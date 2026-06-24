@@ -27,11 +27,16 @@ option(HUGENGINE_RHI_D3D12       "Enable D3D12 backend"  ON)
 add_subdirectory(Engine/External)
 
 # ============================================================
-# Engine (C++26 applies only to HugEngine targets)
+# Engine (C++20 applies only to HugEngine targets)
+# MSVC: /std:c++20 /Zc:preprocessor
 # ============================================================
-set(CMAKE_CXX_STANDARD 26)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+if(MSVC)
+    add_compile_options(/Zc:preprocessor /bigobj /MP)
+endif()
 
 add_subdirectory(Engine)
 

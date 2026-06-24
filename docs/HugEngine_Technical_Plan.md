@@ -38,7 +38,7 @@
    - [22. 实时焦散 🆕](#22-实时焦散-)
    - [23. 工具与工作流](#23-工具与工作流)
    - [24. 编辑器](#24-编辑器)
-   - [25. C++26 反射系统](#25-c26-反射系统)
+   - [25. 宏驱动反射系统](#25-宏驱动反射系统)
 4. [分阶段实施计划](#4-分阶段实施计划)
 5. [关键技术选型参考](#5-关键技术选型参考)
 6. [🆕 新增技术对照表](#6-新增技术对照表)
@@ -51,10 +51,13 @@
 
 | 维度 | 选型 |
 |------|------|
-| 构建系统 | CMake + vcpkg |
+| 构建系统 | CMake + FetchContent（无需 vcpkg） |
+| C++ 编译器 | MSVC 2026 (Windows) / GCC 16 (MinGW 备选) |
+| C++ 标准 | C++20 |
 | 数学库 | GLM + 自研扩展 |
 | 着色器语言 | Slang (glslang + dxc + metal 后端) |
-| RHI 后端 | Vulkan 1.3+, D3D12 SM 6.10+, Metal 3, WebGPU 🆕 |
+| RHI 后端 | Vulkan 1.3+, D3D12 SM 6.6+, Metal 3, WebGPU 🆕 |
+| 反射系统 | 宏驱动：HE_CLASS + HE_REGISTER_PROPERTY + HE_ATTR_* |
 | 起步策略 | 核心架构优先（RHI + Slang 编译 + RenderGraph + 基础管线） |
 
 ---
@@ -66,8 +69,8 @@
 │                        编辑器层                               │
 │  World Editor │ Material Editor │ Visual Script │ Terrain    │
 ├─────────────────────────────────────────────────────────────┤
-│                      C++26 反射系统                           │
-│  ^T 反射 │ 属性系统 │ 序列化 │ 类型注册表 │ 脚本绑定          │
+│                      宏驱动反射系统                           │
+│  HE_CLASS │ HE_PROPERTY │ HE_ATTR │ 序列化 │ 类型注册表     │
 ├─────────────────────────────────────────────────────────────┤
 │                      渲染特性层                               │
 │  GI · RT · VSM · VT · Nanite · Neural · Caustics · 3DGS     │
@@ -135,7 +138,7 @@
 > - **Component（组件）**: 可复用的功能单元，挂载到 Entity 上提供渲染、物理、音频等行为
 > - **System（系统）**: 按 Component 类型遍历并执行逻辑的调度器（RenderSystem、AnimationSystem 等）
 >
-> 与 UE5 的 Actor-Component 模型对齐，但通过 C++26 静态反射实现零宏、零代码生成的组件注册。
+> 与 UE5 的 Actor-Component 模型对齐，通过宏驱动反射（HE_CLASS/HE_PROPERTY/HE_ATTR）实现组件注册。
 
 #### 2A. 核心架构
 
@@ -184,7 +187,7 @@
 
 | # | 特性 | 说明 | 优先级 |
 |---|------|------|--------|
-| 2D.1 | Component 序列化 | 基于 C++26 反射的编译期序列化展开（Binary + JSON），零手写 | 🔴 核心 |
+| 2D.1 | Component 序列化 | 基于反射宏的序列化（Binary + JSON），遍历 PropertyInfo 自动展开 | 🔴 核心 |
 | 2D.2 | Entity 序列化 | 递归序列化所有 Component，World → File 双向 | 🔴 核心 |
 | 2D.3 | Prefab Diff 序列化 | 仅序列化与 Prefab 默认值的差异属性（Override），压缩存储 | 🟡 重要 |
 | 2D.4 | **Network Replication** 🆕 | `[[engine::replicated]]` 属性自动网络同步，支持 RPC 调用 | 🟢 进阶 |
@@ -603,60 +606,56 @@
 
 ---
 
-### 25. C++26 反射系统
+### 25. 宏驱动反射系统
 
-基于 C++26 标准静态反射（P2996 / P3294），零宏、零外部代码生成器。
+采用 UE5 风格的宏驱动反射方案：`HE_CLASS()` 标记类型、`HE_REGISTER_PROPERTY` 注册属性、`HE_ATTR_*` 添加元数据。
+编译期通过宏展开生成 ClassInfo 结构，运行时注册到 TypeRegistry。无需外部代码生成器。
 
 | # | 分类 | 特性 | 说明 | 优先级 |
 |---|------|------|------|--------|
-| 25.1 | 核心 | 类型注册 | `^T` 获取 `meta::info`，编译期自动生成类型 ID | 🔴 核心 |
-| 25.2 | 核心 | 属性反射 | `meta::members_of(^T)` 枚举成员，获取类型/名称/偏移 | 🔴 核心 |
-| 25.3 | 核心 | 函数反射 | `meta::members_of(^T)` 过滤 `meta::is_function`，获取参数/返回值 | 🟡 重要 |
-| 25.4 | 核心 | 构造工厂 | `[:meta::type_of(^T):]` 拼接回类型 | 🔴 核心 |
-| 25.5 | 核心 | 基类反射 | `meta::bases_of(^T)` 遍历继承链 | 🔴 核心 |
-| 25.6 | 核心 | 枚举反射 | `meta::enumerators_of(^E)` 获取枚举值 | 🔴 核心 |
-| 25.7 | 核心 | 类型 Traits | 自定义 `[[engine::component]]`/`[[engine::resource]]` 属性 | 🟡 重要 |
-| 25.8 | 核心 | Placeholder / Deleted | `TReflectedPtr<T>` + `meta::is_valid` | 🟡 重要 |
-| 25.9 | 元数据 | Category | `[[engine::category("...")]]` | 🔴 核心 |
-| 25.10 | 元数据 | Display Name | `[[engine::display_name("...")]]` | 🟡 重要 |
-| 25.11 | 元数据 | Tooltip | `[[engine::tooltip("...")]]` | 🟡 重要 |
-| 25.12 | 元数据 | Range | `[[engine::range(min, max)]]` | 🟡 重要 |
-| 25.13 | 元数据 | Clamp | `[[engine::clamp(min, max)]]` | 🟡 重要 |
-| 25.14 | 元数据 | Slider / Step | `[[engine::slider]]` / `[[engine::step(s)]]` | 🟡 重要 |
-| 25.15 | 元数据 | Read Only / Edit Condition | `[[engine::read_only]]` / `[[engine::edit_condition("prop")]]` | 🟡 重要 |
-| 25.16 | 元数据 | Hide In Editor | `[[engine::hide_in_editor]]` | 🟡 重要 |
-| 25.17 | 元数据 | Asset Picker | `[[engine::asset_picker(".gltf")]]` | 🟡 重要 |
-| 25.18 | 元数据 | Color Widget | `[[engine::color_widget]]` | 🟢 进阶 |
-| 25.19 | 元数据 | Unit | `[[engine::unit("cm")]]` | 🟢 进阶 |
-| 25.20 | 元数据 | Sort Priority | `[[engine::sort_priority(N)]]` | 🟢 进阶 |
-| 25.21 | 元数据 | Deprecated | `[[engine::deprecated("use X instead")]]` | 🟢 进阶 |
-| 25.22 | 访问 | 属性读写 | 编译期生成类型安全 Getter/Setter | 🔴 核心 |
-| 25.23 | 访问 | 运行时遍历 | `meta::expand` + 编译期循环展开 | 🔴 核心 |
-| 25.24 | 访问 | 成员指针获取 | `[:member:]` 直接访问 | 🔴 核心 |
-| 25.25 | 访问 | Sub-property | 递归反射（如 `float3.x`） | 🟡 重要 |
-| 25.26 | 序列化 | 二进制序列化 | 编译期生成 `ar &` 展开 | 🔴 核心 |
-| 25.27 | 序列化 | JSON 序列化 | `meta::name_of(member)` 自动生成 key | 🔴 核心 |
-| 25.28 | 序列化 | 增量序列化 | Default 对象 + Diff 比较 | 🟡 重要 |
-| 25.29 | 序列化 | 版本兼容 | `[[engine::renamed_from("old")]]` 向下兼容 | 🟡 重要 |
-| 25.30 | 序列化 | Asset 引用序列化 | Path/ID 序列化，反序列化时解析 | 🔴 核心 |
-| 25.31 | 序列化 | Binary Diff/Merge | `meta::members_of` 生成逐成员 diff | 🟢 进阶 |
-| 25.32 | 注册表 | 类型注册表 | 编译期 `TypeDescriptor` → 运行时全局 Registry | 🔴 核心 |
-| 25.33 | 注册表 | 属性描述符 | `PropertyDescriptor{name, type, offset, attributes}` | 🔴 核心 |
-| 25.34 | 注册表 | 类型 Factory | `HashMap<uint64, std::function<void*()>>` | 🔴 核心 |
-| 25.35 | 注册表 | Namespace 支持 | `meta::name_of` 自动包含 namespace | 🟡 重要 |
-| 25.36 | 注册表 | Template 容器反射 | `TArray<T>`, `TMap<K,V>` 等 | 🟡 重要 |
-| 25.37 | 注册表 | 属性提取 | `meta::attributes_of(member)` 提取 `[[engine::...]]` | 🔴 核心 |
-| 25.38 | 注册表 | Editor-only 过滤 | `if constexpr` 剔除 Release 构建的属性注册 | 🟡 重要 |
-| 25.39 | 集成 | Details Panel | `meta::members_of` → Widget 自动生成 | 🔴 核心 |
-| 25.40 | 集成 | 序列化/反序列化 | 编译期 `serialize()` → 关卡保存/加载 | 🔴 核心 |
-| 25.41 | 集成 | CVar 绑定 | `[[engine::cvar]]` → 控制台变量 | 🟡 重要 |
-| 25.42 | 集成 | 脚本绑定 | `meta::members_of` → Lua/C# 暴露 | 🟢 进阶 |
-| 25.43 | 集成 | ImGui Debug | `for_each_property` → 自动 Debug 面板 | 🟡 重要 |
-| 25.44 | 集成 | 资源热重载 | `[[engine::depends_on_asset]]` → 自动依赖追踪 | 🟡 重要 |
-| 25.45 | 集成 | 动画轨道 | 反射属性路径作为动画曲线绑定目标 | 🟢 进阶 |
-| 25.46 | 集成 | Prefab Override | 序列化 Diff vs Prefab，仅保存覆盖属性 | 🟢 进阶 |
-| 25.47 | 集成 | Network Replication | `[[engine::replicated]]` → 自动网络同步 | 🟢 进阶 |
-| 25.48 | 集成 | Undo/Redo | `PropertyChangeCommand` 自动入栈 | 🔴 核心 |
+| 25.1 | 核心 | 类型注册 | `HE_CLASS()` 宏生成 `StaticClass()` + `GetClass()`，启动时自动注册 | 🔴 核心 |
+| 25.2 | 核心 | 属性注册 | `HE_REGISTER_PROPERTY(Type, Member)` 宏记录名称、偏移、大小、类型 | 🔴 核心 |
+| 25.3 | 核心 | 属性注解 | `HE_ATTR_CATEGORY/RANGE/TOOLTIP/...` 等 12 种注解宏 | 🔴 核心 |
+| 25.4 | 核心 | 构造工厂 | ClassInfo 内嵌 lambda 工厂 `[]() → new T()` | 🔴 核心 |
+| 25.5 | 核心 | 类型哈希 | FNV-1a 64-bit 对类名字符串编译期/运行期均可用 | 🔴 核心 |
+| 25.6 | 核心 | 枚举反射 | 手动注册枚举键值对到 TypeRegistry | 🟡 重要 |
+| 25.7 | 核心 | 类型标记宏 | `HE_COMPONENT()` / `HE_RESOURCE()` 宏（封装 HE_CLASS） | 🟡 重要 |
+| 25.8 | 核心 | 空对象处理 | `TReflectedPtr<T>` + ClassInfo 有效性检查 | 🟡 重要 |
+| 25.9 | 元数据 | Category | `HE_ATTR_CATEGORY("Transform")` — 编辑器分组 | 🔴 核心 |
+| 25.10 | 元数据 | Display Name | `HE_ATTR_DISPLAY_NAME("显示名")` — 编辑器标签 | 🟡 重要 |
+| 25.11 | 元数据 | Tooltip | `HE_ATTR_TOOLTIP("提示文字")` — 悬停说明 | 🟡 重要 |
+| 25.12 | 元数据 | Range | `HE_ATTR_RANGE(0.0, 100.0)` — 数值范围 | 🟡 重要 |
+| 25.13 | 元数据 | Clamp | Range 的强约束版本（同时钳制值） | 🟡 重要 |
+| 25.14 | 元数据 | Read Only | `HE_ATTR_READ_ONLY()` — 编辑器只读 | 🟡 重要 |
+| 25.15 | 元数据 | Hidden | `HE_ATTR_HIDDEN()` — 编辑器不显示 | 🟡 重要 |
+| 25.16 | 元数据 | Asset Picker | `HE_ATTR_ASSET_PICKER(".gltf")` — 资产选择器 | 🟡 重要 |
+| 25.17 | 元数据 | Color Widget | `HE_ATTR_COLOR()` — 颜色拾取器 | 🟢 进阶 |
+| 25.18 | 元数据 | Unit | 通过 Category 字符串追加单位信息 | 🟢 进阶 |
+| 25.19 | 元数据 | Deprecated | `HE_ATTR_DEPRECATED("请使用 X")` — 弃用标记 | 🟢 进阶 |
+| 25.20 | 访问 | 属性读写 | `GetMemberPtr<T>(obj, prop)` 通过偏移量类型安全访问 | 🔴 核心 |
+| 25.21 | 访问 | 运行时遍历 | `ForEachProperty(obj, callback)` 遍历 ClassInfo::properties | 🔴 核心 |
+| 25.22 | 访问 | Sub-property | 递归遍历嵌套类型的属性（如 `float3.x → float3 → x`） | 🟡 重要 |
+| 25.23 | 序列化 | 二进制序列化 | 遍历 properties → 逐成员 `ar & value` | 🔴 核心 |
+| 25.24 | 序列化 | JSON 序列化 | property.name 作为 key 自动生成 JSON | 🔴 核心 |
+| 25.25 | 序列化 | 增量序列化 | 与 Default 对象 Diff，仅序列化变化属性 | 🟡 重要 |
+| 25.26 | 序列化 | 版本兼容 | 属性 name 映射表处理重命名兼容 | 🟡 重要 |
+| 25.27 | 序列化 | Asset 引用序列化 | AssetPicker 标记的属性序列化为路径/ID | 🔴 核心 |
+| 25.28 | 序列化 | Binary Diff/Merge | 遍历 properties 生成逐成员 diff | 🟢 进阶 |
+| 25.29 | 注册表 | 类型注册表 | TypeRegistry 单例，全局 hash→ClassInfo 映射 | 🔴 核心 |
+| 25.30 | 注册表 | 属性描述符 | PropertyInfo{name, offset, size, typeName, flags, attributes} | 🔴 核心 |
+| 25.31 | 注册表 | 类型工厂 | `HashMap<u64, std::function<void*()>>` 按 hash 创建实例 | 🔴 核心 |
+| 25.32 | 注册表 | 属性提取 | ClassInfo::properties[i].attributes 键值对 | 🔴 核心 |
+| 25.33 | 注册表 | Editor-only 过滤 | Release 构建跳过 HE_ATTR_HIDDEN 属性注册 | 🟡 重要 |
+| 25.34 | 集成 | Details Panel | ForEachProperty → 根据 attributes 选择 Widget → 自动生成 UI | 🔴 核心 |
+| 25.35 | 集成 | 序列化/反序列化 | ForEachProperty → Archive → 关卡保存/加载 | 🔴 核心 |
+| 25.36 | 集成 | CVar 绑定 | 属性标记 CVar 自动注册为控制台变量 | 🟡 重要 |
+| 25.37 | 集成 | 脚本绑定 | ForEachProperty → 暴露给 Lua/C# | 🟢 进阶 |
+| 25.38 | 集成 | ImGui Debug | ForEachProperty → 自动生成 Debug 面板 | 🟡 重要 |
+| 25.39 | 集成 | 资源热重载 | AssetPicker 标记建立依赖 → 资源变更触发重载 | 🟡 重要 |
+| 25.40 | 集成 | 动画轨道 | 反射属性路径作为动画曲线绑定目标 | 🟢 进阶 |
+| 25.41 | 集成 | Prefab Override | 序列化 Diff vs Prefab，仅保存覆盖的属性 | 🟢 进阶 |
+| 25.42 | 集成 | Network Replication | HE_ATTR_REPLICATED → 自动网络同步 | 🟢 进阶 |
+| 25.43 | 集成 | Undo/Redo | 属性修改自动入栈 PropertyChangeCommand | 🔴 核心 |
 
 ---
 
@@ -690,7 +689,7 @@ Phase 8: 打磨+发布    (10 周)  ── 优化+文档+示例
 | 5-8 | **RHI 抽象层**: Vulkan 1.3+ + D3D12 SM6.6+ 双后端, Device/SwapChain/Buffer/Texture 封装 |
 | 9-10 | **Slang 着色器编译管线**: Slang → SPIR-V / DXIL 编译, Include 系统, 预编译缓存 |
 | 11-13 | **Render Graph**: 帧资源管理, Pass 依赖图, 自动 Barrier (D3D12 Enhanced Barriers / Vulkan Layout Transitions), 资源别名 |
-| 14-15 | **C++26 反射系统**: ^T + [:...:] + [[engine::]] 属性 + 类型注册表 + 序列化 |
+| 14-15 | **宏驱动反射系统**: HE_CLASS + HE_REGISTER_PROPERTY + HE_ATTR_* 注解宏 + TypeRegistry + 序列化 |
 | 16-17 | **Actor-Component 架构 🆕**: Entity/Component 基类, 生命周期, Component 查询, Scene Graph + Transform 层级, 基础渲染组件 (StaticMesh/Light/Camera) |
 | 18 | **基础前向渲染**: HDR + PBR (Metallic-Roughness) + 基础 Tone Mapping (ACES) |
 | 19 | **基础延迟渲染**: GBuffer (Albedo+Normal+Roughness+Metallic+Depth) + 基础光照 Pass |
@@ -702,7 +701,7 @@ Phase 8: 打磨+发布    (10 周)  ── 优化+文档+示例
 - 前向/延迟双管线
 - glTF 模型 → Entity+Component 自动装配
 - 基础编辑器可运行，World Outliner 浏览 Entity-Component 层级
-- 100% C++26 反射驱动属性编辑（零宏、零代码生成）
+- 100% 宏驱动反射属性编辑（HE_CLASS/HE_PROPERTY/HE_ATTR）
 
 ---
 
@@ -874,7 +873,7 @@ Phase 8: 打磨+发布    (10 周)  ── 优化+文档+示例
 | 网格优化 | **meshoptimizer** | — |
 | 调试 | **RenderDoc + PIX + Nsight** | — |
 | 编辑器 UI | **Dear ImGui** (核心) + **自研 Docking 框架** | Qt (备选) |
-| C++ 反射 | **C++26 静态反射** (P2996): `^T` + `[:...:]` + `[[engine::]]` | ClangTool 代码生成 (回退) |
+| 反射系统 | **宏驱动反射**: `HE_CLASS()` + `HE_REGISTER_PROPERTY` + `HE_ATTR_*` | 外部代码生成器 (备选) |
 | 序列化 | **编译期生成 Binary + JSON** | Protobuf/FlatBuffers |
 | 材质编辑器 | **自研 Node Graph Editor** (基于 ImGui) | — |
 | 可视化脚本 | **自研 Visual Scripting** (Blueprint 式) | Lua 绑定 |
@@ -940,7 +939,7 @@ Phase 8: 打磨+发布    (10 周)  ── 优化+文档+示例
 | 46 | SMS + ReSTIR Caustics | 22.焦散 🆕 | 🟢 | SIGGRAPH Asia 2025 |
 | 47 | Markov Chain Path Guiding | 22.焦散 🆕 | 🟢 | KIT 2025 |
 | 48 | WebGPU RHI Backend | 架构 | 🟢 | W3C Standard 2025 |
-| 49 | **Actor-Component 渲染架构** 🆕 | 2.场景管理 | 🔴 | UE5 Actor-Component 模型 + C++26 反射 |
+| 49 | **Actor-Component 渲染架构** 🆕 | 2.场景管理 | 🔴 | UE5 Actor-Component 模型 + 宏驱动反射 |
 | 50 | **Scene Graph + Transform 层级** 🆕 | 2.场景管理 | 🔴 | 树形空间层级，Dirty Flag 传播 |
 | 51 | **渲染组件族 (StaticMesh/Light/Camera/SkeletalMesh/Decal/Particle/3DGS/Volume)** 🆕 | 2.场景管理 | 🔴 | 以 Component 形式挂载渲染图元 |
 | 52 | **Component 生命周期与依赖** 🆕 | 2.场景管理 | 🔴 | OnCreate→Start→Update→Destroy + [[engine::require<T>]] |

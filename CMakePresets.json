@@ -2,6 +2,19 @@
   "version": 3,
   "configurePresets": [
     {
+      "name": "default",
+      "displayName": "MSVC 2026 (Vulkan + D3D12, Windows 默认)",
+      "generator": "Visual Studio 18 2026",
+      "binaryDir": "${sourceDir}/Build",
+      "cacheVariables": {
+        "HUGENGINE_BUILD_SAMPLES": "ON",
+        "HUGENGINE_BUILD_EDITOR": "ON",
+        "HUGENGINE_BUILD_TESTS": "OFF",
+        "HUGENGINE_RHI_VULKAN": "ON",
+        "HUGENGINE_RHI_D3D12": "ON"
+      }
+    },
+    {
       "name": "gcc",
       "displayName": "GCC 16 MinGW (Vulkan)",
       "generator": "MinGW Makefiles",
@@ -15,19 +28,6 @@
         "HUGENGINE_BUILD_TESTS": "OFF",
         "HUGENGINE_RHI_VULKAN": "ON",
         "HUGENGINE_RHI_D3D12": "OFF"
-      }
-    },
-    {
-      "name": "vs2026",
-      "displayName": "Visual Studio 2026 (Vulkan + D3D12)",
-      "generator": "Visual Studio 18 2026",
-      "binaryDir": "${sourceDir}/Build",
-      "cacheVariables": {
-        "HUGENGINE_BUILD_SAMPLES": "ON",
-        "HUGENGINE_BUILD_EDITOR": "ON",
-        "HUGENGINE_BUILD_TESTS": "OFF",
-        "HUGENGINE_RHI_VULKAN": "ON",
-        "HUGENGINE_RHI_D3D12": "ON"
       }
     }
   ]

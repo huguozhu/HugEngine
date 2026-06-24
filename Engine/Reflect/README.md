@@ -1,6 +1,6 @@
 # Reflect (L1)
 
-C++26 静态反射系统 — 零宏、零外部代码生成器的反射方案。
+宏驱动反射系统 — HE_CLASS / HE_REGISTER_PROPERTY / HE_ATTR_* 宏注册方案。
 
 | 子系统 | 说明 | Phase |
 |--------|------|-------|

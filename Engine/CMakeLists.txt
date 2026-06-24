@@ -5,7 +5,7 @@
 # Core — Platform, Math, Memory, Containers, Threading (L0)
 add_subdirectory(Core)
 
-# Reflect — C++26 static reflection system (L1)
+# Reflect — 宏驱动反射系统 (L1)
 add_subdirectory(Reflect)
 
 # RHI — Rendering Hardware Interface (L2)

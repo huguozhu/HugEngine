@@ -81,7 +81,7 @@
 ├──────────────────────────────────────────────────────────────────┤
 │  L1  反射层 (Reflection Layer)                [★ Phase 1 核心]   │
 │  ┌────────────────────┐ ┌──────────────┐ ┌──────────────────┐   │
-│  │ C++26 ^T + [:...:] │ │[[engine::]]  │ │ Serialization    │   │
+│  │ HE_CLASS() 宏注册  │ │ HE_ATTR_*    │ │ 序列化          │   │
 │  │ Type Registry      │ │Attributes    │ │(Binary + JSON)   │   │
 │  └────────────────────┘ └──────────────┘ └──────────────────┘   │
 ├──────────────────────────────────────────────────────────────────┤
@@ -159,7 +159,7 @@ Asset (glTF/Texture) ──Import──► AssetRegistry ──Instantiate──
 | M12 | SlangCompiler (Frontend + Backend) | L3 | P1 | M06,M11 | C |
 | M13 | ShaderHotReload | L3 | P1 | M12 | C |
 | M14 | ShaderVariantMgmt + ASD | L3 | P5 | M12 | — |
-| M15 | Cpp26Reflection (^T + [:...:]) | L1 | P1 | M00 | A |
+| M15 | MacroReflection (HE_CLASS + HE_PROPERTY + HE_ATTR) | L1 | P1 | M00 | A |
 | M16 | EngineAttributes ([[engine::...]]) | L1 | P1 | M15 | A |
 | M17 | Serialization (Binary + JSON + Diff) | L1 | P1 | M15,M16 | — |
 | M18 | TypeRegistry (Runtime reflection DB) | L1 | P1 | M15,M16 | — |
@@ -428,10 +428,10 @@ HugEngine (总计 ~119 周)
 │   │   ├── ST-03.02 SIMD 加速 (SSE/AVX/NEON)
 │   │   └── ST-03.03 几何工具 (AABB/Frustum/Ray/Sphere)
 │   │
-│   ├── EP-04 C++26 反射系统 (2w)  [可并行]
-│   │   ├── ST-04.01 ^T 反射操作符 + meta::info 封装
-│   │   ├── ST-04.02 [[engine::]] 属性系统 (category/range/tooltip...)
-│   │   ├── ST-04.03 编译期序列化 (Binary + JSON)
+│   ├── EP-04 宏驱动反射系统 (2w)  [可并行]
+│   │   ├── ST-04.01 HE_CLASS/HE_PROPERTY 注册宏实现
+│   │   ├── ST-04.02 HE_ATTR_* 注解系统 (Category/Range/Tooltip...)
+│   │   ├── ST-04.03 序列化 (Binary + JSON，基于 PropertyInfo 遍历)
 │   │   └── ST-04.04 运行时类型注册表 (TypeRegistry)
 │   │
 │   ├── EP-05 RHI 抽象层 · 核心 (4w)  ★ 关键路径
@@ -461,7 +461,7 @@ HugEngine (总计 ~119 周)
 │   │   ├── ST-08.03 Component 查询 (World::Query<...>)
 │   │   ├── ST-08.04 Scene Graph + Transform 层级 (Dirty Flag 传播)
 │   │   ├── ST-08.05 基础渲染组件 (StaticMesh/Light/Camera)
-│   │   └── ST-08.06 Entity/Component 序列化 (基于 C++26 反射)
+│   │   └── ST-08.06 Entity/Component 序列化 (基于 PropertyInfo 遍历)
 │   │
 │   ├── EP-09 基础前向渲染 (2w)
 │   │   ├── ST-09.01 HDR 渲染目标 + ACES Tone Mapping
@@ -729,7 +729,7 @@ P1 ──► P2 ──► P3 ──► P4 ──► P5 ──► P6 ──► P7
 ```
 Phase 1 (最大并行度: 4 条线)
   [线A] M01, M02, M03 (Platform + Math + Log)  ── 2w
-  [线B] M15, M16, M18 (C++26 Reflection)       ── 2w  } 前 6 周
+  [线B] M15, M16, M18 (宏驱动反射)       ── 2w  } 前 6 周
   [线C] M04→M05→M06 (RHI Core)                 ── 4w  } 可并行
   [线D] M12→M13 (Slang Compiler)               ── 2w  }
   汇合点 ──► M19 (RenderGraph) 3w ──► M20,M21,M22 (Component) 2w
@@ -874,10 +874,12 @@ private:
     std::unordered_map<uint64_t, std::unique_ptr<Component>> m_Components;
 };
 
-// Component 基类 — 基于 C++26 反射
-// 任何 [[engine::component]] 标记的类型自动继承 Component 接口
+// Component 基类 — 宏驱动反射
+// HE_COMPONENT() 宏标记的类型自动获得反射能力
 class Component {
 public:
+    HE_COMPONENT()
+    
     virtual ~Component() = default;
     
     // 生命周期 (由 World 调用，不要手动调用)
@@ -890,9 +892,6 @@ public:
     
     Entity*             GetEntity() const { return m_Entity; }
     bool                IsActive()  const { return m_Active && m_Entity && m_Entity->IsActive(); }
-    
-    // 编译期依赖声明 (C++26 属性驱动)
-    // [[engine::require<Transform>]]  → 自动在 AddComponent 时检查
 
 protected:
     Entity* m_Entity = nullptr;
@@ -1226,7 +1225,7 @@ public:
     
     // 编辑操作 (通过 Command 模式，支持 Undo/Redo)
     void SelectEntity(Entity::ID id);
-    void ModifyProperty(Entity::ID entity, meta::info property, const void* newValue);
+    void ModifyProperty(Entity::ID entity, const ::he::reflect::PropertyInfo& prop, const void* newValue);
     void Undo();
     void Redo();
     
@@ -1302,7 +1301,7 @@ private:
 
 | # | 风险 | 影响 | 概率 | 缓解措施 |
 |---|------|------|------|----------|
-| 1 | C++26 反射编译器支持延迟 | 高 | 中 | P1 即集成 Clang 19+/MSVC 2026，维护 ClangTool 回退方案 |
+| 1 | 反射宏注册代码量较大（手写 HE_REGISTER_PROPERTY） | 低 | 中 | 宏驱动的注册量可控；后续可选外部代码生成器减负 |
 | 2 | Slang Metal/WebGPU 后端不稳定 | 中 | 中 | Metal 延迟到 P6，WebGPU 延迟到 P8；先用 D3D12+Vulkan 验证 |
 | 3 | RTX Mega Geometry / Wide BVH 硬件支持差异 | 低 | 低 | 使用标准 DXR/VulkanRT Fallback 路径 |
 | 4 | Nanite 软件光栅化性能不足 | 高 | 低 | 参考 UE5 开源研究，优先保证 Mesh Shader 路径可用 |

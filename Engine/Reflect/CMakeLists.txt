@@ -1,4 +1,4 @@
-# Reflect — C++26 static reflection system (L1)
+# Reflect — 宏驱动反射系统 (L1)
 # Phase 1 · Weeks 3-4
 
 add_library(HugEngineReflect INTERFACE)

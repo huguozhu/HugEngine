@@ -3,121 +3,47 @@
 #include "Core/Types.h"
 
 // ============================================================
-// [[engine::...]] attribute definitions
+// 属性系统 — 引擎标准注解
 //
-// These define the standard attributes available for marking
-// engine types and properties. In C++26, these will be real
-// custom attributes parsed by the compiler. Until then, we
-// define them as empty struct tags for documentation and
-// future compatibility.
+// 这些定义作为 HE_ATTR_* 宏的文档参考，也为未来
+// C++ 编译器原生属性支持预留接口。
 //
-// Usage:
-//   struct [[engine::component]]
-//          [[engine::display_name("Point Light")]]
-//          PointLightComponent { ... };
+// 当前使用方式（宏驱动）:
+//   HE_REGISTER_PROPERTY(float, health)
+//       HE_ATTR_CATEGORY("Stats")
+//       HE_ATTR_RANGE(0.0f, 100.0f)
+//
+// 属性列表:
+//   Category      — 编辑器分类（如 "Transform", "Rendering"）
+//   DisplayName   — 编辑器显示名
+//   Tooltip       — 悬停提示
+//   Range         — 数值范围 (min, max)
+//   Clamp         — 值钳制范围
+//   ReadOnly      — 只读标记
+//   Hidden        — 编辑器隐藏
+//   AssetPicker   — 资产选择器（过滤器如 ".gltf"）
+//   ColorWidget   — 颜色拾取器
+//   Unit          — 物理单位（"cm", "degree"）
+//   Deprecated    — 弃用标记 + 替代说明
+//   Replicated    — 网络复制标记
+//   Streaming     — 流式加载源标记
 // ============================================================
 
-namespace he::attribute {
+namespace he::reflect {
 
-// --- Type-level attributes ---
+// 标准属性键名常量
+namespace AttrKey {
+    constexpr const char* Category     = "Category";
+    constexpr const char* DisplayName  = "DisplayName";
+    constexpr const char* Tooltip      = "Tooltip";
+    constexpr const char* Range        = "Range";       // 格式: "min,max"
+    constexpr const char* Clamp        = "Clamp";       // 格式: "min,max"
+    constexpr const char* AssetPicker  = "AssetPicker"; // 格式: ".gltf"
+    constexpr const char* ColorWidget  = "ColorWidget";
+    constexpr const char* Unit         = "Unit";        // 格式: "cm"
+    constexpr const char* Deprecated   = "Deprecated";  // 格式: "替代说明"
+    constexpr const char* SortPriority = "SortPriority";
+    constexpr const char* EditCondition = "EditCondition";
+}
 
-// Marks a type as an engine component
-struct component {};
-
-// Marks a type as an engine resource/asset
-struct resource {};
-
-// --- Property attributes ---
-
-// Editor display name override
-template<const char Name[]>
-struct display_name {};
-
-// Editor category grouping
-template<const char Category[]>
-struct category {};
-
-// Tooltip text
-template<const char Text[]>
-struct tooltip {};
-
-// Numeric range (min, max)
-struct range {
-    float min;
-    float max;
-};
-
-// Clamp range
-struct clamp {
-    float min;
-    float max;
-};
-
-// Display as slider
-struct slider {};
-
-// Step size for numeric input
-struct step {
-    float value;
-};
-
-// Read-only in editor
-struct read_only {};
-
-// Conditionally editable
-template<const char Condition[]>
-struct edit_condition {};
-
-// Hidden from editor
-struct hide_in_editor {};
-
-// Asset picker filter
-template<const char Filter[]>
-struct asset_picker {};
-
-// Use color widget
-struct color_widget {};
-
-// Physical unit
-template<const char Unit[]>
-struct unit {};
-
-// Sort priority (lower = earlier)
-struct sort_priority {
-    int value;
-};
-
-// Mark as deprecated
-template<const char Reason[]>
-struct deprecated {};
-
-// Renamed from a previous version
-template<const char OldName[]>
-struct renamed_from {};
-
-// Network replicated
-struct replicated {};
-
-// Streaming source marker
-struct streaming_source {};
-
-// Console variable binding
-struct cvar {};
-
-// Dependency on another asset
-struct depends_on_asset {};
-
-// Required component dependency
-template<typename T>
-struct require {};
-
-// Optional component dependency
-template<typename T>
-struct optional_component {};
-
-// Update order hint
-struct update_order {
-    int value;
-};
-
-} // namespace he::attribute
+} // namespace he::reflect
