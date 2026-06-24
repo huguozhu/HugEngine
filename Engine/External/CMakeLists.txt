@@ -3,7 +3,10 @@
 # ============================================================
 
 include(FetchContent)
-cmake_policy(SET CMP0167 OLD) # Suppress FetchContent warnings in CMake 4.x
+cmake_policy(SET CMP0167 OLD) # CMake 4.x FetchContent 兼容
+
+# 抑制第三方库 CMake 版本过低的警告
+set(CMAKE_SUPPRESS_DEVELOPER_WARNINGS ON CACHE BOOL "")
 
 # --- GLFW 3.4 ---
 FetchContent_Declare(glfw
