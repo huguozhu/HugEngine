@@ -7,6 +7,7 @@
 // until the full RHI abstraction is complete (Phase 1-2).
 // ============================================================
 
+#define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
 
 #include "RHI/RHI.h"

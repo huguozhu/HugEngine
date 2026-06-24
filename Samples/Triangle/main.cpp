@@ -145,8 +145,7 @@ int main() {
         frameIndex++;
     }
 
-    device->WaitIdle();
-    HE_CORE_INFO("Triangle sample exited after {} frames", frameIndex);
-    engine.Shutdown();
+    // Vulkan 资源由析构函数自动逆序清理，确保 surface 在窗口前销毁
+    HE_CORE_INFO("Exiting after {} frames", frameIndex);
     return 0;
 }

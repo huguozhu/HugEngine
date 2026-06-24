@@ -35,6 +35,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 if(MSVC)
     add_compile_options(/Zc:preprocessor /bigobj /MP /utf-8 /Zc:noScanModuleDependencies)
+    add_compile_definitions(NOMINMAX)
 endif()
 
 add_subdirectory(Engine)

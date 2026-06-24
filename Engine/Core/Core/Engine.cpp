@@ -12,10 +12,9 @@ Engine::~Engine() {
 }
 
 void Engine::Initialize() {
-    HE_CORE_INFO("=== Initializing HugEngine v0.1.0 ===");
-
-    // 1. Logging
+    // 日志系统必须最先初始化
     Logger::Initialize();
+    HE_CORE_INFO("=== Initializing HugEngine v0.1.0 ===");
 
     // 2. Job system
     JobSystem::Initialize(m_Config.jobThreads);

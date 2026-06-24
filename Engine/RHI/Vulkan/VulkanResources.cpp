@@ -2,6 +2,7 @@
 #include "Core/Log.h"
 #include "Core/Assert.h"
 
+#define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
 
 #include <cstring>
@@ -38,8 +39,13 @@ VulkanBuffer::VulkanBuffer(VkDevice device, VkPhysicalDevice physical, const Buf
     VkMemoryRequirements memReqs;
     vkGetBufferMemoryRequirements(device, m_Buffer, &memReqs);
 
+    VkMemoryAllocateFlagsInfo allocFlags{};
+    allocFlags.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+    allocFlags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+
     VkMemoryAllocateInfo allocInfo{};
     allocInfo.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.pNext           = &allocFlags;
     allocInfo.allocationSize  = memReqs.size;
     allocInfo.memoryTypeIndex = FindMemoryType(physical, memReqs.memoryTypeBits,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);

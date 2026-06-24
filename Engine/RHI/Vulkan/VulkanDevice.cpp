@@ -6,6 +6,7 @@
 #include "Core/Log.h"
 #include "Core/Assert.h"
 
+#define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
 
 #include <algorithm>
@@ -32,6 +33,7 @@ namespace he::rhi {
 // ============================================================
 class VulkanDevice final : public IRHIDevice {
 public:
+    ~VulkanDevice() override { Shutdown(); }
     Backend    GetBackend() const override { return Backend::Vulkan; }
     DeviceCaps GetCaps()    const override;
 
@@ -176,13 +178,11 @@ void VulkanDevice::Initialize(const DeviceInitDesc& desc) {
 }
 
 void VulkanDevice::Shutdown() {
-    WaitIdle();
-
-    if (m_GraphicsCmdPool) { vkDestroyCommandPool(m_Device, m_GraphicsCmdPool, nullptr); }
-    if (m_ComputeCmdPool)  { vkDestroyCommandPool(m_Device, m_ComputeCmdPool, nullptr); }
-    if (m_Device)          { vkDestroyDevice(m_Device, nullptr); }
-    if (m_Surface)         { vkDestroySurfaceKHR(m_Instance, m_Surface, nullptr); }
-    if (m_Instance)        { vkDestroyInstance(m_Instance, nullptr); }
+    if (m_GraphicsCmdPool) { vkDestroyCommandPool(m_Device, m_GraphicsCmdPool, nullptr); m_GraphicsCmdPool = VK_NULL_HANDLE; }
+    if (m_ComputeCmdPool)  { vkDestroyCommandPool(m_Device, m_ComputeCmdPool, nullptr); m_ComputeCmdPool = VK_NULL_HANDLE; }
+    if (m_Device)          { vkDestroyDevice(m_Device, nullptr); m_Device = VK_NULL_HANDLE; }
+    if (m_Surface)         { vkDestroySurfaceKHR(m_Instance, m_Surface, nullptr); m_Surface = VK_NULL_HANDLE; }
+    if (m_Instance)        { vkDestroyInstance(m_Instance, nullptr); m_Instance = VK_NULL_HANDLE; }
 
     HE_CORE_INFO("Vulkan device destroyed");
 }
@@ -242,10 +242,16 @@ void VulkanDevice::CreateLogicalDevice() {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
     };
 
+    // 启用 bufferDeviceAddress（缓冲设备地址查询需要）
+    VkPhysicalDeviceBufferDeviceAddressFeatures addrFeature{};
+    addrFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
+    addrFeature.bufferDeviceAddress = VK_TRUE;
+
     VkPhysicalDeviceFeatures features{};
 
     VkDeviceCreateInfo deviceInfo{};
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    deviceInfo.pNext = &addrFeature;
     deviceInfo.queueCreateInfoCount = 1;
     deviceInfo.pQueueCreateInfos = &queueInfo;
     deviceInfo.enabledExtensionCount = static_cast<u32>(deviceExtensions.size());
@@ -461,10 +467,9 @@ bool VulkanSwapChain::AcquireNextImage() {
 }
 
 void VulkanSwapChain::Present(bool /*vsync*/) {
+    // 纯 Fence 同步：GPU 完成由 Begin 中的 vkWaitForFences 保证
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-    presentInfo.waitSemaphoreCount = 1;
-    presentInfo.pWaitSemaphores    = &m_RenderComplete;
     presentInfo.swapchainCount = 1;
     presentInfo.pSwapchains     = &m_Swapchain;
     presentInfo.pImageIndices   = &m_CurrentImage;
@@ -505,7 +510,8 @@ VulkanCommandList::~VulkanCommandList() {
 }
 
 void VulkanCommandList::Begin() {
-    vkResetCommandPool(m_Device, m_CmdPool, 0);
+    // 直接重置命令缓冲（GPU 在上一帧 Submit 中已同步完成）
+    vkResetCommandBuffer(m_CmdBuffer, 0);
 
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -554,35 +560,28 @@ void VulkanCommandList::BeginRenderPass(u32 colorCount, Format, Format depthForm
         }
     }
 
-    // 构建清除值数组（最多支持 1 颜色 + 1 深度模板）
+    // 构建清除值（颜色 + 深度，始终 2 个以匹配 RenderPass 附件数）
     VkClearValue vkClearValues[2]{};
-    u32 clearCount = static_cast<u32>(colorCount);
-    for (u32 c = 0; c < clearCount; ++c) {
-        if (clear) {
-            vkClearValues[c].color.float32[0] = clear[c].color[0];
-            vkClearValues[c].color.float32[1] = clear[c].color[1];
-            vkClearValues[c].color.float32[2] = clear[c].color[2];
-            vkClearValues[c].color.float32[3] = clear[c].color[3];
-        } else {
-            vkClearValues[c].color.float32[0] = 0.1f;
-            vkClearValues[c].color.float32[1] = 0.1f;
-            vkClearValues[c].color.float32[2] = 0.15f;
-            vkClearValues[c].color.float32[3] = 1.0f;
-        }
+    if (clear) {
+        vkClearValues[0].color.float32[0] = clear[0].color[0];
+        vkClearValues[0].color.float32[1] = clear[0].color[1];
+        vkClearValues[0].color.float32[2] = clear[0].color[2];
+        vkClearValues[0].color.float32[3] = clear[0].color[3];
+    } else {
+        vkClearValues[0].color.float32[0] = 0.1f;
+        vkClearValues[0].color.float32[1] = 0.1f;
+        vkClearValues[0].color.float32[2] = 0.15f;
+        vkClearValues[0].color.float32[3] = 1.0f;
     }
-    // 深度模板清除值
-    if (depthFormat != Format::Unknown) {
-        vkClearValues[clearCount].depthStencil.depth   = clear ? clear[colorCount].depth   : 1.0f;
-        vkClearValues[clearCount].depthStencil.stencil = clear ? clear[colorCount].stencil : 0;
-        clearCount++;
-    }
+    vkClearValues[1].depthStencil.depth   = 1.0f;
+    vkClearValues[1].depthStencil.stencil = 0;
 
     VkRenderPassBeginInfo rpBegin{};
     rpBegin.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     rpBegin.renderPass        = m_CurrentRenderPass;
     rpBegin.framebuffer       = m_Framebuffers[m_CurrentImageIndex];
     rpBegin.renderArea.extent = m_SwapchainExtent;
-    rpBegin.clearValueCount   = clearCount;
+    rpBegin.clearValueCount   = 2;
     rpBegin.pClearValues      = vkClearValues;
 
     vkCmdBeginRenderPass(m_CmdBuffer, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
@@ -680,17 +679,10 @@ void VulkanCommandList::DrawIndexed(u32 indexCount, u32 instanceCount,
 }
 
 void VulkanCommandList::Submit() {
-    vkResetFences(m_Device, 1, &m_Fence);
-
-    // 从关联的 SwapChain 自动获取同步原语
+    // 等待 SwapChain 图像可用
     VkSemaphore waitSem   = VK_NULL_HANDLE;
-    VkSemaphore signalSem = VK_NULL_HANDLE;
-    if (m_pSwapChain) {
-        waitSem   = m_pSwapChain->GetImageAcquiredSemaphore();
-        signalSem = m_pSwapChain->GetRenderCompleteSemaphore();
-    }
-
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    if (m_pSwapChain) waitSem = m_pSwapChain->GetImageAcquiredSemaphore();
 
     VkSubmitInfo submitInfo{};
     submitInfo.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -699,10 +691,10 @@ void VulkanCommandList::Submit() {
     submitInfo.pWaitDstStageMask    = &waitStage;
     submitInfo.commandBufferCount   = 1;
     submitInfo.pCommandBuffers      = &m_CmdBuffer;
-    submitInfo.signalSemaphoreCount = signalSem ? 1u : 0u;
-    submitInfo.pSignalSemaphores    = &signalSem;
 
+    vkResetFences(m_Device, 1, &m_Fence);
     vkQueueSubmit(m_Queue, 1, &submitInfo, m_Fence);
+    // 同步等待 GPU 完成
     vkWaitForFences(m_Device, 1, &m_Fence, VK_TRUE, UINT64_MAX);
 }
 

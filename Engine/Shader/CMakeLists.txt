@@ -61,31 +61,13 @@ if(GLSLANG_VALIDATOR)
         list(APPEND SPV_FILES ${SPV})
     endforeach()
 
-    # 生成嵌入 SPIR-V 的 C 头文件
-    # CMake 4.x: file(READ ... HEX) 行为改变，改用 file(READ) + string(HEX)
-    set(GEN_SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/gen_embedded_shaders.cmake")
-    file(WRITE ${GEN_SCRIPT}
-        "file(WRITE ${HEADER_FILE} \"// Auto-generated — DO NOT EDIT\\n#pragma once\\n#include <cstdint>\\n#include <vector>\\n\\n\")\n"
-    )
-    foreach(SPV ${SPV_FILES})
-        get_filename_component(FILE_NAME ${SPV} NAME)  # "Triangle.vert.spv"
-        string(REGEX REPLACE "[.][^.]*$" "" FULL_NAME ${FILE_NAME})  # 删除末扩展名 → "Triangle.vert"
-        string(REGEX REPLACE "[.]" "_" VAR_NAME ${FULL_NAME})  # "Triangle_vert"
-        set(VAR_RAW  "RAW_${VAR_NAME}")
-        set(VAR_HEX  "HEX_${VAR_NAME}")
-        file(APPEND ${GEN_SCRIPT}
-            "file(READ ${SPV} ${VAR_RAW})\n"
-            "string(HEX \"\${${VAR_RAW}}\" ${VAR_HEX})\n"
-            "string(REGEX REPLACE \"(..)\" \"0x\\\\1u,\" ${VAR_HEX} \"\${${VAR_HEX}}\")\n"
-            "file(APPEND ${HEADER_FILE} \"inline const std::vector<uint32_t> k_${VAR_NAME}_spv = { \${${VAR_HEX}} };\\n\\n\")\n"
-        )
-    endforeach()
-
+    # 用 Python 脚本将 SPIR-V 二进制转为 C++ uint32_t 数组
+    set(SPV_TOOL "${CMAKE_CURRENT_SOURCE_DIR}/spv_to_header.py")
     add_custom_command(
         OUTPUT ${HEADER_FILE}
-        COMMAND ${CMAKE_COMMAND} -P ${GEN_SCRIPT}
-        DEPENDS ${SPV_FILES}
-        COMMENT "Generating EmbeddedShaders.h"
+        COMMAND python "${SPV_TOOL}" "${HEADER_FILE}" ${SPV_FILES}
+        DEPENDS ${SPV_FILES} ${SPV_TOOL}
+        COMMENT "Generating EmbeddedShaders.h (Python)"
     )
 
     # Target that all shader compilation feeds into
