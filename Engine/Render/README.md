@@ -4,10 +4,11 @@
 
 | 子系统 | 说明 | Phase |
 |--------|------|-------|
-| Graph | RenderGraph (Pass DAG, Barrier 自动推导, 资源别名, Async Compute 调度) | P1 |
-| Pipeline | Forward (HDR+PBR), Deferred (GBuffer+LightPass), Forward+ (Clustered) | P1-2 |
-| Lighting | Clustered Shading 光照剔除, PBR BRDF, IBL | P1-2 |
-| Shadow | CSM + PCF + VSM (后续 Phase) | P2-3 |
-| PostProcess | Bloom, DOF, MotionBlur, ToneMapping, AutoExposure | P1-6 |
+| Graph | RenderGraph (Pass DAG, 拓扑排序, 资源依赖推导, 自动 Barrier 规划) | P1 ✅ |
+| Pipeline | Forward (HDR+PBR), Deferred (GBuffer+LightPass), Forward+ (Clustered) | P2 |
+| Lighting | Clustered Shading 光照剔除, PBR BRDF, IBL | P2 |
+| Shadow | CSM + PCF + VSM | P3 |
+| PostProcess | Bloom, DOF, MotionBlur, ToneMapping, AutoExposure | P3+ |
 
 **依赖**: RHI, Shader, Scene
+**关键接口**: `RenderGraph::AddPass()`, `RenderGraph::Compile()`, `RenderGraph::Execute()`

@@ -4,9 +4,11 @@
 
 | 子系统 | 说明 | Phase |
 |--------|------|-------|
-| Entity | UUID 实体、World 容器、Entity 查询 | P1 |
-| Component | Component 基类、生命周期 (Create/Start/Update/Destroy)、查询索引 | P1 |
-| Graph | SceneGraph 树形层级、Transform 级联、Dirty Flag 传播 | P1 |
+| Entity | UUID 实体句柄 | P1 ✅ |
+| Component | 基类 + 生命周期 (Create/Start/Update/Destroy) + HE_COMPONENT 宏 | P1 ✅ |
+| Transform | 位置/旋转/缩放 + GetLocalMatrix() | P1 ✅ |
+| World | 实体容器 + AddComponent<T>/GetComponent<T>/ForEach<T> | P1 ✅ |
+| Graph | SceneGraph 层级变换 + Dirty Flag 级联 | P1 ✅ |
 
 **依赖**: Reflect, Core
-**关键接口**: `Entity::AddComponent<T>()`, `World::Query<Components...>()`
+**关键接口**: `World::AddComponent<T>()`, `World::ForEach<T>(callback)`
