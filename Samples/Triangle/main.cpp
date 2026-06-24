@@ -1,12 +1,16 @@
 // ============================================================
-// HelloWorld — HugEngine Phase 1: Triangle on screen
+// Triangle — 使用 HugEngine RHI 渲染三角形
+//
+// 本示例演示 HugEngine 的最简渲染流程：
+//   Engine 启动 → Vulkan 设备 → SwapChain → Buffer/Shader
+//   → Pipeline 状态 → CommandList → 主循环绘制
 // ============================================================
 
 #include "Core/Core.h"
 #include "Core/Engine.h"
 #include "Platform/Window.h"
 #include "RHI/RHI.h"
-#include "Vulkan/VulkanInternal.h"  // Phase 1 bridge
+#include "Vulkan/VulkanInternal.h"  // Phase 1 桥接：直接管理 Framebuffer
 #include "EmbeddedShaders.h"
 
 #include <cstring>
@@ -15,7 +19,9 @@
 using namespace he;
 
 int main() {
-    // --- Engine bootstrap ---
+    // ============================================================
+    // 1. 引擎启动
+    // ============================================================
     he::EngineConfig config;
     config.appName      = "HugEngine — Triangle";
     config.windowWidth  = 1920;
@@ -24,7 +30,9 @@ int main() {
     he::Engine engine(config);
     engine.Initialize();
 
-    // --- RHI device ---
+    // ============================================================
+    // 2. 创建 Vulkan RHI 设备
+    // ============================================================
     he::rhi::DeviceInitDesc rhiDesc;
     rhiDesc.backend          = he::rhi::Backend::Vulkan;
     rhiDesc.enableValidation = true;
@@ -34,7 +42,9 @@ int main() {
     device->Initialize(rhiDesc);
     he::rhi::SetDevice(device.get());
 
-    // --- SwapChain ---
+    // ============================================================
+    // 3. 创建 SwapChain（与窗口关联）
+    // ============================================================
     auto swapchain = device->CreateSwapChain({
         .windowHandle = engine.GetWindow()->GetNativeHandleRaw(),
         .width  = engine.GetWindow()->GetWidth(),
@@ -42,12 +52,17 @@ int main() {
         .vsync  = true,
     });
 
-    // --- Triangle vertices ---
-    struct Vertex { float x, y; };
+    // ============================================================
+    // 4. 创建三角形顶点缓冲
+    // ============================================================
+    struct Vertex {
+        float x, y;  // NDC 坐标
+    };
+
     const Vertex kVertices[] = {
-        { 0.0f, -0.5f},
-        { 0.5f,  0.5f},
-        {-0.5f,  0.5f},
+        { 0.0f, -0.5f },  // 底端中点
+        { 0.5f,  0.5f },  // 右上角
+        {-0.5f,  0.5f },  // 左上角
     };
 
     auto vertexBuffer = device->CreateBuffer({
@@ -57,7 +72,9 @@ int main() {
         .stride      = sizeof(Vertex),
     });
 
-    // --- Shaders ---
+    // ============================================================
+    // 5. 加载着色器（由 HugEngineShader 模块编译嵌入）
+    // ============================================================
     he::rhi::ShaderBytecode vertShader;
     vertShader.stage      = he::rhi::ShaderStage::Vertex;
     vertShader.spirv      = k_Triangle_vert_spv;
@@ -68,7 +85,9 @@ int main() {
     fragShader.spirv      = k_Triangle_frag_spv;
     fragShader.entryPoint = "main";
 
-    // --- Pipeline ---
+    // ============================================================
+    // 6. 创建管线状态（PSO）
+    // ============================================================
     auto pipeline = device->CreatePipelineState({
         .vertexShader        = &vertShader,
         .pixelShader         = &fragShader,
@@ -78,11 +97,16 @@ int main() {
         .debugName           = "Triangle",
     });
 
-    // --- Command list ---
+    // ============================================================
+    // 7. 创建命令列表
+    // ============================================================
     auto cmdList = device->CreateCommandList();
     cmdList->SetPipeline(pipeline.get());
 
-    // --- Vulkan framebuffer setup (Phase 1 bridge) ---
+    // ============================================================
+    // 8. Vulkan Framebuffer 设置（Phase 1 桥接）
+    //    后续版本将通过 RenderGraph 自动管理
+    // ============================================================
     auto* vkCmd       = static_cast<he::rhi::VulkanCommandList*>(cmdList.get());
     auto* vkSwapchain = static_cast<he::rhi::VulkanSwapChain*>(swapchain.get());
 
@@ -94,41 +118,59 @@ int main() {
     };
     setupFramebuffers();
 
-    // --- Resize ---
+    // ============================================================
+    // 9. 窗口大小调整回调
+    // ============================================================
     engine.GetWindow()->SetResizeCallback([&](u32 w, u32 h) {
         swapchain->Resize(w, h);
         setupFramebuffers();
     });
 
-    // --- Main loop ---
-    HE_CORE_INFO("Rendering triangle...");
+    // ============================================================
+    // 10. 主渲染循环
+    // ============================================================
+    HE_CORE_INFO("Triangle sample started — rendering...");
     u64 frameIndex = 0;
 
     while (!engine.GetWindow()->ShouldClose()) {
         engine.GetWindow()->PollEvents();
 
+        // 获取下一帧图像
         if (!swapchain->AcquireNextImage())
             continue;
 
         vkCmd->SetCurrentImageIndex(swapchain->GetCurrentBackBufferIndex());
 
+        // 录制渲染命令
         cmdList->Begin();
         cmdList->BeginRenderPass(1, he::rhi::Format::RGBA8_UNORM);
-        cmdList->SetViewport({0, 0,
-            (float)swapchain->GetWidth(), (float)swapchain->GetHeight(), 0, 1});
-        cmdList->SetScissor({0, 0, swapchain->GetWidth(), swapchain->GetHeight()});
+        cmdList->SetViewport({
+            0, 0,
+            static_cast<float>(swapchain->GetWidth()),
+            static_cast<float>(swapchain->GetHeight()),
+            0.0f, 1.0f
+        });
+        cmdList->SetScissor({
+            0, 0,
+            swapchain->GetWidth(),
+            swapchain->GetHeight()
+        });
         cmdList->SetVertexBuffer(vertexBuffer.get(), 0);
-        cmdList->Draw(3);
+        cmdList->Draw(3);  // 3 个顶点 = 1 个三角形
         cmdList->EndRenderPass();
         cmdList->End();
 
+        // 提交并呈现
         device->Submit(cmdList.get());
         swapchain->Present(true);
         frameIndex++;
     }
 
+    // ============================================================
+    // 11. 清理退出
+    // ============================================================
     device->WaitIdle();
-    HE_CORE_INFO("Exited after {} frames", frameIndex);
+    HE_CORE_INFO("Triangle sample exited after {} frames", frameIndex);
     engine.Shutdown();
     return 0;
 }

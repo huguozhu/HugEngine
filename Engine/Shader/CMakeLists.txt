@@ -5,7 +5,8 @@ add_library(HugEngineShader INTERFACE)
 
 target_include_directories(HugEngineShader INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/Public
-    ${CMAKE_CURRENT_BINARY_DIR}          # For generated EmbeddedShaders.h
+    ${CMAKE_CURRENT_BINARY_DIR}          # For generated EmbeddedShaders.h (legacy)
+    ${CMAKE_CURRENT_BINARY_DIR}/Shaders  # EmbeddedShaders.h 实际生成路径
 )
 
 target_link_libraries(HugEngineShader INTERFACE HugEngineRHI)
@@ -60,19 +61,23 @@ if(GLSLANG_VALIDATOR)
         list(APPEND SPV_FILES ${SPV})
     endforeach()
 
-    # Generate header that embeds all SPIR-V as uint32_t arrays
-    # Use a small cmake script for the conversion
+    # 生成嵌入 SPIR-V 的 C 头文件
+    # CMake 4.x: file(READ ... HEX) 行为改变，改用 file(READ) + string(HEX)
     set(GEN_SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/gen_embedded_shaders.cmake")
     file(WRITE ${GEN_SCRIPT}
         "file(WRITE ${HEADER_FILE} \"// Auto-generated — DO NOT EDIT\\n#pragma once\\n#include <cstdint>\\n#include <vector>\\n\\n\")\n"
     )
     foreach(SPV ${SPV_FILES})
-        get_filename_component(VAR_NAME ${SPV} NAME_WE)
-        string(REGEX REPLACE "\\.(vert|frag)$" "" VAR_NAME ${VAR_NAME})
+        get_filename_component(FILE_NAME ${SPV} NAME)  # "Triangle.vert.spv"
+        string(REGEX REPLACE "[.][^.]*$" "" FULL_NAME ${FILE_NAME})  # 删除末扩展名 → "Triangle.vert"
+        string(REGEX REPLACE "[.]" "_" VAR_NAME ${FULL_NAME})  # "Triangle_vert"
+        set(VAR_RAW  "RAW_${VAR_NAME}")
+        set(VAR_HEX  "HEX_${VAR_NAME}")
         file(APPEND ${GEN_SCRIPT}
-            "file(READ ${SPV} HEX_)\n"
-            "string(REGEX REPLACE \"(..)\" \"0x\\\\1u,\" HEX_ \"\${HEX_}\")\n"
-            "file(APPEND ${HEADER_FILE} \"inline const std::vector<uint32_t> k_${VAR_NAME}_spv = { \${HEX_} };\\n\\n\")\n"
+            "file(READ ${SPV} ${VAR_RAW})\n"
+            "string(HEX \"\${${VAR_RAW}}\" ${VAR_HEX})\n"
+            "string(REGEX REPLACE \"(..)\" \"0x\\\\1u,\" ${VAR_HEX} \"\${${VAR_HEX}}\")\n"
+            "file(APPEND ${HEADER_FILE} \"inline const std::vector<uint32_t> k_${VAR_NAME}_spv = { \${${VAR_HEX}} };\\n\\n\")\n"
         )
     endforeach()
 

@@ -6,113 +6,26 @@
 #include "Core/Log.h"
 #include "Core/Assert.h"
 
-#define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
 
+#include <algorithm>
 #include <vector>
 #include <cstring>
 
+// VulkanSwapChain/VulkanCommandList + 其他 Vulkan 类型完整定义
+#include "VulkanInternal.h"
+
 namespace he::rhi {
 
-// Forward declarations from VulkanResources.cpp
-class VulkanBuffer;
-class VulkanPipelineState;
-std::unique_ptr<IRHIBuffer> CreateVulkanBuffer(VkDevice, VkPhysicalDevice, const BufferDesc&);
+// 工厂函数（实现在 VulkanResources.cpp）
+std::unique_ptr<IRHIBuffer>        CreateVulkanBuffer(VkDevice, VkPhysicalDevice, const BufferDesc&);
+std::unique_ptr<IRHITexture>       CreateVulkanTexture(VkDevice, VkPhysicalDevice, VkCommandPool, VkQueue, const TextureDesc&);
+std::unique_ptr<IRHISampler>       CreateVulkanSampler(VkDevice, const SamplerDesc&);
 std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(VkDevice, const PipelineStateDesc&);
 
-// ============================================================
-// Vulkan swapchain
-// ============================================================
-class VulkanSwapChain final : public IRHISwapChain {
-public:
-    VulkanSwapChain(VkDevice device, VkPhysicalDevice physical, VkSurfaceKHR surface,
-                    VkQueue presentQueue, const SwapChainDesc& desc);
-    ~VulkanSwapChain() override;
+} // namespace he::rhi
 
-    void Resize(u32 width, u32 height) override;
-    u32  GetCurrentBackBufferIndex() const override { return m_CurrentImage; }
-    u32  GetWidth()  const override { return m_Width; }
-    u32  GetHeight() const override { return m_Height; }
-    bool AcquireNextImage() override;
-    void Present(bool vsync) override;
-
-    VkSwapchainKHR GetHandle()     const { return m_Swapchain; }
-    VkFormat       GetFormat()     const { return m_Format; }
-    VkImageView    GetImageView(u32 i) const { return m_ImageViews[i]; }
-    VkExtent2D     GetExtent()     const { return {m_Width, m_Height}; }
-    VkImage        GetImage(u32 i) const { return m_Images[i]; }
-
-private:
-    void CreateSwapchain();
-    void DestroySwapchain();
-
-    VkDevice         m_Device        = VK_NULL_HANDLE;
-    VkPhysicalDevice m_Physical      = VK_NULL_HANDLE;
-    VkSurfaceKHR     m_Surface       = VK_NULL_HANDLE;
-    VkQueue          m_PresentQueue  = VK_NULL_HANDLE;
-
-    VkSwapchainKHR   m_Swapchain     = VK_NULL_HANDLE;
-    VkFormat         m_Format        = VK_FORMAT_B8G8R8A8_UNORM;
-    u32              m_Width         = 0;
-    u32              m_Height        = 0;
-    u32              m_ImageCount    = 0;
-    u32              m_CurrentImage  = 0;
-
-    std::vector<VkImage>     m_Images;
-    std::vector<VkImageView> m_ImageViews;
-};
-
-// ============================================================
-// Vulkan command list
-// ============================================================
-class VulkanCommandList final : public IRHICommandList {
-public:
-    VulkanCommandList(VkDevice device, VkQueue queue, u32 queueFamily);
-    ~VulkanCommandList() override;
-
-    void Begin() override;
-    void End()   override;
-    void BeginRenderPass(u32 colorCount, Format colorFmt, Format depthFmt,
-                         const ClearValue* clear) override;
-    void EndRenderPass() override;
-    void SetPipeline(IRHIPipelineState* pso) override;
-    void SetVertexBuffer(IRHIBuffer* buffer, u32 binding) override;
-    void SetViewport(const Viewport& vp) override;
-    void SetScissor(const ScissorRect& sc) override;
-    void Draw(u32 vertexCount, u32 instanceCount, u32 firstVertex, u32 firstInstance) override;
-    void DrawIndexed(u32 indexCount, u32 instanceCount, u32 firstIndex,
-                     i32 vertexOffset, u32 firstInstance) override;
-    void Submit() override;
-
-    // Vulkan-specific: set swapchain images for framebuffer creation
-    void SetSwapchainViews(Span<VkImageView> views, VkExtent2D extent) {
-        m_SwapchainViews.assign(views.begin(), views.end());
-        m_SwapchainExtent = extent;
-    }
-
-    VkCommandBuffer GetHandle() const { return m_CmdBuffer; }
-
-private:
-    VkDevice         m_Device      = VK_NULL_HANDLE;
-    VkQueue          m_Queue       = VK_NULL_HANDLE;
-    u32              m_QueueFamily = 0;
-
-    VkCommandPool    m_CmdPool     = VK_NULL_HANDLE;
-    VkCommandBuffer  m_CmdBuffer   = VK_NULL_HANDLE;
-    VkFence          m_Fence       = VK_NULL_HANDLE;
-
-    // State tracking
-    VkPipeline       m_CurrentPipeline = VK_NULL_HANDLE;
-    VkPipelineLayout m_CurrentLayout   = VK_NULL_HANDLE;
-    VkRenderPass     m_CurrentRenderPass = VK_NULL_HANDLE;
-    VkBuffer         m_CurrentVB       = VK_NULL_HANDLE;
-
-    // Swapchain framebuffers
-    std::vector<VkImageView> m_SwapchainViews;
-    VkExtent2D               m_SwapchainExtent{};
-    std::vector<VkFramebuffer> m_Framebuffers;
-    u32                       m_CurrentImageIndex = 0;
-};
+namespace he::rhi {
 
 // ============================================================
 // Vulkan device
@@ -127,6 +40,10 @@ public:
 
     std::unique_ptr<IRHISwapChain>    CreateSwapChain(const SwapChainDesc& desc) override;
     std::unique_ptr<IRHICommandList>  CreateCommandList(QueueType queue) override;
+    std::unique_ptr<IRHIBuffer>       CreateBuffer(const BufferDesc& desc) override;
+    std::unique_ptr<IRHITexture>      CreateTexture(const TextureDesc& desc) override;
+    std::unique_ptr<IRHISampler>      CreateSampler(const SamplerDesc& desc) override;
+    std::unique_ptr<IRHIPipelineState> CreatePipelineState(const PipelineStateDesc& desc) override;
 
     void WaitIdle() override;
     void Submit(IRHICommandList* cmdList) override;
@@ -137,6 +54,7 @@ public:
     VkInstance       GetVkInstance()   const { return m_Instance; }
     VkSurfaceKHR     GetVkSurface()    const { return m_Surface; }
     VkQueue          GetGraphicsQueue() const { return m_GraphicsQueue; }
+    VkCommandPool    GetGraphicsCmdPool() const { return m_GraphicsCmdPool; }
     u32              GetGraphicsFamily() const { return m_GraphicsFamily; }
 
 private:
@@ -638,10 +556,6 @@ void VulkanCommandList::SetPipeline(IRHIPipelineState* pso) {
     m_Framebuffers.clear();
 }
 
-void VulkanCommandList::SetCurrentImageIndex(u32 index) {
-    m_CurrentImageIndex = index;
-}
-
 void VulkanCommandList::SetVertexBuffer(IRHIBuffer* buffer, u32 /*binding*/) {
     auto* vkBuf = static_cast<VulkanBuffer*>(buffer);
     m_CurrentVB = vkBuf->GetHandle();
@@ -683,9 +597,12 @@ std::unique_ptr<IRHIPipelineState> VulkanDevice::CreatePipelineState(const Pipel
     return CreateVulkanPipeline(m_Device, desc);
 }
 
-std::unique_ptr<IRHITexture> VulkanDevice::CreateTexture(const TextureDesc&) {
-    HE_CORE_WARN("CreateTexture not yet implemented");
-    return nullptr;
+std::unique_ptr<IRHITexture> VulkanDevice::CreateTexture(const TextureDesc& desc) {
+    return CreateVulkanTexture(m_Device, m_Physical, m_GraphicsCmdPool, m_GraphicsQueue, desc);
+}
+
+std::unique_ptr<IRHISampler> VulkanDevice::CreateSampler(const SamplerDesc& desc) {
+    return CreateVulkanSampler(m_Device, desc);
 }
 
 // ============================================================

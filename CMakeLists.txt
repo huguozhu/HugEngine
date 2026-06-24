@@ -35,7 +35,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 if(MSVC)
-    add_compile_options(/Zc:preprocessor /bigobj /MP)
+    add_compile_options(/Zc:preprocessor /bigobj /MP /utf-8 /Zc:noScanModuleDependencies)
 endif()
 
 add_subdirectory(Engine)

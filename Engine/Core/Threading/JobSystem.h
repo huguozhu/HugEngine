@@ -2,6 +2,9 @@
 
 #include "Core/Types.h"
 
+// MSVC 2026: <chrono> 需显式包含，taskflow 依赖但未自行引入
+#include <chrono>
+
 #include <taskflow/taskflow.hpp>
 
 #include <functional>

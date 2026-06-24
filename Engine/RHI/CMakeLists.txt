@@ -24,6 +24,10 @@ if(HUGENGINE_RHI_VULKAN)
         Vulkan/VulkanResources.cpp
     )
     target_link_libraries(HugEngineRHI PUBLIC Vulkan::Vulkan)
+    # 暴露 Vulkan 桥接头文件给 Sample（Phase 1 临时方案）
+    # 使得 #include "Vulkan/VulkanInternal.h" 可解析
+    target_include_directories(HugEngineRHI PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
     target_compile_definitions(HugEngineRHI PUBLIC HE_RHI_VULKAN)
 
     message(STATUS "Vulkan backend: ENABLED (${Vulkan_INCLUDE_DIRS})")

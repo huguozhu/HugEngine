@@ -8,6 +8,11 @@ cmake_policy(SET CMP0167 OLD) # CMake 4.x FetchContent 兼容
 # 抑制第三方库 CMake 版本过低的警告
 set(CMAKE_SUPPRESS_DEVELOPER_WARNINGS ON CACHE BOOL "")
 
+# Taskflow v3.9.0 需要 C++17 兼容模式（MSVC 2026 默认标准会移除 chrono::system_clock）
+set(CMAKE_CXX_STANDARD 17 CACHE STRING "")
+set(CMAKE_CXX_STANDARD_REQUIRED ON CACHE BOOL "")
+set(CMAKE_CXX_EXTENSIONS OFF CACHE BOOL "")
+
 # --- GLFW 3.4 ---
 FetchContent_Declare(glfw
     URL https://github.com/glfw/glfw/archive/refs/tags/3.3.9.zip
@@ -72,6 +77,9 @@ FetchContent_MakeAvailable(
     stb
     meshoptimizer
 )
+
+# Taskflow v3.9.0 为 header-only 库，C++ 标准由消费方决定
+# 不再覆盖其 CXX_STANDARD，避免模板实例化不一致
 
 if(HUGENGINE_BUILD_TESTS)
     FetchContent_MakeAvailable(Catch2)

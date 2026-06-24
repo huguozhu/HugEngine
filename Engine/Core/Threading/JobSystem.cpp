@@ -2,6 +2,8 @@
 #include "Core/Log.h"
 
 #include <thread>
+#include <algorithm>
+#include <vector>
 
 namespace he {
 
@@ -43,23 +45,25 @@ void JobSystem::Submit(std::function<void()> job) {
 }
 
 void JobSystem::ParallelFor(u32 count, std::function<void(u32 index)> body) {
-    m_Taskflow->for_each_index(0u, static_cast<int>(count), 1, std::move(body));
-    m_Executor->run(*m_Taskflow).wait();
-    m_Taskflow->clear();
+    // 用 ParallelInvoke 避免 taskflow for_each_index 模板在 MSVC 2026 的链接问题
+    std::vector<std::function<void()>> tasks(count);
+    for (u32 i = 0; i < count; ++i)
+        tasks[i] = [=] { body(i); };
+    ParallelInvoke(tasks);
 }
 
 void JobSystem::ParallelForChunked(u32 count, u32 chunkSize,
                                    std::function<void(u32 start, u32 end)> body) {
     u32 numChunks = (count + chunkSize - 1) / chunkSize;
-    m_Taskflow->for_each_index(0u, static_cast<int>(numChunks), 1,
-        [=](int i) {
-            u32 start = static_cast<u32>(i) * chunkSize;
+    std::vector<std::function<void()>> tasks(numChunks);
+    for (u32 i = 0; i < numChunks; ++i) {
+        tasks[i] = [=] {
+            u32 start = i * chunkSize;
             u32 end   = std::min(start + chunkSize, count);
             body(start, end);
-        }
-    );
-    m_Executor->run(*m_Taskflow).wait();
-    m_Taskflow->clear();
+        };
+    }
+    ParallelInvoke(tasks);
 }
 
 void JobSystem::ParallelInvoke(std::span<std::function<void()>> tasks) {

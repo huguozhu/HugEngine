@@ -10,9 +10,6 @@ public:
 
     void Initialize(const DeviceInitDesc& desc) override;
     void Shutdown() override;
-    void BeginFrame() override;
-    void EndFrame()   override;
-    void Present()    override;
 };
 
 DeviceCaps D3D12Device::GetCaps() const {
@@ -42,8 +39,5 @@ void D3D12Device::Shutdown() {
     IRHIDevice::Shutdown();
 }
 
-void D3D12Device::BeginFrame() {}
-void D3D12Device::EndFrame()   {}
-void D3D12Device::Present()    {}
 
 } // namespace he::rhi

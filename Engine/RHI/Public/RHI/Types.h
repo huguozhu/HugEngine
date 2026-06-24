@@ -128,6 +128,20 @@ enum class CompareFunc : u8 {
     Always,
 };
 
+// --- Sampler filter mode ---
+enum class FilterMode : u8 {
+    Nearest,  // 最近点采样
+    Linear,   // 双线性插值
+};
+
+// --- Sampler address mode ---
+enum class AddressMode : u8 {
+    Repeat,          // 重复
+    MirroredRepeat,  // 镜像重复
+    ClampToEdge,     // 边缘钳制
+    ClampToBorder,   // 边界色钳制
+};
+
 // --- Device capabilities ---
 struct DeviceCaps {
     u32     maxBindlessResources   = 0;
