@@ -18,3 +18,4 @@ target_link_libraries(HugEngineCore PUBLIC
     spdlog::spdlog
     Taskflow
 )
+

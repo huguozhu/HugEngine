@@ -5,6 +5,9 @@ project(HugEngine
     LANGUAGES CXX
 )
 
+# VS 解决方案目录分组
+set_property(GLOBAL PROPERTY USE_FOLDERS ON)
+
 # Output directories
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
@@ -45,4 +48,27 @@ add_subdirectory(Engine)
 # ============================================================
 if(HUGENGINE_BUILD_SAMPLES)
     add_subdirectory(Samples)
+endif()
+
+# ============================================================
+# VS 解决方案目录 — 覆盖所有子模块的 FOLDER 设置
+# ============================================================
+# External 第三方库（覆盖 GLFW 自带的 "GLFW3" 等）
+foreach(_ext glfw glm spdlog Taskflow stb meshoptimizer update_mappings)
+    if(TARGET ${_ext})
+        set_target_properties(${_ext} PROPERTIES FOLDER "External")
+    endif()
+endforeach()
+
+# Engine 模块
+foreach(_eng HugEngineCore HugEngineRHI HugEngineReflect HugEngineShader
+            HugEngineScene HugEngineRender HugEngineAsset HugEngineEditor CompileShaders)
+    if(TARGET ${_eng})
+        set_target_properties(${_eng} PROPERTIES FOLDER "Engine")
+    endif()
+endforeach()
+
+# Samples
+if(TARGET Triangle)
+    set_target_properties(Triangle PROPERTIES FOLDER "Samples")
 endif()

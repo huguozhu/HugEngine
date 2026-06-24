@@ -28,7 +28,6 @@ set(TF_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 add_subdirectory(taskflow)
 
 # --- stb (header-only, 无 CMake 构建) ---
-# 直接提供 include 路径
 if(NOT TARGET stb)
     add_library(stb INTERFACE)
     target_include_directories(stb INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/stb)
