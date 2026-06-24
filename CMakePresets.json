@@ -1,0 +1,34 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "gcc",
+      "displayName": "GCC 16 MinGW (Vulkan)",
+      "generator": "MinGW Makefiles",
+      "binaryDir": "${sourceDir}/Build",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "C:/gcc16/mingw64/bin/gcc.exe",
+        "CMAKE_CXX_COMPILER": "C:/gcc16/mingw64/bin/g++.exe",
+        "CMAKE_MAKE_PROGRAM": "C:/gcc16/mingw64/bin/mingw32-make.exe",
+        "HUGENGINE_BUILD_SAMPLES": "ON",
+        "HUGENGINE_BUILD_EDITOR": "ON",
+        "HUGENGINE_BUILD_TESTS": "OFF",
+        "HUGENGINE_RHI_VULKAN": "ON",
+        "HUGENGINE_RHI_D3D12": "OFF"
+      }
+    },
+    {
+      "name": "vs2026",
+      "displayName": "Visual Studio 2026 (Vulkan + D3D12)",
+      "generator": "Visual Studio 18 2026",
+      "binaryDir": "${sourceDir}/Build",
+      "cacheVariables": {
+        "HUGENGINE_BUILD_SAMPLES": "ON",
+        "HUGENGINE_BUILD_EDITOR": "ON",
+        "HUGENGINE_BUILD_TESTS": "OFF",
+        "HUGENGINE_RHI_VULKAN": "ON",
+        "HUGENGINE_RHI_D3D12": "ON"
+      }
+    }
+  ]
+}

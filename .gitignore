@@ -1,0 +1,25 @@
+# Build output
+Build/
+out/
+
+# IDE
+.idea/
+.vs/
+.vscode/
+*.user
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated
+*.spv
+*.dxil
+
+# Intermediate
+*.obj
+*.pch
+*.ilk
+*.pdb
+*.lib
+*.exp
