@@ -6,6 +6,8 @@
 
 namespace he::rhi {
 
+class IRHISwapChain;  // 前向声明，避免循环依赖
+
 struct ClearValue {
     float color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     float depth    = 1.0f;
@@ -41,9 +43,13 @@ public:
     ) = 0;
     virtual void EndRenderPass() = 0;
 
+    // SwapChain 关联（自动管理 Framebuffer + 同步 + 图像索引）
+    virtual void SetSwapChain(IRHISwapChain* swapchain) = 0;
+
     // Pipeline + resources
     virtual void SetPipeline(IRHIPipelineState* pso) = 0;
     virtual void SetVertexBuffer(IRHIBuffer* buffer, u32 binding = 0) = 0;
+    virtual void SetIndexBuffer(IRHIBuffer* buffer, u32 offset = 0) = 0;
 
     // State
     virtual void SetViewport(const Viewport& vp) = 0;

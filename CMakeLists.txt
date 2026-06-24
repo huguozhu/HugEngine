@@ -17,7 +17,6 @@ option(HUGENGINE_BUILD_SAMPLES   "Build sample projects" ON)
 option(HUGENGINE_BUILD_EDITOR    "Build editor"          ON)
 option(HUGENGINE_BUILD_TESTS     "Build tests"           OFF)
 option(HUGENGINE_RHI_VULKAN      "Enable Vulkan backend" ON)
-option(HUGENGINE_RHI_D3D12       "Enable D3D12 backend"  ON)
 
 # ============================================================
 # External dependencies (FetchContent — no vcpkg)

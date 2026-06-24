@@ -382,11 +382,66 @@ void VulkanSwapChain::CreateSwapchain() {
         viewInfo.subresourceRange.layerCount = 1;
         vkCreateImageView(m_Device, &viewInfo, nullptr, &m_ImageViews[i]);
     }
+
+    // 创建同步原语
+    VkSemaphoreCreateInfo semInfo{};
+    semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    vkCreateSemaphore(m_Device, &semInfo, nullptr, &m_ImageAcquired);
+    vkCreateSemaphore(m_Device, &semInfo, nullptr, &m_RenderComplete);
+
+    // 创建深度模板纹理
+    VkImageCreateInfo depthInfo{};
+    depthInfo.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    depthInfo.imageType     = VK_IMAGE_TYPE_2D;
+    depthInfo.format        = VK_FORMAT_D32_SFLOAT;
+    depthInfo.extent        = {m_Width, m_Height, 1};
+    depthInfo.mipLevels     = 1;
+    depthInfo.arrayLayers   = 1;
+    depthInfo.samples       = VK_SAMPLE_COUNT_1_BIT;
+    depthInfo.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    depthInfo.usage         = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    depthInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    vkCreateImage(m_Device, &depthInfo, nullptr, &m_DepthImage);
+
+    VkMemoryRequirements depthMemReqs;
+    vkGetImageMemoryRequirements(m_Device, m_DepthImage, &depthMemReqs);
+
+    VkMemoryAllocateInfo depthAlloc{};
+    depthAlloc.sType          = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    depthAlloc.allocationSize = depthMemReqs.size;
+    // 查找 Device Local 内存类型
+    VkPhysicalDeviceMemoryProperties memProps;
+    vkGetPhysicalDeviceMemoryProperties(m_Physical, &memProps);
+    u32 depthMemType = 0;
+    for (u32 i = 0; i < memProps.memoryTypeCount; ++i) {
+        if ((depthMemReqs.memoryTypeBits & (1 << i)) &&
+            (memProps.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+            { depthMemType = i; break; }
+    }
+    depthAlloc.memoryTypeIndex = depthMemType;
+    vkAllocateMemory(m_Device, &depthAlloc, nullptr, &m_DepthImageMemory);
+    vkBindImageMemory(m_Device, m_DepthImage, m_DepthImageMemory, 0);
+
+    VkImageViewCreateInfo depthViewInfo{};
+    depthViewInfo.sType     = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    depthViewInfo.image     = m_DepthImage;
+    depthViewInfo.viewType  = VK_IMAGE_VIEW_TYPE_2D;
+    depthViewInfo.format    = VK_FORMAT_D32_SFLOAT;
+    depthViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    depthViewInfo.subresourceRange.levelCount = 1;
+    depthViewInfo.subresourceRange.layerCount = 1;
+    vkCreateImageView(m_Device, &depthViewInfo, nullptr, &m_DepthImageView);
 }
 
 void VulkanSwapChain::DestroySwapchain() {
     for (auto& view : m_ImageViews) vkDestroyImageView(m_Device, view, nullptr);
     m_ImageViews.clear();
+    if (m_DepthImageView)   { vkDestroyImageView(m_Device, m_DepthImageView, nullptr); m_DepthImageView = VK_NULL_HANDLE; }
+    if (m_DepthImage)       { vkDestroyImage(m_Device, m_DepthImage, nullptr); m_DepthImage = VK_NULL_HANDLE; }
+    if (m_DepthImageMemory) { vkFreeMemory(m_Device, m_DepthImageMemory, nullptr); m_DepthImageMemory = VK_NULL_HANDLE; }
+    if (m_ImageAcquired)  { vkDestroySemaphore(m_Device, m_ImageAcquired, nullptr);  m_ImageAcquired  = VK_NULL_HANDLE; }
+    if (m_RenderComplete) { vkDestroySemaphore(m_Device, m_RenderComplete, nullptr); m_RenderComplete = VK_NULL_HANDLE; }
     if (m_Swapchain) vkDestroySwapchainKHR(m_Device, m_Swapchain, nullptr);
     m_Swapchain = VK_NULL_HANDLE;
 }
@@ -400,18 +455,19 @@ void VulkanSwapChain::Resize(u32 width, u32 height) {
 }
 
 bool VulkanSwapChain::AcquireNextImage() {
-    VkSemaphore semaphore = VK_NULL_HANDLE; // Placeholder
     VkResult result = vkAcquireNextImageKHR(m_Device, m_Swapchain, UINT64_MAX,
-                                            semaphore, VK_NULL_HANDLE, &m_CurrentImage);
+                                            m_ImageAcquired, VK_NULL_HANDLE, &m_CurrentImage);
     return result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR;
 }
 
 void VulkanSwapChain::Present(bool /*vsync*/) {
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    presentInfo.waitSemaphoreCount = 1;
+    presentInfo.pWaitSemaphores    = &m_RenderComplete;
     presentInfo.swapchainCount = 1;
-    presentInfo.pSwapchains = &m_Swapchain;
-    presentInfo.pImageIndices = &m_CurrentImage;
+    presentInfo.pSwapchains     = &m_Swapchain;
+    presentInfo.pImageIndices   = &m_CurrentImage;
 
     vkQueuePresentKHR(m_PresentQueue, &presentInfo);
 }
@@ -460,24 +516,35 @@ void VulkanCommandList::End() {
     vkEndCommandBuffer(m_CmdBuffer);
 }
 
-void VulkanCommandList::BeginRenderPass(u32, Format, Format,
+void VulkanCommandList::BeginRenderPass(u32 colorCount, Format, Format depthFormat,
                                         const ClearValue* clear) {
+    // 从 SwapChain 获取当前图像索引
+    if (m_pSwapChain)
+        m_CurrentImageIndex = m_pSwapChain->GetCurrentBackBufferIndex();
+
     if (m_SwapchainViews.empty() || !m_CurrentRenderPass) {
         HE_CORE_ERROR("BeginRenderPass: no swapchain views or render pass set");
         return;
     }
 
-    // Create framebuffers lazily
+    // 创建 Framebuffer（颜色 + 深度附件）
     if (m_Framebuffers.empty()) {
         u32 count = static_cast<u32>(m_SwapchainViews.size());
         m_Framebuffers.resize(count);
         for (u32 i = 0; i < count; ++i) {
-            VkImageView attachments[] = { m_SwapchainViews[i] };
+            VkImageView attachments[2] = { m_SwapchainViews[i] };
+            u32 attachmentCount = 1;
+
+            // 如果 SwapChain 有深度纹理，作为第二个附件
+            if (m_pSwapChain && m_pSwapChain->GetDepthImageView()) {
+                attachments[1] = m_pSwapChain->GetDepthImageView();
+                attachmentCount = 2;
+            }
 
             VkFramebufferCreateInfo fbInfo{};
             fbInfo.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
             fbInfo.renderPass      = m_CurrentRenderPass;
-            fbInfo.attachmentCount = 1;
+            fbInfo.attachmentCount = attachmentCount;
             fbInfo.pAttachments    = attachments;
             fbInfo.width           = m_SwapchainExtent.width;
             fbInfo.height          = m_SwapchainExtent.height;
@@ -487,17 +554,27 @@ void VulkanCommandList::BeginRenderPass(u32, Format, Format,
         }
     }
 
-    VkClearValue vkClear{};
-    if (clear) {
-        vkClear.color.float32[0] = clear->color[0];
-        vkClear.color.float32[1] = clear->color[1];
-        vkClear.color.float32[2] = clear->color[2];
-        vkClear.color.float32[3] = clear->color[3];
-    } else {
-        vkClear.color.float32[0] = 0.1f;
-        vkClear.color.float32[1] = 0.1f;
-        vkClear.color.float32[2] = 0.15f;
-        vkClear.color.float32[3] = 1.0f;
+    // 构建清除值数组（最多支持 1 颜色 + 1 深度模板）
+    VkClearValue vkClearValues[2]{};
+    u32 clearCount = static_cast<u32>(colorCount);
+    for (u32 c = 0; c < clearCount; ++c) {
+        if (clear) {
+            vkClearValues[c].color.float32[0] = clear[c].color[0];
+            vkClearValues[c].color.float32[1] = clear[c].color[1];
+            vkClearValues[c].color.float32[2] = clear[c].color[2];
+            vkClearValues[c].color.float32[3] = clear[c].color[3];
+        } else {
+            vkClearValues[c].color.float32[0] = 0.1f;
+            vkClearValues[c].color.float32[1] = 0.1f;
+            vkClearValues[c].color.float32[2] = 0.15f;
+            vkClearValues[c].color.float32[3] = 1.0f;
+        }
+    }
+    // 深度模板清除值
+    if (depthFormat != Format::Unknown) {
+        vkClearValues[clearCount].depthStencil.depth   = clear ? clear[colorCount].depth   : 1.0f;
+        vkClearValues[clearCount].depthStencil.stencil = clear ? clear[colorCount].stencil : 0;
+        clearCount++;
     }
 
     VkRenderPassBeginInfo rpBegin{};
@@ -505,21 +582,16 @@ void VulkanCommandList::BeginRenderPass(u32, Format, Format,
     rpBegin.renderPass        = m_CurrentRenderPass;
     rpBegin.framebuffer       = m_Framebuffers[m_CurrentImageIndex];
     rpBegin.renderArea.extent = m_SwapchainExtent;
-    rpBegin.clearValueCount   = 1;
-    rpBegin.pClearValues      = &vkClear;
+    rpBegin.clearValueCount   = clearCount;
+    rpBegin.pClearValues      = vkClearValues;
 
     vkCmdBeginRenderPass(m_CmdBuffer, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
 
-    // Bind pipeline if set
+    // 绑定管线
     if (m_CurrentPipeline) {
         vkCmdBindPipeline(m_CmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_CurrentPipeline);
     }
-
-    // Bind vertex buffer if set
-    if (m_CurrentVB) {
-        VkDeviceSize offset = 0;
-        vkCmdBindVertexBuffers(m_CmdBuffer, 0, 1, &m_CurrentVB, &offset);
-    }
+    // 顶点/索引缓冲在 Draw/DrawIndexed 时按需绑定，以支持正确的 binding 参数
 }
 
 void VulkanCommandList::EndRenderPass() {
@@ -544,6 +616,19 @@ void VulkanCommandList::SetScissor(const ScissorRect& sc) {
     vkCmdSetScissor(m_CmdBuffer, 0, 1, &vkScissor);
 }
 
+void VulkanCommandList::SetSwapChain(IRHISwapChain* swapchain) {
+    // 保存 Vulkan SwapChain 指针，后续 BeginRenderPass/Submit 自动使用
+    m_pSwapChain = static_cast<VulkanSwapChain*>(swapchain);
+
+    // 预创建 Framebuffer 用的 ImageView 列表
+    u32 count = 3;
+    m_SwapchainViews.resize(count);
+    for (u32 i = 0; i < count; ++i)
+        m_SwapchainViews[i] = m_pSwapChain->GetImageView(i);
+    m_SwapchainExtent = {m_pSwapChain->GetWidth(), m_pSwapChain->GetHeight()};
+    m_Framebuffers.clear();  // 强制重建
+}
+
 void VulkanCommandList::SetPipeline(IRHIPipelineState* pso) {
     auto* vkPso = static_cast<VulkanPipelineState*>(pso);
     m_CurrentPipeline   = vkPso->GetPipeline();
@@ -556,18 +641,40 @@ void VulkanCommandList::SetPipeline(IRHIPipelineState* pso) {
     m_Framebuffers.clear();
 }
 
-void VulkanCommandList::SetVertexBuffer(IRHIBuffer* buffer, u32 /*binding*/) {
+void VulkanCommandList::SetVertexBuffer(IRHIBuffer* buffer, u32 binding) {
     auto* vkBuf = static_cast<VulkanBuffer*>(buffer);
     m_CurrentVB = vkBuf->GetHandle();
+    m_VBBinding = binding;
+}
+
+void VulkanCommandList::SetIndexBuffer(IRHIBuffer* buffer, u32 offset) {
+    auto* vkBuf = static_cast<VulkanBuffer*>(buffer);
+    m_CurrentIB = vkBuf->GetHandle();
+    m_IBOffset  = offset;
+    // 根据缓冲区大小推断索引类型（4 字节 = UINT32，2 字节 = UINT16）
+    m_CurrentIndexType = (vkBuf->GetSize() >= 4) ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
 }
 
 void VulkanCommandList::Draw(u32 vertexCount, u32 instanceCount,
                               u32 firstVertex, u32 firstInstance) {
+    // 绑定当前顶点缓冲（使用记录下的 binding 索引）
+    if (m_CurrentVB) {
+        VkDeviceSize offset = 0;
+        vkCmdBindVertexBuffers(m_CmdBuffer, m_VBBinding, 1, &m_CurrentVB, &offset);
+    }
     vkCmdDraw(m_CmdBuffer, vertexCount, instanceCount, firstVertex, firstInstance);
 }
 
 void VulkanCommandList::DrawIndexed(u32 indexCount, u32 instanceCount,
                                      u32 firstIndex, i32 vertexOffset, u32 firstInstance) {
+    // 绑定索引缓冲
+    if (m_CurrentIB)
+        vkCmdBindIndexBuffer(m_CmdBuffer, m_CurrentIB, m_IBOffset, m_CurrentIndexType);
+    // 绑定当前顶点缓冲
+    if (m_CurrentVB) {
+        VkDeviceSize offset = 0;
+        vkCmdBindVertexBuffers(m_CmdBuffer, m_VBBinding, 1, &m_CurrentVB, &offset);
+    }
     vkCmdDrawIndexed(m_CmdBuffer, indexCount, instanceCount,
                      firstIndex, vertexOffset, firstInstance);
 }
@@ -575,10 +682,25 @@ void VulkanCommandList::DrawIndexed(u32 indexCount, u32 instanceCount,
 void VulkanCommandList::Submit() {
     vkResetFences(m_Device, 1, &m_Fence);
 
+    // 从关联的 SwapChain 自动获取同步原语
+    VkSemaphore waitSem   = VK_NULL_HANDLE;
+    VkSemaphore signalSem = VK_NULL_HANDLE;
+    if (m_pSwapChain) {
+        waitSem   = m_pSwapChain->GetImageAcquiredSemaphore();
+        signalSem = m_pSwapChain->GetRenderCompleteSemaphore();
+    }
+
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+
     VkSubmitInfo submitInfo{};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &m_CmdBuffer;
+    submitInfo.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.waitSemaphoreCount   = waitSem ? 1u : 0u;
+    submitInfo.pWaitSemaphores      = &waitSem;
+    submitInfo.pWaitDstStageMask    = &waitStage;
+    submitInfo.commandBufferCount   = 1;
+    submitInfo.pCommandBuffers      = &m_CmdBuffer;
+    submitInfo.signalSemaphoreCount = signalSem ? 1u : 0u;
+    submitInfo.pSignalSemaphores    = &signalSem;
 
     vkQueueSubmit(m_Queue, 1, &submitInfo, m_Fence);
     vkWaitForFences(m_Device, 1, &m_Fence, VK_TRUE, UINT64_MAX);
@@ -610,15 +732,9 @@ std::unique_ptr<IRHISampler> VulkanDevice::CreateSampler(const SamplerDesc& desc
 // ============================================================
 
 std::unique_ptr<IRHIDevice> CreateDevice(Backend backend) {
-    switch (backend) {
-        case Backend::Vulkan:
-            return std::make_unique<VulkanDevice>();
-        case Backend::D3D12:
-            HE_CORE_WARN("D3D12 backend not yet implemented");
-            return nullptr;
-        default:
-            return nullptr;
-    }
+    if (backend == Backend::Vulkan)
+        return std::make_unique<VulkanDevice>();
+    return nullptr;
 }
 
 } // namespace he::rhi

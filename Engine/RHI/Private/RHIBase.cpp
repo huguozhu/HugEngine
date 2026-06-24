@@ -20,7 +20,7 @@ IRHIDevice::~IRHIDevice() = default;
 
 void IRHIDevice::Initialize(const DeviceInitDesc& desc) {
     HE_CORE_INFO("Initializing RHI device...");
-    HE_CORE_INFO("  Backend: {}", desc.backend == Backend::Vulkan ? "Vulkan" : "D3D12");
+    HE_CORE_INFO("  Backend: Vulkan");
     HE_CORE_INFO("  Adapter: {}", desc.preferredAdapter >= 0
         ? std::to_string(desc.preferredAdapter) : "default");
 }

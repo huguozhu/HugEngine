@@ -529,7 +529,9 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     VkShaderModule vert = createShader(desc.vertexShader,   VK_SHADER_STAGE_VERTEX_BIT);
     VkShaderModule frag = createShader(desc.pixelShader,    VK_SHADER_STAGE_FRAGMENT_BIT);
 
-    // 2. Render pass (single color attachment)
+    // 2. Render pass（颜色附件 + 可选的深度附件）
+    bool hasDepth = (desc.depthFormat != Format::Unknown);
+
     VkAttachmentDescription colorAttach{};
     colorAttach.format        = VK_FORMAT_B8G8R8A8_UNORM;
     colorAttach.samples       = VK_SAMPLE_COUNT_1_BIT;
@@ -538,24 +540,38 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     colorAttach.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     colorAttach.finalLayout   = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
+    VkAttachmentDescription depthAttach{};
+    depthAttach.format        = VK_FORMAT_D32_SFLOAT;
+    depthAttach.samples       = VK_SAMPLE_COUNT_1_BIT;
+    depthAttach.loadOp        = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depthAttach.storeOp       = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depthAttach.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    depthAttach.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depthAttach.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    depthAttach.finalLayout   = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
     VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference depthRef{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
 
     VkSubpassDescription subpass{};
-    subpass.pipelineBindPoint    = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount = 1;
-    subpass.pColorAttachments    = &colorRef;
+    subpass.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount    = 1;
+    subpass.pColorAttachments       = &colorRef;
+    subpass.pDepthStencilAttachment = hasDepth ? &depthRef : nullptr;
+
+    VkAttachmentDescription attachments[2] = { colorAttach, depthAttach };
 
     VkSubpassDependency dep{};
     dep.srcSubpass    = VK_SUBPASS_EXTERNAL;
     dep.dstSubpass    = 0;
     dep.srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dep.dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dep.dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | (hasDepth ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT : 0u);
 
     VkRenderPassCreateInfo rpInfo{};
     rpInfo.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    rpInfo.attachmentCount = 1;
-    rpInfo.pAttachments    = &colorAttach;
+    rpInfo.attachmentCount = hasDepth ? 2u : 1u;
+    rpInfo.pAttachments    = attachments;
     rpInfo.subpassCount    = 1;
     rpInfo.pSubpasses      = &subpass;
     rpInfo.dependencyCount = 1;
@@ -604,6 +620,15 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     ms.sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
     ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
+    // 6. Depth stencil state
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType            = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable  = desc.depthTest ? VK_TRUE : VK_FALSE;
+    depthStencil.depthWriteEnable = desc.depthWrite ? VK_TRUE : VK_FALSE;
+    depthStencil.depthCompareOp   = ToVkCompareOp(desc.depthCompare);
+    depthStencil.depthBoundsTestEnable = VK_FALSE;
+    depthStencil.stencilTestEnable     = VK_FALSE;
+
     VkPipelineColorBlendAttachmentState blendAttach{};
     blendAttach.colorWriteMask =
         VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
@@ -646,6 +671,7 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     pipeInfo.pViewportState      = &viewportState;
     pipeInfo.pRasterizationState = &rasterizer;
     pipeInfo.pMultisampleState   = &ms;
+    pipeInfo.pDepthStencilState  = &depthStencil;
     pipeInfo.pColorBlendState    = &colorBlend;
     pipeInfo.pDynamicState       = &dynState;
     pipeInfo.layout              = pipelineLayout;

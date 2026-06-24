@@ -31,11 +31,14 @@ public:
     bool AcquireNextImage() override;
     void Present(bool vsync) override;
 
-    VkSwapchainKHR GetHandle()     const { return m_Swapchain; }
-    VkFormat       GetFormat()     const { return m_Format; }
-    VkImageView    GetImageView(u32 i) const { return m_ImageViews[i]; }
-    VkExtent2D     GetExtent()     const { return {m_Width, m_Height}; }
-    VkImage        GetImage(u32 i) const { return m_Images[i]; }
+    VkSwapchainKHR GetHandle()                const { return m_Swapchain; }
+    VkFormat       GetFormat()                const { return m_Format; }
+    VkImageView    GetImageView(u32 i)        const { return m_ImageViews[i]; }
+    VkImageView    GetDepthImageView()        const { return m_DepthImageView; }
+    VkExtent2D     GetExtent()                const { return {m_Width, m_Height}; }
+    VkImage        GetImage(u32 i)            const { return m_Images[i]; }
+    VkSemaphore    GetImageAcquiredSemaphore() const { return m_ImageAcquired; }
+    VkSemaphore    GetRenderCompleteSemaphore() const { return m_RenderComplete; }
 
 private:
     void CreateSwapchain();
@@ -52,6 +55,14 @@ private:
     u32              m_Height        = 0;
     u32              m_ImageCount    = 0;
     u32              m_CurrentImage  = 0;
+
+    VkSemaphore      m_ImageAcquired  = VK_NULL_HANDLE;  // 图像可用信号
+    VkSemaphore      m_RenderComplete = VK_NULL_HANDLE;  // 渲染完成信号
+
+    // 深度模板缓冲（与 SwapChain 同尺寸）
+    VkImage         m_DepthImage        = VK_NULL_HANDLE;
+    VkImageView     m_DepthImageView    = VK_NULL_HANDLE;
+    VkDeviceMemory  m_DepthImageMemory  = VK_NULL_HANDLE;
 
     std::vector<VkImage>     m_Images;
     std::vector<VkImageView> m_ImageViews;
@@ -70,8 +81,10 @@ public:
     void BeginRenderPass(u32 colorCount, Format colorFmt, Format depthFmt,
                          const ClearValue* clear) override;
     void EndRenderPass() override;
+    void SetSwapChain(IRHISwapChain* swapchain) override;
     void SetPipeline(IRHIPipelineState* pso) override;
     void SetVertexBuffer(IRHIBuffer* buffer, u32 binding) override;
+    void SetIndexBuffer(IRHIBuffer* buffer, u32 offset) override;
     void SetViewport(const Viewport& vp) override;
     void SetScissor(const ScissorRect& sc) override;
     void Draw(u32 vertexCount, u32 instanceCount, u32 firstVertex, u32 firstInstance) override;
@@ -86,6 +99,12 @@ public:
     }
     void SetCurrentImageIndex(u32 index) { m_CurrentImageIndex = index; }
 
+    // 设置 Submit 时的等待/信号 Semaphore
+    void SetSyncSemaphores(VkSemaphore wait, VkSemaphore signal) {
+        m_WaitSemaphore   = wait;
+        m_SignalSemaphore = signal;
+    }
+
     VkCommandBuffer GetHandle() const { return m_CmdBuffer; }
 
 private:
@@ -97,10 +116,21 @@ private:
     VkCommandBuffer  m_CmdBuffer   = VK_NULL_HANDLE;
     VkFence          m_Fence       = VK_NULL_HANDLE;
 
+    // 关联的 SwapChain（自动管理 Framebuffer + 同步 + 图像索引）
+    VulkanSwapChain* m_pSwapChain = nullptr;
+
+    // 同步原语
+    VkSemaphore      m_WaitSemaphore   = VK_NULL_HANDLE;
+    VkSemaphore      m_SignalSemaphore = VK_NULL_HANDLE;
+
     VkPipeline       m_CurrentPipeline = VK_NULL_HANDLE;
     VkPipelineLayout m_CurrentLayout   = VK_NULL_HANDLE;
     VkRenderPass     m_CurrentRenderPass = VK_NULL_HANDLE;
     VkBuffer         m_CurrentVB       = VK_NULL_HANDLE;
+    u32              m_VBBinding       = 0;
+    VkBuffer         m_CurrentIB       = VK_NULL_HANDLE;
+    VkIndexType      m_CurrentIndexType = VK_INDEX_TYPE_UINT32;
+    u32              m_IBOffset         = 0;
 
     std::vector<VkImageView> m_SwapchainViews;
     VkExtent2D               m_SwapchainExtent{};
