@@ -304,18 +304,31 @@ void VulkanDevice::CreateLogicalDevice() {
 
     std::vector<const char*> deviceExtensions = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+        VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,  // Bindless 资源
     };
 
-    // 启用 bufferDeviceAddress（缓冲设备地址查询需要）
+    // Bindless: descriptor indexing 特性
+    VkPhysicalDeviceDescriptorIndexingFeatures descIndexing{};
+    descIndexing.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+    descIndexing.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+    descIndexing.runtimeDescriptorArray = VK_TRUE;
+    descIndexing.descriptorBindingVariableDescriptorCount = VK_TRUE;
+    descIndexing.descriptorBindingPartiallyBound = VK_TRUE;
+
+    // 启用 bufferDeviceAddress
     VkPhysicalDeviceBufferDeviceAddressFeatures addrFeature{};
     addrFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
     addrFeature.bufferDeviceAddress = VK_TRUE;
+    addrFeature.pNext = nullptr;
+
+    // pNext 链: descIndexing → addrFeature
+    descIndexing.pNext = &addrFeature;
 
     VkPhysicalDeviceFeatures features{};
 
     VkDeviceCreateInfo deviceInfo{};
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    deviceInfo.pNext = &addrFeature;
+    deviceInfo.pNext = &descIndexing;
     deviceInfo.queueCreateInfoCount = 1;
     deviceInfo.pQueueCreateInfos = &queueInfo;
     deviceInfo.enabledExtensionCount = static_cast<u32>(deviceExtensions.size());

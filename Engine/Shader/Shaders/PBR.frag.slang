@@ -20,8 +20,12 @@ struct GPULight {
     float2 _pad;
 };
 
-// Descriptor Set: set=0, binding=1 — 光照数组
+// Descriptor Set: set=0
+//   binding=1: 光照数组
+//   binding=4: Bindless 纹理数组（CombinedImageSampler[]）
 [[vk::binding(1, 0)]] StructuredBuffer<GPULight> u_Lights;
+[[vk::binding(4, 0)]] Texture2D u_Textures[];
+[[vk::binding(4, 0)]] SamplerState u_Samplers[];
 
 // Push constants
 [[vk::push_constant]] cbuffer PushConstants {
@@ -36,7 +40,8 @@ struct GPULight {
     float4   cameraPosition;
     uint     lightCount;
     uint     materialFlags;
-    uint     _pad[14];
+    uint     materialID;            // bindless 纹理索引
+    uint     _pad[13];
 };
 
 float3 ACESFilm(float3 x) {

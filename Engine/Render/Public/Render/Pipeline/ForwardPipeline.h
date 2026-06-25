@@ -61,7 +61,7 @@ private:
     rhi::IRHIDevice* m_Device = nullptr;
     std::unique_ptr<rhi::IRHIPipelineState> m_PBR_PSO;
 
-    // Descriptor Set + Storage Buffer（多光源）
+    // Descriptor Set + Storage Buffer（多光源 + Bindless 纹理）
     rhi::DescriptorSetLayoutHandle m_LightDescLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_LightDescSet    = rhi::kInvalidSet;
     std::unique_ptr<rhi::IRHIBuffer> m_LightBuffer;

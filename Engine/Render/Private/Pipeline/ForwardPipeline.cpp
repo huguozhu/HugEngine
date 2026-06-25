@@ -34,12 +34,14 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         { 2, 0, rhi::VertexFormat::Float2, offsetof(he::StaticVertex, uv) },
     };
 
-    // --- 3. 先创建 DescriptorSetLayout（PSO 创建时需要）---
-    rhi::DescriptorSetLayoutDesc lightLayoutDesc;
-    lightLayoutDesc.bindings = {
+    // --- 3. 创建 DescriptorSetLayout ---
+    // 组合 layout: binding=1 (Light SSBO) + binding=4 (Bindless Texture2D[])
+    rhi::DescriptorSetLayoutDesc combinedLayoutDesc;
+    combinedLayoutDesc.bindings = {
         { 1, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Pixel },
+        { 4, rhi::DescriptorType::CombinedImageSampler, 1024, rhi::ShaderStage::Pixel, true },
     };
-    m_LightDescLayout = device->CreateDescriptorSetLayout(lightLayoutDesc);
+    m_LightDescLayout = device->CreateDescriptorSetLayout(combinedLayoutDesc);
 
     // --- 4. Push constant + PSO ---
     rhi::PushConstantRange pcRange;

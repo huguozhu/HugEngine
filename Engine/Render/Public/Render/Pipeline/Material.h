@@ -56,7 +56,8 @@ struct alignas(16) PushConstantData {
     float4   cameraPosition;        // [176..192]
     u32      lightCount;            // [192]
     u32      materialFlags;         // [196]
-    u32      _pad[14];              // [200..256]
+    u32      materialID;            // [200] bindless 纹理索引
+    u32      _pad[13];              // [204..256]
 };
 
 static_assert(sizeof(PushConstantData) == 256,

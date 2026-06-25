@@ -19,7 +19,8 @@ layout(location = 2) in float2 inUV;
     float4   cameraPosition;        // [176..192]
     uint     lightCount;            // [192]
     uint     materialFlags;         // [196]
-    uint     _pad[14];              // [200..256]
+    uint     materialID;            // [200] bindless index
+    uint     _pad[13];              // [204..256]
 };
 
 struct VSOutput {
