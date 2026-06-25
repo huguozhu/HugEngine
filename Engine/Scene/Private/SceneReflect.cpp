@@ -9,6 +9,7 @@
 #include "Scene/MeshComponent.h"
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
+#include "Scene/LightComponent.h"
 
 namespace he {
 
@@ -30,6 +31,19 @@ HE_END_REGISTER()
 
 // --- SphereComponent 注册 ---
 HE_BEGIN_REGISTER(he::SphereComponent)
+HE_END_REGISTER()
+
+// --- LightComponent + 子类注册 ---
+HE_BEGIN_REGISTER(he::LightComponent)
+HE_END_REGISTER()
+
+HE_BEGIN_REGISTER(he::DirectionalLight)
+HE_END_REGISTER()
+
+HE_BEGIN_REGISTER(he::PointLight)
+HE_END_REGISTER()
+
+HE_BEGIN_REGISTER(he::SpotLight)
 HE_END_REGISTER()
 
 } // namespace he

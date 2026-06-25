@@ -12,19 +12,21 @@ layout(location = 2) in float2 inUV;
 
 // --- Push constants（与 CPU 端 PushConstantData 对齐）---
 [[vk::push_constant]] cbuffer PushConstants {
-    float4x4 modelMatrix;       // [0..64]
-    float4x4 viewProjMatrix;    // [64..128]
-    float4   baseColorFactor;   // [128..144]
-    float    metallicFactor;    // [144]
-    float    roughnessFactor;   // [148]
-    float    aoFactor;          // [152]
-    float    alphaCutoff;       // [156]
-    float4   emissiveFactor;    // [160..176]
-    float4   cameraPosition;    // [176..192]
-    float4   lightDirection;    // [192..208]
-    float4   lightColor;        // [208..224]
-    uint     materialFlags;     // [224]
-    uint     _pad[3];           // [228..240]
+    float4x4 modelMatrix;           // [0..64]
+    float4x4 viewProjMatrix;        // [64..128]
+    float4   baseColorFactor;       // [128..144]
+    float    metallicFactor;        // [144]
+    float    roughnessFactor;       // [148]
+    float    aoFactor;              // [152]
+    float    alphaCutoff;           // [156]
+    float4   emissiveFactor;        // [160..176]
+    float4   cameraPosition;        // [176..192]
+    uint     lightCount;            // [192]
+    uint     materialFlags;         // [196]
+    float2   lightConeAngles;       // [200] (内锥角, 外锥角, Spot 专用)
+    float4   lightColorIntensity;   // [208..224]
+    float4   lightDirectionType;    // [224..240]   xyz=方向, w=类型(0=Dir,1=Point,2=Spot)
+    float4   lightPositionRange;    // [240..256]   xyz=位置, w=范围
 };
 
 // --- 顶点输出结构体 ---

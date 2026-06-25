@@ -126,14 +126,22 @@ int main() {
         float3(0.0f, 0.2f, -1.5f), float3(0.6f),
         float4(0.95f, 0.93f, 0.88f, 1.0f), 0.0f, 0.35f, true);
 
+    // --- 创建光照 ---
+    {
+        Entity lightEntity = world.CreateEntity("DirectionalLight");
+        world.AddComponent<TransformComponent>(lightEntity);
+        auto* dl = world.AddComponent<DirectionalLight>(lightEntity);
+        dl->direction = float3(0.5f, -1.0f, 1.0f);
+        dl->color     = float3(1.0f, 0.95f, 0.85f);
+        dl->intensity = 5.0f;
+        sceneGraph.SetParent(lightEntity, Entity{kInvalidEntity});
+    }
+
     HE_CORE_INFO("Scene created: {} entities", world.GetEntityCount());
 
     // --- 5. 初始化前向管线 ---
     render::ForwardPipeline pipeline;
     pipeline.Initialize(device.get());
-
-    // 默认光照（方向光）
-    render::PushConstantData lighting = render::ForwardPipeline::MakeDefaultLighting();
 
     // --- 6. 创建命令列表 ---
     auto cmdList = device->CreateCommandList();
@@ -258,13 +266,8 @@ int main() {
         pipeline.BeginFrame(cmdList.get(),
             swapchain->GetWidth(), swapchain->GetHeight());
 
-        // 设置光照（随时间旋转）
-        float angle = static_cast<float>(frameIndex) * 0.005f;
-        lighting.lightDirection = float4(
-            sin(angle) * 0.5f, -1.0f, cos(angle) * 0.5f, 5.0f);
-
-        // 渲染场景（设置 push constants + 绘制每个网格）
-        pipeline.RenderScene(cmdList.get(), world, sceneGraph, camera, lighting);
+        // 渲染场景
+        pipeline.RenderScene(cmdList.get(), world, sceneGraph, camera);
 
         cmdList->EndRenderPass();
         cmdList->End();
@@ -283,10 +286,9 @@ int main() {
             char buf[256];
             snprintf(buf, sizeof(buf),
                 "HugEngine — PBR | FPS: %.0f | Pos: (%.1f, %.1f, %.1f) "
-                "| Metal=%.2f Rough=%.2f | 右键拖拽旋转 WASD移动",
+                "| 右键拖拽旋转 WASD移动",
                 fps,
-                camera.position.x, camera.position.y, camera.position.z,
-                lighting.metallicFactor, lighting.roughnessFactor);
+                camera.position.x, camera.position.y, camera.position.z);
             glfwSetWindowTitle(glfwWin, buf);
             titleTimer = 0.0;
             titleFrame = 0;

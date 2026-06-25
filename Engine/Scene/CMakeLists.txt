@@ -10,6 +10,7 @@ target_sources(HugEngineScene PRIVATE
     Private/SceneReflect.cpp
     Private/CubeComponent.cpp
     Private/SphereComponent.cpp
+    Private/LightComponent.cpp
 )
 
 target_include_directories(HugEngineScene
