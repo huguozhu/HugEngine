@@ -14,6 +14,7 @@
 #include "Editor/EditorContext.h"
 #include "Editor/Command.h"
 #include "imgui.h"
+#include "Editor/SceneSerializer.h"
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -163,18 +164,17 @@ void EditorApp::MainLoop() {
         m_CmdList->Begin();
         m_CmdList->BeginRenderPass(1, rhi::Format::RGBA8_UNORM);
 
+        // 每帧通用操作：设置视口尺寸（提升至分支外，避免重复调用）
+        m_Pipeline->BeginFrame(m_CmdList.get(),
+            m_SwapChain->GetWidth(), m_SwapChain->GetHeight());
+        m_Viewport->SetViewportSize(m_SwapChain->GetWidth(), m_SwapChain->GetHeight());
+
         if (m_EditorCtx->IsPlaying()) {
             // Play 模式：更新世界 + 渲染游戏视图
             m_World->Update(dt);
-            m_Pipeline->BeginFrame(m_CmdList.get(),
-                m_SwapChain->GetWidth(), m_SwapChain->GetHeight());
-            m_Viewport->SetViewportSize(m_SwapChain->GetWidth(), m_SwapChain->GetHeight());
             m_Viewport->RenderGameView(m_CmdList.get());
         } else {
             // Edit 模式：场景渲染由 ViewportPanel 管理
-            m_Pipeline->BeginFrame(m_CmdList.get(),
-                m_SwapChain->GetWidth(), m_SwapChain->GetHeight());
-            m_Viewport->SetViewportSize(m_SwapChain->GetWidth(), m_SwapChain->GetHeight());
             m_Viewport->Render(m_CmdList.get());
         }
 
@@ -184,9 +184,15 @@ void EditorApp::MainLoop() {
         // --- �˵��� ---
         if (ImGui::BeginMainMenuBar()) {
             if (ImGui::BeginMenu("File")) {
-                ImGui::MenuItem("New Scene", nullptr);
-                ImGui::MenuItem("Open...", nullptr);
-                ImGui::MenuItem("Save", nullptr);
+                if (ImGui::MenuItem("New Scene")) {
+                    // 清空场景（重置 World 和 SceneGraph）
+                }
+                if (ImGui::MenuItem("Open Scene...")) {
+                    editor::SceneSerializer::Load("Content/Scenes/scene.hescene", *m_World, *m_SceneGraph);
+                }
+                if (ImGui::MenuItem("Save Scene As...")) {
+                    editor::SceneSerializer::Save("Content/Scenes/scene.hescene", *m_World, *m_SceneGraph);
+                }
                 ImGui::Separator();
                 ImGui::MenuItem("Exit", nullptr);
                 ImGui::EndMenu();
