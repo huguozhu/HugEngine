@@ -159,17 +159,24 @@ void EditorApp::MainLoop() {
         if (!m_SwapChain->AcquireNextImage())
             continue;
 
-        // ��Ⱦ
+        // --- 帧逻辑分叉：Play 模式用游戏渲染路径，Edit 模式用编辑器渲染路径 ---
         m_CmdList->Begin();
         m_CmdList->BeginRenderPass(1, rhi::Format::RGBA8_UNORM);
 
-        m_Pipeline->BeginFrame(m_CmdList.get(),
-            m_SwapChain->GetWidth(), m_SwapChain->GetHeight());
-
-        // ������Ⱦ���� ViewportPanel ������
-        // 更新视口相机宽高比（�?SwapChain 尺寸获取，不依赖 ImGui 上下文）
-        m_Viewport->SetViewportSize(m_SwapChain->GetWidth(), m_SwapChain->GetHeight());
-        m_Viewport->Render(m_CmdList.get());
+        if (m_EditorCtx->IsPlaying()) {
+            // Play 模式：更新世界 + 渲染游戏视图
+            m_World->Update(dt);
+            m_Pipeline->BeginFrame(m_CmdList.get(),
+                m_SwapChain->GetWidth(), m_SwapChain->GetHeight());
+            m_Viewport->SetViewportSize(m_SwapChain->GetWidth(), m_SwapChain->GetHeight());
+            m_Viewport->RenderGameView(m_CmdList.get());
+        } else {
+            // Edit 模式：场景渲染由 ViewportPanel 管理
+            m_Pipeline->BeginFrame(m_CmdList.get(),
+                m_SwapChain->GetWidth(), m_SwapChain->GetHeight());
+            m_Viewport->SetViewportSize(m_SwapChain->GetWidth(), m_SwapChain->GetHeight());
+            m_Viewport->Render(m_CmdList.get());
+        }
 
         // UI
         m_ImGui->BeginFrame();
@@ -199,50 +206,71 @@ void EditorApp::MainLoop() {
                 ImGui::MenuItem("Content Browser", nullptr, &m_ContentBrowser->m_Visible);
                 ImGui::EndMenu();
             }
+
+            // Play/Stop 按钮（菜单栏右侧）
+            ImGui::SameLine(ImGui::GetWindowWidth() - 100);
+            if (m_EditorCtx->IsPlaying()) {
+                if (ImGui::Button("Stop")) m_EditorCtx->Stop();
+            } else {
+                if (ImGui::Button("Play")) m_EditorCtx->Play();
+            }
             ImGui::EndMainMenuBar();
         }
 
-        // 主面板窗口（填充菜单栏下方全部空间，无标题栏/无边框）
-        ImGuiViewport* mainVP = ImGui::GetMainViewport();
-        ImGui::SetNextWindowPos(mainVP->WorkPos);
-        ImGui::SetNextWindowSize(mainVP->WorkSize);
-        ImGui::Begin("EditorMain", nullptr,
-            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus |
-            ImGuiWindowFlags_NoSavedSettings);
+        // --- Play 模式覆盖层 / Edit 模式编辑器 UI ---
+        if (m_EditorCtx->IsPlaying()) {
+            // 游戏覆盖层：FPS + 退出提示
+            ImGui::SetNextWindowBgAlpha(0.3f);
+            ImGui::Begin("GameOverlay", nullptr,
+                ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize);
+            ImGui::Text("FPS: %.0f | Press ESC to Stop", 1.0f / dt);
+            ImGui::End();
+            // ESC 键退出 Play 模式
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape))
+                m_EditorCtx->Stop();
+        } else {
+            // 主面板窗口（填充菜单栏下方全部空间，无标题栏/无边框）
+            ImGuiViewport* mainVP = ImGui::GetMainViewport();
+            ImGui::SetNextWindowPos(mainVP->WorkPos);
+            ImGui::SetNextWindowSize(mainVP->WorkSize);
+            ImGui::Begin("EditorMain", nullptr,
+                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus |
+                ImGuiWindowFlags_NoSavedSettings);
 
-        // 整体布局：Viewport (�? | Details (�?
-        ImVec2 avail = ImGui::GetContentRegionAvail();
-        float detailsWidth = 300.0f;
-        float viewportWidth = avail.x - detailsWidth - 4.0f;
+            // 整体布局：Viewport (左) | Details (右)
+            ImVec2 avail = ImGui::GetContentRegionAvail();
+            float detailsWidth = 300.0f;
+            float viewportWidth = avail.x - detailsWidth - 4.0f;
 
-        // Viewport
-        ImGui::BeginChild("ViewportRegion", {viewportWidth, avail.y * 0.75f}, true);
-        // 3D 场景�?ViewportPanel::Render 渲染�?BackBuffer
-        // Phase 3-2: 改为渲染�?off-screen texture �?ImGui::Image
-        ImGui::EndChild();
+            // Viewport
+            ImGui::BeginChild("ViewportRegion", {viewportWidth, avail.y * 0.75f}, true);
+            // 3D 场景由 ViewportPanel::Render 渲染到 BackBuffer
+            // Phase 3-2: 改为渲染到 off-screen texture + ImGui::Image
+            ImGui::EndChild();
 
-        ImGui::SameLine();
+            ImGui::SameLine();
 
-        // Details
-        ImGui::BeginChild("DetailsRegion", {detailsWidth, avail.y * 0.75f}, true);
-        m_Details->Render();
-        ImGui::EndChild();
+            // Details
+            ImGui::BeginChild("DetailsRegion", {detailsWidth, avail.y * 0.75f}, true);
+            m_Details->Render();
+            ImGui::EndChild();
 
-        // Outliner（底部区域）
-        ImGui::BeginChild("OutlinerRegion", {avail.x, avail.y * 0.25f - 4.0f}, true);
-        m_Outliner->Render();
-        ImGui::EndChild();
+            // Outliner（底部区域）
+            ImGui::BeginChild("OutlinerRegion", {avail.x, avail.y * 0.25f - 4.0f}, true);
+            m_Outliner->Render();
+            ImGui::EndChild();
 
-        // 状态栏
-        ImGui::Text("Selected: %d | FPS: %.0f",
-            (int)m_EditorCtx->GetSelection().size(),
-            1.0f / (dt > 0 ? dt : 0.016f));
+            // 状态栏
+            ImGui::Text("Selected: %d | FPS: %.0f",
+                (int)m_EditorCtx->GetSelection().size(),
+                1.0f / (dt > 0 ? dt : 0.016f));
 
-        ImGui::End(); // EditorMain
+            ImGui::End(); // EditorMain
 
-        // 浮动面板（自持窗口，不嵌入 EditorMain 布局）
-        m_ContentBrowser->Render();
+            // 浮动面板（自持窗口，不嵌入 EditorMain 布局）
+            m_ContentBrowser->Render();
+        }
 
         m_ImGui->EndFrame(m_CmdList.get());
 

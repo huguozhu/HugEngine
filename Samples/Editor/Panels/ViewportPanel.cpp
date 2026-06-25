@@ -52,6 +52,15 @@ void ViewportPanel::Render(rhi::IRHICommandList* cmdList) {
     // Phase 3-2: ��Ϊ��Ⱦ�� off-screen texture �� ImGui::Image
 }
 
+void ViewportPanel::RenderGameView(rhi::IRHICommandList* cmdList) {
+    if (!m_Ctx || !m_Pipeline) return;
+    // 简化：使用编辑器相机，后续扩展为场景 Camera
+    m_Pipeline->RenderScene(cmdList,
+        *m_Ctx->GetWorld(),
+        *m_Ctx->GetSceneGraph(),
+        m_Camera);
+}
+
 void ViewportPanel::UpdateCamera(float deltaTime) {
     if (!m_Window) return;
 

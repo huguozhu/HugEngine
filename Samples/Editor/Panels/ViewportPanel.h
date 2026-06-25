@@ -39,6 +39,9 @@ public:
     /// 渲染视口（每帧调用，在 RenderPass 内部）
     void Render(he::rhi::IRHICommandList* cmdList);
 
+    /// 游戏模式渲染（使用编辑器相机，后续扩展为场景 Camera）
+    void RenderGameView(he::rhi::IRHICommandList* cmdList);
+
     /// 更新视口尺寸（由 EditorApp 在 SwapChain resize 时调用）
     void SetViewportSize(u32 width, u32 height) {
         m_Camera.SetAspectRatio(static_cast<f32>(width), static_cast<f32>(height));
