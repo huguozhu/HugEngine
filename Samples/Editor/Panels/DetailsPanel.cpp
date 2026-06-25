@@ -191,32 +191,75 @@ void DetailsPanel::RenderMesh(World* world, Entity entity) {
         ImGui::Text("Emissive Tex: %s", mesh->emissiveTexture.c_str());
     if (!mesh->occlusionTexture.empty())
         ImGui::Text("Occlusion Tex: %s", mesh->occlusionTexture.c_str());
-}
 
-void DetailsPanel::RenderLight(World* world, Entity entity) {
-    if (!ImGui::CollapsingHeader("Light", ImGuiTreeNodeFlags_DefaultOpen))
-        return;
-
-    auto* light = world->GetComponent<DirectionalLight>(entity);
-    if (!light) return;
-    auto* cmdHistory = m_Ctx->GetCommandHistory();
-
-    // 方向
-    float3 oldDir = light->direction;
-    float dir[3] = { oldDir.x, oldDir.y, oldDir.z };
-    if (ImGui::DragFloat3("Direction", dir, 0.05f, -1.0f, 1.0f)) {
-        light->direction = glm::normalize(float3(dir[0], dir[1], dir[2]));
+    // Alpha Mode（Opaque / Mask / Blend）
+    u8 oldAlphaMode = mesh->alphaMode;
+    const char* alphaItems[] = {"Opaque", "Mask", "Blend"};
+    int alphaIdx = (int)mesh->alphaMode;
+    if (ImGui::Combo("Alpha Mode", &alphaIdx, alphaItems, 3)) {
+        mesh->alphaMode = (u8)alphaIdx;
     }
-    if (ImGui::IsItemDeactivatedAfterEdit()) {
-        float3 newDir = glm::normalize(float3(dir[0], dir[1], dir[2]));
-        if (glm::any(glm::notEqual(oldDir, newDir))) {
+    if (ImGui::IsItemDeactivatedAfterEdit() && oldAlphaMode != mesh->alphaMode) {
+        cmdHistory->Execute(std::make_unique<PropertyChangeCommand>(
+            "Change Alpha Mode",
+            [mesh, oldAlphaMode]() { mesh->alphaMode = oldAlphaMode; },
+            [mesh, a = mesh->alphaMode]() { mesh->alphaMode = a; }
+        ));
+    }
+
+    // Alpha Cutoff（仅 Mask 模式可用）
+    if (mesh->alphaMode == 1) {
+        float oldCutoff = mesh->alphaCutoff;
+        if (ImGui::DragFloat("Alpha Cutoff", &mesh->alphaCutoff, 0.01f, 0.0f, 1.0f)) {}
+        if (ImGui::IsItemDeactivatedAfterEdit() && oldCutoff != mesh->alphaCutoff) {
+            float newCutoff = mesh->alphaCutoff;
             cmdHistory->Execute(std::make_unique<PropertyChangeCommand>(
-                "Change Light Direction",
-                [light, oldDir]() { light->direction = oldDir; },
-                [light, newDir]() { light->direction = newDir; }
+                "Change Alpha Cutoff",
+                [mesh, oldCutoff]() { mesh->alphaCutoff = oldCutoff; },
+                [mesh, newCutoff]() { mesh->alphaCutoff = newCutoff; }
             ));
         }
     }
+
+    // Double Sided
+    bool oldDS = mesh->doubleSided;
+    if (ImGui::Checkbox("Double Sided", &mesh->doubleSided)) {}
+    if (ImGui::IsItemDeactivatedAfterEdit() && oldDS != mesh->doubleSided) {
+        cmdHistory->Execute(std::make_unique<PropertyChangeCommand>(
+            "Change Double Sided",
+            [mesh, oldDS]() { mesh->doubleSided = oldDS; },
+            [mesh, d = mesh->doubleSided]() { mesh->doubleSided = d; }
+        ));
+    }
+
+    // Unlit
+    bool oldUnlit = mesh->unlit;
+    if (ImGui::Checkbox("Unlit", &mesh->unlit)) {}
+    if (ImGui::IsItemDeactivatedAfterEdit() && oldUnlit != mesh->unlit) {
+        cmdHistory->Execute(std::make_unique<PropertyChangeCommand>(
+            "Change Unlit",
+            [mesh, oldUnlit]() { mesh->unlit = oldUnlit; },
+            [mesh, u = mesh->unlit]() { mesh->unlit = u; }
+        ));
+    }
+
+    // AO Strength
+    float oldAO = mesh->aoFactor;
+    if (ImGui::DragFloat("AO Strength", &mesh->aoFactor, 0.01f, 0.0f, 1.0f)) {}
+    if (ImGui::IsItemDeactivatedAfterEdit() && oldAO != mesh->aoFactor) {
+        float newAO = mesh->aoFactor;
+        cmdHistory->Execute(std::make_unique<PropertyChangeCommand>(
+            "Change AO Strength",
+            [mesh, oldAO]() { mesh->aoFactor = oldAO; },
+            [mesh, newAO]() { mesh->aoFactor = newAO; }
+        ));
+    }
+}
+
+void DetailsPanel::RenderLightBase(World* world, Entity entity) {
+    auto* light = world->GetComponent<LightComponent>(entity);
+    if (!light) return;
+    auto* cmdHistory = m_Ctx->GetCommandHistory();
 
     // 颜色
     float3 oldColor = light->color;
