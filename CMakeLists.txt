@@ -37,7 +37,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 if(MSVC)
-    add_compile_options(/Zc:preprocessor /bigobj /MP /utf-8 /Zc:noScanModuleDependencies)
+    add_compile_options(/Zc:preprocessor /bigobj /MP /utf-8 )
     add_compile_definitions(NOMINMAX)
 endif()
 
@@ -71,4 +71,7 @@ endforeach()
 # Samples
 if(TARGET Triangle)
     set_target_properties(Triangle PROPERTIES FOLDER "Samples")
+endif()
+if(TARGET Sponza)
+    set_target_properties(Sponza PROPERTIES FOLDER "Samples")
 endif()

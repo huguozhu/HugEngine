@@ -610,13 +610,25 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
 
     // 根据 desc.vertexLayout 构建 Vulkan 属性列表
     std::vector<VkVertexInputAttributeDescription> vkAttrs;
-    for (auto& attr : desc.vertexLayout.attributes) {
-        VkVertexInputAttributeDescription va{};
-        va.location = attr.location;
-        va.binding  = attr.binding;
-        va.format   = toVkVertexFormat(attr.format);
-        va.offset   = attr.offset;
-        vkAttrs.push_back(va);
+    if (desc.vertexLayout.attributes.empty()) {
+        // 回退：未指定属性时，根据 stride 推导默认格式
+        VkVertexInputAttributeDescription defaultAttr{};
+        defaultAttr.location = 0;
+        defaultAttr.binding  = 0;
+        defaultAttr.offset   = 0;
+        if (desc.vertexLayout.stride >= 32) defaultAttr.format = VK_FORMAT_R32G32B32_SFLOAT;
+        else if (desc.vertexLayout.stride >= 12) defaultAttr.format = VK_FORMAT_R32G32B32_SFLOAT;
+        else defaultAttr.format = VK_FORMAT_R32G32_SFLOAT;  // stride=8: vec2
+        vkAttrs.push_back(defaultAttr);
+    } else {
+        for (auto& attr : desc.vertexLayout.attributes) {
+            VkVertexInputAttributeDescription va{};
+            va.location = attr.location;
+            va.binding  = attr.binding;
+            va.format   = toVkVertexFormat(attr.format);
+            va.offset   = attr.offset;
+            vkAttrs.push_back(va);
+        }
     }
 
     VkPipelineVertexInputStateCreateInfo vertexInput{};
