@@ -22,6 +22,7 @@ using namespace he;
 
 // 前向声明面板（后续 Task 中实现）
 #include "Panels/OutlinerPanel.h"
+#include "Panels/DetailsPanel.h"
 
 namespace he::editor {
 
@@ -30,12 +31,6 @@ class ViewportPanel {
 public:
     void Initialize(EditorContext*) {}
     void Render(rhi::IRHICommandList*) {}
-};
-
-class DetailsPanel {
-public:
-    void Initialize(EditorContext*) {}
-    void Render() {}
 };
 
 } // namespace he::editor
@@ -214,7 +209,7 @@ void EditorApp::MainLoop() {
 
         // Details
         ImGui::BeginChild("DetailsRegion", {detailsWidth, avail.y * 0.75f}, true);
-        ImGui::Text("Details (placeholder)");
+        m_Details->Render();
         ImGui::EndChild();
 
         // Outliner（底部区域）
