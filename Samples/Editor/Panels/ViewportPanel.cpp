@@ -5,6 +5,7 @@
 #include "Render/Pipeline/ForwardPipeline.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
+#include "imgui.h"
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -18,13 +19,13 @@ void ViewportPanel::Initialize(EditorContext* ctx,
     m_Pipeline = pipeline;
     m_Window   = window;
 
-    // 初始化编辑器相机
+    // ��ʼ���༭�����
     m_Camera.position = float3(0.0f, 2.0f, 8.0f);
     m_Camera.forward  = float3(0.0f, -0.2f, -1.0f);
     m_Camera.up       = float3(0.0f, 1.0f, 0.0f);
     m_Camera.SetAspectRatio(16.0f, 9.0f);
 
-    // 从初始朝向反算 yaw/pitch
+    // �ӳ�ʼ������ yaw/pitch
     m_Yaw   = std::atan2(m_Camera.forward.x, -m_Camera.forward.z);
     m_Pitch = std::asin(m_Camera.forward.y);
 }
@@ -32,32 +33,36 @@ void ViewportPanel::Initialize(EditorContext* ctx,
 void ViewportPanel::Render(rhi::IRHICommandList* cmdList) {
     if (!m_Ctx || !m_Pipeline) return;
 
-    // 计算帧时间
+    // ����֡ʱ��
     static f64 lastTime = glfwGetTime();
     f64 now = glfwGetTime();
     float dt = static_cast<float>(now - lastTime);
     lastTime = now;
 
-    // 更新编辑器相机
+    // ��ȡ�ӿ�ʵ�ʳߴ粢����������߱ȣ�ȷ������ʼ����ȷ�����ӿ�����
+    auto viewportSize = ImGui::GetContentRegionAvail();
+    m_Camera.SetAspectRatio(viewportSize.x, viewportSize.y);
+
+    // ���±༭�����
     UpdateCamera(dt);
 
-    // 渲染场景到视口区域
+    // ��Ⱦ�������ӿ�����
     m_Pipeline->RenderScene(cmdList,
         *m_Ctx->GetWorld(),
         *m_Ctx->GetSceneGraph(),
         m_Camera);
 
-    // MVP 阶段：直接使用 ForwardPipeline 渲染到 BackBuffer
-    // Phase 3-2: 改为渲染到 off-screen texture → ImGui::Image
+    // MVP �׶Σ�ֱ��ʹ�� ForwardPipeline ��Ⱦ�� BackBuffer
+    // Phase 3-2: ��Ϊ��Ⱦ�� off-screen texture �� ImGui::Image
 }
 
 void ViewportPanel::UpdateCamera(float deltaTime) {
     if (!m_Window) return;
 
-    // --- 焦点检查：仅当视口区域被 hovered/focused 时才捕获输入 ---
-    // MVP 简化：始终捕获（后续改为焦点敏感）
+    // --- �����飺�����ӿ����� hovered/focused ʱ�Ų������� ---
+    // MVP �򻯣�ʼ�ղ��񣨺�����Ϊ�������У�
 
-    // --- 鼠标旋转（右键拖拽）---
+    // --- �����ת���Ҽ���ק��---
     bool mouseDown = glfwGetMouseButton(m_Window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
 
     if (mouseDown && !m_RightMouseDown) {
@@ -80,7 +85,7 @@ void ViewportPanel::UpdateCamera(float deltaTime) {
         m_Pitch  = glm::clamp(m_Pitch, -1.5f, 1.5f);
     }
 
-    // --- WASD 移动 ---
+    // --- WASD �ƶ� ---
     float speed = m_MoveSpeed * deltaTime;
     if (glfwGetKey(m_Window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
         speed *= 3.0f;
@@ -98,7 +103,7 @@ void ViewportPanel::UpdateCamera(float deltaTime) {
     if (glm::dot(move, move) > 0.0001f)
         m_Camera.position += glm::normalize(move) * speed;
 
-    // 更新朝向
+    // ���³���
     float3 forward;
     forward.x = cos(m_Pitch) * sin(m_Yaw);
     forward.y = sin(m_Pitch);
