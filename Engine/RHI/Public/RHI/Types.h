@@ -178,9 +178,9 @@ enum class DescriptorType : u8 {
 struct DescriptorSetLayoutBinding {
     u32             binding     = 0;        // binding 编号
     DescriptorType  type        = DescriptorType::UniformBuffer;
-    u32             count       = 1;        // 数组元素数（bindless 时可能很大）
-    ShaderStage     stageFlags  = ShaderStage::Vertex;  // 可见的着色器阶段
-    bool            bindless    = false;    // 是否为无绑定数组（变长 descriptor count）
+    u32             count       = 1;        // 数组元素数
+    u8              stageMask   = 1;        // VK_SHADER_STAGE_* 位掩码 (1=Vertex, 16=Fragment, 17=Both)
+    bool            bindless    = false;    // 是否为无绑定数组
 };
 
 struct DescriptorSetLayoutDesc {

@@ -23,15 +23,24 @@ static u32 FindMemoryType(VkPhysicalDevice physical, u32 typeFilter, VkMemoryPro
     return 0;
 }
 
+// BufferUsage 位掩码 → VkBufferUsageFlags 映射
+static VkBufferUsageFlags ToVkBufferUsage(BufferUsage usage) {
+    VkBufferUsageFlags flags = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    if (u32(usage) & u32(BufferUsage::Vertex))   flags |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    if (u32(usage) & u32(BufferUsage::Index))    flags |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    if (u32(usage) & u32(BufferUsage::Uniform))  flags |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    if (u32(usage) & u32(BufferUsage::Storage))  flags |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    if (u32(usage) & u32(BufferUsage::Indirect)) flags |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+    return flags;
+}
+
 VulkanBuffer::VulkanBuffer(VkDevice device, VkPhysicalDevice physical, const BufferDesc& desc)
     : m_Device(device), m_Size(desc.size)
 {
     VkBufferCreateInfo bufferInfo{};
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufferInfo.size  = desc.size;
-    bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
-                       VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                       VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    bufferInfo.usage = ToVkBufferUsage(desc.usage);
 
     VkResult result = vkCreateBuffer(device, &bufferInfo, nullptr, &m_Buffer);
     HE_ASSERT(result == VK_SUCCESS, "Failed to create buffer");

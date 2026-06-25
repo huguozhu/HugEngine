@@ -34,11 +34,8 @@ struct GPULight {
 // Descriptor Sets (set=0):
 //   binding=1: GPULight[]
 //   binding=2: GPUObjectData[]
-//   binding=4: Texture2D[] + SamplerState[]
 [[vk::binding(1, 0)]] StructuredBuffer<GPULight> u_Lights;
 [[vk::binding(2, 0)]] StructuredBuffer<GPUObjectData> u_Objects;
-[[vk::binding(4, 0)]] Texture2D u_Textures[];
-[[vk::binding(4, 0)]] SamplerState u_Samplers[];
 
 [[vk::push_constant]] cbuffer FrameConstants {
     float4x4 viewProjMatrix;

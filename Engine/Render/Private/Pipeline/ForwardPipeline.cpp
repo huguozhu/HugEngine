@@ -35,12 +35,13 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     };
 
     // --- 3. 创建 DescriptorSetLayout ---
-    // 组合 layout: binding=1 (Light SSBO) + binding=2 (Object SSBO) + binding=4 (Bindless)
+    // Descriptor set layout: 只包含 shader 实际使用的 binding
+    // binding=1 (Light SSBO, Fragment)
+    // binding=2 (Object SSBO, Vertex+Fragment)
     rhi::DescriptorSetLayoutDesc combinedLayoutDesc;
     combinedLayoutDesc.bindings = {
-        { 1, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Pixel },
-        { 2, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Vertex },
-        { 4, rhi::DescriptorType::CombinedImageSampler, 1024, rhi::ShaderStage::Pixel, true },
+        { 1, rhi::DescriptorType::StorageBuffer, 1, 16 },     // stageMask=16 (Fragment)
+        { 2, rhi::DescriptorType::StorageBuffer, 1, 17 },     // stageMask=17 (Vertex|Fragment)
     };
     m_DescLayout = device->CreateDescriptorSetLayout(combinedLayoutDesc);
 

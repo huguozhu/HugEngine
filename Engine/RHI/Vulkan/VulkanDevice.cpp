@@ -414,17 +414,7 @@ DescriptorSetLayoutHandle VulkanDevice::CreateDescriptorSetLayout(const Descript
         vb.binding            = b.binding;
         vb.descriptorType     = ToVkDescType(b.type);
         vb.descriptorCount    = b.count;
-        vb.stageFlags         = 0;
-        if (u8(b.stageFlags) & 1) vb.stageFlags |= VK_SHADER_STAGE_VERTEX_BIT;
-        // Match by ShaderStage enum values
-        switch (b.stageFlags) {
-            case ShaderStage::Vertex:   vb.stageFlags = VK_SHADER_STAGE_VERTEX_BIT; break;
-            case ShaderStage::Pixel:    vb.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; break;
-            case ShaderStage::Compute:  vb.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT; break;
-            default:
-                vb.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-                break;
-        }
+        vb.stageFlags = b.stageMask;  // 直接使用 VK_SHADER_STAGE_* 位掩码
         vkBindings.push_back(vb);
     }
 
