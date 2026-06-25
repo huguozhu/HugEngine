@@ -1,2 +1,12 @@
-// 暂存 — 后续任务替换为完整实现
-int main() { return 0; }
+// Samples/Editor/main.cpp
+
+// ============================================================
+// HugEditor — HugEngine 独立编辑器入口
+// ============================================================
+
+#include "EditorApp.h"
+
+int main() {
+    EditorApp app;
+    return app.Run();
+}
