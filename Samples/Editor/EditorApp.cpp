@@ -20,20 +20,10 @@
 
 using namespace he;
 
-// 前向声明面板（后续 Task 中实现）
+// 面板头文件
 #include "Panels/OutlinerPanel.h"
 #include "Panels/DetailsPanel.h"
-
-namespace he::editor {
-
-// 占位面板 — 后续 Task 替换
-class ViewportPanel {
-public:
-    void Initialize(EditorContext*) {}
-    void Render(rhi::IRHICommandList*) {}
-};
-
-} // namespace he::editor
+#include "Panels/ViewportPanel.h"
 
 EditorApp::EditorApp()  = default;
 EditorApp::~EditorApp() = default;
@@ -131,7 +121,7 @@ void EditorApp::InitEditor() {
     m_Outliner  = std::make_unique<editor::OutlinerPanel>();
     m_Details   = std::make_unique<editor::DetailsPanel>();
 
-    m_Viewport->Initialize(m_EditorCtx.get());
+    m_Viewport->Initialize(m_EditorCtx.get(), m_Pipeline.get(), m_Window);
     m_Outliner->Initialize(m_EditorCtx.get());
     m_Details->Initialize(m_EditorCtx.get());
 
@@ -139,15 +129,6 @@ void EditorApp::InitEditor() {
 }
 
 void EditorApp::MainLoop() {
-    // 相机（临时内置，ViewportPanel 完成后移入面板）
-    render::CameraData camera;
-    camera.position = float3(0.0f, 2.0f, 8.0f);
-    camera.forward  = float3(0.0f, 0.0f, -1.0f);
-    camera.up       = float3(0.0f, 1.0f, 0.0f);
-    camera.SetAspectRatio(
-        static_cast<f32>(m_SwapChain->GetWidth()),
-        static_cast<f32>(m_SwapChain->GetHeight()));
-
     while (!m_Engine->GetWindow()->ShouldClose()) {
         f64 now = glfwGetTime();
         f32 dt  = static_cast<f32>(now - m_LastTime);
@@ -165,8 +146,8 @@ void EditorApp::MainLoop() {
         m_Pipeline->BeginFrame(m_CmdList.get(),
             m_SwapChain->GetWidth(), m_SwapChain->GetHeight());
 
-        // 场景渲染
-        m_Pipeline->RenderScene(m_CmdList.get(), *m_World, *m_SceneGraph, camera);
+        // 场景渲染（由 ViewportPanel 驱动）
+        m_Viewport->Render(m_CmdList.get());
 
         // UI
         m_ImGui->BeginFrame();
@@ -202,7 +183,8 @@ void EditorApp::MainLoop() {
 
         // Viewport
         ImGui::BeginChild("ViewportRegion", {viewportWidth, avail.y * 0.75f}, true);
-        ImGui::Text("Viewport (placeholder)");
+        // 3D 场景已由 ViewportPanel::Render 渲染到 BackBuffer
+        // Phase 3-2: 改为渲染到 off-screen texture → ImGui::Image
         ImGui::EndChild();
 
         ImGui::SameLine();
@@ -216,6 +198,13 @@ void EditorApp::MainLoop() {
         ImGui::BeginChild("OutlinerRegion", {avail.x, avail.y * 0.25f - 4.0f}, true);
         m_Outliner->Render();
         ImGui::EndChild();
+
+        // 状态栏
+        ImGui::Begin("StatusBar");
+        ImGui::Text("Selected: %d | FPS: %.0f",
+            (int)m_EditorCtx->GetSelection().size(),
+            1.0f / (dt > 0 ? dt : 0.016f));
+        ImGui::End();
 
         m_ImGui->EndFrame(m_CmdList.get());
 
