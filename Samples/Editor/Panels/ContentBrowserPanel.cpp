@@ -5,6 +5,7 @@
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
 #include "Asset/glTFLoader.h"
+#include "Editor/SceneSerializer.h"
 #include "imgui.h"
 
 #include <filesystem>
@@ -83,24 +84,24 @@ void ContentBrowserPanel::RenderFileGrid() {
             ImGui::BeginGroup();
             ImGui::PushID(name.c_str());
 
-            // 图标占位
-            ImGui::Button(isGLB ? "3D" : "IMG", {60, 60});
+            // 图标按钮（双击或单击触发导入）
+            if (ImGui::Button(isGLB ? "3D" : "IMG", {60, 60}) ||
+                (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))) {
+                if (isGLB) {
+                    ImportGLB(entry.path().string());
+                } else if (ext == ".hescene") {
+                    editor::SceneSerializer::Load(
+                        entry.path().string(),
+                        *m_Ctx->GetWorld(),
+                        *m_Ctx->GetSceneGraph());
+                }
+            }
 
             // 文件名（截断过长名称）
             String displayName = name;
             if (displayName.size() > 12)
                 displayName = displayName.substr(0, 10) + "..";
             ImGui::Text("%s", displayName.c_str());
-
-            // 双击导入
-            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
-                if (isGLB) {
-                    ImportGLB(entry.path().string());
-                } else if (ext == ".hescene") {
-                    // 场景文件加载
-                    // Phase 3-2: 通过 SceneSerializer::Load
-                }
-            }
 
             // 右键菜单
             if (ImGui::BeginPopupContextItem(name.c_str())) {
