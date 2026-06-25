@@ -24,12 +24,13 @@ void ContentBrowserPanel::Render() {
 
     ImGui::NextColumn();
 
-    // 路径导航：.. 按钮在前，防止被路径文字挤出视野
-    if (ImGui::Button("..")) {
+    // 路径导航：箭头按钮退回上级目录
+    if (ImGui::ArrowButton("##updir", ImGuiDir_Up)) {
         auto parent = std::filesystem::path(m_CurrentPath).parent_path();
         String parentStr = parent.string();
-        // 防止退到 Content 目录之上（parent_path 对 "Content" 返回 ""）
-        if (!parentStr.empty()) m_CurrentPath = parentStr;
+        if (!parentStr.empty() && parentStr != m_CurrentPath) {
+            m_CurrentPath = parentStr;
+        }
     }
     ImGui::SameLine();
     ImGui::Text("Path: %s", m_CurrentPath.c_str());
