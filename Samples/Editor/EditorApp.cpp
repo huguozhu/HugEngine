@@ -247,6 +247,13 @@ void EditorApp::MainLoop() {
 void EditorApp::Shutdown() {
     m_Device->WaitIdle();
     m_ImGui->Shutdown();
+    // 在 Engine 销毁前释放所有子系统（避免析构时 Logger 已失效）
+    m_Pipeline.reset();
+    m_SceneGraph.reset();
+    m_World.reset();
+    m_CmdList.reset();
+    m_SwapChain.reset();
+    m_Device.reset();
     // Engine ������ʱ����
     delete m_Engine;
 }
