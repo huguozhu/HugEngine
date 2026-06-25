@@ -246,7 +246,7 @@ void EditorApp::MainLoop() {
             ImGui::Begin("EditorMain", nullptr,
                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus |
-                ImGuiWindowFlags_NoSavedSettings);
+                ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground);
 
             // 整体布局：Viewport (左) | Details (右)
             ImVec2 avail = ImGui::GetContentRegionAvail();
