@@ -35,13 +35,20 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     };
 
     // --- 3. 创建 DescriptorSetLayout ---
-    // 组合 layout: binding=1 (Light SSBO) + binding=4 (Bindless Texture2D[])
+    // 组合 layout: binding=1 (Light SSBO) + binding=2 (Object SSBO) + binding=4 (Bindless)
     rhi::DescriptorSetLayoutDesc combinedLayoutDesc;
     combinedLayoutDesc.bindings = {
         { 1, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Pixel },
+        { 2, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Vertex },
         { 4, rhi::DescriptorType::CombinedImageSampler, 1024, rhi::ShaderStage::Pixel, true },
     };
-    m_LightDescLayout = device->CreateDescriptorSetLayout(combinedLayoutDesc);
+    m_DescLayout = device->CreateDescriptorSetLayout(combinedLayoutDesc);
+
+    // 创建对象 Storage Buffer（每帧填充）
+    rhi::BufferDesc objBufDesc;
+    objBufDesc.size  = sizeof(GPUObjectData) * MAX_OBJECTS;
+    objBufDesc.usage = rhi::BufferUsage::Storage;
+    m_ObjectBuffer = device->CreateBuffer(objBufDesc);
 
     // --- 4. Push constant + PSO ---
     rhi::PushConstantRange pcRange;
@@ -58,31 +65,34 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     psoDesc.depthWrite           = true;
     psoDesc.depthCompare         = rhi::CompareFunc::LessEqual;
     psoDesc.pushConstantRanges   = { pcRange };
-    psoDesc.descriptorSetLayouts = { m_LightDescLayout };
+    psoDesc.descriptorSetLayouts = { m_DescLayout };
     psoDesc.debugName            = "ForwardPBR";
 
     m_PBR_PSO = device->CreatePipelineState(psoDesc);
     HE_ASSERT(m_PBR_PSO, "ForwardPipeline: failed to create PBR PSO");
 
-    // 创建 Storage Buffer（每帧填充）
+    // 创建 Light Storage Buffer
     rhi::BufferDesc lightBufDesc;
     lightBufDesc.size  = sizeof(GPULight) * MAX_LIGHTS;
     lightBufDesc.usage = rhi::BufferUsage::Storage;
     m_LightBuffer = device->CreateBuffer(lightBufDesc);
 
-    // 分配 DescriptorSet 并绑定 Storage Buffer
-    m_LightDescSet = device->AllocateDescriptorSet(m_LightDescLayout);
-    device->UpdateDescriptorSet(m_LightDescSet, 1, rhi::DescriptorType::StorageBuffer,
+    // 分配 DescriptorSet 并绑定两个 Storage Buffer
+    m_DescSet = device->AllocateDescriptorSet(m_DescLayout);
+    device->UpdateDescriptorSet(m_DescSet, 1, rhi::DescriptorType::StorageBuffer,
                                 m_LightBuffer.get());
+    device->UpdateDescriptorSet(m_DescSet, 2, rhi::DescriptorType::StorageBuffer,
+                                m_ObjectBuffer.get());
 
     HE_CORE_INFO("ForwardPipeline initialized");
 }
 
 void ForwardPipeline::Shutdown() {
     if (m_Device) {
-        m_Device->DestroyDescriptorSetLayout(m_LightDescLayout);
+        m_Device->DestroyDescriptorSetLayout(m_DescLayout);
     }
     m_LightBuffer.reset();
+    m_ObjectBuffer.reset();
     m_PBR_PSO.reset();
     m_Device = nullptr;
     HE_CORE_INFO("ForwardPipeline shut down");
@@ -164,12 +174,28 @@ void ForwardPipeline::RenderScene(
     float4x4 viewProj = camera.GetViewProjMatrix();
     u32 drawCount = 0;
 
-    // 每帧收集光源数据
-    PushConstantData lighting{};
-    CollectLights(lighting, world, sceneGraph);
+    // 帧级 push constant（viewProj + camera + lightCount）
+    PushConstantData framePC{};
+    framePC.viewProjMatrix = viewProj;
+    framePC.cameraPosition = float4(camera.position, 0.0f);
 
-    // 绑定光照 DescriptorSet（set=0，binding=1 = GPULight[]）
-    cmd->BindDescriptorSet(0, m_LightDescSet);
+    // 每帧收集光源数据
+    CollectLights(framePC, world, sceneGraph);
+
+    // 上传 per-object 数据到 Storage Buffer
+    GPUObjectData* objData = static_cast<GPUObjectData*>(m_ObjectBuffer->Map());
+    u32 objectIndex = 0;
+
+    auto uploadObject = [&](he::Entity e, he::MeshComponent& mesh, float4x4& wm, PBRMaterial& mat) {
+        if (objectIndex >= MAX_OBJECTS) return;
+        GPUObjectData& obj = objData[objectIndex];
+        obj.worldMatrix = wm;
+        FillObjectData(obj, mat);
+        objectIndex++;
+    };
+
+    // 绑定 DescriptorSet（光照 + 对象数据）
+    cmd->BindDescriptorSet(0, m_DescSet);
 
     auto renderMesh = [&](he::Entity e, he::MeshComponent& mesh) {
         if (mesh.GetIndexCount() == 0) return;
@@ -186,7 +212,9 @@ void ForwardPipeline::RenderScene(
         mat.doubleSided     = mesh.doubleSided;
         mat.unlit           = mesh.unlit;
 
-        DrawMesh(cmd, &mesh, worldMatrix, viewProj, mat, camera, lighting);
+        uploadObject(e, mesh, worldMatrix, mat);
+        framePC.objectIndex = objectIndex - 1;
+        DrawMesh(cmd, &mesh, worldMatrix, viewProj, mat, camera, framePC);
         drawCount++;
     };
 
@@ -198,10 +226,12 @@ void ForwardPipeline::RenderScene(
         renderMesh(e, static_cast<he::MeshComponent&>(s));
     });
 
+    m_ObjectBuffer->Unmap();
+
     static bool s_FirstFrame = true;
     if (s_FirstFrame) {
         HE_CORE_INFO("ForwardPipeline::RenderScene: {} draws, {} lights",
-            drawCount, lighting.lightCount);
+            drawCount, framePC.lightCount);
         s_FirstFrame = false;
     }
 }
@@ -212,21 +242,16 @@ void ForwardPipeline::EndFrame(rhi::IRHICommandList* /*cmd*/) {
 void ForwardPipeline::DrawMesh(
     rhi::IRHICommandList* cmd,
     he::MeshComponent* mesh,
-    const float4x4& worldMatrix,
-    const float4x4& viewProjMatrix,
-    const PBRMaterial& material,
-    const CameraData& camera,
-    const PushConstantData& lighting)
+    const float4x4& /*worldMatrix*/,
+    const float4x4& /*viewProjMatrix*/,
+    const PBRMaterial& /*material*/,
+    const CameraData& /*camera*/,
+    const PushConstantData& framePC)
 {
     if (!mesh || mesh->GetIndexCount() == 0) return;
 
-    PushConstantData pc = lighting;
-    pc.modelMatrix    = worldMatrix;
-    pc.viewProjMatrix = viewProjMatrix;
-    FillMaterialPushConstants(pc, material);
-    pc.cameraPosition = float4(camera.position, 0.0f);
-
-    cmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
+    // 帧级 push constant: viewProj + camera + lightCount + objectIndex
+    cmd->SetPushConstants(0, sizeof(PushConstantData), &framePC);
     cmd->SetVertexBuffer(mesh->GetVertexBuffer().get(), 0);
     cmd->SetIndexBuffer(mesh->GetIndexBuffer().get());
     cmd->DrawIndexed(mesh->GetIndexCount());

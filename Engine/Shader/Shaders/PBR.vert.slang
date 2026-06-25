@@ -1,26 +1,36 @@
 // ============================================================
-// PBR.vert.slang — PBR 渲染顶点着色器
+// PBR.vert.slang — PBR 顶点着色器 (GPU-driven)
+// per-object 数据从 Storage Buffer 读取
 // ============================================================
 
 layout(location = 0) in float3 inPosition;
 layout(location = 1) in float3 inNormal;
 layout(location = 2) in float2 inUV;
 
-// Push constants（光照数据已移至 Storage Buffer）
-[[vk::push_constant]] cbuffer PushConstants {
-    float4x4 modelMatrix;           // [0..64]
-    float4x4 viewProjMatrix;        // [64..128]
-    float4   baseColorFactor;       // [128..144]
-    float    metallicFactor;        // [144]
-    float    roughnessFactor;       // [148]
-    float    aoFactor;              // [152]
-    float    alphaCutoff;           // [156]
-    float4   emissiveFactor;        // [160..176]
-    float4   cameraPosition;        // [176..192]
-    uint     lightCount;            // [192]
-    uint     materialFlags;         // [196]
-    uint     materialID;            // [200] bindless index
-    uint     _pad[13];              // [204..256]
+// GPU Object（128 bytes，匹配 CPU GPUObjectData）
+struct GPUObjectData {
+    float4x4 worldMatrix;
+    float4   baseColorFactor;
+    float4   emissiveFactor;
+    float    metallicFactor;
+    float    roughnessFactor;
+    float    aoFactor;
+    float    alphaCutoff;
+    uint     materialFlags;
+    uint     materialID;
+    uint     _pad[2];
+};
+
+// set=0, binding=2: GPU 对象数据数组
+[[vk::binding(2, 0)]] StructuredBuffer<GPUObjectData> u_Objects;
+
+// 帧级 Push Constants
+[[vk::push_constant]] cbuffer FrameConstants {
+    float4x4 viewProjMatrix;
+    float4   cameraPosition;
+    uint     lightCount;
+    uint     objectIndex;
+    uint     _pad[2];
 };
 
 struct VSOutput {
@@ -32,9 +42,11 @@ struct VSOutput {
 
 VSOutput vertexMain() {
     VSOutput output;
-    float4 worldPos = mul(modelMatrix, float4(inPosition, 1.0));
+    GPUObjectData obj = u_Objects[objectIndex];
+
+    float4 worldPos = mul(obj.worldMatrix, float4(inPosition, 1.0));
     output.worldPos = worldPos.xyz;
-    output.worldNormal = normalize(mul((float3x3)modelMatrix, inNormal));
+    output.worldNormal = normalize(mul((float3x3)obj.worldMatrix, inNormal));
     output.uv = inUV;
     output.position = mul(viewProjMatrix, worldPos);
     return output;

@@ -61,10 +61,11 @@ private:
     rhi::IRHIDevice* m_Device = nullptr;
     std::unique_ptr<rhi::IRHIPipelineState> m_PBR_PSO;
 
-    // Descriptor Set + Storage Buffer（多光源 + Bindless 纹理）
-    rhi::DescriptorSetLayoutHandle m_LightDescLayout = rhi::kInvalidLayout;
-    rhi::DescriptorSetHandle       m_LightDescSet    = rhi::kInvalidSet;
+    // Descriptor Set + Storage Buffers（光照 + 对象数据）
+    rhi::DescriptorSetLayoutHandle m_DescLayout     = rhi::kInvalidLayout;
+    rhi::DescriptorSetHandle       m_DescSet        = rhi::kInvalidSet;
     std::unique_ptr<rhi::IRHIBuffer> m_LightBuffer;
+    std::unique_ptr<rhi::IRHIBuffer> m_ObjectBuffer;   // GPUObjectData[MAX_OBJECTS]
 
     // 着色器字节码
     rhi::ShaderBytecode m_VS;

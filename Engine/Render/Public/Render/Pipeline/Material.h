@@ -41,27 +41,39 @@ struct alignas(16) GPULight {
 static_assert(sizeof(GPULight) == 64, "GPULight must be 64 bytes");
 
 // ============================================================
-// Push Constant 数据（每物体，192 字节）
+// GPU 对象数据（Storage Buffer，每物体 128 字节）
+// Shader 通过 objectIndex 索引，替代 PushConstant 传递
+// ============================================================
+static constexpr u32 MAX_OBJECTS = 1024;
+
+struct alignas(16) GPUObjectData {
+    float4x4 worldMatrix;           // [0..64]   世界矩阵
+    float4   baseColorFactor;       // [64..80]  基础色
+    float4   emissiveFactor;        // [80..96]  自发光
+    float    metallicFactor;        // [96]
+    float    roughnessFactor;       // [100]
+    float    aoFactor;              // [104]
+    float    alphaCutoff;           // [108]
+    u32      materialFlags;         // [112]
+    u32      materialID;            // [116]     bindless 纹理索引
+    u32      _pad[2];               // [120..128] 对齐
+};
+static_assert(sizeof(GPUObjectData) == 128, "GPUObjectData must be 128 bytes");
+
+// ============================================================
+// Push Constant 数据（帧级数据，约 96 字节）
 // 光照数据已移至 Storage Buffer（Descriptor Set）
 // ============================================================
 struct alignas(16) PushConstantData {
-    float4x4 modelMatrix;           // [0..64]
-    float4x4 viewProjMatrix;        // [64..128]
-    float4   baseColorFactor;       // [128..144]
-    float    metallicFactor;        // [144]
-    float    roughnessFactor;       // [148]
-    float    aoFactor;              // [152]
-    float    alphaCutoff;           // [156]
-    float4   emissiveFactor;        // [160..176]
-    float4   cameraPosition;        // [176..192]
-    u32      lightCount;            // [192]
-    u32      materialFlags;         // [196]
-    u32      materialID;            // [200] bindless 纹理索引
-    u32      _pad[13];              // [204..256]
+    float4x4 viewProjMatrix;        // [0..64]
+    float4   cameraPosition;        // [64..80]
+    u32      lightCount;            // [80]
+    u32      objectIndex;           // [84]   GPU 对象索引
+    u32      _pad[2];               // [88..96]
 };
 
-static_assert(sizeof(PushConstantData) == 256,
-    "PushConstantData must be 256 bytes");
+static_assert(sizeof(PushConstantData) == 96,
+    "PushConstantData must be 96 bytes");
 
 // ============================================================
 // glTF 2.0 PBR 材质（CPU 端资产数据）
@@ -98,18 +110,19 @@ inline PBRMaterial GetDefaultMaterial() {
     return mat;
 }
 
-inline void FillMaterialPushConstants(PushConstantData& pc, const PBRMaterial& mat) {
-    pc.baseColorFactor = mat.baseColorFactor;
-    pc.metallicFactor  = mat.metallicFactor;
-    pc.roughnessFactor = mat.roughnessFactor;
-    pc.aoFactor        = mat.aoFactor;
-    pc.alphaCutoff     = mat.alphaCutoff;
-    pc.emissiveFactor  = float4(mat.emissiveFactor, 0.0f);
+// 填充 GPUObjectData（每帧上传到 Storage Buffer）
+inline void FillObjectData(GPUObjectData& obj, const PBRMaterial& mat) {
+    obj.baseColorFactor = mat.baseColorFactor;
+    obj.emissiveFactor  = float4(mat.emissiveFactor, 0.0f);
+    obj.metallicFactor  = mat.metallicFactor;
+    obj.roughnessFactor = mat.roughnessFactor;
+    obj.aoFactor        = mat.aoFactor;
+    obj.alphaCutoff     = mat.alphaCutoff;
     u32 flags = MF_None;
     if (mat.doubleSided)  flags |= MF_DoubleSided;
     if (mat.alphaMode == AlphaMode::Mask) flags |= MF_AlphaMask;
     if (mat.unlit)        flags |= MF_Unlit;
-    pc.materialFlags = flags;
+    obj.materialFlags = flags;
 }
 
 } // namespace he::render
