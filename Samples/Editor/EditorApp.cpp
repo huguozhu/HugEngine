@@ -253,8 +253,10 @@ void EditorApp::MainLoop() {
             float detailsWidth = 300.0f;
             float viewportWidth = avail.x - detailsWidth - 4.0f;
 
-            // Viewport
+            // Viewport（透明背景，3D 场景仅在此区域可见）
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
             ImGui::BeginChild("ViewportRegion", {viewportWidth, avail.y * 0.75f}, true);
+            ImGui::PopStyleColor();
             // 3D 场景由 ViewportPanel::Render 渲染到 BackBuffer
             // Phase 3-2: 改为渲染到 off-screen texture + ImGui::Image
             ImGui::EndChild();
