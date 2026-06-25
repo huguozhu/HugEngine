@@ -1,4 +1,6 @@
 #include "Render/Pipeline/ForwardPipeline.h"
+#include "Scene/CubeComponent.h"
+#include "Scene/SphereComponent.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include "EmbeddedShaders.h"  // 编译后生成的 SPIR-V 数组
@@ -90,21 +92,25 @@ void ForwardPipeline::RenderScene(
     u32 drawCount = 0;
 
     // 遍历所有 MeshComponent，渲染每个网格
-    world.ForEach<he::MeshComponent>([&](he::Entity e, he::MeshComponent& mesh) {
+    // 渲染单个 MeshComponent 的公共逻辑
+    auto renderMesh = [&](he::Entity e, he::MeshComponent& mesh) {
         if (mesh.GetIndexCount() == 0) return;
-
-        // 获取世界矩阵
         float4x4 worldMatrix = sceneGraph.GetWorldMatrix(e);
-
-        // 从网格组件读取实际材质参数
         PBRMaterial mat = GetDefaultMaterial();
         mat.baseColorFactor = mesh.baseColorFactor;
         mat.metallicFactor  = mesh.metallicFactor;
         mat.roughnessFactor = mesh.roughnessFactor;
-
-        // 填充 push constant 并绘制
         DrawMesh(cmd, &mesh, worldMatrix, viewProj, mat, camera, lighting);
         drawCount++;
+    };
+
+    // 遍历 MeshComponent 及其子类（World 按 typeid 分桶，需分别查询）
+    world.ForEach<he::MeshComponent>(renderMesh);
+    world.ForEach<he::CubeComponent>([&](he::Entity e, he::CubeComponent& c) {
+        renderMesh(e, static_cast<he::MeshComponent&>(c));
+    });
+    world.ForEach<he::SphereComponent>([&](he::Entity e, he::SphereComponent& s) {
+        renderMesh(e, static_cast<he::MeshComponent&>(s));
     });
 
     // 首帧打印场景统计

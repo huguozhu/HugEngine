@@ -15,7 +15,8 @@
 #include "Render/Pipeline/ForwardPipeline.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
-#include "Scene/MeshComponent.h"
+#include "Scene/CubeComponent.h"
+#include "Scene/SphereComponent.h"
 #include "Scene/Transform.h"
 
 #include <cmath>
@@ -27,59 +28,35 @@
 using namespace he;
 
 // ============================================================
-// 辅助：创建立方体网格实体
+// 辅助：创建带材质的形状实体
 // ============================================================
-Entity CreateCubeEntity(World& world, SceneGraph& sg,
-                        const float3& position, const float3& scale,
-                        const float4& baseColor, float metallic, float roughness)
+Entity CreateShapeEntity(World& world, SceneGraph& sg,
+                         const float3& position, const float3& scale,
+                         const float4& baseColor, float metallic, float roughness,
+                         bool sphere = false)
 {
-    // 立方体顶点（position + normal + uv）— 24 个顶点（每面 4 个）
-    struct {
-        TArray<StaticVertex> verts;
-        TArray<u32>          indices;
-    } cube;
+    Entity e = world.CreateEntity(sphere ? "Sphere" : "Cube");
 
-    auto addFace = [&](float3 normal, float3 tangent, float3 bitangent) {
-        u32 base = static_cast<u32>(cube.verts.size());
-        float3 center = normal;  // 面中心（单位立方体）
-        // 四个角
-        float3 corners[4] = {
-            center + (-tangent - bitangent),
-            center + ( tangent - bitangent),
-            center + ( tangent + bitangent),
-            center + (-tangent + bitangent),
-        };
-        for (u32 i = 0; i < 4; ++i) {
-            cube.verts.push_back({ corners[i], normal, float2(i % 2 == 1 ? 1.0f : 0.0f, i / 2 == 1 ? 1.0f : 0.0f) });
-        }
-        // 两个三角形 = 6 个索引
-        u32 idx[6] = { base, base+1, base+2, base, base+2, base+3 };
-        for (u32 i = 0; i < 6; ++i) cube.indices.push_back(idx[i]);
-    };
-
-    // 6 个面
-    addFace(float3( 0, 0, 1), float3(1,0,0), float3(0,1,0));   // +Z
-    addFace(float3( 0, 0,-1), float3(-1,0,0),float3(0,1,0));   // -Z
-    addFace(float3( 1, 0, 0), float3(0,0,-1),float3(0,1,0));   // +X
-    addFace(float3(-1, 0, 0), float3(0,0,1), float3(0,1,0));   // -X
-    addFace(float3( 0, 1, 0), float3(1,0,0), float3(0,0,-1));  // +Y
-    addFace(float3( 0,-1, 0), float3(1,0,0), float3(0,0,1));   // -Y
-
-    // 创建实体
-    Entity e = world.CreateEntity("Cube");
     auto* xform = world.AddComponent<TransformComponent>(e);
     xform->position = position;
     xform->scale    = scale;
 
-    auto* mesh = world.AddComponent<MeshComponent>(e);
-    mesh->SetMeshData(cube.verts, cube.indices);
+    MeshComponent* mesh;
+    if (sphere) {
+        auto* sc = world.AddComponent<SphereComponent>(e);
+        sc->radius = 0.5f;
+        mesh = static_cast<MeshComponent*>(sc);
+    } else {
+        auto* cc = world.AddComponent<CubeComponent>(e);
+        cc->halfExtent = 0.5f;
+        mesh = static_cast<MeshComponent*>(cc);
+    }
+
     mesh->baseColorFactor  = baseColor;
     mesh->metallicFactor   = metallic;
     mesh->roughnessFactor  = roughness;
 
-    // 注册场景图节点
     sg.SetParent(e, Entity{kInvalidEntity});
-
     return e;
 }
 
@@ -119,35 +96,35 @@ int main() {
     World world;
     SceneGraph sceneGraph(world);
 
-    // 地板（深灰色，粗糙）
-    CreateCubeEntity(world, sceneGraph,
+    // 地板（深灰色立方体，粗糙）
+    CreateShapeEntity(world, sceneGraph,
         float3(0.0f, -1.5f, 0.0f), float3(5.0f, 0.2f, 5.0f),
         float4(0.3f, 0.3f, 0.35f, 1.0f), 0.0f, 0.9f);
 
-    // 金球（金属，光滑）— 缩小立方体模拟
-    CreateCubeEntity(world, sceneGraph,
+    // 金球（金属，光滑）
+    CreateShapeEntity(world, sceneGraph,
         float3(-1.5f, 0.0f, 0.0f), float3(0.8f),
-        float4(1.0f, 0.72f, 0.0f, 1.0f), 1.0f, 0.15f);
+        float4(1.0f, 0.72f, 0.0f, 1.0f), 1.0f, 0.15f, true);
 
-    // 铜块（金属，中度粗糙）
-    CreateCubeEntity(world, sceneGraph,
+    // 铜球（金属，中度粗糙）
+    CreateShapeEntity(world, sceneGraph,
         float3(0.0f, 0.0f, 0.0f), float3(0.8f),
-        float4(0.85f, 0.45f, 0.2f, 1.0f), 0.95f, 0.4f);
+        float4(0.85f, 0.45f, 0.2f, 1.0f), 0.95f, 0.4f, true);
 
-    // 塑料球（非金属，光滑）
-    CreateCubeEntity(world, sceneGraph,
+    // 蓝色塑料立方体（非金属，光滑）
+    CreateShapeEntity(world, sceneGraph,
         float3(1.5f, 0.0f, 0.0f), float3(0.8f),
         float4(0.2f, 0.5f, 1.0f, 1.0f), 0.0f, 0.2f);
 
-    // 红色橡胶块（非金属，粗糙）
-    CreateCubeEntity(world, sceneGraph,
+    // 红色橡胶立方体（非金属，粗糙）
+    CreateShapeEntity(world, sceneGraph,
         float3(0.0f, 0.0f, 1.5f), float3(0.7f),
         float4(0.9f, 0.15f, 0.1f, 1.0f), 0.0f, 0.85f);
 
-    // 白色陶瓷柱
-    CreateCubeEntity(world, sceneGraph,
-        float3(0.0f, 0.2f, -1.5f), float3(0.5f, 1.5f, 0.5f),
-        float4(0.95f, 0.93f, 0.88f, 1.0f), 0.0f, 0.35f);
+    // 白色陶瓷球
+    CreateShapeEntity(world, sceneGraph,
+        float3(0.0f, 0.2f, -1.5f), float3(0.6f),
+        float4(0.95f, 0.93f, 0.88f, 1.0f), 0.0f, 0.35f, true);
 
     HE_CORE_INFO("Scene created: {} entities", world.GetEntityCount());
 

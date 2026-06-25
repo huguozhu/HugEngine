@@ -7,6 +7,8 @@
 #include "Scene/Component.h"
 #include "Scene/Transform.h"
 #include "Scene/MeshComponent.h"
+#include "Scene/CubeComponent.h"
+#include "Scene/SphereComponent.h"
 
 namespace he {
 
@@ -20,6 +22,14 @@ HE_END_REGISTER()
 
 // --- MeshComponent 注册 ---
 HE_BEGIN_REGISTER(he::MeshComponent)
+HE_END_REGISTER()
+
+// --- CubeComponent 注册 ---
+HE_BEGIN_REGISTER(he::CubeComponent)
+HE_END_REGISTER()
+
+// --- SphereComponent 注册 ---
+HE_BEGIN_REGISTER(he::SphereComponent)
 HE_END_REGISTER()
 
 } // namespace he

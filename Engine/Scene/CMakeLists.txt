@@ -8,6 +8,8 @@ target_sources(HugEngineScene PRIVATE
     Private/SceneGraph.cpp
     Private/MeshComponent.cpp
     Private/SceneReflect.cpp
+    Private/CubeComponent.cpp
+    Private/SphereComponent.cpp
 )
 
 target_include_directories(HugEngineScene
