@@ -14,6 +14,7 @@
 #include "Core/Log.h"
 
 #include <fstream>
+#include <unordered_map>
 #include <vector>
 
 namespace he::editor {
@@ -98,9 +99,18 @@ bool SceneSerializer::Load(StringView filePath, World& world, SceneGraph& sg) {
     if(r32()!=kVersion){ HE_CORE_ERROR("SceneSerializer: bad version"); return false; }
 
     u32 ec=r32();
+
+    // --- 清除当前世界内容 ---
+    std::vector<Entity> toRemove;
+    world.ForEachEntity([&](Entity e) { toRemove.push_back(e); });
+    for (auto& e : toRemove) world.DestroyEntity(e);
+
+    // --- 重建实体，保留旧 ID 到新 Entity 的映射 ---
+    std::unordered_map<u64, Entity> idMap;
     for(u32 ei=0;ei<ec;++ei){
         u64 eid=r64();
         Entity ent=world.CreateEntity("Entity");
+        idMap[eid] = ent;
 
         u32 cc=r32();
         for(u32 ci=0;ci<cc;++ci){
@@ -134,9 +144,9 @@ bool SceneSerializer::Load(StringView filePath, World& world, SceneGraph& sg) {
         }
     }
 
-    // Hierarchy
+    // Hierarchy — 通过 idMap 将保存的旧 ID 转换为新创建的 Entity
     u32 pc=r32();
-    for(u32 pi=0;pi<pc;++pi){ u64 c=r64(),p=r64(); sg.SetParent({c},{p}); }
+    for(u32 pi=0;pi<pc;++pi){ u64 c=r64(),p=r64(); sg.SetParent(idMap[c], idMap[p]); }
 
     HE_CORE_INFO("Scene loaded: {} entities", ec);
     return true;
