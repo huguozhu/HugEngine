@@ -15,7 +15,6 @@
 struct GLFWwindow;
 
 namespace he::rhi {
-    class IRHIDevice;
     class IRHICommandList;
 }
 namespace he::render {

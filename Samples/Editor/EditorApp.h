@@ -51,7 +51,6 @@ private:
     void InitEditor();      // ImGui + EditorContext + 面板
     void InitPipeline();    // ForwardPipeline
     void MainLoop();        // 帧循环
-    void RenderUI();        // 面板渲染
     void Shutdown();
 
     // --- 底层 ---
@@ -75,5 +74,4 @@ private:
     std::unique_ptr<he::editor::DetailsPanel>  m_Details;
 
     he::f64  m_LastTime  = 0.0;
-    bool m_Running   = true;
 };

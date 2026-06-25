@@ -5,7 +5,6 @@
 #include "Render/Pipeline/ForwardPipeline.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
-#include "imgui.h"
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>

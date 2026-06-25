@@ -50,6 +50,12 @@ void EditorApp::InitEngine() {
     m_Engine->Initialize();
     m_Window = m_Engine->GetWindow()->GetNativeHandle();
 
+    // 窗口调整大小回调 → 自动重建 SwapChain
+    m_Engine->GetWindow()->SetResizeCallback([&](u32 w, u32 h) {
+        m_SwapChain->Resize(w, h);
+        m_CmdList->SetSwapChain(m_SwapChain.get());
+    });
+
     // 创建 RHI 设备
     rhi::DeviceInitDesc rhiDesc;
     rhiDesc.backend          = rhi::Backend::Vulkan;
@@ -135,6 +141,14 @@ void EditorApp::MainLoop() {
         m_LastTime = now;
 
         m_Engine->GetWindow()->PollEvents();
+
+        // Ctrl+Z / Ctrl+Y Undo/Redo 键盘快捷键
+        if (ImGui::IsKeyPressed(ImGuiKey_Z) && ImGui::GetIO().KeyCtrl) {
+            m_CmdHistory->Undo();
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_Y) && ImGui::GetIO().KeyCtrl) {
+            m_CmdHistory->Redo();
+        }
 
         if (!m_SwapChain->AcquireNextImage())
             continue;
