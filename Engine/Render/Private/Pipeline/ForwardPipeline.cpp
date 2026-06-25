@@ -111,8 +111,8 @@ void ForwardPipeline::BeginFrame(rhi::IRHICommandList* cmd, u32 width, u32 heigh
 void ForwardPipeline::CollectLights(PushConstantData& pc, he::World& world, he::SceneGraph& sg) {
     pc.lightCount = 0;
 
-    // 填入 Storage Buffer
-    world.ForEach<he::LightComponent>([&](he::Entity e, he::LightComponent& lc) {
+    // 填入 Storage Buffer（需遍历三种光源子类，World 按 type_index 分桶存储）
+    auto collectLight = [&](he::Entity e, he::LightComponent& lc) {
         if (pc.lightCount >= MAX_LIGHTS) return;
         u32 i = pc.lightCount;
 
@@ -143,14 +143,15 @@ void ForwardPipeline::CollectLights(PushConstantData& pc, he::World& world, he::
         }
         }
 
-        // 写入 Storage Buffer
         GPULight* lights = static_cast<GPULight*>(m_LightBuffer->Map());
-        if (lights) {
-            lights[i] = gl;
-        }
+        if (lights) lights[i] = gl;
         m_LightBuffer->Unmap();
         pc.lightCount++;
-    });
+    };
+
+    world.ForEach<he::DirectionalLight>(collectLight);
+    world.ForEach<he::PointLight>(collectLight);
+    world.ForEach<he::SpotLight>(collectLight);
 
     // 无光源时提供默认方向光
     if (pc.lightCount == 0) {
