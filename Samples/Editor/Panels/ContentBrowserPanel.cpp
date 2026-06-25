@@ -24,13 +24,15 @@ void ContentBrowserPanel::Render() {
 
     ImGui::NextColumn();
 
-    // 路径导航
-    ImGui::Text("Path: %s", m_CurrentPath.c_str());
-    ImGui::SameLine();
+    // 路径导航：.. 按钮在前，防止被路径文字挤出视野
     if (ImGui::Button("..")) {
         auto parent = std::filesystem::path(m_CurrentPath).parent_path();
-        if (!parent.empty()) m_CurrentPath = parent.string();
+        String parentStr = parent.string();
+        // 防止退到 Content 目录之上（parent_path 对 "Content" 返回 ""）
+        if (!parentStr.empty()) m_CurrentPath = parentStr;
     }
+    ImGui::SameLine();
+    ImGui::Text("Path: %s", m_CurrentPath.c_str());
     ImGui::Separator();
 
     RenderFileGrid();
@@ -57,6 +59,7 @@ void ContentBrowserPanel::RenderDirectoryTree() {
 
 void ContentBrowserPanel::RenderFileGrid() {
     std::error_code ec;
+    int itemCount = 0; // 非 static，每帧重置
     for (auto& entry : std::filesystem::directory_iterator(m_CurrentPath, ec)) {
         if (entry.is_regular_file()) {
             String name = entry.path().filename().string();
@@ -104,7 +107,6 @@ void ContentBrowserPanel::RenderFileGrid() {
             ImGui::EndGroup();
 
             // 每行 4 个，自动换行
-            static int itemCount = 0;
             itemCount++;
             if (itemCount % 4 != 0)
                 ImGui::SameLine();
