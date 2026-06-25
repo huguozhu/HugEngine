@@ -30,6 +30,7 @@ if(GLSLANG_VALIDATOR)
     # Collect all .vert / .frag files
     file(GLOB VERT_SHADERS "${SHADER_DIR}/*.vert")
     file(GLOB FRAG_SHADERS "${SHADER_DIR}/*.frag")
+    file(GLOB GLSL_INCLUDES "${SHADER_DIR}/*.glsl")  # 公共头文件依赖
 
     set(SPV_FILES "")
 
@@ -40,8 +41,8 @@ if(GLSLANG_VALIDATOR)
         add_custom_command(
             OUTPUT ${SPV}
             COMMAND ${CMAKE_COMMAND} -E make_directory ${SPV_OUT_DIR}
-            COMMAND ${GLSLANG_VALIDATOR} -V -S vert ${SRC} -o ${SPV}
-            DEPENDS ${SRC}
+            COMMAND ${GLSLANG_VALIDATOR} -V -S vert -I"${SHADER_DIR}" ${SRC} -o ${SPV}
+            DEPENDS ${SRC} ${GLSL_INCLUDES}
             COMMENT "SPIR-V: ${NAME}.vert"
         )
         list(APPEND SPV_FILES ${SPV})
@@ -54,8 +55,8 @@ if(GLSLANG_VALIDATOR)
         add_custom_command(
             OUTPUT ${SPV}
             COMMAND ${CMAKE_COMMAND} -E make_directory ${SPV_OUT_DIR}
-            COMMAND ${GLSLANG_VALIDATOR} -V -S frag ${SRC} -o ${SPV}
-            DEPENDS ${SRC}
+            COMMAND ${GLSLANG_VALIDATOR} -V -S frag -I"${SHADER_DIR}" ${SRC} -o ${SPV}
+            DEPENDS ${SRC} ${GLSL_INCLUDES}
             COMMENT "SPIR-V: ${NAME}.frag"
         )
         list(APPEND SPV_FILES ${SPV})

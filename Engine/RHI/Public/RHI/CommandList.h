@@ -62,6 +62,18 @@ public:
                              u32 firstIndex = 0, i32 vertexOffset = 0,
                              u32 firstInstance = 0) = 0;
 
+    // Push constants（小型常量数据，直接推送到 GPU 寄存器）
+    virtual void SetPushConstants(u32 offset, u32 size, const void* data) = 0;
+
+    // Pipeline barrier（资源状态转换 / 同步）
+    virtual void PipelineBarrier(
+        PipelineStage srcStage, PipelineStage dstStage,
+        ResourceState srcState, ResourceState dstState) = 0;
+
+    // 缓冲拷贝（GPU 端）
+    virtual void CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst,
+                            u64 size, u64 srcOffset = 0, u64 dstOffset = 0) = 0;
+
     virtual void Submit() = 0;
 };
 

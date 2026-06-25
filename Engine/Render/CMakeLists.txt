@@ -5,6 +5,7 @@ add_library(HugEngineRender STATIC)
 
 target_sources(HugEngineRender PRIVATE
     Private/RenderGraph.cpp
+    Private/Pipeline/ForwardPipeline.cpp
 )
 
 target_include_directories(HugEngineRender

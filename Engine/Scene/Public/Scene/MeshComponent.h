@@ -43,6 +43,8 @@ public:
 
     // 材质
     float4 baseColorFactor = float4(1.0f);
+    float  metallicFactor  = 0.0f;     // 金属度 [0,1]
+    float  roughnessFactor = 0.8f;     // 粗糙度 [0.04,1]
     String baseColorTexture; // 纹理路径（后续用 Asset 系统加载）
 
 private:

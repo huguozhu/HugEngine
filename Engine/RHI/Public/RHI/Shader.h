@@ -12,6 +12,16 @@
 
 namespace he::rhi {
 
+// --- Push constant 范围描述 ---
+// stageMask 使用 Vulkan VkShaderStageFlagBits 位掩码值：
+//   1 = VERTEX, 16 = FRAGMENT, 32 = COMPUTE, ...
+// 组合示例: stageMask = 1 | 16 → Vertex + Fragment 可见
+struct PushConstantRange {
+    u32 stageMask = 1;          // VK_SHADER_STAGE_VERTEX_BIT（默认 Vertex）
+    u32 offset    = 0;          // 起始偏移（字节）
+    u32 size      = 128;        // 大小（字节），最大 256
+};
+
 // --- Shader bytecode (pre-compiled) ---
 struct ShaderBytecode {
     ShaderStage             stage = ShaderStage::Vertex;
@@ -66,6 +76,15 @@ struct PipelineStateDesc {
 
     // Multisampling
     u32                 sampleCount     = 1;
+
+    // Pipeline bind point（图形 / 计算）
+    PipelineBindPoint   bindPoint       = PipelineBindPoint::Graphics;
+
+    // Push constant ranges（用于管线布局）
+    std::vector<PushConstantRange> pushConstantRanges;
+
+    // Subpass index（默认 0，用于 Deferred 渲染的多 Subpass）
+    u32                 subpassIndex    = 0;
 
     // Debug
     String              debugName;

@@ -162,7 +162,36 @@ void VulkanDevice::Initialize(const DeviceInitDesc& desc) {
 
     HE_CORE_INFO("Vulkan instance created");
 
-    // 2. Create surface
+    // 2. 设置调试回调（在创建 instance 后立即设置）
+    if (m_ValidationEnabled) {
+        VkDebugUtilsMessengerCreateInfoEXT debugInfo{};
+        debugInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+        debugInfo.messageSeverity =
+            VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+            VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+        debugInfo.messageType =
+            VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+            VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+            VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+        debugInfo.pfnUserCallback = [](
+            VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+            VkDebugUtilsMessageTypeFlagsEXT,
+            const VkDebugUtilsMessengerCallbackDataEXT* data,
+            void*) -> VkBool32 {
+            if (severity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
+                HE_CORE_WARN("[Vulkan] {}", data->pMessage);
+            }
+            return VK_FALSE;
+        };
+        auto pfnCreate = (PFN_vkCreateDebugUtilsMessengerEXT)
+            vkGetInstanceProcAddr(m_Instance, "vkCreateDebugUtilsMessengerEXT");
+        if (pfnCreate) {
+            pfnCreate(m_Instance, &debugInfo, nullptr, &m_DebugMessenger);
+            HE_CORE_INFO("Vulkan debug messenger attached");
+        }
+    }
+
+    // 3. Create surface
     CreateSurface(desc.windowHandle);
 
     // 3. Select physical device
@@ -676,6 +705,79 @@ void VulkanCommandList::DrawIndexed(u32 indexCount, u32 instanceCount,
     }
     vkCmdDrawIndexed(m_CmdBuffer, indexCount, instanceCount,
                      firstIndex, vertexOffset, firstInstance);
+}
+
+void VulkanCommandList::SetPushConstants(u32 offset, u32 size, const void* data) {
+    if (m_CurrentLayout) {
+        vkCmdPushConstants(m_CmdBuffer, m_CurrentLayout,
+                          VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                          offset, size, data);
+    }
+}
+
+// ResourceState → VkImageLayout 映射
+static VkImageLayout ToVkImageLayout(ResourceState state) {
+    switch (state) {
+        case ResourceState::RenderTarget:       return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        case ResourceState::DepthStencilWrite:  return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        case ResourceState::DepthStencilRead:   return VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+        case ResourceState::ShaderResource:     return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        case ResourceState::Present:            return VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        case ResourceState::CopySrc:            return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        case ResourceState::CopyDst:            return VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        case ResourceState::UnorderedAccess:    return VK_IMAGE_LAYOUT_GENERAL;
+        default:                                return VK_IMAGE_LAYOUT_UNDEFINED;
+    }
+}
+
+void VulkanCommandList::PipelineBarrier(
+    PipelineStage srcStage, PipelineStage dstStage,
+    ResourceState srcState, ResourceState dstState)
+{
+    // 仅处理全局内存屏障（简化实现，后续版本会扩展为 Image Buffer Barrier）
+    VkMemoryBarrier memoryBarrier{};
+    memoryBarrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    memoryBarrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+    memoryBarrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+
+    // PipelineStage → VkPipelineStageFlags 映射
+    VkPipelineStageFlags vkSrcStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    VkPipelineStageFlags vkDstStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+
+    if (u32(srcStage) & u32(PipelineStage::ColorAttachmentOutput))
+        vkSrcStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    if (u32(srcStage) & u32(PipelineStage::FragmentShader))
+        vkSrcStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    if (u32(srcStage) & u32(PipelineStage::ComputeShader))
+        vkSrcStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    if (u32(srcStage) & u32(PipelineStage::Transfer))
+        vkSrcStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+
+    if (u32(dstStage) & u32(PipelineStage::FragmentShader))
+        vkDstStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    if (u32(dstStage) & u32(PipelineStage::ColorAttachmentOutput))
+        vkDstStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    if (u32(dstStage) & u32(PipelineStage::ComputeShader))
+        vkDstStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    if (u32(dstStage) & u32(PipelineStage::Transfer))
+        vkDstStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+
+    vkCmdPipelineBarrier(m_CmdBuffer,
+        vkSrcStage, vkDstStage,
+        0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
+}
+
+void VulkanCommandList::CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst,
+                                    u64 size, u64 srcOffset, u64 dstOffset) {
+    auto* vkSrc = static_cast<VulkanBuffer*>(src);
+    auto* vkDst = static_cast<VulkanBuffer*>(dst);
+
+    VkBufferCopy region{};
+    region.srcOffset = srcOffset;
+    region.dstOffset = dstOffset;
+    region.size      = size;
+
+    vkCmdCopyBuffer(m_CmdBuffer, vkSrc->GetHandle(), vkDst->GetHandle(), 1, &region);
 }
 
 void VulkanCommandList::Submit() {

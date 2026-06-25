@@ -6,6 +6,8 @@ add_library(HugEngineScene STATIC)
 target_sources(HugEngineScene PRIVATE
     Private/World.cpp
     Private/SceneGraph.cpp
+    Private/MeshComponent.cpp
+    Private/SceneReflect.cpp
 )
 
 target_include_directories(HugEngineScene

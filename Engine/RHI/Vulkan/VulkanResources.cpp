@@ -592,18 +592,39 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     binding.stride    = desc.vertexLayout.stride > 0 ? desc.vertexLayout.stride : 8;
     binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-    VkVertexInputAttributeDescription attr{};
-    attr.location = 0;
-    attr.binding  = 0;
-    attr.format   = VK_FORMAT_R32G32_SFLOAT;
-    attr.offset   = 0;
+    // VertexFormat -> VkFormat 映射
+    auto toVkVertexFormat = [](VertexFormat fmt) -> VkFormat {
+        switch (fmt) {
+            case VertexFormat::Float:   return VK_FORMAT_R32_SFLOAT;
+            case VertexFormat::Float2:  return VK_FORMAT_R32G32_SFLOAT;
+            case VertexFormat::Float3:  return VK_FORMAT_R32G32B32_SFLOAT;
+            case VertexFormat::Float4:  return VK_FORMAT_R32G32B32A32_SFLOAT;
+            case VertexFormat::UByte4_Norm: return VK_FORMAT_R8G8B8A8_UNORM;
+            case VertexFormat::Byte4_Norm:  return VK_FORMAT_R8G8B8A8_SNORM;
+            case VertexFormat::UInt:    return VK_FORMAT_R32_UINT;
+            case VertexFormat::UInt2:   return VK_FORMAT_R32G32_UINT;
+            case VertexFormat::UInt4:   return VK_FORMAT_R32G32B32A32_UINT;
+            default:                    return VK_FORMAT_R32G32B32_SFLOAT;
+        }
+    };
+
+    // 根据 desc.vertexLayout 构建 Vulkan 属性列表
+    std::vector<VkVertexInputAttributeDescription> vkAttrs;
+    for (auto& attr : desc.vertexLayout.attributes) {
+        VkVertexInputAttributeDescription va{};
+        va.location = attr.location;
+        va.binding  = attr.binding;
+        va.format   = toVkVertexFormat(attr.format);
+        va.offset   = attr.offset;
+        vkAttrs.push_back(va);
+    }
 
     VkPipelineVertexInputStateCreateInfo vertexInput{};
     vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     vertexInput.vertexBindingDescriptionCount   = 1;
     vertexInput.pVertexBindingDescriptions      = &binding;
-    vertexInput.vertexAttributeDescriptionCount = 1;
-    vertexInput.pVertexAttributeDescriptions    = &attr;
+    vertexInput.vertexAttributeDescriptionCount = static_cast<u32>(vkAttrs.size());
+    vertexInput.pVertexAttributeDescriptions    = vkAttrs.data();
 
     // 4. Input assembly
     VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
@@ -651,8 +672,20 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     dynState.dynamicStateCount = 2;
     dynState.pDynamicStates    = dyn;
 
+    // 构建 push constant ranges（直接使用 stageMask 位掩码）
+    std::vector<VkPushConstantRange> vkPushRanges;
+    for (auto& pcRange : desc.pushConstantRanges) {
+        VkPushConstantRange vkRange{};
+        vkRange.stageFlags = pcRange.stageMask;  // 直接使用 Vulkan 兼容的位掩码
+        vkRange.offset     = pcRange.offset;
+        vkRange.size       = pcRange.size;
+        vkPushRanges.push_back(vkRange);
+    }
+
     VkPipelineLayoutCreateInfo layoutInfo{};
-    layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layoutInfo.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layoutInfo.pushConstantRangeCount = static_cast<u32>(vkPushRanges.size());
+    layoutInfo.pPushConstantRanges    = vkPushRanges.empty() ? nullptr : vkPushRanges.data();
     VkPipelineLayout pipelineLayout;
     vkCreatePipelineLayout(device, &layoutInfo, nullptr, &pipelineLayout);
 

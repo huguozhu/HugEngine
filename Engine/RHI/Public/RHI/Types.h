@@ -158,4 +158,124 @@ struct DeviceCaps {
     bool    supportsSamplerFeedback = false;
 };
 
+// --- 管线绑定点 ---
+enum class PipelineBindPoint : u8 {
+    Graphics,   // 图形管线
+    Compute,    // 计算管线
+};
+
+// --- 描述符类型 ---
+enum class DescriptorType : u8 {
+    UniformBuffer,              // 常量缓冲区
+    StorageBuffer,              // 结构化缓冲区（读写）
+    CombinedImageSampler,       // 组合图像+采样器
+    StorageImage,               // 存储图像（读写）
+    Sampler,                    // 独立采样器
+    InputAttachment,            // 输入附件（用于 SubPass）
+};
+
+// --- 描述符集布局 ---
+struct DescriptorSetLayoutBinding {
+    u32             binding     = 0;        // binding 编号
+    DescriptorType  type        = DescriptorType::UniformBuffer;
+    u32             count       = 1;        // 数组元素数（bindless 时可能很大）
+    ShaderStage     stageFlags  = ShaderStage::Vertex;  // 可见的着色器阶段
+    bool            bindless    = false;    // 是否为无绑定数组（变长 descriptor count）
+};
+
+struct DescriptorSetLayoutDesc {
+    std::vector<DescriptorSetLayoutBinding> bindings;
+};
+
+// --- 资源状态（用于 Barrier 推导）---
+enum class ResourceState : u32 {
+    Undefined               = 0,
+    // 通用
+    Common                  = 1 << 0,
+    // 顶点/索引缓冲
+    VertexAndConstantBuffer = 1 << 1,
+    IndexBuffer             = 1 << 2,
+    // 渲染目标
+    RenderTarget            = 1 << 3,
+    // 深度模板
+    DepthStencilRead        = 1 << 4,
+    DepthStencilWrite       = 1 << 5,
+    // 着色器资源
+    ShaderResource          = 1 << 6,
+    UnorderedAccess         = 1 << 7,
+    // 拷贝
+    CopySrc                 = 1 << 8,
+    CopyDst                 = 1 << 9,
+    // 呈现
+    Present                 = 1 << 10,
+    // 间接绘制
+    IndirectArgument        = 1 << 11,
+};
+
+inline ResourceState operator|(ResourceState a, ResourceState b) { return ResourceState(u32(a) | u32(b)); }
+inline ResourceState operator&(ResourceState a, ResourceState b) { return ResourceState(u32(a) & u32(b)); }
+inline bool          operator!(ResourceState a)                  { return u32(a) == 0; }
+
+// --- 管线阶段标志（用于 Barrier）---
+enum class PipelineStage : u32 {
+    None                        = 0,
+    TopOfPipe                   = 1 << 0,
+    DrawIndirect                = 1 << 1,
+    VertexInput                 = 1 << 2,
+    VertexShader                = 1 << 3,
+    FragmentShader              = 1 << 4,
+    EarlyFragmentTests          = 1 << 5,
+    LateFragmentTests           = 1 << 6,
+    ColorAttachmentOutput       = 1 << 7,
+    ComputeShader               = 1 << 8,
+    Transfer                    = 1 << 9,
+    BottomOfPipe                = 1 << 10,
+};
+
+inline PipelineStage operator|(PipelineStage a, PipelineStage b) { return PipelineStage(u32(a) | u32(b)); }
+
+// --- 访问标志（用于 Barrier）---
+enum class AccessFlags : u32 {
+    None                        = 0,
+    IndirectCommandRead         = 1 << 0,
+    IndexRead                   = 1 << 1,
+    VertexAttributeRead         = 1 << 2,
+    UniformRead                 = 1 << 3,
+    ShaderRead                  = 1 << 4,
+    ShaderWrite                 = 1 << 5,
+    ColorAttachmentRead         = 1 << 6,
+    ColorAttachmentWrite        = 1 << 7,
+    DepthStencilAttachmentRead  = 1 << 8,
+    DepthStencilAttachmentWrite = 1 << 9,
+    TransferRead                = 1 << 10,
+    TransferWrite               = 1 << 11,
+    MemoryRead                  = 1 << 12,
+    MemoryWrite                 = 1 << 13,
+};
+
+inline AccessFlags operator|(AccessFlags a, AccessFlags b) { return AccessFlags(u32(a) | u32(b)); }
+
+// --- 间接绘制命令（GPU 可写结构）---
+struct IndirectDrawCommand {
+    u32 vertexCount;        // 顶点数量
+    u32 instanceCount;      // 实例数量
+    u32 firstVertex;        // 起始顶点偏移
+    u32 firstInstance;      // 起始实例偏移
+};
+
+struct IndirectDrawIndexedCommand {
+    u32 indexCount;         // 索引数量
+    u32 instanceCount;      // 实例数量
+    u32 firstIndex;         // 起始索引偏移
+    i32 vertexOffset;       // 顶点偏移
+    u32 firstInstance;      // 起始实例偏移
+};
+
+// --- 计算间接调度命令 ---
+struct DispatchIndirectCommand {
+    u32 groupCountX;        // X 方向工作组数
+    u32 groupCountY;        // Y 方向工作组数
+    u32 groupCountZ;        // Z 方向工作组数
+};
+
 } // namespace he::rhi

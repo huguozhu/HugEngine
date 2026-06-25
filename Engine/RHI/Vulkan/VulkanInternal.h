@@ -91,6 +91,11 @@ public:
     void Draw(u32 vertexCount, u32 instanceCount, u32 firstVertex, u32 firstInstance) override;
     void DrawIndexed(u32 indexCount, u32 instanceCount, u32 firstIndex,
                      i32 vertexOffset, u32 firstInstance) override;
+    void SetPushConstants(u32 offset, u32 size, const void* data) override;
+    void PipelineBarrier(PipelineStage srcStage, PipelineStage dstStage,
+                         ResourceState srcState, ResourceState dstState) override;
+    void CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst,
+                    u64 size, u64 srcOffset, u64 dstOffset) override;
     void Submit() override;
 
     // Phase 1 桥接：直接设置 Framebuffer
