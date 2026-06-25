@@ -96,10 +96,19 @@ void ForwardPipeline::RenderScene(
     auto renderMesh = [&](he::Entity e, he::MeshComponent& mesh) {
         if (mesh.GetIndexCount() == 0) return;
         float4x4 worldMatrix = sceneGraph.GetWorldMatrix(e);
+
+        // 从 MeshComponent 读取所有 glTF 材质参数
         PBRMaterial mat = GetDefaultMaterial();
         mat.baseColorFactor = mesh.baseColorFactor;
+        mat.emissiveFactor  = mesh.emissiveFactor;
         mat.metallicFactor  = mesh.metallicFactor;
         mat.roughnessFactor = mesh.roughnessFactor;
+        mat.aoFactor        = mesh.aoFactor;
+        mat.alphaCutoff     = mesh.alphaCutoff;
+        mat.alphaMode       = static_cast<AlphaMode>(mesh.alphaMode);
+        mat.doubleSided     = mesh.doubleSided;
+        mat.unlit           = mesh.unlit;
+
         DrawMesh(cmd, &mesh, worldMatrix, viewProj, mat, camera, lighting);
         drawCount++;
     };
@@ -151,12 +160,8 @@ void ForwardPipeline::DrawMesh(
     PushConstantData pc = lighting;
     pc.modelMatrix    = worldMatrix;
     pc.viewProjMatrix = viewProjMatrix;
-    pc.baseColorFactor  = material.baseColorFactor;
-    pc.metallicFactor   = material.metallicFactor;
-    pc.roughnessFactor  = material.roughnessFactor;
-    pc.aoFactor         = material.aoFactor;
-    pc.alphaCutoff      = material.alphaCutoff;
-    pc.cameraPosition   = float4(camera.position, 0.0f);
+    FillMaterialPushConstants(pc, material);
+    pc.cameraPosition = float4(camera.position, 0.0f);
 
     // 推送常量
     cmd->SetPushConstants(0, sizeof(PushConstantData), &pc);

@@ -10,12 +10,12 @@
 // ============================================================
 // MeshComponent — 网格渲染组件
 //
-// 存储顶点/索引缓冲引用 + 包围盒
+// 存储顶点/索引缓冲引用 + 包围盒 + glTF 2.0 PBR 材质
 // ============================================================
 
 namespace he {
 
-/// 静态网格顶点（Phase 1: 仅位置）
+/// 静态网格顶点
 struct StaticVertex {
     float3 position;
     float3 normal;
@@ -25,7 +25,7 @@ struct StaticVertex {
 class MeshComponent : public Component {
     HE_COMPONENT()
 public:
-    /// 设置网格数据（由 Asset 加载器调用）
+    /// 设置网格数据（由 Asset 加载器或 Shape 组件调用）
     void SetMeshData(
         const TArray<StaticVertex>& vertices,
         const TArray<u32>& indices
@@ -41,11 +41,23 @@ public:
     /// 包围盒
     AABB GetBounds() const { return m_Bounds; }
 
-    // 材质
-    float4 baseColorFactor = float4(1.0f);
-    float  metallicFactor  = 0.0f;     // 金属度 [0,1]
-    float  roughnessFactor = 0.8f;     // 粗糙度 [0.04,1]
-    String baseColorTexture; // 纹理路径（后续用 Asset 系统加载）
+    // --- glTF 2.0 PBR 材质参数 ---
+    float4 baseColorFactor   = float4(1.0f);     // 基础色 RGBA
+    float3 emissiveFactor    = float3(0.0f);     // 自发光 RGB
+    float  metallicFactor    = 0.0f;             // 金属度 [0,1]
+    float  roughnessFactor   = 0.8f;             // 粗糙度 [0.04,1]
+    float  aoFactor          = 1.0f;             // 环境光遮蔽强度
+    float  alphaCutoff       = 0.5f;             // Alpha 截断阈值
+    bool   doubleSided       = false;            // 双面渲染
+    bool   unlit             = false;            // 无光照模式
+    u8     alphaMode         = 0;                // AlphaMode: 0=Opaque, 1=Mask, 2=Blend
+
+    // --- 纹理路径（Phase 2 中期通过 Bindless 采样）---
+    String baseColorTexture;            // 基础色纹理
+    String normalTexture;               // 法线贴图
+    String metallicRoughnessTexture;    // 金属度+粗糙度纹理
+    String occlusionTexture;            // 环境光遮蔽纹理
+    String emissiveTexture;             // 自发光纹理
 
 private:
     std::unique_ptr<rhi::IRHIBuffer> m_VertexBuffer;

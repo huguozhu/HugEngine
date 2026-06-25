@@ -22,9 +22,12 @@ struct FSInput {
     float    roughnessFactor;   // [148]
     float    aoFactor;          // [152]
     float    alphaCutoff;       // [156]
-    float4   cameraPosition;    // [160..176]
-    float4   lightDirection;    // [176..192]
-    float4   lightColor;        // [192..208]
+    float4   emissiveFactor;    // [160..176]
+    float4   cameraPosition;    // [176..192]
+    float4   lightDirection;    // [192..208]
+    float4   lightColor;        // [208..224]
+    uint     materialFlags;     // [224]
+    uint     _pad[3];           // [228..240]
 };
 
 // ============================================================
@@ -65,6 +68,7 @@ float4 fragmentMain(FSInput input) : SV_Target0 {
     float3 color = PBR_BRDF(albedo, metallic, roughness, N, V, L) * lightRadiance;
     color *= ao;
     color += albedo * 0.03 * ao;  // 简单环境光
+    color += emissiveFactor.rgb;   // 自发光（线性空间，不受光照影响）
 
     // ACES ToneMapping + sRGB 输出
     float3 mapped = ACESFilm(color);

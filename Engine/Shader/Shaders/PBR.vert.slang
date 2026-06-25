@@ -19,9 +19,12 @@ layout(location = 2) in float2 inUV;
     float    roughnessFactor;   // [148]
     float    aoFactor;          // [152]
     float    alphaCutoff;       // [156]
-    float4   cameraPosition;    // [160..176]
-    float4   lightDirection;    // [176..192]
-    float4   lightColor;        // [192..208]
+    float4   emissiveFactor;    // [160..176]
+    float4   cameraPosition;    // [176..192]
+    float4   lightDirection;    // [192..208]
+    float4   lightColor;        // [208..224]
+    uint     materialFlags;     // [224]
+    uint     _pad[3];           // [228..240]
 };
 
 // --- 顶点输出结构体 ---
