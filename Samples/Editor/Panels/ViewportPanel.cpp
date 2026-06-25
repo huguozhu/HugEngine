@@ -5,7 +5,6 @@
 #include "Render/Pipeline/ForwardPipeline.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
-#include "imgui.h"
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -39,9 +38,6 @@ void ViewportPanel::Render(rhi::IRHICommandList* cmdList) {
     float dt = static_cast<float>(now - lastTime);
     lastTime = now;
 
-    // ��ȡ�ӿ�ʵ�ʳߴ粢����������߱ȣ�ȷ������ʼ����ȷ�����ӿ�����
-    auto viewportSize = ImGui::GetContentRegionAvail();
-    m_Camera.SetAspectRatio(viewportSize.x, viewportSize.y);
 
     // ���±༭�����
     UpdateCamera(dt);
