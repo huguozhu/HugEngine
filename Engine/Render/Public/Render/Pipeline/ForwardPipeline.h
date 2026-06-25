@@ -55,8 +55,18 @@ private:
         const CameraData& camera,
         const PushConstantData& lighting);
 
+    // 将 CPU 端 GPULight 数组上传到 Storage Buffer（每帧调用）
+    void UploadLightBuffer();
+
     rhi::IRHIDevice* m_Device = nullptr;
     std::unique_ptr<rhi::IRHIPipelineState> m_PBR_PSO;
+
+    // Descriptor Set + Storage Buffer（多光源）
+    rhi::DescriptorSetLayoutHandle m_LightDescLayout = rhi::kInvalidLayout;
+    rhi::DescriptorSetHandle       m_LightDescSet    = rhi::kInvalidSet;
+    std::unique_ptr<rhi::IRHIBuffer> m_LightBuffer;
+
+    // 着色器字节码
     rhi::ShaderBytecode m_VS;
     rhi::ShaderBytecode m_FS;
 };

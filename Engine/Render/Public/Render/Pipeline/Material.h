@@ -41,14 +41,12 @@ struct alignas(16) GPULight {
 static_assert(sizeof(GPULight) == 64, "GPULight must be 64 bytes");
 
 // ============================================================
-// Push Constant 数据（每物体，256 字节）
+// Push Constant 数据（每物体，192 字节）
+// 光照数据已移至 Storage Buffer（Descriptor Set）
 // ============================================================
 struct alignas(16) PushConstantData {
-    // --- 顶点着色器 ---
     float4x4 modelMatrix;           // [0..64]
     float4x4 viewProjMatrix;        // [64..128]
-
-    // --- 片元着色器：材质 ---
     float4   baseColorFactor;       // [128..144]
     float    metallicFactor;        // [144]
     float    roughnessFactor;       // [148]
@@ -56,14 +54,9 @@ struct alignas(16) PushConstantData {
     float    alphaCutoff;           // [156]
     float4   emissiveFactor;        // [160..176]
     float4   cameraPosition;        // [176..192]
-
-    // --- 片元着色器：光照 ---
     u32      lightCount;            // [192]
     u32      materialFlags;         // [196]
-    float2   lightConeAngles;       // [200]  (内锥角, 外锥角)
-    float4   lightColorIntensity;   // [208..224] xyz=颜色, w=强度
-    float4   lightDirectionType;    // [224..240] xyz=方向, w=类型
-    float4   lightPositionRange;    // [240..256] xyz=位置, w=范围
+    u32      _pad[14];              // [200..256]
 };
 
 static_assert(sizeof(PushConstantData) == 256,

@@ -83,6 +83,9 @@ struct PipelineStateDesc {
     // Push constant ranges（用于管线布局）
     std::vector<PushConstantRange> pushConstantRanges;
 
+    // Descriptor set layouts（Pipeline Layout 使用，预先通过设备接口创建）
+    std::vector<DescriptorSetLayoutHandle> descriptorSetLayouts;
+
     // Subpass index（默认 0，用于 Deferred 渲染的多 Subpass）
     u32                 subpassIndex    = 0;
 

@@ -187,6 +187,12 @@ struct DescriptorSetLayoutDesc {
     std::vector<DescriptorSetLayoutBinding> bindings;
 };
 
+// --- 描述符句柄（不透明，Vulkan 内部实现）---
+using DescriptorSetLayoutHandle = u64;
+using DescriptorSetHandle        = u64;
+constexpr DescriptorSetLayoutHandle kInvalidLayout = 0;
+constexpr DescriptorSetHandle       kInvalidSet    = 0;
+
 // --- 资源状态（用于 Barrier 推导）---
 enum class ResourceState : u32 {
     Undefined               = 0,

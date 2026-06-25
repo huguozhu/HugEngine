@@ -72,9 +72,12 @@ private:
 // ============================================================
 // VulkanCommandList — 完整定义（供 Sample 和内部分享）
 // ============================================================
+class VulkanDevice; // 前向声明
+
 class VulkanCommandList final : public IRHICommandList {
 public:
-    VulkanCommandList(VkDevice device, VkQueue queue, u32 queueFamily);
+    VulkanCommandList(VkDevice device, VkQueue queue, u32 queueFamily,
+                      VulkanDevice* vulkanDevice = nullptr);
     ~VulkanCommandList() override;
 
     void Begin() override;
@@ -88,6 +91,7 @@ public:
     void SetIndexBuffer(IRHIBuffer* buffer, u32 offset) override;
     void SetViewport(const Viewport& vp) override;
     void SetScissor(const ScissorRect& sc) override;
+    void BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) override;
     void Draw(u32 vertexCount, u32 instanceCount, u32 firstVertex, u32 firstInstance) override;
     void DrawIndexed(u32 indexCount, u32 instanceCount, u32 firstIndex,
                      i32 vertexOffset, u32 firstInstance) override;
@@ -116,6 +120,7 @@ public:
 private:
     VkDevice         m_Device      = VK_NULL_HANDLE;
     VkQueue          m_Queue       = VK_NULL_HANDLE;
+    VulkanDevice*    m_VulkanDevice = nullptr;  // 用于 DescriptorSet 句柄解析
     u32              m_QueueFamily = 0;
 
     VkCommandPool    m_CmdPool     = VK_NULL_HANDLE;

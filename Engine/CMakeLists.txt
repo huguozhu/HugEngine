@@ -5,8 +5,11 @@
 # Core — Platform, Math, Memory, Containers, Threading (L0)
 add_subdirectory(Core)
 
-# Reflect — 宏驱动反射系统 (L1)
+# Reflect — 反射系统 (L1)
 add_subdirectory(Reflect)
+
+# Serialize — 序列化（基于反射）
+add_subdirectory(Serialize)
 
 # RHI — Rendering Hardware Interface (L2)
 add_subdirectory(RHI)

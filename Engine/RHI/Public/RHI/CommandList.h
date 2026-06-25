@@ -63,6 +63,8 @@ public:
                              u32 firstInstance = 0) = 0;
 
     // Push constants（小型常量数据，直接推送到 GPU 寄存器）
+    virtual void BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) = 0;
+
     virtual void SetPushConstants(u32 offset, u32 size, const void* data) = 0;
 
     // Pipeline barrier（资源状态转换 / 同步）

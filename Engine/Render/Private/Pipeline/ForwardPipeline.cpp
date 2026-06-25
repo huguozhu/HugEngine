@@ -34,29 +34,53 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         { 2, 0, rhi::VertexFormat::Float2, offsetof(he::StaticVertex, uv) },
     };
 
+    // --- 3. 先创建 DescriptorSetLayout（PSO 创建时需要）---
+    rhi::DescriptorSetLayoutDesc lightLayoutDesc;
+    lightLayoutDesc.bindings = {
+        { 1, rhi::DescriptorType::StorageBuffer, 1, rhi::ShaderStage::Pixel },
+    };
+    m_LightDescLayout = device->CreateDescriptorSetLayout(lightLayoutDesc);
+
+    // --- 4. Push constant + PSO ---
     rhi::PushConstantRange pcRange;
-    pcRange.stageMask = 1 | 16;  // Vertex + Fragment
+    pcRange.stageMask = 1 | 16;
     pcRange.offset    = 0;
     pcRange.size      = sizeof(PushConstantData);
 
     rhi::PipelineStateDesc psoDesc;
-    psoDesc.vertexShader        = &m_VS;
-    psoDesc.pixelShader         = &m_FS;
-    psoDesc.vertexLayout        = vertexLayout;
-    psoDesc.topology            = rhi::PrimitiveTopology::TriangleList;
-    psoDesc.depthTest           = true;
-    psoDesc.depthWrite          = true;
-    psoDesc.depthCompare        = rhi::CompareFunc::LessEqual;
-    psoDesc.pushConstantRanges  = { pcRange };
-    psoDesc.debugName           = "ForwardPBR";
+    psoDesc.vertexShader         = &m_VS;
+    psoDesc.pixelShader          = &m_FS;
+    psoDesc.vertexLayout         = vertexLayout;
+    psoDesc.topology             = rhi::PrimitiveTopology::TriangleList;
+    psoDesc.depthTest            = true;
+    psoDesc.depthWrite           = true;
+    psoDesc.depthCompare         = rhi::CompareFunc::LessEqual;
+    psoDesc.pushConstantRanges   = { pcRange };
+    psoDesc.descriptorSetLayouts = { m_LightDescLayout };
+    psoDesc.debugName            = "ForwardPBR";
 
     m_PBR_PSO = device->CreatePipelineState(psoDesc);
     HE_ASSERT(m_PBR_PSO, "ForwardPipeline: failed to create PBR PSO");
+
+    // 创建 Storage Buffer（每帧填充）
+    rhi::BufferDesc lightBufDesc;
+    lightBufDesc.size  = sizeof(GPULight) * MAX_LIGHTS;
+    lightBufDesc.usage = rhi::BufferUsage::Storage;
+    m_LightBuffer = device->CreateBuffer(lightBufDesc);
+
+    // 分配 DescriptorSet 并绑定 Storage Buffer
+    m_LightDescSet = device->AllocateDescriptorSet(m_LightDescLayout);
+    device->UpdateDescriptorSet(m_LightDescSet, 1, rhi::DescriptorType::StorageBuffer,
+                                m_LightBuffer.get());
 
     HE_CORE_INFO("ForwardPipeline initialized");
 }
 
 void ForwardPipeline::Shutdown() {
+    if (m_Device) {
+        m_Device->DestroyDescriptorSetLayout(m_LightDescLayout);
+    }
+    m_LightBuffer.reset();
     m_PBR_PSO.reset();
     m_Device = nullptr;
     HE_CORE_INFO("ForwardPipeline shut down");
@@ -73,51 +97,57 @@ void ForwardPipeline::BeginFrame(rhi::IRHICommandList* cmd, u32 width, u32 heigh
 
 void ForwardPipeline::CollectLights(PushConstantData& pc, he::World& world, he::SceneGraph& sg) {
     pc.lightCount = 0;
-    pc.lightColorIntensity  = float4(1.0f, 1.0f, 1.0f, 0.0f);
-    pc.lightDirectionType   = float4(0.0f, -1.0f, 0.0f, 0.0f);
-    pc.lightPositionRange   = float4(0.0f, 0.0f, 0.0f, 1.0f);
-    pc.lightConeAngles      = float2(0.3f, 0.6f);
 
+    // 填入 Storage Buffer
     world.ForEach<he::LightComponent>([&](he::Entity e, he::LightComponent& lc) {
         if (pc.lightCount >= MAX_LIGHTS) return;
         u32 i = pc.lightCount;
 
-        // 填充光源数据
-        pc.lightColorIntensity  = float4(lc.color, lc.intensity);
-        pc.lightDirectionType   = float4(0.0f, -1.0f, 0.0f, static_cast<float>(u32(lc.type)));
-        pc.lightPositionRange   = float4(0.0f, 0.0f, 0.0f, 1.0f);
+        GPULight gl{};
+        gl.colorIntensity  = float4(lc.color, lc.intensity);
 
         switch (lc.type) {
         case he::LightType::Directional: {
             auto* dl = static_cast<he::DirectionalLight*>(&lc);
-            pc.lightDirectionType = float4(dl->direction, 0.0f);  // type=0
+            gl.directionType = float4(dl->direction, 0.0f);  // type=0
+            gl.positionRange = float4(0, 0, 0, 0);
             break;
         }
         case he::LightType::Point: {
             auto* pl = static_cast<he::PointLight*>(&lc);
             float3 pos = sg.GetWorldPosition(e);
-            pc.lightPositionRange = float4(pos, pl->range);
-            pc.lightDirectionType.w = 1.0f;  // type=1
+            gl.positionRange = float4(pos, pl->range);
+            gl.directionType = float4(0, -1, 0, 1.0f);  // type=1
             break;
         }
         case he::LightType::Spot: {
             auto* sl = static_cast<he::SpotLight*>(&lc);
             float3 pos = sg.GetWorldPosition(e);
-            float3 dir = sl->direction;  // TODO: Transform direction by entity rotation
-            pc.lightPositionRange = float4(pos, sl->range);
-            pc.lightDirectionType = float4(dir, 2.0f);  // type=2
-            pc.lightConeAngles   = float2(sl->innerConeAngle, sl->outerConeAngle);
+            gl.positionRange = float4(pos, sl->range);
+            gl.directionType = float4(sl->direction, 2.0f);  // type=2
+            gl.coneAngles   = float2(sl->innerConeAngle, sl->outerConeAngle);
             break;
         }
         }
+
+        // 写入 Storage Buffer
+        GPULight* lights = static_cast<GPULight*>(m_LightBuffer->Map());
+        if (lights) {
+            lights[i] = gl;
+        }
+        m_LightBuffer->Unmap();
         pc.lightCount++;
     });
 
-    // 无光源时使用默认方向光
+    // 无光源时提供默认方向光
     if (pc.lightCount == 0) {
         pc.lightCount = 1;
-        pc.lightColorIntensity = float4(1.0f, 0.95f, 0.85f, 5.0f);
-        pc.lightDirectionType  = float4(0.5f, -1.0f, 1.0f, 0.0f);
+        GPULight gl{};
+        gl.colorIntensity = float4(1.0f, 0.95f, 0.85f, 5.0f);
+        gl.directionType  = float4(0.5f, -1.0f, 1.0f, 0.0f);
+        GPULight* lights = static_cast<GPULight*>(m_LightBuffer->Map());
+        if (lights) lights[0] = gl;
+        m_LightBuffer->Unmap();
     }
 }
 
@@ -135,6 +165,9 @@ void ForwardPipeline::RenderScene(
     // 每帧收集光源数据
     PushConstantData lighting{};
     CollectLights(lighting, world, sceneGraph);
+
+    // 绑定光照 DescriptorSet（set=0，binding=1 = GPULight[]）
+    cmd->BindDescriptorSet(0, m_LightDescSet);
 
     auto renderMesh = [&](he::Entity e, he::MeshComponent& mesh) {
         if (mesh.GetIndexCount() == 0) return;

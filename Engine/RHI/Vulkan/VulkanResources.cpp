@@ -516,7 +516,8 @@ std::unique_ptr<IRHISampler> CreateVulkanSampler(
 }
 
 std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
-    VkDevice device, const PipelineStateDesc& desc)
+    VkDevice device, const PipelineStateDesc& desc,
+    const std::vector<VkDescriptorSetLayout>& descLayouts)
 {
     // 1. Create shader modules
     auto createShader = [&](const ShaderBytecode* bc, VkShaderStageFlagBits stage) -> VkShaderModule {
@@ -696,6 +697,8 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
 
     VkPipelineLayoutCreateInfo layoutInfo{};
     layoutInfo.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layoutInfo.setLayoutCount         = static_cast<u32>(descLayouts.size());
+    layoutInfo.pSetLayouts            = descLayouts.empty() ? nullptr : descLayouts.data();
     layoutInfo.pushConstantRangeCount = static_cast<u32>(vkPushRanges.size());
     layoutInfo.pPushConstantRanges    = vkPushRanges.empty() ? nullptr : vkPushRanges.data();
     VkPipelineLayout pipelineLayout;

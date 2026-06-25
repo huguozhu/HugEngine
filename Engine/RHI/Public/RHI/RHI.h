@@ -43,6 +43,13 @@ public:
     virtual std::unique_ptr<IRHISampler>        CreateSampler(const SamplerDesc& desc) = 0;
     virtual std::unique_ptr<IRHIPipelineState>  CreatePipelineState(const PipelineStateDesc& desc) = 0;
 
+    // --- Descriptor Sets ---
+    virtual DescriptorSetLayoutHandle CreateDescriptorSetLayout(const DescriptorSetLayoutDesc& desc) = 0;
+    virtual DescriptorSetHandle       AllocateDescriptorSet(DescriptorSetLayoutHandle layout) = 0;
+    virtual void                      UpdateDescriptorSet(DescriptorSetHandle set, u32 binding,
+                                                          DescriptorType type, IRHIBuffer* buffer) = 0;
+    virtual void                      DestroyDescriptorSetLayout(DescriptorSetLayoutHandle layout) = 0;
+
     // --- Commands ---
     virtual void Submit(IRHICommandList* cmdList) = 0;
     virtual void WaitIdle() = 0;
