@@ -56,6 +56,19 @@ public:
             callback(e);
     }
 
+    /// 遍历指定实体的所有组件（供序列化等遍历使用）
+    /// 回调参数为 Component* 基类指针，可通过 GetClass() 获取反射信息
+    void ForEachComponent(Entity entity, std::function<void(Component*)> callback) {
+        if (!IsValid(entity)) return;
+        for (auto& [typeIndex, bucket] : m_Store) {
+            for (auto& entry : bucket) {
+                if (entry.entityID == entity.id) {
+                    callback(entry.ptr.get());
+                }
+            }
+        }
+    }
+
     void  Update(f32 deltaTime);
 
 private:
