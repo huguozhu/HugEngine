@@ -34,8 +34,17 @@ private:
     /// 渲染单个 Mesh 材质属性
     void RenderMesh(he::World* world, he::Entity entity);
 
-    /// 渲染单个 Light 属性
-    void RenderLight(he::World* world, he::Entity entity);
+    /// 渲染 Light 基类公共属性（颜色/强度/阴影）
+    void RenderLightBase(he::World* world, he::Entity entity);
+
+    /// 渲染平行光属性
+    void RenderDirectionalLight(he::World* world, he::Entity entity);
+
+    /// 渲染点光源属性
+    void RenderPointLight(he::World* world, he::Entity entity);
+
+    /// 渲染聚光灯属性
+    void RenderSpotLight(he::World* world, he::Entity entity);
 
     EditorContext* m_Ctx = nullptr;
 };

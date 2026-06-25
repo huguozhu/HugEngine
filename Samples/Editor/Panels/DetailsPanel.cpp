@@ -46,8 +46,15 @@ void DetailsPanel::Render() {
     if (world->HasComponent<MeshComponent>(entity))
         RenderMesh(world, entity);
 
+    // 检测光照组件类型（平行光 / 点光源 / 聚光灯 / 基础光源）
     if (world->HasComponent<DirectionalLight>(entity))
-        RenderLight(world, entity);
+        RenderDirectionalLight(world, entity);
+    else if (world->HasComponent<PointLight>(entity))
+        RenderPointLight(world, entity);
+    else if (world->HasComponent<SpotLight>(entity))
+        RenderSpotLight(world, entity);
+    else if (world->HasComponent<LightComponent>(entity))
+        RenderLightBase(world, entity);
 }
 
 void DetailsPanel::RenderTransform(World* world, Entity entity) {
@@ -239,6 +246,154 @@ void DetailsPanel::RenderLight(World* world, Entity entity) {
                 "Change Light Intensity",
                 [light, oldIntensity]() { light->intensity = oldIntensity; },
                 [light, newIntensity]() { light->intensity = newIntensity; }
+            ));
+        }
+    }
+
+    // 投射阴影
+    bool oldShadow = light->castShadow;
+    if (ImGui::Checkbox("Cast Shadow", &light->castShadow)) {
+    }
+    if (ImGui::IsItemDeactivatedAfterEdit() && oldShadow != light->castShadow) {
+        cmdHistory->Execute(std::make_unique<PropertyChangeCommand>(
+            "Change Cast Shadow",
+            [light, oldShadow]() { light->castShadow = oldShadow; },
+            [light, s = light->castShadow]() { light->castShadow = s; }
+        ));
+    }
+}
+
+void DetailsPanel::RenderDirectionalLight(World* world, Entity entity) {
+    if (!ImGui::CollapsingHeader("Directional Light", ImGuiTreeNodeFlags_DefaultOpen))
+        return;
+
+    auto* light = world->GetComponent<DirectionalLight>(entity);
+    if (!light) return;
+    auto* cmdHistory = m_Ctx->GetCommandHistory();
+
+    // 光源公共属性
+    RenderLightBase(world, entity);
+
+    // 方向
+    float3 oldDir = light->direction;
+    float dir[3] = { oldDir.x, oldDir.y, oldDir.z };
+    if (ImGui::DragFloat3("Direction", dir, 0.05f, -1.0f, 1.0f)) {
+        light->direction = glm::normalize(float3(dir[0], dir[1], dir[2]));
+    }
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+        float3 newDir = glm::normalize(float3(dir[0], dir[1], dir[2]));
+        if (glm::any(glm::notEqual(oldDir, newDir))) {
+            cmdHistory->Execute(std::make_unique<PropertyChangeCommand>(
+                "Change Light Direction",
+                [light, oldDir]() { light->direction = oldDir; },
+                [light, newDir]() { light->direction = newDir; }
+            ));
+        }
+    }
+}
+
+void DetailsPanel::RenderPointLight(World* world, Entity entity) {
+    if (!ImGui::CollapsingHeader("Point Light", ImGuiTreeNodeFlags_DefaultOpen))
+        return;
+
+    auto* light = world->GetComponent<PointLight>(entity);
+    if (!light) return;
+    auto* cmdHistory = m_Ctx->GetCommandHistory();
+
+    // 光源公共属性
+    RenderLightBase(world, entity);
+
+    // 范围
+    float oldRange = light->range;
+    if (ImGui::DragFloat("Range", &light->range, 0.1f, 0.0f, 1000.0f)) {
+    }
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+        float newRange = light->range;
+        if (oldRange != newRange) {
+            cmdHistory->Execute(std::make_unique<PropertyChangeCommand>(
+                "Change Light Range",
+                [light, oldRange]() { light->range = oldRange; },
+                [light, newRange]() { light->range = newRange; }
+            ));
+        }
+    }
+}
+
+void DetailsPanel::RenderSpotLight(World* world, Entity entity) {
+    if (!ImGui::CollapsingHeader("Spot Light", ImGuiTreeNodeFlags_DefaultOpen))
+        return;
+
+    auto* light = world->GetComponent<SpotLight>(entity);
+    if (!light) return;
+    auto* cmdHistory = m_Ctx->GetCommandHistory();
+
+    // 光源公共属性
+    RenderLightBase(world, entity);
+
+    // 方向
+    float3 oldDir = light->direction;
+    float dir[3] = { oldDir.x, oldDir.y, oldDir.z };
+    if (ImGui::DragFloat3("Direction", dir, 0.05f, -1.0f, 1.0f)) {
+        light->direction = glm::normalize(float3(dir[0], dir[1], dir[2]));
+    }
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+        float3 newDir = glm::normalize(float3(dir[0], dir[1], dir[2]));
+        if (glm::any(glm::notEqual(oldDir, newDir))) {
+            cmdHistory->Execute(std::make_unique<PropertyChangeCommand>(
+                "Change Light Direction",
+                [light, oldDir]() { light->direction = oldDir; },
+                [light, newDir]() { light->direction = newDir; }
+            ));
+        }
+    }
+
+    // 范围
+    float oldRange = light->range;
+    if (ImGui::DragFloat("Range", &light->range, 0.1f, 0.0f, 1000.0f)) {
+    }
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+        float newRange = light->range;
+        if (oldRange != newRange) {
+            cmdHistory->Execute(std::make_unique<PropertyChangeCommand>(
+                "Change Light Range",
+                [light, oldRange]() { light->range = oldRange; },
+                [light, newRange]() { light->range = newRange; }
+            ));
+        }
+    }
+
+    // 内锥角 / 外锥角（UI 显示为角度，内部存储为弧度）
+    constexpr float RAD2DEG = 180.0f / 3.14159265f;
+    constexpr float DEG2RAD = 3.14159265f / 180.0f;
+
+    float oldInner = light->innerConeAngle;
+    float innerDeg = oldInner * RAD2DEG;
+    if (ImGui::SliderFloat("Inner Cone Angle", &innerDeg, 0.0f, 180.0f, "%.1f deg")) {
+        light->innerConeAngle = innerDeg * DEG2RAD;
+    }
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+        float newInner = light->innerConeAngle;
+        if (oldInner != newInner) {
+            cmdHistory->Execute(std::make_unique<PropertyChangeCommand>(
+                "Change Inner Cone Angle",
+                [light, oldInner]() { light->innerConeAngle = oldInner; },
+                [light, newInner]() { light->innerConeAngle = newInner; }
+            ));
+        }
+    }
+
+    float oldOuter = light->outerConeAngle;
+    float outerDeg = oldOuter * RAD2DEG;
+    if (ImGui::SliderFloat("Outer Cone Angle", &outerDeg, 0.0f, 180.0f, "%.1f deg")) {
+        light->outerConeAngle = outerDeg * DEG2RAD;
+    }
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+        float newOuter = light->outerConeAngle;
+        if (oldOuter != newOuter) {
+            cmdHistory->Execute(std::make_unique<PropertyChangeCommand>(
+                "Change Outer Cone Angle",
+                [light, oldOuter]() { light->outerConeAngle = oldOuter; },
+                [light, newOuter]() { light->outerConeAngle = newOuter; }
             ));
         }
     }
