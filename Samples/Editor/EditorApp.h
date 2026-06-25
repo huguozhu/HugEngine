@@ -36,6 +36,7 @@ namespace he::editor {
     class ViewportPanel;
     class OutlinerPanel;
     class DetailsPanel;
+    class ContentBrowserPanel;
 }
 
 class EditorApp {
@@ -73,6 +74,7 @@ private:
     std::unique_ptr<he::editor::ViewportPanel> m_Viewport;
     std::unique_ptr<he::editor::OutlinerPanel> m_Outliner;
     std::unique_ptr<he::editor::DetailsPanel>  m_Details;
+    std::unique_ptr<he::editor::ContentBrowserPanel> m_ContentBrowser;
 
     he::f64  m_LastTime  = 0.0;
 };

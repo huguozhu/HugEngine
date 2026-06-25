@@ -5,6 +5,7 @@ add_executable(HugEditor
     Panels/ViewportPanel.cpp
     Panels/OutlinerPanel.cpp
     Panels/DetailsPanel.cpp
+    Panels/ContentBrowserPanel.cpp
 )
 
 target_include_directories(HugEditor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -16,6 +17,7 @@ target_link_libraries(HugEditor PRIVATE
     HugEngineRender
     HugEngineScene
     HugEngineEditor
+    HugEngineAsset
 )
 
 add_dependencies(HugEditor CompileShaders)
