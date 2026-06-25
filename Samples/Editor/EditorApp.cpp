@@ -263,15 +263,19 @@ void EditorApp::MainLoop() {
 
             ImGui::SameLine();
 
-            // Details
+            // Details（不透明白色背景，遮盖后方 3D 场景）
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(30,30,34,255));
             ImGui::BeginChild("DetailsRegion", {detailsWidth, avail.y * 0.75f}, true);
             m_Details->Render();
             ImGui::EndChild();
+            ImGui::PopStyleColor();
 
-            // Outliner（底部区域）
+            // Outliner（不透明白色背景，遮盖后方 3D 场景）
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(30,30,34,255));
             ImGui::BeginChild("OutlinerRegion", {avail.x, avail.y * 0.25f - 4.0f}, true);
             m_Outliner->Render();
             ImGui::EndChild();
+            ImGui::PopStyleColor();
 
             // 状态栏
             ImGui::Text("Selected: %d | FPS: %.0f",
