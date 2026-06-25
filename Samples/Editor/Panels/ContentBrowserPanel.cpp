@@ -24,14 +24,17 @@ void ContentBrowserPanel::Render() {
 
     ImGui::NextColumn();
 
-    // 路径导航：箭头按钮退回上级目录
+    // 路径导航：箭头按钮退回上级目录（根目录时禁用）
+    auto currentPath = std::filesystem::path(m_CurrentPath);
+    auto parentPath  = currentPath.parent_path();
+    bool atRoot = (parentPath.empty() || parentPath == currentPath);
+    if (atRoot) ImGui::BeginDisabled();
     if (ImGui::ArrowButton("##updir", ImGuiDir_Up)) {
-        auto parent = std::filesystem::path(m_CurrentPath).parent_path();
-        String parentStr = parent.string();
-        if (!parentStr.empty() && parentStr != m_CurrentPath) {
-            m_CurrentPath = parentStr;
-        }
+        m_CurrentPath = parentPath.string();
     }
+    if (atRoot) ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip(atRoot ? "Already at root" : "Go to parent directory");
     ImGui::SameLine();
     ImGui::Text("Path: %s", m_CurrentPath.c_str());
     ImGui::Separator();
@@ -46,15 +49,19 @@ void ContentBrowserPanel::RenderDirectoryTree() {
     ImGui::Text("Directories");
     ImGui::Separator();
 
-    // 列出 Content 目录下的子目录
     std::error_code ec;
+    bool hasDirs = false;
     for (auto& entry : std::filesystem::directory_iterator(m_CurrentPath, ec)) {
         if (entry.is_directory()) {
-            String name = entry.path().filename().string();
+            hasDirs = true;
+            String name = "[D] " + entry.path().filename().string();
             if (ImGui::Selectable(name.c_str(), false)) {
                 m_CurrentPath = entry.path().string();
             }
         }
+    }
+    if (!hasDirs) {
+        ImGui::TextDisabled("  (empty)");
     }
 }
 
