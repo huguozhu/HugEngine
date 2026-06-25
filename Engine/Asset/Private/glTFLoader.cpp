@@ -159,18 +159,32 @@ glTFResult LoadGLB(World& world, const String& filePath) {
         return result;
     }
 
-    // 辅助函数：根据 accessor index 获取 bufferView index + count + offset
+    // 辅助函数：在 accessors JSON 数组中定位第 N 个 accessor（按 {} 计数）
     auto findAccessor = [&](i32 accIdx, i32& outBV, i32& outCount, i32& outOffset, i32& outCompType) -> bool {
         if (accIdx < 0) return false;
-        char key[64];
-        snprintf(key, sizeof(key), "\"accessor\":%d", accIdx);
-        const char* acc = strstr(accessorsPos, key);
-        if (!acc) return false;
+        // 在 accessors 数组中定位第 accIdx 个 JSON 对象
+        const char* cur = accessorsPos;
+        i32 depth = 0, found = -1;
+        bool inString = false;
+        while (*cur) {
+            if (*cur == '"' && (cur == accessorsPos || *(cur-1) != '\\')) inString = !inString;
+            if (!inString) {
+                if (*cur == '{') {
+                    if (depth == 0) found++;
+                    depth++;
+                } else if (*cur == '}') {
+                    depth--;
+                }
+            }
+            if (found == accIdx && depth == 1) break; // 找到了目标 accessor 的开头
+            cur++;
+        }
+        if (found != accIdx) return false;
 
-        outBV       = ExtractInt(acc, "\"bufferView\"");
-        outCount    = ExtractInt(acc, "\"count\"");
-        outOffset   = ExtractInt(acc, "\"byteOffset\"");
-        outCompType = ExtractInt(acc, "\"componentType\"");
+        outBV       = ExtractInt(cur, "\"bufferView\"");
+        outCount    = ExtractInt(cur, "\"count\"");
+        outOffset   = ExtractInt(cur, "\"byteOffset\"");
+        outCompType = ExtractInt(cur, "\"componentType\"");
         return outBV >= 0;
     };
 
