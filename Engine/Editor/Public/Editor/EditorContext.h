@@ -37,6 +37,18 @@ public:
     template<typename T>
     void SetProperty(he::Entity entity, const char* propName, const T& value);
 
+    // --- 编辑器状态 ---
+    enum class EditorState : u8 { Edit, Play };
+
+    /// 切换到运行模式
+    void Play()           { m_State = EditorState::Play; }
+    /// 回到编辑模式
+    void Stop()           { m_State = EditorState::Edit; }
+    /// 获取当前编辑器状态
+    EditorState GetState() const { return m_State; }
+    /// 判断是否处于运行模式
+    bool IsPlaying()     const { return m_State == EditorState::Play; }
+
     // --- 引擎引用 ---
     he::World*          GetWorld()          const { return m_World; }
     he::SceneGraph*     GetSceneGraph()     const { return m_SceneGraph; }
@@ -53,6 +65,7 @@ private:
     he::World*          m_World      = nullptr;
     he::SceneGraph*     m_SceneGraph = nullptr;
     he::CommandHistory* m_CmdHistory = nullptr;
+    EditorState         m_State      = EditorState::Edit;
     TArray<he::Entity>  m_Selection;
     TArray<std::function<void()>> m_SelectionCallbacks;
 };
