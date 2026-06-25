@@ -5,6 +5,7 @@ target_sources(HugEngineEditor PRIVATE
     Private/CVar.cpp
     Private/Command.cpp
     Private/ImGuiIntegration.cpp
+    Private/EditorContext.cpp
 )
 
 target_include_directories(HugEngineEditor
