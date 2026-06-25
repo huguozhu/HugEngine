@@ -6,6 +6,7 @@ target_sources(HugEngineEditor PRIVATE
     Private/Command.cpp
     Private/ImGuiIntegration.cpp
     Private/EditorContext.cpp
+    Private/SceneSerializer.cpp
 )
 
 target_include_directories(HugEngineEditor
@@ -14,4 +15,4 @@ target_include_directories(HugEngineEditor
     PRIVATE ${CMAKE_SOURCE_DIR}/Engine/RHI/Vulkan  # VulkanInternal.h
 )
 
-target_link_libraries(HugEngineEditor PUBLIC HugEngineRender imgui)
+target_link_libraries(HugEngineEditor PUBLIC HugEngineRender HugEngineSerialize imgui)
