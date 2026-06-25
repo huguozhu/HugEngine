@@ -6,6 +6,7 @@ add_executable(HugEditor
     Panels/OutlinerPanel.cpp
     Panels/DetailsPanel.cpp
     Panels/ContentBrowserPanel.cpp
+    Panels/ProjectSettingsPanel.cpp
 )
 
 target_include_directories(HugEditor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

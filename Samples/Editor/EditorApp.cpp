@@ -26,6 +26,7 @@ using namespace he;
 #include "Panels/DetailsPanel.h"
 #include "Panels/ViewportPanel.h"
 #include "Panels/ContentBrowserPanel.h"
+#include "Panels/ProjectSettingsPanel.h"
 
 EditorApp::EditorApp()  = default;
 EditorApp::~EditorApp() = default;
@@ -129,11 +130,13 @@ void EditorApp::InitEditor() {
     m_Outliner  = std::make_unique<editor::OutlinerPanel>();
     m_Details   = std::make_unique<editor::DetailsPanel>();
     m_ContentBrowser = std::make_unique<editor::ContentBrowserPanel>();
+    m_ProjectSettings = std::make_unique<editor::ProjectSettingsPanel>();
 
     m_Viewport->Initialize(m_EditorCtx.get(), m_Pipeline.get(), m_Window);
     m_Outliner->Initialize(m_EditorCtx.get());
     m_Details->Initialize(m_EditorCtx.get());
     m_ContentBrowser->Initialize(m_EditorCtx.get());
+    m_ProjectSettings->Initialize(m_EditorCtx.get());
 
     m_LastTime = glfwGetTime();
 }
@@ -210,6 +213,7 @@ void EditorApp::MainLoop() {
             }
             if (ImGui::BeginMenu("View")) {
                 ImGui::MenuItem("Content Browser", nullptr, &m_ContentBrowser->m_Visible);
+                ImGui::MenuItem("Project Settings", nullptr, &m_ProjectSettings->m_Visible);
                 ImGui::EndMenu();
             }
 
@@ -276,6 +280,7 @@ void EditorApp::MainLoop() {
 
             // 浮动面板（自持窗口，不嵌入 EditorMain 布局）
             m_ContentBrowser->Render();
+            m_ProjectSettings->Render();
         }
 
         m_ImGui->EndFrame(m_CmdList.get());
