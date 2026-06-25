@@ -21,6 +21,8 @@
 using namespace he;
 
 // 前向声明面板（后续 Task 中实现）
+#include "Panels/OutlinerPanel.h"
+
 namespace he::editor {
 
 // 占位面板 — 后续 Task 替换
@@ -28,12 +30,6 @@ class ViewportPanel {
 public:
     void Initialize(EditorContext*) {}
     void Render(rhi::IRHICommandList*) {}
-};
-
-class OutlinerPanel {
-public:
-    void Initialize(EditorContext*) {}
-    void Render() {}
 };
 
 class DetailsPanel {
@@ -223,7 +219,7 @@ void EditorApp::MainLoop() {
 
         // Outliner（底部区域）
         ImGui::BeginChild("OutlinerRegion", {avail.x, avail.y * 0.25f - 4.0f}, true);
-        ImGui::Text("Outliner (placeholder)");
+        m_Outliner->Render();
         ImGui::EndChild();
 
         m_ImGui->EndFrame(m_CmdList.get());
