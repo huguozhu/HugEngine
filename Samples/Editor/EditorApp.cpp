@@ -247,7 +247,6 @@ void EditorApp::MainLoop() {
 void EditorApp::Shutdown() {
     m_Device->WaitIdle();
     m_ImGui->Shutdown();
-    m_Pipeline->Shutdown();
     // Engine 在析构时清理
     delete m_Engine;
 }
