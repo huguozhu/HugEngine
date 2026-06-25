@@ -21,8 +21,13 @@ option(HUGENGINE_BUILD_EDITOR    "Build editor"          ON)
 option(HUGENGINE_BUILD_TESTS     "Build tests"           OFF)
 option(HUGENGINE_RHI_VULKAN      "Enable Vulkan backend" ON)
 
+# Vulkan SDK（ImGui Vulkan 后端 + RHI 均需要）
+if(HUGENGINE_RHI_VULKAN)
+    find_package(Vulkan REQUIRED)
+endif()
+
 # ============================================================
-# External dependencies (FetchContent — no vcpkg)
+# External dependencies
 # NOTE: External deps processed BEFORE C++26 to avoid
 #       propagating CXX_STANDARD to sub-builds
 # ============================================================

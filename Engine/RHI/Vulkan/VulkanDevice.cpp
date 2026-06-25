@@ -1003,4 +1003,21 @@ std::unique_ptr<IRHIDevice> CreateDevice(Backend backend) {
     return nullptr;
 }
 
+// --- VulkanDeviceAccess — 内部桥接实现 ---
+VkInstance VulkanDeviceAccess::GetInstance(IRHIDevice* d) {
+    return static_cast<VulkanDevice*>(d)->GetVkInstance();
+}
+VkPhysicalDevice VulkanDeviceAccess::GetPhysical(IRHIDevice* d) {
+    return static_cast<VulkanDevice*>(d)->GetVkPhysical();
+}
+VkDevice VulkanDeviceAccess::GetDevice(IRHIDevice* d) {
+    return static_cast<VulkanDevice*>(d)->GetVkDevice();
+}
+u32 VulkanDeviceAccess::GetGraphicsFamily(IRHIDevice* d) {
+    return static_cast<VulkanDevice*>(d)->GetGraphicsFamily();
+}
+VkQueue VulkanDeviceAccess::GetGraphicsQueue(IRHIDevice* d) {
+    return static_cast<VulkanDevice*>(d)->GetGraphicsQueue();
+}
+
 } // namespace he::rhi

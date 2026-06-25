@@ -18,6 +18,8 @@
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
 #include "Scene/Transform.h"
+#include "Editor/ImGuiIntegration.h"
+#include "imgui.h"
 
 #include <cmath>
 #include <cstring>
@@ -146,7 +148,14 @@ int main() {
     // --- 6. 创建命令列表 ---
     auto cmdList = device->CreateCommandList();
     cmdList->SetSwapChain(swapchain.get());
-    cmdList->SetPipeline(pipeline.GetPipelineState());  // 一次性绑定 PSO + RenderPass
+    cmdList->SetPipeline(pipeline.GetPipelineState());
+
+    // --- 6.5. 获取 GLFW 窗口句柄 ---
+    GLFWwindow* glfwWin = engine.GetWindow()->GetNativeHandle();
+
+    // --- 6.6. ImGui ---
+    editor::ImGuiIntegration imgui;
+    imgui.Initialize(glfwWin, device.get(), swapchain.get());
 
     // --- 7. 相机 ---
     render::CameraData camera;
@@ -166,9 +175,6 @@ int main() {
     double lastMouseX = 0.0, lastMouseY = 0.0;
     float  moveSpeed  = 5.0f;      // 基础移动速度（单位/秒）
     float  lookSpeed  = 0.003f;    // 旋转灵敏度
-
-    // 获取 GLFW 窗口句柄，直接读取键鼠状态
-    GLFWwindow* glfwWin = engine.GetWindow()->GetNativeHandle();
 
     // --- 8. 窗口调整回调 ---
     engine.GetWindow()->SetResizeCallback([&](u32 w, u32 h) {
@@ -269,6 +275,17 @@ int main() {
         // 渲染场景
         pipeline.RenderScene(cmdList.get(), world, sceneGraph, camera);
 
+        // --- ImGui ---
+        imgui.BeginFrame();
+        ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
+        ImGui::SetNextWindowBgAlpha(0.5f);
+        ImGui::Begin("HugEngine");
+        ImGui::Text("FPS: %.0f", 1.0f / (deltaTime > 0 ? deltaTime : 0.016f));
+        ImGui::Text("Pos: (%.1f, %.1f, %.1f)",
+            camera.position.x, camera.position.y, camera.position.z);
+        ImGui::End();
+        imgui.EndFrame(cmdList.get());
+
         cmdList->EndRenderPass();
         cmdList->End();
 
@@ -296,6 +313,7 @@ int main() {
     }
 
     // 清理
+    imgui.Shutdown();
     device->WaitIdle();
     pipeline.Shutdown();
 

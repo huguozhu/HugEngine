@@ -7,6 +7,7 @@ target_link_libraries(Sponza PRIVATE
     HugEngineShader
     HugEngineScene
     HugEngineRender
+    HugEngineEditor
 )
 
 # 依赖 CompileShaders 确保 EmbeddedShaders.h 已生成

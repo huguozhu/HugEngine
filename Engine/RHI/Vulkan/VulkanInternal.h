@@ -237,4 +237,16 @@ private:
     VkSampler  m_Sampler  = VK_NULL_HANDLE;
 };
 
+// ============================================================
+// VulkanDeviceAccess — 内部桥接：从 IRHIDevice 获取 Vulkan 句柄
+// 供 Editor/ImGui 等非 RHI 模块使用
+// ============================================================
+struct VulkanDeviceAccess {
+    static VkInstance       GetInstance(IRHIDevice* d);
+    static VkPhysicalDevice GetPhysical(IRHIDevice* d);
+    static VkDevice         GetDevice(IRHIDevice* d);
+    static u32              GetGraphicsFamily(IRHIDevice* d);
+    static VkQueue          GetGraphicsQueue(IRHIDevice* d);
+};
+
 } // namespace he::rhi
