@@ -49,6 +49,13 @@ public:
     void ForEach(std::function<void(Entity, T&)> callback);
 
     usize GetEntityCount() const { return m_Entities.size(); }
+
+    /// 遍历所有存活实体（供编辑器等遍历使用）
+    void ForEachEntity(std::function<void(Entity)> callback) const {
+        for (auto& e : m_Entities)
+            callback(e);
+    }
+
     void  Update(f32 deltaTime);
 
 private:
