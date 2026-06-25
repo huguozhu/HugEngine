@@ -54,8 +54,9 @@ private:
     void Shutdown();
 
     // --- 底层 ---
-    he::Engine*                     m_Engine    = nullptr;
-    GLFWwindow*                     m_Window    = nullptr;
+    // 声明顺序即析构顺序（逆序）：Engine 最后销毁，Logger 在所有子系统之后释放
+    std::unique_ptr<he::Engine>         m_Engine;
+    GLFWwindow*                         m_Window    = nullptr;
     std::unique_ptr<he::rhi::IRHIDevice>       m_Device;
     std::unique_ptr<he::rhi::IRHISwapChain>    m_SwapChain;
     std::unique_ptr<he::rhi::IRHICommandList>  m_CmdList;

@@ -4,7 +4,6 @@
 #include "Editor/EditorContext.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
-#include "Scene/Transform.h"
 #include "Scene/MeshComponent.h"
 #include "Scene/CubeComponent.h"
 #include "Scene/LightComponent.h"
@@ -28,37 +27,38 @@ void OutlinerPanel::Render() {
     }
     ImGui::Separator();
 
-    // 遍历所有根实体（无父节点的实体视为顶层）
     auto* world = m_Ctx->GetWorld();
     auto* sg    = m_Ctx->GetSceneGraph();
 
+    // 一次性构建 parent→children 映射（O(N)），避免每节点递归时重复遍历全实体
+    std::unordered_map<EntityID, TArray<Entity>> childrenMap;
+    world->ForEachEntity([&](Entity e) {
+        Entity parent = sg ? sg->GetParent(e) : Entity{kInvalidEntity};
+        if (parent.IsValid()) {
+            childrenMap[parent.id].push_back(e);
+        }
+    });
+
+    // 遍历根实体（无父节点）
     world->ForEachEntity([&](Entity e) {
         Entity parent = sg ? sg->GetParent(e) : Entity{kInvalidEntity};
         if (!parent.IsValid()) {
-            // 根实体
-            RenderEntity(e, 0);
+            RenderEntity(e, 0, childrenMap);
         }
     });
 }
 
-void OutlinerPanel::RenderEntity(Entity entity, int depth) {
+void OutlinerPanel::RenderEntity(Entity entity, int depth,
+                                  const std::unordered_map<EntityID, TArray<Entity>>& childrenMap) {
     auto* world = m_Ctx->GetWorld();
-    auto* sg    = m_Ctx->GetSceneGraph();
-    if (!world || !sg) return;
+    if (!world) return;
 
     // 获取实体名称
-    auto* t = world->GetComponent<TransformComponent>(entity);
-    String name = "Entity#" + std::to_string(entity.id);
-    if (t) {
-        // 尝试从组件获取名称（后续可扩展为 NameComponent）
-        name = "Entity #" + std::to_string(entity.id);
-    }
+    String name = "Entity #" + std::to_string(entity.id);
 
     // 搜索过滤（简单匹配检查）
     if (!m_Filter.empty()) {
         if (name.find(m_Filter) == String::npos) {
-            // 不匹配则跳过该节点（完整实现需递归检查子树）
-            // 简化处理：不匹配不渲染该节点
             return;
         }
     }
@@ -84,16 +84,9 @@ void OutlinerPanel::RenderEntity(Entity entity, int depth) {
     if (isSelected)
         flags |= ImGuiTreeNodeFlags_Selected;
 
-    // 先检查是否有子实体（决定是否显示展开箭头）
-    bool hasChildren = false;
-    world->ForEachEntity([&](Entity child) {
-        if (!hasChildren) {
-            Entity parent = sg->GetParent(child);
-            if (parent == entity) {
-                hasChildren = true;
-            }
-        }
-    });
+    // 从预计算映射 O(1) 判断是否有子实体
+    auto it = childrenMap.find(entity.id);
+    bool hasChildren = (it != childrenMap.end() && !it->second.empty());
     if (!hasChildren) {
         flags |= ImGuiTreeNodeFlags_Leaf;
     }
@@ -109,7 +102,6 @@ void OutlinerPanel::RenderEntity(Entity entity, int depth) {
     // 右键菜单
     if (ImGui::BeginPopupContextItem()) {
         if (ImGui::MenuItem("Delete")) {
-            // Phase 3-1: 简单设为 DestroyEntity
             world->DestroyEntity(entity);
             m_Ctx->DeselectAll();
         }
@@ -120,13 +112,12 @@ void OutlinerPanel::RenderEntity(Entity entity, int depth) {
     }
 
     if (open) {
-        // 渲染子实体（遍历所有实体，找 parent == entity 的子节点）
-        world->ForEachEntity([&](Entity child) {
-            Entity parent = sg->GetParent(child);
-            if (parent == entity) {
-                RenderEntity(child, depth + 1);
+        // 从预计算映射 O(1) 获取子实体列表
+        if (it != childrenMap.end()) {
+            for (auto& child : it->second) {
+                RenderEntity(child, depth + 1, childrenMap);
             }
-        });
+        }
         ImGui::TreePop();
     }
 }

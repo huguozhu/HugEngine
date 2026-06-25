@@ -55,4 +55,22 @@ private:
     std::deque<std::unique_ptr<Command>> m_RedoStack;
 };
 
+/// 属性修改命令（通过 lambda 捕获旧值/新值，支持任意类型属性的 Undo/Redo）
+class PropertyChangeCommand : public Command {
+public:
+    using Action = std::function<void()>;
+
+    PropertyChangeCommand(String desc, Action undoAction, Action redoAction)
+        : m_Desc(std::move(desc)), m_Undo(std::move(undoAction)), m_Redo(std::move(redoAction)) {}
+
+    void Execute() override { m_Redo(); }
+    void Undo()    override { m_Undo(); }
+    String GetDescription() const override { return m_Desc; }
+
+private:
+    String m_Desc;
+    Action m_Undo;  // 撤销 = 恢复旧值
+    Action m_Redo;  // 重做 = 应用新值
+};
+
 } // namespace he

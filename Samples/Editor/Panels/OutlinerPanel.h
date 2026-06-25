@@ -11,6 +11,9 @@
 
 #include "Core/Types.h"
 #include "Scene/Entity.h"
+#include "Containers/Array.h"
+
+#include <unordered_map>
 
 namespace he::editor {
     class EditorContext;
@@ -29,8 +32,9 @@ public:
     void SetFilter(const char* filter) { m_Filter = filter; }
 
 private:
-    /// 递归渲染实体及其子节点
-    void RenderEntity(he::Entity entity, int depth);
+    /// 递归渲染实体及其子节点（childrenMap 预计算，O(1) 查找子节点）
+    void RenderEntity(he::Entity entity, int depth,
+                      const std::unordered_map<he::EntityID, TArray<he::Entity>>& childrenMap);
 
     EditorContext* m_Ctx    = nullptr;
     String         m_Filter;  // 搜索过滤文本

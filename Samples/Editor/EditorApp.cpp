@@ -46,7 +46,7 @@ void EditorApp::InitEngine() {
     config.windowHeight = 1080;
     config.enableVSync  = true;
 
-    m_Engine = new Engine(config);
+    m_Engine = std::make_unique<Engine>(config);
     m_Engine->Initialize();
     m_Window = m_Engine->GetWindow()->GetNativeHandle();
 
@@ -255,5 +255,4 @@ void EditorApp::Shutdown() {
     m_SwapChain.reset();
     m_Device.reset();
     // Engine 在析构时清理
-    delete m_Engine;
 }
