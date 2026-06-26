@@ -22,10 +22,8 @@ class ContentBrowserPanel {
 public:
     void Initialize(EditorContext* ctx) {
         m_Ctx = ctx;
-        // 将默认路径转为绝对路径，确保 directory_iterator 不受工作目录影响
-        std::error_code ec;
-        auto absPath = std::filesystem::absolute("Content", ec);
-        if (!ec) m_CurrentPath = absPath.string();
+        // 使用 CMake 编译定义提供的 Content 绝对路径，避免工作目录依赖
+        m_CurrentPath = String(HUGE_CONTENT_DIR);
     }
     void Render();
 

@@ -51,6 +51,7 @@ private:
 
     // Vulkan 资源
     void* m_DescPool      = nullptr;  // VkDescriptorPool
+    void* m_RenderPass    = nullptr;  // VkRenderPass（ImGui 后端使用，不可提前销毁）
     void* m_FontTexture   = nullptr;  // VkImage
     void* m_FontTexView   = nullptr;  // VkImageView
     void* m_FontTexMem    = nullptr;  // VkDeviceMemory

@@ -262,7 +262,7 @@ int main() {
         forward.z = -cos(pitch) * cos(yaw);
         camera.forward = glm::normalize(forward);
 
-        // 渲染一帧（顺序必须严格：Begin → BeginRenderPass → Viewport/Scissor → Draw → EndRenderPass → End）
+        // 渲染一帧（顺序必须严格：Begin → BeginRenderPass → Viewport/Scissor → Draw → ImGui → EndRenderPass → End）
         cmdList->Begin();
 
         // 注意：BeginRenderPass 必须在 SetViewport/SetScissor 之前
@@ -275,7 +275,7 @@ int main() {
         // 渲染场景
         pipeline.RenderScene(cmdList.get(), world, sceneGraph, camera);
 
-        // --- ImGui ---
+        // --- ImGui（在同一渲染通道内绘制 — ImGui RP 现已与 Forward RP 兼容）---
         imgui.BeginFrame();
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
         ImGui::SetNextWindowBgAlpha(0.5f);

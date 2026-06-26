@@ -1,6 +1,10 @@
 #include "Core/Engine.h"
 #include "Core/Log.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 namespace he {
 
 Engine::Engine(const EngineConfig& config)
@@ -12,6 +16,11 @@ Engine::~Engine() {
 }
 
 void Engine::Initialize() {
+    // Windows 控制台默认使用 GBK 编码，切换为 UTF-8 避免中文日志乱码
+#ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8);
+#endif
+
     // 日志系统必须最先初始化
     Logger::Initialize();
     HE_CORE_INFO("=== Initializing HugEngine v0.1.0 ===");
