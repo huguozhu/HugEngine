@@ -38,6 +38,48 @@ float G_Smith(float NdotV, float NdotL, float roughness) {
 }
 
 // ============================================================
+// PCF 阴影采样（Percentage-Closer Filtering）
+//
+// 3x3 核比较采样，返回 [0,1] 可见度。
+// 1.0 = 完全照亮，0.0 = 完全遮蔽。
+// ============================================================
+float SampleShadowPCF(float3 worldPos, float3 worldNormal, float3 lightDir,
+                       GPUShadowData sm, Texture2D<float> shadowMap,
+                       SamplerComparisonState shadowSampler)
+{
+    // 应用法线偏移减少自阴影
+    float3 biasedPos = worldPos + worldNormal * sm.shadowParams.y;
+
+    // 变换到光照裁剪空间
+    float4 shadowClip = mul(sm.lightViewProj, float4(biasedPos, 1.0));
+
+    // 透视除法 → NDC
+    float3 ndc = shadowClip.xyz / shadowClip.w;
+
+    // NDC [-1,1] → UV [0,1]
+    float2 uv = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    float  depth = ndc.z;
+
+    // 应用深度偏移
+    depth -= sm.shadowParams.x;
+
+    // 超出纹理范围 → 无阴影
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
+        return 1.0;
+
+    // 3×3 PCF
+    float2 texelSize = 1.0 / 2048.0; // 基于 shadowMapSize
+    float shadow = 0.0;
+    for (int x = -1; x <= 1; x++) {
+        for (int y = -1; y <= 1; y++) {
+            float2 sampleUV = uv + float2(float(x), float(y)) * texelSize;
+            shadow += shadowMap.SampleCmp(shadowSampler, sampleUV, depth);
+        }
+    }
+    return shadow / 9.0;
+}
+
+// ============================================================
 // PBR BRDF — Cook-Torrance + Lambertian
 // ============================================================
 float3 PBR_BRDF(float3 albedo, float metallic, float roughness,

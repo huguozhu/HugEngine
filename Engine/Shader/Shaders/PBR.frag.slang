@@ -28,14 +28,25 @@ struct GPULight {
     float4 directionType;
     float4 positionRange;
     float2 coneAngles;
-    float2 _pad;
+    int    shadowIndex;
+    int    _padLight;
+};
+
+struct GPUShadowData {
+    float4x4 lightViewProj;
+    float4   shadowParams;    // x=bias, y=normalBias, z=strength
 };
 
 // Descriptor Sets (set=0):
 //   binding=1: GPULight[]
 //   binding=2: GPUObjectData[]
+//   binding=3: GPUShadowData[]
+//   binding=4: ShadowMap 深度纹理 (CombinedImageSampler)
 [[vk::binding(1, 0)]] StructuredBuffer<GPULight> u_Lights;
 [[vk::binding(2, 0)]] StructuredBuffer<GPUObjectData> u_Objects;
+[[vk::binding(3, 0)]] StructuredBuffer<GPUShadowData> u_ShadowData;
+[[vk::binding(4, 0)]] Texture2D<float> u_ShadowMap;
+[[vk::binding(4, 0)]] SamplerComparisonState u_ShadowSampler;
 
 [[vk::push_constant]] cbuffer FrameConstants {
     float4x4 viewProjMatrix;
@@ -85,7 +96,16 @@ float4 fragmentMain(FSInput input) : SV_Target0 {
             }
         }
         float3 radiance = light.colorIntensity.rgb * light.colorIntensity.w * attenuation;
-        color += PBR_BRDF(albedo, metallic, roughness, N, V, L) * radiance;
+
+        // 阴影采样
+        float shadow = 1.0;
+        if (light.shadowIndex >= 0) {
+            GPUShadowData sm = u_ShadowData[light.shadowIndex];
+            shadow = lerp(1.0, SampleShadowPCF(input.worldPos, N, L, sm, u_ShadowMap, u_ShadowSampler),
+                          sm.shadowParams.z); // shadowStrength 控制阴影不透明度
+        }
+
+        color += PBR_BRDF(albedo, metallic, roughness, N, V, L) * radiance * shadow;
     }
     color *= ao;
     color += obj.emissiveFactor.rgb;

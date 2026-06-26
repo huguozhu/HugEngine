@@ -28,14 +28,23 @@ enum MaterialFlags : u32 {
 // GPU Light 结构（Storage Buffer 上传，glsl std430 对齐）
 // 每灯光 64 字节，最多 MAX_LIGHTS（8）个
 // ============================================================
-static constexpr u32 MAX_LIGHTS = 8;
+static constexpr u32 MAX_LIGHTS    = 8;
+static constexpr u32 MAX_SHADOWS   = 4;  // 最多 4 个投射阴影的光源
+
+// --- GPU 阴影数据（Storage Buffer，每个阴影投射光源一条）---
+struct alignas(16) GPUShadowData {
+    float4x4 lightViewProj;   // 世界空间→光照裁剪空间
+    float4   shadowParams;    // x=bias, y=normalBias, z=strength, w=未使用
+};
+static_assert(sizeof(GPUShadowData) == 80, "GPUShadowData must be 80 bytes");
 
 struct alignas(16) GPULight {
     float4 colorIntensity;    // xyz=颜色, w=强度
     float4 directionType;     // xyz=方向, w=类型 (0=Dir,1=Point,2=Spot)
     float4 positionRange;     // xyz=位置, w=范围
     float2 coneAngles;        // x=内锥角, y=外锥角 (Spot 专用)
-    float2 _pad;
+    i32    shadowIndex;       // -1=无阴影, >=0 指向 u_ShadowData 数组
+    i32    _pad;
 };
 
 static_assert(sizeof(GPULight) == 64, "GPULight must be 64 bytes");

@@ -26,7 +26,13 @@ public:
     LightType type      = LightType::Directional;  // 光源类型
     float3    color     = float3(1.0f);            // 光照颜色（线性空间）
     float     intensity = 1.0f;                    // 强度
-    bool      castShadow = false;                  // 投射阴影
+
+    // --- 阴影参数 ---
+    bool      castShadow       = false;            // 是否投射阴影
+    u32       shadowMapSize    = 2048;             // 阴影贴图分辨率
+    float     shadowBias       = 0.005f;           // 深度偏移（防止阴影痤疮）
+    float     shadowNormalBias = 0.02f;            // 法线偏移（防止自阴影）
+    float     shadowStrength   = 1.0f;             // 阴影强度 [0,1]
 };
 
 // --- 平行光（无限远方向光）---

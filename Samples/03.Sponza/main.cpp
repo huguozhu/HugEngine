@@ -21,11 +21,63 @@
 #include "imgui.h"
 
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <unordered_map>
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
 using namespace he;
+
+// ============================================================
+// 配置读写（简易 key=value 格式）
+// ============================================================
+static String g_ConfigPath = String(HUGE_CONTENT_DIR) + "Config/03_Sponza.cfg";
+
+static std::unordered_map<String, String> LoadConfigFile(const String& path) {
+    std::unordered_map<String, String> map;
+    std::ifstream f(path);
+    if (!f.is_open()) return map;
+    String line;
+    while (std::getline(f, line)) {
+        auto eq = line.find('=');
+        if (eq == String::npos) continue;
+        String key = line.substr(0, eq);
+        String val = line.substr(eq + 1);
+        // 去除末尾 \r
+        if (!val.empty() && val.back() == '\r') val.pop_back();
+        map[key] = val;
+    }
+    return map;
+}
+
+static void SaveConfigFile(const String& path,
+                            const std::unordered_map<String, String>& map) {
+    // 确保目录存在
+    std::filesystem::path p(path);
+    std::error_code ec;
+    std::filesystem::create_directories(p.parent_path(), ec);
+
+    std::ofstream f(path);
+    if (!f.is_open()) return;
+    for (auto& [k, v] : map) {
+        f << k << "=" << v << "\n";
+    }
+}
+
+// 辅助：从 map 读取 float 值
+static float GetFloat(const std::unordered_map<String, String>& m,
+                      const String& key, float def = 0.0f) {
+    auto it = m.find(key);
+    return (it != m.end()) ? std::stof(it->second) : def;
+}
+static int GetInt(const std::unordered_map<String, String>& m,
+                  const String& key, int def = 0) {
+    auto it = m.find(key);
+    return (it != m.end()) ? std::stoi(it->second) : def;
+}
 
 int main() {
     // ============================================================
@@ -80,15 +132,32 @@ int main() {
     HE_CORE_INFO("Sponza 加载完成: {} 实体, {} 网格图元",
                  result.entities.size(), result.meshCount);
 
+    // --- 加载配置文件 ---
+    auto cfgData = LoadConfigFile(g_ConfigPath);
+    bool hasConfig = !cfgData.empty();
+    if (hasConfig) {
+        HE_CORE_INFO("加载配置文件: {}", g_ConfigPath);
+    }
+
     // --- 添加方向光 ---
+    Entity mainLightEntity;
+    DirectionalLight* mainDL = nullptr;
     {
-        Entity lightEntity = world.CreateEntity("DirectionalLight");
-        world.AddComponent<TransformComponent>(lightEntity);
-        auto* dl = world.AddComponent<DirectionalLight>(lightEntity);
-        dl->direction = float3(0.4f, -1.0f, 0.6f);
-        dl->color     = float3(1.0f, 0.95f, 0.85f);
-        dl->intensity = 8.0f;
-        sceneGraph.SetParent(lightEntity, Entity{kInvalidEntity});
+        mainLightEntity = world.CreateEntity("DirectionalLight");
+        world.AddComponent<TransformComponent>(mainLightEntity);
+        mainDL = world.AddComponent<DirectionalLight>(mainLightEntity);
+        mainDL->direction    = float3(
+            GetFloat(cfgData, "light_dir_x", 0.4f),
+            GetFloat(cfgData, "light_dir_y", -1.0f),
+            GetFloat(cfgData, "light_dir_z", 0.6f));
+        mainDL->color        = float3(
+            GetFloat(cfgData, "light_color_r", 1.0f),
+            GetFloat(cfgData, "light_color_g", 0.95f),
+            GetFloat(cfgData, "light_color_b", 0.85f));
+        mainDL->intensity    = GetFloat(cfgData, "light_intensity", 8.0f);
+        mainDL->castShadow   = GetInt(cfgData, "shadow_enabled", 1) != 0;
+        mainDL->shadowBias   = GetFloat(cfgData, "shadow_bias", 0.003f);
+        sceneGraph.SetParent(mainLightEntity, Entity{kInvalidEntity});
     }
 
     // --- 添加半球环境光补光 ---
@@ -96,9 +165,15 @@ int main() {
         Entity lightEntity = world.CreateEntity("FillLight");
         world.AddComponent<TransformComponent>(lightEntity);
         auto* dl = world.AddComponent<DirectionalLight>(lightEntity);
-        dl->direction = float3(-0.3f, -0.4f, -0.5f);
-        dl->color     = float3(0.6f, 0.7f, 0.9f);
-        dl->intensity = 2.0f;
+        dl->direction = float3(
+            GetFloat(cfgData, "fill_dir_x", -0.3f),
+            GetFloat(cfgData, "fill_dir_y", -0.4f),
+            GetFloat(cfgData, "fill_dir_z", -0.5f));
+        dl->color     = float3(
+            GetFloat(cfgData, "fill_color_r", 0.6f),
+            GetFloat(cfgData, "fill_color_g", 0.7f),
+            GetFloat(cfgData, "fill_color_b", 0.9f));
+        dl->intensity = GetFloat(cfgData, "fill_intensity", 2.0f);
         sceneGraph.SetParent(lightEntity, Entity{kInvalidEntity});
     }
 
@@ -126,23 +201,41 @@ int main() {
     imgui.Initialize(glfwWin, device.get(), swapchain.get());
 
     // ============================================================
-    // 8. 相机 — 初始位置适配 Sponza 室内场景
+    // 8. 相机 — 从配置文件加载，否则使用默认位置
     // ============================================================
     render::CameraData camera;
-    camera.position = float3(0.0f, 3.0f, 0.0f);
-    camera.forward  = float3(0.0f, -0.1f, -1.0f);
-    camera.up       = float3(0.0f, 1.0f, 0.0f);
+    camera.up = float3(0.0f, 1.0f, 0.0f);
     camera.SetAspectRatio(
         static_cast<float>(swapchain->GetWidth()),
         static_cast<float>(swapchain->GetHeight()));
 
-    float yaw   = std::atan2(camera.forward.x, -camera.forward.z);
-    float pitch = std::asin(camera.forward.y);
+    float yaw, pitch;
+    if (hasConfig) {
+        camera.position = float3(
+            GetFloat(cfgData, "cam_pos_x", 0.0f),
+            GetFloat(cfgData, "cam_pos_y", 3.0f),
+            GetFloat(cfgData, "cam_pos_z", 0.0f));
+        yaw   = GetFloat(cfgData, "cam_yaw", -1.57f);
+        pitch = GetFloat(cfgData, "cam_pitch", -0.1f);
+    } else {
+        camera.position = float3(0.0f, 3.0f, 0.0f);
+        yaw   = -1.57f;
+        pitch = -0.1f;
+    }
+
+    // 从 yaw/pitch 计算 forward
+    {
+        float3 fwd;
+        fwd.x = cos(pitch) * sin(yaw);
+        fwd.y = sin(pitch);
+        fwd.z = -cos(pitch) * cos(yaw);
+        camera.forward = glm::normalize(fwd);
+    }
 
     // 鼠标状态
     bool   rightMouseDown = false;
     double lastMouseX = 0.0, lastMouseY = 0.0;
-    float  moveSpeed  = 8.0f;      // Sponza 场景较大，速度稍快
+    float  moveSpeed  = 72.0f;     // Sponza 场景较大，快速移动
     float  lookSpeed  = 0.003f;
 
     // ============================================================
@@ -235,11 +328,55 @@ int main() {
         // ImGui（在同一渲染通道内绘制 — ImGui RP 现已与 Forward RP 兼容）
         imgui.BeginFrame();
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
-        ImGui::SetNextWindowBgAlpha(0.5f);
-        ImGui::Begin("03.Sponza");
-        ImGui::Text("FPS: %.0f", 1.0f / (deltaTime > 0 ? deltaTime : 0.016f));
-        ImGui::Text("Pos: (%.1f, %.1f, %.1f)",
-            camera.position.x, camera.position.y, camera.position.z);
+        ImGui::SetNextWindowBgAlpha(0.55f);
+        ImGui::Begin("03.Sponza — 性能监控");
+        {
+            // --- FPS + 帧时间 ---
+            float fps = 1.0f / (deltaTime > 0.001f ? deltaTime : 0.016f);
+            ImGui::TextColored({0.3f, 1.0f, 0.3f, 1.0f}, "FPS: %.0f", fps);
+            ImGui::SameLine(120);
+            ImGui::TextColored({0.6f, 0.6f, 0.6f, 1.0f}, "(%.2f ms)", deltaTime * 1000.0f);
+
+            // --- 相机 ---
+            ImGui::SeparatorText("相机");
+            ImGui::Text("位置: (%.1f, %.1f, %.1f)",
+                camera.position.x, camera.position.y, camera.position.z);
+            ImGui::Text("朝向: (%.2f, %.2f, %.2f)",
+                camera.forward.x, camera.forward.y, camera.forward.z);
+            ImGui::Text("Yaw: %.1f°  Pitch: %.1f°",
+                glm::degrees(yaw), glm::degrees(pitch));
+
+            // --- 方向光 ---
+            ImGui::SeparatorText("方向光");
+            world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& dl) {
+                ImGui::Text("方向: (%.2f, %.2f, %.2f)",
+                    dl.direction.x, dl.direction.y, dl.direction.z);
+                ImGui::Text("颜色: (%.2f, %.2f, %.2f)",
+                    dl.color.x, dl.color.y, dl.color.z);
+                ImGui::Text("强度: %.1f", dl.intensity);
+
+                // 阴影状态
+                if (dl.castShadow) {
+                    ImGui::TextColored({1.0f, 0.8f, 0.2f, 1.0f},
+                        "阴影: ON  (%ux%u, bias=%.4f)",
+                        dl.shadowMapSize, dl.shadowMapSize, dl.shadowBias);
+                } else {
+                    ImGui::TextColored({0.5f, 0.5f, 0.5f, 1.0f}, "阴影: OFF");
+                }
+            });
+
+            // --- 场景统计 ---
+            ImGui::SeparatorText("场景");
+            u32 meshCount = 0, dirLightCount = 0;
+            world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent&) {
+                meshCount++;
+            });
+            world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight&) {
+                dirLightCount++;
+            });
+            ImGui::Text("%u 网格  |  %u 方向光  |  1 阴影投射",
+                meshCount, dirLightCount);
+        }
         ImGui::End();
         imgui.EndFrame(cmdList.get());
 
@@ -255,6 +392,47 @@ int main() {
     imgui.Shutdown();
     device->WaitIdle();
     pipeline.Shutdown();
+
+    // ============================================================
+    // 保存配置（相机 + 方向光参数）
+    // ============================================================
+    {
+        std::unordered_map<String, String> out;
+        // 相机
+        out["cam_pos_x"]  = std::to_string(camera.position.x);
+        out["cam_pos_y"]  = std::to_string(camera.position.y);
+        out["cam_pos_z"]  = std::to_string(camera.position.z);
+        out["cam_yaw"]    = std::to_string(yaw);
+        out["cam_pitch"]  = std::to_string(pitch);
+
+        // 主方向光
+        if (mainDL) {
+            out["light_dir_x"]     = std::to_string(mainDL->direction.x);
+            out["light_dir_y"]     = std::to_string(mainDL->direction.y);
+            out["light_dir_z"]     = std::to_string(mainDL->direction.z);
+            out["light_color_r"]   = std::to_string(mainDL->color.x);
+            out["light_color_g"]   = std::to_string(mainDL->color.y);
+            out["light_color_b"]   = std::to_string(mainDL->color.z);
+            out["light_intensity"] = std::to_string(mainDL->intensity);
+            out["shadow_enabled"]  = std::to_string(mainDL->castShadow ? 1 : 0);
+            out["shadow_bias"]     = std::to_string(mainDL->shadowBias);
+        }
+
+        // 补光也保存（方便调整）
+        world.ForEach<he::DirectionalLight>([&](he::Entity e, he::DirectionalLight& l) {
+            if (e == mainLightEntity) return;  // 跳过主光
+            out["fill_dir_x"]     = std::to_string(l.direction.x);
+            out["fill_dir_y"]     = std::to_string(l.direction.y);
+            out["fill_dir_z"]     = std::to_string(l.direction.z);
+            out["fill_color_r"]   = std::to_string(l.color.x);
+            out["fill_color_g"]   = std::to_string(l.color.y);
+            out["fill_color_b"]   = std::to_string(l.color.z);
+            out["fill_intensity"] = std::to_string(l.intensity);
+        });
+
+        SaveConfigFile(g_ConfigPath, out);
+        HE_CORE_INFO("配置已保存: {}", g_ConfigPath);
+    }
 
     HE_CORE_INFO("03.Sponza 退出 ({} 帧)", frameIndex);
     return 0;

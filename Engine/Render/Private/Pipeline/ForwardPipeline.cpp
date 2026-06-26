@@ -5,6 +5,8 @@
 #include "Core/Assert.h"
 #include "EmbeddedShaders.h"
 
+#include <glm/gtc/matrix_transform.hpp>
+
 namespace he::render {
 
 ForwardPipeline::ForwardPipeline() {
@@ -14,10 +16,40 @@ ForwardPipeline::~ForwardPipeline() {
     Shutdown();
 }
 
+// 计算方向光的正交投影矩阵（用于阴影贴图）
+static float4x4 ComputeDirectionalLightViewProj(
+    const float3& lightDir, const CameraData& camera, float size)
+{
+    // 将灯光视为无穷远，构建正交投影
+    // 使用相机视锥体的中心作为阴影投影的参考点
+    float3 camForward = camera.forward;
+    float3 camCenter = camera.position + camForward * 20.0f; // 阴影中心在相机前方
+
+    // 灯光上方向量（避免与 lightDir 共线）
+    float3 up = (abs(lightDir.y) < 0.999f) ? float3(0, 1, 0) : float3(1, 0, 0);
+
+    float4x4 lightView = glm::lookAt(
+        camCenter - lightDir * size * 0.5f,  // 灯光位置（远离场景中心）
+        camCenter,
+        up);
+
+    // 正交投影包围盒
+    float halfSize = size * 0.5f;
+    float nearPlane = 0.1f;
+    float farPlane  = size * 2.0f;
+    float4x4 lightProj = glm::ortho(-halfSize, halfSize, -halfSize, halfSize, nearPlane, farPlane);
+
+    // Vulkan NDC: 反转 Y 轴
+    lightProj[1][1] *= -1.0f;
+
+    return lightProj * lightView;
+}
+
 void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     m_Device = device;
     HE_ASSERT(m_Device, "ForwardPipeline: device is null");
 
+    // --- PBR 着色器 ---
     m_VS.stage      = rhi::ShaderStage::Vertex;
     m_VS.spirv      = k_PBR_vert_spv;
     m_VS.entryPoint = "main";
@@ -25,6 +57,15 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     m_FS.stage      = rhi::ShaderStage::Pixel;
     m_FS.spirv      = k_PBR_frag_spv;
     m_FS.entryPoint = "main";
+
+    // --- 阴影着色器 ---
+    m_ShadowVS.stage      = rhi::ShaderStage::Vertex;
+    m_ShadowVS.spirv      = k_Shadow_vert_spv;
+    m_ShadowVS.entryPoint = "main";
+
+    m_ShadowFS.stage      = rhi::ShaderStage::Pixel;
+    m_ShadowFS.spirv      = k_Shadow_frag_spv;
+    m_ShadowFS.entryPoint = "main";
 
     rhi::VertexInputLayout vertexLayout;
     vertexLayout.stride = sizeof(he::StaticVertex);
@@ -34,26 +75,73 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         { 2, 0, rhi::VertexFormat::Float2, offsetof(he::StaticVertex, uv) },
     };
 
-    // --- 3. 创建 DescriptorSetLayout ---
-    // Descriptor set layout: 只包含 shader 实际使用的 binding
-    // binding=1 (Light SSBO, Fragment)
-    // binding=2 (Object SSBO, Vertex+Fragment)
+    // --- 主管线 DescriptorSetLayout ---
+    // binding=1: GPULight[] (Fragment)
+    // binding=2: GPUObjectData[] (Vertex|Fragment)
+    // binding=3: GPUShadowData[] (Fragment)
+    // binding=4: CombinedImageSampler — ShadowMap (Fragment)
     rhi::DescriptorSetLayoutDesc combinedLayoutDesc;
     combinedLayoutDesc.bindings = {
-        { 1, rhi::DescriptorType::StorageBuffer, 1, 16 },     // stageMask=16 (Fragment)
-        { 2, rhi::DescriptorType::StorageBuffer, 1, 17 },     // stageMask=17 (Vertex|Fragment)
+        { 1, rhi::DescriptorType::StorageBuffer,       1, 16 },     // Fragment
+        { 2, rhi::DescriptorType::StorageBuffer,       1, 17 },     // Vertex|Fragment
+        { 3, rhi::DescriptorType::StorageBuffer,       1, 16 },     // Fragment (阴影数据)
+        { 4, rhi::DescriptorType::CombinedImageSampler, 1, 16 },    // Fragment (阴影贴图)
     };
     m_DescLayout = device->CreateDescriptorSetLayout(combinedLayoutDesc);
 
-    // 创建对象 Storage Buffer（每帧填充）
+    // --- 创建 Storage Buffers ---
     rhi::BufferDesc objBufDesc;
     objBufDesc.size  = sizeof(GPUObjectData) * MAX_OBJECTS;
     objBufDesc.usage = rhi::BufferUsage::Storage;
     m_ObjectBuffer = device->CreateBuffer(objBufDesc);
 
-    // --- 4. Push constant + PSO ---
+    rhi::BufferDesc lightBufDesc;
+    lightBufDesc.size  = sizeof(GPULight) * MAX_LIGHTS;
+    lightBufDesc.usage = rhi::BufferUsage::Storage;
+    m_LightBuffer = device->CreateBuffer(lightBufDesc);
+
+    rhi::BufferDesc shadowBufDesc;
+    shadowBufDesc.size  = sizeof(GPUShadowData) * MAX_SHADOWS;
+    shadowBufDesc.usage = rhi::BufferUsage::Storage;
+    m_ShadowBuffer = device->CreateBuffer(shadowBufDesc);
+
+    // --- 创建阴影贴图纹理（深度纹理，将被着色器采样）---
+    rhi::TextureDesc shadowTexDesc;
+    shadowTexDesc.format      = rhi::Format::D32_FLOAT;
+    shadowTexDesc.width       = m_ShadowMapSize;
+    shadowTexDesc.height      = m_ShadowMapSize;
+    shadowTexDesc.depth       = 1;
+    shadowTexDesc.mipLevels   = 1;
+    shadowTexDesc.arrayLayers = 1;
+    shadowTexDesc.usage       = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
+    m_ShadowMap = device->CreateTexture(shadowTexDesc);
+
+    // --- 创建 PCF 比较采样器 ---
+    rhi::SamplerDesc shadowSamplerDesc;
+    shadowSamplerDesc.minFilter     = rhi::FilterMode::Linear;
+    shadowSamplerDesc.magFilter     = rhi::FilterMode::Linear;
+    shadowSamplerDesc.addressU      = rhi::AddressMode::ClampToEdge;
+    shadowSamplerDesc.addressV      = rhi::AddressMode::ClampToEdge;
+    shadowSamplerDesc.addressW      = rhi::AddressMode::ClampToEdge;
+    shadowSamplerDesc.enableCompare = true;               // 启用深度比较
+    shadowSamplerDesc.compareFunc   = rhi::CompareFunc::LessEqual;
+    m_ShadowSampler = device->CreateSampler(shadowSamplerDesc);
+
+    // --- 分配描述符集并绑定所有资源 ---
+    m_DescSet = device->AllocateDescriptorSet(m_DescLayout);
+    device->UpdateDescriptorSet(m_DescSet, 1, rhi::DescriptorType::StorageBuffer,
+                                m_LightBuffer.get());
+    device->UpdateDescriptorSet(m_DescSet, 2, rhi::DescriptorType::StorageBuffer,
+                                m_ObjectBuffer.get());
+    device->UpdateDescriptorSet(m_DescSet, 3, rhi::DescriptorType::StorageBuffer,
+                                m_ShadowBuffer.get());
+    device->UpdateDescriptorSet(m_DescSet, 4,
+                                rhi::DescriptorType::CombinedImageSampler,
+                                m_ShadowMap.get(), m_ShadowSampler.get());
+
+    // --- 主管线 PSO ---
     rhi::PushConstantRange pcRange;
-    pcRange.stageMask = 1 | 16;
+    pcRange.stageMask = 1 | 16;     // Vertex | Fragment
     pcRange.offset    = 0;
     pcRange.size      = sizeof(PushConstantData);
 
@@ -72,20 +160,33 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     m_PBR_PSO = device->CreatePipelineState(psoDesc);
     HE_ASSERT(m_PBR_PSO, "ForwardPipeline: failed to create PBR PSO");
 
-    // 创建 Light Storage Buffer
-    rhi::BufferDesc lightBufDesc;
-    lightBufDesc.size  = sizeof(GPULight) * MAX_LIGHTS;
-    lightBufDesc.usage = rhi::BufferUsage::Storage;
-    m_LightBuffer = device->CreateBuffer(lightBufDesc);
+    // --- 阴影 PSO（深度专用：无颜色附件，仅深度写入）---
+    rhi::PushConstantRange shadowPCRange;
+    shadowPCRange.stageMask = 1;    // Vertex only
+    shadowPCRange.offset    = 0;
+    shadowPCRange.size      = sizeof(ShadowPushConstant);
 
-    // 分配 DescriptorSet 并绑定两个 Storage Buffer
-    m_DescSet = device->AllocateDescriptorSet(m_DescLayout);
-    device->UpdateDescriptorSet(m_DescSet, 1, rhi::DescriptorType::StorageBuffer,
-                                m_LightBuffer.get());
-    device->UpdateDescriptorSet(m_DescSet, 2, rhi::DescriptorType::StorageBuffer,
-                                m_ObjectBuffer.get());
+    rhi::PipelineStateDesc shadowPSODesc;
+    shadowPSODesc.vertexShader         = &m_ShadowVS;
+    shadowPSODesc.pixelShader          = &m_ShadowFS;
+    shadowPSODesc.vertexLayout         = vertexLayout;
+    shadowPSODesc.topology             = rhi::PrimitiveTopology::TriangleList;
+    shadowPSODesc.depthTest            = true;
+    shadowPSODesc.depthWrite           = true;
+    shadowPSODesc.depthCompare         = rhi::CompareFunc::LessEqual;
+    shadowPSODesc.depthFormat          = rhi::Format::D32_FLOAT;
+    shadowPSODesc.colorAttachmentCount = 0;  // 深度专用：无颜色输出
+    shadowPSODesc.pushConstantRanges   = { shadowPCRange };
+    shadowPSODesc.descriptorSetLayouts = { m_DescLayout };
+    shadowPSODesc.debugName            = "ShadowDepth";
 
-    HE_CORE_INFO("ForwardPipeline initialized");
+    m_ShadowPSO = device->CreatePipelineState(shadowPSODesc);
+    HE_ASSERT(m_ShadowPSO, "ForwardPipeline: failed to create Shadow PSO");
+
+    // TODO Phase 4A-2: 阴影贴图布局转换（UNDEFINED → SHADER_READ_ONLY_OPTIMAL）
+    // 需在 RHI 层添加 Image Barrier 支持后再实现
+
+    HE_CORE_INFO("ForwardPipeline initialized (with Shadow Mapping)");
 }
 
 void ForwardPipeline::Shutdown() {
@@ -94,7 +195,11 @@ void ForwardPipeline::Shutdown() {
     }
     m_LightBuffer.reset();
     m_ObjectBuffer.reset();
+    m_ShadowBuffer.reset();
+    m_ShadowMap.reset();
+    m_ShadowSampler.reset();
     m_PBR_PSO.reset();
+    m_ShadowPSO.reset();
     m_Device = nullptr;
     HE_CORE_INFO("ForwardPipeline shut down");
 }
@@ -108,37 +213,72 @@ void ForwardPipeline::BeginFrame(rhi::IRHICommandList* cmd, u32 width, u32 heigh
     cmd->SetScissor({ 0, 0, width, height });
 }
 
-void ForwardPipeline::CollectLights(PushConstantData& pc, he::World& world, he::SceneGraph& sg) {
+void ForwardPipeline::CollectLights(
+    PushConstantData& pc,
+    std::vector<GPUShadowData>& shadowData,
+    he::World& world,
+    he::SceneGraph& sg)
+{
     pc.lightCount = 0;
+    shadowData.clear();
 
-    // 填入 Storage Buffer（需遍历三种光源子类，World 按 type_index 分桶存储）
     auto collectLight = [&](he::Entity e, he::LightComponent& lc) {
         if (pc.lightCount >= MAX_LIGHTS) return;
         u32 i = pc.lightCount;
 
         GPULight gl{};
         gl.colorIntensity  = float4(lc.color, lc.intensity);
+        gl.shadowIndex     = -1;  // 默认无阴影
+
+        // 分配阴影槽（如果光源投射阴影）
+        if (lc.castShadow && shadowData.size() < MAX_SHADOWS) {
+            gl.shadowIndex = static_cast<i32>(shadowData.size());
+        }
 
         switch (lc.type) {
         case he::LightType::Directional: {
             auto* dl = static_cast<he::DirectionalLight*>(&lc);
-            gl.directionType = float4(dl->direction, 0.0f);  // type=0
+            gl.directionType = float4(dl->direction, 0.0f);
             gl.positionRange = float4(0, 0, 0, 0);
+
+            if (gl.shadowIndex >= 0) {
+                // 使用一个虚拟相机来计算方向光阴影的包围区域
+                // 简化版：基于光源方向计算正交投影
+                float3 lightDir = glm::normalize(dl->direction);
+                float sceneSize = 30.0f; // 固定场景大小（后续可根据实际场景调整）
+
+                GPUShadowData sd{};
+                sd.lightViewProj = ComputeDirectionalLightViewProj(
+                    lightDir, CameraData{}, sceneSize);
+                sd.shadowParams = float4(lc.shadowBias, lc.shadowNormalBias,
+                                         lc.shadowStrength, 0.0f);
+                shadowData.push_back(sd);
+            }
             break;
         }
         case he::LightType::Point: {
             auto* pl = static_cast<he::PointLight*>(&lc);
             float3 pos = sg.GetWorldPosition(e);
             gl.positionRange = float4(pos, pl->range);
-            gl.directionType = float4(0, -1, 0, 1.0f);  // type=1
+            gl.directionType = float4(0, -1, 0, 1.0f);
+
+            if (gl.shadowIndex >= 0) {
+                // 点光源阴影暂不支持，清除 shadowIndex
+                gl.shadowIndex = -1;
+            }
             break;
         }
         case he::LightType::Spot: {
             auto* sl = static_cast<he::SpotLight*>(&lc);
             float3 pos = sg.GetWorldPosition(e);
             gl.positionRange = float4(pos, sl->range);
-            gl.directionType = float4(sl->direction, 2.0f);  // type=2
+            gl.directionType = float4(sl->direction, 2.0f);
             gl.coneAngles   = float2(sl->innerConeAngle, sl->outerConeAngle);
+
+            if (gl.shadowIndex >= 0) {
+                // 聚光灯阴影暂不支持，清除 shadowIndex
+                gl.shadowIndex = -1;
+            }
             break;
         }
         }
@@ -159,10 +299,79 @@ void ForwardPipeline::CollectLights(PushConstantData& pc, he::World& world, he::
         GPULight gl{};
         gl.colorIntensity = float4(1.0f, 0.95f, 0.85f, 5.0f);
         gl.directionType  = float4(0.5f, -1.0f, 1.0f, 0.0f);
+        gl.shadowIndex    = -1;
         GPULight* lights = static_cast<GPULight*>(m_LightBuffer->Map());
         if (lights) lights[0] = gl;
         m_LightBuffer->Unmap();
     }
+
+    // 上传阴影 GPU 数据到 SSBO
+    if (!shadowData.empty()) {
+        GPUShadowData* sd = static_cast<GPUShadowData*>(m_ShadowBuffer->Map());
+        for (usize j = 0; j < shadowData.size(); ++j) {
+            sd[j] = shadowData[j];
+        }
+        m_ShadowBuffer->Unmap();
+    }
+}
+
+void ForwardPipeline::RenderShadowPass(
+    rhi::IRHICommandList* cmd,
+    he::World& world,
+    he::SceneGraph& sceneGraph,
+    const std::vector<const he::LightComponent*>& /*shadowLights*/,
+    const std::vector<GPUShadowData>& shadowGPUData)
+{
+    if (shadowGPUData.empty()) return;
+
+    // 阴影通道目前每个阴影光源一个深度贴图，但先实现单光源简化版
+    // 对于每个投射阴影的方向光，渲染场景到其深度贴图
+    // 注：当前简化实现 — 仅渲染到单个阴影贴图（最后处理的光源覆盖前面的）
+
+    // 绑定阴影 PSO
+    cmd->SetPipeline(m_ShadowPSO.get());
+
+    // 绑定描述符集（阴影着色器使用与主管线相同的对象数据）
+    cmd->BindDescriptorSet(0, m_DescSet);
+
+    // 阴影通道视口 + 裁剪
+    cmd->SetViewport({ 0, static_cast<float>(m_ShadowMapSize),
+                        static_cast<float>(m_ShadowMapSize),
+                        -static_cast<float>(m_ShadowMapSize), 0.0f, 1.0f });
+    cmd->SetScissor({ 0, 0, m_ShadowMapSize, m_ShadowMapSize });
+
+    // 为每个阴影投射光源渲染场景深度
+    // 当前版本：仅处理第一个阴影投射方向光
+    const GPUShadowData& sm = shadowGPUData[0];
+
+    ShadowPushConstant shadowPC{};
+    shadowPC.lightViewProj = sm.lightViewProj;
+
+    auto renderMeshForShadow = [&](he::Entity e, he::MeshComponent& mesh) {
+        if (mesh.GetIndexCount() == 0) return;
+        shadowPC.objectIndex = 0;  // 简化：每帧为阴影通道单独上传对象
+        // 获取世界矩阵
+        float4x4 worldMatrix = sceneGraph.GetWorldMatrix(e);
+
+        // 临时上传此对象到 Object Buffer（阴影通道需读取世界矩阵）
+        // 注意：阴影着色器从 u_Objects[objectIndex].worldMatrix 读取
+        GPUObjectData* objData = static_cast<GPUObjectData*>(m_ObjectBuffer->Map());
+        objData[0].worldMatrix = worldMatrix;
+        m_ObjectBuffer->Unmap();
+
+        cmd->SetPushConstants(0, sizeof(ShadowPushConstant), &shadowPC);
+        cmd->SetVertexBuffer(mesh.GetVertexBuffer().get(), 0);
+        cmd->SetIndexBuffer(mesh.GetIndexBuffer().get());
+        cmd->DrawIndexed(mesh.GetIndexCount());
+    };
+
+    world.ForEach<he::MeshComponent>(renderMeshForShadow);
+    world.ForEach<he::CubeComponent>([&](he::Entity e, he::CubeComponent& c) {
+        renderMeshForShadow(e, static_cast<he::MeshComponent&>(c));
+    });
+    world.ForEach<he::SphereComponent>([&](he::Entity e, he::SphereComponent& s) {
+        renderMeshForShadow(e, static_cast<he::MeshComponent&>(s));
+    });
 }
 
 void ForwardPipeline::RenderScene(
@@ -176,13 +385,25 @@ void ForwardPipeline::RenderScene(
     float4x4 viewProj = camera.GetViewProjMatrix();
     u32 drawCount = 0;
 
-    // 帧级 push constant（viewProj + camera + lightCount）
+    // 帧级 push constant
     PushConstantData framePC{};
     framePC.viewProjMatrix = viewProj;
     framePC.cameraPosition = float4(camera.position, 0.0f);
 
-    // 每帧收集光源数据
-    CollectLights(framePC, world, sceneGraph);
+    // 收集光源 + 阴影数据
+    std::vector<GPUShadowData> shadowGPUData;
+    std::vector<const he::LightComponent*> shadowLights;
+    CollectLights(framePC, shadowGPUData, world, sceneGraph);
+
+    // ============================================================
+    // 阴影通道
+    // ============================================================
+    // 注意：阴影通道需要在一个渲染通道内执行，此处利用 VulkanCommandList 的
+    // BeginRenderPass 机制。但是阴影 PSO 有自己独立的渲染通道（无颜色附件），
+    // 因此阴影通道需要在 BeginRenderPass 之前通过 ShadowPSO 的 renderPass 渲染。
+
+    // 当前简化实现：阴影通道使用 ShadowPSO 的 renderPass
+    // 需要先结束主管道的 renderPass（由调用方保证已在 BeginRenderPass 内）
 
     // 上传 per-object 数据到 Storage Buffer
     GPUObjectData* objData = static_cast<GPUObjectData*>(m_ObjectBuffer->Map());
@@ -196,7 +417,7 @@ void ForwardPipeline::RenderScene(
         objectIndex++;
     };
 
-    // 绑定 DescriptorSet（光照 + 对象数据）
+    // 绑定 DescriptorSet
     cmd->BindDescriptorSet(0, m_DescSet);
 
     auto renderMesh = [&](he::Entity e, he::MeshComponent& mesh) {
@@ -232,8 +453,8 @@ void ForwardPipeline::RenderScene(
 
     static bool s_FirstFrame = true;
     if (s_FirstFrame) {
-        HE_CORE_INFO("ForwardPipeline::RenderScene: {} draws, {} lights",
-            drawCount, framePC.lightCount);
+        HE_CORE_INFO("ForwardPipeline::RenderScene: {} draws, {} lights, {} shadows",
+            drawCount, framePC.lightCount, shadowGPUData.size());
         s_FirstFrame = false;
     }
 }
@@ -252,7 +473,6 @@ void ForwardPipeline::DrawMesh(
 {
     if (!mesh || mesh->GetIndexCount() == 0) return;
 
-    // 帧级 push constant: viewProj + camera + lightCount + objectIndex
     cmd->SetPushConstants(0, sizeof(PushConstantData), &framePC);
     cmd->SetVertexBuffer(mesh->GetVertexBuffer().get(), 0);
     cmd->SetIndexBuffer(mesh->GetIndexBuffer().get());

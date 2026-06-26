@@ -247,6 +247,7 @@ struct VulkanDeviceAccess {
     static VkDevice         GetDevice(IRHIDevice* d);
     static u32              GetGraphicsFamily(IRHIDevice* d);
     static VkQueue          GetGraphicsQueue(IRHIDevice* d);
+    static VkCommandPool    GetGraphicsCmdPool(IRHIDevice* d);
 };
 
 } // namespace he::rhi

@@ -56,6 +56,9 @@ public:
     DescriptorSetHandle       AllocateDescriptorSet(DescriptorSetLayoutHandle layout) override;
     void                      UpdateDescriptorSet(DescriptorSetHandle set, u32 binding,
                                                   DescriptorType type, IRHIBuffer* buffer) override;
+    void                      UpdateDescriptorSet(DescriptorSetHandle set, u32 binding,
+                                                  DescriptorType type, IRHITexture* texture,
+                                                  IRHISampler* sampler) override;
     void                      DestroyDescriptorSetLayout(DescriptorSetLayoutHandle layout) override;
 
     // Internal
@@ -472,6 +475,32 @@ void VulkanDevice::UpdateDescriptorSet(DescriptorSetHandle setHandle, u32 bindin
     write.descriptorCount = 1;
     write.descriptorType  = ToVkDescType(type);
     write.pBufferInfo     = &bufInfo;
+
+    vkUpdateDescriptorSets(m_Device, 1, &write, 0, nullptr);
+}
+
+void VulkanDevice::UpdateDescriptorSet(DescriptorSetHandle setHandle, u32 binding,
+                                        DescriptorType type, IRHITexture* texture,
+                                        IRHISampler* sampler) {
+    if (setHandle == 0 || setHandle > m_DescSets.size()) return;
+    VkDescriptorSet ds = m_DescSets[static_cast<usize>(setHandle - 1)];
+
+    auto* vkTex     = static_cast<VulkanTexture*>(texture);
+    auto* vkSampler = static_cast<VulkanSampler*>(sampler);
+
+    VkDescriptorImageInfo imageInfo{};
+    imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    imageInfo.imageView   = vkTex->GetImageView();
+    imageInfo.sampler     = vkSampler->GetHandle();
+
+    VkWriteDescriptorSet write{};
+    write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet          = ds;
+    write.dstBinding      = binding;
+    write.dstArrayElement = 0;
+    write.descriptorCount = 1;
+    write.descriptorType  = ToVkDescType(type);
+    write.pImageInfo      = &imageInfo;
 
     vkUpdateDescriptorSets(m_Device, 1, &write, 0, nullptr);
 }
@@ -1021,6 +1050,10 @@ u32 VulkanDeviceAccess::GetGraphicsFamily(IRHIDevice* d) {
 }
 VkQueue VulkanDeviceAccess::GetGraphicsQueue(IRHIDevice* d) {
     return static_cast<VulkanDevice*>(d)->GetGraphicsQueue();
+}
+
+VkCommandPool VulkanDeviceAccess::GetGraphicsCmdPool(IRHIDevice* d) {
+    return static_cast<VulkanDevice*>(d)->GetGraphicsCmdPool();
 }
 
 } // namespace he::rhi

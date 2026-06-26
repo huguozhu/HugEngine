@@ -546,52 +546,73 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     VkShaderModule frag = createShader(desc.pixelShader,    VK_SHADER_STAGE_FRAGMENT_BIT);
 
     // 2. Render pass（颜色附件 + 可选的深度附件）
+    //    支持 depth-only 模式：colorAttachmentCount=0 时仅创建深度附件
+    bool hasColor = (desc.colorAttachmentCount > 0);
     bool hasDepth = (desc.depthFormat != Format::Unknown);
 
     VkAttachmentDescription colorAttach{};
-    colorAttach.format        = VK_FORMAT_B8G8R8A8_UNORM;
-    colorAttach.samples       = VK_SAMPLE_COUNT_1_BIT;
-    colorAttach.loadOp        = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    colorAttach.storeOp       = VK_ATTACHMENT_STORE_OP_STORE;
-    colorAttach.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    colorAttach.finalLayout   = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    if (hasColor) {
+        colorAttach.format        = VK_FORMAT_B8G8R8A8_UNORM;
+        colorAttach.samples       = VK_SAMPLE_COUNT_1_BIT;
+        colorAttach.loadOp        = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        colorAttach.storeOp       = VK_ATTACHMENT_STORE_OP_STORE;
+        colorAttach.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        colorAttach.finalLayout   = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    }
 
     VkAttachmentDescription depthAttach{};
-    depthAttach.format        = VK_FORMAT_D32_SFLOAT;
-    depthAttach.samples       = VK_SAMPLE_COUNT_1_BIT;
-    depthAttach.loadOp        = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    depthAttach.storeOp       = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depthAttach.format         = hasDepth ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_UNDEFINED;
+    depthAttach.samples        = VK_SAMPLE_COUNT_1_BIT;
+    depthAttach.loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depthAttach.storeOp        = VK_ATTACHMENT_STORE_OP_STORE; // 阴影贴图需要 STORE
     depthAttach.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     depthAttach.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    depthAttach.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    depthAttach.finalLayout   = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    depthAttach.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+    depthAttach.finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL; // 阴影贴图后续要采样
 
+    // depth-only 模式下，深度附件在 index 0；否则在 index 1
+    u32 depthAttachIdx = hasColor ? 1u : 0u;
     VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-    VkAttachmentReference depthRef{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference depthRef{depthAttachIdx, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
 
     VkSubpassDescription subpass{};
     subpass.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount    = 1;
-    subpass.pColorAttachments       = &colorRef;
+    subpass.colorAttachmentCount    = hasColor ? 1u : 0u;
+    subpass.pColorAttachments       = hasColor ? &colorRef : nullptr;
     subpass.pDepthStencilAttachment = hasDepth ? &depthRef : nullptr;
 
-    VkAttachmentDescription attachments[2] = { colorAttach, depthAttach };
+    // 构建附件数组：depth-only 时深度在 [0]，否则颜色在 [0]、深度在 [1]
+    VkAttachmentDescription attachments[2];
+    u32 attachmentCount = 0;
+    u32 colorIdx = 0, depthInArrIdx = 0;
+    if (hasColor) {
+        attachments[attachmentCount++] = colorAttach;
+        colorIdx = 0;
+        depthInArrIdx = 1;
+        if (hasDepth) attachments[attachmentCount++] = depthAttach;
+    } else if (hasDepth) {
+        attachments[attachmentCount++] = depthAttach;
+        depthInArrIdx = 0;
+    }
 
     VkSubpassDependency dep{};
     dep.srcSubpass    = VK_SUBPASS_EXTERNAL;
     dep.dstSubpass    = 0;
-    dep.srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dep.dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-    dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | (hasDepth ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT : 0u);
+    dep.srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dep.dstStageMask  = (hasColor ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT : 0u) |
+                        (hasDepth ? VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT : 0u);
+    dep.dstAccessMask = (hasColor ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT : 0u) |
+                        (hasDepth ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT : 0u);
 
     VkRenderPassCreateInfo rpInfo{};
     rpInfo.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    rpInfo.attachmentCount = hasDepth ? 2u : 1u;
+    rpInfo.attachmentCount = attachmentCount;
     rpInfo.pAttachments    = attachments;
     rpInfo.subpassCount    = 1;
     rpInfo.pSubpasses      = &subpass;
-    rpInfo.dependencyCount = 1;
-    rpInfo.pDependencies   = &dep;
+    rpInfo.dependencyCount = (hasColor || hasDepth) ? 1u : 0u;
+    rpInfo.pDependencies   = (hasColor || hasDepth) ? &dep : nullptr;
 
     VkRenderPass renderPass;
     vkCreateRenderPass(device, &rpInfo, nullptr, &renderPass);

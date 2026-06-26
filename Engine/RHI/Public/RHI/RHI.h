@@ -48,6 +48,9 @@ public:
     virtual DescriptorSetHandle       AllocateDescriptorSet(DescriptorSetLayoutHandle layout) = 0;
     virtual void                      UpdateDescriptorSet(DescriptorSetHandle set, u32 binding,
                                                           DescriptorType type, IRHIBuffer* buffer) = 0;
+    virtual void                      UpdateDescriptorSet(DescriptorSetHandle set, u32 binding,
+                                                          DescriptorType type, IRHITexture* texture,
+                                                          IRHISampler* sampler) = 0; // CombinedImageSampler（阴影贴图等）
     virtual void                      DestroyDescriptorSetLayout(DescriptorSetLayoutHandle layout) = 0;
 
     // --- Commands ---
