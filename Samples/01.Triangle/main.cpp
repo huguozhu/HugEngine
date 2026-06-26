@@ -1,5 +1,5 @@
 // ============================================================
-// Triangle — 使用 HugEngine RHI 渲染三角形
+// 01.Triangle — 使用 HugEngine RHI 渲染三角形
 //
 // 本示例演示 HugEngine 的最简渲染流程：
 //   Engine 启动 → Vulkan 设备 → SwapChain → Buffer/Shader
@@ -23,7 +23,7 @@ int main() {
     // 1. 引擎启动
     // ============================================================
     he::EngineConfig config;
-    config.appName      = "HugEngine — Triangle";
+    config.appName      = "HugEngine — 01.Triangle";
     config.windowWidth  = 1920;
     config.windowHeight = 1080;
 
@@ -113,7 +113,7 @@ int main() {
     // ============================================================
     // 9. 主渲染循环
     // ============================================================
-    HE_CORE_INFO("Triangle sample started — rendering...");
+    HE_CORE_INFO("01.Triangle sample started — rendering...");
     u64 frameIndex = 0;
 
     while (!engine.GetWindow()->ShouldClose()) {

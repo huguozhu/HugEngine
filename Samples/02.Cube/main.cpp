@@ -1,5 +1,5 @@
 // ============================================================
-// Sponza — HugEngine PBR 前向渲染管线演示
+// 02.Cube — HugEngine PBR 前向渲染管线演示
 //
 // 使用逐物体 Push Constants 的 PBR 渲染：
 //   Engine → RHI Vulkan → ForwardPipeline → 场景遍历
@@ -184,7 +184,7 @@ int main() {
     });
 
     // --- 9. 主循环 ---
-    HE_CORE_INFO("PBR demo started — WASD=移动, 右键拖拽=旋转, 滚轮=缩放, Shift=加速");
+    HE_CORE_INFO("02.Cube demo started — WASD=移动, 右键拖拽=旋转, 滚轮=缩放, Shift=加速");
     u64  frameIndex = 0;
     f64  lastTime   = glfwGetTime();
 

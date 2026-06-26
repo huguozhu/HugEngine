@@ -74,9 +74,9 @@ foreach(_eng HugEngineCore HugEngineRHI HugEngineReflect HugEngineShader HugEngi
 endforeach()
 
 # Samples
-if(TARGET Triangle)
-    set_target_properties(Triangle PROPERTIES FOLDER "Samples")
+if(TARGET 01.Triangle)
+    set_target_properties(01.Triangle PROPERTIES FOLDER "Samples")
 endif()
-if(TARGET Sponza)
-    set_target_properties(Sponza PROPERTIES FOLDER "Samples")
+if(TARGET 02.Cube)
+    set_target_properties(02.Cube PROPERTIES FOLDER "Samples")
 endif()
