@@ -19,6 +19,9 @@ Thumbs.db
 # Downloaded test assets
 Content/gltf/
 
+# ImGui runtime settings
+imgui.ini
+
 # Intermediate
 *.obj
 *.pch
