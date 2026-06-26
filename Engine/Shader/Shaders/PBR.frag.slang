@@ -46,7 +46,9 @@ struct GPUShadowData {
 [[vk::binding(2, 0)]] StructuredBuffer<GPUObjectData> u_Objects;
 [[vk::binding(3, 0)]] StructuredBuffer<GPUShadowData> u_ShadowData;
 [[vk::binding(4, 0)]] Texture2D<float> u_ShadowMap;
-[[vk::binding(4, 0)]] SamplerComparisonState u_ShadowSampler;
+[[vk::binding(4, 0)]] SamplerState u_ShadowSampler;
+[[vk::binding(5, 0)]] Texture2D<float4> u_BaseColorTex;
+[[vk::binding(5, 0)]] SamplerState u_BaseColorSampler;
 
 [[vk::push_constant]] cbuffer FrameConstants {
     float4x4 viewProjMatrix;
@@ -64,8 +66,8 @@ float3 ACESFilm(float3 x) {
 float4 fragmentMain(FSInput input) : SV_Target0 {
     GPUObjectData obj = u_Objects[objectIndex];
 
-    float3 albedo = obj.baseColorFactor.rgb;
-    float alpha   = obj.baseColorFactor.a;
+    float3 albedo = obj.baseColorFactor.rgb * u_BaseColorTex.Sample(u_BaseColorSampler, input.uv).rgb;
+    float alpha   = obj.baseColorFactor.a * u_BaseColorTex.Sample(u_BaseColorSampler, input.uv).a;
     if (alpha < obj.alphaCutoff) discard;
 
     float metallic  = obj.metallicFactor;

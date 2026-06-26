@@ -29,6 +29,10 @@
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
+// stb_image — 纹理解码
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
+
 using namespace he;
 
 // ============================================================
@@ -180,10 +184,75 @@ int main() {
     HE_CORE_INFO("场景就绪: {} 实体", world.GetEntityCount());
 
     // ============================================================
+    // 4.5 加载 glTF 纹理（stb_image → RHI Texture → MeshComponent）
+    // 纹理缓存在 main() 作用域存活，MeshComponent 使用裸指针引用
+    // ============================================================
+    std::unordered_map<String,
+        std::pair<std::unique_ptr<rhi::IRHITexture>,
+                  std::unique_ptr<rhi::IRHISampler>>> g_TexCache;
+    {
+        std::filesystem::path sponzaDir = std::filesystem::path(sponzaPath).parent_path();
+
+        u32 texLoaded = 0;
+        world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent& mesh) {
+            if (mesh.baseColorTexture.empty()) return;
+
+            String texPath = (sponzaDir / mesh.baseColorTexture).string();
+
+            auto it = g_TexCache.find(texPath);
+            if (it == g_TexCache.end()) {
+                int w, h, ch;
+                u8* pixels = stbi_load(texPath.c_str(), &w, &h, &ch, 4);
+                if (!pixels) {
+                    HE_CORE_WARN("纹理加载失败: {} ({})", texPath, stbi_failure_reason());
+                    return;
+                }
+
+                rhi::TextureDesc texDesc;
+                texDesc.format      = rhi::Format::RGBA8_UNORM;
+                texDesc.width       = static_cast<u32>(w);
+                texDesc.height      = static_cast<u32>(h);
+                texDesc.usage       = rhi::TextureUsage::ShaderResource;
+                texDesc.initialData = pixels;
+                auto gpuTex = device->CreateTexture(texDesc);
+
+                rhi::SamplerDesc sampDesc;
+                sampDesc.minFilter = rhi::FilterMode::Linear;
+                sampDesc.magFilter = rhi::FilterMode::Linear;
+                sampDesc.addressU  = rhi::AddressMode::Repeat;
+                sampDesc.addressV  = rhi::AddressMode::Repeat;
+                auto gpuSamp = device->CreateSampler(sampDesc);
+
+                stbi_image_free(pixels);
+
+                it = g_TexCache.emplace(texPath,
+                    std::make_pair(std::move(gpuTex), std::move(gpuSamp))).first;
+                texLoaded++;
+                HE_CORE_INFO("纹理已上传到 GPU: {} ({}×{})", texPath, w, h);
+            }
+
+            mesh.SetBaseColorTexture(
+                it->second.first.get(), it->second.second.get());
+        });
+
+        HE_CORE_INFO("纹理加载完成: {} 张独立纹理 (去重后)", texLoaded);
+    }
+
+    // ============================================================
     // 5. 初始化前向管线
     // ============================================================
     render::ForwardPipeline pipeline;
     pipeline.Initialize(device.get());
+
+    // 将第一个 baseColorTexture 绑定到管线
+    world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent& mesh) {
+        if (mesh.GetBaseColorGPUTexture()) {
+            pipeline.SetBaseColorTexture(
+                mesh.GetBaseColorGPUTexture(),
+                mesh.GetBaseColorGPUSampler());
+            return;
+        }
+    });
 
     // ============================================================
     // 6. 创建命令列表

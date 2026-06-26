@@ -483,15 +483,28 @@ void VulkanDevice::UpdateDescriptorSet(DescriptorSetHandle setHandle, u32 bindin
                                         DescriptorType type, IRHITexture* texture,
                                         IRHISampler* sampler) {
     if (setHandle == 0 || setHandle > m_DescSets.size()) return;
+    if (!texture || !sampler) return;  // 防御性检查
     VkDescriptorSet ds = m_DescSets[static_cast<usize>(setHandle - 1)];
+    if (ds == VK_NULL_HANDLE) return;
 
     auto* vkTex     = static_cast<VulkanTexture*>(texture);
     auto* vkSampler = static_cast<VulkanSampler*>(sampler);
 
+    VkImageView imgView = vkTex->GetImageView();
+    VkSampler   vkSamp  = vkSampler->GetHandle();
+
+    // 诊断日志：定位非法描述符绑定
+    if (imgView == VK_NULL_HANDLE || imgView == (VkImageView)0xdddddddddddddddd ||
+        vkSamp == VK_NULL_HANDLE || vkSamp == (VkSampler)0xdddddddddddddddd) {
+        HE_CORE_ERROR("UpdateDescriptorSet: 非法句柄! binding={} imgView={:#018x} sampler={:#018x} texPtr={} sampPtr={}",
+            binding, (u64)imgView, (u64)vkSamp, (void*)texture, (void*)sampler);
+        return;
+    }
+
     VkDescriptorImageInfo imageInfo{};
     imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    imageInfo.imageView   = vkTex->GetImageView();
-    imageInfo.sampler     = vkSampler->GetHandle();
+    imageInfo.imageView   = imgView;
+    imageInfo.sampler     = vkSamp;
 
     VkWriteDescriptorSet write{};
     write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;

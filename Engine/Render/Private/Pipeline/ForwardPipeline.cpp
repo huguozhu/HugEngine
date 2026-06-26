@@ -80,12 +80,14 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     // binding=2: GPUObjectData[] (Vertex|Fragment)
     // binding=3: GPUShadowData[] (Fragment)
     // binding=4: CombinedImageSampler — ShadowMap (Fragment)
+    // binding=5: CombinedImageSampler — BaseColor Texture (Fragment)
     rhi::DescriptorSetLayoutDesc combinedLayoutDesc;
     combinedLayoutDesc.bindings = {
-        { 1, rhi::DescriptorType::StorageBuffer,       1, 16 },     // Fragment
-        { 2, rhi::DescriptorType::StorageBuffer,       1, 17 },     // Vertex|Fragment
-        { 3, rhi::DescriptorType::StorageBuffer,       1, 16 },     // Fragment (阴影数据)
-        { 4, rhi::DescriptorType::CombinedImageSampler, 1, 16 },    // Fragment (阴影贴图)
+        { 1, rhi::DescriptorType::StorageBuffer,        1, 16 },     // Fragment
+        { 2, rhi::DescriptorType::StorageBuffer,        1, 17 },     // Vertex|Fragment
+        { 3, rhi::DescriptorType::StorageBuffer,        1, 16 },     // Fragment (阴影数据)
+        { 4, rhi::DescriptorType::CombinedImageSampler,  1, 16 },     // Fragment (阴影贴图)
+        { 5, rhi::DescriptorType::CombinedImageSampler,  1, 16 },     // Fragment (基础色纹理)
     };
     m_DescLayout = device->CreateDescriptorSetLayout(combinedLayoutDesc);
 
@@ -127,7 +129,37 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     shadowSamplerDesc.compareFunc   = rhi::CompareFunc::LessEqual;
     m_ShadowSampler = device->CreateSampler(shadowSamplerDesc);
 
+    // --- 创建占位纹理 + 采样器 ---
+    {
+        u8 white4[4] = { 255, 255, 255, 255 };
+        rhi::TextureDesc whiteTexDesc;
+        whiteTexDesc.format      = rhi::Format::RGBA8_UNORM;
+        whiteTexDesc.width       = 1;
+        whiteTexDesc.height      = 1;
+        whiteTexDesc.usage       = rhi::TextureUsage::ShaderResource;
+        whiteTexDesc.initialData = white4;
+        m_DefaultBaseColorTex = device->CreateTexture(whiteTexDesc);
+
+        rhi::SamplerDesc defaultSampDesc;
+        defaultSampDesc.minFilter = rhi::FilterMode::Linear;
+        defaultSampDesc.magFilter = rhi::FilterMode::Linear;
+        defaultSampDesc.addressU  = rhi::AddressMode::Repeat;
+        defaultSampDesc.addressV  = rhi::AddressMode::Repeat;
+        m_DefaultBaseColorSampler = device->CreateSampler(defaultSampDesc);
+
+        // 阴影 PCF 比较采样器（后续阴影贴图就绪后启用）
+        rhi::SamplerDesc shadowSampDesc;
+        shadowSampDesc.minFilter     = rhi::FilterMode::Linear;
+        shadowSampDesc.magFilter     = rhi::FilterMode::Linear;
+        shadowSampDesc.addressU      = rhi::AddressMode::ClampToEdge;
+        shadowSampDesc.addressV      = rhi::AddressMode::ClampToEdge;
+        shadowSampDesc.enableCompare = true;
+        shadowSampDesc.compareFunc   = rhi::CompareFunc::LessEqual;
+        m_ShadowSampler = device->CreateSampler(shadowSampDesc);
+    }
+
     // --- 分配描述符集并绑定所有资源 ---
+    // 注：binding 4 复用 DefaultBaseColorTex（阴影贴图渲染通道就绪后替换为深度纹理）
     m_DescSet = device->AllocateDescriptorSet(m_DescLayout);
     device->UpdateDescriptorSet(m_DescSet, 1, rhi::DescriptorType::StorageBuffer,
                                 m_LightBuffer.get());
@@ -137,7 +169,10 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
                                 m_ShadowBuffer.get());
     device->UpdateDescriptorSet(m_DescSet, 4,
                                 rhi::DescriptorType::CombinedImageSampler,
-                                m_ShadowMap.get(), m_ShadowSampler.get());
+                                m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
+    device->UpdateDescriptorSet(m_DescSet, 5,
+                                rhi::DescriptorType::CombinedImageSampler,
+                                m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
 
     // --- 主管线 PSO ---
     rhi::PushConstantRange pcRange;
@@ -202,6 +237,12 @@ void ForwardPipeline::Shutdown() {
     m_ShadowPSO.reset();
     m_Device = nullptr;
     HE_CORE_INFO("ForwardPipeline shut down");
+}
+
+void ForwardPipeline::SetBaseColorTexture(rhi::IRHITexture* tex, rhi::IRHISampler* sampler) {
+    if (!tex || !sampler || !m_Device) return;
+    m_Device->UpdateDescriptorSet(m_DescSet, 5,
+        rhi::DescriptorType::CombinedImageSampler, tex, sampler);
 }
 
 void ForwardPipeline::BeginFrame(rhi::IRHICommandList* cmd, u32 width, u32 height) {

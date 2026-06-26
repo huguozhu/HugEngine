@@ -45,7 +45,7 @@ float G_Smith(float NdotV, float NdotL, float roughness) {
 // ============================================================
 float SampleShadowPCF(float3 worldPos, float3 worldNormal, float3 lightDir,
                        GPUShadowData sm, Texture2D<float> shadowMap,
-                       SamplerComparisonState shadowSampler)
+                       SamplerState shadowSampler)
 {
     // 应用法线偏移减少自阴影
     float3 biasedPos = worldPos + worldNormal * sm.shadowParams.y;
@@ -67,13 +67,14 @@ float SampleShadowPCF(float3 worldPos, float3 worldNormal, float3 lightDir,
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
         return 1.0;
 
-    // 3×3 PCF
-    float2 texelSize = 1.0 / 2048.0; // 基于 shadowMapSize
+    // 3×3 PCF（手动深度比较，兼容普通和比较采样器）
+    float2 texelSize = 1.0 / 2048.0;
     float shadow = 0.0;
     for (int x = -1; x <= 1; x++) {
         for (int y = -1; y <= 1; y++) {
             float2 sampleUV = uv + float2(float(x), float(y)) * texelSize;
-            shadow += shadowMap.SampleCmp(shadowSampler, sampleUV, depth);
+            float shadowDepth = shadowMap.Sample(shadowSampler, sampleUV);
+            shadow += (depth <= shadowDepth) ? 1.0 : 0.0;
         }
     }
     return shadow / 9.0;

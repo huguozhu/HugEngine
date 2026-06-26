@@ -41,6 +41,14 @@ public:
     /// 包围盒
     AABB GetBounds() const { return m_Bounds; }
 
+    // --- 纹理设置（外部加载后注入，指针由调用方管理生命周期）---
+    void SetBaseColorTexture(rhi::IRHITexture* tex, rhi::IRHISampler* sampler) {
+        m_BaseColorGPUTex     = tex;
+        m_BaseColorGPUSampler = sampler;
+    }
+    rhi::IRHITexture* GetBaseColorGPUTexture() const { return m_BaseColorGPUTex; }
+    rhi::IRHISampler* GetBaseColorGPUSampler() const { return m_BaseColorGPUSampler; }
+
     // --- glTF 2.0 PBR 材质参数 ---
     float4 baseColorFactor   = float4(1.0f);     // 基础色 RGBA
     float3 emissiveFactor    = float3(0.0f);     // 自发光 RGB
@@ -62,6 +70,8 @@ public:
 private:
     std::unique_ptr<rhi::IRHIBuffer> m_VertexBuffer;
     std::unique_ptr<rhi::IRHIBuffer> m_IndexBuffer;
+    rhi::IRHITexture* m_BaseColorGPUTex     = nullptr;  // GPU 基础色纹理（裸指针，由缓存管理）
+    rhi::IRHISampler* m_BaseColorGPUSampler  = nullptr;  // 纹理采样器
     u32 m_VertexCount = 0;
     u32 m_IndexCount  = 0;
     AABB m_Bounds;

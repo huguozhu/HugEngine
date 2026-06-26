@@ -50,6 +50,9 @@ public:
 
     rhi::IRHIPipelineState* GetPipelineState() const { return m_PBR_PSO.get(); }
 
+    // 绑定基础色纹理（外部加载后调用）
+    void SetBaseColorTexture(rhi::IRHITexture* tex, rhi::IRHISampler* sampler);
+
 private:
     // 阴影通道 — 渲染所有投射阴影的光源的深度贴图
     void RenderShadowPass(
@@ -89,9 +92,15 @@ private:
     std::unique_ptr<rhi::IRHIBuffer> m_ShadowBuffer;   // GPUShadowData[MAX_SHADOWS]
 
     // 阴影贴图 + 采样器
-    std::unique_ptr<rhi::IRHITexture>  m_ShadowMap;     // 深度纹理
-    std::unique_ptr<rhi::IRHISampler>  m_ShadowSampler; // PCF 比较采样器
+    std::unique_ptr<rhi::IRHITexture>  m_ShadowMap;          // 深度纹理（待阴影通道渲染后使用）
+    std::unique_ptr<rhi::IRHITexture>  m_ShadowPlaceholderTex; // 占位纹理（布局正确的 dummy）
+    std::unique_ptr<rhi::IRHISampler>  m_ShadowSampler;      // PCF 比较采样器（用于正式阴影贴图）
+    std::unique_ptr<rhi::IRHISampler>  m_ShadowPlaceholderSampler; // 占位纹理的普通采样器
     u32 m_ShadowMapSize = 2048;
+
+    // 基础色纹理（默认 1×1 白色，运行时替换为 glTF 纹理）
+    std::unique_ptr<rhi::IRHITexture>  m_DefaultBaseColorTex;
+    std::unique_ptr<rhi::IRHISampler>  m_DefaultBaseColorSampler;
 
     // 着色器字节码
     rhi::ShaderBytecode m_VS;

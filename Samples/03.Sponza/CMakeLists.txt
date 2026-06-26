@@ -9,6 +9,7 @@ target_link_libraries(03.Sponza PRIVATE
     HugEngineRender
     HugEngineEditor
     HugEngineAsset
+    stb   # 纹理解码 (stb_image.h)
 )
 
 # 定义 Content 目录绝对路径（解决从不同工作目录运行的路径问题）
