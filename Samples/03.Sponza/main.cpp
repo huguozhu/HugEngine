@@ -187,55 +187,49 @@ int main() {
     // 4.5 加载 glTF 纹理（stb_image → RHI Texture → MeshComponent）
     // 纹理缓存在 main() 作用域存活，MeshComponent 使用裸指针引用
     // ============================================================
+    // 纹理缓存（main 作用域存活，MeshComponent 裸指针引用）
     std::unordered_map<String,
         std::pair<std::unique_ptr<rhi::IRHITexture>,
                   std::unique_ptr<rhi::IRHISampler>>> g_TexCache;
+
+    // 加载一张纹理（自动去重缓存）
+    auto loadTexture = [&](const String& uri) -> std::pair<rhi::IRHITexture*, rhi::IRHISampler*> {
+        if (uri.empty()) return {nullptr, nullptr};
+        String texPath = (std::filesystem::path(sponzaPath).parent_path() / uri).string();
+        auto it = g_TexCache.find(texPath);
+        if (it == g_TexCache.end()) {
+            int w, h, ch;
+            u8* pixels = stbi_load(texPath.c_str(), &w, &h, &ch, 4);
+            if (!pixels) { HE_CORE_WARN("纹理加载失败: {}", texPath); return {nullptr, nullptr}; }
+            rhi::TextureDesc td; td.format=rhi::Format::RGBA8_UNORM;
+            td.width=static_cast<u32>(w); td.height=static_cast<u32>(h);
+            td.usage=rhi::TextureUsage::ShaderResource; td.initialData=pixels;
+            auto t = device->CreateTexture(td);
+            rhi::SamplerDesc sd; sd.minFilter=rhi::FilterMode::Linear;
+            sd.magFilter=rhi::FilterMode::Linear;
+            sd.addressU=sd.addressV=rhi::AddressMode::Repeat;
+            auto s = device->CreateSampler(sd);
+            stbi_image_free(pixels);
+            it = g_TexCache.emplace(texPath, std::make_pair(std::move(t), std::move(s))).first;
+            HE_CORE_INFO("GPU 纹理: {} ({}×{})", texPath, w, h);
+        }
+        return {it->second.first.get(), it->second.second.get()};
+    };
+
     {
-        std::filesystem::path sponzaDir = std::filesystem::path(sponzaPath).parent_path();
-
-        u32 texLoaded = 0;
+        u32 texCount = 0;
         world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent& mesh) {
-            if (mesh.baseColorTexture.empty()) return;
-
-            String texPath = (sponzaDir / mesh.baseColorTexture).string();
-
-            auto it = g_TexCache.find(texPath);
-            if (it == g_TexCache.end()) {
-                int w, h, ch;
-                u8* pixels = stbi_load(texPath.c_str(), &w, &h, &ch, 4);
-                if (!pixels) {
-                    HE_CORE_WARN("纹理加载失败: {} ({})", texPath, stbi_failure_reason());
-                    return;
-                }
-
-                rhi::TextureDesc texDesc;
-                texDesc.format      = rhi::Format::RGBA8_UNORM;
-                texDesc.width       = static_cast<u32>(w);
-                texDesc.height      = static_cast<u32>(h);
-                texDesc.usage       = rhi::TextureUsage::ShaderResource;
-                texDesc.initialData = pixels;
-                auto gpuTex = device->CreateTexture(texDesc);
-
-                rhi::SamplerDesc sampDesc;
-                sampDesc.minFilter = rhi::FilterMode::Linear;
-                sampDesc.magFilter = rhi::FilterMode::Linear;
-                sampDesc.addressU  = rhi::AddressMode::Repeat;
-                sampDesc.addressV  = rhi::AddressMode::Repeat;
-                auto gpuSamp = device->CreateSampler(sampDesc);
-
-                stbi_image_free(pixels);
-
-                it = g_TexCache.emplace(texPath,
-                    std::make_pair(std::move(gpuTex), std::move(gpuSamp))).first;
-                texLoaded++;
-                HE_CORE_INFO("纹理已上传到 GPU: {} ({}×{})", texPath, w, h);
-            }
-
-            mesh.SetBaseColorTexture(
-                it->second.first.get(), it->second.second.get());
+            auto [bcTex, bcSamp] = loadTexture(mesh.baseColorTexture);
+            mesh.SetBaseColorTexture(bcTex, bcSamp);
+            auto [nTex, nSamp] = loadTexture(mesh.normalTexture);
+            mesh.SetNormalTexture(nTex, nSamp);
+            auto [mrTex, mrSamp] = loadTexture(mesh.metallicRoughnessTexture);
+            mesh.SetMetallicRoughnessTexture(mrTex, mrSamp);
+            auto [aoTex, aoSamp] = loadTexture(mesh.occlusionTexture);
+            mesh.SetOcclusionTexture(aoTex, aoSamp);
+            texCount++;
         });
-
-        HE_CORE_INFO("纹理加载完成: {} 张独立纹理 (去重后)", texLoaded);
+        HE_CORE_INFO("纹理加载完成: {} primitive, {} 张独立纹理", texCount, g_TexCache.size());
     }
 
     // ============================================================
@@ -244,12 +238,16 @@ int main() {
     render::ForwardPipeline pipeline;
     pipeline.Initialize(device.get());
 
-    // 将第一个 baseColorTexture 绑定到管线
+    // 将第一个 primitive 的纹理绑定到管线（后续实现 per-material 纹理数组）
     world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent& mesh) {
         if (mesh.GetBaseColorGPUTexture()) {
-            pipeline.SetBaseColorTexture(
-                mesh.GetBaseColorGPUTexture(),
-                mesh.GetBaseColorGPUSampler());
+            pipeline.SetBaseColorTexture(mesh.GetBaseColorGPUTexture(), mesh.GetBaseColorGPUSampler());
+            if (mesh.GetNormalGPUTexture())
+                pipeline.SetNormalTexture(mesh.GetNormalGPUTexture(), mesh.GetNormalGPUSampler());
+            if (mesh.GetMetallicRoughnessGPUTexture())
+                pipeline.SetMetallicRoughnessTexture(mesh.GetMetallicRoughnessGPUTexture(), mesh.GetMetallicRoughnessGPUSampler());
+            if (mesh.GetOcclusionGPUTexture())
+                pipeline.SetOcclusionTexture(mesh.GetOcclusionGPUTexture(), mesh.GetOcclusionGPUSampler());
             return;
         }
     });

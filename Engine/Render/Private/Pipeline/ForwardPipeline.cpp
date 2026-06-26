@@ -76,18 +76,16 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     };
 
     // --- 主管线 DescriptorSetLayout ---
-    // binding=1: GPULight[] (Fragment)
-    // binding=2: GPUObjectData[] (Vertex|Fragment)
-    // binding=3: GPUShadowData[] (Fragment)
-    // binding=4: CombinedImageSampler — ShadowMap (Fragment)
-    // binding=5: CombinedImageSampler — BaseColor Texture (Fragment)
     rhi::DescriptorSetLayoutDesc combinedLayoutDesc;
     combinedLayoutDesc.bindings = {
-        { 1, rhi::DescriptorType::StorageBuffer,        1, 16 },     // Fragment
-        { 2, rhi::DescriptorType::StorageBuffer,        1, 17 },     // Vertex|Fragment
-        { 3, rhi::DescriptorType::StorageBuffer,        1, 16 },     // Fragment (阴影数据)
-        { 4, rhi::DescriptorType::CombinedImageSampler,  1, 16 },     // Fragment (阴影贴图)
-        { 5, rhi::DescriptorType::CombinedImageSampler,  1, 16 },     // Fragment (基础色纹理)
+        { 1, rhi::DescriptorType::StorageBuffer,        1, 16 },  // Fragment — 灯光
+        { 2, rhi::DescriptorType::StorageBuffer,        1, 17 },  // Vertex|Fragment — 对象
+        { 3, rhi::DescriptorType::StorageBuffer,        1, 16 },  // Fragment — 阴影数据
+        { 4, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Fragment — 阴影贴图
+        { 5, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Fragment — 基础色
+        { 6, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Fragment — 法线
+        { 7, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Fragment — 金属度/粗糙度
+        { 8, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Fragment — AO
     };
     m_DescLayout = device->CreateDescriptorSetLayout(combinedLayoutDesc);
 
@@ -173,6 +171,16 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     device->UpdateDescriptorSet(m_DescSet, 5,
                                 rhi::DescriptorType::CombinedImageSampler,
                                 m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
+    // binding 6-8: 复用默认纹理（运行时通过 SetXxxTexture 替换）
+    device->UpdateDescriptorSet(m_DescSet, 6,
+                                rhi::DescriptorType::CombinedImageSampler,
+                                m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
+    device->UpdateDescriptorSet(m_DescSet, 7,
+                                rhi::DescriptorType::CombinedImageSampler,
+                                m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
+    device->UpdateDescriptorSet(m_DescSet, 8,
+                                rhi::DescriptorType::CombinedImageSampler,
+                                m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
 
     // --- 主管线 PSO ---
     rhi::PushConstantRange pcRange;
@@ -242,6 +250,24 @@ void ForwardPipeline::Shutdown() {
 void ForwardPipeline::SetBaseColorTexture(rhi::IRHITexture* tex, rhi::IRHISampler* sampler) {
     if (!tex || !sampler || !m_Device) return;
     m_Device->UpdateDescriptorSet(m_DescSet, 5,
+        rhi::DescriptorType::CombinedImageSampler, tex, sampler);
+}
+
+void ForwardPipeline::SetNormalTexture(rhi::IRHITexture* tex, rhi::IRHISampler* sampler) {
+    if (!tex || !sampler || !m_Device) return;
+    m_Device->UpdateDescriptorSet(m_DescSet, 6,
+        rhi::DescriptorType::CombinedImageSampler, tex, sampler);
+}
+
+void ForwardPipeline::SetMetallicRoughnessTexture(rhi::IRHITexture* tex, rhi::IRHISampler* sampler) {
+    if (!tex || !sampler || !m_Device) return;
+    m_Device->UpdateDescriptorSet(m_DescSet, 7,
+        rhi::DescriptorType::CombinedImageSampler, tex, sampler);
+}
+
+void ForwardPipeline::SetOcclusionTexture(rhi::IRHITexture* tex, rhi::IRHISampler* sampler) {
+    if (!tex || !sampler || !m_Device) return;
+    m_Device->UpdateDescriptorSet(m_DescSet, 8,
         rhi::DescriptorType::CombinedImageSampler, tex, sampler);
 }
 

@@ -46,8 +46,27 @@ public:
         m_BaseColorGPUTex     = tex;
         m_BaseColorGPUSampler = sampler;
     }
-    rhi::IRHITexture* GetBaseColorGPUTexture() const { return m_BaseColorGPUTex; }
-    rhi::IRHISampler* GetBaseColorGPUSampler() const { return m_BaseColorGPUSampler; }
+    void SetNormalTexture(rhi::IRHITexture* tex, rhi::IRHISampler* sampler) {
+        m_NormalGPUTex     = tex;
+        m_NormalGPUSampler = sampler;
+    }
+    void SetMetallicRoughnessTexture(rhi::IRHITexture* tex, rhi::IRHISampler* sampler) {
+        m_MetallicRoughnessGPUTex     = tex;
+        m_MetallicRoughnessGPUSampler = sampler;
+    }
+    void SetOcclusionTexture(rhi::IRHITexture* tex, rhi::IRHISampler* sampler) {
+        m_OcclusionGPUTex     = tex;
+        m_OcclusionGPUSampler = sampler;
+    }
+
+    rhi::IRHITexture* GetBaseColorGPUTexture() const        { return m_BaseColorGPUTex; }
+    rhi::IRHISampler* GetBaseColorGPUSampler() const        { return m_BaseColorGPUSampler; }
+    rhi::IRHITexture* GetNormalGPUTexture() const           { return m_NormalGPUTex; }
+    rhi::IRHISampler* GetNormalGPUSampler() const           { return m_NormalGPUSampler; }
+    rhi::IRHITexture* GetMetallicRoughnessGPUTexture() const { return m_MetallicRoughnessGPUTex; }
+    rhi::IRHISampler* GetMetallicRoughnessGPUSampler() const { return m_MetallicRoughnessGPUSampler; }
+    rhi::IRHITexture* GetOcclusionGPUTexture() const        { return m_OcclusionGPUTex; }
+    rhi::IRHISampler* GetOcclusionGPUSampler() const        { return m_OcclusionGPUSampler; }
 
     // --- glTF 2.0 PBR 材质参数 ---
     float4 baseColorFactor   = float4(1.0f);     // 基础色 RGBA
@@ -70,8 +89,14 @@ public:
 private:
     std::unique_ptr<rhi::IRHIBuffer> m_VertexBuffer;
     std::unique_ptr<rhi::IRHIBuffer> m_IndexBuffer;
-    rhi::IRHITexture* m_BaseColorGPUTex     = nullptr;  // GPU 基础色纹理（裸指针，由缓存管理）
-    rhi::IRHISampler* m_BaseColorGPUSampler  = nullptr;  // 纹理采样器
+    rhi::IRHITexture* m_BaseColorGPUTex             = nullptr;
+    rhi::IRHISampler* m_BaseColorGPUSampler          = nullptr;
+    rhi::IRHITexture* m_NormalGPUTex                = nullptr;
+    rhi::IRHISampler* m_NormalGPUSampler             = nullptr;
+    rhi::IRHITexture* m_MetallicRoughnessGPUTex      = nullptr;
+    rhi::IRHISampler* m_MetallicRoughnessGPUSampler  = nullptr;
+    rhi::IRHITexture* m_OcclusionGPUTex             = nullptr;
+    rhi::IRHISampler* m_OcclusionGPUSampler          = nullptr;
     u32 m_VertexCount = 0;
     u32 m_IndexCount  = 0;
     AABB m_Bounds;

@@ -49,6 +49,12 @@ struct GPUShadowData {
 [[vk::binding(4, 0)]] SamplerState u_ShadowSampler;
 [[vk::binding(5, 0)]] Texture2D<float4> u_BaseColorTex;
 [[vk::binding(5, 0)]] SamplerState u_BaseColorSampler;
+[[vk::binding(6, 0)]] Texture2D<float4> u_NormalTex;
+[[vk::binding(6, 0)]] SamplerState u_NormalSampler;
+[[vk::binding(7, 0)]] Texture2D<float4> u_MetallicRoughnessTex;
+[[vk::binding(7, 0)]] SamplerState u_MetallicRoughnessSampler;
+[[vk::binding(8, 0)]] Texture2D<float4> u_OcclusionTex;
+[[vk::binding(8, 0)]] SamplerState u_OcclusionSampler;
 
 [[vk::push_constant]] cbuffer FrameConstants {
     float4x4 viewProjMatrix;
@@ -66,15 +72,24 @@ float3 ACESFilm(float3 x) {
 float4 fragmentMain(FSInput input) : SV_Target0 {
     GPUObjectData obj = u_Objects[objectIndex];
 
-    float3 albedo = obj.baseColorFactor.rgb * u_BaseColorTex.Sample(u_BaseColorSampler, input.uv).rgb;
-    float alpha   = obj.baseColorFactor.a * u_BaseColorTex.Sample(u_BaseColorSampler, input.uv).a;
+    float4 baseColorSample = u_BaseColorTex.Sample(u_BaseColorSampler, input.uv);
+    float3 albedo = obj.baseColorFactor.rgb * baseColorSample.rgb;
+    float alpha   = obj.baseColorFactor.a * baseColorSample.a;
     if (alpha < obj.alphaCutoff) discard;
 
-    float metallic  = obj.metallicFactor;
-    float roughness = clamp(obj.roughnessFactor, 0.04, 1.0);
-    float ao        = obj.aoFactor;
-
+    // 法线贴图
+    float3 texNormal = u_NormalTex.Sample(u_NormalSampler, input.uv).rgb * 2.0 - 1.0;
     float3 N = normalize(input.worldNormal);
+    N = normalize(N + texNormal * 0.5); // 简化 TBN：世界法线 + 纹理扰动
+
+    // 金属度/粗糙度贴图（glTF 标准：B=金属度, G=粗糙度）
+    float4 metallicRoughnessSample = u_MetallicRoughnessTex.Sample(u_MetallicRoughnessSampler, input.uv);
+    float metallic  = obj.metallicFactor  * metallicRoughnessSample.b;
+    float roughness = obj.roughnessFactor * metallicRoughnessSample.g;
+    roughness = clamp(roughness, 0.04, 1.0);
+
+    // AO 贴图（glTF 标准：R=AO）
+    float ao = obj.aoFactor * u_OcclusionTex.Sample(u_OcclusionSampler, input.uv).r;
     float3 V = normalize(cameraPosition.xyz - input.worldPos);
 
     // 多光源循环
