@@ -7,7 +7,9 @@ target_sources(HugEngineAsset PRIVATE
 
 target_include_directories(HugEngineAsset
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/Public
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Private
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/Private
+        ${CMAKE_SOURCE_DIR}/Engine/External/meshoptimizer/extern  # cgltf 单头文件库
 )
 
 target_link_libraries(HugEngineAsset PUBLIC HugEngineScene HugEngineReflect)

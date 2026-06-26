@@ -59,14 +59,14 @@ endif()
 # VS 解决方案目录 — 覆盖所有子模块的 FOLDER 设置
 # ============================================================
 # External 第三方库（覆盖 GLFW 自带的 "GLFW3" 等）
-foreach(_ext glfw glm spdlog Taskflow stb meshoptimizer update_mappings)
+foreach(_ext glfw glm spdlog Taskflow stb meshoptimizer update_mappings imgui)
     if(TARGET ${_ext})
         set_target_properties(${_ext} PROPERTIES FOLDER "External")
     endif()
 endforeach()
 
 # Engine 模块
-foreach(_eng HugEngineCore HugEngineRHI HugEngineReflect HugEngineShader
+foreach(_eng HugEngineCore HugEngineRHI HugEngineReflect HugEngineShader HugEngineSerialize
             HugEngineScene HugEngineRender HugEngineAsset HugEngineEditor CompileShaders)
     if(TARGET ${_eng})
         set_target_properties(${_eng} PROPERTIES FOLDER "Engine")

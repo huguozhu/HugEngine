@@ -88,7 +88,7 @@ void ContentBrowserPanel::RenderFileGrid() {
             if (ImGui::Button(isGLB ? "3D" : "IMG", {60, 60}) ||
                 (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))) {
                 if (isGLB) {
-                    ImportGLB(entry.path().string());
+                    ImportGLTF(entry.path().string());
                 } else if (ext == ".hescene") {
                     editor::SceneSerializer::Load(
                         entry.path().string(),
@@ -106,7 +106,7 @@ void ContentBrowserPanel::RenderFileGrid() {
             // 右键菜单
             if (ImGui::BeginPopupContextItem(name.c_str())) {
                 if (isGLB && ImGui::MenuItem("Import to Scene")) {
-                    ImportGLB(entry.path().string());
+                    ImportGLTF(entry.path().string());
                 }
                 ImGui::MenuItem("Show in Explorer");
                 ImGui::EndPopup();
@@ -123,22 +123,18 @@ void ContentBrowserPanel::RenderFileGrid() {
     }
 }
 
-void ContentBrowserPanel::ImportGLB(const String& filePath) {
+void ContentBrowserPanel::ImportGLTF(const String& filePath) {
     if (!m_Ctx) return;
     auto* world = m_Ctx->GetWorld();
     auto* sg    = m_Ctx->GetSceneGraph();
     if (!world || !sg) return;
 
-    HE_CORE_INFO("Importing GLB: {}", filePath);
-    auto result = asset::LoadGLB(*world, filePath);
+    HE_CORE_INFO("导入 glTF: {}", filePath);
+    auto result = asset::LoadGLTF(*world, *sg, filePath);
     if (result.success) {
-        // 将所有导入实体设为根节点
-        for (auto& e : result.entities) {
-            sg->SetParent(e, {kInvalidEntity});
-        }
-        HE_CORE_INFO("Imported {} entities from {}", result.meshCount, filePath);
+        HE_CORE_INFO("导入成功: {} 实体, {} 网格图元", result.entities.size(), result.meshCount);
     } else {
-        HE_CORE_ERROR("Failed to import GLB: {}", result.error);
+        HE_CORE_ERROR("导入 glTF 失败: {}", result.error);
     }
 }
 

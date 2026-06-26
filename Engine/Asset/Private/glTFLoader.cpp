@@ -1,320 +1,406 @@
 #include "Asset/glTFLoader.h"
 #include "Scene/World.h"
+#include "Scene/SceneGraph.h"
 #include "Scene/MeshComponent.h"
 #include "Scene/Transform.h"
 #include "Core/Log.h"
 #include "Math/Geometry.h"
 
-#include <fstream>
-#include <cstring>
+#include <unordered_map>
+#include <vector>
+#include <string>
+
+// GLM 矩阵分解（用于 node.matrix）
+#include <glm/gtx/matrix_decompose.hpp>
+
+// ============================================================
+// cgltf 实现 — 单头文件库，仅在此翻译单元中展开
+// ============================================================
+#define CGLTF_IMPLEMENTATION
+#include "cgltf.h"
 
 namespace he::asset {
 
 // ============================================================
-// GLB 格式常量
+// 匿名命名空间 — 内部辅助函数
 // ============================================================
-static constexpr u32 GLB_MAGIC   = 0x46546C67;  // "glTF"
-static constexpr u32 JSON_CHUNK  = 0x4E4F534A;  // "JSON"
-static constexpr u32 BIN_CHUNK   = 0x004E4942;  // "BIN\0"
+namespace {
 
-/// 从字符串中提取整数值
-static i32 ExtractInt(const char* json, const char* key) {
-    const char* pos = strstr(json, key);
-    if (!pos) return -1;
-    pos += strlen(key);
-    while (*pos == ' ' || *pos == ':' || *pos == '"') pos++;
-    return strtol(pos, nullptr, 10);
-}
-
-/// 从字符串中提取浮点数
-static f32 ExtractFloat(const char* json, const char* key) {
-    const char* pos = strstr(json, key);
-    if (!pos) return 0.0f;
-    pos += strlen(key);
-    while (*pos == ' ' || *pos == ':' || *pos == '"') pos++;
-    return strtof(pos, nullptr);
-}
-
-/// 从字符串中提取浮点数组（最多 count 个）
-static u32 ExtractFloatArray(const char* json, const char* key, f32* out, u32 maxCount) {
-    const char* pos = strstr(json, key);
-    if (!pos) return 0;
-    pos += strlen(key);
-    while (*pos == ' ' || *pos == ':' || *pos == '"' || *pos == '[') pos++;
-    u32 count = 0;
-    while (count < maxCount && *pos && *pos != ']') {
-        out[count++] = strtof(pos, const_cast<char**>(&pos));
-        while (*pos == ',' || *pos == ' ') pos++;
+/// cgltf 错误码 → 可读字符串
+String CgltfResultToString(cgltf_result result) {
+    switch (result) {
+        case cgltf_result_success:           return "成功";
+        case cgltf_result_data_too_short:    return "数据过短";
+        case cgltf_result_unknown_format:    return "未知格式";
+        case cgltf_result_invalid_json:      return "无效 JSON";
+        case cgltf_result_invalid_gltf:      return "无效 glTF";
+        case cgltf_result_invalid_options:   return "无效选项";
+        case cgltf_result_file_not_found:    return "文件未找到";
+        case cgltf_result_io_error:          return "IO 错误";
+        case cgltf_result_out_of_memory:     return "内存不足";
+        case cgltf_result_legacy_gltf:       return "旧版 glTF 1.0（不支持）";
+        default:                             return "未知错误";
     }
-    return count;
 }
 
-glTFResult LoadGLB(World& world, const String& filePath) {
+/// 将 glTF 节点的 TRS 变换写入 TransformComponent
+///
+/// 优先使用 node.matrix（通过 GLM 分解为 TRS），
+/// 否则使用独立的 translation/rotation/scale 字段。
+///
+/// 注意：cgltf 四元数存储顺序为 {x, y, z, w}（glTF 规范），
+///       GLM quat 构造函数为 quat(w, x, y, z)，需转换。
+void ApplyNodeTransform(const cgltf_node* node, TransformComponent* tf) {
+    if (!tf) return;
+
+    if (node->has_matrix) {
+        // node.matrix 是列主序 float[16]，与 glm::mat4 内存布局一致
+        float4x4 mat = glm::make_mat4(node->matrix);
+        glm::vec3 skew;
+        glm::vec4 perspective;
+        glm::decompose(mat, tf->scale, tf->rotation, tf->position, skew, perspective);
+    } else {
+        if (node->has_translation) {
+            tf->position = float3(node->translation[0],
+                                  node->translation[1],
+                                  node->translation[2]);
+        }
+        if (node->has_rotation) {
+            // cgltf: {x, y, z, w} → GLM: quat(w, x, y, z)
+            tf->rotation = quat(node->rotation[3],
+                                node->rotation[0],
+                                node->rotation[1],
+                                node->rotation[2]);
+        }
+        if (node->has_scale) {
+            tf->scale = float3(node->scale[0],
+                               node->scale[1],
+                               node->scale[2]);
+        }
+    }
+}
+
+/// 将 cgltf 材质参数复制到 MeshComponent 的 PBR 字段
+///
+/// 提取 metallic-roughness PBR 参数、alpha 模式、
+/// 双面/无光照标志，以及纹理路径（URI 字符串）。
+void ApplyMaterial(const cgltf_material* material, MeshComponent* meshComp) {
+    if (!material || !meshComp) return;
+
+    // --- PBR Metallic-Roughness ---
+    if (material->has_pbr_metallic_roughness) {
+        auto& pbr = material->pbr_metallic_roughness;
+        meshComp->baseColorFactor = float4(
+            pbr.base_color_factor[0],
+            pbr.base_color_factor[1],
+            pbr.base_color_factor[2],
+            pbr.base_color_factor[3]);
+        meshComp->metallicFactor  = pbr.metallic_factor;
+        meshComp->roughnessFactor = pbr.roughness_factor;
+
+        // 基础色纹理
+        if (pbr.base_color_texture.texture &&
+            pbr.base_color_texture.texture->image) {
+            auto* image = pbr.base_color_texture.texture->image;
+            if (image->uri && *image->uri) {
+                meshComp->baseColorTexture = String(reinterpret_cast<const char*>(image->uri));
+            }
+        }
+
+        // 金属度-粗糙度纹理
+        if (pbr.metallic_roughness_texture.texture &&
+            pbr.metallic_roughness_texture.texture->image) {
+            auto* image = pbr.metallic_roughness_texture.texture->image;
+            if (image->uri && *image->uri) {
+                meshComp->metallicRoughnessTexture = String(reinterpret_cast<const char*>(image->uri));
+            }
+        }
+    }
+
+    // --- 法线贴图 ---
+    if (material->normal_texture.texture &&
+        material->normal_texture.texture->image) {
+        auto* image = material->normal_texture.texture->image;
+        if (image->uri && *image->uri) {
+            meshComp->normalTexture = String(reinterpret_cast<const char*>(image->uri));
+        }
+    }
+
+    // --- 遮挡贴图 ---
+    if (material->occlusion_texture.texture &&
+        material->occlusion_texture.texture->image) {
+        auto* image = material->occlusion_texture.texture->image;
+        if (image->uri && *image->uri) {
+            meshComp->occlusionTexture = String(reinterpret_cast<const char*>(image->uri));
+        }
+    }
+
+    // --- 自发光 ---
+    meshComp->emissiveFactor = float3(
+        material->emissive_factor[0],
+        material->emissive_factor[1],
+        material->emissive_factor[2]);
+
+    if (material->emissive_texture.texture &&
+        material->emissive_texture.texture->image) {
+        auto* image = material->emissive_texture.texture->image;
+        if (image->uri && *image->uri) {
+            meshComp->emissiveTexture = String(reinterpret_cast<const char*>(image->uri));
+        }
+    }
+
+    // --- Alpha 模式 ---
+    switch (material->alpha_mode) {
+        case cgltf_alpha_mode_opaque: meshComp->alphaMode = 0; break;
+        case cgltf_alpha_mode_mask:   meshComp->alphaMode = 1; break;
+        case cgltf_alpha_mode_blend:  meshComp->alphaMode = 2; break;
+        default:                      meshComp->alphaMode = 0; break;
+    }
+    meshComp->alphaCutoff = material->alpha_cutoff;
+
+    // --- 双面渲染 ---
+    meshComp->doubleSided = material->double_sided ? true : false;
+
+    // --- 无光照（KHR_materials_unlit）---
+    meshComp->unlit = material->unlit ? true : false;
+}
+
+/// 检查 accessor 属性是否存在且数据可用
+bool HasAttribute(const cgltf_attribute* attr) {
+    return attr && attr->data && attr->data->count > 0;
+}
+
+/// 加载单个 glTF primitive 的数据并创建 MeshComponent
+///
+/// 使用 cgltf_accessor_unpack_floats / cgltf_accessor_unpack_indices
+/// 解析顶点属性和索引数据。这些函数自动处理：
+///   - 不同组件类型（FLOAT / BYTE / SHORT / HALF 等）
+///   - 归一化（normalized 标志）
+///   - 缓冲区步长（byteStride）
+///   - 稀疏访问器（sparse）
+///
+/// @return 加载的顶点数和索引数（用于日志输出）
+void LoadPrimitive(
+    const cgltf_primitive& prim,
+    World&               world,
+    Entity               parentEntity,
+    SceneGraph&          sceneGraph,
+    glTFResult&          result)
+{
+    // 跳过非三角形图元
+    if (prim.type != cgltf_primitive_type_triangles) {
+        HE_CORE_WARN("跳过非三角形图元 (type={})", static_cast<int>(prim.type));
+        return;
+    }
+
+    // --- 1. 定位顶点属性 ---
+    const cgltf_attribute* posAttr    = nullptr;
+    const cgltf_attribute* normalAttr = nullptr;
+    const cgltf_attribute* uvAttr     = nullptr;
+
+    for (cgltf_size a = 0; a < prim.attributes_count; ++a) {
+        const auto& attr = prim.attributes[a];
+        switch (attr.type) {
+            case cgltf_attribute_type_position: posAttr    = &attr; break;
+            case cgltf_attribute_type_normal:   normalAttr = &attr; break;
+            case cgltf_attribute_type_texcoord: uvAttr     = &attr; break;
+            default: break; // TANGENT / COLOR / JOINTS / WEIGHTS 暂不处理
+        }
+    }
+
+    if (!HasAttribute(posAttr)) {
+        HE_CORE_WARN("Primitive 缺少 POSITION 属性，跳过");
+        return;
+    }
+
+    // --- 2. 创建本 primitive 对应的 Entity ---
+    cgltf_size vertexCount = posAttr->data->count;
+    String primName = String("Prim_") + std::to_string(result.meshCount);
+    Entity primEntity = world.CreateEntity(primName);
+    world.AddComponent<TransformComponent>(primEntity); // 默认 TRS（单位变换）
+    sceneGraph.SetParent(primEntity, parentEntity);
+    result.entities.push_back(primEntity);
+
+    // --- 3. 提取位置数据 ---
+    cgltf_size posComps = cgltf_num_components(posAttr->data->type); // 应为 3 (VEC3)
+    std::vector<float> posFloats(posComps * vertexCount);
+    cgltf_accessor_unpack_floats(posAttr->data, posFloats.data(), posComps * vertexCount);
+
+    // --- 4. 提取法线数据（可选）---
+    std::vector<float> normalFloats;
+    if (HasAttribute(normalAttr)) {
+        cgltf_size normComps = cgltf_num_components(normalAttr->data->type);
+        normalFloats.resize(normComps * vertexCount);
+        cgltf_accessor_unpack_floats(normalAttr->data, normalFloats.data(),
+                                     normComps * vertexCount);
+    }
+
+    // --- 5. 提取 UV 数据（可选）---
+    std::vector<float> uvFloats;
+    bool hasUV = false;
+    cgltf_size uvComps = 0;
+    if (HasAttribute(uvAttr)) {
+        uvComps = cgltf_num_components(uvAttr->data->type);
+        uvFloats.resize(uvComps * vertexCount);
+        cgltf_size unpacked = cgltf_accessor_unpack_floats(uvAttr->data, uvFloats.data(),
+                                                           uvComps * vertexCount);
+        hasUV = (unpacked > 0);
+    }
+
+    // --- 6. 构建 StaticVertex 数组 ---
+    TArray<StaticVertex> vertices;
+    vertices.reserve(static_cast<usize>(vertexCount));
+    for (cgltf_size i = 0; i < vertexCount; ++i) {
+        StaticVertex v{};
+        v.position = float3(posFloats[i * posComps + 0],
+                            posFloats[i * posComps + 1],
+                            posFloats[i * posComps + 2]);
+        v.normal   = HasAttribute(normalAttr)
+            ? float3(normalFloats[i * 3], normalFloats[i * 3 + 1], normalFloats[i * 3 + 2])
+            : float3(0.0f, 1.0f, 0.0f); // 默认朝上
+        v.uv       = hasUV
+            ? float2(uvFloats[i * uvComps], uvFloats[i * uvComps + 1])
+            : float2(0.0f, 0.0f); // 默认 UV 零点
+        vertices.push_back(v);
+    }
+
+    // --- 7. 提取索引数据（可选）---
+    TArray<u32> indices;
+    if (prim.indices) {
+        // 先查询索引数量
+        cgltf_size indexCount = cgltf_accessor_unpack_indices(prim.indices, nullptr, sizeof(u32), 0);
+        if (indexCount > 0) {
+            indices.resize(static_cast<usize>(indexCount));
+            cgltf_accessor_unpack_indices(prim.indices, indices.data(), sizeof(u32), indexCount);
+        }
+    }
+
+    // --- 8. 创建 MeshComponent 并设置数据 ---
+    auto* meshComp = world.AddComponent<MeshComponent>(primEntity);
+    if (meshComp) {
+        meshComp->SetMeshData(vertices, indices);
+
+        // 提取材质参数
+        if (prim.material) {
+            ApplyMaterial(prim.material, meshComp);
+        }
+    }
+
+    // --- 9. 记录日志 ---
+    HE_CORE_INFO("  Primitive[{}]: {} vertices, {} indices, hasNormal={}, hasUV={}",
+                 result.meshCount, vertexCount, indices.size(),
+                 HasAttribute(normalAttr), hasUV);
+
+    ++result.meshCount;
+}
+
+/// 递归处理 glTF 场景中的节点
+///
+/// 遍历节点树，为每个节点创建 Entity + TransformComponent，
+/// 如有 mesh 则为每个 primitive 创建子 Entity + MeshComponent，
+/// 如有 children 则递归处理。
+void ProcessNode(
+    const cgltf_node*                                          node,
+    Entity                                                     parentEntity,
+    World&                                                     world,
+    SceneGraph&                                                sceneGraph,
+    std::unordered_map<const cgltf_node*, Entity>&             nodeEntityMap,
+    glTFResult&                                                result)
+{
+    if (!node) return;
+
+    // --- 1. 创建当前节点对应的 Entity ---
+    String entityName = node->name
+        ? String(reinterpret_cast<const char*>(node->name))
+        : String("glTF_Node");
+    Entity nodeEntity = world.CreateEntity(entityName);
+
+    auto* tf = world.AddComponent<TransformComponent>(nodeEntity);
+    ApplyNodeTransform(node, tf);
+
+    // 建立父子关系
+    if (parentEntity.IsValid()) {
+        sceneGraph.SetParent(nodeEntity, parentEntity);
+    }
+
+    result.entities.push_back(nodeEntity);
+    nodeEntityMap[node] = nodeEntity; // 注册映射，供未来蒙皮/动画等扩展使用
+
+    // --- 2. 如有 mesh，为每个 primitive 创建子实体 ---
+    if (node->mesh) {
+        for (cgltf_size p = 0; p < node->mesh->primitives_count; ++p) {
+            LoadPrimitive(node->mesh->primitives[p],
+                          world, nodeEntity, sceneGraph, result);
+        }
+    }
+
+    // --- 3. 递归处理子节点 ---
+    for (cgltf_size c = 0; c < node->children_count; ++c) {
+        ProcessNode(node->children[c], nodeEntity,
+                    world, sceneGraph, nodeEntityMap, result);
+    }
+}
+
+} // namespace
+
+// ============================================================
+// 公开入口 — LoadGLTF
+// ============================================================
+glTFResult LoadGLTF(World& world, SceneGraph& sceneGraph, const String& filePath) {
     glTFResult result;
 
-    // 1. 读取文件
-    std::ifstream file(filePath, std::ios::binary | std::ios::ate);
-    if (!file.is_open()) {
-        result.error = "Failed to open file: " + filePath;
+    // 1. 解析文件（自动识别 .glb / .gltf）
+    cgltf_options options{};
+    cgltf_data* data = nullptr;
+
+    cgltf_result parseResult = cgltf_parse_file(&options, filePath.c_str(), &data);
+    if (parseResult != cgltf_result_success) {
+        result.error = String("cgltf 解析失败: ") + CgltfResultToString(parseResult)
+                       + " (" + filePath + ")";
         HE_CORE_ERROR("{}", result.error);
         return result;
     }
 
-    usize fileSize = static_cast<usize>(file.tellg());
-    file.seekg(0);
-
-    std::vector<u8> data(fileSize);
-    file.read(reinterpret_cast<char*>(data.data()), fileSize);
-    file.close();
-
-    HE_CORE_INFO("Loading GLB: {} ({} bytes)", filePath, fileSize);
-
-    // 2. 解析 GLB 头部
-    if (fileSize < 12) {
-        result.error = "File too small for GLB header";
+    // 2. 加载外部缓冲区数据（.bin 文件、base64 内嵌等）
+    cgltf_result loadResult = cgltf_load_buffers(&options, data, filePath.c_str());
+    if (loadResult != cgltf_result_success) {
+        result.error = String("cgltf 加载缓冲区失败: ") + CgltfResultToString(loadResult);
+        HE_CORE_ERROR("{}", result.error);
+        cgltf_free(data);
         return result;
     }
 
-    u32 magic   = *reinterpret_cast<u32*>(&data[0]);
-    u32 version = *reinterpret_cast<u32*>(&data[4]);
-    // u32 totalLen = *reinterpret_cast<u32*>(&data[8]);
-
-    if (magic != GLB_MAGIC) {
-        result.error = "Not a GLB file";
-        return result;
-    }
-    if (version != 2) {
-        result.error = "Only glTF 2.0 supported";
-        return result;
-    }
-
-    // 3. 解析 Chunks
-    usize offset = 12;
-    const char* jsonData = nullptr;
-    usize jsonLen = 0;
-    const u8* binData = nullptr;
-    usize binLen = 0;
-
-    while (offset + 8 <= fileSize) {
-        u32 chunkLen  = *reinterpret_cast<u32*>(&data[offset]);
-        u32 chunkType = *reinterpret_cast<u32*>(&data[offset + 4]);
-        offset += 8;
-
-        if (chunkType == JSON_CHUNK && offset + chunkLen <= fileSize) {
-            jsonData = reinterpret_cast<const char*>(&data[offset]);
-            jsonLen  = chunkLen;
-        } else if (chunkType == BIN_CHUNK && offset + chunkLen <= fileSize) {
-            binData = &data[offset];
-            binLen  = chunkLen;
-        }
-        offset += chunkLen;
-    }
-
-    if (!jsonData || !binData) {
-        result.error = "Missing JSON or BIN chunk";
-        return result;
-    }
-
-    // 4. 解析 JSON — 找到第一个 mesh 的 primitive
-    // 查找 "meshes" 数组中的第一个 mesh
-    const char* meshPos = strstr(jsonData, "\"meshes\"");
-    if (!meshPos) {
-        result.error = "No meshes found";
-        return result;
-    }
-
-    const char* primPos = strstr(meshPos, "\"primitives\"");
-    if (!primPos) {
-        result.error = "No primitives found";
-        return result;
-    }
-
-    // 获取第一个 primitive 的 POSITION accessor
-    i32 posAccessor = ExtractInt(primPos, "\"POSITION\"");
-    if (posAccessor < 0) {
-        result.error = "No POSITION accessor";
-        return result;
-    }
-
-    // 获取 NORMAL accessor (可选)
-    i32 normalAccessor = ExtractInt(primPos, "\"NORMAL\"");
-
-    // 获取 TEXCOORD_0 accessor (可选)
-    i32 uvAccessor = ExtractInt(primPos, "\"TEXCOORD_0\"");
-
-    // 获取 INDEX accessor
-    i32 idxAccessor = ExtractInt(primPos, "\"indices\"");
-
-    // 获取 baseColorFactor (可选)
-    f32 baseColor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-    const char* matPos = strstr(jsonData, "\"materials\"");
-
-    // 5. 解析 accessors 获取 bufferView
-    HE_CORE_INFO("  POSITION accessor: {}, INDEX: {}", posAccessor, idxAccessor);
-
-    // 查找 accessor 指向的 bufferView
-    const char* accessorsPos = strstr(jsonData, "\"accessors\"");
-    if (!accessorsPos) {
-        result.error = "No accessors found";
-        return result;
-    }
-
-    // 辅助函数：在 accessors JSON 数组中定位第 N 个 accessor（按 {} 计数）
-    auto findAccessor = [&](i32 accIdx, i32& outBV, i32& outCount, i32& outOffset, i32& outCompType) -> bool {
-        if (accIdx < 0) return false;
-        // 在 accessors 数组中定位第 accIdx 个 JSON 对象
-        const char* cur = accessorsPos;
-        i32 depth = 0, found = -1;
-        bool inString = false;
-        while (*cur) {
-            if (*cur == '"' && (cur == accessorsPos || *(cur-1) != '\\')) inString = !inString;
-            if (!inString) {
-                if (*cur == '{') {
-                    if (depth == 0) found++;
-                    depth++;
-                } else if (*cur == '}') {
-                    depth--;
-                }
-            }
-            if (found == accIdx && depth == 1) break; // 找到了目标 accessor 的开头
-            cur++;
-        }
-        if (found != accIdx) return false;
-
-        outBV       = ExtractInt(cur, "\"bufferView\"");
-        outCount    = ExtractInt(cur, "\"count\"");
-        outOffset   = ExtractInt(cur, "\"byteOffset\"");
-        outCompType = ExtractInt(cur, "\"componentType\"");
-        return outBV >= 0;
-    };
-
-    // 辅助函数：根据 bufferView index 获取 buffer 中的 byteOffset + byteLength
-    auto findBufferView = [&](i32 bvIdx, i32& outByteOffset, i32& outByteLen) -> bool {
-        char key[64];
-        snprintf(key, sizeof(key), "\"bufferView\":%d", bvIdx);
-        const char* bv = strstr(jsonData, key);
-        if (!bv) return false;
-
-        outByteOffset = ExtractInt(bv, "\"byteOffset\"");
-        outByteLen    = ExtractInt(bv, "\"byteLength\"");
-        return true;
-    };
-
-    // 6. 提取顶点位置
-    i32 posBV, posCount, posOffset, posCompType;
-    if (!findAccessor(posAccessor, posBV, posCount, posOffset, posCompType)) {
-        result.error = "Invalid POSITION accessor";
-        return result;
-    }
-
-    i32 posByteOffset, posByteLen;
-    if (!findBufferView(posBV, posByteOffset, posByteLen)) {
-        result.error = "Invalid POSITION bufferView";
-        return result;
-    }
-
-    usize posStart = posByteOffset + posOffset;
-    if (posStart + posCount * 12 > binLen) {  // 12 = 3 floats * 4 bytes
-        result.error = "POSITION data out of range";
-        return result;
-    }
-
-    const f32* posData = reinterpret_cast<const f32*>(&binData[posStart]);
-
-    // 7. 提取法线（可选）
-    const f32* normalData = nullptr;
-    i32 normalCount = 0;
-    if (normalAccessor >= 0) {
-        i32 nBV, nCount, nOffset, nCompType;
-        i32 nByteOffset, nByteLen;
-        if (findAccessor(normalAccessor, nBV, nCount, nOffset, nCompType) &&
-            findBufferView(nBV, nByteOffset, nByteLen)) {
-            usize nStart = nByteOffset + nOffset;
-            if (nStart + nCount * 12 <= binLen) {
-                normalData = reinterpret_cast<const f32*>(&binData[nStart]);
-                normalCount = nCount;
-            }
+    // 3. 选择要加载的场景（默认场景或第一个场景）
+    cgltf_scene* scene = data->scene;
+    if (!scene) {
+        if (data->scenes_count > 0) {
+            scene = &data->scenes[0];
+        } else {
+            result.error = "glTF 文件中没有场景";
+            HE_CORE_ERROR("{}", result.error);
+            cgltf_free(data);
+            return result;
         }
     }
 
-    // 8. 提取 UV（可选）
-    const f32* uvData = nullptr;
-    i32 uvCount = 0;
-    if (uvAccessor >= 0) {
-        i32 uBV, uCount, uOffset, uCompType;
-        i32 uByteOffset, uByteLen;
-        if (findAccessor(uvAccessor, uBV, uCount, uOffset, uCompType) &&
-            findBufferView(uBV, uByteOffset, uByteLen)) {
-            usize uStart = uByteOffset + uOffset;
-            if (uStart + uCount * 8 <= binLen) {  // 8 = 2 floats * 4 bytes
-                uvData = reinterpret_cast<const f32*>(&binData[uStart]);
-                uvCount = uCount;
-            }
-        }
+    HE_CORE_INFO("加载 glTF: {} (场景: {}, 节点: {}, 网格: {})",
+                 filePath,
+                 scene->name ? reinterpret_cast<const char*>(scene->name) : "默认",
+                 scene->nodes_count,
+                 data->meshes_count);
+
+    // 4. 递归遍历场景中的所有根节点
+    std::unordered_map<const cgltf_node*, Entity> nodeEntityMap;
+    for (cgltf_size i = 0; i < scene->nodes_count; ++i) {
+        ProcessNode(scene->nodes[i], Entity{kInvalidEntity},
+                    world, sceneGraph, nodeEntityMap, result);
     }
 
-    // 9. 提取索引
-    const u8* indexRaw = nullptr;
-    i32 idxCount = 0;
-    bool idx32 = false;
-    if (idxAccessor >= 0) {
-        i32 iBV, iCount, iOffset, iCompType;
-        i32 iByteOffset, iByteLen;
-        if (findAccessor(idxAccessor, iBV, iCount, iOffset, iCompType) &&
-            findBufferView(iBV, iByteOffset, iByteLen)) {
-            usize iStart = iByteOffset + iOffset;
-            if (iStart + iCount * 2 <= binLen) {
-                indexRaw = &binData[iStart];
-                idxCount = iCount;
-                idx32 = (iCompType == 5125);  // 5125 = UNSIGNED_INT
-            }
-        }
-    }
+    // 5. 清理
+    cgltf_free(data);
 
-    HE_CORE_INFO("  Vertices: {}, Normals: {}, UVs: {}, Indices: {}",
-                 posCount, normalCount, uvCount, idxCount);
-
-    // 10. 构建网格数据
-    TArray<StaticVertex> vertices;
-    vertices.reserve(posCount);
-    for (i32 i = 0; i < posCount; ++i) {
-        StaticVertex v;
-        v.position = float3(posData[i * 3], posData[i * 3 + 1], posData[i * 3 + 2]);
-        v.normal   = (normalData && i < normalCount)
-            ? float3(normalData[i * 3], normalData[i * 3 + 1], normalData[i * 3 + 2])
-            : float3(0, 1, 0);
-        v.uv       = (uvData && i < uvCount)
-            ? float2(uvData[i * 2], uvData[i * 2 + 1])
-            : float2(0, 0);
-        vertices.push_back(v);
-    }
-
-    TArray<u32> indices;
-    if (indexRaw && idxCount > 0) {
-        indices.reserve(idxCount);
-        for (i32 i = 0; i < idxCount; ++i) {
-            if (idx32) {
-                indices.push_back(reinterpret_cast<const u32*>(indexRaw)[i]);
-            } else {
-                indices.push_back(reinterpret_cast<const u16*>(indexRaw)[i]);
-            }
-        }
-    }
-
-    // 11. 创建实体
-    Entity entity = world.CreateEntity("glTF_Mesh");
-    world.AddComponent<TransformComponent>(entity);
-
-    auto* mesh = world.AddComponent<MeshComponent>(entity);
-    if (mesh) {
-        mesh->SetMeshData(vertices, indices);
-    }
-
-    result.entities.push_back(entity);
-    result.meshCount = 1;
-    result.success   = true;
-
-    HE_CORE_INFO("glTF loaded: {} vertices, {} indices", posCount, idxCount);
+    result.success = true;
+    HE_CORE_INFO("glTF 加载完成: {} 实体, {} 网格图元", result.entities.size(), result.meshCount);
     return result;
 }
 

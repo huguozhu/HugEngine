@@ -32,7 +32,7 @@ public:
 private:
     void RenderDirectoryTree();
     void RenderFileGrid();
-    void ImportGLB(const String& filePath);
+    void ImportGLTF(const String& filePath); // 通过 cgltf 加载 .glb / .gltf
 
     EditorContext* m_Ctx         = nullptr;
     String         m_CurrentPath = "Content";  // 默认浏览目录
