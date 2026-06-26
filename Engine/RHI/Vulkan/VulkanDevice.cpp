@@ -396,13 +396,13 @@ void VulkanDevice::EnsureDescriptorPool() {
 
     VkDescriptorPoolSize poolSizes[] = {
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 16 },
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 16 },
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 256 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 512 },         // 每 set 需要 3 个，~100+ sets
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1024 }, // 每 set 需要 5 个，~100+ sets
     };
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.maxSets       = 64;
+    poolInfo.maxSets       = 256;  // 需容纳 per-material 描述符集
     poolInfo.poolSizeCount = 3;
     poolInfo.pPoolSizes    = poolSizes;
     poolInfo.flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;

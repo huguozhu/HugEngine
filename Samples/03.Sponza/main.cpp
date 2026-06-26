@@ -158,7 +158,7 @@ int main() {
             GetFloat(cfgData, "light_color_r", 1.0f),
             GetFloat(cfgData, "light_color_g", 0.95f),
             GetFloat(cfgData, "light_color_b", 0.85f));
-        mainDL->intensity    = GetFloat(cfgData, "light_intensity", 8.0f);
+        mainDL->intensity    = GetFloat(cfgData, "light_intensity", 15.0f); // 增强光照使纹理更可见
         mainDL->castShadow   = GetInt(cfgData, "shadow_enabled", 1) != 0;
         mainDL->shadowBias   = GetFloat(cfgData, "shadow_bias", 0.003f);
         sceneGraph.SetParent(mainLightEntity, Entity{kInvalidEntity});
@@ -238,19 +238,18 @@ int main() {
     render::ForwardPipeline pipeline;
     pipeline.Initialize(device.get());
 
-    // 将第一个 primitive 的纹理绑定到管线（后续实现 per-material 纹理数组）
+    // 为每个 primitive 创建独立描述符集（纹理已写入，渲染时只 bind 不 update）
+    u32 descSetOk = 0, descSetFail = 0;
     world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent& mesh) {
-        if (mesh.GetBaseColorGPUTexture()) {
-            pipeline.SetBaseColorTexture(mesh.GetBaseColorGPUTexture(), mesh.GetBaseColorGPUSampler());
-            if (mesh.GetNormalGPUTexture())
-                pipeline.SetNormalTexture(mesh.GetNormalGPUTexture(), mesh.GetNormalGPUSampler());
-            if (mesh.GetMetallicRoughnessGPUTexture())
-                pipeline.SetMetallicRoughnessTexture(mesh.GetMetallicRoughnessGPUTexture(), mesh.GetMetallicRoughnessGPUSampler());
-            if (mesh.GetOcclusionGPUTexture())
-                pipeline.SetOcclusionTexture(mesh.GetOcclusionGPUTexture(), mesh.GetOcclusionGPUSampler());
-            return;
-        }
+        auto set = pipeline.CreateTextureDescriptorSet(
+            mesh.GetBaseColorGPUTexture(), mesh.GetBaseColorGPUSampler(),
+            mesh.GetNormalGPUTexture(), mesh.GetNormalGPUSampler(),
+            mesh.GetMetallicRoughnessGPUTexture(), mesh.GetMetallicRoughnessGPUSampler(),
+            mesh.GetOcclusionGPUTexture(), mesh.GetOcclusionGPUSampler());
+        mesh.SetDescriptorSet(set);
+        if (set != rhi::kInvalidSet) descSetOk++; else descSetFail++;
     });
+    HE_CORE_INFO("描述符集分配: {} 成功, {} 失败", descSetOk, descSetFail);
 
     // ============================================================
     // 6. 创建命令列表

@@ -68,6 +68,10 @@ public:
     rhi::IRHITexture* GetOcclusionGPUTexture() const        { return m_OcclusionGPUTex; }
     rhi::IRHISampler* GetOcclusionGPUSampler() const        { return m_OcclusionGPUSampler; }
 
+    // 描述符集（包含该 primitive 的纹理绑定，渲染时直接 bind 无需 update）
+    void SetDescriptorSet(rhi::DescriptorSetHandle h) { m_DescSetHandle = h; }
+    rhi::DescriptorSetHandle GetDescriptorSet() const { return m_DescSetHandle; }
+
     // --- glTF 2.0 PBR 材质参数 ---
     float4 baseColorFactor   = float4(1.0f);     // 基础色 RGBA
     float3 emissiveFactor    = float3(0.0f);     // 自发光 RGB
@@ -97,6 +101,7 @@ private:
     rhi::IRHISampler* m_MetallicRoughnessGPUSampler  = nullptr;
     rhi::IRHITexture* m_OcclusionGPUTex             = nullptr;
     rhi::IRHISampler* m_OcclusionGPUSampler          = nullptr;
+    rhi::DescriptorSetHandle m_DescSetHandle = rhi::kInvalidSet;
     u32 m_VertexCount = 0;
     u32 m_IndexCount  = 0;
     AABB m_Bounds;

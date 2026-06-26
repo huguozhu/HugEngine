@@ -20,7 +20,7 @@ struct CameraData {
 
     float   fov         = 60.0f;               // 垂直视场角（度）
     float   nearPlane   = 0.1f;                // 近裁剪面
-    float   farPlane    = 1000.0f;             // 远裁剪面
+    float   farPlane    = 2000.0f;             // 远裁剪面
     float   aspectRatio = 16.0f / 9.0f;        // 宽高比
 
     // 视图矩阵（世界空间 → 相机空间）

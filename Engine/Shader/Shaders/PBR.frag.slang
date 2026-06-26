@@ -79,21 +79,17 @@ float4 fragmentMain(FSInput input) : SV_Target0 {
 
     // 法线贴图
     float3 texNormal = u_NormalTex.Sample(u_NormalSampler, input.uv).rgb * 2.0 - 1.0;
-    float3 N = normalize(input.worldNormal);
-    N = normalize(N + texNormal * 0.5); // 简化 TBN：世界法线 + 纹理扰动
-
-    // 金属度/粗糙度贴图（glTF 标准：B=金属度, G=粗糙度）
-    float4 metallicRoughnessSample = u_MetallicRoughnessTex.Sample(u_MetallicRoughnessSampler, input.uv);
-    float metallic  = obj.metallicFactor  * metallicRoughnessSample.b;
-    float roughness = obj.roughnessFactor * metallicRoughnessSample.g;
-    roughness = clamp(roughness, 0.04, 1.0);
-
-    // AO 贴图（glTF 标准：R=AO）
-    float ao = obj.aoFactor * u_OcclusionTex.Sample(u_OcclusionSampler, input.uv).r;
+    float3 N = normalize(input.worldNormal + texNormal * 0.5);
     float3 V = normalize(cameraPosition.xyz - input.worldPos);
 
+    // 金属度/粗糙度贴图
+    float4 mrSample = u_MetallicRoughnessTex.Sample(u_MetallicRoughnessSampler, input.uv);
+    float metallic  = obj.metallicFactor  * mrSample.b;
+    float roughness = clamp(obj.roughnessFactor * mrSample.g, 0.04, 1.0);
+    float ao = obj.aoFactor * u_OcclusionTex.Sample(u_OcclusionSampler, input.uv).r;
+
     // 多光源循环
-    float3 color = albedo * 0.03 * ao;
+    float3 color = albedo * 0.5 * ao;  // 高环境光让纹理可见
     uint count = min(lightCount, 8u);
     for (uint i = 0; i < count; i++) {
         GPULight light = u_Lights[i];

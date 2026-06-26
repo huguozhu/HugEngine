@@ -247,28 +247,35 @@ void ForwardPipeline::Shutdown() {
     HE_CORE_INFO("ForwardPipeline shut down");
 }
 
-void ForwardPipeline::SetBaseColorTexture(rhi::IRHITexture* tex, rhi::IRHISampler* sampler) {
-    if (!tex || !sampler || !m_Device) return;
-    m_Device->UpdateDescriptorSet(m_DescSet, 5,
-        rhi::DescriptorType::CombinedImageSampler, tex, sampler);
-}
+rhi::DescriptorSetHandle ForwardPipeline::CreateTextureDescriptorSet(
+    rhi::IRHITexture* baseColor, rhi::IRHISampler* bcSampler,
+    rhi::IRHITexture* normal,   rhi::IRHISampler* nSampler,
+    rhi::IRHITexture* metallicRoughness, rhi::IRHISampler* mrSampler,
+    rhi::IRHITexture* occlusion, rhi::IRHISampler* ocSampler)
+{
+    if (!m_Device) return rhi::kInvalidSet;
+    auto set = m_Device->AllocateDescriptorSet(m_DescLayout);
+    if (set == rhi::kInvalidSet) return set;
 
-void ForwardPipeline::SetNormalTexture(rhi::IRHITexture* tex, rhi::IRHISampler* sampler) {
-    if (!tex || !sampler || !m_Device) return;
-    m_Device->UpdateDescriptorSet(m_DescSet, 6,
-        rhi::DescriptorType::CombinedImageSampler, tex, sampler);
-}
+    // 复制共享绑定 1-4（灯光/对象/阴影数据/阴影贴图）
+    m_Device->UpdateDescriptorSet(set, 1, rhi::DescriptorType::StorageBuffer, m_LightBuffer.get());
+    m_Device->UpdateDescriptorSet(set, 2, rhi::DescriptorType::StorageBuffer, m_ObjectBuffer.get());
+    m_Device->UpdateDescriptorSet(set, 3, rhi::DescriptorType::StorageBuffer, m_ShadowBuffer.get());
+    m_Device->UpdateDescriptorSet(set, 4, rhi::DescriptorType::CombinedImageSampler,
+        m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
 
-void ForwardPipeline::SetMetallicRoughnessTexture(rhi::IRHITexture* tex, rhi::IRHISampler* sampler) {
-    if (!tex || !sampler || !m_Device) return;
-    m_Device->UpdateDescriptorSet(m_DescSet, 7,
-        rhi::DescriptorType::CombinedImageSampler, tex, sampler);
-}
+    // 纹理绑定 5-8（使用默认纹理作为回退）
+    auto use = [&](u32 b, rhi::IRHITexture* t, rhi::IRHISampler* s) {
+        m_Device->UpdateDescriptorSet(set, b, rhi::DescriptorType::CombinedImageSampler,
+            t ? t : m_DefaultBaseColorTex.get(),
+            s ? s : m_DefaultBaseColorSampler.get());
+    };
+    use(5, baseColor, bcSampler);
+    use(6, normal, nSampler);
+    use(7, metallicRoughness, mrSampler);
+    use(8, occlusion, ocSampler);
 
-void ForwardPipeline::SetOcclusionTexture(rhi::IRHITexture* tex, rhi::IRHISampler* sampler) {
-    if (!tex || !sampler || !m_Device) return;
-    m_Device->UpdateDescriptorSet(m_DescSet, 8,
-        rhi::DescriptorType::CombinedImageSampler, tex, sampler);
+    return set;
 }
 
 void ForwardPipeline::BeginFrame(rhi::IRHICommandList* cmd, u32 width, u32 height) {
@@ -484,9 +491,6 @@ void ForwardPipeline::RenderScene(
         objectIndex++;
     };
 
-    // 绑定 DescriptorSet
-    cmd->BindDescriptorSet(0, m_DescSet);
-
     auto renderMesh = [&](he::Entity e, he::MeshComponent& mesh) {
         if (mesh.GetIndexCount() == 0) return;
         float4x4 worldMatrix = sceneGraph.GetWorldMatrix(e);
@@ -504,6 +508,13 @@ void ForwardPipeline::RenderScene(
 
         uploadObject(e, mesh, worldMatrix, mat);
         framePC.objectIndex = objectIndex - 1;
+
+        // 绑定该 mesh 的独立描述符集（纹理已在加载时写入，渲染时只 bind 不 update）
+        if (mesh.GetDescriptorSet() != rhi::kInvalidSet)
+            cmd->BindDescriptorSet(0, mesh.GetDescriptorSet());
+        else
+            cmd->BindDescriptorSet(0, m_DescSet);
+
         DrawMesh(cmd, &mesh, worldMatrix, viewProj, mat, camera, framePC);
         drawCount++;
     };

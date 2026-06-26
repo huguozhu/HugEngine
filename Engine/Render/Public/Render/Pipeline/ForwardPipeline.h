@@ -50,11 +50,12 @@ public:
 
     rhi::IRHIPipelineState* GetPipelineState() const { return m_PBR_PSO.get(); }
 
-    // 绑定纹理（外部加载后调用）
-    void SetBaseColorTexture(rhi::IRHITexture* tex, rhi::IRHISampler* sampler);
-    void SetNormalTexture(rhi::IRHITexture* tex, rhi::IRHISampler* sampler);
-    void SetMetallicRoughnessTexture(rhi::IRHITexture* tex, rhi::IRHISampler* sampler);
-    void SetOcclusionTexture(rhi::IRHITexture* tex, rhi::IRHISampler* sampler);
+    // 为指定纹理组合分配独立描述符集（渲染时直接绑定，避免 per-draw update）
+    rhi::DescriptorSetHandle CreateTextureDescriptorSet(
+        rhi::IRHITexture* baseColor, rhi::IRHISampler* bcSampler,
+        rhi::IRHITexture* normal,   rhi::IRHISampler* nSampler,
+        rhi::IRHITexture* metallicRoughness, rhi::IRHISampler* mrSampler,
+        rhi::IRHITexture* occlusion, rhi::IRHISampler* ocSampler);
 
 private:
     // 阴影通道 — 渲染所有投射阴影的光源的深度贴图
