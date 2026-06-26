@@ -19,6 +19,9 @@ Thumbs.db
 # Downloaded test assets
 Content/gltf/
 
+# Runtime config (auto-saved on exit)
+Content/Config/
+
 # ImGui runtime settings
 imgui.ini
 
