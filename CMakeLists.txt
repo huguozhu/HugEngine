@@ -26,6 +26,14 @@ if(HUGENGINE_RHI_VULKAN)
     find_package(Vulkan REQUIRED)
 endif()
 
+# Git（用于下载测试资源 + 子模块管理）
+find_package(Git REQUIRED)
+
+# ============================================================
+# 下载测试资源（Sponza glTF 等）
+# ============================================================
+include(cmake/DownloadAssets.cmake)
+
 # ============================================================
 # External dependencies
 # NOTE: External deps processed BEFORE C++26 to avoid

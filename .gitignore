@@ -16,6 +16,9 @@ Thumbs.db
 *.spv
 *.dxil
 
+# Downloaded test assets
+Content/gltf/
+
 # Intermediate
 *.obj
 *.pch
