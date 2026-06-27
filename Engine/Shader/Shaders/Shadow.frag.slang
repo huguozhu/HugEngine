@@ -7,7 +7,7 @@
 struct FSInput {
 };
 
-float4 fragmentMain(FSInput input) : SV_Target0 {
-    // 深度由固定管线写入，片元着色器无需输出
-    return float4(0, 0, 0, 0);
+// 注：阴影通道无颜色附件，片元着色器不输出任何颜色
+// 深度由固定管线写入（pipeline depthWrite = VK_TRUE）
+void fragmentMain(FSInput input) {
 }

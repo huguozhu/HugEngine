@@ -45,7 +45,7 @@ if(SLANGC)
             OUTPUT ${SPV}
             COMMAND ${CMAKE_COMMAND} -E make_directory ${SPV_OUT_DIR}
             COMMAND ${SLANGC} ${SRC} -target spirv -entry vertexMain -stage vertex
-                    -I "${SHADER_DIR}" -o ${SPV}
+                    -I "${SHADER_DIR}" -o ${SPV} -Wno-39001
             DEPENDS ${SRC} ${SLANG_INCLUDES}
             COMMENT "Slang → SPIR-V: ${NAME}"
         )
@@ -61,7 +61,7 @@ if(SLANGC)
             OUTPUT ${SPV}
             COMMAND ${CMAKE_COMMAND} -E make_directory ${SPV_OUT_DIR}
             COMMAND ${SLANGC} ${SRC} -target spirv -entry fragmentMain -stage fragment
-                    -I "${SHADER_DIR}" -o ${SPV}
+                    -I "${SHADER_DIR}" -o ${SPV} -Wno-39001
             DEPENDS ${SRC} ${SLANG_INCLUDES}
             COMMENT "Slang → SPIR-V: ${NAME}"
         )

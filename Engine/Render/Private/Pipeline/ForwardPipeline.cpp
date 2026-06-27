@@ -204,6 +204,13 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     HE_ASSERT(m_PBR_PSO, "ForwardPipeline: failed to create PBR PSO");
 
     // --- 阴影 PSO（深度专用：无颜色附件，仅深度写入）---
+    // 阴影 VS 仅使用位置属性，声明精简顶点布局避免 Vulkan 验证警告
+    rhi::VertexInputLayout shadowVertexLayout;
+    shadowVertexLayout.stride = sizeof(he::StaticVertex);
+    shadowVertexLayout.attributes = {
+        { 0, 0, rhi::VertexFormat::Float3, offsetof(he::StaticVertex, position) },
+    };
+
     rhi::PushConstantRange shadowPCRange;
     shadowPCRange.stageMask = 1;    // Vertex only
     shadowPCRange.offset    = 0;
@@ -212,7 +219,7 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     rhi::PipelineStateDesc shadowPSODesc;
     shadowPSODesc.vertexShader         = &m_ShadowVS;
     shadowPSODesc.pixelShader          = &m_ShadowFS;
-    shadowPSODesc.vertexLayout         = vertexLayout;
+    shadowPSODesc.vertexLayout         = shadowVertexLayout;
     shadowPSODesc.topology             = rhi::PrimitiveTopology::TriangleList;
     shadowPSODesc.depthTest            = true;
     shadowPSODesc.depthWrite           = true;

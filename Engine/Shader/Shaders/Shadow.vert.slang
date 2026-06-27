@@ -6,8 +6,8 @@
 // ============================================================
 
 layout(location = 0) in float3 inPosition;
-layout(location = 1) in float3 inNormal;
-layout(location = 2) in float2 inUV;
+// 注：阴影通道仅需位置，normal(loc=1) 和 uv(loc=2) 不声明，避免 Vulkan 验证警告
+// 顶点缓冲 stride 仍为 sizeof(StaticVertex)=32，位置数据在偏移 0 处
 
 // GPU Object（128 bytes，匹配 CPU GPUObjectData）
 struct GPUObjectData {
