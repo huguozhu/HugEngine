@@ -55,6 +55,8 @@ struct GPUShadowData {
 [[vk::binding(7, 0)]] SamplerState u_MetallicRoughnessSampler;
 [[vk::binding(8, 0)]] Texture2D<float4> u_OcclusionTex;
 [[vk::binding(8, 0)]] SamplerState u_OcclusionSampler;
+[[vk::binding(9, 0)]] TextureCube<float> u_PointShadowCube;
+[[vk::binding(9, 0)]] SamplerState u_PointShadowSampler;
 
 [[vk::push_constant]] cbuffer FrameConstants {
     float4x4 viewProjMatrix;
@@ -89,7 +91,7 @@ float4 fragmentMain(FSInput input) : SV_Target0 {
     float ao = obj.aoFactor * u_OcclusionTex.Sample(u_OcclusionSampler, input.uv).r;
 
     // 多光源循环
-    float3 color = albedo * 0.5 * ao;  // 高环境光让纹理可见
+    float3 color = albedo * 0.08 * ao;  // 低环境光，避免过曝，让光源主导照明
     uint count = min(lightCount, 8u);
     for (uint i = 0; i < count; i++) {
         GPULight light = u_Lights[i];
@@ -114,8 +116,19 @@ float4 fragmentMain(FSInput input) : SV_Target0 {
         float shadow = 1.0;
         if (light.shadowIndex >= 0) {
             GPUShadowData sm = u_ShadowData[light.shadowIndex];
-            shadow = lerp(1.0, SampleShadowPCF(input.worldPos, N, L, sm, u_ShadowMap, u_ShadowSampler),
-                          sm.shadowParams.z); // shadowStrength 控制阴影不透明度
+            // shadowParams.w: 0=方向光, 1=点光
+            if (sm.shadowParams.w < 0.5f) {
+                // 方向光阴影 — 2D 纹理 PCF
+                shadow = lerp(1.0, SampleShadowPCF(input.worldPos, N, L, sm, u_ShadowMap, u_ShadowSampler),
+                              sm.shadowParams.z);
+            } else {
+                // 点光源阴影 — Cubemap 采样
+                float3 lightPos = sm.lightViewProj[0].xyz;
+                float  range    = sm.lightViewProj[0].w;
+                shadow = lerp(1.0, SamplePointShadow(input.worldPos, lightPos, range,
+                              sm, u_PointShadowCube, u_PointShadowSampler),
+                              sm.shadowParams.z);
+            }
         }
 
         color += PBR_BRDF(albedo, metallic, roughness, N, V, L) * radiance * shadow;

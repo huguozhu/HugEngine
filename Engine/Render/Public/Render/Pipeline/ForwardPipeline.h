@@ -76,6 +76,17 @@ public:
     // 结束离屏阴影渲染通道并执行布局转换 Barrier
     void EndShadowPass(rhi::IRHICommandList* cmd);
 
+    // --- 点光源阴影（Cubemap）---
+    // 渲染点光源阴影到 Cubemap 的 6 个面
+    void RenderPointShadowPass(
+        rhi::IRHICommandList* cmd,
+        he::World& world,
+        he::SceneGraph& sg,
+        const std::vector<const he::LightComponent*>& pointLights,
+        const std::vector<GPUShadowData>& pointShadowData);
+    // 是否有活动的点光源阴影
+    bool HasPointShadows() const { return m_HasPointShadows; }
+
 private:
 
     // 从 World 收集活跃光源，填充 PushConstant 的光照字段
@@ -108,11 +119,17 @@ private:
     std::unique_ptr<rhi::IRHIBuffer> m_ShadowBuffer;   // GPUShadowData[MAX_SHADOWS]
 
     // 阴影贴图 + 采样器
-    std::unique_ptr<rhi::IRHITexture>  m_ShadowMap;          // 深度纹理（待阴影通道渲染后使用）
+    std::unique_ptr<rhi::IRHITexture>  m_ShadowMap;          // 方向光深度纹理
     std::unique_ptr<rhi::IRHITexture>  m_ShadowPlaceholderTex; // 占位纹理（布局正确的 dummy）
-    std::unique_ptr<rhi::IRHISampler>  m_ShadowSampler;      // PCF 比较采样器（用于正式阴影贴图）
+    std::unique_ptr<rhi::IRHISampler>  m_ShadowSampler;      // 方向光阴影采样器
     std::unique_ptr<rhi::IRHISampler>  m_ShadowPlaceholderSampler; // 占位纹理的普通采样器
     u32 m_ShadowMapSize = 2048;
+
+    // 点光源阴影（Cubemap）
+    std::unique_ptr<rhi::IRHITexture>  m_PointShadowMap;     // Cubemap 深度纹理
+    std::unique_ptr<rhi::IRHISampler>  m_PointShadowSampler; // Cubemap 采样器
+    u32 m_PointShadowMapSize = 512;  // 每面分辨率
+    bool m_HasPointShadows = false;
 
     // 基础色纹理（默认 1×1 白色，运行时替换为 glTF 纹理）
     std::unique_ptr<rhi::IRHITexture>  m_DefaultBaseColorTex;

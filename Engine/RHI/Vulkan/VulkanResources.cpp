@@ -221,6 +221,9 @@ static VkImageAspectFlags ToVkAspectMask(Format fmt) {
 static VkImageViewType ToVkImageViewType(const TextureDesc& desc) {
     if (desc.depth > 1)
         return VK_IMAGE_VIEW_TYPE_3D;
+    bool isCubemap = u32(desc.usage) & u32(TextureUsage::Cubemap);
+    if (isCubemap)
+        return VK_IMAGE_VIEW_TYPE_CUBE;
     if (desc.arrayLayers > 1)
         return VK_IMAGE_VIEW_TYPE_2D_ARRAY;
     return VK_IMAGE_VIEW_TYPE_2D;
@@ -271,18 +274,21 @@ VulkanTexture::VulkanTexture(VkDevice device, VkPhysicalDevice physical,
     , m_VkFormat(ToVkFormat(desc.format))
 {
     // 1. 创建 VkImage
+    bool isCubemap = u32(desc.usage) & u32(TextureUsage::Cubemap);
     VkImageCreateInfo imageInfo{};
     imageInfo.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageInfo.imageType     = (desc.depth > 1) ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
     imageInfo.format        = m_VkFormat;
     imageInfo.extent        = {m_Width, m_Height, m_Depth};
     imageInfo.mipLevels     = m_MipLevels;
-    imageInfo.arrayLayers   = m_ArrayLayers;
+    imageInfo.arrayLayers   = isCubemap ? 6 : m_ArrayLayers;  // Cubemap 固定 6 面
     imageInfo.samples       = VK_SAMPLE_COUNT_1_BIT;
     imageInfo.tiling        = VK_IMAGE_TILING_OPTIMAL;
     imageInfo.usage         = ToVkImageUsage(desc.usage);
     imageInfo.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (isCubemap)
+        imageInfo.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
 
     // 需要上传初始数据时添加 TransferDst 标志
     if (desc.initialData)
@@ -325,11 +331,36 @@ VulkanTexture::VulkanTexture(VkDevice device, VkPhysicalDevice physical,
     result = vkCreateImageView(device, &viewInfo, nullptr, &m_ImageView);
     HE_ASSERT(result == VK_SUCCESS, "Failed to create Vulkan image view");
 
-    HE_CORE_INFO("Vulkan texture created: {}x{} [{}]", m_Width, m_Height,
-                 m_Format == Format::RGBA8_UNORM ? "RGBA8" : "other");
+    // 5. 为 Cubemap 创建 6 个逐面 2D ImageView（用于离屏渲染到每个面）
+    if (isCubemap) {
+        m_FaceViews.resize(6);
+        VkImageViewCreateInfo faceViewInfo{};
+        faceViewInfo.sType      = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        faceViewInfo.image      = m_Image;
+        faceViewInfo.viewType   = VK_IMAGE_VIEW_TYPE_2D;  // 单面 2D
+        faceViewInfo.format     = m_VkFormat;
+        faceViewInfo.subresourceRange.aspectMask     = ToVkAspectMask(desc.format);
+        faceViewInfo.subresourceRange.baseMipLevel   = 0;
+        faceViewInfo.subresourceRange.levelCount     = m_MipLevels;
+        faceViewInfo.subresourceRange.baseArrayLayer = 0;
+        faceViewInfo.subresourceRange.layerCount     = 1;
+
+        for (u32 face = 0; face < 6; ++face) {
+            faceViewInfo.subresourceRange.baseArrayLayer = face;
+            result = vkCreateImageView(device, &faceViewInfo, nullptr, &m_FaceViews[face]);
+            HE_ASSERT(result == VK_SUCCESS, "Failed to create cubemap face image view");
+        }
+    }
+
+    HE_CORE_INFO("Vulkan texture created: {}x{} [{}]{}", m_Width, m_Height,
+                 m_Format == Format::RGBA8_UNORM ? "RGBA8" : "other",
+                 isCubemap ? " cubemap" : "");
 }
 
 VulkanTexture::~VulkanTexture() {
+    for (auto& fv : m_FaceViews)
+        if (fv) vkDestroyImageView(m_Device, fv, nullptr);
+    m_FaceViews.clear();
     if (m_ImageView) vkDestroyImageView(m_Device, m_ImageView, nullptr);
     if (m_Image)     vkDestroyImage(m_Device, m_Image, nullptr);
     if (m_Memory)    vkFreeMemory(m_Device, m_Memory, nullptr);

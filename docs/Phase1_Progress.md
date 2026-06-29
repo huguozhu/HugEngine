@@ -67,7 +67,7 @@ Phase 4（渲染增强）进行中。
 | Camera 系统 | `Pipeline/Camera.h` (视图/投影/视锥体) | ✅ |
 | Shadow 基础设施 | Shadow PSO + 阴影贴图纹理 + PCF 采样器 + 描述符绑定 | ✅ |
 | Per-primitive 纹理 | CreateTextureDescriptorSet → 独立描述符集 → 渲染时直接 Bind | ✅ |
-| 阴影通道渲染 | ShadowPass 深度渲染到 ShadowMap | ⬜ 待实施 |
+| 阴影通道渲染 | ShadowPass 深度渲染到 ShadowMap | ✅ |
 | Deferred / 后处理 | — | ❌ |
 
 ### L5 — Scene（场景层）✅
@@ -137,13 +137,13 @@ Phase 4（渲染增强）进行中。
 | 视口 3D 渲染到全屏 backbuffer | 3D 仅在 ImGui 透明区域可见 | 离屏渲染 (ImGui::Image) |
 | 无 Gizmo 操作 | 无法拖拽移动/旋转/缩放 | 编辑器增强 |
 | 无鼠标拾取选择 | 只能通过 Outliner 选中 | 编辑器增强 |
-| 阴影通道未执行 | ShadowMap 为占位纹理，无实际阴影 | 实现 ShadowPass 渲染 |
 | 所有 primitive 共用全局纹理 | 多材质场景纹理错误 | Per-primitive 描述符集（已完成） |
 
 ## 待实施 (Phase 4+)
 
-- 阴影通道渲染（ShadowMap 深度写入 + 布局转换）
+- ~~阴影通道渲染（ShadowMap 深度写入 + 布局转换）~~ ✅
 - Cascaded Shadow Maps (CSM) + 点光/聚光阴影
+- 面积光源（Area Light）：矩形/碟形光源、LTC 线性变换余弦近似
 - IBL（Image-Based Lighting）+ 环境贴图
 - Bindless 纹理数组（Texture2D[] + materialID 索引）
 - 离屏视口渲染（RHI Texture → ImGui::Image）

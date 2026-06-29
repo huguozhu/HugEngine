@@ -183,6 +183,25 @@ int main() {
         sceneGraph.SetParent(lightEntity, Entity{kInvalidEntity});
     }
 
+    // --- 添加点光源（测试点光阴影）---
+    Entity pointLightEntity;
+    {
+        pointLightEntity = world.CreateEntity("PointLight");
+        world.AddComponent<TransformComponent>(pointLightEntity);
+        auto* pl = world.AddComponent<PointLight>(pointLightEntity);
+        pl->color      = float3(1.0f, 0.85f, 0.6f);  // 暖色
+        pl->intensity  = 20.0f;
+        pl->range      = 600.0f;
+        pl->castShadow = true;
+        pl->shadowBias = 0.005f;
+
+        // 通过 Transform 设置位置
+        auto* plTransform = world.GetComponent<TransformComponent>(pointLightEntity);
+        if (plTransform) plTransform->position = float3(0.0f, 300.0f, 0.0f);
+
+        sceneGraph.SetParent(pointLightEntity, Entity{kInvalidEntity});
+    }
+
     HE_CORE_INFO("场景就绪: {} 实体", world.GetEntityCount());
 
     // ============================================================
@@ -394,11 +413,31 @@ int main() {
             std::vector<render::GPUShadowData> shadowGPUData;
             pipeline.CollectShadowLights(world, sceneGraph, shadowLights, shadowGPUData);
 
-            if (!shadowGPUData.empty()) {
+            // 分离方向光和点光源
+            std::vector<const he::LightComponent*> dirLights, pointLights;
+            std::vector<render::GPUShadowData> dirShadowData, pointShadowData;
+            for (usize i = 0; i < shadowLights.size(); ++i) {
+                if (shadowLights[i]->type == he::LightType::Directional) {
+                    dirLights.push_back(shadowLights[i]);
+                    dirShadowData.push_back(shadowGPUData[i]);
+                } else if (shadowLights[i]->type == he::LightType::Point) {
+                    pointLights.push_back(shadowLights[i]);
+                    pointShadowData.push_back(shadowGPUData[i]);
+                }
+            }
+
+            // 方向光阴影
+            if (!dirShadowData.empty()) {
                 pipeline.BeginShadowPass(cmdList.get());
                 pipeline.RenderShadowPass(cmdList.get(), world, sceneGraph,
-                                         shadowLights, shadowGPUData);
+                                         dirLights, dirShadowData);
                 pipeline.EndShadowPass(cmdList.get());
+            }
+
+            // 点光源阴影（Cubemap 6 面）
+            if (!pointShadowData.empty()) {
+                pipeline.RenderPointShadowPass(cmdList.get(), world, sceneGraph,
+                                              pointLights, pointShadowData);
             }
         }
 

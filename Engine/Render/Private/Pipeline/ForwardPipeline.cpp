@@ -82,11 +82,12 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         { 1, rhi::DescriptorType::StorageBuffer,        1, 16 },  // Fragment — 灯光
         { 2, rhi::DescriptorType::StorageBuffer,        1, 17 },  // Vertex|Fragment — 对象
         { 3, rhi::DescriptorType::StorageBuffer,        1, 16 },  // Fragment — 阴影数据
-        { 4, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Fragment — 阴影贴图
+        { 4, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Fragment — 方向光阴影贴图
         { 5, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Fragment — 基础色
         { 6, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Fragment — 法线
         { 7, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Fragment — 金属度/粗糙度
         { 8, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Fragment — AO
+        { 9, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Fragment — 点光源阴影 Cubemap
     };
     m_DescLayout = device->CreateDescriptorSetLayout(combinedLayoutDesc);
 
@@ -125,9 +126,30 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         shadowSampDesc.addressU  = rhi::AddressMode::ClampToEdge;
         shadowSampDesc.addressV  = rhi::AddressMode::ClampToEdge;
         shadowSampDesc.addressW  = rhi::AddressMode::ClampToEdge;
-        // 注意：不使用 enableCompare — Slang Sample() 与 comparison sampler 不兼容
-        // PCF 在着色器中手动做深度比较
         m_ShadowSampler = device->CreateSampler(shadowSampDesc);
+    }
+
+    // --- 创建点光源阴影 Cubemap（6 面深度纹理）---
+    {
+        rhi::TextureDesc pointShadowDesc;
+        pointShadowDesc.format      = rhi::Format::D32_FLOAT;
+        pointShadowDesc.width       = m_PointShadowMapSize;
+        pointShadowDesc.height      = m_PointShadowMapSize;
+        pointShadowDesc.depth       = 1;
+        pointShadowDesc.mipLevels   = 1;
+        pointShadowDesc.arrayLayers = 1;  // Cubemap 标志自动设 6 层
+        pointShadowDesc.usage       = rhi::TextureUsage::DepthStencil
+                                    | rhi::TextureUsage::ShaderResource
+                                    | rhi::TextureUsage::Cubemap;
+        m_PointShadowMap = device->CreateTexture(pointShadowDesc);
+
+        rhi::SamplerDesc pointSampDesc;
+        pointSampDesc.minFilter = rhi::FilterMode::Linear;
+        pointSampDesc.magFilter = rhi::FilterMode::Linear;
+        pointSampDesc.addressU  = rhi::AddressMode::ClampToEdge;
+        pointSampDesc.addressV  = rhi::AddressMode::ClampToEdge;
+        pointSampDesc.addressW  = rhi::AddressMode::ClampToEdge;
+        m_PointShadowSampler = device->CreateSampler(pointSampDesc);
     }
 
     // --- 创建占位纹理 + 采样器 ---
@@ -174,6 +196,9 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     device->UpdateDescriptorSet(m_DescSet, 8,
                                 rhi::DescriptorType::CombinedImageSampler,
                                 m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
+    device->UpdateDescriptorSet(m_DescSet, 9,
+                                rhi::DescriptorType::CombinedImageSampler,
+                                m_PointShadowMap.get(), m_PointShadowSampler.get());
 
     // --- 主管线 PSO ---
     rhi::PushConstantRange pcRange;
@@ -274,6 +299,10 @@ rhi::DescriptorSetHandle ForwardPipeline::CreateTextureDescriptorSet(
     use(6, normal, nSampler);
     use(7, metallicRoughness, mrSampler);
     use(8, occlusion, ocSampler);
+
+    // binding 9: 点光源阴影 Cubemap（共享）
+    m_Device->UpdateDescriptorSet(set, 9, rhi::DescriptorType::CombinedImageSampler,
+        m_PointShadowMap.get(), m_PointShadowSampler.get());
 
     return set;
 }
@@ -418,6 +447,21 @@ void ForwardPipeline::CollectShadowLights(
         shadowLights.push_back(&lc);
     });
 
+    // 收集点光源阴影
+    world.ForEach<he::PointLight>([&](he::Entity e, he::PointLight& lc) {
+        if (!lc.castShadow) return;
+        if (shadowGPUData.size() >= MAX_SHADOWS) return;
+
+        float3 lightPos = sg.GetWorldPosition(e);
+
+        GPUShadowData sd{};
+        // 复用 lightViewProj 存储点光数据：col0.xyz=位置, col0.w=范围
+        sd.lightViewProj[0] = float4(lightPos, lc.range);
+        sd.shadowParams  = float4(lc.shadowBias, lc.shadowNormalBias, lc.shadowStrength, 1.0f);  // w=1 表示点光
+        shadowGPUData.push_back(sd);
+        shadowLights.push_back(&lc);
+    });
+
     // 上传阴影 GPU 数据到 SSBO（供阴影 VS 和主 PS 读取）
     if (!shadowGPUData.empty()) {
         GPUShadowData* sd = static_cast<GPUShadowData*>(m_ShadowBuffer->Map());
@@ -459,6 +503,112 @@ void ForwardPipeline::EndShadowPass(rhi::IRHICommandList* cmd) {
         m_ShadowMap.get());
 
     // 恢复 PBR PSO（确保后续 BeginRenderPass 使用正确的 render pass）
+    cmd->SetPipeline(m_PBR_PSO.get());
+}
+
+// ============================================================
+// 点光源阴影 — Cubemap 6 面透视渲染
+// ============================================================
+
+// Cubemap 6 面方向 + 上向量（Vulkan 右手坐标系）
+struct CubemapFace {
+    float3 dir;
+    float3 up;
+};
+static const CubemapFace kCubeFaces[6] = {
+    { float3( 1, 0, 0), float3(0,-1, 0) },  // +X (right)
+    { float3(-1, 0, 0), float3(0,-1, 0) },  // -X (left)
+    { float3( 0, 1, 0), float3(0, 0, 1) },  // +Y (top)
+    { float3( 0,-1, 0), float3(0, 0,-1) },  // -Y (bottom)
+    { float3( 0, 0, 1), float3(0,-1, 0) },  // +Z (front)
+    { float3( 0, 0,-1), float3(0,-1, 0) },  // -Z (back)
+};
+
+void ForwardPipeline::RenderPointShadowPass(
+    rhi::IRHICommandList* cmd,
+    he::World& world,
+    he::SceneGraph& sceneGraph,
+    const std::vector<const he::LightComponent*>& pointLights,
+    const std::vector<GPUShadowData>& pointShadowData)
+{
+    if (pointShadowData.empty() || !m_PointShadowMap) return;
+
+    // 对每个投射阴影的点光源
+    for (usize li = 0; li < pointShadowData.size() && li < pointLights.size(); ++li) {
+        const GPUShadowData& sd = pointShadowData[li];
+        float3 lightPos = float3(sd.lightViewProj[0]);
+        float  range    = sd.lightViewProj[0].w;
+
+        // 6 面透视投影（90° FOV，宽高比 1:1）
+        float4x4 proj = glm::perspectiveRH_ZO(glm::radians(90.0f), 1.0f, 0.1f, range);
+
+        for (u32 face = 0; face < 6; ++face) {
+            // 视图矩阵：从光源位置看向该面方向
+            float4x4 view = glm::lookAtRH(lightPos,
+                lightPos + kCubeFaces[face].dir,
+                kCubeFaces[face].up);
+            float4x4 viewProj = proj * view;
+
+            // 设置 Shadow PSO → BeginOffscreenPass（每面独立 depth-only RP）
+            cmd->SetPipeline(m_ShadowPSO.get());
+
+            void* faceView = m_PointShadowMap->GetNativeHandle(face);
+            if (!faceView) continue;
+
+            rhi::ClearValue clearVal{};
+            clearVal.depth = 1.0f;
+            cmd->BeginOffscreenPass(nullptr, faceView,
+                m_PointShadowMapSize, m_PointShadowMapSize, &clearVal);
+
+            // 视口 + 裁剪
+            cmd->SetViewport({ 0, static_cast<float>(m_PointShadowMapSize),
+                static_cast<float>(m_PointShadowMapSize),
+                -static_cast<float>(m_PointShadowMapSize), 0.0f, 1.0f });
+            cmd->SetScissor({ 0, 0, m_PointShadowMapSize, m_PointShadowMapSize });
+
+            // 绑定描述符集
+            cmd->BindDescriptorSet(0, m_DescSet);
+
+            // 绘制所有几何体
+            ShadowPushConstant shadowPC{};
+            shadowPC.lightViewProj = viewProj;
+
+            auto renderMeshForPointShadow = [&](he::Entity e, he::MeshComponent& mesh) {
+                if (mesh.GetIndexCount() == 0) return;
+                shadowPC.objectIndex = 0;
+
+                float4x4 worldMatrix = sceneGraph.GetWorldMatrix(e);
+                GPUObjectData* objData = static_cast<GPUObjectData*>(m_ObjectBuffer->Map());
+                objData[0].worldMatrix = worldMatrix;
+                m_ObjectBuffer->Unmap();
+
+                cmd->SetPushConstants(0, sizeof(ShadowPushConstant), &shadowPC);
+                cmd->SetVertexBuffer(mesh.GetVertexBuffer().get(), 0);
+                cmd->SetIndexBuffer(mesh.GetIndexBuffer().get());
+                cmd->DrawIndexed(mesh.GetIndexCount());
+            };
+
+            world.ForEach<he::MeshComponent>(renderMeshForPointShadow);
+            world.ForEach<he::CubeComponent>([&](he::Entity e, he::CubeComponent& c) {
+                renderMeshForPointShadow(e, static_cast<he::MeshComponent&>(c));
+            });
+            world.ForEach<he::SphereComponent>([&](he::Entity e, he::SphereComponent& s) {
+                renderMeshForPointShadow(e, static_cast<he::MeshComponent&>(s));
+            });
+
+            cmd->EndOffscreenPass();
+
+            // 每面渲染后执行布局转换（深度写入 → 着色器资源）
+            cmd->PipelineBarrier(
+                rhi::PipelineStage::LateFragmentTests,
+                rhi::PipelineStage::FragmentShader,
+                rhi::ResourceState::DepthStencilRead,
+                rhi::ResourceState::ShaderResource,
+                m_PointShadowMap.get());
+        }
+    }
+
+    // 恢复 PBR PSO
     cmd->SetPipeline(m_PBR_PSO.get());
 }
 

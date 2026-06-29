@@ -219,8 +219,17 @@ public:
     u32    GetArrayLayers()  const override { return m_ArrayLayers; }
     Format GetFormat()       const override { return m_Format; }
     void*  GetNativeHandle() const override { return reinterpret_cast<void*>(m_ImageView); }
+    // 逐面句柄（Cubemap face 0-5），非 Cubemap 纹理返回主 ImageView
+    void*  GetNativeHandle(u32 index) const override {
+        return (index < m_FaceViews.size())
+            ? reinterpret_cast<void*>(m_FaceViews[index])
+            : reinterpret_cast<void*>(m_ImageView);
+    }
     VkImage     GetImage()     const { return m_Image; }
     VkImageView GetImageView() const { return m_ImageView; }
+    VkImageView GetFaceView(u32 face) const {
+        return (face < m_FaceViews.size()) ? m_FaceViews[face] : VK_NULL_HANDLE;
+    }
 private:
     void UploadInitialData(VkCommandPool cmdPool, VkQueue queue, const TextureDesc& desc);
     VkDevice         m_Device       = VK_NULL_HANDLE;
@@ -228,6 +237,7 @@ private:
     VkImage          m_Image        = VK_NULL_HANDLE;
     VkImageView      m_ImageView    = VK_NULL_HANDLE;
     VkDeviceMemory   m_Memory       = VK_NULL_HANDLE;
+    std::vector<VkImageView> m_FaceViews; // Cubemap 6 面独立 ImageView
     u32              m_Width        = 1;
     u32              m_Height       = 1;
     u32              m_Depth        = 1;

@@ -56,7 +56,8 @@ public:
     virtual Format GetFormat() const = 0;
 
     // 原生资源句柄（后端特定：Vulkan=VkImageView, 空=未初始化）
-    virtual void*  GetNativeHandle() const = 0;  // ImageView 句柄
+    virtual void*  GetNativeHandle() const = 0;          // ImageView 句柄（默认面/层）
+    virtual void*  GetNativeHandle(u32 index) const = 0; // 逐面/逐层句柄（Cubemap 面 0-5）
 };
 
 // --- Sampler descriptor ---

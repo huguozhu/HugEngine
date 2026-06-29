@@ -90,6 +90,7 @@ enum class TextureUsage : u32 {
     UnorderedAccess   = 1 << 3,
     TransferSrc       = 1 << 4,
     TransferDst       = 1 << 5,
+    Cubemap           = 1 << 6,  // 立方体贴图（6 面，用于点光源阴影等）
 };
 inline TextureUsage operator|(TextureUsage a, TextureUsage b) { return TextureUsage(u32(a) | u32(b)); }
 

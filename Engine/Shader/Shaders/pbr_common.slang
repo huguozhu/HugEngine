@@ -81,6 +81,34 @@ float SampleShadowPCF(float3 worldPos, float3 worldNormal, float3 lightDir,
 }
 
 // ============================================================
+// 点光源阴影 — Cubemap 单次采样
+//
+// 从片段位置向光源方向采样 Cubemap，比较距离。
+// 返回 [0,1] 可见度（1=完全照亮，0=完全遮蔽）。
+// ============================================================
+float SamplePointShadow(float3 worldPos, float3 lightPos, float lightRange,
+                         GPUShadowData sm, TextureCube<float> shadowCube,
+                         SamplerState shadowSampler)
+{
+    float3 toLight = lightPos - worldPos;
+    float  dist    = length(toLight);
+    float3 dir     = toLight / max(dist, 0.001);
+
+    // 超出范围 → 无阴影
+    if (dist > lightRange)
+        return 1.0;
+
+    // 深度采样（方向向量直接用作 Cubemap 纹理坐标）
+    float shadowDepth = shadowCube.Sample(shadowSampler, dir).r;
+
+    // 归一化距离用于比较：世界空间距离 / 光源范围
+    float normalizedDist = dist / lightRange;
+
+    // 应用深度偏移后比较
+    return (normalizedDist - sm.shadowParams.x <= shadowDepth) ? 1.0 : 0.0;
+}
+
+// ============================================================
 // PBR BRDF — Cook-Torrance + Lambertian
 // ============================================================
 float3 PBR_BRDF(float3 albedo, float metallic, float roughness,
