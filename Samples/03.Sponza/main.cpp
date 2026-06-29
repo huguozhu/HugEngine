@@ -395,7 +395,7 @@ int main() {
         imgui.BeginFrame();
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
         ImGui::SetNextWindowBgAlpha(0.55f);
-        ImGui::Begin("03.Sponza — 性能监控");
+        ImGui::Begin("03.Sponza 性能监控");
         {
             // --- FPS + 帧时间 ---
             float fps = 1.0f / (deltaTime > 0.001f ? deltaTime : 0.016f);

@@ -24,6 +24,33 @@ void ImGuiIntegration::Initialize(GLFWwindow* window, rhi::IRHIDevice* device,
     m_Context = ImGui::CreateContext();
     ImGui::StyleColorsDark();
 
+    // --- 加载中文字体支持 ---
+    // ImGui 默认字体仅含 ASCII，中文会显示为方框或乱码。
+    // 添加黑体作为默认字体（包含 ASCII + CJK），保留原默认字体作后备。
+    // .ttc 集合文件 stb_truetype 可能光栅化失败，优先使用 .ttf。
+    {
+        ImGuiIO& io = ImGui::GetIO();
+
+        // 字形范围：基本拉丁 + 简体中文
+        static const ImWchar chineseRanges[] = {
+            0x0020, 0x00FF,  // Basic Latin + Latin Supplement
+            0x4E00, 0x9FFF,  // CJK Unified Ideographs
+            0,
+        };
+
+        ImFontConfig fontConfig{};
+        fontConfig.SizePixels = 16.0f;
+
+        ImFont* cjkFont = io.Fonts->AddFontFromFileTTF(
+            "C:\\Windows\\Fonts\\simhei.ttf", 16.0f, &fontConfig, chineseRanges);
+        if (cjkFont) {
+            io.FontDefault = cjkFont;
+            HE_CORE_INFO("ImGui 中文字体已加载: simhei.ttf");
+        } else {
+            HE_CORE_WARN("ImGui 中文字体加载失败，中文将无法正常显示");
+        }
+    }
+
     ImGui_ImplGlfw_InitForVulkan(window, true);
     CreateVulkanResources(device, swapchain);
 
