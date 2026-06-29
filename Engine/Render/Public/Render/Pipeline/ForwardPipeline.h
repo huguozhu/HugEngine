@@ -77,15 +77,19 @@ public:
     void EndShadowPass(rhi::IRHICommandList* cmd);
 
     // --- 点光源阴影（Cubemap）---
-    // 渲染点光源阴影到 Cubemap 的 6 个面
     void RenderPointShadowPass(
         rhi::IRHICommandList* cmd,
         he::World& world,
         he::SceneGraph& sg,
         const std::vector<const he::LightComponent*>& pointLights,
         const std::vector<GPUShadowData>& pointShadowData);
-    // 是否有活动的点光源阴影
     bool HasPointShadows() const { return m_HasPointShadows; }
+
+    // --- HDR 离屏渲染 ---
+    void BeginHDRPass(rhi::IRHICommandList* cmd, u32 width, u32 height);
+    void EndHDRPass(rhi::IRHICommandList* cmd);
+    void RenderToneMapPass(rhi::IRHICommandList* cmd);
+    void ResizeHDRTarget(u32 width, u32 height);
 
 private:
 
@@ -130,6 +134,20 @@ private:
     std::unique_ptr<rhi::IRHISampler>  m_PointShadowSampler; // Cubemap 采样器
     u32 m_PointShadowMapSize = 512;  // 每面分辨率
     bool m_HasPointShadows = false;
+    bool m_PointShadowInitDone = false;  // Cubemap 布局首次转换标记
+
+    // HDR 离屏渲染（RGBA16_FLOAT）
+    std::unique_ptr<rhi::IRHITexture>  m_HDRTarget;     // 离屏颜色纹理
+    std::unique_ptr<rhi::IRHITexture>  m_HDRDepth;      // 离屏深度纹理
+    std::unique_ptr<rhi::IRHISampler>  m_HDRSampler;    // 线性采样器
+    u32 m_HDRWidth = 1920, m_HDRHeight = 1080;
+
+    // ToneMap 全屏后处理（HDR → ACES → sRGB → SwapChain）
+    std::unique_ptr<rhi::IRHIPipelineState> m_ToneMapPSO;
+    rhi::DescriptorSetLayoutHandle m_ToneMapLayout = rhi::kInvalidLayout;
+    rhi::DescriptorSetHandle       m_ToneMapSet    = rhi::kInvalidSet;
+    rhi::ShaderBytecode m_ToneMapVS;
+    rhi::ShaderBytecode m_ToneMapFS;
 
     // 基础色纹理（默认 1×1 白色，运行时替换为 glTF 纹理）
     std::unique_ptr<rhi::IRHITexture>  m_DefaultBaseColorTex;

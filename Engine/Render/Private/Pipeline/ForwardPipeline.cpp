@@ -68,6 +68,14 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     m_ShadowFS.spirv      = k_Shadow_frag_spv;
     m_ShadowFS.entryPoint = "main";
 
+    // --- ToneMap 着色器 ---
+    m_ToneMapVS.stage      = rhi::ShaderStage::Vertex;
+    m_ToneMapVS.spirv      = k_ToneMap_vert_spv;
+    m_ToneMapVS.entryPoint = "main";
+    m_ToneMapFS.stage      = rhi::ShaderStage::Pixel;
+    m_ToneMapFS.spirv      = k_ToneMap_frag_spv;
+    m_ToneMapFS.entryPoint = "main";
+
     rhi::VertexInputLayout vertexLayout;
     vertexLayout.stride = sizeof(he::StaticVertex);
     vertexLayout.attributes = {
@@ -152,6 +160,30 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         m_PointShadowSampler = device->CreateSampler(pointSampDesc);
     }
 
+    // --- HDR 离屏渲染目标（RGBA16_FLOAT 颜色 + D32 深度）---
+    {
+        rhi::TextureDesc hdrColorDesc;
+        hdrColorDesc.format = rhi::Format::RGBA16_FLOAT;
+        hdrColorDesc.width  = m_HDRWidth;
+        hdrColorDesc.height = m_HDRHeight;
+        hdrColorDesc.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
+        m_HDRTarget = device->CreateTexture(hdrColorDesc);
+
+        rhi::TextureDesc hdrDepthDesc;
+        hdrDepthDesc.format = rhi::Format::D32_FLOAT;
+        hdrDepthDesc.width  = m_HDRWidth;
+        hdrDepthDesc.height = m_HDRHeight;
+        hdrDepthDesc.usage  = rhi::TextureUsage::DepthStencil;
+        m_HDRDepth = device->CreateTexture(hdrDepthDesc);
+
+        rhi::SamplerDesc hdrSampDesc;
+        hdrSampDesc.minFilter = rhi::FilterMode::Linear;
+        hdrSampDesc.magFilter = rhi::FilterMode::Linear;
+        hdrSampDesc.addressU  = rhi::AddressMode::ClampToEdge;
+        hdrSampDesc.addressV  = rhi::AddressMode::ClampToEdge;
+        m_HDRSampler = device->CreateSampler(hdrSampDesc);
+    }
+
     // --- 创建占位纹理 + 采样器 ---
     {
         u8 white4[4] = { 255, 255, 255, 255 };
@@ -214,6 +246,9 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     psoDesc.depthTest            = true;
     psoDesc.depthWrite           = true;
     psoDesc.depthCompare         = rhi::CompareFunc::LessEqual;
+    psoDesc.depthFormat          = rhi::Format::D32_FLOAT;      // 匹配 HDR/Shadow 深度附件
+    psoDesc.colorAttachmentCount = 1;
+    psoDesc.colorFormats[0]      = rhi::Format::RGBA16_FLOAT;  // HDR 离屏目标
     psoDesc.pushConstantRanges   = { pcRange };
     psoDesc.descriptorSetLayouts = { m_DescLayout };
     psoDesc.debugName            = "ForwardPBR";
@@ -251,10 +286,36 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     m_ShadowPSO = device->CreatePipelineState(shadowPSODesc);
     HE_ASSERT(m_ShadowPSO, "ForwardPipeline: failed to create Shadow PSO");
 
-    // TODO Phase 4A-2: 阴影贴图布局转换（UNDEFINED → SHADER_READ_ONLY_OPTIMAL）
-    // 需在 RHI 层添加 Image Barrier 支持后再实现
+    // --- ToneMap 全屏后处理 PSO ---
+    {
+        rhi::DescriptorSetLayoutDesc tmLayout;
+        tmLayout.bindings = {
+            { 0, rhi::DescriptorType::CombinedImageSampler, 1, 16 },  // Fragment — HDR 纹理
+        };
+        m_ToneMapLayout = device->CreateDescriptorSetLayout(tmLayout);
 
-    HE_CORE_INFO("ForwardPipeline initialized (with Shadow Mapping)");
+        m_ToneMapSet = device->AllocateDescriptorSet(m_ToneMapLayout);
+        device->UpdateDescriptorSet(m_ToneMapSet, 0,
+            rhi::DescriptorType::CombinedImageSampler,
+            m_HDRTarget.get(), m_HDRSampler.get());
+
+        rhi::PipelineStateDesc tmDesc;
+        tmDesc.vertexShader         = &m_ToneMapVS;
+        tmDesc.pixelShader          = &m_ToneMapFS;
+        tmDesc.topology             = rhi::PrimitiveTopology::TriangleList;
+        tmDesc.depthTest            = false;
+        tmDesc.depthWrite           = false;
+        tmDesc.depthFormat          = rhi::Format::D32_FLOAT;  // 匹配 SwapChain RP 深度附件
+        tmDesc.colorAttachmentCount = 1;
+        tmDesc.colorFormats[0]      = rhi::Format::BGRA8_UNORM; // 输出到 SwapChain
+        tmDesc.descriptorSetLayouts = { m_ToneMapLayout };
+        tmDesc.debugName            = "ToneMap";
+
+        m_ToneMapPSO = device->CreatePipelineState(tmDesc);
+        HE_ASSERT(m_ToneMapPSO, "ForwardPipeline: failed to create ToneMap PSO");
+    }
+
+    HE_CORE_INFO("ForwardPipeline initialized (with HDR + Tone Mapping)");
 }
 
 void ForwardPipeline::Shutdown() {
@@ -268,6 +329,11 @@ void ForwardPipeline::Shutdown() {
     m_ShadowSampler.reset();
     m_PBR_PSO.reset();
     m_ShadowPSO.reset();
+    m_ToneMapPSO.reset();
+    m_HDRTarget.reset();
+    m_HDRDepth.reset();
+    m_HDRSampler.reset();
+    if (m_Device) m_Device->DestroyDescriptorSetLayout(m_ToneMapLayout);
     m_Device = nullptr;
     HE_CORE_INFO("ForwardPipeline shut down");
 }
@@ -504,6 +570,93 @@ void ForwardPipeline::EndShadowPass(rhi::IRHICommandList* cmd) {
 
     // 恢复 PBR PSO（确保后续 BeginRenderPass 使用正确的 render pass）
     cmd->SetPipeline(m_PBR_PSO.get());
+}
+
+// ============================================================
+// HDR 离屏渲染 + ToneMap 后处理
+// ============================================================
+
+void ForwardPipeline::BeginHDRPass(rhi::IRHICommandList* cmd, u32 width, u32 height) {
+    // 首次使用：确保点光 Cubemap 布局从 Undefined 转换到 ShaderResource
+    if (!m_PointShadowInitDone) {
+        m_PointShadowInitDone = true;
+        cmd->PipelineBarrier(
+            rhi::PipelineStage::TopOfPipe,
+            rhi::PipelineStage::FragmentShader,
+            rhi::ResourceState::Undefined,
+            rhi::ResourceState::ShaderResource,
+            m_PointShadowMap.get());
+    }
+
+    cmd->SetPipeline(m_PBR_PSO.get());
+
+    void* colorView = m_HDRTarget->GetNativeHandle();
+    void* depthView = m_HDRDepth->GetNativeHandle();
+
+    rhi::ClearValue clear{};
+    clear.depth = 1.0f;
+
+    cmd->BeginOffscreenPass(colorView, depthView, width, height, &clear);
+
+    cmd->SetViewport({ 0, static_cast<float>(height),
+        static_cast<float>(width), -static_cast<float>(height), 0.0f, 1.0f });
+    cmd->SetScissor({ 0, 0, width, height });
+}
+
+void ForwardPipeline::EndHDRPass(rhi::IRHICommandList* cmd) {
+    cmd->EndOffscreenPass();
+
+    // 布局转换：Present（RP finalLayout）→ 着色器只读（ToneMap 采样）
+    // 注意：当前 RP 颜色附件 finalLayout 固定为 PRESENT_SRC_KHR
+    cmd->PipelineBarrier(
+        rhi::PipelineStage::ColorAttachmentOutput,
+        rhi::PipelineStage::FragmentShader,
+        rhi::ResourceState::Present,
+        rhi::ResourceState::ShaderResource,
+        m_HDRTarget.get());
+
+    // 预置 ToneMap PSO，确保后续 BeginRenderPass 使用正确的 SwapChain RP（B8G8R8A8）
+    cmd->SetPipeline(m_ToneMapPSO.get());
+}
+
+void ForwardPipeline::RenderToneMapPass(rhi::IRHICommandList* cmd) {
+    cmd->SetPipeline(m_ToneMapPSO.get());
+
+    // 显式设置视口 + 裁剪（BeginRenderPass 不会自动设置，需匹配 SwapChain 尺寸）
+    // 当前 SwapChain 尺寸由 m_HDRWidth/Height 近似（resize 时同步更新）
+    cmd->SetViewport({ 0, static_cast<float>(m_HDRHeight),
+        static_cast<float>(m_HDRWidth), -static_cast<float>(m_HDRHeight), 0.0f, 1.0f });
+    cmd->SetScissor({ 0, 0, m_HDRWidth, m_HDRHeight });
+
+    cmd->BindDescriptorSet(0, m_ToneMapSet);
+    cmd->Draw(3);  // 全屏三角形
+}
+
+void ForwardPipeline::ResizeHDRTarget(u32 width, u32 height) {
+    if (width == m_HDRWidth && height == m_HDRHeight) return;
+    m_HDRWidth  = width;
+    m_HDRHeight = height;
+
+    // 重建 HDR 颜色纹理
+    rhi::TextureDesc hdrColorDesc;
+    hdrColorDesc.format = rhi::Format::RGBA16_FLOAT;
+    hdrColorDesc.width  = m_HDRWidth;
+    hdrColorDesc.height = m_HDRHeight;
+    hdrColorDesc.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
+    m_HDRTarget = m_Device->CreateTexture(hdrColorDesc);
+
+    // 重建 HDR 深度纹理
+    rhi::TextureDesc hdrDepthDesc;
+    hdrDepthDesc.format = rhi::Format::D32_FLOAT;
+    hdrDepthDesc.width  = m_HDRWidth;
+    hdrDepthDesc.height = m_HDRHeight;
+    hdrDepthDesc.usage  = rhi::TextureUsage::DepthStencil;
+    m_HDRDepth = m_Device->CreateTexture(hdrDepthDesc);
+
+    // 更新 ToneMap 描述符集指向新纹理
+    m_Device->UpdateDescriptorSet(m_ToneMapSet, 0,
+        rhi::DescriptorType::CombinedImageSampler,
+        m_HDRTarget.get(), m_HDRSampler.get());
 }
 
 // ============================================================

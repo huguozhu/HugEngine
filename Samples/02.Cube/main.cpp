@@ -262,20 +262,21 @@ int main() {
         forward.z = -cos(pitch) * cos(yaw);
         camera.forward = glm::normalize(forward);
 
-        // 渲染一帧（顺序必须严格：Begin → BeginRenderPass → Viewport/Scissor → Draw → ImGui → EndRenderPass → End）
+        // 渲染一帧（HDR 离屏 → ToneMap → ImGui）
         cmdList->Begin();
 
-        // 注意：BeginRenderPass 必须在 SetViewport/SetScissor 之前
-        cmdList->BeginRenderPass(1, rhi::Format::RGBA8_UNORM);
-
-        // Viewport/Scissor 必须在 RenderPass 内部设置（Vulkan 规范）
+        // HDR 离屏渲染通道
+        pipeline.BeginHDRPass(cmdList.get(),
+            swapchain->GetWidth(), swapchain->GetHeight());
         pipeline.BeginFrame(cmdList.get(),
             swapchain->GetWidth(), swapchain->GetHeight());
-
-        // 渲染场景
         pipeline.RenderScene(cmdList.get(), world, sceneGraph, camera);
+        pipeline.EndHDRPass(cmdList.get());
 
-        // --- ImGui（在同一渲染通道内绘制 — ImGui RP 现已与 Forward RP 兼容）---
+        // ToneMap 后处理 + ImGui（输出到 SwapChain）
+        cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
+        pipeline.RenderToneMapPass(cmdList.get());
+
         imgui.BeginFrame();
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
         ImGui::SetNextWindowBgAlpha(0.5f);

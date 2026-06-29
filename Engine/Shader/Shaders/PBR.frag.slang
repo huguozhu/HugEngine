@@ -136,6 +136,6 @@ float4 fragmentMain(FSInput input) : SV_Target0 {
     color *= ao;
     color += obj.emissiveFactor.rgb;
 
-    float3 mapped = ACESFilm(color);
-    return float4(LinearToSRGB(mapped), alpha);
+    // HDR 线性输出到 RGBA16_FLOAT 离屏目标，色调映射由 ToneMap Pass 完成
+    return float4(color, alpha);
 }

@@ -331,6 +331,7 @@ int main() {
     engine.GetWindow()->SetResizeCallback([&](u32 w, u32 h) {
         swapchain->Resize(w, h);
         cmdList->SetSwapChain(swapchain.get());
+        pipeline.ResizeHDRTarget(w, h);
         camera.SetAspectRatio(static_cast<float>(w), static_cast<float>(h));
     });
 
@@ -441,14 +442,18 @@ int main() {
             }
         }
 
-        // 主渲染通道
-        cmdList->BeginRenderPass(1, rhi::Format::RGBA8_UNORM);
-
+        // --- HDR 离屏渲染通道（RGBA16_FLOAT）---
+        pipeline.BeginHDRPass(cmdList.get(),
+            swapchain->GetWidth(), swapchain->GetHeight());
         pipeline.BeginFrame(cmdList.get(),
             swapchain->GetWidth(), swapchain->GetHeight());
         pipeline.RenderScene(cmdList.get(), world, sceneGraph, camera);
+        pipeline.EndHDRPass(cmdList.get());
 
-        // ImGui（在同一渲染通道内绘制 — ImGui RP 现已与 Forward RP 兼容）
+        // --- ToneMap 后处理 + ImGui（输出到 SwapChain B8G8R8A8）---
+        cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
+        pipeline.RenderToneMapPass(cmdList.get());
+
         imgui.BeginFrame();
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
         ImGui::SetNextWindowBgAlpha(0.55f);

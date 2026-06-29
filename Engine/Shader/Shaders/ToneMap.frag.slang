@@ -8,7 +8,7 @@
 
 // --- HDR 输入纹理 ---
 [[vk::binding(0, 0)]] Texture2D u_HDRTexture;
-[[vk::binding(1, 0)]] SamplerState u_HDRSampler;
+[[vk::binding(0, 0)]] SamplerState u_HDRSampler;  // 同 binding = CombinedImageSampler
 
 struct FSInput {
     float2 uv : TEXCOORD0;

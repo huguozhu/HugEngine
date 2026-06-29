@@ -1078,10 +1078,17 @@ void VulkanCommandList::PipelineBarrier(
     imageBarrier.newLayout           = ToVkImageLayout(dstState);
     imageBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     imageBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    imageBarrier.image               = vkTex->GetImage();
-    imageBarrier.subresourceRange    = {
-        VK_IMAGE_ASPECT_DEPTH_BIT, // 假设为深度纹理（阴影贴图）
-        0, 1, 0, 1
+    imageBarrier.image = vkTex->GetImage();
+
+    // 根据纹理格式选择 aspect mask（深度/模板 vs 颜色）
+    VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+    Format fmt = vkTex->GetFormat();
+    if (fmt == Format::D32_FLOAT || fmt == Format::D24_UNORM_S8_UINT || fmt == Format::D16_UNORM)
+        aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+    imageBarrier.subresourceRange = {
+        aspect,
+        0, vkTex->GetMipLevels(),
+        0, vkTex->GetArrayLayers()   // Cubemap=6, 普通纹理=1
     };
 
     vkCmdPipelineBarrier(m_CmdBuffer,

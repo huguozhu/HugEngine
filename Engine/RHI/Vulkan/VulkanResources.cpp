@@ -269,7 +269,8 @@ VulkanTexture::VulkanTexture(VkDevice device, VkPhysicalDevice physical,
                              const TextureDesc& desc)
     : m_Device(device), m_Physical(physical)
     , m_Width(desc.width), m_Height(desc.height), m_Depth(desc.depth)
-    , m_MipLevels(desc.mipLevels), m_ArrayLayers(desc.arrayLayers)
+    , m_MipLevels(desc.mipLevels)
+    , m_ArrayLayers(u32(desc.usage) & u32(TextureUsage::Cubemap) ? 6 : desc.arrayLayers)
     , m_Format(desc.format)
     , m_VkFormat(ToVkFormat(desc.format))
 {
