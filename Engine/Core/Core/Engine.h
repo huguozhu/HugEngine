@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Core/Core.h"
+#include "Core/Log.h"
 #include "Platform/Window.h"
 #include "Threading/JobSystem.h"
 
@@ -17,6 +18,7 @@ struct EngineConfig {
     bool        enableVSync  = true;
     u32         jobThreads   = 0;    // 0 = auto-detect
     bool        enableValidation = true;
+    LogLevel    logLevel     = LogLevel::Info;  // 默认日志等级
 };
 
 class Engine {

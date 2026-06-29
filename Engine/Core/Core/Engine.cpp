@@ -22,7 +22,7 @@ void Engine::Initialize() {
 #endif
 
     // 日志系统必须最先初始化
-    Logger::Initialize();
+    Logger::Initialize(m_Config.logLevel);
     HE_CORE_INFO("=== Initializing HugEngine v0.1.0 ===");
 
     // 2. Job system

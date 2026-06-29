@@ -13,9 +13,20 @@
 
 namespace he {
 
+// 日志等级（与 spdlog 对齐）
+enum class LogLevel : u8 {
+    Trace    = 0,
+    Debug    = 1,
+    Info     = 2,
+    Warn     = 3,
+    Error    = 4,
+    Critical = 5,
+    Off      = 6,
+};
+
 class Logger {
 public:
-    static void Initialize();
+    static void Initialize(LogLevel level = LogLevel::Info);
     static void Shutdown();
 
     static spdlog::logger* GetCoreLogger()   { return s_CoreLogger.get(); }
