@@ -54,6 +54,9 @@ public:
     virtual u32    GetMipLevels()   const = 0;
     virtual u32    GetArrayLayers() const = 0;
     virtual Format GetFormat() const = 0;
+
+    // 原生资源句柄（后端特定：Vulkan=VkImageView, 空=未初始化）
+    virtual void*  GetNativeHandle() const = 0;  // ImageView 句柄
 };
 
 // --- Sampler descriptor ---

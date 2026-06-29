@@ -828,6 +828,95 @@ void VulkanCommandList::EndRenderPass() {
     vkCmdEndRenderPass(m_CmdBuffer);
 }
 
+// ============================================================
+// 离屏渲染通道（非 SwapChain 渲染目标，用于阴影贴图等）
+// ============================================================
+void VulkanCommandList::BeginOffscreenPass(
+    void* colorImageView, void* depthImageView,
+    u32 width, u32 height, const ClearValue* clear)
+{
+    // 验证：至少需要一个附件
+    auto colorView = static_cast<VkImageView>(colorImageView);
+    auto depthView = static_cast<VkImageView>(depthImageView);
+    if (!colorView && !depthView) {
+        HE_CORE_ERROR("BeginOffscreenPass: 至少需要一个附件");
+        return;
+    }
+    if (m_CurrentRenderPass == VK_NULL_HANDLE) {
+        HE_CORE_ERROR("BeginOffscreenPass: 未设置 PSO（先调用 SetPipeline）");
+        return;
+    }
+
+    // 销毁上一帧的离屏 Framebuffer（此时已通过 Submit + WaitIdle 安全提交）
+    if (m_OffscreenFB != VK_NULL_HANDLE) {
+        vkDestroyFramebuffer(m_Device, m_OffscreenFB, nullptr);
+        m_OffscreenFB = VK_NULL_HANDLE;
+    }
+
+    // 构建附件列表
+    VkImageView attachments[2] = {};
+    u32 attachmentCount = 0;
+    if (colorView) attachments[attachmentCount++] = colorView;
+    if (depthView) attachments[attachmentCount++] = depthView;
+
+    // 创建临时 Framebuffer
+    VkFramebufferCreateInfo fbInfo{};
+    fbInfo.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    fbInfo.renderPass      = m_CurrentRenderPass;
+    fbInfo.attachmentCount = attachmentCount;
+    fbInfo.pAttachments    = attachments;
+    fbInfo.width           = width;
+    fbInfo.height          = height;
+    fbInfo.layers          = 1;
+    vkCreateFramebuffer(m_Device, &fbInfo, nullptr, &m_OffscreenFB);
+
+    // 清除值
+    VkClearValue vkClearValues[2]{};
+    u32 clearCount = 0;
+    if (colorView) {
+        if (clear) {
+            vkClearValues[clearCount].color.float32[0] = clear->color[0];
+            vkClearValues[clearCount].color.float32[1] = clear->color[1];
+            vkClearValues[clearCount].color.float32[2] = clear->color[2];
+            vkClearValues[clearCount].color.float32[3] = clear->color[3];
+        }
+        clearCount++;
+    }
+    if (depthView) {
+        vkClearValues[clearCount].depthStencil.depth =
+            clear ? clear->depth : 1.0f;
+        vkClearValues[clearCount].depthStencil.stencil =
+            clear ? clear->stencil : 0;
+        clearCount++;
+    }
+
+    VkRenderPassBeginInfo rpBegin{};
+    rpBegin.sType       = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    rpBegin.renderPass  = m_CurrentRenderPass;
+    rpBegin.framebuffer = m_OffscreenFB;
+    rpBegin.renderArea.extent = { width, height };
+    rpBegin.clearValueCount   = clearCount;
+    rpBegin.pClearValues      = vkClearValues;
+
+    vkCmdBeginRenderPass(m_CmdBuffer, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
+    m_InOffscreenPass = true;
+
+    // 在渲染通道内重新绑定管线（Vulkan 要求）
+    if (m_CurrentPipeline != VK_NULL_HANDLE) {
+        vkCmdBindPipeline(m_CmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_CurrentPipeline);
+    }
+}
+
+void VulkanCommandList::EndOffscreenPass() {
+    if (!m_InOffscreenPass) return;
+    vkCmdEndRenderPass(m_CmdBuffer);
+    m_InOffscreenPass = false;
+
+    // Framebuffer 不能立即销毁 — 命令缓冲区尚未提交执行。
+    // 延迟到下一帧 BeginOffscreenPass 或析构时清理。
+    // 注：临时泄漏一帧的 Framebuffer，生产代码应使用围栏或删除队列。
+}
+
 void VulkanCommandList::SetViewport(const Viewport& vp) {
     VkViewport vkViewport{};
     vkViewport.x = vp.x;
@@ -917,56 +1006,87 @@ void VulkanCommandList::SetPushConstants(u32 offset, u32 size, const void* data)
     }
 }
 
-// ResourceState → VkImageLayout 映射
+// ResourceState → VkImageLayout 映射（支持位组合，写状态优先）
 static VkImageLayout ToVkImageLayout(ResourceState state) {
-    switch (state) {
-        case ResourceState::RenderTarget:       return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        case ResourceState::DepthStencilWrite:  return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-        case ResourceState::DepthStencilRead:   return VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-        case ResourceState::ShaderResource:     return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        case ResourceState::Present:            return VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-        case ResourceState::CopySrc:            return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        case ResourceState::CopyDst:            return VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        case ResourceState::UnorderedAccess:    return VK_IMAGE_LAYOUT_GENERAL;
-        default:                                return VK_IMAGE_LAYOUT_UNDEFINED;
-    }
+    u32 s = u32(state);
+    if (s & u32(ResourceState::DepthStencilWrite)) return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    if (s & u32(ResourceState::DepthStencilRead))  return VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    if (s & u32(ResourceState::RenderTarget))       return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    if (s & u32(ResourceState::ShaderResource))     return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (s & u32(ResourceState::Present))            return VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    if (s & u32(ResourceState::UnorderedAccess))    return VK_IMAGE_LAYOUT_GENERAL;
+    if (s & u32(ResourceState::CopySrc))            return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    if (s & u32(ResourceState::CopyDst))            return VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    return VK_IMAGE_LAYOUT_UNDEFINED;
+}
+
+// PipelineStage → VkPipelineStageFlags 映射
+static VkPipelineStageFlags ToVkPipelineStageFlags(PipelineStage stage) {
+    VkPipelineStageFlags flags = 0;
+    u32 s = u32(stage);
+    if (s & u32(PipelineStage::ColorAttachmentOutput)) flags |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    if (s & u32(PipelineStage::FragmentShader))        flags |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    if (s & u32(PipelineStage::ComputeShader))         flags |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    if (s & u32(PipelineStage::Transfer))              flags |= VK_PIPELINE_STAGE_TRANSFER_BIT;
+    if (s & u32(PipelineStage::EarlyFragmentTests))    flags |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    if (s & u32(PipelineStage::LateFragmentTests))     flags |= VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    if (s & u32(PipelineStage::VertexShader))          flags |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
+    return flags ? flags : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+}
+
+// ResourceState → VkAccessFlags 映射
+static VkAccessFlags ToVkAccessFlags(ResourceState state) {
+    VkAccessFlags flags = 0;
+    u32 s = u32(state);
+    if (s & u32(ResourceState::DepthStencilWrite)) flags |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    if (s & u32(ResourceState::DepthStencilRead))  flags |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+    if (s & u32(ResourceState::ShaderResource))     flags |= VK_ACCESS_SHADER_READ_BIT;
+    if (s & u32(ResourceState::RenderTarget))       flags |= VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    if (s & u32(ResourceState::UnorderedAccess))    flags |= VK_ACCESS_SHADER_WRITE_BIT;
+    if (s & u32(ResourceState::CopySrc))            flags |= VK_ACCESS_TRANSFER_READ_BIT;
+    if (s & u32(ResourceState::CopyDst))            flags |= VK_ACCESS_TRANSFER_WRITE_BIT;
+    return flags ? flags : VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
 }
 
 void VulkanCommandList::PipelineBarrier(
     PipelineStage srcStage, PipelineStage dstStage,
     ResourceState srcState, ResourceState dstState)
 {
-    // 仅处理全局内存屏障（简化实现，后续版本会扩展为 Image Buffer Barrier）
     VkMemoryBarrier memoryBarrier{};
     memoryBarrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    memoryBarrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
-    memoryBarrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
-
-    // PipelineStage → VkPipelineStageFlags 映射
-    VkPipelineStageFlags vkSrcStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-    VkPipelineStageFlags vkDstStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-
-    if (u32(srcStage) & u32(PipelineStage::ColorAttachmentOutput))
-        vkSrcStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    if (u32(srcStage) & u32(PipelineStage::FragmentShader))
-        vkSrcStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    if (u32(srcStage) & u32(PipelineStage::ComputeShader))
-        vkSrcStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-    if (u32(srcStage) & u32(PipelineStage::Transfer))
-        vkSrcStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-
-    if (u32(dstStage) & u32(PipelineStage::FragmentShader))
-        vkDstStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    if (u32(dstStage) & u32(PipelineStage::ColorAttachmentOutput))
-        vkDstStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    if (u32(dstStage) & u32(PipelineStage::ComputeShader))
-        vkDstStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-    if (u32(dstStage) & u32(PipelineStage::Transfer))
-        vkDstStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    memoryBarrier.srcAccessMask = ToVkAccessFlags(srcState);
+    memoryBarrier.dstAccessMask = ToVkAccessFlags(dstState);
 
     vkCmdPipelineBarrier(m_CmdBuffer,
-        vkSrcStage, vkDstStage,
+        ToVkPipelineStageFlags(srcStage), ToVkPipelineStageFlags(dstStage),
         0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
+}
+
+void VulkanCommandList::PipelineBarrier(
+    PipelineStage srcStage, PipelineStage dstStage,
+    ResourceState srcState, ResourceState dstState,
+    IRHITexture* texture)
+{
+    if (!texture) return;
+    auto* vkTex = static_cast<VulkanTexture*>(texture);
+
+    VkImageMemoryBarrier imageBarrier{};
+    imageBarrier.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    imageBarrier.srcAccessMask       = ToVkAccessFlags(srcState);
+    imageBarrier.dstAccessMask       = ToVkAccessFlags(dstState);
+    imageBarrier.oldLayout           = ToVkImageLayout(srcState);
+    imageBarrier.newLayout           = ToVkImageLayout(dstState);
+    imageBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    imageBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    imageBarrier.image               = vkTex->GetImage();
+    imageBarrier.subresourceRange    = {
+        VK_IMAGE_ASPECT_DEPTH_BIT, // 假设为深度纹理（阴影贴图）
+        0, 1, 0, 1
+    };
+
+    vkCmdPipelineBarrier(m_CmdBuffer,
+        ToVkPipelineStageFlags(srcStage), ToVkPipelineStageFlags(dstStage),
+        0, 0, nullptr, 0, nullptr, 1, &imageBarrier);
 }
 
 void VulkanCommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle setHandle) {

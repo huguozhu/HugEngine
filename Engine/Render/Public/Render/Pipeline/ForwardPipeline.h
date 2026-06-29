@@ -57,14 +57,26 @@ public:
         rhi::IRHITexture* metallicRoughness, rhi::IRHISampler* mrSampler,
         rhi::IRHITexture* occlusion, rhi::IRHISampler* ocSampler);
 
-private:
-    // 阴影通道 — 渲染所有投射阴影的光源的深度贴图
+public:
+    // --- 阴影通道编排（在主管线渲染通道外调用）---
+    // 收集阴影投射光源并上传阴影数据到 SSBO
+    void CollectShadowLights(
+        he::World& world, he::SceneGraph& sg,
+        std::vector<const he::LightComponent*>& shadowLights,
+        std::vector<GPUShadowData>& shadowGPUData);
+    // 开始离屏阴影渲染通道（depth-only，渲染到 m_ShadowMap）
+    void BeginShadowPass(rhi::IRHICommandList* cmd);
+    // 渲染场景深度到当前阴影贴图（需在 BeginShadowPass/EndShadowPass 之间调用）
     void RenderShadowPass(
         rhi::IRHICommandList* cmd,
         he::World& world,
         he::SceneGraph& sg,
         const std::vector<const he::LightComponent*>& shadowLights,
         const std::vector<GPUShadowData>& shadowGPUData);
+    // 结束离屏阴影渲染通道并执行布局转换 Barrier
+    void EndShadowPass(rhi::IRHICommandList* cmd);
+
+private:
 
     // 从 World 收集活跃光源，填充 PushConstant 的光照字段
     void CollectLights(PushConstantData& pc,

@@ -6,6 +6,7 @@
 #include "EmbeddedShaders.h"
 
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/ext/matrix_clip_space.hpp>  // orthoRH_ZO (Vulkan Z [0,1])
 
 namespace he::render {
 
@@ -28,19 +29,19 @@ static float4x4 ComputeDirectionalLightViewProj(
     // 灯光上方向量（避免与 lightDir 共线）
     float3 up = (abs(lightDir.y) < 0.999f) ? float3(0, 1, 0) : float3(1, 0, 0);
 
-    float4x4 lightView = glm::lookAt(
-        camCenter - lightDir * size * 0.5f,  // 灯光位置（远离场景中心）
-        camCenter,
-        up);
+    float4x4 lightView = glm::lookAtRH(
+        camCenter - lightDir * size * 0.5f,   // 灯光位置（逆光方向，从远处照射场景中心）
+        camCenter,                              // 注视场景中心
+        up);                                    // 上方向
 
     // 正交投影包围盒
+    // 使用 RH_ZO 变体：Vulkan 右手坐标系 + Z [0,1] 深度范围
+    // 注意：glm::ortho 默认使用 OpenGL [-1,1] 深度范围，与 Vulkan 不兼容
     float halfSize = size * 0.5f;
     float nearPlane = 0.1f;
     float farPlane  = size * 2.0f;
-    float4x4 lightProj = glm::ortho(-halfSize, halfSize, -halfSize, halfSize, nearPlane, farPlane);
-
-    // Vulkan NDC: 反转 Y 轴
-    lightProj[1][1] *= -1.0f;
+    float4x4 lightProj = glm::orthoRH_ZO(-halfSize, halfSize, -halfSize, halfSize,
+                                         nearPlane, farPlane);
 
     return lightProj * lightView;
 }
@@ -116,16 +117,18 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     shadowTexDesc.usage       = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
     m_ShadowMap = device->CreateTexture(shadowTexDesc);
 
-    // --- 创建 PCF 比较采样器 ---
-    rhi::SamplerDesc shadowSamplerDesc;
-    shadowSamplerDesc.minFilter     = rhi::FilterMode::Linear;
-    shadowSamplerDesc.magFilter     = rhi::FilterMode::Linear;
-    shadowSamplerDesc.addressU      = rhi::AddressMode::ClampToEdge;
-    shadowSamplerDesc.addressV      = rhi::AddressMode::ClampToEdge;
-    shadowSamplerDesc.addressW      = rhi::AddressMode::ClampToEdge;
-    shadowSamplerDesc.enableCompare = true;               // 启用深度比较
-    shadowSamplerDesc.compareFunc   = rhi::CompareFunc::LessEqual;
-    m_ShadowSampler = device->CreateSampler(shadowSamplerDesc);
+    // --- 创建阴影贴图采样器（非比较模式 — PCF 手动做深度比较）---
+    {
+        rhi::SamplerDesc shadowSampDesc;
+        shadowSampDesc.minFilter = rhi::FilterMode::Linear;
+        shadowSampDesc.magFilter = rhi::FilterMode::Linear;
+        shadowSampDesc.addressU  = rhi::AddressMode::ClampToEdge;
+        shadowSampDesc.addressV  = rhi::AddressMode::ClampToEdge;
+        shadowSampDesc.addressW  = rhi::AddressMode::ClampToEdge;
+        // 注意：不使用 enableCompare — Slang Sample() 与 comparison sampler 不兼容
+        // PCF 在着色器中手动做深度比较
+        m_ShadowSampler = device->CreateSampler(shadowSampDesc);
+    }
 
     // --- 创建占位纹理 + 采样器 ---
     {
@@ -144,20 +147,10 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         defaultSampDesc.addressU  = rhi::AddressMode::Repeat;
         defaultSampDesc.addressV  = rhi::AddressMode::Repeat;
         m_DefaultBaseColorSampler = device->CreateSampler(defaultSampDesc);
-
-        // 阴影 PCF 比较采样器（后续阴影贴图就绪后启用）
-        rhi::SamplerDesc shadowSampDesc;
-        shadowSampDesc.minFilter     = rhi::FilterMode::Linear;
-        shadowSampDesc.magFilter     = rhi::FilterMode::Linear;
-        shadowSampDesc.addressU      = rhi::AddressMode::ClampToEdge;
-        shadowSampDesc.addressV      = rhi::AddressMode::ClampToEdge;
-        shadowSampDesc.enableCompare = true;
-        shadowSampDesc.compareFunc   = rhi::CompareFunc::LessEqual;
-        m_ShadowSampler = device->CreateSampler(shadowSampDesc);
     }
 
     // --- 分配描述符集并绑定所有资源 ---
-    // 注：binding 4 复用 DefaultBaseColorTex（阴影贴图渲染通道就绪后替换为深度纹理）
+    // binding 4: 阴影贴图（深度纹理 + PCF 比较采样器）
     m_DescSet = device->AllocateDescriptorSet(m_DescLayout);
     device->UpdateDescriptorSet(m_DescSet, 1, rhi::DescriptorType::StorageBuffer,
                                 m_LightBuffer.get());
@@ -167,7 +160,7 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
                                 m_ShadowBuffer.get());
     device->UpdateDescriptorSet(m_DescSet, 4,
                                 rhi::DescriptorType::CombinedImageSampler,
-                                m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
+                                m_ShadowMap.get(), m_ShadowSampler.get());
     device->UpdateDescriptorSet(m_DescSet, 5,
                                 rhi::DescriptorType::CombinedImageSampler,
                                 m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
@@ -212,7 +205,7 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     };
 
     rhi::PushConstantRange shadowPCRange;
-    shadowPCRange.stageMask = 1;    // Vertex only
+    shadowPCRange.stageMask = 1 | 16;  // Vertex | Fragment（与 PBR PSO 一致，共享 SetPushConstants 实现）
     shadowPCRange.offset    = 0;
     shadowPCRange.size      = sizeof(ShadowPushConstant);
 
@@ -269,7 +262,7 @@ rhi::DescriptorSetHandle ForwardPipeline::CreateTextureDescriptorSet(
     m_Device->UpdateDescriptorSet(set, 2, rhi::DescriptorType::StorageBuffer, m_ObjectBuffer.get());
     m_Device->UpdateDescriptorSet(set, 3, rhi::DescriptorType::StorageBuffer, m_ShadowBuffer.get());
     m_Device->UpdateDescriptorSet(set, 4, rhi::DescriptorType::CombinedImageSampler,
-        m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
+        m_ShadowMap.get(), m_ShadowSampler.get());
 
     // 纹理绑定 5-8（使用默认纹理作为回退）
     auto use = [&](u32 b, rhi::IRHITexture* t, rhi::IRHISampler* s) {
@@ -326,7 +319,7 @@ void ForwardPipeline::CollectLights(
                 // 使用一个虚拟相机来计算方向光阴影的包围区域
                 // 简化版：基于光源方向计算正交投影
                 float3 lightDir = glm::normalize(dl->direction);
-                float sceneSize = 30.0f; // 固定场景大小（后续可根据实际场景调整）
+                float sceneSize = 2800.0f; // 覆盖整个 Sponza 场景
 
                 GPUShadowData sd{};
                 sd.lightViewProj = ComputeDirectionalLightViewProj(
@@ -394,6 +387,79 @@ void ForwardPipeline::CollectLights(
         }
         m_ShadowBuffer->Unmap();
     }
+}
+
+// 公开方法：仅收集阴影投射光源（供外部渲染循环在 BeginRenderPass 前调用）
+void ForwardPipeline::CollectShadowLights(
+    he::World& world, he::SceneGraph& sg,
+    std::vector<const he::LightComponent*>& shadowLights,
+    std::vector<GPUShadowData>& shadowGPUData)
+{
+    shadowLights.clear();
+    shadowGPUData.clear();
+
+    world.ForEach<he::DirectionalLight>([&](he::Entity e, he::DirectionalLight& lc) {
+        if (!lc.castShadow) return;
+        if (shadowGPUData.size() >= MAX_SHADOWS) return;
+
+        float3 lightDir = glm::normalize(lc.direction);
+
+        // 计算场景包围盒中心（Sponza 约 -1424~1302 × -2~1296 × -645~574）
+        // 简化：使用场景大致中心，覆盖足够的区域
+        CameraData shadowCam;
+        shadowCam.position = float3(0.0f, 400.0f, 0.0f);  // Sponza 中心
+        shadowCam.forward  = float3(0.0f, 0.0f, -1.0f);
+        float sceneSize = 2800.0f;  // 覆盖整个 Sponza
+
+        GPUShadowData sd{};
+        sd.lightViewProj = ComputeDirectionalLightViewProj(lightDir, shadowCam, sceneSize);
+        sd.shadowParams  = float4(lc.shadowBias, lc.shadowNormalBias, lc.shadowStrength, 0.0f);
+        shadowGPUData.push_back(sd);
+        shadowLights.push_back(&lc);
+    });
+
+    // 上传阴影 GPU 数据到 SSBO（供阴影 VS 和主 PS 读取）
+    if (!shadowGPUData.empty()) {
+        GPUShadowData* sd = static_cast<GPUShadowData*>(m_ShadowBuffer->Map());
+        for (usize j = 0; j < shadowGPUData.size(); ++j)
+            sd[j] = shadowGPUData[j];
+        m_ShadowBuffer->Unmap();
+    }
+}
+
+// 开始离屏阴影渲染通道（在主管线 BeginRenderPass 之前调用）
+void ForwardPipeline::BeginShadowPass(rhi::IRHICommandList* cmd) {
+    // 设置 Shadow PSO（depth-only render pass）
+    cmd->SetPipeline(m_ShadowPSO.get());
+
+    // 获取阴影贴图的原生 ImageView
+    void* depthView = m_ShadowMap->GetNativeHandle();
+    if (!depthView) {
+        HE_CORE_ERROR("BeginShadowPass: ShadowMap ImageView 无效");
+        return;
+    }
+
+    rhi::ClearValue clearVal{};
+    clearVal.depth = 1.0f;  // 远平面 = 无遮挡
+
+    cmd->BeginOffscreenPass(nullptr, depthView, m_ShadowMapSize, m_ShadowMapSize, &clearVal);
+}
+
+// 结束离屏阴影渲染通道并执行布局转换
+void ForwardPipeline::EndShadowPass(rhi::IRHICommandList* cmd) {
+    cmd->EndOffscreenPass();
+
+    // 布局转换：DEPTH_STENCIL_READ_ONLY_OPTIMAL → SHADER_READ_ONLY_OPTIMAL
+    // 注意：srcState 必须与 RenderPass 的 finalLayout 一致
+    cmd->PipelineBarrier(
+        rhi::PipelineStage::LateFragmentTests,
+        rhi::PipelineStage::FragmentShader,
+        rhi::ResourceState::DepthStencilRead,  // 匹配 RP finalLayout
+        rhi::ResourceState::ShaderResource,
+        m_ShadowMap.get());
+
+    // 恢复 PBR PSO（确保后续 BeginRenderPass 使用正确的 render pass）
+    cmd->SetPipeline(m_PBR_PSO.get());
 }
 
 void ForwardPipeline::RenderShadowPass(

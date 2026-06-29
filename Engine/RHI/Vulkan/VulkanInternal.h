@@ -85,6 +85,10 @@ public:
     void BeginRenderPass(u32 colorCount, Format colorFmt, Format depthFmt,
                          const ClearValue* clear) override;
     void EndRenderPass() override;
+    void BeginOffscreenPass(void* colorImageView, void* depthImageView,
+                            u32 width, u32 height,
+                            const ClearValue* clear) override;
+    void EndOffscreenPass() override;
     void SetSwapChain(IRHISwapChain* swapchain) override;
     void SetPipeline(IRHIPipelineState* pso) override;
     void SetVertexBuffer(IRHIBuffer* buffer, u32 binding) override;
@@ -98,6 +102,9 @@ public:
     void SetPushConstants(u32 offset, u32 size, const void* data) override;
     void PipelineBarrier(PipelineStage srcStage, PipelineStage dstStage,
                          ResourceState srcState, ResourceState dstState) override;
+    void PipelineBarrier(PipelineStage srcStage, PipelineStage dstStage,
+                         ResourceState srcState, ResourceState dstState,
+                         IRHITexture* texture) override;
     void CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst,
                     u64 size, u64 srcOffset, u64 dstOffset) override;
     void Submit() override;
@@ -147,6 +154,11 @@ private:
     VkExtent2D               m_SwapchainExtent{};
     std::vector<VkFramebuffer> m_Framebuffers;
     u32                       m_CurrentImageIndex = 0;
+
+    // 离屏渲染通道状态
+    VkFramebuffer m_OffscreenFB = VK_NULL_HANDLE;
+    VkRenderPass  m_OffscreenRP = VK_NULL_HANDLE;
+    bool          m_InOffscreenPass = false;
 };
 
 // ============================================================
@@ -206,6 +218,7 @@ public:
     u32    GetMipLevels()    const override { return m_MipLevels; }
     u32    GetArrayLayers()  const override { return m_ArrayLayers; }
     Format GetFormat()       const override { return m_Format; }
+    void*  GetNativeHandle() const override { return reinterpret_cast<void*>(m_ImageView); }
     VkImage     GetImage()     const { return m_Image; }
     VkImageView GetImageView() const { return m_ImageView; }
 private:

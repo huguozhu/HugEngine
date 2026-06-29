@@ -25,6 +25,7 @@
 #include <fstream>
 #include <sstream>
 #include <unordered_map>
+#include <vector>
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -385,6 +386,22 @@ int main() {
 
         // --- 渲染 ---
         cmdList->Begin();
+
+        // 阴影通道（在主渲染通道之前执行，离屏渲染到 ShadowMap）
+        {
+            std::vector<const he::LightComponent*> shadowLights;
+            std::vector<render::GPUShadowData> shadowGPUData;
+            pipeline.CollectShadowLights(world, sceneGraph, shadowLights, shadowGPUData);
+
+            if (!shadowGPUData.empty()) {
+                pipeline.BeginShadowPass(cmdList.get());
+                pipeline.RenderShadowPass(cmdList.get(), world, sceneGraph,
+                                         shadowLights, shadowGPUData);
+                pipeline.EndShadowPass(cmdList.get());
+            }
+        }
+
+        // 主渲染通道
         cmdList->BeginRenderPass(1, rhi::Format::RGBA8_UNORM);
 
         pipeline.BeginFrame(cmdList.get(),
@@ -395,43 +412,69 @@ int main() {
         imgui.BeginFrame();
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
         ImGui::SetNextWindowBgAlpha(0.55f);
-        ImGui::Begin("03.Sponza 性能监控");
+        ImGui::Begin("03.Sponza 控制面板");
         {
-            // --- FPS + 帧时间 ---
+            // ============================================================
+            // 性能监控
+            // ============================================================
             float fps = 1.0f / (deltaTime > 0.001f ? deltaTime : 0.016f);
             ImGui::TextColored({0.3f, 1.0f, 0.3f, 1.0f}, "FPS: %.0f", fps);
             ImGui::SameLine(120);
             ImGui::TextColored({0.6f, 0.6f, 0.6f, 1.0f}, "(%.2f ms)", deltaTime * 1000.0f);
 
-            // --- 相机 ---
+            // ============================================================
+            // 相机
+            // ============================================================
             ImGui::SeparatorText("相机");
-            ImGui::Text("位置: (%.1f, %.1f, %.1f)",
-                camera.position.x, camera.position.y, camera.position.z);
-            ImGui::Text("朝向: (%.2f, %.2f, %.2f)",
-                camera.forward.x, camera.forward.y, camera.forward.z);
-            ImGui::Text("Yaw: %.1f°  Pitch: %.1f°",
-                glm::degrees(yaw), glm::degrees(pitch));
+            ImGui::DragFloat3("位置", &camera.position[0], 5.0f);
+            float yawDeg   = glm::degrees(yaw);
+            float pitchDeg = glm::degrees(pitch);
+            if (ImGui::SliderFloat("Yaw", &yawDeg, -180.0f, 180.0f, "%.1f°"))
+                yaw = glm::radians(yawDeg);
+            if (ImGui::SliderFloat("Pitch", &pitchDeg, -85.0f, 85.0f, "%.1f°"))
+                pitch = glm::radians(pitchDeg);
+            ImGui::DragFloat("移动速度", &moveSpeed, 1.0f, 1.0f, 500.0f, "%.0f");
 
-            // --- 方向光 ---
-            ImGui::SeparatorText("方向光");
-            world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& dl) {
-                ImGui::Text("方向: (%.2f, %.2f, %.2f)",
-                    dl.direction.x, dl.direction.y, dl.direction.z);
-                ImGui::Text("颜色: (%.2f, %.2f, %.2f)",
-                    dl.color.x, dl.color.y, dl.color.z);
-                ImGui::Text("强度: %.1f", dl.intensity);
+            // ============================================================
+            // 光源
+            // ============================================================
+            world.ForEach<he::DirectionalLight>([&](he::Entity e, he::DirectionalLight& dl) {
+                bool isMain = (e == mainLightEntity);
+                ImGui::SeparatorText(isMain ? "主方向光" : "补光");
 
-                // 阴影状态
-                if (dl.castShadow) {
-                    ImGui::TextColored({1.0f, 0.8f, 0.2f, 1.0f},
-                        "阴影: ON  (%ux%u, bias=%.4f)",
-                        dl.shadowMapSize, dl.shadowMapSize, dl.shadowBias);
-                } else {
-                    ImGui::TextColored({0.5f, 0.5f, 0.5f, 1.0f}, "阴影: OFF");
+                // 方向（滑块修改后自动归一化）
+                float3 dir = dl.direction;
+                if (ImGui::SliderFloat3("方向", &dir[0], -1.0f, 1.0f, "%.2f")) {
+                    if (glm::dot(dir, dir) > 0.0001f)
+                        dl.direction = glm::normalize(dir);
+                }
+
+                // 颜色
+                ImGui::ColorEdit3("颜色", &dl.color[0]);
+
+                // 强度
+                ImGui::DragFloat("强度", &dl.intensity, 0.1f, 0.0f, 100.0f, "%.1f");
+
+                // 阴影参数（仅主方向光显示）
+                if (isMain) {
+                    bool shadowOn = dl.castShadow;
+                    if (ImGui::Checkbox("投射阴影", &shadowOn))
+                        dl.castShadow = shadowOn;
+
+                    if (dl.castShadow) {
+                        ImGui::Indent(12.0f);
+                        ImGui::DragFloat("深度偏移", &dl.shadowBias, 0.0001f, 0.0f, 0.1f, "%.4f",
+                            ImGuiSliderFlags_Logarithmic);
+                        ImGui::DragFloat("法线偏移", &dl.shadowNormalBias, 0.001f, 0.0f, 0.5f, "%.3f");
+                        ImGui::SliderFloat("阴影强度", &dl.shadowStrength, 0.0f, 1.0f, "%.2f");
+                        ImGui::Unindent(12.0f);
+                    }
                 }
             });
 
-            // --- 场景统计 ---
+            // ============================================================
+            // 场景统计
+            // ============================================================
             ImGui::SeparatorText("场景");
             u32 meshCount = 0, dirLightCount = 0;
             world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent&) {

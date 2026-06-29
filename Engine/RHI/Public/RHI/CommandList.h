@@ -43,6 +43,17 @@ public:
     ) = 0;
     virtual void EndRenderPass() = 0;
 
+    // 离屏渲染通道：渲染到自定义纹理附件（非 SwapChain）
+    // colorImageView/depthImageView 为后端特定句柄（VkImageView），可空。
+    // 必须先调用 SetPipeline 设置匹配的 PSO（render pass 一致）。
+    virtual void BeginOffscreenPass(
+        void* colorImageView,   // 可空（深度专用通道如 ShadowMap）
+        void* depthImageView,   // 可空
+        u32 width, u32 height,
+        const ClearValue* clear = nullptr
+    ) = 0;
+    virtual void EndOffscreenPass() = 0;
+
     // SwapChain 关联（自动管理 Framebuffer + 同步 + 图像索引）
     virtual void SetSwapChain(IRHISwapChain* swapchain) = 0;
 
@@ -67,10 +78,16 @@ public:
 
     virtual void SetPushConstants(u32 offset, u32 size, const void* data) = 0;
 
-    // Pipeline barrier（资源状态转换 / 同步）
+    // Pipeline barrier（全局内存屏障）
     virtual void PipelineBarrier(
         PipelineStage srcStage, PipelineStage dstStage,
         ResourceState srcState, ResourceState dstState) = 0;
+
+    // Pipeline barrier（图像布局转换，如阴影贴图 Depth→ShaderRead）
+    virtual void PipelineBarrier(
+        PipelineStage srcStage, PipelineStage dstStage,
+        ResourceState srcState, ResourceState dstState,
+        IRHITexture* texture) = 0;
 
     // 缓冲拷贝（GPU 端）
     virtual void CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst,
