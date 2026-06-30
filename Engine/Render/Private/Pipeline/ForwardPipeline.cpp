@@ -21,48 +21,25 @@ ForwardPipeline::~ForwardPipeline() {
     Shutdown();
 }
 
-// 计算方向光的正交投影矩阵
-// 固定世界中心避免跳变 + 基于视锥体动态调整尺寸保证全视角覆盖
+// 计算方向光的正交投影矩阵（固定世界中心，不跟相机移动）
 static float4x4 ComputeDirectionalLightViewProj(
     const float3& lightDir, const CameraData& camera)
 {
-    // 固定场景中心（世界空间，不跟相机移动）
+    // 固定场景中心
     float3 sceneCenter(0.0f, 400.0f, 0.0f);
+    float sceneSize = 4000.0f;
 
-    // 灯光视图矩阵（固定中心，不抖动）
+    // 灯光视图矩阵
     float3 lightUp = (abs(lightDir.y) < 0.999f) ? float3(0, 1, 0) : float3(1, 0, 0);
     float4x4 lightView = glm::lookAtRH(
-        sceneCenter - lightDir * 2000.0f, sceneCenter, lightUp);
+        sceneCenter - lightDir * sceneSize * 0.5f,
+        sceneCenter,
+        lightUp);
 
-    // 计算相机视锥体在灯光空间中的 XY 包围盒，确定所需覆盖范围
-    float3 f = glm::normalize(camera.forward);
-    float3 r = glm::normalize(glm::cross(f, camera.up));
-    float3 u = glm::cross(r, f);
-    float tanHalfFov = glm::tan(glm::radians(camera.fov) * 0.5f);
-    float farH = tanHalfFov * camera.farPlane;
-    float farW = farH * camera.aspectRatio;
-    float3 farC = camera.position + f * camera.farPlane;
-
-    float3 farCorners[4] = {
-        farC - r*farW - u*farH, farC + r*farW - u*farH,
-        farC - r*farW + u*farH, farC + r*farW + u*farH,
-    };
-
-    float minX = FLT_MAX, maxX = -FLT_MAX;
-    float minY = FLT_MAX, maxY = -FLT_MAX;
-    for (auto& c : farCorners) {
-        float4 ls = lightView * float4(c, 1.0f);
-        minX = glm::min(minX, ls.x); maxX = glm::max(maxX, ls.x);
-        minY = glm::min(minY, ls.y); maxY = glm::max(maxY, ls.y);
-    }
-
-    // 最小覆盖保证（防止视锥体退化）
-    float halfSize = glm::max(glm::max(glm::abs(minX), glm::abs(maxX)),
-                              glm::max(glm::abs(minY), glm::abs(maxY)));
-    halfSize = glm::max(halfSize, 1400.0f);  // 最小覆盖 2800×2800
-
+    // 正交投影
+    float halfSize  = sceneSize * 0.5f;
     float nearPlane = 0.1f;
-    float farPlane  = 6000.0f;
+    float farPlane  = sceneSize * 2.0f;
     float4x4 lightProj = glm::orthoRH_ZO(-halfSize, halfSize, -halfSize, halfSize,
                                          nearPlane, farPlane);
 
