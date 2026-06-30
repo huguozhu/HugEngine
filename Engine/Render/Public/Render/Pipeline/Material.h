@@ -28,8 +28,9 @@ enum MaterialFlags : u32 {
 // GPU Light 结构（Storage Buffer 上传，glsl std430 对齐）
 // 每灯光 64 字节，最多 MAX_LIGHTS（8）个
 // ============================================================
-static constexpr u32 MAX_LIGHTS    = 8;
-static constexpr u32 MAX_SHADOWS   = 4;  // 最多 4 个投射阴影的光源
+static constexpr u32 MAX_LIGHTS          = 8;
+static constexpr u32 MAX_SHADOWS         = 4;   // 最多 4 个投射阴影的光源
+static constexpr u32 MAX_FRAMES_IN_FLIGHT = 3;  // 三缓冲帧环
 
 // --- GPU 阴影数据（Storage Buffer，每个阴影投射光源一条）---
 struct alignas(16) GPUShadowData {

@@ -70,33 +70,32 @@ VulkanBuffer::VulkanBuffer(VkDevice device, VkPhysicalDevice physical, const Buf
     addrInfo.buffer = m_Buffer;
     m_DeviceAddress = vkGetBufferDeviceAddress(device, &addrInfo);
 
-    // Upload initial data
+    // 持久映射：构造时映射一次，后续 Map() 直接返回指针（Phase 1 多线程渲染）
+    vkMapMemory(device, m_Memory, 0, m_Size, 0, &m_MappedPtr);
+    m_IsMapped = true;
+
+    // Upload initial data（直接写入持久映射指针）
     if (desc.initialData) {
-        void* dst = Map();
-        std::memcpy(dst, desc.initialData, desc.size);
-        Unmap();
+        std::memcpy(m_MappedPtr, desc.initialData, desc.size);
     }
 }
 
 VulkanBuffer::~VulkanBuffer() {
+    if (m_IsMapped) {
+        vkUnmapMemory(m_Device, m_Memory);
+        m_IsMapped = false;
+    }
     vkDestroyBuffer(m_Device, m_Buffer, nullptr);
     vkFreeMemory(m_Device, m_Memory, nullptr);
 }
 
 void* VulkanBuffer::Map() {
-    if (!m_IsMapped) {
-        vkMapMemory(m_Device, m_Memory, 0, m_Size, 0, &m_MappedPtr);
-        m_IsMapped = true;
-    }
+    // 持久映射：直接返回已映射的指针，无需每次调用 vkMapMemory（Phase 1）
     return m_MappedPtr;
 }
 
 void VulkanBuffer::Unmap() {
-    if (m_IsMapped) {
-        vkUnmapMemory(m_Device, m_Memory);
-        m_IsMapped = false;
-        m_MappedPtr = nullptr;
-    }
+    // 持久映射：Unmap 变为 no-op，缓冲区在整个生命周期保持映射状态（Phase 1）
 }
 
 // ============================================================

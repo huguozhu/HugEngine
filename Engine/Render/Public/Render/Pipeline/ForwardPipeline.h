@@ -116,11 +116,15 @@ private:
     std::unique_ptr<rhi::IRHIPipelineState> m_ShadowPSO;  // 阴影深度专用 PSO
 
     // 主管道 Descriptor Set + Storage Buffers（光照 + 对象数据 + 阴影数据 + 阴影贴图）
-    rhi::DescriptorSetLayoutHandle m_DescLayout     = rhi::kInvalidLayout;
-    rhi::DescriptorSetHandle       m_DescSet        = rhi::kInvalidSet;
-    std::unique_ptr<rhi::IRHIBuffer> m_LightBuffer;
-    std::unique_ptr<rhi::IRHIBuffer> m_ObjectBuffer;   // GPUObjectData[MAX_OBJECTS]
-    std::unique_ptr<rhi::IRHIBuffer> m_ShadowBuffer;   // GPUShadowData[MAX_SHADOWS]
+    rhi::DescriptorSetLayoutHandle m_DescLayout      = rhi::kInvalidLayout;
+    rhi::DescriptorSetHandle       m_DescSets[MAX_FRAMES_IN_FLIGHT] = {};  // 三缓冲共享描述符集
+    // 三缓冲 StorageBuffer（Phase 1 多线程渲染：CPU 写入当前帧，GPU 读取上一帧）
+    std::unique_ptr<rhi::IRHIBuffer> m_LightBuffers[MAX_FRAMES_IN_FLIGHT];
+    std::unique_ptr<rhi::IRHIBuffer> m_ObjectBuffers[MAX_FRAMES_IN_FLIGHT];  // GPUObjectData[MAX_OBJECTS]
+    std::unique_ptr<rhi::IRHIBuffer> m_ShadowBuffers[MAX_FRAMES_IN_FLIGHT];  // GPUShadowData[MAX_SHADOWS]
+    u32 m_CurrentFrameSlot = 0;  // 当前帧槽位 [0, MAX_FRAMES_IN_FLIGHT)
+    // 所有已分配的 per-mesh 描述符集（用于每帧更新动态绑定 1-3）
+    std::vector<rhi::DescriptorSetHandle> m_AllPerMeshDescSets;
 
     // 阴影贴图 + 采样器
     std::unique_ptr<rhi::IRHITexture>  m_ShadowMap;          // 方向光深度纹理

@@ -122,7 +122,7 @@ public:
         m_SignalSemaphore = signal;
     }
 
-    VkCommandBuffer GetHandle() const { return m_CmdBuffer; }
+    VkCommandBuffer GetHandle() const { return m_CmdBuffers[m_FrameIndex]; }
 
 private:
     VkDevice         m_Device      = VK_NULL_HANDLE;
@@ -130,9 +130,12 @@ private:
     VulkanDevice*    m_VulkanDevice = nullptr;  // 用于 DescriptorSet 句柄解析
     u32              m_QueueFamily = 0;
 
-    VkCommandPool    m_CmdPool     = VK_NULL_HANDLE;
-    VkCommandBuffer  m_CmdBuffer   = VK_NULL_HANDLE;
-    VkFence          m_Fence       = VK_NULL_HANDLE;
+    // 三缓冲帧环（Phase 1 多线程渲染）
+    static constexpr u32 kMaxFramesInFlight = 3;
+    VkCommandPool    m_CmdPools[kMaxFramesInFlight]   = {};
+    VkCommandBuffer  m_CmdBuffers[kMaxFramesInFlight] = {};
+    VkFence          m_Fences[kMaxFramesInFlight]     = {};
+    u32              m_FrameIndex = 0;  // 当前帧槽位
 
     // 关联的 SwapChain（自动管理 Framebuffer + 同步 + 图像索引）
     VulkanSwapChain* m_pSwapChain = nullptr;

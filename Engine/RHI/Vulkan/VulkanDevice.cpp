@@ -715,42 +715,53 @@ VulkanCommandList::VulkanCommandList(VkDevice device, VkQueue queue, u32 queueFa
     : m_Device(device), m_Queue(queue), m_QueueFamily(queueFamily)
     , m_VulkanDevice(vulkanDevice)
 {
-    VkCommandPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    poolInfo.queueFamilyIndex = m_QueueFamily;
-    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-    vkCreateCommandPool(m_Device, &poolInfo, nullptr, &m_CmdPool);
+    // 创建三缓冲命令池 + 命令缓冲 + 栅栏（Phase 1 多线程渲染）
+    for (u32 i = 0; i < kMaxFramesInFlight; ++i) {
+        VkCommandPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        poolInfo.queueFamilyIndex = m_QueueFamily;
+        poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        vkCreateCommandPool(m_Device, &poolInfo, nullptr, &m_CmdPools[i]);
 
-    VkCommandBufferAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    allocInfo.commandPool = m_CmdPool;
-    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocInfo.commandBufferCount = 1;
-    vkAllocateCommandBuffers(m_Device, &allocInfo, &m_CmdBuffer);
+        VkCommandBufferAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocInfo.commandPool = m_CmdPools[i];
+        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocInfo.commandBufferCount = 1;
+        vkAllocateCommandBuffers(m_Device, &allocInfo, &m_CmdBuffers[i]);
 
-    VkFenceCreateInfo fenceInfo{};
-    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    vkCreateFence(m_Device, &fenceInfo, nullptr, &m_Fence);
+        // 创建时设为已触发状态，首次 Begin() 不会阻塞
+        VkFenceCreateInfo fenceInfo{};
+        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+        vkCreateFence(m_Device, &fenceInfo, nullptr, &m_Fences[i]);
+    }
 }
 
 VulkanCommandList::~VulkanCommandList() {
     vkDeviceWaitIdle(m_Device);
     for (auto& fb : m_Framebuffers) vkDestroyFramebuffer(m_Device, fb, nullptr);
-    if (m_Fence)     vkDestroyFence(m_Device, m_Fence, nullptr);
-    if (m_CmdPool)   vkDestroyCommandPool(m_Device, m_CmdPool, nullptr);
+    for (u32 i = 0; i < kMaxFramesInFlight; ++i) {
+        if (m_Fences[i])    vkDestroyFence(m_Device, m_Fences[i], nullptr);
+        if (m_CmdPools[i])  vkDestroyCommandPool(m_Device, m_CmdPools[i], nullptr);
+    }
 }
 
 void VulkanCommandList::Begin() {
-    // 直接重置命令缓冲（GPU 在上一帧 Submit 中已同步完成）
-    vkResetCommandBuffer(m_CmdBuffer, 0);
+    // 等待当前帧槽位的 GPU 栅栏（非阻塞：仅等待该槽位的历史提交）
+    vkWaitForFences(m_Device, 1, &m_Fences[m_FrameIndex], VK_TRUE, UINT64_MAX);
 
+    // 重置该槽位的命令池
+    vkResetCommandPool(m_Device, m_CmdPools[m_FrameIndex], 0);
+
+    // 开始录制当前帧的命令缓冲
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    vkBeginCommandBuffer(m_CmdBuffer, &beginInfo);
+    vkBeginCommandBuffer(m_CmdBuffers[m_FrameIndex], &beginInfo);
 }
 
 void VulkanCommandList::End() {
-    vkEndCommandBuffer(m_CmdBuffer);
+    vkEndCommandBuffer(m_CmdBuffers[m_FrameIndex]);
 }
 
 void VulkanCommandList::BeginRenderPass(u32 colorCount, Format, Format depthFormat,
@@ -815,17 +826,17 @@ void VulkanCommandList::BeginRenderPass(u32 colorCount, Format, Format depthForm
     rpBegin.clearValueCount   = 2;
     rpBegin.pClearValues      = vkClearValues;
 
-    vkCmdBeginRenderPass(m_CmdBuffer, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBeginRenderPass(m_CmdBuffers[m_FrameIndex], &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
 
     // 绑定管线
     if (m_CurrentPipeline) {
-        vkCmdBindPipeline(m_CmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_CurrentPipeline);
+        vkCmdBindPipeline(m_CmdBuffers[m_FrameIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, m_CurrentPipeline);
     }
     // 顶点/索引缓冲在 Draw/DrawIndexed 时按需绑定，以支持正确的 binding 参数
 }
 
 void VulkanCommandList::EndRenderPass() {
-    vkCmdEndRenderPass(m_CmdBuffer);
+    vkCmdEndRenderPass(m_CmdBuffers[m_FrameIndex]);
 }
 
 // ============================================================
@@ -898,18 +909,18 @@ void VulkanCommandList::BeginOffscreenPass(
     rpBegin.clearValueCount   = clearCount;
     rpBegin.pClearValues      = vkClearValues;
 
-    vkCmdBeginRenderPass(m_CmdBuffer, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBeginRenderPass(m_CmdBuffers[m_FrameIndex], &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
     m_InOffscreenPass = true;
 
     // 在渲染通道内重新绑定管线（Vulkan 要求）
     if (m_CurrentPipeline != VK_NULL_HANDLE) {
-        vkCmdBindPipeline(m_CmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_CurrentPipeline);
+        vkCmdBindPipeline(m_CmdBuffers[m_FrameIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, m_CurrentPipeline);
     }
 }
 
 void VulkanCommandList::EndOffscreenPass() {
     if (!m_InOffscreenPass) return;
-    vkCmdEndRenderPass(m_CmdBuffer);
+    vkCmdEndRenderPass(m_CmdBuffers[m_FrameIndex]);
     m_InOffscreenPass = false;
 
     // Framebuffer 不能立即销毁 — 命令缓冲区尚未提交执行。
@@ -925,14 +936,14 @@ void VulkanCommandList::SetViewport(const Viewport& vp) {
     vkViewport.height = vp.height;
     vkViewport.minDepth = vp.minDepth;
     vkViewport.maxDepth = vp.maxDepth;
-    vkCmdSetViewport(m_CmdBuffer, 0, 1, &vkViewport);
+    vkCmdSetViewport(m_CmdBuffers[m_FrameIndex], 0, 1, &vkViewport);
 }
 
 void VulkanCommandList::SetScissor(const ScissorRect& sc) {
     VkRect2D vkScissor{};
     vkScissor.offset = {sc.x, sc.y};
     vkScissor.extent = {sc.width, sc.height};
-    vkCmdSetScissor(m_CmdBuffer, 0, 1, &vkScissor);
+    vkCmdSetScissor(m_CmdBuffers[m_FrameIndex], 0, 1, &vkScissor);
 }
 
 void VulkanCommandList::SetSwapChain(IRHISwapChain* swapchain) {
@@ -979,28 +990,28 @@ void VulkanCommandList::Draw(u32 vertexCount, u32 instanceCount,
     // 绑定当前顶点缓冲（使用记录下的 binding 索引）
     if (m_CurrentVB) {
         VkDeviceSize offset = 0;
-        vkCmdBindVertexBuffers(m_CmdBuffer, m_VBBinding, 1, &m_CurrentVB, &offset);
+        vkCmdBindVertexBuffers(m_CmdBuffers[m_FrameIndex], m_VBBinding, 1, &m_CurrentVB, &offset);
     }
-    vkCmdDraw(m_CmdBuffer, vertexCount, instanceCount, firstVertex, firstInstance);
+    vkCmdDraw(m_CmdBuffers[m_FrameIndex], vertexCount, instanceCount, firstVertex, firstInstance);
 }
 
 void VulkanCommandList::DrawIndexed(u32 indexCount, u32 instanceCount,
                                      u32 firstIndex, i32 vertexOffset, u32 firstInstance) {
     // 绑定索引缓冲
     if (m_CurrentIB)
-        vkCmdBindIndexBuffer(m_CmdBuffer, m_CurrentIB, m_IBOffset, m_CurrentIndexType);
+        vkCmdBindIndexBuffer(m_CmdBuffers[m_FrameIndex], m_CurrentIB, m_IBOffset, m_CurrentIndexType);
     // 绑定当前顶点缓冲
     if (m_CurrentVB) {
         VkDeviceSize offset = 0;
-        vkCmdBindVertexBuffers(m_CmdBuffer, m_VBBinding, 1, &m_CurrentVB, &offset);
+        vkCmdBindVertexBuffers(m_CmdBuffers[m_FrameIndex], m_VBBinding, 1, &m_CurrentVB, &offset);
     }
-    vkCmdDrawIndexed(m_CmdBuffer, indexCount, instanceCount,
+    vkCmdDrawIndexed(m_CmdBuffers[m_FrameIndex], indexCount, instanceCount,
                      firstIndex, vertexOffset, firstInstance);
 }
 
 void VulkanCommandList::SetPushConstants(u32 offset, u32 size, const void* data) {
     if (m_CurrentLayout) {
-        vkCmdPushConstants(m_CmdBuffer, m_CurrentLayout,
+        vkCmdPushConstants(m_CmdBuffers[m_FrameIndex], m_CurrentLayout,
                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                           offset, size, data);
     }
@@ -1057,7 +1068,7 @@ void VulkanCommandList::PipelineBarrier(
     memoryBarrier.srcAccessMask = ToVkAccessFlags(srcState);
     memoryBarrier.dstAccessMask = ToVkAccessFlags(dstState);
 
-    vkCmdPipelineBarrier(m_CmdBuffer,
+    vkCmdPipelineBarrier(m_CmdBuffers[m_FrameIndex],
         ToVkPipelineStageFlags(srcStage), ToVkPipelineStageFlags(dstStage),
         0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
 }
@@ -1091,7 +1102,7 @@ void VulkanCommandList::PipelineBarrier(
         0, vkTex->GetArrayLayers()   // Cubemap=6, 普通纹理=1
     };
 
-    vkCmdPipelineBarrier(m_CmdBuffer,
+    vkCmdPipelineBarrier(m_CmdBuffers[m_FrameIndex],
         ToVkPipelineStageFlags(srcStage), ToVkPipelineStageFlags(dstStage),
         0, 0, nullptr, 0, nullptr, 1, &imageBarrier);
 }
@@ -1100,7 +1111,7 @@ void VulkanCommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle setH
     if (!m_VulkanDevice) return;
     VkDescriptorSet ds = m_VulkanDevice->ResolveDescriptorSet(setHandle);
     if (ds == VK_NULL_HANDLE) return;
-    vkCmdBindDescriptorSets(m_CmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+    vkCmdBindDescriptorSets(m_CmdBuffers[m_FrameIndex], VK_PIPELINE_BIND_POINT_GRAPHICS,
                             m_CurrentLayout, setIndex, 1, &ds, 0, nullptr);
 }
 
@@ -1114,7 +1125,7 @@ void VulkanCommandList::CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst,
     region.dstOffset = dstOffset;
     region.size      = size;
 
-    vkCmdCopyBuffer(m_CmdBuffer, vkSrc->GetHandle(), vkDst->GetHandle(), 1, &region);
+    vkCmdCopyBuffer(m_CmdBuffers[m_FrameIndex], vkSrc->GetHandle(), vkDst->GetHandle(), 1, &region);
 }
 
 void VulkanCommandList::Submit() {
@@ -1123,18 +1134,23 @@ void VulkanCommandList::Submit() {
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     if (m_pSwapChain) waitSem = m_pSwapChain->GetImageAcquiredSemaphore();
 
+    VkCommandBuffer cb = m_CmdBuffers[m_FrameIndex];
+
     VkSubmitInfo submitInfo{};
     submitInfo.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.waitSemaphoreCount   = waitSem ? 1u : 0u;
     submitInfo.pWaitSemaphores      = &waitSem;
     submitInfo.pWaitDstStageMask    = &waitStage;
     submitInfo.commandBufferCount   = 1;
-    submitInfo.pCommandBuffers      = &m_CmdBuffer;
+    submitInfo.pCommandBuffers      = &cb;
 
-    vkResetFences(m_Device, 1, &m_Fence);
-    vkQueueSubmit(m_Queue, 1, &submitInfo, m_Fence);
-    // 同步等待 GPU 完成
-    vkWaitForFences(m_Device, 1, &m_Fence, VK_TRUE, UINT64_MAX);
+    // 重置当前帧栅栏并提交（GPU 执行完成后触发栅栏）
+    vkResetFences(m_Device, 1, &m_Fences[m_FrameIndex]);
+    vkQueueSubmit(m_Queue, 1, &submitInfo, m_Fences[m_FrameIndex]);
+
+    // 非阻塞：不等待 GPU 完成，下一帧 Begin() 中等待该槽位的历史栅栏
+    // CPU 可提前 1-2 帧开始录制
+    m_FrameIndex = (m_FrameIndex + 1) % kMaxFramesInFlight;
 }
 
 // ============================================================

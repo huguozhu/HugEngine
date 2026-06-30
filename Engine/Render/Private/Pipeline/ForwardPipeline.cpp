@@ -99,21 +99,23 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     };
     m_DescLayout = device->CreateDescriptorSetLayout(combinedLayoutDesc);
 
-    // --- 创建 Storage Buffers ---
-    rhi::BufferDesc objBufDesc;
-    objBufDesc.size  = sizeof(GPUObjectData) * MAX_OBJECTS;
-    objBufDesc.usage = rhi::BufferUsage::Storage;
-    m_ObjectBuffer = device->CreateBuffer(objBufDesc);
+    // --- 创建三缓冲 Storage Buffers（Phase 1 多线程渲染）---
+    for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        rhi::BufferDesc objBufDesc;
+        objBufDesc.size  = sizeof(GPUObjectData) * MAX_OBJECTS;
+        objBufDesc.usage = rhi::BufferUsage::Storage;
+        m_ObjectBuffers[i] = device->CreateBuffer(objBufDesc);
 
-    rhi::BufferDesc lightBufDesc;
-    lightBufDesc.size  = sizeof(GPULight) * MAX_LIGHTS;
-    lightBufDesc.usage = rhi::BufferUsage::Storage;
-    m_LightBuffer = device->CreateBuffer(lightBufDesc);
+        rhi::BufferDesc lightBufDesc;
+        lightBufDesc.size  = sizeof(GPULight) * MAX_LIGHTS;
+        lightBufDesc.usage = rhi::BufferUsage::Storage;
+        m_LightBuffers[i] = device->CreateBuffer(lightBufDesc);
 
-    rhi::BufferDesc shadowBufDesc;
-    shadowBufDesc.size  = sizeof(GPUShadowData) * MAX_SHADOWS;
-    shadowBufDesc.usage = rhi::BufferUsage::Storage;
-    m_ShadowBuffer = device->CreateBuffer(shadowBufDesc);
+        rhi::BufferDesc shadowBufDesc;
+        shadowBufDesc.size  = sizeof(GPUShadowData) * MAX_SHADOWS;
+        shadowBufDesc.usage = rhi::BufferUsage::Storage;
+        m_ShadowBuffers[i] = device->CreateBuffer(shadowBufDesc);
+    }
 
     // --- 创建阴影贴图纹理（深度纹理，将被着色器采样）---
     rhi::TextureDesc shadowTexDesc;
@@ -203,34 +205,39 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         m_DefaultBaseColorSampler = device->CreateSampler(defaultSampDesc);
     }
 
-    // --- 分配描述符集并绑定所有资源 ---
-    // binding 4: 阴影贴图（深度纹理 + PCF 比较采样器）
-    m_DescSet = device->AllocateDescriptorSet(m_DescLayout);
-    device->UpdateDescriptorSet(m_DescSet, 1, rhi::DescriptorType::StorageBuffer,
-                                m_LightBuffer.get());
-    device->UpdateDescriptorSet(m_DescSet, 2, rhi::DescriptorType::StorageBuffer,
-                                m_ObjectBuffer.get());
-    device->UpdateDescriptorSet(m_DescSet, 3, rhi::DescriptorType::StorageBuffer,
-                                m_ShadowBuffer.get());
-    device->UpdateDescriptorSet(m_DescSet, 4,
-                                rhi::DescriptorType::CombinedImageSampler,
-                                m_ShadowMap.get(), m_ShadowSampler.get());
-    device->UpdateDescriptorSet(m_DescSet, 5,
-                                rhi::DescriptorType::CombinedImageSampler,
-                                m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
-    // binding 6-8: 复用默认纹理（运行时通过 SetXxxTexture 替换）
-    device->UpdateDescriptorSet(m_DescSet, 6,
-                                rhi::DescriptorType::CombinedImageSampler,
-                                m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
-    device->UpdateDescriptorSet(m_DescSet, 7,
-                                rhi::DescriptorType::CombinedImageSampler,
-                                m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
-    device->UpdateDescriptorSet(m_DescSet, 8,
-                                rhi::DescriptorType::CombinedImageSampler,
-                                m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
-    device->UpdateDescriptorSet(m_DescSet, 9,
-                                rhi::DescriptorType::CombinedImageSampler,
-                                m_PointShadowMap.get(), m_PointShadowSampler.get());
+    // --- 分配三缓冲共享描述符集（Phase 1：每帧槽位独立绑定）---
+    // 每帧槽位对应一组 Buffer，避免 GPU 正在读取时 CPU 覆盖
+    for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        rhi::DescriptorSetHandle set = device->AllocateDescriptorSet(m_DescLayout);
+        device->UpdateDescriptorSet(set, 1, rhi::DescriptorType::StorageBuffer,
+                                    m_LightBuffers[i].get());
+        device->UpdateDescriptorSet(set, 2, rhi::DescriptorType::StorageBuffer,
+                                    m_ObjectBuffers[i].get());
+        device->UpdateDescriptorSet(set, 3, rhi::DescriptorType::StorageBuffer,
+                                    m_ShadowBuffers[i].get());
+        // binding 4-9: 静态资源（纹理/采样器），三帧共用
+        device->UpdateDescriptorSet(set, 4,
+                                    rhi::DescriptorType::CombinedImageSampler,
+                                    m_ShadowMap.get(), m_ShadowSampler.get());
+        device->UpdateDescriptorSet(set, 5,
+                                    rhi::DescriptorType::CombinedImageSampler,
+                                    m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
+        device->UpdateDescriptorSet(set, 6,
+                                    rhi::DescriptorType::CombinedImageSampler,
+                                    m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
+        device->UpdateDescriptorSet(set, 7,
+                                    rhi::DescriptorType::CombinedImageSampler,
+                                    m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
+        device->UpdateDescriptorSet(set, 8,
+                                    rhi::DescriptorType::CombinedImageSampler,
+                                    m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
+        device->UpdateDescriptorSet(set, 9,
+                                    rhi::DescriptorType::CombinedImageSampler,
+                                    m_PointShadowMap.get(), m_PointShadowSampler.get());
+        m_DescSets[i] = set;
+    }
+    // 初始化时使用第一个槽位
+    m_CurrentFrameSlot = 0;
 
     // --- 主管线 PSO ---
     rhi::PushConstantRange pcRange;
@@ -322,9 +329,12 @@ void ForwardPipeline::Shutdown() {
     if (m_Device) {
         m_Device->DestroyDescriptorSetLayout(m_DescLayout);
     }
-    m_LightBuffer.reset();
-    m_ObjectBuffer.reset();
-    m_ShadowBuffer.reset();
+    for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        m_LightBuffers[i].reset();
+        m_ObjectBuffers[i].reset();
+        m_ShadowBuffers[i].reset();
+    }
+    m_AllPerMeshDescSets.clear();
     m_ShadowMap.reset();
     m_ShadowSampler.reset();
     m_PBR_PSO.reset();
@@ -348,10 +358,10 @@ rhi::DescriptorSetHandle ForwardPipeline::CreateTextureDescriptorSet(
     auto set = m_Device->AllocateDescriptorSet(m_DescLayout);
     if (set == rhi::kInvalidSet) return set;
 
-    // 复制共享绑定 1-4（灯光/对象/阴影数据/阴影贴图）
-    m_Device->UpdateDescriptorSet(set, 1, rhi::DescriptorType::StorageBuffer, m_LightBuffer.get());
-    m_Device->UpdateDescriptorSet(set, 2, rhi::DescriptorType::StorageBuffer, m_ObjectBuffer.get());
-    m_Device->UpdateDescriptorSet(set, 3, rhi::DescriptorType::StorageBuffer, m_ShadowBuffer.get());
+    // 复制共享绑定 1-3（使用第一个槽位的缓冲区，每帧 UpdatePerFrameBindings 会切换）
+    m_Device->UpdateDescriptorSet(set, 1, rhi::DescriptorType::StorageBuffer, m_LightBuffers[0].get());
+    m_Device->UpdateDescriptorSet(set, 2, rhi::DescriptorType::StorageBuffer, m_ObjectBuffers[0].get());
+    m_Device->UpdateDescriptorSet(set, 3, rhi::DescriptorType::StorageBuffer, m_ShadowBuffers[0].get());
     m_Device->UpdateDescriptorSet(set, 4, rhi::DescriptorType::CombinedImageSampler,
         m_ShadowMap.get(), m_ShadowSampler.get());
 
@@ -370,10 +380,26 @@ rhi::DescriptorSetHandle ForwardPipeline::CreateTextureDescriptorSet(
     m_Device->UpdateDescriptorSet(set, 9, rhi::DescriptorType::CombinedImageSampler,
         m_PointShadowMap.get(), m_PointShadowSampler.get());
 
+    // 跟踪所有 per-mesh 描述符集，用于每帧更新动态绑定（Phase 1 三缓冲）
+    m_AllPerMeshDescSets.push_back(set);
+
     return set;
 }
 
 void ForwardPipeline::BeginFrame(rhi::IRHICommandList* cmd, u32 width, u32 height) {
+    // 切换到下一个三缓冲槽位
+    m_CurrentFrameSlot = (m_CurrentFrameSlot + 1) % MAX_FRAMES_IN_FLIGHT;
+
+    // 更新所有 per-mesh 描述符集的动态绑定 1-3（指向当前帧的缓冲区）
+    rhi::IRHIBuffer* curLightBuf  = m_LightBuffers[m_CurrentFrameSlot].get();
+    rhi::IRHIBuffer* curObjectBuf = m_ObjectBuffers[m_CurrentFrameSlot].get();
+    rhi::IRHIBuffer* curShadowBuf = m_ShadowBuffers[m_CurrentFrameSlot].get();
+    for (auto& set : m_AllPerMeshDescSets) {
+        m_Device->UpdateDescriptorSet(set, 1, rhi::DescriptorType::StorageBuffer, curLightBuf);
+        m_Device->UpdateDescriptorSet(set, 2, rhi::DescriptorType::StorageBuffer, curObjectBuf);
+        m_Device->UpdateDescriptorSet(set, 3, rhi::DescriptorType::StorageBuffer, curShadowBuf);
+    }
+
     cmd->SetViewport({
         0, static_cast<float>(height),
         static_cast<float>(width), -static_cast<float>(height),
@@ -453,9 +479,9 @@ void ForwardPipeline::CollectLights(
         }
         }
 
-        GPULight* lights = static_cast<GPULight*>(m_LightBuffer->Map());
+        GPULight* lights = static_cast<GPULight*>(m_LightBuffers[m_CurrentFrameSlot]->Map());
         if (lights) lights[i] = gl;
-        m_LightBuffer->Unmap();
+        m_LightBuffers[m_CurrentFrameSlot]->Unmap();
         pc.lightCount++;
     };
 
@@ -470,18 +496,18 @@ void ForwardPipeline::CollectLights(
         gl.colorIntensity = float4(1.0f, 0.95f, 0.85f, 5.0f);
         gl.directionType  = float4(0.5f, -1.0f, 1.0f, 0.0f);
         gl.shadowIndex    = -1;
-        GPULight* lights = static_cast<GPULight*>(m_LightBuffer->Map());
+        GPULight* lights = static_cast<GPULight*>(m_LightBuffers[m_CurrentFrameSlot]->Map());
         if (lights) lights[0] = gl;
-        m_LightBuffer->Unmap();
+        m_LightBuffers[m_CurrentFrameSlot]->Unmap();
     }
 
     // 上传阴影 GPU 数据到 SSBO
     if (!shadowData.empty()) {
-        GPUShadowData* sd = static_cast<GPUShadowData*>(m_ShadowBuffer->Map());
+        GPUShadowData* sd = static_cast<GPUShadowData*>(m_ShadowBuffers[m_CurrentFrameSlot]->Map());
         for (usize j = 0; j < shadowData.size(); ++j) {
             sd[j] = shadowData[j];
         }
-        m_ShadowBuffer->Unmap();
+        m_ShadowBuffers[m_CurrentFrameSlot]->Unmap();
     }
 }
 
@@ -533,10 +559,10 @@ void ForwardPipeline::CollectShadowLights(
 
     // 上传阴影 GPU 数据到 SSBO（供阴影 VS 和主 PS 读取）
     if (!shadowGPUData.empty()) {
-        GPUShadowData* sd = static_cast<GPUShadowData*>(m_ShadowBuffer->Map());
+        GPUShadowData* sd = static_cast<GPUShadowData*>(m_ShadowBuffers[m_CurrentFrameSlot]->Map());
         for (usize j = 0; j < shadowGPUData.size(); ++j)
             sd[j] = shadowGPUData[j];
-        m_ShadowBuffer->Unmap();
+        m_ShadowBuffers[m_CurrentFrameSlot]->Unmap();
     }
 }
 
@@ -723,7 +749,7 @@ void ForwardPipeline::RenderPointShadowPass(
             cmd->SetScissor({ 0, 0, m_PointShadowMapSize, m_PointShadowMapSize });
 
             // 绑定描述符集
-            cmd->BindDescriptorSet(0, m_DescSet);
+            cmd->BindDescriptorSet(0, m_DescSets[m_CurrentFrameSlot]);
 
             // 绘制所有几何体
             ShadowPushConstant shadowPC{};
@@ -734,9 +760,9 @@ void ForwardPipeline::RenderPointShadowPass(
                 shadowPC.objectIndex = 0;
 
                 float4x4 worldMatrix = sceneGraph.GetWorldMatrix(e);
-                GPUObjectData* objData = static_cast<GPUObjectData*>(m_ObjectBuffer->Map());
+                GPUObjectData* objData = static_cast<GPUObjectData*>(m_ObjectBuffers[m_CurrentFrameSlot]->Map());
                 objData[0].worldMatrix = worldMatrix;
-                m_ObjectBuffer->Unmap();
+                m_ObjectBuffers[m_CurrentFrameSlot]->Unmap();
 
                 cmd->SetPushConstants(0, sizeof(ShadowPushConstant), &shadowPC);
                 cmd->SetVertexBuffer(mesh.GetVertexBuffer().get(), 0);
@@ -785,7 +811,7 @@ void ForwardPipeline::RenderShadowPass(
     cmd->SetPipeline(m_ShadowPSO.get());
 
     // 绑定描述符集（阴影着色器使用与主管线相同的对象数据）
-    cmd->BindDescriptorSet(0, m_DescSet);
+    cmd->BindDescriptorSet(0, m_DescSets[m_CurrentFrameSlot]);
 
     // 阴影通道视口 + 裁剪
     cmd->SetViewport({ 0, static_cast<float>(m_ShadowMapSize),
@@ -808,9 +834,9 @@ void ForwardPipeline::RenderShadowPass(
 
         // 临时上传此对象到 Object Buffer（阴影通道需读取世界矩阵）
         // 注意：阴影着色器从 u_Objects[objectIndex].worldMatrix 读取
-        GPUObjectData* objData = static_cast<GPUObjectData*>(m_ObjectBuffer->Map());
+        GPUObjectData* objData = static_cast<GPUObjectData*>(m_ObjectBuffers[m_CurrentFrameSlot]->Map());
         objData[0].worldMatrix = worldMatrix;
-        m_ObjectBuffer->Unmap();
+        m_ObjectBuffers[m_CurrentFrameSlot]->Unmap();
 
         cmd->SetPushConstants(0, sizeof(ShadowPushConstant), &shadowPC);
         cmd->SetVertexBuffer(mesh.GetVertexBuffer().get(), 0);
@@ -859,7 +885,7 @@ void ForwardPipeline::RenderScene(
     // 需要先结束主管道的 renderPass（由调用方保证已在 BeginRenderPass 内）
 
     // 上传 per-object 数据到 Storage Buffer
-    GPUObjectData* objData = static_cast<GPUObjectData*>(m_ObjectBuffer->Map());
+    GPUObjectData* objData = static_cast<GPUObjectData*>(m_ObjectBuffers[m_CurrentFrameSlot]->Map());
     u32 objectIndex = 0;
 
     auto uploadObject = [&](he::Entity e, he::MeshComponent& mesh, float4x4& wm, PBRMaterial& mat) {
@@ -892,7 +918,7 @@ void ForwardPipeline::RenderScene(
         if (mesh.GetDescriptorSet() != rhi::kInvalidSet)
             cmd->BindDescriptorSet(0, mesh.GetDescriptorSet());
         else
-            cmd->BindDescriptorSet(0, m_DescSet);
+            cmd->BindDescriptorSet(0, m_DescSets[m_CurrentFrameSlot]);
 
         DrawMesh(cmd, &mesh, worldMatrix, viewProj, mat, camera, framePC);
         drawCount++;
@@ -906,7 +932,7 @@ void ForwardPipeline::RenderScene(
         renderMesh(e, static_cast<he::MeshComponent&>(s));
     });
 
-    m_ObjectBuffer->Unmap();
+    m_ObjectBuffers[m_CurrentFrameSlot]->Unmap();
 
     static bool s_FirstFrame = true;
     if (s_FirstFrame) {
