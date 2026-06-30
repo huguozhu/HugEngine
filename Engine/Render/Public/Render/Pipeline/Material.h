@@ -32,12 +32,19 @@ static constexpr u32 MAX_LIGHTS          = 8;
 static constexpr u32 MAX_SHADOWS         = 4;   // 最多 4 个投射阴影的光源
 static constexpr u32 MAX_FRAMES_IN_FLIGHT = 3;  // 三缓冲帧环
 
+// CSM 级联数
+static constexpr u32 CASCADE_COUNT = 3;
+
 // --- GPU 阴影数据（Storage Buffer，每个阴影投射光源一条）---
+// CSM: 3 级联 lightViewProj + 4 分割深度
 struct alignas(16) GPUShadowData {
-    float4x4 lightViewProj;   // 世界空间→光照裁剪空间
-    float4   shadowParams;    // x=bias, y=normalBias, z=strength, w=未使用
+    float4x4 lightViewProj[CASCADE_COUNT];  // [0..192] 方向光 CSM 级联矩阵
+    float4   shadowParams;    // [192..208] x=bias, y=normalBias, z=strength, w=类型
+    float4   splitDistances;  // [208..224] CSM 分割点
+    float4   cameraForward;   // [224..240] 相机前向(级联选择)
+    float4   pointLightData;  // [240..256] xyz=点光位置, w=范围
 };
-static_assert(sizeof(GPUShadowData) == 80, "GPUShadowData must be 80 bytes");
+static_assert(sizeof(GPUShadowData) == 256, "GPUShadowData must be 256 bytes");
 
 struct alignas(16) GPULight {
     float4 colorIntensity;    // xyz=颜色, w=强度
@@ -78,12 +85,14 @@ struct alignas(16) PushConstantData {
     float4x4 viewProjMatrix;        // [0..64]
     float4   cameraPosition;        // [64..80]
     u32      lightCount;            // [80]
-    u32      objectIndex;           // [84]   GPU 对象索引
+    u32      objectIndex;           // [84]
     u32      _pad[2];               // [88..96]
 };
 
 static_assert(sizeof(PushConstantData) == 96,
     "PushConstantData must be 96 bytes");
+
+// CSM 级联选择用的 cameraForward 移至 GPUShadowData.shadowParams.w
 
 // ============================================================
 // glTF 2.0 PBR 材质（CPU 端资产数据）

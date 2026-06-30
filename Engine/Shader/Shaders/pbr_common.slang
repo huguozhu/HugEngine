@@ -44,38 +44,43 @@ float G_Smith(float NdotV, float NdotL, float roughness) {
 // 1.0 = 完全照亮，0.0 = 完全遮蔽。
 // ============================================================
 float SampleShadowPCF(float3 worldPos, float3 worldNormal, float3 lightDir,
-                       GPUShadowData sm, Texture2D<float> shadowMap,
+                       GPUShadowData sm, float3 cameraPos,
+                       Texture2D<float> shadowMap0,
+                       Texture2D<float> shadowMap1,
+                       Texture2D<float> shadowMap2,
                        SamplerState shadowSampler)
 {
-    // 应用法线偏移减少自阴影
+    // CSM 级联选择
+    float viewZ = dot(worldPos - cameraPos, sm.cameraForward.xyz);
+    uint cascade = 0u;
+    if (viewZ > sm.splitDistances[0]) cascade = 1u;
+    if (viewZ > sm.splitDistances[1]) cascade = 2u;
+
+    float4x4 lightViewProj = sm.lightViewProj[cascade];
     float3 biasedPos = worldPos + worldNormal * sm.shadowParams.y;
 
-    // 变换到光照裁剪空间
-    float4 shadowClip = mul(sm.lightViewProj, float4(biasedPos, 1.0));
-
-    // 透视除法 → NDC
+    float4 shadowClip = mul(lightViewProj, float4(biasedPos, 1.0));
     float3 ndc = shadowClip.xyz / shadowClip.w;
-
-    // NDC [-1,1] → UV [0,1]
     float2 uv = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-    float  depth = ndc.z;
+    float  depth = ndc.z - sm.shadowParams.x;
 
-    // 应用深度偏移
-    depth -= sm.shadowParams.x;
-
-    // 超出纹理范围 → 无阴影
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
         return 1.0;
 
-    // 3×3 PCF（手动深度比较，兼容普通和比较采样器）
     float2 texelSize = 1.0 / 2048.0;
     float shadow = 0.0;
-    for (int x = -1; x <= 1; x++) {
-        for (int y = -1; y <= 1; y++) {
-            float2 sampleUV = uv + float2(float(x), float(y)) * texelSize;
-            float shadowDepth = shadowMap.Sample(shadowSampler, sampleUV);
-            shadow += (depth <= shadowDepth) ? 1.0 : 0.0;
-        }
+    if (cascade == 0u) {
+        for (int x = -1; x <= 1; x++)
+            for (int y = -1; y <= 1; y++)
+                shadow += (depth <= shadowMap0.Sample(shadowSampler, uv + float2(x, y) * texelSize)) ? 1.0 : 0.0;
+    } else if (cascade == 1u) {
+        for (int x = -1; x <= 1; x++)
+            for (int y = -1; y <= 1; y++)
+                shadow += (depth <= shadowMap1.Sample(shadowSampler, uv + float2(x, y) * texelSize)) ? 1.0 : 0.0;
+    } else {
+        for (int x = -1; x <= 1; x++)
+            for (int y = -1; y <= 1; y++)
+                shadow += (depth <= shadowMap2.Sample(shadowSampler, uv + float2(x, y) * texelSize)) ? 1.0 : 0.0;
     }
     return shadow / 9.0;
 }

@@ -31,8 +31,8 @@ VSOutput vertexMain(uint vid : SV_VertexID) {
     // 深度测试 EQUAL 配合深度缓冲清空值 1.0，仅在无几何体像素绘制
     output.position = float4(pos.x, pos.y, 1.0, 1.0);
 
-    // NDC → 世界空间方向（逆 ViewProj 反算）
-    float4 worldPos = mul(invViewProjMatrix, float4(pos.x, pos.y, 1.0, 1.0));
+    // NDC → 世界空间方向（逆 ViewProj 反算, Y 取反修正 Vulkan cubemap 朝向）
+    float4 worldPos = mul(invViewProjMatrix, float4(pos.x, -pos.y, 1.0, 1.0));
     output.worldDir = worldPos.xyz / worldPos.w;
     return output;
 }

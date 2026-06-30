@@ -270,7 +270,7 @@ int main() {
                 lastMouseY = cy;
 
                 yaw   += dx * lookSpeed;   // 向右拖拽 → 视角右转
-                pitch -= dy * lookSpeed;   // 向上拖拽 → 视角上抬
+                pitch += dy * lookSpeed;   // 上推鼠标 = 抬头
                 // 限制俯仰角，避免万向锁
                 pitch = glm::clamp(pitch, -1.5f, 1.5f);
             }

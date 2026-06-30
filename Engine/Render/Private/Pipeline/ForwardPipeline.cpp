@@ -21,28 +21,48 @@ ForwardPipeline::~ForwardPipeline() {
     Shutdown();
 }
 
-// 计算方向光的正交投影矩阵（固定世界中心，不跟相机移动）
-static float4x4 ComputeDirectionalLightViewProj(
-    const float3& lightDir, const CameraData& camera)
+// 计算方向光 CSM 级联的正交投影矩阵
+// subNear/subFar: 该级联的视锥体深度范围
+static float4x4 ComputeCascadeViewProj(
+    const float3& lightDir, const CameraData& camera, float subNear, float subFar)
 {
+    // 相机基底向量
+    float3 f = glm::normalize(camera.forward);
+    float3 r = glm::normalize(glm::cross(f, camera.up));
+    float3 u = glm::cross(r, f);
+    float tanHalfFov = glm::tan(glm::radians(camera.fov) * 0.5f);
+
+    // 子视锥体远平面 4 角点
+    float farH = tanHalfFov * subFar;
+    float farW = farH * camera.aspectRatio;
+    float3 farC = camera.position + f * subFar;
+
+    float3 subCorners[4] = {
+        farC - r*farW - u*farH, farC + r*farW - u*farH,
+        farC - r*farW + u*farH, farC + r*farW + u*farH,
+    };
+
     // 固定场景中心
     float3 sceneCenter(0.0f, 400.0f, 0.0f);
-    float sceneSize = 4000.0f;
-
-    // 灯光视图矩阵
     float3 lightUp = (abs(lightDir.y) < 0.999f) ? float3(0, 1, 0) : float3(1, 0, 0);
     float4x4 lightView = glm::lookAtRH(
-        sceneCenter - lightDir * sceneSize * 0.5f,
-        sceneCenter,
-        lightUp);
+        sceneCenter - lightDir * 4000.0f, sceneCenter, lightUp);
 
-    // 正交投影
-    float halfSize  = sceneSize * 0.5f;
-    float nearPlane = 0.1f;
-    float farPlane  = sceneSize * 2.0f;
+    // 计算子视锥体在灯光空间中的 XY 包围盒
+    float minX = FLT_MAX, maxX = -FLT_MAX;
+    float minY = FLT_MAX, maxY = -FLT_MAX;
+    for (auto& c : subCorners) {
+        float4 ls = lightView * float4(c, 1.0f);
+        minX = glm::min(minX, ls.x); maxX = glm::max(maxX, ls.x);
+        minY = glm::min(minY, ls.y); maxY = glm::max(maxY, ls.y);
+    }
+
+    // 近级联收紧包围盒以提高精度
+    float halfSize = glm::max(glm::max(-minX, maxX), glm::max(-minY, maxY));
+    halfSize = glm::max(halfSize, 200.0f);  // 最小覆盖
+
     float4x4 lightProj = glm::orthoRH_ZO(-halfSize, halfSize, -halfSize, halfSize,
-                                         nearPlane, farPlane);
-
+                                         0.1f, 8000.0f);
     return lightProj * lightView;
 }
 
@@ -87,15 +107,17 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     // --- 主管线 DescriptorSetLayout ---
     rhi::DescriptorSetLayoutDesc combinedLayoutDesc;
     combinedLayoutDesc.bindings = {
-        { 1, rhi::DescriptorType::StorageBuffer,        1, 16 },  // Fragment — 灯光
-        { 2, rhi::DescriptorType::StorageBuffer,        1, 17 },  // Vertex|Fragment — 对象
-        { 3, rhi::DescriptorType::StorageBuffer,        1, 16 },  // Fragment — 阴影数据
-        { 4, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Fragment — 方向光阴影贴图
-        { 5, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Fragment — 基础色
-        { 6, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Fragment — 法线
-        { 7, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Fragment — 金属度/粗糙度
-        { 8, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Fragment — AO
-        { 9, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Fragment — 点光源阴影 Cubemap
+        { 1, rhi::DescriptorType::StorageBuffer,        1, 16 },
+        { 2, rhi::DescriptorType::StorageBuffer,        1, 17 },
+        { 3, rhi::DescriptorType::StorageBuffer,        1, 16 },
+        { 4, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // CSM cascade 0
+        { 5, rhi::DescriptorType::CombinedImageSampler,  1, 16 },
+        { 6, rhi::DescriptorType::CombinedImageSampler,  1, 16 },
+        { 7, rhi::DescriptorType::CombinedImageSampler,  1, 16 },
+        { 8, rhi::DescriptorType::CombinedImageSampler,  1, 16 },
+        { 9, rhi::DescriptorType::CombinedImageSampler,  1, 16 },
+        { 10, rhi::DescriptorType::CombinedImageSampler, 1, 16 },  // CSM cascade 1
+        { 11, rhi::DescriptorType::CombinedImageSampler, 1, 16 },  // CSM cascade 2
     };
     m_DescLayout = device->CreateDescriptorSetLayout(combinedLayoutDesc);
 
@@ -117,16 +139,18 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         m_ShadowBuffers[i] = device->CreateBuffer(shadowBufDesc);
     }
 
-    // --- 创建阴影贴图纹理（深度纹理，将被着色器采样）---
-    rhi::TextureDesc shadowTexDesc;
-    shadowTexDesc.format      = rhi::Format::D32_FLOAT;
-    shadowTexDesc.width       = m_ShadowMapSize;
-    shadowTexDesc.height      = m_ShadowMapSize;
-    shadowTexDesc.depth       = 1;
-    shadowTexDesc.mipLevels   = 1;
-    shadowTexDesc.arrayLayers = 1;
-    shadowTexDesc.usage       = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
-    m_ShadowMap = device->CreateTexture(shadowTexDesc);
+    // --- CSM 阴影贴图（3 级联 × 2048×2048 D32_FLOAT）---
+    for (u32 c = 0; c < CASCADE_COUNT; ++c) {
+        rhi::TextureDesc shadowTexDesc;
+        shadowTexDesc.format      = rhi::Format::D32_FLOAT;
+        shadowTexDesc.width       = m_ShadowMapSize;
+        shadowTexDesc.height      = m_ShadowMapSize;
+        shadowTexDesc.depth       = 1;
+        shadowTexDesc.mipLevels   = 1;
+        shadowTexDesc.arrayLayers = 1;
+        shadowTexDesc.usage       = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
+        m_ShadowMaps[c] = device->CreateTexture(shadowTexDesc);
+    }
 
     // --- 创建阴影贴图采样器（非比较模式 — PCF 手动做深度比较）---
     {
@@ -216,9 +240,12 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         device->UpdateDescriptorSet(set, 3, rhi::DescriptorType::StorageBuffer,
                                     m_ShadowBuffers[i].get());
         // binding 4-9: 静态资源（纹理/采样器），三帧共用
-        device->UpdateDescriptorSet(set, 4,
-                                    rhi::DescriptorType::CombinedImageSampler,
-                                    m_ShadowMap.get(), m_ShadowSampler.get());
+        // CSM: 绑定 3 级联阴影贴图
+        for (u32 c = 0; c < CASCADE_COUNT; ++c) {
+            u32 binding = (c == 0) ? 4u : (c == 1 ? 10u : 11u);
+            device->UpdateDescriptorSet(set, binding, rhi::DescriptorType::CombinedImageSampler,
+                                        m_ShadowMaps[c].get(), m_ShadowSampler.get());
+        }
         device->UpdateDescriptorSet(set, 5,
                                     rhi::DescriptorType::CombinedImageSampler,
                                     m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
@@ -386,7 +413,7 @@ void ForwardPipeline::Shutdown() {
         m_ShadowBuffers[i].reset();
     }
     m_AllPerMeshDescSets.clear();
-    m_ShadowMap.reset();
+    for (u32 c = 0; c < CASCADE_COUNT; ++c) m_ShadowMaps[c].reset();
     m_ShadowSampler.reset();
     m_PBR_PSO.reset();
     m_ShadowPSO.reset();
@@ -416,8 +443,12 @@ rhi::DescriptorSetHandle ForwardPipeline::CreateTextureDescriptorSet(
     m_Device->UpdateDescriptorSet(set, 1, rhi::DescriptorType::StorageBuffer, m_LightBuffers[0].get());
     m_Device->UpdateDescriptorSet(set, 2, rhi::DescriptorType::StorageBuffer, m_ObjectBuffers[0].get());
     m_Device->UpdateDescriptorSet(set, 3, rhi::DescriptorType::StorageBuffer, m_ShadowBuffers[0].get());
-    m_Device->UpdateDescriptorSet(set, 4, rhi::DescriptorType::CombinedImageSampler,
-        m_ShadowMap.get(), m_ShadowSampler.get());
+    // CSM: per-mesh set 绑定 3 级联
+    for (u32 c = 0; c < CASCADE_COUNT; ++c) {
+        u32 binding = (c == 0) ? 4u : (c == 1 ? 10u : 11u);
+        m_Device->UpdateDescriptorSet(set, binding, rhi::DescriptorType::CombinedImageSampler,
+            m_ShadowMaps[c].get(), m_ShadowSampler.get());
+    }
 
     // 纹理绑定 5-8（使用默认纹理作为回退）
     auto use = [&](u32 b, rhi::IRHITexture* t, rhi::IRHISampler* s) {
@@ -476,8 +507,8 @@ void ForwardPipeline::CollectLights(
 
     auto collectLight = [&](he::Entity e, he::LightComponent& lc) {
         if (!lc.enabled) return;  // 禁用光源：不参与光照
-        if (pc.lightCount >= MAX_LIGHTS) return;
         u32 i = pc.lightCount;
+        if (i >= MAX_LIGHTS) return;
 
         GPULight gl{};
         gl.colorIntensity  = float4(lc.color, lc.intensity);
@@ -498,8 +529,19 @@ void ForwardPipeline::CollectLights(
                 float3 lightDir = glm::normalize(dl->direction);
 
                 GPUShadowData sd{};
-                sd.lightViewProj = ComputeDirectionalLightViewProj(
-                    lightDir, camera);
+                // CSM 混合分割（λ=0.5）
+                float lambda = 0.5f;
+                for (u32 c = 0; c < CASCADE_COUNT; ++c) {
+                    float p = (c + 1) / (float)CASCADE_COUNT;
+                    float logSplit = camera.nearPlane * pow(camera.farPlane / camera.nearPlane, p);
+                    float uniSplit = camera.nearPlane + (camera.farPlane - camera.nearPlane) * p;
+                    sd.splitDistances[c] = lambda * logSplit + (1.0f - lambda) * uniSplit;
+                    sd.lightViewProj[c] = ComputeCascadeViewProj(lightDir, camera,
+                        (c == 0 ? camera.nearPlane : sd.splitDistances[c-1]),
+                        sd.splitDistances[c]);
+                }
+                sd.splitDistances[3] = camera.farPlane;
+                sd.cameraForward = float4(glm::normalize(camera.forward), 0.0f);
                 sd.shadowParams = float4(lc.shadowBias, lc.shadowNormalBias,
                                          lc.shadowStrength, 0.0f);
                 shadowData.push_back(sd);
@@ -536,7 +578,7 @@ void ForwardPipeline::CollectLights(
         GPULight* lights = static_cast<GPULight*>(m_LightBuffers[m_CurrentFrameSlot]->Map());
         if (lights) lights[i] = gl;
         m_LightBuffers[m_CurrentFrameSlot]->Unmap();
-        pc.lightCount++;
+        pc.lightCount++;  // lightCount++
     };
 
     world.ForEach<he::DirectionalLight>(collectLight);
@@ -583,7 +625,18 @@ void ForwardPipeline::CollectShadowLights(
         float3 lightDir = glm::normalize(lc.direction);
 
         GPUShadowData sd{};
-        sd.lightViewProj = ComputeDirectionalLightViewProj(lightDir, camera);
+        float lambda = 0.5f;
+        for (u32 c = 0; c < CASCADE_COUNT; ++c) {
+            float p = (c + 1) / (float)CASCADE_COUNT;
+            float logSplit = camera.nearPlane * pow(camera.farPlane / camera.nearPlane, p);
+            float uniSplit = camera.nearPlane + (camera.farPlane - camera.nearPlane) * p;
+            sd.splitDistances[c] = lambda * logSplit + (1.0f - lambda) * uniSplit;
+            sd.lightViewProj[c] = ComputeCascadeViewProj(lightDir, camera,
+                (c == 0 ? camera.nearPlane : sd.splitDistances[c-1]),
+                sd.splitDistances[c]);
+        }
+        sd.splitDistances[3] = camera.farPlane;
+        sd.cameraForward = float4(glm::normalize(camera.forward), 0.0f);
         sd.shadowParams  = float4(lc.shadowBias, lc.shadowNormalBias, lc.shadowStrength, 0.0f);
         shadowGPUData.push_back(sd);
         shadowLights.push_back(&lc);
@@ -598,9 +651,8 @@ void ForwardPipeline::CollectShadowLights(
         float3 lightPos = sg.GetWorldPosition(e);
 
         GPUShadowData sd{};
-        // 复用 lightViewProj 存储点光数据：col0.xyz=位置, col0.w=范围
-        sd.lightViewProj[0] = float4(lightPos, lc.range);
-        sd.shadowParams  = float4(lc.shadowBias, lc.shadowNormalBias, lc.shadowStrength, 1.0f);  // w=1 表示点光
+        sd.pointLightData = float4(lightPos, lc.range);
+        sd.shadowParams  = float4(lc.shadowBias, lc.shadowNormalBias, lc.shadowStrength, 1.0f);
         shadowGPUData.push_back(sd);
         shadowLights.push_back(&lc);
     });
@@ -615,38 +667,37 @@ void ForwardPipeline::CollectShadowLights(
 }
 
 // 开始离屏阴影渲染通道（在主管线 BeginRenderPass 之前调用）
-void ForwardPipeline::BeginShadowPass(rhi::IRHICommandList* cmd) {
-    // 设置 Shadow PSO（depth-only render pass）
+void ForwardPipeline::BeginShadowPass(rhi::IRHICommandList* cmd, u32 cascadeIdx) {
     cmd->SetPipeline(m_ShadowPSO.get());
 
-    // 获取阴影贴图的原生 ImageView
-    void* depthView = m_ShadowMap->GetNativeHandle();
+    void* depthView = m_ShadowMaps[cascadeIdx]->GetNativeHandle();
     if (!depthView) {
-        HE_CORE_ERROR("BeginShadowPass: ShadowMap ImageView 无效");
+        HE_CORE_ERROR("BeginShadowPass[{}]: ImageView 无效", cascadeIdx);
         return;
     }
 
     rhi::ClearValue clearVal{};
-    clearVal.depth = 1.0f;  // 远平面 = 无遮挡
+    clearVal.depth = 1.0f;
 
     cmd->BeginOffscreenPass(nullptr, depthView, m_ShadowMapSize, m_ShadowMapSize, &clearVal);
 }
 
-// 结束离屏阴影渲染通道并执行布局转换
+// CSM: 结束级联阴影通道并执行布局转换
 void ForwardPipeline::EndShadowPass(rhi::IRHICommandList* cmd) {
     cmd->EndOffscreenPass();
-
-    // 布局转换：DEPTH_STENCIL_READ_ONLY_OPTIMAL → SHADER_READ_ONLY_OPTIMAL
-    // 注意：srcState 必须与 RenderPass 的 finalLayout 一致
-    cmd->PipelineBarrier(
-        rhi::PipelineStage::LateFragmentTests,
-        rhi::PipelineStage::FragmentShader,
-        rhi::ResourceState::DepthStencilRead,  // 匹配 RP finalLayout
-        rhi::ResourceState::ShaderResource,
-        m_ShadowMap.get());
-
-    // 恢复 PBR PSO（确保后续 BeginRenderPass 使用正确的 render pass）
     cmd->SetPipeline(m_PBR_PSO.get());
+}
+
+// CSM: 全部级联渲染完毕后统一转换布局
+void ForwardPipeline::EndAllShadowPasses(rhi::IRHICommandList* cmd) {
+    for (u32 c = 0; c < CASCADE_COUNT; ++c) {
+        cmd->PipelineBarrier(
+            rhi::PipelineStage::LateFragmentTests,
+            rhi::PipelineStage::FragmentShader,
+            rhi::ResourceState::DepthStencilRead,
+            rhi::ResourceState::ShaderResource,
+            m_ShadowMaps[c].get());
+    }
 }
 
 // ============================================================
@@ -803,8 +854,8 @@ void ForwardPipeline::RenderPointShadowPass(
     // 对每个投射阴影的点光源
     for (usize li = 0; li < pointShadowData.size() && li < pointLights.size(); ++li) {
         const GPUShadowData& sd = pointShadowData[li];
-        float3 lightPos = float3(sd.lightViewProj[0]);
-        float  range    = sd.lightViewProj[0].w;
+        float3 lightPos = float3(sd.pointLightData);
+        float  range    = sd.pointLightData.w;
 
         // 6 面透视投影（90° FOV，宽高比 1:1）
         float4x4 proj = glm::perspectiveRH_ZO(glm::radians(90.0f), 1.0f, 0.1f, range);
@@ -884,7 +935,8 @@ void ForwardPipeline::RenderShadowPass(
     he::World& world,
     he::SceneGraph& sceneGraph,
     const std::vector<const he::LightComponent*>& /*shadowLights*/,
-    const std::vector<GPUShadowData>& shadowGPUData)
+    const std::vector<GPUShadowData>& shadowGPUData,
+    u32 cascadeIdx)
 {
     if (shadowGPUData.empty()) return;
 
@@ -909,7 +961,7 @@ void ForwardPipeline::RenderShadowPass(
     const GPUShadowData& sm = shadowGPUData[0];
 
     ShadowPushConstant shadowPC{};
-    shadowPC.lightViewProj = sm.lightViewProj;
+    shadowPC.lightViewProj = sm.lightViewProj[cascadeIdx];
 
     // 一次性映射对象缓冲区，逐实体分配独立 objectIndex（避免槽位覆盖冲突）
     GPUObjectData* objData = static_cast<GPUObjectData*>(
@@ -959,6 +1011,7 @@ void ForwardPipeline::RenderScene(
     PushConstantData framePC{};
     framePC.viewProjMatrix = viewProj;
     framePC.cameraPosition = float4(camera.position, 0.0f);
+    // CSM cameraForward 已移至 GPUShadowData
 
     // 收集光源 + 阴影数据
     std::vector<GPUShadowData> shadowGPUData;
@@ -1065,7 +1118,7 @@ void ForwardPipeline::RenderScene(
                 for (u32 i = start; i < end; ++i) {
                     auto& de = visible[i];
                     PushConstantData pc = framePC;
-                    pc.objectIndex = i;
+                    pc.objectIndex = i;  // objectIndex
 
                     if (de.mesh->GetDescriptorSet() != rhi::kInvalidSet)
                         secCmd->BindDescriptorSet(0, de.mesh->GetDescriptorSet());

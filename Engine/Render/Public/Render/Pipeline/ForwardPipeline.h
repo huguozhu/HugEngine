@@ -67,17 +67,18 @@ public:
         std::vector<const he::LightComponent*>& shadowLights,
         std::vector<GPUShadowData>& shadowGPUData,
         const CameraData& camera);
-    // 开始离屏阴影渲染通道（depth-only，渲染到 m_ShadowMap）
-    void BeginShadowPass(rhi::IRHICommandList* cmd);
-    // 渲染场景深度到当前阴影贴图（需在 BeginShadowPass/EndShadowPass 之间调用）
+    // CSM 级联阴影通道（cascadeIdx ∈ [0, CASCADE_COUNT)）
+    void BeginShadowPass(rhi::IRHICommandList* cmd, u32 cascadeIdx);
     void RenderShadowPass(
         rhi::IRHICommandList* cmd,
         he::World& world,
         he::SceneGraph& sg,
         const std::vector<const he::LightComponent*>& shadowLights,
-        const std::vector<GPUShadowData>& shadowGPUData);
-    // 结束离屏阴影渲染通道并执行布局转换 Barrier
+        const std::vector<GPUShadowData>& shadowGPUData,
+        u32 cascadeIdx);
     void EndShadowPass(rhi::IRHICommandList* cmd);
+    // CSM: 全部级联渲染完毕后统一转换布局
+    void EndAllShadowPasses(rhi::IRHICommandList* cmd);
 
     // --- 点光源阴影（Cubemap）---
     void RenderPointShadowPass(
@@ -134,12 +135,12 @@ private:
     // 所有已分配的 per-mesh 描述符集（用于每帧更新动态绑定 1-3）
     std::vector<rhi::DescriptorSetHandle> m_AllPerMeshDescSets;
 
-    // 阴影贴图 + 采样器
-    std::unique_ptr<rhi::IRHITexture>  m_ShadowMap;          // 方向光深度纹理
-    std::unique_ptr<rhi::IRHITexture>  m_ShadowPlaceholderTex; // 占位纹理（布局正确的 dummy）
-    std::unique_ptr<rhi::IRHISampler>  m_ShadowSampler;      // 方向光阴影采样器
+    // CSM 阴影贴图（3 级联，每级 2048×2048 D32_FLOAT）
+    std::unique_ptr<rhi::IRHITexture>  m_ShadowMaps[CASCADE_COUNT];
+    std::unique_ptr<rhi::IRHISampler>  m_ShadowSampler;      // 方向光阴影采样器（共享）
     std::unique_ptr<rhi::IRHISampler>  m_ShadowPlaceholderSampler; // 占位纹理的普通采样器
     u32 m_ShadowMapSize = 2048;
+    std::unique_ptr<rhi::IRHITexture>  m_ShadowPlaceholderTex; // 占位纹理
 
     // 点光源阴影（Cubemap）
     std::unique_ptr<rhi::IRHITexture>  m_PointShadowMap;     // Cubemap 深度纹理

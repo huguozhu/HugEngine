@@ -501,7 +501,7 @@ int main() {
                 lastMouseY = cy;
 
                 yaw   += dx * lookSpeed;
-                pitch -= dy * lookSpeed;
+                pitch += dy * lookSpeed;  // 上推鼠标=抬头
                 pitch  = glm::clamp(pitch, -1.5f, 1.5f);
             }
 
@@ -558,12 +558,15 @@ int main() {
                 }
             }
 
-            // 方向光阴影
+            // 方向光阴影 CSM（3 级联）
             if (!dirShadowData.empty()) {
-                pipeline.BeginShadowPass(cmdList.get());
-                pipeline.RenderShadowPass(cmdList.get(), world, sceneGraph,
-                                         dirLights, dirShadowData);
-                pipeline.EndShadowPass(cmdList.get());
+                for (u32 c = 0; c < render::CASCADE_COUNT; ++c) {
+                    pipeline.BeginShadowPass(cmdList.get(), c);
+                    pipeline.RenderShadowPass(cmdList.get(), world, sceneGraph,
+                                             dirLights, dirShadowData, c);
+                    pipeline.EndShadowPass(cmdList.get());
+                }
+                pipeline.EndAllShadowPasses(cmdList.get());
             }
 
             // 点光源阴影（Cubemap 6 面）

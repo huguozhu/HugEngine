@@ -33,8 +33,11 @@ struct GPULight {
 };
 
 struct GPUShadowData {
-    float4x4 lightViewProj;
-    float4   shadowParams;    // x=bias, y=normalBias, z=strength
+    float4x4 lightViewProj[3];  // 方向光 CSM 级联矩阵
+    float4   shadowParams;      // x=bias, y=normalBias, z=strength, w=类型
+    float4   splitDistances;    // CSM 级联分割点
+    float4   cameraForward;     // 相机前向(级联选择)
+    float4   pointLightData;    // xyz=点光位置, w=范围
 };
 
 // Descriptor Sets (set=0):
@@ -45,8 +48,10 @@ struct GPUShadowData {
 [[vk::binding(1, 0)]] StructuredBuffer<GPULight> u_Lights;
 [[vk::binding(2, 0)]] StructuredBuffer<GPUObjectData> u_Objects;
 [[vk::binding(3, 0)]] StructuredBuffer<GPUShadowData> u_ShadowData;
-[[vk::binding(4, 0)]] Texture2D<float> u_ShadowMap;
+[[vk::binding(4, 0)]] Texture2D<float> u_ShadowMap0;   // CSM cascade 0
 [[vk::binding(4, 0)]] SamplerState u_ShadowSampler;
+[[vk::binding(10, 0)]] Texture2D<float> u_ShadowMap1;  // CSM cascade 1
+[[vk::binding(11, 0)]] Texture2D<float> u_ShadowMap2;  // CSM cascade 2
 [[vk::binding(5, 0)]] Texture2D<float4> u_BaseColorTex;
 [[vk::binding(5, 0)]] SamplerState u_BaseColorSampler;
 [[vk::binding(6, 0)]] Texture2D<float4> u_NormalTex;
@@ -119,12 +124,15 @@ float4 fragmentMain(FSInput input) : SV_Target0 {
             // shadowParams.w: 0=方向光, 1=点光
             if (sm.shadowParams.w < 0.5f) {
                 // 方向光阴影 — 2D 纹理 PCF
-                shadow = lerp(1.0, SampleShadowPCF(input.worldPos, N, L, sm, u_ShadowMap, u_ShadowSampler),
+                shadow = lerp(1.0, SampleShadowPCF(input.worldPos, N, L, sm,
+                              cameraPosition.xyz,
+                              u_ShadowMap0, u_ShadowMap1, u_ShadowMap2,
+                              u_ShadowSampler),
                               sm.shadowParams.z);
             } else {
                 // 点光源阴影 — Cubemap 采样
-                float3 lightPos = sm.lightViewProj[0].xyz;
-                float  range    = sm.lightViewProj[0].w;
+                float3 lightPos = sm.pointLightData.xyz;
+                float  range    = sm.pointLightData.w;
                 shadow = lerp(1.0, SamplePointShadow(input.worldPos, lightPos, range,
                               sm, u_PointShadowCube, u_PointShadowSampler),
                               sm.shadowParams.z);
