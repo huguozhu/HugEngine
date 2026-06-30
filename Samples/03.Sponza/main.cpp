@@ -94,7 +94,7 @@ int main() {
     config.windowWidth  = 960;
     config.windowHeight = 540;
     config.enableVSync  = true;
-    config.logLevel     = LogLevel::Error;   // 启动时仅显示 Error/Critical
+    config.logLevel     = LogLevel::Info;   // 启动时仅显示 Info
 
     Engine engine(config);
     engine.Initialize();
