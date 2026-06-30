@@ -172,7 +172,7 @@ private:
 public:
     // 渲染天空盒（遍历 Scene 中的 SkyboxComponent）
     void RenderSkybox(rhi::IRHICommandList* cmd, he::World& world,
-                      const float4x4& viewProj);
+                      const CameraData& camera);
 };
 
 } // namespace he::render

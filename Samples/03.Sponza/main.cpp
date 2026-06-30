@@ -577,8 +577,7 @@ int main() {
             swapchain->GetWidth(), swapchain->GetHeight());
         pipeline.RenderScene(cmdList.get(), world, sceneGraph, camera);
         // Skybox 在场景之后渲染（depth=Equal，仅在空白区域绘制）
-        pipeline.RenderSkybox(cmdList.get(), world,
-                              camera.GetViewProjMatrix());
+        pipeline.RenderSkybox(cmdList.get(), world, camera);
         pipeline.EndHDRPass(cmdList.get());
 
         // --- ToneMap 后处理 + ImGui（输出到 SwapChain B8G8R8A8）---

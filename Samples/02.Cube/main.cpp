@@ -317,7 +317,7 @@ int main() {
         pipeline.BeginFrame(cmdList.get(),
             swapchain->GetWidth(), swapchain->GetHeight());
         pipeline.RenderScene(cmdList.get(), world, sceneGraph, camera);
-        pipeline.RenderSkybox(cmdList.get(), world, camera.GetViewProjMatrix());
+        pipeline.RenderSkybox(cmdList.get(), world, camera);
         pipeline.EndHDRPass(cmdList.get());
 
         // ToneMap 后处理 + ImGui（输出到 SwapChain）

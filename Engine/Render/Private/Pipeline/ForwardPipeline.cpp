@@ -692,7 +692,7 @@ void ForwardPipeline::EndHDRPass(rhi::IRHICommandList* cmd) {
 }
 
 void ForwardPipeline::RenderSkybox(rhi::IRHICommandList* cmd, he::World& world,
-                                    const float4x4& viewProj) {
+                                    const CameraData& camera) {
     he::SkyboxComponent* skybox = nullptr;
     world.ForEach<he::SkyboxComponent>([&](he::Entity, he::SkyboxComponent& sc) {
         if (sc.enabled && sc.GetCubemap()) skybox = &sc;
@@ -711,10 +711,11 @@ void ForwardPipeline::RenderSkybox(rhi::IRHICommandList* cmd, he::World& world,
     }
     auto skySet = s_CachedSkySet;
 
-    // 计算逆 ViewProj（去除平移，仅保留旋转 + 投影的逆）
-    float4x4 viewNoTrans = viewProj;
-    viewNoTrans[3][0] = 0.0f; viewNoTrans[3][1] = 0.0f; viewNoTrans[3][2] = 0.0f;
-    float4x4 invViewProj = glm::inverse(viewNoTrans);
+    // 计算旋转视图的逆 ViewProj（相机置于原点，去除平移影响）
+    // 直接清零 viewProj[3] 是错误的——V 的平移已被 P 乘积分布到多列
+    float4x4 viewRotOnly     = glm::lookAtRH(float3(0.0f), camera.forward, camera.up);
+    float4x4 viewProjNoTrans = camera.GetProjMatrix() * viewRotOnly;
+    float4x4 invViewProj     = glm::inverse(viewProjNoTrans);
 
     // Push Constants: float4x4(64) + float(4) + 28B对齐 = 96B
     struct alignas(16) SkyboxPC { float4x4 invVP; float intensity; float _pad[7]; } pc{};
