@@ -43,6 +43,7 @@ public:
 
     std::unique_ptr<IRHISwapChain>    CreateSwapChain(const SwapChainDesc& desc) override;
     std::unique_ptr<IRHICommandList>  CreateCommandList(QueueType queue) override;
+    std::unique_ptr<IRHICommandList>  CreateSecondaryCommandList() override;
     std::unique_ptr<IRHIBuffer>       CreateBuffer(const BufferDesc& desc) override;
     std::unique_ptr<IRHITexture>      CreateTexture(const TextureDesc& desc) override;
     std::unique_ptr<IRHISampler>      CreateSampler(const SamplerDesc& desc) override;
@@ -365,6 +366,10 @@ std::unique_ptr<IRHISwapChain> VulkanDevice::CreateSwapChain(const SwapChainDesc
 std::unique_ptr<IRHICommandList> VulkanDevice::CreateCommandList(QueueType queue) {
     return std::make_unique<VulkanCommandList>(m_Device, m_GraphicsQueue,
                                                m_GraphicsFamily, this);
+}
+
+std::unique_ptr<IRHICommandList> VulkanDevice::CreateSecondaryCommandList() {
+    return std::make_unique<VulkanCommandList>(m_Device, m_GraphicsFamily, this);
 }
 
 void VulkanDevice::WaitIdle() {
@@ -749,18 +754,77 @@ VulkanCommandList::VulkanCommandList(VkDevice device, VkQueue queue, u32 queueFa
     }
 }
 
+// Phase 2: 辅助命令缓冲构造
+VulkanCommandList::VulkanCommandList(VkDevice device, u32 queueFamily,
+                                     VulkanDevice* vulkanDevice)
+    : m_Device(device), m_QueueFamily(queueFamily), m_VulkanDevice(vulkanDevice)
+{
+    VkCommandPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.queueFamilyIndex = m_QueueFamily;
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    vkCreateCommandPool(m_Device, &poolInfo, nullptr, &m_SecondaryPool);
+
+    VkCommandBufferAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocInfo.commandPool = m_SecondaryPool;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
+    allocInfo.commandBufferCount = 1;
+    vkAllocateCommandBuffers(m_Device, &allocInfo, &m_CmdBuffers[0]);
+}
+
 VulkanCommandList::~VulkanCommandList() {
     vkDeviceWaitIdle(m_Device);
     for (auto& fb : m_Framebuffers) vkDestroyFramebuffer(m_Device, fb, nullptr);
+    if (m_CurrentOffscreenFB) { vkDestroyFramebuffer(m_Device, m_CurrentOffscreenFB, nullptr); }
     for (u32 i = 0; i < kMaxFramesInFlight; ++i) {
-        if (m_Fences[i])    vkDestroyFence(m_Device, m_Fences[i], nullptr);
-        if (m_CmdPools[i])  vkDestroyCommandPool(m_Device, m_CmdPools[i], nullptr);
+        for (VkFramebuffer fb : m_PendingFBs[i]) { vkDestroyFramebuffer(m_Device, fb, nullptr); }
+        m_PendingFBs[i].clear();
     }
+    if (m_SecondaryPool) {
+        vkDestroyCommandPool(m_Device, m_SecondaryPool, nullptr);
+    } else {
+        for (u32 i = 0; i < kMaxFramesInFlight; ++i) {
+            if (m_Fences[i])    vkDestroyFence(m_Device, m_Fences[i], nullptr);
+            if (m_CmdPools[i])  vkDestroyCommandPool(m_Device, m_CmdPools[i], nullptr);
+        }
+    }
+}
+
+void VulkanCommandList::BeginSecondary(IRHIPipelineState* pso) {
+    auto* vkPSO = static_cast<VulkanPipelineState*>(pso);
+    VkCommandBufferInheritanceInfo inheritInfo{};
+    inheritInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO;
+    inheritInfo.renderPass = vkPSO->GetRenderPass();
+    inheritInfo.subpass = 0;
+    inheritInfo.framebuffer = VK_NULL_HANDLE;
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT
+                    | VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    beginInfo.pInheritanceInfo = &inheritInfo;
+    vkResetCommandPool(m_Device, m_SecondaryPool, 0);
+    vkBeginCommandBuffer(m_CmdBuffers[0], &beginInfo);
+}
+
+void VulkanCommandList::ExecuteSecondary(IRHICommandList* secondary) {
+    auto* vkSec = static_cast<VulkanCommandList*>(secondary);
+    vkCmdExecuteCommands(m_CmdBuffers[m_FrameIndex], 1, &vkSec->m_CmdBuffers[0]);
 }
 
 void VulkanCommandList::Begin() {
     // 等待当前帧槽位的 GPU 栅栏（非阻塞：仅等待该槽位的历史提交）
     vkWaitForFences(m_Device, 1, &m_Fences[m_FrameIndex], VK_TRUE, UINT64_MAX);
+
+    // 安全销毁待处理 FB（fence 已等待，GPU 保证完成）
+    for (VkFramebuffer fb : m_PendingFBs[m_FrameIndex]) { vkDestroyFramebuffer(m_Device, fb, nullptr); }
+    m_PendingFBs[m_FrameIndex].clear();
+    // 安全销毁旧 swapchain framebuffer 并标记重建
+    if (m_FramebuffersNeedRebuild) {
+        for (VkFramebuffer fb : m_Framebuffers) { vkDestroyFramebuffer(m_Device, fb, nullptr); }
+        m_Framebuffers.clear();
+    }
 
     // 重置该槽位的命令池
     vkResetCommandPool(m_Device, m_CmdPools[m_FrameIndex], 0);
@@ -787,7 +851,12 @@ void VulkanCommandList::BeginRenderPass(u32 colorCount, Format, Format depthForm
     }
 
     // 创建 Framebuffer（颜色 + 深度附件）
-    if (m_Framebuffers.empty()) {
+    if (m_Framebuffers.empty() || m_FramebuffersNeedRebuild) {
+        if (!m_Framebuffers.empty()) {
+            // 旧 FB 已在 Begin() 中销毁，这里只清空句柄
+            m_Framebuffers.clear();
+        }
+        m_FramebuffersNeedRebuild = false;
         u32 count = static_cast<u32>(m_SwapchainViews.size());
         m_Framebuffers.resize(count);
         for (u32 i = 0; i < count; ++i) {
@@ -869,19 +938,14 @@ void VulkanCommandList::BeginOffscreenPass(
         return;
     }
 
-    // 销毁上一帧的离屏 Framebuffer（此时已通过 Submit + WaitIdle 安全提交）
-    if (m_OffscreenFB != VK_NULL_HANDLE) {
-        vkDestroyFramebuffer(m_Device, m_OffscreenFB, nullptr);
-        m_OffscreenFB = VK_NULL_HANDLE;
-    }
-
     // 构建附件列表
     VkImageView attachments[2] = {};
     u32 attachmentCount = 0;
     if (colorView) attachments[attachmentCount++] = colorView;
     if (depthView) attachments[attachmentCount++] = depthView;
 
-    // 创建临时 Framebuffer
+    // 创建离屏 Framebuffer（每帧新建，旧的在 Begin() 中通过 fence 等待后安全销毁）
+    VkFramebuffer offscreenFB = VK_NULL_HANDLE;
     VkFramebufferCreateInfo fbInfo{};
     fbInfo.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
     fbInfo.renderPass      = m_CurrentRenderPass;
@@ -890,7 +954,8 @@ void VulkanCommandList::BeginOffscreenPass(
     fbInfo.width           = width;
     fbInfo.height          = height;
     fbInfo.layers          = 1;
-    vkCreateFramebuffer(m_Device, &fbInfo, nullptr, &m_OffscreenFB);
+    vkCreateFramebuffer(m_Device, &fbInfo, nullptr, &offscreenFB);
+    m_CurrentOffscreenFB = offscreenFB;  // 记录当前 FB 以便延迟销毁
 
     // 清除值
     VkClearValue vkClearValues[2]{};
@@ -915,7 +980,7 @@ void VulkanCommandList::BeginOffscreenPass(
     VkRenderPassBeginInfo rpBegin{};
     rpBegin.sType       = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     rpBegin.renderPass  = m_CurrentRenderPass;
-    rpBegin.framebuffer = m_OffscreenFB;
+    rpBegin.framebuffer = offscreenFB;
     rpBegin.renderArea.extent = { width, height };
     rpBegin.clearValueCount   = clearCount;
     rpBegin.pClearValues      = vkClearValues;
@@ -934,9 +999,12 @@ void VulkanCommandList::EndOffscreenPass() {
     vkCmdEndRenderPass(m_CmdBuffers[m_FrameIndex]);
     m_InOffscreenPass = false;
 
-    // Framebuffer 不能立即销毁 — 命令缓冲区尚未提交执行。
-    // 延迟到下一帧 BeginOffscreenPass 或析构时清理。
-    // 注：临时泄漏一帧的 Framebuffer，生产代码应使用围栏或删除队列。
+    // FB 不能立即销毁 — CB 尚未提交。加入延迟销毁队列，
+    // 在 3 帧后 Begin() 的 fence 等待后安全销毁。
+    if (m_CurrentOffscreenFB) {
+        m_PendingFBs[m_FrameIndex].push_back(m_CurrentOffscreenFB);
+        m_CurrentOffscreenFB = VK_NULL_HANDLE;
+    }
 }
 
 void VulkanCommandList::SetViewport(const Viewport& vp) {
@@ -967,7 +1035,7 @@ void VulkanCommandList::SetSwapChain(IRHISwapChain* swapchain) {
     for (u32 i = 0; i < count; ++i)
         m_SwapchainViews[i] = m_pSwapChain->GetImageView(i);
     m_SwapchainExtent = {m_pSwapChain->GetWidth(), m_pSwapChain->GetHeight()};
-    m_Framebuffers.clear();  // 强制重建
+    m_FramebuffersNeedRebuild = true;  // 标记重建，旧 FB 在 Begin() 中安全销毁
 }
 
 void VulkanCommandList::SetPipeline(IRHIPipelineState* pso) {
@@ -976,10 +1044,9 @@ void VulkanCommandList::SetPipeline(IRHIPipelineState* pso) {
     m_CurrentLayout     = vkPso->GetPipelineLayout();
     m_CurrentRenderPass = vkPso->GetRenderPass();
 
-    // Invalidate framebuffers since render pass changed
-    for (auto& fb : m_Framebuffers)
-        vkDestroyFramebuffer(m_Device, fb, nullptr);
-    m_Framebuffers.clear();
+    // Render pass 变化时标记 framebuffer 需重建（不立即销毁，GPU 可能还在用）
+    // 旧 framebuffer 在 Begin() 的 fence 等待后安全销毁
+    m_FramebuffersNeedRebuild = true;
 }
 
 void VulkanCommandList::SetVertexBuffer(IRHIBuffer* buffer, u32 binding) {

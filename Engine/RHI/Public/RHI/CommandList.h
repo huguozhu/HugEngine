@@ -34,6 +34,11 @@ public:
     virtual void Begin() = 0;
     virtual void End()   = 0;
 
+    // 辅助命令缓冲接口（Phase 2 并行录制）
+    virtual void BeginSecondary(IRHIPipelineState* pso) = 0;
+    virtual void ExecuteSecondary(IRHICommandList* secondary) = 0;
+    virtual bool IsSecondary() const = 0;
+
     // Render pass: binds framebuffer and clears
     virtual void BeginRenderPass(
         u32 colorCount,

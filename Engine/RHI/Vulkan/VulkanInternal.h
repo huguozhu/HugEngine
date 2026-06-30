@@ -79,10 +79,14 @@ class VulkanCommandList final : public IRHICommandList {
 public:
     VulkanCommandList(VkDevice device, VkQueue queue, u32 queueFamily,
                       VulkanDevice* vulkanDevice = nullptr);
+    VulkanCommandList(VkDevice device, u32 queueFamily, VulkanDevice* vulkanDevice); // 辅助 CB
     ~VulkanCommandList() override;
 
     void Begin() override;
     void End()   override;
+    void BeginSecondary(IRHIPipelineState* pso) override;
+    void ExecuteSecondary(IRHICommandList* secondary) override;
+    bool IsSecondary() const override { return m_SecondaryPool != VK_NULL_HANDLE; }
     void BeginRenderPass(u32 colorCount, Format colorFmt, Format depthFmt,
                          const ClearValue* clear) override;
     void EndRenderPass() override;
@@ -137,6 +141,7 @@ private:
     VkCommandBuffer  m_CmdBuffers[kMaxFramesInFlight] = {};
     VkFence          m_Fences[kMaxFramesInFlight]     = {};
     u32              m_FrameIndex = 0;  // 当前帧槽位
+    VkCommandPool    m_SecondaryPool = VK_NULL_HANDLE;  // Phase 2 辅助 CB 池
 
     // 关联的 SwapChain（自动管理 Framebuffer + 同步 + 图像索引）
     VulkanSwapChain* m_pSwapChain = nullptr;
@@ -157,12 +162,15 @@ private:
     std::vector<VkImageView> m_SwapchainViews;
     VkExtent2D               m_SwapchainExtent{};
     std::vector<VkFramebuffer> m_Framebuffers;
+    bool                       m_FramebuffersNeedRebuild = true;
     u32                       m_CurrentImageIndex = 0;
 
     // 离屏渲染通道状态
-    VkFramebuffer m_OffscreenFB = VK_NULL_HANDLE;
     VkRenderPass  m_OffscreenRP = VK_NULL_HANDLE;
     bool          m_InOffscreenPass = false;
+    // 离屏 FB 延迟销毁（每槽位独立队列，Begin() 仅清理当前槽位）
+    VkFramebuffer m_CurrentOffscreenFB = VK_NULL_HANDLE;
+    std::vector<VkFramebuffer> m_PendingFBs[kMaxFramesInFlight];
 };
 
 // ============================================================
