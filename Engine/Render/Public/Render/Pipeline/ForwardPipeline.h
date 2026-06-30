@@ -65,7 +65,8 @@ public:
     void CollectShadowLights(
         he::World& world, he::SceneGraph& sg,
         std::vector<const he::LightComponent*>& shadowLights,
-        std::vector<GPUShadowData>& shadowGPUData);
+        std::vector<GPUShadowData>& shadowGPUData,
+        const CameraData& camera);
     // 开始离屏阴影渲染通道（depth-only，渲染到 m_ShadowMap）
     void BeginShadowPass(rhi::IRHICommandList* cmd);
     // 渲染场景深度到当前阴影贴图（需在 BeginShadowPass/EndShadowPass 之间调用）
@@ -102,7 +103,8 @@ private:
     // 从 World 收集活跃光源，填充 PushConstant 的光照字段
     void CollectLights(PushConstantData& pc,
                        std::vector<GPUShadowData>& shadowData,
-                       he::World& world, he::SceneGraph& sg);
+                       he::World& world, he::SceneGraph& sg,
+                       const CameraData& camera);
 
     // 绘制单个网格（主管线）
     void DrawMesh(

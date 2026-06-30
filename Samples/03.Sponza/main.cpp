@@ -543,7 +543,7 @@ int main() {
         {
             std::vector<const he::LightComponent*> shadowLights;
             std::vector<render::GPUShadowData> shadowGPUData;
-            pipeline.CollectShadowLights(world, sceneGraph, shadowLights, shadowGPUData);
+            pipeline.CollectShadowLights(world, sceneGraph, shadowLights, shadowGPUData, camera);
 
             // 分离方向光和点光源
             std::vector<const he::LightComponent*> dirLights, pointLights;

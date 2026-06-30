@@ -21,29 +21,48 @@ ForwardPipeline::~ForwardPipeline() {
     Shutdown();
 }
 
-// 计算方向光的正交投影矩阵（用于阴影贴图）
+// 计算方向光的正交投影矩阵
+// 固定世界中心避免跳变 + 基于视锥体动态调整尺寸保证全视角覆盖
 static float4x4 ComputeDirectionalLightViewProj(
-    const float3& lightDir, const CameraData& camera, float size)
+    const float3& lightDir, const CameraData& camera)
 {
-    // 将灯光视为无穷远，构建正交投影
-    // 使用相机视锥体的中心作为阴影投影的参考点
-    float3 camForward = camera.forward;
-    float3 camCenter = camera.position + camForward * 20.0f; // 阴影中心在相机前方
+    // 固定场景中心（世界空间，不跟相机移动）
+    float3 sceneCenter(0.0f, 400.0f, 0.0f);
 
-    // 灯光上方向量（避免与 lightDir 共线）
-    float3 up = (abs(lightDir.y) < 0.999f) ? float3(0, 1, 0) : float3(1, 0, 0);
-
+    // 灯光视图矩阵（固定中心，不抖动）
+    float3 lightUp = (abs(lightDir.y) < 0.999f) ? float3(0, 1, 0) : float3(1, 0, 0);
     float4x4 lightView = glm::lookAtRH(
-        camCenter - lightDir * size * 0.5f,   // 灯光位置（逆光方向，从远处照射场景中心）
-        camCenter,                              // 注视场景中心
-        up);                                    // 上方向
+        sceneCenter - lightDir * 2000.0f, sceneCenter, lightUp);
 
-    // 正交投影包围盒
-    // 使用 RH_ZO 变体：Vulkan 右手坐标系 + Z [0,1] 深度范围
-    // 注意：glm::ortho 默认使用 OpenGL [-1,1] 深度范围，与 Vulkan 不兼容
-    float halfSize = size * 0.5f;
+    // 计算相机视锥体在灯光空间中的 XY 包围盒，确定所需覆盖范围
+    float3 f = glm::normalize(camera.forward);
+    float3 r = glm::normalize(glm::cross(f, camera.up));
+    float3 u = glm::cross(r, f);
+    float tanHalfFov = glm::tan(glm::radians(camera.fov) * 0.5f);
+    float farH = tanHalfFov * camera.farPlane;
+    float farW = farH * camera.aspectRatio;
+    float3 farC = camera.position + f * camera.farPlane;
+
+    float3 farCorners[4] = {
+        farC - r*farW - u*farH, farC + r*farW - u*farH,
+        farC - r*farW + u*farH, farC + r*farW + u*farH,
+    };
+
+    float minX = FLT_MAX, maxX = -FLT_MAX;
+    float minY = FLT_MAX, maxY = -FLT_MAX;
+    for (auto& c : farCorners) {
+        float4 ls = lightView * float4(c, 1.0f);
+        minX = glm::min(minX, ls.x); maxX = glm::max(maxX, ls.x);
+        minY = glm::min(minY, ls.y); maxY = glm::max(maxY, ls.y);
+    }
+
+    // 最小覆盖保证（防止视锥体退化）
+    float halfSize = glm::max(glm::max(glm::abs(minX), glm::abs(maxX)),
+                              glm::max(glm::abs(minY), glm::abs(maxY)));
+    halfSize = glm::max(halfSize, 1400.0f);  // 最小覆盖 2800×2800
+
     float nearPlane = 0.1f;
-    float farPlane  = size * 2.0f;
+    float farPlane  = 6000.0f;
     float4x4 lightProj = glm::orthoRH_ZO(-halfSize, halfSize, -halfSize, halfSize,
                                          nearPlane, farPlane);
 
@@ -472,7 +491,8 @@ void ForwardPipeline::CollectLights(
     PushConstantData& pc,
     std::vector<GPUShadowData>& shadowData,
     he::World& world,
-    he::SceneGraph& sg)
+    he::SceneGraph& sg,
+    const CameraData& camera)
 {
     pc.lightCount = 0;
     shadowData.clear();
@@ -498,14 +518,11 @@ void ForwardPipeline::CollectLights(
             gl.positionRange = float4(0, 0, 0, 0);
 
             if (gl.shadowIndex >= 0) {
-                // 使用一个虚拟相机来计算方向光阴影的包围区域
-                // 简化版：基于光源方向计算正交投影
                 float3 lightDir = glm::normalize(dl->direction);
-                float sceneSize = 2800.0f; // 覆盖整个 Sponza 场景
 
                 GPUShadowData sd{};
                 sd.lightViewProj = ComputeDirectionalLightViewProj(
-                    lightDir, CameraData{}, sceneSize);
+                    lightDir, camera);
                 sd.shadowParams = float4(lc.shadowBias, lc.shadowNormalBias,
                                          lc.shadowStrength, 0.0f);
                 shadowData.push_back(sd);
@@ -575,27 +592,21 @@ void ForwardPipeline::CollectLights(
 void ForwardPipeline::CollectShadowLights(
     he::World& world, he::SceneGraph& sg,
     std::vector<const he::LightComponent*>& shadowLights,
-    std::vector<GPUShadowData>& shadowGPUData)
+    std::vector<GPUShadowData>& shadowGPUData,
+    const CameraData& camera)
 {
     shadowLights.clear();
     shadowGPUData.clear();
 
     world.ForEach<he::DirectionalLight>([&](he::Entity e, he::DirectionalLight& lc) {
-        if (!lc.enabled) return;    // 禁用光源不投射阴影
+        if (!lc.enabled) return;
         if (!lc.castShadow) return;
         if (shadowGPUData.size() >= MAX_SHADOWS) return;
 
         float3 lightDir = glm::normalize(lc.direction);
 
-        // 计算场景包围盒中心（Sponza 约 -1424~1302 × -2~1296 × -645~574）
-        // 简化：使用场景大致中心，覆盖足够的区域
-        CameraData shadowCam;
-        shadowCam.position = float3(0.0f, 400.0f, 0.0f);  // Sponza 中心
-        shadowCam.forward  = float3(0.0f, 0.0f, -1.0f);
-        float sceneSize = 2800.0f;  // 覆盖整个 Sponza
-
         GPUShadowData sd{};
-        sd.lightViewProj = ComputeDirectionalLightViewProj(lightDir, shadowCam, sceneSize);
+        sd.lightViewProj = ComputeDirectionalLightViewProj(lightDir, camera);
         sd.shadowParams  = float4(lc.shadowBias, lc.shadowNormalBias, lc.shadowStrength, 0.0f);
         shadowGPUData.push_back(sd);
         shadowLights.push_back(&lc);
@@ -975,7 +986,7 @@ void ForwardPipeline::RenderScene(
     // 收集光源 + 阴影数据
     std::vector<GPUShadowData> shadowGPUData;
     std::vector<const he::LightComponent*> shadowLights;
-    CollectLights(framePC, shadowGPUData, world, sceneGraph);
+    CollectLights(framePC, shadowGPUData, world, sceneGraph, camera);
 
     // ============================================================
     // Phase 5-3: 多线程视锥剔除
