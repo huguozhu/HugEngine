@@ -613,6 +613,11 @@ int main() {
                 pitch = glm::radians(pitchDeg);
             ImGui::DragFloat("移动速度", &moveSpeed, 1.0f, 1.0f, 500.0f, "%.0f");
 
+            // Phase 5-4 多线程录制开关
+            bool multiThread = pipeline.IsMultiThreadedRecording();
+            if (ImGui::Checkbox("多线程录制", &multiThread))
+                pipeline.SetMultiThreadedRecording(multiThread);
+
             // ============================================================
             // 光源
             // ============================================================

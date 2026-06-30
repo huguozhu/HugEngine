@@ -366,6 +366,17 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         HE_ASSERT(m_SkyboxPSO, "ForwardPipeline: failed to create Skybox PSO");
     }
 
+    // --- Phase 5-4: 预分配 sec CB 录制池（每线程一个独立 sec CL）---
+    if (m_MultiThreadRecord) {
+        u32 threadCount = JobSystem::Instance().GetThreadCount();
+        u32 secCount = std::min(kMaxSecRecordLists, std::max(threadCount, 1u));
+        for (u32 i = 0; i < secCount; ++i) {
+            auto secCL = device->CreateSecondaryCommandList();
+            if (secCL) m_SecRecordLists.push_back(std::move(secCL));
+        }
+        HE_CORE_INFO("  Sec record pool: {} lists", m_SecRecordLists.size());
+    }
+
     HE_CORE_INFO("ForwardPipeline initialized (with HDR + Tone Mapping + Skybox)");
 }
 
@@ -390,6 +401,7 @@ void ForwardPipeline::Shutdown() {
     if (m_Device) m_Device->DestroyDescriptorSetLayout(m_ToneMapLayout);
     if (m_Device) m_Device->DestroyDescriptorSetLayout(m_SkyboxDescLayout);
     m_SkyboxPSO.reset();
+    m_SecRecordLists.clear();  // Phase 5-4 sec CB 录制池
     m_Device = nullptr;
     HE_CORE_INFO("ForwardPipeline shut down");
 }
@@ -1016,11 +1028,12 @@ void ForwardPipeline::RenderScene(
             });
     }
 
-    // Step 3: 单线程上传 GPU 数据 + 绘制（仅可见实体）
+    // Step 3: 上传 GPU 数据（单线程）+ 录制绘制命令（单/多线程可选）
     GPUObjectData* objData = static_cast<GPUObjectData*>(
         m_ObjectBuffers[m_CurrentFrameSlot]->Map());
     u32 objectIndex = 0;
 
+    // --- 3a: 单线程上传所有可见实体的材质到 Object Buffer ---
     for (auto& de : visible) {
         if (objectIndex >= MAX_OBJECTS) break;
 
@@ -1038,19 +1051,77 @@ void ForwardPipeline::RenderScene(
         GPUObjectData& obj = objData[objectIndex];
         obj.worldMatrix = de.worldMatrix;
         FillObjectData(obj, mat);
-        framePC.objectIndex = objectIndex;
         objectIndex++;
-
-        if (de.mesh->GetDescriptorSet() != rhi::kInvalidSet)
-            cmd->BindDescriptorSet(0, de.mesh->GetDescriptorSet());
-        else
-            cmd->BindDescriptorSet(0, m_DescSets[m_CurrentFrameSlot]);
-
-        DrawMesh(cmd, de.mesh, de.worldMatrix, viewProj, mat, camera, framePC);
-        drawCount++;
     }
 
+    u32 totalDraws = objectIndex;
     m_ObjectBuffers[m_CurrentFrameSlot]->Unmap();
+
+    // --- 3b: 录制绘制命令 ---
+    if (m_MultiThreadRecord && !m_SecRecordLists.empty() && totalDraws > 0) {
+        // Phase 5-4: 多线程并行录制 sec CB，主 CB 统一执行
+        u32 numThreads = std::min((u32)m_SecRecordLists.size(), totalDraws);
+        u32 chunkSize  = (totalDraws + numThreads - 1) / numThreads;
+
+        std::vector<std::function<void()>> tasks;
+        tasks.reserve(numThreads);
+        for (u32 t = 0; t < numThreads; ++t) {
+            tasks.push_back([&, t]() {
+                u32 start = t * chunkSize;
+                u32 end   = std::min(start + chunkSize, totalDraws);
+                if (start >= end) return;
+
+                auto& secCmd = m_SecRecordLists[t];
+                secCmd->BeginSecondary(m_PBR_PSO.get());
+
+                for (u32 i = start; i < end; ++i) {
+                    auto& de = visible[i];
+                    PushConstantData pc = framePC;
+                    pc.objectIndex = i;
+
+                    if (de.mesh->GetDescriptorSet() != rhi::kInvalidSet)
+                        secCmd->BindDescriptorSet(0, de.mesh->GetDescriptorSet());
+                    else
+                        secCmd->BindDescriptorSet(0, m_DescSets[m_CurrentFrameSlot]);
+
+                    secCmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
+                    secCmd->SetVertexBuffer(de.mesh->GetVertexBuffer().get(), 0);
+                    secCmd->SetIndexBuffer(de.mesh->GetIndexBuffer().get());
+                    secCmd->DrawIndexed(de.mesh->GetIndexCount());
+                }
+
+                secCmd->End();
+            });
+        }
+
+        JobSystem::Instance().ParallelInvoke(tasks);
+
+        // 主 CB 统一执行所有 sec CB
+        for (u32 t = 0; t < numThreads; ++t) {
+            u32 start = t * chunkSize;
+            if (start >= totalDraws) continue;
+            cmd->ExecuteSecondary(m_SecRecordLists[t].get());
+        }
+
+        drawCount = totalDraws;
+    } else {
+        // 单线程录制（回退路径）
+        objectIndex = 0;
+        for (auto& de : visible) {
+            if (objectIndex >= MAX_OBJECTS) break;
+
+            framePC.objectIndex = objectIndex;
+            objectIndex++;
+
+            if (de.mesh->GetDescriptorSet() != rhi::kInvalidSet)
+                cmd->BindDescriptorSet(0, de.mesh->GetDescriptorSet());
+            else
+                cmd->BindDescriptorSet(0, m_DescSets[m_CurrentFrameSlot]);
+
+            DrawMesh(cmd, de.mesh, de.worldMatrix, viewProj, GetDefaultMaterial(), camera, framePC);
+            drawCount++;
+        }
+    }
 
     static bool s_FirstFrame = true;
     if (s_FirstFrame) {

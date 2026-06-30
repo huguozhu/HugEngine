@@ -815,6 +815,13 @@ void VulkanCommandList::BeginSecondary(IRHIPipelineState* pso) {
     vkBeginCommandBuffer(m_SecCmdBuffers[m_SecSlot], &beginInfo);
     // 别名给 SetPipeline/Draw 等 Vulkan 调用共用（m_FrameIndex=0 for secondary）
     m_CmdBuffers[m_FrameIndex] = m_SecCmdBuffers[m_SecSlot];
+    // 记录 PSO 状态并绑定额外管线（BindDescriptorSet 需要 pipeline layout）
+    m_CurrentPipeline   = vkPSO->GetPipeline();
+    m_CurrentLayout     = vkPSO->GetPipelineLayout();
+    m_CurrentRenderPass = vkPSO->GetRenderPass();
+    // 在 sec CB 中绑定额外管线（sec CB 不会继承 primary 的管线状态）
+    vkCmdBindPipeline(m_SecCmdBuffers[m_SecSlot], VK_PIPELINE_BIND_POINT_GRAPHICS,
+                      m_CurrentPipeline);
     m_SecActive = m_SecSlot;
     m_IsRecording = true;
 }

@@ -18,6 +18,7 @@ struct EngineConfig {
     bool        enableVSync  = true;
     u32         jobThreads   = 0;    // 0 = auto-detect
     bool        enableValidation = true;
+    bool        enableMultiThreadRecord = true;  // Phase 5-4: 多线程命令录制
     LogLevel    logLevel     = LogLevel::Info;  // 默认日志等级
 };
 

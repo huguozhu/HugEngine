@@ -87,6 +87,10 @@ public:
         const std::vector<GPUShadowData>& pointShadowData);
     bool HasPointShadows() const { return m_HasPointShadows; }
 
+    // Phase 5-4: 多线程命令录制开关（ImGui 面板运行时切换）
+    void SetMultiThreadedRecording(bool enable) { m_MultiThreadRecord = enable; }
+    bool IsMultiThreadedRecording() const { return m_MultiThreadRecord; }
+
     // --- HDR 离屏渲染 ---
     void BeginHDRPass(rhi::IRHICommandList* cmd, u32 width, u32 height);
     void EndHDRPass(rhi::IRHICommandList* cmd);
@@ -162,6 +166,11 @@ private:
     // 天空盒（全屏三角形，无需 VB/IB）
     std::unique_ptr<rhi::IRHIPipelineState> m_SkyboxPSO;
     rhi::DescriptorSetLayoutHandle m_SkyboxDescLayout = rhi::kInvalidLayout;
+
+    // Phase 5-4 多线程录制
+    bool m_MultiThreadRecord = true;
+    static constexpr u32 kMaxSecRecordLists = 8;
+    std::vector<std::unique_ptr<rhi::IRHICommandList>> m_SecRecordLists;
     rhi::ShaderBytecode m_SkyboxVS;
     rhi::ShaderBytecode m_SkyboxFS;
 
