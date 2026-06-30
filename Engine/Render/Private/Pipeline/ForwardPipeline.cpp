@@ -392,6 +392,7 @@ void ForwardPipeline::CollectLights(
     shadowData.clear();
 
     auto collectLight = [&](he::Entity e, he::LightComponent& lc) {
+        if (!lc.enabled) return;  // 禁用光源：不参与光照
         if (pc.lightCount >= MAX_LIGHTS) return;
         u32 i = pc.lightCount;
 
@@ -494,6 +495,7 @@ void ForwardPipeline::CollectShadowLights(
     shadowGPUData.clear();
 
     world.ForEach<he::DirectionalLight>([&](he::Entity e, he::DirectionalLight& lc) {
+        if (!lc.enabled) return;    // 禁用光源不投射阴影
         if (!lc.castShadow) return;
         if (shadowGPUData.size() >= MAX_SHADOWS) return;
 
@@ -515,6 +517,7 @@ void ForwardPipeline::CollectShadowLights(
 
     // 收集点光源阴影
     world.ForEach<he::PointLight>([&](he::Entity e, he::PointLight& lc) {
+        if (!lc.enabled) return;    // 禁用光源不投射阴影
         if (!lc.castShadow) return;
         if (shadowGPUData.size() >= MAX_SHADOWS) return;
 

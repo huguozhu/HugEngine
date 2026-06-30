@@ -10,7 +10,7 @@ Phase 4（渲染增强）进行中。
 - **Phase 1**: 8 个引擎模块落地（Core/Reflect/RHI/Shader/Render/Scene/Asset/Editor）
 - **Phase 2**: PBR 前向管线 + 反射序列化 + 多光源 + Bindless 基础设施
 - **Phase 3**: 独立编辑器应用（Viewport/Outliner/Details/ContentBrowser/ProjectSettings/PlayStop）
-- **Phase 4**: 阴影系统 + HDR 管线 + 点光源阴影 + ImGui 控制面板
+- **Phase 4**: 阴影系统（内联实现 + 策略模式重构）+ HDR 管线 + 点光源阴影 + ImGui 控制面板
 - **示例**: 01.Triangle + 02.Cube + 03.Sponza + HugEditor
 
 ## 模块完成度
@@ -58,6 +58,7 @@ Phase 4（渲染增强）进行中。
 | SPIR-V 嵌入 | `spv_to_header.py` | ✅ |
 | PBR Shader | `Shaders/PBR.vert.slang`, `PBR.frag.slang`, `pbr_common.slang` | ✅ |
 | Shadow Shader | `Shaders/Shadow.vert.slang`, `Shadow.frag.slang` | ✅ |
+| Shadow 策略着色器 | `Shaders/Shadow/shadow_common.slang`, `shadow_hard.slang`, `shadow_pcf.slang` | ✅ |
 | ToneMap Shader | `Shaders/ToneMap.vert.slang`, `ToneMap.frag.slang`（ACES + LinearToSRGB） | ✅ |
 | 示例 Shader | `Shaders/Triangle.vert.slang`, `Triangle.frag.slang` | ✅ |
 | PCF 阴影采样 | 3×3 kernel 手动深度比较（pbr_common.slang） | ✅ |
@@ -75,7 +76,9 @@ Phase 4（渲染增强）进行中。
 | HDR 离屏管线 | BeginHDRPass(RGBA16_FLOAT+D32) → EndHDRPass → ToneMap(ACES+sRGB) → SwapChain | ✅ |
 | Per-primitive 纹理 | CreateTextureDescriptorSet → 独立描述符集 → 渲染时直接 Bind | ✅ |
 | ImGui 控制面板 | 相机位置/朝向/速度 + 光源方向/颜色/强度 + 阴影参数可编辑 | ✅ |
+| 阴影策略模式 | IShadowTechnique 抽象接口 + ShadowHard/ShadowPCF 实现 + ShadowManager 工厂缓存 | ✅ |
 | Deferred / 后处理 | — | ❌ |
+| ShadowManager 集成 | 替换 ForwardPipeline 内联阴影代码为 ShadowManager 统一调度 | 🚧 |
 
 ### L5 — Scene（场景层）✅
 | 子系统 | 文件 | 状态 |
@@ -89,6 +92,7 @@ Phase 4（渲染增强）进行中。
 | CubeComponent | `Public/Scene/CubeComponent.h` | ✅ |
 | SphereComponent | `Public/Scene/SphereComponent.h` | ✅ |
 | LightComponent | `Public/Scene/LightComponent.h` (Point/Directional/Spot + 阴影参数) | ✅ |
+| ShadowConfig | `Public/Scene/ShadowConfig.h`（ShadowTechnique 枚举 + 每光源参数结构体） | ✅ |
 
 ### Asset（资源层）
 | 子系统 | 文件 | 状态 |
@@ -143,6 +147,9 @@ Phase 4（渲染增强）进行中。
 | 中文日志 | SetConsoleOutputCP(CP_UTF8) 解决 Windows 控制台乱码 |
 | LogLevel 控制 | LogLevel 枚举 + EngineConfig::logLevel（Sponza 默认 Error） |
 | 配置持久化 | Content/Config/03_Sponza.cfg 保存/加载相机+灯光参数 |
+| 阴影系统重构 | 策略模式架构：IShadowTechnique → ShadowHard(Nearest) / ShadowPCF(Linear+比较) + ShadowManager 技术缓存 |
+| 阴影配置枚举 | ShadowTechnique 7 级枚举 (None/Hard/PCF/PCSS/CSM/VSM/RT) + 完整参数结构体 |
+| 阴影着色器分层 | shadow_common.slang(GPUShadowData) → shadow_hard.slang / shadow_pcf.slang + pbr_common.slang 分发 |
 
 ## 已知限制
 
@@ -153,6 +160,7 @@ Phase 4（渲染增强）进行中。
 | 无鼠标拾取选择 | 只能通过 Outliner 选中 | 编辑器增强 |
 | 点光阴影无视锥剔除 | 6 面 × 103 mesh ≈ 618 draw/帧，FPS ~20 | Per-face 视锥剔除 |
 | 无点光阴影 PCF | 点光阴影为单采样，边缘硬 | 多采样软阴影 |
+| ShadowManager 未集成 | 阴影代码仍内联在 ForwardPipeline 中 | 替换为 ShadowManager 统一调度 |
 
 ## 待实施 (Phase 4+)
 
@@ -162,6 +170,8 @@ Phase 4（渲染增强）进行中。
 - ~~ImGui 可编辑控制面板~~ ✅
 - ~~ImGui 中文字体~~ ✅
 - ~~LogLevel 日志等级控制~~ ✅
+- ~~阴影系统策略模式重构（IShadowTechnique + ShadowHard + ShadowPCF + ShadowManager）~~ ✅
+- ShadowManager 集成到 ForwardPipeline（替换内联阴影代码）
 - Cascaded Shadow Maps (CSM)
 - 面积光源（Area Light）：矩形/碟形光源、LTC 线性变换余弦近似
 - IBL（Image-Based Lighting）+ 环境贴图

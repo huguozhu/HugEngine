@@ -24,6 +24,7 @@ class LightComponent : public Component {
     HE_COMPONENT()
 public:
     LightType type      = LightType::Directional;  // 光源类型
+    bool      enabled   = true;                    // 是否启用
     float3    color     = float3(1.0f);            // 光照颜色（线性空间）
     float     intensity = 1.0f;                    // 强度
 

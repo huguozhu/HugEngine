@@ -16,6 +16,7 @@
 #include "Scene/SceneGraph.h"
 #include "Scene/LightComponent.h"
 #include "Scene/Transform.h"
+#include "Scene/SphereComponent.h"
 #include "Asset/glTFLoader.h"
 #include "Editor/ImGuiIntegration.h"
 #include "imgui.h"
@@ -185,6 +186,7 @@ int main() {
 
     // --- 添加点光源（测试点光阴影）---
     Entity pointLightEntity;
+    Entity pointLightSphereEntity;  // 可视化球体
     {
         pointLightEntity = world.CreateEntity("PointLight");
         world.AddComponent<TransformComponent>(pointLightEntity);
@@ -197,9 +199,33 @@ int main() {
 
         // 通过 Transform 设置位置
         auto* plTransform = world.GetComponent<TransformComponent>(pointLightEntity);
-        if (plTransform) plTransform->position = float3(0.0f, 300.0f, 0.0f);
+        if (plTransform) {
+            plTransform->position = float3(
+                GetFloat(cfgData, "point_pos_x", -300.0f),
+                GetFloat(cfgData, "point_pos_y", 100.0f),
+                GetFloat(cfgData, "point_pos_z", 0.0f));
+        }
 
         sceneGraph.SetParent(pointLightEntity, Entity{kInvalidEntity});
+
+        // 创建可视化球体（在点光源位置显示一个小球，随光源一起移动）
+        pointLightSphereEntity = world.CreateEntity("PointLightSphere");
+        world.AddComponent<TransformComponent>(pointLightSphereEntity);
+        // AddComponent 会调用 OnCreate() 生成默认半径 0.5 的几何体
+        auto* sphere = world.AddComponent<SphereComponent>(pointLightSphereEntity);
+        // 设置目标参数后重新生成几何体（旧缓冲区会被 unique_ptr 自动释放）
+        sphere->radius       = 15.0f;   // Sponza 场景较大，球体半径 15 单位
+        sphere->segmentCount = 16;      // 低面数，仅用于可视化
+        sphere->ringCount    = 8;
+        sphere->OnCreate();             // 用新参数重建几何体
+
+        // 初始位置与点光源一致
+        auto* sphereTransform = world.GetComponent<TransformComponent>(pointLightSphereEntity);
+        if (sphereTransform && plTransform) {
+            sphereTransform->position = plTransform->position;
+        }
+
+        sceneGraph.SetParent(pointLightSphereEntity, Entity{kInvalidEntity});
     }
 
     HE_CORE_INFO("场景就绪: {} 实体", world.GetEntityCount());
@@ -471,7 +497,7 @@ int main() {
             // 相机
             // ============================================================
             ImGui::SeparatorText("相机");
-            ImGui::DragFloat3("位置", &camera.position[0], 5.0f);
+            ImGui::DragFloat3("位置##Camera", &camera.position[0], 5.0f);
             float yawDeg   = glm::degrees(yaw);
             float pitchDeg = glm::degrees(pitch);
             if (ImGui::SliderFloat("Yaw", &yawDeg, -180.0f, 180.0f, "%.1f°"))
@@ -486,6 +512,9 @@ int main() {
             world.ForEach<he::DirectionalLight>([&](he::Entity e, he::DirectionalLight& dl) {
                 bool isMain = (e == mainLightEntity);
                 ImGui::SeparatorText(isMain ? "主方向光" : "补光");
+
+                // 启用开关
+                ImGui::Checkbox(isMain ? "启用##MainDL" : "启用##FillDL", &dl.enabled);
 
                 // 方向（滑块修改后自动归一化）
                 float3 dir = dl.direction;
@@ -518,6 +547,44 @@ int main() {
             });
 
             // ============================================================
+            // 点光源
+            // ============================================================
+            world.ForEach<he::PointLight>([&](he::Entity e, he::PointLight& pl) {
+                ImGui::SeparatorText("点光源");
+                ImGui::Checkbox("启用##PointEnable", &pl.enabled);
+                auto* plTransform = world.GetComponent<TransformComponent>(e);
+                if (plTransform) {
+                    if (ImGui::DragFloat3("位置##PointLight", &plTransform->position[0], 5.0f)) {
+                        // 同步球体位置
+                        auto* sphereTransform = world.GetComponent<TransformComponent>(
+                            pointLightSphereEntity);
+                        if (sphereTransform)
+                            sphereTransform->position = plTransform->position;
+                    }
+                }
+                ImGui::ColorEdit3("颜色", &pl.color[0]);
+                ImGui::DragFloat("强度", &pl.intensity, 0.1f, 0.0f, 200.0f, "%.1f");
+                ImGui::DragFloat("范围", &pl.range, 10.0f, 10.0f, 5000.0f, "%.0f");
+                bool shadowOn = pl.castShadow;
+                if (ImGui::Checkbox("投射阴影##PointShadow", &shadowOn))
+                    pl.castShadow = shadowOn;
+                if (pl.castShadow) {
+                    ImGui::Indent(12.0f);
+                    ImGui::DragFloat("深度偏移##PointBias", &pl.shadowBias, 0.0001f, 0.0f, 0.1f, "%.4f",
+                        ImGuiSliderFlags_Logarithmic);
+                    ImGui::Unindent(12.0f);
+                }
+            });
+
+            // 确保每次渲染前球体位置与点光源同步（处理非 ImGui 的位置更新）
+            {
+                auto* plTransform = world.GetComponent<TransformComponent>(pointLightEntity);
+                auto* sphereTransform = world.GetComponent<TransformComponent>(pointLightSphereEntity);
+                if (plTransform && sphereTransform)
+                    sphereTransform->position = plTransform->position;
+            }
+
+            // ============================================================
             // 场景统计
             // ============================================================
             ImGui::SeparatorText("场景");
@@ -528,8 +595,8 @@ int main() {
             world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight&) {
                 dirLightCount++;
             });
-            ImGui::Text("%u 网格  |  %u 方向光  |  1 阴影投射",
-                meshCount, dirLightCount);
+            ImGui::Text("%u 网格  |  %u 方向光  |  %u 点光 + 可视化球体",
+                meshCount, dirLightCount, 1);
         }
         ImGui::End();
         imgui.EndFrame(cmdList.get());
@@ -583,6 +650,14 @@ int main() {
             out["fill_color_b"]   = std::to_string(l.color.z);
             out["fill_intensity"] = std::to_string(l.intensity);
         });
+
+        // 点光源位置
+        auto* plTransform = world.GetComponent<TransformComponent>(pointLightEntity);
+        if (plTransform) {
+            out["point_pos_x"] = std::to_string(plTransform->position.x);
+            out["point_pos_y"] = std::to_string(plTransform->position.y);
+            out["point_pos_z"] = std::to_string(plTransform->position.z);
+        }
 
         SaveConfigFile(g_ConfigPath, out);
         HE_CORE_INFO("配置已保存: {}", g_ConfigPath);
