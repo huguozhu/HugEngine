@@ -57,6 +57,7 @@ private:
     u32              m_ImageCount    = 0;
     u32              m_CurrentImage  = 0;
 
+    bool             m_IsMinimized    = false;           // 窗口最小化标记
     VkSemaphore      m_ImageAcquired  = VK_NULL_HANDLE;  // 图像可用信号
     VkSemaphore      m_RenderComplete = VK_NULL_HANDLE;  // 渲染完成信号
 

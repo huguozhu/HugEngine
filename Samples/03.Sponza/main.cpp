@@ -355,6 +355,8 @@ int main() {
     // 9. 窗口调整回调
     // ============================================================
     engine.GetWindow()->SetResizeCallback([&](u32 w, u32 h) {
+        // 窗口最小化时尺寸为 0，跳过所有重建（恢复时 GLFW 会再次回调）
+        if (w == 0 || h == 0) return;
         swapchain->Resize(w, h);
         cmdList->SetSwapChain(swapchain.get());
         pipeline.ResizeHDRTarget(w, h);

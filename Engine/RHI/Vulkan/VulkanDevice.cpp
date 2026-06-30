@@ -575,6 +575,9 @@ void VulkanSwapChain::CreateSwapchain() {
         }
     }
 
+    // 窗口最小化时尺寸可能为 0，跳过创建
+    if (m_Width == 0 || m_Height == 0) return;
+
     m_Width  = std::clamp(m_Width,  caps.minImageExtent.width,  caps.maxImageExtent.width);
     m_Height = std::clamp(m_Height, caps.minImageExtent.height, caps.maxImageExtent.height);
 
@@ -682,6 +685,12 @@ void VulkanSwapChain::DestroySwapchain() {
 }
 
 void VulkanSwapChain::Resize(u32 width, u32 height) {
+    // 窗口最小化时尺寸为 0，跳过重建（恢复时 GLFW 会再次回调）
+    if (width == 0 || height == 0) {
+        m_IsMinimized = true;
+        return;
+    }
+    m_IsMinimized = false;
     vkDeviceWaitIdle(m_Device);
     DestroySwapchain();
     m_Width = width;
@@ -690,6 +699,8 @@ void VulkanSwapChain::Resize(u32 width, u32 height) {
 }
 
 bool VulkanSwapChain::AcquireNextImage() {
+    // 窗口最小化时跳过图像获取
+    if (m_IsMinimized || m_Swapchain == VK_NULL_HANDLE) return false;
     VkResult result = vkAcquireNextImageKHR(m_Device, m_Swapchain, UINT64_MAX,
                                             m_ImageAcquired, VK_NULL_HANDLE, &m_CurrentImage);
     return result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR;
