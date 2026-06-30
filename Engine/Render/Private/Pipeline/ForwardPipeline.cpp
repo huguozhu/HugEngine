@@ -429,8 +429,8 @@ rhi::DescriptorSetHandle ForwardPipeline::CreateTextureDescriptorSet(
     return set;
 }
 
-void ForwardPipeline::BeginFrame(rhi::IRHICommandList* cmd, u32 width, u32 height) {
-    // 切换到下一个三缓冲槽位
+void ForwardPipeline::NextFrame() {
+    // 推进三缓冲槽位（帧首调用，确保 Shadow 和 Scene 使用同一帧的缓冲区）
     m_CurrentFrameSlot = (m_CurrentFrameSlot + 1) % MAX_FRAMES_IN_FLIGHT;
 
     // 更新所有 per-mesh 描述符集的动态绑定 1-3（指向当前帧的缓冲区）
@@ -442,7 +442,9 @@ void ForwardPipeline::BeginFrame(rhi::IRHICommandList* cmd, u32 width, u32 heigh
         m_Device->UpdateDescriptorSet(set, 2, rhi::DescriptorType::StorageBuffer, curObjectBuf);
         m_Device->UpdateDescriptorSet(set, 3, rhi::DescriptorType::StorageBuffer, curShadowBuf);
     }
+}
 
+void ForwardPipeline::BeginFrame(rhi::IRHICommandList* cmd, u32 width, u32 height) {
     cmd->SetViewport({
         0, static_cast<float>(height),
         static_cast<float>(width), -static_cast<float>(height),
@@ -906,17 +908,21 @@ void ForwardPipeline::RenderShadowPass(
     ShadowPushConstant shadowPC{};
     shadowPC.lightViewProj = sm.lightViewProj;
 
+    // 一次性映射对象缓冲区，逐实体分配独立 objectIndex（避免槽位覆盖冲突）
+    GPUObjectData* objData = static_cast<GPUObjectData*>(
+        m_ObjectBuffers[m_CurrentFrameSlot]->Map());
+    u32 objectIndex = 0;
+
     auto renderMeshForShadow = [&](he::Entity e, he::MeshComponent& mesh) {
         if (mesh.GetIndexCount() == 0) return;
-        shadowPC.objectIndex = 0;  // 简化：每帧为阴影通道单独上传对象
-        // 获取世界矩阵
+        if (objectIndex >= MAX_OBJECTS) return;
+
         float4x4 worldMatrix = sceneGraph.GetWorldMatrix(e);
 
-        // 临时上传此对象到 Object Buffer（阴影通道需读取世界矩阵）
-        // 注意：阴影着色器从 u_Objects[objectIndex].worldMatrix 读取
-        GPUObjectData* objData = static_cast<GPUObjectData*>(m_ObjectBuffers[m_CurrentFrameSlot]->Map());
-        objData[0].worldMatrix = worldMatrix;
-        m_ObjectBuffers[m_CurrentFrameSlot]->Unmap();
+        // 写入独立槽位，不再所有实体共用 objData[0]
+        objData[objectIndex].worldMatrix = worldMatrix;
+        shadowPC.objectIndex = objectIndex;
+        objectIndex++;
 
         cmd->SetPushConstants(0, sizeof(ShadowPushConstant), &shadowPC);
         cmd->SetVertexBuffer(mesh.GetVertexBuffer().get(), 0);
@@ -931,6 +937,8 @@ void ForwardPipeline::RenderShadowPass(
     world.ForEach<he::SphereComponent>([&](he::Entity e, he::SphereComponent& s) {
         renderMeshForShadow(e, static_cast<he::MeshComponent&>(s));
     });
+
+    m_ObjectBuffers[m_CurrentFrameSlot]->Unmap();
 }
 
 void ForwardPipeline::RenderScene(

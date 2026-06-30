@@ -311,6 +311,9 @@ int main() {
         // 渲染一帧（HDR 离屏 → ToneMap → ImGui）
         cmdList->Begin();
 
+        // 帧首推进槽位（三缓冲帧环）
+        pipeline.NextFrame();
+
         // HDR 离屏渲染通道
         pipeline.BeginHDRPass(cmdList.get(),
             swapchain->GetWidth(), swapchain->GetHeight());

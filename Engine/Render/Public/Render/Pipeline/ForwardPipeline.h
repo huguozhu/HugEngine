@@ -37,6 +37,8 @@ public:
     void Initialize(rhi::IRHIDevice* device);
     void Shutdown();
 
+    // 推进三缓冲槽位，更新 per-mesh 描述符集指向新帧缓冲区（帧首调用，在 Shadow/Scene 之前）
+    void NextFrame();
     void BeginFrame(rhi::IRHICommandList* cmd, u32 width, u32 height);
 
     // 渲染场景（含阴影通道）

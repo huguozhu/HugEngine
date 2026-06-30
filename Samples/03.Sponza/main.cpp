@@ -536,6 +536,9 @@ int main() {
         // --- 渲染 ---
         cmdList->Begin();
 
+        // 帧首推进槽位，确保 Shadow 和 Scene 使用同一帧缓冲区
+        pipeline.NextFrame();
+
         // 阴影通道（在主渲染通道之前执行，离屏渲染到 ShadowMap）
         {
             std::vector<const he::LightComponent*> shadowLights;
