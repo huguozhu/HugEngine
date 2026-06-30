@@ -1,16 +1,16 @@
 # HugEngine 实施进度
 
-> 最后更新: 2026-06-30
+> 最后更新: 2026-07-01
 
 ## 整体进度
 
-Phase 1（核心骨架）+ Phase 2（基础设施）+ Phase 3（编辑器完整功能）已完成。
-Phase 4（渲染增强）进行中。
+Phase 1-4 核心渲染功能已完成，Phase 5（多线程渲染）进行中。
 
 - **Phase 1**: 8 个引擎模块落地（Core/Reflect/RHI/Shader/Render/Scene/Asset/Editor）
 - **Phase 2**: PBR 前向管线 + 反射序列化 + 多光源 + Bindless 基础设施
 - **Phase 3**: 独立编辑器应用（Viewport/Outliner/Details/ContentBrowser/ProjectSettings/PlayStop）
-- **Phase 4**: 阴影系统（内联实现 + 策略模式重构）+ HDR 管线 + 点光源阴影 + ImGui 控制面板
+- **Phase 4**: 阴影系统 + HDR 管线 + 点光源阴影 + ImGui 控制面板
+- **Phase 5**: 多线程渲染（Phase 1 三缓冲完成，Phase 2 辅助命令缓冲部分完成）
 - **示例**: 01.Triangle + 02.Cube + 03.Sponza + HugEditor
 
 ## 模块完成度
@@ -50,6 +50,10 @@ Phase 4（渲染增强）进行中。
 | 深度专用管线 | colorAttachmentCount=0 → depth-only render pass | ✅ |
 | Cubemap 支持 | VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT + 6 面独立 ImageView | ✅ |
 | 描述符池 | StorageBuffer=512, CombinedImageSampler=1024, maxSets=256 | ✅ |
+| 三缓冲帧环 | kMaxFramesInFlight=3 cmd pools/buffers/fences（Phase 5-1） | ✅ |
+| 持久映射 | VulkanBuffer 构造时 vkMapMemory，Map/Unmap 变 no-op（Phase 5-1） | ✅ |
+| 辅助命令缓冲 | BeginSecondary / ExecuteSecondary / CreateSecondaryCommandList（Phase 5-2） | ✅ |
+| FB 生命周期 | 延迟销毁队列（离屏）+ 标记重建（SwapChain），避免 CB 录制期间销毁 | ✅ |
 
 ### L3 — Shader（着色器层）✅
 | 子系统 | 文件 | 状态 |
@@ -58,7 +62,6 @@ Phase 4（渲染增强）进行中。
 | SPIR-V 嵌入 | `spv_to_header.py` | ✅ |
 | PBR Shader | `Shaders/PBR.vert.slang`, `PBR.frag.slang`, `pbr_common.slang` | ✅ |
 | Shadow Shader | `Shaders/Shadow.vert.slang`, `Shadow.frag.slang` | ✅ |
-| Shadow 策略着色器 | `Shaders/Shadow/shadow_common.slang`, `shadow_hard.slang`, `shadow_pcf.slang` | ✅ |
 | ToneMap Shader | `Shaders/ToneMap.vert.slang`, `ToneMap.frag.slang`（ACES + LinearToSRGB） | ✅ |
 | 示例 Shader | `Shaders/Triangle.vert.slang`, `Triangle.frag.slang` | ✅ |
 | PCF 阴影采样 | 3×3 kernel 手动深度比较（pbr_common.slang） | ✅ |
@@ -76,9 +79,7 @@ Phase 4（渲染增强）进行中。
 | HDR 离屏管线 | BeginHDRPass(RGBA16_FLOAT+D32) → EndHDRPass → ToneMap(ACES+sRGB) → SwapChain | ✅ |
 | Per-primitive 纹理 | CreateTextureDescriptorSet → 独立描述符集 → 渲染时直接 Bind | ✅ |
 | ImGui 控制面板 | 相机位置/朝向/速度 + 光源方向/颜色/强度 + 阴影参数可编辑 | ✅ |
-| 阴影策略模式 | IShadowTechnique 抽象接口 + ShadowHard/ShadowPCF 实现 + ShadowManager 工厂缓存 | ✅ |
 | Deferred / 后处理 | — | ❌ |
-| ShadowManager 集成 | 替换 ForwardPipeline 内联阴影代码为 ShadowManager 统一调度 | 🚧 |
 
 ### L5 — Scene（场景层）✅
 | 子系统 | 文件 | 状态 |
@@ -91,8 +92,7 @@ Phase 4（渲染增强）进行中。
 | MeshComponent | `Public/Scene/MeshComponent.h` (+ GPU 纹理字段 + 描述符集字段) | ✅ |
 | CubeComponent | `Public/Scene/CubeComponent.h` | ✅ |
 | SphereComponent | `Public/Scene/SphereComponent.h` | ✅ |
-| LightComponent | `Public/Scene/LightComponent.h` (Point/Directional/Spot + 阴影参数) | ✅ |
-| ShadowConfig | `Public/Scene/ShadowConfig.h`（ShadowTechnique 枚举 + 每光源参数结构体） | ✅ |
+| LightComponent | `Public/Scene/LightComponent.h` (Point/Directional/Spot + enabled 开关 + 阴影参数) | ✅ |
 
 ### Asset（资源层）
 | 子系统 | 文件 | 状态 |
@@ -147,9 +147,26 @@ Phase 4（渲染增强）进行中。
 | 中文日志 | SetConsoleOutputCP(CP_UTF8) 解决 Windows 控制台乱码 |
 | LogLevel 控制 | LogLevel 枚举 + EngineConfig::logLevel（Sponza 默认 Error） |
 | 配置持久化 | Content/Config/03_Sponza.cfg 保存/加载相机+灯光参数 |
-| 阴影系统重构 | 策略模式架构：IShadowTechnique → ShadowHard(Nearest) / ShadowPCF(Linear+比较) + ShadowManager 技术缓存 |
-| 阴影配置枚举 | ShadowTechnique 7 级枚举 (None/Hard/PCF/PCSS/CSM/VSM/RT) + 完整参数结构体 |
-| 阴影着色器分层 | shadow_common.slang(GPUShadowData) → shadow_hard.slang / shadow_pcf.slang + pbr_common.slang 分发 |
+| 光源 enabled 开关 | LightComponent::enabled + ImGui Checkbox + CollectLights 过滤 |
+| 点光源可视化 | SphereComponent 球体跟随点光源位置 + ImGui DragFloat3 同步 |
+
+## Phase 5 多线程渲染成果
+
+| 子系统 | 实现 | 状态 |
+|--------|------|------|
+| 三缓冲帧环 | 3 个 CommandPool + CommandBuffer + Fence，Begin 等待对应槽位 | ✅ |
+| 非阻塞提交 | Submit 移除 vkWaitForFences，CPU 提前 1-2 帧录制 | ✅ |
+| 持久映射 | VulkanBuffer 构造时 vkMapMemory，Map/Unmap 零开销 | ✅ |
+| Per-Frame Buffer Ring | ObjectBuffer/LightBuffer/ShadowBuffer ×3，每帧切换 | ✅ |
+| Secondary CB 接口 | BeginSecondary / ExecuteSecondary / CreateSecondaryCommandList | ✅ |
+| Pipeline 绑定 | BeginSecondary 中 vkCmdBindPipeline，解决 sec CB 无管线问题 | ✅ |
+| FB 生命周期修复 | SetPipeline 不再立即销毁 framebuffer，改为标记重建 + Begin 清理 | ✅ |
+| 离屏 FB 延迟销毁 | 每槽位独立 m_PendingFBs 队列，fence 等待后批量 vkDestroy | ✅ |
+| 点阴影 sec CB 集成 | RenderPointShadowPass 改为 sec CB 录制+执行 | 🚧 受阻 |
+
+**FPS 提升**：Phase 5-1 后 Sponza 从 ~20 FPS 提升到 ~74 FPS。
+
+**Phase 5-2 受阻原因**：RenderPointShadowPass 使用 secondary CB 时，执行 ≥2 个面后 primary CB 进入 invalid state。录制 1 面全量 mesh + 执行 1 面正常，≥2 面即大量 VUID 错误。根因待排查。
 
 ## 已知限制
 
@@ -158,26 +175,21 @@ Phase 4（渲染增强）进行中。
 | 视口 3D 渲染到全屏 backbuffer | 3D 仅在 ImGui 透明区域可见 | 离屏渲染 (ImGui::Image) |
 | 无 Gizmo 操作 | 无法拖拽移动/旋转/缩放 | 编辑器增强 |
 | 无鼠标拾取选择 | 只能通过 Outliner 选中 | 编辑器增强 |
-| 点光阴影无视锥剔除 | 6 面 × 103 mesh ≈ 618 draw/帧，FPS ~20 | Per-face 视锥剔除 |
+| 点光阴影无视锥剔除 | 6 面 × 103 mesh ≈ 618 draw/帧 | Per-face 视锥剔除 (Phase 5-3) |
 | 无点光阴影 PCF | 点光阴影为单采样，边缘硬 | 多采样软阴影 |
-| ShadowManager 未集成 | 阴影代码仍内联在 ForwardPipeline 中 | 替换为 ShadowManager 统一调度 |
+| sec CB 多面执行崩溃 | ≥2 面 primary CB invalid | 根因待查 |
+| 启动偶发崩溃 | BeginRenderPass 返回时 EndRenderPass 未检查 | 已修复 (m_InRenderPass 标记) |
 
-## 待实施 (Phase 4+)
+## 待实施
 
-- ~~阴影通道渲染（ShadowMap 深度写入 + 布局转换）~~ ✅
-- ~~点光源阴影~~ ✅
-- ~~HDR 离屏渲染管线~~ ✅
-- ~~ImGui 可编辑控制面板~~ ✅
-- ~~ImGui 中文字体~~ ✅
-- ~~LogLevel 日志等级控制~~ ✅
-- ~~阴影系统策略模式重构（IShadowTechnique + ShadowHard + ShadowPCF + ShadowManager）~~ ✅
-- ShadowManager 集成到 ForwardPipeline（替换内联阴影代码）
 - Cascaded Shadow Maps (CSM)
 - 面积光源（Area Light）：矩形/碟形光源、LTC 线性变换余弦近似
 - IBL（Image-Based Lighting）+ 环境贴图
 - Bindless 纹理数组（Texture2D[] + materialID 索引）
 - 离屏视口渲染（RHI Texture → ImGui::Image）
 - Gizmo 操作 + 鼠标拾取选择
+- 多线程视锥剔除（Phase 5-3）
+- sec CB 多面执行崩溃修复（Phase 5-2 续）
 - GPU Driven 渲染（视锥剔除 / Hi-Z / ExecuteIndirect）
 - Prefab 系统 + Asset Registry + NameComponent
 - 骨骼动画 + 粒子系统
