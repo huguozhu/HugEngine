@@ -427,7 +427,7 @@ void VulkanTexture::UploadInitialData(VkCommandPool cmdPool, VkQueue queue,
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(cmd, &beginInfo);
 
-    // 图像布局转换：UNDEFINED → TRANSFER_DST
+    // 图像布局转换：UNDEFINED → TRANSFER_DST（所有 level）
     VkImageMemoryBarrier barrier{};
     barrier.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     barrier.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -448,6 +448,17 @@ void VulkanTexture::UploadInitialData(VkCommandPool cmdPool, VkQueue queue,
         VK_PIPELINE_STAGE_TRANSFER_BIT,
         0, 0, nullptr, 0, nullptr, 1, &barrier);
 
+    // 若需 mipmap，将全图转为 GENERAL（避免逐 level barrier 追踪）
+    if (m_MipLevels > 1) {
+        barrier.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.newLayout     = VK_IMAGE_LAYOUT_GENERAL;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &barrier);
+    }
+
     // 拷贝暂存缓冲 → 图像
     VkBufferImageCopy copyRegion{};
     copyRegion.bufferOffset                    = 0;
@@ -463,11 +474,47 @@ void VulkanTexture::UploadInitialData(VkCommandPool cmdPool, VkQueue queue,
     vkCmdCopyBufferToImage(cmd, stagingBuffer, m_Image,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
 
-    // 图像布局转换：TRANSFER_DST → SHADER_READ_ONLY
-    barrier.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    // --- Mipmap 生成（GENERAL 布局避免逐 level barrier 追踪）---
+    if (m_MipLevels > 1) {
+        i32 mipW = static_cast<i32>(m_Width);
+        i32 mipH = static_cast<i32>(m_Height);
+
+        for (u32 i = 1; i < m_MipLevels; ++i) {
+            i32 nextW = mipW > 1 ? mipW / 2 : 1;
+            i32 nextH = mipH > 1 ? mipH / 2 : 1;
+
+            VkImageBlit blit{};
+            blit.srcSubresource.aspectMask     = ToVkAspectMask(desc.format);
+            blit.srcSubresource.mipLevel       = i - 1;
+            blit.srcSubresource.baseArrayLayer = 0;
+            blit.srcSubresource.layerCount     = m_ArrayLayers;
+            blit.srcOffsets[0] = {0, 0, 0};
+            blit.srcOffsets[1] = {mipW, mipH, 1};
+            blit.dstSubresource.aspectMask     = ToVkAspectMask(desc.format);
+            blit.dstSubresource.mipLevel       = i;
+            blit.dstSubresource.baseArrayLayer = 0;
+            blit.dstSubresource.layerCount     = m_ArrayLayers;
+            blit.dstOffsets[0] = {0, 0, 0};
+            blit.dstOffsets[1] = {nextW, nextH, 1};
+
+            vkCmdBlitImage(cmd,
+                m_Image, VK_IMAGE_LAYOUT_GENERAL,
+                m_Image, VK_IMAGE_LAYOUT_GENERAL,
+                1, &blit, VK_FILTER_LINEAR);
+
+            mipW = nextW;
+            mipH = nextH;
+        }
+    }
+
+    // 最终布局：GENERAL 或 TRANSFER_DST → SHADER_READ_ONLY（所有 level）
+    barrier.oldLayout     = (m_MipLevels > 1) ? VK_IMAGE_LAYOUT_GENERAL
+                                               : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     barrier.newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.srcAccessMask = (m_MipLevels > 1) ? (VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT)
+                                               : VK_ACCESS_TRANSFER_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    barrier.subresourceRange.levelCount = m_MipLevels;
 
     vkCmdPipelineBarrier(cmd,
         VK_PIPELINE_STAGE_TRANSFER_BIT,

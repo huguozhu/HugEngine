@@ -21,6 +21,7 @@
 #include "Editor/ImGuiIntegration.h"
 #include "imgui.h"
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -248,12 +249,23 @@ int main() {
             int w, h, ch;
             u8* pixels = stbi_load(texPath.c_str(), &w, &h, &ch, 4);
             if (!pixels) { HE_CORE_WARN("纹理加载失败: {}", texPath); return {nullptr, nullptr}; }
+            // 计算 mipmap 层级数
+            u32 maxDim = static_cast<u32>(std::max(w, h));
+            u32 mipLevels = 1;
+            while (maxDim > 1) { maxDim >>= 1; ++mipLevels; }
+
             rhi::TextureDesc td; td.format=rhi::Format::RGBA8_UNORM;
             td.width=static_cast<u32>(w); td.height=static_cast<u32>(h);
-            td.usage=rhi::TextureUsage::ShaderResource; td.initialData=pixels;
+            td.mipLevels = mipLevels;
+            td.usage=rhi::TextureUsage::ShaderResource
+                   | rhi::TextureUsage::TransferSrc
+                   | rhi::TextureUsage::TransferDst;  // mipmap 生成需要 blit
+            td.initialData=pixels;
             auto t = device->CreateTexture(td);
             rhi::SamplerDesc sd; sd.minFilter=rhi::FilterMode::Linear;
             sd.magFilter=rhi::FilterMode::Linear;
+            sd.mipFilter=rhi::FilterMode::Linear;  // mipmap 线性过渡
+            sd.maxLod = static_cast<float>(mipLevels);
             sd.addressU=sd.addressV=rhi::AddressMode::Repeat;
             auto s = device->CreateSampler(sd);
             stbi_image_free(pixels);
