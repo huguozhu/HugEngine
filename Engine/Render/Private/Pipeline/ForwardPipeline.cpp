@@ -4,10 +4,13 @@
 #include "Scene/SkyboxComponent.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
+#include "Threading/JobSystem.h"
 #include "EmbeddedShaders.h"
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/ext/matrix_clip_space.hpp>  // orthoRH_ZO (Vulkan Z [0,1])
+
+#include <mutex>
 
 namespace he::render {
 
@@ -963,68 +966,95 @@ void ForwardPipeline::RenderScene(
     CollectLights(framePC, shadowGPUData, world, sceneGraph);
 
     // ============================================================
-    // 阴影通道
+    // Phase 5-3: 多线程视锥剔除
     // ============================================================
-    // 注意：阴影通道需要在一个渲染通道内执行，此处利用 VulkanCommandList 的
-    // BeginRenderPass 机制。但是阴影 PSO 有自己独立的渲染通道（无颜色附件），
-    // 因此阴影通道需要在 BeginRenderPass 之前通过 ShadowPSO 的 renderPass 渲染。
 
-    // 当前简化实现：阴影通道使用 ShadowPSO 的 renderPass
-    // 需要先结束主管道的 renderPass（由调用方保证已在 BeginRenderPass 内）
+    // Step 1: 单线程收集所有可绘制实体 + 预计算世界空间包围盒
+    struct DrawableEntity {
+        he::Entity        entity;
+        he::MeshComponent* mesh;
+        float4x4          worldMatrix;  // 缓存，避免 GPU 上传时重复计算
+        AABB              worldBounds;
+    };
+    std::vector<DrawableEntity> drawables;
 
-    // 上传 per-object 数据到 Storage Buffer
-    GPUObjectData* objData = static_cast<GPUObjectData*>(m_ObjectBuffers[m_CurrentFrameSlot]->Map());
+    auto gatherEntity = [&](he::Entity e, he::MeshComponent& m) {
+        if (m.GetIndexCount() == 0) return;
+        float4x4 wm = sceneGraph.GetWorldMatrix(e);
+        drawables.push_back({e, &m, wm, m.GetBounds().Transform(wm)});
+    };
+    world.ForEach<he::MeshComponent>(gatherEntity);
+    world.ForEach<he::CubeComponent>([&](he::Entity e, he::CubeComponent& c) {
+        gatherEntity(e, static_cast<he::MeshComponent&>(c));
+    });
+    world.ForEach<he::SphereComponent>([&](he::Entity e, he::SphereComponent& s) {
+        gatherEntity(e, static_cast<he::MeshComponent&>(s));
+    });
+
+    u32 totalEntities = static_cast<u32>(drawables.size());
+
+    // Step 2: 并行视锥剔除（chunk=64，每线程独立收集后合并）
+    Frustum frustum = camera.GetFrustum();
+    std::mutex visibleMutex;
+    std::vector<DrawableEntity> visible;
+    visible.reserve(totalEntities);
+
+    if (totalEntities > 0) {
+        JobSystem::Instance().ParallelForChunked(
+            totalEntities, 64,
+            [&](u32 start, u32 end) {
+                std::vector<DrawableEntity> local;
+                local.reserve(end - start);
+                for (u32 i = start; i < end; ++i) {
+                    if (frustum.Intersects(drawables[i].worldBounds))
+                        local.push_back(drawables[i]);
+                }
+                if (!local.empty()) {
+                    std::lock_guard<std::mutex> lock(visibleMutex);
+                    visible.insert(visible.end(), local.begin(), local.end());
+                }
+            });
+    }
+
+    // Step 3: 单线程上传 GPU 数据 + 绘制（仅可见实体）
+    GPUObjectData* objData = static_cast<GPUObjectData*>(
+        m_ObjectBuffers[m_CurrentFrameSlot]->Map());
     u32 objectIndex = 0;
 
-    auto uploadObject = [&](he::Entity e, he::MeshComponent& mesh, float4x4& wm, PBRMaterial& mat) {
-        if (objectIndex >= MAX_OBJECTS) return;
-        GPUObjectData& obj = objData[objectIndex];
-        obj.worldMatrix = wm;
-        FillObjectData(obj, mat);
-        objectIndex++;
-    };
-
-    auto renderMesh = [&](he::Entity e, he::MeshComponent& mesh) {
-        if (mesh.GetIndexCount() == 0) return;
-        float4x4 worldMatrix = sceneGraph.GetWorldMatrix(e);
+    for (auto& de : visible) {
+        if (objectIndex >= MAX_OBJECTS) break;
 
         PBRMaterial mat = GetDefaultMaterial();
-        mat.baseColorFactor = mesh.baseColorFactor;
-        mat.emissiveFactor  = mesh.emissiveFactor;
-        mat.metallicFactor  = mesh.metallicFactor;
-        mat.roughnessFactor = mesh.roughnessFactor;
-        mat.aoFactor        = mesh.aoFactor;
-        mat.alphaCutoff     = mesh.alphaCutoff;
-        mat.alphaMode       = static_cast<AlphaMode>(mesh.alphaMode);
-        mat.doubleSided     = mesh.doubleSided;
-        mat.unlit           = mesh.unlit;
+        mat.baseColorFactor = de.mesh->baseColorFactor;
+        mat.emissiveFactor  = de.mesh->emissiveFactor;
+        mat.metallicFactor  = de.mesh->metallicFactor;
+        mat.roughnessFactor = de.mesh->roughnessFactor;
+        mat.aoFactor        = de.mesh->aoFactor;
+        mat.alphaCutoff     = de.mesh->alphaCutoff;
+        mat.alphaMode       = static_cast<AlphaMode>(de.mesh->alphaMode);
+        mat.doubleSided     = de.mesh->doubleSided;
+        mat.unlit           = de.mesh->unlit;
 
-        uploadObject(e, mesh, worldMatrix, mat);
-        framePC.objectIndex = objectIndex - 1;
+        GPUObjectData& obj = objData[objectIndex];
+        obj.worldMatrix = de.worldMatrix;
+        FillObjectData(obj, mat);
+        framePC.objectIndex = objectIndex;
+        objectIndex++;
 
-        // 绑定该 mesh 的独立描述符集（纹理已在加载时写入，渲染时只 bind 不 update）
-        if (mesh.GetDescriptorSet() != rhi::kInvalidSet)
-            cmd->BindDescriptorSet(0, mesh.GetDescriptorSet());
+        if (de.mesh->GetDescriptorSet() != rhi::kInvalidSet)
+            cmd->BindDescriptorSet(0, de.mesh->GetDescriptorSet());
         else
             cmd->BindDescriptorSet(0, m_DescSets[m_CurrentFrameSlot]);
 
-        DrawMesh(cmd, &mesh, worldMatrix, viewProj, mat, camera, framePC);
+        DrawMesh(cmd, de.mesh, de.worldMatrix, viewProj, mat, camera, framePC);
         drawCount++;
-    };
-
-    world.ForEach<he::MeshComponent>(renderMesh);
-    world.ForEach<he::CubeComponent>([&](he::Entity e, he::CubeComponent& c) {
-        renderMesh(e, static_cast<he::MeshComponent&>(c));
-    });
-    world.ForEach<he::SphereComponent>([&](he::Entity e, he::SphereComponent& s) {
-        renderMesh(e, static_cast<he::MeshComponent&>(s));
-    });
+    }
 
     m_ObjectBuffers[m_CurrentFrameSlot]->Unmap();
 
     static bool s_FirstFrame = true;
     if (s_FirstFrame) {
-        HE_CORE_INFO("ForwardPipeline::RenderScene: {} draws, {} lights, {} shadows",
+        HE_CORE_INFO("ForwardPipeline::RenderScene: {} draws, {} lights, {} shadows (Phase 5-3 frustum cull)",
             drawCount, framePC.lightCount, shadowGPUData.size());
         s_FirstFrame = false;
     }

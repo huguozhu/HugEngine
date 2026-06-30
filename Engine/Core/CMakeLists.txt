@@ -6,6 +6,7 @@ add_library(HugEngineCore STATIC)
 target_sources(HugEngineCore PRIVATE
     Core/Engine.cpp
     Core/Log.cpp
+    Math/Geometry.cpp
     Platform/Window.cpp
     Threading/JobSystem.cpp
 )
