@@ -165,6 +165,9 @@ private:
     bool                       m_FramebuffersNeedRebuild = true;
     u32                       m_CurrentImageIndex = 0;
 
+    // 命令缓冲录制状态（防护 vkCmdBindPipeline 在 Begin 前调用）
+    bool          m_IsRecording = false;
+
     // 离屏渲染通道状态
     VkRenderPass  m_OffscreenRP = VK_NULL_HANDLE;
     bool          m_InOffscreenPass = false;

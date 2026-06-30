@@ -833,10 +833,12 @@ void VulkanCommandList::Begin() {
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     vkBeginCommandBuffer(m_CmdBuffers[m_FrameIndex], &beginInfo);
+    m_IsRecording = true;
 }
 
 void VulkanCommandList::End() {
     vkEndCommandBuffer(m_CmdBuffers[m_FrameIndex]);
+    m_IsRecording = false;
 }
 
 void VulkanCommandList::BeginRenderPass(u32 colorCount, Format, Format depthFormat,
@@ -1044,9 +1046,11 @@ void VulkanCommandList::SetPipeline(IRHIPipelineState* pso) {
     m_CurrentLayout     = vkPso->GetPipelineLayout();
     m_CurrentRenderPass = vkPso->GetRenderPass();
 
-    // 绑定管线到命令缓冲（Primary/Secondary 统一处理）
-    vkCmdBindPipeline(m_CmdBuffers[m_FrameIndex], VK_PIPELINE_BIND_POINT_GRAPHICS,
-                     m_CurrentPipeline);
+    // 仅当命令缓冲处于录制状态时绑定管线（防止 Begin 前调用导致的堆损坏）
+    if (m_IsRecording) {
+        vkCmdBindPipeline(m_CmdBuffers[m_FrameIndex], VK_PIPELINE_BIND_POINT_GRAPHICS,
+                         m_CurrentPipeline);
+    }
 
     // Render pass 变化时标记 framebuffer 需重建
     m_FramebuffersNeedRebuild = true;
