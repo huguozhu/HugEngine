@@ -141,7 +141,13 @@ private:
     VkCommandBuffer  m_CmdBuffers[kMaxFramesInFlight] = {};
     VkFence          m_Fences[kMaxFramesInFlight]     = {};
     u32              m_FrameIndex = 0;  // 当前帧槽位
-    VkCommandPool    m_SecondaryPool = VK_NULL_HANDLE;  // Phase 2 辅助 CB 池
+
+    // Phase 2 辅助命令缓冲池（预分配 6 个，每 Cubemap 面一个，避免重置冲突）
+    static constexpr u32 kMaxSecondaryCBs = 6;
+    VkCommandPool    m_SecondaryPool = VK_NULL_HANDLE;
+    VkCommandBuffer  m_SecCmdBuffers[kMaxSecondaryCBs] = {};
+    u32              m_SecSlot   = 0;  // 下一个可用槽位
+    u32              m_SecActive = 0;  // 当前活跃的 sec CB 索引
 
     // 关联的 SwapChain（自动管理 Framebuffer + 同步 + 图像索引）
     VulkanSwapChain* m_pSwapChain = nullptr;

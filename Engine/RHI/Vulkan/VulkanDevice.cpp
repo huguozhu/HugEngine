@@ -754,7 +754,7 @@ VulkanCommandList::VulkanCommandList(VkDevice device, VkQueue queue, u32 queueFa
     }
 }
 
-// Phase 2: 辅助命令缓冲构造
+// Phase 2: 辅助命令缓冲构造（预分配 kMaxSecondaryCBs 个 sec CB，避免复用冲突）
 VulkanCommandList::VulkanCommandList(VkDevice device, u32 queueFamily,
                                      VulkanDevice* vulkanDevice)
     : m_Device(device), m_QueueFamily(queueFamily), m_VulkanDevice(vulkanDevice)
@@ -769,8 +769,9 @@ VulkanCommandList::VulkanCommandList(VkDevice device, u32 queueFamily,
     allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     allocInfo.commandPool = m_SecondaryPool;
     allocInfo.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
-    allocInfo.commandBufferCount = 1;
-    vkAllocateCommandBuffers(m_Device, &allocInfo, &m_CmdBuffers[0]);
+    allocInfo.commandBufferCount = kMaxSecondaryCBs;
+    vkAllocateCommandBuffers(m_Device, &allocInfo, m_SecCmdBuffers);
+    m_SecSlot = 0;
 }
 
 VulkanCommandList::~VulkanCommandList() {
@@ -792,6 +793,12 @@ VulkanCommandList::~VulkanCommandList() {
 }
 
 void VulkanCommandList::BeginSecondary(IRHIPipelineState* pso) {
+    // 槽位耗尽时重置池（此时 primary CB 应已提交，sec CB 引用已消费）
+    if (m_SecSlot >= kMaxSecondaryCBs) {
+        vkResetCommandPool(m_Device, m_SecondaryPool, 0);
+        m_SecSlot = 0;
+    }
+
     auto* vkPSO = static_cast<VulkanPipelineState*>(pso);
     VkCommandBufferInheritanceInfo inheritInfo{};
     inheritInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO;
@@ -804,13 +811,19 @@ void VulkanCommandList::BeginSecondary(IRHIPipelineState* pso) {
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT
                     | VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     beginInfo.pInheritanceInfo = &inheritInfo;
-    vkResetCommandPool(m_Device, m_SecondaryPool, 0);
-    vkBeginCommandBuffer(m_CmdBuffers[0], &beginInfo);
+
+    vkBeginCommandBuffer(m_SecCmdBuffers[m_SecSlot], &beginInfo);
+    // 别名给 SetPipeline/Draw 等 Vulkan 调用共用（m_FrameIndex=0 for secondary）
+    m_CmdBuffers[m_FrameIndex] = m_SecCmdBuffers[m_SecSlot];
+    m_SecActive = m_SecSlot;
+    m_IsRecording = true;
 }
 
 void VulkanCommandList::ExecuteSecondary(IRHICommandList* secondary) {
     auto* vkSec = static_cast<VulkanCommandList*>(secondary);
-    vkCmdExecuteCommands(m_CmdBuffers[m_FrameIndex], 1, &vkSec->m_CmdBuffers[0]);
+    // 执行 sec CL 当前活跃的 sec CB（而非已被覆盖的旧 CB）
+    vkCmdExecuteCommands(m_CmdBuffers[m_FrameIndex], 1,
+                         &vkSec->m_SecCmdBuffers[vkSec->m_SecActive]);
 }
 
 void VulkanCommandList::Begin() {
@@ -837,7 +850,13 @@ void VulkanCommandList::Begin() {
 }
 
 void VulkanCommandList::End() {
-    vkEndCommandBuffer(m_CmdBuffers[m_FrameIndex]);
+    if (m_SecondaryPool) {
+        // 辅助命令缓冲：结束当前槽位的 sec CB，槽位递增
+        vkEndCommandBuffer(m_SecCmdBuffers[m_SecActive]);
+        m_SecSlot = m_SecActive + 1;
+    } else {
+        vkEndCommandBuffer(m_CmdBuffers[m_FrameIndex]);
+    }
     m_IsRecording = false;
 }
 
