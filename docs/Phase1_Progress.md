@@ -4,13 +4,15 @@
 
 ## 整体进度
 
-Phase 1-4 核心渲染功能已完成，Phase 5（多线程渲染）进行中。
+Phase 1-4 核心渲染功能完成，多线程渲染 Phase 5 部分完成，Skybox 系统完成。
 
 - **Phase 1**: 8 个引擎模块落地（Core/Reflect/RHI/Shader/Render/Scene/Asset/Editor）
 - **Phase 2**: PBR 前向管线 + 反射序列化 + 多光源 + Bindless 基础设施
 - **Phase 3**: 独立编辑器应用（Viewport/Outliner/Details/ContentBrowser/ProjectSettings/PlayStop）
 - **Phase 4**: 阴影系统 + HDR 管线 + 点光源阴影 + ImGui 控制面板
-- **Phase 5**: 多线程渲染（Phase 1 三缓冲完成，Phase 2 辅助命令缓冲部分完成）
+- **Skybox**: 天空盒系统（VS 全屏三角形 + 逆VP + Cubemap 采样 + ECS 组件）
+- **多线程 Phase 5-1**: 三缓冲帧环 + 非阻塞提交 + 持久映射（FPS 20→74）
+- **多线程 Phase 5-2**: RHI 辅助命令缓冲（ForwardPipeline 集成受阻）
 - **示例**: 01.Triangle + 02.Cube + 03.Sponza + HugEditor
 
 ## 模块完成度
@@ -18,155 +20,80 @@ Phase 1-4 核心渲染功能已完成，Phase 5（多线程渲染）进行中。
 ### L0 — Core（平台层）✅
 | 子系统 | 文件 | 状态 |
 |--------|------|------|
-| Types | `Core/Types.h` | ✅ |
-| Platform | `Core/Platform.h`, `Platform/Window.h/.cpp` (GLFW) | ✅ |
-| Assert | `Core/Assert.h` | ✅ |
-| Log | `Core/Log.h/.cpp` (spdlog) + LogLevel 枚举 | ✅ |
-| Engine | `Core/Engine.h/.cpp` (+ EngineConfig::logLevel) | ✅ |
+| Types/Platform/Assert/Log/Engine | 基础平台层 | ✅ |
 | Math | `Math/Math.h` (GLM), `Math/Geometry.h` | ✅ |
-| Containers | `Containers/Array.h` (TArray, TMap, TInlineVec) | ✅ |
-| Memory | `Memory/Allocator.h` (IAllocator, MallocAllocator) | ✅ |
+| Containers/Memory | TArray, TMap, Allocator | ✅ |
 | Threading | `Threading/JobSystem.h/.cpp` (Taskflow) | ✅ |
 
 ### L1 — Reflect（反射层）✅
 | 子系统 | 文件 | 状态 |
 |--------|------|------|
-| ReflectionAPI | `Public/Reflect/ReflectionAPI.h` | ✅ |
-| ReflectionMacros | `Public/Reflect/ReflectionMacros.h` | ✅ |
-| TypeInfo | `Public/Reflect/TypeInfo.h` | ✅ |
-| TypeRegistry | `Private/TypeRegistry.cpp` | ✅ |
-| Attribute | `Public/Reflect/Attribute.h` | ✅ |
-| Serialize | `Serialize/Public/Serialize/Archive.h`, `BinaryArchive.h`, `Private/BinaryArchive.cpp` | ✅ |
+| ReflectionAPI/Macros/TypeInfo | 反射基础 | ✅ |
+| TypeRegistry/Attribute | 类型注册 | ✅ |
+| Serialize | Archive, BinaryArchive | ✅ |
 
 ### L2 — RHI（渲染硬件接口层）✅
 | 子系统 | 文件 | 状态 |
 |--------|------|------|
-| 公共接口 | `Public/RHI/RHI.h`, `Types.h`, `Buffer.h`, `Shader.h`, `SwapChain.h`, `CommandList.h` | ✅ |
-| TextureUsage | Cubemap 标志 + IRHITexture::GetNativeHandle(face) | ✅ |
-| Descriptor Sets | CreateDescriptorSetLayout / AllocateDescriptorSet / UpdateDescriptorSet(tex+sampler) / BindDescriptorSet | ✅ |
-| Push Constants / Barrier | SetPushConstants / PipelineBarrier（全局 + 图像布局转换） | ✅ |
-| 离屏渲染 | BeginOffscreenPass / EndOffscreenPass（非 SwapChain 渲染目标） | ✅ |
-| Vulkan 后端 | `Vulkan/VulkanDevice.cpp`, `VulkanResources.cpp`, `VulkanInternal.h` | ✅ |
-| 深度专用管线 | colorAttachmentCount=0 → depth-only render pass | ✅ |
-| Cubemap 支持 | VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT + 6 面独立 ImageView | ✅ |
-| 描述符池 | StorageBuffer=512, CombinedImageSampler=1024, maxSets=256 | ✅ |
+| 公共接口 | RHI.h, Types.h, Buffer.h, Shader.h, SwapChain.h, CommandList.h | ✅ |
+| Descriptor Sets / Push Constants | CreateDescriptorSetLayout / SetPushConstants / PipelineBarrier | ✅ |
+| 离屏渲染 | BeginOffscreenPass / EndOffscreenPass | ✅ |
+| Vulkan 后端 | VulkanDevice.cpp, VulkanResources.cpp, VulkanInternal.h | ✅ |
+| 深度专用管线 / Cubemap / 描述符池 | colorAttachmentCount=0, CUBE_COMPATIBLE, maxSets=256 | ✅ |
 | 三缓冲帧环 | kMaxFramesInFlight=3 cmd pools/buffers/fences（Phase 5-1） | ✅ |
 | 持久映射 | VulkanBuffer 构造时 vkMapMemory，Map/Unmap 变 no-op（Phase 5-1） | ✅ |
-| 辅助命令缓冲 | BeginSecondary / ExecuteSecondary / CreateSecondaryCommandList（Phase 5-2） | ✅ |
-| FB 生命周期 | 延迟销毁队列（离屏）+ 标记重建（SwapChain），避免 CB 录制期间销毁 | ✅ |
+| 辅助命令缓冲 | BeginSecondary/ExecuteSecondary/CreateSecondaryCommandList（Phase 5-2） | ✅ |
+| FB 生命周期 | 延迟销毁队列（离屏）+ 标记重建（SwapChain） | ✅ |
+| 空顶点输入 | vertexBindingDescriptionCount=0（SV_VertexID 全屏三角形） | ✅ |
+| SetPipeline 绑定 | vkCmdBindPipeline（关键修复） | ✅ |
 
 ### L3 — Shader（着色器层）✅
 | 子系统 | 文件 | 状态 |
 |--------|------|------|
-| Slang 编译器 | `CMakeLists.txt` (slangc, Vulkan SDK 自带) | ✅ |
-| SPIR-V 嵌入 | `spv_to_header.py` | ✅ |
-| PBR Shader | `Shaders/PBR.vert.slang`, `PBR.frag.slang`, `pbr_common.slang` | ✅ |
-| Shadow Shader | `Shaders/Shadow.vert.slang`, `Shadow.frag.slang` | ✅ |
-| ToneMap Shader | `Shaders/ToneMap.vert.slang`, `ToneMap.frag.slang`（ACES + LinearToSRGB） | ✅ |
-| 示例 Shader | `Shaders/Triangle.vert.slang`, `Triangle.frag.slang` | ✅ |
-| PCF 阴影采样 | 3×3 kernel 手动深度比较（pbr_common.slang） | ✅ |
-| Cubemap 阴影采样 | SamplePointShadow() 方向向量采样 + 距离比较（pbr_common.slang） | ✅ |
-| 多纹理采样 | BaseColor/Normal/MetallicRoughness/Occlusion + ShadowMap + PointShadowCube | ✅ |
+| Slang 编译器 / SPIR-V 嵌入 | CMakeLists + spv_to_header.py | ✅ |
+| PBR Shader | PBR.vert.slang, PBR.frag.slang, pbr_common.slang | ✅ |
+| Shadow Shader | Shadow.vert.slang, Shadow.frag.slang | ✅ |
+| ToneMap Shader | ToneMap.vert.slang, ToneMap.frag.slang | ✅ |
+| **Skybox Shader** | **Skybox.vert.slang, Skybox.frag.slang** | ✅ |
+| 示例 Shader | Triangle.vert.slang, Triangle.frag.slang | ✅ |
+| PCF / Cubemap 阴影采样 | 3x3 kernel + SamplePointShadow() | ✅ |
 
 ### L4 — Render（渲染层）✅
 | 子系统 | 文件 | 状态 |
 |--------|------|------|
-| Forward 管线 | `Pipeline/ForwardPipeline.h/.cpp` (PBR + 多光源 + Per-primitive 纹理) | ✅ |
-| Material 系统 | `Pipeline/Material.h` (glTF 2.0 PBR + GPUObjectData + GPULight + GPUShadowData) | ✅ |
-| Camera 系统 | `Pipeline/Camera.h` (视图/投影/视锥体) | ✅ |
+| Forward 管线 | ForwardPipeline.h/.cpp (PBR + 多光源 + 纹理 + 阴影 + 天空盒) | ✅ |
+| Material 系统 | Material.h (GPUObjectData + GPULight + GPUShadowData) | ✅ |
+| Camera 系统 | Camera.h (视图/投影/视锥体) | ✅ |
 | 方向光阴影 | BeginShadowPass → RenderShadowPass → EndShadowPass + Barrier | ✅ |
-| 点光源阴影 | RenderPointShadowPass：Cubemap 6 面 90° 透视渲染 | ✅ |
-| HDR 离屏管线 | BeginHDRPass(RGBA16_FLOAT+D32) → EndHDRPass → ToneMap(ACES+sRGB) → SwapChain | ✅ |
-| Per-primitive 纹理 | CreateTextureDescriptorSet → 独立描述符集 → 渲染时直接 Bind | ✅ |
-| ImGui 控制面板 | 相机位置/朝向/速度 + 光源方向/颜色/强度 + 阴影参数可编辑 | ✅ |
+| 点光源阴影 | RenderPointShadowPass：Cubemap 6 面 90 度透视渲染 | ✅ |
+| HDR 离屏管线 | BeginHDRPass → EndHDRPass → ToneMap(ACES+sRGB) → SwapChain | ✅ |
+| Per-primitive 纹理 | 独立描述符集 → 渲染时直接 Bind | ✅ |
+| **天空盒** | **RenderSkybox()：全屏三角形 + Equal 深度测试 + Cubemap** | ✅ |
+| ImGui 控制面板 | 相机/光源/阴影参数可编辑 | ✅ |
 | Deferred / 后处理 | — | ❌ |
 
 ### L5 — Scene（场景层）✅
 | 子系统 | 文件 | 状态 |
 |--------|------|------|
-| Entity | `Public/Scene/Entity.h` | ✅ |
-| Component | `Public/Scene/Component.h` | ✅ |
-| Transform | `Public/Scene/Transform.h` | ✅ |
-| World | `Public/Scene/World.h`, `Private/World.cpp` | ✅ |
-| SceneGraph | `Public/Scene/SceneGraph.h`, `Private/SceneGraph.cpp` | ✅ |
-| MeshComponent | `Public/Scene/MeshComponent.h` (+ GPU 纹理字段 + 描述符集字段) | ✅ |
-| CubeComponent | `Public/Scene/CubeComponent.h` | ✅ |
-| SphereComponent | `Public/Scene/SphereComponent.h` | ✅ |
-| LightComponent | `Public/Scene/LightComponent.h` (Point/Directional/Spot + enabled 开关 + 阴影参数) | ✅ |
+| Entity/Component/Transform/World/SceneGraph | 核心场景系统 | ✅ |
+| MeshComponent | GPU 纹理字段 + 描述符集字段 | ✅ |
+| CubeComponent / SphereComponent | 形状组件 | ✅ |
+| LightComponent | Point/Directional/Spot + enabled 开关 + 阴影参数 | ✅ |
+| **SkyboxComponent** | **Cubemap 纹理 + 采样器 + intensity + enabled** | ✅ |
 
-### Asset（资源层）
-| 子系统 | 文件 | 状态 |
-|--------|------|------|
-| glTF 加载器 | `Public/Asset/glTFLoader.h`, `Private/glTFLoader.cpp` (cgltf 驱动) | ✅ |
-| 纹理路径提取 | ApplyMaterial → 5 种纹理 URI (BC/Normal/MR/Occlusion/Emissive) | ✅ |
-| 自动下载测试资源 | `cmake/DownloadAssets.cmake` (git sparse-checkout Sponza) | ✅ |
+## Skybox 系统关键技术细节
 
-### L8 — Editor（编辑器层）
-| 子系统 | 文件 | 状态 |
-|--------|------|------|
-| ImGui 集成 | `Public/Editor/ImGuiIntegration.h`, `Private/ImGuiIntegration.cpp` | ✅ |
-| ImGui 中文字体 | simhei.ttf 黑体 + CJK 字形范围（简体中文） | ✅ |
-| ImGui RP 兼容 | 深度附件 + subpass dependency 匹配 Forward RP | ✅ |
-| EditorApp | `Samples/Editor/EditorApp.h/.cpp`, `main.cpp` | ✅ |
-| 其他面板 | Viewport/Outliner/Details/ContentBrowser/ProjectSettings | ✅ |
-
-## 示例项目
-
-| 项目 | 说明 | 状态 |
-|------|------|------|
-| Samples/01.Triangle | 使用 IRHI 接口渲染三角形 | ✅ |
-| Samples/02.Cube | PBR 材质立方体+球体，WASD 自由相机，HDR + ToneMap | ✅ |
-| Samples/03.Sponza | Sponza glTF + PBR + 方向光阴影 + 点光阴影 + HDR + ImGui 控制面板 | ✅ |
-
-## 工程配置
-
-| 项目 | 说明 |
+| 细节 | 实现 |
 |------|------|
-| 构建系统 | CMake 4.3.1 + MSVC 2026 |
-| 第三方库 | git submodule + CDN (ImGui) + stb_image（纹理解码） |
-| 着色器语言 | Slang (slangc, Vulkan SDK 自带) |
-| C++ 标准 | C++20 (Engine) / C++17 (External) |
-| 资源下载 | cmake/DownloadAssets.cmake（Sponza glTF 自动下载） |
-| 验证层 | Vulkan Validation Layers，03.Sponza 和 02.Cube 均 0 VUID 错误 |
-
-## Phase 4 关键技术成果
-
-| 子系统 | 实现 |
-|--------|------|
-| glTF 加载器重写 | cgltf v1.14 替代手工字符串解析，支持 .glb/.gltf |
-| 纹理加载管线 | stb_image 解码 → RHI Texture 上传 → 纹理缓存去重 |
-| 着色器纹理采样 | PBR.frag 采样 4 种 PBR 贴图（BC/Normal/MR/AO） |
-| Per-primitive 纹理 | 独立描述符集 → 渲染时 BindDescriptorSet 直接切换 |
-| 方向光阴影 | Shadow PSO + ShadowMap + PCF 3×3 + Barrier 布局转换 |
-| 点光源阴影 | Cubemap 6 面 90° 透视渲染 + SamplePointShadow() |
-| HDR 离屏管线 | RGBA16_FLOAT 离屏目标 → ACES ToneMap → sRGB SwapChain |
-| ToneMap 后处理 | 全屏三角形 + CombinedImageSampler + ACES + LinearToSRGB |
-| ImGui 中文字体 | simhei.ttf 黑体 + CJK Unified Ideographs |
-| ImGui 控制面板 | 相机 DragFloat3/Slider、光源 SliderFloat3/ColorEdit3、阴影 Checkbox/DragFloat |
-| Vulkan RP 兼容 | ImGui RP 与 Forward RP 匹配深度附件和 subpass 依赖 |
-| 中文日志 | SetConsoleOutputCP(CP_UTF8) 解决 Windows 控制台乱码 |
-| LogLevel 控制 | LogLevel 枚举 + EngineConfig::logLevel（Sponza 默认 Error） |
-| 配置持久化 | Content/Config/03_Sponza.cfg 保存/加载相机+灯光参数 |
-| 光源 enabled 开关 | LightComponent::enabled + ImGui Checkbox + CollectLights 过滤 |
-| 点光源可视化 | SphereComponent 球体跟随点光源位置 + ImGui DragFloat3 同步 |
-
-## Phase 5 多线程渲染成果
-
-| 子系统 | 实现 | 状态 |
-|--------|------|------|
-| 三缓冲帧环 | 3 个 CommandPool + CommandBuffer + Fence，Begin 等待对应槽位 | ✅ |
-| 非阻塞提交 | Submit 移除 vkWaitForFences，CPU 提前 1-2 帧录制 | ✅ |
-| 持久映射 | VulkanBuffer 构造时 vkMapMemory，Map/Unmap 零开销 | ✅ |
-| Per-Frame Buffer Ring | ObjectBuffer/LightBuffer/ShadowBuffer ×3，每帧切换 | ✅ |
-| Secondary CB 接口 | BeginSecondary / ExecuteSecondary / CreateSecondaryCommandList | ✅ |
-| Pipeline 绑定 | BeginSecondary 中 vkCmdBindPipeline，解决 sec CB 无管线问题 | ✅ |
-| FB 生命周期修复 | SetPipeline 不再立即销毁 framebuffer，改为标记重建 + Begin 清理 | ✅ |
-| 离屏 FB 延迟销毁 | 每槽位独立 m_PendingFBs 队列，fence 等待后批量 vkDestroy | ✅ |
-| 点阴影 sec CB 集成 | RenderPointShadowPass 改为 sec CB 录制+执行 | 🚧 受阻 |
-
-**FPS 提升**：Phase 5-1 后 Sponza 从 ~20 FPS 提升到 ~74 FPS。
-
-**Phase 5-2 受阻原因**：RenderPointShadowPass 使用 secondary CB 时，执行 ≥2 个面后 primary CB 进入 invalid state。录制 1 面全量 mesh + 执行 1 面正常，≥2 面即大量 VUID 错误。根因待排查。
+| 几何体 | 全屏三角形（3 顶点，SV_VertexID，无 Vertex Buffer） |
+| 顶点着色器 | NDC 坐标 → 逆 ViewProj（去平移）反算世界空间方向 |
+| 片元着色器 | TextureCube.Sample(方向) × intensity |
+| 深度测试 | Equal（仅远平面 depth=1.0 空白区域绘制） |
+| 渲染顺序 | 场景不透明物体 → 天空盒（场景覆盖天空盒） |
+| HDR 全景 | stbi_loadf 加载 skybox.hdr → Equirectangular → Cubemap 转换 |
+| 面纹理 | stbi_load 加载 6 面 daylight*.png |
+| 描述符集 | 缓存复用（避免 frame-in-flight UAF 纹理错乱） |
+| vkCmdBindPipeline | SetPipeline 必须调用（天空盒不渲染根因） |
 
 ## 已知限制
 
@@ -175,10 +102,9 @@ Phase 1-4 核心渲染功能已完成，Phase 5（多线程渲染）进行中。
 | 视口 3D 渲染到全屏 backbuffer | 3D 仅在 ImGui 透明区域可见 | 离屏渲染 (ImGui::Image) |
 | 无 Gizmo 操作 | 无法拖拽移动/旋转/缩放 | 编辑器增强 |
 | 无鼠标拾取选择 | 只能通过 Outliner 选中 | 编辑器增强 |
-| 点光阴影无视锥剔除 | 6 面 × 103 mesh ≈ 618 draw/帧 | Per-face 视锥剔除 (Phase 5-3) |
+| 点光阴影无视锥剔除 | 6 面 × 103 mesh ≈ 618 draw/帧 | Per-face 视锥剔除 |
 | 无点光阴影 PCF | 点光阴影为单采样，边缘硬 | 多采样软阴影 |
 | sec CB 多面执行崩溃 | ≥2 面 primary CB invalid | 根因待查 |
-| 启动偶发崩溃 | BeginRenderPass 返回时 EndRenderPass 未检查 | 已修复 (m_InRenderPass 标记) |
 
 ## 待实施
 
