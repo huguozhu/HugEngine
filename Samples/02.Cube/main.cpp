@@ -18,11 +18,13 @@
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
 #include "Scene/Transform.h"
+#include "Scene/SkyboxComponent.h"
 #include "Editor/ImGuiIntegration.h"
 #include "imgui.h"
 
 #include <cmath>
 #include <cstring>
+#include <vector>
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -69,8 +71,8 @@ int main() {
     // --- 1. 引擎启动 ---
     EngineConfig config;
     config.appName      = "HugEngine — PBR Forward Pipeline";
-    config.windowWidth  = 1920;
-    config.windowHeight = 1080;
+    config.windowWidth  = 960;
+    config.windowHeight = 500;
     config.enableVSync  = true;
 
     Engine engine(config);
@@ -139,6 +141,40 @@ int main() {
         sceneGraph.SetParent(lightEntity, Entity{kInvalidEntity});
     }
 
+    // --- 天空盒（程序化蓝色渐变 Cubemap）---
+    {
+        const u32 faceSize = 64;
+        const u32 faceBytes = faceSize * faceSize * 4;
+        std::vector<u8> allFaces(faceBytes * 6);
+        for (u32 f = 0; f < 6; ++f) {
+            u8* d = allFaces.data() + f * faceBytes;
+            for (u32 y = 0; y < faceSize; ++y) {
+                float t = (float)y / faceSize;
+                u8 r = (u8)(glm::mix(0.2f, 0.6f, t)*255);
+                u8 g = (u8)(glm::mix(0.3f, 0.7f, t)*255);
+                u8 b = (u8)(glm::mix(0.6f, 0.9f, t)*255);
+                for (u32 x = 0; x < faceSize; ++x) {
+                    usize i = (y*faceSize+x)*4;
+                    d[i]=r; d[i+1]=g; d[i+2]=b; d[i+3]=255;
+                }
+            }
+        }
+        rhi::TextureDesc cmDesc;
+        cmDesc.format=rhi::Format::RGBA8_UNORM; cmDesc.width=cmDesc.height=faceSize;
+        cmDesc.mipLevels=1; cmDesc.arrayLayers=6;
+        cmDesc.usage=rhi::TextureUsage::ShaderResource|rhi::TextureUsage::Cubemap|rhi::TextureUsage::TransferDst;
+        cmDesc.initialData=allFaces.data();
+        auto cm= device->CreateTexture(cmDesc);
+        rhi::SamplerDesc s; s.minFilter=s.magFilter=rhi::FilterMode::Linear;
+        s.addressU=s.addressV=s.addressW=rhi::AddressMode::ClampToEdge;
+        auto cs = device->CreateSampler(s);
+        Entity e = world.CreateEntity("Skybox");
+        world.AddComponent<TransformComponent>(e);
+        auto* sc = world.AddComponent<SkyboxComponent>(e);
+        sc->SetCubemap(std::move(cm), std::move(cs));
+        sceneGraph.SetParent(e, Entity{kInvalidEntity});
+    }
+
     HE_CORE_INFO("Scene created: {} entities", world.GetEntityCount());
 
     // --- 5. 初始化前向管线 ---
@@ -178,8 +214,10 @@ int main() {
 
     // --- 8. 窗口调整回调 ---
     engine.GetWindow()->SetResizeCallback([&](u32 w, u32 h) {
+        if (w == 0 || h == 0) return;
         swapchain->Resize(w, h);
         cmdList->SetSwapChain(swapchain.get());
+        pipeline.ResizeHDRTarget(w, h);
         camera.SetAspectRatio(static_cast<float>(w), static_cast<float>(h));
     });
 
@@ -271,6 +309,7 @@ int main() {
         pipeline.BeginFrame(cmdList.get(),
             swapchain->GetWidth(), swapchain->GetHeight());
         pipeline.RenderScene(cmdList.get(), world, sceneGraph, camera);
+        pipeline.RenderSkybox(cmdList.get(), world, camera.GetViewProjMatrix());
         pipeline.EndHDRPass(cmdList.get());
 
         // ToneMap 后处理 + ImGui（输出到 SwapChain）

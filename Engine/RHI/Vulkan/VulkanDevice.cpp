@@ -1044,8 +1044,11 @@ void VulkanCommandList::SetPipeline(IRHIPipelineState* pso) {
     m_CurrentLayout     = vkPso->GetPipelineLayout();
     m_CurrentRenderPass = vkPso->GetRenderPass();
 
-    // Render pass 变化时标记 framebuffer 需重建（不立即销毁，GPU 可能还在用）
-    // 旧 framebuffer 在 Begin() 的 fence 等待后安全销毁
+    // 绑定管线到命令缓冲（Primary/Secondary 统一处理）
+    vkCmdBindPipeline(m_CmdBuffers[m_FrameIndex], VK_PIPELINE_BIND_POINT_GRAPHICS,
+                     m_CurrentPipeline);
+
+    // Render pass 变化时标记 framebuffer 需重建
     m_FramebuffersNeedRebuild = true;
 }
 

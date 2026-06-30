@@ -10,6 +10,7 @@
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
 #include "Scene/LightComponent.h"
+#include "Scene/SkyboxComponent.h"
 
 namespace he {
 
@@ -44,6 +45,9 @@ HE_BEGIN_REGISTER(he::PointLight)
 HE_END_REGISTER()
 
 HE_BEGIN_REGISTER(he::SpotLight)
+HE_END_REGISTER()
+
+HE_BEGIN_REGISTER(he::SkyboxComponent)
 HE_END_REGISTER()
 
 } // namespace he

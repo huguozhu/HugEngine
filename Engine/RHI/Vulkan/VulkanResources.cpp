@@ -721,10 +721,11 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     VkRenderPass renderPass;
     vkCreateRenderPass(device, &rpInfo, nullptr, &renderPass);
 
-    // 3. Vertex input
+    // 3. Vertex input（空 layout → SV_VertexID 全屏三角形，无需 VB）
+    bool hasVertexInput = (desc.vertexLayout.stride > 0) || (!desc.vertexLayout.attributes.empty());
     VkVertexInputBindingDescription binding{};
     binding.binding   = 0;
-    binding.stride    = desc.vertexLayout.stride > 0 ? desc.vertexLayout.stride : 8;
+    binding.stride    = hasVertexInput ? (desc.vertexLayout.stride > 0 ? desc.vertexLayout.stride : 8) : 0;
     binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
     // VertexFormat -> VkFormat 映射
@@ -768,10 +769,10 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
 
     VkPipelineVertexInputStateCreateInfo vertexInput{};
     vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    vertexInput.vertexBindingDescriptionCount   = 1;
-    vertexInput.pVertexBindingDescriptions      = &binding;
-    vertexInput.vertexAttributeDescriptionCount = static_cast<u32>(vkAttrs.size());
-    vertexInput.pVertexAttributeDescriptions    = vkAttrs.data();
+    vertexInput.vertexBindingDescriptionCount   = hasVertexInput ? 1u : 0u;
+    vertexInput.pVertexBindingDescriptions      = hasVertexInput ? &binding : nullptr;
+    vertexInput.vertexAttributeDescriptionCount = hasVertexInput ? static_cast<u32>(vkAttrs.size()) : 0u;
+    vertexInput.pVertexAttributeDescriptions    = hasVertexInput ? vkAttrs.data() : nullptr;
 
     // 4. Input assembly
     VkPipelineInputAssemblyStateCreateInfo inputAssembly{};

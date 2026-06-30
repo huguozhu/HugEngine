@@ -11,6 +11,7 @@ target_sources(HugEngineScene PRIVATE
     Private/CubeComponent.cpp
     Private/SphereComponent.cpp
     Private/LightComponent.cpp
+    Private/SkyboxComponent.cpp
 )
 
 target_include_directories(HugEngineScene

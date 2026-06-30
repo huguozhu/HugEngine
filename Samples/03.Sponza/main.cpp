@@ -17,6 +17,7 @@
 #include "Scene/LightComponent.h"
 #include "Scene/Transform.h"
 #include "Scene/SphereComponent.h"
+#include "Scene/SkyboxComponent.h"
 #include "Asset/glTFLoader.h"
 #include "Editor/ImGuiIntegration.h"
 #include "imgui.h"
@@ -227,6 +228,93 @@ int main() {
         }
 
         sceneGraph.SetParent(pointLightSphereEntity, Entity{kInvalidEntity});
+    }
+
+    // --- 天空盒（从 skybox.hdr 生成 Cubemap）---
+    {
+        // 加载 HDR 全景图（stbi_loadf 返回 float 数据）
+        String hdrPath = String(HUGE_CONTENT_DIR) + "Textures/skybox.hdr";
+        int hdrW, hdrH, hdrCh;
+        float* hdrData = stbi_loadf(hdrPath.c_str(), &hdrW, &hdrH, &hdrCh, 4);
+        if (!hdrData) {
+            HE_CORE_WARN("skybox.hdr 加载失败: {}", hdrPath);
+        } else {
+            HE_CORE_INFO("skybox.hdr: {}×{} ({} channels)", hdrW, hdrH, hdrCh);
+
+            const u32 faceSize = 512;  // 每面分辨率
+            const u32 faceBytes = faceSize * faceSize * 4;
+            std::vector<u8> allFaces(faceBytes * 6);
+
+            // Cubemap 6 面方向（Vulkan 标准）
+            struct { float3 dir; float3 up; float3 right; } faces[6] = {
+                {{ 1, 0, 0}, {0,-1, 0}, {0, 0,-1}},  // +X
+                {{-1, 0, 0}, {0,-1, 0}, {0, 0, 1}},  // -X
+                {{ 0, 1, 0}, {0, 0, 1}, {1, 0, 0}},  // +Y
+                {{ 0,-1, 0}, {0, 0,-1}, {1, 0, 0}},  // -Y
+                {{ 0, 0, 1}, {0,-1, 0}, {1, 0, 0}},  // +Z
+                {{ 0, 0,-1}, {0,-1, 0}, {-1,0, 0}},  // -Z
+            };
+
+            for (u32 f = 0; f < 6; ++f) {
+                u8* faceData = allFaces.data() + f * faceBytes;
+                for (u32 y = 0; y < faceSize; ++y) {
+                    for (u32 x = 0; x < faceSize; ++x) {
+                        // 像素 → NDC [-1,1]
+                        float u = (2.0f * x / faceSize) - 1.0f;
+                        float v = (2.0f * y / faceSize) - 1.0f;
+                        // 世界空间方向
+                        float3 dir = glm::normalize(
+                            faces[f].dir + faces[f].right * u + faces[f].up * v);
+                        // 方向 → Equirectangular UV
+                        float eqU = (std::atan2(dir.z, dir.x) / (2.0f * 3.14159265f)) + 0.5f;
+                        float eqV = (std::asin(glm::clamp(dir.y, -1.0f, 1.0f)) / 3.14159265f) + 0.5f;
+                        // 双线性采样 HDR（简单最近邻以避免边界计算）
+                        int px = static_cast<int>(eqU * hdrW) % hdrW;
+                        int py = static_cast<int>(eqV * hdrH) % hdrH;
+                        if (px < 0) px += hdrW;
+                        if (py < 0) py += hdrH;
+                        float* src = hdrData + (py * hdrW + px) * 4;
+                        // HDR float → u8（Reinhard tonemap）
+                        auto tonemap = [](float c) {
+                            c = c / (1.0f + c);  // Reinhard
+                            return static_cast<u8>(glm::clamp(c, 0.0f, 1.0f) * 255.0f);
+                        };
+                        usize idx = (y * faceSize + x) * 4;
+                        faceData[idx+0] = tonemap(src[0]);
+                        faceData[idx+1] = tonemap(src[1]);
+                        faceData[idx+2] = tonemap(src[2]);
+                        faceData[idx+3] = 255;
+                    }
+                }
+            }
+            stbi_image_free(hdrData);
+
+            rhi::TextureDesc cmDesc;
+            cmDesc.format      = rhi::Format::RGBA8_UNORM;
+            cmDesc.width       = faceSize;
+            cmDesc.height      = faceSize;
+            cmDesc.mipLevels   = 1;
+            cmDesc.arrayLayers = 6;
+            cmDesc.usage       = rhi::TextureUsage::ShaderResource
+                               | rhi::TextureUsage::Cubemap
+                               | rhi::TextureUsage::TransferDst;
+            cmDesc.initialData = allFaces.data();
+            auto cubemap = device->CreateTexture(cmDesc);
+
+            rhi::SamplerDesc cmSamp;
+            cmSamp.minFilter  = rhi::FilterMode::Linear;
+            cmSamp.magFilter  = rhi::FilterMode::Linear;
+            cmSamp.addressU   = rhi::AddressMode::ClampToEdge;
+            cmSamp.addressV   = rhi::AddressMode::ClampToEdge;
+            cmSamp.addressW   = rhi::AddressMode::ClampToEdge;
+            auto cmSampler = device->CreateSampler(cmSamp);
+
+            Entity skyEntity = world.CreateEntity("Skybox");
+            world.AddComponent<TransformComponent>(skyEntity);
+            auto* skyComp = world.AddComponent<SkyboxComponent>(skyEntity);
+            skyComp->SetCubemap(std::move(cubemap), std::move(cmSampler));
+            sceneGraph.SetParent(skyEntity, Entity{kInvalidEntity});
+        }
     }
 
     HE_CORE_INFO("场景就绪: {} 实体", world.GetEntityCount());
@@ -488,6 +576,9 @@ int main() {
         pipeline.BeginFrame(cmdList.get(),
             swapchain->GetWidth(), swapchain->GetHeight());
         pipeline.RenderScene(cmdList.get(), world, sceneGraph, camera);
+        // Skybox 在场景之后渲染（depth=Equal，仅在空白区域绘制）
+        pipeline.RenderSkybox(cmdList.get(), world,
+                              camera.GetViewProjMatrix());
         pipeline.EndHDRPass(cmdList.get());
 
         // --- ToneMap 后处理 + ImGui（输出到 SwapChain B8G8R8A8）---

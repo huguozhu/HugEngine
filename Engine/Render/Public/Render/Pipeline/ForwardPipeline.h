@@ -157,11 +157,22 @@ private:
     std::unique_ptr<rhi::IRHITexture>  m_DefaultBaseColorTex;
     std::unique_ptr<rhi::IRHISampler>  m_DefaultBaseColorSampler;
 
+    // 天空盒（全屏三角形，无需 VB/IB）
+    std::unique_ptr<rhi::IRHIPipelineState> m_SkyboxPSO;
+    rhi::DescriptorSetLayoutHandle m_SkyboxDescLayout = rhi::kInvalidLayout;
+    rhi::ShaderBytecode m_SkyboxVS;
+    rhi::ShaderBytecode m_SkyboxFS;
+
     // 着色器字节码
     rhi::ShaderBytecode m_VS;
     rhi::ShaderBytecode m_FS;
     rhi::ShaderBytecode m_ShadowVS;
     rhi::ShaderBytecode m_ShadowFS;
+
+public:
+    // 渲染天空盒（遍历 Scene 中的 SkyboxComponent）
+    void RenderSkybox(rhi::IRHICommandList* cmd, he::World& world,
+                      const float4x4& viewProj);
 };
 
 } // namespace he::render

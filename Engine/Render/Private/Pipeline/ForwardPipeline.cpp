@@ -1,6 +1,7 @@
 #include "Render/Pipeline/ForwardPipeline.h"
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
+#include "Scene/SkyboxComponent.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include "EmbeddedShaders.h"
@@ -322,7 +323,47 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         HE_ASSERT(m_ToneMapPSO, "ForwardPipeline: failed to create ToneMap PSO");
     }
 
-    HE_CORE_INFO("ForwardPipeline initialized (with HDR + Tone Mapping)");
+    // --- 天空盒 PSO（全屏三角形，SV_VertexID，无需 VB/IB）---
+    {
+        m_SkyboxVS.stage      = rhi::ShaderStage::Vertex;
+        m_SkyboxVS.spirv      = k_Skybox_vert_spv;
+        m_SkyboxVS.entryPoint = "main";
+
+        m_SkyboxFS.stage      = rhi::ShaderStage::Pixel;
+        m_SkyboxFS.spirv      = k_Skybox_frag_spv;
+        m_SkyboxFS.entryPoint = "main";
+
+        rhi::DescriptorSetLayoutDesc skyLayout;
+        skyLayout.bindings = {
+            { 10, rhi::DescriptorType::CombinedImageSampler, 1, 16 },
+        };
+        m_SkyboxDescLayout = device->CreateDescriptorSetLayout(skyLayout);
+
+        // 天空盒专用 Push Constant：float4x4 + float = 80 bytes
+        rhi::PushConstantRange skyPCRange;
+        skyPCRange.stageMask = 1 | 16;  // Vertex | Fragment
+        skyPCRange.offset    = 0;
+        skyPCRange.size      = 96;  // float4x4(64) + float(4) + 16B对齐
+
+        rhi::PipelineStateDesc skyDesc;
+        skyDesc.vertexShader         = &m_SkyboxVS;
+        skyDesc.pixelShader          = &m_SkyboxFS;
+        skyDesc.topology             = rhi::PrimitiveTopology::TriangleList;
+        skyDesc.depthTest            = true;
+        skyDesc.depthWrite           = false;   // 不写深度
+        skyDesc.depthCompare         = rhi::CompareFunc::Equal;  // 仅远平面空白处
+        skyDesc.depthFormat          = rhi::Format::D32_FLOAT;
+        skyDesc.colorAttachmentCount = 1;
+        skyDesc.colorFormats[0]      = rhi::Format::RGBA16_FLOAT;
+        skyDesc.pushConstantRanges   = { skyPCRange };
+        skyDesc.descriptorSetLayouts = { m_SkyboxDescLayout };
+        skyDesc.debugName            = "Skybox";
+
+        m_SkyboxPSO = device->CreatePipelineState(skyDesc);
+        HE_ASSERT(m_SkyboxPSO, "ForwardPipeline: failed to create Skybox PSO");
+    }
+
+    HE_CORE_INFO("ForwardPipeline initialized (with HDR + Tone Mapping + Skybox)");
 }
 
 void ForwardPipeline::Shutdown() {
@@ -344,6 +385,8 @@ void ForwardPipeline::Shutdown() {
     m_HDRDepth.reset();
     m_HDRSampler.reset();
     if (m_Device) m_Device->DestroyDescriptorSetLayout(m_ToneMapLayout);
+    if (m_Device) m_Device->DestroyDescriptorSetLayout(m_SkyboxDescLayout);
+    m_SkyboxPSO.reset();
     m_Device = nullptr;
     HE_CORE_INFO("ForwardPipeline shut down");
 }
@@ -646,6 +689,42 @@ void ForwardPipeline::EndHDRPass(rhi::IRHICommandList* cmd) {
 
     // 预置 ToneMap PSO，确保后续 BeginRenderPass 使用正确的 SwapChain RP（B8G8R8A8）
     cmd->SetPipeline(m_ToneMapPSO.get());
+}
+
+void ForwardPipeline::RenderSkybox(rhi::IRHICommandList* cmd, he::World& world,
+                                    const float4x4& viewProj) {
+    he::SkyboxComponent* skybox = nullptr;
+    world.ForEach<he::SkyboxComponent>([&](he::Entity, he::SkyboxComponent& sc) {
+        if (sc.enabled && sc.GetCubemap()) skybox = &sc;
+    });
+    if (!skybox) return;
+
+    // 描述符集只分配一次，复用（cubemap/sampler 不变）
+    static rhi::DescriptorSetHandle s_CachedSkySet = rhi::kInvalidSet;
+    static he::SkyboxComponent* s_CachedSkybox = nullptr;
+    if (s_CachedSkySet == rhi::kInvalidSet || s_CachedSkybox != skybox) {
+        s_CachedSkySet = m_Device->AllocateDescriptorSet(m_SkyboxDescLayout);
+        m_Device->UpdateDescriptorSet(s_CachedSkySet, 10,
+            rhi::DescriptorType::CombinedImageSampler,
+            skybox->GetCubemap(), skybox->GetCubemapSampler());
+        s_CachedSkybox = skybox;
+    }
+    auto skySet = s_CachedSkySet;
+
+    // 计算逆 ViewProj（去除平移，仅保留旋转 + 投影的逆）
+    float4x4 viewNoTrans = viewProj;
+    viewNoTrans[3][0] = 0.0f; viewNoTrans[3][1] = 0.0f; viewNoTrans[3][2] = 0.0f;
+    float4x4 invViewProj = glm::inverse(viewNoTrans);
+
+    // Push Constants: float4x4(64) + float(4) + 28B对齐 = 96B
+    struct alignas(16) SkyboxPC { float4x4 invVP; float intensity; float _pad[7]; } pc{};
+    pc.invVP     = invViewProj;
+    pc.intensity = skybox->intensity;
+
+    cmd->SetPipeline(m_SkyboxPSO.get());
+    cmd->BindDescriptorSet(0, skySet);
+    cmd->SetPushConstants(0, sizeof(SkyboxPC), &pc);
+    cmd->Draw(3);  // 全屏三角形，3 顶点（SV_VertexID 驱动）
 }
 
 void ForwardPipeline::RenderToneMapPass(rhi::IRHICommandList* cmd) {
