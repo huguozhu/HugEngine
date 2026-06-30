@@ -104,7 +104,9 @@ Phase 1-4 核心渲染功能完成，多线程渲染 Phase 5 部分完成，Skyb
 | 无鼠标拾取选择 | 只能通过 Outliner 选中 | 编辑器增强 |
 | 点光阴影无视锥剔除 | 6 面 × 103 mesh ≈ 618 draw/帧 | Per-face 视锥剔除 |
 | 无点光阴影 PCF | 点光阴影为单采样，边缘硬 | 多采样软阴影 |
-| sec CB 多面执行崩溃 | ≥2 面 primary CB invalid | 根因待查 |
+| sec CB 多面执行崩溃 | ≥2 面 primary CB invalid | **✅ 已修复** (Phase 5-2) |
+| 方向光阴影跳变 | 阴影跟随相机移动 | **✅ 已修复**（固定世界中心） |
+| 部分视角阴影消失 | 极端视角阴影贴图覆盖不足 | CSM |
 
 ## 待实施
 
@@ -114,8 +116,10 @@ Phase 1-4 核心渲染功能完成，多线程渲染 Phase 5 部分完成，Skyb
 - Bindless 纹理数组（Texture2D[] + materialID 索引）
 - 离屏视口渲染（RHI Texture → ImGui::Image）
 - Gizmo 操作 + 鼠标拾取选择
-- 多线程视锥剔除（Phase 5-3）
-- sec CB 多面执行崩溃修复（Phase 5-2 续）
+- 多线程视锥剔除（Phase 5-3）**✅**
+- 多线程命令缓冲录制（Phase 5-4）**✅**
+- 方向光阴影跳变修复：固定世界中心 + 动态覆盖尺寸 **✅**
+- sec CB 多面执行崩溃修复（Phase 5-2 续）**✅**
 - GPU Driven 渲染（视锥剔除 / Hi-Z / ExecuteIndirect）
 - Prefab 系统 + Asset Registry + NameComponent
 - 骨骼动画 + 粒子系统
