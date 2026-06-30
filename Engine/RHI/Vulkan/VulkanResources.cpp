@@ -448,21 +448,10 @@ void VulkanTexture::UploadInitialData(VkCommandPool cmdPool, VkQueue queue,
         VK_PIPELINE_STAGE_TRANSFER_BIT,
         0, 0, nullptr, 0, nullptr, 1, &barrier);
 
-    // 若需 mipmap，将全图转为 GENERAL（避免逐 level barrier 追踪）
-    if (m_MipLevels > 1) {
-        barrier.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barrier.newLayout     = VK_IMAGE_LAYOUT_GENERAL;
-        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-        vkCmdPipelineBarrier(cmd,
-            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-            0, 0, nullptr, 0, nullptr, 1, &barrier);
-    }
-
-    // 拷贝暂存缓冲 → 图像
+    // 拷贝暂存缓冲 → 图像（level 0）
     VkBufferImageCopy copyRegion{};
     copyRegion.bufferOffset                    = 0;
-    copyRegion.bufferRowLength                 = 0; // 紧密排列
+    copyRegion.bufferRowLength                 = 0;
     copyRegion.bufferImageHeight               = 0;
     copyRegion.imageSubresource.aspectMask     = ToVkAspectMask(desc.format);
     copyRegion.imageSubresource.mipLevel       = 0;
@@ -474,8 +463,18 @@ void VulkanTexture::UploadInitialData(VkCommandPool cmdPool, VkQueue queue,
     vkCmdCopyBufferToImage(cmd, stagingBuffer, m_Image,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
 
-    // --- Mipmap 生成（GENERAL 布局避免逐 level barrier 追踪）---
+    // --- Mipmap 生成（Copy 后逐级 blit，标准逐级 barrier）---
     if (m_MipLevels > 1) {
+        VkImageMemoryBarrier mipBarrier{};
+        mipBarrier.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        mipBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        mipBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        mipBarrier.image               = m_Image;
+        mipBarrier.subresourceRange.aspectMask     = ToVkAspectMask(desc.format);
+        mipBarrier.subresourceRange.baseArrayLayer = 0;
+        mipBarrier.subresourceRange.layerCount     = m_ArrayLayers;
+        mipBarrier.subresourceRange.levelCount     = 1;
+
         i32 mipW = static_cast<i32>(m_Width);
         i32 mipH = static_cast<i32>(m_Height);
 
@@ -483,6 +482,17 @@ void VulkanTexture::UploadInitialData(VkCommandPool cmdPool, VkQueue queue,
             i32 nextW = mipW > 1 ? mipW / 2 : 1;
             i32 nextH = mipH > 1 ? mipH / 2 : 1;
 
+            // level i-1: TRANSFER_DST → TRANSFER_SRC（作为 blit 源）
+            mipBarrier.subresourceRange.baseMipLevel = i - 1;
+            mipBarrier.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            mipBarrier.newLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            mipBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            mipBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            vkCmdPipelineBarrier(cmd,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                0, 0, nullptr, 0, nullptr, 1, &mipBarrier);
+
+            // Blit level i-1 → level i
             VkImageBlit blit{};
             blit.srcSubresource.aspectMask     = ToVkAspectMask(desc.format);
             blit.srcSubresource.mipLevel       = i - 1;
@@ -498,28 +508,44 @@ void VulkanTexture::UploadInitialData(VkCommandPool cmdPool, VkQueue queue,
             blit.dstOffsets[1] = {nextW, nextH, 1};
 
             vkCmdBlitImage(cmd,
-                m_Image, VK_IMAGE_LAYOUT_GENERAL,
-                m_Image, VK_IMAGE_LAYOUT_GENERAL,
+                m_Image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                m_Image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                 1, &blit, VK_FILTER_LINEAR);
+
+            // level i-1: TRANSFER_SRC → SHADER_READ_ONLY（完成使命）
+            mipBarrier.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            mipBarrier.newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            mipBarrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            mipBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(cmd,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                0, 0, nullptr, 0, nullptr, 1, &mipBarrier);
 
             mipW = nextW;
             mipH = nextH;
         }
+
+        // 最后一层 level: TRANSFER_DST → SHADER_READ_ONLY
+        mipBarrier.subresourceRange.baseMipLevel = m_MipLevels - 1;
+        mipBarrier.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        mipBarrier.newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        mipBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        mipBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &mipBarrier);
+    } else {
+        // 单 mip level：TRANSFER_DST → SHADER_READ_ONLY
+        barrier.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        barrier.subresourceRange.levelCount = 1;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &barrier);
     }
-
-    // 最终布局：GENERAL 或 TRANSFER_DST → SHADER_READ_ONLY（所有 level）
-    barrier.oldLayout     = (m_MipLevels > 1) ? VK_IMAGE_LAYOUT_GENERAL
-                                               : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    barrier.newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    barrier.srcAccessMask = (m_MipLevels > 1) ? (VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT)
-                                               : VK_ACCESS_TRANSFER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    barrier.subresourceRange.levelCount = m_MipLevels;
-
-    vkCmdPipelineBarrier(cmd,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-        0, 0, nullptr, 0, nullptr, 1, &barrier);
 
     vkEndCommandBuffer(cmd);
 
