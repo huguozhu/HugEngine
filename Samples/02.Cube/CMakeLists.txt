@@ -8,6 +8,11 @@ target_link_libraries(02.Cube PRIVATE
     HugEngineScene
     HugEngineRender
     HugEngineEditor
+    stb   # stb_image.h 纹理解码
+)
+
+target_compile_definitions(02.Cube PRIVATE
+    HUGE_CONTENT_DIR="${CMAKE_SOURCE_DIR}/Content/"
 )
 
 # 依赖 CompileShaders 确保 EmbeddedShaders.h 已生成

@@ -26,6 +26,9 @@
 #include <cstring>
 #include <vector>
 
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
+
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
@@ -141,38 +144,43 @@ int main() {
         sceneGraph.SetParent(lightEntity, Entity{kInvalidEntity});
     }
 
-    // --- 天空盒（程序化蓝色渐变 Cubemap）---
+    // --- 天空盒（从 skybox 目录加载 6 面纹理）---
     {
-        const u32 faceSize = 64;
-        const u32 faceBytes = faceSize * faceSize * 4;
-        std::vector<u8> allFaces(faceBytes * 6);
+        String skyDir = String(HUGE_CONTENT_DIR) + "Textures/skybox/";
+        const char* faceFiles[6] = {
+            "daylight0.png", "daylight1.png", "daylight2.png",
+            "daylight3.png", "daylight4.png", "daylight5.png",
+        };
+        std::vector<u8> allFaces;
+        u32 faceW = 0, faceH = 0;
+
         for (u32 f = 0; f < 6; ++f) {
-            u8* d = allFaces.data() + f * faceBytes;
-            for (u32 y = 0; y < faceSize; ++y) {
-                float t = (float)y / faceSize;
-                u8 r = (u8)(glm::mix(0.2f, 0.6f, t)*255);
-                u8 g = (u8)(glm::mix(0.3f, 0.7f, t)*255);
-                u8 b = (u8)(glm::mix(0.6f, 0.9f, t)*255);
-                for (u32 x = 0; x < faceSize; ++x) {
-                    usize i = (y*faceSize+x)*4;
-                    d[i]=r; d[i+1]=g; d[i+2]=b; d[i+3]=255;
-                }
-            }
+            String path = skyDir + faceFiles[f];
+            int w, h, ch;
+            u8* pixels = stbi_load(path.c_str(), &w, &h, &ch, 4);
+            if (!pixels) { HE_CORE_WARN("Skybox face {} 加载失败: {}", f, path); break; }
+            if (f == 0) { faceW = (u32)w; faceH = (u32)h; }
+            usize byteSize = faceW * faceH * 4;
+            allFaces.insert(allFaces.end(), pixels, pixels + byteSize);
+            stbi_image_free(pixels);
         }
-        rhi::TextureDesc cmDesc;
-        cmDesc.format=rhi::Format::RGBA8_UNORM; cmDesc.width=cmDesc.height=faceSize;
-        cmDesc.mipLevels=1; cmDesc.arrayLayers=6;
-        cmDesc.usage=rhi::TextureUsage::ShaderResource|rhi::TextureUsage::Cubemap|rhi::TextureUsage::TransferDst;
-        cmDesc.initialData=allFaces.data();
-        auto cm= device->CreateTexture(cmDesc);
-        rhi::SamplerDesc s; s.minFilter=s.magFilter=rhi::FilterMode::Linear;
-        s.addressU=s.addressV=s.addressW=rhi::AddressMode::ClampToEdge;
-        auto cs = device->CreateSampler(s);
-        Entity e = world.CreateEntity("Skybox");
-        world.AddComponent<TransformComponent>(e);
-        auto* sc = world.AddComponent<SkyboxComponent>(e);
-        sc->SetCubemap(std::move(cm), std::move(cs));
-        sceneGraph.SetParent(e, Entity{kInvalidEntity});
+
+        if (!allFaces.empty()) {
+            rhi::TextureDesc cmDesc;
+            cmDesc.format=rhi::Format::RGBA8_UNORM; cmDesc.width=faceW; cmDesc.height=faceH;
+            cmDesc.mipLevels=1; cmDesc.arrayLayers=6;
+            cmDesc.usage=rhi::TextureUsage::ShaderResource|rhi::TextureUsage::Cubemap|rhi::TextureUsage::TransferDst;
+            cmDesc.initialData=allFaces.data();
+            auto cm = device->CreateTexture(cmDesc);
+            rhi::SamplerDesc s; s.minFilter=s.magFilter=rhi::FilterMode::Linear;
+            s.addressU=s.addressV=s.addressW=rhi::AddressMode::ClampToEdge;
+            auto cs = device->CreateSampler(s);
+            Entity e = world.CreateEntity("Skybox");
+            world.AddComponent<TransformComponent>(e);
+            auto* sc = world.AddComponent<SkyboxComponent>(e);
+            sc->SetCubemap(std::move(cm), std::move(cs));
+            sceneGraph.SetParent(e, Entity{kInvalidEntity});
+        }
     }
 
     HE_CORE_INFO("Scene created: {} entities", world.GetEntityCount());
