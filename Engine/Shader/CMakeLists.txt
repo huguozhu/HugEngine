@@ -29,10 +29,11 @@ if(SLANGC)
     # 收集所有 .slang 文件
     file(GLOB VERT_SLANG "${SHADER_DIR}/*.vert.slang")
     file(GLOB FRAG_SLANG "${SHADER_DIR}/*.frag.slang")
+    file(GLOB COMP_SLANG "${SHADER_DIR}/*.comp.slang")
     file(GLOB SLANG_INCLUDES "${SHADER_DIR}/*.slang")  # 公共头文件
 
     # 过滤出非编译文件（仅 include）
-    set(COMPILE_SOURCES ${VERT_SLANG} ${FRAG_SLANG})
+    set(COMPILE_SOURCES ${VERT_SLANG} ${FRAG_SLANG} ${COMP_SLANG})
     set(SPV_FILES "")
 
     # 顶点着色器
@@ -60,6 +61,22 @@ if(SLANGC)
             OUTPUT ${SPV}
             COMMAND ${CMAKE_COMMAND} -E make_directory ${SPV_OUT_DIR}
             COMMAND ${SLANGC} ${SRC} -target spirv -entry fragmentMain -stage fragment
+                    -I "${SHADER_DIR}" -o ${SPV} -Wno-39001
+            DEPENDS ${SRC} ${SLANG_INCLUDES}
+            COMMENT "Slang → SPIR-V: ${NAME}"
+        )
+        list(APPEND SPV_FILES ${SPV})
+    endforeach()
+
+    # 计算着色器（.comp.slang）
+    foreach(SRC ${COMP_SLANG})
+        get_filename_component(FNAME ${SRC} NAME)      # MyShader.comp.slang
+        string(REGEX REPLACE "\\.slang$" "" NAME "${FNAME}")  # MyShader.comp
+        set(SPV "${SPV_OUT_DIR}/${NAME}.spv")
+        add_custom_command(
+            OUTPUT ${SPV}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${SPV_OUT_DIR}
+            COMMAND ${SLANGC} ${SRC} -target spirv -entry main -stage compute
                     -I "${SHADER_DIR}" -o ${SPV} -Wno-39001
             DEPENDS ${SRC} ${SLANG_INCLUDES}
             COMMENT "Slang → SPIR-V: ${NAME}"

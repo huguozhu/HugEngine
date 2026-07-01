@@ -1071,10 +1071,11 @@ void VulkanCommandList::SetPipeline(IRHIPipelineState* pso) {
     m_CurrentPipeline   = vkPso->GetPipeline();
     m_CurrentLayout     = vkPso->GetPipelineLayout();
     m_CurrentRenderPass = vkPso->GetRenderPass();
+    m_CurrentBindPoint  = vkPso->GetBindPoint();
 
-    // 仅当命令缓冲处于录制状态时绑定管线（防止 Begin 前调用导致的堆损坏）
+    // 仅当命令缓冲处于录制状态时绑定管线
     if (m_IsRecording) {
-        vkCmdBindPipeline(m_CmdBuffers[m_FrameIndex], VK_PIPELINE_BIND_POINT_GRAPHICS,
+        vkCmdBindPipeline(m_CmdBuffers[m_FrameIndex], m_CurrentBindPoint,
                          m_CurrentPipeline);
     }
 
@@ -1122,10 +1123,21 @@ void VulkanCommandList::DrawIndexed(u32 indexCount, u32 instanceCount,
 
 void VulkanCommandList::SetPushConstants(u32 offset, u32 size, const void* data) {
     if (m_CurrentLayout) {
+        VkShaderStageFlags stage = (m_CurrentBindPoint == VK_PIPELINE_BIND_POINT_COMPUTE)
+            ? VK_SHADER_STAGE_COMPUTE_BIT
+            : (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
         vkCmdPushConstants(m_CmdBuffers[m_FrameIndex], m_CurrentLayout,
-                          VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                          offset, size, data);
+                          stage, offset, size, data);
     }
+}
+
+void VulkanCommandList::Dispatch(u32 groupCountX, u32 groupCountY, u32 groupCountZ) {
+    vkCmdDispatch(m_CmdBuffers[m_FrameIndex], groupCountX, groupCountY, groupCountZ);
+}
+
+void VulkanCommandList::DispatchIndirect(IRHIBuffer* buffer, u64 offset) {
+    auto* vkBuf = static_cast<VulkanBuffer*>(buffer);
+    vkCmdDispatchIndirect(m_CmdBuffers[m_FrameIndex], vkBuf->GetHandle(), offset);
 }
 
 // ResourceState → VkImageLayout 映射（支持位组合，写状态优先）

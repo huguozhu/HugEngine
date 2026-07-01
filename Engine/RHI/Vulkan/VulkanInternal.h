@@ -105,6 +105,8 @@ public:
     void DrawIndexed(u32 indexCount, u32 instanceCount, u32 firstIndex,
                      i32 vertexOffset, u32 firstInstance) override;
     void SetPushConstants(u32 offset, u32 size, const void* data) override;
+    void Dispatch(u32 groupCountX, u32 groupCountY, u32 groupCountZ) override;
+    void DispatchIndirect(IRHIBuffer* buffer, u64 offset) override;
     void PipelineBarrier(PipelineStage srcStage, PipelineStage dstStage,
                          ResourceState srcState, ResourceState dstState) override;
     void PipelineBarrier(PipelineStage srcStage, PipelineStage dstStage,
@@ -156,9 +158,10 @@ private:
     VkSemaphore      m_WaitSemaphore   = VK_NULL_HANDLE;
     VkSemaphore      m_SignalSemaphore = VK_NULL_HANDLE;
 
-    VkPipeline       m_CurrentPipeline = VK_NULL_HANDLE;
-    VkPipelineLayout m_CurrentLayout   = VK_NULL_HANDLE;
-    VkRenderPass     m_CurrentRenderPass = VK_NULL_HANDLE;
+    VkPipeline          m_CurrentPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout    m_CurrentLayout   = VK_NULL_HANDLE;
+    VkRenderPass        m_CurrentRenderPass = VK_NULL_HANDLE;
+    VkPipelineBindPoint m_CurrentBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     VkBuffer         m_CurrentVB       = VK_NULL_HANDLE;
     u32              m_VBBinding       = 0;
     VkBuffer         m_CurrentIB       = VK_NULL_HANDLE;
@@ -188,18 +191,22 @@ private:
 class VulkanPipelineState final : public IRHIPipelineState {
 public:
     VulkanPipelineState(VkDevice device, VkPipeline pipeline,
-                        VkPipelineLayout layout, VkRenderPass renderPass)
+                        VkPipelineLayout layout, VkRenderPass renderPass,
+                        VkPipelineBindPoint bindPoint)
         : m_Device(device), m_Pipeline(pipeline)
-        , m_PipelineLayout(layout), m_RenderPass(renderPass) {}
+        , m_PipelineLayout(layout), m_RenderPass(renderPass)
+        , m_BindPoint(bindPoint) {}
     ~VulkanPipelineState();
-    VkPipeline       GetPipeline()       const { return m_Pipeline; }
-    VkPipelineLayout GetPipelineLayout() const { return m_PipelineLayout; }
-    VkRenderPass     GetRenderPass()     const { return m_RenderPass; }
+    VkPipeline           GetPipeline()       const { return m_Pipeline; }
+    VkPipelineLayout     GetPipelineLayout() const { return m_PipelineLayout; }
+    VkRenderPass         GetRenderPass()     const { return m_RenderPass; }
+    VkPipelineBindPoint  GetBindPoint()      const { return m_BindPoint; }
 private:
-    VkDevice         m_Device;
-    VkPipeline       m_Pipeline;
-    VkPipelineLayout m_PipelineLayout;
-    VkRenderPass     m_RenderPass;
+    VkDevice            m_Device;
+    VkPipeline          m_Pipeline;
+    VkPipelineLayout    m_PipelineLayout;
+    VkRenderPass        m_RenderPass;
+    VkPipelineBindPoint m_BindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
 };
 
 // ============================================================

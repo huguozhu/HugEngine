@@ -94,6 +94,10 @@ public:
         ResourceState srcState, ResourceState dstState,
         IRHITexture* texture) = 0;
 
+    // 计算着色器调度
+    virtual void Dispatch(u32 groupCountX, u32 groupCountY, u32 groupCountZ) = 0;
+    virtual void DispatchIndirect(IRHIBuffer* buffer, u64 offset) = 0;
+
     // 缓冲拷贝（GPU 端）
     virtual void CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst,
                             u64 size, u64 srcOffset = 0, u64 dstOffset = 0) = 0;

@@ -646,6 +646,47 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
         return mod;
     };
 
+    // Compute pipeline: 跳过 render pass 和图形管线创建
+    if (desc.bindPoint == PipelineBindPoint::Compute) {
+        VkShaderModule comp = createShader(desc.computeShader, VK_SHADER_STAGE_COMPUTE_BIT);
+        HE_ASSERT(comp, "Compute pipeline requires a valid compute shader");
+
+        // Pipeline layout
+        std::vector<VkPushConstantRange> vkPushRanges;
+        for (auto& pcRange : desc.pushConstantRanges) {
+            VkPushConstantRange vkRange{};
+            vkRange.stageFlags = pcRange.stageMask;
+            vkRange.offset     = pcRange.offset;
+            vkRange.size       = pcRange.size;
+            vkPushRanges.push_back(vkRange);
+        }
+        VkPipelineLayoutCreateInfo layoutInfo{};
+        layoutInfo.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        layoutInfo.setLayoutCount         = static_cast<u32>(descLayouts.size());
+        layoutInfo.pSetLayouts            = descLayouts.empty() ? nullptr : descLayouts.data();
+        layoutInfo.pushConstantRangeCount = static_cast<u32>(vkPushRanges.size());
+        layoutInfo.pPushConstantRanges    = vkPushRanges.empty() ? nullptr : vkPushRanges.data();
+        VkPipelineLayout pipelineLayout;
+        vkCreatePipelineLayout(device, &layoutInfo, nullptr, &pipelineLayout);
+
+        VkComputePipelineCreateInfo compInfo{};
+        compInfo.sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        compInfo.stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        compInfo.stage.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
+        compInfo.stage.module = comp;
+        compInfo.stage.pName  = "main";
+        compInfo.layout       = pipelineLayout;
+
+        VkPipeline pipeline;
+        vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &compInfo, nullptr, &pipeline);
+        vkDestroyShaderModule(device, comp, nullptr);
+
+        HE_CORE_INFO("Vulkan compute pipeline created");
+        return std::make_unique<VulkanPipelineState>(device, pipeline, pipelineLayout,
+                                                      VK_NULL_HANDLE, VK_PIPELINE_BIND_POINT_COMPUTE);
+    }
+
+    // Graphics pipeline
     VkShaderModule vert = createShader(desc.vertexShader,   VK_SHADER_STAGE_VERTEX_BIT);
     VkShaderModule frag = createShader(desc.pixelShader,    VK_SHADER_STAGE_FRAGMENT_BIT);
 
@@ -877,8 +918,9 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     vkDestroyShaderModule(device, vert, nullptr);
     vkDestroyShaderModule(device, frag, nullptr);
 
-    HE_CORE_INFO("Vulkan pipeline created");
-    return std::make_unique<VulkanPipelineState>(device, pipeline, pipelineLayout, renderPass);
+    HE_CORE_INFO("Vulkan graphics pipeline created");
+    return std::make_unique<VulkanPipelineState>(device, pipeline, pipelineLayout,
+                                                  renderPass, VK_PIPELINE_BIND_POINT_GRAPHICS);
 }
 
 } // namespace he::rhi
