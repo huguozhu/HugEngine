@@ -1,20 +1,17 @@
 #include "Pipeline/ForwardPipeline.h"
 #include "GI/GI_IBL.h"
-#include "Shadow/ShadowSystem.h"   // 具体实现（创建 ShadowSystem 实例）
-#include "Shadow/ShadowNone.h"     // 空实现（默认无阴影时使用）
+#include "Shadow/ShadowSystem.h"
+#include "Shadow/ShadowNone.h"
+#include "PostProcess/ToneMapPass.h"
+#include "PostProcess/SkyboxPass.h"
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
 #include "Scene/SkyboxComponent.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include "Threading/JobSystem.h"
-// 按需包含 Shader SPV（修改单个 shader 只重编译 ForwardPipeline.cpp）
 #include "PBR.vert.spv.h"
 #include "PBR.frag.spv.h"
-#include "ToneMap.vert.spv.h"
-#include "ToneMap.frag.spv.h"
-#include "Skybox.vert.spv.h"
-#include "Skybox.frag.spv.h"
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/ext/matrix_clip_space.hpp>  // orthoRH_ZO (Vulkan Z [0,1])
@@ -42,14 +39,6 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     m_FS.stage      = rhi::ShaderStage::Pixel;
     m_FS.spirv      = k_PBR_frag_spv;
     m_FS.entryPoint = "main";
-
-    // --- ToneMap 着色器 ---
-    m_ToneMapVS.stage      = rhi::ShaderStage::Vertex;
-    m_ToneMapVS.spirv      = k_ToneMap_vert_spv;
-    m_ToneMapVS.entryPoint = "main";
-    m_ToneMapFS.stage      = rhi::ShaderStage::Pixel;
-    m_ToneMapFS.spirv      = k_ToneMap_frag_spv;
-    m_ToneMapFS.entryPoint = "main";
 
     rhi::VertexInputLayout vertexLayout;
     vertexLayout.stride = sizeof(he::StaticVertex);
@@ -197,74 +186,15 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     m_PBR_PSO = device->CreatePipelineState(psoDesc);
     HE_ASSERT(m_PBR_PSO, "ForwardPipeline: failed to create PBR PSO");
 
-    // --- ToneMap 全屏后处理 PSO ---
-    {
-        rhi::DescriptorSetLayoutDesc tmLayout;
-        tmLayout.bindings = {
-            { 0, rhi::DescriptorType::CombinedImageSampler, 1, 16 },  // Fragment — HDR 纹理
-        };
-        m_ToneMapLayout = device->CreateDescriptorSetLayout(tmLayout);
+    // --- ToneMap 后处理子系统 ---
+    m_ToneMap = std::make_unique<ToneMapPass>();
+    m_ToneMap->Initialize(device, m_HDRWidth, m_HDRHeight);
+    HE_CORE_INFO("ForwardPipeline: ToneMapPass initialized");
 
-        m_ToneMapSet = device->AllocateDescriptorSet(m_ToneMapLayout);
-        device->UpdateDescriptorSet(m_ToneMapSet, 0,
-            rhi::DescriptorType::CombinedImageSampler,
-            m_HDRTarget.get(), m_HDRSampler.get());
-
-        rhi::PipelineStateDesc tmDesc;
-        tmDesc.vertexShader         = &m_ToneMapVS;
-        tmDesc.pixelShader          = &m_ToneMapFS;
-        tmDesc.topology             = rhi::PrimitiveTopology::TriangleList;
-        tmDesc.depthTest            = false;
-        tmDesc.depthWrite           = false;
-        tmDesc.depthFormat          = rhi::Format::D32_FLOAT;  // 匹配 SwapChain RP 深度附件
-        tmDesc.colorAttachmentCount = 1;
-        tmDesc.colorFormats[0]      = rhi::Format::BGRA8_UNORM; // 输出到 SwapChain
-        tmDesc.descriptorSetLayouts = { m_ToneMapLayout };
-        tmDesc.debugName            = "ToneMap";
-
-        m_ToneMapPSO = device->CreatePipelineState(tmDesc);
-        HE_ASSERT(m_ToneMapPSO, "ForwardPipeline: failed to create ToneMap PSO");
-    }
-
-    // --- 天空盒 PSO（全屏三角形，SV_VertexID，无需 VB/IB）---
-    {
-        m_SkyboxVS.stage      = rhi::ShaderStage::Vertex;
-        m_SkyboxVS.spirv      = k_Skybox_vert_spv;
-        m_SkyboxVS.entryPoint = "main";
-
-        m_SkyboxFS.stage      = rhi::ShaderStage::Pixel;
-        m_SkyboxFS.spirv      = k_Skybox_frag_spv;
-        m_SkyboxFS.entryPoint = "main";
-
-        rhi::DescriptorSetLayoutDesc skyLayout;
-        skyLayout.bindings = {
-            { 10, rhi::DescriptorType::CombinedImageSampler, 1, 16 },
-        };
-        m_SkyboxDescLayout = device->CreateDescriptorSetLayout(skyLayout);
-
-        // 天空盒专用 Push Constant：float4x4 + float = 80 bytes
-        rhi::PushConstantRange skyPCRange;
-        skyPCRange.stageMask = 1 | 16;  // Vertex | Fragment
-        skyPCRange.offset    = 0;
-        skyPCRange.size      = 96;  // float4x4(64) + float(4) + 16B对齐
-
-        rhi::PipelineStateDesc skyDesc;
-        skyDesc.vertexShader         = &m_SkyboxVS;
-        skyDesc.pixelShader          = &m_SkyboxFS;
-        skyDesc.topology             = rhi::PrimitiveTopology::TriangleList;
-        skyDesc.depthTest            = true;
-        skyDesc.depthWrite           = false;   // 不写深度
-        skyDesc.depthCompare         = rhi::CompareFunc::Equal;  // 仅远平面空白处
-        skyDesc.depthFormat          = rhi::Format::D32_FLOAT;
-        skyDesc.colorAttachmentCount = 1;
-        skyDesc.colorFormats[0]      = rhi::Format::RGBA16_FLOAT;
-        skyDesc.pushConstantRanges   = { skyPCRange };
-        skyDesc.descriptorSetLayouts = { m_SkyboxDescLayout };
-        skyDesc.debugName            = "Skybox";
-
-        m_SkyboxPSO = device->CreatePipelineState(skyDesc);
-        HE_ASSERT(m_SkyboxPSO, "ForwardPipeline: failed to create Skybox PSO");
-    }
+    // --- 天空盒子系统 ---
+    m_Skybox = std::make_unique<SkyboxPass>();
+    m_Skybox->Initialize(device, m_HDRWidth, m_HDRHeight);
+    HE_CORE_INFO("ForwardPipeline: SkyboxPass initialized");
 
     // --- HDR 离屏渲染目标（RGBA16_FLOAT 颜色 + D32 深度）---
     {
@@ -324,13 +254,12 @@ void ForwardPipeline::Shutdown() {
     }
     m_AllPerMeshDescSets.clear();
     m_PBR_PSO.reset();
-    m_ToneMapPSO.reset();
+    if (m_ToneMap) { m_ToneMap->Shutdown(); m_ToneMap.reset(); }
+    if (m_Skybox)  { m_Skybox->Shutdown();  m_Skybox.reset(); }
     m_HDRTarget.reset();
     m_HDRDepth.reset();
     m_HDRSampler.reset();
-    if (m_Device) m_Device->DestroyDescriptorSetLayout(m_ToneMapLayout);
-    if (m_Device) m_Device->DestroyDescriptorSetLayout(m_SkyboxDescLayout);
-    m_SkyboxPSO.reset();
+    m_Device = nullptr;
     m_SecRecordLists.clear();  // Phase 5-4 sec CB 录制池
 
     // 阴影子系统
@@ -514,8 +443,6 @@ void ForwardPipeline::EndHDRPass(rhi::IRHICommandList* cmd) {
         rhi::ResourceState::ShaderResource,
         m_HDRTarget.get());
 
-    // 预置 ToneMap PSO，确保后续 BeginRenderPass 使用正确的 SwapChain RP（B8G8R8A8）
-    cmd->SetPipeline(m_ToneMapPSO.get());
 }
 
 void ForwardPipeline::PrepareGI(rhi::IRHICommandList* cmd, he::World& world) {
@@ -564,50 +491,17 @@ void ForwardPipeline::UpdateIBLBindings(GI_IBL* gi) {
 
 void ForwardPipeline::RenderSkybox(rhi::IRHICommandList* cmd, he::World& world,
                                     const CameraData& camera) {
-    he::SkyboxComponent* skybox = nullptr;
-    world.ForEach<he::SkyboxComponent>([&](he::Entity, he::SkyboxComponent& sc) {
-        if (sc.enabled && sc.GetCubemap()) skybox = &sc;
-    });
-    if (!skybox) return;
-
-    // 描述符集只分配一次，复用（cubemap/sampler 不变）
-    static rhi::DescriptorSetHandle s_CachedSkySet = rhi::kInvalidSet;
-    static he::SkyboxComponent* s_CachedSkybox = nullptr;
-    if (s_CachedSkySet == rhi::kInvalidSet || s_CachedSkybox != skybox) {
-        s_CachedSkySet = m_Device->AllocateDescriptorSet(m_SkyboxDescLayout);
-        m_Device->UpdateDescriptorSet(s_CachedSkySet, 10,
-            rhi::DescriptorType::CombinedImageSampler,
-            skybox->GetCubemap(), skybox->GetCubemapSampler());
-        s_CachedSkybox = skybox;
-    }
-    auto skySet = s_CachedSkySet;
-
-    // 计算旋转视图的逆 ViewProj（相机置于原点，去除平移影响）
-    float4x4 viewRotOnly     = glm::lookAtRH(float3(0.0f), camera.forward, camera.up);
-    float4x4 viewProjNoTrans = camera.GetProjMatrix() * viewRotOnly;
-    float4x4 invViewProj     = glm::inverse(viewProjNoTrans);
-
-    // Push Constants: float4x4(64) + float(4) + 28B对齐 = 96B
-    struct alignas(16) SkyboxPC { float4x4 invVP; float intensity; float _pad[7]; } pc{};
-    pc.invVP     = invViewProj;
-    pc.intensity = skybox->intensity;
-
-    cmd->SetPipeline(m_SkyboxPSO.get());
-    cmd->BindDescriptorSet(0, skySet);
-    cmd->SetPushConstants(0, sizeof(SkyboxPC), &pc);
-    cmd->Draw(3);  // 全屏三角形，3 顶点（SV_VertexID 驱动）
+    if (!m_Skybox) return;
+    SubsystemContext ctx; ctx.world = &world; ctx.camera = &camera;
+    m_Skybox->Update(ctx);
+    m_Skybox->Render(cmd);
 }
 
 void ForwardPipeline::RenderToneMapPass(rhi::IRHICommandList* cmd) {
-    cmd->SetPipeline(m_ToneMapPSO.get());
-
-    // 显式设置视口 + 裁剪（BeginRenderPass 不会自动设置，需匹配 SwapChain 尺寸）
-    cmd->SetViewport({ 0, static_cast<float>(m_HDRHeight),
-        static_cast<float>(m_HDRWidth), -static_cast<float>(m_HDRHeight), 0.0f, 1.0f });
-    cmd->SetScissor({ 0, 0, m_HDRWidth, m_HDRHeight });
-
-    cmd->BindDescriptorSet(0, m_ToneMapSet);
-    cmd->Draw(3);  // 全屏三角形
+    if (m_ToneMap) {
+        m_ToneMap->SetInput(m_HDRTarget.get(), m_HDRSampler.get());
+        m_ToneMap->Render(cmd);
+    }
 }
 
 void ForwardPipeline::ResizeHDRTarget(u32 width, u32 height) {
@@ -631,10 +525,7 @@ void ForwardPipeline::ResizeHDRTarget(u32 width, u32 height) {
     hdrDepthDesc.usage  = rhi::TextureUsage::DepthStencil;
     m_HDRDepth = m_Device->CreateTexture(hdrDepthDesc);
 
-    // 更新 ToneMap 描述符集指向新纹理
-    m_Device->UpdateDescriptorSet(m_ToneMapSet, 0,
-        rhi::DescriptorType::CombinedImageSampler,
-        m_HDRTarget.get(), m_HDRSampler.get());
+    // ToneMapPass 输入会自动通过每帧 SetInput 更新，无需手动更新描述符集
 }
 
 // ---- IRenderPipeline 包装方法 ----
@@ -654,6 +545,8 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
 
 void ForwardPipeline::OnResize(u32 width, u32 height) {
     ResizeHDRTarget(width, height);
+    if (m_ToneMap) m_ToneMap->OnResize(width, height);
+    if (m_Skybox)  m_Skybox->OnResize(width, height);
 }
 
 void ForwardPipeline::RenderScene(
