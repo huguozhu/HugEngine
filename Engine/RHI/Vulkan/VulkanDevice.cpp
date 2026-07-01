@@ -318,6 +318,8 @@ void VulkanDevice::CreateLogicalDevice() {
     descIndexing.runtimeDescriptorArray = VK_TRUE;
     descIndexing.descriptorBindingVariableDescriptorCount = VK_TRUE;
     descIndexing.descriptorBindingPartiallyBound = VK_TRUE;
+    descIndexing.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
+    descIndexing.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
 
     // 启用 bufferDeviceAddress
     VkPhysicalDeviceBufferDeviceAddressFeatures addrFeature{};
@@ -410,24 +412,35 @@ void VulkanDevice::EnsureDescriptorPool() {
     poolInfo.maxSets       = 256;  // 需容纳 per-material 描述符集
     poolInfo.poolSizeCount = 3;
     poolInfo.pPoolSizes    = poolSizes;
-    poolInfo.flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    poolInfo.flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT
+                            | VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
 
     vkCreateDescriptorPool(m_Device, &poolInfo, nullptr, &m_DescPool);
 }
 
 DescriptorSetLayoutHandle VulkanDevice::CreateDescriptorSetLayout(const DescriptorSetLayoutDesc& desc) {
     std::vector<VkDescriptorSetLayoutBinding> vkBindings;
+    std::vector<VkDescriptorBindingFlags>     bindingFlags;
     for (auto& b : desc.bindings) {
         VkDescriptorSetLayoutBinding vb{};
         vb.binding            = b.binding;
         vb.descriptorType     = ToVkDescType(b.type);
         vb.descriptorCount    = b.count;
-        vb.stageFlags = b.stageMask;  // 直接使用 VK_SHADER_STAGE_* 位掩码
+        vb.stageFlags = b.stageMask;
         vkBindings.push_back(vb);
+        // 允许描述符集在 CB pending 时更新（消除 VUID-vkUpdateDescriptorSets-None-03047）
+        bindingFlags.push_back(VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
     }
+
+    VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo{};
+    flagsInfo.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+    flagsInfo.bindingCount  = static_cast<u32>(bindingFlags.size());
+    flagsInfo.pBindingFlags = bindingFlags.data();
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.flags        = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+    layoutInfo.pNext        = &flagsInfo;
     layoutInfo.bindingCount = static_cast<u32>(vkBindings.size());
     layoutInfo.pBindings    = vkBindings.data();
 
