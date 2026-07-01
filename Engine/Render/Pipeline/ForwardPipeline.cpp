@@ -759,7 +759,7 @@ void ForwardPipeline::BeginHDRPass(rhi::IRHICommandList* cmd, u32 width, u32 hei
     rhi::ClearValue clear{};
     clear.depth = 1.0f;
 
-    cmd->BeginOffscreenPass(colorView, depthView, width, height, &clear);
+    cmd->BeginOffscreenPass(colorView, depthView, width, height, &clear, true);
 
     cmd->SetViewport({ 0, static_cast<float>(height),
         static_cast<float>(width), -static_cast<float>(height), 0.0f, 1.0f });

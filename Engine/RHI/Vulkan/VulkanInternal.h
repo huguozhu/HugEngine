@@ -92,7 +92,7 @@ public:
     void EndRenderPass() override;
     void BeginOffscreenPass(void* colorImageView, void* depthImageView,
                             u32 width, u32 height,
-                            const ClearValue* clear) override;
+                            const ClearValue* clear, bool allowSecondary) override;
     void EndOffscreenPass() override;
     void SetSwapChain(IRHISwapChain* swapchain) override;
     void SetPipeline(IRHIPipelineState* pso) override;

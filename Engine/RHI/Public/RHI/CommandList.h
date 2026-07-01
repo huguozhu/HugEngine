@@ -51,11 +51,13 @@ public:
     // 离屏渲染通道：渲染到自定义纹理附件（非 SwapChain）
     // colorImageView/depthImageView 为后端特定句柄（VkImageView），可空。
     // 必须先调用 SetPipeline 设置匹配的 PSO（render pass 一致）。
+    // allowSecondary: true → RP 允许执行 Secondary CB（多线程录制）
     virtual void BeginOffscreenPass(
         void* colorImageView,   // 可空（深度专用通道如 ShadowMap）
         void* depthImageView,   // 可空
         u32 width, u32 height,
-        const ClearValue* clear = nullptr
+        const ClearValue* clear = nullptr,
+        bool allowSecondary = false
     ) = 0;
     virtual void EndOffscreenPass() = 0;
 

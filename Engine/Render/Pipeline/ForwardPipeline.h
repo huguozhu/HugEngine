@@ -173,9 +173,8 @@ private:
     std::unique_ptr<rhi::IRHIPipelineState> m_SkyboxPSO;
     rhi::DescriptorSetLayoutHandle m_SkyboxDescLayout = rhi::kInvalidLayout;
 
-    // Phase 5-4 多线程录制（暂时禁用，SecCB viewport 集成需 Vulkan 深度调试）
-    // TODO: 修复后启用 — SecCB 从 primary 继承 viewport 策略需重构
-    bool m_MultiThreadRecord = false;
+    // Phase 5-4 多线程录制
+    bool m_MultiThreadRecord = true;
     static constexpr u32 kMaxSecRecordLists = 8;
     std::vector<std::unique_ptr<rhi::IRHICommandList>> m_SecRecordLists;
     rhi::ShaderBytecode m_SkyboxVS;

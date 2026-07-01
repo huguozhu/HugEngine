@@ -952,7 +952,7 @@ void VulkanCommandList::EndRenderPass() {
 // ============================================================
 void VulkanCommandList::BeginOffscreenPass(
     void* colorImageView, void* depthImageView,
-    u32 width, u32 height, const ClearValue* clear)
+    u32 width, u32 height, const ClearValue* clear, bool allowSecondary)
 {
     // 验证：至少需要一个附件
     auto colorView = static_cast<VkImageView>(colorImageView);
@@ -1013,7 +1013,10 @@ void VulkanCommandList::BeginOffscreenPass(
     rpBegin.clearValueCount   = clearCount;
     rpBegin.pClearValues      = vkClearValues;
 
-    vkCmdBeginRenderPass(m_CmdBuffers[m_FrameIndex], &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
+    VkSubpassContents contents = allowSecondary
+        ? VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_KHR
+        : VK_SUBPASS_CONTENTS_INLINE;
+    vkCmdBeginRenderPass(m_CmdBuffers[m_FrameIndex], &rpBegin, contents);
     m_InOffscreenPass = true;
 
     // 在渲染通道内重新绑定管线（Vulkan 要求）
