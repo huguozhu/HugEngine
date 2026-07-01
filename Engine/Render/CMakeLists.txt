@@ -1,16 +1,28 @@
-# Render — RenderGraph, Pipelines, Lighting, PostProcess (L4)
-# Phase 1
-
+# Render — RenderGraph, Pipelines, Lighting, PostProcess, GI (L4)
+# 头文件列入 target_sources 方便 IDE 浏览，不参与编译
 add_library(HugEngineRender STATIC)
 
 target_sources(HugEngineRender PRIVATE
-    Private/RenderGraph.cpp
-    Private/Pipeline/ForwardPipeline.cpp
+    # Pipeline
+    Pipeline/Camera.h
+    Pipeline/CameraController.h
+    Pipeline/CameraController.cpp
+    Pipeline/ForwardPipeline.h
+    Pipeline/ForwardPipeline.cpp
+    Pipeline/Material.h
+    # RenderGraph
+    RenderGraph.h
+    RenderGraph.cpp
+    # Subsystem (基础接口)
+    Subsystem/RenderSubsystem.h
+    # GI (全局光照)
+    GI/GlobalIllumination.h
+    GI/GI_None.h
+    GI/GI_None.cpp
 )
 
 target_include_directories(HugEngineRender
-    PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/Public
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Private
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_link_libraries(HugEngineRender PUBLIC HugEngineRHI HugEngineShader HugEngineScene)

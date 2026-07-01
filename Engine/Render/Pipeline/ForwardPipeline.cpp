@@ -1,4 +1,4 @@
-#include "Render/Pipeline/ForwardPipeline.h"
+#include "Pipeline/ForwardPipeline.h"
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
 #include "Scene/SkyboxComponent.h"
@@ -705,6 +705,11 @@ void ForwardPipeline::EndAllShadowPasses(rhi::IRHICommandList* cmd) {
 // ============================================================
 
 void ForwardPipeline::BeginHDRPass(rhi::IRHICommandList* cmd, u32 width, u32 height) {
+    // 同步当前渲染尺寸（多线程路径 / ToneMap 视口需要）
+    if (width != m_HDRWidth || height != m_HDRHeight) {
+        ResizeHDRTarget(width, height);
+    }
+
     // 首次使用：确保点光 Cubemap 布局从 Undefined 转换到 ShaderResource
     if (!m_PointShadowInitDone) {
         m_PointShadowInitDone = true;
@@ -734,12 +739,11 @@ void ForwardPipeline::BeginHDRPass(rhi::IRHICommandList* cmd, u32 width, u32 hei
 void ForwardPipeline::EndHDRPass(rhi::IRHICommandList* cmd) {
     cmd->EndOffscreenPass();
 
-    // 布局转换：Present（RP finalLayout）→ 着色器只读（ToneMap 采样）
-    // 注意：当前 RP 颜色附件 finalLayout 固定为 PRESENT_SRC_KHR
+    // 布局转换：COLOR_ATTACHMENT → 着色器只读（ToneMap 采样）
     cmd->PipelineBarrier(
         rhi::PipelineStage::ColorAttachmentOutput,
         rhi::PipelineStage::FragmentShader,
-        rhi::ResourceState::Present,
+        rhi::ResourceState::RenderTarget,
         rhi::ResourceState::ShaderResource,
         m_HDRTarget.get());
 
@@ -1114,6 +1118,11 @@ void ForwardPipeline::RenderScene(
 
                 auto& secCmd = m_SecRecordLists[t];
                 secCmd->BeginSecondary(m_PBR_PSO.get());
+                // Secondary CB 不继承 Primary 的动态状态，必须显式设置视口/裁剪区
+                secCmd->SetViewport({ 0, static_cast<float>(m_HDRHeight),
+                    static_cast<float>(m_HDRWidth), -static_cast<float>(m_HDRHeight),
+                    0.0f, 1.0f });
+                secCmd->SetScissor({ 0, 0, m_HDRWidth, m_HDRHeight });
 
                 for (u32 i = start; i < end; ++i) {
                     auto& de = visible[i];

@@ -11,7 +11,8 @@
 #include "Core/Engine.h"
 #include "Platform/Window.h"
 #include "RHI/RHI.h"
-#include "Render/Pipeline/ForwardPipeline.h"
+#include "Pipeline/ForwardPipeline.h"
+#include "Pipeline/CameraController.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
 #include "Scene/LightComponent.h"
@@ -416,40 +417,28 @@ int main() {
     // ============================================================
     // 8. 相机 — 从配置文件加载，否则使用默认位置
     // ============================================================
-    render::CameraData camera;
-    camera.up = float3(0.0f, 1.0f, 0.0f);
-    camera.SetAspectRatio(
+    render::CameraController camCtrl;
+    camCtrl.SetAspectRatio(
         static_cast<float>(swapchain->GetWidth()),
         static_cast<float>(swapchain->GetHeight()));
+    camCtrl.SetMoveSpeed(72.0f);  // Sponza 场景较大，快速移动
 
-    float yaw, pitch;
     if (hasConfig) {
-        camera.position = float3(
+        camCtrl.SetPosition(float3(
             GetFloat(cfgData, "cam_pos_x", 0.0f),
             GetFloat(cfgData, "cam_pos_y", 3.0f),
-            GetFloat(cfgData, "cam_pos_z", 0.0f));
-        yaw   = GetFloat(cfgData, "cam_yaw", -1.57f);
-        pitch = GetFloat(cfgData, "cam_pitch", -0.1f);
+            GetFloat(cfgData, "cam_pos_z", 0.0f)));
+        camCtrl.SetOrientation(
+            GetFloat(cfgData, "cam_yaw", -1.57f),
+            GetFloat(cfgData, "cam_pitch", -0.1f));
     } else {
-        camera.position = float3(0.0f, 3.0f, 0.0f);
-        yaw   = -1.57f;
-        pitch = -0.1f;
-    }
-
-    // 从 yaw/pitch 计算 forward
-    {
-        float3 fwd;
-        fwd.x = cos(pitch) * sin(yaw);
-        fwd.y = sin(pitch);
-        fwd.z = -cos(pitch) * cos(yaw);
-        camera.forward = glm::normalize(fwd);
+        camCtrl.SetPosition(float3(0.0f, 3.0f, 0.0f));
+        camCtrl.SetOrientation(-1.57f, -0.1f);
     }
 
     // 鼠标状态
     bool   rightMouseDown = false;
     double lastMouseX = 0.0, lastMouseY = 0.0;
-    float  moveSpeed  = 72.0f;     // Sponza 场景较大，快速移动
-    float  lookSpeed  = 0.003f;
 
     // ============================================================
     // 9. 窗口调整回调
@@ -460,7 +449,7 @@ int main() {
         swapchain->Resize(w, h);
         cmdList->SetSwapChain(swapchain.get());
         pipeline.ResizeHDRTarget(w, h);
-        camera.SetAspectRatio(static_cast<float>(w), static_cast<float>(h));
+        camCtrl.SetAspectRatio(static_cast<float>(w), static_cast<float>(h));
     });
 
     // ============================================================
@@ -500,38 +489,21 @@ int main() {
                 lastMouseX = cx;
                 lastMouseY = cy;
 
-                yaw   += dx * lookSpeed;
-                pitch += dy * lookSpeed;  // 上推鼠标=抬头
-                pitch  = glm::clamp(pitch, -1.5f, 1.5f);
+                camCtrl.Rotate(dx * 0.003f, -dy * 0.003f);
             }
 
-            // 移动速度
-            float speed = moveSpeed * deltaTime;
-            if (glfwGetKey(glfwWin, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
-                speed *= 3.0f;
+            // 键盘移动
+            render::CameraController::MoveInput moveIn;
+            moveIn.forward  = glfwGetKey(glfwWin, GLFW_KEY_W) == GLFW_PRESS;
+            moveIn.backward = glfwGetKey(glfwWin, GLFW_KEY_S) == GLFW_PRESS;
+            moveIn.left     = glfwGetKey(glfwWin, GLFW_KEY_A) == GLFW_PRESS;
+            moveIn.right    = glfwGetKey(glfwWin, GLFW_KEY_D) == GLFW_PRESS;
+            moveIn.up       = glfwGetKey(glfwWin, GLFW_KEY_E) == GLFW_PRESS;
+            moveIn.down     = glfwGetKey(glfwWin, GLFW_KEY_Q) == GLFW_PRESS;
+            moveIn.sprint   = glfwGetKey(glfwWin, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
 
-            // WASD + E/Q 移动
-            float3 right = glm::normalize(glm::cross(camera.forward, camera.up));
-            float3 move  = float3(0.0f);
-            if (glfwGetKey(glfwWin, GLFW_KEY_W) == GLFW_PRESS) move += camera.forward;
-            if (glfwGetKey(glfwWin, GLFW_KEY_S) == GLFW_PRESS) move -= camera.forward;
-            if (glfwGetKey(glfwWin, GLFW_KEY_A) == GLFW_PRESS) move -= right;
-            if (glfwGetKey(glfwWin, GLFW_KEY_D) == GLFW_PRESS) move += right;
-            if (glfwGetKey(glfwWin, GLFW_KEY_E) == GLFW_PRESS) move += camera.up;
-            if (glfwGetKey(glfwWin, GLFW_KEY_Q) == GLFW_PRESS) move -= camera.up;
-
-            if (glm::dot(move, move) > 0.0001f) {
-                move = glm::normalize(move) * speed;
-                camera.position += move;
-            }
+            camCtrl.Update(deltaTime, moveIn);
         }
-
-        // 更新相机朝向
-        float3 forward;
-        forward.x = cos(pitch) * sin(yaw);
-        forward.y = sin(pitch);
-        forward.z = -cos(pitch) * cos(yaw);
-        camera.forward = glm::normalize(forward);
 
         // --- 渲染 ---
         cmdList->Begin();
@@ -543,7 +515,7 @@ int main() {
         {
             std::vector<const he::LightComponent*> shadowLights;
             std::vector<render::GPUShadowData> shadowGPUData;
-            pipeline.CollectShadowLights(world, sceneGraph, shadowLights, shadowGPUData, camera);
+            pipeline.CollectShadowLights(world, sceneGraph, shadowLights, shadowGPUData, camCtrl.GetCamera());
 
             // 分离方向光和点光源
             std::vector<const he::LightComponent*> dirLights, pointLights;
@@ -581,9 +553,9 @@ int main() {
             swapchain->GetWidth(), swapchain->GetHeight());
         pipeline.BeginFrame(cmdList.get(),
             swapchain->GetWidth(), swapchain->GetHeight());
-        pipeline.RenderScene(cmdList.get(), world, sceneGraph, camera);
+        pipeline.RenderScene(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
         // Skybox 在场景之后渲染（depth=Equal，仅在空白区域绘制）
-        pipeline.RenderSkybox(cmdList.get(), world, camera);
+        pipeline.RenderSkybox(cmdList.get(), world, camCtrl.GetCamera());
         pipeline.EndHDRPass(cmdList.get());
 
         // --- ToneMap 后处理 + ImGui（输出到 SwapChain B8G8R8A8）---
@@ -607,14 +579,16 @@ int main() {
             // 相机
             // ============================================================
             ImGui::SeparatorText("相机");
-            ImGui::DragFloat3("位置##Camera", &camera.position[0], 5.0f);
-            float yawDeg   = glm::degrees(yaw);
-            float pitchDeg = glm::degrees(pitch);
+            ImGui::DragFloat3("位置##Camera", &camCtrl.GetCamera().position[0], 5.0f);
+            float yawDeg   = glm::degrees(camCtrl.GetYaw());
+            float pitchDeg = glm::degrees(camCtrl.GetPitch());
             if (ImGui::SliderFloat("Yaw", &yawDeg, -180.0f, 180.0f, "%.1f°"))
-                yaw = glm::radians(yawDeg);
+                camCtrl.SetOrientation(glm::radians(yawDeg), camCtrl.GetPitch());
             if (ImGui::SliderFloat("Pitch", &pitchDeg, -85.0f, 85.0f, "%.1f°"))
-                pitch = glm::radians(pitchDeg);
-            ImGui::DragFloat("移动速度", &moveSpeed, 1.0f, 1.0f, 500.0f, "%.0f");
+                camCtrl.SetOrientation(camCtrl.GetYaw(), glm::radians(pitchDeg));
+            float moveSpeed = camCtrl.GetMoveSpeed();
+            if (ImGui::DragFloat("移动速度", &moveSpeed, 1.0f, 1.0f, 500.0f, "%.0f"))
+                camCtrl.SetMoveSpeed(moveSpeed);
 
             // Phase 5-4 多线程录制开关
             bool multiThread = pipeline.IsMultiThreadedRecording();
@@ -735,11 +709,11 @@ int main() {
     {
         std::unordered_map<String, String> out;
         // 相机
-        out["cam_pos_x"]  = std::to_string(camera.position.x);
-        out["cam_pos_y"]  = std::to_string(camera.position.y);
-        out["cam_pos_z"]  = std::to_string(camera.position.z);
-        out["cam_yaw"]    = std::to_string(yaw);
-        out["cam_pitch"]  = std::to_string(pitch);
+        out["cam_pos_x"]  = std::to_string(camCtrl.GetCamera().position.x);
+        out["cam_pos_y"]  = std::to_string(camCtrl.GetCamera().position.y);
+        out["cam_pos_z"]  = std::to_string(camCtrl.GetCamera().position.z);
+        out["cam_yaw"]    = std::to_string(camCtrl.GetYaw());
+        out["cam_pitch"]  = std::to_string(camCtrl.GetPitch());
 
         // 主方向光
         if (mainDL) {

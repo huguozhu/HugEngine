@@ -9,7 +9,7 @@
 // ============================================================
 
 #include "Core/Types.h"
-#include "Render/Pipeline/Camera.h"
+#include "Pipeline/CameraController.h"
 #include "Math/Math.h"
 
 struct GLFWwindow;
@@ -44,11 +44,11 @@ public:
 
     /// 更新视口尺寸（由 EditorApp 在 SwapChain resize 时调用）
     void SetViewportSize(u32 width, u32 height) {
-        m_Camera.SetAspectRatio(static_cast<f32>(width), static_cast<f32>(height));
+        m_CamCtrl.SetAspectRatio(static_cast<f32>(width), static_cast<f32>(height));
     }
 
     /// 获取编辑器相机引用（供外部读取相机状态）
-    const he::render::CameraData& GetCamera() const { return m_Camera; }
+    const he::render::CameraData& GetCamera() const { return m_CamCtrl.GetCamera(); }
 
 private:
     void UpdateCamera(float deltaTime);
@@ -57,16 +57,12 @@ private:
     he::render::ForwardPipeline* m_Pipeline = nullptr;
     GLFWwindow*                  m_Window   = nullptr;
 
-    he::render::CameraData m_Camera;
+    he::render::CameraController m_CamCtrl;
 
     // 鼠标状态
     bool   m_RightMouseDown = false;
     double m_LastMouseX     = 0.0;
     double m_LastMouseY     = 0.0;
-    float  m_Yaw            = 0.0f;
-    float  m_Pitch          = 0.0f;
-    float  m_MoveSpeed      = 5.0f;
-    float  m_LookSpeed      = 0.003f;
 };
 
 } // namespace he::editor

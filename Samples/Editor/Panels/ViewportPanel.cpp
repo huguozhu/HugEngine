@@ -2,7 +2,7 @@
 
 #include "ViewportPanel.h"
 #include "Editor/EditorContext.h"
-#include "Render/Pipeline/ForwardPipeline.h"
+#include "Pipeline/ForwardPipeline.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
 
@@ -18,56 +18,41 @@ void ViewportPanel::Initialize(EditorContext* ctx,
     m_Pipeline = pipeline;
     m_Window   = window;
 
-    // ��ʼ���༭�����
-    m_Camera.position = float3(0.0f, 2.0f, 8.0f);
-    m_Camera.forward  = float3(0.0f, -0.2f, -1.0f);
-    m_Camera.up       = float3(0.0f, 1.0f, 0.0f);
-    m_Camera.SetAspectRatio(16.0f, 9.0f);
-
-    // �ӳ�ʼ������ yaw/pitch
-    m_Yaw   = std::atan2(m_Camera.forward.x, -m_Camera.forward.z);
-    m_Pitch = std::asin(m_Camera.forward.y);
+    // 初始化编辑器相机（CameraController 默认位置/朝向与旧代码一致）
+    m_CamCtrl.SetAspectRatio(16.0f, 9.0f);
 }
 
 void ViewportPanel::Render(rhi::IRHICommandList* cmdList) {
     if (!m_Ctx || !m_Pipeline) return;
 
-    // ����֡ʱ��
+    // 计算帧时间
     static f64 lastTime = glfwGetTime();
     f64 now = glfwGetTime();
     float dt = static_cast<float>(now - lastTime);
     lastTime = now;
 
-
-    // ���±༭�����
+    // 更新编辑器相机
     UpdateCamera(dt);
 
-    // ��Ⱦ�������ӿ�����
+    // 渲染 3D 场景到当前 BackBuffer
     m_Pipeline->RenderScene(cmdList,
         *m_Ctx->GetWorld(),
         *m_Ctx->GetSceneGraph(),
-        m_Camera);
-
-    // MVP �׶Σ�ֱ��ʹ�� ForwardPipeline ��Ⱦ�� BackBuffer
-    // Phase 3-2: ��Ϊ��Ⱦ�� off-screen texture �� ImGui::Image
+        m_CamCtrl.GetCamera());
 }
 
 void ViewportPanel::RenderGameView(rhi::IRHICommandList* cmdList) {
     if (!m_Ctx || !m_Pipeline) return;
-    // 简化：使用编辑器相机，后续扩展为场景 Camera
     m_Pipeline->RenderScene(cmdList,
         *m_Ctx->GetWorld(),
         *m_Ctx->GetSceneGraph(),
-        m_Camera);
+        m_CamCtrl.GetCamera());
 }
 
 void ViewportPanel::UpdateCamera(float deltaTime) {
     if (!m_Window) return;
 
-    // --- �����飺�����ӿ����� hovered/focused ʱ�Ų������� ---
-    // MVP �򻯣�ʼ�ղ��񣨺�����Ϊ�������У�
-
-    // --- �����ת���Ҽ���ק��---
+    // --- 鼠标旋转（右键拖拽）---
     bool mouseDown = glfwGetMouseButton(m_Window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
 
     if (mouseDown && !m_RightMouseDown) {
@@ -85,35 +70,20 @@ void ViewportPanel::UpdateCamera(float deltaTime) {
         m_LastMouseX = cx;
         m_LastMouseY = cy;
 
-        m_Yaw   += dx * m_LookSpeed;
-        m_Pitch -= dy * m_LookSpeed;
-        m_Pitch  = glm::clamp(m_Pitch, -1.5f, 1.5f);
+        m_CamCtrl.Rotate(dx * 0.003f, -dy * 0.003f);
     }
 
-    // --- WASD �ƶ� ---
-    float speed = m_MoveSpeed * deltaTime;
-    if (glfwGetKey(m_Window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
-        speed *= 3.0f;
+    // --- 键盘移动 ---
+    render::CameraController::MoveInput moveIn;
+    moveIn.forward  = glfwGetKey(m_Window, GLFW_KEY_W) == GLFW_PRESS;
+    moveIn.backward = glfwGetKey(m_Window, GLFW_KEY_S) == GLFW_PRESS;
+    moveIn.left     = glfwGetKey(m_Window, GLFW_KEY_A) == GLFW_PRESS;
+    moveIn.right    = glfwGetKey(m_Window, GLFW_KEY_D) == GLFW_PRESS;
+    moveIn.up       = glfwGetKey(m_Window, GLFW_KEY_E) == GLFW_PRESS;
+    moveIn.down     = glfwGetKey(m_Window, GLFW_KEY_Q) == GLFW_PRESS;
+    moveIn.sprint   = glfwGetKey(m_Window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
 
-    float3 right = glm::normalize(glm::cross(m_Camera.forward, m_Camera.up));
-    float3 move(0.0f);
-
-    if (glfwGetKey(m_Window, GLFW_KEY_W) == GLFW_PRESS) move += m_Camera.forward;
-    if (glfwGetKey(m_Window, GLFW_KEY_S) == GLFW_PRESS) move -= m_Camera.forward;
-    if (glfwGetKey(m_Window, GLFW_KEY_A) == GLFW_PRESS) move -= right;
-    if (glfwGetKey(m_Window, GLFW_KEY_D) == GLFW_PRESS) move += right;
-    if (glfwGetKey(m_Window, GLFW_KEY_E) == GLFW_PRESS) move += m_Camera.up;
-    if (glfwGetKey(m_Window, GLFW_KEY_Q) == GLFW_PRESS) move -= m_Camera.up;
-
-    if (glm::dot(move, move) > 0.0001f)
-        m_Camera.position += glm::normalize(move) * speed;
-
-    // ���³���
-    float3 forward;
-    forward.x = cos(m_Pitch) * sin(m_Yaw);
-    forward.y = sin(m_Pitch);
-    forward.z = -cos(m_Pitch) * cos(m_Yaw);
-    m_Camera.forward = glm::normalize(forward);
+    m_CamCtrl.Update(deltaTime, moveIn);
 }
 
 } // namespace he::editor

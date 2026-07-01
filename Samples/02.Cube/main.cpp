@@ -12,7 +12,8 @@
 #include "Core/Engine.h"
 #include "Platform/Window.h"
 #include "RHI/RHI.h"
-#include "Render/Pipeline/ForwardPipeline.h"
+#include "Pipeline/ForwardPipeline.h"
+#include "Pipeline/CameraController.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
 #include "Scene/CubeComponent.h"
@@ -202,23 +203,14 @@ int main() {
     imgui.Initialize(glfwWin, device.get(), swapchain.get());
 
     // --- 7. 相机 ---
-    render::CameraData camera;
-    camera.position = float3(0.0f, 2.0f, 8.0f);
-    camera.forward  = float3(0.0f, -0.2f, -1.0f);
-    camera.up       = float3(0.0f, 1.0f, 0.0f);
-    camera.SetAspectRatio(
+    render::CameraController camCtrl;
+    camCtrl.SetAspectRatio(
         static_cast<float>(swapchain->GetWidth()),
         static_cast<float>(swapchain->GetHeight()));
-
-    // 从初始朝向反算 yaw / pitch
-    float yaw   = std::atan2(camera.forward.x, -camera.forward.z);
-    float pitch = std::asin(camera.forward.y);
 
     // 鼠标状态
     bool   rightMouseDown = false;
     double lastMouseX = 0.0, lastMouseY = 0.0;
-    float  moveSpeed  = 5.0f;      // 基础移动速度（单位/秒）
-    float  lookSpeed  = 0.003f;    // 旋转灵敏度
 
     // --- 8. 窗口调整回调 ---
     engine.GetWindow()->SetResizeCallback([&](u32 w, u32 h) {
@@ -226,7 +218,7 @@ int main() {
         swapchain->Resize(w, h);
         cmdList->SetSwapChain(swapchain.get());
         pipeline.ResizeHDRTarget(w, h);
-        camera.SetAspectRatio(static_cast<float>(w), static_cast<float>(h));
+        camCtrl.SetAspectRatio(static_cast<float>(w), static_cast<float>(h));
     });
 
     // --- 9. 主循环 ---
@@ -253,12 +245,10 @@ int main() {
             bool mouseDown = glfwGetMouseButton(glfwWin, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
 
             if (mouseDown && !rightMouseDown) {
-                // 开始拖拽：记录初始位置，锁定光标
                 rightMouseDown = true;
                 glfwGetCursorPos(glfwWin, &lastMouseX, &lastMouseY);
                 glfwSetInputMode(glfwWin, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
             } else if (!mouseDown && rightMouseDown) {
-                // 释放拖拽：还原光标
                 rightMouseDown = false;
                 glfwSetInputMode(glfwWin, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
             } else if (mouseDown && rightMouseDown) {
@@ -269,44 +259,21 @@ int main() {
                 lastMouseX = cx;
                 lastMouseY = cy;
 
-                yaw   += dx * lookSpeed;   // 向右拖拽 → 视角右转
-                pitch += dy * lookSpeed;   // 上推鼠标 = 抬头
-                // 限制俯仰角，避免万向锁
-                pitch = glm::clamp(pitch, -1.5f, 1.5f);
+                camCtrl.Rotate(dx * 0.003f, -dy * 0.003f);  // 上推鼠标(dy<0) → pitch增大
             }
 
-            // --- 计算移动速度 ---
-            float speed = moveSpeed * deltaTime;
-            if (glfwGetKey(glfwWin, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) {
-                speed *= 3.0f;  // Shift 加速
-            }
+            // --- 键盘移动 ---
+            render::CameraController::MoveInput moveIn;
+            moveIn.forward  = glfwGetKey(glfwWin, GLFW_KEY_W) == GLFW_PRESS;
+            moveIn.backward = glfwGetKey(glfwWin, GLFW_KEY_S) == GLFW_PRESS;
+            moveIn.left     = glfwGetKey(glfwWin, GLFW_KEY_A) == GLFW_PRESS;
+            moveIn.right    = glfwGetKey(glfwWin, GLFW_KEY_D) == GLFW_PRESS;
+            moveIn.up       = glfwGetKey(glfwWin, GLFW_KEY_E) == GLFW_PRESS;
+            moveIn.down     = glfwGetKey(glfwWin, GLFW_KEY_Q) == GLFW_PRESS;
+            moveIn.sprint   = glfwGetKey(glfwWin, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
 
-            // --- WASD 移动 ---
-            float3 right = glm::normalize(glm::cross(camera.forward, camera.up));
-            float3 move  = float3(0.0f);
-            if (glfwGetKey(glfwWin, GLFW_KEY_W) == GLFW_PRESS) move += camera.forward;
-            if (glfwGetKey(glfwWin, GLFW_KEY_S) == GLFW_PRESS) move -= camera.forward;
-            if (glfwGetKey(glfwWin, GLFW_KEY_A) == GLFW_PRESS) move -= right;
-            if (glfwGetKey(glfwWin, GLFW_KEY_D) == GLFW_PRESS) move += right;
-            if (glfwGetKey(glfwWin, GLFW_KEY_E) == GLFW_PRESS) move += camera.up;     // E = 上升
-            if (glfwGetKey(glfwWin, GLFW_KEY_Q) == GLFW_PRESS) move -= camera.up;     // Q = 下降
-
-            if (glm::dot(move, move) > 0.0001f) {
-                move = glm::normalize(move) * speed;
-                camera.position += move;
-            }
-
-            // --- 滚轮缩放 ---
-            // （GLFW 滚轮通过回调获取，这里用简化方式：alt+W/S）
-            // 留空，后续通过 ImGui / 输入系统完善
+            camCtrl.Update(deltaTime, moveIn);
         }
-
-        // 更新相机朝向
-        float3 forward;
-        forward.x = cos(pitch) * sin(yaw);
-        forward.y = sin(pitch);
-        forward.z = -cos(pitch) * cos(yaw);
-        camera.forward = glm::normalize(forward);
 
         // 渲染一帧（HDR 离屏 → ToneMap → ImGui）
         cmdList->Begin();
@@ -319,8 +286,8 @@ int main() {
             swapchain->GetWidth(), swapchain->GetHeight());
         pipeline.BeginFrame(cmdList.get(),
             swapchain->GetWidth(), swapchain->GetHeight());
-        pipeline.RenderScene(cmdList.get(), world, sceneGraph, camera);
-        pipeline.RenderSkybox(cmdList.get(), world, camera);
+        pipeline.RenderScene(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
+        pipeline.RenderSkybox(cmdList.get(), world, camCtrl.GetCamera());
         pipeline.EndHDRPass(cmdList.get());
 
         // ToneMap 后处理 + ImGui（输出到 SwapChain）
@@ -333,7 +300,7 @@ int main() {
         ImGui::Begin("HugEngine");
         ImGui::Text("FPS: %.0f", 1.0f / (deltaTime > 0 ? deltaTime : 0.016f));
         ImGui::Text("Pos: (%.1f, %.1f, %.1f)",
-            camera.position.x, camera.position.y, camera.position.z);
+            camCtrl.GetCamera().position.x, camCtrl.GetCamera().position.y, camCtrl.GetCamera().position.z);
         ImGui::End();
         imgui.EndFrame(cmdList.get());
 
@@ -356,7 +323,7 @@ int main() {
                 "HugEngine — PBR | FPS: %.0f | Pos: (%.1f, %.1f, %.1f) "
                 "| 右键拖拽旋转 WASD移动",
                 fps,
-                camera.position.x, camera.position.y, camera.position.z);
+                camCtrl.GetCamera().position.x, camCtrl.GetCamera().position.y, camCtrl.GetCamera().position.z);
             glfwSetWindowTitle(glfwWin, buf);
             titleTimer = 0.0;
             titleFrame = 0;

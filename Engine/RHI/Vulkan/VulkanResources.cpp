@@ -656,12 +656,16 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
 
     VkAttachmentDescription colorAttach{};
     if (hasColor) {
-        colorAttach.format        = VK_FORMAT_B8G8R8A8_UNORM;
+        colorAttach.format        = ToVkFormat(desc.colorFormats[0]); // 使用 PSO 声明的格式
         colorAttach.samples       = VK_SAMPLE_COUNT_1_BIT;
         colorAttach.loadOp        = VK_ATTACHMENT_LOAD_OP_CLEAR;
         colorAttach.storeOp       = VK_ATTACHMENT_STORE_OP_STORE;
         colorAttach.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        colorAttach.finalLayout   = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        // SwapChain 格式输出到屏幕用 PRESENT，离屏纹理用 COLOR_ATTACHMENT（后续 barrier 转 SHADER_READ）
+        colorAttach.finalLayout   = (desc.colorFormats[0] == Format::BGRA8_UNORM ||
+                                     desc.colorFormats[0] == Format::BGRA8_SRGB)
+                                    ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+                                    : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     }
 
     VkAttachmentDescription depthAttach{};
