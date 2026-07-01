@@ -67,6 +67,7 @@ struct GPUShadowData {
 [[vk::binding(12, 0)]] SamplerState       u_IBLSampler;
 [[vk::binding(13, 0)]] TextureCube<float4> u_PrefilterMap;
 [[vk::binding(14, 0)]] Texture2D<float2>   u_BRDF_LUT;
+static const float kPrefilterMips = 5.0;  // 预滤波 mip 数（匹配 GI_IBL::kPrefilterMips）
 
 [[vk::push_constant]] cbuffer FrameConstants {
     float4x4 viewProjMatrix;
@@ -157,9 +158,10 @@ float4 fragmentMain(FSInput input) : SV_Target0 {
     float3 irradiance = u_IrradianceMap.Sample(u_IBLSampler, N).rgb;
     color += kD * irradiance * albedo * iblScale;
 
-    // 镜面反射 IBL：预滤波环境图 + BRDF LUT
+    // 镜面反射 IBL：预滤波环境图（roughness→mip）+ BRDF LUT
     float3 R = reflect(-V, N);
-    float3 prefilteredColor = u_PrefilterMap.Sample(u_IBLSampler, R).rgb;
+    float mipLevel = roughness * float(kPrefilterMips - 1);  // roughness 0..1 → mip 0..4
+    float3 prefilteredColor = u_PrefilterMap.SampleLevel(u_IBLSampler, R, mipLevel).rgb;
     float2 envBRDF = u_BRDF_LUT.Sample(u_IBLSampler, float2(max(dot(N, V), 0.0), roughness)).rg;
     color += prefilteredColor * (F * envBRDF.r + envBRDF.g) * iblScale;
 

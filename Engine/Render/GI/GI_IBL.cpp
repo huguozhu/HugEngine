@@ -2,6 +2,7 @@
 #include "RHI/RHI.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
+#include "Vulkan/VulkanInternal.h"  // 创建逐 mip 面视图需要访问 VkImage（Engine/RHI/ public include）
 // 按需包含 IBL Shader SPV（修改 IBL shader 只重编译 GI_IBL.cpp）
 #include "IBL_Irradiance.vert.spv.h"
 #include "IBL_Irradiance.frag.spv.h"
@@ -9,6 +10,33 @@
 #include "IBL_Prefilter.frag.spv.h"
 #include "IBL_BRDF_LUT.vert.spv.h"
 #include "IBL_BRDF_LUT.frag.spv.h"
+
+using namespace he;
+using namespace he::rhi;
+
+namespace {
+
+// 为 Cubemap 的指定 face + mip 创建临时 VkImageView（用于逐 mip 离屏渲染）
+VkImageView CreateFaceMipView(IRHITexture* tex, u32 face, u32 mip) {
+    auto* vkTex = static_cast<VulkanTexture*>(tex);
+    VkImageViewCreateInfo info{};
+    info.sType      = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    info.image      = vkTex->GetImage();
+    info.viewType   = VK_IMAGE_VIEW_TYPE_2D;
+    info.format     = vkTex->GetVkFormat();
+    info.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+    info.subresourceRange.baseMipLevel   = mip;
+    info.subresourceRange.levelCount     = 1;
+    info.subresourceRange.baseArrayLayer = face;
+    info.subresourceRange.layerCount     = 1;
+
+    VkImageView view = VK_NULL_HANDLE;
+    VkDevice device = vkTex->GetDevice();
+    vkCreateImageView(device, &info, nullptr, &view);
+    return view;
+}
+
+} // anonymous namespace
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/ext/matrix_clip_space.hpp>
@@ -64,19 +92,19 @@ bool GI_IBL::Initialize(rhi::IRHIDevice* device, u32, u32) {
         HE_CORE_INFO("  Irradiance Map: {}x{} Cubemap", kIrradianceRes, kIrradianceRes);
     }
 
-    // Prefilter Map: 128×128 RGBA16_FLOAT Cubemap（6 面，1 mip，后续可扩展多 mip）
+    // Prefilter Map: 128×128 RGBA16_FLOAT Cubemap（6 面，5 mip 对应 roughness 0/0.25/0.5/0.75/1.0）
     {
         rhi::TextureDesc desc;
         desc.format      = rhi::Format::RGBA16_FLOAT;
         desc.width       = kPrefilterRes;
         desc.height      = kPrefilterRes;
-        desc.mipLevels   = 1;
+        desc.mipLevels   = kPrefilterMips;
         desc.arrayLayers = 6;
         desc.usage       = rhi::TextureUsage::RenderTarget
                          | rhi::TextureUsage::ShaderResource
                          | rhi::TextureUsage::Cubemap;
         m_PrefilterMap = device->CreateTexture(desc);
-        HE_CORE_INFO("  Prefilter Map: {}x{} Cubemap", kPrefilterRes, kPrefilterRes);
+        HE_CORE_INFO("  Prefilter Map: {}x{} Cubemap ({} mips)", kPrefilterRes, kPrefilterRes, kPrefilterMips);
     }
 
     // BRDF LUT: 512×512 RG16_FLOAT 2D
@@ -92,11 +120,14 @@ bool GI_IBL::Initialize(rhi::IRHIDevice* device, u32, u32) {
         HE_CORE_INFO("  BRDF LUT: {}x{}", kBRDF_LUT_Res, kBRDF_LUT_Res);
     }
 
-    // --- 2. 创建公共采样器（线性插值 + Clamp 边缘）---
+    // --- 2. 创建公共采样器（三线性插值 + Clamp 边缘，支持 mip 过滤）---
     {
         rhi::SamplerDesc sampDesc;
         sampDesc.minFilter = rhi::FilterMode::Linear;
         sampDesc.magFilter = rhi::FilterMode::Linear;
+        sampDesc.mipFilter = rhi::FilterMode::Linear;
+        sampDesc.minLod    = 0.0f;
+        sampDesc.maxLod    = static_cast<float>(kPrefilterMips - 1);  // mip index max = 4
         sampDesc.addressU  = rhi::AddressMode::ClampToEdge;
         sampDesc.addressV  = rhi::AddressMode::ClampToEdge;
         sampDesc.addressW  = rhi::AddressMode::ClampToEdge;
@@ -108,7 +139,7 @@ bool GI_IBL::Initialize(rhi::IRHIDevice* device, u32, u32) {
     rhi::PushConstantRange pcRange;
     pcRange.stageMask = 1 | 16;  // Vertex | Fragment
     pcRange.offset    = 0;
-    pcRange.size      = 80;  // float4x4(64) + float(4) + 12B pad
+    pcRange.size      = 96;  // float4x4(64) + float(4) + padding → 96B (align 16)
 
     // 辐照度卷积 PSO
     {
@@ -212,6 +243,12 @@ bool GI_IBL::Initialize(rhi::IRHIDevice* device, u32, u32) {
 }
 
 void GI_IBL::Shutdown() {
+    // 清理缓存的逐 mip 面视图
+    if (m_PrefilterMap && !m_CachedMipViews.empty()) {
+        auto* vkTex = static_cast<VulkanTexture*>(m_PrefilterMap.get());
+        for (auto& v : m_CachedMipViews) vkDestroyImageView(vkTex->GetDevice(), v, nullptr);
+        m_CachedMipViews.clear();
+    }
     m_IrradianceMap.reset();
     m_PrefilterMap.reset();
     m_BRDF_LUT.reset();
@@ -288,29 +325,37 @@ void GI_IBL::Render(rhi::IRHICommandList* cmd) {
             m_IrradianceMap.get());
     }
 
-    // --- Pass 2: 预滤波环境图 ---
+    // --- Pass 2: 预滤波环境图（5 mip，roughness = mip / 4）---
     {
-        struct alignas(16) IBLPush { float4x4 invVP; float roughness; float _pad[3]; } pc{};
-        pc.roughness = 0.5f;  // 中等粗糙度（Phase A 单 mip）
+        // 先销毁旧缓存视图（prefilter 重建时）
+        auto* vkTex = static_cast<VulkanTexture*>(m_PrefilterMap.get());
+        for (auto& v : m_CachedMipViews) vkDestroyImageView(vkTex->GetDevice(), v, nullptr);
+        m_CachedMipViews.clear();
 
+        struct alignas(16) IBLPush { float4x4 invVP; float roughness; float _pad[3]; } pc{};
         cmd->SetPipeline(m_PrefilterPSO.get());
         cmd->BindDescriptorSet(0, m_PrefilterSet);
 
-        for (u32 face = 0; face < 6; ++face) {
-            void* faceView = m_PrefilterMap->GetNativeHandle(face);
-            if (!faceView) continue;
+        for (u32 mip = 0; mip < kPrefilterMips; ++mip) {
+            u32 mipRes   = kPrefilterRes >> mip;  // 128, 64, 32, 16, 8
+            pc.roughness = static_cast<float>(mip) / static_cast<float>(kPrefilterMips - 1);
 
-            float4x4 view  = CubeFaceViewMatrix(face);
-            pc.invVP       = glm::inverse(proj * view);
+            for (u32 face = 0; face < 6; ++face) {
+                VkImageView mipView = CreateFaceMipView(m_PrefilterMap.get(), face, mip);
+                m_CachedMipViews.push_back(mipView);  // 缓存：framebuffer 延迟销毁需要有效视图
 
-            cmd->BeginOffscreenPass(faceView, nullptr, kPrefilterRes, kPrefilterRes, nullptr);
-            cmd->SetViewport({ 0, static_cast<float>(kPrefilterRes),
-                static_cast<float>(kPrefilterRes), -static_cast<float>(kPrefilterRes),
-                0.0f, 1.0f });
-            cmd->SetScissor({ 0, 0, kPrefilterRes, kPrefilterRes });
-            cmd->SetPushConstants(0, sizeof(IBLPush), &pc);
-            cmd->Draw(3);
-            cmd->EndOffscreenPass();
+                float4x4 view  = CubeFaceViewMatrix(face);
+                pc.invVP       = glm::inverse(proj * view);
+
+                cmd->BeginOffscreenPass(reinterpret_cast<void*>(mipView), nullptr,
+                                        mipRes, mipRes, nullptr);
+                cmd->SetViewport({ 0, static_cast<float>(mipRes),
+                    static_cast<float>(mipRes), -static_cast<float>(mipRes), 0.0f, 1.0f });
+                cmd->SetScissor({ 0, 0, mipRes, mipRes });
+                cmd->SetPushConstants(0, sizeof(IBLPush), &pc);
+                cmd->Draw(3);
+                cmd->EndOffscreenPass();
+            }
         }
 
         // 布局转换：COLOR_ATTACHMENT → SHADER_READ

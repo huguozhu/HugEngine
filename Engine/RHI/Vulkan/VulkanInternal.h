@@ -251,6 +251,8 @@ public:
     VkImageView GetFaceView(u32 face) const {
         return (face < m_FaceViews.size()) ? m_FaceViews[face] : VK_NULL_HANDLE;
     }
+    VkFormat   GetVkFormat() const { return m_VkFormat; }
+    VkDevice   GetDevice()   const { return m_Device; }
 private:
     void UploadInitialData(VkCommandPool cmdPool, VkQueue queue, const TextureDesc& desc);
     VkDevice         m_Device       = VK_NULL_HANDLE;
