@@ -286,9 +286,9 @@ void ShadowSystem::RenderPointShadows(rhi::IRHICommandList* cmd,he::World& w,he:
 void ShadowSystem::Bind(rhi::IRHICommandList*)const{}
 void ShadowSystem::OnResize(u32,u32){}
 
-rhi::IRHITexture* ShadowSystem::GetCSMShadowMap(u32 c)const{
-    HE_ASSERT(c<CASCADE_COUNT,"cascade out of range");
-    return m_ShadowMaps[c].get();
+rhi::IRHITexture* ShadowSystem::GetShadowMap(u32 i)const{
+    HE_ASSERT(i<CASCADE_COUNT,"shadow map index out of range");
+    return m_ShadowMaps[i].get();
 }
 
 i32 ShadowSystem::GetShadowIndex(he::Entity lightEntity)const{

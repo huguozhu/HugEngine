@@ -1,11 +1,8 @@
 #pragma once
-#include "Subsystem/RenderSubsystem.h"
+
+#include "Shadow/IShadowSystem.h"
 #include "Pipeline/Material.h"
-#include "RHI/RHI.h"
-#include "RHI/Buffer.h"
 #include "RHI/Shader.h"
-#include "Core/Types.h"
-#include "Scene/Entity.h"
 #include <memory>
 #include <vector>
 
@@ -13,40 +10,44 @@ namespace he { class World; class SceneGraph; }
 
 namespace he::render {
 
-class ShadowSystem : public IRenderSubsystem {
+// ============================================================================
+// ShadowSystem — CSM 级联阴影 + 点光源 Cubemap 阴影
+// ============================================================================
+class ShadowSystem : public IShadowSystem {
     HE_DECLARE_NON_COPYABLE(ShadowSystem);
 public:
     ShadowSystem()=default;
     ~ShadowSystem()override=default;
 
+    // IRenderSubsystem
     bool Initialize(rhi::IRHIDevice* device,u32 width,u32 height)override;
     void Shutdown()override;
     void Update(const SubsystemContext& ctx)override;
     void Render(rhi::IRHICommandList* cmdList)override;
     void Bind(rhi::IRHICommandList* cmdList)const override;
     void OnResize(u32 width,u32 height)override;
-
     const char* GetName()const override{return"ShadowSystem";}
     bool IsReady()const override{return m_Ready;}
     bool IsEnabled()const override{return m_Enabled;}
     void SetEnabled(bool e)override{m_Enabled=e;}
 
-    void NextFrame();
-    void SetRenderResources(rhi::IRHIBuffer* objectBuffer,rhi::IRHIBuffer* shadowBuffer,rhi::DescriptorSetHandle descSet);
-    void CreateShadowPSO(rhi::DescriptorSetLayoutHandle layout);
+    // IShadowSystem
+    Mode GetMode()const override{return Mode::Traditional;}
+    void NextFrame()override;
+    void SetRenderResources(rhi::IRHIBuffer* objBuf,rhi::IRHIBuffer* shadowBuf,rhi::DescriptorSetHandle descSet)override;
+    void CreateShadowPSO(rhi::DescriptorSetLayoutHandle layout)override;
+    u32 GetShadowMapCount()const override{return CASCADE_COUNT;}
+    rhi::IRHITexture* GetShadowMap(u32 i)const override;
+    rhi::IRHISampler* GetShadowSampler()const override{return m_ShadowSampler.get();}
+    rhi::IRHITexture* GetPointShadowMap()const override{return m_PointShadowMap.get();}
+    rhi::IRHISampler* GetPointShadowSampler()const override{return m_PointShadowSampler.get();}
+    i32 GetShadowIndex(Entity light)const override;
+    bool HasActiveShadows()const override{return m_HasDirectionalShadows||m_HasPointShadows;}
 
-    rhi::IRHITexture* GetCSMShadowMap(u32 c)const;
-    rhi::IRHISampler* GetShadowSampler()const{return m_ShadowSampler.get();}
-    rhi::IRHITexture* GetPointShadowMap()const{return m_PointShadowMap.get();}
-    rhi::IRHISampler* GetPointShadowSampler()const{return m_PointShadowSampler.get();}
-
+    // ---- ShadowSystem 特有查询 ----
     bool HasDirectionalShadows()const{return m_HasDirectionalShadows;}
     bool HasPointShadows()const{return m_HasPointShadows;}
     u32  GetCurrentFrameSlot()const{return m_CurrentFrameSlot;}
-
-    /// 获取指定光源的 ShadowIndex（阴影数据在 SSBO 中的偏移）
-    /// 返回 -1 表示该光源未投射阴影
-    i32 GetShadowIndex(he::Entity lightEntity)const;
 
 private:
     void CollectDirectionalShadows(he::World& w,he::SceneGraph& sg,const CameraData& cam);
@@ -69,8 +70,7 @@ private:
     rhi::DescriptorSetHandle m_ExternalDescSet=rhi::kInvalidSet;
 
     std::vector<GPUShadowData> m_ShadowGPUData,m_PointShadowData;
-    std::vector<he::Entity>    m_ShadowEntities;  // 方向光 Entity 列表（与 m_ShadowGPUData 一一对应）
-    std::vector<he::Entity>    m_PointShadowEntities; // 点光源 Entity 列表（与 m_PointShadowData 一一对应）
+    std::vector<he::Entity>    m_ShadowEntities,m_PointShadowEntities;
     u32 m_CurrentFrameSlot=0;
     bool m_Ready=false,m_HasDirectionalShadows=false,m_HasPointShadows=false;
     he::World* m_CachedWorld=nullptr;

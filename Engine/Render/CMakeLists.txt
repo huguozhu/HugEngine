@@ -23,6 +23,8 @@ target_sources(HugEngineRender PRIVATE
     GI/GI_IBL.h
     GI/GI_IBL.cpp
     # Shadow (阴影子系统)
+    Shadow/IShadowSystem.h
+    Shadow/ShadowNone.h
     Shadow/ShadowSystem.h
     Shadow/ShadowSystem.cpp
 )

@@ -7,7 +7,7 @@
 
 namespace he::render { class GI_IBL; }        // 前向声明 — 避免循环依赖
 
-#include "Shadow/ShadowSystem.h"  // 完整类型 — 调用方需要访问 ShadowSystem API
+#include "Shadow/IShadowSystem.h"  // 完整类型 — 调用方通过 GetShadowSystem() 访问
 
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
@@ -44,7 +44,7 @@ public:
                 he::SceneGraph& sg, const CameraData& camera) override;
 
     // 子系统访问
-    ShadowSystem*        GetShadowSystem() override { return m_ShadowSystem.get(); }
+    IShadowSystem*       GetShadowSystem() override { return m_ShadowSystem.get(); }
     IGlobalIllumination* GetGI()           override { return m_GI.get(); }
 
     // ---- ForwardPipeline 特有方法 ----
@@ -164,7 +164,7 @@ private:
 
     // 子系统
     std::unique_ptr<IGlobalIllumination> m_GI;          // GI 子系统（IBL）
-    std::unique_ptr<ShadowSystem>        m_ShadowSystem; // 阴影子系统（CSM + Point）
+    std::unique_ptr<IShadowSystem>       m_ShadowSystem; // 阴影子系统（可替换实现）
 
 private:
     // 更新描述符集 IBL 绑定

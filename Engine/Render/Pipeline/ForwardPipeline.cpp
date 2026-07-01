@@ -1,6 +1,7 @@
 #include "Pipeline/ForwardPipeline.h"
 #include "GI/GI_IBL.h"
-#include "Shadow/ShadowSystem.h"
+#include "Shadow/ShadowSystem.h"   // 具体实现（创建 ShadowSystem 实例）
+#include "Shadow/ShadowNone.h"     // 空实现（默认无阴影时使用）
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
 #include "Scene/SkyboxComponent.h"
@@ -138,7 +139,7 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         for (u32 c = 0; c < CASCADE_COUNT; ++c) {
             u32 binding = (c == 0) ? 4u : (c == 1 ? 10u : 11u);
             device->UpdateDescriptorSet(set, binding, rhi::DescriptorType::CombinedImageSampler,
-                m_ShadowSystem->GetCSMShadowMap(c), m_ShadowSystem->GetShadowSampler());
+                m_ShadowSystem->GetShadowMap(c), m_ShadowSystem->GetShadowSampler());
         }
         // 绑定 5-8: 材质纹理占位（运行时通过 CreateTextureDescriptorSet 替换）
         device->UpdateDescriptorSet(set, 5,
@@ -362,7 +363,7 @@ rhi::DescriptorSetHandle ForwardPipeline::CreateTextureDescriptorSet(
     for (u32 c = 0; c < CASCADE_COUNT; ++c) {
         u32 binding = (c == 0) ? 4u : (c == 1 ? 10u : 11u);
         m_Device->UpdateDescriptorSet(set, binding, rhi::DescriptorType::CombinedImageSampler,
-            m_ShadowSystem->GetCSMShadowMap(c), m_ShadowSystem->GetShadowSampler());
+            m_ShadowSystem->GetShadowMap(c), m_ShadowSystem->GetShadowSampler());
     }
 
     // 纹理绑定 5-8（使用默认纹理作为回退）

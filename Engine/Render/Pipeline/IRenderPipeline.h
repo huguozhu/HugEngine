@@ -6,7 +6,7 @@
 // 前向声明
 namespace he { class World; class SceneGraph; }
 namespace he::rhi { class IRHIDevice; class IRHICommandList; }
-namespace he::render { class ShadowSystem; class IGlobalIllumination; }
+namespace he::render { class IShadowSystem; class IGlobalIllumination; }
 
 namespace he::render {
 
@@ -60,7 +60,7 @@ public:
     // ---- 子系统访问（可选覆写） ----
 
     /// 获取阴影子系统，无阴影时返回 nullptr
-    virtual ShadowSystem* GetShadowSystem() { return nullptr; }
+    virtual IShadowSystem* GetShadowSystem() { return nullptr; }
 
     /// 获取 GI 子系统，无 GI 时返回 nullptr
     virtual IGlobalIllumination* GetGI() { return nullptr; }
