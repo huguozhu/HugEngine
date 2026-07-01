@@ -86,7 +86,8 @@ struct alignas(16) PushConstantData {
     float4   cameraPosition;        // [64..80]
     u32      lightCount;            // [80]
     u32      objectIndex;           // [84]
-    u32      _pad[2];               // [88..96]
+    float    iblIntensity;          // [88] IBL 强度倍率（0=关闭）
+    u32      _pad;                  // [92..96]
 };
 
 static_assert(sizeof(PushConstantData) == 96,

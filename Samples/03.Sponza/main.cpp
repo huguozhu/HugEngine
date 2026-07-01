@@ -600,6 +600,20 @@ int main() {
                 pipeline.SetMultiThreadedRecording(multiThread);
 
             // ============================================================
+            // GI
+            // ============================================================
+            auto* gi = pipeline.GetGI();
+            if (gi) {
+                ImGui::SeparatorText("GI");
+                auto settings = gi->GetSettings();
+                float intensity = settings.intensity;
+                if (ImGui::SliderFloat("IBL Intensity", &intensity, 0.0f, 3.0f, "%.2f")) {
+                    settings.intensity = intensity;
+                    gi->SetSettings(settings);
+                }
+            }
+
+            // ============================================================
             // 光源
             // ============================================================
             world.ForEach<he::DirectionalLight>([&](he::Entity e, he::DirectionalLight& dl) {

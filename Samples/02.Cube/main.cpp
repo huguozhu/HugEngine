@@ -304,6 +304,20 @@ int main() {
         ImGui::Text("FPS: %.0f", 1.0f / (deltaTime > 0 ? deltaTime : 0.016f));
         ImGui::Text("Pos: (%.1f, %.1f, %.1f)",
             camCtrl.GetCamera().position.x, camCtrl.GetCamera().position.y, camCtrl.GetCamera().position.z);
+
+        // GI 控制
+        auto* gi = pipeline.GetGI();
+        if (gi) {
+            ImGui::SeparatorText("GI");
+            auto settings = gi->GetSettings();
+            ImGui::Text("Mode: %s", settings.mode == render::GIMode::IBL ? "IBL" : "None");
+            float intensity = settings.intensity;
+            if (ImGui::SliderFloat("Intensity", &intensity, 0.0f, 3.0f, "%.2f")) {
+                settings.intensity = intensity;
+                gi->SetSettings(settings);
+            }
+        }
+
         ImGui::End();
         imgui.EndFrame(cmdList.get());
 

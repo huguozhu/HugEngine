@@ -74,7 +74,8 @@ static const float kPrefilterMips = 5.0;  // 预滤波 mip 数（匹配 GI_IBL::
     float4   cameraPosition;
     uint     lightCount;
     uint     objectIndex;
-    uint     _pad[2];
+    float    iblIntensity;  // IBL 强度倍率（0=关闭）
+    uint     _pad;
 };
 
 float3 ACESFilm(float3 x) {
@@ -150,20 +151,18 @@ float4 fragmentMain(FSInput input) : SV_Target0 {
     color *= ao;
 
     // ---- IBL（环境光照） ----
-    // IBL 强度倍率（后续通过 ImGui 面板控制）
-    const float iblScale = 1.0;
     float3 F0_ibl = lerp(float3(0.04), albedo, metallic);
     float3 F = F_SchlickRoughness(max(dot(N, V), 0.0), F0_ibl, roughness, metallic);
     float3 kD = (1.0 - F) * (1.0 - metallic);
     float3 irradiance = u_IrradianceMap.Sample(u_IBLSampler, N).rgb;
-    color += kD * irradiance * albedo * iblScale;
+    color += kD * irradiance * albedo * iblIntensity;
 
     // 镜面反射 IBL：预滤波环境图（roughness→mip）+ BRDF LUT
     float3 R = reflect(-V, N);
-    float mipLevel = roughness * float(kPrefilterMips - 1);  // roughness 0..1 → mip 0..4
+    float mipLevel = roughness * float(kPrefilterMips - 1);
     float3 prefilteredColor = u_PrefilterMap.SampleLevel(u_IBLSampler, R, mipLevel).rgb;
     float2 envBRDF = u_BRDF_LUT.Sample(u_IBLSampler, float2(max(dot(N, V), 0.0), roughness)).rg;
-    color += prefilteredColor * (F * envBRDF.r + envBRDF.g) * iblScale;
+    color += prefilteredColor * (F * envBRDF.r + envBRDF.g) * iblIntensity;
 
     color += obj.emissiveFactor.rgb;
 

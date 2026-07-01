@@ -1089,6 +1089,7 @@ void ForwardPipeline::RenderScene(
     PushConstantData framePC{};
     framePC.viewProjMatrix = viewProj;
     framePC.cameraPosition = float4(camera.position, 0.0f);
+    framePC.iblIntensity  = m_GI ? m_GI->GetSettings().intensity : 1.0f;
     // CSM cameraForward 已移至 GPUShadowData
 
     // 收集光源 + 阴影数据
