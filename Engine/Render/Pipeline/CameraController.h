@@ -81,7 +81,7 @@ private:
     float m_Pitch            = 0.0f;
     float m_MoveSpeed        = 5.0f;     // 基础移动速度（单位/秒）
     float m_LookSensitivity  = 0.003f;   // 旋转灵敏度
-    MoveMode m_MoveMode      = MoveMode::Ground;
+    MoveMode m_MoveMode      = MoveMode::Free;  // 默认飞行模式：W=视线方向前进
 };
 
 } // namespace he::render

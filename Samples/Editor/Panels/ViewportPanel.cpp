@@ -18,7 +18,8 @@ void ViewportPanel::Initialize(EditorContext* ctx,
     m_Pipeline = pipeline;
     m_Window   = window;
 
-    // 初始化编辑器相机（CameraController 默认位置/朝向与旧代码一致）
+    // 初始化编辑器相机（编辑器使用 Ground 模式：WASD 水平面移动）
+    m_CamCtrl.SetMoveMode(render::CameraController::MoveMode::Ground);
     m_CamCtrl.SetAspectRatio(16.0f, 9.0f);
 }
 
