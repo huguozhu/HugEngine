@@ -4,6 +4,7 @@
 #include "Shadow/ShadowNone.h"
 #include "PostProcess/ToneMapPass.h"
 #include "PostProcess/SkyboxPass.h"
+#include "SceneRenderer.h"
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
 #include "Scene/SkyboxComponent.h"
@@ -238,6 +239,9 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         }
         HE_CORE_INFO("  Sec record pool: {} lists", m_SecRecordLists.size());
     }
+
+    // --- SceneRenderer ---
+    m_SceneRenderer = std::make_unique<SceneRenderer>();
 
     HE_CORE_INFO("ForwardPipeline initialized (with HDR + Tone Mapping + Skybox + ShadowSystem)");
     return true;
@@ -572,88 +576,16 @@ void ForwardPipeline::RenderScene(
     CollectLights(framePC, world, sceneGraph, camera);
 
     // ============================================================
-    // Phase 5-3: 多线程视锥剔除
+    // 几何体数据准备 → SceneRenderer（视锥剔除 + GPU 上传）
     // ============================================================
+    auto drawItems = m_SceneRenderer->Prepare(world, sceneGraph, camera,
+                                               m_ObjectBuffers[m_CurrentFrameSlot].get());
+    u32 totalDraws = (u32)drawItems.size();
 
-    // Step 1: 单线程收集所有可绘制实体 + 预计算世界空间包围盒
-    struct DrawableEntity {
-        he::Entity        entity;
-        he::MeshComponent* mesh;
-        float4x4          worldMatrix;  // 缓存，避免 GPU 上传时重复计算
-        AABB              worldBounds;
-    };
-    std::vector<DrawableEntity> drawables;
-
-    auto gatherEntity = [&](he::Entity e, he::MeshComponent& m) {
-        if (m.GetIndexCount() == 0) return;
-        float4x4 wm = sceneGraph.GetWorldMatrix(e);
-        drawables.push_back({e, &m, wm, m.GetBounds().Transform(wm)});
-    };
-    world.ForEach<he::MeshComponent>(gatherEntity);
-    world.ForEach<he::CubeComponent>([&](he::Entity e, he::CubeComponent& c) {
-        gatherEntity(e, static_cast<he::MeshComponent&>(c));
-    });
-    world.ForEach<he::SphereComponent>([&](he::Entity e, he::SphereComponent& s) {
-        gatherEntity(e, static_cast<he::MeshComponent&>(s));
-    });
-
-    u32 totalEntities = static_cast<u32>(drawables.size());
-
-    // Step 2: 并行视锥剔除（chunk=64，每线程独立收集后合并）
-    Frustum frustum = camera.GetFrustum();
-    std::mutex visibleMutex;
-    std::vector<DrawableEntity> visible;
-    visible.reserve(totalEntities);
-
-    if (totalEntities > 0) {
-        JobSystem::Instance().ParallelForChunked(
-            totalEntities, 64,
-            [&](u32 start, u32 end) {
-                std::vector<DrawableEntity> local;
-                local.reserve(end - start);
-                for (u32 i = start; i < end; ++i) {
-                    if (frustum.Intersects(drawables[i].worldBounds))
-                        local.push_back(drawables[i]);
-                }
-                if (!local.empty()) {
-                    std::lock_guard<std::mutex> lock(visibleMutex);
-                    visible.insert(visible.end(), local.begin(), local.end());
-                }
-            });
-    }
-
-    // Step 3: 上传 GPU 数据（单线程）+ 录制绘制命令（单/多线程可选）
-    GPUObjectData* objData = static_cast<GPUObjectData*>(
-        m_ObjectBuffers[m_CurrentFrameSlot]->Map());
-    u32 objectIndex = 0;
-
-    // --- 3a: 单线程上传所有可见实体的材质到 Object Buffer ---
-    for (auto& de : visible) {
-        if (objectIndex >= MAX_OBJECTS) break;
-
-        PBRMaterial mat = GetDefaultMaterial();
-        mat.baseColorFactor = de.mesh->baseColorFactor;
-        mat.emissiveFactor  = de.mesh->emissiveFactor;
-        mat.metallicFactor  = de.mesh->metallicFactor;
-        mat.roughnessFactor = de.mesh->roughnessFactor;
-        mat.aoFactor        = de.mesh->aoFactor;
-        mat.alphaCutoff     = de.mesh->alphaCutoff;
-        mat.alphaMode       = static_cast<AlphaMode>(de.mesh->alphaMode);
-        mat.doubleSided     = de.mesh->doubleSided;
-        mat.unlit           = de.mesh->unlit;
-
-        GPUObjectData& obj = objData[objectIndex];
-        obj.worldMatrix = de.worldMatrix;
-        FillObjectData(obj, mat);
-        objectIndex++;
-    }
-
-    u32 totalDraws = objectIndex;
-    m_ObjectBuffers[m_CurrentFrameSlot]->Unmap();
-
-    // --- 3b: 录制绘制命令 ---
+    // ============================================================
+    // 录制绘制命令（ForwardPipeline 特有：PBR PSO + 描述符集）
+    // ============================================================
     if (m_MultiThreadRecord && !m_SecRecordLists.empty() && totalDraws > 0) {
-        // Phase 5-4: 多线程并行录制 sec CB，主 CB 统一执行
         u32 numThreads = std::min((u32)m_SecRecordLists.size(), totalDraws);
         u32 chunkSize  = (totalDraws + numThreads - 1) / numThreads;
 
@@ -667,57 +599,43 @@ void ForwardPipeline::RenderScene(
 
                 auto& secCmd = m_SecRecordLists[t];
                 secCmd->BeginSecondary(m_PBR_PSO.get());
-                // Secondary CB 不继承 Primary 的动态状态，必须显式设置视口/裁剪区
-                secCmd->SetViewport({ 0, static_cast<float>(m_HDRHeight),
-                    static_cast<float>(m_HDRWidth), -static_cast<float>(m_HDRHeight),
-                    0.0f, 1.0f });
-                secCmd->SetScissor({ 0, 0, m_HDRWidth, m_HDRHeight });
+                secCmd->SetViewport({0, (float)m_HDRHeight, (float)m_HDRWidth, -(float)m_HDRHeight, 0, 1});
+                secCmd->SetScissor({0, 0, m_HDRWidth, m_HDRHeight});
 
                 for (u32 i = start; i < end; ++i) {
-                    auto& de = visible[i];
+                    auto& di = drawItems[i];
                     PushConstantData pc = framePC;
-                    pc.objectIndex = i;  // objectIndex
-
-                    if (de.mesh->GetDescriptorSet() != rhi::kInvalidSet)
-                        secCmd->BindDescriptorSet(0, de.mesh->GetDescriptorSet());
+                    pc.objectIndex = di.objectIndex;
+                    if (di.mesh->GetDescriptorSet() != rhi::kInvalidSet)
+                        secCmd->BindDescriptorSet(0, di.mesh->GetDescriptorSet());
                     else
                         secCmd->BindDescriptorSet(0, m_DescSets[m_CurrentFrameSlot]);
-
                     secCmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
-                    secCmd->SetVertexBuffer(de.mesh->GetVertexBuffer().get(), 0);
-                    secCmd->SetIndexBuffer(de.mesh->GetIndexBuffer().get());
-                    secCmd->DrawIndexed(de.mesh->GetIndexCount());
+                    secCmd->SetVertexBuffer(di.mesh->GetVertexBuffer().get(), 0);
+                    secCmd->SetIndexBuffer(di.mesh->GetIndexBuffer().get());
+                    secCmd->DrawIndexed(di.mesh->GetIndexCount());
                 }
-
                 secCmd->End();
             });
         }
-
         JobSystem::Instance().ParallelInvoke(tasks);
-
-        // 主 CB 统一执行所有 sec CB
         for (u32 t = 0; t < numThreads; ++t) {
-            u32 start = t * chunkSize;
-            if (start >= totalDraws) continue;
+            if (t * chunkSize >= totalDraws) continue;
             cmd->ExecuteSecondary(m_SecRecordLists[t].get());
         }
-
         drawCount = totalDraws;
     } else {
-        // 单线程录制（回退路径）
-        objectIndex = 0;
-        for (auto& de : visible) {
-            if (objectIndex >= MAX_OBJECTS) break;
-
-            framePC.objectIndex = objectIndex;
-            objectIndex++;
-
-            if (de.mesh->GetDescriptorSet() != rhi::kInvalidSet)
-                cmd->BindDescriptorSet(0, de.mesh->GetDescriptorSet());
+        for (auto& di : drawItems) {
+            PushConstantData pc = framePC;
+            pc.objectIndex = di.objectIndex;
+            if (di.mesh->GetDescriptorSet() != rhi::kInvalidSet)
+                cmd->BindDescriptorSet(0, di.mesh->GetDescriptorSet());
             else
                 cmd->BindDescriptorSet(0, m_DescSets[m_CurrentFrameSlot]);
-
-            DrawMesh(cmd, de.mesh, de.worldMatrix, viewProj, GetDefaultMaterial(), camera, framePC);
+            cmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
+            cmd->SetVertexBuffer(di.mesh->GetVertexBuffer().get(), 0);
+            cmd->SetIndexBuffer(di.mesh->GetIndexBuffer().get());
+            cmd->DrawIndexed(di.mesh->GetIndexCount());
             drawCount++;
         }
     }

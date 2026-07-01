@@ -8,6 +8,7 @@
 namespace he::render { class GI_IBL; }
 namespace he::render { class ToneMapPass; }
 namespace he::render { class SkyboxPass; }
+namespace he::render { class SceneRenderer; }
 
 #include "Shadow/IShadowSystem.h"
 
@@ -123,6 +124,7 @@ private:
     std::unique_ptr<IShadowSystem>       m_ShadowSystem;
     std::unique_ptr<ToneMapPass>         m_ToneMap;
     std::unique_ptr<SkyboxPass>          m_Skybox;
+    std::unique_ptr<SceneRenderer>       m_SceneRenderer;
 };
 
 } // namespace he::render
