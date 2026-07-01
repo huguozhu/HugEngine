@@ -25,7 +25,6 @@ if(SLANGC)
 
     set(SHADER_DIR   "${CMAKE_CURRENT_SOURCE_DIR}/Shaders")
     set(SPV_OUT_DIR  "${CMAKE_CURRENT_BINARY_DIR}/Shaders")
-    set(HEADER_FILE  "${SPV_OUT_DIR}/EmbeddedShaders.h")
 
     # 收集所有 .slang 文件
     file(GLOB VERT_SLANG "${SHADER_DIR}/*.vert.slang")
@@ -68,16 +67,23 @@ if(SLANGC)
         list(APPEND SPV_FILES ${SPV})
     endforeach()
 
-    # SPIR-V 二进制 → C++ uint32_t 数组
+    # SPIR-V 二进制 → C++ uint32_t 数组（每个 .spv 独立生成 .spv.h，按需 include）
+    set(SPV_HEADERS "")
     set(SPV_TOOL "${CMAKE_CURRENT_SOURCE_DIR}/spv_to_header.py")
-    add_custom_command(
-        OUTPUT ${HEADER_FILE}
-        COMMAND python "${SPV_TOOL}" "${HEADER_FILE}" ${SPV_FILES}
-        DEPENDS ${SPV_FILES} ${SPV_TOOL}
-        COMMENT "Generating EmbeddedShaders.h (Python)"
-    )
+    foreach(SPV ${SPV_FILES})
+        get_filename_component(SPV_NAME ${SPV} NAME)
+        set(SPV_H "${SPV_OUT_DIR}/${SPV_NAME}.h")
+        list(APPEND SPV_HEADERS ${SPV_H})
+        # 每个 spv 独立的 custom_command：只有变动时才重新生成对应 .h
+        add_custom_command(
+            OUTPUT ${SPV_H}
+            COMMAND python "${SPV_TOOL}" "${SPV_OUT_DIR}" ${SPV}
+            DEPENDS ${SPV} ${SPV_TOOL}
+            COMMENT "SPV header: ${SPV_NAME}.h"
+        )
+    endforeach()
 
-    add_custom_target(CompileShaders ALL DEPENDS ${HEADER_FILE})
+    add_custom_target(CompileShaders ALL DEPENDS ${SPV_HEADERS})
     add_dependencies(HugEngineShader CompileShaders)
 
 else()

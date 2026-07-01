@@ -2,7 +2,13 @@
 #include "RHI/RHI.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
-#include "EmbeddedShaders.h"
+// 按需包含 IBL Shader SPV（修改 IBL shader 只重编译 GI_IBL.cpp）
+#include "IBL_Irradiance.vert.spv.h"
+#include "IBL_Irradiance.frag.spv.h"
+#include "IBL_Prefilter.vert.spv.h"
+#include "IBL_Prefilter.frag.spv.h"
+#include "IBL_BRDF_LUT.vert.spv.h"
+#include "IBL_BRDF_LUT.frag.spv.h"
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/ext/matrix_clip_space.hpp>

@@ -6,7 +6,15 @@
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include "Threading/JobSystem.h"
-#include "EmbeddedShaders.h"
+// 按需包含 Shader SPV（修改单个 shader 只重编译 ForwardPipeline.cpp）
+#include "PBR.vert.spv.h"
+#include "PBR.frag.spv.h"
+#include "Shadow.vert.spv.h"
+#include "Shadow.frag.spv.h"
+#include "ToneMap.vert.spv.h"
+#include "ToneMap.frag.spv.h"
+#include "Skybox.vert.spv.h"
+#include "Skybox.frag.spv.h"
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/ext/matrix_clip_space.hpp>  // orthoRH_ZO (Vulkan Z [0,1])
