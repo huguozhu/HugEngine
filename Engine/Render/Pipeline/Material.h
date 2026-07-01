@@ -96,6 +96,16 @@ static_assert(sizeof(PushConstantData) == 96,
 // CSM 级联选择用的 cameraForward 移至 GPUShadowData.shadowParams.w
 
 // ============================================================
+// 阴影通道 Push Constant（阴影 VS 使用）
+// ============================================================
+struct alignas(16) ShadowPushConstant {
+    float4x4 lightViewProj;   // 光照裁剪矩阵
+    u32      objectIndex;     // GPU 对象索引
+    u32      _pad[3];         // 对齐到 80 字节
+};
+static_assert(sizeof(ShadowPushConstant) == 80, "ShadowPushConstant must be 80 bytes");
+
+// ============================================================
 // glTF 2.0 PBR 材质（CPU 端资产数据）
 // ============================================================
 struct PBRMaterial {

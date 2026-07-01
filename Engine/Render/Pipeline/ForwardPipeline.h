@@ -5,7 +5,10 @@
 #include "GI/GlobalIllumination.h"
 #include "RHI/RHI.h"
 
-namespace he::render { class GI_IBL; }  // 前向声明 — 避免循环依赖
+namespace he::render { class GI_IBL; }        // 前向声明 — 避免循环依赖
+
+#include "Shadow/ShadowSystem.h"  // 完整类型 — 调用方需要访问 ShadowSystem API
+
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
 #include "Scene/MeshComponent.h"
@@ -17,18 +20,10 @@ namespace he::render { class GI_IBL; }  // 前向声明 — 避免循环依赖
 #include <vector>
 
 // ============================================================
-// ForwardPipeline — 前向 PBR 渲染管线（含阴影通道）
+// ForwardPipeline — 前向 PBR 渲染管线（阴影已抽取为 ShadowSystem）
 // ============================================================
 
 namespace he::render {
-
-// 阴影通道 Push Constant
-struct alignas(16) ShadowPushConstant {
-    float4x4 lightViewProj;   // 光照裁剪矩阵
-    u32      objectIndex;     // GPU 对象索引
-    u32      _pad[3];         // 对齐到 80 字节
-};
-static_assert(sizeof(ShadowPushConstant) == 80, "ShadowPushConstant must be 80 bytes");
 
 class ForwardPipeline {
     HE_DECLARE_NON_COPYABLE(ForwardPipeline);
@@ -44,7 +39,7 @@ public:
     void NextFrame();
     void BeginFrame(rhi::IRHICommandList* cmd, u32 width, u32 height);
 
-    // 渲染场景（含阴影通道）
+    // 渲染场景（光照 + PBR 绘制 + 视锥剔除）
     void RenderScene(
         rhi::IRHICommandList* cmd,
         he::World& world,
@@ -62,36 +57,6 @@ public:
         rhi::IRHITexture* metallicRoughness, rhi::IRHISampler* mrSampler,
         rhi::IRHITexture* occlusion, rhi::IRHISampler* ocSampler);
 
-public:
-    // --- 阴影通道编排（在主管线渲染通道外调用）---
-    // 收集阴影投射光源并上传阴影数据到 SSBO
-    void CollectShadowLights(
-        he::World& world, he::SceneGraph& sg,
-        std::vector<const he::LightComponent*>& shadowLights,
-        std::vector<GPUShadowData>& shadowGPUData,
-        const CameraData& camera);
-    // CSM 级联阴影通道（cascadeIdx ∈ [0, CASCADE_COUNT)）
-    void BeginShadowPass(rhi::IRHICommandList* cmd, u32 cascadeIdx);
-    void RenderShadowPass(
-        rhi::IRHICommandList* cmd,
-        he::World& world,
-        he::SceneGraph& sg,
-        const std::vector<const he::LightComponent*>& shadowLights,
-        const std::vector<GPUShadowData>& shadowGPUData,
-        u32 cascadeIdx);
-    void EndShadowPass(rhi::IRHICommandList* cmd);
-    // CSM: 全部级联渲染完毕后统一转换布局
-    void EndAllShadowPasses(rhi::IRHICommandList* cmd);
-
-    // --- 点光源阴影（Cubemap）---
-    void RenderPointShadowPass(
-        rhi::IRHICommandList* cmd,
-        he::World& world,
-        he::SceneGraph& sg,
-        const std::vector<const he::LightComponent*>& pointLights,
-        const std::vector<GPUShadowData>& pointShadowData);
-    bool HasPointShadows() const { return m_HasPointShadows; }
-
     // Phase 5-4: 多线程命令录制开关（ImGui 面板运行时切换）
     void SetMultiThreadedRecording(bool enable) { m_MultiThreadRecord = enable; }
     bool IsMultiThreadedRecording() const { return m_MultiThreadRecord; }
@@ -102,11 +67,31 @@ public:
     void RenderToneMapPass(rhi::IRHICommandList* cmd);
     void ResizeHDRTarget(u32 width, u32 height);
 
+    // --- 子系统和访问器 ---
+
+    // 渲染天空盒（遍历 Scene 中的 SkyboxComponent）
+    void RenderSkybox(rhi::IRHICommandList* cmd, he::World& world,
+                      const CameraData& camera);
+
+    // GI 子系统访问
+    IGlobalIllumination* GetGI() { return m_GI.get(); }
+    void SetGI(std::unique_ptr<IGlobalIllumination> gi) { m_GI = std::move(gi); }
+
+    // GI 准备（Scene 渲染前调用：检测 Skybox → 更新 IBL 贴图）
+    void PrepareGI(rhi::IRHICommandList* cmd, he::World& world);
+
+    // 阴影子系统访问
+    ShadowSystem* GetShadowSystem() { return m_ShadowSystem.get(); }
+
+    // 当前帧 Object/Shadow Buffer + 描述符集（供 ShadowSystem 复用）
+    rhi::IRHIBuffer*           GetCurrentObjectBuffer() { return m_ObjectBuffers[m_CurrentFrameSlot].get(); }
+    rhi::IRHIBuffer*           GetCurrentShadowBuffer() { return m_ShadowBuffers[m_CurrentFrameSlot].get(); }
+    rhi::DescriptorSetHandle   GetCurrentDescSet()      { return m_DescSets[m_CurrentFrameSlot]; }
+
 private:
 
-    // 从 World 收集活跃光源，填充 PushConstant 的光照字段
+    // 从 World 收集活跃光源，填充 PushConstant + Light SSBO
     void CollectLights(PushConstantData& pc,
-                       std::vector<GPUShadowData>& shadowData,
                        he::World& world, he::SceneGraph& sg,
                        const CameraData& camera);
 
@@ -125,9 +110,8 @@ private:
 
     rhi::IRHIDevice* m_Device = nullptr;
     std::unique_ptr<rhi::IRHIPipelineState> m_PBR_PSO;
-    std::unique_ptr<rhi::IRHIPipelineState> m_ShadowPSO;  // 阴影深度专用 PSO
 
-    // 主管道 Descriptor Set + Storage Buffers（光照 + 对象数据 + 阴影数据 + 阴影贴图）
+    // 主管道 Descriptor Set + Storage Buffers（光照 + 对象数据）
     rhi::DescriptorSetLayoutHandle m_DescLayout      = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_DescSets[MAX_FRAMES_IN_FLIGHT] = {};  // 三缓冲共享描述符集
     // 三缓冲 StorageBuffer（Phase 1 多线程渲染：CPU 写入当前帧，GPU 读取上一帧）
@@ -137,20 +121,6 @@ private:
     u32 m_CurrentFrameSlot = 0;  // 当前帧槽位 [0, MAX_FRAMES_IN_FLIGHT)
     // 所有已分配的 per-mesh 描述符集（用于每帧更新动态绑定 1-3）
     std::vector<rhi::DescriptorSetHandle> m_AllPerMeshDescSets;
-
-    // CSM 阴影贴图（3 级联，每级 2048×2048 D32_FLOAT）
-    std::unique_ptr<rhi::IRHITexture>  m_ShadowMaps[CASCADE_COUNT];
-    std::unique_ptr<rhi::IRHISampler>  m_ShadowSampler;      // 方向光阴影采样器（共享）
-    std::unique_ptr<rhi::IRHISampler>  m_ShadowPlaceholderSampler; // 占位纹理的普通采样器
-    u32 m_ShadowMapSize = 2048;
-    std::unique_ptr<rhi::IRHITexture>  m_ShadowPlaceholderTex; // 占位纹理
-
-    // 点光源阴影（Cubemap）
-    std::unique_ptr<rhi::IRHITexture>  m_PointShadowMap;     // Cubemap 深度纹理
-    std::unique_ptr<rhi::IRHISampler>  m_PointShadowSampler; // Cubemap 采样器
-    u32 m_PointShadowMapSize = 512;  // 每面分辨率
-    bool m_HasPointShadows = false;
-    bool m_PointShadowInitDone = false;  // Cubemap 布局首次转换标记
 
     // HDR 离屏渲染（RGBA16_FLOAT）
     std::unique_ptr<rhi::IRHITexture>  m_HDRTarget;     // 离屏颜色纹理
@@ -183,23 +153,10 @@ private:
     // 着色器字节码
     rhi::ShaderBytecode m_VS;
     rhi::ShaderBytecode m_FS;
-    rhi::ShaderBytecode m_ShadowVS;
-    rhi::ShaderBytecode m_ShadowFS;
 
-    // GI 子系统
-    std::unique_ptr<IGlobalIllumination> m_GI;
-
-public:
-    // 渲染天空盒（遍历 Scene 中的 SkyboxComponent）
-    void RenderSkybox(rhi::IRHICommandList* cmd, he::World& world,
-                      const CameraData& camera);
-
-    // GI 子系统访问
-    IGlobalIllumination* GetGI() { return m_GI.get(); }
-    void SetGI(std::unique_ptr<IGlobalIllumination> gi) { m_GI = std::move(gi); }
-
-    // GI 准备（Scene 渲染前调用：检测 Skybox → 更新 IBL 贴图）
-    void PrepareGI(rhi::IRHICommandList* cmd, he::World& world);
+    // 子系统
+    std::unique_ptr<IGlobalIllumination> m_GI;          // GI 子系统（IBL）
+    std::unique_ptr<ShadowSystem>        m_ShadowSystem; // 阴影子系统（CSM + Point）
 
 private:
     // 更新描述符集 IBL 绑定

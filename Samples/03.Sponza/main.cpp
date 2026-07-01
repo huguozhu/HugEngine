@@ -511,41 +511,20 @@ int main() {
         // 帧首推进槽位，确保 Shadow 和 Scene 使用同一帧缓冲区
         pipeline.NextFrame();
 
-        // 阴影通道（在主渲染通道之前执行，离屏渲染到 ShadowMap）
+        // 阴影子系统：注入渲染资源 → Update → Render
         {
-            std::vector<const he::LightComponent*> shadowLights;
-            std::vector<render::GPUShadowData> shadowGPUData;
-            pipeline.CollectShadowLights(world, sceneGraph, shadowLights, shadowGPUData, camCtrl.GetCamera());
+            auto* shadowSys = pipeline.GetShadowSystem();
+            shadowSys->SetRenderResources(
+                pipeline.GetCurrentObjectBuffer(),
+                pipeline.GetCurrentShadowBuffer(),
+                pipeline.GetCurrentDescSet());
 
-            // 分离方向光和点光源
-            std::vector<const he::LightComponent*> dirLights, pointLights;
-            std::vector<render::GPUShadowData> dirShadowData, pointShadowData;
-            for (usize i = 0; i < shadowLights.size(); ++i) {
-                if (shadowLights[i]->type == he::LightType::Directional) {
-                    dirLights.push_back(shadowLights[i]);
-                    dirShadowData.push_back(shadowGPUData[i]);
-                } else if (shadowLights[i]->type == he::LightType::Point) {
-                    pointLights.push_back(shadowLights[i]);
-                    pointShadowData.push_back(shadowGPUData[i]);
-                }
-            }
-
-            // 方向光阴影 CSM（3 级联）
-            if (!dirShadowData.empty()) {
-                for (u32 c = 0; c < render::CASCADE_COUNT; ++c) {
-                    pipeline.BeginShadowPass(cmdList.get(), c);
-                    pipeline.RenderShadowPass(cmdList.get(), world, sceneGraph,
-                                             dirLights, dirShadowData, c);
-                    pipeline.EndShadowPass(cmdList.get());
-                }
-                pipeline.EndAllShadowPasses(cmdList.get());
-            }
-
-            // 点光源阴影（Cubemap 6 面）
-            if (!pointShadowData.empty()) {
-                pipeline.RenderPointShadowPass(cmdList.get(), world, sceneGraph,
-                                              pointLights, pointShadowData);
-            }
+            render::SubsystemContext shadowCtx;
+            shadowCtx.world       = &world;
+            shadowCtx.sceneGraph  = &sceneGraph;
+            shadowCtx.camera      = &camCtrl.GetCamera();
+            shadowSys->Update(shadowCtx);
+            shadowSys->Render(cmdList.get());
         }
 
         // --- HDR 离屏渲染通道（RGBA16_FLOAT）---

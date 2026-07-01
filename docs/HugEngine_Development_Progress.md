@@ -4,13 +4,14 @@
 
 ## 整体进度
 
-核心渲染功能 + IBL 环境光照 + 多线程渲染完成。架构重构为 `IRenderPipeline + IRenderSubsystem` 双层模式已规划。
+核心渲染功能 + IBL 环境光照 + 多线程渲染 + 阴影子系统抽取完成。
 
 - **Phase 1-4**: 引擎模块 + PBR 前向管线 + 编辑器 + 阴影 + HDR ✅
 - **Phase 5**: 三缓冲帧环 + 辅助命令缓冲 + 多线程视锥剔除 + 录制 ✅
 - **GI_IBL**: 环境光照（辐照度 32² + 预滤波 5-mip + BRDF LUT） ✅
 - **CameraController**: 可复用相机控制模块（Free/Ground 双模式） ✅
 - **RHI Compute Shader**: Dispatch + Compute PSO + .comp.slang 编译 ✅
+- **ShadowSystem**: 阴影子系统抽取为 IRenderSubsystem（CSM + Point） ✅
 
 ## 模块完成度
 
@@ -79,7 +80,7 @@ Engine/Render/
 ├── Pipeline/    (Camera, CameraController, ForwardPipeline, Material)
 ├── Subsystem/   (IRenderSubsystem)
 ├── GI/          (IGlobalIllumination, GI_None, GI_IBL, GI_RSM)
-├── Shadow/      (占位 — Shadow 抽取后填充)
+├── Shadow/      (ShadowSystem — CSM + Point 阴影子系统) ✅
 ├── PostProcess/ (占位)
 └── RenderGraph.h/.cpp
 ```
@@ -88,7 +89,6 @@ Engine/Render/
 
 | 问题 | 影响 | 计划 |
 |------|------|------|
-| Shadow 未抽取为 IRenderSubsystem | 无法复用给其他管线 | 任务 #11 |
 | IRenderPipeline 基类未实现 | 无法添加 Deferred/Forward+ | 任务 #12 |
 | 点光阴影无 PCF / 无视锥剔除 | 硬边 + 高 draw count | |
 | 无 Bindless 纹理数组 | 无法降低 draw call | |
@@ -101,5 +101,5 @@ Engine/Render/
 |---|------|:---:|
 | 9 | GI_RSM（Reflective Shadow Maps） | ⬜ |
 | 10 | DeferredPipeline（延迟渲染） | ⬜ |
-| 11 | Shadow 子系统抽取（IRenderSubsystem） | ⬜ |
+| 11 | Shadow 子系统抽取（IRenderSubsystem） | ✅ |
 | 12 | IRenderPipeline 基类 | ⬜ |
