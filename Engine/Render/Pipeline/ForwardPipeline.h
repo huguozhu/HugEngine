@@ -1,7 +1,7 @@
 #pragma once
 
+#include "Pipeline/IRenderPipeline.h"
 #include "Pipeline/Material.h"
-#include "Pipeline/Camera.h"
 #include "GI/GlobalIllumination.h"
 #include "RHI/RHI.h"
 
@@ -25,18 +25,30 @@ namespace he::render { class GI_IBL; }        // 前向声明 — 避免循环�
 
 namespace he::render {
 
-class ForwardPipeline {
+class ForwardPipeline : public IRenderPipeline {
     HE_DECLARE_NON_COPYABLE(ForwardPipeline);
 
 public:
     ForwardPipeline();
-    ~ForwardPipeline();
+    ~ForwardPipeline() override;
 
-    void Initialize(rhi::IRHIDevice* device);
-    void Shutdown();
+    // ---- IRenderPipeline 接口 ----
+    bool Initialize(rhi::IRHIDevice* device) override;
+    void Shutdown() override;
+    void NextFrame() override;
+    void OnResize(u32 width, u32 height) override;
+    const char* GetName() const override { return "ForwardPipeline"; }
 
-    // 推进三缓冲槽位，更新 per-mesh 描述符集指向新帧缓冲区（帧首调用，在 Shadow/Scene 之前）
-    void NextFrame();
+    /// 渲染完整一帧（HDR 离屏 → 场景 → 天空盒 → ToneMap 后处理）
+    void Render(rhi::IRHICommandList* cmd, he::World& world,
+                he::SceneGraph& sg, const CameraData& camera) override;
+
+    // 子系统访问
+    ShadowSystem*        GetShadowSystem() override { return m_ShadowSystem.get(); }
+    IGlobalIllumination* GetGI()           override { return m_GI.get(); }
+
+    // ---- ForwardPipeline 特有方法 ----
+
     void BeginFrame(rhi::IRHICommandList* cmd, u32 width, u32 height);
 
     // 渲染场景（光照 + PBR 绘制 + 视锥剔除）
@@ -73,15 +85,11 @@ public:
     void RenderSkybox(rhi::IRHICommandList* cmd, he::World& world,
                       const CameraData& camera);
 
-    // GI 子系统访问
-    IGlobalIllumination* GetGI() { return m_GI.get(); }
     void SetGI(std::unique_ptr<IGlobalIllumination> gi) { m_GI = std::move(gi); }
 
     // GI 准备（Scene 渲染前调用：检测 Skybox → 更新 IBL 贴图）
     void PrepareGI(rhi::IRHICommandList* cmd, he::World& world);
 
-    // 阴影子系统访问
-    ShadowSystem* GetShadowSystem() { return m_ShadowSystem.get(); }
 
     // 当前帧 Object/Shadow Buffer + 描述符集（供 ShadowSystem 复用）
     rhi::IRHIBuffer*           GetCurrentObjectBuffer() { return m_ObjectBuffers[m_CurrentFrameSlot].get(); }

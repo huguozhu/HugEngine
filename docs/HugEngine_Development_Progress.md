@@ -12,6 +12,7 @@
 - **CameraController**: 可复用相机控制模块（Free/Ground 双模式） ✅
 - **RHI Compute Shader**: Dispatch + Compute PSO + .comp.slang 编译 ✅
 - **ShadowSystem**: 阴影子系统抽取为 IRenderSubsystem（CSM + Point） ✅
+- **IRenderPipeline**: 渲染管线抽象基类（ForwardPipeline 继承） ✅
 
 ## 模块完成度
 
@@ -89,7 +90,6 @@ Engine/Render/
 
 | 问题 | 影响 | 计划 |
 |------|------|------|
-| IRenderPipeline 基类未实现 | 无法添加 Deferred/Forward+ | 任务 #12 |
 | 点光阴影无 PCF / 无视锥剔除 | 硬边 + 高 draw count | |
 | 无 Bindless 纹理数组 | 无法降低 draw call | |
 | 离屏视口渲染 (ImGui::Image) | 编辑器 Viewport | |
@@ -102,4 +102,4 @@ Engine/Render/
 | 9 | GI_RSM（Reflective Shadow Maps） | ⬜ |
 | 10 | DeferredPipeline（延迟渲染） | ⬜ |
 | 11 | Shadow 子系统抽取（IRenderSubsystem） | ✅ |
-| 12 | IRenderPipeline 基类 | ⬜ |
+| 12 | IRenderPipeline 基类 | ✅ |

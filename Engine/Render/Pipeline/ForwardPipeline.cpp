@@ -29,7 +29,7 @@ ForwardPipeline::~ForwardPipeline() {
     Shutdown();
 }
 
-void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
+bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     m_Device = device;
     HE_ASSERT(m_Device, "ForwardPipeline: device is null");
 
@@ -309,6 +309,7 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     }
 
     HE_CORE_INFO("ForwardPipeline initialized (with HDR + Tone Mapping + Skybox + ShadowSystem)");
+    return true;
 }
 
 void ForwardPipeline::Shutdown() {
@@ -633,6 +634,25 @@ void ForwardPipeline::ResizeHDRTarget(u32 width, u32 height) {
     m_Device->UpdateDescriptorSet(m_ToneMapSet, 0,
         rhi::DescriptorType::CombinedImageSampler,
         m_HDRTarget.get(), m_HDRSampler.get());
+}
+
+// ---- IRenderPipeline 包装方法 ----
+
+void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
+                              he::SceneGraph& sg, const CameraData& camera)
+{
+    // GI 准备（检测 Skybox → 更新 IBL）
+    PrepareGI(cmd, world);
+    // HDR 离屏通道
+    BeginHDRPass(cmd, m_HDRWidth, m_HDRHeight);
+    BeginFrame(cmd, m_HDRWidth, m_HDRHeight);
+    RenderScene(cmd, world, sg, camera);
+    RenderSkybox(cmd, world, camera);
+    EndHDRPass(cmd);
+}
+
+void ForwardPipeline::OnResize(u32 width, u32 height) {
+    ResizeHDRTarget(width, height);
 }
 
 void ForwardPipeline::RenderScene(

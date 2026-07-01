@@ -4,6 +4,7 @@ add_library(HugEngineRender STATIC)
 
 target_sources(HugEngineRender PRIVATE
     # Pipeline
+    Pipeline/IRenderPipeline.h
     Pipeline/Camera.h
     Pipeline/CameraController.h
     Pipeline/CameraController.cpp

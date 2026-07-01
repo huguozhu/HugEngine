@@ -385,6 +385,8 @@ int main() {
     // ============================================================
     render::ForwardPipeline pipeline;
     pipeline.Initialize(device.get());
+    // 同步 HDR 离屏渲染尺寸与 SwapChain
+    pipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
 
     // 为每个 primitive 创建独立描述符集（纹理已写入，渲染时只 bind 不 update）
     u32 descSetOk = 0, descSetFail = 0;
@@ -448,7 +450,7 @@ int main() {
         if (w == 0 || h == 0) return;
         swapchain->Resize(w, h);
         cmdList->SetSwapChain(swapchain.get());
-        pipeline.ResizeHDRTarget(w, h);
+        pipeline.OnResize(w, h);
         camCtrl.SetAspectRatio(static_cast<float>(w), static_cast<float>(h));
     });
 
@@ -527,19 +529,8 @@ int main() {
             shadowSys->Render(cmdList.get());
         }
 
-        // --- HDR 离屏渲染通道（RGBA16_FLOAT）---
-        // GI 准备（HDR Pass 之前）
-        pipeline.PrepareGI(cmdList.get(), world);
-
-        // HDR 离屏渲染通道
-        pipeline.BeginHDRPass(cmdList.get(),
-            swapchain->GetWidth(), swapchain->GetHeight());
-        pipeline.BeginFrame(cmdList.get(),
-            swapchain->GetWidth(), swapchain->GetHeight());
-        pipeline.RenderScene(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
-        // Skybox 在场景之后渲染（depth=Equal，仅在空白区域绘制）
-        pipeline.RenderSkybox(cmdList.get(), world, camCtrl.GetCamera());
-        pipeline.EndHDRPass(cmdList.get());
+        // --- HDR 离屏渲染 + 场景 + 天空盒（IRenderPipeline::Render 封装）---
+        pipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
 
         // --- ToneMap 后处理 + ImGui（输出到 SwapChain B8G8R8A8）---
         cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
