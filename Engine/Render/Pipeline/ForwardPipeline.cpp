@@ -443,6 +443,8 @@ void ForwardPipeline::EndHDRPass(rhi::IRHICommandList* cmd) {
         rhi::ResourceState::ShaderResource,
         m_HDRTarget.get());
 
+    // 预设 ToneMap PSO 为下一个 RenderPass 的初始管线（匹配 SwapChain BGRA8_UNORM 格式）
+    if (m_ToneMap) m_ToneMap->PreBind(cmd);
 }
 
 void ForwardPipeline::PrepareGI(rhi::IRHICommandList* cmd, he::World& world) {

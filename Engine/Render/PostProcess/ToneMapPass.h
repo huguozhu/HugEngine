@@ -29,8 +29,10 @@ public:
     bool IsEnabled()const override{return m_Enabled;}
     void SetEnabled(bool e)override{m_Enabled=e;}
 
-    // 每帧设置 HDR 输入纹理（由管线在 HDR Pass 后调用）
+    // 每帧设置 HDR 输入纹理
     void SetInput(rhi::IRHITexture* hdrTarget,rhi::IRHISampler* sampler);
+    // 预设 PSO 为下一个 RenderPass 的初始管线
+    void PreBind(rhi::IRHICommandList* cmd){if(m_Ready)cmd->SetPipeline(m_PSO.get());}
 
 private:
     rhi::ShaderBytecode m_VS,m_FS;
