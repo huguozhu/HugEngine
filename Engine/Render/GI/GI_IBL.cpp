@@ -128,6 +128,7 @@ bool GI_IBL::Initialize(rhi::IRHIDevice* device, u32, u32) {
         psoDesc.depthWrite           = false;
         psoDesc.colorAttachmentCount = 1;
         psoDesc.colorFormats[0]      = rhi::Format::RGBA16_FLOAT;
+        psoDesc.depthFormat          = rhi::Format::Unknown;  // 无需深度
         psoDesc.pushConstantRanges   = { pcRange };
         psoDesc.descriptorSetLayouts = { m_IrradianceLayout };
         psoDesc.debugName            = "IBL_Irradiance";
@@ -163,6 +164,7 @@ bool GI_IBL::Initialize(rhi::IRHIDevice* device, u32, u32) {
         psoDesc.depthWrite           = false;
         psoDesc.colorAttachmentCount = 1;
         psoDesc.colorFormats[0]      = rhi::Format::RGBA16_FLOAT;
+        psoDesc.depthFormat          = rhi::Format::Unknown;  // 无需深度
         psoDesc.pushConstantRanges   = { pcRange };
         psoDesc.descriptorSetLayouts = { m_PrefilterLayout };
         psoDesc.debugName            = "IBL_Prefilter";
@@ -191,6 +193,7 @@ bool GI_IBL::Initialize(rhi::IRHIDevice* device, u32, u32) {
         psoDesc.depthWrite           = false;
         psoDesc.colorAttachmentCount = 1;
         psoDesc.colorFormats[0]      = rhi::Format::RG16_FLOAT;
+        psoDesc.depthFormat          = rhi::Format::Unknown;  // 无需深度
         psoDesc.debugName            = "IBL_BRDF_LUT";
 
         m_BRDF_LUT_PSO = device->CreatePipelineState(psoDesc);
@@ -223,9 +226,11 @@ void GI_IBL::Update(const SubsystemContext& ctx) {
 
 void GI_IBL::SetIBLSkybox(rhi::IRHITexture* cubemap, rhi::IRHISampler* sampler) {
     if (!cubemap || !sampler) return;
+    // 仅当 skybox 实际变化时才标记脏（避免每帧重生成）
+    if (m_SkyboxCubemap == cubemap && m_SkyboxSampler == sampler) return;
     m_SkyboxCubemap = cubemap;
     m_SkyboxSampler = sampler;
-    m_Dirty         = true;  // 标记需要重新生成 IBL 贴图
+    m_Dirty         = true;
 
     // 更新描述符集绑定
     m_Device->UpdateDescriptorSet(m_IrradianceSet, 0,
@@ -267,6 +272,14 @@ void GI_IBL::Render(rhi::IRHICommandList* cmd) {
             cmd->Draw(3);  // 全屏三角形
             cmd->EndOffscreenPass();
         }
+
+        // 布局转换：COLOR_ATTACHMENT → SHADER_READ（PBR Shader 采样）
+        cmd->PipelineBarrier(
+            rhi::PipelineStage::ColorAttachmentOutput,
+            rhi::PipelineStage::FragmentShader,
+            rhi::ResourceState::RenderTarget,
+            rhi::ResourceState::ShaderResource,
+            m_IrradianceMap.get());
     }
 
     // --- Pass 2: 预滤波环境图 ---
@@ -293,6 +306,14 @@ void GI_IBL::Render(rhi::IRHICommandList* cmd) {
             cmd->Draw(3);
             cmd->EndOffscreenPass();
         }
+
+        // 布局转换：COLOR_ATTACHMENT → SHADER_READ
+        cmd->PipelineBarrier(
+            rhi::PipelineStage::ColorAttachmentOutput,
+            rhi::PipelineStage::FragmentShader,
+            rhi::ResourceState::RenderTarget,
+            rhi::ResourceState::ShaderResource,
+            m_PrefilterMap.get());
     }
 
     // --- Pass 3: BRDF LUT ---
@@ -306,6 +327,14 @@ void GI_IBL::Render(rhi::IRHICommandList* cmd) {
         cmd->SetScissor({ 0, 0, kBRDF_LUT_Res, kBRDF_LUT_Res });
         cmd->Draw(3);
         cmd->EndOffscreenPass();
+
+        // 布局转换：COLOR_ATTACHMENT → SHADER_READ
+        cmd->PipelineBarrier(
+            rhi::PipelineStage::ColorAttachmentOutput,
+            rhi::PipelineStage::FragmentShader,
+            rhi::ResourceState::RenderTarget,
+            rhi::ResourceState::ShaderResource,
+            m_BRDF_LUT.get());
     }
 
     m_Dirty = false;

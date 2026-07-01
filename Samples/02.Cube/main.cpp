@@ -281,12 +281,14 @@ int main() {
         // 帧首推进槽位（三缓冲帧环）
         pipeline.NextFrame();
 
+        // GI 准备（HDR Pass 之前：IBL 贴图生成需要独立 offscreen pass）
+        pipeline.PrepareGI(cmdList.get(), world);
+
         // HDR 离屏渲染通道
         pipeline.BeginHDRPass(cmdList.get(),
             swapchain->GetWidth(), swapchain->GetHeight());
         pipeline.BeginFrame(cmdList.get(),
             swapchain->GetWidth(), swapchain->GetHeight());
-        pipeline.PrepareGI(cmdList.get(), world);
         pipeline.RenderScene(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
         pipeline.RenderSkybox(cmdList.get(), world, camCtrl.GetCamera());
         pipeline.EndHDRPass(cmdList.get());
