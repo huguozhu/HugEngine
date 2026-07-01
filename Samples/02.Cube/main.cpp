@@ -286,6 +286,7 @@ int main() {
             swapchain->GetWidth(), swapchain->GetHeight());
         pipeline.BeginFrame(cmdList.get(),
             swapchain->GetWidth(), swapchain->GetHeight());
+        pipeline.PrepareGI(cmdList.get(), world);
         pipeline.RenderScene(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
         pipeline.RenderSkybox(cmdList.get(), world, camCtrl.GetCamera());
         pipeline.EndHDRPass(cmdList.get());

@@ -2,7 +2,7 @@
 
 #include "Subsystem/RenderSubsystem.h"
 
-namespace rhi {
+namespace he::rhi {
     class IRHITexture;
 }
 

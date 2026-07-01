@@ -1,4 +1,5 @@
 #include "Pipeline/ForwardPipeline.h"
+#include "GI/GI_IBL.h"
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
 #include "Scene/SkyboxComponent.h"
@@ -118,6 +119,9 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         { 9, rhi::DescriptorType::CombinedImageSampler,  1, 16 },
         { 10, rhi::DescriptorType::CombinedImageSampler, 1, 16 },  // CSM cascade 1
         { 11, rhi::DescriptorType::CombinedImageSampler, 1, 16 },  // CSM cascade 2
+        { 12, rhi::DescriptorType::CombinedImageSampler, 1, 16 },  // IBL Irradiance Cubemap
+        { 13, rhi::DescriptorType::CombinedImageSampler, 1, 16 },  // IBL Prefilter Cubemap
+        { 14, rhi::DescriptorType::CombinedImageSampler, 1, 16 },  // IBL BRDF LUT
     };
     m_DescLayout = device->CreateDescriptorSetLayout(combinedLayoutDesc);
 
@@ -261,6 +265,16 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         device->UpdateDescriptorSet(set, 9,
                                     rhi::DescriptorType::CombinedImageSampler,
                                     m_PointShadowMap.get(), m_PointShadowSampler.get());
+        // IBL 纹理占位（GI_IBL 生成后通过 UpdateIBLBindings 替换）
+        device->UpdateDescriptorSet(set, 12,
+                                    rhi::DescriptorType::CombinedImageSampler,
+                                    m_PointShadowMap.get(), m_PointShadowSampler.get());
+        device->UpdateDescriptorSet(set, 13,
+                                    rhi::DescriptorType::CombinedImageSampler,
+                                    m_PointShadowMap.get(), m_PointShadowSampler.get());
+        device->UpdateDescriptorSet(set, 14,
+                                    rhi::DescriptorType::CombinedImageSampler,
+                                    m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
         m_DescSets[i] = set;
     }
     // 初始化时使用第一个槽位
@@ -387,6 +401,14 @@ void ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
 
         m_SkyboxPSO = device->CreatePipelineState(skyDesc);
         HE_ASSERT(m_SkyboxPSO, "ForwardPipeline: failed to create Skybox PSO");
+    }
+
+    // --- GI 子系统（IBL）---
+    {
+        auto gi = std::make_unique<GI_IBL>();
+        gi->Initialize(device, 0, 0);  // IBL 分辨率独立于视口
+        m_GI = std::move(gi);
+        HE_CORE_INFO("ForwardPipeline: GI_IBL initialized");
     }
 
     // --- Phase 5-4: 预分配 sec CB 录制池（每线程一个独立 sec CL）---
@@ -749,6 +771,50 @@ void ForwardPipeline::EndHDRPass(rhi::IRHICommandList* cmd) {
 
     // 预置 ToneMap PSO，确保后续 BeginRenderPass 使用正确的 SwapChain RP（B8G8R8A8）
     cmd->SetPipeline(m_ToneMapPSO.get());
+}
+
+void ForwardPipeline::PrepareGI(rhi::IRHICommandList* cmd, he::World& world) {
+    if (!m_GI || !m_GI->IsEnabled()) return;
+
+    // 查找启用的 SkyboxComponent → 设置 Skybox Cubemap
+    world.ForEach<he::SkyboxComponent>([&](he::Entity, he::SkyboxComponent& sc) {
+        if (sc.enabled && sc.GetCubemap()) {
+            auto* giIBL = dynamic_cast<GI_IBL*>(m_GI.get());
+            if (giIBL) {
+                giIBL->SetIBLSkybox(sc.GetCubemap(), sc.GetCubemapSampler());
+                // 若 IBL 脏 → 生成辐照度/预滤波/BRDF LUT
+                giIBL->Render(cmd);
+                // 更新 PBR 描述符集绑定到新生成的 IBL 纹理
+                UpdateIBLBindings(giIBL);
+            }
+        }
+    });
+}
+
+void ForwardPipeline::UpdateIBLBindings(GI_IBL* gi) {
+    rhi::IRHITexture* irr    = gi->GetIrradianceMap();
+    rhi::IRHITexture* pref   = gi->GetPrefilterMap();
+    rhi::IRHITexture* lut    = gi->GetBRDF_LUT();
+    rhi::IRHISampler* sampler = gi->GetIBLSampler();
+
+    // 更新共享描述符集（三帧全部更新，确保一致性）
+    for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        m_Device->UpdateDescriptorSet(m_DescSets[i], 12,
+            rhi::DescriptorType::CombinedImageSampler, irr, sampler);
+        m_Device->UpdateDescriptorSet(m_DescSets[i], 13,
+            rhi::DescriptorType::CombinedImageSampler, pref, sampler);
+        m_Device->UpdateDescriptorSet(m_DescSets[i], 14,
+            rhi::DescriptorType::CombinedImageSampler, lut, sampler);
+    }
+    // 更新 per-mesh 描述符集
+    for (auto& set : m_AllPerMeshDescSets) {
+        m_Device->UpdateDescriptorSet(set, 12,
+            rhi::DescriptorType::CombinedImageSampler, irr, sampler);
+        m_Device->UpdateDescriptorSet(set, 13,
+            rhi::DescriptorType::CombinedImageSampler, pref, sampler);
+        m_Device->UpdateDescriptorSet(set, 14,
+            rhi::DescriptorType::CombinedImageSampler, lut, sampler);
+    }
 }
 
 void ForwardPipeline::RenderSkybox(rhi::IRHICommandList* cmd, he::World& world,

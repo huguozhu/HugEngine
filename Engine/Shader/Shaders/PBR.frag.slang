@@ -62,6 +62,11 @@ struct GPUShadowData {
 [[vk::binding(8, 0)]] SamplerState u_OcclusionSampler;
 [[vk::binding(9, 0)]] TextureCube<float> u_PointShadowCube;
 [[vk::binding(9, 0)]] SamplerState u_PointShadowSampler;
+// IBL 纹理
+[[vk::binding(12, 0)]] TextureCube<float4> u_IrradianceMap;
+[[vk::binding(12, 0)]] SamplerState       u_IBLSampler;
+[[vk::binding(13, 0)]] TextureCube<float4> u_PrefilterMap;
+[[vk::binding(14, 0)]] Texture2D<float2>   u_BRDF_LUT;
 
 [[vk::push_constant]] cbuffer FrameConstants {
     float4x4 viewProjMatrix;
@@ -142,6 +147,20 @@ float4 fragmentMain(FSInput input) : SV_Target0 {
         color += PBR_BRDF(albedo, metallic, roughness, N, V, L) * radiance * shadow;
     }
     color *= ao;
+
+    // ---- IBL（环境光照） ----
+    // 漫反射 IBL：从辐照度图采样
+    float3 F = F_SchlickRoughness(max(dot(N, V), 0.0), float3(0.04), roughness, metallic);
+    float3 kD = (1.0 - F) * (1.0 - metallic);
+    float3 irradiance = u_IrradianceMap.Sample(u_IBLSampler, N).rgb;
+    color += kD * irradiance * albedo;
+
+    // 镜面反射 IBL：预滤波环境图 + BRDF LUT
+    float3 R = reflect(-V, N);
+    float3 prefilteredColor = u_PrefilterMap.Sample(u_IBLSampler, R).rgb;
+    float2 envBRDF = u_BRDF_LUT.Sample(u_IBLSampler, float2(max(dot(N, V), 0.0), roughness)).rg;
+    color += prefilteredColor * (F * envBRDF.r + envBRDF.g);
+
     color += obj.emissiveFactor.rgb;
 
     // HDR 线性输出到 RGBA16_FLOAT 离屏目标，色调映射由 ToneMap Pass 完成

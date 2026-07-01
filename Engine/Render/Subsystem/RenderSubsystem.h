@@ -3,10 +3,12 @@
 #include "Core/Types.h"
 #include "Pipeline/Camera.h"
 
-// 前向声明 — 避免子系统头文件引入全量依赖
-namespace rhi {
+// 前向声明 — 保持头文件轻量，避免引入全量 RHI 依赖
+namespace he::rhi {
     class IRHIDevice;
     class IRHICommandList;
+    class IRHITexture;
+    class IRHISampler;
 }
 
 namespace he {

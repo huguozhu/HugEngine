@@ -15,6 +15,12 @@ float3 F_Schlick(float3 f0, float cosTheta) {
     return f0 + (1.0 - f0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
+// Fresnel-Schlick with roughness: reduces mirror reflection at grazing angles
+float3 F_SchlickRoughness(float cosTheta, float3 F0, float roughness, float metallic) {
+    float3 rcp = max(float3(1.0 - roughness), F0);
+    return F0 + (rcp - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
 // ============================================================
 // Normal Distribution Function — GGX (Trowbridge-Reitz)
 // ============================================================

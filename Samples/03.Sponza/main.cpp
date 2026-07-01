@@ -553,6 +553,7 @@ int main() {
             swapchain->GetWidth(), swapchain->GetHeight());
         pipeline.BeginFrame(cmdList.get(),
             swapchain->GetWidth(), swapchain->GetHeight());
+        pipeline.PrepareGI(cmdList.get(), world);
         pipeline.RenderScene(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
         // Skybox 在场景之后渲染（depth=Equal，仅在空白区域绘制）
         pipeline.RenderSkybox(cmdList.get(), world, camCtrl.GetCamera());

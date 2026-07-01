@@ -2,7 +2,10 @@
 
 #include "Pipeline/Material.h"
 #include "Pipeline/Camera.h"
+#include "GI/GlobalIllumination.h"
 #include "RHI/RHI.h"
+
+namespace he::render { class GI_IBL; }  // 前向声明 — 避免循环依赖
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
 #include "Scene/MeshComponent.h"
@@ -184,10 +187,24 @@ private:
     rhi::ShaderBytecode m_ShadowVS;
     rhi::ShaderBytecode m_ShadowFS;
 
+    // GI 子系统
+    std::unique_ptr<IGlobalIllumination> m_GI;
+
 public:
     // 渲染天空盒（遍历 Scene 中的 SkyboxComponent）
     void RenderSkybox(rhi::IRHICommandList* cmd, he::World& world,
                       const CameraData& camera);
+
+    // GI 子系统访问
+    IGlobalIllumination* GetGI() { return m_GI.get(); }
+    void SetGI(std::unique_ptr<IGlobalIllumination> gi) { m_GI = std::move(gi); }
+
+    // GI 准备（Scene 渲染前调用：检测 Skybox → 更新 IBL 贴图）
+    void PrepareGI(rhi::IRHICommandList* cmd, he::World& world);
+
+private:
+    // 更新描述符集 IBL 绑定
+    void UpdateIBLBindings(GI_IBL* gi);
 };
 
 } // namespace he::render

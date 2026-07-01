@@ -19,6 +19,8 @@ target_sources(HugEngineRender PRIVATE
     GI/GlobalIllumination.h
     GI/GI_None.h
     GI/GI_None.cpp
+    GI/GI_IBL.h
+    GI/GI_IBL.cpp
 )
 
 target_include_directories(HugEngineRender
