@@ -282,8 +282,11 @@ int main() {
         pipeline.NextFrame();
 
         if (pipeline.UseRenderGraph()) {
-            // RenderGraph：Shadow+IBL+RSM+HDR+Skybox+ToneMap 全在 Graph 内
             pipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
+            cmdList->End();
+            device->Submit(cmdList.get());
+            swapchain->Present(true);
+            continue;
         } else {
             pipeline.PrepareGI(cmdList.get(), world, sceneGraph);
             pipeline.BeginHDRPass(cmdList.get(),

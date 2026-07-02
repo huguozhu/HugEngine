@@ -33,6 +33,7 @@ public:
     void SetInput(rhi::IRHITexture* hdrTarget,rhi::IRHISampler* sampler);
     // 预设 PSO 为下一个 RenderPass 的初始管线
     void PreBind(rhi::IRHICommandList* cmd){if(m_Ready)cmd->SetPipeline(m_PSO.get());}
+    rhi::IRHIPipelineState* GetPSO()const{return m_PSO.get();}
 
 private:
     rhi::ShaderBytecode m_VS,m_FS;

@@ -268,7 +268,7 @@ void GI_IBL::Update(const SubsystemContext& ctx) {
 }
 
 void GI_IBL::SetIBLSkybox(rhi::IRHITexture* cubemap, rhi::IRHISampler* sampler) {
-    if (!cubemap || !sampler) return;
+    if (!cubemap || !sampler || !m_Device) return;
     // 仅当 skybox 实际变化时才标记脏（避免每帧重生成）
     if (m_SkyboxCubemap == cubemap && m_SkyboxSampler == sampler) return;
     m_SkyboxCubemap = cubemap;
@@ -276,12 +276,14 @@ void GI_IBL::SetIBLSkybox(rhi::IRHITexture* cubemap, rhi::IRHISampler* sampler) 
     m_Dirty         = true;
 
     // 更新描述符集绑定
-    m_Device->UpdateDescriptorSet(m_IrradianceSet, 0,
-        rhi::DescriptorType::CombinedImageSampler,
-        m_SkyboxCubemap, m_SkyboxSampler);
-    m_Device->UpdateDescriptorSet(m_PrefilterSet, 0,
-        rhi::DescriptorType::CombinedImageSampler,
-        m_SkyboxCubemap, m_SkyboxSampler);
+    if (m_IrradianceSet != rhi::kInvalidSet)
+        m_Device->UpdateDescriptorSet(m_IrradianceSet, 0,
+            rhi::DescriptorType::CombinedImageSampler,
+            m_SkyboxCubemap, m_SkyboxSampler);
+    if (m_PrefilterSet != rhi::kInvalidSet)
+        m_Device->UpdateDescriptorSet(m_PrefilterSet, 0,
+            rhi::DescriptorType::CombinedImageSampler,
+            m_SkyboxCubemap, m_SkyboxSampler);
 }
 
 void GI_IBL::Render(rhi::IRHICommandList* cmd) {
