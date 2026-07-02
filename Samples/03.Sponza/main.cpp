@@ -515,7 +515,7 @@ int main() {
         // 帧首推进槽位，确保 Shadow 和 Scene 使用同一帧缓冲区
         pipeline.NextFrame();
 
-        // 阴影子系统：注入渲染资源 → Update → Render
+        // 阴影子系统：测试隔离 — 仅 CSM
         {
             auto* shadowSys = pipeline.GetShadowSystem();
             shadowSys->SetRenderResources(
@@ -539,8 +539,10 @@ int main() {
             cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
             pipeline.RenderToneMapPass(cmdList.get());
         }
+        // RG 模式下 ToneMap 已关闭 RP，ImGui 需自行开 RP（LOAD 保留 ToneMap 输出）
         if (pipeline.UseRenderGraph()) {
-            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);  // RG: ImGui 需要 RP
+            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
+                rhi::Format::Unknown, nullptr, rhi::IRHICommandList::LoadOp::Load);
         }
 
         imgui.BeginFrame();

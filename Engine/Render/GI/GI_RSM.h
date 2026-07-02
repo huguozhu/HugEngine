@@ -44,9 +44,10 @@ public:
                           rhi::DescriptorSetHandle descSet);
 
     // 设置 Shadow Map 深度附件（渲染 RSM 时复用）
-    void SetShadowDepthView(void* depthView) { m_ShadowDepthView = depthView; }
+    // DEPRECATED: RSM 现在使用独立深度缓冲，不再复用 CSM ShadowMap
+    void SetShadowDepthView(void* depthView) { m_ExternalDepthView = depthView; }
 
-    // 从光源 POV 渲染几何体到 RSM 纹理
+    // 从光源 POV 渲染几何体到 RSM 纹理（使用独立深度缓冲）
     void RenderRSMPass(rhi::IRHICommandList* cmd, he::World& world, he::SceneGraph& sg);
 
     // 纹理访问
@@ -57,12 +58,13 @@ public:
 private:
     std::unique_ptr<rhi::IRHITexture> m_RSMPos;   // RGBA16_FLOAT worldPos
     std::unique_ptr<rhi::IRHITexture> m_RSMFlux;   // RGBA16_FLOAT normal+flux
+    std::unique_ptr<rhi::IRHITexture> m_RSMDepth;  // D32_FLOAT 独立深度缓冲（不依赖 CSM ShadowMap）
     std::unique_ptr<rhi::IRHISampler> m_RSMSampler;
 
     std::unique_ptr<rhi::IRHIPipelineState> m_RSMPSO;
     rhi::DescriptorSetLayoutHandle m_RSMLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_RSMSet    = rhi::kInvalidSet;
-    void* m_ShadowDepthView = nullptr;  // 外部 Shadow Map 深度视图
+    void* m_ExternalDepthView = nullptr;  // 外部深度视图（保留兼容但不再用于 RSM）
 
     float4x4 m_LightVP;
     u32      m_RSMResolution = 512;

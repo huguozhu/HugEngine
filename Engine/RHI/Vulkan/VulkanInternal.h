@@ -167,6 +167,7 @@ private:
     VkPipelineLayout    m_CurrentLayout   = VK_NULL_HANDLE;
     VkRenderPass        m_CurrentRenderPass = VK_NULL_HANDLE;
     VkRenderPass        m_LoadRenderPass = VK_NULL_HANDLE;  // LOAD_OP 版本（ImGui 叠加用）
+    VkRenderPass        m_CurrentFramebufferRP = VK_NULL_HANDLE;  // 追踪 Framebuffer 创建时使用的 RP
     VkPipelineBindPoint m_CurrentBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     VkBuffer         m_CurrentVB       = VK_NULL_HANDLE;
     u32              m_VBBinding       = 0;

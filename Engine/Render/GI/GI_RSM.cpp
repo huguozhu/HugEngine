@@ -35,6 +35,15 @@ bool GI_RSM::Initialize(rhi::IRHIDevice* device, u32, u32) {
     fluxDesc.usage     = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
     m_RSMFlux = device->CreateTexture(fluxDesc);
 
+    // 独立深度缓冲（不再复用 CSM ShadowMap，避免布局冲突导致白屏）
+    rhi::TextureDesc depthDesc;
+    depthDesc.format    = rhi::Format::D32_FLOAT;
+    depthDesc.width     = m_RSMResolution;
+    depthDesc.height    = m_RSMResolution;
+    depthDesc.mipLevels = 1;
+    depthDesc.usage     = rhi::TextureUsage::DepthStencil;  // 仅深度附件，无需采样
+    m_RSMDepth = device->CreateTexture(depthDesc);
+
     rhi::SamplerDesc sampDesc;
     sampDesc.minFilter = rhi::FilterMode::Linear;
     sampDesc.magFilter = rhi::FilterMode::Linear;
@@ -119,12 +128,12 @@ void GI_RSM::SetLightViewProj(const float4x4& vp, u32 resolution,
 }
 
 void GI_RSM::Render(rhi::IRHICommandList* cmd) {
-    if (!m_Ready || !m_ExternalObjBuf || !m_ShadowDepthView) return;
+    if (!m_Ready || !m_ExternalObjBuf || !m_RSMDepth) return;
     // 实际渲染委托给 RenderRSMPass（由 ForwardPipeline 在 Render 中调用）
 }
 
 void GI_RSM::RenderRSMPass(rhi::IRHICommandList* cmd, he::World& world, he::SceneGraph& sg) {
-    if (!m_Ready || !m_ExternalObjBuf || !m_ShadowDepthView) return;
+    if (!m_Ready || !m_ExternalObjBuf || !m_RSMDepth) return;
 
     m_Device->UpdateDescriptorSet(m_RSMSet, 1,
         rhi::DescriptorType::StorageBuffer, m_ExternalObjBuf);
@@ -141,7 +150,7 @@ void GI_RSM::RenderRSMPass(rhi::IRHICommandList* cmd, he::World& world, he::Scen
         m_RSMFlux->GetNativeHandle()
     };
 
-    cmd->BeginOffscreenPassMRT(colorViews, 2, m_ShadowDepthView,
+    cmd->BeginOffscreenPassMRT(colorViews, 2, m_RSMDepth->GetNativeHandle(),
                                m_RSMResolution, m_RSMResolution, clears, false);
     cmd->SetViewport({ 0, static_cast<float>(m_RSMResolution),
         static_cast<float>(m_RSMResolution), -static_cast<float>(m_RSMResolution),

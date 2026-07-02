@@ -892,67 +892,19 @@ void VulkanCommandList::BeginRenderPass(u32 colorCount, Format, Format depthForm
         return;
     }
 
-    // 创建 Framebuffer（颜色 + 深度附件）
-    if (m_Framebuffers.empty() || m_FramebuffersNeedRebuild) {
-        if (!m_Framebuffers.empty()) {
-            // 旧 FB 已在 Begin() 中销毁，这里只清空句柄
-            m_Framebuffers.clear();
-        }
-        m_FramebuffersNeedRebuild = false;
-        u32 count = static_cast<u32>(m_SwapchainViews.size());
-        m_Framebuffers.resize(count);
-        for (u32 i = 0; i < count; ++i) {
-            VkImageView attachments[2] = { m_SwapchainViews[i] };
-            u32 attachmentCount = 1;
-
-            // 如果 SwapChain 有深度纹理，作为第二个附件
-            if (m_pSwapChain && m_pSwapChain->GetDepthImageView()) {
-                attachments[1] = m_pSwapChain->GetDepthImageView();
-                attachmentCount = 2;
-            }
-
-            VkFramebufferCreateInfo fbInfo{};
-            fbInfo.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-            fbInfo.renderPass      = m_CurrentRenderPass;
-            fbInfo.attachmentCount = attachmentCount;
-            fbInfo.pAttachments    = attachments;
-            fbInfo.width           = m_SwapchainExtent.width;
-            fbInfo.height          = m_SwapchainExtent.height;
-            fbInfo.layers          = 1;
-
-            vkCreateFramebuffer(m_Device, &fbInfo, nullptr, &m_Framebuffers[i]);
-        }
-    }
-
-    // 构建清除值（颜色 + 深度，始终 2 个以匹配 RenderPass 附件数）
-    VkClearValue vkClearValues[2]{};
-    if (clear) {
-        vkClearValues[0].color.float32[0] = clear[0].color[0];
-        vkClearValues[0].color.float32[1] = clear[0].color[1];
-        vkClearValues[0].color.float32[2] = clear[0].color[2];
-        vkClearValues[0].color.float32[3] = clear[0].color[3];
-    } else {
-        vkClearValues[0].color.float32[0] = 0.1f;
-        vkClearValues[0].color.float32[1] = 0.1f;
-        vkClearValues[0].color.float32[2] = 0.15f;
-        vkClearValues[0].color.float32[3] = 1.0f;
-    }
-    vkClearValues[1].depthStencil.depth   = 1.0f;
-    vkClearValues[1].depthStencil.stencil = 0;
-
-    // 选择正确的 RenderPass（LOAD 操作需要 LOAD_OP_LOAD 的 RP）
+    // 先确定最终使用的 RenderPass（LoadOp 不同 → RP 不同）
     VkRenderPass rp = m_CurrentRenderPass;
     if (loadOp == LoadOp::Load) {
         if (m_LoadRenderPass == VK_NULL_HANDLE) {
-            // 懒创建 LOAD 版本 RenderPass（与当前 RP 相同附件格式，但 loadOp=LOAD）
+            // 懒创建 LOAD 版本 RenderPass（保留 BackBuffer 内容 + 深度匹配 PSO RP 的 finalLayout）
             VkAttachmentDescription att[2]{};
             att[0].format = VK_FORMAT_B8G8R8A8_UNORM; // SwapChain 格式
             att[0].samples = VK_SAMPLE_COUNT_1_BIT;
-            att[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;  // 保留内容
+            att[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;  // 保留 BackBuffer 内容
             att[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
             att[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
             att[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-            att[0].initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            att[0].initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;  // 匹配 PSO RP 的 finalLayout（BGRA8_UNORM → Present）
             att[0].finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
             att[1].format = VK_FORMAT_D32_SFLOAT;
             att[1].samples = VK_SAMPLE_COUNT_1_BIT;
@@ -960,8 +912,8 @@ void VulkanCommandList::BeginRenderPass(u32 colorCount, Format, Format depthForm
             att[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
             att[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
             att[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-            att[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-            att[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            att[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;  // 匹配所有 PSO RP 的 finalLayout
+            att[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
 
             VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
             VkAttachmentReference depthRef{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
@@ -990,6 +942,60 @@ void VulkanCommandList::BeginRenderPass(u32 colorCount, Format, Format depthForm
         }
         rp = m_LoadRenderPass;
     }
+
+    // RP 变化时强制重建 Framebuffer（确保 FB 与 RP 兼容）
+    if (rp != m_CurrentFramebufferRP) {
+        m_FramebuffersNeedRebuild = true;
+        m_CurrentFramebufferRP = rp;
+    }
+
+    // 创建 Framebuffer（颜色 + 深度附件），使用最终 RP
+    if (m_Framebuffers.empty() || m_FramebuffersNeedRebuild) {
+        if (!m_Framebuffers.empty()) {
+            // 旧 FB 已在 Begin() 中销毁，这里只清空句柄
+            m_Framebuffers.clear();
+        }
+        m_FramebuffersNeedRebuild = false;
+        u32 count = static_cast<u32>(m_SwapchainViews.size());
+        m_Framebuffers.resize(count);
+        for (u32 i = 0; i < count; ++i) {
+            VkImageView attachments[2] = { m_SwapchainViews[i] };
+            u32 attachmentCount = 1;
+
+            // 如果 SwapChain 有深度纹理，作为第二个附件
+            if (m_pSwapChain && m_pSwapChain->GetDepthImageView()) {
+                attachments[1] = m_pSwapChain->GetDepthImageView();
+                attachmentCount = 2;
+            }
+
+            VkFramebufferCreateInfo fbInfo{};
+            fbInfo.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+            fbInfo.renderPass      = rp;  // 使用最终选择的 RP（而非 m_CurrentRenderPass）
+            fbInfo.attachmentCount = attachmentCount;
+            fbInfo.pAttachments    = attachments;
+            fbInfo.width           = m_SwapchainExtent.width;
+            fbInfo.height          = m_SwapchainExtent.height;
+            fbInfo.layers          = 1;
+
+            vkCreateFramebuffer(m_Device, &fbInfo, nullptr, &m_Framebuffers[i]);
+        }
+    }
+
+    // 构建清除值（颜色 + 深度，始终 2 个以匹配 RenderPass 附件数）
+    VkClearValue vkClearValues[2]{};
+    if (clear) {
+        vkClearValues[0].color.float32[0] = clear[0].color[0];
+        vkClearValues[0].color.float32[1] = clear[0].color[1];
+        vkClearValues[0].color.float32[2] = clear[0].color[2];
+        vkClearValues[0].color.float32[3] = clear[0].color[3];
+    } else {
+        vkClearValues[0].color.float32[0] = 0.1f;
+        vkClearValues[0].color.float32[1] = 0.1f;
+        vkClearValues[0].color.float32[2] = 0.15f;
+        vkClearValues[0].color.float32[3] = 1.0f;
+    }
+    vkClearValues[1].depthStencil.depth   = 1.0f;
+    vkClearValues[1].depthStencil.stencil = 0;
 
     VkRenderPassBeginInfo rpBegin{};
     rpBegin.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;

@@ -483,17 +483,15 @@ void ForwardPipeline::PrepareGI(rhi::IRHICommandList* cmd, he::World& world, he:
         }
     });
 
-    // RSM 渲染（复用 Shadow System 的深度缓冲和光源 VP）
+    // RSM 渲染（使用独立深度缓冲，不再复用 CSM ShadowMap 避免布局冲突）
     if (m_RSM && m_ShadowSystem && m_ShadowSystem->HasActiveShadows()) {
-        rhi::IRHITexture* sm0 = m_ShadowSystem->GetShadowMap(0);
-        if (sm0) {
-            m_RSM->SetShadowDepthView(sm0->GetNativeHandle());
-            float4x4 lightVP = m_ShadowSystem->GetLightViewProj(0);
-            m_RSM->SetLightViewProj(lightVP, sm0->GetWidth(),
+        float4x4 lightVP = m_ShadowSystem->GetLightViewProj(0);
+        if (glm::determinant(lightVP) != 0.0f) {  // 有效光源 VP
+            m_RSM->SetLightViewProj(lightVP, m_RSM->GetRSMPositionMap()->GetWidth(),
                                     m_ObjectBuffers[m_CurrentFrameSlot].get(),
                                     m_ShadowSystem->GetShadowSampler(),
                                     m_DescSets[m_CurrentFrameSlot]);
-            // 从光源 POV 渲染几何体 → RSM 纹理
+            // 从光源 POV 渲染几何体 → RSM 纹理（使用 RSM 自有的独立深度缓冲）
             m_RSM->RenderRSMPass(cmd, world, sg);
             UpdateRSMBindings();
         }
@@ -626,7 +624,8 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             EndHDRPass(c);
         });
 
-    rg.AddPass("ToneMap", {}, {{backBuf, ResourceAccess::Write}},
+    // ToneMap 读取 HDR 颜色纹理，写入 BackBuffer
+    rg.AddPass("ToneMap", {{hdrColor, ResourceAccess::Read}}, {{backBuf, ResourceAccess::Write}},
         [this](rhi::IRHICommandList* c) {
             m_ToneMap->SetInput(m_HDRTarget.get(), m_HDRSampler.get());
             m_ToneMap->PreBind(c);
