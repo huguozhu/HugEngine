@@ -9,48 +9,55 @@
 #include <functional>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 // ============================================================
 // Render Graph — 帧级渲染资源编排器
 //
-// Phase 1: 手动添加 Pass → Compile (拓扑排序 + Barrier) → Execute
-// Phase 2+: 自动 Barrier 推导、资源别名、Async Compute
+// Phase 2: 自动 Barrier 推导 + 资源别名 + Pass 裁剪
 // ============================================================
 
 namespace he::render {
-
-class IRHICommandList; // 避免循环依赖
 
 // --- 资源句柄 ---
 using ResourceHandle = u32;
 constexpr ResourceHandle kInvalidHandle = ~0u;
 
 // --- 资源描述 ---
-enum class ResourceType : u8 {
-    Texture,
-    Buffer,
-};
+enum class ResourceType : u8 { Texture, Buffer };
 
 struct ResourceDesc {
-    ResourceType type = ResourceType::Texture;
-    u32          width  = 1;
-    u32          height = 1;
-    rhi::Format       format = rhi::Format::RGBA8_UNORM;
-    rhi::BufferUsage  bufferUsage = rhi::BufferUsage::None;
+    ResourceType     type         = ResourceType::Texture;
+    u32              width        = 1;
+    u32              height       = 1;
+    rhi::Format      format       = rhi::Format::RGBA8_UNORM;
+    rhi::BufferUsage bufferUsage  = rhi::BufferUsage::None;
     rhi::TextureUsage textureUsage = rhi::TextureUsage::ShaderResource;
+    u64              bufferSize   = 0;  // 用于别名大小计算
+    String           name;              // 调试名
+};
+
+// --- 资源运行时状态 ---
+struct ResourceState {
+    rhi::ResourceState layout = rhi::ResourceState::Undefined;
+    bool isDepth = false;  // 深度/模板资源用特殊布局
 };
 
 // --- 资源访问信息 ---
-enum class ResourceAccess : u8 {
-    None,
-    Read,
-    Write,
-    ReadWrite,
-};
+enum class ResourceAccess : u8 { None, Read, Write, ReadWrite };
 
 struct PassResource {
     ResourceHandle handle;
     ResourceAccess access;
+};
+
+// --- 屏障记录 ---
+struct BarrierRecord {
+    ResourceHandle handle;
+    rhi::PipelineStage srcStage;
+    rhi::PipelineStage dstStage;
+    rhi::ResourceState srcState;
+    rhi::ResourceState dstState;
 };
 
 // --- 渲染 Pass ---
@@ -61,9 +68,17 @@ struct PassNode {
     std::vector<PassResource>   reads;
     std::vector<PassResource>   writes;
     PassExecuteFunc             execute;
-    // 编译后填充
-    std::vector<PassNode*>      dependencies;  // 本 Pass 依赖的前置 Pass
-    u32                         order = 0;     // 执行顺序
+    // 编译后
+    std::vector<PassNode*>      dependencies;
+    u32                         order = 0;
+    // 屏障：Pass 执行前需要插入的资源转换
+    std::vector<BarrierRecord>  preBarriers;
+};
+
+// --- 资源别名池（Phase 2: 简单贪心，Phase 3: 完善）---
+struct AliasInfo {
+    u64  offset = 0;   // 池内偏移
+    u32  poolId = 0;   // 所属池（0=未分配）
 };
 
 // --- Render Graph ---
@@ -75,44 +90,47 @@ public:
     // --- 资源管理 ---
     ResourceHandle CreateTexture(StringView name, const rhi::TextureDesc& desc);
     ResourceHandle CreateBuffer(StringView name, const rhi::BufferDesc& desc);
+    ResourceHandle ImportTexture(StringView name, rhi::IRHITexture* external);
     const ResourceDesc& GetResourceDesc(ResourceHandle h) const;
 
     // --- Pass 构建 ---
-    /// 添加渲染 Pass，声明读/写资源
     PassNode* AddPass(StringView name,
                       std::vector<PassResource> reads  = {},
                       std::vector<PassResource> writes = {},
                       PassExecuteFunc execute = nullptr);
 
-    // --- 导入外部资源 ---
-    /// 导入 SwapChain 的 BackBuffer 作为输出资源
     ResourceHandle ImportBackBuffer();
 
-    // --- 编译与执行 ---
-    /// 编译图：拓扑排序 → 推导 Barrier
+    // --- 编译 ---
     void Compile();
 
-    /// 按编译顺序执行所有 Pass
+    // --- 执行 ---
     void Execute(rhi::IRHICommandList* cmdList, rhi::IRHIDevice* device);
 
-    /// 清空图（下一帧重建）
     void Reset();
-
     const std::vector<PassNode*>& GetPassOrder() const { return m_PassOrder; }
 
 private:
     void BuildDependencies();
     void TopologicalSort();
+    void DeriveBarriers();       // 自动推导 Barrier（Phase 2）
+    void ApplyAliasing();         // 资源别名分配（Phase 2）
+    void CullDeadPasses();        // 裁剪未使用的 Pass（Phase 2）
+    rhi::ResourceState AccessToState(ResourceAccess access, bool isDepth) const;
 
-    TArray<ResourceDesc>     m_Resources;
-    std::vector<PassNode>    m_Passes;
-    std::vector<PassNode*>   m_PassOrder;
+    std::vector<ResourceDesc>     m_Resources;
+    std::vector<ResourceState>    m_ResourceStates;   // 编译后填充
+    std::vector<AliasInfo>        m_AliasInfo;         // 别名分配
+    std::vector<PassNode>         m_Passes;
+    std::vector<PassNode*>        m_PassOrder;
+
+    // 导入的外部资源（不管理生命周期）
+    std::unordered_map<ResourceHandle, rhi::IRHITexture*> m_ImportedTextures;
 
     ResourceHandle m_BackBufferHandle = kInvalidHandle;
     bool           m_Compiled = false;
 };
 
-// 便捷宏：声明 Pass 读资源
 #define RG_READ(h)   PassResource{h, ResourceAccess::Read}
 #define RG_WRITE(h)  PassResource{h, ResourceAccess::Write}
 #define RG_RW(h)     PassResource{h, ResourceAccess::ReadWrite}
