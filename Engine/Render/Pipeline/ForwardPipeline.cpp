@@ -615,20 +615,19 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     auto hdrColor = rg.ImportTexture("HDR_Color", m_HDRTarget.get());
     auto hdrDepth = rg.ImportTexture("HDR_Depth", m_HDRDepth.get());
     auto backBuf  = rg.ImportBackBuffer();
-    rg.AddPass("Skybox", {}, {{hdrColor, ResourceAccess::Write}, {hdrDepth, ResourceAccess::Write}},
-        [this, w, h, &world, &camera](rhi::IRHICommandList* c) {
-            c->SetPipeline(m_PBR_PSO.get());
-            rhi::ClearValue clr{}; clr.depth = 1.0f;
-            c->BeginOffscreenPass(m_HDRTarget->GetNativeHandle(), m_HDRDepth->GetNativeHandle(), w, h, &clr, false);
-            c->SetViewport({0,(float)h,(float)w,-(float)h,0,1});
-            c->SetScissor({0,0,w,h});
+
+    rg.AddPass("FullScene", {}, {{hdrColor, ResourceAccess::Write}, {hdrDepth, ResourceAccess::Write}},
+        [this, w, h, &world, &sg, &camera](rhi::IRHICommandList* c) {
+            PrepareGI(c, world, sg);
+            BeginHDRPass(c, w, h);
+            BeginFrame(c, w, h);
+            RenderScene(c, world, sg, camera);
             RenderSkybox(c, world, camera);
-            c->EndOffscreenPass();
+            EndHDRPass(c);
         });
+
     rg.AddPass("ToneMap", {}, {{backBuf, ResourceAccess::Write}},
         [this](rhi::IRHICommandList* c) {
-            c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput, rhi::PipelineStage::FragmentShader,
-                rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, m_HDRTarget.get());
             m_ToneMap->SetInput(m_HDRTarget.get(), m_HDRSampler.get());
             m_ToneMap->PreBind(c);
             c->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
