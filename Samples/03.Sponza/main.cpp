@@ -385,7 +385,7 @@ int main() {
     // ============================================================
     render::ForwardPipeline pipeline;
     pipeline.Initialize(device.get());
-    pipeline.SetUseRenderGraph(true);
+    pipeline.SetUseRenderGraph(false);
     pipeline.SetSwapChain(swapchain.get());
     // 同步 HDR 离屏渲染尺寸与 SwapChain
     pipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
@@ -515,7 +515,7 @@ int main() {
         // 帧首推进槽位，确保 Shadow 和 Scene 使用同一帧缓冲区
         pipeline.NextFrame();
 
-        // 阴影子系统：测试隔离 — 仅 CSM
+        // 阴影子系统：CPU 端数据收集（GPU 渲染已迁移到 RenderGraph 的 ShadowCSM Pass）
         {
             auto* shadowSys = pipeline.GetShadowSystem();
             shadowSys->SetRenderResources(
@@ -528,7 +528,7 @@ int main() {
             shadowCtx.sceneGraph  = &sceneGraph;
             shadowCtx.camera      = &camCtrl.GetCamera();
             shadowSys->Update(shadowCtx);
-            shadowSys->Render(cmdList.get());
+            // Render() 已迁移到 BuildFrameGraph 的 ShadowCSM Pass
         }
 
         // --- RenderGraph 全 Pass 编排（Shadow→IBL→RSM→HDR→Skybox→ToneMap）---

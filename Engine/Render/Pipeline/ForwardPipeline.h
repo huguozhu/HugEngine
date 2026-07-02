@@ -122,7 +122,7 @@ private:
     std::unique_ptr<rhi::IRHITexture> m_DefaultBaseColorTex;
     std::unique_ptr<rhi::IRHISampler> m_DefaultBaseColorSampler;
 
-    // 多线程录制
+    // 多线程录制（Sec CB 模循环复用，无池重置 VUID 问题）
     bool m_MultiThreadRecord = true;
     static constexpr u32 kMaxSecRecordLists = 8;
     // RenderGraph 模式（默认关闭，渐进迁移到声明式编排）

@@ -614,6 +614,38 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     auto hdrDepth = rg.ImportTexture("HDR_Depth", m_HDRDepth.get());
     auto backBuf  = rg.ImportBackBuffer();
 
+    // --- Pass 0: ShadowCSM — CSM 级联阴影贴图渲染 ---
+    // 声明写入所有 CSM 贴图 + hdrDepth（WAW 确保 ShadowCSM 先于 FullScene）
+    if (m_ShadowSystem && m_ShadowSystem->HasActiveShadows()) {
+        ResourceHandle csmMaps[CASCADE_COUNT];
+        for (u32 c = 0; c < CASCADE_COUNT; ++c) {
+            auto* tex = m_ShadowSystem->GetShadowMap(c);
+            if (tex) {
+                char name[32];
+                snprintf(name, sizeof(name), "CSM_ShadowMap_C%u", c);
+                csmMaps[c] = rg.ImportTexture(name, tex);
+            } else {
+                csmMaps[c] = kInvalidHandle;
+            }
+        }
+
+        std::vector<PassResource> shadowWrites;
+        for (u32 c = 0; c < CASCADE_COUNT; ++c)
+            if (csmMaps[c] != kInvalidHandle)
+                shadowWrites.push_back(RG_WRITE(csmMaps[c]));
+        // WAW 依赖：声明写入 hdrDepth 确保 ShadowCSM → FullScene 的执行顺序
+        shadowWrites.push_back(RG_WRITE(hdrDepth));
+
+        rg.AddPass("ShadowCSM", {}, std::move(shadowWrites),
+            [this](rhi::IRHICommandList* c) {
+                // 手动 Barrier 处理 ShadowMap 布局转换：
+                // CSMTechnique::Render 在 EndOffscreenPass 后
+                // 自动转换 DepthStencilRead → ShaderResource
+                m_ShadowSystem->Render(c);
+            });
+    }
+
+    // --- Pass 1: FullScene — 主场景 HDR 渲染 ---
     rg.AddPass("FullScene", {}, {{hdrColor, ResourceAccess::Write}, {hdrDepth, ResourceAccess::Write}},
         [this, w, h, &world, &sg, &camera](rhi::IRHICommandList* c) {
             PrepareGI(c, world, sg);
@@ -624,7 +656,7 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             EndHDRPass(c);
         });
 
-    // ToneMap 读取 HDR 颜色纹理，写入 BackBuffer
+    // --- Pass 2: ToneMap — HDR → LDR 色调映射 ---
     rg.AddPass("ToneMap", {{hdrColor, ResourceAccess::Read}}, {{backBuf, ResourceAccess::Write}},
         [this](rhi::IRHICommandList* c) {
             m_ToneMap->SetInput(m_HDRTarget.get(), m_HDRSampler.get());

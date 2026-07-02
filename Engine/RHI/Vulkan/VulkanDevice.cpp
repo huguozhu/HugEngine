@@ -725,12 +725,14 @@ bool VulkanSwapChain::AcquireNextImage() {
 }
 
 void VulkanSwapChain::Present(bool /*vsync*/) {
-    // 纯 Fence 同步：GPU 完成由 Begin 中的 vkWaitForFences 保证
+    VkSemaphore waitSem = m_RenderComplete;
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-    presentInfo.swapchainCount = 1;
+    presentInfo.swapchainCount  = 1;
     presentInfo.pSwapchains     = &m_Swapchain;
     presentInfo.pImageIndices   = &m_CurrentImage;
+    presentInfo.waitSemaphoreCount = 1;
+    presentInfo.pWaitSemaphores    = &waitSem;
 
     vkQueuePresentKHR(m_PresentQueue, &presentInfo);
 }
@@ -807,11 +809,9 @@ VulkanCommandList::~VulkanCommandList() {
 }
 
 void VulkanCommandList::BeginSecondary(IRHIPipelineState* pso) {
-    // 槽位耗尽时重置池（此时 primary CB 应已提交，sec CB 引用已消费）
-    if (m_SecSlot >= kMaxSecondaryCBs) {
-        vkResetCommandPool(m_Device, m_SecondaryPool, 0);
-        m_SecSlot = 0;
-    }
+    // 模循环复用 Sec CB：kMaxSecondaryCBs == kMaxFramesInFlight，
+    // 每个 CB 在 kMaxFramesInFlight 帧后复用，此时主 CB 栅栏已确保 GPU 完成。
+    u32 idx = m_SecSlot % kMaxSecondaryCBs;
 
     auto* vkPSO = static_cast<VulkanPipelineState*>(pso);
     VkCommandBufferInheritanceInfo inheritInfo{};
@@ -826,17 +826,18 @@ void VulkanCommandList::BeginSecondary(IRHIPipelineState* pso) {
                     | VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     beginInfo.pInheritanceInfo = &inheritInfo;
 
-    vkBeginCommandBuffer(m_SecCmdBuffers[m_SecSlot], &beginInfo);
+    // vkBeginCommandBuffer 对已完成 CB 隐式重置（等价于 vkResetCommandBuffer）
+    vkBeginCommandBuffer(m_SecCmdBuffers[idx], &beginInfo);
     // 别名给 SetPipeline/Draw 等 Vulkan 调用共用（m_FrameIndex=0 for secondary）
-    m_CmdBuffers[m_FrameIndex] = m_SecCmdBuffers[m_SecSlot];
+    m_CmdBuffers[m_FrameIndex] = m_SecCmdBuffers[idx];
     // 记录 PSO 状态并绑定额外管线（BindDescriptorSet 需要 pipeline layout）
     m_CurrentPipeline   = vkPSO->GetPipeline();
     m_CurrentLayout     = vkPSO->GetPipelineLayout();
     m_CurrentRenderPass = vkPSO->GetRenderPass();
     // 在 sec CB 中绑定额外管线（sec CB 不会继承 primary 的管线状态）
-    vkCmdBindPipeline(m_SecCmdBuffers[m_SecSlot], VK_PIPELINE_BIND_POINT_GRAPHICS,
+    vkCmdBindPipeline(m_SecCmdBuffers[idx], VK_PIPELINE_BIND_POINT_GRAPHICS,
                       m_CurrentPipeline);
-    m_SecActive = m_SecSlot;
+    m_SecActive = idx;
     m_IsRecording = true;
 }
 
@@ -872,9 +873,9 @@ void VulkanCommandList::Begin() {
 
 void VulkanCommandList::End() {
     if (m_SecondaryPool) {
-        // 辅助命令缓冲：结束当前槽位的 sec CB，槽位递增
+        // 辅助命令缓冲：结束当前槽位的 sec CB，槽位递增（模循环复用）
         vkEndCommandBuffer(m_SecCmdBuffers[m_SecActive]);
-        m_SecSlot = m_SecActive + 1;
+        ++m_SecSlot;
     } else {
         vkEndCommandBuffer(m_CmdBuffers[m_FrameIndex]);
     }
@@ -1403,6 +1404,10 @@ void VulkanCommandList::Submit() {
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     if (m_pSwapChain) waitSem = m_pSwapChain->GetImageAcquiredSemaphore();
 
+    // 渲染完成后通知 Present
+    VkSemaphore signalSem = VK_NULL_HANDLE;
+    if (m_pSwapChain) signalSem = m_pSwapChain->GetRenderCompleteSemaphore();
+
     VkCommandBuffer cb = m_CmdBuffers[m_FrameIndex];
 
     VkSubmitInfo submitInfo{};
@@ -1412,6 +1417,8 @@ void VulkanCommandList::Submit() {
     submitInfo.pWaitDstStageMask    = &waitStage;
     submitInfo.commandBufferCount   = 1;
     submitInfo.pCommandBuffers      = &cb;
+    submitInfo.signalSemaphoreCount = signalSem ? 1u : 0u;
+    submitInfo.pSignalSemaphores    = &signalSem;
 
     // 重置当前帧栅栏并提交（GPU 执行完成后触发栅栏）
     vkResetFences(m_Device, 1, &m_Fences[m_FrameIndex]);

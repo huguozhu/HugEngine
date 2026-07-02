@@ -150,7 +150,7 @@ private:
     u32              m_FrameIndex = 0;  // 当前帧槽位
 
     // Phase 2 辅助命令缓冲池（预分配 6 个，每 Cubemap 面一个，避免重置冲突）
-    static constexpr u32 kMaxSecondaryCBs = 6;
+    static constexpr u32 kMaxSecondaryCBs = 3;  // 与 kMaxFramesInFlight 一致，保证 fence 等待后才复用
     VkCommandPool    m_SecondaryPool = VK_NULL_HANDLE;
     VkCommandBuffer  m_SecCmdBuffers[kMaxSecondaryCBs] = {};
     u32              m_SecSlot   = 0;  // 下一个可用槽位
