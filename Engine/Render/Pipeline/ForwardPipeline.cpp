@@ -589,14 +589,91 @@ void ForwardPipeline::ResizeHDRTarget(u32 width, u32 height) {
 void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
                               he::SceneGraph& sg, const CameraData& camera)
 {
-    // GI 准备（检测 Skybox → 更新 IBL）
+    if (m_UseRenderGraph) {
+        // RenderGraph 声明式路径
+        RenderGraph rg;
+        BuildFrameGraph(rg, world, sg, camera);
+        rg.Compile();
+        rg.Execute(cmd, m_Device);
+        return;
+    }
+    // 命令式路径（兼容旧版）
     PrepareGI(cmd, world, sg);
-    // HDR 离屏通道
     BeginHDRPass(cmd, m_HDRWidth, m_HDRHeight);
     BeginFrame(cmd, m_HDRWidth, m_HDRHeight);
     RenderScene(cmd, world, sg, camera);
     RenderSkybox(cmd, world, camera);
     EndHDRPass(cmd);
+}
+
+void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
+                                       he::SceneGraph& sg, const CameraData& camera)
+{
+    if (m_SwapChain) rg.SetSwapChain(m_SwapChain);
+    // 同步 ToneMap/Skybox 尺寸（不重分配 HDR 目标，仅更新视口参数）
+    if (m_SwapChain) {
+        u32 sw = m_SwapChain->GetWidth(), sh = m_SwapChain->GetHeight();
+        if (m_ToneMap) m_ToneMap->OnResize(sw, sh);
+        if (m_Skybox)  m_Skybox->OnResize(sw, sh);
+    }
+    u32 w = m_HDRWidth, h = m_HDRHeight;
+
+    // 外部资源导入
+    auto hdrColor  = rg.ImportTexture("HDR_Color",  m_HDRTarget.get());
+    auto hdrDepth  = rg.ImportTexture("HDR_Depth",  m_HDRDepth.get());
+    auto backBuf   = rg.ImportBackBuffer();
+
+    // GI 子系统资源
+    ResourceHandle irrMap = kInvalidHandle, prefMap = kInvalidHandle, brdfLut = kInvalidHandle;
+    if (auto* giIBL = dynamic_cast<GI_IBL*>(m_GI.get())) {
+        if (giIBL->GetIrradianceMap())
+            irrMap = rg.ImportTexture("IBL_Irradiance", giIBL->GetIrradianceMap());
+        if (giIBL->GetPrefilterMap())
+            prefMap = rg.ImportTexture("IBL_Prefilter", giIBL->GetPrefilterMap());
+        if (giIBL->GetBRDF_LUT())
+            brdfLut = rg.ImportTexture("IBL_BRDF_LUT", giIBL->GetBRDF_LUT());
+    }
+
+    ResourceHandle shadowMap0 = kInvalidHandle;
+    if (m_ShadowSystem && m_ShadowSystem->GetShadowMapCount() > 0)
+        shadowMap0 = rg.ImportTexture("Shadow_CSM0", m_ShadowSystem->GetShadowMap(0));
+
+    // HDR 场景 Pass
+    rg.AddPass("HDR_Scene",
+        {{irrMap, ResourceAccess::Read}, {prefMap, ResourceAccess::Read},
+         {brdfLut, ResourceAccess::Read}, {shadowMap0, ResourceAccess::Read}},
+        {{hdrColor, ResourceAccess::Write}, {hdrDepth, ResourceAccess::Write}},
+        [&](rhi::IRHICommandList* c) {
+            c->SetPipeline(m_PBR_PSO.get());
+            rhi::ClearValue clr{};
+            clr.depth = 1.0f;
+            c->BeginOffscreenPass(m_HDRTarget->GetNativeHandle(),
+                                  m_HDRDepth->GetNativeHandle(), w, h, &clr, false); // RG 同步执行，不需要 sec CB
+            c->SetViewport({0,(float)h,(float)w,-(float)h,0,1});
+            c->SetScissor({0,0,w,h});
+            RenderScene(c, world, sg, camera);
+            c->EndOffscreenPass();
+        });
+
+    // Skybox Pass
+    rg.AddPass("Skybox",
+        {{hdrDepth, ResourceAccess::Read}},
+        {{hdrColor, ResourceAccess::Write}},
+        [&](rhi::IRHICommandList* c) { RenderSkybox(c, world, camera); });
+
+    // ToneMap Pass：HDR → sRGB → SwapChain（含 Begin/EndRenderPass）
+    if (m_ToneMap) {
+        rg.AddPass("ToneMap",
+            {{hdrColor, ResourceAccess::Read}},
+            {{backBuf, ResourceAccess::Write}},
+            [&](rhi::IRHICommandList* c) {
+                m_ToneMap->SetInput(m_HDRTarget.get(), m_HDRSampler.get());
+                c->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
+                m_ToneMap->Render(c);
+                c->EndRenderPass();
+            });
+    }
+
 }
 
 void ForwardPipeline::OnResize(u32 width, u32 height) {

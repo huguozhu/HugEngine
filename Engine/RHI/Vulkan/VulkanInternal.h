@@ -36,6 +36,8 @@ public:
     VkFormat       GetFormat()                const { return m_Format; }
     VkImageView    GetImageView(u32 i)        const { return m_ImageViews[i]; }
     VkImageView    GetDepthImageView()        const { return m_DepthImageView; }
+    void* GetCurrentBackBufferView() const override { return reinterpret_cast<void*>(m_ImageViews[m_CurrentImage]); }
+    void* GetDepthBufferView()       const override { return reinterpret_cast<void*>(m_DepthImageView); }
     VkExtent2D     GetExtent()                const { return {m_Width, m_Height}; }
     VkImage        GetImage(u32 i)            const { return m_Images[i]; }
     VkSemaphore    GetImageAcquiredSemaphore() const { return m_ImageAcquired; }

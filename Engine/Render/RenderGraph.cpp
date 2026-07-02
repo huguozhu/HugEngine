@@ -235,14 +235,13 @@ void RenderGraph::DeriveBarriers() {
 }
 
 void RenderGraph::CullDeadPasses() {
-    // 标记被后续 Pass 消费的资源
+    // 标记被后续 Pass 消费的资源（导入资源 + BackBuffer 永不被裁剪）
     std::unordered_set<ResourceHandle> consumed;
     for (auto* pass : m_PassOrder)
         for (auto& r : pass->reads)
             consumed.insert(r.handle);
-    // 标记导入的外部资源（必须保留）
-    for (auto& [h, _] : m_ImportedTextures)
-        consumed.insert(h);
+    for (auto& [h, _] : m_ImportedTextures) consumed.insert(h);
+    if (m_BackBufferHandle != kInvalidHandle) consumed.insert(m_BackBufferHandle);
 
     // 移除输出未被消费的 Pass
     std::vector<PassNode*> alive;
@@ -335,7 +334,16 @@ void RenderGraph::Execute(rhi::IRHICommandList* cmdList, rhi::IRHIDevice* device
 
     HE_CORE_INFO("RenderGraph::Execute — {} passes", m_PassOrder.size());
 
-    // 创建实际 RHI 资源（使用别名分配）
+    // 每帧更新 SwapChain BackBuffer
+    if (m_SwapChain && m_BackBufferHandle != kInvalidHandle) {
+        u32 idx = m_SwapChain->GetCurrentBackBufferIndex();
+        void* bbView = m_SwapChain->GetCurrentBackBufferView();
+        m_Resources[m_BackBufferHandle].width  = m_SwapChain->GetWidth();
+        m_Resources[m_BackBufferHandle].height = m_SwapChain->GetHeight();
+        // Store backbuffer view for barrier/pass use
+        m_ImportedTextures[m_BackBufferHandle] = reinterpret_cast<rhi::IRHITexture*>(bbView);
+    }
+
     TArray<std::unique_ptr<rhi::IRHITexture>> textures(m_Resources.size());
     TArray<std::unique_ptr<rhi::IRHIBuffer>>  buffers(m_Resources.size());
 
@@ -357,9 +365,7 @@ void RenderGraph::Execute(rhi::IRHICommandList* cmdList, rhi::IRHIDevice* device
         }
     }
 
-    // 按拓扑顺序执行 Pass，注入 Barrier
     for (auto* pass : m_PassOrder) {
-        // 执行前置 Barrier
         for (auto& br : pass->preBarriers) {
             if (br.srcState == br.dstState) continue;
             u32 idx = br.handle;
@@ -370,10 +376,7 @@ void RenderGraph::Execute(rhi::IRHICommandList* cmdList, rhi::IRHIDevice* device
                 cmdList->PipelineBarrier(br.srcStage, br.dstStage, br.srcState, br.dstState, tex);
             }
         }
-
-        if (pass->execute) {
-            pass->execute(cmdList);
-        }
+        if (pass->execute) pass->execute(cmdList);
     }
 }
 

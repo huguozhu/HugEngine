@@ -385,6 +385,8 @@ int main() {
     // ============================================================
     render::ForwardPipeline pipeline;
     pipeline.Initialize(device.get());
+    pipeline.SetUseRenderGraph(true);
+    pipeline.SetSwapChain(swapchain.get());
     // 同步 HDR 离屏渲染尺寸与 SwapChain
     pipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
 
@@ -532,9 +534,11 @@ int main() {
         // --- HDR 离屏渲染 + 场景 + 天空盒（IRenderPipeline::Render 封装）---
         pipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
 
-        // --- ToneMap 后处理 + ImGui（输出到 SwapChain B8G8R8A8）---
-        cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
-        pipeline.RenderToneMapPass(cmdList.get());
+        // --- ToneMap + ImGui ---
+        if (!pipeline.UseRenderGraph()) {
+            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
+            pipeline.RenderToneMapPass(cmdList.get());
+        }
 
         imgui.BeginFrame();
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
@@ -678,7 +682,9 @@ int main() {
         ImGui::End();
         imgui.EndFrame(cmdList.get());
 
-        cmdList->EndRenderPass();
+        if (!pipeline.UseRenderGraph()) {
+            cmdList->EndRenderPass();
+        }
         cmdList->End();
 
         device->Submit(cmdList.get());

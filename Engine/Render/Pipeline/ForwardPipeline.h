@@ -4,6 +4,7 @@
 #include "Pipeline/Material.h"
 #include "GI/GlobalIllumination.h"
 #include "RHI/RHI.h"
+#include "RenderGraph.h"
 
 namespace he::render { class GI_IBL; }
 namespace he::render { class GI_RSM; }
@@ -47,11 +48,18 @@ public:
     ToneMapPass*         GetToneMap()            { return m_ToneMap.get(); }
     SkyboxPass*          GetSkybox()             { return m_Skybox.get(); }
 
-    // ForwardPipeline 特有方法
+    // ForwardPipeline 特有方法（命令式，保留兼容）
     void BeginFrame(rhi::IRHICommandList* cmd, u32 width, u32 height);
     void RenderScene(rhi::IRHICommandList* cmd, he::World& world,
                      he::SceneGraph& sg, const CameraData& camera);
     void EndFrame(rhi::IRHICommandList* cmd);
+
+    // RenderGraph 模式（声明式 Pass 编排，自动 Barrier）
+    void BuildFrameGraph(RenderGraph& rg, he::World& world, he::SceneGraph& sg,
+                         const CameraData& camera);
+    bool UseRenderGraph() const { return m_UseRenderGraph; }
+    void SetUseRenderGraph(bool use) { m_UseRenderGraph = use; }
+    void SetSwapChain(rhi::IRHISwapChain* sc) { m_SwapChain = sc; }
     rhi::IRHIPipelineState* GetPipelineState() const { return m_PBR_PSO.get(); }
 
     rhi::DescriptorSetHandle CreateTextureDescriptorSet(
@@ -117,6 +125,8 @@ private:
     // 多线程录制
     bool m_MultiThreadRecord = true;
     static constexpr u32 kMaxSecRecordLists = 8;
+    // RenderGraph 模式（默认关闭，渐进迁移到声明式编排）
+    bool m_UseRenderGraph = false;
     std::vector<std::unique_ptr<rhi::IRHICommandList>> m_SecRecordLists;
 
     // 着色器
@@ -124,8 +134,9 @@ private:
 
     // 子系统
     std::unique_ptr<IGlobalIllumination> m_GI;
-    std::unique_ptr<GI_RSM>              m_RSM;   // RSM GI（独立于 IBL）
+    std::unique_ptr<GI_RSM>              m_RSM;
     std::unique_ptr<IShadowSystem>       m_ShadowSystem;
+    rhi::IRHISwapChain* m_SwapChain = nullptr;
     std::unique_ptr<ToneMapPass>         m_ToneMap;
     std::unique_ptr<SkyboxPass>          m_Skybox;
     std::unique_ptr<SceneRenderer>       m_SceneRenderer;

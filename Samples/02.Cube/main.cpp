@@ -189,6 +189,8 @@ int main() {
     // --- 5. 初始化前向管线 ---
     render::ForwardPipeline pipeline;
     pipeline.Initialize(device.get());
+    pipeline.SetUseRenderGraph(true);
+    pipeline.SetSwapChain(swapchain.get());
 
     // --- 6. 创建命令列表 ---
     auto cmdList = device->CreateCommandList();
@@ -275,27 +277,27 @@ int main() {
             camCtrl.Update(deltaTime, moveIn);
         }
 
-        // 渲染一帧（HDR 离屏 → ToneMap → ImGui）
+        // 渲染一帧
         cmdList->Begin();
-
-        // 帧首推进槽位（三缓冲帧环）
         pipeline.NextFrame();
 
-        // GI 准备（HDR Pass 之前：IBL 贴图生成需要独立 offscreen pass）
-        pipeline.PrepareGI(cmdList.get(), world, sceneGraph);
-
-        // HDR 离屏渲染通道
-        pipeline.BeginHDRPass(cmdList.get(),
-            swapchain->GetWidth(), swapchain->GetHeight());
-        pipeline.BeginFrame(cmdList.get(),
-            swapchain->GetWidth(), swapchain->GetHeight());
-        pipeline.RenderScene(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
-        pipeline.RenderSkybox(cmdList.get(), world, camCtrl.GetCamera());
-        pipeline.EndHDRPass(cmdList.get());
-
-        // ToneMap 后处理 + ImGui（输出到 SwapChain）
-        cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
-        pipeline.RenderToneMapPass(cmdList.get());
+        if (pipeline.UseRenderGraph()) {
+            // RenderGraph 声明式路径：HDR → ToneMap 全部在 Graph 内完成
+            pipeline.PrepareGI(cmdList.get(), world, sceneGraph);
+            pipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
+        } else {
+            // 命令式路径（兼容）
+            pipeline.PrepareGI(cmdList.get(), world, sceneGraph);
+            pipeline.BeginHDRPass(cmdList.get(),
+                swapchain->GetWidth(), swapchain->GetHeight());
+            pipeline.BeginFrame(cmdList.get(),
+                swapchain->GetWidth(), swapchain->GetHeight());
+            pipeline.RenderScene(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
+            pipeline.RenderSkybox(cmdList.get(), world, camCtrl.GetCamera());
+            pipeline.EndHDRPass(cmdList.get());
+            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
+            pipeline.RenderToneMapPass(cmdList.get());
+        }
 
         imgui.BeginFrame();
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
@@ -321,7 +323,9 @@ int main() {
         ImGui::End();
         imgui.EndFrame(cmdList.get());
 
-        cmdList->EndRenderPass();
+        if (!pipeline.UseRenderGraph()) {
+            cmdList->EndRenderPass();  // 命令式：关闭 swapchain RP
+        }
         cmdList->End();
 
         device->Submit(cmdList.get());

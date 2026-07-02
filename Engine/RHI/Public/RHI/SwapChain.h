@@ -26,6 +26,9 @@ public:
     virtual bool AcquireNextImage() = 0;
     // Present to screen
     virtual void Present(bool vsync) = 0;
+    // 获取当前 BackBuffer ImageView（供 RenderGraph 导入）
+    virtual void* GetCurrentBackBufferView() const = 0;
+    virtual void* GetDepthBufferView()       const = 0;
 };
 
 } // namespace he::rhi
