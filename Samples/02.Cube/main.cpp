@@ -175,7 +175,7 @@ int main() {
         float3(0.0f, 1.2f, -1.5f), float3(0.6f),
         float4(0.95f, 0.93f, 0.88f, 1.0f), 0.0f, 0.35f, true);
 
-    // --- 创建光照 ---
+    // --- 方向光 ---
     Entity mainLightEntity;
     DirectionalLight* mainDL = nullptr;
     {
@@ -188,6 +188,36 @@ int main() {
         mainDL->castShadow = true;
         mainDL->shadowBias = 0.003f;
         sceneGraph.SetParent(mainLightEntity, Entity{kInvalidEntity});
+    }
+
+    // --- 点光源（投射阴影）---
+    Entity pointLightEntity;
+    Entity pointLightSphere;  // 可视化球体
+    {
+        pointLightEntity = world.CreateEntity("PointLight");
+        world.AddComponent<TransformComponent>(pointLightEntity);
+        auto* pl = world.AddComponent<PointLight>(pointLightEntity);
+        pl->color      = float3(1.0f, 0.6f, 0.3f);  // 暖橙色
+        pl->intensity  = 30.0f;
+        pl->range      = 15.0f;
+        pl->castShadow = true;
+        pl->shadowBias = 0.005f;
+
+        auto* plTransform = world.GetComponent<TransformComponent>(pointLightEntity);
+        if (plTransform) plTransform->position = float3(2.0f, 4.0f, 3.0f);
+        sceneGraph.SetParent(pointLightEntity, Entity{kInvalidEntity});
+
+        // 可视化球体
+        pointLightSphere = world.CreateEntity("PointLightSphere");
+        world.AddComponent<TransformComponent>(pointLightSphere);
+        auto* sphere = world.AddComponent<SphereComponent>(pointLightSphere);
+        sphere->radius = 0.15f;
+        sphere->segmentCount = 12;
+        sphere->ringCount = 6;
+        sphere->OnCreate();
+        auto* sphereTransform = world.GetComponent<TransformComponent>(pointLightSphere);
+        if (sphereTransform) sphereTransform->position = float3(2.0f, 2.0f, 3.0f);
+        sceneGraph.SetParent(pointLightSphere, Entity{kInvalidEntity});
     }
 
     // --- 天空盒（从 skybox 目录加载 6 面纹理）---
@@ -343,7 +373,7 @@ int main() {
         {
             auto* shadowSys = pipeline.GetShadowSystem();
             shadowSys->SetRenderResources(
-                pipeline.GetCurrentObjectBuffer(),
+                pipeline.GetCurrentShadowObjectBuffer(),  // 阴影专用 Object Buffer
                 pipeline.GetCurrentShadowBuffer(),
                 pipeline.GetCurrentDescSet());
 
@@ -354,25 +384,18 @@ int main() {
             shadowSys->Update(shadowCtx);
         }
 
-        if (pipeline.UseRenderGraph()) {
-            pipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
-        } else {
-            pipeline.PrepareGI(cmdList.get(), world, sceneGraph);
-            pipeline.BeginHDRPass(cmdList.get(),
-                swapchain->GetWidth(), swapchain->GetHeight());
-            pipeline.BeginFrame(cmdList.get(),
-                swapchain->GetWidth(), swapchain->GetHeight());
-            pipeline.RenderScene(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
-            pipeline.RenderSkybox(cmdList.get(), world, camCtrl.GetCamera());
-            pipeline.EndHDRPass(cmdList.get());
-            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
-            pipeline.RenderToneMapPass(cmdList.get());
-        }
+        // 统一使用 pipeline.Render()（RG/非RG 内部均包含 Shadow + HDR + 场景 + 天空盒）
+        pipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
 
-        // RG 模式下 ToneMap 已关闭 RP，ImGui 需自行开 RP（LOAD 保留 ToneMap 输出）
+        // ToneMap + ImGui RenderPass
         if (pipeline.UseRenderGraph()) {
+            // RG：ToneMap 已在 RG 内完成，ImGui 用 LOAD 保留输出
             cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
                 rhi::Format::Unknown, nullptr, rhi::IRHICommandList::LoadOp::Load);
+        } else {
+            // 非 RG：手动渲染 ToneMap，首次写入 BackBuffer 用 Clear
+            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
+            pipeline.RenderToneMapPass(cmdList.get());
         }
 
         imgui.BeginFrame();
@@ -430,6 +453,38 @@ int main() {
                 ImGui::Unindent(12.0f);
             }
         }
+
+        // 点光源控制
+        world.ForEach<he::PointLight>([&](he::Entity e, he::PointLight& pl) {
+            ImGui::SeparatorText("点光源");
+
+            ImGui::Checkbox("启用##PTEnabled", &pl.enabled);
+
+            auto* plTransform = world.GetComponent<TransformComponent>(e);
+            if (plTransform) {
+                if (ImGui::DragFloat3("位置##PTPos", &plTransform->position[0], 0.1f)) {
+                    // 同步可视化球体位置
+                    auto* sphereTransform = world.GetComponent<TransformComponent>(pointLightSphere);
+                    if (sphereTransform)
+                        sphereTransform->position = plTransform->position;
+                }
+            }
+
+            ImGui::ColorEdit3("颜色##PTColor", &pl.color[0]);
+            ImGui::DragFloat("强度##PTIntensity", &pl.intensity, 0.5f, 0.0f, 200.0f, "%.1f");
+            ImGui::DragFloat("范围##PTRange", &pl.range, 0.5f, 0.5f, 50.0f, "%.1f");
+
+            bool ptShadow = pl.castShadow;
+            if (ImGui::Checkbox("投射阴影##PTShadow", &ptShadow))
+                pl.castShadow = ptShadow;
+
+            if (pl.castShadow) {
+                ImGui::Indent(12.0f);
+                ImGui::DragFloat("深度偏移##PTBias", &pl.shadowBias, 0.0001f, 0.0f, 0.1f, "%.4f",
+                    ImGuiSliderFlags_Logarithmic);
+                ImGui::Unindent(12.0f);
+            }
+        });
 
         ImGui::End();
         imgui.EndFrame(cmdList.get());

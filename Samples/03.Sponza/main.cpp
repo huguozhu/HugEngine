@@ -519,7 +519,7 @@ int main() {
         {
             auto* shadowSys = pipeline.GetShadowSystem();
             shadowSys->SetRenderResources(
-                pipeline.GetCurrentObjectBuffer(),
+                pipeline.GetCurrentShadowObjectBuffer(),  // 阴影专用 Object Buffer
                 pipeline.GetCurrentShadowBuffer(),
                 pipeline.GetCurrentDescSet());
 

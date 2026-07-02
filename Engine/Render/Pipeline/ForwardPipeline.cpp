@@ -96,6 +96,12 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         shadowBufDesc.size  = sizeof(GPUShadowData) * MAX_SHADOWS;
         shadowBufDesc.usage = rhi::BufferUsage::Storage;
         m_ShadowBuffers[i] = device->CreateBuffer(shadowBufDesc);
+
+        // 阴影专用 Object Buffer（独立于场景，避免 CPU 录制覆盖）
+        rhi::BufferDesc shadowObjDesc;
+        shadowObjDesc.size  = sizeof(GPUObjectData) * MAX_OBJECTS;
+        shadowObjDesc.usage = rhi::BufferUsage::Storage;
+        m_ShadowObjBuffers[i] = device->CreateBuffer(shadowObjDesc);
     }
 
     // --- 创建纹理采样器（通用）---
@@ -594,6 +600,25 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
         rg.Execute(cmd, m_Device);
         return;
     }
+    // 非 RG 路径：手动渲染阴影
+    if (m_ShadowSystem && m_ShadowSystem->HasActiveShadows()) {
+        u32 slot = m_CurrentFrameSlot;
+        // 切换 binding 2 到阴影 Object Buffer
+        m_Device->UpdateDescriptorSet(m_DescSets[slot], 2,
+            rhi::DescriptorType::StorageBuffer, m_ShadowObjBuffers[slot].get());
+        for (auto& set : m_AllPerMeshDescSets)
+            m_Device->UpdateDescriptorSet(set, 2,
+                rhi::DescriptorType::StorageBuffer, m_ShadowObjBuffers[slot].get());
+
+        m_ShadowSystem->Render(cmd);
+
+        // 恢复 binding 2
+        m_Device->UpdateDescriptorSet(m_DescSets[slot], 2,
+            rhi::DescriptorType::StorageBuffer, m_ObjectBuffers[slot].get());
+        for (auto& set : m_AllPerMeshDescSets)
+            m_Device->UpdateDescriptorSet(set, 2,
+                rhi::DescriptorType::StorageBuffer, m_ObjectBuffers[slot].get());
+    }
     PrepareGI(cmd, world, sg);
     BeginHDRPass(cmd, m_HDRWidth, m_HDRHeight);
     BeginFrame(cmd, m_HDRWidth, m_HDRHeight);
@@ -645,10 +670,27 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
 
         rg.AddPass("Shadow", {}, std::move(shadowWrites),
             [this](rhi::IRHICommandList* c) {
-                // 手动 Barrier 处理布局转换：
-                // CSMTechnique/PointShadowTechnique::Render 内部
-                // 在 EndOffscreenPass 后转换 DepthStencilRead→ShaderResource
+                // 切换描述符集 binding 2 到阴影专用 Object Buffer
+                // （避免 FullScene 的 SceneRenderer::Prepare 覆盖数据）
+                u32 slot = m_CurrentFrameSlot;
+                m_Device->UpdateDescriptorSet(m_DescSets[slot], 2,
+                    rhi::DescriptorType::StorageBuffer,
+                    m_ShadowObjBuffers[slot].get());
+                for (auto& set : m_AllPerMeshDescSets)
+                    m_Device->UpdateDescriptorSet(set, 2,
+                        rhi::DescriptorType::StorageBuffer,
+                        m_ShadowObjBuffers[slot].get());
+
                 m_ShadowSystem->Render(c);
+
+                // 恢复 binding 2 到场景 Object Buffer（FullScene 使用）
+                m_Device->UpdateDescriptorSet(m_DescSets[slot], 2,
+                    rhi::DescriptorType::StorageBuffer,
+                    m_ObjectBuffers[slot].get());
+                for (auto& set : m_AllPerMeshDescSets)
+                    m_Device->UpdateDescriptorSet(set, 2,
+                        rhi::DescriptorType::StorageBuffer,
+                        m_ObjectBuffers[slot].get());
             });
     }
 

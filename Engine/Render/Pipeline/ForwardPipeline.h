@@ -87,6 +87,8 @@ public:
     rhi::IRHIBuffer*         GetCurrentObjectBuffer() { return m_ObjectBuffers[m_CurrentFrameSlot].get(); }
     rhi::IRHIBuffer*         GetCurrentShadowBuffer() { return m_ShadowBuffers[m_CurrentFrameSlot].get(); }
     rhi::DescriptorSetHandle GetCurrentDescSet()      { return m_DescSets[m_CurrentFrameSlot]; }
+    // 阴影专用 Object Buffer（独立于场景 Object Buffer，避免 CPU 录制时覆盖）
+    rhi::IRHIBuffer*         GetCurrentShadowObjectBuffer() { return m_ShadowObjBuffers[m_CurrentFrameSlot].get(); }
 
     // HDR 纹理访问（供 ToneMapPass 使用）
     rhi::IRHITexture* GetHDRTarget()  const { return m_HDRTarget.get(); }
@@ -110,6 +112,7 @@ private:
     std::unique_ptr<rhi::IRHIBuffer> m_LightBuffers[MAX_FRAMES_IN_FLIGHT];
     std::unique_ptr<rhi::IRHIBuffer> m_ObjectBuffers[MAX_FRAMES_IN_FLIGHT];
     std::unique_ptr<rhi::IRHIBuffer> m_ShadowBuffers[MAX_FRAMES_IN_FLIGHT];
+    std::unique_ptr<rhi::IRHIBuffer> m_ShadowObjBuffers[MAX_FRAMES_IN_FLIGHT];  // 阴影专用 Object Buffer
     u32 m_CurrentFrameSlot = 0;
     std::vector<rhi::DescriptorSetHandle> m_AllPerMeshDescSets;
 
