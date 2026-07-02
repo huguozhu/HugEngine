@@ -531,13 +531,16 @@ int main() {
             shadowSys->Render(cmdList.get());
         }
 
-        // --- HDR 离屏渲染 + 场景 + 天空盒（IRenderPipeline::Render 封装）---
+        // --- RenderGraph 全 Pass 编排（Shadow→IBL→RSM→HDR→Skybox→ToneMap）---
         pipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
 
         // --- ToneMap + ImGui ---
         if (!pipeline.UseRenderGraph()) {
             cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
             pipeline.RenderToneMapPass(cmdList.get());
+        }
+        if (pipeline.UseRenderGraph()) {
+            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);  // RG: ImGui 需要 RP
         }
 
         imgui.BeginFrame();
@@ -681,10 +684,7 @@ int main() {
         }
         ImGui::End();
         imgui.EndFrame(cmdList.get());
-
-        if (!pipeline.UseRenderGraph()) {
-            cmdList->EndRenderPass();
-        }
+        cmdList->EndRenderPass();  // 关闭 ImGui RP
         cmdList->End();
 
         device->Submit(cmdList.get());

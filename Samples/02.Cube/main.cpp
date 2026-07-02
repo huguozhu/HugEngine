@@ -282,11 +282,9 @@ int main() {
         pipeline.NextFrame();
 
         if (pipeline.UseRenderGraph()) {
-            // RenderGraph 声明式路径：HDR → ToneMap 全部在 Graph 内完成
-            pipeline.PrepareGI(cmdList.get(), world, sceneGraph);
+            // RenderGraph：Shadow+IBL+RSM+HDR+Skybox+ToneMap 全在 Graph 内
             pipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
         } else {
-            // 命令式路径（兼容）
             pipeline.PrepareGI(cmdList.get(), world, sceneGraph);
             pipeline.BeginHDRPass(cmdList.get(),
                 swapchain->GetWidth(), swapchain->GetHeight());
@@ -297,6 +295,11 @@ int main() {
             pipeline.EndHDRPass(cmdList.get());
             cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
             pipeline.RenderToneMapPass(cmdList.get());
+        }
+
+        // RG 模式下 ToneMap 已关闭 RP，ImGui 需自行开 RP（LOAD 保留内容）
+        if (pipeline.UseRenderGraph()) {
+            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
         }
 
         imgui.BeginFrame();
@@ -322,10 +325,7 @@ int main() {
 
         ImGui::End();
         imgui.EndFrame(cmdList.get());
-
-        if (!pipeline.UseRenderGraph()) {
-            cmdList->EndRenderPass();  // 命令式：关闭 swapchain RP
-        }
+        cmdList->EndRenderPass();  // 关闭 ImGui RP（RG 和 non-RG 都需要）
         cmdList->End();
 
         device->Submit(cmdList.get());

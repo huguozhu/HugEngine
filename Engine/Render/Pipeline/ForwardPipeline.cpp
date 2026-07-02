@@ -590,14 +590,12 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
                               he::SceneGraph& sg, const CameraData& camera)
 {
     if (m_UseRenderGraph) {
-        // RenderGraph 声明式路径
         RenderGraph rg;
         BuildFrameGraph(rg, world, sg, camera);
         rg.Compile();
         rg.Execute(cmd, m_Device);
         return;
     }
-    // 命令式路径（兼容旧版）
     PrepareGI(cmd, world, sg);
     BeginHDRPass(cmd, m_HDRWidth, m_HDRHeight);
     BeginFrame(cmd, m_HDRWidth, m_HDRHeight);
@@ -610,7 +608,6 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                                        he::SceneGraph& sg, const CameraData& camera)
 {
     if (m_SwapChain) rg.SetSwapChain(m_SwapChain);
-    // 同步 ToneMap/Skybox 尺寸（不重分配 HDR 目标，仅更新视口参数）
     if (m_SwapChain) {
         u32 sw = m_SwapChain->GetWidth(), sh = m_SwapChain->GetHeight();
         if (m_ToneMap) m_ToneMap->OnResize(sw, sh);
@@ -618,50 +615,100 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     }
     u32 w = m_HDRWidth, h = m_HDRHeight;
 
-    // 外部资源导入
     auto hdrColor  = rg.ImportTexture("HDR_Color",  m_HDRTarget.get());
     auto hdrDepth  = rg.ImportTexture("HDR_Depth",  m_HDRDepth.get());
     auto backBuf   = rg.ImportBackBuffer();
 
-    // GI 子系统资源
+    // IBL 纹理
     ResourceHandle irrMap = kInvalidHandle, prefMap = kInvalidHandle, brdfLut = kInvalidHandle;
     if (auto* giIBL = dynamic_cast<GI_IBL*>(m_GI.get())) {
-        if (giIBL->GetIrradianceMap())
-            irrMap = rg.ImportTexture("IBL_Irradiance", giIBL->GetIrradianceMap());
-        if (giIBL->GetPrefilterMap())
-            prefMap = rg.ImportTexture("IBL_Prefilter", giIBL->GetPrefilterMap());
-        if (giIBL->GetBRDF_LUT())
-            brdfLut = rg.ImportTexture("IBL_BRDF_LUT", giIBL->GetBRDF_LUT());
+        if (giIBL->GetIrradianceMap())  irrMap = rg.ImportTexture("IBL_Irradiance", giIBL->GetIrradianceMap());
+        if (giIBL->GetPrefilterMap())   prefMap = rg.ImportTexture("IBL_Prefilter",  giIBL->GetPrefilterMap());
+        if (giIBL->GetBRDF_LUT())       brdfLut = rg.ImportTexture("IBL_BRDF_LUT",   giIBL->GetBRDF_LUT());
     }
 
-    ResourceHandle shadowMap0 = kInvalidHandle;
-    if (m_ShadowSystem && m_ShadowSystem->GetShadowMapCount() > 0)
-        shadowMap0 = rg.ImportTexture("Shadow_CSM0", m_ShadowSystem->GetShadowMap(0));
+    // RSM 纹理
+    ResourceHandle rsmPosMap = kInvalidHandle, rsmFluxMap = kInvalidHandle;
+    if (m_RSM) {
+        if (m_RSM->GetRSMPositionMap()) rsmPosMap = rg.ImportTexture("RSM_Pos",  m_RSM->GetRSMPositionMap());
+        if (m_RSM->GetRSMFluxMap())     rsmFluxMap = rg.ImportTexture("RSM_Flux", m_RSM->GetRSMFluxMap());
+    }
 
-    // HDR 场景 Pass
+    ResourceHandle shadowMap0 = kInvalidHandle, shadowMap1 = kInvalidHandle, shadowMap2 = kInvalidHandle;
+    if (m_ShadowSystem && m_ShadowSystem->GetShadowMapCount() >= 3) {
+        shadowMap0 = rg.ImportTexture("Shadow_CSM0", m_ShadowSystem->GetShadowMap(0));
+        shadowMap1 = rg.ImportTexture("Shadow_CSM1", m_ShadowSystem->GetShadowMap(1));
+        shadowMap2 = rg.ImportTexture("Shadow_CSM2", m_ShadowSystem->GetShadowMap(2));
+    }
+
+    // --- Pass 1: 阴影 ---
+    if (m_ShadowSystem && m_ShadowSystem->HasActiveShadows()) {
+        rg.AddPass("Shadow", {},
+            {{shadowMap0, ResourceAccess::Write}, {shadowMap1, ResourceAccess::Write}, {shadowMap2, ResourceAccess::Write}},
+            [&](rhi::IRHICommandList* c) {
+                m_ShadowSystem->SetRenderResources(m_ObjectBuffers[m_CurrentFrameSlot].get(),
+                    m_ShadowBuffers[m_CurrentFrameSlot].get(), m_DescSets[m_CurrentFrameSlot]);
+                SubsystemContext sctx{&world, &sg, &camera, w, h};
+                m_ShadowSystem->Update(sctx);
+                m_ShadowSystem->Render(c);
+            });
+    }
+
+    // --- Pass 2: GI_IBL ---
+    if (auto* giIBL = dynamic_cast<GI_IBL*>(m_GI.get())) {
+        rg.AddPass("GI_IBL", {},
+            {{irrMap, ResourceAccess::Write}, {prefMap, ResourceAccess::Write}, {brdfLut, ResourceAccess::Write}},
+            [&](rhi::IRHICommandList* c) {
+                SubsystemContext sctx{&world, &sg, &camera, w, h};
+                giIBL->Update(sctx);
+                giIBL->Render(c);
+                UpdateIBLBindings(giIBL);
+            });
+    }
+
+    // --- Pass 3: GI_RSM ---
+    if (m_RSM && m_ShadowSystem && m_ShadowSystem->HasActiveShadows()) {
+        rg.AddPass("GI_RSM",
+            {{shadowMap0, ResourceAccess::Read}},
+            {{rsmPosMap, ResourceAccess::Write}, {rsmFluxMap, ResourceAccess::Write}},
+            [&](rhi::IRHICommandList* c) {
+                rhi::IRHITexture* sm0 = m_ShadowSystem->GetShadowMap(0);
+                if (sm0) {
+                    m_RSM->SetShadowDepthView(sm0->GetNativeHandle());
+                    m_RSM->SetLightViewProj(m_ShadowSystem->GetLightViewProj(0), sm0->GetWidth(),
+                        m_ObjectBuffers[m_CurrentFrameSlot].get(), m_ShadowSystem->GetShadowSampler(),
+                        m_DescSets[m_CurrentFrameSlot]);
+                    m_RSM->RenderRSMPass(c, world, sg);
+                    UpdateRSMBindings();
+                }
+            });
+    }
+
+    // --- Pass 4: HDR 场景 ---
     rg.AddPass("HDR_Scene",
         {{irrMap, ResourceAccess::Read}, {prefMap, ResourceAccess::Read},
-         {brdfLut, ResourceAccess::Read}, {shadowMap0, ResourceAccess::Read}},
+         {brdfLut, ResourceAccess::Read}, {shadowMap0, ResourceAccess::Read},
+         {shadowMap1, ResourceAccess::Read}, {shadowMap2, ResourceAccess::Read},
+         {rsmPosMap, ResourceAccess::Read}, {rsmFluxMap, ResourceAccess::Read}},
         {{hdrColor, ResourceAccess::Write}, {hdrDepth, ResourceAccess::Write}},
         [&](rhi::IRHICommandList* c) {
             c->SetPipeline(m_PBR_PSO.get());
-            rhi::ClearValue clr{};
-            clr.depth = 1.0f;
+            rhi::ClearValue clr{}; clr.depth = 1.0f;
             c->BeginOffscreenPass(m_HDRTarget->GetNativeHandle(),
-                                  m_HDRDepth->GetNativeHandle(), w, h, &clr, false); // RG 同步执行，不需要 sec CB
+                m_HDRDepth->GetNativeHandle(), w, h, &clr, false);
             c->SetViewport({0,(float)h,(float)w,-(float)h,0,1});
             c->SetScissor({0,0,w,h});
             RenderScene(c, world, sg, camera);
             c->EndOffscreenPass();
         });
 
-    // Skybox Pass
+    // --- Pass 5: Skybox ---
     rg.AddPass("Skybox",
         {{hdrDepth, ResourceAccess::Read}},
         {{hdrColor, ResourceAccess::Write}},
         [&](rhi::IRHICommandList* c) { RenderSkybox(c, world, camera); });
 
-    // ToneMap Pass：HDR → sRGB → SwapChain（含 Begin/EndRenderPass）
+    // --- Pass 6: ToneMap ---
     if (m_ToneMap) {
         rg.AddPass("ToneMap",
             {{hdrColor, ResourceAccess::Read}},
@@ -673,7 +720,6 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 c->EndRenderPass();
             });
     }
-
 }
 
 void ForwardPipeline::OnResize(u32 width, u32 height) {
