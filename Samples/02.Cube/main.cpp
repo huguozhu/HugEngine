@@ -282,7 +282,7 @@ int main() {
         pipeline.NextFrame();
 
         // GI 准备（HDR Pass 之前：IBL 贴图生成需要独立 offscreen pass）
-        pipeline.PrepareGI(cmdList.get(), world);
+        pipeline.PrepareGI(cmdList.get(), world, sceneGraph);
 
         // HDR 离屏渲染通道
         pipeline.BeginHDRPass(cmdList.get(),

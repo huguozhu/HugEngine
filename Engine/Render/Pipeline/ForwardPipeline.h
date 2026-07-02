@@ -69,7 +69,7 @@ public:
     void ResizeHDRTarget(u32 w, u32 h);
 
     void SetGI(std::unique_ptr<IGlobalIllumination> gi) { m_GI = std::move(gi); }
-    void PrepareGI(rhi::IRHICommandList* cmd, he::World& world);
+    void PrepareGI(rhi::IRHICommandList* cmd, he::World& world, he::SceneGraph& sg);
     GI_RSM* GetRSM() { return m_RSM.get(); }
 
     // 后处理（委托给子系统）

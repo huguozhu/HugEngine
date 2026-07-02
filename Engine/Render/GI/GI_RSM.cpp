@@ -3,7 +3,10 @@
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include "Vulkan/VulkanInternal.h"
-#include "Scene/MeshComponent.h"  // StaticVertex
+#include "Scene/World.h"
+#include "Scene/SceneGraph.h"
+#include "Scene/MeshComponent.h"
+#include "Pipeline/Material.h"   // GPUObjectData
 #include "RSM_Generate.vert.spv.h"
 #include "RSM_Generate.frag.spv.h"
 
@@ -117,6 +120,11 @@ void GI_RSM::SetLightViewProj(const float4x4& vp, u32 resolution,
 
 void GI_RSM::Render(rhi::IRHICommandList* cmd) {
     if (!m_Ready || !m_ExternalObjBuf || !m_ShadowDepthView) return;
+    // 实际渲染委托给 RenderRSMPass（由 ForwardPipeline 在 Render 中调用）
+}
+
+void GI_RSM::RenderRSMPass(rhi::IRHICommandList* cmd, he::World& world, he::SceneGraph& sg) {
+    if (!m_Ready || !m_ExternalObjBuf || !m_ShadowDepthView) return;
 
     m_Device->UpdateDescriptorSet(m_RSMSet, 1,
         rhi::DescriptorType::StorageBuffer, m_ExternalObjBuf);
@@ -140,12 +148,33 @@ void GI_RSM::Render(rhi::IRHICommandList* cmd) {
         0.0f, 1.0f });
     cmd->SetScissor({ 0, 0, m_RSMResolution, m_RSMResolution });
 
-    // RSM 渲染：从光源视角绘制场景（需要 SceneRenderer 提供的 draw list）
-    // 当前为骨架实现 — 纹理已创建并绑定深度，实际 draw calls 待后续集成
+    // 上传对象数据到 GPU（从光源 POV 不需要世界矩阵，直接用 objectIndex 索引）
+    auto* objData = static_cast<GPUObjectData*>(m_ExternalObjBuf->Map());
+    u32 objectIndex = 0;
+
+    auto renderMesh = [&](he::Entity e, he::MeshComponent& m) {
+        if (m.GetIndexCount() == 0 || objectIndex >= MAX_OBJECTS) return;
+        objData[objectIndex].worldMatrix = sg.GetWorldMatrix(e);
+
+        // 设置 RSM push constants
+        struct alignas(16) RSMPush { float4x4 lightVP; u32 objIdx; u32 lightIdx; u32 _pad[2]; } pc{};
+        pc.lightVP = m_LightVP;
+        pc.objIdx  = objectIndex;
+        pc.lightIdx = 0;  // 使用第一个方向光
+        cmd->SetPushConstants(0, sizeof(RSMPush), &pc);
+
+        cmd->SetVertexBuffer(m.GetVertexBuffer().get(), 0);
+        cmd->SetIndexBuffer(m.GetIndexBuffer().get());
+        cmd->DrawIndexed(m.GetIndexCount());
+        objectIndex++;
+    };
+
+    world.ForEach<he::MeshComponent>(renderMesh);
+    m_ExternalObjBuf->Unmap();
 
     cmd->EndOffscreenPass();
 
-    // 布局转换：COLOR_ATTACHMENT → SHADER_READ（PBR Shader 采样）
+    // 布局转换：COLOR_ATTACHMENT → SHADER_READ
     cmd->PipelineBarrier(
         rhi::PipelineStage::ColorAttachmentOutput,
         rhi::PipelineStage::FragmentShader,

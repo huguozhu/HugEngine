@@ -170,26 +170,28 @@ float4 fragmentMain(FSInput input) : SV_Target0 {
     color += prefilteredColor * (F * envBRDF.r + envBRDF.g) * iblIntensity;
 
     // ---- RSM 间接光照（Reflective Shadow Maps） ----
-    if (iblIntensity > 0.0) {
-        // 采样 RSM：在 light space 采样临近像素，累加间接漫反射
+    if (iblIntensity > 0.0 && u_ShadowData[0].shadowParams.z > 0.0) {
+        // 将世界坐标变换到光源空间（使用第一个方向光的 CSM cascade 0 VP）
+        float4 lightSpacePos = mul(u_ShadowData[0].lightViewProj[0], float4(input.worldPos, 1.0));
+        float2 rsmCoord = lightSpacePos.xy / lightSpacePos.w * 0.5 + 0.5;  // [-1,1] → [0,1]
+
         float3 rsmIndirect = float3(0.0);
-        float2 rsmCoord = float2(0.5, 0.5);  // placeholder: light-space projection
-        const float rsmRadius = 0.01;  // 采样半径（RSM 空间）
+        const float rsmRadius = 0.005;  // RSM 采样半径
         for (int dx = -2; dx <= 2; dx++) {
             for (int dy = -2; dy <= 2; dy++) {
-                float2 uv = rsmCoord + float2(dx, dy) * rsmRadius;
+                float2 uv = saturate(rsmCoord + float2(dx, dy) * rsmRadius);
                 float4 posSample  = u_RSMPositionMap.Sample(u_RSMSampler, uv);
                 float4 fluxSample = u_RSMFluxMap.Sample(u_RSMSampler, uv);
                 float3 samplePos  = posSample.xyz;
-                float3 sampleN    = normalize(fluxSample.rgb * 2.0 - 1.0);  // 法线编码 [0,1]→[-1,1]
-                float  flux       = fluxSample.a;  // 通量存储在 alpha 通道
+                float3 sampleN    = normalize(fluxSample.rgb * 2.0 - 1.0);
+                float  flux       = fluxSample.a;
                 float3 dir        = samplePos - input.worldPos;
                 float  dist2      = max(dot(dir, dir), 0.01);
-                float  NdotDir    = max(dot(N, normalize(dir)), 0.0);
-                rsmIndirect += flux * NdotDir / dist2 * albedo;
+                float  cosDir     = max(dot(sampleN, -normalize(dir)), 0.0);
+                rsmIndirect += flux * max(dot(N, normalize(dir)), 0.0) * cosDir / dist2;
             }
         }
-        color += rsmIndirect * 0.02 * iblIntensity;  // RSM 衰减系数
+        color += rsmIndirect * 0.03 * iblIntensity;  // RSM 间接光贡献
     }
 
     color += obj.emissiveFactor.rgb;

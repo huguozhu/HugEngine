@@ -466,7 +466,7 @@ void ForwardPipeline::EndHDRPass(rhi::IRHICommandList* cmd) {
     if (m_ToneMap) m_ToneMap->PreBind(cmd);
 }
 
-void ForwardPipeline::PrepareGI(rhi::IRHICommandList* cmd, he::World& world) {
+void ForwardPipeline::PrepareGI(rhi::IRHICommandList* cmd, he::World& world, he::SceneGraph& sg) {
     if (!m_GI || !m_GI->IsEnabled()) return;
 
     // 查找启用的 SkyboxComponent → 设置 Skybox Cubemap
@@ -493,7 +493,8 @@ void ForwardPipeline::PrepareGI(rhi::IRHICommandList* cmd, he::World& world) {
                                     m_ObjectBuffers[m_CurrentFrameSlot].get(),
                                     m_ShadowSystem->GetShadowSampler(),
                                     m_DescSets[m_CurrentFrameSlot]);
-            m_RSM->Render(cmd);
+            // 从光源 POV 渲染几何体 → RSM 纹理
+            m_RSM->RenderRSMPass(cmd, world, sg);
             UpdateRSMBindings();
         }
     }
@@ -589,7 +590,7 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
                               he::SceneGraph& sg, const CameraData& camera)
 {
     // GI 准备（检测 Skybox → 更新 IBL）
-    PrepareGI(cmd, world);
+    PrepareGI(cmd, world, sg);
     // HDR 离屏通道
     BeginHDRPass(cmd, m_HDRWidth, m_HDRHeight);
     BeginFrame(cmd, m_HDRWidth, m_HDRHeight);

@@ -46,6 +46,9 @@ public:
     // 设置 Shadow Map 深度附件（渲染 RSM 时复用）
     void SetShadowDepthView(void* depthView) { m_ShadowDepthView = depthView; }
 
+    // 从光源 POV 渲染几何体到 RSM 纹理
+    void RenderRSMPass(rhi::IRHICommandList* cmd, he::World& world, he::SceneGraph& sg);
+
     // 纹理访问
     rhi::IRHITexture* GetRSMPositionMap() const { return m_RSMPos.get(); }
     rhi::IRHITexture* GetRSMFluxMap()     const { return m_RSMFlux.get(); }
