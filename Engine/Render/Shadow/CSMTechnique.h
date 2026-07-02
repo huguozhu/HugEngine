@@ -40,6 +40,10 @@ public:
     // 暴露 PSO（供 PointShadowTechnique 复用）
     rhi::IRHIPipelineState* GetPSO()const{return m_ShadowPSO.get();}
 
+    // 获取 cascade i 的光源 VP 矩阵（供 RSM 等 GI 技术复用）
+    float4x4 GetLightViewProj(u32 cascade) const { return (cascade < CASCADE_COUNT) ? m_LightVPs[cascade] : float4x4(1.0f); }
+    u32      GetShadowMapSize()    const { return m_ShadowMapSize; }
+
 private:
     void RenderCascade(rhi::IRHICommandList* cmd,u32 ci,he::World& w,he::SceneGraph& sg,
                        const GPUShadowData& sd);
@@ -54,6 +58,7 @@ private:
     rhi::IRHIBuffer*        m_ExternalObjectBuffer=nullptr;
     rhi::DescriptorSetHandle m_ExternalDescSet=rhi::kInvalidSet;
     rhi::IRHIDevice* m_Device=nullptr;
+    float4x4 m_LightVPs[CASCADE_COUNT]{};  // 缓存最近一次的 cascade VP（供 RSM 查询）
 };
 
 } // namespace he::render

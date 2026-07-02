@@ -93,6 +93,9 @@ public:
     void BeginOffscreenPass(void* colorImageView, void* depthImageView,
                             u32 width, u32 height,
                             const ClearValue* clear, bool allowSecondary) override;
+    void BeginOffscreenPassMRT(void* const* colorImageViews, u32 colorCount,
+                               void* depthImageView, u32 width, u32 height,
+                               const ClearValue* clears, bool allowSecondary) override;
     void EndOffscreenPass() override;
     void SetSwapChain(IRHISwapChain* swapchain) override;
     void SetPipeline(IRHIPipelineState* pso) override;

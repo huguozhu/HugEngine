@@ -93,6 +93,7 @@ void CSMTechnique::Render(rhi::IRHICommandList* cmd,he::World& w,he::SceneGraph&
 }
 
 void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,he::World& w,he::SceneGraph& sg,const GPUShadowData& sd){
+    m_LightVPs[ci] = sd.lightViewProj[ci];  // 缓存供 RSM 查询
     void*dv=m_ShadowMaps[ci]->GetNativeHandle();if(!dv)return;
     rhi::ClearValue cv{};cv.depth=1.f;
     cmd->SetPipeline(m_ShadowPSO.get());cmd->BeginOffscreenPass(nullptr,dv,m_ShadowMapSize,m_ShadowMapSize,&cv);

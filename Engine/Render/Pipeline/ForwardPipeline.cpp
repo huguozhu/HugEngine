@@ -1,5 +1,6 @@
 #include "Pipeline/ForwardPipeline.h"
 #include "GI/GI_IBL.h"
+#include "GI/GI_RSM.h"
 #include "Shadow/ShadowSystem.h"
 #include "Shadow/ShadowNone.h"
 #include "PostProcess/ToneMapPass.h"
@@ -71,6 +72,8 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         { 12, rhi::DescriptorType::CombinedImageSampler, 1, 16 },  // IBL Irradiance Cubemap
         { 13, rhi::DescriptorType::CombinedImageSampler, 1, 16 },  // IBL Prefilter Cubemap
         { 14, rhi::DescriptorType::CombinedImageSampler, 1, 16 },  // IBL BRDF LUT
+        { 15, rhi::DescriptorType::CombinedImageSampler, 1, 16 },  // RSM Position
+        { 16, rhi::DescriptorType::CombinedImageSampler, 1, 16 },  // RSM Normal+Flux
     };
     m_DescLayout = device->CreateDescriptorSetLayout(combinedLayoutDesc);
 
@@ -158,6 +161,13 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         device->UpdateDescriptorSet(set, 14,
             rhi::DescriptorType::CombinedImageSampler,
             m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
+        // 绑定 15-16: RSM 纹理占位（GI_RSM 渲染后替换）
+        device->UpdateDescriptorSet(set, 15,
+            rhi::DescriptorType::CombinedImageSampler,
+            m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
+        device->UpdateDescriptorSet(set, 16,
+            rhi::DescriptorType::CombinedImageSampler,
+            m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
         m_DescSets[i] = set;
     }
     // 初始化时使用第一个槽位
@@ -221,12 +231,17 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         m_HDRSampler = device->CreateSampler(hdrSampDesc);
     }
 
-    // --- GI 子系统（IBL）---
+    // --- GI 子系统（IBL + RSM）---
     {
         auto gi = std::make_unique<GI_IBL>();
         gi->Initialize(device, 0, 0);  // IBL 分辨率独立于视口
         m_GI = std::move(gi);
         HE_CORE_INFO("ForwardPipeline: GI_IBL initialized");
+    }
+    {
+        m_RSM = std::make_unique<GI_RSM>();
+        m_RSM->Initialize(device, 0, 0);
+        HE_CORE_INFO("ForwardPipeline: GI_RSM initialized");
     }
 
     // --- Phase 5-4: 预分配 sec CB 录制池（每线程一个独立 sec CL）---
@@ -467,6 +482,40 @@ void ForwardPipeline::PrepareGI(rhi::IRHICommandList* cmd, he::World& world) {
             }
         }
     });
+
+    // RSM 渲染（复用 Shadow System 的深度缓冲和光源 VP）
+    if (m_RSM && m_ShadowSystem && m_ShadowSystem->HasActiveShadows()) {
+        rhi::IRHITexture* sm0 = m_ShadowSystem->GetShadowMap(0);
+        if (sm0) {
+            m_RSM->SetShadowDepthView(sm0->GetNativeHandle());
+            float4x4 lightVP = m_ShadowSystem->GetLightViewProj(0);
+            m_RSM->SetLightViewProj(lightVP, sm0->GetWidth(),
+                                    m_ObjectBuffers[m_CurrentFrameSlot].get(),
+                                    m_ShadowSystem->GetShadowSampler(),
+                                    m_DescSets[m_CurrentFrameSlot]);
+            m_RSM->Render(cmd);
+            UpdateRSMBindings();
+        }
+    }
+}
+
+void ForwardPipeline::UpdateRSMBindings() {
+    if (!m_RSM) return;
+    rhi::IRHITexture* posMap  = m_RSM->GetRSMPositionMap();
+    rhi::IRHITexture* fluxMap = m_RSM->GetRSMFluxMap();
+    rhi::IRHISampler* sampler = m_RSM->GetRSMSampler();
+    for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        m_Device->UpdateDescriptorSet(m_DescSets[i], 15,
+            rhi::DescriptorType::CombinedImageSampler, posMap, sampler);
+        m_Device->UpdateDescriptorSet(m_DescSets[i], 16,
+            rhi::DescriptorType::CombinedImageSampler, fluxMap, sampler);
+    }
+    for (auto& set : m_AllPerMeshDescSets) {
+        m_Device->UpdateDescriptorSet(set, 15,
+            rhi::DescriptorType::CombinedImageSampler, posMap, sampler);
+        m_Device->UpdateDescriptorSet(set, 16,
+            rhi::DescriptorType::CombinedImageSampler, fluxMap, sampler);
+    }
 }
 
 void ForwardPipeline::UpdateIBLBindings(GI_IBL* gi) {

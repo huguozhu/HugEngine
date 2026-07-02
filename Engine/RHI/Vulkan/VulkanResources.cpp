@@ -695,18 +695,21 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     bool hasColor = (desc.colorAttachmentCount > 0);
     bool hasDepth = (desc.depthFormat != Format::Unknown);
 
-    VkAttachmentDescription colorAttach{};
-    if (hasColor) {
-        colorAttach.format        = ToVkFormat(desc.colorFormats[0]); // 使用 PSO 声明的格式
-        colorAttach.samples       = VK_SAMPLE_COUNT_1_BIT;
-        colorAttach.loadOp        = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        colorAttach.storeOp       = VK_ATTACHMENT_STORE_OP_STORE;
-        colorAttach.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        // SwapChain 格式输出到屏幕用 PRESENT，离屏纹理用 COLOR_ATTACHMENT（后续 barrier 转 SHADER_READ）
-        colorAttach.finalLayout   = (desc.colorFormats[0] == Format::BGRA8_UNORM ||
-                                     desc.colorFormats[0] == Format::BGRA8_SRGB)
-                                    ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
-                                    : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    // 构建颜色附件（支持 MRT：最多 4 个）
+    VkAttachmentDescription colorAttachments[4]{};
+    VkAttachmentReference   colorRefs[4]{};
+    for (u32 c = 0; c < desc.colorAttachmentCount; ++c) {
+        colorAttachments[c].format        = ToVkFormat(desc.colorFormats[c]);
+        colorAttachments[c].samples       = VK_SAMPLE_COUNT_1_BIT;
+        colorAttachments[c].loadOp        = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        colorAttachments[c].storeOp       = VK_ATTACHMENT_STORE_OP_STORE;
+        colorAttachments[c].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        colorAttachments[c].finalLayout   = (desc.colorFormats[c] == Format::BGRA8_UNORM ||
+                                             desc.colorFormats[c] == Format::BGRA8_SRGB)
+                                            ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+                                            : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        colorRefs[c].attachment = c;
+        colorRefs[c].layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     }
 
     VkAttachmentDescription depthAttach{};
@@ -719,30 +722,22 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     depthAttach.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
     depthAttach.finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL; // 阴影贴图后续要采样
 
-    // depth-only 模式下，深度附件在 index 0；否则在 index 1
-    u32 depthAttachIdx = hasColor ? 1u : 0u;
-    VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    // depth-only 模式下，深度附件在颜色之后
+    u32 depthAttachIdx = desc.colorAttachmentCount;  // 深度在颜色附件之后
     VkAttachmentReference depthRef{depthAttachIdx, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
 
     VkSubpassDescription subpass{};
     subpass.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount    = hasColor ? 1u : 0u;
-    subpass.pColorAttachments       = hasColor ? &colorRef : nullptr;
+    subpass.colorAttachmentCount    = desc.colorAttachmentCount;
+    subpass.pColorAttachments       = hasColor ? colorRefs : nullptr;
     subpass.pDepthStencilAttachment = hasDepth ? &depthRef : nullptr;
 
-    // 构建附件数组：depth-only 时深度在 [0]，否则颜色在 [0]、深度在 [1]
-    VkAttachmentDescription attachments[2];
+    // 构建附件数组：颜色在前 [0..N-1]，深度在 [N]
+    VkAttachmentDescription attachments[5];  // 最多 4 颜色 + 1 深度
     u32 attachmentCount = 0;
-    u32 colorIdx = 0, depthInArrIdx = 0;
-    if (hasColor) {
-        attachments[attachmentCount++] = colorAttach;
-        colorIdx = 0;
-        depthInArrIdx = 1;
-        if (hasDepth) attachments[attachmentCount++] = depthAttach;
-    } else if (hasDepth) {
-        attachments[attachmentCount++] = depthAttach;
-        depthInArrIdx = 0;
-    }
+    for (u32 c = 0; c < desc.colorAttachmentCount; ++c)
+        attachments[attachmentCount++] = colorAttachments[c];
+    if (hasDepth) attachments[attachmentCount++] = depthAttach;
 
     VkSubpassDependency dep{};
     dep.srcSubpass    = VK_SUBPASS_EXTERNAL;
@@ -849,15 +844,17 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     depthStencil.depthBoundsTestEnable = VK_FALSE;
     depthStencil.stencilTestEnable     = VK_FALSE;
 
-    VkPipelineColorBlendAttachmentState blendAttach{};
-    blendAttach.colorWriteMask =
-        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-        VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendAttachmentState blendAttachments[4]{};
+    for (u32 c = 0; c < desc.colorAttachmentCount; ++c) {
+        blendAttachments[c].colorWriteMask =
+            VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    }
 
     VkPipelineColorBlendStateCreateInfo colorBlend{};
     colorBlend.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    colorBlend.attachmentCount = 1;
-    colorBlend.pAttachments    = &blendAttach;
+    colorBlend.attachmentCount = desc.colorAttachmentCount;
+    colorBlend.pAttachments    = blendAttachments;
 
     VkDynamicState dyn[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
     VkPipelineDynamicStateCreateInfo dynState{};

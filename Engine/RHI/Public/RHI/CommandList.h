@@ -59,6 +59,14 @@ public:
         const ClearValue* clear = nullptr,
         bool allowSecondary = false
     ) = 0;
+    // MRT 版本：多个颜色附件（用于 Deferred GBuffer / RSM 等）
+    virtual void BeginOffscreenPassMRT(
+        void* const* colorImageViews, u32 colorCount,
+        void* depthImageView,
+        u32 width, u32 height,
+        const ClearValue* clears = nullptr,
+        bool allowSecondary = false
+    ) = 0;
     virtual void EndOffscreenPass() = 0;
 
     // SwapChain 关联（自动管理 Framebuffer + 同步 + 图像索引）

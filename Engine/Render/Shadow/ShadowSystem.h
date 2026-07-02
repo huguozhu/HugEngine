@@ -47,6 +47,7 @@ public:
     rhi::IRHISampler* GetPointShadowSampler()const override;
     i32 GetShadowIndex(Entity light)const override;
     bool HasActiveShadows()const override{return m_ActiveCount>0;}
+    float4x4 GetLightViewProj(u32 cascade)const override;
 
 private:
     std::vector<std::unique_ptr<IShadowTechnique>> m_Techniques;

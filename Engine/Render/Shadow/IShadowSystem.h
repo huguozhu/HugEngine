@@ -63,6 +63,9 @@ public:
     // ---- 状态查询 ----
 
     virtual bool HasActiveShadows() const = 0;
+
+    /// 获取 cascade i 的光源 VP 矩阵（默认返回 identity，CSM override）
+    virtual float4x4 GetLightViewProj(u32 cascade) const { (void)cascade; return float4x4(1.0f); }
 };
 
 } // namespace he::render

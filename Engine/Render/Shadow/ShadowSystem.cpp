@@ -127,4 +127,12 @@ i32 ShadowSystem::GetShadowIndex(Entity light)const{
     return -1;
 }
 
+float4x4 ShadowSystem::GetLightViewProj(u32 cascade)const{
+    for(auto& t:m_Techniques){
+        if(auto* csm=dynamic_cast<CSMTechnique*>(t.get()))
+            return csm->GetLightViewProj(cascade);
+    }
+    return float4x4(1.0f);
+}
+
 } // namespace he::render

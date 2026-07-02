@@ -1038,6 +1038,78 @@ void VulkanCommandList::BeginOffscreenPass(
     }
 }
 
+void VulkanCommandList::BeginOffscreenPassMRT(
+    void* const* colorImageViews, u32 colorCount,
+    void* depthImageView, u32 width, u32 height,
+    const ClearValue* clears, bool allowSecondary)
+{
+    if (colorCount == 0 && !depthImageView) {
+        HE_CORE_ERROR("BeginOffscreenPassMRT: 至少需要一个附件");
+        return;
+    }
+    if (m_CurrentRenderPass == VK_NULL_HANDLE) {
+        HE_CORE_ERROR("BeginOffscreenPassMRT: 未设置 PSO（先调用 SetPipeline）");
+        return;
+    }
+
+    // 构建附件列表：颜色在前，深度在后
+    VkImageView attachments[4] = {};
+    u32 attachmentCount = 0;
+    for (u32 i = 0; i < colorCount && attachmentCount < 4; ++i)
+        attachments[attachmentCount++] = static_cast<VkImageView>(colorImageViews[i]);
+    auto depthView = static_cast<VkImageView>(depthImageView);
+    u32 depthIndex = attachmentCount;
+    if (depthView) attachments[attachmentCount++] = depthView;
+
+    VkFramebuffer offscreenFB = VK_NULL_HANDLE;
+    VkFramebufferCreateInfo fbInfo{};
+    fbInfo.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    fbInfo.renderPass      = m_CurrentRenderPass;
+    fbInfo.attachmentCount = attachmentCount;
+    fbInfo.pAttachments    = attachments;
+    fbInfo.width           = width;
+    fbInfo.height          = height;
+    fbInfo.layers          = 1;
+    vkCreateFramebuffer(m_Device, &fbInfo, nullptr, &offscreenFB);
+    m_CurrentOffscreenFB = offscreenFB;
+
+    // 清除值
+    VkClearValue vkClearValues[4]{};
+    u32 clearCount = 0;
+    for (u32 i = 0; i < colorCount; ++i) {
+        if (clears) {
+            vkClearValues[clearCount].color.float32[0] = clears[i].color[0];
+            vkClearValues[clearCount].color.float32[1] = clears[i].color[1];
+            vkClearValues[clearCount].color.float32[2] = clears[i].color[2];
+            vkClearValues[clearCount].color.float32[3] = clears[i].color[3];
+        }
+        clearCount++;
+    }
+    if (depthView) {
+        vkClearValues[clearCount].depthStencil.depth = clears ? clears[colorCount].depth : 1.0f;
+        vkClearValues[clearCount].depthStencil.stencil = 0;
+        clearCount++;
+    }
+
+    VkRenderPassBeginInfo rpBegin{};
+    rpBegin.sType       = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    rpBegin.renderPass  = m_CurrentRenderPass;
+    rpBegin.framebuffer = offscreenFB;
+    rpBegin.renderArea.extent = { width, height };
+    rpBegin.clearValueCount   = clearCount;
+    rpBegin.pClearValues      = vkClearValues;
+
+    VkSubpassContents contents = allowSecondary
+        ? VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_KHR
+        : VK_SUBPASS_CONTENTS_INLINE;
+    vkCmdBeginRenderPass(m_CmdBuffers[m_FrameIndex], &rpBegin, contents);
+    m_InOffscreenPass = true;
+
+    if (m_CurrentPipeline != VK_NULL_HANDLE) {
+        vkCmdBindPipeline(m_CmdBuffers[m_FrameIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, m_CurrentPipeline);
+    }
+}
+
 void VulkanCommandList::EndOffscreenPass() {
     if (!m_InOffscreenPass) return;
     vkCmdEndRenderPass(m_CmdBuffers[m_FrameIndex]);

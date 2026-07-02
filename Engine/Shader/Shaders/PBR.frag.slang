@@ -69,6 +69,11 @@ struct GPUShadowData {
 [[vk::binding(14, 0)]] Texture2D<float2>   u_BRDF_LUT;
 static const float kPrefilterMips = 5.0;  // 预滤波 mip 数（匹配 GI_IBL::kPrefilterMips）
 
+// RSM 纹理（Reflective Shadow Maps）
+[[vk::binding(15, 0)]] Texture2D<float4> u_RSMPositionMap;   // worldPos.xyz
+[[vk::binding(15, 0)]] SamplerState      u_RSMSampler;
+[[vk::binding(16, 0)]] Texture2D<float4> u_RSMFluxMap;       // normal.xy + flux
+
 [[vk::push_constant]] cbuffer FrameConstants {
     float4x4 viewProjMatrix;
     float4   cameraPosition;
@@ -163,6 +168,29 @@ float4 fragmentMain(FSInput input) : SV_Target0 {
     float3 prefilteredColor = u_PrefilterMap.SampleLevel(u_IBLSampler, R, mipLevel).rgb;
     float2 envBRDF = u_BRDF_LUT.Sample(u_IBLSampler, float2(max(dot(N, V), 0.0), roughness)).rg;
     color += prefilteredColor * (F * envBRDF.r + envBRDF.g) * iblIntensity;
+
+    // ---- RSM 间接光照（Reflective Shadow Maps） ----
+    if (iblIntensity > 0.0) {
+        // 采样 RSM：在 light space 采样临近像素，累加间接漫反射
+        float3 rsmIndirect = float3(0.0);
+        float2 rsmCoord = float2(0.5, 0.5);  // placeholder: light-space projection
+        const float rsmRadius = 0.01;  // 采样半径（RSM 空间）
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dy = -2; dy <= 2; dy++) {
+                float2 uv = rsmCoord + float2(dx, dy) * rsmRadius;
+                float4 posSample  = u_RSMPositionMap.Sample(u_RSMSampler, uv);
+                float4 fluxSample = u_RSMFluxMap.Sample(u_RSMSampler, uv);
+                float3 samplePos  = posSample.xyz;
+                float3 sampleN    = normalize(fluxSample.rgb * 2.0 - 1.0);  // 法线编码 [0,1]→[-1,1]
+                float  flux       = fluxSample.a;  // 通量存储在 alpha 通道
+                float3 dir        = samplePos - input.worldPos;
+                float  dist2      = max(dot(dir, dir), 0.01);
+                float  NdotDir    = max(dot(N, normalize(dir)), 0.0);
+                rsmIndirect += flux * NdotDir / dist2 * albedo;
+            }
+        }
+        color += rsmIndirect * 0.02 * iblIntensity;  // RSM 衰减系数
+    }
 
     color += obj.emissiveFactor.rgb;
 

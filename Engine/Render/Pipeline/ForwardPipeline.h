@@ -6,6 +6,7 @@
 #include "RHI/RHI.h"
 
 namespace he::render { class GI_IBL; }
+namespace he::render { class GI_RSM; }
 namespace he::render { class ToneMapPass; }
 namespace he::render { class SkyboxPass; }
 namespace he::render { class SceneRenderer; }
@@ -69,6 +70,7 @@ public:
 
     void SetGI(std::unique_ptr<IGlobalIllumination> gi) { m_GI = std::move(gi); }
     void PrepareGI(rhi::IRHICommandList* cmd, he::World& world);
+    GI_RSM* GetRSM() { return m_RSM.get(); }
 
     // 后处理（委托给子系统）
     void RenderToneMapPass(rhi::IRHICommandList* cmd);
@@ -90,6 +92,7 @@ private:
                   const PushConstantData& lighting);
     void UploadLightBuffer();
     void UpdateIBLBindings(GI_IBL* gi);
+    void UpdateRSMBindings();
 
     rhi::IRHIDevice* m_Device = nullptr;
     std::unique_ptr<rhi::IRHIPipelineState> m_PBR_PSO;
@@ -121,6 +124,7 @@ private:
 
     // 子系统
     std::unique_ptr<IGlobalIllumination> m_GI;
+    std::unique_ptr<GI_RSM>              m_RSM;   // RSM GI（独立于 IBL）
     std::unique_ptr<IShadowSystem>       m_ShadowSystem;
     std::unique_ptr<ToneMapPass>         m_ToneMap;
     std::unique_ptr<SkyboxPass>          m_Skybox;
