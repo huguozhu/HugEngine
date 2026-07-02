@@ -283,10 +283,6 @@ int main() {
 
         if (pipeline.UseRenderGraph()) {
             pipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
-            cmdList->End();
-            device->Submit(cmdList.get());
-            swapchain->Present(true);
-            continue;
         } else {
             pipeline.PrepareGI(cmdList.get(), world, sceneGraph);
             pipeline.BeginHDRPass(cmdList.get(),
@@ -300,9 +296,10 @@ int main() {
             pipeline.RenderToneMapPass(cmdList.get());
         }
 
-        // RG 模式下 ToneMap 已关闭 RP，ImGui 需自行开 RP（LOAD 保留内容）
+        // RG 模式下 ToneMap 已关闭 RP，ImGui 需自行开 RP（LOAD 保留 ToneMap 输出）
         if (pipeline.UseRenderGraph()) {
-            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
+            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
+                rhi::Format::Unknown, nullptr, rhi::IRHICommandList::LoadOp::Load);
         }
 
         imgui.BeginFrame();

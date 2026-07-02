@@ -90,7 +90,7 @@ public:
     void ExecuteSecondary(IRHICommandList* secondary) override;
     bool IsSecondary() const override { return m_SecondaryPool != VK_NULL_HANDLE; }
     void BeginRenderPass(u32 colorCount, Format colorFmt, Format depthFmt,
-                         const ClearValue* clear) override;
+                         const ClearValue* clear, LoadOp loadOp) override;
     void EndRenderPass() override;
     void BeginOffscreenPass(void* colorImageView, void* depthImageView,
                             u32 width, u32 height,
@@ -166,6 +166,7 @@ private:
     VkPipeline          m_CurrentPipeline = VK_NULL_HANDLE;
     VkPipelineLayout    m_CurrentLayout   = VK_NULL_HANDLE;
     VkRenderPass        m_CurrentRenderPass = VK_NULL_HANDLE;
+    VkRenderPass        m_LoadRenderPass = VK_NULL_HANDLE;  // LOAD_OP 版本（ImGui 叠加用）
     VkPipelineBindPoint m_CurrentBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     VkBuffer         m_CurrentVB       = VK_NULL_HANDLE;
     u32              m_VBBinding       = 0;

@@ -795,6 +795,7 @@ VulkanCommandList::~VulkanCommandList() {
         for (VkFramebuffer fb : m_PendingFBs[i]) { vkDestroyFramebuffer(m_Device, fb, nullptr); }
         m_PendingFBs[i].clear();
     }
+    if (m_LoadRenderPass) { vkDestroyRenderPass(m_Device, m_LoadRenderPass, nullptr); }
     if (m_SecondaryPool) {
         vkDestroyCommandPool(m_Device, m_SecondaryPool, nullptr);
     } else {
@@ -881,7 +882,7 @@ void VulkanCommandList::End() {
 }
 
 void VulkanCommandList::BeginRenderPass(u32 colorCount, Format, Format depthFormat,
-                                        const ClearValue* clear) {
+                                        const ClearValue* clear, LoadOp loadOp) {
     // 从 SwapChain 获取当前图像索引
     if (m_pSwapChain)
         m_CurrentImageIndex = m_pSwapChain->GetCurrentBackBufferIndex();
@@ -939,9 +940,60 @@ void VulkanCommandList::BeginRenderPass(u32 colorCount, Format, Format depthForm
     vkClearValues[1].depthStencil.depth   = 1.0f;
     vkClearValues[1].depthStencil.stencil = 0;
 
+    // 选择正确的 RenderPass（LOAD 操作需要 LOAD_OP_LOAD 的 RP）
+    VkRenderPass rp = m_CurrentRenderPass;
+    if (loadOp == LoadOp::Load) {
+        if (m_LoadRenderPass == VK_NULL_HANDLE) {
+            // 懒创建 LOAD 版本 RenderPass（与当前 RP 相同附件格式，但 loadOp=LOAD）
+            VkAttachmentDescription att[2]{};
+            att[0].format = VK_FORMAT_B8G8R8A8_UNORM; // SwapChain 格式
+            att[0].samples = VK_SAMPLE_COUNT_1_BIT;
+            att[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;  // 保留内容
+            att[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            att[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            att[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            att[0].initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            att[0].finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            att[1].format = VK_FORMAT_D32_SFLOAT;
+            att[1].samples = VK_SAMPLE_COUNT_1_BIT;
+            att[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            att[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            att[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            att[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            att[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            att[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+            VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+            VkAttachmentReference depthRef{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+            VkSubpassDescription subpass{};
+            subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+            subpass.colorAttachmentCount = 1;
+            subpass.pColorAttachments = &colorRef;
+            subpass.pDepthStencilAttachment = &depthRef;
+
+            VkSubpassDependency dep{};
+            dep.srcSubpass = VK_SUBPASS_EXTERNAL;
+            dep.dstSubpass = 0;
+            dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+            VkRenderPassCreateInfo rpInfo{};
+            rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+            rpInfo.attachmentCount = 2;
+            rpInfo.pAttachments = att;
+            rpInfo.subpassCount = 1;
+            rpInfo.pSubpasses = &subpass;
+            rpInfo.dependencyCount = 1;
+            rpInfo.pDependencies = &dep;
+            vkCreateRenderPass(m_Device, &rpInfo, nullptr, &m_LoadRenderPass);
+        }
+        rp = m_LoadRenderPass;
+    }
+
     VkRenderPassBeginInfo rpBegin{};
     rpBegin.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    rpBegin.renderPass        = m_CurrentRenderPass;
+    rpBegin.renderPass        = rp;
     rpBegin.framebuffer       = m_Framebuffers[m_CurrentImageIndex];
     rpBegin.renderArea.extent = m_SwapchainExtent;
     rpBegin.clearValueCount   = 2;
