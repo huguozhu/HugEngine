@@ -614,8 +614,8 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     auto hdrDepth = rg.ImportTexture("HDR_Depth", m_HDRDepth.get());
     auto backBuf  = rg.ImportBackBuffer();
 
-    // --- Pass 0: ShadowCSM — CSM 级联阴影贴图渲染 ---
-    // 声明写入所有 CSM 贴图 + hdrDepth（WAW 确保 ShadowCSM 先于 FullScene）
+    // --- Pass 0: Shadow — CSM 级联 + Point Cubemap 阴影贴图渲染 ---
+    // 声明写入所有阴影贴图 + hdrDepth（WAW 确保 Shadow 先于 FullScene）
     if (m_ShadowSystem && m_ShadowSystem->HasActiveShadows()) {
         ResourceHandle csmMaps[CASCADE_COUNT];
         for (u32 c = 0; c < CASCADE_COUNT; ++c) {
@@ -633,14 +633,21 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         for (u32 c = 0; c < CASCADE_COUNT; ++c)
             if (csmMaps[c] != kInvalidHandle)
                 shadowWrites.push_back(RG_WRITE(csmMaps[c]));
-        // WAW 依赖：声明写入 hdrDepth 确保 ShadowCSM → FullScene 的执行顺序
+
+        // Point Shadow Cubemap
+        if (auto* ptTex = m_ShadowSystem->GetPointShadowMap()) {
+            auto ptHandle = rg.ImportTexture("PointShadow_CubeMap", ptTex);
+            shadowWrites.push_back(RG_WRITE(ptHandle));
+        }
+
+        // WAW 依赖：声明写入 hdrDepth 确保 Shadow → FullScene 的执行顺序
         shadowWrites.push_back(RG_WRITE(hdrDepth));
 
-        rg.AddPass("ShadowCSM", {}, std::move(shadowWrites),
+        rg.AddPass("Shadow", {}, std::move(shadowWrites),
             [this](rhi::IRHICommandList* c) {
-                // 手动 Barrier 处理 ShadowMap 布局转换：
-                // CSMTechnique::Render 在 EndOffscreenPass 后
-                // 自动转换 DepthStencilRead → ShaderResource
+                // 手动 Barrier 处理布局转换：
+                // CSMTechnique/PointShadowTechnique::Render 内部
+                // 在 EndOffscreenPass 后转换 DepthStencilRead→ShaderResource
                 m_ShadowSystem->Render(c);
             });
     }

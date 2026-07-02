@@ -26,6 +26,9 @@
 #include <cmath>
 #include <cstring>
 #include <vector>
+#include <fstream>
+#include <filesystem>
+#include <unordered_map>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
@@ -34,6 +37,44 @@
 #include <GLFW/glfw3.h>
 
 using namespace he;
+
+// ============================================================
+// 相机配置读写（简易 key=value 格式）
+// ============================================================
+static String g_ConfigPath = String(HUGE_CONTENT_DIR) + "Config/02_Cube.cfg";
+
+static std::unordered_map<String, String> LoadConfigFile(const String& path) {
+    std::unordered_map<String, String> map;
+    std::ifstream f(path);
+    if (!f.is_open()) return map;
+    String line;
+    while (std::getline(f, line)) {
+        auto eq = line.find('=');
+        if (eq == String::npos) continue;
+        String key = line.substr(0, eq);
+        String val = line.substr(eq + 1);
+        if (!val.empty() && val.back() == '\r') val.pop_back();
+        map[key] = val;
+    }
+    return map;
+}
+
+static void SaveConfigFile(const String& path,
+                            const std::unordered_map<String, String>& map) {
+    std::filesystem::path p(path);
+    std::error_code ec;
+    std::filesystem::create_directories(p.parent_path(), ec);
+    std::ofstream f(path);
+    if (!f.is_open()) return;
+    for (auto& [k, v] : map)
+        f << k << "=" << v << "\n";
+}
+
+static float GetFloat(const std::unordered_map<String, String>& m,
+                      const String& key, float def = 0.0f) {
+    auto it = m.find(key);
+    return (it != m.end()) ? std::stof(it->second) : def;
+}
 
 // ============================================================
 // 辅助：创建带材质的形状实体
@@ -104,45 +145,49 @@ int main() {
     World world;
     SceneGraph sceneGraph(world);
 
-    // 地板（深灰色立方体，粗糙）
+    // 地板（深灰色立方体，粗糙，长宽 2x）
     CreateShapeEntity(world, sceneGraph,
-        float3(0.0f, -1.5f, 0.0f), float3(5.0f, 0.2f, 5.0f),
+        float3(0.0f, -1.5f, 0.0f), float3(20.0f, 0.2f, 20.0f),
         float4(0.3f, 0.3f, 0.35f, 1.0f), 0.0f, 0.9f);
 
     // 金球（金属，光滑）
     CreateShapeEntity(world, sceneGraph,
-        float3(-1.5f, 0.0f, 0.0f), float3(0.8f),
+        float3(-1.5f, 2.0f, 0.0f), float3(0.8f),
         float4(1.0f, 0.72f, 0.0f, 1.0f), 1.0f, 0.15f, true);
 
     // 铜球（金属，中度粗糙）
     CreateShapeEntity(world, sceneGraph,
-        float3(0.0f, 0.0f, 0.0f), float3(0.8f),
+        float3(0.0f, 3.0f, 0.0f), float3(0.8f),
         float4(0.85f, 0.45f, 0.2f, 1.0f), 0.95f, 0.4f, true);
 
     // 蓝色塑料立方体（非金属，光滑）
     CreateShapeEntity(world, sceneGraph,
-        float3(1.5f, 0.0f, 0.0f), float3(0.8f),
+        float3(1.5f, 3.0f, 0.0f), float3(0.8f),
         float4(0.2f, 0.5f, 1.0f, 1.0f), 0.0f, 0.2f);
 
     // 红色橡胶立方体（非金属，粗糙）
     CreateShapeEntity(world, sceneGraph,
-        float3(0.0f, 0.0f, 1.5f), float3(0.7f),
+        float3(0.0f, 2.0f, 1.5f), float3(0.7f),
         float4(0.9f, 0.15f, 0.1f, 1.0f), 0.0f, 0.85f);
 
     // 白色陶瓷球
     CreateShapeEntity(world, sceneGraph,
-        float3(0.0f, 0.2f, -1.5f), float3(0.6f),
+        float3(0.0f, 1.2f, -1.5f), float3(0.6f),
         float4(0.95f, 0.93f, 0.88f, 1.0f), 0.0f, 0.35f, true);
 
     // --- 创建光照 ---
+    Entity mainLightEntity;
+    DirectionalLight* mainDL = nullptr;
     {
-        Entity lightEntity = world.CreateEntity("DirectionalLight");
-        world.AddComponent<TransformComponent>(lightEntity);
-        auto* dl = world.AddComponent<DirectionalLight>(lightEntity);
-        dl->direction = float3(0.5f, -1.0f, 1.0f);
-        dl->color     = float3(1.0f, 0.95f, 0.85f);
-        dl->intensity = 5.0f;
-        sceneGraph.SetParent(lightEntity, Entity{kInvalidEntity});
+        mainLightEntity = world.CreateEntity("DirectionalLight");
+        world.AddComponent<TransformComponent>(mainLightEntity);
+        mainDL = world.AddComponent<DirectionalLight>(mainLightEntity);
+        mainDL->direction = float3(0.5f, -1.0f, 1.0f);
+        mainDL->color     = float3(1.0f, 0.95f, 0.85f);
+        mainDL->intensity = 5.0f;
+        mainDL->castShadow = true;
+        mainDL->shadowBias = 0.003f;
+        sceneGraph.SetParent(mainLightEntity, Entity{kInvalidEntity});
     }
 
     // --- 天空盒（从 skybox 目录加载 6 面纹理）---
@@ -189,7 +234,7 @@ int main() {
     // --- 5. 初始化前向管线 ---
     render::ForwardPipeline pipeline;
     pipeline.Initialize(device.get());
-    pipeline.SetUseRenderGraph(true);
+    pipeline.SetUseRenderGraph(false);
     pipeline.SetSwapChain(swapchain.get());
 
     // --- 6. 创建命令列表 ---
@@ -209,6 +254,19 @@ int main() {
     camCtrl.SetAspectRatio(
         static_cast<float>(swapchain->GetWidth()),
         static_cast<float>(swapchain->GetHeight()));
+
+    // 从配置文件加载相机状态
+    auto cfgData = LoadConfigFile(g_ConfigPath);
+    if (!cfgData.empty()) {
+        camCtrl.SetPosition(float3(
+            GetFloat(cfgData, "cam_pos_x", 0.0f),
+            GetFloat(cfgData, "cam_pos_y", 3.0f),
+            GetFloat(cfgData, "cam_pos_z", 0.0f)));
+        camCtrl.SetOrientation(
+            GetFloat(cfgData, "cam_yaw", -1.57f),
+            GetFloat(cfgData, "cam_pitch", -0.1f));
+        HE_CORE_INFO("加载相机配置: {}", g_ConfigPath);
+    }
 
     // 鼠标状态
     bool   rightMouseDown = false;
@@ -281,6 +339,21 @@ int main() {
         cmdList->Begin();
         pipeline.NextFrame();
 
+        // 阴影子系统：CPU 端数据收集（GPU 渲染在 RenderGraph 的 Shadow Pass）
+        {
+            auto* shadowSys = pipeline.GetShadowSystem();
+            shadowSys->SetRenderResources(
+                pipeline.GetCurrentObjectBuffer(),
+                pipeline.GetCurrentShadowBuffer(),
+                pipeline.GetCurrentDescSet());
+
+            render::SubsystemContext shadowCtx;
+            shadowCtx.world       = &world;
+            shadowCtx.sceneGraph  = &sceneGraph;
+            shadowCtx.camera      = &camCtrl.GetCamera();
+            shadowSys->Update(shadowCtx);
+        }
+
         if (pipeline.UseRenderGraph()) {
             pipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
         } else {
@@ -310,6 +383,11 @@ int main() {
         ImGui::Text("Pos: (%.1f, %.1f, %.1f)",
             camCtrl.GetCamera().position.x, camCtrl.GetCamera().position.y, camCtrl.GetCamera().position.z);
 
+        // 渲染选项
+        bool useRG = pipeline.UseRenderGraph();
+        if (ImGui::Checkbox("RenderGraph", &useRG))
+            pipeline.SetUseRenderGraph(useRG);
+
         // GI 控制
         auto* gi = pipeline.GetGI();
         if (gi) {
@@ -320,6 +398,36 @@ int main() {
             if (ImGui::SliderFloat("Intensity", &intensity, 0.0f, 3.0f, "%.2f")) {
                 settings.intensity = intensity;
                 gi->SetSettings(settings);
+            }
+        }
+
+        // 方向光控制
+        if (mainDL) {
+            ImGui::SeparatorText("方向光");
+
+            ImGui::Checkbox("启用##DLEnabled", &mainDL->enabled);
+
+            float3 dir = mainDL->direction;
+            if (ImGui::SliderFloat3("方向##DLDir", &dir[0], -1.0f, 1.0f, "%.2f")) {
+                if (glm::dot(dir, dir) > 0.0001f)
+                    mainDL->direction = glm::normalize(dir);
+            }
+
+            ImGui::ColorEdit3("颜色##DLColor", &mainDL->color[0]);
+
+            ImGui::DragFloat("强度##DLIntensity", &mainDL->intensity, 0.1f, 0.0f, 50.0f, "%.1f");
+
+            bool shadowOn = mainDL->castShadow;
+            if (ImGui::Checkbox("投射阴影##DLShadow", &shadowOn))
+                mainDL->castShadow = shadowOn;
+
+            if (mainDL->castShadow) {
+                ImGui::Indent(12.0f);
+                ImGui::DragFloat("深度偏移##DLBias", &mainDL->shadowBias, 0.0001f, 0.0f, 0.1f, "%.4f",
+                    ImGuiSliderFlags_Logarithmic);
+                ImGui::DragFloat("法线偏移##DLNormalBias", &mainDL->shadowNormalBias, 0.001f, 0.0f, 0.5f, "%.3f");
+                ImGui::SliderFloat("阴影强度##DLShadowStr", &mainDL->shadowStrength, 0.0f, 1.0f, "%.2f");
+                ImGui::Unindent(12.0f);
             }
         }
 
@@ -349,6 +457,18 @@ int main() {
             titleTimer = 0.0;
             titleFrame = 0;
         }
+    }
+
+    // 保存相机配置
+    {
+        std::unordered_map<String, String> out;
+        out["cam_pos_x"] = std::to_string(camCtrl.GetCamera().position.x);
+        out["cam_pos_y"] = std::to_string(camCtrl.GetCamera().position.y);
+        out["cam_pos_z"] = std::to_string(camCtrl.GetCamera().position.z);
+        out["cam_yaw"]   = std::to_string(camCtrl.GetYaw());
+        out["cam_pitch"] = std::to_string(camCtrl.GetPitch());
+        SaveConfigFile(g_ConfigPath, out);
+        HE_CORE_INFO("相机配置已保存: {}", g_ConfigPath);
     }
 
     // 清理
