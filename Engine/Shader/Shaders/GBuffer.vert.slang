@@ -49,7 +49,7 @@ VSOutput vertexMain(VSInput input) {
     output.position    = mul(viewProjMatrix, worldPos);      // 含抖动
     output.prevClipPos = mul(prevViewProjMatrix, worldPos);  // 不含抖动，用于速度计算
     output.worldPos    = worldPos.xyz;
-    output.worldNormal = mul((float3x3)obj.worldMatrix, input.normalOS);
+    output.worldNormal = normalize(mul((float3x3)obj.worldMatrix, input.normalOS));
     output.uv          = input.uv;
     return output;
 }

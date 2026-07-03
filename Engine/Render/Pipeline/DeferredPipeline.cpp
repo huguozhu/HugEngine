@@ -67,14 +67,6 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         m_HDRSampler = device->CreateSampler(s);
     }
 
-    // GBuffer 读取采样器（线性 + Clamp to Edge，用于 TAA 采样 Depth/Normal/Velocity）
-    {
-        rhi::SamplerDesc sd;
-        sd.minFilter = sd.magFilter = rhi::FilterMode::Linear;
-        sd.addressU  = sd.addressV  = rhi::AddressMode::ClampToEdge;
-        m_GBufferSampler = device->CreateSampler(sd);
-    }
-
     // 三缓冲
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
         m_LightBuffers[i]      = device->CreateBuffer({sizeof(GPULight) * MAX_LIGHTS, rhi::BufferUsage::Storage});
@@ -229,7 +221,6 @@ void DeferredPipeline::Shutdown() {
     if (m_LightingLayout != rhi::kInvalidLayout) { m_Device->DestroyDescriptorSetLayout(m_LightingLayout); }
     m_GBufferA.reset(); m_GBufferB.reset(); m_GBufferC.reset(); m_GBufferDepth.reset();
     m_GBufferD.reset();
-    m_GBufferSampler.reset();
     if (m_AntiAliasing) m_AntiAliasing->Shutdown();
     m_AntiAliasing.reset();
     m_HDRTarget.reset(); m_HDRDepth.reset(); m_HDRSampler.reset();

@@ -104,7 +104,8 @@ private:
 
     // 历史缓冲（double-buffered，自拥有）
     std::unique_ptr<rhi::IRHITexture> m_HistoryColor[2];
-    std::unique_ptr<rhi::IRHISampler> m_HistorySampler;
+    std::unique_ptr<rhi::IRHISampler> m_HistorySampler;   // 线性采样，用于历史颜色混合
+    std::unique_ptr<rhi::IRHISampler> m_PointSampler;     // 点采样，用于 current color / depth / normal / velocity
     u32 m_HistoryRead  = 0;
     u32 m_HistoryWrite = 1;
 

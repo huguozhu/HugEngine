@@ -77,7 +77,6 @@ private:
     std::unique_ptr<rhi::IRHITexture> m_GBufferA, m_GBufferB, m_GBufferC;
     // GBuffer 第 4 张 MRT：velocity（RG16_FLOAT，UV 空间运动矢量）
     std::unique_ptr<rhi::IRHITexture> m_GBufferD;
-    std::unique_ptr<rhi::IRHISampler> m_GBufferSampler;  // GBuffer 读取通用采样器
     std::unique_ptr<rhi::IRHITexture> m_GBufferDepth;
     std::unique_ptr<rhi::IRHIPipelineState> m_GBufferPSO;
     rhi::DescriptorSetLayoutHandle m_GBufferLayout = rhi::kInvalidLayout;   // set=0: per-frame

@@ -67,6 +67,12 @@ void AA_TAA::CreateHistoryTextures(u32 w, u32 h) {
     sd.minFilter = sd.magFilter = rhi::FilterMode::Linear;
     sd.addressU  = sd.addressV  = rhi::AddressMode::ClampToEdge;
     m_HistorySampler = m_Device->CreateSampler(sd);
+
+    // 点采样器：用于 current color、depth、normal、velocity 等不需要插值的纹理
+    rhi::SamplerDesc psd;
+    psd.minFilter = psd.magFilter = rhi::FilterMode::Nearest;
+    psd.addressU  = psd.addressV  = rhi::AddressMode::ClampToEdge;
+    m_PointSampler = m_Device->CreateSampler(psd);
 }
 
 void AA_TAA::CreatePSO() {
@@ -110,6 +116,7 @@ void AA_TAA::Shutdown() {
     m_HistoryColor[0].reset();
     m_HistoryColor[1].reset();
     m_HistorySampler.reset();
+    m_PointSampler.reset();
     m_Device = nullptr;
     m_Ready  = false;
     HE_CORE_INFO("AA_TAA shutdown");
@@ -131,9 +138,9 @@ void AA_TAA::OnResize(u32 w, u32 h) {
 void AA_TAA::SetInput(rhi::IRHITexture* color, rhi::IRHISampler* /*sampler*/) {
     m_InputColor = color;
     if (m_InputColor) {
-        // TAA resolve 所有输入使用统一的历史采样器保证一致 filtering
+        // CurrentColor 使用点采样（最近邻），避免对已抖动 HDR 颜色做线性插值模糊
         m_Device->UpdateDescriptorSet(m_DescSet, 0, rhi::DescriptorType::CombinedImageSampler,
-                                      m_InputColor, m_HistorySampler.get());
+                                      m_InputColor, m_PointSampler.get());
     }
 }
 
@@ -144,9 +151,10 @@ void AA_TAA::SetGBufferInputs(rhi::IRHITexture* depth,
     m_NormalTexture   = normal;
     m_VelocityTexture = velocity;
 
+    // Depth/Normal/Velocity 使用点采样（最近邻），避免深度边界或法线方向因线性滤波失真
     auto bind = [&](u32 b, rhi::IRHITexture* t) {
         if (t) m_Device->UpdateDescriptorSet(m_DescSet, b, rhi::DescriptorType::CombinedImageSampler,
-                                             t, m_HistorySampler.get());
+                                             t, m_PointSampler.get());
     };
     bind(2, depth);
     bind(3, normal);
@@ -228,8 +236,12 @@ void AA_TAA::Render(rhi::IRHICommandList* cmd) {
     struct { float2 jitter; float2 _pad; } pc = { m_CurrentJitter, {0.0f, 0.0f} };
     cmd->SetPushConstants(0, sizeof(pc), &pc);
 
+    // 在 render pass 内执行 TAA resolve 绘制（自拥有输出纹理，无深度）
+    cmd->BeginOffscreenPass(m_HistoryColor[m_HistoryWrite]->GetNativeHandle(),
+                            nullptr, m_Width, m_Height, nullptr, false);
     // 全屏三角形
     cmd->Draw(3);
+    cmd->EndOffscreenPass();
 }
 
 } // namespace he::render
