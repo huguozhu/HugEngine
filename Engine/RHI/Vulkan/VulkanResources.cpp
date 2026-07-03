@@ -2,6 +2,9 @@
 // VulkanResources.cpp — Vulkan 资源实现
 // 负责 Buffer、Texture、Sampler 的创建/销毁/映射
 // ============================================================
+
+// VMA 实现：在且仅在此编译单元中编译 VMA 单头文件的函数体
+#define VMA_IMPLEMENTATION
 #include "RHI/RHI.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
@@ -15,17 +18,6 @@
 #include "VulkanInternal.h"
 
 namespace he::rhi {
-
-static u32 FindMemoryType(VkPhysicalDevice physical, u32 typeFilter, VkMemoryPropertyFlags props) {
-    VkPhysicalDeviceMemoryProperties memProps;
-    vkGetPhysicalDeviceMemoryProperties(physical, &memProps);
-    for (u32 i = 0; i < memProps.memoryTypeCount; i++) {
-        if ((typeFilter & (1 << i)) && (memProps.memoryTypes[i].propertyFlags & props) == props)
-            return i;
-    }
-    HE_ASSERT(false, "No suitable memory type found");
-    return 0;
-}
 
 // BufferUsage 位掩码 → VkBufferUsageFlags 映射
 static VkBufferUsageFlags ToVkBufferUsage(BufferUsage usage) {
@@ -42,59 +34,48 @@ static VkBufferUsageFlags ToVkBufferUsage(BufferUsage usage) {
 // VulkanBuffer 实现
 // ============================================================
 
-VulkanBuffer::VulkanBuffer(VkDevice device, VkPhysicalDevice physical, const BufferDesc& desc)
-    : m_Device(device), m_Size(desc.size)
+VulkanBuffer::VulkanBuffer(VmaAllocator allocator, const BufferDesc& desc)
+    : m_Allocator(allocator), m_Size(desc.size)
 {
     VkBufferCreateInfo bufferInfo{};
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufferInfo.size  = desc.size;
     bufferInfo.usage = ToVkBufferUsage(desc.usage);
 
-    VkResult result = vkCreateBuffer(device, &bufferInfo, nullptr, &m_Buffer);
-    HE_ASSERT(result == VK_SUCCESS, "Failed to create buffer");
+    // VMA 一键创建 Buffer + 分配内存（持久映射，HOST_VISIBLE）
+    VmaAllocationCreateInfo allocCreateInfo{};
+    allocCreateInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+                          | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    allocCreateInfo.usage = VMA_MEMORY_USAGE_AUTO;
 
-    VkMemoryRequirements memReqs;
-    vkGetBufferMemoryRequirements(device, m_Buffer, &memReqs);
+    VkResult result = vmaCreateBuffer(allocator, &bufferInfo, &allocCreateInfo,
+                                       &m_Buffer, &m_Allocation, nullptr);
+    HE_ASSERT(result == VK_SUCCESS, "VMA: Failed to create buffer");
 
-    VkMemoryAllocateFlagsInfo allocFlags{};
-    allocFlags.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
-    allocFlags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+    // 获取持久映射指针（VMA_ALLOCATION_CREATE_MAPPED_BIT 保证 pMappedData 非空）
+    VmaAllocationInfo allocInfo;
+    vmaGetAllocationInfo(allocator, m_Allocation, &allocInfo);
+    m_MappedPtr = allocInfo.pMappedData;
+    m_IsMapped = (m_MappedPtr != nullptr);
 
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.pNext           = &allocFlags;
-    allocInfo.allocationSize  = memReqs.size;
-    allocInfo.memoryTypeIndex = FindMemoryType(physical, memReqs.memoryTypeBits,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-
-    result = vkAllocateMemory(device, &allocInfo, nullptr, &m_Memory);
-    HE_ASSERT(result == VK_SUCCESS, "Failed to allocate buffer memory");
-
-    vkBindBufferMemory(device, m_Buffer, m_Memory, 0);
-
-    // Device address
+    // Device address（从 VMA 分配器获取 VkDevice）
+    VmaAllocatorInfo allocatorInfo;
+    vmaGetAllocatorInfo(allocator, &allocatorInfo);
     VkBufferDeviceAddressInfo addrInfo{};
     addrInfo.sType  = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
     addrInfo.buffer = m_Buffer;
-    m_DeviceAddress = vkGetBufferDeviceAddress(device, &addrInfo);
+    m_DeviceAddress = vkGetBufferDeviceAddress(allocatorInfo.device, &addrInfo);
 
-    // 持久映射：构造时映射一次，后续 Map() 直接返回指针（Phase 1 多线程渲染）
-    vkMapMemory(device, m_Memory, 0, m_Size, 0, &m_MappedPtr);
-    m_IsMapped = true;
-
-    // Upload initial data（直接写入持久映射指针）
-    if (desc.initialData) {
+    // 上传初始数据（直接写入持久映射指针）
+    if (desc.initialData && m_MappedPtr) {
         std::memcpy(m_MappedPtr, desc.initialData, desc.size);
     }
 }
 
 VulkanBuffer::~VulkanBuffer() {
-    if (m_IsMapped) {
-        vkUnmapMemory(m_Device, m_Memory);
-        m_IsMapped = false;
+    if (m_Buffer) {
+        vmaDestroyBuffer(m_Allocator, m_Buffer, m_Allocation);
     }
-    vkDestroyBuffer(m_Device, m_Buffer, nullptr);
-    vkFreeMemory(m_Device, m_Memory, nullptr);
 }
 
 void* VulkanBuffer::Map() {
@@ -258,16 +239,20 @@ VkCompareOp ToVkCompareOp(CompareFunc func) {
 // VulkanTexture 实现
 // ============================================================
 
-VulkanTexture::VulkanTexture(VkDevice device, VkPhysicalDevice physical,
-                             VkCommandPool cmdPool, VkQueue queue,
+VulkanTexture::VulkanTexture(VmaAllocator allocator, VkCommandPool cmdPool, VkQueue queue,
                              const TextureDesc& desc)
-    : m_Device(device), m_Physical(physical)
+    : m_Allocator(allocator)
     , m_Width(desc.width), m_Height(desc.height), m_Depth(desc.depth)
     , m_MipLevels(desc.mipLevels)
     , m_ArrayLayers(u32(desc.usage) & u32(TextureUsage::Cubemap) ? 6 : desc.arrayLayers)
     , m_Format(desc.format)
     , m_VkFormat(ToVkFormat(desc.format))
 {
+    // 从 VMA 分配器获取 VkDevice（供 vkCreateImage / vkDestroyImageView 使用）
+    VmaAllocatorInfo allocInfo;
+    vmaGetAllocatorInfo(allocator, &allocInfo);
+    m_Device = allocInfo.device;
+
     // 1. 创建 VkImage
     bool isCubemap = u32(desc.usage) & u32(TextureUsage::Cubemap);
     VkImageCreateInfo imageInfo{};
@@ -276,7 +261,7 @@ VulkanTexture::VulkanTexture(VkDevice device, VkPhysicalDevice physical,
     imageInfo.format        = m_VkFormat;
     imageInfo.extent        = {m_Width, m_Height, m_Depth};
     imageInfo.mipLevels     = m_MipLevels;
-    imageInfo.arrayLayers   = isCubemap ? 6 : m_ArrayLayers;  // Cubemap 固定 6 面
+    imageInfo.arrayLayers   = isCubemap ? 6 : m_ArrayLayers;
     imageInfo.samples       = VK_SAMPLE_COUNT_1_BIT;
     imageInfo.tiling        = VK_IMAGE_TILING_OPTIMAL;
     imageInfo.usage         = ToVkImageUsage(desc.usage);
@@ -289,23 +274,18 @@ VulkanTexture::VulkanTexture(VkDevice device, VkPhysicalDevice physical,
     if (desc.initialData)
         imageInfo.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 
-    VkResult result = vkCreateImage(device, &imageInfo, nullptr, &m_Image);
+    VkResult result = vkCreateImage(m_Device, &imageInfo, nullptr, &m_Image);
     HE_ASSERT(result == VK_SUCCESS, "Failed to create Vulkan image");
 
-    // 2. 分配并绑定内存
-    VkMemoryRequirements memReqs;
-    vkGetImageMemoryRequirements(device, m_Image, &memReqs);
+    // 2. VMA 分配并绑定内存（DEVICE_LOCAL，GPU 专用）
+    VmaAllocationCreateInfo allocCreateInfo{};
+    allocCreateInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
 
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType          = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memReqs.size;
-    allocInfo.memoryTypeIndex = FindMemoryType(physical, memReqs.memoryTypeBits,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    result = vmaAllocateMemoryForImage(allocator, m_Image, &allocCreateInfo,
+                                        &m_Allocation, nullptr);
+    HE_ASSERT(result == VK_SUCCESS, "VMA: Failed to allocate texture memory");
 
-    result = vkAllocateMemory(device, &allocInfo, nullptr, &m_Memory);
-    HE_ASSERT(result == VK_SUCCESS, "Failed to allocate texture memory");
-
-    vkBindImageMemory(device, m_Image, m_Memory, 0);
+    vmaBindImageMemory(allocator, m_Allocation, m_Image);
 
     // 3. 上传初始数据（如果有）
     if (desc.initialData)
@@ -323,7 +303,7 @@ VulkanTexture::VulkanTexture(VkDevice device, VkPhysicalDevice physical,
     viewInfo.subresourceRange.baseArrayLayer = 0;
     viewInfo.subresourceRange.layerCount     = m_ArrayLayers;
 
-    result = vkCreateImageView(device, &viewInfo, nullptr, &m_ImageView);
+    result = vkCreateImageView(m_Device, &viewInfo, nullptr, &m_ImageView);
     HE_ASSERT(result == VK_SUCCESS, "Failed to create Vulkan image view");
 
     // 5. 为 Cubemap 创建 6 个逐面 2D ImageView（用于离屏渲染到每个面）
@@ -332,7 +312,7 @@ VulkanTexture::VulkanTexture(VkDevice device, VkPhysicalDevice physical,
         VkImageViewCreateInfo faceViewInfo{};
         faceViewInfo.sType      = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
         faceViewInfo.image      = m_Image;
-        faceViewInfo.viewType   = VK_IMAGE_VIEW_TYPE_2D;  // 单面 2D
+        faceViewInfo.viewType   = VK_IMAGE_VIEW_TYPE_2D;
         faceViewInfo.format     = m_VkFormat;
         faceViewInfo.subresourceRange.aspectMask     = ToVkAspectMask(desc.format);
         faceViewInfo.subresourceRange.baseMipLevel   = 0;
@@ -342,7 +322,7 @@ VulkanTexture::VulkanTexture(VkDevice device, VkPhysicalDevice physical,
 
         for (u32 face = 0; face < 6; ++face) {
             faceViewInfo.subresourceRange.baseArrayLayer = face;
-            result = vkCreateImageView(device, &faceViewInfo, nullptr, &m_FaceViews[face]);
+            result = vkCreateImageView(m_Device, &faceViewInfo, nullptr, &m_FaceViews[face]);
             HE_ASSERT(result == VK_SUCCESS, "Failed to create cubemap face image view");
         }
     }
@@ -357,8 +337,10 @@ VulkanTexture::~VulkanTexture() {
         if (fv) vkDestroyImageView(m_Device, fv, nullptr);
     m_FaceViews.clear();
     if (m_ImageView) vkDestroyImageView(m_Device, m_ImageView, nullptr);
-    if (m_Image)     vkDestroyImage(m_Device, m_Image, nullptr);
-    if (m_Memory)    vkFreeMemory(m_Device, m_Memory, nullptr);
+    if (m_Image) {
+        // vmaDestroyImage 自动处理 vkDestroyImage + vkFreeMemory
+        vmaDestroyImage(m_Allocator, m_Image, m_Allocation);
+    }
 }
 
 void VulkanTexture::UploadInitialData(VkCommandPool cmdPool, VkQueue queue,
@@ -378,34 +360,28 @@ void VulkanTexture::UploadInitialData(VkCommandPool cmdPool, VkQueue queue,
                  * desc.depth * desc.arrayLayers * GetFormatByteSize(desc.format);
     }
 
-    // 创建暂存缓冲区（host-visible）
+    // 创建暂存缓冲区（VMA 管理，CPU 可见）
     VkBufferCreateInfo stagingInfo{};
     stagingInfo.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     stagingInfo.size        = dataSize;
     stagingInfo.usage       = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     stagingInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
+    VmaAllocationCreateInfo stagingAllocInfo{};
+    stagingAllocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+                           | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    stagingAllocInfo.usage = VMA_MEMORY_USAGE_CPU_ONLY;
+
     VkBuffer stagingBuffer;
-    vkCreateBuffer(m_Device, &stagingInfo, nullptr, &stagingBuffer);
+    VmaAllocation stagingAlloc;
+    VkResult result = vmaCreateBuffer(m_Allocator, &stagingInfo, &stagingAllocInfo,
+                                       &stagingBuffer, &stagingAlloc, nullptr);
+    HE_ASSERT(result == VK_SUCCESS, "VMA: Failed to create staging buffer for texture upload");
 
-    VkMemoryRequirements stagingMemReqs;
-    vkGetBufferMemoryRequirements(m_Device, stagingBuffer, &stagingMemReqs);
-
-    VkDeviceMemory stagingMemory;
-    VkMemoryAllocateInfo stagingAlloc{};
-    stagingAlloc.sType          = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    stagingAlloc.allocationSize = stagingMemReqs.size;
-    stagingAlloc.memoryTypeIndex = FindMemoryType(m_Physical, stagingMemReqs.memoryTypeBits,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-
-    vkAllocateMemory(m_Device, &stagingAlloc, nullptr, &stagingMemory);
-    vkBindBufferMemory(m_Device, stagingBuffer, stagingMemory, 0);
-
-    // 拷贝数据到暂存缓冲区
-    void* mapped;
-    vkMapMemory(m_Device, stagingMemory, 0, dataSize, 0, &mapped);
-    std::memcpy(mapped, desc.initialData, dataSize);
-    vkUnmapMemory(m_Device, stagingMemory);
+    // 拷贝数据到暂存缓冲区（VMA 持久映射，无需手动 Map/Unmap）
+    VmaAllocationInfo stagingAllocInfo2;
+    vmaGetAllocationInfo(m_Allocator, stagingAlloc, &stagingAllocInfo2);
+    std::memcpy(stagingAllocInfo2.pMappedData, desc.initialData, dataSize);
 
     // 分配一次性命令缓冲
     VkCommandBufferAllocateInfo cmdAlloc{};
@@ -553,10 +529,9 @@ void VulkanTexture::UploadInitialData(VkCommandPool cmdPool, VkQueue queue,
     vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
     vkQueueWaitIdle(queue);
 
-    // 清理暂存资源
+    // 清理暂存资源（VMA 一步完成 Buffer + Allocation 销毁）
     vkFreeCommandBuffers(m_Device, cmdPool, 1, &cmd);
-    vkDestroyBuffer(m_Device, stagingBuffer, nullptr);
-    vkFreeMemory(m_Device, stagingMemory, nullptr);
+    vmaDestroyBuffer(m_Allocator, stagingBuffer, stagingAlloc);
 }
 
 // ============================================================
@@ -604,17 +579,16 @@ VulkanSampler::~VulkanSampler() {
 // ============================================================
 
 std::unique_ptr<IRHIBuffer> CreateVulkanBuffer(
-    VkDevice device, VkPhysicalDevice physical, const BufferDesc& desc)
+    VmaAllocator allocator, const BufferDesc& desc)
 {
-    return std::make_unique<VulkanBuffer>(device, physical, desc);
+    return std::make_unique<VulkanBuffer>(allocator, desc);
 }
 
 std::unique_ptr<IRHITexture> CreateVulkanTexture(
-    VkDevice device, VkPhysicalDevice physical,
-    VkCommandPool cmdPool, VkQueue queue,
+    VmaAllocator allocator, VkCommandPool cmdPool, VkQueue queue,
     const TextureDesc& desc)
 {
-    return std::make_unique<VulkanTexture>(device, physical, cmdPool, queue, desc);
+    return std::make_unique<VulkanTexture>(allocator, cmdPool, queue, desc);
 }
 
 std::unique_ptr<IRHISampler> CreateVulkanSampler(

@@ -31,6 +31,10 @@ if(HUGENGINE_RHI_VULKAN)
     # 使得 #include "Vulkan/VulkanInternal.h" 可解析
     target_include_directories(HugEngineRHI PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
+    target_include_directories(HugEngineRHI PUBLIC
+        ${CMAKE_SOURCE_DIR}/Engine/External/VulkanMemoryAllocator   # VMA 单头文件
+    )
+
     target_compile_definitions(HugEngineRHI PUBLIC HE_RHI_VULKAN)
 
     message(STATUS "Vulkan backend: ENABLED (${Vulkan_INCLUDE_DIRS})")

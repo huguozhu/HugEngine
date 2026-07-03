@@ -19,8 +19,8 @@
 namespace he::rhi {
 
 // 工厂函数（实现在 VulkanResources.cpp 和 VulkanPipeline.cpp）
-std::unique_ptr<IRHIBuffer>        CreateVulkanBuffer(VkDevice, VkPhysicalDevice, const BufferDesc&);
-std::unique_ptr<IRHITexture>       CreateVulkanTexture(VkDevice, VkPhysicalDevice, VkCommandPool, VkQueue, const TextureDesc&);
+std::unique_ptr<IRHIBuffer>        CreateVulkanBuffer(VmaAllocator, const BufferDesc&);
+std::unique_ptr<IRHITexture>       CreateVulkanTexture(VmaAllocator, VkCommandPool, VkQueue, const TextureDesc&);
 std::unique_ptr<IRHISampler>       CreateVulkanSampler(VkDevice, const SamplerDesc&);
 std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(VkDevice, const PipelineStateDesc&,
     const std::vector<VkDescriptorSetLayout>& descLayouts);
@@ -155,6 +155,8 @@ void VulkanDevice::Initialize(const DeviceInitDesc& desc) {
 }
 
 void VulkanDevice::Shutdown() {
+    if (m_VmaAllocator) { vmaDestroyAllocator(m_VmaAllocator); m_VmaAllocator = VK_NULL_HANDLE; }
+
     // 清理 Descriptor Set Layouts
     for (auto& layout : m_DescSetLayouts)
         vkDestroyDescriptorSetLayout(m_Device, layout, nullptr);
@@ -263,6 +265,45 @@ void VulkanDevice::CreateLogicalDevice() {
 
     vkGetDeviceQueue(m_Device, m_GraphicsFamily, 0, &m_GraphicsQueue);
     HE_CORE_INFO("Logical device + graphics queue created");
+
+    // 创建 VMA 分配器（替代裸 vkAllocateMemory/vkFreeMemory）
+    VmaVulkanFunctions vmaVulkanFunctions{};
+    vmaVulkanFunctions.vkGetInstanceProcAddr                = vkGetInstanceProcAddr;
+    vmaVulkanFunctions.vkGetDeviceProcAddr                  = vkGetDeviceProcAddr;
+    vmaVulkanFunctions.vkAllocateMemory                    = vkAllocateMemory;
+    vmaVulkanFunctions.vkBindBufferMemory                  = vkBindBufferMemory;
+    vmaVulkanFunctions.vkBindImageMemory                   = vkBindImageMemory;
+    vmaVulkanFunctions.vkCreateBuffer                      = vkCreateBuffer;
+    vmaVulkanFunctions.vkCreateImage                       = vkCreateImage;
+    vmaVulkanFunctions.vkDestroyBuffer                     = vkDestroyBuffer;
+    vmaVulkanFunctions.vkDestroyImage                      = vkDestroyImage;
+    vmaVulkanFunctions.vkFlushMappedMemoryRanges           = vkFlushMappedMemoryRanges;
+    vmaVulkanFunctions.vkFreeMemory                        = vkFreeMemory;
+    vmaVulkanFunctions.vkGetBufferMemoryRequirements       = vkGetBufferMemoryRequirements;
+    vmaVulkanFunctions.vkGetImageMemoryRequirements        = vkGetImageMemoryRequirements;
+    vmaVulkanFunctions.vkGetPhysicalDeviceMemoryProperties = vkGetPhysicalDeviceMemoryProperties;
+    vmaVulkanFunctions.vkGetPhysicalDeviceProperties       = vkGetPhysicalDeviceProperties;
+    vmaVulkanFunctions.vkInvalidateMappedMemoryRanges      = vkInvalidateMappedMemoryRanges;
+    vmaVulkanFunctions.vkMapMemory                         = vkMapMemory;
+    vmaVulkanFunctions.vkUnmapMemory                       = vkUnmapMemory;
+    vmaVulkanFunctions.vkCmdCopyBuffer                     = vkCmdCopyBuffer;
+    // Vulkan 1.1+ functions（Vulkan 1.3 中为核心，VMA 字段名仍用 KHR 后缀）
+    vmaVulkanFunctions.vkGetBufferMemoryRequirements2KHR   = vkGetBufferMemoryRequirements2;
+    vmaVulkanFunctions.vkGetImageMemoryRequirements2KHR    = vkGetImageMemoryRequirements2;
+    vmaVulkanFunctions.vkBindBufferMemory2KHR              = vkBindBufferMemory2;
+    vmaVulkanFunctions.vkBindImageMemory2KHR               = vkBindImageMemory2;
+
+    VmaAllocatorCreateInfo vmaCreateInfo{};
+    vmaCreateInfo.vulkanApiVersion = VK_API_VERSION_1_3;
+    vmaCreateInfo.physicalDevice   = m_Physical;
+    vmaCreateInfo.device           = m_Device;
+    vmaCreateInfo.instance         = m_Instance;
+    vmaCreateInfo.flags            = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+    vmaCreateInfo.pVulkanFunctions = &vmaVulkanFunctions;
+
+    VkResult vmaResult = vmaCreateAllocator(&vmaCreateInfo, &m_VmaAllocator);
+    HE_ASSERT(vmaResult == VK_SUCCESS, "Failed to create VMA allocator");
+    HE_CORE_INFO("VMA allocator created (buffer device address enabled)");
 }
 
 void VulkanDevice::CreateCommandPools() {
@@ -464,7 +505,7 @@ void VulkanDevice::DestroyDescriptorSetLayout(DescriptorSetLayoutHandle handle) 
 // ============================================================
 
 std::unique_ptr<IRHIBuffer> VulkanDevice::CreateBuffer(const BufferDesc& desc) {
-    return CreateVulkanBuffer(m_Device, m_Physical, desc);
+    return CreateVulkanBuffer(m_VmaAllocator, desc);
 }
 
 std::unique_ptr<IRHIPipelineState> VulkanDevice::CreatePipelineState(const PipelineStateDesc& desc) {
@@ -479,7 +520,7 @@ std::unique_ptr<IRHIPipelineState> VulkanDevice::CreatePipelineState(const Pipel
 }
 
 std::unique_ptr<IRHITexture> VulkanDevice::CreateTexture(const TextureDesc& desc) {
-    return CreateVulkanTexture(m_Device, m_Physical, m_GraphicsCmdPool, m_GraphicsQueue, desc);
+    return CreateVulkanTexture(m_VmaAllocator, m_GraphicsCmdPool, m_GraphicsQueue, desc);
 }
 
 std::unique_ptr<IRHISampler> VulkanDevice::CreateSampler(const SamplerDesc& desc) {

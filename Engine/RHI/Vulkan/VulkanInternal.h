@@ -10,6 +10,10 @@
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
 
+// VMA (Vulkan Memory Allocator) — 单头文件，内存池化与子分配
+#define VMA_VULKAN_VERSION 1003000  // Vulkan 1.3
+#include "vk_mem_alloc.h"
+
 #include "RHI/RHI.h"
 #include <span>
 #include <vector>
@@ -115,6 +119,7 @@ public:
     VkQueue          GetGraphicsQueue() const { return m_GraphicsQueue; }
     VkCommandPool    GetGraphicsCmdPool() const { return m_GraphicsCmdPool; }
     u32              GetGraphicsFamily() const { return m_GraphicsFamily; }
+    VmaAllocator     GetVmaAllocator() const { return m_VmaAllocator; }
 
     // Descriptor set handle 解析（供 VulkanCommandList 使用）
     VkDescriptorSet ResolveDescriptorSet(DescriptorSetHandle h) const {
@@ -143,6 +148,7 @@ private:
     VkCommandPool    m_GraphicsCmdPool = VK_NULL_HANDLE;
     VkCommandPool    m_ComputeCmdPool  = VK_NULL_HANDLE;
 
+    VmaAllocator               m_VmaAllocator     = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT m_DebugMessenger = VK_NULL_HANDLE;
     bool m_ValidationEnabled = false;
 
@@ -300,7 +306,7 @@ private:
 // ============================================================
 class VulkanBuffer final : public IRHIBuffer {
 public:
-    VulkanBuffer(VkDevice device, VkPhysicalDevice physical, const BufferDesc& desc);
+    VulkanBuffer(VmaAllocator allocator, const BufferDesc& desc);
     ~VulkanBuffer() override;
     usize GetSize()  const override { return m_Size; }
     void* Map()            override;
@@ -308,9 +314,9 @@ public:
     u64   GetDeviceAddress() const override { return m_DeviceAddress; }
     VkBuffer GetHandle() const { return m_Buffer; }
 private:
-    VkDevice          m_Device        = VK_NULL_HANDLE;
+    VmaAllocator      m_Allocator     = VK_NULL_HANDLE;
     VkBuffer          m_Buffer        = VK_NULL_HANDLE;
-    VkDeviceMemory    m_Memory        = VK_NULL_HANDLE;
+    VmaAllocation     m_Allocation    = VK_NULL_HANDLE;
     usize             m_Size          = 0;
     u64               m_DeviceAddress = 0;
     bool              m_IsMapped      = false;
@@ -322,8 +328,7 @@ private:
 // ============================================================
 class VulkanTexture final : public IRHITexture {
 public:
-    VulkanTexture(VkDevice device, VkPhysicalDevice physical,
-                  VkCommandPool cmdPool, VkQueue queue,
+    VulkanTexture(VmaAllocator allocator, VkCommandPool cmdPool, VkQueue queue,
                   const TextureDesc& desc);
     ~VulkanTexture() override;
     u32    GetWidth()        const override { return m_Width; }
@@ -349,10 +354,10 @@ public:
 private:
     void UploadInitialData(VkCommandPool cmdPool, VkQueue queue, const TextureDesc& desc);
     VkDevice         m_Device       = VK_NULL_HANDLE;
-    VkPhysicalDevice m_Physical     = VK_NULL_HANDLE;
+    VmaAllocator     m_Allocator    = VK_NULL_HANDLE;
     VkImage          m_Image        = VK_NULL_HANDLE;
     VkImageView      m_ImageView    = VK_NULL_HANDLE;
-    VkDeviceMemory   m_Memory       = VK_NULL_HANDLE;
+    VmaAllocation    m_Allocation   = VK_NULL_HANDLE;
     std::vector<VkImageView> m_FaceViews; // Cubemap 6 面独立 ImageView
     u32              m_Width        = 1;
     u32              m_Height       = 1;
