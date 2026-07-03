@@ -183,7 +183,8 @@ void AA_TAA::UpdateUniforms(const float4x4& prevViewProj,
     uniforms.prevViewProj    = prevViewProj;
     uniforms.invCurrViewProj = invCurrViewProj;
     uniforms.resolution      = {(float)width, (float)height};
-    uniforms.blendFactor     = 0.05f;
+    // 首帧无历史数据（velocity=0 导致 disocclusion 无法触发），强制 100% 当前帧初始化
+    uniforms.blendFactor     = (m_FrameIndex <= 1) ? 1.0f : 0.05f;
     uniforms.unused          = 0.0f;
 
     void* mapped = m_UniformBuffer->Map();
