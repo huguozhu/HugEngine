@@ -323,7 +323,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             float4x4 invVP = glm::inverse(camera.GetViewProjMatrix());
             struct { float4x4 ivp; float4 cp; u32 lc; float ii; u32 _pad[2]; } lpc;
             lpc.ivp = invVP; lpc.cp = float4(camera.position, 0.0f);
-            lpc.lc = 0; lpc.ii = m_GI ? m_GI->GetSettings().intensity : 1.0f;
+            lpc.lc = 0; lpc.ii = (m_GI && m_GI->IsReady()) ? m_GI->GetSettings().intensity : 0.0f;
             // 填充光源数据
             {
                 PushConstantData fpc{};
