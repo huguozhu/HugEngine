@@ -98,7 +98,6 @@ private:
 
     // 输入纹理（外部注入，不持有所有权）
     rhi::IRHITexture* m_InputColor      = nullptr;
-    rhi::IRHISampler* m_InputSampler    = nullptr;
     rhi::IRHITexture* m_DepthTexture    = nullptr;
     rhi::IRHITexture* m_NormalTexture   = nullptr;
     rhi::IRHITexture* m_VelocityTexture = nullptr;
