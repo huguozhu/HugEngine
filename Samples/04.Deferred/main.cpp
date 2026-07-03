@@ -87,9 +87,9 @@ int main() {
     while (!engine.GetWindow()->ShouldClose()) {
         f64 now = glfwGetTime(); f32 dt = (f32)(now - lt); lt = now;
         engine.GetWindow()->PollEvents();
-        if (!swapchain->AcquireNextImage()) {
-            glfwWaitEvents();  // 窗口最小化时等待事件，避免死循环
-            continue;
+        while (!swapchain->AcquireNextImage()) {
+            engine.GetWindow()->PollEvents();  // 等待窗口就绪
+            lt = glfwGetTime();  // 重置时间避免大 deltaTime
         }
 
         bool md = glfwGetMouseButton(glfwWin, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
