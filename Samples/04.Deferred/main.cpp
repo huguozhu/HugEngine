@@ -87,10 +87,7 @@ int main() {
     while (!engine.GetWindow()->ShouldClose()) {
         f64 now = glfwGetTime(); f32 dt = (f32)(now - lt); lt = now;
         engine.GetWindow()->PollEvents();
-        while (!swapchain->AcquireNextImage()) {
-            engine.GetWindow()->PollEvents();  // 等待窗口就绪
-            lt = glfwGetTime();  // 重置时间避免大 deltaTime
-        }
+        if (!swapchain->AcquireNextImage()) continue;
 
         bool md = glfwGetMouseButton(glfwWin, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
         if (md && !rmb) { rmb = true; glfwGetCursorPos(glfwWin, &mx, &my); glfwSetInputMode(glfwWin, GLFW_CURSOR, GLFW_CURSOR_DISABLED); }
