@@ -127,7 +127,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         {1,0,rhi::VertexFormat::Float3, offsetof(he::StaticVertex, normal)},
         {2,0,rhi::VertexFormat::Float2, offsetof(he::StaticVertex, uv)},
     };
-    rhi::PushConstantRange pc; pc.stageMask = 1|16; pc.size = 256; // 双矩阵 128B + objectIndex + padding
+    rhi::PushConstantRange pc; pc.stageMask = 1|16; pc.size = 256; // 192B 实际用量
     rhi::PipelineStateDesc gbDesc;
     gbDesc.vertexShader = &gbVS; gbDesc.pixelShader = &gbFS;
     gbDesc.vertexLayout = vl;
@@ -299,49 +299,35 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     auto hdrC = rg.ImportTexture("HDR_C", m_HDRTarget.get());
     auto backBuf = rg.ImportBackBuffer();
 
-    // ── 帧首：记录当前帧 ViewProj + 合成抖动 ViewProj ──
-    float4x4 viewMat = camera.GetViewMatrix();
-    float4x4 projMat = camera.GetProjMatrix();
-    m_CurrViewProj = projMat * viewMat;
-
-    // 首帧：prev = curr（velocity 为零）
-    static bool firstFrame = true;
-    if (firstFrame) { m_PrevViewProj = m_CurrViewProj; firstFrame = false; }
-
-    // 带抖动的 ViewProj（TAA 子像素抖动，对投影矩阵第 3 列的 xy 做偏移）
-    float4x4 jitteredProj = projMat;
-    if (m_AntiAliasing && m_AntiAliasing->IsEnabled()) {
-        float2 jitter = m_AntiAliasing->GetJitterOffset();
-        jitteredProj[2][0] += jitter.x;  // proj[2][0] 映射 NDC x
-        jitteredProj[2][1] += jitter.y;  // proj[2][1] 映射 NDC y
-    }
-    float4x4 jitteredVP = jitteredProj * viewMat;
-
-    // TAA 帧首：推进抖动序列 + 交换历史缓冲
-    if (m_AntiAliasing) m_AntiAliasing->OnBeginFrame();
-
     (void)world; (void)sg;
 
-    // GBuffer 4×MRT + SceneRenderer
+    // ── 帧首：更新成员变量（lambda 内通过 this 安全访问，无悬垂引用风险）──
+    m_CurrViewProj = camera.GetViewProjMatrix();
+    static bool firstFrame = true;
+    if (firstFrame) { m_PrevViewProj = m_CurrViewProj; firstFrame = false; }
+    if (m_AntiAliasing) m_AntiAliasing->OnBeginFrame();
+
+    // GBuffer 4×MRT + SceneRenderer（所有矩阵在 lambda 内计算，避免捕获悬垂引用）
     rg.AddPass("GB_Clear", {}, {{gbA, ResourceAccess::Write}, {gbB, ResourceAccess::Write},
-        {gbC, ResourceAccess::Write}, {gbDepth, ResourceAccess::Write}, {gbVel, ResourceAccess::Write}},
+        {gbC, ResourceAccess::Write}, {gbVel, ResourceAccess::Write}, {gbDepth, ResourceAccess::Write}},
         [&, w, h](rhi::IRHICommandList* c) {
-            // 更新 set=0 binding 2 到当前帧 ObjectBuffer
             m_Device->UpdateDescriptorSet(m_GBufferSet, 2, rhi::DescriptorType::StorageBuffer,
                 m_ObjectBuffers[m_CurrentFrameSlot].get());
             c->SetPipeline(m_GBufferPSO.get());
-            c->BindDescriptorSet(0, m_GBufferSet);  // set=0: per-frame ObjectBuffer
+            c->BindDescriptorSet(0, m_GBufferSet);
             rhi::ClearValue clears[5]{};
             clears[0].color[3] = 1.0f; clears[1].color[3] = 1.0f;
-            clears[2].color[3] = 1.0f; clears[3].color[0] = 0.0f; // velocity: 初始化为 0
-            clears[3].color[1] = 0.0f;
-            clears[4].depth    = 1.0f;
+            clears[2].color[3] = 1.0f; clears[3].color[0] = 0.0f; // velocity=0
+            clears[3].color[1] = 0.0f; clears[4].depth = 1.0f;
             void* cv[4] = {m_GBufferA->GetNativeHandle(), m_GBufferB->GetNativeHandle(),
                            m_GBufferC->GetNativeHandle(), m_GBufferD->GetNativeHandle()};
             c->BeginOffscreenPassMRT(cv, 4, m_GBufferDepth->GetNativeHandle(), w, h, clears, false);
             c->SetViewport({0,(float)h,(float)w,-(float)h,0,1});
             c->SetScissor({0,0,w,h});
             auto drawItems = m_SceneRenderer->Prepare(world, sg, camera, m_ObjectBuffers[m_CurrentFrameSlot].get());
+            // ★ 在 lambda 内计算 VP（避免捕获 BuildFrameGraph 局部变量的悬垂引用）
+            // 计算 VP（暂不应用 jitter，避免时域抖动伪影）
+            float4x4 jitteredVP = camera.GetViewProjMatrix();
             for (auto& di : drawItems) {
                 struct {
                     float4x4 viewProjMatrix;
@@ -355,7 +341,6 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 c->SetPushConstants(0, sizeof(pc), &pc);
                 c->SetVertexBuffer(di.mesh->GetVertexBuffer().get(), 0);
                 c->SetIndexBuffer(di.mesh->GetIndexBuffer().get());
-                // set=1: per-mesh 纹理（静态，无帧间竞态）
                 if (di.mesh->GetDescriptorSet() != rhi::kInvalidSet)
                     c->BindDescriptorSet(1, di.mesh->GetDescriptorSet());
                 c->DrawIndexed(di.mesh->GetIndexCount());

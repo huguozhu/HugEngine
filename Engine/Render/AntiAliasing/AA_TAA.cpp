@@ -11,8 +11,8 @@ namespace he::render {
 float2 AA_TAA::HaltonSample(u32 index) {
     // Halton(2): 0.5, -0.5, 0.25, -0.75, 0.875, -0.875, -0.125, 0.125
     // Halton(3): 0.333, -0.333, -0.111, 0.778, -0.556, -0.222, 0.444, -0.444
-    static const float kHaltonX[8] = { 0.5f, -0.5f,  0.25f, -0.75f, 0.875f, -0.875f, -0.125f, 0.125f };
-    static const float kHaltonY[8] = { 0.333f, -0.333f, -0.111f, 0.778f, -0.556f, -0.222f, 0.444f, -0.444f };
+    static const float kHaltonX[8] = { 0.25f, -0.25f,  0.125f, -0.375f, 0.4375f, -0.4375f, -0.0625f, 0.0625f };
+    static const float kHaltonY[8] = { 0.167f, -0.167f, -0.056f, 0.389f, -0.278f, -0.111f, 0.222f, -0.222f };
     u32 i = index % 8;
     return {kHaltonX[i], kHaltonY[i]};
 }
@@ -184,7 +184,7 @@ void AA_TAA::UpdateUniforms(const float4x4& prevViewProj,
     uniforms.invCurrViewProj = invCurrViewProj;
     uniforms.resolution      = {(float)width, (float)height};
     // 首帧无历史数据（velocity=0 导致 disocclusion 无法触发），强制 100% 当前帧初始化
-    uniforms.blendFactor     = (m_FrameIndex <= 1) ? 1.0f : 0.05f;
+    uniforms.blendFactor     = (m_FrameIndex <= 1) ? 1.0f : 0.1f; // 10% 当前帧加速收敛
     uniforms.unused          = 0.0f;
 
     void* mapped = m_UniformBuffer->Map();

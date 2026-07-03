@@ -59,8 +59,8 @@ void current_color_aabb(float2 uv, out float3 aabbMin, out float3 aabbMax) {
     aabbMax = max(max(max(c00,c10),max(c20,c01)),max(max(c11,c21),max(c02,c12)));
     aabbMax = max(aabbMax, c22);
 
-    // 轻微膨胀 AABB，容忍微小颜色变化
-    float3 ext = (aabbMax - aabbMin) * 0.01;
+    // 膨胀 AABB 放宽裁剪范围，避免阻止 TAA 时域收敛
+    float3 ext = (aabbMax - aabbMin) * 0.05 + 0.001;
     aabbMin -= ext;
     aabbMax += ext;
 }
