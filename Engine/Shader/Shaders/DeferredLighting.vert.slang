@@ -14,5 +14,6 @@ VSOutput vertexMain(uint vid : SV_VertexID) {
     VSOutput output;
     output.position = float4(clipPos, 0.0, 1.0);
     output.uv       = clipPos * 0.5 + 0.5;
+    output.uv.y     = 1.0 - output.uv.y;  // Vulkan Y 翻转（匹配 ToneMap.vert）
     return output;
 }

@@ -76,6 +76,8 @@ private:
     std::unique_ptr<rhi::IRHIPipelineState> m_LightingPSO;
     rhi::DescriptorSetLayoutHandle m_LightingLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_LightingSet    = rhi::kInvalidSet;
+    std::unique_ptr<rhi::IRHITexture> m_PlaceholderTex;
+    std::unique_ptr<rhi::IRHISampler> m_PlaceholderSamp;
 
     // HDR (Lighting 输出 + ToneMap 输入)
     std::unique_ptr<rhi::IRHITexture> m_HDRTarget, m_HDRDepth;

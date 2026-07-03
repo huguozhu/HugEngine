@@ -160,6 +160,20 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     };
     m_LightingLayout = device->CreateDescriptorSetLayout(ll);
     m_LightingSet    = device->AllocateDescriptorSet(m_LightingLayout);
+    // 预填充所有 binding 占位纹理（避免未绑定→Intel GPU 白屏）
+    {
+        u8 w4[4]={255,255,255,255};
+        rhi::TextureDesc ptd; ptd.format=rhi::Format::RGBA8_UNORM; ptd.width=1; ptd.height=1; ptd.mipLevels=1; ptd.arrayLayers=1; ptd.usage=rhi::TextureUsage::ShaderResource; ptd.initialData=w4;
+        auto pt = device->CreateTexture(ptd);
+        rhi::SamplerDesc sd; sd.minFilter=sd.magFilter=rhi::FilterMode::Linear;
+        sd.addressU=sd.addressV=rhi::AddressMode::ClampToEdge;
+        auto ps = device->CreateSampler(sd);
+        // 只更新 layout 中声明的 binding（0-4, 10-16）
+        for (u32 b : {0u,1u,2u,3u,4u,10u,11u,12u,13u,14u,15u,16u})
+            device->UpdateDescriptorSet(m_LightingSet, b, rhi::DescriptorType::CombinedImageSampler, pt.get(), ps.get());
+        m_PlaceholderTex = std::move(pt);
+        m_PlaceholderSamp = std::move(ps);
+    }
 
     rhi::PushConstantRange lpc; lpc.stageMask = 1|16; lpc.size = 96;
     rhi::PipelineStateDesc lDesc;
@@ -230,29 +244,16 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                                         he::SceneGraph& sg, const CameraData& camera) {
     if (m_SwapChain) rg.SetSwapChain(m_SwapChain);
     u32 w = m_Width, h = m_Height;
-
     auto gbA = rg.ImportTexture("GB_A", m_GBufferA.get());
     auto gbB = rg.ImportTexture("GB_B", m_GBufferB.get());
     auto gbC = rg.ImportTexture("GB_C", m_GBufferC.get());
     auto gbD = rg.ImportTexture("GB_D", m_GBufferDepth.get());
     auto hdrC = rg.ImportTexture("HDR_C", m_HDRTarget.get());
-    auto hdrD = rg.ImportTexture("HDR_D", m_HDRDepth.get());
     auto backBuf = rg.ImportBackBuffer();
+    (void)world; (void)sg; (void)camera;
 
-    auto* giIBL = dynamic_cast<GI_IBL*>(m_GI.get());
-    ResourceHandle irr = kInvalidHandle, pref = kInvalidHandle, lut = kInvalidHandle;
-    bool hasIBL = (giIBL && giIBL->IsReady());
-    if (hasIBL && giIBL->GetIrradianceMap() && giIBL->GetPrefilterMap() && giIBL->GetBRDF_LUT()) {
-        irr  = rg.ImportTexture("IBL_Irr", giIBL->GetIrradianceMap());
-        pref = rg.ImportTexture("IBL_Pref", giIBL->GetPrefilterMap());
-        lut  = rg.ImportTexture("IBL_LUT", giIBL->GetBRDF_LUT());
-    }
-    ResourceHandle sm0 = kInvalidHandle;
-    if (m_ShadowSystem && m_ShadowSystem->GetShadowMapCount() > 0)
-        sm0 = rg.ImportTexture("SM0", m_ShadowSystem->GetShadowMap(0));
-
-    // GBuffer Pass (几何→MRT+Depth)
-    rg.AddPass("GBuffer", {}, {{gbA, ResourceAccess::Write}, {gbB, ResourceAccess::Write},
+    // GBuffer MRT + SceneRenderer（无 draw，仅验证 Prepare 不崩溃）
+    rg.AddPass("GB_Clear", {}, {{gbA, ResourceAccess::Write}, {gbB, ResourceAccess::Write},
         {gbC, ResourceAccess::Write}, {gbD, ResourceAccess::Write}},
         [&, w, h](rhi::IRHICommandList* c) {
             m_Device->UpdateDescriptorSet(m_GBufferSet, 2, rhi::DescriptorType::StorageBuffer,
@@ -260,7 +261,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             c->SetPipeline(m_GBufferPSO.get());
             c->BindDescriptorSet(0, m_GBufferSet);
             rhi::ClearValue clears[4]{};
-            clears[3].depth = 1.0f;
+            clears[0].color[3]=1.0f; clears[1].color[3]=1.0f; clears[2].color[3]=1.0f; clears[3].depth=1.0f;
             void* cv[3] = {m_GBufferA->GetNativeHandle(), m_GBufferB->GetNativeHandle(), m_GBufferC->GetNativeHandle()};
             c->BeginOffscreenPassMRT(cv, 3, m_GBufferDepth->GetNativeHandle(), w, h, clears, false);
             c->SetViewport({0,(float)h,(float)w,-(float)h,0,1});
@@ -279,65 +280,31 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
 
     // Lighting Pass (全屏 PBR)
     rg.AddPass("Lighting",
-        {{gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbC, ResourceAccess::Read},
-         {irr, ResourceAccess::Read}, {pref, ResourceAccess::Read},
-         {lut, ResourceAccess::Read}, {sm0, ResourceAccess::Read}},
-        {{hdrC, ResourceAccess::Write}, {hdrD, ResourceAccess::Write}},
+        {{gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbC, ResourceAccess::Read}},
+        {{hdrC, ResourceAccess::Write}},
         [&, w, h](rhi::IRHICommandList* c) {
-            // 显式 Barrier: DepthStencilWrite → DepthStencilRead (深度采样用)
             c->PipelineBarrier(rhi::PipelineStage::LateFragmentTests, rhi::PipelineStage::FragmentShader,
                 rhi::ResourceState::DepthStencilWrite, rhi::ResourceState::DepthStencilRead, m_GBufferDepth.get());
-            // 绑定 Lighting 描述符 (GBuffer + Shadow + IBL)
-            auto bindTex = [&](u32 b, rhi::IRHITexture* t, rhi::IRHISampler* s) {
-                if (t && s) m_Device->UpdateDescriptorSet(m_LightingSet, b,
-                    rhi::DescriptorType::CombinedImageSampler, t, s);
-            };
-            bindTex(0, m_GBufferA.get(), m_HDRSampler.get());
-            bindTex(1, m_GBufferB.get(), m_HDRSampler.get());
-            bindTex(2, m_GBufferC.get(), m_HDRSampler.get());
-            bindTex(3, m_GBufferDepth.get(), m_HDRSampler.get());
+            auto bindTex = [&](u32 b, rhi::IRHITexture* t) { if(t) m_Device->UpdateDescriptorSet(m_LightingSet, b, rhi::DescriptorType::CombinedImageSampler, t, m_HDRSampler.get()); };
+            bindTex(0, m_GBufferA.get()); bindTex(1, m_GBufferB.get()); bindTex(2, m_GBufferC.get());
+            bindTex(3, m_GBufferDepth.get());
             if (m_ShadowSystem && m_ShadowSystem->GetShadowMap(0))
-                bindTex(4, m_ShadowSystem->GetShadowMap(0), m_ShadowSystem->GetShadowSampler());
-            // IBL (可选，从 m_GI 直接访问避免悬空引用)
-            if (m_GI && m_GI->IsReady()) {
-                auto* ibl = dynamic_cast<GI_IBL*>(m_GI.get());
-                if (ibl) {
-                    bindTex(12, ibl->GetIrradianceMap(), ibl->GetIBLSampler());
-                    bindTex(13, ibl->GetPrefilterMap(), ibl->GetIBLSampler());
-                    bindTex(14, ibl->GetBRDF_LUT(), ibl->GetIBLSampler());
-                }
-            }
-            m_Device->UpdateDescriptorSet(m_LightingSet, 17, rhi::DescriptorType::StorageBuffer,
-                m_LightBuffers[m_CurrentFrameSlot].get());
-            m_Device->UpdateDescriptorSet(m_LightingSet, 18, rhi::DescriptorType::StorageBuffer,
-                m_ShadowBuffers[m_CurrentFrameSlot].get());
-
-            c->SetPipeline(m_LightingPSO.get());
-            c->BindDescriptorSet(0, m_LightingSet);
+                bindTex(4, m_ShadowSystem->GetShadowMap(0));
+            m_Device->UpdateDescriptorSet(m_LightingSet, 17, rhi::DescriptorType::StorageBuffer, m_LightBuffers[m_CurrentFrameSlot].get());
+            m_Device->UpdateDescriptorSet(m_LightingSet, 18, rhi::DescriptorType::StorageBuffer, m_ShadowBuffers[m_CurrentFrameSlot].get());
+            c->SetPipeline(m_LightingPSO.get()); c->BindDescriptorSet(0, m_LightingSet);
             rhi::ClearValue clr{};
             c->BeginOffscreenPass(m_HDRTarget->GetNativeHandle(), m_HDRDepth->GetNativeHandle(), w, h, &clr, false);
-            c->SetViewport({0,(float)h,(float)w,-(float)h,0,1});
-            c->SetScissor({0,0,w,h});
-
-            // Push constants
-            float4x4 invVP = glm::inverse(camera.GetViewProjMatrix());
+            c->SetViewport({0,(float)h,(float)w,-(float)h,0,1}); c->SetScissor({0,0,w,h});
+            float4x4 ivp = glm::inverse(camera.GetViewProjMatrix());
             struct { float4x4 ivp; float4 cp; u32 lc; float ii; u32 _pad[2]; } lpc;
-            lpc.ivp = invVP; lpc.cp = float4(camera.position, 0.0f);
-            lpc.lc = 0; lpc.ii = (m_GI && m_GI->IsReady()) ? m_GI->GetSettings().intensity : 0.0f;
-            // 填充光源数据
-            {
-                PushConstantData fpc{};
-                CollectLights(fpc, world, sg, camera);
-                lpc.lc = fpc.lightCount;
-                auto* ll = static_cast<GPULight*>(m_LightBuffers[m_CurrentFrameSlot]->Map());
-                (void)ll; // CollectLights 已填充
-            }
+            lpc.ivp=ivp; lpc.cp=float4(camera.position,0); lpc.ii=0; lpc.lc=0;
+            { PushConstantData fpc{}; CollectLights(fpc, world, sg, camera); lpc.lc = fpc.lightCount; }
             c->SetPushConstants(0, sizeof(lpc), &lpc);
             c->Draw(3);
             c->EndOffscreenPass();
         });
 
-    // ToneMap
     rg.AddPass("ToneMap", {}, {{backBuf, ResourceAccess::Write}},
         [this](rhi::IRHICommandList* c) {
             c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput, rhi::PipelineStage::FragmentShader,
