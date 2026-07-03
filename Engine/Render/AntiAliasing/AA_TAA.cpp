@@ -206,11 +206,8 @@ void AA_TAA::OnBeginFrame() {
     m_CurrentJitter.x = rawJitter.x * 2.0f / (float)m_Width;
     m_CurrentJitter.y = rawJitter.y * 2.0f / (float)m_Height;
 
-    // 交换历史缓冲 read/write（本次 TAA resolve 读取上一帧的历史，写入当前帧）
-    m_HistoryWrite = m_HistoryRead;
-    m_HistoryRead  = 1 - m_HistoryRead;
-
     ++m_FrameIndex;
+    // 注意：历史缓冲 swap 在 Render() 末尾进行——Render 写入后立即将 read 指向刚写完的帧
 }
 
 rhi::IRHITexture* AA_TAA::GetOutputTexture() const {
@@ -243,6 +240,10 @@ void AA_TAA::Render(rhi::IRHICommandList* cmd) {
     // 全屏三角形
     cmd->Draw(3);
     cmd->EndOffscreenPass();
+
+    // 刚写入的帧立即成为读出目标（ToneMap/下游读取它），另一帧作为下一帧的写入目标
+    m_HistoryRead  = m_HistoryWrite;
+    m_HistoryWrite = 1 - m_HistoryRead;
 }
 
 } // namespace he::render
