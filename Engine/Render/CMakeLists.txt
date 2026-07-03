@@ -40,6 +40,7 @@ target_sources(HugEngineRender PRIVATE
     Shadow/PointShadowTechnique.h
     Shadow/PointShadowTechnique.cpp
     # PostProcess
+    PostProcess/PostProcessPass.h
     PostProcess/ToneMapPass.h
     PostProcess/ToneMapPass.cpp
     PostProcess/SkyboxPass.h

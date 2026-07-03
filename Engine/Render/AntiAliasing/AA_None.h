@@ -8,7 +8,7 @@ namespace he::render {
 // AA_None — 空对象（Null Object 模式）
 //
 // 所有 AA 操作均为 no-op，管线透传原始 HDR 纹理给下游。
-// 启用/禁用状态返回 false，使 ImGui 面板等可以据此隐藏 AA 控件。
+// IsEnabled() 返回 false，ImGui 面板可据此隐藏 AA 控件。
 // ============================================================
 class AA_None final : public IAntiAliasing {
 public:
@@ -32,17 +32,22 @@ public:
     [[nodiscard]] bool        IsEnabled() const override { return false; }
     void SetEnabled(bool) override {}
 
-    // ---- IAntiAliasing ----
+    // ---- IPostProcessPass ----
 
-    [[nodiscard]] AAMode GetMode() const override { return AAMode::None; }
-
-    // 透传输入作为输出（管线通过 GetOutputTexture 统一获取下游纹理）
     void SetInput(rhi::IRHITexture* tex, rhi::IRHISampler* samp) override {
         m_Input        = tex;
         m_InputSampler = samp;
     }
+    [[nodiscard]] rhi::Format GetOutputFormat() const override {
+        // 透传模式：输出格式等于输入格式（管线自行判断）
+        return rhi::Format::RGBA16_FLOAT;
+    }
     [[nodiscard]] rhi::IRHITexture* GetOutputTexture() const override { return m_Input; }
     [[nodiscard]] rhi::IRHISampler* GetOutputSampler() const override { return m_InputSampler; }
+
+    // ---- IAntiAliasing ----
+
+    [[nodiscard]] AAMode GetMode() const override { return AAMode::None; }
 
 private:
     bool m_Ready = false;

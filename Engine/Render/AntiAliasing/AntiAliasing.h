@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Subsystem/RenderSubsystem.h"
+#include "PostProcess/PostProcessPass.h"
 #include "Pipeline/Camera.h"
 #include "Core/Types.h"
 
@@ -9,8 +9,6 @@
 namespace he::rhi {
     class IRHITexture;
     class IRHISampler;
-    class IRHIDevice;
-    class IRHICommandList;
     struct TextureDesc;
     struct PipelineStateDesc;
 }
@@ -38,23 +36,20 @@ struct AASettings {
 };
 
 // ============================================================
-// IAntiAliasing — 抗锯齿子系统公共接口
+// IAntiAliasing — 抗锯齿子系统接口
 //
-// 继承 IRenderSubsystem（与 IShadowSystem / IGlobalIllumination 一致）。
-// 不同 AA 技术在管线中的插入点和支持的管线类型不同：
+// 继承 IPostProcessPass（后处理链路接口），AA 特有方法在此扩展。
+// SetInput/GetOutput/GetOutputFormat 等链路方法由基类 IPostProcessPass 提供。
 //
 //   ForwardPipeline（仅 MSAA / FXAA）:
 //     Scene → ToneMap → [FXAA] → Present
 //     ↑ MSAA 覆盖 RT 创建参数
 //
 //   DeferredPipeline（仅 TAA / FXAA）:
-//     GBuffer → Lighting → [TAA Resolve] → ToneMap → [FXAA] → Present
-//                           ↑ TAA 利用 GBuffer 深度/法线做邻域裁剪
-//
-// 管线通过 GetMode() + SupportsForward()/SupportsDeferred() 决定
-// 是否启用 AA、覆盖 RT 参数、以及 Pass 插入位置。
+//     GBuffer → Lighting → [TAA] → ToneMap → [FXAA] → Present
+//                       ↑ TAA 利用 GBuffer 深度/法线做邻域裁剪
 // ============================================================
-class IAntiAliasing : public IRenderSubsystem {
+class IAntiAliasing : public IPostProcessPass {
     HE_DECLARE_NON_COPYABLE(IAntiAliasing);
 
 public:
@@ -63,7 +58,6 @@ public:
 
     // ---- 模式查询 ----
 
-    /// 当前 AA 技术类型
     [[nodiscard]] virtual AAMode GetMode() const = 0;
 
     // ---- RT 创建参数覆盖（MSAA 专属） ----
@@ -80,13 +74,6 @@ public:
     /// 覆盖 PSO 创建描述符（MSAA 设置 sampleCount）
     virtual void OverridePSODesc(rhi::PipelineStateDesc&) const {}
 
-    // ---- AA Pass 位置查询 ----
-
-    /// AA Pass 是否运行在 HDR 空间（ToneMap 前）
-    /// true = TAA（HDR 空间，ToneMap 前）
-    /// false = FXAA（LDR 空间，ToneMap 后）
-    [[nodiscard]] virtual bool IsHDRSpace() const { return false; }
-
     // ---- TAA 专属：抖动投影 ----
 
     /// 当前帧的子像素抖动偏移（NDC 空间 [-1, 1]）
@@ -97,22 +84,11 @@ public:
 
     // ---- 管线兼容性 ----
 
-    /// 是否支持前向渲染管线
     /// MSAA=true（硬件采样覆盖 RT），TAA=false（需 GBuffer 深度/法线），FXAA=true
     [[nodiscard]] virtual bool SupportsForward()  const { return true; }
 
-    /// 是否支持延迟渲染管线
     /// MSAA=false（GBuffer MRT 多采样代价过高），TAA=true（复用 GBuffer），FXAA=true
     [[nodiscard]] virtual bool SupportsDeferred() const { return true; }
-
-    // ---- 后处理类 AA 输入/输出（TAA / FXAA 使用） ----
-
-    /// 设置输入纹理 + 采样器（管线在 AA Pass 前调用）
-    virtual void SetInput(rhi::IRHITexture* color, rhi::IRHISampler* sampler) {}
-
-    /// AA 处理后的输出纹理（下游 Pass 从此纹理读取）
-    [[nodiscard]] virtual rhi::IRHITexture* GetOutputTexture() const { return nullptr; }
-    [[nodiscard]] virtual rhi::IRHISampler* GetOutputSampler() const { return nullptr; }
 
     // ---- 配置 ----
 
