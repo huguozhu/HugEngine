@@ -233,7 +233,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
 
     auto* giIBL = dynamic_cast<GI_IBL*>(m_GI.get());
     ResourceHandle irr = kInvalidHandle, pref = kInvalidHandle, lut = kInvalidHandle;
-    if (giIBL) {
+    if (giIBL && giIBL->GetIrradianceMap() && giIBL->GetPrefilterMap() && giIBL->GetBRDF_LUT()) {
         irr  = rg.ImportTexture("IBL_Irr", giIBL->GetIrradianceMap());
         pref = rg.ImportTexture("IBL_Pref", giIBL->GetPrefilterMap());
         lut  = rg.ImportTexture("IBL_LUT", giIBL->GetBRDF_LUT());
