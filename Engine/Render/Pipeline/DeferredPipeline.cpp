@@ -82,16 +82,23 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     m_Skybox  = std::make_unique<SkyboxPass>(); m_Skybox->Initialize(device, m_Width, m_Height);
     m_SceneRenderer = std::make_unique<SceneRenderer>();
 
-    // GBuffer PSO (3 MRT + D32, 纹理描述符共享 Forward 布局)
+    // GBuffer PSO (3 MRT + D32, 拆分描述符集 set=0 + set=1)
+    // set=0: per-frame GPUObjectData[]（每帧更新 buffer 绑定）
     rhi::DescriptorSetLayoutDesc gbLayout;
     gbLayout.bindings = {
         {2, rhi::DescriptorType::StorageBuffer, 1, 17},  // u_Objects (Vertex|Fragment)
-        {5, rhi::DescriptorType::CombinedImageSampler, 1, 16},
-        {6, rhi::DescriptorType::CombinedImageSampler, 1, 16},
-        {7, rhi::DescriptorType::CombinedImageSampler, 1, 16},
-        {8, rhi::DescriptorType::CombinedImageSampler, 1, 16},
     };
     m_GBufferLayout = device->CreateDescriptorSetLayout(gbLayout);
+
+    // set=1: per-mesh 静态纹理（每个 mesh 独立创建，永不更新，消除帧间竞态）
+    rhi::DescriptorSetLayoutDesc perMeshLayout;
+    perMeshLayout.bindings = {
+        {5, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // BaseColor
+        {6, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // Normal
+        {7, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // MetallicRoughness
+        {8, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // Occlusion
+    };
+    m_PerMeshLayout = device->CreateDescriptorSetLayout(perMeshLayout);
 
     rhi::ShaderBytecode gbVS, gbFS;
     gbVS.stage = rhi::ShaderStage::Vertex; gbVS.spirv = k_GBuffer_vert_spv; gbVS.entryPoint = "main";
@@ -112,30 +119,24 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     gbDesc.colorAttachmentCount = 3;
     gbDesc.colorFormats[0] = gbDesc.colorFormats[1] = gbDesc.colorFormats[2] = rhi::Format::RGBA16_FLOAT;
     gbDesc.pushConstantRanges = {pc};
-    gbDesc.descriptorSetLayouts = {m_GBufferLayout};
+    gbDesc.descriptorSetLayouts = {m_GBufferLayout, m_PerMeshLayout};
     gbDesc.debugName = "GBuffer";
     m_GBufferPSO = device->CreatePipelineState(gbDesc);
     HE_ASSERT(m_GBufferPSO, "DeferredPipeline: GBuffer PSO failed");
 
-    // GBuffer 描述符集（绑定 Object SSBO + 默认纹理）
+    // GBuffer set=0 共享描述符集（仅含 binding 2: Object SSBO，每帧更新 buffer）
     m_GBufferSet = device->AllocateDescriptorSet(m_GBufferLayout);
-    // 默认 1x1 白纹理 + 线性采样器
-    std::unique_ptr<rhi::IRHITexture> defTex;
-    std::unique_ptr<rhi::IRHISampler> defSamp;
+    // 默认纹理（per-mesh set=1 回退用）
     {
         u8 w4[4]={255,255,255,255};
         rhi::TextureDesc defDesc; defDesc.format=rhi::Format::RGBA8_UNORM;
         defDesc.width=1; defDesc.height=1; defDesc.mipLevels=1; defDesc.arrayLayers=1;
         defDesc.usage=rhi::TextureUsage::ShaderResource; defDesc.initialData=w4;
-        defTex = device->CreateTexture(defDesc);
+        m_PlaceholderTex = device->CreateTexture(defDesc);
         rhi::SamplerDesc sd; sd.minFilter=sd.magFilter=rhi::FilterMode::Linear;
         sd.addressU=sd.addressV=rhi::AddressMode::Repeat;
-        defSamp = device->CreateSampler(sd);
+        m_PlaceholderSamp = device->CreateSampler(sd);
     }
-    device->UpdateDescriptorSet(m_GBufferSet, 5, rhi::DescriptorType::CombinedImageSampler, defTex.get(), defSamp.get());
-    device->UpdateDescriptorSet(m_GBufferSet, 6, rhi::DescriptorType::CombinedImageSampler, defTex.get(), defSamp.get());
-    device->UpdateDescriptorSet(m_GBufferSet, 7, rhi::DescriptorType::CombinedImageSampler, defTex.get(), defSamp.get());
-    device->UpdateDescriptorSet(m_GBufferSet, 8, rhi::DescriptorType::CombinedImageSampler, defTex.get(), defSamp.get());
 
     // Lighting PSO (全屏三角形，无深度)
     rhi::ShaderBytecode lVS, lFS;
@@ -198,6 +199,7 @@ void DeferredPipeline::Shutdown() {
     if (m_ToneMap) m_ToneMap->Shutdown();
     if (m_Skybox)  m_Skybox->Shutdown();
     if (m_GBufferLayout != rhi::kInvalidLayout) { m_Device->DestroyDescriptorSetLayout(m_GBufferLayout); }
+    if (m_PerMeshLayout  != rhi::kInvalidLayout) { m_Device->DestroyDescriptorSetLayout(m_PerMeshLayout); }
     if (m_LightingLayout != rhi::kInvalidLayout) { m_Device->DestroyDescriptorSetLayout(m_LightingLayout); }
     m_GBufferA.reset(); m_GBufferB.reset(); m_GBufferC.reset(); m_GBufferDepth.reset();
     m_HDRTarget.reset(); m_HDRDepth.reset(); m_HDRSampler.reset();
@@ -208,6 +210,28 @@ void DeferredPipeline::Shutdown() {
     for (auto& b : m_ShadowObjBuffers) b.reset();
     m_Device = nullptr; m_Ready = false;
     HE_CORE_INFO("DeferredPipeline shutdown");
+}
+
+rhi::DescriptorSetHandle DeferredPipeline::CreateTextureDescriptorSet(
+    rhi::IRHITexture* baseColor, rhi::IRHISampler* bcSampler,
+    rhi::IRHITexture* normal,   rhi::IRHISampler* nSampler,
+    rhi::IRHITexture* metallicRoughness, rhi::IRHISampler* mrSampler,
+    rhi::IRHITexture* occlusion, rhi::IRHISampler* ocSampler)
+{
+    if (!m_Device) return rhi::kInvalidSet;
+    auto set = m_Device->AllocateDescriptorSet(m_PerMeshLayout);
+    if (set == rhi::kInvalidSet) return set;
+
+    auto use = [&](u32 b, rhi::IRHITexture* t, rhi::IRHISampler* s) {
+        m_Device->UpdateDescriptorSet(set, b, rhi::DescriptorType::CombinedImageSampler,
+            t ? t : m_PlaceholderTex.get(),
+            s ? s : m_PlaceholderSamp.get());
+    };
+    use(5, baseColor, bcSampler);
+    use(6, normal, nSampler);
+    use(7, metallicRoughness, mrSampler);
+    use(8, occlusion, ocSampler);
+    return set;
 }
 
 void DeferredPipeline::NextFrame() {
@@ -256,10 +280,11 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     rg.AddPass("GB_Clear", {}, {{gbA, ResourceAccess::Write}, {gbB, ResourceAccess::Write},
         {gbC, ResourceAccess::Write}, {gbD, ResourceAccess::Write}},
         [&, w, h](rhi::IRHICommandList* c) {
+            // 更新 set=0 binding 2 到当前帧 ObjectBuffer
             m_Device->UpdateDescriptorSet(m_GBufferSet, 2, rhi::DescriptorType::StorageBuffer,
                 m_ObjectBuffers[m_CurrentFrameSlot].get());
             c->SetPipeline(m_GBufferPSO.get());
-            c->BindDescriptorSet(0, m_GBufferSet);
+            c->BindDescriptorSet(0, m_GBufferSet);  // set=0: per-frame ObjectBuffer
             rhi::ClearValue clears[4]{};
             clears[0].color[3]=1.0f; clears[1].color[3]=1.0f; clears[2].color[3]=1.0f; clears[3].depth=1.0f;
             void* cv[3] = {m_GBufferA->GetNativeHandle(), m_GBufferB->GetNativeHandle(), m_GBufferC->GetNativeHandle()};
@@ -273,6 +298,9 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 c->SetPushConstants(0, sizeof(pc), &pc);
                 c->SetVertexBuffer(di.mesh->GetVertexBuffer().get(), 0);
                 c->SetIndexBuffer(di.mesh->GetIndexBuffer().get());
+                // set=1: per-mesh 纹理（静态，无帧间竞态）
+                if (di.mesh->GetDescriptorSet() != rhi::kInvalidSet)
+                    c->BindDescriptorSet(1, di.mesh->GetDescriptorSet());
                 c->DrawIndexed(di.mesh->GetIndexCount());
             }
             c->EndOffscreenPass();

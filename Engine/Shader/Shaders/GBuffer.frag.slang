@@ -23,15 +23,17 @@ struct GPUObjectData {
     uint     _pad[2];
 };
 
+// set=0: per-frame GPUObjectData[]
 [[vk::binding(2, 0)]] StructuredBuffer<GPUObjectData> u_Objects;
-[[vk::binding(5, 0)]] Texture2D<float4> u_BaseColorTex;
-[[vk::binding(5, 0)]] SamplerState       u_BaseColorSampler;
-[[vk::binding(6, 0)]] Texture2D<float4> u_NormalTex;
-[[vk::binding(6, 0)]] SamplerState       u_NormalSampler;
-[[vk::binding(7, 0)]] Texture2D<float4> u_MetallicRoughnessTex;
-[[vk::binding(7, 0)]] SamplerState       u_MetallicRoughnessSampler;
-[[vk::binding(8, 0)]] Texture2D<float4> u_OcclusionTex;
-[[vk::binding(8, 0)]] SamplerState       u_OcclusionSampler;
+// set=1: per-mesh 静态纹理（永不更新，消除帧间竞态）
+[[vk::binding(5, 1)]] Texture2D<float4> u_BaseColorTex;
+[[vk::binding(5, 1)]] SamplerState       u_BaseColorSampler;
+[[vk::binding(6, 1)]] Texture2D<float4> u_NormalTex;
+[[vk::binding(6, 1)]] SamplerState       u_NormalSampler;
+[[vk::binding(7, 1)]] Texture2D<float4> u_MetallicRoughnessTex;
+[[vk::binding(7, 1)]] SamplerState       u_MetallicRoughnessSampler;
+[[vk::binding(8, 1)]] Texture2D<float4> u_OcclusionTex;
+[[vk::binding(8, 1)]] SamplerState       u_OcclusionSampler;
 
 [[vk::push_constant]] cbuffer FrameConstants {
     float4x4 viewProjMatrix;
