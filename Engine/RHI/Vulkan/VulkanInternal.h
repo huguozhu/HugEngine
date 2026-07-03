@@ -75,7 +75,86 @@ private:
 // ============================================================
 // VulkanCommandList — 完整定义（供 Sample 和内部分享）
 // ============================================================
-class VulkanDevice; // 前向声明
+// VulkanDevice 类定义在此处（不在 .cpp 中），因为 VulkanCommandList 需要其完整定义
+// 方法实现位于 VulkanDevice.cpp
+class VulkanDevice final : public IRHIDevice {
+public:
+    ~VulkanDevice() override;
+    Backend    GetBackend() const override { return Backend::Vulkan; }
+    DeviceCaps GetCaps()    const override;
+
+    void Initialize(const DeviceInitDesc& desc) override;
+    void Shutdown() override;
+
+    std::unique_ptr<IRHISwapChain>    CreateSwapChain(const SwapChainDesc& desc) override;
+    std::unique_ptr<IRHICommandList>  CreateCommandList(QueueType queue) override;
+    std::unique_ptr<IRHICommandList>  CreateSecondaryCommandList() override;
+    std::unique_ptr<IRHIBuffer>       CreateBuffer(const BufferDesc& desc) override;
+    std::unique_ptr<IRHITexture>      CreateTexture(const TextureDesc& desc) override;
+    std::unique_ptr<IRHISampler>      CreateSampler(const SamplerDesc& desc) override;
+    std::unique_ptr<IRHIPipelineState> CreatePipelineState(const PipelineStateDesc& desc) override;
+
+    void WaitIdle() override;
+    void Submit(IRHICommandList* cmdList) override;
+
+    // Descriptor Sets
+    DescriptorSetLayoutHandle CreateDescriptorSetLayout(const DescriptorSetLayoutDesc& desc) override;
+    DescriptorSetHandle       AllocateDescriptorSet(DescriptorSetLayoutHandle layout) override;
+    void                      UpdateDescriptorSet(DescriptorSetHandle set, u32 binding,
+                                                  DescriptorType type, IRHIBuffer* buffer) override;
+    void                      UpdateDescriptorSet(DescriptorSetHandle set, u32 binding,
+                                                  DescriptorType type, IRHITexture* texture,
+                                                  IRHISampler* sampler) override;
+    void                      DestroyDescriptorSetLayout(DescriptorSetLayoutHandle layout) override;
+
+    // Internal
+    VkDevice         GetVkDevice()     const { return m_Device; }
+    VkPhysicalDevice GetVkPhysical()   const { return m_Physical; }
+    VkInstance       GetVkInstance()   const { return m_Instance; }
+    VkSurfaceKHR     GetVkSurface()    const { return m_Surface; }
+    VkQueue          GetGraphicsQueue() const { return m_GraphicsQueue; }
+    VkCommandPool    GetGraphicsCmdPool() const { return m_GraphicsCmdPool; }
+    u32              GetGraphicsFamily() const { return m_GraphicsFamily; }
+
+    // Descriptor set handle 解析（供 VulkanCommandList 使用）
+    VkDescriptorSet ResolveDescriptorSet(DescriptorSetHandle h) const {
+        if (h == 0 || h > m_DescSets.size()) return VK_NULL_HANDLE;
+        return m_DescSets[static_cast<usize>(h - 1)];
+    }
+    VkDescriptorSetLayout ResolveDescriptorSetLayout(DescriptorSetLayoutHandle h) const {
+        if (h == 0 || h > m_DescSetLayouts.size()) return VK_NULL_HANDLE;
+        return m_DescSetLayouts[static_cast<usize>(h - 1)];
+    }
+
+private:
+    void CreateSurface(void* windowHandle);
+    void SelectPhysicalDevice();
+    void CreateLogicalDevice();
+    void CreateCommandPools();
+
+    VkInstance       m_Instance       = VK_NULL_HANDLE;
+    VkPhysicalDevice m_Physical       = VK_NULL_HANDLE;
+    VkDevice         m_Device         = VK_NULL_HANDLE;
+    VkSurfaceKHR     m_Surface        = VK_NULL_HANDLE;
+
+    VkQueue          m_GraphicsQueue   = VK_NULL_HANDLE;
+    u32              m_GraphicsFamily  = 0;
+
+    VkCommandPool    m_GraphicsCmdPool = VK_NULL_HANDLE;
+    VkCommandPool    m_ComputeCmdPool  = VK_NULL_HANDLE;
+
+    VkDebugUtilsMessengerEXT m_DebugMessenger = VK_NULL_HANDLE;
+    bool m_ValidationEnabled = false;
+
+    // Descriptor set management
+    VkDescriptorPool                  m_DescPool = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSetLayout> m_DescSetLayouts;
+    std::vector<VkDescriptorSet>       m_DescSets;
+    std::vector<DescriptorSetLayoutHandle> m_DescSetLayoutParents;  // layout handle per set
+
+    void EnsureDescriptorPool();
+    VkDescriptorType ToVkDescType(DescriptorType type) const;
+};
 
 class VulkanCommandList final : public IRHICommandList {
 public:
@@ -193,7 +272,7 @@ private:
 };
 
 // ============================================================
-// VulkanPipelineState — 完整定义（非 inline 方法在 VulkanResources.cpp）
+// VulkanPipelineState — 完整定义（析构实现在 VulkanPipeline.cpp）
 // ============================================================
 class VulkanPipelineState final : public IRHIPipelineState {
 public:
@@ -309,5 +388,11 @@ struct VulkanDeviceAccess {
     static VkQueue          GetGraphicsQueue(IRHIDevice* d);
     static VkCommandPool    GetGraphicsCmdPool(IRHIDevice* d);
 };
+
+// ============================================================
+// 格式转换辅助函数（跨 .cpp 共享，实现在 VulkanResources.cpp）
+// ============================================================
+VkFormat    ToVkFormat(Format fmt);
+VkCompareOp ToVkCompareOp(CompareFunc func);
 
 } // namespace he::rhi

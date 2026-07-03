@@ -21,7 +21,10 @@ if(HUGENGINE_RHI_VULKAN)
 
     target_sources(HugEngineRHI PRIVATE
         Vulkan/VulkanDevice.cpp
+        Vulkan/VulkanSwapChain.cpp
+        Vulkan/VulkanCommandList.cpp
         Vulkan/VulkanResources.cpp
+        Vulkan/VulkanPipeline.cpp
     )
     target_link_libraries(HugEngineRHI PUBLIC Vulkan::Vulkan)
     # 暴露 Vulkan 桥接头文件给 Sample（Phase 1 临时方案）
