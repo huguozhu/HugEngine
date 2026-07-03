@@ -453,10 +453,10 @@ void VulkanCommandList::BeginOffscreenPassMRT(
         return;
     }
 
-    // 构建附件列表：颜色在前，深度在后
-    VkImageView attachments[4] = {};
+    // 构建附件列表：颜色在前，深度在后；支持最多 4 个颜色附件 + 1 个深度附件（共 5 个）
+    VkImageView attachments[5] = {};
     u32 attachmentCount = 0;
-    for (u32 i = 0; i < colorCount && attachmentCount < 4; ++i)
+    for (u32 i = 0; i < colorCount && attachmentCount < 5; ++i)
         attachments[attachmentCount++] = static_cast<VkImageView>(colorImageViews[i]);
     auto depthView = static_cast<VkImageView>(depthImageView);
     u32 depthIndex = attachmentCount;
@@ -474,8 +474,8 @@ void VulkanCommandList::BeginOffscreenPassMRT(
     vkCreateFramebuffer(m_Device, &fbInfo, nullptr, &offscreenFB);
     m_CurrentOffscreenFB = offscreenFB;
 
-    // 清除值
-    VkClearValue vkClearValues[4]{};
+    // 清除值（最多 4 个颜色 + 1 个深度，共 5 个）
+    VkClearValue vkClearValues[5]{};
     u32 clearCount = 0;
     for (u32 i = 0; i < colorCount; ++i) {
         if (clears) {
