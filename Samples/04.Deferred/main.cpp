@@ -70,6 +70,7 @@ int main() {
 
     auto cmdList = device->CreateCommandList();
     cmdList->SetSwapChain(swapchain.get());
+    cmdList->SetPipeline(pipeline.GetToneMap()->GetPSO());  // 预设 BGRA8 RP，ImGui LoadOp 需要
 
     GLFWwindow* glfwWin = engine.GetWindow()->GetNativeHandle();
     editor::ImGuiIntegration imgui; imgui.Initialize(glfwWin, device.get(), swapchain.get());
