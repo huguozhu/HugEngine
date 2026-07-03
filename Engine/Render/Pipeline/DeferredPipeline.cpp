@@ -65,11 +65,19 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         m_ShadowObjBuffers[i]  = device->CreateBuffer({sizeof(GPUObjectData) * MAX_OBJECTS, rhi::BufferUsage::Storage});
     }
 
-    // 子系统
+    // 子系统（IBL/RSM 可选，初始化失败不影响核心渲染）
     m_ShadowSystem = std::make_unique<ShadowSystem>();
     m_ShadowSystem->Initialize(device, 0, 0);
-    auto gi = std::make_unique<GI_IBL>(); gi->Initialize(device, 0, 0); m_GI = std::move(gi);
-    m_RSM = std::make_unique<GI_RSM>(); m_RSM->Initialize(device, 0, 0);
+    try {
+        auto gi = std::make_unique<GI_IBL>();
+        gi->Initialize(device, 0, 0);
+        m_GI = std::move(gi);
+        HE_CORE_INFO("DeferredPipeline: GI_IBL ready");
+    } catch (...) {
+        HE_CORE_WARN("DeferredPipeline: GI_IBL init failed, IBL disabled");
+        m_GI.reset();
+    }
+    try { m_RSM = std::make_unique<GI_RSM>(); m_RSM->Initialize(device, 0, 0); } catch (...) { m_RSM.reset(); }
     m_ToneMap = std::make_unique<ToneMapPass>(); m_ToneMap->Initialize(device, m_Width, m_Height);
     m_Skybox  = std::make_unique<SkyboxPass>(); m_Skybox->Initialize(device, m_Width, m_Height);
     m_SceneRenderer = std::make_unique<SceneRenderer>();
@@ -233,7 +241,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
 
     auto* giIBL = dynamic_cast<GI_IBL*>(m_GI.get());
     ResourceHandle irr = kInvalidHandle, pref = kInvalidHandle, lut = kInvalidHandle;
-    if (giIBL && giIBL->GetIrradianceMap() && giIBL->GetPrefilterMap() && giIBL->GetBRDF_LUT()) {
+    bool hasIBL = (giIBL && giIBL->IsReady());
+    if (hasIBL && giIBL->GetIrradianceMap() && giIBL->GetPrefilterMap() && giIBL->GetBRDF_LUT()) {
         irr  = rg.ImportTexture("IBL_Irr", giIBL->GetIrradianceMap());
         pref = rg.ImportTexture("IBL_Pref", giIBL->GetPrefilterMap());
         lut  = rg.ImportTexture("IBL_LUT", giIBL->GetBRDF_LUT());
