@@ -26,13 +26,40 @@ if(SLANGC)
     set(SHADER_DIR   "${CMAKE_CURRENT_SOURCE_DIR}/Shaders")
     set(SPV_OUT_DIR  "${CMAKE_CURRENT_BINARY_DIR}/Shaders")
 
-    # 收集所有 .slang 文件
-    file(GLOB VERT_SLANG "${SHADER_DIR}/*.vert.slang")
-    file(GLOB FRAG_SLANG "${SHADER_DIR}/*.frag.slang")
-    file(GLOB COMP_SLANG "${SHADER_DIR}/*.comp.slang")
-    file(GLOB SLANG_INCLUDES "${SHADER_DIR}/*.slang")  # 公共头文件
+    # 显式列出所有需编译的 shader（file(GLOB) 无法跟踪新增文件，故用显式列表）
+    set(VERT_SLANG
+        "${SHADER_DIR}/DeferredLighting.vert.slang"
+        "${SHADER_DIR}/GBuffer.vert.slang"
+        "${SHADER_DIR}/IBL_BRDF_LUT.vert.slang"
+        "${SHADER_DIR}/IBL_Irradiance.vert.slang"
+        "${SHADER_DIR}/IBL_Prefilter.vert.slang"
+        "${SHADER_DIR}/PBR.vert.slang"
+        "${SHADER_DIR}/RSM_Generate.vert.slang"
+        "${SHADER_DIR}/Shadow.vert.slang"
+        "${SHADER_DIR}/Skybox.vert.slang"
+        "${SHADER_DIR}/TAA_Resolve.vert.slang"
+        "${SHADER_DIR}/ToneMap.vert.slang"
+        "${SHADER_DIR}/Triangle.vert.slang"
+    )
+    set(FRAG_SLANG
+        "${SHADER_DIR}/DeferredLighting.frag.slang"
+        "${SHADER_DIR}/GBuffer.frag.slang"
+        "${SHADER_DIR}/IBL_BRDF_LUT.frag.slang"
+        "${SHADER_DIR}/IBL_Irradiance.frag.slang"
+        "${SHADER_DIR}/IBL_Prefilter.frag.slang"
+        "${SHADER_DIR}/PBR.frag.slang"
+        "${SHADER_DIR}/RSM_Generate.frag.slang"
+        "${SHADER_DIR}/Shadow.frag.slang"
+        "${SHADER_DIR}/Skybox.frag.slang"
+        "${SHADER_DIR}/TAA_Resolve.frag.slang"
+        "${SHADER_DIR}/ToneMap.frag.slang"
+        "${SHADER_DIR}/Triangle.frag.slang"
+    )
+    set(COMP_SLANG
+        "${SHADER_DIR}/TestClear.comp.slang"
+    )
+    file(GLOB SLANG_INCLUDES "${SHADER_DIR}/*.slang")  # 公共头文件（用 glob 自动收集即可）
 
-    # 过滤出非编译文件（仅 include）
     set(COMPILE_SOURCES ${VERT_SLANG} ${FRAG_SLANG} ${COMP_SLANG})
     set(SPV_FILES "")
 
