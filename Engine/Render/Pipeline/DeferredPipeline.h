@@ -16,6 +16,7 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "PostProcess/SkyboxPass.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
+#include "AntiAliasing/AntiAliasing.h"
 
 #include <memory>
 #include <vector>
@@ -74,6 +75,9 @@ private:
 
     // GBuffer (graph-managed, OnResize 重建)
     std::unique_ptr<rhi::IRHITexture> m_GBufferA, m_GBufferB, m_GBufferC;
+    // GBuffer 第 4 张 MRT：velocity（RG16_FLOAT，UV 空间运动矢量）
+    std::unique_ptr<rhi::IRHITexture> m_GBufferD;
+    std::unique_ptr<rhi::IRHISampler> m_GBufferSampler;  // GBuffer 读取通用采样器
     std::unique_ptr<rhi::IRHITexture> m_GBufferDepth;
     std::unique_ptr<rhi::IRHIPipelineState> m_GBufferPSO;
     rhi::DescriptorSetLayoutHandle m_GBufferLayout = rhi::kInvalidLayout;   // set=0: per-frame
@@ -105,6 +109,13 @@ private:
     std::unique_ptr<ToneMapPass>         m_ToneMap;
     std::unique_ptr<SkyboxPass>          m_Skybox;
     std::unique_ptr<SceneRenderer>       m_SceneRenderer;
+
+    // 时域抗锯齿
+    std::unique_ptr<IAntiAliasing> m_AntiAliasing;
+
+    // 相机矩阵缓存（当前帧 + 上一帧，用于 velocity 计算和 TAA）
+    float4x4 m_PrevViewProj = float4x4(1.0f);
+    float4x4 m_CurrViewProj = float4x4(1.0f);
 
     u32 m_Width = 1920, m_Height = 1080;
     bool m_Ready = false;

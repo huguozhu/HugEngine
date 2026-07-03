@@ -5,6 +5,7 @@
 #include "PostProcess/ToneMapPass.h"
 #include "PostProcess/SkyboxPass.h"
 #include "SceneRenderer.h"
+#include "AntiAliasing/AA_TAA.h"
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
 #include "Scene/LightComponent.h"
@@ -40,6 +41,15 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         m_GBufferDepth = device->CreateTexture(d);
     }
 
+    // GBuffer D: velocity (RG16_FLOAT)
+    {
+        rhi::TextureDesc d;
+        d.format = rhi::Format::RG16_FLOAT;
+        d.width  = m_Width; d.height = m_Height;
+        d.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
+        m_GBufferD = device->CreateTexture(d);
+    }
+
     // HDR target
     {
         rhi::TextureDesc d;
@@ -55,6 +65,14 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         rhi::SamplerDesc s; s.minFilter = s.magFilter = rhi::FilterMode::Linear;
         s.addressU = s.addressV = rhi::AddressMode::ClampToEdge;
         m_HDRSampler = device->CreateSampler(s);
+    }
+
+    // GBuffer 读取采样器（线性 + Clamp to Edge，用于 TAA 采样 Depth/Normal/Velocity）
+    {
+        rhi::SamplerDesc sd;
+        sd.minFilter = sd.magFilter = rhi::FilterMode::Linear;
+        sd.addressU  = sd.addressV  = rhi::AddressMode::ClampToEdge;
+        m_GBufferSampler = device->CreateSampler(sd);
     }
 
     // 三缓冲
@@ -82,7 +100,14 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     m_Skybox  = std::make_unique<SkyboxPass>(); m_Skybox->Initialize(device, m_Width, m_Height);
     m_SceneRenderer = std::make_unique<SceneRenderer>();
 
-    // GBuffer PSO (3 MRT + D32, 拆分描述符集 set=0 + set=1)
+    // AA_TAA
+    m_AntiAliasing = std::make_unique<AA_TAA>();
+    if (!m_AntiAliasing->Initialize(device, m_Width, m_Height)) {
+        HE_CORE_WARN("DeferredPipeline: AA_TAA init failed, anti-aliasing disabled");
+        m_AntiAliasing.reset();
+    }
+
+    // GBuffer PSO (4 MRT + D32, 拆分描述符集 set=0 + set=1)
     // set=0: per-frame GPUObjectData[]（每帧更新 buffer 绑定）
     rhi::DescriptorSetLayoutDesc gbLayout;
     gbLayout.bindings = {
@@ -110,14 +135,15 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         {1,0,rhi::VertexFormat::Float3, offsetof(he::StaticVertex, normal)},
         {2,0,rhi::VertexFormat::Float2, offsetof(he::StaticVertex, uv)},
     };
-    rhi::PushConstantRange pc; pc.stageMask = 1|16; pc.size = 128;
+    rhi::PushConstantRange pc; pc.stageMask = 1|16; pc.size = 256; // 双矩阵 128B + objectIndex + padding
     rhi::PipelineStateDesc gbDesc;
     gbDesc.vertexShader = &gbVS; gbDesc.pixelShader = &gbFS;
     gbDesc.vertexLayout = vl;
     gbDesc.depthTest = true; gbDesc.depthWrite = true;
     gbDesc.depthFormat = rhi::Format::D32_FLOAT;
-    gbDesc.colorAttachmentCount = 3;
+    gbDesc.colorAttachmentCount = 4;
     gbDesc.colorFormats[0] = gbDesc.colorFormats[1] = gbDesc.colorFormats[2] = rhi::Format::RGBA16_FLOAT;
+    gbDesc.colorFormats[3] = rhi::Format::RG16_FLOAT;  // velocity
     gbDesc.pushConstantRanges = {pc};
     gbDesc.descriptorSetLayouts = {m_GBufferLayout, m_PerMeshLayout};
     gbDesc.debugName = "GBuffer";
@@ -202,6 +228,10 @@ void DeferredPipeline::Shutdown() {
     if (m_PerMeshLayout  != rhi::kInvalidLayout) { m_Device->DestroyDescriptorSetLayout(m_PerMeshLayout); }
     if (m_LightingLayout != rhi::kInvalidLayout) { m_Device->DestroyDescriptorSetLayout(m_LightingLayout); }
     m_GBufferA.reset(); m_GBufferB.reset(); m_GBufferC.reset(); m_GBufferDepth.reset();
+    m_GBufferD.reset();
+    m_GBufferSampler.reset();
+    if (m_AntiAliasing) m_AntiAliasing->Shutdown();
+    m_AntiAliasing.reset();
     m_HDRTarget.reset(); m_HDRDepth.reset(); m_HDRSampler.reset();
     m_GBufferPSO.reset(); m_LightingPSO.reset();
     for (auto& b : m_LightBuffers) b.reset();
@@ -249,11 +279,13 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
     r(m_GBufferA, rhi::Format::RGBA16_FLOAT, rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource);
     r(m_GBufferB, rhi::Format::RGBA16_FLOAT, rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource);
     r(m_GBufferC, rhi::Format::RGBA16_FLOAT, rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource);
+    r(m_GBufferD, rhi::Format::RG16_FLOAT, rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource);
     r(m_GBufferDepth, rhi::Format::D32_FLOAT, rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource);
     r(m_HDRTarget, rhi::Format::RGBA16_FLOAT, rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource);
     r(m_HDRDepth, rhi::Format::D32_FLOAT, rhi::TextureUsage::DepthStencil);
     if (m_ToneMap) m_ToneMap->OnResize(w, h);
     if (m_Skybox)  { m_Skybox->Shutdown(); m_Skybox->Initialize(m_Device, w, h); }
+    if (m_AntiAliasing) m_AntiAliasing->OnResize(w, h);
 }
 
 void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
@@ -271,30 +303,64 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     auto gbA = rg.ImportTexture("GB_A", m_GBufferA.get());
     auto gbB = rg.ImportTexture("GB_B", m_GBufferB.get());
     auto gbC = rg.ImportTexture("GB_C", m_GBufferC.get());
-    auto gbD = rg.ImportTexture("GB_D", m_GBufferDepth.get());
+    auto gbDepth = rg.ImportTexture("GB_Depth", m_GBufferDepth.get());
+    auto gbVel = rg.ImportTexture("GB_Vel", m_GBufferD.get());
     auto hdrC = rg.ImportTexture("HDR_C", m_HDRTarget.get());
     auto backBuf = rg.ImportBackBuffer();
-    (void)world; (void)sg; (void)camera;
 
-    // GBuffer MRT + SceneRenderer（无 draw，仅验证 Prepare 不崩溃）
+    // ── 帧首：记录当前帧 ViewProj + 合成抖动 ViewProj ──
+    float4x4 viewMat = camera.GetViewMatrix();
+    float4x4 projMat = camera.GetProjMatrix();
+    m_CurrViewProj = projMat * viewMat;
+
+    // 首帧：prev = curr（velocity 为零）
+    static bool firstFrame = true;
+    if (firstFrame) { m_PrevViewProj = m_CurrViewProj; firstFrame = false; }
+
+    // 带抖动的 ViewProj（TAA 子像素抖动，对投影矩阵第 3 列的 xy 做偏移）
+    float4x4 jitteredProj = projMat;
+    if (m_AntiAliasing && m_AntiAliasing->IsEnabled()) {
+        float2 jitter = m_AntiAliasing->GetJitterOffset();
+        jitteredProj[2][0] += jitter.x;  // proj[2][0] 映射 NDC x
+        jitteredProj[2][1] += jitter.y;  // proj[2][1] 映射 NDC y
+    }
+    float4x4 jitteredVP = jitteredProj * viewMat;
+
+    // TAA 帧首：推进抖动序列 + 交换历史缓冲
+    if (m_AntiAliasing) m_AntiAliasing->OnBeginFrame();
+
+    (void)world; (void)sg;
+
+    // GBuffer 4×MRT + SceneRenderer
     rg.AddPass("GB_Clear", {}, {{gbA, ResourceAccess::Write}, {gbB, ResourceAccess::Write},
-        {gbC, ResourceAccess::Write}, {gbD, ResourceAccess::Write}},
+        {gbC, ResourceAccess::Write}, {gbDepth, ResourceAccess::Write}, {gbVel, ResourceAccess::Write}},
         [&, w, h](rhi::IRHICommandList* c) {
             // 更新 set=0 binding 2 到当前帧 ObjectBuffer
             m_Device->UpdateDescriptorSet(m_GBufferSet, 2, rhi::DescriptorType::StorageBuffer,
                 m_ObjectBuffers[m_CurrentFrameSlot].get());
             c->SetPipeline(m_GBufferPSO.get());
             c->BindDescriptorSet(0, m_GBufferSet);  // set=0: per-frame ObjectBuffer
-            rhi::ClearValue clears[4]{};
-            clears[0].color[3]=1.0f; clears[1].color[3]=1.0f; clears[2].color[3]=1.0f; clears[3].depth=1.0f;
-            void* cv[3] = {m_GBufferA->GetNativeHandle(), m_GBufferB->GetNativeHandle(), m_GBufferC->GetNativeHandle()};
-            c->BeginOffscreenPassMRT(cv, 3, m_GBufferDepth->GetNativeHandle(), w, h, clears, false);
+            rhi::ClearValue clears[5]{};
+            clears[0].color[3] = 1.0f; clears[1].color[3] = 1.0f;
+            clears[2].color[3] = 1.0f; clears[3].color[0] = 0.0f; // velocity: 初始化为 0
+            clears[3].color[1] = 0.0f;
+            clears[4].depth    = 1.0f;
+            void* cv[4] = {m_GBufferA->GetNativeHandle(), m_GBufferB->GetNativeHandle(),
+                           m_GBufferC->GetNativeHandle(), m_GBufferD->GetNativeHandle()};
+            c->BeginOffscreenPassMRT(cv, 4, m_GBufferDepth->GetNativeHandle(), w, h, clears, false);
             c->SetViewport({0,(float)h,(float)w,-(float)h,0,1});
             c->SetScissor({0,0,w,h});
             auto drawItems = m_SceneRenderer->Prepare(world, sg, camera, m_ObjectBuffers[m_CurrentFrameSlot].get());
             for (auto& di : drawItems) {
-                struct { float4x4 vp; u32 oi; u32 _pad[12]; } pc;
-                pc.vp = camera.GetViewProjMatrix(); pc.oi = di.objectIndex;
+                struct {
+                    float4x4 viewProjMatrix;
+                    float4x4 prevViewProjMatrix;
+                    u32      objectIndex;
+                    u32      _pad[15];
+                } pc;
+                pc.viewProjMatrix     = jitteredVP;
+                pc.prevViewProjMatrix = m_PrevViewProj;
+                pc.objectIndex        = di.objectIndex;
                 c->SetPushConstants(0, sizeof(pc), &pc);
                 c->SetVertexBuffer(di.mesh->GetVertexBuffer().get(), 0);
                 c->SetIndexBuffer(di.mesh->GetIndexBuffer().get());
@@ -333,16 +399,53 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             c->EndOffscreenPass();
         });
 
+    // TAA Resolve Pass — 在 HDR 空间做时域抗锯齿
+    rg.AddPass("TAA_Resolve",
+        {{hdrC, ResourceAccess::Read}},
+        {}, // TAA 写自己的 HistoryColor（自拥有），不写入 graph 管理的外部 RT
+        [&, h = m_Height, w = m_Width](rhi::IRHICommandList* c) {
+            if (!m_AntiAliasing || !m_AntiAliasing->IsEnabled()) return;
+
+            // 设置输入：HDR 颜色 + GBuffer 辅助纹理
+            m_AntiAliasing->SetInput(m_HDRTarget.get(), m_HDRSampler.get());
+            auto* taa = static_cast<AA_TAA*>(m_AntiAliasing.get());
+            taa->SetGBufferInputs(m_GBufferDepth.get(),
+                                   m_GBufferB.get(),
+                                   m_GBufferD.get());
+
+            // 更新 TAA uniform buffer
+            float4x4 invCurrVP = glm::inverse(m_CurrViewProj);
+            taa->UpdateUniforms(
+                m_PrevViewProj, invCurrVP, m_Width, m_Height);
+
+            // Barrier：HDR 从 RenderTarget 转为 ShaderResource
+            c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput,
+                               rhi::PipelineStage::FragmentShader,
+                               rhi::ResourceState::RenderTarget,
+                               rhi::ResourceState::ShaderResource,
+                               m_HDRTarget.get());
+
+            m_AntiAliasing->Render(c);
+        });
+
     rg.AddPass("ToneMap", {}, {{backBuf, ResourceAccess::Write}},
         [this](rhi::IRHICommandList* c) {
             c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput, rhi::PipelineStage::FragmentShader,
                 rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, m_HDRTarget.get());
-            m_ToneMap->SetInput(m_HDRTarget.get(), m_HDRSampler.get());
+            if (m_AntiAliasing && m_AntiAliasing->IsEnabled()) {
+                m_ToneMap->SetInput(m_AntiAliasing->GetOutputTexture(),
+                                    m_AntiAliasing->GetOutputSampler());
+            } else {
+                m_ToneMap->SetInput(m_HDRTarget.get(), m_HDRSampler.get());
+            }
             m_ToneMap->PreBind(c);
             c->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
             m_ToneMap->Render(c);
             c->EndRenderPass();
         });
+
+    // ── 帧末：保存当前帧 VP 供下一帧使用 ──
+    m_PrevViewProj = m_CurrViewProj;
 }
 
 void DeferredPipeline::CollectLights(PushConstantData& pc, he::World& world,
