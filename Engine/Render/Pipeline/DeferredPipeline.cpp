@@ -288,26 +288,25 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             c->PipelineBarrier(rhi::PipelineStage::LateFragmentTests, rhi::PipelineStage::FragmentShader,
                 rhi::ResourceState::DepthStencilWrite, rhi::ResourceState::DepthStencilRead, m_GBufferDepth.get());
             // 绑定 Lighting 描述符 (GBuffer + Shadow + IBL)
-            m_Device->UpdateDescriptorSet(m_LightingSet, 0, rhi::DescriptorType::CombinedImageSampler,
-                m_GBufferA.get(), m_HDRSampler.get());
-            m_Device->UpdateDescriptorSet(m_LightingSet, 1, rhi::DescriptorType::CombinedImageSampler,
-                m_GBufferB.get(), m_HDRSampler.get());
-            m_Device->UpdateDescriptorSet(m_LightingSet, 2, rhi::DescriptorType::CombinedImageSampler,
-                m_GBufferC.get(), m_HDRSampler.get());
-            m_Device->UpdateDescriptorSet(m_LightingSet, 3, rhi::DescriptorType::CombinedImageSampler,
-                m_GBufferDepth.get(), m_HDRSampler.get());
-            if (m_ShadowSystem->GetShadowMap(0))
-                m_Device->UpdateDescriptorSet(m_LightingSet, 4, rhi::DescriptorType::CombinedImageSampler,
-                    m_ShadowSystem->GetShadowMap(0), m_ShadowSystem->GetShadowSampler());
-            if (giIBL && giIBL->GetIrradianceMap() && giIBL->GetIBLSampler())
-                m_Device->UpdateDescriptorSet(m_LightingSet, 12, rhi::DescriptorType::CombinedImageSampler,
-                    giIBL->GetIrradianceMap(), giIBL->GetIBLSampler());
-            if (giIBL && giIBL->GetPrefilterMap() && giIBL->GetIBLSampler())
-                m_Device->UpdateDescriptorSet(m_LightingSet, 13, rhi::DescriptorType::CombinedImageSampler,
-                    giIBL->GetPrefilterMap(), giIBL->GetIBLSampler());
-            if (giIBL && giIBL->GetBRDF_LUT() && giIBL->GetIBLSampler())
-                m_Device->UpdateDescriptorSet(m_LightingSet, 14, rhi::DescriptorType::CombinedImageSampler,
-                    giIBL->GetBRDF_LUT(), giIBL->GetIBLSampler());
+            auto bindTex = [&](u32 b, rhi::IRHITexture* t, rhi::IRHISampler* s) {
+                if (t && s) m_Device->UpdateDescriptorSet(m_LightingSet, b,
+                    rhi::DescriptorType::CombinedImageSampler, t, s);
+            };
+            bindTex(0, m_GBufferA.get(), m_HDRSampler.get());
+            bindTex(1, m_GBufferB.get(), m_HDRSampler.get());
+            bindTex(2, m_GBufferC.get(), m_HDRSampler.get());
+            bindTex(3, m_GBufferDepth.get(), m_HDRSampler.get());
+            if (m_ShadowSystem && m_ShadowSystem->GetShadowMap(0))
+                bindTex(4, m_ShadowSystem->GetShadowMap(0), m_ShadowSystem->GetShadowSampler());
+            // IBL (可选，从 m_GI 直接访问避免悬空引用)
+            if (m_GI && m_GI->IsReady()) {
+                auto* ibl = dynamic_cast<GI_IBL*>(m_GI.get());
+                if (ibl) {
+                    bindTex(12, ibl->GetIrradianceMap(), ibl->GetIBLSampler());
+                    bindTex(13, ibl->GetPrefilterMap(), ibl->GetIBLSampler());
+                    bindTex(14, ibl->GetBRDF_LUT(), ibl->GetIBLSampler());
+                }
+            }
             m_Device->UpdateDescriptorSet(m_LightingSet, 17, rhi::DescriptorType::StorageBuffer,
                 m_LightBuffers[m_CurrentFrameSlot].get());
             m_Device->UpdateDescriptorSet(m_LightingSet, 18, rhi::DescriptorType::StorageBuffer,
