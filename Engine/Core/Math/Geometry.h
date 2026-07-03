@@ -55,16 +55,20 @@ struct AABB {
     }
 };
 
+// 前向声明（Frustum::Intersects(Sphere) 需要）
+struct Sphere;
+
 // --- Frustum (6 planes, view-projection space) ---
 struct Frustum {
     // Plane: normal.xyz, distance.w (ax + by + cz + d = 0)
     float4 planes[6]; // Left, Right, Top, Bottom, Near, Far
 
-    // Extract frustum planes from a view-projection matrix
+    // 从视图投影矩阵提取 6 个裁剪平面（Gribb/Hartmann 方法）
     static Frustum FromViewProj(const float4x4& vp);
 
-    // Culling tests
+    // 剔除测试
     bool Intersects(const AABB& box) const;
+    bool Intersects(const Sphere& sphere) const;
     bool Contains(const float3& point) const;
 };
 
@@ -78,8 +82,13 @@ struct Ray {
 
     float3 PointAt(float t) const { return origin + direction * t; }
 
-    // Ray-AABB intersection (slab method)
+    // Ray-AABB 相交（slab 方法），返回 tMin/tMax
     bool IntersectsAABB(const AABB& box, float& tMin, float& tMax) const;
+    // Ray-Sphere 相交
+    bool IntersectsSphere(const Sphere& sphere, float& t) const;
+    // Ray-Triangle 相交（Möller-Trumbore 算法）
+    bool IntersectsTriangle(const float3& v0, const float3& v1,
+                            const float3& v2, float& t, float& u, float& v) const;
 };
 
 // --- Sphere ---
