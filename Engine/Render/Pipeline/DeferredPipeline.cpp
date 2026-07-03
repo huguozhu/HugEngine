@@ -290,13 +290,13 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             if (m_ShadowSystem->GetShadowMap(0))
                 m_Device->UpdateDescriptorSet(m_LightingSet, 4, rhi::DescriptorType::CombinedImageSampler,
                     m_ShadowSystem->GetShadowMap(0), m_ShadowSystem->GetShadowSampler());
-            if (giIBL && giIBL->GetIrradianceMap())
+            if (giIBL && giIBL->GetIrradianceMap() && giIBL->GetIBLSampler())
                 m_Device->UpdateDescriptorSet(m_LightingSet, 12, rhi::DescriptorType::CombinedImageSampler,
                     giIBL->GetIrradianceMap(), giIBL->GetIBLSampler());
-            if (giIBL && giIBL->GetPrefilterMap())
+            if (giIBL && giIBL->GetPrefilterMap() && giIBL->GetIBLSampler())
                 m_Device->UpdateDescriptorSet(m_LightingSet, 13, rhi::DescriptorType::CombinedImageSampler,
                     giIBL->GetPrefilterMap(), giIBL->GetIBLSampler());
-            if (giIBL && giIBL->GetBRDF_LUT())
+            if (giIBL && giIBL->GetBRDF_LUT() && giIBL->GetIBLSampler())
                 m_Device->UpdateDescriptorSet(m_LightingSet, 14, rhi::DescriptorType::CombinedImageSampler,
                     giIBL->GetBRDF_LUT(), giIBL->GetIBLSampler());
             m_Device->UpdateDescriptorSet(m_LightingSet, 17, rhi::DescriptorType::StorageBuffer,
