@@ -253,7 +253,7 @@ VulkanTexture::VulkanTexture(VmaAllocator allocator, VkCommandPool cmdPool, VkQu
     vmaGetAllocatorInfo(allocator, &allocInfo);
     m_Device = allocInfo.device;
 
-    // 1. 创建 VkImage
+    // 1. VMA 一步创建 VkImage + 分配 + 绑定（VMA_MEMORY_USAGE_AUTO 需资源创建上下文）
     bool isCubemap = u32(desc.usage) & u32(TextureUsage::Cubemap);
     VkImageCreateInfo imageInfo{};
     imageInfo.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -274,18 +274,12 @@ VulkanTexture::VulkanTexture(VmaAllocator allocator, VkCommandPool cmdPool, VkQu
     if (desc.initialData)
         imageInfo.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 
-    VkResult result = vkCreateImage(m_Device, &imageInfo, nullptr, &m_Image);
-    HE_ASSERT(result == VK_SUCCESS, "Failed to create Vulkan image");
-
-    // 2. VMA 分配并绑定内存（DEVICE_LOCAL，GPU 专用）
     VmaAllocationCreateInfo allocCreateInfo{};
     allocCreateInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
 
-    result = vmaAllocateMemoryForImage(allocator, m_Image, &allocCreateInfo,
-                                        &m_Allocation, nullptr);
-    HE_ASSERT(result == VK_SUCCESS, "VMA: Failed to allocate texture memory");
-
-    vmaBindImageMemory(allocator, m_Allocation, m_Image);
+    VkResult result = vmaCreateImage(allocator, &imageInfo, &allocCreateInfo,
+                                      &m_Image, &m_Allocation, nullptr);
+    HE_ASSERT(result == VK_SUCCESS, "VMA: Failed to create texture");
 
     // 3. 上传初始数据（如果有）
     if (desc.initialData)
