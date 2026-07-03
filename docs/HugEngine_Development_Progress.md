@@ -161,9 +161,11 @@ Engine/RHI/Vulkan/  (拆分为 5 个文件)
 | 10 | DeferredPipeline (GBuffer + LightPass + Sponza) | ✅ |
 | 11 | IPostProcessPass + IAntiAliasing 接口架构 | ✅ |
 | — | AA_TAA 实现（含 Velocity Buffer 4 MRT GBuffer） | ✅ |
-| — | AA_MSAA 实现 | ⬜ |
+| — | VMA 集成（Vulkan Memory Allocator 替换裸 vkAllocateMemory） | ✅ |
+| — | Shader Hot Reload（Editor 模式 .slang 文件监控 + 自动重编译 + PSO 热替换） | 📋 |
+| — | Clustered Shading（视锥空间 Cluster 划分 + 光源剔除） | ⬜ |
+| — | SSAO / SSR 屏幕空间效果 | ⬜ |
 | — | AA_FXAA 实现 | ⬜ |
-| — | 管线 AA 集成（ForwardPipeline + DeferredPipeline） | ⬜ |
 | — | FullScene 拆分为独立 Shadow/IBL/HDR Pass | ⬜ |
 | — | Bindless 纹理数组 | ⬜ |
 | — | GPU Culling (Compute Shader 视锥剔除) | ⬜ |

@@ -62,14 +62,8 @@ struct GPUShadowData {
 [[vk::binding(4, 0)]] SamplerState u_ShadowSampler;
 [[vk::binding(10, 0)]] Texture2D<float> u_ShadowMap1;  // CSM cascade 1
 [[vk::binding(11, 0)]] Texture2D<float> u_ShadowMap2;  // CSM cascade 2
-[[vk::binding(5, 1)]] Texture2D<float4> u_BaseColorTex;
-[[vk::binding(5, 1)]] SamplerState u_BaseColorSampler;
-[[vk::binding(6, 1)]] Texture2D<float4> u_NormalTex;
-[[vk::binding(6, 1)]] SamplerState u_NormalSampler;
-[[vk::binding(7, 1)]] Texture2D<float4> u_MetallicRoughnessTex;
-[[vk::binding(7, 1)]] SamplerState u_MetallicRoughnessSampler;
-[[vk::binding(8, 1)]] Texture2D<float4> u_OcclusionTex;
-[[vk::binding(8, 1)]] SamplerState u_OcclusionSampler;
+// Bindless 纹理通过 u_Textures[] / u_Samplers[] 访问（common.slang 声明）
+// 偏移: materialID + 0 = BaseColor, +1 = Normal, +2 = MetallicRoughness, +3 = Occlusion
 [[vk::binding(9, 0)]] TextureCube<float> u_PointShadowCube;
 [[vk::binding(9, 0)]] SamplerState u_PointShadowSampler;
 // IBL 纹理
@@ -101,21 +95,22 @@ float3 ACESFilm(float3 x) {
 float4 fragmentMain(FSInput input) : SV_Target0 {
     GPUObjectData obj = u_Objects[objectIndex];
 
-    float4 baseColorSample = u_BaseColorTex.Sample(u_BaseColorSampler, input.uv);
+    uint texBase = obj.materialID;
+    float4 baseColorSample = u_Textures[texBase + 0].Sample(u_Samplers[0], input.uv);
     float3 albedo = obj.baseColorFactor.rgb * baseColorSample.rgb;
     float alpha   = obj.baseColorFactor.a * baseColorSample.a;
     if (alpha < obj.alphaCutoff) discard;
 
     // 法线贴图
-    float3 texNormal = u_NormalTex.Sample(u_NormalSampler, input.uv).rgb * 2.0 - 1.0;
+    float3 texNormal = u_Textures[texBase + 1].Sample(u_Samplers[0], input.uv).rgb * 2.0 - 1.0;
     float3 N = normalize(input.worldNormal + texNormal * 0.5);
     float3 V = normalize(cameraPosition.xyz - input.worldPos);
 
     // 金属度/粗糙度贴图
-    float4 mrSample = u_MetallicRoughnessTex.Sample(u_MetallicRoughnessSampler, input.uv);
+    float4 mrSample = u_Textures[texBase + 2].Sample(u_Samplers[0], input.uv);
     float metallic  = obj.metallicFactor  * mrSample.b;
     float roughness = clamp(obj.roughnessFactor * mrSample.g, 0.04, 1.0);
-    float ao = obj.aoFactor * u_OcclusionTex.Sample(u_OcclusionSampler, input.uv).r;
+    float ao = obj.aoFactor * u_Textures[texBase + 3].Sample(u_Samplers[0], input.uv).r;
 
     // 多光源循环
     float3 color = albedo * 0.08 * ao;  // 低环境光，避免过曝，让光源主导照明

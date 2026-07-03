@@ -3,6 +3,7 @@ add_library(HugEngineAsset STATIC)
 
 target_sources(HugEngineAsset PRIVATE
     Private/glTFLoader.cpp
+    Private/BindlessTextureManager.cpp
 )
 
 target_include_directories(HugEngineAsset

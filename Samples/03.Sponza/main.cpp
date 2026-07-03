@@ -20,6 +20,7 @@
 #include "Scene/SphereComponent.h"
 #include "Scene/SkyboxComponent.h"
 #include "Asset/glTFLoader.h"
+#include "Asset/BindlessTextureManager.h"
 #include "Editor/ImGuiIntegration.h"
 #include "imgui.h"
 
@@ -364,21 +365,32 @@ int main() {
         return {it->second.first.get(), it->second.second.get()};
     };
 
+    // 创建 bindless 默认占位纹理（必须在 RegisterMaterial 之前）
     {
-        u32 texCount = 0;
-        world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent& mesh) {
-            auto [bcTex, bcSamp] = loadTexture(mesh.baseColorTexture);
-            mesh.SetBaseColorTexture(bcTex, bcSamp);
-            auto [nTex, nSamp] = loadTexture(mesh.normalTexture);
-            mesh.SetNormalTexture(nTex, nSamp);
-            auto [mrTex, mrSamp] = loadTexture(mesh.metallicRoughnessTexture);
-            mesh.SetMetallicRoughnessTexture(mrTex, mrSamp);
-            auto [aoTex, aoSamp] = loadTexture(mesh.occlusionTexture);
-            mesh.SetOcclusionTexture(aoTex, aoSamp);
-            texCount++;
-        });
-        HE_CORE_INFO("纹理加载完成: {} primitive, {} 张独立纹理", texCount, g_TexCache.size());
+        u8 white[4]={255,255,255,255};
+        rhi::TextureDesc td; td.format=rhi::Format::RGBA8_UNORM;
+        td.width=1; td.height=1; td.mipLevels=1;
+        td.usage=rhi::TextureUsage::ShaderResource; td.initialData=white;
+        auto defaultTex = device->CreateTexture(td);
+        rhi::SamplerDesc sd; sd.minFilter=sd.magFilter=rhi::FilterMode::Linear;
+        sd.addressU=sd.addressV=rhi::AddressMode::Repeat;
+        auto defaultSamp = device->CreateSampler(sd);
+        he::asset::BindlessTextureManager::Instance().SetDefaultTexture(
+            defaultTex.get(), defaultSamp.get());
+        g_TexCache["__default__"] = {std::move(defaultTex), std::move(defaultSamp)};
     }
+
+    // 加载纹理 + 注册到 BindlessTextureManager
+    world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent& mesh) {
+        auto [bcTex, bcSamp] = loadTexture(mesh.baseColorTexture);
+        auto [nTex, nSamp] = loadTexture(mesh.normalTexture);
+        auto [mrTex, mrSamp] = loadTexture(mesh.metallicRoughnessTexture);
+        auto [aoTex, aoSamp] = loadTexture(mesh.occlusionTexture);
+        u32 matID = he::asset::BindlessTextureManager::Instance().RegisterMaterial(
+            bcTex, bcSamp, nTex, nSamp, mrTex, mrSamp, aoTex, aoSamp);
+        mesh.materialID = matID;
+    });
+    HE_CORE_INFO("纹理加载 + 注册完成: {} 张独立纹理", g_TexCache.size());
 
     // ============================================================
     // 5. 初始化前向管线
@@ -389,19 +401,6 @@ int main() {
     pipeline.SetSwapChain(swapchain.get());
     // 同步 HDR 离屏渲染尺寸与 SwapChain
     pipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
-
-    // 为每个 primitive 创建独立描述符集（纹理已写入，渲染时只 bind 不 update）
-    u32 descSetOk = 0, descSetFail = 0;
-    world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent& mesh) {
-        auto set = pipeline.CreateTextureDescriptorSet(
-            mesh.GetBaseColorGPUTexture(), mesh.GetBaseColorGPUSampler(),
-            mesh.GetNormalGPUTexture(), mesh.GetNormalGPUSampler(),
-            mesh.GetMetallicRoughnessGPUTexture(), mesh.GetMetallicRoughnessGPUSampler(),
-            mesh.GetOcclusionGPUTexture(), mesh.GetOcclusionGPUSampler());
-        mesh.SetDescriptorSet(set);
-        if (set != rhi::kInvalidSet) descSetOk++; else descSetFail++;
-    });
-    HE_CORE_INFO("描述符集分配: {} 成功, {} 失败", descSetOk, descSetFail);
 
     // ============================================================
     // 6. 创建命令列表

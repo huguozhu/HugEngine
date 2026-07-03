@@ -55,14 +55,16 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     m_ShadowSystem->Initialize(device, 0, 0);
     HE_CORE_INFO("ForwardPipeline: ShadowSystem initialized");
 
-    // --- 主管线 DescriptorSetLayout（拆分为 set=0 per-frame + set=1 per-mesh）---
-    // set=0: per-frame 动态数据（三缓冲，每帧更新 buffer 绑定）
+    // --- 主管线 DescriptorSetLayout（set=0: per-frame + bindless 纹理/采样器）---
+    // set=0: per-frame 动态数据 + 全局 bindless 纹理数组
     rhi::DescriptorSetLayoutDesc perFrameLayoutDesc;
     perFrameLayoutDesc.bindings = {
         { 1,  rhi::DescriptorType::StorageBuffer,        1, 16 },  // GPULight[]
         { 2,  rhi::DescriptorType::StorageBuffer,        1, 17 },  // GPUObjectData[]
         { 3,  rhi::DescriptorType::StorageBuffer,        1, 16 },  // GPUShadowData[]
         { 4,  rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // CSM cascade 0
+        { 5,  rhi::DescriptorType::SampledImage,  4096, 16, true },  // u_Textures[] bindless
+        { 6,  rhi::DescriptorType::Sampler,       4096, 16, true },  // u_Samplers[] bindless
         { 9,  rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Point Shadow Cubemap
         { 10, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // CSM cascade 1
         { 11, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // CSM cascade 2
@@ -74,17 +76,7 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     };
     m_PerFrameLayout = device->CreateDescriptorSetLayout(perFrameLayoutDesc);
 
-    // set=1: per-mesh 静态纹理（每个 mesh 独立创建，永不更新，消除帧间竞态）
-    rhi::DescriptorSetLayoutDesc perMeshLayoutDesc;
-    perMeshLayoutDesc.bindings = {
-        { 5, rhi::DescriptorType::CombinedImageSampler, 1, 16 },  // BaseColor
-        { 6, rhi::DescriptorType::CombinedImageSampler, 1, 16 },  // Normal
-        { 7, rhi::DescriptorType::CombinedImageSampler, 1, 16 },  // MetallicRoughness
-        { 8, rhi::DescriptorType::CombinedImageSampler, 1, 16 },  // Occlusion
-    };
-    m_PerMeshLayout = device->CreateDescriptorSetLayout(perMeshLayoutDesc);
-
-    // 用 per-frame 布局创建 Shadow PSO（Shadow 不需要 set=1 的纹理绑定）
+    // 用 per-frame 布局创建 Shadow PSO（阴影通道不需要 per-mesh 纹理绑定）
     m_ShadowSystem->CreateShadowPSO(m_PerFrameLayout);
 
     // --- 创建三缓冲 Storage Buffers（Phase 1 多线程渲染）---
@@ -111,27 +103,26 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         m_ShadowObjBuffers[i] = device->CreateBuffer(shadowObjDesc);
     }
 
-    // --- 创建纹理采样器（通用）---
-    // 基础色纹理 + 采样器（默认 1×1 白色）
+    // --- 创建 bindless 占位纹理 + 采样器 ---
     {
         u8 white4[4] = { 255, 255, 255, 255 };
-        rhi::TextureDesc whiteTexDesc;
-        whiteTexDesc.format      = rhi::Format::RGBA8_UNORM;
-        whiteTexDesc.width       = 1;
-        whiteTexDesc.height      = 1;
-        whiteTexDesc.usage       = rhi::TextureUsage::ShaderResource;
-        whiteTexDesc.initialData = white4;
-        m_DefaultBaseColorTex = device->CreateTexture(whiteTexDesc);
+        rhi::TextureDesc texDesc;
+        texDesc.format      = rhi::Format::RGBA8_UNORM;
+        texDesc.width       = 1;
+        texDesc.height      = 1;
+        texDesc.usage       = rhi::TextureUsage::ShaderResource;
+        texDesc.initialData = white4;
+        m_BindlessPlaceholder = device->CreateTexture(texDesc);
 
-        rhi::SamplerDesc defaultSampDesc;
-        defaultSampDesc.minFilter = rhi::FilterMode::Linear;
-        defaultSampDesc.magFilter = rhi::FilterMode::Linear;
-        defaultSampDesc.addressU  = rhi::AddressMode::Repeat;
-        defaultSampDesc.addressV  = rhi::AddressMode::Repeat;
-        m_DefaultBaseColorSampler = device->CreateSampler(defaultSampDesc);
+        rhi::SamplerDesc sampDesc;
+        sampDesc.minFilter = rhi::FilterMode::Linear;
+        sampDesc.magFilter = rhi::FilterMode::Linear;
+        sampDesc.addressU  = rhi::AddressMode::Repeat;
+        sampDesc.addressV  = rhi::AddressMode::Repeat;
+        m_BindlessSampler = device->CreateSampler(sampDesc);
     }
 
-    // --- 分配三缓冲共享描述符集（set=0: per-frame 动态数据）---
+    // --- 分配三缓冲共享描述符集（set=0: per-frame + bindless）---
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
         rhi::DescriptorSetHandle set = device->AllocateDescriptorSet(m_PerFrameLayout);
         device->UpdateDescriptorSet(set, 1, rhi::DescriptorType::StorageBuffer,
@@ -146,6 +137,15 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
             device->UpdateDescriptorSet(set, binding, rhi::DescriptorType::CombinedImageSampler,
                 m_ShadowSystem->GetShadowMap(c), m_ShadowSystem->GetShadowSampler());
         }
+        // 绑定 5-6: bindless 占位符（BindlessTextureManager 在渲染时更新）
+        {
+            rhi::IRHITexture* texPtrs[] = { m_BindlessPlaceholder.get() };
+            rhi::IRHISampler* sampPtrs[] = { m_BindlessSampler.get() };
+            device->UpdateDescriptorSet(set, 5, rhi::DescriptorType::SampledImage,
+                texPtrs, nullptr, 1);
+            device->UpdateDescriptorSet(set, 6, rhi::DescriptorType::Sampler,
+                nullptr, sampPtrs, 1);
+        }
         // 绑定 9: 点光源阴影 Cubemap（来自 ShadowSystem）
         device->UpdateDescriptorSet(set, 9,
             rhi::DescriptorType::CombinedImageSampler,
@@ -159,14 +159,14 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
             m_ShadowSystem->GetPointShadowMap(), m_ShadowSystem->GetPointShadowSampler());
         device->UpdateDescriptorSet(set, 14,
             rhi::DescriptorType::CombinedImageSampler,
-            m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
+            m_BindlessPlaceholder.get(), m_BindlessSampler.get());
         // 绑定 15-16: RSM 纹理占位（GI_RSM 渲染后替换）
         device->UpdateDescriptorSet(set, 15,
             rhi::DescriptorType::CombinedImageSampler,
-            m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
+            m_BindlessPlaceholder.get(), m_BindlessSampler.get());
         device->UpdateDescriptorSet(set, 16,
             rhi::DescriptorType::CombinedImageSampler,
-            m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
+            m_BindlessPlaceholder.get(), m_BindlessSampler.get());
         m_DescSets[i] = set;
     }
     // 初始化时使用第一个槽位
@@ -190,7 +190,7 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     psoDesc.colorAttachmentCount = 1;
     psoDesc.colorFormats[0]      = rhi::Format::RGBA16_FLOAT;  // HDR 离屏目标
     psoDesc.pushConstantRanges   = { pcRange };
-    psoDesc.descriptorSetLayouts = { m_PerFrameLayout, m_PerMeshLayout };
+    psoDesc.descriptorSetLayouts = { m_PerFrameLayout };  // 仅 set=0，bindless 统一管理
     psoDesc.debugName            = "ForwardPBR";
 
     m_PBR_PSO = device->CreatePipelineState(psoDesc);
@@ -264,7 +264,6 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
 void ForwardPipeline::Shutdown() {
     if (m_Device) {
         m_Device->DestroyDescriptorSetLayout(m_PerFrameLayout);
-        m_Device->DestroyDescriptorSetLayout(m_PerMeshLayout);
     }
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
         m_LightBuffers[i].reset();
@@ -288,31 +287,6 @@ void ForwardPipeline::Shutdown() {
 
     m_Device = nullptr;
     HE_CORE_INFO("ForwardPipeline shut down");
-}
-
-rhi::DescriptorSetHandle ForwardPipeline::CreateTextureDescriptorSet(
-    rhi::IRHITexture* baseColor, rhi::IRHISampler* bcSampler,
-    rhi::IRHITexture* normal,   rhi::IRHISampler* nSampler,
-    rhi::IRHITexture* metallicRoughness, rhi::IRHISampler* mrSampler,
-    rhi::IRHITexture* occlusion, rhi::IRHISampler* ocSampler)
-{
-    if (!m_Device) return rhi::kInvalidSet;
-    // set=1: per-mesh 静态纹理（独立布局，不含 buffer 绑定，永不更新）
-    auto set = m_Device->AllocateDescriptorSet(m_PerMeshLayout);
-    if (set == rhi::kInvalidSet) return set;
-
-    // 纹理绑定 5-8（使用默认纹理作为回退）
-    auto use = [&](u32 b, rhi::IRHITexture* t, rhi::IRHISampler* s) {
-        m_Device->UpdateDescriptorSet(set, b, rhi::DescriptorType::CombinedImageSampler,
-            t ? t : m_DefaultBaseColorTex.get(),
-            s ? s : m_DefaultBaseColorSampler.get());
-    };
-    use(5, baseColor, bcSampler);
-    use(6, normal, nSampler);
-    use(7, metallicRoughness, mrSampler);
-    use(8, occlusion, ocSampler);
-
-    return set;
 }
 
 void ForwardPipeline::NextFrame() {
@@ -685,8 +659,12 @@ void ForwardPipeline::RenderScene(
                                                m_ObjectBuffers[m_CurrentFrameSlot].get());
     u32 totalDraws = (u32)drawItems.size();
 
+    // 更新 bindless 纹理数组（首个 draw 前推送到 GPU）
+    he::asset::BindlessTextureManager::Instance().UpdateDescriptorSet(
+        m_Device, m_DescSets[m_CurrentFrameSlot], 5, 6);
+
     // ============================================================
-    // 录制绘制命令（ForwardPipeline 特有：PBR PSO + 描述符集）
+    // 录制绘制命令（ForwardPipeline 特有：PBR PSO + bindless 描述符集）
     // ============================================================
     if (m_MultiThreadRecord && !m_SecRecordLists.empty() && totalDraws > 0) {
         u32 numThreads = std::min((u32)m_SecRecordLists.size(), totalDraws);
@@ -709,9 +687,8 @@ void ForwardPipeline::RenderScene(
                     auto& di = drawItems[i];
                     PushConstantData pc = framePC;
                     pc.objectIndex = di.objectIndex;
-                    secCmd->BindDescriptorSet(0, m_DescSets[m_CurrentFrameSlot]);  // set=0: per-frame
-                    if (di.mesh->GetDescriptorSet() != rhi::kInvalidSet)
-                        secCmd->BindDescriptorSet(1, di.mesh->GetDescriptorSet());  // set=1: per-mesh 纹理
+                    secCmd->BindDescriptorSet(0, m_DescSets[m_CurrentFrameSlot]);  // set=0: per-frame + bindless
+                    // 不再需要 bind set=1 — 纹理采样通过 bindless u_Textures[] 访问
                     secCmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
                     secCmd->SetVertexBuffer(di.mesh->GetVertexBuffer().get(), 0);
                     secCmd->SetIndexBuffer(di.mesh->GetIndexBuffer().get());
@@ -730,9 +707,8 @@ void ForwardPipeline::RenderScene(
         for (auto& di : drawItems) {
             PushConstantData pc = framePC;
             pc.objectIndex = di.objectIndex;
-            cmd->BindDescriptorSet(0, m_DescSets[m_CurrentFrameSlot]);  // set=0: per-frame
-            if (di.mesh->GetDescriptorSet() != rhi::kInvalidSet)
-                cmd->BindDescriptorSet(1, di.mesh->GetDescriptorSet());  // set=1: per-mesh 纹理
+            cmd->BindDescriptorSet(0, m_DescSets[m_CurrentFrameSlot]);  // set=0: per-frame + bindless
+            // 不再需要 bind set=1
             cmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
             cmd->SetVertexBuffer(di.mesh->GetVertexBuffer().get(), 0);
             cmd->SetIndexBuffer(di.mesh->GetIndexBuffer().get());

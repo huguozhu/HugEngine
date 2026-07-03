@@ -158,9 +158,9 @@ void VulkanDevice::Shutdown() {
     if (m_VmaAllocator) { vmaDestroyAllocator(m_VmaAllocator); m_VmaAllocator = VK_NULL_HANDLE; }
 
     // 清理 Descriptor Set Layouts
-    for (auto& layout : m_DescSetLayouts)
-        vkDestroyDescriptorSetLayout(m_Device, layout, nullptr);
-    m_DescSetLayouts.clear();
+    for (auto& info : m_DescLayoutInfos)
+        vkDestroyDescriptorSetLayout(m_Device, info.layout, nullptr);
+    m_DescLayoutInfos.clear();
     m_DescSets.clear();
     m_DescSetLayoutParents.clear();
 
@@ -351,6 +351,7 @@ VkDescriptorType VulkanDevice::ToVkDescType(DescriptorType type) const {
         case DescriptorType::StorageBuffer:         return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         case DescriptorType::CombinedImageSampler:  return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         case DescriptorType::StorageImage:          return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        case DescriptorType::SampledImage:          return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
         case DescriptorType::Sampler:               return VK_DESCRIPTOR_TYPE_SAMPLER;
         default:                                    return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     }
@@ -360,15 +361,17 @@ void VulkanDevice::EnsureDescriptorPool() {
     if (m_DescPool != VK_NULL_HANDLE) return;
 
     VkDescriptorPoolSize poolSizes[] = {
-        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 16 },
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 512 },         // 每 set 需要 3 个，~100+ sets
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1024 }, // 每 set 需要 5 个，~100+ sets
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 64 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1024 },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8192 }, // bindless 纹理数组
+        { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4096 },
+        { VK_DESCRIPTOR_TYPE_SAMPLER, 4096 },
     };
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.maxSets       = 256;  // 需容纳 per-material 描述符集
-    poolInfo.poolSizeCount = 3;
+    poolInfo.maxSets       = 1024;  // 需容纳 bindless + per-frame 描述符集
+    poolInfo.poolSizeCount = 5;
     poolInfo.pPoolSizes    = poolSizes;
     poolInfo.flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT
                             | VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
@@ -377,8 +380,8 @@ void VulkanDevice::EnsureDescriptorPool() {
 }
 
 DescriptorSetLayoutHandle VulkanDevice::CreateDescriptorSetLayout(const DescriptorSetLayoutDesc& desc) {
+    DescLayoutInfo info;
     std::vector<VkDescriptorSetLayoutBinding> vkBindings;
-    std::vector<VkDescriptorBindingFlags>     bindingFlags;
     for (auto& b : desc.bindings) {
         VkDescriptorSetLayoutBinding vb{};
         vb.binding            = b.binding;
@@ -386,14 +389,21 @@ DescriptorSetLayoutHandle VulkanDevice::CreateDescriptorSetLayout(const Descript
         vb.descriptorCount    = b.count;
         vb.stageFlags = b.stageMask;
         vkBindings.push_back(vb);
-        // 允许描述符集在 CB pending 时更新（消除 VUID-vkUpdateDescriptorSets-None-03047）
-        bindingFlags.push_back(VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT);
+
+        info.bindings.push_back(b);
+
+        VkDescriptorBindingFlags flags = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
+        if (b.bindless) {
+            flags |= VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT
+                   | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+        }
+        info.bindingFlags.push_back(flags);
     }
 
     VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo{};
     flagsInfo.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-    flagsInfo.bindingCount  = static_cast<u32>(bindingFlags.size());
-    flagsInfo.pBindingFlags = bindingFlags.data();
+    flagsInfo.bindingCount  = static_cast<u32>(info.bindingFlags.size());
+    flagsInfo.pBindingFlags = info.bindingFlags.data();
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -404,23 +414,44 @@ DescriptorSetLayoutHandle VulkanDevice::CreateDescriptorSetLayout(const Descript
 
     VkDescriptorSetLayout layout;
     vkCreateDescriptorSetLayout(m_Device, &layoutInfo, nullptr, &layout);
+    info.layout = layout;
 
-    DescriptorSetLayoutHandle handle = static_cast<DescriptorSetLayoutHandle>(m_DescSetLayouts.size() + 1);
-    m_DescSetLayouts.push_back(layout);
+    DescriptorSetLayoutHandle handle = static_cast<DescriptorSetLayoutHandle>(m_DescLayoutInfos.size() + 1);
+    m_DescLayoutInfos.push_back(info);
     return handle;
 }
 
 DescriptorSetHandle VulkanDevice::AllocateDescriptorSet(DescriptorSetLayoutHandle layoutHandle) {
     EnsureDescriptorPool();
-    if (layoutHandle == 0 || layoutHandle > m_DescSetLayouts.size()) return kInvalidSet;
+    if (layoutHandle == 0 || layoutHandle > m_DescLayoutInfos.size()) return kInvalidSet;
 
-    VkDescriptorSetLayout layout = m_DescSetLayouts[static_cast<usize>(layoutHandle - 1)];
+    auto& info = m_DescLayoutInfos[static_cast<usize>(layoutHandle - 1)];
+    VkDescriptorSetLayout layout = info.layout;
 
     VkDescriptorSetAllocateInfo allocInfo{};
     allocInfo.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     allocInfo.descriptorPool     = m_DescPool;
     allocInfo.descriptorSetCount = 1;
     allocInfo.pSetLayouts        = &layout;
+
+    // 处理 bindless 可变描述符数量
+    // Vulkan 规范：descriptorSetCount 是分配的 set 数（固定为 1），
+    // pDescriptorCounts 指向单个 u32，其值为最后一个 VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT 的 maxCount
+    VkDescriptorSetVariableDescriptorCountAllocateInfo varCountInfo{};
+    u32 maxVarCount = 0;
+    bool hasBindless = false;
+    for (usize i = 0; i < info.bindings.size(); ++i) {
+        if (info.bindings[i].bindless) {
+            maxVarCount = std::max(maxVarCount, info.bindings[i].count);
+            hasBindless = true;
+        }
+    }
+    if (hasBindless) {
+        varCountInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO;
+        varCountInfo.descriptorSetCount = 1;           // 只分配一个 descriptor set
+        varCountInfo.pDescriptorCounts = &maxVarCount; // 单个 set 的可变计数
+        allocInfo.pNext = &varCountInfo;
+    }
 
     VkDescriptorSet ds;
     VkResult result = vkAllocateDescriptorSets(m_Device, &allocInfo, &ds);
@@ -451,6 +482,72 @@ void VulkanDevice::UpdateDescriptorSet(DescriptorSetHandle setHandle, u32 bindin
     write.descriptorCount = 1;
     write.descriptorType  = ToVkDescType(type);
     write.pBufferInfo     = &bufInfo;
+
+    vkUpdateDescriptorSets(m_Device, 1, &write, 0, nullptr);
+}
+
+void VulkanDevice::UpdateDescriptorSet(DescriptorSetHandle setHandle, u32 binding,
+                                        DescriptorType type,
+                                        IRHITexture** textures, IRHISampler** samplers,
+                                        u32 count) {
+    if (setHandle == 0 || setHandle > m_DescSets.size()) return;
+    if (count == 0) return;
+    VkDescriptorSet ds = m_DescSets[static_cast<usize>(setHandle - 1)];
+    if (ds == VK_NULL_HANDLE) return;
+
+    VkDescriptorType vkType = ToVkDescType(type);
+    std::vector<VkDescriptorImageInfo> imageInfos(count);
+    for (u32 i = 0; i < count; ++i) {
+        // SampledImage: 仅使用 imageView，sampler 字段忽略
+        if (vkType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) {
+            if (!textures || !textures[i]) {
+                imageInfos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                imageInfos[i].imageView   = VK_NULL_HANDLE;
+                imageInfos[i].sampler     = VK_NULL_HANDLE;
+                continue;
+            }
+            auto* vkTex = static_cast<VulkanTexture*>(textures[i]);
+            imageInfos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            imageInfos[i].imageView   = vkTex->GetImageView();
+            imageInfos[i].sampler     = VK_NULL_HANDLE;
+            continue;
+        }
+        // Sampler: 仅使用 sampler，imageView 字段忽略
+        if (vkType == VK_DESCRIPTOR_TYPE_SAMPLER) {
+            if (!samplers || !samplers[i]) {
+                imageInfos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                imageInfos[i].imageView   = VK_NULL_HANDLE;
+                imageInfos[i].sampler     = VK_NULL_HANDLE;
+                continue;
+            }
+            auto* vkSampler = static_cast<VulkanSampler*>(samplers[i]);
+            imageInfos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            imageInfos[i].imageView   = VK_NULL_HANDLE;
+            imageInfos[i].sampler     = vkSampler->GetHandle();
+            continue;
+        }
+        // CombinedImageSampler: 同时使用 imageView + sampler
+        if (!textures || !textures[i] || !samplers || !samplers[i]) {
+            imageInfos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            imageInfos[i].imageView   = VK_NULL_HANDLE;
+            imageInfos[i].sampler     = VK_NULL_HANDLE;
+            continue;
+        }
+        auto* vkTex     = static_cast<VulkanTexture*>(textures[i]);
+        auto* vkSampler = static_cast<VulkanSampler*>(samplers[i]);
+        imageInfos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        imageInfos[i].imageView   = vkTex->GetImageView();
+        imageInfos[i].sampler     = vkSampler->GetHandle();
+    }
+
+    VkWriteDescriptorSet write{};
+    write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet          = ds;
+    write.dstBinding      = binding;
+    write.dstArrayElement = 0;
+    write.descriptorCount = count;
+    write.descriptorType  = vkType;
+    write.pImageInfo      = imageInfos.data();
 
     vkUpdateDescriptorSets(m_Device, 1, &write, 0, nullptr);
 }
@@ -495,8 +592,8 @@ void VulkanDevice::UpdateDescriptorSet(DescriptorSetHandle setHandle, u32 bindin
 }
 
 void VulkanDevice::DestroyDescriptorSetLayout(DescriptorSetLayoutHandle handle) {
-    if (handle == 0 || handle > m_DescSetLayouts.size()) return;
-    VkDescriptorSetLayout layout = m_DescSetLayouts[static_cast<usize>(handle - 1)];
+    if (handle == 0 || handle > m_DescLayoutInfos.size()) return;
+    VkDescriptorSetLayout layout = m_DescLayoutInfos[static_cast<usize>(handle - 1)].layout;
     vkDestroyDescriptorSetLayout(m_Device, layout, nullptr);
 }
 

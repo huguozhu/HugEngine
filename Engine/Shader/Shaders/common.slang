@@ -24,4 +24,8 @@ float Luminance(float3 color) {
     return dot(color, float3(0.2126, 0.7152, 0.0722));
 }
 
+// Bindless 纹理数组（全局共享，所有 mesh 共用 set=0 binding 5-6）
+[[vk::binding(5, 0)]] Texture2D<float4> u_Textures[];
+[[vk::binding(6, 0)]] SamplerState      u_Samplers[];
+
 #endif // HUGENGINE_COMMON_SLANG

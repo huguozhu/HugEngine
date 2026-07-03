@@ -5,6 +5,7 @@
 #include "GI/GlobalIllumination.h"
 #include "RHI/RHI.h"
 #include "RenderGraph.h"
+#include "Asset/BindlessTextureManager.h"
 
 namespace he::render { class GI_IBL; }
 namespace he::render { class GI_RSM; }
@@ -62,12 +63,6 @@ public:
     void SetSwapChain(rhi::IRHISwapChain* sc) { m_SwapChain = sc; }
     rhi::IRHIPipelineState* GetPipelineState() const { return m_PBR_PSO.get(); }
 
-    rhi::DescriptorSetHandle CreateTextureDescriptorSet(
-        rhi::IRHITexture* baseColor, rhi::IRHISampler* bcSampler,
-        rhi::IRHITexture* normal,   rhi::IRHISampler* nSampler,
-        rhi::IRHITexture* metallicRoughness, rhi::IRHISampler* mrSampler,
-        rhi::IRHITexture* occlusion, rhi::IRHISampler* ocSampler);
-
     void SetMultiThreadedRecording(bool e) { m_MultiThreadRecord = e; }
     bool IsMultiThreadedRecording() const { return m_MultiThreadRecord; }
 
@@ -107,8 +102,7 @@ private:
     rhi::IRHIDevice* m_Device = nullptr;
     std::unique_ptr<rhi::IRHIPipelineState> m_PBR_PSO;
 
-    rhi::DescriptorSetLayoutHandle m_PerFrameLayout = rhi::kInvalidLayout;  // set=0: per-frame 动态数据
-    rhi::DescriptorSetLayoutHandle m_PerMeshLayout  = rhi::kInvalidLayout;  // set=1: per-mesh 静态纹理
+    rhi::DescriptorSetLayoutHandle m_PerFrameLayout = rhi::kInvalidLayout;  // set=0: per-frame + bindless
     rhi::DescriptorSetHandle       m_DescSets[MAX_FRAMES_IN_FLIGHT] = {};   // set=0 三缓冲
     std::unique_ptr<rhi::IRHIBuffer> m_LightBuffers[MAX_FRAMES_IN_FLIGHT];
     std::unique_ptr<rhi::IRHIBuffer> m_ObjectBuffers[MAX_FRAMES_IN_FLIGHT];
@@ -121,9 +115,9 @@ private:
     std::unique_ptr<rhi::IRHISampler> m_HDRSampler;
     u32 m_HDRWidth = 1920, m_HDRHeight = 1080;
 
-    // 默认纹理
-    std::unique_ptr<rhi::IRHITexture> m_DefaultBaseColorTex;
-    std::unique_ptr<rhi::IRHISampler> m_DefaultBaseColorSampler;
+    // Bindless 占位纹理/采样器
+    std::unique_ptr<rhi::IRHITexture> m_BindlessPlaceholder;
+    std::unique_ptr<rhi::IRHISampler> m_BindlessSampler;
 
     // 多线程录制（Sec CB 模循环复用，无池重置 VUID 问题）
     bool m_MultiThreadRecord = true;

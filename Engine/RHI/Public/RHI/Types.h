@@ -171,6 +171,7 @@ enum class DescriptorType : u8 {
     StorageBuffer,              // 结构化缓冲区（读写）
     CombinedImageSampler,       // 组合图像+采样器
     StorageImage,               // 存储图像（读写）
+    SampledImage,               // 采样图像（Texture2D 等，不含采样器）
     Sampler,                    // 独立采样器
     InputAttachment,            // 输入附件（用于 SubPass）
 };

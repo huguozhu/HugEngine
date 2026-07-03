@@ -56,4 +56,4 @@ target_include_directories(HugEngineRender
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-target_link_libraries(HugEngineRender PUBLIC HugEngineRHI HugEngineShader HugEngineScene)
+target_link_libraries(HugEngineRender PUBLIC HugEngineRHI HugEngineShader HugEngineScene HugEngineAsset)

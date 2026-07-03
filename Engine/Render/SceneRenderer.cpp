@@ -73,6 +73,7 @@ std::vector<DrawItem> SceneRenderer::Prepare(he::World& world, he::SceneGraph& s
         GPUObjectData& obj = objData[vi];
         obj.worldMatrix = e.worldMatrix;
         FillObjectData(obj, mat);
+        obj.materialID = e.mesh->materialID;
 
         result.push_back({e.mesh, vi});
     }

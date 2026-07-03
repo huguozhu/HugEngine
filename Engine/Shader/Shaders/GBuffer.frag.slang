@@ -4,6 +4,8 @@
 // MRT 2: RGBA16  emissive.rgb + ao
 // MRT 3: RG16    velocity.xy = currUV - prevUV（UV 空间运动矢量）
 
+#include "common.slang"
+
 struct VSOutput {
     float4 position              : SV_Position;
     [[vk::location(0)]] float3 worldPos;
@@ -25,17 +27,11 @@ struct GPUObjectData {
     uint     _pad[2];
 };
 
-// set=0: per-frame GPUObjectData[]
+// set=0: per-frame data (u_Objects + bindless textures)
 [[vk::binding(2, 0)]] StructuredBuffer<GPUObjectData> u_Objects;
-// set=1: per-mesh 静态纹理
-[[vk::binding(5, 1)]] Texture2D<float4> u_BaseColorTex;
-[[vk::binding(5, 1)]] SamplerState       u_BaseColorSampler;
-[[vk::binding(6, 1)]] Texture2D<float4> u_NormalTex;
-[[vk::binding(6, 1)]] SamplerState       u_NormalSampler;
-[[vk::binding(7, 1)]] Texture2D<float4> u_MetallicRoughnessTex;
-[[vk::binding(7, 1)]] SamplerState       u_MetallicRoughnessSampler;
-[[vk::binding(8, 1)]] Texture2D<float4> u_OcclusionTex;
-[[vk::binding(8, 1)]] SamplerState       u_OcclusionSampler;
+
+// Bindless 纹理通过 common.slang 中的 u_Textures[] / u_Samplers[] 访问
+// 偏移: materialID + 0 = BaseColor, +1 = Normal, +2 = MetallicRoughness, +3 = Occlusion
 
 [[vk::push_constant]] cbuffer FrameConstants {
     float4x4 viewProjMatrix;
@@ -54,20 +50,21 @@ struct FSOutput {
 FSOutput fragmentMain(VSOutput input) {
     GPUObjectData obj = u_Objects[objectIndex];
 
-    // ── MRT 0-2：PBR 材质（逻辑不变） ──
-    float4 baseColorSample = u_BaseColorTex.Sample(u_BaseColorSampler, input.uv);
+    // ── MRT 0-2：PBR 材质（bindless 纹理数组采样） ──
+    uint texBase = obj.materialID;
+    float4 baseColorSample = u_Textures[texBase + 0].Sample(u_Samplers[0], input.uv);
     float3 albedo   = obj.baseColorFactor.rgb * baseColorSample.rgb;
     float  alpha    = obj.baseColorFactor.a * baseColorSample.a;
-    float  metallic = obj.metallicFactor * u_MetallicRoughnessTex.Sample(u_MetallicRoughnessSampler, input.uv).b;
+    float  metallic = obj.metallicFactor * u_Textures[texBase + 2].Sample(u_Samplers[0], input.uv).b;
 
     if (alpha < obj.alphaCutoff) discard;
 
-    float3 texNormal = u_NormalTex.Sample(u_NormalSampler, input.uv).rgb * 2.0 - 1.0;
+    float3 texNormal = u_Textures[texBase + 1].Sample(u_Samplers[0], input.uv).rgb * 2.0 - 1.0;
     float3 N = normalize(input.worldNormal + texNormal * 0.5);
 
     float roughness = clamp(obj.roughnessFactor *
-        u_MetallicRoughnessTex.Sample(u_MetallicRoughnessSampler, input.uv).g, 0.04, 1.0);
-    float ao = obj.aoFactor * u_OcclusionTex.Sample(u_OcclusionSampler, input.uv).r;
+        u_Textures[texBase + 2].Sample(u_Samplers[0], input.uv).g, 0.04, 1.0);
+    float ao = obj.aoFactor * u_Textures[texBase + 3].Sample(u_Samplers[0], input.uv).r;
 
     // ── MRT 3：Velocity（UV 空间运动矢量 = currUV - prevUV） ──
     float3 currNDC = input.position.xyz / input.position.w;

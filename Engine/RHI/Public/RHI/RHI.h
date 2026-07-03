@@ -52,6 +52,11 @@ public:
     virtual void                      UpdateDescriptorSet(DescriptorSetHandle set, u32 binding,
                                                           DescriptorType type, IRHITexture* texture,
                                                           IRHISampler* sampler) = 0; // CombinedImageSampler（阴影贴图等）
+    /// 更新描述符数组（bindless 纹理/采样器数组）
+    virtual void                      UpdateDescriptorSet(DescriptorSetHandle set, u32 binding,
+                                                          DescriptorType type,
+                                                          IRHITexture** textures, IRHISampler** samplers,
+                                                          u32 count) = 0;
     virtual void                      DestroyDescriptorSetLayout(DescriptorSetLayoutHandle layout) = 0;
 
     // --- Commands ---

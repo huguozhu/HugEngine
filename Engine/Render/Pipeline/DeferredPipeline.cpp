@@ -6,6 +6,7 @@
 #include "PostProcess/SkyboxPass.h"
 #include "SceneRenderer.h"
 #include "AntiAliasing/AA_TAA.h"
+#include "Asset/BindlessTextureManager.h"
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
 #include "Scene/LightComponent.h"
@@ -99,23 +100,15 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         m_AntiAliasing.reset();
     }
 
-    // GBuffer PSO (4 MRT + D32, 拆分描述符集 set=0 + set=1)
-    // set=0: per-frame GPUObjectData[]（每帧更新 buffer 绑定）
+    // GBuffer PSO (4 MRT + D32, set=0 合并 per-frame + bindless 纹理/采样器数组)
+    // set=0: per-frame GPUObjectData[] + bindless Texture2D[] + SamplerState[]
     rhi::DescriptorSetLayoutDesc gbLayout;
     gbLayout.bindings = {
-        {2, rhi::DescriptorType::StorageBuffer, 1, 17},  // u_Objects (Vertex|Fragment)
+        {2, rhi::DescriptorType::StorageBuffer, 1, 17},   // u_Objects (Vertex|Fragment)
+        {5, rhi::DescriptorType::SampledImage, 4096, 16, true},  // u_Textures[] bindless
+        {6, rhi::DescriptorType::Sampler, 4096, 16, true},               // u_Samplers[] bindless
     };
     m_GBufferLayout = device->CreateDescriptorSetLayout(gbLayout);
-
-    // set=1: per-mesh 静态纹理（每个 mesh 独立创建，永不更新，消除帧间竞态）
-    rhi::DescriptorSetLayoutDesc perMeshLayout;
-    perMeshLayout.bindings = {
-        {5, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // BaseColor
-        {6, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // Normal
-        {7, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // MetallicRoughness
-        {8, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // Occlusion
-    };
-    m_PerMeshLayout = device->CreateDescriptorSetLayout(perMeshLayout);
 
     rhi::ShaderBytecode gbVS, gbFS;
     gbVS.stage = rhi::ShaderStage::Vertex; gbVS.spirv = k_GBuffer_vert_spv; gbVS.entryPoint = "main";
@@ -137,23 +130,33 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     gbDesc.colorFormats[0] = gbDesc.colorFormats[1] = gbDesc.colorFormats[2] = rhi::Format::RGBA16_FLOAT;
     gbDesc.colorFormats[3] = rhi::Format::RG16_FLOAT;  // velocity
     gbDesc.pushConstantRanges = {pc};
-    gbDesc.descriptorSetLayouts = {m_GBufferLayout, m_PerMeshLayout};
+    gbDesc.descriptorSetLayouts = {m_GBufferLayout};  // 仅 set=0，无 per-mesh
     gbDesc.debugName = "GBuffer";
     m_GBufferPSO = device->CreatePipelineState(gbDesc);
     HE_ASSERT(m_GBufferPSO, "DeferredPipeline: GBuffer PSO failed");
 
-    // GBuffer set=0 共享描述符集（仅含 binding 2: Object SSBO，每帧更新 buffer）
+    // GBuffer set=0 共享描述符集（含 binding 2: Object SSBO + bindless 5/6）
     m_GBufferSet = device->AllocateDescriptorSet(m_GBufferLayout);
-    // 默认纹理（per-mesh set=1 回退用）
+    // 创建 bindless 占位纹理和采样器（bindless 数组回退用）
     {
         u8 w4[4]={255,255,255,255};
         rhi::TextureDesc defDesc; defDesc.format=rhi::Format::RGBA8_UNORM;
         defDesc.width=1; defDesc.height=1; defDesc.mipLevels=1; defDesc.arrayLayers=1;
         defDesc.usage=rhi::TextureUsage::ShaderResource; defDesc.initialData=w4;
-        m_PlaceholderTex = device->CreateTexture(defDesc);
+        m_BindlessPlaceholder = device->CreateTexture(defDesc);
         rhi::SamplerDesc sd; sd.minFilter=sd.magFilter=rhi::FilterMode::Linear;
         sd.addressU=sd.addressV=rhi::AddressMode::Repeat;
-        m_PlaceholderSamp = device->CreateSampler(sd);
+        m_BindlessSampler = device->CreateSampler(sd);
+        // 设置 BindlessTextureManager 的默认纹理（null 回退用）
+        he::asset::BindlessTextureManager::Instance().SetDefaultTexture(
+            m_BindlessPlaceholder.get(), m_BindlessSampler.get());
+        // 预填充绑定 5 和 6 至少一个有效的占位符
+        rhi::IRHITexture* texPtrs[] = { m_BindlessPlaceholder.get() };
+        rhi::IRHISampler* sampPtrs[] = { m_BindlessSampler.get() };
+        device->UpdateDescriptorSet(m_GBufferSet, 5, rhi::DescriptorType::SampledImage,
+            texPtrs, nullptr, 1);
+        device->UpdateDescriptorSet(m_GBufferSet, 6, rhi::DescriptorType::Sampler,
+            nullptr, sampPtrs, 1);
     }
 
     // Lighting PSO (全屏三角形，无深度)
@@ -190,8 +193,6 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         // 只更新 layout 中声明的 binding（0-4, 10-16）
         for (u32 b : {0u,1u,2u,3u,4u,10u,11u,12u,13u,14u,15u,16u})
             device->UpdateDescriptorSet(m_LightingSet, b, rhi::DescriptorType::CombinedImageSampler, pt.get(), ps.get());
-        m_PlaceholderTex = std::move(pt);
-        m_PlaceholderSamp = std::move(ps);
     }
 
     rhi::PushConstantRange lpc; lpc.stageMask = 1|16; lpc.size = 96;
@@ -217,7 +218,6 @@ void DeferredPipeline::Shutdown() {
     if (m_ToneMap) m_ToneMap->Shutdown();
     if (m_Skybox)  m_Skybox->Shutdown();
     if (m_GBufferLayout != rhi::kInvalidLayout) { m_Device->DestroyDescriptorSetLayout(m_GBufferLayout); }
-    if (m_PerMeshLayout  != rhi::kInvalidLayout) { m_Device->DestroyDescriptorSetLayout(m_PerMeshLayout); }
     if (m_LightingLayout != rhi::kInvalidLayout) { m_Device->DestroyDescriptorSetLayout(m_LightingLayout); }
     m_GBufferA.reset(); m_GBufferB.reset(); m_GBufferC.reset(); m_GBufferDepth.reset();
     m_GBufferD.reset();
@@ -233,27 +233,7 @@ void DeferredPipeline::Shutdown() {
     HE_CORE_INFO("DeferredPipeline shutdown");
 }
 
-rhi::DescriptorSetHandle DeferredPipeline::CreateTextureDescriptorSet(
-    rhi::IRHITexture* baseColor, rhi::IRHISampler* bcSampler,
-    rhi::IRHITexture* normal,   rhi::IRHISampler* nSampler,
-    rhi::IRHITexture* metallicRoughness, rhi::IRHISampler* mrSampler,
-    rhi::IRHITexture* occlusion, rhi::IRHISampler* ocSampler)
-{
-    if (!m_Device) return rhi::kInvalidSet;
-    auto set = m_Device->AllocateDescriptorSet(m_PerMeshLayout);
-    if (set == rhi::kInvalidSet) return set;
-
-    auto use = [&](u32 b, rhi::IRHITexture* t, rhi::IRHISampler* s) {
-        m_Device->UpdateDescriptorSet(set, b, rhi::DescriptorType::CombinedImageSampler,
-            t ? t : m_PlaceholderTex.get(),
-            s ? s : m_PlaceholderSamp.get());
-    };
-    use(5, baseColor, bcSampler);
-    use(6, normal, nSampler);
-    use(7, metallicRoughness, mrSampler);
-    use(8, occlusion, ocSampler);
-    return set;
-}
+// CreateTextureDescriptorSet 已移除 — 使用全局 bindless 纹理数组替代
 
 void DeferredPipeline::NextFrame() {
     m_CurrentFrameSlot = (m_CurrentFrameSlot + 1) % MAX_FRAMES_IN_FLIGHT;
@@ -311,6 +291,10 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     rg.AddPass("GB_Clear", {}, {{gbA, ResourceAccess::Write}, {gbB, ResourceAccess::Write},
         {gbC, ResourceAccess::Write}, {gbVel, ResourceAccess::Write}, {gbDepth, ResourceAccess::Write}},
         [&, w, h](rhi::IRHICommandList* c) {
+            // 更新 bindless 纹理数组（纹理注册后首次渲染时推送到 GPU）
+            he::asset::BindlessTextureManager::Instance().UpdateDescriptorSet(
+                m_Device, m_GBufferSet, 5, 6);
+
             m_Device->UpdateDescriptorSet(m_GBufferSet, 2, rhi::DescriptorType::StorageBuffer,
                 m_ObjectBuffers[m_CurrentFrameSlot].get());
             c->SetPipeline(m_GBufferPSO.get());
@@ -341,8 +325,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 c->SetPushConstants(0, sizeof(pc), &pc);
                 c->SetVertexBuffer(di.mesh->GetVertexBuffer().get(), 0);
                 c->SetIndexBuffer(di.mesh->GetIndexBuffer().get());
-                if (di.mesh->GetDescriptorSet() != rhi::kInvalidSet)
-                    c->BindDescriptorSet(1, di.mesh->GetDescriptorSet());
+                // 不再需要 bind set=1 — 纹理采样通过 bindless u_Textures[] 访问
                 c->DrawIndexed(di.mesh->GetIndexCount());
             }
             c->EndOffscreenPass();

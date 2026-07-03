@@ -6,6 +6,7 @@
 #include "GI/GI_RSM.h"
 #include "RHI/RHI.h"
 #include "RenderGraph.h"
+#include "Asset/BindlessTextureManager.h"
 
 namespace he::render { class GI_IBL; class GI_RSM; }
 namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer; }
@@ -55,13 +56,6 @@ public:
     rhi::IRHIBuffer* GetCurrentShadowBuffer()  { return m_ShadowBuffers[m_CurrentFrameSlot].get(); }
     rhi::IRHIBuffer* GetCurrentShadowObjBuffer(){ return m_ShadowObjBuffers[m_CurrentFrameSlot].get(); }
 
-    // 为每个 mesh 创建独立描述符集（set=1: 仅纹理绑定 5-8，静态永不变）
-    rhi::DescriptorSetHandle CreateTextureDescriptorSet(
-        rhi::IRHITexture* baseColor, rhi::IRHISampler* bcSampler,
-        rhi::IRHITexture* normal,   rhi::IRHISampler* nSampler,
-        rhi::IRHITexture* metallicRoughness, rhi::IRHISampler* mrSampler,
-        rhi::IRHITexture* occlusion, rhi::IRHISampler* ocSampler);
-
 private:
     void BuildFrameGraph(RenderGraph& rg, he::World& world,
                          he::SceneGraph& sg, const CameraData& camera);
@@ -79,16 +73,15 @@ private:
     std::unique_ptr<rhi::IRHITexture> m_GBufferD;
     std::unique_ptr<rhi::IRHITexture> m_GBufferDepth;
     std::unique_ptr<rhi::IRHIPipelineState> m_GBufferPSO;
-    rhi::DescriptorSetLayoutHandle m_GBufferLayout = rhi::kInvalidLayout;   // set=0: per-frame
-    rhi::DescriptorSetLayoutHandle m_PerMeshLayout  = rhi::kInvalidLayout;  // set=1: per-mesh 纹理
-    rhi::DescriptorSetHandle       m_GBufferSet    = rhi::kInvalidSet;      // set=0 共享
+    rhi::DescriptorSetLayoutHandle m_GBufferLayout = rhi::kInvalidLayout;   // set=0: per-frame + bindless
+    rhi::DescriptorSetHandle       m_GBufferSet    = rhi::kInvalidSet;      // set=0 共享（含 bindless）
 
     // Lighting PSO + 描述符
     std::unique_ptr<rhi::IRHIPipelineState> m_LightingPSO;
     rhi::DescriptorSetLayoutHandle m_LightingLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_LightingSet    = rhi::kInvalidSet;
-    std::unique_ptr<rhi::IRHITexture> m_PlaceholderTex;
-    std::unique_ptr<rhi::IRHISampler> m_PlaceholderSamp;
+    std::unique_ptr<rhi::IRHITexture> m_BindlessPlaceholder;
+    std::unique_ptr<rhi::IRHISampler> m_BindlessSampler;
 
     // HDR (Lighting 输出 + ToneMap 输入)
     std::unique_ptr<rhi::IRHITexture> m_HDRTarget, m_HDRDepth;

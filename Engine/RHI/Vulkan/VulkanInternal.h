@@ -109,6 +109,10 @@ public:
     void                      UpdateDescriptorSet(DescriptorSetHandle set, u32 binding,
                                                   DescriptorType type, IRHITexture* texture,
                                                   IRHISampler* sampler) override;
+    void                      UpdateDescriptorSet(DescriptorSetHandle set, u32 binding,
+                                                  DescriptorType type,
+                                                  IRHITexture** textures, IRHISampler** samplers,
+                                                  u32 count) override;
     void                      DestroyDescriptorSetLayout(DescriptorSetLayoutHandle layout) override;
 
     // Internal
@@ -127,8 +131,8 @@ public:
         return m_DescSets[static_cast<usize>(h - 1)];
     }
     VkDescriptorSetLayout ResolveDescriptorSetLayout(DescriptorSetLayoutHandle h) const {
-        if (h == 0 || h > m_DescSetLayouts.size()) return VK_NULL_HANDLE;
-        return m_DescSetLayouts[static_cast<usize>(h - 1)];
+        if (h == 0 || h > m_DescLayoutInfos.size()) return VK_NULL_HANDLE;
+        return m_DescLayoutInfos[static_cast<usize>(h - 1)].layout;
     }
 
 private:
@@ -154,7 +158,14 @@ private:
 
     // Descriptor set management
     VkDescriptorPool                  m_DescPool = VK_NULL_HANDLE;
-    std::vector<VkDescriptorSetLayout> m_DescSetLayouts;
+
+    /// 描述符集布局信息（含绑定元数据，用于 bindless 分配）
+    struct DescLayoutInfo {
+        VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+        std::vector<DescriptorSetLayoutBinding> bindings;
+        std::vector<VkDescriptorBindingFlags> bindingFlags;
+    };
+    std::vector<DescLayoutInfo> m_DescLayoutInfos;
     std::vector<VkDescriptorSet>       m_DescSets;
     std::vector<DescriptorSetLayoutHandle> m_DescSetLayoutParents;  // layout handle per set
 
