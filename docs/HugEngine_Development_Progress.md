@@ -20,6 +20,7 @@
 - **DeferredPipeline**: GBuffer MRT + 全屏 Lighting Pass + Sponza 场景 ✅
 - **描述符集竞态修复**: 拆分为 set=0(per-frame) + set=1(per-mesh) ✅
 - **抗锯齿架构**: IAntiAliasing 接口 + IPostProcessPass 中间层 ✅
+- **AA_TAA**: 时域抗锯齿（含 Velocity Buffer GBuffer MRT3）✅
 - **Samples**: 02.Cube, 03.Sponza (Forward), 04.Deferred (Sponza+延迟) ✅
 
 ## 模块完成度
@@ -138,7 +139,7 @@ Engine/RHI/Vulkan/  (拆分为 5 个文件)
 |---------|:---:|:---:|------|------|
 | None | ✓ | ✓ | — | 空操作 |
 | MSAA | ✓ | ✗ | HDR | 延迟 GBuffer MRT 多采样代价过高 |
-| TAA | ✗ | ✓ | HDR | 复用 GBuffer 深度/法线做邻域裁剪 |
+| TAA | ✗ | ✓ | HDR | 复用 GBuffer 深度/法线/velocity 做邻域裁剪 |
 | FXAA | ✓ | ✓ | LDR | 纯 LDR 后处理，无管线依赖 |
 
 ## 已知限制
@@ -159,8 +160,8 @@ Engine/RHI/Vulkan/  (拆分为 5 个文件)
 | 9 | GI_RSM (RSM 完善) | ✅ |
 | 10 | DeferredPipeline (GBuffer + LightPass + Sponza) | ✅ |
 | 11 | IPostProcessPass + IAntiAliasing 接口架构 | ✅ |
+| — | AA_TAA 实现（含 Velocity Buffer 4 MRT GBuffer） | ✅ |
 | — | AA_MSAA 实现 | ⬜ |
-| — | AA_TAA 实现（含 TAA_Resolve 着色器） | ⬜ |
 | — | AA_FXAA 实现 | ⬜ |
 | — | 管线 AA 集成（ForwardPipeline + DeferredPipeline） | ⬜ |
 | — | FullScene 拆分为独立 Shadow/IBL/HDR Pass | ⬜ |

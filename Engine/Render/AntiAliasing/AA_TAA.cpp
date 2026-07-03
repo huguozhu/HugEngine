@@ -94,6 +94,7 @@ void AA_TAA::CreatePSO() {
     desc.topology            = rhi::PrimitiveTopology::TriangleList;
     desc.depthTest           = false;
     desc.depthWrite          = false;
+    desc.depthFormat         = rhi::Format::Unknown;  // 无深度附件（render pass 只创建 1 个附件）
     desc.colorAttachmentCount = 1;
     desc.colorFormats[0]     = rhi::Format::RGBA16_FLOAT;  // HDR 输出
     desc.pushConstantRanges  = {pc};

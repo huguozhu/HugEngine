@@ -421,12 +421,14 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
 
     rg.AddPass("ToneMap", {}, {{backBuf, ResourceAccess::Write}},
         [this](rhi::IRHICommandList* c) {
-            c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput, rhi::PipelineStage::FragmentShader,
-                rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, m_HDRTarget.get());
             if (m_AntiAliasing && m_AntiAliasing->IsEnabled()) {
+                // TAA 已过渡 HDR → ShaderResource，ToneMap 直接采样 TAA 输出
                 m_ToneMap->SetInput(m_AntiAliasing->GetOutputTexture(),
                                     m_AntiAliasing->GetOutputSampler());
             } else {
+                // TAA 禁用时需手动过渡 HDR → ShaderResource
+                c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput, rhi::PipelineStage::FragmentShader,
+                    rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, m_HDRTarget.get());
                 m_ToneMap->SetInput(m_HDRTarget.get(), m_HDRSampler.get());
             }
             m_ToneMap->PreBind(c);
