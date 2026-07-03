@@ -39,6 +39,8 @@ target_sources(HugEngineRender PRIVATE
     Shadow/CSMTechnique.cpp
     Shadow/PointShadowTechnique.h
     Shadow/PointShadowTechnique.cpp
+    Shadow/SpotShadowTechnique.h
+    Shadow/SpotShadowTechnique.cpp
     # PostProcess
     PostProcess/PostProcessPass.h
     PostProcess/ToneMapPass.h

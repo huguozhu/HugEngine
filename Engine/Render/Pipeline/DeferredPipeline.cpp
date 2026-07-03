@@ -169,9 +169,10 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         {1, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // GBufferB
         {2, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // GBufferC
         {3, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // Depth
-        {4, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // Shadow0
-        {10, rhi::DescriptorType::CombinedImageSampler, 1, 16}, // Shadow1
-        {11, rhi::DescriptorType::CombinedImageSampler, 1, 16}, // Shadow2
+        {4, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // Shadow0 (CSM0)
+        {9, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // SpotShadow
+        {10, rhi::DescriptorType::CombinedImageSampler, 1, 16}, // Shadow1 (CSM1)
+        {11, rhi::DescriptorType::CombinedImageSampler, 1, 16}, // Shadow2 (CSM2)
         {12, rhi::DescriptorType::CombinedImageSampler, 1, 16}, // Irradiance
         {13, rhi::DescriptorType::CombinedImageSampler, 1, 16}, // Prefilter
         {14, rhi::DescriptorType::CombinedImageSampler, 1, 16}, // BRDF LUT
@@ -190,8 +191,8 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         rhi::SamplerDesc sd; sd.minFilter=sd.magFilter=rhi::FilterMode::Linear;
         sd.addressU=sd.addressV=rhi::AddressMode::ClampToEdge;
         auto ps = device->CreateSampler(sd);
-        // 只更新 layout 中声明的 binding（0-4, 10-16）
-        for (u32 b : {0u,1u,2u,3u,4u,10u,11u,12u,13u,14u,15u,16u})
+        // 只更新 layout 中声明的 binding（0-4, 9-16）
+        for (u32 b : {0u,1u,2u,3u,4u,9u,10u,11u,12u,13u,14u,15u,16u})
             device->UpdateDescriptorSet(m_LightingSet, b, rhi::DescriptorType::CombinedImageSampler, pt.get(), ps.get());
     }
 
@@ -343,6 +344,9 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             bindTex(3, m_GBufferDepth.get());
             if (m_ShadowSystem && m_ShadowSystem->GetShadowMap(0))
                 bindTex(4, m_ShadowSystem->GetShadowMap(0));
+            // Spot 阴影贴图（映射索引 4 = CSM(3) + Point(1) + Spot(0)）
+            if (m_ShadowSystem && m_ShadowSystem->GetShadowMap(4))
+                bindTex(9, m_ShadowSystem->GetShadowMap(4));
             m_Device->UpdateDescriptorSet(m_LightingSet, 17, rhi::DescriptorType::StorageBuffer, m_LightBuffers[m_CurrentFrameSlot].get());
             m_Device->UpdateDescriptorSet(m_LightingSet, 18, rhi::DescriptorType::StorageBuffer, m_ShadowBuffers[m_CurrentFrameSlot].get());
             c->SetPipeline(m_LightingPSO.get()); c->BindDescriptorSet(0, m_LightingSet);
@@ -427,6 +431,12 @@ void DeferredPipeline::CollectLights(PushConstantData& pc, he::World& world,
             gl.positionRange = float4(sg.GetWorldPosition(e), pl->range);
             gl.directionType.w = 1.0f; break;
         }
+        case he::LightType::Spot: {
+            auto* sl = static_cast<he::SpotLight*>(&lc);
+            gl.positionRange = float4(sg.GetWorldPosition(e), sl->range);
+            gl.directionType = float4(glm::normalize(sl->direction), 2.0f); // Spot
+            gl.coneAngles = float2(sl->innerConeAngle, sl->outerConeAngle); break;
+        }
         default: break;
         }
         auto* lights = static_cast<GPULight*>(m_LightBuffers[m_CurrentFrameSlot]->Map());
@@ -436,6 +446,7 @@ void DeferredPipeline::CollectLights(PushConstantData& pc, he::World& world,
     };
     world.ForEach<he::DirectionalLight>(cl);
     world.ForEach<he::PointLight>(cl);
+    world.ForEach<he::SpotLight>(cl);
     if (pc.lightCount == 0) {
         pc.lightCount = 1;
         GPULight gl{}; gl.colorIntensity = float4(1,0.95,0.85,5); gl.directionType = float4(0.5,-1,1,0); gl.shadowIndex = -1;

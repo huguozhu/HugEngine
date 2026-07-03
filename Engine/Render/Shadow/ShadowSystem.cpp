@@ -1,6 +1,7 @@
 #include "Shadow/ShadowSystem.h"
 #include "Shadow/CSMTechnique.h"
 #include "Shadow/PointShadowTechnique.h"
+#include "Shadow/SpotShadowTechnique.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
 
@@ -18,6 +19,10 @@ bool ShadowSystem::Initialize(rhi::IRHIDevice* device,u32,u32){
     pt->Initialize(device);
     m_Techniques.push_back(std::move(pt));
 
+    auto spot=std::make_unique<SpotShadowTechnique>();
+    spot->Initialize(device);
+    m_Techniques.push_back(std::move(spot));
+
     m_Ready=true;
     HE_CORE_INFO("ShadowSystem init ({} techniques)",m_Techniques.size());
     return true;
@@ -28,6 +33,7 @@ void ShadowSystem::CreateShadowPSO(rhi::DescriptorSetLayoutHandle layout){
         // 每个 Technique 创建自己的 PSO
         if(auto* csm=dynamic_cast<CSMTechnique*>(t.get())) csm->CreatePSO(layout);
         if(auto* pt=dynamic_cast<PointShadowTechnique*>(t.get())) pt->CreatePSO(layout);
+        if(auto* spot=dynamic_cast<SpotShadowTechnique*>(t.get())) spot->CreatePSO(layout);
     }
 }
 

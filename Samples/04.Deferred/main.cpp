@@ -218,6 +218,42 @@ int main() {
         sceneGraph.SetParent(pointLightSphereEntity, Entity{kInvalidEntity});
     }
 
+    // --- 聚光灯 ---
+    Entity spotLightEntity, spotLightConeEntity;
+    {
+        spotLightEntity = world.CreateEntity("SpotLight");
+        world.AddComponent<TransformComponent>(spotLightEntity);
+        auto* sl = world.AddComponent<SpotLight>(spotLightEntity);
+        sl->color           = float3(1.0f, 0.9f, 0.7f);
+        sl->intensity       = 80.0f;
+        sl->range           = 1200.0f;
+        sl->innerConeAngle  = 0.25f;  // ~14°
+        sl->outerConeAngle  = 0.50f;  // ~29°
+        sl->direction       = float3(0.0f, -1.0f, 0.3f);  // 向下倾斜
+        sl->castShadow      = true;
+        sl->shadowBias      = 0.005f;
+
+        auto* slTransform = world.GetComponent<TransformComponent>(spotLightEntity);
+        if (slTransform) {
+            slTransform->position = float3(0.0f, 200.0f, -200.0f);
+        }
+        sceneGraph.SetParent(spotLightEntity, Entity{kInvalidEntity});
+
+        // 可视化锥体（小圆锥表示光源位置）
+        spotLightConeEntity = world.CreateEntity("SpotLightCone");
+        world.AddComponent<TransformComponent>(spotLightConeEntity);
+        auto* coneSphere = world.AddComponent<SphereComponent>(spotLightConeEntity);
+        coneSphere->radius       = 10.0f;
+        coneSphere->segmentCount = 8;
+        coneSphere->ringCount    = 4;
+        coneSphere->OnCreate();
+
+        auto* coneTransform = world.GetComponent<TransformComponent>(spotLightConeEntity);
+        if (coneTransform && slTransform)
+            coneTransform->position = slTransform->position;
+        sceneGraph.SetParent(spotLightConeEntity, Entity{kInvalidEntity});
+    }
+
     // --- 天空盒 ---
     {
         String hdrPath = String(HUGE_CONTENT_DIR) + "Textures/skybox.hdr";

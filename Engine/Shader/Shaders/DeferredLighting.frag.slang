@@ -17,6 +17,7 @@ struct VSOutput {
 // Shadow + IBL + RSM (复用 Forward PBR 绑定)
 [[vk::binding(4, 0)]] Texture2D<float>  u_ShadowMap0;
 [[vk::binding(4, 0)]] SamplerState      u_ShadowSampler;
+[[vk::binding(9, 0)]] Texture2D<float>  u_SpotShadowMap;  // 聚光灯阴影贴图
 [[vk::binding(10, 0)]] Texture2D<float> u_ShadowMap1;
 [[vk::binding(11, 0)]] Texture2D<float> u_ShadowMap2;
 [[vk::binding(12, 0)]] TextureCube<float4> u_IrradianceMap;
@@ -104,8 +105,23 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
         if (light.shadowIndex >= 0) {
             GPUShadowData sm = u_ShadowData[light.shadowIndex];
             if (sm.shadowParams.w < 0.5f) {
+                // 方向光 CSM
                 shadow = lerp(1.0, SampleShadowPCF(worldPos, N, L, sm, cameraPosition.xyz,
                     u_ShadowMap0, u_ShadowMap1, u_ShadowMap2, u_ShadowSampler), sm.shadowParams.z);
+            } else if (sm.shadowParams.w > 1.5f) {
+                // 聚光灯透视阴影（单采样 + PCF 3×3）
+                float4 spotClip = mul(sm.lightViewProj[0], float4(worldPos + N * sm.shadowParams.y, 1.0));
+                float3 spotNdc = spotClip.xyz / spotClip.w;
+                float2 spotUv = float2(spotNdc.x * 0.5 + 0.5, 0.5 - spotNdc.y * 0.5);
+                float  spotZ  = spotNdc.z - sm.shadowParams.x;
+                float2 ts = 1.0 / 1024.0;
+                float spotShadow = 0.0;
+                if (spotUv.x > 0.0 && spotUv.x < 1.0 && spotUv.y > 0.0 && spotUv.y < 1.0) {
+                    for (int sx = -1; sx <= 1; sx++)
+                        for (int sy = -1; sy <= 1; sy++)
+                            spotShadow += (spotZ <= u_SpotShadowMap.Sample(u_ShadowSampler, spotUv + float2(sx, sy) * ts)) ? 1.0 : 0.0;
+                    shadow = spotShadow / 9.0;
+                }
             }
         }
         color += PBR_BRDF(albedo, metallic, roughness, N, V, L) * radiance * shadow;
