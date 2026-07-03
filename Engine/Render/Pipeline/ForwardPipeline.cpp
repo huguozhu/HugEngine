@@ -55,30 +55,37 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     m_ShadowSystem->Initialize(device, 0, 0);
     HE_CORE_INFO("ForwardPipeline: ShadowSystem initialized");
 
-    // --- 主管线 DescriptorSetLayout ---
-    rhi::DescriptorSetLayoutDesc combinedLayoutDesc;
-    combinedLayoutDesc.bindings = {
-        { 1, rhi::DescriptorType::StorageBuffer,        1, 16 },
-        { 2, rhi::DescriptorType::StorageBuffer,        1, 17 },
-        { 3, rhi::DescriptorType::StorageBuffer,        1, 16 },
-        { 4, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // CSM cascade 0
-        { 5, rhi::DescriptorType::CombinedImageSampler,  1, 16 },
-        { 6, rhi::DescriptorType::CombinedImageSampler,  1, 16 },
-        { 7, rhi::DescriptorType::CombinedImageSampler,  1, 16 },
-        { 8, rhi::DescriptorType::CombinedImageSampler,  1, 16 },
-        { 9, rhi::DescriptorType::CombinedImageSampler,  1, 16 },
-        { 10, rhi::DescriptorType::CombinedImageSampler, 1, 16 },  // CSM cascade 1
-        { 11, rhi::DescriptorType::CombinedImageSampler, 1, 16 },  // CSM cascade 2
-        { 12, rhi::DescriptorType::CombinedImageSampler, 1, 16 },  // IBL Irradiance Cubemap
-        { 13, rhi::DescriptorType::CombinedImageSampler, 1, 16 },  // IBL Prefilter Cubemap
-        { 14, rhi::DescriptorType::CombinedImageSampler, 1, 16 },  // IBL BRDF LUT
-        { 15, rhi::DescriptorType::CombinedImageSampler, 1, 16 },  // RSM Position
-        { 16, rhi::DescriptorType::CombinedImageSampler, 1, 16 },  // RSM Normal+Flux
+    // --- 主管线 DescriptorSetLayout（拆分为 set=0 per-frame + set=1 per-mesh）---
+    // set=0: per-frame 动态数据（三缓冲，每帧更新 buffer 绑定）
+    rhi::DescriptorSetLayoutDesc perFrameLayoutDesc;
+    perFrameLayoutDesc.bindings = {
+        { 1,  rhi::DescriptorType::StorageBuffer,        1, 16 },  // GPULight[]
+        { 2,  rhi::DescriptorType::StorageBuffer,        1, 17 },  // GPUObjectData[]
+        { 3,  rhi::DescriptorType::StorageBuffer,        1, 16 },  // GPUShadowData[]
+        { 4,  rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // CSM cascade 0
+        { 9,  rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Point Shadow Cubemap
+        { 10, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // CSM cascade 1
+        { 11, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // CSM cascade 2
+        { 12, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // IBL Irradiance Cubemap
+        { 13, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // IBL Prefilter Cubemap
+        { 14, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // IBL BRDF LUT
+        { 15, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // RSM Position
+        { 16, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // RSM Normal+Flux
     };
-    m_DescLayout = device->CreateDescriptorSetLayout(combinedLayoutDesc);
+    m_PerFrameLayout = device->CreateDescriptorSetLayout(perFrameLayoutDesc);
 
-    // 用管线的描述符集布局创建 Shadow PSO（复用同一布局，与 PBR Shader 兼容）
-    m_ShadowSystem->CreateShadowPSO(m_DescLayout);
+    // set=1: per-mesh 静态纹理（每个 mesh 独立创建，永不更新，消除帧间竞态）
+    rhi::DescriptorSetLayoutDesc perMeshLayoutDesc;
+    perMeshLayoutDesc.bindings = {
+        { 5, rhi::DescriptorType::CombinedImageSampler, 1, 16 },  // BaseColor
+        { 6, rhi::DescriptorType::CombinedImageSampler, 1, 16 },  // Normal
+        { 7, rhi::DescriptorType::CombinedImageSampler, 1, 16 },  // MetallicRoughness
+        { 8, rhi::DescriptorType::CombinedImageSampler, 1, 16 },  // Occlusion
+    };
+    m_PerMeshLayout = device->CreateDescriptorSetLayout(perMeshLayoutDesc);
+
+    // 用 per-frame 布局创建 Shadow PSO（Shadow 不需要 set=1 的纹理绑定）
+    m_ShadowSystem->CreateShadowPSO(m_PerFrameLayout);
 
     // --- 创建三缓冲 Storage Buffers（Phase 1 多线程渲染）---
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
@@ -124,14 +131,13 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         m_DefaultBaseColorSampler = device->CreateSampler(defaultSampDesc);
     }
 
-    // --- 分配三缓冲共享描述符集（Phase 1：每帧槽位独立绑定）---
+    // --- 分配三缓冲共享描述符集（set=0: per-frame 动态数据）---
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        rhi::DescriptorSetHandle set = device->AllocateDescriptorSet(m_DescLayout);
+        rhi::DescriptorSetHandle set = device->AllocateDescriptorSet(m_PerFrameLayout);
         device->UpdateDescriptorSet(set, 1, rhi::DescriptorType::StorageBuffer,
                                     m_LightBuffers[i].get());
         device->UpdateDescriptorSet(set, 2, rhi::DescriptorType::StorageBuffer,
                                     m_ObjectBuffers[i].get());
-        // 绑定 3: 阴影数据 SSBO（ForwardPipeline 自有缓冲，每帧独立槽位）
         device->UpdateDescriptorSet(set, 3, rhi::DescriptorType::StorageBuffer,
                                     m_ShadowBuffers[i].get());
         // CSM: 绑定 3 级联阴影贴图（来自 ShadowSystem）
@@ -140,19 +146,6 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
             device->UpdateDescriptorSet(set, binding, rhi::DescriptorType::CombinedImageSampler,
                 m_ShadowSystem->GetShadowMap(c), m_ShadowSystem->GetShadowSampler());
         }
-        // 绑定 5-8: 材质纹理占位（运行时通过 CreateTextureDescriptorSet 替换）
-        device->UpdateDescriptorSet(set, 5,
-            rhi::DescriptorType::CombinedImageSampler,
-            m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
-        device->UpdateDescriptorSet(set, 6,
-            rhi::DescriptorType::CombinedImageSampler,
-            m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
-        device->UpdateDescriptorSet(set, 7,
-            rhi::DescriptorType::CombinedImageSampler,
-            m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
-        device->UpdateDescriptorSet(set, 8,
-            rhi::DescriptorType::CombinedImageSampler,
-            m_DefaultBaseColorTex.get(), m_DefaultBaseColorSampler.get());
         // 绑定 9: 点光源阴影 Cubemap（来自 ShadowSystem）
         device->UpdateDescriptorSet(set, 9,
             rhi::DescriptorType::CombinedImageSampler,
@@ -197,7 +190,7 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     psoDesc.colorAttachmentCount = 1;
     psoDesc.colorFormats[0]      = rhi::Format::RGBA16_FLOAT;  // HDR 离屏目标
     psoDesc.pushConstantRanges   = { pcRange };
-    psoDesc.descriptorSetLayouts = { m_DescLayout };
+    psoDesc.descriptorSetLayouts = { m_PerFrameLayout, m_PerMeshLayout };
     psoDesc.debugName            = "ForwardPBR";
 
     m_PBR_PSO = device->CreatePipelineState(psoDesc);
@@ -270,14 +263,14 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
 
 void ForwardPipeline::Shutdown() {
     if (m_Device) {
-        m_Device->DestroyDescriptorSetLayout(m_DescLayout);
+        m_Device->DestroyDescriptorSetLayout(m_PerFrameLayout);
+        m_Device->DestroyDescriptorSetLayout(m_PerMeshLayout);
     }
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
         m_LightBuffers[i].reset();
         m_ObjectBuffers[i].reset();
         m_ShadowBuffers[i].reset();
     }
-    m_AllPerMeshDescSets.clear();
     m_PBR_PSO.reset();
     if (m_ToneMap) { m_ToneMap->Shutdown(); m_ToneMap.reset(); }
     if (m_Skybox)  { m_Skybox->Shutdown();  m_Skybox.reset(); }
@@ -304,21 +297,9 @@ rhi::DescriptorSetHandle ForwardPipeline::CreateTextureDescriptorSet(
     rhi::IRHITexture* occlusion, rhi::IRHISampler* ocSampler)
 {
     if (!m_Device) return rhi::kInvalidSet;
-    auto set = m_Device->AllocateDescriptorSet(m_DescLayout);
+    // set=1: per-mesh 静态纹理（独立布局，不含 buffer 绑定，永不更新）
+    auto set = m_Device->AllocateDescriptorSet(m_PerMeshLayout);
     if (set == rhi::kInvalidSet) return set;
-
-    // 复制共享绑定 1-2（使用第一个槽位的缓冲区，每帧 NextFrame 会切换）
-    m_Device->UpdateDescriptorSet(set, 1, rhi::DescriptorType::StorageBuffer, m_LightBuffers[0].get());
-    m_Device->UpdateDescriptorSet(set, 2, rhi::DescriptorType::StorageBuffer, m_ObjectBuffers[0].get());
-    // 绑定 3: 阴影数据 SSBO（ForwardPipeline 自有缓冲）
-    m_Device->UpdateDescriptorSet(set, 3, rhi::DescriptorType::StorageBuffer,
-        m_ShadowBuffers[0].get());
-    // CSM: per-mesh set 绑定 3 级联（来自 ShadowSystem）
-    for (u32 c = 0; c < CASCADE_COUNT; ++c) {
-        u32 binding = (c == 0) ? 4u : (c == 1 ? 10u : 11u);
-        m_Device->UpdateDescriptorSet(set, binding, rhi::DescriptorType::CombinedImageSampler,
-            m_ShadowSystem->GetShadowMap(c), m_ShadowSystem->GetShadowSampler());
-    }
 
     // 纹理绑定 5-8（使用默认纹理作为回退）
     auto use = [&](u32 b, rhi::IRHITexture* t, rhi::IRHISampler* s) {
@@ -331,13 +312,6 @@ rhi::DescriptorSetHandle ForwardPipeline::CreateTextureDescriptorSet(
     use(7, metallicRoughness, mrSampler);
     use(8, occlusion, ocSampler);
 
-    // 绑定 9: 点光源阴影 Cubemap（来自 ShadowSystem）
-    m_Device->UpdateDescriptorSet(set, 9, rhi::DescriptorType::CombinedImageSampler,
-        m_ShadowSystem->GetPointShadowMap(), m_ShadowSystem->GetPointShadowSampler());
-
-    // 跟踪所有 per-mesh 描述符集，用于每帧更新动态绑定（Phase 1 三缓冲）
-    m_AllPerMeshDescSets.push_back(set);
-
     return set;
 }
 
@@ -347,16 +321,7 @@ void ForwardPipeline::NextFrame() {
 
     // 同步阴影子系统帧槽位
     m_ShadowSystem->NextFrame();
-
-    // 更新所有 per-mesh 描述符集的动态绑定 1-3（指向当前帧的缓冲区）
-    rhi::IRHIBuffer* curLightBuf  = m_LightBuffers[m_CurrentFrameSlot].get();
-    rhi::IRHIBuffer* curObjectBuf = m_ObjectBuffers[m_CurrentFrameSlot].get();
-    rhi::IRHIBuffer* curShadowBuf = m_ShadowBuffers[m_CurrentFrameSlot].get();
-    for (auto& set : m_AllPerMeshDescSets) {
-        m_Device->UpdateDescriptorSet(set, 1, rhi::DescriptorType::StorageBuffer, curLightBuf);
-        m_Device->UpdateDescriptorSet(set, 2, rhi::DescriptorType::StorageBuffer, curObjectBuf);
-        m_Device->UpdateDescriptorSet(set, 3, rhi::DescriptorType::StorageBuffer, curShadowBuf);
-    }
+    // per-mesh 描述符集 (set=1) 是静态纹理绑定，不需要每帧更新
 }
 
 void ForwardPipeline::BeginFrame(rhi::IRHICommandList* cmd, u32 width, u32 height) {
@@ -509,16 +474,11 @@ void ForwardPipeline::UpdateRSMBindings() {
     rhi::IRHITexture* posMap  = m_RSM->GetRSMPositionMap();
     rhi::IRHITexture* fluxMap = m_RSM->GetRSMFluxMap();
     rhi::IRHISampler* sampler = m_RSM->GetRSMSampler();
+    // RSM 绑定在 set=0（per-frame），只需更新共享描述符集
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
         m_Device->UpdateDescriptorSet(m_DescSets[i], 15,
             rhi::DescriptorType::CombinedImageSampler, posMap, sampler);
         m_Device->UpdateDescriptorSet(m_DescSets[i], 16,
-            rhi::DescriptorType::CombinedImageSampler, fluxMap, sampler);
-    }
-    for (auto& set : m_AllPerMeshDescSets) {
-        m_Device->UpdateDescriptorSet(set, 15,
-            rhi::DescriptorType::CombinedImageSampler, posMap, sampler);
-        m_Device->UpdateDescriptorSet(set, 16,
             rhi::DescriptorType::CombinedImageSampler, fluxMap, sampler);
     }
 }
@@ -529,22 +489,13 @@ void ForwardPipeline::UpdateIBLBindings(GI_IBL* gi) {
     rhi::IRHITexture* lut    = gi->GetBRDF_LUT();
     rhi::IRHISampler* sampler = gi->GetIBLSampler();
 
-    // 更新共享描述符集（三帧全部更新，确保一致性）
+    // IBL 绑定在 set=0（per-frame），只需更新共享描述符集
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
         m_Device->UpdateDescriptorSet(m_DescSets[i], 12,
             rhi::DescriptorType::CombinedImageSampler, irr, sampler);
         m_Device->UpdateDescriptorSet(m_DescSets[i], 13,
             rhi::DescriptorType::CombinedImageSampler, pref, sampler);
         m_Device->UpdateDescriptorSet(m_DescSets[i], 14,
-            rhi::DescriptorType::CombinedImageSampler, lut, sampler);
-    }
-    // 更新 per-mesh 描述符集
-    for (auto& set : m_AllPerMeshDescSets) {
-        m_Device->UpdateDescriptorSet(set, 12,
-            rhi::DescriptorType::CombinedImageSampler, irr, sampler);
-        m_Device->UpdateDescriptorSet(set, 13,
-            rhi::DescriptorType::CombinedImageSampler, pref, sampler);
-        m_Device->UpdateDescriptorSet(set, 14,
             rhi::DescriptorType::CombinedImageSampler, lut, sampler);
     }
 }
@@ -603,21 +554,15 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
     // 非 RG 路径：手动渲染阴影
     if (m_ShadowSystem && m_ShadowSystem->HasActiveShadows()) {
         u32 slot = m_CurrentFrameSlot;
-        // 切换 binding 2 到阴影 Object Buffer
+        // 切换 binding 2 到阴影 Object Buffer（仅更新 set=0 per-frame 集）
         m_Device->UpdateDescriptorSet(m_DescSets[slot], 2,
             rhi::DescriptorType::StorageBuffer, m_ShadowObjBuffers[slot].get());
-        for (auto& set : m_AllPerMeshDescSets)
-            m_Device->UpdateDescriptorSet(set, 2,
-                rhi::DescriptorType::StorageBuffer, m_ShadowObjBuffers[slot].get());
 
         m_ShadowSystem->Render(cmd);
 
         // 恢复 binding 2
         m_Device->UpdateDescriptorSet(m_DescSets[slot], 2,
             rhi::DescriptorType::StorageBuffer, m_ObjectBuffers[slot].get());
-        for (auto& set : m_AllPerMeshDescSets)
-            m_Device->UpdateDescriptorSet(set, 2,
-                rhi::DescriptorType::StorageBuffer, m_ObjectBuffers[slot].get());
     }
     PrepareGI(cmd, world, sg);
     BeginHDRPass(cmd, m_HDRWidth, m_HDRHeight);
@@ -671,15 +616,11 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         rg.AddPass("Shadow", {}, std::move(shadowWrites),
             [this](rhi::IRHICommandList* c) {
                 // 切换描述符集 binding 2 到阴影专用 Object Buffer
-                // （避免 FullScene 的 SceneRenderer::Prepare 覆盖数据）
+                // （仅更新 set=0 per-frame 集，per-mesh set=1 不包含 buffer 绑定）
                 u32 slot = m_CurrentFrameSlot;
                 m_Device->UpdateDescriptorSet(m_DescSets[slot], 2,
                     rhi::DescriptorType::StorageBuffer,
                     m_ShadowObjBuffers[slot].get());
-                for (auto& set : m_AllPerMeshDescSets)
-                    m_Device->UpdateDescriptorSet(set, 2,
-                        rhi::DescriptorType::StorageBuffer,
-                        m_ShadowObjBuffers[slot].get());
 
                 m_ShadowSystem->Render(c);
 
@@ -687,10 +628,6 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 m_Device->UpdateDescriptorSet(m_DescSets[slot], 2,
                     rhi::DescriptorType::StorageBuffer,
                     m_ObjectBuffers[slot].get());
-                for (auto& set : m_AllPerMeshDescSets)
-                    m_Device->UpdateDescriptorSet(set, 2,
-                        rhi::DescriptorType::StorageBuffer,
-                        m_ObjectBuffers[slot].get());
             });
     }
 
@@ -772,10 +709,9 @@ void ForwardPipeline::RenderScene(
                     auto& di = drawItems[i];
                     PushConstantData pc = framePC;
                     pc.objectIndex = di.objectIndex;
+                    secCmd->BindDescriptorSet(0, m_DescSets[m_CurrentFrameSlot]);  // set=0: per-frame
                     if (di.mesh->GetDescriptorSet() != rhi::kInvalidSet)
-                        secCmd->BindDescriptorSet(0, di.mesh->GetDescriptorSet());
-                    else
-                        secCmd->BindDescriptorSet(0, m_DescSets[m_CurrentFrameSlot]);
+                        secCmd->BindDescriptorSet(1, di.mesh->GetDescriptorSet());  // set=1: per-mesh 纹理
                     secCmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
                     secCmd->SetVertexBuffer(di.mesh->GetVertexBuffer().get(), 0);
                     secCmd->SetIndexBuffer(di.mesh->GetIndexBuffer().get());
@@ -794,10 +730,9 @@ void ForwardPipeline::RenderScene(
         for (auto& di : drawItems) {
             PushConstantData pc = framePC;
             pc.objectIndex = di.objectIndex;
+            cmd->BindDescriptorSet(0, m_DescSets[m_CurrentFrameSlot]);  // set=0: per-frame
             if (di.mesh->GetDescriptorSet() != rhi::kInvalidSet)
-                cmd->BindDescriptorSet(0, di.mesh->GetDescriptorSet());
-            else
-                cmd->BindDescriptorSet(0, m_DescSets[m_CurrentFrameSlot]);
+                cmd->BindDescriptorSet(1, di.mesh->GetDescriptorSet());  // set=1: per-mesh 纹理
             cmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
             cmd->SetVertexBuffer(di.mesh->GetVertexBuffer().get(), 0);
             cmd->SetIndexBuffer(di.mesh->GetIndexBuffer().get());

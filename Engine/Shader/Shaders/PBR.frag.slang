@@ -40,11 +40,21 @@ struct GPUShadowData {
     float4   pointLightData;    // xyz=点光位置, w=范围
 };
 
-// Descriptor Sets (set=0):
-//   binding=1: GPULight[]
-//   binding=2: GPUObjectData[]
-//   binding=3: GPUShadowData[]
-//   binding=4: ShadowMap 深度纹理 (CombinedImageSampler)
+// Descriptor Sets:
+//   set=0: per-frame 动态数据
+//     binding=1: GPULight[]
+//     binding=2: GPUObjectData[]
+//     binding=3: GPUShadowData[]
+//     binding=4: ShadowMap CSM cascade 0 (CombinedImageSampler)
+//     binding=9: PointShadow Cubemap
+//     binding=10-11: CSM cascade 1-2
+//     binding=12-14: IBL (Irradiance/Prefilter/BRDF LUT)
+//     binding=15-16: RSM (Position/Flux)
+//   set=1: per-mesh 静态纹理（永不更新，避免帧间竞态）
+//     binding=5: BaseColor + Sampler
+//     binding=6: Normal + Sampler
+//     binding=7: MetallicRoughness + Sampler
+//     binding=8: Occlusion + Sampler
 [[vk::binding(1, 0)]] StructuredBuffer<GPULight> u_Lights;
 [[vk::binding(2, 0)]] StructuredBuffer<GPUObjectData> u_Objects;
 [[vk::binding(3, 0)]] StructuredBuffer<GPUShadowData> u_ShadowData;
@@ -52,14 +62,14 @@ struct GPUShadowData {
 [[vk::binding(4, 0)]] SamplerState u_ShadowSampler;
 [[vk::binding(10, 0)]] Texture2D<float> u_ShadowMap1;  // CSM cascade 1
 [[vk::binding(11, 0)]] Texture2D<float> u_ShadowMap2;  // CSM cascade 2
-[[vk::binding(5, 0)]] Texture2D<float4> u_BaseColorTex;
-[[vk::binding(5, 0)]] SamplerState u_BaseColorSampler;
-[[vk::binding(6, 0)]] Texture2D<float4> u_NormalTex;
-[[vk::binding(6, 0)]] SamplerState u_NormalSampler;
-[[vk::binding(7, 0)]] Texture2D<float4> u_MetallicRoughnessTex;
-[[vk::binding(7, 0)]] SamplerState u_MetallicRoughnessSampler;
-[[vk::binding(8, 0)]] Texture2D<float4> u_OcclusionTex;
-[[vk::binding(8, 0)]] SamplerState u_OcclusionSampler;
+[[vk::binding(5, 1)]] Texture2D<float4> u_BaseColorTex;
+[[vk::binding(5, 1)]] SamplerState u_BaseColorSampler;
+[[vk::binding(6, 1)]] Texture2D<float4> u_NormalTex;
+[[vk::binding(6, 1)]] SamplerState u_NormalSampler;
+[[vk::binding(7, 1)]] Texture2D<float4> u_MetallicRoughnessTex;
+[[vk::binding(7, 1)]] SamplerState u_MetallicRoughnessSampler;
+[[vk::binding(8, 1)]] Texture2D<float4> u_OcclusionTex;
+[[vk::binding(8, 1)]] SamplerState u_OcclusionSampler;
 [[vk::binding(9, 0)]] TextureCube<float> u_PointShadowCube;
 [[vk::binding(9, 0)]] SamplerState u_PointShadowSampler;
 // IBL 纹理

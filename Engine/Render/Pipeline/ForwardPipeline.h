@@ -107,14 +107,14 @@ private:
     rhi::IRHIDevice* m_Device = nullptr;
     std::unique_ptr<rhi::IRHIPipelineState> m_PBR_PSO;
 
-    rhi::DescriptorSetLayoutHandle m_DescLayout = rhi::kInvalidLayout;
-    rhi::DescriptorSetHandle       m_DescSets[MAX_FRAMES_IN_FLIGHT] = {};
+    rhi::DescriptorSetLayoutHandle m_PerFrameLayout = rhi::kInvalidLayout;  // set=0: per-frame 动态数据
+    rhi::DescriptorSetLayoutHandle m_PerMeshLayout  = rhi::kInvalidLayout;  // set=1: per-mesh 静态纹理
+    rhi::DescriptorSetHandle       m_DescSets[MAX_FRAMES_IN_FLIGHT] = {};   // set=0 三缓冲
     std::unique_ptr<rhi::IRHIBuffer> m_LightBuffers[MAX_FRAMES_IN_FLIGHT];
     std::unique_ptr<rhi::IRHIBuffer> m_ObjectBuffers[MAX_FRAMES_IN_FLIGHT];
     std::unique_ptr<rhi::IRHIBuffer> m_ShadowBuffers[MAX_FRAMES_IN_FLIGHT];
     std::unique_ptr<rhi::IRHIBuffer> m_ShadowObjBuffers[MAX_FRAMES_IN_FLIGHT];  // 阴影专用 Object Buffer
     u32 m_CurrentFrameSlot = 0;
-    std::vector<rhi::DescriptorSetHandle> m_AllPerMeshDescSets;
 
     // HDR 离屏渲染
     std::unique_ptr<rhi::IRHITexture> m_HDRTarget, m_HDRDepth;
