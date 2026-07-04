@@ -536,12 +536,11 @@ int main() {
             if (tDown && !tWasDown) animCameraMode = !animCameraMode;
             tWasDown = tDown;
 
-            // 动画相机模式：从 AnimationComponent 的 Transform 同步位置
-            if (animCameraMode) {
+            // 动画相机模式：动画播放时从 AnimationComponent 同步位置
+            if (animCameraMode && camAnim->playing) {
                 auto* camTf = world.GetComponent<TransformComponent>(camAnimEntity);
                 if (camTf) {
                     camCtrl.SetPosition(camTf->position);
-                    // 相机始终看向原点
                     float3 toOrigin = glm::normalize(float3(0, 200, 0) - camTf->position);
                     camCtrl.SetOrientationFromForward(toOrigin);
                 }
@@ -622,6 +621,10 @@ int main() {
             // 动画模式指示
             if (animCameraMode) {
                 ImGui::TextColored({0.3f, 1.0f, 0.5f, 1.0f}, "动画相机 (按 T 切换手动)");
+                bool playing = camAnim->playing;
+                if (ImGui::Checkbox("播放动画", &playing))
+                    camAnim->playing = playing;
+                ImGui::SameLine();
                 float speed = camAnim->speed;
                 if (ImGui::SliderFloat("动画速度", &speed, 0.1f, 3.0f, "%.1f"))
                     camAnim->speed = speed;
