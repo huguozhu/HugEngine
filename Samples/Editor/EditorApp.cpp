@@ -385,7 +385,9 @@ void EditorApp::MainLoop() {
             // 浮动面板（自持窗口，不嵌入 EditorMain 布局）
             m_ContentBrowser->Render();
             m_ProjectSettings->Render();
-            m_Stats->Render(dt, 0u, (u32)m_World->GetEntityCount());
+            u32 drawCount = m_Pipeline->GetLastDrawCount();
+            u32 triCount  = m_Pipeline->GetLastTriCount();
+            m_Stats->Render(dt, drawCount, triCount);
         }
 
         m_ImGui->EndFrame(m_CmdList.get());

@@ -10,7 +10,7 @@ class StatsPanel {
 public:
     bool m_Visible = true;
 
-    void Render(float deltaTime, u32 drawCalls, u32 entityCount);
+    void Render(float deltaTime, u32 drawCalls, u32 triCount);
 
 private:
     static constexpr int kHistorySize = 120;

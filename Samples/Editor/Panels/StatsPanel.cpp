@@ -5,7 +5,7 @@
 
 namespace he::editor {
 
-void StatsPanel::Render(float deltaTime, u32 drawCalls, u32 entityCount) {
+void StatsPanel::Render(float deltaTime, u32 drawCalls, u32 triCount) {
     if (!m_Visible) return;
 
     ImGui::SetNextWindowSize(ImVec2(280, 200), ImGuiCond_FirstUseEver);
@@ -39,10 +39,7 @@ void StatsPanel::Render(float deltaTime, u32 drawCalls, u32 entityCount) {
 
     // Draw Calls
     ImGui::Text("Draw Calls:  %u", drawCalls);
-    ImGui::Text("Entities:    %u", entityCount);
-
-    // 粗略三角形数（从 drawCalls 估算）
-    ImGui::Text("Triangles:   ~%u", drawCalls * 1000);
+    ImGui::Text("Triangles:   %u", triCount);
 
     ImGui::End();
 }

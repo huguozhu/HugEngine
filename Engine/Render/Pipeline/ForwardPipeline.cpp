@@ -807,10 +807,16 @@ void ForwardPipeline::RenderScene(
         }
     }
 
+    m_LastDrawCount = drawCount;
+    m_LastTriCount  = 0;
+    // 三角形计数（粗略估算：每个 draw 平均 indexCount/3）
+    for (auto& di : filteredItems)
+        m_LastTriCount += di.mesh->GetIndexCount() / 3;
+
     static bool s_FirstFrame = true;
     if (s_FirstFrame) {
-        HE_CORE_INFO("ForwardPipeline::RenderScene: {} draws, {} lights (Phase 5-3 frustum cull)",
-            drawCount, framePC.lightCount);
+        HE_CORE_INFO("ForwardPipeline::RenderScene: {} draws, {} tris, {} lights",
+            drawCount, m_LastTriCount, framePC.lightCount);
         s_FirstFrame = false;
     }
 }

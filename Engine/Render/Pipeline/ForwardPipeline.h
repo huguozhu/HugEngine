@@ -90,6 +90,8 @@ public:
     rhi::IRHITexture* GetHDRTarget()  const { return m_HDRTarget.get(); }
     rhi::IRHISampler* GetHDRSampler() const { return m_HDRSampler.get(); }
     GPUCulling& GetGPUCulling() { return m_GPUCulling; }
+    u32 GetLastDrawCount() const { return m_LastDrawCount; }
+    u32 GetLastTriCount()  const { return m_LastTriCount; }
 
 private:
     void CollectLights(PushConstantData& pc, he::World& world, he::SceneGraph& sg, const CameraData& camera);
@@ -142,7 +144,9 @@ private:
 
     // GPU Culling
     GPUCulling m_GPUCulling;
-    std::vector<u32> m_GPUVisibleIndices;  // GPU 剔除后的可见物体索引
+    std::vector<u32> m_GPUVisibleIndices;
+    u32 m_LastDrawCount = 0;
+    u32 m_LastTriCount  = 0;  // GPU 剔除后的可见物体索引
 };
 
 } // namespace he::render
