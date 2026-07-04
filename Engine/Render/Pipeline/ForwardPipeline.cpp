@@ -172,6 +172,13 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     // 初始化时使用第一个槽位
     m_CurrentFrameSlot = 0;
 
+    // 注册全部三缓冲描述符集到 BindlessTextureManager
+    // FlushPending() 会自动向全部已注册 set 推送纹理数组，无需调用方手动遍历
+    for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        he::asset::BindlessTextureManager::Instance().RegisterDescriptorSet(
+            device, m_DescSets[i], 5, 6);
+    }
+
     // --- 主管线 PSO ---
     rhi::PushConstantRange pcRange;
     pcRange.stageMask = 1 | 16;     // Vertex | Fragment
@@ -659,14 +666,8 @@ void ForwardPipeline::RenderScene(
                                                m_ObjectBuffers[m_CurrentFrameSlot].get());
     u32 totalDraws = (u32)drawItems.size();
 
-    // 更新 bindless 纹理数组到全部三缓冲描述符集（新增纹理需写入所有 set，避免帧间闪烁）
-    auto& btm = he::asset::BindlessTextureManager::Instance();
-    if (btm.IsDirty()) {
-        for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-            btm.UpdateDescriptorSet(m_Device, m_DescSets[i], 5, 6);
-        }
-        btm.ClearDirty();
-    }
+    // 推送 bindless 纹理到全部已注册描述符集（FlushPending 自动遍历全部 set）
+    he::asset::BindlessTextureManager::Instance().FlushPending();
 
     // ============================================================
     // 录制绘制命令（ForwardPipeline 特有：PBR PSO + bindless 描述符集）

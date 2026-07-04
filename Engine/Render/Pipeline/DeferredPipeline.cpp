@@ -157,6 +157,9 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
             texPtrs, nullptr, 1);
         device->UpdateDescriptorSet(m_GBufferSet, 6, rhi::DescriptorType::Sampler,
             nullptr, sampPtrs, 1);
+        // 注册 GBufferSet 到 BindlessTextureManager（纹理加载后 FlushPending 自动推送）
+        he::asset::BindlessTextureManager::Instance().RegisterDescriptorSet(
+            device, m_GBufferSet, 5, 6);
     }
 
     // Lighting PSO (全屏三角形，无深度)
@@ -292,10 +295,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     rg.AddPass("GB_Clear", {}, {{gbA, ResourceAccess::Write}, {gbB, ResourceAccess::Write},
         {gbC, ResourceAccess::Write}, {gbVel, ResourceAccess::Write}, {gbDepth, ResourceAccess::Write}},
         [&, w, h](rhi::IRHICommandList* c) {
-            // 更新 bindless 纹理数组（纹理注册后首次渲染时推送到 GPU）
-            auto& btm = he::asset::BindlessTextureManager::Instance();
-            btm.UpdateDescriptorSet(m_Device, m_GBufferSet, 5, 6);
-            btm.ClearDirty();  // DeferredPipeline 仅单个 GBufferSet，更新后即可清除脏标志
+            // 推送 bindless 纹理到全部已注册描述符集
+            he::asset::BindlessTextureManager::Instance().FlushPending();
 
             m_Device->UpdateDescriptorSet(m_GBufferSet, 2, rhi::DescriptorType::StorageBuffer,
                 m_ObjectBuffers[m_CurrentFrameSlot].get());
