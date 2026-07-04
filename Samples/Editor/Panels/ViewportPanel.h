@@ -46,6 +46,9 @@ public:
     /// 渲染 Gizmo 叠加层（在 ImGui 帧内调用，场景渲染之后）
     void RenderGizmoOverlay();
 
+    /// 处理鼠标点击选中
+    void HandleClickSelect();
+
     /// 更新视口尺寸
     void SetViewportSize(u32 width, u32 height) {
         m_CamCtrl.SetAspectRatio(static_cast<f32>(width), static_cast<f32>(height));
@@ -56,9 +59,11 @@ public:
     /// 聚焦相机到指定世界坐标
     void FocusOn(const float3& worldPos);
 
-    // 视口区域（由 EditorApp 在 ImGui 帧内设置）
-    float2 m_VP_Pos  = float2(0, 0);
-    float2 m_VP_Size = float2(1920, 1080);
+    // 视口区域（Gizmo 投影用全窗口，点击检测用 child 区域）
+    float2 m_VP_Pos      = float2(0, 0);
+    float2 m_VP_Size     = float2(1920, 1080);
+    float2 m_VP_ChildMin = float2(0, 0);
+    float2 m_VP_ChildMax = float2(1920, 1080);
 
 private:
     void UpdateCamera(float deltaTime);

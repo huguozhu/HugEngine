@@ -84,10 +84,19 @@ void DetailsPanel::RenderTransform(World* world, Entity entity) {
         }
     }
 
-    // 缩放
+    // 缩放（支持等比缩放）
     float3 oldScl = t->scale;
     float scl[3] = { oldScl.x, oldScl.y, oldScl.z };
+    static bool uniformScale = false;
+    ImGui::Checkbox("等比缩放", &uniformScale);
+    ImGui::SameLine();
     if (ImGui::DragFloat3("Scale", scl, 0.1f, 0.01f, 100.0f)) {
+        if (uniformScale) {
+            // 找到改变的轴，同步到全部三轴
+            if (scl[0] != oldScl.x) { scl[1] = scl[0]; scl[2] = scl[0]; }
+            else if (scl[1] != oldScl.y) { scl[0] = scl[1]; scl[2] = scl[1]; }
+            else if (scl[2] != oldScl.z) { scl[0] = scl[2]; scl[1] = scl[2]; }
+        }
         t->scale = float3(scl[0], scl[1], scl[2]);
     }
     if (ImGui::IsItemDeactivatedAfterEdit()) {

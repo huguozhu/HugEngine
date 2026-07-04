@@ -344,9 +344,15 @@ void EditorApp::MainLoop() {
             ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
             ImGui::BeginChild("ViewportRegion", {viewportWidth, avail.y * 0.75f}, true);
             ImGui::PopStyleColor();
-            // Gizmo 投影用全窗口坐标（3D 场景渲染到完整 backbuffer，非仅 child 区域）
+            // Gizmo 投影用全窗口坐标（3D 场景渲染到完整 backbuffer）
             m_Viewport->m_VP_Pos  = float2(0, 0);
             m_Viewport->m_VP_Size = float2(m_SwapChain->GetWidth(), m_SwapChain->GetHeight());
+            // 点击检测用视口 child 的窗口区域
+            ImVec2 wPos = ImGui::GetWindowPos();
+            ImVec2 wSize = ImGui::GetWindowSize();
+            m_Viewport->m_VP_ChildMin = float2(wPos.x, wPos.y);
+            m_Viewport->m_VP_ChildMax = float2(wPos.x + wSize.x, wPos.y + wSize.y);
+            m_Viewport->HandleClickSelect();
             m_Viewport->RenderGizmoOverlay();
             ImGui::EndChild();
 

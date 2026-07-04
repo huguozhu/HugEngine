@@ -6,6 +6,10 @@
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
 #include "Scene/Transform.h"
+#include "Scene/MeshComponent.h"
+#include "Scene/CubeComponent.h"
+#include "Scene/SphereComponent.h"
+#include "Core/Log.h"
 #include "imgui.h"
 
 #define GLFW_INCLUDE_NONE
@@ -133,6 +137,106 @@ void ViewportPanel::UpdateCamera(float deltaTime) {
     moveIn.sprint   = glfwGetKey(m_Window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
 
     m_CamCtrl.Update(deltaTime, moveIn);
+}
+
+// 射线-AABB 相交检测（slab 方法）
+static bool RayAABB(const float3& origin, const float3& dir,
+                    const float3& aabbMin, const float3& aabbMax, float& outT) {
+    float tMin = 0.0f, tMax = FLT_MAX;
+    for (int i = 0; i < 3; ++i) {
+        if (std::abs(dir[i]) < 0.0001f) {
+            if (origin[i] < aabbMin[i] || origin[i] > aabbMax[i]) return false;
+        } else {
+            float invD = 1.0f / dir[i];
+            float t1 = (aabbMin[i] - origin[i]) * invD;
+            float t2 = (aabbMax[i] - origin[i]) * invD;
+            if (t1 > t2) std::swap(t1, t2);
+            tMin = std::max(tMin, t1);
+            tMax = std::min(tMax, t2);
+            if (tMin > tMax) return false;
+        }
+    }
+    outT = tMin;
+    return true;
+}
+
+void ViewportPanel::HandleClickSelect() {
+    if (!m_Ctx || !m_Window) return;
+
+    // 用 GLFW 检测左键（避免 ImGui Child 窗口吞事件）
+    static bool wasDown = false;
+    bool isDown = glfwGetMouseButton(m_Window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+    bool clicked = !wasDown && isDown;
+    wasDown = isDown;
+    if (!clicked) return;
+
+    // 右键按住时不处理（正在旋转视角）
+    if (glfwGetMouseButton(m_Window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS) return;
+
+    // 调试
+    static int clickCount = 0;
+
+    // 检查鼠标是否在视口 child 区域内
+    double mx, my;
+    glfwGetCursorPos(m_Window, &mx, &my);
+    if (mx < m_VP_ChildMin.x || my < m_VP_ChildMin.y ||
+        mx > m_VP_ChildMax.x || my > m_VP_ChildMax.y) return;
+    HE_CORE_INFO("Click #{}: mouse=({:.0f},{:.0f}) child=({:.0f},{:.0f})-({:.0f},{:.0f})",
+        ++clickCount, mx, my, m_VP_ChildMin.x, m_VP_ChildMin.y, m_VP_ChildMax.x, m_VP_ChildMax.y);
+
+    auto* world = m_Ctx->GetWorld();
+    if (!world) return;
+
+    // 屏幕坐标 → NDC → 世界射线
+    float nx = (float(mx) - m_VP_Pos.x) / m_VP_Size.x * 2.0f - 1.0f;
+    float ny = 1.0f - (float(my) - m_VP_Pos.y) / m_VP_Size.y * 2.0f;
+    float4x4 invVP = glm::inverse(m_CamCtrl.GetCamera().GetViewProjMatrix());
+    float4 nearP = invVP * float4(nx, ny, 0.0f, 1.0f);
+    float4 farP  = invVP * float4(nx, ny, 1.0f, 1.0f);
+    float3 origin = float3(nearP) / nearP.w;
+    float3 farPoint = float3(farP) / farP.w;
+    float3 dir = glm::normalize(farPoint - origin);
+    HE_CORE_INFO("  Ray: origin=({:.1f},{:.1f},{:.1f}) dir=({:.2f},{:.2f},{:.2f})",
+        origin.x, origin.y, origin.z, dir.x, dir.y, dir.z);
+
+    // 遍历所有 MeshComponent 做射线-AABB 测试
+    Entity bestHit{ kInvalidEntity };
+    float bestT = FLT_MAX;
+    int testedCount = 0;
+    // 收集所有可点击的几何体（Mesh + Cube + Sphere）
+    struct HitTarget { AABB bounds; Entity entity; };
+    std::vector<HitTarget> targets;
+    auto* sg = m_Ctx->GetSceneGraph();
+    world->ForEach<he::MeshComponent>([&](he::Entity e, he::MeshComponent& mc) {
+        if (mc.GetIndexCount() == 0) return;
+        float4x4 wm = sg ? sg->GetWorldMatrix(e) : float4x4(1.0f);
+        targets.push_back({mc.GetBounds().Transform(wm), e});
+    });
+    world->ForEach<he::CubeComponent>([&](he::Entity e, he::CubeComponent& cc) {
+        if (cc.GetIndexCount() == 0) return;
+        float4x4 wm = sg ? sg->GetWorldMatrix(e) : float4x4(1.0f);
+        targets.push_back({cc.GetBounds().Transform(wm), e});
+    });
+    world->ForEach<he::SphereComponent>([&](he::Entity e, he::SphereComponent& sc) {
+        if (sc.GetIndexCount() == 0) return;
+        float4x4 wm = sg ? sg->GetWorldMatrix(e) : float4x4(1.0f);
+        targets.push_back({sc.GetBounds().Transform(wm), e});
+    });
+
+    for (auto& t : targets) {
+        float tHit;
+        if (RayAABB(origin, dir, t.bounds.min, t.bounds.max, tHit) && tHit < bestT) {
+            bestT = tHit;
+            bestHit = t.entity;
+        }
+        testedCount++;
+    }
+
+    HE_CORE_INFO("  Tested {} targets, bestHit={}, t={:.1f}", testedCount, bestHit.id, bestT);
+    if (bestHit.IsValid()) {
+        m_Ctx->SelectEntity(bestHit);
+        HE_CORE_INFO("  Selected entity #{}", bestHit.id);
+    }
 }
 
 } // namespace he::editor
