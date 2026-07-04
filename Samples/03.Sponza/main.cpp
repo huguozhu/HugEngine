@@ -434,6 +434,8 @@ int main() {
         camCtrl.SetOrientation(
             GetFloat(cfgData, "cam_yaw", -1.57f),
             GetFloat(cfgData, "cam_pitch", -0.1f));
+        camCtrl.GetCamera().nearPlane = GetFloat(cfgData, "cam_near", 0.1f);
+        camCtrl.GetCamera().farPlane  = GetFloat(cfgData, "cam_far", 2000.0f);
     } else {
         camCtrl.SetPosition(float3(0.0f, 3.0f, 0.0f));
         camCtrl.SetOrientation(-1.57f, -0.1f);
@@ -713,8 +715,10 @@ int main() {
         out["cam_pos_x"]  = std::to_string(camCtrl.GetCamera().position.x);
         out["cam_pos_y"]  = std::to_string(camCtrl.GetCamera().position.y);
         out["cam_pos_z"]  = std::to_string(camCtrl.GetCamera().position.z);
-        out["cam_yaw"]    = std::to_string(camCtrl.GetYaw());
-        out["cam_pitch"]  = std::to_string(camCtrl.GetPitch());
+        out["cam_yaw"]   = std::to_string(camCtrl.GetYaw());
+        out["cam_pitch"] = std::to_string(camCtrl.GetPitch());
+        out["cam_near"]  = std::to_string(camCtrl.GetCamera().nearPlane);
+        out["cam_far"]   = std::to_string(camCtrl.GetCamera().farPlane);
 
         // 主方向光
         if (mainDL) {
