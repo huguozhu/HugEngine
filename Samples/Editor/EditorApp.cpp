@@ -39,6 +39,7 @@ static std::vector<std::string> s_DroppedFiles;
 #include "Panels/ViewportPanel.h"
 #include "Panels/ContentBrowserPanel.h"
 #include "Panels/ProjectSettingsPanel.h"
+#include "Panels/StatsPanel.h"
 
 EditorApp::EditorApp()  = default;
 EditorApp::~EditorApp() = default;
@@ -147,6 +148,7 @@ void EditorApp::InitEditor() {
     m_Details   = std::make_unique<editor::DetailsPanel>();
     m_ContentBrowser = std::make_unique<editor::ContentBrowserPanel>();
     m_ProjectSettings = std::make_unique<editor::ProjectSettingsPanel>();
+    m_Stats = std::make_unique<editor::StatsPanel>();
 
     m_Viewport->Initialize(m_EditorCtx.get(), m_Pipeline.get(), m_Window);
     m_Outliner->Initialize(m_EditorCtx.get());
@@ -383,6 +385,7 @@ void EditorApp::MainLoop() {
             // 浮动面板（自持窗口，不嵌入 EditorMain 布局）
             m_ContentBrowser->Render();
             m_ProjectSettings->Render();
+            m_Stats->Render(dt, 0u, (u32)m_World->GetEntityCount());
         }
 
         m_ImGui->EndFrame(m_CmdList.get());

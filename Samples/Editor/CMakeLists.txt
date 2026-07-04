@@ -7,6 +7,7 @@ add_executable(HugEditor
     Panels/DetailsPanel.cpp
     Panels/ContentBrowserPanel.cpp
     Panels/ProjectSettingsPanel.cpp
+    Panels/StatsPanel.cpp
     Panels/Gizmo.cpp
 )
 

@@ -41,6 +41,7 @@ namespace he::editor {
     class DetailsPanel;
     class ContentBrowserPanel;
     class ProjectSettingsPanel;
+    class StatsPanel;
 }
 
 class EditorApp {
@@ -87,6 +88,7 @@ private:
     std::unique_ptr<he::editor::DetailsPanel>  m_Details;
     std::unique_ptr<he::editor::ContentBrowserPanel> m_ContentBrowser;
     std::unique_ptr<he::editor::ProjectSettingsPanel> m_ProjectSettings;
+    std::unique_ptr<he::editor::StatsPanel> m_Stats;
 
     he::f64  m_LastTime  = 0.0;
 };
