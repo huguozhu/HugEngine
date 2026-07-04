@@ -590,6 +590,14 @@ int main() {
             ImGui::SeparatorText("延迟渲染管线");
             ImGui::Text("GBuffer + Lighting Pass (全屏 PBR)");
             ImGui::Text("3×MRT (albedo+metallic | normal+roughness | emissive+ao) + D32");
+            bool clustered = pipeline.GetClusteredShading().enabled;
+            if (ImGui::Checkbox("Clustered Shading", &clustered))
+                pipeline.GetClusteredShading().enabled = clustered;
+            if (clustered) {
+                ImGui::SameLine();
+                ImGui::TextColored({0.5f, 1.0f, 0.5f, 1.0f}, "%u clusters",
+                    pipeline.GetClusteredShading().GetClusterCount());
+            }
 
             // 相机
             ImGui::SeparatorText("相机");

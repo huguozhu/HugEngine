@@ -13,6 +13,7 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 
 #include "Shadow/IShadowSystem.h"
 #include "SceneRenderer.h"
+#include "Pipeline/ClusteredShading.h"
 #include "PostProcess/ToneMapPass.h"
 #include "PostProcess/SkyboxPass.h"
 #include "Scene/World.h"
@@ -50,6 +51,7 @@ public:
     IShadowSystem*       GetShadowSystem() override { return m_ShadowSystem.get(); }
     IGlobalIllumination* GetGI()           override { return m_GI.get(); }
     ToneMapPass*         GetToneMap()            { return m_ToneMap.get(); }
+    ClusteredShading&    GetClusteredShading()   { return m_ClusteredShading; }
     void SetSwapChain(rhi::IRHISwapChain* sc)  { m_SwapChain = sc; }
 
     rhi::IRHIBuffer* GetCurrentObjectBuffer()  { return m_ObjectBuffers[m_CurrentFrameSlot].get(); }
@@ -104,6 +106,12 @@ private:
 
     // 时域抗锯齿
     std::unique_ptr<IAntiAliasing> m_AntiAliasing;
+
+    // Clustered Shading
+    ClusteredShading m_ClusteredShading;
+    std::unique_ptr<rhi::IRHIBuffer> m_LightGridBuffer;       // binding 7
+    std::unique_ptr<rhi::IRHIBuffer> m_LightIndexListBuffer;  // binding 8
+    std::vector<GPULight> m_CachedLights;  // CPU 端缓存，避免 culling 时重复 Map
 
     // 相机矩阵缓存（当前帧 + 上一帧，用于 velocity 计算和 TAA）
     float4x4 m_PrevViewProj = float4x4(1.0f);

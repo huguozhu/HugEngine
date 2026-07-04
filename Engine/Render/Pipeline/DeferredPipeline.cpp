@@ -12,6 +12,8 @@
 #include "Scene/LightComponent.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
+#include <cstring>
+#include <cmath>
 #include "GBuffer.vert.spv.h"
 #include "GBuffer.frag.spv.h"
 #include "DeferredLighting.vert.spv.h"
@@ -173,6 +175,8 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         {2, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // GBufferC
         {3, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // Depth
         {4, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // Shadow0 (CSM0)
+        {7, rhi::DescriptorType::StorageBuffer, 1, 16},  // LightGrid (Clustered)
+        {8, rhi::DescriptorType::StorageBuffer, 1, 16},  // LightIndexList (Clustered)
         {9, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // SpotShadow
         {10, rhi::DescriptorType::CombinedImageSampler, 1, 16}, // Shadow1 (CSM1)
         {11, rhi::DescriptorType::CombinedImageSampler, 1, 16}, // Shadow2 (CSM2)
@@ -197,9 +201,14 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         // 只更新 layout 中声明的 binding（0-4, 9-16）
         for (u32 b : {0u,1u,2u,3u,4u,9u,10u,11u,12u,13u,14u,15u,16u})
             device->UpdateDescriptorSet(m_LightingSet, b, rhi::DescriptorType::CombinedImageSampler, pt.get(), ps.get());
+        // Cluster SSBO 占位（binding 7/8）
+        rhi::BufferDesc gd; gd.size=16; gd.usage=rhi::BufferUsage::Storage;
+        auto gb = device->CreateBuffer(gd);
+        device->UpdateDescriptorSet(m_LightingSet, 7, rhi::DescriptorType::StorageBuffer, gb.get());
+        device->UpdateDescriptorSet(m_LightingSet, 8, rhi::DescriptorType::StorageBuffer, gb.get());
     }
 
-    rhi::PushConstantRange lpc; lpc.stageMask = 1|16; lpc.size = 96;
+    rhi::PushConstantRange lpc; lpc.stageMask = 1|16; lpc.size = 128;  // 含 cluster 参数
     rhi::PipelineStateDesc lDesc;
     lDesc.vertexShader = &lVS; lDesc.pixelShader = &lFS;
     lDesc.topology = rhi::PrimitiveTopology::TriangleList;
@@ -351,14 +360,53 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 bindTex(9, m_ShadowSystem->GetShadowMap(4));
             m_Device->UpdateDescriptorSet(m_LightingSet, 17, rhi::DescriptorType::StorageBuffer, m_LightBuffers[m_CurrentFrameSlot].get());
             m_Device->UpdateDescriptorSet(m_LightingSet, 18, rhi::DescriptorType::StorageBuffer, m_ShadowBuffers[m_CurrentFrameSlot].get());
+
+            // Clustered Shading: 构建 cluster AABB + 光源剔除（仅在启用时）
+            PushConstantData fpc{}; CollectLights(fpc, world, sg, camera);
+            float4x4 ivp = glm::inverse(camera.GetViewProjMatrix());
+            u32 useClustered = 0u;
+            if (m_ClusteredShading.enabled) {
+                m_CachedLights.resize(fpc.lightCount);
+                auto* gpuLights = static_cast<const GPULight*>(m_LightBuffers[m_CurrentFrameSlot]->Map());
+                if (gpuLights) { memcpy(m_CachedLights.data(), gpuLights, fpc.lightCount * sizeof(GPULight)); }
+                m_LightBuffers[m_CurrentFrameSlot]->Unmap();
+                m_ClusteredShading.BuildClusters(ivp, w, h, camera.nearPlane, camera.farPlane);
+                m_ClusteredShading.CullLights(m_CachedLights.data(), fpc.lightCount);
+                // 上传 LightGrid
+                auto& grid = m_ClusteredShading.GetLightGrid();
+                if (!m_LightGridBuffer || m_LightGridBuffer->GetSize() < grid.size() * 8) {
+                    rhi::BufferDesc d; d.size = grid.size() * 8; d.usage = rhi::BufferUsage::Storage; d.cpuAccess = true;
+                    m_LightGridBuffer = m_Device->CreateBuffer(d);
+                }
+                void* m = m_LightGridBuffer->Map();
+                if (m) { memcpy(m, grid.data(), grid.size() * 8); m_LightGridBuffer->Unmap(); }
+                m_Device->UpdateDescriptorSet(m_LightingSet, 7, rhi::DescriptorType::StorageBuffer, m_LightGridBuffer.get());
+                // 上传 LightIndexList
+                auto& list = m_ClusteredShading.GetLightIndexList();
+                if (!m_LightIndexListBuffer || m_LightIndexListBuffer->GetSize() < list.size() * 4) {
+                    rhi::BufferDesc d; d.size = std::max<usize>(list.size() * 4, 64); d.usage = rhi::BufferUsage::Storage; d.cpuAccess = true;
+                    m_LightIndexListBuffer = m_Device->CreateBuffer(d);
+                }
+                void* m2 = m_LightIndexListBuffer->Map();
+                if (m2) { memcpy(m2, list.data(), list.size() * 4); m_LightIndexListBuffer->Unmap(); }
+                m_Device->UpdateDescriptorSet(m_LightingSet, 8, rhi::DescriptorType::StorageBuffer, m_LightIndexListBuffer.get());
+                useClustered = 1u;
+            }
+
             c->SetPipeline(m_LightingPSO.get()); c->BindDescriptorSet(0, m_LightingSet);
             rhi::ClearValue clr{};
             c->BeginOffscreenPass(m_HDRTarget->GetNativeHandle(), m_HDRDepth->GetNativeHandle(), w, h, &clr, false);
             c->SetViewport({0,(float)h,(float)w,-(float)h,0,1}); c->SetScissor({0,0,w,h});
-            float4x4 ivp = glm::inverse(camera.GetViewProjMatrix());
-            struct { float4x4 ivp; float4 cp; u32 lc; float ii; u32 _pad[2]; } lpc;
-            lpc.ivp=ivp; lpc.cp=float4(camera.position,0); lpc.ii=0; lpc.lc=0;
-            { PushConstantData fpc{}; CollectLights(fpc, world, sg, camera); lpc.lc = fpc.lightCount; }
+            // Push constant: 含 cluster 网格参数 + 开关
+            struct { float4x4 ivp; float4 cp; u32 lc; float ii;
+                     u32 cTx; u32 cTy; float cNear; float cFar; float cLogF;
+                     u32 cUse; u32 _pad2[2]; } lpc;
+            lpc.ivp = ivp; lpc.cp = float4(camera.position, 0); lpc.ii = 0; lpc.lc = fpc.lightCount;
+            lpc.cUse = useClustered;
+            lpc.cTx = useClustered ? m_ClusteredShading.GetTileCountX() : 0u;
+            lpc.cTy = useClustered ? m_ClusteredShading.GetTileCountY() : 0u;
+            float n = camera.nearPlane, f = camera.farPlane;
+            lpc.cNear = n; lpc.cFar = f; lpc.cLogF = std::log(f / n);
             c->SetPushConstants(0, sizeof(lpc), &lpc);
             c->Draw(3);
             c->EndOffscreenPass();

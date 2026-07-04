@@ -47,15 +47,28 @@ struct GPUShadowData {
 [[vk::binding(17, 0)]] StructuredBuffer<GPULight>      u_Lights;
 [[vk::binding(18, 0)]] StructuredBuffer<GPUShadowData> u_ShadowData;
 
+// Clustered Shading: LightGrid + LightIndexList（每 cluster 只迭代影响它的光源）
+struct LightGridCell { uint offset; uint count; };
+[[vk::binding(7, 0)]]  StructuredBuffer<LightGridCell> u_LightGrid;       // 每 cluster 的光源列表头
+[[vk::binding(8, 0)]]  StructuredBuffer<uint>          u_LightIndexList;  // 扁平光源索引数组
+
+// Cluster 网格参数（push constant 传入）
 [[vk::push_constant]] cbuffer LightingPC {
     float4x4 invViewProj;
     float4   cameraPosition;
     uint     lightCount;
     float    iblIntensity;
-    uint     _pad[2];
+    uint     clusterTilesX;     // screen 宽度方向 tile 数（0=禁用 clustered）
+    uint     clusterTilesY;     // screen 高度方向 tile 数
+    float    clusterNear;       // 近裁剪面
+    float    clusterFar;        // 远裁剪面
+    float    clusterLogFactor;  // log(far/near) 用于计算 Z slice
+    uint     useClustered;      // 是否启用 clustered shading
+    uint     _pad2[2];
 };
 
 static const float kPrefilterMips = 5.0;
+static const uint  kClusterSlices = 12;  // 与 C++ kDepthSlices 保持一致
 
 float4 fragmentMain(VSOutput input) : SV_Target0 {
     float2 uv = input.uv;
@@ -80,10 +93,21 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
     float3 V = normalize(cameraPosition.xyz - worldPos);
     float3 color = float3(0.0);
 
-    // 3. 直接光照
-    uint count = min(lightCount, 8u);
-    for (uint i = 0u; i < count; i++) {
-        GPULight light = u_Lights[i];
+    // 3. 直接光照（Clustered 或线性回退）
+    if (useClustered != 0u && clusterTilesX > 0u) {
+        // --- Clustered Shading ---
+        uint tileX = uint(input.position.x) / 64;
+        uint tileY = uint(input.position.y) / 64;
+        float linearDepth = clusterNear * clusterFar / (clusterFar - depth * (clusterFar - clusterNear));
+        float sliceF = float(kClusterSlices) * log(linearDepth / clusterNear) / clusterLogFactor;
+        uint  slice  = uint(clamp(sliceF, 0.0f, float(kClusterSlices - 1)));
+        uint clusterIdx = (slice * clusterTilesY + tileY) * clusterTilesX + tileX;
+
+        LightGridCell cell = u_LightGrid[clusterIdx];
+        uint endIdx = cell.offset + min(cell.count, 64u);
+        for (uint li = cell.offset; li < endIdx; li++) {
+            uint i = u_LightIndexList[li];
+            GPULight light = u_Lights[i];
         uint ltype = uint(light.directionType.w);
         float3 L; float attenuation = 1.0;
         if (ltype == 0u) {
@@ -125,6 +149,46 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
             }
         }
         color += PBR_BRDF(albedo, metallic, roughness, N, V, L) * radiance * shadow;
+        }  // end clustered for
+    } else {
+        // --- 线性回退（Clustered 禁用时）---
+        uint count = min(lightCount, 8u);
+        for (uint i = 0u; i < count; i++) {
+            GPULight light = u_Lights[i];
+        uint ltype = uint(light.directionType.w);
+        float3 L; float attenuation = 1.0;
+        if (ltype == 0u) { L = normalize(-light.directionType.xyz); }
+        else {
+            float3 toLight = light.positionRange.xyz - worldPos;
+            float dist = length(toLight); L = toLight / max(dist, 0.001);
+            float d = dist / max(light.positionRange.w, 0.001);
+            attenuation = 1.0 / (1.0 + 2.0 * d + d * d);
+            if (ltype == 2u) { float spotDot = dot(-L, normalize(light.directionType.xyz));
+                attenuation *= smoothstep(light.coneAngles.y, light.coneAngles.x, spotDot); }
+        }
+        float3 radiance = light.colorIntensity.rgb * light.colorIntensity.w * attenuation;
+        float shadow = 1.0;
+        if (light.shadowIndex >= 0) {
+            GPUShadowData sm = u_ShadowData[light.shadowIndex];
+            if (sm.shadowParams.w < 0.5f) {
+                shadow = lerp(1.0, SampleShadowPCF(worldPos, N, L, sm, cameraPosition.xyz,
+                    u_ShadowMap0, u_ShadowMap1, u_ShadowMap2, u_ShadowSampler), sm.shadowParams.z);
+            } else if (sm.shadowParams.w > 1.5f) {
+                float4 spotClip = mul(sm.lightViewProj[0], float4(worldPos + N * sm.shadowParams.y, 1.0));
+                float3 spotNdc = spotClip.xyz / spotClip.w;
+                float2 spotUv = float2(spotNdc.x * 0.5 + 0.5, 0.5 - spotNdc.y * 0.5);
+                float  spotZ  = spotNdc.z - sm.shadowParams.x;
+                float2 ts = 1.0 / 1024.0; float spotShadow = 0.0;
+                if (spotUv.x > 0.0 && spotUv.x < 1.0 && spotUv.y > 0.0 && spotUv.y < 1.0) {
+                    for (int sx = -1; sx <= 1; sx++)
+                        for (int sy = -1; sy <= 1; sy++)
+                            spotShadow += (spotZ <= u_SpotShadowMap.Sample(u_ShadowSampler, spotUv + float2(sx, sy) * ts)) ? 1.0 : 0.0;
+                    shadow = spotShadow / 9.0;
+                }
+            }
+        }
+        color += PBR_BRDF(albedo, metallic, roughness, N, V, L) * radiance * shadow;
+        }
     }
 
     // 4. IBL

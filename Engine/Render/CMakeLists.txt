@@ -16,6 +16,7 @@ target_sources(HugEngineRender PRIVATE
     Pipeline/ForwardPipeline.cpp
     Pipeline/DeferredPipeline.h
     Pipeline/DeferredPipeline.cpp
+    Pipeline/ClusteredShading.cpp
     Pipeline/Material.h
     # RenderGraph
     RenderGraph.h
