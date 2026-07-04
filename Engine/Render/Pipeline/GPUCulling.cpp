@@ -88,6 +88,20 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
     return true;
 }
 
+void GPUCulling::Shutdown(rhi::IRHIDevice* device) {
+    if (!m_Initialized) return;
+    m_BoundsBuffer.reset();
+    m_VisibleIndicesBuf.reset();
+    m_DrawCountBuf.reset();
+    m_PSO.reset();
+    if (m_DescLayout != rhi::kInvalidLayout && device) {
+        device->DestroyDescriptorSetLayout(m_DescLayout);
+        m_DescLayout = rhi::kInvalidLayout;
+    }
+    m_DescSet = rhi::kInvalidSet;
+    m_Initialized = false;
+}
+
 void GPUCulling::UploadBounds(rhi::IRHIDevice* device,
                                const std::vector<CullObjectBounds>& bounds) {
     if (bounds.empty() || !m_Initialized) return;

@@ -244,6 +244,7 @@ void DeferredPipeline::Shutdown() {
     for (auto& b : m_ObjectBuffers) b.reset();
     for (auto& b : m_ShadowBuffers) b.reset();
     for (auto& b : m_ShadowObjBuffers) b.reset();
+    m_GPUCulling.Shutdown(m_Device);
     m_Device = nullptr; m_Ready = false;
     HE_CORE_INFO("DeferredPipeline shutdown");
 }

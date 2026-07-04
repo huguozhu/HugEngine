@@ -35,6 +35,8 @@ public:
 
     /// 初始化：创建 SSBO + Compute PSO
     bool Initialize(rhi::IRHIDevice* device);
+    /// 清理 GPU 资源
+    void Shutdown(rhi::IRHIDevice* device);
 
     /// 上传物体 AABB 到 GPU
     void UploadBounds(rhi::IRHIDevice* device,

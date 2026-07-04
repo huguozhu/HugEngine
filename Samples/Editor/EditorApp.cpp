@@ -395,6 +395,10 @@ void EditorApp::Shutdown() {
     m_Pipeline.reset();
     m_SceneGraph.reset();
     m_World.reset();
+    // 纹理缓存必须在 Device 之前释放（VMA 在 Device 内）
+    m_TexCache.clear();
+    m_DefaultTex.reset();
+    m_DefaultSampler.reset();
     m_CmdList.reset();
     m_SwapChain.reset();
     m_Device.reset();

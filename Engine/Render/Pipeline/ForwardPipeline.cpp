@@ -287,14 +287,15 @@ void ForwardPipeline::Shutdown() {
     m_HDRTarget.reset();
     m_HDRDepth.reset();
     m_HDRSampler.reset();
-    m_Device = nullptr;
     m_SecRecordLists.clear();  // Phase 5-4 sec CB 录制池
 
-    // 阴影子系统
+    // 阴影子系统（需在 m_Device 有效时清理）
     if (m_ShadowSystem) {
         m_ShadowSystem->Shutdown();
         m_ShadowSystem.reset();
     }
+
+    m_GPUCulling.Shutdown(m_Device);
 
     m_Device = nullptr;
     HE_CORE_INFO("ForwardPipeline shut down");
