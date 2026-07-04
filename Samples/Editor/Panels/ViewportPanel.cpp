@@ -28,20 +28,27 @@ void ViewportPanel::Initialize(EditorContext* ctx,
 void ViewportPanel::Render(rhi::IRHICommandList* cmdList) {
     if (!m_Ctx || !m_Pipeline) return;
 
-    // 计算帧时间
     static f64 lastTime = glfwGetTime();
     f64 now = glfwGetTime();
     float dt = static_cast<float>(now - lastTime);
     lastTime = now;
 
-    // 更新编辑器相机
     UpdateCamera(dt);
 
-    // 渲染 3D 场景到当前 BackBuffer
+    // 绑定 PBR PSO（Editor 直接渲染到 backbuffer，不走 BeginHDRPass）
+    cmdList->SetPipeline(m_Pipeline->GetPipelineState());
     m_Pipeline->RenderScene(cmdList,
         *m_Ctx->GetWorld(),
         *m_Ctx->GetSceneGraph(),
         m_CamCtrl.GetCamera());
+}
+
+void ViewportPanel::FocusOn(const float3& worldPos) {
+    // 将相机放在目标后方 5 单位处，看向目标
+    float3 camPos = worldPos + float3(0, 2, 5);
+    m_CamCtrl.SetPosition(camPos);
+    float3 forward = glm::normalize(worldPos - camPos);
+    m_CamCtrl.SetOrientationFromForward(forward);
 }
 
 void ViewportPanel::RenderGameView(rhi::IRHICommandList* cmdList) {
@@ -80,12 +87,15 @@ void ViewportPanel::RenderGizmoOverlay() {
     quat rot = tf->rotation;
     float3 scl = tf->scale;
 
-    m_Gizmo.Render(m_CamCtrl.GetCamera(), pos, rot, scl, vp, m_VP_Pos, m_VP_Size);
+    bool dragging = m_Gizmo.Render(m_CamCtrl.GetCamera(), pos, rot, scl, vp, m_VP_Pos, m_VP_Size);
 
-    // 应用变换
-    tf->position = pos;
-    tf->rotation = rot;
-    tf->scale    = scl;
+    // 应用变换 + 标记场景图为脏
+    if (dragging) {
+        tf->position = pos;
+        tf->rotation = rot;
+        tf->scale    = scl;
+        m_Ctx->GetSceneGraph()->MarkDirty(selEnt);
+    }
 }
 
 void ViewportPanel::UpdateCamera(float deltaTime) {

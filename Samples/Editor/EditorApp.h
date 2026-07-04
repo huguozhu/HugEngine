@@ -8,7 +8,10 @@
 // ============================================================
 
 #include "Core/Core.h"
+#include "RHI/RHI.h"
+#include "RHI/Buffer.h"
 #include <memory>
+#include <unordered_map>
 
 struct GLFWwindow;
 
@@ -70,6 +73,13 @@ private:
     std::unique_ptr<he::CommandHistory>          m_CmdHistory;
     std::unique_ptr<he::editor::ImGuiIntegration> m_ImGui;
     std::unique_ptr<he::editor::EditorContext>    m_EditorCtx;
+
+    // --- 纹理缓存（持有 GPU 纹理生命周期）---
+    std::unordered_map<std::string,
+        std::pair<std::unique_ptr<he::rhi::IRHITexture>,
+                  std::unique_ptr<he::rhi::IRHISampler>>> m_TexCache;
+    std::unique_ptr<he::rhi::IRHITexture> m_DefaultTex;
+    std::unique_ptr<he::rhi::IRHISampler> m_DefaultSampler;
 
     // --- 面板 ---
     std::unique_ptr<he::editor::ViewportPanel> m_Viewport;

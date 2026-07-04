@@ -15,11 +15,23 @@
 #include "Editor/Command.h"
 #include "imgui.h"
 #include "Editor/SceneSerializer.h"
+#include "Asset/glTFLoader.h"
+#include "Asset/BindlessTextureManager.h"
+#include "Core/Log.h"
+#include <cctype>
+#include <unordered_map>
+#include <filesystem>
+
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
 using namespace he;
+
+// 拖放文件队列（GLFW 回调写入，主循环消费）
+static std::vector<std::string> s_DroppedFiles;
 
 // ���ͷ�ļ�
 #include "Panels/OutlinerPanel.h"
@@ -53,10 +65,14 @@ void EditorApp::InitEngine() {
     m_Engine->Initialize();
     m_Window = m_Engine->GetWindow()->GetNativeHandle();
 
-    // ���ڵ�����С�ص� �� �Զ��ؽ� SwapChain
     m_Engine->GetWindow()->SetResizeCallback([&](u32 w, u32 h) {
         m_SwapChain->Resize(w, h);
         m_CmdList->SetSwapChain(m_SwapChain.get());
+    });
+
+    // 拖放导入回调
+    glfwSetDropCallback(m_Window, [](GLFWwindow*, int count, const char** paths) {
+        for (int i = 0; i < count; ++i) s_DroppedFiles.push_back(paths[i]);
     });
 
     // ���� RHI �豸
@@ -149,6 +165,77 @@ void EditorApp::MainLoop() {
 
         m_Engine->GetWindow()->PollEvents();
 
+        // 处理拖放导入队列
+        if (!s_DroppedFiles.empty()) {
+            for (auto& path : s_DroppedFiles) {
+                String ext = path.substr(path.find_last_of('.') + 1);
+                // 转小写比较
+                for (auto& c : ext) c = static_cast<char>(std::tolower(c));
+                if (ext == "glb" || ext == "gltf") {
+                    HE_CORE_INFO("拖放导入 glTF: {}", path);
+                    auto result = asset::LoadGLTF(*m_World, *m_SceneGraph, String(path));
+                    if (result.success) {
+                        HE_CORE_INFO("  导入成功: {} 实体", result.entities.size());
+                        // 纹理基路径
+                        String baseDir = (std::filesystem::path(path).parent_path() / "").string();
+                        // 占位纹理（持久化）
+                        if (!m_DefaultTex.get()) {
+                            u8 w4[4]={255,255,255,255};
+                            rhi::TextureDesc td; td.format=rhi::Format::RGBA8_UNORM;
+                            td.width=td.height=1; td.mipLevels=1;
+                            td.usage=rhi::TextureUsage::ShaderResource; td.initialData=w4;
+                            m_DefaultTex = m_Device->CreateTexture(td);
+                            rhi::SamplerDesc sd; sd.minFilter=sd.magFilter=rhi::FilterMode::Linear;
+                            sd.addressU=sd.addressV=rhi::AddressMode::Repeat;
+                            m_DefaultSampler = m_Device->CreateSampler(sd);
+                            asset::BindlessTextureManager::Instance().SetDefaultTexture(
+                                m_DefaultTex.get(), m_DefaultSampler.get());
+                        }
+                        m_World->ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent& mc) {
+                            auto loadTex = [&](const String& uriStr) -> std::pair<rhi::IRHITexture*, rhi::IRHISampler*> {
+                                if (uriStr.empty()) return {nullptr, nullptr};
+                                String fullPath = (std::filesystem::path(baseDir) / uriStr).string();
+                                auto it = m_TexCache.find(fullPath);
+                                if (it != m_TexCache.end()) return {it->second.first.get(), it->second.second.get()};
+                                int w, h, c;
+                                u8* px = stbi_load(fullPath.c_str(), &w, &h, &c, 4);
+                                if (!px) { HE_CORE_WARN("纹理加载失败: {}", fullPath); return {nullptr, nullptr}; }
+                                rhi::TextureDesc td; td.format=rhi::Format::RGBA8_UNORM;
+                                td.width=u32(w); td.height=u32(h); td.mipLevels=1;
+                                td.usage=rhi::TextureUsage::ShaderResource; td.initialData=px;
+                                auto tex = m_Device->CreateTexture(td);
+                                rhi::SamplerDesc sd; sd.minFilter=sd.magFilter=rhi::FilterMode::Linear;
+                                sd.addressU=sd.addressV=rhi::AddressMode::Repeat;
+                                auto samp = m_Device->CreateSampler(sd);
+                                stbi_image_free(px);
+                                auto* tp = tex.get(); auto* sp = samp.get();
+                                m_TexCache[fullPath] = {std::move(tex), std::move(samp)};
+                                return {tp, sp};
+                            };
+                            auto [bc, bcs] = loadTex(mc.baseColorTexture);
+                            auto [n, ns]   = loadTex(mc.normalTexture);
+                            auto [mr, mrs] = loadTex(mc.metallicRoughnessTexture);
+                            auto [ao, aos] = loadTex(mc.occlusionTexture);
+                            mc.materialID = asset::BindlessTextureManager::Instance().RegisterMaterial(
+                                bc, bcs, n, ns, mr, mrs, ao, aos);
+                        });
+                        // 选中并聚焦第一个导入实体
+                        if (!result.entities.empty()) {
+                            m_EditorCtx->SelectEntity(result.entities[0]);
+                            // 聚焦相机到选中物体
+                            auto* tf = m_World->GetComponent<TransformComponent>(result.entities[0]);
+                            if (tf) m_Viewport->FocusOn(tf->position);
+                        }
+                    } else {
+                        HE_CORE_WARN("  导入失败: {}", result.error);
+                    }
+                } else {
+                    HE_CORE_INFO("拖放文件: {} (未处理的格式)", path);
+                }
+            }
+            s_DroppedFiles.clear();
+        }
+
         // Ctrl+Z / Ctrl+Y Undo/Redo ���̿�ݼ�
         // �� ImGui �ı�����򼤻�ʱ���������������ı��༭��ݼ���ͻ
         if (!ImGui::IsAnyItemActive()) {
@@ -167,7 +254,7 @@ void EditorApp::MainLoop() {
         m_CmdList->Begin();
         m_CmdList->BeginRenderPass(1, rhi::Format::RGBA8_UNORM);
 
-        // 每帧通用操作：设置视口尺寸（提升至分支外，避免重复调用）
+        m_Pipeline->NextFrame();
         m_Pipeline->BeginFrame(m_CmdList.get(),
             m_SwapChain->GetWidth(), m_SwapChain->GetHeight());
         m_Viewport->SetViewportSize(m_SwapChain->GetWidth(), m_SwapChain->GetHeight());

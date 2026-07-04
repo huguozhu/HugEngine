@@ -53,6 +53,9 @@ public:
 
     const he::render::CameraData& GetCamera() const { return m_CamCtrl.GetCamera(); }
 
+    /// 聚焦相机到指定世界坐标
+    void FocusOn(const float3& worldPos);
+
     // 视口区域（由 EditorApp 在 ImGui 帧内设置）
     float2 m_VP_Pos  = float2(0, 0);
     float2 m_VP_Size = float2(1920, 1080);

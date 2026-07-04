@@ -25,6 +25,7 @@ target_link_libraries(HugEditor PRIVATE
     HugEngineScene
     HugEngineEditor
     HugEngineAsset
+    stb
 )
 
 add_dependencies(HugEditor CompileShaders)
