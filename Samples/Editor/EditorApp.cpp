@@ -352,8 +352,8 @@ void EditorApp::MainLoop() {
             ImVec2 wSize = ImGui::GetWindowSize();
             m_Viewport->m_VP_ChildMin = float2(wPos.x, wPos.y);
             m_Viewport->m_VP_ChildMax = float2(wPos.x + wSize.x, wPos.y + wSize.y);
-            m_Viewport->HandleClickSelect();
-            m_Viewport->RenderGizmoOverlay();
+            m_Viewport->RenderGizmoOverlay();  // Gizmo 先处理，标记 hover/drag
+            m_Viewport->HandleClickSelect();    // 再点击选中（跳过 gizmo 交互中的点击）
             m_Viewport->RenderDebugOverlay();
             ImGui::EndChild();
 
