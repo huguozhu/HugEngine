@@ -77,6 +77,7 @@ private:
 
     he::render::CameraController m_CamCtrl;
     Gizmo m_Gizmo;
+    bool   m_GizmoHovered = false;  // 当前帧 gizmo 被 hover
 
     // 鼠标状态
     bool   m_RightMouseDown = false;

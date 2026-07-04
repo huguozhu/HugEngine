@@ -86,21 +86,20 @@ void ViewportPanel::RenderGizmoOverlay() {
             ? GizmoSpace::World : GizmoSpace::Local;
     }
 
-    // 渲染 gizmo
+    // 渲染 gizmo（记录是否 hover，点击选中时跳过）
     float4x4 vp = m_CamCtrl.GetCamera().GetViewProjMatrix();
     float3 pos = tf->position;
     quat rot = tf->rotation;
     float3 scl = tf->scale;
 
-    bool dragging = m_Gizmo.Render(m_CamCtrl.GetCamera(), pos, rot, scl, vp, m_VP_Pos, m_VP_Size);
+    m_GizmoHovered = m_Gizmo.Render(m_CamCtrl.GetCamera(), pos, rot, scl, vp, m_VP_Pos, m_VP_Size);
 
-    // 应用变换 + 标记场景图为脏
-    if (dragging) {
-        tf->position = pos;
-        tf->rotation = rot;
-        tf->scale    = scl;
+    // 应用变换 + 标记脏（Render 内已修改 pos/rot/scl）
+    tf->position = pos;
+    tf->rotation = rot;
+    tf->scale    = scl;
+    if (m_Gizmo.IsDragging() || m_GizmoHovered)
         m_Ctx->GetSceneGraph()->MarkDirty(selEnt);
-    }
 }
 
 void ViewportPanel::UpdateCamera(float deltaTime) {
@@ -173,6 +172,8 @@ void ViewportPanel::HandleClickSelect() {
 
     // 右键按住时不处理（正在旋转视角）
     if (glfwGetMouseButton(m_Window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS) return;
+    // Gizmo 交互中不处理点击选中
+    if (m_Gizmo.IsDragging() || m_GizmoHovered) return;
 
     // 调试
     static int clickCount = 0;
