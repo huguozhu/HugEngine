@@ -293,8 +293,9 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         {gbC, ResourceAccess::Write}, {gbVel, ResourceAccess::Write}, {gbDepth, ResourceAccess::Write}},
         [&, w, h](rhi::IRHICommandList* c) {
             // 更新 bindless 纹理数组（纹理注册后首次渲染时推送到 GPU）
-            he::asset::BindlessTextureManager::Instance().UpdateDescriptorSet(
-                m_Device, m_GBufferSet, 5, 6);
+            auto& btm = he::asset::BindlessTextureManager::Instance();
+            btm.UpdateDescriptorSet(m_Device, m_GBufferSet, 5, 6);
+            btm.ClearDirty();  // DeferredPipeline 仅单个 GBufferSet，更新后即可清除脏标志
 
             m_Device->UpdateDescriptorSet(m_GBufferSet, 2, rhi::DescriptorType::StorageBuffer,
                 m_ObjectBuffers[m_CurrentFrameSlot].get());

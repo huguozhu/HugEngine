@@ -35,6 +35,11 @@ public:
 
     u32 GetTextureCount() const { return m_TextureCount; }
 
+    /// 描述符集是否脏（需要重新写入 GPU）
+    bool IsDirty() const { return m_DescDirty; }
+    /// 清除脏标志（调用方在所有需要的描述符集上完成 UpdateDescriptorSet 后调用）
+    void ClearDirty() { m_DescDirty = false; }
+
     /// 设置占位纹理/采样器（null 纹理回退用，必须在注册纹理前调用）
     void SetDefaultTexture(rhi::IRHITexture* tex, rhi::IRHISampler* samp) {
         m_DefaultTexture = tex; m_DefaultSampler = samp;

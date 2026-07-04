@@ -56,7 +56,8 @@ void BindlessTextureManager::UpdateDescriptorSet(
         rhi::DescriptorType::Sampler,
         nullptr, sampPtrs.data(), m_TextureCount);
 
-    m_DescDirty = false;
+    // 注意：不在此处清除 m_DescDirty，由调用方在所有需要的描述符集更新完成后调用 ClearDirty()
+    // 这样三缓冲等多描述符集场景可以在一次 dirty 周期内更新所有 set
     HE_CORE_INFO("BindlessTextureManager: {} textures updated to descriptor set", m_TextureCount);
 }
 
