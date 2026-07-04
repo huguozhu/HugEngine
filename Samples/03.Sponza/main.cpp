@@ -19,6 +19,7 @@
 #include "Scene/Transform.h"
 #include "Scene/SphereComponent.h"
 #include "Scene/SkyboxComponent.h"
+#include "Scene/AnimationComponent.h"
 #include "Asset/glTFLoader.h"
 #include "Asset/BindlessTextureManager.h"
 #include "Editor/ImGuiIntegration.h"
@@ -441,8 +442,40 @@ int main() {
         camCtrl.SetOrientation(-1.57f, -0.1f);
     }
 
+    // ============================================================
+    // 8.5 相机平移动画（AnimationComponent 演示）
+    // ============================================================
+    Entity camAnimEntity = world.CreateEntity("CameraAnimation");
+    world.AddComponent<TransformComponent>(camAnimEntity);
+    auto* camAnim = world.AddComponent<AnimationComponent>(camAnimEntity);
+    {
+        // 创建绕 Y 轴旋转的圆形路径动画（6 秒一圈）
+        auto& clips = camAnim->clips;
+        clips.push_back({});
+        camAnim->currentClip = 0;
+        auto& clip = clips.back();
+        clip.name    = "CameraOrbit";
+        clip.looping = true;
+        const float radius = 600.0f;
+        const float height = 200.0f;
+        const int   steps  = 60;
+        const float duration = 6.0f;
+        for (int i = 0; i <= steps; ++i) {
+            float t = static_cast<float>(i) / steps * duration;
+            float angle = (static_cast<float>(i) / steps) * glm::radians(360.0f);
+            camAnim->AddTranslationKey(t, float3(
+                std::cos(angle) * radius, height, std::sin(angle) * radius));
+        }
+        // 相机始终看向原点
+        camAnim->FinalizeClip();
+        camAnim->playing = true;
+    }
+    sceneGraph.SetParent(camAnimEntity, Entity{kInvalidEntity});
+    HE_CORE_INFO("相机动画已创建: {} 秒圆形路径", 6.0f);
+
     // 鼠标状态
     bool   rightMouseDown = false;
+    bool   animCameraMode = true;  // T 键切换：动画相机模式
     double lastMouseX = 0.0, lastMouseY = 0.0;
 
     // ============================================================
@@ -497,6 +530,23 @@ int main() {
                 camCtrl.Rotate(dx * 0.003f, -dy * 0.003f);
             }
 
+            // T 键切换动画/手动相机模式
+            static bool tWasDown = false;
+            bool tDown = glfwGetKey(glfwWin, GLFW_KEY_T) == GLFW_PRESS;
+            if (tDown && !tWasDown) animCameraMode = !animCameraMode;
+            tWasDown = tDown;
+
+            // 动画相机模式：从 AnimationComponent 的 Transform 同步位置
+            if (animCameraMode) {
+                auto* camTf = world.GetComponent<TransformComponent>(camAnimEntity);
+                if (camTf) {
+                    camCtrl.SetPosition(camTf->position);
+                    // 相机始终看向原点
+                    float3 toOrigin = glm::normalize(float3(0, 200, 0) - camTf->position);
+                    camCtrl.SetOrientationFromForward(toOrigin);
+                }
+            }
+
             // 键盘移动
             render::CameraController::MoveInput moveIn;
             moveIn.forward  = glfwGetKey(glfwWin, GLFW_KEY_W) == GLFW_PRESS;
@@ -515,6 +565,12 @@ int main() {
 
         // 帧首推进槽位，确保 Shadow 和 Scene 使用同一帧缓冲区
         pipeline.NextFrame();
+
+        // Transform 动画更新（驱动 AnimationComponent → TransformComponent）
+        world.ForEach<he::AnimationComponent>([&](he::Entity e, he::AnimationComponent& anim) {
+            auto* tf = world.GetComponent<TransformComponent>(e);
+            if (tf) anim.Update(deltaTime, tf);
+        });
 
         // 阴影子系统：CPU 端数据收集（GPU 渲染已迁移到 RenderGraph 的 ShadowCSM Pass）
         {
@@ -563,6 +619,15 @@ int main() {
             // 相机
             // ============================================================
             ImGui::SeparatorText("相机");
+            // 动画模式指示
+            if (animCameraMode) {
+                ImGui::TextColored({0.3f, 1.0f, 0.5f, 1.0f}, "动画相机 (按 T 切换手动)");
+                float speed = camAnim->speed;
+                if (ImGui::SliderFloat("动画速度", &speed, 0.1f, 3.0f, "%.1f"))
+                    camAnim->speed = speed;
+            } else {
+                ImGui::TextColored({1.0f, 1.0f, 0.3f, 1.0f}, "手动相机 (按 T 切换动画)");
+            }
             ImGui::DragFloat3("位置##Camera", &camCtrl.GetCamera().position[0], 5.0f);
             float yawDeg   = glm::degrees(camCtrl.GetYaw());
             float pitchDeg = glm::degrees(camCtrl.GetPitch());

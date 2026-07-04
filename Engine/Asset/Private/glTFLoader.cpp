@@ -3,12 +3,14 @@
 #include "Scene/SceneGraph.h"
 #include "Scene/MeshComponent.h"
 #include "Scene/Transform.h"
+#include "Scene/AnimationComponent.h"
 #include "Core/Log.h"
 #include "Math/Geometry.h"
 
 #include <unordered_map>
 #include <vector>
 #include <string>
+#include <algorithm>
 
 // GLM 矩阵分解（用于 node.matrix）
 #include <glm/gtx/matrix_decompose.hpp>
@@ -396,7 +398,81 @@ glTFResult LoadGLTF(World& world, SceneGraph& sceneGraph, const String& filePath
                     world, sceneGraph, nodeEntityMap, result);
     }
 
-    // 5. 清理
+    // 5. 加载动画数据 → AnimationComponent
+    u32 animCount = 0;
+    for (cgltf_size a = 0; a < data->animations_count; ++a) {
+        const cgltf_animation& anim = data->animations[a];
+
+        // 按目标节点分组 channels → 为每个被动画的节点创建 AnimationComponent
+        std::unordered_map<const cgltf_node*, AnimationComponent*> nodeAnimMap;
+
+        for (cgltf_size c = 0; c < anim.channels_count; ++c) {
+            const cgltf_animation_channel& channel = anim.channels[c];
+            const cgltf_animation_sampler& sampler = *channel.sampler;
+            const cgltf_node* targetNode = channel.target_node;
+            if (!targetNode) continue;
+
+            // 查找或创建该节点的 AnimationComponent
+            auto itEnt = nodeEntityMap.find(targetNode);
+            if (itEnt == nodeEntityMap.end()) continue;
+            Entity ent = itEnt->second;
+
+            auto& acPtr = nodeAnimMap[targetNode];
+            if (!acPtr) {
+                acPtr = world.AddComponent<AnimationComponent>(ent);
+                if (!acPtr) continue;
+                auto& clips = acPtr->clips;
+                clips.push_back({});
+                acPtr->currentClip = static_cast<i32>(clips.size()) - 1;
+                auto& clip = clips.back();
+                clip.name = anim.name
+                    ? String(reinterpret_cast<const char*>(anim.name))
+                    : String("Anim_") + std::to_string(a);
+                clip.looping = true;
+                ++animCount;
+            }
+            auto* ac = acPtr;
+
+            // 读取关键帧
+            cgltf_size keyCount = sampler.input->count;
+            if (keyCount == 0) continue;
+            std::vector<float> timestamps(keyCount);
+            for (cgltf_size k = 0; k < keyCount; ++k)
+                cgltf_accessor_read_float(sampler.input, k, &timestamps[k], 1);
+
+            if (channel.target_path == cgltf_animation_path_type_translation) {
+                for (cgltf_size k = 0; k < keyCount; ++k) {
+                    float v[3];
+                    cgltf_accessor_read_float(sampler.output, k, v, 3);
+                    ac->AddTranslationKey(timestamps[k], float3(v[0], v[1], v[2]));
+                }
+            } else if (channel.target_path == cgltf_animation_path_type_rotation) {
+                for (cgltf_size k = 0; k < keyCount; ++k) {
+                    float q[4];
+                    cgltf_accessor_read_float(sampler.output, k, q, 4);
+                    // cgltf: {x,y,z,w} → GLM: quat(w,x,y,z)
+                    ac->AddRotationKey(timestamps[k], quat(q[3], q[0], q[1], q[2]));
+                }
+            } else if (channel.target_path == cgltf_animation_path_type_scale) {
+                for (cgltf_size k = 0; k < keyCount; ++k) {
+                    float v[3];
+                    cgltf_accessor_read_float(sampler.output, k, v, 3);
+                    ac->AddScaleKey(timestamps[k], float3(v[0], v[1], v[2]));
+                }
+            }
+        }
+
+        // 完成所有 channel 的添加后 Finalize
+        for (auto& [node, ac] : nodeAnimMap) {
+            ac->FinalizeClip();
+            ac->playing = true;
+        }
+    }
+    if (animCount > 0) {
+        HE_CORE_INFO("  加载 {} 个动画, {} 个被驱动节点", data->animations_count, animCount);
+    }
+
+    // 6. 清理
     cgltf_free(data);
 
     result.success = true;

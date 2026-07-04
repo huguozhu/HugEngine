@@ -17,6 +17,7 @@
 #include "Scene/Transform.h"
 #include "Scene/SphereComponent.h"
 #include "Scene/SkyboxComponent.h"
+#include "Scene/AnimationComponent.h"
 #include "Asset/glTFLoader.h"
 #include "Asset/BindlessTextureManager.h"
 #include "Editor/ImGuiIntegration.h"
@@ -453,7 +454,37 @@ int main() {
         camCtrl.SetOrientation(-1.57f, -0.1f);
     }
 
+    // ============================================================
+    // 8.5 相机平移动画（AnimationComponent 演示）
+    // ============================================================
+    Entity camAnimEntity = world.CreateEntity("CameraAnimation");
+    world.AddComponent<TransformComponent>(camAnimEntity);
+    auto* camAnim = world.AddComponent<AnimationComponent>(camAnimEntity);
+    {
+        auto& clips = camAnim->clips;
+        clips.push_back({});
+        camAnim->currentClip = 0;
+        auto& clip = clips.back();
+        clip.name    = "CameraOrbit";
+        clip.looping = true;
+        const float radius   = 600.0f;
+        const float height   = 200.0f;
+        const int   steps    = 60;
+        const float duration = 6.0f;
+        for (int i = 0; i <= steps; ++i) {
+            float t = static_cast<float>(i) / steps * duration;
+            float angle = (static_cast<float>(i) / steps) * glm::radians(360.0f);
+            camAnim->AddTranslationKey(t, float3(
+                std::cos(angle) * radius, height, std::sin(angle) * radius));
+        }
+        camAnim->FinalizeClip();
+        camAnim->playing = true;
+    }
+    sceneGraph.SetParent(camAnimEntity, Entity{kInvalidEntity});
+    HE_CORE_INFO("相机动画已创建: {} 秒圆形路径", 6.0f);
+
     bool   rightMouseDown = false;
+    bool   animCameraMode = true;
     double lastMouseX = 0.0, lastMouseY = 0.0;
 
     // ============================================================
@@ -504,6 +535,22 @@ int main() {
                 camCtrl.Rotate(dx * 0.003f, -dy * 0.003f);
             }
 
+            // T 键切换动画/手动相机模式
+            static bool tWasDown = false;
+            bool tDown = glfwGetKey(glfwWin, GLFW_KEY_T) == GLFW_PRESS;
+            if (tDown && !tWasDown) animCameraMode = !animCameraMode;
+            tWasDown = tDown;
+
+            // 动画相机模式：同步 AnimationComponent 的位置到 CameraController
+            if (animCameraMode) {
+                auto* camTf = world.GetComponent<TransformComponent>(camAnimEntity);
+                if (camTf) {
+                    camCtrl.SetPosition(camTf->position);
+                    float3 toOrigin = glm::normalize(float3(0, 200, 0) - camTf->position);
+                    camCtrl.SetOrientationFromForward(toOrigin);
+                }
+            }
+
             render::CameraController::MoveInput moveIn;
             moveIn.forward  = glfwGetKey(glfwWin, GLFW_KEY_W) == GLFW_PRESS;
             moveIn.backward = glfwGetKey(glfwWin, GLFW_KEY_S) == GLFW_PRESS;
@@ -514,6 +561,12 @@ int main() {
             moveIn.sprint   = glfwGetKey(glfwWin, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
             camCtrl.Update(deltaTime, moveIn);
         }
+
+        // Transform 动画更新（驱动 AnimationComponent → TransformComponent）
+        world.ForEach<he::AnimationComponent>([&](he::Entity e, he::AnimationComponent& anim) {
+            auto* tf = world.GetComponent<TransformComponent>(e);
+            if (tf) anim.Update(deltaTime, tf);
+        });
 
         // --- 渲染（DeferredPipeline 通过 RenderGraph 全自动编排）---
         cmdList->Begin();
@@ -540,6 +593,14 @@ int main() {
 
             // 相机
             ImGui::SeparatorText("相机");
+            if (animCameraMode) {
+                ImGui::TextColored({0.3f, 1.0f, 0.5f, 1.0f}, "动画相机 (按 T 切换手动)");
+                float s = camAnim->speed;
+                if (ImGui::SliderFloat("动画速度", &s, 0.1f, 3.0f, "%.1f"))
+                    camAnim->speed = s;
+            } else {
+                ImGui::TextColored({1.0f, 1.0f, 0.3f, 1.0f}, "手动相机 (按 T 切换动画)");
+            }
             ImGui::DragFloat3("位置##Camera", &camCtrl.GetCamera().position[0], 5.0f);
             float yawDeg   = glm::degrees(camCtrl.GetYaw());
             float pitchDeg = glm::degrees(camCtrl.GetPitch());
