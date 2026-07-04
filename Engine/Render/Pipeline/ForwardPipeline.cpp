@@ -17,6 +17,7 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/ext/matrix_clip_space.hpp>  // orthoRH_ZO (Vulkan Z [0,1])
+#include <unordered_set>
 
 #include <mutex>
 
@@ -260,6 +261,9 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         }
         HE_CORE_INFO("  Sec record pool: {} lists", m_SecRecordLists.size());
     }
+
+    // --- GPU Culling ---
+    m_GPUCulling.Initialize(device);
 
     // --- SceneRenderer ---
     m_SceneRenderer = std::make_unique<SceneRenderer>();
@@ -660,11 +664,50 @@ void ForwardPipeline::RenderScene(
     CollectLights(framePC, world, sceneGraph, camera);
 
     // ============================================================
-    // 几何体数据准备 → SceneRenderer（视锥剔除 + GPU 上传）
+    // GPU 视锥剔除（Compute Shader）— 读回上帧结果 → 调度下帧
     // ============================================================
-    auto drawItems = m_SceneRenderer->Prepare(world, sceneGraph, camera,
-                                               m_ObjectBuffers[m_CurrentFrameSlot].get());
-    u32 totalDraws = (u32)drawItems.size();
+    // 1) 读回上一帧 GPU culling 结果（已 submit 执行完毕）
+    bool useGPUVisible = false;
+    if (m_GPUCulling.enabled) {
+        m_GPUCulling.Readback(m_Device, m_GPUVisibleIndices);
+        useGPUVisible = !m_GPUVisibleIndices.empty();
+    }
+
+    // 2) SceneRenderer 准备所有 draw items
+    auto allDrawItems = m_SceneRenderer->Prepare(world, sceneGraph, camera,
+                                                  m_ObjectBuffers[m_CurrentFrameSlot].get());
+
+    // 3) 上传当前帧 bounds + 调度 GPU culling（结果下帧读回）
+    if (m_GPUCulling.enabled) {
+        std::vector<CullObjectBounds> allBounds;
+        world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent& mc) {
+            if (mc.GetIndexCount() == 0) return;
+            CullObjectBounds cb;
+            const auto& bb = mc.GetBounds();
+            cb.minPoint    = float4(bb.min, 0);
+            cb.maxPoint    = float4(bb.max, 0);
+            cb.objectIndex = static_cast<u32>(allBounds.size());
+            allBounds.push_back(cb);
+        });
+        if (!allBounds.empty()) {
+            m_GPUCulling.UploadBounds(m_Device, allBounds);
+            m_GPUCulling.Dispatch(cmd, viewProj, (u32)allBounds.size());
+        }
+    }
+
+    // GPU 剔除后过滤：构建可见 draw 列表
+    std::vector<DrawItem> filteredItems;
+    if (useGPUVisible) {
+        // 构建 GPU 可见集合（objectIndex → true）
+        std::unordered_set<u32> visibleSet(m_GPUVisibleIndices.begin(), m_GPUVisibleIndices.end());
+        for (auto& di : allDrawItems) {
+            if (visibleSet.count(di.objectIndex))
+                filteredItems.push_back(di);
+        }
+    } else {
+        filteredItems = std::move(allDrawItems);
+    }
+    u32 totalDraws = (u32)filteredItems.size();
 
     // 推送 bindless 纹理到全部已注册描述符集（FlushPending 自动遍历全部 set）
     he::asset::BindlessTextureManager::Instance().FlushPending();
@@ -690,7 +733,7 @@ void ForwardPipeline::RenderScene(
                 secCmd->SetScissor({0, 0, m_HDRWidth, m_HDRHeight});
 
                 for (u32 i = start; i < end; ++i) {
-                    auto& di = drawItems[i];
+                    auto& di = filteredItems[i];
                     PushConstantData pc = framePC;
                     pc.objectIndex = di.objectIndex;
                     secCmd->BindDescriptorSet(0, m_DescSets[m_CurrentFrameSlot]);  // set=0: per-frame + bindless
@@ -710,7 +753,7 @@ void ForwardPipeline::RenderScene(
         }
         drawCount = totalDraws;
     } else {
-        for (auto& di : drawItems) {
+        for (auto& di : filteredItems) {
             PushConstantData pc = framePC;
             pc.objectIndex = di.objectIndex;
             cmd->BindDescriptorSet(0, m_DescSets[m_CurrentFrameSlot]);  // set=0: per-frame + bindless

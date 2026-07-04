@@ -56,6 +56,7 @@ if(SLANGC)
         "${SHADER_DIR}/Triangle.frag.slang"
     )
     set(COMP_SLANG
+        "${SHADER_DIR}/GPUCull.comp.slang"
         "${SHADER_DIR}/TestClear.comp.slang"
     )
     file(GLOB SLANG_INCLUDES "${SHADER_DIR}/*.slang")  # 公共头文件（用 glob 自动收集即可）

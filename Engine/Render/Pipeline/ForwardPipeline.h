@@ -6,6 +6,7 @@
 #include "RHI/RHI.h"
 #include "RenderGraph.h"
 #include "Asset/BindlessTextureManager.h"
+#include "Pipeline/GPUCulling.h"
 
 namespace he::render { class GI_IBL; }
 namespace he::render { class GI_RSM; }
@@ -88,6 +89,7 @@ public:
     // HDR 纹理访问（供 ToneMapPass 使用）
     rhi::IRHITexture* GetHDRTarget()  const { return m_HDRTarget.get(); }
     rhi::IRHISampler* GetHDRSampler() const { return m_HDRSampler.get(); }
+    GPUCulling& GetGPUCulling() { return m_GPUCulling; }
 
 private:
     void CollectLights(PushConstantData& pc, he::World& world, he::SceneGraph& sg, const CameraData& camera);
@@ -137,6 +139,10 @@ private:
     std::unique_ptr<ToneMapPass>         m_ToneMap;
     std::unique_ptr<SkyboxPass>          m_Skybox;
     std::unique_ptr<SceneRenderer>       m_SceneRenderer;
+
+    // GPU Culling
+    GPUCulling m_GPUCulling;
+    std::vector<u32> m_GPUVisibleIndices;  // GPU 剔除后的可见物体索引
 };
 
 } // namespace he::render

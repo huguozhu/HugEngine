@@ -652,6 +652,15 @@ int main() {
             bool multiThread = pipeline.IsMultiThreadedRecording();
             if (ImGui::Checkbox("多线程录制", &multiThread))
                 pipeline.SetMultiThreadedRecording(multiThread);
+            // GPU Culling 开关
+            bool gpuCull = pipeline.GetGPUCulling().enabled;
+            if (ImGui::Checkbox("GPU 视锥剔除", &gpuCull))
+                pipeline.GetGPUCulling().enabled = gpuCull;
+            if (gpuCull) {
+                ImGui::SameLine();
+                ImGui::TextColored({0.5f, 1.0f, 0.5f, 1.0f}, "可见 %u/%u",
+                    pipeline.GetGPUCulling().GetLastVisibleCount(), (u32)104u);
+            }
 
             // ============================================================
             // GI
