@@ -598,6 +598,14 @@ int main() {
                 ImGui::TextColored({0.5f, 1.0f, 0.5f, 1.0f}, "%u clusters",
                     pipeline.GetClusteredShading().GetClusterCount());
             }
+            bool gpuCull = pipeline.GetGPUCulling().enabled;
+            if (ImGui::Checkbox("GPU 视锥剔除", &gpuCull))
+                pipeline.GetGPUCulling().enabled = gpuCull;
+            if (gpuCull) {
+                ImGui::SameLine();
+                ImGui::TextColored({0.5f, 1.0f, 0.5f, 1.0f}, "%u 可见",
+                    pipeline.GetGPUCulling().GetLastVisibleCount());
+            }
 
             // 相机
             ImGui::SeparatorText("相机");

@@ -14,6 +14,7 @@
 #include "Core/Assert.h"
 #include <cstring>
 #include <cmath>
+#include <unordered_set>
 #include "GBuffer.vert.spv.h"
 #include "GBuffer.frag.spv.h"
 #include "DeferredLighting.vert.spv.h"
@@ -94,6 +95,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     m_ToneMap = std::make_unique<ToneMapPass>(); m_ToneMap->Initialize(device, m_Width, m_Height);
     m_Skybox  = std::make_unique<SkyboxPass>(); m_Skybox->Initialize(device, m_Width, m_Height);
     m_SceneRenderer = std::make_unique<SceneRenderer>();
+    m_GPUCulling.Initialize(device);
 
     // AA_TAA
     m_AntiAliasing = std::make_unique<AA_TAA>();
@@ -300,10 +302,17 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     if (firstFrame) { m_PrevViewProj = m_CurrViewProj; firstFrame = false; }
     if (m_AntiAliasing) m_AntiAliasing->OnBeginFrame();
 
-    // GBuffer 4×MRT + SceneRenderer（所有矩阵在 lambda 内计算，避免捕获悬垂引用）
+    // GPU 剔除读回（上帧结果）+ 过滤可见物体
+    bool useGPUVisible = false;
+    if (m_GPUCulling.enabled) {
+        m_GPUCulling.Readback(m_Device, m_GPUVisibleIndices);
+        useGPUVisible = !m_GPUVisibleIndices.empty();
+    }
+
+    // GBuffer 4×MRT + SceneRenderer
     rg.AddPass("GB_Clear", {}, {{gbA, ResourceAccess::Write}, {gbB, ResourceAccess::Write},
         {gbC, ResourceAccess::Write}, {gbVel, ResourceAccess::Write}, {gbDepth, ResourceAccess::Write}},
-        [&, w, h](rhi::IRHICommandList* c) {
+        [&, w, h, useGPUVisible](rhi::IRHICommandList* c) {
             // 推送 bindless 纹理到全部已注册描述符集
             he::asset::BindlessTextureManager::Instance().FlushPending();
 
@@ -321,10 +330,35 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             c->SetViewport({0,(float)h,(float)w,-(float)h,0,1});
             c->SetScissor({0,0,w,h});
             auto drawItems = m_SceneRenderer->Prepare(world, sg, camera, m_ObjectBuffers[m_CurrentFrameSlot].get());
-            // ★ 在 lambda 内计算 VP（避免捕获 BuildFrameGraph 局部变量的悬垂引用）
-            // 计算 VP（暂不应用 jitter，避免时域抖动伪影）
+
+            // GPU 剔除过滤（使用上帧结果）
+            std::vector<DrawItem> filteredItems;
+            if (useGPUVisible) {
+                std::unordered_set<u32> visSet(m_GPUVisibleIndices.begin(), m_GPUVisibleIndices.end());
+                for (auto& di : drawItems)
+                    if (visSet.count(di.objectIndex)) filteredItems.push_back(di);
+            } else {
+                filteredItems = std::move(drawItems);
+            }
+
+            // 上传 GPU culling bounds + 调度 compute（结果下帧读回）
+            if (m_GPUCulling.enabled) {
+                std::vector<CullObjectBounds> allBounds;
+                world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent& mc) {
+                    if (mc.GetIndexCount() == 0) return;
+                    CullObjectBounds cb;
+                    const auto& bb = mc.GetBounds();
+                    cb.minPoint = float4(bb.min, 0); cb.maxPoint = float4(bb.max, 0);
+                    cb.objectIndex = (u32)allBounds.size(); allBounds.push_back(cb);
+                });
+                if (!allBounds.empty()) {
+                    m_GPUCulling.UploadBounds(m_Device, allBounds);
+                    m_GPUCulling.Dispatch(c, camera.GetViewProjMatrix(), (u32)allBounds.size());
+                }
+            }
+
             float4x4 jitteredVP = camera.GetViewProjMatrix();
-            for (auto& di : drawItems) {
+            for (auto& di : filteredItems) {
                 struct {
                     float4x4 viewProjMatrix;
                     float4x4 prevViewProjMatrix;
