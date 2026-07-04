@@ -24,6 +24,15 @@ public:
         float4x4 S = glm::scale(float4x4(1.0f), scale);
         return T * R * S;
     }
+
+    /// 从旋转计算世界前向（-Z 轴，Vulkan 约定）
+    float3 GetForward() const { return rotation * float3(0.0f, 0.0f, -1.0f); }
+
+    /// 从旋转计算世界上方向（+Y 轴）
+    float3 GetUp() const { return rotation * float3(0.0f, 1.0f, 0.0f); }
+
+    /// 从旋转计算世界右方向（+X 轴）
+    float3 GetRight() const { return rotation * float3(1.0f, 0.0f, 0.0f); }
 };
 
 } // namespace he

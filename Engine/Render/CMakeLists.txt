@@ -11,6 +11,7 @@ target_sources(HugEngineRender PRIVATE
     Pipeline/Camera.h
     Pipeline/CameraController.h
     Pipeline/CameraController.cpp
+    Pipeline/Camera.cpp
     Pipeline/ForwardPipeline.h
     Pipeline/ForwardPipeline.cpp
     Pipeline/DeferredPipeline.h

@@ -7,9 +7,11 @@
 // ============================================================
 // Camera.h — 渲染相机
 //
-// 提供视图/投影矩阵计算和视锥体提取
-// 复用 Core/Math/Geometry.h 的 Frustum
+// CameraData: 渲染管线使用的相机数据（视图/投影矩阵 + 视锥体）
+// CameraComponent 通过 MakeCameraData() 转换为 CameraData
 // ============================================================
+
+namespace he { class CameraComponent; class TransformComponent; }
 
 namespace he::render {
 
@@ -58,5 +60,9 @@ struct CameraData {
         aspectRatio = width / height;
     }
 };
+
+/// 从 CameraComponent + TransformComponent 构造渲染用 CameraData
+CameraData MakeCameraData(const he::CameraComponent& camComp,
+                          const he::TransformComponent& transform);
 
 } // namespace he::render

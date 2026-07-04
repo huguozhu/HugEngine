@@ -11,6 +11,7 @@
 #include "Scene/SphereComponent.h"
 #include "Scene/LightComponent.h"
 #include "Scene/SkyboxComponent.h"
+#include "Scene/CameraComponent.h"
 
 namespace he {
 
@@ -48,6 +49,9 @@ HE_BEGIN_REGISTER(he::SpotLight)
 HE_END_REGISTER()
 
 HE_BEGIN_REGISTER(he::SkyboxComponent)
+HE_END_REGISTER()
+
+HE_BEGIN_REGISTER(he::CameraComponent)
 HE_END_REGISTER()
 
 } // namespace he
