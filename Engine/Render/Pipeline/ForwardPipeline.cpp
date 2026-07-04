@@ -616,10 +616,48 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             });
     }
 
-    // --- Pass 1: FullScene — 主场景 HDR 渲染 ---
-    rg.AddPass("FullScene", {}, {{hdrColor, ResourceAccess::Write}, {hdrDepth, ResourceAccess::Write}},
-        [this, w, h, &world, &sg, &camera](rhi::IRHICommandList* c) {
-            PrepareGI(c, world, sg);
+    // --- Pass 1: IBL 生成（仅在天空盒脏时执行）---
+    auto* giIBL = dynamic_cast<GI_IBL*>(m_GI.get());
+    bool iblNeedsUpdate = false;
+    if (giIBL && giIBL->IsDirty()) {
+        auto iblIrr  = rg.ImportTexture("IBL_Irradiance", giIBL->GetIrradianceMap());
+        auto iblPref = rg.ImportTexture("IBL_Prefilter",  giIBL->GetPrefilterMap());
+        auto iblLUT  = rg.ImportTexture("IBL_BRDF_LUT",   giIBL->GetBRDF_LUT());
+        rg.AddPass("IBL_Generate", {},
+            {{iblIrr, ResourceAccess::Write}, {iblPref, ResourceAccess::Write}, {iblLUT, ResourceAccess::Write}},
+            [giIBL](rhi::IRHICommandList* c) { giIBL->Render(c); });
+        iblNeedsUpdate = true;
+    }
+
+    // --- Pass 2: RSM 生成（Reflective Shadow Maps）---
+    if (m_RSM && m_ShadowSystem && m_ShadowSystem->HasActiveShadows()) {
+        float4x4 lightVP = m_ShadowSystem->GetLightViewProj(0);
+        if (glm::determinant(lightVP) != 0.0f) {
+            auto rsmPos  = rg.ImportTexture("RSM_Position",  m_RSM->GetRSMPositionMap());
+            auto rsmFlux = rg.ImportTexture("RSM_Flux",      m_RSM->GetRSMFluxMap());
+            rg.AddPass("RSM_Generate", {},
+                {{rsmPos, ResourceAccess::Write}, {rsmFlux, ResourceAccess::Write}},
+                [this, &world, &sg](rhi::IRHICommandList* c) {
+                    m_RSM->SetLightViewProj(m_ShadowSystem->GetLightViewProj(0),
+                        m_RSM->GetRSMPositionMap()->GetWidth(),
+                        m_ObjectBuffers[m_CurrentFrameSlot].get(),
+                        m_ShadowSystem->GetShadowSampler(),
+                        m_DescSets[m_CurrentFrameSlot]);
+                    m_RSM->RenderRSMPass(c, world, sg);
+                });
+        }
+    }
+
+    // --- Pass 3: Scene — HDR 几何 + 天空盒渲染 ---
+    rg.AddPass("Scene",
+        {{hdrDepth, ResourceAccess::Read}},  // 读深度确保在 Shadow 之后
+        {{hdrColor, ResourceAccess::Write}, {hdrDepth, ResourceAccess::Write}},
+        [this, w, h, &world, &sg, &camera, iblNeedsUpdate](rhi::IRHICommandList* c) {
+            // IBL bindings 更新（IBL pass 之后纹理已变化）
+            if (iblNeedsUpdate && m_GI) {
+                auto* gi = dynamic_cast<GI_IBL*>(m_GI.get());
+                if (gi) UpdateIBLBindings(gi);
+            }
             BeginHDRPass(c, w, h);
             BeginFrame(c, w, h);
             RenderScene(c, world, sg, camera);
@@ -627,7 +665,7 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             EndHDRPass(c);
         });
 
-    // --- Pass 2: ToneMap — HDR → LDR 色调映射 ---
+    // --- Pass 4: ToneMap — HDR → LDR 色调映射 ---
     rg.AddPass("ToneMap", {{hdrColor, ResourceAccess::Read}}, {{backBuf, ResourceAccess::Write}},
         [this](rhi::IRHICommandList* c) {
             m_ToneMap->SetInput(m_HDRTarget.get(), m_HDRSampler.get());

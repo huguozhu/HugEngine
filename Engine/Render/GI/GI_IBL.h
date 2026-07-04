@@ -46,6 +46,7 @@ public:
     // ---- 设置 Skybox Cubemap ----
     /// 设置输入天空盒 Cubemap + 采样器，标记脏状态触发重生成
     void SetIBLSkybox(rhi::IRHITexture* cubemap, rhi::IRHISampler* sampler);
+    bool IsDirty() const { return m_Dirty; }
 
     // ---- 访问 IBL 纹理（供 ForwardPipeline 绑定到 PBR 描述符集） ----
     [[nodiscard]] rhi::IRHITexture* GetIrradianceMap() const { return m_IrradianceMap.get(); }
