@@ -261,9 +261,16 @@ void EditorApp::MainLoop() {
             m_SwapChain->GetWidth(), m_SwapChain->GetHeight());
         m_Viewport->SetViewportSize(m_SwapChain->GetWidth(), m_SwapChain->GetHeight());
 
-        if (m_EditorCtx->IsPlaying()) {
-            // Play 模式：更新世界 + 渲染游戏视图
-            m_World->Update(dt);
+        if (m_EditorCtx->IsPlaying() || m_EditorCtx->IsPaused()) {
+            // Play/Paused 模式渲染
+            if (m_EditorCtx->IsPlaying()) {
+                m_World->Update(dt);
+            }
+            if (m_StepFrame) {
+                m_World->Update(0.016f);
+                m_EditorCtx->Pause();
+                m_StepFrame = false;
+            }
             m_Viewport->RenderGameView(m_CmdList.get());
         } else {
             // Edit 模式：场景渲染由 ViewportPanel 管理
@@ -306,25 +313,34 @@ void EditorApp::MainLoop() {
                 ImGui::EndMenu();
             }
 
-            // Play/Stop 按钮（菜单栏右侧）
-            ImGui::SameLine(ImGui::GetWindowWidth() - 100);
-            if (m_EditorCtx->IsPlaying()) {
-                if (ImGui::Button("Stop")) m_EditorCtx->Stop();
-            } else {
+            // Play/Pause/Stop 按钮（菜单栏右侧）
+            ImGui::SameLine(ImGui::GetWindowWidth() - 150);
+            if (m_EditorCtx->GetState() == he::editor::EditorContext::EditorState::Edit) {
                 if (ImGui::Button("Play")) m_EditorCtx->Play();
+            } else {
+                bool playing = m_EditorCtx->IsPlaying();
+                if (ImGui::Button(playing ? "Pause" : "Resume"))
+                    playing ? m_EditorCtx->Pause() : m_EditorCtx->Play();
+                ImGui::SameLine();
+                if (m_EditorCtx->IsPaused()) {
+                    if (ImGui::Button("Step")) { m_EditorCtx->Play(); m_StepFrame = true; }
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Stop")) { m_EditorCtx->Stop(); m_StepFrame = false; }
             }
             ImGui::EndMainMenuBar();
         }
 
-        // --- Play 模式覆盖层 / Edit 模式编辑器 UI ---
-        if (m_EditorCtx->IsPlaying()) {
-            // 游戏覆盖层：FPS + 退出提示
+        // --- Play/Paused 覆盖层 / Edit 模式编辑器 UI ---
+        if (m_EditorCtx->IsPlaying() || m_EditorCtx->IsPaused()) {
             ImGui::SetNextWindowBgAlpha(0.3f);
             ImGui::Begin("GameOverlay", nullptr,
                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize);
-            ImGui::Text("FPS: %.0f | Press ESC to Stop", 1.0f / dt);
+            if (m_EditorCtx->IsPaused())
+                ImGui::TextColored({1,1,0,1}, "PAUSED | FPS: %.0f | ESC: Stop | Step: advance 1 frame", 1.0f/dt);
+            else
+                ImGui::Text("FPS: %.0f | Press ESC to Stop", 1.0f / dt);
             ImGui::End();
-            // ESC 键退出 Play 模式
             if (ImGui::IsKeyPressed(ImGuiKey_Escape))
                 m_EditorCtx->Stop();
         } else {

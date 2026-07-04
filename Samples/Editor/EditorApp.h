@@ -91,4 +91,5 @@ private:
     std::unique_ptr<he::editor::StatsPanel> m_Stats;
 
     he::f64  m_LastTime  = 0.0;
+    bool     m_StepFrame = false;  // PIE Step 模式
 };

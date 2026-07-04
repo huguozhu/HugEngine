@@ -38,16 +38,14 @@ public:
     void SetProperty(he::Entity entity, const char* propName, const T& value);
 
     // --- 编辑器状态 ---
-    enum class EditorState : u8 { Edit, Play };
+    enum class EditorState : u8 { Edit, Play, Paused };
 
-    /// 切换到运行模式
     void Play()           { m_State = EditorState::Play; }
-    /// 回到编辑模式
+    void Pause()          { m_State = EditorState::Paused; }
     void Stop()           { m_State = EditorState::Edit; }
-    /// 获取当前编辑器状态
     EditorState GetState() const { return m_State; }
-    /// 判断是否处于运行模式
     bool IsPlaying()     const { return m_State == EditorState::Play; }
+    bool IsPaused()      const { return m_State == EditorState::Paused; }
 
     // --- 引擎引用 ---
     he::World*          GetWorld()          const { return m_World; }
