@@ -48,7 +48,9 @@ void DetailsPanel::Render() {
     if (world->HasComponent<TransformComponent>(entity))
         RenderTransform(world, entity);
 
-    if (world->HasComponent<MeshComponent>(entity))
+    if (world->HasComponent<MeshComponent>(entity) ||
+        world->HasComponent<CubeComponent>(entity) ||
+        world->HasComponent<SphereComponent>(entity))
         RenderMesh(world, entity);
 
     // 检测光照组件类型（平行光 / 点光源 / 聚光灯 / 基础光源）
@@ -68,16 +70,17 @@ void DetailsPanel::Render() {
 
     if (ImGui::BeginPopup("AddComponentPopup")) {
         static const char* items[] = {
-            "Cube (Debug)", "Sphere (Debug)",
+            "Mesh", "Cube (Debug)", "Sphere (Debug)",
             "Point Light", "Spot Light", "Directional Light",
             "Camera", "Skybox"
         };
         for (int i = 0; i < IM_ARRAYSIZE(items); ++i) {
             if (ImGui::Selectable(items[i])) {
-                if (strcmp(items[i], "Cube (Debug)") == 0) world->AddComponent<CubeComponent>(entity);
+                if (strcmp(items[i], "Mesh") == 0) world->AddComponent<MeshComponent>(entity);
+                else if (strcmp(items[i], "Cube (Debug)") == 0) world->AddComponent<CubeComponent>(entity);
                 else if (strcmp(items[i], "Sphere (Debug)") == 0) world->AddComponent<SphereComponent>(entity);
-                else if (strcmp(items[i], "Point Light") == 0) { auto* l = world->AddComponent<PointLight>(entity); l->color=float3(1,0.8f,0.6f); l->intensity=20; l->range=100; }
-                else if (strcmp(items[i], "Spot Light") == 0) { auto* l = world->AddComponent<SpotLight>(entity); l->color=float3(1,1,1); l->intensity=30; l->range=100; }
+                else if (strcmp(items[i], "Point Light") == 0) { auto* l = world->AddComponent<PointLight>(entity); l->color=float3(1,0.8f,0.6f); l->intensity=20; }
+                else if (strcmp(items[i], "Spot Light") == 0) { auto* l = world->AddComponent<SpotLight>(entity); l->color=float3(1,1,1); l->intensity=30; }
                 else if (strcmp(items[i], "Directional Light") == 0) { auto* l = world->AddComponent<DirectionalLight>(entity); l->color=float3(1,0.95f,0.85f); l->intensity=10; }
                 else if (strcmp(items[i], "Camera") == 0) world->AddComponent<CameraComponent>(entity);
                 else if (strcmp(items[i], "Skybox") == 0) world->AddComponent<SkyboxComponent>(entity);
@@ -172,6 +175,8 @@ void DetailsPanel::RenderMesh(World* world, Entity entity) {
         return;
 
     auto* mesh = world->GetComponent<MeshComponent>(entity);
+    if (!mesh) mesh = world->GetComponent<CubeComponent>(entity);
+    if (!mesh) mesh = world->GetComponent<SphereComponent>(entity);
     if (!mesh) return;
     auto* cmdHistory = m_Ctx->GetCommandHistory();
 

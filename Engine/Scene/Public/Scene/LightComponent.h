@@ -51,7 +51,7 @@ class PointLight : public LightComponent {
 public:
     void OnCreate() override;
 
-    float range = 10.0f;  // 影响范围
+    float range = 1.0f;   // 影响范围
 };
 
 // --- 聚光灯（锥形辐射 + 角度衰减）---

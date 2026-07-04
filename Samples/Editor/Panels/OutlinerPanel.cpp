@@ -6,7 +6,9 @@
 #include "Scene/SceneGraph.h"
 #include "Scene/MeshComponent.h"
 #include "Scene/CubeComponent.h"
+#include "Scene/SphereComponent.h"
 #include "Scene/LightComponent.h"
+#include "Scene/Transform.h"
 #include "imgui.h"
 
 namespace he::editor {
@@ -29,6 +31,38 @@ void OutlinerPanel::Render() {
 
     auto* world = m_Ctx->GetWorld();
     auto* sg    = m_Ctx->GetSceneGraph();
+
+    // Add Entity 按钮
+    ImGui::SameLine(0, 4);
+    if (ImGui::Button("+", ImVec2(24, 20))) ImGui::OpenPopup("AddEntityPopup");
+    if (ImGui::BeginPopup("AddEntityPopup")) {
+        auto createEntity = [&](const char* name) {
+            Entity e = world->CreateEntity(name);
+            world->AddComponent<TransformComponent>(e);
+            if (sg) sg->SetParent(e, Entity{kInvalidEntity});
+            m_Ctx->SelectEntity(e);
+            return e;
+        };
+        if (ImGui::MenuItem("Empty Entity")) { createEntity("NewEntity"); }
+        if (ImGui::MenuItem("Cube")) { Entity e = createEntity("Cube"); world->AddComponent<CubeComponent>(e); }
+        if (ImGui::MenuItem("Sphere")) { Entity e = createEntity("Sphere"); world->AddComponent<SphereComponent>(e); }
+        if (ImGui::MenuItem("Point Light")) {
+            Entity e = createEntity("PointLight");
+            auto* pl = world->AddComponent<PointLight>(e);
+            pl->color = float3(1, 0.8f, 0.6f); pl->intensity = 20;
+        }
+        if (ImGui::MenuItem("Spot Light")) {
+            Entity e = createEntity("SpotLight");
+            auto* sl = world->AddComponent<SpotLight>(e);
+            sl->color = float3(1, 0.9f, 0.7f); sl->intensity = 30;
+        }
+        if (ImGui::MenuItem("Directional Light")) {
+            Entity e = createEntity("DirLight");
+            auto* dl = world->AddComponent<DirectionalLight>(e);
+            dl->color = float3(1, 0.95f, 0.85f); dl->intensity = 10;
+        }
+        ImGui::EndPopup();
+    }
 
     // 一次性构建 parent→children 映射（O(N)），避免每节点递归时重复遍历全实体
     std::unordered_map<EntityID, TArray<Entity>> childrenMap;
