@@ -57,78 +57,97 @@ void Gizmo::DrawAxis(const float2& origin, const float3& axisDir, u32 color,
 bool Gizmo::Render(const render::CameraData& camera, float3& position, quat& rotation, float3& scale,
                     const float4x4& viewProj, const float2& vpPos, const float2& vpSize) {
     auto* dl = ImGui::GetWindowDrawList();
-    float2 origin2D = WorldToScreen(position, viewProj, vpPos, vpSize);
+    float2 center = WorldToScreen(position, viewProj, vpPos, vpSize);
 
-    // 原点不在视口内或太远
-    if (origin2D.x < vpPos.x - 50 || origin2D.y < vpPos.y - 50 ||
-        origin2D.x > vpPos.x + vpSize.x + 50 ||
-        origin2D.y > vpPos.y + vpSize.y + 50)
+    if (center.x < vpPos.x - 50 || center.y < vpPos.y - 50 ||
+        center.x > vpPos.x + vpSize.x + 50 || center.y > vpPos.y + vpSize.y + 50)
         return false;
 
-    // 根据模式选择轴向
-    float3 axisX = (space == GizmoSpace::Local) ? rotation * float3(1, 0, 0) : float3(1, 0, 0);
-    float3 axisY = (space == GizmoSpace::Local) ? rotation * float3(0, 1, 0) : float3(0, 1, 0);
-    float3 axisZ = (space == GizmoSpace::Local) ? rotation * float3(0, 0, 1) : float3(0, 0, 1);
+    float3 axX = (space == GizmoSpace::Local) ? rotation * float3(1,0,0) : float3(1,0,0);
+    float3 axY = (space == GizmoSpace::Local) ? rotation * float3(0,1,0) : float3(0,1,0);
+    float3 axZ = (space == GizmoSpace::Local) ? rotation * float3(0,0,1) : float3(0,0,1);
 
-    // 绘制轴
-    DrawAxis(origin2D, axisX, kColorX, viewProj, vpPos, vpSize, position);
-    DrawAxis(origin2D, axisY, kColorY, viewProj, vpPos, vpSize, position);
-    DrawAxis(origin2D, axisZ, kColorZ, viewProj, vpPos, vpSize, position);
-
-    // 原点圆点
-    dl->AddCircleFilled(ImVec2(origin2D.x, origin2D.y), 4.0f, 0xFFFFFFFF);
-
-    // --- 鼠标交互（平移模式）---
     ImVec2 mouse = ImGui::GetMousePos();
     float2 mPos(mouse.x, mouse.y);
     bool hovered = false;
 
-    if (!m_Dragging) {
-        // 检测悬停
-        float3 axes[] = {axisX, axisY, axisZ};
-        for (int i = 0; i < 3; ++i) {
-            float3 endWorld = position + axes[i] * kAxisLength;
-            float2 end2D = WorldToScreen(endWorld, viewProj, vpPos, vpSize);
-            if (HitTest(mPos, origin2D, end2D, 10.0f)) {
-                // 高亮选中轴
-                float3 highlightEnd = position + axes[i] * kAxisLength;
-                float2 hEnd = WorldToScreen(highlightEnd, viewProj, vpPos, vpSize);
-                dl->AddLine(ImVec2(origin2D.x, origin2D.y), ImVec2(hEnd.x, hEnd.y), kColorSel, 3.0f);
-                hovered = true;
+    if (mode == GizmoMode::Translate) {
+        // === 平移模式 ===
+        DrawAxis(center, axX, kColorX, viewProj, vpPos, vpSize, position);
+        DrawAxis(center, axY, kColorY, viewProj, vpPos, vpSize, position);
+        DrawAxis(center, axZ, kColorZ, viewProj, vpPos, vpSize, position);
+        dl->AddCircleFilled(ImVec2(center.x, center.y), 4.0f, 0xFFFFFFFF);
 
-                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                    m_Dragging = true;
-                    m_ActiveAxis = i;
-                    m_DragStartPos = position;
-                    m_DragStartMouse = mPos;
+        if (!m_Dragging) {
+            float3 axes[] = {axX, axY, axZ};
+            for (int i = 0; i < 3; ++i) {
+                float2 end2D = WorldToScreen(position + axes[i] * kAxisLength, viewProj, vpPos, vpSize);
+                if (HitTest(mPos, center, end2D, 10.0f)) {
+                    float2 hEnd = WorldToScreen(position + axes[i] * kAxisLength, viewProj, vpPos, vpSize);
+                    dl->AddLine(ImVec2(center.x, center.y), ImVec2(hEnd.x, hEnd.y), kColorSel, 3.0f);
+                    hovered = true;
+                    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                        m_Dragging = true; m_ActiveAxis = i;
+                        m_DragStartPos = position; m_DragStartMouse = mPos;
+                    }
+                    break;
                 }
-                break;
             }
+        } else {
+            float3 tax[3] = {axX, axY, axZ};
+            float3 moveAxis = tax[m_ActiveAxis];
+            float2 mouseDelta = mPos - m_DragStartMouse;
+            float2 s0 = WorldToScreen(position, viewProj, vpPos, vpSize);
+            float2 s1 = WorldToScreen(position + moveAxis, viewProj, vpPos, vpSize);
+            float2 screenAxis = s1 - s0;
+            float len = glm::length(screenAxis);
+            if (len > 0.001f) {
+                float worldDelta = glm::dot(mouseDelta, screenAxis / len) * kAxisLength / std::max(len, 1.0f);
+                position = m_DragStartPos + moveAxis * worldDelta;
+            }
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) { m_Dragging = false; m_ActiveAxis = -1; }
         }
-    } else {
-        // 拖拽中：沿轴移动
-        float3 axes[] = {axisX, axisY, axisZ};
-        float3 moveAxis = axes[m_ActiveAxis];
-
-        // 计算屏幕空间移动量 → 世界空间
-        float2 mouseDelta = mPos - m_DragStartMouse;
-        // 投影轴到屏幕：用轴方向的 3D 点投影到屏幕，计算屏幕空间的轴向量
-        float3 axisPoint = position + moveAxis;
-        float2 axisScreen0 = WorldToScreen(position, viewProj, vpPos, vpSize);
-        float2 axisScreen1 = WorldToScreen(axisPoint, viewProj, vpPos, vpSize);
-        float2 screenAxis = axisScreen1 - axisScreen0;
-        float screenAxisLen = glm::length(screenAxis);
-        if (screenAxisLen > 0.001f) {
-            screenAxis /= screenAxisLen;
-            float projDelta = glm::dot(mouseDelta, screenAxis);
-            // 屏幕像素 → 世界单位（粗略近似）
-            float worldDelta = projDelta * kAxisLength / std::max(screenAxisLen, 1.0f);
-            position = m_DragStartPos + moveAxis * worldDelta;
+    } else if (mode == GizmoMode::Rotate) {
+        // === 旋转模式 ===
+        float ringR = 50.0f;
+        u32 colors[3] = {kColorX, kColorY, kColorZ};
+        float3 axes[3] = {axX, axY, axZ};
+        // 计算每个环的屏幕空间法线方向（投影 3D 轴到屏幕）
+        float2 screenAxes[3];
+        for (int i = 0; i < 3; ++i) {
+            float2 p = WorldToScreen(position + axes[i] * 0.5f, viewProj, vpPos, vpSize);
+            screenAxes[i] = glm::normalize(p - center);
         }
 
-        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-            m_Dragging = false;
-            m_ActiveAxis = -1;
+        dl->AddCircleFilled(ImVec2(center.x, center.y), 3.0f, 0xFFFFFFFF);
+
+        if (!m_Dragging) {
+            for (int i = 0; i < 3; ++i) {
+                u32 col = colors[i];
+                // 绘制环
+                dl->AddCircle(ImVec2(center.x, center.y), ringR, col, 48, 2.0f);
+                // 检测悬停：鼠标到环的距离
+                float distToRing = std::abs(glm::length(mPos - center) - ringR);
+                if (distToRing < 10.0f) {
+                    dl->AddCircle(ImVec2(center.x, center.y), ringR, kColorSel, 48, 3.0f);
+                    hovered = true;
+                    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                        m_Dragging = true; m_ActiveAxis = i;
+                        m_DragStartRot = rotation;
+                        m_DragStartAngle = std::atan2(mPos.y - center.y, mPos.x - center.x);
+                    }
+                    break;
+                }
+            }
+        } else {
+            // 计算旋转增量
+            float newAngle = std::atan2(mPos.y - center.y, mPos.x - center.x);
+            float deltaAngle = newAngle - m_DragStartAngle;
+            float3 rotAxis = axes[m_ActiveAxis];
+            rotation = glm::angleAxis(deltaAngle, rotAxis) * m_DragStartRot;
+            // 高亮拖拽中的环
+            dl->AddCircle(ImVec2(center.x, center.y), ringR, kColorSel, 48, 3.0f);
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) { m_Dragging = false; m_ActiveAxis = -1; }
         }
     }
 

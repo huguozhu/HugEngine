@@ -50,10 +50,12 @@ private:
     static constexpr u32 kColorSel = 0xFFFFFF33; // Yellow (selected axis)
     static constexpr float kAxisLength = 2.0f;   // World-space axis length
 
-    bool  m_Dragging    = false;
-    i32   m_ActiveAxis  = -1;  // 0=X, 1=Y, 2=Z, -1=none
+    bool  m_Dragging     = false;
+    i32   m_ActiveAxis   = -1;  // 0=X, 1=Y, 2=Z, -1=none
     float3 m_DragStartPos;
     float2 m_DragStartMouse;
+    quat   m_DragStartRot;       // 旋转拖拽起始值
+    float  m_DragStartAngle = 0; // 旋转拖拽起始角度
 };
 
 } // namespace he::editor
