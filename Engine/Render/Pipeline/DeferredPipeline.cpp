@@ -354,6 +354,9 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 if (!allBounds.empty()) {
                     m_GPUCulling.UploadBounds(m_Device, allBounds);
                     m_GPUCulling.Dispatch(c, camera.GetViewProjMatrix(), (u32)allBounds.size());
+                    // Dispatch 切换到了 Compute PSO，需要恢复 Graphics PSO
+                    c->SetPipeline(m_GBufferPSO.get());
+                    c->BindDescriptorSet(0, m_GBufferSet);
                 }
             }
 

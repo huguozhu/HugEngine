@@ -692,6 +692,8 @@ void ForwardPipeline::RenderScene(
         if (!allBounds.empty()) {
             m_GPUCulling.UploadBounds(m_Device, allBounds);
             m_GPUCulling.Dispatch(cmd, viewProj, (u32)allBounds.size());
+            // Dispatch 切换到了 Compute PSO，恢复 Graphics PSO
+            cmd->SetPipeline(m_PBR_PSO.get());
         }
     }
 
