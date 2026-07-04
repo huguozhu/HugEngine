@@ -548,6 +548,12 @@ int main() {
             float moveSpeed = camCtrl.GetMoveSpeed();
             if (ImGui::DragFloat("移动速度", &moveSpeed, 1.0f, 1.0f, 500.0f, "%.0f"))
                 camCtrl.SetMoveSpeed(moveSpeed);
+            float nearP = camCtrl.GetCamera().nearPlane;
+            float farP  = camCtrl.GetCamera().farPlane;
+            if (ImGui::DragFloat("近裁剪面", &nearP, 0.01f, 0.001f, 10.0f, "%.3f"))
+                camCtrl.GetCamera().nearPlane = nearP;
+            if (ImGui::DragFloat("远裁剪面", &farP, 10.0f, 10.0f, 50000.0f, "%.0f"))
+                camCtrl.GetCamera().farPlane = farP;
 
             // GI
             auto* gi = pipeline.GetGI();
