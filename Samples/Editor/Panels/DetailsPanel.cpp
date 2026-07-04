@@ -9,6 +9,7 @@
 #include "Scene/MeshComponent.h"
 #include "Scene/LightComponent.h"
 #include "imgui.h"
+#include <glm/gtx/euler_angles.hpp>
 
 namespace he::editor {
 
@@ -80,6 +81,26 @@ void DetailsPanel::RenderTransform(World* world, Entity entity) {
                 "Change Position",
                 [t, sg, entity, oldPos]() { t->position = oldPos; if (sg) sg->MarkDirty(entity); },
                 [t, sg, entity, newPos]() { t->position = newPos; if (sg) sg->MarkDirty(entity); }
+            ));
+        }
+    }
+
+    // 旋转（Euler 角度制显示）
+    quat oldRot = t->rotation;
+    float3 oldEuler = glm::degrees(glm::eulerAngles(oldRot));
+    float euler[3] = { oldEuler.x, oldEuler.y, oldEuler.z };
+    if (ImGui::DragFloat3("Rotation", euler, 0.5f, -360.0f, 360.0f, "%.1f°")) {
+        quat newRot = glm::quat(glm::radians(float3(euler[0], euler[1], euler[2])));
+        t->rotation = newRot;
+        if (sg) sg->MarkDirty(entity);
+    }
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+        quat newRot = glm::quat(glm::radians(float3(euler[0], euler[1], euler[2])));
+        if (glm::any(glm::notEqual(oldEuler, float3(euler[0], euler[1], euler[2])))) {
+            cmdHistory->Execute(std::make_unique<PropertyChangeCommand>(
+                "Change Rotation",
+                [t, sg, entity, oldRot]() { t->rotation = oldRot; if (sg) sg->MarkDirty(entity); },
+                [t, sg, entity, newRot]() { t->rotation = newRot; if (sg) sg->MarkDirty(entity); }
             ));
         }
     }
