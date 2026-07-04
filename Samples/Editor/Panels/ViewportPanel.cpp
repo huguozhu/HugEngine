@@ -9,6 +9,7 @@
 #include "Scene/MeshComponent.h"
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
+#include "Scene/LightComponent.h"
 #include "Core/Log.h"
 #include "imgui.h"
 
@@ -237,6 +238,188 @@ void ViewportPanel::HandleClickSelect() {
         m_Ctx->SelectEntity(bestHit);
         HE_CORE_INFO("  Selected entity #{}", bestHit.id);
     }
+}
+
+void ViewportPanel::RenderDebugOverlay() {
+    // F 键切换
+    static bool showDebug = false;
+    if (ImGui::IsKeyPressed(ImGuiKey_F)) showDebug = !showDebug;
+    if (!showDebug) return;
+
+    auto* dl = ImGui::GetWindowDrawList();
+    auto* world = m_Ctx ? m_Ctx->GetWorld() : nullptr;
+    if (!world) return;
+
+    const auto& cam = m_CamCtrl.GetCamera();
+    float4x4 vp = cam.GetViewProjMatrix();
+    float4x4 invVP = glm::inverse(vp);
+
+    // 3D → 2D 投影辅助
+    auto project = [&](const float3& wp) -> float2 {
+        float4 clip = vp * float4(wp, 1.0f);
+        if (std::abs(clip.w) < 0.0001f) return float2(-9999);
+        float3 ndc = float3(clip) / clip.w;
+        return float2(m_VP_Pos.x + (ndc.x * 0.5f + 0.5f) * m_VP_Size.x,
+                      m_VP_Pos.y + (0.5f - ndc.y * 0.5f) * m_VP_Size.y);
+    };
+
+    auto drawLine3D = [&](const float3& a, const float3& b, u32 col) {
+        float2 sa = project(a), sb = project(b);
+        if (sa.x < -100 || sb.x < -100) return;
+        dl->AddLine(ImVec2(sa.x, sa.y), ImVec2(sb.x, sb.y), col, 1.5f);
+    };
+
+    // === 相机视锥体 ===
+    float n = cam.nearPlane, f = cam.farPlane;
+    float4 ndcCorners[8] = {
+        {-1,-1,0,1}, {1,-1,0,1}, {1,1,0,1}, {-1,1,0,1},  // near
+        {-1,-1,1,1}, {1,-1,1,1}, {1,1,1,1}, {-1,1,1,1},  // far
+    };
+    float3 corners[8];
+    for (int i = 0; i < 8; ++i) {
+        float4 w = invVP * ndcCorners[i];
+        corners[i] = float3(w) / w.w;
+    }
+    u32 camCol = 0xFFAAFFFF;
+    // near rect
+    for (int i = 0; i < 4; ++i) drawLine3D(corners[i], corners[(i+1)%4], camCol);
+    // far rect
+    for (int i = 0; i < 4; ++i) drawLine3D(corners[i+4], corners[4+(i+1)%4], camCol);
+    // connecting edges
+    for (int i = 0; i < 4; ++i) drawLine3D(corners[i], corners[i+4], camCol);
+
+    // === 编辑器相机视锥体 (Perspective) ===
+    {
+        float3 camPos = m_CamCtrl.GetCamera().position;
+        float3 camFwd = m_CamCtrl.GetCamera().forward;
+        float3 camUp  = m_CamCtrl.GetCamera().up;
+        float3 camRight = glm::cross(camFwd, camUp);
+        float n = m_CamCtrl.GetCamera().nearPlane;
+        float f = m_CamCtrl.GetCamera().farPlane;
+        float fovRad = glm::radians(m_CamCtrl.GetCamera().fov);
+        float aspect = m_CamCtrl.GetCamera().aspectRatio;
+
+        float nearH = std::tan(fovRad * 0.5f) * n;
+        float nearW = nearH * aspect;
+        float farH  = std::tan(fovRad * 0.5f) * f;
+        float farW  = farH * aspect;
+
+        float3 nearCenter = camPos + camFwd * n;
+        float3 farCenter  = camPos + camFwd * f;
+        float3 nc[4] = { nearCenter + camUp*nearH - camRight*nearW, nearCenter + camUp*nearH + camRight*nearW,
+                         nearCenter - camUp*nearH + camRight*nearW, nearCenter - camUp*nearH - camRight*nearW };
+        float3 fc[4] = { farCenter  + camUp*farH  - camRight*farW,  farCenter  + camUp*farH  + camRight*farW,
+                         farCenter  - camUp*farH  + camRight*farW,  farCenter  - camUp*farH  - camRight*farW };
+        u32 cCol = 0xFF6699FF;
+        for (int i = 0; i < 4; ++i) { drawLine3D(nc[i], nc[(i+1)%4], cCol); drawLine3D(fc[i], fc[(i+1)%4], cCol); drawLine3D(nc[i], fc[i], cCol); }
+        dl->AddText(ImVec2(project(camPos).x, project(camPos).y - 20), cCol, "Camera");
+    }
+
+    // === 点光源：球体线框 ===
+    world->ForEach<he::PointLight>([&](he::Entity e, he::PointLight& pl) {
+        if (!pl.enabled) return;
+        auto* tf = world->GetComponent<TransformComponent>(e);
+        float3 pos = tf ? tf->position : float3(0);
+        float r = pl.range;
+        int segs = 24;
+        u32 col = 0xFFFFAA33;
+        // 3 个正交圆环模拟球体
+        for (int axis = 0; axis < 3; ++axis) {
+            float3 u, v;
+            if (axis == 0) { u = float3(1,0,0); v = float3(0,1,0); }
+            else if (axis == 1) { u = float3(1,0,0); v = float3(0,0,1); }
+            else { u = float3(0,1,0); v = float3(0,0,1); }
+            float2 prev;
+            for (int i = 0; i <= segs; ++i) {
+                float a = float(i) / segs * glm::radians(360.0f);
+                float3 pt = pos + (u * std::cos(a) + v * std::sin(a)) * r;
+                float2 sp = project(pt);
+                if (i > 0) dl->AddLine(ImVec2(prev.x, prev.y), ImVec2(sp.x, sp.y), col, 1.0f);
+                prev = sp;
+            }
+        }
+        dl->AddText(ImVec2(project(pos).x + 10, project(pos).y - 8), col, "PointLight");
+    });
+
+    // === 聚光灯：锥体线框 ===
+    world->ForEach<he::SpotLight>([&](he::Entity e, he::SpotLight& sl) {
+        if (!sl.enabled) return;
+        auto* tf = world->GetComponent<TransformComponent>(e);
+        float3 pos = tf ? tf->position : float3(0);
+        float3 dir = glm::normalize(sl.direction);
+        float3 up = std::abs(dir.y) < 0.99f ? float3(0,1,0) : float3(1,0,0);
+        float3 right = glm::normalize(glm::cross(dir, up));
+        up = glm::cross(right, dir);
+        float r = sl.range;
+        float outerR = std::tan(sl.outerConeAngle * 0.5f) * r;
+        float innerR = std::tan(sl.innerConeAngle * 0.5f) * r;
+        float3 baseCenter = pos + dir * r;
+        int segs = 20;
+        u32 outerCol = 0xFF33FFAA, innerCol = 0xFF66FFCC;
+        float2 prevOuter, prevInner;
+        for (int i = 0; i <= segs; ++i) {
+            float a = float(i) / segs * glm::radians(360.0f);
+            float3 ptOuter = baseCenter + (right*std::cos(a) + up*std::sin(a)) * outerR;
+            float3 ptInner = baseCenter + (right*std::cos(a) + up*std::sin(a)) * innerR;
+            float2 so = project(ptOuter), si = project(ptInner);
+            if (i > 0) { dl->AddLine(ImVec2(prevOuter.x,prevOuter.y), ImVec2(so.x,so.y), outerCol, 1.0f);
+                         dl->AddLine(ImVec2(prevInner.x,prevInner.y), ImVec2(si.x,si.y), innerCol, 1.0f); }
+            dl->AddLine(ImVec2(project(pos).x, project(pos).y), ImVec2(so.x, so.y), outerCol, 1.0f);
+            prevOuter = so; prevInner = si;
+        }
+        dl->AddText(ImVec2(project(pos).x + 10, project(pos).y - 8), 0xFF33FFAA, "SpotLight");
+    });
+
+    // === 方向光：从相机视锥体反算正交投影盒 (Orthographic) ===
+    // 先获取当前相机视锥体 8 个角点（世界空间）
+    float3 camCorners[8];
+    {
+        float cn = cam.nearPlane, cf = cam.farPlane;
+        float fovRad = glm::radians(cam.fov);
+        float aspect = cam.aspectRatio;
+        float nh = std::tan(fovRad * 0.5f) * cn, nw = nh * aspect;
+        float fh = std::tan(fovRad * 0.5f) * cf, fw = fh * aspect;
+        float3 cFwd = cam.forward, cUp = cam.up, cRight = glm::cross(cFwd, cUp);
+        float3 nc = cam.position + cFwd * cn;
+        float3 fc = cam.position + cFwd * cf;
+        camCorners[0] = nc + cUp*nh - cRight*nw; camCorners[1] = nc + cUp*nh + cRight*nw;
+        camCorners[2] = nc - cUp*nh + cRight*nw; camCorners[3] = nc - cUp*nh - cRight*nw;
+        camCorners[4] = fc + cUp*fh - cRight*fw; camCorners[5] = fc + cUp*fh + cRight*fw;
+        camCorners[6] = fc - cUp*fh + cRight*fw; camCorners[7] = fc - cUp*fh - cRight*fw;
+    }
+
+    world->ForEach<he::DirectionalLight>([&](he::Entity e, he::DirectionalLight& dirLight) {
+        if (!dirLight.enabled) return;
+        auto* tf = world->GetComponent<TransformComponent>(e);
+        float3 lPos = tf ? tf->position : float3(0);
+        float3 lDir = glm::normalize(dirLight.direction);
+        float3 lUp = std::abs(lDir.y) < 0.99f ? float3(0,1,0) : float3(1,0,0);
+        float3 lRight = glm::normalize(glm::cross(lDir, lUp));
+        lUp = glm::cross(lRight, lDir);
+        // 构建光空间 view 矩阵，将相机视锥角点变换到光空间求 AABB
+        float4x4 lightView = glm::lookAtRH(lPos, lPos + lDir, lUp);
+        float3 lsMin(FLT_MAX), lsMax(-FLT_MAX);
+        for (int i = 0; i < 8; ++i) {
+            float3 ls = float3(lightView * float4(camCorners[i], 1.0f));
+            lsMin = glm::min(lsMin, ls); lsMax = glm::max(lsMax, ls);
+        }
+        // 扩展 Z 范围以容纳近处物体
+        lsMin.z -= 10.0f; lsMax.z += 10.0f;
+        // 逆变换角点回世界空间绘制
+        float3 b[8];
+        for (int i = 0; i < 8; ++i) {
+            float3 ls((i&1)?lsMax.x:lsMin.x, (i&2)?lsMax.y:lsMin.y, (i&4)?lsMax.z:lsMin.z);
+            float4 ws = glm::inverse(lightView) * float4(ls, 1.0f);
+            b[i] = float3(ws) / ws.w;
+        }
+        u32 dCol = 0xFFFF6666;
+        for (int i = 0; i < 4; ++i) {
+            drawLine3D(b[i], b[(i+1)%4], dCol);
+            drawLine3D(b[i+4], b[4+(i+1)%4], dCol);
+            drawLine3D(b[i], b[i+4], dCol);
+        }
+        dl->AddText(ImVec2(project(lPos).x + 10, project(lPos).y - 8), dCol, "DirLight");
+    });
 }
 
 } // namespace he::editor

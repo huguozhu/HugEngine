@@ -49,6 +49,9 @@ public:
     /// 处理鼠标点击选中
     void HandleClickSelect();
 
+    /// 渲染 Debug 叠加层（视锥体 / 光源范围）
+    void RenderDebugOverlay();
+
     /// 更新视口尺寸
     void SetViewportSize(u32 width, u32 height) {
         m_CamCtrl.SetAspectRatio(static_cast<f32>(width), static_cast<f32>(height));

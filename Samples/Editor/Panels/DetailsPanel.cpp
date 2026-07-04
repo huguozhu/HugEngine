@@ -8,6 +8,10 @@
 #include "Scene/Transform.h"
 #include "Scene/MeshComponent.h"
 #include "Scene/LightComponent.h"
+#include "Scene/CameraComponent.h"
+#include "Scene/SkyboxComponent.h"
+#include "Scene/CubeComponent.h"
+#include "Scene/SphereComponent.h"
 #include "imgui.h"
 #include <glm/gtx/euler_angles.hpp>
 
@@ -56,6 +60,32 @@ void DetailsPanel::Render() {
         RenderSpotLight(world, entity);
     else if (world->HasComponent<LightComponent>(entity))
         RenderLightBase(world, entity);
+
+    // === Add Component 按钮 ===
+    ImGui::Spacing(); ImGui::Separator();
+    if (ImGui::Button("Add Component", ImVec2(-1, 0)))
+        ImGui::OpenPopup("AddComponentPopup");
+
+    if (ImGui::BeginPopup("AddComponentPopup")) {
+        static const char* items[] = {
+            "Cube (Debug)", "Sphere (Debug)",
+            "Point Light", "Spot Light", "Directional Light",
+            "Camera", "Skybox"
+        };
+        for (int i = 0; i < IM_ARRAYSIZE(items); ++i) {
+            if (ImGui::Selectable(items[i])) {
+                if (strcmp(items[i], "Cube (Debug)") == 0) world->AddComponent<CubeComponent>(entity);
+                else if (strcmp(items[i], "Sphere (Debug)") == 0) world->AddComponent<SphereComponent>(entity);
+                else if (strcmp(items[i], "Point Light") == 0) { auto* l = world->AddComponent<PointLight>(entity); l->color=float3(1,0.8f,0.6f); l->intensity=20; l->range=100; }
+                else if (strcmp(items[i], "Spot Light") == 0) { auto* l = world->AddComponent<SpotLight>(entity); l->color=float3(1,1,1); l->intensity=30; l->range=100; }
+                else if (strcmp(items[i], "Directional Light") == 0) { auto* l = world->AddComponent<DirectionalLight>(entity); l->color=float3(1,0.95f,0.85f); l->intensity=10; }
+                else if (strcmp(items[i], "Camera") == 0) world->AddComponent<CameraComponent>(entity);
+                else if (strcmp(items[i], "Skybox") == 0) world->AddComponent<SkyboxComponent>(entity);
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        ImGui::EndPopup();
+    }
 }
 
 void DetailsPanel::RenderTransform(World* world, Entity entity) {

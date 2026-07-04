@@ -354,6 +354,7 @@ void EditorApp::MainLoop() {
             m_Viewport->m_VP_ChildMax = float2(wPos.x + wSize.x, wPos.y + wSize.y);
             m_Viewport->HandleClickSelect();
             m_Viewport->RenderGizmoOverlay();
+            m_Viewport->RenderDebugOverlay();
             ImGui::EndChild();
 
             ImGui::SameLine();
