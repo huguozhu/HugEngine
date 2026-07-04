@@ -253,12 +253,14 @@ void EditorApp::MainLoop() {
             float detailsWidth = 300.0f;
             float viewportWidth = avail.x - detailsWidth - 4.0f;
 
-            // Viewport（透明背景，3D 场景仅在此区域可见）
+            // Viewport（透明背景，3D 场景渲染到全窗口 backbuffer）
             ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0,0,0,0));
             ImGui::BeginChild("ViewportRegion", {viewportWidth, avail.y * 0.75f}, true);
             ImGui::PopStyleColor();
-            // 3D 场景由 ViewportPanel::Render 渲染到 BackBuffer
-            // Phase 3-2: 改为渲染到 off-screen texture + ImGui::Image
+            // Gizmo 投影用全窗口坐标（3D 场景渲染到完整 backbuffer，非仅 child 区域）
+            m_Viewport->m_VP_Pos  = float2(0, 0);
+            m_Viewport->m_VP_Size = float2(m_SwapChain->GetWidth(), m_SwapChain->GetHeight());
+            m_Viewport->RenderGizmoOverlay();
             ImGui::EndChild();
 
             ImGui::SameLine();

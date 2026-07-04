@@ -5,6 +5,8 @@
 #include "Pipeline/ForwardPipeline.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
+#include "Scene/Transform.h"
+#include "imgui.h"
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -48,6 +50,42 @@ void ViewportPanel::RenderGameView(rhi::IRHICommandList* cmdList) {
         *m_Ctx->GetWorld(),
         *m_Ctx->GetSceneGraph(),
         m_CamCtrl.GetCamera());
+}
+
+void ViewportPanel::RenderGizmoOverlay() {
+    if (!m_Ctx) return;
+    auto& sel = m_Ctx->GetSelection();
+    if (sel.empty()) return;
+    he::Entity selEnt = sel[0];
+    if (!selEnt.IsValid()) return;
+    auto* world = m_Ctx->GetWorld();
+    if (!world) return;
+
+    auto* tf = world->GetComponent<TransformComponent>(selEnt);
+    if (!tf) return;
+
+    // 模式切换键
+    auto& io = ImGui::GetIO();
+    if (!io.WantCaptureKeyboard) {
+        if (ImGui::IsKeyPressed(ImGuiKey_W)) m_Gizmo.mode = GizmoMode::Translate;
+        if (ImGui::IsKeyPressed(ImGuiKey_E)) m_Gizmo.mode = GizmoMode::Rotate;
+        if (ImGui::IsKeyPressed(ImGuiKey_R)) m_Gizmo.mode = GizmoMode::Scale;
+        if (ImGui::IsKeyPressed(ImGuiKey_X)) m_Gizmo.space = (m_Gizmo.space == GizmoSpace::Local)
+            ? GizmoSpace::World : GizmoSpace::Local;
+    }
+
+    // 渲染 gizmo
+    float4x4 vp = m_CamCtrl.GetCamera().GetViewProjMatrix();
+    float3 pos = tf->position;
+    quat rot = tf->rotation;
+    float3 scl = tf->scale;
+
+    m_Gizmo.Render(m_CamCtrl.GetCamera(), pos, rot, scl, vp, m_VP_Pos, m_VP_Size);
+
+    // 应用变换
+    tf->position = pos;
+    tf->rotation = rot;
+    tf->scale    = scl;
 }
 
 void ViewportPanel::UpdateCamera(float deltaTime) {

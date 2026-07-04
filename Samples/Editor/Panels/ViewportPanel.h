@@ -11,6 +11,7 @@
 #include "Core/Types.h"
 #include "Pipeline/CameraController.h"
 #include "Math/Math.h"
+#include "Panels/Gizmo.h"
 
 struct GLFWwindow;
 
@@ -39,16 +40,22 @@ public:
     /// 渲染视口（每帧调用，在 RenderPass 内部）
     void Render(he::rhi::IRHICommandList* cmdList);
 
-    /// 游戏模式渲染（使用编辑器相机，后续扩展为场景 Camera）
+    /// 游戏模式渲染
     void RenderGameView(he::rhi::IRHICommandList* cmdList);
 
-    /// 更新视口尺寸（由 EditorApp 在 SwapChain resize 时调用）
+    /// 渲染 Gizmo 叠加层（在 ImGui 帧内调用，场景渲染之后）
+    void RenderGizmoOverlay();
+
+    /// 更新视口尺寸
     void SetViewportSize(u32 width, u32 height) {
         m_CamCtrl.SetAspectRatio(static_cast<f32>(width), static_cast<f32>(height));
     }
 
-    /// 获取编辑器相机引用（供外部读取相机状态）
     const he::render::CameraData& GetCamera() const { return m_CamCtrl.GetCamera(); }
+
+    // 视口区域（由 EditorApp 在 ImGui 帧内设置）
+    float2 m_VP_Pos  = float2(0, 0);
+    float2 m_VP_Size = float2(1920, 1080);
 
 private:
     void UpdateCamera(float deltaTime);
@@ -58,6 +65,7 @@ private:
     GLFWwindow*                  m_Window   = nullptr;
 
     he::render::CameraController m_CamCtrl;
+    Gizmo m_Gizmo;
 
     // 鼠标状态
     bool   m_RightMouseDown = false;
