@@ -21,6 +21,9 @@ class Gizmo {
 public:
     GizmoMode mode  = GizmoMode::Translate;
     GizmoSpace space = GizmoSpace::World;
+    i32 rotateAxis  = 0;  // 0=X, 1=Y, 2=Z（旋转模式下当前激活的轴）
+
+    void cycleRotateAxis() { rotateAxis = (rotateAxis + 1) % 3; }
 
     /// 渲染 gizmo（在 ImGui 帧内调用，使用 ImDrawList）
     /// 返回 true 表示 gizmo 正在被拖拽（此时隐藏鼠标输入）

@@ -108,46 +108,46 @@ bool Gizmo::Render(const render::CameraData& camera, float3& position, quat& rot
             if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) { m_Dragging = false; m_ActiveAxis = -1; }
         }
     } else if (mode == GizmoMode::Rotate) {
-        // === 旋转模式 ===
+        // === 旋转模式（单轴环，R 键切换）===
         float ringR = 50.0f;
         u32 colors[3] = {kColorX, kColorY, kColorZ};
         float3 axes[3] = {axX, axY, axZ};
-        // 计算每个环的屏幕空间法线方向（投影 3D 轴到屏幕）
-        float2 screenAxes[3];
-        for (int i = 0; i < 3; ++i) {
-            float2 p = WorldToScreen(position + axes[i] * 0.5f, viewProj, vpPos, vpSize);
-            screenAxes[i] = glm::normalize(p - center);
-        }
+        u32 axCol = colors[rotateAxis];
+        float3 rotAx = axes[rotateAxis];
 
         dl->AddCircleFilled(ImVec2(center.x, center.y), 3.0f, 0xFFFFFFFF);
 
+        // 绘制当前激活的旋转环
+        dl->AddCircle(ImVec2(center.x, center.y), ringR, axCol, 48, 2.5f);
+        // 轴标签
+        const char* labels[3] = {"X", "Y", "Z"};
+        float2 labelP = WorldToScreen(position + rotAx * 1.2f, viewProj, vpPos, vpSize);
+        dl->AddText(ImVec2(labelP.x - 4, labelP.y - 8), axCol, labels[rotateAxis]);
+
+        // 绘制其他轴的灰色淡环（参考）
+        for (int i = 0; i < 3; ++i) {
+            if (i == rotateAxis) continue;
+            dl->AddCircle(ImVec2(center.x, center.y), ringR, colors[i] & 0x44FFFFFF, 48, 1.0f);
+        }
+
+        // 交互
         if (!m_Dragging) {
-            for (int i = 0; i < 3; ++i) {
-                u32 col = colors[i];
-                // 绘制环
-                dl->AddCircle(ImVec2(center.x, center.y), ringR, col, 48, 2.0f);
-                // 检测悬停：鼠标到环的距离
-                float distToRing = std::abs(glm::length(mPos - center) - ringR);
-                if (distToRing < 10.0f) {
-                    dl->AddCircle(ImVec2(center.x, center.y), ringR, kColorSel, 48, 3.0f);
-                    hovered = true;
-                    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                        m_Dragging = true; m_ActiveAxis = i;
-                        m_DragStartRot = rotation;
-                        m_DragStartAngle = std::atan2(mPos.y - center.y, mPos.x - center.x);
-                    }
-                    break;
+            float distToRing = std::abs(glm::length(mPos - center) - ringR);
+            if (distToRing < 12.0f) {
+                dl->AddCircle(ImVec2(center.x, center.y), ringR, kColorSel, 48, 3.5f);
+                hovered = true;
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                    m_Dragging = true; m_ActiveAxis = rotateAxis;
+                    m_DragStartRot = rotation;
+                    m_DragStartAngle = std::atan2(mPos.y - center.y, mPos.x - center.x);
                 }
             }
         } else {
-            // 计算旋转增量
             float newAngle = std::atan2(mPos.y - center.y, mPos.x - center.x);
             float deltaAngle = newAngle - m_DragStartAngle;
-            float3 rotAxis = axes[m_ActiveAxis];
-            rotation = glm::angleAxis(deltaAngle, rotAxis) * m_DragStartRot;
-            // 高亮拖拽中的环
-            dl->AddCircle(ImVec2(center.x, center.y), ringR, kColorSel, 48, 3.0f);
-            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) { m_Dragging = false; m_ActiveAxis = -1; }
+            rotation = glm::angleAxis(deltaAngle, rotAx) * m_DragStartRot;
+            dl->AddCircle(ImVec2(center.x, center.y), ringR, kColorSel, 48, 3.5f);
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) { m_Dragging = false; }
         }
     }
 

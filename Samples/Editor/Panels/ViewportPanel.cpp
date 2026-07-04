@@ -81,8 +81,10 @@ void ViewportPanel::RenderGizmoOverlay() {
     auto& io = ImGui::GetIO();
     if (!io.WantCaptureKeyboard) {
         if (ImGui::IsKeyPressed(ImGuiKey_W)) m_Gizmo.mode = GizmoMode::Translate;
-        if (ImGui::IsKeyPressed(ImGuiKey_E)) m_Gizmo.mode = GizmoMode::Rotate;
-        if (ImGui::IsKeyPressed(ImGuiKey_R)) m_Gizmo.mode = GizmoMode::Scale;
+        if (ImGui::IsKeyPressed(ImGuiKey_R)) {
+            if (m_Gizmo.mode != GizmoMode::Rotate) m_Gizmo.mode = GizmoMode::Rotate;
+            else m_Gizmo.cycleRotateAxis();  // 旋转模式下 R 切换轴
+        }
         if (ImGui::IsKeyPressed(ImGuiKey_X)) m_Gizmo.space = (m_Gizmo.space == GizmoSpace::Local)
             ? GizmoSpace::World : GizmoSpace::Local;
     }
@@ -127,14 +129,15 @@ void ViewportPanel::UpdateCamera(float deltaTime) {
         m_CamCtrl.Rotate(dx * 0.003f, -dy * 0.003f);
     }
 
-    // --- 键盘移动 ---
+    // --- 键盘移动（Gizmo 交互时禁用，避免按键冲突）---
     render::CameraController::MoveInput moveIn;
-    moveIn.forward  = glfwGetKey(m_Window, GLFW_KEY_W) == GLFW_PRESS;
+    bool gizmoActive = m_Gizmo.IsDragging() || m_GizmoHovered;
+    moveIn.forward  = !gizmoActive && glfwGetKey(m_Window, GLFW_KEY_W) == GLFW_PRESS;
     moveIn.backward = glfwGetKey(m_Window, GLFW_KEY_S) == GLFW_PRESS;
     moveIn.left     = glfwGetKey(m_Window, GLFW_KEY_A) == GLFW_PRESS;
     moveIn.right    = glfwGetKey(m_Window, GLFW_KEY_D) == GLFW_PRESS;
-    moveIn.up       = glfwGetKey(m_Window, GLFW_KEY_E) == GLFW_PRESS;
-    moveIn.down     = glfwGetKey(m_Window, GLFW_KEY_Q) == GLFW_PRESS;
+    moveIn.up       = !gizmoActive && glfwGetKey(m_Window, GLFW_KEY_E) == GLFW_PRESS;
+    moveIn.down     = !gizmoActive && glfwGetKey(m_Window, GLFW_KEY_Q) == GLFW_PRESS;
     moveIn.sprint   = glfwGetKey(m_Window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
 
     m_CamCtrl.Update(deltaTime, moveIn);
