@@ -149,6 +149,61 @@ bool Gizmo::Render(const render::CameraData& camera, float3& position, quat& rot
             dl->AddCircle(ImVec2(center.x, center.y), ringR, kColorSel, 48, 3.5f);
             if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) { m_Dragging = false; }
         }
+    } else if (mode == GizmoMode::Scale) {
+        // === 缩放模式 ===
+        float3 axes[3] = {axX, axY, axZ};
+        u32 colors[3] = {kColorX, kColorY, kColorZ};
+        // 绘制轴 + 末端方块
+        for (int i = 0; i < 3; ++i) {
+            float2 end2D = WorldToScreen(position + axes[i] * kAxisLength, viewProj, vpPos, vpSize);
+            dl->AddLine(ImVec2(center.x, center.y), ImVec2(end2D.x, end2D.y), colors[i], 2.0f);
+            float cubeSz = 6.0f;
+            dl->AddRectFilled(ImVec2(end2D.x - cubeSz, end2D.y - cubeSz),
+                              ImVec2(end2D.x + cubeSz, end2D.y + cubeSz), colors[i]);
+        }
+        // 中心方块（等比缩放）
+        float cs = 7.0f;
+        dl->AddRectFilled(ImVec2(center.x - cs, center.y - cs),
+                          ImVec2(center.x + cs, center.y + cs), 0xFFFFFFFF);
+
+        if (!m_Dragging) {
+            // 检测悬停：末端方块 或 中心方块
+            for (int i = 0; i < 3; ++i) {
+                float2 end2D = WorldToScreen(position + axes[i] * kAxisLength, viewProj, vpPos, vpSize);
+                if (std::abs(mPos.x - end2D.x) < 8.0f && std::abs(mPos.y - end2D.y) < 8.0f) {
+                    float cubeSz = 8.0f;
+                    dl->AddRect(ImVec2(end2D.x - cubeSz, end2D.y - cubeSz),
+                                ImVec2(end2D.x + cubeSz, end2D.y + cubeSz), kColorSel, 0, 0, 2.0f);
+                    hovered = true;
+                    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                        m_Dragging = true; m_ActiveAxis = i;
+                        m_DragStartScale = scale; m_DragStartMouse = mPos;
+                    }
+                    break;
+                }
+            }
+            if (!hovered && std::abs(mPos.x - center.x) < cs + 2.0f && std::abs(mPos.y - center.y) < cs + 2.0f) {
+                dl->AddRect(ImVec2(center.x - cs - 2, center.y - cs - 2),
+                            ImVec2(center.x + cs + 2, center.y + cs + 2), kColorSel, 0, 0, 2.0f);
+                hovered = true;
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                    m_Dragging = true; m_ActiveAxis = -1;  // -1 = 等比缩放
+                    m_DragStartScale = scale; m_DragStartMouse = mPos;
+                }
+            }
+        } else {
+            float2 mouseDelta = mPos - m_DragStartMouse;
+            float delta = (mouseDelta.x + mouseDelta.y) * 0.01f;  // 屏幕像素→缩放因子
+            if (m_ActiveAxis >= 0) {
+                // 单轴缩放
+                scale[m_ActiveAxis] = std::max(0.01f, m_DragStartScale[m_ActiveAxis] + delta);
+            } else {
+                // 等比缩放（-1）
+                float u = std::max(0.01f, m_DragStartScale.x + delta);
+                scale = float3(u);
+            }
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) { m_Dragging = false; m_ActiveAxis = -1; }
+        }
     }
 
     return m_Dragging || hovered;

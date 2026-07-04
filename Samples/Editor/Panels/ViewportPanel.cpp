@@ -83,8 +83,9 @@ void ViewportPanel::RenderGizmoOverlay() {
         if (ImGui::IsKeyPressed(ImGuiKey_W)) m_Gizmo.mode = GizmoMode::Translate;
         if (ImGui::IsKeyPressed(ImGuiKey_R)) {
             if (m_Gizmo.mode != GizmoMode::Rotate) m_Gizmo.mode = GizmoMode::Rotate;
-            else m_Gizmo.cycleRotateAxis();  // 旋转模式下 R 切换轴
+            else m_Gizmo.cycleRotateAxis();
         }
+        if (ImGui::IsKeyPressed(ImGuiKey_S)) m_Gizmo.mode = GizmoMode::Scale;
         if (ImGui::IsKeyPressed(ImGuiKey_X)) m_Gizmo.space = (m_Gizmo.space == GizmoSpace::Local)
             ? GizmoSpace::World : GizmoSpace::Local;
     }

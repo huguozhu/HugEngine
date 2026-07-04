@@ -58,6 +58,7 @@ private:
     float3 m_DragStartPos;
     float2 m_DragStartMouse;
     quat   m_DragStartRot;       // 旋转拖拽起始值
+    float3 m_DragStartScale;     // 缩放拖拽起始值
     float  m_DragStartAngle = 0; // 旋转拖拽起始角度
 };
 
