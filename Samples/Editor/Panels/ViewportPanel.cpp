@@ -325,10 +325,11 @@ void ViewportPanel::RenderDebugOverlay() {
     // === 聚光灯（选中时）===
     world->ForEach<he::SpotLight>([&](he::Entity e, he::SpotLight& sl) {
         if (!sl.enabled || e != selEnt) return;
-        float3 pos = world->GetComponent<TransformComponent>(e)->position;
+        auto* tf = world->GetComponent<TransformComponent>(e);
+        float3 pos = tf ? tf->position : float3(0);
         float3 dir = glm::normalize(sl.direction);
-        float3 up = std::abs(dir.y) < 0.99f ? float3(0,1,0) : float3(1,0,0);
-        float3 right = glm::normalize(glm::cross(dir, up)); up = glm::cross(right, dir);
+        float3 up  = tf ? tf->GetUp() : float3(0,1,0);
+        float3 right = tf ? tf->GetRight() : glm::normalize(glm::cross(dir, up));
         float r = sl.range, outerR = std::tan(sl.outerConeAngle*0.5f)*r, innerR = std::tan(sl.innerConeAngle*0.5f)*r;
         float3 base = pos + dir * r;
         int segs = 20; float2 prevO, prevI;
@@ -347,37 +348,22 @@ void ViewportPanel::RenderDebugOverlay() {
         dl->AddText(ImVec2(project(pos).x + 10, project(pos).y - 8), 0xFF33FFAA, "SpotLight");
     });
 
-    // === 方向光（选中时）===
-    float3 camCorners[8];
-    {
-        float cn = cam.nearPlane, cf = cam.farPlane, fovRad = glm::radians(cam.fov), aspect = cam.aspectRatio;
-        float nh = std::tan(fovRad*0.5f)*cn, nw = nh*aspect, fh = std::tan(fovRad*0.5f)*cf, fw = fh*aspect;
-        float3 fwd = cam.forward, up = cam.up, right = glm::cross(fwd, up);
-        float3 nc = cam.position + fwd*cn, fc = cam.position + fwd*cf;
-        camCorners[0]=nc+up*nh-right*nw; camCorners[1]=nc+up*nh+right*nw;
-        camCorners[2]=nc-up*nh+right*nw; camCorners[3]=nc-up*nh-right*nw;
-        camCorners[4]=fc+up*fh-right*fw; camCorners[5]=fc+up*fh+right*fw;
-        camCorners[6]=fc-up*fh+right*fw; camCorners[7]=fc-up*fh-right*fw;
-    }
+    // === 方向光：正交视锥体（从光源位置出发）===
     world->ForEach<he::DirectionalLight>([&](he::Entity e, he::DirectionalLight& dirLight) {
         if (!dirLight.enabled || e != selEnt) return;
-        float3 lPos = world->GetComponent<TransformComponent>(e)->position;
+        auto* tf = world->GetComponent<TransformComponent>(e);
+        float3 lPos = tf ? tf->position : float3(0);
+        // 使用 Transform 的旋转 + 光源 direction 计算朝向
         float3 lDir = glm::normalize(dirLight.direction);
-        float3 lUp = std::abs(lDir.y) < 0.99f ? float3(0,1,0) : float3(1,0,0);
-        float3 lRight = glm::normalize(glm::cross(lDir, lUp)); lUp = glm::cross(lRight, lDir);
-        float4x4 lightView = glm::lookAtRH(lPos, lPos + lDir, lUp);
-        float3 lsMin(FLT_MAX), lsMax(-FLT_MAX);
-        for (int i = 0; i < 8; ++i) {
-            float3 ls = float3(lightView * float4(camCorners[i], 1.0f));
-            lsMin = glm::min(lsMin, ls); lsMax = glm::max(lsMax, ls);
-        }
-        lsMin.z -= 10.0f; lsMax.z += 10.0f;
+        float3 lUp = tf ? tf->GetUp() : float3(0,1,0);
+        float3 lRight = tf ? tf->GetRight() : glm::normalize(glm::cross(lDir, lUp));
+        float nearD = 0.1f, farD = 10.0f, halfSz = 3.0f;
+        float3 nearC = lPos + lDir * nearD, farC = lPos + lDir * farD;
         float3 b[8];
-        for (int i = 0; i < 8; ++i) {
-            float3 ls((i&1)?lsMax.x:lsMin.x, (i&2)?lsMax.y:lsMin.y, (i&4)?lsMax.z:lsMin.z);
-            float4 ws = glm::inverse(lightView) * float4(ls, 1.0f);
-            b[i] = float3(ws) / ws.w;
-        }
+        b[0]=nearC+lUp*halfSz-lRight*halfSz; b[1]=nearC+lUp*halfSz+lRight*halfSz;
+        b[2]=nearC-lUp*halfSz+lRight*halfSz; b[3]=nearC-lUp*halfSz-lRight*halfSz;
+        b[4]=farC+lUp*halfSz-lRight*halfSz;  b[5]=farC+lUp*halfSz+lRight*halfSz;
+        b[6]=farC-lUp*halfSz+lRight*halfSz;  b[7]=farC-lUp*halfSz-lRight*halfSz;
         u32 dCol = 0xFFFF6666;
         for (int i = 0; i < 4; ++i) {
             drawLine3D(b[i], b[(i+1)%4], dCol); drawLine3D(b[i+4], b[4+(i+1)%4], dCol);
