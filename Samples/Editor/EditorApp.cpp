@@ -333,6 +333,7 @@ void EditorApp::MainLoop() {
             if (ImGui::BeginMenu("View")) {
                 ImGui::MenuItem("Content Browser", nullptr, &m_ContentBrowser->m_Visible);
                 ImGui::MenuItem("Project Settings", nullptr, &m_ProjectSettings->m_Visible);
+                ImGui::MenuItem("Material Editor", nullptr, &m_MaterialEditor->m_Visible);
                 ImGui::EndMenu();
             }
 
