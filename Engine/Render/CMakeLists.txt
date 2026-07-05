@@ -36,6 +36,7 @@ target_sources(HugEngineRender PRIVATE
     GI/GI_RSM.cpp
     GI/GI_SSGI.h
     GI/GI_SSGI.cpp
+    GI/GI_SSR.cpp
     # Shadow (阴影子系统)
     Shadow/IShadowSystem.h
     Shadow/IShadowTechnique.h

@@ -98,6 +98,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     m_GPUCulling.Initialize(device);
     m_GPUScene.Initialize(device);
     m_SSGI.Initialize(device, m_Width, m_Height);
+    m_SSR.Initialize(device, m_Width, m_Height);
     m_SSAO.Initialize(device, m_Width, m_Height);
     m_SSAO.enabled = false;  // 默认关闭
 
@@ -195,6 +196,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         {18, rhi::DescriptorType::StorageBuffer, 1, 16},  // ShadowData
         {19, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // SSGI
         {20, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // SSAO
+        {21, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // SSR
     };
     m_LightingLayout = device->CreateDescriptorSetLayout(ll);
     m_LightingSet    = device->AllocateDescriptorSet(m_LightingLayout);
@@ -253,6 +255,7 @@ void DeferredPipeline::Shutdown() {
     m_GPUCulling.Shutdown(m_Device);
     m_GPUScene.Shutdown();
     m_SSGI.Shutdown();
+    m_SSR.Shutdown();
     m_SSAO.Shutdown();
     m_Device = nullptr; m_Ready = false;
     HE_CORE_INFO("DeferredPipeline shutdown");
@@ -284,6 +287,7 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
     if (m_AntiAliasing) m_AntiAliasing->OnResize(w, h);
     m_SSAO.OnResize(w, h);
     m_SSGI.OnResize(w, h);
+    m_SSR.OnResize(w, h);
 }
 
 void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
@@ -403,6 +407,22 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             } else {
                 rhi::ClearValue wclr; wclr.color[0]=wclr.color[1]=wclr.color[2]=wclr.color[3]=1;
                 c->BeginOffscreenPass(m_SSAO.GetAOTexture()->GetNativeHandle(), nullptr, w, h, &wclr, false);
+            }
+            c->EndOffscreenPass();
+        });
+
+    // SSR Pass（屏幕空间反射）
+    auto ssrOut = rg.ImportTexture("SSR_Output", m_SSR.GetIndirectSpecularTexture());
+    rg.AddPass("SSR", {}, {{ssrOut, ResourceAccess::Write}},
+        [&, w, h](rhi::IRHICommandList* c) {
+            m_SSR.PreBind(c);
+            rhi::ClearValue clr{};
+            if (m_SSR.IsEnabled()) {
+                m_SSR.SetInputs(m_GBufferDepth.get(), m_GBufferB.get(), m_GBufferA.get());
+                c->BeginOffscreenPass(m_SSR.GetIndirectSpecularTexture()->GetNativeHandle(), nullptr, w, h, &clr, false);
+                m_SSR.Render(c);
+            } else {
+                c->BeginOffscreenPass(m_SSR.GetIndirectSpecularTexture()->GetNativeHandle(), nullptr, w, h, &clr, false);
             }
             c->EndOffscreenPass();
         });
