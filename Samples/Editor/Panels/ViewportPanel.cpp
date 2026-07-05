@@ -13,6 +13,12 @@
 #include "Scene/CameraComponent.h"
 #include "Core/Log.h"
 #include "imgui.h"
+#include "Editor/CVar.h"
+
+extern he::CVar<float> cvCamSpeed;
+extern he::CVar<float> cvSnapGrid;
+extern he::CVar<float> cvSnapAngle;
+extern he::CVar<float> cvSnapScale;
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -90,10 +96,13 @@ void ViewportPanel::RenderGizmoOverlay() {
             ? GizmoSpace::World : GizmoSpace::Local;
     }
 
-    // Ctrl 键临时禁用吸附（按住 Ctrl 时自由变换）
-    m_Gizmo.snapEnabled = !ImGui::GetIO().KeyCtrl;
+    // 从 CVar 读取吸附参数（Ctrl 临时禁用）
+    m_Gizmo.snapEnabled  = !ImGui::GetIO().KeyCtrl;
+    m_Gizmo.snapGridSize = cvSnapGrid.Get();
+    m_Gizmo.snapAngle    = cvSnapAngle.Get();
+    m_Gizmo.snapScale    = cvSnapScale.Get();
 
-    // 渲染 gizmo（记录是否 hover，点击选中时跳过）
+    // 渲染 gizmo
     float4x4 vp = m_CamCtrl.GetCamera().GetViewProjMatrix();
     float3 pos = tf->position;
     quat rot = tf->rotation;
@@ -144,6 +153,7 @@ void ViewportPanel::UpdateCamera(float deltaTime) {
     moveIn.down     = !gizmoActive && glfwGetKey(m_Window, GLFW_KEY_Q) == GLFW_PRESS;
     moveIn.sprint   = glfwGetKey(m_Window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
 
+    m_CamCtrl.SetMoveSpeed(cvCamSpeed.Get());
     m_CamCtrl.Update(deltaTime, moveIn);
 }
 

@@ -41,6 +41,7 @@ static std::vector<std::string> s_DroppedFiles;
 #include "Panels/ProjectSettingsPanel.h"
 #include "Panels/StatsPanel.h"
 #include "Panels/LevelLoader.h"
+#include "Editor/CVar.h"
 
 EditorApp::EditorApp()  = default;
 EditorApp::~EditorApp() = default;
@@ -125,6 +126,15 @@ void EditorApp::InitScene() {
 
     HE_CORE_INFO("Default scene created: {} entities", m_World->GetEntityCount());
 }
+// === 全局 CVar 注册（Project Settings 面板自动发现）===
+he::CVar<float> cvCamSpeed  ("editor.camera.speed", 5.0f, "编辑器相机移速");
+he::CVar<float> cvSnapGrid  ("editor.gizmo.snap_grid", 1.0f, "Gizmo 平移吸附网格");
+he::CVar<float> cvSnapAngle ("editor.gizmo.snap_angle", 15.0f, "Gizmo 旋转吸附角度");
+he::CVar<float> cvSnapScale ("editor.gizmo.snap_scale", 0.1f, "Gizmo 缩放吸附步长");
+he::CVar<bool>  cvVSync     ("render.vsync", true, "垂直同步");
+he::CVar<bool>  cvShadows   ("render.shadow_enabled", true, "阴影开关");
+he::CVar<bool>  cvDebugVis  ("editor.debug.frustum", false, "Debug 视锥体显示");
+he::CVar<String> cvPipeline ("render.pipeline", "forward", "渲染管线: forward / deferred (需重启)");
 
 void EditorApp::InitPipeline() {
     m_CmdList = m_Device->CreateCommandList();
@@ -132,7 +142,11 @@ void EditorApp::InitPipeline() {
 
     m_Pipeline = std::make_unique<render::ForwardPipeline>();
     m_Pipeline->Initialize(m_Device.get());
+    m_Pipeline->SetUseRenderGraph(false);
+    m_Pipeline->SetSwapChain(m_SwapChain.get());
+    m_Pipeline->OnResize(m_SwapChain->GetWidth(), m_SwapChain->GetHeight());
     m_CmdList->SetPipeline(m_Pipeline->GetPipelineState());
+    HE_CORE_INFO("Pipeline: Forward (change via Project Settings CVar 'render.pipeline', requires restart)");
 }
 
 void EditorApp::InitEditor() {
