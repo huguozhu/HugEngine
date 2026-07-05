@@ -205,6 +205,8 @@ public:
     void Draw(u32 vertexCount, u32 instanceCount, u32 firstVertex, u32 firstInstance) override;
     void DrawIndexed(u32 indexCount, u32 instanceCount, u32 firstIndex,
                      i32 vertexOffset, u32 firstInstance) override;
+    void DrawIndexedIndirect(IRHIBuffer* buffer, u64 offset,
+                             u32 drawCount, u32 stride) override;
     void SetPushConstants(u32 offset, u32 size, const void* data) override;
     void Dispatch(u32 groupCountX, u32 groupCountY, u32 groupCountZ) override;
     void DispatchIndirect(IRHIBuffer* buffer, u64 offset) override;

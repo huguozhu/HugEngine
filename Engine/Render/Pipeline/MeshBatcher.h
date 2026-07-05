@@ -34,9 +34,12 @@ public:
     u32 GetTotalVertexCount() const { return m_TotalVertices; }
     u32 GetTotalIndexCount()  const { return m_TotalIndices; }
 
-    // Indirect draw commands（每个原始 mesh 一条）
+    // Indirect draw commands
     const std::vector<IndirectDrawCommand>& GetDrawCommands() const { return m_Commands; }
     u32 GetCommandCount() const { return (u32)m_Commands.size(); }
+
+    /// 将 draw 参数写入 GPUScene 对象（按 Build 顺序，objectIndex 匹配）
+    void FillGPUScene(class GPUScene& scene) const;
 
 private:
     std::vector<StaticVertex> m_MergedVertices;

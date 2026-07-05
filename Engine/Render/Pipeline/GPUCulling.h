@@ -49,6 +49,7 @@ public:
     void Readback(rhi::IRHIDevice* device, std::vector<u32>& outVisibleIndices);
 
     u32 GetLastVisibleCount() const { return m_LastVisibleCount; }
+    rhi::IRHIBuffer* GetIndirectBuffer() const { return m_IndirectCmdBuf.get(); }
 
 private:
     bool m_Initialized = false;

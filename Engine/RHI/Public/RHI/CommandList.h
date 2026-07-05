@@ -89,6 +89,8 @@ public:
     virtual void DrawIndexed(u32 indexCount, u32 instanceCount = 1,
                              u32 firstIndex = 0, i32 vertexOffset = 0,
                              u32 firstInstance = 0) = 0;
+    virtual void DrawIndexedIndirect(IRHIBuffer* buffer, u64 offset,
+                                     u32 drawCount, u32 stride) = 0;
 
     // Push constants（小型常量数据，直接推送到 GPU 寄存器）
     virtual void BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) = 0;

@@ -1,7 +1,8 @@
 // Pipeline/MeshBatcher.cpp — Mesh 合并实现
 #include "Pipeline/MeshBatcher.h"
+#include "Pipeline/GPUScene.h"
 #include "Scene/World.h"
-#include "RHI/RHI.h"  // GetDevice()
+#include "RHI/RHI.h"
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
 #include "Core/Log.h"
@@ -77,6 +78,16 @@ bool MeshBatcher::Build(World& world) {
         (m_TotalVertices * sizeof(StaticVertex)) / 1024,
         (m_TotalIndices * sizeof(u32)) / 1024);
     return true;
+}
+
+void MeshBatcher::FillGPUScene(GPUScene& scene) const {
+    auto& objs = const_cast<std::vector<GPUSceneObject>&>(scene.GetObjects());
+    u32 count = std::min((u32)m_Commands.size(), (u32)objs.size());
+    for (u32 i = 0; i < count; ++i) {
+        objs[i].indexCount  = m_Commands[i].indexCount;
+        objs[i].firstIndex  = m_Commands[i].firstIndex;
+        objs[i].vertexOffset = m_Commands[i].vertexOffset;
+    }
 }
 
 } // namespace he::render

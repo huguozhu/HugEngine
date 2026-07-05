@@ -618,6 +618,13 @@ void VulkanCommandList::DrawIndexed(u32 indexCount, u32 instanceCount,
                      firstIndex, vertexOffset, firstInstance);
 }
 
+void VulkanCommandList::DrawIndexedIndirect(rhi::IRHIBuffer* buffer, u64 offset,
+                                             u32 drawCount, u32 stride) {
+    auto* vkBuf = static_cast<VulkanBuffer*>(buffer);
+    vkCmdDrawIndexedIndirect(m_CmdBuffers[m_FrameIndex], vkBuf->GetHandle(),
+                              (VkDeviceSize)offset, drawCount, stride);
+}
+
 void VulkanCommandList::SetPushConstants(u32 offset, u32 size, const void* data) {
     if (m_CurrentLayout) {
         VkShaderStageFlags stage = (m_CurrentBindPoint == VK_PIPELINE_BIND_POINT_COMPUTE)
