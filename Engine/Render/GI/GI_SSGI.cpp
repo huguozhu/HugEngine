@@ -25,10 +25,20 @@ bool GI_SSGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Device=device;m_Width=width;m_Height=height;
     m_Settings.enabled=false; m_Settings.intensity=1.0f; m_Settings.mode=GIMode::SSGI;
 
+    // Uniform Buffer: 592 字节（kernel[32]×16 + params[16] + proj[64]）
+    rhi::BufferDesc ubDesc;
+    ubDesc.size = 32*sizeof(float4) + sizeof(float4) + sizeof(float4x4);
+    ubDesc.usage = rhi::BufferUsage::Uniform;
+    ubDesc.cpuAccess = true;
+    m_UniformBuffer = device->CreateBuffer(ubDesc);
+
     rhi::DescriptorSetLayoutDesc l;
     l.bindings={{0,rhi::DescriptorType::CombinedImageSampler,1,16},{1,rhi::DescriptorType::CombinedImageSampler,1,16},{2,rhi::DescriptorType::CombinedImageSampler,1,16},{3,rhi::DescriptorType::UniformBuffer,1,16}};
     m_DescLayout=device->CreateDescriptorSetLayout(l);
     m_DescSet=device->AllocateDescriptorSet(m_DescLayout);
+
+    // 绑定 Uniform Buffer 到 binding 3
+    device->UpdateDescriptorSet(m_DescSet, 3, rhi::DescriptorType::UniformBuffer, m_UniformBuffer.get());
 
     rhi::ShaderBytecode vs,fs;vs.stage=rhi::ShaderStage::Vertex;vs.spirv=k_SSAO_vert_spv;vs.entryPoint="vertexMain";
     fs.stage=rhi::ShaderStage::Pixel;fs.spirv=k_SSGI_frag_spv;fs.entryPoint="fragmentMain";
@@ -46,7 +56,7 @@ bool GI_SSGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Ready=true;HE_CORE_INFO("SSGI initialized");return true;
 }
 
-void GI_SSGI::Shutdown(){m_PSO.reset();if(m_Device&&m_DescLayout!=rhi::kInvalidLayout)m_Device->DestroyDescriptorSetLayout(m_DescLayout);m_Output.reset();m_Sampler.reset();m_PointSampler.reset();m_Device=nullptr;m_Ready=false;}
+void GI_SSGI::Shutdown(){m_PSO.reset();m_UniformBuffer.reset();if(m_Device&&m_DescLayout!=rhi::kInvalidLayout)m_Device->DestroyDescriptorSetLayout(m_DescLayout);m_Output.reset();m_Sampler.reset();m_PointSampler.reset();m_Device=nullptr;m_Ready=false;}
 
 void GI_SSGI::OnResize(u32 w,u32 h){m_Width=w;m_Height=h;CreateOutputTex(w,h);}
 
@@ -72,12 +82,15 @@ void GI_SSGI::Render(rhi::IRHICommandList* cmd){
     cmd->SetViewport({0,(float)m_Height,(float)m_Width,-(float)m_Height,0,1});
     cmd->SetScissor({0,0,m_Width,m_Height});
 
+    // 通过 Uniform Buffer 传递参数（替代 push constant，避免 592 字节溢出 256 限制）
     static std::vector<float4> kernel; if(kernel.empty())GenSSGISamples(kernel,32);
-    struct{float4 k[32];float4 p;float4x4 proj;}pc;memcpy(pc.k,kernel.data(),32*sizeof(float4));
-    pc.p=float4(radius, m_Settings.intensity, float(sampleCount), 0);
+    struct alignas(16){float4 k[32];float4 p;float4x4 proj;} ub;
+    memcpy(ub.k,kernel.data(),32*sizeof(float4));
+    ub.p=float4(radius, m_Settings.intensity, float(sampleCount), 0);
     float a=float(m_Width)/float(m_Height);
-    pc.proj=glm::inverse(glm::perspectiveRH_ZO(glm::radians(60.0f),a,0.1f,1000.0f));
-    cmd->SetPushConstants(0,sizeof(pc),&pc);
+    ub.proj=glm::inverse(glm::perspectiveRH_ZO(glm::radians(60.0f),a,0.1f,1000.0f));
+    void* mapped=m_UniformBuffer->Map();
+    if(mapped){memcpy(mapped,&ub,sizeof(ub));m_UniformBuffer->Unmap();}
     cmd->Draw(3);
 }
 

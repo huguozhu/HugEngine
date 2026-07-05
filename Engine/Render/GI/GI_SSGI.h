@@ -55,6 +55,9 @@ private:
     std::unique_ptr<rhi::IRHISampler> m_Sampler;
     std::unique_ptr<rhi::IRHISampler> m_PointSampler;
 
+    // Uniform Buffer：存储采样内核 + 参数（绑定到 binding 3，替代 push constant）
+    std::unique_ptr<rhi::IRHIBuffer> m_UniformBuffer;
+
     rhi::IRHITexture* m_Depth   = nullptr;
     rhi::IRHITexture* m_Albedo  = nullptr;
     rhi::IRHITexture* m_Normal  = nullptr;
