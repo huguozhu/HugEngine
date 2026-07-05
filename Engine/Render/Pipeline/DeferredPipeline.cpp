@@ -433,14 +433,23 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             c->EndOffscreenPass();
         });
 
-    // Denoise passes for SSGI + SSR
-    auto ssgiDenoised = rg.ImportTexture("SSGI_Denoised", m_DenoiseSSGI.GetOutput());
-    auto ssrDenoised  = rg.ImportTexture("SSR_Denoised",  m_DenoiseSSR.GetOutput());
+    // SSR Denoise
+    auto ssrDenoised = rg.ImportTexture("SSR_Denoised", m_DenoiseSSR.GetOutput());
+    rg.AddPass("SSR_Denoise", {{ssrOut, ResourceAccess::Read}}, {{ssrDenoised, ResourceAccess::Write}},
+        [&, w, h](rhi::IRHICommandList* c) {
+            m_DenoiseSSR.PreBind(c);
+            m_DenoiseSSR.SetInputs(m_SSR.GetIndirectSpecularTexture(), m_GBufferDepth.get(), m_GBufferB.get());
+            rhi::ClearValue clr{};
+            c->BeginOffscreenPass(m_DenoiseSSR.GetOutput()->GetNativeHandle(), nullptr, w, h, &clr, false);
+            m_DenoiseSSR.Render(c);
+            c->EndOffscreenPass();
+        });
+
     // SSGI Pass（屏幕空间间接漫反射）
     auto ssgiOut = rg.ImportTexture("SSGI_Output", m_SSGI.GetIndirectDiffuseTexture());
     rg.AddPass("SSGI", {}, {{ssgiOut, ResourceAccess::Write}},
         [&, w, h](rhi::IRHICommandList* c) {
-            m_SSGI.PreBind(c);  // 设置 SSGI PSO（无 depth，1 color attachment）
+            m_SSGI.PreBind(c);
             rhi::ClearValue clr{};
             if (m_SSGI.IsEnabled()) {
                 m_SSGI.SetInputs(m_GBufferDepth.get(), m_GBufferB.get(), m_GBufferA.get());
@@ -452,10 +461,23 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             c->EndOffscreenPass();
         });
 
-    // Lighting Pass (全屏 PBR + SSGI 读取)
+    // SSGI Denoise
+    auto ssgiDenoised = rg.ImportTexture("SSGI_Denoised", m_DenoiseSSGI.GetOutput());
+    rg.AddPass("SSGI_Denoise", {{ssgiOut, ResourceAccess::Read}}, {{ssgiDenoised, ResourceAccess::Write}},
+        [&, w, h](rhi::IRHICommandList* c) {
+            m_DenoiseSSGI.PreBind(c);
+            m_DenoiseSSGI.SetInputs(m_SSGI.GetIndirectDiffuseTexture(), m_GBufferDepth.get(), m_GBufferB.get());
+            rhi::ClearValue clr{};
+            c->BeginOffscreenPass(m_DenoiseSSGI.GetOutput()->GetNativeHandle(), nullptr, w, h, &clr, false);
+            m_DenoiseSSGI.Render(c);
+            c->EndOffscreenPass();
+        });
+
+    // Lighting Pass (全屏 PBR + 降噪后 SSGI/SSR 读取)
     rg.AddPass("Lighting",
         {{gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbC, ResourceAccess::Read},
-         {ssgiOut, ResourceAccess::Read}},  // 声明读依赖，确保 SSGI 先执行
+         {ssgiDenoised, ResourceAccess::Read},
+         {ssrDenoised, ResourceAccess::Read}},
         {{hdrC, ResourceAccess::Write}},
         [&, w, h](rhi::IRHICommandList* c) {
             c->PipelineBarrier(rhi::PipelineStage::LateFragmentTests, rhi::PipelineStage::FragmentShader,
@@ -471,9 +493,11 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             m_Device->UpdateDescriptorSet(m_LightingSet, 17, rhi::DescriptorType::StorageBuffer, m_LightBuffers[m_CurrentFrameSlot].get());
             m_Device->UpdateDescriptorSet(m_LightingSet, 18, rhi::DescriptorType::StorageBuffer, m_ShadowBuffers[m_CurrentFrameSlot].get());
             m_Device->UpdateDescriptorSet(m_LightingSet, 19, rhi::DescriptorType::CombinedImageSampler,
-                m_SSGI.GetIndirectDiffuseTexture(), m_SSGI.GetOutputSampler());
+                m_DenoiseSSGI.GetOutput(), m_SSGI.GetOutputSampler());
             m_Device->UpdateDescriptorSet(m_LightingSet, 20, rhi::DescriptorType::CombinedImageSampler,
                 m_SSAO.GetAOTexture(), m_SSAO.GetAOSampler());
+            m_Device->UpdateDescriptorSet(m_LightingSet, 21, rhi::DescriptorType::CombinedImageSampler,
+                m_DenoiseSSR.GetOutput(), m_SSR.GetOutputSampler());
 
             // Clustered Shading: 构建 cluster AABB + 光源剔除（仅在启用时）
             PushConstantData fpc{}; CollectLights(fpc, world, sg, camera);
