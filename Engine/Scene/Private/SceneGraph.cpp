@@ -64,11 +64,10 @@ void SceneGraph::MarkDirty(Entity entity) {
 }
 
 void SceneGraph::UpdateTransforms() {
-    // 每帧全量更新世界矩阵（后续可优化为仅 dirty 节点）
     for (auto& [id, node] : m_Nodes) {
-        auto* tf = m_World.GetComponent<TransformComponent>(Entity{id});
-        if (tf) node.localMatrix = tf->GetLocalMatrix();
-        ComputeWorldMatrix(Entity{id});
+        if (node.dirty) {
+            ComputeWorldMatrix(Entity{id});
+        }
     }
 }
 

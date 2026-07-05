@@ -15,6 +15,7 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "SceneRenderer.h"
 #include "Pipeline/ClusteredShading.h"
 #include "Pipeline/GPUCulling.h"
+#include "Pipeline/GPUScene.h"
 #include "PostProcess/ToneMapPass.h"
 #include "PostProcess/SkyboxPass.h"
 #include "Scene/World.h"
@@ -118,6 +119,7 @@ private:
     // GPU Culling
     GPUCulling m_GPUCulling;
     std::vector<u32> m_GPUVisibleIndices;
+
 
     // 相机矩阵缓存（当前帧 + 上一帧，用于 velocity 计算和 TAA）
     float4x4 m_PrevViewProj = float4x4(1.0f);

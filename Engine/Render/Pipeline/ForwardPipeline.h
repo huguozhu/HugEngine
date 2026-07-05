@@ -150,7 +150,8 @@ private:
     GPUCulling m_GPUCulling;
     std::vector<u32> m_GPUVisibleIndices;
     u32 m_LastDrawCount = 0;
-    u32 m_LastTriCount  = 0;  // GPU 剔除后的可见物体索引
+    u32 m_LastTriCount  = 0;
+
 };
 
 } // namespace he::render
