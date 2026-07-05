@@ -334,9 +334,12 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             c->SetScissor({0,0,w,h});
             auto drawItems = m_SceneRenderer->Prepare(world, sg, camera, m_ObjectBuffers[m_CurrentFrameSlot].get());
 
-            // GPU 剔除过滤（使用上帧结果）
+            // GPU 剔除过滤（仅当索引数量匹配时才启用，避免编号不一致导致黑屏）
             std::vector<DrawItem> filteredItems;
-            if (useGPUVisible) {
+            bool gpuCullSafe = useGPUVisible &&
+                m_GPUVisibleIndices.size() <= drawItems.size() &&
+                m_GPUScene.GetObjectCount() == (u32)drawItems.size();
+            if (gpuCullSafe) {
                 std::unordered_set<u32> visSet(m_GPUVisibleIndices.begin(), m_GPUVisibleIndices.end());
                 for (auto& di : drawItems)
                     if (visSet.count(di.objectIndex)) filteredItems.push_back(di);

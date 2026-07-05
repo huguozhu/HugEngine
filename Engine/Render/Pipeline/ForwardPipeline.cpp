@@ -743,7 +743,7 @@ void ForwardPipeline::RenderScene(
 
     // GPU 剔除后过滤：构建可见 draw 列表
     std::vector<DrawItem> filteredItems;
-    if (useGPUVisible) {
+    if (useGPUVisible && m_GPUScene.GetObjectCount() == (u32)allDrawItems.size()) {
         // 构建 GPU 可见集合（objectIndex → true）
         std::unordered_set<u32> visibleSet(m_GPUVisibleIndices.begin(), m_GPUVisibleIndices.end());
         for (auto& di : allDrawItems) {
