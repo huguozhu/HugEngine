@@ -31,7 +31,8 @@ public:
     const String& GetName()        const { return m_Name; }
     const String& GetDescription() const { return m_Description; }
 
-    virtual CVarValue GetValue() const = 0;
+    virtual CVarValue GetValue()  const = 0;
+    virtual String    GetString() const = 0;
     virtual void      SetFromString(StringView str) = 0;
 
     /// 获取所有注册的 CVar
@@ -52,7 +53,14 @@ public:
     T    Get() const { return m_Value; }
     void Set(T val)  { m_Value = val; }
 
-    CVarValue GetValue() const override { return CVarValue(m_Value); }
+    CVarValue GetValue()  const override { return CVarValue(m_Value); }
+    String    GetString() const override {
+        if constexpr (std::is_same_v<T, i32>)      return std::to_string(m_Value);
+        else if constexpr (std::is_same_v<T, f32>)  return std::to_string(m_Value);
+        else if constexpr (std::is_same_v<T, bool>) return m_Value ? "true" : "false";
+        else if constexpr (std::is_same_v<T, String>) return m_Value;
+        return "?";
+    }
 
     void SetFromString(StringView str) override {
         if constexpr (std::is_same_v<T, i32>)      { m_Value = static_cast<i32>(std::stoi(String(str))); }

@@ -10,6 +10,7 @@ add_executable(HugEditor
     Panels/StatsPanel.cpp
     Panels/Gizmo.cpp
     Panels/LevelLoader.cpp
+    Panels/ConsolePanel.cpp
 )
 
 target_include_directories(HugEditor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

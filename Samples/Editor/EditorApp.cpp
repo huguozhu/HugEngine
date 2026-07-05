@@ -40,6 +40,7 @@ static std::vector<std::string> s_DroppedFiles;
 #include "Panels/ContentBrowserPanel.h"
 #include "Panels/ProjectSettingsPanel.h"
 #include "Panels/StatsPanel.h"
+#include "Panels/ConsolePanel.h"
 #include "Panels/LevelLoader.h"
 #include "Editor/CVar.h"
 
@@ -165,6 +166,7 @@ void EditorApp::InitEditor() {
     m_ContentBrowser = std::make_unique<editor::ContentBrowserPanel>();
     m_ProjectSettings = std::make_unique<editor::ProjectSettingsPanel>();
     m_Stats = std::make_unique<editor::StatsPanel>();
+    m_Console = std::make_unique<editor::ConsolePanel>();
 
     m_Viewport->Initialize(m_EditorCtx.get(), m_Pipeline.get(), m_Window);
     m_Outliner->Initialize(m_EditorCtx.get());
@@ -423,6 +425,7 @@ void EditorApp::MainLoop() {
             u32 drawCount = m_Pipeline->GetLastDrawCount();
             u32 triCount  = m_Pipeline->GetLastTriCount();
             m_Stats->Render(dt, drawCount, triCount);
+            m_Console->Render();
         }
 
         m_ImGui->EndFrame(m_CmdList.get());
