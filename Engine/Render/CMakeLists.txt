@@ -34,6 +34,8 @@ target_sources(HugEngineRender PRIVATE
     GI/GI_IBL.cpp
     GI/GI_RSM.h
     GI/GI_RSM.cpp
+    GI/GI_SSGI.h
+    GI/GI_SSGI.cpp
     # Shadow (阴影子系统)
     Shadow/IShadowSystem.h
     Shadow/IShadowTechnique.h
@@ -53,7 +55,7 @@ target_sources(HugEngineRender PRIVATE
     PostProcess/SkyboxPass.h
     PostProcess/SkyboxPass.cpp
     PostProcess/SSAO.cpp
-    GI/GI_SSGI.cpp
+    
     # AntiAliasing
     AntiAliasing/AntiAliasing.h
     AntiAliasing/AA_None.h
