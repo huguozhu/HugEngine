@@ -385,9 +385,26 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             c->EndOffscreenPass();
         });
 
-    // Lighting Pass (全屏 PBR + SSGI)
+    // SSGI Pass（屏幕空间间接漫反射）
+    auto ssgiOut = rg.ImportTexture("SSGI_Output", m_SSGI.GetIndirectDiffuseTexture());
+    rg.AddPass("SSGI", {}, {{ssgiOut, ResourceAccess::Write}},
+        [&, w, h](rhi::IRHICommandList* c) {
+            rhi::ClearValue black{};
+            if (m_SSGI.IsEnabled()) {
+                m_SSGI.SetInputs(m_GBufferDepth.get(), m_GBufferB.get(), m_GBufferA.get());
+                c->BeginOffscreenPass(m_SSGI.GetIndirectDiffuseTexture()->GetNativeHandle(), nullptr, w, h, &black, false);
+                m_SSGI.Render(c);
+            } else {
+                c->BeginOffscreenPass(m_SSGI.GetIndirectDiffuseTexture()->GetNativeHandle(), nullptr, w, h, &black, false);
+                // 不清算：黑色 = 无间接光照
+            }
+            c->EndOffscreenPass();
+        });
+
+    // Lighting Pass (全屏 PBR + SSGI 读取)
     rg.AddPass("Lighting",
-        {{gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbC, ResourceAccess::Read}},
+        {{gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbC, ResourceAccess::Read},
+         {ssgiOut, ResourceAccess::Read}},  // 声明读依赖，确保 SSGI 先执行
         {{hdrC, ResourceAccess::Write}},
         [&, w, h](rhi::IRHICommandList* c) {
             c->PipelineBarrier(rhi::PipelineStage::LateFragmentTests, rhi::PipelineStage::FragmentShader,
@@ -436,18 +453,6 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 m_Device->UpdateDescriptorSet(m_LightingSet, 8, rhi::DescriptorType::StorageBuffer, m_LightIndexListBuffer.get());
                 useClustered = 1u;
             }
-
-            // SSGI 间接光照（在 Lighting 之前执行）
-            m_SSGI.SetInputs(m_GBufferDepth.get(), m_GBufferB.get(), m_GBufferA.get());
-            c->BeginOffscreenPass(m_SSGI.GetIndirectDiffuseTexture()->GetNativeHandle(), nullptr, w, h, nullptr, false);
-            m_SSGI.Render(c);
-            c->EndOffscreenPass();
-            // Barrier: SSGI output layout COLOR_ATTACHMENT → SHADER_RESOURCE（Lighting 需要采样）
-            c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput,
-                               rhi::PipelineStage::FragmentShader,
-                               rhi::ResourceState::RenderTarget,
-                               rhi::ResourceState::ShaderResource,
-                               m_SSGI.GetIndirectDiffuseTexture());
 
             c->SetPipeline(m_LightingPSO.get()); c->BindDescriptorSet(0, m_LightingSet);
             rhi::ClearValue clr{};
