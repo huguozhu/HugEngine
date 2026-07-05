@@ -1,5 +1,6 @@
 #pragma once
 
+#include "GI/GlobalIllumination.h"
 #include "RHI/RHI.h"
 #include "Math/Math.h"
 #include <memory>
@@ -8,29 +9,35 @@
 namespace he::render {
 
 // ============================================================
-// SSGI — 屏幕空间全局光照（间接漫反射）
-//
-// 基于 SSAO 架构，额外采样 GBuffer albedo 作为间接光源。
-// 每像素在半球内取 N 个采样点 → 深度测试 → 累加 Albedo。
-// 输入：depth + normal + albedo（GBuffer）
-// 输出：间接光照纹理（RGB16F）
+// GI_SSGI — 屏幕空间全局光照（间接漫反射）
+// 继承 IGlobalIllumination，纳入统一 GI 架构
 // ============================================================
-class SSGI {
+class GI_SSGI : public IGlobalIllumination {
 public:
-    bool enabled = true;
-    float radius     = 1.0f;
-    float intensity  = 1.0f;
-    int   sampleCount = 16;
+    GI_SSGI() = default;
 
-    bool Initialize(rhi::IRHIDevice* device, u32 width, u32 height);
-    void Shutdown();
-    void OnResize(u32 w, u32 h);
+    // IRenderSubsystem
+    bool Initialize(rhi::IRHIDevice* device, u32 width, u32 height) override;
+    void Shutdown() override;
+    void Update(const SubsystemContext&) override {}
+    void Render(rhi::IRHICommandList* cmd) override;
+    void Bind(rhi::IRHICommandList*) const override {}
+    void OnResize(u32 w, u32 h) override;
+    const char* GetName() const override { return "GI_SSGI"; }
+    bool IsReady() const override { return m_Ready; }
+    bool IsEnabled() const override { return m_Settings.enabled; }
+    void SetEnabled(bool e) override { m_Settings.enabled = e; }
 
+    // IGlobalIllumination
+    GIMode GetMode() const override { return GIMode::SSGI; }
+    rhi::IRHITexture* GetIndirectDiffuseTexture() const override { return m_Output.get(); }
+
+    // SSGI 特有
     void SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal, rhi::IRHITexture* albedo);
-    void Render(rhi::IRHICommandList* cmd);
-
-    rhi::IRHITexture* GetOutputTexture() const { return m_Output.get(); }
     rhi::IRHISampler* GetOutputSampler() const { return m_Sampler.get(); }
+
+    float radius = 1.0f;
+    int   sampleCount = 16;
 
 private:
     void CreateOutputTex(u32 w, u32 h);

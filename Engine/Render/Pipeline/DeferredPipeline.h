@@ -125,7 +125,7 @@ private:
     bool       m_BatchBuilt = false;
 
     // SSGI
-    SSGI m_SSGI;
+    GI_SSGI m_SSGI;
     std::vector<u32> m_GPUVisibleIndices;
 
 

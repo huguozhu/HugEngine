@@ -386,12 +386,12 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         });
 
     // SSGI Pass（屏幕空间间接漫反射）
-    auto ssgiOut = rg.ImportTexture("SSGI_Output", m_SSGI.GetOutputTexture());
+    auto ssgiOut = rg.ImportTexture("SSGI_Output", m_SSGI.GetIndirectDiffuseTexture());
     rg.AddPass("SSGI", {{gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbDepth, ResourceAccess::Read}},
         {{ssgiOut, ResourceAccess::Write}},
         [&, w, h](rhi::IRHICommandList* c) {
             m_SSGI.SetInputs(m_GBufferDepth.get(), m_GBufferB.get(), m_GBufferA.get());
-            c->BeginOffscreenPass(m_SSGI.GetOutputTexture()->GetNativeHandle(), nullptr, w, h, nullptr, false);
+            c->BeginOffscreenPass(m_SSGI.GetIndirectDiffuseTexture()->GetNativeHandle(), nullptr, w, h, nullptr, false);
             m_SSGI.Render(c);
             c->EndOffscreenPass();
         });
@@ -414,7 +414,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             m_Device->UpdateDescriptorSet(m_LightingSet, 17, rhi::DescriptorType::StorageBuffer, m_LightBuffers[m_CurrentFrameSlot].get());
             m_Device->UpdateDescriptorSet(m_LightingSet, 18, rhi::DescriptorType::StorageBuffer, m_ShadowBuffers[m_CurrentFrameSlot].get());
             m_Device->UpdateDescriptorSet(m_LightingSet, 19, rhi::DescriptorType::CombinedImageSampler,
-                m_SSGI.GetOutputTexture(), m_SSGI.GetOutputSampler());
+                m_SSGI.GetIndirectDiffuseTexture(), m_SSGI.GetOutputSampler());
 
             // Clustered Shading: 构建 cluster AABB + 光源剔除（仅在启用时）
             PushConstantData fpc{}; CollectLights(fpc, world, sg, camera);
