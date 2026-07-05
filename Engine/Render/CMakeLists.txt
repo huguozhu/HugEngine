@@ -18,6 +18,7 @@ target_sources(HugEngineRender PRIVATE
     Pipeline/DeferredPipeline.cpp
     Pipeline/ClusteredShading.cpp
     Pipeline/GPUScene.cpp
+    Pipeline/MeshBatcher.cpp
     Pipeline/GPUCulling.cpp
     Pipeline/Material.h
     # RenderGraph

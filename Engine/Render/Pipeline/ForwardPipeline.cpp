@@ -805,8 +805,7 @@ void ForwardPipeline::RenderScene(
         for (auto& di : filteredItems) {
             PushConstantData pc = framePC;
             pc.objectIndex = di.objectIndex;
-            cmd->BindDescriptorSet(0, m_DescSets[m_CurrentFrameSlot]);  // set=0: per-frame + bindless
-            // 不再需要 bind set=1
+            cmd->BindDescriptorSet(0, m_DescSets[m_CurrentFrameSlot]);
             cmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
             cmd->SetVertexBuffer(di.mesh->GetVertexBuffer().get(), 0);
             cmd->SetIndexBuffer(di.mesh->GetIndexBuffer().get());
