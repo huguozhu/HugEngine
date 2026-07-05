@@ -53,6 +53,7 @@ target_sources(HugEngineRender PRIVATE
     PostProcess/SkyboxPass.h
     PostProcess/SkyboxPass.cpp
     PostProcess/SSAO.cpp
+    PostProcess/SSGI.cpp
     # AntiAliasing
     AntiAliasing/AntiAliasing.h
     AntiAliasing/AA_None.h
