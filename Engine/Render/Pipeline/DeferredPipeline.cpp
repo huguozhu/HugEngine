@@ -442,6 +442,12 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             c->BeginOffscreenPass(m_SSGI.GetIndirectDiffuseTexture()->GetNativeHandle(), nullptr, w, h, nullptr, false);
             m_SSGI.Render(c);
             c->EndOffscreenPass();
+            // Barrier: SSGI output layout COLOR_ATTACHMENT → SHADER_RESOURCE（Lighting 需要采样）
+            c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput,
+                               rhi::PipelineStage::FragmentShader,
+                               rhi::ResourceState::RenderTarget,
+                               rhi::ResourceState::ShaderResource,
+                               m_SSGI.GetIndirectDiffuseTexture());
 
             c->SetPipeline(m_LightingPSO.get()); c->BindDescriptorSet(0, m_LightingSet);
             rhi::ClearValue clr{};

@@ -23,7 +23,7 @@ static void GenSSGISamples(std::vector<float4>& kernel, int count) {
 
 bool GI_SSGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Device=device;m_Width=width;m_Height=height;
-    m_Settings.enabled=true; m_Settings.intensity=1.0f; m_Settings.mode=GIMode::SSGI;
+    m_Settings.enabled=false; m_Settings.intensity=1.0f; m_Settings.mode=GIMode::SSGI;
 
     rhi::DescriptorSetLayoutDesc l;
     l.bindings={{0,rhi::DescriptorType::CombinedImageSampler,1,16},{1,rhi::DescriptorType::CombinedImageSampler,1,16},{2,rhi::DescriptorType::CombinedImageSampler,1,16},{3,rhi::DescriptorType::UniformBuffer,1,16}};
