@@ -46,18 +46,19 @@ public:
     /// 从 World 收集所有可渲染物体的数据
     void Collect(class World& world, class SceneGraph& sg);
 
-    /// 上传到 GPU（全量覆盖 SSBO）
+    /// 上传到 GPU（仅 Dirty 部分增量写入 SSBO）
     void Upload(rhi::IRHIDevice* device);
 
     // GPU 缓冲访问
     rhi::IRHIBuffer* GetObjectBuffer() const { return m_ObjectSSBO.get(); }
     u32              GetObjectCount() const { return m_ObjectCount; }
 
-    // CPU 端数据（供 GPU Culling / Indirect Draw 使用）
     const std::vector<GPUSceneObject>& GetObjects() const { return m_Objects; }
 
 private:
     std::vector<GPUSceneObject> m_Objects;
+    std::vector<float4x4> m_CachedMatrices;  // 上帧的 localToWorld（检测变化）
+    std::vector<u32>      m_DirtyIndices;    // 需要上传的对象索引
     std::unique_ptr<rhi::IRHIBuffer> m_ObjectSSBO;
     u32 m_ObjectCount = 0;
     bool m_Initialized = false;

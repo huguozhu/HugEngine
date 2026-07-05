@@ -31,67 +31,55 @@ void GPUScene::Shutdown() {
     m_Initialized = false;
 }
 
+static void FillObj(GPUSceneObject& o, const float4x4& wm, const AABB& b, u32 idx) {
+    o.localToWorld = wm; o.boundsMin=float4(b.min,0); o.boundsMax=float4(b.max,0);
+    o.objectID=idx; o.visibilityFlags=1; o.meshIndex=0;
+}
+
 void GPUScene::Collect(World& world, SceneGraph& sg) {
-    m_Objects.clear();
+    m_DirtyIndices.clear();
 
-    // 收集 MeshComponent
-    world.ForEach<MeshComponent>([&](Entity e, MeshComponent& mc) {
-        if (mc.GetIndexCount() == 0) return;
-        GPUSceneObject obj{};
-        obj.localToWorld = sg.GetWorldMatrix(e);
-        const auto& bb = mc.GetBounds();
-        AABB wb = bb.Transform(obj.localToWorld);
-        obj.boundsMin  = float4(wb.min, 0);
-        obj.boundsMax  = float4(wb.max, 0);
-        obj.meshIndex  = 0;  // Phase 2 填充
-        obj.materialIndex = mc.materialID;
-        obj.objectID   = (u32)m_Objects.size();
-        obj.visibilityFlags = 1;  // visible
-        m_Objects.push_back(obj);
-    });
-
-    // 收集 CubeComponent
-    world.ForEach<CubeComponent>([&](Entity e, CubeComponent& cc) {
-        if (cc.GetIndexCount() == 0) return;
-        GPUSceneObject obj{};
-        obj.localToWorld = sg.GetWorldMatrix(e);
-        const auto& ccb = cc.GetBounds(); AABB cwb = ccb.Transform(obj.localToWorld);
-        obj.boundsMin  = float4(cwb.min, 0);
-        obj.boundsMax  = float4(cwb.max, 0);
-        obj.meshIndex  = 0;
-        obj.materialIndex = 0;
-        obj.objectID   = (u32)m_Objects.size();
-        obj.visibilityFlags = 1;
-        m_Objects.push_back(obj);
-    });
-
-    // 收集 SphereComponent
-    world.ForEach<SphereComponent>([&](Entity e, SphereComponent& sc) {
-        if (sc.GetIndexCount() == 0) return;
-        GPUSceneObject obj{};
-        obj.localToWorld = sg.GetWorldMatrix(e);
-        const auto& scb = sc.GetBounds(); AABB swb = scb.Transform(obj.localToWorld);
-        obj.boundsMin  = float4(swb.min, 0);
-        obj.boundsMax  = float4(swb.max, 0);
-        obj.meshIndex  = 0;
-        obj.materialIndex = 0;
-        obj.objectID   = (u32)m_Objects.size();
-        obj.visibilityFlags = 1;
-        m_Objects.push_back(obj);
-    });
-
-    m_ObjectCount = (u32)m_Objects.size();
+    if (m_Objects.empty()) {
+        // 首次：全量收集
+        auto collect = [&](Entity e, auto& comp, u32 matID) {
+            if (comp.GetIndexCount()==0) return;
+            GPUSceneObject o{}; float4x4 wm=sg.GetWorldMatrix(e);
+            FillObj(o,wm,comp.GetBounds().Transform(wm),(u32)m_Objects.size());
+            o.materialIndex=matID; m_Objects.push_back(o);
+            m_CachedMatrices.push_back(wm);
+            m_DirtyIndices.push_back((u32)m_Objects.size()-1);
+        };
+        world.ForEach<MeshComponent>([&](Entity e, MeshComponent& mc){collect(e,mc,mc.materialID);});
+        world.ForEach<CubeComponent>([&](Entity e, CubeComponent& cc){collect(e,cc,0);});
+        world.ForEach<SphereComponent>([&](Entity e, SphereComponent& sc){collect(e,sc,0);});
+    } else {
+        // 增量：只更新变化的对象
+        u32 idx=0;
+        auto update = [&](Entity e, auto& comp) {
+            if (comp.GetIndexCount()==0){idx++;return;}
+            if (idx>=m_Objects.size()) return;
+            float4x4 wm=sg.GetWorldMatrix(e);
+            if (wm!=m_CachedMatrices[idx]) {
+                FillObj(m_Objects[idx],wm,comp.GetBounds().Transform(wm),idx);
+                m_CachedMatrices[idx]=wm; m_DirtyIndices.push_back(idx);
+            }
+            idx++;
+        };
+        world.ForEach<MeshComponent>([&](Entity e, MeshComponent& mc){update(e,mc);});
+        world.ForEach<CubeComponent>([&](Entity e, CubeComponent& cc){update(e,cc);});
+        world.ForEach<SphereComponent>([&](Entity e, SphereComponent& sc){update(e,sc);});
+    }
+    m_ObjectCount=(u32)m_Objects.size();
 }
 
 void GPUScene::Upload(rhi::IRHIDevice* device) {
-    if (m_Objects.empty()) return;
-
-    usize size = m_Objects.size() * sizeof(GPUSceneObject);
-    void* mapped = m_ObjectSSBO->Map();
-    if (mapped) {
-        memcpy(mapped, m_Objects.data(), size);
-        m_ObjectSSBO->Unmap();
-    }
+    if (m_DirtyIndices.empty()) return;
+    void* mapped=m_ObjectSSBO->Map();
+    if (!mapped) return;
+    u8* base=static_cast<u8*>(mapped);
+    for (u32 idx : m_DirtyIndices)
+        memcpy(base+idx*sizeof(GPUSceneObject), &m_Objects[idx], sizeof(GPUSceneObject));
+    m_ObjectSSBO->Unmap();
 }
 
 } // namespace he::render
