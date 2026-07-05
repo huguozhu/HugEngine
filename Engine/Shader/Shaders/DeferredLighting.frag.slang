@@ -46,6 +46,7 @@ struct GPUShadowData {
 
 [[vk::binding(17, 0)]] StructuredBuffer<GPULight>      u_Lights;
 [[vk::binding(18, 0)]] StructuredBuffer<GPUShadowData> u_ShadowData;
+[[vk::binding(19, 0)]] Texture2D<float4> u_SSGI;  // SSGI 间接光照
 
 // Clustered Shading: LightGrid + LightIndexList（每 cluster 只迭代影响它的光源）
 struct LightGridCell { uint offset; uint count; };
@@ -221,6 +222,11 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
     }
 
     color *= ao;
+
+    // SSGI 间接漫反射
+    float4 ssgi = u_SSGI.Sample(u_GBufferSampler, uv);
+    color += ssgi.rgb;
+
     color += gbC.rgb;  // emissive
     return float4(color, 1.0);
 }

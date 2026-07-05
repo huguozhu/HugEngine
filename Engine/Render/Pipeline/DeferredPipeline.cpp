@@ -97,6 +97,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     m_SceneRenderer = std::make_unique<SceneRenderer>();
     m_GPUCulling.Initialize(device);
     m_GPUScene.Initialize(device);
+    m_SSGI.Initialize(device, m_Width, m_Height);
 
     // AA_TAA
     m_AntiAliasing = std::make_unique<AA_TAA>();
@@ -190,6 +191,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         {16, rhi::DescriptorType::CombinedImageSampler, 1, 16}, // RSM Flux
         {17, rhi::DescriptorType::StorageBuffer, 1, 16},  // Lights
         {18, rhi::DescriptorType::StorageBuffer, 1, 16},  // ShadowData
+        {19, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // SSGI Output
     };
     m_LightingLayout = device->CreateDescriptorSetLayout(ll);
     m_LightingSet    = device->AllocateDescriptorSet(m_LightingLayout);
@@ -247,6 +249,7 @@ void DeferredPipeline::Shutdown() {
     for (auto& b : m_ShadowObjBuffers) b.reset();
     m_GPUCulling.Shutdown(m_Device);
     m_GPUScene.Shutdown();
+    m_SSGI.Shutdown();
     m_Device = nullptr; m_Ready = false;
     HE_CORE_INFO("DeferredPipeline shutdown");
 }
@@ -382,6 +385,17 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             c->EndOffscreenPass();
         });
 
+    // SSGI Pass（屏幕空间间接漫反射）
+    auto ssgiOut = rg.ImportTexture("SSGI_Output", m_SSGI.GetOutputTexture());
+    rg.AddPass("SSGI", {{gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbDepth, ResourceAccess::Read}},
+        {{ssgiOut, ResourceAccess::Write}},
+        [&, w, h](rhi::IRHICommandList* c) {
+            m_SSGI.SetInputs(m_GBufferDepth.get(), m_GBufferB.get(), m_GBufferA.get());
+            c->BeginOffscreenPass(m_SSGI.GetOutputTexture()->GetNativeHandle(), nullptr, w, h, nullptr, false);
+            m_SSGI.Render(c);
+            c->EndOffscreenPass();
+        });
+
     // Lighting Pass (全屏 PBR)
     rg.AddPass("Lighting",
         {{gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbC, ResourceAccess::Read}},
@@ -399,6 +413,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 bindTex(9, m_ShadowSystem->GetShadowMap(4));
             m_Device->UpdateDescriptorSet(m_LightingSet, 17, rhi::DescriptorType::StorageBuffer, m_LightBuffers[m_CurrentFrameSlot].get());
             m_Device->UpdateDescriptorSet(m_LightingSet, 18, rhi::DescriptorType::StorageBuffer, m_ShadowBuffers[m_CurrentFrameSlot].get());
+            m_Device->UpdateDescriptorSet(m_LightingSet, 19, rhi::DescriptorType::CombinedImageSampler,
+                m_SSGI.GetOutputTexture(), m_SSGI.GetOutputSampler());
 
             // Clustered Shading: 构建 cluster AABB + 光源剔除（仅在启用时）
             PushConstantData fpc{}; CollectLights(fpc, world, sg, camera);
