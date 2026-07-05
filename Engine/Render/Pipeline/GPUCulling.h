@@ -55,8 +55,7 @@ private:
     rhi::ShaderBytecode m_CS;
 
     // GPU 缓冲
-    std::unique_ptr<rhi::IRHIBuffer> m_BoundsBuffer;       // binding 0
-    std::unique_ptr<rhi::IRHIBuffer> m_VisibleIndicesBuf;  // binding 1
+    std::unique_ptr<rhi::IRHIBuffer> m_IndirectCmdBuf;     // binding 1: IndirectDrawCommand[]
     std::unique_ptr<rhi::IRHIBuffer> m_DrawCountBuf;       // binding 2
     std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
     rhi::DescriptorSetLayoutHandle m_DescLayout = rhi::kInvalidLayout;

@@ -1,4 +1,5 @@
 #include "Pipeline/GPUCulling.h"
+#include "Pipeline/MeshBatcher.h"  // IndirectDrawCommand
 #include "GPUCull.comp.spv.h"
 #include "HiZDownsample.comp.spv.h"
 #include "Core/Log.h"
@@ -52,10 +53,10 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
     // SSBO 创建（binding 0 由 SetSceneBuffer 设置，此处创建占位）
     // VisibleIndices + DrawCount
     {
-        rhi::BufferDesc d; d.size = sizeof(u32) * kMaxObjects;
+        rhi::BufferDesc d; d.size = sizeof(IndirectDrawCommand) * kMaxObjects;
         d.usage = rhi::BufferUsage::Storage; d.cpuAccess = true;
-        m_VisibleIndicesBuf = device->CreateBuffer(d);
-        device->UpdateDescriptorSet(m_DescSet, 1, rhi::DescriptorType::StorageBuffer, m_VisibleIndicesBuf.get());
+        m_IndirectCmdBuf = device->CreateBuffer(d);
+        device->UpdateDescriptorSet(m_DescSet, 1, rhi::DescriptorType::StorageBuffer, m_IndirectCmdBuf.get());
     }
     {
         rhi::BufferDesc d; d.size = sizeof(u32) * 4;  // 16 bytes, 4 u32s for safety
@@ -118,7 +119,7 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
 
 void GPUCulling::Shutdown(rhi::IRHIDevice* device) {
     if (!m_Initialized) return;
-    m_VisibleIndicesBuf.reset();
+    m_IndirectCmdBuf.reset();
     m_DrawCountBuf.reset();
     m_PSO.reset();
     if (m_DescLayout != rhi::kInvalidLayout && device) {
@@ -175,7 +176,6 @@ void GPUCulling::Readback(rhi::IRHIDevice* device,
     outVisibleIndices.clear();
     if (!m_Initialized || !enabled) return;
 
-    // 读回 count
     u32 count = 0;
     void* dc = m_DrawCountBuf->Map();
     if (dc) { count = *static_cast<u32*>(dc); m_DrawCountBuf->Unmap(); }
@@ -183,12 +183,13 @@ void GPUCulling::Readback(rhi::IRHIDevice* device,
     if (count == 0) { m_LastVisibleCount = 0; return; }
     if (count > kMaxObjects) count = kMaxObjects;
 
-    // 读回可见索引列表
     outVisibleIndices.resize(count);
-    void* vi = m_VisibleIndicesBuf->Map();
+    void* vi = m_IndirectCmdBuf->Map();
     if (vi) {
-        memcpy(outVisibleIndices.data(), vi, count * sizeof(u32));
-        m_VisibleIndicesBuf->Unmap();
+        auto* cmds = static_cast<IndirectDrawCommand*>(vi);
+        for (u32 i = 0; i < count; ++i)
+            outVisibleIndices[i] = cmds[i].firstInstance;  // objectID 存在 firstInstance
+        m_IndirectCmdBuf->Unmap();
     }
 
     m_LastVisibleCount = count;
