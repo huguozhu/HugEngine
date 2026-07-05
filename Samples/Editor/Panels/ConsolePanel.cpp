@@ -55,6 +55,11 @@ void ConsolePanel::ExecuteCommand(const std::string& cmd) {
 }
 
 void ConsolePanel::Render() {
+    // 按 ~ 键弹出/隐藏（必须在 visible 检查之前处理）
+    if (ImGui::IsKeyPressed(ImGuiKey_GraveAccent)) {
+        m_Visible = !m_Visible;
+        if (m_Visible) m_FocusInput = true;
+    }
     if (!m_Visible) return;
 
     ImGui::SetNextWindowSize(ImVec2(600, 300), ImGuiCond_FirstUseEver);
@@ -108,14 +113,7 @@ void ConsolePanel::Render() {
     }
     ImGui::PopItemWidth();
 
-    // 保持聚焦
     if (reclaimFocus) m_FocusInput = true;
-    // 按 ` 键弹出控制台
-    if (ImGui::IsKeyPressed(ImGuiKey_GraveAccent)) {
-        m_Visible = !m_Visible;
-        if (m_Visible) m_FocusInput = true;
-    }
-
     ImGui::End();
 }
 
