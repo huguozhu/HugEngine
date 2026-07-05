@@ -7,6 +7,7 @@
 #include "RenderGraph.h"
 #include "Asset/BindlessTextureManager.h"
 #include "Pipeline/GPUCulling.h"
+#include "AntiAliasing/AntiAliasing.h"
 
 namespace he::render { class GI_IBL; }
 namespace he::render { class GI_RSM; }
@@ -73,6 +74,8 @@ public:
     void ResizeHDRTarget(u32 w, u32 h);
 
     void SetGI(std::unique_ptr<IGlobalIllumination> gi) { m_GI = std::move(gi); }
+    IAntiAliasing* GetAntiAliasing() { return m_AntiAliasing.get(); }
+    void SetAntiAliasing(std::unique_ptr<IAntiAliasing> aa) { m_AntiAliasing = std::move(aa); }
     void PrepareGI(rhi::IRHICommandList* cmd, he::World& world, he::SceneGraph& sg);
     GI_RSM* GetRSM() { return m_RSM.get(); }
 
@@ -137,6 +140,7 @@ private:
     std::unique_ptr<IGlobalIllumination> m_GI;
     std::unique_ptr<GI_RSM>              m_RSM;
     std::unique_ptr<IShadowSystem>       m_ShadowSystem;
+    std::unique_ptr<IAntiAliasing>       m_AntiAliasing;
     rhi::IRHISwapChain* m_SwapChain = nullptr;
     std::unique_ptr<ToneMapPass>         m_ToneMap;
     std::unique_ptr<SkyboxPass>          m_Skybox;

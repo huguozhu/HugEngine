@@ -5,6 +5,8 @@
 #include "Platform/Window.h"
 #include "RHI/RHI.h"
 #include "Pipeline/ForwardPipeline.h"
+#include "AntiAliasing/AA_None.h"
+#include "AntiAliasing/AA_FXAA.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
 #include "Scene/Transform.h"
@@ -137,6 +139,7 @@ he::CVar<bool>  cvVSync     ("render.vsync", true, "垂直同步");
 he::CVar<bool>  cvShadows   ("render.shadow_enabled", true, "阴影开关");
 he::CVar<bool>  cvDebugVis  ("editor.debug.frustum", false, "Debug 视锥体显示");
 he::CVar<String> cvPipeline ("render.pipeline", "forward", "渲染管线: forward / deferred (需重启)");
+he::CVar<String> cvAAMode   ("render.aa_mode", "none", "抗锯齿: none / fxaa / taa");
 
 void EditorApp::InitPipeline() {
     m_CmdList = m_Device->CreateCommandList();
@@ -186,6 +189,30 @@ void EditorApp::MainLoop() {
         m_LastTime = now;
 
         m_Engine->GetWindow()->PollEvents();
+
+        // AA 模式切换（根据 CVar 动态创建/替换）
+        static String s_LastAAMode = "none";
+        String aaMode = cvAAMode.Get();
+        if (aaMode != s_LastAAMode) {
+            s_LastAAMode = aaMode;
+            if (aaMode == "fxaa") {
+                auto fxaa = std::make_unique<render::AA_FXAA>();
+                fxaa->Initialize(m_Device.get(), m_SwapChain->GetWidth(), m_SwapChain->GetHeight());
+                m_Pipeline->SetAntiAliasing(std::move(fxaa));
+                HE_CORE_INFO("AA switched to FXAA");
+            } else if (aaMode == "taa") {
+                // TAA 仅 DeferredPipeline 支持（当前 Editor 用 ForwardPipeline）
+                HE_CORE_WARN("TAA requires DeferredPipeline — falling back to None");
+                m_Pipeline->SetAntiAliasing(std::make_unique<render::AA_None>());
+                cvAAMode.Set("none");
+                s_LastAAMode = "none";
+            } else {
+                auto none = std::make_unique<render::AA_None>();
+                none->Initialize(m_Device.get(), m_SwapChain->GetWidth(), m_SwapChain->GetHeight());
+                m_Pipeline->SetAntiAliasing(std::move(none));
+                HE_CORE_INFO("AA switched to None");
+            }
+        }
 
         // 同步 LevelComponent（加载新的，无需每帧）
         he::editor::LevelLoader::SyncAll(*m_World);

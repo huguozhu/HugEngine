@@ -14,6 +14,8 @@
 #include "Threading/JobSystem.h"
 #include "PBR.vert.spv.h"
 #include "PBR.frag.spv.h"
+#include "AntiAliasing/AA_None.h"
+#include "AntiAliasing/AA_FXAA.h"
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/ext/matrix_clip_space.hpp>  // orthoRH_ZO (Vulkan Z [0,1])
@@ -214,6 +216,11 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     m_Skybox->Initialize(device, m_HDRWidth, m_HDRHeight);
     HE_CORE_INFO("ForwardPipeline: SkyboxPass initialized");
 
+    // --- AA 子系统（默认 None，运行时切换）---
+    m_AntiAliasing = std::make_unique<AA_None>();
+    m_AntiAliasing->Initialize(device, m_HDRWidth, m_HDRHeight);
+    HE_CORE_INFO("ForwardPipeline: AA initialized (None)");
+
     // --- HDR 离屏渲染目标（RGBA16_FLOAT 颜色 + D32 深度）---
     {
         rhi::TextureDesc hdrColorDesc;
@@ -296,6 +303,7 @@ void ForwardPipeline::Shutdown() {
     }
 
     m_GPUCulling.Shutdown(m_Device);
+    if (m_AntiAliasing) { m_AntiAliasing->Shutdown(); m_AntiAliasing.reset(); }
 
     m_Device = nullptr;
     HE_CORE_INFO("ForwardPipeline shut down");
@@ -556,6 +564,12 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
     RenderScene(cmd, world, sg, camera);
     RenderSkybox(cmd, world, camera);
     EndHDRPass(cmd);
+
+    // AA Pass（FXAA 等在 HDR→ToneMap 之间或 ToneMap 之后）
+    if (m_AntiAliasing && m_AntiAliasing->IsEnabled() && m_AntiAliasing->GetMode() != AAMode::None) {
+        m_AntiAliasing->SetInput(m_HDRTarget.get(), m_HDRSampler.get());
+        m_AntiAliasing->Render(cmd);
+    }
 }
 
 void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
