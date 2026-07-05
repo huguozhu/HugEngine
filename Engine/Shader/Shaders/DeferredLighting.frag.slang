@@ -47,6 +47,7 @@ struct GPUShadowData {
 [[vk::binding(17, 0)]] StructuredBuffer<GPULight>      u_Lights;
 [[vk::binding(18, 0)]] StructuredBuffer<GPUShadowData> u_ShadowData;
 [[vk::binding(19, 0)]] Texture2D<float4> u_SSGI;  // SSGI 间接光照
+[[vk::binding(20, 0)]] Texture2D<float4> u_SSAO;  // SSAO 环境光遮蔽
 
 // Clustered Shading: LightGrid + LightIndexList（每 cluster 只迭代影响它的光源）
 struct LightGridCell { uint offset; uint count; };
@@ -221,7 +222,9 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
         color += rsmIndirect * 0.03 * iblIntensity;
     }
 
-    color *= ao;
+    // SSAO 屏幕空间遮蔽（与 GBuffer AO 相乘）
+    float ssao = u_SSAO.Sample(u_GBufferSampler, uv).r;
+    color *= ao * ssao;
 
     // SSGI 间接漫反射
     float4 ssgi = u_SSGI.Sample(u_GBufferSampler, uv);

@@ -18,6 +18,7 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "Pipeline/GPUScene.h"
 #include "Pipeline/MeshBatcher.h"
 #include "GI/GI_SSGI.h"
+#include "PostProcess/SSAO.h"
 #include "PostProcess/ToneMapPass.h"
 #include "PostProcess/SkyboxPass.h"
 #include "Scene/World.h"
@@ -124,8 +125,9 @@ private:
     MeshBatcher m_MeshBatcher;
     bool       m_BatchBuilt = false;
 
-    // SSGI
+    // SSGI + SSAO
     GI_SSGI m_SSGI;
+    SSAO    m_SSAO;
     std::vector<u32> m_GPUVisibleIndices;
 
 

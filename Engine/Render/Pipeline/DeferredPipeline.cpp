@@ -98,6 +98,8 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     m_GPUCulling.Initialize(device);
     m_GPUScene.Initialize(device);
     m_SSGI.Initialize(device, m_Width, m_Height);
+    m_SSAO.Initialize(device, m_Width, m_Height);
+    m_SSAO.enabled = false;  // 默认关闭
 
     // AA_TAA
     m_AntiAliasing = std::make_unique<AA_TAA>();
@@ -191,7 +193,8 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         {16, rhi::DescriptorType::CombinedImageSampler, 1, 16}, // RSM Flux
         {17, rhi::DescriptorType::StorageBuffer, 1, 16},  // Lights
         {18, rhi::DescriptorType::StorageBuffer, 1, 16},  // ShadowData
-        {19, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // SSGI Output
+        {19, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // SSGI
+        {20, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // SSAO
     };
     m_LightingLayout = device->CreateDescriptorSetLayout(ll);
     m_LightingSet    = device->AllocateDescriptorSet(m_LightingLayout);
@@ -250,6 +253,7 @@ void DeferredPipeline::Shutdown() {
     m_GPUCulling.Shutdown(m_Device);
     m_GPUScene.Shutdown();
     m_SSGI.Shutdown();
+    m_SSAO.Shutdown();
     m_Device = nullptr; m_Ready = false;
     HE_CORE_INFO("DeferredPipeline shutdown");
 }
@@ -385,6 +389,22 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             c->EndOffscreenPass();
         });
 
+    // SSAO Pass
+    auto ssaoOut = rg.ImportTexture("SSAO_Output", m_SSAO.GetAOTexture());
+    rg.AddPass("SSAO", {}, {{ssaoOut, ResourceAccess::Write}},
+        [&, w, h](rhi::IRHICommandList* c) {
+            m_SSAO.PreBind(c);
+            if (m_SSAO.enabled) {
+                m_SSAO.SetInputs(m_GBufferDepth.get(), m_GBufferB.get());
+                c->BeginOffscreenPass(m_SSAO.GetAOTexture()->GetNativeHandle(), nullptr, w, h, nullptr, false);
+                m_SSAO.Render(c);
+            } else {
+                rhi::ClearValue wclr; wclr.color[0]=wclr.color[1]=wclr.color[2]=wclr.color[3]=1;
+                c->BeginOffscreenPass(m_SSAO.GetAOTexture()->GetNativeHandle(), nullptr, w, h, &wclr, false);
+            }
+            c->EndOffscreenPass();
+        });
+
     // SSGI Pass（屏幕空间间接漫反射）
     auto ssgiOut = rg.ImportTexture("SSGI_Output", m_SSGI.GetIndirectDiffuseTexture());
     rg.AddPass("SSGI", {}, {{ssgiOut, ResourceAccess::Write}},
@@ -421,6 +441,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             m_Device->UpdateDescriptorSet(m_LightingSet, 18, rhi::DescriptorType::StorageBuffer, m_ShadowBuffers[m_CurrentFrameSlot].get());
             m_Device->UpdateDescriptorSet(m_LightingSet, 19, rhi::DescriptorType::CombinedImageSampler,
                 m_SSGI.GetIndirectDiffuseTexture(), m_SSGI.GetOutputSampler());
+            m_Device->UpdateDescriptorSet(m_LightingSet, 20, rhi::DescriptorType::CombinedImageSampler,
+                m_SSAO.GetAOTexture(), m_SSAO.GetAOSampler());
 
             // Clustered Shading: 构建 cluster AABB + 光源剔除（仅在启用时）
             PushConstantData fpc{}; CollectLights(fpc, world, sg, camera);

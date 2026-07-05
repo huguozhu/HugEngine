@@ -36,6 +36,7 @@ public:
     // 输出
     rhi::IRHITexture* GetAOTexture() const { return m_AOTexture.get(); }
     rhi::IRHISampler* GetAOSampler() const { return m_AOSampler.get(); }
+    void PreBind(rhi::IRHICommandList* cmd) const { if (m_Ready) cmd->SetPipeline(m_SSAO_PSO.get()); }
 
 private:
     void CreateAOTexture(u32 w, u32 h);
