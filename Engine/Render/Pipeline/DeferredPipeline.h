@@ -17,7 +17,7 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "Pipeline/GPUCulling.h"
 #include "Pipeline/GPUScene.h"
 #include "Pipeline/MeshBatcher.h"
-#include "PostProcess/SSGI.h"
+#include "GI/GI_SSGI.h"
 #include "PostProcess/ToneMapPass.h"
 #include "PostProcess/SkyboxPass.h"
 #include "Scene/World.h"

@@ -1,5 +1,5 @@
 // PostProcess/SSGI.cpp — 屏幕空间全局光照
-#include "PostProcess/SSGI.h"
+#include "GI/GI_SSGI.h"
 #include "Core/Log.h"
 #include "SSAO.vert.spv.h"
 #include "SSGI.frag.spv.h"
