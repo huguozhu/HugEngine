@@ -810,7 +810,7 @@ void ForwardPipeline::RenderScene(
         drawCount = totalDraws;
     } else {
         // ExecuteIndirect 路径（仅当 Batch 已构建且 GPU Culling 有结果）
-        bool useIndirect = m_BatchBuilt && m_GPUCulling.enabled
+        bool useIndirect = m_UseExecuteIndirect && m_BatchBuilt && m_GPUCulling.enabled
                         && m_MeshBatcher.GetTotalIndexCount() > 0
                         && m_GPUCulling.GetLastVisibleCount() > 0;
         if (useIndirect) {

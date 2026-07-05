@@ -140,6 +140,7 @@ he::CVar<bool>  cvShadows   ("render.shadow_enabled", true, "阴影开关");
 he::CVar<bool>  cvDebugVis  ("editor.debug.frustum", false, "Debug 视锥体显示");
 he::CVar<String> cvPipeline ("render.pipeline", "forward", "渲染管线: forward / deferred (需重启)");
 he::CVar<String> cvAAMode   ("render.aa_mode", "none", "抗锯齿: none / fxaa / taa");
+he::CVar<bool>   cvExecIndirect("render.execute_indirect", true, "ExecuteIndirect: GPU Driven绘制");
 
 void EditorApp::InitPipeline() {
     m_CmdList = m_Device->CreateCommandList();
@@ -213,6 +214,9 @@ void EditorApp::MainLoop() {
                 HE_CORE_INFO("AA switched to None");
             }
         }
+
+        // ExecuteIndirect 开关
+        m_Pipeline->SetUseExecuteIndirect(cvExecIndirect.Get());
 
         // 同步 LevelComponent（加载新的，无需每帧）
         he::editor::LevelLoader::SyncAll(*m_World);

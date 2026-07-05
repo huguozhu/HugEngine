@@ -69,6 +69,8 @@ public:
 
     void SetMultiThreadedRecording(bool e) { m_MultiThreadRecord = e; }
     bool IsMultiThreadedRecording() const { return m_MultiThreadRecord; }
+    void SetUseExecuteIndirect(bool e) { m_UseExecuteIndirect = e; }
+    bool GetUseExecuteIndirect() const { return m_UseExecuteIndirect; }
 
     // HDR 离屏渲染
     void BeginHDRPass(rhi::IRHICommandList* cmd, u32 w, u32 h);
@@ -128,8 +130,9 @@ private:
     std::unique_ptr<rhi::IRHITexture> m_BindlessPlaceholder;
     std::unique_ptr<rhi::IRHISampler> m_BindlessSampler;
 
-    // 多线程录制（Sec CB 模循环复用，无池重置 VUID 问题）
+    // 多线程录制
     bool m_MultiThreadRecord = true;
+    bool m_UseExecuteIndirect = true;
     static constexpr u32 kMaxSecRecordLists = 8;
     // RenderGraph 模式（默认关闭，渐进迁移到声明式编排）
     bool m_UseRenderGraph = false;
