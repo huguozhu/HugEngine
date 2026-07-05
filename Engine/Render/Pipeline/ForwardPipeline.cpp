@@ -706,6 +706,13 @@ void ForwardPipeline::RenderScene(
 {
     sceneGraph.UpdateTransforms();
 
+    // Mesh Batcher：首次构建 + 填 draw 参数到 GPUScene
+    if (!m_BatchBuilt) {
+        m_MeshBatcher.Build(world);
+        m_BatchBuilt = true;
+    }
+    m_MeshBatcher.FillGPUScene(m_GPUScene);
+
     float4x4 viewProj = camera.GetViewProjMatrix();
     u32 drawCount = 0;
 
