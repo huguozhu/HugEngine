@@ -1,5 +1,6 @@
 #include "Pipeline/GPUCulling.h"
 #include "GPUCull.comp.spv.h"
+#include "HiZDownsample.comp.spv.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include <cstring>
@@ -40,9 +41,10 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
     // 描述符集布局: 3 个 SSBO binding
     rhi::DescriptorSetLayoutDesc layoutDesc;
     layoutDesc.bindings = {
-        {0, rhi::DescriptorType::StorageBuffer, 1, 32},  // u_ObjectBounds (Compute)
+        {0, rhi::DescriptorType::StorageBuffer, 1, 32},  // u_SceneObjects
         {1, rhi::DescriptorType::StorageBuffer, 1, 32},  // u_VisibleIndices
         {2, rhi::DescriptorType::StorageBuffer, 1, 32},  // u_DrawCount
+        {3, rhi::DescriptorType::CombinedImageSampler, 1, 32},  // u_HiZDepth (Hi-Z)
     };
     m_DescLayout = device->CreateDescriptorSetLayout(layoutDesc);
     m_DescSet    = device->AllocateDescriptorSet(m_DescLayout);
@@ -78,6 +80,37 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
     m_PSO = device->CreatePipelineState(psoDesc);
     HE_ASSERT(m_PSO, "GPUCulling: Compute PSO creation failed");
 
+    // Hi-Z 下采样 PSO 和描述符集
+    {
+        rhi::DescriptorSetLayoutDesc hizLayout;
+        hizLayout.bindings = {{0,rhi::DescriptorType::CombinedImageSampler,1,32},
+                              {1,rhi::DescriptorType::StorageImage,1,32}};
+        m_HiZLayout = device->CreateDescriptorSetLayout(hizLayout);
+        m_HiZSet0   = device->AllocateDescriptorSet(m_HiZLayout);
+        m_HiZSet1   = device->AllocateDescriptorSet(m_HiZLayout);
+
+        rhi::ShaderBytecode hizCS;
+        hizCS.stage=rhi::ShaderStage::Compute; hizCS.spirv=k_HiZDownsample_comp_spv; hizCS.entryPoint="main";
+
+        rhi::PushConstantRange hizPCR; hizPCR.stageMask=32; hizPCR.offset=0; hizPCR.size=16;
+
+        rhi::PipelineStateDesc hizDesc;
+        hizDesc.bindPoint=rhi::PipelineBindPoint::Compute;
+        hizDesc.computeShader=&hizCS;
+        hizDesc.pushConstantRanges={hizPCR};
+        hizDesc.descriptorSetLayouts={m_HiZLayout};
+        hizDesc.debugName="HiZDownsample";
+        m_HiZ_PSO=device->CreatePipelineState(hizDesc);
+    }
+
+    // Hi-Z 采样器
+    {
+        rhi::SamplerDesc sd; sd.minFilter=sd.magFilter=rhi::FilterMode::Nearest;
+        sd.addressU=sd.addressV=rhi::AddressMode::ClampToEdge;
+        sd.minLod=0; sd.maxLod=(float)kHiZMips;
+        m_HiZSampler=device->CreateSampler(sd);
+    }
+
     m_Initialized = true;
     HE_CORE_INFO("GPUCulling initialized (max {} objects)", kMaxObjects);
     return true;
@@ -98,8 +131,17 @@ void GPUCulling::Shutdown(rhi::IRHIDevice* device) {
 
 void GPUCulling::SetSceneBuffer(rhi::IRHIDevice* device, rhi::IRHIBuffer* gpuSceneSSBO) {
     if (!m_Initialized || !gpuSceneSSBO) return;
-    // 绑定 GPUScene SSBO 到 binding 0
     device->UpdateDescriptorSet(m_DescSet, 0, rhi::DescriptorType::StorageBuffer, gpuSceneSSBO);
+}
+
+void GPUCulling::SetDepthTexture(rhi::IRHIDevice* device, rhi::IRHITexture* depthTex,
+                                   u32 width, u32 height) {
+    if (!m_Initialized) return;
+    m_DepthInput = depthTex;
+    // 全分辨率 Hi-Z（暂不构建金字塔，shader 中 hizMipCount=1 直接读 mip 0）
+    m_HiZMipCount = 1;
+    device->UpdateDescriptorSet(m_DescSet, 3, rhi::DescriptorType::CombinedImageSampler,
+                                depthTex, m_HiZSampler.get());
 }
 
 void GPUCulling::Dispatch(rhi::IRHICommandList* cmd,
@@ -115,7 +157,7 @@ void GPUCulling::Dispatch(rhi::IRHICommandList* cmd,
     for (int i=0;i<6;++i) pc.planes[i]=planes[i];
     pc.vp    = viewProj;
     pc.sSize = float2((float)screenW, (float)screenH);
-    pc.mips  = 0;  // Hi-Z 暂未启用
+    pc.mips  = m_HiZMipCount;  // 0=禁用, 1=全分辨率
     pc.count = objectCount;
 
     cmd->SetPipeline(m_PSO.get());
