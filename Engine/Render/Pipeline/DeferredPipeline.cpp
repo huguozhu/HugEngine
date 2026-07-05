@@ -282,6 +282,8 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
     if (m_ToneMap) m_ToneMap->OnResize(w, h);
     if (m_Skybox)  { m_Skybox->Shutdown(); m_Skybox->Initialize(m_Device, w, h); }
     if (m_AntiAliasing) m_AntiAliasing->OnResize(w, h);
+    m_SSAO.OnResize(w, h);
+    m_SSGI.OnResize(w, h);
 }
 
 void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
@@ -479,7 +481,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             c->SetPipeline(m_LightingPSO.get()); c->BindDescriptorSet(0, m_LightingSet);
             rhi::ClearValue clr{};
             c->BeginOffscreenPass(m_HDRTarget->GetNativeHandle(), m_HDRDepth->GetNativeHandle(), w, h, &clr, false);
-            c->SetViewport({0,(float)h,(float)w,-(float)h,0,1}); c->SetScissor({0,0,w,h});
+            c->SetViewport({0,(float)h,(float)w,-(float)h,0,1});
+            c->SetScissor({0,0,w,h});
             // Push constant: 含 cluster 网格参数 + 开关
             struct { float4x4 ivp; float4 cp; u32 lc; float ii;
                      u32 cTx; u32 cTy; float cNear; float cFar; float cLogF;
