@@ -47,13 +47,8 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
     m_DescLayout = device->CreateDescriptorSetLayout(layoutDesc);
     m_DescSet    = device->AllocateDescriptorSet(m_DescLayout);
 
-    // SSBO 创建
-    {
-        rhi::BufferDesc d; d.size = sizeof(CullObjectBounds) * kMaxObjects;
-        d.usage = rhi::BufferUsage::Storage; d.cpuAccess = true;
-        m_BoundsBuffer = device->CreateBuffer(d);
-        device->UpdateDescriptorSet(m_DescSet, 0, rhi::DescriptorType::StorageBuffer, m_BoundsBuffer.get());
-    }
+    // SSBO 创建（binding 0 由 SetSceneBuffer 设置，此处创建占位）
+    // VisibleIndices + DrawCount
     {
         rhi::BufferDesc d; d.size = sizeof(u32) * kMaxObjects;
         d.usage = rhi::BufferUsage::Storage; d.cpuAccess = true;
@@ -102,19 +97,10 @@ void GPUCulling::Shutdown(rhi::IRHIDevice* device) {
     m_Initialized = false;
 }
 
-void GPUCulling::UploadBounds(rhi::IRHIDevice* device,
-                               const std::vector<CullObjectBounds>& bounds) {
-    if (bounds.empty() || !m_Initialized) return;
-    void* m = m_BoundsBuffer->Map();
-    if (m) {
-        memcpy(m, bounds.data(), bounds.size() * sizeof(CullObjectBounds));
-        m_BoundsBuffer->Unmap();
-    }
-
-    // 清零 draw count
-    u32 zero[4] = {0,0,0,0};
-    void* dc = m_DrawCountBuf->Map();
-    if (dc) { memcpy(dc, zero, sizeof(zero)); m_DrawCountBuf->Unmap(); }
+void GPUCulling::SetSceneBuffer(rhi::IRHIDevice* device, rhi::IRHIBuffer* gpuSceneSSBO) {
+    if (!m_Initialized || !gpuSceneSSBO) return;
+    // 绑定 GPUScene SSBO 到 binding 0
+    device->UpdateDescriptorSet(m_DescSet, 0, rhi::DescriptorType::StorageBuffer, gpuSceneSSBO);
 }
 
 void GPUCulling::Dispatch(rhi::IRHICommandList* cmd,

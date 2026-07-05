@@ -7,6 +7,7 @@
 #include "RenderGraph.h"
 #include "Asset/BindlessTextureManager.h"
 #include "Pipeline/GPUCulling.h"
+#include "Pipeline/GPUScene.h"
 #include "AntiAliasing/AntiAliasing.h"
 
 namespace he::render { class GI_IBL; }
@@ -148,6 +149,7 @@ private:
 
     // GPU Culling
     GPUCulling m_GPUCulling;
+    GPUScene   m_GPUScene;
     std::vector<u32> m_GPUVisibleIndices;
     u32 m_LastDrawCount = 0;
     u32 m_LastTriCount  = 0;

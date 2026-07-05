@@ -118,6 +118,7 @@ private:
 
     // GPU Culling
     GPUCulling m_GPUCulling;
+    GPUScene   m_GPUScene;
     std::vector<u32> m_GPUVisibleIndices;
 
 

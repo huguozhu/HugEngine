@@ -271,6 +271,7 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
 
     // --- GPU Culling ---
     m_GPUCulling.Initialize(device);
+    m_GPUScene.Initialize(device);
 
     // --- SceneRenderer ---
     m_SceneRenderer = std::make_unique<SceneRenderer>();
@@ -303,6 +304,7 @@ void ForwardPipeline::Shutdown() {
     }
 
     m_GPUCulling.Shutdown(m_Device);
+    m_GPUScene.Shutdown();
     if (m_AntiAliasing) { m_AntiAliasing->Shutdown(); m_AntiAliasing.reset(); }
 
     m_Device = nullptr;
@@ -730,24 +732,13 @@ void ForwardPipeline::RenderScene(
     auto allDrawItems = m_SceneRenderer->Prepare(world, sceneGraph, camera,
                                                   m_ObjectBuffers[m_CurrentFrameSlot].get());
 
-    // 3) 上传当前帧 bounds + 调度 GPU culling（结果下帧读回）
+    // 3) GPU 剔除：绑定 GPUScene SSBO → Dispatch Compute → 恢复 Graphics PSO
     if (m_GPUCulling.enabled) {
-        std::vector<CullObjectBounds> allBounds;
-        world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent& mc) {
-            if (mc.GetIndexCount() == 0) return;
-            CullObjectBounds cb;
-            const auto& bb = mc.GetBounds();
-            cb.minPoint    = float4(bb.min, 0);
-            cb.maxPoint    = float4(bb.max, 0);
-            cb.objectIndex = static_cast<u32>(allBounds.size());
-            allBounds.push_back(cb);
-        });
-        if (!allBounds.empty()) {
-            m_GPUCulling.UploadBounds(m_Device, allBounds);
-            m_GPUCulling.Dispatch(cmd, viewProj, (u32)allBounds.size());
-            // Dispatch 切换到了 Compute PSO，恢复 Graphics PSO
-            cmd->SetPipeline(m_PBR_PSO.get());
-        }
+        m_GPUScene.Collect(world, sceneGraph);
+        m_GPUScene.Upload(m_Device);
+        m_GPUCulling.SetSceneBuffer(m_Device, m_GPUScene.GetObjectBuffer());
+        m_GPUCulling.Dispatch(cmd, viewProj, m_GPUScene.GetObjectCount());
+        cmd->SetPipeline(m_PBR_PSO.get());
     }
 
     // GPU 剔除后过滤：构建可见 draw 列表

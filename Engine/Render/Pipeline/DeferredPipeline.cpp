@@ -96,6 +96,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     m_Skybox  = std::make_unique<SkyboxPass>(); m_Skybox->Initialize(device, m_Width, m_Height);
     m_SceneRenderer = std::make_unique<SceneRenderer>();
     m_GPUCulling.Initialize(device);
+    m_GPUScene.Initialize(device);
 
     // AA_TAA
     m_AntiAliasing = std::make_unique<AA_TAA>();
@@ -245,6 +246,7 @@ void DeferredPipeline::Shutdown() {
     for (auto& b : m_ShadowBuffers) b.reset();
     for (auto& b : m_ShadowObjBuffers) b.reset();
     m_GPUCulling.Shutdown(m_Device);
+    m_GPUScene.Shutdown();
     m_Device = nullptr; m_Ready = false;
     HE_CORE_INFO("DeferredPipeline shutdown");
 }
@@ -342,23 +344,14 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 filteredItems = std::move(drawItems);
             }
 
-            // 上传 GPU culling bounds + 调度 compute（结果下帧读回）
+            // GPU 剔除：GPUScene → Compute → Dispatch
             if (m_GPUCulling.enabled) {
-                std::vector<CullObjectBounds> allBounds;
-                world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent& mc) {
-                    if (mc.GetIndexCount() == 0) return;
-                    CullObjectBounds cb;
-                    const auto& bb = mc.GetBounds();
-                    cb.minPoint = float4(bb.min, 0); cb.maxPoint = float4(bb.max, 0);
-                    cb.objectIndex = (u32)allBounds.size(); allBounds.push_back(cb);
-                });
-                if (!allBounds.empty()) {
-                    m_GPUCulling.UploadBounds(m_Device, allBounds);
-                    m_GPUCulling.Dispatch(c, camera.GetViewProjMatrix(), (u32)allBounds.size());
-                    // Dispatch 切换到了 Compute PSO，需要恢复 Graphics PSO
-                    c->SetPipeline(m_GBufferPSO.get());
-                    c->BindDescriptorSet(0, m_GBufferSet);
-                }
+                m_GPUScene.Collect(world, sg);
+                m_GPUScene.Upload(m_Device);
+                m_GPUCulling.SetSceneBuffer(m_Device, m_GPUScene.GetObjectBuffer());
+                m_GPUCulling.Dispatch(c, camera.GetViewProjMatrix(), m_GPUScene.GetObjectCount());
+                c->SetPipeline(m_GBufferPSO.get());
+                c->BindDescriptorSet(0, m_GBufferSet);
             }
 
             float4x4 jitteredVP = camera.GetViewProjMatrix();

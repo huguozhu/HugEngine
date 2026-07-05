@@ -38,11 +38,10 @@ public:
     /// 清理 GPU 资源
     void Shutdown(rhi::IRHIDevice* device);
 
-    /// 上传物体 AABB 到 GPU
-    void UploadBounds(rhi::IRHIDevice* device,
-                      const std::vector<CullObjectBounds>& bounds);
+    /// 设置 GPUScene SSBO（替代 UploadBounds）并更新 descriptor
+    void SetSceneBuffer(rhi::IRHIDevice* device, rhi::IRHIBuffer* gpuSceneSSBO);
 
-    /// 调度 Compute Shader（在 command list 中）
+    /// 调度 Compute Shader
     void Dispatch(rhi::IRHICommandList* cmd, const float4x4& viewProj, u32 objectCount);
 
     /// 从 GPU 读回可见物体索引列表（CPU 同步）
