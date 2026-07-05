@@ -90,6 +90,9 @@ void ViewportPanel::RenderGizmoOverlay() {
             ? GizmoSpace::World : GizmoSpace::Local;
     }
 
+    // Ctrl 键临时禁用吸附（按住 Ctrl 时自由变换）
+    m_Gizmo.snapEnabled = !ImGui::GetIO().KeyCtrl;
+
     // 渲染 gizmo（记录是否 hover，点击选中时跳过）
     float4x4 vp = m_CamCtrl.GetCamera().GetViewProjMatrix();
     float3 pos = tf->position;

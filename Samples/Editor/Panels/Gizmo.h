@@ -33,6 +33,12 @@ public:
     /// 获取当前拖拽状态
     bool IsDragging() const { return m_Dragging; }
 
+    /// 吸附参数（默认启用，Ctrl 禁用）
+    bool  snapEnabled  = true;
+    float snapGridSize = 1.0f;    // 平移吸附网格
+    float snapAngle    = 15.0f;   // 旋转吸附角度（度）
+    float snapScale    = 0.1f;    // 缩放吸附步长
+
 private:
     // 3D → 2D 投影
     float2 WorldToScreen(const float3& worldPos, const float4x4& vp,

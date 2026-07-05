@@ -104,6 +104,11 @@ bool Gizmo::Render(const render::CameraData& camera, float3& position, quat& rot
             if (len > 0.001f) {
                 float worldDelta = glm::dot(mouseDelta, screenAxis / len) * kAxisLength / std::max(len, 1.0f);
                 position = m_DragStartPos + moveAxis * worldDelta;
+                // Snap
+                if (snapEnabled) {
+                    for (int a = 0; a < 3; ++a)
+                        position[a] = std::round(position[a] / snapGridSize) * snapGridSize;
+                }
             }
             if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) { m_Dragging = false; m_ActiveAxis = -1; }
         }
@@ -145,6 +150,11 @@ bool Gizmo::Render(const render::CameraData& camera, float3& position, quat& rot
         } else {
             float newAngle = std::atan2(mPos.y - center.y, mPos.x - center.x);
             float deltaAngle = newAngle - m_DragStartAngle;
+            if (snapEnabled) {
+                float deg = glm::degrees(deltaAngle);
+                deg = std::round(deg / snapAngle) * snapAngle;
+                deltaAngle = glm::radians(deg);
+            }
             rotation = glm::angleAxis(deltaAngle, rotAx) * m_DragStartRot;
             dl->AddCircle(ImVec2(center.x, center.y), ringR, kColorSel, 48, 3.5f);
             if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) { m_Dragging = false; }
@@ -193,13 +203,13 @@ bool Gizmo::Render(const render::CameraData& camera, float3& position, quat& rot
             }
         } else {
             float2 mouseDelta = mPos - m_DragStartMouse;
-            float delta = (mouseDelta.x + mouseDelta.y) * 0.01f;  // 屏幕像素→缩放因子
+            float delta = (mouseDelta.x + mouseDelta.y) * 0.01f;
             if (m_ActiveAxis >= 0) {
-                // 单轴缩放
                 scale[m_ActiveAxis] = std::max(0.01f, m_DragStartScale[m_ActiveAxis] + delta);
+                if (snapEnabled) scale[m_ActiveAxis] = std::round(scale[m_ActiveAxis] / snapScale) * snapScale;
             } else {
-                // 等比缩放（-1）
                 float u = std::max(0.01f, m_DragStartScale.x + delta);
+                if (snapEnabled) u = std::round(u / snapScale) * snapScale;
                 scale = float3(u);
             }
             if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) { m_Dragging = false; m_ActiveAxis = -1; }
