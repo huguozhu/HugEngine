@@ -16,6 +16,7 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "Pipeline/ClusteredShading.h"
 #include "Pipeline/GPUCulling.h"
 #include "Pipeline/GPUScene.h"
+#include "Pipeline/MeshBatcher.h"
 #include "PostProcess/ToneMapPass.h"
 #include "PostProcess/SkyboxPass.h"
 #include "Scene/World.h"
@@ -119,6 +120,8 @@ private:
     // GPU Culling
     GPUCulling m_GPUCulling;
     GPUScene   m_GPUScene;
+    MeshBatcher m_MeshBatcher;
+    bool       m_BatchBuilt = false;
     std::vector<u32> m_GPUVisibleIndices;
 
 

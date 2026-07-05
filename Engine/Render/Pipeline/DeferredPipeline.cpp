@@ -305,6 +305,10 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     if (firstFrame) { m_PrevViewProj = m_CurrViewProj; firstFrame = false; }
     if (m_AntiAliasing) m_AntiAliasing->OnBeginFrame();
 
+    // GPUScene 收集 + 上传（增量，仅 dirty 对象）
+    m_GPUScene.Collect(world, sg);
+    m_GPUScene.Upload(m_Device);
+
     // GPU 剔除读回（上帧结果）+ 过滤可见物体
     bool useGPUVisible = false;
     if (m_GPUCulling.enabled) {
