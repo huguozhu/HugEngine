@@ -40,6 +40,7 @@ static std::vector<std::string> s_DroppedFiles;
 #include "Panels/ContentBrowserPanel.h"
 #include "Panels/ProjectSettingsPanel.h"
 #include "Panels/StatsPanel.h"
+#include "Panels/LevelLoader.h"
 
 EditorApp::EditorApp()  = default;
 EditorApp::~EditorApp() = default;
@@ -99,6 +100,7 @@ void EditorApp::InitScene() {
     // ����Ĭ�ϳ��������� + �����
     m_World      = std::make_unique<World>();
     m_SceneGraph = std::make_unique<SceneGraph>(*m_World);
+    m_World->SetSceneGraph(m_SceneGraph.get());
 
     // ����
     Entity ground = m_World->CreateEntity("Ground");
@@ -166,6 +168,9 @@ void EditorApp::MainLoop() {
         m_LastTime = now;
 
         m_Engine->GetWindow()->PollEvents();
+
+        // 同步 LevelComponent（加载新的，无需每帧）
+        he::editor::LevelLoader::SyncAll(*m_World);
 
         // 处理拖放导入队列
         if (!s_DroppedFiles.empty()) {

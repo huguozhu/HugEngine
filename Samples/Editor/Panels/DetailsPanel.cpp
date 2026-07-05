@@ -12,6 +12,7 @@
 #include "Scene/SkyboxComponent.h"
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
+#include "Scene/LevelComponent.h"
 #include "imgui.h"
 #include <glm/gtx/euler_angles.hpp>
 
@@ -70,13 +71,14 @@ void DetailsPanel::Render() {
 
     if (ImGui::BeginPopup("AddComponentPopup")) {
         static const char* items[] = {
-            "Mesh", "Cube (Debug)", "Sphere (Debug)",
+            "Mesh", "Cube (Debug)", "Sphere (Debug)", "Level",
             "Point Light", "Spot Light", "Directional Light",
             "Camera", "Skybox"
         };
         for (int i = 0; i < IM_ARRAYSIZE(items); ++i) {
             if (ImGui::Selectable(items[i])) {
                 if (strcmp(items[i], "Mesh") == 0) world->AddComponent<MeshComponent>(entity);
+                else if (strcmp(items[i], "Level") == 0) world->AddComponent<LevelComponent>(entity);
                 else if (strcmp(items[i], "Cube (Debug)") == 0) world->AddComponent<CubeComponent>(entity);
                 else if (strcmp(items[i], "Sphere (Debug)") == 0) world->AddComponent<SphereComponent>(entity);
                 else if (strcmp(items[i], "Point Light") == 0) { auto* l = world->AddComponent<PointLight>(entity); l->color=float3(1,0.8f,0.6f); l->intensity=20; }

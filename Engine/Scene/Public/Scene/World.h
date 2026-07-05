@@ -21,10 +21,15 @@
 
 namespace he {
 
+class SceneGraph; // fwd
+
 class World {
 public:
     World() = default;
     ~World();
+
+    void SetSceneGraph(SceneGraph* sg) { m_SceneGraph = sg; }
+    SceneGraph* GetSceneGraph() const { return m_SceneGraph; }
 
     // --- 实体管理 ---
     Entity CreateEntity(StringView name = "Entity");
@@ -82,6 +87,7 @@ private:
 
     EntityID m_NextID = 1;
     TArray<Entity> m_Entities;
+    SceneGraph* m_SceneGraph = nullptr;
     std::unordered_map<std::type_index, std::vector<ComponentEntry>> m_Store;
 };
 
@@ -101,6 +107,8 @@ T* World::AddComponent(Entity entity, Args&&... args) {
     auto comp = std::make_unique<T>(std::forward<Args>(args)...);
     T* ptr = comp.get();
 
+    ptr->m_Entity = entity;
+    ptr->m_World  = this;
     ptr->m_State = ComponentState::Created;
     ptr->OnCreate();
     ptr->m_State = ComponentState::Active;
