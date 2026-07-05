@@ -50,6 +50,7 @@ target_sources(HugEngineRender PRIVATE
     PostProcess/ToneMapPass.cpp
     PostProcess/SkyboxPass.h
     PostProcess/SkyboxPass.cpp
+    PostProcess/SSAO.cpp
     # AntiAliasing
     AntiAliasing/AntiAliasing.h
     AntiAliasing/AA_None.h
