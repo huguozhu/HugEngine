@@ -8,6 +8,7 @@ struct FSInput {
     [[vk::location(0)]] float3 worldPos;
     [[vk::location(1)]] float3 worldNormal;
     [[vk::location(2)]] float2 uv;
+    [[vk::location(3)]] nointerpolation uint objectIndex;  // 从 VS 传入
 };
 
 struct GPUObjectData {
@@ -93,7 +94,7 @@ float3 ACESFilm(float3 x) {
 }
 
 float4 fragmentMain(FSInput input) : SV_Target0 {
-    GPUObjectData obj = u_Objects[objectIndex];
+    GPUObjectData obj = u_Objects[input.objectIndex];
 
     uint texBase = obj.materialID;
     float4 baseColorSample = u_Textures[texBase + 0].Sample(u_Samplers[0], input.uv);

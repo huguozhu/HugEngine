@@ -86,11 +86,12 @@ struct alignas(16) PushConstantData {
     float4   cameraPosition;        // [64..80]
     u32      lightCount;            // [80]
     u32      objectIndex;           // [84]
-    float    iblIntensity;          // [88] IBL 强度倍率（0=关闭）
-    u32      _pad;                  // [92..96]
+    u32      useInstanceID;         // [88] 1=ExecuteIndirect 从 SV_InstanceID 读 objectIndex
+    float    iblIntensity;          // [92]
+    u32      _pad;                  // [96]
 };
 
-static_assert(sizeof(PushConstantData) == 96,
+static_assert(sizeof(PushConstantData) == 112,
     "PushConstantData must be 96 bytes");
 
 // CSM 级联选择用的 cameraForward 移至 GPUShadowData.shadowParams.w

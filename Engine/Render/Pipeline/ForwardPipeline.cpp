@@ -809,15 +809,31 @@ void ForwardPipeline::RenderScene(
         }
         drawCount = totalDraws;
     } else {
-        for (auto& di : filteredItems) {
-            PushConstantData pc = framePC;
-            pc.objectIndex = di.objectIndex;
+        // ExecuteIndirect 路径（仅当 Batch 已构建且 GPU Culling 有结果）
+        bool useIndirect = m_BatchBuilt && m_GPUCulling.enabled
+                        && m_MeshBatcher.GetTotalIndexCount() > 0
+                        && m_GPUCulling.GetLastVisibleCount() > 0;
+        if (useIndirect) {
+            cmd->SetVertexBuffer(m_MeshBatcher.GetVertexBuffer(), 0);
+            cmd->SetIndexBuffer(m_MeshBatcher.GetIndexBuffer(), 0);
+            framePC.useInstanceID = 1;  // SV_InstanceID 模式
             cmd->BindDescriptorSet(0, m_DescSets[m_CurrentFrameSlot]);
-            cmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
-            cmd->SetVertexBuffer(di.mesh->GetVertexBuffer().get(), 0);
-            cmd->SetIndexBuffer(di.mesh->GetIndexBuffer().get());
-            cmd->DrawIndexed(di.mesh->GetIndexCount());
-            drawCount++;
+            cmd->SetPushConstants(0, sizeof(PushConstantData), &framePC);
+            cmd->DrawIndexedIndirect(m_GPUCulling.GetIndirectBuffer(), 0,
+                m_GPUCulling.GetLastVisibleCount(), sizeof(IndirectDrawCommand));
+            drawCount = m_GPUCulling.GetLastVisibleCount();
+        } else {
+            framePC.useInstanceID = 0;  // push constant 模式
+            for (auto& di : filteredItems) {
+                PushConstantData pc = framePC;
+                pc.objectIndex = di.objectIndex;
+                cmd->BindDescriptorSet(0, m_DescSets[m_CurrentFrameSlot]);
+                cmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
+                cmd->SetVertexBuffer(di.mesh->GetVertexBuffer().get(), 0);
+                cmd->SetIndexBuffer(di.mesh->GetIndexBuffer().get());
+                cmd->DrawIndexed(di.mesh->GetIndexCount());
+                drawCount++;
+            }
         }
     }
 

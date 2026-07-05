@@ -29,8 +29,10 @@ struct GPUObjectData {
     float4x4 viewProjMatrix;
     float4   cameraPosition;
     uint     lightCount;
-    uint     objectIndex;
-    uint     _pad[2];
+    uint     objectIndex;     // 传统模式：push constant 传入
+    uint     useInstanceID;   // 1=从 SV_InstanceID 读 objectIndex
+    float    iblIntensity;    // IBL 强度（VS 不使用，仅占位对齐 FS）
+    uint     _pad;
 };
 
 struct VSOutput {
@@ -38,16 +40,19 @@ struct VSOutput {
     [[vk::location(0)]] float3 worldPos;
     [[vk::location(1)]] float3 worldNormal;
     [[vk::location(2)]] float2 uv;
+    [[vk::location(3)]] nointerpolation uint objectIndex;  // 传递到 FS
 };
 
-VSOutput vertexMain() {
+VSOutput vertexMain(uint instanceID : SV_InstanceID) {
     VSOutput output;
-    GPUObjectData obj = u_Objects[objectIndex];
+    uint objIdx = (useInstanceID != 0u) ? instanceID : objectIndex;
+    GPUObjectData obj = u_Objects[objIdx];
 
     float4 worldPos = mul(obj.worldMatrix, float4(inPosition, 1.0));
     output.worldPos = worldPos.xyz;
     output.worldNormal = normalize(mul((float3x3)obj.worldMatrix, inNormal));
     output.uv = inUV;
+    output.objectIndex = objIdx;  // 传递 objectIndex 到 FS
     output.position = mul(viewProjMatrix, worldPos);
     return output;
 }
