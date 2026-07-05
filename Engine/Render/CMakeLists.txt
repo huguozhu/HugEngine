@@ -55,6 +55,8 @@ target_sources(HugEngineRender PRIVATE
     AntiAliasing/AA_None.h
     AntiAliasing/AA_TAA.h
     AntiAliasing/AA_TAA.cpp
+    AntiAliasing/AA_FXAA.h
+    AntiAliasing/AA_FXAA.cpp
 )
 
 target_include_directories(HugEngineRender

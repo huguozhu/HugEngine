@@ -29,6 +29,7 @@ if(SLANGC)
     # 显式列出所有需编译的 shader（file(GLOB) 无法跟踪新增文件，故用显式列表）
     set(VERT_SLANG
         "${SHADER_DIR}/DeferredLighting.vert.slang"
+        "${SHADER_DIR}/FXAA.vert.slang"
         "${SHADER_DIR}/GBuffer.vert.slang"
         "${SHADER_DIR}/IBL_BRDF_LUT.vert.slang"
         "${SHADER_DIR}/IBL_Irradiance.vert.slang"
@@ -54,6 +55,7 @@ if(SLANGC)
         "${SHADER_DIR}/TAA_Resolve.frag.slang"
         "${SHADER_DIR}/ToneMap.frag.slang"
         "${SHADER_DIR}/Triangle.frag.slang"
+        "${SHADER_DIR}/FXAA.frag.slang"
     )
     set(COMP_SLANG
         "${SHADER_DIR}/GPUCull.comp.slang"
