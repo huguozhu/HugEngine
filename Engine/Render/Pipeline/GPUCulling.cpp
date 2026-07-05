@@ -62,11 +62,11 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
         device->UpdateDescriptorSet(m_DescSet, 2, rhi::DescriptorType::StorageBuffer, m_DrawCountBuf.get());
     }
 
-    // Compute PSO
+    // Compute PSO（Hi-Z: 6 planes + float4x4 VP + float2 screen + 2 uint）
     rhi::PushConstantRange pcRange;
-    pcRange.stageMask = 32;  // Compute
+    pcRange.stageMask = 32;
     pcRange.offset = 0;
-    pcRange.size   = sizeof(float4) * 6 + sizeof(u32) * 4;  // 6 planes + objectCount + 3 pad
+    pcRange.size   = sizeof(float4) * 6 + sizeof(float4x4) + sizeof(float2) + sizeof(u32) * 4;
 
     rhi::PipelineStateDesc psoDesc;
     psoDesc.bindPoint = rhi::PipelineBindPoint::Compute;
@@ -85,7 +85,6 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
 
 void GPUCulling::Shutdown(rhi::IRHIDevice* device) {
     if (!m_Initialized) return;
-    m_BoundsBuffer.reset();
     m_VisibleIndicesBuf.reset();
     m_DrawCountBuf.reset();
     m_PSO.reset();
@@ -104,27 +103,29 @@ void GPUCulling::SetSceneBuffer(rhi::IRHIDevice* device, rhi::IRHIBuffer* gpuSce
 }
 
 void GPUCulling::Dispatch(rhi::IRHICommandList* cmd,
-                           const float4x4& viewProj, u32 objectCount) {
+                           const float4x4& viewProj, u32 objectCount,
+                           u32 screenW, u32 screenH) {
     if (!m_Initialized || !enabled || objectCount == 0) return;
 
-    // 提取视锥平面
     float4 planes[6];
     ExtractFrustumPlanes(viewProj, planes);
 
-    // Push constant 数据
-    struct { float4 planes[6]; u32 count; u32 pad[3]; } pc;
-    for (int i = 0; i < 6; ++i) pc.planes[i] = planes[i];
+    // Push constants: 匹配 GPUCull.comp.slang 布局
+    struct { float4 planes[6]; float4x4 vp; float2 sSize; u32 mips; u32 count; } pc;
+    for (int i=0;i<6;++i) pc.planes[i]=planes[i];
+    pc.vp    = viewProj;
+    pc.sSize = float2((float)screenW, (float)screenH);
+    pc.mips  = 0;  // Hi-Z 暂未启用
     pc.count = objectCount;
-    pc.pad[0] = pc.pad[1] = pc.pad[2] = 0;
 
     cmd->SetPipeline(m_PSO.get());
     cmd->BindDescriptorSet(0, m_DescSet);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
 
-    u32 groups = (objectCount + 63) / 64;  // 64 threads per group
+    u32 groups = (objectCount + 63) / 64;
     cmd->Dispatch(groups, 1, 1);
 
-    m_LastVisibleCount = 0;  // 将由 Readback 填充
+    m_LastVisibleCount = 0;
 }
 
 void GPUCulling::Readback(rhi::IRHIDevice* device,

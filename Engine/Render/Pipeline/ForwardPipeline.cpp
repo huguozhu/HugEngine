@@ -737,7 +737,8 @@ void ForwardPipeline::RenderScene(
         m_GPUScene.Collect(world, sceneGraph);
         m_GPUScene.Upload(m_Device);
         m_GPUCulling.SetSceneBuffer(m_Device, m_GPUScene.GetObjectBuffer());
-        m_GPUCulling.Dispatch(cmd, viewProj, m_GPUScene.GetObjectCount());
+        m_GPUCulling.Dispatch(cmd, viewProj, m_GPUScene.GetObjectCount(),
+                              m_HDRWidth, m_HDRHeight);
         cmd->SetPipeline(m_PBR_PSO.get());
     }
 

@@ -38,11 +38,12 @@ public:
     /// 清理 GPU 资源
     void Shutdown(rhi::IRHIDevice* device);
 
-    /// 设置 GPUScene SSBO（替代 UploadBounds）并更新 descriptor
+    /// 设置 GPUScene SSBO + 深度缓冲输入
     void SetSceneBuffer(rhi::IRHIDevice* device, rhi::IRHIBuffer* gpuSceneSSBO);
+    void SetDepthTexture(rhi::IRHIDevice* device, rhi::IRHITexture* depthTex);
 
-    /// 调度 Compute Shader
-    void Dispatch(rhi::IRHICommandList* cmd, const float4x4& viewProj, u32 objectCount);
+    /// 调度 Compute Shader（含 Hi-Z 金字塔构建）
+    void Dispatch(rhi::IRHICommandList* cmd, const float4x4& viewProj, u32 objectCount, u32 screenW, u32 screenH);
 
     /// 从 GPU 读回可见物体索引列表（CPU 同步）
     void Readback(rhi::IRHIDevice* device, std::vector<u32>& outVisibleIndices);

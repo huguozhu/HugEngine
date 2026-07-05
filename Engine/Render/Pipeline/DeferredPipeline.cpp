@@ -352,7 +352,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 m_GPUScene.Collect(world, sg);
                 m_GPUScene.Upload(m_Device);
                 m_GPUCulling.SetSceneBuffer(m_Device, m_GPUScene.GetObjectBuffer());
-                m_GPUCulling.Dispatch(c, camera.GetViewProjMatrix(), m_GPUScene.GetObjectCount());
+                m_GPUCulling.Dispatch(c, camera.GetViewProjMatrix(), m_GPUScene.GetObjectCount(), w, h);
                 c->SetPipeline(m_GBufferPSO.get());
                 c->BindDescriptorSet(0, m_GBufferSet);
             }
