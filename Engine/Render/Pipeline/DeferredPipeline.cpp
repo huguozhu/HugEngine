@@ -99,6 +99,8 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     m_GPUScene.Initialize(device);
     m_SSGI.Initialize(device, m_Width, m_Height);
     m_SSR.Initialize(device, m_Width, m_Height);
+    m_DenoiseSSGI.Initialize(device, m_Width, m_Height);
+    m_DenoiseSSR.Initialize(device, m_Width, m_Height);
     m_SSAO.Initialize(device, m_Width, m_Height);
     m_SSAO.enabled = false;  // 默认关闭
 
@@ -256,6 +258,8 @@ void DeferredPipeline::Shutdown() {
     m_GPUScene.Shutdown();
     m_SSGI.Shutdown();
     m_SSR.Shutdown();
+    m_DenoiseSSGI.Shutdown();
+    m_DenoiseSSR.Shutdown();
     m_SSAO.Shutdown();
     m_Device = nullptr; m_Ready = false;
     HE_CORE_INFO("DeferredPipeline shutdown");
@@ -288,6 +292,8 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
     m_SSAO.OnResize(w, h);
     m_SSGI.OnResize(w, h);
     m_SSR.OnResize(w, h);
+    m_DenoiseSSGI.OnResize(w, h);
+    m_DenoiseSSR.OnResize(w, h);
 }
 
 void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,

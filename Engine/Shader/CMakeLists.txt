@@ -58,6 +58,7 @@ if(SLANGC)
         "${SHADER_DIR}/SSAO_Blur.frag.slang"
         "${SHADER_DIR}/SSGI.frag.slang"
         "${SHADER_DIR}/SSR.frag.slang"
+        "${SHADER_DIR}/Denoise.frag.slang"
         "${SHADER_DIR}/TAA_Resolve.frag.slang"
         "${SHADER_DIR}/ToneMap.frag.slang"
         "${SHADER_DIR}/Triangle.frag.slang"
