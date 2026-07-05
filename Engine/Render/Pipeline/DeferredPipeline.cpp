@@ -99,6 +99,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     m_GPUScene.Initialize(device);
     m_SSGI.Initialize(device, m_Width, m_Height);
     m_SSR.Initialize(device, m_Width, m_Height);
+    m_DDGI.Initialize(device, m_Width, m_Height);
     m_DenoiseSSGI.Initialize(device, m_Width, m_Height);
     m_DenoiseSSR.Initialize(device, m_Width, m_Height);
     m_SSAO.Initialize(device, m_Width, m_Height);
@@ -199,6 +200,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         {19, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // SSGI
         {20, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // SSAO
         {21, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // SSR
+        {22, rhi::DescriptorType::StorageBuffer,         1, 16},  // DDGI Probes
     };
     m_LightingLayout = device->CreateDescriptorSetLayout(ll);
     m_LightingSet    = device->AllocateDescriptorSet(m_LightingLayout);
@@ -218,6 +220,8 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         auto gb = device->CreateBuffer(gd);
         device->UpdateDescriptorSet(m_LightingSet, 7, rhi::DescriptorType::StorageBuffer, gb.get());
         device->UpdateDescriptorSet(m_LightingSet, 8, rhi::DescriptorType::StorageBuffer, gb.get());
+        // DDGI 探针 SSBO 占位（binding 22）
+        device->UpdateDescriptorSet(m_LightingSet, 22, rhi::DescriptorType::StorageBuffer, gb.get());
     }
 
     rhi::PushConstantRange lpc; lpc.stageMask = 1|16; lpc.size = 128;  // 含 cluster 参数
@@ -258,6 +262,7 @@ void DeferredPipeline::Shutdown() {
     m_GPUScene.Shutdown();
     m_SSGI.Shutdown();
     m_SSR.Shutdown();
+    m_DDGI.Shutdown();
     m_DenoiseSSGI.Shutdown();
     m_DenoiseSSR.Shutdown();
     m_SSAO.Shutdown();
@@ -292,6 +297,7 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
     m_SSAO.OnResize(w, h);
     m_SSGI.OnResize(w, h);
     m_SSR.OnResize(w, h);
+    m_DDGI.OnResize(w, h);
     m_DenoiseSSGI.OnResize(w, h);
     m_DenoiseSSR.OnResize(w, h);
 }
@@ -401,6 +407,26 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             c->EndOffscreenPass();
         });
 
+    // ============================================================
+    // DDGI Probe Update（Compute Shader：必须放在所有 offscreen pass 之前，
+    // 避免 compute pipeline 切换影响后续 render pass 状态）
+    // ============================================================
+    rg.AddPass("DDGI_Update",
+        {{gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbDepth, ResourceAccess::Read}},
+        {},
+        [&](rhi::IRHICommandList* c) {
+            if (m_DDGI.IsEnabled()) {
+                m_DDGI.SetGBufferInputs(m_GBufferDepth.get(), m_GBufferB.get(), m_GBufferA.get());
+                SubsystemContext dgiCtx;
+                dgiCtx.camera = &camera;
+                m_DDGI.Update(dgiCtx);
+                m_DDGI.Render(c);
+                // Compute dispatch 后恢复 graphics pipeline，
+                // 确保后续 pass 的 SetPipeline / BeginOffscreenPass 状态正确
+                c->SetPipeline(m_LightingPSO.get());
+            }
+        });
+
     // SSAO Pass
     auto ssaoOut = rg.ImportTexture("SSAO_Output", m_SSAO.GetAOTexture());
     rg.AddPass("SSAO", {}, {{ssaoOut, ResourceAccess::Write}},
@@ -473,7 +499,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             c->EndOffscreenPass();
         });
 
-    // Lighting Pass (全屏 PBR + 降噪后 SSGI/SSR 读取)
+    // Lighting Pass (全屏 PBR + 降噪后 SSGI/SSR/DDGI 读取)
     rg.AddPass("Lighting",
         {{gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbC, ResourceAccess::Read},
          {ssgiDenoised, ResourceAccess::Read},
@@ -498,6 +524,10 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 m_SSAO.GetAOTexture(), m_SSAO.GetAOSampler());
             m_Device->UpdateDescriptorSet(m_LightingSet, 21, rhi::DescriptorType::CombinedImageSampler,
                 m_DenoiseSSR.GetOutput(), m_SSR.GetOutputSampler());
+
+            // DDGI 探针数据（binding 22：StorageBuffer，Lighting 中三线性插值采样）
+            m_Device->UpdateDescriptorSet(m_LightingSet, 22, rhi::DescriptorType::StorageBuffer,
+                m_DDGI.GetProbeBuffer());
 
             // Clustered Shading: 构建 cluster AABB + 光源剔除（仅在启用时）
             PushConstantData fpc{}; CollectLights(fpc, world, sg, camera);

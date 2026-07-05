@@ -20,6 +20,7 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "GI/GI_SSGI.h"
 #include "PostProcess/SSAO.h"
 #include "GI/GI_SSR.h"
+#include "GI/GI_DDGI.h"
 #include "PostProcess/Denoiser.h"
 #include "PostProcess/ToneMapPass.h"
 #include "PostProcess/SkyboxPass.h"
@@ -58,6 +59,9 @@ public:
     IShadowSystem*       GetShadowSystem() override { return m_ShadowSystem.get(); }
     IGlobalIllumination* GetGI()           override { return m_GI.get(); }
     ToneMapPass*         GetToneMap()            { return m_ToneMap.get(); }
+    GI_DDGI*             GetDDGI()               { return &m_DDGI; }
+    GI_SSGI*             GetSSGI()               { return &m_SSGI; }
+    GI_SSR*              GetSSR()                { return &m_SSR; }
     ClusteredShading&    GetClusteredShading()   { return m_ClusteredShading; }
     GPUCulling&          GetGPUCulling()         { return m_GPUCulling; }
     void SetSwapChain(rhi::IRHISwapChain* sc)  { m_SwapChain = sc; }
@@ -127,9 +131,10 @@ private:
     MeshBatcher m_MeshBatcher;
     bool       m_BatchBuilt = false;
 
-    // SSGI + SSAO
+    // SSGI + SSR + DDGI + SSAO
     GI_SSGI m_SSGI;
     GI_SSR  m_SSR;
+    GI_DDGI m_DDGI;
     Denoiser m_DenoiseSSGI;
     Denoiser m_DenoiseSSR;
     SSAO    m_SSAO;

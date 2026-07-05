@@ -49,6 +49,7 @@ struct GPUShadowData {
 [[vk::binding(19, 0)]] Texture2D<float4> u_SSGI;  // SSGI 间接光照
 [[vk::binding(20, 0)]] Texture2D<float4> u_SSAO;  // SSAO 环境光遮蔽
 [[vk::binding(21, 0)]] Texture2D<float4> u_SSR;   // SSR 屏幕空间反射
+[[vk::binding(22, 0)]] StructuredBuffer<float4> u_DDGIProbes;  // DDGI 探针数据（每探针 16 float4）
 
 // Clustered Shading: LightGrid + LightIndexList（每 cluster 只迭代影响它的光源）
 struct LightGridCell { uint offset; uint count; };
@@ -72,6 +73,82 @@ struct LightGridCell { uint offset; uint count; };
 
 static const float kPrefilterMips = 5.0;
 static const uint  kClusterSlices = 12;  // 与 C++ kDepthSlices 保持一致
+
+// ---- DDGI 探针网格参数（TODO: 改为 Uniform Buffer，当前与 GI_DDGI 默认值保持同步） ----
+static const uint   kDDGI_GridX    = 8;
+static const uint   kDDGI_GridY    = 4;
+static const uint   kDDGI_GridZ    = 8;
+static const float  kDDGI_CellSize = 3.0;
+static const float3 kDDGI_Origin   = float3(-10.0, -2.0, -10.0);
+static const uint   kDDGI_Stride   = 16;  // 每探针 16 float4
+
+// SH 基函数常量
+static const float kDDGI_SH_Y00 = 0.28209479177387814;       // l=0: sqrt(1/(4π))
+static const float kDDGI_SH_B1  = 0.4886025119029199;        // l=1: sqrt(3/(4π))
+
+// 在方向 dir 处评估 9 系数 SH 的辐照度（bands 0/1/2 完整版）
+float3 EvalDDGI_SH(float4 sh[9], float3 dir) {
+    float3 result = sh[0].rgb * kDDGI_SH_Y00;                // l=0, m=0
+    result += sh[1].rgb * dir.y * kDDGI_SH_B1;               // l=1, m=-1
+    result += sh[2].rgb * dir.z * kDDGI_SH_B1;               // l=1, m=0
+    result += sh[3].rgb * dir.x * kDDGI_SH_B1;               // l=1, m=1
+    // l=2, m=-2: sqrt(15/(4π)) * x*y
+    result += sh[4].rgb * 1.0925484305920792 * dir.x * dir.y;
+    // l=2, m=-1: sqrt(15/(4π)) * y*z
+    result += sh[5].rgb * 1.0925484305920792 * dir.y * dir.z;
+    // l=2, m=0:  sqrt(5/(16π)) * (3z²-1)
+    result += sh[6].rgb * 0.31539156525252005 * (3.0 * dir.z * dir.z - 1.0);
+    // l=2, m=1:  sqrt(15/(4π)) * x*z
+    result += sh[7].rgb * 1.0925484305920792 * dir.x * dir.z;
+    // l=2, m=2:  sqrt(15/(16π)) * (x²-y²)
+    result += sh[8].rgb * 0.5462742152960396 * (dir.x * dir.x - dir.y * dir.y);
+    return max(result, 0.0);
+}
+
+// 三线性插值采样 DDGI 探针网格，返回间接漫反射辐照度
+float3 SampleDDGI(float3 worldPos, float3 normal) {
+    // 世界坐标 → 探针网格坐标
+    float3 gridCoord = (worldPos - kDDGI_Origin) / kDDGI_CellSize;
+    int3   baseCoord = int3(floor(gridCoord));
+    float3 frac      = frac(gridCoord);
+
+    // 钳制到网格边界内
+    baseCoord = clamp(baseCoord, int3(0, 0, 0),
+                      int3(kDDGI_GridX - 1, kDDGI_GridY - 1, kDDGI_GridZ - 1));
+
+    float3 result      = float3(0.0, 0.0, 0.0);
+    float  totalWeight = 0.0;
+
+    // 遍历包围世界坐标的 8 个最近探针
+    for (int dz = 0; dz <= 1; dz++) {
+        for (int dy = 0; dy <= 1; dy++) {
+            for (int dx = 0; dx <= 1; dx++) {
+                int3 coord = baseCoord + int3(dx, dy, dz);
+                coord = clamp(coord, int3(0, 0, 0),
+                              int3(kDDGI_GridX - 1, kDDGI_GridY - 1, kDDGI_GridZ - 1));
+
+                // 三线性插值权重
+                float weight = (1.0 - abs(float(dx) - frac.x))
+                             * (1.0 - abs(float(dy) - frac.y))
+                             * (1.0 - abs(float(dz) - frac.z));
+
+                // 读取探针 SH 系数（每探针 16 × float4，前 9 个是 SH）
+                uint   baseIdx = coord.z * kDDGI_GridX * kDDGI_GridY
+                               + coord.y * kDDGI_GridX + coord.x;
+                uint   bufBase = baseIdx * kDDGI_Stride;
+                float4 sh[9];
+                for (int i = 0; i < 9; i++) {
+                    sh[i] = u_DDGIProbes[bufBase + i];
+                }
+
+                result      += EvalDDGI_SH(sh, normal) * weight;
+                totalWeight += weight;
+            }
+        }
+    }
+
+    return result / max(totalWeight, 0.001);
+}
 
 float4 fragmentMain(VSOutput input) : SV_Target0 {
     float2 uv = input.uv;
@@ -227,9 +304,13 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
     float ssao = u_SSAO.Sample(u_GBufferSampler, uv).r;
     color *= ao * ssao;
 
-    // SSGI 间接漫反射
+    // SSGI 间接漫反射（屏幕空间）
     float4 ssgi = u_SSGI.Sample(u_GBufferSampler, uv);
     color += ssgi.rgb;
+
+    // DDGI 间接漫反射（探针网格，世界空间三线性插值 + SH 评估）
+    float3 ddgi = SampleDDGI(worldPos, N);
+    color += ddgi * 0.5;  // 强度缩放（与 SSGI 叠加，避免过度照亮）
 
     // SSR 间接镜面反射
     float4 ssr = u_SSR.Sample(u_GBufferSampler, uv);

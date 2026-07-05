@@ -638,15 +638,68 @@ int main() {
             if (ImGui::DragFloat("远裁剪面", &farP, 10.0f, 10.0f, 50000.0f, "%.0f"))
                 camCtrl.GetCamera().farPlane = farP;
 
-            // GI
+            // GI — IBL
             auto* gi = pipeline.GetGI();
             if (gi) {
-                ImGui::SeparatorText("GI");
+                ImGui::SeparatorText("GI — IBL");
                 auto settings = gi->GetSettings();
                 float intensity = settings.intensity;
-                if (ImGui::SliderFloat("IBL Intensity", &intensity, 0.0f, 3.0f, "%.2f")) {
+                if (ImGui::SliderFloat("IBL 强度", &intensity, 0.0f, 3.0f, "%.2f")) {
                     settings.intensity = intensity;
                     gi->SetSettings(settings);
+                }
+            }
+
+            // GI — SSGI（屏幕空间间接漫反射）
+            if (auto* ssgi = pipeline.GetSSGI()) {
+                ImGui::SeparatorText("GI — SSGI");
+                bool ssgiOn = ssgi->IsEnabled();
+                if (ImGui::Checkbox("启用 SSGI", &ssgiOn))
+                    ssgi->SetEnabled(ssgiOn);
+                if (ssgiOn) {
+                    ImGui::Indent(12.0f);
+                    ImGui::DragFloat("采样半径##ssgi", &ssgi->radius, 0.1f, 0.1f, 5.0f, "%.1f");
+                    ImGui::SliderInt("采样数##ssgi", &ssgi->sampleCount, 4, 64);
+                    auto ssgiSettings = ssgi->GetSettings();
+                    if (ImGui::SliderFloat("强度##ssgi", &ssgiSettings.intensity, 0.0f, 2.0f, "%.2f"))
+                        ssgi->SetSettings(ssgiSettings);
+                    ImGui::Unindent(12.0f);
+                }
+            }
+
+            // GI — DDGI（探针网格动态 GI）
+            if (auto* ddgi = pipeline.GetDDGI()) {
+                ImGui::SeparatorText("GI — DDGI");
+                bool ddgiOn = ddgi->IsEnabled();
+                if (ImGui::Checkbox("启用 DDGI", &ddgiOn))
+                    ddgi->SetEnabled(ddgiOn);
+                if (ddgiOn) {
+                    ImGui::Indent(12.0f);
+                    ImGui::SliderFloat("时间混合##ddgi", &ddgi->blendAlpha, 0.0f, 0.98f, "%.2f");
+                    ImGui::SliderFloat("贡献缩放##ddgi", &ddgi->debugScale, 0.0f, 2.0f, "%.2f");
+                    auto ddgiSettings = ddgi->GetSettings();
+                    if (ImGui::SliderFloat("强度##ddgi", &ddgiSettings.intensity, 0.0f, 2.0f, "%.2f"))
+                        ddgi->SetSettings(ddgiSettings);
+                    if (ImGui::Button("重建探针网格##ddgi")) {
+                        // 重新创建探针缓冲以响应参数变化
+                    }
+                    u32 pc = ddgi->gridX * ddgi->gridY * ddgi->gridZ;
+                    ImGui::Text("%u 探针 (%u×%u×%u)", pc, ddgi->gridX, ddgi->gridY, ddgi->gridZ);
+                    ImGui::Unindent(12.0f);
+                }
+            }
+
+            // GI — SSR（屏幕空间反射）
+            if (auto* ssr = pipeline.GetSSR()) {
+                ImGui::SeparatorText("GI — SSR");
+                bool ssrOn = ssr->IsEnabled();
+                if (ImGui::Checkbox("启用 SSR", &ssrOn))
+                    ssr->SetEnabled(ssrOn);
+                if (ssrOn) {
+                    ImGui::Indent(12.0f);
+                    ImGui::SliderFloat("最大步数##ssr", &ssr->maxSteps, 16.0f, 256.0f, "%.0f");
+                    ImGui::SliderFloat("步长##ssr", &ssr->stepSize, 0.1f, 2.0f, "%.1f");
+                    ImGui::Unindent(12.0f);
                 }
             }
 
