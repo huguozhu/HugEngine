@@ -35,6 +35,7 @@ public:
     // SSGI 特有
     void SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal, rhi::IRHITexture* albedo);
     rhi::IRHISampler* GetOutputSampler() const { return m_Sampler.get(); }
+    void PreBind(rhi::IRHICommandList* cmd) const { if (m_Ready) cmd->SetPipeline(m_PSO.get()); }
 
     float radius = 1.0f;
     int   sampleCount = 16;

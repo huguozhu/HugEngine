@@ -389,14 +389,14 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     auto ssgiOut = rg.ImportTexture("SSGI_Output", m_SSGI.GetIndirectDiffuseTexture());
     rg.AddPass("SSGI", {}, {{ssgiOut, ResourceAccess::Write}},
         [&, w, h](rhi::IRHICommandList* c) {
-            rhi::ClearValue black{};
+            m_SSGI.PreBind(c);  // 设置 SSGI PSO（无 depth，1 color attachment）
+            rhi::ClearValue clr{};
             if (m_SSGI.IsEnabled()) {
                 m_SSGI.SetInputs(m_GBufferDepth.get(), m_GBufferB.get(), m_GBufferA.get());
-                c->BeginOffscreenPass(m_SSGI.GetIndirectDiffuseTexture()->GetNativeHandle(), nullptr, w, h, &black, false);
+                c->BeginOffscreenPass(m_SSGI.GetIndirectDiffuseTexture()->GetNativeHandle(), nullptr, w, h, &clr, false);
                 m_SSGI.Render(c);
             } else {
-                c->BeginOffscreenPass(m_SSGI.GetIndirectDiffuseTexture()->GetNativeHandle(), nullptr, w, h, &black, false);
-                // 不清算：黑色 = 无间接光照
+                c->BeginOffscreenPass(m_SSGI.GetIndirectDiffuseTexture()->GetNativeHandle(), nullptr, w, h, &clr, false);
             }
             c->EndOffscreenPass();
         });
