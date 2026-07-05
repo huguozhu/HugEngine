@@ -43,6 +43,7 @@ namespace he::editor {
     class ProjectSettingsPanel;
     class StatsPanel;
     class ConsolePanel;
+    class MaterialEditor;
 }
 
 class EditorApp {
@@ -91,6 +92,7 @@ private:
     std::unique_ptr<he::editor::ProjectSettingsPanel> m_ProjectSettings;
     std::unique_ptr<he::editor::StatsPanel> m_Stats;
     std::unique_ptr<he::editor::ConsolePanel> m_Console;
+    std::unique_ptr<he::editor::MaterialEditor> m_MaterialEditor;
 
     he::f64  m_LastTime  = 0.0;
     bool     m_StepFrame = false;  // PIE Step 模式
