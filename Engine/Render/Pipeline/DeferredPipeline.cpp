@@ -433,6 +433,9 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             c->EndOffscreenPass();
         });
 
+    // Denoise passes for SSGI + SSR
+    auto ssgiDenoised = rg.ImportTexture("SSGI_Denoised", m_DenoiseSSGI.GetOutput());
+    auto ssrDenoised  = rg.ImportTexture("SSR_Denoised",  m_DenoiseSSR.GetOutput());
     // SSGI Pass（屏幕空间间接漫反射）
     auto ssgiOut = rg.ImportTexture("SSGI_Output", m_SSGI.GetIndirectDiffuseTexture());
     rg.AddPass("SSGI", {}, {{ssgiOut, ResourceAccess::Write}},
