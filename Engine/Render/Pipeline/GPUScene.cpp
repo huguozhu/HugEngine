@@ -34,6 +34,7 @@ void GPUScene::Shutdown() {
 static void FillObj(GPUSceneObject& o, const float4x4& wm, const AABB& b, u32 idx) {
     o.localToWorld = wm; o.boundsMin=float4(b.min,0); o.boundsMax=float4(b.max,0);
     o.objectID=idx; o.visibilityFlags=1; o.meshIndex=0;
+    o.indexCount=0; o.firstIndex=0; o.vertexOffset=0;  // 由 MeshBatcher 填充
 }
 
 void GPUScene::Collect(World& world, SceneGraph& sg) {

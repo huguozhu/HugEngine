@@ -23,15 +23,18 @@ namespace he::render {
 
 // GPU 端场景物体数据（std140 对齐，256 bytes）
 struct alignas(256) GPUSceneObject {
-    float4x4 localToWorld;   // [0..64]   世界矩阵
-    float4   boundsMin;      // [64..80]  AABB 最小角（世界空间）
-    float4   boundsMax;      // [80..96]  AABB 最大角
-    u32      meshIndex;      // [96]      全局 Mesh 数组索引
-    u32      materialIndex;  // [100]     全局 Material 数组索引
-    u32      objectID;       // [104]     GPUObjectData SSBO 中的索引
-    u32      visibilityFlags;// [108]     可见性标志（1=visible, 2=castShadow）
-    u32      _pad[5];        // [112..128] padding to 128
-    // [128..256] reserved for future use (prevLocalToWorld, etc.)
+    float4x4 localToWorld;   // [0..64]
+    float4   boundsMin;      // [64..80]
+    float4   boundsMax;      // [80..96]
+    u32      meshIndex;      // [96]
+    u32      materialIndex;  // [100]
+    u32      objectID;       // [104]
+    u32      visibilityFlags;// [108]
+    u32      indexCount;     // [112] IndirectDraw 参数
+    u32      firstIndex;     // [116] IndirectDraw 参数
+    i32      vertexOffset;   // [120] IndirectDraw 参数
+    u32      _pad[1];        // [124..128]
+    // [128..256] reserved
 };
 
 static_assert(sizeof(GPUSceneObject) == 256, "GPUSceneObject must be 256 bytes");
