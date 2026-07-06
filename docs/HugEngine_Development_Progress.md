@@ -1,6 +1,6 @@
 # HugEngine 开发进度
 
-> 最后更新: 2026-07-06
+> 最后更新: 2026-07-07
 
 ## 整体进度
 
@@ -205,7 +205,7 @@ Engine/Shader/Shaders/  (Slang → SPIR-V → .spv.h)
 | GPUCulling::Dispatch 在 RenderPass 内执行 | Vulkan 校验警告 |
 | DDGI 探针更新仅采样 albedo (无真实 radiance) | 光照估计粗糙，需前帧 HDR 或 Light Probe |
 | DDGI 探针可见性测试使用简单深度比较 | 可能出现漏光/遮挡错误 |
-| 后处理链无 DOF/MotionBlur | Bloom 已实现 ✅ |
+| 后处理链无 DOF/MotionBlur | Bloom + DOF + MotionBlur 已实现 ✅ |
 
 ## 待办任务
 
@@ -228,7 +228,12 @@ Engine/Shader/Shaders/  (Slang → SPIR-V → .spv.h)
 | — | AA_FXAA 实现 | ✅ |
 | — | FullScene 拆分为独立 Shadow/IBL/HDR Pass | ⬜ |
 | — | GPUCulling 集成到 DeferredPipeline | ✅ |
-| — | Bloom 后处理（DOF / MotionBlur 待实现） | 🟡 |
+| — | Bloom 后处理（DOF / MotionBlur 待实现） | ✅ |
+| — | DOF 景深（CoC + 模糊 + 合成） | ✅ |
+| — | MotionBlur 运动模糊（velocity 方向采样） | ✅ |
+| — | ExecuteIndirect + GPU Driven (Deferred) | ✅ |
+| — | GPU Profiling（时间戳查询 + ImGui 面板） | ✅ |
+| — | GBuffer 描述符集绑定修复（Compute PSO） | ✅ |
 
 ## 架构文档对比分析 (vs HugEngine_Architecture_And_Tasks.md)
 
@@ -236,12 +241,12 @@ Engine/Shader/Shaders/  (Slang → SPIR-V → .spv.h)
 
 | Phase | 主题 | 完成度 | 完成项 | 缺失项 |
 |-------|------|:---:|--------|--------|
-| P1 | 核心骨架 | ~80% | RHI Vulkan, Slang→SPIR-V, RenderGraph, ECS, glTF, Forward+Deferred, TAA, SSAO, Bloom, FXAA, Editor基础 | D3D12/Metal后端, AsyncCompute, GPU Profiling, Shader HotReload, MotionBlur/DOF/Exposure, MSAA, Undo/Redo, TypeRegistry |
-| P2 | GPU Driven | ~40% | Bindless, GPU Culling, GPU Scene, CSM+Shadow, IBL, Clustered Shading | ExecuteIndirect+DGC, VSM, VRS, Decal/ReflProbe, Prefab, Forward+, FXAA/SMAA, TAAU |
-| P3 | 高级几何 | ~5% | — | Nanite, Mesh Shader, Virtual Texturing, VSM, OIT, Impostor |
-| P4 | GI + RT | ~15% | DDGI (GBuffer采样), Denoiser, SSGI, SSR | HW RT, Lumen GI, VXGI, ReSTIR, NRD, OMM/SER, SHaRC, NRC, RT管线 |
-| P5 | 神经渲染 | 0% | — | Streamline (DLSS/FSR/XeSS), FrameGen, RayRecon, Neural Materials, RTXNS, DLAA |
-| P6 | 大气+后处理+动画 | 0% | — | Atmosphere, Volumetrics, DOF, 骨骼动画, 地形植被 |
+| P1 | 核心骨架 | ~85% | RHI Vulkan, Slang→SPIR-V, RenderGraph, ECS, glTF, Forward+Deferred, TAA, SSAO, Bloom, DOF, MotionBlur, FXAA, GPU Profiling, Editor基础 | D3D12/Metal后端, AsyncCompute, Shader HotReload, AutoExposure, MSAA, Undo/Redo |
+| P2 | GPU Driven | ~50% | Bindless, GPU Culling, GPU Scene, CSM+Shadow, IBL, Clustered Shading, ExecuteIndirect+DGC (Deferred) | ExecuteIndirect (Forward), VSM, VRS, Decal/ReflProbe, Prefab, Forward+, TAAU |
+| P3 | 高级几何 | ~5% | — | Nanite, Mesh Shader, Virtual Texturing, OIT, Impostor |
+| P4 | GI + RT | ~15% | DDGI (GBuffer), Denoiser, SSGI, SSR | HW RT, Lumen GI, VXGI, ReSTIR, NRD, NRC, RT管线 |
+| P5 | 神经渲染 | 0% | — | DLSS/FSR/XeSS, FrameGen, RayRecon, Neural Materials |
+| P6 | 大气+后处理+动画 | ~30% | Bloom, DOF, MotionBlur | Atmosphere, Volumetrics, 骨骼动画, 地形植被 |
 | P7 | 高斯泼溅+焦散 | 0% | — | 3DGS, 4DGS, 焦散 |
 | P8 | 打磨发布 | 0% | — | WebGPU, PSO Cache, Full PT, VR/XR |
 
@@ -252,18 +257,18 @@ Engine/Shader/Shaders/  (Slang → SPIR-V → .spv.h)
 | 1 | GPUCulling 集成到 Deferred | P2 | 🔴 高 | 独立 GPU_Cull Pass + 修复冗余 Collect/Upload ✅ |
 | 2 | FXAA 实现 | P1 | 🔴 高 | AA_FXAA 类 + LDR 中间纹理 + ToneMap→FXAA→Present 链路 ✅ |
 | 3 | Shader Hot Reload | P1 | 🟡 中 | 开发效率倍增器 |
-| 4 | PostProcess Bloom | P1 | 🟡 中 | 视觉品质关键，RenderGraph 已有 |
+| 4 | PostProcess Bloom | P1 | 🟡 中 | Bloom + DOF + MotionBlur 已实现 ✅ |
 | 5 | DDGI 前帧 HDR radiance 采样 | P4 | 🟡 中 | 探针光照精度从粗糙→准确 |
-| 6 | ExecuteIndirect + DGC | P2 | 🟡 中 | GPU Driven 渲染闭环 |
-| 7 | RHI D3D12 后端 | P1 | 🟢 低 | 跨平台 Windows |
-| 8 | Virtual Shadow Maps | P3 | 🟢 低 | 大规模高质量阴影 |
-| 9 | HW Ray Tracing | P4 | 🟢 低 | 需大量基础设施 (TLAS/BLAS, RT PSO) |
-| 10 | Prefab 系统 | P2 | 🟢 低 | 编辑器工作流 |
-| 11 | DDGI 探针可见性优化 | P4 | 🟡 中 | 多步 march + 深度偏移减少漏光 |
-| 12 | PostProcess AutoExposure + ColorGrading | P1 | 🟡 中 | HDR→LDR 视觉品质 |
-| 13 | Temporal Upsampling (TAAU) | P2 | 🟢 低 | 低分辨率渲染→超采样 |
-| 14 | RHI AsyncCompute | P1 | 🟢 低 | 并行执行 compute + graphics |
-| 15 | GPU Profiling (PIX/RenderDoc) | P1 | 🟢 低 | 性能分析工具集成 |
+| 6 | ExecuteIndirect + DGC | P2 | 🟡 中 | Deferred 已实现 ✅，Forward 待改造 |
+| 7 | GPU Profiling | P1 | 🟡 中 | RHI 时间戳查询 + RenderGraph 集成 + ImGui ✅ |
+| 8 | RHI D3D12 后端 | P1 | 🟢 低 | 跨平台 Windows |
+| 9 | Virtual Shadow Maps | P3 | 🟢 低 | 大规模高质量阴影 |
+| 10 | HW Ray Tracing | P4 | 🟢 低 | 需大量基础设施 (TLAS/BLAS, RT PSO) |
+| 11 | Prefab 系统 | P2 | 🟢 低 | 编辑器工作流 |
+| 12 | DDGI 探针可见性优化 | P4 | 🟡 中 | 多步 march + 深度偏移减少漏光 |
+| 13 | PostProcess AutoExposure + ColorGrading | P1 | 🟡 中 | HDR→LDR 视觉品质 |
+| 14 | Temporal Upsampling (TAAU) | P2 | 🟢 低 | 低分辨率渲染→超采样 |
+| 15 | RHI AsyncCompute | P1 | 🟢 低 | 并行执行 compute + graphics |
 | 16 | Decal + ReflectionProbe 组件 | P2 | 🟢 低 | 场景丰富度 |
 | 17 | Atmosphere + Volumetrics | P6 | 🟢 低 | 天空/雾/云 |
 | 18 | Skeletal Animation | P6 | 🟢 低 | 角色动画 |
