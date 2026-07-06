@@ -550,13 +550,12 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     rg.AddPass("SSAO", {}, {{ssaoOut, ResourceAccess::Write}},
         [&, w, h](rhi::IRHICommandList* c) {
             m_SSAO.PreBind(c);
+            // 始终以白色清除（AO=1.0=无遮蔽），enabled 时 SSAO 在上面绘制 AO 结果
+            rhi::ClearValue aoClear; aoClear.color[0]=aoClear.color[1]=aoClear.color[2]=aoClear.color[3]=1.0f;
+            c->BeginOffscreenPass(m_SSAO.GetAOTexture()->GetNativeHandle(), nullptr, w, h, &aoClear, false);
             if (m_SSAO.enabled) {
                 m_SSAO.SetInputs(m_GBufferDepth.get(), m_GBufferB.get());
-                c->BeginOffscreenPass(m_SSAO.GetAOTexture()->GetNativeHandle(), nullptr, w, h, nullptr, false);
                 m_SSAO.Render(c);
-            } else {
-                rhi::ClearValue wclr; wclr.color[0]=wclr.color[1]=wclr.color[2]=wclr.color[3]=1;
-                c->BeginOffscreenPass(m_SSAO.GetAOTexture()->GetNativeHandle(), nullptr, w, h, &wclr, false);
             }
             c->EndOffscreenPass();
         });
