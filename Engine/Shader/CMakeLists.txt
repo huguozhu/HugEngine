@@ -63,6 +63,7 @@ if(SLANGC)
         "${SHADER_DIR}/ToneMap.frag.slang"
         "${SHADER_DIR}/Triangle.frag.slang"
         "${SHADER_DIR}/FXAA.frag.slang"
+        "${SHADER_DIR}/GaussianBlur.frag.slang"
     )
     set(COMP_SLANG
         "${SHADER_DIR}/GPUCull.comp.slang"

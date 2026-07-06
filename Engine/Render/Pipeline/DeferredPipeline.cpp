@@ -116,6 +116,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     m_DenoiseSSGI.Initialize(device, m_Width, m_Height);
     m_DenoiseSSR.Initialize(device, m_Width, m_Height);
     m_SSAO.Initialize(device, m_Width, m_Height);
+    m_GaussianBlur.Initialize(device, m_Width / 2, m_Height / 2);  // 半分辨率（Bloom 标准）
     m_SSAO.enabled = false;  // 默认关闭
 
     // AA_TAA（HDR 空间）
@@ -291,6 +292,7 @@ void DeferredPipeline::Shutdown() {
     m_DenoiseSSGI.Shutdown();
     m_DenoiseSSR.Shutdown();
     m_SSAO.Shutdown();
+    m_GaussianBlur.Shutdown();
     m_Device = nullptr; m_Ready = false;
     HE_CORE_INFO("DeferredPipeline shutdown");
 }
@@ -332,6 +334,7 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
     m_DDGI.OnResize(w, h);
     m_DenoiseSSGI.OnResize(w, h);
     m_DenoiseSSR.OnResize(w, h);
+    m_GaussianBlur.OnResize(w / 2, h / 2);
 }
 
 void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
@@ -616,6 +619,21 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             lpc.cNear = n; lpc.cFar = f; lpc.cLogF = std::log(f / n);
             c->SetPushConstants(0, sizeof(lpc), &lpc);
             c->Draw(3);
+            c->EndOffscreenPass();
+        });
+
+    // ── 高斯模糊 Pass（半分辨率，Bloom 基础构件，当前独立测试）──
+    auto blurOut = rg.ImportTexture("Blur_Output", m_GaussianBlur.GetOutput());
+    rg.AddPass("GaussianBlur",
+        {{hdrC, ResourceAccess::Read}},
+        {{blurOut, ResourceAccess::Write}},
+        [&, w2 = m_Width / 2, h2 = m_Height / 2](rhi::IRHICommandList* c) {
+            m_GaussianBlur.SetInput(m_HDRTarget.get(), m_HDRSampler.get());
+            m_GaussianBlur.PreBind(c);
+            rhi::ClearValue clr{};
+            c->BeginOffscreenPass(m_GaussianBlur.GetOutput()->GetNativeHandle(),
+                                  nullptr, w2, h2, &clr, false);
+            m_GaussianBlur.Render(c);
             c->EndOffscreenPass();
         });
 
