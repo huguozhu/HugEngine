@@ -27,6 +27,7 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
 #include "AntiAliasing/AntiAliasing.h"
+#include "AntiAliasing/AA_FXAA.h"
 
 #include <memory>
 #include <vector>
@@ -65,6 +66,8 @@ public:
     ClusteredShading&    GetClusteredShading()   { return m_ClusteredShading; }
     GPUCulling&          GetGPUCulling()         { return m_GPUCulling; }
     void SetSwapChain(rhi::IRHISwapChain* sc)  { m_SwapChain = sc; }
+    void EnableFXAA(bool enable)               { m_FXAAEnabled = enable; }
+    bool IsFXAAEnabled() const                 { return m_FXAAEnabled && m_FXAA != nullptr; }
 
     rhi::IRHIBuffer* GetCurrentObjectBuffer()  { return m_ObjectBuffers[m_CurrentFrameSlot].get(); }
     rhi::IRHIBuffer* GetCurrentShadowBuffer()  { return m_ShadowBuffers[m_CurrentFrameSlot].get(); }
@@ -101,6 +104,11 @@ private:
     std::unique_ptr<rhi::IRHITexture> m_HDRTarget, m_HDRDepth;
     std::unique_ptr<rhi::IRHISampler> m_HDRSampler;
 
+    // LDR 中间纹理（ToneMap 输出 → FXAA 输入，BGRA8_UNORM）
+    // FXAA 禁用时 ToneMap 直接写 BackBuffer，此纹理闲置
+    std::unique_ptr<rhi::IRHITexture> m_LDRTarget;
+    std::unique_ptr<rhi::IRHISampler> m_LDRSampler;
+
     // 三缓冲
     std::unique_ptr<rhi::IRHIBuffer> m_LightBuffers[MAX_FRAMES_IN_FLIGHT];
     std::unique_ptr<rhi::IRHIBuffer> m_ObjectBuffers[MAX_FRAMES_IN_FLIGHT];
@@ -118,6 +126,10 @@ private:
 
     // 时域抗锯齿
     std::unique_ptr<IAntiAliasing> m_AntiAliasing;
+
+    // FXAA（LDR 空间后处理抗锯齿，可单独使用或与 TAA 叠加）
+    std::unique_ptr<AA_FXAA> m_FXAA;
+    bool m_FXAAEnabled = false;
 
     // Clustered Shading
     ClusteredShading m_ClusteredShading;

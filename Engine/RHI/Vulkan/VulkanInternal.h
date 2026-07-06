@@ -288,6 +288,11 @@ private:
     // 离屏 FB 延迟销毁（每槽位独立队列，Begin() 仅清理当前槽位）
     VkFramebuffer m_CurrentOffscreenFB = VK_NULL_HANDLE;
     std::vector<VkFramebuffer> m_PendingFBs[kMaxFramesInFlight];
+
+    // 虚拟深度附件（StartOffscreenPass 无 depth 参数时填充，满足带 depth 的 RenderPass）
+    VkImage        m_DummyDepthImage  = VK_NULL_HANDLE;
+    VkDeviceMemory m_DummyDepthMemory = VK_NULL_HANDLE;
+    VkImageView    m_DummyDepthView   = VK_NULL_HANDLE;
 };
 
 // ============================================================

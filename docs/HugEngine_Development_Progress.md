@@ -99,9 +99,12 @@
 
 ```
 DeferredPipeline::BuildFrameGraph
+  ├── "GPU_Cull" Pass (GPU 剔除启用时)
+  │     └── Compute Shader: 读上帧深度 → GPUScene 视锥+Hi-Z 剔除 → IndirectCmdBuf
   ├── "GB_Clear" Pass
   │     └── 4 MRT GBuffer (albedo+metallic / normal+roughness / emissive+ao / velocity) + D32
   │         绑定 set=0(per-frame ObjectBuffer) + bindless 纹理数组
+  │         使用上帧 GPU Culling Readback 结果过滤可见物体
   ├── [DDGI_Update] Pass (DDGI 启用时)
   │     └── Compute Shader: 3D 探针网格 Fibonacci 球面采样 GBuffer → SH 投影 + 时间混合
   ├── "SSAO" Pass → SSAO Output
@@ -119,7 +122,10 @@ DeferredPipeline::BuildFrameGraph
   │         + SSGI (降噪后) + SSR (降噪后) + DDGI (三线性插值 SH 评估) + SSAO
   ├── "TAA_Resolve" Pass (TAA 启用时)
   │     └── 时域抗锯齿 (HDR 空间, 复用 GBuffer 深度/法线/velocity)
-  └── "ToneMap" Pass → BackBuffer
+  ├── "ToneMap" Pass → LDR Target / BackBuffer
+  │     └── HDR→LDR ACES Tonemapping (FXAA 启用时输出到 LDR 中间纹理)
+  └── "FXAA" Pass (FXAA 启用时) → BackBuffer
+        └── LDR 空间快速近似抗锯齿 (edge-detect + blend)
 ```
 
 ### 后处理链架构
@@ -128,7 +134,8 @@ DeferredPipeline::BuildFrameGraph
 Lighting 输出 (HDR)
   │
   ├─ [TAA]   ← SetInput → Render → GetOutput=HDR_AA
-  ├─ ToneMap ← SetInput → BeginRP → Render
+  ├─ ToneMap ← SetInput → BeginRP → Render → GetOutput=LDR
+  ├─ [FXAA]  ← SetInput → BeginRP → Render → GetOutput=LDR_AA (→ Present)
   └─ Present
 ```
 
@@ -194,7 +201,7 @@ Engine/Shader/Shaders/  (Slang → SPIR-V → .spv.h)
 | FullScene Pass 仍为老代码打包 | 未拆分为独立 Shadow/IBL/HDR Pass |
 | 点光阴影无 PCF 软滤波 | 硬边缘锯齿 |
 | 点光阴影无视锥剔除 | 6 面渲染全场景 |
-| GPU Culling 仅 forward 管线使用 | Deferred 未集成 |
+| GPU Culling 仅 forward 管线使用 | Deferred 已集成 ✅ |
 | GPUCulling::Dispatch 在 RenderPass 内执行 | Vulkan 校验警告 |
 | DDGI 探针更新仅采样 albedo (无真实 radiance) | 光照估计粗糙，需前帧 HDR 或 Light Probe |
 | DDGI 探针可见性测试使用简单深度比较 | 可能出现漏光/遮挡错误 |
@@ -242,8 +249,8 @@ Engine/Shader/Shaders/  (Slang → SPIR-V → .spv.h)
 
 | # | 功能 | Phase | 重要性 | 说明 |
 |---|------|:---:|:---:|------|
-| 1 | GPUCulling 集成到 Deferred | P2 | 🔴 高 | 已在 Forward 可用，Deferred 待集成 |
-| 2 | FXAA 实现 | P1 | 🔴 高 | 接口+shader 已有，只需实现 AA_FXAA |
+| 1 | GPUCulling 集成到 Deferred | P2 | 🔴 高 | 独立 GPU_Cull Pass + 修复冗余 Collect/Upload ✅ |
+| 2 | FXAA 实现 | P1 | 🔴 高 | AA_FXAA 类 + LDR 中间纹理 + ToneMap→FXAA→Present 链路 ✅ |
 | 3 | Shader Hot Reload | P1 | 🟡 中 | 开发效率倍增器 |
 | 4 | PostProcess Bloom | P1 | 🟡 中 | 视觉品质关键，RenderGraph 已有 |
 | 5 | DDGI 前帧 HDR radiance 采样 | P4 | 🟡 中 | 探针光照精度从粗糙→准确 |

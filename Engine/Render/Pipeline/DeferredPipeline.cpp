@@ -6,6 +6,7 @@
 #include "PostProcess/SkyboxPass.h"
 #include "SceneRenderer.h"
 #include "AntiAliasing/AA_TAA.h"
+#include "AntiAliasing/AA_FXAA.h"
 #include "Asset/BindlessTextureManager.h"
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
@@ -71,6 +72,18 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         m_HDRSampler = device->CreateSampler(s);
     }
 
+    // LDR 中间纹理（FXAA 链路：ToneMap → LDR → FXAA → BackBuffer）
+    {
+        rhi::TextureDesc d;
+        d.format = rhi::Format::BGRA8_UNORM;
+        d.width = m_Width; d.height = m_Height;
+        d.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
+        m_LDRTarget = device->CreateTexture(d);
+        rhi::SamplerDesc s; s.minFilter = s.magFilter = rhi::FilterMode::Linear;
+        s.addressU = s.addressV = rhi::AddressMode::ClampToEdge;
+        m_LDRSampler = device->CreateSampler(s);
+    }
+
     // 三缓冲
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
         m_LightBuffers[i]      = device->CreateBuffer({sizeof(GPULight) * MAX_LIGHTS, rhi::BufferUsage::Storage});
@@ -105,12 +118,21 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     m_SSAO.Initialize(device, m_Width, m_Height);
     m_SSAO.enabled = false;  // 默认关闭
 
-    // AA_TAA
+    // AA_TAA（HDR 空间）
     m_AntiAliasing = std::make_unique<AA_TAA>();
     if (!m_AntiAliasing->Initialize(device, m_Width, m_Height)) {
         HE_CORE_WARN("DeferredPipeline: AA_TAA init failed, anti-aliasing disabled");
         m_AntiAliasing.reset();
     }
+
+    // AA_FXAA（LDR 空间，默认关闭，通过 EnableFXAA(true) 开启）
+    m_FXAA = std::make_unique<AA_FXAA>();
+    if (!m_FXAA->Initialize(device, m_Width, m_Height)) {
+        HE_CORE_WARN("DeferredPipeline: AA_FXAA init failed");
+        m_FXAA.reset();
+    }
+    this->EnableFXAA(true);
+
 
     // GBuffer PSO (4 MRT + D32, set=0 合并 per-frame + bindless 纹理/采样器数组)
     // set=0: per-frame GPUObjectData[] + bindless Texture2D[] + SamplerState[]
@@ -252,6 +274,9 @@ void DeferredPipeline::Shutdown() {
     m_GBufferD.reset();
     if (m_AntiAliasing) m_AntiAliasing->Shutdown();
     m_AntiAliasing.reset();
+    if (m_FXAA) m_FXAA->Shutdown();
+    m_FXAA.reset();
+    m_LDRTarget.reset(); m_LDRSampler.reset();
     m_HDRTarget.reset(); m_HDRDepth.reset(); m_HDRSampler.reset();
     m_GBufferPSO.reset(); m_LightingPSO.reset();
     for (auto& b : m_LightBuffers) b.reset();
@@ -294,6 +319,13 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
     if (m_ToneMap) m_ToneMap->OnResize(w, h);
     if (m_Skybox)  { m_Skybox->Shutdown(); m_Skybox->Initialize(m_Device, w, h); }
     if (m_AntiAliasing) m_AntiAliasing->OnResize(w, h);
+    if (m_FXAA) m_FXAA->OnResize(w, h);
+    // 重建 LDR 中间纹理
+    {
+        rhi::TextureDesc d; d.format = rhi::Format::BGRA8_UNORM;
+        d.width = w; d.height = h; d.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
+        m_LDRTarget = m_Device->CreateTexture(d);
+    }
     m_SSAO.OnResize(w, h);
     m_SSGI.OnResize(w, h);
     m_SSR.OnResize(w, h);
@@ -341,6 +373,20 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         useGPUVisible = !m_GPUVisibleIndices.empty();
     }
 
+    // ── GPU 剔除 Compute Pass（读上帧 GBuffer 深度 → 调度下帧剔除）──
+    // 必须在 GBuffer 之前：此时 gbDepth 保留上帧数据且未作为渲染目标
+    rg.AddPass("GPU_Cull",
+        {{gbDepth, ResourceAccess::Read}},  // 读上一帧深度做 Hi-Z 遮挡剔除
+        {},
+        [&, w, h](rhi::IRHICommandList* c) {
+            if (!m_GPUCulling.enabled) return;
+            m_GPUCulling.SetSceneBuffer(m_Device, m_GPUScene.GetObjectBuffer());
+            if (m_GBufferDepth) m_GPUCulling.SetDepthTexture(m_Device, m_GBufferDepth.get(), w, h);
+            m_GPUCulling.Dispatch(c, camera.GetViewProjMatrix(), m_GPUScene.GetObjectCount(), w, h);
+            // 恢复 graphics pipeline state（compute dispatch 后状态未定义，影响后续 GBuffer pass）
+            c->SetPipeline(m_GBufferPSO.get());
+        });
+
     // GBuffer 4×MRT + SceneRenderer
     rg.AddPass("GB_Clear", {}, {{gbA, ResourceAccess::Write}, {gbB, ResourceAccess::Write},
         {gbC, ResourceAccess::Write}, {gbVel, ResourceAccess::Write}, {gbDepth, ResourceAccess::Write}},
@@ -376,16 +422,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 filteredItems = std::move(drawItems);
             }
 
-            // GPU 剔除：GPUScene → Compute → Dispatch
-            if (m_GPUCulling.enabled) {
-                m_GPUScene.Collect(world, sg);
-                m_GPUScene.Upload(m_Device);
-                m_GPUCulling.SetSceneBuffer(m_Device, m_GPUScene.GetObjectBuffer());
-                if (m_GBufferDepth) m_GPUCulling.SetDepthTexture(m_Device, m_GBufferDepth.get(), w, h);
-                m_GPUCulling.Dispatch(c, camera.GetViewProjMatrix(), m_GPUScene.GetObjectCount(), w, h);
-                c->SetPipeline(m_GBufferPSO.get());
-                c->BindDescriptorSet(0, m_GBufferSet);
-            }
+            // GPU 剔除已在独立 "GPU_Cull" pass 中完成（GBuffer 之前）
+            // 此处仅使用上帧 Readback 结果过滤可见物体
 
             float4x4 jitteredVP = camera.GetViewProjMatrix();
             for (auto& di : filteredItems) {
@@ -610,9 +648,17 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             m_AntiAliasing->Render(c);
         });
 
-    rg.AddPass("ToneMap", {}, {{backBuf, ResourceAccess::Write}},
-        [this](rhi::IRHICommandList* c) {
-            if (m_AntiAliasing && m_AntiAliasing->IsEnabled()) {
+    // LDR 中间纹理（FXAA 启用时 ToneMap 写入此处，FXAA 再写入 BackBuffer）
+    auto ldrTarget = rg.ImportTexture("LDR", m_LDRTarget.get());
+    bool useFXAA = IsFXAAEnabled();
+    bool useTAA  = (m_AntiAliasing && m_AntiAliasing->IsEnabled());
+
+    // ToneMap Pass（HDR → LDR，输出到 LDR 中间纹理或直接 BackBuffer）
+    rg.AddPass("ToneMap",
+        {},
+        {{useFXAA ? ldrTarget : backBuf, ResourceAccess::Write}},
+        [this, useTAA, useFXAA, w, h](rhi::IRHICommandList* c) {
+            if (useTAA) {
                 // TAA 已过渡 HDR → ShaderResource，ToneMap 直接采样 TAA 输出
                 m_ToneMap->SetInput(m_AntiAliasing->GetOutputTexture(),
                                     m_AntiAliasing->GetOutputSampler());
@@ -623,10 +669,38 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 m_ToneMap->SetInput(m_HDRTarget.get(), m_HDRSampler.get());
             }
             m_ToneMap->PreBind(c);
-            c->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
-            m_ToneMap->Render(c);
-            c->EndRenderPass();
+            if (useFXAA) {
+                // FXAA 启用 → ToneMap 写入 LDR 中间纹理（离屏），FXAA 再写入 BackBuffer
+                rhi::ClearValue clr{};
+                c->BeginOffscreenPass(m_LDRTarget->GetNativeHandle(), nullptr, w, h, &clr, false);
+                m_ToneMap->Render(c);
+                c->EndOffscreenPass();
+            } else {
+                // FXAA 禁用 → ToneMap 直接写入 SwapChain BackBuffer
+                c->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
+                m_ToneMap->Render(c);
+                c->EndRenderPass();
+            }
         });
+
+    // FXAA Pass（LDR 空间后处理抗锯齿，ToneMap 之后、Present 之前）
+    if (useFXAA) {
+        rg.AddPass("FXAA",
+            {{ldrTarget, ResourceAccess::Read}},
+            {{backBuf, ResourceAccess::Write}},
+            [this](rhi::IRHICommandList* c) {
+                m_FXAA->SetInput(m_LDRTarget.get(), m_LDRSampler.get());
+                // LDR 纹理从 RenderTarget 过渡到 ShaderResource（ToneMap 写入后）
+                c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput,
+                                   rhi::PipelineStage::FragmentShader,
+                                   rhi::ResourceState::RenderTarget,
+                                   rhi::ResourceState::ShaderResource,
+                                   m_LDRTarget.get());
+                c->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
+                m_FXAA->Render(c);
+                c->EndRenderPass();
+            });
+    }
 
     // ── 帧末：保存当前帧 VP 供下一帧使用 ──
     m_PrevViewProj = m_CurrViewProj;
