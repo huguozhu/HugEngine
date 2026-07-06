@@ -250,27 +250,32 @@ Engine/Shader/Shaders/  (Slang → SPIR-V → .spv.h)
 | P7 | 高斯泼溅+焦散 | 0% | — | 3DGS, 4DGS, 焦散 |
 | P8 | 打磨发布 | 0% | — | WebGPU, PSO Cache, Full PT, VR/XR |
 
-### 按优先级缺失功能 Top 10
+### 按优先级缺失功能 Top 20
 
 | # | 功能 | Phase | 重要性 | 说明 |
 |---|------|:---:|:---:|------|
-| 1 | GPUCulling 集成到 Deferred | P2 | 🔴 高 | 独立 GPU_Cull Pass + 修复冗余 Collect/Upload ✅ |
-| 2 | FXAA 实现 | P1 | 🔴 高 | AA_FXAA 类 + LDR 中间纹理 + ToneMap→FXAA→Present 链路 ✅ |
-| 3 | Shader Hot Reload | P1 | 🟡 中 | 开发效率倍增器 |
-| 4 | PostProcess Bloom | P1 | 🟡 中 | Bloom + DOF + MotionBlur 已实现 ✅ |
-| 5 | DDGI 前帧 HDR radiance 采样 | P4 | 🟡 中 | 探针光照精度从粗糙→准确 |
-| 6 | ExecuteIndirect + DGC | P2 | 🟡 中 | Deferred 已实现 ✅，Forward 待改造 |
-| 7 | GPU Profiling | P1 | 🟡 中 | RHI 时间戳查询 + RenderGraph 集成 + ImGui ✅ |
-| 8 | RHI D3D12 后端 | P1 | 🟢 低 | 跨平台 Windows |
-| 9 | Virtual Shadow Maps | P3 | 🟢 低 | 大规模高质量阴影 |
-| 10 | HW Ray Tracing | P4 | 🟢 低 | 需大量基础设施 (TLAS/BLAS, RT PSO) |
-| 11 | Prefab 系统 | P2 | 🟢 低 | 编辑器工作流 |
-| 12 | DDGI 探针可见性优化 | P4 | 🟡 中 | 多步 march + 深度偏移减少漏光 |
-| 13 | PostProcess AutoExposure + ColorGrading | P1 | 🟡 中 | HDR→LDR 视觉品质 |
-| 14 | Temporal Upsampling (TAAU) | P2 | 🟢 低 | 低分辨率渲染→超采样 |
-| 15 | RHI AsyncCompute | P1 | 🟢 低 | 并行执行 compute + graphics |
-| 16 | Decal + ReflectionProbe 组件 | P2 | 🟢 低 | 场景丰富度 |
-| 17 | Atmosphere + Volumetrics | P6 | 🟢 低 | 天空/雾/云 |
-| 18 | Skeletal Animation | P6 | 🟢 低 | 角色动画 |
-| 19 | 3DGS (Gaussian Splatting) | P7 | 🟢 低 | 新图元类型 |
-| 20 | Editor Undo/Redo | P1 | 🟢 低 | 编辑器体验 |
+| — | GPUCulling 集成到 Deferred | P2 | 🔴 高 | ✅ 独立 GPU_Cull Pass + 修复冗余 Collect/Upload |
+| — | FXAA 实现 | P1 | 🔴 高 | ✅ AA_FXAA 类 + LDR 纹理 + ToneMap→FXAA→Present |
+| — | Bloom + DOF + MotionBlur | P1/P6 | 🔴 高 | ✅ BrightPass + GaussianBlur + CoC + Velocity MB |
+| — | ExecuteIndirect + GPU Driven (Deferred) | P2 | 🔴 高 | ✅ MeshBatcher + DrawIndexedIndirect + CPU 回退 |
+| — | GPU Profiling | P1 | 🟡 中 | ✅ 时间戳查询 + RenderGraph + ImGui 面板 |
+| 1 | Shader Hot Reload | P1 | 🔴 高 | 开发效率倍增器（.slang 监控 + 自动重编译 + PSO 热替换） |
+| 2 | DDGI 前帧 HDR radiance 采样 | P4 | 🟡 中 | 探针光照精度从粗糙→准确 |
+| 3 | DDGI 探针可见性优化 | P4 | 🟡 中 | 多步 march + 深度偏移减少漏光 |
+| 4 | PostProcess AutoExposure + ColorGrading | P1 | 🟡 中 | HDR→LDR 视觉品质 |
+| 5 | ExecuteIndirect + GPU Driven (Forward) | P2 | 🟡 中 | ForwardPipeline 同 Deferred 架构改造 |
+| 6 | FullScene 拆分为独立 Pass | P1 | 🟡 中 | Shadow / IBL / HDR 解耦 |
+| 7 | RHI D3D12 后端 | P1 | 🟢 低 | 跨平台 Windows |
+| 8 | Virtual Shadow Maps | P3 | 🟢 低 | 大规模高质量阴影 |
+| 9 | HW Ray Tracing | P4 | 🟢 低 | TLAS/BLAS + RT PSO |
+| 10 | Prefab 系统 | P2 | 🟢 低 | 编辑器工作流 |
+| 11 | Temporal Upsampling (TAAU) | P2 | 🟢 低 | 低分辨率渲染→超采样 |
+| 12 | RHI AsyncCompute | P1 | 🟢 低 | 并行 compute + graphics |
+| 13 | Decal + ReflectionProbe | P2 | 🟢 低 | 场景丰富度 |
+| 14 | Atmosphere + Volumetrics | P6 | 🟢 低 | 天空/雾/云 |
+| 15 | Skeletal Animation | P6 | 🟢 低 | 角色动画 |
+| 16 | GI_VXGI 体素锥追踪 | P4 | 🟢 低 | 3D Clipmap Cone Trace |
+| 17 | 3DGS (Gaussian Splatting) | P7 | 🟢 低 | 新图元类型 |
+| 18 | Editor Undo/Redo | P1 | 🟢 低 | 编辑器体验 |
+| 19 | Forward+ (Tile-based Light Culling) | P2 | 🟢 低 | 前向管线多光源优化 |
+| 20 | SMAA 抗锯齿 | P1 | 🟢 低 | 比 FXAA 更高质量的 LDR 后处理 |
