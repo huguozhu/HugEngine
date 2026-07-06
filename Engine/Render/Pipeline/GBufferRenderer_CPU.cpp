@@ -67,11 +67,13 @@ void GBufferRenderer_CPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
             float4x4 viewProjMatrix;
             float4x4 prevViewProjMatrix;
             u32      objectIndex;
-            u32      _pad[15];
+            u32      useInstanceID;   // 必须显式设为 0，匹配 shader 布局
+            u32      _pad[14];
         } pc;
         pc.viewProjMatrix     = jitteredVP;
         pc.prevViewProjMatrix = ctx.prevViewProj;
         pc.objectIndex        = di.objectIndex;
+        pc.useInstanceID      = 0;
         cmd->SetPushConstants(0, sizeof(pc), &pc);
         cmd->SetVertexBuffer(di.mesh->GetVertexBuffer().get(), 0);
         cmd->SetIndexBuffer(di.mesh->GetIndexBuffer().get());
