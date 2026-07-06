@@ -453,23 +453,30 @@ void RenderGraph::Execute(rhi::IRHICommandList* graphicsCmd,
     u32 passIdx = 0;
 
     for (auto* pass : m_PassOrder) {
-        // 选择正确的命令列表
-        rhi::IRHICommandList* cmdList = graphicsCmd;
-        if (pass->queueHint == RGPassQueue::Compute && m_AsyncComputeEnabled)
-            cmdList = computeCmd;
+        bool isComputePass = (pass->queueHint == RGPassQueue::Compute && m_AsyncComputeEnabled);
+        rhi::IRHICommandList* cmdList = isComputePass ? computeCmd : graphicsCmd;
 
-        // 1. 跨队列 Acquire Barrier（从 Graphics 获取资源所有权）
-        for (auto& br : pass->crossQueueAcquire) {
-            if (br.srcState == br.dstState) continue;
-            rhi::IRHITexture* tex = getTexture(br.handle);
-            if (tex) {
-                cmdList->QueueOwnershipTransfer(tex,
+        // 1. 跨队列 Acquire（Graphics → Compute）
+        //    Vulkan QFOT 需要两个 Barrier:
+        //      a) RELEASE 在源队列 (Graphics) 上录制
+        //      b) ACQUIRE 在目标队列 (Compute) 上录制
+        if (isComputePass) {
+            for (auto& br : pass->crossQueueAcquire) {
+                if (br.srcState == br.dstState) continue;
+                rhi::IRHITexture* tex = getTexture(br.handle);
+                if (!tex) continue;
+                // RELEASE on Graphics: 释放所有权，Compute 队列可以获取
+                graphicsCmd->QueueOwnershipTransfer(tex,
+                    rhi::QueueType::Graphics, rhi::QueueType::Compute,
+                    br.srcState, br.dstState);
+                // ACQUIRE on Compute: 获取所有权，准备使用
+                computeCmd->QueueOwnershipTransfer(tex,
                     rhi::QueueType::Graphics, rhi::QueueType::Compute,
                     br.srcState, br.dstState);
             }
         }
 
-        // 2. 常规 Barrier（布局转换）
+        // 2. 常规 Barrier（布局转换）— 在当前 Pass 的命令列表上录制
         for (auto& br : pass->preBarriers) {
             if (br.srcState == br.dstState) continue;
             rhi::IRHITexture* tex = getTexture(br.handle);
@@ -485,12 +492,19 @@ void RenderGraph::Execute(rhi::IRHICommandList* graphicsCmd,
         if (m_Profiler) m_Profiler->EndPass(cmdList, passIdx);
         passIdx++;
 
-        // 4. 跨队列 Release Barrier（释放资源回 Graphics）
-        for (auto& br : pass->crossQueueRelease) {
-            if (br.srcState == br.dstState) continue;
-            rhi::IRHITexture* tex = getTexture(br.handle);
-            if (tex) {
-                cmdList->QueueOwnershipTransfer(tex,
+        // 4. 跨队列 Release（Compute → Graphics）
+        //    QFOT 两个 Barrier: RELEASE on Compute + ACQUIRE on Graphics
+        if (isComputePass) {
+            for (auto& br : pass->crossQueueRelease) {
+                if (br.srcState == br.dstState) continue;
+                rhi::IRHITexture* tex = getTexture(br.handle);
+                if (!tex) continue;
+                // RELEASE on Compute: 释放所有权回 Graphics
+                computeCmd->QueueOwnershipTransfer(tex,
+                    rhi::QueueType::Compute, rhi::QueueType::Graphics,
+                    br.srcState, br.dstState);
+                // ACQUIRE on Graphics: 重新获取所有权
+                graphicsCmd->QueueOwnershipTransfer(tex,
                     rhi::QueueType::Compute, rhi::QueueType::Graphics,
                     br.srcState, br.dstState);
             }

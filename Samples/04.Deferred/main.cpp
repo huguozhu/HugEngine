@@ -847,6 +847,7 @@ int main() {
         cmdList->End();
 
         device->Submit(cmdList.get());
+        pipeline.FlushComputeWork();  // AsyncCompute: Graphics Submit 之后提交 Compute 工作
         swapchain->Present(true);
         frameIndex++;
     }

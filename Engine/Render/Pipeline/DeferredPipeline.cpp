@@ -314,6 +314,12 @@ void DeferredPipeline::Shutdown() {
     if (m_GBufferRenderer) m_GBufferRenderer->Shutdown();
     m_GBufferRenderer.reset();
     m_Profiler.Shutdown();
+    // AsyncCompute 清理
+    if (m_CrossQueueFence != rhi::kInvalidFence) {
+        m_Device->DestroyFence(m_CrossQueueFence);
+        m_CrossQueueFence = rhi::kInvalidFence;
+    }
+    m_ComputeCmdList.reset();
     m_SSGI.Shutdown();
     m_SSR.Shutdown();
     m_DDGI.Shutdown();
@@ -409,6 +415,8 @@ void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
     bool useAsyncCompute = m_Device->HasAsyncComputeQueue();
     if (useAsyncCompute && !m_ComputeCmdList) {
         m_ComputeCmdList = m_Device->CreateCommandList(rhi::QueueType::Compute);
+        // 创建跨队列同步 Fence（Timeline Semaphore）
+        m_CrossQueueFence = m_Device->CreateFence();
         HE_CORE_INFO("DeferredPipeline: AsyncCompute enabled — dedicated Compute command list created");
     }
 
@@ -420,14 +428,31 @@ void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
 
     if (useAsyncCompute && m_ComputeCmdList) {
         // 双队列模式: Graphics + Compute 并行执行
+        // 注意: Compute 命令列表在 Begin/End 之间录制，但不在此时 Submit
+        //       Submit 推迟到 FlushComputeWork()，确保 Graphics 先提交
         m_ComputeCmdList->Begin();
         rg.Execute(cmd, m_ComputeCmdList.get(), m_Device);
         m_ComputeCmdList->End();
-        m_ComputeCmdList->Submit();
+        m_ComputePendingSubmit = true;
     } else {
         // 回退: 单 Graphics 队列（与原来行为一致）
         rg.Execute(cmd, m_Device);
     }
+}
+
+void DeferredPipeline::FlushComputeWork() {
+    // 在 Graphics 命令列表 Submit 之后调用
+    // 使用 Timeline Semaphore 确保 Compute 等待 Graphics 的 QFOT Release Barrier
+    if (!m_ComputePendingSubmit || !m_ComputeCmdList) return;
+
+    u64 signalValue = ++m_FrameCounter;
+    // Graphics 队列 Signal: 标记所有 Release Barrier 已提交
+    m_Device->SignalFenceOnQueue(rhi::QueueType::Graphics, m_CrossQueueFence, signalValue);
+    // Compute 队列 Wait: 等待 Graphics 完成 Release 后再执行 ACQUIRE
+    m_Device->WaitFenceOnQueue(rhi::QueueType::Compute, m_CrossQueueFence, signalValue);
+    // 现在可以安全提交 Compute 工作
+    m_Device->Submit(m_ComputeCmdList.get());
+    m_ComputePendingSubmit = false;
 }
 
 void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,

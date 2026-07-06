@@ -62,6 +62,10 @@ public:
     void Render(rhi::IRHICommandList* cmd, he::World& world,
                 he::SceneGraph& sg, const CameraData& camera) override;
 
+    // AsyncCompute: 在 Graphics Submit 之后调用，提交 Compute 工作
+    // 内部使用 Timeline Semaphore 确保跨队列同步顺序
+    void FlushComputeWork();
+
     IShadowSystem*       GetShadowSystem() override { return m_ShadowSystem.get(); }
     IGlobalIllumination* GetGI()           override { return m_GI.get(); }
     ToneMapPass*         GetToneMap()            { return m_ToneMap.get(); }
@@ -101,8 +105,9 @@ private:
 
     // AsyncCompute: 专用 Compute 队列命令列表（延迟创建）
     std::unique_ptr<rhi::IRHICommandList> m_ComputeCmdList;
-
-    // GBuffer (graph-managed, OnResize 重建)
+    rhi::RHIFenceHandle m_CrossQueueFence = rhi::kInvalidFence;  // 跨队列同步信号量
+    u64  m_FrameCounter = 0;              // 帧计数器（Fence 信号值）
+    bool m_ComputePendingSubmit = false;  // 是否有待提交的 Compute 工作
     std::unique_ptr<rhi::IRHITexture> m_GBufferA, m_GBufferB, m_GBufferC;
     // GBuffer 第 4 张 MRT：velocity（RG16_FLOAT，UV 空间运动矢量）
     std::unique_ptr<rhi::IRHITexture> m_GBufferD;
