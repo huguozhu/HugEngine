@@ -55,6 +55,62 @@ static u32 FindQueueFamily(VkPhysicalDevice physical, VkQueueFlags required, VkS
 }
 
 // ============================================================
+// VulkanDevice::FindQueueFamilies — 查询所有队列族，检测 AsyncCompute 能力
+// ============================================================
+void VulkanDevice::FindQueueFamilies() {
+    // 1. 查找 Graphics + Compute + Present 队列族（必须）
+    m_GraphicsFamily = FindQueueFamily(m_Physical,
+        VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT, m_Surface);
+    HE_ASSERT(m_GraphicsFamily != ~0u, "No suitable graphics queue family found");
+
+    // 2. 尝试查找独立 Compute 队列族（不带 GRAPHICS_BIT）
+    //    优先选纯 COMPUTE_BIT（不含 TRANSFER）→ 专用硬件引擎
+    //    回退: COMPUTE+TRANSFER 族 → 独立调度
+    //    无回退: AsyncCompute = false
+    u32 computeOnlyFamily  = UINT32_MAX;  // 纯 Compute（最优）
+    u32 computeDedicatedFamily = UINT32_MAX; // Compute+Transfer（次选）
+
+    u32 queueFamilyCount = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(m_Physical, &queueFamilyCount, nullptr);
+    std::vector<VkQueueFamilyProperties> families(queueFamilyCount);
+    vkGetPhysicalDeviceQueueFamilyProperties(m_Physical, &queueFamilyCount, families.data());
+
+    for (u32 i = 0; i < queueFamilyCount; i++) {
+        VkQueueFlags flags = families[i].queueFlags;
+        bool hasCompute  = (flags & VK_QUEUE_COMPUTE_BIT) != 0;
+        bool hasGraphics = (flags & VK_QUEUE_GRAPHICS_BIT) != 0;
+        bool hasTransfer = (flags & VK_QUEUE_TRANSFER_BIT) != 0;
+
+        if (hasCompute && !hasGraphics && i != m_GraphicsFamily) {
+            // 最佳选择: 纯 Compute 队列族（异步硬件引擎，如 NVIDIA AMP）
+            if (!hasTransfer) {
+                computeOnlyFamily = i;
+                break;
+            }
+            // 次选: Compute+Transfer 族（独立但共享 DMA 引擎）
+            if (computeDedicatedFamily == UINT32_MAX) {
+                computeDedicatedFamily = i;
+            }
+        }
+    }
+
+    if (computeOnlyFamily != UINT32_MAX) {
+        m_ComputeFamily    = computeOnlyFamily;
+        m_HasAsyncCompute  = true;
+        HE_CORE_INFO("AsyncCompute: Tier 2 — 专用纯 Compute 硬件引擎 (family {})", m_ComputeFamily);
+    } else if (computeDedicatedFamily != UINT32_MAX) {
+        m_ComputeFamily    = computeDedicatedFamily;
+        m_HasAsyncCompute  = true;
+        HE_CORE_INFO("AsyncCompute: Tier 1 — 独立 Compute 队列族 (family {})", m_ComputeFamily);
+    } else {
+        // 无独立 Compute 队列 → 回退到 Graphics 队列族
+        m_ComputeFamily    = m_GraphicsFamily;
+        m_HasAsyncCompute  = false;
+        HE_CORE_INFO("AsyncCompute: Tier 0 — 不支持，Compute 与 Graphics 共享队列");
+    }
+}
+
+// ============================================================
 // Vulkan Device Implementation
 // ============================================================
 
@@ -70,6 +126,13 @@ DeviceCaps VulkanDevice::GetCaps() const {
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(m_Physical, &props);
     caps.maxSamplerAnisotropy = static_cast<u32>(props.limits.maxSamplerAnisotropy);
+
+    // 异步计算能力
+    caps.supportsAsyncCompute  = m_HasAsyncCompute;
+    caps.supportsTransferQueue = false;  // Transfer 队列暂未独立实现
+    caps.asyncComputeTier      = m_HasAsyncCompute
+        ? (m_ComputeFamily != m_GraphicsFamily ? 2u : 1u)
+        : 0u;
 
     return caps;
 }
@@ -148,10 +211,13 @@ void VulkanDevice::Initialize(const DeviceInitDesc& desc) {
     // 4. Select physical device
     SelectPhysicalDevice();
 
-    // 5. Create logical device
+    // 5. 查询队列族（检测 AsyncCompute 能力，必须在 CreateLogicalDevice 之前）
+    FindQueueFamilies();
+
+    // 6. Create logical device
     CreateLogicalDevice();
 
-    // 6. Create command pools
+    // 7. Create command pools
     CreateCommandPools();
 
     HE_CORE_INFO("Vulkan device fully initialized");
@@ -168,6 +234,13 @@ void VulkanDevice::Shutdown() {
     m_DescSetLayoutParents.clear();
 
     if (m_DescPool)        { vkDestroyDescriptorPool(m_Device, m_DescPool, nullptr); m_DescPool = VK_NULL_HANDLE; }
+
+    // 清理 Timeline Semaphore (Fence)
+    for (auto& fs : m_Fences) {
+        if (fs.semaphore) vkDestroySemaphore(m_Device, fs.semaphore, nullptr);
+    }
+    m_Fences.clear();
+
     if (m_GraphicsCmdPool) { vkDestroyCommandPool(m_Device, m_GraphicsCmdPool, nullptr); m_GraphicsCmdPool = VK_NULL_HANDLE; }
     if (m_ComputeCmdPool)  { vkDestroyCommandPool(m_Device, m_ComputeCmdPool, nullptr); m_ComputeCmdPool = VK_NULL_HANDLE; }
     if (m_Device)          { vkDestroyDevice(m_Device, nullptr); m_Device = VK_NULL_HANDLE; }
@@ -217,16 +290,26 @@ void VulkanDevice::SelectPhysicalDevice() {
 }
 
 void VulkanDevice::CreateLogicalDevice() {
-    m_GraphicsFamily = FindQueueFamily(m_Physical,
-        VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT, m_Surface);
-    HE_ASSERT(m_GraphicsFamily != ~0u, "No suitable queue family found");
-
     float queuePriority = 1.0f;
-    VkDeviceQueueCreateInfo queueInfo{};
-    queueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-    queueInfo.queueFamilyIndex = m_GraphicsFamily;
-    queueInfo.queueCount = 1;
-    queueInfo.pQueuePriorities = &queuePriority;
+
+    // 构建队列创建信息（1 或 2 个队列族）
+    std::vector<VkDeviceQueueCreateInfo> queueInfos;
+    {
+        VkDeviceQueueCreateInfo gfxInfo{};
+        gfxInfo.sType            = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        gfxInfo.queueFamilyIndex = m_GraphicsFamily;
+        gfxInfo.queueCount       = 1;
+        gfxInfo.pQueuePriorities = &queuePriority;
+        queueInfos.push_back(gfxInfo);
+    }
+    if (m_HasAsyncCompute) {
+        VkDeviceQueueCreateInfo compInfo{};
+        compInfo.sType            = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        compInfo.queueFamilyIndex = m_ComputeFamily;
+        compInfo.queueCount       = 1;
+        compInfo.pQueuePriorities = &queuePriority;
+        queueInfos.push_back(compInfo);
+    }
 
     std::vector<const char*> deviceExtensions = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
@@ -249,16 +332,23 @@ void VulkanDevice::CreateLogicalDevice() {
     addrFeature.bufferDeviceAddress = VK_TRUE;
     addrFeature.pNext = nullptr;
 
-    // pNext 链: descIndexing → addrFeature
+    // 启用 Timeline Semaphore（Vulkan 1.2+ 核心特性，需显式开启）
+    VkPhysicalDeviceTimelineSemaphoreFeatures timelineFeature{};
+    timelineFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
+    timelineFeature.timelineSemaphore = VK_TRUE;
+    timelineFeature.pNext = nullptr;
+
+    // pNext 链: descIndexing → addrFeature → timelineFeature
     descIndexing.pNext = &addrFeature;
+    addrFeature.pNext  = &timelineFeature;
 
     VkPhysicalDeviceFeatures features{};
 
     VkDeviceCreateInfo deviceInfo{};
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     deviceInfo.pNext = &descIndexing;
-    deviceInfo.queueCreateInfoCount = 1;
-    deviceInfo.pQueueCreateInfos = &queueInfo;
+    deviceInfo.queueCreateInfoCount = static_cast<u32>(queueInfos.size());
+    deviceInfo.pQueueCreateInfos = queueInfos.data();
     deviceInfo.enabledExtensionCount = static_cast<u32>(deviceExtensions.size());
     deviceInfo.ppEnabledExtensionNames = deviceExtensions.data();
     deviceInfo.pEnabledFeatures = &features;
@@ -266,8 +356,17 @@ void VulkanDevice::CreateLogicalDevice() {
     VkResult result = vkCreateDevice(m_Physical, &deviceInfo, nullptr, &m_Device);
     HE_ASSERT(result == VK_SUCCESS, "Failed to create logical device");
 
+    // 获取队列句柄
     vkGetDeviceQueue(m_Device, m_GraphicsFamily, 0, &m_GraphicsQueue);
-    HE_CORE_INFO("Logical device + graphics queue created");
+    if (m_HasAsyncCompute) {
+        vkGetDeviceQueue(m_Device, m_ComputeFamily, 0, &m_ComputeQueue);
+        HE_CORE_INFO("Logical device created (Graphics family={} + AsyncCompute family={})",
+                     m_GraphicsFamily, m_ComputeFamily);
+    } else {
+        m_ComputeQueue = m_GraphicsQueue;  // 回退到同一队列
+        HE_CORE_INFO("Logical device created (Graphics+Compute shared, family={})",
+                     m_GraphicsFamily);
+    }
 
     // 创建 VMA 分配器（替代裸 vkAllocateMemory/vkFreeMemory）
     VmaVulkanFunctions vmaVulkanFunctions{};
@@ -312,13 +411,18 @@ void VulkanDevice::CreateLogicalDevice() {
 void VulkanDevice::CreateCommandPools() {
     VkCommandPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    poolInfo.queueFamilyIndex = m_GraphicsFamily;
     poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
 
+    // Graphics 命令池 — 使用 Graphics 队列族
+    poolInfo.queueFamilyIndex = m_GraphicsFamily;
     vkCreateCommandPool(m_Device, &poolInfo, nullptr, &m_GraphicsCmdPool);
 
-    poolInfo.queueFamilyIndex = m_GraphicsFamily; // Use same family for compute
+    // Compute 命令池 — 使用 Compute 队列族（可能与 Graphics 相同）
+    poolInfo.queueFamilyIndex = m_ComputeFamily;
     vkCreateCommandPool(m_Device, &poolInfo, nullptr, &m_ComputeCmdPool);
+
+    HE_CORE_INFO("Command pools: Graphics(family={}), Compute(family={})",
+                 m_GraphicsFamily, m_ComputeFamily);
 }
 
 std::unique_ptr<IRHISwapChain> VulkanDevice::CreateSwapChain(const SwapChainDesc& desc) {
@@ -327,8 +431,22 @@ std::unique_ptr<IRHISwapChain> VulkanDevice::CreateSwapChain(const SwapChainDesc
 }
 
 std::unique_ptr<IRHICommandList> VulkanDevice::CreateCommandList(QueueType queue) {
-    return std::make_unique<VulkanCommandList>(m_Device, m_GraphicsQueue,
-                                               m_GraphicsFamily, this);
+    // 根据队列类型选择正确的 VkQueue 和 QueueFamily
+    VkQueue vkQueue = m_GraphicsQueue;
+    u32     family  = m_GraphicsFamily;
+
+    if (queue == QueueType::Compute) {
+        vkQueue = m_ComputeQueue;
+        family  = m_ComputeFamily;
+    } else if (queue == QueueType::Copy) {
+        // Copy 队列暂未独立实现，回退到 Graphics
+        vkQueue = m_GraphicsQueue;
+        family  = m_GraphicsFamily;
+    }
+
+    auto cmdList = std::make_unique<VulkanCommandList>(m_Device, vkQueue, family, this);
+    cmdList->SetQueueType(queue);  // 记录队列类型，用于跨队列 Barrier
+    return cmdList;
 }
 
 std::unique_ptr<IRHICommandList> VulkanDevice::CreateSecondaryCommandList() {
@@ -342,6 +460,143 @@ void VulkanDevice::WaitIdle() {
 void VulkanDevice::Submit(IRHICommandList* cmdList) {
     auto* vulkanCmd = static_cast<VulkanCommandList*>(cmdList);
     vulkanCmd->Submit();
+}
+
+// ── 多队列支持 ──
+
+bool VulkanDevice::HasAsyncComputeQueue() const {
+    return m_HasAsyncCompute;
+}
+
+u32 VulkanDevice::GetQueueFamily(QueueType queue) const {
+    switch (queue) {
+        case QueueType::Compute:  return m_ComputeFamily;
+        case QueueType::Graphics: return m_GraphicsFamily;
+        case QueueType::Copy:     return m_GraphicsFamily;  // 暂用 Graphics 族
+        default:                  return m_GraphicsFamily;
+    }
+}
+
+// ── 跨队列同步原语 (Timeline Semaphore) ──
+
+VkSemaphore VulkanDevice::CreateTimelineSemaphore(u64 initialValue) {
+    VkSemaphoreTypeCreateInfo typeInfo{};
+    typeInfo.sType         = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+    typeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    typeInfo.initialValue  = initialValue;
+
+    VkSemaphoreCreateInfo semInfo{};
+    semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    semInfo.pNext = &typeInfo;
+
+    VkSemaphore semaphore = VK_NULL_HANDLE;
+    VkResult result = vkCreateSemaphore(m_Device, &semInfo, nullptr, &semaphore);
+    HE_ASSERT(result == VK_SUCCESS, "Failed to create timeline semaphore");
+    return semaphore;
+}
+
+RHIFenceHandle VulkanDevice::CreateFence() {
+    VkSemaphore semaphore = CreateTimelineSemaphore(0);
+    FenceState fs;
+    fs.semaphore    = semaphore;
+    fs.currentValue = 0;
+    m_Fences.push_back(fs);
+    return static_cast<RHIFenceHandle>(m_Fences.size());  // 1-based handle
+}
+
+void VulkanDevice::DestroyFence(RHIFenceHandle fence) {
+    if (fence == kInvalidFence || fence > m_Fences.size()) return;
+    auto& fs = m_Fences[static_cast<usize>(fence - 1)];
+    if (fs.semaphore) {
+        vkDestroySemaphore(m_Device, fs.semaphore, nullptr);
+        fs.semaphore = VK_NULL_HANDLE;
+    }
+}
+
+bool VulkanDevice::WaitForFence(RHIFenceHandle fence, u64 value, u64 timeout) {
+    if (fence == kInvalidFence || fence > m_Fences.size()) return false;
+    auto& fs = m_Fences[static_cast<usize>(fence - 1)];
+
+    VkSemaphoreWaitInfo waitInfo{};
+    waitInfo.sType          = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+    waitInfo.semaphoreCount = 1;
+    waitInfo.pSemaphores    = &fs.semaphore;
+    waitInfo.pValues        = &value;
+
+    VkResult result = vkWaitSemaphores(m_Device, &waitInfo, timeout);
+    return result == VK_SUCCESS;
+}
+
+u64 VulkanDevice::GetFenceValue(RHIFenceHandle fence) const {
+    if (fence == kInvalidFence || fence > m_Fences.size()) return 0;
+    auto& fs = m_Fences[static_cast<usize>(fence - 1)];
+
+    u64 value = 0;
+    vkGetSemaphoreCounterValue(m_Device, fs.semaphore, &value);
+    return value;
+}
+
+void VulkanDevice::SignalFenceOnQueue(QueueType queue, RHIFenceHandle fence, u64 value) {
+    if (fence == kInvalidFence || fence > m_Fences.size()) return;
+    auto& fs = m_Fences[static_cast<usize>(fence - 1)];
+
+    VkQueue vkQueue = (queue == QueueType::Compute) ? m_ComputeQueue : m_GraphicsQueue;
+
+    VkTimelineSemaphoreSubmitInfo timelineInfo{};
+    timelineInfo.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+    timelineInfo.signalSemaphoreValueCount = 1;
+    timelineInfo.pSignalSemaphoreValues    = &value;
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.pNext              = &timelineInfo;
+    submitInfo.signalSemaphoreCount = 1;
+    submitInfo.pSignalSemaphores    = &fs.semaphore;
+
+    VkResult result = vkQueueSubmit(vkQueue, 1, &submitInfo, VK_NULL_HANDLE);
+    HE_ASSERT(result == VK_SUCCESS, "SignalFenceOnQueue: vkQueueSubmit failed");
+
+    fs.currentValue = value;
+}
+
+void VulkanDevice::WaitFenceOnQueue(QueueType queue, RHIFenceHandle fence, u64 value) {
+    if (fence == kInvalidFence || fence > m_Fences.size()) return;
+    auto& fs = m_Fences[static_cast<usize>(fence - 1)];
+
+    VkQueue vkQueue = (queue == QueueType::Compute) ? m_ComputeQueue : m_GraphicsQueue;
+
+    VkTimelineSemaphoreSubmitInfo timelineInfo{};
+    timelineInfo.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+    timelineInfo.waitSemaphoreValueCount   = 1;
+    timelineInfo.pWaitSemaphoreValues      = &value;
+
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.pNext                = &timelineInfo;
+    submitInfo.waitSemaphoreCount   = 1;
+    submitInfo.pWaitSemaphores      = &fs.semaphore;
+    submitInfo.pWaitDstStageMask    = &waitStage;
+
+    VkResult result = vkQueueSubmit(vkQueue, 1, &submitInfo, VK_NULL_HANDLE);
+    HE_ASSERT(result == VK_SUCCESS, "WaitFenceOnQueue: vkQueueSubmit failed");
+}
+
+void VulkanDevice::SubmitAll(Span<IRHICommandList*> cmdLists) {
+    // 按队列分组提交
+    std::vector<VulkanCommandList*> gfxLists, compLists;
+    for (auto* cl : cmdLists) {
+        auto* vkCl = static_cast<VulkanCommandList*>(cl);
+        if (vkCl->GetQueueType() == QueueType::Compute)
+            compLists.push_back(vkCl);
+        else
+            gfxLists.push_back(vkCl);
+    }
+
+    // 分别提交到各自队列
+    for (auto* cl : gfxLists) cl->Submit();
+    for (auto* cl : compLists) cl->Submit();
 }
 
 // ── GPU Query ──
@@ -667,6 +922,12 @@ VkQueue VulkanDeviceAccess::GetGraphicsQueue(IRHIDevice* d) {
 
 VkCommandPool VulkanDeviceAccess::GetGraphicsCmdPool(IRHIDevice* d) {
     return static_cast<VulkanDevice*>(d)->GetGraphicsCmdPool();
+}
+VkQueue VulkanDeviceAccess::GetComputeQueue(IRHIDevice* d) {
+    return static_cast<VulkanDevice*>(d)->GetComputeQueue();
+}
+u32 VulkanDeviceAccess::GetComputeFamily(IRHIDevice* d) {
+    return static_cast<VulkanDevice*>(d)->GetComputeFamily();
 }
 
 } // namespace he::rhi

@@ -157,6 +157,10 @@ struct DeviceCaps {
     bool    supportsCooperativeVectors = false;
     bool    supportsLinearAlgebra  = false;
     bool    supportsSamplerFeedback = false;
+    // 异步计算支持
+    bool    supportsAsyncCompute   = false;  // GPU 是否有独立 Compute 队列族
+    bool    supportsTransferQueue  = false;  // GPU 是否有独立 Copy 队列 (DMA)
+    u32     asyncComputeTier       = 0;      // 0=不支持, 1=独立队列族, 2=专用硬件引擎
 };
 
 // --- 管线绑定点 ---
@@ -194,6 +198,12 @@ using DescriptorSetLayoutHandle = u64;
 using DescriptorSetHandle        = u64;
 constexpr DescriptorSetLayoutHandle kInvalidLayout = 0;
 constexpr DescriptorSetHandle       kInvalidSet    = 0;
+
+// --- 跨队列同步原语（不透明句柄）---
+// Vulkan: 封装 VkSemaphore (Timeline Semaphore)
+// D3D12:  封装 ID3D12Fence
+using RHIFenceHandle            = u64;
+constexpr RHIFenceHandle kInvalidFence = 0;
 
 // --- 资源状态（用于 Barrier 推导）---
 enum class ResourceState : u32 {

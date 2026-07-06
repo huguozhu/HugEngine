@@ -117,6 +117,28 @@ public:
     virtual void CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst,
                             u64 size, u64 srcOffset = 0, u64 dstOffset = 0) = 0;
 
+    // 跨队列所有权转移（AsyncCompute Barrier）
+    // 当资源从 Graphics 队列移交给 Compute 队列（或反向）时调用
+    // Vulkan: PipelineBarrier 中设置 srcQueueFamilyIndex != dstQueueFamilyIndex
+    // D3D12:  发出 ResourceBarrier with D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES
+    virtual void QueueOwnershipTransfer(
+        IRHITexture* texture,
+        QueueType srcQueue,
+        QueueType dstQueue,
+        ResourceState currentState,
+        ResourceState newState) = 0;
+
+    virtual void QueueOwnershipTransfer(
+        IRHIBuffer* buffer,
+        QueueType srcQueue,
+        QueueType dstQueue,
+        ResourceState currentState,
+        ResourceState newState) = 0;
+
+    // 简化版: 释放资源到目标队列，保持原状态
+    virtual void ReleaseToQueue(IRHITexture* texture, QueueType dstQueue) = 0;
+    virtual void AcquireFromQueue(IRHITexture* texture, QueueType srcQueue) = 0;
+
     // GPU 时间戳查询
     virtual void WriteTimestamp(IRHIQueryPool* pool, u32 queryIndex) = 0;
     virtual void ResetQueryPool(IRHIQueryPool* pool) = 0;

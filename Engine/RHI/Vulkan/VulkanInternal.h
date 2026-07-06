@@ -101,6 +101,19 @@ public:
     void WaitIdle() override;
     void Submit(IRHICommandList* cmdList) override;
 
+    // 多队列支持
+    bool HasAsyncComputeQueue() const override;
+    u32  GetQueueFamily(QueueType queue) const override;
+
+    // 跨队列同步原语 (Timeline Semaphore)
+    RHIFenceHandle CreateFence() override;
+    void           DestroyFence(RHIFenceHandle fence) override;
+    bool           WaitForFence(RHIFenceHandle fence, u64 value, u64 timeout = UINT64_MAX) override;
+    u64            GetFenceValue(RHIFenceHandle fence) const override;
+    void           SignalFenceOnQueue(QueueType queue, RHIFenceHandle fence, u64 value) override;
+    void           WaitFenceOnQueue(QueueType queue, RHIFenceHandle fence, u64 value) override;
+    void           SubmitAll(Span<IRHICommandList*> cmdLists) override;
+
     // GPU Query
     std::unique_ptr<IRHIQueryPool> CreateQueryPool(u32 queryCount) override;
     float GetTimestampPeriod() override;
@@ -129,6 +142,11 @@ public:
     u32              GetGraphicsFamily() const { return m_GraphicsFamily; }
     VmaAllocator     GetVmaAllocator() const { return m_VmaAllocator; }
 
+    // 异步计算队列访问器
+    VkQueue GetComputeQueue()  const { return m_ComputeQueue; }
+    u32     GetComputeFamily() const { return m_ComputeFamily; }
+    bool    HasAsyncCompute()  const { return m_HasAsyncCompute; }
+
     // Descriptor set handle 解析（供 VulkanCommandList 使用）
     VkDescriptorSet ResolveDescriptorSet(DescriptorSetHandle h) const {
         if (h == 0 || h > m_DescSets.size()) return VK_NULL_HANDLE;
@@ -142,8 +160,10 @@ public:
 private:
     void CreateSurface(void* windowHandle);
     void SelectPhysicalDevice();
+    void FindQueueFamilies();     // 查询所有队列族，检测 AsyncCompute 能力
     void CreateLogicalDevice();
     void CreateCommandPools();
+    VkSemaphore CreateTimelineSemaphore(u64 initialValue);  // 创建 Timeline 信号量
 
     VkInstance       m_Instance       = VK_NULL_HANDLE;
     VkPhysicalDevice m_Physical       = VK_NULL_HANDLE;
@@ -153,8 +173,20 @@ private:
     VkQueue          m_GraphicsQueue   = VK_NULL_HANDLE;
     u32              m_GraphicsFamily  = 0;
 
+    // 独立 Compute 队列（AsyncCompute）
+    VkQueue          m_ComputeQueue    = VK_NULL_HANDLE;
+    u32              m_ComputeFamily   = 0;
+    bool             m_HasAsyncCompute = false;
+
     VkCommandPool    m_GraphicsCmdPool = VK_NULL_HANDLE;
     VkCommandPool    m_ComputeCmdPool  = VK_NULL_HANDLE;
+
+    // Timeline Semaphore 池（跨队列同步）
+    struct FenceState {
+        VkSemaphore semaphore    = VK_NULL_HANDLE;
+        u64         currentValue = 0;
+    };
+    std::vector<FenceState> m_Fences;
 
     VmaAllocator               m_VmaAllocator     = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT m_DebugMessenger = VK_NULL_HANDLE;
@@ -222,6 +254,16 @@ public:
     void CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst,
                     u64 size, u64 srcOffset, u64 dstOffset) override;
 
+    // 跨队列所有权转移（AsyncCompute Barrier）
+    void QueueOwnershipTransfer(IRHITexture* texture,
+                                QueueType srcQueue, QueueType dstQueue,
+                                ResourceState currentState, ResourceState newState) override;
+    void QueueOwnershipTransfer(IRHIBuffer* buffer,
+                                QueueType srcQueue, QueueType dstQueue,
+                                ResourceState currentState, ResourceState newState) override;
+    void ReleaseToQueue(IRHITexture* texture, QueueType dstQueue) override;
+    void AcquireFromQueue(IRHITexture* texture, QueueType srcQueue) override;
+
     // GPU Timestamp Query
     void WriteTimestamp(IRHIQueryPool* pool, u32 queryIndex) override;
     void ResetQueryPool(IRHIQueryPool* pool) override;
@@ -235,6 +277,8 @@ public:
         m_SwapchainExtent = extent;
     }
     void SetCurrentImageIndex(u32 index) { m_CurrentImageIndex = index; }
+    void SetQueueType(QueueType type) { m_QueueType = type; }  // 设置队列类型（跨队列 Barrier 用）
+    QueueType GetQueueType() const { return m_QueueType; }      // 获取队列类型
 
     // 设置 Submit 时的等待/信号 Semaphore
     void SetSyncSemaphores(VkSemaphore wait, VkSemaphore signal) {
@@ -249,6 +293,7 @@ private:
     VkQueue          m_Queue       = VK_NULL_HANDLE;
     VulkanDevice*    m_VulkanDevice = nullptr;  // 用于 DescriptorSet 句柄解析
     u32              m_QueueFamily = 0;
+    QueueType        m_QueueType   = QueueType::Graphics;  // 所属队列类型
 
     // 三缓冲帧环（Phase 1 多线程渲染）
     static constexpr u32 kMaxFramesInFlight = 3;
@@ -420,6 +465,8 @@ struct VulkanDeviceAccess {
     static u32              GetGraphicsFamily(IRHIDevice* d);
     static VkQueue          GetGraphicsQueue(IRHIDevice* d);
     static VkCommandPool    GetGraphicsCmdPool(IRHIDevice* d);
+    static VkQueue          GetComputeQueue(IRHIDevice* d);
+    static u32              GetComputeFamily(IRHIDevice* d);
 };
 
 // ============================================================

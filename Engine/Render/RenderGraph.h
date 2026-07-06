@@ -60,6 +60,13 @@ struct BarrierRecord {
     rhi::ResourceState dstState;
 };
 
+// --- Pass 队列类型提示 ---
+enum class RGPassQueue : u8 {
+    Default  = 0,  // 跟随 RenderGraph 默认队列 (Graphics)
+    Graphics = 1,  // 显式 Graphics 队列
+    Compute  = 2,  // 显式 Compute 队列 → AsyncCompute 候选
+};
+
 // --- 渲染 Pass ---
 using PassExecuteFunc = std::function<void(rhi::IRHICommandList* cmdList)>;
 
@@ -73,6 +80,13 @@ struct PassNode {
     u32                         order = 0;
     // 屏障：Pass 执行前需要插入的资源转换
     std::vector<BarrierRecord>  preBarriers;
+    // 异步调度
+    RGPassQueue                 queueHint     = RGPassQueue::Default;  // 队列类型提示
+    bool                        asyncSchedule = false;  // 编译后: 是否可并行执行
+    bool                        requiresSync  = false;  // 编译后: 是否需要跨队列同步点
+    // 跨队列 Barrier（AsyncCompute 专用）
+    std::vector<BarrierRecord>  crossQueueAcquire;  // Pass 执行前: Graphics→Compute
+    std::vector<BarrierRecord>  crossQueueRelease;  // Pass 执行后: Compute→Graphics
 };
 
 // --- 资源别名池（Phase 2: 简单贪心，Phase 3: 完善）---
@@ -99,15 +113,25 @@ public:
     PassNode* AddPass(StringView name,
                       std::vector<PassResource> reads  = {},
                       std::vector<PassResource> writes = {},
-                      PassExecuteFunc execute = nullptr);
+                      PassExecuteFunc execute = nullptr,
+                      RGPassQueue queueHint = RGPassQueue::Default);
 
     ResourceHandle ImportBackBuffer();
 
     // --- 编译 ---
     void Compile();
 
-    // --- 执行 ---
+    // --- 执行（同步模式，单 Graphics 队列） ---
     void Execute(rhi::IRHICommandList* cmdList, rhi::IRHIDevice* device);
+
+    // --- 执行（异步模式，Graphics + Compute 双队列） ---
+    void Execute(rhi::IRHICommandList* graphicsCmd,
+                 rhi::IRHICommandList* computeCmd,
+                 rhi::IRHIDevice* device);
+
+    // --- AsyncCompute 开关 ---
+    bool IsAsyncComputeEnabled() const { return m_AsyncComputeEnabled; }
+    void SetAsyncComputeEnabled(bool enabled) { m_AsyncComputeEnabled = enabled; }
 
     void Reset();
     const std::vector<PassNode*>& GetPassOrder() const { return m_PassOrder; }
@@ -119,6 +143,14 @@ private:
     void ApplyAliasing();         // 资源别名分配（Phase 2）
     void CullDeadPasses();        // 裁剪未使用的 Pass（Phase 2）
     rhi::ResourceState AccessToState(ResourceAccess access, bool isDepth) const;
+
+    // AsyncCompute 调度（Phase 3）
+    void ScheduleAsyncPasses();   // 分析依赖，标记可并行 Pass
+    void InsertCrossQueueBarrier(PassNode* pass,
+                                  rhi::QueueType srcQueue,
+                                  rhi::QueueType dstQueue);
+    // 获取 Pass 之后（拓扑序）的所有 Pass
+    std::vector<PassNode*> GetSubsequentPasses(PassNode* pass);
 
     std::vector<ResourceDesc>     m_Resources;
     std::vector<ResourceState>    m_ResourceStates;   // 编译后填充
@@ -133,6 +165,7 @@ private:
 
     ResourceHandle m_BackBufferHandle = kInvalidHandle;
     bool           m_Compiled = false;
+    bool           m_AsyncComputeEnabled = false;
 };
 
 #define RG_READ(h)   PassResource{h, ResourceAccess::Read}

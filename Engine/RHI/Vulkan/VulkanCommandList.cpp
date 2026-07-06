@@ -738,6 +738,88 @@ void VulkanCommandList::PipelineBarrier(
 }
 
 // ============================================================
+// 跨队列所有权转移（AsyncCompute Barrier）
+// ============================================================
+
+void VulkanCommandList::QueueOwnershipTransfer(
+    IRHITexture* texture,
+    QueueType srcQueue, QueueType dstQueue,
+    ResourceState currentState, ResourceState newState)
+{
+    if (!texture || !m_VulkanDevice) return;
+    auto* vkTex = static_cast<VulkanTexture*>(texture);
+
+    u32 srcFamily = m_VulkanDevice->GetQueueFamily(srcQueue);
+    u32 dstFamily = m_VulkanDevice->GetQueueFamily(dstQueue);
+
+    VkImageMemoryBarrier imageBarrier{};
+    imageBarrier.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    imageBarrier.srcAccessMask       = ToVkAccessFlags(currentState);
+    imageBarrier.dstAccessMask       = ToVkAccessFlags(newState);
+    imageBarrier.oldLayout           = ToVkImageLayout(currentState);
+    imageBarrier.newLayout           = ToVkImageLayout(newState);
+    imageBarrier.srcQueueFamilyIndex = srcFamily;
+    imageBarrier.dstQueueFamilyIndex = dstFamily;
+    imageBarrier.image               = vkTex->GetImage();
+
+    // 根据纹理格式选择 aspect mask
+    VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+    Format fmt = vkTex->GetFormat();
+    if (fmt == Format::D32_FLOAT || fmt == Format::D24_UNORM_S8_UINT || fmt == Format::D16_UNORM)
+        aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+    imageBarrier.subresourceRange = {
+        aspect,
+        0, vkTex->GetMipLevels(),
+        0, vkTex->GetArrayLayers()
+    };
+
+    vkCmdPipelineBarrier(m_CmdBuffers[m_FrameIndex],
+        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &imageBarrier);
+}
+
+void VulkanCommandList::QueueOwnershipTransfer(
+    IRHIBuffer* buffer,
+    QueueType srcQueue, QueueType dstQueue,
+    ResourceState currentState, ResourceState newState)
+{
+    if (!buffer || !m_VulkanDevice) return;
+    auto* vkBuf = static_cast<VulkanBuffer*>(buffer);
+
+    u32 srcFamily = m_VulkanDevice->GetQueueFamily(srcQueue);
+    u32 dstFamily = m_VulkanDevice->GetQueueFamily(dstQueue);
+
+    VkBufferMemoryBarrier bufferBarrier{};
+    bufferBarrier.sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    bufferBarrier.srcAccessMask       = ToVkAccessFlags(currentState);
+    bufferBarrier.dstAccessMask       = ToVkAccessFlags(newState);
+    bufferBarrier.srcQueueFamilyIndex = srcFamily;
+    bufferBarrier.dstQueueFamilyIndex = dstFamily;
+    bufferBarrier.buffer              = vkBuf->GetHandle();
+    bufferBarrier.offset              = 0;
+    bufferBarrier.size                = vkBuf->GetSize();
+
+    vkCmdPipelineBarrier(m_CmdBuffers[m_FrameIndex],
+        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+        0, 0, nullptr, 1, &bufferBarrier, 0, nullptr);
+}
+
+void VulkanCommandList::ReleaseToQueue(IRHITexture* texture, QueueType dstQueue) {
+    // 简化版: 释放资源到目标队列，保持 ShaderResource 状态
+    // 调用者（RenderGraph）应在外部追踪精确状态，此处用安全默认值
+    QueueOwnershipTransfer(texture, m_QueueType, dstQueue,
+                           ResourceState::ShaderResource, ResourceState::ShaderResource);
+}
+
+void VulkanCommandList::AcquireFromQueue(IRHITexture* texture, QueueType srcQueue) {
+    // 简化版: 从源队列获取资源，保持 ShaderResource 状态
+    QueueOwnershipTransfer(texture, srcQueue, m_QueueType,
+                           ResourceState::ShaderResource, ResourceState::ShaderResource);
+}
+
+// ============================================================
 // Submit（提交命令缓冲到 GPU 队列）
 // ============================================================
 

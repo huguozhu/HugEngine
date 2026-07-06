@@ -87,15 +87,19 @@ ResourceHandle RenderGraph::ImportBackBuffer() {
 PassNode* RenderGraph::AddPass(StringView name,
                                 std::vector<PassResource> reads,
                                 std::vector<PassResource> writes,
-                                PassExecuteFunc execute) {
+                                PassExecuteFunc execute,
+                                RGPassQueue queueHint) {
     PassNode pass;
-    pass.name    = String(name);
-    pass.reads   = std::move(reads);
-    pass.writes  = std::move(writes);
-    pass.execute = std::move(execute);
+    pass.name      = String(name);
+    pass.reads     = std::move(reads);
+    pass.writes    = std::move(writes);
+    pass.execute   = std::move(execute);
+    pass.queueHint = queueHint;
     m_Passes.push_back(std::move(pass));
     m_Compiled = false;
-    HE_CORE_INFO("  RG pass: {}", name);
+    HE_CORE_INFO("  RG pass: {} [{}]", name,
+                 queueHint == RGPassQueue::Compute ? "Compute" :
+                 queueHint == RGPassQueue::Graphics ? "Graphics" : "Default");
     return &m_Passes.back();
 }
 
@@ -124,6 +128,12 @@ void RenderGraph::Compile() {
     DeriveBarriers();
     CullDeadPasses();
     ApplyAliasing();
+
+    // 异步调度分析（在 Barrier 推导之后，因为需要知道资源状态）
+    if (m_AsyncComputeEnabled) {
+        ScheduleAsyncPasses();
+    }
+
     m_Compiled = true;
 }
 
@@ -390,6 +400,193 @@ void RenderGraph::Execute(rhi::IRHICommandList* cmdList, rhi::IRHIDevice* device
     if (m_Profiler) m_Profiler->EndFrame(device);
 }
 
+// ============================================================
+// 双队列 Execute（AsyncCompute 模式）
+// ============================================================
+
+void RenderGraph::Execute(rhi::IRHICommandList* graphicsCmd,
+                           rhi::IRHICommandList* computeCmd,
+                           rhi::IRHIDevice* device) {
+    if (!m_Compiled) Compile();
+
+    HE_CORE_INFO("RenderGraph::Execute (Async) — {} passes", m_PassOrder.size());
+
+    // 每帧更新 SwapChain BackBuffer
+    if (m_SwapChain && m_BackBufferHandle != kInvalidHandle) {
+        u32 idx = m_SwapChain->GetCurrentBackBufferIndex();
+        void* bbView = m_SwapChain->GetCurrentBackBufferView();
+        m_Resources[m_BackBufferHandle].width  = m_SwapChain->GetWidth();
+        m_Resources[m_BackBufferHandle].height = m_SwapChain->GetHeight();
+        m_ImportedTextures[m_BackBufferHandle] = reinterpret_cast<rhi::IRHITexture*>(bbView);
+    }
+
+    TArray<std::unique_ptr<rhi::IRHITexture>> textures(m_Resources.size());
+    TArray<std::unique_ptr<rhi::IRHIBuffer>>  buffers(m_Resources.size());
+
+    for (usize i = 0; i < m_Resources.size(); ++i) {
+        if (m_ImportedTextures.count(static_cast<ResourceHandle>(i))) continue;
+        auto& desc = m_Resources[i];
+        if (desc.type == ResourceType::Texture && desc.width > 0) {
+            rhi::TextureDesc texDesc;
+            texDesc.width  = desc.width;
+            texDesc.height = desc.height;
+            texDesc.format = desc.format;
+            texDesc.usage  = desc.textureUsage;
+            textures[i] = device->CreateTexture(texDesc);
+        } else if (desc.type == ResourceType::Buffer && desc.bufferSize > 0) {
+            rhi::BufferDesc bufDesc;
+            bufDesc.size  = desc.bufferSize;
+            bufDesc.usage = desc.bufferUsage;
+            buffers[i] = device->CreateBuffer(bufDesc);
+        }
+    }
+
+    // 辅助: 根据资源 handle 获取纹理指针
+    auto getTexture = [&](ResourceHandle h) -> rhi::IRHITexture* {
+        if (h < textures.size() && textures[h]) return textures[h].get();
+        if (m_ImportedTextures.count(h)) return m_ImportedTextures[h];
+        return nullptr;
+    };
+
+    // GPU Profiler（仍在 Graphics 命令列表上打标签）
+    if (m_Profiler) m_Profiler->BeginFrame(graphicsCmd);
+    u32 passIdx = 0;
+
+    for (auto* pass : m_PassOrder) {
+        // 选择正确的命令列表
+        rhi::IRHICommandList* cmdList = graphicsCmd;
+        if (pass->queueHint == RGPassQueue::Compute && m_AsyncComputeEnabled)
+            cmdList = computeCmd;
+
+        // 1. 跨队列 Acquire Barrier（从 Graphics 获取资源所有权）
+        for (auto& br : pass->crossQueueAcquire) {
+            if (br.srcState == br.dstState) continue;
+            rhi::IRHITexture* tex = getTexture(br.handle);
+            if (tex) {
+                cmdList->QueueOwnershipTransfer(tex,
+                    rhi::QueueType::Graphics, rhi::QueueType::Compute,
+                    br.srcState, br.dstState);
+            }
+        }
+
+        // 2. 常规 Barrier（布局转换）
+        for (auto& br : pass->preBarriers) {
+            if (br.srcState == br.dstState) continue;
+            rhi::IRHITexture* tex = getTexture(br.handle);
+            if (tex) {
+                cmdList->PipelineBarrier(br.srcStage, br.dstStage,
+                                         br.srcState, br.dstState, tex);
+            }
+        }
+
+        // 3. 执行 Pass
+        if (m_Profiler) m_Profiler->BeginPass(cmdList, passIdx, pass->name);
+        if (pass->execute) pass->execute(cmdList);
+        if (m_Profiler) m_Profiler->EndPass(cmdList, passIdx);
+        passIdx++;
+
+        // 4. 跨队列 Release Barrier（释放资源回 Graphics）
+        for (auto& br : pass->crossQueueRelease) {
+            if (br.srcState == br.dstState) continue;
+            rhi::IRHITexture* tex = getTexture(br.handle);
+            if (tex) {
+                cmdList->QueueOwnershipTransfer(tex,
+                    rhi::QueueType::Compute, rhi::QueueType::Graphics,
+                    br.srcState, br.dstState);
+            }
+        }
+    }
+
+    if (m_Profiler) m_Profiler->EndFrame(device);
+}
+
+// ============================================================
+// AsyncCompute 调度分析
+// ============================================================
+
+void RenderGraph::ScheduleAsyncPasses() {
+    HE_CORE_INFO("RenderGraph::ScheduleAsyncPasses — analyzing async compute candidates");
+
+    for (auto* pass : m_PassOrder) {
+        if (pass->queueHint != RGPassQueue::Compute) continue;
+
+        // 检查资源依赖: 该 Pass 的输出是否被后面的 Graphics Pass 读取
+        bool canAsync = true;
+        for (auto& write : pass->writes) {
+            for (auto* subsequentPass : GetSubsequentPasses(pass)) {
+                if (subsequentPass->queueHint == RGPassQueue::Compute) continue; // Comp-to-Comp 无需转移
+                for (auto& read : subsequentPass->reads) {
+                    if (write.handle == read.handle) {
+                        canAsync = false; // 有 RAW 依赖，不可完全异步
+                        break;
+                    }
+                }
+                if (!canAsync) break;
+            }
+        }
+
+        if (canAsync) {
+            pass->asyncSchedule = true;
+            // 自动插入跨队列 Barrier
+            InsertCrossQueueBarrier(pass,
+                rhi::QueueType::Graphics, rhi::QueueType::Compute);
+            HE_CORE_INFO("  Async pass '{}': 可并行", pass->name);
+        } else {
+            pass->requiresSync = true;
+            HE_CORE_INFO("  Async pass '{}': 存在依赖，需同步点", pass->name);
+        }
+    }
+}
+
+std::vector<PassNode*> RenderGraph::GetSubsequentPasses(PassNode* pass) {
+    std::vector<PassNode*> result;
+    bool found = false;
+    for (auto* p : m_PassOrder) {
+        if (found) result.push_back(p);
+        if (p == pass) found = true;
+    }
+    return result;
+}
+
+void RenderGraph::InsertCrossQueueBarrier(PassNode* pass,
+                                           rhi::QueueType srcQueue,
+                                           rhi::QueueType dstQueue) {
+    // 为 Pass 的 reads 插入 Acquire：从 Graphics 获取资源所有权
+    for (auto& r : pass->reads) {
+        if (r.handle >= m_ResourceStates.size()) continue;
+        auto& state = m_ResourceStates[r.handle];
+        if (state.layout == rhi::ResourceState::Undefined) continue;
+
+        BarrierRecord br;
+        br.handle   = r.handle;
+        br.srcState = state.layout;
+        br.dstState = state.layout;  // 保持相同状态，只转移所有权
+        br.srcStage = rhi::PipelineStage::BottomOfPipe;
+        br.dstStage = rhi::PipelineStage::ComputeShader;
+        pass->crossQueueAcquire.push_back(br);
+    }
+
+    // 为 Pass 的 writes 插入 Release：释放回 Graphics
+    for (auto& w : pass->writes) {
+        if (w.handle >= m_ResourceStates.size()) continue;
+        auto& state = m_ResourceStates[w.handle];
+
+        // 推导写入后的状态
+        rhi::ResourceState writtenState = AccessToState(w.access, state.isDepth);
+
+        BarrierRecord br;
+        br.handle   = w.handle;
+        br.srcState = writtenState;
+        br.dstState = writtenState;  // 保持相同状态，只转移所有权
+        br.srcStage = rhi::PipelineStage::ComputeShader;
+        br.dstStage = rhi::PipelineStage::TopOfPipe;
+        pass->crossQueueRelease.push_back(br);
+
+        // 更新追踪状态
+        state.layout = writtenState;
+    }
+}
+
 void RenderGraph::Reset() {
     m_Resources.clear();
     m_ResourceStates.clear();
@@ -399,6 +596,7 @@ void RenderGraph::Reset() {
     m_ImportedTextures.clear();
     m_BackBufferHandle = kInvalidHandle;
     m_Compiled = false;
+    m_AsyncComputeEnabled = false;
     HE_CORE_INFO("RenderGraph cleared");
 }
 
