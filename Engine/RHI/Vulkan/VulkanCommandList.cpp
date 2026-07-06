@@ -689,7 +689,8 @@ void VulkanCommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle setH
     if (!m_VulkanDevice) return;
     VkDescriptorSet ds = m_VulkanDevice->ResolveDescriptorSet(setHandle);
     if (ds == VK_NULL_HANDLE) return;
-    vkCmdBindDescriptorSets(m_CmdBuffers[m_FrameIndex], VK_PIPELINE_BIND_POINT_GRAPHICS,
+    // 使用 m_CurrentBindPoint（SetPipeline 已根据 Compute/Graphics PSO 设置正确的 bind point）
+    vkCmdBindDescriptorSets(m_CmdBuffers[m_FrameIndex], m_CurrentBindPoint,
                             m_CurrentLayout, setIndex, 1, &ds, 0, nullptr);
 }
 

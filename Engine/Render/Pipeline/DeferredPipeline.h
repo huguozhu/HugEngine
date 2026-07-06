@@ -17,6 +17,7 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "Pipeline/GPUCulling.h"
 #include "Pipeline/GPUScene.h"
 #include "Pipeline/MeshBatcher.h"
+#include "Pipeline/GBufferRenderer.h"
 #include "GI/GI_SSGI.h"
 #include "PostProcess/SSAO.h"
 #include "GI/GI_SSR.h"
@@ -73,6 +74,11 @@ public:
     DOFPass&        GetDOF()        { return m_DOF; }
     MotionBlurPass& GetMotionBlur() { return m_MotionBlur; }
     SSAO&           GetSSAO()       { return m_SSAO; }
+    // GBuffer 渲染模式
+    enum class GBufferMode : u8 { CPU, GPU };
+    void         SetGBufferMode(GBufferMode m);
+    GBufferMode  GetGBufferMode() const         { return m_GBufferMode; }
+
     void EnableFXAA(bool enable);
     bool IsFXAAEnabled() const                 { return m_FXAAEnabled && m_FXAA != nullptr; }
 
@@ -149,6 +155,11 @@ private:
     GPUScene   m_GPUScene;
     MeshBatcher m_MeshBatcher;
     bool       m_BatchBuilt = false;
+
+    // GBuffer 渲染（CPU/GPU 双模式）
+    GBufferMode m_GBufferMode = GBufferMode::CPU;
+    GBufferContext m_GBufferCtx;
+    std::unique_ptr<IGBufferRenderer> m_GBufferRenderer;
 
     // SSGI + SSR + DDGI + SSAO
     GI_SSGI m_SSGI;

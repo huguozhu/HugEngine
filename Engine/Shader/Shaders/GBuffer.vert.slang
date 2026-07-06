@@ -34,16 +34,18 @@ struct GPUObjectData {
 
 // offset 0:  viewProjMatrix     (64B) — 当前帧 VP（含抖动）
 // offset 64: prevViewProjMatrix (64B) — 上一帧 VP（不含抖动）
-// offset 128:objectIndex        (4B)
+// offset 128:objectIndex / useInstanceID
 [[vk::push_constant]] cbuffer FrameConstants {
     float4x4 viewProjMatrix;       // offset 0,  64B
     float4x4 prevViewProjMatrix;   // offset 64, 64B
     uint     objectIndex;          // offset 128, 4B
-    uint     _pad[15];             // 填充到 192B
+    uint     useInstanceID;        // offset 132, 4B  [GPU Driven 模式：1=从 SV_InstanceID 读取]
+    uint     _pad[14];             // 填充到 192B
 };
 
-VSOutput vertexMain(VSInput input) {
-    GPUObjectData obj = u_Objects[objectIndex];
+VSOutput vertexMain(VSInput input, uint instanceID : SV_InstanceID) {
+    uint objIdx = (useInstanceID != 0u) ? instanceID : objectIndex;
+    GPUObjectData obj = u_Objects[objIdx];
     float4 worldPos = mul(obj.worldMatrix, float4(input.positionOS, 1.0));
 
     VSOutput output;

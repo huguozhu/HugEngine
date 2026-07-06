@@ -7,6 +7,8 @@
 #include "SceneRenderer.h"
 #include "AntiAliasing/AA_TAA.h"
 #include "AntiAliasing/AA_FXAA.h"
+#include "Pipeline/GBufferRenderer_CPU.h"
+#include "Pipeline/GBufferRenderer_GPU.h"
 #include "Asset/BindlessTextureManager.h"
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
@@ -191,6 +193,28 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
             device, m_GBufferSet, 5, 6);
     }
 
+    // ── GBuffer 渲染器（PSO + DescriptorSet 就绪后创建）──
+    m_GBufferCtx.device       = device;
+    m_GBufferCtx.width        = m_Width;
+    m_GBufferCtx.height       = m_Height;
+    m_GBufferCtx.gbA          = m_GBufferA.get();
+    m_GBufferCtx.gbB          = m_GBufferB.get();
+    m_GBufferCtx.gbC          = m_GBufferC.get();
+    m_GBufferCtx.gbVel        = m_GBufferD.get();
+    m_GBufferCtx.gbDepth      = m_GBufferDepth.get();
+    m_GBufferCtx.pso          = m_GBufferPSO.get();
+    m_GBufferCtx.descSet      = m_GBufferSet;
+    m_GBufferCtx.sceneRenderer = m_SceneRenderer.get();
+    m_GBufferCtx.gpuCulling    = &m_GPUCulling;
+    m_GBufferCtx.gpuScene      = &m_GPUScene;
+    m_GBufferCtx.gpuVisibleIndices = &m_GPUVisibleIndices;
+    m_GBufferCtx.meshBatcher        = &m_MeshBatcher;
+    if (m_GBufferMode == GBufferMode::GPU)
+        m_GBufferRenderer = std::make_unique<GBufferRenderer_GPU>();
+    else
+        m_GBufferRenderer = std::make_unique<GBufferRenderer_CPU>();
+    m_GBufferRenderer->Initialize(m_GBufferCtx);
+
     // Lighting PSO (全屏三角形，无深度)
     rhi::ShaderBytecode lVS, lFS;
     lVS.stage = rhi::ShaderStage::Vertex; lVS.spirv = k_DeferredLighting_vert_spv; lVS.entryPoint = "main";
@@ -280,6 +304,8 @@ void DeferredPipeline::Shutdown() {
     for (auto& b : m_ShadowObjBuffers) b.reset();
     m_GPUCulling.Shutdown(m_Device);
     m_GPUScene.Shutdown();
+    if (m_GBufferRenderer) m_GBufferRenderer->Shutdown();
+    m_GBufferRenderer.reset();
     m_SSGI.Shutdown();
     m_SSR.Shutdown();
     m_DDGI.Shutdown();
@@ -292,6 +318,18 @@ void DeferredPipeline::Shutdown() {
 }
 
 // CreateTextureDescriptorSet 已移除 — 使用全局 bindless 纹理数组替代
+
+void DeferredPipeline::SetGBufferMode(GBufferMode mode) {
+    if (mode == m_GBufferMode && m_GBufferRenderer) return;
+    m_GBufferMode = mode;
+    if (m_GBufferRenderer) m_GBufferRenderer->Shutdown();
+    if (mode == GBufferMode::GPU)
+        m_GBufferRenderer = std::make_unique<GBufferRenderer_GPU>();
+    else
+        m_GBufferRenderer = std::make_unique<GBufferRenderer_CPU>();
+    m_GBufferRenderer->Initialize(m_GBufferCtx);
+    HE_CORE_INFO("DeferredPipeline: GBuffer 模式切换到 {}", mode == GBufferMode::GPU ? "GPU" : "CPU");
+}
 
 void DeferredPipeline::EnableFXAA(bool enable) {
     m_FXAAEnabled = enable;
@@ -329,6 +367,13 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
     if (m_Skybox)  { m_Skybox->Shutdown(); m_Skybox->Initialize(m_Device, w, h); }
     if (m_AntiAliasing) m_AntiAliasing->OnResize(w, h);
     if (m_FXAA) m_FXAA->OnResize(w, h);
+    m_GBufferCtx.width  = w;
+    m_GBufferCtx.height = h;
+    m_GBufferCtx.gbA    = m_GBufferA.get();
+    m_GBufferCtx.gbB    = m_GBufferB.get();
+    m_GBufferCtx.gbC    = m_GBufferC.get();
+    m_GBufferCtx.gbVel  = m_GBufferD.get();
+    m_GBufferCtx.gbDepth = m_GBufferDepth.get();
     // 重建 LDR 中间纹理
     {
         rhi::TextureDesc d; d.format = rhi::Format::BGRA8_UNORM;
@@ -372,8 +417,12 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     if (firstFrame) { m_PrevViewProj = m_CurrViewProj; firstFrame = false; }
     if (m_AntiAliasing) m_AntiAliasing->OnBeginFrame();
 
-    // GPUScene 收集 + 上传（增量，仅 dirty 对象）
+    // GPUScene 收集 → [GPU 模式: 填充 IndirectDraw 参数] → 上传
     m_GPUScene.Collect(world, sg);
+    if (m_GBufferMode == GBufferMode::GPU) {
+        if (!m_BatchBuilt) { m_MeshBatcher.Build(world); m_BatchBuilt = true; }
+        m_MeshBatcher.FillGPUScene(m_GPUScene);  // 在 Upload 前写入 draw 参数
+    }
     m_GPUScene.Upload(m_Device);
 
     // GPU 剔除读回（上帧结果）+ 过滤可见物体
@@ -397,62 +446,14 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             c->SetPipeline(m_GBufferPSO.get());
         });
 
-    // GBuffer 4×MRT + SceneRenderer
+    // GBuffer 4×MRT + 绘制（委托给 IGBufferRenderer，支持 CPU/GPU 双模式）
     rg.AddPass("GB_Clear", {}, {{gbA, ResourceAccess::Write}, {gbB, ResourceAccess::Write},
         {gbC, ResourceAccess::Write}, {gbVel, ResourceAccess::Write}, {gbDepth, ResourceAccess::Write}},
-        [&, w, h, useGPUVisible](rhi::IRHICommandList* c) {
-            // 推送 bindless 纹理到全部已注册描述符集
-            he::asset::BindlessTextureManager::Instance().FlushPending();
-
-            m_Device->UpdateDescriptorSet(m_GBufferSet, 2, rhi::DescriptorType::StorageBuffer,
-                m_ObjectBuffers[m_CurrentFrameSlot].get());
-            c->SetPipeline(m_GBufferPSO.get());
-            c->BindDescriptorSet(0, m_GBufferSet);
-            rhi::ClearValue clears[5]{};
-            clears[0].color[3] = 1.0f; clears[1].color[3] = 1.0f;
-            clears[2].color[3] = 1.0f; clears[3].color[0] = 0.0f; // velocity=0
-            clears[3].color[1] = 0.0f; clears[4].depth = 1.0f;
-            void* cv[4] = {m_GBufferA->GetNativeHandle(), m_GBufferB->GetNativeHandle(),
-                           m_GBufferC->GetNativeHandle(), m_GBufferD->GetNativeHandle()};
-            c->BeginOffscreenPassMRT(cv, 4, m_GBufferDepth->GetNativeHandle(), w, h, clears, false);
-            c->SetViewport({0,(float)h,(float)w,-(float)h,0,1});
-            c->SetScissor({0,0,w,h});
-            auto drawItems = m_SceneRenderer->Prepare(world, sg, camera, m_ObjectBuffers[m_CurrentFrameSlot].get());
-
-            // GPU 剔除过滤（仅当索引数量匹配时才启用，避免编号不一致导致黑屏）
-            std::vector<DrawItem> filteredItems;
-            bool gpuCullSafe = useGPUVisible &&
-                m_GPUVisibleIndices.size() <= drawItems.size() &&
-                m_GPUScene.GetObjectCount() == (u32)drawItems.size();
-            if (gpuCullSafe) {
-                std::unordered_set<u32> visSet(m_GPUVisibleIndices.begin(), m_GPUVisibleIndices.end());
-                for (auto& di : drawItems)
-                    if (visSet.count(di.objectIndex)) filteredItems.push_back(di);
-            } else {
-                filteredItems = std::move(drawItems);
-            }
-
-            // GPU 剔除已在独立 "GPU_Cull" pass 中完成（GBuffer 之前）
-            // 此处仅使用上帧 Readback 结果过滤可见物体
-
-            float4x4 jitteredVP = camera.GetViewProjMatrix();
-            for (auto& di : filteredItems) {
-                struct {
-                    float4x4 viewProjMatrix;
-                    float4x4 prevViewProjMatrix;
-                    u32      objectIndex;
-                    u32      _pad[15];
-                } pc;
-                pc.viewProjMatrix     = jitteredVP;
-                pc.prevViewProjMatrix = m_PrevViewProj;
-                pc.objectIndex        = di.objectIndex;
-                c->SetPushConstants(0, sizeof(pc), &pc);
-                c->SetVertexBuffer(di.mesh->GetVertexBuffer().get(), 0);
-                c->SetIndexBuffer(di.mesh->GetIndexBuffer().get());
-                // 不再需要 bind set=1 — 纹理采样通过 bindless u_Textures[] 访问
-                c->DrawIndexed(di.mesh->GetIndexCount());
-            }
-            c->EndOffscreenPass();
+        [&](rhi::IRHICommandList* c) {
+            // 更新运行时 context
+            m_GBufferCtx.objectBuffer = m_ObjectBuffers[m_CurrentFrameSlot].get();
+            m_GBufferCtx.prevViewProj = m_PrevViewProj;
+            m_GBufferRenderer->Render(c, m_GBufferCtx, world, sg, camera);
         });
 
     // ============================================================

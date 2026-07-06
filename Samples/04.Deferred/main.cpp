@@ -703,6 +703,14 @@ int main() {
                 }
             }
 
+            // ── GBuffer 模式 ──
+            ImGui::SeparatorText("GBuffer 渲染模式");
+            int gbMode = (int)pipeline.GetGBufferMode();
+            ImGui::RadioButton("CPU Driven", &gbMode, 0); ImGui::SameLine();
+            ImGui::RadioButton("GPU Driven (ExecuteIndirect)", &gbMode, 1);
+            if (gbMode != (int)pipeline.GetGBufferMode())
+                pipeline.SetGBufferMode((render::DeferredPipeline::GBufferMode)gbMode);
+
             // ── 后处理 ──
             ImGui::SeparatorText("后处理");
             {

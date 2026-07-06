@@ -20,6 +20,8 @@ target_sources(HugEngineRender PRIVATE
     Pipeline/GPUScene.cpp
     Pipeline/MeshBatcher.cpp
     Pipeline/GPUCulling.cpp
+    Pipeline/GBufferRenderer_CPU.cpp
+    Pipeline/GBufferRenderer_GPU.cpp
     Pipeline/Material.h
     # RenderGraph
     RenderGraph.h
