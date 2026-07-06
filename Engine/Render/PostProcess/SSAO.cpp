@@ -73,6 +73,14 @@ bool SSAO::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         m_SSAOLayout = device->CreateDescriptorSetLayout(l);
         m_SSAOSet    = device->AllocateDescriptorSet(m_SSAOLayout);
 
+        // 创建 SSAO 参数 UBO（kernel[64] + params + proj = 1104 bytes）
+        rhi::BufferDesc ubDesc;
+        ubDesc.size  = 64 * sizeof(float4) + sizeof(float4) + sizeof(float4x4);
+        ubDesc.usage = rhi::BufferUsage::Uniform;
+        ubDesc.cpuAccess = true;
+        m_ParamUBO = device->CreateBuffer(ubDesc);
+        device->UpdateDescriptorSet(m_SSAOSet, 3, rhi::DescriptorType::UniformBuffer, m_ParamUBO.get());
+
         rhi::ShaderBytecode vs,fs;
         vs.stage=rhi::ShaderStage::Vertex; vs.spirv=k_SSAO_vert_spv; vs.entryPoint="vertexMain";
         fs.stage=rhi::ShaderStage::Pixel;  fs.spirv=k_SSAO_frag_spv; fs.entryPoint="fragmentMain";
@@ -120,6 +128,7 @@ void SSAO::Shutdown() {
     if (m_Device && m_BlurLayout!=rhi::kInvalidLayout) m_Device->DestroyDescriptorSetLayout(m_BlurLayout);
     m_SSAO_PSO.reset(); m_Blur_PSO.reset();
     m_AOTexture.reset(); m_BlurTexture.reset(); m_AOSampler.reset(); m_PointSampler.reset(); m_NoiseTex.reset();
+    m_ParamUBO.reset();
     m_Device = nullptr; m_Ready = false;
 }
 
@@ -141,17 +150,25 @@ void SSAO::Render(rhi::IRHICommandList* cmd) {
     cmd->SetViewport({0,(float)m_Height,(float)m_Width,-(float)m_Height,0,1});
     cmd->SetScissor({0,0,m_Width,m_Height});
 
-    // Push constants: kernel + params
-    struct { float4 kernel[64]; float4 params; float4x4 proj; } pc;
-    memcpy(pc.kernel, m_Kernel.data(), 64*sizeof(float4));
-    pc.params = float4(radius, bias, intensity, float(sampleCount));
-    // Vulkan 投影矩阵（Y 翻转，Z [0,1]）
-    float n=0.1f,f=1000.0f; float a=float(m_Width)/float(m_Height);
-    pc.proj = glm::perspectiveRH_ZO(glm::radians(60.0f), a, n, f);
-    // 用逆矩阵从 NDC 重建 view-space
-    pc.proj = glm::inverse(pc.proj);
-
-    cmd->SetPushConstants(0, sizeof(pc), &pc);
+    // 上传 SSAO 参数到 Uniform Buffer（kernel[64] + params + proj）
+    // 对齐 shader 中 SSAOParams cbuffer 布局
+    {
+        u8* dst = static_cast<u8*>(m_ParamUBO->Map());
+        if (dst) {
+            // kernel[64] — 半球采样方向（view-space）
+            memcpy(dst, m_Kernel.data(), 64 * sizeof(float4));
+            dst += 64 * sizeof(float4);
+            // params — x=radius, y=bias, z=intensity, w=sampleCount
+            float4 p(radius, bias, intensity, float(sampleCount));
+            memcpy(dst, &p, sizeof(float4));
+            dst += sizeof(float4);
+            // proj — 投影矩阵的逆（NDC → view-space）
+            float n=0.1f,f=1000.0f; float a=float(m_Width)/float(m_Height);
+            float4x4 projInv = glm::inverse(glm::perspectiveRH_ZO(glm::radians(60.0f), a, n, f));
+            memcpy(dst, &projInv, sizeof(float4x4));
+            m_ParamUBO->Unmap();
+        }
+    }
     cmd->Draw(3);
 
     // --- Blur Pass ---

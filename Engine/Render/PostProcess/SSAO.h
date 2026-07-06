@@ -71,6 +71,9 @@ private:
     // 随机采样内核 + 噪声
     std::vector<float4> m_Kernel;
     std::unique_ptr<rhi::IRHITexture> m_NoiseTex;
+
+    // SSAO 参数 Uniform Buffer（对应 shader SSAOParams: kernel[64] + params + proj）
+    std::unique_ptr<rhi::IRHIBuffer> m_ParamUBO;
 };
 
 } // namespace he::render
