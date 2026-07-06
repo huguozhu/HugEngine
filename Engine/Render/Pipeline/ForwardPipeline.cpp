@@ -308,6 +308,12 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         rec.shaderNames[1]    = "PBR.frag";
         rec.rawPSO            = m_PBR_PSO.get();
         m_PSORegistry.push_back(std::move(rec));
+        // push_back 后重新定位指针：移动构造复制了指针值（原指向栈变量 rec），
+        // 需要重定向到向量内自有副本，否则悬空
+        auto& stored = m_PSORegistry.back();
+        stored.desc.vertexShader = &stored.vsCopy;
+        stored.desc.pixelShader  = &stored.fsCopy;
+
         HE_CORE_INFO("[HotReload] PSO 注册: PBR (vert + frag)");
     }
 
