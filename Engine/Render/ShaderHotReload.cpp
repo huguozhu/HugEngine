@@ -112,6 +112,10 @@ void ShaderHotReload::WatchThread(StringView shaderDir) {
     std::unordered_map<String, std::chrono::steady_clock::time_point> lastChange;
 
     while (m_Running) {
+        // 每次循环前重置事件（手动重置事件在 ReadDirectoryChangesW 完成后保持 signaled，
+        // 必须重置才能安全复用）
+        ResetEvent(hEvent);
+
         DWORD bytesReturned = 0;
         OVERLAPPED overlapped{};
         overlapped.hEvent = hEvent;
@@ -128,42 +132,33 @@ void ShaderHotReload::WatchThread(StringView shaderDir) {
 
         // 最多等待 500ms（便于检查 m_Running 退出标志）
         DWORD waitResult = WaitForSingleObject(hEvent, 500);
-        if (waitResult == WAIT_TIMEOUT) {
-            // 超时：重置事件并继续检查退出标志
-            ResetEvent(hEvent);
-            continue;
-        }
-        if (waitResult != WAIT_OBJECT_0) break;
-
-        DWORD cb = 0;
-        if (!GetOverlappedResult(hDir, &overlapped, &cb, FALSE)) break;
-        if (cb == 0) {
-            ResetEvent(hEvent);
-            continue;
-        }
-
-        auto* info = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(buffer);
         auto now = std::chrono::steady_clock::now();
 
-        for (;;) {
-            // 宽字符 → UTF-8
-            int len = WideCharToMultiByte(CP_UTF8, 0, info->FileName,
-                                          info->FileNameLength / 2, nullptr, 0, nullptr, nullptr);
-            String filename(len, '\0');
-            WideCharToMultiByte(CP_UTF8, 0, info->FileName,
-                                info->FileNameLength / 2, &filename[0], len, nullptr, nullptr);
-
-            // 只处理 .slang 文件
-            if (filename.find(".slang") != String::npos) {
-                lastChange[filename] = now;
+        // 解析文件变更通知（可能包含多个文件）
+        if (waitResult == WAIT_OBJECT_0) {
+            DWORD cb = 0;
+            if (!GetOverlappedResult(hDir, &overlapped, &cb, FALSE)) break;
+            if (cb > 0) {
+                auto* info = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(buffer);
+                for (;;) {
+                    int len = WideCharToMultiByte(CP_UTF8, 0, info->FileName,
+                        info->FileNameLength / 2, nullptr, 0, nullptr, nullptr);
+                    String filename(len, '\0');
+                    WideCharToMultiByte(CP_UTF8, 0, info->FileName,
+                        info->FileNameLength / 2, &filename[0], len, nullptr, nullptr);
+                    if (filename.find(".slang") != String::npos) {
+                        lastChange[filename] = now;
+                    }
+                    if (info->NextEntryOffset == 0) break;
+                    info = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(
+                        reinterpret_cast<u8*>(info) + info->NextEntryOffset);
+                }
             }
-
-            if (info->NextEntryOffset == 0) break;
-            info = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(
-                reinterpret_cast<u8*>(info) + info->NextEntryOffset);
+        } else if (waitResult != WAIT_TIMEOUT) {
+            break;
         }
 
-        // 200ms debounce: 检查哪些文件已稳定
+        // 200ms debounce: 每次循环都检查（超时或变更通知都触发），确保累积变更最终被处理
         for (auto it = lastChange.begin(); it != lastChange.end(); ) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 now - it->second).count();
@@ -175,13 +170,10 @@ void ShaderHotReload::WatchThread(StringView shaderDir) {
                 if (!InferShaderType(filename, stage, entry)) continue;
 
                 HE_CORE_INFO("[HotReload] 检测到变更: {}", filename);
-
-                // 调用 slangc 重编译
                 auto slPath = fs::path(dir) / filename;
                 std::vector<u32> spirv;
                 if (CompileShader(m_SlangcPath, slPath.string(),
                                   stage, entry, m_IncludeDir, spirv)) {
-                    // 提取 shader 名（如 "PBR.frag"）
                     String shaderName = fs::path(filename).stem().string();
                     {
                         std::lock_guard<std::mutex> lock(m_Mutex);
@@ -192,8 +184,6 @@ void ShaderHotReload::WatchThread(StringView shaderDir) {
                 ++it;
             }
         }
-
-        ResetEvent(hEvent);
     }
 
     CloseHandle(hEvent);
