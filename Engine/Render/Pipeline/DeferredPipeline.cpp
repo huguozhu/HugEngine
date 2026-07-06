@@ -411,11 +411,28 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
 
 void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
                                he::SceneGraph& sg, const CameraData& camera) {
-    // 延迟创建 Compute 命令列表（AsyncCompute 模式）
-    bool useAsyncCompute = m_Device->HasAsyncComputeQueue();
+    // ============================================================
+    // AsyncCompute: 当前默认关闭，等待实现多阶段提交架构
+    //
+    // 已知问题: QFOT Barrier 需要在两个队列之间正确地 RELEASE→ACQUIRE，
+    //   当前单次 vkQueueSubmit 无法在命令缓冲中间插入信号量同步点。
+    //   正确方案需要将 Graphics 拆分为:
+    //     Submit #1: QFOT Release + Signal(fence_A)
+    //     Submit #2: Compute: Wait(fence_A) + work + Release + Signal(fence_B)
+    //     Submit #3: Graphics: Wait(fence_B) + Acquire + 后续渲染
+    //   这要求 RenderGraph 支持分阶段提交，属于较大架构改动。
+    //
+    // 当前所有 Pass 在单 Graphics 队列执行，AsyncCompute 基础设施保留。
+    // 设置 m_AsyncComputeOverride = true 可强制启用（仅用于调试）。
+    // ============================================================
+#if 0  // AsyncCompute: 设为 1 启用（调试用，已知白屏问题）
+    bool useAsyncCompute = m_Device->HasAsyncComputeQueue() || m_AsyncComputeOverride;
+#else
+    bool useAsyncCompute = false;
+#endif
+
     if (useAsyncCompute && !m_ComputeCmdList) {
         m_ComputeCmdList = m_Device->CreateCommandList(rhi::QueueType::Compute);
-        // 创建跨队列同步 Fence（Timeline Semaphore）
         m_CrossQueueFence = m_Device->CreateFence();
         HE_CORE_INFO("DeferredPipeline: AsyncCompute enabled — dedicated Compute command list created");
     }
@@ -427,33 +444,21 @@ void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
     rg.Compile();
 
     if (useAsyncCompute && m_ComputeCmdList) {
-        // 双队列模式: Graphics + Compute 并行执行
-        // ============================================================
-        // Timeline Semaphore 同步策略:
-        //   1. Graphics Submit 时附带 Signal(m_CrossQueueFence)
-        //   2. Compute  Submit 时附带 Wait(m_CrossQueueFence)
-        //   → Compute 在 Graphics 全部完成后才开始，安全但串行
-        //   → 后续优化方向: 将 Graphics 拆分为两阶段提交实现真正并行
-        // ============================================================
         m_ComputeCmdList->Begin();
         rg.Execute(cmd, m_ComputeCmdList.get(), m_Device);
         m_ComputeCmdList->End();
 
-        // 设置 Timeline Semaphore 同步（在 Submit 时自动附加到 pNext 链）
         u64 signalValue = ++m_FrameCounter;
         cmd->SetTimelineSignal(m_CrossQueueFence, signalValue);
         m_ComputeCmdList->SetTimelineWait(m_CrossQueueFence, signalValue);
         m_ComputePendingSubmit = true;
     } else {
-        // 回退: 单 Graphics 队列（与原来行为一致）
+        // 单 Graphics 队列（正常路径）
         rg.Execute(cmd, m_Device);
     }
 }
 
 void DeferredPipeline::FlushComputeWork() {
-    // 在 Graphics 命令列表 Submit 之后调用
-    // Timeline Semaphore 信号/等待已通过 SetTimelineSignal/SetTimelineWait
-    // 集成到命令列表的 vkQueueSubmit pNext 链中，此处只需提交 Compute
     if (!m_ComputePendingSubmit || !m_ComputeCmdList) return;
     m_Device->Submit(m_ComputeCmdList.get());
     m_ComputePendingSubmit = false;
