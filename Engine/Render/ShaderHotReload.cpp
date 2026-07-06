@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <chrono>
 #include <fstream>
+#include <iterator>
 #include <unordered_map>
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -198,40 +199,80 @@ bool ShaderHotReload::CompileShader(StringView slangcPath, StringView slFile,
                                      std::vector<u32>& outSpirv) {
     auto startTime = std::chrono::steady_clock::now();
 
-    // 构建命令行: slangc file.slang -target spirv -entry main -stage compute -I dir -o out.spv
-    // 输出到临时文件
+    // 临时输出文件
     auto tmpSpv = std::filesystem::temp_directory_path() / "hug_shader_temp.spv";
 
-    String cmd;
-    cmd += "\"" + String(slangcPath) + "\"";
-    cmd += " \"" + String(slFile) + "\"";
-    cmd += " -target spirv";
-    cmd += " -entry " + String(entryPoint);
-    cmd += " -stage " + String(stage);
-    cmd += " -I \"" + String(includeDir) + "\"";
-    cmd += " -o \"" + tmpSpv.string() + "\"";
-    cmd += " -Wno-39001 2>&1";
+    // 构建命令行（Windows: 第一个参数是程序名，不需要引号包裹；其余参数正常传递）
+    // slangc 使用 "-" 前缀的参数格式，不需要 shell 特殊处理
+    String cmdLine;
+    cmdLine += "\"" + String(slangcPath) + "\"";
+    cmdLine += " \"" + String(slFile) + "\"";
+    cmdLine += " -target spirv";
+    cmdLine += " -entry " + String(entryPoint);
+    cmdLine += " -stage " + String(stage);
+    cmdLine += " -I \"" + String(includeDir) + "\"";
+    cmdLine += " -o \"" + tmpSpv.string() + "\"";
+    cmdLine += " -Wno-39001";
 
-    // 执行编译
-    FILE* pipe = _popen(cmd.c_str(), "r");
-    if (!pipe) {
-        HE_CORE_ERROR("[HotReload] 无法启动 slangc: {}", cmd);
+    // 使用 CreateProcess 直接调用，避免 cmd.exe 引号转义问题
+    // 创建临时 stderr 文件捕获错误输出
+    auto tmpErr = std::filesystem::temp_directory_path() / "hug_shader_temp.err";
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+
+    HANDLE hErrFile = CreateFileA(tmpErr.string().c_str(), GENERIC_WRITE,
+        FILE_SHARE_READ, &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+
+    STARTUPINFOA si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdError = hErrFile;
+
+    PROCESS_INFORMATION pi{};
+    // 使用可修改的缓冲区（CreateProcessA 的命令行参数需要非 const）
+    std::vector<char> cmdBuf(cmdLine.begin(), cmdLine.end());
+    cmdBuf.push_back('\0');
+
+    BOOL created = CreateProcessA(
+        nullptr,                // lpApplicationName（从命令行第一个 token 解析）
+        cmdBuf.data(),          // lpCommandLine（可修改的缓冲区）
+        nullptr, nullptr, TRUE, // 继承句柄
+        0, nullptr, nullptr, &si, &pi);
+
+    if (hErrFile) CloseHandle(hErrFile);
+
+    if (!created) {
+        HE_CORE_ERROR("[HotReload] 无法启动 slangc (错误码: {}):\n  cmd: {}",
+                      GetLastError(), cmdLine);
         return false;
     }
 
-    // 读取输出
-    String output;
-    char buf[256];
-    while (fgets(buf, sizeof(buf), pipe)) output += buf;
-    int ret = _pclose(pipe);
+    // 等待编译完成（最多 30 秒）
+    WaitForSingleObject(pi.hProcess, 30000);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
 
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - startTime).count();
 
-    if (ret != 0) {
-        HE_CORE_ERROR("[HotReload] 编译失败 ({}ms):\n{}", elapsed, output);
+    // 检查输出文件是否存在
+    if (!std::filesystem::exists(tmpSpv) || std::filesystem::file_size(tmpSpv) == 0) {
+        // 读取 stderr 获取错误信息
+        String errOutput;
+        std::ifstream errFile(tmpErr.string());
+        if (errFile) {
+            errOutput.assign(std::istreambuf_iterator<char>(errFile),
+                            std::istreambuf_iterator<char>());
+        }
+        HE_CORE_ERROR("[HotReload] 编译失败 ({}ms):\n{}", elapsed,
+                      errOutput.empty() ? "(无错误输出)" : errOutput);
+        std::filesystem::remove(tmpErr);
         return false;
     }
+
+    // 清理错误文件（编译成功时为空）
+    std::filesystem::remove(tmpErr);
 
     // 从临时 .spv 加载 SPIR-V
     if (!LoadSpirv(tmpSpv.string(), outSpirv)) {
@@ -241,7 +282,6 @@ bool ShaderHotReload::CompileShader(StringView slangcPath, StringView slFile,
 
     HE_CORE_INFO("[HotReload] 编译成功: {} ({}ms, {} bytes)",
                  slFile, elapsed, outSpirv.size() * 4);
-    // 清理临时文件
     std::filesystem::remove(tmpSpv);
     return true;
 }
