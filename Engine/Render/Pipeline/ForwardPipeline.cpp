@@ -349,7 +349,11 @@ int ForwardPipeline::ReloadShader(StringView shaderName,
             continue;
         }
 
-        // 替换旧 PSO
+        // 延迟销毁旧 PSO（GPU 可能仍在使用它的 VkRenderPass）
+        // 3 帧后通过 NextFrame() 安全释放
+        if (m_PBR_PSO) {
+            m_RetiredPSOs.push_back({MAX_FRAMES_IN_FLIGHT, std::move(m_PBR_PSO)});
+        }
         m_PBR_PSO = std::move(newPSO);
         rec.rawPSO = m_PBR_PSO.get();
 
@@ -399,6 +403,14 @@ void ForwardPipeline::Shutdown() {
 void ForwardPipeline::NextFrame() {
     // 推进三缓冲槽位（帧首调用，确保 Shadow 和 Scene 使用同一帧的缓冲区）
     m_CurrentFrameSlot = (m_CurrentFrameSlot + 1) % MAX_FRAMES_IN_FLIGHT;
+
+    // 清理延迟销毁的旧 PSO（等 GPU 完成 3 帧后安全释放）
+    for (auto it = m_RetiredPSOs.begin(); it != m_RetiredPSOs.end(); ) {
+        if (--it->first == 0)
+            it = m_RetiredPSOs.erase(it);
+        else
+            ++it;
+    }
 
     // 同步阴影子系统帧槽位
     m_ShadowSystem->NextFrame();

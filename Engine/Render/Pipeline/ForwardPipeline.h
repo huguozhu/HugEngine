@@ -173,6 +173,8 @@ private:
         rhi::IRHIPipelineState* rawPSO = nullptr;  // 指向 m_PBR_PSO.get()
     };
     std::vector<PSORecord> m_PSORegistry;
+    // 延迟销毁的旧 PSO（等 GPU 完成 3 帧后再释放 VkRenderPass）
+    std::vector<std::pair<u32, std::unique_ptr<rhi::IRHIPipelineState>>> m_RetiredPSOs;
 
 };
 
