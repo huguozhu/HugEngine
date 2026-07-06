@@ -259,6 +259,7 @@ public:
                          IRHITexture* texture) override;
     void CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst,
                     u64 size, u64 srcOffset, u64 dstOffset) override;
+    void CopyTextureToTexture(IRHITexture* src, IRHITexture* dst) override;
 
     // 跨队列所有权转移（AsyncCompute Barrier）
     void QueueOwnershipTransfer(IRHITexture* texture,

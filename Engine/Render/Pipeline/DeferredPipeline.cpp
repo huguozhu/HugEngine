@@ -699,6 +699,16 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             c->EndOffscreenPass();
         });
 
+    // ── DDGI 前帧 HDR 捕获（将当前 Lighting 输出拷贝到 DDGI，供下帧探针采样真实辐射度）──
+    rg.AddPass("DDGI_CaptureHDR",
+        {{hdrC, ResourceAccess::Read}},  // 读 HDR 作为拷贝源
+        {},                               // 无 RenderGraph 管理的输出
+        [&](rhi::IRHICommandList* c) {
+            if (m_DDGI.IsEnabled()) {
+                m_DDGI.CaptureHDR(c, m_HDRTarget.get());
+            }
+        });
+
     // ── 后处理链路：Bloom → DOF → MotionBlur（责任链，按序串联）──
     bool bloomActive = m_Bloom.IsEnabled() && m_Bloom.GetOutput() != nullptr;
     bool dofActive   = m_DOF.IsEnabled()   && m_DOF.GetOutput()   != nullptr;

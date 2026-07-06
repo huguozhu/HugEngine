@@ -17,6 +17,11 @@
 // 上一帧探针历史（只读，时间混合源）
 [[vk::binding(5, 0)]] StructuredBuffer<float4> u_ProbeHistory;
 
+// 前帧 HDR 辐射度（CombinedImageSampler, 与 u_LinearSampler 共享 binding slot）
+// 替代之前的 albedo * 0.3 近似，提供探针采样的真实光照
+[[vk::binding(6, 0)]] Texture2D<float4> u_PrevHDR;
+[[vk::binding(6, 0)]] SamplerState u_LinearSampler;
+
 // 探针网格 + 相机参数
 [[vk::binding(4, 0)]] cbuffer DDGIParams {
     float4   u_GridOrigin;   // xyz=世界空间原点
@@ -135,11 +140,14 @@ void main(uint3 id : SV_DispatchThreadID) {
             continue;  // 采样点被遮挡
         }
 
-        // 可见：读取 albedo 作为近似辐射度
-        float3 albedo = u_GBufferA.SampleLevel(u_PointSampler, uv, 0).rgb;
-
-        // 辐射度 ≈ albedo * 0.3（假设均匀环境光，缺少直接光照信息时的近似）
-        float3 radiance = albedo * 0.3;
+        // 可见：读取前帧 HDR 作为真实辐射度（包含完整 PBR+IBL+阴影）
+        // 灰度兜底：首帧 HDR 可能为全零，用 0.03 防止全黑
+        float3 radiance = u_PrevHDR.SampleLevel(u_LinearSampler, uv, 0).rgb;
+        if (dot(radiance, radiance) < 0.0001) {
+            // 首帧或采样点屏幕外：回退到 albedo 近似
+            float3 albedo = u_GBufferA.SampleLevel(u_PointSampler, uv, 0).rgb;
+            radiance = albedo * 0.03;  // 极弱光兜底，首帧后会被 HDR 覆盖
+        }
 
         // SH 投影
         float basis[9];

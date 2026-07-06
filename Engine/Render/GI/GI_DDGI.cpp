@@ -36,28 +36,47 @@ bool GI_DDGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     uniformDesc.cpuAccess = true;  // 每帧 Map/Unmap 更新
     m_GridUniform = device->CreateBuffer(uniformDesc);
 
-    // ---- 采样器（点采样，用于 GBuffer 读取） ----
+    // ---- 采样器 ----
     rhi::SamplerDesc psd;
     psd.minFilter  = psd.magFilter = rhi::FilterMode::Nearest;
     psd.addressU   = psd.addressV   = rhi::AddressMode::ClampToEdge;
     m_PointSampler = device->CreateSampler(psd);
 
+    rhi::SamplerDesc lsd;
+    lsd.minFilter  = lsd.magFilter = rhi::FilterMode::Linear;
+    lsd.addressU   = lsd.addressV   = rhi::AddressMode::ClampToEdge;
+    m_LinearSampler = device->CreateSampler(lsd);
+
+    // ---- 前帧 HDR 纹理（存储上一帧 Lighting 输出，供探针采样真实辐射度） ----
+    rhi::TextureDesc hdrDesc;
+    hdrDesc.width  = width;
+    hdrDesc.height = height;
+    hdrDesc.format = rhi::Format::RGBA16_FLOAT;
+    hdrDesc.usage  = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::TransferDst;
+    m_PrevHDR = device->CreateTexture(hdrDesc);
+
     // ---- DescriptorSet 布局 ----
-    // binding 0-2: GBuffer CombinedImageSampler（Compute 阶段）
-    // binding 3:   ProbeBuffer  StorageBuffer（当前帧输出，RW）
+    // binding 0-2: GBuffer CombinedImageSampler
+    // binding 3:   ProbeBuffer  StorageBuffer（RW, 当前帧输出）
     // binding 4:   GridUniform  UniformBuffer（探针网格参数）
-    // binding 5:   HistoryBuffer StorageBuffer（上一帧输入，只读）
+    // binding 5:   HistoryBuffer StorageBuffer（只读, 上一帧历史）
+    // binding 6:   PrevHDR CombinedImageSampler（前帧 HDR 辐射度）
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = {
-        {0, rhi::DescriptorType::CombinedImageSampler, 1, 32},   // GBufferA
-        {1, rhi::DescriptorType::CombinedImageSampler, 1, 32},   // GBufferB
-        {2, rhi::DescriptorType::CombinedImageSampler, 1, 32},   // Depth
-        {3, rhi::DescriptorType::StorageBuffer,         1, 32},  // ProbeBuffer (RW)
-        {4, rhi::DescriptorType::UniformBuffer,         1, 32},  // GridParams
-        {5, rhi::DescriptorType::StorageBuffer,         1, 32},  // ProbeHistory (只读)
+        {0, rhi::DescriptorType::CombinedImageSampler, 1, 32},
+        {1, rhi::DescriptorType::CombinedImageSampler, 1, 32},
+        {2, rhi::DescriptorType::CombinedImageSampler, 1, 32},
+        {3, rhi::DescriptorType::StorageBuffer,         1, 32},
+        {4, rhi::DescriptorType::UniformBuffer,         1, 32},
+        {5, rhi::DescriptorType::StorageBuffer,         1, 32},
+        {6, rhi::DescriptorType::CombinedImageSampler, 1, 32},   // 前帧 HDR
     };
     m_Layout = device->CreateDescriptorSetLayout(layout);
     m_Set    = device->AllocateDescriptorSet(m_Layout);
+
+    // 预绑定前帧 HDR（纹理创建后不变，只需更新 sampler）
+    device->UpdateDescriptorSet(m_Set, 6, rhi::DescriptorType::CombinedImageSampler,
+        m_PrevHDR.get(), m_LinearSampler.get());
 
     // 预绑定不变的 binding：uniform buffer（每帧只需 Map/Unmap 更新内容）
     device->UpdateDescriptorSet(m_Set, 4, rhi::DescriptorType::UniformBuffer, m_GridUniform.get());
@@ -96,6 +115,8 @@ void GI_DDGI::Shutdown() {
     m_ProbeHistory.reset();
     m_GridUniform.reset();
     m_PointSampler.reset();
+    m_LinearSampler.reset();
+    m_PrevHDR.reset();
     m_Device = nullptr;
     m_Ready  = false;
     HE_CORE_INFO("GI_DDGI shutdown");
@@ -181,6 +202,26 @@ void GI_DDGI::Render(rhi::IRHICommandList* cmd) {
         rhi::PipelineStage::FragmentShader,
         rhi::ResourceState::UnorderedAccess,
         rhi::ResourceState::ShaderResource);
+}
+
+void GI_DDGI::CaptureHDR(rhi::IRHICommandList* cmd, rhi::IRHITexture* hdr) {
+    if (!hdr || !m_PrevHDR) return;
+
+    // 确保前帧 HDR 尺寸匹配（窗口 resize 可能改变尺寸）
+    if (m_PrevHDR->GetWidth() != hdr->GetWidth() || m_PrevHDR->GetHeight() != hdr->GetHeight()) {
+        rhi::TextureDesc hdrDesc;
+        hdrDesc.width  = hdr->GetWidth();
+        hdrDesc.height = hdr->GetHeight();
+        hdrDesc.format = rhi::Format::RGBA16_FLOAT;
+        hdrDesc.usage  = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::TransferDst;
+        m_PrevHDR = m_Device->CreateTexture(hdrDesc);
+        // 重新绑定到描述符集
+        m_Device->UpdateDescriptorSet(m_Set, 6, rhi::DescriptorType::CombinedImageSampler,
+            m_PrevHDR.get(), m_LinearSampler.get());
+    }
+
+    // 将当前 HDR → PrevHDR（GPU 端拷贝，自动处理布局转换）
+    cmd->CopyTextureToTexture(hdr, m_PrevHDR.get());
 }
 
 } // namespace he::render

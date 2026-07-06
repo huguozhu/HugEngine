@@ -117,6 +117,10 @@ public:
     virtual void CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst,
                             u64 size, u64 srcOffset = 0, u64 dstOffset = 0) = 0;
 
+    // 纹理拷贝（GPU 端，同分辨率/同格式）
+    // 内部自动处理 TRANSFER_SRC / TRANSFER_DST 布局转换
+    virtual void CopyTextureToTexture(IRHITexture* src, IRHITexture* dst) = 0;
+
     // 跨队列所有权转移（AsyncCompute Barrier）
     // 当资源从 Graphics 队列移交给 Compute 队列（或反向）时调用
     // Vulkan: PipelineBarrier 中设置 srcQueueFamilyIndex != dstQueueFamilyIndex

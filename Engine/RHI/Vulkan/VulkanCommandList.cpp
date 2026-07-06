@@ -685,6 +685,63 @@ void VulkanCommandList::CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst,
     vkCmdCopyBuffer(m_CmdBuffers[m_FrameIndex], vkSrc->GetHandle(), vkDst->GetHandle(), 1, &region);
 }
 
+void VulkanCommandList::CopyTextureToTexture(IRHITexture* src, IRHITexture* dst) {
+    auto* vkSrc = static_cast<VulkanTexture*>(src);
+    auto* vkDst = static_cast<VulkanTexture*>(dst);
+    u32 w = vkSrc->GetWidth(), h = vkSrc->GetHeight();
+
+    // 源: ShaderRead → TransferSrc, 目标: Undefined/Present → TransferDst
+    VkImageMemoryBarrier preBarriers[2]{};
+    preBarriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    preBarriers[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    preBarriers[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    preBarriers[0].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    preBarriers[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    preBarriers[0].image = vkSrc->GetImage();
+    preBarriers[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+    preBarriers[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    preBarriers[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    preBarriers[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    preBarriers[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    preBarriers[1].image = vkDst->GetImage();
+    preBarriers[1].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+    vkCmdPipelineBarrier(m_CmdBuffers[m_FrameIndex],
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 0, nullptr, 0, nullptr, 2, preBarriers);
+
+    VkImageCopy region{};
+    region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.extent = {w, h, 1};
+    vkCmdCopyImage(m_CmdBuffers[m_FrameIndex],
+        vkSrc->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        vkDst->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+    // 恢复: TransferSrc → ShaderRead, TransferDst → ShaderRead
+    VkImageMemoryBarrier postBarriers[2]{};
+    postBarriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    postBarriers[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    postBarriers[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    postBarriers[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    postBarriers[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    postBarriers[0].image = vkSrc->GetImage();
+    postBarriers[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+    postBarriers[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    postBarriers[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    postBarriers[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    postBarriers[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    postBarriers[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    postBarriers[1].image = vkDst->GetImage();
+    postBarriers[1].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+    vkCmdPipelineBarrier(m_CmdBuffers[m_FrameIndex],
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        0, 0, nullptr, 0, nullptr, 2, postBarriers);
+}
+
 // ============================================================
 // Pipeline Barrier
 // ============================================================

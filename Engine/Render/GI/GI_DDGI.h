@@ -37,6 +37,9 @@ public:
 
     void SetGBufferInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal, rhi::IRHITexture* albedo);
 
+    // 捕获当前帧 HDR 到前帧纹理（供下帧 DDGI 探针采样真实辐射度）
+    void CaptureHDR(rhi::IRHICommandList* cmd, rhi::IRHITexture* hdr);
+
     // 探针数据缓冲（供 Lighting Pass 绑定，每帧更新后为最新 blend 结果）
     rhi::IRHIBuffer* GetProbeBuffer() const { return m_ProbeBuffer.get(); }
 
@@ -79,7 +82,13 @@ private:
     std::unique_ptr<rhi::IRHIBuffer> m_GridUniform;
 
     // 采样器
-    std::unique_ptr<rhi::IRHISampler> m_PointSampler;  // 点采样（GBuffer 读取）
+    std::unique_ptr<rhi::IRHISampler> m_PointSampler;    // 点采样（GBuffer 读取）
+    std::unique_ptr<rhi::IRHISampler> m_LinearSampler;   // 线性采样（前帧 HDR 读取）
+
+    // 前帧 HDR 辐射度纹理（上个帧的 Lighting 输出，供探针采真实辐照度）
+    std::unique_ptr<rhi::IRHITexture> m_PrevHDR;
+    rhi::DescriptorSetLayoutHandle m_PrevHDR_Layout = rhi::kInvalidLayout;
+    rhi::DescriptorSetHandle       m_PrevHDR_Set    = rhi::kInvalidSet;  // set=0 的追加描述符
 
     // GBuffer 输入（不持有所有权）
     rhi::IRHITexture* m_Depth  = nullptr;
