@@ -52,7 +52,6 @@ private:
     u32 m_MaxPasses = 0;
     u32 m_MaxFramesInFlight = 3;
     u32 m_FrameIndex = 0;
-    u32 m_ReadbackFrame = 1;  // 延迟 1 帧读回（等待 GPU 完成）
     float m_TimestampPeriod = 0.0f;  // ns per tick
     std::vector<PerFrame> m_Frames;
     std::vector<PassProfile> m_LastProfiled;

@@ -22,7 +22,6 @@ void ProfilerManager::Initialize(rhi::IRHIDevice* device, u32 maxPasses, u32 max
     }
     m_LastProfiled.resize(maxPasses);
     m_FrameIndex    = 0;
-    m_ReadbackFrame = 1;
     HE_CORE_INFO("ProfilerManager 初始化完成: {} passes, {} frames", maxPasses, maxFramesInFlight);
 }
 
@@ -36,8 +35,8 @@ void ProfilerManager::BeginFrame(rhi::IRHICommandList* cmd) {
     frame.passCount = 0;
     cmd->ResetQueryPool(frame.pool.get());
 
-    // 读回上一帧（延迟 1 帧，确保 GPU 已完成写入）
-    u32 rbIdx = (m_FrameIndex + m_MaxFramesInFlight - 1) % m_MaxFramesInFlight;
+    // 读回 2 帧前的结果（延迟 2 帧，确保 GPU 已完成写入）
+    u32 rbIdx = (m_FrameIndex + m_MaxFramesInFlight - 2) % m_MaxFramesInFlight;
     auto& rbFrame = m_Frames[rbIdx];
     if (rbFrame.passCount > 0) {
         cmd->GetQueryResults(rbFrame.pool.get(), 0, rbFrame.passCount * 2,
