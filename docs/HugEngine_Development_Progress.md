@@ -1,6 +1,6 @@
 # HugEngine 开发进度
 
-> 最后更新: 2026-07-07
+> 最后更新: 2026-07-07（今日更新: Shader Hot Reload ✅, DDGI HDR ✅, SSAO 修复, AsyncCompute 更新）
 
 ## 整体进度
 
@@ -203,7 +203,7 @@ Engine/Shader/Shaders/  (Slang → SPIR-V → .spv.h)
 | 点光阴影无视锥剔除 | 6 面渲染全场景 |
 | GPU Culling 仅 forward 管线使用 | Deferred 已集成 ✅ |
 | GPUCulling::Dispatch 在 RenderPass 内执行 | Vulkan 校验警告 |
-| DDGI 探针更新仅采样 albedo (无真实 radiance) | 光照估计粗糙，需前帧 HDR 或 Light Probe |
+| DDGI 探针更新仅采样 albedo (无真实 radiance) | ✅ 已修复：前帧 HDR radiance 采样替代 albedo*0.3 近似 |
 | DDGI 探针可见性测试使用简单深度比较 | 可能出现漏光/遮挡错误 |
 | 后处理链无 DOF/MotionBlur | Bloom + DOF + MotionBlur 已实现 ✅ |
 
@@ -221,8 +221,8 @@ Engine/Shader/Shaders/  (Slang → SPIR-V → .spv.h)
 | — | Denoiser（5×5 双边模糊，SSGI/SSR 共用） | ✅ |
 | — | Clustered Shading（视锥空间 Cluster 划分 + 光源剔除） | ✅ |
 | — | GPU Culling (Compute Shader 视锥 + Hi-Z 剔除) | ✅ |
-| — | Shader Hot Reload（Editor 模式 .slang 文件监控 + 自动重编译 + PSO 热替换） | 📋 |
-| — | DDGI 探针真实 radiance 采样（前帧 HDR 输入） | ⬜ |
+| — | Shader Hot Reload（Editor 模式 .slang 文件监控 + 自动重编译 + PSO 热替换） | ✅ |
+| — | DDGI 探针真实 radiance 采样（前帧 HDR 输入） | ✅ |
 | — | DDGI 探针可见性优化（多步 march + 深度偏移） | ⬜ |
 | — | GI_VXGI 体素锥追踪 | ⬜ |
 | — | AA_FXAA 实现 | ✅ |
@@ -241,7 +241,7 @@ Engine/Shader/Shaders/  (Slang → SPIR-V → .spv.h)
 
 | Phase | 主题 | 完成度 | 完成项 | 缺失项 |
 |-------|------|:---:|--------|--------|
-| P1 | 核心骨架 | ~85% | RHI Vulkan, Slang→SPIR-V, RenderGraph, ECS, glTF, Forward+Deferred, TAA, SSAO, Bloom, DOF, MotionBlur, FXAA, GPU Profiling, Editor基础 | D3D12/Metal后端, AsyncCompute, Shader HotReload, AutoExposure, MSAA, Undo/Redo |
+| P1 | 核心骨架 | ~90% | RHI Vulkan, Slang→SPIR-V, RenderGraph, ECS, glTF, Forward+Deferred, TAA, SSAO, Bloom, DOF, MotionBlur, FXAA, GPU Profiling, Editor基础, Shader HotReload, AsyncCompute(基础) | D3D12/Metal后端, AutoExposure, MSAA, Undo/Redo |
 | P2 | GPU Driven | ~50% | Bindless, GPU Culling, GPU Scene, CSM+Shadow, IBL, Clustered Shading, ExecuteIndirect+DGC (Deferred) | ExecuteIndirect (Forward), VSM, VRS, Decal/ReflProbe, Prefab, Forward+, TAAU |
 | P3 | 高级几何 | ~5% | — | Nanite, Mesh Shader, Virtual Texturing, OIT, Impostor |
 | P4 | GI + RT | ~15% | DDGI (GBuffer), Denoiser, SSGI, SSR | HW RT, Lumen GI, VXGI, ReSTIR, NRD, NRC, RT管线 |
@@ -259,8 +259,8 @@ Engine/Shader/Shaders/  (Slang → SPIR-V → .spv.h)
 | — | Bloom + DOF + MotionBlur | P1/P6 | 🔴 高 | ✅ BrightPass + GaussianBlur + CoC + Velocity MB |
 | — | ExecuteIndirect + GPU Driven (Deferred) | P2 | 🔴 高 | ✅ MeshBatcher + DrawIndexedIndirect + CPU 回退 |
 | — | GPU Profiling | P1 | 🟡 中 | ✅ 时间戳查询 + RenderGraph + ImGui 面板 |
-| 1 | Shader Hot Reload | P1 | 🔴 高 | 开发效率倍增器（.slang 监控 + 自动重编译 + PSO 热替换） |
-| 2 | DDGI 前帧 HDR radiance 采样 | P4 | 🟡 中 | 探针光照精度从粗糙→准确 |
+| 1 | Shader Hot Reload | P1 | 🔴 高 | ✅ 完成：FileWatcher + slangc 重编译 + PSO 热替换 |
+| 2 | DDGI 前帧 HDR radiance 采样 | P4 | 🟡 中 | ✅ 完成：前帧 HDR 替代 albedo*0.3 |
 | 3 | DDGI 探针可见性优化 | P4 | 🟡 中 | 多步 march + 深度偏移减少漏光 |
 | 4 | PostProcess AutoExposure + ColorGrading | P1 | 🟡 中 | HDR→LDR 视觉品质 |
 | 5 | ExecuteIndirect + GPU Driven (Forward) | P2 | 🟡 中 | ForwardPipeline 同 Deferred 架构改造 |
@@ -270,7 +270,7 @@ Engine/Shader/Shaders/  (Slang → SPIR-V → .spv.h)
 | 9 | HW Ray Tracing | P4 | 🟢 低 | TLAS/BLAS + RT PSO |
 | 10 | Prefab 系统 | P2 | 🟢 低 | 编辑器工作流 |
 | 11 | Temporal Upsampling (TAAU) | P2 | 🟢 低 | 低分辨率渲染→超采样 |
-| 12 | RHI AsyncCompute | P1 | 🟢 低 | 并行 compute + graphics |
+| 12 | RHI AsyncCompute | P1 | 🟢 低 | ✅ Steps 1-5 完成（基础设施），默认关闭待多阶段提交 |
 | 13 | Decal + ReflectionProbe | P2 | 🟢 低 | 场景丰富度 |
 | 14 | Atmosphere + Volumetrics | P6 | 🟢 低 | 天空/雾/云 |
 | 15 | Skeletal Animation | P6 | 🟢 低 | 角色动画 |
