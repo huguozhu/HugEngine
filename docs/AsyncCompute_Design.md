@@ -438,10 +438,22 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, ...) {
 | Step 3 | RHI Device: 实现 `HasAsyncComputeQueue()`, `CreateFence/DestroyFence`, `WaitForFence`, `SignalFenceOnQueue/WaitFenceOnQueue` | 1d | ✅ 已完成 |
 | Step 4 | RHI Barrier: 实现 `QueueOwnershipTransfer()` (Vulkan: 设置 queueFamilyIndex; D3D12: ResourceBarrier) | 0.5d | ✅ 已完成 |
 | Step 5 | RenderGraph: `RGPassQueue` 枚举 + `AddPass(queueHint)` + `ScheduleAsyncPasses()` | 1.5d | ✅ 已完成 |
-| Step 6 | 管线接入: GPU_Cull + SSGI + Denoise + DepthPyramid → 标记 Compute Pass | 0.5d | ⏳ 待实现 |
-| Step 7 | 测试验证: RenderDoc GPU 时间线验证并行执行 | 0.5d | ⏳ 待实现 |
+| Step 6 | 管线接入: GPU_Cull + SSGI + Denoise + DepthPyramid → 标记 Compute Pass | 0.5d | ✅ 已完成 |
+| Step 7 | 测试验证: RenderDoc GPU 时间线验证并行执行 | 0.5d | ⏳ 待验证 |
 
 **总计约 6 个工作日**（仅 Vulkan 后端，不含 D3D12）。
+
+### 8.1 实际接入情况
+
+当前引擎中真正使用 Compute Shader（`Dispatch()`）的 Pass：
+
+| Pass | 管线 | 状态 |
+|------|------|:---:|
+| GPU_Cull | DeferredPipeline | ✅ 已标记 `RGPassQueue::Compute` |
+| DDGI_Update | DeferredPipeline | ✅ 已标记 `RGPassQueue::Compute` |
+| GPU_Cull | ForwardPipeline | ⚠️ 未使用 RenderGraph，直接内联 Dispatch |
+
+SSR/SSGI/SSAO/Denoise/Bloom/DOF/MotionBlur 当前使用全屏三角形 + Graphics Pipeline（`BeginOffscreenPass`），并非 Compute Shader。待后续重构为 Compute Shader 后可标记为 `RGPassQueue::Compute`。
 
 ---
 

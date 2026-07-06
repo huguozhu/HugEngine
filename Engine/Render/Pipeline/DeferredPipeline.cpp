@@ -405,11 +405,29 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
 
 void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
                                he::SceneGraph& sg, const CameraData& camera) {
+    // 延迟创建 Compute 命令列表（AsyncCompute 模式）
+    bool useAsyncCompute = m_Device->HasAsyncComputeQueue();
+    if (useAsyncCompute && !m_ComputeCmdList) {
+        m_ComputeCmdList = m_Device->CreateCommandList(rhi::QueueType::Compute);
+        HE_CORE_INFO("DeferredPipeline: AsyncCompute enabled — dedicated Compute command list created");
+    }
+
     RenderGraph rg;
     rg.SetProfiler(&m_Profiler);
+    rg.SetAsyncComputeEnabled(useAsyncCompute);
     BuildFrameGraph(rg, world, sg, camera);
     rg.Compile();
-    rg.Execute(cmd, m_Device);
+
+    if (useAsyncCompute && m_ComputeCmdList) {
+        // 双队列模式: Graphics + Compute 并行执行
+        m_ComputeCmdList->Begin();
+        rg.Execute(cmd, m_ComputeCmdList.get(), m_Device);
+        m_ComputeCmdList->End();
+        m_ComputeCmdList->Submit();
+    } else {
+        // 回退: 单 Graphics 队列（与原来行为一致）
+        rg.Execute(cmd, m_Device);
+    }
 }
 
 void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
@@ -459,7 +477,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             m_GPUCulling.Dispatch(c, camera.GetViewProjMatrix(), m_GPUScene.GetObjectCount(), w, h);
             // 恢复 graphics pipeline state（compute dispatch 后状态未定义，影响后续 GBuffer pass）
             c->SetPipeline(m_GBufferPSO.get());
-        });
+        },
+        RGPassQueue::Compute);  // AsyncCompute: GPU 剔除在 Compute 队列执行
 
     // GBuffer 4×MRT + 绘制（委托给 IGBufferRenderer，支持 CPU/GPU 双模式）
     rg.AddPass("GB_Clear", {}, {{gbA, ResourceAccess::Write}, {gbB, ResourceAccess::Write},
@@ -489,7 +508,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 // 确保后续 pass 的 SetPipeline / BeginOffscreenPass 状态正确
                 c->SetPipeline(m_LightingPSO.get());
             }
-        });
+        },
+        RGPassQueue::Compute);  // AsyncCompute: DDGI 探针更新在 Compute 队列执行
 
     // SSAO Pass
     auto ssaoOut = rg.ImportTexture("SSAO_Output", m_SSAO.GetAOTexture());

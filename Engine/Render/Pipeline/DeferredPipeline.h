@@ -99,6 +99,9 @@ private:
     rhi::IRHIDevice* m_Device = nullptr;
     rhi::IRHISwapChain* m_SwapChain = nullptr;
 
+    // AsyncCompute: 专用 Compute 队列命令列表（延迟创建）
+    std::unique_ptr<rhi::IRHICommandList> m_ComputeCmdList;
+
     // GBuffer (graph-managed, OnResize 重建)
     std::unique_ptr<rhi::IRHITexture> m_GBufferA, m_GBufferB, m_GBufferC;
     // GBuffer 第 4 张 MRT：velocity（RG16_FLOAT，UV 空间运动矢量）
