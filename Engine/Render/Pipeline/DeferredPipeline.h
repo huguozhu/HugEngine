@@ -23,6 +23,7 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "GI/GI_DDGI.h"
 #include "PostProcess/Denoiser.h"
 #include "PostProcess/GaussianBlurPass.h"
+#include "PostProcess/BloomPass.h"
 #include "PostProcess/ToneMapPass.h"
 #include "PostProcess/SkyboxPass.h"
 #include "Scene/World.h"
@@ -152,6 +153,7 @@ private:
     Denoiser m_DenoiseSSR;
     SSAO    m_SSAO;
     GaussianBlurPass m_GaussianBlur;  // 高斯模糊（Bloom 基础构件）
+    BloomPass m_Bloom;              // 完整 Bloom 后处理
     std::vector<u32> m_GPUVisibleIndices;
 
 
