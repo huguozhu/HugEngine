@@ -428,11 +428,21 @@ void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
 
     if (useAsyncCompute && m_ComputeCmdList) {
         // 双队列模式: Graphics + Compute 并行执行
-        // 注意: Compute 命令列表在 Begin/End 之间录制，但不在此时 Submit
-        //       Submit 推迟到 FlushComputeWork()，确保 Graphics 先提交
+        // ============================================================
+        // Timeline Semaphore 同步策略:
+        //   1. Graphics Submit 时附带 Signal(m_CrossQueueFence)
+        //   2. Compute  Submit 时附带 Wait(m_CrossQueueFence)
+        //   → Compute 在 Graphics 全部完成后才开始，安全但串行
+        //   → 后续优化方向: 将 Graphics 拆分为两阶段提交实现真正并行
+        // ============================================================
         m_ComputeCmdList->Begin();
         rg.Execute(cmd, m_ComputeCmdList.get(), m_Device);
         m_ComputeCmdList->End();
+
+        // 设置 Timeline Semaphore 同步（在 Submit 时自动附加到 pNext 链）
+        u64 signalValue = ++m_FrameCounter;
+        cmd->SetTimelineSignal(m_CrossQueueFence, signalValue);
+        m_ComputeCmdList->SetTimelineWait(m_CrossQueueFence, signalValue);
         m_ComputePendingSubmit = true;
     } else {
         // 回退: 单 Graphics 队列（与原来行为一致）
@@ -442,15 +452,9 @@ void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
 
 void DeferredPipeline::FlushComputeWork() {
     // 在 Graphics 命令列表 Submit 之后调用
-    // 使用 Timeline Semaphore 确保 Compute 等待 Graphics 的 QFOT Release Barrier
+    // Timeline Semaphore 信号/等待已通过 SetTimelineSignal/SetTimelineWait
+    // 集成到命令列表的 vkQueueSubmit pNext 链中，此处只需提交 Compute
     if (!m_ComputePendingSubmit || !m_ComputeCmdList) return;
-
-    u64 signalValue = ++m_FrameCounter;
-    // Graphics 队列 Signal: 标记所有 Release Barrier 已提交
-    m_Device->SignalFenceOnQueue(rhi::QueueType::Graphics, m_CrossQueueFence, signalValue);
-    // Compute 队列 Wait: 等待 Graphics 完成 Release 后再执行 ACQUIRE
-    m_Device->WaitFenceOnQueue(rhi::QueueType::Compute, m_CrossQueueFence, signalValue);
-    // 现在可以安全提交 Compute 工作
     m_Device->Submit(m_ComputeCmdList.get());
     m_ComputePendingSubmit = false;
 }

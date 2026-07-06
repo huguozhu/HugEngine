@@ -147,6 +147,12 @@ public:
     u32     GetComputeFamily() const { return m_ComputeFamily; }
     bool    HasAsyncCompute()  const { return m_HasAsyncCompute; }
 
+    // Fence 句柄 → VkSemaphore 解析（供 VulkanCommandList 集成 Timeline 信号量）
+    VkSemaphore ResolveFenceSemaphore(RHIFenceHandle fence) const {
+        if (fence == kInvalidFence || fence > m_Fences.size()) return VK_NULL_HANDLE;
+        return m_Fences[static_cast<usize>(fence - 1)].semaphore;
+    }
+
     // Descriptor set handle 解析（供 VulkanCommandList 使用）
     VkDescriptorSet ResolveDescriptorSet(DescriptorSetHandle h) const {
         if (h == 0 || h > m_DescSets.size()) return VK_NULL_HANDLE;
@@ -264,6 +270,10 @@ public:
     void ReleaseToQueue(IRHITexture* texture, QueueType dstQueue) override;
     void AcquireFromQueue(IRHITexture* texture, QueueType srcQueue) override;
 
+    // Timeline Semaphore 集成到 Submit
+    void SetTimelineSignal(RHIFenceHandle fence, u64 value) override;
+    void SetTimelineWait(RHIFenceHandle fence, u64 value) override;
+
     // GPU Timestamp Query
     void WriteTimestamp(IRHIQueryPool* pool, u32 queryIndex) override;
     void ResetQueryPool(IRHIQueryPool* pool) override;
@@ -312,9 +322,15 @@ private:
     // 关联的 SwapChain（自动管理 Framebuffer + 同步 + 图像索引）
     VulkanSwapChain* m_pSwapChain = nullptr;
 
-    // 同步原语
+    // 同步原语（Binary Semaphore，SwapChain 用）
     VkSemaphore      m_WaitSemaphore   = VK_NULL_HANDLE;
     VkSemaphore      m_SignalSemaphore = VK_NULL_HANDLE;
+
+    // Timeline Semaphore 集成（AsyncCompute 跨队列同步）
+    VkSemaphore      m_TimelineSignalSem = VK_NULL_HANDLE;
+    u64              m_TimelineSignalVal = 0;
+    VkSemaphore      m_TimelineWaitSem   = VK_NULL_HANDLE;
+    u64              m_TimelineWaitVal   = 0;
 
     VkPipeline          m_CurrentPipeline = VK_NULL_HANDLE;
     VkPipelineLayout    m_CurrentLayout   = VK_NULL_HANDLE;

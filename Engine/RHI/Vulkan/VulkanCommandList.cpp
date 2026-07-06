@@ -820,6 +820,24 @@ void VulkanCommandList::AcquireFromQueue(IRHITexture* texture, QueueType srcQueu
 }
 
 // ============================================================
+// Timeline Semaphore 集成（SetTimelineSignal / SetTimelineWait）
+// ============================================================
+
+void VulkanCommandList::SetTimelineSignal(RHIFenceHandle fence, u64 value) {
+    if (!m_VulkanDevice || fence == kInvalidFence) return;
+    // 通过 VulkanDevice 解析 FenceHandle → VkSemaphore
+    // 直接访问内部 m_Fences（VulkanCommandList 和 VulkanDevice 是 friend/内部类）
+    m_TimelineSignalSem = m_VulkanDevice->ResolveFenceSemaphore(fence);
+    m_TimelineSignalVal = value;
+}
+
+void VulkanCommandList::SetTimelineWait(RHIFenceHandle fence, u64 value) {
+    if (!m_VulkanDevice || fence == kInvalidFence) return;
+    m_TimelineWaitSem = m_VulkanDevice->ResolveFenceSemaphore(fence);
+    m_TimelineWaitVal = value;
+}
+
+// ============================================================
 // Submit（提交命令缓冲到 GPU 队列）
 // ============================================================
 
@@ -835,19 +853,65 @@ void VulkanCommandList::Submit() {
 
     VkCommandBuffer cb = m_CmdBuffers[m_FrameIndex];
 
+    // 构建二进制 + Timeline 信号量列表
+    // Vulkan 允许在 pSignalSemaphores 中混合二进制和 Timeline 信号量
+    VkSemaphore allSignalSems[2];
+    u64        timelineSignalVals[2];
+    u32        signalCount = 0;
+    if (signalSem) allSignalSems[signalCount++] = signalSem;
+    if (m_TimelineSignalSem) {
+        allSignalSems[signalCount] = m_TimelineSignalSem;
+        timelineSignalVals[signalCount] = m_TimelineSignalVal;
+        signalCount++;
+    }
+
+    // 构建二进制 + Timeline 等待信号量列表
+    VkSemaphore allWaitSems[2];
+    u64        timelineWaitVals[2];
+    VkPipelineStageFlags waitStages[2];
+    u32        waitCount = 0;
+    if (waitSem) {
+        allWaitSems[waitCount] = waitSem;
+        waitStages[waitCount] = waitStage;
+        waitCount++;
+    }
+    if (m_TimelineWaitSem) {
+        allWaitSems[waitCount] = m_TimelineWaitSem;
+        waitStages[waitCount] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        timelineWaitVals[waitCount] = m_TimelineWaitVal;
+        waitCount++;
+    }
+
+    // 构建 Timeline Semaphore Submit Info（pNext 链）
+    // 注意：binary semaphore 不使用 timeline values，但 pWaitSemaphoreValues 必须
+    // 为每个 wait semaphore 提供值。对于 binary semaphore，该值被忽略。
+    VkTimelineSemaphoreSubmitInfo timelineInfo{};
+    timelineInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+    timelineInfo.waitSemaphoreValueCount   = waitCount;
+    timelineInfo.pWaitSemaphoreValues      = timelineWaitVals;
+    timelineInfo.signalSemaphoreValueCount = signalCount;
+    timelineInfo.pSignalSemaphoreValues    = timelineSignalVals;
+
     VkSubmitInfo submitInfo{};
     submitInfo.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.waitSemaphoreCount   = waitSem ? 1u : 0u;
-    submitInfo.pWaitSemaphores      = &waitSem;
-    submitInfo.pWaitDstStageMask    = &waitStage;
+    submitInfo.pNext                = &timelineInfo;  // Timeline Semaphore 扩展
+    submitInfo.waitSemaphoreCount   = waitCount;
+    submitInfo.pWaitSemaphores      = allWaitSems;
+    submitInfo.pWaitDstStageMask    = waitStages;
     submitInfo.commandBufferCount   = 1;
     submitInfo.pCommandBuffers      = &cb;
-    submitInfo.signalSemaphoreCount = signalSem ? 1u : 0u;
-    submitInfo.pSignalSemaphores    = &signalSem;
+    submitInfo.signalSemaphoreCount = signalCount;
+    submitInfo.pSignalSemaphores    = allSignalSems;
 
     // 重置当前帧栅栏并提交（GPU 执行完成后触发栅栏）
     vkResetFences(m_Device, 1, &m_Fences[m_FrameIndex]);
     vkQueueSubmit(m_Queue, 1, &submitInfo, m_Fences[m_FrameIndex]);
+
+    // 清除 Timeline 信号量状态（下次 Submit 需重新设置）
+    m_TimelineSignalSem = VK_NULL_HANDLE;
+    m_TimelineSignalVal = 0;
+    m_TimelineWaitSem   = VK_NULL_HANDLE;
+    m_TimelineWaitVal   = 0;
 
     // 非阻塞：不等待 GPU 完成，下一帧 Begin() 中等待该槽位的历史栅栏
     // CPU 可提前 1-2 帧开始录制

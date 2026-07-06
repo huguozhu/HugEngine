@@ -139,6 +139,12 @@ public:
     virtual void ReleaseToQueue(IRHITexture* texture, QueueType dstQueue) = 0;
     virtual void AcquireFromQueue(IRHITexture* texture, QueueType srcQueue) = 0;
 
+    // 跨队列同步：在 Submit 时携带 Timeline Semaphore Signal/Wait
+    // 调用 SetTimelineSignal/SetTimelineWait 后，下一次 Submit 会在
+    // vkQueueSubmit 的 pNext 中自动附加 VkTimelineSemaphoreSubmitInfo
+    virtual void SetTimelineSignal(RHIFenceHandle fence, u64 value) = 0;
+    virtual void SetTimelineWait(RHIFenceHandle fence, u64 value) = 0;
+
     // GPU 时间戳查询
     virtual void WriteTimestamp(IRHIQueryPool* pool, u32 queryIndex) = 0;
     virtual void ResetQueryPool(IRHIQueryPool* pool) = 0;
