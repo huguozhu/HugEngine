@@ -5,6 +5,7 @@
 #include "Platform/Window.h"
 #include "RHI/RHI.h"
 #include "Pipeline/ForwardPipeline.h"
+#include "ShaderHotReload.h"
 #include "AntiAliasing/AA_None.h"
 #include "AntiAliasing/AA_FXAA.h"
 #include "Scene/World.h"
@@ -153,6 +154,22 @@ void EditorApp::InitPipeline() {
     m_Pipeline->OnResize(m_SwapChain->GetWidth(), m_SwapChain->GetHeight());
     m_CmdList->SetPipeline(m_Pipeline->GetPipelineState());
     HE_CORE_INFO("Pipeline: Forward (change via Project Settings CVar 'render.pipeline', requires restart)");
+
+    // --- Shader 热重载 ---
+    m_ShaderHotReload = std::make_unique<he::render::ShaderHotReload>();
+    // 获取 shader 源文件目录和 slangc 路径
+    String shaderDir  = "../../Engine/Shader/Shaders";     // 相对于 build/bin/Debug
+    String slangcPath = "slangc";                           // 依赖 PATH 环境变量
+    m_ShaderHotReload->Start(shaderDir, slangcPath,
+        [this](const String& shaderName, const std::vector<u32>& spirv) {
+            if (m_Pipeline) {
+                int n = m_Pipeline->ReloadShader(shaderName, spirv);
+                if (n > 0) {
+                    HE_CORE_INFO("[HotReload] {} → 成功重载 {} 个 PSO", shaderName, n);
+                }
+            }
+        });
+    HE_CORE_INFO("Shader Hot Reload 已启动");
 }
 
 void EditorApp::InitEditor() {
@@ -190,6 +207,11 @@ void EditorApp::MainLoop() {
         m_LastTime = now;
 
         m_Engine->GetWindow()->PollEvents();
+
+        // Shader 热重载 — 每帧处理待重载队列
+        if (m_ShaderHotReload) {
+            m_ShaderHotReload->Poll();
+        }
 
         // AA 模式切换（根据 CVar 动态创建/替换）
         static String s_LastAAMode = "none";
@@ -474,6 +496,12 @@ void EditorApp::MainLoop() {
 }
 
 void EditorApp::Shutdown() {
+    // 停止 Shader 热重载（必须在设备释放前停止）
+    if (m_ShaderHotReload) {
+        m_ShaderHotReload->Stop();
+        m_ShaderHotReload.reset();
+    }
+
     m_Device->WaitIdle();
     m_ImGui->Shutdown();
     // �?Engine 销毁前释放所有子系统（避免析构时 Logger 已失效）

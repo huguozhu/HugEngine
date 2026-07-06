@@ -27,6 +27,7 @@ namespace rhi {
 }
 namespace render {
     class ForwardPipeline;
+    class ShaderHotReload;              // Shader 热重载
 }
 namespace editor {
     class ImGuiIntegration;
@@ -93,6 +94,9 @@ private:
     std::unique_ptr<he::editor::StatsPanel> m_Stats;
     std::unique_ptr<he::editor::ConsolePanel> m_Console;
     std::unique_ptr<he::editor::MaterialEditor> m_MaterialEditor;
+
+    // --- Shader 热重载 ---
+    std::unique_ptr<he::render::ShaderHotReload> m_ShaderHotReload;
 
     he::f64  m_LastTime  = 0.0;
     bool     m_StepFrame = false;  // PIE Step 模式
