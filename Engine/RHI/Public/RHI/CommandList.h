@@ -3,6 +3,7 @@
 #include "RHI/Types.h"
 #include "RHI/Buffer.h"
 #include "RHI/Shader.h"
+#include "RHI/QueryPool.h"
 
 namespace he::rhi {
 
@@ -115,6 +116,11 @@ public:
     // 缓冲拷贝（GPU 端）
     virtual void CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst,
                             u64 size, u64 srcOffset = 0, u64 dstOffset = 0) = 0;
+
+    // GPU 时间戳查询
+    virtual void WriteTimestamp(IRHIQueryPool* pool, u32 queryIndex) = 0;
+    virtual void ResetQueryPool(IRHIQueryPool* pool) = 0;
+    virtual void GetQueryResults(IRHIQueryPool* pool, u32 first, u32 count, u64* data) = 0;
 
     virtual void Submit() = 0;
 };

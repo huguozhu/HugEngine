@@ -27,6 +27,7 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "PostProcess/DOFPass.h"
 #include "PostProcess/MotionBlurPass.h"
 #include "PostProcess/ToneMapPass.h"
+#include "Profiler/ProfilerManager.h"
 #include "PostProcess/SkyboxPass.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
@@ -74,6 +75,7 @@ public:
     DOFPass&        GetDOF()        { return m_DOF; }
     MotionBlurPass& GetMotionBlur() { return m_MotionBlur; }
     SSAO&           GetSSAO()       { return m_SSAO; }
+    ProfilerManager& GetProfiler()   { return m_Profiler; }
     // GBuffer 渲染模式
     enum class GBufferMode : u8 { CPU, GPU };
     void         SetGBufferMode(GBufferMode m);
@@ -121,6 +123,7 @@ private:
     // FXAA 禁用时 ToneMap 直接写 BackBuffer，此纹理闲置
     std::unique_ptr<rhi::IRHITexture> m_LDRTarget;
     std::unique_ptr<rhi::IRHISampler> m_LDRSampler;
+    std::unique_ptr<rhi::IRHITexture> m_LDRDummyDepth;  // ToneMap PSO 带 depth，Offscreen 需 2 附件
 
     // 三缓冲
     std::unique_ptr<rhi::IRHIBuffer> m_LightBuffers[MAX_FRAMES_IN_FLIGHT];
@@ -171,6 +174,7 @@ private:
     BloomPass m_Bloom;          // Bloom（懒初始化）
     DOFPass  m_DOF;            // 景深（懒初始化）
     MotionBlurPass m_MotionBlur; // 运动模糊（懒初始化）
+    ProfilerManager m_Profiler;  // GPU 时间戳 Profiler
     std::vector<u32> m_GPUVisibleIndices;
 
 

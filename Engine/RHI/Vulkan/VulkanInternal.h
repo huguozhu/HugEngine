@@ -101,6 +101,10 @@ public:
     void WaitIdle() override;
     void Submit(IRHICommandList* cmdList) override;
 
+    // GPU Query
+    std::unique_ptr<IRHIQueryPool> CreateQueryPool(u32 queryCount) override;
+    float GetTimestampPeriod() override;
+
     // Descriptor Sets
     DescriptorSetLayoutHandle CreateDescriptorSetLayout(const DescriptorSetLayoutDesc& desc) override;
     DescriptorSetHandle       AllocateDescriptorSet(DescriptorSetLayoutHandle layout) override;
@@ -217,6 +221,12 @@ public:
                          IRHITexture* texture) override;
     void CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst,
                     u64 size, u64 srcOffset, u64 dstOffset) override;
+
+    // GPU Timestamp Query
+    void WriteTimestamp(IRHIQueryPool* pool, u32 queryIndex) override;
+    void ResetQueryPool(IRHIQueryPool* pool) override;
+    void GetQueryResults(IRHIQueryPool* pool, u32 first, u32 count, u64* data) override;
+
     void Submit() override;
 
     // Phase 1 桥接：直接设置 Framebuffer

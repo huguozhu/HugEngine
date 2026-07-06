@@ -92,6 +92,7 @@ public:
     ResourceHandle CreateBuffer(StringView name, const rhi::BufferDesc& desc);
     ResourceHandle ImportTexture(StringView name, rhi::IRHITexture* external);
     void          SetSwapChain(rhi::IRHISwapChain* sc) { m_SwapChain = sc; }
+    void          SetProfiler(class ProfilerManager* p) { m_Profiler = p; }
     const ResourceDesc& GetResourceDesc(ResourceHandle h) const;
 
     // --- Pass 构建 ---
@@ -128,6 +129,7 @@ private:
     // 导入的外部资源
     std::unordered_map<ResourceHandle, rhi::IRHITexture*> m_ImportedTextures;
     rhi::IRHISwapChain* m_SwapChain = nullptr;
+    ProfilerManager*    m_Profiler  = nullptr;
 
     ResourceHandle m_BackBufferHandle = kInvalidHandle;
     bool           m_Compiled = false;

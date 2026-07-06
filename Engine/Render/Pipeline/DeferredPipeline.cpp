@@ -84,6 +84,10 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         rhi::SamplerDesc s; s.minFilter = s.magFilter = rhi::FilterMode::Linear;
         s.addressU = s.addressV = rhi::AddressMode::ClampToEdge;
         m_LDRSampler = device->CreateSampler(s);
+        // 虚拟深度附件（ToneMap PSO 带 D32_FLOAT depthFormat，Offscreen 需要 2 附件）
+        rhi::TextureDesc dd; dd.format = rhi::Format::D32_FLOAT;
+        dd.width = 1; dd.height = 1; dd.usage = rhi::TextureUsage::DepthStencil;
+        m_LDRDummyDepth = device->CreateTexture(dd);
     }
 
     // 三缓冲
@@ -215,6 +219,9 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         m_GBufferRenderer = std::make_unique<GBufferRenderer_CPU>();
     m_GBufferRenderer->Initialize(m_GBufferCtx);
 
+    // GPU Profiler
+    m_Profiler.Initialize(device, 20, MAX_FRAMES_IN_FLIGHT);
+
     // Lighting PSO (全屏三角形，无深度)
     rhi::ShaderBytecode lVS, lFS;
     lVS.stage = rhi::ShaderStage::Vertex; lVS.spirv = k_DeferredLighting_vert_spv; lVS.entryPoint = "main";
@@ -295,7 +302,7 @@ void DeferredPipeline::Shutdown() {
     m_AntiAliasing.reset();
     if (m_FXAA) m_FXAA->Shutdown();
     m_FXAA.reset();
-    m_LDRTarget.reset(); m_LDRSampler.reset();
+    m_LDRTarget.reset(); m_LDRSampler.reset(); m_LDRDummyDepth.reset();
     m_HDRTarget.reset(); m_HDRDepth.reset(); m_HDRSampler.reset();
     m_GBufferPSO.reset(); m_LightingPSO.reset();
     for (auto& b : m_LightBuffers) b.reset();
@@ -306,6 +313,7 @@ void DeferredPipeline::Shutdown() {
     m_GPUScene.Shutdown();
     if (m_GBufferRenderer) m_GBufferRenderer->Shutdown();
     m_GBufferRenderer.reset();
+    m_Profiler.Shutdown();
     m_SSGI.Shutdown();
     m_SSR.Shutdown();
     m_DDGI.Shutdown();
@@ -380,6 +388,12 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
         d.width = w; d.height = h; d.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
         m_LDRTarget = m_Device->CreateTexture(d);
     }
+    // 重建 LDR 虚拟深度
+    {
+        rhi::TextureDesc dd; dd.format = rhi::Format::D32_FLOAT;
+        dd.width = 1; dd.height = 1; dd.usage = rhi::TextureUsage::DepthStencil;
+        m_LDRDummyDepth = m_Device->CreateTexture(dd);
+    }
     m_SSAO.OnResize(w, h);
     m_SSGI.OnResize(w, h);
     m_SSR.OnResize(w, h);
@@ -392,6 +406,7 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
 void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
                                he::SceneGraph& sg, const CameraData& camera) {
     RenderGraph rg;
+    rg.SetProfiler(&m_Profiler);
     BuildFrameGraph(rg, world, sg, camera);
     rg.Compile();
     rg.Execute(cmd, m_Device);
@@ -740,7 +755,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             if (useFXAA) {
                 // FXAA 启用 → ToneMap 写入 LDR 中间纹理（离屏），FXAA 再写入 BackBuffer
                 rhi::ClearValue clr{};
-                c->BeginOffscreenPass(m_LDRTarget->GetNativeHandle(), nullptr, w, h, &clr, false);
+                c->BeginOffscreenPass(m_LDRTarget->GetNativeHandle(),
+                    m_LDRDummyDepth->GetNativeHandle(), w, h, &clr, false);
                 m_ToneMap->Render(c);
                 c->EndOffscreenPass();
             } else {

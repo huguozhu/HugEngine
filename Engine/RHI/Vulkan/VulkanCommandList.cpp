@@ -19,6 +19,7 @@
 
 // VulkanSwapChain/VulkanCommandList 等类型的完整定义
 #include "VulkanInternal.h"
+#include "VulkanQueryPool.h"
 
 namespace he::rhi {
 
@@ -371,7 +372,6 @@ void VulkanCommandList::BeginOffscreenPass(
     void* colorImageView, void* depthImageView,
     u32 width, u32 height, const ClearValue* clear, bool allowSecondary)
 {
-    // 验证：至少需要一个附件
     auto colorView = static_cast<VkImageView>(colorImageView);
     auto depthView = static_cast<VkImageView>(depthImageView);
     if (!colorView && !depthView) {
@@ -383,60 +383,13 @@ void VulkanCommandList::BeginOffscreenPass(
         return;
     }
 
-    // 懒创建 1×1 虚拟深度附件（当 PSO 的 RenderPass 包含深度附件但调用方未提供时使用）
-    // ToneMap 等后处理 PSO 的 depthFormat 匹配 BackBuffer，Offscreen 路径不需要真深度
-    if (!depthView && m_DummyDepthView == VK_NULL_HANDLE) {
-        VkImageCreateInfo imgInfo{};
-        imgInfo.sType     = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        imgInfo.imageType = VK_IMAGE_TYPE_2D;
-        imgInfo.format    = VK_FORMAT_D32_SFLOAT;
-        imgInfo.extent    = {1, 1, 1};
-        imgInfo.mipLevels = 1;
-        imgInfo.arrayLayers = 1;
-        imgInfo.samples   = VK_SAMPLE_COUNT_1_BIT;
-        imgInfo.tiling    = VK_IMAGE_TILING_OPTIMAL;
-        imgInfo.usage     = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-        vkCreateImage(m_Device, &imgInfo, nullptr, &m_DummyDepthImage);
-
-        VkMemoryRequirements memReq;
-        vkGetImageMemoryRequirements(m_Device, m_DummyDepthImage, &memReq);
-        VkMemoryAllocateInfo allocInfo{};
-        allocInfo.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocInfo.allocationSize  = memReq.size;
-        allocInfo.memoryTypeIndex = 0;  // GPU local (Vulkan 规范保证 index 0 总是有效)
-        // 查找 DEVICE_LOCAL 内存类型索引
-        VkPhysicalDeviceMemoryProperties mp;
-        vkGetPhysicalDeviceMemoryProperties(m_VulkanDevice->GetVkPhysical(), &mp);
-        for (u32 i = 0; i < mp.memoryTypeCount; ++i) {
-            if ((mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) &&
-                (memReq.memoryTypeBits & (1u << i))) {
-                allocInfo.memoryTypeIndex = i;
-                break;
-            }
-        }
-        vkAllocateMemory(m_Device, &allocInfo, nullptr, &m_DummyDepthMemory);
-        vkBindImageMemory(m_Device, m_DummyDepthImage, m_DummyDepthMemory, 0);
-
-        VkImageViewCreateInfo viewInfo{};
-        viewInfo.sType      = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        viewInfo.image      = m_DummyDepthImage;
-        viewInfo.viewType   = VK_IMAGE_VIEW_TYPE_2D;
-        viewInfo.format     = VK_FORMAT_D32_SFLOAT;
-        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-        viewInfo.subresourceRange.levelCount = 1;
-        viewInfo.subresourceRange.layerCount = 1;
-        vkCreateImageView(m_Device, &viewInfo, nullptr, &m_DummyDepthView);
-    }
-
-    // 构建附件列表（至少 2 个以匹配带 depth 的 RenderPass）
+    // 构建附件列表（仅使用调用方提供的附件）
     VkImageView attachments[2] = {};
     u32 attachmentCount = 0;
     if (colorView) attachments[attachmentCount++] = colorView;
-    else           attachments[attachmentCount++] = VK_NULL_HANDLE;
-    // 无论调用方是否传 depthView，始终提供 depth 附件（匹配 PSO RenderPass 附件数）
-    attachments[attachmentCount++] = depthView ? depthView : m_DummyDepthView;
+    if (depthView) attachments[attachmentCount++] = depthView;
 
-    // 创建离屏 Framebuffer（每帧新建，旧的在 Begin() 中通过 fence 等待后安全销毁）
+    // 创建离屏 Framebuffer
     VkFramebuffer offscreenFB = VK_NULL_HANDLE;
     VkFramebufferCreateInfo fbInfo{};
     fbInfo.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
@@ -447,25 +400,32 @@ void VulkanCommandList::BeginOffscreenPass(
     fbInfo.height          = height;
     fbInfo.layers          = 1;
     vkCreateFramebuffer(m_Device, &fbInfo, nullptr, &offscreenFB);
-    m_CurrentOffscreenFB = offscreenFB;  // 记录当前 FB 以便延迟销毁
+    m_CurrentOffscreenFB = offscreenFB;
 
-    // 清除值（始终 2 个以匹配带 depth 的 RenderPass）
+    // 清除值
     VkClearValue vkClearValues[2]{};
-    if (colorView && clear) {
-        vkClearValues[0].color.float32[0] = clear->color[0];
-        vkClearValues[0].color.float32[1] = clear->color[1];
-        vkClearValues[0].color.float32[2] = clear->color[2];
-        vkClearValues[0].color.float32[3] = clear->color[3];
+    u32 clearCount = 0;
+    if (colorView) {
+        if (clear) {
+            vkClearValues[clearCount].color.float32[0] = clear->color[0];
+            vkClearValues[clearCount].color.float32[1] = clear->color[1];
+            vkClearValues[clearCount].color.float32[2] = clear->color[2];
+            vkClearValues[clearCount].color.float32[3] = clear->color[3];
+        }
+        clearCount++;
     }
-    vkClearValues[1].depthStencil.depth   = clear ? clear->depth   : 1.0f;
-    vkClearValues[1].depthStencil.stencil = clear ? clear->stencil : 0;
+    if (depthView) {
+        vkClearValues[clearCount].depthStencil.depth   = clear ? clear->depth   : 1.0f;
+        vkClearValues[clearCount].depthStencil.stencil = clear ? clear->stencil : 0;
+        clearCount++;
+    }
 
     VkRenderPassBeginInfo rpBegin{};
     rpBegin.sType       = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     rpBegin.renderPass  = m_CurrentRenderPass;
     rpBegin.framebuffer = offscreenFB;
     rpBegin.renderArea.extent = { width, height };
-    rpBegin.clearValueCount   = 2;  // 始终 2 个清除值
+    rpBegin.clearValueCount   = clearCount;
     rpBegin.pClearValues      = vkClearValues;
 
     VkSubpassContents contents = allowSecondary
@@ -474,7 +434,6 @@ void VulkanCommandList::BeginOffscreenPass(
     vkCmdBeginRenderPass(m_CmdBuffers[m_FrameIndex], &rpBegin, contents);
     m_InOffscreenPass = true;
 
-    // 在渲染通道内重新绑定管线（Vulkan 要求）
     if (m_CurrentPipeline != VK_NULL_HANDLE) {
         vkCmdBindPipeline(m_CmdBuffers[m_FrameIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, m_CurrentPipeline);
     }
@@ -692,6 +651,25 @@ void VulkanCommandList::BindDescriptorSet(u32 setIndex, DescriptorSetHandle setH
     // 使用 m_CurrentBindPoint（SetPipeline 已根据 Compute/Graphics PSO 设置正确的 bind point）
     vkCmdBindDescriptorSets(m_CmdBuffers[m_FrameIndex], m_CurrentBindPoint,
                             m_CurrentLayout, setIndex, 1, &ds, 0, nullptr);
+}
+
+// ── GPU Timestamp Query ──
+void VulkanCommandList::WriteTimestamp(IRHIQueryPool* pool, u32 queryIndex) {
+    auto* vkPool = static_cast<VulkanQueryPool*>(pool);
+    vkCmdWriteTimestamp(m_CmdBuffers[m_FrameIndex],
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, vkPool->GetHandle(), queryIndex);
+}
+
+void VulkanCommandList::ResetQueryPool(IRHIQueryPool* pool) {
+    auto* vkPool = static_cast<VulkanQueryPool*>(pool);
+    vkCmdResetQueryPool(m_CmdBuffers[m_FrameIndex], vkPool->GetHandle(), 0, vkPool->GetQueryCount());
+}
+
+void VulkanCommandList::GetQueryResults(IRHIQueryPool* pool, u32 first, u32 count, u64* data) {
+    auto* vkPool = static_cast<VulkanQueryPool*>(pool);
+    vkGetQueryPoolResults(m_Device, vkPool->GetHandle(), first, count,
+        sizeof(u64) * count, data, sizeof(u64),
+        VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
 }
 
 void VulkanCommandList::CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst,

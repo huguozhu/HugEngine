@@ -5,6 +5,7 @@
 #include "RHI/CommandList.h"
 #include "RHI/Buffer.h"
 #include "RHI/Shader.h"
+#include "RHI/QueryPool.h"
 #include "Core/Types.h"
 
 #include <memory>
@@ -58,6 +59,10 @@ public:
                                                           IRHITexture** textures, IRHISampler** samplers,
                                                           u32 count) = 0;
     virtual void                      DestroyDescriptorSetLayout(DescriptorSetLayoutHandle layout) = 0;
+
+    // --- GPU Query ---
+    virtual std::unique_ptr<IRHIQueryPool> CreateQueryPool(u32 queryCount) = 0;
+    virtual float GetTimestampPeriod() = 0;  // 时间戳单位（纳秒）
 
     // --- Commands ---
     virtual void Submit(IRHICommandList* cmdList) = 0;

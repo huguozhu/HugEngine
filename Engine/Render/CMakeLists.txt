@@ -66,7 +66,9 @@ target_sources(HugEngineRender PRIVATE
     PostProcess/BloomPass.cpp
     PostProcess/DOFPass.cpp
     PostProcess/MotionBlurPass.cpp
-    
+    # Profiler
+    Profiler/ProfilerManager.cpp
+
     # AntiAliasing
     AntiAliasing/AntiAliasing.h
     AntiAliasing/AA_None.h

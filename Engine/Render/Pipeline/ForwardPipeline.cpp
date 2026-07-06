@@ -234,7 +234,7 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         hdrDepthDesc.format = rhi::Format::D32_FLOAT;
         hdrDepthDesc.width  = m_HDRWidth;
         hdrDepthDesc.height = m_HDRHeight;
-        hdrDepthDesc.usage  = rhi::TextureUsage::DepthStencil;
+        hdrDepthDesc.usage  = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;  // GPU Culling 需要采样深度
         m_HDRDepth = device->CreateTexture(hdrDepthDesc);
 
         rhi::SamplerDesc hdrSampDesc;
@@ -272,6 +272,7 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     // --- GPU Culling ---
     m_GPUCulling.Initialize(device);
     m_GPUScene.Initialize(device);
+    m_Profiler.Initialize(device, 20, MAX_FRAMES_IN_FLIGHT);  // GPU Profiler
 
     // --- SceneRenderer ---
     m_SceneRenderer = std::make_unique<SceneRenderer>();
@@ -305,6 +306,7 @@ void ForwardPipeline::Shutdown() {
 
     m_GPUCulling.Shutdown(m_Device);
     m_GPUScene.Shutdown();
+    m_Profiler.Shutdown();
     if (m_AntiAliasing) { m_AntiAliasing->Shutdown(); m_AntiAliasing.reset(); }
 
     m_Device = nullptr;
@@ -529,9 +531,8 @@ void ForwardPipeline::ResizeHDRTarget(u32 width, u32 height) {
     hdrDepthDesc.format = rhi::Format::D32_FLOAT;
     hdrDepthDesc.width  = m_HDRWidth;
     hdrDepthDesc.height = m_HDRHeight;
-    hdrDepthDesc.usage  = rhi::TextureUsage::DepthStencil;
+    hdrDepthDesc.usage  = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
     m_HDRDepth = m_Device->CreateTexture(hdrDepthDesc);
-
     // ToneMapPass 输入会自动通过每帧 SetInput 更新，无需手动更新描述符集
 }
 
@@ -542,6 +543,7 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
 {
     if (m_UseRenderGraph) {
         RenderGraph rg;
+        rg.SetProfiler(&m_Profiler);
         BuildFrameGraph(rg, world, sg, camera);
         rg.Compile();
         rg.Execute(cmd, m_Device);

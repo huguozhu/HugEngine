@@ -703,6 +703,18 @@ int main() {
                 }
             }
 
+            // ── GPU Profiler ──
+            ImGui::SeparatorText("GPU Profiler");
+            auto& pdata = pipeline.GetProfiler().GetLastFrameData();
+            float totalMs = 0;
+            for (auto& p : pdata) {
+                if (p.gpuMs < 0) continue;  // 未使用
+                totalMs += p.gpuMs;
+                ImGui::Text("%-20s %6.2fms", p.name.c_str(), p.gpuMs);
+            }
+            ImGui::Separator();
+            ImGui::Text("Total GPU: %.2fms (%.0f FPS)", totalMs, totalMs > 0 ? 1000.0f / totalMs : 0);
+
             // ── GBuffer 模式 ──
             ImGui::SeparatorText("GBuffer 渲染模式");
             int gbMode = (int)pipeline.GetGBufferMode();

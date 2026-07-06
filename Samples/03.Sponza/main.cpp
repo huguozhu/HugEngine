@@ -676,6 +676,18 @@ int main() {
                 }
             }
 
+            // ── GPU Profiler ──
+            ImGui::SeparatorText("GPU Profiler");
+            auto& pdata = pipeline.GetProfiler().GetLastFrameData();
+            float totalMs = 0;
+            for (auto& p : pdata) {
+                if (p.gpuMs < 0) continue;
+                totalMs += p.gpuMs;
+                ImGui::Text("%-20s %6.2fms", p.name.c_str(), p.gpuMs);
+            }
+            ImGui::Separator();
+            ImGui::Text("Total GPU: %.2fms (%.0f FPS)", totalMs, totalMs > 0 ? 1000.0f / totalMs : 0);
+
             // ============================================================
             // 光源
             // ============================================================

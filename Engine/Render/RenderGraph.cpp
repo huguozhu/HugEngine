@@ -1,4 +1,5 @@
 #include "RenderGraph.h"
+#include "Profiler/ProfilerManager.h"
 #include "Core/Log.h"
 
 #include <algorithm>
@@ -365,6 +366,10 @@ void RenderGraph::Execute(rhi::IRHICommandList* cmdList, rhi::IRHIDevice* device
         }
     }
 
+    // GPU Profiler
+    if (m_Profiler) m_Profiler->BeginFrame(cmdList);
+    u32 passIdx = 0;
+
     for (auto* pass : m_PassOrder) {
         for (auto& br : pass->preBarriers) {
             if (br.srcState == br.dstState) continue;
@@ -376,8 +381,13 @@ void RenderGraph::Execute(rhi::IRHICommandList* cmdList, rhi::IRHIDevice* device
                 cmdList->PipelineBarrier(br.srcStage, br.dstStage, br.srcState, br.dstState, tex);
             }
         }
+        if (m_Profiler) m_Profiler->BeginPass(cmdList, passIdx, pass->name);
         if (pass->execute) pass->execute(cmdList);
+        if (m_Profiler) m_Profiler->EndPass(cmdList, passIdx);
+        passIdx++;
     }
+
+    if (m_Profiler) m_Profiler->EndFrame(device);
 }
 
 void RenderGraph::Reset() {

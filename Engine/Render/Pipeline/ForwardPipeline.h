@@ -10,6 +10,7 @@
 #include "Pipeline/GPUScene.h"
 #include "Pipeline/MeshBatcher.h"
 #include "AntiAliasing/AntiAliasing.h"
+#include "Profiler/ProfilerManager.h"
 
 namespace he::render { class GI_IBL; }
 namespace he::render { class GI_RSM; }
@@ -97,6 +98,7 @@ public:
     rhi::IRHITexture* GetHDRTarget()  const { return m_HDRTarget.get(); }
     rhi::IRHISampler* GetHDRSampler() const { return m_HDRSampler.get(); }
     GPUCulling& GetGPUCulling() { return m_GPUCulling; }
+    ProfilerManager& GetProfiler() { return m_Profiler; }
     u32 GetLastDrawCount() const { return m_LastDrawCount; }
     u32 GetLastTriCount()  const { return m_LastTriCount; }
 
@@ -135,7 +137,7 @@ private:
     bool m_UseExecuteIndirect = true;
     static constexpr u32 kMaxSecRecordLists = 8;
     // RenderGraph 模式（默认关闭，渐进迁移到声明式编排）
-    bool m_UseRenderGraph = false;
+    bool m_UseRenderGraph = true;   // 启用 RenderGraph（含 GPU Profiler）
     std::vector<std::unique_ptr<rhi::IRHICommandList>> m_SecRecordLists;
 
     // 着色器
@@ -157,6 +159,7 @@ private:
     MeshBatcher m_MeshBatcher;
     bool       m_BatchBuilt = false;
     std::vector<u32> m_GPUVisibleIndices;
+    ProfilerManager m_Profiler;  // GPU 时间戳 Profiler
     u32 m_LastDrawCount = 0;
     u32 m_LastTriCount  = 0;
 

@@ -4,10 +4,13 @@
 #include "RHI/Buffer.h"
 #include "RHI/Shader.h"
 #include "Core/Log.h"
-#include "Core/Assert.h"
 
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
+
+#include "VulkanQueryPool.h"
+#include "VulkanInternal.h"
+#include "Core/Assert.h"
 
 #include <algorithm>
 #include <vector>
@@ -339,6 +342,17 @@ void VulkanDevice::WaitIdle() {
 void VulkanDevice::Submit(IRHICommandList* cmdList) {
     auto* vulkanCmd = static_cast<VulkanCommandList*>(cmdList);
     vulkanCmd->Submit();
+}
+
+// ── GPU Query ──
+std::unique_ptr<IRHIQueryPool> VulkanDevice::CreateQueryPool(u32 queryCount) {
+    return std::make_unique<VulkanQueryPool>(m_Device, queryCount);
+}
+
+float VulkanDevice::GetTimestampPeriod() {
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(m_Physical, &props);
+    return float(props.limits.timestampPeriod);  // 纳秒
 }
 
 // ============================================================
