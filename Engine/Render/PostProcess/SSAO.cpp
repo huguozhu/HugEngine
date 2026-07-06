@@ -75,7 +75,7 @@ bool SSAO::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
 
         // 创建 SSAO 参数 UBO（kernel[64] + params + proj = 1104 bytes）
         rhi::BufferDesc ubDesc;
-        ubDesc.size  = 64 * sizeof(float4) + sizeof(float4) + sizeof(float4x4);
+        ubDesc.size  = 64 * sizeof(float4) + sizeof(float4) + sizeof(float4x4) * 2;  // kernel + params + invProj + proj
         ubDesc.usage = rhi::BufferUsage::Uniform;
         ubDesc.cpuAccess = true;
         m_ParamUBO = device->CreateBuffer(ubDesc);
@@ -162,10 +162,14 @@ void SSAO::Render(rhi::IRHICommandList* cmd) {
             float4 p(radius, bias, intensity, float(sampleCount));
             memcpy(dst, &p, sizeof(float4));
             dst += sizeof(float4);
-            // proj — 投影矩阵的逆（NDC → view-space）
+            // u_InvProj: 逆投影矩阵（clip→view，用于从深度重建 view-space 位置）
             float n=0.1f,f=1000.0f; float a=float(m_Width)/float(m_Height);
-            float4x4 projInv = glm::inverse(glm::perspectiveRH_ZO(glm::radians(60.0f), a, n, f));
+            float4x4 proj = glm::perspectiveRH_ZO(glm::radians(60.0f), a, n, f);
+            float4x4 projInv = glm::inverse(proj);
             memcpy(dst, &projInv, sizeof(float4x4));
+            dst += sizeof(float4x4);
+            // u_Proj: 正投影矩阵（view→clip，用于将采样点投影到屏幕）
+            memcpy(dst, &proj, sizeof(float4x4));
             m_ParamUBO->Unmap();
         }
     }

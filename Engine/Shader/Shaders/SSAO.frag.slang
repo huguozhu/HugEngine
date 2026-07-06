@@ -9,11 +9,12 @@ struct VSOutput {
 [[vk::binding(2, 0)]] Texture2D<float4> u_Noise;
 [[vk::binding(0, 0)]] SamplerState      u_PointSampler;  // 点采样（用于 GBuffer）
 
-// Uniform buffer: 64 个半球采样点 + 参数
+// Uniform buffer: 采样点 + 参数 + 正/逆投影矩阵
 [[vk::binding(3, 0)]] cbuffer SSAOParams {
     float4 u_Samples[64];
-    float4 u_Params;  // x=radius, y=bias, z=intensity, w=sampleCount
-    float4x4 u_Proj;  // 投影矩阵（用于重建 view-space Z）
+    float4 u_Params;    // x=radius, y=bias, z=intensity, w=sampleCount
+    float4x4 u_InvProj; // 逆投影矩阵（clip→view，用于从深度重建 view-space 位置）
+    float4x4 u_Proj;    // 正投影矩阵（view→clip，用于将采样点投影到屏幕）
 };
 
 float4 fragmentMain(VSOutput input) : SV_Target0 {
@@ -23,9 +24,9 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
 
     float3 N = normalize(u_Normal.Sample(u_PointSampler, uv).rgb * 2.0 - 1.0);
 
-    // 重建 view-space 位置（利用投影矩阵）
+    // 重建 view-space 位置（逆投影: clip→view）
     float4 clipP = float4(uv * 2.0 - 1.0, depth, 1.0);
-    float4 viewP4 = mul(u_Proj, clipP);
+    float4 viewP4 = mul(u_InvProj, clipP);
     float3 viewPos = viewP4.xyz / viewP4.w;
 
     // TBN 矩阵（随机旋转）
@@ -45,25 +46,26 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
         float3 sDir = mul(TBN, u_Samples[i].xyz);     // tangent → view space
         float3 sPos = viewPos + sDir * radius;
 
-        // 投影到屏幕
-        float4 offset = mul(u_Proj, float4(sPos, 1.0));
-        offset.xyz /= offset.w;
-        float2 suv = offset.xy * 0.5 + 0.5;
+        // 正向投影到屏幕（view→clip→NDC→UV）
+        float4 clipS = mul(u_Proj, float4(sPos, 1.0));
+        float3 ndcS = clipS.xyz / max(clipS.w, 0.0001);
+        float2 suv = ndcS.xy * 0.5 + 0.5;
 
-        // 采样点深度
-        float sd = u_Depth.Sample(u_PointSampler, suv).r;
+        // 屏幕外跳过
+        if (suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0) continue;
+
+        // 采样点深度（投影后的 NDC Z，已透视除法）
+        float sampleDepth = ndcS.z;
+
+        // 几何体深度（从深度缓冲读取）
+        float geoDepth = u_Depth.Sample(u_PointSampler, suv).r;
 
         // 范围检查（避免深度不连续处的伪遮挡）
         float rangeCheck = smoothstep(0.0, 1.0, radius / abs(viewPos.z - sPos.z));
 
-        // 如果采样点的 view-space Z >= 采样深度 → 被遮挡
-        float sViewZ = (mul(u_Proj, float4(suv*2.0-1.0, sd, 1.0)).z) /
-                       (mul(u_Proj, float4(suv*2.0-1.0, sd, 1.0)).w);
-        // 简化：直接比较 NDC Z
-        float sampleClipZ = sd;
-        float samplePosClipZ = (mul(u_Proj, float4(sPos, 1.0)).z) /
-                                (mul(u_Proj, float4(sPos, 1.0)).w);
-        occlusion += (sampleClipZ >= samplePosClipZ + bias ? 1.0 : 0.0) * rangeCheck;
+        // 遮挡判定: Vulkan NDC [0,1]，引擎使用 Reverse-Z（近=1, 远=0）
+        // sampleDepth < geoDepth 表示采样点比几何体更远 → 被遮挡
+        occlusion += (sampleDepth < geoDepth - bias ? 1.0 : 0.0) * rangeCheck;
     }
 
     occlusion /= float(samples);
