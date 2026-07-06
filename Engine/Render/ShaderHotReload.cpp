@@ -25,9 +25,19 @@ void ShaderHotReload::Start(StringView shaderDir, StringView slangcPath,
     m_SlangcPath = String(slangcPath);
     m_IncludeDir = String(shaderDir);
     m_OnReload   = std::move(onReload);
+
+    // 校验目录是否存在（避免线程静默失败）
+    namespace fs = std::filesystem;
+    String absPath = fs::absolute(fs::path(String(shaderDir))).string();
+    if (!fs::exists(absPath)) {
+        HE_CORE_ERROR("[HotReload] Shader 目录不存在: {} (解析为: {})", shaderDir, absPath);
+        return;
+    }
+    // 使用解析后的绝对路径，确保线程中 CreateFileA 成功
+    HE_CORE_INFO("[HotReload] 启动文件监控: {} → {}", shaderDir, absPath);
+
     m_Running    = true;
-    m_WatchThread = std::thread(&ShaderHotReload::WatchThread, this, String(shaderDir));
-    HE_CORE_INFO("[HotReload] 启动文件监控: {}", shaderDir);
+    m_WatchThread = std::thread(&ShaderHotReload::WatchThread, this, absPath);
 }
 
 void ShaderHotReload::Stop() {

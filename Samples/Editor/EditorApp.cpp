@@ -158,7 +158,7 @@ void EditorApp::InitPipeline() {
     // --- Shader 热重载 ---
     m_ShaderHotReload = std::make_unique<he::render::ShaderHotReload>();
     // 获取 shader 源文件目录和 slangc 路径
-    String shaderDir  = "../../Engine/Shader/Shaders";     // 相对于 build/bin/Debug
+    String shaderDir  = "../../../Engine/Shader/Shaders";     // 从 build/bin/Debug 到项目根
     String slangcPath = "slangc";                           // 依赖 PATH 环境变量
     m_ShaderHotReload->Start(shaderDir, slangcPath,
         [this](const String& shaderName, const std::vector<u32>& spirv) {
