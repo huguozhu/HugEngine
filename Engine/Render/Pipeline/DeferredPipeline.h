@@ -22,7 +22,6 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "GI/GI_SSR.h"
 #include "GI/GI_DDGI.h"
 #include "PostProcess/Denoiser.h"
-#include "PostProcess/GaussianBlurPass.h"
 #include "PostProcess/BloomPass.h"
 #include "PostProcess/ToneMapPass.h"
 #include "PostProcess/SkyboxPass.h"
@@ -68,7 +67,7 @@ public:
     ClusteredShading&    GetClusteredShading()   { return m_ClusteredShading; }
     GPUCulling&          GetGPUCulling()         { return m_GPUCulling; }
     void SetSwapChain(rhi::IRHISwapChain* sc)  { m_SwapChain = sc; }
-    void EnableFXAA(bool enable)               { m_FXAAEnabled = enable; }
+    void EnableFXAA(bool enable);
     bool IsFXAAEnabled() const                 { return m_FXAAEnabled && m_FXAA != nullptr; }
 
     rhi::IRHIBuffer* GetCurrentObjectBuffer()  { return m_ObjectBuffers[m_CurrentFrameSlot].get(); }
@@ -152,8 +151,7 @@ private:
     Denoiser m_DenoiseSSGI;
     Denoiser m_DenoiseSSR;
     SSAO    m_SSAO;
-    GaussianBlurPass m_GaussianBlur;  // 高斯模糊（Bloom 基础构件）
-    BloomPass m_Bloom;              // 完整 Bloom 后处理
+    BloomPass m_Bloom;  // Bloom 后处理（懒初始化）
     std::vector<u32> m_GPUVisibleIndices;
 
 

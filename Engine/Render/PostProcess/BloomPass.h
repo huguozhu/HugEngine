@@ -26,18 +26,24 @@ public:
     rhi::IRHITexture* GetOutput()        const { return m_Output.get(); }
     rhi::IRHISampler* GetOutputSampler() const { return m_OutSampler.get(); }
     bool IsEnabled()                     const { return m_Enabled; }
-    void SetEnabled(bool e)                    { m_Enabled = e; }
+    /// 启用 Bloom（首次调用时触发懒初始化）
+    void SetEnabled(bool e) {
+        m_Enabled = e;
+        if (e && !m_Ready) { EnsureInitialized(); }
+    }
     float GetThreshold()                  const { return m_Threshold; }
     void  SetThreshold(float t)                 { m_Threshold = t; }
     float GetIntensity()                  const { return m_Intensity; }
     void  SetIntensity(float i)                 { m_Intensity = i; }
 
 private:
+    void EnsureInitialized();  // 懒初始化：首次 SetEnabled(true) 或 Render() 时调用
+
     rhi::IRHIDevice* m_Device  = nullptr;
     u32 m_Width  = 0;
     u32 m_Height = 0;
     bool m_Ready = false;
-    bool m_Enabled = true;
+    bool m_Enabled = false;   // 默认关闭，SetEnabled(true) 触发懒初始化
     float m_Threshold = 3.0f;   // 亮度阈值
     float m_Intensity = 0.8f;   // Bloom 强度
 

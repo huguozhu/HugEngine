@@ -125,6 +125,8 @@ bool BloomPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
 }
 
 void BloomPass::Shutdown() {
+    if (!m_Ready) return;  // 懒初始化从未触发，无需清理
+
     m_BrightPSO.reset();
     m_BrightTex.reset();
     m_BrightSampler.reset();
@@ -146,6 +148,7 @@ void BloomPass::Shutdown() {
 }
 
 void BloomPass::OnResize(u32 w, u32 h) {
+    if (!m_Ready) return;  // 懒初始化从未触发，无需 resize
     if (w == m_Width && h == m_Height) return;
     m_Width  = w;
     m_Height = h;
@@ -171,8 +174,14 @@ void BloomPass::SetInput(rhi::IRHITexture* hdr, rhi::IRHISampler* sampler) {
     m_HDRSampler = sampler;
 }
 
+void BloomPass::EnsureInitialized() {
+    if (m_Ready || !m_Device) return;
+    Initialize(m_Device, m_Width, m_Height);
+}
+
 void BloomPass::Render(rhi::IRHICommandList* cmd) {
-    if (!m_Ready || !m_HDRInput) return;
+    if (!m_Ready || !m_Enabled) return;  // 未初始化或禁用 → 跳过
+    if (!m_HDRInput) return;
     u32 hw = m_Width / 2, hh = m_Height / 2;
     rhi::ClearValue clr{};
 

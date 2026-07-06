@@ -116,10 +116,8 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     m_DenoiseSSGI.Initialize(device, m_Width, m_Height);
     m_DenoiseSSR.Initialize(device, m_Width, m_Height);
     m_SSAO.Initialize(device, m_Width, m_Height);
-    m_GaussianBlur.Initialize(device, m_Width / 2, m_Height / 2);  // 半分辨率（Bloom 标准）
-    m_Bloom.Initialize(device, m_Width, m_Height);               // 全分辨率 Bloom
-    m_Bloom.SetEnabled(false);
     m_SSAO.enabled = false;  // 默认关闭
+    // Bloom / FXAA / GaussianBlur：懒初始化，首次 SetEnabled(true) 时才分配 GPU 资源
 
     // AA_TAA（HDR 空间）
     m_AntiAliasing = std::make_unique<AA_TAA>();
@@ -128,13 +126,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         m_AntiAliasing.reset();
     }
 
-    // AA_FXAA（LDR 空间，默认关闭，通过 EnableFXAA(true) 开启）
-    m_FXAA = std::make_unique<AA_FXAA>();
-    if (!m_FXAA->Initialize(device, m_Width, m_Height)) {
-        HE_CORE_WARN("DeferredPipeline: AA_FXAA init failed");
-        m_FXAA.reset();
-    }
-    this->EnableFXAA(true);
+    // AA_FXAA（LDR 空间，懒初始化：EnableFXAA(true) 首次调用时分配 GPU 资源）
 
 
     // GBuffer PSO (4 MRT + D32, set=0 合并 per-frame + bindless 纹理/采样器数组)
@@ -294,13 +286,25 @@ void DeferredPipeline::Shutdown() {
     m_DenoiseSSGI.Shutdown();
     m_DenoiseSSR.Shutdown();
     m_SSAO.Shutdown();
-    m_GaussianBlur.Shutdown();
     m_Bloom.Shutdown();
     m_Device = nullptr; m_Ready = false;
     HE_CORE_INFO("DeferredPipeline shutdown");
 }
 
 // CreateTextureDescriptorSet 已移除 — 使用全局 bindless 纹理数组替代
+
+void DeferredPipeline::EnableFXAA(bool enable) {
+    m_FXAAEnabled = enable;
+    if (!enable || !m_Device) return;
+    // 懒初始化：首次 EnableFXAA(true) 时创建 PSO 和纹理
+    if (!m_FXAA) {
+        m_FXAA = std::make_unique<AA_FXAA>();
+        if (!m_FXAA->Initialize(m_Device, m_Width, m_Height)) {
+            HE_CORE_WARN("DeferredPipeline: AA_FXAA init failed");
+            m_FXAA.reset();
+        }
+    }
+}
 
 void DeferredPipeline::NextFrame() {
     m_CurrentFrameSlot = (m_CurrentFrameSlot + 1) % MAX_FRAMES_IN_FLIGHT;
@@ -337,8 +341,7 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
     m_DDGI.OnResize(w, h);
     m_DenoiseSSGI.OnResize(w, h);
     m_DenoiseSSR.OnResize(w, h);
-    m_GaussianBlur.OnResize(w / 2, h / 2);
-    m_Bloom.OnResize(w, h);
+    m_Bloom.OnResize(w, h);  // 内部守卫：未初始化时直接 return
 }
 
 void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
@@ -626,27 +629,28 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             c->EndOffscreenPass();
         });
 
-    // ── Bloom Pass（HDR → BrightPass → GaussianBlur → Composite → HDR_Bloom）──
-    auto bloomOut = rg.ImportTexture("Bloom_Output", m_Bloom.GetOutput());
-    bool bloomActive = m_Bloom.IsEnabled();  // 记录 Bloom 是否本帧激活（决定下游读取源）
-    rg.AddPass("Bloom",
-        {{hdrC, ResourceAccess::Read}},
-        {{bloomOut, ResourceAccess::Write}},
-        [&](rhi::IRHICommandList* c) {
-            if (!bloomActive) return;
-            // Barrier：HDR 从 RenderTarget 转为 ShaderResource（Bloom 读取）
-            c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput,
-                               rhi::PipelineStage::FragmentShader,
-                               rhi::ResourceState::RenderTarget,
-                               rhi::ResourceState::ShaderResource,
-                               m_HDRTarget.get());
-            m_Bloom.SetInput(m_HDRTarget.get(), m_HDRSampler.get());
-            m_Bloom.Render(c);
-        });
+    // ── Bloom Pass（懒初始化：仅在 SetEnabled(true) 后激活）──
+    bool bloomActive = m_Bloom.IsEnabled() && m_Bloom.GetOutput() != nullptr;
+    if (bloomActive) {
+        auto bloomOut = rg.ImportTexture("Bloom_Output", m_Bloom.GetOutput());
+        rg.AddPass("Bloom",
+            {{hdrC, ResourceAccess::Read}},
+            {{bloomOut, ResourceAccess::Write}},
+            [&](rhi::IRHICommandList* c) {
+                // Barrier：HDR 从 RenderTarget 转为 ShaderResource（Bloom 读取）
+                c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput,
+                                   rhi::PipelineStage::FragmentShader,
+                                   rhi::ResourceState::RenderTarget,
+                                   rhi::ResourceState::ShaderResource,
+                                   m_HDRTarget.get());
+                m_Bloom.SetInput(m_HDRTarget.get(), m_HDRSampler.get());
+                m_Bloom.Render(c);
+            });
+    }
 
     // TAA Resolve Pass — 在 HDR 空间做时域抗锯齿（读取 Bloom 输出或原始 HDR）
     rg.AddPass("TAA_Resolve",
-        {{bloomActive ? bloomOut : hdrC, ResourceAccess::Read}},
+        {{hdrC, ResourceAccess::Read}},
         {},
         [&, bloomActive, h = m_Height, w = m_Width](rhi::IRHICommandList* c) {
             if (!m_AntiAliasing || !m_AntiAliasing->IsEnabled()) return;
