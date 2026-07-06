@@ -64,6 +64,15 @@ public:
 
     /// 获取 GI 子系统，无 GI 时返回 nullptr
     virtual IGlobalIllumination* GetGI() { return nullptr; }
+
+    // ---- Shader 热重载 ----
+
+    /// 热重载单个 Shader（传入新编译的 SPIR-V 字节码）
+    /// @param shaderName 文件名（不含路径和扩展名，如 "PBR.frag"）
+    /// @param newSpirv   新编译的 SPIR-V 字节码
+    /// @return 受影响并已替换的 PSO 数量，0=未找到匹配, -1=失败
+    virtual int ReloadShader(StringView shaderName,
+                             const std::vector<u32>& newSpirv) { return -1; }
 };
 
 } // namespace he::render

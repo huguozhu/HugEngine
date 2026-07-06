@@ -21,6 +21,7 @@
 #include <glm/ext/matrix_clip_space.hpp>  // orthoRH_ZO (Vulkan Z [0,1])
 #include <unordered_set>
 
+#include <chrono>
 #include <mutex>
 
 namespace he::render {
@@ -278,7 +279,83 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     m_SceneRenderer = std::make_unique<SceneRenderer>();
 
     HE_CORE_INFO("ForwardPipeline initialized (with HDR + Tone Mapping + Skybox + ShadowSystem)");
+
+    // Shader 热重载：注册 PSO 到热重载表
+    {
+        PSORecord rec;
+        // 重建 PSO 描述符（与初始化时创建 m_PBR_PSO 的参数完全一致）
+        rec.desc.debugName            = "ForwardPBR";
+        rec.desc.vertexLayout         = vertexLayout;
+        rec.desc.topology             = rhi::PrimitiveTopology::TriangleList;
+        rec.desc.depthTest            = true;
+        rec.desc.depthWrite           = true;
+        rec.desc.depthCompare         = rhi::CompareFunc::LessEqual;
+        rec.desc.depthFormat          = rhi::Format::D32_FLOAT;
+        rec.desc.colorAttachmentCount = 1;
+        rec.desc.colorFormats[0]      = rhi::Format::RGBA16_FLOAT;
+        rec.desc.pushConstantRanges   = { pcRange };
+        rec.desc.descriptorSetLayouts = { m_PerFrameLayout };
+        // Shader 副本（自有 spirv 数据，ReloadShader 中会被替换）
+        rec.vsCopy.stage      = rhi::ShaderStage::Vertex;
+        rec.vsCopy.spirv      = m_VS.spirv;
+        rec.vsCopy.entryPoint = "main";
+        rec.fsCopy.stage      = rhi::ShaderStage::Pixel;
+        rec.fsCopy.spirv      = m_FS.spirv;
+        rec.fsCopy.entryPoint = "main";
+        rec.desc.vertexShader = &rec.vsCopy;
+        rec.desc.pixelShader  = &rec.fsCopy;
+        rec.shaderNames[0]    = "PBR.vert";
+        rec.shaderNames[1]    = "PBR.frag";
+        rec.rawPSO            = m_PBR_PSO.get();
+        m_PSORegistry.push_back(std::move(rec));
+        HE_CORE_INFO("[HotReload] PSO 注册: PBR (vert + frag)");
+    }
+
     return true;
+}
+
+// === Shader 热重载 ===
+
+int ForwardPipeline::ReloadShader(StringView shaderName,
+                                   const std::vector<u32>& newSpirv) {
+    auto startTime = std::chrono::steady_clock::now();
+    int count = 0;
+
+    for (auto& rec : m_PSORegistry) {
+        // 检查该 PSO 是否使用了这个 Shader
+        int stageIndex = -1;
+        if (rec.shaderNames[0] == shaderName) stageIndex = 0;  // 顶点shader
+        if (rec.shaderNames[1] == shaderName) stageIndex = 1;  // 片元shader
+
+        if (stageIndex < 0) continue;  // 不匹配，跳过
+
+        // 更新 Shader 字节码
+        if (stageIndex == 0) {
+            rec.vsCopy.spirv = newSpirv;
+        } else {
+            rec.fsCopy.spirv = newSpirv;
+        }
+
+        // 重建 PSO
+        auto newPSO = m_Device->CreatePipelineState(rec.desc);
+        if (!newPSO) {
+            HE_CORE_ERROR("[HotReload] PSO 重建失败: {}", shaderName);
+            continue;
+        }
+
+        // 替换旧 PSO
+        m_PBR_PSO = std::move(newPSO);
+        rec.rawPSO = m_PBR_PSO.get();
+
+        count++;
+        HE_CORE_INFO("[HotReload] PSO 替换成功: {} → PBR", shaderName);
+    }
+
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - startTime).count();
+    HE_CORE_INFO("[HotReload] {} 个 PSO 重建完成 ({}ms)", count, elapsed);
+
+    return count > 0 ? count : 0;
 }
 
 void ForwardPipeline::Shutdown() {

@@ -51,6 +51,7 @@ public:
     // 子系统访问
     IShadowSystem*       GetShadowSystem() override { return m_ShadowSystem.get(); }
     IGlobalIllumination* GetGI()           override { return m_GI.get(); }
+    int ReloadShader(StringView shaderName, const std::vector<u32>& newSpirv) override;
     ToneMapPass*         GetToneMap()            { return m_ToneMap.get(); }
     SkyboxPass*          GetSkybox()             { return m_Skybox.get(); }
 
@@ -162,6 +163,16 @@ private:
     ProfilerManager m_Profiler;  // GPU 时间戳 Profiler
     u32 m_LastDrawCount = 0;
     u32 m_LastTriCount  = 0;
+
+    // Shader 热重载 — PSO 注册表
+    struct PSORecord {
+        rhi::PipelineStateDesc  desc;              // 完整 PSO 创建参数（含 ShaderBytecode 副本）
+        rhi::ShaderBytecode     vsCopy;            // 顶点着色器字节码副本（自有 spirv 数据）
+        rhi::ShaderBytecode     fsCopy;            // 片元着色器字节码副本
+        String                  shaderNames[2];    // [0]=顶点shader名, [1]=片元shader名（如 "PBR.vert", "PBR.frag"）
+        rhi::IRHIPipelineState* rawPSO = nullptr;  // 指向 m_PBR_PSO.get()
+    };
+    std::vector<PSORecord> m_PSORegistry;
 
 };
 
