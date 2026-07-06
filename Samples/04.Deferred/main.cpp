@@ -703,6 +703,54 @@ int main() {
                 }
             }
 
+            // ── 后处理 ──
+            ImGui::SeparatorText("后处理");
+            {
+                // SSAO
+                bool ssaoOn = pipeline.GetSSAO().enabled;
+                if (ImGui::Checkbox("SSAO", &ssaoOn))
+                    pipeline.GetSSAO().enabled = ssaoOn;
+
+                // Bloom
+                auto& bloom = pipeline.GetBloom();
+                bool bloomOn = bloom.IsEnabled();
+                if (ImGui::Checkbox("Bloom", &bloomOn)) bloom.SetEnabled(bloomOn);
+                if (bloomOn) {
+                    ImGui::Indent(12.0f);
+                    float t = bloom.GetThreshold();
+                    if (ImGui::SliderFloat("阈值##bloom", &t, 0.1f, 10.0f, "%.1f")) bloom.SetThreshold(t);
+                    float i = bloom.GetIntensity();
+                    if (ImGui::SliderFloat("强度##bloom", &i, 0.0f, 2.0f, "%.2f")) bloom.SetIntensity(i);
+                    ImGui::Unindent(12.0f);
+                }
+
+                // DOF
+                auto& dof = pipeline.GetDOF();
+                bool dofOn = dof.IsEnabled();
+                if (ImGui::Checkbox("景深 (DOF)", &dofOn)) dof.SetEnabled(dofOn);
+                if (dofOn) {
+                    ImGui::Indent(12.0f);
+                    float fd = dof.GetFocusDepth();
+                    if (ImGui::SliderFloat("对焦深度##dof", &fd, 0.0f, 1.0f, "%.3f")) dof.SetFocusDepth(fd);
+                    float fr = dof.GetFocusRange();
+                    if (ImGui::SliderFloat("过渡范围##dof", &fr, 0.001f, 0.5f, "%.3f")) dof.SetFocusRange(fr);
+                    float di = dof.GetIntensity();
+                    if (ImGui::SliderFloat("强度##dof", &di, 0.0f, 2.0f, "%.2f")) dof.SetIntensity(di);
+                    ImGui::Unindent(12.0f);
+                }
+
+                // MotionBlur
+                auto& mb = pipeline.GetMotionBlur();
+                bool mbOn = mb.IsEnabled();
+                if (ImGui::Checkbox("运动模糊 (MB)", &mbOn)) mb.SetEnabled(mbOn);
+                if (mbOn) {
+                    ImGui::Indent(12.0f);
+                    float mi = mb.GetIntensity();
+                    if (ImGui::SliderFloat("强度##mb", &mi, 0.0f, 2.0f, "%.2f")) mb.SetIntensity(mi);
+                    ImGui::Unindent(12.0f);
+                }
+            }
+
             // 光源
             world.ForEach<he::DirectionalLight>([&](he::Entity e, he::DirectionalLight& dl) {
                 bool isMain = (e == mainLightEntity);

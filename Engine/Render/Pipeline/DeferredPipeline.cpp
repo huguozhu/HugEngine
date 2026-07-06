@@ -629,60 +629,82 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             c->EndOffscreenPass();
         });
 
-    // ── Bloom Pass（懒初始化：仅在 SetEnabled(true) 后激活）──
+    // ── 后处理链路：Bloom → DOF → MotionBlur（责任链，按序串联）──
     bool bloomActive = m_Bloom.IsEnabled() && m_Bloom.GetOutput() != nullptr;
+    bool dofActive   = m_DOF.IsEnabled()   && m_DOF.GetOutput()   != nullptr;
+    bool mbActive    = m_MotionBlur.IsEnabled() && m_MotionBlur.GetOutput() != nullptr;
+    bool anyPostActive = bloomActive || dofActive || mbActive;
+
+    // Bloom
     if (bloomActive) {
-        auto bloomOut = rg.ImportTexture("Bloom_Output", m_Bloom.GetOutput());
-        rg.AddPass("Bloom",
-            {{hdrC, ResourceAccess::Read}},
-            {{bloomOut, ResourceAccess::Write}},
+        auto bloomOut = rg.ImportTexture("Bloom_Out", m_Bloom.GetOutput());
+        rg.AddPass("Bloom", {{hdrC, ResourceAccess::Read}}, {{bloomOut, ResourceAccess::Write}},
             [&](rhi::IRHICommandList* c) {
-                // Barrier：HDR 从 RenderTarget 转为 ShaderResource（Bloom 读取）
-                c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput,
-                                   rhi::PipelineStage::FragmentShader,
-                                   rhi::ResourceState::RenderTarget,
-                                   rhi::ResourceState::ShaderResource,
-                                   m_HDRTarget.get());
+                c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput, rhi::PipelineStage::FragmentShader,
+                    rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, m_HDRTarget.get());
                 m_Bloom.SetInput(m_HDRTarget.get(), m_HDRSampler.get());
                 m_Bloom.Render(c);
             });
     }
 
-    // TAA Resolve Pass — 在 HDR 空间做时域抗锯齿（读取 Bloom 输出或原始 HDR）
+    // DOF（景深）：读取 Bloom 输出或原始 HDR
+    if (dofActive) {
+        auto dofOut = rg.ImportTexture("DOF_Out", m_DOF.GetOutput());
+        rg.AddPass("DOF", {{hdrC, ResourceAccess::Read}}, {{dofOut, ResourceAccess::Write}},
+            [&, bloomActive](rhi::IRHICommandList* c) {
+                auto* src = bloomActive ? m_Bloom.GetOutput() : m_HDRTarget.get();
+                auto* smp = bloomActive ? m_Bloom.GetOutputSampler() : m_HDRSampler.get();
+                m_DOF.SetInputs(src, smp, m_GBufferDepth.get());
+                c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput, rhi::PipelineStage::FragmentShader,
+                    rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, src);
+                m_DOF.Render(c);
+            });
+    }
+
+    // MotionBlur：读取 DOF 输出 > Bloom 输出 > 原始 HDR
+    if (mbActive) {
+        auto mbOut = rg.ImportTexture("MB_Out", m_MotionBlur.GetOutput());
+        rg.AddPass("MotionBlur", {{hdrC, ResourceAccess::Read}}, {{mbOut, ResourceAccess::Write}},
+            [&, bloomActive, dofActive](rhi::IRHICommandList* c) {
+                auto* src = dofActive   ? m_DOF.GetOutput()
+                           : bloomActive ? m_Bloom.GetOutput()
+                           :               m_HDRTarget.get();
+                auto* smp = dofActive   ? m_DOF.GetOutputSampler()
+                           : bloomActive ? m_Bloom.GetOutputSampler()
+                           :               m_HDRSampler.get();
+                m_MotionBlur.SetInputs(src, smp, m_GBufferD.get(), m_HDRSampler.get());
+                c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput, rhi::PipelineStage::FragmentShader,
+                    rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, src);
+                m_MotionBlur.Render(c);
+            });
+    }
+
+    // TAA Resolve — 读取后处理链最后一个激活 Pass 的输出
     rg.AddPass("TAA_Resolve",
         {{hdrC, ResourceAccess::Read}},
         {},
-        [&, bloomActive, h = m_Height, w = m_Width](rhi::IRHICommandList* c) {
+        [&, bloomActive, dofActive, mbActive, anyPostActive, h = m_Height, w = m_Width](rhi::IRHICommandList* c) {
             if (!m_AntiAliasing || !m_AntiAliasing->IsEnabled()) return;
-
-            // 设置输入：Bloom 启用时读 Bloom 输出，否则读原始 HDR
-            if (bloomActive) {
-                m_AntiAliasing->SetInput(m_Bloom.GetOutput(), m_Bloom.GetOutputSampler());
-                // Barrier：Bloom 从 RenderTarget 转为 ShaderResource
-                c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput,
-                                   rhi::PipelineStage::FragmentShader,
-                                   rhi::ResourceState::RenderTarget,
-                                   rhi::ResourceState::ShaderResource,
-                                   m_Bloom.GetOutput());
+            auto* src = mbActive ? m_MotionBlur.GetOutput()
+                      : dofActive ? m_DOF.GetOutput()
+                      : bloomActive ? m_Bloom.GetOutput()
+                      : m_HDRTarget.get();
+            auto* smp = mbActive ? m_MotionBlur.GetOutputSampler()
+                      : dofActive ? m_DOF.GetOutputSampler()
+                      : bloomActive ? m_Bloom.GetOutputSampler()
+                      : m_HDRSampler.get();
+            m_AntiAliasing->SetInput(src, smp);
+            if (anyPostActive) {
+                c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput, rhi::PipelineStage::FragmentShader,
+                    rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, src);
             } else {
-                // Bloom 禁用：手动过渡 HDR → ShaderResource
-                c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput,
-                                   rhi::PipelineStage::FragmentShader,
-                                   rhi::ResourceState::RenderTarget,
-                                   rhi::ResourceState::ShaderResource,
-                                   m_HDRTarget.get());
-                m_AntiAliasing->SetInput(m_HDRTarget.get(), m_HDRSampler.get());
+                c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput, rhi::PipelineStage::FragmentShader,
+                    rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, m_HDRTarget.get());
             }
             auto* taa = static_cast<AA_TAA*>(m_AntiAliasing.get());
-            taa->SetGBufferInputs(m_GBufferDepth.get(),
-                                   m_GBufferB.get(),
-                                   m_GBufferD.get());
-
-            // 更新 TAA uniform buffer
+            taa->SetGBufferInputs(m_GBufferDepth.get(), m_GBufferB.get(), m_GBufferD.get());
             float4x4 invCurrVP = glm::inverse(m_CurrViewProj);
-            taa->UpdateUniforms(
-                m_PrevViewProj, invCurrVP, m_Width, m_Height);
-
+            taa->UpdateUniforms(m_PrevViewProj, invCurrVP, m_Width, m_Height);
             m_AntiAliasing->Render(c);
         });
 
@@ -695,16 +717,20 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     rg.AddPass("ToneMap",
         {},
         {{useFXAA ? ldrTarget : backBuf, ResourceAccess::Write}},
-        [this, useTAA, useFXAA, w, h, bloomActive](rhi::IRHICommandList* c) {
+        [this, useTAA, useFXAA, w, h, anyPostActive](rhi::IRHICommandList* c) {
             if (useTAA) {
-                // TAA 已过渡 HDR → ShaderResource，ToneMap 直接采样 TAA 输出
                 m_ToneMap->SetInput(m_AntiAliasing->GetOutputTexture(),
                                     m_AntiAliasing->GetOutputSampler());
-            } else if (bloomActive) {
-                // TAA 禁用 + Bloom 启用：读取 Bloom 输出（Bloom Pass 已做 Barrier）
-                m_ToneMap->SetInput(m_Bloom.GetOutput(), m_Bloom.GetOutputSampler());
+            } else if (anyPostActive) {
+                // 读取后处理链最后一个激活 Pass 的输出
+                auto* src = m_MotionBlur.IsEnabled() ? m_MotionBlur.GetOutput()
+                          : m_DOF.IsEnabled()        ? m_DOF.GetOutput()
+                          :                            m_Bloom.GetOutput();
+                auto* smp = m_MotionBlur.IsEnabled() ? m_MotionBlur.GetOutputSampler()
+                          : m_DOF.IsEnabled()        ? m_DOF.GetOutputSampler()
+                          :                            m_Bloom.GetOutputSampler();
+                m_ToneMap->SetInput(src, smp);
             } else {
-                // TAA 禁用 + Bloom 禁用：手动过渡 HDR → ShaderResource
                 c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput, rhi::PipelineStage::FragmentShader,
                     rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, m_HDRTarget.get());
                 m_ToneMap->SetInput(m_HDRTarget.get(), m_HDRSampler.get());

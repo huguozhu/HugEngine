@@ -205,7 +205,7 @@ Engine/Shader/Shaders/  (Slang → SPIR-V → .spv.h)
 | GPUCulling::Dispatch 在 RenderPass 内执行 | Vulkan 校验警告 |
 | DDGI 探针更新仅采样 albedo (无真实 radiance) | 光照估计粗糙，需前帧 HDR 或 Light Probe |
 | DDGI 探针可见性测试使用简单深度比较 | 可能出现漏光/遮挡错误 |
-| 后处理链无 Bloom/DOF/MotionBlur | 仅 ToneMap + Skybox |
+| 后处理链无 DOF/MotionBlur | Bloom 已实现 ✅ |
 
 ## 待办任务
 
@@ -225,10 +225,10 @@ Engine/Shader/Shaders/  (Slang → SPIR-V → .spv.h)
 | — | DDGI 探针真实 radiance 采样（前帧 HDR 输入） | ⬜ |
 | — | DDGI 探针可见性优化（多步 march + 深度偏移） | ⬜ |
 | — | GI_VXGI 体素锥追踪 | ⬜ |
-| — | AA_FXAA 实现 | ⬜ |
+| — | AA_FXAA 实现 | ✅ |
 | — | FullScene 拆分为独立 Shadow/IBL/HDR Pass | ⬜ |
-| — | GPUCulling 集成到 DeferredPipeline | ⬜ |
-| — | Bloom / DOF / MotionBlur 后处理 | ⬜ |
+| — | GPUCulling 集成到 DeferredPipeline | ✅ |
+| — | Bloom 后处理（DOF / MotionBlur 待实现） | 🟡 |
 
 ## 架构文档对比分析 (vs HugEngine_Architecture_And_Tasks.md)
 
@@ -236,7 +236,7 @@ Engine/Shader/Shaders/  (Slang → SPIR-V → .spv.h)
 
 | Phase | 主题 | 完成度 | 完成项 | 缺失项 |
 |-------|------|:---:|--------|--------|
-| P1 | 核心骨架 | ~75% | RHI Vulkan, Slang→SPIR-V, RenderGraph, ECS, glTF, Forward+Deferred, TAA, SSAO, Editor基础 | D3D12/Metal后端, AsyncCompute, GPU Profiling, Shader HotReload, Bloom/MotionBlur/Exposure, MSAA, Undo/Redo, TypeRegistry |
+| P1 | 核心骨架 | ~80% | RHI Vulkan, Slang→SPIR-V, RenderGraph, ECS, glTF, Forward+Deferred, TAA, SSAO, Bloom, FXAA, Editor基础 | D3D12/Metal后端, AsyncCompute, GPU Profiling, Shader HotReload, MotionBlur/DOF/Exposure, MSAA, Undo/Redo, TypeRegistry |
 | P2 | GPU Driven | ~40% | Bindless, GPU Culling, GPU Scene, CSM+Shadow, IBL, Clustered Shading | ExecuteIndirect+DGC, VSM, VRS, Decal/ReflProbe, Prefab, Forward+, FXAA/SMAA, TAAU |
 | P3 | 高级几何 | ~5% | — | Nanite, Mesh Shader, Virtual Texturing, VSM, OIT, Impostor |
 | P4 | GI + RT | ~15% | DDGI (GBuffer采样), Denoiser, SSGI, SSR | HW RT, Lumen GI, VXGI, ReSTIR, NRD, OMM/SER, SHaRC, NRC, RT管线 |

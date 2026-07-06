@@ -62,6 +62,8 @@ target_sources(HugEngineRender PRIVATE
     PostProcess/Denoiser.cpp
     PostProcess/GaussianBlurPass.cpp
     PostProcess/BloomPass.cpp
+    PostProcess/DOFPass.cpp
+    PostProcess/MotionBlurPass.cpp
     
     # AntiAliasing
     AntiAliasing/AntiAliasing.h
