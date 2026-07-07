@@ -124,6 +124,17 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         sampDesc.addressU  = rhi::AddressMode::Repeat;
         sampDesc.addressV  = rhi::AddressMode::Repeat;
         m_BindlessSampler = device->CreateSampler(sampDesc);
+
+        // 注册默认占位纹理到 BindlessTextureManager（作为 null/无纹理 mesh 的回退）
+        // 预分配 materialID=0 的 4 个纹理槽位（BaseColor, Normal, MetallicRoughness, Occlusion），
+        // 确保 materialID=0 的 mesh（如 02.Cube 中无纹理的立方体/球体）始终有有效纹理
+        he::asset::BindlessTextureManager::Instance().SetDefaultTexture(
+            m_BindlessPlaceholder.get(), m_BindlessSampler.get());
+        he::asset::BindlessTextureManager::Instance().RegisterMaterial(
+            nullptr, nullptr,   // BaseColor → 默认白色纹理
+            nullptr, nullptr,   // Normal → 默认白色纹理(法线=[0.5,0.5,1.0]=无扰动)
+            nullptr, nullptr,   // MetallicRoughness → 默认白色纹理
+            nullptr, nullptr);  // Occlusion → 默认白色纹理(AO=1.0)
     }
 
     // --- 分配三缓冲共享描述符集（set=0: per-frame + bindless）---
