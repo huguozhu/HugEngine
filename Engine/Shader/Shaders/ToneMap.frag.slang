@@ -26,9 +26,14 @@ float3 ACESFilm(float3 x) {
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
 
+[[vk::push_constant]] cbuffer ToneMapPC {
+    float exposure;   // 自动曝光值（默认 1.0 = 无调整）
+    float _pad[3];
+};
+
 float4 fragmentMain(FSInput input) : SV_Target0 {
-    // 采样 HDR 颜色
-    float3 hdrColor = u_HDRTexture.Sample(u_HDRSampler, input.uv).rgb;
+    // 采样 HDR 颜色 + 应用曝光
+    float3 hdrColor = u_HDRTexture.Sample(u_HDRSampler, input.uv).rgb * exposure;
 
     // ACES Tone Mapping
     float3 mapped = ACESFilm(hdrColor);

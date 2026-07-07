@@ -40,6 +40,8 @@ public:
 
     // ---- ToneMap 特有 ----
 
+    /// 设置自动曝光值
+    void SetExposure(float e) { m_Exposure = e; }
     /// 预设 PSO 为下一个 RenderPass 的初始管线
     void PreBind(rhi::IRHICommandList* cmd) { if (m_Ready) cmd->SetPipeline(m_PSO.get()); }
     rhi::IRHIPipelineState* GetPSO() const { return m_PSO.get(); }
@@ -51,6 +53,7 @@ private:
     rhi::DescriptorSetHandle       m_DescSet    = rhi::kInvalidSet;
     rhi::IRHITexture*  m_HDRTarget  = nullptr;
     rhi::IRHISampler*  m_HDRSampler = nullptr;
+    float m_Exposure = 1.0f;
     u32 m_Width = 0, m_Height = 0;
     bool m_Ready = false;
 };

@@ -221,6 +221,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
 
     // GPU Profiler
     m_Profiler.Initialize(device, 20, MAX_FRAMES_IN_FLIGHT);
+    m_AutoExposure.Initialize(device, m_Width, m_Height);
 
     // Lighting PSO (全屏三角形，无深度)
     rhi::ShaderBytecode lVS, lFS;
@@ -314,6 +315,7 @@ void DeferredPipeline::Shutdown() {
     if (m_GBufferRenderer) m_GBufferRenderer->Shutdown();
     m_GBufferRenderer.reset();
     m_Profiler.Shutdown();
+    m_AutoExposure.Shutdown();
     // AsyncCompute 清理
     if (m_CrossQueueFence != rhi::kInvalidFence) {
         m_Device->DestroyFence(m_CrossQueueFence);
@@ -407,6 +409,7 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
     m_DenoiseSSGI.OnResize(w, h);
     m_DenoiseSSR.OnResize(w, h);
     m_Bloom.OnResize(w, h);  // 内部守卫：未初始化时直接 return
+    m_AutoExposure.OnResize(w, h);
 }
 
 void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
@@ -708,6 +711,15 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             }
         });
 
+    // ── AutoExposure（Compute reduction → SSBO，Bloom 之前）──
+    rg.AddPass("AutoExposure", {{hdrC, ResourceAccess::Read}}, {},
+        [&](rhi::IRHICommandList* c) {
+            m_AutoExposure.SetInput(m_HDRTarget.get(), m_HDRSampler.get());
+            m_AutoExposure.Render(c);
+            // 恢复 graphics pipeline state（compute dispatch 后 m_CurrentRenderPass 为空）
+            c->SetPipeline(m_LightingPSO.get());
+        });
+
     // ── 后处理链路：Bloom → DOF → MotionBlur（责任链，按序串联）──
     bool bloomActive = m_Bloom.IsEnabled() && m_Bloom.GetOutput() != nullptr;
     bool dofActive   = m_DOF.IsEnabled()   && m_DOF.GetOutput()   != nullptr;
@@ -814,6 +826,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                     rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, m_HDRTarget.get());
                 m_ToneMap->SetInput(m_HDRTarget.get(), m_HDRSampler.get());
             }
+            m_ToneMap->SetExposure(m_AutoExposure.GetExposure());
             m_ToneMap->PreBind(c);
             if (useFXAA) {
                 // FXAA 启用 → ToneMap 写入 LDR 中间纹理（离屏），FXAA 再写入 BackBuffer

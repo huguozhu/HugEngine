@@ -66,6 +66,7 @@ target_sources(HugEngineRender PRIVATE
     PostProcess/BloomPass.cpp
     PostProcess/DOFPass.cpp
     PostProcess/MotionBlurPass.cpp
+    PostProcess/AutoExposurePass.cpp
     # Profiler
     Profiler/ProfilerManager.cpp
 

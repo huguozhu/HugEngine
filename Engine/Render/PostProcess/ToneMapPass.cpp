@@ -24,6 +24,8 @@ bool ToneMapPass::Initialize(rhi::IRHIDevice* device,u32 width,u32 height){
     d.depthTest=false;d.depthWrite=false;
     d.depthFormat=rhi::Format::D32_FLOAT;
     d.colorAttachmentCount=1;d.colorFormats[0]=rhi::Format::BGRA8_UNORM;
+    rhi::PushConstantRange pcr; pcr.stageMask=1|16; pcr.size=16;  // Vertex|Fragment
+    d.pushConstantRanges={pcr};
     d.descriptorSetLayouts={m_DescLayout};d.debugName="ToneMap";
     m_PSO=device->CreatePipelineState(d);
     HE_ASSERT(m_PSO,"ToneMapPass: PSO failed");
@@ -52,6 +54,9 @@ void ToneMapPass::Render(rhi::IRHICommandList* cmd){
     cmd->SetViewport({0,(float)m_Height,(float)m_Width,-(float)m_Height,0,1});
     cmd->SetScissor({0,0,m_Width,m_Height});
     cmd->BindDescriptorSet(0,m_DescSet);
+    struct { float exposure; float _pad[3]; } pc;
+    pc.exposure = m_Exposure;
+    cmd->SetPushConstants(0, sizeof(pc), &pc);
     cmd->Draw(3);
 }
 

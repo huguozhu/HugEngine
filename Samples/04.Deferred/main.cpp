@@ -723,6 +723,23 @@ int main() {
             if (gbMode != (int)pipeline.GetGBufferMode())
                 pipeline.SetGBufferMode((render::DeferredPipeline::GBufferMode)gbMode);
 
+            // ── AutoExposure ──
+            ImGui::SeparatorText("AutoExposure");
+            {
+                auto& ae = pipeline.GetAutoExposure();
+                bool aeOn = ae.IsEnabled();
+                if (ImGui::Checkbox("启用自动曝光", &aeOn)) ae.SetEnabled(aeOn);
+                if (aeOn) {
+                    ImGui::Indent(12.0f);
+                    float s = ae.GetAdaptSpeed();
+                    if (ImGui::SliderFloat("适应速度", &s, 0.1f, 10.0f, "%.1f")) ae.SetAdaptSpeed(s);
+                    float t = ae.GetTargetLum();
+                    if (ImGui::SliderFloat("目标亮度", &t, 0.01f, 1.0f, "%.2f")) ae.SetTargetLum(t);
+                    ImGui::Text("当前曝光: %.2f", ae.GetExposure());
+                    ImGui::Unindent(12.0f);
+                }
+            }
+
             // ── 后处理 ──
             ImGui::SeparatorText("后处理");
             {
