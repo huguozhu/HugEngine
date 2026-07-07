@@ -27,6 +27,7 @@ struct TextureDesc {
     u32         depth       = 1;
     u32         mipLevels   = 1;
     u32         arrayLayers = 1;
+    u32         sampleCount = 1;     // MSAA 采样数（1=无 MSAA, 2/4/8）
     Format      format      = Format::RGBA8_UNORM;
     TextureUsage usage      = TextureUsage::ShaderResource;
     const void* initialData = nullptr;

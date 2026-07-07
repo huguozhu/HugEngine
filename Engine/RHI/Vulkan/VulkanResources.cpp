@@ -245,6 +245,7 @@ VulkanTexture::VulkanTexture(VmaAllocator allocator, VkCommandPool cmdPool, VkQu
     , m_Width(desc.width), m_Height(desc.height), m_Depth(desc.depth)
     , m_MipLevels(desc.mipLevels)
     , m_ArrayLayers(u32(desc.usage) & u32(TextureUsage::Cubemap) ? 6 : desc.arrayLayers)
+    , m_SampleCount(desc.sampleCount)
     , m_Format(desc.format)
     , m_VkFormat(ToVkFormat(desc.format))
 {
@@ -262,7 +263,18 @@ VulkanTexture::VulkanTexture(VmaAllocator allocator, VkCommandPool cmdPool, VkQu
     imageInfo.extent        = {m_Width, m_Height, m_Depth};
     imageInfo.mipLevels     = m_MipLevels;
     imageInfo.arrayLayers   = isCubemap ? 6 : m_ArrayLayers;
-    imageInfo.samples       = VK_SAMPLE_COUNT_1_BIT;
+    // 将 u32 采样数转换为 VkSampleCountFlagBits
+    VkSampleCountFlagBits vkSamples = VK_SAMPLE_COUNT_1_BIT;
+    switch (desc.sampleCount) {
+        case 2:  vkSamples = VK_SAMPLE_COUNT_2_BIT;  break;
+        case 4:  vkSamples = VK_SAMPLE_COUNT_4_BIT;  break;
+        case 8:  vkSamples = VK_SAMPLE_COUNT_8_BIT;  break;
+        case 16: vkSamples = VK_SAMPLE_COUNT_16_BIT; break;
+        case 32: vkSamples = VK_SAMPLE_COUNT_32_BIT; break;
+        case 64: vkSamples = VK_SAMPLE_COUNT_64_BIT; break;
+        default: vkSamples = VK_SAMPLE_COUNT_1_BIT;  break;
+    }
+    imageInfo.samples       = vkSamples;
     imageInfo.tiling        = VK_IMAGE_TILING_OPTIMAL;
     imageInfo.usage         = ToVkImageUsage(desc.usage);
     imageInfo.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;

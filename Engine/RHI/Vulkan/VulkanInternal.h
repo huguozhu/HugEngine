@@ -454,6 +454,7 @@ private:
     u32              m_Depth        = 1;
     u32              m_MipLevels    = 1;
     u32              m_ArrayLayers  = 1;
+    u32              m_SampleCount  = 1;
     Format           m_Format       = Format::RGBA8_UNORM;
     VkFormat         m_VkFormat     = VK_FORMAT_R8G8B8A8_UNORM;
 };
