@@ -478,7 +478,7 @@ int main() {
                 std::cos(angle) * radius, height, std::sin(angle) * radius));
         }
         camAnim->FinalizeClip();
-        camAnim->playing = true;
+        camAnim->playing = false;  // 默认关闭启动动画
     }
     sceneGraph.SetParent(camAnimEntity, Entity{kInvalidEntity});
     HE_CORE_INFO("相机动画已创建: {} 秒圆形路径", 6.0f);

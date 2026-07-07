@@ -468,14 +468,14 @@ int main() {
         }
         // 相机始终看向原点
         camAnim->FinalizeClip();
-        camAnim->playing = true;
+        camAnim->playing = false;  // 默认关闭启动动画
     }
     sceneGraph.SetParent(camAnimEntity, Entity{kInvalidEntity});
     HE_CORE_INFO("相机动画已创建: {} 秒圆形路径", 6.0f);
 
     // 鼠标状态
     bool   rightMouseDown = false;
-    bool   animCameraMode = true;  // T 键切换：动画相机模式
+    bool   animCameraMode = false; // T 键切换：动画相机模式（默认关闭）
     double lastMouseX = 0.0, lastMouseY = 0.0;
 
     // ============================================================
