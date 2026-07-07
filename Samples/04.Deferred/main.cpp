@@ -840,12 +840,12 @@ int main() {
                 ImGui::Checkbox(isMain ? "启用##MainDL" : "启用##FillDL", &dl.enabled);
 
                 float3 dir = dl.direction;
-                if (ImGui::SliderFloat3("方向", &dir[0], -1.0f, 1.0f, "%.2f")) {
+                if (ImGui::SliderFloat3(isMain ? "方向##MainDL" : "方向##FillDL", &dir[0], -1.0f, 1.0f, "%.2f")) {
                     if (glm::dot(dir, dir) > 0.0001f)
                         dl.direction = glm::normalize(dir);
                 }
-                ImGui::ColorEdit3("颜色", &dl.color[0]);
-                ImGui::DragFloat("强度", &dl.intensity, 0.1f, 0.0f, 100.0f, "%.1f");
+                ImGui::ColorEdit3(isMain ? "颜色##MainDL" : "颜色##FillDL", &dl.color[0]);
+                ImGui::DragFloat(isMain ? "强度##MainDL" : "强度##FillDL", &dl.intensity, 0.1f, 0.0f, 100.0f, "%.1f");
 
                 if (isMain) {
                     bool shadowOn = dl.castShadow;
