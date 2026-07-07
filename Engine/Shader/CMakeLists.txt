@@ -69,6 +69,7 @@ if(SLANGC)
         "${SHADER_DIR}/DOF_CoC.frag.slang"
         "${SHADER_DIR}/DOF_Composite.frag.slang"
         "${SHADER_DIR}/MotionBlur.frag.slang"
+        "${SHADER_DIR}/ColorGrading.frag.slang"
     )
     set(COMP_SLANG
         "${SHADER_DIR}/GPUCull.comp.slang"

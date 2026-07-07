@@ -27,6 +27,7 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "PostProcess/DOFPass.h"
 #include "PostProcess/MotionBlurPass.h"
 #include "PostProcess/AutoExposurePass.h"
+#include "PostProcess/ColorGradingPass.h"
 #include "PostProcess/ToneMapPass.h"
 #include "Profiler/ProfilerManager.h"
 #include "PostProcess/SkyboxPass.h"
@@ -82,6 +83,7 @@ public:
     SSAO&           GetSSAO()       { return m_SSAO; }
     ProfilerManager&    GetProfiler()      { return m_Profiler; }
     AutoExposurePass&   GetAutoExposure()  { return m_AutoExposure; }
+    ColorGradingPass&   GetColorGrading()  { return m_ColorGrading; }
     // GBuffer 渲染模式
     enum class GBufferMode : u8 { CPU, GPU };
     void         SetGBufferMode(GBufferMode m);
@@ -186,6 +188,7 @@ private:
     MotionBlurPass m_MotionBlur; // 运动模糊（懒初始化）
     ProfilerManager m_Profiler;  // GPU 时间戳 Profiler
     AutoExposurePass m_AutoExposure; // 自动曝光
+    ColorGradingPass m_ColorGrading; // LDR 色彩分级
     std::vector<u32> m_GPUVisibleIndices;
 
 

@@ -799,21 +799,22 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             m_AntiAliasing->Render(c);
         });
 
-    // LDR 中间纹理（FXAA 启用时 ToneMap 写入此处，FXAA 再写入 BackBuffer）
+    // LDR 管线：ToneMap → [ColorGrading] → [FXAA] → BackBuffer
     auto ldrTarget = rg.ImportTexture("LDR", m_LDRTarget.get());
-    bool useFXAA = IsFXAAEnabled();
-    bool useTAA  = (m_AntiAliasing && m_AntiAliasing->IsEnabled());
+    bool useFXAA  = IsFXAAEnabled();
+    bool useColor = m_ColorGrading.IsEnabled() && m_ColorGrading.GetOutput() != nullptr;
+    bool useTAA   = (m_AntiAliasing && m_AntiAliasing->IsEnabled());
+    bool needLDR  = useFXAA || useColor;  // 任一启用就需要 LDR 中间纹理
 
-    // ToneMap Pass（HDR → LDR，输出到 LDR 中间纹理或直接 BackBuffer）
+    // ToneMap Pass（HDR → LDR，输出到 LDR 或 BackBuffer）
     rg.AddPass("ToneMap",
         {},
-        {{useFXAA ? ldrTarget : backBuf, ResourceAccess::Write}},
-        [this, useTAA, useFXAA, w, h, anyPostActive](rhi::IRHICommandList* c) {
+        {{needLDR ? ldrTarget : backBuf, ResourceAccess::Write}},
+        [this, useTAA, needLDR, w, h, anyPostActive](rhi::IRHICommandList* c) {
             if (useTAA) {
                 m_ToneMap->SetInput(m_AntiAliasing->GetOutputTexture(),
                                     m_AntiAliasing->GetOutputSampler());
             } else if (anyPostActive) {
-                // 读取后处理链最后一个激活 Pass 的输出
                 auto* src = m_MotionBlur.IsEnabled() ? m_MotionBlur.GetOutput()
                           : m_DOF.IsEnabled()        ? m_DOF.GetOutput()
                           :                            m_Bloom.GetOutput();
@@ -828,34 +829,50 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             }
             m_ToneMap->SetExposure(m_AutoExposure.GetExposure());
             m_ToneMap->PreBind(c);
-            if (useFXAA) {
-                // FXAA 启用 → ToneMap 写入 LDR 中间纹理（离屏），FXAA 再写入 BackBuffer
+            if (needLDR) {
                 rhi::ClearValue clr{};
                 c->BeginOffscreenPass(m_LDRTarget->GetNativeHandle(),
                     m_LDRDummyDepth->GetNativeHandle(), w, h, &clr, false);
                 m_ToneMap->Render(c);
                 c->EndOffscreenPass();
             } else {
-                // FXAA 禁用 → ToneMap 直接写入 SwapChain BackBuffer
                 c->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
                 m_ToneMap->Render(c);
                 c->EndRenderPass();
             }
         });
 
-    // FXAA Pass（LDR 空间后处理抗锯齿，ToneMap 之后、Present 之前）
+    // ColorGrading Pass（LDR 色彩分级，ToneMap 之后、FXAA 之前）
+    if (useColor) {
+        auto cgOut = rg.ImportTexture("CG_Out", m_ColorGrading.GetOutput());
+        rg.AddPass("ColorGrading",
+            {{ldrTarget, ResourceAccess::Read}},
+            {{cgOut, ResourceAccess::Write}},
+            [this, w, h](rhi::IRHICommandList* c) {
+                m_ColorGrading.SetInput(m_LDRTarget.get(), m_LDRSampler.get());
+                c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput, rhi::PipelineStage::FragmentShader,
+                    rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, m_LDRTarget.get());
+                m_ColorGrading.PreBind(c);
+                rhi::ClearValue clr{};
+                c->BeginOffscreenPass(m_ColorGrading.GetOutput()->GetNativeHandle(), nullptr, w, h, &clr, false);
+                m_ColorGrading.Render(c);
+                c->EndOffscreenPass();
+            });
+    }
+
+    // FXAA Pass（LDR 空间后处理抗锯齿，ColorGrading 之后、Present 之前）
     if (useFXAA) {
+        auto* fxaaInput = useColor ? m_ColorGrading.GetOutput() : m_LDRTarget.get();
+        auto* fxaaSamp  = useColor ? m_ColorGrading.GetOutputSampler() : m_LDRSampler.get();
         rg.AddPass("FXAA",
             {{ldrTarget, ResourceAccess::Read}},
             {{backBuf, ResourceAccess::Write}},
-            [this](rhi::IRHICommandList* c) {
-                m_FXAA->SetInput(m_LDRTarget.get(), m_LDRSampler.get());
-                // LDR 纹理从 RenderTarget 过渡到 ShaderResource（ToneMap 写入后）
+            [this, fxaaInput, fxaaSamp](rhi::IRHICommandList* c) {
+                m_FXAA->SetInput(fxaaInput, fxaaSamp);
                 c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput,
                                    rhi::PipelineStage::FragmentShader,
                                    rhi::ResourceState::RenderTarget,
-                                   rhi::ResourceState::ShaderResource,
-                                   m_LDRTarget.get());
+                                   rhi::ResourceState::ShaderResource, fxaaInput);
                 c->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
                 m_FXAA->Render(c);
                 c->EndRenderPass();

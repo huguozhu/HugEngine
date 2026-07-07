@@ -740,6 +740,24 @@ int main() {
                 }
             }
 
+            // ── ColorGrading ──
+            ImGui::SeparatorText("色彩分级");
+            {
+                auto& cg = pipeline.GetColorGrading();
+                bool cgOn = cg.IsEnabled();
+                if (ImGui::Checkbox("启用色彩分级", &cgOn)) cg.SetEnabled(cgOn);
+                if (cgOn) {
+                    ImGui::Indent(12.0f);
+                    float s = cg.GetSaturation();
+                    if (ImGui::SliderFloat("饱和度", &s, 0.0f, 2.0f, "%.2f")) cg.SetSaturation(s);
+                    float c = cg.GetContrast();
+                    if (ImGui::SliderFloat("对比度", &c, 0.5f, 2.0f, "%.2f")) cg.SetContrast(c);
+                    float v = cg.GetVibrance();
+                    if (ImGui::SliderFloat("Vibrance", &v, 0.0f, 2.0f, "%.2f")) cg.SetVibrance(v);
+                    ImGui::Unindent(12.0f);
+                }
+            }
+
             // ── 后处理 ──
             ImGui::SeparatorText("后处理");
             {
