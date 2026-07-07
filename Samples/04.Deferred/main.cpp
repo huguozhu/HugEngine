@@ -161,8 +161,11 @@ int main() {
             GetFloat(cfgData, "light_color_g", 0.95f),
             GetFloat(cfgData, "light_color_b", 0.85f));
         mainDL->intensity    = GetFloat(cfgData, "light_intensity", 15.0f);
-        mainDL->castShadow   = GetInt(cfgData, "shadow_enabled", 1) != 0;
-        mainDL->shadowBias   = GetFloat(cfgData, "shadow_bias", 0.003f);
+        mainDL->castShadow       = GetInt(cfgData, "shadow_enabled", 1) != 0;
+        mainDL->shadowBias       = GetFloat(cfgData, "shadow_bias", 0.003f);
+        mainDL->shadowNormalBias = GetFloat(cfgData, "shadow_normal_bias", 0.02f);
+        mainDL->shadowStrength   = GetFloat(cfgData, "shadow_strength", 1.0f);
+        mainDL->enabled          = GetInt(cfgData, "light_enabled", 1) != 0;
         sceneGraph.SetParent(mainLightEntity, Entity{kInvalidEntity});
     }
 
@@ -180,6 +183,7 @@ int main() {
             GetFloat(cfgData, "fill_color_g", 0.7f),
             GetFloat(cfgData, "fill_color_b", 0.9f));
         dl->intensity = GetFloat(cfgData, "fill_intensity", 2.0f);
+        dl->enabled   = GetInt(cfgData, "fill_enabled", 1) != 0;
         sceneGraph.SetParent(lightEntity, Entity{kInvalidEntity});
     }
 
@@ -189,11 +193,15 @@ int main() {
         pointLightEntity = world.CreateEntity("PointLight");
         world.AddComponent<TransformComponent>(pointLightEntity);
         auto* pl = world.AddComponent<PointLight>(pointLightEntity);
-        pl->color      = float3(1.0f, 0.85f, 0.6f);
-        pl->intensity  = 20.0f;
-        pl->range      = 600.0f;
-        pl->castShadow = true;
-        pl->shadowBias = 0.005f;
+        pl->color      = float3(
+            GetFloat(cfgData, "point_color_r", 1.0f),
+            GetFloat(cfgData, "point_color_g", 0.85f),
+            GetFloat(cfgData, "point_color_b", 0.6f));
+        pl->intensity  = GetFloat(cfgData, "point_intensity", 20.0f);
+        pl->range      = GetFloat(cfgData, "point_range", 600.0f);
+        pl->castShadow = GetInt(cfgData, "point_shadow", 1) != 0;
+        pl->shadowBias = GetFloat(cfgData, "point_bias", 0.005f);
+        pl->enabled    = GetInt(cfgData, "point_enabled", 1) != 0;
 
         auto* plTransform = world.GetComponent<TransformComponent>(pointLightEntity);
         if (plTransform) {
@@ -225,18 +233,28 @@ int main() {
         spotLightEntity = world.CreateEntity("SpotLight");
         world.AddComponent<TransformComponent>(spotLightEntity);
         auto* sl = world.AddComponent<SpotLight>(spotLightEntity);
-        sl->color           = float3(1.0f, 0.9f, 0.7f);
-        sl->intensity       = 80.0f;
-        sl->range           = 1200.0f;
-        sl->innerConeAngle  = 0.25f;  // ~14°
-        sl->outerConeAngle  = 0.50f;  // ~29°
-        sl->direction       = float3(0.0f, -1.0f, 0.3f);  // 向下倾斜
-        sl->castShadow      = true;
-        sl->shadowBias      = 0.005f;
+        sl->color           = float3(
+            GetFloat(cfgData, "spot_color_r", 1.0f),
+            GetFloat(cfgData, "spot_color_g", 0.9f),
+            GetFloat(cfgData, "spot_color_b", 0.7f));
+        sl->intensity       = GetFloat(cfgData, "spot_intensity", 80.0f);
+        sl->range           = GetFloat(cfgData, "spot_range", 1200.0f);
+        sl->innerConeAngle  = GetFloat(cfgData, "spot_inner_angle", 0.25f);
+        sl->outerConeAngle  = GetFloat(cfgData, "spot_outer_angle", 0.50f);
+        sl->direction       = float3(
+            GetFloat(cfgData, "spot_dir_x", 0.0f),
+            GetFloat(cfgData, "spot_dir_y", -1.0f),
+            GetFloat(cfgData, "spot_dir_z", 0.3f));
+        sl->castShadow      = GetInt(cfgData, "spot_shadow", 1) != 0;
+        sl->shadowBias      = GetFloat(cfgData, "spot_bias", 0.005f);
+        sl->enabled         = GetInt(cfgData, "spot_enabled", 1) != 0;
 
         auto* slTransform = world.GetComponent<TransformComponent>(spotLightEntity);
         if (slTransform) {
-            slTransform->position = float3(0.0f, 200.0f, -200.0f);
+            slTransform->position = float3(
+                GetFloat(cfgData, "spot_pos_x", 0.0f),
+                GetFloat(cfgData, "spot_pos_y", 200.0f),
+                GetFloat(cfgData, "spot_pos_z", -200.0f));
         }
         sceneGraph.SetParent(spotLightEntity, Entity{kInvalidEntity});
 
@@ -412,6 +430,64 @@ int main() {
     pipeline.Initialize(device.get());
     pipeline.SetSwapChain(swapchain.get());
     pipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+
+    // ── 从配置文件恢复管线 / GI / 后处理设置 ──
+    if (hasConfig) {
+        pipeline.GetClusteredShading().enabled = GetInt(cfgData, "clustered", 1) != 0;
+        pipeline.GetGPUCulling().enabled       = GetInt(cfgData, "gpu_cull", 1) != 0;
+        pipeline.SetGBufferMode((render::DeferredPipeline::GBufferMode)GetInt(cfgData, "gbuffer_mode", 0));
+
+        auto& ae = pipeline.GetAutoExposure();
+        ae.SetEnabled(GetInt(cfgData, "ae_enabled", 0) != 0);
+        ae.SetAdaptSpeed(GetFloat(cfgData, "ae_adapt_speed", 2.0f));
+        ae.SetTargetLum(GetFloat(cfgData, "ae_target_lum", 0.18f));
+
+        auto& bloom = pipeline.GetBloom();
+        bloom.SetEnabled(GetInt(cfgData, "bloom_enabled", 0) != 0);
+        bloom.SetThreshold(GetFloat(cfgData, "bloom_threshold", 1.0f));
+        bloom.SetIntensity(GetFloat(cfgData, "bloom_intensity", 0.5f));
+
+        auto& dof = pipeline.GetDOF();
+        dof.SetEnabled(GetInt(cfgData, "dof_enabled", 0) != 0);
+        dof.SetFocusDepth(GetFloat(cfgData, "dof_focus", 0.5f));
+        dof.SetFocusRange(GetFloat(cfgData, "dof_range", 0.1f));
+        dof.SetIntensity(GetFloat(cfgData, "dof_intensity", 1.0f));
+
+        auto& mb = pipeline.GetMotionBlur();
+        mb.SetEnabled(GetInt(cfgData, "mb_enabled", 0) != 0);
+        mb.SetIntensity(GetFloat(cfgData, "mb_intensity", 0.5f));
+
+        pipeline.GetSSAO().enabled = GetInt(cfgData, "ssao_enabled", 0) != 0;
+
+        if (auto* gi = pipeline.GetGI()) {
+            auto s = gi->GetSettings();
+            s.intensity = GetFloat(cfgData, "ibl_intensity", 1.0f);
+            gi->SetSettings(s);
+        }
+        if (auto* ssgi = pipeline.GetSSGI()) {
+            ssgi->SetEnabled(GetInt(cfgData, "ssgi_enabled", 0) != 0);
+            ssgi->radius      = GetFloat(cfgData, "ssgi_radius", 1.0f);
+            ssgi->sampleCount = GetInt(cfgData, "ssgi_samples", 16);
+            auto s = ssgi->GetSettings();
+            s.intensity = GetFloat(cfgData, "ssgi_intensity", 1.0f);
+            ssgi->SetSettings(s);
+        }
+        if (auto* ddgi = pipeline.GetDDGI()) {
+            ddgi->SetEnabled(GetInt(cfgData, "ddgi_enabled", 0) != 0);
+            ddgi->blendAlpha = GetFloat(cfgData, "ddgi_blend", 0.9f);
+            ddgi->debugScale = GetFloat(cfgData, "ddgi_scale", 1.0f);
+            auto s = ddgi->GetSettings();
+            s.intensity = GetFloat(cfgData, "ddgi_intensity", 1.0f);
+            ddgi->SetSettings(s);
+        }
+        if (auto* ssr = pipeline.GetSSR()) {
+            ssr->SetEnabled(GetInt(cfgData, "ssr_enabled", 0) != 0);
+            ssr->maxSteps = GetFloat(cfgData, "ssr_max_steps", 64.0f);
+            ssr->stepSize = GetFloat(cfgData, "ssr_step_size", 0.5f);
+        }
+
+        HE_CORE_INFO("管道设置已从配置文件恢复");
+    }
 
     HE_CORE_INFO("DeferredPipeline 初始化完成");
 
@@ -876,6 +952,39 @@ int main() {
                 }
             });
 
+            // 聚光灯
+            world.ForEach<he::SpotLight>([&](he::Entity e, he::SpotLight& sl) {
+                ImGui::SeparatorText("聚光灯");
+                ImGui::Checkbox("启用##SpotEnable", &sl.enabled);
+                auto* slTransform = world.GetComponent<TransformComponent>(e);
+                if (slTransform) {
+                    if (ImGui::DragFloat3("位置##SpotLight", &slTransform->position[0], 5.0f)) {
+                        auto* coneTransform = world.GetComponent<TransformComponent>(spotLightConeEntity);
+                        if (coneTransform)
+                            coneTransform->position = slTransform->position;
+                    }
+                }
+                float3 dir = sl.direction;
+                if (ImGui::SliderFloat3("方向##SpotDir", &dir[0], -1.0f, 1.0f, "%.2f")) {
+                    if (glm::dot(dir, dir) > 0.0001f)
+                        sl.direction = glm::normalize(dir);
+                }
+                ImGui::ColorEdit3("颜色##SpotColor", &sl.color[0]);
+                ImGui::DragFloat("强度##SpotIntensity", &sl.intensity, 0.1f, 0.0f, 200.0f, "%.1f");
+                ImGui::DragFloat("范围##SpotRange", &sl.range, 10.0f, 10.0f, 5000.0f, "%.0f");
+                ImGui::SliderFloat("内锥角##SpotInner", &sl.innerConeAngle, 0.01f, 1.5f, "%.2f rad");
+                ImGui::SliderFloat("外锥角##SpotOuter", &sl.outerConeAngle, 0.01f, 1.5f, "%.2f rad");
+                bool shadowOn = sl.castShadow;
+                if (ImGui::Checkbox("投射阴影##SpotShadow", &shadowOn))
+                    sl.castShadow = shadowOn;
+                if (sl.castShadow) {
+                    ImGui::Indent(12.0f);
+                    ImGui::DragFloat("深度偏移##SpotBias", &sl.shadowBias, 0.0001f, 0.0f, 0.1f, "%.4f",
+                        ImGuiSliderFlags_Logarithmic);
+                    ImGui::Unindent(12.0f);
+                }
+            });
+
             // 同步球体位置
             {
                 auto* plTransform = world.GetComponent<TransformComponent>(pointLightEntity);
@@ -898,10 +1007,11 @@ int main() {
 
             // 场景统计
             ImGui::SeparatorText("场景");
-            u32 meshCount = 0, dirLightCount = 0;
+            u32 meshCount = 0, dirLightCount = 0, spotCount = 0;
             world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent&) { meshCount++; });
             world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight&) { dirLightCount++; });
-            ImGui::Text("%u 网格  |  %u 方向光  |  %u 点光", meshCount, dirLightCount, 1);
+            world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight&) { spotCount++; });
+            ImGui::Text("%u 网格  |  %u 方向光  |  %u 点光  |  %u 聚光", meshCount, dirLightCount, 1, spotCount);
         }
         ImGui::End();
         imgui.EndFrame(cmdList.get());
@@ -920,32 +1030,40 @@ int main() {
     pipeline.Shutdown();
 
     // ============================================================
-    // 保存配置
+    // 保存配置（所有 ImGui 可控参数）
     // ============================================================
     {
         std::unordered_map<String, String> out;
-        out["cam_pos_x"]  = std::to_string(camCtrl.GetCamera().position.x);
-        out["cam_pos_y"]  = std::to_string(camCtrl.GetCamera().position.y);
-        out["cam_pos_z"]  = std::to_string(camCtrl.GetCamera().position.z);
+
+        // ── 相机 ──
+        out["cam_pos_x"] = std::to_string(camCtrl.GetCamera().position.x);
+        out["cam_pos_y"] = std::to_string(camCtrl.GetCamera().position.y);
+        out["cam_pos_z"] = std::to_string(camCtrl.GetCamera().position.z);
         out["cam_yaw"]   = std::to_string(camCtrl.GetYaw());
         out["cam_pitch"] = std::to_string(camCtrl.GetPitch());
         out["cam_near"]  = std::to_string(camCtrl.GetCamera().nearPlane);
         out["cam_far"]   = std::to_string(camCtrl.GetCamera().farPlane);
 
+        // ── 主方向光 ──
         if (mainDL) {
-            out["light_dir_x"]     = std::to_string(mainDL->direction.x);
-            out["light_dir_y"]     = std::to_string(mainDL->direction.y);
-            out["light_dir_z"]     = std::to_string(mainDL->direction.z);
-            out["light_color_r"]   = std::to_string(mainDL->color.x);
-            out["light_color_g"]   = std::to_string(mainDL->color.y);
-            out["light_color_b"]   = std::to_string(mainDL->color.z);
-            out["light_intensity"] = std::to_string(mainDL->intensity);
-            out["shadow_enabled"]  = std::to_string(mainDL->castShadow ? 1 : 0);
-            out["shadow_bias"]     = std::to_string(mainDL->shadowBias);
+            out["light_enabled"]      = std::to_string(mainDL->enabled ? 1 : 0);
+            out["light_dir_x"]        = std::to_string(mainDL->direction.x);
+            out["light_dir_y"]        = std::to_string(mainDL->direction.y);
+            out["light_dir_z"]        = std::to_string(mainDL->direction.z);
+            out["light_color_r"]      = std::to_string(mainDL->color.x);
+            out["light_color_g"]      = std::to_string(mainDL->color.y);
+            out["light_color_b"]      = std::to_string(mainDL->color.z);
+            out["light_intensity"]    = std::to_string(mainDL->intensity);
+            out["shadow_enabled"]     = std::to_string(mainDL->castShadow ? 1 : 0);
+            out["shadow_bias"]        = std::to_string(mainDL->shadowBias);
+            out["shadow_normal_bias"] = std::to_string(mainDL->shadowNormalBias);
+            out["shadow_strength"]    = std::to_string(mainDL->shadowStrength);
         }
 
+        // ── 补光 ──
         world.ForEach<he::DirectionalLight>([&](he::Entity e, he::DirectionalLight& l) {
             if (e == mainLightEntity) return;
+            out["fill_enabled"]   = std::to_string(l.enabled ? 1 : 0);
             out["fill_dir_x"]     = std::to_string(l.direction.x);
             out["fill_dir_y"]     = std::to_string(l.direction.y);
             out["fill_dir_z"]     = std::to_string(l.direction.z);
@@ -955,12 +1073,100 @@ int main() {
             out["fill_intensity"] = std::to_string(l.intensity);
         });
 
-        auto* plTransform = world.GetComponent<TransformComponent>(pointLightEntity);
-        if (plTransform) {
-            out["point_pos_x"] = std::to_string(plTransform->position.x);
-            out["point_pos_y"] = std::to_string(plTransform->position.y);
-            out["point_pos_z"] = std::to_string(plTransform->position.z);
+        // ── 点光源 ──
+        world.ForEach<he::PointLight>([&](he::Entity e, he::PointLight& pl) {
+            out["point_enabled"]   = std::to_string(pl.enabled ? 1 : 0);
+            out["point_color_r"]   = std::to_string(pl.color.x);
+            out["point_color_g"]   = std::to_string(pl.color.y);
+            out["point_color_b"]   = std::to_string(pl.color.z);
+            out["point_intensity"] = std::to_string(pl.intensity);
+            out["point_range"]     = std::to_string(pl.range);
+            out["point_shadow"]    = std::to_string(pl.castShadow ? 1 : 0);
+            out["point_bias"]      = std::to_string(pl.shadowBias);
+            auto* t = world.GetComponent<TransformComponent>(e);
+            if (t) {
+                out["point_pos_x"] = std::to_string(t->position.x);
+                out["point_pos_y"] = std::to_string(t->position.y);
+                out["point_pos_z"] = std::to_string(t->position.z);
+            }
+        });
+
+        // ── 聚光灯 ──
+        world.ForEach<he::SpotLight>([&](he::Entity e, he::SpotLight& sl) {
+            out["spot_enabled"]     = std::to_string(sl.enabled ? 1 : 0);
+            out["spot_dir_x"]       = std::to_string(sl.direction.x);
+            out["spot_dir_y"]       = std::to_string(sl.direction.y);
+            out["spot_dir_z"]       = std::to_string(sl.direction.z);
+            out["spot_color_r"]     = std::to_string(sl.color.x);
+            out["spot_color_g"]     = std::to_string(sl.color.y);
+            out["spot_color_b"]     = std::to_string(sl.color.z);
+            out["spot_intensity"]   = std::to_string(sl.intensity);
+            out["spot_range"]       = std::to_string(sl.range);
+            out["spot_inner_angle"] = std::to_string(sl.innerConeAngle);
+            out["spot_outer_angle"] = std::to_string(sl.outerConeAngle);
+            out["spot_shadow"]      = std::to_string(sl.castShadow ? 1 : 0);
+            out["spot_bias"]        = std::to_string(sl.shadowBias);
+            auto* t = world.GetComponent<TransformComponent>(e);
+            if (t) {
+                out["spot_pos_x"] = std::to_string(t->position.x);
+                out["spot_pos_y"] = std::to_string(t->position.y);
+                out["spot_pos_z"] = std::to_string(t->position.z);
+            }
+        });
+
+        // ── 渲染设置 ──
+        out["clustered"]    = std::to_string(pipeline.GetClusteredShading().enabled ? 1 : 0);
+        out["gpu_cull"]     = std::to_string(pipeline.GetGPUCulling().enabled ? 1 : 0);
+        out["gbuffer_mode"] = std::to_string((int)pipeline.GetGBufferMode());
+
+        // ── AutoExposure ──
+        auto& ae = pipeline.GetAutoExposure();
+        out["ae_enabled"]     = std::to_string(ae.IsEnabled() ? 1 : 0);
+        out["ae_adapt_speed"] = std::to_string(ae.GetAdaptSpeed());
+        out["ae_target_lum"]  = std::to_string(ae.GetTargetLum());
+
+        // ── Bloom ──
+        auto& bloom = pipeline.GetBloom();
+        out["bloom_enabled"]   = std::to_string(bloom.IsEnabled() ? 1 : 0);
+        out["bloom_threshold"] = std::to_string(bloom.GetThreshold());
+        out["bloom_intensity"] = std::to_string(bloom.GetIntensity());
+
+        // ── DOF ──
+        auto& dof = pipeline.GetDOF();
+        out["dof_enabled"]   = std::to_string(dof.IsEnabled() ? 1 : 0);
+        out["dof_focus"]     = std::to_string(dof.GetFocusDepth());
+        out["dof_range"]     = std::to_string(dof.GetFocusRange());
+        out["dof_intensity"] = std::to_string(dof.GetIntensity());
+
+        // ── MotionBlur ──
+        auto& mb = pipeline.GetMotionBlur();
+        out["mb_enabled"]   = std::to_string(mb.IsEnabled() ? 1 : 0);
+        out["mb_intensity"] = std::to_string(mb.GetIntensity());
+
+        // ── GI ──
+        if (auto* gi = pipeline.GetGI()) {
+            out["ibl_intensity"] = std::to_string(gi->GetSettings().intensity);
         }
+        if (auto* ssgi = pipeline.GetSSGI()) {
+            out["ssgi_enabled"]   = std::to_string(ssgi->IsEnabled() ? 1 : 0);
+            out["ssgi_radius"]    = std::to_string(ssgi->radius);
+            out["ssgi_samples"]   = std::to_string(ssgi->sampleCount);
+            out["ssgi_intensity"] = std::to_string(ssgi->GetSettings().intensity);
+        }
+        if (auto* ddgi = pipeline.GetDDGI()) {
+            out["ddgi_enabled"]   = std::to_string(ddgi->IsEnabled() ? 1 : 0);
+            out["ddgi_blend"]     = std::to_string(ddgi->blendAlpha);
+            out["ddgi_scale"]     = std::to_string(ddgi->debugScale);
+            out["ddgi_intensity"] = std::to_string(ddgi->GetSettings().intensity);
+        }
+        if (auto* ssr = pipeline.GetSSR()) {
+            out["ssr_enabled"]   = std::to_string(ssr->IsEnabled() ? 1 : 0);
+            out["ssr_max_steps"] = std::to_string(ssr->maxSteps);
+            out["ssr_step_size"] = std::to_string(ssr->stepSize);
+        }
+
+        // ── SSAO ──
+        out["ssao_enabled"] = std::to_string(pipeline.GetSSAO().enabled ? 1 : 0);
 
         SaveConfigFile(g_ConfigPath, out);
         HE_CORE_INFO("配置已保存: {}", g_ConfigPath);
