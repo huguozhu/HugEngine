@@ -986,13 +986,14 @@ void DeferredPipeline::CollectLights(PushConstantData& pc, he::World& world,
     world.ForEach<he::DirectionalLight>(cl);
     world.ForEach<he::PointLight>(cl);
     world.ForEach<he::SpotLight>(cl);
-    if (pc.lightCount == 0) {
-        pc.lightCount = 1;
-        GPULight gl{}; gl.colorIntensity = float4(1,0.95,0.85,5); gl.directionType = float4(0.5,-1,1,0); gl.shadowIndex = -1;
-        auto* lights = static_cast<GPULight*>(m_LightBuffers[m_CurrentFrameSlot]->Map());
-        if (lights) lights[0] = gl;
-        m_LightBuffers[m_CurrentFrameSlot]->Unmap();
-    }
+    // 保底光源已注释：无光源时不再自动添加默认方向光
+    //if (pc.lightCount == 0) {
+    //    pc.lightCount = 1;
+    //    GPULight gl{}; gl.colorIntensity = float4(1,0.95,0.85,5); gl.directionType = float4(0.5,-1,1,0); gl.shadowIndex = -1;
+    //    auto* lights = static_cast<GPULight*>(m_LightBuffers[m_CurrentFrameSlot]->Map());
+    //    if (lights) lights[0] = gl;
+    //    m_LightBuffers[m_CurrentFrameSlot]->Unmap();
+    //}
 }
 
 void DeferredPipeline::UpdateIBLBindings(GI_IBL* gi) {
