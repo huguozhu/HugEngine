@@ -688,6 +688,12 @@ int main() {
             ImGui::Separator();
             ImGui::Text("Total GPU: %.2fms (%.0f FPS)", totalMs, totalMs > 0 ? 1000.0f / totalMs : 0);
 
+            // ── 渲染设置 ──
+            ImGui::SeparatorText("渲染设置");
+            bool useIndirect = pipeline.GetUseExecuteIndirect();
+            if (ImGui::Checkbox("GPU Driven (ExecuteIndirect)", &useIndirect))
+                pipeline.SetUseExecuteIndirect(useIndirect);
+
             // ============================================================
             // 光源
             // ============================================================
