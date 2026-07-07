@@ -1,6 +1,6 @@
 # HugEngine 开发进度
 
-> 最后更新: 2026-07-07（今日更新: AutoExposure 自动曝光 ✅, ColorGrading 色彩分级 ✅, Forward ExecuteIndirect 修复, 动画系统, 代码全面分析更新）
+> 最后更新: 2026-07-07（今日更新: SMAA ✅, AA_MSAA ✅, SMAA/FXAA 互斥, LDR AA Combo, Forward+ 任务）
 
 ## 整体进度
 
@@ -32,6 +32,8 @@
 - **抗锯齿架构**: IAntiAliasing 接口 + IPostProcessPass 中间层 ✅
 - **AA_TAA**: 时域抗锯齿（含 Velocity Buffer GBuffer MRT4）✅
 - **AA_FXAA**: LDR 空间快速近似抗锯齿 ✅
+- **AA_SMAA**: LDR 空间子像素形态学抗锯齿（3 Pass，与 FXAA 互斥）✅
+- **AA_MSAA**: 硬件多重采样（IAntiAliasing 接口 + TextureDesc.sampleCount）✅
 - **Clustered Shading**: 视锥空间 Cluster 划分 + 光源剔除 ✅
 - **GPU Culling**: Compute Shader 视锥 + Hi-Z 遮挡剔除 ✅
 - **ExecuteIndirect**: DeferredPipeline (MeshBatcher + DrawIndexedIndirect + CPU 回退) ✅ + ForwardPipeline ✅
@@ -81,6 +83,7 @@
 | MotionBlur (velocity 方向采样模糊) | ✅ |
 | AutoExposure (Compute 降采样 256 partial sum + 时间混合) | ✅ |
 | ColorGrading (LDR 饱和度/对比度/振铃调节) | ✅ |
+| SMAA (EdgeDetect + BlendWeight + Neighborhood 3 Pass) | ✅ |
 | Shader Hot Reload (FileWatcher + 自动重编译 + PSO 热替换) | ✅ |
 
 ### L4 — Render（渲染层）
@@ -97,7 +100,7 @@
 | ToneMapPass + SkyboxPass + SSAO + Denoiser | ✅ |
 | BloomPass + DOFPass + MotionBlurPass | ✅ |
 | AutoExposurePass + ColorGradingPass | ✅ |
-| IAntiAliasing → AA_None, AA_TAA, AA_FXAA | ✅ |
+| IAntiAliasing → AA_None, AA_TAA, AA_FXAA, AA_SMAA, AA_MSAA | ✅ |
 | SceneRenderer (实体收集 → 视锥剔除 → 上传) | ✅ |
 | ClusteredShading (视锥 Cluster + 光源剔除 + LightGrid) | ✅ |
 | GPUCulling (Compute 视锥 + Hi-Z 遮挡剔除) | ✅ |
@@ -157,6 +160,7 @@
 | TAA | HDR 抗锯齿 | Deferred | HDR | 时域累积 + 邻域裁剪 (GBuffer 深度/法线/velocity) |
 | FXAA | LDR 抗锯齿 | Both | LDR | 边缘检测 + 混合 (ColorGrading 之后) |
 | SSAO | 屏幕空间 AO | Both | HDR | 半球采样 + 双边模糊 |
+| SMAA | LDR 抗锯齿 | Both | LDR | 3 Pass 形态学 (EdgeDetect+BlendWeight+Neighborhood)，与 FXAA 互斥 |
 
 ## 架构设计
 
@@ -203,9 +207,11 @@ DeferredPipeline::BuildFrameGraph
   │     └── HDR→LDR ACES Tonemapping (含 AutoExposure 曝光值)
   │         输出到 LDR 中间纹理（有下游 Pass 时）或直接输出到 BackBuffer
   ├── "ColorGrading" Pass (可选) → CG Output
-  │     └── LDR 色彩分级: Saturation + Contrast + Vibrance (ToneMap 之后、FXAA 之前)
+  │     └── LDR 色彩分级: Saturation + Contrast + Vibrance (ToneMap 之后、AA 之前)
+  ├── "SMAA" Pass (可选) → BackBuffer (与 FXAA 互斥)
+  │     └── LDR 空间形态学抗锯齿 3 Pass: EdgeDetect→BlendWeight→Neighborhood
   └── "FXAA" Pass (可选) → BackBuffer
-        └── LDR 空间快速近似抗锯齿 (edge-detect + blend, ColorGrading 之后)
+        └── LDR 空间快速近似抗锯齿 (edge-detect + blend, SMAA 未启用时执行)
 ```
 
 ### 后处理链架构
@@ -229,7 +235,7 @@ Lighting 输出 (HDR)
 
 后处理责任链（按序串联，每个 Pass 可选启用，输出级联到下一个）：
 ```
-HDR → Bloom → DOF → MotionBlur → TAA → ToneMap → ColorGrading → FXAA → Present
+HDR → Bloom → DOF → MotionBlur → TAA → ToneMap → ColorGrading → [SMAA|FXAA] → Present
 ```
 
 ### 子系统继承树
@@ -246,7 +252,7 @@ IRenderSubsystem
         ├── DOFPass (CoC + 模糊 + 合成)
         ├── MotionBlurPass (velocity 方向采样)
         ├── ColorGradingPass (LDR 色彩分级)
-        └── IAntiAliasing → AA_None, AA_TAA, AA_FXAA
+        └── IAntiAliasing → AA_None, AA_TAA, AA_FXAA, AA_SMAA, AA_MSAA
 ```
 
 ### 目录结构
@@ -260,7 +266,7 @@ Engine/Render/
 ├── Shadow/         (IShadowSystem, ShadowSystem, ShadowNone, CSMTechnique, PointShadowTechnique, SpotShadowTechnique)
 ├── PostProcess/    (IPostProcessPass, ToneMapPass, SkyboxPass, SSAO, Denoiser, BloomPass, DOFPass,
 │                    MotionBlurPass, AutoExposurePass, ColorGradingPass, GaussianBlurPass)
-├── AntiAliasing/   (IAntiAliasing, AA_None, AA_TAA, AA_FXAA)
+├── AntiAliasing/   (IAntiAliasing, AA_None, AA_TAA, AA_FXAA, AA_SMAA, AA_MSAA)
 ├── Profiler/       (ProfilerManager)
 ├── SceneRenderer.h/.cpp
 ├── RenderGraph.h/.cpp
@@ -290,6 +296,7 @@ Engine/Shader/Shaders/  (Slang → SPIR-V → .spv.h)
 ├── MotionBlur                               (运动模糊后处理)
 ├── AutoExposure.comp                        (自动曝光 Compute)
 ├── ColorGrading                             (LDR 色彩分级)
+├── SMAA_EdgeDetect + SMAA_BlendWeight + SMAA_Neighborhood  (SMAA 3 Pass)
 └── common, pbr_common                       (公共头文件)
 ```
 
@@ -301,6 +308,8 @@ Engine/Shader/Shaders/  (Slang → SPIR-V → .spv.h)
 | MSAA | ✓ | ✗ | HDR | 延迟 GBuffer MRT 多采样代价过高 |
 | TAA | ✗ | ✓ | HDR | 复用 GBuffer 深度/法线/velocity 做邻域裁剪 |
 | FXAA | ✓ | ✓ | LDR | 纯 LDR 后处理，无管线依赖 |
+| SMAA | ✓ | ✓ | LDR | 3 Pass 形态学（边缘检测+权重计算+邻域混合），与 FXAA 互斥 |
+| MSAA | ✓ | ⚠️ | HDR | 硬件多采样（仅 HDR 目标，GBuffer 保持 1x，需重启生效） |
 
 ## 已知限制
 
@@ -344,7 +353,7 @@ Engine/Shader/Shaders/  (Slang → SPIR-V → .spv.h)
 
 | Phase | 主题 | 完成度 | 完成项 | 缺失项 |
 |-------|------|:---:|--------|--------|
-| P1 | 核心骨架 | ~95% | RHI Vulkan+VMA, Slang→SPIR-V, RenderGraph, ECS, glTF, Forward+Deferred, TAA, SSAO, Bloom, DOF, MotionBlur, FXAA, AutoExposure, ColorGrading, GPU Profiling, Editor基础, Shader HotReload, AsyncCompute(基础), Animation(关键帧) | MSAA, Undo/Redo, SMAA |
+| P1 | 核心骨架 | ~97% | RHI Vulkan+VMA, Slang→SPIR-V, RenderGraph, ECS, glTF, Forward+Deferred, TAA, SSAO, Bloom, DOF, MotionBlur, FXAA, SMAA, MSAA(基础), AutoExposure, ColorGrading, GPU Profiling, Editor基础, Shader HotReload, AsyncCompute(基础), Animation(关键帧) | Undo/Redo |
 | P2 | GPU Driven | ~80% | Bindless, GPU Culling, GPU Scene, CSM+Shadow, IBL, Clustered Shading, ExecuteIndirect+DGC (Deferred+Forward), VMA | VSM, VRS, Decal/ReflProbe, Prefab, Forward+ |
 | P3 | 高级几何 | ~5% | — | Nanite, Mesh Shader, Virtual Texturing, OIT, Impostor |
 | P4 | GI + RT | ~15% | DDGI (HDR radiance), Denoiser, SSGI, SSR | HW RT, Lumen GI, VXGI, ReSTIR, NRD, NRC, RT管线 |
@@ -362,7 +371,7 @@ Engine/Shader/Shaders/  (Slang → SPIR-V → .spv.h)
 | 3 | 点光阴影 PCF 软滤波 + 视锥剔除 | P1 | 🟡 中 | 阴影质量与性能优化 |
 | 4 | AsyncCompute 完善 + 默认开启 | P1 | 🟡 中 | 多阶段提交架构 |
 | 5 | GPUCulling Dispatch 移出 RenderPass | P2 | 🟢 低 | Vulkan 校验警告修复 |
-| 6 | Forward+ (Tile-based Light Culling) | P2 | 🟡 中 | 前向管线多光源性能 |
+| 6 | Forward+ (ForwardPipeline + ClusteredShading 模式) | P2 | 🟡 中 | 前向管线 Tile-based 光源剔除 |
 | 7 | HW Ray Tracing | P4 | 🟢 低 | TLAS/BLAS + RT PSO |
 | 8 | GI_VXGI 体素锥追踪 | P4 | 🟢 低 | 3D Clipmap Cone Trace |
 | 9 | Virtual Shadow Maps | P3 | 🟢 低 | 大规模高质量阴影 |
@@ -371,8 +380,7 @@ Engine/Shader/Shaders/  (Slang → SPIR-V → .spv.h)
 | 12 | Skeletal Animation | P6 | 🟡 中 | 角色动画 |
 | 13 | Atmosphere + Volumetrics | P6 | 🟢 低 | 天空/雾/云 |
 | 14 | Editor Undo/Redo | P1 | 🟢 低 | 编辑器体验 |
-| 15 | Editor MSAA / SMAA | P1 | 🟢 低 | 前向管线抗锯齿选项 |
-| 16 | Nanite / Mesh Shader | P3 | 🟢 低 | 虚拟几何 |
-| 17 | Virtual Texturing | P3 | 🟢 低 | 大地形纹理流式加载 |
-| 18 | GI_ReSTIR 时空重采样 | P4 | 🟢 低 | 重要性采样 + 光线追踪 |
-| 19 | 3DGS (Gaussian Splatting) | P7 | 🟢 低 | 新图元类型 + 4DGS |
+| 15 | Nanite / Mesh Shader | P3 | 🟢 低 | 虚拟几何 |
+| 16 | Virtual Texturing | P3 | 🟢 低 | 大地形纹理流式加载 |
+| 17 | GI_ReSTIR 时空重采样 | P4 | 🟢 低 | 重要性采样 + 光线追踪 |
+| 18 | 3DGS (Gaussian Splatting) | P7 | 🟢 低 | 新图元类型 + 4DGS |
