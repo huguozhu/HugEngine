@@ -706,16 +706,16 @@ int main() {
 
                 // 方向（滑块修改后自动归一化）
                 float3 dir = dl.direction;
-                if (ImGui::SliderFloat3("方向", &dir[0], -1.0f, 1.0f, "%.2f")) {
+                if (ImGui::SliderFloat3(isMain ? "方向##MainDL" : "方向##FillDL", &dir[0], -1.0f, 1.0f, "%.2f")) {
                     if (glm::dot(dir, dir) > 0.0001f)
                         dl.direction = glm::normalize(dir);
                 }
 
                 // 颜色
-                ImGui::ColorEdit3("颜色", &dl.color[0]);
+                ImGui::ColorEdit3(isMain ? "颜色##MainDL" : "颜色##FillDL", &dl.color[0]);
 
                 // 强度
-                ImGui::DragFloat("强度", &dl.intensity, 0.1f, 0.0f, 100.0f, "%.1f");
+                ImGui::DragFloat(isMain ? "强度##MainDL" : "强度##FillDL", &dl.intensity, 0.1f, 0.0f, 100.0f, "%.1f");
 
                 // 阴影参数（仅主方向光显示）
                 if (isMain) {
