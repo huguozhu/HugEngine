@@ -266,6 +266,7 @@ int main() {
     pipeline.Initialize(device.get());
     pipeline.SetUseRenderGraph(false);
     pipeline.SetSwapChain(swapchain.get());
+    pipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
 
     // --- 6. 创建命令列表 ---
     auto cmdList = device->CreateCommandList();
@@ -307,7 +308,7 @@ int main() {
         if (w == 0 || h == 0) return;
         swapchain->Resize(w, h);
         cmdList->SetSwapChain(swapchain.get());
-        pipeline.ResizeHDRTarget(w, h);
+        pipeline.OnResize(w, h);
         camCtrl.SetAspectRatio(static_cast<float>(w), static_cast<float>(h));
     });
 
@@ -387,16 +388,9 @@ int main() {
         // 统一使用 pipeline.Render()（RG/非RG 内部均包含 Shadow + HDR + 场景 + 天空盒）
         pipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
 
-        // ToneMap + ImGui RenderPass
-        if (pipeline.UseRenderGraph()) {
-            // RG：ToneMap 已在 RG 内完成，ImGui 用 LOAD 保留输出
-            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
-                rhi::Format::Unknown, nullptr, rhi::IRHICommandList::LoadOp::Load);
-        } else {
-            // 非 RG：手动渲染 ToneMap，首次写入 BackBuffer 用 Clear
-            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
-            pipeline.RenderToneMapPass(cmdList.get());
-        }
+        // ToneMap（非 RG 路径，与 03.Sponza 一致）
+        cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
+        pipeline.RenderToneMapPass(cmdList.get());
 
         imgui.BeginFrame();
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
