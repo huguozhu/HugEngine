@@ -57,17 +57,26 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         m_GBufferD = device->CreateTexture(d);
     }
 
-    // HDR target
+    // 硬件 MSAA：覆盖纹理和 PSO 的 sampleCount
+    if (m_MSAAEnabled) {
+        m_MSAA = std::make_unique<AA_MSAA>();
+        m_MSAA->Initialize(device, m_Width, m_Height);
+        HE_CORE_INFO("DeferredPipeline: MSAA {}x enabled (HDR 目标多采样，GBuffer 保持 1x)", m_MSAA->GetCurrentSampleCount());
+    }
+
+    // HDR target（MSAA 启用时使用多采样纹理）
     {
         rhi::TextureDesc d;
         d.format = rhi::Format::RGBA16_FLOAT;
         d.width = m_Width; d.height = m_Height;
         d.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
+        if (m_MSAA) m_MSAA->OverrideTextureDesc(d);
         m_HDRTarget = device->CreateTexture(d);
         rhi::TextureDesc dd;
         dd.format = rhi::Format::D32_FLOAT;
         dd.width = m_Width; dd.height = m_Height;
         dd.usage = rhi::TextureUsage::DepthStencil;
+        if (m_MSAA) m_MSAA->OverrideTextureDesc(dd);  // HDR 深度纹理与颜色纹理相同采样数
         m_HDRDepth = device->CreateTexture(dd);
         rhi::SamplerDesc s; s.minFilter = s.magFilter = rhi::FilterMode::Linear;
         s.addressU = s.addressV = rhi::AddressMode::ClampToEdge;
@@ -283,6 +292,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     lDesc.pushConstantRanges = {lpc};
     lDesc.descriptorSetLayouts = {m_LightingLayout};
     lDesc.debugName = "DeferredLighting";
+    if (m_MSAA) m_MSAA->OverridePSODesc(lDesc);  // 硬件 MSAA 覆盖 PSO sampleCount
     m_LightingPSO = device->CreatePipelineState(lDesc);
     HE_ASSERT(m_LightingPSO, "DeferredPipeline: Lighting PSO failed");
 
@@ -303,6 +313,10 @@ void DeferredPipeline::Shutdown() {
     m_AntiAliasing.reset();
     if (m_FXAA) m_FXAA->Shutdown();
     m_FXAA.reset();
+    if (m_SMAA) m_SMAA->Shutdown();
+    m_SMAA.reset();
+    if (m_MSAA) m_MSAA->Shutdown();
+    m_MSAA.reset();
     m_LDRTarget.reset(); m_LDRSampler.reset(); m_LDRDummyDepth.reset();
     m_HDRTarget.reset(); m_HDRDepth.reset(); m_HDRSampler.reset();
     m_GBufferPSO.reset(); m_LightingPSO.reset();
@@ -360,6 +374,35 @@ void DeferredPipeline::EnableFXAA(bool enable) {
     }
 }
 
+void DeferredPipeline::EnableSMAA(bool enable) {
+    m_SMAAEnabled = enable;
+    if (!enable || !m_Device) return;
+    // 懒初始化：首次 EnableSMAA(true) 时创建 GPU 资源
+    if (!m_SMAA) {
+        m_SMAA = std::make_unique<AA_SMAA>();
+        if (!m_SMAA->Initialize(m_Device, m_Width, m_Height)) {
+            HE_CORE_WARN("DeferredPipeline: AA_SMAA init failed");
+            m_SMAA.reset();
+        }
+    }
+}
+
+void DeferredPipeline::EnableMSAA(bool enable) {
+    // MSAA 需要修改 RT/PSO 采样数，仅在管线初始化前设置有效
+    // 运行时切换需要重建管线（OnResize 路径会应用 OverrideTextureDesc）
+    m_MSAAEnabled = enable;
+    if (!enable || !m_Device) return;
+    if (!m_MSAA) {
+        m_MSAA = std::make_unique<AA_MSAA>();
+        m_MSAA->Initialize(m_Device, m_Width, m_Height);
+    }
+    // 已有设备但管线未初始化：暂存标志，Initialize() 中生效
+    // 已初始化：需重建 HDR 目标才能生效（警告用户）
+    if (m_Ready) {
+        HE_CORE_WARN("DeferredPipeline: MSAA toggled after init — 需重启应用生效");
+    }
+}
+
 void DeferredPipeline::NextFrame() {
     m_CurrentFrameSlot = (m_CurrentFrameSlot + 1) % MAX_FRAMES_IN_FLIGHT;
 }
@@ -383,6 +426,7 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
     if (m_Skybox)  { m_Skybox->Shutdown(); m_Skybox->Initialize(m_Device, w, h); }
     if (m_AntiAliasing) m_AntiAliasing->OnResize(w, h);
     if (m_FXAA) m_FXAA->OnResize(w, h);
+    if (m_SMAA) m_SMAA->OnResize(w, h);    // SMAA 中间纹理随分辨率重建
     m_GBufferCtx.width  = w;
     m_GBufferCtx.height = h;
     m_GBufferCtx.gbA    = m_GBufferA.get();
@@ -799,12 +843,14 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             m_AntiAliasing->Render(c);
         });
 
-    // LDR 管线：ToneMap → [ColorGrading] → [FXAA] → BackBuffer
+    // LDR 管线：ToneMap → [ColorGrading] → [SMAA | FXAA] → BackBuffer
+    // SMAA 与 FXAA 互斥（二选一），均为 LDR 空间后处理抗锯齿终端 Pass
     auto ldrTarget = rg.ImportTexture("LDR", m_LDRTarget.get());
     bool useFXAA  = IsFXAAEnabled();
+    bool useSMAA  = IsSMAAEnabled();                                             // SMAA 互斥选项
     bool useColor = m_ColorGrading.IsEnabled() && m_ColorGrading.GetOutput() != nullptr;
     bool useTAA   = (m_AntiAliasing && m_AntiAliasing->IsEnabled());
-    bool needLDR  = useFXAA || useColor;  // 任一启用就需要 LDR 中间纹理
+    bool needLDR  = useFXAA || useSMAA || useColor;  // 任一启用就需要 LDR 中间纹理
 
     // ToneMap Pass（HDR → LDR，输出到 LDR 或 BackBuffer）
     rg.AddPass("ToneMap",
@@ -842,7 +888,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             }
         });
 
-    // ColorGrading Pass（LDR 色彩分级，ToneMap 之后、FXAA 之前）
+    // ColorGrading Pass（LDR 色彩分级，ToneMap 之后、AA 之前）
     if (useColor) {
         auto cgOut = rg.ImportTexture("CG_Out", m_ColorGrading.GetOutput());
         rg.AddPass("ColorGrading",
@@ -860,8 +906,31 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             });
     }
 
-    // FXAA Pass（LDR 空间后处理抗锯齿，ColorGrading 之后、Present 之前）
-    if (useFXAA) {
+    // SMAA Pass（LDR 空间形态学抗锯齿，ColorGrading 之后、直接写 BackBuffer）
+    // 与 FXAA 互斥：SMAA 启用时跳过后面的 FXAA Pass
+    if (useSMAA) {
+        auto* smaaInput = useColor ? m_ColorGrading.GetOutput() : m_LDRTarget.get();
+        auto* smaaSamp  = useColor ? m_ColorGrading.GetOutputSampler() : m_LDRSampler.get();
+        rg.AddPass("SMAA",
+            {{ldrTarget, ResourceAccess::Read}},
+            {{backBuf, ResourceAccess::Write}},
+            [this, smaaInput, smaaSamp](rhi::IRHICommandList* c) {
+                m_SMAA->SetInput(smaaInput, smaaSamp);
+                // Barrier: 输入纹理 RT → SRV（供 SMAA Pass 1 采样）
+                c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput,
+                                   rhi::PipelineStage::FragmentShader,
+                                   rhi::ResourceState::RenderTarget,
+                                   rhi::ResourceState::ShaderResource, smaaInput);
+                // Pass 1+2（离屏渲染：边缘检测 + 混合权重）
+                m_SMAA->Render(c);
+                // Pass 3（邻域混合 → BackBuffer）
+                c->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
+                m_SMAA->RenderFinalPass(c);
+                c->EndRenderPass();
+            });
+    }
+    // FXAA Pass（LDR 空间后处理抗锯齿，仅 SMAA 未启用时执行）
+    else if (useFXAA) {
         auto* fxaaInput = useColor ? m_ColorGrading.GetOutput() : m_LDRTarget.get();
         auto* fxaaSamp  = useColor ? m_ColorGrading.GetOutputSampler() : m_LDRSampler.get();
         rg.AddPass("FXAA",

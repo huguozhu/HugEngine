@@ -804,6 +804,33 @@ int main() {
                     if (ImGui::SliderFloat("强度##mb", &mi, 0.0f, 2.0f, "%.2f")) mb.SetIntensity(mi);
                     ImGui::Unindent(12.0f);
                 }
+
+                // 硬件 MSAA（HDR 目标多采样，需重启应用生效）
+                ImGui::Spacing();
+                bool msaaOn = pipeline.IsMSAAEnabled();
+                if (ImGui::Checkbox("MSAA 4x (硬件)", &msaaOn)) {
+                    pipeline.EnableMSAA(msaaOn);
+                }
+                if (msaaOn) {
+                    ImGui::SameLine();
+                    ImGui::TextColored({0.5f, 1.0f, 0.5f, 1.0f}, "(重启生效)");
+                }
+
+                // LDR 抗锯齿（SMAA 与 FXAA 互斥二选一，与 MSAA 可叠加）
+                bool smaaOn = pipeline.IsSMAAEnabled();
+                bool fxaaOn = pipeline.IsFXAAEnabled();
+                int ldrAA = smaaOn ? 1 : (fxaaOn ? 2 : 0);
+                if (ImGui::Combo("LDR 抗锯齿", &ldrAA, "关闭\0SMAA\0FXAA\0")) {
+                    pipeline.EnableSMAA(ldrAA == 1);
+                    pipeline.EnableFXAA(ldrAA == 2);
+                }
+                if (ldrAA == 1) {
+                    ImGui::SameLine();
+                    ImGui::TextColored({0.5f, 0.8f, 1.0f, 1.0f}, "(形态学)");
+                } else if (ldrAA == 2) {
+                    ImGui::SameLine();
+                    ImGui::TextColored({1.0f, 0.8f, 0.5f, 1.0f}, "(快速近似)");
+                }
             }
 
             // 光源

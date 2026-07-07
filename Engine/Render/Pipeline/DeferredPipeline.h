@@ -35,6 +35,8 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "Scene/SceneGraph.h"
 #include "AntiAliasing/AntiAliasing.h"
 #include "AntiAliasing/AA_FXAA.h"
+#include "AntiAliasing/AA_SMAA.h"
+#include "AntiAliasing/AA_MSAA.h"
 
 #include <memory>
 #include <vector>
@@ -91,6 +93,14 @@ public:
 
     void EnableFXAA(bool enable);
     bool IsFXAAEnabled() const                 { return m_FXAAEnabled && m_FXAA != nullptr; }
+
+    void EnableSMAA(bool enable);                                                   // SMAA 懒初始化
+    bool IsSMAAEnabled() const                 { return m_SMAAEnabled && m_SMAA != nullptr && m_SMAA->IsReady(); }
+    AA_SMAA* GetSMAA()                         { return m_SMAA.get(); }
+
+    void EnableMSAA(bool enable);                                                   // MSAA 懒初始化
+    bool IsMSAAEnabled() const                 { return m_MSAAEnabled && m_MSAA != nullptr && m_MSAA->IsReady(); }
+    AA_MSAA* GetMSAA()                         { return m_MSAA.get(); }
 
     rhi::IRHIBuffer* GetCurrentObjectBuffer()  { return m_ObjectBuffers[m_CurrentFrameSlot].get(); }
     rhi::IRHIBuffer* GetCurrentShadowBuffer()  { return m_ShadowBuffers[m_CurrentFrameSlot].get(); }
@@ -158,6 +168,14 @@ private:
     // FXAA（LDR 空间后处理抗锯齿，可单独使用或与 TAA 叠加）
     std::unique_ptr<AA_FXAA> m_FXAA;
     bool m_FXAAEnabled = false;
+
+    // SMAA（LDR 空间形态学抗锯齿，与 FXAA 互斥二选一）
+    std::unique_ptr<AA_SMAA> m_SMAA;
+    bool m_SMAAEnabled = false;
+
+    // MSAA（硬件多重采样，覆盖 RT/PSO 的 sampleCount，无需独立 Pass）
+    std::unique_ptr<AA_MSAA> m_MSAA;
+    bool m_MSAAEnabled = false;
 
     // Clustered Shading
     ClusteredShading m_ClusteredShading;

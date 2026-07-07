@@ -78,6 +78,9 @@ target_sources(HugEngineRender PRIVATE
     AntiAliasing/AA_TAA.cpp
     AntiAliasing/AA_FXAA.h
     AntiAliasing/AA_FXAA.cpp
+    AntiAliasing/AA_SMAA.h
+    AntiAliasing/AA_SMAA.cpp
+    AntiAliasing/AA_MSAA.h
     # ShaderHotReload
     ShaderHotReload.h
     ShaderHotReload.cpp
