@@ -89,9 +89,9 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     bool hasColor = (desc.colorAttachmentCount > 0);
     bool hasDepth = (desc.depthFormat != Format::Unknown);
 
-    // 构建颜色附件（支持 MRT：最多 4 个）
-    VkAttachmentDescription colorAttachments[4]{};
-    VkAttachmentReference   colorRefs[4]{};
+    // 构建颜色附件（支持 MRT：最多 8 个）
+    VkAttachmentDescription colorAttachments[8]{};
+    VkAttachmentReference   colorRefs[8]{};
     for (u32 c = 0; c < desc.colorAttachmentCount; ++c) {
         colorAttachments[c].format        = ToVkFormat(desc.colorFormats[c]);
         colorAttachments[c].samples       = VK_SAMPLE_COUNT_1_BIT;
@@ -127,7 +127,7 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     subpass.pDepthStencilAttachment = hasDepth ? &depthRef : nullptr;
 
     // 构建附件数组：颜色在前 [0..N-1]，深度在 [N]
-    VkAttachmentDescription attachments[5];  // 最多 4 颜色 + 1 深度
+    VkAttachmentDescription attachments[9];  // 最多 8 颜色 + 1 深度
     u32 attachmentCount = 0;
     for (u32 c = 0; c < desc.colorAttachmentCount; ++c)
         attachments[attachmentCount++] = colorAttachments[c];
@@ -238,7 +238,7 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     depthStencil.depthBoundsTestEnable = VK_FALSE;
     depthStencil.stencilTestEnable     = VK_FALSE;
 
-    VkPipelineColorBlendAttachmentState blendAttachments[4]{};
+    VkPipelineColorBlendAttachmentState blendAttachments[8]{};  // 支持最多 8 个 MRT
     for (u32 c = 0; c < desc.colorAttachmentCount; ++c) {
         blendAttachments[c].colorWriteMask =
             VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |

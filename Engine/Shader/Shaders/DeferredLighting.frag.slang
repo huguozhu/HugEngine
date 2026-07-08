@@ -13,6 +13,7 @@ struct VSOutput {
 [[vk::binding(1, 0)]] Texture2D<float4> u_GBufferB;  // normal*0.5+0.5 + roughness
 [[vk::binding(2, 0)]] Texture2D<float4> u_GBufferC;  // emissive.rgb + ao
 [[vk::binding(3, 0)]] Texture2D<float>  u_Depth;
+[[vk::binding(23, 0)]] Texture2D<float4> u_GBufferE;  // worldPos.xyz（GBuffer MRT4 直接读取）
 
 // Shadow + IBL + RSM (复用 Forward PBR 绑定)
 [[vk::binding(4, 0)]] Texture2D<float>  u_ShadowMap0;
@@ -42,8 +43,8 @@ struct LightGridCell { uint offset; uint count; };
 [[vk::binding(8, 0)]]  StructuredBuffer<uint>          u_LightIndexList;  // 扁平光源索引数组
 
 // Cluster 网格参数（push constant 传入）
+// worldPos 由 GBuffer MRT4 直接读取，无需 Camera invViewProj
 [[vk::push_constant]] cbuffer LightingPC {
-    float4x4 invViewProj;
     float4   cameraPosition;
     uint     lightCount;
     float    iblIntensity;
@@ -53,7 +54,7 @@ struct LightGridCell { uint offset; uint count; };
     float    clusterFar;        // 远裁剪面
     float    clusterLogFactor;  // log(far/near) 用于计算 Z slice
     uint     useClustered;      // 是否启用 clustered shading
-    uint     _pad2[2];
+    uint     _pad[3];
 };
 
 static const float kPrefilterMips = 5.0;
@@ -139,10 +140,10 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
     float2 uv = input.uv;
 
     // 1. 反算世界坐标
-    float depth = u_Depth.Sample(u_GBufferSampler, uv).r;
-    float4 clipPos = float4(uv * 2.0 - 1.0, depth, 1.0);
-    float4 worldPos4 = mul(invViewProj, clipPos);
-    float3 worldPos  = worldPos4.xyz / worldPos4.w;
+    // 1. 世界坐标直接从 GBuffer MRT4 读取（无需 Camera 矩阵，避免视角耦合）
+    float3 worldPos = u_GBufferE.Sample(u_GBufferSampler, uv).xyz;
+    // 深度仅用于 Clustered Shading 的 Z-slice 计算（非世界坐标重建）
+    float  depth    = u_Depth.Sample(u_GBufferSampler, uv).r;
 
     // 2. 读取 GBuffer
     float4 gbA = u_GBufferA.Sample(u_GBufferSampler, uv);

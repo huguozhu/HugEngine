@@ -23,8 +23,9 @@ struct GBufferContext {
     rhi::IRHITexture* gbA     = nullptr;
     rhi::IRHITexture* gbB     = nullptr;
     rhi::IRHITexture* gbC     = nullptr;
-    rhi::IRHITexture* gbVel   = nullptr;
-    rhi::IRHITexture* gbDepth = nullptr;
+    rhi::IRHITexture* gbVel      = nullptr;
+    rhi::IRHITexture* gbDepth    = nullptr;
+    rhi::IRHITexture* gbWorldPos = nullptr;  // MRT4: worldPos.xyz（RGBA16_FLOAT）
 
     // PSO + DescriptorSet
     rhi::IRHIPipelineState* pso     = nullptr;

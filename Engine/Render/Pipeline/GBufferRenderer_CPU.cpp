@@ -30,15 +30,16 @@ void GBufferRenderer_CPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
     cmd->SetPipeline(ctx.pso);
     cmd->BindDescriptorSet(0, ctx.descSet);
 
-    // 清除值（4 颜色 MRT + 深度）
-    rhi::ClearValue clears[5]{};
+    // 清除值（5 颜色 MRT + 深度）
+    rhi::ClearValue clears[6]{};
     clears[0].color[3] = 1.0f; clears[1].color[3] = 1.0f;
     clears[2].color[3] = 1.0f; clears[3].color[0] = 0.0f; // velocity=0
-    clears[3].color[1] = 0.0f; clears[4].depth = 1.0f;
+    clears[3].color[1] = 0.0f; clears[5].depth = 1.0f;
 
-    void* cv[4] = { ctx.gbA->GetNativeHandle(), ctx.gbB->GetNativeHandle(),
-                    ctx.gbC->GetNativeHandle(), ctx.gbVel->GetNativeHandle() };
-    cmd->BeginOffscreenPassMRT(cv, 4, ctx.gbDepth->GetNativeHandle(), w, h, clears, false);
+    void* cv[5] = { ctx.gbA->GetNativeHandle(), ctx.gbB->GetNativeHandle(),
+                    ctx.gbC->GetNativeHandle(), ctx.gbVel->GetNativeHandle(),
+                    ctx.gbWorldPos->GetNativeHandle() };
+    cmd->BeginOffscreenPassMRT(cv, 5, ctx.gbDepth->GetNativeHandle(), w, h, clears, false);
     cmd->SetViewport({0, (float)h, (float)w, -(float)h, 0, 1});
     cmd->SetScissor({0, 0, w, h});
 

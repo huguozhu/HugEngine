@@ -57,6 +57,9 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         m_GBufferD = device->CreateTexture(d);
     }
 
+    // GBuffer E: worldPos.xyz（RGBA16_FLOAT，Lighting pass 直接读取）
+    m_GBufferE = createGBuffer("GBufferE");
+
     // 硬件 MSAA：覆盖纹理和 PSO 的 sampleCount
     if (m_MSAAEnabled) {
         m_MSAA = std::make_unique<AA_MSAA>();
@@ -181,9 +184,10 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     gbDesc.vertexLayout = vl;
     gbDesc.depthTest = true; gbDesc.depthWrite = true;
     gbDesc.depthFormat = rhi::Format::D32_FLOAT;
-    gbDesc.colorAttachmentCount = 4;
+    gbDesc.colorAttachmentCount = 5;
     gbDesc.colorFormats[0] = gbDesc.colorFormats[1] = gbDesc.colorFormats[2] = rhi::Format::RGBA16_FLOAT;
     gbDesc.colorFormats[3] = rhi::Format::RG16_FLOAT;  // velocity
+    gbDesc.colorFormats[4] = rhi::Format::RGBA16_FLOAT; // worldPos.xyz
     gbDesc.pushConstantRanges = {pc};
     gbDesc.descriptorSetLayouts = {m_GBufferLayout};  // 仅 set=0，无 per-mesh
     gbDesc.debugName = "GBuffer";
@@ -226,6 +230,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     m_GBufferCtx.gbC          = m_GBufferC.get();
     m_GBufferCtx.gbVel        = m_GBufferD.get();
     m_GBufferCtx.gbDepth      = m_GBufferDepth.get();
+    m_GBufferCtx.gbWorldPos   = m_GBufferE.get();
     m_GBufferCtx.pso          = m_GBufferPSO.get();
     m_GBufferCtx.descSet      = m_GBufferSet;
     m_GBufferCtx.sceneRenderer = m_SceneRenderer.get();
@@ -253,6 +258,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         {1, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // GBufferB
         {2, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // GBufferC
         {3, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // Depth
+        {23, rhi::DescriptorType::CombinedImageSampler, 1, 16}, // GBufferE (worldPos)
         {4, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // Shadow0 (CSM0)
         {7, rhi::DescriptorType::StorageBuffer, 1, 16},  // LightGrid (Clustered)
         {8, rhi::DescriptorType::StorageBuffer, 1, 16},  // LightIndexList (Clustered)
@@ -282,7 +288,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         sd.addressU=sd.addressV=rhi::AddressMode::ClampToEdge;
         auto ps = device->CreateSampler(sd);
         // 只更新 layout 中声明的 binding（0-4, 9-16）
-        for (u32 b : {0u,1u,2u,3u,4u,9u,10u,11u,12u,13u,14u,15u,16u})
+        for (u32 b : {0u,1u,2u,3u,4u,9u,10u,11u,12u,13u,14u,15u,16u,23u})
             device->UpdateDescriptorSet(m_LightingSet, b, rhi::DescriptorType::CombinedImageSampler, pt.get(), ps.get());
         // Cluster SSBO 占位（binding 7/8）
         rhi::BufferDesc gd; gd.size=16; gd.usage=rhi::BufferUsage::Storage;
@@ -319,7 +325,7 @@ void DeferredPipeline::Shutdown() {
     if (m_GBufferLayout != rhi::kInvalidLayout) { m_Device->DestroyDescriptorSetLayout(m_GBufferLayout); }
     if (m_LightingLayout != rhi::kInvalidLayout) { m_Device->DestroyDescriptorSetLayout(m_LightingLayout); }
     m_GBufferA.reset(); m_GBufferB.reset(); m_GBufferC.reset(); m_GBufferDepth.reset();
-    m_GBufferD.reset();
+    m_GBufferD.reset(); m_GBufferE.reset();
     if (m_AntiAliasing) m_AntiAliasing->Shutdown();
     m_AntiAliasing.reset();
     if (m_FXAA) m_FXAA->Shutdown();
@@ -430,6 +436,7 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
     r(m_GBufferB, rhi::Format::RGBA16_FLOAT, rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource);
     r(m_GBufferC, rhi::Format::RGBA16_FLOAT, rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource);
     r(m_GBufferD, rhi::Format::RG16_FLOAT, rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource);
+    r(m_GBufferE, rhi::Format::RGBA16_FLOAT, rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource);
     r(m_GBufferDepth, rhi::Format::D32_FLOAT, rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource);
     r(m_HDRTarget, rhi::Format::RGBA16_FLOAT, rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource);
     r(m_HDRDepth, rhi::Format::D32_FLOAT, rhi::TextureUsage::DepthStencil);
@@ -443,8 +450,9 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
     m_GBufferCtx.gbA    = m_GBufferA.get();
     m_GBufferCtx.gbB    = m_GBufferB.get();
     m_GBufferCtx.gbC    = m_GBufferC.get();
-    m_GBufferCtx.gbVel  = m_GBufferD.get();
-    m_GBufferCtx.gbDepth = m_GBufferDepth.get();
+    m_GBufferCtx.gbVel      = m_GBufferD.get();
+    m_GBufferCtx.gbDepth    = m_GBufferDepth.get();
+    m_GBufferCtx.gbWorldPos = m_GBufferE.get();
     // 重建 LDR 中间纹理
     {
         rhi::TextureDesc d; d.format = rhi::Format::BGRA8_UNORM;
@@ -531,6 +539,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     auto gbC = rg.ImportTexture("GB_C", m_GBufferC.get());
     auto gbDepth = rg.ImportTexture("GB_Depth", m_GBufferDepth.get());
     auto gbVel = rg.ImportTexture("GB_Vel", m_GBufferD.get());
+    auto gbWorldPos = rg.ImportTexture("GB_WorldPos", m_GBufferE.get());
     auto hdrC = rg.ImportTexture("HDR_C", m_HDRTarget.get());
     auto backBuf = rg.ImportBackBuffer();
 
@@ -611,8 +620,9 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 shadowWrites.push_back(RG_WRITE(csmMaps[c]));
         if (spotShadowHandle != kInvalidHandle)
             shadowWrites.push_back(RG_WRITE(spotShadowHandle));
-        // WAW 假依赖：写入 gbDepth 确保 Shadow → GB_Clear 执行顺序
+        // WAW 假依赖：写入 gbDepth/gbWorldPos 确保 Shadow → GB_Clear 执行顺序
         shadowWrites.push_back(RG_WRITE(gbDepth));
+        shadowWrites.push_back(RG_WRITE(gbWorldPos));
 
         rg.AddPass("Shadow", {}, std::move(shadowWrites),
             [this](rhi::IRHICommandList* c) {
@@ -633,7 +643,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
 
     // GBuffer 4×MRT + 绘制（委托给 IGBufferRenderer，支持 CPU/GPU 双模式）
     rg.AddPass("GB_Clear", {}, {{gbA, ResourceAccess::Write}, {gbB, ResourceAccess::Write},
-        {gbC, ResourceAccess::Write}, {gbVel, ResourceAccess::Write}, {gbDepth, ResourceAccess::Write}},
+        {gbC, ResourceAccess::Write}, {gbVel, ResourceAccess::Write}, {gbWorldPos, ResourceAccess::Write},
+        {gbDepth, ResourceAccess::Write}},
         [&](rhi::IRHICommandList* c) {
             // 更新运行时 context
             m_GBufferCtx.objectBuffer = m_ObjectBuffers[m_CurrentFrameSlot].get();
@@ -734,8 +745,10 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         });
 
     // Lighting Pass (全屏 PBR + 降噪后 SSGI/SSR/DDGI 读取)
+    // worldPos 直接从 GBuffer MRT4 读取，不再需要 Camera invViewProj 做深度重建
     rg.AddPass("Lighting",
         {{gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbC, ResourceAccess::Read},
+         {gbWorldPos, ResourceAccess::Read},
          {ssgiDenoised, ResourceAccess::Read},
          {ssrDenoised, ResourceAccess::Read}},
         {{hdrC, ResourceAccess::Write}},
@@ -744,8 +757,10 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 rhi::ResourceState::DepthStencilWrite, rhi::ResourceState::DepthStencilRead, m_GBufferDepth.get());
             auto bindTex = [&](u32 b, rhi::IRHITexture* t) { if(t) m_Device->UpdateDescriptorSet(m_LightingSet, b, rhi::DescriptorType::CombinedImageSampler, t, m_HDRSampler.get()); };
             bindTex(0, m_GBufferA.get()); bindTex(1, m_GBufferB.get()); bindTex(2, m_GBufferC.get());
+            // GBufferE: worldPos.xyz（直接从 GBuffer 读取世界坐标，无需 invViewProj 重建）
+            m_Device->UpdateDescriptorSet(m_LightingSet, 23, rhi::DescriptorType::CombinedImageSampler,
+                m_GBufferE.get(), m_PointSampler.get());
             // 深度缓冲区使用点采样（Nearest），避免 Linear 插值在物体边缘混合背景深度
-            // → 导致 worldPos 重建错误 → 点/聚光灯光照随 Camera 视角变化
             m_Device->UpdateDescriptorSet(m_LightingSet, 3, rhi::DescriptorType::CombinedImageSampler,
                 m_GBufferDepth.get(), m_PointSampler.get());
             if (m_ShadowSystem && m_ShadowSystem->GetShadowMap(0))
@@ -811,7 +826,6 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             // Push constant: 使用 ShaderTypes.slang 统一定义的 DeferredLightingPushConstant
             DeferredLightingPushConstant lpc{};
             float iblIntensity = m_GI ? m_GI->GetSettings().intensity : 1.0f;
-            lpc.invViewProj     = ivp;
             lpc.cameraPosition  = float4(camera.position, 0);
             lpc.iblIntensity    = iblIntensity;
             lpc.lightCount      = fpc.lightCount;

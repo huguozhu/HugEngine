@@ -125,6 +125,8 @@ private:
     std::unique_ptr<rhi::IRHITexture> m_GBufferA, m_GBufferB, m_GBufferC;
     // GBuffer 第 4 张 MRT：velocity（RG16_FLOAT，UV 空间运动矢量）
     std::unique_ptr<rhi::IRHITexture> m_GBufferD;
+    // GBuffer 第 5 张 MRT：worldPos.xyz（RGBA16_FLOAT，Lighting pass 直接读取，无需 invViewProj）
+    std::unique_ptr<rhi::IRHITexture> m_GBufferE;
     std::unique_ptr<rhi::IRHITexture> m_GBufferDepth;
     std::unique_ptr<rhi::IRHIPipelineState> m_GBufferPSO;
     rhi::DescriptorSetLayoutHandle m_GBufferLayout = rhi::kInvalidLayout;   // set=0: per-frame + bindless

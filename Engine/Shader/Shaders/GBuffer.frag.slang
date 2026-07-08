@@ -34,6 +34,7 @@ struct FSOutput {
     [[vk::location(1)]] float4 normalRoughness : SV_Target1;
     [[vk::location(2)]] float4 emissiveAO      : SV_Target2;
     [[vk::location(3)]] float2 velocity         : SV_Target3;  // UV 空间运动矢量
+    [[vk::location(4)]] float4 worldPos         : SV_Target4;  // 世界坐标（Lighting pass 直接读取）
 };
 
 FSOutput fragmentMain(VSOutput input) {
@@ -69,5 +70,6 @@ FSOutput fragmentMain(VSOutput input) {
     output.normalRoughness = float4(N * 0.5 + 0.5, roughness);
     output.emissiveAO      = float4(obj.emissiveFactor.rgb, ao);
     output.velocity        = motion;
+    output.worldPos        = float4(input.worldPos, 0.0);  // 世界坐标存入 GBuffer
     return output;
 }

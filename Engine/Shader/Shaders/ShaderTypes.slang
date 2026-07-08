@@ -94,19 +94,19 @@ GPU_STRUCT GBufferPushConstant {
     GPU_UINT _pad[14];              // [136..192] 填充到 192B
 };
 
-// --- DeferredLightingPushConstant: 延迟光照 Push Constant（128 字节）---
+// --- DeferredLightingPushConstant: 延迟光照 Push Constant（64 字节）---
+// 注意：worldPos 直接从 GBuffer MRT4 读取，不再需要 Camera invViewProj 做深度重建
 GPU_STRUCT DeferredLightingPushConstant {
-    float4x4 invViewProj;           // [0..64]   相机逆 VP（深度→世界坐标重建）
-    float4   cameraPosition;        // [64..80]  相机世界位置
-    GPU_UINT lightCount;            // [80]
-    float    iblIntensity;          // [84]      IBL 环境光强度
-    GPU_UINT clusterTilesX;         // [88]      Clustered shading X tile 数
-    GPU_UINT clusterTilesY;         // [92]      Clustered shading Y tile 数
-    float    clusterNear;           // [96]      近裁剪面
-    float    clusterFar;            // [100]     远裁剪面
-    float    clusterLogFactor;      // [104]     log(far/near)
-    GPU_UINT useClustered;          // [108]     1=启用 Clustered Shading
-    GPU_UINT _pad[4];               // [112..128] 对齐到 128B
+    float4   cameraPosition;        // [0..16]   相机世界位置（仅用于 V 方向计算）
+    GPU_UINT lightCount;            // [16]
+    float    iblIntensity;          // [20]      IBL 环境光强度
+    GPU_UINT clusterTilesX;         // [24]      Clustered shading X tile 数
+    GPU_UINT clusterTilesY;         // [28]      Clustered shading Y tile 数
+    float    clusterNear;           // [32]      近裁剪面
+    float    clusterFar;            // [36]      远裁剪面
+    float    clusterLogFactor;      // [40]      log(far/near)
+    GPU_UINT useClustered;          // [44]      1=启用 Clustered Shading
+    GPU_UINT _pad[4];               // [48..64]  对齐到 64B
 };
 
 // ---- 清理宏 ----
