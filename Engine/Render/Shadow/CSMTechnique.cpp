@@ -18,15 +18,34 @@
 namespace he::render {
 
 float4x4 CSMTechnique::ComputeCascadeViewProj(const float3& ld,const CameraData& cam,float sn,float sf){
+    // 计算相机视锥体的级联子视锥体 8 个角点（世界空间）
     float3 f=glm::normalize(cam.forward),r=glm::normalize(glm::cross(f,cam.up)),u=glm::cross(r,f);
-    float th=glm::tan(glm::radians(cam.fov)*.5f),fh=th*sf,fw=fh*cam.aspectRatio;
-    float3 fc=cam.position+f*sf;
-    float3 sc[4]={{fc-r*fw-u*fh},{fc+r*fw-u*fh},{fc-r*fw+u*fh},{fc+r*fw+u*fh}};
-    float3 scn(0,400,0);
+    float th=glm::tan(glm::radians(cam.fov)*.5f);
+    float fh_near=th*sn, fw_near=fh_near*cam.aspectRatio;  // 近平面半高/半宽
+    float fh_far =th*sf, fw_far =fh_far *cam.aspectRatio;  // 远平面半高/半宽
+    float3 nc=cam.position+f*sn;  // 近平面中心
+    float3 fc=cam.position+f*sf;  // 远平面中心
+
+    // 8 个视锥体角点
+    float3 corners[8]={
+        nc-r*fw_near-u*fh_near, nc+r*fw_near-u*fh_near,
+        nc-r*fw_near+u*fh_near, nc+r*fw_near+u*fh_near,
+        fc-r*fw_far -u*fh_far,  fc+r*fw_far -u*fh_far,
+        fc-r*fw_far +u*fh_far,  fc+r*fw_far +u*fh_far,
+    };
+
+    // 场景中心 = 视锥体角点平均值（动态计算，替代硬编码）
+    float3 scn=float3(0,0,0);
+    for(int i=0;i<8;++i) scn+=corners[i];
+    scn/=8.0f;
+
+    // 光源视图矩阵：从光源方向观察场景中心
     float3 lu=(abs(ld.y)<.999f)?float3(0,1,0):float3(1,0,0);
     float4x4 lv=glm::lookAtRH(scn-ld*4000.f,scn,lu);
+
+    // 将所有角点变换到光源视图空间，计算包围盒
     float mnX=FLT_MAX,mxX=-FLT_MAX,mnY=FLT_MAX,mxY=-FLT_MAX;
-    for(auto&c:sc){float4 ls=lv*float4(c,1.f);mnX=glm::min(mnX,ls.x);mxX=glm::max(mxX,ls.x);mnY=glm::min(mnY,ls.y);mxY=glm::max(mxY,ls.y);}
+    for(auto&c:corners){float4 ls=lv*float4(c,1.f);mnX=glm::min(mnX,ls.x);mxX=glm::max(mxX,ls.x);mnY=glm::min(mnY,ls.y);mxY=glm::max(mxY,ls.y);}
     float h=glm::max(glm::max(-mnX,mxX),glm::max(-mnY,mxY));h=glm::max(h,200.f);
     return glm::orthoRH_ZO(-h,h,-h,h,.1f,8000.f)*lv;
 }
