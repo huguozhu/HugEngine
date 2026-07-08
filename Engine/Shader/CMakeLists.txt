@@ -5,6 +5,7 @@ add_library(HugEngineShader INTERFACE)
 
 target_include_directories(HugEngineShader INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/Public
+    ${CMAKE_CURRENT_SOURCE_DIR}/Shaders   # ShaderTypes.slang 等 C++/Slang 共享头文件
     ${CMAKE_CURRENT_BINARY_DIR}
     ${CMAKE_CURRENT_BINARY_DIR}/Shaders
 )

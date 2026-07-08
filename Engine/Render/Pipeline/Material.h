@@ -4,7 +4,10 @@
 #include "Math/Math.h"
 
 // ============================================================
-// Material.h — glTF 2.0 PBR 材质 + Light + Push Constant
+// Material.h — glTF 2.0 PBR 材质 + GPU 共享结构体引用
+//
+// GPU 结构体定义统一在 ShaderTypes.slang（C++/Slang 共用），
+// 此文件仅保留 CPU 端材质类型和常量。
 // ============================================================
 
 namespace he::render {
@@ -25,85 +28,25 @@ enum MaterialFlags : u32 {
 };
 
 // ============================================================
-// GPU Light 结构（Storage Buffer 上传，glsl std430 对齐）
-// 每灯光 64 字节，最多 MAX_LIGHTS（8）个
+// GPU 常量
 // ============================================================
 static constexpr u32 MAX_LIGHTS          = 8;
-static constexpr u32 MAX_SHADOWS         = 4;   // 最多 4 个投射阴影的光源
-static constexpr u32 MAX_FRAMES_IN_FLIGHT = 3;  // 三缓冲帧环
-
-// CSM 级联数
-static constexpr u32 CASCADE_COUNT = 3;
-
-// --- GPU 阴影数据（Storage Buffer，每个阴影投射光源一条）---
-// CSM: 3 级联 lightViewProj + 4 分割深度
-struct alignas(16) GPUShadowData {
-    float4x4 lightViewProj[CASCADE_COUNT];  // [0..192] 方向光 CSM 级联矩阵
-    float4   shadowParams;    // [192..208] x=bias, y=normalBias, z=strength, w=类型
-    float4   splitDistances;  // [208..224] CSM 分割点
-    float4   cameraForward;   // [224..240] 相机前向(级联选择)
-    float4   pointLightData;  // [240..256] xyz=点光位置, w=范围
-};
-static_assert(sizeof(GPUShadowData) == 256, "GPUShadowData must be 256 bytes");
-
-struct alignas(16) GPULight {
-    float4 colorIntensity;    // xyz=颜色, w=强度
-    float4 directionType;     // xyz=方向, w=类型 (0=Dir,1=Point,2=Spot)
-    float4 positionRange;     // xyz=位置, w=范围
-    float2 coneAngles;        // x=内锥角, y=外锥角 (Spot 专用)
-    i32    shadowIndex;       // -1=无阴影, >=0 指向 u_ShadowData 数组
-    i32    _pad;
-};
-
-static_assert(sizeof(GPULight) == 64, "GPULight must be 64 bytes");
+static constexpr u32 MAX_SHADOWS         = 4;
+static constexpr u32 MAX_FRAMES_IN_FLIGHT = 3;
+static constexpr u32 MAX_OBJECTS          = 1024;
+static constexpr u32 CASCADE_COUNT        = 3;
 
 // ============================================================
-// GPU 对象数据（Storage Buffer，每物体 128 字节）
-// Shader 通过 objectIndex 索引，替代 PushConstant 传递
+// GPU 结构体 — 来自 ShaderTypes.slang（C++/Slang 共享定义）
+// 修改布局时请编辑 ShaderTypes.slang，两边自动同步
 // ============================================================
-static constexpr u32 MAX_OBJECTS = 1024;
+#include "ShaderTypes.slang"
 
-struct alignas(16) GPUObjectData {
-    float4x4 worldMatrix;           // [0..64]   世界矩阵
-    float4   baseColorFactor;       // [64..80]  基础色
-    float4   emissiveFactor;        // [80..96]  自发光
-    float    metallicFactor;        // [96]
-    float    roughnessFactor;       // [100]
-    float    aoFactor;              // [104]
-    float    alphaCutoff;           // [108]
-    u32      materialFlags;         // [112]
-    u32      materialID;            // [116]     bindless 纹理索引
-    u32      _pad[2];               // [120..128] 对齐
-};
-static_assert(sizeof(GPUObjectData) == 128, "GPUObjectData must be 128 bytes");
-
-// ============================================================
-// Push Constant 数据（帧级数据，约 96 字节）
-// 光照数据已移至 Storage Buffer（Descriptor Set）
-// ============================================================
-struct alignas(16) PushConstantData {
-    float4x4 viewProjMatrix;        // [0..64]
-    float4   cameraPosition;        // [64..80]
-    u32      lightCount;            // [80]
-    u32      objectIndex;           // [84]
-    u32      useInstanceID;         // [88] 1=ExecuteIndirect 从 SV_InstanceID 读 objectIndex
-    float    iblIntensity;          // [92]
-    u32      _pad;                  // [96]
-};
-
-static_assert(sizeof(PushConstantData) == 112,
-    "PushConstantData must be 96 bytes");
-
-// CSM 级联选择用的 cameraForward 移至 GPUShadowData.shadowParams.w
-
-// ============================================================
-// 阴影通道 Push Constant（阴影 VS 使用）
-// ============================================================
-struct alignas(16) ShadowPushConstant {
-    float4x4 lightViewProj;   // 光照裁剪矩阵
-    u32      objectIndex;     // GPU 对象索引
-    u32      _pad[3];         // 对齐到 80 字节
-};
+// 尺寸验证（保持与 ShaderTypes.slang 一致）
+static_assert(sizeof(GPUShadowData)   == 256, "GPUShadowData must be 256 bytes");
+static_assert(sizeof(GPULight)        == 64,  "GPULight must be 64 bytes");
+static_assert(sizeof(GPUObjectData)   == 128, "GPUObjectData must be 128 bytes");
+static_assert(sizeof(PushConstantData) == 112, "PushConstantData must be 112 bytes");
 static_assert(sizeof(ShadowPushConstant) == 80, "ShadowPushConstant must be 80 bytes");
 
 // ============================================================

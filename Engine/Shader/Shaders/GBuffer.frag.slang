@@ -14,18 +14,7 @@ struct VSOutput {
     [[vk::location(3)]] float4 prevClipPos;
 };
 
-struct GPUObjectData {
-    float4x4 worldMatrix;
-    float4   baseColorFactor;
-    float4   emissiveFactor;
-    float    metallicFactor;
-    float    roughnessFactor;
-    float    aoFactor;
-    float    alphaCutoff;
-    uint     materialFlags;
-    uint     materialID;
-    uint     _pad[2];
-};
+// GPUObjectData 定义来自 ShaderTypes.slang（C++/Slang 共享）
 
 // set=0: per-frame data (u_Objects + bindless textures)
 [[vk::binding(2, 0)]] StructuredBuffer<GPUObjectData> u_Objects;

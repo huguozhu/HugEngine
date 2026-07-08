@@ -5,6 +5,7 @@
 // MRT 1: RGBA16_FLOAT — worldNormal.xyz + flux
 // 通量 = albedo * lightColor * max(NdotL, 0)（Lambertian 一次反射）
 // ============================================================
+#include "ShaderTypes.slang"  // GPULight 共享定义
 
 struct VSOutput {
     float4 position              : SV_Position;
@@ -17,15 +18,7 @@ struct FSOutput {
     [[vk::location(1)]] float4 normalAndFlux : SV_Target1;
 };
 
-// 灯光数据（与 PBR 共用 set=0 binding=1）
-struct GPULight {
-    float4 colorIntensity;
-    float4 directionType;
-    float4 positionRange;
-    float2 coneAngles;
-    int    shadowIndex;
-    int    _padLight;
-};
+// GPULight 定义来自 ShaderTypes.slang（C++/Slang 共享）
 
 [[vk::binding(1, 0)]] StructuredBuffer<GPULight> u_Lights;
 

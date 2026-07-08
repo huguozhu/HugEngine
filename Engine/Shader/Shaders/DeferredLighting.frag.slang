@@ -27,22 +27,7 @@ struct VSOutput {
 [[vk::binding(15, 0)]] Texture2D<float4>   u_RSMPositionMap;
 [[vk::binding(16, 0)]] Texture2D<float4>   u_RSMFluxMap;
 
-// GPU 数据结构（与 PBR.frag.slang 一致）
-struct GPULight {
-    float4 colorIntensity;
-    float4 directionType;
-    float4 positionRange;
-    float2 coneAngles;
-    int    shadowIndex;
-    int    _padLight;
-};
-struct GPUShadowData {
-    float4x4 lightViewProj[3];
-    float4   shadowParams;
-    float4   splitDistances;
-    float4   cameraForward;
-    float4   pointLightData;
-};
+// GPULight / GPUShadowData 定义来自 ShaderTypes.slang（C++/Slang 共享）
 
 [[vk::binding(17, 0)]] StructuredBuffer<GPULight>      u_Lights;
 [[vk::binding(18, 0)]] StructuredBuffer<GPUShadowData> u_ShadowData;

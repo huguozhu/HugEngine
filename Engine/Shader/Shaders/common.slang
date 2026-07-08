@@ -4,6 +4,8 @@
 #ifndef HUGENGINE_COMMON_SLANG
 #define HUGENGINE_COMMON_SLANG
 
+#include "ShaderTypes.slang"  // GPU struct 共享定义（GPUObjectData 等）
+
 static const float HE_PI      = 3.14159265359;
 static const float HE_2PI     = 6.28318530718;
 static const float HE_HALF_PI = 1.57079632679;

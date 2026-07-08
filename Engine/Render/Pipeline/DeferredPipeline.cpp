@@ -808,18 +808,20 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             c->BeginOffscreenPass(m_HDRTarget->GetNativeHandle(), m_HDRDepth->GetNativeHandle(), w, h, &clr, false);
             c->SetViewport({0,(float)h,(float)w,-(float)h,0,1});
             c->SetScissor({0,0,w,h});
-            // Push constant: 含 cluster 网格参数 + 开关
-            struct { float4x4 ivp; float4 cp; u32 lc; float ii;
-                     u32 cTx; u32 cTy; float cNear; float cFar; float cLogF;
-                     u32 cUse; u32 _pad2[2]; } lpc;
-            // IBL 强度从 GI 子系统获取（默认 1.0），避免硬编码 0 导致环境光全黑
+            // Push constant: 使用 ShaderTypes.slang 统一定义的 DeferredLightingPushConstant
+            DeferredLightingPushConstant lpc{};
             float iblIntensity = m_GI ? m_GI->GetSettings().intensity : 1.0f;
-            lpc.ivp = ivp; lpc.cp = float4(camera.position, 0); lpc.ii = iblIntensity; lpc.lc = fpc.lightCount;
-            lpc.cUse = useClustered;
-            lpc.cTx = useClustered ? m_ClusteredShading.GetTileCountX() : 0u;
-            lpc.cTy = useClustered ? m_ClusteredShading.GetTileCountY() : 0u;
+            lpc.invViewProj     = ivp;
+            lpc.cameraPosition  = float4(camera.position, 0);
+            lpc.iblIntensity    = iblIntensity;
+            lpc.lightCount      = fpc.lightCount;
+            lpc.useClustered    = useClustered;
+            lpc.clusterTilesX   = useClustered ? m_ClusteredShading.GetTileCountX() : 0u;
+            lpc.clusterTilesY   = useClustered ? m_ClusteredShading.GetTileCountY() : 0u;
             float n = camera.nearPlane, f = camera.farPlane;
-            lpc.cNear = n; lpc.cFar = f; lpc.cLogF = std::log(f / n);
+            lpc.clusterNear     = n;
+            lpc.clusterFar      = f;
+            lpc.clusterLogFactor = std::log(f / n);
             c->SetPushConstants(0, sizeof(lpc), &lpc);
             c->Draw(3);
             c->EndOffscreenPass();

@@ -11,35 +11,11 @@ struct FSInput {
     [[vk::location(3)]] nointerpolation uint objectIndex;  // 从 VS 传入
 };
 
-struct GPUObjectData {
-    float4x4 worldMatrix;
-    float4   baseColorFactor;
-    float4   emissiveFactor;
-    float    metallicFactor;
-    float    roughnessFactor;
-    float    aoFactor;
-    float    alphaCutoff;
-    uint     materialFlags;
-    uint     materialID;
-    uint     _pad[2];
-};
+// GPUObjectData 定义来自 ShaderTypes.slang（C++/Slang 共享）
 
-struct GPULight {
-    float4 colorIntensity;
-    float4 directionType;
-    float4 positionRange;
-    float2 coneAngles;
-    int    shadowIndex;
-    int    _padLight;
-};
+// GPULight 定义来自 ShaderTypes.slang（C++/Slang 共享）
 
-struct GPUShadowData {
-    float4x4 lightViewProj[3];  // 方向光 CSM 级联矩阵
-    float4   shadowParams;      // x=bias, y=normalBias, z=strength, w=类型
-    float4   splitDistances;    // CSM 级联分割点
-    float4   cameraForward;     // 相机前向(级联选择)
-    float4   pointLightData;    // xyz=点光位置, w=范围
-};
+// GPUShadowData 定义来自 ShaderTypes.slang（C++/Slang 共享）
 
 // Descriptor Sets:
 //   set=0: per-frame 动态数据

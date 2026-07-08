@@ -17,18 +17,7 @@ struct VSOutput {
     [[vk::location(3)]] float4 prevClipPos;   // 上一帧裁剪空间位置（无抖动）→ velocity 计算
 };
 
-struct GPUObjectData {
-    float4x4 worldMatrix;
-    float4   baseColorFactor;
-    float4   emissiveFactor;
-    float    metallicFactor;
-    float    roughnessFactor;
-    float    aoFactor;
-    float    alphaCutoff;
-    uint     materialFlags;
-    uint     materialID;
-    uint     _pad[2];
-};
+// GPUObjectData 定义来自 ShaderTypes.slang（C++/Slang 共享）
 
 [[vk::binding(2, 0)]] StructuredBuffer<GPUObjectData> u_Objects;
 

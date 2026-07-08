@@ -3,24 +3,14 @@
 //
 // 从 lightViewProj 渲染几何体，输出世界空间位置和法线。
 // 与 Shadow.vert 共用同一顶点格式（StaticVertex: pos+normal+uv）。
+#include "ShaderTypes.slang"  // GPUObjectData / GPULight 共享定义
 // ============================================================
 
 layout(location = 0) in float3 inPosition;
 layout(location = 1) in float3 inNormal;
 
 // GPU Object（128 bytes，匹配 CPU GPUObjectData）
-struct GPUObjectData {
-    float4x4 worldMatrix;
-    float4   baseColorFactor;
-    float4   emissiveFactor;
-    float    metallicFactor;
-    float    roughnessFactor;
-    float    aoFactor;
-    float    alphaCutoff;
-    uint     materialFlags;
-    uint     materialID;
-    uint     _pad[2];
-};
+// GPUObjectData 定义来自 ShaderTypes.slang（C++/Slang 共享）
 
 [[vk::binding(2, 0)]] StructuredBuffer<GPUObjectData> u_Objects;
 

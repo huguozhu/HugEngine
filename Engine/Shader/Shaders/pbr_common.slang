@@ -7,6 +7,7 @@
 #define HUGENGINE_PBR_COMMON_SLANG
 
 #include "common.slang"
+#include "ShaderTypes.slang"  // GPU struct 共享定义（GPULight, GPUShadowData 等）
 
 // ============================================================
 // Fresnel — Schlick 近似
