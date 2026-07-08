@@ -70,9 +70,10 @@ u32 SpotShadowTechnique::CollectLights(he::World& w,he::SceneGraph& sg,const Cam
         float4x4 proj=glm::perspectiveRH_ZO(glm::radians(glm::degrees(fov)),1.0f,.1f,std::max(lc.range,.2f));
         float4x4 view=glm::lookAtRH(lp,lp+dir,float3(0,1,0));
         GPUShadowData sd{};
-        sd.lightViewProj[0]=proj*view; // Spot 透视 VP
+        sd.lightViewProj[0]=proj*view; // Spot 透视 VP（光源矩阵，非 Camera 矩阵）
         sd.pointLightData=float4(lp,lc.range);
         sd.shadowParams=float4(lc.shadowBias,lc.shadowNormalBias,lc.shadowStrength, 2.0f); // 2=Spot
+        sd.splitDistances=float4(dir, lc.outerConeAngle); // 方向 + 外锥角（供 Render 重建 VP）
         out.push_back(sd);ent.push_back(e);
     });
     return (u32)(out.size()-start);

@@ -81,6 +81,13 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         rhi::SamplerDesc s; s.minFilter = s.magFilter = rhi::FilterMode::Linear;
         s.addressU = s.addressV = rhi::AddressMode::ClampToEdge;
         m_HDRSampler = device->CreateSampler(s);
+
+        // 点采样器（Nearest）：深度纹理精确读取，避免 Linear 插值
+        // 在物体边缘混合背景深度导致 worldPos 重建错误
+        rhi::SamplerDesc ptDesc;
+        ptDesc.minFilter = ptDesc.magFilter = rhi::FilterMode::Nearest;
+        ptDesc.addressU  = ptDesc.addressV  = rhi::AddressMode::ClampToEdge;
+        m_PointSampler = device->CreateSampler(ptDesc);
     }
 
     // LDR 中间纹理（FXAA 链路：ToneMap → LDR → FXAA → BackBuffer）
@@ -153,6 +160,10 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         {6, rhi::DescriptorType::Sampler, 4096, 16, true},               // u_Samplers[] bindless
     };
     m_GBufferLayout = device->CreateDescriptorSetLayout(gbLayout);
+
+    // 创建阴影 PSO（使用 GBuffer 的 descriptor set layout，
+    // 阴影 VS 仅使用 binding=2 GPUObjectData[]，与 GBuffer layout 兼容）
+    m_ShadowSystem->CreateShadowPSO(m_GBufferLayout);
 
     rhi::ShaderBytecode gbVS, gbFS;
     gbVS.stage = rhi::ShaderStage::Vertex; gbVS.spirv = k_GBuffer_vert_spv; gbVS.entryPoint = "main";
@@ -318,7 +329,7 @@ void DeferredPipeline::Shutdown() {
     if (m_MSAA) m_MSAA->Shutdown();
     m_MSAA.reset();
     m_LDRTarget.reset(); m_LDRSampler.reset(); m_LDRDummyDepth.reset();
-    m_HDRTarget.reset(); m_HDRDepth.reset(); m_HDRSampler.reset();
+    m_HDRTarget.reset(); m_HDRDepth.reset(); m_HDRSampler.reset(); m_PointSampler.reset();
     m_GBufferPSO.reset(); m_LightingPSO.reset();
     for (auto& b : m_LightBuffers) b.reset();
     for (auto& b : m_ObjectBuffers) b.reset();
@@ -561,6 +572,65 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         },
         RGPassQueue::Compute);  // AsyncCompute: GPU 剔除在 Compute 队列执行
 
+    // ── Shadow Pass（使用光源 VP 矩阵渲染 CSM + Spot shadow maps）──
+    // 必须在 GBuffer 之前完成，确保阴影贴图在 Lighting Pass 中可采样
+    {
+        u32 slot = m_CurrentFrameSlot;
+        // 设置阴影渲染资源：Object Buffer + ShadowData Buffer + DescriptorSet
+        m_ShadowSystem->SetRenderResources(
+            m_ShadowObjBuffers[slot].get(),
+            m_ShadowBuffers[slot].get(),
+            m_GBufferSet);
+
+        SubsystemContext sctx;
+        sctx.world       = &world;
+        sctx.sceneGraph  = &sg;
+        sctx.camera      = &camera;
+        m_ShadowSystem->Update(sctx);  // 收集光源 → 填充 GPUShadowData（光源 VP 矩阵）
+    }
+
+    // 导入阴影贴图到 RenderGraph（Shadow pass 写入，Lighting pass 隐式读取）
+    ResourceHandle csmMaps[3];
+    for (u32 c = 0; c < 3; ++c) {
+        auto* tex = m_ShadowSystem->GetShadowMap(c);
+        if (tex) {
+            char name[32];
+            snprintf(name, sizeof(name), "CSM_Shadow_C%u", c);
+            csmMaps[c] = rg.ImportTexture(name, tex);
+        } else {
+            csmMaps[c] = kInvalidHandle;
+        }
+    }
+    auto* spotSTex = m_ShadowSystem->GetShadowMap(4);  // Spot 阴影在索引 4
+    auto spotShadowHandle = spotSTex ? rg.ImportTexture("SpotShadow", spotSTex) : kInvalidHandle;
+
+    {
+        std::vector<PassResource> shadowWrites;
+        for (u32 c = 0; c < 3; ++c)
+            if (csmMaps[c] != kInvalidHandle)
+                shadowWrites.push_back(RG_WRITE(csmMaps[c]));
+        if (spotShadowHandle != kInvalidHandle)
+            shadowWrites.push_back(RG_WRITE(spotShadowHandle));
+        // WAW 假依赖：写入 gbDepth 确保 Shadow → GB_Clear 执行顺序
+        shadowWrites.push_back(RG_WRITE(gbDepth));
+
+        rg.AddPass("Shadow", {}, std::move(shadowWrites),
+            [this](rhi::IRHICommandList* c) {
+                u32 slot = m_CurrentFrameSlot;
+                // 切换到阴影专用 Object Buffer（binding 2），渲染完成后恢复
+                m_Device->UpdateDescriptorSet(m_GBufferSet, 2,
+                    rhi::DescriptorType::StorageBuffer,
+                    m_ShadowObjBuffers[slot].get());
+
+                m_ShadowSystem->Render(c);  // 使用光源 VP 矩阵渲染所有阴影贴图
+
+                // 恢复场景 Object Buffer 供后续 GBuffer pass 使用
+                m_Device->UpdateDescriptorSet(m_GBufferSet, 2,
+                    rhi::DescriptorType::StorageBuffer,
+                    m_ObjectBuffers[slot].get());
+            });
+    }
+
     // GBuffer 4×MRT + 绘制（委托给 IGBufferRenderer，支持 CPU/GPU 双模式）
     rg.AddPass("GB_Clear", {}, {{gbA, ResourceAccess::Write}, {gbB, ResourceAccess::Write},
         {gbC, ResourceAccess::Write}, {gbVel, ResourceAccess::Write}, {gbDepth, ResourceAccess::Write}},
@@ -674,9 +744,17 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 rhi::ResourceState::DepthStencilWrite, rhi::ResourceState::DepthStencilRead, m_GBufferDepth.get());
             auto bindTex = [&](u32 b, rhi::IRHITexture* t) { if(t) m_Device->UpdateDescriptorSet(m_LightingSet, b, rhi::DescriptorType::CombinedImageSampler, t, m_HDRSampler.get()); };
             bindTex(0, m_GBufferA.get()); bindTex(1, m_GBufferB.get()); bindTex(2, m_GBufferC.get());
-            bindTex(3, m_GBufferDepth.get());
+            // 深度缓冲区使用点采样（Nearest），避免 Linear 插值在物体边缘混合背景深度
+            // → 导致 worldPos 重建错误 → 点/聚光灯光照随 Camera 视角变化
+            m_Device->UpdateDescriptorSet(m_LightingSet, 3, rhi::DescriptorType::CombinedImageSampler,
+                m_GBufferDepth.get(), m_PointSampler.get());
             if (m_ShadowSystem && m_ShadowSystem->GetShadowMap(0))
                 bindTex(4, m_ShadowSystem->GetShadowMap(0));
+            // CSM 级联 1/2（绑定 10/11，与 Shader layout 一致）
+            if (m_ShadowSystem && m_ShadowSystem->GetShadowMap(1))
+                bindTex(10, m_ShadowSystem->GetShadowMap(1));
+            if (m_ShadowSystem && m_ShadowSystem->GetShadowMap(2))
+                bindTex(11, m_ShadowSystem->GetShadowMap(2));
             // Spot 阴影贴图（映射索引 4 = CSM(3) + Point(1) + Spot(0)）
             if (m_ShadowSystem && m_ShadowSystem->GetShadowMap(4))
                 bindTex(9, m_ShadowSystem->GetShadowMap(4));
@@ -734,7 +812,9 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             struct { float4x4 ivp; float4 cp; u32 lc; float ii;
                      u32 cTx; u32 cTy; float cNear; float cFar; float cLogF;
                      u32 cUse; u32 _pad2[2]; } lpc;
-            lpc.ivp = ivp; lpc.cp = float4(camera.position, 0); lpc.ii = 0; lpc.lc = fpc.lightCount;
+            // IBL 强度从 GI 子系统获取（默认 1.0），避免硬编码 0 导致环境光全黑
+            float iblIntensity = m_GI ? m_GI->GetSettings().intensity : 1.0f;
+            lpc.ivp = ivp; lpc.cp = float4(camera.position, 0); lpc.ii = iblIntensity; lpc.lc = fpc.lightCount;
             lpc.cUse = useClustered;
             lpc.cTx = useClustered ? m_ClusteredShading.GetTileCountX() : 0u;
             lpc.cTy = useClustered ? m_ClusteredShading.GetTileCountY() : 0u;

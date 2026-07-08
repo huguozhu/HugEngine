@@ -140,6 +140,7 @@ private:
     // HDR (Lighting 输出 + ToneMap 输入)
     std::unique_ptr<rhi::IRHITexture> m_HDRTarget, m_HDRDepth;
     std::unique_ptr<rhi::IRHISampler> m_HDRSampler;
+    std::unique_ptr<rhi::IRHISampler> m_PointSampler;  // 点采样器（深度纹理 Nearest，避免 Linear 插值导致 worldPos 错误）
 
     // LDR 中间纹理（ToneMap 输出 → FXAA 输入，BGRA8_UNORM）
     // FXAA 禁用时 ToneMap 直接写 BackBuffer，此纹理闲置
