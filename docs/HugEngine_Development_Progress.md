@@ -1,6 +1,6 @@
 # HugEngine 开发进度
 
-> 最后更新: 2026-07-07（今日更新: SMAA ✅, AA_MSAA ✅, SMAA/FXAA 互斥, LDR AA Combo, Forward+ 任务）
+> 最后更新: 2026-07-09（今日更新: ShaderTypes.slang ✅, GBuffer 5 MRT worldPos ✅, DeferredPipeline Shadow 集成 ✅）
 
 ## 整体进度
 
@@ -27,7 +27,7 @@
 - **前向渲染 RG 集成**: FullScene(旧打包) + ToneMap + ImGui LoadOp ✅
 - **ShadowSystem**: CSM + Point Cubemap + Spot + 阴影专用 Object Buffer ✅
 - **PostProcess**: ToneMapPass + SkyboxPass + BloomPass + DOFPass + MotionBlurPass + AutoExposurePass + ColorGradingPass ✅
-- **DeferredPipeline**: GBuffer 4×MRT + 全屏 Lighting Pass + Sponza 场景 ✅
+- **DeferredPipeline**: GBuffer 5×MRT (含 worldPos) + 全屏 Lighting Pass (直接读世界坐标) + ShadowSystem 集成 + Sponza 场景 ✅
 - **描述符集竞态修复**: 拆分为 set=0(per-frame) + set=1(per-mesh) ✅
 - **抗锯齿架构**: IAntiAliasing 接口 + IPostProcessPass 中间层 ✅
 - **AA_TAA**: 时域抗锯齿（含 Velocity Buffer GBuffer MRT4）✅
@@ -54,7 +54,7 @@
 | 辅助命令缓冲 + 多线程录制 | ✅ |
 | Compute Shader (Dispatch + Compute PSO) | ✅ |
 | BeginRenderPass LoadOp::Load (ImGui 叠加) | ✅ |
-| BeginOffscreenPassMRT (多颜色附件) | ✅ |
+| BeginOffscreenPassMRT (最多 8 颜色附件, Vulkan 标准上限) | ✅ |
 | PipelineBarrier (纹理 + 全局布局转换) | ✅ |
 | VMA 集成 (VulkanMemoryAllocator) | ✅ |
 | AsyncCompute (双队列 + Timeline Semaphore + 跨队列同步) | ✅ |
@@ -67,7 +67,8 @@
 | PBR / Shadow / ToneMap / Skybox | ✅ |
 | IBL (Irradiance + Prefilter 5-mip + BRDF LUT) | ✅ |
 | RSM_Generate (双 MRT: position + normal+flux) | ✅ |
-| GBuffer (4 MRT: albedo+metallic / normal+roughness / emissive+ao / velocity + D32) | ✅ |
+| GBuffer (5 MRT: albedo+metallic / normal+roughness / emissive+ao / velocity + worldPos + D32) | ✅ |
+| ShaderTypes.slang (C++/Slang Push Constant 结构体统一, GPU_STRUCT 宏) | ✅ |
 | DeferredLighting (全屏 PBR + IBL + RSM + Shadow + SSGI + SSR + DDGI) | ✅ |
 | SSGI (屏幕空间 Ray Marching 间接漫反射) | ✅ |
 | SSR (屏幕空间 Ray Marching 镜面反射) | ✅ |
@@ -170,8 +171,11 @@
 DeferredPipeline::BuildFrameGraph
   ├── "GPU_Cull" Pass (GPU 剔除启用时)
   │     └── Compute Shader: 读上帧深度 → GPUScene 视锥+Hi-Z 剔除 → IndirectCmdBuf
+  ├── "Shadow" Pass (阴影投射光源存在时)
+  │     └── ShadowSystem::Update → 收集光源 GPUShadowData（光源 VP 矩阵）
+  │         ShadowSystem::Render → CSM(3 cascade) + Spot 阴影贴图渲染
   ├── "GB_Clear" Pass
-  │     └── 4 MRT GBuffer (albedo+metallic / normal+roughness / emissive+ao / velocity) + D32
+  │     └── 5 MRT GBuffer (albedo+metallic / normal+roughness / emissive+ao / velocity / worldPos) + D32
   │         绑定 set=0(per-frame ObjectBuffer) + bindless 纹理数组
   │         使用上帧 GPU Culling Readback 结果过滤可见物体
   ├── [DDGI_Update] Pass (DDGI 启用时)
@@ -297,6 +301,7 @@ Engine/Shader/Shaders/  (Slang → SPIR-V → .spv.h)
 ├── AutoExposure.comp                        (自动曝光 Compute)
 ├── ColorGrading                             (LDR 色彩分级)
 ├── SMAA_EdgeDetect + SMAA_BlendWeight + SMAA_Neighborhood  (SMAA 3 Pass)
+├── ShaderTypes.slang                         (C++/Slang 共享 GPU 结构体定义)
 └── common, pbr_common                       (公共头文件)
 ```
 
@@ -316,6 +321,9 @@ Engine/Shader/Shaders/  (Slang → SPIR-V → .spv.h)
 | 问题 | 影响 | 状态 |
 |------|------|:---:|
 | FullScene Pass 仍为老代码打包 | 未拆分为独立 Shadow/IBL/HDR Pass | ⬜ |
+| DeferredPipeline: ShadowSystem 已集成 Update/Render + Shadow pass | 光源 VP 矩阵正确传入 Lighting | ✅ |
+| DeferredPipeline: IBL iblIntensity 此前硬编码为 0 (已修复) | 环境光始终禁用 | ✅ |
+| DeferredPipeline: 深度 Linear→Nearest 采样修复 | 边缘混合导致 worldPos 错误 | ✅ |
 | 点光阴影无 PCF 软滤波 | 硬边缘锯齿 | ⬜ |
 | 点光阴影无视锥剔除 | 6 面渲染全场景 | ⬜ |
 | GPUCulling::Dispatch 在 RenderPass 内执行 | Vulkan 校验警告 | ⬜ |
