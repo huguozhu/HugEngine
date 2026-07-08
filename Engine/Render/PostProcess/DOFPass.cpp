@@ -135,9 +135,9 @@ void DOFPass::Render(rhi::IRHICommandList* cmd) {
 
     // ── Pass 1: CoC ──
     {
-        // 深度采样器：线性采样（CoC 需要平滑）
+        // 深度采样器：点采样（Nearest）避免边缘混合前景/背景深度导致 CoC 错误
         rhi::SamplerDesc depthSamp;
-        depthSamp.minFilter = depthSamp.magFilter = rhi::FilterMode::Linear;
+        depthSamp.minFilter = depthSamp.magFilter = rhi::FilterMode::Nearest;
         depthSamp.addressU = depthSamp.addressV = rhi::AddressMode::ClampToEdge;
         auto ds = m_Device->CreateSampler(depthSamp);  // 简便：每帧创建（可优化为复用）
 
