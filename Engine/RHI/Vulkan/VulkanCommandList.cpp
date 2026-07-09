@@ -899,18 +899,27 @@ void VulkanCommandList::SetTimelineWait(RHIFenceHandle fence, u64 value) {
 // ============================================================
 
 // ============================================================
-// Mesh Shader 命令 — 桩实现（P6 替换为真实实现）
+// Mesh Shader 命令
 // ============================================================
 
 void VulkanCommandList::DrawMeshTasks(u32 groupCountX, u32 groupCountY, u32 groupCountZ) {
-    (void)groupCountX; (void)groupCountY; (void)groupCountZ;
-    HE_CORE_WARN("DrawMeshTasks: 尚未实现（P6）");
+    if (!m_VulkanDevice->m_CmdDrawMeshTasks) {
+        HE_CORE_WARN("DrawMeshTasks: 设备不支持 Mesh Shader");
+        return;
+    }
+    VkCommandBuffer cb = m_CmdBuffers[m_FrameIndex];
+    m_VulkanDevice->m_CmdDrawMeshTasks(cb, groupCountX, groupCountY, groupCountZ);
 }
 
 void VulkanCommandList::DrawMeshTasksIndirect(IRHIBuffer* buffer, u64 offset,
                                                u32 drawCount, u32 stride) {
-    (void)buffer; (void)offset; (void)drawCount; (void)stride;
-    HE_CORE_WARN("DrawMeshTasksIndirect: 尚未实现（P6）");
+    if (!m_VulkanDevice->m_CmdDrawMeshTasksIndirect) {
+        HE_CORE_WARN("DrawMeshTasksIndirect: 设备不支持 Mesh Shader");
+        return;
+    }
+    auto* vkBuf = static_cast<VulkanBuffer*>(buffer);
+    VkCommandBuffer cb = m_CmdBuffers[m_FrameIndex];
+    m_VulkanDevice->m_CmdDrawMeshTasksIndirect(cb, vkBuf->GetHandle(), offset, drawCount, stride);
 }
 
 // ============================================================

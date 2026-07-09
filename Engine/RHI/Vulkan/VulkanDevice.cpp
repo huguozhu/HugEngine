@@ -719,6 +719,17 @@ void VulkanDevice::LoadRTFunctions() {
     HE_ASSERT(m_RT.cmdTraceRays,          "加载 vkCmdTraceRaysKHR 失败");
 
     HE_CORE_INFO("RT 扩展函数全部加载成功");
+
+    // 加载 Mesh Shader 扩展函数（仅在硬件支持时）
+    if (m_SupportsMesh) {
+        m_CmdDrawMeshTasks = reinterpret_cast<PFN_vkCmdDrawMeshTasksEXT>(
+            vkGetDeviceProcAddr(m_Device, "vkCmdDrawMeshTasksEXT"));
+        m_CmdDrawMeshTasksIndirect = reinterpret_cast<PFN_vkCmdDrawMeshTasksIndirectEXT>(
+            vkGetDeviceProcAddr(m_Device, "vkCmdDrawMeshTasksIndirectEXT"));
+        HE_ASSERT(m_CmdDrawMeshTasks, "加载 vkCmdDrawMeshTasksEXT 失败");
+        HE_ASSERT(m_CmdDrawMeshTasksIndirect, "加载 vkCmdDrawMeshTasksIndirectEXT 失败");
+        HE_CORE_INFO("Mesh Shader 扩展函数加载成功");
+    }
 }
 
 // ============================================================

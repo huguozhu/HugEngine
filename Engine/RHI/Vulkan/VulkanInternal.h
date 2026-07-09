@@ -182,6 +182,10 @@ public:
     // RT 函数派发表
     VulkanRTDispatch& GetRTDispatch() { return m_RT; }
 
+    // Mesh Shader 函数指针（vkCmdDrawMeshTasksEXT / vkCmdDrawMeshTasksIndirectEXT）
+    PFN_vkCmdDrawMeshTasksEXT          m_CmdDrawMeshTasks         = nullptr;
+    PFN_vkCmdDrawMeshTasksIndirectEXT  m_CmdDrawMeshTasksIndirect = nullptr;
+
     // Fence 句柄 → VkSemaphore 解析（供 VulkanCommandList 集成 Timeline 信号量）
     VkSemaphore ResolveFenceSemaphore(RHIFenceHandle fence) const {
         if (fence == kInvalidFence || fence > m_Fences.size()) return VK_NULL_HANDLE;
