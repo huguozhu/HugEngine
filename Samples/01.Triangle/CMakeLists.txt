@@ -1,5 +1,5 @@
 # 01.Triangle — 使用 HugEngine RHI 渲染三角形
-add_executable(01.Triangle main.cpp)
+add_executable(01.Triangle 01.Triangle.cpp)
 
 target_link_libraries(01.Triangle PRIVATE
     HugEngineCore

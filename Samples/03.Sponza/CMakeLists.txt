@@ -1,5 +1,5 @@
 # 03.Sponza — 加载 Sponza glTF 场景，自由相机漫游
-add_executable(03.Sponza main.cpp)
+add_executable(03.Sponza 03.Sponza.cpp)
 
 target_link_libraries(03.Sponza PRIVATE
     HugEngineCore

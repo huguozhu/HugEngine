@@ -585,6 +585,7 @@ private:
     u64                         m_Size          = 0;
     AccelerationStructureType   m_Type          = AccelerationStructureType::BottomLevel;
     BLASBuildDesc               m_BLASDesc;            // BLAS 几何描述（供 Build 使用）
+    PFN_vkDestroyAccelerationStructureKHR m_DestroyAS = nullptr;  // 析构时使用的函数指针（避免链接扩展函数）
 };
 
 // ============================================================

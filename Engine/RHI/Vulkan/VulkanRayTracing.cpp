@@ -24,6 +24,7 @@ VulkanAccelerationStructure::VulkanAccelerationStructure(
     VkDevice device, VmaAllocator allocator,
     AccelerationStructureType type, const VulkanRTDispatch& rt, u64 asSize)
     : m_Device(device), m_Allocator(allocator), m_Type(type), m_Size(asSize)
+    , m_DestroyAS(rt.destroyAS)  // 扩展函数指针，析构时使用（避免直接链接 vkDestroyAccelerationStructureKHR）
 {
     // 1. 创建底层存储缓冲（DEVICE_LOCAL，GPU 端读写）
     VkBufferCreateInfo bufferInfo{};
@@ -69,10 +70,8 @@ VulkanAccelerationStructure::VulkanAccelerationStructure(
 }
 
 VulkanAccelerationStructure::~VulkanAccelerationStructure() {
-    if (m_AS) {
-        // 使用存储的派发函数指针销毁 AS（设备可能在析构时仍有效）
-        // 注意: 此处假设 VulkanDevice 析构在 AS 析构之后，m_Device 仍有效
-        vkDestroyAccelerationStructureKHR(m_Device, m_AS, nullptr);
+    if (m_AS && m_DestroyAS) {
+        m_DestroyAS(m_Device, m_AS, nullptr);
     }
     if (m_Buffer) {
         vmaDestroyBuffer(m_Allocator, m_Buffer, m_Allocation);

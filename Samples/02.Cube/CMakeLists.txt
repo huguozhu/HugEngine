@@ -1,5 +1,5 @@
 # 02.Cube — PBR 前向渲染管线演示（立方体+球体）
-add_executable(02.Cube main.cpp)
+add_executable(02.Cube 02.Cube.cpp)
 
 target_link_libraries(02.Cube PRIVATE
     HugEngineCore
