@@ -485,8 +485,37 @@ int main() {
         ImGui::SetNextWindowBgAlpha(0.5f);
         ImGui::Begin("HugEngine");
         ImGui::Text("FPS: %.0f", 1.0f / (deltaTime > 0 ? deltaTime : 0.016f));
-        ImGui::Text("Pos: (%.1f, %.1f, %.1f)",
-            camCtrl.GetCamera().position.x, camCtrl.GetCamera().position.y, camCtrl.GetCamera().position.z);
+        // ============================================================
+        // 相机信息（可编辑）
+        // ============================================================
+        ImGui::SeparatorText("相机");
+        auto& cam = camCtrl.GetCamera();
+
+        // 位置
+        ImGui::DragFloat3("位置", &cam.position[0], 1.0f);
+
+        // 旋转（Yaw / Pitch 角度制）
+        float yawDeg   = glm::degrees(camCtrl.GetYaw());
+        float pitchDeg = glm::degrees(camCtrl.GetPitch());
+        bool yawChanged   = ImGui::SliderFloat("Yaw",   &yawDeg,   -180.0f, 180.0f, "%.1f°");
+        bool pitchChanged = ImGui::SliderFloat("Pitch", &pitchDeg, -89.0f,  89.0f,  "%.1f°");
+        if (yawChanged || pitchChanged)
+            camCtrl.SetOrientation(glm::radians(yawDeg), glm::radians(pitchDeg));
+
+        // 朝向 / 上方向（只读，由 Yaw/Pitch 导出）
+        ImGui::Text("朝向: (%.2f, %.2f, %.2f)", cam.forward.x, cam.forward.y, cam.forward.z);
+
+        // FOV、裁剪面
+        ImGui::SliderFloat("FOV", &cam.fov, 10.0f, 120.0f, "%.0f°");
+        ImGui::DragFloat("近裁剪面", &cam.nearPlane, 0.01f, 0.001f, 10.0f, "%.3f",
+            ImGuiSliderFlags_Logarithmic);
+        ImGui::DragFloat("远裁剪面", &cam.farPlane, 10.0f, 10.0f, 50000.0f, "%.0f");
+
+        // 宽高比 / 移动速度
+        ImGui::Text("宽高比: %.2f", cam.aspectRatio);
+        float speed = camCtrl.GetMoveSpeed();
+        if (ImGui::DragFloat("移动速度", &speed, 1.0f, 0.1f, 500.0f, "%.1f"))
+            camCtrl.SetMoveSpeed(speed);
 
         // 渲染模式切换
         ImGui::SeparatorText("渲染模式");
