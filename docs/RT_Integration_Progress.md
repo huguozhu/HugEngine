@@ -119,17 +119,46 @@ virtual void UpdateDescriptorSet(DescriptorSetHandle set, u32 binding,
 
 ---
 
+## Phase 3：RT 材质 + 多光源 ✅ 已完成
+
+**目标**：RT ClosestHit 读取真实材质色 + 引擎光源数据。
+
+**提交**：`b4b19be` Phase 3: RT 材质色 + 多光源 — UB/纹理方案
+
+### Phase 3 技术突破
+
+#### 3.1 SSBO 替代方案
+- **问题**：`StructuredBuffer`/`ByteAddressBuffer` 在 RT ClosestHit shader 中导致 GPU fault（slangc SPIR-V 兼容性）。
+- **方案 A（光源）**：使用 `cbuffer` (Uniform Buffer) — 在 ClosestHit 中兼容。
+- **方案 B（材质）**：使用 `Texture2D::Load()` — 天然支持非均匀动态索引，无需 sampler。
+
+#### 3.2 cbuffer 数组非均匀索引
+- **问题**：cbuffer 数组用 InstanceID 动态索引时 GPU fault。
+- **根因**：slangc 未生成 `NonUniform` SPIR-V 装饰词。
+- **修复**：`VkPhysicalDeviceDescriptorIndexingFeatures::shaderUniformBufferArrayNonUniformIndexing = VK_TRUE`。
+- **最终选择**：纹理方案更稳定，避免 `NonUniform` 依赖。
+
+#### 3.3 数据流
+```
+MeshComponent.baseColorFactor → Texture2D(1×256 RGBA32F) → ClosestHit::Load(id)
+GPULight SSBO → Uniform Buffer(cbuffer) → ClosestHit::u_Lights[li]
+ForwardPipeline → GetCurrentLightBuffer() → RTPass::UpdateLightBuffer
+```
+
 ### Phase 3 踩坑记录
 
-1. **Uniform Buffer 替代 Storage Buffer** → `StructuredBuffer`/`ByteAddressBuffer` 在 ClosestHit 中 GPU fault（slangc SPIR-V 兼容性）。使用 `cbuffer` (Uniform Buffer) 可行。`CreateMaterialBuffer` 从 GPUObjectData SSBO（CPU 端 map）提取材质色写入 UB。
+1. **cbuffer 内存布局不匹配** → std140 顺序数组 ≠ C++ 交错写入。修复：改为 struct 交错布局。
+2. **cbuffer 数组动态索引 GPU fault** → 需要 `NonUniform` 装饰。修复：改用 `Texture2D::Load()`。
+3. **光源强度缩放** → 引擎 intensity ~2-5，需 `*0.15` 映射到合理范围。
+4. **Vulkan12Features struct 不存在** → `shaderUniformBufferArrayNonUniformIndexing` 在 `DescriptorIndexingFeatures` 中。
 
 ### Phase 3 已知限制
 
 | 限制 | 原因 | 方案 |
 |------|------|------|
-| 顶点法线不可用 | 需 SSBO 绑定 vertex buffer | slangc 修复或 `SPV_KHR_ray_tracing_position_fetch` |
-| 多光源数据不可用 | 需 SSBO 绑定 GPULight[] | 同上 |
-| InstanceID/ObjectData 索引可能不匹配 | 视锥剔除差异 | 当前 Sponza 全可见时无影响 |
+| 无纹理采样 | `SampledImage` + sampler 需扩展 | Phase 4 bindless 纹理 |
+| 法线近似（`-WorldRayDirection`） | SSBO 不可用 | slangc 更新或 position_fetch |
+| 无阴影射线 | SSBO 不可用（GPUShadowData[]） | 同上 |
 
 ---
 
@@ -140,5 +169,7 @@ Phase 1 ✅ 已完成并验证
     ↓
 Phase 2 ✅ 已完成（含 02.Cube RT 模式）
     ↓
-Phase 3 🔄 进行中（UB 材质色完成，vertex normal/multilight 待 SSBO 修复）
+Phase 3 ✅ 已完成（Texture2D 材质 + UB 光源）
+    ↓
+Phase 4 ⬜ 待规划（纹理采样 + 逐顶点法线 + 阴影）
 ```
