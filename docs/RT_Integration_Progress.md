@@ -52,6 +52,28 @@ AcquireNextImage
 
 **目标**：加载 Sponza glTF 资源，用 RT 渲染（创建 BLAS/TLAS + TraceRays 击中三角面片）。
 
+**提交**：`138ac62` Phase 2: Sponza 几何体 RT 渲染 — BLAS/TLAS + TraceRays
+
+### Phase 2 已修改文件
+
+| 文件 | 操作 | 说明 |
+|------|:---:|------|
+| `Engine/RHI/Public/RHI/Types.h` | 修改 | `DescriptorType::AccelerationStructure` |
+| `Engine/RHI/Public/RHI/RHI.h` | 修改 | `UpdateDescriptorSet(AS*)` 虚方法 |
+| `Engine/RHI/Vulkan/VulkanInternal.h` | 修改 | VulkanDevice 声明 |
+| `Engine/RHI/Vulkan/VulkanDevice.cpp` | 修改 | ToVkDescType/EnsureDescriptorPool/UpdateDescriptorSet(AS*)/GetTLASBuildSizes |
+| `Engine/RHI/Vulkan/VulkanCommandList.cpp` | 修改 | `SetPushConstants` RT 绑定点修复 |
+| `Engine/RHI/Vulkan/VulkanResources.cpp` | 修改 | `ToVkBufferUsage` 添加 AS input flag |
+| `Engine/Scene/Private/MeshComponent.cpp` | 修改 | 缓冲添加 `AccelerationStruct` 用法 |
+| `Engine/Render/Pipeline/RTPass.h` | 修改 | 双描述符集 + BindDescriptorSets |
+| `Engine/Render/Pipeline/RTPass.cpp` | 修改 | 描述符管理 + 材质数据 |
+| `Engine/Shader/Shaders/RT_Sponza.rgen.slang` | 新建 | 相机光线生成 |
+| `Engine/Shader/Shaders/RT_Sponza.rmiss.slang` | 新建 | 天空渐变 |
+| `Engine/Shader/Shaders/RT_Sponza.rchit.slang` | 新建 | 命中着色 |
+| `Engine/Shader/CMakeLists.txt` | 修改 | 注册 6 个 RT 着色器 |
+| `Samples/03.Sponza/03.Sponza.cpp` | 修改 | RT 模式集成 |
+| `Samples/02.Cube/02.Cube.cpp` | 修改 | RT 模式集成 |
+
 ### Phase 2 步骤
 
 #### 2.1 添加 AccelerationStructure 描述符类型 + UpdateDescriptorSet
