@@ -82,9 +82,24 @@ if(SLANGC)
         "${SHADER_DIR}/DDGI.comp.slang"
         "${SHADER_DIR}/AutoExposure.comp.slang"
     )
+    # Ray Tracing 着色器（.rgen / .rmiss / .rchit / .rahit / .rcall）
+    # 命名约定: EffectName.rgen.slang (RayGen), EffectName.rmiss.slang (Miss),
+    #           EffectName.rchit.slang (ClosestHit), EffectName.rahit.slang (AnyHit)
+    set(RT_SLANG
+        # P8 示例: RT_Shadow, RT_Reflection, RT_AO 等
+        # "${SHADER_DIR}/RT_Shadow.rgen.slang"
+        # "${SHADER_DIR}/RT_Shadow.rmiss.slang"
+        # "${SHADER_DIR}/RT_Shadow.rchit.slang"
+    )
+    # Mesh Shader 着色器（.mesh / .task）
+    # 命名约定: EffectName.mesh.slang (Mesh), EffectName.task.slang (Amplification/Task)
+    set(MESH_SLANG
+        # P9 示例: GBuffer.mesh, PBR.mesh 等
+        # "${SHADER_DIR}/GBuffer.mesh.slang"
+    )
     file(GLOB SLANG_INCLUDES "${SHADER_DIR}/*.slang")  # 公共头文件（用 glob 自动收集即可）
 
-    set(COMPILE_SOURCES ${VERT_SLANG} ${FRAG_SLANG} ${COMP_SLANG})
+    set(COMPILE_SOURCES ${VERT_SLANG} ${FRAG_SLANG} ${COMP_SLANG} ${RT_SLANG} ${MESH_SLANG})
     set(SPV_FILES "")
 
     # 顶点着色器
@@ -131,6 +146,58 @@ if(SLANGC)
                     -I "${SHADER_DIR}" -o ${SPV} -Wno-39001
             DEPENDS ${SRC} ${SLANG_INCLUDES}
             COMMENT "Slang → SPIR-V: ${NAME}"
+        )
+        list(APPEND SPV_FILES ${SPV})
+    endforeach()
+
+    # ── Ray Tracing 着色器 ──
+    # Slang stage 映射: rgen→raygeneration, rmiss→miss, rchit→closesthit, rahit→anyhit, rcall→callable
+    foreach(SRC ${RT_SLANG})
+        get_filename_component(FNAME ${SRC} NAME)
+        string(REGEX REPLACE "\\.slang$" "" NAME "${FNAME}")         # RT_Shadow.rgen
+        string(REGEX MATCH "rgen|rmiss|rchit|rahit|rcall" RT_STAGE "${NAME}")
+        set(SPV "${SPV_OUT_DIR}/${NAME}.spv")
+        if(RT_STAGE STREQUAL "rgen")
+            set(SLANGC_STAGE "raygeneration")
+        elseif(RT_STAGE STREQUAL "rmiss")
+            set(SLANGC_STAGE "miss")
+        elseif(RT_STAGE STREQUAL "rchit")
+            set(SLANGC_STAGE "closesthit")
+        elseif(RT_STAGE STREQUAL "rahit")
+            set(SLANGC_STAGE "anyhit")
+        elseif(RT_STAGE STREQUAL "rcall")
+            set(SLANGC_STAGE "callable")
+        endif()
+        add_custom_command(
+            OUTPUT ${SPV}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${SPV_OUT_DIR}
+            COMMAND ${SLANGC} ${SRC} -target spirv -entry main -stage ${SLANGC_STAGE}
+                    -I "${SHADER_DIR}" -o ${SPV} -Wno-39001
+            DEPENDS ${SRC} ${SLANG_INCLUDES}
+            COMMENT "Slang → SPIR-V (RT): ${NAME} [${SLANGC_STAGE}]"
+        )
+        list(APPEND SPV_FILES ${SPV})
+    endforeach()
+
+    # ── Mesh Shader 着色器 ──
+    # Slang stage 映射: mesh→mesh, task→task (Amplification Shader = Task Shader in Vulkan)
+    foreach(SRC ${MESH_SLANG})
+        get_filename_component(FNAME ${SRC} NAME)
+        string(REGEX REPLACE "\\.slang$" "" NAME "${FNAME}")         # GBuffer.mesh
+        string(REGEX MATCH "mesh|task" MS_STAGE "${NAME}")
+        set(SPV "${SPV_OUT_DIR}/${NAME}.spv")
+        if(MS_STAGE STREQUAL "mesh")
+            set(SLANGC_STAGE "mesh")
+        elseif(MS_STAGE STREQUAL "task")
+            set(SLANGC_STAGE "task")
+        endif()
+        add_custom_command(
+            OUTPUT ${SPV}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${SPV_OUT_DIR}
+            COMMAND ${SLANGC} ${SRC} -target spirv -entry main -stage ${SLANGC_STAGE}
+                    -I "${SHADER_DIR}" -o ${SPV} -Wno-39001
+            DEPENDS ${SRC} ${SLANG_INCLUDES}
+            COMMENT "Slang → SPIR-V (Mesh): ${NAME} [${SLANGC_STAGE}]"
         )
         list(APPEND SPV_FILES ${SPV})
     endforeach()
