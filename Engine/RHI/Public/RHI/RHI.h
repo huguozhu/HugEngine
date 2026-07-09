@@ -6,6 +6,8 @@
 #include "RHI/Buffer.h"
 #include "RHI/Shader.h"
 #include "RHI/QueryPool.h"
+#include "RHI/RayTracing.h"
+#include "RHI/MeshShader.h"
 #include "Core/Types.h"
 
 #include <memory>
@@ -44,6 +46,16 @@ public:
     virtual std::unique_ptr<IRHITexture>        CreateTexture(const TextureDesc& desc) = 0;
     virtual std::unique_ptr<IRHISampler>        CreateSampler(const SamplerDesc& desc) = 0;
     virtual std::unique_ptr<IRHIPipelineState>  CreatePipelineState(const PipelineStateDesc& desc) = 0;
+
+    // --- Ray Tracing 资源创建 ---
+    virtual std::unique_ptr<IRHIAccelerationStructure>
+        CreateBLAS(const BLASBuildDesc& desc) = 0;                                // 创建 Bottom-Level Acceleration Structure
+    virtual std::unique_ptr<IRHIAccelerationStructure>
+        CreateTLAS(const TLASBuildDesc& desc) = 0;                                // 创建 Top-Level Acceleration Structure
+    virtual ASBuildSizes GetBLASBuildSizes(const BLASBuildDesc& desc) = 0;        // 查询 BLAS 构建所需内存
+    virtual ASBuildSizes GetTLASBuildSizes(u32 maxInstanceCount) = 0;             // 查询 TLAS 构建所需内存
+    virtual std::unique_ptr<IRHIRayTracingPipelineState>
+        CreateRTPipelineState(const RTPipelineStateDesc& desc) = 0;               // 创建 RT Pipeline State
 
     // --- Descriptor Sets ---
     virtual DescriptorSetLayoutHandle CreateDescriptorSetLayout(const DescriptorSetLayoutDesc& desc) = 0;

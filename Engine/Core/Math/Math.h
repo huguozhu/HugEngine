@@ -37,10 +37,11 @@ using double2 = glm::dvec2;
 using double3 = glm::dvec3;
 using double4 = glm::dvec4;
 
-// --- Matrix types ---
+// --- 矩阵类型 ---
 using float2x2 = glm::mat2;
 using float3x3 = glm::mat3;
 using float4x4 = glm::mat4;
+using float3x4 = glm::mat3x4;  // 3×4 行主序仿射变换矩阵（用于 Ray Tracing TLAS Instance）
 
 // --- Quaternion ---
 using quat = glm::quat;

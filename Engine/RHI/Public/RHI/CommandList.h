@@ -4,6 +4,7 @@
 #include "RHI/Buffer.h"
 #include "RHI/Shader.h"
 #include "RHI/QueryPool.h"
+#include "RHI/RayTracing.h"
 
 namespace he::rhi {
 
@@ -93,6 +94,11 @@ public:
     virtual void DrawIndexedIndirect(IRHIBuffer* buffer, u64 offset,
                                      u32 drawCount, u32 stride) = 0;
 
+    // Mesh Shader 绘制（替代传统 VS+IA 管线）
+    virtual void DrawMeshTasks(u32 groupCountX, u32 groupCountY = 1, u32 groupCountZ = 1) = 0;
+    virtual void DrawMeshTasksIndirect(IRHIBuffer* buffer, u64 offset,
+                                       u32 drawCount, u32 stride) = 0;
+
     // Push constants（小型常量数据，直接推送到 GPU 寄存器）
     virtual void BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) = 0;
 
@@ -112,6 +118,15 @@ public:
     // 计算着色器调度
     virtual void Dispatch(u32 groupCountX, u32 groupCountY, u32 groupCountZ) = 0;
     virtual void DispatchIndirect(IRHIBuffer* buffer, u64 offset) = 0;
+
+    // Ray Tracing 命令
+    virtual void BuildBLAS(IRHIAccelerationStructure* blas, IRHIBuffer* scratchBuffer,
+                           const BLASBuildDesc& desc, bool update = false) = 0;      // 构建/更新 BLAS
+    virtual void BuildTLAS(IRHIAccelerationStructure* tlas, IRHIBuffer* scratchBuffer,
+                           IRHIBuffer* instanceBuffer, u32 instanceCount,
+                           bool update = false) = 0;                                  // 构建/更新 TLAS
+    virtual void BindRTPipeline(IRHIRayTracingPipelineState* rtPSO) = 0;              // 绑定 RT 管线
+    virtual void TraceRays(const SBTDesc& sbt, u32 width, u32 height, u32 depth = 1) = 0;  // 发射光线
 
     // 缓冲拷贝（GPU 端）
     virtual void CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst,

@@ -45,7 +45,11 @@ enum class Format : u32 {
 
     R32_FLOAT,
     RG32_FLOAT,
+    RGB32_FLOAT,
     RGBA32_FLOAT,
+
+    // 整数格式
+    R32_UINT,
 
     R11G11B10_FLOAT,
 
