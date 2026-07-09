@@ -1,6 +1,6 @@
 # HugEngine 开发进度
 
-> 最后更新: 2026-07-09（今日更新: ShaderTypes.slang ✅, GBuffer 5 MRT worldPos ✅, DeferredPipeline Shadow 集成 ✅）
+> 最后更新: 2026-07-10（今日更新: HW Ray Tracing Phase 1-3 ✅, RT PSO + BLAS/TLAS + TraceRays + 材质+光照）
 
 ## 整体进度
 
@@ -59,6 +59,9 @@
 | VMA 集成 (VulkanMemoryAllocator) | ✅ |
 | AsyncCompute (双队列 + Timeline Semaphore + 跨队列同步) | ✅ |
 | 时间戳查询 (QueryPool + GPU Profiler) | ✅ |
+| Ray Tracing (BLAS/TLAS + RT PSO + SBT + TraceRays) | ✅ |
+| AccelerationStructure 描述符类型 + UpdateDescriptorSet(AS*) | ✅ |
+| BufferUsage::AccelerationStruct → AS build input flag | ✅ |
 
 ### L3 — Shader（着色器层）✅
 | 特性 | 状态 |
@@ -86,6 +89,9 @@
 | ColorGrading (LDR 饱和度/对比度/振铃调节) | ✅ |
 | SMAA (EdgeDetect + BlendWeight + Neighborhood 3 Pass) | ✅ |
 | Shader Hot Reload (FileWatcher + 自动重编译 + PSO 热替换) | ✅ |
+| RT_Triangle.rgen/rmiss (Phase 1: 过程化三角形) | ✅ |
+| RT_Sponza.rgen/rmiss/rchit (Phase 2-3: 几何体 RayGen/Miss/ClosestHit) | ✅ |
+| RT_Shadow.rgen + RT_Common.rmiss/rchit (Phase 3+ 存根) | ✅ |
 
 ### L4 — Render（渲染层）
 | 子系统 | 状态 |
@@ -108,6 +114,7 @@
 | MeshBatcher (GPU Driven 批量绘制 + DrawIndexedIndirect) | ✅ |
 | ProfilerManager (GPU 时间戳查询 + RenderGraph 集成 + ImGui 面板) | ✅ |
 | ShaderHotReload (FileWatcher + slangc 编译 + PSO 热替换) | ✅ |
+| RTPass (BLAS/TLAS 管理 + SBT + 描述符集 + 材质/光源 UB/纹理) | ✅ |
 | ImGui LoadOp::Load (UI 叠加 + GI/后处理参数面板) | ✅ |
 
 ### L5 — Scene（场景层）✅
@@ -301,6 +308,9 @@ Engine/Shader/Shaders/  (Slang → SPIR-V → .spv.h)
 ├── AutoExposure.comp                        (自动曝光 Compute)
 ├── ColorGrading                             (LDR 色彩分级)
 ├── SMAA_EdgeDetect + SMAA_BlendWeight + SMAA_Neighborhood  (SMAA 3 Pass)
+├── RT_Triangle, RT_Background, RT_Shadow     (RT 着色器: Phase 1-2 存根)
+├── RT_Sponza.rgen/rmiss/rchit               (RT 着色器: Phase 2-3 几何体渲染)
+├── RT_Common.rmiss/rchit                    (RT 着色器: Phase 3+ 通用存根)
 ├── ShaderTypes.slang                         (C++/Slang 共享 GPU 结构体定义)
 └── common, pbr_common                       (公共头文件)
 ```
@@ -315,6 +325,40 @@ Engine/Shader/Shaders/  (Slang → SPIR-V → .spv.h)
 | FXAA | ✓ | ✓ | LDR | 纯 LDR 后处理，无管线依赖 |
 | SMAA | ✓ | ✓ | LDR | 3 Pass 形态学（边缘检测+权重计算+邻域混合），与 FXAA 互斥 |
 | MSAA | ✓ | ⚠️ | HDR | 硬件多采样（仅 HDR 目标，GBuffer 保持 1x，需重启生效） |
+
+### Ray Tracing 渲染流程（Phase 2-3）
+
+```
+RT 模式帧循环:
+  pipeline.Render()                              ← 填充 GPUObjectData + 光栅化输出
+  rtPass.BuildAS(world, sg)                      ← BLAS(几何变更时) + TLAS(每帧)
+  rtPass.UpdateLightBuffer(lightBuf)             ← 光源 UB 填充
+  PipelineBarrier(Undefined → UAV)               ← BackBuffer 准备 RT 写入
+  BindRTPipeline → BindDescriptorSets
+  SetPushConstants(invViewProj, camPos)          ← 相机数据
+  TraceRays(w, h)
+  PipelineBarrier(UAV → RenderTarget)            ← BackBuffer 准备 ImGui
+  SetPipeline(rasterPSO)
+  BeginRenderPass(Load) → ImGui → EndRenderPass  ← ImGui 叠加
+  Present
+```
+
+**数据流**：
+```
+MeshComponent.baseColorFactor → Texture2D(1×256 RGBA32F) → ClosestHit::Load(id)
+GPULight SSBO → Uniform Buffer(cbuffer) → ClosestHit::u_Lights[li]
+Camera → PushConstant → RayGen::invViewProj → world ray
+```
+
+**已知 RT 限制**：
+| 限制 | 原因 | 方案 |
+|------|------|------|
+| SSBO 在 ClosestHit 中 GPU fault | slangc SPIR-V 兼容性 | ✅ UB/纹理替代 |
+| 无纹理采样 | bindless 纹理未接入 RT | Phase 4 |
+| 法线近似 (-WorldRayDirection) | 无顶点缓冲 SSBO | Phase 4 |
+| 无阴影射线 | 需 GPUShadowData SSBO | Phase 4 |
+
+---
 
 ## 已知限制
 
@@ -344,7 +388,7 @@ Engine/Shader/Shaders/  (Slang → SPIR-V → .spv.h)
 | 7 | ExecuteIndirect + GPU Driven (Forward | ⬜ 部分完成，待完善 |
 | 8 | Forward+ (Tile-based Light Culling) | ⬜ |
 | 9 | GI_VXGI 体素锥追踪 | ⬜ |
-| 10 | HW Ray Tracing (TLAS/BLAS + RT PSO) | ⬜ |
+| 10 | HW Ray Tracing (TLAS/BLAS + RT PSO + TraceRays + 材质+光照) | ✅ Phase 1-3 完成 |
 | 11 | Virtual Shadow Maps | ⬜ |
 | 12 | GI_ReSTIR 时空重采样 | ⬜ |
 | 13 | Prefab 系统 | ⬜ |
@@ -364,7 +408,7 @@ Engine/Shader/Shaders/  (Slang → SPIR-V → .spv.h)
 | P1 | 核心骨架 | ~97% | RHI Vulkan+VMA, Slang→SPIR-V, RenderGraph, ECS, glTF, Forward+Deferred, TAA, SSAO, Bloom, DOF, MotionBlur, FXAA, SMAA, MSAA(基础), AutoExposure, ColorGrading, GPU Profiling, Editor基础, Shader HotReload, AsyncCompute(基础), Animation(关键帧) | Undo/Redo |
 | P2 | GPU Driven | ~80% | Bindless, GPU Culling, GPU Scene, CSM+Shadow, IBL, Clustered Shading, ExecuteIndirect+DGC (Deferred+Forward), VMA | VSM, VRS, Decal/ReflProbe, Prefab, Forward+ |
 | P3 | 高级几何 | ~5% | — | Nanite, Mesh Shader, Virtual Texturing, OIT, Impostor |
-| P4 | GI + RT | ~15% | DDGI (HDR radiance), Denoiser, SSGI, SSR | HW RT, Lumen GI, VXGI, ReSTIR, NRD, NRC, RT管线 |
+| P4 | GI + RT | ~30% | DDGI (HDR radiance), Denoiser, SSGI, SSR, **HW RT Phase 1-3** (BLAS/TLAS + TraceRays + 材质+光照) | Lumen GI, VXGI, ReSTIR, NRD, NRC, RT 顶点法线/纹理/阴影 |
 | P5 | 神经渲染 | 0% | — | DLSS/FSR/XeSS, FrameGen, RayRecon, Neural Materials |
 | P6 | 大气+后处理+动画 | ~40% | Bloom, DOF, MotionBlur, AutoExposure, ColorGrading, 关键帧动画 | Atmosphere, Volumetrics, 骨骼动画, 地形植被 |
 | P7 | 高斯泼溅+焦散 | 0% | — | 3DGS, 4DGS, 焦散 |
@@ -380,7 +424,7 @@ Engine/Shader/Shaders/  (Slang → SPIR-V → .spv.h)
 | 4 | AsyncCompute 完善 + 默认开启 | P1 | 🟡 中 | 多阶段提交架构 |
 | 5 | GPUCulling Dispatch 移出 RenderPass | P2 | 🟢 低 | Vulkan 校验警告修复 |
 | 6 | Forward+ (ForwardPipeline + ClusteredShading 模式) | P2 | 🟡 中 | 前向管线 Tile-based 光源剔除 |
-| 7 | HW Ray Tracing | P4 | 🟢 低 | TLAS/BLAS + RT PSO |
+| 7 | HW Ray Tracing (纹理采样 + 顶点法线 + 阴影) | P4 | 🟢 低 | Phase 1-3 ✅, Phase 4 待规划 |
 | 8 | GI_VXGI 体素锥追踪 | P4 | 🟢 低 | 3D Clipmap Cone Trace |
 | 9 | Virtual Shadow Maps | P3 | 🟢 低 | 大规模高质量阴影 |
 | 10 | Prefab 系统 | P2 | 🟢 低 | 编辑器工作流 |
