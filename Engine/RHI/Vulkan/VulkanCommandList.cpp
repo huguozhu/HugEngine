@@ -914,29 +914,175 @@ void VulkanCommandList::DrawMeshTasksIndirect(IRHIBuffer* buffer, u64 offset,
 }
 
 // ============================================================
-// Ray Tracing 命令 — 桩实现（P3-P5 替换为真实实现）
+// Ray Tracing 命令 — 真实实现
 // ============================================================
 
 void VulkanCommandList::BuildBLAS(IRHIAccelerationStructure* blas, IRHIBuffer* scratchBuffer,
                                    const BLASBuildDesc& desc, bool update) {
-    (void)blas; (void)scratchBuffer; (void)desc; (void)update;
-    HE_CORE_WARN("BuildBLAS: 尚未实现（P3）");
+    auto* vkBLAS  = static_cast<VulkanAccelerationStructure*>(blas);
+    auto* vkScratch = static_cast<VulkanBuffer*>(scratchBuffer);
+    auto& rt = m_VulkanDevice->GetRTDispatch();
+    VkCommandBuffer cb = m_CmdBuffers[m_FrameIndex];
+
+    // 1. 构建 VkAccelerationStructureGeometryKHR 数组
+    std::vector<VkAccelerationStructureGeometryKHR> vkGeometries;
+    std::vector<VkAccelerationStructureBuildRangeInfoKHR> rangeInfos;
+    std::vector<u32> maxPrimCounts;
+
+    for (auto& g : desc.geometries) {
+        auto* vkVB = static_cast<VulkanBuffer*>(g.vertexBuffer);
+        auto* vkIB = static_cast<VulkanBuffer*>(g.indexBuffer);
+        auto* vkTF = g.transformBuffer ? static_cast<VulkanBuffer*>(g.transformBuffer) : nullptr;
+
+        VkAccelerationStructureGeometryKHR vkGeo{};
+        vkGeo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+        vkGeo.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+        vkGeo.geometry.triangles.sType         = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+        vkGeo.geometry.triangles.vertexFormat  = ToVkFormat(g.vertexFormat);
+        vkGeo.geometry.triangles.vertexData.deviceAddress = vkVB->GetDeviceAddress();
+        vkGeo.geometry.triangles.vertexStride  = g.vertexStride;
+        vkGeo.geometry.triangles.maxVertex     = g.maxVertex;
+        vkGeo.geometry.triangles.indexType     = (g.indexFormat == Format::R32_UINT)
+                                                  ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
+        vkGeo.geometry.triangles.indexData.deviceAddress  = vkIB ? vkIB->GetDeviceAddress() : 0;
+        vkGeo.geometry.triangles.transformData.deviceAddress = vkTF ? vkTF->GetDeviceAddress() : 0;
+        vkGeo.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+        vkGeometries.push_back(vkGeo);
+
+        VkAccelerationStructureBuildRangeInfoKHR range{};
+        range.primitiveCount  = g.maxPrimitiveCount;
+        range.primitiveOffset = 0;
+        range.firstVertex     = 0;
+        range.transformOffset = 0;
+        rangeInfos.push_back(range);
+        maxPrimCounts.push_back(g.maxPrimitiveCount);
+    }
+
+    // 2. 构建信息
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
+    buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    buildInfo.type                      = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    buildInfo.flags                     = ToVkBuildFlags(desc.flags);
+    buildInfo.mode                      = update
+        ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR
+        : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    buildInfo.srcAccelerationStructure  = update ? vkBLAS->GetHandle() : VK_NULL_HANDLE;
+    buildInfo.dstAccelerationStructure  = vkBLAS->GetHandle();
+    buildInfo.geometryCount             = static_cast<u32>(vkGeometries.size());
+    buildInfo.pGeometries               = vkGeometries.data();
+    buildInfo.scratchData.deviceAddress = vkScratch->GetDeviceAddress();
+
+    // 3. 构建 BLAS
+    VkAccelerationStructureBuildRangeInfoKHR* pRangeInfos = rangeInfos.data();
+    rt.cmdBuildAS(cb, 1, &buildInfo, &pRangeInfos);
 }
 
 void VulkanCommandList::BuildTLAS(IRHIAccelerationStructure* tlas, IRHIBuffer* scratchBuffer,
                                    IRHIBuffer* instanceBuffer, u32 instanceCount, bool update) {
-    (void)tlas; (void)scratchBuffer; (void)instanceBuffer; (void)instanceCount; (void)update;
-    HE_CORE_WARN("BuildTLAS: 尚未实现（P3）");
+    auto* vkTLAS    = static_cast<VulkanAccelerationStructure*>(tlas);
+    auto* vkScratch = static_cast<VulkanBuffer*>(scratchBuffer);
+    auto* vkInstBuf = static_cast<VulkanBuffer*>(instanceBuffer);
+    auto& rt = m_VulkanDevice->GetRTDispatch();
+    VkCommandBuffer cb = m_CmdBuffers[m_FrameIndex];
+
+    // 1. 实例几何描述
+    VkAccelerationStructureGeometryKHR geoInfo{};
+    geoInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+    geoInfo.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+    geoInfo.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+    geoInfo.geometry.instances.arrayOfPointers = VK_FALSE;
+    geoInfo.geometry.instances.data.deviceAddress = vkInstBuf->GetDeviceAddress();
+
+    // 2. 构建信息
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
+    buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    buildInfo.type                      = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    buildInfo.flags                     = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    buildInfo.mode                      = update
+        ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR
+        : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    buildInfo.srcAccelerationStructure  = update ? vkTLAS->GetHandle() : VK_NULL_HANDLE;
+    buildInfo.dstAccelerationStructure  = vkTLAS->GetHandle();
+    buildInfo.geometryCount             = 1;
+    buildInfo.pGeometries               = &geoInfo;
+    buildInfo.scratchData.deviceAddress = vkScratch->GetDeviceAddress();
+
+    // 3. 构建范围
+    VkAccelerationStructureBuildRangeInfoKHR range{};
+    range.primitiveCount  = instanceCount;
+    range.primitiveOffset = 0;
+    range.firstVertex     = 0;
+    range.transformOffset = 0;
+
+    VkAccelerationStructureBuildRangeInfoKHR* pRange = &range;
+    rt.cmdBuildAS(cb, 1, &buildInfo, &pRange);
+
+    // 4. 内存屏障：确保 TLAS 构建完成后才能用于 TraceRays
+    VkMemoryBarrier barrier{};
+    barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    barrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    vkCmdPipelineBarrier(cb,
+        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+        VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+        0, 1, &barrier, 0, nullptr, 0, nullptr);
 }
 
 void VulkanCommandList::BindRTPipeline(IRHIRayTracingPipelineState* rtPSO) {
-    (void)rtPSO;
-    HE_CORE_WARN("BindRTPipeline: 尚未实现（P4）");
+    auto* vkPSO = static_cast<VulkanRTPipelineState*>(rtPSO);
+    VkCommandBuffer cb = m_CmdBuffers[m_FrameIndex];
+
+    m_CurrentPipeline       = vkPSO->GetPipeline();
+    m_CurrentLayout         = vkPSO->GetPipelineLayout();
+    m_CurrentBindPoint      = VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR;
+
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, vkPSO->GetPipeline());
 }
 
 void VulkanCommandList::TraceRays(const SBTDesc& sbt, u32 width, u32 height, u32 depth) {
-    (void)sbt; (void)width; (void)height; (void)depth;
-    HE_CORE_WARN("TraceRays: 尚未实现（P5）");
+    auto& rt = m_VulkanDevice->GetRTDispatch();
+    VkCommandBuffer cb = m_CmdBuffers[m_FrameIndex];
+
+    // 解析 SBT 缓冲区 GPU 地址
+    auto* vkBuf = static_cast<VulkanBuffer*>(sbt.buffer);
+    u64 baseAddr = vkBuf->GetDeviceAddress();
+    u64 bufSize  = vkBuf->GetSize();
+
+    // 构建 VkStridedDeviceAddressRegionKHR（每个区域需要 deviceAddress + stride + size）
+    // 区域大小从偏移差推断（假设紧密排列，末尾区域到缓冲末尾）
+    auto makeRegion = [&](const SBTSlot& slot, u64 nextOffset) -> VkStridedDeviceAddressRegionKHR {
+        VkStridedDeviceAddressRegionKHR region{};
+        if (slot.stride == 0) return region;  // 空区域（deviceAddress=0, stride=0, size=0）
+
+        region.deviceAddress = baseAddr + slot.handleOffset;
+        region.stride        = slot.stride;
+        u64 endOffset = (nextOffset > slot.handleOffset) ? nextOffset : bufSize;
+        region.size = (endOffset > slot.handleOffset) ? (endOffset - slot.handleOffset) : slot.stride;
+        return region;
+    };
+
+    // 收集有效区域偏移，排序后推断每个区域的终止位置
+    u64 offsets[4] = {
+        sbt.rayGen.stride   ? sbt.rayGen.handleOffset   : ~0ull,
+        sbt.miss.stride     ? sbt.miss.handleOffset     : ~0ull,
+        sbt.hit.stride      ? sbt.hit.handleOffset      : ~0ull,
+        sbt.callable.stride ? sbt.callable.handleOffset : ~0ull,
+    };
+    std::sort(offsets, offsets + 4);
+
+    auto getNext = [&](u64 myOffset) -> u64 {
+        for (u64 o : offsets) if (o > myOffset && o != ~0ull) return o;
+        return bufSize;
+    };
+
+    auto rayGenRegion   = makeRegion(sbt.rayGen,   getNext(sbt.rayGen.handleOffset));
+    auto missRegion     = makeRegion(sbt.miss,     getNext(sbt.miss.handleOffset));
+    auto hitRegion      = makeRegion(sbt.hit,      getNext(sbt.hit.handleOffset));
+    auto callableRegion = makeRegion(sbt.callable, getNext(sbt.callable.handleOffset));
+
+    rt.cmdTraceRays(cb,
+        &rayGenRegion, &missRegion, &hitRegion, &callableRegion,
+        width, height, depth);
 }
 
 void VulkanCommandList::Submit() {

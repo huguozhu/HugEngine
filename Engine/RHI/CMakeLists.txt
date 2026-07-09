@@ -25,6 +25,7 @@ if(HUGENGINE_RHI_VULKAN)
         Vulkan/VulkanCommandList.cpp
         Vulkan/VulkanResources.cpp
         Vulkan/VulkanPipeline.cpp
+        Vulkan/VulkanRayTracing.cpp
     )
     target_link_libraries(HugEngineRHI PUBLIC Vulkan::Vulkan)
     # 暴露 Vulkan 桥接头文件给 Sample（Phase 1 临时方案）

@@ -79,6 +79,20 @@ private:
 // ============================================================
 // VulkanCommandList — 完整定义（供 Sample 和内部分享）
 // ============================================================
+// RT 扩展函数派发表（供 VulkanDevice + VulkanAccelerationStructure 等使用）
+// ============================================================
+struct VulkanRTDispatch {
+    PFN_vkCreateAccelerationStructureKHR           createAS              = nullptr;
+    PFN_vkDestroyAccelerationStructureKHR          destroyAS             = nullptr;
+    PFN_vkGetAccelerationStructureBuildSizesKHR    getASBuildSizes       = nullptr;
+    PFN_vkCmdBuildAccelerationStructuresKHR        cmdBuildAS            = nullptr;
+    PFN_vkGetAccelerationStructureDeviceAddressKHR getASDeviceAddress    = nullptr;
+    PFN_vkCreateRayTracingPipelinesKHR             createRTPipelines     = nullptr;
+    PFN_vkGetRayTracingShaderGroupHandlesKHR       getRTShaderGroupHandles = nullptr;
+    PFN_vkCmdTraceRaysKHR                          cmdTraceRays          = nullptr;
+};
+
+// ============================================================
 // VulkanDevice 类定义在此处（不在 .cpp 中），因为 VulkanCommandList 需要其完整定义
 // 方法实现位于 VulkanDevice.cpp
 class VulkanDevice final : public IRHIDevice {
@@ -161,6 +175,13 @@ public:
     bool    SupportsRayTracing()  const { return m_SupportsRT; }
     bool    SupportsMeshShaders() const { return m_SupportsMesh; }
 
+    // Shader Group 句柄信息（用于 SBT 构建）
+    u32 GetShaderGroupHandleSize()    const { return m_ShaderGroupHandleSize; }
+    u32 GetShaderGroupBaseAlignment() const { return m_ShaderGroupBaseAlignment; }
+
+    // RT 函数派发表
+    VulkanRTDispatch& GetRTDispatch() { return m_RT; }
+
     // Fence 句柄 → VkSemaphore 解析（供 VulkanCommandList 集成 Timeline 信号量）
     VkSemaphore ResolveFenceSemaphore(RHIFenceHandle fence) const {
         if (fence == kInvalidFence || fence > m_Fences.size()) return VK_NULL_HANDLE;
@@ -186,6 +207,7 @@ private:
     VkSemaphore CreateTimelineSemaphore(u64 initialValue);  // 创建 Timeline 信号量
     void QueryRTCapabilities();   // 查询 RT 扩展支持 + 硬件能力
     void QueryMeshCapabilities(); // 查询 Mesh Shader 扩展支持 + 硬件能力
+    void LoadRTFunctions();       // 加载 RT 扩展函数指针
 
     VkInstance       m_Instance       = VK_NULL_HANDLE;
     VkPhysicalDevice m_Physical       = VK_NULL_HANDLE;
@@ -236,6 +258,9 @@ private:
     VmaAllocator               m_VmaAllocator     = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT m_DebugMessenger = VK_NULL_HANDLE;
     bool m_ValidationEnabled = false;
+
+    // RT 扩展函数派发表
+    VulkanRTDispatch m_RT;
 
     // Descriptor set management
     VkDescriptorPool                  m_DescPool = VK_NULL_HANDLE;
@@ -523,6 +548,68 @@ private:
 };
 
 // ============================================================
+// VulkanAccelerationStructure — BLAS/TLAS 加速结构封装
+// ============================================================
+class VulkanAccelerationStructure final : public IRHIAccelerationStructure {
+public:
+    VulkanAccelerationStructure(VkDevice device, VmaAllocator allocator,
+                                AccelerationStructureType type,
+                                const VulkanRTDispatch& rt,
+                                u64 asSize);
+    ~VulkanAccelerationStructure() override;
+
+    u64 GetDeviceAddress() const override { return m_DeviceAddress; }
+    u64 GetSize()           const override { return m_Size; }
+
+    VkAccelerationStructureKHR GetHandle()    const { return m_AS; }
+    AccelerationStructureType  GetType()       const { return m_Type; }
+    VkDevice                  GetDevice()     const { return m_Device; }
+    u64                       GetBufferAddress() const { return m_BufferAddress; }
+
+    // BLAS 构建时使用的几何描述（仅 BLAS 有效）
+    void SetBLASDesc(const BLASBuildDesc& desc) { m_BLASDesc = desc; }
+    const BLASBuildDesc& GetBLASDesc() const { return m_BLASDesc; }
+
+private:
+    VkDevice                    m_Device        = VK_NULL_HANDLE;
+    VmaAllocator                m_Allocator     = VK_NULL_HANDLE;
+    VkAccelerationStructureKHR  m_AS            = VK_NULL_HANDLE;
+    VkBuffer                    m_Buffer        = VK_NULL_HANDLE;  // 底层存储缓冲
+    VmaAllocation               m_Allocation    = VK_NULL_HANDLE;
+    u64                         m_DeviceAddress = 0;   // AS GPU 地址（vkGetAccelerationStructureDeviceAddressKHR）
+    u64                         m_BufferAddress = 0;   // 底层缓冲 GPU 地址（用于 TLAS 实例引用）
+    u64                         m_Size          = 0;
+    AccelerationStructureType   m_Type          = AccelerationStructureType::BottomLevel;
+    BLASBuildDesc               m_BLASDesc;            // BLAS 几何描述（供 Build 使用）
+};
+
+// ============================================================
+// VulkanRTPipelineState — RT 管线状态 + 着色器组句柄
+// ============================================================
+class VulkanRTPipelineState final : public IRHIRayTracingPipelineState {
+public:
+    VulkanRTPipelineState(VkDevice device, VkPipeline pipeline,
+                          VkPipelineLayout layout, u32 groupCount,
+                          u32 handleSize, std::vector<u8> handles);
+    ~VulkanRTPipelineState() override;
+
+    u32 GetShaderGroupCount()       const override { return m_GroupCount; }
+    u32 GetShaderGroupHandleSize()  const override { return m_HandleSize; }
+    std::vector<u8> GetShaderGroupHandles() const override { return m_Handles; }
+
+    VkPipeline       GetPipeline()       const { return m_Pipeline; }
+    VkPipelineLayout GetPipelineLayout() const { return m_PipelineLayout; }
+
+private:
+    VkDevice            m_Device         = VK_NULL_HANDLE;
+    VkPipeline          m_Pipeline       = VK_NULL_HANDLE;
+    VkPipelineLayout    m_PipelineLayout = VK_NULL_HANDLE;
+    u32                 m_GroupCount     = 0;
+    u32                 m_HandleSize     = 0;
+    std::vector<u8>     m_Handles;       // 所有着色器组句柄数据（SBT 用）
+};
+
+// ============================================================
 // VulkanDeviceAccess — 内部桥接：从 IRHIDevice 获取 Vulkan 句柄
 // 供 Editor/ImGui 等非 RHI 模块使用
 // ============================================================
@@ -538,9 +625,10 @@ struct VulkanDeviceAccess {
 };
 
 // ============================================================
-// 格式转换辅助函数（跨 .cpp 共享，实现在 VulkanResources.cpp）
+// 格式转换辅助函数（跨 .cpp 共享，实现在 VulkanResources.cpp + VulkanRayTracing.cpp）
 // ============================================================
 VkFormat    ToVkFormat(Format fmt);
 VkCompareOp ToVkCompareOp(CompareFunc func);
+VkBuildAccelerationStructureFlagsKHR ToVkBuildFlags(ASBuildFlags flags);
 
 } // namespace he::rhi
