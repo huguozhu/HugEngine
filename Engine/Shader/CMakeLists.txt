@@ -93,8 +93,7 @@ if(SLANGC)
     # Mesh Shader 着色器（.mesh / .task）
     # 命名约定: EffectName.mesh.slang (Mesh), EffectName.task.slang (Amplification/Task)
     set(MESH_SLANG
-        # P9 示例: GBuffer.mesh, PBR.mesh 等
-        # "${SHADER_DIR}/GBuffer.mesh.slang"
+        "${SHADER_DIR}/GBuffer.mesh.slang"
     )
     file(GLOB SLANG_INCLUDES "${SHADER_DIR}/*.slang")  # 公共头文件（用 glob 自动收集即可）
 

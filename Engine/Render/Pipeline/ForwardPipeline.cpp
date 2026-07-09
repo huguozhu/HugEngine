@@ -14,6 +14,7 @@
 #include "Threading/JobSystem.h"
 #include "PBR.vert.spv.h"
 #include "PBR.frag.spv.h"
+#include "GBuffer.mesh.spv.h"
 #include "RT_Shadow.rgen.spv.h"
 #include "RT_Common.rmiss.spv.h"
 #include "RT_Common.rchit.spv.h"
@@ -353,6 +354,14 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
             m_RTEnabled = false;
             HE_CORE_WARN("ForwardPipeline: RTPass init failed, RT disabled");
         }
+    }
+
+    // --- Mesh Shader 支持（硬件支持时创建测试 PSO）---
+    // 注：完整 Mesh Shader PSO 使用方式参见 VulkanPipeline.cpp 中的 mesh branch
+    //    PipelineStateDesc::meshShader 设为 ShaderBytecode* 即可自动走 Mesh 管线路径
+    //    创建后用 DrawMeshTasks(groupCount, 1, 1) 替代 DrawIndexed
+    if (device->GetCaps().supportsMeshShaders) {
+        HE_CORE_INFO("ForwardPipeline: Mesh Shader 硬件支持已就绪，可通过 PipelineStateDesc::meshShader 使用");
     }
 
     HE_CORE_INFO("ForwardPipeline initialized (with HDR + Tone Mapping + Skybox + ShadowSystem)");
