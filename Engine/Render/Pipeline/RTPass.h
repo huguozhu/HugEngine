@@ -61,10 +61,22 @@ public:
     // 发射光线（width/height 通常对应屏幕分辨率或半分辨率）
     void TraceRays(rhi::IRHICommandList* cmd, u32 width, u32 height);
 
-    // 每帧更新 RT 描述符集（set0: TLAS + BackBuffer, set1: GPUObjectData SSBO）
+    // 每帧更新 RT 描述符集（set0: TLAS + BackBuffer, set1: 材质 Uniform Buffer）
     void UpdateRTDescriptorSet(rhi::IRHIDevice* device,
                                void* backBufferView,
                                rhi::IRHIBuffer* objectDataBuffer);
+
+    // 创建材质纹理（1×N RGBA32F），从 World MeshComponent 读取 baseColorFactor
+    bool CreateMaterialTexture(rhi::IRHIDevice* device, u32 maxInstances,
+                               he::World& world);
+
+    // 创建 + 更新光源 Uniform Buffer
+    bool CreateLightBuffer(rhi::IRHIDevice* device, u32 maxLights = 8);
+    void UpdateLightBuffer(rhi::IRHIBuffer* lightBuffer);
+
+    // 获取资源
+    rhi::IRHITexture* GetMaterialTexture() const { return m_MaterialTex.get(); }
+    rhi::IRHIBuffer*  GetLightBuffer()    const { return m_LightUB.get(); }
 
     // 获取描述符集句柄（set0: RayGen, set1: ClosestHit）
     rhi::DescriptorSetHandle GetDescriptorSet0() const { return m_DescSet; }
@@ -114,6 +126,12 @@ private:
     rhi::DescriptorSetHandle       m_DescSet     = rhi::kInvalidSet;      // set=0（内部管理）
     rhi::DescriptorSetHandle       m_DescSet1    = rhi::kInvalidSet;      // set=1（内部管理）
     rhi::PushConstantRange         m_PushConstRange;                      // Push Constant 范围
+
+    // set=1 资源（ClosestHit 使用）
+    std::unique_ptr<rhi::IRHITexture> m_MaterialTex;                     // 材质 1D 纹理 (b=0)
+    std::unique_ptr<rhi::IRHIBuffer>  m_LightUB;                        // 光源 UB (b=1)
+    u32 m_MaterialInstanceCount = 0;
+    u32 m_LightMaxCount = 8;
 
     u32 m_MaxInstanceCount = 4096;
     bool m_Initialized = false;

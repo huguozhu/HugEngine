@@ -176,6 +176,8 @@ bool RTPass::CreateSBT(rhi::IRHIDevice* device) {
 }
 
 void RTPass::Shutdown() {
+    m_MaterialTex.reset();
+    m_LightUB.reset();
     m_TLASScratch.reset();
     m_TLASInstanceBuffer.reset();
     m_SBTBuffer.reset();
@@ -344,11 +346,94 @@ void RTPass::UpdateRTDescriptorSet(rhi::IRHIDevice* device,
             rhi::DescriptorType::StorageImage, backBufferView);
     }
 
-    // set=1: GPUObjectData SSBO（ClosestHit 使用，独立 set 避免冲突）
-    if (m_DescSet1 != rhi::kInvalidSet && objectDataBuffer) {
-        device->UpdateDescriptorSet(m_DescSet1, 0,
-            rhi::DescriptorType::StorageBuffer, objectDataBuffer);
+    // set=1: 材质纹理 + 光源 UB（ClosestHit 使用）
+    if (m_DescSet1 != rhi::kInvalidSet) {
+        if (m_MaterialTex) {
+            // 材质 = SampledImage（Texture2D::Load 不需要采样器）
+            device->UpdateDescriptorSet(m_DescSet1, 0,
+                rhi::DescriptorType::SampledImage,
+                m_MaterialTex.get(), nullptr);
+        }
+        if (m_LightUB)
+            device->UpdateDescriptorSet(m_DescSet1, 1,
+                rhi::DescriptorType::UniformBuffer, m_LightUB.get());
     }
+}
+
+// 创建材质纹理（1×N RGBA32F），从 World MeshComponent 读取 baseColorFactor
+bool RTPass::CreateMaterialTexture(rhi::IRHIDevice* device, u32 maxInstances,
+                                    he::World& world) {
+    if (!device || maxInstances == 0) return false;
+    m_MaterialInstanceCount = std::min(maxInstances, 256u);
+
+    // 默认白色兜底
+    std::vector<float> texData(m_MaterialInstanceCount * 4, 1.0f);
+
+    // 从 MeshComponent 收集 baseColorFactor（按 TLAS 实例顺序）
+    u32 idx = 0;
+    world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent& mesh) {
+        if (mesh.GetIndexCount() == 0) return;
+        if (idx >= m_MaterialInstanceCount) return;
+        float* dst = &texData[idx * 4];
+        dst[0] = mesh.baseColorFactor.x;
+        dst[1] = mesh.baseColorFactor.y;
+        dst[2] = mesh.baseColorFactor.z;
+        dst[3] = mesh.baseColorFactor.w;
+        idx++;
+    });
+
+    rhi::TextureDesc texDesc;
+    texDesc.format = rhi::Format::RGBA32_FLOAT;
+    texDesc.width  = m_MaterialInstanceCount;
+    texDesc.height = 1;
+    texDesc.mipLevels = 1;
+    texDesc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::TransferDst;
+    texDesc.initialData = texData.data();
+    m_MaterialTex = device->CreateTexture(texDesc);
+    HE_CORE_INFO("RTPass: 材质纹理创建 ({}×1 RGBA32F, {} meshes)", m_MaterialInstanceCount, idx);
+    return m_MaterialTex != nullptr;
+}
+
+// 创建光源 Uniform Buffer（8 盏灯 * 2 float4 + count = 272 字节）
+bool RTPass::CreateLightBuffer(rhi::IRHIDevice* device, u32 maxLights) {
+    if (!device) return false;
+    m_LightMaxCount = std::min(maxLights, 8u);
+    // colorIntensity[8] + directionType[8] + lightCount + pad
+    u32 size = m_LightMaxCount * 32 + 16;  // 2 float4 per light + count
+    rhi::BufferDesc ubDesc;
+    ubDesc.size  = size;
+    ubDesc.usage = rhi::BufferUsage::Uniform;
+    m_LightUB = device->CreateBuffer(ubDesc);
+    HE_CORE_INFO("RTPass: 光源 UB 创建 ({} lights, {}B)", m_LightMaxCount, size);
+    return m_LightUB != nullptr;
+}
+
+// 从 GPULight SSBO 提取光源数据填充 UB（每帧调用）
+void RTPass::UpdateLightBuffer(rhi::IRHIBuffer* lightBuffer) {
+    if (!m_LightUB || !lightBuffer) return;
+
+    // GPULight = 64 bytes: colorIntensity(16) + directionType(16) + positionRange(16) + coneAngles(8) + shadowIndex(4) + pad(4)
+    u8* src = static_cast<u8*>(lightBuffer->Map());
+    u8* dst = static_cast<u8*>(m_LightUB->Map());
+    if (!src || !dst) return;
+
+    u32 count = 0;
+    for (u32 i = 0; i < m_LightMaxCount; ++i) {
+        u32 srcOff = i * 64;
+        float intensity = *reinterpret_cast<float*>(src + srcOff + 12); // colorIntensity.w
+        if (intensity <= 0.0f) continue;  // 跳过无效光源
+
+        // colorIntensity (float4 at offset 0)
+        std::memcpy(dst + i * 32, src + srcOff, 16);
+        // directionType (float4 at offset 16)
+        std::memcpy(dst + i * 32 + 16, src + srcOff + 16, 16);
+        count++;
+    }
+    // lightCount at end
+    *reinterpret_cast<u32*>(dst + m_LightMaxCount * 32) = count;
+
+    m_LightUB->Unmap();
+    lightBuffer->Unmap();
 }
 
 // BindDescriptorSets — 绑定所有描述符集

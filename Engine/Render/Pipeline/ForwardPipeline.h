@@ -92,6 +92,7 @@ public:
 
     rhi::IRHIBuffer*         GetCurrentObjectBuffer() { return m_ObjectBuffers[m_CurrentFrameSlot].get(); }
     rhi::IRHIBuffer*         GetCurrentShadowBuffer() { return m_ShadowBuffers[m_CurrentFrameSlot].get(); }
+    rhi::IRHIBuffer*         GetCurrentLightBuffer()  { return m_LightBuffers[m_CurrentFrameSlot].get(); }
     rhi::DescriptorSetHandle GetCurrentDescSet()      { return m_DescSets[m_CurrentFrameSlot]; }
     // 阴影专用 Object Buffer（独立于场景 Object Buffer，避免 CPU 录制时覆盖）
     rhi::IRHIBuffer*         GetCurrentShadowObjectBuffer() { return m_ShadowObjBuffers[m_CurrentFrameSlot].get(); }

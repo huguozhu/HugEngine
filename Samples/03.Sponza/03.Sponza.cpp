@@ -429,7 +429,8 @@ int main() {
 
         rhi::DescriptorSetLayoutDesc rtSet1Desc;
         rtSet1Desc.bindings = {
-            { 0, rhi::DescriptorType::StorageBuffer,         1, 0x40  },
+            { 0, rhi::DescriptorType::SampledImage,  1, 0x40 },  // 材质纹理
+            { 1, rhi::DescriptorType::UniformBuffer, 1, 0x40 },  // 光源 UB
         };
         rtLayout1 = device->CreateDescriptorSetLayout(rtSet1Desc);
 
@@ -459,6 +460,10 @@ int main() {
         rtPass.Initialize(device.get(),
             { rgen, rmiss, rchit }, rtGroups,
             rtLayouts, pcRange);
+
+        // 5.5.6 创建 RT 资源（材质纹理 + 光源 UB）
+        rtPass.CreateMaterialTexture(device.get(), 256, world);
+        rtPass.CreateLightBuffer(device.get(), 8);
 
         HE_CORE_INFO("RT 路径初始化完成 (RT: {})",
             rtPass.IsValid() ? "就绪" : "不可用");
@@ -663,7 +668,11 @@ int main() {
             // a) 构建/更新 AS（仅几何变更时重建 BLAS，每帧重建 TLAS）
             rtPass.BuildAS(cmdList.get(), world, sceneGraph);
 
-            // b) 更新 RT 描述符集（绑定 TLAS + BackBuffer + GPUObjectData SSBO）
+            // b1) 填充光源 UB（材质纹理为静态，创建时已初始化）
+            rtPass.UpdateLightBuffer(
+                pipeline.GetCurrentLightBuffer());
+
+            // b2) 更新 RT 描述符集（set0: TLAS + BackBuffer, set1: 材质 UB）
             rtPass.UpdateRTDescriptorSet(device.get(),
                 swapchain->GetCurrentBackBufferView(),
                 pipeline.GetCurrentObjectBuffer());

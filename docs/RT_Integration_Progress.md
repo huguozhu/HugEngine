@@ -113,9 +113,23 @@ virtual void UpdateDescriptorSet(DescriptorSetHandle set, u32 binding,
 
 | 限制 | 原因 | 计划 |
 |------|------|------|
-| 无法读取 GPUObjectData（材质色） | SSBO 在 ClosestHit 中不兼容 | Phase 3 |
-| 法线近似（`-WorldRayDirection`） | 无顶点法线数据 | Phase 3 引入顶点缓冲 |
-| InstanceID 与 ObjectData 索引不匹配 | 视锥剔除等差异 | Phase 3 统一索引 |
+| 无法读取 GPUObjectData（材质色） | SSBO 在 ClosestHit 中不兼容 | ✅ Phase 3 用 Uniform Buffer 修复 |
+| 法线近似（`-WorldRayDirection`） | 无顶点法线数据 | Phase 3 引入顶点缓冲（依赖 SSBO 修复） |
+| InstanceID 与 ObjectData 索引不匹配 | 视锥剔除等差异 | 当前 Sponza 全可见时无影响 |
+
+---
+
+### Phase 3 踩坑记录
+
+1. **Uniform Buffer 替代 Storage Buffer** → `StructuredBuffer`/`ByteAddressBuffer` 在 ClosestHit 中 GPU fault（slangc SPIR-V 兼容性）。使用 `cbuffer` (Uniform Buffer) 可行。`CreateMaterialBuffer` 从 GPUObjectData SSBO（CPU 端 map）提取材质色写入 UB。
+
+### Phase 3 已知限制
+
+| 限制 | 原因 | 方案 |
+|------|------|------|
+| 顶点法线不可用 | 需 SSBO 绑定 vertex buffer | slangc 修复或 `SPV_KHR_ray_tracing_position_fetch` |
+| 多光源数据不可用 | 需 SSBO 绑定 GPULight[] | 同上 |
+| InstanceID/ObjectData 索引可能不匹配 | 视锥剔除差异 | 当前 Sponza 全可见时无影响 |
 
 ---
 
@@ -126,5 +140,5 @@ Phase 1 ✅ 已完成并验证
     ↓
 Phase 2 ✅ 已完成（含 02.Cube RT 模式）
     ↓
-Phase 3 ⬜ 待规划（RT 材质 + 直接光照）
+Phase 3 🔄 进行中（UB 材质色完成，vertex normal/multilight 待 SSBO 修复）
 ```

@@ -394,13 +394,15 @@ void VulkanDevice::CreateLogicalDevice() {
     addrFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
     addrFeature.bufferDeviceAddress = VK_TRUE;
 
+    // 启用 Uniform Buffer 非均匀动态索引（RT ClosestHit cbuffer[id] 访问需要）
+    descIndexing.shaderUniformBufferArrayNonUniformIndexing = VK_TRUE;
+
     // 启用 Timeline Semaphore（Vulkan 1.2+ 核心特性，需显式开启）
     VkPhysicalDeviceTimelineSemaphoreFeatures timelineFeature{};
     timelineFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
     timelineFeature.timelineSemaphore = VK_TRUE;
 
     // pNext 链构建: descIndexing → addrFeature → timelineFeature → [RT] → [Mesh]
-    // 末尾开始向前链接: timelineFeature ← meshFeature? ← rt? ← as? ← addrFeature? ← descIndexing
     void** ppNext = &descIndexing.pNext;
     *ppNext = &addrFeature; ppNext = &addrFeature.pNext;
     *ppNext = &timelineFeature; ppNext = &timelineFeature.pNext;
