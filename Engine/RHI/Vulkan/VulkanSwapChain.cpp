@@ -73,7 +73,9 @@ void VulkanSwapChain::CreateSwapchain() {
     swapInfo.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
     swapInfo.imageExtent = {m_Width, m_Height};
     swapInfo.imageArrayLayers = 1;
-    swapInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    swapInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+                         | VK_IMAGE_USAGE_STORAGE_BIT           // RT 直接写入 BackBuffer
+                         | VK_IMAGE_USAGE_TRANSFER_DST_BIT;     // 支持拷贝到 BackBuffer
     swapInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     swapInfo.preTransform = caps.currentTransform;
     swapInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;

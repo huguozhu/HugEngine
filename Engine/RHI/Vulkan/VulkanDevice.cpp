@@ -1362,6 +1362,29 @@ void VulkanDevice::UpdateDescriptorSet(DescriptorSetHandle setHandle, u32 bindin
     vkUpdateDescriptorSets(m_Device, 1, &write, 0, nullptr);
 }
 
+void VulkanDevice::UpdateDescriptorSetWithImageView(DescriptorSetHandle setHandle, u32 binding,
+                                                      DescriptorType type, void* imageView) {
+    if (setHandle == 0 || setHandle > m_DescSets.size()) return;
+    VkDescriptorSet ds = m_DescSets[static_cast<usize>(setHandle - 1)];
+    if (ds == VK_NULL_HANDLE) return;
+
+    VkDescriptorImageInfo imageInfo{};
+    imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;  // StorageImage 使用 GENERAL 布局
+    imageInfo.imageView   = static_cast<VkImageView>(imageView);
+    imageInfo.sampler     = VK_NULL_HANDLE;
+
+    VkWriteDescriptorSet write{};
+    write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet          = ds;
+    write.dstBinding      = binding;
+    write.dstArrayElement = 0;
+    write.descriptorCount = 1;
+    write.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    write.pImageInfo      = &imageInfo;
+
+    vkUpdateDescriptorSets(m_Device, 1, &write, 0, nullptr);
+}
+
 void VulkanDevice::DestroyDescriptorSetLayout(DescriptorSetLayoutHandle handle) {
     if (handle == 0 || handle > m_DescLayoutInfos.size()) return;
     VkDescriptorSetLayout layout = m_DescLayoutInfos[static_cast<usize>(handle - 1)].layout;

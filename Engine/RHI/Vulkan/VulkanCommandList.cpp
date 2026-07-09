@@ -49,7 +49,9 @@ static VkPipelineStageFlags ToVkPipelineStageFlags(PipelineStage stage) {
     if (s & u32(PipelineStage::Transfer))              flags |= VK_PIPELINE_STAGE_TRANSFER_BIT;
     if (s & u32(PipelineStage::EarlyFragmentTests))    flags |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
     if (s & u32(PipelineStage::LateFragmentTests))     flags |= VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-    if (s & u32(PipelineStage::VertexShader))          flags |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
+    if (s & u32(PipelineStage::VertexShader))             flags |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
+    if (s & u32(PipelineStage::RayTracingShader))          flags |= VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
+    if (s & u32(PipelineStage::AccelerationStructureBuild)) flags |= VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
     return flags ? flags : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
 }
 

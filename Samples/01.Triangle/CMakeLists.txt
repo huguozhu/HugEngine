@@ -5,6 +5,7 @@ target_link_libraries(01.Triangle PRIVATE
     HugEngineCore
     HugEngineRHI
     HugEngineShader
+    HugEngineEditor
 )
 
 # 依赖 CompileShaders 确保 EmbeddedShaders.h 已生成

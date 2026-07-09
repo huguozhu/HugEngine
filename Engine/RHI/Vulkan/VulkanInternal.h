@@ -155,6 +155,8 @@ public:
                                                   IRHITexture** textures, IRHISampler** samplers,
                                                   u32 count) override;
     void                      DestroyDescriptorSetLayout(DescriptorSetLayoutHandle layout) override;
+    void                      UpdateDescriptorSetWithImageView(DescriptorSetHandle set, u32 binding,
+                                                                DescriptorType type, void* imageView) override;
 
     // Internal
     VkDevice         GetVkDevice()     const { return m_Device; }

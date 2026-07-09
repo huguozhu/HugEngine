@@ -44,6 +44,7 @@ if(SLANGC)
         "${SHADER_DIR}/TAA_Resolve.vert.slang"
         "${SHADER_DIR}/ToneMap.vert.slang"
         "${SHADER_DIR}/Triangle.vert.slang"
+        "${SHADER_DIR}/Fullscreen.vert.slang"
     )
     set(FRAG_SLANG
         "${SHADER_DIR}/DeferredLighting.frag.slang"
@@ -74,6 +75,7 @@ if(SLANGC)
         "${SHADER_DIR}/SMAA_EdgeDetect.frag.slang"
         "${SHADER_DIR}/SMAA_BlendWeight.frag.slang"
         "${SHADER_DIR}/SMAA_Neighborhood.frag.slang"
+        "${SHADER_DIR}/FullscreenCopy.frag.slang"
     )
     set(COMP_SLANG
         "${SHADER_DIR}/GPUCull.comp.slang"
@@ -86,9 +88,8 @@ if(SLANGC)
     # 命名约定: EffectName.rgen.slang (RayGen), EffectName.rmiss.slang (Miss),
     #           EffectName.rchit.slang (ClosestHit), EffectName.rahit.slang (AnyHit)
     set(RT_SLANG
-        "${SHADER_DIR}/RT_Shadow.rgen.slang"
-        "${SHADER_DIR}/RT_Common.rmiss.slang"
-        "${SHADER_DIR}/RT_Common.rchit.slang"
+        "${SHADER_DIR}/RT_Triangle.rgen.slang"
+        "${SHADER_DIR}/RT_Background.rmiss.slang"
     )
     # Mesh Shader 着色器（.mesh / .task）
     # 命名约定: EffectName.mesh.slang (Mesh), EffectName.task.slang (Amplification/Task)

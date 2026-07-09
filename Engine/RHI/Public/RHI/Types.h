@@ -209,7 +209,7 @@ struct DescriptorSetLayoutBinding {
     u32             binding     = 0;        // binding 编号
     DescriptorType  type        = DescriptorType::UniformBuffer;
     u32             count       = 1;        // 数组元素数
-    u8              stageMask   = 1;        // VK_SHADER_STAGE_* 位掩码 (1=Vertex, 16=Fragment, 17=Both)
+    u32             stageMask   = 1;        // VK_SHADER_STAGE_* 位掩码 (1=Vertex, 16=Fragment, 0x100=RayGen)
     bool            bindless    = false;    // 是否为无绑定数组
 };
 
@@ -272,6 +272,8 @@ enum class PipelineStage : u32 {
     ComputeShader               = 1 << 8,
     Transfer                    = 1 << 9,
     BottomOfPipe                = 1 << 10,
+    RayTracingShader            = 1 << 11,  // VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
+    AccelerationStructureBuild  = 1 << 12,  // VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR
 };
 
 inline PipelineStage operator|(PipelineStage a, PipelineStage b) { return PipelineStage(u32(a) | u32(b)); }
