@@ -27,6 +27,8 @@ static VkBufferUsageFlags ToVkBufferUsage(BufferUsage usage) {
     if (u32(usage) & u32(BufferUsage::Uniform))  flags |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
     if (u32(usage) & u32(BufferUsage::Storage))  flags |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
     if (u32(usage) & u32(BufferUsage::Indirect)) flags |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+    if (u32(usage) & u32(BufferUsage::AccelerationStruct))
+        flags |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
     return flags;
 }
 

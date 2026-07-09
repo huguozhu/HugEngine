@@ -943,12 +943,18 @@ ASBuildSizes VulkanDevice::GetBLASBuildSizes(const BLASBuildDesc& desc) {
 ASBuildSizes VulkanDevice::GetTLASBuildSizes(u32 maxInstanceCount) {
     if (!m_SupportsRT || !m_RT.getASBuildSizes) return ASBuildSizes{};
 
+    // TLAS 需要一个 dummy geometry（类型=INSTANCES）以满足 Vulkan VUID：
+    // geometryCount != 0 时，pGeometries 或 ppGeometries 必须非空
+    VkAccelerationStructureGeometryKHR tlasGeo{};
+    tlasGeo.sType        = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+    tlasGeo.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+
     VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
     buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
     buildInfo.type          = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
     buildInfo.flags         = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
     buildInfo.geometryCount = 1;  // TLAS 只有一个"几何"（实例数组）
-    buildInfo.pGeometries   = nullptr;  // 查询大小时可为空
+    buildInfo.pGeometries   = &tlasGeo;
 
     VkAccelerationStructureBuildSizesInfoKHR sizeInfo{};
     sizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
@@ -1124,6 +1130,7 @@ VkDescriptorType VulkanDevice::ToVkDescType(DescriptorType type) const {
         case DescriptorType::StorageImage:          return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         case DescriptorType::SampledImage:          return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
         case DescriptorType::Sampler:               return VK_DESCRIPTOR_TYPE_SAMPLER;
+        case DescriptorType::AccelerationStructure: return VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
         default:                                    return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     }
 }
@@ -1136,13 +1143,15 @@ void VulkanDevice::EnsureDescriptorPool() {
         { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1024 },
         { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8192 }, // bindless 纹理数组
         { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4096 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 256 },            // StorageImage（RT BackBuffer 等）
         { VK_DESCRIPTOR_TYPE_SAMPLER, 4096 },
+        { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 64 }, // RT TLAS 绑定
     };
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     poolInfo.maxSets       = 1024;  // 需容纳 bindless + per-frame 描述符集
-    poolInfo.poolSizeCount = 5;
+    poolInfo.poolSizeCount = 7;
     poolInfo.pPoolSizes    = poolSizes;
     poolInfo.flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT
                             | VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
@@ -1381,6 +1390,36 @@ void VulkanDevice::UpdateDescriptorSetWithImageView(DescriptorSetHandle setHandl
     write.descriptorCount = 1;
     write.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     write.pImageInfo      = &imageInfo;
+
+    vkUpdateDescriptorSets(m_Device, 1, &write, 0, nullptr);
+}
+
+// UpdateDescriptorSet — AccelerationStructure 绑定（使用 pNext 链扩展 VkWriteDescriptorSet）
+void VulkanDevice::UpdateDescriptorSet(DescriptorSetHandle setHandle, u32 binding,
+                                        DescriptorType type,
+                                        IRHIAccelerationStructure* as) {
+    if (setHandle == 0 || setHandle > m_DescSets.size()) return;
+    VkDescriptorSet ds = m_DescSets[static_cast<usize>(setHandle - 1)];
+    if (ds == VK_NULL_HANDLE) return;
+
+    auto* vkAS = static_cast<VulkanAccelerationStructure*>(as);
+    VkAccelerationStructureKHR vkHandle = vkAS->GetHandle();
+
+    // pNext 链：VkWriteDescriptorSet → VkWriteDescriptorSetAccelerationStructureKHR
+    VkWriteDescriptorSetAccelerationStructureKHR asInfo{};
+    asInfo.sType =
+        VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+    asInfo.accelerationStructureCount = 1;
+    asInfo.pAccelerationStructures    = &vkHandle;
+
+    VkWriteDescriptorSet write{};
+    write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.pNext           = &asInfo;
+    write.dstSet          = ds;
+    write.dstBinding      = binding;
+    write.dstArrayElement = 0;
+    write.descriptorCount = 1;
+    write.descriptorType  = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
 
     vkUpdateDescriptorSets(m_Device, 1, &write, 0, nullptr);
 }

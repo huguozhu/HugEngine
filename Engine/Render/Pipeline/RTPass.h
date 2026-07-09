@@ -38,9 +38,13 @@ public:
     ~RTPass();
 
     // 初始化：创建 RT PSO + SBT
+    // @param descLayouts  描述符集布局数组（set=0: RayGen, set=1: rchit SSBO）
+    // @param pushConstRange Push Constant 范围（用于相机数据传输到 RayGen）
     bool Initialize(rhi::IRHIDevice* device,
                     const std::vector<rhi::ShaderBytecode>& rtShaders,
-                    const std::vector<rhi::RTShaderGroup>& shaderGroups);
+                    const std::vector<rhi::RTShaderGroup>& shaderGroups,
+                    const std::vector<rhi::DescriptorSetLayoutHandle>& descLayouts = {},
+                    rhi::PushConstantRange pushConstRange = {});
 
     // 为 BLAS 绑定 SRV（在 Initialize 之后调用）
     bool CreateSBT(rhi::IRHIDevice* device);
@@ -56,6 +60,18 @@ public:
 
     // 发射光线（width/height 通常对应屏幕分辨率或半分辨率）
     void TraceRays(rhi::IRHICommandList* cmd, u32 width, u32 height);
+
+    // 每帧更新 RT 描述符集（set0: TLAS + BackBuffer, set1: GPUObjectData SSBO）
+    void UpdateRTDescriptorSet(rhi::IRHIDevice* device,
+                               void* backBufferView,
+                               rhi::IRHIBuffer* objectDataBuffer);
+
+    // 获取描述符集句柄（set0: RayGen, set1: ClosestHit）
+    rhi::DescriptorSetHandle GetDescriptorSet0() const { return m_DescSet; }
+    rhi::DescriptorSetHandle GetDescriptorSet1() const { return m_DescSet1; }
+
+    // 绑定所有描述符集
+    void BindDescriptorSets(rhi::IRHICommandList* cmd);
 
     // 状态查询
     bool IsValid() const { return m_RTPipeline != nullptr && m_TLAS != nullptr; }
@@ -92,8 +108,12 @@ private:
     std::vector<rhi::ShaderBytecode> m_Shaders;
     std::vector<rhi::RTShaderGroup>  m_ShaderGroups;
 
-    // 描述符集布局
-    rhi::DescriptorSetLayoutHandle m_DescLayout = rhi::kInvalidLayout;
+    // 描述符集
+    rhi::DescriptorSetLayoutHandle m_DescLayout  = rhi::kInvalidLayout;   // set=0
+    rhi::DescriptorSetLayoutHandle m_DescLayout1 = rhi::kInvalidLayout;   // set=1（rchit SSBO）
+    rhi::DescriptorSetHandle       m_DescSet     = rhi::kInvalidSet;      // set=0（内部管理）
+    rhi::DescriptorSetHandle       m_DescSet1    = rhi::kInvalidSet;      // set=1（内部管理）
+    rhi::PushConstantRange         m_PushConstRange;                      // Push Constant 范围
 
     u32 m_MaxInstanceCount = 4096;
     bool m_Initialized = false;

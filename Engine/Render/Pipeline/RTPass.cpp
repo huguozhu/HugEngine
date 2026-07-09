@@ -22,10 +22,16 @@ RTPass::~RTPass() {
 
 bool RTPass::Initialize(rhi::IRHIDevice* device,
                          const std::vector<rhi::ShaderBytecode>& rtShaders,
-                         const std::vector<rhi::RTShaderGroup>& shaderGroups) {
+                         const std::vector<rhi::RTShaderGroup>& shaderGroups,
+                         const std::vector<rhi::DescriptorSetLayoutHandle>& descLayouts,
+                         rhi::PushConstantRange pushConstRange) {
     m_Device = device;
     m_Shaders = rtShaders;
     m_ShaderGroups = shaderGroups;
+    m_PushConstRange = pushConstRange;
+
+    if (!descLayouts.empty()) m_DescLayout = descLayouts[0];
+    if (descLayouts.size() > 1) m_DescLayout1 = descLayouts[1];
 
     // 检查设备 RT 支持
     auto caps = device->GetCaps();
@@ -34,13 +40,34 @@ bool RTPass::Initialize(rhi::IRHIDevice* device,
         return false;
     }
 
+    // 检查 Shader 是否有效
+    if (rtShaders.empty()) {
+        HE_CORE_WARN("RTPass: 未提供 RT Shader，初始化跳过");
+        return false;
+    }
+
+    // 0. 分配描述符集
+    if (m_DescLayout != rhi::kInvalidLayout) {
+        m_DescSet = device->AllocateDescriptorSet(m_DescLayout);
+    }
+    if (m_DescLayout1 != rhi::kInvalidLayout) {
+        m_DescSet1 = device->AllocateDescriptorSet(m_DescLayout1);
+    }
+
     // 1. 创建 RT Pipeline State
     rhi::RTPipelineStateDesc rtpDesc;
     rtpDesc.shaders        = rtShaders;
     rtpDesc.shaderGroups   = shaderGroups;
     rtpDesc.maxRecursionDepth = 1;
-    rtpDesc.maxPayloadSize    = 4;  // 简单的 0/1 payload（可见/遮挡）
+    rtpDesc.maxPayloadSize    = 16;
+    rtpDesc.maxHitAttributeSize = 8;
     rtpDesc.debugName      = "RTPass";
+    for (auto& l : descLayouts) {
+        if (l != rhi::kInvalidLayout)
+            rtpDesc.descriptorSetLayouts.push_back(l);
+    }
+    if (m_PushConstRange.size > 0)
+        rtpDesc.pushConstantRanges.push_back(m_PushConstRange);
 
     m_RTPipeline = device->CreateRTPipelineState(rtpDesc);
     if (!m_RTPipeline) {
@@ -303,6 +330,35 @@ void RTPass::TraceRays(rhi::IRHICommandList* cmd, u32 width, u32 height) {
     cmd->TraceRays(m_SBT, width, height, 1);
 }
 
+// UpdateRTDescriptorSet — 每帧刷新描述符集
+void RTPass::UpdateRTDescriptorSet(rhi::IRHIDevice* device,
+                                    void* backBufferView,
+                                    rhi::IRHIBuffer* objectDataBuffer) {
+    if (!m_TLAS) return;
+
+    // set=0: TLAS + BackBuffer（RayGen 使用）
+    if (m_DescSet != rhi::kInvalidSet) {
+        device->UpdateDescriptorSet(m_DescSet, 0,
+            rhi::DescriptorType::AccelerationStructure, m_TLAS.get());
+        device->UpdateDescriptorSetWithImageView(m_DescSet, 1,
+            rhi::DescriptorType::StorageImage, backBufferView);
+    }
+
+    // set=1: GPUObjectData SSBO（ClosestHit 使用，独立 set 避免冲突）
+    if (m_DescSet1 != rhi::kInvalidSet && objectDataBuffer) {
+        device->UpdateDescriptorSet(m_DescSet1, 0,
+            rhi::DescriptorType::StorageBuffer, objectDataBuffer);
+    }
+}
+
+// BindDescriptorSets — 绑定所有描述符集
+void RTPass::BindDescriptorSets(rhi::IRHICommandList* cmd) {
+    if (m_DescSet != rhi::kInvalidSet)
+        cmd->BindDescriptorSet(0, m_DescSet);
+    if (m_DescSet1 != rhi::kInvalidSet)
+        cmd->BindDescriptorSet(1, m_DescSet1);
+}
+
 int RTPass::ReloadShader(StringView shaderName, const std::vector<u32>& newSpirv) {
     if (!m_Device || !m_Initialized) return -1;
 
@@ -320,12 +376,18 @@ int RTPass::ReloadShader(StringView shaderName, const std::vector<u32>& newSpirv
     }
 
     if (count > 0) {
-        // 重建 RT PSO
+        // 重建 RT PSO（保留描述符集布局和 Push Constant）
         rhi::RTPipelineStateDesc rtpDesc;
         rtpDesc.shaders        = m_Shaders;
         rtpDesc.shaderGroups   = m_ShaderGroups;
         rtpDesc.maxRecursionDepth = 1;
-        rtpDesc.maxPayloadSize    = 4;
+        rtpDesc.maxPayloadSize    = 16;
+        if (m_DescLayout != rhi::kInvalidLayout)
+            rtpDesc.descriptorSetLayouts.push_back(m_DescLayout);
+        if (m_DescLayout1 != rhi::kInvalidLayout)
+            rtpDesc.descriptorSetLayouts.push_back(m_DescLayout1);
+        if (m_PushConstRange.size > 0)
+            rtpDesc.pushConstantRanges.push_back(m_PushConstRange);
         m_RTPipeline = m_Device->CreateRTPipelineState(rtpDesc);
         CreateSBT(m_Device);
         HE_CORE_INFO("RTPass: 热重载 {} 个 shader", count);

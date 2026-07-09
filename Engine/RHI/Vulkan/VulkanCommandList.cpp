@@ -629,9 +629,20 @@ void VulkanCommandList::DrawIndexedIndirect(rhi::IRHIBuffer* buffer, u64 offset,
 
 void VulkanCommandList::SetPushConstants(u32 offset, u32 size, const void* data) {
     if (m_CurrentLayout) {
-        VkShaderStageFlags stage = (m_CurrentBindPoint == VK_PIPELINE_BIND_POINT_COMPUTE)
-            ? VK_SHADER_STAGE_COMPUTE_BIT
-            : (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
+        // 根据当前管线绑定点选择正确的 shader stage 标志
+        VkShaderStageFlags stage;
+        if (m_CurrentBindPoint == VK_PIPELINE_BIND_POINT_COMPUTE) {
+            stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        } else if (m_CurrentBindPoint == VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR) {
+            // RT 管线：Push Constant 需覆盖所有 RT shader stage
+            stage = VK_SHADER_STAGE_RAYGEN_BIT_KHR
+                  | VK_SHADER_STAGE_MISS_BIT_KHR
+                  | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR
+                  | VK_SHADER_STAGE_ANY_HIT_BIT_KHR
+                  | VK_SHADER_STAGE_CALLABLE_BIT_KHR;
+        } else {
+            stage = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        }
         vkCmdPushConstants(m_CmdBuffers[m_FrameIndex], m_CurrentLayout,
                           stage, offset, size, data);
     }

@@ -23,6 +23,11 @@
 #include "Editor/ImGuiIntegration.h"
 #include "imgui.h"
 
+// RT 着色器 SPIR-V（Phase 2：复用 Sponza RT 着色器）
+#include "RT_Sponza.rgen.spv.h"
+#include "RT_Sponza.rmiss.spv.h"
+#include "RT_Sponza.rchit.spv.h"
+
 #include <cmath>
 #include <cstring>
 #include <vector>
@@ -268,6 +273,46 @@ int main() {
     pipeline.SetSwapChain(swapchain.get());
     pipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
 
+    // ============================================================
+    // 5.5 RT 路径初始化
+    // ============================================================
+    bool rtSupported = device->GetCaps().supportsRayTracing;
+    he::render::RTPass rtPass;
+    rhi::DescriptorSetLayoutHandle rtLayout0 = rhi::kInvalidLayout;
+
+    if (rtSupported) {
+        // set=0: TLAS + BackBuffer（RayGen）
+        rhi::DescriptorSetLayoutDesc rtSet0Desc;
+        rtSet0Desc.bindings = {
+            { 0, rhi::DescriptorType::AccelerationStructure, 1, 0x100 },
+            { 1, rhi::DescriptorType::StorageImage,          1, 0x100 },
+        };
+        rtLayout0 = device->CreateDescriptorSetLayout(rtSet0Desc);
+
+        rhi::ShaderBytecode rgen{ rhi::ShaderStage::RayGen,
+            k_RT_Sponza_rgen_spv, {}, "main" };
+        rhi::ShaderBytecode rmiss{ rhi::ShaderStage::Miss,
+            k_RT_Sponza_rmiss_spv, {}, "main" };
+        rhi::ShaderBytecode rchit{ rhi::ShaderStage::ClosestHit,
+            k_RT_Sponza_rchit_spv, {}, "main" };
+
+        std::vector<rhi::RTShaderGroup> rtGroups = {
+            { rhi::RTShaderGroupType::RayGen, 0, ~0u, ~0u, ~0u, "RayGen" },
+            { rhi::RTShaderGroupType::Miss,   1, ~0u, ~0u, ~0u, "Miss"   },
+            { rhi::RTShaderGroupType::Hit,   ~0u, 2,   ~0u, ~0u, "Hit"   },
+        };
+
+        rhi::PushConstantRange pcRange;
+        pcRange.stageMask = 0x100;
+        pcRange.offset    = 0;
+        pcRange.size      = 80;
+
+        std::vector<rhi::DescriptorSetLayoutHandle> rtLayouts = { rtLayout0 };
+        rtPass.Initialize(device.get(), { rgen, rmiss, rchit }, rtGroups,
+                         rtLayouts, pcRange);
+        HE_CORE_INFO("02.Cube RT: {}", rtPass.IsValid() ? "就绪" : "不可用");
+    }
+
     // --- 6. 创建命令列表 ---
     auto cmdList = device->CreateCommandList();
     cmdList->SetSwapChain(swapchain.get());
@@ -316,6 +361,7 @@ int main() {
     HE_CORE_INFO("02.Cube demo started — WASD=移动, 右键拖拽=旋转, 滚轮=缩放, Shift=加速");
     u64  frameIndex = 0;
     f64  lastTime   = glfwGetTime();
+    int  renderMode  = 0;  // 0=光栅化, 1=RT
 
     while (!engine.GetWindow()->ShouldClose()) {
         // 计算帧时间
@@ -388,9 +434,51 @@ int main() {
         // 统一使用 pipeline.Render()（RG/非RG 内部均包含 Shadow + HDR + 场景 + 天空盒）
         pipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
 
-        // ToneMap（非 RG 路径，与 03.Sponza 一致）
-        cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
-        pipeline.RenderToneMapPass(cmdList.get());
+        // --- ToneMap + ImGui / RT 路径分支 ---
+        if (renderMode == 1 && rtPass.IsValid()) {
+            // RT 路径：光追直写 BackBuffer（覆盖光栅化输出）
+            rtPass.BuildAS(cmdList.get(), world, sceneGraph);
+            rtPass.UpdateRTDescriptorSet(device.get(),
+                swapchain->GetCurrentBackBufferView(),
+                pipeline.GetCurrentObjectBuffer());
+
+            // Push Constants：相机数据
+            struct RTPushConstant { float4x4 invViewProj; float4 camPosNearFar; };
+            RTPushConstant rtPC;
+            const auto& camData = camCtrl.GetCamera();
+            rtPC.invViewProj = glm::inverse(camData.GetViewProjMatrix());
+            rtPC.camPosNearFar = float4(camData.position.x, camData.position.y,
+                                        camData.position.z, camData.nearPlane);
+
+            // BackBuffer 屏障 → RT 可写
+            cmdList->PipelineBarrier(
+                rhi::PipelineStage::BottomOfPipe,
+                rhi::PipelineStage::RayTracingShader,
+                rhi::ResourceState::Undefined,
+                rhi::ResourceState::UnorderedAccess);
+
+            rtPass.BindPipeline(cmdList.get());
+            rtPass.BindDescriptorSets(cmdList.get());
+            cmdList->SetPushConstants(0, sizeof(RTPushConstant), &rtPC);
+            rtPass.TraceRays(cmdList.get(),
+                swapchain->GetWidth(), swapchain->GetHeight());
+
+            // BackBuffer 屏障 → RenderTarget（准备 ImGui）
+            cmdList->PipelineBarrier(
+                rhi::PipelineStage::RayTracingShader,
+                rhi::PipelineStage::ColorAttachmentOutput,
+                rhi::ResourceState::UnorderedAccess,
+                rhi::ResourceState::RenderTarget);
+
+            cmdList->SetPipeline(pipeline.GetPipelineState());
+            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
+                rhi::Format::Unknown, nullptr,
+                rhi::IRHICommandList::LoadOp::Load);
+        } else {
+            // 光栅化路径（不变）
+            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
+            pipeline.RenderToneMapPass(cmdList.get());
+        }
 
         imgui.BeginFrame();
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
@@ -399,6 +487,16 @@ int main() {
         ImGui::Text("FPS: %.0f", 1.0f / (deltaTime > 0 ? deltaTime : 0.016f));
         ImGui::Text("Pos: (%.1f, %.1f, %.1f)",
             camCtrl.GetCamera().position.x, camCtrl.GetCamera().position.y, camCtrl.GetCamera().position.z);
+
+        // 渲染模式切换
+        ImGui::SeparatorText("渲染模式");
+        if (rtSupported) {
+            ImGui::RadioButton("光栅化 (ForwardPipeline)", &renderMode, 0);
+            ImGui::SameLine();
+            ImGui::RadioButton("Ray Tracing", &renderMode, 1);
+        } else {
+            ImGui::TextColored({0.5f, 0.5f, 0.5f, 1.0f}, "RT 不可用（设备不支持）");
+        }
 
         // 渲染选项
         bool useRG = pipeline.UseRenderGraph();
@@ -523,6 +621,12 @@ int main() {
     // 清理
     imgui.Shutdown();
     device->WaitIdle();
+
+    // RT 资源清理
+    rtPass.Shutdown();
+    if (rtLayout0 != rhi::kInvalidLayout)
+        device->DestroyDescriptorSetLayout(rtLayout0);
+
     pipeline.Shutdown();
 
     HE_CORE_INFO("Exiting after {} frames", frameIndex);

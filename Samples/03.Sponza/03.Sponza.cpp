@@ -25,6 +25,11 @@
 #include "Editor/ImGuiIntegration.h"
 #include "imgui.h"
 
+// RT 着色器 SPIR-V（编译生成的内嵌头文件）
+#include "RT_Sponza.rgen.spv.h"
+#include "RT_Sponza.rmiss.spv.h"
+#include "RT_Sponza.rchit.spv.h"
+
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -404,6 +409,64 @@ int main() {
     pipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
 
     // ============================================================
+    // 5.5 RT 路径初始化（Ray Tracing 渲染 Path）
+    // ============================================================
+    bool rtSupported = device->GetCaps().supportsRayTracing;
+    he::render::RTPass rtPass;
+    rhi::DescriptorSetLayoutHandle rtLayout0 = rhi::kInvalidLayout;
+    rhi::DescriptorSetLayoutHandle rtLayout1 = rhi::kInvalidLayout;
+
+    if (rtSupported) {
+        // 5.5.1 创建描述符集布局
+        //   set=0: TLAS + BackBuffer（RayGen 使用）
+        //   set=1: GPUObjectData SSBO（ClosestHit 使用，独立 set 避免冲突）
+        rhi::DescriptorSetLayoutDesc rtSet0Desc;
+        rtSet0Desc.bindings = {
+            { 0, rhi::DescriptorType::AccelerationStructure, 1, 0x100 },
+            { 1, rhi::DescriptorType::StorageImage,          1, 0x100 },
+        };
+        rtLayout0 = device->CreateDescriptorSetLayout(rtSet0Desc);
+
+        rhi::DescriptorSetLayoutDesc rtSet1Desc;
+        rtSet1Desc.bindings = {
+            { 0, rhi::DescriptorType::StorageBuffer,         1, 0x40  },
+        };
+        rtLayout1 = device->CreateDescriptorSetLayout(rtSet1Desc);
+
+        // 5.5.2 准备 Shader 字节码
+        rhi::ShaderBytecode rgen{ rhi::ShaderStage::RayGen,
+            k_RT_Sponza_rgen_spv, {}, "main" };
+        rhi::ShaderBytecode rmiss{ rhi::ShaderStage::Miss,
+            k_RT_Sponza_rmiss_spv, {}, "main" };
+        rhi::ShaderBytecode rchit{ rhi::ShaderStage::ClosestHit,
+            k_RT_Sponza_rchit_spv, {}, "main" };
+
+        // 5.5.3 Shader Group 定义
+        std::vector<rhi::RTShaderGroup> rtGroups = {
+            { rhi::RTShaderGroupType::RayGen, 0, ~0u, ~0u, ~0u, "RayGen" },
+            { rhi::RTShaderGroupType::Miss,   1, ~0u, ~0u, ~0u, "Miss"   },
+            { rhi::RTShaderGroupType::Hit,   ~0u, 2,   ~0u, ~0u, "Hit"   },
+        };
+
+        // 5.5.4 Push Constant 范围
+        rhi::PushConstantRange pcRange;
+        pcRange.stageMask = 0x100;
+        pcRange.offset    = 0;
+        pcRange.size      = 80;
+
+        // 5.5.5 初始化 RTPass（两个 set layout）
+        std::vector<rhi::DescriptorSetLayoutHandle> rtLayouts = { rtLayout0, rtLayout1 };
+        rtPass.Initialize(device.get(),
+            { rgen, rmiss, rchit }, rtGroups,
+            rtLayouts, pcRange);
+
+        HE_CORE_INFO("RT 路径初始化完成 (RT: {})",
+            rtPass.IsValid() ? "就绪" : "不可用");
+    } else {
+        HE_CORE_WARN("设备不支持 Ray Tracing，RT 模式不可用");
+    }
+
+    // ============================================================
     // 6. 创建命令列表
     // ============================================================
     auto cmdList = device->CreateCommandList();
@@ -496,6 +559,8 @@ int main() {
     HE_CORE_INFO("03.Sponza 启动 — WASD=移动, 右键拖拽=旋转, Shift=加速, E/Q=升降");
     u64 frameIndex = 0;
     f64 lastTime   = glfwGetTime();
+
+    int  renderMode  = rtSupported ? 1 : 0;  // 默认 RT 模式
 
     while (!engine.GetWindow()->ShouldClose()) {
         f64 now       = glfwGetTime();
@@ -590,15 +655,67 @@ int main() {
         // --- RenderGraph 全 Pass 编排（Shadow→IBL→RSM→HDR→Skybox→ToneMap）---
         pipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
 
-        // --- ToneMap + ImGui ---
-        if (!pipeline.UseRenderGraph()) {
-            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
-            pipeline.RenderToneMapPass(cmdList.get());
-        }
-        // RG 模式下 ToneMap 已关闭 RP，ImGui 需自行开 RP（LOAD 保留 ToneMap 输出）
-        if (pipeline.UseRenderGraph()) {
+        // --- ToneMap + ImGui / RT 路径分支 ---
+        if (renderMode == 1 && rtPass.IsValid()) {
+            // ============================================================
+            // RT 路径：光追直写 BackBuffer（覆盖 pipeline.Render 的光栅化输出）
+            // ============================================================
+            // a) 构建/更新 AS（仅几何变更时重建 BLAS，每帧重建 TLAS）
+            rtPass.BuildAS(cmdList.get(), world, sceneGraph);
+
+            // b) 更新 RT 描述符集（绑定 TLAS + BackBuffer + GPUObjectData SSBO）
+            rtPass.UpdateRTDescriptorSet(device.get(),
+                swapchain->GetCurrentBackBufferView(),
+                pipeline.GetCurrentObjectBuffer());
+
+            // c) Push Constants：相机数据（NDC→世界光线重建）
+            struct RTPushConstant { float4x4 invViewProj; float4 camPosNearFar; };
+            RTPushConstant rtPC;
+            const auto& camData = camCtrl.GetCamera();
+            rtPC.invViewProj = glm::inverse(camData.GetViewProjMatrix());
+            rtPC.camPosNearFar = float4(camData.position.x, camData.position.y,
+                                        camData.position.z, camData.nearPlane);
+
+            // d) BackBuffer 屏障：→ RT 可写
+            cmdList->PipelineBarrier(
+                rhi::PipelineStage::BottomOfPipe,
+                rhi::PipelineStage::RayTracingShader,
+                rhi::ResourceState::Undefined,
+                rhi::ResourceState::UnorderedAccess);
+
+            // e) 绑定 RT 管线 + 描述符集 + Push Constants → 发射光线
+            rtPass.BindPipeline(cmdList.get());
+            rtPass.BindDescriptorSets(cmdList.get());
+            cmdList->SetPushConstants(0, sizeof(RTPushConstant), &rtPC);
+            rtPass.TraceRays(cmdList.get(),
+                swapchain->GetWidth(), swapchain->GetHeight());
+
+            // f) BackBuffer 屏障：RT 写完 → RenderTarget（准备 ImGui 叠加）
+            cmdList->PipelineBarrier(
+                rhi::PipelineStage::RayTracingShader,
+                rhi::PipelineStage::ColorAttachmentOutput,
+                rhi::ResourceState::UnorderedAccess,
+                rhi::ResourceState::RenderTarget);
+
+            // g) 设置光栅化 PSO 以初始化 m_CurrentRenderPass（BeginRenderPass 需要）
+            cmdList->SetPipeline(pipeline.GetPipelineState());
+
+            // h) 打开 ImGui RP（LoadOp::Load 保留 RT 输出 → ImGui 叠加在上面）
             cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
                 rhi::Format::Unknown, nullptr, rhi::IRHICommandList::LoadOp::Load);
+        } else {
+            // ============================================================
+            // 光栅化路径（原有逻辑不变）
+            // ============================================================
+            if (!pipeline.UseRenderGraph()) {
+                cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
+                pipeline.RenderToneMapPass(cmdList.get());
+            }
+            // RG 模式下 ToneMap 已关闭 RP，ImGui 需自行开 RP（LOAD 保留 ToneMap 输出）
+            if (pipeline.UseRenderGraph()) {
+                cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
+                    rhi::Format::Unknown, nullptr, rhi::IRHICommandList::LoadOp::Load);
+            }
         }
 
         imgui.BeginFrame();
@@ -613,6 +730,18 @@ int main() {
             ImGui::TextColored({0.3f, 1.0f, 0.3f, 1.0f}, "FPS: %.0f", fps);
             ImGui::SameLine(120);
             ImGui::TextColored({0.6f, 0.6f, 0.6f, 1.0f}, "(%.2f ms)", deltaTime * 1000.0f);
+
+            // ============================================================
+            // 渲染模式
+            // ============================================================
+            ImGui::SeparatorText("渲染模式");
+            if (rtSupported) {
+                ImGui::RadioButton("光栅化 (ForwardPipeline)", &renderMode, 0);
+                ImGui::SameLine();
+                ImGui::RadioButton("Ray Tracing", &renderMode, 1);
+            } else {
+                ImGui::TextColored({0.5f, 0.5f, 0.5f, 1.0f}, "RT 不可用（设备不支持）");
+            }
 
             // ============================================================
             // 相机
@@ -799,6 +928,14 @@ int main() {
     // 清理
     imgui.Shutdown();
     device->WaitIdle();
+
+    // RT 资源清理
+    rtPass.Shutdown();
+    if (rtLayout0 != rhi::kInvalidLayout)
+        device->DestroyDescriptorSetLayout(rtLayout0);
+    if (rtLayout1 != rhi::kInvalidLayout)
+        device->DestroyDescriptorSetLayout(rtLayout1);
+
     pipeline.Shutdown();
 
     // ============================================================

@@ -48,7 +48,7 @@ AcquireNextImage
 
 ---
 
-## Phase 2：03.Sponza 几何体 RT 渲染 ⬜ 待实施
+## Phase 2：03.Sponza 几何体 RT 渲染 ✅ 已完成
 
 **目标**：加载 Sponza glTF 资源，用 RT 渲染（创建 BLAS/TLAS + TraceRays 击中三角面片）。
 
@@ -102,10 +102,29 @@ virtual void UpdateDescriptorSet(DescriptorSetHandle set, u32 binding,
 
 ---
 
+### Phase 2 踩坑记录
+
+1. **`SetPushConstants` 未处理 RT 绑定点** → push constant 发送到 Vertex/Fragment 而非 RayGen → 黑屏。修复：添加 `VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR` 分支，使用全部 RT stage flags。
+2. **顶点/索引缓冲缺 `ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT`** → BLAS 构建静默失败 → 全 Miss。修复：`ToVkBufferUsage` 添加 `AccelerationStruct` 映射，`MeshComponent::SetMeshData` 添加该用法标志。
+3. **`GetTLASBuildSizes` 中 `pGeometries=nullptr` 但 `geometryCount=1`** → 违反 VUID → 崩溃。修复：提供 dummy `VK_GEOMETRY_TYPE_INSTANCES_KHR` 几何体。
+4. **`StructuredBuffer` / `ByteAddressBuffer` 在 ClosestHit shader 中崩溃** → slangc SPIR-V 兼容性问题（GPU fault）。Phase 3 修复。当前方案：InstanceID 伪随机色 + `-WorldRayDirection()` 法线近似。
+
+### Phase 2 已知限制
+
+| 限制 | 原因 | 计划 |
+|------|------|------|
+| 无法读取 GPUObjectData（材质色） | SSBO 在 ClosestHit 中不兼容 | Phase 3 |
+| 法线近似（`-WorldRayDirection`） | 无顶点法线数据 | Phase 3 引入顶点缓冲 |
+| InstanceID 与 ObjectData 索引不匹配 | 视锥剔除等差异 | Phase 3 统一索引 |
+
+---
+
 ## 执行状态
 
 ```
-Phase 1 ✅ 已完成并验证 (提交 93225b5)
+Phase 1 ✅ 已完成并验证
     ↓
-Phase 2 ⬜ 待实施 (2.1→2.2→2.3→2.4)
+Phase 2 ✅ 已完成（含 02.Cube RT 模式）
+    ↓
+Phase 3 ⬜ 待规划（RT 材质 + 直接光照）
 ```

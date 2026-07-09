@@ -75,6 +75,10 @@ public:
     /// 直接绑定 ImageView 到描述符集（用于 SwapChain BackBuffer 等非 IRHITexture 图像）
     virtual void                      UpdateDescriptorSetWithImageView(DescriptorSetHandle set, u32 binding,
                                                                        DescriptorType type, void* imageView) = 0;
+    /// 更新描述符集：绑定 AccelerationStructure（用于 RT PSO 的 TLAS 绑定）
+    virtual void                      UpdateDescriptorSet(DescriptorSetHandle set, u32 binding,
+                                                          DescriptorType type,
+                                                          IRHIAccelerationStructure* as) = 0;
     // --- GPU Query ---
     virtual std::unique_ptr<IRHIQueryPool> CreateQueryPool(u32 queryCount) = 0;
     virtual float GetTimestampPeriod() = 0;  // 时间戳单位（纳秒）

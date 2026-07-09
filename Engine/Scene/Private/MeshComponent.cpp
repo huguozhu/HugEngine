@@ -22,18 +22,18 @@ void MeshComponent::SetMeshData(
         return;
     }
 
-    // 顶点缓冲
+    // 顶点缓冲（含 AccelerationStruct 标志，支持 BLAS 构建）
     rhi::BufferDesc vbDesc;
     vbDesc.size        = vertices.size() * sizeof(StaticVertex);
-    vbDesc.usage       = rhi::BufferUsage::Vertex;
+    vbDesc.usage       = rhi::BufferUsage::Vertex | rhi::BufferUsage::AccelerationStruct;
     vbDesc.initialData = vertices.data();
     vbDesc.stride      = sizeof(StaticVertex);
     m_VertexBuffer = device->CreateBuffer(vbDesc);
 
-    // 索引缓冲
+    // 索引缓冲（含 AccelerationStruct 标志，支持 BLAS 构建）
     rhi::BufferDesc ibDesc;
     ibDesc.size        = indices.size() * sizeof(u32);
-    ibDesc.usage       = rhi::BufferUsage::Index;
+    ibDesc.usage       = rhi::BufferUsage::Index | rhi::BufferUsage::AccelerationStruct;
     ibDesc.initialData = indices.data();
     ibDesc.stride      = sizeof(u32);
     m_IndexBuffer = device->CreateBuffer(ibDesc);

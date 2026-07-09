@@ -90,6 +90,12 @@ if(SLANGC)
     set(RT_SLANG
         "${SHADER_DIR}/RT_Triangle.rgen.slang"
         "${SHADER_DIR}/RT_Background.rmiss.slang"
+        "${SHADER_DIR}/RT_Sponza.rgen.slang"
+        "${SHADER_DIR}/RT_Sponza.rmiss.slang"
+        "${SHADER_DIR}/RT_Sponza.rchit.slang"
+        "${SHADER_DIR}/RT_Shadow.rgen.slang"
+        "${SHADER_DIR}/RT_Common.rmiss.slang"
+        "${SHADER_DIR}/RT_Common.rchit.slang"
     )
     # Mesh Shader 着色器（.mesh / .task）
     # 命名约定: EffectName.mesh.slang (Mesh), EffectName.task.slang (Amplification/Task)

@@ -202,6 +202,7 @@ enum class DescriptorType : u8 {
     SampledImage,               // 采样图像（Texture2D 等，不含采样器）
     Sampler,                    // 独立采样器
     InputAttachment,            // 输入附件（用于 SubPass）
+    AccelerationStructure,      // 加速结构（用于 RT PSO 描述符集，绑定 TLAS）
 };
 
 // --- 描述符集布局 ---

@@ -157,6 +157,9 @@ public:
     void                      DestroyDescriptorSetLayout(DescriptorSetLayoutHandle layout) override;
     void                      UpdateDescriptorSetWithImageView(DescriptorSetHandle set, u32 binding,
                                                                 DescriptorType type, void* imageView) override;
+    void                      UpdateDescriptorSet(DescriptorSetHandle set, u32 binding,
+                                                  DescriptorType type,
+                                                  IRHIAccelerationStructure* as) override;
 
     // Internal
     VkDevice         GetVkDevice()     const { return m_Device; }
