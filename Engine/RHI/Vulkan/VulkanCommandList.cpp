@@ -898,6 +898,47 @@ void VulkanCommandList::SetTimelineWait(RHIFenceHandle fence, u64 value) {
 // Submit（提交命令缓冲到 GPU 队列）
 // ============================================================
 
+// ============================================================
+// Mesh Shader 命令 — 桩实现（P6 替换为真实实现）
+// ============================================================
+
+void VulkanCommandList::DrawMeshTasks(u32 groupCountX, u32 groupCountY, u32 groupCountZ) {
+    (void)groupCountX; (void)groupCountY; (void)groupCountZ;
+    HE_CORE_WARN("DrawMeshTasks: 尚未实现（P6）");
+}
+
+void VulkanCommandList::DrawMeshTasksIndirect(IRHIBuffer* buffer, u64 offset,
+                                               u32 drawCount, u32 stride) {
+    (void)buffer; (void)offset; (void)drawCount; (void)stride;
+    HE_CORE_WARN("DrawMeshTasksIndirect: 尚未实现（P6）");
+}
+
+// ============================================================
+// Ray Tracing 命令 — 桩实现（P3-P5 替换为真实实现）
+// ============================================================
+
+void VulkanCommandList::BuildBLAS(IRHIAccelerationStructure* blas, IRHIBuffer* scratchBuffer,
+                                   const BLASBuildDesc& desc, bool update) {
+    (void)blas; (void)scratchBuffer; (void)desc; (void)update;
+    HE_CORE_WARN("BuildBLAS: 尚未实现（P3）");
+}
+
+void VulkanCommandList::BuildTLAS(IRHIAccelerationStructure* tlas, IRHIBuffer* scratchBuffer,
+                                   IRHIBuffer* instanceBuffer, u32 instanceCount, bool update) {
+    (void)tlas; (void)scratchBuffer; (void)instanceBuffer; (void)instanceCount; (void)update;
+    HE_CORE_WARN("BuildTLAS: 尚未实现（P3）");
+}
+
+void VulkanCommandList::BindRTPipeline(IRHIRayTracingPipelineState* rtPSO) {
+    (void)rtPSO;
+    HE_CORE_WARN("BindRTPipeline: 尚未实现（P4）");
+}
+
+void VulkanCommandList::TraceRays(const SBTDesc& sbt, u32 width, u32 height, u32 depth) {
+    (void)sbt; (void)width; (void)height; (void)depth;
+    HE_CORE_WARN("TraceRays: 尚未实现（P5）");
+}
+
 void VulkanCommandList::Submit() {
     // 等待 SwapChain 图像可用
     VkSemaphore waitSem   = VK_NULL_HANDLE;

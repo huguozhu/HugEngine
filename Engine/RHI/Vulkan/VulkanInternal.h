@@ -98,6 +98,16 @@ public:
     std::unique_ptr<IRHISampler>      CreateSampler(const SamplerDesc& desc) override;
     std::unique_ptr<IRHIPipelineState> CreatePipelineState(const PipelineStateDesc& desc) override;
 
+    // Ray Tracing 资源创建（P1 接口，P3-P5 实现）
+    std::unique_ptr<IRHIAccelerationStructure>
+        CreateBLAS(const BLASBuildDesc& desc) override;
+    std::unique_ptr<IRHIAccelerationStructure>
+        CreateTLAS(const TLASBuildDesc& desc) override;
+    ASBuildSizes GetBLASBuildSizes(const BLASBuildDesc& desc) override;
+    ASBuildSizes GetTLASBuildSizes(u32 maxInstanceCount) override;
+    std::unique_ptr<IRHIRayTracingPipelineState>
+        CreateRTPipelineState(const RTPipelineStateDesc& desc) override;
+
     void WaitIdle() override;
     void Submit(IRHICommandList* cmdList) override;
 
@@ -147,6 +157,10 @@ public:
     u32     GetComputeFamily() const { return m_ComputeFamily; }
     bool    HasAsyncCompute()  const { return m_HasAsyncCompute; }
 
+    // RT / Mesh Shader 支持状态
+    bool    SupportsRayTracing()  const { return m_SupportsRT; }
+    bool    SupportsMeshShaders() const { return m_SupportsMesh; }
+
     // Fence 句柄 → VkSemaphore 解析（供 VulkanCommandList 集成 Timeline 信号量）
     VkSemaphore ResolveFenceSemaphore(RHIFenceHandle fence) const {
         if (fence == kInvalidFence || fence > m_Fences.size()) return VK_NULL_HANDLE;
@@ -170,6 +184,8 @@ private:
     void CreateLogicalDevice();
     void CreateCommandPools();
     VkSemaphore CreateTimelineSemaphore(u64 initialValue);  // 创建 Timeline 信号量
+    void QueryRTCapabilities();   // 查询 RT 扩展支持 + 硬件能力
+    void QueryMeshCapabilities(); // 查询 Mesh Shader 扩展支持 + 硬件能力
 
     VkInstance       m_Instance       = VK_NULL_HANDLE;
     VkPhysicalDevice m_Physical       = VK_NULL_HANDLE;
@@ -183,6 +199,29 @@ private:
     VkQueue          m_ComputeQueue    = VK_NULL_HANDLE;
     u32              m_ComputeFamily   = 0;
     bool             m_HasAsyncCompute = false;
+
+    // RT / Mesh Shader 支持状态 + 硬件属性（在 QueryRTCapabilities/QueryMeshCapabilities 中填充）
+    bool             m_SupportsRT    = false;
+    bool             m_SupportsMesh  = false;
+    // RT Pipeline 属性
+    u32              m_MaxRayRecursionDepth     = 1;
+    u32              m_ShaderGroupHandleSize    = 32;
+    u32              m_ShaderGroupBaseAlignment = 64;
+    u64              m_MaxRTDispatchSize        = 0;
+    // Acceleration Structure 属性
+    u64              m_MaxASInstanceCount       = 0;
+    u64              m_MaxASGeometryCount       = 0;
+    u64              m_MaxASPrimitiveCount      = 0;
+    u64              m_MinASScratchAlignment    = 0;
+    // Mesh Shader 属性
+    u32              m_MaxMeshWorkGroupInvocations = 128;
+    u32              m_MaxMeshOutputVertices       = 256;
+    u32              m_MaxMeshOutputPrimitives     = 256;
+    u32              m_MaxTaskWorkGroupInvocations = 128;
+    u32              m_MaxTaskPayloadSize          = 16384;
+    u32              m_MaxMeshWorkGroupCountX      = 65535;
+    u32              m_MaxMeshWorkGroupCountY      = 65535;
+    u32              m_MaxMeshWorkGroupCountZ      = 65535;
 
     VkCommandPool    m_GraphicsCmdPool = VK_NULL_HANDLE;
     VkCommandPool    m_ComputeCmdPool  = VK_NULL_HANDLE;
@@ -249,9 +288,20 @@ public:
                      i32 vertexOffset, u32 firstInstance) override;
     void DrawIndexedIndirect(IRHIBuffer* buffer, u64 offset,
                              u32 drawCount, u32 stride) override;
+    // Mesh Shader 绘制（P6 实现）
+    void DrawMeshTasks(u32 groupCountX, u32 groupCountY, u32 groupCountZ) override;
+    void DrawMeshTasksIndirect(IRHIBuffer* buffer, u64 offset,
+                               u32 drawCount, u32 stride) override;
     void SetPushConstants(u32 offset, u32 size, const void* data) override;
     void Dispatch(u32 groupCountX, u32 groupCountY, u32 groupCountZ) override;
     void DispatchIndirect(IRHIBuffer* buffer, u64 offset) override;
+    // Ray Tracing 命令（P3-P5 实现）
+    void BuildBLAS(IRHIAccelerationStructure* blas, IRHIBuffer* scratchBuffer,
+                   const BLASBuildDesc& desc, bool update) override;
+    void BuildTLAS(IRHIAccelerationStructure* tlas, IRHIBuffer* scratchBuffer,
+                   IRHIBuffer* instanceBuffer, u32 instanceCount, bool update) override;
+    void BindRTPipeline(IRHIRayTracingPipelineState* rtPSO) override;
+    void TraceRays(const SBTDesc& sbt, u32 width, u32 height, u32 depth) override;
     void PipelineBarrier(PipelineStage srcStage, PipelineStage dstStage,
                          ResourceState srcState, ResourceState dstState) override;
     void PipelineBarrier(PipelineStage srcStage, PipelineStage dstStage,

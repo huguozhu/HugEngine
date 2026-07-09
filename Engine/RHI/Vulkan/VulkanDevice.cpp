@@ -118,14 +118,34 @@ DeviceCaps VulkanDevice::GetCaps() const {
     DeviceCaps caps;
     caps.maxBindlessResources = 1000000;
     caps.maxPushConstantsSize = 256;
-    caps.supportsRayTracing   = true;
-    caps.supportsMeshShaders  = true;
-    caps.supportsVRS          = true;
 
     // Query actual limits
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(m_Physical, &props);
     caps.maxSamplerAnisotropy = static_cast<u32>(props.limits.maxSamplerAnisotropy);
+
+    // Ray Tracing 能力（从硬件查询，非硬编码）
+    caps.supportsRayTracing       = m_SupportsRT;
+    caps.supportsVRS              = false;  // VRS 暂未实现
+    caps.maxRayRecursionDepth     = m_MaxRayRecursionDepth;
+    caps.shaderGroupHandleSize    = m_ShaderGroupHandleSize;
+    caps.shaderGroupBaseAlignment = m_ShaderGroupBaseAlignment;
+    caps.maxRTDispatchSize        = m_MaxRTDispatchSize;
+    caps.maxASInstanceCount       = m_MaxASInstanceCount;
+    caps.maxASGeometryCount       = m_MaxASGeometryCount;
+    caps.maxASPrimitiveCount      = m_MaxASPrimitiveCount;
+    caps.minASScratchAlignment    = m_MinASScratchAlignment;
+
+    // Mesh Shader 能力（从硬件查询，非硬编码）
+    caps.supportsMeshShaders        = m_SupportsMesh;
+    caps.maxMeshWorkGroupInvocations = m_MaxMeshWorkGroupInvocations;
+    caps.maxMeshOutputVertices       = m_MaxMeshOutputVertices;
+    caps.maxMeshOutputPrimitives     = m_MaxMeshOutputPrimitives;
+    caps.maxTaskWorkGroupInvocations = m_MaxTaskWorkGroupInvocations;
+    caps.maxTaskPayloadSize          = m_MaxTaskPayloadSize;
+    caps.maxMeshWorkGroupCountX      = m_MaxMeshWorkGroupCountX;
+    caps.maxMeshWorkGroupCountY      = m_MaxMeshWorkGroupCountY;
+    caps.maxMeshWorkGroupCountZ      = m_MaxMeshWorkGroupCountZ;
 
     // 异步计算能力
     caps.supportsAsyncCompute  = m_HasAsyncCompute;
@@ -211,13 +231,17 @@ void VulkanDevice::Initialize(const DeviceInitDesc& desc) {
     // 4. Select physical device
     SelectPhysicalDevice();
 
-    // 5. 查询队列族（检测 AsyncCompute 能力，必须在 CreateLogicalDevice 之前）
+    // 5. 查询 RT / Mesh Shader 硬件能力（在创建逻辑设备之前）
+    QueryRTCapabilities();
+    QueryMeshCapabilities();
+
+    // 6. 查询队列族（检测 AsyncCompute 能力，必须在 CreateLogicalDevice 之前）
     FindQueueFamilies();
 
-    // 6. Create logical device
+    // 7. Create logical device
     CreateLogicalDevice();
 
-    // 7. Create command pools
+    // 8. Create command pools
     CreateCommandPools();
 
     HE_CORE_INFO("Vulkan device fully initialized");
@@ -316,6 +340,33 @@ void VulkanDevice::CreateLogicalDevice() {
         VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,  // Bindless 资源
     };
 
+    // 条件启用 Ray Tracing 扩展
+    VkPhysicalDeviceRayTracingPipelineFeaturesKHR rtPipelineFeature{};
+    rtPipelineFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
+    rtPipelineFeature.rayTracingPipeline = VK_TRUE;
+
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR asFeature{};
+    asFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+    asFeature.accelerationStructure = VK_TRUE;
+
+    if (m_SupportsRT) {
+        deviceExtensions.push_back(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
+        deviceExtensions.push_back(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
+        deviceExtensions.push_back(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+        HE_CORE_INFO("RT 扩展已启用: VK_KHR_acceleration_structure + VK_KHR_ray_tracing_pipeline");
+    }
+
+    // 条件启用 Mesh Shader 扩展
+    VkPhysicalDeviceMeshShaderFeaturesEXT meshFeature{};
+    meshFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
+    meshFeature.taskShader = VK_TRUE;
+    meshFeature.meshShader = VK_TRUE;
+
+    if (m_SupportsMesh) {
+        deviceExtensions.push_back(VK_EXT_MESH_SHADER_EXTENSION_NAME);
+        HE_CORE_INFO("Mesh Shader 扩展已启用: VK_EXT_mesh_shader");
+    }
+
     // Bindless: descriptor indexing 特性
     VkPhysicalDeviceDescriptorIndexingFeatures descIndexing{};
     descIndexing.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
@@ -330,17 +381,25 @@ void VulkanDevice::CreateLogicalDevice() {
     VkPhysicalDeviceBufferDeviceAddressFeatures addrFeature{};
     addrFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
     addrFeature.bufferDeviceAddress = VK_TRUE;
-    addrFeature.pNext = nullptr;
 
     // 启用 Timeline Semaphore（Vulkan 1.2+ 核心特性，需显式开启）
     VkPhysicalDeviceTimelineSemaphoreFeatures timelineFeature{};
     timelineFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
     timelineFeature.timelineSemaphore = VK_TRUE;
-    timelineFeature.pNext = nullptr;
 
-    // pNext 链: descIndexing → addrFeature → timelineFeature
-    descIndexing.pNext = &addrFeature;
-    addrFeature.pNext  = &timelineFeature;
+    // pNext 链构建: descIndexing → addrFeature → timelineFeature → [RT] → [Mesh]
+    // 末尾开始向前链接: timelineFeature ← meshFeature? ← rt? ← as? ← addrFeature? ← descIndexing
+    void** ppNext = &descIndexing.pNext;
+    *ppNext = &addrFeature; ppNext = &addrFeature.pNext;
+    *ppNext = &timelineFeature; ppNext = &timelineFeature.pNext;
+    if (m_SupportsRT) {
+        *ppNext = &asFeature; ppNext = &asFeature.pNext;
+        *ppNext = &rtPipelineFeature; ppNext = &rtPipelineFeature.pNext;
+    }
+    if (m_SupportsMesh) {
+        *ppNext = &meshFeature; ppNext = &meshFeature.pNext;
+    }
+    *ppNext = nullptr;
 
     VkPhysicalDeviceFeatures features{};
 
@@ -608,6 +667,159 @@ float VulkanDevice::GetTimestampPeriod() {
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(m_Physical, &props);
     return float(props.limits.timestampPeriod);  // 纳秒
+}
+
+// ============================================================
+// RT / Mesh Shader 能力检测
+// ============================================================
+
+void VulkanDevice::QueryRTCapabilities() {
+    // 1. 检查设备扩展是否可用
+    u32 extCount = 0;
+    vkEnumerateDeviceExtensionProperties(m_Physical, nullptr, &extCount, nullptr);
+    std::vector<VkExtensionProperties> extensions(extCount);
+    vkEnumerateDeviceExtensionProperties(m_Physical, nullptr, &extCount, extensions.data());
+
+    bool hasAS  = false;  // VK_KHR_acceleration_structure
+    bool hasRTP = false;  // VK_KHR_ray_tracing_pipeline
+    bool hasDHO = false;  // VK_KHR_deferred_host_operations
+
+    for (auto& ext : extensions) {
+        if (strcmp(ext.extensionName, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) == 0)
+            hasAS = true;
+        if (strcmp(ext.extensionName, VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME) == 0)
+            hasRTP = true;
+        if (strcmp(ext.extensionName, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME) == 0)
+            hasDHO = true;
+    }
+
+    m_SupportsRT = hasAS && hasRTP;
+    if (!m_SupportsRT) {
+        HE_CORE_INFO("Ray Tracing: 不支持（缺少 VK_KHR_acceleration_structure 或 VK_KHR_ray_tracing_pipeline）");
+        return;
+    }
+
+    HE_CORE_INFO("Ray Tracing: 硬件支持已检测 (AS={}, RTPipeline={}, DeferredHostOps={})",
+                 hasAS, hasRTP, hasDHO);
+
+    // 2. 查询 RT Pipeline 属性（通过 pNext 链）
+    VkPhysicalDeviceRayTracingPipelinePropertiesKHR rtProps{};
+    rtProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
+
+    VkPhysicalDeviceAccelerationStructurePropertiesKHR asProps{};
+    asProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
+    asProps.pNext = nullptr;
+
+    // pNext 链: base → rtProps → asProps
+    rtProps.pNext = &asProps;
+
+    VkPhysicalDeviceProperties2 props2{};
+    props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    props2.pNext = &rtProps;
+
+    vkGetPhysicalDeviceProperties2(m_Physical, &props2);
+
+    m_MaxRayRecursionDepth     = rtProps.maxRayRecursionDepth;
+    m_ShaderGroupHandleSize    = rtProps.shaderGroupHandleSize;
+    m_ShaderGroupBaseAlignment = rtProps.shaderGroupBaseAlignment;
+    m_MaxRTDispatchSize        = rtProps.maxRayDispatchInvocationCount;
+    m_MaxASInstanceCount       = asProps.maxInstanceCount;
+    m_MaxASGeometryCount       = asProps.maxGeometryCount;
+    m_MaxASPrimitiveCount      = asProps.maxPrimitiveCount;
+    m_MinASScratchAlignment    = asProps.minAccelerationStructureScratchOffsetAlignment;
+
+    HE_CORE_INFO("RT 属性: maxRecursion={}, groupHandleSize={}, groupAlign={}, maxDispatch={}",
+                 m_MaxRayRecursionDepth, m_ShaderGroupHandleSize,
+                 m_ShaderGroupBaseAlignment, m_MaxRTDispatchSize);
+    HE_CORE_INFO("AS  属性: maxInstances={}, maxGeometries={}, maxPrimitives={}, scratchAlign={}",
+                 m_MaxASInstanceCount, m_MaxASGeometryCount,
+                 m_MaxASPrimitiveCount, m_MinASScratchAlignment);
+}
+
+void VulkanDevice::QueryMeshCapabilities() {
+    // 1. 检查设备扩展是否可用
+    u32 extCount = 0;
+    vkEnumerateDeviceExtensionProperties(m_Physical, nullptr, &extCount, nullptr);
+    std::vector<VkExtensionProperties> extensions(extCount);
+    vkEnumerateDeviceExtensionProperties(m_Physical, nullptr, &extCount, extensions.data());
+
+    bool hasMesh = false;
+    for (auto& ext : extensions) {
+        if (strcmp(ext.extensionName, VK_EXT_MESH_SHADER_EXTENSION_NAME) == 0) {
+            hasMesh = true;
+            break;
+        }
+    }
+
+    m_SupportsMesh = hasMesh;
+    if (!m_SupportsMesh) {
+        HE_CORE_INFO("Mesh Shader: 不支持（缺少 VK_EXT_mesh_shader）");
+        return;
+    }
+
+    HE_CORE_INFO("Mesh Shader: 硬件支持已检测");
+
+    // 2. 查询 Mesh Shader 属性
+    VkPhysicalDeviceMeshShaderPropertiesEXT meshProps{};
+    meshProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT;
+
+    VkPhysicalDeviceProperties2 props2{};
+    props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    props2.pNext = &meshProps;
+
+    vkGetPhysicalDeviceProperties2(m_Physical, &props2);
+
+    m_MaxMeshWorkGroupInvocations = meshProps.maxMeshWorkGroupInvocations;
+    m_MaxMeshOutputVertices       = meshProps.maxMeshOutputVertices;
+    m_MaxMeshOutputPrimitives     = meshProps.maxMeshOutputPrimitives;
+    m_MaxTaskWorkGroupInvocations = meshProps.maxTaskWorkGroupInvocations;
+    m_MaxTaskPayloadSize          = meshProps.maxTaskPayloadSize;
+    m_MaxMeshWorkGroupCountX      = meshProps.maxMeshWorkGroupCount[0];
+    m_MaxMeshWorkGroupCountY      = meshProps.maxMeshWorkGroupCount[1];
+    m_MaxMeshWorkGroupCountZ      = meshProps.maxMeshWorkGroupCount[2];
+
+    HE_CORE_INFO("Mesh 属性: meshInvocations={}, meshVertices={}, meshPrimitives={}",
+                 m_MaxMeshWorkGroupInvocations, m_MaxMeshOutputVertices, m_MaxMeshOutputPrimitives);
+    HE_CORE_INFO("Mesh 属性: taskInvocations={}, taskPayload={}, workGroupCount=({},{},{})",
+                 m_MaxTaskWorkGroupInvocations, m_MaxTaskPayloadSize,
+                 m_MaxMeshWorkGroupCountX, m_MaxMeshWorkGroupCountY, m_MaxMeshWorkGroupCountZ);
+}
+
+// ============================================================
+// RT 资源创建 — 桩实现（P3-P5 替换为真实实现）
+// ============================================================
+
+std::unique_ptr<IRHIAccelerationStructure>
+VulkanDevice::CreateBLAS(const BLASBuildDesc& desc) {
+    (void)desc;
+    HE_CORE_WARN("CreateBLAS: 尚未实现（P3）");
+    return nullptr;
+}
+
+std::unique_ptr<IRHIAccelerationStructure>
+VulkanDevice::CreateTLAS(const TLASBuildDesc& desc) {
+    (void)desc;
+    HE_CORE_WARN("CreateTLAS: 尚未实现（P3）");
+    return nullptr;
+}
+
+ASBuildSizes VulkanDevice::GetBLASBuildSizes(const BLASBuildDesc& desc) {
+    (void)desc;
+    HE_CORE_WARN("GetBLASBuildSizes: 尚未实现（P3）");
+    return ASBuildSizes{};
+}
+
+ASBuildSizes VulkanDevice::GetTLASBuildSizes(u32 maxInstanceCount) {
+    (void)maxInstanceCount;
+    HE_CORE_WARN("GetTLASBuildSizes: 尚未实现（P3）");
+    return ASBuildSizes{};
+}
+
+std::unique_ptr<IRHIRayTracingPipelineState>
+VulkanDevice::CreateRTPipelineState(const RTPipelineStateDesc& desc) {
+    (void)desc;
+    HE_CORE_WARN("CreateRTPipelineState: 尚未实现（P4）");
+    return nullptr;
 }
 
 // ============================================================

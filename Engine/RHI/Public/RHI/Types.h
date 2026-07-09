@@ -165,6 +165,26 @@ struct DeviceCaps {
     bool    supportsAsyncCompute   = false;  // GPU 是否有独立 Compute 队列族
     bool    supportsTransferQueue  = false;  // GPU 是否有独立 Copy 队列 (DMA)
     u32     asyncComputeTier       = 0;      // 0=不支持, 1=独立队列族, 2=专用硬件引擎
+
+    // Ray Tracing 详细能力（supportsRayTracing=true 时有效）
+    u32     maxRayRecursionDepth     = 1;     // 最大递归深度
+    u32     shaderGroupHandleSize    = 32;    // 着色器组句柄大小（字节）
+    u32     shaderGroupBaseAlignment = 64;    // 着色器组句柄对齐（字节）
+    u64     maxRTDispatchSize        = 0;     // 单次 TraceRays 最大尺寸 (width*height*depth)
+    u64     maxASInstanceCount       = 0;     // TLAS 最大实例数
+    u64     maxASGeometryCount       = 0;     // BLAS 最大几何数
+    u64     maxASPrimitiveCount      = 0;     // BLAS 最大三角形数
+    u64     minASScratchAlignment    = 0;     // Scratch 缓冲区最小对齐（字节）
+
+    // Mesh Shader 详细能力（supportsMeshShaders=true 时有效）
+    u32     maxMeshWorkGroupInvocations = 128;  // Mesh Shader 单工作组最大调用数
+    u32     maxMeshOutputVertices       = 256;  // Mesh Shader 最大输出顶点数
+    u32     maxMeshOutputPrimitives     = 256;  // Mesh Shader 最大输出图元数
+    u32     maxTaskWorkGroupInvocations = 128;  // Task Shader 单工作组最大调用数
+    u32     maxTaskPayloadSize          = 16384; // Task→Mesh payload 最大字节数
+    u32     maxMeshWorkGroupCountX      = 65535; // Mesh 工作组 X 方向最大数
+    u32     maxMeshWorkGroupCountY      = 65535; // Mesh 工作组 Y 方向最大数
+    u32     maxMeshWorkGroupCountZ      = 65535; // Mesh 工作组 Z 方向最大数
 };
 
 // --- 管线绑定点 ---
