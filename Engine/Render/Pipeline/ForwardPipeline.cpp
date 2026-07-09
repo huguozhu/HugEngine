@@ -14,6 +14,9 @@
 #include "Threading/JobSystem.h"
 #include "PBR.vert.spv.h"
 #include "PBR.frag.spv.h"
+#include "RT_Shadow.rgen.spv.h"
+#include "RT_Common.rmiss.spv.h"
+#include "RT_Common.rchit.spv.h"
 #include "AntiAliasing/AA_None.h"
 #include "AntiAliasing/AA_FXAA.h"
 
@@ -289,6 +292,69 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     // --- SceneRenderer ---
     m_SceneRenderer = std::make_unique<SceneRenderer>();
 
+    // --- Ray Tracing 子系统（可选，硬件不支持时跳过）---
+    m_RTEnabled = device->GetCaps().supportsRayTracing;
+    if (m_RTEnabled) {
+        m_RTPass = std::make_unique<RTPass>();
+        // 构建 RT shader 字节码（从嵌入的 SPIR-V 数据加载）
+        std::vector<rhi::ShaderBytecode> rtShaders;
+        // RT_Shadow.rgen — RayGen
+        {
+            rhi::ShaderBytecode bc;
+            bc.stage      = rhi::ShaderStage::RayGen;
+            bc.spirv      = k_RT_Shadow_rgen_spv;
+            bc.entryPoint = "main";
+            rtShaders.push_back(bc);
+        }
+        // RT_Common.rmiss — Miss
+        {
+            rhi::ShaderBytecode bc;
+            bc.stage      = rhi::ShaderStage::Miss;
+            bc.spirv      = k_RT_Common_rmiss_spv;
+            bc.entryPoint = "main";
+            rtShaders.push_back(bc);
+        }
+        // RT_Common.rchit — ClosestHit (index 2 = hit group 0)
+        {
+            rhi::ShaderBytecode bc;
+            bc.stage      = rhi::ShaderStage::ClosestHit;
+            bc.spirv      = k_RT_Common_rchit_spv;
+            bc.entryPoint = "main";
+            rtShaders.push_back(bc);
+        }
+
+        // 着色器组: [0]=RayGen, [1]=Miss, [2]=Hit
+        std::vector<rhi::RTShaderGroup> groups;
+        {
+            rhi::RTShaderGroup rg;
+            rg.type = rhi::RTShaderGroupType::RayGen;
+            rg.generalShader = 0;
+            rg.name = "RayGen";
+            groups.push_back(rg);
+        }
+        {
+            rhi::RTShaderGroup mg;
+            mg.type = rhi::RTShaderGroupType::Miss;
+            mg.generalShader = 1;
+            mg.name = "Miss";
+            groups.push_back(mg);
+        }
+        {
+            rhi::RTShaderGroup hg;
+            hg.type = rhi::RTShaderGroupType::Hit;
+            hg.closestHitShader = 2;
+            hg.name = "Hit";
+            groups.push_back(hg);
+        }
+
+        if (m_RTPass->Initialize(device, rtShaders, groups)) {
+            HE_CORE_INFO("ForwardPipeline: RTPass initialized — RT Shadow enabled");
+        } else {
+            m_RTEnabled = false;
+            HE_CORE_WARN("ForwardPipeline: RTPass init failed, RT disabled");
+        }
+    }
+
     HE_CORE_INFO("ForwardPipeline initialized (with HDR + Tone Mapping + Skybox + ShadowSystem)");
 
     // Shader 热重载：注册 PSO 到热重载表
@@ -400,6 +466,10 @@ void ForwardPipeline::Shutdown() {
     if (m_ShadowSystem) {
         m_ShadowSystem->Shutdown();
         m_ShadowSystem.reset();
+    }
+    if (m_RTPass) {
+        m_RTPass->Shutdown();
+        m_RTPass.reset();
     }
 
     m_GPUCulling.Shutdown(m_Device);
@@ -693,6 +763,14 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     auto hdrColor = rg.ImportTexture("HDR_Color", m_HDRTarget.get());
     auto hdrDepth = rg.ImportTexture("HDR_Depth", m_HDRDepth.get());
     auto backBuf  = rg.ImportBackBuffer();
+
+    // --- Pass 0: AS Build — BLAS/TLAS 构建（Ray Tracing，仅在 RT 启用时执行）---
+    if (m_RTEnabled && m_RTPass && m_RTPass->IsValid()) {
+        rg.AddPass("AS_Build", {}, {},
+            [this, &world, &sg](rhi::IRHICommandList* c) {
+                m_RTPass->BuildAS(c, world, sg);
+            });
+    }
 
     // --- Pass 0: Shadow — CSM 级联 + Point Cubemap 阴影贴图渲染 ---
     // 声明写入所有阴影贴图 + hdrDepth（WAW 确保 Shadow 先于 FullScene）

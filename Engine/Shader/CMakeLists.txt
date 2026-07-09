@@ -86,10 +86,9 @@ if(SLANGC)
     # 命名约定: EffectName.rgen.slang (RayGen), EffectName.rmiss.slang (Miss),
     #           EffectName.rchit.slang (ClosestHit), EffectName.rahit.slang (AnyHit)
     set(RT_SLANG
-        # P8 示例: RT_Shadow, RT_Reflection, RT_AO 等
-        # "${SHADER_DIR}/RT_Shadow.rgen.slang"
-        # "${SHADER_DIR}/RT_Shadow.rmiss.slang"
-        # "${SHADER_DIR}/RT_Shadow.rchit.slang"
+        "${SHADER_DIR}/RT_Shadow.rgen.slang"
+        "${SHADER_DIR}/RT_Common.rmiss.slang"
+        "${SHADER_DIR}/RT_Common.rchit.slang"
     )
     # Mesh Shader 着色器（.mesh / .task）
     # 命名约定: EffectName.mesh.slang (Mesh), EffectName.task.slang (Amplification/Task)

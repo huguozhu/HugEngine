@@ -9,6 +9,7 @@
 #include "Pipeline/GPUCulling.h"
 #include "Pipeline/GPUScene.h"
 #include "Pipeline/MeshBatcher.h"
+#include "Pipeline/RTPass.h"
 #include "AntiAliasing/AntiAliasing.h"
 #include "Profiler/ProfilerManager.h"
 
@@ -148,6 +149,8 @@ private:
     std::unique_ptr<IGlobalIllumination> m_GI;
     std::unique_ptr<GI_RSM>              m_RSM;
     std::unique_ptr<IShadowSystem>       m_ShadowSystem;
+    std::unique_ptr<RTPass>              m_RTPass;         // Ray Tracing 子系统
+    bool                                 m_RTEnabled = false;
     std::unique_ptr<IAntiAliasing>       m_AntiAliasing;
     rhi::IRHISwapChain* m_SwapChain = nullptr;
     std::unique_ptr<ToneMapPass>         m_ToneMap;

@@ -81,6 +81,9 @@ target_sources(HugEngineRender PRIVATE
     AntiAliasing/AA_SMAA.h
     AntiAliasing/AA_SMAA.cpp
     AntiAliasing/AA_MSAA.h
+    # Ray Tracing
+    Pipeline/RTPass.h
+    Pipeline/RTPass.cpp
     # ShaderHotReload
     ShaderHotReload.h
     ShaderHotReload.cpp
