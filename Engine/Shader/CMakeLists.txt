@@ -93,6 +93,7 @@ if(SLANGC)
         "${SHADER_DIR}/RT_Sponza.rgen.slang"
         "${SHADER_DIR}/RT_Sponza.rmiss.slang"
         "${SHADER_DIR}/RT_Sponza.rchit.slang"
+        "${SHADER_DIR}/RT_PBR.rchit.slang"
         "${SHADER_DIR}/RT_Shadow.rgen.slang"
         "${SHADER_DIR}/RT_Common.rmiss.slang"
         "${SHADER_DIR}/RT_Common.rchit.slang"
@@ -157,6 +158,9 @@ if(SLANGC)
 
     # ── Ray Tracing 着色器 ──
     # Slang stage 映射: rgen→raygeneration, rmiss→miss, rchit→closesthit, rahit→anyhit, rcall→callable
+    # 重要：使用 -emit-spirv-via-glsl 路径确保 NonUniform 装饰正确生成
+    #       (slangc 直接 SPIR-V 路径在 ClosestHit 中不生成 NonUniform 装饰，
+    #        导致 Intel Arc B370 等 GPU shaderStorageBufferArrayNonUniformIndexingNative=false 时 GPU fault)
     foreach(SRC ${RT_SLANG})
         get_filename_component(FNAME ${SRC} NAME)
         string(REGEX REPLACE "\\.slang$" "" NAME "${FNAME}")         # RT_Shadow.rgen
@@ -177,9 +181,10 @@ if(SLANGC)
             OUTPUT ${SPV}
             COMMAND ${CMAKE_COMMAND} -E make_directory ${SPV_OUT_DIR}
             COMMAND ${SLANGC} ${SRC} -target spirv -entry main -stage ${SLANGC_STAGE}
+                    -emit-spirv-via-glsl -force-glsl-scalar-layout
                     -I "${SHADER_DIR}" -o ${SPV} -Wno-39001
             DEPENDS ${SRC} ${SLANG_INCLUDES}
-            COMMENT "Slang → SPIR-V (RT): ${NAME} [${SLANGC_STAGE}]"
+            COMMENT "Slang → SPIR-V (RT): ${NAME} [${SLANGC_STAGE}] (via-glsl)"
         )
         list(APPEND SPV_FILES ${SPV})
     endforeach()

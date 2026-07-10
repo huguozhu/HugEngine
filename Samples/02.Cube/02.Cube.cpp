@@ -26,7 +26,7 @@
 // RT 着色器 SPIR-V（Phase 2：复用 Sponza RT 着色器）
 #include "RT_Sponza.rgen.spv.h"
 #include "RT_Sponza.rmiss.spv.h"
-#include "RT_Sponza.rchit.spv.h"
+#include "RT_PBR.rchit.spv.h"  // Phase 4: 顶点拉取 + 重心插值法线
 
 #include <cmath>
 #include <cstring>
@@ -279,9 +279,10 @@ int main() {
     bool rtSupported = device->GetCaps().supportsRayTracing;
     he::render::RTPass rtPass;
     rhi::DescriptorSetLayoutHandle rtLayout0 = rhi::kInvalidLayout;
+    rhi::DescriptorSetLayoutHandle rtLayout1 = rhi::kInvalidLayout;
 
     if (rtSupported) {
-        // set=0: TLAS + BackBuffer（RayGen）
+        // set=0: TLAS + BackBuffer（RayGen 使用）
         rhi::DescriptorSetLayoutDesc rtSet0Desc;
         rtSet0Desc.bindings = {
             { 0, rhi::DescriptorType::AccelerationStructure, 1, 0x100 },
@@ -289,12 +290,23 @@ int main() {
         };
         rtLayout0 = device->CreateDescriptorSetLayout(rtSet0Desc);
 
+        // set=1: 材质纹理 + 光源 UB + 顶点 SSBO + 索引 SSBO（ClosestHit 使用）
+        rhi::DescriptorSetLayoutDesc rtSet1Desc;
+        rtSet1Desc.bindings = {
+            { 0, rhi::DescriptorType::SampledImage,  1, 0x40 },  // 材质纹理
+            { 1, rhi::DescriptorType::UniformBuffer, 1, 0x40 },  // 光源 UB
+            { 2, rhi::DescriptorType::StorageBuffer, 1, 0x40 },  // 顶点 SSBO
+            { 3, rhi::DescriptorType::StorageBuffer, 1, 0x40 },  // 索引 SSBO
+        };
+        rtLayout1 = device->CreateDescriptorSetLayout(rtSet1Desc);
+
+        // Phase 4: 使用 RT_PBR 着色器（顶点拉取 + 重心插值 + bindless 纹理）
         rhi::ShaderBytecode rgen{ rhi::ShaderStage::RayGen,
             k_RT_Sponza_rgen_spv, {}, "main" };
         rhi::ShaderBytecode rmiss{ rhi::ShaderStage::Miss,
             k_RT_Sponza_rmiss_spv, {}, "main" };
         rhi::ShaderBytecode rchit{ rhi::ShaderStage::ClosestHit,
-            k_RT_Sponza_rchit_spv, {}, "main" };
+            k_RT_PBR_rchit_spv, {}, "main" };
 
         std::vector<rhi::RTShaderGroup> rtGroups = {
             { rhi::RTShaderGroupType::RayGen, 0, ~0u, ~0u, ~0u, "RayGen" },
@@ -307,10 +319,33 @@ int main() {
         pcRange.offset    = 0;
         pcRange.size      = 80;
 
-        std::vector<rhi::DescriptorSetLayoutHandle> rtLayouts = { rtLayout0 };
+        // 创建 bindless 描述符集（set=2, 必须在 Initialize 之前）
+        rtPass.CreateBindlessDescriptorSet(device.get(), 256);
+
+        // Initialize 会自动包含已创建的 set=2 布局
+        std::vector<rhi::DescriptorSetLayoutHandle> rtLayouts = { rtLayout0, rtLayout1 };
         rtPass.Initialize(device.get(), { rgen, rmiss, rchit }, rtGroups,
                          rtLayouts, pcRange);
-        HE_CORE_INFO("02.Cube RT: {}", rtPass.IsValid() ? "就绪" : "不可用");
+
+        // 创建 RT 资源
+        rtPass.CreateMaterialTexture(device.get(), 8, world);
+        rtPass.CreateLightBuffer(device.get(), 8);
+
+        // 注册默认白色纹理到 bindless 数组（索引 0）
+        {
+            rhi::TextureDesc whiteTexDesc;
+            whiteTexDesc.format = rhi::Format::RGBA8_UNORM;
+            whiteTexDesc.width  = 1;
+            whiteTexDesc.height = 1;
+            whiteTexDesc.usage  = rhi::TextureUsage::ShaderResource;
+            u8 whitePixel[4] = { 255, 255, 255, 255 };
+            whiteTexDesc.initialData = whitePixel;
+            auto whiteTex = device->CreateTexture(whiteTexDesc);
+            rtPass.RegisterBindlessTexture(device.get(), whiteTex.get(), nullptr);
+        }
+
+        HE_CORE_INFO("02.Cube RT: {} (Phase 4.2 bindless + vertex pulling)",
+            rtPass.IsValid() ? "就绪" : "不可用");
     }
 
     // --- 6. 创建命令列表 ---
@@ -438,9 +473,21 @@ int main() {
         if (renderMode == 1 && rtPass.IsValid()) {
             // RT 路径：光追直写 BackBuffer（覆盖光栅化输出）
             rtPass.BuildAS(cmdList.get(), world, sceneGraph);
+
+            // 更新描述符集（set0: TLAS + BackBuffer, set1: 材质/光源/顶点）
             rtPass.UpdateRTDescriptorSet(device.get(),
                 swapchain->GetCurrentBackBufferView(),
                 pipeline.GetCurrentObjectBuffer());
+            rtPass.UpdateLightBuffer(pipeline.GetCurrentLightBuffer());
+
+            // 绑定第一个 mesh 的顶点/索引缓冲（单 mesh 场景，无歧义）
+            world.ForEach<MeshComponent>([&](Entity entity, MeshComponent& mesh) {
+                (void)entity;
+                if (mesh.GetVertexCount() > 0 && mesh.GetIndexCount() > 0) {
+                    rtPass.UpdateVertexDataDescriptorSet(device.get(), &mesh);
+                    return;
+                }
+            });
 
             // Push Constants：相机数据
             struct RTPushConstant { float4x4 invViewProj; float4 camPosNearFar; };
@@ -655,6 +702,8 @@ int main() {
     rtPass.Shutdown();
     if (rtLayout0 != rhi::kInvalidLayout)
         device->DestroyDescriptorSetLayout(rtLayout0);
+    if (rtLayout1 != rhi::kInvalidLayout)
+        device->DestroyDescriptorSetLayout(rtLayout1);
 
     pipeline.Shutdown();
 

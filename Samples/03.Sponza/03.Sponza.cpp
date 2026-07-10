@@ -427,9 +427,12 @@ int main() {
         };
         rtLayout0 = device->CreateDescriptorSetLayout(rtSet0Desc);
 
+        // 注意：Sponza 是多 mesh 场景，Phase 4 顶点拉取暂不支持多 mesh
+        // （每个 mesh 有独立顶点/索引缓冲，需合并或 bindless 支持）
+        // 使用 Phase 3 着色器（-WorldRayDirection() 近似法线）
         rhi::DescriptorSetLayoutDesc rtSet1Desc;
         rtSet1Desc.bindings = {
-            { 0, rhi::DescriptorType::SampledImage,  1, 0x40 },  // 材质纹理
+            { 0, rhi::DescriptorType::SampledImage,  1, 0x40 },  // 材质纹理 (Texture2D)
             { 1, rhi::DescriptorType::UniformBuffer, 1, 0x40 },  // 光源 UB
         };
         rtLayout1 = device->CreateDescriptorSetLayout(rtSet1Desc);
@@ -440,7 +443,7 @@ int main() {
         rhi::ShaderBytecode rmiss{ rhi::ShaderStage::Miss,
             k_RT_Sponza_rmiss_spv, {}, "main" };
         rhi::ShaderBytecode rchit{ rhi::ShaderStage::ClosestHit,
-            k_RT_Sponza_rchit_spv, {}, "main" };
+            k_RT_Sponza_rchit_spv, {}, "main" };  // Phase 3: 无顶点拉取
 
         // 5.5.3 Shader Group 定义
         std::vector<rhi::RTShaderGroup> rtGroups = {
@@ -672,7 +675,7 @@ int main() {
             rtPass.UpdateLightBuffer(
                 pipeline.GetCurrentLightBuffer());
 
-            // b2) 更新 RT 描述符集（set0: TLAS + BackBuffer, set1: 材质 UB）
+            // b2) 更新 RT 描述符集（set0: TLAS + BackBuffer, set1: 材质/光源）
             rtPass.UpdateRTDescriptorSet(device.get(),
                 swapchain->GetCurrentBackBufferView(),
                 pipeline.GetCurrentObjectBuffer());
