@@ -471,50 +471,34 @@ TraceRay 参数：
 
 #### 新增文件
 
-| 文件 | 说明 |
-|------|------|
-| `Engine/Shader/Shaders/RT_PBR.rchit.slang` | 重构 ClosestHit：顶点拉取 + 纹理采样 + 阴影 |
-| `Engine/Render/Pipeline/BindlessTextureManager.h` | Bindless 纹理数组管理器 |
-| `Engine/Render/Pipeline/BindlessTextureManager.cpp` | 实现 |
-
-#### 修改文件
-
-| 文件 | 变更说明 |
-|------|------|
-| `Engine/Shader/CMakeLists.txt` | RT 着色器添加 `-emit-spirv-via-glsl` |
-| `Engine/Shader/Shaders/RT_Sponza.rchit.slang` | 逐步迁移到通用 RT_PBR |
-| `Engine/Shader/Shaders/RT_Shadow.rgen.slang` | 完善：实现从 G-Buffer 重建世界位置发射阴影光线 |
-| `Engine/Shader/Shaders/RT_Common.rchit.slang` | 删除占位符 → 合并到 RT_PBR |
-| `Engine/Shader/Shaders/RT_Common.rmiss.slang` | 阴影 Miss：输出 visibility=1 |
-| `Engine/Shader/Shaders/ShaderTypes.slang` | 新增 `GPUVertex` 结构体定义 |
-| `Engine/RHI/Public/RHI/Types.h` | 新增 `DescriptorType::StorageBuffer`（如需） |
-| `Engine/RHI/Public/RHI/RHI.h` | 新增 `UpdateDescriptorSet(SSBO)` 虚方法 |
-| `Engine/RHI/Vulkan/VulkanDevice.cpp` | 实现 SSBO 描述符更新 + pool size |
-| `Engine/Render/Pipeline/RTPass.h` | 新增 set=2 布局、顶点缓冲创建、bindless 集成 |
-| `Engine/Render/Pipeline/RTPass.cpp` | 实现顶点数据上传、set=2 描述符管理、阴影 SBT |
-| `Samples/03.Sponza/03.Sponza.cpp` | 使用新的 RT shader 组配置 |
+| 文件 | 状态 | 说明 |
+|------|:--:|------|
+| `Engine/Shader/Shaders/RT_PBR.rchit.slang` | ✅ | 顶点拉取 + 重心插值法线 + bindless 纹理采样 |
+| `Engine/Shader/CMakeLists.txt` | ✅ | RT 着色器 `-emit-spirv-via-glsl -force-glsl-scalar-layout` |
+| `Engine/Render/Pipeline/RTPass.h` | ✅ | CreateVertexPullBuffer + IndexPullBuffer + BindlessDescriptorSet |
+| `Engine/Render/Pipeline/RTPass.cpp` | ✅ | 48B→32B 解包 + SSBO 绑定 + set=2 描述符管理 |
+| `Samples/02.Cube/02.Cube.cpp` | ✅ | 启用 RT_PBR (set=0+1+2, 单 mesh) |
+| `Samples/03.Sponza/03.Sponza.cpp` | ✅ | 保持 Phase 3 shader (多 mesh 兼容), set=0+1 |
+| `Engine/Shader/Shaders/ShaderTypes.slang` | ↔ | GPUVertex 改在 shader 内定义（C++/GPU 布局不同） |
+| `Engine/Shader/Shaders/RT_Shadow.rgen.slang` | ⬜ | 待完善 |
+| `Engine/Shader/Shaders/RT_Common.rchit.slang` | ⬜ | 待合并到 RT_PBR |
+| `Engine/Shader/Shaders/RT_Common.rmiss.slang` | ⬜ | 待实现阴影 Miss |
+| `Engine/Render/Pipeline/BindlessTextureManager.h` | ⬜ | bindless 纹理注册逻辑已内嵌到 RTPass，独立类待提取 |
 
 ---
 
 ### 4.5 实施顺序
 
 ```
-Phase 4.0  ✅ 已验证   slangc via-glsl 路径 NonUniform 装饰
-Phase 4.0a ⬜ 待实施   修改 CMakeLists.txt → RT 着色器 via-glsl
-Phase 4.0b ⬜ 待实施   端到端验证：Simple StructuredBuffer 在 ClosestHit 中工作
-    ↓
-Phase 4.1a ⬜ 待实施   RHI SSBO 描述符类型 + UpdateDescriptorSet
-Phase 4.1b ⬜ 待实施   RTPass 创建顶点/索引描述符绑定
-Phase 4.1c ⬜ 待实施   ClosestHit 顶点拉取 + 重心插值法线
-Phase 4.0  ✅ 已完成   slangc via-glsl 路径 NonUniform 装饰
+Phase 4.0  ✅ 已完成   slangc via-glsl 路径 NonUniform 装饰（7 个）
 Phase 4.0a ✅ 已完成   修改 CMakeLists.txt → RT 着色器 via-glsl + scalar-layout
-Phase 4.0b ✅ 已完成   端到端验证：StructuredBuffer 在 ClosestHit 中工作 (via-glsl)
+Phase 4.0b ✅ 已完成   端到端验证：StructuredBuffer 在 ClosestHit 中工作
     ↓
 Phase 4.1a ✅ 已完成   RHI 层 StorageBuffer 已有（Phase 3 已实现，无需修改）
-Phase 4.1b ✅ 已完成   RTPass::CreateVertexPullBuffer + UpdateVertexDataDescriptorSet
+Phase 4.1b ✅ 已完成   RTPass::CreateVertexPullBuffer (48B→32B) + IndexPullBuffer
 Phase 4.1c ✅ 已完成   RT_PBR.rchit.slang 顶点拉取 + 重心插值法线
     ↓
-Phase 4.2a ✅ 已完成   BindlessTextureManager → RTPass::CreateBindlessDescriptorSet + RegisterBindlessTexture
+Phase 4.2a ✅ 已完成   RTPass::CreateBindlessDescriptorSet (set=2, 256 纹理) + RegisterBindlessTexture
 Phase 4.2b ⬜ 待实施   glTF 纹理加载 + 注册到 bindless 数组
 Phase 4.2c ⬜ 待实施   ClosestHit PBR 完整管线（baseColor + metallic-roughness + normal map）
     ↓
@@ -534,7 +518,11 @@ Phase 2 ✅ 已完成（含 02.Cube RT 模式）
     ↓
 Phase 3 ✅ 已完成（Texture2D 材质 + UB 光源）
     ↓
-Phase 4 🔄 进行中 → 4.0 ✅ → 4.1 ✅ → 4.2 待实施 → 4.3 待实施
+Phase 4 🔄 进行中 → 4.0 ✅ → 4.1 ✅ → 4.2a ✅ → 4.2b/c ⬜ → 4.3 ⬜
+
+**最新提交**：`820d2cb` Phase 4: RT 逐顶点法线 + Bindless 纹理基础设施
+- 02.Cube: RT_PBR shader (set=0 + set=1 + set=2) 顶点拉取 + bindless ✅
+- 03.Sponza: RT_Sponza shader (set=0 + set=1) Phase 3 兼容 ✅
 
 ---
 
