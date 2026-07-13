@@ -1,21 +1,9 @@
-// RT_Sponza.rchit.slang — Phase 5: PBR 因子 + Bindless 基础设施就绪
+// RT_Sponza.rchit.slang — Phase 5: PBR 因子（3×N 纹理） + HitKind 法线修正
 //
 // 材质纹理布局（3×N RGBA32F，set=1 binding 0）:
 //   Row 0 (y=0): baseColorFactor (RGBA)
 //   Row 1 (y=1): metallic, roughness, ao, alphaCutoff (RGBA)
-//   Row 2 (y=2): materialID, 0, 0, 0（预留 bindless 纹理索引）
-//
-// slangc ClosestHit 数组索引 bug（2026.1~2026.13 未修复）:
-//   任意动态数组索引在 ClosestHit 中 GPU 静默失败:
-//     StructuredBuffer<T>  arr[id]   — SSBO
-//     ByteAddressBuffer    arr[id]   — 原始缓冲
-//     Texture2D<float4>    arr[id]   — Bindless 纹理数组
-//   仅常量索引 arr[0] 和单资源 .Load/.Sample 正常工作
-//
-// Bindless 基础设施已就绪（set=0 b=5,6），待 slangc 修复后接入:
-//   #include "common.slang"  // u_Textures[], u_Samplers[]
-//   uint texBase = NonUniformResourceIndex(matID);
-//   float4 albedo = u_Textures[texBase+0].Sample(u_Samplers[0], uv);
+//   Row 2 (y=2): materialID, 0, 0, 0（预留 bindless）
 
 struct RayPayload { float3 color; float hitT; };
 
@@ -51,7 +39,7 @@ void main(inout RayPayload payload) {
             0.20 + float((h >> 16) & 0xFF) / 255.0 * 0.30);
     }
 
-    // ── 2. 法线 + HitKind 修正 ──
+    // ── 2. 法线 + HitKind 朝向修正 ──
     float3 N = -WorldRayDirection();
     if (HitKind() == 0xFF) N = -N;
 

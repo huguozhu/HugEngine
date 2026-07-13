@@ -118,7 +118,6 @@ bool RTPass::CreateSBT(rhi::IRHIDevice* device) {
     u32 handleSize   = m_RTPipeline->GetShaderGroupHandleSize();
     auto handles     = m_RTPipeline->GetShaderGroupHandles();
 
-    // 计算 SBT 布局（假设简单映射：group[0]=RayGen, group[1]=Miss, group[2]=Hit）
     u32 align = device->GetCaps().shaderGroupBaseAlignment;
     auto aligned = [align](u32 size) -> u32 {
         return (size + align - 1) & ~(align - 1);
