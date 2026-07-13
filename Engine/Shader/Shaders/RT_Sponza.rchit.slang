@@ -19,7 +19,7 @@ struct LightUB { float4 ci; float4 dt; };
 
 // Triplanar UV — 平滑轴混合
 float2 TriplanarUV(float3 P, float3 N) {
-    float s = 0.01;
+    float s = 0.1;
     float3 w = abs(N) / (abs(N).x + abs(N).y + abs(N).z + 0.0001);
     return (P.zy * w.x + P.xz * w.y + P.xy * w.z) * s;
 }
