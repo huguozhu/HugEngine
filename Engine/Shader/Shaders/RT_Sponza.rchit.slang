@@ -42,7 +42,7 @@ void main(inout RayPayload payload) {
     float4 pp = u_MatTex.Load(int3(id, 1, 0));
     float roughnessFac = pp.y;
     float aoFac = pp.z;
-    uint  matID = asuint(u_MatTex.Load(int3(id, 2, 0)).r);
+    uint  matID = uint(u_MatTex.Load(int3(id, 2, 0)).r);
 
     if (dot(bc, float3(0.3, 0.59, 0.11)) < 0.01) {
         uint h = id * 2654435761u;

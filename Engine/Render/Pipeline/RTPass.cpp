@@ -389,10 +389,10 @@ bool RTPass::CreateMaterialTexture(rhi::IRHIDevice* device, u32 maxInstances,
         row1[1] = mesh.roughnessFactor;
         row1[2] = mesh.aoFactor;
         row1[3] = mesh.alphaCutoff;
-        // Row 2: materialID (uint bitcast to float), 0, 0, 0
+        // Row 2: materialID (uint→float 值转换，避免 denormal flush-to-zero)
         float* row2 = &texData[m_MaterialInstanceCount * 4 * 2 + idx * 4];
-        std::memcpy(&row2[0], &mesh.materialID, 4);       // uint → float bitcast
-        row2[1] = 0.0f;  // materialFlags 在 GPUObjectData 层计算，此处预留
+        row2[0] = static_cast<float>(mesh.materialID);
+        row2[1] = 0.0f;
         row2[2] = 0.0f;
         row2[3] = 0.0f;
         idx++;
