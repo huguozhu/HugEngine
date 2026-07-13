@@ -74,13 +74,32 @@ public:
     bool CreateLightBuffer(rhi::IRHIDevice* device, u32 maxLights = 8);
     void UpdateLightBuffer(rhi::IRHIBuffer* lightBuffer);
 
+    // 更新 set=1 的顶点/索引 SSBO 绑定（Phase 4 顶点拉取）
+    // 传入当前帧需要拉取顶点的 MeshComponent（通常取第一个有效 mesh）
+    // 内部自动处理 GLM 对齐→GPU 标量布局的转换
+    void UpdateVertexDataDescriptorSet(rhi::IRHIDevice* device,
+                                       he::MeshComponent* mesh);
+
+    // 创建顶点拉取专用缓冲（GPU 标量布局，32B/顶点）
+    bool CreateVertexPullBuffer(rhi::IRHIDevice* device, he::MeshComponent* mesh);
+
+    // Phase 4.2: Bindless 纹理支持
+    // 注册纹理到 bindless 数组，返回索引（MaterialData 中的纹理 ID）
+    u32  RegisterBindlessTexture(rhi::IRHIDevice* device,
+                                  rhi::IRHITexture* texture,
+                                  rhi::IRHISampler* sampler);
+    // 创建 bindless 描述符集布局 + 分配描述符集
+    bool CreateBindlessDescriptorSet(rhi::IRHIDevice* device,
+                                      u32 maxTextures = 256);
+
     // 获取资源
     rhi::IRHITexture* GetMaterialTexture() const { return m_MaterialTex.get(); }
     rhi::IRHIBuffer*  GetLightBuffer()    const { return m_LightUB.get(); }
 
-    // 获取描述符集句柄（set0: RayGen, set1: ClosestHit）
+    // 获取描述符集句柄（set0: RayGen, set1: ClosestHit, set2: Bindless 纹理）
     rhi::DescriptorSetHandle GetDescriptorSet0() const { return m_DescSet; }
     rhi::DescriptorSetHandle GetDescriptorSet1() const { return m_DescSet1; }
+    rhi::DescriptorSetHandle GetDescriptorSet2() const { return m_DescSet2; }
 
     // 绑定所有描述符集
     void BindDescriptorSets(rhi::IRHICommandList* cmd);
@@ -123,13 +142,24 @@ private:
     // 描述符集
     rhi::DescriptorSetLayoutHandle m_DescLayout  = rhi::kInvalidLayout;   // set=0
     rhi::DescriptorSetLayoutHandle m_DescLayout1 = rhi::kInvalidLayout;   // set=1（rchit SSBO）
+    rhi::DescriptorSetLayoutHandle m_DescLayout2 = rhi::kInvalidLayout;   // set=2（bindless 纹理）
     rhi::DescriptorSetHandle       m_DescSet     = rhi::kInvalidSet;      // set=0（内部管理）
     rhi::DescriptorSetHandle       m_DescSet1    = rhi::kInvalidSet;      // set=1（内部管理）
+    rhi::DescriptorSetHandle       m_DescSet2    = rhi::kInvalidSet;      // set=2（内部管理）
     rhi::PushConstantRange         m_PushConstRange;                      // Push Constant 范围
 
     // set=1 资源（ClosestHit 使用）
     std::unique_ptr<rhi::IRHITexture> m_MaterialTex;                     // 材质 1D 纹理 (b=0)
     std::unique_ptr<rhi::IRHIBuffer>  m_LightUB;                        // 光源 UB (b=1)
+    std::unique_ptr<rhi::IRHIBuffer>  m_VertexPullBuffer;               // 顶点拉取 SSBO (b=2, GPU 标量布局)
+    std::unique_ptr<rhi::IRHIBuffer>  m_IndexPullBuffer;                // 索引拉取 SSBO (b=3, 直接拷贝)
+
+    // set=2 资源（Bindless 纹理数组, Phase 4.2）
+    std::unique_ptr<rhi::IRHISampler>  m_BindlessSampler;               // 共享采样器 (b=1)
+    std::vector<rhi::IRHITexture*>     m_BindlessTextures;              // 已注册纹理列表
+    std::vector<rhi::IRHISampler*>     m_BindlessSamplers;              // 对应采样器（CombinedImageSampler）
+    u32 m_BindlessMaxCount = 0;
+
     u32 m_MaterialInstanceCount = 0;
     u32 m_LightMaxCount = 8;
 

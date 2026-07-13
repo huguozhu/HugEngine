@@ -6,6 +6,7 @@
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
 #include "Scene/Transform.h"
+#include "Scene/MeshComponent.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
 
@@ -53,6 +54,9 @@ bool RTPass::Initialize(rhi::IRHIDevice* device,
     if (m_DescLayout1 != rhi::kInvalidLayout) {
         m_DescSet1 = device->AllocateDescriptorSet(m_DescLayout1);
     }
+    if (m_DescLayout2 != rhi::kInvalidLayout) {
+        m_DescSet2 = device->AllocateDescriptorSet(m_DescLayout2);
+    }
 
     // 1. 创建 RT Pipeline State
     rhi::RTPipelineStateDesc rtpDesc;
@@ -66,6 +70,9 @@ bool RTPass::Initialize(rhi::IRHIDevice* device,
         if (l != rhi::kInvalidLayout)
             rtpDesc.descriptorSetLayouts.push_back(l);
     }
+    // 如果 set=2 已创建（bindless），也加入布局
+    if (m_DescLayout2 != rhi::kInvalidLayout)
+        rtpDesc.descriptorSetLayouts.push_back(m_DescLayout2);
     if (m_PushConstRange.size > 0)
         rtpDesc.pushConstantRanges.push_back(m_PushConstRange);
 
@@ -176,8 +183,13 @@ bool RTPass::CreateSBT(rhi::IRHIDevice* device) {
 }
 
 void RTPass::Shutdown() {
+    m_VertexPullBuffer.reset();
+    m_IndexPullBuffer.reset();
     m_MaterialTex.reset();
     m_LightUB.reset();
+    m_BindlessSampler.reset();
+    m_BindlessTextures.clear();
+    m_BindlessSamplers.clear();
     m_TLASScratch.reset();
     m_TLASInstanceBuffer.reset();
     m_SBTBuffer.reset();
@@ -452,12 +464,222 @@ void RTPass::UpdateLightBuffer(rhi::IRHIBuffer* lightBuffer) {
     lightBuffer->Unmap();
 }
 
+// ============================================================
+// Phase 4: 顶点拉取 — GPU 标量布局 SSBO
+// ============================================================
+
+// GPU 端顶点布局（标量布局：紧密打包 32 字节）
+// 与 C++ StaticVertex(GLM 对齐 40B) 不同，需要解包转换
+struct RTVertexPacked {
+    float position[3];   // offset 0,  12 字节
+    float normal[3];     // offset 12, 12 字节
+    float uv[2];         // offset 24, 8 字节
+};
+static_assert(sizeof(RTVertexPacked) == 32,
+              "RTVertexPacked must be 32 bytes (GPU scalar layout)");
+
+// C++ StaticVertex 布局检测
+// 不启用 GLM_FORCE_DEFAULT_ALIGNED_GENTYPES：32 字节（与 GPU 标量一致）
+// 启用后 GLM vec3→16B 且 struct 对齐至 16B：48 字节（需解包）
+static_assert(sizeof(he::StaticVertex) == 32 || sizeof(he::StaticVertex) == 48,
+              "Unexpected StaticVertex size — expected 32 or 48");
+
+bool RTPass::CreateVertexPullBuffer(rhi::IRHIDevice* device,
+                                     he::MeshComponent* mesh) {
+    if (!device || !mesh) return false;
+
+    u32 vertexCount = mesh->GetVertexCount();
+    if (vertexCount == 0) {
+        HE_CORE_WARN("RTPass::CreateVertexPullBuffer: mesh has 0 vertices");
+        return false;
+    }
+
+    auto* srcBuf = mesh->GetVertexBuffer().get();
+    if (!srcBuf) {
+        HE_CORE_WARN("RTPass::CreateVertexPullBuffer: mesh has no vertex buffer");
+        return false;
+    }
+
+    u64 srcSize = srcBuf->GetSize();
+    u64 expectedSize = vertexCount * sizeof(he::StaticVertex);
+    if (srcSize < expectedSize) {
+        HE_CORE_ERROR("RTPass::CreateVertexPullBuffer: buffer size mismatch "
+                      "(expected={}, actual={})", expectedSize, srcSize);
+        return false;
+    }
+
+    const u8* src = static_cast<const u8*>(srcBuf->Map());
+    if (!src) {
+        HE_CORE_ERROR("RTPass::CreateVertexPullBuffer: Map() failed (nullptr)");
+        return false;
+    }
+
+    constexpr u32 GPU_STRIDE = sizeof(RTVertexPacked);       // 32 字节
+    constexpr u32 CPU_STRIDE = sizeof(he::StaticVertex);     // 32 或 48 字节
+
+    std::vector<RTVertexPacked> packed(vertexCount);
+
+    if constexpr (CPU_STRIDE == GPU_STRIDE) {
+        // CPU 与 GPU 布局一致（32 字节），直接拷贝
+        std::memcpy(packed.data(), src, srcSize);
+        HE_CORE_INFO("RTPass: 顶点布局一致 ({}B)，直接复用原始缓冲", CPU_STRIDE);
+    } else {
+        // GLM 对齐布局（48 字节）：GLM vec3 含 4B 尾部+8B 尾部 struct padding
+        // 每顶点内偏移: pos(0), normal(16), uv(32) — 与 32B 布局一致，仅 stride 不同
+        for (u32 i = 0; i < vertexCount; i++) {
+            const float* v = reinterpret_cast<const float*>(src + i * CPU_STRIDE);
+            packed[i].position[0] = v[0];  // pos.x
+            packed[i].position[1] = v[1];  // pos.y
+            packed[i].position[2] = v[2];  // pos.z
+            packed[i].normal[0]   = v[4];  // normal.x (v[3]=pos.w padding)
+            packed[i].normal[1]   = v[5];  // normal.y
+            packed[i].normal[2]   = v[6];  // normal.z
+            packed[i].uv[0]       = v[8];  // uv.x (v[7]=normal.w padding)
+            packed[i].uv[1]       = v[9];  // uv.y
+        }
+        HE_CORE_INFO("RTPass: 顶点布局解包 (CPU={}B → GPU={}B)", CPU_STRIDE, GPU_STRIDE);
+    }
+    srcBuf->Unmap();
+
+    // 上传顶点数据到 GPU
+    rhi::BufferDesc vbDesc;
+    vbDesc.size        = vertexCount * GPU_STRIDE;
+    vbDesc.usage       = rhi::BufferUsage::Storage;
+    vbDesc.initialData = packed.data();
+    m_VertexPullBuffer = device->CreateBuffer(vbDesc);
+
+    if (!m_VertexPullBuffer) {
+        HE_CORE_ERROR("RTPass::CreateVertexPullBuffer: GPU vertex buffer creation failed (size={})",
+                      vbDesc.size);
+        return false;
+    }
+
+    // 索引缓冲直接拷贝（uint32，无布局差异），创建独立 SSBO 避免修改源缓冲的 usage
+    auto* idxBuf = mesh->GetIndexBuffer().get();
+    if (idxBuf) {
+        u32 idxCount = mesh->GetIndexCount();
+        u64 idxSize = idxCount * sizeof(u32);
+        const u8* idxSrc = static_cast<const u8*>(idxBuf->Map());
+        if (idxSrc) {
+            rhi::BufferDesc ibDesc;
+            ibDesc.size        = idxSize;
+            ibDesc.usage       = rhi::BufferUsage::Storage;
+            ibDesc.initialData = idxSrc;
+            m_IndexPullBuffer = device->CreateBuffer(ibDesc);
+            idxBuf->Unmap();
+
+            if (!m_IndexPullBuffer)
+                HE_CORE_WARN("RTPass::CreateVertexPullBuffer: GPU index buffer creation failed");
+        }
+    }
+
+    HE_CORE_INFO("RTPass: 顶点拉取缓冲创建成功 ({} vertices, CPU={}B→GPU={}B, total={}KB)",
+                 vertexCount, CPU_STRIDE, GPU_STRIDE,
+                 static_cast<u32>(vbDesc.size) / 1024);
+    return true;
+}
+
+void RTPass::UpdateVertexDataDescriptorSet(rhi::IRHIDevice* device,
+                                             he::MeshComponent* mesh) {
+    if (!device || !mesh) return;
+    if (m_DescSet1 == rhi::kInvalidSet) return;
+
+    // 首次调用时创建顶点拉取缓冲（含顶点+索引）
+    if (!m_VertexPullBuffer) {
+        CreateVertexPullBuffer(device, mesh);
+    }
+
+    // binding 2: StructuredBuffer<GPUVertex> — 顶点数据（GPU 标量布局）
+    if (m_VertexPullBuffer) {
+        device->UpdateDescriptorSet(m_DescSet1, 2,
+            rhi::DescriptorType::StorageBuffer, m_VertexPullBuffer.get());
+    }
+
+    // binding 3: ByteAddressBuffer — 索引数据（独立 SSBO 拷贝）
+    if (m_IndexPullBuffer) {
+        device->UpdateDescriptorSet(m_DescSet1, 3,
+            rhi::DescriptorType::StorageBuffer, m_IndexPullBuffer.get());
+    }
+}
+
+// ============================================================
+// Phase 4.2: Bindless 纹理管理
+// ============================================================
+
+bool RTPass::CreateBindlessDescriptorSet(rhi::IRHIDevice* device, u32 maxTextures) {
+    if (!device) return false;
+    m_BindlessMaxCount = maxTextures;
+
+    // 创建 bindless 描述符集布局
+    // set=2: 纹理数组(CombinedImageSampler) + 独立采样器
+    rhi::DescriptorSetLayoutDesc desc;
+    desc.bindings = {
+        { 0, rhi::DescriptorType::CombinedImageSampler,
+          maxTextures, 0x40, true },  // bindless=true, ClosestHit
+    };
+    m_DescLayout2 = device->CreateDescriptorSetLayout(desc);
+    if (m_DescLayout2 == rhi::kInvalidLayout) {
+        HE_CORE_ERROR("RTPass: bindless descriptor layout 创建失败");
+        return false;
+    }
+
+    // 分配描述符集
+    m_DescSet2 = device->AllocateDescriptorSet(m_DescLayout2);
+    if (m_DescSet2 == rhi::kInvalidSet) {
+        HE_CORE_ERROR("RTPass: bindless descriptor set 分配失败");
+        return false;
+    }
+
+    // 创建默认采样器（线性过滤 + 重复寻址）
+    rhi::SamplerDesc samplerDesc;
+    samplerDesc.minFilter = rhi::FilterMode::Linear;
+    samplerDesc.magFilter = rhi::FilterMode::Linear;
+    samplerDesc.mipFilter = rhi::FilterMode::Linear;
+    samplerDesc.addressU  = rhi::AddressMode::Repeat;
+    samplerDesc.addressV  = rhi::AddressMode::Repeat;
+    samplerDesc.maxAnisotropy = 16.0f;
+    m_BindlessSampler = device->CreateSampler(samplerDesc);
+
+    // 预分配纹理/采样器数组（用默认白色纹理填充）
+    m_BindlessTextures.resize(maxTextures, nullptr);
+    m_BindlessSamplers.resize(maxTextures, nullptr);
+
+    HE_CORE_INFO("RTPass: bindless 描述符集创建 (max={} textures)", maxTextures);
+    return true;
+}
+
+u32 RTPass::RegisterBindlessTexture(rhi::IRHIDevice* device,
+                                      rhi::IRHITexture* texture,
+                                      rhi::IRHISampler* sampler) {
+    if (!device || !texture || m_BindlessTextures.empty()) return ~0u;
+
+    // 查找空闲槽位
+    for (u32 i = 0; i < m_BindlessMaxCount; ++i) {
+        if (m_BindlessTextures[i] == nullptr) {
+            m_BindlessTextures[i] = texture;
+            m_BindlessSamplers[i] = sampler ? sampler : m_BindlessSampler.get();
+
+            // 更新描述符集（绑定此纹理）
+            device->UpdateDescriptorSet(m_DescSet2, 0,
+                rhi::DescriptorType::CombinedImageSampler,
+                m_BindlessTextures.data(),
+                m_BindlessSamplers.data(),
+                m_BindlessMaxCount);
+            return i;
+        }
+    }
+    HE_CORE_WARN("RTPass: bindless 纹理数组已满 (max={})", m_BindlessMaxCount);
+    return ~0u;
+}
+
 // BindDescriptorSets — 绑定所有描述符集
 void RTPass::BindDescriptorSets(rhi::IRHICommandList* cmd) {
     if (m_DescSet != rhi::kInvalidSet)
         cmd->BindDescriptorSet(0, m_DescSet);
     if (m_DescSet1 != rhi::kInvalidSet)
         cmd->BindDescriptorSet(1, m_DescSet1);
+    if (m_DescSet2 != rhi::kInvalidSet)
+        cmd->BindDescriptorSet(2, m_DescSet2);
 }
 
 int RTPass::ReloadShader(StringView shaderName, const std::vector<u32>& newSpirv) {
@@ -489,6 +711,8 @@ int RTPass::ReloadShader(StringView shaderName, const std::vector<u32>& newSpirv
             rtpDesc.descriptorSetLayouts.push_back(m_DescLayout);
         if (m_DescLayout1 != rhi::kInvalidLayout)
             rtpDesc.descriptorSetLayouts.push_back(m_DescLayout1);
+        if (m_DescLayout2 != rhi::kInvalidLayout)
+            rtpDesc.descriptorSetLayouts.push_back(m_DescLayout2);
         if (m_PushConstRange.size > 0)
             rtpDesc.pushConstantRanges.push_back(m_PushConstRange);
         m_RTPipeline = m_Device->CreateRTPipelineState(rtpDesc);
