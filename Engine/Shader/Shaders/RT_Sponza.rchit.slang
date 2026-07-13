@@ -1,16 +1,25 @@
-// RT_Sponza.rchit.slang — Phase 4: 2×N 扩展纹理 + 完整 PBR 材质数据
+// RT_Sponza.rchit.slang — Phase 5: PBR 因子 + Bindless 基础设施就绪
 //
-// 方案：用 2×N RGBA32F 纹理替代 StructuredBuffer，规避 slangc StorageBuffer 在 ClosestHit 中的 bug
+// 材质纹理布局（3×N RGBA32F，set=1 binding 0）:
 //   Row 0 (y=0): baseColorFactor (RGBA)
 //   Row 1 (y=1): metallic, roughness, ao, alphaCutoff (RGBA)
+//   Row 2 (y=2): materialID, 0, 0, 0（预留 bindless 纹理索引）
 //
-// slangc bug: StructuredBuffer / ByteAddressBuffer（均映射到 SPIR-V StorageBuffer）
-//   在 ClosestHit 着色器中导致 GPU 静默失败（黑屏），slangc 2026.1 ~ 2026.13 均未修复
-//   变通：Texture2D::Load() 天然支持非均匀索引，在 ClosestHit 中稳定工作
+// slangc ClosestHit 数组索引 bug（2026.1~2026.13 未修复）:
+//   任意动态数组索引在 ClosestHit 中 GPU 静默失败:
+//     StructuredBuffer<T>  arr[id]   — SSBO
+//     ByteAddressBuffer    arr[id]   — 原始缓冲
+//     Texture2D<float4>    arr[id]   — Bindless 纹理数组
+//   仅常量索引 arr[0] 和单资源 .Load/.Sample 正常工作
+//
+// Bindless 基础设施已就绪（set=0 b=5,6），待 slangc 修复后接入:
+//   #include "common.slang"  // u_Textures[], u_Samplers[]
+//   uint texBase = NonUniformResourceIndex(matID);
+//   float4 albedo = u_Textures[texBase+0].Sample(u_Samplers[0], uv);
 
 struct RayPayload { float3 color; float hitT; };
 
-// 2×N 材质纹理：行0=baseColor, 行1=PBR参数
+// 3×N 材质纹理
 [[vk::binding(0, 1)]] Texture2D<float4> u_MatTex;
 
 // 光源 Uniform Buffer
@@ -21,18 +30,19 @@ struct LightUB { float4 ci; float4 dt; };
 void main(inout RayPayload payload) {
     uint id = InstanceID();
 
-    // ── 1. 从 2×N 纹理读取完整 PBR 材质数据 ──
-    // Row 0 (y=0): baseColorFactor
-    float4 baseColor = u_MatTex.Load(int3(id, 0, 0));
-    float3 bc = baseColor.rgb;
+    // ── 1. 从 3×N 纹理读取 PBR 因子 ──
+    float4 baseColorF = u_MatTex.Load(int3(id, 0, 0));
+    float3 bc = baseColorF.rgb;
 
-    // Row 1 (y=1): metallic, roughness, ao, alphaCutoff
-    float4 pbrParams = u_MatTex.Load(int3(id, 1, 0));
-    float metallic  = pbrParams.x;
-    float roughness = pbrParams.y;
-    float ao        = pbrParams.z;
+    float4 pbrParams  = u_MatTex.Load(int3(id, 1, 0));
+    float  metallic   = pbrParams.x;
+    float  roughness  = pbrParams.y;
+    float  ao         = pbrParams.z;
 
-    // 若 baseColorFactor 接近黑色，用随机颜色染色（调试可见性）
+    // Row 2: materialID (预留 bindless)
+    // uint matID = asuint(u_MatTex.Load(int3(id, 2, 0)).r);
+
+    // 若 baseColorFactor 接近黑色，用随机颜色染色
     if (dot(bc, float3(0.3, 0.59, 0.11)) < 0.01) {
         uint h = id * 2654435761u;
         bc = float3(
@@ -41,9 +51,8 @@ void main(inout RayPayload payload) {
             0.20 + float((h >> 16) & 0xFF) / 255.0 * 0.30);
     }
 
-    // ── 2. 法线计算 ──
+    // ── 2. 法线 + HitKind 修正 ──
     float3 N = -WorldRayDirection();
-    // HitKind 修正朝向（HIT_KIND_TRIANGLE_FRONT_FACE=0xFE, BACK_FACE=0xFF）
     if (HitKind() == 0xFF) N = -N;
 
     // ── 3. 光照计算 ──
@@ -63,7 +72,7 @@ void main(inout RayPayload payload) {
         total += float3(0.45, 0.50, 0.58) * max(dot(N, L1), 0.0) * 0.35;
     }
 
-    // ── 4. 材质属性影响 ──
+    // ── 4. 材质属性 ──
     float roughnessAtten = 1.0 - roughness * 0.3;
     float aoAtten = lerp(0.7, 1.0, ao);
 

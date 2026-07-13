@@ -419,7 +419,10 @@ int main() {
     if (rtSupported) {
         // 5.5.1 创建描述符集布局
         //   set=0: TLAS + BackBuffer（RayGen 使用）
-        //   set=1: GPUObjectData SSBO（ClosestHit 使用，独立 set 避免冲突）
+        //   set=1: 材质纹理 + 光源 UB（ClosestHit 使用）
+        // TODO Phase 5+: 添加 b=5 SampledImage[4096] + b=6 Sampler[4096] 到 set=0，
+        //   注册到 BindlessTextureManager，shader include "common.slang" 采样 u_Textures[]
+        //   等待 slangc 修复 ClosestHit 动态数组索引 bug
         rhi::DescriptorSetLayoutDesc rtSet0Desc;
         rtSet0Desc.bindings = {
             { 0, rhi::DescriptorType::AccelerationStructure, 1, 0x100 },
@@ -429,7 +432,7 @@ int main() {
 
         rhi::DescriptorSetLayoutDesc rtSet1Desc;
         rtSet1Desc.bindings = {
-            { 0, rhi::DescriptorType::SampledImage,  1, 0x40 },  // 材质纹理 (2×N)
+            { 0, rhi::DescriptorType::SampledImage,  1, 0x40 },  // 材质纹理 (3×N)
             { 1, rhi::DescriptorType::UniformBuffer, 1, 0x40 },  // 光源 UB
         };
         rtLayout1 = device->CreateDescriptorSetLayout(rtSet1Desc);

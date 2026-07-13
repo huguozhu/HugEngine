@@ -235,6 +235,46 @@ float4 pbrParams = u_MatTex.Load(int3(id, 1, 0));  // 行1
 
 ---
 
+## Phase 5：slangc ClosestHit 动态数组索引 Bug 诊断 ✅ 已完成
+
+**目标**：诊断并记录 slangc 在 ClosestHit 着色器中的 SPIR-V 代码生成 bug，为后续 bindless 纹理接入做准备。
+
+### 诊断结论
+
+**slangc 在 ClosestHit 中，任何动态数组索引均导致 GPU 静默失败（黑屏）**：
+
+| 资源类型 | 常量索引 `[0]` | 动态索引 `[id]` |
+|----------|:---:|:---:|
+| `Texture2D<float4>` (单资源 `.Load/.Sample`) | ✅ | ✅ |
+| `Texture2D<float4>[]` (bindless 数组) | ✅ | ❌ |
+| `StructuredBuffer<T>` (SSBO) | ❌ | ❌ |
+| `ByteAddressBuffer` | — | ❌ |
+
+**测试版本**：slangc 2026.1 ~ 2026.13 均未修复
+
+**影响**：
+- ❌ Bindless 纹理数组 (`u_Textures[id].Sample()`)
+- ❌ StructuredBuffer (`u_Objects[id]`)
+- ❌ ByteAddressBuffer (`u_Data.Load<T>(offset)`)
+- ✅ 单个纹理 `.Load/.Sample`（非数组）
+- ✅ cbuffer 数组（配合 `shaderUniformBufferArrayNonUniformIndexing`）
+
+### 已实施的变通
+
+- **材质纹理 3×N**：扩展 Row 2 预留 `materialID`（bindless 修复后立即可用）
+- **BindlessTextureManager 注册接口**：已就绪，添加 bindless 绑定后即插即用
+- **Triplanar UV + 法线贴图代码**：shader 注释中保留完整实现模板
+
+### Phase 5 已知限制
+
+| 限制 | 原因 | 方案 |
+|------|------|------|
+| 无 bindless 纹理采样 | slangc 动态数组索引 bug | 待 slangc 修复 |
+| 无 SSBO 数据访问 | 同上 | 同上 |
+| 无阴影射线 | GPUShadowData 需 SSBO | 变通：cbuffer 纹理方案 |
+
+---
+
 ## 执行状态
 
 ```
@@ -246,5 +286,7 @@ Phase 3 ✅ 已完成（Texture2D 材质 + UB 光源）
     ↓
 Phase 4 ✅ 已完成（2×N 扩展纹理 — PBR 材质数据）
     ↓
-Phase 5 ⬜ 待规划（bindless 纹理 + 阴影射线 + 几何法线 + SSBO 修复迁回）
+Phase 5 ✅ 已完成（slangc bug 诊断 + bindless 基础设施）
+    ↓
+Phase 6 ⬜ 待规划（阴影射线 + 几何法线 + 等待 slangc 修复）
 ```

@@ -289,11 +289,11 @@ int main() {
         };
         rtLayout0 = device->CreateDescriptorSetLayout(rtSet0Desc);
 
-        // set=1: 材质纹理 + 光源 UB + GPUObjectData SSBO（ClosestHit）
+        // set=1: 材质纹理 + 光源 UB（ClosestHit）
         rhi::DescriptorSetLayoutHandle rtLayout1;
         rhi::DescriptorSetLayoutDesc rtSet1Desc;
         rtSet1Desc.bindings = {
-            { 0, rhi::DescriptorType::SampledImage,  1, 0x40 },  // 材质纹理 (2×N)
+            { 0, rhi::DescriptorType::SampledImage,  1, 0x40 },  // 材质纹理 (3×N)
             { 1, rhi::DescriptorType::UniformBuffer, 1, 0x40 },  // 光源 UB
         };
         rtLayout1 = device->CreateDescriptorSetLayout(rtSet1Desc);

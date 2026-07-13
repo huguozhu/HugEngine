@@ -360,16 +360,17 @@ void RTPass::UpdateRTDescriptorSet(rhi::IRHIDevice* device,
     }
 }
 
-// 创建材质纹理（2×N RGBA32F），从 World MeshComponent 读取完整 PBR 材质数据
+// 创建材质纹理（3×N RGBA32F），从 World MeshComponent 读取完整 PBR 材质数据
 // Row 0: baseColorFactor (RGBA)
 // Row 1: metallic, roughness, ao, alphaCutoff (RGBA)
+// Row 2: materialID (uint as float), materialFlags (uint as float), 0, 0 (RGBA)
 bool RTPass::CreateMaterialTexture(rhi::IRHIDevice* device, u32 maxInstances,
                                     he::World& world) {
     if (!device || maxInstances == 0) return false;
     m_MaterialInstanceCount = std::min(maxInstances, 256u);
 
-    // 2 行 × N 列，默认白色兜底
-    std::vector<float> texData(m_MaterialInstanceCount * 4 * 2, 1.0f);
+    // 3 行 × N 列，默认白色兜底
+    std::vector<float> texData(m_MaterialInstanceCount * 4 * 3, 1.0f);
 
     // 从 MeshComponent 收集 PBR 材质数据（按 TLAS 实例顺序）
     u32 idx = 0;
@@ -388,18 +389,24 @@ bool RTPass::CreateMaterialTexture(rhi::IRHIDevice* device, u32 maxInstances,
         row1[1] = mesh.roughnessFactor;
         row1[2] = mesh.aoFactor;
         row1[3] = mesh.alphaCutoff;
+        // Row 2: materialID (uint bitcast to float), 0, 0, 0
+        float* row2 = &texData[m_MaterialInstanceCount * 4 * 2 + idx * 4];
+        std::memcpy(&row2[0], &mesh.materialID, 4);       // uint → float bitcast
+        row2[1] = 0.0f;  // materialFlags 在 GPUObjectData 层计算，此处预留
+        row2[2] = 0.0f;
+        row2[3] = 0.0f;
         idx++;
     });
 
     rhi::TextureDesc texDesc;
     texDesc.format = rhi::Format::RGBA32_FLOAT;
     texDesc.width  = m_MaterialInstanceCount;
-    texDesc.height = 2;  // Phase 4: 2 行（baseColor + PBR 参数）
+    texDesc.height = 3;  // Phase 5: 3 行（baseColor + PBR + materialID）
     texDesc.mipLevels = 1;
     texDesc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::TransferDst;
     texDesc.initialData = texData.data();
     m_MaterialTex = device->CreateTexture(texDesc);
-    HE_CORE_INFO("RTPass: 材质纹理创建 ({}×2 RGBA32F, {} meshes)", m_MaterialInstanceCount, idx);
+    HE_CORE_INFO("RTPass: 材质纹理创建 ({}×3 RGBA32F, {} meshes)", m_MaterialInstanceCount, idx);
     return m_MaterialTex != nullptr;
 }
 
