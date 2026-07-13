@@ -184,109 +184,107 @@ ForwardPipeline → GetCurrentLightBuffer() → RTPass::UpdateLightBuffer
 
 ---
 
-## Phase 4：扩展纹理 PBR 数据 ✅ 已完成
+## Phase 4：PBR 材质数据 + 3×N 扩展纹理 ✅ 已完成
 
-**目标**：将完整 PBR 材质数据（metallic/roughness/ao）传入 RT ClosestHit 着色器。
+**目标**：将完整 PBR 材质数据（metallic/roughness/ao/materialID）传入 RT 管线。
 
-**技术方案**：2×N RGBA32F 扩展纹理（绕过 slangc StructuredBuffer 在 ClosestHit 中的 GPU 崩溃 bug）
+**技术方案**：3×N RGBA32F 纹理传递 PBR 因子 + materialID
 
 ### Phase 4 已修改文件
 
 | 文件 | 操作 | 说明 |
 |------|:---:|------|
-| `Engine/RHI/Vulkan/VulkanDevice.cpp` | 修改 | 启用 `shaderStorageBufferArrayNonUniformIndexing` + `VK_KHR_ray_tracing_position_fetch` 扩展 |
-| `Engine/Render/Pipeline/RTPass.cpp` | 修改 | `CreateMaterialTexture` 扩展为 2×N（行0=baseColorFactor, 行1=PBR参数） |
-| `Engine/Shader/Shaders/RT_Sponza.rchit.slang` | 重写 | 从 2×N 纹理读取完整 PBR 数据 + HitKind 法线修正 |
+| `Engine/RHI/Vulkan/VulkanDevice.cpp` | 修改 | 启用 `shaderStorageBufferArrayNonUniformIndexing` + `VK_KHR_ray_tracing_position_fetch` |
+| `Engine/Render/Pipeline/RTPass.h` | 修改 | BLASEntry 添加 `materialIndex`（确定性 InstanceID 映射） |
+| `Engine/Render/Pipeline/RTPass.cpp` | 修改 | `CreateMaterialTexture` 3×N + SBT 重构支持多组类型 |
+| `Engine/RHI/Public/RHI/Types.h` | 修改 | 添加 `ShaderStage::Callable` |
+| `Engine/RHI/Vulkan/VulkanDevice.cpp` | 修改 | Callable → `VK_SHADER_STAGE_CALLABLE_BIT_KHR` |
+| `Samples/03.Sponza/03.Sponza.cpp` | 修改 | RT 管线添加 Callable group + bindless 绑定 + RegisterDescriptorSet |
+| `Samples/02.Cube/02.Cube.cpp` | 修改 | 补齐 RT set=1 + bindless 绑定 |
+| `Engine/Shader/CMakeLists.txt` | 修改 | 注册 `RT_Bindless.rcall.slang` |
+| `Engine/Shader/Shaders/RT_Sponza.rchit.slang` | 重写 | 从 3×N 纹理读取因子 + CallShader bindless 采样 |
+| `Engine/Shader/Shaders/RT_Bindless.rcall.slang` | **新建** | Callable shader: bindless PBR 纹理采样 |
+| `Engine/Shader/Shaders/GBuffer.mesh.slang` | 修改 | 适配 slangc 2026.13 mesh shader 语法 |
+| `Engine/Asset/Private/glTFLoader.cpp` | 修改 | 嵌入式纹理支持（`stbi_load_from_memory`） |
 
-### Phase 4 技术要点
-
-#### 4.1 2×N 扩展纹理方案
+### 4.1 3×N 材质纹理
 ```
-Row 0 (y=0): baseColorFactor.rgba — 每个实例 1 个 float4
-Row 1 (y=1): metallic, roughness, ao, alphaCutoff — 每个实例 1 个 float4
+Row 0 (y=0): baseColorFactor (RGBA)
+Row 1 (y=1): metallic, roughness, ao, alphaCutoff (RGBA)
+Row 2 (y=2): materialID (float值), 0, 0, 0
 ```
 
-着色器读取：
-```hlsl
-float4 baseColor = u_MatTex.Load(int3(id, 0, 0));  // 行0
-float4 pbrParams = u_MatTex.Load(int3(id, 1, 0));  // 行1
-```
+### 4.2 踩坑记录
 
-#### 4.2 SSBO 兼容性问题（踩坑）
-- **发现**：slangc 2026.1 在 ClosestHit 中声明 `StructuredBuffer<T>` 会导致 GPU 静默失败（黑屏）
-- **诊断过程**：
-  1. 移除 SSBO 声明 → 彩色 ✅（管线正常）
-  2. 声明 SSBO + 固定索引 `u_Objects[0]` → 黑屏 ❌
-  3. 结论：SSBO 声明本身触发 slangc SPIR-V 代码生成 bug，非 `NonUniform` 或索引问题
-- **变通**：用 `Texture2D::Load()` 传递 PBR 数据，完全避开 SSBO
-- **后续**：待 slangc 修复后可迁回 `StructuredBuffer<GPUObjectData>` 方案
+1. **RGBA32F denormal flush-to-zero**：`memcpy` 位转换 `uint(4)` → float 位模式是 denormal，GPU 清零。修复：`static_cast<float>(materialID)` 值转换。
 
-#### 4.3 法线改进
-- 使用 `HitKind()` 判断正面/背面，修正法线朝向
+2. **CallableKHR + ImageSampleImplicitLod**：`Sample()` 在 CallableKHR 中不合法。修复：`SampleLevel(0.0)` 显式 LOD。
 
-### Phase 4 已知限制
-
-| 限制 | 原因 | 方案 |
-|------|------|------|
-| 无真实几何法线 | `HitTriangleVertexPositionsKHR` 在 slangc HLSL 模式下不可用 | slangc 更新或顶点缓冲方案 |
-| 无 bindless 纹理采样 | Bindless 纹理数组在 ClosestHit 中未绑定 | Phase 5 |
-| 无阴影射线 | GPUShadowData 未传入 RT 管线 | Phase 5 |
-| SSBO 不可用于 ClosestHit | slangc 2026.1 SPIR-V 代码生成 bug | 待 slangc 修复后迁回 |
+3. **Hard-axis triplanar 噪声**：硬切换投影轴导致相邻像素 UV 跳变。修复：平滑加权混合 + scale=0.01。
 
 ---
 
-## Phase 5：slangc ClosestHit 动态数组索引 Bug 诊断 ✅ 已完成
+## Phase 5：Callable Bindless 纹理采样 ✅ 已完成
 
-**目标**：诊断并记录 slangc 在 ClosestHit 着色器中的 SPIR-V 代码生成 bug，为后续 bindless 纹理接入做准备。
+**目标**：在 RT 路径中实现真实纹理采样（albedo/normal/metallic/roughness/ao）。
 
-### 诊断结论
+**核心技术突破**：**CallableKHR 绕过 ClosestHitKHR 动态数组索引 bug**。
 
-**slangc 在 ClosestHit 中，任何动态数组索引均导致 GPU 静默失败（黑屏）**：
+### 5.1 数据流
+```
+ClosestHit: u_MatTex.Load(id) → PBR因子 + materialID
+  → CallShader(0, data) → CallableKHR
+    → u_Textures[materialID].SampleLevel(uv) → PBR 纹理数据
+  → 合并因子×纹理 → 光照 → 输出
+```
 
-| 资源类型 | 常量索引 `[0]` | 动态索引 `[id]` |
-|----------|:---:|:---:|
-| `Texture2D<float4>` (单资源 `.Load/.Sample`) | ✅ | ✅ |
-| `Texture2D<float4>[]` (bindless 数组) | ✅ | ❌ |
-| `StructuredBuffer<T>` (SSBO) | ❌ | ❌ |
-| `ByteAddressBuffer` | — | ❌ |
+### 5.2 ClosestHitKHR StorageBuffer Bug（深度诊断）
 
-**测试版本**：slangc 2026.1 ~ 2026.13 均未修复
+**发现**：`StorageBuffer` 在 ClosestHitKHR 中**完全不可用**，表现为 GPU 静默失败（黑屏）。
 
-**影响**：
-- ❌ Bindless 纹理数组 (`u_Textures[id].Sample()`)
-- ❌ StructuredBuffer (`u_Objects[id]`)
-- ❌ ByteAddressBuffer (`u_Data.Load<T>(offset)`)
-- ✅ 单个纹理 `.Load/.Sample`（非数组）
-- ✅ cbuffer 数组（配合 `shaderUniformBufferArrayNonUniformIndexing`）
+**诊断矩阵**：
 
-### 已实施的变通
+| 着色器语言 | 编译器 | 资源类型 | 常量索引 | 动态索引 | 结果 |
+|-----------|--------|---------|:---:|:---:|:---:|
+| HLSL | slangc 2026.1~13 | StructuredBuffer | ❌ | ❌ | 黑屏 |
+| HLSL | slangc 2026.1~13 | ByteAddressBuffer | — | ❌ | 黑屏 |
+| HLSL | slangc 2026.1~13 | Texture2D[] (bindless) | ✅ | ❌ | 黑屏 |
+| HLSL | slangc 2026.13 | CallableKHR ByteAddressBuffer | ✅ | ✅ | **正常** |
+| HLSL | slangc 2026.13 | CallableKHR Texture2D[] | ✅ | ✅ | **正常** |
+| GLSL | glslangValidator | ClosestHitKHR SSBO | ❌ | ❌ | 黑屏 |
 
-- **材质纹理 3×N**：扩展 Row 2 预留 `materialID`（bindless 修复后立即可用）
-- **BindlessTextureManager 注册接口**：已就绪，添加 bindless 绑定后即插即用
-- **Triplanar UV + 法线贴图代码**：shader 注释中保留完整实现模板
+**结论**：`StorageBuffer` 存储类在 **ClosestHitKHR 执行模型**中 GPU 硬件不支持（与编译器/NonUniform 无关）。`CallableKHR` 执行模型完全支持。
 
-### Phase 5 已知限制
+### 5.3 当前能力
 
-| 限制 | 原因 | 方案 |
-|------|------|------|
-| 无 bindless 纹理采样 | slangc 动态数组索引 bug | 待 slangc 修复 |
-| 无 SSBO 数据访问 | 同上 | 同上 |
-| 无阴影射线 | GPUShadowData 需 SSBO | 变通：cbuffer 纹理方案 |
+| 功能 | 状态 | 实现方式 |
+|------|:---:|------|
+| PBR 因子 (bc/metallic/roughness/ao) | ✅ | 3×N 纹理 |
+| Bindless 纹理采样 | ✅ | Callable shader |
+| Triplanar UV 投影 | ✅ | 平滑加权 + scale=0.01 |
+| 法线贴图扰动 | ✅ | Callable 采样 + normal |
+| 多采样降噪 | ✅ | 1-16 SPP 可调 |
+| 天空光照模型 | ✅ | lerp(暗地面, 亮天光, N.y) + 太阳 |
+| HitKind 法线修正 | ✅ | 正面/背面自动翻转 |
+| 嵌入式纹理加载 | ✅ | glTF buffer-embedded stbi |
+| 真实 mesh UV | ⬜ | Callable + 顶点缓冲读取 |
+| 阴影射线 | ⬜ | 需 SSBO 或 Callable 变通 |
+| 几何法线 | ⬜ | position_fetch HLSL 支持 |
 
 ---
 
 ## 执行状态
 
 ```
-Phase 1 ✅ 已完成并验证
+Phase 1 ✅ 已完成并验证（过程化三角形）
     ↓
-Phase 2 ✅ 已完成（含 02.Cube RT 模式）
+Phase 2 ✅ 已完成（Sponza 几何体 BLAS/TLAS）
     ↓
 Phase 3 ✅ 已完成（Texture2D 材质 + UB 光源）
     ↓
-Phase 4 ✅ 已完成（2×N 扩展纹理 — PBR 材质数据）
+Phase 4 ✅ 已完成（3×N PBR 因子 + Callable 基础设施）
     ↓
-Phase 5 ✅ 已完成（slangc bug 诊断 + bindless 基础设施）
+Phase 5 ✅ 已完成（Callable bindless 纹理 + 多采样 + 光照）
     ↓
-Phase 6 ⬜ 待规划（阴影射线 + 几何法线 + 等待 slangc 修复）
+Phase 6 ⬜ 待规划（真实 mesh UV + 阴影射线 + 几何法线）
 ```
