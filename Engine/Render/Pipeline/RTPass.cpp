@@ -58,7 +58,7 @@ bool RTPass::Initialize(rhi::IRHIDevice* device,
     rhi::RTPipelineStateDesc rtpDesc;
     rtpDesc.shaders        = rtShaders;
     rtpDesc.shaderGroups   = shaderGroups;
-    rtpDesc.maxRecursionDepth = 1;
+    rtpDesc.maxRecursionDepth = 2;  // RayGen(0) → ClosestHit(1) → Callable(2)
     rtpDesc.maxPayloadSize    = 16;
     rtpDesc.maxHitAttributeSize = 8;
     rtpDesc.debugName      = "RTPass";
@@ -123,54 +123,55 @@ bool RTPass::CreateSBT(rhi::IRHIDevice* device) {
         return (size + align - 1) & ~(align - 1);
     };
 
-    u32 raygenSize   = aligned(handleSize);
-    u32 missSize     = aligned(handleSize);
-    u32 hitGroupSize = aligned(handleSize * (groupCount > 2 ? (groupCount - 2) : 0));
+    // ── 分类统计各组类型 ──
+    std::vector<u32> rgIdx, missIdx, hitIdx, callIdx;
+    for (u32 g = 0; g < groupCount; ++g) {
+        auto t = m_ShaderGroups[g].type;
+        if (t == rhi::RTShaderGroupType::RayGen)      rgIdx.push_back(g);
+        else if (t == rhi::RTShaderGroupType::Miss)    missIdx.push_back(g);
+        else if (t == rhi::RTShaderGroupType::Hit)     hitIdx.push_back(g);
+        else if (t == rhi::RTShaderGroupType::Callable) callIdx.push_back(g);
+    }
 
-    u32 totalSize = raygenSize + missSize + hitGroupSize;
-    if (totalSize == 0) return false;
+    u32 stride = aligned(handleSize);
+    u32 rgOff  = 0;
+    u32 msOff  = rgOff  + stride * (u32)rgIdx.size();
+    u32 htOff  = msOff  + stride * (u32)missIdx.size();
+    u32 caOff  = htOff  + stride * (u32)hitIdx.size();
+    u32 total  = caOff  + stride * (u32)callIdx.size();
+    if (total == 0) return false;
 
-    // 创建 SBT 缓冲
     rhi::BufferDesc sbtDesc;
-    sbtDesc.size  = totalSize;
+    sbtDesc.size  = total;
     sbtDesc.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::AccelerationStruct
                   | rhi::BufferUsage::Uniform;
     m_SBTBuffer = device->CreateBuffer(sbtDesc);
 
-    // 填充 SBT 句柄数据
     u8* mapped = static_cast<u8*>(m_SBTBuffer->Map());
     if (!mapped) return false;
 
-    // RayGen (group 0)
-    if (groupCount > 0) std::memcpy(mapped, handles.data(), handleSize);
-
-    // Miss (group 1)
-    if (groupCount > 1) std::memcpy(mapped + raygenSize,
-                                     handles.data() + handleSize, handleSize);
-
-    // Hit groups (groups 2+)
-    for (u32 g = 2; g < groupCount; ++g) {
-        std::memcpy(mapped + raygenSize + missSize + (g - 2) * hitGroupSize,
-                    handles.data() + g * handleSize, handleSize);
-    }
+    for (u32 i = 0; i < rgIdx.size(); ++i)
+        std::memcpy(mapped + rgOff + i * stride, handles.data() + rgIdx[i] * handleSize, handleSize);
+    for (u32 i = 0; i < missIdx.size(); ++i)
+        std::memcpy(mapped + msOff + i * stride, handles.data() + missIdx[i] * handleSize, handleSize);
+    for (u32 i = 0; i < hitIdx.size(); ++i)
+        std::memcpy(mapped + htOff + i * stride, handles.data() + hitIdx[i] * handleSize, handleSize);
+    for (u32 i = 0; i < callIdx.size(); ++i)
+        std::memcpy(mapped + caOff + i * stride, handles.data() + callIdx[i] * handleSize, handleSize);
     m_SBTBuffer->Unmap();
 
-    // 设置 SBT 描述
     m_SBT.buffer = m_SBTBuffer.get();
-    if (groupCount > 0) {
-        m_SBT.rayGen.handleOffset = 0;
-        m_SBT.rayGen.stride       = raygenSize;
-    }
-    if (groupCount > 1) {
-        m_SBT.miss.handleOffset = raygenSize;
-        m_SBT.miss.stride       = missSize;
-    }
-    if (groupCount > 2) {
-        m_SBT.hit.handleOffset  = raygenSize + missSize;
-        m_SBT.hit.stride        = hitGroupSize;
-    }
+    m_SBT.rayGen.handleOffset  = rgOff;
+    m_SBT.rayGen.stride        = rgIdx.empty()  ? 0 : stride;
+    m_SBT.miss.handleOffset    = msOff;
+    m_SBT.miss.stride          = missIdx.empty()? 0 : stride;
+    m_SBT.hit.handleOffset     = htOff;
+    m_SBT.hit.stride           = hitIdx.empty() ? 0 : stride;
+    m_SBT.callable.handleOffset = caOff;
+    m_SBT.callable.stride       = callIdx.empty()? 0 : stride;
 
-    HE_CORE_INFO("RTPass: SBT 创建完成 ({} groups, {}B total)", groupCount, totalSize);
+    HE_CORE_INFO("RTPass: SBT 创建完成 ({} groups: {}RG {}Miss {}Hit {}Call, {}B)",
+                 groupCount, rgIdx.size(), missIdx.size(), hitIdx.size(), callIdx.size(), total);
     return true;
 }
 
@@ -473,6 +474,8 @@ int RTPass::ReloadShader(StringView shaderName, const std::vector<u32>& newSpirv
             { s.spirv = newSpirv; count++; }
         else if (shaderName.find("rchit") != StringView::npos && s.stage == rhi::ShaderStage::ClosestHit)
             { s.spirv = newSpirv; count++; }
+        else if (shaderName.find("rcall") != StringView::npos && s.stage == rhi::ShaderStage::Callable)
+            { s.spirv = newSpirv; count++; }
     }
 
     if (count > 0) {
@@ -480,7 +483,7 @@ int RTPass::ReloadShader(StringView shaderName, const std::vector<u32>& newSpirv
         rhi::RTPipelineStateDesc rtpDesc;
         rtpDesc.shaders        = m_Shaders;
         rtpDesc.shaderGroups   = m_ShaderGroups;
-        rtpDesc.maxRecursionDepth = 1;
+        rtpDesc.maxRecursionDepth = 2;  // RayGen(0) → ClosestHit(1) → Callable(2)
         rtpDesc.maxPayloadSize    = 16;
         if (m_DescLayout != rhi::kInvalidLayout)
             rtpDesc.descriptorSetLayouts.push_back(m_DescLayout);

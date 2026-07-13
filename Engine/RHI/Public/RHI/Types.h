@@ -110,6 +110,7 @@ enum class ShaderStage : u8 {
     AnyHit,
     ClosestHit,
     Miss,
+    Callable,
     Count
 };
 

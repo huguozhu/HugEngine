@@ -1,36 +1,49 @@
-// RT_Sponza.rchit.slang — Phase 5: PBR 因子（3×N 纹理） + HitKind 法线修正
+// RT_Sponza.rchit.slang — Phase 5: Callable bindless PBR + Triplanar UV
 //
-// 材质纹理布局（3×N RGBA32F，set=1 binding 0）:
-//   Row 0 (y=0): baseColorFactor (RGBA)
-//   Row 1 (y=1): metallic, roughness, ao, alphaCutoff (RGBA)
-//   Row 2 (y=2): materialID, 0, 0, 0（预留 bindless）
+// 通过 CallShader 调用 RT_Bindless.rcall 完成纹理采样
+// CallableKHR 不受 slangc ClosestHit 动态数组索引 bug 影响
 
 struct RayPayload { float3 color; float hitT; };
 
-// 3×N 材质纹理
+// Callable 数据（需与 RT_Bindless.rcall.slang 的 BindlessCallData 匹配）
+struct BindlessCallData {
+    uint  materialID;
+    float2 uv;
+    float3 albedo;
+    float3 normal;
+    float  metallic;
+    float  roughness;
+    float  ao;
+};
+
+// 3×N 材质纹理（PBR 因子）
 [[vk::binding(0, 1)]] Texture2D<float4> u_MatTex;
 
 // 光源 Uniform Buffer
 struct LightUB { float4 ci; float4 dt; };
 [[vk::binding(1, 1)]] cbuffer LightUB { LightUB u_Lights[8]; uint u_LightCount; uint u_Pad[3]; };
 
+// Triplanar UV（世界空间 → 纹理坐标，Sponza 场景尺度优化）
+float2 TriplanarUV(float3 P, float3 N) {
+    float s = 1.0;  // 1 纹理单元 = 1 世界单位
+    // 根据主导法线轴选择投影平面
+    float3 absN = abs(N);
+    if (absN.x >= absN.y && absN.x >= absN.z) return P.zy * s;  // YZ（法线朝 ±X）
+    else if (absN.y >= absN.z)                return P.xz * s;  // XZ（法线朝 ±Y）
+    else                                       return P.xy * s;  // XY（法线朝 ±Z）
+}
+
 [shader("closesthit")]
 void main(inout RayPayload payload) {
     uint id = InstanceID();
 
-    // ── 1. 从 3×N 纹理读取 PBR 因子 ──
-    float4 baseColorF = u_MatTex.Load(int3(id, 0, 0));
-    float3 bc = baseColorF.rgb;
+    // ── 1. PBR 因子 ──
+    float3 bc = u_MatTex.Load(int3(id, 0, 0)).rgb;
+    float4 pp = u_MatTex.Load(int3(id, 1, 0));
+    float roughnessFac = pp.y;
+    float aoFac = pp.z;
+    uint  matID = asuint(u_MatTex.Load(int3(id, 2, 0)).r);
 
-    float4 pbrParams  = u_MatTex.Load(int3(id, 1, 0));
-    float  metallic   = pbrParams.x;
-    float  roughness  = pbrParams.y;
-    float  ao         = pbrParams.z;
-
-    // Row 2: materialID (预留 bindless)
-    // uint matID = asuint(u_MatTex.Load(int3(id, 2, 0)).r);
-
-    // 若 baseColorFactor 接近黑色，用随机颜色染色
     if (dot(bc, float3(0.3, 0.59, 0.11)) < 0.01) {
         uint h = id * 2654435761u;
         bc = float3(
@@ -39,30 +52,56 @@ void main(inout RayPayload payload) {
             0.20 + float((h >> 16) & 0xFF) / 255.0 * 0.30);
     }
 
-    // ── 2. 法线 + HitKind 朝向修正 ──
-    float3 N = -WorldRayDirection();
+    // ── 2. 法线 + 命中点 ──
+    float3 W = WorldRayDirection();
+    float3 N = -W;
     if (HitKind() == 0xFF) N = -N;
+    float3 P = WorldRayOrigin() + W * RayTCurrent();
 
-    // ── 3. 光照计算 ──
-    float3 amb = float3(0.22, 0.23, 0.26);
-    float hemi = (N.y * 0.5 + 0.5) * 0.12;
-    float3 total = amb + hemi;
+    // ── 3. Callable bindless 纹理采样 ──
+    BindlessCallData callData;
+    callData.materialID = matID;
+    callData.uv = TriplanarUV(P, N);
+    callData.albedo    = bc;
+    callData.normal    = float3(0, 0, 1);
+    callData.metallic  = 0.0;
+    callData.roughness = roughnessFac;
+    callData.ao        = aoFac;
+    CallShader(0, callData);
 
+    // 合并因子和纹理采样结果
+    float3 albedo    = bc * callData.albedo;
+    float  roughness = clamp(roughnessFac * callData.roughness, 0.04, 1.0);
+    float  ao        = aoFac * callData.ao;
+    float  metallic  = pp.x * callData.metallic;  // 因子 × 纹理
+
+    // 法线：叠加切线空间法线贴图到近似几何法线
+    float3 Nf = normalize(N + callData.normal * 0.15);
+
+    // ── 4. 光照 ──
+    // 天空环境光 + 半球地面反弹
+    float3 skyAmb = float3(0.55, 0.58, 0.62);
+    float  hemi   = (Nf.y * 0.5 + 0.5);  // 0(向下)→1(向上)
+    float3 total  = lerp(float3(0.15, 0.12, 0.08), skyAmb, hemi);   // 地面暗，天光亮
+
+    // 方向光
     for (uint li = 0; li < u_LightCount && li < 8; li++) {
         if (uint(u_Lights[li].dt.w) == 0)
             total += u_Lights[li].ci.rgb * u_Lights[li].ci.w
-                  * max(dot(N, u_Lights[li].dt.xyz), 0.0) * 0.15;
+                  * max(dot(Nf, u_Lights[li].dt.xyz), 0.0);
     }
+    // 默认太阳光 + 补光（无引擎光源时）
     if (u_LightCount == 0) {
-        float3 L0 = normalize(float3(0.5, -0.9, 0.3));
-        total += float3(1.0, 0.92, 0.78) * max(dot(N, L0), 0.0) * 0.55;
-        float3 L1 = normalize(float3(-0.3, 0.4, -0.2));
-        total += float3(0.45, 0.50, 0.58) * max(dot(N, L1), 0.0) * 0.35;
+        float3 sunDir = normalize(float3(0.5, -0.8, 0.4));
+        float3 sunCol = float3(1.0, 0.93, 0.78);       // 暖色太阳
+        total += sunCol * max(dot(Nf, sunDir), 0.0) * 4.0;
+        float3 fillDir = normalize(float3(-0.3, 0.3, -0.2));
+        total += float3(0.3, 0.35, 0.45) * max(dot(Nf, fillDir), 0.0) * 1.0;
     }
 
-    // ── 4. 材质属性 ──
-    float roughnessAtten = 1.0 - roughness * 0.3;
-    float aoAtten = lerp(0.7, 1.0, ao);
+    // ── 5. 材质 ──
+    float roughnessAtten = 1.0 - roughness * 0.15;
+    float aoAtten = lerp(0.5, 1.0, ao);
 
-    payload.color = bc * total * roughnessAtten * aoAtten;
+    payload.color = albedo * total * roughnessAtten * aoAtten;
 }

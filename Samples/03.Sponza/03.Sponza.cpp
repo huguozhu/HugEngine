@@ -29,6 +29,7 @@
 #include "RT_Sponza.rgen.spv.h"
 #include "RT_Sponza.rmiss.spv.h"
 #include "RT_Sponza.rchit.spv.h"
+#include "RT_Bindless.rcall.spv.h"
 
 #include <algorithm>
 #include <cmath>
@@ -425,8 +426,10 @@ int main() {
         //   等待 slangc 修复 ClosestHit 动态数组索引 bug
         rhi::DescriptorSetLayoutDesc rtSet0Desc;
         rtSet0Desc.bindings = {
-            { 0, rhi::DescriptorType::AccelerationStructure, 1, 0x100 },
-            { 1, rhi::DescriptorType::StorageImage,          1, 0x100 },
+            { 0, rhi::DescriptorType::AccelerationStructure, 1,    0x100 },          // RayGen
+            { 1, rhi::DescriptorType::StorageImage,          1,    0x100 },          // RayGen
+            { 5, rhi::DescriptorType::SampledImage,          4096, 0x2000, true },   // Callable bindless 纹理
+            { 6, rhi::DescriptorType::Sampler,               4096, 0x2000, true },   // Callable bindless 采样器
         };
         rtLayout0 = device->CreateDescriptorSetLayout(rtSet0Desc);
 
@@ -444,12 +447,17 @@ int main() {
             k_RT_Sponza_rmiss_spv, {}, "main" };
         rhi::ShaderBytecode rchit{ rhi::ShaderStage::ClosestHit,
             k_RT_Sponza_rchit_spv, {}, "main" };
+        // Callable: bindless 纹理采样（Phase 5 测试 CallableKHR 是否绕过 slangc bug）
+        rhi::ShaderBytecode rcall{ rhi::ShaderStage::Callable,
+            k_RT_Bindless_rcall_spv, {}, "main" };
 
         // 5.5.3 Shader Group 定义
+        // Group 0=RayGen, 1=Miss, 2=Hit, 3=Callable（bindless 采样）
         std::vector<rhi::RTShaderGroup> rtGroups = {
-            { rhi::RTShaderGroupType::RayGen, 0, ~0u, ~0u, ~0u, "RayGen" },
-            { rhi::RTShaderGroupType::Miss,   1, ~0u, ~0u, ~0u, "Miss"   },
-            { rhi::RTShaderGroupType::Hit,   ~0u, 2,   ~0u, ~0u, "Hit"   },
+            { rhi::RTShaderGroupType::RayGen,   0, ~0u, ~0u, ~0u, "RayGen" },
+            { rhi::RTShaderGroupType::Miss,     1, ~0u, ~0u, ~0u, "Miss"   },
+            { rhi::RTShaderGroupType::Hit,     ~0u, 2,   ~0u, ~0u, "Hit"    },
+            { rhi::RTShaderGroupType::Callable, 3, ~0u, ~0u, ~0u, "BindlessCall" },
         };
 
         // 5.5.4 Push Constant 范围
@@ -461,12 +469,16 @@ int main() {
         // 5.5.5 初始化 RTPass（两个 set layout）
         std::vector<rhi::DescriptorSetLayoutHandle> rtLayouts = { rtLayout0, rtLayout1 };
         rtPass.Initialize(device.get(),
-            { rgen, rmiss, rchit }, rtGroups,
+            { rgen, rmiss, rchit, rcall }, rtGroups,
             rtLayouts, pcRange);
 
         // 5.5.6 创建 RT 资源（材质纹理 + 光源 UB）
         rtPass.CreateMaterialTexture(device.get(), 256, world);
         rtPass.CreateLightBuffer(device.get(), 8);
+
+        // 注册 RT set=0 到 BindlessTextureManager（Callable shader 需要 bindless 纹理）
+        he::asset::BindlessTextureManager::Instance().RegisterDescriptorSet(
+            device.get(), rtPass.GetDescriptorSet0(), 5, 6);
 
         HE_CORE_INFO("RT 路径初始化完成 (RT: {})",
             rtPass.IsValid() ? "就绪" : "不可用");

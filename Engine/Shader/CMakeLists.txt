@@ -93,6 +93,7 @@ if(SLANGC)
         "${SHADER_DIR}/RT_Sponza.rgen.slang"
         "${SHADER_DIR}/RT_Sponza.rmiss.slang"
         "${SHADER_DIR}/RT_Sponza.rchit.slang"
+        "${SHADER_DIR}/RT_Bindless.rcall.slang"
         "${SHADER_DIR}/RT_Shadow.rgen.slang"
         "${SHADER_DIR}/RT_Common.rmiss.slang"
         "${SHADER_DIR}/RT_Common.rchit.slang"
