@@ -184,6 +184,57 @@ ForwardPipeline → GetCurrentLightBuffer() → RTPass::UpdateLightBuffer
 
 ---
 
+## Phase 4：扩展纹理 PBR 数据 ✅ 已完成
+
+**目标**：将完整 PBR 材质数据（metallic/roughness/ao）传入 RT ClosestHit 着色器。
+
+**技术方案**：2×N RGBA32F 扩展纹理（绕过 slangc StructuredBuffer 在 ClosestHit 中的 GPU 崩溃 bug）
+
+### Phase 4 已修改文件
+
+| 文件 | 操作 | 说明 |
+|------|:---:|------|
+| `Engine/RHI/Vulkan/VulkanDevice.cpp` | 修改 | 启用 `shaderStorageBufferArrayNonUniformIndexing` + `VK_KHR_ray_tracing_position_fetch` 扩展 |
+| `Engine/Render/Pipeline/RTPass.cpp` | 修改 | `CreateMaterialTexture` 扩展为 2×N（行0=baseColorFactor, 行1=PBR参数） |
+| `Engine/Shader/Shaders/RT_Sponza.rchit.slang` | 重写 | 从 2×N 纹理读取完整 PBR 数据 + HitKind 法线修正 |
+
+### Phase 4 技术要点
+
+#### 4.1 2×N 扩展纹理方案
+```
+Row 0 (y=0): baseColorFactor.rgba — 每个实例 1 个 float4
+Row 1 (y=1): metallic, roughness, ao, alphaCutoff — 每个实例 1 个 float4
+```
+
+着色器读取：
+```hlsl
+float4 baseColor = u_MatTex.Load(int3(id, 0, 0));  // 行0
+float4 pbrParams = u_MatTex.Load(int3(id, 1, 0));  // 行1
+```
+
+#### 4.2 SSBO 兼容性问题（踩坑）
+- **发现**：slangc 2026.1 在 ClosestHit 中声明 `StructuredBuffer<T>` 会导致 GPU 静默失败（黑屏）
+- **诊断过程**：
+  1. 移除 SSBO 声明 → 彩色 ✅（管线正常）
+  2. 声明 SSBO + 固定索引 `u_Objects[0]` → 黑屏 ❌
+  3. 结论：SSBO 声明本身触发 slangc SPIR-V 代码生成 bug，非 `NonUniform` 或索引问题
+- **变通**：用 `Texture2D::Load()` 传递 PBR 数据，完全避开 SSBO
+- **后续**：待 slangc 修复后可迁回 `StructuredBuffer<GPUObjectData>` 方案
+
+#### 4.3 法线改进
+- 使用 `HitKind()` 判断正面/背面，修正法线朝向
+
+### Phase 4 已知限制
+
+| 限制 | 原因 | 方案 |
+|------|------|------|
+| 无真实几何法线 | `HitTriangleVertexPositionsKHR` 在 slangc HLSL 模式下不可用 | slangc 更新或顶点缓冲方案 |
+| 无 bindless 纹理采样 | Bindless 纹理数组在 ClosestHit 中未绑定 | Phase 5 |
+| 无阴影射线 | GPUShadowData 未传入 RT 管线 | Phase 5 |
+| SSBO 不可用于 ClosestHit | slangc 2026.1 SPIR-V 代码生成 bug | 待 slangc 修复后迁回 |
+
+---
+
 ## 执行状态
 
 ```
@@ -193,5 +244,7 @@ Phase 2 ✅ 已完成（含 02.Cube RT 模式）
     ↓
 Phase 3 ✅ 已完成（Texture2D 材质 + UB 光源）
     ↓
-Phase 4 ⬜ 待规划（纹理采样 + 逐顶点法线 + 阴影）
+Phase 4 ✅ 已完成（2×N 扩展纹理 — PBR 材质数据）
+    ↓
+Phase 5 ⬜ 待规划（bindless 纹理 + 阴影射线 + 几何法线 + SSBO 修复迁回）
 ```

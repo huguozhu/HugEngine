@@ -429,7 +429,7 @@ int main() {
 
         rhi::DescriptorSetLayoutDesc rtSet1Desc;
         rtSet1Desc.bindings = {
-            { 0, rhi::DescriptorType::SampledImage,  1, 0x40 },  // 材质纹理
+            { 0, rhi::DescriptorType::SampledImage,  1, 0x40 },  // 材质纹理 (2×N)
             { 1, rhi::DescriptorType::UniformBuffer, 1, 0x40 },  // 光源 UB
         };
         rtLayout1 = device->CreateDescriptorSetLayout(rtSet1Desc);

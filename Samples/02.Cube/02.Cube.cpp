@@ -289,6 +289,15 @@ int main() {
         };
         rtLayout0 = device->CreateDescriptorSetLayout(rtSet0Desc);
 
+        // set=1: 材质纹理 + 光源 UB + GPUObjectData SSBO（ClosestHit）
+        rhi::DescriptorSetLayoutHandle rtLayout1;
+        rhi::DescriptorSetLayoutDesc rtSet1Desc;
+        rtSet1Desc.bindings = {
+            { 0, rhi::DescriptorType::SampledImage,  1, 0x40 },  // 材质纹理 (2×N)
+            { 1, rhi::DescriptorType::UniformBuffer, 1, 0x40 },  // 光源 UB
+        };
+        rtLayout1 = device->CreateDescriptorSetLayout(rtSet1Desc);
+
         rhi::ShaderBytecode rgen{ rhi::ShaderStage::RayGen,
             k_RT_Sponza_rgen_spv, {}, "main" };
         rhi::ShaderBytecode rmiss{ rhi::ShaderStage::Miss,
@@ -307,9 +316,14 @@ int main() {
         pcRange.offset    = 0;
         pcRange.size      = 80;
 
-        std::vector<rhi::DescriptorSetLayoutHandle> rtLayouts = { rtLayout0 };
+        std::vector<rhi::DescriptorSetLayoutHandle> rtLayouts = { rtLayout0, rtLayout1 };
         rtPass.Initialize(device.get(), { rgen, rmiss, rchit }, rtGroups,
                          rtLayouts, pcRange);
+
+        // 创建 RT 资源（材质纹理 + 光源 UB）
+        rtPass.CreateMaterialTexture(device.get(), 256, world);
+        rtPass.CreateLightBuffer(device.get(), 8);
+
         HE_CORE_INFO("02.Cube RT: {}", rtPass.IsValid() ? "就绪" : "不可用");
     }
 
@@ -438,6 +452,7 @@ int main() {
         if (renderMode == 1 && rtPass.IsValid()) {
             // RT 路径：光追直写 BackBuffer（覆盖光栅化输出）
             rtPass.BuildAS(cmdList.get(), world, sceneGraph);
+            rtPass.UpdateLightBuffer(pipeline.GetCurrentLightBuffer());
             rtPass.UpdateRTDescriptorSet(device.get(),
                 swapchain->GetCurrentBackBufferView(),
                 pipeline.GetCurrentObjectBuffer());

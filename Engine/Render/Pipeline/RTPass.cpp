@@ -360,37 +360,46 @@ void RTPass::UpdateRTDescriptorSet(rhi::IRHIDevice* device,
     }
 }
 
-// 创建材质纹理（1×N RGBA32F），从 World MeshComponent 读取 baseColorFactor
+// 创建材质纹理（2×N RGBA32F），从 World MeshComponent 读取完整 PBR 材质数据
+// Row 0: baseColorFactor (RGBA)
+// Row 1: metallic, roughness, ao, alphaCutoff (RGBA)
 bool RTPass::CreateMaterialTexture(rhi::IRHIDevice* device, u32 maxInstances,
                                     he::World& world) {
     if (!device || maxInstances == 0) return false;
     m_MaterialInstanceCount = std::min(maxInstances, 256u);
 
-    // 默认白色兜底
-    std::vector<float> texData(m_MaterialInstanceCount * 4, 1.0f);
+    // 2 行 × N 列，默认白色兜底
+    std::vector<float> texData(m_MaterialInstanceCount * 4 * 2, 1.0f);
 
-    // 从 MeshComponent 收集 baseColorFactor（按 TLAS 实例顺序）
+    // 从 MeshComponent 收集 PBR 材质数据（按 TLAS 实例顺序）
     u32 idx = 0;
     world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent& mesh) {
         if (mesh.GetIndexCount() == 0) return;
         if (idx >= m_MaterialInstanceCount) return;
-        float* dst = &texData[idx * 4];
-        dst[0] = mesh.baseColorFactor.x;
-        dst[1] = mesh.baseColorFactor.y;
-        dst[2] = mesh.baseColorFactor.z;
-        dst[3] = mesh.baseColorFactor.w;
+        // Row 0: baseColorFactor
+        float* row0 = &texData[idx * 4];
+        row0[0] = mesh.baseColorFactor.x;
+        row0[1] = mesh.baseColorFactor.y;
+        row0[2] = mesh.baseColorFactor.z;
+        row0[3] = mesh.baseColorFactor.w;
+        // Row 1: metallic, roughness, ao, alphaCutoff
+        float* row1 = &texData[m_MaterialInstanceCount * 4 + idx * 4];
+        row1[0] = mesh.metallicFactor;
+        row1[1] = mesh.roughnessFactor;
+        row1[2] = mesh.aoFactor;
+        row1[3] = mesh.alphaCutoff;
         idx++;
     });
 
     rhi::TextureDesc texDesc;
     texDesc.format = rhi::Format::RGBA32_FLOAT;
     texDesc.width  = m_MaterialInstanceCount;
-    texDesc.height = 1;
+    texDesc.height = 2;  // Phase 4: 2 行（baseColor + PBR 参数）
     texDesc.mipLevels = 1;
     texDesc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::TransferDst;
     texDesc.initialData = texData.data();
     m_MaterialTex = device->CreateTexture(texDesc);
-    HE_CORE_INFO("RTPass: 材质纹理创建 ({}×1 RGBA32F, {} meshes)", m_MaterialInstanceCount, idx);
+    HE_CORE_INFO("RTPass: 材质纹理创建 ({}×2 RGBA32F, {} meshes)", m_MaterialInstanceCount, idx);
     return m_MaterialTex != nullptr;
 }
 

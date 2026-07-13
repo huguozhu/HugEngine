@@ -361,11 +361,17 @@ void VulkanDevice::CreateLogicalDevice() {
     asFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
     asFeature.accelerationStructure = VK_TRUE;
 
+    // 启用 Ray Tracing Position Fetch（ClosestHit 中获取命中三角形顶点位置）
+    VkPhysicalDeviceRayTracingPositionFetchFeaturesKHR posFetchFeature{};
+    posFetchFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_POSITION_FETCH_FEATURES_KHR;
+    posFetchFeature.rayTracingPositionFetch = VK_TRUE;
+
     if (m_SupportsRT) {
         deviceExtensions.push_back(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
         deviceExtensions.push_back(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
         deviceExtensions.push_back(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
-        HE_CORE_INFO("RT 扩展已启用: VK_KHR_acceleration_structure + VK_KHR_ray_tracing_pipeline");
+        deviceExtensions.push_back(VK_KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME);
+        HE_CORE_INFO("RT 扩展已启用: VK_KHR_acceleration_structure + VK_KHR_ray_tracing_pipeline + position_fetch");
     }
 
     // 条件启用 Mesh Shader 扩展
@@ -396,6 +402,8 @@ void VulkanDevice::CreateLogicalDevice() {
 
     // 启用 Uniform Buffer 非均匀动态索引（RT ClosestHit cbuffer[id] 访问需要）
     descIndexing.shaderUniformBufferArrayNonUniformIndexing = VK_TRUE;
+    // 启用 Storage Buffer 非均匀动态索引（RT ClosestHit StructuredBuffer[id] 访问需要）
+    descIndexing.shaderStorageBufferArrayNonUniformIndexing = VK_TRUE;
 
     // 启用 Timeline Semaphore（Vulkan 1.2+ 核心特性，需显式开启）
     VkPhysicalDeviceTimelineSemaphoreFeatures timelineFeature{};
@@ -409,6 +417,7 @@ void VulkanDevice::CreateLogicalDevice() {
     if (m_SupportsRT) {
         *ppNext = &asFeature; ppNext = &asFeature.pNext;
         *ppNext = &rtPipelineFeature; ppNext = &rtPipelineFeature.pNext;
+        *ppNext = &posFetchFeature; ppNext = &posFetchFeature.pNext;
     }
     if (m_SupportsMesh) {
         *ppNext = &meshFeature; ppNext = &meshFeature.pNext;
