@@ -464,7 +464,7 @@ int main() {
         rhi::PushConstantRange pcRange;
         pcRange.stageMask = 0x100;
         pcRange.offset    = 0;
-        pcRange.size      = 80;
+        pcRange.size      = 96;  // float4x4(64) + float4(16) + uint4(16)
 
         // 5.5.5 初始化 RTPass（两个 set layout）
         std::vector<rhi::DescriptorSetLayoutHandle> rtLayouts = { rtLayout0, rtLayout1 };
@@ -581,6 +581,7 @@ int main() {
     f64 lastTime   = glfwGetTime();
 
     int  renderMode  = rtSupported ? 1 : 0;  // 默认 RT 模式
+    int  rtSampleCount = 1;                   // RT 每像素采样数（1-16）
 
     while (!engine.GetWindow()->ShouldClose()) {
         f64 now       = glfwGetTime();
@@ -692,13 +693,22 @@ int main() {
                 swapchain->GetCurrentBackBufferView(),
                 pipeline.GetCurrentObjectBuffer());
 
-            // c) Push Constants：相机数据（NDC→世界光线重建）
-            struct RTPushConstant { float4x4 invViewProj; float4 camPosNearFar; };
+            // c) Push Constants：相机数据 + 多采样参数
+            struct RTPushConstant {
+                float4x4 invViewProj;
+                float4   camPosNearFar;   // xyz=camera pos, w=near
+                u32      sampleCount;
+                u32      frameIndex;
+                u32      _pad0;
+                u32      _pad1;
+            };
             RTPushConstant rtPC;
             const auto& camData = camCtrl.GetCamera();
             rtPC.invViewProj = glm::inverse(camData.GetViewProjMatrix());
             rtPC.camPosNearFar = float4(camData.position.x, camData.position.y,
                                         camData.position.z, camData.nearPlane);
+            rtPC.sampleCount = (u32)rtSampleCount;
+            rtPC.frameIndex  = (u32)(frameIndex % 1000000);
 
             // d) BackBuffer 屏障：→ RT 可写
             cmdList->PipelineBarrier(
@@ -765,6 +775,14 @@ int main() {
                 ImGui::RadioButton("Ray Tracing", &renderMode, 1);
             } else {
                 ImGui::TextColored({0.5f, 0.5f, 0.5f, 1.0f}, "RT 不可用（设备不支持）");
+            }
+
+            // RT 采样数
+            if (renderMode == 1) {
+                ImGui::SeparatorText("RT 采样");
+                ImGui::SliderInt("SPP", &rtSampleCount, 1, 16);
+                ImGui::TextColored({0.5f, 0.5f, 0.5f, 1.0f},
+                    "每像素 %d 条光线 (%dx 性能开销)", rtSampleCount, rtSampleCount);
             }
 
             // ============================================================

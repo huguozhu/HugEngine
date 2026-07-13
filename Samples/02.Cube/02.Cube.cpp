@@ -21,12 +21,14 @@
 #include "Scene/Transform.h"
 #include "Scene/SkyboxComponent.h"
 #include "Editor/ImGuiIntegration.h"
+#include "Asset/BindlessTextureManager.h"
 #include "imgui.h"
 
 // RT 着色器 SPIR-V（Phase 2：复用 Sponza RT 着色器）
 #include "RT_Sponza.rgen.spv.h"
 #include "RT_Sponza.rmiss.spv.h"
 #include "RT_Sponza.rchit.spv.h"
+#include "RT_Bindless.rcall.spv.h"
 
 #include <cmath>
 #include <cstring>
@@ -281,11 +283,13 @@ int main() {
     rhi::DescriptorSetLayoutHandle rtLayout0 = rhi::kInvalidLayout;
 
     if (rtSupported) {
-        // set=0: TLAS + BackBuffer（RayGen）
+        // set=0: TLAS + BackBuffer + Bindless（Callable shader 需要）
         rhi::DescriptorSetLayoutDesc rtSet0Desc;
         rtSet0Desc.bindings = {
-            { 0, rhi::DescriptorType::AccelerationStructure, 1, 0x100 },
-            { 1, rhi::DescriptorType::StorageImage,          1, 0x100 },
+            { 0, rhi::DescriptorType::AccelerationStructure, 1,    0x100 },
+            { 1, rhi::DescriptorType::StorageImage,          1,    0x100 },
+            { 5, rhi::DescriptorType::SampledImage,          4096, 0x2000, true },  // Callable bindless
+            { 6, rhi::DescriptorType::Sampler,               4096, 0x2000, true },  // Callable bindless
         };
         rtLayout0 = device->CreateDescriptorSetLayout(rtSet0Desc);
 
@@ -304,25 +308,32 @@ int main() {
             k_RT_Sponza_rmiss_spv, {}, "main" };
         rhi::ShaderBytecode rchit{ rhi::ShaderStage::ClosestHit,
             k_RT_Sponza_rchit_spv, {}, "main" };
+        rhi::ShaderBytecode rcall{ rhi::ShaderStage::Callable,
+            k_RT_Bindless_rcall_spv, {}, "main" };
 
         std::vector<rhi::RTShaderGroup> rtGroups = {
-            { rhi::RTShaderGroupType::RayGen, 0, ~0u, ~0u, ~0u, "RayGen" },
-            { rhi::RTShaderGroupType::Miss,   1, ~0u, ~0u, ~0u, "Miss"   },
-            { rhi::RTShaderGroupType::Hit,   ~0u, 2,   ~0u, ~0u, "Hit"   },
+            { rhi::RTShaderGroupType::RayGen,   0, ~0u, ~0u, ~0u, "RayGen" },
+            { rhi::RTShaderGroupType::Miss,     1, ~0u, ~0u, ~0u, "Miss"   },
+            { rhi::RTShaderGroupType::Hit,     ~0u, 2,   ~0u, ~0u, "Hit"    },
+            { rhi::RTShaderGroupType::Callable, 3, ~0u, ~0u, ~0u, "BindlessCall" },
         };
 
         rhi::PushConstantRange pcRange;
         pcRange.stageMask = 0x100;
         pcRange.offset    = 0;
-        pcRange.size      = 80;
+        pcRange.size      = 96;
 
         std::vector<rhi::DescriptorSetLayoutHandle> rtLayouts = { rtLayout0, rtLayout1 };
-        rtPass.Initialize(device.get(), { rgen, rmiss, rchit }, rtGroups,
+        rtPass.Initialize(device.get(), { rgen, rmiss, rchit, rcall }, rtGroups,
                          rtLayouts, pcRange);
 
         // 创建 RT 资源（材质纹理 + 光源 UB）
         rtPass.CreateMaterialTexture(device.get(), 256, world);
         rtPass.CreateLightBuffer(device.get(), 8);
+
+        // 注册到 BindlessTextureManager（Callable shader 需要 bindless 纹理）
+        he::asset::BindlessTextureManager::Instance().RegisterDescriptorSet(
+            device.get(), rtPass.GetDescriptorSet0(), 5, 6);
 
         HE_CORE_INFO("02.Cube RT: {}", rtPass.IsValid() ? "就绪" : "不可用");
     }
@@ -458,12 +469,21 @@ int main() {
                 pipeline.GetCurrentObjectBuffer());
 
             // Push Constants：相机数据
-            struct RTPushConstant { float4x4 invViewProj; float4 camPosNearFar; };
+            struct RTPushConstant {
+                float4x4 invViewProj;
+                float4   camPosNearFar;
+                u32      sampleCount;
+                u32      frameIndex;
+                u32      _pad0;
+                u32      _pad1;
+            };
             RTPushConstant rtPC;
             const auto& camData = camCtrl.GetCamera();
             rtPC.invViewProj = glm::inverse(camData.GetViewProjMatrix());
             rtPC.camPosNearFar = float4(camData.position.x, camData.position.y,
                                         camData.position.z, camData.nearPlane);
+            rtPC.sampleCount = 1;
+            rtPC.frameIndex  = 0;
 
             // BackBuffer 屏障 → RT 可写
             cmdList->PipelineBarrier(
