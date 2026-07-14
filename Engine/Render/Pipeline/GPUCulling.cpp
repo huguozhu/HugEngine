@@ -1,6 +1,8 @@
 #include "Pipeline/GPUCulling.h"
 #include "Pipeline/MeshBatcher.h"  // IndirectDrawCommand
 #include "GPUCull.comp.spv.h"
+#include "GPUCull_Phase1.comp.spv.h"
+#include "GPUCull_TwoPhase.comp.spv.h"
 #include "HiZDownsample.comp.spv.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
@@ -8,24 +10,23 @@
 #include <glm/gtc/matrix_access.hpp>
 
 // ============================================================
-// GPUCulling 实现
+// GPUCulling 实现 — 单阶段/两阶段遮挡剔除
 // ============================================================
 
 namespace he::render {
 
 /// 从 ViewProj 矩阵提取 6 个视锥平面（Gribb-Hartmann, world space）
 static void ExtractFrustumPlanes(const float4x4& vp, float4 planes[6]) {
-    // 列主序矩阵，row = column in glm
-    float4 r1 = glm::row(vp, 0);  // X
-    float4 r2 = glm::row(vp, 1);  // Y
-    float4 r3 = glm::row(vp, 2);  // Z
-    float4 r4 = glm::row(vp, 3);  // W
+    float4 r1 = glm::row(vp, 0);
+    float4 r2 = glm::row(vp, 1);
+    float4 r3 = glm::row(vp, 2);
+    float4 r4 = glm::row(vp, 3);
 
     planes[0] = r4 + r1;  // Left
     planes[1] = r4 - r1;  // Right
     planes[2] = r4 + r2;  // Bottom
     planes[3] = r4 - r2;  // Top
-    planes[4] = r4 + r3;  // Near (Vulkan z∈[0,1])
+    planes[4] = r4 + r3;  // Near (Vulkan z?[0,1])
     planes[5] = r4 - r3;  // Far
 
     for (int i = 0; i < 6; ++i) {
@@ -34,24 +35,27 @@ static void ExtractFrustumPlanes(const float4x4& vp, float4 planes[6]) {
     }
 }
 
+// ============================================================
+// Initialize
+// ============================================================
+
 bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
+    // ── 单阶段/Phase 1 PSO ──
     m_CS.stage      = rhi::ShaderStage::Compute;
     m_CS.spirv      = k_GPUCull_comp_spv;
     m_CS.entryPoint = "main";
 
-    // 描述符集布局: 3 个 SSBO binding
     rhi::DescriptorSetLayoutDesc layoutDesc;
     layoutDesc.bindings = {
-        {0, rhi::DescriptorType::StorageBuffer, 1, 32},  // u_SceneObjects
-        {1, rhi::DescriptorType::StorageBuffer, 1, 32},  // u_VisibleIndices
-        {2, rhi::DescriptorType::StorageBuffer, 1, 32},  // u_DrawCount
-        {3, rhi::DescriptorType::CombinedImageSampler, 1, 32},  // u_HiZDepth (Hi-Z)
+        {0, rhi::DescriptorType::StorageBuffer, 1, 32},
+        {1, rhi::DescriptorType::StorageBuffer, 1, 32},
+        {2, rhi::DescriptorType::StorageBuffer, 1, 32},
+        {3, rhi::DescriptorType::CombinedImageSampler, 1, 32},
     };
     m_DescLayout = device->CreateDescriptorSetLayout(layoutDesc);
     m_DescSet    = device->AllocateDescriptorSet(m_DescLayout);
 
-    // SSBO 创建（binding 0 由 SetSceneBuffer 设置，此处创建占位）
-    // VisibleIndices + DrawCount
+    // Single-phase: IndirectDraw + DrawCount SSBO
     {
         rhi::BufferDesc d; d.size = sizeof(IndirectDrawCommand) * kMaxObjects;
         d.usage = rhi::BufferUsage::Storage; d.cpuAccess = true;
@@ -59,13 +63,13 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
         device->UpdateDescriptorSet(m_DescSet, 1, rhi::DescriptorType::StorageBuffer, m_IndirectCmdBuf.get());
     }
     {
-        rhi::BufferDesc d; d.size = sizeof(u32) * 4;  // 16 bytes, 4 u32s for safety
+        rhi::BufferDesc d; d.size = sizeof(u32) * 4;
         d.usage = rhi::BufferUsage::Storage; d.cpuAccess = true;
         m_DrawCountBuf = device->CreateBuffer(d);
         device->UpdateDescriptorSet(m_DescSet, 2, rhi::DescriptorType::StorageBuffer, m_DrawCountBuf.get());
     }
 
-    // Compute PSO（Hi-Z: 6 planes + float4x4 VP + float2 screen + 2 uint）
+    // Push constants: 6 planes + float4x4 VP + float2 screen + 2 uint
     rhi::PushConstantRange pcRange;
     pcRange.stageMask = 32;
     pcRange.offset = 0;
@@ -81,84 +85,244 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
     m_PSO = device->CreatePipelineState(psoDesc);
     HE_ASSERT(m_PSO, "GPUCulling: Compute PSO creation failed");
 
-    // Hi-Z 下采样 PSO 和描述符集
+    // ── Phase 1 PSO（相同布局，不同 shader，输出候选索引）──
+    m_Phase1CS.stage = rhi::ShaderStage::Compute;
+    m_Phase1CS.spirv = k_GPUCull_Phase1_comp_spv;
+    m_Phase1CS.entryPoint = "main";
+
+    m_Phase1Layout = device->CreateDescriptorSetLayout(layoutDesc);
+    m_Phase1Set    = device->AllocateDescriptorSet(m_Phase1Layout);
+
+    rhi::PipelineStateDesc p1Desc;
+    p1Desc.bindPoint = rhi::PipelineBindPoint::Compute;
+    p1Desc.computeShader = &m_Phase1CS;
+    p1Desc.pushConstantRanges = {pcRange};
+    p1Desc.descriptorSetLayouts = {m_Phase1Layout};
+    p1Desc.debugName = "GPUCull_Phase1";
+    m_Phase1PSO = device->CreatePipelineState(p1Desc);
+    HE_ASSERT(m_Phase1PSO, "GPUCulling: Phase 1 PSO creation failed");
+
+    // Phase 1 候选缓冲
+    {
+        rhi::BufferDesc d; d.size = sizeof(u32) * kMaxObjects;
+        d.usage = rhi::BufferUsage::Storage; d.cpuAccess = true;
+        m_CandidateBuf = device->CreateBuffer(d);
+        device->UpdateDescriptorSet(m_Phase1Set, 1, rhi::DescriptorType::StorageBuffer, m_CandidateBuf.get());
+    }
+    {
+        rhi::BufferDesc d; d.size = sizeof(u32) * 4;
+        d.usage = rhi::BufferUsage::Storage; d.cpuAccess = true;
+        m_CandidateCountBuf = device->CreateBuffer(d);
+        device->UpdateDescriptorSet(m_Phase1Set, 2, rhi::DescriptorType::StorageBuffer, m_CandidateCountBuf.get());
+    }
+
+    // ── Phase 2 PSO（5 个 binding）──
+    m_Phase2CS.stage = rhi::ShaderStage::Compute;
+    m_Phase2CS.spirv = k_GPUCull_TwoPhase_comp_spv;
+    m_Phase2CS.entryPoint = "main";
+
+    rhi::DescriptorSetLayoutDesc p2Layout;
+    p2Layout.bindings = {
+        {0, rhi::DescriptorType::StorageBuffer, 1, 32},        // u_SceneObjects
+        {1, rhi::DescriptorType::StorageBuffer, 1, 32},        // u_Candidates
+        {2, rhi::DescriptorType::StorageBuffer, 1, 32},        // u_DrawCount
+        {3, rhi::DescriptorType::CombinedImageSampler, 1, 32}, // u_HiZ
+        {4, rhi::DescriptorType::StorageBuffer, 1, 32},        // u_IndirectCmds
+    };
+    m_Phase2Layout = device->CreateDescriptorSetLayout(p2Layout);
+    m_Phase2Set    = device->AllocateDescriptorSet(m_Phase2Layout);
+
+    // Phase 2 固定绑定（不变的生命周期）
+    device->UpdateDescriptorSet(m_Phase2Set, 1, rhi::DescriptorType::StorageBuffer, m_CandidateBuf.get());
+    device->UpdateDescriptorSet(m_Phase2Set, 2, rhi::DescriptorType::StorageBuffer, m_DrawCountBuf.get());
+    device->UpdateDescriptorSet(m_Phase2Set, 4, rhi::DescriptorType::StorageBuffer, m_IndirectCmdBuf.get());
+    // binding 0 和 3 由 SetSceneBuffer / SetDepthTexture 设置
+
+    // Phase 2 push constants: float4x4 vp + float2 screenSize + uint mips + uint count
+    rhi::PushConstantRange p2PCR;
+    p2PCR.stageMask = 32;
+    p2PCR.offset = 0;
+    p2PCR.size   = sizeof(float4x4) + sizeof(float2) + sizeof(u32) * 2;  // 64+8+8=80
+
+    rhi::PipelineStateDesc p2Desc;
+    p2Desc.bindPoint = rhi::PipelineBindPoint::Compute;
+    p2Desc.computeShader = &m_Phase2CS;
+    p2Desc.pushConstantRanges = {p2PCR};
+    p2Desc.descriptorSetLayouts = {m_Phase2Layout};
+    p2Desc.debugName = "GPUCull_Phase2";
+    m_Phase2PSO = device->CreatePipelineState(p2Desc);
+    HE_ASSERT(m_Phase2PSO, "GPUCulling: Phase 2 PSO creation failed");
+
+    // ── Hi-Z 下采样 PSO ──
     {
         rhi::DescriptorSetLayoutDesc hizLayout;
-        hizLayout.bindings = {{0,rhi::DescriptorType::CombinedImageSampler,1,32},
-                              {1,rhi::DescriptorType::StorageImage,1,32}};
+        hizLayout.bindings = {{0, rhi::DescriptorType::CombinedImageSampler, 1, 32},
+                              {1, rhi::DescriptorType::StorageImage, 1, 32}};
         m_HiZLayout = device->CreateDescriptorSetLayout(hizLayout);
-        m_HiZSet0   = device->AllocateDescriptorSet(m_HiZLayout);
-        m_HiZSet1   = device->AllocateDescriptorSet(m_HiZLayout);
+        m_HiZSet    = device->AllocateDescriptorSet(m_HiZLayout);
 
         rhi::ShaderBytecode hizCS;
-        hizCS.stage=rhi::ShaderStage::Compute; hizCS.spirv=k_HiZDownsample_comp_spv; hizCS.entryPoint="main";
+        hizCS.stage = rhi::ShaderStage::Compute;
+        hizCS.spirv = k_HiZDownsample_comp_spv;
+        hizCS.entryPoint = "main";
 
-        rhi::PushConstantRange hizPCR; hizPCR.stageMask=32; hizPCR.offset=0; hizPCR.size=16;
+        rhi::PushConstantRange hizPCR;
+        hizPCR.stageMask = 32;
+        hizPCR.offset = 0;
+        hizPCR.size   = 24;  // uint2 srcSize + uint2 dstSize + uint srcMip + uint _pad
 
         rhi::PipelineStateDesc hizDesc;
-        hizDesc.bindPoint=rhi::PipelineBindPoint::Compute;
-        hizDesc.computeShader=&hizCS;
-        hizDesc.pushConstantRanges={hizPCR};
-        hizDesc.descriptorSetLayouts={m_HiZLayout};
-        hizDesc.debugName="HiZDownsample";
-        m_HiZ_PSO=device->CreatePipelineState(hizDesc);
+        hizDesc.bindPoint = rhi::PipelineBindPoint::Compute;
+        hizDesc.computeShader = &hizCS;
+        hizDesc.pushConstantRanges = {hizPCR};
+        hizDesc.descriptorSetLayouts = {m_HiZLayout};
+        hizDesc.debugName = "HiZDownsample";
+        m_HiZ_PSO = device->CreatePipelineState(hizDesc);
+        HE_ASSERT(m_HiZ_PSO, "GPUCulling: HiZDownsample PSO creation failed");
     }
 
     // Hi-Z 采样器
     {
-        rhi::SamplerDesc sd; sd.minFilter=sd.magFilter=rhi::FilterMode::Nearest;
-        sd.addressU=sd.addressV=rhi::AddressMode::ClampToEdge;
-        sd.minLod=0; sd.maxLod=(float)kHiZMips;
-        m_HiZSampler=device->CreateSampler(sd);
+        rhi::SamplerDesc sd;
+        sd.minFilter = sd.magFilter = rhi::FilterMode::Nearest;
+        sd.addressU = sd.addressV = rhi::AddressMode::ClampToEdge;
+        sd.minLod = 0;
+        sd.maxLod = (float)kHiZMips;
+        m_HiZSampler = device->CreateSampler(sd);
     }
 
     m_Initialized = true;
-    HE_CORE_INFO("GPUCulling initialized (max {} objects)", kMaxObjects);
+    HE_CORE_INFO("GPUCulling initialized (max {} objects, two-phase={})", kMaxObjects, useTwoPhase ? "on" : "off");
     return true;
 }
 
+// ============================================================
+// Shutdown
+// ============================================================
+
 void GPUCulling::Shutdown(rhi::IRHIDevice* device) {
     if (!m_Initialized) return;
+
+    // 清理 Hi-Z 每 mip 视图
+    for (u32 i = 0; i < kHiZMips; ++i) {
+        if (m_MipViews[i].storageView) {
+            device->DestroyTextureMipView(m_MipViews[i].storageView);
+            m_MipViews[i].storageView = nullptr;
+        }
+        if (m_MipViews[i].sampledView) {
+            device->DestroyTextureMipView(m_MipViews[i].sampledView);
+            m_MipViews[i].sampledView = nullptr;
+        }
+    }
+
+    m_CandidateBuf.reset();
+    m_CandidateCountBuf.reset();
+    m_Phase1PSO.reset();
+    m_Phase2PSO.reset();
     m_IndirectCmdBuf.reset();
     m_DrawCountBuf.reset();
     m_PSO.reset();
+    m_HiZTexture.reset();
+    m_HiZSampler.reset();
+    m_HiZ_PSO.reset();
     if (m_DescLayout != rhi::kInvalidLayout && device) {
         device->DestroyDescriptorSetLayout(m_DescLayout);
         m_DescLayout = rhi::kInvalidLayout;
     }
-    m_DescSet = rhi::kInvalidSet;
+    if (m_Phase1Layout != rhi::kInvalidLayout && device) {
+        device->DestroyDescriptorSetLayout(m_Phase1Layout);
+        m_Phase1Layout = rhi::kInvalidLayout;
+    }
+    if (m_Phase2Layout != rhi::kInvalidLayout && device) {
+        device->DestroyDescriptorSetLayout(m_Phase2Layout);
+        m_Phase2Layout = rhi::kInvalidLayout;
+    }
+    if (m_HiZLayout != rhi::kInvalidLayout && device) {
+        device->DestroyDescriptorSetLayout(m_HiZLayout);
+        m_HiZLayout = rhi::kInvalidLayout;
+    }
+    m_DescSet    = rhi::kInvalidSet;
+    m_Phase1Set  = rhi::kInvalidSet;
+    m_Phase2Set  = rhi::kInvalidSet;
+    m_HiZSet     = rhi::kInvalidSet;
     m_Initialized = false;
 }
 
+// ============================================================
+// SetSceneBuffer / SetDepthTexture
+// ============================================================
+
 void GPUCulling::SetSceneBuffer(rhi::IRHIDevice* device, rhi::IRHIBuffer* gpuSceneSSBO) {
     if (!m_Initialized || !gpuSceneSSBO) return;
-    device->UpdateDescriptorSet(m_DescSet, 0, rhi::DescriptorType::StorageBuffer, gpuSceneSSBO);
+    device->UpdateDescriptorSet(m_DescSet,   0, rhi::DescriptorType::StorageBuffer, gpuSceneSSBO);
+    device->UpdateDescriptorSet(m_Phase1Set, 0, rhi::DescriptorType::StorageBuffer, gpuSceneSSBO);
+    device->UpdateDescriptorSet(m_Phase2Set, 0, rhi::DescriptorType::StorageBuffer, gpuSceneSSBO);
 }
 
 void GPUCulling::SetDepthTexture(rhi::IRHIDevice* device, rhi::IRHITexture* depthTex,
                                    u32 width, u32 height) {
     if (!m_Initialized) return;
     m_DepthInput = depthTex;
-    // 全分辨率 Hi-Z（暂不构建金字塔，shader 中 hizMipCount=1 直接读 mip 0）
-    m_HiZMipCount = 1;
-    device->UpdateDescriptorSet(m_DescSet, 3, rhi::DescriptorType::CombinedImageSampler,
+    m_HiZMipCount = 1;  // 当前仅使用全分辨率深度
+
+    // 单阶段/Phase 1: 绑定上帧深度
+    device->UpdateDescriptorSet(m_DescSet,   3, rhi::DescriptorType::CombinedImageSampler,
                                 depthTex, m_HiZSampler.get());
+    device->UpdateDescriptorSet(m_Phase1Set, 3, rhi::DescriptorType::CombinedImageSampler,
+                                depthTex, m_HiZSampler.get());
+
+    // Phase 2: 绑定当前帧深度（GBuffer 之后由外部更新）
+    device->UpdateDescriptorSet(m_Phase2Set, 3, rhi::DescriptorType::CombinedImageSampler,
+                                depthTex, m_HiZSampler.get());
+
+    // ── 创建/重建 Hi-Z 纹理 ──
+    if (!m_HiZTexture || m_HiZTexture->GetWidth() != width || m_HiZTexture->GetHeight() != height) {
+        m_HiZTexture.reset();
+
+        rhi::TextureDesc hizDesc;
+        hizDesc.format = rhi::Format::R32_FLOAT;
+        hizDesc.width  = width;
+        hizDesc.height = height;
+        hizDesc.mipLevels = kHiZMips;
+        hizDesc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::UnorderedAccess;
+        m_HiZTexture = device->CreateTexture(hizDesc);
+        HE_CORE_INFO("GPUCulling: Hi-Z texture created ({}x{}×{} mips)", width, height, kHiZMips);
+
+        // 创建每 mip 的 storage/sampled 视图（供未来金字塔构建使用）
+        for (u32 i = 0; i < kHiZMips; ++i) {
+            if (m_MipViews[i].storageView) {
+                device->DestroyTextureMipView(m_MipViews[i].storageView);
+                m_MipViews[i].storageView = nullptr;
+            }
+            if (m_MipViews[i].sampledView) {
+                device->DestroyTextureMipView(m_MipViews[i].sampledView);
+                m_MipViews[i].sampledView = nullptr;
+            }
+            m_MipViews[i].storageView = device->CreateTextureMipStorageView(m_HiZTexture.get(), i);
+            m_MipViews[i].sampledView = device->CreateTextureMipSampledView(m_HiZTexture.get(), i);
+        }
+    }
 }
+
+// ============================================================
+// 单阶段 Dispatch
+// ============================================================
 
 void GPUCulling::Dispatch(rhi::IRHICommandList* cmd,
                            const float4x4& viewProj, u32 objectCount,
                            u32 screenW, u32 screenH) {
     if (!m_Initialized || !enabled || objectCount == 0) return;
 
+    m_LastViewProj = viewProj;
+
     float4 planes[6];
     ExtractFrustumPlanes(viewProj, planes);
 
-    // Push constants: 匹配 GPUCull.comp.slang 布局
     struct { float4 planes[6]; float4x4 vp; float2 sSize; u32 mips; u32 count; } pc;
-    for (int i=0;i<6;++i) pc.planes[i]=planes[i];
+    for (int i = 0; i < 6; ++i) pc.planes[i] = planes[i];
     pc.vp    = viewProj;
     pc.sSize = float2((float)screenW, (float)screenH);
-    pc.mips  = m_HiZMipCount;  // 0=禁用, 1=全分辨率
+    pc.mips  = m_HiZMipCount;
     pc.count = objectCount;
 
     cmd->SetPipeline(m_PSO.get());
@@ -171,8 +335,119 @@ void GPUCulling::Dispatch(rhi::IRHICommandList* cmd,
     m_LastVisibleCount = 0;
 }
 
+// ============================================================
+// Phase 1: 粗筛 → 候选列表
+// ============================================================
+
+void GPUCulling::DispatchPhase1(rhi::IRHICommandList* cmd, const float4x4& viewProj,
+                                 u32 objectCount, u32 screenW, u32 screenH) {
+    if (!m_Initialized || !enabled || objectCount == 0) return;
+
+    m_LastViewProj = viewProj;
+
+    float4 planes[6];
+    ExtractFrustumPlanes(viewProj, planes);
+
+    struct { float4 planes[6]; float4x4 vp; float2 sSize; u32 mips; u32 count; } pc;
+    for (int i = 0; i < 6; ++i) pc.planes[i] = planes[i];
+    pc.vp    = viewProj;
+    pc.sSize = float2((float)screenW, (float)screenH);
+    pc.mips  = m_HiZMipCount;
+    pc.count = objectCount;
+
+    // 清零候选计数
+    void* countPtr = m_CandidateCountBuf->Map();
+    if (countPtr) {
+        std::memset(countPtr, 0, sizeof(u32) * 4);
+        m_CandidateCountBuf->Unmap();
+    }
+
+    cmd->SetPipeline(m_Phase1PSO.get());
+    cmd->BindDescriptorSet(0, m_Phase1Set);
+    cmd->SetPushConstants(0, sizeof(pc), &pc);
+
+    u32 groups = (objectCount + 63) / 64;
+    cmd->Dispatch(groups, 1, 1);
+}
+
+// ============================================================
+// BuildHiZPyramid — 构建 Hi-Z 深度金字塔
+//
+// 当前实现：深度缓冲可直接采样，m_HiZMipCount = 1。
+// 后续在此处循环 Dispatch HiZDownsample 构建完整金字塔。
+// ============================================================
+
+void GPUCulling::BuildHiZPyramid(rhi::IRHICommandList* cmd, u32 screenW, u32 screenH) {
+    (void)cmd;
+    (void)screenW;
+    (void)screenH;
+    // TODO: 循环调度 HiZDownsample 构建完整金字塔
+    //   for (u32 mip = 1; mip < actualMipCount; ++mip) {
+    //     device->UpdateDescriptorSetWithImageView(m_HiZSet, 0, CombinedImageSampler, m_MipViews[mip-1].sampledView);
+    //     device->UpdateDescriptorSetWithImageView(m_HiZSet, 1, StorageImage, m_MipViews[mip].storageView);
+    //     cmd->SetPipeline(m_HiZ_PSO.get());
+    //     cmd->BindDescriptorSet(0, m_HiZSet);
+    //     struct { uint2 srcSize; uint2 dstSize; uint srcMip; uint _pad; } pc = ...;
+    //     cmd->SetPushConstants(0, sizeof(pc), &pc);
+    //     cmd->Dispatch(groupX, groupY, 1);
+    //   }
+    //   m_HiZMipCount = actualMipCount;
+    //   将 Phase 2 的 depth 绑定切换到 Hi-Z 纹理
+}
+
+// ============================================================
+// Phase 2: 精筛 → IndirectDraw
+// ============================================================
+
+void GPUCulling::DispatchPhase2(rhi::IRHICommandList* cmd, u32 screenW, u32 screenH) {
+    u32 candidateCount = GetPhase1CandidateCount();
+    if (!m_Initialized || !enabled || candidateCount == 0) return;
+
+    // 清零 DrawCount
+    void* dcPtr = m_DrawCountBuf->Map();
+    if (dcPtr) {
+        std::memset(dcPtr, 0, sizeof(u32) * 4);
+        m_DrawCountBuf->Unmap();
+    }
+
+    // Push constants
+    struct { float4x4 vp; float2 sSize; u32 mips; u32 count; } pc;
+    pc.vp    = m_LastViewProj;
+    pc.sSize = float2((float)screenW, (float)screenH);
+    pc.mips  = m_HiZMipCount;
+    pc.count = candidateCount;
+
+    cmd->SetPipeline(m_Phase2PSO.get());
+    cmd->BindDescriptorSet(0, m_Phase2Set);
+    cmd->SetPushConstants(0, sizeof(pc), &pc);
+
+    u32 groups = (candidateCount + 63) / 64;
+    cmd->Dispatch(groups, 1, 1);
+
+    // Phase 2 完成后，最终可见物体数需要从 m_DrawCountBuf 读回
+    m_LastVisibleCount = 0;  // 延迟到 Readback 时更新
+}
+
+// ============================================================
+// GetPhase1CandidateCount
+// ============================================================
+
+u32 GPUCulling::GetPhase1CandidateCount() const {
+    if (!m_Initialized || !m_CandidateCountBuf) return 0;
+    void* ptr = m_CandidateCountBuf->Map();
+    if (!ptr) return 0;
+    u32 count = *static_cast<const u32*>(ptr);
+    m_CandidateCountBuf->Unmap();
+    return count;
+}
+
+// ============================================================
+// Readback
+// ============================================================
+
 void GPUCulling::Readback(rhi::IRHIDevice* device,
                            std::vector<u32>& outVisibleIndices) {
+    (void)device;
     outVisibleIndices.clear();
     if (!m_Initialized || !enabled) return;
 
@@ -188,7 +463,7 @@ void GPUCulling::Readback(rhi::IRHIDevice* device,
     if (vi) {
         auto* cmds = static_cast<IndirectDrawCommand*>(vi);
         for (u32 i = 0; i < count; ++i)
-            outVisibleIndices[i] = cmds[i].firstInstance;  // objectID 存在 firstInstance
+            outVisibleIndices[i] = cmds[i].firstInstance;
         m_IndirectCmdBuf->Unmap();
     }
 

@@ -79,6 +79,8 @@ if(SLANGC)
     )
     set(COMP_SLANG
         "${SHADER_DIR}/GPUCull.comp.slang"
+        "${SHADER_DIR}/GPUCull_Phase1.comp.slang"
+        "${SHADER_DIR}/GPUCull_TwoPhase.comp.slang"
         "${SHADER_DIR}/HiZDownsample.comp.slang"
         "${SHADER_DIR}/TestClear.comp.slang"
         "${SHADER_DIR}/DDGI.comp.slang"

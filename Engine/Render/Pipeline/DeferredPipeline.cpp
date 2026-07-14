@@ -554,19 +554,38 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     }
 
     // ── GPU 剔除 Compute Pass（读上帧 GBuffer 深度 → 调度下帧剔除）──
+    // 单阶段模式：Dispatch() 直接输出 IndirectDraw 命令
+    // 两阶段模式：DispatchPhase1() 仅做粗筛，输出候选列表
     // 必须在 GBuffer 之前：此时 gbDepth 保留上帧数据且未作为渲染目标
-    rg.AddPass("GPU_Cull",
-        {{gbDepth, ResourceAccess::Read}},  // 读上一帧深度做 Hi-Z 遮挡剔除
-        {},
-        [&, w, h](rhi::IRHICommandList* c) {
-            if (!m_GPUCulling.enabled) return;
-            m_GPUCulling.SetSceneBuffer(m_Device, m_GPUScene.GetObjectBuffer());
-            if (m_GBufferDepth) m_GPUCulling.SetDepthTexture(m_Device, m_GBufferDepth.get(), w, h);
-            m_GPUCulling.Dispatch(c, camera.GetViewProjMatrix(), m_GPUScene.GetObjectCount(), w, h);
-            // 恢复 graphics pipeline state（compute dispatch 后状态未定义，影响后续 GBuffer pass）
-            c->SetPipeline(m_GBufferPSO.get());
-        },
-        RGPassQueue::Compute);  // AsyncCompute: GPU 剔除在 Compute 队列执行
+    if (m_GPUCulling.useTwoPhase) {
+        // Phase 1: 视锥 + 上帧 Hi-Z 粗筛 → 候选列表（AsyncCompute 队列，帧首执行）
+        rg.AddPass("GPU_Cull_Phase1",
+            {{gbDepth, ResourceAccess::Read}},  // 读上一帧深度做粗筛遮挡测试
+            {},
+            [&, w, h](rhi::IRHICommandList* c) {
+                if (!m_GPUCulling.enabled) return;
+                m_GPUCulling.SetSceneBuffer(m_Device, m_GPUScene.GetObjectBuffer());
+                if (m_GBufferDepth) m_GPUCulling.SetDepthTexture(m_Device, m_GBufferDepth.get(), w, h);
+                m_GPUCulling.DispatchPhase1(c, camera.GetViewProjMatrix(),
+                                            m_GPUScene.GetObjectCount(), w, h);
+                c->SetPipeline(m_GBufferPSO.get());
+            },
+            RGPassQueue::Compute);  // AsyncCompute: Phase 1 在 Compute 队列执行
+    } else {
+        // 单阶段模式：完整剔除 → IndirectDraw 命令
+        rg.AddPass("GPU_Cull",
+            {{gbDepth, ResourceAccess::Read}},  // 读上一帧深度做 Hi-Z 遮挡剔除
+            {},
+            [&, w, h](rhi::IRHICommandList* c) {
+                if (!m_GPUCulling.enabled) return;
+                m_GPUCulling.SetSceneBuffer(m_Device, m_GPUScene.GetObjectBuffer());
+                if (m_GBufferDepth) m_GPUCulling.SetDepthTexture(m_Device, m_GBufferDepth.get(), w, h);
+                m_GPUCulling.Dispatch(c, camera.GetViewProjMatrix(),
+                                      m_GPUScene.GetObjectCount(), w, h);
+                c->SetPipeline(m_GBufferPSO.get());
+            },
+            RGPassQueue::Compute);  // AsyncCompute: GPU 剔除在 Compute 队列执行
+    }
 
     // ── Shadow Pass（使用光源 VP 矩阵渲染 CSM + Spot shadow maps）──
     // 必须在 GBuffer 之前完成，确保阴影贴图在 Lighting Pass 中可采样
@@ -638,6 +657,29 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             m_GBufferCtx.prevViewProj = m_PrevViewProj;
             m_GBufferRenderer->Render(c, m_GBufferCtx, world, sg, camera);
         });
+
+    // ── 两阶段剔除 Phase 2: 当前帧 Hi-Z 精筛（GBuffer 后，读取当前帧深度）──
+    if (m_GPUCulling.useTwoPhase && m_GPUCulling.enabled) {
+        // 构建当前帧 Hi-Z 深度金字塔（从 GBuffer 刚写入的深度缓冲下采样）
+        rg.AddPass("HiZ_Build",
+            {{gbDepth, ResourceAccess::Read}},
+            {},
+            [&, w, h](rhi::IRHICommandList* c) {
+                m_GPUCulling.BuildHiZPyramid(c, w, h);
+            });
+
+        // Phase 2: 读取当前帧 Hi-Z，验证 Phase 1 候选 → 输出 IndirectDraw 命令
+        rg.AddPass("GPU_Cull_Phase2",
+            {{gbDepth, ResourceAccess::Read}},
+            {},
+            [&](rhi::IRHICommandList* c) {
+                // 更新 Phase 2 的深度/Hi-Z 绑定为当前帧 GBuffer 深度
+                m_Device->UpdateDescriptorSet(m_GPUCulling.GetPhase2Set(), 3,
+                    rhi::DescriptorType::CombinedImageSampler,
+                    m_GBufferDepth.get(), m_GPUCulling.GetHiZSampler());
+                m_GPUCulling.DispatchPhase2(c, m_Width, m_Height);
+            });
+    }
 
     // ============================================================
     // DDGI Probe Update（Compute Shader：必须放在所有 offscreen pass 之前，

@@ -161,6 +161,11 @@ public:
                                                   DescriptorType type,
                                                   IRHIAccelerationStructure* as) override;
 
+    // Per-Mip ImageView 支持
+    void*                     CreateTextureMipStorageView(IRHITexture* texture, u32 mipLevel) override;
+    void*                     CreateTextureMipSampledView(IRHITexture* texture, u32 mipLevel) override;
+    void                      DestroyTextureMipView(void* view) override;
+
     // Internal
     VkDevice         GetVkDevice()     const { return m_Device; }
     VkPhysicalDevice GetVkPhysical()   const { return m_Physical; }

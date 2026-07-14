@@ -1436,6 +1436,52 @@ void VulkanDevice::UpdateDescriptorSet(DescriptorSetHandle setHandle, u32 bindin
     vkUpdateDescriptorSets(m_Device, 1, &write, 0, nullptr);
 }
 
+// ============================================================
+// Per-Mip ImageView 支持
+// ============================================================
+
+void* VulkanDevice::CreateTextureMipStorageView(IRHITexture* texture, u32 mipLevel) {
+    auto* vkTex = static_cast<VulkanTexture*>(texture);
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image            = vkTex->GetImage();
+    viewInfo.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format           = vkTex->GetVkFormat();
+    viewInfo.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewInfo.subresourceRange.baseMipLevel   = mipLevel;
+    viewInfo.subresourceRange.levelCount     = 1;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount     = 1;
+    VkImageView view = VK_NULL_HANDLE;
+    VkResult result = vkCreateImageView(m_Device, &viewInfo, nullptr, &view);
+    HE_ASSERT_MSG(result == VK_SUCCESS, "Failed to create mip storage image view");
+    return reinterpret_cast<void*>(view);
+}
+
+void* VulkanDevice::CreateTextureMipSampledView(IRHITexture* texture, u32 mipLevel) {
+    auto* vkTex = static_cast<VulkanTexture*>(texture);
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image            = vkTex->GetImage();
+    viewInfo.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format           = vkTex->GetVkFormat();
+    viewInfo.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewInfo.subresourceRange.baseMipLevel   = mipLevel;
+    viewInfo.subresourceRange.levelCount     = 1;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount     = 1;
+    VkImageView view = VK_NULL_HANDLE;
+    VkResult result = vkCreateImageView(m_Device, &viewInfo, nullptr, &view);
+    HE_ASSERT_MSG(result == VK_SUCCESS, "Failed to create mip sampled image view");
+    return reinterpret_cast<void*>(view);
+}
+
+void VulkanDevice::DestroyTextureMipView(void* view) {
+    if (view) {
+        vkDestroyImageView(m_Device, reinterpret_cast<VkImageView>(view), nullptr);
+    }
+}
+
 void VulkanDevice::DestroyDescriptorSetLayout(DescriptorSetLayoutHandle handle) {
     if (handle == 0 || handle > m_DescLayoutInfos.size()) return;
     VkDescriptorSetLayout layout = m_DescLayoutInfos[static_cast<usize>(handle - 1)].layout;
