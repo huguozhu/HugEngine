@@ -38,8 +38,8 @@ public:
     bool useTwoPhase = false;
 
     /// 持久化线程组模式（默认关闭，与两阶段剔除互斥）
-    bool usePTG = false;
-    static constexpr u32 kPTGGroupCount = 4;
+    bool usePTG = true;
+    static constexpr u32 kPTGGroupCount = 1;  // 单线程组：64 线程并行剔除，避免跨组同步
 
     /// 初始化 PTG（一次性 Dispatch，之后通过 Signal 触发处理）
     bool InitializePTG(rhi::IRHIDevice* device);

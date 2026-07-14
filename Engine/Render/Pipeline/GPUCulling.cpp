@@ -615,13 +615,8 @@ bool GPUCulling::InitializePTG(rhi::IRHIDevice* device) {
     m_PTG_PSO = device->CreatePipelineState(ptgDesc);
     HE_ASSERT(m_PTG_PSO, "GPUCulling: PersistentCull PSO creation failed");
 
-    // 6. 一次性 Dispatch PTG 线程组
-    // 使用临时 command list 执行初始 Dispatch，Submit 后 PTG 即开始 spin-wait
-    auto initCmd = device->CreateCommandList(rhi::QueueType::Compute);
-    initCmd->SetPipeline(m_PTG_PSO.get());
-    initCmd->BindDescriptorSet(0, m_PTGSet);
-    initCmd->Dispatch(kPTGGroupCount, 1, 1);
-    device->Submit(initCmd.get());
+    // 6. PTG per-frame dispatch 模式：无需初始 Dispatch
+    //   每帧由 SignalPTG 执行 vkCmdDispatch（通过 AsyncCompute 队列）
 
     m_PTGActive = true;
     m_PTGFrameCounter = 1;  // 帧计数器从 1 开始，0 为初始空闲态
@@ -631,13 +626,13 @@ bool GPUCulling::InitializePTG(rhi::IRHIDevice* device) {
 }
 
 // ============================================================
-// SignalPTG — 每帧触发 PTG 处理
-// 写入视锥参数 + 帧信号到 m_PTGParamBuf
+// SignalPTG — 每帧 Dispatch PTG Compute Shader
+// 当前为 per-frame dispatch 模式（非持久化），用于验证 shader/描述符正确性。
+// 确认白屏问题解决后再切换为真正的持久化 spin-wait 模式。
 // ============================================================
 
 void GPUCulling::SignalPTG(rhi::IRHICommandList* cmd, const float4x4& viewProj,
                             u32 objectCount, u32 screenW, u32 screenH) {
-    (void)cmd;
     if (!m_PTGActive) return;
 
     m_LastViewProj = viewProj;
@@ -646,7 +641,7 @@ void GPUCulling::SignalPTG(rhi::IRHICommandList* cmd, const float4x4& viewProj,
     float4 planes[6];
     ExtractFrustumPlanes(viewProj, planes);
 
-    // 写入 PTGParams 到缓冲
+    // 写入 PTGParams 到 Uniform Buffer
     void* mapped = m_PTGParamBuf->Map();
     if (!mapped) return;
 
@@ -659,6 +654,18 @@ void GPUCulling::SignalPTG(rhi::IRHICommandList* cmd, const float4x4& viewProj,
     params->frameIndex = m_PTGFrameCounter++;
 
     m_PTGParamBuf->Unmap();
+
+    // 每帧 Dispatch PTG shader（替代持久化 spin-wait）
+    cmd->SetPipeline(m_PTG_PSO.get());
+    cmd->BindDescriptorSet(0, m_PTGSet);
+    cmd->Dispatch(kPTGGroupCount, 1, 1);
+
+    // 全局屏障：确保 Compute Shader 写入对后续 Indirect Draw 可见
+    cmd->PipelineBarrier(
+        rhi::PipelineStage::ComputeShader, rhi::PipelineStage::DrawIndirect,
+        rhi::ResourceState::UnorderedAccess, rhi::ResourceState::IndirectArgument);
+
+    m_LastVisibleCount = 0;
 }
 
 // ============================================================

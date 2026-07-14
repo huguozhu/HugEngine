@@ -579,6 +579,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             RGPassQueue::Compute);  // AsyncCompute: Phase 1 在 Compute 队列执行
     } else {
         // 单阶段模式：完整剔除 → IndirectDraw 命令
+        // PTG per-frame dispatch 模式可用 AsyncCompute（与普通 Dispatch 相同路径）
         rg.AddPass("GPU_Cull",
             {{gbDepth, ResourceAccess::Read}},  // 读上一帧深度做 Hi-Z 遮挡剔除
             {},
@@ -595,7 +596,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 }
                 c->SetPipeline(m_GBufferPSO.get());
             },
-            RGPassQueue::Compute);  // AsyncCompute: GPU 剔除在 Compute 队列执行
+            RGPassQueue::Compute);
     }
 
     // ── Shadow Pass（使用光源 VP 矩阵渲染 CSM + Spot shadow maps）──
