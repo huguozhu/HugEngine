@@ -580,7 +580,7 @@ int main() {
     u64 frameIndex = 0;
     f64 lastTime   = glfwGetTime();
 
-    int  renderMode  = rtSupported ? 1 : 0;  // 默认 RT 模式
+    int  renderMode  = 0;  // 默认光栅化渲染（ForwardPipeline），按 T 切换 RT 模式
     int  rtSampleCount = 1;                   // RT 每像素采样数（1-16）
 
     while (!engine.GetWindow()->ShouldClose()) {
