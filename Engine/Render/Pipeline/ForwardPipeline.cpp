@@ -70,6 +70,8 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         { 1,  rhi::DescriptorType::StorageBuffer,        1, 16 },  // GPULight[]
         { 2,  rhi::DescriptorType::StorageBuffer,        1, 17 },  // GPUObjectData[]
         { 3,  rhi::DescriptorType::StorageBuffer,        1, 16 },  // GPUShadowData[]
+        { 7,  rhi::DescriptorType::StorageBuffer,        1, 16 },  // LightGrid（Forward+）
+        { 8,  rhi::DescriptorType::StorageBuffer,        1, 16 },  // LightIndexList（Forward+）
         { 4,  rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // CSM cascade 0
         { 5,  rhi::DescriptorType::SampledImage,  4096, 16, true },  // u_Textures[] bindless
         { 6,  rhi::DescriptorType::Sampler,       4096, 16, true },  // u_Samplers[] bindless
@@ -111,6 +113,21 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         m_ShadowObjBuffers[i] = device->CreateBuffer(shadowObjDesc);
     }
 
+    // --- Forward+ LightGrid / LightIndexList 初始占位缓冲区 ---
+    {
+        rhi::BufferDesc gridDesc;
+        gridDesc.size  = sizeof(ClusteredShading::LightGridCell) * 64;
+        gridDesc.usage = rhi::BufferUsage::Storage;
+        gridDesc.cpuAccess = true;
+        m_LightGridBuffer = device->CreateBuffer(gridDesc);
+
+        rhi::BufferDesc listDesc;
+        listDesc.size  = sizeof(u32) * 64;
+        listDesc.usage = rhi::BufferUsage::Storage;
+        listDesc.cpuAccess = true;
+        m_LightIndexListBuffer = device->CreateBuffer(listDesc);
+    }
+
     // --- 创建 bindless 占位纹理 + 采样器 ---
     {
         u8 white4[4] = { 255, 255, 255, 255 };
@@ -150,6 +167,11 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
                                     m_ObjectBuffers[i].get());
         device->UpdateDescriptorSet(set, 3, rhi::DescriptorType::StorageBuffer,
                                     m_ShadowBuffers[i].get());
+        // Forward+: LightGrid / LightIndexList 初始占位
+        device->UpdateDescriptorSet(set, 7, rhi::DescriptorType::StorageBuffer,
+                                    m_LightGridBuffer.get());
+        device->UpdateDescriptorSet(set, 8, rhi::DescriptorType::StorageBuffer,
+                                    m_LightIndexListBuffer.get());
         // CSM: 绑定 3 级联阴影贴图（来自 ShadowSystem）
         for (u32 c = 0; c < CASCADE_COUNT; ++c) {
             u32 binding = (c == 0) ? 4u : (c == 1 ? 10u : 11u);
@@ -463,6 +485,8 @@ void ForwardPipeline::Shutdown() {
         m_ObjectBuffers[i].reset();
         m_ShadowBuffers[i].reset();
     }
+    m_LightGridBuffer.reset();         // Forward+ LightGrid
+    m_LightIndexListBuffer.reset();    // Forward+ LightIndexList
     m_PBR_PSO.reset();
     if (m_ToneMap) { m_ToneMap->Shutdown(); m_ToneMap.reset(); }
     if (m_Skybox)  { m_Skybox->Shutdown();  m_Skybox.reset(); }
@@ -860,6 +884,76 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         }
     }
 
+    // --- Pass 2.5: Forward+ 光源剔除（Compute Pass，仅在开启时）---
+    if (m_UseForwardPlus && m_ClusteredShading.enabled) {
+        rg.AddPass("ForwardPlus_LightCull",
+            {}, {},
+            [this, &world, &sg, &camera, w, h](rhi::IRHICommandList* c) {
+                // 收集光源到 GPU 缓冲区
+                PushConstantData pc;
+                CollectLights(pc, world, sg, camera);
+
+                // 缓存光源到 CPU（供 Cluster 剔除使用）
+                m_CachedLights.resize(pc.lightCount);
+                auto* gpuLights = static_cast<const GPULight*>(
+                    m_LightBuffers[m_CurrentFrameSlot]->Map());
+                if (gpuLights && pc.lightCount > 0) {
+                    memcpy(m_CachedLights.data(), gpuLights,
+                           pc.lightCount * sizeof(GPULight));
+                }
+                m_LightBuffers[m_CurrentFrameSlot]->Unmap();
+
+                // 构建 Cluster AABB + CPU 端光源剔除
+                float4x4 invVP = glm::inverse(camera.GetViewProjMatrix());
+                m_ClusteredShading.BuildClusters(invVP, w, h,
+                    camera.nearPlane, camera.farPlane);
+                m_ClusteredShading.CullLights(m_CachedLights.data(), pc.lightCount);
+
+                // 上传 LightGrid 到 GPU（binding 7）
+                auto& grid = m_ClusteredShading.GetLightGrid();
+                if (!m_LightGridBuffer ||
+                    m_LightGridBuffer->GetSize() < grid.size() * sizeof(ClusteredShading::LightGridCell)) {
+                    rhi::BufferDesc d;
+                    d.size = grid.size() * sizeof(ClusteredShading::LightGridCell);
+                    d.usage = rhi::BufferUsage::Storage;
+                    d.cpuAccess = true;
+                    m_LightGridBuffer = m_Device->CreateBuffer(d);
+                }
+                void* mappedGrid = m_LightGridBuffer->Map();
+                if (mappedGrid && !grid.empty()) {
+                    memcpy(mappedGrid, grid.data(),
+                           grid.size() * sizeof(ClusteredShading::LightGridCell));
+                }
+                m_LightGridBuffer->Unmap();
+
+                // 上传 LightIndexList 到 GPU（binding 8）
+                auto& list = m_ClusteredShading.GetLightIndexList();
+                u32 listByteSize = (u32)(list.size() * sizeof(u32));
+                if (!m_LightIndexListBuffer ||
+                    m_LightIndexListBuffer->GetSize() < listByteSize) {
+                    rhi::BufferDesc d;
+                    d.size = std::max<usize>(listByteSize, 64u);
+                    d.usage = rhi::BufferUsage::Storage;
+                    d.cpuAccess = true;
+                    m_LightIndexListBuffer = m_Device->CreateBuffer(d);
+                }
+                void* mappedList = m_LightIndexListBuffer->Map();
+                if (mappedList && !list.empty()) {
+                    memcpy(mappedList, list.data(), listByteSize);
+                }
+                m_LightIndexListBuffer->Unmap();
+
+                // 更新全部三缓冲描述符集的 LightGrid / LightIndexList 绑定
+                for (u32 si = 0; si < MAX_FRAMES_IN_FLIGHT; ++si) {
+                    m_Device->UpdateDescriptorSet(m_DescSets[si], 7,
+                        rhi::DescriptorType::StorageBuffer, m_LightGridBuffer.get());
+                    m_Device->UpdateDescriptorSet(m_DescSets[si], 8,
+                        rhi::DescriptorType::StorageBuffer, m_LightIndexListBuffer.get());
+                }
+            },
+            RGPassQueue::Compute);
+    }
+
     // --- Pass 3: Scene — HDR 几何 + 天空盒渲染 ---
     rg.AddPass("Scene",
         {{hdrDepth, ResourceAccess::Read}},  // 读深度确保在 Shadow 之后
@@ -912,6 +1006,21 @@ void ForwardPipeline::RenderScene(
 
     // 收集光源（阴影数据由 ShadowSystem 管理，此处仅收集光照）
     CollectLights(framePC, world, sceneGraph, camera);
+
+    // Forward+: 设置 Cluster 参数（与 ForwardPlus_LightCull pass 共享 m_ClusteredShading 状态）
+    if (m_UseForwardPlus && m_ClusteredShading.enabled) {
+        float n = camera.nearPlane, f = camera.farPlane;
+        framePC.clusterTilesX    = m_ClusteredShading.GetTileCountX();
+        framePC.clusterTilesY    = m_ClusteredShading.GetTileCountY();
+        framePC.clusterNear      = n;
+        framePC.clusterFar       = f;
+        framePC.clusterLogFactor = std::log(f / n);
+        framePC.useClustered     = 1;
+    } else {
+        framePC.clusterTilesX    = 0;
+        framePC.clusterTilesY    = 0;
+        framePC.useClustered     = 0;
+    }
 
     // ============================================================
     // GPU 视锥剔除（Compute Shader）— 读回上帧结果 → 调度下帧

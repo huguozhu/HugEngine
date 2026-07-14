@@ -14,7 +14,7 @@ layout(location = 2) in float2 inUV;
 // set=0, binding=2: GPU 对象数据数组
 [[vk::binding(2, 0)]] StructuredBuffer<GPUObjectData> u_Objects;
 
-// 帧级 Push Constants
+// 帧级 Push Constants（Forward+ 扩展，与 FS 对齐）
 [[vk::push_constant]] cbuffer FrameConstants {
     float4x4 viewProjMatrix;
     float4   cameraPosition;
@@ -22,7 +22,12 @@ layout(location = 2) in float2 inUV;
     uint     objectIndex;     // 传统模式：push constant 传入
     uint     useInstanceID;   // 1=从 SV_InstanceID 读 objectIndex
     float    iblIntensity;    // IBL 强度（VS 不使用，仅占位对齐 FS）
-    uint     _pad;
+    uint     clusterTilesX;   // Forward+ 参数（VS 不使用，仅占位对齐）
+    uint     clusterTilesY;
+    float    clusterNear;
+    float    clusterFar;
+    float    clusterLogFactor;
+    uint     useClustered;
 };
 
 struct VSOutput {
