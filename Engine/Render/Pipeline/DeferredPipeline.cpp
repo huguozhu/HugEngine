@@ -134,6 +134,9 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     m_Skybox  = std::make_unique<SkyboxPass>(); m_Skybox->Initialize(device, m_Width, m_Height);
     m_SceneRenderer = std::make_unique<SceneRenderer>();
     m_GPUCulling.Initialize(device);
+    if (m_GPUCulling.usePTG) {
+        m_GPUCulling.InitializePTG(device);
+    }
     m_GPUScene.Initialize(device);
     m_SSGI.Initialize(device, m_Width, m_Height);
     m_SSR.Initialize(device, m_Width, m_Height);
@@ -341,6 +344,9 @@ void DeferredPipeline::Shutdown() {
     for (auto& b : m_ObjectBuffers) b.reset();
     for (auto& b : m_ShadowBuffers) b.reset();
     for (auto& b : m_ShadowObjBuffers) b.reset();
+    if (m_GPUCulling.usePTG) {
+        m_GPUCulling.ShutdownPTG(m_Device);
+    }
     m_GPUCulling.Shutdown(m_Device);
     m_GPUScene.Shutdown();
     if (m_GBufferRenderer) m_GBufferRenderer->Shutdown();
@@ -580,8 +586,13 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 if (!m_GPUCulling.enabled) return;
                 m_GPUCulling.SetSceneBuffer(m_Device, m_GPUScene.GetObjectBuffer());
                 if (m_GBufferDepth) m_GPUCulling.SetDepthTexture(m_Device, m_GBufferDepth.get(), w, h);
-                m_GPUCulling.Dispatch(c, camera.GetViewProjMatrix(),
-                                      m_GPUScene.GetObjectCount(), w, h);
+                if (m_GPUCulling.usePTG) {
+                    m_GPUCulling.SignalPTG(c, camera.GetViewProjMatrix(),
+                                          m_GPUScene.GetObjectCount(), w, h);
+                } else {
+                    m_GPUCulling.Dispatch(c, camera.GetViewProjMatrix(),
+                                          m_GPUScene.GetObjectCount(), w, h);
+                }
                 c->SetPipeline(m_GBufferPSO.get());
             },
             RGPassQueue::Compute);  // AsyncCompute: GPU 剔除在 Compute 队列执行

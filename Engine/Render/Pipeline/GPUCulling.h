@@ -37,6 +37,20 @@ public:
     /// 启用两阶段剔除（默认关闭，向后兼容）
     bool useTwoPhase = false;
 
+    /// 持久化线程组模式（默认关闭，与两阶段剔除互斥）
+    bool usePTG = false;
+    static constexpr u32 kPTGGroupCount = 4;
+
+    /// 初始化 PTG（一次性 Dispatch，之后通过 Signal 触发处理）
+    bool InitializePTG(rhi::IRHIDevice* device);
+
+    /// 每帧触发 PTG 处理（写入视锥/Hi-Z 参数 + 帧信号）
+    void SignalPTG(rhi::IRHICommandList* cmd, const float4x4& viewProj,
+                   u32 objectCount, u32 screenW, u32 screenH);
+
+    /// 关闭 PTG 线程（发送 0xFFFFFFFF 退出信号）
+    void ShutdownPTG(rhi::IRHIDevice* device);
+
     /// 初始化：创建 SSBO + Compute PSO
     bool Initialize(rhi::IRHIDevice* device);
     /// 清理 GPU 资源
@@ -122,6 +136,15 @@ private:
         void* sampledView = nullptr;  // Texture2D 读取用
     };
     HiZMipViews m_MipViews[kHiZMips];
+
+    // PTG 资源
+    rhi::ShaderBytecode m_PTGCS;
+    std::unique_ptr<rhi::IRHIPipelineState> m_PTG_PSO;
+    std::unique_ptr<rhi::IRHIBuffer> m_PTGParamBuf;       // 每帧参数 + 帧触发信号
+    rhi::DescriptorSetLayoutHandle m_PTGLayout = rhi::kInvalidLayout;
+    rhi::DescriptorSetHandle       m_PTGSet    = rhi::kInvalidSet;
+    bool m_PTGActive = false;
+    u32 m_PTGFrameCounter = 1;  // PTG 帧计数器（从 1 开始，0 为初始空闲态）
 
     float4x4 m_LastViewProj = float4x4(1.0f);  // 最近一次设置的 ViewProj（Phase 2 复用）
     u32 m_LastVisibleCount = 0;

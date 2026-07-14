@@ -4,6 +4,7 @@
 #include "GPUCull_Phase1.comp.spv.h"
 #include "GPUCull_TwoPhase.comp.spv.h"
 #include "HiZDownsample.comp.spv.h"
+#include "PersistentCull.comp.spv.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include <cstring>
@@ -14,6 +15,20 @@
 // ============================================================
 
 namespace he::render {
+
+// PTGParams — 持久化线程组每帧参数结构体
+// 布局必须与 PersistentCull.comp.slang 中的 PTGParams 一致
+struct PTGParams {
+    float4x4 viewProj;          // [0..64)   投影矩阵
+    float4   frustumPlanes[6];  // [64..160) 视锥平面
+    float2   screenSize;        // [160..168)
+    u32      objectCount;       // [168]
+    u32      hizMipCount;       // [172]
+    u32      frameIndex;        // [176]
+    u32      _padPTG[3];        // [180..192) 填充到 192 字节（16 字节对齐）
+};
+static_assert(sizeof(PTGParams) == 192,
+              "PTGParams size must be 192 bytes (padded to 16)");
 
 /// 从 ViewProj 矩阵提取 6 个视锥平面（Gribb-Hartmann, world space）
 static void ExtractFrustumPlanes(const float4x4& vp, float4 planes[6]) {
@@ -216,6 +231,11 @@ void GPUCulling::Shutdown(rhi::IRHIDevice* device) {
         }
     }
 
+    // 确保 PTG 线程已退出
+    if (m_PTGActive) {
+        ShutdownPTG(device);
+    }
+
     m_CandidateBuf.reset();
     m_CandidateCountBuf.reset();
     m_Phase1PSO.reset();
@@ -226,6 +246,16 @@ void GPUCulling::Shutdown(rhi::IRHIDevice* device) {
     m_HiZTexture.reset();
     m_HiZSampler.reset();
     m_HiZ_PSO.reset();
+
+    // PTG 资源清理
+    m_PTG_PSO.reset();
+    m_PTGParamBuf.reset();
+    if (m_PTGLayout != rhi::kInvalidLayout && device) {
+        device->DestroyDescriptorSetLayout(m_PTGLayout);
+        m_PTGLayout = rhi::kInvalidLayout;
+    }
+    m_PTGSet = rhi::kInvalidSet;
+
     if (m_DescLayout != rhi::kInvalidLayout && device) {
         device->DestroyDescriptorSetLayout(m_DescLayout);
         m_DescLayout = rhi::kInvalidLayout;
@@ -245,6 +275,7 @@ void GPUCulling::Shutdown(rhi::IRHIDevice* device) {
     m_DescSet    = rhi::kInvalidSet;
     m_Phase1Set  = rhi::kInvalidSet;
     m_Phase2Set  = rhi::kInvalidSet;
+    m_PTGSet     = rhi::kInvalidSet;
     m_HiZSet     = rhi::kInvalidSet;
     m_Initialized = false;
 }
@@ -258,6 +289,9 @@ void GPUCulling::SetSceneBuffer(rhi::IRHIDevice* device, rhi::IRHIBuffer* gpuSce
     device->UpdateDescriptorSet(m_DescSet,   0, rhi::DescriptorType::StorageBuffer, gpuSceneSSBO);
     device->UpdateDescriptorSet(m_Phase1Set, 0, rhi::DescriptorType::StorageBuffer, gpuSceneSSBO);
     device->UpdateDescriptorSet(m_Phase2Set, 0, rhi::DescriptorType::StorageBuffer, gpuSceneSSBO);
+    if (m_PTGActive) {
+        device->UpdateDescriptorSet(m_PTGSet, 1, rhi::DescriptorType::StorageBuffer, gpuSceneSSBO);
+    }
 }
 
 void GPUCulling::SetDepthTexture(rhi::IRHIDevice* device, rhi::IRHITexture* depthTex,
@@ -275,6 +309,12 @@ void GPUCulling::SetDepthTexture(rhi::IRHIDevice* device, rhi::IRHITexture* dept
     // Phase 2: 绑定当前帧深度（GBuffer 之后由外部更新）
     device->UpdateDescriptorSet(m_Phase2Set, 3, rhi::DescriptorType::CombinedImageSampler,
                                 depthTex, m_HiZSampler.get());
+
+    // PTG: 绑定深度纹理（与单阶段共用上帧深度）
+    if (m_PTGActive) {
+        device->UpdateDescriptorSet(m_PTGSet, 2, rhi::DescriptorType::CombinedImageSampler,
+                                    depthTex, m_HiZSampler.get());
+    }
 
     // ── 创建/重建 Hi-Z 纹理 ──
     if (!m_HiZTexture || m_HiZTexture->GetWidth() != width || m_HiZTexture->GetHeight() != height) {
@@ -514,6 +554,134 @@ void GPUCulling::Readback(rhi::IRHIDevice* device,
     }
 
     m_LastVisibleCount = count;
+}
+
+// ============================================================
+// PTG 初始化：创建信号缓冲 + PTG PSO，一次性 Dispatch
+// ============================================================
+
+bool GPUCulling::InitializePTG(rhi::IRHIDevice* device) {
+    if (!m_Initialized || !device) return false;
+
+    // 1. 创建 PTG 参数缓冲（CPU 每帧写入视锥参数 + 帧信号）
+    {
+        rhi::BufferDesc paramDesc;
+        paramDesc.size = sizeof(PTGParams);  // 192 字节
+        paramDesc.usage = rhi::BufferUsage::Uniform;
+        paramDesc.cpuAccess = true;  // 允许 CPU Map/Unmap
+        m_PTGParamBuf = device->CreateBuffer(paramDesc);
+
+        // 清零初始化，确保 frameIndex = 0（PTG 等待帧索引 >= 1）
+        void* ptr = m_PTGParamBuf->Map();
+        if (ptr) {
+            std::memset(ptr, 0, sizeof(PTGParams));
+            m_PTGParamBuf->Unmap();
+        }
+    }
+
+    // 2. 加载 PTG Shader
+    m_PTGCS.stage = rhi::ShaderStage::Compute;
+    m_PTGCS.spirv = k_PersistentCull_comp_spv;
+    m_PTGCS.entryPoint = "main";
+
+    // 3. 创建 PTG 描述符布局（5 个 binding）
+    rhi::DescriptorSetLayoutDesc ptgLayout;
+    ptgLayout.bindings = {
+        {0, rhi::DescriptorType::UniformBuffer, 1, 32},        // u_PTGParams
+        {1, rhi::DescriptorType::StorageBuffer, 1, 32},        // u_SceneObjects
+        {2, rhi::DescriptorType::CombinedImageSampler, 1, 32}, // u_HiZDepth + Sampler
+        {3, rhi::DescriptorType::StorageBuffer, 1, 32},        // u_IndirectCommands
+        {4, rhi::DescriptorType::StorageBuffer, 1, 32},        // u_DrawCount
+    };
+    m_PTGLayout = device->CreateDescriptorSetLayout(ptgLayout);
+    m_PTGSet = device->AllocateDescriptorSet(m_PTGLayout);
+
+    // 4. 绑定 PTG 参数缓冲（binding 0）
+    device->UpdateDescriptorSet(m_PTGSet, 0, rhi::DescriptorType::UniformBuffer, m_PTGParamBuf.get());
+    // binding 1 (SceneObjects) 由 SetSceneBuffer 设置
+    // binding 2 (HiZDepth) 由 SetDepthTexture 设置
+    // binding 3 (IndirectCmds) 由 Initialize 中 m_IndirectCmdBuf 设置
+    device->UpdateDescriptorSet(m_PTGSet, 3, rhi::DescriptorType::StorageBuffer, m_IndirectCmdBuf.get());
+    // binding 4 (DrawCount) 由 Initialize 中 m_DrawCountBuf 设置
+    device->UpdateDescriptorSet(m_PTGSet, 4, rhi::DescriptorType::StorageBuffer, m_DrawCountBuf.get());
+
+    // 5. 创建 PTG PSO（无 push constants，全部通过描述符传递）
+    rhi::PipelineStateDesc ptgDesc;
+    ptgDesc.bindPoint = rhi::PipelineBindPoint::Compute;
+    ptgDesc.computeShader = &m_PTGCS;
+    ptgDesc.pushConstantRanges = {};
+    ptgDesc.descriptorSetLayouts = {m_PTGLayout};
+    ptgDesc.debugName = "PersistentCull";
+    m_PTG_PSO = device->CreatePipelineState(ptgDesc);
+    HE_ASSERT(m_PTG_PSO, "GPUCulling: PersistentCull PSO creation failed");
+
+    // 6. 一次性 Dispatch PTG 线程组
+    // 使用临时 command list 执行初始 Dispatch，Submit 后 PTG 即开始 spin-wait
+    auto initCmd = device->CreateCommandList(rhi::QueueType::Compute);
+    initCmd->SetPipeline(m_PTG_PSO.get());
+    initCmd->BindDescriptorSet(0, m_PTGSet);
+    initCmd->Dispatch(kPTGGroupCount, 1, 1);
+    device->Submit(initCmd.get());
+
+    m_PTGActive = true;
+    m_PTGFrameCounter = 1;  // 帧计数器从 1 开始，0 为初始空闲态
+    HE_CORE_INFO("GPUCulling: PTG initialized ({} groups, {} threads total)",
+                 kPTGGroupCount, kPTGGroupCount * 64);
+    return true;
+}
+
+// ============================================================
+// SignalPTG — 每帧触发 PTG 处理
+// 写入视锥参数 + 帧信号到 m_PTGParamBuf
+// ============================================================
+
+void GPUCulling::SignalPTG(rhi::IRHICommandList* cmd, const float4x4& viewProj,
+                            u32 objectCount, u32 screenW, u32 screenH) {
+    (void)cmd;
+    if (!m_PTGActive) return;
+
+    m_LastViewProj = viewProj;
+
+    // 提取 6 个视锥平面
+    float4 planes[6];
+    ExtractFrustumPlanes(viewProj, planes);
+
+    // 写入 PTGParams 到缓冲
+    void* mapped = m_PTGParamBuf->Map();
+    if (!mapped) return;
+
+    auto* params = static_cast<PTGParams*>(mapped);
+    params->viewProj = viewProj;
+    for (int i = 0; i < 6; ++i) params->frustumPlanes[i] = planes[i];
+    params->screenSize = float2((float)screenW, (float)screenH);
+    params->objectCount = objectCount;
+    params->hizMipCount = m_HiZMipCount;
+    params->frameIndex = m_PTGFrameCounter++;
+
+    m_PTGParamBuf->Unmap();
+}
+
+// ============================================================
+// ShutdownPTG — 发送退出信号并等待 PTG 线程终止
+// ============================================================
+
+void GPUCulling::ShutdownPTG(rhi::IRHIDevice* device) {
+    if (!m_PTGActive || !device) return;
+
+    // 1. 发送退出信号（frameIndex = 0xFFFFFFFF）
+    void* mapped = m_PTGParamBuf->Map();
+    if (mapped) {
+        auto* params = static_cast<PTGParams*>(mapped);
+        params->frameIndex = 0xFFFFFFFF;
+        m_PTGParamBuf->Unmap();
+    }
+
+    // 2. 等待 GPU 完成，确保 PTG 线程检测到退出信号并终止
+    device->WaitIdle();
+
+    m_PTGActive = false;
+    m_PTGFrameCounter = 0;
+    HE_CORE_INFO("GPUCulling: PTG shutdown complete");
 }
 
 } // namespace he::render
