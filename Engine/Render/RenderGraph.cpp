@@ -376,70 +376,61 @@ void RenderGraph::Execute(rhi::IRHICommandList* cmdList, rhi::IRHIDevice* device
         }
     }
 
-    // GPU Profiler
-    if (m_Profiler) m_Profiler->BeginFrame(cmdList);
-    u32 passIdx = 0;
+    // 按队列类型分支执行
+    if (m_AsyncComputeEnabled && HasComputePasses()) {
+        // AsyncCompute 多阶段提交：自动拆分 Graphics/Compute 到独立命令列表
+        ExecuteWithAsyncCompute(cmdList, device, textures, buffers);
+    } else {
+        // 单队列执行（传统路径）
+        if (m_Profiler) m_Profiler->BeginFrame(cmdList);
+        u32 passIdx = 0;
 
-    for (auto* pass : m_PassOrder) {
-        for (auto& br : pass->preBarriers) {
-            if (br.srcState == br.dstState) continue;
-            u32 idx = br.handle;
-            rhi::IRHITexture* tex = (idx < textures.size()) ? textures[idx].get() : nullptr;
-            if (!tex && m_ImportedTextures.count(br.handle))
-                tex = m_ImportedTextures[br.handle];
-            if (tex) {
-                cmdList->PipelineBarrier(br.srcStage, br.dstStage, br.srcState, br.dstState, tex);
+        for (auto* pass : m_PassOrder) {
+            for (auto& br : pass->preBarriers) {
+                if (br.srcState == br.dstState) continue;
+                u32 idx = br.handle;
+                rhi::IRHITexture* tex = (idx < textures.size()) ? textures[idx].get() : nullptr;
+                if (!tex && m_ImportedTextures.count(br.handle))
+                    tex = m_ImportedTextures[br.handle];
+                if (tex) {
+                    cmdList->PipelineBarrier(br.srcStage, br.dstStage, br.srcState, br.dstState, tex);
+                }
             }
+            if (m_Profiler) m_Profiler->BeginPass(cmdList, passIdx, pass->name);
+            if (pass->execute) pass->execute(cmdList);
+            if (m_Profiler) m_Profiler->EndPass(cmdList, passIdx);
+            passIdx++;
         }
-        if (m_Profiler) m_Profiler->BeginPass(cmdList, passIdx, pass->name);
-        if (pass->execute) pass->execute(cmdList);
-        if (m_Profiler) m_Profiler->EndPass(cmdList, passIdx);
-        passIdx++;
-    }
 
-    if (m_Profiler) m_Profiler->EndFrame(device);
+        if (m_Profiler) m_Profiler->EndFrame(device);
+    }
 }
 
 // ============================================================
-// 双队列 Execute（AsyncCompute 模式）
+// AsyncCompute 辅助方法
 // ============================================================
 
-void RenderGraph::Execute(rhi::IRHICommandList* graphicsCmd,
-                           rhi::IRHICommandList* computeCmd,
-                           rhi::IRHIDevice* device) {
-    if (!m_Compiled) Compile();
-
-    HE_CORE_INFO("RenderGraph::Execute (Async) — {} passes", m_PassOrder.size());
-
-    // 每帧更新 SwapChain BackBuffer
-    if (m_SwapChain && m_BackBufferHandle != kInvalidHandle) {
-        u32 idx = m_SwapChain->GetCurrentBackBufferIndex();
-        void* bbView = m_SwapChain->GetCurrentBackBufferView();
-        m_Resources[m_BackBufferHandle].width  = m_SwapChain->GetWidth();
-        m_Resources[m_BackBufferHandle].height = m_SwapChain->GetHeight();
-        m_ImportedTextures[m_BackBufferHandle] = reinterpret_cast<rhi::IRHITexture*>(bbView);
+bool RenderGraph::HasComputePasses() const {
+    for (auto* pass : m_PassOrder) {
+        if (pass->queueHint == RGPassQueue::Compute) return true;
     }
+    return false;
+}
 
-    TArray<std::unique_ptr<rhi::IRHITexture>> textures(m_Resources.size());
-    TArray<std::unique_ptr<rhi::IRHIBuffer>>  buffers(m_Resources.size());
+// ============================================================
+// ExecuteWithAsyncCompute — 多阶段提交
+// 将 Pass 按队列拆分为三段：
+//   Phase 1: Graphics 命令列表 #1（Shadow + 前期 Pass）
+//   Phase 2: Compute 命令列表（GPUCull, SSAO, AutoExposure 等）
+//   Phase 3: Graphics 命令列表 #2（GBuffer, Lighting, PostProcess）
+// ============================================================
 
-    for (usize i = 0; i < m_Resources.size(); ++i) {
-        if (m_ImportedTextures.count(static_cast<ResourceHandle>(i))) continue;
-        auto& desc = m_Resources[i];
-        if (desc.type == ResourceType::Texture && desc.width > 0) {
-            rhi::TextureDesc texDesc;
-            texDesc.width  = desc.width;
-            texDesc.height = desc.height;
-            texDesc.format = desc.format;
-            texDesc.usage  = desc.textureUsage;
-            textures[i] = device->CreateTexture(texDesc);
-        } else if (desc.type == ResourceType::Buffer && desc.bufferSize > 0) {
-            rhi::BufferDesc bufDesc;
-            bufDesc.size  = desc.bufferSize;
-            bufDesc.usage = desc.bufferUsage;
-            buffers[i] = device->CreateBuffer(bufDesc);
-        }
-    }
+void RenderGraph::ExecuteWithAsyncCompute(rhi::IRHICommandList* mainCmd,
+    rhi::IRHIDevice* device,
+    const TArray<std::unique_ptr<rhi::IRHITexture>>& textures,
+    const TArray<std::unique_ptr<rhi::IRHIBuffer>>& /*buffers*/) {
+
+    HE_CORE_INFO("RenderGraph::ExecuteWithAsyncCompute — {} passes", m_PassOrder.size());
 
     // 辅助: 根据资源 handle 获取纹理指针
     auto getTexture = [&](ResourceHandle h) -> rhi::IRHITexture* {
@@ -448,70 +439,97 @@ void RenderGraph::Execute(rhi::IRHICommandList* graphicsCmd,
         return nullptr;
     };
 
-    // GPU Profiler（仍在 Graphics 命令列表上打标签）
-    if (m_Profiler) m_Profiler->BeginFrame(graphicsCmd);
-    u32 passIdx = 0;
+    u64 timelineValue = m_TimelineBase;
 
+    // ============================================================
+    // 简单双命令列表方案：
+    // - computeCmd: 收集所有可异步执行的 Compute Pass（仅读上帧数据）
+    // - mainCmd:   收集所有 Graphics Pass + 不可异步的 Compute Pass
+    //
+    // Timeline Semaphore: computeCmd 完成后 signal，mainCmd 提交时 wait
+    // mainCmd 上的所有 Pass 完全保持与单队列路径一致的录制顺序，
+    // 仅 GPU_Cull 等安全 Pass 被移到异步队列执行。
+    // ============================================================
+
+    // 先收集异步 Compute Pass 列表
+    std::vector<PassNode*> asyncComputePasses;
+    std::vector<PassNode*> mainPasses;
+    bool crossedCompute = false;
     for (auto* pass : m_PassOrder) {
-        bool isComputePass = (pass->queueHint == RGPassQueue::Compute && m_AsyncComputeEnabled);
-        rhi::IRHICommandList* cmdList = isComputePass ? computeCmd : graphicsCmd;
-
-        // 1. 跨队列 Acquire（Graphics → Compute）
-        //    Vulkan QFOT 需要两个 Barrier:
-        //      a) RELEASE 在源队列 (Graphics) 上录制
-        //      b) ACQUIRE 在目标队列 (Compute) 上录制
-        if (isComputePass) {
-            for (auto& br : pass->crossQueueAcquire) {
-                if (br.srcState == br.dstState) continue;
-                rhi::IRHITexture* tex = getTexture(br.handle);
-                if (!tex) continue;
-                // RELEASE on Graphics: 释放所有权，Compute 队列可以获取
-                graphicsCmd->QueueOwnershipTransfer(tex,
-                    rhi::QueueType::Graphics, rhi::QueueType::Compute,
-                    br.srcState, br.dstState);
-                // ACQUIRE on Compute: 获取所有权，准备使用
-                computeCmd->QueueOwnershipTransfer(tex,
-                    rhi::QueueType::Graphics, rhi::QueueType::Compute,
-                    br.srcState, br.dstState);
-            }
-        }
-
-        // 2. 常规 Barrier（布局转换）— 在当前 Pass 的命令列表上录制
-        for (auto& br : pass->preBarriers) {
-            if (br.srcState == br.dstState) continue;
-            rhi::IRHITexture* tex = getTexture(br.handle);
-            if (tex) {
-                cmdList->PipelineBarrier(br.srcStage, br.dstStage,
-                                         br.srcState, br.dstState, tex);
-            }
-        }
-
-        // 3. 执行 Pass
-        if (m_Profiler) m_Profiler->BeginPass(cmdList, passIdx, pass->name);
-        if (pass->execute) pass->execute(cmdList);
-        if (m_Profiler) m_Profiler->EndPass(cmdList, passIdx);
-        passIdx++;
-
-        // 4. 跨队列 Release（Compute → Graphics）
-        //    QFOT 两个 Barrier: RELEASE on Compute + ACQUIRE on Graphics
-        if (isComputePass) {
-            for (auto& br : pass->crossQueueRelease) {
-                if (br.srcState == br.dstState) continue;
-                rhi::IRHITexture* tex = getTexture(br.handle);
-                if (!tex) continue;
-                // RELEASE on Compute: 释放所有权回 Graphics
-                computeCmd->QueueOwnershipTransfer(tex,
-                    rhi::QueueType::Compute, rhi::QueueType::Graphics,
-                    br.srcState, br.dstState);
-                // ACQUIRE on Graphics: 重新获取所有权
-                graphicsCmd->QueueOwnershipTransfer(tex,
-                    rhi::QueueType::Compute, rhi::QueueType::Graphics,
-                    br.srcState, br.dstState);
-            }
+        if (pass->queueHint == RGPassQueue::Compute && !crossedCompute) {
+            asyncComputePasses.push_back(pass);
+        } else {
+            crossedCompute = true;  // 第一个非 Compute Pass 之后，所有 Pass 走 mainCmd
+            mainPasses.push_back(pass);
         }
     }
 
+    // 创建 Compute 命令列表，录制所有异步 Compute Pass
+    auto computeCmd = device->CreateCommandList(rhi::QueueType::Compute);
+    computeCmd->Begin();
+
+    u32 passIdx = 0;
+    for (auto* pass : asyncComputePasses) {
+        for (auto& br : pass->crossQueueAcquire) {
+            rhi::IRHITexture* tex = getTexture(br.handle);
+            if (!tex) continue;
+            computeCmd->QueueOwnershipTransfer(tex,
+                rhi::QueueType::Graphics, rhi::QueueType::Compute,
+                br.srcState, br.dstState);
+        }
+
+        for (auto& br : pass->preBarriers) {
+            if (br.srcState == br.dstState) continue;
+            rhi::IRHITexture* tex = getTexture(br.handle);
+            if (tex) computeCmd->PipelineBarrier(br.srcStage, br.dstStage, br.srcState, br.dstState, tex);
+        }
+
+        if (m_Profiler) m_Profiler->BeginPass(computeCmd.get(), passIdx, pass->name);
+        if (pass->execute) pass->execute(computeCmd.get());
+        if (m_Profiler) m_Profiler->EndPass(computeCmd.get(), passIdx);
+
+        for (auto& br : pass->crossQueueRelease) {
+            rhi::IRHITexture* tex = getTexture(br.handle);
+            if (!tex) continue;
+            computeCmd->QueueOwnershipTransfer(tex,
+                rhi::QueueType::Compute, rhi::QueueType::Graphics,
+                br.srcState, br.dstState);
+            mainCmd->QueueOwnershipTransfer(tex,
+                rhi::QueueType::Compute, rhi::QueueType::Graphics,
+                br.srcState, br.dstState);
+        }
+        passIdx++;
+    }
+
+    // 设置 Compute → Graphics 同步点
+    if (!asyncComputePasses.empty()) {
+        computeCmd->SetTimelineSignal(m_CrossQueueFence, timelineValue);
+        mainCmd->SetTimelineWait(m_CrossQueueFence, timelineValue);
+    }
+
+    computeCmd->End();
+    computeCmd->Submit();  // 异步提交到 Compute 队列
+
+    // ============================================================
+    // 所有主 Pass 录制在 mainCmd 上（与单队列路径完全一致）
+    // ============================================================
+    if (m_Profiler) m_Profiler->BeginFrame(mainCmd);
+
+    for (auto* pass : mainPasses) {
+        for (auto& br : pass->preBarriers) {
+            if (br.srcState == br.dstState) continue;
+            rhi::IRHITexture* tex = getTexture(br.handle);
+            if (tex) mainCmd->PipelineBarrier(br.srcStage, br.dstStage, br.srcState, br.dstState, tex);
+        }
+
+        if (m_Profiler) m_Profiler->BeginPass(mainCmd, passIdx, pass->name);
+        if (pass->execute) pass->execute(mainCmd);
+        if (m_Profiler) m_Profiler->EndPass(mainCmd, passIdx);
+        passIdx++;
+    }
+
     if (m_Profiler) m_Profiler->EndFrame(device);
+    // 注意：mainCmd 由外部框架管理 Begin/End/Submit，此处不操作
 }
 
 // ============================================================

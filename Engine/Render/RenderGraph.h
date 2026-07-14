@@ -124,14 +124,13 @@ public:
     // --- 执行（同步模式，单 Graphics 队列） ---
     void Execute(rhi::IRHICommandList* cmdList, rhi::IRHIDevice* device);
 
-    // --- 执行（异步模式，Graphics + Compute 双队列） ---
-    void Execute(rhi::IRHICommandList* graphicsCmd,
-                 rhi::IRHICommandList* computeCmd,
-                 rhi::IRHIDevice* device);
-
     // --- AsyncCompute 开关 ---
     bool IsAsyncComputeEnabled() const { return m_AsyncComputeEnabled; }
     void SetAsyncComputeEnabled(bool enabled) { m_AsyncComputeEnabled = enabled; }
+
+    // --- 跨队列同步（AsyncCompute 多阶段提交使用） ---
+    void SetCrossQueueFence(rhi::RHIFenceHandle fence) { m_CrossQueueFence = fence; }
+    void SetTimelineBase(u64 base) { m_TimelineBase = base; }
 
     void Reset();
     const std::vector<PassNode*>& GetPassOrder() const { return m_PassOrder; }
@@ -152,6 +151,13 @@ private:
     // 获取 Pass 之后（拓扑序）的所有 Pass
     std::vector<PassNode*> GetSubsequentPasses(PassNode* pass);
 
+    // AsyncCompute 多阶段提交
+    bool HasComputePasses() const;
+    void ExecuteWithAsyncCompute(rhi::IRHICommandList* mainCmd,
+        rhi::IRHIDevice* device,
+        const TArray<std::unique_ptr<rhi::IRHITexture>>& textures,
+        const TArray<std::unique_ptr<rhi::IRHIBuffer>>& buffers);
+
     std::vector<ResourceDesc>     m_Resources;
     std::vector<ResourceState>    m_ResourceStates;   // 编译后填充
     std::vector<AliasInfo>        m_AliasInfo;         // 别名分配
@@ -166,6 +172,10 @@ private:
     ResourceHandle m_BackBufferHandle = kInvalidHandle;
     bool           m_Compiled = false;
     bool           m_AsyncComputeEnabled = false;
+
+    // AsyncCompute 跨队列同步
+    rhi::RHIFenceHandle m_CrossQueueFence = rhi::kInvalidFence;
+    u64                 m_TimelineBase    = 0;  // 当前帧时间线基值（由 DeferredPipeline 设置）
 };
 
 #define RG_READ(h)   PassResource{h, ResourceAccess::Read}

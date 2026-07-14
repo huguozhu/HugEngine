@@ -478,56 +478,43 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
 void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
                                he::SceneGraph& sg, const CameraData& camera) {
     // ============================================================
-    // AsyncCompute: 当前默认关闭，等待实现多阶段提交架构
+    // AsyncCompute: RenderGraph 多阶段提交
     //
-    // 已知问题: QFOT Barrier 需要在两个队列之间正确地 RELEASE→ACQUIRE，
-    //   当前单次 vkQueueSubmit 无法在命令缓冲中间插入信号量同步点。
-    //   正确方案需要将 Graphics 拆分为:
-    //     Submit #1: QFOT Release + Signal(fence_A)
-    //     Submit #2: Compute: Wait(fence_A) + work + Release + Signal(fence_B)
-    //     Submit #3: Graphics: Wait(fence_B) + Acquire + 后续渲染
-    //   这要求 RenderGraph 支持分阶段提交，属于较大架构改动。
+    // 当设备支持专用 Compute 队列时，RenderGraph 内部自动将 Pass
+    // 拆分为三段提交：
+    //   Phase 1: Graphics CmdList #1（Shadow + 前期 Pass）
+    //   Phase 2: Compute CmdList（GPUCull, SSAO, DDGI, AutoExposure）
+    //   Phase 3: Graphics CmdList #2（GBuffer, Lighting, PostProcess）
     //
-    // 当前所有 Pass 在单 Graphics 队列执行，AsyncCompute 基础设施保留。
-    // 设置 m_AsyncComputeOverride = true 可强制启用（仅用于调试）。
+    // 传统单队列回退：设备不支持 AsyncCompute 时自动降级。
     // ============================================================
-#if 0  // AsyncCompute: 设为 1 启用（调试用，已知白屏问题）
-    bool useAsyncCompute = m_Device->HasAsyncComputeQueue() || m_AsyncComputeOverride;
-#else
-    bool useAsyncCompute = false;
-#endif
+    bool useAsyncCompute = m_Device->HasAsyncComputeQueue();
 
-    if (useAsyncCompute && !m_ComputeCmdList) {
-        m_ComputeCmdList = m_Device->CreateCommandList(rhi::QueueType::Compute);
+    if (useAsyncCompute && m_CrossQueueFence == rhi::kInvalidFence) {
+        // 首次使用 AsyncCompute 时，创建跨队列时间线信号量
         m_CrossQueueFence = m_Device->CreateFence();
-        HE_CORE_INFO("DeferredPipeline: AsyncCompute enabled — dedicated Compute command list created");
+        HE_CORE_INFO("DeferredPipeline: AsyncCompute — CrossQueue fence created");
     }
 
     RenderGraph rg;
     rg.SetProfiler(&m_Profiler);
     rg.SetAsyncComputeEnabled(useAsyncCompute);
+    if (useAsyncCompute) {
+        // 将时间线信号量传入 RenderGraph，供多阶段提交使用
+        rg.SetCrossQueueFence(m_CrossQueueFence);
+        rg.SetTimelineBase(m_FrameCounter);
+        m_FrameCounter += 2;  // 每帧消耗 2 个时间线值
+    }
     BuildFrameGraph(rg, world, sg, camera);
     rg.Compile();
 
-    if (useAsyncCompute && m_ComputeCmdList) {
-        m_ComputeCmdList->Begin();
-        rg.Execute(cmd, m_ComputeCmdList.get(), m_Device);
-        m_ComputeCmdList->End();
-
-        u64 signalValue = ++m_FrameCounter;
-        cmd->SetTimelineSignal(m_CrossQueueFence, signalValue);
-        m_ComputeCmdList->SetTimelineWait(m_CrossQueueFence, signalValue);
-        m_ComputePendingSubmit = true;
-    } else {
-        // 单 Graphics 队列（正常路径）
-        rg.Execute(cmd, m_Device);
-    }
+    // 统一入口：RenderGraph 根据 useAsyncCompute 自动分支
+    rg.Execute(cmd, m_Device);
 }
 
 void DeferredPipeline::FlushComputeWork() {
-    if (!m_ComputePendingSubmit || !m_ComputeCmdList) return;
-    m_Device->Submit(m_ComputeCmdList.get());
-    m_ComputePendingSubmit = false;
+    // 多阶段提交已在 RenderGraph::ExecuteWithAsyncCompute 内部自动完成
+    // 保留此方法以兼容外部调用（Samples/04.Deferred.cpp line 1022）
 }
 
 void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
@@ -858,7 +845,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             m_AutoExposure.Render(c);
             // 恢复 graphics pipeline state（compute dispatch 后 m_CurrentRenderPass 为空）
             c->SetPipeline(m_LightingPSO.get());
-        });
+        },
+        RGPassQueue::Compute);  // AsyncCompute: 自动曝光在 Compute 队列执行
 
     // ── 后处理链路：Bloom → DOF → MotionBlur（责任链，按序串联）──
     bool bloomActive = m_Bloom.IsEnabled() && m_Bloom.GetOutput() != nullptr;
