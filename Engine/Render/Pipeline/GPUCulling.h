@@ -78,6 +78,7 @@ public:
 
 private:
     bool m_Initialized = false;
+    rhi::IRHIDevice* m_Device = nullptr;  // 缓存设备指针（描述符更新用）
 
     // 单阶段/Phase 1 PSO
     rhi::ShaderBytecode m_CS;

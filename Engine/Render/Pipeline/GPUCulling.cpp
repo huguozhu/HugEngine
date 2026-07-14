@@ -191,6 +191,7 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
         m_HiZSampler = device->CreateSampler(sd);
     }
 
+    m_Device = device;
     m_Initialized = true;
     HE_CORE_INFO("GPUCulling initialized (max {} objects, two-phase={})", kMaxObjects, useTwoPhase ? "on" : "off");
     return true;
@@ -378,21 +379,66 @@ void GPUCulling::DispatchPhase1(rhi::IRHICommandList* cmd, const float4x4& viewP
 // ============================================================
 
 void GPUCulling::BuildHiZPyramid(rhi::IRHICommandList* cmd, u32 screenW, u32 screenH) {
-    (void)cmd;
-    (void)screenW;
-    (void)screenH;
-    // TODO: 循环调度 HiZDownsample 构建完整金字塔
-    //   for (u32 mip = 1; mip < actualMipCount; ++mip) {
-    //     device->UpdateDescriptorSetWithImageView(m_HiZSet, 0, CombinedImageSampler, m_MipViews[mip-1].sampledView);
-    //     device->UpdateDescriptorSetWithImageView(m_HiZSet, 1, StorageImage, m_MipViews[mip].storageView);
-    //     cmd->SetPipeline(m_HiZ_PSO.get());
-    //     cmd->BindDescriptorSet(0, m_HiZSet);
-    //     struct { uint2 srcSize; uint2 dstSize; uint srcMip; uint _pad; } pc = ...;
-    //     cmd->SetPushConstants(0, sizeof(pc), &pc);
-    //     cmd->Dispatch(groupX, groupY, 1);
-    //   }
-    //   m_HiZMipCount = actualMipCount;
-    //   将 Phase 2 的 depth 绑定切换到 Hi-Z 纹理
+    if (!m_Initialized || !m_DepthInput || !m_HiZTexture) return;
+    if (screenW < 2 || screenH < 2) { m_HiZMipCount = 1; return; }
+
+    // 计算需要的 mip 级数（最小 1×1）
+    u32 maxDim = (screenW > screenH) ? screenW : screenH;
+    u32 mipCount = 1;
+    while ((maxDim >> mipCount) >= 2) mipCount++;
+    if (mipCount > kHiZMips) mipCount = kHiZMips;
+    m_HiZMipCount = mipCount;
+
+    cmd->SetPipeline(m_HiZ_PSO.get());
+
+    u32 srcW = screenW, srcH = screenH;
+
+    for (u32 mip = 0; mip < mipCount - 1; ++mip) {
+        u32 dstW = srcW >> 1;
+        u32 dstH = srcH >> 1;
+
+        // ── 更新描述符 ──
+        if (mip == 0) {
+            // 第一级：从原始深度纹理下采样到 Hi-Z mip 1
+            m_Device->UpdateDescriptorSet(m_HiZSet, 0,
+                rhi::DescriptorType::CombinedImageSampler,
+                m_DepthInput, m_HiZSampler.get());
+        } else {
+            // 后续级：从 Hi-Z mip N 下采样到 mip N+1
+            m_Device->UpdateDescriptorSet(m_HiZSet, 0,
+                rhi::DescriptorType::CombinedImageSampler,
+                m_HiZTexture.get(), m_HiZSampler.get());
+        }
+        // 目标：Hi-Z mip N+1 的存储图像视图
+        m_Device->UpdateDescriptorSetWithImageView(m_HiZSet, 1,
+            rhi::DescriptorType::StorageImage,
+            m_MipViews[mip + 1].storageView);
+
+        cmd->BindDescriptorSet(0, m_HiZSet);
+
+        // ── Push Constants ──
+        struct { u32 srcW; u32 srcH; u32 dstW; u32 dstH; u32 srcMip; u32 _pad; } pc;
+        pc.srcW   = srcW;
+        pc.srcH   = srcH;
+        pc.dstW   = dstW;
+        pc.dstH   = dstH;
+        pc.srcMip = mip;  // 源 mip 级别（深度纹理时 mip=0）
+        pc._pad   = 0;
+        cmd->SetPushConstants(0, sizeof(pc), &pc);
+
+        // ── Dispatch ──
+        u32 groupsX = (dstW + 15) / 16;
+        u32 groupsY = (dstH + 15) / 16;
+        cmd->Dispatch(groupsX, groupsY, 1);
+
+        srcW = dstW;
+        srcH = dstH;
+    }
+
+    // 金字塔构建完成后，将 Phase 2 的深度绑定切换为 Hi-Z 纹理
+    m_Device->UpdateDescriptorSet(m_Phase2Set, 3,
+        rhi::DescriptorType::CombinedImageSampler,
+        m_HiZTexture.get(), m_HiZSampler.get());
 }
 
 // ============================================================
