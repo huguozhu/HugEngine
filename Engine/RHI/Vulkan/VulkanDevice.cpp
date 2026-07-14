@@ -370,8 +370,13 @@ void VulkanDevice::CreateLogicalDevice() {
         deviceExtensions.push_back(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
         deviceExtensions.push_back(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
         deviceExtensions.push_back(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
-        deviceExtensions.push_back(VK_KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME);
-        HE_CORE_INFO("RT 扩展已启用: VK_KHR_acceleration_structure + VK_KHR_ray_tracing_pipeline + position_fetch");
+        // position_fetch 是可选扩展（部分 GPU 不支持），仅在检测到可用时启用
+        if (m_SupportsRTPositionFetch) {
+            deviceExtensions.push_back(VK_KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME);
+            HE_CORE_INFO("RT 扩展已启用: VK_KHR_acceleration_structure + VK_KHR_ray_tracing_pipeline + position_fetch");
+        } else {
+            HE_CORE_INFO("RT 扩展已启用: VK_KHR_acceleration_structure + VK_KHR_ray_tracing_pipeline (position_fetch 不可用)");
+        }
     }
 
     // 条件启用 Mesh Shader 扩展
@@ -417,7 +422,9 @@ void VulkanDevice::CreateLogicalDevice() {
     if (m_SupportsRT) {
         *ppNext = &asFeature; ppNext = &asFeature.pNext;
         *ppNext = &rtPipelineFeature; ppNext = &rtPipelineFeature.pNext;
-        *ppNext = &posFetchFeature; ppNext = &posFetchFeature.pNext;
+        if (m_SupportsRTPositionFetch) {
+            *ppNext = &posFetchFeature; ppNext = &posFetchFeature.pNext;
+        }
     }
     if (m_SupportsMesh) {
         *ppNext = &meshFeature; ppNext = &meshFeature.pNext;
@@ -757,6 +764,7 @@ void VulkanDevice::QueryRTCapabilities() {
     bool hasAS  = false;  // VK_KHR_acceleration_structure
     bool hasRTP = false;  // VK_KHR_ray_tracing_pipeline
     bool hasDHO = false;  // VK_KHR_deferred_host_operations
+    bool hasPosFetch = false;  // VK_KHR_ray_tracing_position_fetch（可选）
 
     for (auto& ext : extensions) {
         if (strcmp(ext.extensionName, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) == 0)
@@ -765,7 +773,10 @@ void VulkanDevice::QueryRTCapabilities() {
             hasRTP = true;
         if (strcmp(ext.extensionName, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME) == 0)
             hasDHO = true;
+        if (strcmp(ext.extensionName, VK_KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME) == 0)
+            hasPosFetch = true;
     }
+    m_SupportsRTPositionFetch = hasPosFetch;
 
     m_SupportsRT = hasAS && hasRTP;
     if (!m_SupportsRT) {

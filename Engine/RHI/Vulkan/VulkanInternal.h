@@ -232,8 +232,9 @@ private:
     bool             m_HasAsyncCompute = false;
 
     // RT / Mesh Shader 支持状态 + 硬件属性（在 QueryRTCapabilities/QueryMeshCapabilities 中填充）
-    bool             m_SupportsRT    = false;
-    bool             m_SupportsMesh  = false;
+    bool             m_SupportsRT              = false;
+    bool             m_SupportsRTPositionFetch = false;  // VK_KHR_ray_tracing_position_fetch（可选）
+    bool             m_SupportsMesh            = false;
     // RT Pipeline 属性
     u32              m_MaxRayRecursionDepth     = 1;
     u32              m_ShaderGroupHandleSize    = 32;

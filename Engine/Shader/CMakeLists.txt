@@ -76,6 +76,7 @@ if(SLANGC)
         "${SHADER_DIR}/SMAA_BlendWeight.frag.slang"
         "${SHADER_DIR}/SMAA_Neighborhood.frag.slang"
         "${SHADER_DIR}/FullscreenCopy.frag.slang"
+        "${SHADER_DIR}/TriangleMesh.frag.slang"
     )
     set(COMP_SLANG
         "${SHADER_DIR}/GPUCull.comp.slang"
@@ -101,6 +102,7 @@ if(SLANGC)
     # Mesh Shader 着色器（.mesh / .task）
     # 命名约定: EffectName.mesh.slang (Mesh), EffectName.task.slang (Amplification/Task)
     set(MESH_SLANG
+        "${SHADER_DIR}/Triangle.mesh.slang"
         "${SHADER_DIR}/GBuffer.mesh.slang"
     )
     file(GLOB SLANG_INCLUDES "${SHADER_DIR}/*.slang")  # 公共头文件（用 glob 自动收集即可）

@@ -1,9 +1,10 @@
 // ============================================================
-// 01.Triangle — HugEngine RHI 渲染三角形（光栅化 + Ray Tracing）
+// 01.Triangle — HugEngine RHI 渲染三角形（光栅化 + Ray Tracing + Mesh Shader）
 //
-// 光栅化：传统 VS→PS 管线，红色三角形
-// RT：    RayGen 着色器过程化红色三角形 → StorageImage
-// ImGui： 切换渲染模式
+// 光栅化：   传统 VS→PS 管线，纯红色三角形
+// RT：       RayGen 着色器过程化红色三角形 → StorageImage
+// Mesh Shader：无 VB/IB，MS→PS 硬编码三色渐变三角形
+// ImGui：    切换渲染模式
 // ============================================================
 
 #include "Core/Core.h"
@@ -14,6 +15,8 @@
 #include "EmbeddedShaders.h"
 #include "RT_Triangle.rgen.spv.h"
 #include "RT_Background.rmiss.spv.h"
+#include "Triangle.mesh.spv.h"
+#include "TriangleMesh.frag.spv.h"
 #include "imgui.h"
 
 #include <cstring>
@@ -41,8 +44,9 @@ int main() {
     device->Initialize(rhiDesc);
     he::rhi::SetDevice(device.get());
 
-    bool rtSupported = device->GetCaps().supportsRayTracing;
-    HE_CORE_INFO("RT 支持: {}", rtSupported ? "是" : "否");
+    bool rtSupported   = device->GetCaps().supportsRayTracing;
+    bool meshSupported = device->GetCaps().supportsMeshShaders;
+    HE_CORE_INFO("RT 支持: {}, Mesh Shader 支持: {}", rtSupported ? "是" : "否", meshSupported ? "是" : "否");
 
     // ============================================================
     // 2. SwapChain
@@ -129,13 +133,33 @@ int main() {
     }
 
     // ============================================================
-    // 5. ImGui 集成
+    // 5. Mesh Shader 路径（无 VB/IB，硬编码三色三角形）
+    // ============================================================
+    std::unique_ptr<he::rhi::IRHIPipelineState> meshPSO;
+
+    if (meshSupported) {
+        he::rhi::ShaderBytecode meshShader{he::rhi::ShaderStage::Mesh, k_Triangle_mesh_spv, {}, "main"};
+        he::rhi::ShaderBytecode meshFrag{he::rhi::ShaderStage::Pixel,  k_TriangleMesh_frag_spv, {}, "main"};
+
+        meshPSO = device->CreatePipelineState({
+            .pixelShader = &meshFrag,
+            .meshShader  = &meshShader,
+            .depthTest   = false,
+            .depthWrite  = false,
+            .debugName   = "TriangleMesh",
+        });
+
+        HE_CORE_INFO("Mesh Shader 管线就绪: DrawMeshTasks(1,1,1)");
+    }
+
+    // ============================================================
+    // 6. ImGui 集成
     // ============================================================
     he::editor::ImGuiIntegration imgui;
     imgui.Initialize(engine.GetWindow()->GetNativeHandle(), device.get(), swapchain.get());
 
     // ============================================================
-    // 6. 命令列表
+    // 7. 命令列表
     // ============================================================
     auto cmdList = device->CreateCommandList();
     cmdList->SetSwapChain(swapchain.get());
@@ -146,9 +170,9 @@ int main() {
     });
 
     // ============================================================
-    // 7. 主渲染循环
+    // 8. 主渲染循环
     // ============================================================
-    int renderMode = rtSupported ? 1 : 0;  // 0=光栅化, 1=RT
+    int renderMode = rtSupported ? 1 : 0;  // 0=光栅化, 1=RT, 2=Mesh Shader
     HE_CORE_INFO("01.Triangle started — ImGui 切换渲染模式");
     u64 frameIndex = 0;
 
@@ -190,6 +214,13 @@ int main() {
             // RenderPass (LoadOp::Load 保留 BackBuffer 上的 RT 输出)
             cmdList->BeginRenderPass(1, he::rhi::Format::RGBA8_UNORM, he::rhi::Format::Unknown,
                                      nullptr, rhi::IRHICommandList::LoadOp::Load);
+        } else if (renderMode == 2 && meshSupported && meshPSO) {
+            // ── Mesh Shader 模式：三色渐变三角形，无 VB/IB ──
+            cmdList->SetPipeline(meshPSO.get());
+            cmdList->BeginRenderPass(1, he::rhi::Format::RGBA8_UNORM);
+            cmdList->SetViewport({0, 0, static_cast<float>(w), static_cast<float>(h), 0.0f, 1.0f});
+            cmdList->SetScissor({0, 0, w, h});
+            cmdList->DrawMeshTasks(1, 1, 1);  // 1 个工作组，3 个线程输出 1 个三角形
         } else {
             // 光栅化模式：红色三角形
             cmdList->SetPipeline(pipeline.get());
@@ -204,7 +235,7 @@ int main() {
         imgui.BeginFrame();
         {
             ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowSize(ImVec2(260, rtSupported ? 120 : 70), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(ImVec2(260, 160), ImGuiCond_FirstUseEver);
             ImGui::Begin("渲染模式");
 
             ImGui::RadioButton("光栅化 (VS→PS)", &renderMode, 0);
@@ -215,9 +246,17 @@ int main() {
                 ImGui::RadioButton("Ray Tracing (不支持)", &renderMode, 1);
                 ImGui::EndDisabled();
             }
+            if (meshSupported) {
+                ImGui::RadioButton("Mesh Shader (MS→PS)", &renderMode, 2);
+            } else {
+                ImGui::BeginDisabled();
+                ImGui::RadioButton("Mesh Shader (不支持)", &renderMode, 2);
+                ImGui::EndDisabled();
+            }
 
             ImGui::Separator();
-            ImGui::Text("当前: %s", renderMode == 0 ? "光栅化" : "Ray Tracing");
+            const char* modeNames[] = {"光栅化", "Ray Tracing", "Mesh Shader"};
+            ImGui::Text("当前: %s", modeNames[renderMode]);
             ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
             ImGui::End();
         }
@@ -232,7 +271,7 @@ int main() {
     }
 
     // ============================================================
-    // 8. 清理
+    // 9. 清理
     // ============================================================
     device->WaitIdle();
     imgui.Shutdown();
