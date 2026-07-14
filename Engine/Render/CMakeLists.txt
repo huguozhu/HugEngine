@@ -22,6 +22,8 @@ target_sources(HugEngineRender PRIVATE
     Pipeline/GPUCulling.cpp
     Pipeline/GBufferRenderer_CPU.cpp
     Pipeline/GBufferRenderer_GPU.cpp
+    Pipeline/GPUWorkGraph.h
+    Pipeline/GPUWorkGraph.cpp
     Pipeline/Material.h
     # RenderGraph
     RenderGraph.h

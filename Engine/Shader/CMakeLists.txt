@@ -78,6 +78,7 @@ if(SLANGC)
         "${SHADER_DIR}/FullscreenCopy.frag.slang"
     )
     set(COMP_SLANG
+        "${SHADER_DIR}/WorkGraph_Entry.comp.slang"
         "${SHADER_DIR}/GPUCull.comp.slang"
         "${SHADER_DIR}/GPUCull_Phase1.comp.slang"
         "${SHADER_DIR}/GPUCull_TwoPhase.comp.slang"
