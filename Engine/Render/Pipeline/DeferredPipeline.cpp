@@ -9,6 +9,10 @@
 #include "AntiAliasing/AA_FXAA.h"
 #include "Pipeline/GBufferRenderer_CPU.h"
 #include "Pipeline/GBufferRenderer_GPU.h"
+
+// DGC 支持（仅在 Vulkan 后端启用）
+#include "Vulkan/VulkanDGC.h"
+#include "Vulkan/VulkanInternal.h"   // VulkanDeviceAccess / VulkanPipelineState 等
 #include "Asset/BindlessTextureManager.h"
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
@@ -22,6 +26,11 @@
 #include "GBuffer.frag.spv.h"
 #include "DeferredLighting.vert.spv.h"
 #include "DeferredLighting.frag.spv.h"
+
+// CVar: DGC 运行时开关（0=关闭，1=开启，默认关闭以保留传统 ExecuteIndirect 回退）
+// 在控制台输入 "r.DGC.Enable 1" 可动态启用
+static int32_t cvDGC_Enable = 0;
+static const char* kCVar_DGC_Enable_Name = "r.DGC.Enable";
 
 namespace he::render {
 
@@ -197,6 +206,34 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     m_GBufferPSO = device->CreatePipelineState(gbDesc);
     HE_ASSERT(m_GBufferPSO, "DeferredPipeline: GBuffer PSO failed");
 
+    // ── DGC 初始化（仅在硬件支持时）──
+    if (device->GetCaps().supportsDGC) {
+        // 获取 Vulkan 底层句柄
+        auto* vkDev = static_cast<rhi::VulkanDevice*>(device);
+        VkDevice vkDevice       = vkDev->GetVkDevice();
+        VkPhysicalDevice vkPhysical = vkDev->GetVkPhysical();
+        auto* vkPipelineState   = static_cast<rhi::VulkanPipelineState*>(m_GBufferPSO.get());
+        VkPipeline vkPipeline   = vkPipelineState->GetPipeline();
+        const auto& dgcFuncs    = vkDev->GetDGCFuncs();
+
+        m_VulkanDGC = new rhi::VulkanDGC();
+        bool dgcOK = m_VulkanDGC->Initialize(
+            vkDevice, vkPhysical, vkPipeline,
+            GPUCulling::kMaxObjects,  // maxSequences = 最大场景物体数
+            GPUCulling::kMaxObjects,  // maxDraws = 最大绘制调用数
+            dgcFuncs
+        );
+        if (dgcOK) {
+            HE_CORE_INFO("DeferredPipeline: DGC 初始化成功，可通过 r.DGC.Enable 1 启用");
+        } else {
+            HE_CORE_WARN("DeferredPipeline: DGC 初始化失败，回退到 ExecuteIndirect 路径");
+            delete m_VulkanDGC;
+            m_VulkanDGC = nullptr;
+        }
+    } else {
+        HE_CORE_INFO("DeferredPipeline: 硬件不支持 DGC，使用传统 ExecuteIndirect 路径");
+    }
+
     // GBuffer set=0 共享描述符集（含 binding 2: Object SSBO + bindless 5/6）
     m_GBufferSet = device->AllocateDescriptorSet(m_GBufferLayout);
     // 创建 bindless 占位纹理和采样器（bindless 数组回退用）
@@ -351,6 +388,15 @@ void DeferredPipeline::Shutdown() {
     m_GPUScene.Shutdown();
     if (m_GBufferRenderer) m_GBufferRenderer->Shutdown();
     m_GBufferRenderer.reset();
+
+    // DGC 清理
+    if (m_VulkanDGC) {
+        auto* vkDev = static_cast<rhi::VulkanDevice*>(m_Device);
+        m_VulkanDGC->Shutdown(vkDev->GetVkDevice());
+        delete m_VulkanDGC;
+        m_VulkanDGC = nullptr;
+    }
+
     m_Profiler.Shutdown();
     m_AutoExposure.Shutdown();
     // AsyncCompute 清理
@@ -667,6 +713,29 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             // 更新运行时 context
             m_GBufferCtx.objectBuffer = m_ObjectBuffers[m_CurrentFrameSlot].get();
             m_GBufferCtx.prevViewProj = m_PrevViewProj;
+
+            // ── DGC 模式上下文注入 ──
+            // 检查 DGC 硬件支持 + CVar 开关 + 可视化回调非空
+            m_DGCEnabled = (cvDGC_Enable != 0)
+                && m_VulkanDGC && m_VulkanDGC->IsInitialized()
+                && m_GPUCulling.GetIndirectBuffer()
+                && m_GPUCulling.enabled;
+            if (m_DGCEnabled) {
+                auto& dgcCtx = m_GBufferCtx.dgc;
+                dgcCtx.enabled               = true;
+                dgcCtx.indirectCommandsLayout = reinterpret_cast<void*>(
+                    m_VulkanDGC->GetLayout());
+                dgcCtx.indirectExecutionSet   = reinterpret_cast<void*>(
+                    m_VulkanDGC->GetExecutionSet());
+                dgcCtx.preprocessBufferAddr   = m_VulkanDGC->GetPreprocessAddress();
+                dgcCtx.preprocessBufferSize   = m_VulkanDGC->GetPreprocessSize();
+                dgcCtx.maxSequenceCount       = m_VulkanDGC->GetMaxSequences();
+                dgcCtx.sequenceBuffer         = m_GPUCulling.GetIndirectBuffer();
+                dgcCtx.countBuffer            = m_GPUCulling.GetDrawCountBuffer();
+            } else {
+                m_GBufferCtx.dgc = {};  // 重置 DGC 上下文
+            }
+
             m_GBufferRenderer->Render(c, m_GBufferCtx, world, sg, camera);
         });
 

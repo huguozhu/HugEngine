@@ -87,6 +87,7 @@ public:
 
     u32 GetLastVisibleCount() const { return m_LastVisibleCount; }
     rhi::IRHIBuffer* GetIndirectBuffer() const { return m_IndirectCmdBuf.get(); }
+    rhi::IRHIBuffer* GetDrawCountBuffer() const { return m_DrawCountBuf.get(); }
     rhi::DescriptorSetHandle GetPhase2Set() const { return m_Phase2Set; }
     rhi::IRHISampler* GetHiZSampler() const { return m_HiZSampler.get(); }
 

@@ -166,6 +166,9 @@ DeviceCaps VulkanDevice::GetCaps() const {
         ? (m_ComputeFamily != m_GraphicsFamily ? 2u : 1u)
         : 0u;
 
+    // Device Generated Commands 能力
+    caps.supportsDGC = m_SupportsDGC;
+
     return caps;
 }
 
@@ -243,11 +246,10 @@ void VulkanDevice::Initialize(const DeviceInitDesc& desc) {
     // 4. Select physical device
     SelectPhysicalDevice();
 
-    // 5. 查询 RT / Mesh Shader 硬件能力（在创建逻辑设备之前）
+    // 5. 查询 RT / Mesh Shader / DGC 硬件能力（在创建逻辑设备之前）
     QueryRTCapabilities();
     QueryMeshCapabilities();
-
-    // 6. 查询队列族（检测 AsyncCompute 能力，必须在 CreateLogicalDevice 之前）
+    QueryDGCCapabilities();        // 检测 VK_EXT_device_generated_commands 支持
     FindQueueFamilies();
 
     // 7. Create logical device
@@ -385,6 +387,16 @@ void VulkanDevice::CreateLogicalDevice() {
         HE_CORE_INFO("Mesh Shader 扩展已启用: VK_EXT_mesh_shader");
     }
 
+    // 条件启用 Device Generated Commands 扩展
+    VkPhysicalDeviceDeviceGeneratedCommandsFeaturesEXT dgcFeature{};
+    dgcFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_GENERATED_COMMANDS_FEATURES_EXT;
+    dgcFeature.deviceGeneratedCommands = VK_TRUE;
+
+    if (m_SupportsDGC) {
+        deviceExtensions.push_back(VK_EXT_DEVICE_GENERATED_COMMANDS_EXTENSION_NAME);
+        HE_CORE_INFO("DGC 扩展已启用: VK_EXT_device_generated_commands");
+    }
+
     // Bindless: descriptor indexing 特性
     VkPhysicalDeviceDescriptorIndexingFeatures descIndexing{};
     descIndexing.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
@@ -410,7 +422,7 @@ void VulkanDevice::CreateLogicalDevice() {
     timelineFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
     timelineFeature.timelineSemaphore = VK_TRUE;
 
-    // pNext 链构建: descIndexing → addrFeature → timelineFeature → [RT] → [Mesh]
+    // pNext 链构建: descIndexing → addrFeature → timelineFeature → [RT] → [Mesh] → [DGC]
     void** ppNext = &descIndexing.pNext;
     *ppNext = &addrFeature; ppNext = &addrFeature.pNext;
     *ppNext = &timelineFeature; ppNext = &timelineFeature.pNext;
@@ -421,6 +433,9 @@ void VulkanDevice::CreateLogicalDevice() {
     }
     if (m_SupportsMesh) {
         *ppNext = &meshFeature; ppNext = &meshFeature.pNext;
+    }
+    if (m_SupportsDGC) {
+        *ppNext = &dgcFeature; ppNext = &dgcFeature.pNext;
     }
     *ppNext = nullptr;
 
@@ -438,8 +453,9 @@ void VulkanDevice::CreateLogicalDevice() {
     VkResult result = vkCreateDevice(m_Physical, &deviceInfo, nullptr, &m_Device);
     HE_ASSERT(result == VK_SUCCESS, "Failed to create logical device");
 
-    // 加载 RT 扩展函数指针（必须在 vkCreateDevice 之后）
+    // 加载 RT + DGC 扩展函数指针（必须在 vkCreateDevice 之后）
     LoadRTFunctions();
+    LoadDGCFunctions();
 
     // 获取队列句柄
     vkGetDeviceQueue(m_Device, m_GraphicsFamily, 0, &m_GraphicsQueue);
@@ -857,6 +873,82 @@ void VulkanDevice::QueryMeshCapabilities() {
     HE_CORE_INFO("Mesh 属性: taskInvocations={}, taskPayload={}, workGroupCount=({},{},{})",
                  m_MaxTaskWorkGroupInvocations, m_MaxTaskPayloadSize,
                  m_MaxMeshWorkGroupCountX, m_MaxMeshWorkGroupCountY, m_MaxMeshWorkGroupCountZ);
+}
+
+// ============================================================
+// DGC 能力检测 + 函数加载
+// ============================================================
+
+void VulkanDevice::QueryDGCCapabilities() {
+    m_SupportsDGC = VulkanDGC::IsSupported(m_Physical);
+    if (!m_SupportsDGC) {
+        HE_CORE_INFO("Device Generated Commands: 不支持（缺少 VK_EXT_device_generated_commands）");
+        return;
+    }
+    HE_CORE_INFO("Device Generated Commands: 硬件支持已检测");
+
+    // 查询 DGC 属性（通过 VkPhysicalDeviceProperties2 pNext 链）
+    VkPhysicalDeviceDeviceGeneratedCommandsPropertiesEXT dgcProps{};
+    dgcProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_GENERATED_COMMANDS_PROPERTIES_EXT;
+
+    VkPhysicalDeviceProperties2 props2{};
+    props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    props2.pNext = &dgcProps;
+
+    vkGetPhysicalDeviceProperties2(m_Physical, &props2);
+
+    HE_CORE_INFO("DGC 属性: maxIndirectPipelineCount={}, maxIndirectSequenceCount={}, "
+                 "maxIndirectCommandsTokenCount={}, maxIndirectCommandsTokenOffset={}, "
+                 "maxIndirectCommandsIndirectStride={}",
+                 dgcProps.maxIndirectPipelineCount,
+                 dgcProps.maxIndirectSequenceCount,
+                 dgcProps.maxIndirectCommandsTokenCount,
+                 dgcProps.maxIndirectCommandsTokenOffset,
+                 dgcProps.maxIndirectCommandsIndirectStride);
+}
+
+void VulkanDevice::LoadDGCFunctions() {
+    if (!m_SupportsDGC) return;
+
+    m_DGCFuncs.vkCreateIndirectCommandsLayoutEXT =
+        reinterpret_cast<PFN_vkCreateIndirectCommandsLayoutEXT>(
+            vkGetDeviceProcAddr(m_Device, "vkCreateIndirectCommandsLayoutEXT"));
+    m_DGCFuncs.vkDestroyIndirectCommandsLayoutEXT =
+        reinterpret_cast<PFN_vkDestroyIndirectCommandsLayoutEXT>(
+            vkGetDeviceProcAddr(m_Device, "vkDestroyIndirectCommandsLayoutEXT"));
+    m_DGCFuncs.vkCreateIndirectExecutionSetEXT =
+        reinterpret_cast<PFN_vkCreateIndirectExecutionSetEXT>(
+            vkGetDeviceProcAddr(m_Device, "vkCreateIndirectExecutionSetEXT"));
+    m_DGCFuncs.vkDestroyIndirectExecutionSetEXT =
+        reinterpret_cast<PFN_vkDestroyIndirectExecutionSetEXT>(
+            vkGetDeviceProcAddr(m_Device, "vkDestroyIndirectExecutionSetEXT"));
+    m_DGCFuncs.vkGetGeneratedCommandsMemoryRequirementsEXT =
+        reinterpret_cast<PFN_vkGetGeneratedCommandsMemoryRequirementsEXT>(
+            vkGetDeviceProcAddr(m_Device, "vkGetGeneratedCommandsMemoryRequirementsEXT"));
+    m_DGCFuncs.vkCmdExecuteGeneratedCommandsEXT =
+        reinterpret_cast<PFN_vkCmdExecuteGeneratedCommandsEXT>(
+            vkGetDeviceProcAddr(m_Device, "vkCmdExecuteGeneratedCommandsEXT"));
+    m_DGCFuncs.vkCmdPreprocessGeneratedCommandsEXT =
+        reinterpret_cast<PFN_vkCmdPreprocessGeneratedCommandsEXT>(
+            vkGetDeviceProcAddr(m_Device, "vkCmdPreprocessGeneratedCommandsEXT"));
+
+    // 验证所有函数加载成功
+    HE_ASSERT(m_DGCFuncs.vkCreateIndirectCommandsLayoutEXT,
+              "加载 vkCreateIndirectCommandsLayoutEXT 失败");
+    HE_ASSERT(m_DGCFuncs.vkDestroyIndirectCommandsLayoutEXT,
+              "加载 vkDestroyIndirectCommandsLayoutEXT 失败");
+    HE_ASSERT(m_DGCFuncs.vkCreateIndirectExecutionSetEXT,
+              "加载 vkCreateIndirectExecutionSetEXT 失败");
+    HE_ASSERT(m_DGCFuncs.vkDestroyIndirectExecutionSetEXT,
+              "加载 vkDestroyIndirectExecutionSetEXT 失败");
+    HE_ASSERT(m_DGCFuncs.vkGetGeneratedCommandsMemoryRequirementsEXT,
+              "加载 vkGetGeneratedCommandsMemoryRequirementsEXT 失败");
+    HE_ASSERT(m_DGCFuncs.vkCmdExecuteGeneratedCommandsEXT,
+              "加载 vkCmdExecuteGeneratedCommandsEXT 失败");
+    HE_ASSERT(m_DGCFuncs.vkCmdPreprocessGeneratedCommandsEXT,
+              "加载 vkCmdPreprocessGeneratedCommandsEXT 失败");
+
+    HE_CORE_INFO("DGC 扩展函数全部加载成功");
 }
 
 // ============================================================

@@ -75,8 +75,26 @@ void GBufferRenderer_GPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
         pc.useInstanceID      = 1;
 
         cmd->SetPushConstants(0, sizeof(pc), &pc);
-        cmd->DrawIndexedIndirect(ctx.gpuCulling->GetIndirectBuffer(), 0,
-                                  visCount, sizeof(IndirectDrawCommand));
+
+        // ── DGC 路径 vs 传统 ExecuteIndirect 路径 ──
+        if (ctx.dgc.enabled && ctx.dgc.sequenceBuffer && ctx.dgc.countBuffer) {
+            // DGC 路径：由 GPU 生成 vkCmdDrawIndexed 命令
+            rhi::IRHICommandList::DGCExecuteDesc dgcDesc{};
+            dgcDesc.indirectCommandsLayout = ctx.dgc.indirectCommandsLayout;
+            dgcDesc.indirectExecutionSet   = ctx.dgc.indirectExecutionSet;
+            dgcDesc.sequencesBufferAddr    = ctx.dgc.sequenceBuffer->GetDeviceAddress();
+            dgcDesc.maxSequenceCount       = ctx.dgc.maxSequenceCount;
+            dgcDesc.sequenceCountAddr      = ctx.dgc.countBuffer->GetDeviceAddress();
+            dgcDesc.preprocessBufferAddr   = ctx.dgc.preprocessBufferAddr;
+            dgcDesc.preprocessBufferSize   = ctx.dgc.preprocessBufferSize;
+            dgcDesc.maxDrawCount           = visCount;
+
+            cmd->ExecuteGeneratedCommands(dgcDesc);
+        } else {
+            // 传统 ExecuteIndirect 路径：CPU 调用 vkCmdDrawIndexedIndirect
+            cmd->DrawIndexedIndirect(ctx.gpuCulling->GetIndirectBuffer(), 0,
+                                      visCount, sizeof(IndirectDrawCommand));
+        }
     } else {
         // 回退到 CPU 逐对象绘制（首帧或 GPU 剔除异常时）
         if (dbgCount <= 3) HE_CORE_INFO("GBuffer_GPU: fallback CPU path, {} drawItems", drawItems.size());
