@@ -2,7 +2,7 @@
 // VulkanSwapChain.cpp — Vulkan 交换链实现
 // 负责 SwapChain 创建/销毁、窗口缩放、图像获取与呈现
 // ============================================================
-#include "VulkanInternal.h"
+#include "VulkanSwapChain.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include <algorithm>

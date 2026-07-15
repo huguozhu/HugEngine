@@ -10,7 +10,7 @@
 #include <vulkan/vulkan.h>
 
 #include "VulkanDGC.h"
-#include "VulkanInternal.h"
+#include "VulkanDevice.h"
 #include "Core/Assert.h"
 
 #include <cstring>

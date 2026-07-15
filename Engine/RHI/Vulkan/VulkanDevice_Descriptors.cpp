@@ -12,7 +12,7 @@
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
 
-#include "VulkanInternal.h"
+#include "VulkanDevice.h"
 #include "Core/Assert.h"
 
 #include <algorithm>

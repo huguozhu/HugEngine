@@ -7,7 +7,7 @@
 #include "RHI/CommandList.h"
 #include "Core/Log.h"
 
-#include "VulkanInternal.h"
+#include "VulkanDevice.h"
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_vulkan.h"

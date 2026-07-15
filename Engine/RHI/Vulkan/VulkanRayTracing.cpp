@@ -12,7 +12,8 @@
 #include <cstring>
 
 // Vulkan 类型的完整定义
-#include "VulkanInternal.h"
+#include "VulkanPipeline.h"
+#include "VulkanDevice.h"
 
 namespace he::rhi {
 

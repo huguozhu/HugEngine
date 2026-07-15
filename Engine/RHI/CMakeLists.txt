@@ -14,7 +14,11 @@ set(RHI_SOURCES
     RHI/MeshShader.h
     RHI/RayTracing.h
     RHI/RHIBase.cpp
-    Vulkan/VulkanInternal.h
+    Vulkan/VulkanDevice.h
+    Vulkan/VulkanSwapChain.h
+    Vulkan/VulkanCommandList.h
+    Vulkan/VulkanResources.h
+    Vulkan/VulkanPipeline.h
     Vulkan/VulkanQueryPool.h
     Vulkan/VulkanDGC.h
 )

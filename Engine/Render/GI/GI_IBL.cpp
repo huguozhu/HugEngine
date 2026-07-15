@@ -2,7 +2,7 @@
 #include "RHI/RHI.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
-#include "Vulkan/VulkanInternal.h"  // 创建逐 mip 面视图需要访问 VkImage（Engine/RHI/ public include）
+#include "Vulkan/VulkanResources.h"  // 创建逐 mip 面视图需要访问 VkImage
 // 按需包含 IBL Shader SPV（修改 IBL shader 只重编译 GI_IBL.cpp）
 #include "IBL_Irradiance.vert.spv.h"
 #include "IBL_Irradiance.frag.spv.h"

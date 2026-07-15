@@ -15,7 +15,7 @@
 #include <cstring>
 
 // Vulkan 类型的完整定义（供 inline 方法使用）
-#include "VulkanInternal.h"
+#include "VulkanResources.h"
 
 namespace he::rhi {
 

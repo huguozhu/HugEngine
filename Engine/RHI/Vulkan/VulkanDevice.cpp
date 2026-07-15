@@ -9,15 +9,12 @@
 #include <vulkan/vulkan.h>
 
 #include "VulkanQueryPool.h"
-#include "VulkanInternal.h"
+#include "VulkanDevice.h"
 #include "Core/Assert.h"
 
 #include <algorithm>
 #include <vector>
 #include <cstring>
-
-// VulkanSwapChain/VulkanCommandList + 其他 Vulkan 类型完整定义
-#include "VulkanInternal.h"
 
 namespace he::rhi {
 

@@ -18,7 +18,8 @@
 #include <cstring>
 
 // VulkanSwapChain/VulkanCommandList 等类型的完整定义
-#include "VulkanInternal.h"
+#include "VulkanCommandList.h"
+#include "VulkanDevice.h"
 #include "VulkanQueryPool.h"
 
 namespace he::rhi {
