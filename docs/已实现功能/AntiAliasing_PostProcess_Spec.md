@@ -1,6 +1,6 @@
 # 抗锯齿 & 后处理架构 Spec
 
-> 版本: 1.0 | 日期: 2026-07-03 | 基于 HugEngine Phase 5 架构
+> 版本: 2.0 | 日期: 2026-07-15 | 全部功能已实现
 
 ## 1. 目标
 
@@ -49,18 +49,22 @@ IRenderSubsystem                         ← 基础生命周期
               │ SupportsForward() / SupportsDeferred()
               │ GetJitterOffset() / OnBeginFrame()
               │
-              └── AA_None                ← 空对象
-                  (AA_MSAA / AA_TAA / AA_FXAA 待实现)
+              ├── AA_None                ← 空对象
+              ├── AA_MSAA               ← 硬件多重采样 (HDR)
+              ├── AA_TAA                ← 时域抗锯齿 (HDR)
+              ├── AA_FXAA               ← 快速近似抗锯齿 (LDR)
+              └── AA_SMAA               ← 形态学抗锯齿 (LDR, 3 Pass)
 ```
 
 ## 4. AA 技术分配
 
-| AA 技术 | ForwardPipeline | DeferredPipeline | 空间 | ToneMap 位置 | 原因 |
-|---------|:---:|:---:|------|:---:|------|
-| None | ✓ | ✓ | — | — | 空操作 |
-| MSAA | ✓ | ✗ | HDR | 前（Resolve） | 延迟 GBuffer MRT 多采样代价过高 |
-| TAA | ✗ | ✓ | HDR | 前 | 复用 GBuffer 深度/法线做邻域裁剪 |
-| FXAA | ✓ | ✓ | LDR | 后 | 纯 LDR 后处理，无管线依赖 |
+| AA 技术 | ForwardPipeline | DeferredPipeline | 空间 | ToneMap 位置 | 状态 |
+|---------|:---:|:---:|------|:---:|:---:|
+| None | ✓ | ✓ | — | — | ✅ |
+| MSAA | ✓ | ⚠️ | HDR | 前（Resolve） | ✅ GBuffer 保持 1x |
+| TAA | ✗ | ✓ | HDR | 前 | ✅ Halton 抖动 + YCoCg 裁剪 |
+| FXAA | ✓ | ✓ | LDR | 后 | ✅ |
+| SMAA | ✓ | ✓ | LDR | 后 | ✅ 3 Pass（EdgeDetect+BlendWeight+Neighborhood），与 FXAA 互斥 |
 
 ## 5. 后处理链编排
 
@@ -102,15 +106,16 @@ Pass "FXAA"       [读] LDR_Intermediate  [写] BackBuffer
 | `GetJitterOffset()` / `OnBeginFrame()` | TAA 抖动投影 |
 | `SetInput()` / `GetOutput*()` | 继承自 IPostProcessPass |
 
-## 7. 待实现
+## 7. 实现状态（全部完成）
 
-| 任务 | 文件 |
-|------|------|
-| AA_MSAA | `AntiAliasing/AA_MSAA.h/.cpp` |
-| AA_TAA | `AntiAliasing/AA_TAA.h/.cpp`（含 TAA_Resolve 着色器） |
-| AA_FXAA | `AntiAliasing/AA_FXAA.h/.cpp`（含 FXAA 着色器） |
-| 管线集成 | ForwardPipeline/DeferredPipeline 添加 AA 子系统创建 + Pass 编排 |
-| RHI 扩展 | TextureDesc/PipelineStateDesc 添加 sampleCount；vkCmdResolveImage 封装 |
+| 任务 | 文件 | 状态 |
+|------|------|:---:|
+| AA_MSAA | `AntiAliasing/AA_MSAA.h`（懒初始化，覆盖 RT/PSO sampleCount） | ✅ |
+| AA_TAA | `AntiAliasing/AA_TAA.h/.cpp` + `TAA_Resolve.vert/frag.slang`（Halton 抖动 + YCoCg AABB 裁剪） | ✅ |
+| AA_FXAA | `AntiAliasing/AA_FXAA.h/.cpp` + `FXAA.vert/frag.slang`（LDR 空间） | ✅ |
+| AA_SMAA | `AntiAliasing/AA_SMAA.h/.cpp` + `SMAA_EdgeDetect/BlendWeight/Neighborhood.frag.slang`（3 Pass） | ✅ |
+| 管线集成 | ForwardPipeline / DeferredPipeline 均已集成 AA 子系统 | ✅ |
+| RHI 扩展 | `TextureDesc.sampleCount` + `PipelineStateDesc.sampleCount` + `vkCmdResolveImage` | ✅ |
 
 ## 8. 设计原则
 
