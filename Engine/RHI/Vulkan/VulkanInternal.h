@@ -228,6 +228,7 @@ private:
     void QueryDGCCapabilities();  // 查询 DGC 扩展支持
     void LoadDGCFunctions();      // 加载 DGC 扩展函数指针
     void LoadRTFunctions();       // 加载 RT 扩展函数指针
+    void LoadMeshFunctions();    // 加载 Mesh Shader 扩展函数指针
 
     VkInstance       m_Instance       = VK_NULL_HANDLE;
     VkPhysicalDevice m_Physical       = VK_NULL_HANDLE;
