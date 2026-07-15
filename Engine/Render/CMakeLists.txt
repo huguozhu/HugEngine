@@ -14,6 +14,7 @@ set(RENDER_SOURCES
     Pipeline/Camera.cpp
     Pipeline/ForwardPipeline.h
     Pipeline/ForwardPipeline.cpp
+    Pipeline/ForwardPipeline_FrameGraph.cpp
     Pipeline/DeferredPipeline.h
     Pipeline/DeferredPipeline.cpp
     Pipeline/DeferredPipeline_FrameGraph.cpp
