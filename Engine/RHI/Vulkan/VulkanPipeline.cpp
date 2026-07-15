@@ -2,7 +2,8 @@
 // VulkanPipeline.cpp — Vulkan 管线状态对象（PSO）创建
 // 负责 Graphics/Compute Pipeline 构建、ShaderModule、PipelineLayout
 // ============================================================
-#include "VulkanPipeline.h"
+#include "VulkanPipelineState.h"
+#include "VulkanRT.h"  // ToVkFormat / ToVkCompareOp
 #include "Core/Log.h"
 #include "Core/Assert.h"
 

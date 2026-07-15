@@ -18,7 +18,8 @@ set(RHI_SOURCES
     Vulkan/VulkanSwapChain.h
     Vulkan/VulkanCommandList.h
     Vulkan/VulkanResources.h
-    Vulkan/VulkanPipeline.h
+    Vulkan/VulkanRT.h
+    Vulkan/VulkanPipelineState.h
     Vulkan/VulkanQueryPool.h
     Vulkan/VulkanDGC.h
 )
@@ -42,14 +43,13 @@ if(HUGENGINE_RHI_VULKAN)
 
     set(RHI_VULKAN_SOURCES
         Vulkan/VulkanDevice.cpp
-        Vulkan/VulkanDevice_RT.cpp
+        Vulkan/VulkanRT.cpp
         Vulkan/VulkanDevice_MeshShader.cpp
         Vulkan/VulkanDevice_Descriptors.cpp
         Vulkan/VulkanSwapChain.cpp
         Vulkan/VulkanCommandList.cpp
         Vulkan/VulkanResources.cpp
         Vulkan/VulkanPipeline.cpp
-        Vulkan/VulkanRayTracing.cpp
         Vulkan/VulkanDGC.cpp
     )
 

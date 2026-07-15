@@ -12,7 +12,7 @@
 
 // DGC 支持（仅在 Vulkan 后端启用）
 #include "Vulkan/VulkanDGC.h"
-#include "Vulkan/VulkanPipeline.h"      // VulkanPipelineState
+#include "Vulkan/VulkanPipelineState.h"  // VulkanPipelineState
 #include "Vulkan/VulkanDevice.h"        // VulkanDeviceAccess
 #include "Asset/BindlessTextureManager.h"
 #include "Scene/CubeComponent.h"

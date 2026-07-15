@@ -1,8 +1,10 @@
-// VulkanDevice_RT.cpp — Ray Tracing 能力查询、函数加载与资源创建
-// 从 VulkanDevice.cpp 拆分，包含：
-//   - QueryRTCapabilities / LoadRTFunctions
-//   - CreateBLAS / CreateTLAS / GetBLASBuildSizes / GetTLASBuildSizes
-//   - CreateRTPipelineState
+// ============================================================
+// VulkanRT.cpp — Ray Tracing 全部实现
+//
+// 从以下文件合并：
+//   VulkanDevice_RT.cpp  — VulkanDevice 的 RT 方法（查询/加载/创建）
+//   VulkanRayTracing.cpp — AS / RTPSO 资源类型的构造析构
+// ============================================================
 
 #include "RHI/RHI.h"
 #include "RHI/Shader.h"
@@ -11,6 +13,7 @@
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
 
+#include "VulkanRT.h"
 #include "VulkanDevice.h"
 #include "Core/Assert.h"
 
@@ -20,12 +23,92 @@
 namespace he::rhi {
 
 // ============================================================
-// RT 扩展函数加载（设备创建后调用一次）
+// VulkanAccelerationStructure 实现
+// ============================================================
+
+VulkanAccelerationStructure::VulkanAccelerationStructure(
+    VkDevice device, VmaAllocator allocator,
+    AccelerationStructureType type, const VulkanRTDispatch& rt, u64 asSize)
+    : m_Device(device), m_Allocator(allocator), m_Type(type), m_Size(asSize)
+    , m_DestroyAS(rt.destroyAS)
+{
+    // 1. 创建底层存储缓冲（DEVICE_LOCAL，GPU 端读写）
+    VkBufferCreateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size  = asSize;
+    bufferInfo.usage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
+                     | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+
+    VmaAllocationCreateInfo allocInfo{};
+    allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+
+    VkResult result = vmaCreateBuffer(allocator, &bufferInfo, &allocInfo,
+                                       &m_Buffer, &m_Allocation, nullptr);
+    HE_ASSERT(result == VK_SUCCESS, "VMA: 创建 AS 存储缓冲失败");
+
+    VkBufferDeviceAddressInfo addrInfo{};
+    addrInfo.sType  = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+    addrInfo.buffer = m_Buffer;
+    m_BufferAddress = vkGetBufferDeviceAddress(device, &addrInfo);
+
+    // 2. 创建 VkAccelerationStructureKHR
+    VkAccelerationStructureCreateInfoKHR asInfo{};
+    asInfo.sType  = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+    asInfo.buffer = m_Buffer;
+    asInfo.size   = asSize;
+    asInfo.type   = (type == AccelerationStructureType::BottomLevel)
+                    ? VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR
+                    : VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+
+    result = rt.createAS(device, &asInfo, nullptr, &m_AS);
+    HE_ASSERT(result == VK_SUCCESS, "创建 VkAccelerationStructureKHR 失败");
+
+    // 3. 获取 AS GPU 地址
+    VkAccelerationStructureDeviceAddressInfoKHR asAddrInfo{};
+    asAddrInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+    asAddrInfo.accelerationStructure = m_AS;
+    m_DeviceAddress = rt.getASDeviceAddress(device, &asAddrInfo);
+
+    HE_CORE_INFO("VulkanAccelerationStructure: type={} size={}MB deviceAddr={:#x}",
+                 (type == AccelerationStructureType::BottomLevel) ? "BLAS" : "TLAS",
+                 asSize / (1024 * 1024), m_DeviceAddress);
+}
+
+VulkanAccelerationStructure::~VulkanAccelerationStructure() {
+    if (m_AS && m_DestroyAS) {
+        m_DestroyAS(m_Device, m_AS, nullptr);
+    }
+    if (m_Buffer) {
+        vmaDestroyBuffer(m_Allocator, m_Buffer, m_Allocation);
+    }
+}
+
+// ============================================================
+// VulkanRTPipelineState 实现
+// ============================================================
+
+VulkanRTPipelineState::VulkanRTPipelineState(
+    VkDevice device, VkPipeline pipeline, VkPipelineLayout layout,
+    u32 groupCount, u32 handleSize, std::vector<u8> handles)
+    : m_Device(device), m_Pipeline(pipeline), m_PipelineLayout(layout)
+    , m_GroupCount(groupCount), m_HandleSize(handleSize)
+    , m_Handles(std::move(handles))
+{
+    HE_CORE_INFO("VulkanRTPipelineState: {} groups, handleSize={}, totalHandles={}B",
+                 groupCount, handleSize, m_Handles.size());
+}
+
+VulkanRTPipelineState::~VulkanRTPipelineState() {
+    if (m_Pipeline)       vkDestroyPipeline(m_Device, m_Pipeline, nullptr);
+    if (m_PipelineLayout) vkDestroyPipelineLayout(m_Device, m_PipelineLayout, nullptr);
+}
+
+// ============================================================
+// VulkanDevice::LoadRTFunctions — 加载 RT 扩展函数指针
 // ============================================================
 void VulkanDevice::LoadRTFunctions() {
     if (!m_SupportsRT) return;
 
-    // 加载所有 RT 扩展函数指针（vkGetDeviceProcAddr）
     m_RT.createAS              = reinterpret_cast<PFN_vkCreateAccelerationStructureKHR>(
         vkGetDeviceProcAddr(m_Device, "vkCreateAccelerationStructureKHR"));
     m_RT.destroyAS             = reinterpret_cast<PFN_vkDestroyAccelerationStructureKHR>(
@@ -43,7 +126,6 @@ void VulkanDevice::LoadRTFunctions() {
     m_RT.cmdTraceRays          = reinterpret_cast<PFN_vkCmdTraceRaysKHR>(
         vkGetDeviceProcAddr(m_Device, "vkCmdTraceRaysKHR"));
 
-    // 验证所有函数加载成功
     HE_ASSERT(m_RT.createAS,              "加载 vkCreateAccelerationStructureKHR 失败");
     HE_ASSERT(m_RT.destroyAS,             "加载 vkDestroyAccelerationStructureKHR 失败");
     HE_ASSERT(m_RT.getASBuildSizes,       "加载 vkGetAccelerationStructureBuildSizesKHR 失败");
@@ -57,20 +139,18 @@ void VulkanDevice::LoadRTFunctions() {
 }
 
 // ============================================================
-// RT / Mesh Shader 能力检测
+// VulkanDevice::QueryRTCapabilities — 查询硬件 RT 能力
 // ============================================================
-
 void VulkanDevice::QueryRTCapabilities() {
-    // 1. 检查设备扩展是否可用
     u32 extCount = 0;
     vkEnumerateDeviceExtensionProperties(m_Physical, nullptr, &extCount, nullptr);
     std::vector<VkExtensionProperties> extensions(extCount);
     vkEnumerateDeviceExtensionProperties(m_Physical, nullptr, &extCount, extensions.data());
 
-    bool hasAS  = false;  // VK_KHR_acceleration_structure
-    bool hasRTP = false;  // VK_KHR_ray_tracing_pipeline
-    bool hasDHO = false;  // VK_KHR_deferred_host_operations
-    bool hasPosFetch = false;  // VK_KHR_ray_tracing_position_fetch（可选）
+    bool hasAS  = false;
+    bool hasRTP = false;
+    bool hasDHO = false;
+    bool hasPosFetch = false;
 
     for (auto& ext : extensions) {
         if (strcmp(ext.extensionName, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) == 0)
@@ -93,15 +173,12 @@ void VulkanDevice::QueryRTCapabilities() {
     HE_CORE_INFO("Ray Tracing: 硬件支持已检测 (AS={}, RTPipeline={}, DeferredHostOps={})",
                  hasAS, hasRTP, hasDHO);
 
-    // 2. 查询 RT Pipeline 属性（通过 pNext 链）
     VkPhysicalDeviceRayTracingPipelinePropertiesKHR rtProps{};
     rtProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
 
     VkPhysicalDeviceAccelerationStructurePropertiesKHR asProps{};
     asProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
-    asProps.pNext = nullptr;
 
-    // pNext 链: base → rtProps → asProps
     rtProps.pNext = &asProps;
 
     VkPhysicalDeviceProperties2 props2{};
@@ -128,9 +205,8 @@ void VulkanDevice::QueryRTCapabilities() {
 }
 
 // ============================================================
-// RT 资源创建
+// VulkanDevice::CreateBLAS
 // ============================================================
-
 std::unique_ptr<IRHIAccelerationStructure>
 VulkanDevice::CreateBLAS(const BLASBuildDesc& desc) {
     if (!m_SupportsRT) {
@@ -138,16 +214,13 @@ VulkanDevice::CreateBLAS(const BLASBuildDesc& desc) {
         return nullptr;
     }
 
-    // 1. 查询构建所需内存大小
     ASBuildSizes sizes = GetBLASBuildSizes(desc);
     u64 asSize = sizes.accelerationStructureSize;
 
-    // 2. 创建 AS 对象 + 底层缓冲
     auto blas = std::make_unique<VulkanAccelerationStructure>(
         m_Device, m_VmaAllocator,
         AccelerationStructureType::BottomLevel, m_RT, asSize);
 
-    // 3. 存储 BLAS 构建描述（供后续 BuildBLAS 使用）
     blas->SetBLASDesc(desc);
 
     HE_CORE_INFO("CreateBLAS: {} geometries, AS size={}MB, scratch={}MB",
@@ -156,6 +229,9 @@ VulkanDevice::CreateBLAS(const BLASBuildDesc& desc) {
     return blas;
 }
 
+// ============================================================
+// VulkanDevice::CreateTLAS
+// ============================================================
 std::unique_ptr<IRHIAccelerationStructure>
 VulkanDevice::CreateTLAS(const TLASBuildDesc& desc) {
     if (!m_SupportsRT) {
@@ -163,11 +239,9 @@ VulkanDevice::CreateTLAS(const TLASBuildDesc& desc) {
         return nullptr;
     }
 
-    // 1. 查询构建所需内存大小
     ASBuildSizes sizes = GetTLASBuildSizes(desc.maxInstanceCount);
     u64 asSize = sizes.accelerationStructureSize;
 
-    // 2. 创建 AS 对象 + 底层缓冲
     auto tlas = std::make_unique<VulkanAccelerationStructure>(
         m_Device, m_VmaAllocator,
         AccelerationStructureType::TopLevel, m_RT, asSize);
@@ -178,10 +252,12 @@ VulkanDevice::CreateTLAS(const TLASBuildDesc& desc) {
     return tlas;
 }
 
+// ============================================================
+// VulkanDevice::GetBLASBuildSizes
+// ============================================================
 ASBuildSizes VulkanDevice::GetBLASBuildSizes(const BLASBuildDesc& desc) {
     if (!m_SupportsRT || !m_RT.getASBuildSizes) return ASBuildSizes{};
 
-    // 构建 VkAccelerationStructureGeometryKHR 数组（仅用于查询大小，不需要实际缓冲地址）
     std::vector<VkAccelerationStructureGeometryKHR> vkGeometries;
     std::vector<u32> maxPrimCounts;
     for (auto& g : desc.geometries) {
@@ -194,7 +270,7 @@ ASBuildSizes VulkanDevice::GetBLASBuildSizes(const BLASBuildDesc& desc) {
         vkGeo.geometry.triangles.maxVertex     = g.maxVertex;
         vkGeo.geometry.triangles.indexType     = ToVkFormat(g.indexFormat) == VK_FORMAT_R32_UINT
                                                  ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
-        vkGeo.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;  // 默认不透明（后续可扩展 alpha-test 支持）
+        vkGeo.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
         vkGeometries.push_back(vkGeo);
         maxPrimCounts.push_back(g.maxPrimitiveCount);
     }
@@ -219,11 +295,12 @@ ASBuildSizes VulkanDevice::GetBLASBuildSizes(const BLASBuildDesc& desc) {
     return sizes;
 }
 
+// ============================================================
+// VulkanDevice::GetTLASBuildSizes
+// ============================================================
 ASBuildSizes VulkanDevice::GetTLASBuildSizes(u32 maxInstanceCount) {
     if (!m_SupportsRT || !m_RT.getASBuildSizes) return ASBuildSizes{};
 
-    // TLAS 需要一个 dummy geometry（类型=INSTANCES）以满足 Vulkan VUID：
-    // geometryCount != 0 时，pGeometries 或 ppGeometries 必须非空
     VkAccelerationStructureGeometryKHR tlasGeo{};
     tlasGeo.sType        = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
     tlasGeo.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
@@ -232,7 +309,7 @@ ASBuildSizes VulkanDevice::GetTLASBuildSizes(u32 maxInstanceCount) {
     buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
     buildInfo.type          = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
     buildInfo.flags         = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
-    buildInfo.geometryCount = 1;  // TLAS 只有一个"几何"（实例数组）
+    buildInfo.geometryCount = 1;
     buildInfo.pGeometries   = &tlasGeo;
 
     VkAccelerationStructureBuildSizesInfoKHR sizeInfo{};
@@ -249,9 +326,8 @@ ASBuildSizes VulkanDevice::GetTLASBuildSizes(u32 maxInstanceCount) {
 }
 
 // ============================================================
-// RT Pipeline State 创建
+// VulkanDevice::CreateRTPipelineState
 // ============================================================
-
 std::unique_ptr<IRHIRayTracingPipelineState>
 VulkanDevice::CreateRTPipelineState(const RTPipelineStateDesc& desc) {
     if (!m_SupportsRT || !m_RT.createRTPipelines) {
@@ -259,11 +335,6 @@ VulkanDevice::CreateRTPipelineState(const RTPipelineStateDesc& desc) {
         return nullptr;
     }
 
-    // 1. 从 SPIRV 创建 ShaderModule（每个 shader 一个 module）
-    struct ShaderInfo {
-        VkShaderModule module;
-        u32 groupIndex;  // 所属 group
-    };
     std::vector<VkPipelineShaderStageCreateInfo> stages;
     std::vector<VkShaderModule> modules;
 
@@ -280,7 +351,6 @@ VulkanDevice::CreateRTPipelineState(const RTPipelineStateDesc& desc) {
         vkCreateShaderModule(m_Device, &modInfo, nullptr, &mod);
         modules.push_back(mod);
 
-        // 根据 ShaderStage 映射到 VkShaderStageFlagBits
         VkShaderStageFlagBits vkStage;
         switch (bc.stage) {
             case ShaderStage::RayGen:       vkStage = VK_SHADER_STAGE_RAYGEN_BIT_KHR; break;
@@ -301,7 +371,6 @@ VulkanDevice::CreateRTPipelineState(const RTPipelineStateDesc& desc) {
         stages.push_back(stageInfo);
     }
 
-    // 2. 构建 VkRayTracingShaderGroupCreateInfoKHR 数组
     std::vector<VkRayTracingShaderGroupCreateInfoKHR> vkGroups;
     for (auto& group : desc.shaderGroups) {
         VkRayTracingShaderGroupCreateInfoKHR vkGroup{};
@@ -340,7 +409,6 @@ VulkanDevice::CreateRTPipelineState(const RTPipelineStateDesc& desc) {
         vkGroups.push_back(vkGroup);
     }
 
-    // 3. 创建 PipelineLayout
     std::vector<VkDescriptorSetLayout> descLayouts;
     for (auto& handle : desc.descriptorSetLayouts) {
         VkDescriptorSetLayout l = ResolveDescriptorSetLayout(handle);
@@ -366,7 +434,6 @@ VulkanDevice::CreateRTPipelineState(const RTPipelineStateDesc& desc) {
     VkPipelineLayout pipelineLayout;
     vkCreatePipelineLayout(m_Device, &layoutInfo, nullptr, &pipelineLayout);
 
-    // 4. 创建 RT Pipeline
     VkRayTracingPipelineCreateInfoKHR rtInfo{};
     rtInfo.sType                        = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR;
     rtInfo.stageCount                   = static_cast<u32>(stages.size());
@@ -381,14 +448,12 @@ VulkanDevice::CreateRTPipelineState(const RTPipelineStateDesc& desc) {
                                               1, &rtInfo, nullptr, &rtPipeline);
     HE_ASSERT(result == VK_SUCCESS, "Ray Tracing Pipeline 创建失败");
 
-    // 5. 查询着色器组句柄（SBT 用）
     u32 groupCount = static_cast<u32>(vkGroups.size());
     u32 handleSize = m_ShaderGroupHandleSize;
     u32 handleDataSize = groupCount * handleSize;
     std::vector<u8> handles(handleDataSize);
     m_RT.getRTShaderGroupHandles(m_Device, rtPipeline, 0, groupCount, handleDataSize, handles.data());
 
-    // 6. 清理 ShaderModule
     for (auto& mod : modules) vkDestroyShaderModule(m_Device, mod, nullptr);
 
     HE_CORE_INFO("CreateRTPipelineState: {} groups, recursion={}, payload={}B",

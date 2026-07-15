@@ -1,14 +1,19 @@
 #pragma once
 
 // ============================================================
-// VulkanPipeline.h — Vulkan Pipeline / AS / RT Pipeline 类型
-// 从 VulkanInternal.h 拆分
+// VulkanRT.h — Ray Tracing 类型与辅助函数
+//
+// 包含：
+//   VulkanRTDispatch            — RT 扩展函数派发表
+//   VulkanAccelerationStructure — BLAS/TLAS 加速结构
+//   VulkanRTPipelineState       — RT 管线状态 + 着色器组句柄
+//   共享辅助函数                 — ToVkFormat / ToVkCompareOp / ToVkBuildFlags
 // ============================================================
 
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
 
-// VMA (VulkanBuffer/AS 底层存储用)
+// VMA（AS 底层存储缓冲用）
 #define VMA_VULKAN_VERSION 1003000
 #include "vk_mem_alloc.h"
 
@@ -31,31 +36,6 @@ struct VulkanRTDispatch {
     PFN_vkCreateRayTracingPipelinesKHR             createRTPipelines     = nullptr;
     PFN_vkGetRayTracingShaderGroupHandlesKHR       getRTShaderGroupHandles = nullptr;
     PFN_vkCmdTraceRaysKHR                          cmdTraceRays          = nullptr;
-};
-
-// ============================================================
-// VulkanPipelineState — Graphics/Compute Pipeline
-// ============================================================
-class VulkanPipelineState final : public IRHIPipelineState {
-public:
-    VulkanPipelineState(VkDevice device, VkPipeline pipeline,
-                        VkPipelineLayout layout, VkRenderPass renderPass,
-                        VkPipelineBindPoint bindPoint)
-        : m_Device(device), m_Pipeline(pipeline)
-        , m_PipelineLayout(layout), m_RenderPass(renderPass)
-        , m_BindPoint(bindPoint) {}
-    ~VulkanPipelineState();
-    VkPipeline           GetPipeline()       const { return m_Pipeline; }
-    VkPipelineLayout     GetPipelineLayout() const { return m_PipelineLayout; }
-    VkRenderPass         GetRenderPass()     const { return m_RenderPass; }
-    VkPipelineBindPoint  GetBindPoint()      const { return m_BindPoint; }
-    void* GetNativeHandle() const override { return reinterpret_cast<void*>(m_Pipeline); }
-private:
-    VkDevice            m_Device;
-    VkPipeline          m_Pipeline;
-    VkPipelineLayout    m_PipelineLayout;
-    VkRenderPass        m_RenderPass;
-    VkPipelineBindPoint m_BindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
 };
 
 // ============================================================
@@ -121,7 +101,10 @@ private:
 };
 
 // ============================================================
-// 共享辅助函数声明（跨编译单元，实现在 VulkanResources.cpp + VulkanDevice.cpp）
+// 共享辅助函数声明（跨编译单元）
+//   ToVkFormat     — VulkanResources.cpp
+//   ToVkCompareOp  — VulkanPipeline.cpp
+//   ToVkBuildFlags — VulkanDevice.cpp / VulkanRT.cpp
 // ============================================================
 VkFormat    ToVkFormat(Format fmt);
 VkCompareOp ToVkCompareOp(CompareFunc func);
