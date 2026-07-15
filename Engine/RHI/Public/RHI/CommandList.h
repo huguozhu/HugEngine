@@ -94,6 +94,25 @@ public:
     virtual void DrawIndexedIndirect(IRHIBuffer* buffer, u64 offset,
                                      u32 drawCount, u32 stride) = 0;
 
+    // ============================================================
+    // Device Generated Commands (DGC) — VK_EXT_device_generated_commands
+    // GPU 生成实际 vkCmdDraw* 命令，CPU 仅调用一次 ExecuteGeneratedCommands。
+    // 默认空实现（后端不支持时自动跳过）
+    // ============================================================
+
+    /// DGC 执行描述符（封装后端特定句柄 + GPU 地址）
+    struct DGCExecuteDesc {
+        void*   indirectCommandsLayout  = nullptr;  // VkIndirectCommandsLayoutEXT 句柄
+        void*   indirectExecutionSet    = nullptr;  // VkIndirectExecutionSetEXT 句柄
+        u64     sequencesBufferAddr     = 0;        // 序列数据缓冲 GPU 地址
+        u32     maxSequenceCount        = 0;        // 最大序列数
+        u64     sequenceCountAddr       = 0;        // 实际序列数缓冲 GPU 地址
+        u64     preprocessBufferAddr    = 0;        // 预处理缓冲 GPU 地址
+        u64     preprocessBufferSize    = 0;        // 预处理缓冲大小
+        u32     maxDrawCount            = 0;        // 最大绘制调用数
+    };
+    virtual void ExecuteGeneratedCommands(const DGCExecuteDesc& desc) {}
+
     // Mesh Shader 绘制（替代传统 VS+IA 管线）
     virtual void DrawMeshTasks(u32 groupCountX, u32 groupCountY = 1, u32 groupCountZ = 1) = 0;
     virtual void DrawMeshTasksIndirect(IRHIBuffer* buffer, u64 offset,

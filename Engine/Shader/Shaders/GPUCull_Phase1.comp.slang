@@ -1,0 +1,53 @@
+// GPUCull_Phase1.comp.slang — 两阶段遮挡剔除 Phase 1
+// 功能：视锥剔除 + 上帧 Hi-Z 粗筛 → 输出候选物体索引
+//
+// 与 GPUCull.comp.slang 的区别：
+//   - 输出为紧凑的候选索引数组（u32[]），而非 IndirectDrawCommand
+//   - 由两阶段模式调用，Phase 2 对候选做精筛
+
+struct GPUSceneObject {
+    float4x4 localToWorld; float4 boundsMin, boundsMax;
+    uint meshIndex, materialIndex, objectID, visibilityFlags;
+    uint indexCount, firstIndex; int vertexOffset; uint _pad1;
+};
+
+[[vk::binding(0, 0)]] StructuredBuffer<GPUSceneObject> u_SceneObjects;
+[[vk::binding(1, 0)]] RWStructuredBuffer<uint> u_CandidateIndices;  // 候选索引数组
+[[vk::binding(2, 0)]] RWStructuredBuffer<uint> u_CandidateCount;    // 候选数量
+[[vk::binding(3, 0)]] Texture2D<float> u_HiZDepth;                  // 上帧 Hi-Z
+[[vk::binding(3, 0)]] SamplerState     u_HiZSampler;
+
+[[vk::push_constant]] cbuffer CullParams {
+    float4 frustumPlanes[6]; float4x4 viewProjMatrix;
+    float2 screenSize; uint hizMipCount; uint objectCount;
+};
+
+bool AABBOutside(float3 aabbMin, float3 aabbMax, float4 plane) {
+    float3 n = plane.xyz;
+    float3 p; p.x=(n.x>=0)?aabbMax.x:aabbMin.x; p.y=(n.y>=0)?aabbMax.y:aabbMin.y; p.z=(n.z>=0)?aabbMax.z:aabbMin.z;
+    return dot(n,p)+plane.w<0;
+}
+
+bool IsOccluded(float3 mn, float3 mx) {
+    float2 rMin=float2(1e10,1e10), rMax=float2(-1e10,-1e10); float mZ=0;
+    for(int c=0;c<8;c++){float3 corner=float3((c&1)?mx.x:mn.x,(c&2)?mx.y:mn.y,(c&4)?mx.z:mn.z);
+        float4 clip=mul(viewProjMatrix,float4(corner,1));float3 ndc=clip.xyz/max(clip.w,0.0001);
+        if(clip.w<0)return false;float2 s=ndc.xy*0.5+0.5;rMin=min(rMin,s);rMax=max(rMax,s);mZ=max(mZ,ndc.z);}
+    rMin=clamp(rMin,0,1);rMax=clamp(rMax,0,1);
+    float2 sz=(rMax-rMin)*screenSize;float mip=clamp(ceil(log2(max(1,max(sz.x,sz.y)))),0,float(hizMipCount-1));
+    float4 d;d.x=u_HiZDepth.SampleLevel(u_HiZSampler,rMin,mip);d.y=u_HiZDepth.SampleLevel(u_HiZSampler,float2(rMax.x,rMin.y),mip);
+    d.z=u_HiZDepth.SampleLevel(u_HiZSampler,float2(rMin.x,rMax.y),mip);d.w=u_HiZDepth.SampleLevel(u_HiZSampler,rMax,mip);
+    return mZ>min(min(d.x,d.y),min(d.z,d.w));
+}
+
+[numthreads(64,1,1)]
+void main(uint3 id:SV_DispatchThreadID){
+    if(id.x>=objectCount)return;
+    GPUSceneObject o=u_SceneObjects[id.x];float3 mn=o.boundsMin.xyz,mx=o.boundsMax.xyz;
+    if(AABBOutside(mn,mx,frustumPlanes[0]))return;if(AABBOutside(mn,mx,frustumPlanes[1]))return;
+    if(AABBOutside(mn,mx,frustumPlanes[2]))return;if(AABBOutside(mn,mx,frustumPlanes[3]))return;
+    if(AABBOutside(mn,mx,frustumPlanes[4]))return;if(AABBOutside(mn,mx,frustumPlanes[5]))return;
+    if(hizMipCount>0&&IsOccluded(mn,mx))return;
+    uint idx;InterlockedAdd(u_CandidateCount[0],1,idx);
+    u_CandidateIndices[idx]=id.x;  // 写入物体在场景 SSBO 中的索引
+}

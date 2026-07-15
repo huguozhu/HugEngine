@@ -97,6 +97,9 @@ struct PipelineStateDesc {
 class IRHIPipelineState {
 public:
     virtual ~IRHIPipelineState() = default;
+
+    /// 获取后端原生管线句柄（Vulkan: VkPipeline 转为 void*, D3D12: ID3D12PipelineState*）
+    virtual void* GetNativeHandle() const { return nullptr; }
 };
 
 } // namespace he::rhi

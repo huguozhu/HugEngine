@@ -15,6 +15,7 @@
 #include "vk_mem_alloc.h"
 
 #include "RHI/RHI.h"
+#include "VulkanDGC.h"  // VK_EXT_device_generated_commands 封装
 #include <span>
 #include <vector>
 
@@ -161,6 +162,11 @@ public:
                                                   DescriptorType type,
                                                   IRHIAccelerationStructure* as) override;
 
+    // Per-Mip ImageView 支持
+    void*                     CreateTextureMipStorageView(IRHITexture* texture, u32 mipLevel) override;
+    void*                     CreateTextureMipSampledView(IRHITexture* texture, u32 mipLevel) override;
+    void                      DestroyTextureMipView(void* view) override;
+
     // Internal
     VkDevice         GetVkDevice()     const { return m_Device; }
     VkPhysicalDevice GetVkPhysical()   const { return m_Physical; }
@@ -179,6 +185,9 @@ public:
     // RT / Mesh Shader 支持状态
     bool    SupportsRayTracing()  const { return m_SupportsRT; }
     bool    SupportsMeshShaders() const { return m_SupportsMesh; }
+    // DGC 支持状态
+    bool    SupportsDGC() const { return m_SupportsDGC; }
+    const VulkanDGCFuncs& GetDGCFuncs() const { return m_DGCFuncs; }
 
     // Shader Group 句柄信息（用于 SBT 构建）
     u32 GetShaderGroupHandleSize()    const { return m_ShaderGroupHandleSize; }
@@ -216,6 +225,8 @@ private:
     VkSemaphore CreateTimelineSemaphore(u64 initialValue);  // 创建 Timeline 信号量
     void QueryRTCapabilities();   // 查询 RT 扩展支持 + 硬件能力
     void QueryMeshCapabilities(); // 查询 Mesh Shader 扩展支持 + 硬件能力
+    void QueryDGCCapabilities();  // 查询 DGC 扩展支持
+    void LoadDGCFunctions();      // 加载 DGC 扩展函数指针
     void LoadRTFunctions();       // 加载 RT 扩展函数指针
 
     VkInstance       m_Instance       = VK_NULL_HANDLE;
@@ -231,10 +242,11 @@ private:
     u32              m_ComputeFamily   = 0;
     bool             m_HasAsyncCompute = false;
 
-    // RT / Mesh Shader 支持状态 + 硬件属性（在 QueryRTCapabilities/QueryMeshCapabilities 中填充）
+    // RT / Mesh Shader / DGC 支持状态 + 硬件属性（在 Query* 中填充）
     bool             m_SupportsRT              = false;
     bool             m_SupportsRTPositionFetch = false;  // VK_KHR_ray_tracing_position_fetch（可选）
     bool             m_SupportsMesh            = false;
+    bool             m_SupportsDGC             = false;
     // RT Pipeline 属性
     u32              m_MaxRayRecursionDepth     = 1;
     u32              m_ShaderGroupHandleSize    = 32;
@@ -271,6 +283,8 @@ private:
 
     // RT 扩展函数派发表
     VulkanRTDispatch m_RT;
+    // DGC 扩展函数派发表
+    VulkanDGCFuncs   m_DGCFuncs;
 
     // Descriptor set management
     VkDescriptorPool                  m_DescPool = VK_NULL_HANDLE;
@@ -323,6 +337,8 @@ public:
                      i32 vertexOffset, u32 firstInstance) override;
     void DrawIndexedIndirect(IRHIBuffer* buffer, u64 offset,
                              u32 drawCount, u32 stride) override;
+    // Device Generated Commands（DGC，Task 5 实现）
+    void ExecuteGeneratedCommands(const DGCExecuteDesc& desc) override;
     // Mesh Shader 绘制（P6 实现）
     void DrawMeshTasks(u32 groupCountX, u32 groupCountY, u32 groupCountZ) override;
     void DrawMeshTasksIndirect(IRHIBuffer* buffer, u64 offset,
@@ -468,6 +484,7 @@ public:
     VkPipelineLayout     GetPipelineLayout() const { return m_PipelineLayout; }
     VkRenderPass         GetRenderPass()     const { return m_RenderPass; }
     VkPipelineBindPoint  GetBindPoint()      const { return m_BindPoint; }
+    void* GetNativeHandle() const override { return reinterpret_cast<void*>(m_Pipeline); }
 private:
     VkDevice            m_Device;
     VkPipeline          m_Pipeline;

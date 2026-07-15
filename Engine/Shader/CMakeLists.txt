@@ -79,11 +79,15 @@ if(SLANGC)
         "${SHADER_DIR}/TriangleMesh.frag.slang"
     )
     set(COMP_SLANG
+        "${SHADER_DIR}/WorkGraph_Entry.comp.slang"
         "${SHADER_DIR}/GPUCull.comp.slang"
+        "${SHADER_DIR}/GPUCull_Phase1.comp.slang"
+        "${SHADER_DIR}/GPUCull_TwoPhase.comp.slang"
         "${SHADER_DIR}/HiZDownsample.comp.slang"
         "${SHADER_DIR}/TestClear.comp.slang"
         "${SHADER_DIR}/DDGI.comp.slang"
         "${SHADER_DIR}/AutoExposure.comp.slang"
+        "${SHADER_DIR}/PersistentCull.comp.slang"
     )
     # Ray Tracing 着色器（.rgen / .rmiss / .rchit / .rahit / .rcall）
     # 命名约定: EffectName.rgen.slang (RayGen), EffectName.rmiss.slang (Miss),

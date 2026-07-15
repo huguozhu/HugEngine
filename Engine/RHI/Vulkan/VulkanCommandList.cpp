@@ -627,25 +627,62 @@ void VulkanCommandList::DrawIndexedIndirect(rhi::IRHIBuffer* buffer, u64 offset,
                               (VkDeviceSize)offset, drawCount, stride);
 }
 
-void VulkanCommandList::SetPushConstants(u32 offset, u32 size, const void* data) {
-    if (m_CurrentLayout) {
-        // 根据当前管线绑定点选择正确的 shader stage 标志
-        VkShaderStageFlags stage;
-        if (m_CurrentBindPoint == VK_PIPELINE_BIND_POINT_COMPUTE) {
-            stage = VK_SHADER_STAGE_COMPUTE_BIT;
-        } else if (m_CurrentBindPoint == VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR) {
-            // RT 管线：Push Constant 需覆盖所有 RT shader stage
-            stage = VK_SHADER_STAGE_RAYGEN_BIT_KHR
-                  | VK_SHADER_STAGE_MISS_BIT_KHR
-                  | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR
-                  | VK_SHADER_STAGE_ANY_HIT_BIT_KHR
-                  | VK_SHADER_STAGE_CALLABLE_BIT_KHR;
-        } else {
-            stage = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-        }
-        vkCmdPushConstants(m_CmdBuffers[m_FrameIndex], m_CurrentLayout,
-                          stage, offset, size, data);
+// ============================================================
+// ExecuteGeneratedCommands — DGC 执行入口
+// GPU 根据 IndirectCommandsLayout 从间接缓冲读取参数并生成绘制命令
+// ============================================================
+void VulkanCommandList::ExecuteGeneratedCommands(const DGCExecuteDesc& desc) {
+    if (!m_VulkanDevice || !m_VulkanDevice->SupportsDGC()) {
+        HE_CORE_WARN("ExecuteGeneratedCommands: 设备不支持 DGC");
+        return;
     }
+
+    VkCommandBuffer cb = m_CmdBuffers[m_FrameIndex];
+    const auto& dgcFuncs = m_VulkanDevice->GetDGCFuncs();
+
+    // 从 DGCExecuteDesc 还原 Vulkan 句柄（非调度句柄需 reinterpret_cast）
+    VkIndirectCommandsLayoutEXT layout =
+        reinterpret_cast<VkIndirectCommandsLayoutEXT>(desc.indirectCommandsLayout);
+    VkIndirectExecutionSetEXT executionSet =
+        reinterpret_cast<VkIndirectExecutionSetEXT>(desc.indirectExecutionSet);
+
+    // 构建 DGC 执行信息
+    VkGeneratedCommandsInfoEXT genInfo{};
+    genInfo.sType              = VK_STRUCTURE_TYPE_GENERATED_COMMANDS_INFO_EXT;
+    genInfo.shaderStages       = VK_SHADER_STAGE_VERTEX_BIT
+                                 | VK_SHADER_STAGE_FRAGMENT_BIT;
+    genInfo.indirectExecutionSet   = executionSet;
+    genInfo.indirectCommandsLayout = layout;
+    genInfo.indirectAddress        = desc.sequencesBufferAddr;
+    genInfo.indirectAddressSize    = desc.maxSequenceCount * sizeof(u32) * 5;  // VkDrawIndexedIndirectCommand
+    genInfo.preprocessAddress      = desc.preprocessBufferAddr;
+    genInfo.preprocessSize         = desc.preprocessBufferSize;
+    genInfo.maxSequenceCount       = desc.maxSequenceCount;
+    genInfo.sequenceCountAddress   = desc.sequenceCountAddr;
+    genInfo.maxDrawCount           = desc.maxDrawCount;
+
+    // 执行 DGC（isPreprocessed = VK_FALSE：由驱动内部完成预处理）
+    dgcFuncs.vkCmdExecuteGeneratedCommandsEXT(
+        cb, VK_FALSE, &genInfo);
+}
+
+void VulkanCommandList::SetPushConstants(u32 offset, u32 size, const void* data) {
+    // 根据当前管线绑定点选择正确的 shader stage 标志
+    VkShaderStageFlags stage;
+    if (m_CurrentBindPoint == VK_PIPELINE_BIND_POINT_COMPUTE) {
+        stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    } else if (m_CurrentBindPoint == VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR) {
+        // RT 管线：Push Constant 需覆盖所有 RT shader stage
+        stage = VK_SHADER_STAGE_RAYGEN_BIT_KHR
+              | VK_SHADER_STAGE_MISS_BIT_KHR
+              | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR
+              | VK_SHADER_STAGE_ANY_HIT_BIT_KHR
+              | VK_SHADER_STAGE_CALLABLE_BIT_KHR;
+    } else {
+        stage = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
+    vkCmdPushConstants(m_CmdBuffers[m_FrameIndex], m_CurrentLayout,
+                      stage, offset, size, data);
 }
 
 void VulkanCommandList::Dispatch(u32 groupCountX, u32 groupCountY, u32 groupCountZ) {

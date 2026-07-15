@@ -2,6 +2,7 @@
 
 #include "Pipeline/IRenderPipeline.h"
 #include "Pipeline/Material.h"
+#include "Pipeline/ClusteredShading.h"
 #include "GI/GlobalIllumination.h"
 #include "RHI/RHI.h"
 #include "RenderGraph.h"
@@ -167,6 +168,13 @@ private:
     ProfilerManager m_Profiler;  // GPU 时间戳 Profiler
     u32 m_LastDrawCount = 0;
     u32 m_LastTriCount  = 0;
+
+    // Forward+（Cluster 光源剔除）
+    bool                           m_UseForwardPlus = true;  // 默认开启 Forward+
+    ClusteredShading               m_ClusteredShading;
+    std::unique_ptr<rhi::IRHIBuffer> m_LightGridBuffer;       // binding 7: LightGrid
+    std::unique_ptr<rhi::IRHIBuffer> m_LightIndexListBuffer;  // binding 8: LightIndexList
+    std::vector<GPULight>          m_CachedLights;            // CPU 端光源缓存（剔除用）
 
     // Shader 热重载 — PSO 注册表
     struct PSORecord {

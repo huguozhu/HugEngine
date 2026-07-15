@@ -66,16 +66,22 @@ GPU_STRUCT GPUObjectData {
 // Push Constant 结构体
 // ============================================================
 
-// --- ForwardPushConstant: 前向管线每帧 Push Constant（112 字节）---
+// --- ForwardPushConstant: 前向管线每帧 Push Constant（128 字节）---
 // C++ 端别名: PushConstantData
+// Forward+: cluster 参数由 m_UseForwardPlus 控制，运行时切换传统 / Forward+ 路径
 GPU_STRUCT PushConstantData {
     float4x4 viewProjMatrix;        // [0..64]   相机 VP 矩阵
     float4   cameraPosition;        // [64..80]  相机世界位置
-    GPU_UINT lightCount;            // [80]
-    GPU_UINT objectIndex;           // [84]
+    GPU_UINT lightCount;            // [80]      光源总数
+    GPU_UINT objectIndex;           // [84]      GPU 对象索引
     GPU_UINT useInstanceID;         // [88]      1=GPU Driven (SV_InstanceID)
     float    iblIntensity;          // [92]      IBL 环境光强度
-    GPU_UINT _pad;                  // [96]
+    GPU_UINT clusterTilesX;         // [96]      Cluster X 方向 tile 数（0=传统模式）
+    GPU_UINT clusterTilesY;         // [100]     Cluster Y 方向 tile 数
+    float    clusterNear;           // [104]     近裁剪面
+    float    clusterFar;            // [108]     远裁剪面
+    float    clusterLogFactor;      // [112]     log(far/near)
+    GPU_UINT useClustered;          // [116]     1=Forward+ / 0=传统 Forward
 };
 
 // --- ShadowPushConstant: 阴影通道 Push Constant（80 字节）---

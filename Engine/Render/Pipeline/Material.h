@@ -46,7 +46,7 @@ static constexpr u32 CASCADE_COUNT        = 3;
 static_assert(sizeof(GPUShadowData)   == 256, "GPUShadowData must be 256 bytes");
 static_assert(sizeof(GPULight)        == 64,  "GPULight must be 64 bytes");
 static_assert(sizeof(GPUObjectData)   == 128, "GPUObjectData must be 128 bytes");
-static_assert(sizeof(PushConstantData) == 112, "PushConstantData must be 112 bytes");
+static_assert(sizeof(PushConstantData) == 128, "PushConstantData must be 128 bytes");
 static_assert(sizeof(ShadowPushConstant) == 80, "ShadowPushConstant must be 80 bytes");
 
 // ============================================================

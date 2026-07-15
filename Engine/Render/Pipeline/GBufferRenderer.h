@@ -47,6 +47,19 @@ struct GBufferContext {
 
     // GPU Driven 专用：MeshBatcher（VB/IB 合并，由 DeferredPipeline 管理生命周期）
     class MeshBatcher* meshBatcher = nullptr;
+
+    // ── DGC 执行上下文（GPU Driven + DGC 模式使用）──
+    struct DGCContext {
+        bool    enabled               = false;  // DGC 是否启用
+        void*   indirectCommandsLayout = nullptr; // VkIndirectCommandsLayoutEXT
+        void*   indirectExecutionSet   = nullptr; // VkIndirectExecutionSetEXT
+        u64     preprocessBufferAddr   = 0;       // 预处理缓冲 GPU 地址
+        u64     preprocessBufferSize   = 0;       // 预处理缓冲大小
+        u32     maxSequenceCount       = 0;       // 最大序列数
+        rhi::IRHIBuffer* sequenceBuffer  = nullptr; // 间接绘制命令缓冲（由 GPU Cull 填充）
+        rhi::IRHIBuffer* countBuffer     = nullptr; // 实际绘制数缓冲（由 GPU Cull 填充）
+    };
+    DGCContext dgc;
 };
 
 // ============================================================

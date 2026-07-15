@@ -79,6 +79,14 @@ public:
     virtual void                      UpdateDescriptorSet(DescriptorSetHandle set, u32 binding,
                                                           DescriptorType type,
                                                           IRHIAccelerationStructure* as) = 0;
+
+    // --- Per-Mip ImageView 支持（用于 Hi-Z 金字塔构建等写入特定 mip 的场景） ---
+    /// 创建纹理指定 mip level 的存储图像视图（仅 Color format 纹理）
+    virtual void*                     CreateTextureMipStorageView(IRHITexture* texture, u32 mipLevel) = 0;
+    /// 创建纹理指定 mip level 的采样图像视图（仅 Color format 纹理）
+    virtual void*                     CreateTextureMipSampledView(IRHITexture* texture, u32 mipLevel) = 0;
+    /// 销毁通过 CreateTextureMip*View 创建的图像视图
+    virtual void                      DestroyTextureMipView(void* view) = 0;
     // --- GPU Query ---
     virtual std::unique_ptr<IRHIQueryPool> CreateQueryPool(u32 queryCount) = 0;
     virtual float GetTimestampPeriod() = 0;  // 时间戳单位（纳秒）

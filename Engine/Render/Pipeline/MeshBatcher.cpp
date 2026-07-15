@@ -13,6 +13,7 @@ bool MeshBatcher::Build(World& world) {
     m_MergedVertices.clear();
     m_MergedIndices.clear();
     m_Commands.clear();
+    m_DGCTokens.clear();
 
     u32 baseVertex = 0;
     u32 baseIndex  = 0;
@@ -50,6 +51,17 @@ bool MeshBatcher::Build(World& world) {
 
         // 记录间接绘制命令
         m_Commands.push_back({idxCount, 1, baseIndex, (i32)baseVertex, 0});
+
+        // DGC 模式：记录含 objectIndex 的 draw token
+        // objectIndex = 当前物体在 GPUScene 中的索引（与 m_Commands 顺序一致）
+        DGCDrawToken dgcToken;
+        dgcToken.indexCount    = idxCount;
+        dgcToken.instanceCount = 1;
+        dgcToken.firstIndex    = baseIndex;
+        dgcToken.vertexOffset  = (i32)baseVertex;
+        dgcToken.firstInstance = (u32)m_DGCTokens.size();  // 初始时 firstInstance=objectIndex
+        dgcToken.objectIndex   = (u32)m_DGCTokens.size();  // 按 Build 顺序递增
+        m_DGCTokens.push_back(dgcToken);
 
         baseVertex += vtxCount;
         baseIndex  += idxCount;

@@ -1,6 +1,6 @@
 # HugEngine 开发进度
 
-> 最后更新: 2026-07-10（今日更新: HW Ray Tracing Phase 1-3 ✅, RT PSO + BLAS/TLAS + TraceRays + 材质+光照）
+> 最后更新: 2026-07-15（今日更新: GPU Driven 全链路完成 — AsyncCompute + 两阶段剔除 + PTG + DGC + WorkGraph + Forward+）
 
 ## 整体进度
 
@@ -13,6 +13,10 @@
 - **Phase 1**: 引擎模块 + PBR 前向管线 + 编辑器 + 阴影 + HDR + 后处理链 + TAA/FXAA + 动画基础 ✅
 - **Phase 1-4**: 全面完成后处理链 (Bloom/DOF/MotionBlur/AutoExposure/ColorGrading) ✅
 - **Phase 2**: GPU Driven — Bindless + GPU Culling + CSM + IBL + Clustered Shading + ExecuteIndirect (Deferred+Forward) ✅
+- **Phase 2a (GPU Driven 升级)**: 两阶段遮挡剔除 + Hi-Z 金字塔 + PTG 剔除 + AsyncCompute 开启 ✅
+- **DGC (Device Generated Commands)**: VK_EXT_device_generated_commands + GPU 自主命令生成 ✅
+- **GPU Work Graph**: 软件模拟框架 (Entry/Compute/Draw 节点链 + 原子计数器 Record 传递) ✅
+- **Forward+ Pipeline**: ClusteredShading 集成到 ForwardPipeline ✅
 - **Phase 5**: 三缓冲帧环 + 辅助命令缓冲 + 多线程视锥剔除 + 录制 ✅
 - **GI_IBL**: 环境光照（辐照度 32² + 预滤波 5-mip + BRDF LUT） ✅
 - **GI_RSM**: Reflective Shadow Maps（独立深度缓冲 + 光栅化生成 + PBR 采样） ✅
@@ -383,21 +387,24 @@ Camera → PushConstant → RayGen::invViewProj → world ray
 | 2 | FullScene 拆分为独立 Shadow/IBL/HDR Pass | ⬜ |
 | 3 | 点光阴影 PCF 软滤波 | ⬜ |
 | 4 | 点光阴影视锥剔除 | ⬜ |
-| 5 | GPUCulling Dispatch 移出 RenderPass | ⬜ |
-| 6 | AsyncCompute 多阶段提交架构完善 + 默认开启 | ⬜ |
-| 7 | ExecuteIndirect + GPU Driven (Forward | ⬜ 部分完成，待完善 |
-| 8 | Forward+ (Tile-based Light Culling) | ⬜ |
-| 9 | GI_VXGI 体素锥追踪 | ⬜ |
-| 10 | HW Ray Tracing (TLAS/BLAS + RT PSO + TraceRays + 材质+光照) | ✅ Phase 1-3 完成 |
-| 11 | Virtual Shadow Maps | ⬜ |
-| 12 | GI_ReSTIR 时空重采样 | ⬜ |
-| 13 | Prefab 系统 | ⬜ |
-| 14 | Decal + ReflectionProbe | ⬜ |
-| 15 | Atmosphere + Volumetrics | ⬜ |
-| 16 | Skeletal Animation (骨骼动画) | ⬜ |
-| 17 | Editor Undo/Redo | ⬜ |
-| 18 | Nanite / Mesh Shader / Virtual Texturing | ⬜ |
-| 19 | 3DGS (Gaussian Splatting) | ⬜ |
+| 5 | GPUCulling Dispatch 移出 RenderPass | ✅ 2026-07-14 (确认无需修复) |
+| 6 | AsyncCompute 多阶段提交架构完善 + 默认开启 | ✅ 2026-07-14 |
+| 7 | 两阶段遮挡剔除 (Phase 1 粗筛 + Phase 2 精筛 + Hi-Z 金字塔) | ✅ 2026-07-14 |
+| 8 | 持久化线程组剔除 (PTG — per-frame dispatch 模式) | ✅ 2026-07-15 |
+| 9 | Device Generated Commands (VK_EXT_dgc) | ✅ 2026-07-15 |
+| 10 | GPU Work Graph 软件模拟框架 | ✅ 2026-07-15 |
+| 11 | Forward+ (Tile-based Light Culling) | ✅ 2026-07-15 |
+| 12 | GI_VXGI 体素锥追踪 | ⬜ |
+| 13 | HW Ray Tracing (TLAS/BLAS + RT PSO + TraceRays + 材质+光照) | ✅ Phase 1-3 完成 |
+| 14 | Virtual Shadow Maps | ⬜ |
+| 15 | GI_ReSTIR 时空重采样 | ⬜ |
+| 16 | Prefab 系统 | ⬜ |
+| 17 | Decal + ReflectionProbe | ⬜ |
+| 18 | Atmosphere + Volumetrics | ⬜ |
+| 19 | Skeletal Animation (骨骼动画) | ⬜ |
+| 20 | Editor Undo/Redo | ⬜ |
+| 21 | Nanite / Mesh Shader / Virtual Texturing | ⬜ |
+| 22 | 3DGS (Gaussian Splatting) | ⬜ |
 
 ## 架构文档对比分析 (vs HugEngine_Architecture_And_Tasks.md)
 
@@ -406,7 +413,7 @@ Camera → PushConstant → RayGen::invViewProj → world ray
 | Phase | 主题 | 完成度 | 完成项 | 缺失项 |
 |-------|------|:---:|--------|--------|
 | P1 | 核心骨架 | ~97% | RHI Vulkan+VMA, Slang→SPIR-V, RenderGraph, ECS, glTF, Forward+Deferred, TAA, SSAO, Bloom, DOF, MotionBlur, FXAA, SMAA, MSAA(基础), AutoExposure, ColorGrading, GPU Profiling, Editor基础, Shader HotReload, AsyncCompute(基础), Animation(关键帧) | Undo/Redo |
-| P2 | GPU Driven | ~80% | Bindless, GPU Culling, GPU Scene, CSM+Shadow, IBL, Clustered Shading, ExecuteIndirect+DGC (Deferred+Forward), VMA | VSM, VRS, Decal/ReflProbe, Prefab, Forward+ |
+| P2 | GPU Driven | ~95% | Bindless, GPU Culling, GPU Scene, CSM+Shadow, IBL, Clustered Shading, ExecuteIndirect+DGC (Deferred+Forward), VMA, 两阶段剔除, Hi-Z 金字塔, PTG, AsyncCompute, Forward+, WorkGraph 框架 | VSM, VRS, Decal/ReflProbe, Prefab |
 | P3 | 高级几何 | ~5% | — | Nanite, Mesh Shader, Virtual Texturing, OIT, Impostor |
 | P4 | GI + RT | ~30% | DDGI (HDR radiance), Denoiser, SSGI, SSR, **HW RT Phase 1-3** (BLAS/TLAS + TraceRays + 材质+光照) | Lumen GI, VXGI, ReSTIR, NRD, NRC, RT 顶点法线/纹理/阴影 |
 | P5 | 神经渲染 | 0% | — | DLSS/FSR/XeSS, FrameGen, RayRecon, Neural Materials |

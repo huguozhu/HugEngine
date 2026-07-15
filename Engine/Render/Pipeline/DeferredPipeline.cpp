@@ -9,6 +9,10 @@
 #include "AntiAliasing/AA_FXAA.h"
 #include "Pipeline/GBufferRenderer_CPU.h"
 #include "Pipeline/GBufferRenderer_GPU.h"
+
+// DGC 支持（仅在 Vulkan 后端启用）
+#include "Vulkan/VulkanDGC.h"
+#include "Vulkan/VulkanInternal.h"   // VulkanDeviceAccess / VulkanPipelineState 等
 #include "Asset/BindlessTextureManager.h"
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
@@ -22,6 +26,11 @@
 #include "GBuffer.frag.spv.h"
 #include "DeferredLighting.vert.spv.h"
 #include "DeferredLighting.frag.spv.h"
+
+// CVar: DGC 运行时开关（0=关闭，1=开启，默认关闭以保留传统 ExecuteIndirect 回退）
+// 在控制台输入 "r.DGC.Enable 1" 可动态启用
+static int32_t cvDGC_Enable = 0;
+static const char* kCVar_DGC_Enable_Name = "r.DGC.Enable";
 
 namespace he::render {
 
@@ -134,6 +143,9 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     m_Skybox  = std::make_unique<SkyboxPass>(); m_Skybox->Initialize(device, m_Width, m_Height);
     m_SceneRenderer = std::make_unique<SceneRenderer>();
     m_GPUCulling.Initialize(device);
+    if (m_GPUCulling.usePTG) {
+        m_GPUCulling.InitializePTG(device);
+    }
     m_GPUScene.Initialize(device);
     m_SSGI.Initialize(device, m_Width, m_Height);
     m_SSR.Initialize(device, m_Width, m_Height);
@@ -193,6 +205,34 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     gbDesc.debugName = "GBuffer";
     m_GBufferPSO = device->CreatePipelineState(gbDesc);
     HE_ASSERT(m_GBufferPSO, "DeferredPipeline: GBuffer PSO failed");
+
+    // ── DGC 初始化（仅在硬件支持时）──
+    if (device->GetCaps().supportsDGC) {
+        // 获取 Vulkan 底层句柄
+        auto* vkDev = static_cast<rhi::VulkanDevice*>(device);
+        VkDevice vkDevice       = vkDev->GetVkDevice();
+        VkPhysicalDevice vkPhysical = vkDev->GetVkPhysical();
+        auto* vkPipelineState   = static_cast<rhi::VulkanPipelineState*>(m_GBufferPSO.get());
+        VkPipeline vkPipeline   = vkPipelineState->GetPipeline();
+        const auto& dgcFuncs    = vkDev->GetDGCFuncs();
+
+        m_VulkanDGC = new rhi::VulkanDGC();
+        bool dgcOK = m_VulkanDGC->Initialize(
+            vkDevice, vkPhysical, vkPipeline,
+            GPUCulling::kMaxObjects,  // maxSequences = 最大场景物体数
+            GPUCulling::kMaxObjects,  // maxDraws = 最大绘制调用数
+            dgcFuncs
+        );
+        if (dgcOK) {
+            HE_CORE_INFO("DeferredPipeline: DGC 初始化成功，可通过 r.DGC.Enable 1 启用");
+        } else {
+            HE_CORE_WARN("DeferredPipeline: DGC 初始化失败，回退到 ExecuteIndirect 路径");
+            delete m_VulkanDGC;
+            m_VulkanDGC = nullptr;
+        }
+    } else {
+        HE_CORE_INFO("DeferredPipeline: 硬件不支持 DGC，使用传统 ExecuteIndirect 路径");
+    }
 
     // GBuffer set=0 共享描述符集（含 binding 2: Object SSBO + bindless 5/6）
     m_GBufferSet = device->AllocateDescriptorSet(m_GBufferLayout);
@@ -341,10 +381,22 @@ void DeferredPipeline::Shutdown() {
     for (auto& b : m_ObjectBuffers) b.reset();
     for (auto& b : m_ShadowBuffers) b.reset();
     for (auto& b : m_ShadowObjBuffers) b.reset();
+    if (m_GPUCulling.usePTG) {
+        m_GPUCulling.ShutdownPTG(m_Device);
+    }
     m_GPUCulling.Shutdown(m_Device);
     m_GPUScene.Shutdown();
     if (m_GBufferRenderer) m_GBufferRenderer->Shutdown();
     m_GBufferRenderer.reset();
+
+    // DGC 清理
+    if (m_VulkanDGC) {
+        auto* vkDev = static_cast<rhi::VulkanDevice*>(m_Device);
+        m_VulkanDGC->Shutdown(vkDev->GetVkDevice());
+        delete m_VulkanDGC;
+        m_VulkanDGC = nullptr;
+    }
+
     m_Profiler.Shutdown();
     m_AutoExposure.Shutdown();
     // AsyncCompute 清理
@@ -478,56 +530,43 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
 void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
                                he::SceneGraph& sg, const CameraData& camera) {
     // ============================================================
-    // AsyncCompute: 当前默认关闭，等待实现多阶段提交架构
+    // AsyncCompute: RenderGraph 多阶段提交
     //
-    // 已知问题: QFOT Barrier 需要在两个队列之间正确地 RELEASE→ACQUIRE，
-    //   当前单次 vkQueueSubmit 无法在命令缓冲中间插入信号量同步点。
-    //   正确方案需要将 Graphics 拆分为:
-    //     Submit #1: QFOT Release + Signal(fence_A)
-    //     Submit #2: Compute: Wait(fence_A) + work + Release + Signal(fence_B)
-    //     Submit #3: Graphics: Wait(fence_B) + Acquire + 后续渲染
-    //   这要求 RenderGraph 支持分阶段提交，属于较大架构改动。
+    // 当设备支持专用 Compute 队列时，RenderGraph 内部自动将 Pass
+    // 拆分为三段提交：
+    //   Phase 1: Graphics CmdList #1（Shadow + 前期 Pass）
+    //   Phase 2: Compute CmdList（GPUCull, SSAO, DDGI, AutoExposure）
+    //   Phase 3: Graphics CmdList #2（GBuffer, Lighting, PostProcess）
     //
-    // 当前所有 Pass 在单 Graphics 队列执行，AsyncCompute 基础设施保留。
-    // 设置 m_AsyncComputeOverride = true 可强制启用（仅用于调试）。
+    // 传统单队列回退：设备不支持 AsyncCompute 时自动降级。
     // ============================================================
-#if 0  // AsyncCompute: 设为 1 启用（调试用，已知白屏问题）
-    bool useAsyncCompute = m_Device->HasAsyncComputeQueue() || m_AsyncComputeOverride;
-#else
-    bool useAsyncCompute = false;
-#endif
+    bool useAsyncCompute = m_Device->HasAsyncComputeQueue();
 
-    if (useAsyncCompute && !m_ComputeCmdList) {
-        m_ComputeCmdList = m_Device->CreateCommandList(rhi::QueueType::Compute);
+    if (useAsyncCompute && m_CrossQueueFence == rhi::kInvalidFence) {
+        // 首次使用 AsyncCompute 时，创建跨队列时间线信号量
         m_CrossQueueFence = m_Device->CreateFence();
-        HE_CORE_INFO("DeferredPipeline: AsyncCompute enabled — dedicated Compute command list created");
+        HE_CORE_INFO("DeferredPipeline: AsyncCompute — CrossQueue fence created");
     }
 
     RenderGraph rg;
     rg.SetProfiler(&m_Profiler);
     rg.SetAsyncComputeEnabled(useAsyncCompute);
+    if (useAsyncCompute) {
+        // 将时间线信号量传入 RenderGraph，供多阶段提交使用
+        rg.SetCrossQueueFence(m_CrossQueueFence);
+        rg.SetTimelineBase(m_FrameCounter);
+        m_FrameCounter += 2;  // 每帧消耗 2 个时间线值
+    }
     BuildFrameGraph(rg, world, sg, camera);
     rg.Compile();
 
-    if (useAsyncCompute && m_ComputeCmdList) {
-        m_ComputeCmdList->Begin();
-        rg.Execute(cmd, m_ComputeCmdList.get(), m_Device);
-        m_ComputeCmdList->End();
-
-        u64 signalValue = ++m_FrameCounter;
-        cmd->SetTimelineSignal(m_CrossQueueFence, signalValue);
-        m_ComputeCmdList->SetTimelineWait(m_CrossQueueFence, signalValue);
-        m_ComputePendingSubmit = true;
-    } else {
-        // 单 Graphics 队列（正常路径）
-        rg.Execute(cmd, m_Device);
-    }
+    // 统一入口：RenderGraph 根据 useAsyncCompute 自动分支
+    rg.Execute(cmd, m_Device);
 }
 
 void DeferredPipeline::FlushComputeWork() {
-    if (!m_ComputePendingSubmit || !m_ComputeCmdList) return;
-    m_Device->Submit(m_ComputeCmdList.get());
-    m_ComputePendingSubmit = false;
+    // 多阶段提交已在 RenderGraph::ExecuteWithAsyncCompute 内部自动完成
+    // 保留此方法以兼容外部调用（Samples/04.Deferred.cpp line 1022）
 }
 
 void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
@@ -567,19 +606,44 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     }
 
     // ── GPU 剔除 Compute Pass（读上帧 GBuffer 深度 → 调度下帧剔除）──
+    // 单阶段模式：Dispatch() 直接输出 IndirectDraw 命令
+    // 两阶段模式：DispatchPhase1() 仅做粗筛，输出候选列表
     // 必须在 GBuffer 之前：此时 gbDepth 保留上帧数据且未作为渲染目标
-    rg.AddPass("GPU_Cull",
-        {{gbDepth, ResourceAccess::Read}},  // 读上一帧深度做 Hi-Z 遮挡剔除
-        {},
-        [&, w, h](rhi::IRHICommandList* c) {
-            if (!m_GPUCulling.enabled) return;
-            m_GPUCulling.SetSceneBuffer(m_Device, m_GPUScene.GetObjectBuffer());
-            if (m_GBufferDepth) m_GPUCulling.SetDepthTexture(m_Device, m_GBufferDepth.get(), w, h);
-            m_GPUCulling.Dispatch(c, camera.GetViewProjMatrix(), m_GPUScene.GetObjectCount(), w, h);
-            // 恢复 graphics pipeline state（compute dispatch 后状态未定义，影响后续 GBuffer pass）
-            c->SetPipeline(m_GBufferPSO.get());
-        },
-        RGPassQueue::Compute);  // AsyncCompute: GPU 剔除在 Compute 队列执行
+    if (m_GPUCulling.useTwoPhase) {
+        // Phase 1: 视锥 + 上帧 Hi-Z 粗筛 → 候选列表（AsyncCompute 队列，帧首执行）
+        rg.AddPass("GPU_Cull_Phase1",
+            {{gbDepth, ResourceAccess::Read}},  // 读上一帧深度做粗筛遮挡测试
+            {},
+            [&, w, h](rhi::IRHICommandList* c) {
+                if (!m_GPUCulling.enabled) return;
+                m_GPUCulling.SetSceneBuffer(m_Device, m_GPUScene.GetObjectBuffer());
+                if (m_GBufferDepth) m_GPUCulling.SetDepthTexture(m_Device, m_GBufferDepth.get(), w, h);
+                m_GPUCulling.DispatchPhase1(c, camera.GetViewProjMatrix(),
+                                            m_GPUScene.GetObjectCount(), w, h);
+                c->SetPipeline(m_GBufferPSO.get());
+            },
+            RGPassQueue::Compute);  // AsyncCompute: Phase 1 在 Compute 队列执行
+    } else {
+        // 单阶段模式：完整剔除 → IndirectDraw 命令
+        // PTG per-frame dispatch 模式可用 AsyncCompute（与普通 Dispatch 相同路径）
+        rg.AddPass("GPU_Cull",
+            {{gbDepth, ResourceAccess::Read}},  // 读上一帧深度做 Hi-Z 遮挡剔除
+            {},
+            [&, w, h](rhi::IRHICommandList* c) {
+                if (!m_GPUCulling.enabled) return;
+                m_GPUCulling.SetSceneBuffer(m_Device, m_GPUScene.GetObjectBuffer());
+                if (m_GBufferDepth) m_GPUCulling.SetDepthTexture(m_Device, m_GBufferDepth.get(), w, h);
+                if (m_GPUCulling.usePTG) {
+                    m_GPUCulling.SignalPTG(c, camera.GetViewProjMatrix(),
+                                          m_GPUScene.GetObjectCount(), w, h);
+                } else {
+                    m_GPUCulling.Dispatch(c, camera.GetViewProjMatrix(),
+                                          m_GPUScene.GetObjectCount(), w, h);
+                }
+                c->SetPipeline(m_GBufferPSO.get());
+            },
+            RGPassQueue::Compute);
+    }
 
     // ── Shadow Pass（使用光源 VP 矩阵渲染 CSM + Spot shadow maps）──
     // 必须在 GBuffer 之前完成，确保阴影贴图在 Lighting Pass 中可采样
@@ -649,8 +713,54 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             // 更新运行时 context
             m_GBufferCtx.objectBuffer = m_ObjectBuffers[m_CurrentFrameSlot].get();
             m_GBufferCtx.prevViewProj = m_PrevViewProj;
+
+            // ── DGC 模式上下文注入 ──
+            // 检查 DGC 硬件支持 + CVar 开关 + 可视化回调非空
+            m_DGCEnabled = (cvDGC_Enable != 0)
+                && m_VulkanDGC && m_VulkanDGC->IsInitialized()
+                && m_GPUCulling.GetIndirectBuffer()
+                && m_GPUCulling.enabled;
+            if (m_DGCEnabled) {
+                auto& dgcCtx = m_GBufferCtx.dgc;
+                dgcCtx.enabled               = true;
+                dgcCtx.indirectCommandsLayout = reinterpret_cast<void*>(
+                    m_VulkanDGC->GetLayout());
+                dgcCtx.indirectExecutionSet   = reinterpret_cast<void*>(
+                    m_VulkanDGC->GetExecutionSet());
+                dgcCtx.preprocessBufferAddr   = m_VulkanDGC->GetPreprocessAddress();
+                dgcCtx.preprocessBufferSize   = m_VulkanDGC->GetPreprocessSize();
+                dgcCtx.maxSequenceCount       = m_VulkanDGC->GetMaxSequences();
+                dgcCtx.sequenceBuffer         = m_GPUCulling.GetIndirectBuffer();
+                dgcCtx.countBuffer            = m_GPUCulling.GetDrawCountBuffer();
+            } else {
+                m_GBufferCtx.dgc = {};  // 重置 DGC 上下文
+            }
+
             m_GBufferRenderer->Render(c, m_GBufferCtx, world, sg, camera);
         });
+
+    // ── 两阶段剔除 Phase 2: 当前帧 Hi-Z 精筛（GBuffer 后，读取当前帧深度）──
+    if (m_GPUCulling.useTwoPhase && m_GPUCulling.enabled) {
+        // 构建当前帧 Hi-Z 深度金字塔（从 GBuffer 刚写入的深度缓冲下采样）
+        rg.AddPass("HiZ_Build",
+            {{gbDepth, ResourceAccess::Read}},
+            {},
+            [&, w, h](rhi::IRHICommandList* c) {
+                m_GPUCulling.BuildHiZPyramid(c, w, h);
+            });
+
+        // Phase 2: 读取当前帧 Hi-Z，验证 Phase 1 候选 → 输出 IndirectDraw 命令
+        rg.AddPass("GPU_Cull_Phase2",
+            {{gbDepth, ResourceAccess::Read}},
+            {},
+            [&](rhi::IRHICommandList* c) {
+                // 更新 Phase 2 的深度/Hi-Z 绑定为当前帧 GBuffer 深度
+                m_Device->UpdateDescriptorSet(m_GPUCulling.GetPhase2Set(), 3,
+                    rhi::DescriptorType::CombinedImageSampler,
+                    m_GBufferDepth.get(), m_GPUCulling.GetHiZSampler());
+                m_GPUCulling.DispatchPhase2(c, m_Width, m_Height);
+            });
+    }
 
     // ============================================================
     // DDGI Probe Update（Compute Shader：必须放在所有 offscreen pass 之前，
@@ -858,7 +968,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             m_AutoExposure.Render(c);
             // 恢复 graphics pipeline state（compute dispatch 后 m_CurrentRenderPass 为空）
             c->SetPipeline(m_LightingPSO.get());
-        });
+        },
+        RGPassQueue::Compute);  // AsyncCompute: 自动曝光在 Compute 队列执行
 
     // ── 后处理链路：Bloom → DOF → MotionBlur（责任链，按序串联）──
     bool bloomActive = m_Bloom.IsEnabled() && m_Bloom.GetOutput() != nullptr;

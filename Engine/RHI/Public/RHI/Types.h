@@ -165,6 +165,9 @@ struct DeviceCaps {
     // 异步计算支持
     bool    supportsAsyncCompute   = false;  // GPU 是否有独立 Compute 队列族
     bool    supportsTransferQueue  = false;  // GPU 是否有独立 Copy 队列 (DMA)
+
+    // Device Generated Commands 支持（VK_EXT_device_generated_commands）
+    bool    supportsDGC            = false;  // DGC 硬件加速
     u32     asyncComputeTier       = 0;      // 0=不支持, 1=独立队列族, 2=专用硬件引擎
 
     // Ray Tracing 详细能力（supportsRayTracing=true 时有效）
