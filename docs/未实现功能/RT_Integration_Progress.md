@@ -240,7 +240,7 @@ ClosestHit: u_MatTex.Load(id) → PBR因子 + materialID
 
 ### 5.2 ClosestHitKHR StorageBuffer Bug（深度诊断）
 
-**发现**：`StorageBuffer` 在 ClosestHitKHR 中**完全不可用**，表现为 GPU 静默失败（黑屏）。
+**发现**：`StorageBuffer` 在 ClosestHitKHR 中**当前测试环境**不可用，表现为 GPU 静默失败（黑屏）。
 
 **诊断矩阵**：
 
@@ -253,7 +253,7 @@ ClosestHit: u_MatTex.Load(id) → PBR因子 + materialID
 | HLSL | slangc 2026.13 | CallableKHR Texture2D[] | ✅ | ✅ | **正常** |
 | GLSL | glslangValidator | ClosestHitKHR SSBO | ❌ | ❌ | 黑屏 |
 
-**结论**：`StorageBuffer` 存储类在 **ClosestHitKHR 执行模型**中 GPU 硬件不支持（与编译器/NonUniform 无关）。`CallableKHR` 执行模型完全支持。
+**结论**：`StorageBuffer` 在 ClosestHitKHR 中触发黑屏，两个编译器（slangc/glslangValidator）表现一致，排除编译器 bug。Vulkan 规范本身允许 ClosestHit 使用 StorageBuffer，**推测为特定 GPU 驱动或 SPIR-V 内存访问修饰符缺失**导致的兼容性问题。需在不同 GPU（NVIDIA/AMD/Intel）上验证以确定根因。`CallableKHR` 执行模型在测试环境中完全正常，作为当前变通方案。
 
 ### 5.3 当前能力
 
@@ -268,8 +268,9 @@ ClosestHit: u_MatTex.Load(id) → PBR因子 + materialID
 | HitKind 法线修正 | ✅ | 正面/背面自动翻转 |
 | 嵌入式纹理加载 | ✅ | glTF buffer-embedded stbi |
 | 真实 mesh UV | ⬜ | Callable + 顶点缓冲读取 |
-| 阴影射线 | ⬜ | 需 SSBO 或 Callable 变通 |
-| 几何法线 | ⬜ | position_fetch HLSL 支持 |
+| 阴影射线 | ⬜ | SSBO 在 ClosestHit 兼容性待验证，或 Callable 变通 |
+| 几何法线 | ⬜ | position_fetch 扩展已加载，shader 端接入 `HitTriangleVertexPosition` |
+| StorageBuffer ClosestHit 兼容性 | ⬜ | 需在不同 GPU 上验证根因（驱动 bug 或 SPIR-V 修饰符） |
 
 ---
 
