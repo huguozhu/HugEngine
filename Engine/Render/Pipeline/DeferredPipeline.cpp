@@ -354,6 +354,9 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     m_LightingPSO = device->CreatePipelineState(lDesc);
     HE_ASSERT(m_LightingPSO, "DeferredPipeline: Lighting PSO failed");
 
+    // GPU 粒子系统
+    m_ParticleRenderer.Initialize(device);
+
     m_Ready = true;
     HE_CORE_INFO("DeferredPipeline initialized");
     return true;
@@ -409,6 +412,7 @@ void DeferredPipeline::Shutdown() {
     m_SSGI.Shutdown();
     m_SSR.Shutdown();
     m_DDGI.Shutdown();
+    m_ParticleRenderer.Shutdown(m_Device);
     m_DenoiseSSGI.Shutdown();
     m_DenoiseSSR.Shutdown();
     m_SSAO.Shutdown();

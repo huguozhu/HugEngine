@@ -440,6 +440,16 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         },
         RGPassQueue::Compute);  // AsyncCompute: 自动曝光在 Compute 队列执行
 
+    // ── Particle Render（粒子写入 HDR Target，Lighting 之后）──
+    for (u32 pid : m_ParticleComponentIDs) {
+        rg.AddPass("ParticleRender",
+            {{hdrC, ResourceAccess::Read}},
+            {{hdrC, ResourceAccess::Write}},
+            [this, pid, &camera](rhi::IRHICommandList* c) {
+                m_ParticleRenderer.Render(c, pid, camera.GetViewProjMatrix(), camera);
+            });
+    }
+
     // ── 后处理链路：Bloom → DOF → MotionBlur（责任链，按序串联）──
     bool bloomActive = m_Bloom.IsEnabled() && m_Bloom.GetOutput() != nullptr;
     bool dofActive   = m_DOF.IsEnabled()   && m_DOF.GetOutput()   != nullptr;

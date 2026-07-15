@@ -21,6 +21,7 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 // DGC 前向声明（仅在 Vulkan 后端下实际使用）
 namespace he::rhi { class VulkanDGC; }
 #include "Pipeline/GBufferRenderer.h"
+#include "Pipeline/ParticleRenderer.h"
 #include "GI/GI_SSGI.h"
 #include "PostProcess/SSAO.h"
 #include "GI/GI_SSR.h"
@@ -198,6 +199,10 @@ private:
     // Device Generated Commands（DGC）状态
     rhi::VulkanDGC* m_VulkanDGC  = nullptr;   // DGC 封装（仅在 Vulkan + DGC 支持时创建，手动管理生命周期）
     bool            m_DGCEnabled = false;     // 运行时 CVar 控制
+
+    // GPU 粒子系统
+    ParticleRenderer m_ParticleRenderer;
+    std::vector<u32> m_ParticleComponentIDs;   // 注册的粒子组件 ID 列表
 
     // GBuffer 渲染（CPU/GPU 双模式）
     GBufferMode m_GBufferMode = GBufferMode::CPU;
