@@ -21,7 +21,8 @@ public:
     void UnregisterComponent(u32 id);
 
     /// GPU Tick: TickBegin → Emit → Simulate → Culling（Compute 队列）
-    void DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float deltaTime);
+    void DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float deltaTime,
+                         const float4x4& viewProj);
 
     /// Render: 粒子 Billboard 渲染到当前 RenderTarget
     void Render(rhi::IRHICommandList* cmd, u32 id,
@@ -51,7 +52,12 @@ private:
         rhi::DescriptorSetHandle cullingSet = rhi::kInvalidSet;
         rhi::DescriptorSetHandle renderSet  = rhi::kInvalidSet;
 
+        // 渐变纹理 (ColorOverLife + SizeOverLife)
+        std::unique_ptr<rhi::IRHITexture>  colorOverLifeTex;
+        std::unique_ptr<rhi::IRHISampler>  gradientSampler;
+
         void CreateBuffers(rhi::IRHIDevice* device, u32 sortCapacity);
+        void UpdateGradientTextures(rhi::IRHIDevice* device);
     };
 
     // Compute PSOs

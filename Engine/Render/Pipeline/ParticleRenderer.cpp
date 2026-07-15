@@ -28,6 +28,27 @@ using he::DispatchArgs;
 static constexpr u32 kRandomFloatNum = 512;
 static constexpr u32 kCS_Threads    = 32;
 
+// 从 ViewProj 矩阵提取 6 个视锥平面 (NDC space)
+static void ExtractFrustumPlanes(const float4x4& vp, float4 planes[6]) {
+    // Left:   row3 + row0
+    planes[0] = float4(vp[0][3] + vp[0][0], vp[1][3] + vp[1][0], vp[2][3] + vp[2][0], vp[3][3] + vp[3][0]);
+    // Right:  row3 - row0
+    planes[1] = float4(vp[0][3] - vp[0][0], vp[1][3] - vp[1][0], vp[2][3] - vp[2][0], vp[3][3] - vp[3][0]);
+    // Bottom: row3 + row1
+    planes[2] = float4(vp[0][3] + vp[0][1], vp[1][3] + vp[1][1], vp[2][3] + vp[2][1], vp[3][3] + vp[3][1]);
+    // Top:    row3 - row1
+    planes[3] = float4(vp[0][3] - vp[0][1], vp[1][3] - vp[1][1], vp[2][3] - vp[2][1], vp[3][3] - vp[3][1]);
+    // Near:   row2
+    planes[4] = float4(vp[0][2], vp[1][2], vp[2][2], vp[3][2]);
+    // Far:    row3 - row2
+    planes[5] = float4(vp[0][3] - vp[0][2], vp[1][3] - vp[1][2], vp[2][3] - vp[2][2], vp[3][3] - vp[3][2]);
+    // Normalize all planes
+    for (int i = 0; i < 6; i++) {
+        float len = sqrt(planes[i].x * planes[i].x + planes[i].y * planes[i].y + planes[i].z * planes[i].z);
+        planes[i] /= len;
+    }
+}
+
 // ============================================================
 // CompState::CreateBuffers
 // ============================================================
@@ -96,7 +117,55 @@ void ParticleRenderer::CompState::CreateBuffers(rhi::IRHIDevice* device, u32 sor
         emitIndirectArgs = device->CreateBuffer(d);
         simIndirectArgs  = device->CreateBuffer(d);
     }
+
+    // 渐变纹理 (32×1, ColorOverLife RGBA8 + SizeOverLife RG32F)
+    {
+        rhi::TextureDesc td;
+        td.format = rhi::Format::RGBA8_UNORM;
+        td.width = 32; td.height = 1; td.depth = 1;
+        td.usage = rhi::TextureUsage::ShaderResource;
+        colorOverLifeTex = device->CreateTexture(td);
+
+        rhi::SamplerDesc sd;
+        sd.minFilter = rhi::FilterMode::Linear;
+        sd.magFilter = rhi::FilterMode::Linear;
+        sd.addressU = rhi::AddressMode::ClampToEdge;
+        gradientSampler = device->CreateSampler(sd);
+    }
+
     buffersCreated = true;
+}
+
+void ParticleRenderer::CompState::UpdateGradientTextures(rhi::IRHIDevice* device) {
+    if (!comp) return;
+
+    // 生成 ColorOverLife 渐变 (32 samples)
+    u8 colorData[32 * 4];  // 32 pixels × RGBA8
+    const auto& colorCurve = comp->GetParam().colorOverLife;
+    float delta = 1.0f / 31.0f;
+    for (u32 i = 0; i < 32; ++i) {
+        float t = i * delta;
+        float4 c = float4(1.0f);  // default white
+        if (colorCurve.size() >= 2) {
+            // 线性插值关键帧
+            for (size_t k = 0; k < colorCurve.size() - 1; ++k) {
+                if (t >= colorCurve[k].first && t <= colorCurve[k+1].first) {
+                    float range = colorCurve[k+1].first - colorCurve[k].first;
+                    float factor = (range > 0) ? (t - colorCurve[k].first) / range : 0;
+                    c = colorCurve[k].second + (colorCurve[k+1].second - colorCurve[k].second) * factor;
+                    break;
+                }
+            }
+        }
+        colorData[i*4+0] = u8(c.x * 255);
+        colorData[i*4+1] = u8(c.y * 255);
+        colorData[i*4+2] = u8(c.z * 255);
+        colorData[i*4+3] = u8(c.w * 255);
+    }
+
+    // 上传到纹理 (简化: 用 Buffer 中转)
+    // TODO: 通过 RHI 正确上传纹理数据
+    (void)colorData; (void)device;
 }
 
 // ============================================================
@@ -186,9 +255,10 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
     {
         rhi::DescriptorSetLayoutDesc ld;
         ld.bindings = {
-            {0, rhi::DescriptorType::StorageBuffer, 1, 16},  // Billboard vertices
-            {1, rhi::DescriptorType::StorageBuffer, 1, 16},  // SortIndices
-            {2, rhi::DescriptorType::StorageBuffer, 1, 16},  // Particle buffer
+            {0, rhi::DescriptorType::StorageBuffer, 1, 16},         // Billboard vertices
+            {1, rhi::DescriptorType::StorageBuffer, 1, 16},         // SortIndices
+            {2, rhi::DescriptorType::StorageBuffer, 1, 16},         // Particle buffer
+            {7, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // ColorOverLife
         };
         m_RenderLayout = device->CreateDescriptorSetLayout(ld);
 
@@ -268,6 +338,8 @@ u32 ParticleRenderer::RegisterComponent(ParticleComponent* comp, rhi::IRHIDevice
     device->UpdateDescriptorSet(cs.renderSet, 0, rhi::DescriptorType::StorageBuffer, cs.billboardVB.get());
     device->UpdateDescriptorSet(cs.renderSet, 1, rhi::DescriptorType::StorageBuffer, cs.sortIndices.get());
     device->UpdateDescriptorSet(cs.renderSet, 2, rhi::DescriptorType::StorageBuffer, cs.particleBuf.get());
+    device->UpdateDescriptorSet(cs.renderSet, 7, rhi::DescriptorType::CombinedImageSampler,
+                                cs.colorOverLifeTex.get(), cs.gradientSampler.get());
 
     u32 id = (u32)m_Components.size();
     m_Components.push_back(std::move(cs));
@@ -281,7 +353,8 @@ u32 ParticleRenderer::RegisterComponent(ParticleComponent* comp, rhi::IRHIDevice
 // DispatchCompute — GPU 模拟全流程
 // ============================================================
 
-void ParticleRenderer::DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float deltaTime) {
+void ParticleRenderer::DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float deltaTime,
+                                        const float4x4& viewProj) {
     if (id >= m_Components.size() || !m_Initialized) return;
     auto& cs = m_Components[id];
     auto* comp = cs.comp;
@@ -380,8 +453,12 @@ void ParticleRenderer::DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float 
     // ── Culling Pass ──
     {
         GpuCullingParam cullParam = {};
-        // frustum planes 由调用者 (DeferredPipeline) 提供
-        // 此处简化: 全部通过
+        cullParam.viewProj = viewProj;
+        ExtractFrustumPlanes(viewProj, cullParam.frustumPlanes);
+
+        // upload to UB
+        std::memcpy(cs.cullingUB->Map(), &cullParam, sizeof(GpuCullingParam));
+        cs.cullingUB->Unmap();
 
         cmd->SetPipeline(m_CullingPSO.get());
         cmd->BindDescriptorSet(0, cs.cullingSet);

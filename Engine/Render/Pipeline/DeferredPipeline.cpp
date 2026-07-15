@@ -553,6 +553,12 @@ void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
         HE_CORE_INFO("DeferredPipeline: AsyncCompute — CrossQueue fence created");
     }
 
+    // ── 粒子模拟 (Compute，在 RenderGraph 之前) ──
+    float4x4 viewProj = camera.GetViewProjMatrix();
+    for (u32 pid : m_ParticleComponentIDs) {
+        m_ParticleRenderer.DispatchCompute(cmd, pid, 0.016f, viewProj);
+    }
+
     RenderGraph rg;
     rg.SetProfiler(&m_Profiler);
     rg.SetAsyncComputeEnabled(useAsyncCompute);
