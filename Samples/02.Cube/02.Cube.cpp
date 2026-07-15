@@ -13,6 +13,7 @@
 #include "Platform/Window.h"
 #include "RHI/RHI.h"
 #include "Pipeline/ForwardPipeline.h"
+#include "Pipeline/DeferredPipeline.h"
 #include "Pipeline/CameraController.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
@@ -268,12 +269,20 @@ int main() {
 
     HE_CORE_INFO("Scene created: {} entities", world.GetEntityCount());
 
-    // --- 5. 初始化前向管线 ---
-    render::ForwardPipeline pipeline;
-    pipeline.Initialize(device.get());
-    pipeline.SetUseRenderGraph(false);
-    pipeline.SetSwapChain(swapchain.get());
-    pipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+    // --- 5. 初始化前向管线 + 延迟管线 ---
+    render::ForwardPipeline  forwardPipeline;
+    render::DeferredPipeline deferredPipeline;
+    forwardPipeline.Initialize(device.get());
+    forwardPipeline.SetUseRenderGraph(false);
+    forwardPipeline.SetMultiThreadedRecording(false);  // 简单场景关闭多线程录制
+    forwardPipeline.SetSwapChain(swapchain.get());
+    forwardPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+
+    deferredPipeline.Initialize(device.get());
+    deferredPipeline.SetSwapChain(swapchain.get());
+    deferredPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+    // 02.Cube 物体少，关闭 GPU 剔除避免首帧闪烁
+    deferredPipeline.GetGPUCulling().enabled = false;
 
     // ============================================================
     // 5.5 RT 路径初始化
@@ -341,7 +350,7 @@ int main() {
     // --- 6. 创建命令列表 ---
     auto cmdList = device->CreateCommandList();
     cmdList->SetSwapChain(swapchain.get());
-    cmdList->SetPipeline(pipeline.GetPipelineState());
+    cmdList->SetPipeline(forwardPipeline.GetPipelineState());
 
     // --- 6.5. 获取 GLFW 窗口句柄 ---
     GLFWwindow* glfwWin = engine.GetWindow()->GetNativeHandle();
@@ -378,7 +387,8 @@ int main() {
         if (w == 0 || h == 0) return;
         swapchain->Resize(w, h);
         cmdList->SetSwapChain(swapchain.get());
-        pipeline.OnResize(w, h);
+        forwardPipeline.OnResize(w, h);
+        deferredPipeline.OnResize(w, h);
         camCtrl.SetAspectRatio(static_cast<float>(w), static_cast<float>(h));
     });
 
@@ -386,7 +396,7 @@ int main() {
     HE_CORE_INFO("02.Cube demo started — WASD=移动, 右键拖拽=旋转, 滚轮=缩放, Shift=加速");
     u64  frameIndex = 0;
     f64  lastTime   = glfwGetTime();
-    int  renderMode  = 0;  // 0=光栅化, 1=RT
+    int  renderMode  = 1;  // 0=Forward, 1=Deferred, 2=RT
 
     while (!engine.GetWindow()->ShouldClose()) {
         // 计算帧时间
@@ -439,80 +449,83 @@ int main() {
 
         // 渲染一帧
         cmdList->Begin();
-        pipeline.NextFrame();
 
-        // 阴影子系统：CPU 端数据收集（GPU 渲染在 RenderGraph 的 Shadow Pass）
-        {
-            auto* shadowSys = pipeline.GetShadowSystem();
+        // --- Forward 模式 ---
+        if (renderMode == 0) {
+            forwardPipeline.NextFrame();
+
+            auto* shadowSys = forwardPipeline.GetShadowSystem();
             shadowSys->SetRenderResources(
-                pipeline.GetCurrentShadowObjectBuffer(),  // 阴影专用 Object Buffer
-                pipeline.GetCurrentShadowBuffer(),
-                pipeline.GetCurrentDescSet());
+                forwardPipeline.GetCurrentShadowObjectBuffer(),
+                forwardPipeline.GetCurrentShadowBuffer(),
+                forwardPipeline.GetCurrentDescSet());
 
             render::SubsystemContext shadowCtx;
-            shadowCtx.world       = &world;
-            shadowCtx.sceneGraph  = &sceneGraph;
-            shadowCtx.camera      = &camCtrl.GetCamera();
+            shadowCtx.world = &world; shadowCtx.sceneGraph = &sceneGraph;
+            shadowCtx.camera = &camCtrl.GetCamera();
             shadowSys->Update(shadowCtx);
+
+            forwardPipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
+            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
+            forwardPipeline.RenderToneMapPass(cmdList.get());
         }
+        // --- Deferred 模式 ---
+        else if (renderMode == 1) {
+            deferredPipeline.NextFrame();
+            deferredPipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
+            // ImGui 叠加：Deferred 已写 BackBuffer，Load 保留内容
+            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
+                rhi::Format::Unknown, nullptr, rhi::IRHICommandList::LoadOp::Load);
+        }
+        // --- RT 模式 ---
+        else if (renderMode == 2 && rtPass.IsValid()) {
+            forwardPipeline.NextFrame();
 
-        // 统一使用 pipeline.Render()（RG/非RG 内部均包含 Shadow + HDR + 场景 + 天空盒）
-        pipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
+            auto* shadowSys = forwardPipeline.GetShadowSystem();
+            shadowSys->SetRenderResources(
+                forwardPipeline.GetCurrentShadowObjectBuffer(),
+                forwardPipeline.GetCurrentShadowBuffer(),
+                forwardPipeline.GetCurrentDescSet());
+            render::SubsystemContext shadowCtx;
+            shadowCtx.world = &world; shadowCtx.sceneGraph = &sceneGraph;
+            shadowCtx.camera = &camCtrl.GetCamera();
+            shadowSys->Update(shadowCtx);
 
-        // --- ToneMap + ImGui / RT 路径分支 ---
-        if (renderMode == 1 && rtPass.IsValid()) {
-            // RT 路径：光追直写 BackBuffer（覆盖光栅化输出）
+            forwardPipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
+
             rtPass.BuildAS(cmdList.get(), world, sceneGraph);
-            rtPass.UpdateLightBuffer(pipeline.GetCurrentLightBuffer());
+            rtPass.UpdateLightBuffer(forwardPipeline.GetCurrentLightBuffer());
             rtPass.UpdateRTDescriptorSet(device.get(),
                 swapchain->GetCurrentBackBufferView(),
-                pipeline.GetCurrentObjectBuffer());
+                forwardPipeline.GetCurrentObjectBuffer());
 
-            // Push Constants：相机数据
             struct RTPushConstant {
-                float4x4 invViewProj;
-                float4   camPosNearFar;
-                u32      sampleCount;
-                u32      frameIndex;
-                u32      _pad0;
-                u32      _pad1;
+                float4x4 invViewProj; float4 camPosNearFar;
+                u32 sampleCount, frameIndex, _pad0, _pad1;
             };
             RTPushConstant rtPC;
             const auto& camData = camCtrl.GetCamera();
             rtPC.invViewProj = glm::inverse(camData.GetViewProjMatrix());
             rtPC.camPosNearFar = float4(camData.position.x, camData.position.y,
                                         camData.position.z, camData.nearPlane);
-            rtPC.sampleCount = 1;
-            rtPC.frameIndex  = 0;
+            rtPC.sampleCount = 1; rtPC.frameIndex = 0;
 
-            // BackBuffer 屏障 → RT 可写
-            cmdList->PipelineBarrier(
-                rhi::PipelineStage::BottomOfPipe,
+            cmdList->PipelineBarrier(rhi::PipelineStage::BottomOfPipe,
                 rhi::PipelineStage::RayTracingShader,
-                rhi::ResourceState::Undefined,
-                rhi::ResourceState::UnorderedAccess);
+                rhi::ResourceState::Undefined, rhi::ResourceState::UnorderedAccess);
 
             rtPass.BindPipeline(cmdList.get());
             rtPass.BindDescriptorSets(cmdList.get());
             cmdList->SetPushConstants(0, sizeof(RTPushConstant), &rtPC);
-            rtPass.TraceRays(cmdList.get(),
-                swapchain->GetWidth(), swapchain->GetHeight());
+            rtPass.TraceRays(cmdList.get(), swapchain->GetWidth(), swapchain->GetHeight());
 
-            // BackBuffer 屏障 → RenderTarget（准备 ImGui）
-            cmdList->PipelineBarrier(
-                rhi::PipelineStage::RayTracingShader,
+            cmdList->PipelineBarrier(rhi::PipelineStage::RayTracingShader,
                 rhi::PipelineStage::ColorAttachmentOutput,
-                rhi::ResourceState::UnorderedAccess,
-                rhi::ResourceState::RenderTarget);
+                rhi::ResourceState::UnorderedAccess, rhi::ResourceState::RenderTarget);
 
-            cmdList->SetPipeline(pipeline.GetPipelineState());
+            cmdList->SetPipeline(forwardPipeline.GetPipelineState());
             cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
-                rhi::Format::Unknown, nullptr,
-                rhi::IRHICommandList::LoadOp::Load);
-        } else {
-            // 光栅化路径（不变）
-            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
-            pipeline.RenderToneMapPass(cmdList.get());
+                rhi::Format::Unknown, nullptr, rhi::IRHICommandList::LoadOp::Load);
         }
 
         imgui.BeginFrame();
@@ -554,21 +567,16 @@ int main() {
 
         // 渲染模式切换
         ImGui::SeparatorText("渲染模式");
+        ImGui::RadioButton("Forward 前向渲染", &renderMode, 0);
+        ImGui::SameLine();
+        ImGui::RadioButton("Deferred 延迟渲染", &renderMode, 1);
         if (rtSupported) {
-            ImGui::RadioButton("光栅化 (ForwardPipeline)", &renderMode, 0);
             ImGui::SameLine();
-            ImGui::RadioButton("Ray Tracing", &renderMode, 1);
-        } else {
-            ImGui::TextColored({0.5f, 0.5f, 0.5f, 1.0f}, "RT 不可用（设备不支持）");
+            ImGui::RadioButton("Ray Tracing", &renderMode, 2);
         }
 
-        // 渲染选项
-        bool useRG = pipeline.UseRenderGraph();
-        if (ImGui::Checkbox("RenderGraph", &useRG))
-            pipeline.SetUseRenderGraph(useRG);
-
         // GI 控制
-        auto* gi = pipeline.GetGI();
+        auto* gi = forwardPipeline.GetGI();
         if (gi) {
             ImGui::SeparatorText("GI");
             auto settings = gi->GetSettings();
@@ -691,7 +699,8 @@ int main() {
     if (rtLayout0 != rhi::kInvalidLayout)
         device->DestroyDescriptorSetLayout(rtLayout0);
 
-    pipeline.Shutdown();
+    forwardPipeline.Shutdown();
+    deferredPipeline.Shutdown();
 
     HE_CORE_INFO("Exiting after {} frames", frameIndex);
     return 0;
