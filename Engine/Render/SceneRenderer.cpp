@@ -38,13 +38,19 @@ std::vector<DrawItem> SceneRenderer::Prepare(he::World& world, he::SceneGraph& s
     std::mutex mtx;
     std::vector<u32> visibleIdx; visibleIdx.reserve(total);
 
-    JobSystem::Instance().ParallelForChunked(total, 64, [&](u32 start, u32 end) {
-        std::vector<u32> local; local.reserve(end - start);
-        for (u32 i = start; i < end; ++i)
-            if (frustum.Intersects(entries[i].worldBounds))
-                local.push_back(i);
-        if (!local.empty()) { std::lock_guard<std::mutex> lk(mtx); visibleIdx.insert(visibleIdx.end(), local.begin(), local.end()); }
-    });
+    if (enableFrustumCull) {
+        JobSystem::Instance().ParallelForChunked(total, 64, [&](u32 start, u32 end) {
+            std::vector<u32> local; local.reserve(end - start);
+            for (u32 i = start; i < end; ++i) {
+                if (!entries[i].worldBounds.IsValid() || frustum.Intersects(entries[i].worldBounds))
+                    local.push_back(i);
+            }
+            if (!local.empty()) { std::lock_guard<std::mutex> lk(mtx); visibleIdx.insert(visibleIdx.end(), local.begin(), local.end()); }
+        });
+    } else {
+        for (u32 i = 0; i < total; ++i)
+            visibleIdx.push_back(i);
+    }
 
     u32 visibleCount = (u32)visibleIdx.size();
     if (visibleCount == 0) return result;

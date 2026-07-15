@@ -26,8 +26,9 @@ struct DrawItem {
 // ============================================================================
 class SceneRenderer {
 public:
+    bool enableFrustumCull = true;  // CPU 视锥剔除开关（默认开启）
+
     /// 收集可见实体 → 剔除 → 上传 GPUObjectData → 返回 DrawList
-    /// 调用者负责 Begin/End RenderPass，使用返回的列表自己录制 Draw
     std::vector<DrawItem> Prepare(he::World& world, he::SceneGraph& sg,
                                    const CameraData& camera,
                                    rhi::IRHIBuffer* objectBuffer);

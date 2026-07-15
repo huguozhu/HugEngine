@@ -62,7 +62,8 @@ bool Frustum::Intersects(const AABB& box) const {
         );
 
         // p-vertex 都在外侧 → 完全剔除
-        if (glm::dot(n, pVertex) + d < 0.0f)
+        // 加小 epsilon 防止近平面精度问题和边界误判
+        if (glm::dot(n, pVertex) + d + 0.001f < 0.0f)
             return false;
     }
     return true;

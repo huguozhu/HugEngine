@@ -34,7 +34,7 @@ bool IsOccluded(float3 mn, float3 mx) {
     float2 sz=(rMax-rMin)*screenSize;float mip=clamp(ceil(log2(max(1,max(sz.x,sz.y)))),0,float(hizMipCount-1));
     float4 d;d.x=u_HiZ.SampleLevel(u_HiZSampler,rMin,mip);d.y=u_HiZ.SampleLevel(u_HiZSampler,float2(rMax.x,rMin.y),mip);
     d.z=u_HiZ.SampleLevel(u_HiZSampler,float2(rMin.x,rMax.y),mip);d.w=u_HiZ.SampleLevel(u_HiZSampler,rMax,mip);
-    return mZ>min(min(d.x,d.y),min(d.z,d.w));
+    return mZ > max(max(d.x, d.y), max(d.z, d.w));
 }
 
 [numthreads(64,1,1)]

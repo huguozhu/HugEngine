@@ -102,6 +102,7 @@ public:
     rhi::IRHITexture* GetHDRTarget()  const { return m_HDRTarget.get(); }
     rhi::IRHISampler* GetHDRSampler() const { return m_HDRSampler.get(); }
     GPUCulling& GetGPUCulling() { return m_GPUCulling; }
+    SceneRenderer& GetSceneRenderer() { return *m_SceneRenderer; }
     ProfilerManager& GetProfiler() { return m_Profiler; }
     u32 GetLastDrawCount() const { return m_LastDrawCount; }
     u32 GetLastTriCount()  const { return m_LastTriCount; }

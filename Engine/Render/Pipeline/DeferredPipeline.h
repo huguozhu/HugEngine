@@ -82,6 +82,7 @@ public:
     GI_SSR*              GetSSR()                { return &m_SSR; }
     ClusteredShading&    GetClusteredShading()   { return m_ClusteredShading; }
     GPUCulling&          GetGPUCulling()         { return m_GPUCulling; }
+    SceneRenderer&        GetSceneRenderer()       { return *m_SceneRenderer; }
     ParticleRenderer&     GetParticleRenderer()   { return m_ParticleRenderer; }
     void AddParticleComponent(u32 id)             { m_ParticleComponentIDs.push_back(id); }
     void SetSwapChain(rhi::IRHISwapChain* sc)  { m_SwapChain = sc; }

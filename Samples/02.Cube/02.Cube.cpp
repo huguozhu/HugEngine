@@ -394,7 +394,7 @@ int main() {
     HE_CORE_INFO("02.Cube demo started — WASD=移动, 右键拖拽=旋转, 滚轮=缩放, Shift=加速");
     u64  frameIndex = 0;
     f64  lastTime   = glfwGetTime();
-    int  renderMode  = 0;  // 0=Forward, 1=Deferred, 2=RT
+    int  renderMode  = 1;  // 0=Forward, 1=Deferred, 2=RT
 
     while (!engine.GetWindow()->ShouldClose()) {
         // 计算帧时间
@@ -575,6 +575,12 @@ int main() {
         if (ImGui::Checkbox("GPU Culling", &gpuCullOn)) {
             forwardPipeline.GetGPUCulling().enabled = gpuCullOn;
             deferredPipeline.GetGPUCulling().enabled = gpuCullOn;
+        }
+        // CPU 视锥剔除开关
+        bool cpuCullOn = forwardPipeline.GetSceneRenderer().enableFrustumCull;
+        if (ImGui::Checkbox("CPU Frustum Cull", &cpuCullOn)) {
+            forwardPipeline.GetSceneRenderer().enableFrustumCull = cpuCullOn;
+            deferredPipeline.GetSceneRenderer().enableFrustumCull = cpuCullOn;
         }
         if (rtSupported) {
             ImGui::SameLine();

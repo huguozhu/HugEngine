@@ -75,7 +75,7 @@ bool IsOccluded(float3 mn, float3 mx) {
     d.y = u_HiZDepth.SampleLevel(u_HiZSampler, float2(rMax.x, rMin.y), mip);
     d.z = u_HiZDepth.SampleLevel(u_HiZSampler, float2(rMin.x, rMax.y), mip);
     d.w = u_HiZDepth.SampleLevel(u_HiZSampler, rMax, mip);
-    return mZ > min(min(d.x, d.y), min(d.z, d.w));
+    return mZ > max(max(d.x, d.y), max(d.z, d.w));
 }
 
 groupshared uint g_DoneFrameIndex;
