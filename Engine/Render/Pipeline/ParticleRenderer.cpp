@@ -10,6 +10,8 @@
 #include "ParticleEmit.comp.spv.h"
 #include "ParticleSimulate.comp.spv.h"
 #include "ParticleCulling.comp.spv.h"
+#include "ParticleRender.vert.spv.h"
+#include "ParticleRender.frag.spv.h"
 
 namespace he::render {
 
@@ -172,6 +174,42 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
                                      {4, rhi::DescriptorType::StorageBuffer, 1, 32}});
     m_CullingPSO = createComputePSO(m_CullingLayout, &m_CullingCS, "ParticleCulling");
 
+    // ── Render PSO (Graphics: Billboard) ──
+    m_RenderVS.stage      = rhi::ShaderStage::Vertex;
+    m_RenderVS.spirv      = k_ParticleRender_vert_spv;
+    m_RenderVS.entryPoint = "vertexMain";
+
+    m_RenderFS.stage      = rhi::ShaderStage::Pixel;
+    m_RenderFS.spirv      = k_ParticleRender_frag_spv;
+    m_RenderFS.entryPoint = "fragmentMain";
+
+    {
+        rhi::DescriptorSetLayoutDesc ld;
+        ld.bindings = {
+            {0, rhi::DescriptorType::StorageBuffer, 1, 16},  // Billboard vertices
+            {1, rhi::DescriptorType::StorageBuffer, 1, 16},  // SortIndices
+            {2, rhi::DescriptorType::StorageBuffer, 1, 16},  // Particle buffer
+        };
+        m_RenderLayout = device->CreateDescriptorSetLayout(ld);
+
+        rhi::PipelineStateDesc desc;
+        desc.bindPoint   = rhi::PipelineBindPoint::Graphics;
+        desc.vertexShader = &m_RenderVS;
+        desc.pixelShader  = &m_RenderFS;
+        desc.pushConstantRanges = {pcRange};
+        desc.descriptorSetLayouts = {m_RenderLayout};
+        desc.debugName   = "ParticleRender";
+
+        // 混合: 与 HDR Target 混合 (additive 或 alpha)
+        desc.blendEnable = true;
+        desc.srcBlend    = rhi::BlendFactor::SrcAlpha;
+        desc.dstBlend    = rhi::BlendFactor::OneMinusSrcAlpha;
+        desc.depthTest   = true;
+        desc.depthWrite  = false;  // 粒子不写深度
+
+        m_RenderPSO = device->CreatePipelineState(desc);
+    }
+
     m_Initialized = true;
     HE_CORE_INFO("ParticleRenderer: 初始化完成");
     return true;
@@ -179,7 +217,7 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
 
 void ParticleRenderer::Shutdown(rhi::IRHIDevice* device) {
     m_Components.clear();
-    m_InitPSO.reset(); m_EmitPSO.reset(); m_SimPSO.reset(); m_CullingPSO.reset();
+    m_InitPSO.reset(); m_EmitPSO.reset(); m_SimPSO.reset(); m_CullingPSO.reset(); m_RenderPSO.reset();
     if (m_InitLayout    != rhi::kInvalidLayout) device->DestroyDescriptorSetLayout(m_InitLayout);
     if (m_EmitLayout    != rhi::kInvalidLayout) device->DestroyDescriptorSetLayout(m_EmitLayout);
     if (m_SimLayout     != rhi::kInvalidLayout) device->DestroyDescriptorSetLayout(m_SimLayout);
@@ -224,6 +262,12 @@ u32 ParticleRenderer::RegisterComponent(ParticleComponent* comp, rhi::IRHIDevice
     device->UpdateDescriptorSet(cs.cullingSet, 2, rhi::DescriptorType::StorageBuffer, cs.sortIndices.get());
     device->UpdateDescriptorSet(cs.cullingSet, 3, rhi::DescriptorType::StorageBuffer, cs.counters.get());
     device->UpdateDescriptorSet(cs.cullingSet, 4, rhi::DescriptorType::StorageBuffer, cs.drawIndirectArgs.get());
+
+    // Render descriptor set
+    cs.renderSet = device->AllocateDescriptorSet(m_RenderLayout);
+    device->UpdateDescriptorSet(cs.renderSet, 0, rhi::DescriptorType::StorageBuffer, cs.billboardVB.get());
+    device->UpdateDescriptorSet(cs.renderSet, 1, rhi::DescriptorType::StorageBuffer, cs.sortIndices.get());
+    device->UpdateDescriptorSet(cs.renderSet, 2, rhi::DescriptorType::StorageBuffer, cs.particleBuf.get());
 
     u32 id = (u32)m_Components.size();
     m_Components.push_back(std::move(cs));
@@ -352,8 +396,33 @@ void ParticleRenderer::DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float 
 
 void ParticleRenderer::Render(rhi::IRHICommandList* cmd, u32 id,
                                const float4x4& viewProj, const CameraData& camera) {
-    (void)cmd; (void)id; (void)viewProj; (void)camera;
-    // TODO: 从 Indirect Buffer 读取 DrawArgs → DrawIndexedIndirect
+    if (id >= m_Components.size() || !m_Initialized) return;
+    auto& cs = m_Components[id];
+    if (!cs.buffersCreated) return;
+
+    // 上传渲染参数
+    GpuRenderParam renderParam = {};
+    renderParam.viewMatrix  = camera.GetViewMatrix();
+    renderParam.projMatrix  = camera.GetProjMatrix();
+    renderParam.texRowsCols = cs.comp ? cs.comp->GetParam().texRowsCols : uint2(1,1);
+    std::memcpy(cs.renderUB->Map(), &renderParam, sizeof(GpuRenderParam));
+    cs.renderUB->Unmap();
+
+    // 绑定管线 + 描述符
+    cmd->SetPipeline(m_RenderPSO.get());
+    cmd->BindDescriptorSet(0, cs.renderSet);
+    cmd->SetPushConstants(0, sizeof(GpuRenderParam), &renderParam);
+
+    // 读取粒子渲染数量（从 GPU counters 回读）
+    ParticleCounters ctrs;
+    std::memcpy(&ctrs, cs.counters->Map(), sizeof(ParticleCounters));
+    cs.counters->Unmap();
+
+    u32 renderCount = ctrs.renderCount;
+    if (renderCount > 0) {
+        // 6 顶点 Billboard × N 实例
+        cmd->Draw(6, renderCount, 0, 0);
+    }
 }
 
 rhi::IRHIBuffer* ParticleRenderer::GetDrawIndirectBuffer(u32 id) const {
