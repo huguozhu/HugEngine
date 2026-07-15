@@ -14,6 +14,7 @@
 #include "Scene/CameraComponent.h"
 #include "Scene/AnimationComponent.h"
 #include "Scene/LevelComponent.h"
+#include "Scene/ParticleComponent.h"
 
 namespace he {
 
@@ -60,6 +61,9 @@ HE_BEGIN_REGISTER(he::AnimationComponent)
 HE_END_REGISTER()
 
 HE_BEGIN_REGISTER(he::LevelComponent)
+HE_END_REGISTER()
+
+HE_BEGIN_REGISTER(he::ParticleComponent)
 HE_END_REGISTER()
 
 } // namespace he

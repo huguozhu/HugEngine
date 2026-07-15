@@ -17,6 +17,7 @@ set(SCENE_SOURCES
     Scene/SphereComponent.h
     Scene/AnimationComponent.h
     Scene/LevelComponent.h
+    Scene/ParticleComponent.h
     Scene/World.cpp
     Scene/SceneGraph.cpp
     Scene/MeshComponent.cpp
@@ -26,6 +27,7 @@ set(SCENE_SOURCES
     Scene/LightComponent.cpp
     Scene/SkyboxComponent.cpp
     Scene/AnimationComponent.cpp
+    Scene/ParticleComponent.cpp
 )
 
 target_sources(HugEngineScene PRIVATE ${SCENE_SOURCES})

@@ -45,6 +45,7 @@ if(SLANGC)
         "${SHADER_DIR}/ToneMap.vert.slang"
         "${SHADER_DIR}/Triangle.vert.slang"
         "${SHADER_DIR}/Fullscreen.vert.slang"
+        "${SHADER_DIR}/Particles/ParticleRender.vert.slang"
     )
     set(FRAG_SLANG
         "${SHADER_DIR}/DeferredLighting.frag.slang"
@@ -77,8 +78,13 @@ if(SLANGC)
         "${SHADER_DIR}/SMAA_Neighborhood.frag.slang"
         "${SHADER_DIR}/FullscreenCopy.frag.slang"
         "${SHADER_DIR}/TriangleMesh.frag.slang"
+        "${SHADER_DIR}/Particles/ParticleRender.frag.slang"
     )
     set(COMP_SLANG
+        "${SHADER_DIR}/Particles/ParticleInit.comp.slang"
+        "${SHADER_DIR}/Particles/ParticleEmit.comp.slang"
+        "${SHADER_DIR}/Particles/ParticleSimulate.comp.slang"
+        "${SHADER_DIR}/Particles/ParticleCulling.comp.slang"
         "${SHADER_DIR}/WorkGraph_Entry.comp.slang"
         "${SHADER_DIR}/GPUCull.comp.slang"
         "${SHADER_DIR}/GPUCull_Phase1.comp.slang"
