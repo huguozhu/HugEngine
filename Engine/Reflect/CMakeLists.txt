@@ -4,11 +4,11 @@
 add_library(HugEngineReflect STATIC)
 
 set(REFLECT_SOURCES
-    Public/Reflect/ReflectionAPI.h
-    Public/Reflect/ReflectionMacros.h
-    Public/Reflect/TypeInfo.h
-    Public/Reflect/Attribute.h
-    Private/TypeRegistry.cpp
+    Reflect/ReflectionAPI.h
+    Reflect/ReflectionMacros.h
+    Reflect/TypeInfo.h
+    Reflect/Attribute.h
+    Reflect/TypeRegistry.cpp
 )
 
 target_sources(HugEngineReflect PRIVATE ${REFLECT_SOURCES})
@@ -17,8 +17,8 @@ target_sources(HugEngineReflect PRIVATE ${REFLECT_SOURCES})
 huge_source_group(${REFLECT_SOURCES})
 
 target_include_directories(HugEngineReflect
-    PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/Public
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Private
+    PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_link_libraries(HugEngineReflect PUBLIC HugEngineCore)

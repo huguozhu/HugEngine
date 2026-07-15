@@ -4,28 +4,28 @@
 add_library(HugEngineScene STATIC)
 
 set(SCENE_SOURCES
-    Public/Scene/Entity.h
-    Public/Scene/Component.h
-    Public/Scene/Transform.h
-    Public/Scene/World.h
-    Public/Scene/SceneGraph.h
-    Public/Scene/MeshComponent.h
-    Public/Scene/LightComponent.h
-    Public/Scene/SkyboxComponent.h
-    Public/Scene/CameraComponent.h
-    Public/Scene/CubeComponent.h
-    Public/Scene/SphereComponent.h
-    Public/Scene/AnimationComponent.h
-    Public/Scene/LevelComponent.h
-    Private/World.cpp
-    Private/SceneGraph.cpp
-    Private/MeshComponent.cpp
-    Private/SceneReflect.cpp
-    Private/CubeComponent.cpp
-    Private/SphereComponent.cpp
-    Private/LightComponent.cpp
-    Private/SkyboxComponent.cpp
-    Private/AnimationComponent.cpp
+    Scene/Entity.h
+    Scene/Component.h
+    Scene/Transform.h
+    Scene/World.h
+    Scene/SceneGraph.h
+    Scene/MeshComponent.h
+    Scene/LightComponent.h
+    Scene/SkyboxComponent.h
+    Scene/CameraComponent.h
+    Scene/CubeComponent.h
+    Scene/SphereComponent.h
+    Scene/AnimationComponent.h
+    Scene/LevelComponent.h
+    Scene/World.cpp
+    Scene/SceneGraph.cpp
+    Scene/MeshComponent.cpp
+    Scene/SceneReflect.cpp
+    Scene/CubeComponent.cpp
+    Scene/SphereComponent.cpp
+    Scene/LightComponent.cpp
+    Scene/SkyboxComponent.cpp
+    Scene/AnimationComponent.cpp
 )
 
 target_sources(HugEngineScene PRIVATE ${SCENE_SOURCES})
@@ -34,8 +34,8 @@ target_sources(HugEngineScene PRIVATE ${SCENE_SOURCES})
 huge_source_group(${SCENE_SOURCES})
 
 target_include_directories(HugEngineScene
-    PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/Public
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Private
+    PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_link_libraries(HugEngineScene PUBLIC

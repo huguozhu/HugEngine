@@ -4,16 +4,16 @@
 add_library(HugEngineRHI STATIC)
 
 set(RHI_SOURCES
-    Private/RHIBase.cpp
-    Public/RHI/RHI.h
-    Public/RHI/Types.h
-    Public/RHI/Shader.h
-    Public/RHI/CommandList.h
-    Public/RHI/Buffer.h
-    Public/RHI/SwapChain.h
-    Public/RHI/QueryPool.h
-    Public/RHI/MeshShader.h
-    Public/RHI/RayTracing.h
+    RHI/RHI.h
+    RHI/Types.h
+    RHI/Shader.h
+    RHI/CommandList.h
+    RHI/Buffer.h
+    RHI/SwapChain.h
+    RHI/QueryPool.h
+    RHI/MeshShader.h
+    RHI/RayTracing.h
+    RHI/RHIBase.cpp
     Vulkan/VulkanInternal.h
     Vulkan/VulkanQueryPool.h
     Vulkan/VulkanDGC.h
@@ -25,8 +25,8 @@ target_sources(HugEngineRHI PRIVATE ${RHI_SOURCES})
 huge_source_group(${RHI_SOURCES})
 
 target_include_directories(HugEngineRHI
-    PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/Public
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Private
+    PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_link_libraries(HugEngineRHI PUBLIC HugEngineCore)

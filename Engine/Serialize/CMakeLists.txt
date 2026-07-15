@@ -3,9 +3,9 @@
 add_library(HugEngineSerialize STATIC)
 
 set(SERIALIZE_SOURCES
-    Public/Serialize/Archive.h
-    Public/Serialize/BinaryArchive.h
-    Private/BinaryArchive.cpp
+    Serialize/Archive.h
+    Serialize/BinaryArchive.h
+    Serialize/BinaryArchive.cpp
 )
 
 target_sources(HugEngineSerialize PRIVATE ${SERIALIZE_SOURCES})
@@ -14,8 +14,8 @@ target_sources(HugEngineSerialize PRIVATE ${SERIALIZE_SOURCES})
 huge_source_group(${SERIALIZE_SOURCES})
 
 target_include_directories(HugEngineSerialize
-    PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/Public
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Private
+    PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_link_libraries(HugEngineSerialize PUBLIC

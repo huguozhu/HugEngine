@@ -2,10 +2,10 @@
 add_library(HugEngineAsset STATIC)
 
 set(ASSET_SOURCES
-    Public/Asset/glTFLoader.h
-    Public/Asset/BindlessTextureManager.h
-    Private/glTFLoader.cpp
-    Private/BindlessTextureManager.cpp
+    Asset/glTFLoader.h
+    Asset/BindlessTextureManager.h
+    Asset/glTFLoader.cpp
+    Asset/BindlessTextureManager.cpp
 )
 
 target_sources(HugEngineAsset PRIVATE ${ASSET_SOURCES})
@@ -14,9 +14,9 @@ target_sources(HugEngineAsset PRIVATE ${ASSET_SOURCES})
 huge_source_group(${ASSET_SOURCES})
 
 target_include_directories(HugEngineAsset
-    PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/Public
+    PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}
     PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/Private
+        ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/Engine/External/meshoptimizer/extern  # cgltf 单头文件库
 )
 
