@@ -48,6 +48,8 @@ if(HUGENGINE_RHI_VULKAN)
         Vulkan/VulkanDevice_Descriptors.cpp
         Vulkan/VulkanSwapChain.cpp
         Vulkan/VulkanCommandList.cpp
+        Vulkan/VulkanCommandList_RenderPass.cpp
+        Vulkan/VulkanCommandList_Submit.cpp
         Vulkan/VulkanResources.cpp
         Vulkan/VulkanPipeline.cpp
         Vulkan/VulkanDGC.cpp
