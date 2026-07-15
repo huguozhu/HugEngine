@@ -274,15 +274,13 @@ int main() {
     render::DeferredPipeline deferredPipeline;
     forwardPipeline.Initialize(device.get());
     forwardPipeline.SetUseRenderGraph(false);
-    forwardPipeline.SetMultiThreadedRecording(false);  // 简单场景关闭多线程录制
+    forwardPipeline.SetMultiThreadedRecording(false);
     forwardPipeline.SetSwapChain(swapchain.get());
     forwardPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
 
     deferredPipeline.Initialize(device.get());
     deferredPipeline.SetSwapChain(swapchain.get());
     deferredPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
-    // 02.Cube 物体少，关闭 GPU 剔除避免首帧闪烁
-    deferredPipeline.GetGPUCulling().enabled = false;
 
     // ============================================================
     // 5.5 RT 路径初始化
@@ -396,7 +394,7 @@ int main() {
     HE_CORE_INFO("02.Cube demo started — WASD=移动, 右键拖拽=旋转, 滚轮=缩放, Shift=加速");
     u64  frameIndex = 0;
     f64  lastTime   = glfwGetTime();
-    int  renderMode  = 1;  // 0=Forward, 1=Deferred, 2=RT
+    int  renderMode  = 0;  // 0=Forward, 1=Deferred, 2=RT
 
     while (!engine.GetWindow()->ShouldClose()) {
         // 计算帧时间
@@ -570,6 +568,14 @@ int main() {
         ImGui::RadioButton("Forward 前向渲染", &renderMode, 0);
         ImGui::SameLine();
         ImGui::RadioButton("Deferred 延迟渲染", &renderMode, 1);
+
+        // GPU 剔除开关
+        ImGui::Spacing();
+        bool gpuCullOn = forwardPipeline.GetGPUCulling().enabled;
+        if (ImGui::Checkbox("GPU Culling", &gpuCullOn)) {
+            forwardPipeline.GetGPUCulling().enabled = gpuCullOn;
+            deferredPipeline.GetGPUCulling().enabled = gpuCullOn;
+        }
         if (rtSupported) {
             ImGui::SameLine();
             ImGui::RadioButton("Ray Tracing", &renderMode, 2);

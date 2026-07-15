@@ -363,7 +363,11 @@ void GPUCulling::Dispatch(rhi::IRHICommandList* cmd,
     for (int i = 0; i < 6; ++i) pc.planes[i] = planes[i];
     pc.vp    = viewProj;
     pc.sSize = float2((float)screenW, (float)screenH);
-    pc.mips  = m_HiZMipCount;
+    // 首帧跳过 Hi-Z：上帧深度未初始化，全 0 深度会导致所有物体被遮挡剔除
+    u32 hizMips = (m_FrameIndex == 0) ? 0 : m_HiZMipCount;
+    m_FrameIndex++;
+
+    pc.mips  = hizMips;
     pc.count = objectCount;
 
     cmd->SetPipeline(m_PSO.get());
@@ -393,7 +397,7 @@ void GPUCulling::DispatchPhase1(rhi::IRHICommandList* cmd, const float4x4& viewP
     for (int i = 0; i < 6; ++i) pc.planes[i] = planes[i];
     pc.vp    = viewProj;
     pc.sSize = float2((float)screenW, (float)screenH);
-    pc.mips  = m_HiZMipCount;
+    u32 hizMips = (m_FrameIndex == 0) ? 0 : m_HiZMipCount; pc.mips = hizMips; m_FrameIndex++;
     pc.count = objectCount;
 
     // 清零候选计数
@@ -500,7 +504,7 @@ void GPUCulling::DispatchPhase2(rhi::IRHICommandList* cmd, u32 screenW, u32 scre
     struct { float4x4 vp; float2 sSize; u32 mips; u32 count; } pc;
     pc.vp    = m_LastViewProj;
     pc.sSize = float2((float)screenW, (float)screenH);
-    pc.mips  = m_HiZMipCount;
+    u32 hizMips = (m_FrameIndex == 0) ? 0 : m_HiZMipCount; pc.mips = hizMips; m_FrameIndex++;
     pc.count = candidateCount;
 
     cmd->SetPipeline(m_Phase2PSO.get());
@@ -650,7 +654,7 @@ void GPUCulling::SignalPTG(rhi::IRHICommandList* cmd, const float4x4& viewProj,
     for (int i = 0; i < 6; ++i) params->frustumPlanes[i] = planes[i];
     params->screenSize = float2((float)screenW, (float)screenH);
     params->objectCount = objectCount;
-    params->hizMipCount = m_HiZMipCount;
+    params->hizMipCount = (m_FrameIndex == 0) ? 0 : m_HiZMipCount; m_FrameIndex++;
     params->frameIndex = m_PTGFrameCounter++;
 
     m_PTGParamBuf->Unmap();

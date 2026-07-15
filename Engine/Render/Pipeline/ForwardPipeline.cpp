@@ -833,10 +833,8 @@ void ForwardPipeline::RenderScene(
     // GPU 视锥剔除（Compute Shader）— 读回上帧结果 → 调度下帧
     // ============================================================
     // 1) 读回上一帧 GPU culling 结果（已 submit 执行完毕）
-    bool useGPUVisible = false;
     if (m_GPUCulling.enabled) {
         m_GPUCulling.Readback(m_Device, m_GPUVisibleIndices);
-        useGPUVisible = !m_GPUVisibleIndices.empty();
     }
 
     // 2) SceneRenderer 准备所有 draw items
@@ -860,16 +858,10 @@ void ForwardPipeline::RenderScene(
 
     // GPU 剔除后过滤：构建可见 draw 列表
     std::vector<DrawItem> filteredItems;
-    if (useGPUVisible && m_GPUScene.GetObjectCount() == (u32)allDrawItems.size()) {
-        // 构建 GPU 可见集合（objectIndex → true）
-        std::unordered_set<u32> visibleSet(m_GPUVisibleIndices.begin(), m_GPUVisibleIndices.end());
-        for (auto& di : allDrawItems) {
-            if (visibleSet.count(di.objectIndex))
-                filteredItems.push_back(di);
-        }
-    } else {
-        filteredItems = std::move(allDrawItems);
-    }
+    // GPU 剔除时，传统 draw 命令也使用全部对象列表。
+    // SceneRenderer 和 GPUScene 的 objectIndex 是独立索引空间，不能直接对号过滤。
+    // 实际剔除由后续 DrawIndexedIndirect 根据 GPU IndirectCmdBuf 完成。
+    filteredItems = std::move(allDrawItems);
     u32 totalDraws = (u32)filteredItems.size();
 
     // 推送 bindless 纹理到全部已注册描述符集（FlushPending 自动遍历全部 set）

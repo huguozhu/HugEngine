@@ -149,6 +149,7 @@ private:
 
     float4x4 m_LastViewProj = float4x4(1.0f);  // 最近一次设置的 ViewProj（Phase 2 复用）
     u32 m_LastVisibleCount = 0;
+    u32 m_FrameIndex        = 0;  // 首帧跳过 Hi-Z，等上帧深度有效
 };
 
 } // namespace he::render
