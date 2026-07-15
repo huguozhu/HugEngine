@@ -1,6 +1,6 @@
 # HugEngine 开发进度
 
-> 最后更新: 2026-07-15（今日更新: GPU Driven 全链路完成 — AsyncCompute + 两阶段剔除 + PTG + DGC + WorkGraph + Forward+）
+> 最后更新: 2026-07-16（今日更新: GPU 粒子系统 P1-P3 + GPU Culling 修复 + RHI 重构 + 文档整理）
 
 ## 整体进度
 
@@ -46,7 +46,8 @@
 - **GPU Profiling**: 时间戳查询 + ProfilerManager + RenderGraph 集成 + ImGui 面板 ✅
 - **VMA 集成**: Vulkan Memory Allocator 替换裸 vkAllocateMemory ✅
 - **Animation**: Transform 关键帧动画组件 (Translation/Rotation/Scale) ✅
-- **Samples**: 02.Cube, 03.Sponza (Forward), 04.Deferred (Sponza+延迟) ✅
+- **GPU Particle System**: ParticleComponent + Compute Shader 模拟 (Init/Emit/Simulate) + Billboard 渲染 + ColorOverLife 渐变 + 视锥剔除 ✅
+- **Samples**: 02.Cube (Forward/Deferred/RT 三模式切换), 03.Sponza (Forward), 04.Deferred (Sponza+延迟) ✅
 
 ## 模块完成度
 
@@ -61,11 +62,16 @@
 | BeginOffscreenPassMRT (最多 8 颜色附件, Vulkan 标准上限) | ✅ |
 | PipelineBarrier (纹理 + 全局布局转换) | ✅ |
 | VMA 集成 (VulkanMemoryAllocator) | ✅ |
+| VulkanDevice 拆分为 4 文件 + VulkanInternal→5 头文件 | ✅ 2026-07-16 |
 | AsyncCompute (双队列 + Timeline Semaphore + 跨队列同步) | ✅ |
+| VulkanCommandList 拆分为 3 文件 (Core/RenderPass/Submit) | ✅ 2026-07-16 |
 | 时间戳查询 (QueryPool + GPU Profiler) | ✅ |
 | Ray Tracing (BLAS/TLAS + RT PSO + SBT + TraceRays) | ✅ |
 | AccelerationStructure 描述符类型 + UpdateDescriptorSet(AS*) | ✅ |
 | BufferUsage::AccelerationStruct → AS build input flag | ✅ |
+| VulkanDevice 拆分为 4 文件 (Core/RT/MeshShader/Descriptors) | ✅ |
+| VulkanInternal.h 拆分为 5 独立头文件 | ✅ |
+| VulkanCommandList 拆分为 3 文件 (Core/RenderPass/Submit) | ✅ |
 
 ### L3 — Shader（着色器层）✅
 | 特性 | 状态 |
@@ -96,6 +102,9 @@
 | RT_Triangle.rgen/rmiss (Phase 1: 过程化三角形) | ✅ |
 | RT_Sponza.rgen/rmiss/rchit (Phase 2-3: 几何体 RayGen/Miss/ClosestHit) | ✅ |
 | RT_Shadow.rgen + RT_Common.rmiss/rchit (Phase 3+ 存根) | ✅ |
+| ParticleInit/Emit/Simulate/Culling.comp (粒子 Compute Shader) | ✅ 2026-07-16 |
+| ParticleRender.vert/frag (Billboard 渲染) | ✅ 2026-07-16 |
+| Hi-Z 遮挡剔除修复 (首帧 skip + max 替代 min) | ✅ 2026-07-16 |
 
 ### L4 — Render（渲染层）
 | 子系统 | 状态 |
@@ -119,6 +128,7 @@
 | ProfilerManager (GPU 时间戳查询 + RenderGraph 集成 + ImGui 面板) | ✅ |
 | ShaderHotReload (FileWatcher + slangc 编译 + PSO 热替换) | ✅ |
 | RTPass (BLAS/TLAS 管理 + SBT + 描述符集 + 材质/光源 UB/纹理) | ✅ |
+| ParticleRenderer (Compute Init/Emit/Simulate + Billboard Draw + 渐变纹理) | ✅ 2026-07-16 |
 | ImGui LoadOp::Load (UI 叠加 + GI/后处理参数面板) | ✅ |
 
 ### L5 — Scene（场景层）✅
@@ -127,6 +137,7 @@
 | Entity/Component/Transform/World/SceneGraph | ✅ |
 | Mesh/Light/Skybox 组件 | ✅ |
 | AnimationComponent (Transform 关键帧: Translation/Rotation/Scale) | ✅ |
+| ParticleComponent (GPU 粒子: Play/Stop/Tick + Emitter 参数) | ✅ 2026-07-16 |
 | CameraController (Free/Ground 模式 + 配置持久化) | ✅ |
 | ECS 反射系统 (Component/Tag/System 注册) | ✅ |
 | SceneSerializer (关卡序列化/反序列化) | ✅ |
@@ -405,6 +416,10 @@ Camera → PushConstant → RayGen::invViewProj → world ray
 | 20 | Editor Undo/Redo | ⬜ |
 | 21 | Nanite / Mesh Shader / Virtual Texturing | ⬜ |
 | 22 | 3DGS (Gaussian Splatting) | ⬜ |
+| 23 | GPU 粒子系统 (ParticleComponent + Compute Simulation + Billboard) | ✅ 2026-07-16 |
+| 24 | RHI Vulkan 重构 (VulkanDevice/Internal/CommandList 拆分) | ✅ 2026-07-16 |
+| 25 | GPU Culling 修复 (首帧 Hi-Z + 索引不匹配 + min→max) | ✅ 2026-07-16 |
+| 26 | 02.Cube 支持 Forward/Deferred/RT 三模式切换 | ✅ 2026-07-16 |
 
 ## 架构文档对比分析 (vs HugEngine_Architecture_And_Tasks.md)
 
