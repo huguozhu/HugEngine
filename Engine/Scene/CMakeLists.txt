@@ -3,7 +3,20 @@
 
 add_library(HugEngineScene STATIC)
 
-target_sources(HugEngineScene PRIVATE
+set(SCENE_SOURCES
+    Public/Scene/Entity.h
+    Public/Scene/Component.h
+    Public/Scene/Transform.h
+    Public/Scene/World.h
+    Public/Scene/SceneGraph.h
+    Public/Scene/MeshComponent.h
+    Public/Scene/LightComponent.h
+    Public/Scene/SkyboxComponent.h
+    Public/Scene/CameraComponent.h
+    Public/Scene/CubeComponent.h
+    Public/Scene/SphereComponent.h
+    Public/Scene/AnimationComponent.h
+    Public/Scene/LevelComponent.h
     Private/World.cpp
     Private/SceneGraph.cpp
     Private/MeshComponent.cpp
@@ -14,6 +27,11 @@ target_sources(HugEngineScene PRIVATE
     Private/SkyboxComponent.cpp
     Private/AnimationComponent.cpp
 )
+
+target_sources(HugEngineScene PRIVATE ${SCENE_SOURCES})
+
+# IDE 目录树：按磁盘目录分组，.h 和 .cpp 合并在一起
+huge_source_group(${SCENE_SOURCES})
 
 target_include_directories(HugEngineScene
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/Public

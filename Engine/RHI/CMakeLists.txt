@@ -3,9 +3,26 @@
 
 add_library(HugEngineRHI STATIC)
 
-target_sources(HugEngineRHI PRIVATE
+set(RHI_SOURCES
     Private/RHIBase.cpp
+    Public/RHI/RHI.h
+    Public/RHI/Types.h
+    Public/RHI/Shader.h
+    Public/RHI/CommandList.h
+    Public/RHI/Buffer.h
+    Public/RHI/SwapChain.h
+    Public/RHI/QueryPool.h
+    Public/RHI/MeshShader.h
+    Public/RHI/RayTracing.h
+    Vulkan/VulkanInternal.h
+    Vulkan/VulkanQueryPool.h
+    Vulkan/VulkanDGC.h
 )
+
+target_sources(HugEngineRHI PRIVATE ${RHI_SOURCES})
+
+# IDE 目录树：按磁盘目录分组，.h 和 .cpp 合并在一起
+huge_source_group(${RHI_SOURCES})
 
 target_include_directories(HugEngineRHI
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/Public
@@ -19,7 +36,7 @@ if(HUGENGINE_RHI_VULKAN)
     # Find Vulkan SDK from system (VULKAN_SDK env var or standard install path)
     find_package(Vulkan REQUIRED)
 
-    target_sources(HugEngineRHI PRIVATE
+    set(RHI_VULKAN_SOURCES
         Vulkan/VulkanDevice.cpp
         Vulkan/VulkanSwapChain.cpp
         Vulkan/VulkanCommandList.cpp
@@ -28,6 +45,12 @@ if(HUGENGINE_RHI_VULKAN)
         Vulkan/VulkanRayTracing.cpp
         Vulkan/VulkanDGC.cpp
     )
+
+    target_sources(HugEngineRHI PRIVATE ${RHI_VULKAN_SOURCES})
+
+    # IDE 目录树：Vulkan 实现文件按磁盘目录分组
+    huge_source_group(${RHI_VULKAN_SOURCES})
+
     target_link_libraries(HugEngineRHI PUBLIC Vulkan::Vulkan)
     # 暴露 Vulkan 桥接头文件给 Sample（Phase 1 临时方案）
     # 使得 #include "Vulkan/VulkanInternal.h" 可解析

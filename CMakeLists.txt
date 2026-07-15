@@ -8,6 +8,20 @@ project(HugEngine
 # VS 解决方案目录分组
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
+# 辅助函数：按磁盘目录结构分组源文件（.h 和 .cpp 合并到同一目录组）
+# 替代 VS 默认的 "Header Files" / "Source Files" 分离
+function(huge_source_group)
+    foreach(_src ${ARGN})
+        get_filename_component(_dir "${_src}" DIRECTORY)
+        if(_dir)
+            string(REPLACE "/" "\\" _group "${_dir}")
+            source_group("${_group}" FILES "${_src}")
+        else()
+            source_group("" FILES "${_src}")
+        endif()
+    endforeach()
+endfunction()
+
 # Output directories
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)

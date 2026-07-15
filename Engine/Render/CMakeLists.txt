@@ -2,7 +2,7 @@
 # 头文件列入 target_sources 方便 IDE 浏览，不参与编译
 add_library(HugEngineRender STATIC)
 
-target_sources(HugEngineRender PRIVATE
+set(RENDER_SOURCES
     # SceneRenderer
     SceneRenderer.h
     SceneRenderer.cpp
@@ -16,21 +16,30 @@ target_sources(HugEngineRender PRIVATE
     Pipeline/ForwardPipeline.cpp
     Pipeline/DeferredPipeline.h
     Pipeline/DeferredPipeline.cpp
+    Pipeline/ClusteredShading.h
     Pipeline/ClusteredShading.cpp
+    Pipeline/GPUScene.h
     Pipeline/GPUScene.cpp
+    Pipeline/MeshBatcher.h
     Pipeline/MeshBatcher.cpp
+    Pipeline/GPUCulling.h
     Pipeline/GPUCulling.cpp
+    Pipeline/GBufferRenderer.h
+    Pipeline/GBufferRenderer_CPU.h
     Pipeline/GBufferRenderer_CPU.cpp
+    Pipeline/GBufferRenderer_GPU.h
     Pipeline/GBufferRenderer_GPU.cpp
     Pipeline/GPUWorkGraph.h
     Pipeline/GPUWorkGraph.cpp
     Pipeline/Material.h
+    Pipeline/RTPass.h
+    Pipeline/RTPass.cpp
     # RenderGraph
     RenderGraph.h
     RenderGraph.cpp
-    # Subsystem (基础接口)
+    # Subsystem
     Subsystem/RenderSubsystem.h
-    # GI (全局光照)
+    # GI
     GI/GlobalIllumination.h
     GI/GI_None.h
     GI/GI_None.cpp
@@ -44,7 +53,7 @@ target_sources(HugEngineRender PRIVATE
     GI/GI_SSR.cpp
     GI/GI_DDGI.h
     GI/GI_DDGI.cpp
-    # Shadow (阴影子系统)
+    # Shadow
     Shadow/IShadowSystem.h
     Shadow/IShadowTechnique.h
     Shadow/ShadowNone.h
@@ -62,17 +71,25 @@ target_sources(HugEngineRender PRIVATE
     PostProcess/ToneMapPass.cpp
     PostProcess/SkyboxPass.h
     PostProcess/SkyboxPass.cpp
+    PostProcess/SSAO.h
     PostProcess/SSAO.cpp
+    PostProcess/Denoiser.h
     PostProcess/Denoiser.cpp
+    PostProcess/GaussianBlurPass.h
     PostProcess/GaussianBlurPass.cpp
+    PostProcess/BloomPass.h
     PostProcess/BloomPass.cpp
+    PostProcess/DOFPass.h
     PostProcess/DOFPass.cpp
+    PostProcess/MotionBlurPass.h
     PostProcess/MotionBlurPass.cpp
+    PostProcess/AutoExposurePass.h
     PostProcess/AutoExposurePass.cpp
+    PostProcess/ColorGradingPass.h
     PostProcess/ColorGradingPass.cpp
     # Profiler
+    Profiler/ProfilerManager.h
     Profiler/ProfilerManager.cpp
-
     # AntiAliasing
     AntiAliasing/AntiAliasing.h
     AntiAliasing/AA_None.h
@@ -83,13 +100,15 @@ target_sources(HugEngineRender PRIVATE
     AntiAliasing/AA_SMAA.h
     AntiAliasing/AA_SMAA.cpp
     AntiAliasing/AA_MSAA.h
-    # Ray Tracing
-    Pipeline/RTPass.h
-    Pipeline/RTPass.cpp
     # ShaderHotReload
     ShaderHotReload.h
     ShaderHotReload.cpp
 )
+
+target_sources(HugEngineRender PRIVATE ${RENDER_SOURCES})
+
+# IDE 目录树：按磁盘目录分组，.h 和 .cpp 合并在一起
+huge_source_group(${RENDER_SOURCES})
 
 target_include_directories(HugEngineRender
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}

@@ -1,10 +1,17 @@
 # Asset — 资源加载, glTF, 注册表 (Phase 1)
 add_library(HugEngineAsset STATIC)
 
-target_sources(HugEngineAsset PRIVATE
+set(ASSET_SOURCES
+    Public/Asset/glTFLoader.h
+    Public/Asset/BindlessTextureManager.h
     Private/glTFLoader.cpp
     Private/BindlessTextureManager.cpp
 )
+
+target_sources(HugEngineAsset PRIVATE ${ASSET_SOURCES})
+
+# IDE 目录树：按磁盘目录分组，.h 和 .cpp 合并在一起
+huge_source_group(${ASSET_SOURCES})
 
 target_include_directories(HugEngineAsset
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/Public
