@@ -374,10 +374,10 @@ Camera → PushConstant → RayGen::invViewProj → world ray
 | DeferredPipeline: 深度 Linear→Nearest 采样修复 | 边缘混合导致 worldPos 错误 | ✅ |
 | 点光阴影无 PCF 软滤波 | 硬边缘锯齿 | ⬜ |
 | 点光阴影无视锥剔除 | 6 面渲染全场景 | ⬜ |
-| GPUCulling::Dispatch 在 RenderPass 内执行 | Vulkan 校验警告 | ⬜ |
+| GPUCulling::Dispatch 在 RenderPass 内执行 | Vulkan 校验警告 | ✅ 2026-07-14 (确认无需修复) |
 | DDGI 探针可见性测试使用简单深度比较 | 可能出现漏光/遮挡错误 | ⬜ |
-| Forward+ (Tile-based Light Culling) | 前向管线仍用传统多光源遍历 | ⬜ |
-| AsyncCompute 默认关闭 | 等待多阶段提交架构完善 | ⬜ |
+| Forward+ (Tile-based Light Culling) | 前向管线 ClusteredShading 集成完成 | ✅ 2026-07-15 |
+| AsyncCompute 默认开启 | 多阶段提交架构已完善 | ✅ 2026-07-14 |
 
 ## 待办任务
 
@@ -428,9 +428,9 @@ Camera → PushConstant → RayGen::invViewProj → world ray
 | 1 | DDGI 探针可见性优化 | P4 | 🟡 中 | 多步 march + 深度偏移减少漏光 |
 | 2 | FullScene 拆分为独立 Pass | P1 | 🟡 中 | Shadow / IBL / HDR 解耦 |
 | 3 | 点光阴影 PCF 软滤波 + 视锥剔除 | P1 | 🟡 中 | 阴影质量与性能优化 |
-| 4 | AsyncCompute 完善 + 默认开启 | P1 | 🟡 中 | 多阶段提交架构 |
-| 5 | GPUCulling Dispatch 移出 RenderPass | P2 | 🟢 低 | Vulkan 校验警告修复 |
-| 6 | Forward+ (ForwardPipeline + ClusteredShading 模式) | P2 | 🟡 中 | 前向管线 Tile-based 光源剔除 |
+| 4 | AsyncCompute 完善 + 默认开启 | P1 | 🟡 中 | ✅ 多阶段提交架构已完善 (2026-07-14) |
+| 5 | GPUCulling Dispatch 移出 RenderPass | P2 | 🟢 低 | ✅ 确认无需修复 (2026-07-14) |
+| 6 | Forward+ (ForwardPipeline + ClusteredShading 模式) | P2 | 🟡 中 | ✅ Tile-based 光源剔除完成 (2026-07-15) |
 | 7 | HW Ray Tracing (纹理采样 + 顶点法线 + 阴影) | P4 | 🟢 低 | Phase 1-3 ✅, Phase 4 待规划 |
 | 8 | GI_VXGI 体素锥追踪 | P4 | 🟢 低 | 3D Clipmap Cone Trace |
 | 9 | Virtual Shadow Maps | P3 | 🟢 低 | 大规模高质量阴影 |
