@@ -27,14 +27,14 @@ static u32 To2Power(u32 i) {
 // ============================================================
 
 void ParticleComponent::Play() {
-    if (m_State != ParticleState::Stopped) {
+    if (m_ParticleState != ParticleState::Stopped) {
         HE_CORE_WARN("ParticleComponent::Play — 非 Stopped 状态下调用");
         return;
     }
     m_NeedInit      = true;
     m_Elapsed       = 0.0f;
     m_LastEmitTime  = 0.0f;
-    m_State         = ParticleState::Playing;
+    m_ParticleState         = ParticleState::Playing;
 
     // 计算最大粒子数: particlesPerSec * maxLifeTime * 1.5 (安全余量)
     m_MaxParticles = u32(m_Param.particlesPerSec * m_Param.maxLifeTime * 1.5f + 15) / 16 * 16;
@@ -47,24 +47,24 @@ void ParticleComponent::Play() {
 }
 
 void ParticleComponent::Pause() {
-    if (m_State != ParticleState::Playing) return;
-    m_State = ParticleState::Pause;
+    if (m_ParticleState != ParticleState::Playing) return;
+    m_ParticleState = ParticleState::Pause;
     if (m_Callback)
         m_Callback("Particle", ParticleMsgType::Pause);
 }
 
 void ParticleComponent::Resume() {
-    if (m_State != ParticleState::Pause) return;
-    m_State = ParticleState::Playing;
+    if (m_ParticleState != ParticleState::Pause) return;
+    m_ParticleState = ParticleState::Playing;
     if (m_Callback)
         m_Callback("Particle", ParticleMsgType::Resume);
 }
 
 void ParticleComponent::Stop() {
-    if (m_State != ParticleState::Playing) return;
+    if (m_ParticleState != ParticleState::Playing) return;
     m_Elapsed      = 0.0f;
     m_LastEmitTime = 0.0f;
-    m_State        = ParticleState::Stopped;
+    m_ParticleState        = ParticleState::Stopped;
     if (m_Callback)
         m_Callback("Particle", ParticleMsgType::Stop);
 }
@@ -74,7 +74,7 @@ void ParticleComponent::Stop() {
 // ============================================================
 
 void ParticleComponent::Tick(float deltaTime) {
-    if (m_State != ParticleState::Playing)
+    if (m_ParticleState != ParticleState::Playing)
         m_TickDeltaTime = 0.0f;
     else
         m_TickDeltaTime = deltaTime;

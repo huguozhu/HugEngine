@@ -200,7 +200,7 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
 
     rhi::PushConstantRange pcRange;
     pcRange.stageMask = 32; // VK_SHADER_STAGE_COMPUTE_BIT
-    pcRange.offset = 0; pcRange.size = 64; // enough for largest push constant
+    pcRange.offset = 0; pcRange.size = 256; // Vulkan 保证最小值 128B，部分 GPU 支持 256B
 
     auto createComputePSO = [&](rhi::DescriptorSetLayoutHandle layout,
                                  rhi::ShaderBytecode* cs, const char* name) {
@@ -269,13 +269,15 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
         desc.pushConstantRanges = {pcRange};
         desc.descriptorSetLayouts = {m_RenderLayout};
         desc.debugName   = "ParticleRender";
+        desc.depthTest    = true;
+        desc.depthWrite   = false;  // 粒子不写深度
+        desc.colorFormats[0] = rhi::Format::RGBA16_FLOAT;  // HDR target
 
-        // 混合: 与 HDR Target 混合 (additive 或 alpha)
-        desc.blendEnable = true;
-        desc.srcBlend    = rhi::BlendFactor::SrcAlpha;
-        desc.dstBlend    = rhi::BlendFactor::OneMinusSrcAlpha;
-        desc.depthTest   = true;
-        desc.depthWrite  = false;  // 粒子不写深度
+        // Push constant for render (Vertex + Fragment stages)
+        rhi::PushConstantRange renderPCRange;
+        renderPCRange.stageMask = 1 | 16;  // VERTEX_BIT | FRAGMENT_BIT
+        renderPCRange.offset = 0; renderPCRange.size = 256;
+        desc.pushConstantRanges = {renderPCRange};
 
         m_RenderPSO = device->CreatePipelineState(desc);
     }
@@ -419,9 +421,6 @@ void ParticleRenderer::DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float 
 
         cmd->SetPipeline(m_EmitPSO.get());
         cmd->BindDescriptorSet(0, cs.emitSet);
-        cmd->SetPushConstants(0, sizeof(GpuEmitParam), cs.emitUB.get() ? nullptr : nullptr);
-        // 更新 uniform buffer (参数通过 UB 传递，不在 push constant)
-        m_Device->UpdateDescriptorSet(cs.emitSet, 4, rhi::DescriptorType::StorageBuffer, cs.emitUB.get());
         cmd->SetPushConstants(0, sizeof(GpuEmitParam), &emitParam);
         cmd->Dispatch((emitCount + kCS_Threads - 1) / kCS_Threads, 1, 1);
 

@@ -201,7 +201,7 @@ public:
     // 参数
     ParticleSystemParam& GetParam() { return m_Param; }
     const ParticleSystemParam& GetParam() const { return m_Param; }
-    ParticleState GetState() const { return m_State; }
+    ParticleState GetState() const { return m_ParticleState; }
     u32 GetMaxParticles() const { return m_MaxParticles; }
 
     // 回调
@@ -225,7 +225,7 @@ public:
 
 private:
     ParticleSystemParam m_Param;
-    ParticleState       m_State             = ParticleState::Stopped;
+    ParticleState       m_ParticleState     = ParticleState::Stopped;
     ParticleCallback    m_Callback;
 
     // 时间

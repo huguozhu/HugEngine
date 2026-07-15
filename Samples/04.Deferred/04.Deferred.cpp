@@ -18,6 +18,7 @@
 #include "Scene/SphereComponent.h"
 #include "Scene/SkyboxComponent.h"
 #include "Scene/AnimationComponent.h"
+#include "Scene/ParticleComponent.h"
 #include "Asset/glTFLoader.h"
 #include "Asset/BindlessTextureManager.h"
 #include "Editor/ImGuiIntegration.h"
@@ -430,6 +431,31 @@ int main() {
     pipeline.Initialize(device.get());
     pipeline.SetSwapChain(swapchain.get());
     pipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+
+    // ── 测试粒子效果 ──
+    {
+        Entity particleEntity = world.CreateEntity("TestParticle");
+        world.AddComponent<TransformComponent>(particleEntity);
+        auto* pc = world.AddComponent<ParticleComponent>(particleEntity);
+        pc->GetParam().particlesPerSec  = 100.0f;
+        pc->GetParam().minLifeTime      = 0.5f;
+        pc->GetParam().maxLifeTime      = 2.0f;
+        pc->GetParam().minInitSpeed     = 2.0f;
+        pc->GetParam().maxInitSpeed     = 10.0f;
+        pc->GetParam().emitShape        = EmitShapeType::Sphere;
+        pc->GetParam().sphereRadius     = 5.0f;
+        pc->GetParam().emitDirectionType = EmitDirectionType::Uniform_3D;
+        pc->GetParam().gravity          = float3(0, -9.8f, 0);
+        pc->GetParam().duration         = -1.0f;  // 无限
+        pc->Play();
+        sceneGraph.SetParent(particleEntity, Entity{kInvalidEntity});
+
+        // 注册到渲染管线
+        u32 pid = pipeline.GetParticleRenderer().RegisterComponent(pc, device.get());
+        pipeline.AddParticleComponent(pid);
+
+        HE_CORE_INFO("粒子系统已注册: id={} maxParticles={}", pid, pc->GetMaxParticles());
+    }
 
     // ── 从配置文件恢复管线 / GI / 后处理设置 ──
     if (hasConfig) {
