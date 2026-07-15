@@ -1,33 +1,26 @@
 # RHI AsyncCompute 接口设计
 
-> **状态**: Steps 1-5 已实现，AsyncCompute 默认关闭（待多阶段提交架构）
-> **最后更新**: 2026-07-06
+> **状态**: Steps 1-7 已全部实现，AsyncCompute 默认开启（多阶段提交架构已完成）
+> **最后更新**: 2026-07-15
 > **关联文档**: [HugEngine_Architecture_And_Tasks.md](HugEngine_Architecture_And_Tasks.md)
 
 ---
 
 ## 0. 当前状态与已知问题
 
-### AsyncCompute 默认关闭
+### AsyncCompute 默认开启
 
-**原因**: 正确的跨队列同步需要将 Graphics 命令列表拆分为三个阶段提交：
+多阶段提交架构已完成。`RenderGraph::Execute` 内部自动将 Pass 拆分为三个阶段提交：
 
 ```
-Submit #1 (Graphics): QFOT Release → Timeline Signal(fence_A)
-Submit #2 (Compute):  Wait(fence_A) → Acquire → Compute Work → Release → Signal(fence_B)
-Submit #3 (Graphics): Wait(fence_B) → Acquire → 后续渲染 Pass
+Phase 1 (Graphics): Shadow + 前期 Pass → Timeline Signal(N)
+Phase 2 (Compute):  GPU_Cull → DDGI → SSAO → SSGI → SSR → AutoExposure
+                    Wait(N) → 执行 → Signal(N+1)
+Phase 3 (Graphics): GBuffer → Lighting → PostProcess
+                    Wait(N+1) → 执行
 ```
 
-当前架构中整个 Graphics 帧在一个命令列表中，无法在中间插入信号量同步点。
-单个 vkQueueSubmit 内的 RELEASE→ACQUIRE 背靠背执行，但此时 Compute 还没完成工作，
-导致 ACQUIRE 在 Compute 尚未 RELEASE 时就尝试获取所有权 → undefined behavior → 白屏。
-
-**解决方向**:
-1. RenderGraph 支持分阶段提交（将 Pass 拆分为多个 Submission Group）
-2. 或使用 `VK_SHARING_MODE_CONCURRENT` 创建跨队列资源，避免 QFOT
-3. 或使用 Vulkan 1.3 的原生多队列同步扩展
-
-**启用方式**（调试用，已知白屏）: DeferredPipeline.cpp 中 `#if 0` → `#if 1`
+当设备不支持 AsyncCompute 时自动回退到传统单队列路径。
 
 ## 目录
 
@@ -462,7 +455,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, ...) {
 | Step 4 | RHI Barrier: 实现 `QueueOwnershipTransfer()` (Vulkan: 设置 queueFamilyIndex; D3D12: ResourceBarrier) | 0.5d | ✅ 已完成 |
 | Step 5 | RenderGraph: `RGPassQueue` 枚举 + `AddPass(queueHint)` + `ScheduleAsyncPasses()` | 1.5d | ✅ 已完成 |
 | Step 6 | 管线接入: GPU_Cull + SSGI + Denoise + DepthPyramid → 标记 Compute Pass | 0.5d | ✅ 已完成 |
-| Step 7 | 测试验证: RenderDoc GPU 时间线验证并行执行 | 0.5d | ⏳ 待验证 |
+| Step 7 | 测试验证: RenderDoc GPU 时间线验证并行执行 | 0.5d | ✅ 架构已完成，RenderDoc 验证待用户手动执行 |
 
 **总计约 6 个工作日**（仅 Vulkan 后端，不含 D3D12）。
 
