@@ -58,7 +58,8 @@ void GBufferRenderer_GPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
             (void*)(ctx.meshBatcher ? ctx.meshBatcher->GetVertexBuffer() : nullptr),
             (void*)(ctx.meshBatcher ? ctx.meshBatcher->GetIndexBuffer() : nullptr));
 
-    if (visCount > 0 && totalIdx > 0) {
+    // 仅 GPU Culling 启用时才走 IndirectDraw 路径，避免禁用时使用脏数据
+    if (ctx.gpuCulling->enabled && visCount > 0 && totalIdx > 0) {
         cmd->SetVertexBuffer(ctx.meshBatcher->GetVertexBuffer(), 0);
         cmd->SetIndexBuffer(ctx.meshBatcher->GetIndexBuffer(), 0);
 

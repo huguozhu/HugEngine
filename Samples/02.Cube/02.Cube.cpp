@@ -282,6 +282,12 @@ int main() {
     deferredPipeline.SetSwapChain(swapchain.get());
     deferredPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
 
+    // 启动时默认关闭 GPU 剔除和 CPU 视锥剔除
+    forwardPipeline.GetGPUCulling().enabled = false;
+    deferredPipeline.GetGPUCulling().enabled = false;
+    forwardPipeline.GetSceneRenderer().enableFrustumCull = false;
+    deferredPipeline.GetSceneRenderer().enableFrustumCull = false;
+
     // ============================================================
     // 5.5 RT 路径初始化
     // ============================================================

@@ -376,8 +376,8 @@ void GPUCulling::Dispatch(rhi::IRHICommandList* cmd,
 
     u32 groups = (objectCount + 63) / 64;
     cmd->Dispatch(groups, 1, 1);
-
-    m_LastVisibleCount = 0;
+    // 不在此处清零 m_LastVisibleCount — Readback() 已在上方设置有效值，
+    // 此处清零会导致 GBufferRenderer 读取到 0 而回退到 CPU 路径
 }
 
 // ============================================================
@@ -668,8 +668,7 @@ void GPUCulling::SignalPTG(rhi::IRHICommandList* cmd, const float4x4& viewProj,
     cmd->PipelineBarrier(
         rhi::PipelineStage::ComputeShader, rhi::PipelineStage::DrawIndirect,
         rhi::ResourceState::UnorderedAccess, rhi::ResourceState::IndirectArgument);
-
-    m_LastVisibleCount = 0;
+    // 不在此处清零 m_LastVisibleCount — Readback() 已在上方设置有效值
 }
 
 // ============================================================

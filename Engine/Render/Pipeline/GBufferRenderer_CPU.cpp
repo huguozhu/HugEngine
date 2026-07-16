@@ -47,8 +47,9 @@ void GBufferRenderer_CPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
     auto drawItems = ctx.sceneRenderer->Prepare(world, sg, camera, ctx.objectBuffer);
 
     // GPU 剔除过滤（Readback 上帧结果 → 过滤可见物体）
+    // 仅 GPU Culling 启用且 visIndices 非空时才过滤，避免使用脏数据
     const auto& visIndices = *ctx.gpuVisibleIndices;
-    bool useGPUVisible = !visIndices.empty();
+    bool useGPUVisible = ctx.gpuCulling->enabled && !visIndices.empty();
     std::vector<DrawItem> filteredItems;
     bool gpuCullSafe = useGPUVisible
         && visIndices.size() <= drawItems.size()

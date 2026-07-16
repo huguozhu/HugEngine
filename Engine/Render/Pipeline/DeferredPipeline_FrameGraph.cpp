@@ -68,10 +68,13 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     m_GPUScene.Upload(m_Device);
 
     // GPU 剔除读回（上帧结果）+ 过滤可见物体
+    // 禁用时必须清空，避免 GBufferRenderer_CPU 使用脏数据过滤物体
     bool useGPUVisible = false;
     if (m_GPUCulling.enabled) {
         m_GPUCulling.Readback(m_Device, m_GPUVisibleIndices);
         useGPUVisible = !m_GPUVisibleIndices.empty();
+    } else {
+        m_GPUVisibleIndices.clear();
     }
 
     // ── GPU 剔除 Compute Pass（读上帧 GBuffer 深度 → 调度下帧剔除）──
