@@ -21,8 +21,8 @@ namespace he { class World; class SceneGraph; }
 
 namespace he::render {
 
-// GPU 端场景物体数据（std140 对齐，256 bytes）
-struct alignas(256) GPUSceneObject {
+// GPU 端场景物体数据（std430 布局，与 GPUCull.comp.slang 保持一致）
+struct GPUSceneObject {
     float4x4 localToWorld;   // [0..64]
     float4   boundsMin;      // [64..80]
     float4   boundsMax;      // [80..96]
@@ -34,10 +34,9 @@ struct alignas(256) GPUSceneObject {
     u32      firstIndex;     // [116] IndirectDraw 参数
     i32      vertexOffset;   // [120] IndirectDraw 参数
     u32      _pad[1];        // [124..128]
-    // [128..256] reserved
 };
 
-static_assert(sizeof(GPUSceneObject) == 256, "GPUSceneObject must be 256 bytes");
+static_assert(sizeof(GPUSceneObject) == 128, "GPUSceneObject must match shader std430 layout (128 bytes)");
 
 class GPUScene {
 public:

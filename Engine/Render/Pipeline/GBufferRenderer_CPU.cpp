@@ -3,6 +3,7 @@
 #include "Pipeline/GBufferRenderer_CPU.h"
 #include "Asset/BindlessTextureManager.h"
 #include "Scene/MeshComponent.h"
+#include "Core/Log.h"
 #include <unordered_set>
 
 namespace he::render {
@@ -58,6 +59,14 @@ void GBufferRenderer_CPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
         std::unordered_set<u32> visSet(visIndices.begin(), visIndices.end());
         for (auto& di : drawItems)
             if (visSet.count(di.objectIndex)) filteredItems.push_back(di);
+
+        // 调试：首帧输出 GPU 剔除统计
+        static bool gpuCullLogged = false;
+        if (!gpuCullLogged) {
+            gpuCullLogged = true;
+            HE_CORE_INFO("GPU Cull: {}/{} objects visible after filtering",
+                filteredItems.size(), drawItems.size());
+        }
     } else {
         filteredItems = std::move(drawItems);
     }

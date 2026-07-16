@@ -22,7 +22,8 @@ struct IndirectCmd { uint indexCount; uint instanceCount; uint firstIndex; int v
 bool AABBOutside(float3 aabbMin, float3 aabbMax, float4 plane) {
     float3 n = plane.xyz;
     float3 p; p.x=(n.x>=0)?aabbMax.x:aabbMin.x; p.y=(n.y>=0)?aabbMax.y:aabbMin.y; p.z=(n.z>=0)?aabbMax.z:aabbMin.z;
-    return dot(n,p)+plane.w<0;
+    // 保守余量：避免浮点精度在视锥边界处误剔除。平面已归一化，0.01≈1cm 世界空间
+    return dot(n, p) + plane.w < -0.01;
 }
 
 bool IsOccluded(float3 mn, float3 mx) {

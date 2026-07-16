@@ -73,6 +73,13 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     if (m_GPUCulling.enabled) {
         m_GPUCulling.Readback(m_Device, m_GPUVisibleIndices);
         useGPUVisible = !m_GPUVisibleIndices.empty();
+        // 首帧启用 GPU Culling 时输出 Readback 统计
+        static bool readbackLogged = false;
+        if (!readbackLogged && m_GPUCulling.enabled) {
+            readbackLogged = true;
+            HE_CORE_INFO("GPU Cull Readback: {} visible / {} gpuScene objects",
+                m_GPUVisibleIndices.size(), m_GPUScene.GetObjectCount());
+        }
     } else {
         m_GPUVisibleIndices.clear();
     }
