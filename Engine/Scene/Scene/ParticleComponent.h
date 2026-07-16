@@ -91,6 +91,12 @@ struct ParticleSystemParam {
     // 物理
     float3            gravity = float3(0, -9.8f, 0);
 
+    // 粒子视觉
+    float             minSize      = 0.25f;   // 粒子最小大小
+    float             maxSize      = 0.5f;    // 粒子最大大小
+    float4            startColor   = float4(1.0f, 0.6f, 0.1f, 1.0f);  // 出生颜色
+    float4            endColor     = float4(1.0f, 0.2f, 0.0f, 0.0f);  // 死亡颜色（末尾透明）
+
     // 生命周期渐变
     SizeOverLife      sizeOverLife;
     ColorOverLife     colorOverLife;
@@ -149,9 +155,10 @@ struct GpuEmitParam {
     u32    _pad1;               // offset 84 (4B) — uvec2 8B 对齐
     u32    texRowsCols[2];      // offset 88 (8B) — uvec2
     u32    texTimeSampling;     // offset 96 (4B)
-    u32    _pad2[3];            // offset 100 (12B) — vec3 16B 对齐
-    float  pad[3];              // offset 112 (12B) — vec3
-    // total: 124 bytes (SPIR-V block padded to 128)
+    float  minSize;             // offset 100 (4B) — 粒子最小大小
+    float  maxSize;             // offset 104 (4B) — 粒子最大大小
+    u32    _pad2[2];            // offset 108 (8B) — uint2 pad
+    // total: 116 bytes (SPIR-V block padded to 128)
 };
 
 struct GpuSimulateParam {
@@ -161,7 +168,8 @@ struct GpuSimulateParam {
     u32    texTimeSampling;     // offset 28 (4B)
     u32    texRowsCols[2];      // offset 32 (8B) — uvec2
     float  texFramesPerSec;     // offset 40 (4B)
-    // total: 44 bytes
+    u32    maxParticles;        // offset 44 (4B) — 粒子池总容量
+    // total: 48 bytes
 };
 
 struct GpuCullingParam {
@@ -174,8 +182,9 @@ struct GpuRenderParam {
     float  viewMatrix[4][4];    // offset 0  (64B)
     float  projMatrix[4][4];    // offset 64 (64B)
     u32    texRowsCols[2];      // offset 128 (8B) — uvec2
-    u32    pad[2];              // offset 136 (8B)
-    // total: 144 bytes
+    float  startColor[4];       // offset 136 (16B) — float4
+    float  endColor[4];         // offset 152 (16B) — float4
+    // total: 168 bytes
 };
 
 struct GpuSortParam {

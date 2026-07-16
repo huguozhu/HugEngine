@@ -1,10 +1,10 @@
 // ParticleSimulate.comp — 粒子物理模拟
-// 更新位置/速度/生命，死粒子回收到 DeadList
+// 遍历粒子池中所有存活粒子，更新位置/速度/生命，死粒子回收到 DeadList
 
 #include "ParticleTypes.slang"
 
-[[vk::binding(0, 0)]] StructuredBuffer<uint>              u_AlivePreIndices;   // pre_sim 存活索引
-[[vk::binding(1, 0)]] RWStructuredBuffer<uint>              u_AlivePostIndices;  // post_sim 存活索引
+[[vk::binding(0, 0)]] StructuredBuffer<uint>              u_AlivePreIndices;   // Emit 后的新粒子索引（保留兼容）
+[[vk::binding(1, 0)]] RWStructuredBuffer<uint>              u_AlivePostIndices;  // 本帧存活粒子索引
 [[vk::binding(2, 0)]] RWStructuredBuffer<ParticleCounters>  u_Counters;
 [[vk::binding(3, 0)]] RWStructuredBuffer<Particle>          u_ParticleBuffer;
 [[vk::binding(4, 0)]] RWStructuredBuffer<uint>              u_DeadList;
@@ -47,42 +47,51 @@ uint updateTexIndex(uint curIndex, float elapsed, float totalLife, uint rows, ui
 [shader("compute")]
 [numthreads(PARTICLE_CS_X_SIZE, 1, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {
-    // 读取 alive_pre_count
-    uint simCount;
-    InterlockedAdd(u_Counters[0].alive_count[0], 0, simCount);
-    if (tid.x >= simCount) return;
+    // 直接以线程 ID 作为粒子索引，遍历整个粒子池
+    uint idx = tid.x;
+    if (idx >= u_SimParam.max_particles) return;
 
-    // 1. 获取粒子索引
-    uint particleIdx = u_AlivePreIndices[tid.x];
-    Particle p = u_ParticleBuffer[particleIdx];
+    // 读取粒子数据
+    Particle p = u_ParticleBuffer[idx];
 
-    // 2. 更新生命
+    // 跳过未初始化的粒子（life_time.y == 0 表示槽位从未被使用）
+    if (p.life_time.y <= 0.0) return;
+
+    // 跳过已死亡的粒子（life_time.x >= life_time.y）
+    if (p.life_time.x >= p.life_time.y) return;
+
     float dt = u_SimParam.delta_time;
-    p.life_time.x += dt;  // cur_life += dt
 
-    // 3. 检查死亡
+    // 更新当前生命
+    p.life_time.x += dt;
+
+    // 检查死亡
     if (p.life_time.x >= p.life_time.y) {
-        // 粒子死亡 → 回收索引到 DeadList
+        // 粒子死亡 → 回收索引到 DeadList，标记槽位为空
         uint deadSlot;
         InterlockedAdd(u_Counters[0].dead_count, 1, deadSlot);
-        u_DeadList[deadSlot] = particleIdx;
-        return;  // 不写入 alive_post
+        u_DeadList[deadSlot] = idx;
+        p.life_time.y = 0.0;  // 标记为未初始化，下次 emit 可重用此槽
+        p.position.w = 0.0;   // 大小归零
+        u_ParticleBuffer[idx] = p;
+        return;  // 不写入 alivePost
     }
 
-    // 4. 更新位置 (Euler 积分)
-    float3 gravity = u_SimParam.gravity;
-    p.velocity.xyz += gravity * dt;
+    // 更新速度（重力 + 风力等外力）
+    p.velocity.xyz += u_SimParam.gravity * dt;
+
+    // 更新位置（Euler 积分）
     p.position.xyz += p.velocity.xyz * dt;
 
-    // 5. 更新纹理帧
+    // 更新纹理帧
     p.tex_index = updateTexIndex(p.tex_index, p.life_time.x, p.life_time.y,
                                   u_SimParam.tex_rows_cols.x, u_SimParam.tex_rows_cols.y);
 
-    // 6. 保存更新后的粒子
-    u_ParticleBuffer[particleIdx] = p;
+    // 保存更新后的粒子
+    u_ParticleBuffer[idx] = p;
 
-    // 7. 写入 alive_post 索引
+    // 写入 alivePost 索引（供 Culling 使用）
     uint aliveSlot;
     InterlockedAdd(u_Counters[0].alive_count[1], 1, aliveSlot);
-    u_AlivePostIndices[aliveSlot] = particleIdx;
+    u_AlivePostIndices[aliveSlot] = idx;
 }

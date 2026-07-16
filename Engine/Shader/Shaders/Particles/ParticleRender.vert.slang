@@ -18,7 +18,7 @@ struct VSOutput {
     float4 position : SV_Position;
     float2 uv       : TEXCOORD0;
     float  lifeRatio : TEXCOORD1;  // 生命比例 (current/total)
-    uint   texIndex : TEXCOORD2;   // 纹理子帧索引
+    uint   particleIdx : TEXCOORD2; // 粒子索引（用于颜色 hash）
     float3 worldPos : TEXCOORD3;   // 世界位置 (for soft particles)
 };
 
@@ -54,10 +54,10 @@ VSOutput vertexMain(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID
     float4 clipPos   = mul(proj, mul(view, worldPos4));
 
     VSOutput o;
-    o.position  = clipPos;
-    o.uv        = uv;
-    o.lifeRatio = p.life_time.x / max(p.life_time.y, 0.001);
-    o.texIndex  = p.tex_index;
-    o.worldPos  = worldPos;
+    o.position   = clipPos;
+    o.uv         = uv;
+    o.lifeRatio  = p.life_time.x / max(p.life_time.y, 0.001);
+    o.particleIdx = particleIdx;  // 唯一粒子索引 → 片元着色器颜色 hash
+    o.worldPos   = worldPos;
     return o;
 }

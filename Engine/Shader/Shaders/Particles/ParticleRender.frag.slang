@@ -1,55 +1,53 @@
-// ParticleRender.frag — Billboard 粒子片元着色器
-// 从 ColorOverLife / SizeOverLife 渐变纹理采样
-
-#include "ParticleTypes.slang"
+// ParticleRender.frag — Billboard 粒子片元着色器（无 push constant 依赖）
 
 struct PSInput {
     float4 position : SV_Position;
     float2 uv       : TEXCOORD0;
     float  lifeRatio : TEXCOORD1;
-    uint   texIndex : TEXCOORD2;
+    uint   particleIdx : TEXCOORD2;
     float3 worldPos : TEXCOORD3;
 };
 
-// Bindless 纹理数组 (复用 GBuffer set=0 中的 bindless)
-[[vk::binding(5, 0)]] Texture2D u_Textures[] : register(t5, space0);
-[[vk::binding(6, 0)]] SamplerState u_Samplers[] : register(s6, space0);
+// HSV → RGB
+float3 hsv2rgb(float h, float s, float v) {
+    float3 c = float3(h * 6.0, 0.0, 0.0);
+    float i = floor(c.x);
+    float f = c.x - i;
+    float p = v * (1.0 - s);
+    float q = v * (1.0 - s * f);
+    float t = v * (1.0 - s * (1.0 - f));
+    if (i == 0.0) return float3(v, t, p);
+    if (i == 1.0) return float3(q, v, p);
+    if (i == 2.0) return float3(p, v, t);
+    if (i == 3.0) return float3(p, q, v);
+    if (i == 4.0) return float3(t, p, v);
+    return float3(v, p, q);
+}
 
-// 渐变纹理 (1D 采样: lifeRatio → color/size)
-[[vk::binding(7, 0)]] Texture2D<float4> u_ColorOverLifeTex;   // RGBA8, 32×1
-[[vk::binding(8, 0)]] Texture2D<float2> u_SizeOverLifeTex;    // RG32F, 32×1
-[[vk::binding(9, 0)]] SamplerState u_GradientSampler;          // Linear clamp
-
-[[vk::push_constant]] cbuffer PushConstant {
-    GpuRenderParam u_RenderParam;
-};
+// 简易 hash → 色相
+float hashToHue(uint seed) {
+    uint h = (seed * 2654435761u) >> 24;
+    return float(h) / 256.0;
+}
 
 float4 fragmentMain(PSInput input) : SV_Target0 {
-    // 1. 从渐变纹理采样颜色
-    float2 gradientUV = float2(input.lifeRatio, 0.5);
-    float4 color = u_ColorOverLifeTex.SampleLevel(u_GradientSampler, gradientUV, 0);
+    // 1. 圆形软边缘
+    float2 center = input.uv - 0.5;
+    float dist = length(center);
+    float edgeAlpha = 1.0 - smoothstep(0.2, 0.5, dist);
 
-    // 2. 纹理子帧 UV 变换
-    uint2 rowsCols = u_RenderParam.texRowsCols;
-    uint totalFrames = max(rowsCols.x * rowsCols.y, 1u);
-    uint frameIdx = input.texIndex % totalFrames;
-    uint col = frameIdx % rowsCols.x;
-    uint row = frameIdx / rowsCols.x;
-    float2 subUV = (input.uv + float2(col, row)) / float2(rowsCols);
+    // 2. 基于粒子索引的鲜艳颜色
+    float hue = hashToHue(input.particleIdx);
+    float3 rgb = hsv2rgb(hue, 0.9, 1.0);
 
-    // 3. 从 bindless 纹理采样 (如果有纹理)
-    // 简化: 使用第一个纹理 (材质 ID = 0)
-    float4 texColor = u_Textures[0].SampleLevel(u_Samplers[0], subUV, 0);
-    color *= texColor;
+    // 3. 中心高亮发光
+    float glow = exp(-dist * 3.0);
+    rgb = lerp(rgb * 0.7, rgb * 1.5, glow);
 
-    // 4. 软粒子 (基于深度比较, 后续添加)
-    // float sceneDepth = u_SceneDepth.Load(int3(input.position.xy, 0));
-    // float particleDepth = input.position.z;
-    // float softAlpha = saturate((sceneDepth - particleDepth) * 10.0);
-    // color.a *= softAlpha;
+    // 4. 生命周期衰减
+    float lifeAlpha = 1.0 - input.lifeRatio * input.lifeRatio;
+    float alpha = edgeAlpha * lifeAlpha * 0.85;
 
-    // 5. Alpha test
-    if (color.a < 0.01) discard;
-
-    return color;
+    if (alpha < 0.02) discard;
+    return float4(rgb, alpha);
 }

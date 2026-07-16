@@ -88,7 +88,10 @@ void main(uint3 tid : SV_DispatchThreadID) {
 
     // 2. 初始化粒子属性
     Particle p;
-    uint seed = tid.x * 7 + 13;
+    // 使用全局原子计数器生成每粒子唯一种子（tid.x 每帧相同，仅用它不够）
+    uint uniqueId;
+    InterlockedAdd(u_Counters[0].simulate_count, 1, uniqueId);  // simulate_count 在此作全局发射计数器
+    uint seed = uniqueId * 9973 + 13;
 
     // 随机生命
     float lifeRange = u_EmitParam.max_life_time - u_EmitParam.min_life_time;
@@ -108,7 +111,11 @@ void main(uint3 tid : SV_DispatchThreadID) {
     } else if (u_EmitParam.emit_shape == Emit_Shape_Type_Box) {
         emitPos += randomPositionBox(u_EmitParam.box_size, seed + 6);
     }
-    p.position = float4(emitPos, 1.0);  // w=1.0 初始大小
+    // 随机大小
+    float size = u_EmitParam.min_size
+        + u_RandomFloats[(seed + 4) % RANDOM_FLOAT_NUM]
+        * (u_EmitParam.max_size - u_EmitParam.min_size);
+    p.position = float4(emitPos, size);  // w=初始大小
 
     // 速度
     float speed = u_EmitParam.min_init_speed

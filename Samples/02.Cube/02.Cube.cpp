@@ -295,18 +295,22 @@ int main() {
     {
         Entity particleEntity = world.CreateEntity("TestParticle");
         auto* ptTransform = world.AddComponent<TransformComponent>(particleEntity);
-        ptTransform->position = float3(0.0f, 2.0f, 0.0f);  // 在场景中心上方发射
+        ptTransform->position = float3(0.0f, 1.0f, 0.0f);  // 场景几何体同一高度，容易看到
         auto* pc = world.AddComponent<ParticleComponent>(particleEntity);
         pc->GetParam().particlesPerSec  = 100.0f;
-        pc->GetParam().minLifeTime      = 0.5f;
-        pc->GetParam().maxLifeTime      = 2.0f;
-        pc->GetParam().minInitSpeed     = 2.0f;
-        pc->GetParam().maxInitSpeed     = 10.0f;
+        pc->GetParam().minLifeTime      = 1.0f;
+        pc->GetParam().maxLifeTime      = 3.0f;
+        pc->GetParam().minInitSpeed     = 3.0f;
+        pc->GetParam().maxInitSpeed     = 8.0f;
         pc->GetParam().emitShape        = EmitShapeType::Sphere;
-        pc->GetParam().sphereRadius     = 5.0f;
-        pc->GetParam().emitDirectionType = EmitDirectionType::Uniform_3D;
-        pc->GetParam().gravity          = float3(0, -9.8f, 0);
+        pc->GetParam().sphereRadius     = 2.0f;   // 扩散半径
+        pc->GetParam().emitDirectionType = EmitDirectionType::Uniform_3D;  // 全方向
+        pc->GetParam().gravity          = float3(0, 0, 0);   // 无重力，向四周飞散
         pc->GetParam().duration         = -1.0f;  // 无限持续
+        pc->GetParam().minSize          = 0.15f;   // 最小粒子
+        pc->GetParam().maxSize          = 0.5f;    // 最大粒子
+        pc->GetParam().startColor       = float4(1.0f, 0.9f, 0.2f, 1.0f);  // 出生：亮金色
+        pc->GetParam().endColor         = float4(1.0f, 0.3f, 0.05f, 0.0f); // 死亡：暗红透明
         pc->Play();
         sceneGraph.SetParent(particleEntity, Entity{kInvalidEntity});
 

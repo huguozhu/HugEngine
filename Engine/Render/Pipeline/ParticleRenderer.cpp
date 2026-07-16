@@ -258,10 +258,9 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
     {
         rhi::DescriptorSetLayoutDesc ld;
         ld.bindings = {
-            {0, rhi::DescriptorType::StorageBuffer, 1, 3},          // Billboard vertices (Vertex)
-            {1, rhi::DescriptorType::StorageBuffer, 1, 3},          // SortIndices (Vertex)
-            {2, rhi::DescriptorType::StorageBuffer, 1, 3},          // Particle buffer (Vertex|Fragment)
-            {7, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // ColorOverLife (Fragment)
+            {0, rhi::DescriptorType::StorageBuffer, 1, 1},   // Billboard vertices (Vertex)
+            {1, rhi::DescriptorType::StorageBuffer, 1, 1},   // SortIndices (Vertex)
+            {2, rhi::DescriptorType::StorageBuffer, 1, 1},   // Particle buffer (Vertex)
         };
         m_RenderLayout = device->CreateDescriptorSetLayout(ld);
 
@@ -346,8 +345,6 @@ u32 ParticleRenderer::RegisterComponent(ParticleComponent* comp, rhi::IRHIDevice
     device->UpdateDescriptorSet(cs.renderSet, 0, rhi::DescriptorType::StorageBuffer, cs.billboardVB.get());
     device->UpdateDescriptorSet(cs.renderSet, 1, rhi::DescriptorType::StorageBuffer, cs.sortIndices.get());
     device->UpdateDescriptorSet(cs.renderSet, 2, rhi::DescriptorType::StorageBuffer, cs.particleBuf.get());
-    device->UpdateDescriptorSet(cs.renderSet, 7, rhi::DescriptorType::CombinedImageSampler,
-                                cs.colorOverLifeTex.get(), cs.gradientSampler.get());
 
     u32 id = (u32)m_Components.size();
     m_Components.push_back(std::move(cs));
@@ -454,14 +451,23 @@ void ParticleRenderer::DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float 
     bool verbose = (dbgFrame < 5);
     if (verbose) HE_CORE_INFO("--- DispatchCompute frame={} dt={:.4f} ---", dbgFrame, deltaTime);
 
-    // ── 处理 dt <= 0（首帧可能为0，用固定帧率兜底）──
-    if (deltaTime <= 0.0f) {
+    // ── 处理 dt 极小或为零（首帧可能 dt≈0，用固定帧率兜底）──
+    if (deltaTime < 1e-6f) {
         deltaTime = 1.0f / 60.0f;  // 默认 60fps
-        if (verbose) HE_CORE_INFO("  dt<=0, 使用默认 dt={:.4f}", deltaTime);
+        if (verbose) HE_CORE_INFO("  dt≈0 (实际={:.6f}), 使用默认 dt={:.4f}", deltaTime, deltaTime);
     }
 
-    // ── Step 0: 读回上帧 GPU 执行结果 ──
+    // ── Step 0: 读回上帧 GPU 执行结果（在 CPU 清零 counters 之前缓存 renderCount）──
     DebugDumpState(id, "Dispatch-Start(prev-frame-GPU-result)");
+    {
+        ParticleCounters prevCtrs;
+        void* prevMap = cs.counters->Map();
+        if (prevMap) {
+            std::memcpy(&prevCtrs, prevMap, sizeof(ParticleCounters));
+            cs.cachedRenderCount = prevCtrs.renderCount;  // 缓存上一帧 GPU 输出
+            cs.counters->Unmap();
+        }
+    }
 
     // ── 首次: 初始化粒子池（仅执行一次，使用 bool flag）──
     if (!cs.initDone) {
@@ -526,6 +532,8 @@ void ParticleRenderer::DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float 
         emitParam.directionSpread = comp->GetParam().directionSpread;
         emitParam.emitDirectionType = (u32)comp->GetParam().emitDirectionType;
         emitParam.texTimeSampling = (u32)comp->GetParam().texTimeSampling;
+        emitParam.minSize = comp->GetParam().minSize;
+        emitParam.maxSize = comp->GetParam().maxSize;
         std::memcpy(cs.emitUB->Map(), &emitParam, sizeof(GpuEmitParam));
         cs.emitUB->Unmap();
 
@@ -542,8 +550,9 @@ void ParticleRenderer::DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float 
             ctrs.deadCount, ctrs.aliveCount[0], ctrs.aliveCount[1],
             ctrs.emitCount, ctrs.renderCount);
         ctrs.emitCount = emitCount;
-        ctrs.aliveCount[0] = 0;  // 重置 alive_pre
-        ctrs.simulateCount = 0;
+        ctrs.aliveCount[0] = 0;  // 重置 alive_pre（本帧新发射粒子）
+        ctrs.aliveCount[1] = 0;  // 重置 alive_post（Simulate 每帧重新填充）
+        // 注意: simulateCount 不重置 — 用作全局唯一发射计数器（Emit shader 种子生成）
         ctrs.renderCount = 0;
         std::memcpy(cMapBefore, &ctrs, sizeof(ParticleCounters));
         cs.counters->Unmap();
@@ -580,6 +589,7 @@ void ParticleRenderer::DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float 
         }
         simParam.texFramesPerSec = comp->GetParam().texFramesPerSec;
         simParam.texTimeSampling = (u32)comp->GetParam().texTimeSampling;
+        simParam.maxParticles    = cs.maxParticles;  // 粒子池总容量（Simulate 遍历所有槽位）
 
         cmd->SetPipeline(m_SimPSO.get());
         cmd->BindDescriptorSet(0, cs.simSet);
@@ -649,6 +659,10 @@ void ParticleRenderer::Render(rhi::IRHICommandList* cmd, u32 id,
         std::memcpy(renderParam.projMatrix, &pm, sizeof(float4x4));
         uint2 tc = cs.comp ? cs.comp->GetParam().texRowsCols : uint2(1,1);
         std::memcpy(renderParam.texRowsCols, &tc, sizeof(uint2));
+        float4 sc = cs.comp ? cs.comp->GetParam().startColor : float4(1.0f);
+        std::memcpy(renderParam.startColor, &sc, sizeof(float4));
+        float4 ec = cs.comp ? cs.comp->GetParam().endColor : float4(1.0f, 0.0f, 0.0f, 0.0f);
+        std::memcpy(renderParam.endColor, &ec, sizeof(float4));
     }
     std::memcpy(cs.renderUB->Map(), &renderParam, sizeof(GpuRenderParam));
     cs.renderUB->Unmap();
@@ -658,19 +672,20 @@ void ParticleRenderer::Render(rhi::IRHICommandList* cmd, u32 id,
     cmd->BindDescriptorSet(0, cs.renderSet);
     cmd->SetPushConstants(0, sizeof(GpuRenderParam), &renderParam);
 
-    // 读取粒子渲染数量（从 GPU counters 回读—上帧结果）
-    ParticleCounters ctrs;
-    std::memcpy(&ctrs, cs.counters->Map(), sizeof(ParticleCounters));
-    cs.counters->Unmap();
-
-    u32 renderCount = ctrs.renderCount;
+    // 使用 DispatchCompute 中缓存的上一帧 GPU renderCount
+    // （DispatchCompute 中 CPU 已清零 renderCount，必须用缓存值避免读到 0）
+    u32 renderCount = cs.cachedRenderCount;
 
     if (verbose) {
-        HE_CORE_INFO("=== [RENDER] frame={} renderCount(read from GPU prev-frame)={} ===",
+        HE_CORE_INFO("=== [RENDER] frame={} renderCount(cached)={} ===",
             renderDbg, renderCount);
         DebugDumpState(id, "Render(read-prev-frame-GPU-output)");
     } else if (renderDbg % 120 == 0) {
-        HE_CORE_INFO("ParticleRender frame={}: emit={} sim={} render={} dead={}",
+        // 定期日志：回读完整 counters 用于诊断
+        ParticleCounters ctrs;
+        void* dbgMap = cs.counters->Map();
+        if (dbgMap) { std::memcpy(&ctrs, dbgMap, sizeof(ParticleCounters)); cs.counters->Unmap(); }
+        HE_CORE_INFO("ParticleRender frame={}: emit={} sim={} render(cached)={} dead={}",
             renderDbg, ctrs.emitCount, ctrs.simulateCount,
             renderCount, ctrs.deadCount);
         DebugDumpState(id, "Render(periodic)");

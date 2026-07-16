@@ -42,6 +42,7 @@ private:
         bool initDone = false;  // Init shader 是否已执行（只执行一次）
         float elapsed = 0.0f;
         float lastEmitTime = 0.0f;
+        u32 cachedRenderCount = 0;  // 缓存上一帧 GPU 输出，避免 CPU 清零后 Render 读到 0
 
         std::unique_ptr<rhi::IRHIBuffer> particleBuf;
         std::unique_ptr<rhi::IRHIBuffer> deadList, alivePre, alivePost;

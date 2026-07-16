@@ -65,7 +65,10 @@ struct GpuEmitParam {
     float   sphere_radius;
     uint2   tex_rows_cols;
     uint    tex_time_sampling_type;
-    float3  pad;
+    float   min_size;          // 初始最小大小
+    float   max_size;          // 初始最大大小
+    uint    _pad3a;            // 手动对齐
+    uint    _pad3b;
 };
 
 struct GpuSimulateParam {
@@ -74,6 +77,7 @@ struct GpuSimulateParam {
     uint    tex_time_sampling_type;
     uint2   tex_rows_cols;
     float   tex_frames_per_sec;
+    uint    max_particles;      // 粒子池总容量，用于遍历所有粒子
 };
 
 struct GpuCullingParam {
@@ -82,10 +86,11 @@ struct GpuCullingParam {
 };
 
 struct GpuRenderParam {
-    float4x4 viewMatrix;
-    float4x4 projMatrix;
-    uint2    texRowsCols;
-    uint2    pad;
+    float4x4 viewMatrix;       // offset 0  (64B)
+    float4x4 projMatrix;       // offset 64 (64B)
+    uint2    texRowsCols;      // offset 128 (8B)
+    float4   startColor;       // offset 136 (16B) — 出生颜色（lifeRatio=0）
+    float4   endColor;         // offset 152 (16B) — 死亡颜色（lifeRatio=1）
 };
 
 struct GpuSortParam {
