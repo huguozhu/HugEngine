@@ -91,8 +91,10 @@ private:
     bool m_Initialized = false;
     rhi::IRHIDevice* m_Device = nullptr;
     std::vector<CompState> m_Components;
-    rhi::IRHITexture* m_SceneDepthTex = nullptr;       // 场景深度（软粒子，在 RegisterComponent 时绑定）
+    rhi::IRHITexture* m_SceneDepthTex = nullptr;       // 场景深度（软粒子，RegisterComponent 时绑定）
     rhi::IRHISampler* m_SceneDepthSampler = nullptr;
+    std::unique_ptr<rhi::IRHITexture> m_ParticleTex;   // 粒子圆形纹理（共享）
+    std::unique_ptr<rhi::IRHISampler> m_ParticleSampler;
 };
 
 } // namespace he::render
