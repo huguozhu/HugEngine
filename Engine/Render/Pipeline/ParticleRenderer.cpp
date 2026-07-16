@@ -272,7 +272,6 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
             {1, rhi::DescriptorType::StorageBuffer, 1, 1},          // SortIndices (Vertex)
             {2, rhi::DescriptorType::StorageBuffer, 1, 1},          // Particle buffer (Vertex)
             {3, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // SceneDepth (Fragment, 软粒子)
-            {4, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // ParticleTexture (Fragment)
         };
         m_RenderLayout = device->CreateDescriptorSetLayout(ld);
 
@@ -297,44 +296,6 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
         desc.pushConstantRanges = {renderPCRange};
 
         m_RenderPSO = device->CreatePipelineState(desc);
-    }
-
-    // ── 创建粒子圆形纹理（64×64，RGBA8，白色软边缘圆）──
-    {
-        const u32 texSize = 64;
-        u8 texData[texSize * texSize * 4];  // RGBA8
-        float halfSize = float(texSize) * 0.5f;
-        for (u32 y = 0; y < texSize; ++y) {
-            for (u32 x = 0; x < texSize; ++x) {
-                float dx = (float(x) + 0.5f - halfSize) / halfSize;
-                float dy = (float(y) + 0.5f - halfSize) / halfSize;
-                float dist = sqrt(dx * dx + dy * dy);
-                // 软边缘圆形：中心白→边缘透明
-                // smoothstep: t = clamp((x-edge0)/(edge1-edge0), 0, 1); return t*t*(3-2*t)
-                float t = (dist - 0.4f) / (1.0f - 0.4f);
-                if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
-                float alpha = 1.0f - t * t * (3.0f - 2.0f * t);
-                u8 val = u8(alpha * 255.0f);
-                u32 idx = (y * texSize + x) * 4;
-                texData[idx + 0] = 255;  // R
-                texData[idx + 1] = 255;  // G
-                texData[idx + 2] = 255;  // B
-                texData[idx + 3] = val;  // A
-            }
-        }
-        rhi::TextureDesc td;
-        td.format = rhi::Format::RGBA8_UNORM;
-        td.width = texSize; td.height = texSize; td.depth = 1;
-        td.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::TransferDst;
-        td.initialData = texData;
-        m_ParticleTex = device->CreateTexture(td);
-
-        rhi::SamplerDesc sd;
-        sd.minFilter = rhi::FilterMode::Linear;
-        sd.magFilter = rhi::FilterMode::Linear;
-        sd.addressU = rhi::AddressMode::ClampToEdge;
-        sd.addressV = rhi::AddressMode::ClampToEdge;
-        m_ParticleSampler = device->CreateSampler(sd);
     }
 
     m_Initialized = true;
@@ -408,12 +369,6 @@ u32 ParticleRenderer::RegisterComponent(ParticleComponent* comp, rhi::IRHIDevice
         device->UpdateDescriptorSet(cs.renderSet, 3, rhi::DescriptorType::CombinedImageSampler,
                                     cs.sceneDepthTex, cs.sceneDepthSampler);
     }
-    // 粒子圆形纹理（所有组件共享）
-    if (m_ParticleTex && m_ParticleSampler) {
-        device->UpdateDescriptorSet(cs.renderSet, 4, rhi::DescriptorType::CombinedImageSampler,
-                                    m_ParticleTex.get(), m_ParticleSampler.get());
-    }
-
     u32 id = (u32)m_Components.size();
     m_Components.push_back(std::move(cs));
     comp->SetGPUReady(true);
