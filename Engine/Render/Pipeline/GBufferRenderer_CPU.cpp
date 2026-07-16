@@ -60,12 +60,19 @@ void GBufferRenderer_CPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
         for (auto& di : drawItems)
             if (visSet.count(di.objectIndex)) filteredItems.push_back(di);
 
-        // 调试：首帧输出 GPU 剔除统计
-        static bool gpuCullLogged = false;
-        if (!gpuCullLogged) {
-            gpuCullLogged = true;
-            HE_CORE_INFO("GPU Cull: {}/{} objects visible after filtering",
-                filteredItems.size(), drawItems.size());
+        // 调试：每 120 帧输出 GPU 剔除统计
+        static int gpuCullDbgFrame = 0;
+        if (ctx.gpuCulling->enabled && ++gpuCullDbgFrame % 120 == 0) {
+            std::string visList, cullList;
+            for (auto& di : drawItems) {
+                if (visSet.count(di.objectIndex))
+                    visList += std::to_string(di.objectIndex) + " ";
+                else
+                    cullList += std::to_string(di.objectIndex) + " ";
+            }
+            HE_CORE_INFO("GPU Cull frame={}: {}/{} visible, culled=[{}]",
+                gpuCullDbgFrame, filteredItems.size(), drawItems.size(),
+                cullList.empty() ? "none" : cullList);
         }
     } else {
         filteredItems = std::move(drawItems);
