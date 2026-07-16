@@ -30,7 +30,8 @@ Frustum Frustum::FromViewProj(const float4x4& vp) {
     f.planes[1] = makePlane(0, false);  // Right:  row3 - row0
     f.planes[2] = makePlane(1, true);   // Bottom: row3 + row1
     f.planes[3] = makePlane(1, false);  // Top:    row3 - row1
-    f.planes[4] = makePlane(2, true);   // Near:   row3 + row2
+    // Vulkan [0,1]: 近平面 z>=0 → row2，非 OpenGL 的 row3+row2 (z>=-w)
+    f.planes[4] = float4(vp[0][2], vp[1][2], vp[2][2], vp[3][2]);  // Near: row2
     f.planes[5] = makePlane(2, false);  // Far:    row3 - row2
 
     // 归一化（不取反，保留 Gribb/Hartmann 原始法线方向）

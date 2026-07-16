@@ -41,8 +41,9 @@ static void ExtractFrustumPlanes(const float4x4& vp, float4 planes[6]) {
     planes[1] = r4 - r1;  // Right
     planes[2] = r4 + r2;  // Bottom
     planes[3] = r4 - r2;  // Top
-    planes[4] = r4 + r3;  // Near (Vulkan z?[0,1])
-    planes[5] = r4 - r3;  // Far
+    // Vulkan [0,1]: 近平面 z>=0 → row2，非 OpenGL row3+row2 (z>=-w)
+    planes[4] = r3;        // Near
+    planes[5] = r4 - r3;   // Far
 
     for (int i = 0; i < 6; ++i) {
         float len = glm::length(float3(planes[i]));
