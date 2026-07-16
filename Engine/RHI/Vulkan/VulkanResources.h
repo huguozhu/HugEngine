@@ -32,12 +32,14 @@ public:
     VkBuffer GetHandle() const { return m_Buffer; }
 private:
     VmaAllocator      m_Allocator     = VK_NULL_HANDLE;
+    VkDevice          m_Device        = VK_NULL_HANDLE;
     VkBuffer          m_Buffer        = VK_NULL_HANDLE;
     VmaAllocation     m_Allocation    = VK_NULL_HANDLE;
     usize             m_Size          = 0;
     u64               m_DeviceAddress = 0;
     bool              m_IsMapped      = false;
     void*             m_MappedPtr     = nullptr;
+    bool              m_IsCoherent    = true;  // 内存是否 host-coherent（无需手动 flush/invalidate）
 };
 
 // ============================================================

@@ -60,17 +60,35 @@ VulkanBuffer::VulkanBuffer(VmaAllocator allocator, const BufferDesc& desc)
     m_MappedPtr = allocInfo.pMappedData;
     m_IsMapped = (m_MappedPtr != nullptr);
 
-    // Device address（从 VMA 分配器获取 VkDevice）
+    // 获取 VkDevice（从 VMA 分配器）
     VmaAllocatorInfo allocatorInfo;
     vmaGetAllocatorInfo(allocator, &allocatorInfo);
+    m_Device = allocatorInfo.device;
+
+    // 检查内存是否 host-coherent（通过 VMA allocation 属性查询）
+    {
+        VkMemoryPropertyFlags memFlags = 0;
+        vmaGetAllocationMemoryProperties(allocator, m_Allocation, &memFlags);
+        m_IsCoherent = (memFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
+    }
+
+    // Device address
     VkBufferDeviceAddressInfo addrInfo{};
     addrInfo.sType  = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
     addrInfo.buffer = m_Buffer;
-    m_DeviceAddress = vkGetBufferDeviceAddress(allocatorInfo.device, &addrInfo);
+    m_DeviceAddress = vkGetBufferDeviceAddress(m_Device, &addrInfo);
 
-    // 上传初始数据（直接写入持久映射指针）
+    // 上传初始数据（直接写入持久映射指针，非 coherent 需 flush）
     if (desc.initialData && m_MappedPtr) {
         std::memcpy(m_MappedPtr, desc.initialData, desc.size);
+        if (!m_IsCoherent) {
+            VkMappedMemoryRange range{};
+            range.sType  = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+            range.memory = allocInfo.deviceMemory;
+            range.offset = allocInfo.offset;
+            range.size   = desc.size;
+            vkFlushMappedMemoryRanges(m_Device, 1, &range);
+        }
     }
 }
 
@@ -81,12 +99,32 @@ VulkanBuffer::~VulkanBuffer() {
 }
 
 void* VulkanBuffer::Map() {
-    // 持久映射：直接返回已映射的指针，无需每次调用 vkMapMemory（Phase 1）
+    // GPU→CPU 回读：始终 invalidate（coherent 内存上为 no-op）
+    if (m_IsMapped) {
+        VmaAllocationInfo allocInfo;
+        vmaGetAllocationInfo(m_Allocator, m_Allocation, &allocInfo);
+        VkMappedMemoryRange range{};
+        range.sType  = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+        range.memory = allocInfo.deviceMemory;
+        range.offset = allocInfo.offset;
+        range.size   = VK_WHOLE_SIZE;
+        vkInvalidateMappedMemoryRanges(m_Device, 1, &range);
+    }
     return m_MappedPtr;
 }
 
 void VulkanBuffer::Unmap() {
-    // 持久映射：Unmap 变为 no-op，缓冲区在整个生命周期保持映射状态（Phase 1）
+    // CPU→GPU 写入：始终 flush（coherent 内存上为 no-op）
+    if (m_IsMapped) {
+        VmaAllocationInfo allocInfo;
+        vmaGetAllocationInfo(m_Allocator, m_Allocation, &allocInfo);
+        VkMappedMemoryRange range{};
+        range.sType  = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+        range.memory = allocInfo.deviceMemory;
+        range.offset = allocInfo.offset;
+        range.size   = VK_WHOLE_SIZE;
+        vkFlushMappedMemoryRanges(m_Device, 1, &range);
+    }
 }
 
 // ============================================================
@@ -234,6 +272,14 @@ VkCompareOp ToVkCompareOp(CompareFunc func) {
         case CompareFunc::GreaterEqual: return VK_COMPARE_OP_GREATER_OR_EQUAL;
         case CompareFunc::Always:       return VK_COMPARE_OP_ALWAYS;
         default:                        return VK_COMPARE_OP_NEVER;
+    }
+}
+
+VkAttachmentLoadOp ToVkLoadOp(LoadOp op) {
+    switch (op) {
+        case LoadOp::Clear:  return VK_ATTACHMENT_LOAD_OP_CLEAR;
+        case LoadOp::Load:   return VK_ATTACHMENT_LOAD_OP_LOAD;
+        default:             return VK_ATTACHMENT_LOAD_OP_CLEAR;
     }
 }
 

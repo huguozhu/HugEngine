@@ -108,6 +108,7 @@ private:
 // ============================================================
 VkFormat    ToVkFormat(Format fmt);
 VkCompareOp ToVkCompareOp(CompareFunc func);
+VkAttachmentLoadOp ToVkLoadOp(LoadOp op);
 VkBuildAccelerationStructureFlagsKHR ToVkBuildFlags(ASBuildFlags flags);
 
 } // namespace he::rhi

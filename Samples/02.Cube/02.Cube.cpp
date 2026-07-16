@@ -21,6 +21,7 @@
 #include "Scene/SphereComponent.h"
 #include "Scene/Transform.h"
 #include "Scene/SkyboxComponent.h"
+#include "Scene/ParticleComponent.h"
 #include "Editor/ImGuiIntegration.h"
 #include "Asset/BindlessTextureManager.h"
 #include "imgui.h"
@@ -289,7 +290,35 @@ int main() {
     deferredPipeline.GetSceneRenderer().enableFrustumCull = false;
 
     // ============================================================
-    // 5.5 RT 路径初始化
+    // 5.5 粒子系统测试
+    // ============================================================
+    {
+        Entity particleEntity = world.CreateEntity("TestParticle");
+        auto* ptTransform = world.AddComponent<TransformComponent>(particleEntity);
+        ptTransform->position = float3(0.0f, 2.0f, 0.0f);  // 在场景中心上方发射
+        auto* pc = world.AddComponent<ParticleComponent>(particleEntity);
+        pc->GetParam().particlesPerSec  = 100.0f;
+        pc->GetParam().minLifeTime      = 0.5f;
+        pc->GetParam().maxLifeTime      = 2.0f;
+        pc->GetParam().minInitSpeed     = 2.0f;
+        pc->GetParam().maxInitSpeed     = 10.0f;
+        pc->GetParam().emitShape        = EmitShapeType::Sphere;
+        pc->GetParam().sphereRadius     = 5.0f;
+        pc->GetParam().emitDirectionType = EmitDirectionType::Uniform_3D;
+        pc->GetParam().gravity          = float3(0, -9.8f, 0);
+        pc->GetParam().duration         = -1.0f;  // 无限持续
+        pc->Play();
+        sceneGraph.SetParent(particleEntity, Entity{kInvalidEntity});
+
+        // 注册到延迟渲染管线（粒子系统仅在 Deferred 模式下生效）
+        u32 pid = deferredPipeline.GetParticleRenderer().RegisterComponent(pc, device.get());
+        deferredPipeline.AddParticleComponent(pid);
+
+        HE_CORE_INFO("粒子系统已注册: id={} maxParticles={}", pid, pc->GetMaxParticles());
+    }
+
+    // ============================================================
+    // 5.6 RT 路径初始化
     // ============================================================
     bool rtSupported = device->GetCaps().supportsRayTracing;
     he::render::RTPass rtPass;
@@ -476,10 +505,10 @@ int main() {
         // --- Deferred 模式 ---
         else if (renderMode == 1) {
             deferredPipeline.NextFrame();
-            deferredPipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
+            deferredPipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera(), deltaTime);
             // ImGui 叠加：Deferred 已写 BackBuffer，Load 保留内容
             cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
-                rhi::Format::Unknown, nullptr, rhi::IRHICommandList::LoadOp::Load);
+                rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
         }
         // --- RT 模式 ---
         else if (renderMode == 2 && rtPass.IsValid()) {
@@ -529,7 +558,7 @@ int main() {
 
             cmdList->SetPipeline(forwardPipeline.GetPipelineState());
             cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
-                rhi::Format::Unknown, nullptr, rhi::IRHICommandList::LoadOp::Load);
+                rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
         }
 
         imgui.BeginFrame();

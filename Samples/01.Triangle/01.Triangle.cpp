@@ -213,7 +213,7 @@ int main() {
 
             // RenderPass (LoadOp::Load 保留 BackBuffer 上的 RT 输出)
             cmdList->BeginRenderPass(1, he::rhi::Format::RGBA8_UNORM, he::rhi::Format::Unknown,
-                                     nullptr, rhi::IRHICommandList::LoadOp::Load);
+                                     nullptr, rhi::LoadOp::Load);
         } else if (renderMode == 2 && meshSupported && meshPSO) {
             // ── Mesh Shader 模式：三色渐变三角形，无 VB/IB ──
             cmdList->SetPipeline(meshPSO.get());

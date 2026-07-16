@@ -48,7 +48,8 @@ public:
     void OnResize(u32 width, u32 height) override;
     const char* GetName() const override { return "ForwardPipeline"; }
     void Render(rhi::IRHICommandList* cmd, he::World& world,
-                he::SceneGraph& sg, const CameraData& camera) override;
+                he::SceneGraph& sg, const CameraData& camera,
+                float deltaTime = 0.016f) override;
 
     // 子系统访问
     IShadowSystem*       GetShadowSystem() override { return m_ShadowSystem.get(); }

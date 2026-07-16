@@ -677,7 +677,7 @@ int main() {
 
         // --- ImGui（LOAD 保留 ToneMap 输出）---
         cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
-            rhi::Format::Unknown, nullptr, rhi::IRHICommandList::LoadOp::Load);
+            rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
 
         imgui.BeginFrame();
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);

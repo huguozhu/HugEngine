@@ -29,12 +29,17 @@ public:
                 const float4x4& viewProj, const CameraData& camera);
 
     rhi::IRHIBuffer* GetDrawIndirectBuffer(u32 id) const;
+    rhi::IRHIPipelineState* GetRenderPSO() const { return m_RenderPSO.get(); }
+
+    // 调试：回读 GPU 缓冲区并打印完整管线状态
+    void DebugDumpState(u32 id, const char* step);
 
 private:
     struct CompState {
         ParticleComponent* comp = nullptr;
         u32 maxParticles = 0;
         bool buffersCreated = false;
+        bool initDone = false;  // Init shader 是否已执行（只执行一次）
         float elapsed = 0.0f;
         float lastEmitTime = 0.0f;
 

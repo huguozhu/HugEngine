@@ -42,7 +42,6 @@ public:
     virtual bool IsSecondary() const = 0;
 
     // Render pass: binds framebuffer and clears
-    enum class LoadOp : u8 { Clear = 0, Load = 1 };  // Clear=清屏, Load=保留内容
     virtual void BeginRenderPass(
         u32 colorCount,
         Format colorFormat,

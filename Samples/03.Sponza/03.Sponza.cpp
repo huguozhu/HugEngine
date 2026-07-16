@@ -736,7 +736,7 @@ int main() {
 
             // h) 打开 ImGui RP（LoadOp::Load 保留 RT 输出 → ImGui 叠加在上面）
             cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
-                rhi::Format::Unknown, nullptr, rhi::IRHICommandList::LoadOp::Load);
+                rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
         } else {
             // ============================================================
             // 光栅化路径（原有逻辑不变）
@@ -748,7 +748,7 @@ int main() {
             // RG 模式下 ToneMap 已关闭 RP，ImGui 需自行开 RP（LOAD 保留 ToneMap 输出）
             if (pipeline.UseRenderGraph()) {
                 cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
-                    rhi::Format::Unknown, nullptr, rhi::IRHICommandList::LoadOp::Load);
+                    rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
             }
         }
 

@@ -748,7 +748,8 @@ void ForwardPipeline::ResizeHDRTarget(u32 width, u32 height) {
 // ---- IRenderPipeline 包装方法 ----
 
 void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
-                              he::SceneGraph& sg, const CameraData& camera)
+                              he::SceneGraph& sg, const CameraData& camera,
+                              float deltaTime)
 {
     if (m_UseRenderGraph) {
         RenderGraph rg;

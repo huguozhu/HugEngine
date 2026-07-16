@@ -99,7 +99,7 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
         for (u32 c = 0; c < desc.colorAttachmentCount; ++c) {
             colorAttachments[c].format        = ToVkFormat(desc.colorFormats[c]);
             colorAttachments[c].samples       = VK_SAMPLE_COUNT_1_BIT;
-            colorAttachments[c].loadOp        = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            colorAttachments[c].loadOp        = ToVkLoadOp(desc.colorLoadOp);
             colorAttachments[c].storeOp       = VK_ATTACHMENT_STORE_OP_STORE;
             colorAttachments[c].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
             colorAttachments[c].finalLayout   = (desc.colorFormats[c] == Format::BGRA8_UNORM ||
@@ -113,7 +113,7 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
         VkAttachmentDescription depthAttach{};
         depthAttach.format         = hasDepth ? ToVkFormat(desc.depthFormat) : VK_FORMAT_UNDEFINED;
         depthAttach.samples        = VK_SAMPLE_COUNT_1_BIT;
-        depthAttach.loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depthAttach.loadOp         = ToVkLoadOp(desc.depthLoadOp);
         depthAttach.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
         depthAttach.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         depthAttach.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -293,7 +293,7 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     for (u32 c = 0; c < desc.colorAttachmentCount; ++c) {
         colorAttachments[c].format        = ToVkFormat(desc.colorFormats[c]);
         colorAttachments[c].samples       = VK_SAMPLE_COUNT_1_BIT;
-        colorAttachments[c].loadOp        = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        colorAttachments[c].loadOp        = ToVkLoadOp(desc.colorLoadOp);
         colorAttachments[c].storeOp       = VK_ATTACHMENT_STORE_OP_STORE;
         colorAttachments[c].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         colorAttachments[c].finalLayout   = (desc.colorFormats[c] == Format::BGRA8_UNORM ||
@@ -307,7 +307,7 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     VkAttachmentDescription depthAttach{};
     depthAttach.format         = hasDepth ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_UNDEFINED;
     depthAttach.samples        = VK_SAMPLE_COUNT_1_BIT;
-    depthAttach.loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depthAttach.loadOp         = ToVkLoadOp(desc.depthLoadOp);
     depthAttach.storeOp        = VK_ATTACHMENT_STORE_OP_STORE; // 阴影贴图需要 STORE
     depthAttach.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     depthAttach.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;

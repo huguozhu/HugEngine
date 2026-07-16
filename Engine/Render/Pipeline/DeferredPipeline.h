@@ -68,7 +68,8 @@ public:
     const char* GetName() const override { return "DeferredPipeline"; }
 
     void Render(rhi::IRHICommandList* cmd, he::World& world,
-                he::SceneGraph& sg, const CameraData& camera) override;
+                he::SceneGraph& sg, const CameraData& camera,
+                float deltaTime = 0.016f) override;
 
     // AsyncCompute: 在 Graphics Submit 之后调用，提交 Compute 工作
     // 内部使用 Timeline Semaphore 确保跨队列同步顺序

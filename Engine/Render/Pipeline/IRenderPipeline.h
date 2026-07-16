@@ -45,7 +45,8 @@ public:
     /// 渲染完整一帧（场景 → 后处理 → 输出到 SwapChain）
     virtual void Render(rhi::IRHICommandList* cmd,
                         he::World& world, he::SceneGraph& sg,
-                        const CameraData& camera) = 0;
+                        const CameraData& camera,
+                        float deltaTime = 0.016f) = 0;
 
     // ---- 窗口适配 ----
 

@@ -533,7 +533,8 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
 }
 
 void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
-                               he::SceneGraph& sg, const CameraData& camera) {
+                               he::SceneGraph& sg, const CameraData& camera,
+                               float deltaTime) {
     // ============================================================
     // AsyncCompute: RenderGraph 多阶段提交
     //
@@ -556,7 +557,7 @@ void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
     // ── 粒子模拟 (Compute，在 RenderGraph 之前) ──
     float4x4 viewProj = camera.GetViewProjMatrix();
     for (u32 pid : m_ParticleComponentIDs) {
-        m_ParticleRenderer.DispatchCompute(cmd, pid, 0.016f, viewProj);
+        m_ParticleRenderer.DispatchCompute(cmd, pid, deltaTime, viewProj);
     }
 
     RenderGraph rg;

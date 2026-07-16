@@ -125,50 +125,71 @@ struct SortInfo {
 };
 
 // ============================================================
-// GPU 参数结构体 (std140 布局, 与 ParticleTypes.slang 对应)
+// GPU 参数结构体 (std140 布局, 与 Slang SPIR-V 完全一致)
+//
+// 重要: 不能使用 glm::vec3/float3 (MSVC 下 alignas(16)，会破坏布局)。
+//       必须使用原始 float 数组 + 显式 padding。
+//       布局由 spirv-cross --reflect 验证。
 // ============================================================
 
-struct alignas(16) GpuEmitParam {
-    float3 position;        u32   maxParticles;
-    u32    emitDirectionType; float3 direction;
-    float  directionSpreadPercent;
-    float  minInitSpeed;    float maxInitSpeed;
-    float  minLifeTime;     float maxLifeTime;
-    float3 boxSize;         i32   emitShape;
-    float  sphereRadius;    uint2 texRowsCols;
-    u32    texTimeSampling; float3 pad;
+struct GpuEmitParam {
+    float  position[3];         // offset 0  (12B) — vec3
+    u32    maxParticles;        // offset 12 (4B)
+    u32    emitDirectionType;   // offset 16 (4B)
+    u32    _pad0[3];            // offset 20 (12B) — vec3 16B 对齐
+    float  direction[3];        // offset 32 (12B) — vec3
+    float  directionSpread;     // offset 44 (4B)
+    float  minInitSpeed;        // offset 48 (4B)
+    float  maxInitSpeed;        // offset 52 (4B)
+    float  minLifeTime;         // offset 56 (4B)
+    float  maxLifeTime;         // offset 60 (4B)
+    float  boxSize[3];          // offset 64 (12B) — vec3, 16B 对齐
+    i32    emitShape;           // offset 76 (4B)
+    float  sphereRadius;        // offset 80 (4B)
+    u32    _pad1;               // offset 84 (4B) — uvec2 8B 对齐
+    u32    texRowsCols[2];      // offset 88 (8B) — uvec2
+    u32    texTimeSampling;     // offset 96 (4B)
+    u32    _pad2[3];            // offset 100 (12B) — vec3 16B 对齐
+    float  pad[3];              // offset 112 (12B) — vec3
+    // total: 124 bytes (SPIR-V block padded to 128)
 };
 
-struct alignas(16) GpuSimulateParam {
-    float  deltaTime;       float3 gravity;
-    u32    texTimeSampling; uint2  texRowsCols;
-    float  texFramesPerSec;
+struct GpuSimulateParam {
+    float  deltaTime;           // offset 0  (4B)
+    u32    _pad0[3];            // offset 4  (12B) — vec3 16B 对齐
+    float  gravity[3];          // offset 16 (12B) — vec3
+    u32    texTimeSampling;     // offset 28 (4B)
+    u32    texRowsCols[2];      // offset 32 (8B) — uvec2
+    float  texFramesPerSec;     // offset 40 (4B)
+    // total: 44 bytes
 };
 
-struct alignas(16) GpuCullingParam {
-    float4x4 viewProj;
-    float4   frustumPlanes[6];
+struct GpuCullingParam {
+    float  viewProj[4][4];      // offset 0  (64B) — mat4, row_major
+    float  frustumPlanes[6][4]; // offset 64 (96B) — float4[6]
+    // total: 160 bytes
 };
 
-struct alignas(16) GpuRenderParam {
-    float4x4 viewMatrix;
-    float4x4 projMatrix;
-    uint2    texRowsCols;
-    uint2    pad;
+struct GpuRenderParam {
+    float  viewMatrix[4][4];    // offset 0  (64B)
+    float  projMatrix[4][4];    // offset 64 (64B)
+    u32    texRowsCols[2];      // offset 128 (8B) — uvec2
+    u32    pad[2];              // offset 136 (8B)
+    // total: 144 bytes
 };
 
-struct alignas(16) GpuSortParam {
+struct GpuSortParam {
     u32 sortLevel;
     u32 descendMask;
     u32 matrixWidth;
     u32 matrixHeight;
 };
 
-struct alignas(16) DispatchArgs {
+struct DispatchArgs {
     u32 dispatchX, dispatchY, dispatchZ;
 };
 
-struct alignas(16) ParticleDrawArgs {
+struct ParticleDrawArgs {
     u32 vertexCount;
     u32 instanceCount;
     u32 firstVertex;

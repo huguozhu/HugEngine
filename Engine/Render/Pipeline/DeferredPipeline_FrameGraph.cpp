@@ -455,8 +455,17 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         rg.AddPass("ParticleRender",
             {{hdrC, ResourceAccess::Read}},
             {{hdrC, ResourceAccess::Write}},
-            [this, pid, &camera](rhi::IRHICommandList* c) {
+            [this, pid, &camera, w, h](rhi::IRHICommandList* c) {
+                // 先设置粒子 PSO（BeginOffscreenPass 需要预绑定 PSO 来创建 RenderPass）
+                c->SetPipeline(m_ParticleRenderer.GetRenderPSO());
+                c->BeginOffscreenPass(
+                    m_HDRTarget->GetNativeHandle(),
+                    m_HDRDepth->GetNativeHandle(),
+                    w, h, nullptr, false);  // LoadOp::Load 保留 Light 结果
+                c->SetViewport({0, (float)h, (float)w, -(float)h, 0, 1});
+                c->SetScissor({0, 0, w, h});
                 m_ParticleRenderer.Render(c, pid, camera.GetViewProjMatrix(), camera);
+                c->EndOffscreenPass();
             });
     }
 

@@ -191,6 +191,9 @@ struct DeviceCaps {
     u32     maxMeshWorkGroupCountZ      = 65535; // Mesh 工作组 Z 方向最大数
 };
 
+// --- 渲染通道加载操作 ---
+enum class LoadOp : u8 { Clear = 0, Load = 1 };  // Clear=清屏, Load=保留内容
+
 // --- 管线绑定点 ---
 enum class PipelineBindPoint : u8 {
     Graphics,   // 图形管线
