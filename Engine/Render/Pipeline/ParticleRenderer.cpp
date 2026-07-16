@@ -10,6 +10,7 @@
 #include "ParticleEmit.comp.spv.h"
 #include "ParticleSimulate.comp.spv.h"
 #include "ParticleCulling.comp.spv.h"
+#include "ParticleSort.comp.spv.h"
 #include "ParticleRender.vert.spv.h"
 #include "ParticleRender.frag.spv.h"
 
@@ -195,6 +196,10 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
     m_CullingCS.spirv      = k_ParticleCulling_comp_spv;
     m_CullingCS.entryPoint = "main";
 
+    m_SortCS.stage      = rhi::ShaderStage::Compute;
+    m_SortCS.spirv      = k_ParticleSort_comp_spv;
+    m_SortCS.entryPoint = "main";
+
     // Layouts
     auto createLayout = [device](std::vector<rhi::DescriptorSetLayoutBinding> b) {
         rhi::DescriptorSetLayoutDesc ld; ld.bindings = std::move(b);
@@ -246,6 +251,11 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
                                      {4, rhi::DescriptorType::StorageBuffer, 1, 32}});
     m_CullingPSO = createComputePSO(m_CullingLayout, &m_CullingCS, "ParticleCulling");
 
+    // Sort Layout + PSO
+    m_SortLayout = createLayout({{0, rhi::DescriptorType::StorageBuffer, 1, 32},
+                                  {1, rhi::DescriptorType::StorageBuffer, 1, 32}});
+    m_SortPSO = createComputePSO(m_SortLayout, &m_SortCS, "ParticleSort");
+
     // ── Render PSO (Graphics: Billboard) ──
     m_RenderVS.stage      = rhi::ShaderStage::Vertex;
     m_RenderVS.spirv      = k_ParticleRender_vert_spv;
@@ -294,11 +304,12 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
 
 void ParticleRenderer::Shutdown(rhi::IRHIDevice* device) {
     m_Components.clear();
-    m_InitPSO.reset(); m_EmitPSO.reset(); m_SimPSO.reset(); m_CullingPSO.reset(); m_RenderPSO.reset();
+    m_InitPSO.reset(); m_EmitPSO.reset(); m_SimPSO.reset(); m_CullingPSO.reset(); m_SortPSO.reset(); m_RenderPSO.reset();
     if (m_InitLayout    != rhi::kInvalidLayout) device->DestroyDescriptorSetLayout(m_InitLayout);
     if (m_EmitLayout    != rhi::kInvalidLayout) device->DestroyDescriptorSetLayout(m_EmitLayout);
     if (m_SimLayout     != rhi::kInvalidLayout) device->DestroyDescriptorSetLayout(m_SimLayout);
     if (m_CullingLayout != rhi::kInvalidLayout) device->DestroyDescriptorSetLayout(m_CullingLayout);
+    if (m_SortLayout    != rhi::kInvalidLayout) device->DestroyDescriptorSetLayout(m_SortLayout);
     m_Initialized = false;
 }
 
@@ -339,6 +350,11 @@ u32 ParticleRenderer::RegisterComponent(ParticleComponent* comp, rhi::IRHIDevice
     device->UpdateDescriptorSet(cs.cullingSet, 2, rhi::DescriptorType::StorageBuffer, cs.sortIndices.get());
     device->UpdateDescriptorSet(cs.cullingSet, 3, rhi::DescriptorType::StorageBuffer, cs.counters.get());
     device->UpdateDescriptorSet(cs.cullingSet, 4, rhi::DescriptorType::StorageBuffer, cs.drawIndirectArgs.get());
+
+    // Sort descriptor set
+    cs.sortSet = device->AllocateDescriptorSet(m_SortLayout);
+    device->UpdateDescriptorSet(cs.sortSet, 0, rhi::DescriptorType::StorageBuffer, cs.sortIndices.get());
+    device->UpdateDescriptorSet(cs.sortSet, 1, rhi::DescriptorType::StorageBuffer, cs.counters.get());
 
     // Render descriptor set
     cs.renderSet = device->AllocateDescriptorSet(m_RenderLayout);
@@ -629,6 +645,18 @@ void ParticleRenderer::DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float 
                 cullParam.frustumPlanes[4][0], cullParam.frustumPlanes[4][1],
                 cullParam.frustumPlanes[4][2], cullParam.frustumPlanes[4][3]);
         }
+    }
+
+    // ── Sort Pass (Bitonic Sort: 按深度降序，远→近渲染) ──
+    {
+        cmd->SetPipeline(m_SortPSO.get());
+        cmd->BindDescriptorSet(0, cs.sortSet);
+        cmd->Dispatch(1, 1, 1);  // 单 workgroup 512 线程，shared memory 排序
+
+        cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::VertexShader,
+                             rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource);
+
+        if (verbose) HE_CORE_INFO("  [SORT] Bitonic Sort dispatch (512 threads, shared mem)");
     }
 
     // ── Dispatch 后立即检查 CPU 写入是否正确 ──

@@ -85,6 +85,7 @@ if(SLANGC)
         "${SHADER_DIR}/Particles/ParticleEmit.comp.slang"
         "${SHADER_DIR}/Particles/ParticleSimulate.comp.slang"
         "${SHADER_DIR}/Particles/ParticleCulling.comp.slang"
+        "${SHADER_DIR}/Particles/ParticleSort.comp.slang"
         "${SHADER_DIR}/WorkGraph_Entry.comp.slang"
         "${SHADER_DIR}/GPUCull.comp.slang"
         "${SHADER_DIR}/GPUCull_Phase1.comp.slang"

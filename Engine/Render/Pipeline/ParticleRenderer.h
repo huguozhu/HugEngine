@@ -57,6 +57,7 @@ private:
         rhi::DescriptorSetHandle simSet  = rhi::kInvalidSet;
         rhi::DescriptorSetHandle cullingSet = rhi::kInvalidSet;
         rhi::DescriptorSetHandle renderSet  = rhi::kInvalidSet;
+        rhi::DescriptorSetHandle sortSet    = rhi::kInvalidSet;
 
         // 渐变纹理 (ColorOverLife + SizeOverLife)
         std::unique_ptr<rhi::IRHITexture>  colorOverLifeTex;
@@ -67,12 +68,13 @@ private:
     };
 
     // Compute PSOs
-    std::unique_ptr<rhi::IRHIPipelineState> m_InitPSO, m_EmitPSO, m_SimPSO, m_CullingPSO;
+    std::unique_ptr<rhi::IRHIPipelineState> m_InitPSO, m_EmitPSO, m_SimPSO, m_CullingPSO, m_SortPSO;
     rhi::DescriptorSetLayoutHandle m_InitLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetLayoutHandle m_EmitLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetLayoutHandle m_SimLayout  = rhi::kInvalidLayout;
     rhi::DescriptorSetLayoutHandle m_CullingLayout = rhi::kInvalidLayout;
-    rhi::ShaderBytecode m_InitCS, m_EmitCS, m_SimCS, m_CullingCS;
+    rhi::DescriptorSetLayoutHandle m_SortLayout = rhi::kInvalidLayout;
+    rhi::ShaderBytecode m_InitCS, m_EmitCS, m_SimCS, m_CullingCS, m_SortCS;
 
     // Render PSO
     std::unique_ptr<rhi::IRHIPipelineState> m_RenderPSO;
