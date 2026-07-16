@@ -88,7 +88,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         rhi::TextureDesc dd;
         dd.format = rhi::Format::D32_FLOAT;
         dd.width = m_Width; dd.height = m_Height;
-        dd.usage = rhi::TextureUsage::DepthStencil;
+        dd.usage = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;  // 软粒子需要采样深度
         if (m_MSAA) m_MSAA->OverrideTextureDesc(dd);  // HDR 深度纹理与颜色纹理相同采样数
         m_HDRDepth = device->CreateTexture(dd);
         rhi::SamplerDesc s; s.minFilter = s.magFilter = rhi::FilterMode::Linear;
@@ -356,6 +356,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
 
     // GPU 粒子系统
     m_ParticleRenderer.Initialize(device);
+    m_ParticleRenderer.SetSceneDepth(m_HDRDepth.get(), m_PointSampler.get());  // 软粒子深度纹理
 
     m_Ready = true;
     HE_CORE_INFO("DeferredPipeline initialized");
@@ -496,7 +497,8 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
     r(m_GBufferE, rhi::Format::RGBA16_FLOAT, rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource);
     r(m_GBufferDepth, rhi::Format::D32_FLOAT, rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource);
     r(m_HDRTarget, rhi::Format::RGBA16_FLOAT, rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource);
-    r(m_HDRDepth, rhi::Format::D32_FLOAT, rhi::TextureUsage::DepthStencil);
+    r(m_HDRDepth, rhi::Format::D32_FLOAT, rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource);
+    m_ParticleRenderer.SetSceneDepth(m_HDRDepth.get(), m_PointSampler.get());  // 软粒子深度纹理更新
     if (m_ToneMap) m_ToneMap->OnResize(w, h);
     if (m_Skybox)  { m_Skybox->Shutdown(); m_Skybox->Initialize(m_Device, w, h); }
     if (m_AntiAliasing) m_AntiAliasing->OnResize(w, h);

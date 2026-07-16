@@ -31,6 +31,9 @@ public:
     rhi::IRHIBuffer* GetDrawIndirectBuffer(u32 id) const;
     rhi::IRHIPipelineState* GetRenderPSO() const { return m_RenderPSO.get(); }
 
+    /// 设置场景深度纹理（用于软粒子边缘混合）
+    void SetSceneDepth(rhi::IRHITexture* depthTexture, rhi::IRHISampler* depthSampler);
+
     // 调试：回读 GPU 缓冲区并打印完整管线状态
     void DebugDumpState(u32 id, const char* step);
 
@@ -63,6 +66,10 @@ private:
         std::unique_ptr<rhi::IRHITexture>  colorOverLifeTex;
         std::unique_ptr<rhi::IRHISampler>  gradientSampler;
 
+        // 场景深度（软粒子，由 DeferredPipeline 传入）
+        rhi::IRHITexture* sceneDepthTex = nullptr;
+        rhi::IRHISampler* sceneDepthSampler = nullptr;
+
         void CreateBuffers(rhi::IRHIDevice* device, u32 sortCapacity);
         void UpdateGradientTextures(rhi::IRHIDevice* device);
     };
@@ -84,6 +91,8 @@ private:
     bool m_Initialized = false;
     rhi::IRHIDevice* m_Device = nullptr;
     std::vector<CompState> m_Components;
+    rhi::IRHITexture* m_SceneDepthTex = nullptr;       // 场景深度（软粒子，在 RegisterComponent 时绑定）
+    rhi::IRHISampler* m_SceneDepthSampler = nullptr;
 };
 
 } // namespace he::render

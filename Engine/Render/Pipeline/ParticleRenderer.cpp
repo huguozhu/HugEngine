@@ -268,9 +268,10 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
     {
         rhi::DescriptorSetLayoutDesc ld;
         ld.bindings = {
-            {0, rhi::DescriptorType::StorageBuffer, 1, 1},   // Billboard vertices (Vertex)
-            {1, rhi::DescriptorType::StorageBuffer, 1, 1},   // SortIndices (Vertex)
-            {2, rhi::DescriptorType::StorageBuffer, 1, 1},   // Particle buffer (Vertex)
+            {0, rhi::DescriptorType::StorageBuffer, 1, 1},          // Billboard vertices (Vertex)
+            {1, rhi::DescriptorType::StorageBuffer, 1, 1},          // SortIndices (Vertex)
+            {2, rhi::DescriptorType::StorageBuffer, 1, 1},          // Particle buffer (Vertex)
+            {3, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // SceneDepth (Fragment, 软粒子)
         };
         m_RenderLayout = device->CreateDescriptorSetLayout(ld);
 
@@ -361,6 +362,13 @@ u32 ParticleRenderer::RegisterComponent(ParticleComponent* comp, rhi::IRHIDevice
     device->UpdateDescriptorSet(cs.renderSet, 0, rhi::DescriptorType::StorageBuffer, cs.billboardVB.get());
     device->UpdateDescriptorSet(cs.renderSet, 1, rhi::DescriptorType::StorageBuffer, cs.sortIndices.get());
     device->UpdateDescriptorSet(cs.renderSet, 2, rhi::DescriptorType::StorageBuffer, cs.particleBuf.get());
+    // 场景深度纹理（软粒子），由 DeferredPipeline 在 Init 时通过 SetSceneDepth 设置
+    cs.sceneDepthTex = m_SceneDepthTex;
+    cs.sceneDepthSampler = m_SceneDepthSampler;
+    if (cs.sceneDepthTex && cs.sceneDepthSampler) {
+        device->UpdateDescriptorSet(cs.renderSet, 3, rhi::DescriptorType::CombinedImageSampler,
+                                    cs.sceneDepthTex, cs.sceneDepthSampler);
+    }
 
     u32 id = (u32)m_Components.size();
     m_Components.push_back(std::move(cs));
@@ -728,6 +736,21 @@ void ParticleRenderer::Render(rhi::IRHICommandList* cmd, u32 id,
     }
 
     renderDbg++;
+}
+
+void ParticleRenderer::SetSceneDepth(rhi::IRHITexture* depthTexture, rhi::IRHISampler* depthSampler) {
+    m_SceneDepthTex = depthTexture;
+    m_SceneDepthSampler = depthSampler;
+    // 更新所有已注册组件的深度纹理绑定
+    for (auto& cs : m_Components) {
+        cs.sceneDepthTex = depthTexture;
+        cs.sceneDepthSampler = depthSampler;
+        if (cs.renderSet != rhi::kInvalidSet && depthTexture && depthSampler) {
+            m_Device->UpdateDescriptorSet(cs.renderSet, 3,
+                rhi::DescriptorType::CombinedImageSampler,
+                depthTexture, depthSampler);
+        }
+    }
 }
 
 rhi::IRHIBuffer* ParticleRenderer::GetDrawIndirectBuffer(u32 id) const {

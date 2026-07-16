@@ -1,4 +1,7 @@
-// ParticleRender.frag — Billboard 粒子片元着色器（无 push constant 依赖）
+// ParticleRender.frag — Billboard 粒子片元着色器 + 软粒子
+
+// 场景深度纹理（用于软粒子边缘混合）
+[[vk::binding(3, 0)]] Texture2D<float> u_SceneDepth;
 
 struct PSInput {
     float4 position : SV_Position;
@@ -47,6 +50,17 @@ float4 fragmentMain(PSInput input) : SV_Target0 {
     // 4. 生命周期衰减
     float lifeAlpha = 1.0 - input.lifeRatio * input.lifeRatio;
     float alpha = edgeAlpha * lifeAlpha * 0.85;
+
+    // 5. 软粒子：读取场景深度，靠近几何体时淡出
+    {
+        // 用像素坐标直接 Load 场景深度（不需要 sampler）
+        float sceneDepth = u_SceneDepth.Load(int3(input.position.xy, 0));
+        float particleDepth = input.position.z;
+        // 粒子在场景前方时 diff>0，靠近时 diff→0 则淡出
+        float depthDiff = sceneDepth - particleDepth;
+        float softFactor = saturate(depthDiff * 50.0);  // 50=过渡比例（越小越柔和）
+        alpha *= softFactor;
+    }
 
     if (alpha < 0.02) discard;
     return float4(rgb, alpha);
