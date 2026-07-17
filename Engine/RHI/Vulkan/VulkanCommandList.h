@@ -177,7 +177,7 @@ private:
     VkRenderPass  m_OffscreenRP = VK_NULL_HANDLE;
     bool          m_InOffscreenPass = false;
     VkFramebuffer m_CurrentOffscreenFB = VK_NULL_HANDLE;
-    std::vector<VkFramebuffer> m_PendingFBs[kMaxFramesInFlight];
+    // m_PendingFBs 已移除，改用 m_VulkanDevice->GetDeferredDestroy() 统一管理
 
     VkImage        m_DummyDepthImage  = VK_NULL_HANDLE;
     VkDeviceMemory m_DummyDepthMemory = VK_NULL_HANDLE;

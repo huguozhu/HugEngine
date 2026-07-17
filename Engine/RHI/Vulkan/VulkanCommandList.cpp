@@ -124,13 +124,16 @@ VulkanCommandList::VulkanCommandList(VkDevice device, u32 queueFamily,
 }
 
 VulkanCommandList::~VulkanCommandList() {
+    // 等待 GPU 完成所有工作，确保延迟销毁队列中的资源可以安全释放
     vkDeviceWaitIdle(m_Device);
+
+    // 清空延迟销毁队列中的 Framebuffer（由 VulkanDevice 统一管理）
+    if (m_VulkanDevice) {
+        m_VulkanDevice->GetDeferredDestroy().FlushAll();
+    }
+
     for (auto& fb : m_Framebuffers) vkDestroyFramebuffer(m_Device, fb, nullptr);
     if (m_CurrentOffscreenFB) { vkDestroyFramebuffer(m_Device, m_CurrentOffscreenFB, nullptr); }
-    for (u32 i = 0; i < kMaxFramesInFlight; ++i) {
-        for (VkFramebuffer fb : m_PendingFBs[i]) { vkDestroyFramebuffer(m_Device, fb, nullptr); }
-        m_PendingFBs[i].clear();
-    }
     if (m_LoadRenderPass) { vkDestroyRenderPass(m_Device, m_LoadRenderPass, nullptr); }
     if (m_DummyDepthView)   { vkDestroyImageView(m_Device, m_DummyDepthView, nullptr); }
     if (m_DummyDepthImage)  { vkDestroyImage(m_Device, m_DummyDepthImage, nullptr); }
@@ -190,9 +193,13 @@ void VulkanCommandList::Begin() {
     // 等待当前帧槽位的 GPU 栅栏
     vkWaitForFences(m_Device, 1, &m_Fences[m_FrameIndex], VK_TRUE, UINT64_MAX);
 
-    // 安全销毁待处理 FB（fence 已等待，GPU 保证完成）
-    for (VkFramebuffer fb : m_PendingFBs[m_FrameIndex]) { vkDestroyFramebuffer(m_Device, fb, nullptr); }
-    m_PendingFBs[m_FrameIndex].clear();
+    // 推进延迟销毁队列（fence 已等待，GPU 保证完成）。
+    // AdvanceDeferredDestroy 内部有帧 ID 去重，多 CommandList 时只执行一次。
+    if (m_VulkanDevice) {
+        m_VulkanDevice->AdvanceFrame();
+        m_VulkanDevice->AdvanceDeferredDestroy(m_VulkanDevice->GetCurrentFrame());
+    }
+
     if (m_FramebuffersNeedRebuild) {
         for (VkFramebuffer fb : m_Framebuffers) { vkDestroyFramebuffer(m_Device, fb, nullptr); }
         m_Framebuffers.clear();

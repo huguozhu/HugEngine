@@ -304,10 +304,17 @@ void VulkanCommandList::EndOffscreenPass() {
     vkCmdEndRenderPass(m_CmdBuffers[m_FrameIndex]);
     m_InOffscreenPass = false;
 
-    // FB 不能立即销毁 — CB 尚未提交。加入延迟销毁队列，
-    // 在 3 帧后 Begin() 的 fence 等待后安全销毁。
+    // FB 不能立即销毁 — CB 尚未提交。
+    // 通过 VulkanDevice 的延迟销毁队列统一管理，3 帧后安全销毁。
     if (m_CurrentOffscreenFB) {
-        m_PendingFBs[m_FrameIndex].push_back(m_CurrentOffscreenFB);
+        VkDevice dev = m_Device;
+        VkFramebuffer fb = m_CurrentOffscreenFB;
+        auto* queue = m_VulkanDevice ? &m_VulkanDevice->GetDeferredDestroy() : nullptr;
+        if (queue) {
+            queue->Enqueue([dev, fb]() {
+                vkDestroyFramebuffer(dev, fb, nullptr);
+            });
+        }
         m_CurrentOffscreenFB = VK_NULL_HANDLE;
     }
 }

@@ -29,8 +29,10 @@
 #include "VulkanResources.h"
 #include "VulkanRT.h"
 #include "VulkanPipelineState.h"
+#include "DeferredDestructionQueue.h"
 
 #include <span>
+#include <unordered_map>
 #include <vector>
 
 namespace he::rhi {
@@ -150,6 +152,32 @@ public:
     // RT 函数派发表
     VulkanRTDispatch& GetRTDispatch() { return m_RT; }
 
+    /// 获取缓存的 PSO 共享引用（供 CreateVulkanPipeline 使用）
+    /// @return 非空 shared_ptr 表示缓存命中，调用方应创建缓存模式 VulkanPipelineState
+    std::shared_ptr<u32> GetCachedPSORef(uint64_t hash, VkPipeline& outPipeline,
+                                          VkPipelineLayout& outLayout,
+                                          VkRenderPass& outRenderPass);
+    /// 将新创建的 PSO 插入缓存（供 CreateVulkanPipeline 使用）
+    void InsertPSOToCache(uint64_t hash, VkPipeline pipeline,
+                          VkPipelineLayout layout, VkRenderPass rp);
+
+    // ============================================================
+    // 延迟销毁队列 — 每帧开始时调用一次，安全销毁 3 帧前的 GPU 资源
+    // 内部有帧计数保护，多次调用只会执行一次
+    // ============================================================
+    DeferredDestructionQueue& GetDeferredDestroy() { return m_DeferredDestroy; }
+    /// 推进延迟销毁队列（每帧调用一次，内部自动去重）
+    void AdvanceDeferredDestroy(u64 frameId) {
+        if (frameId != m_LastDeferredAdvanceFrame) {
+            m_LastDeferredAdvanceFrame = frameId;
+            m_DeferredDestroy.Advance();
+        }
+    }
+
+    // 帧计数器（用于 PSO 缓存 LRU 淘汰 + 延迟销毁去重）
+    u64 GetCurrentFrame() const { return m_CurrentFrame; }
+    void AdvanceFrame() { m_CurrentFrame++; }
+
     // Mesh Shader 函数指针
     PFN_vkCmdDrawMeshTasksEXT          m_CmdDrawMeshTasks         = nullptr;
     PFN_vkCmdDrawMeshTasksIndirectEXT  m_CmdDrawMeshTasksIndirect = nullptr;
@@ -258,6 +286,27 @@ private:
 
     void EnsureDescriptorPool();
     VkDescriptorType ToVkDescType(DescriptorType type) const;
+
+    // ============================================================
+    // GPU 资源延迟销毁队列 — 统一管理所有 Vulkan 资源的生命周期
+    // ============================================================
+    DeferredDestructionQueue m_DeferredDestroy;
+
+    // ============================================================
+    // PSO 缓存 — 基于 PipelineStateDesc 哈希去重
+    // 相同配置的管线只创建一次，后续请求共享底层 Vulkan 对象
+    // ============================================================
+    struct PSOCacheEntryInternal {
+        VkPipeline          pipeline     = VK_NULL_HANDLE;
+        VkPipelineLayout    layout       = VK_NULL_HANDLE;
+        VkRenderPass        renderPass   = VK_NULL_HANDLE;
+        u64                  lastUsedFrame = 0;
+        std::shared_ptr<u32> refCount;  // 共享引用计数（VulkanPipelineState 持有）
+    };
+    std::unordered_map<uint64_t, PSOCacheEntryInternal> m_PSOCache;
+    u64 m_CurrentFrame = 0;  // 递增帧计数器（PSO 缓存 LRU + 延迟销毁去重）
+    u64 m_LastDeferredAdvanceFrame = UINT64_MAX;  // 上一次延迟销毁的帧 ID
+
 };
 
 // ============================================================

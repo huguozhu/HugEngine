@@ -26,8 +26,13 @@ namespace he::rhi {
 std::unique_ptr<IRHIBuffer>        CreateVulkanBuffer(VmaAllocator, const BufferDesc&);
 std::unique_ptr<IRHITexture>       CreateVulkanTexture(VmaAllocator, VkCommandPool, VkQueue, const TextureDesc&);
 std::unique_ptr<IRHISampler>       CreateVulkanSampler(VkDevice, const SamplerDesc&);
+// 注意：CreateVulkanPipeline 现在接受 PSOCache + DeferredDestructionQueue 参数
 std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(VkDevice, const PipelineStateDesc&,
-    const std::vector<VkDescriptorSetLayout>& descLayouts);
+    const std::vector<VkDescriptorSetLayout>& descLayouts,
+    class VulkanDevice* vulkanDevice = nullptr);
+
+// PSO 哈希函数声明（实现在 VulkanPipeline.cpp）
+uint64_t HashPipelineStateDesc(const PipelineStateDesc& desc);
 
 // VulkanDevice 析构函数实现（声明在 VulkanInternal.h，需要非内联定义锚定 vtable）
 VulkanDevice::~VulkanDevice() { Shutdown(); }
@@ -266,6 +271,16 @@ void VulkanDevice::Initialize(const DeviceInitDesc& desc) {
 // Shutdown — 销毁所有 Vulkan 资源
 // ============================================================
 void VulkanDevice::Shutdown() {
+    // 1. 等待 GPU 完成所有工作
+    if (m_Device) vkDeviceWaitIdle(m_Device);
+
+    // 2. 清空 PSO 缓存（等待所有外部引用释放后销毁所有缓存的 Vulkan 对象）
+    m_PSOCache.clear();
+
+    // 3. 立即执行延迟销毁队列中的所有待处理资源（GPU 已 idle，安全）
+    m_DeferredDestroy.FlushAll();
+
+    // 4. 销毁 VMA 分配器（在清理 Vulkan 资源之前）
     if (m_VmaAllocator) { vmaDestroyAllocator(m_VmaAllocator); m_VmaAllocator = VK_NULL_HANDLE; }
 
     for (auto& info : m_DescLayoutInfos)
@@ -775,7 +790,43 @@ std::unique_ptr<IRHIPipelineState> VulkanDevice::CreatePipelineState(const Pipel
         if (l != VK_NULL_HANDLE)
             descLayouts.push_back(l);
     }
-    return CreateVulkanPipeline(m_Device, desc, descLayouts);
+    // 传入 this 指针以使用 PSO 缓存 + 延迟销毁队列
+    return CreateVulkanPipeline(m_Device, desc, descLayouts, this);
+}
+
+// ============================================================
+// PSO 缓存方法
+// ============================================================
+
+void VulkanDevice::InsertPSOToCache(uint64_t hash, VkPipeline pipeline,
+                                    VkPipelineLayout layout, VkRenderPass rp) {
+    PSOCacheEntryInternal entry;
+    entry.pipeline       = pipeline;
+    entry.layout         = layout;
+    entry.renderPass     = rp;
+    entry.lastUsedFrame  = m_CurrentFrame;
+    entry.refCount       = std::make_shared<u32>(0);
+    m_PSOCache[hash] = std::move(entry);
+    HE_CORE_INFO("PSO cache: inserted new entry (hash=0x{:016x}, total={})",
+                 hash, m_PSOCache.size());
+}
+
+std::shared_ptr<u32> VulkanDevice::GetCachedPSORef(uint64_t hash,
+                                                    VkPipeline& outPipeline,
+                                                    VkPipelineLayout& outLayout,
+                                                    VkRenderPass& outRenderPass) {
+    auto it = m_PSOCache.find(hash);
+    if (it == m_PSOCache.end()) return nullptr;
+
+    auto& entry = it->second;
+    // 校验缓存条目有效性
+    if (entry.pipeline == VK_NULL_HANDLE) return nullptr;
+
+    entry.lastUsedFrame = m_CurrentFrame;
+    outPipeline = entry.pipeline;
+    outLayout   = entry.layout;
+    outRenderPass = entry.renderPass;
+    return entry.refCount;  // 共享引用计数
 }
 
 std::unique_ptr<IRHITexture> VulkanDevice::CreateTexture(const TextureDesc& desc) {

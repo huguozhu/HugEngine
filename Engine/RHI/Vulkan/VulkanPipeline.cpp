@@ -1,9 +1,12 @@
 // ============================================================
 // VulkanPipeline.cpp — Vulkan 管线状态对象（PSO）创建
 // 负责 Graphics/Compute Pipeline 构建、ShaderModule、PipelineLayout
+// 集成 PSO 缓存：相同配置的管线仅创建一次，后续请求共享 Vulkan 对象
 // ============================================================
 #include "VulkanPipelineState.h"
 #include "VulkanRT.h"  // ToVkFormat / ToVkCompareOp
+#include "VulkanDevice.h"  // VulkanDevice::PSOCacheEntry / DeferredDestructionQueue
+#include "DeferredDestructionQueue.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
 
@@ -12,22 +15,145 @@
 namespace he::rhi {
 
 // ============================================================
-// VulkanPipelineState 析构（类定义在 VulkanInternal.h）
+// VulkanPipelineState 析构
+//   缓存模式：仅释放 shared_ptr 引用，Vulkan 对象由缓存管理
+//   自拥有模式：直接销毁 Vulkan 对象
 // ============================================================
 VulkanPipelineState::~VulkanPipelineState() {
-    vkDestroyPipeline(m_Device, m_Pipeline, nullptr);
-    vkDestroyPipelineLayout(m_Device, m_PipelineLayout, nullptr);
-    vkDestroyRenderPass(m_Device, m_RenderPass, nullptr);
+    if (m_CacheRef) {
+        // 缓存模式：当最后一个引用释放时，将 Vulkan 对象入队延迟销毁
+        if (m_CacheRef.use_count() == 2) {  // m_CacheRef + 缓存中的副本
+            VkDevice dev = m_Device;
+            VkPipeline pipeline = m_Pipeline;
+            VkPipelineLayout layout = m_PipelineLayout;
+            VkRenderPass rp = m_RenderPass;
+            auto* queue = m_DeferredDestroy;
+            // 捕获到 lambda 中，3 帧后安全销毁
+            if (queue) {
+                queue->Enqueue([dev, pipeline, layout, rp]() {
+                    if (rp)     vkDestroyRenderPass(dev, rp, nullptr);
+                    if (layout) vkDestroyPipelineLayout(dev, layout, nullptr);
+                    if (pipeline) vkDestroyPipeline(dev, pipeline, nullptr);
+                });
+            }
+        }
+        // shared_ptr 自动释放
+    } else {
+        // 自拥有模式：立即销毁（调用方保证 GPU 已完成）
+        if (m_RenderPass)     vkDestroyRenderPass(m_Device, m_RenderPass, nullptr);
+        if (m_PipelineLayout) vkDestroyPipelineLayout(m_Device, m_PipelineLayout, nullptr);
+        if (m_Pipeline)       vkDestroyPipeline(m_Device, m_Pipeline, nullptr);
+    }
+}
+
+// ============================================================
+// PSO 描述哈希计算 — 用于 PSO 缓存去重
+// 对 PipelineStateDesc 的所有关键字段计算哈希，
+// 包括 SPIR-V 二进制内容（非指针），确保相同配置返回相同哈希
+// ============================================================
+static uint64_t HashPipelineStateDesc(const PipelineStateDesc& desc) {
+    // FNV-1a 64-bit 哈希辅助函数
+    auto hashBytes = [](uint64_t hash, const void* data, size_t size) -> uint64_t {
+        const uint8_t* bytes = static_cast<const uint8_t*>(data);
+        for (size_t i = 0; i < size; ++i) {
+            hash ^= bytes[i];
+            hash *= 0x100000001b3ULL;  // FNV-1a prime
+        }
+        return hash;
+    };
+    auto hashU32 = [&hashBytes](uint64_t hash, u32 val) -> uint64_t {
+        return hashBytes(hash, &val, sizeof(val));
+    };
+
+    uint64_t h = 0xcbf29ce484222325ULL;  // FNV-1a offset basis
+
+    // 绑定点（Graphics / Compute）
+    h = hashU32(h, static_cast<u32>(desc.bindPoint));
+
+    // Shader SPIR-V 内容（字节级哈希，确保内容变更触发缓存失效）
+    auto hashShader = [&](const ShaderBytecode* bc, uint64_t hh) -> uint64_t {
+        if (bc) {
+            hh = hashBytes(hh, bc->spirv.data(), bc->spirv.size() * sizeof(u32));
+            hh = hashU32(hh, static_cast<u32>(bc->stage));
+        }
+        return hh;
+    };
+    h = hashShader(desc.vertexShader, h);
+    h = hashShader(desc.pixelShader, h);
+    h = hashShader(desc.computeShader, h);
+    h = hashShader(desc.meshShader, h);
+    h = hashShader(desc.amplificationShader, h);
+
+    // 顶点输入布局
+    h = hashU32(h, desc.vertexLayout.stride);
+    for (auto& attr : desc.vertexLayout.attributes) {
+        h = hashU32(h, attr.location);
+        h = hashU32(h, attr.binding);
+        h = hashU32(h, static_cast<u32>(attr.format));
+        h = hashU32(h, attr.offset);
+    }
+
+    // 渲染状态
+    h = hashU32(h, static_cast<u32>(desc.topology));
+    h = hashU32(h, desc.depthTest ? 1u : 0u);
+    h = hashU32(h, desc.depthWrite ? 1u : 0u);
+    h = hashU32(h, static_cast<u32>(desc.depthCompare));
+
+    // 渲染目标配置
+    h = hashU32(h, desc.colorAttachmentCount);
+    for (u32 i = 0; i < desc.colorAttachmentCount; ++i)
+        h = hashU32(h, static_cast<u32>(desc.colorFormats[i]));
+    h = hashU32(h, static_cast<u32>(desc.depthFormat));
+    h = hashU32(h, static_cast<u32>(desc.colorLoadOp));
+    h = hashU32(h, static_cast<u32>(desc.depthLoadOp));
+    h = hashU32(h, desc.sampleCount);
+    h = hashU32(h, desc.subpassIndex);
+
+    // Push Constant 范围
+    for (auto& pc : desc.pushConstantRanges) {
+        h = hashU32(h, pc.stageMask);
+        h = hashU32(h, pc.offset);
+        h = hashU32(h, pc.size);
+    }
+
+    // Descriptor Set Layout 句柄（用于区分不同的布局绑定）
+    for (auto& dsl : desc.descriptorSetLayouts) {
+        h = hashU32(h, static_cast<u32>(dsl));
+    }
+
+    return h;
 }
 
 // ============================================================
 // CreateVulkanPipeline — 工厂函数，由 VulkanDevice 调用
+// 集成 PSO 缓存：相同 PipelineStateDesc → 复用底层 Vulkan 对象
 // ============================================================
 std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     VkDevice device, const PipelineStateDesc& desc,
-    const std::vector<VkDescriptorSetLayout>& descLayouts)
+    const std::vector<VkDescriptorSetLayout>& descLayouts,
+    VulkanDevice* vulkanDevice)
 {
-    // 1. 创建 ShaderModule 的辅助 lambda
+    // ── PSO 缓存查找 ──
+    if (vulkanDevice) {
+        uint64_t descHash = HashPipelineStateDesc(desc);
+        VkPipeline cachedPipeline = VK_NULL_HANDLE;
+        VkPipelineLayout cachedLayout = VK_NULL_HANDLE;
+        VkRenderPass cachedRP = VK_NULL_HANDLE;
+        auto cachedRef = vulkanDevice->GetCachedPSORef(descHash,
+            cachedPipeline, cachedLayout, cachedRP);
+        if (cachedRef) {
+            // 缓存命中：创建共享引用的 VulkanPipelineState（Vulkan 对象由缓存管理生命周期）
+            HE_CORE_INFO("PSO cache hit: hash=0x{:016x}, pipeline={}", descHash,
+                         reinterpret_cast<void*>(cachedPipeline));
+            VkPipelineBindPoint bp = (desc.bindPoint == PipelineBindPoint::Compute)
+                ? VK_PIPELINE_BIND_POINT_COMPUTE : VK_PIPELINE_BIND_POINT_GRAPHICS;
+            return std::make_unique<VulkanPipelineState>(
+                device, cachedPipeline, cachedLayout, cachedRP, bp,
+                cachedRef, &vulkanDevice->GetDeferredDestroy());
+        }
+    }
+
+    // 0. 创建 ShaderModule 的辅助 lambda
     auto createShader = [&](const ShaderBytecode* bc, VkShaderStageFlagBits stage) -> VkShaderModule {
         if (!bc || bc->spirv.empty()) return VK_NULL_HANDLE;
 
@@ -81,6 +207,19 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
         vkDestroyShaderModule(device, comp, nullptr);
 
         HE_CORE_INFO("Vulkan compute pipeline created");
+        // ── 插入 PSO 缓存（首个引用也使用缓存模式，统一生命周期管理）──
+        if (vulkanDevice) {
+            uint64_t hash = HashPipelineStateDesc(desc);
+            vulkanDevice->InsertPSOToCache(hash, pipeline, pipelineLayout, VK_NULL_HANDLE);
+            VkPipeline cachedP = VK_NULL_HANDLE; VkPipelineLayout cachedL = VK_NULL_HANDLE;
+            VkRenderPass cachedR = VK_NULL_HANDLE;
+            auto ref = vulkanDevice->GetCachedPSORef(hash, cachedP, cachedL, cachedR);
+            if (ref) {
+                return std::make_unique<VulkanPipelineState>(device, pipeline, pipelineLayout,
+                    VK_NULL_HANDLE, VK_PIPELINE_BIND_POINT_COMPUTE,
+                    ref, &vulkanDevice->GetDeferredDestroy());
+            }
+        }
         return std::make_unique<VulkanPipelineState>(device, pipeline, pipelineLayout,
                                                       VK_NULL_HANDLE, VK_PIPELINE_BIND_POINT_COMPUTE);
     }
@@ -290,6 +429,19 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
 
         HE_CORE_INFO("Vulkan mesh shader pipeline created (task={}, mesh, frag={})",
                      task != VK_NULL_HANDLE, frag != VK_NULL_HANDLE);
+        // ── 插入 PSO 缓存 ──
+        if (vulkanDevice) {
+            uint64_t hash = HashPipelineStateDesc(desc);
+            vulkanDevice->InsertPSOToCache(hash, pipeline, pipelineLayout, renderPass);
+            VkPipeline cachedP = VK_NULL_HANDLE; VkPipelineLayout cachedL = VK_NULL_HANDLE;
+            VkRenderPass cachedR = VK_NULL_HANDLE;
+            auto ref = vulkanDevice->GetCachedPSORef(hash, cachedP, cachedL, cachedR);
+            if (ref) {
+                return std::make_unique<VulkanPipelineState>(device, pipeline, pipelineLayout,
+                    renderPass, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    ref, &vulkanDevice->GetDeferredDestroy());
+            }
+        }
         return std::make_unique<VulkanPipelineState>(device, pipeline, pipelineLayout,
                                                       renderPass, VK_PIPELINE_BIND_POINT_GRAPHICS);
     }
@@ -537,6 +689,19 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     vkDestroyShaderModule(device, frag, nullptr);
 
     HE_CORE_INFO("Vulkan graphics pipeline created");
+    // ── 插入 PSO 缓存 ──
+    if (vulkanDevice) {
+        uint64_t hash = HashPipelineStateDesc(desc);
+        vulkanDevice->InsertPSOToCache(hash, pipeline, pipelineLayout, renderPass);
+        VkPipeline cachedP = VK_NULL_HANDLE; VkPipelineLayout cachedL = VK_NULL_HANDLE;
+        VkRenderPass cachedR = VK_NULL_HANDLE;
+        auto ref = vulkanDevice->GetCachedPSORef(hash, cachedP, cachedL, cachedR);
+        if (ref) {
+            return std::make_unique<VulkanPipelineState>(device, pipeline, pipelineLayout,
+                renderPass, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                ref, &vulkanDevice->GetDeferredDestroy());
+        }
+    }
     return std::make_unique<VulkanPipelineState>(device, pipeline, pipelineLayout,
                                                   renderPass, VK_PIPELINE_BIND_POINT_GRAPHICS);
 }
