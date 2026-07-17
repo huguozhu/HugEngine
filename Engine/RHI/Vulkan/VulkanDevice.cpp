@@ -419,8 +419,16 @@ void VulkanDevice::CreateLogicalDevice() {
     descIndexing.descriptorBindingPartiallyBound = VK_TRUE;
     descIndexing.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
     descIndexing.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
+    descIndexing.descriptorBindingStorageImageUpdateAfterBind = VK_TRUE;    // StorageImage bindless
+    descIndexing.descriptorBindingUniformBufferUpdateAfterBind = VK_TRUE;   // UniformBuffer bindless
+    descIndexing.descriptorBindingStorageTexelBufferUpdateAfterBind = VK_TRUE; // TexelBuffer bindless
     descIndexing.shaderUniformBufferArrayNonUniformIndexing = VK_TRUE;
     descIndexing.shaderStorageBufferArrayNonUniformIndexing = VK_TRUE;
+
+    // Vulkan 1.1: shaderDrawParameters（SPIR-V gl_DrawID 需要）
+    VkPhysicalDeviceVulkan11Features vulkan11Features{};
+    vulkan11Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+    vulkan11Features.shaderDrawParameters = VK_TRUE;
 
     // bufferDeviceAddress
     VkPhysicalDeviceBufferDeviceAddressFeatures addrFeature{};
@@ -432,8 +440,9 @@ void VulkanDevice::CreateLogicalDevice() {
     timelineFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
     timelineFeature.timelineSemaphore = VK_TRUE;
 
-    // pNext 链: descIndexing → addrFeature → timelineFeature → [RT] → [Mesh] → [DGC]
+    // pNext 链: descIndexing → vulkan11 → addrFeature → timelineFeature → [RT] → [Mesh] → [DGC]
     void** ppNext = &descIndexing.pNext;
+    *ppNext = &vulkan11Features; ppNext = &vulkan11Features.pNext;
     *ppNext = &addrFeature; ppNext = &addrFeature.pNext;
     *ppNext = &timelineFeature; ppNext = &timelineFeature.pNext;
     if (m_SupportsRT) {
@@ -446,12 +455,37 @@ void VulkanDevice::CreateLogicalDevice() {
     if (m_SupportsMesh) {
         *ppNext = &meshFeature; ppNext = &meshFeature.pNext;
     }
+    // Compute Shader Derivatives（粒子系统 SSAO 等 Compute Shader 中使用 ddx/ddy）
+    VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR computeDerivativesFeature{};
+    bool hasDerivatives = false;
+    {
+        u32 extCount = 0;
+        vkEnumerateDeviceExtensionProperties(m_Physical, nullptr, &extCount, nullptr);
+        std::vector<VkExtensionProperties> exts(extCount);
+        vkEnumerateDeviceExtensionProperties(m_Physical, nullptr, &extCount, exts.data());
+        for (auto& e : exts) {
+            if (strcmp(e.extensionName, VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME) == 0)
+                { hasDerivatives = true; break; }
+        }
+        if (hasDerivatives) {
+            computeDerivativesFeature.sType =
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR;
+            computeDerivativesFeature.computeDerivativeGroupQuads = VK_TRUE;
+            deviceExtensions.push_back(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
+            HE_CORE_INFO("Compute Shader Derivatives 扩展已启用");
+        }
+    }
+
     if (m_SupportsDGC) {
         *ppNext = &dgcFeature; ppNext = &dgcFeature.pNext;
+    }
+    if (hasDerivatives) {
+        *ppNext = &computeDerivativesFeature; ppNext = &computeDerivativesFeature.pNext;
     }
     *ppNext = nullptr;
 
     VkPhysicalDeviceFeatures features{};
+    features.multiDrawIndirect = VK_TRUE;  // GPU Driven 需要多绘制间接
 
     VkDeviceCreateInfo deviceInfo{};
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;

@@ -55,6 +55,10 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
             vkRange.size       = pcRange.size;
             vkPushRanges.push_back(vkRange);
         }
+        if (vkPushRanges.empty()) {  // 自动补全避免验证层警告
+            VkPushConstantRange r{}; r.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT; r.size = 128;
+            vkPushRanges.push_back(r);
+        }
         VkPipelineLayoutCreateInfo layoutInfo{};
         layoutInfo.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         layoutInfo.setLayoutCount         = static_cast<u32>(descLayouts.size());
@@ -101,7 +105,10 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
             colorAttachments[c].samples       = VK_SAMPLE_COUNT_1_BIT;
             colorAttachments[c].loadOp        = ToVkLoadOp(desc.colorLoadOp);
             colorAttachments[c].storeOp       = VK_ATTACHMENT_STORE_OP_STORE;
-            colorAttachments[c].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            // LOAD 模式下 initialLayout 不能是 UNDEFINED（Vulkan 规范要求）
+            colorAttachments[c].initialLayout = (desc.colorLoadOp == LoadOp::Load)
+                ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                : VK_IMAGE_LAYOUT_UNDEFINED;
             colorAttachments[c].finalLayout   = (desc.colorFormats[c] == Format::BGRA8_UNORM ||
                                                  desc.colorFormats[c] == Format::BGRA8_SRGB)
                                                 ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
@@ -117,7 +124,9 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
         depthAttach.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
         depthAttach.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         depthAttach.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        depthAttach.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+        depthAttach.initialLayout  = (desc.depthLoadOp == LoadOp::Load)
+            ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+            : VK_IMAGE_LAYOUT_UNDEFINED;
         depthAttach.finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
 
         u32 depthAttachIdx = desc.colorAttachmentCount;
@@ -216,6 +225,13 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
             vkRange.size       = pcRange.size;
             vkPushRanges.push_back(vkRange);
         }
+        if (vkPushRanges.empty()) {  // 自动补全避免验证层警告
+            VkPushConstantRange r{};
+            r.stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT
+                         | VK_SHADER_STAGE_FRAGMENT_BIT;
+            r.size = 128;
+            vkPushRanges.push_back(r);
+        }
 
         VkPipelineLayoutCreateInfo layoutInfo{};
         layoutInfo.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -295,7 +311,10 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
         colorAttachments[c].samples       = VK_SAMPLE_COUNT_1_BIT;
         colorAttachments[c].loadOp        = ToVkLoadOp(desc.colorLoadOp);
         colorAttachments[c].storeOp       = VK_ATTACHMENT_STORE_OP_STORE;
-        colorAttachments[c].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        // LOAD 模式下 initialLayout 不能是 UNDEFINED（Vulkan 规范要求）
+        colorAttachments[c].initialLayout = (desc.colorLoadOp == LoadOp::Load)
+            ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+            : VK_IMAGE_LAYOUT_UNDEFINED;
         colorAttachments[c].finalLayout   = (desc.colorFormats[c] == Format::BGRA8_UNORM ||
                                              desc.colorFormats[c] == Format::BGRA8_SRGB)
                                             ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
@@ -311,7 +330,9 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     depthAttach.storeOp        = VK_ATTACHMENT_STORE_OP_STORE; // 阴影贴图需要 STORE
     depthAttach.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     depthAttach.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    depthAttach.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+    depthAttach.initialLayout  = (desc.depthLoadOp == LoadOp::Load)
+        ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+        : VK_IMAGE_LAYOUT_UNDEFINED;
     depthAttach.finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL; // 阴影贴图后续要采样
 
     // depth-only 模式下，深度附件在颜色之后
@@ -462,6 +483,14 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
         vkRange.offset     = pcRange.offset;
         vkRange.size       = pcRange.size;
         vkPushRanges.push_back(vkRange);
+    }
+    // 如果着色器使用 push constants 但没有显式声明 range，自动添加默认范围
+    // 避免 Vulkan 验证层警告 "push constants but no VkPushConstantRange found"
+    if (vkPushRanges.empty()) {
+        VkPushConstantRange defaultRange{};
+        defaultRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        defaultRange.size       = 128;  // 最小保证范围
+        vkPushRanges.push_back(defaultRange);
     }
 
     VkPipelineLayoutCreateInfo layoutInfo{};

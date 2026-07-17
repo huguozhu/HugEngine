@@ -546,20 +546,29 @@ void VulkanCommandList::PipelineBarrier(
     if (!texture) return;
     auto* vkTex = static_cast<VulkanTexture*>(texture);
 
+    // 根据纹理格式确定正确的深度/颜色 layout 和 aspect
+    Format fmt = vkTex->GetFormat();
+    bool isDepth = (fmt == Format::D32_FLOAT || fmt == Format::D24_UNORM_S8_UINT ||
+                    fmt == Format::D16_UNORM || fmt == Format::D32_FLOAT_S8_UINT);
+    VkImageAspectFlags aspect = isDepth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+
     VkImageMemoryBarrier imageBarrier{};
     imageBarrier.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     imageBarrier.srcAccessMask       = ToVkAccessFlags(srcState);
     imageBarrier.dstAccessMask       = ToVkAccessFlags(dstState);
-    imageBarrier.oldLayout           = ToVkImageLayout(srcState);
-    imageBarrier.newLayout           = ToVkImageLayout(dstState);
     imageBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     imageBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     imageBarrier.image = vkTex->GetImage();
 
-    VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
-    Format fmt = vkTex->GetFormat();
-    if (fmt == Format::D32_FLOAT || fmt == Format::D24_UNORM_S8_UINT || fmt == Format::D16_UNORM)
-        aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+    // 深度纹理不能使用 COLOR_ATTACHMENT_OPTIMAL layout，需替换为深度对应 layout
+    auto fixLayout = [&](ResourceState state) -> VkImageLayout {
+        VkImageLayout layout = ToVkImageLayout(state);
+        if (isDepth && layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+            return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        return layout;
+    };
+    imageBarrier.oldLayout = fixLayout(srcState);
+    imageBarrier.newLayout = fixLayout(dstState);
     imageBarrier.subresourceRange = {
         aspect,
         0, vkTex->GetMipLevels(),

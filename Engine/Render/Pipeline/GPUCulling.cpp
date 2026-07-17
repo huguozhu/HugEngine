@@ -74,7 +74,7 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
     // Single-phase: IndirectDraw + DrawCount SSBO
     {
         rhi::BufferDesc d; d.size = sizeof(IndirectDrawCommand) * kMaxObjects;
-        d.usage = rhi::BufferUsage::Storage; d.cpuAccess = true;
+        d.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::Indirect; d.cpuAccess = true;
         m_IndirectCmdBuf = device->CreateBuffer(d);
         device->UpdateDescriptorSet(m_DescSet, 1, rhi::DescriptorType::StorageBuffer, m_IndirectCmdBuf.get());
     }

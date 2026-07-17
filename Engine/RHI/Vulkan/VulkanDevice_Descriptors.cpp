@@ -64,7 +64,16 @@ void VulkanDevice::EnsureDescriptorPool() {
 DescriptorSetLayoutHandle VulkanDevice::CreateDescriptorSetLayout(const DescriptorSetLayoutDesc& desc) {
     DescLayoutInfo info;
     std::vector<VkDescriptorSetLayoutBinding> vkBindings;
-    for (auto& b : desc.bindings) {
+    // 找到最后一个 bindless binding 的索引（Vulkan 要求 VARIABLE_DESCRIPTOR_COUNT_BIT
+    // 只能设置在最后一个 binding 上）
+    i32 lastBindlessIdx = -1;
+    for (i32 i = 0; i < (i32)desc.bindings.size(); ++i) {
+        if (desc.bindings[i].bindless)
+            lastBindlessIdx = i;
+    }
+
+    for (i32 i = 0; i < (i32)desc.bindings.size(); ++i) {
+        auto& b = desc.bindings[i];
         VkDescriptorSetLayoutBinding vb{};
         vb.binding            = b.binding;
         vb.descriptorType     = ToVkDescType(b.type);
@@ -74,10 +83,11 @@ DescriptorSetLayoutHandle VulkanDevice::CreateDescriptorSetLayout(const Descript
 
         info.bindings.push_back(b);
 
-        VkDescriptorBindingFlags flags = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
-        if (b.bindless) {
-            flags |= VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT
-                   | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+        VkDescriptorBindingFlags flags = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT
+                                       | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+        if (b.bindless && i == lastBindlessIdx) {
+            // 只有最后一个 bindless binding 允许设置 VARIABLE_COUNT
+            flags |= VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT;
         }
         info.bindingFlags.push_back(flags);
     }
