@@ -1040,6 +1040,12 @@ int main() {
             ImGui::Text("%u 网格  |  %u 方向光  |  %u 点光  |  %u 聚光", meshCount, dirLightCount, 1, spotCount);
         }
         ImGui::End();
+
+        // GPU Profiler 面板（按 F1 切换）
+        if (ImGui::IsKeyPressed(ImGuiKey_F1))
+            pipeline.GetProfilerPanel().Toggle();
+        pipeline.GetProfilerPanel().Draw();
+
         imgui.EndFrame(cmdList.get());
         cmdList->EndRenderPass();
         cmdList->End();

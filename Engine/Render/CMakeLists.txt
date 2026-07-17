@@ -94,6 +94,8 @@ set(RENDER_SOURCES
     # Profiler
     Profiler/ProfilerManager.h
     Profiler/ProfilerManager.cpp
+    Profiler/ProfilerPanel.h
+    Profiler/ProfilerPanel.cpp
     # AntiAliasing
     AntiAliasing/AntiAliasing.h
     AntiAliasing/AA_None.h
@@ -118,4 +120,6 @@ target_include_directories(HugEngineRender
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
+# ImGui 头文件路径（供 ProfilerPanel 使用）
+target_include_directories(HugEngineRender PRIVATE ${CMAKE_SOURCE_DIR}/Engine/External/imgui)
 target_link_libraries(HugEngineRender PUBLIC HugEngineRHI HugEngineShader HugEngineScene HugEngineAsset)

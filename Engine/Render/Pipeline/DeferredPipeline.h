@@ -34,6 +34,7 @@ namespace he::rhi { class VulkanDGC; }
 #include "PostProcess/ColorGradingPass.h"
 #include "PostProcess/ToneMapPass.h"
 #include "Profiler/ProfilerManager.h"
+#include "Profiler/ProfilerPanel.h"
 #include "PostProcess/SkyboxPass.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
@@ -92,6 +93,7 @@ public:
     MotionBlurPass& GetMotionBlur() { return m_MotionBlur; }
     SSAO&           GetSSAO()       { return m_SSAO; }
     ProfilerManager&    GetProfiler()      { return m_Profiler; }
+    ProfilerPanel&      GetProfilerPanel() { return m_ProfilerPanel; }
     AutoExposurePass&   GetAutoExposure()  { return m_AutoExposure; }
     ColorGradingPass&   GetColorGrading()  { return m_ColorGrading; }
     // GBuffer 渲染模式
@@ -224,6 +226,7 @@ private:
     DOFPass  m_DOF;            // 景深（懒初始化）
     MotionBlurPass m_MotionBlur; // 运动模糊（懒初始化）
     ProfilerManager m_Profiler;  // GPU 时间戳 Profiler
+    ProfilerPanel   m_ProfilerPanel; // ImGui 可视化面板
     AutoExposurePass m_AutoExposure; // 自动曝光
     ColorGradingPass m_ColorGrading; // LDR 色彩分级
     std::vector<u32> m_GPUVisibleIndices;

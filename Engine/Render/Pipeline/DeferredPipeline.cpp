@@ -287,6 +287,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
 
     // GPU Profiler
     m_Profiler.Initialize(device, 20, MAX_FRAMES_IN_FLIGHT);
+    m_ProfilerPanel.SetProfiler(&m_Profiler);  // 绑定 ImGui 面板到 Profiler 数据源
     m_AutoExposure.Initialize(device, m_Width, m_Height);
 
     // Lighting PSO (全屏三角形，无深度)
