@@ -82,8 +82,16 @@ public:
     void           SubmitAll(Span<IRHICommandList*> cmdLists) override;
 
     // GPU Query
-    std::unique_ptr<IRHIQueryPool> CreateQueryPool(u32 queryCount) override;
+    std::unique_ptr<IRHIQueryPool> CreateQueryPool(u32 queryCount,
+        QueryType type = QueryType::Timestamp) override;
     float GetTimestampPeriod() override;
+
+    // Debug Object Naming — 为 GPU 资源设置调试名称
+    void SetResourceDebugName(IRHIBuffer* resource, const char* name) override;
+    void SetResourceDebugName(IRHITexture* resource, const char* name) override;
+    void SetResourceDebugName(IRHIPipelineState* resource, const char* name) override;
+    void SetResourceDebugName(IRHISampler* resource, const char* name) override;
+    void SetResourceDebugName(IRHIAccelerationStructure* resource, const char* name) override;
 
     // Descriptor Sets
     DescriptorSetLayoutHandle CreateDescriptorSetLayout(const DescriptorSetLayoutDesc& desc) override;
@@ -129,6 +137,12 @@ public:
     bool    SupportsDGC() const { return m_SupportsDGC; }
     const VulkanDGCFuncs& GetDGCFuncs() const { return m_DGCFuncs; }
 
+    // Debug Utils 函数访问器（供 VulkanCommandList Debug Label 使用）
+    bool                              HasDebugUtils()          const { return m_SetDebugUtilsObjectName != nullptr; }
+    PFN_vkCmdBeginDebugUtilsLabelEXT  GetCmdBeginDebugLabelFn()  const { return m_CmdBeginDebugUtilsLabelEXT; }
+    PFN_vkCmdEndDebugUtilsLabelEXT    GetCmdEndDebugLabelFn()    const { return m_CmdEndDebugUtilsLabelEXT; }
+    PFN_vkCmdInsertDebugUtilsLabelEXT GetCmdInsertDebugLabelFn() const { return m_CmdInsertDebugUtilsLabelEXT; }
+
     // Shader Group 句柄信息（SBT 构建用）
     u32 GetShaderGroupHandleSize()    const { return m_ShaderGroupHandleSize; }
     u32 GetShaderGroupBaseAlignment() const { return m_ShaderGroupBaseAlignment; }
@@ -139,6 +153,12 @@ public:
     // Mesh Shader 函数指针
     PFN_vkCmdDrawMeshTasksEXT          m_CmdDrawMeshTasks         = nullptr;
     PFN_vkCmdDrawMeshTasksIndirectEXT  m_CmdDrawMeshTasksIndirect = nullptr;
+
+    // Debug Utils 函数指针（VK_EXT_debug_utils）
+    PFN_vkSetDebugUtilsObjectNameEXT   m_SetDebugUtilsObjectName     = nullptr;
+    PFN_vkCmdBeginDebugUtilsLabelEXT   m_CmdBeginDebugUtilsLabelEXT  = nullptr;
+    PFN_vkCmdEndDebugUtilsLabelEXT     m_CmdEndDebugUtilsLabelEXT    = nullptr;
+    PFN_vkCmdInsertDebugUtilsLabelEXT  m_CmdInsertDebugUtilsLabelEXT = nullptr;
 
     // Fence → VkSemaphore 解析
     VkSemaphore ResolveFenceSemaphore(RHIFenceHandle fence) const {
@@ -169,6 +189,7 @@ private:
     void LoadDGCFunctions();
     void LoadRTFunctions();
     void LoadMeshFunctions();
+    void LoadDebugUtilsFunctions();  /// 加载 VK_EXT_debug_utils 调试标签 + 对象命名函数
 
     VkInstance       m_Instance       = VK_NULL_HANDLE;
     VkPhysicalDevice m_Physical       = VK_NULL_HANDLE;

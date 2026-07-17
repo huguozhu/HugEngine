@@ -190,10 +190,12 @@ void VulkanDevice::Initialize(const DeviceInitDesc& desc) {
         VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
 #endif
     };
+    // 始终加载 debug utils 扩展（对象命名 + 调试标签无需验证层）
+    instanceExtensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+
     std::vector<const char*> validationLayers;
 
     if (m_ValidationEnabled) {
-        instanceExtensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
         validationLayers.push_back("VK_LAYER_KHRONOS_validation");
     }
 
@@ -467,6 +469,7 @@ void VulkanDevice::CreateLogicalDevice() {
     LoadRTFunctions();       // → VulkanDevice_RT.cpp
     LoadMeshFunctions();     // → VulkanDevice_MeshShader.cpp
     LoadDGCFunctions();      // → VulkanDevice_MeshShader.cpp
+    LoadDebugUtilsFunctions(); // → VulkanDevice_DebugUtils.cpp
 
     // 获取队列句柄
     vkGetDeviceQueue(m_Device, m_GraphicsFamily, 0, &m_GraphicsQueue);
@@ -714,8 +717,8 @@ void VulkanDevice::SubmitAll(Span<IRHICommandList*> cmdLists) {
 // ============================================================
 // GPU Query
 // ============================================================
-std::unique_ptr<IRHIQueryPool> VulkanDevice::CreateQueryPool(u32 queryCount) {
-    return std::make_unique<VulkanQueryPool>(m_Device, queryCount);
+std::unique_ptr<IRHIQueryPool> VulkanDevice::CreateQueryPool(u32 queryCount, QueryType type) {
+    return std::make_unique<VulkanQueryPool>(m_Device, queryCount, type);
 }
 
 float VulkanDevice::GetTimestampPeriod() {

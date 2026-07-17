@@ -29,4 +29,11 @@ void IRHIDevice::Shutdown() {
     HE_CORE_INFO("Shutting down RHI device");
 }
 
+// Debug Object Naming — 默认空实现
+void IRHIDevice::SetResourceDebugName(IRHIBuffer*, const char*) {}
+void IRHIDevice::SetResourceDebugName(IRHITexture*, const char*) {}
+void IRHIDevice::SetResourceDebugName(IRHIPipelineState*, const char*) {}
+void IRHIDevice::SetResourceDebugName(IRHISampler*, const char*) {}
+void IRHIDevice::SetResourceDebugName(IRHIAccelerationStructure*, const char*) {}
+
 } // namespace he::rhi

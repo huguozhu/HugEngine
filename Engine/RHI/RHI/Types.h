@@ -25,6 +25,14 @@ enum class QueueType : u8 {
     Count      = 3
 };
 
+// --- Query pool 类型 ---
+// Timestamp: GPU 时间戳（用于 Profiler 计时）
+// PipelineStatistics: 硬件管线统计（VS/PS 调用次数、三角形数等）
+enum class QueryType : u8 {
+    Timestamp,           // VK_QUERY_TYPE_TIMESTAMP
+    PipelineStatistics,  // VK_QUERY_TYPE_PIPELINE_STATISTICS
+};
+
 // --- Texture format ---
 enum class Format : u32 {
     Unknown = 0,

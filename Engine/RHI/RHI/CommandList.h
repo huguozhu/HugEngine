@@ -187,6 +187,22 @@ public:
     virtual void ResetQueryPool(IRHIQueryPool* pool) = 0;
     virtual void GetQueryResults(IRHIQueryPool* pool, u32 first, u32 count, u64* data) = 0;
 
+    // GPU 通用查询（Pipeline Statistics、Occlusion 等）
+    virtual void BeginQuery(IRHIQueryPool* pool, u32 queryIndex) {}
+    virtual void EndQuery(IRHIQueryPool* pool, u32 queryIndex) {}
+
+    // ============================================================
+    // Debug Marker / Label — GPU 调试标签（VK_EXT_debug_utils / PIX events）
+    // 用于在 RenderDoc / NSight 等工具中标识渲染 Pass 边界
+    // 默认空实现：后端不支持时安全跳过
+    // ============================================================
+    /// 开始一个调试标签区域。color={r,g,b,a} 范围 0-1，可为 nullptr 使用默认色。
+    virtual void BeginDebugLabel(const char* name, const float color[4] = nullptr) {}
+    /// 结束当前调试标签区域。
+    virtual void EndDebugLabel() {}
+    /// 插入一个瞬时调试标签（不嵌套）。
+    virtual void InsertDebugLabel(const char* name, const float color[4] = nullptr) {}
+
     virtual void Submit() = 0;
 };
 

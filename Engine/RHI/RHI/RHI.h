@@ -88,8 +88,18 @@ public:
     /// 销毁通过 CreateTextureMip*View 创建的图像视图
     virtual void                      DestroyTextureMipView(void* view) = 0;
     // --- GPU Query ---
-    virtual std::unique_ptr<IRHIQueryPool> CreateQueryPool(u32 queryCount) = 0;
+    virtual std::unique_ptr<IRHIQueryPool> CreateQueryPool(u32 queryCount,
+        QueryType type = QueryType::Timestamp) = 0;
     virtual float GetTimestampPeriod() = 0;  // 时间戳单位（纳秒）
+
+    // --- Debug Object Naming ---
+    // 为 GPU 资源设置调试名称，在 RenderDoc / NSight 等调试工具中显示
+    // 默认空实现：后端不支持时安全跳过
+    virtual void SetResourceDebugName(IRHIBuffer* resource, const char* name);
+    virtual void SetResourceDebugName(IRHITexture* resource, const char* name);
+    virtual void SetResourceDebugName(IRHIPipelineState* resource, const char* name);
+    virtual void SetResourceDebugName(IRHISampler* resource, const char* name);
+    virtual void SetResourceDebugName(IRHIAccelerationStructure* resource, const char* name);
 
     // --- Commands ---
     virtual void Submit(IRHICommandList* cmdList) = 0;

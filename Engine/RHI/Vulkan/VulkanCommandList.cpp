@@ -396,6 +396,58 @@ void VulkanCommandList::GetQueryResults(IRHIQueryPool* pool, u32 first, u32 coun
         VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
 }
 
+// ── GPU 通用查询（BeginQuery / EndQuery）──
+void VulkanCommandList::BeginQuery(IRHIQueryPool* pool, u32 queryIndex) {
+    auto* vkPool = static_cast<VulkanQueryPool*>(pool);
+    vkCmdBeginQuery(m_CmdBuffers[m_FrameIndex], vkPool->GetHandle(), queryIndex, 0);
+}
+
+void VulkanCommandList::EndQuery(IRHIQueryPool* pool, u32 queryIndex) {
+    auto* vkPool = static_cast<VulkanQueryPool*>(pool);
+    vkCmdEndQuery(m_CmdBuffers[m_FrameIndex], vkPool->GetHandle(), queryIndex);
+}
+
+// ── Debug Label（VK_EXT_debug_utils 调试标签）──
+void VulkanCommandList::BeginDebugLabel(const char* name, const float color[4]) {
+    if (!m_VulkanDevice) return;
+    auto fn = m_VulkanDevice->GetCmdBeginDebugLabelFn();
+    if (!fn) return;
+
+    VkDebugUtilsLabelEXT label{};
+    label.sType      = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
+    label.pLabelName = name;
+    if (color) {
+        label.color[0] = color[0]; label.color[1] = color[1];
+        label.color[2] = color[2]; label.color[3] = color[3];
+    } else {
+        // 默认蓝色：便于在 RenderDoc 中区分不同 Pass
+        label.color[0] = 0.3f; label.color[1] = 0.5f;
+        label.color[2] = 0.9f; label.color[3] = 1.0f;
+    }
+    fn(m_CmdBuffers[m_FrameIndex], &label);
+}
+
+void VulkanCommandList::EndDebugLabel() {
+    if (!m_VulkanDevice) return;
+    auto fn = m_VulkanDevice->GetCmdEndDebugLabelFn();
+    if (fn) fn(m_CmdBuffers[m_FrameIndex]);
+}
+
+void VulkanCommandList::InsertDebugLabel(const char* name, const float color[4]) {
+    if (!m_VulkanDevice) return;
+    auto fn = m_VulkanDevice->GetCmdInsertDebugLabelFn();
+    if (!fn) return;
+
+    VkDebugUtilsLabelEXT label{};
+    label.sType      = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
+    label.pLabelName = name;
+    if (color) {
+        label.color[0] = color[0]; label.color[1] = color[1];
+        label.color[2] = color[2]; label.color[3] = color[3];
+    }
+    fn(m_CmdBuffers[m_FrameIndex], &label);
+}
+
 // ============================================================
 // Copy
 // ============================================================

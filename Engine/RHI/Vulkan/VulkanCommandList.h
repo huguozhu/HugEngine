@@ -98,6 +98,15 @@ public:
     void ResetQueryPool(IRHIQueryPool* pool) override;
     void GetQueryResults(IRHIQueryPool* pool, u32 first, u32 count, u64* data) override;
 
+    // GPU 通用查询
+    void BeginQuery(IRHIQueryPool* pool, u32 queryIndex) override;
+    void EndQuery(IRHIQueryPool* pool, u32 queryIndex) override;
+
+    // Debug Label（VK_EXT_debug_utils）
+    void BeginDebugLabel(const char* name, const float color[4] = nullptr) override;
+    void EndDebugLabel() override;
+    void InsertDebugLabel(const char* name, const float color[4] = nullptr) override;
+
     void Submit() override;
 
     // Phase 1 桥接

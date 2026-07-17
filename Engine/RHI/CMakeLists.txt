@@ -46,6 +46,7 @@ if(HUGENGINE_RHI_VULKAN)
         Vulkan/VulkanRT.cpp
         Vulkan/VulkanDevice_MeshShader.cpp
         Vulkan/VulkanDevice_Descriptors.cpp
+        Vulkan/VulkanDevice_DebugUtils.cpp
         Vulkan/VulkanSwapChain.cpp
         Vulkan/VulkanCommandList.cpp
         Vulkan/VulkanCommandList_RenderPass.cpp

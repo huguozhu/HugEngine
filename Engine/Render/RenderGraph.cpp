@@ -386,6 +386,9 @@ void RenderGraph::Execute(rhi::IRHICommandList* cmdList, rhi::IRHIDevice* device
         u32 passIdx = 0;
 
         for (auto* pass : m_PassOrder) {
+            // 调试标签：每个 Pass 包裹 begin/end label（RenderDoc 中可见）
+            cmdList->BeginDebugLabel(pass->name.c_str());
+
             for (auto& br : pass->preBarriers) {
                 if (br.srcState == br.dstState) continue;
                 u32 idx = br.handle;
@@ -399,6 +402,8 @@ void RenderGraph::Execute(rhi::IRHICommandList* cmdList, rhi::IRHIDevice* device
             if (m_Profiler) m_Profiler->BeginPass(cmdList, passIdx, pass->name);
             if (pass->execute) pass->execute(cmdList);
             if (m_Profiler) m_Profiler->EndPass(cmdList, passIdx);
+
+            cmdList->EndDebugLabel();
             passIdx++;
         }
 
@@ -470,6 +475,7 @@ void RenderGraph::ExecuteWithAsyncCompute(rhi::IRHICommandList* mainCmd,
 
     u32 passIdx = 0;
     for (auto* pass : asyncComputePasses) {
+        computeCmd->BeginDebugLabel(pass->name.c_str());
         for (auto& br : pass->crossQueueAcquire) {
             rhi::IRHITexture* tex = getTexture(br.handle);
             if (!tex) continue;
@@ -498,6 +504,7 @@ void RenderGraph::ExecuteWithAsyncCompute(rhi::IRHICommandList* mainCmd,
                 rhi::QueueType::Compute, rhi::QueueType::Graphics,
                 br.srcState, br.dstState);
         }
+        computeCmd->EndDebugLabel();
         passIdx++;
     }
 
@@ -516,6 +523,7 @@ void RenderGraph::ExecuteWithAsyncCompute(rhi::IRHICommandList* mainCmd,
     if (m_Profiler) m_Profiler->BeginFrame(mainCmd);
 
     for (auto* pass : mainPasses) {
+        mainCmd->BeginDebugLabel(pass->name.c_str());
         for (auto& br : pass->preBarriers) {
             if (br.srcState == br.dstState) continue;
             rhi::IRHITexture* tex = getTexture(br.handle);
@@ -525,6 +533,7 @@ void RenderGraph::ExecuteWithAsyncCompute(rhi::IRHICommandList* mainCmd,
         if (m_Profiler) m_Profiler->BeginPass(mainCmd, passIdx, pass->name);
         if (pass->execute) pass->execute(mainCmd);
         if (m_Profiler) m_Profiler->EndPass(mainCmd, passIdx);
+        mainCmd->EndDebugLabel();
         passIdx++;
     }
 
