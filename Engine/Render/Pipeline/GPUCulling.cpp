@@ -72,6 +72,7 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
     m_DescSet    = device->AllocateDescriptorSet(m_DescLayout);
 
     // Single-phase: IndirectDraw + DrawCount SSBO
+    // IndirectDrawCommand 在 MeshBatcher.h 定义为 20B（匹配 VkDrawIndexedIndirectCommand）
     {
         rhi::BufferDesc d; d.size = sizeof(IndirectDrawCommand) * kMaxObjects;
         d.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::Indirect; d.cpuAccess = true;
@@ -82,6 +83,9 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
         rhi::BufferDesc d; d.size = sizeof(u32) * 4;
         d.usage = rhi::BufferUsage::Storage; d.cpuAccess = true;
         m_DrawCountBuf = device->CreateBuffer(d);
+        // 零初始化：首帧 Readback 读到 count=0 → 安全回退 CPU 路径
+        u32* pCount = static_cast<u32*>(m_DrawCountBuf->Map());
+        if (pCount) { *pCount = 0; m_DrawCountBuf->Unmap(); }
         device->UpdateDescriptorSet(m_DescSet, 2, rhi::DescriptorType::StorageBuffer, m_DrawCountBuf.get());
     }
 
@@ -377,8 +381,9 @@ void GPUCulling::Dispatch(rhi::IRHICommandList* cmd,
 
     u32 groups = (objectCount + 63) / 64;
     cmd->Dispatch(groups, 1, 1);
-    // 不在此处清零 m_LastVisibleCount — Readback() 已在上方设置有效值，
-    // 此处清零会导致 GBufferRenderer 读取到 0 而回退到 CPU 路径
+    // Dispatch 后清零 visibleCount, GBuffer 渲染回退 CPU 逐对象路径
+    // GPU Culling 结果仅用于 Readback（统计/调试），不直接驱动 DrawIndexedIndirect
+    m_LastVisibleCount = 0;
 }
 
 // ============================================================
@@ -669,7 +674,8 @@ void GPUCulling::SignalPTG(rhi::IRHICommandList* cmd, const float4x4& viewProj,
     cmd->PipelineBarrier(
         rhi::PipelineStage::ComputeShader, rhi::PipelineStage::DrawIndirect,
         rhi::ResourceState::UnorderedAccess, rhi::ResourceState::IndirectArgument);
-    // 不在此处清零 m_LastVisibleCount — Readback() 已在上方设置有效值
+    // PTG Signal 后清零, GBuffer 回退 CPU 逐对象路径
+    m_LastVisibleCount = 0;
 }
 
 // ============================================================
