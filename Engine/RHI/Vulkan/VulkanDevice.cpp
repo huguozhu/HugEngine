@@ -277,6 +277,9 @@ void VulkanDevice::Shutdown() {
     // 2. 清空 PSO 缓存（等待所有外部引用释放后销毁所有缓存的 Vulkan 对象）
     m_PSOCache.clear();
 
+    // 2.5. 清理 DGC（在设备销毁前）
+    if (m_DGC.IsInitialized()) m_DGC.Shutdown(m_Device);
+
     // 3. 立即执行延迟销毁队列中的所有待处理资源（GPU 已 idle，安全）
     m_DeferredDestroy.FlushAll();
 
@@ -775,6 +778,31 @@ float VulkanDevice::GetTimestampPeriod() {
     vkGetPhysicalDeviceProperties(m_Physical, &props);
     return float(props.limits.timestampPeriod);
 }
+
+// ============================================================
+// DGC（Device Generated Commands）— 封装 VulkanDGC
+// ============================================================
+
+bool VulkanDevice::InitializeDGC(IRHIPipelineState* pso, u32 maxSequences, u32 maxDraws) {
+    if (!m_SupportsDGC || !pso) return false;
+    auto* vkPSO = static_cast<VulkanPipelineState*>(pso);
+    return m_DGC.Initialize(m_Device, m_Physical, vkPSO->GetPipeline(),
+                            maxSequences, maxDraws, m_DGCFuncs);
+}
+
+void VulkanDevice::ShutdownDGC() {
+    if (m_DGC.IsInitialized()) m_DGC.Shutdown(m_Device);
+}
+
+bool VulkanDevice::IsDGCReady() const {
+    return m_DGC.IsInitialized();
+}
+
+void* VulkanDevice::GetDGCLayout()       const { return m_DGC.GetLayout(); }
+void* VulkanDevice::GetDGCExecutionSet() const { return m_DGC.GetExecutionSet(); }
+u64   VulkanDevice::GetDGCPreprocessAddr() const { return m_DGC.GetPreprocessAddress(); }
+u64   VulkanDevice::GetDGCPreprocessSize() const { return m_DGC.GetPreprocessSize(); }
+u32   VulkanDevice::GetDGCMaxSequences()   const { return m_DGC.GetMaxSequences(); }
 
 // ============================================================
 // 资源创建委托（实现在 VulkanResources.cpp 和 VulkanPipeline.cpp）

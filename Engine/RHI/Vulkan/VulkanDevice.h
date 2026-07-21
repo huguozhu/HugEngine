@@ -88,6 +88,16 @@ public:
         QueryType type = QueryType::Timestamp) override;
     float GetTimestampPeriod() override;
 
+    // DGC（Device Generated Commands）— 封装 VK_EXT_device_generated_commands
+    bool  InitializeDGC(IRHIPipelineState* pso, u32 maxSequences, u32 maxDraws) override;
+    void  ShutdownDGC() override;
+    bool  IsDGCReady() const override;
+    void* GetDGCLayout()           const override;
+    void* GetDGCExecutionSet()     const override;
+    u64   GetDGCPreprocessAddr()   const override;
+    u64   GetDGCPreprocessSize()   const override;
+    u32   GetDGCMaxSequences()     const override;
+
     // Debug Object Naming — 为 GPU 资源设置调试名称
     void SetResourceDebugName(IRHIBuffer* resource, const char* name) override;
     void SetResourceDebugName(IRHITexture* resource, const char* name) override;
@@ -274,6 +284,7 @@ private:
 
     VulkanRTDispatch m_RT;
     VulkanDGCFuncs   m_DGCFuncs;
+    VulkanDGC        m_DGC;  // DGC 封装对象（由 VulkanDevice 管理生命周期）
 
     VkDescriptorPool                  m_DescPool = VK_NULL_HANDLE;
 

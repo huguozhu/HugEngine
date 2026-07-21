@@ -9,11 +9,6 @@
 #include "AntiAliasing/AA_FXAA.h"
 #include "Pipeline/GBufferRenderer_CPU.h"
 #include "Pipeline/GBufferRenderer_GPU.h"
-
-// DGC 支持（仅在 Vulkan 后端启用）
-#include "Vulkan/VulkanDGC.h"
-#include "Vulkan/VulkanPipelineState.h"  // VulkanPipelineState
-#include "Vulkan/VulkanDevice.h"        // VulkanDeviceAccess
 #include "Asset/BindlessTextureManager.h"
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
@@ -193,23 +188,20 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             m_GBufferCtx.objectBuffer = m_ObjectBuffers[m_CurrentFrameSlot].get();
             m_GBufferCtx.prevViewProj = m_PrevViewProj;
 
-            // ── DGC 模式上下文注入 ──
-            // 检查 DGC 硬件支持 + CVar 开关 + 可视化回调非空
+            // ── DGC 模式上下文注入（通过 RHI 统一接口）──
             m_DGCEnabled = (cvDGC_Enable != 0)
-                && m_VulkanDGC && m_VulkanDGC->IsInitialized()
+                && m_Device->IsDGCReady()
                 && m_GPUCulling.GetIndirectBuffer()
                 && m_GPUCulling.enabled;
             if (m_DGCEnabled) {
                 auto& dgcCtx = m_GBufferCtx.dgc;
-                dgcCtx.enabled               = true;
-                dgcCtx.indirectCommandsLayout = reinterpret_cast<void*>(
-                    m_VulkanDGC->GetLayout());
-                dgcCtx.indirectExecutionSet   = reinterpret_cast<void*>(
-                    m_VulkanDGC->GetExecutionSet());
-                dgcCtx.preprocessBufferAddr   = m_VulkanDGC->GetPreprocessAddress();
-                dgcCtx.preprocessBufferSize   = m_VulkanDGC->GetPreprocessSize();
-                dgcCtx.maxSequenceCount       = m_VulkanDGC->GetMaxSequences();
-                dgcCtx.sequenceBuffer         = m_GPUCulling.GetIndirectBuffer();
+                dgcCtx.enabled                 = true;
+                dgcCtx.indirectCommandsLayout  = m_Device->GetDGCLayout();
+                dgcCtx.indirectExecutionSet    = m_Device->GetDGCExecutionSet();
+                dgcCtx.preprocessBufferAddr    = m_Device->GetDGCPreprocessAddr();
+                dgcCtx.preprocessBufferSize    = m_Device->GetDGCPreprocessSize();
+                dgcCtx.maxSequenceCount        = m_Device->GetDGCMaxSequences();
+                dgcCtx.sequenceBuffer          = m_GPUCulling.GetIndirectBuffer();
                 dgcCtx.countBuffer            = m_GPUCulling.GetDrawCountBuffer();
             } else {
                 m_GBufferCtx.dgc = {};  // 重置 DGC 上下文

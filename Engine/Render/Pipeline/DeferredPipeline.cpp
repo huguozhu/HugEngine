@@ -10,10 +10,6 @@
 #include "Pipeline/GBufferRenderer_CPU.h"
 #include "Pipeline/GBufferRenderer_GPU.h"
 
-// DGC 支持（仅在 Vulkan 后端启用）
-#include "Vulkan/VulkanDGC.h"
-#include "Vulkan/VulkanPipelineState.h"  // VulkanPipelineState
-#include "Vulkan/VulkanDevice.h"        // VulkanDeviceAccess
 #include "Asset/BindlessTextureManager.h"
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
@@ -207,29 +203,14 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     m_GBufferPSO = device->CreatePipelineState(gbDesc);
     HE_ASSERT(m_GBufferPSO, "DeferredPipeline: GBuffer PSO failed");
 
-    // ── DGC 初始化（仅在硬件支持时）──
+    // ── DGC 初始化（通过 RHI 统一接口，后端透明）──
     if (device->GetCaps().supportsDGC) {
-        // 获取 Vulkan 底层句柄
-        auto* vkDev = static_cast<rhi::VulkanDevice*>(device);
-        VkDevice vkDevice       = vkDev->GetVkDevice();
-        VkPhysicalDevice vkPhysical = vkDev->GetVkPhysical();
-        auto* vkPipelineState   = static_cast<rhi::VulkanPipelineState*>(m_GBufferPSO.get());
-        VkPipeline vkPipeline   = vkPipelineState->GetPipeline();
-        const auto& dgcFuncs    = vkDev->GetDGCFuncs();
-
-        m_VulkanDGC = new rhi::VulkanDGC();
-        bool dgcOK = m_VulkanDGC->Initialize(
-            vkDevice, vkPhysical, vkPipeline,
-            GPUCulling::kMaxObjects,  // maxSequences = 最大场景物体数
-            GPUCulling::kMaxObjects,  // maxDraws = 最大绘制调用数
-            dgcFuncs
-        );
+        bool dgcOK = device->InitializeDGC(m_GBufferPSO.get(),
+            GPUCulling::kMaxObjects, GPUCulling::kMaxObjects);
         if (dgcOK) {
             HE_CORE_INFO("DeferredPipeline: DGC 初始化成功，可通过 r.DGC.Enable 1 启用");
         } else {
             HE_CORE_WARN("DeferredPipeline: DGC 初始化失败，回退到 ExecuteIndirect 路径");
-            delete m_VulkanDGC;
-            m_VulkanDGC = nullptr;
         }
     } else {
         HE_CORE_INFO("DeferredPipeline: 硬件不支持 DGC，使用传统 ExecuteIndirect 路径");
@@ -396,12 +377,7 @@ void DeferredPipeline::Shutdown() {
     m_GBufferRenderer.reset();
 
     // DGC 清理
-    if (m_VulkanDGC) {
-        auto* vkDev = static_cast<rhi::VulkanDevice*>(m_Device);
-        m_VulkanDGC->Shutdown(vkDev->GetVkDevice());
-        delete m_VulkanDGC;
-        m_VulkanDGC = nullptr;
-    }
+    m_Device->ShutdownDGC();  // DGC 由 RHI 管理生命周期
 
     m_Profiler.Shutdown();
     m_AutoExposure.Shutdown();

@@ -105,6 +105,18 @@ public:
     virtual void SetResourceDebugName(IRHISampler* resource, const char* name);
     virtual void SetResourceDebugName(IRHIAccelerationStructure* resource, const char* name);
 
+    // --- Device Generated Commands (DGC) ---
+    // 默认空实现，后端不支持 DGC 时安全跳过
+    virtual bool  InitializeDGC(IRHIPipelineState* pso, u32 maxSequences, u32 maxDraws) { return false; }
+    virtual void  ShutdownDGC() {}
+    virtual bool  IsDGCReady() const { return false; }
+    /// 以下 getter 返回 Vulkan/D3D12 后端特定句柄（void* / u64），调用方直接赋值到 DGCContext
+    virtual void* GetDGCLayout()           const { return nullptr; }
+    virtual void* GetDGCExecutionSet()     const { return nullptr; }
+    virtual u64   GetDGCPreprocessAddr()   const { return 0; }
+    virtual u64   GetDGCPreprocessSize()   const { return 0; }
+    virtual u32   GetDGCMaxSequences()     const { return 0; }
+
     // --- Commands ---
     virtual void Submit(IRHICommandList* cmdList) = 0;
     virtual void WaitIdle() = 0;

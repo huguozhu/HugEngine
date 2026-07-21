@@ -18,8 +18,6 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "Pipeline/GPUScene.h"
 #include "Pipeline/MeshBatcher.h"
 
-// DGC 前向声明（仅在 Vulkan 后端下实际使用）
-namespace he::rhi { class VulkanDGC; }
 #include "Pipeline/GBufferRenderer.h"
 #include "Pipeline/ParticleRenderer.h"
 #include "GI/GI_SSGI.h"
@@ -211,8 +209,7 @@ private:
     bool       m_BatchBuilt = false;
 
     // Device Generated Commands（DGC）状态
-    rhi::VulkanDGC* m_VulkanDGC  = nullptr;   // DGC 封装（仅在 Vulkan + DGC 支持时创建，手动管理生命周期）
-    bool            m_DGCEnabled = false;     // 运行时 CVar 控制
+    bool            m_DGCEnabled = false;     // 运行时 CVar 控制（DGC 由 m_Device 内部管理）
 
     // GPU 粒子系统
     ParticleRenderer m_ParticleRenderer;
