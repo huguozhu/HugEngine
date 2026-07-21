@@ -130,7 +130,7 @@ void VulkanDevice::FindQueueFamilies() {
 // ============================================================
 DeviceCaps VulkanDevice::GetCaps() const {
     DeviceCaps caps;
-    caps.maxBindlessResources = 1000000;
+    caps.maxBindlessResources = kDefaultMaxBindlessResources;  // 引擎默认 Bindless 上限
     caps.maxPushConstantsSize = kMaxPushConstantSize;  // 引擎全局 Push Constant 上限
 
     VkPhysicalDeviceProperties props;

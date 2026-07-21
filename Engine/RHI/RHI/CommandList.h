@@ -18,15 +18,15 @@ struct ClearValue {
 
 struct Viewport {
     float x = 0, y = 0;
-    float width  = 1920;
-    float height = 1080;
+    float width  = kDefaultBackBufferWidth;
+    float height = kDefaultBackBufferHeight;
     float minDepth = 0.0f;
     float maxDepth = 1.0f;
 };
 
 struct ScissorRect {
     i32 x = 0, y = 0;
-    u32 width = 1920, height = 1080;
+    u32 width = kDefaultBackBufferWidth, height = kDefaultBackBufferHeight;
 };
 
 class IRHICommandList {

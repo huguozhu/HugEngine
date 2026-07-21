@@ -340,7 +340,7 @@ void VulkanCommandList::ExecuteGeneratedCommands(const DGCExecuteDesc& desc) {
     genInfo.indirectExecutionSet   = executionSet;
     genInfo.indirectCommandsLayout = layout;
     genInfo.indirectAddress        = desc.sequencesBufferAddr;
-    genInfo.indirectAddressSize    = desc.maxSequenceCount * sizeof(u32) * 5;
+    genInfo.indirectAddressSize    = desc.maxSequenceCount * kDGCDrawIndexedIndirectStride;
     genInfo.preprocessAddress      = desc.preprocessBufferAddr;
     genInfo.preprocessSize         = desc.preprocessBufferSize;
     genInfo.maxSequenceCount       = desc.maxSequenceCount;

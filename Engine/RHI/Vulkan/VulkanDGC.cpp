@@ -54,8 +54,7 @@ bool VulkanDGC::Initialize(VkDevice device, VkPhysicalDevice physical,
     layoutInfo.shaderStages   = VK_SHADER_STAGE_VERTEX_BIT
                                 | VK_SHADER_STAGE_FRAGMENT_BIT;
     // 每条序列步长 = VkDrawIndexedIndirectCommand（5×u32 = 20 字节）
-    layoutInfo.indirectStride = sizeof(u32) * 5;
-    // 不使用 PUSH_CONSTANT 令牌，pipelineLayout 传 VK_NULL_HANDLE
+    layoutInfo.indirectStride = kDGCDrawIndexedIndirectStride;  // VkDrawIndexedIndirectCommand
     layoutInfo.pipelineLayout = VK_NULL_HANDLE;
     layoutInfo.tokenCount     = 1;
     layoutInfo.pTokens        = &token;

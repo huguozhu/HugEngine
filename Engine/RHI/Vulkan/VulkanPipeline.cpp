@@ -199,7 +199,7 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
         compInfo.stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
         compInfo.stage.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
         compInfo.stage.module = comp;
-        compInfo.stage.pName  = "main";
+        compInfo.stage.pName  = kDefaultShaderEntryPoint;
         compInfo.layout       = pipelineLayout;
 
         VkPipeline pipeline;
@@ -397,19 +397,19 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
             meshStages[stageCount].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
             meshStages[stageCount].stage  = VK_SHADER_STAGE_TASK_BIT_EXT;
             meshStages[stageCount].module = task;
-            meshStages[stageCount].pName  = "main";
+            meshStages[stageCount].pName  = kDefaultShaderEntryPoint;
             stageCount++;
         }
         meshStages[stageCount].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
         meshStages[stageCount].stage  = VK_SHADER_STAGE_MESH_BIT_EXT;
         meshStages[stageCount].module = mesh;
-        meshStages[stageCount].pName  = "main";
+        meshStages[stageCount].pName  = kDefaultShaderEntryPoint;
         stageCount++;
         if (frag) {
             meshStages[stageCount].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
             meshStages[stageCount].stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
             meshStages[stageCount].module = frag;
-            meshStages[stageCount].pName  = "main";
+            meshStages[stageCount].pName  = kDefaultShaderEntryPoint;
             stageCount++;
         }
 
@@ -675,11 +675,11 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     stages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;
     stages[0].module = vert;
-    stages[0].pName  = "main";
+    stages[0].pName  = kDefaultShaderEntryPoint;
     stages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
     stages[1].module = frag;
-    stages[1].pName  = "main";
+    stages[1].pName  = kDefaultShaderEntryPoint;
 
     // 7. Create pipeline
     VkGraphicsPipelineCreateInfo pipeInfo{};

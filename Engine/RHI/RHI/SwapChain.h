@@ -9,8 +9,8 @@ constexpr u32 kSwapchainImageCount = 3;
 
 struct SwapChainDesc {
     void*   windowHandle    = nullptr;
-    u32     width           = 1920;
-    u32     height          = 1080;
+    u32     width           = kDefaultBackBufferWidth;
+    u32     height          = kDefaultBackBufferHeight;
     u32     bufferCount     = kSwapchainImageCount;  // Double/Triple buffering
     Format  format          = Format::RGBA8_UNORM;
     bool    vsync           = true;

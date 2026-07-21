@@ -22,13 +22,16 @@ struct PushConstantRange {
     u32 size      = kDefaultPushConstantSize; // Push Constant 默认范围
 };
 
+// 着色器入口点名称约定（SPIR-V / DXIL / MSL 共用）
+constexpr const char* kDefaultShaderEntryPoint = "main";
+
 // --- Shader bytecode (pre-compiled) ---
 struct ShaderBytecode {
     ShaderStage             stage = ShaderStage::Vertex;
     std::vector<u32>        spirv;    // SPIR-V binary
     // For D3D12: DXIL
     std::vector<u8>         dxil;
-    String                  entryPoint = "main";
+    String                  entryPoint = kDefaultShaderEntryPoint;
 };
 
 // --- Vertex input layout ---

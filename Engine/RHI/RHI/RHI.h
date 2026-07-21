@@ -23,8 +23,8 @@ struct DeviceInitDesc {
     i32         preferredAdapter    = -1;
     bool        enableValidation    = true;
     void*       windowHandle        = nullptr;
-    u32         backBufferWidth     = 1920;
-    u32         backBufferHeight    = 1080;
+    u32         backBufferWidth     = kDefaultBackBufferWidth;
+    u32         backBufferHeight    = kDefaultBackBufferHeight;
 };
 
 class IRHIDevice {

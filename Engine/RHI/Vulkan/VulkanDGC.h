@@ -22,6 +22,10 @@
 
 namespace he::rhi {
 
+// DGC 间接绘制命令步长：VkDrawIndexedIndirectCommand 结构体大小
+// indexCount + instanceCount + firstIndex + vertexOffset + firstInstance = 5 × u32
+constexpr u32 kDGCDrawIndexedIndirectStride = sizeof(u32) * 5;
+
 // ============================================================
 // VulkanDGCFuncs — DGC 扩展函数指针表
 // VulkanDevice 在初始化时填充此表，供 VulkanDGC / VulkanCommandList 使用

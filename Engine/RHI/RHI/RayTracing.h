@@ -110,10 +110,10 @@ enum class RTShaderGroupType : u8 {
 // --- 着色器组描述 ---
 struct RTShaderGroup {
     RTShaderGroupType type              = RTShaderGroupType::Hit;
-    u32               generalShader     = ~0u;  // RayGen / Miss 在 shaders 数组中的索引
-    u32               closestHitShader  = ~0u;  // ClosestHit 在 shaders 数组中的索引
-    u32               anyHitShader      = ~0u;  // AnyHit 在 shaders 数组中的索引（可选）
-    u32               intersectionShader = ~0u; // Intersection 在 shaders 数组中的索引（可选，默认使用 AABB）
+    u32               generalShader     = kRTShaderUnused;  // RayGen / Miss 在 shaders 数组中的索引
+    u32               closestHitShader  = kRTShaderUnused;  // ClosestHit 在 shaders 数组中的索引
+    u32               anyHitShader      = kRTShaderUnused;  // AnyHit 在 shaders 数组中的索引（可选）
+    u32               intersectionShader = kRTShaderUnused; // Intersection 在 shaders 数组中的索引（可选，默认使用 AABB）
     String            name;                      // 调试名称
 };
 

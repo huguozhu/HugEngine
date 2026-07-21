@@ -11,6 +11,10 @@ namespace he::rhi {
 // 最大飞行帧数（Triple Buffering），引擎全局常量
 constexpr u32 kMaxFramesInFlight = 3;
 
+// 默认 BackBuffer 分辨率（1080p，初始化时被实际窗口尺寸覆盖）
+constexpr u32 kDefaultBackBufferWidth  = 1920;
+constexpr u32 kDefaultBackBufferHeight = 1080;
+
 // 描述符集索引常量
 constexpr u32 kDescSetPerFrame = 0;  // set=0: 逐帧数据（Camera、Lights、Shadows 等）
 constexpr u32 kDescSetMaterial = 1;  // set=1: 逐材质数据（Bindless Textures 等）
@@ -34,9 +38,11 @@ constexpr u32 kRTMaxPayloadSize      = 16;  // 最大 Payload 字节数
 constexpr u32 kRTMaxHitAttributeSize = 8;   // 最大 Hit Attribute 字节数
 constexpr u32 kMaxProfilerPasses     = 20;  // GPU Profiler 最大记录 Pass 数
 constexpr u32 kMaxPushConstantSize   = 256; // Vulkan Push Constant 最大字节数
-constexpr u32 kDefaultPushConstantSize = 128; // Push Constant 默认范围大小（最小保证）
-constexpr u32 kCubemapFaceCount      = 6;   // 立方体贴图面数
+constexpr u32 kDefaultPushConstantSize  = 128;    // Push Constant 默认范围大小（最小保证）
+constexpr u32 kDefaultMaxBindlessResources = 1000000; // Bindless 资源默认容量上限
+constexpr u32 kCubemapFaceCount        = 6;      // 立方体贴图面数
 constexpr u32 kMaxConcurrentSemaphores = 2;   // 最多并发信号量数（Binary + Timeline）
+constexpr u32 kRTShaderUnused         = ~0u; // RT 着色器组中"未绑定"槽位哨兵
 
 // Shader Stage 位掩码常量（当前映射 Vulkan VkShaderStageFlagBits，未来适配 D3D12/Metal）
 // 传统管线
