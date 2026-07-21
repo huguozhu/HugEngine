@@ -31,7 +31,8 @@ public:
     void Present(bool vsync) override;
 
     VkSwapchainKHR GetHandle()                const { return m_Swapchain; }
-    VkFormat       GetFormat()                const { return m_Format; }
+    VkFormat       GetVkFormat()              const { return m_Format; }
+    u32            GetBackendFormat()         const override { return static_cast<u32>(m_Format); }
     VkImageView    GetImageView(u32 i)        const { return m_ImageViews[i]; }
     VkImageView    GetDepthImageView()        const { return m_DepthImageView; }
     void* GetCurrentBackBufferView() const override { return reinterpret_cast<void*>(m_ImageViews[m_CurrentImage]); }

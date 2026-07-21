@@ -798,6 +798,91 @@ bool VulkanDevice::IsDGCReady() const {
     return m_DGC.IsInitialized();
 }
 
+// ============================================================
+// ImGui 后端辅助 — 封装 Vulkan 特定资源创建
+// ============================================================
+
+void* VulkanDevice::CreateImGuiDescriptorPool() {
+    VkDescriptorPoolSize poolSizes[] = {
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 },
+    };
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.maxSets       = 2;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes    = poolSizes;
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    vkCreateDescriptorPool(m_Device, &poolInfo, nullptr, &pool);
+    return reinterpret_cast<void*>(pool);
+}
+
+void VulkanDevice::DestroyImGuiDescriptorPool(void* p) {
+    if (p) vkDestroyDescriptorPool(m_Device, reinterpret_cast<VkDescriptorPool>(p), nullptr);
+}
+
+void* VulkanDevice::CreateImGuiRenderPass(u32 swapchainFormat) {
+    VkFormat colorFmt = static_cast<VkFormat>(swapchainFormat);
+
+    VkAttachmentDescription colorAttach{};
+    colorAttach.format         = colorFmt;
+    colorAttach.samples        = VK_SAMPLE_COUNT_1_BIT;
+    colorAttach.loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;
+    colorAttach.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+    colorAttach.initialLayout  = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    colorAttach.finalLayout    = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+    VkAttachmentDescription depthAttach{};
+    depthAttach.format         = VK_FORMAT_D32_SFLOAT;
+    depthAttach.samples        = VK_SAMPLE_COUNT_1_BIT;
+    depthAttach.loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;
+    depthAttach.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+    depthAttach.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    depthAttach.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depthAttach.initialLayout  = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    depthAttach.finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+    VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference depthRef{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount    = 1;
+    subpass.pColorAttachments       = &colorRef;
+    subpass.pDepthStencilAttachment = &depthRef;
+
+    VkAttachmentDescription attachments[2] = { colorAttach, depthAttach };
+
+    VkSubpassDependency dep{};
+    dep.srcSubpass    = VK_SUBPASS_EXTERNAL;
+    dep.dstSubpass    = 0;
+    dep.srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dep.dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+    VkRenderPassCreateInfo rpInfo{};
+    rpInfo.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    rpInfo.attachmentCount = 2;
+    rpInfo.pAttachments    = attachments;
+    rpInfo.subpassCount    = 1;
+    rpInfo.pSubpasses      = &subpass;
+    rpInfo.dependencyCount = 1;
+    rpInfo.pDependencies   = &dep;
+
+    VkRenderPass rp = VK_NULL_HANDLE;
+    vkCreateRenderPass(m_Device, &rpInfo, nullptr, &rp);
+    return reinterpret_cast<void*>(rp);
+}
+
+void VulkanDevice::DestroyImGuiRenderPass(void* rp) {
+    if (rp) vkDestroyRenderPass(m_Device, reinterpret_cast<VkRenderPass>(rp), nullptr);
+}
+
+void* VulkanDevice::GetImGuiCommandBuffer(IRHICommandList* cmd) const {
+    return static_cast<VulkanCommandList*>(cmd)->GetHandle();
+}
+
 void* VulkanDevice::GetDGCLayout()       const { return m_DGC.GetLayout(); }
 void* VulkanDevice::GetDGCExecutionSet() const { return m_DGC.GetExecutionSet(); }
 u64   VulkanDevice::GetDGCPreprocessAddr() const { return m_DGC.GetPreprocessAddress(); }

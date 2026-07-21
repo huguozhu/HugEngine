@@ -98,6 +98,13 @@ public:
     u64   GetDGCPreprocessSize()   const override;
     u32   GetDGCMaxSequences()     const override;
 
+    // ImGui 后端辅助
+    void* CreateImGuiDescriptorPool() override;
+    void  DestroyImGuiDescriptorPool(void* pool) override;
+    void* CreateImGuiRenderPass(u32 swapchainFormat) override;
+    void  DestroyImGuiRenderPass(void* rp) override;
+    void* GetImGuiCommandBuffer(IRHICommandList* cmd) const override;
+
     // Debug Object Naming — 为 GPU 资源设置调试名称
     void SetResourceDebugName(IRHIBuffer* resource, const char* name) override;
     void SetResourceDebugName(IRHITexture* resource, const char* name) override;

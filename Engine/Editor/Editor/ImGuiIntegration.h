@@ -17,14 +17,8 @@ namespace he::editor {
 // ImGuiIntegration — 编辑器 ImGui 集成
 //
 // 管理 ImGui 生命周期、GLFW 输入、Vulkan 渲染。
-// 用法:
-//   ImGuiIntegration imgui;
-//   imgui.Initialize(window, device, swapchain);
-//   while (...) {
-//       imgui.BeginFrame();
-//       ImGui::ShowDemoWindow();
-//       imgui.EndFrame(cmdList);
-//   }
+// Vulkan 特定资源（RenderPass / DescriptorPool）通过 RHI 接口创建，
+// 不直接调用 Vulkan API。
 // ============================================================
 class ImGuiIntegration {
 public:
@@ -41,22 +35,17 @@ public:
     bool IsInitialized() const { return m_Initialized; }
 
 private:
-    void CreateFontTexture();
-    void CreateVulkanResources(rhi::IRHIDevice* device, rhi::IRHISwapChain* swapchain);
-    void DestroyVulkanResources();
+    void CreateImGuiResources(rhi::IRHIDevice* device, rhi::IRHISwapChain* swapchain);
+    void DestroyImGuiResources(rhi::IRHIDevice* device);
 
     GLFWwindow*   m_Window     = nullptr;
     ImGuiContext* m_Context    = nullptr;
     bool          m_Initialized = false;
+    rhi::IRHIDevice* m_Device  = nullptr;    // 持有设备指针用于资源销毁
 
-    // Vulkan 资源
-    void* m_DescPool      = nullptr;  // VkDescriptorPool
-    void* m_RenderPass    = nullptr;  // VkRenderPass（ImGui 后端使用，不可提前销毁）
-    void* m_FontTexture   = nullptr;  // VkImage
-    void* m_FontTexView   = nullptr;  // VkImageView
-    void* m_FontTexMem    = nullptr;  // VkDeviceMemory
-    void* m_FontSampler   = nullptr;  // VkSampler
-    u64   m_FontDescSet   = 0;        // VkDescriptorSet (64-bit handle)
+    // 后端资源（void* 存储，由 RHI 管理生命周期）
+    void* m_DescPool   = nullptr;  // VkDescriptorPool / ID3D12DescriptorHeap
+    void* m_RenderPass = nullptr;  // VkRenderPass
 };
 
 } // namespace he::editor

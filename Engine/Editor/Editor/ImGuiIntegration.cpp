@@ -1,13 +1,17 @@
 // ============================================================
 // ImGuiIntegration.cpp — ImGui v1.91 + GLFW + Vulkan
+//
+// Vulkan 特定资源（RenderPass / DescriptorPool）通过 RHI 接口创建，
+// 不直接调用 vkCreate* / vkDestroy*。
 // ============================================================
 
 #include "Editor/ImGuiIntegration.h"
 #include "RHI/RHI.h"
 #include "RHI/CommandList.h"
+#include "RHI/SwapChain.h"
 #include "Core/Log.h"
 
-#include "VulkanDevice.h"
+#include "Vulkan/VulkanDevice.h"  // VulkanDeviceAccess（获取 Vk 句柄）
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_vulkan.h"
@@ -20,18 +24,15 @@ ImGuiIntegration::~ImGuiIntegration() { Shutdown(); }
 void ImGuiIntegration::Initialize(GLFWwindow* window, rhi::IRHIDevice* device,
                                    rhi::IRHISwapChain* swapchain) {
     m_Window = window;
+    m_Device = device;
     IMGUI_CHECKVERSION();
     m_Context = ImGui::CreateContext();
     ImGui::StyleColorsDark();
 
     // --- 加载中文字体支持 ---
-    // ImGui 默认字体仅含 ASCII，中文会显示为方框或乱码。
-    // 添加黑体作为默认字体（包含 ASCII + CJK），保留原默认字体作后备。
-    // .ttc 集合文件 stb_truetype 可能光栅化失败，优先使用 .ttf。
     {
         ImGuiIO& io = ImGui::GetIO();
 
-        // 字形范围：基本拉丁 + 简体中文
         static const ImWchar chineseRanges[] = {
             0x0020, 0x00FF,  // Basic Latin + Latin Supplement
             0x4E00, 0x9FFF,  // CJK Unified Ideographs
@@ -52,91 +53,29 @@ void ImGuiIntegration::Initialize(GLFWwindow* window, rhi::IRHIDevice* device,
     }
 
     ImGui_ImplGlfw_InitForVulkan(window, true);
-    CreateVulkanResources(device, swapchain);
+    CreateImGuiResources(device, swapchain);
 
     m_Initialized = true;
     HE_CORE_INFO("ImGuiIntegration initialized");
 }
 
-void ImGuiIntegration::CreateVulkanResources(rhi::IRHIDevice* device,
-                                              rhi::IRHISwapChain* swapchain) {
-    auto* vkSC = static_cast<rhi::VulkanSwapChain*>(swapchain);
-
+void ImGuiIntegration::CreateImGuiResources(rhi::IRHIDevice* device,
+                                             rhi::IRHISwapChain* swapchain) {
+    // 通过 VulkanDeviceAccess 获取后端原生句柄（imgui_impl_vulkan 需要）
     VkInstance       instance       = rhi::VulkanDeviceAccess::GetInstance(device);
     VkPhysicalDevice physicalDevice = rhi::VulkanDeviceAccess::GetPhysical(device);
     VkDevice         vkDevice       = rhi::VulkanDeviceAccess::GetDevice(device);
     u32              graphicsFamily = rhi::VulkanDeviceAccess::GetGraphicsFamily(device);
     VkQueue          graphicsQueue  = rhi::VulkanDeviceAccess::GetGraphicsQueue(device);
 
-    // Descriptor Pool
-    VkDescriptorPoolSize poolSizes[] = {
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 },
-    };
-    VkDescriptorPoolCreateInfo poolInfo{};
-    poolInfo.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.maxSets       = 2;
-    poolInfo.poolSizeCount = 1;
-    poolInfo.pPoolSizes    = poolSizes;
-    vkCreateDescriptorPool(vkDevice, &poolInfo, nullptr,
-                           reinterpret_cast<VkDescriptorPool*>(&m_DescPool));
+    // Descriptor Pool — 通过 RHI 接口创建，封装 vkCreateDescriptorPool
+    m_DescPool = device->CreateImGuiDescriptorPool();
 
-    // RenderPass for ImGui — 必须与 Forward RP 兼容（附件数量、格式、依赖数一致）
-    // Forward RP: color[B8G8R8A8] + depth[D32], 1 dependency
-    // ImGui 不使用深度，但需要声明深度附件以确保 Vulkan RP 兼容性
-    VkAttachmentDescription colorAttach{};
-    colorAttach.format         = vkSC->GetFormat();
-    colorAttach.samples        = VK_SAMPLE_COUNT_1_BIT;
-    colorAttach.loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;    // LOAD 保留 Forward 渲染结果
-    colorAttach.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
-    colorAttach.initialLayout  = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    colorAttach.finalLayout    = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    // RenderPass — 通过 RHI 接口创建，封装 vkCreateRenderPass
+    u32 swapchainFormat = swapchain->GetBackendFormat();
+    m_RenderPass = device->CreateImGuiRenderPass(swapchainFormat);
 
-    // 深度附件（与 Forward RP 格式一致，ImGui 不写入但兼容性需要）
-    VkAttachmentDescription depthAttach{};
-    depthAttach.format         = VK_FORMAT_D32_SFLOAT;
-    depthAttach.samples        = VK_SAMPLE_COUNT_1_BIT;
-    depthAttach.loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;    // LOAD 保留 Forward 深度缓冲
-    depthAttach.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
-    depthAttach.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    depthAttach.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    depthAttach.initialLayout  = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-    depthAttach.finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-    VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-    VkAttachmentReference depthRef{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
-    VkSubpassDescription subpass{};
-    subpass.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount    = 1;
-    subpass.pColorAttachments       = &colorRef;
-    subpass.pDepthStencilAttachment = &depthRef; // 声明但实际不写入（pipeline depthWrite = VK_FALSE）
-
-    VkAttachmentDescription attachments[2] = { colorAttach, depthAttach };
-
-    // 子通道依赖（与 Forward RP 完全匹配，确保 Vulkan RP 兼容性）
-    // Forward RP: srcStageMask = COLOR | EARLY_FRAGMENT, dstStageMask = COLOR | EARLY_FRAGMENT
-    VkSubpassDependency dep{};
-    dep.srcSubpass    = VK_SUBPASS_EXTERNAL;
-    dep.dstSubpass    = 0;
-    dep.srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-                        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-    dep.dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-                        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-    dep.srcAccessMask = 0;  // 与 VulkanResources.cpp 中 Forward RP 一致
-    dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
-                        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-
-    VkRenderPassCreateInfo rpInfo{};
-    rpInfo.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    rpInfo.attachmentCount = 2;
-    rpInfo.pAttachments    = attachments;
-    rpInfo.subpassCount    = 1;
-    rpInfo.pSubpasses      = &subpass;
-    rpInfo.dependencyCount = 1;
-    rpInfo.pDependencies   = &dep;
-
-    VkRenderPass imguiRP;
-    vkCreateRenderPass(vkDevice, &rpInfo, nullptr, &imguiRP);
-
+    // 初始化 ImGui Vulkan 后端
     ImGui_ImplVulkan_InitInfo initInfo{};
     initInfo.Instance        = instance;
     initInfo.PhysicalDevice  = physicalDevice;
@@ -146,18 +85,25 @@ void ImGuiIntegration::CreateVulkanResources(rhi::IRHIDevice* device,
     initInfo.DescriptorPool  = reinterpret_cast<VkDescriptorPool>(m_DescPool);
     initInfo.MinImageCount   = rhi::kSwapchainImageCount;
     initInfo.ImageCount      = rhi::kSwapchainImageCount;
-    initInfo.RenderPass     = imguiRP;
-    initInfo.Subpass        = 0;
-    initInfo.MSAASamples    = VK_SAMPLE_COUNT_1_BIT;
+    initInfo.RenderPass      = static_cast<VkRenderPass>(m_RenderPass);
+    initInfo.Subpass         = 0;
+    initInfo.MSAASamples     = VK_SAMPLE_COUNT_1_BIT;
 
     ImGui_ImplVulkan_Init(&initInfo);
-    // 保存 ImGui 渲染通道，不可销毁 — ImGui 后端在每帧开始时通过该句柄启动渲染通道
-    m_RenderPass = imguiRP;
 
     // Upload fonts
     ImGui_ImplVulkan_CreateFontsTexture();
 
     HE_CORE_INFO("ImGui Vulkan backend initialized");
+}
+
+void ImGuiIntegration::DestroyImGuiResources(rhi::IRHIDevice* device) {
+    if (device) {
+        device->DestroyImGuiRenderPass(m_RenderPass);
+        device->DestroyImGuiDescriptorPool(m_DescPool);
+    }
+    m_RenderPass = nullptr;
+    m_DescPool   = nullptr;
 }
 
 void ImGuiIntegration::Shutdown() {
@@ -168,6 +114,8 @@ void ImGuiIntegration::Shutdown() {
     ImGui::DestroyContext(m_Context);
     m_Context = nullptr;
     m_Window  = nullptr;
+    DestroyImGuiResources(m_Device);
+    m_Device  = nullptr;
     HE_CORE_INFO("ImGuiIntegration shut down");
 }
 
@@ -179,8 +127,9 @@ void ImGuiIntegration::BeginFrame() {
 
 void ImGuiIntegration::EndFrame(rhi::IRHICommandList* cmd) {
     ImGui::Render();
-    auto* vkCmd = static_cast<rhi::VulkanCommandList*>(cmd);
-    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), vkCmd->GetHandle());
+    // 通过 RHI 接口获取 VkCommandBuffer，无需 static_cast<VulkanCommandList*>
+    auto* vkCmdBuf = static_cast<VkCommandBuffer>(m_Device->GetImGuiCommandBuffer(cmd));
+    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), vkCmdBuf);
 }
 
 } // namespace he::editor

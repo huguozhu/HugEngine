@@ -117,6 +117,15 @@ public:
     virtual u64   GetDGCPreprocessSize()   const { return 0; }
     virtual u32   GetDGCMaxSequences()     const { return 0; }
 
+    // --- ImGui 后端辅助（封装 Vulkan/D3D12 特定资源创建） ---
+    virtual void* CreateImGuiDescriptorPool() { return nullptr; }
+    virtual void  DestroyImGuiDescriptorPool(void* pool) {}
+    /// @param swapchainFormat 交换链格式（VkFormat / DXGI_FORMAT，通过 IRHISwapChain::GetBackendFormat 查询）
+    virtual void* CreateImGuiRenderPass(u32 swapchainFormat) { return nullptr; }
+    virtual void  DestroyImGuiRenderPass(void* rp) {}
+    /// 获取命令列表后端原生句柄（VkCommandBuffer / ID3D12CommandList），供 ImGui 渲染使用
+    virtual void* GetImGuiCommandBuffer(IRHICommandList* cmd) const { return nullptr; }
+
     // --- Commands ---
     virtual void Submit(IRHICommandList* cmdList) = 0;
     virtual void WaitIdle() = 0;

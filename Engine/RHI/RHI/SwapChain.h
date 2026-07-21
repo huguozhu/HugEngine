@@ -32,6 +32,8 @@ public:
     // 获取当前 BackBuffer ImageView（供 RenderGraph 导入）
     virtual void* GetCurrentBackBufferView() const = 0;
     virtual void* GetDepthBufferView()       const = 0;
+    // 后端像素格式（VkFormat / DXGI_FORMAT），供 ImGui 等后端代码查询
+    virtual u32  GetBackendFormat()    const = 0;
 };
 
 } // namespace he::rhi
