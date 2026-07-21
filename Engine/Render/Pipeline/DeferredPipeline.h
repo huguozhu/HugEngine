@@ -244,7 +244,7 @@ private:
     float4x4 m_PrevViewProj = float4x4(1.0f);
     float4x4 m_CurrViewProj = float4x4(1.0f);
 
-    u32 m_Width = 1920, m_Height = 1080;
+    u32 m_Width = rhi::kDefaultBackBufferWidth, m_Height = rhi::kDefaultBackBufferHeight;
     bool m_Ready = false;
 };
 

@@ -6,10 +6,13 @@
 
 namespace he::render {
 
+// 方向光 Cascaded Shadow Map 默认分辨率
+constexpr u32 kDefaultCSMShadowSize = 2048;
+
 // ============================================================================
 // CSMTechnique — 方向光 Cascaded Shadow Maps
 //
-// 3 级联 × 2048×2048 D32_FLOAT 阴影贴图
+// 3 级联 × kDefaultCSMShadowSize D32_FLOAT 阴影贴图
 // 混合分割（λ=0.5），正交投影
 // ============================================================================
 class CSMTechnique : public IShadowTechnique {
@@ -53,7 +56,7 @@ private:
     std::unique_ptr<rhi::IRHIPipelineState> m_ShadowPSO;
     std::unique_ptr<rhi::IRHITexture> m_ShadowMaps[CASCADE_COUNT];
     std::unique_ptr<rhi::IRHISampler> m_ShadowSampler;
-    u32 m_ShadowMapSize=2048;
+    u32 m_ShadowMapSize = kDefaultCSMShadowSize;
 
     rhi::IRHIBuffer*        m_ExternalObjectBuffer=nullptr;
     rhi::DescriptorSetHandle m_ExternalDescSet=rhi::kInvalidSet;

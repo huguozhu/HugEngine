@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Pipeline/Material.h"  // kMaxGPUObjects
 #include "RHI/RHI.h"
 #include "RHI/Shader.h"
 #include "Math/Math.h"
@@ -30,7 +31,7 @@ struct alignas(16) CullObjectBounds {
 
 class GPUCulling {
 public:
-    static constexpr u32 kMaxObjects = 2048;
+    static constexpr u32 kMaxObjects = kMaxGPUObjects;  // 统一到 Material.h
 
     bool enabled = true;
 

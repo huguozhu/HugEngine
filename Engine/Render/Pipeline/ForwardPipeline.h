@@ -132,7 +132,7 @@ private:
     // HDR 离屏渲染
     std::unique_ptr<rhi::IRHITexture> m_HDRTarget, m_HDRDepth;
     std::unique_ptr<rhi::IRHISampler> m_HDRSampler;
-    u32 m_HDRWidth = 1920, m_HDRHeight = 1080;
+    u32 m_HDRWidth = rhi::kDefaultBackBufferWidth, m_HDRHeight = rhi::kDefaultBackBufferHeight;
 
     // Bindless 占位纹理/采样器
     std::unique_ptr<rhi::IRHITexture> m_BindlessPlaceholder;

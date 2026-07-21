@@ -72,8 +72,8 @@ ResourceHandle RenderGraph::ImportBackBuffer() {
         m_BackBufferHandle = static_cast<ResourceHandle>(m_Resources.size());
         ResourceDesc rd;
         rd.type         = ResourceType::Texture;
-        rd.width        = 1920;
-        rd.height       = 1080;
+        rd.width        = rhi::kDefaultBackBufferWidth;
+        rd.height       = rhi::kDefaultBackBufferHeight;
         rd.format       = rhi::Format::RGBA8_UNORM;
         rd.textureUsage = rhi::TextureUsage::RenderTarget;
         rd.name         = "BackBuffer";

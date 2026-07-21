@@ -6,10 +6,13 @@
 
 namespace he::render {
 
+// 点光源阴影贴图默认分辨率（Cubemap 单面）
+constexpr u32 kDefaultPointShadowSize = 512;
+
 // ============================================================================
 // PointShadowTechnique — 点光源 Cubemap 阴影
 //
-// 512×512 D32_FLOAT × 6 面 Cubemap
+// kDefaultPointShadowSize D32_FLOAT × 6 面 Cubemap
 // 90° FOV 透视投影，逐面渲染
 // ============================================================================
 class PointShadowTechnique : public IShadowTechnique {
@@ -44,7 +47,7 @@ private:
     std::unique_ptr<rhi::IRHIPipelineState> m_ShadowPSO;
     std::unique_ptr<rhi::IRHITexture> m_PointShadowMap;
     std::unique_ptr<rhi::IRHISampler> m_PointShadowSampler;
-    u32 m_MapSize=512;
+    u32 m_MapSize = kDefaultPointShadowSize;
 
     rhi::IRHIBuffer*        m_ExternalObjectBuffer=nullptr;
     rhi::DescriptorSetHandle m_ExternalDescSet=rhi::kInvalidSet;

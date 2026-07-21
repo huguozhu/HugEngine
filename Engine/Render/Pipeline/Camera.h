@@ -20,10 +20,10 @@ struct CameraData {
     float3  forward     = float3(0.0f, 0.0f, -1.0f);  // 视线方向（单位向量）
     float3  up          = float3(0.0f, 1.0f, 0.0f);   // 上方向
 
-    float   fov         = 60.0f;               // 垂直视场角（度）
-    float   nearPlane   = 0.1f;                // 近裁剪面
-    float   farPlane    = 2000.0f;             // 远裁剪面
-    float   aspectRatio = 16.0f / 9.0f;        // 宽高比
+    float   fov         = kDefaultFOV;          // 垂直视场角（度）
+    float   nearPlane   = kDefaultNearPlane;    // 近裁剪面
+    float   farPlane    = kDefaultFarPlane;     // 远裁剪面
+    float   aspectRatio = 16.0f / 9.0f;         // 宽高比
 
     // 视图矩阵（世界空间 → 相机空间）
     float4x4 GetViewMatrix() const {

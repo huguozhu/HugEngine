@@ -15,8 +15,8 @@ namespace he {
 
 struct WindowDesc {
     String  title   = "HugEngine";
-    u32     width   = 1920;
-    u32     height  = 1080;
+    u32     width   = kDefaultWindowWidth;
+    u32     height  = kDefaultWindowHeight;
     bool    resizable = true;
     bool    vsync    = true;
 };

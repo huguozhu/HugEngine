@@ -13,8 +13,8 @@ namespace he {
 
 struct EngineConfig {
     String      appName     = "HugEngine";
-    u32         windowWidth  = 1920;
-    u32         windowHeight = 1080;
+    u32         windowWidth  = kDefaultWindowWidth;
+    u32         windowHeight = kDefaultWindowHeight;
     bool        enableVSync  = true;
     u32         jobThreads   = 0;    // 0 = auto-detect
     bool        enableValidation = true;

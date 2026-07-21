@@ -7,6 +7,9 @@
 
 namespace he::render {
 
+// RSM（Reflective Shadow Map）默认分辨率
+constexpr u32 kDefaultRSMResolution = 512;
+
 // ============================================================================
 // GI_RSM — Reflective Shadow Maps 全局光照
 //
@@ -67,7 +70,7 @@ private:
     void* m_ExternalDepthView = nullptr;  // 外部深度视图（保留兼容但不再用于 RSM）
 
     float4x4 m_LightVP;
-    u32      m_RSMResolution = 512;
+    u32      m_RSMResolution = kDefaultRSMResolution;
     rhi::IRHIBuffer*        m_ExternalObjBuf = nullptr;
     rhi::DescriptorSetHandle m_ExternalDescSet = rhi::kInvalidSet;
 

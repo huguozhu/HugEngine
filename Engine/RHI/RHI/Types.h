@@ -11,9 +11,9 @@ namespace he::rhi {
 // 最大飞行帧数（Triple Buffering），引擎全局常量
 constexpr u32 kMaxFramesInFlight = 3;
 
-// 默认 BackBuffer 分辨率（1080p，初始化时被实际窗口尺寸覆盖）
-constexpr u32 kDefaultBackBufferWidth  = 1920;
-constexpr u32 kDefaultBackBufferHeight = 1080;
+// 默认 BackBuffer 分辨率（1080p），引用 Core 层统一定义
+constexpr u32 kDefaultBackBufferWidth  = kDefaultWindowWidth;
+constexpr u32 kDefaultBackBufferHeight = kDefaultWindowHeight;
 
 // 描述符集索引常量
 constexpr u32 kDescSetPerFrame = 0;  // set=0: 逐帧数据（Camera、Lights、Shadows 等）

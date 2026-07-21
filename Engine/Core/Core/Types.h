@@ -75,4 +75,13 @@ using Span = std::span<T>;
 constexpr u64 INVALID_U64 = ~0ull;
 constexpr u32 INVALID_U32 = ~0u;
 
+// 默认窗口分辨率（1080p），初始化时被实际窗口尺寸覆盖
+constexpr u32 kDefaultWindowWidth  = 1920;
+constexpr u32 kDefaultWindowHeight = 1080;
+
+// 默认相机投影参数
+constexpr float kDefaultFOV       = 60.0f;     // 垂直视场角（度）
+constexpr float kDefaultNearPlane = 0.1f;      // 近裁剪面
+constexpr float kDefaultFarPlane  = 2000.0f;   // 远裁剪面
+
 } // namespace he

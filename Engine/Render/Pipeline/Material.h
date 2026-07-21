@@ -34,7 +34,8 @@ enum MaterialFlags : u32 {
 static constexpr u32 MAX_LIGHTS          = 8;
 static constexpr u32 MAX_SHADOWS         = 4;
 static constexpr u32 MAX_FRAMES_IN_FLIGHT = rhi::kMaxFramesInFlight;
-static constexpr u32 MAX_OBJECTS          = 1024;
+static constexpr u32 MAX_OBJECTS          = 1024;  // CPU 端 Object 缓冲上限
+static constexpr u32 kMaxGPUObjects       = 2048;  // GPU Culling / Scene 最大物体数
 static constexpr u32 CASCADE_COUNT        = 3;
 
 // ============================================================

@@ -26,9 +26,9 @@ class CameraComponent : public Component {
     HE_COMPONENT()
 public:
     // --- 投影参数 ---
-    float fov         = 60.0f;              // 垂直视场角（度）
-    float nearPlane   = 0.1f;               // 近裁剪面
-    float farPlane    = 2000.0f;            // 远裁剪面
+    float fov         = kDefaultFOV;        // 垂直视场角（度）
+    float nearPlane   = kDefaultNearPlane;  // 近裁剪面
+    float farPlane    = kDefaultFarPlane;   // 远裁剪面
     float aspectRatio = 16.0f / 9.0f;       // 宽高比
 
     // --- 主相机标记（场景中多个相机时标识激活相机）---

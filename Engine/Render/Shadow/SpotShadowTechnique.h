@@ -6,10 +6,13 @@
 
 namespace he::render {
 
+// 聚光灯阴影贴图默认分辨率
+constexpr u32 kDefaultSpotShadowSize = 1024;
+
 // ============================================================================
 // SpotShadowTechnique — 聚光灯 2D 透视阴影
 //
-// 1024×1024 D32_FLOAT × 1 张 2D 纹理
+// kDefaultSpotShadowSize D32_FLOAT × 1 张 2D 纹理
 // FOV = outerConeAngle × 2，透视投影
 // ============================================================================
 class SpotShadowTechnique : public IShadowTechnique {
@@ -41,7 +44,7 @@ private:
     std::unique_ptr<rhi::IRHIPipelineState> m_ShadowPSO;
     std::unique_ptr<rhi::IRHITexture> m_SpotShadowMap;
     std::unique_ptr<rhi::IRHISampler> m_SpotShadowSampler;
-    u32 m_MapSize=1024;
+    u32 m_MapSize = kDefaultSpotShadowSize;
 
     rhi::IRHIBuffer*        m_ExternalObjectBuffer=nullptr;
     rhi::DescriptorSetHandle m_ExternalDescSet=rhi::kInvalidSet;

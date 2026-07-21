@@ -40,7 +40,7 @@ static_assert(sizeof(GPUSceneObject) == 128, "GPUSceneObject must match shader s
 
 class GPUScene {
 public:
-    static constexpr u32 kMaxObjects = 2048;
+    static constexpr u32 kMaxObjects = kMaxGPUObjects;  // 统一到 Material.h
 
     bool Initialize(rhi::IRHIDevice* device);
     void Shutdown();
