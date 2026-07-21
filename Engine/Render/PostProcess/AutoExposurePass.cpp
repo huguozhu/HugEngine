@@ -64,7 +64,7 @@ void AutoExposurePass::Render(rhi::IRHICommandList* cmd) {
     struct { float adaptSpeed, targetLogLum, deltaTime; u32 totalPixels; } pc;
     pc.adaptSpeed   = m_AdaptSpeed;
     pc.targetLogLum = log2(m_TargetLum);
-    pc.deltaTime    = 0.016f;
+    pc.deltaTime    = kDefaultDeltaTime;
     pc.totalPixels  = m_Width * m_Height;
 
     cmd->SetPipeline(m_PSO.get()); cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
@@ -84,10 +84,10 @@ void AutoExposurePass::Render(rhi::IRHICommandList* cmd) {
 
         if (valid > 0) {
             float curAvg = sum / float(valid);
-            float t = std::min(m_AdaptSpeed * 0.016f, 1.0f);
+            float t = std::min(m_AdaptSpeed * kDefaultDeltaTime, 1.0f);
             m_PrevLogLum = m_PrevLogLum + (curAvg - m_PrevLogLum) * t;  // 时间混合
             m_Exposure = exp2(log2(m_TargetLum) - m_PrevLogLum);
-            m_Exposure = std::max(0.005f, std::min(m_Exposure, 200.0f));
+            m_Exposure = std::max(kMinExposure, std::min(m_Exposure, kMaxExposure));
         }
     }
 }

@@ -11,6 +11,8 @@ namespace he::render {
 // ============================================================
 class DOFPass {
 public:
+    static constexpr float kDefaultMaxCoC = 0.03f;  // 最大弥散圆直径（屏幕空间比例）
+
     bool Initialize(rhi::IRHIDevice* device, u32 width, u32 height);
     void Shutdown();
     void OnResize(u32 w, u32 h);

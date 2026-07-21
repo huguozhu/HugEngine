@@ -43,7 +43,7 @@ void Denoiser::Render(rhi::IRHICommandList* cmd){
     cmd->SetPipeline(m_PSO.get()); cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_Set);
     cmd->SetViewport({0,(float)m_Height,(float)m_Width,-(float)m_Height,0,1}); cmd->SetScissor({0,0,m_Width,m_Height});
     struct{float2 ts; float dS; float nS;}pc;
-    pc.ts=float2(1.0f/m_Width,1.0f/m_Height); pc.dS=10.0f; pc.nS=8.0f;
+    pc.ts=float2(1.0f/m_Width,1.0f/m_Height); pc.dS=kDefaultDepthSigma; pc.nS=kDefaultNormalSigma;
     cmd->SetPushConstants(0,sizeof(pc),&pc);
     cmd->Draw(3);
 }

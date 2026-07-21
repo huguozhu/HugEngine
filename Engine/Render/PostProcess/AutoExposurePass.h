@@ -12,6 +12,10 @@ namespace he::render {
 // ============================================================
 class AutoExposurePass {
 public:
+    static constexpr float kMinExposure      = 0.005f;   // 最小曝光值
+    static constexpr float kMaxExposure      = 200.0f;   // 最大曝光值
+    static constexpr float kDefaultDeltaTime = 0.016f;   // 默认帧间隔（1/60s）
+
     bool Initialize(rhi::IRHIDevice* device, u32 width, u32 height);
     void Shutdown();
     void OnResize(u32 w, u32 h);

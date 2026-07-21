@@ -10,6 +10,7 @@ namespace he::render {
 // ============================================================
 class MotionBlurPass {
 public:
+    static constexpr u32 kDefaultSamples = 12;  // 方向采样数
     bool Initialize(rhi::IRHIDevice* device, u32 width, u32 height);
     void Shutdown();
     void OnResize(u32 w, u32 h);

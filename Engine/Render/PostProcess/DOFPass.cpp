@@ -145,7 +145,7 @@ void DOFPass::Render(rhi::IRHICommandList* cmd) {
             m_DepthInput, ds.get());
 
         struct { float focusDepth, focusRange, maxCoC, _pad; } pc;
-        pc.focusDepth = m_FocusDepth; pc.focusRange = m_FocusRange; pc.maxCoC = 0.03f;
+        pc.focusDepth = m_FocusDepth; pc.focusRange = m_FocusRange; pc.maxCoC = kDefaultMaxCoC;
 
         cmd->SetPipeline(m_CoCPSO.get());
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_CoCSet);

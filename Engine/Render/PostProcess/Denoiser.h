@@ -11,6 +11,10 @@ namespace he::render {
 // ============================================================
 class Denoiser {
 public:
+    // 双边模糊默认 sigma 值
+    static constexpr float kDefaultDepthSigma  = 10.0f;
+    static constexpr float kDefaultNormalSigma = 8.0f;
+
     bool Initialize(rhi::IRHIDevice* device, u32 width, u32 height);
     void Shutdown();
     void OnResize(u32 w, u32 h);

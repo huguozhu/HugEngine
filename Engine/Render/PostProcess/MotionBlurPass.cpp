@@ -96,7 +96,7 @@ void MotionBlurPass::Render(rhi::IRHICommandList* cmd) {
 
     struct { float intensity; u32 samples; float2 _pad; } pc;
     pc.intensity  = m_Intensity;
-    pc.samples    = 12;
+    pc.samples    = kDefaultSamples;
 
     cmd->SetPipeline(m_PSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
