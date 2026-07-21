@@ -5,10 +5,12 @@
 //   [0..8]  SH 系数 band 0/1/2 (9×float4, RGB 存储)
 //   [9..15] 保留
 
+#include "ShaderTypes.slang"  // GPU 常量 (kGPU*) + 结构体
+
 // GBuffer 输入（只读，CombinedImageSampler）
-[[vk::binding(0, 0)]] Texture2D<float4> u_GBufferA;    // albedo.rgb + metallic
-[[vk::binding(1, 0)]] Texture2D<float4> u_GBufferB;    // normal*0.5+0.5 + roughness
-[[vk::binding(2, 0)]] Texture2D<float>  u_Depth;       // 深度（NDC [0,1]）
+[[vk::binding(kGPUBinding_GBufferA, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferA;
+[[vk::binding(kGPUBinding_GBufferB, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferB;
+[[vk::binding(kGPUBinding_Depth, kGPUDescSet_PerFrame)]] Texture2D<float>  u_Depth;
 [[vk::binding(0, 0)]] SamplerState      u_PointSampler; // 点采样（GBuffer 读取）
 
 // 探针输出（读写，当前帧结果）

@@ -12,7 +12,7 @@ layout(location = 1) in float3 inNormal;
 // GPU Object（128 bytes，匹配 CPU GPUObjectData）
 // GPUObjectData 定义来自 ShaderTypes.slang（C++/Slang 共享）
 
-[[vk::binding(2, 0)]] StructuredBuffer<GPUObjectData> u_Objects;
+[[vk::binding(kGPUBinding_ObjectData, kGPUDescSet_PerFrame)]] StructuredBuffer<GPUObjectData> u_Objects;
 
 [[vk::push_constant]] cbuffer RSMConstants {
     float4x4 lightViewProj;

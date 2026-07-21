@@ -12,7 +12,7 @@ layout(location = 2) in float2 inUV;
 // GPUObjectData 定义来自 ShaderTypes.slang（C++/Slang 共享）
 
 // set=0, binding=2: GPU 对象数据数组
-[[vk::binding(2, 0)]] StructuredBuffer<GPUObjectData> u_Objects;
+[[vk::binding(kGPUBinding_ObjectData, kGPUDescSet_PerFrame)]] StructuredBuffer<GPUObjectData> u_Objects;
 
 // 帧级 Push Constants（Forward+ 扩展，与 FS 对齐）
 [[vk::push_constant]] cbuffer FrameConstants {

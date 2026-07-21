@@ -15,7 +15,7 @@ layout(location = 0) in float3 inPosition;
 // GPUObjectData 定义来自 ShaderTypes.slang（C++/Slang 共享）
 
 // set=0, binding=2: GPU 对象数据（与主管线共用）
-[[vk::binding(2, 0)]] StructuredBuffer<GPUObjectData> u_Objects;
+[[vk::binding(kGPUBinding_ObjectData, kGPUDescSet_PerFrame)]] StructuredBuffer<GPUObjectData> u_Objects;
 
 // Push Constants（阴影通道专用：lightViewProj + objectIndex）
 [[vk::push_constant]] cbuffer ShadowConstants {

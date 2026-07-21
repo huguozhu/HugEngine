@@ -19,7 +19,7 @@ struct VSOutput {
 
 // GPUObjectData 定义来自 ShaderTypes.slang（C++/Slang 共享）
 
-[[vk::binding(2, 0)]] StructuredBuffer<GPUObjectData> u_Objects;
+[[vk::binding(kGPUBinding_ObjectData, kGPUDescSet_PerFrame)]] StructuredBuffer<GPUObjectData> u_Objects;
 
 // offset 0:  viewProjMatrix     (64B) — 当前帧 VP（含抖动）
 // offset 64: prevViewProjMatrix (64B) — 上一帧 VP（不含抖动）
