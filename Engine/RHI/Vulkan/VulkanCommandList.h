@@ -132,7 +132,6 @@ private:
     u32              m_QueueFamily = 0;
     QueueType        m_QueueType   = QueueType::Graphics;
 
-    static constexpr u32 kMaxFramesInFlight = 3;
     VkCommandPool    m_CmdPools[kMaxFramesInFlight]   = {};
     VkCommandBuffer  m_CmdBuffers[kMaxFramesInFlight] = {};
     VkFence          m_Fences[kMaxFramesInFlight]     = {};

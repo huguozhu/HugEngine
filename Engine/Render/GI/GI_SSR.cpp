@@ -50,7 +50,7 @@ void GI_SSR::SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal, rhi::I
 }
 void GI_SSR::Render(rhi::IRHICommandList* cmd){
     if(!m_Ready||!m_Settings.enabled||!m_Depth||!m_Normal||!m_Albedo)return;
-    cmd->SetPipeline(m_PSO.get()); cmd->BindDescriptorSet(0,m_DescSet);
+    cmd->SetPipeline(m_PSO.get()); cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_DescSet);
     cmd->SetViewport({0,(float)m_Height,(float)m_Width,-(float)m_Height,0,1});
     cmd->SetScissor({0,0,m_Width,m_Height});
     struct{float4x4 proj;float4 p;}pc;

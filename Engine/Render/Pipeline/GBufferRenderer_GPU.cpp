@@ -31,10 +31,10 @@ void GBufferRenderer_GPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
     he::asset::BindlessTextureManager::Instance().FlushPending();
 
     // 绑定 set=0
-    ctx.device->UpdateDescriptorSet(ctx.descSet, 2, rhi::DescriptorType::StorageBuffer,
+    ctx.device->UpdateDescriptorSet(ctx.descSet, rhi::kBindingObjectData, rhi::DescriptorType::StorageBuffer,
                                      ctx.objectBuffer);
     cmd->SetPipeline(ctx.pso);
-    cmd->BindDescriptorSet(0, ctx.descSet);
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, ctx.descSet);
 
     // 清除 + 开始 MRT（5 颜色 + 深度）
     rhi::ClearValue clears[6]{};

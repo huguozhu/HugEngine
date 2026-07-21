@@ -114,7 +114,7 @@ void GaussianBlurPass::Render(rhi::IRHICommandList* cmd) {
     if (!m_Ready || !m_Input) return;
 
     cmd->SetPipeline(m_PSO.get());
-    cmd->BindDescriptorSet(0, m_Set);
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
     cmd->SetViewport({0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1});
     cmd->SetScissor({0, 0, m_Width, m_Height});
 

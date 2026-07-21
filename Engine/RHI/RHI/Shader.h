@@ -71,7 +71,7 @@ struct PipelineStateDesc {
 
     // Render target
     u32                 colorAttachmentCount = 1;
-    Format              colorFormats[8]      = {Format::RGBA8_UNORM};
+    Format              colorFormats[kMaxColorAttachments] = {Format::RGBA8_UNORM};
     Format              depthFormat          = Format::D32_FLOAT;
     LoadOp              colorLoadOp          = LoadOp::Clear;  // 颜色附件加载操作：Clear=清屏, Load=保留内容
     LoadOp              depthLoadOp          = LoadOp::Clear;  // 深度附件加载操作

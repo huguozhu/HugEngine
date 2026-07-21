@@ -314,7 +314,7 @@ void GPUWorkGraph::Execute(rhi::IRHICommandList* cmd) {
 
             // 绑定 PSO + 描述符集
             cmd->SetPipeline(node.pso.get());
-            cmd->BindDescriptorSet(0, node.descSet);
+            cmd->BindDescriptorSet(rhi::kDescSetPerFrame, node.descSet);
 
             // Push Constants：4×u32
             //   targetNodeID — 当前节点 ID（shader 中用于输出记录的目标节点 ID）

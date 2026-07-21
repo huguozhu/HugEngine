@@ -80,7 +80,7 @@ void PointShadowTechnique::Render(rhi::IRHICommandList* cmd,he::World& w,he::Sce
             cmd->SetPipeline(m_ShadowPSO.get());
             cmd->SetViewport({0,(float)m_MapSize,(float)m_MapSize,-(float)m_MapSize,0,1});
             cmd->SetScissor({0,0,m_MapSize,m_MapSize});
-            cmd->BindDescriptorSet(0,m_ExternalDescSet);
+            cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_ExternalDescSet);
             u32 oi=0;float4x4 vp=proj*view;
             auto rm=[&](he::Entity,he::MeshComponent& m){
                 if(m.GetIndexCount()==0||oi>=MAX_OBJECTS)return;

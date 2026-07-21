@@ -67,7 +67,7 @@ void AutoExposurePass::Render(rhi::IRHICommandList* cmd) {
     pc.deltaTime    = 0.016f;
     pc.totalPixels  = m_Width * m_Height;
 
-    cmd->SetPipeline(m_PSO.get()); cmd->BindDescriptorSet(0, m_Set);
+    cmd->SetPipeline(m_PSO.get()); cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     cmd->Dispatch(16, 16, 1);  // 256 组
 

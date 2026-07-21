@@ -145,7 +145,7 @@ void AA_SMAA::Render(rhi::IRHICommandList* cmd) {
     // ── Pass 1: Edge Detection → m_EdgeTex ──
     {
         cmd->SetPipeline(m_EdgePSO.get());
-        cmd->BindDescriptorSet(0, m_EdgeSet);
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_EdgeSet);
         cmd->SetViewport({0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1});
         cmd->SetScissor({0, 0, m_Width, m_Height});
 
@@ -179,7 +179,7 @@ void AA_SMAA::Render(rhi::IRHICommandList* cmd) {
             m_EdgeTex.get(), m_PointSampler.get());
 
         cmd->SetPipeline(m_BlendPSO.get());
-        cmd->BindDescriptorSet(0, m_BlendSet);
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_BlendSet);
         cmd->SetViewport({0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1});
         cmd->SetScissor({0, 0, m_Width, m_Height});
 
@@ -224,7 +224,7 @@ void AA_SMAA::RenderFinalPass(rhi::IRHICommandList* cmd) {
         m_BlendTex.get(), m_PointSampler.get());
 
     cmd->SetPipeline(m_NeighborPSO.get());
-    cmd->BindDescriptorSet(0, m_NeighborSet);
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_NeighborSet);
     cmd->SetViewport({0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1});
     cmd->SetScissor({0, 0, m_Width, m_Height});
 

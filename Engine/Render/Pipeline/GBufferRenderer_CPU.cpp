@@ -26,10 +26,10 @@ void GBufferRenderer_CPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
     he::asset::BindlessTextureManager::Instance().FlushPending();
 
     // 绑定 set=0（per-frame ObjectBuffer + bindless 纹理/采样器数组）
-    ctx.device->UpdateDescriptorSet(ctx.descSet, 2, rhi::DescriptorType::StorageBuffer,
+    ctx.device->UpdateDescriptorSet(ctx.descSet, rhi::kBindingObjectData, rhi::DescriptorType::StorageBuffer,
                                      ctx.objectBuffer);
     cmd->SetPipeline(ctx.pso);
-    cmd->BindDescriptorSet(0, ctx.descSet);
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, ctx.descSet);
 
     // 清除值（5 颜色 MRT + 深度）
     rhi::ClearValue clears[6]{};

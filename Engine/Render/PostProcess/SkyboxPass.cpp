@@ -73,7 +73,7 @@ void SkyboxPass::Render(rhi::IRHICommandList* cmd){
     pc.invVP=invVP;pc.intensity=m_CachedSkybox->intensity;
 
     cmd->SetPipeline(m_PSO.get());
-    cmd->BindDescriptorSet(0,m_DescSet);
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_DescSet);
     cmd->SetPushConstants(0,96,&pc);
     cmd->Draw(3);
 }

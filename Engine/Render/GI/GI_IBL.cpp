@@ -299,7 +299,7 @@ void GI_IBL::Render(rhi::IRHICommandList* cmd) {
         struct alignas(16) IBLPush { float4x4 invVP; float roughnessPad; float _pad[3]; } pc{};
 
         cmd->SetPipeline(m_IrradiancePSO.get());
-        cmd->BindDescriptorSet(0, m_IrradianceSet);
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_IrradianceSet);
 
         for (u32 face = 0; face < 6; ++face) {
             void* faceView = m_IrradianceMap->GetNativeHandle(face);
@@ -336,7 +336,7 @@ void GI_IBL::Render(rhi::IRHICommandList* cmd) {
 
         struct alignas(16) IBLPush { float4x4 invVP; float roughness; float _pad[3]; } pc{};
         cmd->SetPipeline(m_PrefilterPSO.get());
-        cmd->BindDescriptorSet(0, m_PrefilterSet);
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_PrefilterSet);
 
         for (u32 mip = 0; mip < kPrefilterMips; ++mip) {
             u32 mipRes   = kPrefilterRes >> mip;  // 128, 64, 32, 16, 8

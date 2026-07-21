@@ -146,7 +146,7 @@ void SSAO::Render(rhi::IRHICommandList* cmd) {
 
     // --- SSAO Pass ---
     cmd->SetPipeline(m_SSAO_PSO.get());
-    cmd->BindDescriptorSet(0, m_SSAOSet);
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_SSAOSet);
     cmd->SetViewport({0,(float)m_Height,(float)m_Width,-(float)m_Height,0,1});
     cmd->SetScissor({0,0,m_Width,m_Height});
 
@@ -177,7 +177,7 @@ void SSAO::Render(rhi::IRHICommandList* cmd) {
 
     // --- Blur Pass ---
     cmd->SetPipeline(m_Blur_PSO.get());
-    cmd->BindDescriptorSet(0, m_BlurSet);
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_BlurSet);
     m_Device->UpdateDescriptorSet(m_BlurSet,0,rhi::DescriptorType::CombinedImageSampler,m_AOTexture.get(),m_AOSampler.get());
 
     struct { float2 ts; float _pad[2]; } bpc;

@@ -506,7 +506,7 @@ void ParticleRenderer::DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float 
         if (verbose) DebugDumpState(id, "After-CPU-Init(deadCount-written)");
 
         cmd->SetPipeline(m_InitPSO.get());
-        cmd->BindDescriptorSet(0, cs.initSet);
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, cs.initSet);
         cmd->SetPushConstants(0, sizeof(u32), &maxP);
         cmd->Dispatch((cs.maxParticles + kCS_Threads - 1) / kCS_Threads, 1, 1);
 
@@ -590,7 +590,7 @@ void ParticleRenderer::DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float 
         HE_CORE_INFO("    GpuEmitParam size={} maxPushConst={}", (u32)sizeof(GpuEmitParam), (u32)sizeof(GpuEmitParam) > 128 ? "OVER!" : "OK");
 
         cmd->SetPipeline(m_EmitPSO.get());
-        cmd->BindDescriptorSet(0, cs.emitSet);
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, cs.emitSet);
         cmd->SetPushConstants(0, sizeof(GpuEmitParam), &emitParam);
         cmd->Dispatch((emitCount + kCS_Threads - 1) / kCS_Threads, 1, 1);
 
@@ -615,7 +615,7 @@ void ParticleRenderer::DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float 
         simParam.maxParticles    = cs.maxParticles;  // 粒子池总容量（Simulate 遍历所有槽位）
 
         cmd->SetPipeline(m_SimPSO.get());
-        cmd->BindDescriptorSet(0, cs.simSet);
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, cs.simSet);
         cmd->SetPushConstants(0, sizeof(GpuSimulateParam), &simParam);
         cmd->Dispatch((cs.maxParticles + kCS_Threads - 1) / kCS_Threads, 1, 1);
 
@@ -642,7 +642,7 @@ void ParticleRenderer::DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float 
         cs.cullingUB->Unmap();
 
         cmd->SetPipeline(m_CullingPSO.get());
-        cmd->BindDescriptorSet(0, cs.cullingSet);
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, cs.cullingSet);
         cmd->SetPushConstants(0, sizeof(GpuCullingParam), &cullParam);
         cmd->Dispatch((cs.maxParticles + kCS_Threads - 1) / kCS_Threads, 1, 1);
 
@@ -657,7 +657,7 @@ void ParticleRenderer::DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float 
     // ── Sort Pass (Bitonic Sort: 按深度降序，远→近渲染) ──
     {
         cmd->SetPipeline(m_SortPSO.get());
-        cmd->BindDescriptorSet(0, cs.sortSet);
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, cs.sortSet);
         cmd->Dispatch(1, 1, 1);  // 单 workgroup 512 线程，shared memory 排序
 
         cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::VertexShader,
@@ -704,7 +704,7 @@ void ParticleRenderer::Render(rhi::IRHICommandList* cmd, u32 id,
 
     // 绑定管线 + 描述符
     cmd->SetPipeline(m_RenderPSO.get());
-    cmd->BindDescriptorSet(0, cs.renderSet);
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, cs.renderSet);
     cmd->SetPushConstants(0, sizeof(GpuRenderParam), &renderParam);
 
     // 使用 DispatchCompute 中缓存的上一帧 GPU renderCount

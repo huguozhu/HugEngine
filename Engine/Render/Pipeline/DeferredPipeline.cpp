@@ -253,9 +253,9 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         // 预填充绑定 5 和 6 至少一个有效的占位符
         rhi::IRHITexture* texPtrs[] = { m_BindlessPlaceholder.get() };
         rhi::IRHISampler* sampPtrs[] = { m_BindlessSampler.get() };
-        device->UpdateDescriptorSet(m_GBufferSet, 5, rhi::DescriptorType::SampledImage,
+        device->UpdateDescriptorSet(m_GBufferSet, rhi::kBindingBindlessTextures, rhi::DescriptorType::SampledImage,
             texPtrs, nullptr, 1);
-        device->UpdateDescriptorSet(m_GBufferSet, 6, rhi::DescriptorType::Sampler,
+        device->UpdateDescriptorSet(m_GBufferSet, rhi::kBindingBindlessSamplers, rhi::DescriptorType::Sampler,
             nullptr, sampPtrs, 1);
         // 注册 GBufferSet 到 BindlessTextureManager（纹理加载后 FlushPending 自动推送）
         he::asset::BindlessTextureManager::Instance().RegisterDescriptorSet(
@@ -335,8 +335,8 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         // Cluster SSBO 占位（binding 7/8）
         rhi::BufferDesc gd; gd.size=16; gd.usage=rhi::BufferUsage::Storage;
         auto gb = device->CreateBuffer(gd);
-        device->UpdateDescriptorSet(m_LightingSet, 7, rhi::DescriptorType::StorageBuffer, gb.get());
-        device->UpdateDescriptorSet(m_LightingSet, 8, rhi::DescriptorType::StorageBuffer, gb.get());
+        device->UpdateDescriptorSet(m_LightingSet, rhi::kBindingLightGrid, rhi::DescriptorType::StorageBuffer, gb.get());
+        device->UpdateDescriptorSet(m_LightingSet, rhi::kBindingLightIndexList, rhi::DescriptorType::StorageBuffer, gb.get());
         // DDGI 探针 SSBO 占位（binding 22）
         device->UpdateDescriptorSet(m_LightingSet, 22, rhi::DescriptorType::StorageBuffer, gb.get());
     }

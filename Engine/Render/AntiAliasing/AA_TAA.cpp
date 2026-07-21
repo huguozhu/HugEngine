@@ -229,7 +229,7 @@ void AA_TAA::Render(rhi::IRHICommandList* cmd) {
     cmd->SetPipeline(m_PSO.get());
     cmd->SetViewport({0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1});
     cmd->SetScissor({0, 0, m_Width, m_Height});
-    cmd->BindDescriptorSet(0, m_DescSet);
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSet);
 
     // Push constant: 全 16B 范围（jitterOffset 8B + zero padding 8B）
     struct { float2 jitter; float2 _pad; } pc = { m_CurrentJitter, {0.0f, 0.0f} };

@@ -142,8 +142,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     }
 
     // 导入阴影贴图到 RenderGraph（Shadow pass 写入，Lighting pass 隐式读取）
-    ResourceHandle csmMaps[3];
-    for (u32 c = 0; c < 3; ++c) {
+    ResourceHandle csmMaps[CASCADE_COUNT];
+    for (u32 c = 0; c < CASCADE_COUNT; ++c) {
         auto* tex = m_ShadowSystem->GetShadowMap(c);
         if (tex) {
             char name[32];
@@ -171,14 +171,14 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             [this](rhi::IRHICommandList* c) {
                 u32 slot = m_CurrentFrameSlot;
                 // 切换到阴影专用 Object Buffer（binding 2），渲染完成后恢复
-                m_Device->UpdateDescriptorSet(m_GBufferSet, 2,
+                m_Device->UpdateDescriptorSet(m_GBufferSet, rhi::kBindingObjectData,
                     rhi::DescriptorType::StorageBuffer,
                     m_ShadowObjBuffers[slot].get());
 
                 m_ShadowSystem->Render(c);  // 使用光源 VP 矩阵渲染所有阴影贴图
 
                 // 恢复场景 Object Buffer 供后续 GBuffer pass 使用
-                m_Device->UpdateDescriptorSet(m_GBufferSet, 2,
+                m_Device->UpdateDescriptorSet(m_GBufferSet, rhi::kBindingObjectData,
                     rhi::DescriptorType::StorageBuffer,
                     m_ObjectBuffers[slot].get());
             });
@@ -394,7 +394,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 }
                 void* m = m_LightGridBuffer->Map();
                 if (m) { memcpy(m, grid.data(), grid.size() * 8); m_LightGridBuffer->Unmap(); }
-                m_Device->UpdateDescriptorSet(m_LightingSet, 7, rhi::DescriptorType::StorageBuffer, m_LightGridBuffer.get());
+                m_Device->UpdateDescriptorSet(m_LightingSet, rhi::kBindingLightGrid, rhi::DescriptorType::StorageBuffer, m_LightGridBuffer.get());
                 // 上传 LightIndexList
                 auto& list = m_ClusteredShading.GetLightIndexList();
                 if (!m_LightIndexListBuffer || m_LightIndexListBuffer->GetSize() < list.size() * 4) {
@@ -403,11 +403,11 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 }
                 void* m2 = m_LightIndexListBuffer->Map();
                 if (m2) { memcpy(m2, list.data(), list.size() * 4); m_LightIndexListBuffer->Unmap(); }
-                m_Device->UpdateDescriptorSet(m_LightingSet, 8, rhi::DescriptorType::StorageBuffer, m_LightIndexListBuffer.get());
+                m_Device->UpdateDescriptorSet(m_LightingSet, rhi::kBindingLightIndexList, rhi::DescriptorType::StorageBuffer, m_LightIndexListBuffer.get());
                 useClustered = 1u;
             }
 
-            c->SetPipeline(m_LightingPSO.get()); c->BindDescriptorSet(0, m_LightingSet);
+            c->SetPipeline(m_LightingPSO.get()); c->BindDescriptorSet(rhi::kDescSetPerFrame, m_LightingSet);
             rhi::ClearValue clr{};
             c->BeginOffscreenPass(m_HDRTarget->GetNativeHandle(), m_HDRDepth->GetNativeHandle(), w, h, &clr, false);
             c->SetViewport({0,(float)h,(float)w,-(float)h,0,1});

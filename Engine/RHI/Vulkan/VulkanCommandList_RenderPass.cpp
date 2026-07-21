@@ -242,7 +242,7 @@ void VulkanCommandList::BeginOffscreenPassMRT(
     }
 
     // 构建附件列表：颜色在前，深度在后；支持最多 7 个颜色 + 1 个深度（共 8 个）
-    VkImageView attachments[8] = {};
+    VkImageView attachments[kMaxColorAttachments] = {};
     u32 attachmentCount = 0;
     for (u32 i = 0; i < colorCount && attachmentCount < 7; ++i)
         attachments[attachmentCount++] = static_cast<VkImageView>(colorImageViews[i]);
@@ -263,7 +263,7 @@ void VulkanCommandList::BeginOffscreenPassMRT(
     m_CurrentOffscreenFB = offscreenFB;
 
     // 清除值（最多 7 个颜色 + 1 个深度，共 8 个）
-    VkClearValue vkClearValues[8]{};
+    VkClearValue vkClearValues[kMaxColorAttachments]{};
     u32 clearCount = 0;
     for (u32 i = 0; i < colorCount; ++i) {
         if (clears) {

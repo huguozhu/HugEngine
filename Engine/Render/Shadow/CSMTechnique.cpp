@@ -119,7 +119,7 @@ void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,he::World& w,h
     cmd->SetPipeline(m_ShadowPSO.get());
     cmd->SetViewport({0,(float)m_ShadowMapSize,(float)m_ShadowMapSize,-(float)m_ShadowMapSize,0,1});
     cmd->SetScissor({0,0,m_ShadowMapSize,m_ShadowMapSize});
-    cmd->BindDescriptorSet(0,m_ExternalDescSet);
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_ExternalDescSet);
     auto*objData=static_cast<GPUObjectData*>(m_ExternalObjectBuffer->Map());
     u32 oi=0;
     auto rm=[&](he::Entity e,he::MeshComponent& m){

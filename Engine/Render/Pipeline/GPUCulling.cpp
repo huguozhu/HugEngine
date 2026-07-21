@@ -376,7 +376,7 @@ void GPUCulling::Dispatch(rhi::IRHICommandList* cmd,
     pc.count = objectCount;
 
     cmd->SetPipeline(m_PSO.get());
-    cmd->BindDescriptorSet(0, m_DescSet);
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSet);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
 
     u32 groups = (objectCount + 63) / 64;
@@ -414,7 +414,7 @@ void GPUCulling::DispatchPhase1(rhi::IRHICommandList* cmd, const float4x4& viewP
     }
 
     cmd->SetPipeline(m_Phase1PSO.get());
-    cmd->BindDescriptorSet(0, m_Phase1Set);
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Phase1Set);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
 
     u32 groups = (objectCount + 63) / 64;
@@ -464,7 +464,7 @@ void GPUCulling::BuildHiZPyramid(rhi::IRHICommandList* cmd, u32 screenW, u32 scr
             rhi::DescriptorType::StorageImage,
             m_MipViews[mip + 1].storageView);
 
-        cmd->BindDescriptorSet(0, m_HiZSet);
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_HiZSet);
 
         // ── Push Constants ──
         struct { u32 srcW; u32 srcH; u32 dstW; u32 dstH; u32 srcMip; u32 _pad; } pc;
@@ -514,7 +514,7 @@ void GPUCulling::DispatchPhase2(rhi::IRHICommandList* cmd, u32 screenW, u32 scre
     pc.count = candidateCount;
 
     cmd->SetPipeline(m_Phase2PSO.get());
-    cmd->BindDescriptorSet(0, m_Phase2Set);
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Phase2Set);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
 
     u32 groups = (candidateCount + 63) / 64;
@@ -667,7 +667,7 @@ void GPUCulling::SignalPTG(rhi::IRHICommandList* cmd, const float4x4& viewProj,
 
     // 每帧 Dispatch PTG shader（替代持久化 spin-wait）
     cmd->SetPipeline(m_PTG_PSO.get());
-    cmd->BindDescriptorSet(0, m_PTGSet);
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_PTGSet);
     cmd->Dispatch(kPTGGroupCount, 1, 1);
 
     // 全局屏障：确保 Compute Shader 写入对后续 Indirect Draw 可见

@@ -163,14 +163,14 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         rhi::DescriptorSetHandle set = device->AllocateDescriptorSet(m_PerFrameLayout);
         device->UpdateDescriptorSet(set, 1, rhi::DescriptorType::StorageBuffer,
                                     m_LightBuffers[i].get());
-        device->UpdateDescriptorSet(set, 2, rhi::DescriptorType::StorageBuffer,
+        device->UpdateDescriptorSet(set, rhi::kBindingObjectData, rhi::DescriptorType::StorageBuffer,
                                     m_ObjectBuffers[i].get());
         device->UpdateDescriptorSet(set, 3, rhi::DescriptorType::StorageBuffer,
                                     m_ShadowBuffers[i].get());
         // Forward+: LightGrid / LightIndexList 初始占位
-        device->UpdateDescriptorSet(set, 7, rhi::DescriptorType::StorageBuffer,
+        device->UpdateDescriptorSet(set, rhi::kBindingLightGrid, rhi::DescriptorType::StorageBuffer,
                                     m_LightGridBuffer.get());
-        device->UpdateDescriptorSet(set, 8, rhi::DescriptorType::StorageBuffer,
+        device->UpdateDescriptorSet(set, rhi::kBindingLightIndexList, rhi::DescriptorType::StorageBuffer,
                                     m_LightIndexListBuffer.get());
         // CSM: 绑定 3 级联阴影贴图（来自 ShadowSystem）
         for (u32 c = 0; c < CASCADE_COUNT; ++c) {
@@ -182,9 +182,9 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         {
             rhi::IRHITexture* texPtrs[] = { m_BindlessPlaceholder.get() };
             rhi::IRHISampler* sampPtrs[] = { m_BindlessSampler.get() };
-            device->UpdateDescriptorSet(set, 5, rhi::DescriptorType::SampledImage,
+            device->UpdateDescriptorSet(set, rhi::kBindingBindlessTextures, rhi::DescriptorType::SampledImage,
                 texPtrs, nullptr, 1);
-            device->UpdateDescriptorSet(set, 6, rhi::DescriptorType::Sampler,
+            device->UpdateDescriptorSet(set, rhi::kBindingBindlessSamplers, rhi::DescriptorType::Sampler,
                 nullptr, sampPtrs, 1);
         }
         // 绑定 9: 点光源阴影 Cubemap（来自 ShadowSystem）
@@ -763,13 +763,13 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
     if (m_ShadowSystem && m_ShadowSystem->HasActiveShadows()) {
         u32 slot = m_CurrentFrameSlot;
         // 切换 binding 2 到阴影 Object Buffer（仅更新 set=0 per-frame 集）
-        m_Device->UpdateDescriptorSet(m_DescSets[slot], 2,
+        m_Device->UpdateDescriptorSet(m_DescSets[slot], rhi::kBindingObjectData,
             rhi::DescriptorType::StorageBuffer, m_ShadowObjBuffers[slot].get());
 
         m_ShadowSystem->Render(cmd);
 
         // 恢复 binding 2
-        m_Device->UpdateDescriptorSet(m_DescSets[slot], 2,
+        m_Device->UpdateDescriptorSet(m_DescSets[slot], rhi::kBindingObjectData,
             rhi::DescriptorType::StorageBuffer, m_ObjectBuffers[slot].get());
     }
     PrepareGI(cmd, world, sg);
@@ -892,7 +892,7 @@ void ForwardPipeline::RenderScene(
                     auto& di = filteredItems[i];
                     PushConstantData pc = framePC;
                     pc.objectIndex = di.objectIndex;
-                    secCmd->BindDescriptorSet(0, m_DescSets[m_CurrentFrameSlot]);  // set=0: per-frame + bindless
+                    secCmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[m_CurrentFrameSlot]);  // set=0: per-frame + bindless
                     // 不再需要 bind set=1 — 纹理采样通过 bindless u_Textures[] 访问
                     secCmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
                     secCmd->SetVertexBuffer(di.mesh->GetVertexBuffer().get(), 0);
@@ -917,7 +917,7 @@ void ForwardPipeline::RenderScene(
             cmd->SetVertexBuffer(m_MeshBatcher.GetVertexBuffer(), 0);
             cmd->SetIndexBuffer(m_MeshBatcher.GetIndexBuffer(), 0);
             framePC.useInstanceID = 1;  // SV_InstanceID 模式
-            cmd->BindDescriptorSet(0, m_DescSets[m_CurrentFrameSlot]);
+            cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[m_CurrentFrameSlot]);
             cmd->SetPushConstants(0, sizeof(PushConstantData), &framePC);
             cmd->DrawIndexedIndirect(m_GPUCulling.GetIndirectBuffer(), 0,
                 m_GPUCulling.GetLastVisibleCount(), sizeof(IndirectDrawCommand));
@@ -927,7 +927,7 @@ void ForwardPipeline::RenderScene(
             for (auto& di : filteredItems) {
                 PushConstantData pc = framePC;
                 pc.objectIndex = di.objectIndex;
-                cmd->BindDescriptorSet(0, m_DescSets[m_CurrentFrameSlot]);
+                cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[m_CurrentFrameSlot]);
                 cmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
                 cmd->SetVertexBuffer(di.mesh->GetVertexBuffer().get(), 0);
                 cmd->SetIndexBuffer(di.mesh->GetIndexBuffer().get());

@@ -237,8 +237,8 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
         bool hasColor = (desc.colorAttachmentCount > 0);
         bool hasDepth = (desc.depthFormat != Format::Unknown);
 
-        VkAttachmentDescription colorAttachments[8]{};
-        VkAttachmentReference   colorRefs[8]{};
+        VkAttachmentDescription colorAttachments[kMaxColorAttachments]{};
+        VkAttachmentReference   colorRefs[kMaxColorAttachments]{};
         for (u32 c = 0; c < desc.colorAttachmentCount; ++c) {
             colorAttachments[c].format        = ToVkFormat(desc.colorFormats[c]);
             colorAttachments[c].samples       = VK_SAMPLE_COUNT_1_BIT;
@@ -277,7 +277,7 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
         subpass.pColorAttachments       = hasColor ? colorRefs : nullptr;
         subpass.pDepthStencilAttachment = hasDepth ? &depthRef : nullptr;
 
-        VkAttachmentDescription attachments[9];
+        VkAttachmentDescription attachments[kMaxColorAttachments + 1];
         u32 attachmentCount = 0;
         for (u32 c = 0; c < desc.colorAttachmentCount; ++c)
             attachments[attachmentCount++] = colorAttachments[c];
@@ -339,7 +339,7 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
         depthStencil.depthWriteEnable = desc.depthWrite ? VK_TRUE : VK_FALSE;
         depthStencil.depthCompareOp   = ToVkCompareOp(desc.depthCompare);
 
-        VkPipelineColorBlendAttachmentState blendAttachments[8]{};
+        VkPipelineColorBlendAttachmentState blendAttachments[kMaxColorAttachments]{};
         for (u32 c = 0; c < desc.colorAttachmentCount; ++c)
             blendAttachments[c].colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                                                   VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
@@ -382,7 +382,7 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
         vkCreatePipelineLayout(device, &layoutInfo, nullptr, &pipelineLayout);
 
         // Shader stages: [Mesh] + [Task(可选)] + [Pixel(可选)]
-        VkPipelineShaderStageCreateInfo meshStages[3]{};
+        VkPipelineShaderStageCreateInfo meshStages[kMaxMeshShaderStages]{};
         u32 stageCount = 0;
         if (task) {
             meshStages[stageCount].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -456,8 +456,8 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     bool hasDepth = (desc.depthFormat != Format::Unknown);
 
     // 构建颜色附件（支持 MRT：最多 8 个）
-    VkAttachmentDescription colorAttachments[8]{};
-    VkAttachmentReference   colorRefs[8]{};
+    VkAttachmentDescription colorAttachments[kMaxColorAttachments]{};
+    VkAttachmentReference   colorRefs[kMaxColorAttachments]{};
     for (u32 c = 0; c < desc.colorAttachmentCount; ++c) {
         colorAttachments[c].format        = ToVkFormat(desc.colorFormats[c]);
         colorAttachments[c].samples       = VK_SAMPLE_COUNT_1_BIT;
@@ -498,7 +498,7 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     subpass.pDepthStencilAttachment = hasDepth ? &depthRef : nullptr;
 
     // 构建附件数组：颜色在前 [0..N-1]，深度在 [N]
-    VkAttachmentDescription attachments[9];  // 最多 8 颜色 + 1 深度
+    VkAttachmentDescription attachments[kMaxColorAttachments + 1];  // 最多 8 颜色 + 1 深度
     u32 attachmentCount = 0;
     for (u32 c = 0; c < desc.colorAttachmentCount; ++c)
         attachments[attachmentCount++] = colorAttachments[c];
@@ -609,7 +609,7 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     depthStencil.depthBoundsTestEnable = VK_FALSE;
     depthStencil.stencilTestEnable     = VK_FALSE;
 
-    VkPipelineColorBlendAttachmentState blendAttachments[8]{};  // 支持最多 8 个 MRT
+    VkPipelineColorBlendAttachmentState blendAttachments[kMaxColorAttachments]{};  // 支持最多 8 个 MRT
     for (u32 c = 0; c < desc.colorAttachmentCount; ++c) {
         blendAttachments[c].colorWriteMask =
             VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
@@ -655,7 +655,7 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     vkCreatePipelineLayout(device, &layoutInfo, nullptr, &pipelineLayout);
 
     // 6. Shader stages
-    VkPipelineShaderStageCreateInfo stages[2]{};
+    VkPipelineShaderStageCreateInfo stages[kMaxShaderStages]{};
     stages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;
     stages[0].module = vert;

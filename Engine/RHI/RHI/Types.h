@@ -8,6 +8,26 @@
 
 namespace he::rhi {
 
+// 最大飞行帧数（Triple Buffering），引擎全局常量
+constexpr u32 kMaxFramesInFlight = 3;
+
+// 描述符集索引常量
+constexpr u32 kDescSetPerFrame = 0;  // set=0: 逐帧数据（Camera、Lights、Shadows 等）
+constexpr u32 kDescSetMaterial = 1;  // set=1: 逐材质数据（Bindless Textures 等）
+constexpr u32 kDescSetBindless = 2;  // set=2: 无绑定资源（TLAS 等）
+
+// 共享 Descriptor Binding 常量（ForwardPipeline / DeferredPipeline / GBuffer 共用语义）
+constexpr u32 kBindingObjectData       = 2;   // Object SSBO（GBuffer / Shadow Pass 共用）
+constexpr u32 kBindingBindlessTextures = 5;   // Bindless 纹理数组（SampledImage）
+constexpr u32 kBindingBindlessSamplers = 6;   // Bindless 采样器数组（Sampler）
+constexpr u32 kBindingLightGrid        = 7;   // 光源网格（Clustered Shading SSBO）
+constexpr u32 kBindingLightIndexList   = 8;   // 光源索引列表（Clustered Shading SSBO）
+
+// 渲染管线限制常量
+constexpr u32 kMaxColorAttachments  = 8;   // 最大 MRT 颜色附件数
+constexpr u32 kMaxMeshShaderStages  = 3;   // 最大 Mesh Shader 管线阶段数（Task + Mesh + Fragment）
+constexpr u32 kMaxShaderStages      = 2;   // 最大传统管线着色器阶段数（Vertex + Fragment）
+
 // --- Backend type ---
 enum class Backend : u8 {
     Vulkan,

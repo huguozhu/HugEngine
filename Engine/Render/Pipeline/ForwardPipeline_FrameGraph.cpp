@@ -87,14 +87,14 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 // 切换描述符集 binding 2 到阴影专用 Object Buffer
                 // （仅更新 set=0 per-frame 集，per-mesh set=1 不包含 buffer 绑定）
                 u32 slot = m_CurrentFrameSlot;
-                m_Device->UpdateDescriptorSet(m_DescSets[slot], 2,
+                m_Device->UpdateDescriptorSet(m_DescSets[slot], rhi::kBindingObjectData,
                     rhi::DescriptorType::StorageBuffer,
                     m_ShadowObjBuffers[slot].get());
 
                 m_ShadowSystem->Render(c);
 
                 // 恢复 binding 2 到场景 Object Buffer（FullScene 使用）
-                m_Device->UpdateDescriptorSet(m_DescSets[slot], 2,
+                m_Device->UpdateDescriptorSet(m_DescSets[slot], rhi::kBindingObjectData,
                     rhi::DescriptorType::StorageBuffer,
                     m_ObjectBuffers[slot].get());
             });
@@ -193,9 +193,9 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
 
                 // 更新全部三缓冲描述符集的 LightGrid / LightIndexList 绑定
                 for (u32 si = 0; si < MAX_FRAMES_IN_FLIGHT; ++si) {
-                    m_Device->UpdateDescriptorSet(m_DescSets[si], 7,
+                    m_Device->UpdateDescriptorSet(m_DescSets[si], rhi::kBindingLightGrid,
                         rhi::DescriptorType::StorageBuffer, m_LightGridBuffer.get());
-                    m_Device->UpdateDescriptorSet(m_DescSets[si], 8,
+                    m_Device->UpdateDescriptorSet(m_DescSets[si], rhi::kBindingLightIndexList,
                         rhi::DescriptorType::StorageBuffer, m_LightIndexListBuffer.get());
                 }
             },

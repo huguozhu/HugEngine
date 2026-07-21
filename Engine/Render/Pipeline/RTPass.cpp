@@ -675,11 +675,11 @@ u32 RTPass::RegisterBindlessTexture(rhi::IRHIDevice* device,
 // BindDescriptorSets — 绑定所有描述符集
 void RTPass::BindDescriptorSets(rhi::IRHICommandList* cmd) {
     if (m_DescSet != rhi::kInvalidSet)
-        cmd->BindDescriptorSet(0, m_DescSet);
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSet);
     if (m_DescSet1 != rhi::kInvalidSet)
-        cmd->BindDescriptorSet(1, m_DescSet1);
+        cmd->BindDescriptorSet(rhi::kDescSetMaterial, m_DescSet1);
     if (m_DescSet2 != rhi::kInvalidSet)
-        cmd->BindDescriptorSet(2, m_DescSet2);
+        cmd->BindDescriptorSet(rhi::kDescSetBindless, m_DescSet2);
 }
 
 int RTPass::ReloadShader(StringView shaderName, const std::vector<u32>& newSpirv) {

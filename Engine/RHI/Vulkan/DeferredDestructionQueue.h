@@ -28,12 +28,14 @@
 #include <functional>
 #include <vector>
 
+#include "RHI/Types.h"   // kMaxFramesInFlight
+
 namespace he::rhi {
 
 class DeferredDestructionQueue {
 public:
-    /// 最大飞行帧数，与 VulkanCommandList::kMaxFramesInFlight 保持一致
-    static constexpr u32 kMaxFramesInFlight = 3;
+    /// 最大飞行帧数，与 RHI/Types.h 中的 kMaxFramesInFlight 保持一致
+    // （已统一到 RHI/Types.h 定义）
 
     DeferredDestructionQueue() = default;
 

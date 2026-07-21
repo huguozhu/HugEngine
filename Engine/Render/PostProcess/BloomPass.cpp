@@ -190,7 +190,7 @@ void BloomPass::Render(rhi::IRHICommandList* cmd) {
         rhi::DescriptorType::CombinedImageSampler, m_HDRInput, m_HDRSampler);
 
     cmd->SetPipeline(m_BrightPSO.get());
-    cmd->BindDescriptorSet(0, m_BrightSet);
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_BrightSet);
     cmd->SetViewport({0, (float)hh, (float)hw, -(float)hh, 0, 1});
     cmd->SetScissor({0, 0, hw, hh});
 
@@ -217,7 +217,7 @@ void BloomPass::Render(rhi::IRHICommandList* cmd) {
         m_Blur.GetOutput(), m_Blur.GetOutputSampler());
 
     cmd->SetPipeline(m_CompositePSO.get());
-    cmd->BindDescriptorSet(0, m_CompositeSet);
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_CompositeSet);
     cmd->SetViewport({0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1});
     cmd->SetScissor({0, 0, m_Width, m_Height});
 

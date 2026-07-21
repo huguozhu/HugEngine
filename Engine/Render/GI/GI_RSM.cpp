@@ -141,7 +141,7 @@ void GI_RSM::RenderRSMPass(rhi::IRHICommandList* cmd, he::World& world, he::Scen
         rhi::DescriptorType::StorageBuffer, m_ExternalObjBuf);
 
     cmd->SetPipeline(m_RSMPSO.get());
-    cmd->BindDescriptorSet(0, m_RSMSet);
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_RSMSet);
 
     rhi::ClearValue clears[2]{};
 

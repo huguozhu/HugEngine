@@ -148,7 +148,7 @@ void DOFPass::Render(rhi::IRHICommandList* cmd) {
         pc.focusDepth = m_FocusDepth; pc.focusRange = m_FocusRange; pc.maxCoC = 0.03f;
 
         cmd->SetPipeline(m_CoCPSO.get());
-        cmd->BindDescriptorSet(0, m_CoCSet);
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_CoCSet);
         cmd->SetViewport({0, (float)h, (float)w, -(float)h, 0, 1});
         cmd->SetScissor({0, 0, w, h});
         cmd->SetPushConstants(0, sizeof(pc), &pc);
@@ -177,7 +177,7 @@ void DOFPass::Render(rhi::IRHICommandList* cmd) {
         pc.intensity = m_Intensity;
 
         cmd->SetPipeline(m_CompositePSO.get());
-        cmd->BindDescriptorSet(0, m_CompositeSet);
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_CompositeSet);
         cmd->SetViewport({0, (float)h, (float)w, -(float)h, 0, 1});
         cmd->SetScissor({0, 0, w, h});
         cmd->SetPushConstants(0, sizeof(pc), &pc);

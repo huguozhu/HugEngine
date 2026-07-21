@@ -32,7 +32,7 @@ struct MeshPipelineStateDesc {
 
     // 渲染目标
     u32    colorAttachmentCount        = 1;
-    Format colorFormats[8]             = {Format::RGBA8_UNORM};
+    Format colorFormats[kMaxColorAttachments]             = {Format::RGBA8_UNORM};
     Format depthFormat                 = Format::D32_FLOAT;
 
     // 多重采样

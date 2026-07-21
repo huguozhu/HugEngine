@@ -2,6 +2,7 @@
 
 #include "Core/Types.h"
 #include "Math/Math.h"
+#include "RHI/Types.h"   // kMaxFramesInFlight
 
 // ============================================================
 // Material.h — glTF 2.0 PBR 材质 + GPU 共享结构体引用
@@ -32,7 +33,7 @@ enum MaterialFlags : u32 {
 // ============================================================
 static constexpr u32 MAX_LIGHTS          = 8;
 static constexpr u32 MAX_SHADOWS         = 4;
-static constexpr u32 MAX_FRAMES_IN_FLIGHT = 3;
+static constexpr u32 MAX_FRAMES_IN_FLIGHT = rhi::kMaxFramesInFlight;
 static constexpr u32 MAX_OBJECTS          = 1024;
 static constexpr u32 CASCADE_COUNT        = 3;
 

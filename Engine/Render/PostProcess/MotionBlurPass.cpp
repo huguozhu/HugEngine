@@ -99,7 +99,7 @@ void MotionBlurPass::Render(rhi::IRHICommandList* cmd) {
     pc.samples    = 12;
 
     cmd->SetPipeline(m_PSO.get());
-    cmd->BindDescriptorSet(0, m_Set);
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
     cmd->SetViewport({0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1});
     cmd->SetScissor({0, 0, m_Width, m_Height});
     cmd->SetPushConstants(0, sizeof(pc), &pc);
