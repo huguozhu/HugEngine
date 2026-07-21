@@ -30,7 +30,7 @@ public:
 
     // --- 阴影参数 ---
     bool      castShadow       = false;            // 是否投射阴影
-    u32       shadowMapSize    = 2048;             // 阴影贴图分辨率
+    u32       shadowMapSize    = kDefaultShadowMapSize;  // 阴影贴图分辨率
     float     shadowBias       = 0.005f;           // 深度偏移（防止阴影痤疮）
     float     shadowNormalBias = 0.02f;            // 法线偏移（防止自阴影）
     float     shadowStrength   = 1.0f;             // 阴影强度 [0,1]

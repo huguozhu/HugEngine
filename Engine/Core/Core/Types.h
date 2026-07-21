@@ -79,6 +79,9 @@ constexpr u32 INVALID_U32 = ~0u;
 constexpr u32 kDefaultWindowWidth  = 1920;
 constexpr u32 kDefaultWindowHeight = 1080;
 
+// 默认阴影贴图分辨率
+constexpr u32 kDefaultShadowMapSize = 2048;
+
 // 默认相机投影参数
 constexpr float kDefaultFOV       = 60.0f;     // 垂直视场角（度）
 constexpr float kDefaultNearPlane = 0.1f;      // 近裁剪面

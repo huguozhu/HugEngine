@@ -55,7 +55,7 @@ void GI_SSR::Render(rhi::IRHICommandList* cmd){
     cmd->SetScissor({0,0,m_Width,m_Height});
     struct{float4x4 proj;float4 p;}pc;
     float a=float(m_Width)/float(m_Height);
-    pc.proj=glm::inverse(glm::perspectiveRH_ZO(glm::radians(60.0f),a,0.1f,1000.0f));
+    pc.proj=glm::inverse(glm::perspectiveRH_ZO(glm::radians(kDefaultFOV),a,kDefaultNearPlane,kDefaultFarPlane));
     pc.p=float4(maxSteps,stepSize,maxDistance,thickness);
     cmd->SetPushConstants(0,sizeof(pc),&pc);
     cmd->Draw(3);

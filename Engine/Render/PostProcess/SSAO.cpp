@@ -163,8 +163,8 @@ void SSAO::Render(rhi::IRHICommandList* cmd) {
             memcpy(dst, &p, sizeof(float4));
             dst += sizeof(float4);
             // u_InvProj: 逆投影矩阵（clip→view，用于从深度重建 view-space 位置）
-            float n=0.1f,f=1000.0f; float a=float(m_Width)/float(m_Height);
-            float4x4 proj = glm::perspectiveRH_ZO(glm::radians(60.0f), a, n, f);
+            float a=float(m_Width)/float(m_Height);
+            float4x4 proj = glm::perspectiveRH_ZO(glm::radians(kDefaultFOV), a, kDefaultNearPlane, kDefaultFarPlane);
             float4x4 projInv = glm::inverse(proj);
             memcpy(dst, &projInv, sizeof(float4x4));
             dst += sizeof(float4x4);

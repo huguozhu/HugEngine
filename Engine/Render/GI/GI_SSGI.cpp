@@ -90,7 +90,7 @@ void GI_SSGI::Render(rhi::IRHICommandList* cmd){
     memcpy(ub.k,kernel.data(),32*sizeof(float4));
     ub.p=float4(radius, m_Settings.intensity, float(sampleCount), 0);
     float a=float(m_Width)/float(m_Height);
-    ub.proj=glm::inverse(glm::perspectiveRH_ZO(glm::radians(60.0f),a,0.1f,1000.0f));
+    ub.proj=glm::inverse(glm::perspectiveRH_ZO(glm::radians(kDefaultFOV),a,kDefaultNearPlane,kDefaultFarPlane));
     void* mapped=m_UniformBuffer->Map();
     if(mapped){memcpy(mapped,&ub,sizeof(ub));m_UniformBuffer->Unmap();}
     cmd->Draw(3);
