@@ -301,7 +301,7 @@ void GI_IBL::Render(rhi::IRHICommandList* cmd) {
         cmd->SetPipeline(m_IrradiancePSO.get());
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_IrradianceSet);
 
-        for (u32 face = 0; face < 6; ++face) {
+        for (u32 face = 0; face < rhi::kCubemapFaceCount; ++face) {
             void* faceView = m_IrradianceMap->GetNativeHandle(face);
             if (!faceView) continue;
 
@@ -342,7 +342,7 @@ void GI_IBL::Render(rhi::IRHICommandList* cmd) {
             u32 mipRes   = kPrefilterRes >> mip;  // 128, 64, 32, 16, 8
             pc.roughness = static_cast<float>(mip) / static_cast<float>(kPrefilterMips - 1);
 
-            for (u32 face = 0; face < 6; ++face) {
+            for (u32 face = 0; face < rhi::kCubemapFaceCount; ++face) {
                 VkImageView mipView = CreateFaceMipView(m_PrefilterMap.get(), face, mip);
                 m_CachedMipViews.push_back(mipView);  // 缓存：framebuffer 延迟销毁需要有效视图
 

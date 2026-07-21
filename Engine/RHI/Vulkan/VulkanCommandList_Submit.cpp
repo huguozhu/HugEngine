@@ -157,8 +157,8 @@ void VulkanCommandList::Submit() {
     VkCommandBuffer cb = m_CmdBuffers[m_FrameIndex];
 
     // 构建二进制 + Timeline 信号量列表
-    VkSemaphore allSignalSems[2];
-    u64        timelineSignalVals[2];
+    VkSemaphore allSignalSems[kMaxConcurrentSemaphores];
+    u64        timelineSignalVals[kMaxConcurrentSemaphores];
     u32        signalCount = 0;
     if (signalSem) allSignalSems[signalCount++] = signalSem;
     if (m_TimelineSignalSem) {
@@ -168,9 +168,9 @@ void VulkanCommandList::Submit() {
     }
 
     // 构建二进制 + Timeline 等待信号量列表
-    VkSemaphore allWaitSems[2];
-    u64        timelineWaitVals[2];
-    VkPipelineStageFlags waitStages[2];
+    VkSemaphore allWaitSems[kMaxConcurrentSemaphores];
+    u64        timelineWaitVals[kMaxConcurrentSemaphores];
+    VkPipelineStageFlags waitStages[kMaxConcurrentSemaphores];
     u32        waitCount = 0;
     if (waitSem) {
         allWaitSems[waitCount] = waitSem;

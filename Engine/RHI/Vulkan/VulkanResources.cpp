@@ -362,7 +362,7 @@ VulkanTexture::VulkanTexture(VmaAllocator allocator, VkCommandPool cmdPool, VkQu
 
     // 5. 为 Cubemap 创建 6 个逐面 2D ImageView（用于离屏渲染到每个面）
     if (isCubemap) {
-        m_FaceViews.resize(6);
+        m_FaceViews.resize(kCubemapFaceCount);
         VkImageViewCreateInfo faceViewInfo{};
         faceViewInfo.sType      = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
         faceViewInfo.image      = m_Image;
@@ -374,7 +374,7 @@ VulkanTexture::VulkanTexture(VmaAllocator allocator, VkCommandPool cmdPool, VkQu
         faceViewInfo.subresourceRange.baseArrayLayer = 0;
         faceViewInfo.subresourceRange.layerCount     = 1;
 
-        for (u32 face = 0; face < 6; ++face) {
+        for (u32 face = 0; face < kCubemapFaceCount; ++face) {
             faceViewInfo.subresourceRange.baseArrayLayer = face;
             result = vkCreateImageView(m_Device, &faceViewInfo, nullptr, &m_FaceViews[face]);
             HE_ASSERT(result == VK_SUCCESS, "Failed to create cubemap face image view");

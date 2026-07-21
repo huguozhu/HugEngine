@@ -18,7 +18,7 @@
 namespace he::render {
 
 struct CubemapFace{float3 dir,up;};
-static const CubemapFace kCubeFaces[6]={
+static const CubemapFace kCubeFaces[rhi::kCubemapFaceCount]={
     {{ 1, 0, 0},{0,-1, 0}},{{-1, 0, 0},{0,-1, 0}},{{ 0, 1, 0},{0, 0, 1}},
     {{ 0,-1, 0},{0, 0,-1}},{{ 0, 0, 1},{0,-1, 0}},{{ 0, 0,-1},{0,-1, 0}},
 };
