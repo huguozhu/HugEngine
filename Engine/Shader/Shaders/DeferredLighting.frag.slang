@@ -57,9 +57,7 @@ struct LightGridCell { uint offset; uint count; };
     uint     _pad[3];
 };
 
-static const float kPrefilterMips = 5.0;
-static const uint  kClusterSlices = 12;  // 与 C++ kDepthSlices 保持一致
-
+// kGPUPrefilterMips / kGPUClusterSlices 统一在 ShaderTypes.slang（kGPU*）
 // ---- DDGI 探针网格参数（TODO: 改为 Uniform Buffer，当前与 GI_DDGI 默认值保持同步） ----
 static const uint   kDDGI_GridX    = 8;
 static const uint   kDDGI_GridY    = 4;
@@ -162,11 +160,11 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
     // 3. 直接光照（Clustered 或线性回退）
     if (useClustered != 0u && clusterTilesX > 0u) {
         // --- Clustered Shading ---
-        uint tileX = uint(input.position.x) / 64;
-        uint tileY = uint(input.position.y) / 64;
+        uint tileX = uint(input.position.x) / kGPUClusterTileSize;
+        uint tileY = uint(input.position.y) / kGPUClusterTileSize;
         float linearDepth = clusterNear * clusterFar / (clusterFar - depth * (clusterFar - clusterNear));
-        float sliceF = float(kClusterSlices) * log(linearDepth / clusterNear) / clusterLogFactor;
-        uint  slice  = uint(clamp(sliceF, 0.0f, float(kClusterSlices - 1)));
+        float sliceF = float(kGPUClusterSlices) * log(linearDepth / clusterNear) / clusterLogFactor;
+        uint  slice  = uint(clamp(sliceF, 0.0f, float(kGPUClusterSlices - 1)));
         uint clusterIdx = (slice * clusterTilesY + tileY) * clusterTilesX + tileX;
 
         LightGridCell cell = u_LightGrid[clusterIdx];
@@ -263,7 +261,7 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
     float3 kD = (1.0 - F) * (1.0 - metallic);
     color += kD * u_IrradianceMap.Sample(u_IBLSampler, N).rgb * albedo * iblIntensity;
     float3 R = reflect(-V, N);
-    float3 prefiltered = u_PrefilterMap.SampleLevel(u_IBLSampler, R, roughness * (kPrefilterMips - 1.0)).rgb;
+    float3 prefiltered = u_PrefilterMap.SampleLevel(u_IBLSampler, R, roughness * (kGPUPrefilterMips - 1.0)).rgb;
     float2 envBRDF = u_BRDF_LUT.Sample(u_IBLSampler, float2(max(dot(N,V),0.0), roughness)).rg;
     color += prefiltered * (F * envBRDF.r + envBRDF.g) * iblIntensity;
 

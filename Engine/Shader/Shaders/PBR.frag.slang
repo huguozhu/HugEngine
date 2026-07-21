@@ -65,9 +65,6 @@ struct LightGridCell { uint offset; uint count; };
 [[vk::binding(kGPUBinding_RSMPosition, kGPUDescSet_PerFrame)]] SamplerState      u_RSMSampler;
 [[vk::binding(kGPUBinding_RSMFlux, kGPUDescSet_PerFrame)]] Texture2D<float4> u_RSMFluxMap;       // normal.xy + flux
 
-static const float kPrefilterMips = 5.0;  // 预滤波 mip 数（匹配 GI_IBL::kPrefilterMips）
-static const uint  kClusterSlices = 12;   // 与 C++ ClusteredShading::kDepthSlices 一致
-
 [[vk::push_constant]] cbuffer FrameConstants {
     float4x4 viewProjMatrix;
     float4   cameraPosition;
@@ -83,10 +80,7 @@ static const uint  kClusterSlices = 12;   // 与 C++ ClusteredShading::kDepthSli
     uint     useClustered;      // 1=Forward+，0=传统 Forward
 };
 
-float3 ACESFilm(float3 x) {
-    float a = 2.51; float b = 0.03; float c = 2.43; float d = 0.59; float e = 0.14;
-    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
-}
+// ACESFilm 定义在 common.slang 中，此处直接使用
 
 // ---- 光源遍历：传统 Forward 与 Forward+ 共用 PBR 计算 ----
 float3 ShadeWithLight(GPULight light, float3 worldPos, float3 N, float3 V,
@@ -154,12 +148,12 @@ float4 fragmentMain(FSInput input) : SV_Target0 {
     float3 color = albedo * 0.08 * ao;  // 低环境光
     if (useClustered != 0u && clusterTilesX > 0u) {
         // --- Forward+ 路径：遍历当前 Cluster 内的光源 ---
-        uint tileX = uint(input.position.x) / 64;  // kTileSize = 64
-        uint tileY = uint(input.position.y) / 64;
+        uint tileX = uint(input.position.x) / kGPUClusterTileSize;
+        uint tileY = uint(input.position.y) / kGPUClusterTileSize;
         // 线性深度重建（Vulkan NDC: z ∈ [0,1]）
         float linearDepth = clusterNear * clusterFar / (clusterFar - input.position.z * (clusterFar - clusterNear));
-        float sliceF = float(kClusterSlices) * log(linearDepth / clusterNear) / clusterLogFactor;
-        uint  slice  = uint(clamp(sliceF, 0.0f, float(kClusterSlices - 1)));
+        float sliceF = float(kGPUClusterSlices) * log(linearDepth / clusterNear) / clusterLogFactor;
+        uint  slice  = uint(clamp(sliceF, 0.0f, float(kGPUClusterSlices - 1)));
         uint clusterIdx = (slice * clusterTilesY + tileY) * clusterTilesX + tileX;
 
         LightGridCell cell = u_LightGrid[clusterIdx];
@@ -188,7 +182,7 @@ float4 fragmentMain(FSInput input) : SV_Target0 {
 
     // 镜面反射 IBL：预滤波环境图（roughness→mip）+ BRDF LUT
     float3 R = reflect(-V, N);
-    float mipLevel = roughness * float(kPrefilterMips - 1);
+    float mipLevel = roughness * float(kGPUPrefilterMips - 1);
     float3 prefilteredColor = u_PrefilterMap.SampleLevel(u_IBLSampler, R, mipLevel).rgb;
     float2 envBRDF = u_BRDF_LUT.Sample(u_IBLSampler, float2(max(dot(N, V), 0.0), roughness)).rg;
     color += prefilteredColor * (F * envBRDF.r + envBRDF.g) * iblIntensity;

@@ -102,6 +102,11 @@ GPU_CONST(float kGPUDefaultNearPlane = 0.1f);     // 默认近裁剪面
 GPU_CONST(float kGPUDefaultFarPlane  = 2000.0f);  // 默认远裁剪面
 GPU_CONST(GPU_UINT kGPUDefaultShadowMapSize = 2048); // 默认阴影贴图分辨率
 
+// --- 渲染算法常量（C++ / Slang 共享）---
+GPU_CONST(GPU_UINT kGPUClusterTileSize    = 64);  // Clustered Shading 屏幕 tile 像素数
+GPU_CONST(GPU_UINT kGPUClusterSlices      = 12);  // Clustered Shading Z 切片数
+GPU_CONST(float   kGPUPrefilterMips       = 5.0); // IBL 预滤波 mip 层数
+
 GPU_CONST_END
 
 // ---- 清理宏（GPU struct 定义后统一清理）----

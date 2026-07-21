@@ -14,17 +14,7 @@ struct FSInput {
     float2 uv : TEXCOORD0;
 };
 
-// ============================================================
-// ACES Filmic Tone Mapping
-// ============================================================
-float3 ACESFilm(float3 x) {
-    float a = 2.51;
-    float b = 0.03;
-    float c = 2.43;
-    float d = 0.59;
-    float e = 0.14;
-    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
-}
+// ACESFilm 定义在 common.slang 中，此处直接使用
 
 [[vk::push_constant]] cbuffer ToneMapPC {
     float exposure;   // 自动曝光值（默认 1.0 = 无调整）
