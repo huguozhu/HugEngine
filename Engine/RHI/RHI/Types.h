@@ -201,6 +201,72 @@ enum class AddressMode : u8 {
     ClampToBorder,   // 边界色钳制
 };
 
+// --- 剔除模式 ---
+enum class CullMode : u8 {
+    None,         // 不剔除
+    Front,        // 剔除正面
+    Back,         // 剔除背面
+    FrontAndBack, // 剔除正反面（仅渲染点/线）
+};
+
+// --- 正面朝向 ---
+enum class FrontFace : u8 {
+    Clockwise,        // 顺时针为正面（Vulkan: VK_FRONT_FACE_CLOCKWISE）
+    CounterClockwise, // 逆时针为正面（D3D12/Metal 默认）
+};
+
+// --- 填充模式 ---
+enum class FillMode : u8 {
+    Solid,     // 实体填充
+    Wireframe, // 线框
+};
+
+// --- 混合因子 ---
+enum class BlendFactor : u8 {
+    Zero,             // 0
+    One,              // 1
+    SrcColor,         // 源颜色
+    OneMinusSrcColor, // 1 - 源颜色
+    SrcAlpha,         // 源 Alpha
+    OneMinusSrcAlpha, // 1 - 源 Alpha
+    DstColor,         // 目标颜色
+    OneMinusDstColor, // 1 - 目标颜色
+    DstAlpha,         // 目标 Alpha
+    OneMinusDstAlpha, // 1 - 目标 Alpha
+};
+
+// --- 混合操作 ---
+enum class BlendOp : u8 {
+    Add,             // 加法
+    Subtract,        // 减法（源 - 目标）
+    ReverseSubtract, // 反向减法（目标 - 源）
+    Min,             // 最小值
+    Max,             // 最大值
+};
+
+// --- 颜色写入掩码 ---
+enum class ColorWriteMask : u8 {
+    None  = 0,
+    Red   = 1 << 0,
+    Green = 1 << 1,
+    Blue  = 1 << 2,
+    Alpha = 1 << 3,
+    All   = Red | Green | Blue | Alpha,
+};
+inline ColorWriteMask operator|(ColorWriteMask a, ColorWriteMask b) { return ColorWriteMask(u8(a) | u8(b)); }
+
+// --- 混合状态（每 MRT） ---
+struct ColorBlendDesc {
+    bool        blendEnable         = false;
+    BlendFactor srcColorBlendFactor = BlendFactor::One;
+    BlendFactor dstColorBlendFactor = BlendFactor::Zero;
+    BlendOp     colorBlendOp        = BlendOp::Add;
+    BlendFactor srcAlphaBlendFactor = BlendFactor::One;
+    BlendFactor dstAlphaBlendFactor = BlendFactor::Zero;
+    BlendOp     alphaBlendOp        = BlendOp::Add;
+    ColorWriteMask writeMask        = ColorWriteMask::All;
+};
+
 // --- Device capabilities ---
 struct DeviceCaps {
     u32     maxBindlessResources   = 0;

@@ -111,4 +111,12 @@ VkCompareOp ToVkCompareOp(CompareFunc func);
 VkAttachmentLoadOp ToVkLoadOp(LoadOp op);
 VkBuildAccelerationStructureFlagsKHR ToVkBuildFlags(ASBuildFlags flags);
 
+// 跨平台渲染状态 → Vulkan 转换
+VkCullModeFlags   ToVkCullMode(CullMode mode);
+VkFrontFace       ToVkFrontFace(FrontFace face);
+VkPolygonMode     ToVkFillMode(FillMode mode);
+VkBlendFactor     ToVkBlendFactor(BlendFactor factor);
+VkBlendOp         ToVkBlendOp(BlendOp op);
+VkColorComponentFlags ToVkColorWriteMask(ColorWriteMask mask);
+
 } // namespace he::rhi

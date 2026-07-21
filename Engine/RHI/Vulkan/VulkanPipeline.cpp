@@ -325,9 +325,10 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
 
         VkPipelineRasterizationStateCreateInfo rasterizer{};
         rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-        rasterizer.lineWidth = 1.0f;
-        rasterizer.cullMode  = VK_CULL_MODE_NONE;
-        rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+        rasterizer.lineWidth   = 1.0f;
+        rasterizer.cullMode    = ToVkCullMode(desc.cullMode);
+        rasterizer.frontFace   = ToVkFrontFace(desc.frontFace);
+        rasterizer.polygonMode = ToVkFillMode(desc.fillMode);
 
         VkPipelineMultisampleStateCreateInfo ms{};
         ms.sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
@@ -340,9 +341,17 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
         depthStencil.depthCompareOp   = ToVkCompareOp(desc.depthCompare);
 
         VkPipelineColorBlendAttachmentState blendAttachments[kMaxColorAttachments]{};
-        for (u32 c = 0; c < desc.colorAttachmentCount; ++c)
-            blendAttachments[c].colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                                                  VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        for (u32 c = 0; c < desc.colorAttachmentCount; ++c) {
+            const auto& cb = desc.colorBlend[c];
+            blendAttachments[c].blendEnable         = cb.blendEnable ? VK_TRUE : VK_FALSE;
+            blendAttachments[c].srcColorBlendFactor = ToVkBlendFactor(cb.srcColorBlendFactor);
+            blendAttachments[c].dstColorBlendFactor = ToVkBlendFactor(cb.dstColorBlendFactor);
+            blendAttachments[c].colorBlendOp        = ToVkBlendOp(cb.colorBlendOp);
+            blendAttachments[c].srcAlphaBlendFactor = ToVkBlendFactor(cb.srcAlphaBlendFactor);
+            blendAttachments[c].dstAlphaBlendFactor = ToVkBlendFactor(cb.dstAlphaBlendFactor);
+            blendAttachments[c].alphaBlendOp        = ToVkBlendOp(cb.alphaBlendOp);
+            blendAttachments[c].colorWriteMask      = ToVkColorWriteMask(cb.writeMask);
+        }
 
         VkPipelineColorBlendStateCreateInfo colorBlend{};
         colorBlend.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
@@ -592,9 +601,10 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
 
     VkPipelineRasterizationStateCreateInfo rasterizer{};
     rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-    rasterizer.lineWidth = 1.0f;
-    rasterizer.cullMode  = VK_CULL_MODE_NONE;
-    rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+    rasterizer.lineWidth   = 1.0f;
+    rasterizer.cullMode    = ToVkCullMode(desc.cullMode);
+    rasterizer.frontFace   = ToVkFrontFace(desc.frontFace);
+    rasterizer.polygonMode = ToVkFillMode(desc.fillMode);
 
     VkPipelineMultisampleStateCreateInfo ms{};
     ms.sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
@@ -611,9 +621,15 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
 
     VkPipelineColorBlendAttachmentState blendAttachments[kMaxColorAttachments]{};  // 支持最多 8 个 MRT
     for (u32 c = 0; c < desc.colorAttachmentCount; ++c) {
-        blendAttachments[c].colorWriteMask =
-            VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        const auto& cb = desc.colorBlend[c];
+        blendAttachments[c].blendEnable         = cb.blendEnable ? VK_TRUE : VK_FALSE;
+        blendAttachments[c].srcColorBlendFactor = ToVkBlendFactor(cb.srcColorBlendFactor);
+        blendAttachments[c].dstColorBlendFactor = ToVkBlendFactor(cb.dstColorBlendFactor);
+        blendAttachments[c].colorBlendOp        = ToVkBlendOp(cb.colorBlendOp);
+        blendAttachments[c].srcAlphaBlendFactor = ToVkBlendFactor(cb.srcAlphaBlendFactor);
+        blendAttachments[c].dstAlphaBlendFactor = ToVkBlendFactor(cb.dstAlphaBlendFactor);
+        blendAttachments[c].alphaBlendOp        = ToVkBlendOp(cb.alphaBlendOp);
+        blendAttachments[c].colorWriteMask      = ToVkColorWriteMask(cb.writeMask);
     }
 
     VkPipelineColorBlendStateCreateInfo colorBlend{};

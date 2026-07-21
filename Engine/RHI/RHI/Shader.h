@@ -65,6 +65,9 @@ struct PipelineStateDesc {
 
     // Render state
     PrimitiveTopology   topology        = PrimitiveTopology::TriangleList;
+    CullMode            cullMode        = CullMode::None;        // 默认不剔除（全屏三角形等）
+    FrontFace           frontFace       = FrontFace::Clockwise;  // 默认顺时针（Vulkan 约定）
+    FillMode            fillMode        = FillMode::Solid;       // 默认实体填充
     bool                depthTest       = true;
     bool                depthWrite      = true;
     CompareFunc         depthCompare    = CompareFunc::LessEqual;
@@ -78,6 +81,9 @@ struct PipelineStateDesc {
 
     // Multisampling
     u32                 sampleCount     = 1;
+
+    // Blend state（per-MRT，索引对应 colorFormats）
+    ColorBlendDesc      colorBlend[kMaxColorAttachments];
 
     // Pipeline bind point（图形 / 计算）
     PipelineBindPoint   bindPoint       = PipelineBindPoint::Graphics;

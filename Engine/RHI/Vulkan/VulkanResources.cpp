@@ -283,6 +283,68 @@ VkAttachmentLoadOp ToVkLoadOp(LoadOp op) {
     }
 }
 
+VkCullModeFlags ToVkCullMode(CullMode mode) {
+    switch (mode) {
+        case CullMode::None:         return VK_CULL_MODE_NONE;
+        case CullMode::Front:        return VK_CULL_MODE_FRONT_BIT;
+        case CullMode::Back:         return VK_CULL_MODE_BACK_BIT;
+        case CullMode::FrontAndBack: return VK_CULL_MODE_FRONT_AND_BACK;
+        default:                     return VK_CULL_MODE_NONE;
+    }
+}
+
+VkFrontFace ToVkFrontFace(FrontFace face) {
+    switch (face) {
+        case FrontFace::Clockwise:        return VK_FRONT_FACE_CLOCKWISE;
+        case FrontFace::CounterClockwise: return VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        default:                          return VK_FRONT_FACE_CLOCKWISE;
+    }
+}
+
+VkPolygonMode ToVkFillMode(FillMode mode) {
+    switch (mode) {
+        case FillMode::Solid:     return VK_POLYGON_MODE_FILL;
+        case FillMode::Wireframe: return VK_POLYGON_MODE_LINE;
+        default:                  return VK_POLYGON_MODE_FILL;
+    }
+}
+
+VkBlendFactor ToVkBlendFactor(BlendFactor factor) {
+    switch (factor) {
+        case BlendFactor::Zero:             return VK_BLEND_FACTOR_ZERO;
+        case BlendFactor::One:              return VK_BLEND_FACTOR_ONE;
+        case BlendFactor::SrcColor:         return VK_BLEND_FACTOR_SRC_COLOR;
+        case BlendFactor::OneMinusSrcColor: return VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+        case BlendFactor::SrcAlpha:         return VK_BLEND_FACTOR_SRC_ALPHA;
+        case BlendFactor::OneMinusSrcAlpha: return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        case BlendFactor::DstColor:         return VK_BLEND_FACTOR_DST_COLOR;
+        case BlendFactor::OneMinusDstColor: return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
+        case BlendFactor::DstAlpha:         return VK_BLEND_FACTOR_DST_ALPHA;
+        case BlendFactor::OneMinusDstAlpha: return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+        default:                            return VK_BLEND_FACTOR_ONE;
+    }
+}
+
+VkBlendOp ToVkBlendOp(BlendOp op) {
+    switch (op) {
+        case BlendOp::Add:             return VK_BLEND_OP_ADD;
+        case BlendOp::Subtract:        return VK_BLEND_OP_SUBTRACT;
+        case BlendOp::ReverseSubtract: return VK_BLEND_OP_REVERSE_SUBTRACT;
+        case BlendOp::Min:             return VK_BLEND_OP_MIN;
+        case BlendOp::Max:             return VK_BLEND_OP_MAX;
+        default:                       return VK_BLEND_OP_ADD;
+    }
+}
+
+VkColorComponentFlags ToVkColorWriteMask(ColorWriteMask mask) {
+    VkColorComponentFlags flags = 0;
+    if (u8(mask) & u8(ColorWriteMask::Red))   flags |= VK_COLOR_COMPONENT_R_BIT;
+    if (u8(mask) & u8(ColorWriteMask::Green)) flags |= VK_COLOR_COMPONENT_G_BIT;
+    if (u8(mask) & u8(ColorWriteMask::Blue))  flags |= VK_COLOR_COMPONENT_B_BIT;
+    if (u8(mask) & u8(ColorWriteMask::Alpha)) flags |= VK_COLOR_COMPONENT_A_BIT;
+    return flags;
+}
+
 // ============================================================
 // VulkanTexture 实现
 // ============================================================
