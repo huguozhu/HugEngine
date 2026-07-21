@@ -8,5 +8,5 @@ target_link_libraries(01.Triangle PRIVATE
     HugEngineEditor
 )
 
-# 依赖 CompileShaders 确保 EmbeddedShaders.h 已生成
+# 依赖 CompileShaders 确保 .spv.h 着色器头文件已生成
 add_dependencies(01.Triangle CompileShaders)
