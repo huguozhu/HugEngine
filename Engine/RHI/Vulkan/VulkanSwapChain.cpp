@@ -62,7 +62,7 @@ void VulkanSwapChain::CreateSwapchain() {
     m_Width  = std::clamp(m_Width,  caps.minImageExtent.width,  caps.maxImageExtent.width);
     m_Height = std::clamp(m_Height, caps.minImageExtent.height, caps.maxImageExtent.height);
 
-    m_ImageCount = std::max(3u, caps.minImageCount);
+    m_ImageCount = std::max(kSwapchainImageCount, caps.minImageCount);
     if (caps.maxImageCount > 0) m_ImageCount = std::min(m_ImageCount, caps.maxImageCount);
 
     VkSwapchainCreateInfoKHR swapInfo{};

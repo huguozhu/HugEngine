@@ -4,11 +4,14 @@
 
 namespace he::rhi {
 
+// SwapChain 图像数量常量（Triple Buffering）
+constexpr u32 kSwapchainImageCount = 3;
+
 struct SwapChainDesc {
     void*   windowHandle    = nullptr;
     u32     width           = 1920;
     u32     height          = 1080;
-    u32     bufferCount     = 3;     // Double/Triple buffering
+    u32     bufferCount     = kSwapchainImageCount;  // Double/Triple buffering
     Format  format          = Format::RGBA8_UNORM;
     bool    vsync           = true;
 };

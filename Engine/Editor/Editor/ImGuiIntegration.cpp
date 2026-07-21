@@ -144,8 +144,8 @@ void ImGuiIntegration::CreateVulkanResources(rhi::IRHIDevice* device,
     initInfo.QueueFamily     = graphicsFamily;
     initInfo.Queue           = graphicsQueue;
     initInfo.DescriptorPool  = reinterpret_cast<VkDescriptorPool>(m_DescPool);
-    initInfo.MinImageCount   = 3;
-    initInfo.ImageCount      = 3;
+    initInfo.MinImageCount   = rhi::kSwapchainImageCount;
+    initInfo.ImageCount      = rhi::kSwapchainImageCount;
     initInfo.RenderPass     = imguiRP;
     initInfo.Subpass        = 0;
     initInfo.MSAASamples    = VK_SAMPLE_COUNT_1_BIT;
