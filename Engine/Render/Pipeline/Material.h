@@ -7,8 +7,8 @@
 // ============================================================
 // Material.h — glTF 2.0 PBR 材质 + GPU 共享结构体引用
 //
-// GPU 结构体定义统一在 ShaderTypes.slang（C++/Slang 共用），
-// 此文件仅保留 CPU 端材质类型和常量。
+// GPU 常量定义在 ShaderTypes.slang 的 ::he::gpu 命名空间中。
+// GPU 结构体在 include 时进入 he::render 命名空间。
 // ============================================================
 
 namespace he::render {
@@ -29,20 +29,21 @@ enum MaterialFlags : u32 {
 };
 
 // ============================================================
-// GPU 常量
-// ============================================================
-static constexpr u32 MAX_LIGHTS          = 8;
-static constexpr u32 MAX_SHADOWS         = 4;
-static constexpr u32 MAX_FRAMES_IN_FLIGHT = rhi::kMaxFramesInFlight;
-static constexpr u32 MAX_OBJECTS          = 1024;  // CPU 端 Object 缓冲上限
-static constexpr u32 kMaxGPUObjects       = 2048;  // GPU Culling / Scene 最大物体数
-static constexpr u32 CASCADE_COUNT        = 3;
-
-// ============================================================
-// GPU 结构体 — 来自 ShaderTypes.slang（C++/Slang 共享定义）
-// 修改布局时请编辑 ShaderTypes.slang，两边自动同步
+// GPU 常量 + 结构体 — ShaderTypes.slang（C++/Slang 共享）
+// he::gpu::* 常量（namespace ::he::gpu 绝对路径不受 includer 影响）
+// GPU 结构体（进入 he::render 命名空间）
 // ============================================================
 #include "ShaderTypes.slang"
+
+// ============================================================
+// 本地常量别名（引用 ShaderTypes.slang kGPU* 统一定义）
+// ============================================================
+static constexpr u32 MAX_LIGHTS           = kGPUMaxLights;
+static constexpr u32 MAX_SHADOWS          = kGPUMaxShadows;
+static constexpr u32 MAX_FRAMES_IN_FLIGHT = rhi::kMaxFramesInFlight;
+static constexpr u32 MAX_OBJECTS          = kGPUMaxObjects;
+static constexpr u32 kMaxGPUObjects       = kGPUMaxGPUObjects;
+static constexpr u32 CASCADE_COUNT        = kGPUCascadeCount;
 
 // 尺寸验证（保持与 ShaderTypes.slang 一致）
 static_assert(sizeof(GPUShadowData)   == 256, "GPUShadowData must be 256 bytes");

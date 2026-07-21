@@ -17,7 +17,7 @@ struct VSOutput {
 // GPUObjectData 定义来自 ShaderTypes.slang（C++/Slang 共享）
 
 // set=0: per-frame data (u_Objects + bindless textures)
-[[vk::binding(kB_ObjectData, kSet_PerFrame)]] StructuredBuffer<GPUObjectData> u_Objects;
+[[vk::binding(kGPUBinding_ObjectData, kGPUDescSet_PerFrame)]] StructuredBuffer<GPUObjectData> u_Objects;
 
 // Bindless 纹理通过 common.slang 中的 u_Textures[] / u_Samplers[] 访问
 // 偏移: materialID + 0 = BaseColor, +1 = Normal, +2 = MetallicRoughness, +3 = Occlusion
