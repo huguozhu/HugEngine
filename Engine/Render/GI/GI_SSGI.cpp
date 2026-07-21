@@ -9,11 +9,13 @@
 
 namespace he::render {
 
+static constexpr u32 kSSGIKernelSize = 32;  // SSGI 采样核大小
+
 static void GenSSGISamples(std::vector<float4>& kernel, int count) {
-    kernel.resize(32);
+    kernel.resize(kSSGIKernelSize);
     std::default_random_engine gen(42);
     std::uniform_real_distribution<float> rnd(0,1);
-    for(int i=0;i<count&&i<32;i++){
+    for(int i=0;i<count&&i<static_cast<int>(kSSGIKernelSize);i++){
         float3 s(rnd(gen)*2-1,rnd(gen)*2-1,rnd(gen));
         s=glm::normalize(s)*rnd(gen);
         float scale=float(i)/float(count);scale=glm::mix(0.1f,1.0f,scale*scale);

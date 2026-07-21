@@ -13,16 +13,16 @@
 namespace he::render {
 
 void SSAO::GenerateKernel() {
-    m_Kernel.resize(64);
+    m_Kernel.resize(kKernelSize);
     std::uniform_real_distribution<float> rnd(0.0f, 1.0f);
     std::default_random_engine gen(42);
-    for (int i = 0; i < 64; ++i) {
+    for (int i = 0; i < kKernelSize; ++i) {
         // 半球内均匀分布，偏向中心
         float3 sample(rnd(gen)*2-1, rnd(gen)*2-1, rnd(gen));
         sample = glm::normalize(sample);
         sample *= rnd(gen);
         // 缩放使靠近中心更多
-        float scale = float(i) / 64.0f;
+        float scale = float(i) / float(kKernelSize);
         scale = glm::mix(0.1f, 1.0f, scale * scale);
         m_Kernel[i] = float4(sample * scale, 0);
     }

@@ -69,6 +69,7 @@ private:
     rhi::IRHITexture* m_NormalTex = nullptr;
 
     // 随机采样内核 + 噪声
+    static constexpr u32 kKernelSize = 64;  // SSAO 采样核大小
     std::vector<float4> m_Kernel;
     std::unique_ptr<rhi::IRHITexture> m_NoiseTex;
 

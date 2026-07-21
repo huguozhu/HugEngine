@@ -208,7 +208,7 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
 
     rhi::PushConstantRange pcRange;
     pcRange.stageMask = 32; // VK_SHADER_STAGE_COMPUTE_BIT
-    pcRange.offset = 0; pcRange.size = 256; // Vulkan 保证最小值 128B，部分 GPU 支持 256B
+    pcRange.offset = 0; pcRange.size = rhi::kMaxPushConstantSize; // Vulkan 保证最小值 128B，部分 GPU 支持 256B
 
     auto createComputePSO = [&](rhi::DescriptorSetLayoutHandle layout,
                                  rhi::ShaderBytecode* cs, const char* name) {
@@ -292,7 +292,7 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
         // Push constant for render (Vertex + Fragment stages)
         rhi::PushConstantRange renderPCRange;
         renderPCRange.stageMask = 1 | 16;  // VERTEX_BIT | FRAGMENT_BIT
-        renderPCRange.offset = 0; renderPCRange.size = 256;
+        renderPCRange.offset = 0; renderPCRange.size = rhi::kMaxPushConstantSize;
         desc.pushConstantRanges = {renderPCRange};
 
         m_RenderPSO = device->CreatePipelineState(desc);

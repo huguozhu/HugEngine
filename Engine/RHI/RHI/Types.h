@@ -28,6 +28,13 @@ constexpr u32 kMaxColorAttachments  = 8;   // 最大 MRT 颜色附件数
 constexpr u32 kMaxMeshShaderStages  = 3;   // 最大 Mesh Shader 管线阶段数（Task + Mesh + Fragment）
 constexpr u32 kMaxShaderStages      = 2;   // 最大传统管线着色器阶段数（Vertex + Fragment）
 
+// Ray Tracing 管线参数常量
+constexpr u32 kRTMaxRecursionDepth   = 2;   // 最大递归深度（RayGen → ClosestHit → Callable）
+constexpr u32 kRTMaxPayloadSize      = 16;  // 最大 Payload 字节数
+constexpr u32 kRTMaxHitAttributeSize = 8;   // 最大 Hit Attribute 字节数
+constexpr u32 kMaxProfilerPasses     = 20;  // GPU Profiler 最大记录 Pass 数
+constexpr u32 kMaxPushConstantSize   = 256; // Vulkan Push Constant 最大字节数
+
 // --- Backend type ---
 enum class Backend : u8 {
     Vulkan,

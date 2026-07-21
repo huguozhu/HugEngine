@@ -48,11 +48,19 @@ namespace he::rhi { class VulkanDGC; }
 
 namespace he::render {
 
+// GBuffer 附件布局常量
+constexpr u32 kGBufferAttachmentCount = 5;
+constexpr u32 kGBufferSlotAlbedo      = 0;  // Albedo.rgb + Metallic.a（RGBA16_FLOAT）
+constexpr u32 kGBufferSlotNormal      = 1;  // Normal.xyz + Roughness.a（RGBA16_FLOAT）
+constexpr u32 kGBufferSlotEmissive    = 2;  // Emissive.rgb + AO.a（RGBA16_FLOAT）
+constexpr u32 kGBufferSlotVelocity    = 3;  // Velocity.xy（RG16_FLOAT）
+constexpr u32 kGBufferSlotWorldPos    = 4;  // WorldPos.xyz（RGBA16_FLOAT）
+
 // ============================================================================
 // DeferredPipeline — 延迟渲染管线（GBuffer + Lighting Pass）
 //
 // 复用 ShadowSystem / GI_IBL / GI_RSM / ToneMapPass / SkyboxPass
-// GBuffer 3×MRT (albedo+metallic / normal+roughness / emissive+ao) + D32
+// GBuffer 5×MRT（albedo+metallic / normal+roughness / emissive+AO / velocity / worldPos）
 // Lighting Pass 全屏三角形 PBR + IBL + RSM + Shadow
 // ============================================================================
 class DeferredPipeline : public IRenderPipeline {

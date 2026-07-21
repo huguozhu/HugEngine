@@ -62,9 +62,9 @@ bool RTPass::Initialize(rhi::IRHIDevice* device,
     rhi::RTPipelineStateDesc rtpDesc;
     rtpDesc.shaders        = rtShaders;
     rtpDesc.shaderGroups   = shaderGroups;
-    rtpDesc.maxRecursionDepth = 2;  // RayGen(0) → ClosestHit(1) → Callable(2)
-    rtpDesc.maxPayloadSize    = 16;
-    rtpDesc.maxHitAttributeSize = 8;
+    rtpDesc.maxRecursionDepth = rhi::kRTMaxRecursionDepth;  // RayGen(0) → ClosestHit(1) → Callable(2)
+    rtpDesc.maxPayloadSize    = rhi::kRTMaxPayloadSize;
+    rtpDesc.maxHitAttributeSize = rhi::kRTMaxHitAttributeSize;
     rtpDesc.debugName      = "RTPass";
     for (auto& l : descLayouts) {
         if (l != rhi::kInvalidLayout)
@@ -705,8 +705,8 @@ int RTPass::ReloadShader(StringView shaderName, const std::vector<u32>& newSpirv
         rhi::RTPipelineStateDesc rtpDesc;
         rtpDesc.shaders        = m_Shaders;
         rtpDesc.shaderGroups   = m_ShaderGroups;
-        rtpDesc.maxRecursionDepth = 2;  // RayGen(0) → ClosestHit(1) → Callable(2)
-        rtpDesc.maxPayloadSize    = 16;
+        rtpDesc.maxRecursionDepth = rhi::kRTMaxRecursionDepth;  // RayGen(0) → ClosestHit(1) → Callable(2)
+        rtpDesc.maxPayloadSize    = rhi::kRTMaxPayloadSize;
         if (m_DescLayout != rhi::kInvalidLayout)
             rtpDesc.descriptorSetLayouts.push_back(m_DescLayout);
         if (m_DescLayout1 != rhi::kInvalidLayout)

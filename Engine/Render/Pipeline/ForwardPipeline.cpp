@@ -310,7 +310,7 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     // --- GPU Culling ---
     m_GPUCulling.Initialize(device);
     m_GPUScene.Initialize(device);
-    m_Profiler.Initialize(device, 20, MAX_FRAMES_IN_FLIGHT);  // GPU Profiler
+    m_Profiler.Initialize(device, rhi::kMaxProfilerPasses, MAX_FRAMES_IN_FLIGHT);  // GPU Profiler
 
     // --- SceneRenderer ---
     m_SceneRenderer = std::make_unique<SceneRenderer>();

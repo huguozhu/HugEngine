@@ -191,16 +191,16 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         {1,0,rhi::VertexFormat::Float3, offsetof(he::StaticVertex, normal)},
         {2,0,rhi::VertexFormat::Float2, offsetof(he::StaticVertex, uv)},
     };
-    rhi::PushConstantRange pc; pc.stageMask = 1|16; pc.size = 256; // 192B 实际用量
+    rhi::PushConstantRange pc; pc.stageMask = 1|16; pc.size = rhi::kMaxPushConstantSize; // 192B 实际用量
     rhi::PipelineStateDesc gbDesc;
     gbDesc.vertexShader = &gbVS; gbDesc.pixelShader = &gbFS;
     gbDesc.vertexLayout = vl;
     gbDesc.depthTest = true; gbDesc.depthWrite = true;
     gbDesc.depthFormat = rhi::Format::D32_FLOAT;
-    gbDesc.colorAttachmentCount = 5;
-    gbDesc.colorFormats[0] = gbDesc.colorFormats[1] = gbDesc.colorFormats[2] = rhi::Format::RGBA16_FLOAT;
-    gbDesc.colorFormats[3] = rhi::Format::RG16_FLOAT;  // velocity
-    gbDesc.colorFormats[4] = rhi::Format::RGBA16_FLOAT; // worldPos.xyz
+    gbDesc.colorAttachmentCount = kGBufferAttachmentCount;
+    gbDesc.colorFormats[kGBufferSlotAlbedo] = gbDesc.colorFormats[kGBufferSlotNormal] = gbDesc.colorFormats[kGBufferSlotEmissive] = rhi::Format::RGBA16_FLOAT;
+    gbDesc.colorFormats[kGBufferSlotVelocity] = rhi::Format::RG16_FLOAT;  // velocity
+    gbDesc.colorFormats[kGBufferSlotWorldPos] = rhi::Format::RGBA16_FLOAT; // worldPos.xyz
     gbDesc.pushConstantRanges = {pc};
     gbDesc.descriptorSetLayouts = {m_GBufferLayout};  // 仅 set=0，无 per-mesh
     gbDesc.debugName = "GBuffer";
@@ -286,7 +286,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     m_GBufferRenderer->Initialize(m_GBufferCtx);
 
     // GPU Profiler
-    m_Profiler.Initialize(device, 20, MAX_FRAMES_IN_FLIGHT);
+    m_Profiler.Initialize(device, rhi::kMaxProfilerPasses, MAX_FRAMES_IN_FLIGHT);
     m_ProfilerPanel.SetProfiler(&m_Profiler);  // 绑定 ImGui 面板到 Profiler 数据源
     m_AutoExposure.Initialize(device, m_Width, m_Height);
 
