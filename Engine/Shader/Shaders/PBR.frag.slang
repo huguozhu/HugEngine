@@ -37,33 +37,33 @@ struct FSInput {
 //     binding=6: Normal + Sampler
 //     binding=7: MetallicRoughness + Sampler
 //     binding=8: Occlusion + Sampler
-[[vk::binding(1, 0)]] StructuredBuffer<GPULight> u_Lights;
-[[vk::binding(2, 0)]] StructuredBuffer<GPUObjectData> u_Objects;
-[[vk::binding(3, 0)]] StructuredBuffer<GPUShadowData> u_ShadowData;
-[[vk::binding(4, 0)]] Texture2D<float> u_ShadowMap0;   // CSM cascade 0
-[[vk::binding(4, 0)]] SamplerState u_ShadowSampler;
-[[vk::binding(10, 0)]] Texture2D<float> u_ShadowMap1;  // CSM cascade 1
-[[vk::binding(11, 0)]] Texture2D<float> u_ShadowMap2;  // CSM cascade 2
+[[vk::binding(kB_Lights, kSet_PerFrame)]] StructuredBuffer<GPULight> u_Lights;
+[[vk::binding(kB_ObjectData, kSet_PerFrame)]] StructuredBuffer<GPUObjectData> u_Objects;
+[[vk::binding(kB_ShadowData, kSet_PerFrame)]] StructuredBuffer<GPUShadowData> u_ShadowData;
+[[vk::binding(kB_ShadowMap0, kSet_PerFrame)]] Texture2D<float> u_ShadowMap0;   // CSM cascade 0
+[[vk::binding(kB_ShadowMap0, kSet_PerFrame)]] SamplerState u_ShadowSampler;
+[[vk::binding(kB_ShadowMap1, kSet_PerFrame)]] Texture2D<float> u_ShadowMap1;  // CSM cascade 1
+[[vk::binding(kB_ShadowMap2, kSet_PerFrame)]] Texture2D<float> u_ShadowMap2;  // CSM cascade 2
 // Bindless 纹理通过 u_Textures[] / u_Samplers[] 访问（common.slang 声明）
 // 偏移: materialID + 0 = BaseColor, +1 = Normal, +2 = MetallicRoughness, +3 = Occlusion
-[[vk::binding(9, 0)]] TextureCube<float> u_PointShadowCube;
-[[vk::binding(9, 0)]] SamplerState u_PointShadowSampler;
+[[vk::binding(kB_PointShadow, kSet_PerFrame)]] TextureCube<float> u_PointShadowCube;
+[[vk::binding(kB_PointShadow, kSet_PerFrame)]] SamplerState u_PointShadowSampler;
 
 // Forward+ LightGrid 和 LightIndexList（Cluster 光源剔除结果）
 struct LightGridCell { uint offset; uint count; };
-[[vk::binding(7, 0)]]  StructuredBuffer<LightGridCell> u_LightGrid;
-[[vk::binding(8, 0)]]  StructuredBuffer<uint>          u_LightIndexList;
+[[vk::binding(kB_LightGrid, kSet_PerFrame)]]  StructuredBuffer<LightGridCell> u_LightGrid;
+[[vk::binding(kB_LightIndexList, kSet_PerFrame)]]  StructuredBuffer<uint>          u_LightIndexList;
 
 // IBL 纹理
-[[vk::binding(12, 0)]] TextureCube<float4> u_IrradianceMap;
-[[vk::binding(12, 0)]] SamplerState       u_IBLSampler;
-[[vk::binding(13, 0)]] TextureCube<float4> u_PrefilterMap;
-[[vk::binding(14, 0)]] Texture2D<float2>   u_BRDF_LUT;
+[[vk::binding(kB_IrradianceMap, kSet_PerFrame)]] TextureCube<float4> u_IrradianceMap;
+[[vk::binding(kB_IrradianceMap, kSet_PerFrame)]] SamplerState       u_IBLSampler;
+[[vk::binding(kB_PrefilterMap, kSet_PerFrame)]] TextureCube<float4> u_PrefilterMap;
+[[vk::binding(kB_BRDF_LUT, kSet_PerFrame)]] Texture2D<float2>   u_BRDF_LUT;
 
 // RSM 纹理（Reflective Shadow Maps）
-[[vk::binding(15, 0)]] Texture2D<float4> u_RSMPositionMap;   // worldPos.xyz
-[[vk::binding(15, 0)]] SamplerState      u_RSMSampler;
-[[vk::binding(16, 0)]] Texture2D<float4> u_RSMFluxMap;       // normal.xy + flux
+[[vk::binding(kB_RSMPosition, kSet_PerFrame)]] Texture2D<float4> u_RSMPositionMap;   // worldPos.xyz
+[[vk::binding(kB_RSMPosition, kSet_PerFrame)]] SamplerState      u_RSMSampler;
+[[vk::binding(kB_RSMFlux, kSet_PerFrame)]] Texture2D<float4> u_RSMFluxMap;       // normal.xy + flux
 
 static const float kPrefilterMips = 5.0;  // 预滤波 mip 数（匹配 GI_IBL::kPrefilterMips）
 static const uint  kClusterSlices = 12;   // 与 C++ ClusteredShading::kDepthSlices 一致
