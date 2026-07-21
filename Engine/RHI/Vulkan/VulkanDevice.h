@@ -116,7 +116,9 @@ public:
 
     // Per-Mip ImageView 支持
     void*                     CreateTextureMipStorageView(IRHITexture* texture, u32 mipLevel) override;
+    void*                     CreateTextureMipStorageView(IRHITexture* texture, u32 mipLevel, u32 arrayLayer) override;
     void*                     CreateTextureMipSampledView(IRHITexture* texture, u32 mipLevel) override;
+    void*                     CreateTextureMipSampledView(IRHITexture* texture, u32 mipLevel, u32 arrayLayer) override;
     void                      DestroyTextureMipView(void* view) override;
 
     // Internal 访问器

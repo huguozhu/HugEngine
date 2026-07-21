@@ -2,7 +2,6 @@
 #include "RHI/RHI.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
-#include "Vulkan/VulkanResources.h"  // 创建逐 mip 面视图需要访问 VkImage
 // 按需包含 IBL Shader SPV（修改 IBL shader 只重编译 GI_IBL.cpp）
 #include "IBL_Irradiance.vert.spv.h"
 #include "IBL_Irradiance.frag.spv.h"
@@ -13,30 +12,6 @@
 
 using namespace he;
 using namespace he::rhi;
-
-namespace {
-
-// 为 Cubemap 的指定 face + mip 创建临时 VkImageView（用于逐 mip 离屏渲染）
-VkImageView CreateFaceMipView(IRHITexture* tex, u32 face, u32 mip) {
-    auto* vkTex = static_cast<VulkanTexture*>(tex);
-    VkImageViewCreateInfo info{};
-    info.sType      = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    info.image      = vkTex->GetImage();
-    info.viewType   = VK_IMAGE_VIEW_TYPE_2D;
-    info.format     = vkTex->GetVkFormat();
-    info.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-    info.subresourceRange.baseMipLevel   = mip;
-    info.subresourceRange.levelCount     = 1;
-    info.subresourceRange.baseArrayLayer = face;
-    info.subresourceRange.layerCount     = 1;
-
-    VkImageView view = VK_NULL_HANDLE;
-    VkDevice device = vkTex->GetDevice();
-    vkCreateImageView(device, &info, nullptr, &view);
-    return view;
-}
-
-} // anonymous namespace
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/ext/matrix_clip_space.hpp>
@@ -243,10 +218,9 @@ bool GI_IBL::Initialize(rhi::IRHIDevice* device, u32, u32) {
 }
 
 void GI_IBL::Shutdown() {
-    // 清理缓存的逐 mip 面视图
-    if (m_PrefilterMap && !m_CachedMipViews.empty()) {
-        auto* vkTex = static_cast<VulkanTexture*>(m_PrefilterMap.get());
-        for (auto& v : m_CachedMipViews) vkDestroyImageView(vkTex->GetDevice(), v, nullptr);
+    // 清理缓存的逐 mip 面视图（通过 RHI 接口统一管理）
+    if (m_Device) {
+        for (auto& v : m_CachedMipViews) m_Device->DestroyTextureMipView(v);
         m_CachedMipViews.clear();
     }
     m_IrradianceMap.reset();
@@ -330,8 +304,9 @@ void GI_IBL::Render(rhi::IRHICommandList* cmd) {
     // --- Pass 2: 预滤波环境图（5 mip，roughness = mip / 4）---
     {
         // 先销毁旧缓存视图（prefilter 重建时）
-        auto* vkTex = static_cast<VulkanTexture*>(m_PrefilterMap.get());
-        for (auto& v : m_CachedMipViews) vkDestroyImageView(vkTex->GetDevice(), v, nullptr);
+        if (m_Device) {
+            for (auto& v : m_CachedMipViews) m_Device->DestroyTextureMipView(v);
+        }
         m_CachedMipViews.clear();
 
         struct alignas(16) IBLPush { float4x4 invVP; float roughness; float _pad[3]; } pc{};
@@ -339,17 +314,18 @@ void GI_IBL::Render(rhi::IRHICommandList* cmd) {
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_PrefilterSet);
 
         for (u32 mip = 0; mip < kPrefilterMips; ++mip) {
-            u32 mipRes   = kPrefilterRes >> mip;  // 128, 64, rhi::kStageMaskCompute, rhi::kStageMaskFragment, 8
+            u32 mipRes   = kPrefilterRes >> mip;  // 128, 64, 32, 16, 8
             pc.roughness = static_cast<float>(mip) / static_cast<float>(kPrefilterMips - 1);
 
             for (u32 face = 0; face < rhi::kCubemapFaceCount; ++face) {
-                VkImageView mipView = CreateFaceMipView(m_PrefilterMap.get(), face, mip);
-                m_CachedMipViews.push_back(mipView);  // 缓存：framebuffer 延迟销毁需要有效视图
+                void* mipView = m_Device->CreateTextureMipStorageView(
+                    m_PrefilterMap.get(), mip, face);  // RHI 统一接口：逐面逐 mip 视图
+                m_CachedMipViews.push_back(mipView);
 
                 float4x4 view  = CubeFaceViewMatrix(face);
                 pc.invVP       = glm::inverse(proj * view);
 
-                cmd->BeginOffscreenPass(reinterpret_cast<void*>(mipView), nullptr,
+                cmd->BeginOffscreenPass(mipView, nullptr,
                                         mipRes, mipRes, nullptr);
                 cmd->SetViewport({ 0, static_cast<float>(mipRes),
                     static_cast<float>(mipRes), -static_cast<float>(mipRes), 0.0f, 1.0f });

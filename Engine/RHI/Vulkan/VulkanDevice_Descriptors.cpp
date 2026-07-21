@@ -363,8 +363,9 @@ void VulkanDevice::UpdateDescriptorSet(DescriptorSetHandle setHandle, u32 bindin
 // Per-Mip ImageView 支持
 // ============================================================
 
-void* VulkanDevice::CreateTextureMipStorageView(IRHITexture* texture, u32 mipLevel) {
-    auto* vkTex = static_cast<VulkanTexture*>(texture);
+// 创建 mip ImageView 的通用辅助函数
+static void* CreateMipViewInternal(VkDevice device, VulkanTexture* vkTex,
+                                    u32 mipLevel, u32 arrayLayer, const char* label) {
     VkImageViewCreateInfo viewInfo{};
     viewInfo.sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     viewInfo.image            = vkTex->GetImage();
@@ -373,30 +374,30 @@ void* VulkanDevice::CreateTextureMipStorageView(IRHITexture* texture, u32 mipLev
     viewInfo.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
     viewInfo.subresourceRange.baseMipLevel   = mipLevel;
     viewInfo.subresourceRange.levelCount     = 1;
-    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.baseArrayLayer = arrayLayer;
     viewInfo.subresourceRange.layerCount     = 1;
     VkImageView view = VK_NULL_HANDLE;
-    VkResult result = vkCreateImageView(m_Device, &viewInfo, nullptr, &view);
-    HE_ASSERT_MSG(result == VK_SUCCESS, "Failed to create mip storage image view");
+    VkResult result = vkCreateImageView(device, &viewInfo, nullptr, &view);
+    HE_ASSERT_MSG(result == VK_SUCCESS, label);
     return reinterpret_cast<void*>(view);
 }
 
+void* VulkanDevice::CreateTextureMipStorageView(IRHITexture* texture, u32 mipLevel) {
+    return CreateMipViewInternal(m_Device, static_cast<VulkanTexture*>(texture),
+                                  mipLevel, 0, "Failed to create mip storage image view");
+}
+void* VulkanDevice::CreateTextureMipStorageView(IRHITexture* texture, u32 mipLevel, u32 arrayLayer) {
+    return CreateMipViewInternal(m_Device, static_cast<VulkanTexture*>(texture),
+                                  mipLevel, arrayLayer, "Failed to create mip storage image view");
+}
+
 void* VulkanDevice::CreateTextureMipSampledView(IRHITexture* texture, u32 mipLevel) {
-    auto* vkTex = static_cast<VulkanTexture*>(texture);
-    VkImageViewCreateInfo viewInfo{};
-    viewInfo.sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    viewInfo.image            = vkTex->GetImage();
-    viewInfo.viewType         = VK_IMAGE_VIEW_TYPE_2D;
-    viewInfo.format           = vkTex->GetVkFormat();
-    viewInfo.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
-    viewInfo.subresourceRange.baseMipLevel   = mipLevel;
-    viewInfo.subresourceRange.levelCount     = 1;
-    viewInfo.subresourceRange.baseArrayLayer = 0;
-    viewInfo.subresourceRange.layerCount     = 1;
-    VkImageView view = VK_NULL_HANDLE;
-    VkResult result = vkCreateImageView(m_Device, &viewInfo, nullptr, &view);
-    HE_ASSERT_MSG(result == VK_SUCCESS, "Failed to create mip sampled image view");
-    return reinterpret_cast<void*>(view);
+    return CreateMipViewInternal(m_Device, static_cast<VulkanTexture*>(texture),
+                                  mipLevel, 0, "Failed to create mip sampled image view");
+}
+void* VulkanDevice::CreateTextureMipSampledView(IRHITexture* texture, u32 mipLevel, u32 arrayLayer) {
+    return CreateMipViewInternal(m_Device, static_cast<VulkanTexture*>(texture),
+                                  mipLevel, arrayLayer, "Failed to create mip sampled image view");
 }
 
 void VulkanDevice::DestroyTextureMipView(void* view) {

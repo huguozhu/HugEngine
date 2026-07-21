@@ -81,10 +81,14 @@ public:
                                                           IRHIAccelerationStructure* as) = 0;
 
     // --- Per-Mip ImageView 支持（用于 Hi-Z 金字塔构建等写入特定 mip 的场景） ---
-    /// 创建纹理指定 mip level 的存储图像视图（仅 Color format 纹理）
+    /// 创建纹理指定 mip level 的存储图像视图（仅 Color format 纹理，默认 layer 0）
     virtual void*                     CreateTextureMipStorageView(IRHITexture* texture, u32 mipLevel) = 0;
-    /// 创建纹理指定 mip level 的采样图像视图（仅 Color format 纹理）
+    /// 创建纹理指定 mip level + array layer 的存储图像视图（用于 Cubemap 逐面渲染等）
+    virtual void*                     CreateTextureMipStorageView(IRHITexture* texture, u32 mipLevel, u32 arrayLayer) = 0;
+    /// 创建纹理指定 mip level 的采样图像视图（仅 Color format 纹理，默认 layer 0）
     virtual void*                     CreateTextureMipSampledView(IRHITexture* texture, u32 mipLevel) = 0;
+    /// 创建纹理指定 mip level + array layer 的采样图像视图（用于 Cubemap 逐面采样等）
+    virtual void*                     CreateTextureMipSampledView(IRHITexture* texture, u32 mipLevel, u32 arrayLayer) = 0;
     /// 销毁通过 CreateTextureMip*View 创建的图像视图
     virtual void                      DestroyTextureMipView(void* view) = 0;
     // --- GPU Query ---

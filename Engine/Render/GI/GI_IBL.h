@@ -5,8 +5,6 @@
 #include "Math/Math.h"
 #include "GI/GlobalIllumination.h"
 
-#include <vulkan/vulkan_core.h>  // VkImageView（逐 mip 面视图缓存）
-
 namespace he::render {
 
 // ============================================================================
@@ -69,7 +67,7 @@ private:
     std::unique_ptr<rhi::IRHITexture> m_IrradianceMap;   // 32×32 RGBA16_FLOAT Cubemap
     std::unique_ptr<rhi::IRHITexture> m_PrefilterMap;     // 128×128 RGBA16_FLOAT Cubemap (5 mips)
     std::unique_ptr<rhi::IRHITexture> m_BRDF_LUT;         // 512×512 RG16_FLOAT 2D
-    std::vector<VkImageView> m_CachedMipViews;            // 逐 mip 面视图缓存（framebuffer 延迟销毁需要）
+    std::vector<void*> m_CachedMipViews;                  // 逐 mip 面视图缓存（RHI 不透明句柄，延迟销毁用）
     std::unique_ptr<rhi::IRHISampler> m_IBLSampler;       // 线性 Clamp 采样器（共享）
 
     // PSO
