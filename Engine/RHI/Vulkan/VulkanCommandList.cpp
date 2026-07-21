@@ -248,7 +248,7 @@ void VulkanCommandList::SetScissor(const ScissorRect& sc) {
 void VulkanCommandList::SetSwapChain(IRHISwapChain* swapchain) {
     m_pSwapChain = static_cast<VulkanSwapChain*>(swapchain);
 
-    u32 count = 3;
+    u32 count = kSwapchainImageCount;  // Triple buffering 图像数
     m_SwapchainViews.resize(count);
     for (u32 i = 0; i < count; ++i)
         m_SwapchainViews[i] = m_pSwapChain->GetImageView(i);

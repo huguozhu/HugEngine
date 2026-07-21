@@ -182,7 +182,7 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
             vkPushRanges.push_back(vkRange);
         }
         if (vkPushRanges.empty()) {  // 自动补全避免验证层警告
-            VkPushConstantRange r{}; r.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT; r.size = 128;
+            VkPushConstantRange r{}; r.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT; r.size = kDefaultPushConstantSize;
             vkPushRanges.push_back(r);
         }
         VkPipelineLayoutCreateInfo layoutInfo{};
@@ -377,7 +377,7 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
             VkPushConstantRange r{};
             r.stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT
                          | VK_SHADER_STAGE_FRAGMENT_BIT;
-            r.size = 128;
+            r.size = kDefaultPushConstantSize;  // Mesh Shader 回退默认值
             vkPushRanges.push_back(r);
         }
 
@@ -657,7 +657,7 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     if (vkPushRanges.empty()) {
         VkPushConstantRange defaultRange{};
         defaultRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-        defaultRange.size       = 128;  // 最小保证范围
+        defaultRange.size       = kDefaultPushConstantSize;  // 最小保证范围
         vkPushRanges.push_back(defaultRange);
     }
 

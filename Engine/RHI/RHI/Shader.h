@@ -19,7 +19,7 @@ namespace he::rhi {
 struct PushConstantRange {
     u32 stageMask = kStageMaskVertex;  // 默认 Vertex Shader 可见
     u32 offset    = 0;                 // 起始偏移（字节）
-    u32 size      = 128;               // 大小（字节），最大 256
+    u32 size      = kDefaultPushConstantSize; // Push Constant 默认范围
 };
 
 // --- Shader bytecode (pre-compiled) ---

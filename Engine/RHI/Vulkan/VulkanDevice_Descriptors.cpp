@@ -37,23 +37,36 @@ VkDescriptorType VulkanDevice::ToVkDescType(DescriptorType type) const {
     }
 }
 
+// ============================================================
+// 描述符池容量常量 — Vulkan 后端资源预算
+// 需根据引擎实际负载（bindless 纹理数、材质数、RT 集数）调整
+// ============================================================
+static constexpr u32 kDescPoolSize_UniformBuffer         = 64;    // 逐帧 UBO 数量
+static constexpr u32 kDescPoolSize_StorageBuffer         = 1024;  // SSBO（Object/Light/Meshlet 等）
+static constexpr u32 kDescPoolSize_CombinedImageSampler  = 8192;  // bindless 纹理数组
+static constexpr u32 kDescPoolSize_SampledImage          = 4096;  // 采样图像（非组合）
+static constexpr u32 kDescPoolSize_StorageImage          = 256;   // StorageImage（RT BackBuffer 等）
+static constexpr u32 kDescPoolSize_Sampler               = 4096;  // bindless 采样器数组
+static constexpr u32 kDescPoolSize_AccelStruct           = 64;    // RT TLAS 绑定
+static constexpr u32 kDescPoolMaxSets                    = 1024;  // 最大描述符集总数
+
 void VulkanDevice::EnsureDescriptorPool() {
     if (m_DescPool != VK_NULL_HANDLE) return;
 
     VkDescriptorPoolSize poolSizes[] = {
-        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 64 },
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1024 },
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8192 }, // bindless 纹理数组
-        { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 4096 },
-        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 256 },            // StorageImage（RT BackBuffer 等）
-        { VK_DESCRIPTOR_TYPE_SAMPLER, 4096 },
-        { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 64 }, // RT TLAS 绑定
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,           kDescPoolSize_UniformBuffer },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           kDescPoolSize_StorageBuffer },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   kDescPoolSize_CombinedImageSampler }, // bindless 纹理数组
+        { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,            kDescPoolSize_SampledImage },
+        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            kDescPoolSize_StorageImage },          // StorageImage（RT BackBuffer 等）
+        { VK_DESCRIPTOR_TYPE_SAMPLER,                  kDescPoolSize_Sampler },
+        { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, kDescPoolSize_AccelStruct },         // RT TLAS 绑定
     };
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.maxSets       = 1024;  // 需容纳 bindless + per-frame 描述符集
-    poolInfo.poolSizeCount = 7;
+    poolInfo.maxSets       = kDescPoolMaxSets;  // 需容纳 bindless + per-frame 描述符集
+    poolInfo.poolSizeCount = static_cast<u32>(std::size(poolSizes));
     poolInfo.pPoolSizes    = poolSizes;
     poolInfo.flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT
                             | VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;

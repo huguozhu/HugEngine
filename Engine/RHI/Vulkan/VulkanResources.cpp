@@ -233,7 +233,7 @@ VulkanTexture::VulkanTexture(VmaAllocator allocator, VkCommandPool cmdPool, VkQu
     : m_Allocator(allocator)
     , m_Width(desc.width), m_Height(desc.height), m_Depth(desc.depth)
     , m_MipLevels(desc.mipLevels)
-    , m_ArrayLayers(u32(desc.usage) & u32(TextureUsage::Cubemap) ? 6 : desc.arrayLayers)
+    , m_ArrayLayers(u32(desc.usage) & u32(TextureUsage::Cubemap) ? kCubemapFaceCount : desc.arrayLayers)
     , m_SampleCount(desc.sampleCount)
     , m_Format(desc.format)
     , m_VkFormat(ToVkFormat(desc.format))
@@ -251,7 +251,7 @@ VulkanTexture::VulkanTexture(VmaAllocator allocator, VkCommandPool cmdPool, VkQu
     imageInfo.format        = m_VkFormat;
     imageInfo.extent        = {m_Width, m_Height, m_Depth};
     imageInfo.mipLevels     = m_MipLevels;
-    imageInfo.arrayLayers   = isCubemap ? 6 : m_ArrayLayers;
+    imageInfo.arrayLayers   = isCubemap ? kCubemapFaceCount : m_ArrayLayers;
     // 将 u32 采样数转换为 VkSampleCountFlagBits
     VkSampleCountFlagBits vkSamples = VK_SAMPLE_COUNT_1_BIT;
     switch (desc.sampleCount) {

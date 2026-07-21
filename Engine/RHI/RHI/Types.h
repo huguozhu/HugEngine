@@ -34,6 +34,7 @@ constexpr u32 kRTMaxPayloadSize      = 16;  // 最大 Payload 字节数
 constexpr u32 kRTMaxHitAttributeSize = 8;   // 最大 Hit Attribute 字节数
 constexpr u32 kMaxProfilerPasses     = 20;  // GPU Profiler 最大记录 Pass 数
 constexpr u32 kMaxPushConstantSize   = 256; // Vulkan Push Constant 最大字节数
+constexpr u32 kDefaultPushConstantSize = 128; // Push Constant 默认范围大小（最小保证）
 constexpr u32 kCubemapFaceCount      = 6;   // 立方体贴图面数
 constexpr u32 kMaxConcurrentSemaphores = 2;   // 最多并发信号量数（Binary + Timeline）
 
