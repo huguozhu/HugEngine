@@ -19,6 +19,7 @@ set(RHI_SOURCES
     Vulkan/VulkanCommandList.h
     Vulkan/VulkanResources.h
     Vulkan/VulkanRT.h
+    Vulkan/VulkanConverters.h
     Vulkan/VulkanPipelineState.h
     Vulkan/VulkanQueryPool.h
     Vulkan/VulkanDGC.h
@@ -52,6 +53,7 @@ if(HUGENGINE_RHI_VULKAN)
         Vulkan/VulkanCommandList_RenderPass.cpp
         Vulkan/VulkanCommandList_Submit.cpp
         Vulkan/VulkanResources.cpp
+        Vulkan/VulkanConverters.cpp
         Vulkan/VulkanPipeline.cpp
         Vulkan/VulkanDGC.cpp
     )

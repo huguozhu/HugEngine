@@ -1,13 +1,12 @@
 #pragma once
 
 // ============================================================
-// VulkanRT.h — Ray Tracing 类型与辅助函数
+// VulkanRT.h — Ray Tracing 类型
 //
 // 包含：
 //   VulkanRTDispatch            — RT 扩展函数派发表
 //   VulkanAccelerationStructure — BLAS/TLAS 加速结构
 //   VulkanRTPipelineState       — RT 管线状态 + 着色器组句柄
-//   共享辅助函数                 — ToVkFormat / ToVkCompareOp / ToVkBuildFlags
 // ============================================================
 
 #define VK_USE_PLATFORM_WIN32_KHR
@@ -19,6 +18,7 @@
 
 #include "RHI/Shader.h"
 #include "RHI/RayTracing.h"
+#include "VulkanConverters.h"
 
 #include <vector>
 
@@ -100,23 +100,7 @@ private:
     std::vector<u8>     m_Handles;
 };
 
-// ============================================================
-// 共享辅助函数声明（跨编译单元）
-//   ToVkFormat     — VulkanResources.cpp
-//   ToVkCompareOp  — VulkanPipeline.cpp
-//   ToVkBuildFlags — VulkanDevice.cpp / VulkanRT.cpp
-// ============================================================
-VkFormat    ToVkFormat(Format fmt);
-VkCompareOp ToVkCompareOp(CompareFunc func);
-VkAttachmentLoadOp ToVkLoadOp(LoadOp op);
+// ToVkBuildFlags 仍在此声明（依赖 ASBuildFlags，不属于 Converters 范畴）
 VkBuildAccelerationStructureFlagsKHR ToVkBuildFlags(ASBuildFlags flags);
-
-// 跨平台渲染状态 → Vulkan 转换
-VkCullModeFlags   ToVkCullMode(CullMode mode);
-VkFrontFace       ToVkFrontFace(FrontFace face);
-VkPolygonMode     ToVkFillMode(FillMode mode);
-VkBlendFactor     ToVkBlendFactor(BlendFactor factor);
-VkBlendOp         ToVkBlendOp(BlendOp op);
-VkColorComponentFlags ToVkColorWriteMask(ColorWriteMask mask);
 
 } // namespace he::rhi
