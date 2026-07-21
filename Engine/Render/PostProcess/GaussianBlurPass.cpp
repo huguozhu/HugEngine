@@ -18,7 +18,7 @@ bool GaussianBlurPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     // 描述符集布局：单个 CombinedImageSampler
     rhi::DescriptorSetLayoutDesc layoutDesc;
     layoutDesc.bindings = {
-        {0, rhi::DescriptorType::CombinedImageSampler, 1, 16}  // stageMask=16 (Fragment)
+        {0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}  // stageMask = rhi::kStageMaskFragment (Fragment)
     };
     m_Layout = device->CreateDescriptorSetLayout(layoutDesc);
     m_Set    = device->AllocateDescriptorSet(m_Layout);
@@ -34,7 +34,7 @@ bool GaussianBlurPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
 
     // Push constant：texelSize (float2)
     rhi::PushConstantRange pcRange;
-    pcRange.stageMask = 16;  // Fragment
+    pcRange.stageMask = rhi::kStageMaskFragment;  // Fragment
     pcRange.size      = 16;  // float2 + float2 padding
 
     // PSO：全屏三角形，无深度

@@ -37,6 +37,22 @@ constexpr u32 kMaxPushConstantSize   = 256; // Vulkan Push Constant 最大字节
 constexpr u32 kCubemapFaceCount      = 6;   // 立方体贴图面数
 constexpr u32 kMaxConcurrentSemaphores = 2;   // 最多并发信号量数（Binary + Timeline）
 
+// Shader Stage 位掩码常量（当前映射 Vulkan VkShaderStageFlagBits，未来适配 D3D12/Metal）
+// 传统管线
+constexpr u32 kStageMaskVertex        = 1;       // Vertex Shader
+constexpr u32 kStageMaskGeometry      = 8;       // Geometry Shader
+constexpr u32 kStageMaskFragment      = 16;      // Fragment / Pixel Shader
+constexpr u32 kStageMaskCompute       = 32;      // Compute Shader
+// Mesh Shader 管线
+constexpr u32 kStageMaskMesh          = 64;      // Mesh Shader (VK_EXT_mesh_shader)
+constexpr u32 kStageMaskAmplification = 128;     // Task / Amplification Shader
+// Ray Tracing 管线
+constexpr u32 kStageMaskRayGen        = 0x100;   // Ray Generation Shader
+constexpr u32 kStageMaskAnyHit        = 0x200;   // Any-Hit Shader
+constexpr u32 kStageMaskClosestHit    = 0x400;   // Closest-Hit Shader
+constexpr u32 kStageMaskMiss          = 0x800;   // Miss Shader
+constexpr u32 kStageMaskCallable      = 0x2000;  // Callable Shader
+
 // --- Backend type ---
 enum class Backend : u8 {
     Vulkan,
@@ -254,7 +270,7 @@ struct DescriptorSetLayoutBinding {
     u32             binding     = 0;        // binding 编号
     DescriptorType  type        = DescriptorType::UniformBuffer;
     u32             count       = 1;        // 数组元素数
-    u32             stageMask   = 1;        // VK_SHADER_STAGE_* 位掩码 (1=Vertex, 16=Fragment, 0x100=RayGen)
+    u32             stageMask   = kStageMaskVertex;  // Shader Stage 位掩码（kStageMask* 常量）
     bool            bindless    = false;    // 是否为无绑定数组
 };
 

@@ -137,7 +137,7 @@ bool GI_IBL::Initialize(rhi::IRHIDevice* device, u32, u32) {
     // --- 3. 创建 PSO ---
 
     rhi::PushConstantRange pcRange;
-    pcRange.stageMask = 1 | 16;  // Vertex | Fragment
+    pcRange.stageMask = rhi::kStageMaskVertex | rhi::kStageMaskFragment;  // Vertex | Fragment
     pcRange.offset    = 0;
     pcRange.size      = 96;  // float4x4(64) + float(4) + padding → 96B (align 16)
 
@@ -145,7 +145,7 @@ bool GI_IBL::Initialize(rhi::IRHIDevice* device, u32, u32) {
     {
         rhi::DescriptorSetLayoutDesc iblLayout;
         iblLayout.bindings = {
-            { 0, rhi::DescriptorType::CombinedImageSampler, 1, 16 },
+            { 0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment },
         };
         m_IrradianceLayout = device->CreateDescriptorSetLayout(iblLayout);
 
@@ -181,7 +181,7 @@ bool GI_IBL::Initialize(rhi::IRHIDevice* device, u32, u32) {
     {
         rhi::DescriptorSetLayoutDesc pfLayout;
         pfLayout.bindings = {
-            { 0, rhi::DescriptorType::CombinedImageSampler, 1, 16 },
+            { 0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment },
         };
         m_PrefilterLayout = device->CreateDescriptorSetLayout(pfLayout);
 
@@ -339,7 +339,7 @@ void GI_IBL::Render(rhi::IRHICommandList* cmd) {
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_PrefilterSet);
 
         for (u32 mip = 0; mip < kPrefilterMips; ++mip) {
-            u32 mipRes   = kPrefilterRes >> mip;  // 128, 64, 32, 16, 8
+            u32 mipRes   = kPrefilterRes >> mip;  // 128, 64, rhi::kStageMaskCompute, rhi::kStageMaskFragment, 8
             pc.roughness = static_cast<float>(mip) / static_cast<float>(kPrefilterMips - 1);
 
             for (u32 face = 0; face < rhi::kCubemapFaceCount; ++face) {

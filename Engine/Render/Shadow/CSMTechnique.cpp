@@ -69,7 +69,7 @@ bool CSMTechnique::Initialize(rhi::IRHIDevice* device){
 void CSMTechnique::CreatePSO(rhi::DescriptorSetLayoutHandle layout){
     rhi::VertexInputLayout vl;vl.stride=sizeof(he::StaticVertex);
     vl.attributes={{0,0,rhi::VertexFormat::Float3,offsetof(he::StaticVertex,position)}};
-    rhi::PushConstantRange pcr; pcr.stageMask=1|16;pcr.offset=0;pcr.size=sizeof(ShadowPushConstant);
+    rhi::PushConstantRange pcr; pcr.stageMask=rhi::kStageMaskVertex|rhi::kStageMaskFragment;pcr.offset=0;pcr.size=sizeof(ShadowPushConstant);
     rhi::PipelineStateDesc d;d.vertexShader=&m_ShadowVS;d.pixelShader=&m_ShadowFS;
     d.vertexLayout=vl;d.topology=rhi::PrimitiveTopology::TriangleList;
     d.depthTest=d.depthWrite=true;d.depthCompare=rhi::CompareFunc::LessEqual;

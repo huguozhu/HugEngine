@@ -63,10 +63,10 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
 
     rhi::DescriptorSetLayoutDesc layoutDesc;
     layoutDesc.bindings = {
-        {0, rhi::DescriptorType::StorageBuffer, 1, 32},
-        {1, rhi::DescriptorType::StorageBuffer, 1, 32},
-        {2, rhi::DescriptorType::StorageBuffer, 1, 32},
-        {3, rhi::DescriptorType::CombinedImageSampler, 1, 32},
+        {0, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+        {1, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+        {2, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+        {3, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
     };
     m_DescLayout = device->CreateDescriptorSetLayout(layoutDesc);
     m_DescSet    = device->AllocateDescriptorSet(m_DescLayout);
@@ -91,7 +91,7 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
 
     // Push constants: 6 planes + float4x4 VP + float2 screen + 2 uint
     rhi::PushConstantRange pcRange;
-    pcRange.stageMask = 32;
+    pcRange.stageMask = rhi::kStageMaskCompute;
     pcRange.offset = 0;
     pcRange.size   = sizeof(float4) * 6 + sizeof(float4x4) + sizeof(float2) + sizeof(u32) * 4;
 
@@ -143,11 +143,11 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
 
     rhi::DescriptorSetLayoutDesc p2Layout;
     p2Layout.bindings = {
-        {0, rhi::DescriptorType::StorageBuffer, 1, 32},        // u_SceneObjects
-        {1, rhi::DescriptorType::StorageBuffer, 1, 32},        // u_Candidates
-        {2, rhi::DescriptorType::StorageBuffer, 1, 32},        // u_DrawCount
-        {3, rhi::DescriptorType::CombinedImageSampler, 1, 32}, // u_HiZ
-        {4, rhi::DescriptorType::StorageBuffer, 1, 32},        // u_IndirectCmds
+        {0, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},        // u_SceneObjects
+        {1, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},        // u_Candidates
+        {2, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},        // u_DrawCount
+        {3, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute}, // u_HiZ
+        {4, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},        // u_IndirectCmds
     };
     m_Phase2Layout = device->CreateDescriptorSetLayout(p2Layout);
     m_Phase2Set    = device->AllocateDescriptorSet(m_Phase2Layout);
@@ -160,7 +160,7 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
 
     // Phase 2 push constants: float4x4 vp + float2 screenSize + uint mips + uint count
     rhi::PushConstantRange p2PCR;
-    p2PCR.stageMask = 32;
+    p2PCR.stageMask = rhi::kStageMaskCompute;
     p2PCR.offset = 0;
     p2PCR.size   = sizeof(float4x4) + sizeof(float2) + sizeof(u32) * 2;  // 64+8+8=80
 
@@ -176,8 +176,8 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
     // ── Hi-Z 下采样 PSO ──
     {
         rhi::DescriptorSetLayoutDesc hizLayout;
-        hizLayout.bindings = {{0, rhi::DescriptorType::CombinedImageSampler, 1, 32},
-                              {1, rhi::DescriptorType::StorageImage, 1, 32}};
+        hizLayout.bindings = {{0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
+                              {1, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskCompute}};
         m_HiZLayout = device->CreateDescriptorSetLayout(hizLayout);
         m_HiZSet    = device->AllocateDescriptorSet(m_HiZLayout);
 
@@ -187,7 +187,7 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
         hizCS.entryPoint = "main";
 
         rhi::PushConstantRange hizPCR;
-        hizPCR.stageMask = 32;
+        hizPCR.stageMask = rhi::kStageMaskCompute;
         hizPCR.offset = 0;
         hizPCR.size   = 24;  // uint2 srcSize + uint2 dstSize + uint srcMip + uint _pad
 
@@ -597,11 +597,11 @@ bool GPUCulling::InitializePTG(rhi::IRHIDevice* device) {
     // 3. 创建 PTG 描述符布局（5 个 binding）
     rhi::DescriptorSetLayoutDesc ptgLayout;
     ptgLayout.bindings = {
-        {0, rhi::DescriptorType::UniformBuffer, 1, 32},        // u_PTGParams
-        {1, rhi::DescriptorType::StorageBuffer, 1, 32},        // u_SceneObjects
-        {2, rhi::DescriptorType::CombinedImageSampler, 1, 32}, // u_HiZDepth + Sampler
-        {3, rhi::DescriptorType::StorageBuffer, 1, 32},        // u_IndirectCommands
-        {4, rhi::DescriptorType::StorageBuffer, 1, 32},        // u_DrawCount
+        {0, rhi::DescriptorType::UniformBuffer, 1, rhi::kStageMaskCompute},        // u_PTGParams
+        {1, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},        // u_SceneObjects
+        {2, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute}, // u_HiZDepth + Sampler
+        {3, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},        // u_IndirectCommands
+        {4, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},        // u_DrawCount
     };
     m_PTGLayout = device->CreateDescriptorSetLayout(ptgLayout);
     m_PTGSet = device->AllocateDescriptorSet(m_PTGLayout);

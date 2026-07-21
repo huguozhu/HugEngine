@@ -54,8 +54,8 @@ bool GI_RSM::Initialize(rhi::IRHIDevice* device, u32, u32) {
     // RSM PSO（双 MRT：pos + normal+flux，深度附件复用 Shadow Map 的 D32）
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = {
-        { 1, rhi::DescriptorType::StorageBuffer, 1, 17 },  // u_Lights (Vertex | Fragment)
-        { 2, rhi::DescriptorType::StorageBuffer, 1, 17 },  // u_Objects (Vertex | Fragment)
+        { 1, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskVertex | rhi::kStageMaskFragment },  // u_Lights (Vertex | Fragment)
+        { 2, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskVertex | rhi::kStageMaskFragment },  // u_Objects (Vertex | Fragment)
     };
     m_RSMLayout = device->CreateDescriptorSetLayout(layout);
     m_RSMSet    = device->AllocateDescriptorSet(m_RSMLayout);
@@ -76,8 +76,8 @@ bool GI_RSM::Initialize(rhi::IRHIDevice* device, u32, u32) {
     };
 
     rhi::PushConstantRange pcRange;
-    pcRange.stageMask = 1;  // Vertex only? No — FS needs lightIndex too. Use Vertex|Fragment.
-    pcRange.stageMask = 1 | 16;
+    pcRange.stageMask = rhi::kStageMaskVertex;  // Vertex only? No — FS needs lightIndex too. Use Vertex|Fragment.
+    pcRange.stageMask = rhi::kStageMaskVertex | rhi::kStageMaskFragment;
     pcRange.offset    = 0;
     pcRange.size      = 96;
 

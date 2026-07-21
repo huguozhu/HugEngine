@@ -71,7 +71,7 @@ void AA_FXAA::Render(rhi::IRHICommandList* cmd) {
 void AA_FXAA::CreatePSO() {
     // 描述符集
     rhi::DescriptorSetLayoutDesc layout;
-    layout.bindings = {{0, rhi::DescriptorType::CombinedImageSampler, 1, 16}};
+    layout.bindings = {{0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}};
     m_DescLayout = m_Device->CreateDescriptorSetLayout(layout);
     m_DescSet = m_Device->AllocateDescriptorSet(m_DescLayout);
 
@@ -80,7 +80,7 @@ void AA_FXAA::CreatePSO() {
     vs.stage=rhi::ShaderStage::Vertex;   vs.spirv=k_FXAA_vert_spv; vs.entryPoint="vertexMain";
     fs.stage=rhi::ShaderStage::Pixel;    fs.spirv=k_FXAA_frag_spv; fs.entryPoint="fragmentMain";
 
-    rhi::PushConstantRange pcr; pcr.stageMask=16; pcr.offset=0; pcr.size=16;
+    rhi::PushConstantRange pcr; pcr.stageMask = rhi::kStageMaskFragment; pcr.offset=0; pcr.size=16;
 
     rhi::PipelineStateDesc d;
     d.vertexShader=&vs; d.pixelShader=&fs;

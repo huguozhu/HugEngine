@@ -22,7 +22,7 @@ bool SkyboxPass::Initialize(rhi::IRHIDevice* device,u32,u32){
     m_DescLayout=device->CreateDescriptorSetLayout(layout);
     m_DescSet=device->AllocateDescriptorSet(m_DescLayout);
 
-    rhi::PushConstantRange pcr;pcr.stageMask=1|16;pcr.offset=0;pcr.size=96;
+    rhi::PushConstantRange pcr;pcr.stageMask=rhi::kStageMaskVertex|rhi::kStageMaskFragment;pcr.offset=0;pcr.size=96;
     rhi::PipelineStateDesc d;d.vertexShader=&m_VS;d.pixelShader=&m_FS;
     d.topology=rhi::PrimitiveTopology::TriangleList;
     d.depthTest=true;d.depthWrite=false;d.depthCompare=rhi::CompareFunc::Equal;

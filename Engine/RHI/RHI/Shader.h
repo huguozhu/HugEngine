@@ -13,13 +13,13 @@
 namespace he::rhi {
 
 // --- Push constant 范围描述 ---
-// stageMask 使用 Vulkan VkShaderStageFlagBits 位掩码值：
-//   1 = VERTEX, 16 = FRAGMENT, 32 = COMPUTE, ...
-// 组合示例: stageMask = 1 | 16 → Vertex + Fragment 可见
+// stageMask 使用跨平台 RHI 位掩码常量（kStageMaskVertex / kStageMaskFragment / kStageMaskCompute 等）
+// 当前映射到 Vulkan VkShaderStageFlagBits，未来可适配 D3D12 Visibility / Metal FunctionConstant
+// 组合示例: stageMask = kStageMaskVertex | kStageMaskFragment → Vertex + Fragment 可见
 struct PushConstantRange {
-    u32 stageMask = 1;          // VK_SHADER_STAGE_VERTEX_BIT（默认 Vertex）
-    u32 offset    = 0;          // 起始偏移（字节）
-    u32 size      = 128;        // 大小（字节），最大 256
+    u32 stageMask = kStageMaskVertex;  // 默认 Vertex Shader 可见
+    u32 offset    = 0;                 // 起始偏移（字节）
+    u32 size      = 128;               // 大小（字节），最大 256
 };
 
 // --- Shader bytecode (pre-compiled) ---

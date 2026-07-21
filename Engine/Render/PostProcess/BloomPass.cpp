@@ -21,7 +21,7 @@ bool BloomPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     // ── BrightPass PSO ──
     {
         rhi::DescriptorSetLayoutDesc layout;
-        layout.bindings = {{0, rhi::DescriptorType::CombinedImageSampler, 1, 16}};
+        layout.bindings = {{0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}};
         m_BrightLayout = device->CreateDescriptorSetLayout(layout);
         m_BrightSet    = device->AllocateDescriptorSet(m_BrightLayout);
 
@@ -34,7 +34,7 @@ bool BloomPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         fs.entryPoint = "fragmentMain";
 
         rhi::PushConstantRange pcRange;
-        pcRange.stageMask = 16;  // Fragment
+        pcRange.stageMask = rhi::kStageMaskFragment;  // Fragment
         pcRange.size      = 16;  // float threshold + 3 float pad
 
         rhi::PipelineStateDesc d;
@@ -72,8 +72,8 @@ bool BloomPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     {
         rhi::DescriptorSetLayoutDesc layout;
         layout.bindings = {
-            {0, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // HDR
-            {1, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // Bloom
+            {0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // HDR
+            {1, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // Bloom
         };
         m_CompositeLayout = device->CreateDescriptorSetLayout(layout);
         m_CompositeSet    = device->AllocateDescriptorSet(m_CompositeLayout);
@@ -87,7 +87,7 @@ bool BloomPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         fs.entryPoint = "fragmentMain";
 
         rhi::PushConstantRange pcRange;
-        pcRange.stageMask = 16;
+        pcRange.stageMask = rhi::kStageMaskFragment;
         pcRange.size      = 16;  // float intensity + 3 float pad
 
         rhi::PipelineStateDesc d;

@@ -24,7 +24,7 @@ bool ToneMapPass::Initialize(rhi::IRHIDevice* device,u32 width,u32 height){
     d.depthTest=false;d.depthWrite=false;
     d.depthFormat=rhi::Format::D32_FLOAT;
     d.colorAttachmentCount=1;d.colorFormats[0]=rhi::Format::BGRA8_UNORM;
-    rhi::PushConstantRange pcr; pcr.stageMask=1|16; pcr.size=16;  // Vertex|Fragment
+    rhi::PushConstantRange pcr; pcr.stageMask=rhi::kStageMaskVertex|rhi::kStageMaskFragment; pcr.size=16;  // Vertex|Fragment
     d.pushConstantRanges={pcr};
     d.descriptorSetLayouts={m_DescLayout};d.debugName="ToneMap";
     m_PSO=device->CreatePipelineState(d);

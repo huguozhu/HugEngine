@@ -13,15 +13,15 @@ bool AutoExposurePass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     // 描述符集：HDR(0) + Result SSBO(1)
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = {
-        {0, rhi::DescriptorType::CombinedImageSampler, 1, 32},
-        {1, rhi::DescriptorType::StorageBuffer,        1, 32},
+        {0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
+        {1, rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},
     };
     m_Layout = device->CreateDescriptorSetLayout(layout);
     m_Set    = device->AllocateDescriptorSet(m_Layout);
 
     // Compute PSO
     m_CS.stage = rhi::ShaderStage::Compute; m_CS.spirv = k_AutoExposure_comp_spv; m_CS.entryPoint = "main";
-    rhi::PushConstantRange pc; pc.stageMask = 32; pc.size = 16;
+    rhi::PushConstantRange pc; pc.stageMask = rhi::kStageMaskCompute; pc.size = 16;
     rhi::PipelineStateDesc d;
     d.bindPoint = rhi::PipelineBindPoint::Compute; d.computeShader = &m_CS;
     d.pushConstantRanges = {pc}; d.descriptorSetLayouts = {m_Layout}; d.debugName = "AutoExposure";
@@ -69,7 +69,7 @@ void AutoExposurePass::Render(rhi::IRHICommandList* cmd) {
 
     cmd->SetPipeline(m_PSO.get()); cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
-    cmd->Dispatch(16, 16, 1);  // 256 组
+    cmd->Dispatch(16, rhi::kStageMaskFragment, 1);  // 256 组
 
     // CPU 读回并平均
     void* data = m_ResultBuf->Map();

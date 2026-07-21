@@ -207,7 +207,7 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
     };
 
     rhi::PushConstantRange pcRange;
-    pcRange.stageMask = 32; // VK_SHADER_STAGE_COMPUTE_BIT
+    pcRange.stageMask = rhi::kStageMaskCompute; // VK_SHADER_STAGE_COMPUTE_BIT
     pcRange.offset = 0; pcRange.size = rhi::kMaxPushConstantSize; // Vulkan 保证最小值 128B，部分 GPU 支持 256B
 
     auto createComputePSO = [&](rhi::DescriptorSetLayoutHandle layout,
@@ -222,38 +222,38 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
     };
 
     // Init Layout + PSO
-    m_InitLayout = createLayout({{0, rhi::DescriptorType::StorageBuffer, 1, 32},
-                                  {1, rhi::DescriptorType::StorageBuffer, 1, 32}});
+    m_InitLayout = createLayout({{0, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+                                  {1, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute}});
     m_InitPSO = createComputePSO(m_InitLayout, &m_InitCS, "ParticleInit");
 
     // Emit Layout + PSO
-    m_EmitLayout = createLayout({{0, rhi::DescriptorType::StorageBuffer, 1, 32},
-                                  {1, rhi::DescriptorType::StorageBuffer, 1, 32},
-                                  {2, rhi::DescriptorType::StorageBuffer, 1, 32},
-                                  {3, rhi::DescriptorType::StorageBuffer, 1, 32},
-                                  {4, rhi::DescriptorType::StorageBuffer, 1, 32}});
+    m_EmitLayout = createLayout({{0, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+                                  {1, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+                                  {2, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+                                  {3, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+                                  {4, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute}});
     m_EmitPSO = createComputePSO(m_EmitLayout, &m_EmitCS, "ParticleEmit");
 
     // Sim Layout + PSO
-    m_SimLayout = createLayout({{0, rhi::DescriptorType::StorageBuffer, 1, 32},
-                                 {1, rhi::DescriptorType::StorageBuffer, 1, 32},
-                                 {2, rhi::DescriptorType::StorageBuffer, 1, 32},
-                                 {3, rhi::DescriptorType::StorageBuffer, 1, 32},
-                                 {4, rhi::DescriptorType::StorageBuffer, 1, 32},
-                                 {5, rhi::DescriptorType::StorageBuffer, 1, 32}});
+    m_SimLayout = createLayout({{0, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+                                 {1, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+                                 {2, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+                                 {3, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+                                 {4, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+                                 {5, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute}});
     m_SimPSO = createComputePSO(m_SimLayout, &m_SimCS, "ParticleSimulate");
 
     // Culling Layout + PSO
-    m_CullingLayout = createLayout({{0, rhi::DescriptorType::StorageBuffer, 1, 32},
-                                     {1, rhi::DescriptorType::StorageBuffer, 1, 32},
-                                     {2, rhi::DescriptorType::StorageBuffer, 1, 32},
-                                     {3, rhi::DescriptorType::StorageBuffer, 1, 32},
-                                     {4, rhi::DescriptorType::StorageBuffer, 1, 32}});
+    m_CullingLayout = createLayout({{0, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+                                     {1, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+                                     {2, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+                                     {3, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+                                     {4, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute}});
     m_CullingPSO = createComputePSO(m_CullingLayout, &m_CullingCS, "ParticleCulling");
 
     // Sort Layout + PSO
-    m_SortLayout = createLayout({{0, rhi::DescriptorType::StorageBuffer, 1, 32},
-                                  {1, rhi::DescriptorType::StorageBuffer, 1, 32}});
+    m_SortLayout = createLayout({{0, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+                                  {1, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute}});
     m_SortPSO = createComputePSO(m_SortLayout, &m_SortCS, "ParticleSort");
 
     // ── Render PSO (Graphics: Billboard) ──
@@ -271,7 +271,7 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
             {0, rhi::DescriptorType::StorageBuffer, 1, 1},          // Billboard vertices (Vertex)
             {1, rhi::DescriptorType::StorageBuffer, 1, 1},          // SortIndices (Vertex)
             {2, rhi::DescriptorType::StorageBuffer, 1, 1},          // Particle buffer (Vertex)
-            {3, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // SceneDepth (Fragment, 软粒子)
+            {3, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // SceneDepth (Fragment, 软粒子)
         };
         m_RenderLayout = device->CreateDescriptorSetLayout(ld);
 
@@ -291,7 +291,7 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
 
         // Push constant for render (Vertex + Fragment stages)
         rhi::PushConstantRange renderPCRange;
-        renderPCRange.stageMask = 1 | 16;  // VERTEX_BIT | FRAGMENT_BIT
+        renderPCRange.stageMask = rhi::kStageMaskVertex | rhi::kStageMaskFragment;  // VERTEX_BIT | FRAGMENT_BIT
         renderPCRange.offset = 0; renderPCRange.size = rhi::kMaxPushConstantSize;
         desc.pushConstantRanges = {renderPCRange};
 

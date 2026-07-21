@@ -73,8 +73,8 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         { 7,  rhi::DescriptorType::StorageBuffer,        1, 16 },  // LightGrid（Forward+）
         { 8,  rhi::DescriptorType::StorageBuffer,        1, 16 },  // LightIndexList（Forward+）
         { 4,  rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // CSM cascade 0
-        { 5,  rhi::DescriptorType::SampledImage,  4096, 16, true },  // u_Textures[] bindless
-        { 6,  rhi::DescriptorType::Sampler,       4096, 16, true },  // u_Samplers[] bindless
+        { 5,  rhi::DescriptorType::SampledImage,  4096, rhi::kStageMaskFragment, true },  // u_Textures[] bindless
+        { 6,  rhi::DescriptorType::Sampler,       4096, rhi::kStageMaskFragment, true },  // u_Samplers[] bindless
         { 9,  rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Point Shadow Cubemap
         { 10, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // CSM cascade 1
         { 11, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // CSM cascade 2
@@ -222,7 +222,7 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
 
     // --- 主管线 PSO ---
     rhi::PushConstantRange pcRange;
-    pcRange.stageMask = 1 | 16;     // Vertex | Fragment
+    pcRange.stageMask = rhi::kStageMaskVertex | rhi::kStageMaskFragment;     // Vertex | Fragment
     pcRange.offset    = 0;
     pcRange.size      = sizeof(PushConstantData);
 

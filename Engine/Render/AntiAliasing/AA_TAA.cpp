@@ -26,12 +26,12 @@ bool AA_TAA::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     // 描述符布局：bindings 0-4 为输入纹理，binding 5 为 uniform buffer
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = {
-        {0, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // u_CurrentColor
-        {1, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // u_HistoryColor
-        {2, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // u_Depth
-        {3, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // u_Normal
-        {4, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // u_Velocity
-        {5, rhi::DescriptorType::UniformBuffer, 1, 17},         // u_TAAUniforms
+        {0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // u_CurrentColor
+        {1, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // u_HistoryColor
+        {2, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // u_Depth
+        {3, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // u_Normal
+        {4, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // u_Velocity
+        {5, rhi::DescriptorType::UniformBuffer, 1, rhi::kStageMaskVertex | rhi::kStageMaskFragment},         // u_TAAUniforms
     };
     m_DescLayout = device->CreateDescriptorSetLayout(layout);
     m_DescSet    = device->AllocateDescriptorSet(m_DescLayout);
@@ -85,7 +85,7 @@ void AA_TAA::CreatePSO() {
     fs.entryPoint = "main";
 
     rhi::PushConstantRange pc;
-    pc.stageMask = 1 | 16;  // Vertex | Fragment
+    pc.stageMask = rhi::kStageMaskVertex | rhi::kStageMaskFragment;  // Vertex | Fragment
     pc.size      = 16;       // float2 jitterOffset
 
     rhi::PipelineStateDesc desc;

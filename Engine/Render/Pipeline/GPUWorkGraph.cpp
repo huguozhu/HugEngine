@@ -121,9 +121,9 @@ u32 GPUWorkGraph::AddNode(const WGNodeDesc& desc) {
         // ── 创建描述符布局（3 个 StorageBuffer binding）──
         rhi::DescriptorSetLayoutDesc layoutDesc;
         layoutDesc.bindings = {
-            {0, rhi::DescriptorType::StorageBuffer, 1, 32},  // input WGRecord[]
-            {1, rhi::DescriptorType::StorageBuffer, 1, 32},  // output WGRecord[]
-            {2, rhi::DescriptorType::StorageBuffer, 1, 32},  // counter u32[4]
+            {0, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},  // input WGRecord[]
+            {1, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},  // output WGRecord[]
+            {2, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},  // counter u32[4]
         };
         node.descLayout = m_Device->CreateDescriptorSetLayout(layoutDesc);
         HE_ASSERT(node.descLayout != rhi::kInvalidLayout,
@@ -144,7 +144,7 @@ u32 GPUWorkGraph::AddNode(const WGNodeDesc& desc) {
         // ── 创建 Compute PSO（Entry 节点使用默认 WorkGraph_Entry shader）──
         if (desc.type == WGNodeType::Entry) {
             rhi::PushConstantRange pcRange;
-            pcRange.stageMask = 32;  // VK_SHADER_STAGE_COMPUTE_BIT
+            pcRange.stageMask = rhi::kStageMaskCompute;  // VK_SHADER_STAGE_COMPUTE_BIT
             pcRange.offset = 0;
             pcRange.size   = 16;    // 4×u32: targetNodeID + maxOutputs + inputCount + _pad
 
@@ -223,7 +223,7 @@ void GPUWorkGraph::SetNodeShader(u32 nodeID, const rhi::ShaderBytecode& bytecode
     node.pso.reset();  // 释放旧 PSO
 
     rhi::PushConstantRange pcRange;
-    pcRange.stageMask = 32;  // VK_SHADER_STAGE_COMPUTE_BIT
+    pcRange.stageMask = rhi::kStageMaskCompute;  // VK_SHADER_STAGE_COMPUTE_BIT
     pcRange.offset = 0;
     pcRange.size   = 16;     // 4×u32
 

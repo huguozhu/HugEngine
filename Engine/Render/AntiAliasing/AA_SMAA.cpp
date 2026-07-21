@@ -242,7 +242,7 @@ void AA_SMAA::RenderFinalPass(rhi::IRHICommandList* cmd) {
 void AA_SMAA::CreateEdgePSO() {
     // 描述符集布局：binding 0 = 输入颜色（CombinedImageSampler, Fragment stage）
     rhi::DescriptorSetLayoutDesc layout;
-    layout.bindings = {{0, rhi::DescriptorType::CombinedImageSampler, 1, 16}};  // stage=16 = Fragment
+    layout.bindings = {{0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}};  // stage=16 = Fragment
     m_EdgeLayout = m_Device->CreateDescriptorSetLayout(layout);
     m_EdgeSet    = m_Device->AllocateDescriptorSet(m_EdgeLayout);
 
@@ -256,7 +256,7 @@ void AA_SMAA::CreateEdgePSO() {
     fs.entryPoint = "fragmentMain";
 
     rhi::PushConstantRange pcr;
-    pcr.stageMask = 16;  // Fragment
+    pcr.stageMask = rhi::kStageMaskFragment;  // Fragment
     pcr.offset    = 0;
     pcr.size      = 16;  // float2 invScreenSize + float2 padding
 
@@ -282,7 +282,7 @@ void AA_SMAA::CreateEdgePSO() {
 void AA_SMAA::CreateBlendPSO() {
     // 描述符集布局：binding 0 = 边缘纹理（CombinedImageSampler, Fragment stage）
     rhi::DescriptorSetLayoutDesc layout;
-    layout.bindings = {{0, rhi::DescriptorType::CombinedImageSampler, 1, 16}};
+    layout.bindings = {{0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}};
     m_BlendLayout = m_Device->CreateDescriptorSetLayout(layout);
     m_BlendSet    = m_Device->AllocateDescriptorSet(m_BlendLayout);
 
@@ -296,7 +296,7 @@ void AA_SMAA::CreateBlendPSO() {
     fs.entryPoint = "fragmentMain";
 
     rhi::PushConstantRange pcr;
-    pcr.stageMask = 16;
+    pcr.stageMask = rhi::kStageMaskFragment;
     pcr.offset    = 0;
     pcr.size      = 16;
 
@@ -325,8 +325,8 @@ void AA_SMAA::CreateNeighborPSO() {
     //   binding 1 = 混合权重（CombinedImageSampler, Fragment stage）
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = {
-        {0, rhi::DescriptorType::CombinedImageSampler, 1, 16},
-        {1, rhi::DescriptorType::CombinedImageSampler, 1, 16},
+        {0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},
+        {1, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},
     };
     m_NeighborLayout = m_Device->CreateDescriptorSetLayout(layout);
     m_NeighborSet    = m_Device->AllocateDescriptorSet(m_NeighborLayout);
@@ -341,7 +341,7 @@ void AA_SMAA::CreateNeighborPSO() {
     fs.entryPoint = "fragmentMain";
 
     rhi::PushConstantRange pcr;
-    pcr.stageMask = 16;
+    pcr.stageMask = rhi::kStageMaskFragment;
     pcr.offset    = 0;
     pcr.size      = 16;
 

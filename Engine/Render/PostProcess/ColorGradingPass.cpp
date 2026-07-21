@@ -11,7 +11,7 @@ bool ColorGradingPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     m_Device = device; m_Width = width; m_Height = height;
 
     rhi::DescriptorSetLayoutDesc layout;
-    layout.bindings = {{0, rhi::DescriptorType::CombinedImageSampler, 1, 16}};
+    layout.bindings = {{0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}};
     m_Layout = device->CreateDescriptorSetLayout(layout);
     m_Set    = device->AllocateDescriptorSet(m_Layout);
 
@@ -19,7 +19,7 @@ bool ColorGradingPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     vs.stage = rhi::ShaderStage::Vertex; vs.spirv = k_SSAO_vert_spv; vs.entryPoint = "vertexMain";
     fs.stage = rhi::ShaderStage::Pixel;  fs.spirv = k_ColorGrading_frag_spv; fs.entryPoint = "fragmentMain";
 
-    rhi::PushConstantRange pc; pc.stageMask = 1|16; pc.size = 64;  // 13 floats + pad
+    rhi::PushConstantRange pc; pc.stageMask = rhi::kStageMaskVertex | rhi::kStageMaskFragment; pc.size = 64;  // 13 floats + pad
     rhi::PipelineStateDesc d;
     d.vertexShader = &vs; d.pixelShader = &fs;
     d.topology = rhi::PrimitiveTopology::TriangleList;

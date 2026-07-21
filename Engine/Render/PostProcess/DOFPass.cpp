@@ -18,7 +18,7 @@ bool DOFPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     // ── CoC PSO ──
     {
         rhi::DescriptorSetLayoutDesc layout;
-        layout.bindings = {{0, rhi::DescriptorType::CombinedImageSampler, 1, 16}};
+        layout.bindings = {{0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}};
         m_CoCLayout = device->CreateDescriptorSetLayout(layout);
         m_CoCSet    = device->AllocateDescriptorSet(m_CoCLayout);
 
@@ -28,7 +28,7 @@ bool DOFPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         fs.stage = rhi::ShaderStage::Pixel;
         fs.spirv = k_DOF_CoC_frag_spv; fs.entryPoint = "fragmentMain";
 
-        rhi::PushConstantRange pc; pc.stageMask = 16; pc.size = 16;
+        rhi::PushConstantRange pc; pc.stageMask = rhi::kStageMaskFragment; pc.size = 16;
         rhi::PipelineStateDesc d;
         d.vertexShader = &vs; d.pixelShader = &fs;
         d.topology = rhi::PrimitiveTopology::TriangleList;
@@ -53,9 +53,9 @@ bool DOFPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     {
         rhi::DescriptorSetLayoutDesc layout;
         layout.bindings = {
-            {0, rhi::DescriptorType::CombinedImageSampler, 1, 16},
-            {1, rhi::DescriptorType::CombinedImageSampler, 1, 16},
-            {2, rhi::DescriptorType::CombinedImageSampler, 1, 16},
+            {0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},
+            {1, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},
+            {2, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},
         };
         m_CompositeLayout = device->CreateDescriptorSetLayout(layout);
         m_CompositeSet    = device->AllocateDescriptorSet(m_CompositeLayout);
@@ -66,7 +66,7 @@ bool DOFPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         fs.stage = rhi::ShaderStage::Pixel;
         fs.spirv = k_DOF_Composite_frag_spv; fs.entryPoint = "fragmentMain";
 
-        rhi::PushConstantRange pc; pc.stageMask = 16; pc.size = 16;
+        rhi::PushConstantRange pc; pc.stageMask = rhi::kStageMaskFragment; pc.size = 16;
         rhi::PipelineStateDesc d;
         d.vertexShader = &vs; d.pixelShader = &fs;
         d.topology = rhi::PrimitiveTopology::TriangleList;

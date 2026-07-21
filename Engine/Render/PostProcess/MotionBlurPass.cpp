@@ -16,8 +16,8 @@ bool MotionBlurPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) 
 
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = {
-        {0, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // HDR
-        {1, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // Velocity
+        {0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // HDR
+        {1, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // Velocity
     };
     m_Layout = device->CreateDescriptorSetLayout(layout);
     m_Set    = device->AllocateDescriptorSet(m_Layout);
@@ -28,7 +28,7 @@ bool MotionBlurPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) 
     fs.stage = rhi::ShaderStage::Pixel;
     fs.spirv = k_MotionBlur_frag_spv; fs.entryPoint = "fragmentMain";
 
-    rhi::PushConstantRange pc; pc.stageMask = 16; pc.size = 16;
+    rhi::PushConstantRange pc; pc.stageMask = rhi::kStageMaskFragment; pc.size = 16;
     rhi::PipelineStateDesc d;
     d.vertexShader = &vs; d.pixelShader = &fs;
     d.topology = rhi::PrimitiveTopology::TriangleList;

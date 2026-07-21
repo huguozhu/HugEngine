@@ -171,9 +171,9 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     // set=0: per-frame GPUObjectData[] + bindless Texture2D[] + SamplerState[]
     rhi::DescriptorSetLayoutDesc gbLayout;
     gbLayout.bindings = {
-        {2, rhi::DescriptorType::StorageBuffer, 1, 17},   // u_Objects (Vertex|Fragment)
-        {5, rhi::DescriptorType::SampledImage, 4096, 16, true},  // u_Textures[] bindless
-        {6, rhi::DescriptorType::Sampler, 4096, 16, true},               // u_Samplers[] bindless
+        {2, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskVertex | rhi::kStageMaskFragment},   // u_Objects (Vertex|Fragment)
+        {5, rhi::DescriptorType::SampledImage, 4096, rhi::kStageMaskFragment, true},  // u_Textures[] bindless
+        {6, rhi::DescriptorType::Sampler, 4096, rhi::kStageMaskFragment, true},               // u_Samplers[] bindless
     };
     m_GBufferLayout = device->CreateDescriptorSetLayout(gbLayout);
 
@@ -191,7 +191,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         {1,0,rhi::VertexFormat::Float3, offsetof(he::StaticVertex, normal)},
         {2,0,rhi::VertexFormat::Float2, offsetof(he::StaticVertex, uv)},
     };
-    rhi::PushConstantRange pc; pc.stageMask = 1|16; pc.size = rhi::kMaxPushConstantSize; // 192B 实际用量
+    rhi::PushConstantRange pc; pc.stageMask = rhi::kStageMaskVertex | rhi::kStageMaskFragment; pc.size = rhi::kMaxPushConstantSize; // 192B 实际用量
     rhi::PipelineStateDesc gbDesc;
     gbDesc.vertexShader = &gbVS; gbDesc.pixelShader = &gbFS;
     gbDesc.vertexLayout = vl;
@@ -296,28 +296,28 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     lFS.stage = rhi::ShaderStage::Pixel;  lFS.spirv = k_DeferredLighting_frag_spv; lFS.entryPoint = "main";
     rhi::DescriptorSetLayoutDesc ll;
     ll.bindings = {
-        {0, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // GBufferA
-        {1, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // GBufferB
-        {2, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // GBufferC
-        {3, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // Depth
-        {23, rhi::DescriptorType::CombinedImageSampler, 1, 16}, // GBufferE (worldPos)
-        {4, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // Shadow0 (CSM0)
-        {7, rhi::DescriptorType::StorageBuffer, 1, 16},  // LightGrid (Clustered)
-        {8, rhi::DescriptorType::StorageBuffer, 1, 16},  // LightIndexList (Clustered)
-        {9, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // SpotShadow
-        {10, rhi::DescriptorType::CombinedImageSampler, 1, 16}, // Shadow1 (CSM1)
-        {11, rhi::DescriptorType::CombinedImageSampler, 1, 16}, // Shadow2 (CSM2)
-        {12, rhi::DescriptorType::CombinedImageSampler, 1, 16}, // Irradiance
-        {13, rhi::DescriptorType::CombinedImageSampler, 1, 16}, // Prefilter
-        {14, rhi::DescriptorType::CombinedImageSampler, 1, 16}, // BRDF LUT
-        {15, rhi::DescriptorType::CombinedImageSampler, 1, 16}, // RSM Pos
-        {16, rhi::DescriptorType::CombinedImageSampler, 1, 16}, // RSM Flux
-        {17, rhi::DescriptorType::StorageBuffer, 1, 16},  // Lights
-        {18, rhi::DescriptorType::StorageBuffer, 1, 16},  // ShadowData
-        {19, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // SSGI
-        {20, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // SSAO
-        {21, rhi::DescriptorType::CombinedImageSampler, 1, 16},  // SSR
-        {22, rhi::DescriptorType::StorageBuffer,         1, 16},  // DDGI Probes
+        {0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // GBufferA
+        {1, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // GBufferB
+        {2, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // GBufferC
+        {3, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // Depth
+        {23, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}, // GBufferE (worldPos)
+        {4, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // Shadow0 (CSM0)
+        {7, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment},  // LightGrid (Clustered)
+        {8, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment},  // LightIndexList (Clustered)
+        {9, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // SpotShadow
+        {10, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}, // Shadow1 (CSM1)
+        {11, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}, // Shadow2 (CSM2)
+        {12, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}, // Irradiance
+        {13, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}, // Prefilter
+        {14, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}, // BRDF LUT
+        {15, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}, // RSM Pos
+        {16, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}, // RSM Flux
+        {17, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment},  // Lights
+        {18, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment},  // ShadowData
+        {19, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // SSGI
+        {20, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // SSAO
+        {21, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // SSR
+        {22, rhi::DescriptorType::StorageBuffer,         1, rhi::kStageMaskFragment},  // DDGI Probes
     };
     m_LightingLayout = device->CreateDescriptorSetLayout(ll);
     m_LightingSet    = device->AllocateDescriptorSet(m_LightingLayout);
@@ -341,7 +341,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         device->UpdateDescriptorSet(m_LightingSet, 22, rhi::DescriptorType::StorageBuffer, gb.get());
     }
 
-    rhi::PushConstantRange lpc; lpc.stageMask = 1|16; lpc.size = 128;  // 含 cluster 参数
+    rhi::PushConstantRange lpc; lpc.stageMask = rhi::kStageMaskVertex | rhi::kStageMaskFragment; lpc.size = 128;  // 含 cluster 参数
     rhi::PipelineStateDesc lDesc;
     lDesc.vertexShader = &lVS; lDesc.pixelShader = &lFS;
     lDesc.topology = rhi::PrimitiveTopology::TriangleList;

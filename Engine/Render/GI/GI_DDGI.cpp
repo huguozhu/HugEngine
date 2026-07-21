@@ -63,13 +63,13 @@ bool GI_DDGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     // binding 6:   PrevHDR CombinedImageSampler（前帧 HDR 辐射度）
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = {
-        {0, rhi::DescriptorType::CombinedImageSampler, 1, 32},
-        {1, rhi::DescriptorType::CombinedImageSampler, 1, 32},
-        {2, rhi::DescriptorType::CombinedImageSampler, 1, 32},
-        {3, rhi::DescriptorType::StorageBuffer,         1, 32},
-        {4, rhi::DescriptorType::UniformBuffer,         1, 32},
-        {5, rhi::DescriptorType::StorageBuffer,         1, 32},
-        {6, rhi::DescriptorType::CombinedImageSampler, 1, 32},   // 前帧 HDR
+        {0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
+        {1, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
+        {2, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
+        {3, rhi::DescriptorType::StorageBuffer,         1, rhi::kStageMaskCompute},
+        {4, rhi::DescriptorType::UniformBuffer,         1, rhi::kStageMaskCompute},
+        {5, rhi::DescriptorType::StorageBuffer,         1, rhi::kStageMaskCompute},
+        {6, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // 前帧 HDR
     };
     m_Layout = device->CreateDescriptorSetLayout(layout);
     m_Set    = device->AllocateDescriptorSet(m_Layout);
