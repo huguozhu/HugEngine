@@ -180,8 +180,16 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
             float3 toLight = light.positionRange.xyz - worldPos;
             float dist = length(toLight);
             L = toLight / max(dist, 0.001);
-            float d = dist / max(light.positionRange.w, 0.001);
-            attenuation = 1.0 / (1.0 + 2.0 * d + d * d);
+            float d = dist / max(abs(light.positionRange.w), 0.001);
+            // 物理模式：positionRange.w < 0 → 平方反比衰减 + 范围软截止
+            // 传统模式：positionRange.w > 0 → 多项式衰减
+            if (light.positionRange.w < 0.0) {
+                attenuation = 1.0 / max(d * d, 0.001);
+                float fade = smoothstep(1.0, 0.8, d);
+                attenuation *= fade * fade;  // 范围边缘软过渡
+            } else {
+                attenuation = 1.0 / (1.0 + 2.0 * d + d * d);
+            }
             if (ltype == 2u) {
                 float spotDot = dot(-L, normalize(light.directionType.xyz));
                 attenuation *= smoothstep(light.coneAngles.y, light.coneAngles.x, spotDot);
@@ -225,8 +233,14 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
         else {
             float3 toLight = light.positionRange.xyz - worldPos;
             float dist = length(toLight); L = toLight / max(dist, 0.001);
-            float d = dist / max(light.positionRange.w, 0.001);
-            attenuation = 1.0 / (1.0 + 2.0 * d + d * d);
+            float d = dist / max(abs(light.positionRange.w), 0.001);
+            if (light.positionRange.w < 0.0) {
+                attenuation = 1.0 / max(d * d, 0.001);
+                float fade = smoothstep(1.0, 0.8, d);
+                attenuation *= fade * fade;
+            } else {
+                attenuation = 1.0 / (1.0 + 2.0 * d + d * d);
+            }
             if (ltype == 2u) { float spotDot = dot(-L, normalize(light.directionType.xyz));
                 attenuation *= smoothstep(light.coneAngles.y, light.coneAngles.x, spotDot); }
         }

@@ -7,7 +7,11 @@
 // LightComponent — 光照组件体系
 //
 // 基类 + 3 个子类：DirectionalLight / PointLight / SpotLight
-// Phase 2 B4 将扩展阴影投射
+//
+// 物理模式（向后兼容）:
+//   luminousIntensity>0 / illuminance>0 → 物理单位 + 平方反比衰减
+//   luminousIntensity=0 / illuminance=0 → 传统 intensity + 多项式衰减
+//   colorTemperature>0 → 色温→RGB 叠加到 color 滤镜
 // ============================================================
 
 namespace he {
@@ -26,7 +30,12 @@ public:
     LightType type      = LightType::Directional;  // 光源类型
     bool      enabled   = true;                    // 是否启用
     float3    color     = float3(1.0f);            // 光照颜色（线性空间）
-    float     intensity = 1.0f;                    // 强度
+    float     intensity = 1.0f;                    // 强度（非物理模式下的无单位乘数）
+
+    // --- 物理光照参数（0 = 使用传统 intensity 模式）---
+    float     colorTemperature = 0.0f;               // 色温, K（0=直接使用 color, >0=色温→RGB × color 滤镜）
+    float     luminousIntensity = 0.0f;              // 发光强度, cd（点光/聚光物理模式, 0=传统模式）
+    float     illuminance = 0.0f;                    // 照度, lux（方向光物理模式, 0=传统模式）
 
     // --- 阴影参数 ---
     bool      castShadow       = false;            // 是否投射阴影

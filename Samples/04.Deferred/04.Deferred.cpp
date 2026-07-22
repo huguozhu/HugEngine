@@ -983,6 +983,21 @@ int main() {
                 ImGui::ColorEdit3(isMain ? "颜色##MainDL" : "颜色##FillDL", &dl.color[0]);
                 ImGui::DragFloat(isMain ? "强度##MainDL" : "强度##FillDL", &dl.intensity, 0.1f, 0.0f, 100.0f, "%.1f");
 
+                // 物理光源参数（方向光）
+                static bool physDirLight = false;
+                ImGui::Checkbox(isMain ? "物理模式##PhysDL" : "物理模式##PhysFillDL", &physDirLight);
+                if (physDirLight) {
+                    ImGui::Indent(12.0f);
+                    ImGui::DragFloat(isMain ? "照度 lux##MainDL" : "照度 lux##FillDL",
+                        &dl.illuminance, 1000.0f, 0.0f, 200000.0f, "%.0f");
+                    if (dl.illuminance > 0.0f) {
+                        ImGui::TextDisabled(isMain ? "(!) 强度将被忽略，使用物理模式" : "(!) intensity ignored, using physical");
+                    }
+                    ImGui::DragFloat(isMain ? "色温 K##MainDL" : "色温 K##FillDL",
+                        &dl.colorTemperature, 50.0f, 0.0f, 12000.0f, "%.0f");
+                    ImGui::Unindent(12.0f);
+                }
+
                 if (isMain) {
                     bool shadowOn = dl.castShadow;
                     if (ImGui::Checkbox("投射阴影", &shadowOn))
@@ -1013,6 +1028,20 @@ int main() {
                 ImGui::ColorEdit3("颜色", &pl.color[0]);
                 ImGui::DragFloat("强度", &pl.intensity, 0.1f, 0.0f, 200.0f, "%.1f");
                 ImGui::DragFloat("范围", &pl.range, 10.0f, 10.0f, 5000.0f, "%.0f");
+
+                // 物理光源参数（点光源）
+                static bool physPointLight = false;
+                ImGui::Checkbox("物理模式##PhysPoint", &physPointLight);
+                if (physPointLight) {
+                    ImGui::Indent(12.0f);
+                    ImGui::DragFloat("发光强度 cd##Point", &pl.luminousIntensity, 1.0f, 0.0f, 100000.0f, "%.0f");
+                    if (pl.luminousIntensity > 0.0f) {
+                        ImGui::TextDisabled("(!) 强度将被忽略，使用物理模式");
+                    }
+                    ImGui::DragFloat("色温 K##Point", &pl.colorTemperature, 50.0f, 0.0f, 12000.0f, "%.0f");
+                    ImGui::Unindent(12.0f);
+                }
+
                 bool shadowOn = pl.castShadow;
                 if (ImGui::Checkbox("投射阴影##PointShadow", &shadowOn))
                     pl.castShadow = shadowOn;

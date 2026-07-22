@@ -9,6 +9,7 @@
 #include "AntiAliasing/AA_FXAA.h"
 #include "Pipeline/GBufferRenderer_CPU.h"
 #include "Pipeline/GBufferRenderer_GPU.h"
+#include "Pipeline/PhysicalLight.h"
 
 #include "Asset/BindlessTextureManager.h"
 #include "Scene/CubeComponent.h"
@@ -612,23 +613,51 @@ void DeferredPipeline::CollectLights(PushConstantData& pc, he::World& world,
     auto cl = [&](he::Entity e, he::LightComponent& lc) {
         u32 i = pc.lightCount; if (i >= MAX_LIGHTS || !lc.enabled) return;
         GPULight gl{};
-        gl.colorIntensity = float4(lc.color, lc.intensity);
+
+        // 色温 → RGB 颜色（叠加到 color 滤镜色上）
+        float3 lightColor = lc.color;
+        if (lc.colorTemperature > 0.0f) {
+            lightColor *= render::KelvinToRGB(lc.colorTemperature);
+        }
+
+        gl.colorIntensity = float4(lightColor, lc.intensity);
         gl.shadowIndex = m_ShadowSystem ? m_ShadowSystem->GetShadowIndex(e) : -1;
+
+        // ── 物理光源模式（luminousIntensity>0 或 illuminance>0 时启用）──
+        // positionRange.w < 0 标记物理模式（shader 用 abs() 获取实际范围值）
         switch (lc.type) {
         case he::LightType::Directional: {
             auto* dl = static_cast<he::DirectionalLight*>(&lc);
-            gl.directionType = float4(dl->direction, 0.0f); break;
+            gl.directionType = float4(dl->direction, 0.0f);
+            if (lc.illuminance > 0.0f) {
+                // 方向光物理模式：colorIntensity.w = 照度 (lux), positionRange.w = -1 (flag)
+                gl.colorIntensity.w = lc.illuminance;
+                gl.positionRange.w   = -1.0f;
+            }
+            break;
         }
         case he::LightType::Point: {
             auto* pl = static_cast<he::PointLight*>(&lc);
             gl.positionRange = float4(sg.GetWorldPosition(e), pl->range);
-            gl.directionType.w = 1.0f; break;
+            gl.directionType.w = 1.0f;
+            if (lc.luminousIntensity > 0.0f) {
+                // 点光源物理模式：colorIntensity.w = 发光强度 (cd), 范围取负标记
+                gl.colorIntensity.w = lc.luminousIntensity;
+                gl.positionRange.w   = -(pl->range);
+            }
+            break;
         }
         case he::LightType::Spot: {
             auto* sl = static_cast<he::SpotLight*>(&lc);
-            gl.positionRange = float4(sg.GetWorldPosition(e), sl->range);
+            float r = lc.luminousIntensity > 0.0f ? -(sl->range) : sl->range;
+            gl.positionRange = float4(sg.GetWorldPosition(e), r);
             gl.directionType = float4(glm::normalize(sl->direction), 2.0f); // Spot
-            gl.coneAngles = float2(sl->innerConeAngle, sl->outerConeAngle); break;
+            gl.coneAngles = float2(sl->innerConeAngle, sl->outerConeAngle);
+            if (lc.luminousIntensity > 0.0f) {
+                // 聚光物理模式：colorIntensity.w = 发光强度 (cd)
+                gl.colorIntensity.w = lc.luminousIntensity;
+            }
+            break;
         }
         default: break;
         }
