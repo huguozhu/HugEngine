@@ -10,6 +10,7 @@
 
 #include "VulkanQueryPool.h"
 #include "VulkanDevice.h"
+#include "VulkanConverters.h"
 #include "Core/Assert.h"
 
 #include <algorithm>
@@ -268,6 +269,9 @@ void VulkanDevice::Initialize(const DeviceInitDesc& desc) {
     // 8. 加载 VkPipelineCache 持久化缓存（从磁盘 pipeline_cache.bin）
     LoadPipelineCache();
 
+    // 9. 初始化 TransientResourceAllocator（瞬态纹理内存池，默认 128MB × 2 双缓冲）
+    m_TransientAllocator.Initialize(m_Device, m_Physical, 128 * 1024 * 1024);
+
     HE_CORE_INFO("Vulkan device fully initialized");
 }
 
@@ -278,8 +282,11 @@ void VulkanDevice::Shutdown() {
     // 1. 等待 GPU 完成所有工作
     if (m_Device) vkDeviceWaitIdle(m_Device);
 
-    // 1.5. 保存并销毁 VkPipelineCache 持久化缓存（在 PSO 缓存清空之后、设备销毁之前）
+    // 1.5. 保存并销毁 VkPipelineCache 持久化缓存
     SavePipelineCache();
+
+    // 1.6. 销毁 TransientResourceAllocator（等待 GPU idle 后安全回收所有 Heap）
+    m_TransientAllocator.Shutdown();
 
     // 2. 清空 PSO 缓存（等待所有外部引用释放后销毁所有缓存的 Vulkan 对象）
     m_PSOCache.clear();
@@ -1024,6 +1031,51 @@ std::shared_ptr<u32> VulkanDevice::GetCachedPSORef(uint64_t hash,
 
 std::unique_ptr<IRHITexture> VulkanDevice::CreateTexture(const TextureDesc& desc) {
     return CreateVulkanTexture(m_VmaAllocator, m_GraphicsCmdPool, m_GraphicsQueue, desc);
+}
+
+// ============================================================
+// CreateTransientTexture — 使用 TransientResourceAllocator 创建瞬态纹理
+// VkImage 绑定到共享 Heap 的偏移位置，帧末 Heap 被回收
+// 与 CreateTexture 的关键区别：不通过 VMA 分配独占内存
+// ============================================================
+std::unique_ptr<IRHITexture> VulkanDevice::CreateTransientTexture(const TextureDesc& desc) {
+    if (!m_TransientAllocator.IsInitialized()) return nullptr;
+
+    // 构建 VkImageCreateInfo（与 VulkanTexture 的构造逻辑保持一致）
+    bool isCubemap = u32(desc.usage) & u32(TextureUsage::Cubemap);
+    VkFormat vkFormat = ToVkFormat(desc.format);
+
+    VkImageCreateInfo imageInfo{};
+    imageInfo.sType       = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType   = (desc.depth > 1) ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
+    imageInfo.format      = vkFormat;
+    imageInfo.extent      = {desc.width, desc.height, desc.depth};
+    imageInfo.mipLevels   = desc.mipLevels;
+    imageInfo.arrayLayers = isCubemap ? kCubemapFaceCount : desc.arrayLayers;
+    VkSampleCountFlagBits vkSamples = VK_SAMPLE_COUNT_1_BIT;
+    switch (desc.sampleCount) {
+        case 2:  vkSamples = VK_SAMPLE_COUNT_2_BIT;  break;
+        case 4:  vkSamples = VK_SAMPLE_COUNT_4_BIT;  break;
+        case 8:  vkSamples = VK_SAMPLE_COUNT_8_BIT;  break;
+        case 16: vkSamples = VK_SAMPLE_COUNT_16_BIT; break;
+        case 32: vkSamples = VK_SAMPLE_COUNT_32_BIT; break;
+        case 64: vkSamples = VK_SAMPLE_COUNT_64_BIT; break;
+        default: vkSamples = VK_SAMPLE_COUNT_1_BIT;  break;
+    }
+    imageInfo.samples     = vkSamples;
+    imageInfo.tiling      = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.usage       = ToVkImageUsage(desc.usage);
+    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (isCubemap) imageInfo.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+
+    // 通过 TransientResourceAllocator 子分配 VkImage + 绑定到共享 Heap
+    auto placed = m_TransientAllocator.AllocateImage(imageInfo);
+    if (placed.image == VK_NULL_HANDLE) {
+        HE_CORE_WARN("CreateTransientTexture: 瞬态分配失败 ({}x{}), 回退到普通纹理", desc.width, desc.height);
+        return nullptr;  // 调用方应回退到 CreateTexture
+    }
+
+    return std::make_unique<VulkanPlacedTexture>(m_Device, placed.image, vkFormat, desc);
 }
 
 std::unique_ptr<IRHISampler> VulkanDevice::CreateSampler(const SamplerDesc& desc) {

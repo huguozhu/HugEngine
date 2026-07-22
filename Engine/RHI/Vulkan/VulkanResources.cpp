@@ -171,7 +171,7 @@ static bool IsCompressedFormat(Format fmt) {
 }
 
 // TextureUsage → VkImageUsageFlags
-static VkImageUsageFlags ToVkImageUsage(TextureUsage usage) {
+VkImageUsageFlags ToVkImageUsage(TextureUsage usage) {
     VkImageUsageFlags flags = 0;
     if (u32(usage) & u32(TextureUsage::ShaderResource))  flags |= VK_IMAGE_USAGE_SAMPLED_BIT;
     if (u32(usage) & u32(TextureUsage::RenderTarget))    flags |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
@@ -590,6 +590,70 @@ std::unique_ptr<IRHISampler> CreateVulkanSampler(
     VkDevice device, const SamplerDesc& desc)
 {
     return std::make_unique<VulkanSampler>(device, desc);
+}
+
+// ============================================================
+// VulkanPlacedTexture 实现 — 使用外部 VkDeviceMemory 的瞬态纹理
+// ============================================================
+
+VulkanPlacedTexture::VulkanPlacedTexture(VkDevice device, VkImage image, VkFormat vkFormat,
+                                         const TextureDesc& desc)
+    : m_Device(device), m_Image(image)
+    , m_Width(desc.width), m_Height(desc.height), m_Depth(desc.depth)
+    , m_MipLevels(desc.mipLevels)
+    , m_ArrayLayers(u32(desc.usage) & u32(TextureUsage::Cubemap) ? kCubemapFaceCount : desc.arrayLayers)
+    , m_Format(desc.format)
+{
+    // 创建 ImageView（与 VulkanTexture 构造函数相同逻辑）
+    bool isCubemap = u32(desc.usage) & u32(TextureUsage::Cubemap);
+
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType      = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image      = m_Image;
+    viewInfo.viewType   = ToVkImageViewType(desc);
+    viewInfo.format     = vkFormat;
+    viewInfo.subresourceRange.aspectMask     = ToVkAspectMask(desc.format);
+    viewInfo.subresourceRange.baseMipLevel   = 0;
+    viewInfo.subresourceRange.levelCount     = m_MipLevels;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount     = m_ArrayLayers;
+
+    VkResult result = vkCreateImageView(m_Device, &viewInfo, nullptr, &m_ImageView);
+    HE_ASSERT(result == VK_SUCCESS, "VulkanPlacedTexture: 创建 ImageView 失败");
+
+    // Cubemap 逐面视图
+    if (isCubemap) {
+        m_FaceViews.resize(kCubemapFaceCount);
+        VkImageViewCreateInfo faceViewInfo{};
+        faceViewInfo.sType      = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        faceViewInfo.image      = m_Image;
+        faceViewInfo.viewType   = VK_IMAGE_VIEW_TYPE_2D;
+        faceViewInfo.format     = vkFormat;
+        faceViewInfo.subresourceRange.aspectMask = ToVkAspectMask(desc.format);
+        faceViewInfo.subresourceRange.baseMipLevel = 0;
+        faceViewInfo.subresourceRange.levelCount   = m_MipLevels;
+        faceViewInfo.subresourceRange.baseArrayLayer = 0;
+        faceViewInfo.subresourceRange.layerCount     = 1;
+
+        for (u32 face = 0; face < kCubemapFaceCount; ++face) {
+            faceViewInfo.subresourceRange.baseArrayLayer = face;
+            result = vkCreateImageView(m_Device, &faceViewInfo, nullptr, &m_FaceViews[face]);
+            HE_ASSERT(result == VK_SUCCESS, "VulkanPlacedTexture: 创建 Cubemap face view 失败");
+        }
+    }
+
+    HE_CORE_INFO("VulkanPlacedTexture: {}x{} [{}]{}", m_Width, m_Height,
+        m_Format == Format::RGBA8_UNORM ? "RGBA8" : "other",
+        isCubemap ? " cubemap" : "");
+}
+
+VulkanPlacedTexture::~VulkanPlacedTexture() {
+    // 只销毁 ImageView 和 VkImage，不销毁 VkDeviceMemory（由 TransientResourceAllocator 管理）
+    for (auto& fv : m_FaceViews)
+        if (fv) vkDestroyImageView(m_Device, fv, nullptr);
+    m_FaceViews.clear();
+    if (m_ImageView) vkDestroyImageView(m_Device, m_ImageView, nullptr);
+    if (m_Image)     vkDestroyImage(m_Device, m_Image, nullptr);
 }
 
 } // namespace he::rhi

@@ -345,6 +345,9 @@ void RenderGraph::Execute(rhi::IRHICommandList* cmdList, rhi::IRHIDevice* device
 
     HE_CORE_INFO("RenderGraph::Execute — {} passes", m_PassOrder.size());
 
+    // 帧首：推进瞬态资源分配器（切换 Heap，回收上上帧内存）
+    device->AdvanceTransientResources();
+
     // 每帧更新 SwapChain BackBuffer
     if (m_SwapChain && m_BackBufferHandle != kInvalidHandle) {
         u32 idx = m_SwapChain->GetCurrentBackBufferIndex();
@@ -367,7 +370,17 @@ void RenderGraph::Execute(rhi::IRHICommandList* cmdList, rhi::IRHIDevice* device
             texDesc.height = desc.height;
             texDesc.format = desc.format;
             texDesc.usage  = desc.textureUsage;
-            textures[i] = device->CreateTexture(texDesc);
+
+            // 别名资源：优先使用瞬态内存池（帧内共享 Heap，帧末回收）
+            // 非别名资源（如导入/持久资源）：使用独占 VMA 分配
+            bool isAliased = (i < m_AliasInfo.size() && m_AliasInfo[i].poolId > 0);
+            if (isAliased) {
+                textures[i] = device->CreateTransientTexture(texDesc);
+            }
+            // 回退：瞬态分配失败或不支持时使用普通纹理
+            if (!textures[i]) {
+                textures[i] = device->CreateTexture(texDesc);
+            }
         } else if (desc.type == ResourceType::Buffer && desc.bufferSize > 0) {
             rhi::BufferDesc bufDesc;
             bufDesc.size  = desc.bufferSize;

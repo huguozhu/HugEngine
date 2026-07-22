@@ -88,6 +88,48 @@ private:
 };
 
 // ============================================================
+// VulkanPlacedTexture — 瞬态纹理（使用外部 VkDeviceMemory）
+// 与 VulkanTexture 的关键区别：不拥有 VkDeviceMemory
+// VkImage 绑定到 TransientResourceAllocator 管理的共享 Heap 偏移位置
+// 帧末 Heap 被回收时，VulkanPlacedTexture 的 VkImage 也被销毁或归还缓存
+// ============================================================
+class VulkanPlacedTexture final : public IRHITexture {
+public:
+    /// 构造函数：接收已绑定到 Heap 的 VkImage，创建 ImageView
+    VulkanPlacedTexture(VkDevice device, VkImage image, VkFormat vkFormat,
+                        const TextureDesc& desc);
+    ~VulkanPlacedTexture() override;
+
+    u32    GetWidth()        const override { return m_Width; }
+    u32    GetHeight()       const override { return m_Height; }
+    u32    GetDepth()        const override { return m_Depth; }
+    u32    GetMipLevels()    const override { return m_MipLevels; }
+    u32    GetArrayLayers()  const override { return m_ArrayLayers; }
+    Format GetFormat()       const override { return m_Format; }
+    void*  GetNativeHandle() const override { return reinterpret_cast<void*>(m_ImageView); }
+    void*  GetNativeHandle(u32 index) const override {
+        return (index < m_FaceViews.size())
+            ? reinterpret_cast<void*>(m_FaceViews[index])
+            : reinterpret_cast<void*>(m_ImageView);
+    }
+
+    VkImage     GetImage()     const { return m_Image; }
+    VkImageView GetImageView() const { return m_ImageView; }
+
+private:
+    VkDevice    m_Device     = VK_NULL_HANDLE;
+    VkImage     m_Image      = VK_NULL_HANDLE;
+    VkImageView m_ImageView  = VK_NULL_HANDLE;
+    std::vector<VkImageView> m_FaceViews;  // Cubemap 逐面视图
+    u32         m_Width      = 1;
+    u32         m_Height     = 1;
+    u32         m_Depth      = 1;
+    u32         m_MipLevels  = 1;
+    u32         m_ArrayLayers = 1;
+    Format      m_Format     = Format::RGBA8_UNORM;
+};
+
+// ============================================================
 // VulkanSampler — GPU 采样器
 // ============================================================
 class VulkanSampler final : public IRHISampler {

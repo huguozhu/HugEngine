@@ -23,6 +23,7 @@ set(RHI_SOURCES
     Vulkan/VulkanPipelineState.h
     Vulkan/VulkanQueryPool.h
     Vulkan/VulkanDGC.h
+    TransientResourceAllocator.h
 )
 
 target_sources(HugEngineRHI PRIVATE ${RHI_SOURCES})
@@ -56,6 +57,7 @@ if(HUGENGINE_RHI_VULKAN)
         Vulkan/VulkanConverters.cpp
         Vulkan/VulkanPipeline.cpp
         Vulkan/VulkanDGC.cpp
+        TransientResourceAllocator.cpp
     )
 
     target_sources(HugEngineRHI PRIVATE ${RHI_VULKAN_SOURCES})

@@ -20,6 +20,9 @@ namespace he::rhi {
 // --- 格式转换 ---
 VkFormat    ToVkFormat(Format fmt);
 
+// --- 纹理使用标志转换 ---
+VkImageUsageFlags ToVkImageUsage(TextureUsage usage);
+
 // --- 深度/模板 ---
 VkCompareOp         ToVkCompareOp(CompareFunc func);
 VkAttachmentLoadOp  ToVkLoadOp(LoadOp op);

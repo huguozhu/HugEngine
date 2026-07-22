@@ -22,6 +22,7 @@
 
 #include "RHI/RHI.h"
 #include "VulkanDGC.h"
+#include "TransientResourceAllocator.h"
 
 // 子模块头文件
 #include "VulkanSwapChain.h"
@@ -56,6 +57,10 @@ public:
     std::unique_ptr<IRHITexture>      CreateTexture(const TextureDesc& desc) override;
     std::unique_ptr<IRHISampler>      CreateSampler(const SamplerDesc& desc) override;
     std::unique_ptr<IRHIPipelineState> CreatePipelineState(const PipelineStateDesc& desc) override;
+
+    // Transient Resource — 使用瞬态内存池创建纹理（RenderGraph 别名分析驱动）
+    std::unique_ptr<IRHITexture>        CreateTransientTexture(const TextureDesc& desc) override;
+    void AdvanceTransientResources() override { m_TransientAllocator.AdvanceFrame(); }
 
     // Ray Tracing 资源创建
     std::unique_ptr<IRHIAccelerationStructure>
@@ -183,6 +188,9 @@ public:
     /// VkPipelineCache 持久化缓存句柄（供 CreateVulkanPipeline / RT 管线创建使用）
     VkPipelineCache GetPipelineCache() const { return m_PipelineCache; }
 
+    /// TransientResourceAllocator 访问器（供内部调试/统计使用）
+    TransientResourceAllocator& GetTransientAllocator() { return m_TransientAllocator; }
+
     // ============================================================
     // 延迟销毁队列 — 每帧开始时调用一次，安全销毁 3 帧前的 GPU 资源
     // 内部有帧计数保护，多次调用只会执行一次
@@ -248,6 +256,12 @@ private:
     VkPhysicalDevice m_Physical        = VK_NULL_HANDLE;
     VkDevice         m_Device          = VK_NULL_HANDLE;
     VkPipelineCache  m_PipelineCache   = VK_NULL_HANDLE;  // 持久化 PSO 编译缓存（磁盘 + GPU 驱动）
+
+    // ============================================================
+    // 瞬态资源分配器 — 帧内临时纹理内存池
+    // 在 CreateLogicalDevice 后初始化，Shutdown 时销毁
+    // ============================================================
+    TransientResourceAllocator m_TransientAllocator;
     VkSurfaceKHR     m_Surface        = VK_NULL_HANDLE;
 
     VkQueue          m_GraphicsQueue   = VK_NULL_HANDLE;

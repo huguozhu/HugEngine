@@ -47,6 +47,14 @@ public:
     virtual std::unique_ptr<IRHISampler>        CreateSampler(const SamplerDesc& desc) = 0;
     virtual std::unique_ptr<IRHIPipelineState>  CreatePipelineState(const PipelineStateDesc& desc) = 0;
 
+    // --- Transient Resource ---
+    // 创建使用瞬态内存的纹理（GPU 完成前帧后内存被回收）
+    // 返回 nullptr 表示后端不支持瞬态资源（回退到普通 CreateTexture）
+    virtual std::unique_ptr<IRHITexture>        CreateTransientTexture(const TextureDesc& desc) { return nullptr; }
+    // 推进瞬态资源帧：回收上一帧内存，切换到下一帧的 Heap
+    // 默认空实现：后端不支持瞬态资源时安全跳过
+    virtual void AdvanceTransientResources() {}
+
     // --- Ray Tracing 资源创建 ---
     virtual std::unique_ptr<IRHIAccelerationStructure>
         CreateBLAS(const BLASBuildDesc& desc) = 0;                                // 创建 Bottom-Level Acceleration Structure
