@@ -444,7 +444,7 @@ VulkanDevice::CreateRTPipelineState(const RTPipelineStateDesc& desc) {
     rtInfo.layout                       = pipelineLayout;
 
     VkPipeline rtPipeline;
-    VkResult result = m_RT.createRTPipelines(m_Device, VK_NULL_HANDLE, VK_NULL_HANDLE,
+    VkResult result = m_RT.createRTPipelines(m_Device, VK_NULL_HANDLE, m_PipelineCache,
                                               1, &rtInfo, nullptr, &rtPipeline);
     HE_ASSERT(result == VK_SUCCESS, "Ray Tracing Pipeline 创建失败");
 

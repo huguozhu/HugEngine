@@ -134,7 +134,9 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     VulkanDevice* vulkanDevice)
 {
     // ── PSO 缓存查找 ──
+    VkPipelineCache pipelineCache = VK_NULL_HANDLE;
     if (vulkanDevice) {
+        pipelineCache = vulkanDevice->GetPipelineCache();
         uint64_t descHash = HashPipelineStateDesc(desc);
         VkPipeline cachedPipeline = VK_NULL_HANDLE;
         VkPipelineLayout cachedLayout = VK_NULL_HANDLE;
@@ -203,7 +205,7 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
         compInfo.layout       = pipelineLayout;
 
         VkPipeline pipeline;
-        vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &compInfo, nullptr, &pipeline);
+        vkCreateComputePipelines(device, pipelineCache, 1, &compInfo, nullptr, &pipeline);
         vkDestroyShaderModule(device, comp, nullptr);
 
         HE_CORE_INFO("Vulkan compute pipeline created");
@@ -430,7 +432,7 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
         pipeInfo.subpass             = 0;
 
         VkPipeline pipeline;
-        vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeInfo, nullptr, &pipeline);
+        vkCreateGraphicsPipelines(device, pipelineCache, 1, &pipeInfo, nullptr, &pipeline);
 
         vkDestroyShaderModule(device, mesh, nullptr);
         if (task) vkDestroyShaderModule(device, task, nullptr);
@@ -699,7 +701,7 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     pipeInfo.subpass             = 0;
 
     VkPipeline pipeline;
-    vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeInfo, nullptr, &pipeline);
+    vkCreateGraphicsPipelines(device, pipelineCache, 1, &pipeInfo, nullptr, &pipeline);
 
     vkDestroyShaderModule(device, vert, nullptr);
     vkDestroyShaderModule(device, frag, nullptr);

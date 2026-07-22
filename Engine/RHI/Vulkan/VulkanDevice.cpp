@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <vector>
 #include <cstring>
+#include <fstream>
 
 namespace he::rhi {
 
@@ -264,6 +265,9 @@ void VulkanDevice::Initialize(const DeviceInitDesc& desc) {
     // 7. Create command pools
     CreateCommandPools();
 
+    // 8. 加载 VkPipelineCache 持久化缓存（从磁盘 pipeline_cache.bin）
+    LoadPipelineCache();
+
     HE_CORE_INFO("Vulkan device fully initialized");
 }
 
@@ -273,6 +277,9 @@ void VulkanDevice::Initialize(const DeviceInitDesc& desc) {
 void VulkanDevice::Shutdown() {
     // 1. 等待 GPU 完成所有工作
     if (m_Device) vkDeviceWaitIdle(m_Device);
+
+    // 1.5. 保存并销毁 VkPipelineCache 持久化缓存（在 PSO 缓存清空之后、设备销毁之前）
+    SavePipelineCache();
 
     // 2. 清空 PSO 缓存（等待所有外部引用释放后销毁所有缓存的 Vulkan 对象）
     m_PSOCache.clear();
@@ -905,6 +912,79 @@ std::unique_ptr<IRHIPipelineState> VulkanDevice::CreatePipelineState(const Pipel
     }
     // 传入 this 指针以使用 PSO 缓存 + 延迟销毁队列
     return CreateVulkanPipeline(m_Device, desc, descLayouts, this);
+}
+
+// ============================================================
+// VkPipelineCache 持久化 — 磁盘 ↔ GPU 驱动管线编译缓存
+// ============================================================
+
+void VulkanDevice::LoadPipelineCache() {
+    const char* kCacheFile = "pipeline_cache.bin";
+
+    // 1. 尝试从磁盘读取缓存数据
+    std::vector<u8> cacheData;
+    {
+        std::ifstream file(kCacheFile, std::ios::binary | std::ios::ate);
+        if (file.is_open()) {
+            usize fileSize = static_cast<usize>(file.tellg());
+            file.seekg(0, std::ios::beg);
+            cacheData.resize(fileSize);
+            file.read(reinterpret_cast<char*>(cacheData.data()), fileSize);
+            HE_CORE_INFO("PipelineCache: 从磁盘加载 {} bytes", fileSize);
+        } else {
+            HE_CORE_INFO("PipelineCache: 磁盘缓存文件未找到，首次启动使用空缓存");
+        }
+    }
+
+    // 2. 创建 VkPipelineCache（传入磁盘数据作为初始内容）
+    VkPipelineCacheCreateInfo cacheInfo{};
+    cacheInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+    cacheInfo.initialDataSize = cacheData.size();
+    cacheInfo.pInitialData    = cacheData.empty() ? nullptr : cacheData.data();
+
+    VkResult result = vkCreatePipelineCache(m_Device, &cacheInfo, nullptr, &m_PipelineCache);
+    if (result == VK_SUCCESS) {
+        HE_CORE_INFO("PipelineCache: VkPipelineCache 创建成功 ({} bytes 初始数据)", cacheData.size());
+    } else {
+        HE_CORE_WARN("PipelineCache: vkCreatePipelineCache 失败 (result={})，回退到空缓存", int(result));
+        m_PipelineCache = VK_NULL_HANDLE;
+    }
+}
+
+void VulkanDevice::SavePipelineCache() {
+    if (!m_Device || m_PipelineCache == VK_NULL_HANDLE) return;
+
+    // 1. 查询缓存数据大小
+    usize dataSize = 0;
+    VkResult result = vkGetPipelineCacheData(m_Device, m_PipelineCache, &dataSize, nullptr);
+    if (result != VK_SUCCESS || dataSize == 0) {
+        HE_CORE_INFO("PipelineCache: 缓存为空，跳过保存");
+        vkDestroyPipelineCache(m_Device, m_PipelineCache, nullptr);
+        m_PipelineCache = VK_NULL_HANDLE;
+        return;
+    }
+
+    // 2. 获取缓存数据
+    std::vector<u8> cacheData(dataSize);
+    result = vkGetPipelineCacheData(m_Device, m_PipelineCache, &dataSize, cacheData.data());
+    if (result == VK_SUCCESS) {
+        // 3. 写入磁盘
+        const char* kCacheFile = "pipeline_cache.bin";
+        std::ofstream file(kCacheFile, std::ios::binary | std::ios::trunc);
+        if (file.is_open()) {
+            file.write(reinterpret_cast<const char*>(cacheData.data()), dataSize);
+            file.close();
+            HE_CORE_INFO("PipelineCache: 保存 {} bytes 到磁盘", dataSize);
+        } else {
+            HE_CORE_WARN("PipelineCache: 无法写入缓存文件 {}", kCacheFile);
+        }
+    } else {
+        HE_CORE_WARN("PipelineCache: vkGetPipelineCacheData 失败 (result={})", int(result));
+    }
+
+    // 4. 销毁 VkPipelineCache
+    vkDestroyPipelineCache(m_Device, m_PipelineCache, nullptr);
+    m_PipelineCache = VK_NULL_HANDLE;
 }
 
 // ============================================================

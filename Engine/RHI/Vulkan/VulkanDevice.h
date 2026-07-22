@@ -180,6 +180,9 @@ public:
     void InsertPSOToCache(uint64_t hash, VkPipeline pipeline,
                           VkPipelineLayout layout, VkRenderPass rp);
 
+    /// VkPipelineCache 持久化缓存句柄（供 CreateVulkanPipeline / RT 管线创建使用）
+    VkPipelineCache GetPipelineCache() const { return m_PipelineCache; }
+
     // ============================================================
     // 延迟销毁队列 — 每帧开始时调用一次，安全销毁 3 帧前的 GPU 资源
     // 内部有帧计数保护，多次调用只会执行一次
@@ -238,9 +241,13 @@ private:
     void LoadMeshFunctions();
     void LoadDebugUtilsFunctions();  /// 加载 VK_EXT_debug_utils 调试标签 + 对象命名函数
 
+    void LoadPipelineCache();  /// 从磁盘加载 pipeline_cache.bin 并创建 VkPipelineCache
+    void SavePipelineCache();  /// 将 VkPipelineCache 数据保存到磁盘
+
     VkInstance       m_Instance       = VK_NULL_HANDLE;
-    VkPhysicalDevice m_Physical       = VK_NULL_HANDLE;
-    VkDevice         m_Device         = VK_NULL_HANDLE;
+    VkPhysicalDevice m_Physical        = VK_NULL_HANDLE;
+    VkDevice         m_Device          = VK_NULL_HANDLE;
+    VkPipelineCache  m_PipelineCache   = VK_NULL_HANDLE;  // 持久化 PSO 编译缓存（磁盘 + GPU 驱动）
     VkSurfaceKHR     m_Surface        = VK_NULL_HANDLE;
 
     VkQueue          m_GraphicsQueue   = VK_NULL_HANDLE;
