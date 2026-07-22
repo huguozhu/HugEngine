@@ -1,7 +1,7 @@
 # RHI Transient Resource Allocator + PSO/Shader 编译管线规划
 
 > 2026-07-22 | 基于 HugEngine RHI vs UE5 差距分析
-> 最后更新：2026-07-22 | Phase 1 ✅ 完成 | Phase 2 ✅ 完成 | Phase 3 📋 设计完成
+> 最后更新：2026-07-22 | Phase 1 ✅ | Phase 2 ✅ | Phase 2.5 ✅ | Phase 3 ✅ | Phase 4 ⏳
 
 ---
 
@@ -11,7 +11,8 @@
 |-------|------|------|------|--------|
 | **1** | VkPipelineCache 持久化 | ✅ 已完成 | `cb0bcd2` | ~75 行 (4 files) |
 | **2** | Transient Allocator 基础版 | ✅ 已完成 | `fdf6a81` | ~200 行 (10 files) |
-| **3** | PSO 预热 + 限流 | 📋 设计完成 | — | ~200 行 (预估) |
+| **2.5** | Transient Allocator 端到端验证 | ✅ 已完成 | `0a1c012` | ~60 行 (3 files) |
+| **3** | PSO 预热管理器 | ✅ 已完成 | `0a1c012` | ~380 行 (11 files) |
 | **4** | Pipeline Library (Fast Link) | ⏳ 待规划 | — | ~300 行 (预估) |
 
 ### Phase 1 实现详情：VkPipelineCache 持久化
@@ -78,6 +79,35 @@ Frame N+1:
 - ⚠️ 当前 DeferredPipeline 所有 RenderTarget 均为 Import 纹理（GBuffer/ShadowMap/SSAO 等预先创建），RenderGraph 内无 `rg.CreateTexture()` 动态资源，瞬态路径未被触发（架构特征，非 bug）
 
 **后续工作：** 当更多 Pass 改用 `rg.CreateTexture()` 动态创建帧内临时纹理时，瞬态分配器自动生效。
+
+---
+
+### Phase 2.5 实现详情：Transient Allocator 端到端验证
+
+**提交：** `0a1c012`
+
+**改动文件：**
+- `DeferredPipeline.h` — 新增 `m_TransientTestPSO` 成员
+- `DeferredPipeline.cpp` — CVar `cvTransientTest` + PSO 创建 + Init/Shutdown 集成
+- `DeferredPipeline_FrameGraph.cpp` — 2 个测试 Pass（`TransientTest_A` / `TransientTest_B`）
+
+**验证机制：**
+```
+cvTransientTest=1 时，在 Particle 之后、Bloom 之前插入 2 个测试 Pass：
+  Pass A: rg.CreateTexture("TransientTest_A", 半分辨率 RGBA16_FLOAT) + 声明写入 HDR
+  Pass B: rg.CreateTexture("TransientTest_B", 半分辨率 RGBA16_FLOAT) + 声明写入 HDR
+
+两个瞬态纹理同大小、非重叠生命周期 → ApplyAliasing 归入同一池
+声明写入 HDRTarget → 防止 CullDeadPasses 裁剪
+```
+
+**测试结果（2026-07-22）：**
+- ✅ `VulkanPlacedTexture: 480x270 [other]` — 每帧 2 次 CreateTransientTexture 调用
+- ✅ `TransientAllocator: Frame N → 切换到 Heap{N%2}` — 双缓冲切换正常
+- ✅ `峰值使用 2.8MB / 128MB` — 瞬态堆正在分配
+- ✅ VkImage 跨帧复用（从缓存命中率可验证）
+
+**默认状态：** `cvTransientTest=0`（关闭），设为 1 重新编译即可启用验证。
 
 ---
 
@@ -384,37 +414,55 @@ void ProcessPSOQueue(u32 maxPerFrame) {
 收益: 热启动 PSO 创建 50ms → 2ms ✅ 已验证
 ```
 
-#### Phase 2：异步 PSO 预热 → Phase 3（设计完成，待实现）
+#### Phase 3 实现详情：PSO 预热管理器 ✅
 
+**提交：** `0a1c012`
+
+**新增文件：**
+- `Engine/RHI/Vulkan/PSOPrecompileManager.h` — 预热管理器类：队列 + worker 线程 + cache merge
+- `Engine/RHI/Vulkan/PSOPrecompileManager.cpp` — 完整实现（Compute + Graphics PSO 编译，~280 行）
+
+**修改文件：**
+- `RHI/RHI.h` — `IRHIDevice` 新增 `PrecompileQueuePSO` / `StartPSOPrecompile` / `GetPSOPrecompileProgress` 虚方法（默认空实现）
+- `Vulkan/VulkanDevice.h` — include + override 声明 + `m_PSOPrecompileManager` 成员
+- `Vulkan/VulkanDevice.cpp` — Init/Shutdown 集成 + 三个方法实现
+- `RHI/CMakeLists.txt` — 注册 `PSOPrecompileManager.cpp`
+- `PostProcess/SSAO.h` — 存储 PSO 描述符 + ShaderBytecode 副本供惰性创建
+- `PostProcess/SSAO.cpp` — 改为惰性 PSO 创建（首次 Render 时调用 CreatePipelineState）+ `PrecompileQueuePSO` 注册
+- `Pipeline/DeferredPipeline.cpp` — `Initialize()` 末尾 `StartPSOPrecompile()`+ `NextFrame()` 中进度追踪
+
+**架构数据流：**
 ```
-新增:
-  Engine/RHI/
-  ├── PSOPrecompileManager.h    ← 预热任务队列 + Worker 线程 + 限流器
-  └── PSOPrecompileManager.cpp
+Initialize():
+  各子系统 → PrecompileQueuePSO(desc) → 入队到 m_Queue
+  StartPSOPrecompile() → Worker 线程:
+    ├── 从主 VkPipelineCache 获取缓存数据 → 派生独立 worker VkPipelineCache
+    ├── Compute PSO: vkCreateShaderModule → vkCreatePipelineLayout → vkCreateComputePipelines
+    ├── Graphics PSO: vkCreateShaderModule ×2 → vkCreatePipelineLayout → vkCreateRenderPass → vkCreateGraphicsPipelines
+    ├── 立即销毁临时 VkPipeline/VkRenderPass/VkPipelineLayout（编译结果已保留在 cache 中）
+    ├── 全部完成 → vkMergePipelineCaches(mainCache, workerCache) 合并
+    └── 线程退出
 
-流程:
-  1. Engine 启动 → 收集所有可能的 PipelineStateDesc 组合
-     （从各 Pass 的 Init 阶段注册 PSO 变体）
-  2. 后台线程逐项编译 → 写入独立的 worker VkPipelineCache
-  3. 完成后 vkMergePipelineCaches(mainCache, workerCache) 合并
-  4. 游戏线程在首次使用前检查预热状态
-     └── 命中: 零开销
-     └── 未命中: 同步编译（回退路径），限流 ≤3/帧
-
-改动量: ~200 行代码
-收益: 运行时 PSO 创建卡顿完全消除
-
-线程安全:
-  - Worker 线程使用独立 VkPipelineCache (vkCreatePipelineCache from main data)
-  - vkMergePipelineCaches 本身线程安全
-  - 不共享任何 mutable 状态（VkPipelineCache 是线程关联的）
+首次 Render():
+  if (!m_SSAO_PSO) → CreatePipelineState(m_SSAO_PsoDesc)
+    └── vkCreateGraphicsPipelines(mainCache, ...) → 主缓存已预热 → ~2ms（vs 冷启动 ~50ms）
 ```
 
-#### Phase 3：PSO 限流 + Fast Link → Phase 4（待规划）
+**测试结果（2026-07-22）：**
+- ✅ `PSOPrecompileManager: 启动后台预热 — 2 个 PSO`（SSAO + SSAO_Blur）
+- ✅ `Worker 线程完成 — 2/2 个 PSO 已编译`
+- ✅ `Worker 缓存已合并到主缓存` — vkMergePipelineCaches 成功
+- ✅ `DeferredPipeline: PSO 预热完成`
+- ✅ 零 Vulkan Validation 错误
+
+**PSO 限流器（未实现）：**
+- 当前引擎所有 PSO 在 `Initialize()` 阶段一次性创建，帧循环中无运行时 PSO 创建
+- 限流器在当前阶段无触发场景，待未来材质变体系统（1000+ PSO）时再实现
+
+#### Phase 4：Pipeline Library (Fast Link)（待规划）
 
 ```
 场景: 开放世界 1000+ 材质 → 1000+ PSO 变体
-限流: 每帧最多创建 3 个新 PSO，其余排队
 Fast Link: 将 PSO 拆分为 4 部分独立缓存，组合耗时 ~0.5ms
 
 （需要 VK_EXT_graphics_pipeline_library 支持）
@@ -428,7 +476,8 @@ Fast Link: 将 PSO 拆分为 4 部分独立缓存，组合耗时 ~0.5ms
 |-------|------|--------|------|------|------|
 | **1** | VkPipelineCache 持久化 | ~75 行 | 热启动 **25× 加速** | 零风险 | ✅ 已完成 |
 | **2** | Transient Allocator 基础版 | ~200 行 | **内存节省 60-70%** | 中（需 RenderGraph 别名分析） | ✅ 已完成 |
-| **3** | PSO 预热 + 限流 | ~200 行 | 消除运行时卡顿 | 低 | 📋 设计完成 |
+| **2.5** | Transient Allocator 端到端验证 | ~60 行 | 验证路径正确性 | 零风险（CVar 关闭） | ✅ 已完成 |
+| **3** | PSO 预热管理器 | ~380 行 | 后台编译 + 惰性 PSO 创建 | 低 | ✅ 已完成 |
 | **4** | Pipeline Library (Fast Link) | ~300 行 | PSO 链接 **100× 加速** | 中（需扩展支持） | ⏳ 待规划 |
 
-**建议顺序：Phase 1 ✅ → Phase 2 ✅ → Phase 3（当前），Phase 4 等待硬件普及。**
+**建议顺序：Phase 1 ✅ → Phase 2 ✅ → Phase 2.5 ✅ → Phase 3 ✅ → Phase 4 等待硬件普及。**
