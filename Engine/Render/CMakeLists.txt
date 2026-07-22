@@ -12,6 +12,8 @@ set(RENDER_SOURCES
     Pipeline/CameraController.h
     Pipeline/CameraController.cpp
     Pipeline/Camera.cpp
+    Pipeline/PhysicalCamera.h
+    Pipeline/PhysicalCamera.cpp
     Pipeline/ForwardPipeline.h
     Pipeline/ForwardPipeline.cpp
     Pipeline/ForwardPipeline_FrameGraph.cpp

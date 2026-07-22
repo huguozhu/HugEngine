@@ -15,8 +15,8 @@
 #include "Scene/LightComponent.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
-#include <cstring>
 #include <cmath>
+#include <cstring>
 #include <unordered_set>
 #include "GBuffer.vert.spv.h"
 #include "GBuffer.frag.spv.h"
@@ -56,6 +56,15 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     static bool firstFrame = true;
     if (firstFrame) { m_PrevViewProj = m_CurrViewProj; firstFrame = false; }
     if (m_AntiAliasing) m_AntiAliasing->OnBeginFrame();
+
+    // ── 物理相机参数推导（根据 camera.exposureBias 等字段判断是否启用）──
+    // 非零 exposureBias 表示使用了物理相机参数，将其传递到 DOF/MotionBlur/Exposure
+    if (camera.apertureDiameter > 0.0f) {
+        m_DOF.SetFocusDepth(camera.focusDistance);
+        m_DOF.SetIntensity(camera.maxCoC);
+    }
+    m_MotionBlur.SetIntensity(camera.motionBlurIntensity);
+    // exposureBias 叠加到 AutoExposure 输出（在 ToneMap Pass 前处理）
 
     // GPUScene 收集 → [GPU 模式: 填充 IndirectDraw 参数] → 上传
     m_GPUScene.Collect(world, sg);
@@ -591,7 +600,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     rg.AddPass("ToneMap",
         {},
         {{needLDR ? ldrTarget : backBuf, ResourceAccess::Write}},
-        [this, useTAA, needLDR, w, h, anyPostActive](rhi::IRHICommandList* c) {
+        [this, &camera, useTAA, needLDR, w, h, anyPostActive](rhi::IRHICommandList* c) {
             if (useTAA) {
                 m_ToneMap->SetInput(m_AntiAliasing->GetOutputTexture(),
                                     m_AntiAliasing->GetOutputSampler());
@@ -608,7 +617,10 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                     rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, m_HDRTarget.get());
                 m_ToneMap->SetInput(m_HDRTarget.get(), m_HDRSampler.get());
             }
-            m_ToneMap->SetExposure(m_AutoExposure.GetExposure());
+            // 物理相机曝光偏置叠加到自动曝光（EV 偏移 → 曝光倍率）
+            float physicalExposure = m_AutoExposure.GetExposure()
+                * std::exp2f(camera.exposureBias);
+            m_ToneMap->SetExposure(physicalExposure);
             m_ToneMap->PreBind(c);
             if (needLDR) {
                 rhi::ClearValue clr{};

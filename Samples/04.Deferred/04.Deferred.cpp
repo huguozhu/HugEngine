@@ -11,6 +11,7 @@
 #include "RHI/RHI.h"
 #include "Pipeline/DeferredPipeline.h"
 #include "Pipeline/CameraController.h"
+#include "Pipeline/PhysicalCamera.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
 #include "Scene/LightComponent.h"
@@ -739,6 +740,51 @@ int main() {
                 camCtrl.GetCamera().nearPlane = nearP;
             if (ImGui::DragFloat("远裁剪面", &farP, 10.0f, 10.0f, 50000.0f, "%.0f"))
                 camCtrl.GetCamera().farPlane = farP;
+
+            // ── 物理相机参数 ──
+            ImGui::SeparatorText("物理相机");
+            static render::PhysicalCameraParams physCam;
+            static bool usePhysicalCamera = false;
+            ImGui::Checkbox("启用物理相机", &usePhysicalCamera);
+            if (usePhysicalCamera) {
+                ImGui::Indent(12.0f);
+                // 镜头
+                ImGui::DragFloat("焦距 (mm)", &physCam.focalLength, 1.0f, 10.0f, 200.0f, "%.0f");
+                ImGui::DragFloat("光圈 f/", &physCam.fStop, 0.1f, 1.0f, 22.0f, "%.1f");
+                // 快门 + ISO
+                float shutterRecip = 1.0f / physCam.shutterSpeed;
+                ImGui::DragFloat("快门 1/", &shutterRecip, 1.0f, 1.0f, 8000.0f, "%.0f");
+                physCam.shutterSpeed = 1.0f / std::max(shutterRecip, 1.0f);
+                ImGui::DragFloat("ISO", &physCam.iso, 10.0f, 50.0f, 25600.0f, "%.0f");
+                // 传感器预设
+                static int sensorPreset = 0;
+                const char* sensorNames[] = {"全画幅 36×24", "APS-C 23.6×15.6", "M4/3 17.3×13.0"};
+                if (ImGui::Combo("传感器", &sensorPreset, sensorNames, 3)) {
+                    if (sensorPreset == 0) physCam.sensor = render::SensorSize::FullFrame();
+                    else if (sensorPreset == 1) physCam.sensor = render::SensorSize::APSC();
+                    else physCam.sensor = render::SensorSize::Micro43();
+                }
+                // 对焦距离
+                ImGui::DragFloat("对焦距离 (m)", &physCam.focusDistance, 0.1f, 0.1f, 500.0f, "%.1f");
+
+                // 应用物理相机参数到 CameraData
+                auto derived = render::DerivePhysicalCamera(physCam,
+                    camCtrl.GetCamera().aspectRatio);
+                camCtrl.GetCamera().fov               = derived.fov;
+                camCtrl.GetCamera().apertureDiameter   = derived.apertureDiameter;
+                camCtrl.GetCamera().exposureBias       = derived.exposureBias;
+                camCtrl.GetCamera().motionBlurIntensity = derived.motionBlurIntensity;
+                camCtrl.GetCamera().focusDistance      = derived.focusDistance;
+                camCtrl.GetCamera().maxCoC             = derived.maxCoC;
+                camCtrl.GetCamera().nearPlane          = physCam.nearPlane;
+                camCtrl.GetCamera().farPlane           = physCam.farPlane;
+
+                // 显示推导值
+                ImGui::Text("推导 FOV: %.1f°  |  光圈孔径: %.2f mm", derived.fov, derived.apertureDiameter);
+                ImGui::Text("EV 偏置: %+.2f  |  运动模糊: %.2f×", derived.exposureBias, derived.motionBlurIntensity);
+                ImGui::Text("弥散圆 max: %.3f", derived.maxCoC);
+                ImGui::Unindent(12.0f);
+            }
 
             // GI — IBL
             auto* gi = pipeline.GetGI();

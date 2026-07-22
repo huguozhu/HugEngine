@@ -25,6 +25,13 @@ struct CameraData {
     float   farPlane    = kDefaultFarPlane;     // 远裁剪面
     float   aspectRatio = 16.0f / 9.0f;         // 宽高比
 
+    // ── 物理相机推导值（可选，由 PhysicalCamera 填充）──
+    float   exposureBias          = 0.0f;   // 曝光偏置（EV 偏移，叠加到 AutoExposure）
+    float   apertureDiameter      = 0.0f;   // 光圈孔径直径, mm（0=不使用物理 DOF）
+    float   focusDistance         = 5.0f;   // 对焦距离, 世界单位
+    float   motionBlurIntensity   = 0.5f;   // 运动模糊强度（物理相机可覆盖）
+    float   maxCoC                = 0.03f;  // 最大弥散圆直径（屏幕空间比例）
+
     // 视图矩阵（世界空间 → 相机空间）
     float4x4 GetViewMatrix() const {
         float3 f = glm::normalize(forward);
