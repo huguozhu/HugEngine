@@ -26,6 +26,9 @@
 // CVar: DGC 运行时开关（0=关闭，1=开启，默认关闭以保留传统 ExecuteIndirect 回退）
 // 在控制台输入 "r.DGC.Enable 1" 可动态启用
 static int32_t cvDGC_Enable = 0;
+
+// CVar: 瞬态资源路径验证开关（与 DeferredPipeline.cpp 中同步）
+static int32_t cvTransientTest = 0;  // 瞬态资源路径验证开关（1=启用测试 Pass）
 static const char* kCVar_DGC_Enable_Name = "r.DGC.Enable";
 
 
@@ -458,6 +461,41 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 c->SetScissor({0, 0, w, h});
                 m_ParticleRenderer.Render(c, pid, camera.GetViewProjMatrix(), camera);
                 c->EndOffscreenPass();
+            });
+    }
+
+    // ── 瞬态资源路径验证（r.TransientTest 1 启用，默认关闭）──
+    // 创建两个半分辨率瞬态纹理，声明非重叠生命周期并写入 HDRTarget（防死 Pass 裁剪），
+    // 验证 ApplyAliasing → CreateTransientTexture → VkImage 缓存 → 双缓冲 Heap 切换 端到端路径
+    if (cvTransientTest) {
+        rhi::TextureDesc tDesc;
+        tDesc.width       = w / 2;     // 半分辨率
+        tDesc.height      = h / 2;
+        tDesc.format      = rhi::Format::RGBA16_FLOAT;
+        tDesc.usage       = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
+        tDesc.mipLevels   = 1;
+        tDesc.arrayLayers = 1;
+        tDesc.sampleCount = 1;
+
+        // 两个相同大小的瞬态纹理，非重叠生命周期 → ApplyAliasing 归入同一池
+        auto transientA = rg.CreateTexture("TransientTest_A", tDesc);
+        auto transientB = rg.CreateTexture("TransientTest_B", tDesc);
+
+        // Pass A: 声明写入 transient_A + 写入 HDRTarget（确保不被 CullDeadPasses 裁剪）
+        rg.AddPass("TransientTest_A",
+            {{hdrC, ResourceAccess::Read}},  // 读取 HDR 建立与前序 Pass 的依赖
+            {{transientA, ResourceAccess::Write}, {hdrC, ResourceAccess::Write}},  // 写入 HDR 连接输出链
+            [](rhi::IRHICommandList* c) {
+                // 空操作：Pass 存活仅用于触发 transient 纹理创建和别名分析
+                // HDRTarget 写入声明仅用于防 CullDeadPasses 裁剪，不产生实际渲染
+            });
+
+        // Pass B: 声明写入 transient_B + 写入 HDRTarget（与 A 的 transient 生命周期不重叠）
+        rg.AddPass("TransientTest_B",
+            {{hdrC, ResourceAccess::Read}},
+            {{transientB, ResourceAccess::Write}, {hdrC, ResourceAccess::Write}},
+            [](rhi::IRHICommandList* c) {
+                // 空操作：transient_B 与 transient_A 同大小/不重叠 → 共享别名池
             });
     }
 

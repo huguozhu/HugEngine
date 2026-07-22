@@ -232,6 +232,7 @@ private:
     MotionBlurPass m_MotionBlur; // 运动模糊（懒初始化）
     ProfilerManager m_Profiler;  // GPU 时间戳 Profiler
     ProfilerPanel   m_ProfilerPanel; // ImGui 可视化面板
+    std::unique_ptr<rhi::IRHIPipelineState> m_TransientTestPSO;  // 瞬态资源路径验证 PSO
     AutoExposurePass m_AutoExposure; // 自动曝光
     ColorGradingPass m_ColorGrading; // LDR 色彩分级
     std::vector<u32> m_GPUVisibleIndices;

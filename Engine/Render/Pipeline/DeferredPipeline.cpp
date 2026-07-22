@@ -23,11 +23,17 @@
 #include "GBuffer.frag.spv.h"
 #include "DeferredLighting.vert.spv.h"
 #include "DeferredLighting.frag.spv.h"
+#include "Fullscreen.vert.spv.h"
+#include "FullscreenCopy.frag.spv.h"
 
 // CVar: DGC 运行时开关（0=关闭，1=开启，默认关闭以保留传统 ExecuteIndirect 回退）
 // 在控制台输入 "r.DGC.Enable 1" 可动态启用
 static int32_t cvDGC_Enable = 0;
 static const char* kCVar_DGC_Enable_Name = "r.DGC.Enable";
+
+// CVar: 瞬态资源路径验证开关（0=关闭，1=开启，默认关闭）
+// 在控制台输入 "r.TransientTest 1" 可启用，验证 Transient Allocator 端到端路径
+static int32_t cvTransientTest = 0;
 
 namespace he::render {
 
@@ -336,9 +342,27 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     m_LightingPSO = device->CreatePipelineState(lDesc);
     HE_ASSERT(m_LightingPSO, "DeferredPipeline: Lighting PSO failed");
 
+    // 瞬态资源路径验证 PSO（全屏三角形 + 纹理拷贝，用于验证 Transient Allocator 端到端路径）
+    {
+        rhi::ShaderBytecode tVS, tFS;
+        tVS.stage = rhi::ShaderStage::Vertex; tVS.spirv = k_Fullscreen_vert_spv; tVS.entryPoint = "main";
+        tFS.stage = rhi::ShaderStage::Pixel;  tFS.spirv = k_FullscreenCopy_frag_spv; tFS.entryPoint = "main";
+        rhi::PipelineStateDesc tDesc;
+        tDesc.vertexShader = &tVS; tDesc.pixelShader = &tFS;
+        tDesc.topology = rhi::PrimitiveTopology::TriangleList;
+        tDesc.depthTest = false; tDesc.depthWrite = false;
+        tDesc.colorAttachmentCount = 1;
+        tDesc.colorFormats[0] = rhi::Format::RGBA16_FLOAT;  // 匹配瞬态纹理格式
+        tDesc.debugName = "TransientTest";
+        m_TransientTestPSO = device->CreatePipelineState(tDesc);
+    }
+
     // GPU 粒子系统
     m_ParticleRenderer.Initialize(device);
     m_ParticleRenderer.SetSceneDepth(m_HDRDepth.get(), m_PointSampler.get());  // 软粒子深度纹理
+
+    // 启动 PSO 后台预热（所有子系统已调用 PrecompileQueuePSO 注册 PSO 变体）
+    device->StartPSOPrecompile();
 
     m_Ready = true;
     HE_CORE_INFO("DeferredPipeline initialized");
@@ -363,7 +387,7 @@ void DeferredPipeline::Shutdown() {
     m_MSAA.reset();
     m_LDRTarget.reset(); m_LDRSampler.reset(); m_LDRDummyDepth.reset();
     m_HDRTarget.reset(); m_HDRDepth.reset(); m_HDRSampler.reset(); m_PointSampler.reset();
-    m_GBufferPSO.reset(); m_LightingPSO.reset();
+    m_GBufferPSO.reset(); m_LightingPSO.reset(); m_TransientTestPSO.reset();
     for (auto& b : m_LightBuffers) b.reset();
     for (auto& b : m_ObjectBuffers) b.reset();
     for (auto& b : m_ShadowBuffers) b.reset();
@@ -457,6 +481,26 @@ void DeferredPipeline::EnableMSAA(bool enable) {
 
 void DeferredPipeline::NextFrame() {
     m_CurrentFrameSlot = (m_CurrentFrameSlot + 1) % MAX_FRAMES_IN_FLIGHT;
+
+    // PSO 预热：主线程检查后台编译进度，完成后合并缓存
+    static bool precompileMerged = false;
+    if (!precompileMerged) {
+        float progress = m_Device->GetPSOPrecompileProgress();
+        if (progress >= 1.0f) {
+            // Worker 线程完成 → 合并缓存到主 VkPipelineCache
+            // vkMergePipelineCaches 由 VulkanDevice 内部调用
+            precompileMerged = true;
+            HE_CORE_INFO("DeferredPipeline: PSO 预热完成，worker 缓存已合并");
+        } else if (static_cast<int>(progress * 100.0f) % 25 == 0) {
+            // 每 25% 进度输出一次日志
+            static int lastReported = -1;
+            int pct = static_cast<int>(progress * 100.0f);
+            if (pct / 25 != lastReported / 25) {
+                lastReported = pct;
+                HE_CORE_INFO("DeferredPipeline: PSO 预热进度 {:.0f}%", progress * 100.0f);
+            }
+        }
+    }
 }
 
 void DeferredPipeline::OnResize(u32 w, u32 h) {

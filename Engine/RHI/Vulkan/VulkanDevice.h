@@ -23,6 +23,7 @@
 #include "RHI/RHI.h"
 #include "VulkanDGC.h"
 #include "TransientResourceAllocator.h"
+#include "PSOPrecompileManager.h"
 
 // 子模块头文件
 #include "VulkanSwapChain.h"
@@ -61,6 +62,11 @@ public:
     // Transient Resource — 使用瞬态内存池创建纹理（RenderGraph 别名分析驱动）
     std::unique_ptr<IRHITexture>        CreateTransientTexture(const TextureDesc& desc) override;
     void AdvanceTransientResources() override { m_TransientAllocator.AdvanceFrame(); }
+
+    // PSO 预热管理器 — 后台编译 PSO 变体到独立 VkPipelineCache
+    void  PrecompileQueuePSO(const PipelineStateDesc& desc) override;
+    void  StartPSOPrecompile() override;
+    float GetPSOPrecompileProgress() const override;
 
     // Ray Tracing 资源创建
     std::unique_ptr<IRHIAccelerationStructure>
@@ -262,6 +268,11 @@ private:
     // 在 CreateLogicalDevice 后初始化，Shutdown 时销毁
     // ============================================================
     TransientResourceAllocator m_TransientAllocator;
+
+    // ============================================================
+    // PSO 预热管理器 — 后台线程编译 PSO 预热驱动缓存
+    // ============================================================
+    PSOPrecompileManager m_PSOPrecompileManager;
     VkSurfaceKHR     m_Surface        = VK_NULL_HANDLE;
 
     VkQueue          m_GraphicsQueue   = VK_NULL_HANDLE;

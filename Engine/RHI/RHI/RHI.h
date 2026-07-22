@@ -55,6 +55,14 @@ public:
     // 默认空实现：后端不支持瞬态资源时安全跳过
     virtual void AdvanceTransientResources() {}
 
+    // --- PSO 预热管理器 ---
+    // 注册 PSO 描述符到后台预热队列（非阻塞，仅记录描述符）
+    virtual void PrecompileQueuePSO(const PipelineStateDesc& desc) {}
+    // 启动后台 PSO 预热线程（从主缓存派生独立 VkPipelineCache 编译）
+    virtual void StartPSOPrecompile() {}
+    // 获取预热进度（0.0 ~ 1.0，1.0 表示全部完成）
+    virtual float GetPSOPrecompileProgress() const { return 1.0f; }
+
     // --- Ray Tracing 资源创建 ---
     virtual std::unique_ptr<IRHIAccelerationStructure>
         CreateBLAS(const BLASBuildDesc& desc) = 0;                                // 创建 Bottom-Level Acceleration Structure

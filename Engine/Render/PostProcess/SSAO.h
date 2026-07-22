@@ -36,7 +36,7 @@ public:
     // 输出
     rhi::IRHITexture* GetAOTexture() const { return m_AOTexture.get(); }
     rhi::IRHISampler* GetAOSampler() const { return m_AOSampler.get(); }
-    void PreBind(rhi::IRHICommandList* cmd) const { if (m_Ready) cmd->SetPipeline(m_SSAO_PSO.get()); }
+    void PreBind(rhi::IRHICommandList* cmd);  // 惰性创建 PSO 并绑定
 
 private:
     void CreateAOTexture(u32 w, u32 h);
@@ -48,9 +48,14 @@ private:
     u32 m_Width = 0, m_Height = 0;
     bool m_Ready = false;
 
-    // PSOs
+    // PSOs（惰性创建：首次 PreBind/Render 时由 CreatePipelineState 生成）
     std::unique_ptr<rhi::IRHIPipelineState> m_SSAO_PSO;
     std::unique_ptr<rhi::IRHIPipelineState> m_Blur_PSO;
+    // PSO 描述符 + ShaderBytecode 副本（供惰性创建 + 预热队列使用）
+    rhi::PipelineStateDesc m_SSAO_PsoDesc;
+    rhi::PipelineStateDesc m_Blur_PsoDesc;
+    rhi::ShaderBytecode    m_SSAO_VS, m_SSAO_FS;   // ShaderBytecode 副本（生命周期与 SSAO 对象一致）
+    rhi::ShaderBytecode    m_Blur_VS,  m_Blur_FS;
 
     // 描述符集
     rhi::DescriptorSetLayoutHandle m_SSAOLayout = rhi::kInvalidLayout;

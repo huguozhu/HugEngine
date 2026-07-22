@@ -272,6 +272,9 @@ void VulkanDevice::Initialize(const DeviceInitDesc& desc) {
     // 9. 初始化 TransientResourceAllocator（瞬态纹理内存池，默认 128MB × 2 双缓冲）
     m_TransientAllocator.Initialize(m_Device, m_Physical, 128 * 1024 * 1024);
 
+    // 10. 初始化 PSO 预热管理器（绑定主 VkPipelineCache，供后台编译使用）
+    m_PSOPrecompileManager.Initialize(m_Device, m_Physical, m_PipelineCache);
+
     HE_CORE_INFO("Vulkan device fully initialized");
 }
 
@@ -287,6 +290,9 @@ void VulkanDevice::Shutdown() {
 
     // 1.6. 销毁 TransientResourceAllocator（等待 GPU idle 后安全回收所有 Heap）
     m_TransientAllocator.Shutdown();
+
+    // 1.7. 销毁 PSO 预热管理器（等待后台线程完成 + 销毁 worker cache）
+    m_PSOPrecompileManager.Shutdown();
 
     // 2. 清空 PSO 缓存（等待所有外部引用释放后销毁所有缓存的 Vulkan 对象）
     m_PSOCache.clear();
@@ -1027,6 +1033,21 @@ std::shared_ptr<u32> VulkanDevice::GetCachedPSORef(uint64_t hash,
     outLayout   = entry.layout;
     outRenderPass = entry.renderPass;
     return entry.refCount;  // 共享引用计数
+}
+
+// ============================================================
+// PSO 预热管理器 — 后台编译 PSO 变体到独立 VkPipelineCache
+// ============================================================
+void VulkanDevice::PrecompileQueuePSO(const PipelineStateDesc& desc) {
+    m_PSOPrecompileManager.QueuePSO(desc);
+}
+
+void VulkanDevice::StartPSOPrecompile() {
+    m_PSOPrecompileManager.StartPrecompile();
+}
+
+float VulkanDevice::GetPSOPrecompileProgress() const {
+    return m_PSOPrecompileManager.GetProgress();
 }
 
 std::unique_ptr<IRHITexture> VulkanDevice::CreateTexture(const TextureDesc& desc) {

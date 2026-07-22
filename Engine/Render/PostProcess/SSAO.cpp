@@ -63,7 +63,7 @@ bool SSAO::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     GenerateKernel();
     GenerateNoise(4);
 
-    // SSAO PSO
+    // SSAO PSO — 描述符布局 + 参数 UBO 在 Init 中创建，PSO 本体惰性编译
     {
         rhi::DescriptorSetLayoutDesc l;
         l.bindings = {{0,rhi::DescriptorType::CombinedImageSampler,1,16},  // Depth
@@ -75,39 +75,55 @@ bool SSAO::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
 
         // 创建 SSAO 参数 UBO（kernel[64] + params + proj = 1104 bytes）
         rhi::BufferDesc ubDesc;
-        ubDesc.size  = 64 * sizeof(float4) + sizeof(float4) + sizeof(float4x4) * 2;  // kernel + params + invProj + proj
+        ubDesc.size  = 64 * sizeof(float4) + sizeof(float4) + sizeof(float4x4) * 2;
         ubDesc.usage = rhi::BufferUsage::Uniform;
         ubDesc.cpuAccess = true;
         m_ParamUBO = device->CreateBuffer(ubDesc);
         device->UpdateDescriptorSet(m_SSAOSet, 3, rhi::DescriptorType::UniformBuffer, m_ParamUBO.get());
 
-        rhi::ShaderBytecode vs,fs;
-        vs.stage=rhi::ShaderStage::Vertex; vs.spirv=k_SSAO_vert_spv; vs.entryPoint="vertexMain";
-        fs.stage=rhi::ShaderStage::Pixel;  fs.spirv=k_SSAO_frag_spv; fs.entryPoint="fragmentMain";
-        rhi::PipelineStateDesc d; d.vertexShader=&vs; d.pixelShader=&fs;
-        d.topology=rhi::PrimitiveTopology::TriangleList;
-        d.depthTest=false; d.depthWrite=false; d.depthFormat=rhi::Format::Unknown;
-        d.colorAttachmentCount=1; d.colorFormats[0]=rhi::Format::R16_FLOAT;
-        d.descriptorSetLayouts={m_SSAOLayout}; d.debugName="SSAO";
-        m_SSAO_PSO = device->CreatePipelineState(d);
+        // 存储 ShaderBytecode 副本（供惰性创建 PSO 时使用）
+        m_SSAO_VS.stage = rhi::ShaderStage::Vertex;
+        m_SSAO_VS.spirv = k_SSAO_vert_spv;
+        m_SSAO_VS.entryPoint = "vertexMain";
+        m_SSAO_FS.stage = rhi::ShaderStage::Pixel;
+        m_SSAO_FS.spirv = k_SSAO_frag_spv;
+        m_SSAO_FS.entryPoint = "fragmentMain";
+
+        rhi::PipelineStateDesc d;
+        d.vertexShader = &m_SSAO_VS; d.pixelShader = &m_SSAO_FS;
+        d.topology = rhi::PrimitiveTopology::TriangleList;
+        d.depthTest = false; d.depthWrite = false; d.depthFormat = rhi::Format::Unknown;
+        d.colorAttachmentCount = 1; d.colorFormats[0] = rhi::Format::R16_FLOAT;
+        d.descriptorSetLayouts = {m_SSAOLayout}; d.debugName = "SSAO";
+        m_SSAO_PsoDesc = d;  // 保存描述符供惰性创建
+
+        // 注册到 PSO 预热队列（后台线程将预编译到 VkPipelineCache）
+        device->PrecompileQueuePSO(d);
     }
 
-    // Blur PSO
+    // Blur PSO — 同样采用惰性创建模式
     {
         rhi::DescriptorSetLayoutDesc l;
         l.bindings = {{0,rhi::DescriptorType::CombinedImageSampler,1,16}};
         m_BlurLayout = device->CreateDescriptorSetLayout(l);
         m_BlurSet    = device->AllocateDescriptorSet(m_BlurLayout);
 
-        rhi::ShaderBytecode vs,fs;
-        vs.stage=rhi::ShaderStage::Vertex; vs.spirv=k_SSAO_Blur_vert_spv; vs.entryPoint="vertexMain";
-        fs.stage=rhi::ShaderStage::Pixel;  fs.spirv=k_SSAO_Blur_frag_spv; fs.entryPoint="fragmentMain";
-        rhi::PipelineStateDesc d; d.vertexShader=&vs; d.pixelShader=&fs;
-        d.topology=rhi::PrimitiveTopology::TriangleList;
-        d.depthTest=false; d.depthWrite=false; d.depthFormat=rhi::Format::Unknown;
-        d.colorAttachmentCount=1; d.colorFormats[0]=rhi::Format::R16_FLOAT;
-        d.descriptorSetLayouts={m_BlurLayout}; d.debugName="SSAO_Blur";
-        m_Blur_PSO = device->CreatePipelineState(d);
+        m_Blur_VS.stage = rhi::ShaderStage::Vertex;
+        m_Blur_VS.spirv = k_SSAO_Blur_vert_spv;
+        m_Blur_VS.entryPoint = "vertexMain";
+        m_Blur_FS.stage = rhi::ShaderStage::Pixel;
+        m_Blur_FS.spirv = k_SSAO_Blur_frag_spv;
+        m_Blur_FS.entryPoint = "fragmentMain";
+
+        rhi::PipelineStateDesc d;
+        d.vertexShader = &m_Blur_VS; d.pixelShader = &m_Blur_FS;
+        d.topology = rhi::PrimitiveTopology::TriangleList;
+        d.depthTest = false; d.depthWrite = false; d.depthFormat = rhi::Format::Unknown;
+        d.colorAttachmentCount = 1; d.colorFormats[0] = rhi::Format::R16_FLOAT;
+        d.descriptorSetLayouts = {m_BlurLayout}; d.debugName = "SSAO_Blur";
+        m_Blur_PsoDesc = d;
+
+        device->PrecompileQueuePSO(d);
     }
 
     // 输出纹理 + 采样器
@@ -141,8 +157,25 @@ void SSAO::SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal) {
     m_Device->UpdateDescriptorSet(m_SSAOSet,2,rhi::DescriptorType::CombinedImageSampler,m_NoiseTex.get(),m_PointSampler.get());
 }
 
+void SSAO::PreBind(rhi::IRHICommandList* cmd) {
+    if (!m_Ready) return;
+    // 惰性创建 SSAO PSO（首次调用时，VkPipelineCache 可能已被后台预热）
+    if (!m_SSAO_PSO) {
+        m_SSAO_PSO = m_Device->CreatePipelineState(m_SSAO_PsoDesc);
+    }
+    cmd->SetPipeline(m_SSAO_PSO.get());
+}
+
 void SSAO::Render(rhi::IRHICommandList* cmd) {
     if (!m_Ready || !m_DepthTex || !m_NormalTex || !enabled) return;
+
+    // 惰性创建 PSO（首次渲染时，VkPipelineCache 已被后台预热，创建耗时 ~2ms 而非 ~50ms）
+    if (!m_SSAO_PSO) {
+        m_SSAO_PSO = m_Device->CreatePipelineState(m_SSAO_PsoDesc);
+    }
+    if (!m_Blur_PSO) {
+        m_Blur_PSO = m_Device->CreatePipelineState(m_Blur_PsoDesc);
+    }
 
     // --- SSAO Pass ---
     cmd->SetPipeline(m_SSAO_PSO.get());
