@@ -46,14 +46,6 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 
 namespace he::render {
 
-// GBuffer 附件布局常量
-constexpr u32 kGBufferAttachmentCount = 5;
-constexpr u32 kGBufferSlotAlbedo      = 0;  // Albedo.rgb + Metallic.a（RGBA16_FLOAT）
-constexpr u32 kGBufferSlotNormal      = 1;  // Normal.xyz + Roughness.a（RGBA16_FLOAT）
-constexpr u32 kGBufferSlotEmissive    = 2;  // Emissive.rgb + AO.a（RGBA16_FLOAT）
-constexpr u32 kGBufferSlotVelocity    = 3;  // Velocity.xy（RG16_FLOAT）
-constexpr u32 kGBufferSlotWorldPos    = 4;  // WorldPos.xyz（RGBA16_FLOAT）
-
 // ============================================================================
 // DeferredPipeline — 延迟渲染管线（GBuffer + Lighting Pass）
 //
@@ -102,10 +94,9 @@ public:
     ProfilerPanel&      GetProfilerPanel() { return m_ProfilerPanel; }
     AutoExposurePass&   GetAutoExposure()  { return m_AutoExposure; }
     ColorGradingPass&   GetColorGrading()  { return m_ColorGrading; }
-    // GBuffer 渲染模式
-    enum class GBufferMode : u8 { CPU, GPU };
-    void         SetGBufferMode(GBufferMode m);
-    GBufferMode  GetGBufferMode() const         { return m_GBufferMode; }
+    // GBuffer 渲染模式（委托给 GBufferRenderer）
+    void         SetGBufferMode(GBufferRenderer::Mode m);
+    GBufferRenderer::Mode GetGBufferMode() const;
 
     void EnableFXAA(bool enable);
     bool IsFXAAEnabled() const                 { return m_FXAAEnabled && m_FXAA != nullptr; }
@@ -138,22 +129,13 @@ private:
     rhi::RHIFenceHandle m_CrossQueueFence = rhi::kInvalidFence;  // 跨队列同步信号量
     u64  m_FrameCounter = 0;              // 帧计数器（Fence 信号值）
     bool m_ComputePendingSubmit = false;  // 是否有待提交的 Compute 工作
-    std::unique_ptr<rhi::IRHITexture> m_GBufferA, m_GBufferB, m_GBufferC;
-    // GBuffer 第 4 张 MRT：velocity（RG16_FLOAT，UV 空间运动矢量）
-    std::unique_ptr<rhi::IRHITexture> m_GBufferD;
-    // GBuffer 第 5 张 MRT：worldPos.xyz（RGBA16_FLOAT，Lighting pass 直接读取，无需 invViewProj）
-    std::unique_ptr<rhi::IRHITexture> m_GBufferE;
-    std::unique_ptr<rhi::IRHITexture> m_GBufferDepth;
-    std::unique_ptr<rhi::IRHIPipelineState> m_GBufferPSO;
-    rhi::DescriptorSetLayoutHandle m_GBufferLayout = rhi::kInvalidLayout;   // set=0: per-frame + bindless
-    rhi::DescriptorSetHandle       m_GBufferSet    = rhi::kInvalidSet;      // set=0 共享（含 bindless）
+    // GBuffer 渲染（纹理所有权 + PSO + 描述符集，共享组件）
+    std::unique_ptr<GBufferRenderer> m_GBuffer;
 
     // Lighting PSO + 描述符
     std::unique_ptr<rhi::IRHIPipelineState> m_LightingPSO;
     rhi::DescriptorSetLayoutHandle m_LightingLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_LightingSet    = rhi::kInvalidSet;
-    std::unique_ptr<rhi::IRHITexture> m_BindlessPlaceholder;
-    std::unique_ptr<rhi::IRHISampler> m_BindlessSampler;
 
     // HDR (Lighting 输出 + ToneMap 输入)
     std::unique_ptr<rhi::IRHITexture> m_HDRTarget, m_HDRDepth;
@@ -215,12 +197,7 @@ private:
     ParticleRenderer m_ParticleRenderer;
     std::vector<u32> m_ParticleComponentIDs;   // 注册的粒子组件 ID 列表
 
-    // GBuffer 渲染（CPU/GPU 双模式）
-    GBufferMode m_GBufferMode = GBufferMode::CPU;
-    GBufferContext m_GBufferCtx;
-    std::unique_ptr<IGBufferRenderer> m_GBufferRenderer;
-
-    // SSGI + SSR + DDGI + SSAO
+    // SSGI + SSR + DDGI + SSAO（DeferredPipeline 专有效果）
     GI_SSGI m_SSGI;
     GI_SSR  m_SSR;
     GI_DDGI m_DDGI;

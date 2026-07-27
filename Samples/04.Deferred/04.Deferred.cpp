@@ -462,7 +462,7 @@ int main() {
     if (hasConfig) {
         pipeline.GetClusteredShading().enabled = GetInt(cfgData, "clustered", 1) != 0;
         pipeline.GetGPUCulling().enabled       = GetInt(cfgData, "gpu_cull", 1) != 0;
-        pipeline.SetGBufferMode((render::DeferredPipeline::GBufferMode)GetInt(cfgData, "gbuffer_mode", 0));
+        pipeline.SetGBufferMode((render::GBufferRenderer::Mode)GetInt(cfgData, "gbuffer_mode", 0));
 
         auto& ae = pipeline.GetAutoExposure();
         ae.SetEnabled(GetInt(cfgData, "ae_enabled", 0) != 0);
@@ -857,7 +857,7 @@ int main() {
             ImGui::RadioButton("CPU Driven", &gbMode, 0); ImGui::SameLine();
             ImGui::RadioButton("GPU Driven (ExecuteIndirect)", &gbMode, 1);
             if (gbMode != (int)pipeline.GetGBufferMode())
-                pipeline.SetGBufferMode((render::DeferredPipeline::GBufferMode)gbMode);
+                pipeline.SetGBufferMode((render::GBufferRenderer::Mode)gbMode);
 
             // ── AutoExposure ──
             ImGui::SeparatorText("AutoExposure");

@@ -7,8 +7,6 @@
 #include "SceneRenderer.h"
 #include "AntiAliasing/AA_TAA.h"
 #include "AntiAliasing/AA_FXAA.h"
-#include "Pipeline/GBufferRenderer_CPU.h"
-#include "Pipeline/GBufferRenderer_GPU.h"
 #include "Pipeline/PhysicalLight.h"
 
 #include "Asset/BindlessTextureManager.h"
@@ -20,8 +18,6 @@
 #include <cstring>
 #include <cmath>
 #include <unordered_set>
-#include "GBuffer.vert.spv.h"
-#include "GBuffer.frag.spv.h"
 #include "DeferredLighting.vert.spv.h"
 #include "DeferredLighting.frag.spv.h"
 #include "Fullscreen.vert.spv.h"
@@ -42,36 +38,9 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     m_Device = device;
     HE_ASSERT(m_Device, "DeferredPipeline: null device");
 
-    // GBuffer 纹理（3×RGBA16_FLOAT + D32）
-    auto createGBuffer = [&](const char* name) {
-        rhi::TextureDesc d;
-        d.format = rhi::Format::RGBA16_FLOAT;
-        d.width = m_Width; d.height = m_Height;
-        d.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
-        return device->CreateTexture(d);
-    };
-    m_GBufferA = createGBuffer("GBufferA");
-    m_GBufferB = createGBuffer("GBufferB");
-    m_GBufferC = createGBuffer("GBufferC");
-    {
-        rhi::TextureDesc d;
-        d.format = rhi::Format::D32_FLOAT;
-        d.width = m_Width; d.height = m_Height;
-        d.usage = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;  // 深度采样需要 SAMPLED
-        m_GBufferDepth = device->CreateTexture(d);
-    }
-
-    // GBuffer D: velocity (RG16_FLOAT)
-    {
-        rhi::TextureDesc d;
-        d.format = rhi::Format::RG16_FLOAT;
-        d.width  = m_Width; d.height = m_Height;
-        d.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
-        m_GBufferD = device->CreateTexture(d);
-    }
-
-    // GBuffer E: worldPos.xyz（RGBA16_FLOAT，Lighting pass 直接读取）
-    m_GBufferE = createGBuffer("GBufferE");
+    // GBuffer 渲染器（纹理所有权 + PSO + 描述符集，共享组件）
+    m_GBuffer = std::make_unique<GBufferRenderer>();
+    m_GBuffer->Initialize(device, m_Width, m_Height);
 
     // 硬件 MSAA：覆盖纹理和 PSO 的 sampleCount
     if (m_MSAAEnabled) {
@@ -151,6 +120,14 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         m_GPUCulling.InitializePTG(device);
     }
     m_GPUScene.Initialize(device);
+
+    // 将子系统指针注入 GBufferRenderer（在它们全部初始化之后）
+    m_GBuffer->SetSceneRenderer(m_SceneRenderer.get());
+    m_GBuffer->SetGPUCulling(&m_GPUCulling);
+    m_GBuffer->SetGPUScene(&m_GPUScene);
+    m_GBuffer->SetVisibleIndices(&m_GPUVisibleIndices);
+    m_GBuffer->SetMeshBatcher(&m_MeshBatcher);
+
     m_SSGI.Initialize(device, m_Width, m_Height);
     m_SSR.Initialize(device, m_Width, m_Height);
     m_DDGI.Initialize(device, m_Width, m_Height);
@@ -170,49 +147,15 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     // AA_FXAA（LDR 空间，懒初始化：EnableFXAA(true) 首次调用时分配 GPU 资源）
 
 
-    // GBuffer PSO (4 MRT + D32, set=0 合并 per-frame + bindless 纹理/采样器数组)
-    // set=0: per-frame GPUObjectData[] + bindless Texture2D[] + SamplerState[]
-    rhi::DescriptorSetLayoutDesc gbLayout;
-    gbLayout.bindings = {
-        {2, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskVertex | rhi::kStageMaskFragment},   // u_Objects (Vertex|Fragment)
-        {5, rhi::DescriptorType::SampledImage, 4096, rhi::kStageMaskFragment, true},  // u_Textures[] bindless
-        {6, rhi::DescriptorType::Sampler, 4096, rhi::kStageMaskFragment, true},               // u_Samplers[] bindless
-    };
-    m_GBufferLayout = device->CreateDescriptorSetLayout(gbLayout);
+    // GBuffer PSO + 描述符集 + DGC 初始化已在 GBufferRenderer::Initialize() 中完成
 
     // 创建阴影 PSO（使用 GBuffer 的 descriptor set layout，
     // 阴影 VS 仅使用 binding=2 GPUObjectData[]，与 GBuffer layout 兼容）
-    m_ShadowSystem->CreateShadowPSO(m_GBufferLayout);
-
-    rhi::ShaderBytecode gbVS, gbFS;
-    gbVS.stage = rhi::ShaderStage::Vertex; gbVS.spirv = k_GBuffer_vert_spv; gbVS.entryPoint = "main";
-    gbFS.stage = rhi::ShaderStage::Pixel;  gbFS.spirv = k_GBuffer_frag_spv;  gbFS.entryPoint = "main";
-    rhi::VertexInputLayout vl;
-    vl.stride = sizeof(he::StaticVertex);
-    vl.attributes = {
-        {0,0,rhi::VertexFormat::Float3, offsetof(he::StaticVertex, position)},
-        {1,0,rhi::VertexFormat::Float3, offsetof(he::StaticVertex, normal)},
-        {2,0,rhi::VertexFormat::Float2, offsetof(he::StaticVertex, uv)},
-    };
-    rhi::PushConstantRange pc; pc.stageMask = rhi::kStageMaskVertex | rhi::kStageMaskFragment; pc.size = rhi::kMaxPushConstantSize; // 192B 实际用量
-    rhi::PipelineStateDesc gbDesc;
-    gbDesc.vertexShader = &gbVS; gbDesc.pixelShader = &gbFS;
-    gbDesc.vertexLayout = vl;
-    gbDesc.depthTest = true; gbDesc.depthWrite = true;
-    gbDesc.depthFormat = rhi::Format::D32_FLOAT;
-    gbDesc.colorAttachmentCount = kGBufferAttachmentCount;
-    gbDesc.colorFormats[kGBufferSlotAlbedo] = gbDesc.colorFormats[kGBufferSlotNormal] = gbDesc.colorFormats[kGBufferSlotEmissive] = rhi::Format::RGBA16_FLOAT;
-    gbDesc.colorFormats[kGBufferSlotVelocity] = rhi::Format::RG16_FLOAT;  // velocity
-    gbDesc.colorFormats[kGBufferSlotWorldPos] = rhi::Format::RGBA16_FLOAT; // worldPos.xyz
-    gbDesc.pushConstantRanges = {pc};
-    gbDesc.descriptorSetLayouts = {m_GBufferLayout};  // 仅 set=0，无 per-mesh
-    gbDesc.debugName = "GBuffer";
-    m_GBufferPSO = device->CreatePipelineState(gbDesc);
-    HE_ASSERT(m_GBufferPSO, "DeferredPipeline: GBuffer PSO failed");
+    m_ShadowSystem->CreateShadowPSO(m_GBuffer->GetLayout());
 
     // ── DGC 初始化（通过 RHI 统一接口，后端透明）──
     if (device->GetCaps().supportsDGC) {
-        bool dgcOK = device->InitializeDGC(m_GBufferPSO.get(),
+        bool dgcOK = device->InitializeDGC(m_GBuffer->GetPSO(),
             GPUCulling::kMaxObjects, GPUCulling::kMaxObjects);
         if (dgcOK) {
             HE_CORE_INFO("DeferredPipeline: DGC 初始化成功，可通过 r.DGC.Enable 1 启用");
@@ -223,55 +166,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         HE_CORE_INFO("DeferredPipeline: 硬件不支持 DGC，使用传统 ExecuteIndirect 路径");
     }
 
-    // GBuffer set=0 共享描述符集（含 binding 2: Object SSBO + bindless 5/6）
-    m_GBufferSet = device->AllocateDescriptorSet(m_GBufferLayout);
-    // 创建 bindless 占位纹理和采样器（bindless 数组回退用）
-    {
-        u8 w4[4]={255,255,255,255};
-        rhi::TextureDesc defDesc; defDesc.format=rhi::Format::RGBA8_UNORM;
-        defDesc.width=1; defDesc.height=1; defDesc.mipLevels=1; defDesc.arrayLayers=1;
-        defDesc.usage=rhi::TextureUsage::ShaderResource; defDesc.initialData=w4;
-        m_BindlessPlaceholder = device->CreateTexture(defDesc);
-        rhi::SamplerDesc sd; sd.minFilter=sd.magFilter=rhi::FilterMode::Linear;
-        sd.addressU=sd.addressV=rhi::AddressMode::Repeat;
-        m_BindlessSampler = device->CreateSampler(sd);
-        // 设置 BindlessTextureManager 的默认纹理（null 回退用）
-        he::asset::BindlessTextureManager::Instance().SetDefaultTexture(
-            m_BindlessPlaceholder.get(), m_BindlessSampler.get());
-        // 预填充绑定 5 和 6 至少一个有效的占位符
-        rhi::IRHITexture* texPtrs[] = { m_BindlessPlaceholder.get() };
-        rhi::IRHISampler* sampPtrs[] = { m_BindlessSampler.get() };
-        device->UpdateDescriptorSet(m_GBufferSet, rhi::kBindingBindlessTextures, rhi::DescriptorType::SampledImage,
-            texPtrs, nullptr, 1);
-        device->UpdateDescriptorSet(m_GBufferSet, rhi::kBindingBindlessSamplers, rhi::DescriptorType::Sampler,
-            nullptr, sampPtrs, 1);
-        // 注册 GBufferSet 到 BindlessTextureManager（纹理加载后 FlushPending 自动推送）
-        he::asset::BindlessTextureManager::Instance().RegisterDescriptorSet(
-            device, m_GBufferSet, 5, 6);
-    }
-
-    // ── GBuffer 渲染器（PSO + DescriptorSet 就绪后创建）──
-    m_GBufferCtx.device       = device;
-    m_GBufferCtx.width        = m_Width;
-    m_GBufferCtx.height       = m_Height;
-    m_GBufferCtx.gbA          = m_GBufferA.get();
-    m_GBufferCtx.gbB          = m_GBufferB.get();
-    m_GBufferCtx.gbC          = m_GBufferC.get();
-    m_GBufferCtx.gbVel        = m_GBufferD.get();
-    m_GBufferCtx.gbDepth      = m_GBufferDepth.get();
-    m_GBufferCtx.gbWorldPos   = m_GBufferE.get();
-    m_GBufferCtx.pso          = m_GBufferPSO.get();
-    m_GBufferCtx.descSet      = m_GBufferSet;
-    m_GBufferCtx.sceneRenderer = m_SceneRenderer.get();
-    m_GBufferCtx.gpuCulling    = &m_GPUCulling;
-    m_GBufferCtx.gpuScene      = &m_GPUScene;
-    m_GBufferCtx.gpuVisibleIndices = &m_GPUVisibleIndices;
-    m_GBufferCtx.meshBatcher        = &m_MeshBatcher;
-    if (m_GBufferMode == GBufferMode::GPU)
-        m_GBufferRenderer = std::make_unique<GBufferRenderer_GPU>();
-    else
-        m_GBufferRenderer = std::make_unique<GBufferRenderer_CPU>();
-    m_GBufferRenderer->Initialize(m_GBufferCtx);
+    // GBufferContext + IGBufferRenderer 已在 GBufferRenderer::Initialize() 中设置
 
     // GPU Profiler
     m_Profiler.Initialize(device, rhi::kMaxProfilerPasses, MAX_FRAMES_IN_FLIGHT);
@@ -374,10 +269,8 @@ void DeferredPipeline::Shutdown() {
     if (m_ShadowSystem) m_ShadowSystem->Shutdown();
     if (m_ToneMap) m_ToneMap->Shutdown();
     if (m_Skybox)  m_Skybox->Shutdown();
-    if (m_GBufferLayout != rhi::kInvalidLayout) { m_Device->DestroyDescriptorSetLayout(m_GBufferLayout); }
+    if (m_GBuffer) m_GBuffer->Shutdown();  // GBuffer 纹理 + PSO + 描述符集
     if (m_LightingLayout != rhi::kInvalidLayout) { m_Device->DestroyDescriptorSetLayout(m_LightingLayout); }
-    m_GBufferA.reset(); m_GBufferB.reset(); m_GBufferC.reset(); m_GBufferDepth.reset();
-    m_GBufferD.reset(); m_GBufferE.reset();
     if (m_AntiAliasing) m_AntiAliasing->Shutdown();
     m_AntiAliasing.reset();
     if (m_FXAA) m_FXAA->Shutdown();
@@ -388,7 +281,7 @@ void DeferredPipeline::Shutdown() {
     m_MSAA.reset();
     m_LDRTarget.reset(); m_LDRSampler.reset(); m_LDRDummyDepth.reset();
     m_HDRTarget.reset(); m_HDRDepth.reset(); m_HDRSampler.reset(); m_PointSampler.reset();
-    m_GBufferPSO.reset(); m_LightingPSO.reset(); m_TransientTestPSO.reset();
+    m_LightingPSO.reset(); m_TransientTestPSO.reset();
     for (auto& b : m_LightBuffers) b.reset();
     for (auto& b : m_ObjectBuffers) b.reset();
     for (auto& b : m_ShadowBuffers) b.reset();
@@ -398,9 +291,6 @@ void DeferredPipeline::Shutdown() {
     }
     m_GPUCulling.Shutdown(m_Device);
     m_GPUScene.Shutdown();
-    if (m_GBufferRenderer) m_GBufferRenderer->Shutdown();
-    m_GBufferRenderer.reset();
-
     // DGC 清理
     m_Device->ShutdownDGC();  // DGC 由 RHI 管理生命周期
 
@@ -426,16 +316,12 @@ void DeferredPipeline::Shutdown() {
 
 // CreateTextureDescriptorSet 已移除 — 使用全局 bindless 纹理数组替代
 
-void DeferredPipeline::SetGBufferMode(GBufferMode mode) {
-    if (mode == m_GBufferMode && m_GBufferRenderer) return;
-    m_GBufferMode = mode;
-    if (m_GBufferRenderer) m_GBufferRenderer->Shutdown();
-    if (mode == GBufferMode::GPU)
-        m_GBufferRenderer = std::make_unique<GBufferRenderer_GPU>();
-    else
-        m_GBufferRenderer = std::make_unique<GBufferRenderer_CPU>();
-    m_GBufferRenderer->Initialize(m_GBufferCtx);
-    HE_CORE_INFO("DeferredPipeline: GBuffer 模式切换到 {}", mode == GBufferMode::GPU ? "GPU" : "CPU");
+void DeferredPipeline::SetGBufferMode(GBufferRenderer::Mode mode) {
+    if (m_GBuffer) m_GBuffer->SetMode(mode);
+}
+
+GBufferRenderer::Mode DeferredPipeline::GetGBufferMode() const {
+    return m_GBuffer ? m_GBuffer->GetMode() : GBufferRenderer::Mode::CPU;
 }
 
 void DeferredPipeline::EnableFXAA(bool enable) {
@@ -507,33 +393,24 @@ void DeferredPipeline::NextFrame() {
 void DeferredPipeline::OnResize(u32 w, u32 h) {
     if (w == m_Width && h == m_Height) return;
     m_Width = w; m_Height = h;
-    // 重建 GBuffer + HDR (简化：直接 CreateTexture 重建)
-    auto r = [&](auto& t, rhi::Format f, rhi::TextureUsage u) {
-        rhi::TextureDesc d; d.format = f; d.width = w; d.height = h; d.usage = u;
-        t = m_Device->CreateTexture(d);
-    };
-    r(m_GBufferA, rhi::Format::RGBA16_FLOAT, rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource);
-    r(m_GBufferB, rhi::Format::RGBA16_FLOAT, rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource);
-    r(m_GBufferC, rhi::Format::RGBA16_FLOAT, rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource);
-    r(m_GBufferD, rhi::Format::RG16_FLOAT, rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource);
-    r(m_GBufferE, rhi::Format::RGBA16_FLOAT, rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource);
-    r(m_GBufferDepth, rhi::Format::D32_FLOAT, rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource);
-    r(m_HDRTarget, rhi::Format::RGBA16_FLOAT, rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource);
-    r(m_HDRDepth, rhi::Format::D32_FLOAT, rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource);
+    // 重建 GBuffer 纹理（委托给 GBufferRenderer）
+    if (m_GBuffer) m_GBuffer->OnResize(w, h);
+    // 重建 HDR 目标
+    {
+        rhi::TextureDesc d; d.format = rhi::Format::RGBA16_FLOAT;
+        d.width = w; d.height = h; d.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
+        m_HDRTarget = m_Device->CreateTexture(d);
+        rhi::TextureDesc dd; dd.format = rhi::Format::D32_FLOAT;
+        dd.width = w; dd.height = h; dd.usage = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
+        m_HDRDepth = m_Device->CreateTexture(dd);
+    }
     m_ParticleRenderer.SetSceneDepth(m_HDRDepth.get(), m_PointSampler.get());  // 软粒子深度纹理更新
     if (m_ToneMap) m_ToneMap->OnResize(w, h);
     if (m_Skybox)  { m_Skybox->Shutdown(); m_Skybox->Initialize(m_Device, w, h); }
     if (m_AntiAliasing) m_AntiAliasing->OnResize(w, h);
     if (m_FXAA) m_FXAA->OnResize(w, h);
     if (m_SMAA) m_SMAA->OnResize(w, h);    // SMAA 中间纹理随分辨率重建
-    m_GBufferCtx.width  = w;
-    m_GBufferCtx.height = h;
-    m_GBufferCtx.gbA    = m_GBufferA.get();
-    m_GBufferCtx.gbB    = m_GBufferB.get();
-    m_GBufferCtx.gbC    = m_GBufferC.get();
-    m_GBufferCtx.gbVel      = m_GBufferD.get();
-    m_GBufferCtx.gbDepth    = m_GBufferDepth.get();
-    m_GBufferCtx.gbWorldPos = m_GBufferE.get();
+    // GBufferContext 纹理指针已在 GBufferRenderer::OnResize() 中更新
     // 重建 LDR 中间纹理
     {
         rhi::TextureDesc d; d.format = rhi::Format::BGRA8_UNORM;

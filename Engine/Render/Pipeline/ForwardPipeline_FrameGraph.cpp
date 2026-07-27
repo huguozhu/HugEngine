@@ -15,9 +15,6 @@
 #include "PBR.vert.spv.h"
 #include "PBR.frag.spv.h"
 #include "GBuffer.mesh.spv.h"
-#include "RT_Shadow.rgen.spv.h"
-#include "RT_Common.rmiss.spv.h"
-#include "RT_Common.rchit.spv.h"
 #include "AntiAliasing/AA_None.h"
 #include "AntiAliasing/AA_FXAA.h"
 
@@ -44,14 +41,6 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     auto hdrColor = rg.ImportTexture("HDR_Color", m_HDRTarget.get());
     auto hdrDepth = rg.ImportTexture("HDR_Depth", m_HDRDepth.get());
     auto backBuf  = rg.ImportBackBuffer();
-
-    // --- Pass 0: AS Build — BLAS/TLAS 构建（Ray Tracing，仅在 RT 启用时执行）---
-    if (m_RTEnabled && m_RTPass && m_RTPass->IsValid()) {
-        rg.AddPass("AS_Build", {}, {},
-            [this, &world, &sg](rhi::IRHICommandList* c) {
-                m_RTPass->BuildAS(c, world, sg);
-            });
-    }
 
     // --- Pass 0: Shadow — CSM 级联 + Point Cubemap 阴影贴图渲染 ---
     // 声明写入所有阴影贴图 + hdrDepth（WAW 确保 Shadow 先于 FullScene）

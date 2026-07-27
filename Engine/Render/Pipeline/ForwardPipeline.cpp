@@ -15,9 +15,6 @@
 #include "PBR.vert.spv.h"
 #include "PBR.frag.spv.h"
 #include "GBuffer.mesh.spv.h"
-#include "RT_Shadow.rgen.spv.h"
-#include "RT_Common.rmiss.spv.h"
-#include "RT_Common.rchit.spv.h"
 #include "AntiAliasing/AA_None.h"
 #include "AntiAliasing/AA_FXAA.h"
 
@@ -315,69 +312,6 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     // --- SceneRenderer ---
     m_SceneRenderer = std::make_unique<SceneRenderer>();
 
-    // --- Ray Tracing 子系统（可选，硬件不支持时跳过）---
-    m_RTEnabled = device->GetCaps().supportsRayTracing;
-    if (m_RTEnabled) {
-        m_RTPass = std::make_unique<RTPass>();
-        // 构建 RT shader 字节码（从嵌入的 SPIR-V 数据加载）
-        std::vector<rhi::ShaderBytecode> rtShaders;
-        // RT_Shadow.rgen — RayGen
-        {
-            rhi::ShaderBytecode bc;
-            bc.stage      = rhi::ShaderStage::RayGen;
-            bc.spirv      = k_RT_Shadow_rgen_spv;
-            bc.entryPoint = "main";
-            rtShaders.push_back(bc);
-        }
-        // RT_Common.rmiss — Miss
-        {
-            rhi::ShaderBytecode bc;
-            bc.stage      = rhi::ShaderStage::Miss;
-            bc.spirv      = k_RT_Common_rmiss_spv;
-            bc.entryPoint = "main";
-            rtShaders.push_back(bc);
-        }
-        // RT_Common.rchit — ClosestHit (index 2 = hit group 0)
-        {
-            rhi::ShaderBytecode bc;
-            bc.stage      = rhi::ShaderStage::ClosestHit;
-            bc.spirv      = k_RT_Common_rchit_spv;
-            bc.entryPoint = "main";
-            rtShaders.push_back(bc);
-        }
-
-        // 着色器组: [0]=RayGen, [1]=Miss, [2]=Hit
-        std::vector<rhi::RTShaderGroup> groups;
-        {
-            rhi::RTShaderGroup rg;
-            rg.type = rhi::RTShaderGroupType::RayGen;
-            rg.generalShader = 0;
-            rg.name = "RayGen";
-            groups.push_back(rg);
-        }
-        {
-            rhi::RTShaderGroup mg;
-            mg.type = rhi::RTShaderGroupType::Miss;
-            mg.generalShader = 1;
-            mg.name = "Miss";
-            groups.push_back(mg);
-        }
-        {
-            rhi::RTShaderGroup hg;
-            hg.type = rhi::RTShaderGroupType::Hit;
-            hg.closestHitShader = 2;
-            hg.name = "Hit";
-            groups.push_back(hg);
-        }
-
-        if (m_RTPass->Initialize(device, rtShaders, groups)) {
-            HE_CORE_INFO("ForwardPipeline: RTPass initialized — RT Shadow enabled");
-        } else {
-            m_RTEnabled = false;
-            HE_CORE_WARN("ForwardPipeline: RTPass init failed, RT disabled");
-        }
-    }
-
     // --- Mesh Shader 支持（硬件支持时创建测试 PSO）---
     // 注：完整 Mesh Shader PSO 使用方式参见 VulkanPipeline.cpp 中的 mesh branch
     //    PipelineStateDesc::meshShader 设为 ShaderBytecode* 即可自动走 Mesh 管线路径
@@ -499,10 +433,6 @@ void ForwardPipeline::Shutdown() {
     if (m_ShadowSystem) {
         m_ShadowSystem->Shutdown();
         m_ShadowSystem.reset();
-    }
-    if (m_RTPass) {
-        m_RTPass->Shutdown();
-        m_RTPass.reset();
     }
 
     m_GPUCulling.Shutdown(m_Device);

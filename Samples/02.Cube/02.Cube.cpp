@@ -14,6 +14,7 @@
 #include "RHI/RHI.h"
 #include "Pipeline/ForwardPipeline.h"
 #include "Pipeline/DeferredPipeline.h"
+#include "Pipeline/RTPass.h"
 #include "Pipeline/CameraController.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"

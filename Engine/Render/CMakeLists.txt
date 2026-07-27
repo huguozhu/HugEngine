@@ -31,6 +31,7 @@ set(RENDER_SOURCES
     Pipeline/GPUCulling.h
     Pipeline/GPUCulling.cpp
     Pipeline/GBufferRenderer.h
+    Pipeline/GBufferRenderer.cpp
     Pipeline/GBufferRenderer_CPU.h
     Pipeline/GBufferRenderer_CPU.cpp
     Pipeline/GBufferRenderer_GPU.h

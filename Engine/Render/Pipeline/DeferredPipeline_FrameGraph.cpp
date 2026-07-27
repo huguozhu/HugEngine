@@ -7,8 +7,6 @@
 #include "SceneRenderer.h"
 #include "AntiAliasing/AA_TAA.h"
 #include "AntiAliasing/AA_FXAA.h"
-#include "Pipeline/GBufferRenderer_CPU.h"
-#include "Pipeline/GBufferRenderer_GPU.h"
 #include "Asset/BindlessTextureManager.h"
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
@@ -18,8 +16,6 @@
 #include <cmath>
 #include <cstring>
 #include <unordered_set>
-#include "GBuffer.vert.spv.h"
-#include "GBuffer.frag.spv.h"
 #include "DeferredLighting.vert.spv.h"
 #include "DeferredLighting.frag.spv.h"
 
@@ -40,12 +36,10 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                                         he::SceneGraph& sg, const CameraData& camera) {
     if (m_SwapChain) rg.SetSwapChain(m_SwapChain);
     u32 w = m_Width, h = m_Height;
-    auto gbA = rg.ImportTexture("GB_A", m_GBufferA.get());
-    auto gbB = rg.ImportTexture("GB_B", m_GBufferB.get());
-    auto gbC = rg.ImportTexture("GB_C", m_GBufferC.get());
-    auto gbDepth = rg.ImportTexture("GB_Depth", m_GBufferDepth.get());
-    auto gbVel = rg.ImportTexture("GB_Vel", m_GBufferD.get());
-    auto gbWorldPos = rg.ImportTexture("GB_WorldPos", m_GBufferE.get());
+    // 从 GBufferRenderer 导入所有 GBuffer 纹理
+    auto gb = m_GBuffer->ImportToRenderGraph(rg);
+    auto gbA = gb.albedo; auto gbB = gb.normal; auto gbC = gb.emissive;
+    auto gbDepth = gb.depth; auto gbVel = gb.velocity; auto gbWorldPos = gb.worldPos;
     auto hdrC = rg.ImportTexture("HDR_C", m_HDRTarget.get());
     auto backBuf = rg.ImportBackBuffer();
 
@@ -68,7 +62,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
 
     // GPUScene 收集 → [GPU 模式: 填充 IndirectDraw 参数] → 上传
     m_GPUScene.Collect(world, sg);
-    if (m_GBufferMode == GBufferMode::GPU) {
+    if (m_GBuffer->GetMode() == GBufferRenderer::Mode::GPU) {
         if (!m_BatchBuilt) { m_MeshBatcher.Build(world); m_BatchBuilt = true; }
         m_MeshBatcher.FillGPUScene(m_GPUScene);  // 在 Upload 前写入 draw 参数
     }
@@ -103,10 +97,10 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             [&, w, h](rhi::IRHICommandList* c) {
                 if (!m_GPUCulling.enabled) return;
                 m_GPUCulling.SetSceneBuffer(m_Device, m_GPUScene.GetObjectBuffer());
-                if (m_GBufferDepth) m_GPUCulling.SetDepthTexture(m_Device, m_GBufferDepth.get(), w, h);
+                if (m_GBuffer->GetDepth()) m_GPUCulling.SetDepthTexture(m_Device, m_GBuffer->GetDepth(), w, h);
                 m_GPUCulling.DispatchPhase1(c, camera.GetViewProjMatrix(),
                                             m_GPUScene.GetObjectCount(), w, h);
-                c->SetPipeline(m_GBufferPSO.get());
+                c->SetPipeline(m_GBuffer->GetPSO());
             },
             RGPassQueue::Compute);  // AsyncCompute: Phase 1 在 Compute 队列执行
     } else {
@@ -118,7 +112,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             [&, w, h](rhi::IRHICommandList* c) {
                 if (!m_GPUCulling.enabled) return;
                 m_GPUCulling.SetSceneBuffer(m_Device, m_GPUScene.GetObjectBuffer());
-                if (m_GBufferDepth) m_GPUCulling.SetDepthTexture(m_Device, m_GBufferDepth.get(), w, h);
+                if (m_GBuffer->GetDepth()) m_GPUCulling.SetDepthTexture(m_Device, m_GBuffer->GetDepth(), w, h);
                 if (m_GPUCulling.usePTG) {
                     m_GPUCulling.SignalPTG(c, camera.GetViewProjMatrix(),
                                           m_GPUScene.GetObjectCount(), w, h);
@@ -126,7 +120,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                     m_GPUCulling.Dispatch(c, camera.GetViewProjMatrix(),
                                           m_GPUScene.GetObjectCount(), w, h);
                 }
-                c->SetPipeline(m_GBufferPSO.get());
+                c->SetPipeline(m_GBuffer->GetPSO());
             },
             RGPassQueue::Compute);
     }
@@ -139,7 +133,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         m_ShadowSystem->SetRenderResources(
             m_ShadowObjBuffers[slot].get(),
             m_ShadowBuffers[slot].get(),
-            m_GBufferSet);
+            m_GBuffer->GetDescriptorSet());
 
         SubsystemContext sctx;
         sctx.world       = &world;
@@ -178,14 +172,14 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             [this](rhi::IRHICommandList* c) {
                 u32 slot = m_CurrentFrameSlot;
                 // 切换到阴影专用 Object Buffer（binding 2），渲染完成后恢复
-                m_Device->UpdateDescriptorSet(m_GBufferSet, rhi::kBindingObjectData,
+                m_Device->UpdateDescriptorSet(m_GBuffer->GetDescriptorSet(), rhi::kBindingObjectData,
                     rhi::DescriptorType::StorageBuffer,
                     m_ShadowObjBuffers[slot].get());
 
                 m_ShadowSystem->Render(c);  // 使用光源 VP 矩阵渲染所有阴影贴图
 
                 // 恢复场景 Object Buffer 供后续 GBuffer pass 使用
-                m_Device->UpdateDescriptorSet(m_GBufferSet, rhi::kBindingObjectData,
+                m_Device->UpdateDescriptorSet(m_GBuffer->GetDescriptorSet(), rhi::kBindingObjectData,
                     rhi::DescriptorType::StorageBuffer,
                     m_ObjectBuffers[slot].get());
             });
@@ -196,9 +190,9 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         {gbC, ResourceAccess::Write}, {gbVel, ResourceAccess::Write}, {gbWorldPos, ResourceAccess::Write},
         {gbDepth, ResourceAccess::Write}},
         [&](rhi::IRHICommandList* c) {
-            // 更新运行时 context
-            m_GBufferCtx.objectBuffer = m_ObjectBuffers[m_CurrentFrameSlot].get();
-            m_GBufferCtx.prevViewProj = m_PrevViewProj;
+            // 更新每帧动态参数
+            m_GBuffer->SetObjectBuffer(m_ObjectBuffers[m_CurrentFrameSlot].get());
+            m_GBuffer->SetPrevViewProj(m_PrevViewProj);
 
             // ── DGC 模式上下文注入（通过 RHI 统一接口）──
             m_DGCEnabled = (cvDGC_Enable != 0)
@@ -206,7 +200,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 && m_GPUCulling.GetIndirectBuffer()
                 && m_GPUCulling.enabled;
             if (m_DGCEnabled) {
-                auto& dgcCtx = m_GBufferCtx.dgc;
+                GBufferContext::DGCContext dgcCtx;
                 dgcCtx.enabled                 = true;
                 dgcCtx.indirectCommandsLayout  = m_Device->GetDGCLayout();
                 dgcCtx.indirectExecutionSet    = m_Device->GetDGCExecutionSet();
@@ -215,11 +209,12 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 dgcCtx.maxSequenceCount        = m_Device->GetDGCMaxSequences();
                 dgcCtx.sequenceBuffer          = m_GPUCulling.GetIndirectBuffer();
                 dgcCtx.countBuffer            = m_GPUCulling.GetDrawCountBuffer();
+                m_GBuffer->SetDGCContext(dgcCtx);
             } else {
-                m_GBufferCtx.dgc = {};  // 重置 DGC 上下文
+                m_GBuffer->ClearDGCContext();
             }
 
-            m_GBufferRenderer->Render(c, m_GBufferCtx, world, sg, camera);
+            m_GBuffer->Render(c, world, sg, camera);
         });
 
     // ── 两阶段剔除 Phase 2: 当前帧 Hi-Z 精筛（GBuffer 后，读取当前帧深度）──
@@ -240,7 +235,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 // 更新 Phase 2 的深度/Hi-Z 绑定为当前帧 GBuffer 深度
                 m_Device->UpdateDescriptorSet(m_GPUCulling.GetPhase2Set(), 3,
                     rhi::DescriptorType::CombinedImageSampler,
-                    m_GBufferDepth.get(), m_GPUCulling.GetHiZSampler());
+                    m_GBuffer->GetDepth(), m_GPUCulling.GetHiZSampler());
                 m_GPUCulling.DispatchPhase2(c, m_Width, m_Height);
             });
     }
@@ -254,7 +249,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         {},
         [&](rhi::IRHICommandList* c) {
             if (m_DDGI.IsEnabled()) {
-                m_DDGI.SetGBufferInputs(m_GBufferDepth.get(), m_GBufferB.get(), m_GBufferA.get());
+                m_DDGI.SetGBufferInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetAlbedo());
                 SubsystemContext dgiCtx;
                 dgiCtx.camera = &camera;
                 m_DDGI.Update(dgiCtx);
@@ -275,7 +270,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             rhi::ClearValue aoClear; aoClear.color[0]=aoClear.color[1]=aoClear.color[2]=aoClear.color[3]=1.0f;
             c->BeginOffscreenPass(m_SSAO.GetAOTexture()->GetNativeHandle(), nullptr, w, h, &aoClear, false);
             if (m_SSAO.enabled) {
-                m_SSAO.SetInputs(m_GBufferDepth.get(), m_GBufferB.get());
+                m_SSAO.SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal());
                 m_SSAO.Render(c);
             }
             c->EndOffscreenPass();
@@ -288,7 +283,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             m_SSR.PreBind(c);
             rhi::ClearValue clr{};
             if (m_SSR.IsEnabled()) {
-                m_SSR.SetInputs(m_GBufferDepth.get(), m_GBufferB.get(), m_GBufferA.get());
+                m_SSR.SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetAlbedo());
                 c->BeginOffscreenPass(m_SSR.GetIndirectSpecularTexture()->GetNativeHandle(), nullptr, w, h, &clr, false);
                 m_SSR.Render(c);
             } else {
@@ -302,7 +297,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     rg.AddPass("SSR_Denoise", {{ssrOut, ResourceAccess::Read}}, {{ssrDenoised, ResourceAccess::Write}},
         [&, w, h](rhi::IRHICommandList* c) {
             m_DenoiseSSR.PreBind(c);
-            m_DenoiseSSR.SetInputs(m_SSR.GetIndirectSpecularTexture(), m_GBufferDepth.get(), m_GBufferB.get());
+            m_DenoiseSSR.SetInputs(m_SSR.GetIndirectSpecularTexture(), m_GBuffer->GetDepth(), m_GBuffer->GetNormal());
             rhi::ClearValue clr{};
             c->BeginOffscreenPass(m_DenoiseSSR.GetOutput()->GetNativeHandle(), nullptr, w, h, &clr, false);
             m_DenoiseSSR.Render(c);
@@ -316,7 +311,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             m_SSGI.PreBind(c);
             rhi::ClearValue clr{};
             if (m_SSGI.IsEnabled()) {
-                m_SSGI.SetInputs(m_GBufferDepth.get(), m_GBufferB.get(), m_GBufferA.get());
+                m_SSGI.SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetAlbedo());
                 c->BeginOffscreenPass(m_SSGI.GetIndirectDiffuseTexture()->GetNativeHandle(), nullptr, w, h, &clr, false);
                 m_SSGI.Render(c);
             } else {
@@ -330,7 +325,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     rg.AddPass("SSGI_Denoise", {{ssgiOut, ResourceAccess::Read}}, {{ssgiDenoised, ResourceAccess::Write}},
         [&, w, h](rhi::IRHICommandList* c) {
             m_DenoiseSSGI.PreBind(c);
-            m_DenoiseSSGI.SetInputs(m_SSGI.GetIndirectDiffuseTexture(), m_GBufferDepth.get(), m_GBufferB.get());
+            m_DenoiseSSGI.SetInputs(m_SSGI.GetIndirectDiffuseTexture(), m_GBuffer->GetDepth(), m_GBuffer->GetNormal());
             rhi::ClearValue clr{};
             c->BeginOffscreenPass(m_DenoiseSSGI.GetOutput()->GetNativeHandle(), nullptr, w, h, &clr, false);
             m_DenoiseSSGI.Render(c);
@@ -347,15 +342,15 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         {{hdrC, ResourceAccess::Write}},
         [&, w, h](rhi::IRHICommandList* c) {
             c->PipelineBarrier(rhi::PipelineStage::LateFragmentTests, rhi::PipelineStage::FragmentShader,
-                rhi::ResourceState::DepthStencilWrite, rhi::ResourceState::DepthStencilRead, m_GBufferDepth.get());
+                rhi::ResourceState::DepthStencilWrite, rhi::ResourceState::DepthStencilRead, m_GBuffer->GetDepth());
             auto bindTex = [&](u32 b, rhi::IRHITexture* t) { if(t) m_Device->UpdateDescriptorSet(m_LightingSet, b, rhi::DescriptorType::CombinedImageSampler, t, m_HDRSampler.get()); };
-            bindTex(0, m_GBufferA.get()); bindTex(1, m_GBufferB.get()); bindTex(2, m_GBufferC.get());
+            bindTex(0, m_GBuffer->GetAlbedo()); bindTex(1, m_GBuffer->GetNormal()); bindTex(2, m_GBuffer->GetEmissive());
             // GBufferE: worldPos.xyz（直接从 GBuffer 读取世界坐标，无需 invViewProj 重建）
             m_Device->UpdateDescriptorSet(m_LightingSet, 23, rhi::DescriptorType::CombinedImageSampler,
-                m_GBufferE.get(), m_PointSampler.get());
+                m_GBuffer->GetWorldPos(), m_PointSampler.get());
             // 深度缓冲区使用点采样（Nearest），避免 Linear 插值在物体边缘混合背景深度
             m_Device->UpdateDescriptorSet(m_LightingSet, 3, rhi::DescriptorType::CombinedImageSampler,
-                m_GBufferDepth.get(), m_PointSampler.get());
+                m_GBuffer->GetDepth(), m_PointSampler.get());
             if (m_ShadowSystem && m_ShadowSystem->GetShadowMap(0))
                 bindTex(4, m_ShadowSystem->GetShadowMap(0));
             // CSM 级联 1/2（绑定 10/11，与 Shader layout 一致）
@@ -533,7 +528,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             [&, bloomActive](rhi::IRHICommandList* c) {
                 auto* src = bloomActive ? m_Bloom.GetOutput() : m_HDRTarget.get();
                 auto* smp = bloomActive ? m_Bloom.GetOutputSampler() : m_HDRSampler.get();
-                m_DOF.SetInputs(src, smp, m_GBufferDepth.get());
+                m_DOF.SetInputs(src, smp, m_GBuffer->GetDepth());
                 c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput, rhi::PipelineStage::FragmentShader,
                     rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, src);
                 m_DOF.Render(c);
@@ -551,7 +546,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 auto* smp = dofActive   ? m_DOF.GetOutputSampler()
                            : bloomActive ? m_Bloom.GetOutputSampler()
                            :               m_HDRSampler.get();
-                m_MotionBlur.SetInputs(src, smp, m_GBufferD.get(), m_HDRSampler.get());
+                m_MotionBlur.SetInputs(src, smp, m_GBuffer->GetVelocity(), m_HDRSampler.get());
                 c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput, rhi::PipelineStage::FragmentShader,
                     rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, src);
                 m_MotionBlur.Render(c);
@@ -581,7 +576,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                     rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, m_HDRTarget.get());
             }
             auto* taa = static_cast<AA_TAA*>(m_AntiAliasing.get());
-            taa->SetGBufferInputs(m_GBufferDepth.get(), m_GBufferB.get(), m_GBufferD.get());
+            taa->SetGBufferInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetVelocity());
             float4x4 invCurrVP = glm::inverse(m_CurrViewProj);
             taa->UpdateUniforms(m_PrevViewProj, invCurrVP, m_Width, m_Height);
             m_AntiAliasing->Render(c);

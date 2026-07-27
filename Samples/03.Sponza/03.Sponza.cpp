@@ -13,6 +13,7 @@
 #include "RHI/RHI.h"
 #include "Pipeline/ForwardPipeline.h"
 #include "Pipeline/CameraController.h"
+#include "Pipeline/RTPass.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
 #include "Scene/LightComponent.h"
