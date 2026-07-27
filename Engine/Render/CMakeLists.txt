@@ -22,6 +22,8 @@ set(RENDER_SOURCES
     Pipeline/DeferredPipeline.h
     Pipeline/DeferredPipeline.cpp
     Pipeline/DeferredPipeline_FrameGraph.cpp
+    Pipeline/HybridRTPipeline.h
+    Pipeline/HybridRTPipeline.cpp
     Pipeline/ClusteredShading.h
     Pipeline/ClusteredShading.cpp
     Pipeline/GPUScene.h
