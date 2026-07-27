@@ -26,21 +26,11 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "GI/GI_SSR.h"
 #include "GI/GI_DDGI.h"
 #include "PostProcess/Denoiser.h"
-#include "PostProcess/BloomPass.h"
-#include "PostProcess/DOFPass.h"
-#include "PostProcess/MotionBlurPass.h"
-#include "PostProcess/AutoExposurePass.h"
-#include "PostProcess/ColorGradingPass.h"
-#include "PostProcess/ToneMapPass.h"
 #include "Profiler/ProfilerManager.h"
 #include "Profiler/ProfilerPanel.h"
-#include "PostProcess/SkyboxPass.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
-#include "AntiAliasing/AntiAliasing.h"
-#include "AntiAliasing/AA_FXAA.h"
-#include "AntiAliasing/AA_SMAA.h"
-#include "AntiAliasing/AA_MSAA.h"
+#include "PostProcess/PostProcessChain.h"
 
 #include <memory>
 #include <vector>
@@ -77,7 +67,7 @@ public:
 
     IShadowSystem*       GetShadowSystem() override { return m_ShadowSystem.get(); }
     IGlobalIllumination* GetGI()           override { return m_GI.get(); }
-    ToneMapPass*         GetToneMap()            { return m_ToneMap.get(); }
+    ToneMapPass*         GetToneMap()            { return m_PostProcess.GetToneMap(); }
     GI_DDGI*             GetDDGI()               { return &m_DDGI; }
     GI_SSGI*             GetSSGI()               { return &m_SSGI; }
     GI_SSR*              GetSSR()                { return &m_SSR; }
@@ -87,28 +77,29 @@ public:
     ParticleRenderer&     GetParticleRenderer()   { return m_ParticleRenderer; }
     void AddParticleComponent(u32 id)             { m_ParticleComponentIDs.push_back(id); }
     void SetSwapChain(rhi::IRHISwapChain* sc)  { m_SwapChain = sc; }
-    BloomPass&      GetBloom()      { return m_Bloom; }
-    DOFPass&        GetDOF()        { return m_DOF; }
-    MotionBlurPass& GetMotionBlur() { return m_MotionBlur; }
+    BloomPass&      GetBloom()      { return m_PostProcess.GetBloom(); }
+    DOFPass&        GetDOF()        { return m_PostProcess.GetDOF(); }
+    MotionBlurPass& GetMotionBlur() { return m_PostProcess.GetMotionBlur(); }
     SSAO&           GetSSAO()       { return m_SSAO; }
     ProfilerManager&    GetProfiler()      { return m_Profiler; }
     ProfilerPanel&      GetProfilerPanel() { return m_ProfilerPanel; }
-    AutoExposurePass&   GetAutoExposure()  { return m_AutoExposure; }
-    ColorGradingPass&   GetColorGrading()  { return m_ColorGrading; }
+    AutoExposurePass&   GetAutoExposure()  { return m_PostProcess.GetAutoExposure(); }
+    ColorGradingPass&   GetColorGrading()  { return m_PostProcess.GetColorGrading(); }
+    SkyboxPass*         GetSkybox()        { return m_PostProcess.GetSkybox(); }
     // GBuffer 渲染模式（委托给 GBufferRenderer）
     void         SetGBufferMode(GBufferRenderer::Mode m);
     GBufferRenderer::Mode GetGBufferMode() const;
 
     void EnableFXAA(bool enable);
-    bool IsFXAAEnabled() const                 { return m_FXAAEnabled && m_FXAA != nullptr; }
+    bool IsFXAAEnabled() const                 { return m_PostProcess.IsFXAAEnabled(); }
 
-    void EnableSMAA(bool enable);                                                   // SMAA 懒初始化
-    bool IsSMAAEnabled() const                 { return m_SMAAEnabled && m_SMAA != nullptr && m_SMAA->IsReady(); }
-    AA_SMAA* GetSMAA()                         { return m_SMAA.get(); }
+    void EnableSMAA(bool enable);
+    bool IsSMAAEnabled() const                 { return m_PostProcess.IsSMAAEnabled(); }
+    AA_SMAA* GetSMAA()                         { return m_PostProcess.GetSMAA(); }
 
-    void EnableMSAA(bool enable);                                                   // MSAA 懒初始化
-    bool IsMSAAEnabled() const                 { return m_MSAAEnabled && m_MSAA != nullptr && m_MSAA->IsReady(); }
-    AA_MSAA* GetMSAA()                         { return m_MSAA.get(); }
+    void EnableMSAA(bool enable);
+    bool IsMSAAEnabled() const                 { return m_PostProcess.IsMSAAEnabled(); }
+    AA_MSAA* GetMSAA()                         { return m_PostProcess.GetMSAA(); }
 
     rhi::IRHIBuffer* GetCurrentObjectBuffer()  { return m_ObjectBuffers[m_CurrentFrameSlot].get(); }
     rhi::IRHIBuffer* GetCurrentShadowBuffer()  { return m_ShadowBuffers[m_CurrentFrameSlot].get(); }
@@ -136,11 +127,8 @@ private:
     // 光照 Pass（HDR 目标 + PSO + 描述符集，共享组件）
     LightingPass m_Lighting;
 
-    // LDR 中间纹理（ToneMap 输出 → FXAA 输入，BGRA8_UNORM）
-    // FXAA 禁用时 ToneMap 直接写 BackBuffer，此纹理闲置
-    std::unique_ptr<rhi::IRHITexture> m_LDRTarget;
-    std::unique_ptr<rhi::IRHISampler> m_LDRSampler;
-    std::unique_ptr<rhi::IRHITexture> m_LDRDummyDepth;  // ToneMap PSO 带 depth，Offscreen 需 2 附件
+    // 后处理链（Bloom/DOF/MotionBlur/TAA/ToneMap/ColorGrading/AA + LDR 纹理，共享组件）
+    PostProcessChain m_PostProcess;
 
     // 三缓冲
     std::unique_ptr<rhi::IRHIBuffer> m_LightBuffers[MAX_FRAMES_IN_FLIGHT];
@@ -153,24 +141,7 @@ private:
     std::unique_ptr<IShadowSystem>       m_ShadowSystem;
     std::unique_ptr<IGlobalIllumination> m_GI;
     std::unique_ptr<GI_RSM>              m_RSM;
-    std::unique_ptr<ToneMapPass>         m_ToneMap;
-    std::unique_ptr<SkyboxPass>          m_Skybox;
     std::unique_ptr<SceneRenderer>       m_SceneRenderer;
-
-    // 时域抗锯齿
-    std::unique_ptr<IAntiAliasing> m_AntiAliasing;
-
-    // FXAA（LDR 空间后处理抗锯齿，可单独使用或与 TAA 叠加）
-    std::unique_ptr<AA_FXAA> m_FXAA;
-    bool m_FXAAEnabled = false;
-
-    // SMAA（LDR 空间形态学抗锯齿，与 FXAA 互斥二选一）
-    std::unique_ptr<AA_SMAA> m_SMAA;
-    bool m_SMAAEnabled = false;
-
-    // MSAA（硬件多重采样，覆盖 RT/PSO 的 sampleCount，无需独立 Pass）
-    std::unique_ptr<AA_MSAA> m_MSAA;
-    bool m_MSAAEnabled = false;
 
     // Clustered Shading
     ClusteredShading m_ClusteredShading;
@@ -198,14 +169,9 @@ private:
     Denoiser m_DenoiseSSGI;
     Denoiser m_DenoiseSSR;
     SSAO    m_SSAO;
-    BloomPass m_Bloom;          // Bloom（懒初始化）
-    DOFPass  m_DOF;            // 景深（懒初始化）
-    MotionBlurPass m_MotionBlur; // 运动模糊（懒初始化）
     ProfilerManager m_Profiler;  // GPU 时间戳 Profiler
     ProfilerPanel   m_ProfilerPanel; // ImGui 可视化面板
     std::unique_ptr<rhi::IRHIPipelineState> m_TransientTestPSO;  // 瞬态资源路径验证 PSO
-    AutoExposurePass m_AutoExposure; // 自动曝光
-    ColorGradingPass m_ColorGrading; // LDR 色彩分级
     std::vector<u32> m_GPUVisibleIndices;
 
 

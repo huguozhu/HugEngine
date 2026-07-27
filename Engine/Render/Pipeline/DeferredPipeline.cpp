@@ -40,31 +40,15 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     m_GBuffer = std::make_unique<GBufferRenderer>();
     m_GBuffer->Initialize(device, m_Width, m_Height);
 
-    // 硬件 MSAA：覆盖纹理和 PSO 的 sampleCount
-    if (m_MSAAEnabled) {
-        m_MSAA = std::make_unique<AA_MSAA>();
-        m_MSAA->Initialize(device, m_Width, m_Height);
-        HE_CORE_INFO("DeferredPipeline: MSAA {}x enabled (HDR 目标多采样，GBuffer 保持 1x)", m_MSAA->GetCurrentSampleCount());
+    // 硬件 MSAA：覆盖纹理和 PSO 的 sampleCount（委托给 PostProcessChain）
+    if (m_PostProcess.IsMSAAEnabled()) {
+        HE_CORE_INFO("DeferredPipeline: MSAA enabled (HDR 目标多采样，GBuffer 保持 1x)");
     }
 
     // HDR 目标 + Lighting PSO + 描述符集（委托给 LightingPass）
     m_Lighting.Initialize(device, m_Width, m_Height);
 
-    // LDR 中间纹理（FXAA 链路：ToneMap → LDR → FXAA → BackBuffer）
-    {
-        rhi::TextureDesc d;
-        d.format = rhi::Format::BGRA8_UNORM;
-        d.width = m_Width; d.height = m_Height;
-        d.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
-        m_LDRTarget = device->CreateTexture(d);
-        rhi::SamplerDesc s; s.minFilter = s.magFilter = rhi::FilterMode::Linear;
-        s.addressU = s.addressV = rhi::AddressMode::ClampToEdge;
-        m_LDRSampler = device->CreateSampler(s);
-        // 虚拟深度附件（ToneMap PSO 带 D32_FLOAT depthFormat，Offscreen 需要 2 附件）
-        rhi::TextureDesc dd; dd.format = rhi::Format::D32_FLOAT;
-        dd.width = 1; dd.height = 1; dd.usage = rhi::TextureUsage::DepthStencil;
-        m_LDRDummyDepth = device->CreateTexture(dd);
-    }
+    // LDR 中间纹理已在 PostProcessChain::Initialize() 中创建
 
     // 三缓冲
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
@@ -87,8 +71,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         m_GI.reset();
     }
     try { m_RSM = std::make_unique<GI_RSM>(); m_RSM->Initialize(device, 0, 0); } catch (...) { m_RSM.reset(); }
-    m_ToneMap = std::make_unique<ToneMapPass>(); m_ToneMap->Initialize(device, m_Width, m_Height);
-    m_Skybox  = std::make_unique<SkyboxPass>(); m_Skybox->Initialize(device, m_Width, m_Height);
+    m_PostProcess.Initialize(device, m_Width, m_Height);  // ToneMap/Skybox/TAA/LDR 纹理
     m_SceneRenderer = std::make_unique<SceneRenderer>();
     m_GPUCulling.Initialize(device);
     if (m_GPUCulling.usePTG) {
@@ -110,17 +93,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     m_DenoiseSSR.Initialize(device, m_Width, m_Height);
     m_SSAO.Initialize(device, m_Width, m_Height);
     m_SSAO.enabled = false;  // 默认关闭
-    // Bloom / FXAA / GaussianBlur：懒初始化，首次 SetEnabled(true) 时才分配 GPU 资源
-
-    // AA_TAA（HDR 空间）
-    m_AntiAliasing = std::make_unique<AA_TAA>();
-    if (!m_AntiAliasing->Initialize(device, m_Width, m_Height)) {
-        HE_CORE_WARN("DeferredPipeline: AA_TAA init failed, anti-aliasing disabled");
-        m_AntiAliasing.reset();
-    }
-
-    // AA_FXAA（LDR 空间，懒初始化：EnableFXAA(true) 首次调用时分配 GPU 资源）
-
+    // Bloom / FXAA / TAA / AutoExposure 已在 PostProcessChain::Initialize() 中创建
 
     // GBuffer PSO + 描述符集 + DGC 初始化已在 GBufferRenderer::Initialize() 中完成
 
@@ -146,8 +119,6 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     // GPU Profiler
     m_Profiler.Initialize(device, rhi::kMaxProfilerPasses, MAX_FRAMES_IN_FLIGHT);
     m_ProfilerPanel.SetProfiler(&m_Profiler);  // 绑定 ImGui 面板到 Profiler 数据源
-    m_AutoExposure.Initialize(device, m_Width, m_Height);
-
     // Lighting PSO + 描述符集已在 LightingPass::Initialize() 中创建
 
     // 瞬态资源路径验证 PSO（全屏三角形 + 纹理拷贝，用于验证 Transient Allocator 端到端路径）
@@ -179,19 +150,9 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
 
 void DeferredPipeline::Shutdown() {
     if (m_ShadowSystem) m_ShadowSystem->Shutdown();
-    if (m_ToneMap) m_ToneMap->Shutdown();
-    if (m_Skybox)  m_Skybox->Shutdown();
+    m_PostProcess.Shutdown();
     if (m_GBuffer) m_GBuffer->Shutdown();
     m_Lighting.Shutdown();
-    if (m_AntiAliasing) m_AntiAliasing->Shutdown();
-    m_AntiAliasing.reset();
-    if (m_FXAA) m_FXAA->Shutdown();
-    m_FXAA.reset();
-    if (m_SMAA) m_SMAA->Shutdown();
-    m_SMAA.reset();
-    if (m_MSAA) m_MSAA->Shutdown();
-    m_MSAA.reset();
-    m_LDRTarget.reset(); m_LDRSampler.reset(); m_LDRDummyDepth.reset();
     m_TransientTestPSO.reset();
     for (auto& b : m_LightBuffers) b.reset();
     for (auto& b : m_ObjectBuffers) b.reset();
@@ -206,7 +167,6 @@ void DeferredPipeline::Shutdown() {
     m_Device->ShutdownDGC();  // DGC 由 RHI 管理生命周期
 
     m_Profiler.Shutdown();
-    m_AutoExposure.Shutdown();
     // AsyncCompute 清理
     if (m_CrossQueueFence != rhi::kInvalidFence) {
         m_Device->DestroyFence(m_CrossQueueFence);
@@ -220,7 +180,6 @@ void DeferredPipeline::Shutdown() {
     m_DenoiseSSGI.Shutdown();
     m_DenoiseSSR.Shutdown();
     m_SSAO.Shutdown();
-    m_Bloom.Shutdown();
     m_Device = nullptr; m_Ready = false;
     HE_CORE_INFO("DeferredPipeline shutdown");
 }
@@ -236,43 +195,16 @@ GBufferRenderer::Mode DeferredPipeline::GetGBufferMode() const {
 }
 
 void DeferredPipeline::EnableFXAA(bool enable) {
-    m_FXAAEnabled = enable;
-    if (!enable || !m_Device) return;
-    // 懒初始化：首次 EnableFXAA(true) 时创建 PSO 和纹理
-    if (!m_FXAA) {
-        m_FXAA = std::make_unique<AA_FXAA>();
-        if (!m_FXAA->Initialize(m_Device, m_Width, m_Height)) {
-            HE_CORE_WARN("DeferredPipeline: AA_FXAA init failed");
-            m_FXAA.reset();
-        }
-    }
+    m_PostProcess.EnableFXAA(m_Device, m_Width, m_Height, enable);
 }
 
 void DeferredPipeline::EnableSMAA(bool enable) {
-    m_SMAAEnabled = enable;
-    if (!enable || !m_Device) return;
-    // 懒初始化：首次 EnableSMAA(true) 时创建 GPU 资源
-    if (!m_SMAA) {
-        m_SMAA = std::make_unique<AA_SMAA>();
-        if (!m_SMAA->Initialize(m_Device, m_Width, m_Height)) {
-            HE_CORE_WARN("DeferredPipeline: AA_SMAA init failed");
-            m_SMAA.reset();
-        }
-    }
+    m_PostProcess.EnableSMAA(m_Device, m_Width, m_Height, enable);
 }
 
 void DeferredPipeline::EnableMSAA(bool enable) {
-    // MSAA 需要修改 RT/PSO 采样数，仅在管线初始化前设置有效
-    // 运行时切换需要重建管线（OnResize 路径会应用 OverrideTextureDesc）
-    m_MSAAEnabled = enable;
-    if (!enable || !m_Device) return;
-    if (!m_MSAA) {
-        m_MSAA = std::make_unique<AA_MSAA>();
-        m_MSAA->Initialize(m_Device, m_Width, m_Height);
-    }
-    // 已有设备但管线未初始化：暂存标志，Initialize() 中生效
-    // 已初始化：需重建 HDR 目标才能生效（警告用户）
-    if (m_Ready) {
+    m_PostProcess.EnableMSAA(m_Device, m_Width, m_Height, enable);
+    if (m_Ready && enable) {
         HE_CORE_WARN("DeferredPipeline: MSAA toggled after init — 需重启应用生效");
     }
 }
@@ -309,32 +241,14 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
     // 重建 HDR 目标（通过 LightingPass）
     m_Lighting.OnResize(m_Device, w, h);
     m_ParticleRenderer.SetSceneDepth(m_Lighting.GetHDRDepth(), m_Lighting.GetPointSampler());  // 软粒子深度纹理更新
-    if (m_ToneMap) m_ToneMap->OnResize(w, h);
-    if (m_Skybox)  { m_Skybox->Shutdown(); m_Skybox->Initialize(m_Device, w, h); }
-    if (m_AntiAliasing) m_AntiAliasing->OnResize(w, h);
-    if (m_FXAA) m_FXAA->OnResize(w, h);
-    if (m_SMAA) m_SMAA->OnResize(w, h);    // SMAA 中间纹理随分辨率重建
+    m_PostProcess.OnResize(m_Device, w, h);
     // GBufferContext 纹理指针已在 GBufferRenderer::OnResize() 中更新
-    // 重建 LDR 中间纹理
-    {
-        rhi::TextureDesc d; d.format = rhi::Format::BGRA8_UNORM;
-        d.width = w; d.height = h; d.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
-        m_LDRTarget = m_Device->CreateTexture(d);
-    }
-    // 重建 LDR 虚拟深度
-    {
-        rhi::TextureDesc dd; dd.format = rhi::Format::D32_FLOAT;
-        dd.width = 1; dd.height = 1; dd.usage = rhi::TextureUsage::DepthStencil;
-        m_LDRDummyDepth = m_Device->CreateTexture(dd);
-    }
     m_SSAO.OnResize(w, h);
     m_SSGI.OnResize(w, h);
     m_SSR.OnResize(w, h);
     m_DDGI.OnResize(w, h);
     m_DenoiseSSGI.OnResize(w, h);
     m_DenoiseSSR.OnResize(w, h);
-    m_Bloom.OnResize(w, h);  // 内部守卫：未初始化时直接 return
-    m_AutoExposure.OnResize(w, h);
 }
 
 void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,

@@ -49,15 +49,15 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     m_CurrViewProj = camera.GetViewProjMatrix();
     static bool firstFrame = true;
     if (firstFrame) { m_PrevViewProj = m_CurrViewProj; firstFrame = false; }
-    if (m_AntiAliasing) m_AntiAliasing->OnBeginFrame();
+    if (m_PostProcess.GetTAA()) m_PostProcess.GetTAA()->OnBeginFrame();
 
     // ── 物理相机参数推导（根据 camera.exposureBias 等字段判断是否启用）──
     // 非零 exposureBias 表示使用了物理相机参数，将其传递到 DOF/MotionBlur/Exposure
     if (camera.apertureDiameter > 0.0f) {
-        m_DOF.SetFocusDepth(camera.focusDistance);
-        m_DOF.SetIntensity(camera.maxCoC);
+        m_PostProcess.GetDOF().SetFocusDepth(camera.focusDistance);
+        m_PostProcess.GetDOF().SetIntensity(camera.maxCoC);
     }
-    m_MotionBlur.SetIntensity(camera.motionBlurIntensity);
+    m_PostProcess.GetMotionBlur().SetIntensity(camera.motionBlurIntensity);
     // exposureBias 叠加到 AutoExposure 输出（在 ToneMap Pass 前处理）
 
     // GPUScene 收集 → [GPU 模式: 填充 IndirectDraw 参数] → 上传
@@ -395,8 +395,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     // ── AutoExposure（Compute reduction → SSBO，Bloom 之前）──
     rg.AddPass("AutoExposure", {{hdrC, ResourceAccess::Read}}, {},
         [&](rhi::IRHICommandList* c) {
-            m_AutoExposure.SetInput(m_Lighting.GetHDRTarget(), m_Lighting.GetHDRSampler());
-            m_AutoExposure.Render(c);
+            m_PostProcess.GetAutoExposure().SetInput(m_Lighting.GetHDRTarget(), m_Lighting.GetHDRSampler());
+            m_PostProcess.GetAutoExposure().Render(c);
             // 恢复 graphics pipeline state（compute dispatch 后 m_CurrentRenderPass 为空）
             c->SetPipeline(m_Lighting.GetPSO());
         },
@@ -457,52 +457,52 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     }
 
     // ── 后处理链路：Bloom → DOF → MotionBlur（责任链，按序串联）──
-    bool bloomActive = m_Bloom.IsEnabled() && m_Bloom.GetOutput() != nullptr;
-    bool dofActive   = m_DOF.IsEnabled()   && m_DOF.GetOutput()   != nullptr;
-    bool mbActive    = m_MotionBlur.IsEnabled() && m_MotionBlur.GetOutput() != nullptr;
+    bool bloomActive = m_PostProcess.GetBloom().IsEnabled() && m_PostProcess.GetBloom().GetOutput() != nullptr;
+    bool dofActive   = m_PostProcess.GetDOF().IsEnabled()   && m_PostProcess.GetDOF().GetOutput()   != nullptr;
+    bool mbActive    = m_PostProcess.GetMotionBlur().IsEnabled() && m_PostProcess.GetMotionBlur().GetOutput() != nullptr;
     bool anyPostActive = bloomActive || dofActive || mbActive;
 
     // Bloom
     if (bloomActive) {
-        auto bloomOut = rg.ImportTexture("Bloom_Out", m_Bloom.GetOutput());
+        auto bloomOut = rg.ImportTexture("Bloom_Out", m_PostProcess.GetBloom().GetOutput());
         rg.AddPass("Bloom", {{hdrC, ResourceAccess::Read}}, {{bloomOut, ResourceAccess::Write}},
             [&](rhi::IRHICommandList* c) {
                 c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput, rhi::PipelineStage::FragmentShader,
                     rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, m_Lighting.GetHDRTarget());
-                m_Bloom.SetInput(m_Lighting.GetHDRTarget(), m_Lighting.GetHDRSampler());
-                m_Bloom.Render(c);
+                m_PostProcess.GetBloom().SetInput(m_Lighting.GetHDRTarget(), m_Lighting.GetHDRSampler());
+                m_PostProcess.GetBloom().Render(c);
             });
     }
 
     // DOF（景深）：读取 Bloom 输出或原始 HDR
     if (dofActive) {
-        auto dofOut = rg.ImportTexture("DOF_Out", m_DOF.GetOutput());
+        auto dofOut = rg.ImportTexture("DOF_Out", m_PostProcess.GetDOF().GetOutput());
         rg.AddPass("DOF", {{hdrC, ResourceAccess::Read}}, {{dofOut, ResourceAccess::Write}},
             [&, bloomActive](rhi::IRHICommandList* c) {
-                auto* src = bloomActive ? m_Bloom.GetOutput() : m_Lighting.GetHDRTarget();
-                auto* smp = bloomActive ? m_Bloom.GetOutputSampler() : m_Lighting.GetHDRSampler();
-                m_DOF.SetInputs(src, smp, m_GBuffer->GetDepth());
+                auto* src = bloomActive ? m_PostProcess.GetBloom().GetOutput() : m_Lighting.GetHDRTarget();
+                auto* smp = bloomActive ? m_PostProcess.GetBloom().GetOutputSampler() : m_Lighting.GetHDRSampler();
+                m_PostProcess.GetDOF().SetInputs(src, smp, m_GBuffer->GetDepth());
                 c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput, rhi::PipelineStage::FragmentShader,
                     rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, src);
-                m_DOF.Render(c);
+                m_PostProcess.GetDOF().Render(c);
             });
     }
 
     // MotionBlur：读取 DOF 输出 > Bloom 输出 > 原始 HDR
     if (mbActive) {
-        auto mbOut = rg.ImportTexture("MB_Out", m_MotionBlur.GetOutput());
+        auto mbOut = rg.ImportTexture("MB_Out", m_PostProcess.GetMotionBlur().GetOutput());
         rg.AddPass("MotionBlur", {{hdrC, ResourceAccess::Read}}, {{mbOut, ResourceAccess::Write}},
             [&, bloomActive, dofActive](rhi::IRHICommandList* c) {
-                auto* src = dofActive   ? m_DOF.GetOutput()
-                           : bloomActive ? m_Bloom.GetOutput()
+                auto* src = dofActive   ? m_PostProcess.GetDOF().GetOutput()
+                           : bloomActive ? m_PostProcess.GetBloom().GetOutput()
                            :               m_Lighting.GetHDRTarget();
-                auto* smp = dofActive   ? m_DOF.GetOutputSampler()
-                           : bloomActive ? m_Bloom.GetOutputSampler()
+                auto* smp = dofActive   ? m_PostProcess.GetDOF().GetOutputSampler()
+                           : bloomActive ? m_PostProcess.GetBloom().GetOutputSampler()
                            :               m_Lighting.GetHDRSampler();
-                m_MotionBlur.SetInputs(src, smp, m_GBuffer->GetVelocity(), m_Lighting.GetHDRSampler());
+                m_PostProcess.GetMotionBlur().SetInputs(src, smp, m_GBuffer->GetVelocity(), m_Lighting.GetHDRSampler());
                 c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput, rhi::PipelineStage::FragmentShader,
                     rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, src);
-                m_MotionBlur.Render(c);
+                m_PostProcess.GetMotionBlur().Render(c);
             });
     }
 
@@ -511,16 +511,16 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         {{hdrC, ResourceAccess::Read}},
         {},
         [&, bloomActive, dofActive, mbActive, anyPostActive, h = m_Height, w = m_Width](rhi::IRHICommandList* c) {
-            if (!m_AntiAliasing || !m_AntiAliasing->IsEnabled()) return;
-            auto* src = mbActive ? m_MotionBlur.GetOutput()
-                      : dofActive ? m_DOF.GetOutput()
-                      : bloomActive ? m_Bloom.GetOutput()
+            if (!m_PostProcess.GetTAA() || !m_PostProcess.GetTAA()->IsEnabled()) return;
+            auto* src = mbActive ? m_PostProcess.GetMotionBlur().GetOutput()
+                      : dofActive ? m_PostProcess.GetDOF().GetOutput()
+                      : bloomActive ? m_PostProcess.GetBloom().GetOutput()
                       : m_Lighting.GetHDRTarget();
-            auto* smp = mbActive ? m_MotionBlur.GetOutputSampler()
-                      : dofActive ? m_DOF.GetOutputSampler()
-                      : bloomActive ? m_Bloom.GetOutputSampler()
+            auto* smp = mbActive ? m_PostProcess.GetMotionBlur().GetOutputSampler()
+                      : dofActive ? m_PostProcess.GetDOF().GetOutputSampler()
+                      : bloomActive ? m_PostProcess.GetBloom().GetOutputSampler()
                       : m_Lighting.GetHDRSampler();
-            m_AntiAliasing->SetInput(src, smp);
+            m_PostProcess.GetTAA()->SetInput(src, smp);
             if (anyPostActive) {
                 c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput, rhi::PipelineStage::FragmentShader,
                     rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, src);
@@ -528,20 +528,20 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput, rhi::PipelineStage::FragmentShader,
                     rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, m_Lighting.GetHDRTarget());
             }
-            auto* taa = static_cast<AA_TAA*>(m_AntiAliasing.get());
+            auto* taa = static_cast<AA_TAA*>(m_PostProcess.GetTAA());
             taa->SetGBufferInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetVelocity());
             float4x4 invCurrVP = glm::inverse(m_CurrViewProj);
             taa->UpdateUniforms(m_PrevViewProj, invCurrVP, m_Width, m_Height);
-            m_AntiAliasing->Render(c);
+            m_PostProcess.GetTAA()->Render(c);
         });
 
     // LDR 管线：ToneMap → [ColorGrading] → [SMAA | FXAA] → BackBuffer
     // SMAA 与 FXAA 互斥（二选一），均为 LDR 空间后处理抗锯齿终端 Pass
-    auto ldrTarget = rg.ImportTexture("LDR", m_LDRTarget.get());
+    auto ldrTarget = rg.ImportTexture("LDR", m_PostProcess.GetLDRTarget());
     bool useFXAA  = IsFXAAEnabled();
     bool useSMAA  = IsSMAAEnabled();                                             // SMAA 互斥选项
-    bool useColor = m_ColorGrading.IsEnabled() && m_ColorGrading.GetOutput() != nullptr;
-    bool useTAA   = (m_AntiAliasing && m_AntiAliasing->IsEnabled());
+    bool useColor = m_PostProcess.GetColorGrading().IsEnabled() && m_PostProcess.GetColorGrading().GetOutput() != nullptr;
+    bool useTAA   = (m_PostProcess.GetTAA() && m_PostProcess.GetTAA()->IsEnabled());
     bool needLDR  = useFXAA || useSMAA || useColor;  // 任一启用就需要 LDR 中间纹理
 
     // ToneMap Pass（HDR → LDR，输出到 LDR 或 BackBuffer）
@@ -550,53 +550,53 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         {{needLDR ? ldrTarget : backBuf, ResourceAccess::Write}},
         [this, &camera, useTAA, needLDR, w, h, anyPostActive](rhi::IRHICommandList* c) {
             if (useTAA) {
-                m_ToneMap->SetInput(m_AntiAliasing->GetOutputTexture(),
-                                    m_AntiAliasing->GetOutputSampler());
+                m_PostProcess.GetToneMap()->SetInput(m_PostProcess.GetTAA()->GetOutputTexture(),
+                                    m_PostProcess.GetTAA()->GetOutputSampler());
             } else if (anyPostActive) {
-                auto* src = m_MotionBlur.IsEnabled() ? m_MotionBlur.GetOutput()
-                          : m_DOF.IsEnabled()        ? m_DOF.GetOutput()
-                          :                            m_Bloom.GetOutput();
-                auto* smp = m_MotionBlur.IsEnabled() ? m_MotionBlur.GetOutputSampler()
-                          : m_DOF.IsEnabled()        ? m_DOF.GetOutputSampler()
-                          :                            m_Bloom.GetOutputSampler();
-                m_ToneMap->SetInput(src, smp);
+                auto* src = m_PostProcess.GetMotionBlur().IsEnabled() ? m_PostProcess.GetMotionBlur().GetOutput()
+                          : m_PostProcess.GetDOF().IsEnabled()        ? m_PostProcess.GetDOF().GetOutput()
+                          :                            m_PostProcess.GetBloom().GetOutput();
+                auto* smp = m_PostProcess.GetMotionBlur().IsEnabled() ? m_PostProcess.GetMotionBlur().GetOutputSampler()
+                          : m_PostProcess.GetDOF().IsEnabled()        ? m_PostProcess.GetDOF().GetOutputSampler()
+                          :                            m_PostProcess.GetBloom().GetOutputSampler();
+                m_PostProcess.GetToneMap()->SetInput(src, smp);
             } else {
                 c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput, rhi::PipelineStage::FragmentShader,
                     rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, m_Lighting.GetHDRTarget());
-                m_ToneMap->SetInput(m_Lighting.GetHDRTarget(), m_Lighting.GetHDRSampler());
+                m_PostProcess.GetToneMap()->SetInput(m_Lighting.GetHDRTarget(), m_Lighting.GetHDRSampler());
             }
             // 物理相机曝光偏置叠加到自动曝光（EV 偏移 → 曝光倍率）
-            float physicalExposure = m_AutoExposure.GetExposure()
+            float physicalExposure = m_PostProcess.GetAutoExposure().GetExposure()
                 * std::exp2f(camera.exposureBias);
-            m_ToneMap->SetExposure(physicalExposure);
-            m_ToneMap->PreBind(c);
+            m_PostProcess.GetToneMap()->SetExposure(physicalExposure);
+            m_PostProcess.GetToneMap()->PreBind(c);
             if (needLDR) {
                 rhi::ClearValue clr{};
-                c->BeginOffscreenPass(m_LDRTarget->GetNativeHandle(),
-                    m_LDRDummyDepth->GetNativeHandle(), w, h, &clr, false);
-                m_ToneMap->Render(c);
+                c->BeginOffscreenPass(m_PostProcess.GetLDRTarget()->GetNativeHandle(),
+                    m_PostProcess.GetLDRDummyDepth()->GetNativeHandle(), w, h, &clr, false);
+                m_PostProcess.GetToneMap()->Render(c);
                 c->EndOffscreenPass();
             } else {
                 c->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
-                m_ToneMap->Render(c);
+                m_PostProcess.GetToneMap()->Render(c);
                 c->EndRenderPass();
             }
         });
 
     // ColorGrading Pass（LDR 色彩分级，ToneMap 之后、AA 之前）
     if (useColor) {
-        auto cgOut = rg.ImportTexture("CG_Out", m_ColorGrading.GetOutput());
+        auto cgOut = rg.ImportTexture("CG_Out", m_PostProcess.GetColorGrading().GetOutput());
         rg.AddPass("ColorGrading",
             {{ldrTarget, ResourceAccess::Read}},
             {{cgOut, ResourceAccess::Write}},
             [this, w, h](rhi::IRHICommandList* c) {
-                m_ColorGrading.SetInput(m_LDRTarget.get(), m_LDRSampler.get());
+                m_PostProcess.GetColorGrading().SetInput(m_PostProcess.GetLDRTarget(), m_PostProcess.GetLDRSampler());
                 c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput, rhi::PipelineStage::FragmentShader,
-                    rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, m_LDRTarget.get());
-                m_ColorGrading.PreBind(c);
+                    rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, m_PostProcess.GetLDRTarget());
+                m_PostProcess.GetColorGrading().PreBind(c);
                 rhi::ClearValue clr{};
-                c->BeginOffscreenPass(m_ColorGrading.GetOutput()->GetNativeHandle(), nullptr, w, h, &clr, false);
-                m_ColorGrading.Render(c);
+                c->BeginOffscreenPass(m_PostProcess.GetColorGrading().GetOutput()->GetNativeHandle(), nullptr, w, h, &clr, false);
+                m_PostProcess.GetColorGrading().Render(c);
                 c->EndOffscreenPass();
             });
     }
@@ -604,41 +604,41 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     // SMAA Pass（LDR 空间形态学抗锯齿，ColorGrading 之后、直接写 BackBuffer）
     // 与 FXAA 互斥：SMAA 启用时跳过后面的 FXAA Pass
     if (useSMAA) {
-        auto* smaaInput = useColor ? m_ColorGrading.GetOutput() : m_LDRTarget.get();
-        auto* smaaSamp  = useColor ? m_ColorGrading.GetOutputSampler() : m_LDRSampler.get();
+        auto* smaaInput = useColor ? m_PostProcess.GetColorGrading().GetOutput() : m_PostProcess.GetLDRTarget();
+        auto* smaaSamp  = useColor ? m_PostProcess.GetColorGrading().GetOutputSampler() : m_PostProcess.GetLDRSampler();
         rg.AddPass("SMAA",
             {{ldrTarget, ResourceAccess::Read}},
             {{backBuf, ResourceAccess::Write}},
             [this, smaaInput, smaaSamp](rhi::IRHICommandList* c) {
-                m_SMAA->SetInput(smaaInput, smaaSamp);
+                m_PostProcess.GetSMAA()->SetInput(smaaInput, smaaSamp);
                 // Barrier: 输入纹理 RT → SRV（供 SMAA Pass 1 采样）
                 c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput,
                                    rhi::PipelineStage::FragmentShader,
                                    rhi::ResourceState::RenderTarget,
                                    rhi::ResourceState::ShaderResource, smaaInput);
                 // Pass 1+2（离屏渲染：边缘检测 + 混合权重）
-                m_SMAA->Render(c);
+                m_PostProcess.GetSMAA()->Render(c);
                 // Pass 3（邻域混合 → BackBuffer）
                 c->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
-                m_SMAA->RenderFinalPass(c);
+                m_PostProcess.GetSMAA()->RenderFinalPass(c);
                 c->EndRenderPass();
             });
     }
     // FXAA Pass（LDR 空间后处理抗锯齿，仅 SMAA 未启用时执行）
     else if (useFXAA) {
-        auto* fxaaInput = useColor ? m_ColorGrading.GetOutput() : m_LDRTarget.get();
-        auto* fxaaSamp  = useColor ? m_ColorGrading.GetOutputSampler() : m_LDRSampler.get();
+        auto* fxaaInput = useColor ? m_PostProcess.GetColorGrading().GetOutput() : m_PostProcess.GetLDRTarget();
+        auto* fxaaSamp  = useColor ? m_PostProcess.GetColorGrading().GetOutputSampler() : m_PostProcess.GetLDRSampler();
         rg.AddPass("FXAA",
             {{ldrTarget, ResourceAccess::Read}},
             {{backBuf, ResourceAccess::Write}},
             [this, fxaaInput, fxaaSamp](rhi::IRHICommandList* c) {
-                m_FXAA->SetInput(fxaaInput, fxaaSamp);
+                m_PostProcess.GetFXAA()->SetInput(fxaaInput, fxaaSamp);
                 c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput,
                                    rhi::PipelineStage::FragmentShader,
                                    rhi::ResourceState::RenderTarget,
                                    rhi::ResourceState::ShaderResource, fxaaInput);
                 c->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
-                m_FXAA->Render(c);
+                m_PostProcess.GetFXAA()->Render(c);
                 c->EndRenderPass();
             });
     }
