@@ -18,8 +18,6 @@
 #include <cstring>
 #include <cmath>
 #include <unordered_set>
-#include "DeferredLighting.vert.spv.h"
-#include "DeferredLighting.frag.spv.h"
 #include "Fullscreen.vert.spv.h"
 #include "FullscreenCopy.frag.spv.h"
 
@@ -49,31 +47,8 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
         HE_CORE_INFO("DeferredPipeline: MSAA {}x enabled (HDR 目标多采样，GBuffer 保持 1x)", m_MSAA->GetCurrentSampleCount());
     }
 
-    // HDR target（MSAA 启用时使用多采样纹理）
-    {
-        rhi::TextureDesc d;
-        d.format = rhi::Format::RGBA16_FLOAT;
-        d.width = m_Width; d.height = m_Height;
-        d.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
-        if (m_MSAA) m_MSAA->OverrideTextureDesc(d);
-        m_HDRTarget = device->CreateTexture(d);
-        rhi::TextureDesc dd;
-        dd.format = rhi::Format::D32_FLOAT;
-        dd.width = m_Width; dd.height = m_Height;
-        dd.usage = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;  // 软粒子需要采样深度
-        if (m_MSAA) m_MSAA->OverrideTextureDesc(dd);  // HDR 深度纹理与颜色纹理相同采样数
-        m_HDRDepth = device->CreateTexture(dd);
-        rhi::SamplerDesc s; s.minFilter = s.magFilter = rhi::FilterMode::Linear;
-        s.addressU = s.addressV = rhi::AddressMode::ClampToEdge;
-        m_HDRSampler = device->CreateSampler(s);
-
-        // 点采样器（Nearest）：深度纹理精确读取，避免 Linear 插值
-        // 在物体边缘混合背景深度导致 worldPos 重建错误
-        rhi::SamplerDesc ptDesc;
-        ptDesc.minFilter = ptDesc.magFilter = rhi::FilterMode::Nearest;
-        ptDesc.addressU  = ptDesc.addressV  = rhi::AddressMode::ClampToEdge;
-        m_PointSampler = device->CreateSampler(ptDesc);
-    }
+    // HDR 目标 + Lighting PSO + 描述符集（委托给 LightingPass）
+    m_Lighting.Initialize(device, m_Width, m_Height);
 
     // LDR 中间纹理（FXAA 链路：ToneMap → LDR → FXAA → BackBuffer）
     {
@@ -173,70 +148,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     m_ProfilerPanel.SetProfiler(&m_Profiler);  // 绑定 ImGui 面板到 Profiler 数据源
     m_AutoExposure.Initialize(device, m_Width, m_Height);
 
-    // Lighting PSO (全屏三角形，无深度)
-    rhi::ShaderBytecode lVS, lFS;
-    lVS.stage = rhi::ShaderStage::Vertex; lVS.spirv = k_DeferredLighting_vert_spv; lVS.entryPoint = "main";
-    lFS.stage = rhi::ShaderStage::Pixel;  lFS.spirv = k_DeferredLighting_frag_spv; lFS.entryPoint = "main";
-    rhi::DescriptorSetLayoutDesc ll;
-    ll.bindings = {
-        {0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // GBufferA
-        {1, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // GBufferB
-        {2, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // GBufferC
-        {3, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // Depth
-        {23, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}, // GBufferE (worldPos)
-        {4, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // Shadow0 (CSM0)
-        {7, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment},  // LightGrid (Clustered)
-        {8, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment},  // LightIndexList (Clustered)
-        {9, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // SpotShadow
-        {10, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}, // Shadow1 (CSM1)
-        {11, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}, // Shadow2 (CSM2)
-        {12, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}, // Irradiance
-        {13, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}, // Prefilter
-        {14, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}, // BRDF LUT
-        {15, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}, // RSM Pos
-        {16, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}, // RSM Flux
-        {17, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment},  // Lights
-        {18, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment},  // ShadowData
-        {19, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // SSGI
-        {20, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // SSAO
-        {21, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // SSR
-        {22, rhi::DescriptorType::StorageBuffer,         1, rhi::kStageMaskFragment},  // DDGI Probes
-    };
-    m_LightingLayout = device->CreateDescriptorSetLayout(ll);
-    m_LightingSet    = device->AllocateDescriptorSet(m_LightingLayout);
-    // 预填充所有 binding 占位纹理（避免未绑定→Intel GPU 白屏）
-    {
-        u8 w4[4]={255,255,255,255};
-        rhi::TextureDesc ptd; ptd.format=rhi::Format::RGBA8_UNORM; ptd.width=1; ptd.height=1; ptd.mipLevels=1; ptd.arrayLayers=1; ptd.usage=rhi::TextureUsage::ShaderResource; ptd.initialData=w4;
-        auto pt = device->CreateTexture(ptd);
-        rhi::SamplerDesc sd; sd.minFilter=sd.magFilter=rhi::FilterMode::Linear;
-        sd.addressU=sd.addressV=rhi::AddressMode::ClampToEdge;
-        auto ps = device->CreateSampler(sd);
-        // 只更新 layout 中声明的 binding（0-4, 9-16）
-        for (u32 b : {0u,1u,2u,3u,4u,9u,10u,11u,12u,13u,14u,15u,16u,23u})
-            device->UpdateDescriptorSet(m_LightingSet, b, rhi::DescriptorType::CombinedImageSampler, pt.get(), ps.get());
-        // Cluster SSBO 占位（binding 7/8）
-        rhi::BufferDesc gd; gd.size=16; gd.usage=rhi::BufferUsage::Storage;
-        auto gb = device->CreateBuffer(gd);
-        device->UpdateDescriptorSet(m_LightingSet, rhi::kBindingLightGrid, rhi::DescriptorType::StorageBuffer, gb.get());
-        device->UpdateDescriptorSet(m_LightingSet, rhi::kBindingLightIndexList, rhi::DescriptorType::StorageBuffer, gb.get());
-        // DDGI 探针 SSBO 占位（binding 22）
-        device->UpdateDescriptorSet(m_LightingSet, 22, rhi::DescriptorType::StorageBuffer, gb.get());
-    }
-
-    rhi::PushConstantRange lpc; lpc.stageMask = rhi::kStageMaskVertex | rhi::kStageMaskFragment; lpc.size = 128;  // 含 cluster 参数
-    rhi::PipelineStateDesc lDesc;
-    lDesc.vertexShader = &lVS; lDesc.pixelShader = &lFS;
-    lDesc.topology = rhi::PrimitiveTopology::TriangleList;
-    lDesc.depthTest = false; lDesc.depthWrite = false;
-    lDesc.colorAttachmentCount = 1;
-    lDesc.colorFormats[0] = rhi::Format::RGBA16_FLOAT;
-    lDesc.pushConstantRanges = {lpc};
-    lDesc.descriptorSetLayouts = {m_LightingLayout};
-    lDesc.debugName = "DeferredLighting";
-    if (m_MSAA) m_MSAA->OverridePSODesc(lDesc);  // 硬件 MSAA 覆盖 PSO sampleCount
-    m_LightingPSO = device->CreatePipelineState(lDesc);
-    HE_ASSERT(m_LightingPSO, "DeferredPipeline: Lighting PSO failed");
+    // Lighting PSO + 描述符集已在 LightingPass::Initialize() 中创建
 
     // 瞬态资源路径验证 PSO（全屏三角形 + 纹理拷贝，用于验证 Transient Allocator 端到端路径）
     {
@@ -255,7 +167,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
 
     // GPU 粒子系统
     m_ParticleRenderer.Initialize(device);
-    m_ParticleRenderer.SetSceneDepth(m_HDRDepth.get(), m_PointSampler.get());  // 软粒子深度纹理
+    m_ParticleRenderer.SetSceneDepth(m_Lighting.GetHDRDepth(), m_Lighting.GetPointSampler());  // 软粒子深度纹理
 
     // 启动 PSO 后台预热（所有子系统已调用 PrecompileQueuePSO 注册 PSO 变体）
     device->StartPSOPrecompile();
@@ -269,8 +181,8 @@ void DeferredPipeline::Shutdown() {
     if (m_ShadowSystem) m_ShadowSystem->Shutdown();
     if (m_ToneMap) m_ToneMap->Shutdown();
     if (m_Skybox)  m_Skybox->Shutdown();
-    if (m_GBuffer) m_GBuffer->Shutdown();  // GBuffer 纹理 + PSO + 描述符集
-    if (m_LightingLayout != rhi::kInvalidLayout) { m_Device->DestroyDescriptorSetLayout(m_LightingLayout); }
+    if (m_GBuffer) m_GBuffer->Shutdown();
+    m_Lighting.Shutdown();
     if (m_AntiAliasing) m_AntiAliasing->Shutdown();
     m_AntiAliasing.reset();
     if (m_FXAA) m_FXAA->Shutdown();
@@ -280,8 +192,7 @@ void DeferredPipeline::Shutdown() {
     if (m_MSAA) m_MSAA->Shutdown();
     m_MSAA.reset();
     m_LDRTarget.reset(); m_LDRSampler.reset(); m_LDRDummyDepth.reset();
-    m_HDRTarget.reset(); m_HDRDepth.reset(); m_HDRSampler.reset(); m_PointSampler.reset();
-    m_LightingPSO.reset(); m_TransientTestPSO.reset();
+    m_TransientTestPSO.reset();
     for (auto& b : m_LightBuffers) b.reset();
     for (auto& b : m_ObjectBuffers) b.reset();
     for (auto& b : m_ShadowBuffers) b.reset();
@@ -395,16 +306,9 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
     m_Width = w; m_Height = h;
     // 重建 GBuffer 纹理（委托给 GBufferRenderer）
     if (m_GBuffer) m_GBuffer->OnResize(w, h);
-    // 重建 HDR 目标
-    {
-        rhi::TextureDesc d; d.format = rhi::Format::RGBA16_FLOAT;
-        d.width = w; d.height = h; d.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
-        m_HDRTarget = m_Device->CreateTexture(d);
-        rhi::TextureDesc dd; dd.format = rhi::Format::D32_FLOAT;
-        dd.width = w; dd.height = h; dd.usage = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
-        m_HDRDepth = m_Device->CreateTexture(dd);
-    }
-    m_ParticleRenderer.SetSceneDepth(m_HDRDepth.get(), m_PointSampler.get());  // 软粒子深度纹理更新
+    // 重建 HDR 目标（通过 LightingPass）
+    m_Lighting.OnResize(m_Device, w, h);
+    m_ParticleRenderer.SetSceneDepth(m_Lighting.GetHDRDepth(), m_Lighting.GetPointSampler());  // 软粒子深度纹理更新
     if (m_ToneMap) m_ToneMap->OnResize(w, h);
     if (m_Skybox)  { m_Skybox->Shutdown(); m_Skybox->Initialize(m_Device, w, h); }
     if (m_AntiAliasing) m_AntiAliasing->OnResize(w, h);

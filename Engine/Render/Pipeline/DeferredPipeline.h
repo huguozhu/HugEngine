@@ -19,6 +19,7 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "Pipeline/MeshBatcher.h"
 
 #include "Pipeline/GBufferRenderer.h"
+#include "Pipeline/LightingPass.h"
 #include "Pipeline/ParticleRenderer.h"
 #include "GI/GI_SSGI.h"
 #include "PostProcess/SSAO.h"
@@ -132,15 +133,8 @@ private:
     // GBuffer 渲染（纹理所有权 + PSO + 描述符集，共享组件）
     std::unique_ptr<GBufferRenderer> m_GBuffer;
 
-    // Lighting PSO + 描述符
-    std::unique_ptr<rhi::IRHIPipelineState> m_LightingPSO;
-    rhi::DescriptorSetLayoutHandle m_LightingLayout = rhi::kInvalidLayout;
-    rhi::DescriptorSetHandle       m_LightingSet    = rhi::kInvalidSet;
-
-    // HDR (Lighting 输出 + ToneMap 输入)
-    std::unique_ptr<rhi::IRHITexture> m_HDRTarget, m_HDRDepth;
-    std::unique_ptr<rhi::IRHISampler> m_HDRSampler;
-    std::unique_ptr<rhi::IRHISampler> m_PointSampler;  // 点采样器（深度纹理 Nearest，避免 Linear 插值导致 worldPos 错误）
+    // 光照 Pass（HDR 目标 + PSO + 描述符集，共享组件）
+    LightingPass m_Lighting;
 
     // LDR 中间纹理（ToneMap 输出 → FXAA 输入，BGRA8_UNORM）
     // FXAA 禁用时 ToneMap 直接写 BackBuffer，此纹理闲置

@@ -40,7 +40,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     auto gb = m_GBuffer->ImportToRenderGraph(rg);
     auto gbA = gb.albedo; auto gbB = gb.normal; auto gbC = gb.emissive;
     auto gbDepth = gb.depth; auto gbVel = gb.velocity; auto gbWorldPos = gb.worldPos;
-    auto hdrC = rg.ImportTexture("HDR_C", m_HDRTarget.get());
+    auto hdrC = rg.ImportTexture("HDR_C", m_Lighting.GetHDRTarget());
     auto backBuf = rg.ImportBackBuffer();
 
     (void)world; (void)sg;
@@ -256,7 +256,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 m_DDGI.Render(c);
                 // Compute dispatch 后恢复 graphics pipeline，
                 // 确保后续 pass 的 SetPipeline / BeginOffscreenPass 状态正确
-                c->SetPipeline(m_LightingPSO.get());
+                c->SetPipeline(m_Lighting.GetPSO());
             }
         },
         RGPassQueue::Compute);  // AsyncCompute: DDGI 探针更新在 Compute 队列执行
@@ -332,8 +332,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             c->EndOffscreenPass();
         });
 
-    // Lighting Pass (全屏 PBR + 降噪后 SSGI/SSR/DDGI 读取)
-    // worldPos 直接从 GBuffer MRT4 读取，不再需要 Camera invViewProj 做深度重建
+    // Lighting Pass (全屏 PBR + 降噪后 SSGI/SSR/DDGI 读取，委托给 LightingPass 共享组件)
     rg.AddPass("Lighting",
         {{gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbC, ResourceAccess::Read},
          {gbWorldPos, ResourceAccess::Read},
@@ -341,92 +340,46 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
          {ssrDenoised, ResourceAccess::Read}},
         {{hdrC, ResourceAccess::Write}},
         [&, w, h](rhi::IRHICommandList* c) {
+            // 深度缓冲屏障（在 Lighting 读取前完成 GBuffer 写入）
             c->PipelineBarrier(rhi::PipelineStage::LateFragmentTests, rhi::PipelineStage::FragmentShader,
-                rhi::ResourceState::DepthStencilWrite, rhi::ResourceState::DepthStencilRead, m_GBuffer->GetDepth());
-            auto bindTex = [&](u32 b, rhi::IRHITexture* t) { if(t) m_Device->UpdateDescriptorSet(m_LightingSet, b, rhi::DescriptorType::CombinedImageSampler, t, m_HDRSampler.get()); };
-            bindTex(0, m_GBuffer->GetAlbedo()); bindTex(1, m_GBuffer->GetNormal()); bindTex(2, m_GBuffer->GetEmissive());
-            // GBufferE: worldPos.xyz（直接从 GBuffer 读取世界坐标，无需 invViewProj 重建）
-            m_Device->UpdateDescriptorSet(m_LightingSet, 23, rhi::DescriptorType::CombinedImageSampler,
-                m_GBuffer->GetWorldPos(), m_PointSampler.get());
-            // 深度缓冲区使用点采样（Nearest），避免 Linear 插值在物体边缘混合背景深度
-            m_Device->UpdateDescriptorSet(m_LightingSet, 3, rhi::DescriptorType::CombinedImageSampler,
-                m_GBuffer->GetDepth(), m_PointSampler.get());
-            if (m_ShadowSystem && m_ShadowSystem->GetShadowMap(0))
-                bindTex(4, m_ShadowSystem->GetShadowMap(0));
-            // CSM 级联 1/2（绑定 10/11，与 Shader layout 一致）
-            if (m_ShadowSystem && m_ShadowSystem->GetShadowMap(1))
-                bindTex(10, m_ShadowSystem->GetShadowMap(1));
-            if (m_ShadowSystem && m_ShadowSystem->GetShadowMap(2))
-                bindTex(11, m_ShadowSystem->GetShadowMap(2));
-            // Spot 阴影贴图（映射索引 4 = CSM(3) + Point(1) + Spot(0)）
-            if (m_ShadowSystem && m_ShadowSystem->GetShadowMap(4))
-                bindTex(9, m_ShadowSystem->GetShadowMap(4));
-            m_Device->UpdateDescriptorSet(m_LightingSet, 17, rhi::DescriptorType::StorageBuffer, m_LightBuffers[m_CurrentFrameSlot].get());
-            m_Device->UpdateDescriptorSet(m_LightingSet, 18, rhi::DescriptorType::StorageBuffer, m_ShadowBuffers[m_CurrentFrameSlot].get());
-            m_Device->UpdateDescriptorSet(m_LightingSet, 19, rhi::DescriptorType::CombinedImageSampler,
-                m_DenoiseSSGI.GetOutput(), m_SSGI.GetOutputSampler());
-            m_Device->UpdateDescriptorSet(m_LightingSet, 20, rhi::DescriptorType::CombinedImageSampler,
-                m_SSAO.GetAOTexture(), m_SSAO.GetAOSampler());
-            m_Device->UpdateDescriptorSet(m_LightingSet, 21, rhi::DescriptorType::CombinedImageSampler,
-                m_DenoiseSSR.GetOutput(), m_SSR.GetOutputSampler());
+                rhi::ResourceState::DepthStencilWrite, rhi::ResourceState::DepthStencilRead,
+                m_GBuffer->GetDepth());
 
-            // DDGI 探针数据（binding 22：StorageBuffer，Lighting 中三线性插值采样）
-            m_Device->UpdateDescriptorSet(m_LightingSet, 22, rhi::DescriptorType::StorageBuffer,
-                m_DDGI.GetProbeBuffer());
-
-            // Clustered Shading: 构建 cluster AABB + 光源剔除（仅在启用时）
+            // 收集光源数据
             PushConstantData fpc{}; CollectLights(fpc, world, sg, camera);
-            float4x4 ivp = glm::inverse(camera.GetViewProjMatrix());
-            u32 useClustered = 0u;
-            if (m_ClusteredShading.enabled) {
+            float iblIntensity = m_GI ? m_GI->GetSettings().intensity : 1.0f;
+
+            // 聚集着色：GPU 光源数据 → CPU 缓存
+            if (m_ClusteredShading.enabled && fpc.lightCount > 0) {
                 m_CachedLights.resize(fpc.lightCount);
-                auto* gpuLights = static_cast<const GPULight*>(m_LightBuffers[m_CurrentFrameSlot]->Map());
-                if (gpuLights) { memcpy(m_CachedLights.data(), gpuLights, fpc.lightCount * sizeof(GPULight)); }
+                auto* gpuLights = static_cast<const GPULight*>(
+                    m_LightBuffers[m_CurrentFrameSlot]->Map());
+                if (gpuLights) {
+                    memcpy(m_CachedLights.data(), gpuLights, fpc.lightCount * sizeof(GPULight));
+                }
                 m_LightBuffers[m_CurrentFrameSlot]->Unmap();
-                m_ClusteredShading.BuildClusters(ivp, w, h, camera.nearPlane, camera.farPlane);
-                m_ClusteredShading.CullLights(m_CachedLights.data(), fpc.lightCount);
-                // 上传 LightGrid
-                auto& grid = m_ClusteredShading.GetLightGrid();
-                if (!m_LightGridBuffer || m_LightGridBuffer->GetSize() < grid.size() * 8) {
-                    rhi::BufferDesc d; d.size = grid.size() * 8; d.usage = rhi::BufferUsage::Storage; d.cpuAccess = true;
-                    m_LightGridBuffer = m_Device->CreateBuffer(d);
-                }
-                void* m = m_LightGridBuffer->Map();
-                if (m) { memcpy(m, grid.data(), grid.size() * 8); m_LightGridBuffer->Unmap(); }
-                m_Device->UpdateDescriptorSet(m_LightingSet, rhi::kBindingLightGrid, rhi::DescriptorType::StorageBuffer, m_LightGridBuffer.get());
-                // 上传 LightIndexList
-                auto& list = m_ClusteredShading.GetLightIndexList();
-                if (!m_LightIndexListBuffer || m_LightIndexListBuffer->GetSize() < list.size() * 4) {
-                    rhi::BufferDesc d; d.size = std::max<usize>(list.size() * 4, 64); d.usage = rhi::BufferUsage::Storage; d.cpuAccess = true;
-                    m_LightIndexListBuffer = m_Device->CreateBuffer(d);
-                }
-                void* m2 = m_LightIndexListBuffer->Map();
-                if (m2) { memcpy(m2, list.data(), list.size() * 4); m_LightIndexListBuffer->Unmap(); }
-                m_Device->UpdateDescriptorSet(m_LightingSet, rhi::kBindingLightIndexList, rhi::DescriptorType::StorageBuffer, m_LightIndexListBuffer.get());
-                useClustered = 1u;
             }
 
-            c->SetPipeline(m_LightingPSO.get()); c->BindDescriptorSet(rhi::kDescSetPerFrame, m_LightingSet);
-            rhi::ClearValue clr{};
-            c->BeginOffscreenPass(m_HDRTarget->GetNativeHandle(), m_HDRDepth->GetNativeHandle(), w, h, &clr, false);
-            c->SetViewport({0,(float)h,(float)w,-(float)h,0,1});
-            c->SetScissor({0,0,w,h});
-            // Push constant: 使用 ShaderTypes.slang 统一定义的 DeferredLightingPushConstant
-            DeferredLightingPushConstant lpc{};
-            float iblIntensity = m_GI ? m_GI->GetSettings().intensity : 1.0f;
-            lpc.cameraPosition  = float4(camera.position, 0);
-            lpc.iblIntensity    = iblIntensity;
-            lpc.lightCount      = fpc.lightCount;
-            lpc.useClustered    = useClustered;
-            lpc.clusterTilesX   = useClustered ? m_ClusteredShading.GetTileCountX() : 0u;
-            lpc.clusterTilesY   = useClustered ? m_ClusteredShading.GetTileCountY() : 0u;
-            float n = camera.nearPlane, f = camera.farPlane;
-            lpc.clusterNear     = n;
-            lpc.clusterFar      = f;
-            lpc.clusterLogFactor = std::log(f / n);
-            c->SetPushConstants(0, sizeof(lpc), &lpc);
-            c->Draw(3);
-            c->EndOffscreenPass();
+            // 委托 LightingPass 执行完整光照
+            m_Lighting.Render(c,
+                m_GBuffer->GetAlbedo(), m_GBuffer->GetNormal(), m_GBuffer->GetEmissive(),
+                m_GBuffer->GetDepth(), m_GBuffer->GetWorldPos(),
+                m_ShadowSystem ? m_ShadowSystem->GetShadowMap(0) : nullptr,
+                m_ShadowSystem ? m_ShadowSystem->GetShadowMap(1) : nullptr,
+                m_ShadowSystem ? m_ShadowSystem->GetShadowMap(2) : nullptr,
+                m_ShadowSystem ? m_ShadowSystem->GetShadowMap(4) : nullptr,
+                m_LightBuffers[m_CurrentFrameSlot].get(),
+                m_ShadowBuffers[m_CurrentFrameSlot].get(),
+                m_SSAO.GetAOTexture(),
+                m_DenoiseSSGI.GetOutput(), m_SSGI.GetOutputSampler(),
+                m_DenoiseSSR.GetOutput(), m_SSR.GetOutputSampler(),
+                m_DDGI.GetProbeBuffer(),
+                &m_ClusteredShading,
+                m_LightGridBuffer.get(), m_LightIndexListBuffer.get(),
+                &m_CachedLights,
+                nullptr, nullptr, nullptr, nullptr,  // RT 纹理（HybridRTPipeline 使用）
+                float4(camera.position, 0), iblIntensity, fpc.lightCount,
+                w, h);
         });
 
     // ── DDGI 前帧 HDR 捕获（将当前 Lighting 输出拷贝到 DDGI，供下帧探针采样真实辐射度）──
@@ -435,17 +388,17 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         {},                               // 无 RenderGraph 管理的输出
         [&](rhi::IRHICommandList* c) {
             if (m_DDGI.IsEnabled()) {
-                m_DDGI.CaptureHDR(c, m_HDRTarget.get());
+                m_DDGI.CaptureHDR(c, m_Lighting.GetHDRTarget());
             }
         });
 
     // ── AutoExposure（Compute reduction → SSBO，Bloom 之前）──
     rg.AddPass("AutoExposure", {{hdrC, ResourceAccess::Read}}, {},
         [&](rhi::IRHICommandList* c) {
-            m_AutoExposure.SetInput(m_HDRTarget.get(), m_HDRSampler.get());
+            m_AutoExposure.SetInput(m_Lighting.GetHDRTarget(), m_Lighting.GetHDRSampler());
             m_AutoExposure.Render(c);
             // 恢复 graphics pipeline state（compute dispatch 后 m_CurrentRenderPass 为空）
-            c->SetPipeline(m_LightingPSO.get());
+            c->SetPipeline(m_Lighting.GetPSO());
         },
         RGPassQueue::Compute);  // AsyncCompute: 自动曝光在 Compute 队列执行
 
@@ -458,8 +411,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 // 先设置粒子 PSO（BeginOffscreenPass 需要预绑定 PSO 来创建 RenderPass）
                 c->SetPipeline(m_ParticleRenderer.GetRenderPSO());
                 c->BeginOffscreenPass(
-                    m_HDRTarget->GetNativeHandle(),
-                    m_HDRDepth->GetNativeHandle(),
+                    m_Lighting.GetHDRTarget()->GetNativeHandle(),
+                    m_Lighting.GetHDRDepth()->GetNativeHandle(),
                     w, h, nullptr, false);  // LoadOp::Load 保留 Light 结果
                 c->SetViewport({0, (float)h, (float)w, -(float)h, 0, 1});
                 c->SetScissor({0, 0, w, h});
@@ -515,8 +468,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         rg.AddPass("Bloom", {{hdrC, ResourceAccess::Read}}, {{bloomOut, ResourceAccess::Write}},
             [&](rhi::IRHICommandList* c) {
                 c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput, rhi::PipelineStage::FragmentShader,
-                    rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, m_HDRTarget.get());
-                m_Bloom.SetInput(m_HDRTarget.get(), m_HDRSampler.get());
+                    rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, m_Lighting.GetHDRTarget());
+                m_Bloom.SetInput(m_Lighting.GetHDRTarget(), m_Lighting.GetHDRSampler());
                 m_Bloom.Render(c);
             });
     }
@@ -526,8 +479,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         auto dofOut = rg.ImportTexture("DOF_Out", m_DOF.GetOutput());
         rg.AddPass("DOF", {{hdrC, ResourceAccess::Read}}, {{dofOut, ResourceAccess::Write}},
             [&, bloomActive](rhi::IRHICommandList* c) {
-                auto* src = bloomActive ? m_Bloom.GetOutput() : m_HDRTarget.get();
-                auto* smp = bloomActive ? m_Bloom.GetOutputSampler() : m_HDRSampler.get();
+                auto* src = bloomActive ? m_Bloom.GetOutput() : m_Lighting.GetHDRTarget();
+                auto* smp = bloomActive ? m_Bloom.GetOutputSampler() : m_Lighting.GetHDRSampler();
                 m_DOF.SetInputs(src, smp, m_GBuffer->GetDepth());
                 c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput, rhi::PipelineStage::FragmentShader,
                     rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, src);
@@ -542,11 +495,11 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             [&, bloomActive, dofActive](rhi::IRHICommandList* c) {
                 auto* src = dofActive   ? m_DOF.GetOutput()
                            : bloomActive ? m_Bloom.GetOutput()
-                           :               m_HDRTarget.get();
+                           :               m_Lighting.GetHDRTarget();
                 auto* smp = dofActive   ? m_DOF.GetOutputSampler()
                            : bloomActive ? m_Bloom.GetOutputSampler()
-                           :               m_HDRSampler.get();
-                m_MotionBlur.SetInputs(src, smp, m_GBuffer->GetVelocity(), m_HDRSampler.get());
+                           :               m_Lighting.GetHDRSampler();
+                m_MotionBlur.SetInputs(src, smp, m_GBuffer->GetVelocity(), m_Lighting.GetHDRSampler());
                 c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput, rhi::PipelineStage::FragmentShader,
                     rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, src);
                 m_MotionBlur.Render(c);
@@ -562,18 +515,18 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             auto* src = mbActive ? m_MotionBlur.GetOutput()
                       : dofActive ? m_DOF.GetOutput()
                       : bloomActive ? m_Bloom.GetOutput()
-                      : m_HDRTarget.get();
+                      : m_Lighting.GetHDRTarget();
             auto* smp = mbActive ? m_MotionBlur.GetOutputSampler()
                       : dofActive ? m_DOF.GetOutputSampler()
                       : bloomActive ? m_Bloom.GetOutputSampler()
-                      : m_HDRSampler.get();
+                      : m_Lighting.GetHDRSampler();
             m_AntiAliasing->SetInput(src, smp);
             if (anyPostActive) {
                 c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput, rhi::PipelineStage::FragmentShader,
                     rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, src);
             } else {
                 c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput, rhi::PipelineStage::FragmentShader,
-                    rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, m_HDRTarget.get());
+                    rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, m_Lighting.GetHDRTarget());
             }
             auto* taa = static_cast<AA_TAA*>(m_AntiAliasing.get());
             taa->SetGBufferInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetVelocity());
@@ -609,8 +562,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 m_ToneMap->SetInput(src, smp);
             } else {
                 c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput, rhi::PipelineStage::FragmentShader,
-                    rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, m_HDRTarget.get());
-                m_ToneMap->SetInput(m_HDRTarget.get(), m_HDRSampler.get());
+                    rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, m_Lighting.GetHDRTarget());
+                m_ToneMap->SetInput(m_Lighting.GetHDRTarget(), m_Lighting.GetHDRSampler());
             }
             // 物理相机曝光偏置叠加到自动曝光（EV 偏移 → 曝光倍率）
             float physicalExposure = m_AutoExposure.GetExposure()

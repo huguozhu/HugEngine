@@ -32,6 +32,8 @@ set(RENDER_SOURCES
     Pipeline/GPUCulling.cpp
     Pipeline/GBufferRenderer.h
     Pipeline/GBufferRenderer.cpp
+    Pipeline/LightingPass.h
+    Pipeline/LightingPass.cpp
     Pipeline/GBufferRenderer_CPU.h
     Pipeline/GBufferRenderer_CPU.cpp
     Pipeline/GBufferRenderer_GPU.h
