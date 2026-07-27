@@ -10,6 +10,7 @@
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/matrix_inverse.hpp>
 #include <cstring>
 
 // RT 着色器 SPIR-V
@@ -100,6 +101,10 @@ bool HybridRTPipeline::Initialize(rhi::IRHIDevice* device) {
 
         if (m_RTPass->Initialize(device, rtShaders, groups)) {
             HE_CORE_INFO("HybridRTPipeline: RTPass 初始化完成");
+
+            // 初始化 RT 效果 Pass
+            m_RTShadow = std::make_unique<RTShadowPass>();
+            m_RTShadow->Initialize(device, m_Width, m_Height, true);  // 默认半分辨率
         } else {
             m_RTEnabled = false;
             m_RTPass.reset();
@@ -121,6 +126,7 @@ void HybridRTPipeline::Shutdown() {
     m_GPUCulling.Shutdown(m_Device);
     m_GPUScene.Shutdown();
     if (m_RTPass) { m_RTPass->Shutdown(); m_RTPass.reset(); }
+    if (m_RTShadow) { m_RTShadow->Shutdown(); m_RTShadow.reset(); }
     m_PostProcess.Shutdown();
     m_Lighting.Shutdown();
     if (m_GBuffer) m_GBuffer->Shutdown();
@@ -252,7 +258,38 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             m_GBuffer->Render(c, world, sg, camera);
         });
 
-    // ── Pass 2: DDGI 更新（探针 GI，RT 管线中保留用于远距离低频光照）──
+    // ── Pass 2: RT Shadow — 对 GBuffer 中每个有效像素发射阴影射线 ──
+    rhi::IRHITexture* rtShadowTex = nullptr;
+    if (m_RTEnabled && m_RTShadow) {
+        auto shadowMaskHandle = rg.ImportTexture("RT_ShadowMask",
+            m_RTShadow->GetShadowMask());
+        rtShadowTex = m_RTShadow->GetShadowMask();
+
+        rg.AddPass("RT_Shadow",
+            {{gbDepth, ResourceAccess::Read}, {gbB, ResourceAccess::Read}},
+            {{shadowMaskHandle, ResourceAccess::Write}},
+            [&](rhi::IRHICommandList* c) {
+                float4x4 invVP = glm::inverse(camera.GetViewProjMatrix());
+                m_RTShadow->Execute(c,
+                    m_RTPass->GetTLAS(),
+                    m_GBuffer->GetDepth(),
+                    m_GBuffer->GetNormal(),
+                    m_LightBuffers[m_CurrentFrameSlot].get(),
+                    0,  // lightCount — 将由 shader 内部从 uniform 读取
+                    invVP,
+                    camera.position,
+                    m_CurrentFrameSlot);
+                // 实际 TraceRays 通过 RTPass 调度
+                if (m_RTPass && m_RTPass->IsValid()) {
+                    m_RTPass->BindPipeline(c);
+                    m_RTPass->TraceRays(c,
+                        m_RTShadow->GetWidth(),
+                        m_RTShadow->GetHeight());
+                }
+            });
+    }
+
+    // ── Pass 3: DDGI 更新（探针 GI，RT 管线中保留用于远距离低频光照）──
     rg.AddPass("DDGI_Update", {{gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read},
         {gbDepth, ResourceAccess::Read}}, {},
         [&](rhi::IRHICommandList* c) {
@@ -294,7 +331,7 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 nullptr, nullptr,  // 无 SSR
                 m_DDGI.GetProbeBuffer(),
                 nullptr, nullptr, nullptr, nullptr,  // 无 Clustered
-                nullptr, nullptr, nullptr, nullptr,  // RT 纹理（Phase 4）
+                rtShadowTex, nullptr, nullptr, nullptr,  // RT 纹理
                 float4(camera.position, 0), 1.0f, lightCount, w, h);
         });
 

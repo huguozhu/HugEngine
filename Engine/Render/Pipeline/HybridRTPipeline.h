@@ -5,6 +5,7 @@
 #include "Pipeline/LightingPass.h"
 #include "PostProcess/PostProcessChain.h"
 #include "Pipeline/RTPass.h"
+#include "RT/RTShadowPass.h"
 #include "Pipeline/GPUCulling.h"
 #include "Pipeline/GPUScene.h"
 #include "Pipeline/MeshBatcher.h"
@@ -56,6 +57,7 @@ public:
     LightingPass*         GetLighting()      { return &m_Lighting; }
     PostProcessChain*     GetPostProcess()   { return &m_PostProcess; }
     RTPass*               GetRTPass()        { return m_RTPass.get(); }
+    RTShadowPass*         GetRTShadow()      { return m_RTShadow.get(); }
     GI_DDGI*              GetDDGI()          { return &m_DDGI; }
     ClusteredShading&     GetClusteredShading() { return m_ClusteredShading; }
     GPUCulling&           GetGPUCulling()       { return m_GPUCulling; }
@@ -93,6 +95,7 @@ private:
 
     // ── RT 基础设施 ──
     std::unique_ptr<RTPass> m_RTPass;
+    std::unique_ptr<RTShadowPass> m_RTShadow;
     bool m_RTEnabled = false;
 
     // ── HybridRTPipeline 专有 GI ──
