@@ -1,29 +1,155 @@
-// RT_Shadow.rgen.slang — 硬阴影光线生成着色器
-// 对每个像素发射 shadow ray 采样光源可见性，输出屏幕空间阴影遮罩
+// RT_Shadow.rgen.slang — 硬件 Ray Tracing 阴影射线生成着色器
+// 对每个像素发射 shadow ray，输出屏幕空间阴影遮罩
+//
+// 数据流：
+//   GBuffer 深度 + 法线 → 重建世界坐标 → 对每个光源发射 TraceRay
+//   → ClosestHit 标记遮挡 → 输出 float 阴影遮罩（0=全影, 1=无影）
+//
+// 使用 RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH
+//   + RAY_FLAG_SKIP_CLOSEST_HIT_SHADER 跳过材质计算，只检测遮挡
 
+// === RayGen 资源 (set=0) ===
+[[vk::binding(0, 0)]] RaytracingAccelerationStructure g_TLAS;
+
+// 输出：单通道阴影遮罩纹理（R16_FLOAT 或 R8_UNORM）
+[[vk::binding(1, 0)]] RWTexture2D<float> g_ShadowMask;
+
+// GBuffer 输入
+[[vk::binding(2, 0)]] Texture2D<float>  g_DepthBuffer;      // 深度缓冲（NDC 或 Reverse-Z）
+[[vk::binding(3, 0)]] Texture2D<float4> g_GBufferB;          // worldNormal.xyz + roughness.w
+
+// 光源 Uniform Buffer（方向光 + 点光源 + 聚光灯，最多 16 个）
+struct ShadowLight {
+    float4 pos_type;      // xyz=位置/方向, w=类型(0=方向光, 1=点光源, 2=聚光灯)
+    float4 color_radius;  // rgb=颜色, w=光源半径（软阴影用）
+    float4 spotDir_angle; // xyz=聚光方向, w=cos(内锥角)（聚光灯专用）
+};
+[[vk::binding(4, 0)]] cbuffer ShadowLightCB {
+    ShadowLight g_Lights[16];
+    uint        g_LightCount;
+    uint        g_ShadowFlags;  // bit0=硬阴影, bit1=半分辨率
+    uint        g_Pad[2];
+};
+
+// === Push Constant ===
+struct ShadowPushConstant {
+    float4x4 invViewProj;     // 逆 ViewProj 矩阵（深度 → 世界坐标）
+    float4   cameraPos;       // 相机世界坐标（xyz）+ nearPlane（w）
+    uint2    dispatchDim;     // DispatchRaysDimensions
+    uint     frameIdx;        // 帧索引（时域抖动用）
+    float    maxShadowDist;   // 最大阴影距离（超出不计算）
+};
+[[vk::push_constant]] ShadowPushConstant g_PC;
+
+// === Payload（与 Miss/ClosestHit 共享） ===
+struct ShadowPayload {
+    bool blocked;  // true=被遮挡, false=可见
+};
+
+// 从深度和 UV 重建世界坐标
+float3 ReconstructWorldPos(uint2 idx, float depth) {
+    float2 uv = (float2(idx) + 0.5) / float2(g_PC.dispatchDim);
+    float4 clipPos = float4(uv * 2.0 - 1.0, depth, 1.0);
+    float4 worldPos4 = mul(g_PC.invViewProj, clipPos);
+    return worldPos4.xyz / worldPos4.w;
+}
+
+// 对单个光源发射阴影射线
+float TraceShadowRay(float3 worldPos, float3 N, ShadowLight light) {
+    // ── 确定光线方向和最大距离 ──
+    float3 L;
+    float  tMax;
+
+    if (light.pos_type.w == 0.0) {
+        // 方向光：光线方向 = 光源方向，最大距离 = 场景包围盒
+        L = normalize(light.pos_type.xyz);
+        tMax = 10000.0;
+    } else {
+        // 点光源/聚光灯：光线方向 = 指向光源，最大距离 = 到光源距离
+        float3 lightPos = light.pos_type.xyz;
+        float3 toLight = lightPos - worldPos;
+        float  dist = length(toLight);
+        L = toLight / dist;
+        tMax = dist;
+    }
+
+    // ── 发射阴影射线 ──
+    RayDesc ray;
+    ray.Origin    = worldPos + N * 0.01;  // 沿法线偏移避免自交
+    ray.Direction = L;
+    ray.TMin      = 0.01;
+    ray.TMax      = tMax - 0.01;  // 减去微小偏移避免光线刚好命中光源位置
+
+    ShadowPayload payload;
+    payload.blocked = false;
+
+    TraceRay(
+        g_TLAS,
+        RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+        RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,  // 跳过 ClosestHit，用 AnyHit 或直接用 miss/hit 判断
+        0xFF,   // instanceMask：追踪所有实例
+        0,      // sbtRecordOffset：阴影 Hit Group
+        0,      // sbtRecordStride
+        0,      // missIndex：阴影 Miss Shader
+        ray,
+        payload
+    );
+
+    return payload.blocked ? 0.0 : 1.0;
+}
+
+// ============================================================
+// 主入口：RayGen 着色器
+// ============================================================
 [shader("raygeneration")]
-void main()
-{
-    // 从 DispatchRaysIndex 获取像素坐标
+void main() {
     uint2 idx = DispatchRaysIndex().xy;
-    uint2 dim = DispatchRaysDimensions().xy;
 
-    // TODO: 从常量缓冲读取相机参数 + 光源方向
-    // float3 rayOrigin = worldPosFromDepth(idx, depthBuffer);
-    // float3 rayDir = normalize(lightDir);
+    // ── 可选优化：半分辨率阴影 ──
+    if ((g_ShadowFlags & 2) != 0) {
+        // 半分辨率模式：检查像素是否在隔行/隔列
+        // （可在上层通过 dispatchDim 控制，这里做二次确认）
+    }
 
-    // 初始化光线 payload
-    // RayDesc ray;
-    // ray.Origin    = rayOrigin + normal * bias;
-    // ray.Direction = rayDir;
-    // ray.TMin      = 0.001;
-    // ray.TMax      = lightDistance;
+    // ── 读取 GBuffer 数据 ──
+    float  depth = g_DepthBuffer.Load(int3(idx, 0));
+    float4 gbB   = g_GBufferB.Load(int3(idx, 0));
+    float3 N     = normalize(gbB.xyz * 2.0 - 1.0);
 
-    // 调用 TraceRay
-    // uint payload = 1;  // 1 = 未命中(可见), 0 = 命中(被遮挡)
-    // TraceRay(sceneTLAS, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, 0, 0, 0, ray, payload);
+    // ── 无效像素（天空等）→ 完全照亮 ──
+    if (depth >= 1.0 || depth <= 0.0) {
+        g_ShadowMask[idx] = 1.0;
+        return;
+    }
 
-    // 写入输出纹理
-    // float visibility = float(payload);
-    // outShadowMask[idx] = visibility;
+    // ── 重建世界坐标 ──
+    float3 worldPos = ReconstructWorldPos(idx, depth);
+
+    // ── 超出最大阴影距离 → 完全照亮 ──
+    if (distance(worldPos, g_PC.cameraPos.xyz) > g_PC.maxShadowDist) {
+        g_ShadowMask[idx] = 1.0;
+        return;
+    }
+
+    // ── 对每个光源计算阴影 ──
+    float shadow = 1.0;
+
+    for (uint li = 0; li < g_LightCount; li++) {
+        ShadowLight light = g_Lights[li];
+
+        // 跳过无贡献光源（方向光 dot(N,L) < 0 → 背对光源 → 无需阴影计算）
+        float3 L_test;
+        if (light.pos_type.w == 0.0) {
+            L_test = normalize(light.pos_type.xyz);
+        } else {
+            L_test = normalize(light.pos_type.xyz - worldPos);
+        }
+        float NdotL = dot(N, L_test);
+        if (NdotL <= 0.0) continue;
+
+        shadow *= TraceShadowRay(worldPos, N, light);
+        if (shadow <= 0.0) break;  // 任何光源已完全遮挡 → 提前退出
+    }
+
+    g_ShadowMask[idx] = shadow;
 }

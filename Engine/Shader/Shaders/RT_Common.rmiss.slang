@@ -1,15 +1,17 @@
 // RT_Common.rmiss.slang — 通用 Miss 着色器
-// 用于 Shadow/Reflection/AO 的未命中处理
+// 用于 Shadow / AO / Reflection 的未命中处理
+//
+// 数据流：
+//   Shadow:     未命中 → payload.blocked = false（光线到达光源，可见）
+//   AO:         未命中 → payload.blocked = false（未遮蔽）
+//   Reflection: 未命中 → 回退到 IBL / 天空（使用专用 Miss 如 RT_Sponza.rmiss）
+
+struct ShadowPayload {
+    bool blocked;  // true=被遮挡, false=可见
+};
 
 [shader("miss")]
-void main()
-{
-    // 未命中表示光线未击中任何几何体
-    // Shadow:  返回 1.0（无遮挡，完全可见）
-    // Reflection: 采样天空盒/IBL
-    // AO:      返回 0.0（无遮蔽）
-    // 具体行为由 payload 区分（由 RayGen 预设）
-
-    // 默认行为：写入 payload = 1（可见/天空）
-    // 具体 payload 语义由 RayGen shader 定义
+void main(inout ShadowPayload payload) {
+    // 未命中 = 光线未碰到任何几何体 → 像素对该光源可见
+    payload.blocked = false;
 }
