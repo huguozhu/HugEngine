@@ -289,6 +289,7 @@ int main() {
     hybridRTPipeline.GetGPUCulling().enabled = false;
     forwardPipeline.GetSceneRenderer().enableFrustumCull = false;
     deferredPipeline.GetSceneRenderer().enableFrustumCull = false;
+    hybridRTPipeline.GetGBuffer()->GetContext().sceneRenderer->enableFrustumCull = false;
 
     // ============================================================
     // 5.5 粒子系统测试
@@ -503,6 +504,11 @@ int main() {
         ImGui::RadioButton("Forward 前向渲染", &renderMode, 0);
         ImGui::SameLine();
         ImGui::RadioButton("Deferred 延迟渲染", &renderMode, 1);
+        bool rtSupported = device->GetCaps().supportsRayTracing;
+        if (rtSupported) {
+            ImGui::SameLine();
+            ImGui::RadioButton("Hybrid RT", &renderMode, 2);
+        }
 
         // GPU 剔除开关
         ImGui::Spacing();
@@ -510,17 +516,13 @@ int main() {
         if (ImGui::Checkbox("GPU Culling", &gpuCullOn)) {
             forwardPipeline.GetGPUCulling().enabled = gpuCullOn;
             deferredPipeline.GetGPUCulling().enabled = gpuCullOn;
+            hybridRTPipeline.GetGPUCulling().enabled = gpuCullOn;
         }
         // CPU 视锥剔除开关
         bool cpuCullOn = forwardPipeline.GetSceneRenderer().enableFrustumCull;
         if (ImGui::Checkbox("CPU Frustum Cull", &cpuCullOn)) {
             forwardPipeline.GetSceneRenderer().enableFrustumCull = cpuCullOn;
             deferredPipeline.GetSceneRenderer().enableFrustumCull = cpuCullOn;
-        }
-        bool rtSupported = device->GetCaps().supportsRayTracing;
-        if (rtSupported) {
-            ImGui::SameLine();
-            ImGui::RadioButton("Hybrid RT", &renderMode, 2);
         }
 
         // GI 控制

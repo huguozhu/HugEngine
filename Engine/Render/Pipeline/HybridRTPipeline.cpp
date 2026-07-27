@@ -32,6 +32,12 @@ bool HybridRTPipeline::Initialize(rhi::IRHIDevice* device) {
     m_Lighting.Initialize(device, m_Width, m_Height);
 
     m_PostProcess.Initialize(device, m_Width, m_Height);
+    // 启用 FXAA 确保有中间 Pass 在 BeginRenderPass 前调用 SetPipeline
+    m_PostProcess.EnableFXAA(device, m_Width, m_Height, true);
+
+    // ── GPU Profiler ──
+    m_Profiler.Initialize(device, rhi::kMaxProfilerPasses, MAX_FRAMES_IN_FLIGHT);
+    m_ProfilerPanel.SetProfiler(&m_Profiler);
 
     // ── GPU Driven ──
     m_SceneRenderer = std::make_unique<SceneRenderer>();
@@ -128,6 +134,7 @@ void HybridRTPipeline::Shutdown() {
     if (m_RTPass) { m_RTPass->Shutdown(); m_RTPass.reset(); }
     if (m_RTShadow) { m_RTShadow->Shutdown(); m_RTShadow.reset(); }
     m_PostProcess.Shutdown();
+    m_Profiler.Shutdown();
     m_Lighting.Shutdown();
     if (m_GBuffer) m_GBuffer->Shutdown();
     for (auto& b : m_LightBuffers) b.reset();
@@ -166,8 +173,12 @@ void HybridRTPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
                                float deltaTime) {
     (void)deltaTime;
 
+    if (!m_SwapChain || !m_Device) {
+        HE_CORE_ERROR("HybridRTPipeline::Render: SwapChain 或 Device 未设置");
+        return;
+    }
+
     RenderGraph rg;
-    rg.SetSwapChain(m_SwapChain);
     rg.SetProfiler(&m_Profiler);
 
     BuildFrameGraph(rg, world, sg, camera);
@@ -289,7 +300,7 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             });
     }
 
-    // ── Pass 3: DDGI 更新（探针 GI，RT 管线中保留用于远距离低频光照）──
+    // ── Pass 3: DDGI 更新（探针 GI，远距离低频光照）──
     rg.AddPass("DDGI_Update", {{gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read},
         {gbDepth, ResourceAccess::Read}}, {},
         [&](rhi::IRHICommandList* c) {
@@ -301,9 +312,9 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             ctx.viewportWidth = w; ctx.viewportHeight = h;
             m_DDGI.Update(ctx);
             m_DDGI.Render(c);
-        }, RGPassQueue::Compute);
+        }, RGPassQueue::Default);
 
-    // ── Pass 3: Lighting（延迟光照，RT 输入源 → 暂无 RT 纹理）──
+    // ── Pass 4: Lighting（延迟光照）──
     u32 lightCount = 0;
     CollectLights(world, sg, camera, lightCount);
 
@@ -341,24 +352,16 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             m_DDGI.CaptureHDR(c, m_Lighting.GetHDRTarget());
         });
 
-    // ── 后处理链（与 DeferredPipeline 相同）──
-    // 自动曝光
+    // ── 后处理链 ──
     rg.AddPass("AutoExposure", {{hdrC, ResourceAccess::Read}}, {},
         [&](rhi::IRHICommandList* c) {
             m_PostProcess.GetAutoExposure().SetInput(
                 m_Lighting.GetHDRTarget(), m_Lighting.GetHDRSampler());
             m_PostProcess.GetAutoExposure().Render(c);
-        }, RGPassQueue::Compute);
+        }, RGPassQueue::Default);
 
-    // Bloom → DOF → MotionBlur → TAA → ToneMap → ColorGrading → SMAA/FXAA
     bool bloomActive = m_PostProcess.GetBloom().IsEnabled()
                        && m_PostProcess.GetBloom().GetOutput() != nullptr;
-    bool dofActive   = m_PostProcess.GetDOF().IsEnabled()
-                       && m_PostProcess.GetDOF().GetOutput() != nullptr;
-    bool mbActive    = m_PostProcess.GetMotionBlur().IsEnabled()
-                       && m_PostProcess.GetMotionBlur().GetOutput() != nullptr;
-    bool anyPostActive = bloomActive || dofActive || mbActive;
-
     if (bloomActive) {
         auto bloomOut = rg.ImportTexture("Bloom_Out",
             m_PostProcess.GetBloom().GetOutput());
@@ -371,19 +374,42 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             });
     }
 
-    // 简化后处理：ToneMap → BackBuffer
-    rg.AddPass("ToneMap", {}, {{backBuf, ResourceAccess::Write}},
+    // ToneMap: HDR → LDR → BackBuffer
+    // 关键：PreBind 调用 SetPipeline 设置 m_CurrentRenderPass 为 BGRA8 兼容格式
+    auto ldrTarget = rg.ImportTexture("LDR", m_PostProcess.GetLDRTarget());
+    rg.AddPass("ToneMap", {}, {{ldrTarget, ResourceAccess::Write}},
         [&, w, h](rhi::IRHICommandList* c) {
-            auto* src = m_Lighting.GetHDRTarget();
-            auto* smp = m_Lighting.GetHDRSampler();
-            m_PostProcess.GetToneMap()->SetInput(src, smp);
+            m_PostProcess.GetToneMap()->SetInput(
+                m_Lighting.GetHDRTarget(), m_Lighting.GetHDRSampler());
             m_PostProcess.GetToneMap()->SetExposure(
                 m_PostProcess.GetAutoExposure().GetExposure()
                 * exp2(camera.exposureBias));
+            // PreBind 调用 SetPipeline → 设置 m_CurrentRenderPass 为 BGRA8 兼容格式
             m_PostProcess.GetToneMap()->PreBind(c);
             rhi::ClearValue clr{};
-            c->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
+            c->BeginOffscreenPass(m_PostProcess.GetLDRTarget()->GetNativeHandle(),
+                m_PostProcess.GetLDRDummyDepth()->GetNativeHandle(), w, h, &clr, false);
             m_PostProcess.GetToneMap()->Render(c);
+            c->EndOffscreenPass();
+        });
+
+    // FXAA: LDR → BackBuffer（FXAA PSO 无深度附件，RenderPass 仅 1 attachment，匹配 SwapChain）
+    rg.AddPass("FXAA", {{ldrTarget, ResourceAccess::Read}}, {{backBuf, ResourceAccess::Write}},
+        [&](rhi::IRHICommandList* c) {
+            c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput,
+                rhi::PipelineStage::FragmentShader,
+                rhi::ResourceState::RenderTarget,
+                rhi::ResourceState::ShaderResource,
+                m_PostProcess.GetLDRTarget());
+            m_PostProcess.GetFXAA()->SetInput(
+                m_PostProcess.GetLDRTarget(),
+                m_PostProcess.GetLDRSampler());
+            // FXAA::Render 内部 SetPipeline 设置 m_CurrentRenderPass（BGRA8, 无深度）
+            // BeginRenderPass 创建 Framebuffer（1 attachment）与 RP 兼容
+            rhi::ClearValue clr{};
+            c->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
+                rhi::Format::Unknown, &clr, rhi::LoadOp::Clear);
+            m_PostProcess.GetFXAA()->Render(c);
             c->EndRenderPass();
         });
 
