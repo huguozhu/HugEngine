@@ -14,7 +14,7 @@
 #include "RHI/RHI.h"
 #include "Pipeline/ForwardPipeline.h"
 #include "Pipeline/DeferredPipeline.h"
-#include "Pipeline/RTPass.h"
+#include "Pipeline/HybridRTPipeline.h"
 #include "Pipeline/CameraController.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
@@ -26,12 +26,6 @@
 #include "Editor/ImGuiIntegration.h"
 #include "Asset/BindlessTextureManager.h"
 #include "imgui.h"
-
-// RT 着色器 SPIR-V（Phase 2：复用 Sponza RT 着色器）
-#include "RT_Sponza.rgen.spv.h"
-#include "RT_Sponza.rmiss.spv.h"
-#include "RT_Sponza.rchit.spv.h"
-#include "RT_Bindless.rcall.spv.h"
 
 #include <cmath>
 #include <cstring>
@@ -284,9 +278,15 @@ int main() {
     deferredPipeline.SetSwapChain(swapchain.get());
     deferredPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
 
+    render::HybridRTPipeline hybridRTPipeline;
+    hybridRTPipeline.Initialize(device.get());
+    hybridRTPipeline.SetSwapChain(swapchain.get());
+    hybridRTPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+
     // 启动时默认关闭 GPU 剔除和 CPU 视锥剔除
     forwardPipeline.GetGPUCulling().enabled = false;
     deferredPipeline.GetGPUCulling().enabled = false;
+    hybridRTPipeline.GetGPUCulling().enabled = false;
     forwardPipeline.GetSceneRenderer().enableFrustumCull = false;
     deferredPipeline.GetSceneRenderer().enableFrustumCull = false;
 
@@ -320,69 +320,6 @@ int main() {
         deferredPipeline.AddParticleComponent(pid);
 
         HE_CORE_INFO("粒子系统已注册: id={} maxParticles={}", pid, pc->GetMaxParticles());
-    }
-
-    // ============================================================
-    // 5.6 RT 路径初始化
-    // ============================================================
-    bool rtSupported = device->GetCaps().supportsRayTracing;
-    he::render::RTPass rtPass;
-    rhi::DescriptorSetLayoutHandle rtLayout0 = rhi::kInvalidLayout;
-
-    if (rtSupported) {
-        // set=0: TLAS + BackBuffer + Bindless（Callable shader 需要）
-        rhi::DescriptorSetLayoutDesc rtSet0Desc;
-        rtSet0Desc.bindings = {
-            { 0, rhi::DescriptorType::AccelerationStructure, 1,    0x100 },
-            { 1, rhi::DescriptorType::StorageImage,          1,    0x100 },
-            { 5, rhi::DescriptorType::SampledImage,          4096, 0x2000, true },  // Callable bindless
-            { 6, rhi::DescriptorType::Sampler,               4096, 0x2000, true },  // Callable bindless
-        };
-        rtLayout0 = device->CreateDescriptorSetLayout(rtSet0Desc);
-
-        // set=1: 材质纹理 + 光源 UB（ClosestHit）
-        rhi::DescriptorSetLayoutHandle rtLayout1;
-        rhi::DescriptorSetLayoutDesc rtSet1Desc;
-        rtSet1Desc.bindings = {
-            { 0, rhi::DescriptorType::SampledImage,  1, 0x40 },  // 材质纹理 (3×N)
-            { 1, rhi::DescriptorType::UniformBuffer, 1, 0x40 },  // 光源 UB
-        };
-        rtLayout1 = device->CreateDescriptorSetLayout(rtSet1Desc);
-
-        rhi::ShaderBytecode rgen{ rhi::ShaderStage::RayGen,
-            k_RT_Sponza_rgen_spv, {}, "main" };
-        rhi::ShaderBytecode rmiss{ rhi::ShaderStage::Miss,
-            k_RT_Sponza_rmiss_spv, {}, "main" };
-        rhi::ShaderBytecode rchit{ rhi::ShaderStage::ClosestHit,
-            k_RT_Sponza_rchit_spv, {}, "main" };
-        rhi::ShaderBytecode rcall{ rhi::ShaderStage::Callable,
-            k_RT_Bindless_rcall_spv, {}, "main" };
-
-        std::vector<rhi::RTShaderGroup> rtGroups = {
-            { rhi::RTShaderGroupType::RayGen,   0, ~0u, ~0u, ~0u, "RayGen" },
-            { rhi::RTShaderGroupType::Miss,     1, ~0u, ~0u, ~0u, "Miss"   },
-            { rhi::RTShaderGroupType::Hit,     ~0u, 2,   ~0u, ~0u, "Hit"    },
-            { rhi::RTShaderGroupType::Callable, 3, ~0u, ~0u, ~0u, "BindlessCall" },
-        };
-
-        rhi::PushConstantRange pcRange;
-        pcRange.stageMask = 0x100;
-        pcRange.offset    = 0;
-        pcRange.size      = 96;
-
-        std::vector<rhi::DescriptorSetLayoutHandle> rtLayouts = { rtLayout0, rtLayout1 };
-        rtPass.Initialize(device.get(), { rgen, rmiss, rchit, rcall }, rtGroups,
-                         rtLayouts, pcRange);
-
-        // 创建 RT 资源（材质纹理 + 光源 UB）
-        rtPass.CreateMaterialTexture(device.get(), 256, world);
-        rtPass.CreateLightBuffer(device.get(), 8);
-
-        // 注册到 BindlessTextureManager（Callable shader 需要 bindless 纹理）
-        he::asset::BindlessTextureManager::Instance().RegisterDescriptorSet(
-            device.get(), rtPass.GetDescriptorSet0(), 5, 6);
-
-        HE_CORE_INFO("02.Cube RT: {}", rtPass.IsValid() ? "就绪" : "不可用");
     }
 
     // --- 6. 创建命令列表 ---
@@ -427,6 +364,7 @@ int main() {
         cmdList->SetSwapChain(swapchain.get());
         forwardPipeline.OnResize(w, h);
         deferredPipeline.OnResize(w, h);
+        hybridRTPipeline.OnResize(w, h);
         camCtrl.SetAspectRatio(static_cast<float>(w), static_cast<float>(h));
     });
 
@@ -434,7 +372,7 @@ int main() {
     HE_CORE_INFO("02.Cube demo started — WASD=移动, 右键拖拽=旋转, 滚轮=缩放, Shift=加速");
     u64  frameIndex = 0;
     f64  lastTime   = glfwGetTime();
-    int  renderMode  = 1;  // 0=Forward, 1=Deferred, 2=RT
+    int  renderMode  = 1;  // 0=Forward, 1=Deferred, 2=HybridRT
 
     while (!engine.GetWindow()->ShouldClose()) {
         // 计算帧时间
@@ -515,53 +453,10 @@ int main() {
             cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
                 rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
         }
-        // --- RT 模式 ---
-        else if (renderMode == 2 && rtPass.IsValid()) {
-            forwardPipeline.NextFrame();
-
-            auto* shadowSys = forwardPipeline.GetShadowSystem();
-            shadowSys->SetRenderResources(
-                forwardPipeline.GetCurrentShadowObjectBuffer(),
-                forwardPipeline.GetCurrentShadowBuffer(),
-                forwardPipeline.GetCurrentDescSet());
-            render::SubsystemContext shadowCtx;
-            shadowCtx.world = &world; shadowCtx.sceneGraph = &sceneGraph;
-            shadowCtx.camera = &camCtrl.GetCamera();
-            shadowSys->Update(shadowCtx);
-
-            forwardPipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
-
-            rtPass.BuildAS(cmdList.get(), world, sceneGraph);
-            rtPass.UpdateLightBuffer(forwardPipeline.GetCurrentLightBuffer());
-            rtPass.UpdateRTDescriptorSet(device.get(),
-                swapchain->GetCurrentBackBufferView(),
-                forwardPipeline.GetCurrentObjectBuffer());
-
-            struct RTPushConstant {
-                float4x4 invViewProj; float4 camPosNearFar;
-                u32 sampleCount, frameIndex, _pad0, _pad1;
-            };
-            RTPushConstant rtPC;
-            const auto& camData = camCtrl.GetCamera();
-            rtPC.invViewProj = glm::inverse(camData.GetViewProjMatrix());
-            rtPC.camPosNearFar = float4(camData.position.x, camData.position.y,
-                                        camData.position.z, camData.nearPlane);
-            rtPC.sampleCount = 1; rtPC.frameIndex = 0;
-
-            cmdList->PipelineBarrier(rhi::PipelineStage::BottomOfPipe,
-                rhi::PipelineStage::RayTracingShader,
-                rhi::ResourceState::Undefined, rhi::ResourceState::UnorderedAccess);
-
-            rtPass.BindPipeline(cmdList.get());
-            rtPass.BindDescriptorSets(cmdList.get());
-            cmdList->SetPushConstants(0, sizeof(RTPushConstant), &rtPC);
-            rtPass.TraceRays(cmdList.get(), swapchain->GetWidth(), swapchain->GetHeight());
-
-            cmdList->PipelineBarrier(rhi::PipelineStage::RayTracingShader,
-                rhi::PipelineStage::ColorAttachmentOutput,
-                rhi::ResourceState::UnorderedAccess, rhi::ResourceState::RenderTarget);
-
-            cmdList->SetPipeline(forwardPipeline.GetPipelineState());
+        // --- HybridRT 模式 ---
+        else if (renderMode == 2) {
+            hybridRTPipeline.NextFrame();
+            hybridRTPipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera(), deltaTime);
             cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
                 rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
         }
@@ -622,9 +517,10 @@ int main() {
             forwardPipeline.GetSceneRenderer().enableFrustumCull = cpuCullOn;
             deferredPipeline.GetSceneRenderer().enableFrustumCull = cpuCullOn;
         }
+        bool rtSupported = device->GetCaps().supportsRayTracing;
         if (rtSupported) {
             ImGui::SameLine();
-            ImGui::RadioButton("Ray Tracing", &renderMode, 2);
+            ImGui::RadioButton("Hybrid RT", &renderMode, 2);
         }
 
         // GI 控制
@@ -746,13 +642,9 @@ int main() {
     imgui.Shutdown();
     device->WaitIdle();
 
-    // RT 资源清理
-    rtPass.Shutdown();
-    if (rtLayout0 != rhi::kInvalidLayout)
-        device->DestroyDescriptorSetLayout(rtLayout0);
-
     forwardPipeline.Shutdown();
     deferredPipeline.Shutdown();
+    hybridRTPipeline.Shutdown();
 
     HE_CORE_INFO("Exiting after {} frames", frameIndex);
     return 0;
