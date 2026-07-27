@@ -1023,8 +1023,54 @@ r.RT.Denoise.Spatial     1   // 空间滤波
 
 ---
 
-> **文档版本**: v2.0
+> **文档版本**: v2.1
 > **创建日期**: 2026-07-27
-> **更新**: 2026-07-27 — 架构从 "DeferredPipeline 内 RT 分支" 改为 "HybridRTPipeline 独立类 + 共享组件"
+> **更新**: 2026-07-28 — 实施进度更新：Phase 1-4.1 完成，HybridRTPipeline 已知问题记录
 > **工期**: 14 周（含 2 周共享组件提取）
 > **前置依赖**: 现有 DeferredPipeline / RenderGraph / RHI RT 接口全部就绪
+
+---
+
+## 附录 C: 实施进度（2026-07-28）
+
+### 已完成
+
+| 阶段 | 状态 | 提交 | 内容 |
+|------|:---:|------|------|
+| Phase 1 | ✅ | `a4e5e89` | SSBO 兼容性修复：RT_Shadow.rgen 重写 + position_fetch POC |
+| Phase 2-1 | ✅ | `72a7680` | GBufferRenderer 提取（纹理所有权迁移）+ ForwardPipeline RT 清理 |
+| Phase 2-2 | ✅ | `47296a8` | LightingPass 提取（HDR 目标 + Lighting PSO + 输入源抽象） |
+| Phase 2-3 | ✅ | `c36e830` | PostProcessChain 提取（Bloom/DOF/MotionBlur/TAA/ToneMap/AA + LDR） |
+| Phase 3 | ✅ | `54b6200` | HybridRTPipeline 骨架：GBuffer + DDGI + Lighting + 后处理 |
+| Phase 4-1 | ✅ | `bc91488` | RTShadowPass 集成：阴影遮罩纹理 + 描述符集 + Execute |
+| 02.Cube | ✅ | `94ef8ff` `d08237c` | 添加 HybridRTPipeline 支持（renderMode=2），移除独立 RTPass 原型 |
+
+### 关键文件变更（实际）
+
+| 文件 | 操作 | 说明 |
+|------|:---:|------|
+| `Engine/Render/Pipeline/GBufferRenderer.h` | 重写 | 新增 `GBufferRenderer` 拥有类 + `Handles` + `ImportToRenderGraph` |
+| `Engine/Render/Pipeline/GBufferRenderer.cpp` | 新建 | 纹理创建 + PSO + 描述符集实现 |
+| `Engine/Render/Pipeline/LightingPass.h/cpp` | 新建 | HDR 目标 + Lighting PSO + `LightingSource` 枚举 |
+| `Engine/Render/PostProcess/PostProcessChain.h/cpp` | 新建 | 后处理 Pass 所有权 + LDR 纹理管理 |
+| `Engine/Render/Pipeline/HybridRTPipeline.h/cpp` | 新建 | 混合 RT 管线完整实现 |
+| `Engine/Render/RT/RTShadowPass.h/cpp` | 新建 | RT 阴影 Pass |
+| `Engine/Render/Pipeline/DeferredPipeline.h/cpp` | 修改 | 移除 ~38 个成员变量，委托给共享组件 |
+| `Engine/Render/Pipeline/DeferredPipeline_FrameGraph.cpp` | 修改 | ImportToRenderGraph + getter 替换 |
+| `Engine/Render/Pipeline/ForwardPipeline.h/cpp` | 修改 | 移除 RTPass 死代码 (~70 行) |
+| `Samples/02.Cube/02.Cube.cpp` | 修改 | HybridRTPipeline + 简化渲染模式 |
+
+### 已知问题
+
+**HybridRTPipeline 运行时崩溃**（2026-07-28，待修复）
+
+- **症状**: `VulkanCommandList::EndRenderPass()` 崩溃
+- **日志**: `BeginRenderPass: no swapchain views or render pass set`
+- **定位**: HybridRTPipeline 的最后一个 Pass（ToneMap → LDR → FXAA → BackBuffer）中调用 `BeginRenderPass` 时，`m_CurrentRenderPass` 与 SwapChain 兼容性问题
+- **分析**: 
+  - DeferredPipeline 通过 TAA/SMAA/FXAA 等中间 Pass 的 `SetPipeline` 自然设置正确的 RP
+  - HybridRTPipeline 缺少这些中间 Pass（TAA/DOF/MotionBlur 均未启用）
+  - FXAA PSO 的 depthFormat=Unknown 理论上应生成 1-attachment RP 与 SwapChain 兼容，但仍失败
+  - 可能与 RenderGraph 的 swapchain 管理有关（DeferredPipeline 不调用 `rg.SetSwapChain()` 却能正常工作）
+- **绕过方案**: 暂使用 DeferredPipeline（renderMode=1）
+- **下一步**: 深入调试 VulkanCommandList 的 render pass 状态管理，或参考 DeferredPipeline 的完整后处理链
