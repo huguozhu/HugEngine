@@ -179,21 +179,12 @@ void HybridRTPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
     }
 
     RenderGraph rg;
-    rg.SetProfiler(&m_Profiler);
-    rg.SetSwapChain(m_SwapChain);  // 确保 RenderGraph 能更新 BackBuffer 尺寸
+    rg.SetSwapChain(m_SwapChain);
 
     BuildFrameGraph(rg, world, sg, camera);
 
     rg.Compile();
     rg.Execute(cmd, m_Device);
-
-    // ── 终极测试：Execute 之后再写红色，验证 swapchain 连通性 ──
-    m_PostProcess.GetToneMap()->PreBind(cmd);
-    rhi::ClearValue red{};
-    red.color[2] = 1.0f; red.color[3] = 1.0f;  // 红色
-    cmd->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
-        rhi::Format::Unknown, &red, rhi::LoadOp::Clear);
-    cmd->EndRenderPass();
 }
 
 // ============================================================
@@ -415,9 +406,7 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             c->EndOffscreenPass();
         });
 
-    // FXAA: LDR → BackBuffer
-    // 显式 PreBind ToneMap PSO 确保 m_CurrentRenderPass 为 2-attachment RP（BGRA8 + D32），
-    // 与 SwapChain Framebuffer（颜色 + 深度）兼容
+    // FXAA: LDR → BackBuffer（与 DeferredPipeline 完全一致的调用方式）
     rg.AddPass("FXAA", {{ldrTarget, ResourceAccess::Read}}, {{backBuf, ResourceAccess::Write}},
         [&](rhi::IRHICommandList* c) {
             c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput,
@@ -428,10 +417,7 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             m_PostProcess.GetFXAA()->SetInput(
                 m_PostProcess.GetLDRTarget(),
                 m_PostProcess.GetLDRSampler());
-            m_PostProcess.GetToneMap()->PreBind(c);
-            rhi::ClearValue clr{};
-            c->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
-                rhi::Format::Unknown, &clr, rhi::LoadOp::Clear);
+            c->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
             m_PostProcess.GetFXAA()->Render(c);
             c->EndRenderPass();
         });

@@ -42,10 +42,11 @@ void PostProcessChain::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
         m_LDRSampler = device->CreateSampler(s);
 
         // 虚拟深度附件（ToneMap PSO 带 depthFormat，Offscreen 需 2 附件）
+        // 必须与 LDR target 同尺寸，否则 vkCreateFramebuffer 因附件尺寸不匹配失败
         rhi::TextureDesc dd;
         dd.format = rhi::Format::D32_FLOAT;
-        dd.width = 1; dd.height = 1;
-        dd.usage = rhi::TextureUsage::DepthStencil;
+        dd.width  = width; dd.height = height;
+        dd.usage  = rhi::TextureUsage::DepthStencil;
         m_LDRDummyDepth = device->CreateTexture(dd);
     }
 
@@ -99,8 +100,8 @@ void PostProcessChain::OnResize(rhi::IRHIDevice* device, u32 width, u32 height) 
     {
         rhi::TextureDesc dd;
         dd.format = rhi::Format::D32_FLOAT;
-        dd.width = 1; dd.height = 1;
-        dd.usage = rhi::TextureUsage::DepthStencil;
+        dd.width  = width; dd.height = height;
+        dd.usage  = rhi::TextureUsage::DepthStencil;
         m_LDRDummyDepth = device->CreateTexture(dd);
     }
 
