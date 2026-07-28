@@ -242,9 +242,24 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
         sd.addressU = sd.addressV = rhi::AddressMode::ClampToEdge;
         auto ps = device->CreateSampler(sd);
 
-        // 更新所有 CombinedImageSampler 绑定（0-4, 9-16, 23）
-        for (u32 b : {0u,1u,2u,3u,4u,9u,10u,11u,12u,13u,14u,15u,16u,23u})
+        // 更新所有 CombinedImageSampler 绑定（0-4, 9-11, 14-16, 23 — 2D 纹理）
+        for (u32 b : {0u,1u,2u,3u,4u,9u,10u,11u,14u,15u,16u,23u})
             device->UpdateDescriptorSet(m_Set, b, rhi::DescriptorType::CombinedImageSampler, pt.get(), ps.get());
+
+        // 绑定 12=Irradiance, 13=Prefilter 需要 Cubemap（Shader 声明为 TextureCube）
+        // 2D 占位纹理类型不匹配 → 采样返回 0 → 间接光照全黑
+        {
+            u8 w4cube[6*4] = {255,255,255,255, 255,255,255,255, 255,255,255,255,
+                               255,255,255,255, 255,255,255,255, 255,255,255,255};
+            rhi::TextureDesc ctd;
+            ctd.format = rhi::Format::RGBA8_UNORM; ctd.width = 1; ctd.height = 1;
+            ctd.mipLevels = 1; ctd.arrayLayers = 6;
+            ctd.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::Cubemap;
+            ctd.initialData = w4cube;
+            auto cubeTex = device->CreateTexture(ctd);
+            device->UpdateDescriptorSet(m_Set, 12, rhi::DescriptorType::CombinedImageSampler, cubeTex.get(), ps.get());
+            device->UpdateDescriptorSet(m_Set, 13, rhi::DescriptorType::CombinedImageSampler, cubeTex.get(), ps.get());
+        }
 
         // Cluster SSBO 占位（binding 7/8）
         rhi::BufferDesc gd; gd.size = 16; gd.usage = rhi::BufferUsage::Storage;
