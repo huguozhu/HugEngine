@@ -179,6 +179,7 @@ void HybridRTPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
     }
 
     RenderGraph rg;
+    rg.SetProfiler(&m_Profiler);
     rg.SetSwapChain(m_SwapChain);
 
     BuildFrameGraph(rg, world, sg, camera);
