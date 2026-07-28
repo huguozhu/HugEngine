@@ -200,11 +200,32 @@ void VulkanCommandList::Begin() {
         m_VulkanDevice->AdvanceDeferredDestroy(m_VulkanDevice->GetCurrentFrame());
     }
 
+    // 延迟销毁旧 Framebuffer — 与 BeginRenderPass 内重建保持一致
     if (m_FramebuffersNeedRebuild) {
-        for (VkFramebuffer fb : m_Framebuffers) { vkDestroyFramebuffer(m_Device, fb, nullptr); }
+        auto* queue = m_VulkanDevice ? &m_VulkanDevice->GetDeferredDestroy() : nullptr;
+        for (VkFramebuffer fb : m_Framebuffers) {
+            if (fb && queue) {
+                VkDevice dev = m_Device;
+                queue->Enqueue([dev, fb]() {
+                    vkDestroyFramebuffer(dev, fb, nullptr);
+                });
+            }
+        }
         m_Framebuffers.clear();
     }
 
+    vkResetCommandPool(m_Device, m_CmdPools[m_FrameIndex], 0);
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    vkBeginCommandBuffer(m_CmdBuffers[m_FrameIndex], &beginInfo);
+    m_IsRecording = true;
+}
+
+void VulkanCommandList::BeginLightweight() {
+    // 仅开始录制，不推进帧计数器也不等待栅栏。
+    // 用于 AsyncCompute 等内部临时命令列表，避免双 Begin 导致
+    // AdvanceFrame 每帧调用两次 → 延迟销毁队列提前触发。
     vkResetCommandPool(m_Device, m_CmdPools[m_FrameIndex], 0);
 
     VkCommandBufferBeginInfo beginInfo{};
@@ -260,15 +281,21 @@ void VulkanCommandList::SetPipeline(IRHIPipelineState* pso) {
     auto* vkPso = static_cast<VulkanPipelineState*>(pso);
     m_CurrentPipeline   = vkPso->GetPipeline();
     m_CurrentLayout     = vkPso->GetPipelineLayout();
-    m_CurrentRenderPass = vkPso->GetRenderPass();
     m_CurrentBindPoint  = vkPso->GetBindPoint();
+
+    // 仅图形管线有有效的 VkRenderPass；Compute/RayTracing 管线返回 VK_NULL_HANDLE
+    // 避免 Compute PSO 的 SetPipeline 将 m_CurrentRenderPass 重置为 NULL，
+    // 导致后续 BeginRenderPass 因 "no render pass set" 而失败
+    VkRenderPass rp = vkPso->GetRenderPass();
+    if (rp != VK_NULL_HANDLE) {
+        m_CurrentRenderPass = rp;
+        m_FramebuffersNeedRebuild = true;  // 仅图形管线切换时需要重建 Framebuffer
+    }
 
     if (m_IsRecording) {
         vkCmdBindPipeline(m_CmdBuffers[m_FrameIndex], m_CurrentBindPoint,
                          m_CurrentPipeline);
     }
-
-    m_FramebuffersNeedRebuild = true;
 }
 
 void VulkanCommandList::SetVertexBuffer(IRHIBuffer* buffer, u32 binding) {

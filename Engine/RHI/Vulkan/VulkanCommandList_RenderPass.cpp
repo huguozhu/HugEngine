@@ -91,7 +91,18 @@ void VulkanCommandList::BeginRenderPass(u32 colorCount, Format, Format depthForm
 
     // 创建 Framebuffer（颜色 + 深度附件），使用最终 RP
     if (m_Framebuffers.empty() || m_FramebuffersNeedRebuild) {
+        // 将旧 Framebuffer 延迟销毁（3 帧后 GPU 保证不再使用）
+        // 不能立即销毁 — Vulkan 规范禁止在录制中销毁已绑定过的 FB
         if (!m_Framebuffers.empty()) {
+            auto* queue = m_VulkanDevice ? &m_VulkanDevice->GetDeferredDestroy() : nullptr;
+            for (VkFramebuffer fb : m_Framebuffers) {
+                if (fb && queue) {
+                    VkDevice dev = m_Device;
+                    queue->Enqueue([dev, fb]() {
+                        vkDestroyFramebuffer(dev, fb, nullptr);
+                    });
+                }
+            }
             m_Framebuffers.clear();
         }
         m_FramebuffersNeedRebuild = false;
@@ -145,8 +156,10 @@ void VulkanCommandList::BeginRenderPass(u32 colorCount, Format, Format depthForm
 
     vkCmdBeginRenderPass(m_CmdBuffers[m_FrameIndex], &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
 
-    // 绑定管线
-    if (m_CurrentPipeline) {
+    // 绑定管线 — 仅当最后绑定的管线是图形管线时才绑定
+    // （RT/Compute 管线的 m_CurrentBindPoint 不匹配 GRAPHICS，
+    //   强行绑定会导致 Vulkan 验证错误 → 崩溃）
+    if (m_CurrentPipeline && m_CurrentBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS) {
         vkCmdBindPipeline(m_CmdBuffers[m_FrameIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, m_CurrentPipeline);
     }
 }
@@ -222,7 +235,8 @@ void VulkanCommandList::BeginOffscreenPass(
     vkCmdBeginRenderPass(m_CmdBuffers[m_FrameIndex], &rpBegin, contents);
     m_InOffscreenPass = true;
 
-    if (m_CurrentPipeline != VK_NULL_HANDLE) {
+    // 仅图形管线：RT/Compute 管线 bind point 不匹配 GRAPHICS
+    if (m_CurrentPipeline != VK_NULL_HANDLE && m_CurrentBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS) {
         vkCmdBindPipeline(m_CmdBuffers[m_FrameIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, m_CurrentPipeline);
     }
 }
@@ -294,7 +308,8 @@ void VulkanCommandList::BeginOffscreenPassMRT(
     vkCmdBeginRenderPass(m_CmdBuffers[m_FrameIndex], &rpBegin, contents);
     m_InOffscreenPass = true;
 
-    if (m_CurrentPipeline != VK_NULL_HANDLE) {
+    // 仅图形管线：RT/Compute 管线 bind point 不匹配 GRAPHICS
+    if (m_CurrentPipeline != VK_NULL_HANDLE && m_CurrentBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS) {
         vkCmdBindPipeline(m_CmdBuffers[m_FrameIndex], VK_PIPELINE_BIND_POINT_GRAPHICS, m_CurrentPipeline);
     }
 }

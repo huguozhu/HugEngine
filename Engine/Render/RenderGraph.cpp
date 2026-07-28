@@ -484,7 +484,7 @@ void RenderGraph::ExecuteWithAsyncCompute(rhi::IRHICommandList* mainCmd,
 
     // 创建 Compute 命令列表，录制所有异步 Compute Pass
     auto computeCmd = device->CreateCommandList(rhi::QueueType::Compute);
-    computeCmd->Begin();
+    computeCmd->BeginLightweight();  // 轻量 Begin：不推进帧计数器，避免延迟销毁提前触发
 
     u32 passIdx = 0;
     for (auto* pass : asyncComputePasses) {

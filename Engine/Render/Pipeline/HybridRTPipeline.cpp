@@ -180,11 +180,20 @@ void HybridRTPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
 
     RenderGraph rg;
     rg.SetProfiler(&m_Profiler);
+    rg.SetSwapChain(m_SwapChain);  // 确保 RenderGraph 能更新 BackBuffer 尺寸
 
     BuildFrameGraph(rg, world, sg, camera);
 
     rg.Compile();
     rg.Execute(cmd, m_Device);
+
+    // ── 终极测试：Execute 之后再写红色，验证 swapchain 连通性 ──
+    m_PostProcess.GetToneMap()->PreBind(cmd);
+    rhi::ClearValue red{};
+    red.color[2] = 1.0f; red.color[3] = 1.0f;  // 红色
+    cmd->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
+        rhi::Format::Unknown, &red, rhi::LoadOp::Clear);
+    cmd->EndRenderPass();
 }
 
 // ============================================================
@@ -250,6 +259,19 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     m_CurrViewProj = camera.GetViewProjMatrix();
     static bool firstFrame = true;
     if (firstFrame) { m_PrevViewProj = m_CurrViewProj; firstFrame = false; }
+
+    // ── Mesh 批处理 + GPUScene 上传 ──
+    m_GPUScene.Collect(world, sg);
+    if (!m_BatchBuilt) { m_MeshBatcher.Build(world); m_BatchBuilt = true; }
+    m_MeshBatcher.FillGPUScene(m_GPUScene);
+    m_GPUScene.Upload(m_Device);
+
+    // ── GPU 可见性 ──
+    if (m_GPUCulling.enabled) {
+        m_GPUCulling.Readback(m_Device, m_GPUVisibleIndices);
+    } else {
+        m_GPUVisibleIndices.clear();
+    }
 
     // ── Pass 0: AS Build — BLAS/TLAS 构建（RT 启用时）──
     if (m_RTEnabled && m_RTPass && m_RTPass->IsValid()) {
@@ -393,7 +415,9 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             c->EndOffscreenPass();
         });
 
-    // FXAA: LDR → BackBuffer（FXAA PSO 无深度附件，RenderPass 仅 1 attachment，匹配 SwapChain）
+    // FXAA: LDR → BackBuffer
+    // 显式 PreBind ToneMap PSO 确保 m_CurrentRenderPass 为 2-attachment RP（BGRA8 + D32），
+    // 与 SwapChain Framebuffer（颜色 + 深度）兼容
     rg.AddPass("FXAA", {{ldrTarget, ResourceAccess::Read}}, {{backBuf, ResourceAccess::Write}},
         [&](rhi::IRHICommandList* c) {
             c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput,
@@ -404,8 +428,7 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             m_PostProcess.GetFXAA()->SetInput(
                 m_PostProcess.GetLDRTarget(),
                 m_PostProcess.GetLDRSampler());
-            // FXAA::Render 内部 SetPipeline 设置 m_CurrentRenderPass（BGRA8, 无深度）
-            // BeginRenderPass 创建 Framebuffer（1 attachment）与 RP 兼容
+            m_PostProcess.GetToneMap()->PreBind(c);
             rhi::ClearValue clr{};
             c->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
                 rhi::Format::Unknown, &clr, rhi::LoadOp::Clear);

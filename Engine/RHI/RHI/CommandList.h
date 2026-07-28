@@ -34,6 +34,10 @@ public:
     virtual ~IRHICommandList() = default;
 
     virtual void Begin() = 0;
+    /// 轻量 Begin：仅开始录制，不推进帧计数器。
+    /// 用于临时命令列表（如 AsyncCompute 内部分发的 Compute CB），
+    /// 避免二次调用 AdvanceFrame 导致延迟销毁队列提前触发。
+    virtual void BeginLightweight() { Begin(); }
     virtual void End()   = 0;
 
     // 辅助命令缓冲接口（Phase 2 并行录制）

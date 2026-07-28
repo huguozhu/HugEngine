@@ -373,7 +373,7 @@ int main() {
     HE_CORE_INFO("02.Cube demo started — WASD=移动, 右键拖拽=旋转, 滚轮=缩放, Shift=加速");
     u64  frameIndex = 0;
     f64  lastTime   = glfwGetTime();
-    int  renderMode  = 1;  // 0=Forward, 1=Deferred, 2=HybridRT
+    int  renderMode  = 2;  // 0=Forward, 1=Deferred, 2=HybridRT
 
     while (!engine.GetWindow()->ShouldClose()) {
         // 计算帧时间

@@ -31,6 +31,7 @@ public:
     ~VulkanCommandList() override;
 
     void Begin() override;
+    void BeginLightweight() override;  // 跳过帧计数器推进，仅开始录制
     void End()   override;
     void BeginSecondary(IRHIPipelineState* pso) override;
     void ExecuteSecondary(IRHICommandList* secondary) override;
