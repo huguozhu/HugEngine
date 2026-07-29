@@ -249,8 +249,9 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
         // 绑定 12=Irradiance, 13=Prefilter 需要 Cubemap（Shader 声明为 TextureCube）
         // 2D 占位纹理类型不匹配 → 采样返回 0 → 间接光照全黑
         {
-            u8 w4cube[6*4] = {255,255,255,255, 255,255,255,255, 255,255,255,255,
-                               255,255,255,255, 255,255,255,255, 255,255,255,255};
+            // 黑色 Cubemap 占位：类型匹配 TextureCube 声明，IBL 贡献为 0
+            // 不能使用白色——白色 Cubemap 会产生非零环境光贡献，导致画面异常
+            u8 w4cube[6*4] = {};  // 6 面 × 4 通道，全部为 0（黑色）
             rhi::TextureDesc ctd;
             ctd.format = rhi::Format::RGBA8_UNORM; ctd.width = 1; ctd.height = 1;
             ctd.mipLevels = 1; ctd.arrayLayers = 6;
