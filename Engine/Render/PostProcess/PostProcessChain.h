@@ -23,7 +23,7 @@ namespace he::render {
 // RenderGraph 链逻辑保留在 BuildFrameGraph 中（避免破坏
 // 复杂的输入源选择逻辑），通过 getter 访问各个 Pass。
 //
-// DeferredPipeline 和 HybridRTPipeline 共享同一个实例。
+// 供 DeferredPipeline 使用。
 // ============================================================
 class PostProcessChain {
     HE_DECLARE_NON_COPYABLE(PostProcessChain);

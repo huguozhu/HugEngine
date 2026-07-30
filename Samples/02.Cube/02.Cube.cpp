@@ -14,7 +14,6 @@
 #include "RHI/RHI.h"
 #include "Pipeline/ForwardPipeline.h"
 #include "Pipeline/DeferredPipeline.h"
-#include "Pipeline/HybridRTPipeline.h"
 #include "Pipeline/CameraController.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
@@ -278,18 +277,11 @@ int main() {
     deferredPipeline.SetSwapChain(swapchain.get());
     deferredPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
 
-    render::HybridRTPipeline hybridRTPipeline;
-    hybridRTPipeline.Initialize(device.get());
-    hybridRTPipeline.SetSwapChain(swapchain.get());
-    hybridRTPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
-
     // 启动时默认关闭 GPU 剔除和 CPU 视锥剔除
     forwardPipeline.GetGPUCulling().enabled = false;
     deferredPipeline.GetGPUCulling().enabled = false;
-    hybridRTPipeline.GetGPUCulling().enabled = false;
     forwardPipeline.GetSceneRenderer().enableFrustumCull = false;
     deferredPipeline.GetSceneRenderer().enableFrustumCull = false;
-    hybridRTPipeline.GetGBuffer()->GetContext().sceneRenderer->enableFrustumCull = false;
 
     // ============================================================
     // 5.5 粒子系统测试
@@ -365,7 +357,6 @@ int main() {
         cmdList->SetSwapChain(swapchain.get());
         forwardPipeline.OnResize(w, h);
         deferredPipeline.OnResize(w, h);
-        hybridRTPipeline.OnResize(w, h);
         camCtrl.SetAspectRatio(static_cast<float>(w), static_cast<float>(h));
     });
 
@@ -373,7 +364,7 @@ int main() {
     HE_CORE_INFO("02.Cube demo started — WASD=移动, 右键拖拽=旋转, 滚轮=缩放, Shift=加速");
     u64  frameIndex = 0;
     f64  lastTime   = glfwGetTime();
-    int  renderMode  = 2;  // 0=Forward, 1=Deferred, 2=HybridRT
+    int  renderMode  = 1;  // 0=Forward, 1=Deferred
 
     while (!engine.GetWindow()->ShouldClose()) {
         // 计算帧时间
@@ -454,14 +445,6 @@ int main() {
             cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
                 rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
         }
-        // --- HybridRT 模式 ---
-        else if (renderMode == 2) {
-            hybridRTPipeline.NextFrame();
-            hybridRTPipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera(), deltaTime);
-            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
-                rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
-        }
-
         imgui.BeginFrame();
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
         ImGui::SetNextWindowBgAlpha(0.5f);
@@ -504,11 +487,6 @@ int main() {
         ImGui::RadioButton("Forward 前向渲染", &renderMode, 0);
         ImGui::SameLine();
         ImGui::RadioButton("Deferred 延迟渲染", &renderMode, 1);
-        bool rtSupported = device->GetCaps().supportsRayTracing;
-        if (rtSupported) {
-            ImGui::SameLine();
-            ImGui::RadioButton("Hybrid RT", &renderMode, 2);
-        }
 
         // GPU 剔除开关
         ImGui::Spacing();
@@ -516,7 +494,6 @@ int main() {
         if (ImGui::Checkbox("GPU Culling", &gpuCullOn)) {
             forwardPipeline.GetGPUCulling().enabled = gpuCullOn;
             deferredPipeline.GetGPUCulling().enabled = gpuCullOn;
-            hybridRTPipeline.GetGPUCulling().enabled = gpuCullOn;
         }
         // CPU 视锥剔除开关
         bool cpuCullOn = forwardPipeline.GetSceneRenderer().enableFrustumCull;
@@ -646,7 +623,6 @@ int main() {
 
     forwardPipeline.Shutdown();
     deferredPipeline.Shutdown();
-    hybridRTPipeline.Shutdown();
 
     HE_CORE_INFO("Exiting after {} frames", frameIndex);
     return 0;

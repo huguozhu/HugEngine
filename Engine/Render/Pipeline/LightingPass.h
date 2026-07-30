@@ -50,7 +50,7 @@ struct LightingInputSources {
 // 拥有 HDR 目标纹理 + Lighting PSO + 描述符集
 // 提供统一 Render 接口：输入 GBuffer + 效果纹理 → 输出 HDR
 //
-// DeferredPipeline 和 HybridRTPipeline 共享同一个实例。
+// 供 DeferredPipeline 使用。
 // ============================================================
 class LightingPass {
     HE_DECLARE_NON_COPYABLE(LightingPass);
@@ -85,7 +85,7 @@ public:
                 rhi::IRHIBuffer* lightGridBuffer,
                 rhi::IRHIBuffer* lightIndexListBuffer,
                 std::vector<GPULight>* cachedLights,
-                // RT 效果纹理（可选，HybridRTPipeline 使用）
+                // RT 效果纹理（可选，暂未使用，保留供未来 RT 管线扩展）
                 rhi::IRHITexture* rtShadowMask  = nullptr,
                 rhi::IRHITexture* rtReflection  = nullptr,
                 rhi::IRHITexture* rtAO          = nullptr,

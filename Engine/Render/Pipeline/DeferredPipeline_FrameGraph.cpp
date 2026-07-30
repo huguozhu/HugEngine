@@ -377,7 +377,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 &m_ClusteredShading,
                 m_LightGridBuffer.get(), m_LightIndexListBuffer.get(),
                 &m_CachedLights,
-                nullptr, nullptr, nullptr, nullptr,  // RT 纹理（HybridRTPipeline 使用）
+                nullptr, nullptr, nullptr, nullptr,  // RT 纹理（暂未使用）
                 float4(camera.position, 0), iblIntensity, fpc.lightCount,
                 w, h);
         });

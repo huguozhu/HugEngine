@@ -77,12 +77,6 @@ GPU_CONST(GPU_UINT kGPUBinding_SSAO_DL       = 20);  // SSAO
 GPU_CONST(GPU_UINT kGPUBinding_SSR           = 21);  // SSR
 GPU_CONST(GPU_UINT kGPUBinding_DDGIProbes    = 22);  // DDGI 探针
 
-// --- RT 效果纹理 Binding 索引（HybridRTPipeline 专用，set=0）---
-GPU_CONST(GPU_UINT kGPUBinding_RT_ShadowMask  = 24);  // RT 阴影遮罩 (R16_FLOAT)
-GPU_CONST(GPU_UINT kGPUBinding_RT_Reflection  = 25);  // RT 反射 (RGBA16_FLOAT)
-GPU_CONST(GPU_UINT kGPUBinding_RT_AO          = 26);  // RT AO (R8_UNORM)
-GPU_CONST(GPU_UINT kGPUBinding_RT_GI          = 27);  // RT GI 间接漫反射 (RGBA16_FLOAT)
-
 // --- 渲染管线限制 ---
 GPU_CONST(GPU_UINT kGPUMaxFramesInFlight       = 3);     // 最大飞行帧数
 GPU_CONST(GPU_UINT kGPUMaxColorAttachments      = 8);    // 最大 MRT 附件数

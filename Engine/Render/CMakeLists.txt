@@ -22,8 +22,6 @@ set(RENDER_SOURCES
     Pipeline/DeferredPipeline.h
     Pipeline/DeferredPipeline.cpp
     Pipeline/DeferredPipeline_FrameGraph.cpp
-    Pipeline/HybridRTPipeline.h
-    Pipeline/HybridRTPipeline.cpp
     Pipeline/ClusteredShading.h
     Pipeline/ClusteredShading.cpp
     Pipeline/GPUScene.h
@@ -45,9 +43,6 @@ set(RENDER_SOURCES
     Pipeline/Material.h
     Pipeline/RTPass.h
     Pipeline/RTPass.cpp
-    # RT (Ray Tracing)
-    RT/RTShadowPass.h
-    RT/RTShadowPass.cpp
     # RenderGraph
     RenderGraph.h
     RenderGraph.cpp

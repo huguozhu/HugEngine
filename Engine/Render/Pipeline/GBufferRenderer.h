@@ -93,7 +93,7 @@ public:
 //
 // 拥有 5 个 MRT 颜色纹理 + 深度纹理，提供 ImportToRenderGraph
 // 和 Render 接口。内部委托给 IGBufferRenderer（CPU/GPU 策略）。
-// DeferredPipeline 和 HybridRTPipeline 共享一个实例。
+// 供 DeferredPipeline 使用。
 // ============================================================
 class GBufferRenderer {
 public:
