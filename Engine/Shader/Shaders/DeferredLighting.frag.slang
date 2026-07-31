@@ -37,6 +37,13 @@ struct VSOutput {
 [[vk::binding(kGPUBinding_SSR, kGPUDescSet_PerFrame)]] Texture2D<float4> u_SSR;   // SSR 屏幕空间反射
 [[vk::binding(kGPUBinding_DDGIProbes, kGPUDescSet_PerFrame)]] StructuredBuffer<float4> u_DDGIProbes;  // DDGI 探针数据（每探针 16 float4）
 
+// Hybrid RT 效果输出纹理（由 HybridRTPipeline 通过 LightingPass 绑定）
+// 通过 push constant 的 rt*Source 字段在 shader 内选择 RT 或屏幕空间源
+[[vk::binding(kGPUBinding_RT_ShadowMask, kGPUDescSet_PerFrame)]] Texture2D<float>  u_RT_ShadowMask;  // RT 阴影遮罩（0=全影, 1=无影）
+[[vk::binding(kGPUBinding_RT_Reflection, kGPUDescSet_PerFrame)]] Texture2D<float4> u_RT_Reflection;  // RT 反射（rgb=反射色, a=有效标记）
+[[vk::binding(kGPUBinding_RT_AO, kGPUDescSet_PerFrame)]] Texture2D<float>  u_RT_AO;          // RT 环境光遮蔽（0=全遮蔽, 1=无遮蔽）
+[[vk::binding(kGPUBinding_RT_GI, kGPUDescSet_PerFrame)]] Texture2D<float4> u_RT_GI;          // RT 间接漫反射（rgb=间接光, a=有效标记）
+
 // Clustered Shading: LightGrid + LightIndexList（每 cluster 只迭代影响它的光源）
 struct LightGridCell { uint offset; uint count; };
 [[vk::binding(kGPUBinding_LightGrid, kGPUDescSet_PerFrame)]]  StructuredBuffer<LightGridCell> u_LightGrid;       // 每 cluster 的光源列表头
@@ -54,7 +61,10 @@ struct LightGridCell { uint offset; uint count; };
     float    clusterFar;        // 远裁剪面
     float    clusterLogFactor;  // log(far/near) 用于计算 Z slice
     uint     useClustered;      // 是否启用 clustered shading
-    uint     _pad[3];
+    uint     rtShadowSource;    // 0=CSM, 1=RT 阴影（配合 u_RT_ShadowMask）
+    uint     rtAOSource;        // 0=SSAO, 1=RT AO（配合 u_RT_AO）
+    uint     rtSpecularSource;  // 0=SSR, 1=RT 反射（配合 u_RT_Reflection）
+    uint     rtDiffuseSource;   // 0=SSGI, 1=RT GI（配合 u_RT_GI）
 };
 
 // kGPUPrefilterMips / kGPUClusterSlices 统一在 ShaderTypes.slang（kGPU*）
@@ -157,6 +167,11 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
     float3 V = normalize(cameraPosition.xyz - worldPos);
     float3 color = float3(0.0);
 
+    // RT 阴影因子：RT 阴影遮罩覆盖所有阴影光源（全屏像素级乘积），
+    // 在直接光照结算后整体乘一次；rtShadowSource=0 时使用传统逐光源 CSM
+    float rtShadowFactor = (rtShadowSource != 0u)
+        ? u_RT_ShadowMask.Sample(u_GBufferSampler, uv).r : 1.0;
+
     // 3. 直接光照（Clustered 或线性回退）
     if (useClustered != 0u && clusterTilesX > 0u) {
         // --- Clustered Shading ---
@@ -198,7 +213,7 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
         float3 radiance = light.colorIntensity.rgb * light.colorIntensity.w * attenuation;
 
         float shadow = 1.0;
-        if (light.shadowIndex >= 0) {
+        if (light.shadowIndex >= 0 && rtShadowSource == 0u) {
             GPUShadowData sm = u_ShadowData[light.shadowIndex];
             if (sm.shadowParams.w < 0.5f) {
                 // 方向光 CSM
@@ -246,7 +261,7 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
         }
         float3 radiance = light.colorIntensity.rgb * light.colorIntensity.w * attenuation;
         float shadow = 1.0;
-        if (light.shadowIndex >= 0) {
+        if (light.shadowIndex >= 0 && rtShadowSource == 0u) {
             GPUShadowData sm = u_ShadowData[light.shadowIndex];
             if (sm.shadowParams.w < 0.5f) {
                 shadow = lerp(1.0, SampleShadowPCF(worldPos, N, L, sm, cameraPosition.xyz,
@@ -268,6 +283,9 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
         color += PBR_BRDF(albedo, metallic, roughness, N, V, L) * radiance * shadow;
         }
     }
+
+    // RT 阴影整体因子（覆盖所有阴影光源；rtShadowSource=0 时恒为 1.0）
+    color *= rtShadowFactor;
 
     // 4. IBL
     float3 F0_ibl = lerp(float3(0.04), albedo, metallic);
@@ -298,21 +316,24 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
         color += rsmIndirect * 0.03 * iblIntensity;
     }
 
-    // SSAO 屏幕空间遮蔽（与 GBuffer AO 相乘）
+    // SSAO 屏幕空间遮蔽（与 GBuffer AO 相乘）；rtAOSource=1 时改用 RT AO 遮罩
     float ssao = u_SSAO.Sample(u_GBufferSampler, uv).r;
-    color *= ao * ssao;
+    float aoVal = (rtAOSource != 0u) ? u_RT_AO.Sample(u_GBufferSampler, uv).r : ssao;
+    color *= ao * aoVal;
 
-    // SSGI 间接漫反射（屏幕空间）
+    // SSGI 间接漫反射（屏幕空间）；rtDiffuseSource=1 时改用 RT GI 输出
     float4 ssgi = u_SSGI.Sample(u_GBufferSampler, uv);
-    color += ssgi.rgb;
+    float4 rtGI = (rtDiffuseSource != 0u) ? u_RT_GI.Sample(u_GBufferSampler, uv) : ssgi;
+    color += rtGI.rgb;
 
     // DDGI 间接漫反射（探针网格，世界空间三线性插值 + SH 评估）
     float3 ddgi = SampleDDGI(worldPos, N);
     color += ddgi * 0.5;  // 强度缩放（与 SSGI 叠加，避免过度照亮）
 
-    // SSR 间接镜面反射
+    // SSR 间接镜面反射；rtSpecularSource=1 时改用 RT 反射输出
     float4 ssr = u_SSR.Sample(u_GBufferSampler, uv);
-    color += ssr.rgb;
+    float4 rtRefl = (rtSpecularSource != 0u) ? u_RT_Reflection.Sample(u_GBufferSampler, uv) : ssr;
+    color += rtRefl.rgb;
 
     color += gbC.rgb;  // emissive
     return float4(color, 1.0);

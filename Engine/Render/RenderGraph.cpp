@@ -110,7 +110,9 @@ rhi::ResourceState RenderGraph::AccessToState(ResourceAccess access, bool isDept
         case ResourceAccess::Write:
             return isDepth ? rhi::ResourceState::DepthStencilWrite : rhi::ResourceState::RenderTarget;
         case ResourceAccess::ReadWrite:
-            return isDepth ? rhi::ResourceState::DepthStencilWrite : rhi::ResourceState::RenderTarget;
+        case ResourceAccess::UAV:
+            // RT/Compute 效果输出：存储图像 UAV（非深度资源）
+            return isDepth ? rhi::ResourceState::DepthStencilWrite : rhi::ResourceState::UnorderedAccess;
         default:
             return rhi::ResourceState::Undefined;
     }
@@ -224,16 +226,22 @@ void RenderGraph::DeriveBarriers() {
                 br.handle   = h;
                 br.srcState = cur.layout;
                 br.dstState = needed;
-                // 推导合适的管线阶段
+                // 推导合适的管线阶段（UAV 资源由 RT/Compute 着色器读写 → RayTracingShader 阶段）
+                bool srcIsUAV = (cur.layout == rhi::ResourceState::UnorderedAccess);
+                bool dstIsUAV = (needed == rhi::ResourceState::UnorderedAccess);
                 if (cur.layout == rhi::ResourceState::DepthStencilWrite ||
                     cur.layout == rhi::ResourceState::RenderTarget)
                     br.srcStage = rhi::PipelineStage::ColorAttachmentOutput;
+                else if (srcIsUAV)
+                    br.srcStage = rhi::PipelineStage::RayTracingShader;
                 else
                     br.srcStage = rhi::PipelineStage::FragmentShader;
                 br.dstStage = rhi::PipelineStage::FragmentShader;
                 if (needed == rhi::ResourceState::RenderTarget ||
                     needed == rhi::ResourceState::DepthStencilWrite)
                     br.dstStage = rhi::PipelineStage::ColorAttachmentOutput;
+                else if (dstIsUAV)
+                    br.dstStage = rhi::PipelineStage::RayTracingShader;
 
                 pass->preBarriers.push_back(br);
                 cur.layout = needed;

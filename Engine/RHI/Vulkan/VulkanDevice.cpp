@@ -449,19 +449,32 @@ void VulkanDevice::CreateLogicalDevice() {
     }
 
     // Bindless: descriptor indexing 特性
+    // 先查询设备实际支持的特性，仅启用可用项——避免请求不支持的
+    // descriptorBindingUniformBufferUpdateAfterBind 等导致设备创建失败
+    // （例如 GTX 1070/Pascal 不支持 UBO update-after-bind）
+    VkPhysicalDeviceDescriptorIndexingFeatures supDescIdx{};
+    supDescIdx.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+    {
+        VkPhysicalDeviceFeatures2 feat2{};
+        feat2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        feat2.pNext = &supDescIdx;
+        vkGetPhysicalDeviceFeatures2(m_Physical, &feat2);
+    }
     VkPhysicalDeviceDescriptorIndexingFeatures descIndexing{};
     descIndexing.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
-    descIndexing.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
-    descIndexing.runtimeDescriptorArray = VK_TRUE;
-    descIndexing.descriptorBindingVariableDescriptorCount = VK_TRUE;
-    descIndexing.descriptorBindingPartiallyBound = VK_TRUE;
-    descIndexing.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
-    descIndexing.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
-    descIndexing.descriptorBindingStorageImageUpdateAfterBind = VK_TRUE;    // StorageImage bindless
-    descIndexing.descriptorBindingUniformBufferUpdateAfterBind = VK_TRUE;   // UniformBuffer bindless
-    descIndexing.descriptorBindingStorageTexelBufferUpdateAfterBind = VK_TRUE; // TexelBuffer bindless
-    descIndexing.shaderUniformBufferArrayNonUniformIndexing = VK_TRUE;
-    descIndexing.shaderStorageBufferArrayNonUniformIndexing = VK_TRUE;
+    descIndexing.shaderSampledImageArrayNonUniformIndexing = supDescIdx.shaderSampledImageArrayNonUniformIndexing;
+    descIndexing.runtimeDescriptorArray = supDescIdx.runtimeDescriptorArray;
+    descIndexing.descriptorBindingVariableDescriptorCount = supDescIdx.descriptorBindingVariableDescriptorCount;
+    descIndexing.descriptorBindingPartiallyBound = supDescIdx.descriptorBindingPartiallyBound;
+    descIndexing.descriptorBindingStorageBufferUpdateAfterBind = supDescIdx.descriptorBindingStorageBufferUpdateAfterBind;
+    descIndexing.descriptorBindingSampledImageUpdateAfterBind = supDescIdx.descriptorBindingSampledImageUpdateAfterBind;
+    descIndexing.descriptorBindingStorageImageUpdateAfterBind = supDescIdx.descriptorBindingStorageImageUpdateAfterBind;    // StorageImage bindless
+    descIndexing.descriptorBindingUniformBufferUpdateAfterBind = supDescIdx.descriptorBindingUniformBufferUpdateAfterBind;   // UniformBuffer bindless
+    descIndexing.descriptorBindingStorageTexelBufferUpdateAfterBind = supDescIdx.descriptorBindingStorageTexelBufferUpdateAfterBind; // TexelBuffer bindless
+    descIndexing.shaderUniformBufferArrayNonUniformIndexing = supDescIdx.shaderUniformBufferArrayNonUniformIndexing;
+    descIndexing.shaderStorageBufferArrayNonUniformIndexing = supDescIdx.shaderStorageBufferArrayNonUniformIndexing;
+    if (!supDescIdx.descriptorBindingUniformBufferUpdateAfterBind)
+        HE_CORE_WARN("设备不支持 descriptorBindingUniformBufferUpdateAfterBind，已跳过（bindless UBO update-after-bind 停用）");
 
     // Vulkan 1.1: shaderDrawParameters（SPIR-V gl_DrawID 需要）
     VkPhysicalDeviceVulkan11Features vulkan11Features{};

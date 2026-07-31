@@ -107,11 +107,19 @@ if(SLANGC)
         "${SHADER_DIR}/RT_Sponza.rchit.slang"
         "${SHADER_DIR}/RT_Bindless.rcall.slang"
         "${SHADER_DIR}/RT_Shadow.rgen.slang"
+        "${SHADER_DIR}/RT_Shadow.rahit.slang"
         "${SHADER_DIR}/RT_Shadow.rmiss.slang"
         "${SHADER_DIR}/RT_Common.rmiss.slang"
         "${SHADER_DIR}/RT_Common.rchit.slang"
         "${SHADER_DIR}/RT_PBR.rchit.slang"
         "${SHADER_DIR}/RT_PositionFetch.rchit.slang"
+        "${SHADER_DIR}/RT_AO.rgen.slang"
+        "${SHADER_DIR}/RT_Reflection.rgen.slang"
+        "${SHADER_DIR}/RT_Reflection.rchit.slang"
+        "${SHADER_DIR}/RT_Reflection.rmiss.slang"
+        "${SHADER_DIR}/RT_GI.rgen.slang"
+        "${SHADER_DIR}/RT_GI.rchit.slang"
+        "${SHADER_DIR}/RT_GI.rmiss.slang"
     )
     # Mesh Shader 着色器（.mesh / .task）
     # 命名约定: EffectName.mesh.slang (Mesh), EffectName.task.slang (Amplification/Task)

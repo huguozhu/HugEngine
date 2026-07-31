@@ -74,8 +74,6 @@ void LightingPass::Render(rhi::IRHICommandList* cmd,
                            float iblIntensity, u32 lightCount,
                            u32 width, u32 height) {
 
-    (void)rtShadowMask; (void)rtReflection; (void)rtAO; (void)rtGI;
-
     auto bindTex = [&](u32 binding, rhi::IRHITexture* tex, rhi::IRHISampler* sampler) {
         if (tex && sampler && m_Device) {
             m_Device->UpdateDescriptorSet(m_Set, binding,
@@ -110,6 +108,13 @@ void LightingPass::Render(rhi::IRHICommandList* cmd,
     // ── 绑定 DDGI 探针 ──
     if (ddgiProbeBuffer && m_Device)
         m_Device->UpdateDescriptorSet(m_Set, 22, rhi::DescriptorType::StorageBuffer, ddgiProbeBuffer);
+
+    // ── 绑定 Hybrid RT 效果输出纹理（非空时才替换占位）──
+    // 阴影/AO 遮罩用线性采样上采样到全分辨率；反射/GI HDR 结果用线性采样
+    bindTex(24, rtShadowMask, m_HDRSampler.get());   // RT 阴影遮罩
+    bindTex(25, rtReflection, m_HDRSampler.get());   // RT 反射
+    bindTex(26, rtAO,         m_HDRSampler.get());   // RT AO
+    bindTex(27, rtGI,         m_HDRSampler.get());   // RT GI
 
     // ── 聚集着色（可选）──
     u32 useClustered = 0;
@@ -155,6 +160,11 @@ void LightingPass::Render(rhi::IRHICommandList* cmd,
     lpc.clusterNear     = clusterNear;
     lpc.clusterFar      = clusterFar;
     lpc.clusterLogFactor = clusterLogFactor;
+    // RT 效果输入源标志：纹理非空则 shader 侧使用 RT 输出替代屏幕空间效果
+    lpc.rtShadowSource   = rtShadowMask ? 1u : 0u;
+    lpc.rtAOSource       = rtAO         ? 1u : 0u;
+    lpc.rtSpecularSource = rtReflection ? 1u : 0u;
+    lpc.rtDiffuseSource  = rtGI         ? 1u : 0u;
     cmd->SetPushConstants(0, sizeof(lpc), &lpc);
     cmd->Draw(3);
 
@@ -224,6 +234,10 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
         {20, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // SSAO
         {21, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // SSR
         {22, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment},         // DDGI Probes
+        {24, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RT 阴影遮罩
+        {25, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RT 反射
+        {26, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RT AO
+        {27, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RT GI
     };
     m_Layout = device->CreateDescriptorSetLayout(ll);
     m_Set    = device->AllocateDescriptorSet(m_Layout);
@@ -245,6 +259,23 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
         // 更新所有 CombinedImageSampler 绑定（0-4, 9-11, 14-16, 23 — 2D 纹理）
         for (u32 b : {0u,1u,2u,3u,4u,9u,10u,11u,14u,15u,16u,23u})
             device->UpdateDescriptorSet(m_Set, b, rhi::DescriptorType::CombinedImageSampler, pt.get(), ps.get());
+
+        // RT 效果占位纹理：
+        //   24/26（RT 阴影/AO）→ 白色（无阴影/无遮蔽，语义上=1.0）
+        //   25/27（RT 反射/GI）→ 黑色（无反射/无间接光，语义上=0.0）
+        {
+            u8 bk[4] = {0,0,0,0};
+            rhi::TextureDesc btd;
+            btd.format = rhi::Format::RGBA8_UNORM; btd.width = 1; btd.height = 1;
+            btd.mipLevels = 1; btd.arrayLayers = 1;
+            btd.usage = rhi::TextureUsage::ShaderResource; btd.initialData = bk;
+            auto bt = device->CreateTexture(btd);
+
+            device->UpdateDescriptorSet(m_Set, 24, rhi::DescriptorType::CombinedImageSampler, pt.get(), ps.get());
+            device->UpdateDescriptorSet(m_Set, 26, rhi::DescriptorType::CombinedImageSampler, pt.get(), ps.get());
+            device->UpdateDescriptorSet(m_Set, 25, rhi::DescriptorType::CombinedImageSampler, bt.get(), ps.get());
+            device->UpdateDescriptorSet(m_Set, 27, rhi::DescriptorType::CombinedImageSampler, bt.get(), ps.get());
+        }
 
         // 绑定 12=Irradiance, 13=Prefilter 需要 Cubemap（Shader 声明为 TextureCube）
         // 2D 占位纹理类型不匹配 → 采样返回 0 → 间接光照全黑

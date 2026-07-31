@@ -3,53 +3,54 @@
 //
 // 数据流：
 //   GBuffer 深度 + 法线 → 重建世界坐标 → 对每个光源发射 TraceRay
-//   → ClosestHit 标记遮挡 → 输出 float 阴影遮罩（0=全影, 1=无影）
+//   → AnyHit 标记遮挡 → 输出 float 阴影遮罩（0=全影, 1=无影）
 //
-// 使用 RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH
-//   + RAY_FLAG_SKIP_CLOSEST_HIT_SHADER 跳过材质计算，只检测遮挡
+// 阴影语义（修复旧版恒无阴影 bug）：
+//   使用 RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH
+//     + RAY_FLAG_SKIP_CLOSEST_HIT_SHADER，
+//   命中检测由 RT_Shadow.rahit（AnyHit）完成——置 payload.blocked=true。
+//   旧版错误地在 ClosestHit 置 blocked 却用 SKIP_CLOSEST_HIT 跳过它，
+//   导致 payload 恒为 false → 阴影恒为 1.0（无阴影）。
+
+#include "ShaderTypes.slang"  // RTShadowPushConstant（C++/Slang 共享布局）
 
 // === RayGen 资源 (set=0) ===
 [[vk::binding(0, 0)]] RaytracingAccelerationStructure g_TLAS;
 
-// 输出：单通道阴影遮罩纹理（R16_FLOAT 或 R8_UNORM）
+// 输出：单通道阴影遮罩纹理（R16_FLOAT）
 [[vk::binding(1, 0)]] RWTexture2D<float> g_ShadowMask;
 
 // GBuffer 输入
-[[vk::binding(2, 0)]] Texture2D<float>  g_DepthBuffer;      // 深度缓冲（NDC 或 Reverse-Z）
+[[vk::binding(2, 0)]] Texture2D<float>  g_DepthBuffer;      // 深度缓冲
 [[vk::binding(3, 0)]] Texture2D<float4> g_GBufferB;          // worldNormal.xyz + roughness.w
 
-// 光源 Uniform Buffer（方向光 + 点光源 + 聚光灯，最多 16 个）
+// 光源 Uniform Buffer（由 RTShadowPass 每帧从 GPULight[] 显式抽取，
+// 避免与 GPULight SSBO 的 64B 布局不匹配——旧版 bug 根源）
 struct ShadowLight {
     float4 pos_type;      // xyz=位置/方向, w=类型(0=方向光, 1=点光源, 2=聚光灯)
-    float4 color_radius;  // rgb=颜色, w=光源半径（软阴影用）
+    float4 color_radius;  // rgb=颜色, w=光源半径（软阴影预留）
     float4 spotDir_angle; // xyz=聚光方向, w=cos(内锥角)（聚光灯专用）
 };
 [[vk::binding(4, 0)]] cbuffer ShadowLightCB {
     ShadowLight g_Lights[16];
-    uint        g_LightCount;
-    uint        g_ShadowFlags;  // bit0=硬阴影, bit1=半分辨率
-    uint        g_Pad[2];
 };
 
-// === Push Constant ===
-struct ShadowPushConstant {
-    float4x4 invViewProj;     // 逆 ViewProj 矩阵（深度 → 世界坐标）
-    float4   cameraPos;       // 相机世界坐标（xyz）+ nearPlane（w）
-    uint2    dispatchDim;     // DispatchRaysDimensions
-    uint     frameIdx;        // 帧索引（时域抖动用）
-    float    maxShadowDist;   // 最大阴影距离（超出不计算）
-};
-[[vk::push_constant]] ShadowPushConstant g_PC;
+// === Push Constant（共享结构，见 ShaderTypes.slang）===
+[[vk::push_constant]] RTShadowPushConstant g_PC;
 
-// === Payload（与 Miss/ClosestHit 共享） ===
+// === Payload（与 AnyHit/Miss 共享）===
 struct ShadowPayload {
     bool blocked;  // true=被遮挡, false=可见
 };
 
 // 从深度和 UV 重建世界坐标
+// 注意：Vulkan 像素坐标 y 向下，而相机 ViewProj 为 GLM 约定（y 向上），
+// 必须先翻转 NDC y（与 RT_Sponza.rgen 一致），否则重建结果上下颠倒。
 float3 ReconstructWorldPos(uint2 idx, float depth) {
-    float2 uv = (float2(idx) + 0.5) / float2(g_PC.dispatchDim);
-    float4 clipPos = float4(uv * 2.0 - 1.0, depth, 1.0);
+    float2 uv = (float2(idx) + 0.5) / float2(g_PC.dispatchDimX, g_PC.dispatchDimY);
+    float2 ndc = uv * 2.0 - 1.0;
+    ndc.y = -ndc.y;  // Vulkan NDC y 翻转
+    float4 clipPos = float4(ndc, depth, 1.0);
     float4 worldPos4 = mul(g_PC.invViewProj, clipPos);
     return worldPos4.xyz / worldPos4.w;
 }
@@ -73,7 +74,7 @@ float TraceShadowRay(float3 worldPos, float3 N, ShadowLight light) {
         tMax = dist;
     }
 
-    // ── 发射阴影射线 ──
+    // ── 发射阴影射线（AnyHit 检测遮挡，见 RT_Shadow.rahit.slang）──
     RayDesc ray;
     ray.Origin    = worldPos + N * 0.01;  // 沿法线偏移避免自交
     ray.Direction = L;
@@ -86,7 +87,7 @@ float TraceShadowRay(float3 worldPos, float3 N, ShadowLight light) {
     TraceRay(
         g_TLAS,
         RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
-        RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,  // 跳过 ClosestHit，用 AnyHit 或直接用 miss/hit 判断
+        RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,  // 跳过 ClosestHit，仅用 AnyHit 检测遮挡
         0xFF,   // instanceMask：追踪所有实例
         0,      // sbtRecordOffset：阴影 Hit Group
         0,      // sbtRecordStride
@@ -104,12 +105,6 @@ float TraceShadowRay(float3 worldPos, float3 N, ShadowLight light) {
 [shader("raygeneration")]
 void main() {
     uint2 idx = DispatchRaysIndex().xy;
-
-    // ── 可选优化：半分辨率阴影 ──
-    if ((g_ShadowFlags & 2) != 0) {
-        // 半分辨率模式：检查像素是否在隔行/隔列
-        // （可在上层通过 dispatchDim 控制，这里做二次确认）
-    }
 
     // ── 读取 GBuffer 数据 ──
     float  depth = g_DepthBuffer.Load(int3(idx, 0));
@@ -134,7 +129,7 @@ void main() {
     // ── 对每个光源计算阴影 ──
     float shadow = 1.0;
 
-    for (uint li = 0; li < g_LightCount; li++) {
+    for (uint li = 0; li < g_PC.lightCount; li++) {
         ShadowLight light = g_Lights[li];
 
         // 跳过无贡献光源（方向光 dot(N,L) < 0 → 背对光源 → 无需阴影计算）

@@ -44,7 +44,9 @@ struct ResourceState {
 };
 
 // --- 资源访问信息 ---
-enum class ResourceAccess : u8 { None, Read, Write, ReadWrite };
+// ReadWrite = 可读写（RT/Compute 效果输出，如存储图像 UAV），
+// UAV       = 显式 UAV 访问（语义与 ReadWrite 一致，供调用方区分用途）
+enum class ResourceAccess : u8 { None, Read, Write, ReadWrite, UAV };
 
 struct PassResource {
     ResourceHandle handle;

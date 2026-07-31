@@ -1044,6 +1044,13 @@ r.RT.Denoise.Spatial     1   // 空间滤波
 | Phase 3 | ✅ | `54b6200` | HybridRTPipeline 骨架：GBuffer + DDGI + Lighting + 后处理 |
 | Phase 4-1 | ✅ | `bc91488` | RTShadowPass 集成：阴影遮罩纹理 + 描述符集 + Execute |
 | 02.Cube | ✅ | `94ef8ff` `d08237c` | 添加 HybridRTPipeline 支持（renderMode=2），移除独立 RTPass 原型 |
+| Phase 4-2 (P2) | ✅ | 工作区 | RTReflectionPass：RT_Reflection.rgen/rchit/rmiss + GGX 反射 + 半分辨率 |
+| Phase 4-3 (P3) | ✅ | 工作区 | RTAOPass：RT_AO.rgen + 余弦半球采样 + 半分辨率 R8 遮罩 |
+| Phase 4-4 (P4) | ✅ | 工作区 | RTGIPass：RT_GI.rgen/rchit/rmiss + 一次反弹间接漫反射 + 四分之一分辨率 |
+
+**当前已知限制（2026-08-01，不影响正确性）**：
+- GTX 1070 等 Pascal 设备不支持 `VK_KHR_ray_tracing_position_fetch` → ClosestHit 用「材质纹理 + 三角形法线纹理」查询几何（而非 position_fetch / SSBO，SSBO 在 ClosestHit 中已知 slangc GPU fault）。
+- RenderGraph 对导入纹理逐帧重置为 Undefined，深度等跨帧状态可能产生 `VUID-oldLayout-01197` 验证警告（cosmetic，访问掩码同步仍正确）。
 
 ### 关键文件变更（实际）
 

@@ -77,6 +77,12 @@ GPU_CONST(GPU_UINT kGPUBinding_SSAO_DL       = 20);  // SSAO
 GPU_CONST(GPU_UINT kGPUBinding_SSR           = 21);  // SSR
 GPU_CONST(GPU_UINT kGPUBinding_DDGIProbes    = 22);  // DDGI 探针
 
+// --- Hybrid RT 管线 Binding 索引（Lighting 采样 RT 效果输出纹理）---
+GPU_CONST(GPU_UINT kGPUBinding_RT_ShadowMask = 24);  // RT 阴影遮罩（R16_FLOAT）
+GPU_CONST(GPU_UINT kGPUBinding_RT_Reflection = 25);  // RT 反射（RGBA16_FLOAT）
+GPU_CONST(GPU_UINT kGPUBinding_RT_AO         = 26);  // RT 环境光遮蔽（R8_UNORM）
+GPU_CONST(GPU_UINT kGPUBinding_RT_GI         = 27);  // RT 间接漫反射（RGBA16_FLOAT）
+
 // --- 渲染管线限制 ---
 GPU_CONST(GPU_UINT kGPUMaxFramesInFlight       = 3);     // 最大飞行帧数
 GPU_CONST(GPU_UINT kGPUMaxColorAttachments      = 8);    // 最大 MRT 附件数
@@ -200,8 +206,37 @@ GPU_STRUCT DeferredLightingPushConstant {
     float    clusterFar;            // [36]      远裁剪面
     float    clusterLogFactor;      // [40]      log(far/near)
     GPU_UINT useClustered;          // [44]      1=启用 Clustered Shading
-    GPU_UINT _pad[4];               // [48..64]  对齐到 64B
+    GPU_UINT rtShadowSource;        // [48]      0=CSM, 1=RT 阴影（RT 遮罩）
+    GPU_UINT rtAOSource;            // [52]      0=SSAO, 1=RT AO
+    GPU_UINT rtSpecularSource;      // [56]      0=SSR, 1=RT 反射
+    GPU_UINT rtDiffuseSource;       // [60]      0=SSGI, 1=RT GI
 };
+
+// --- RTShadowPushConstant: RT 阴影 Pass Push Constant（104B，C++/Slang 单一数据源）---
+GPU_STRUCT RTShadowPushConstant {
+    float4x4 invViewProj;           // [0..64]   逆 ViewProj（深度 → 世界坐标）
+    float4   cameraPos;             // [64..80]  xyz=相机世界位置, w=近平面
+    GPU_UINT dispatchDimX;          // [80]      DispatchRaysDimensions.x
+    GPU_UINT dispatchDimY;          // [84]      DispatchRaysDimensions.y
+    GPU_UINT frameIdx;              // [88]      帧索引（时域抖动用）
+    float    maxShadowDist;         // [92]      最大阴影距离
+    GPU_UINT shadowFlags;           // [96]      bit0=硬阴影, bit1=半分辨率
+    GPU_UINT lightCount;            // [100]     阴影光源数
+};                                  // 共 104B（alignas(16) 后 112B）
+
+// --- RTRayEffectPushConstant: RT 反射/AO/GI 效果共享 Push Constant（108B，alignas 后 112B）---
+// 被 Reflection / AO / GI 三个效果 Pass 复用；未使用字段由各 Pass 置 0。
+GPU_STRUCT RTRayEffectPushConstant {
+    float4x4 invViewProj;           // [0..64]   逆 ViewProj（深度 → 世界坐标）
+    float4   cameraPos;             // [64..80]  xyz=相机世界位置, w=近平面
+    GPU_UINT dispatchDimX;          // [80]      DispatchRaysDimensions.x
+    GPU_UINT dispatchDimY;          // [84]      DispatchRaysDimensions.y
+    GPU_UINT frameIndex;            // [88]      帧索引（时域抖动 / 随机种子）
+    float    maxDistance;           // [92]      最大追踪距离（AO=2m, GI=30m, Refl=500m）
+    GPU_UINT sampleCount;           // [96]      AO/GI 每像素采样数（Reflection=1）
+    GPU_UINT flags;                 // [100]     bit0=半分辨率
+    GPU_UINT lightCount;            // [104]     直接光源数（ClosestHit 光照用）
+};                                  // 共 108B（alignas(16) 后 112B）
 
 // ---- 清理宏 ----
 #undef GPU_UINT

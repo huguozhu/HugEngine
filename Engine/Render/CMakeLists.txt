@@ -22,6 +22,8 @@ set(RENDER_SOURCES
     Pipeline/DeferredPipeline.h
     Pipeline/DeferredPipeline.cpp
     Pipeline/DeferredPipeline_FrameGraph.cpp
+    Pipeline/HybridRTPipeline.h
+    Pipeline/HybridRTPipeline.cpp
     Pipeline/ClusteredShading.h
     Pipeline/ClusteredShading.cpp
     Pipeline/GPUScene.h
@@ -43,6 +45,17 @@ set(RENDER_SOURCES
     Pipeline/Material.h
     Pipeline/RTPass.h
     Pipeline/RTPass.cpp
+    # RT 效果 Pass（HybridRT 管线）
+    RT/RTEffectPass.h
+    RT/RTEffectPass.cpp
+    RT/RTShadowPass.h
+    RT/RTShadowPass.cpp
+    RT/RTAOPass.h
+    RT/RTAOPass.cpp
+    RT/RTReflectionPass.h
+    RT/RTReflectionPass.cpp
+    RT/RTGIPass.h
+    RT/RTGIPass.cpp
     # RenderGraph
     RenderGraph.h
     RenderGraph.cpp

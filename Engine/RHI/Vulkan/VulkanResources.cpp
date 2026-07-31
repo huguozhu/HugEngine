@@ -30,6 +30,8 @@ static VkBufferUsageFlags ToVkBufferUsage(BufferUsage usage) {
     if (u32(usage) & u32(BufferUsage::Indirect)) flags |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
     if (u32(usage) & u32(BufferUsage::AccelerationStruct))
         flags |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+    if (u32(usage) & u32(BufferUsage::ShaderBindingTable))
+        flags |= VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR;
     return flags;
 }
 

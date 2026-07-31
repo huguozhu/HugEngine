@@ -7,6 +7,8 @@
 #include "Scene/SceneGraph.h"
 #include "Scene/Transform.h"
 #include "Scene/MeshComponent.h"
+#include "Scene/CubeComponent.h"
+#include "Scene/SphereComponent.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
 
@@ -41,12 +43,6 @@ bool RTPass::Initialize(rhi::IRHIDevice* device,
         return false;
     }
 
-    // 检查 Shader 是否有效
-    if (rtShaders.empty()) {
-        HE_CORE_WARN("RTPass: 未提供 RT Shader，初始化跳过");
-        return false;
-    }
-
     // 0. 分配描述符集
     if (m_DescLayout != rhi::kInvalidLayout) {
         m_DescSet = device->AllocateDescriptorSet(m_DescLayout);
@@ -58,34 +54,39 @@ bool RTPass::Initialize(rhi::IRHIDevice* device,
         m_DescSet2 = device->AllocateDescriptorSet(m_DescLayout2);
     }
 
-    // 1. 创建 RT Pipeline State
-    rhi::RTPipelineStateDesc rtpDesc;
-    rtpDesc.shaders        = rtShaders;
-    rtpDesc.shaderGroups   = shaderGroups;
-    rtpDesc.maxRecursionDepth = rhi::kRTMaxRecursionDepth;  // RayGen(0) → ClosestHit(1) → Callable(2)
-    rtpDesc.maxPayloadSize    = rhi::kRTMaxPayloadSize;
-    rtpDesc.maxHitAttributeSize = rhi::kRTMaxHitAttributeSize;
-    rtpDesc.debugName      = "RTPass";
-    for (auto& l : descLayouts) {
-        if (l != rhi::kInvalidLayout)
-            rtpDesc.descriptorSetLayouts.push_back(l);
-    }
-    // 如果 set=2 已创建（bindless），也加入布局
-    if (m_DescLayout2 != rhi::kInvalidLayout)
-        rtpDesc.descriptorSetLayouts.push_back(m_DescLayout2);
-    if (m_PushConstRange.size > 0)
-        rtpDesc.pushConstantRanges.push_back(m_PushConstRange);
+    // 1. 创建 RT Pipeline State（AS-only 模式：rtShaders 为空则跳过管线+SBT，
+    //    仅构建 BLAS/TLAS——HybridRT 的效果管线由 RTEffectPass 各自创建）
+    if (!rtShaders.empty()) {
+        rhi::RTPipelineStateDesc rtpDesc;
+        rtpDesc.shaders        = rtShaders;
+        rtpDesc.shaderGroups   = shaderGroups;
+        rtpDesc.maxRecursionDepth = rhi::kRTMaxRecursionDepth;  // RayGen(0) → ClosestHit(1) → Callable(2)
+        rtpDesc.maxPayloadSize    = rhi::kRTMaxPayloadSize;
+        rtpDesc.maxHitAttributeSize = rhi::kRTMaxHitAttributeSize;
+        rtpDesc.debugName      = "RTPass";
+        for (auto& l : descLayouts) {
+            if (l != rhi::kInvalidLayout)
+                rtpDesc.descriptorSetLayouts.push_back(l);
+        }
+        // 如果 set=2 已创建（bindless），也加入布局
+        if (m_DescLayout2 != rhi::kInvalidLayout)
+            rtpDesc.descriptorSetLayouts.push_back(m_DescLayout2);
+        if (m_PushConstRange.size > 0)
+            rtpDesc.pushConstantRanges.push_back(m_PushConstRange);
 
-    m_RTPipeline = device->CreateRTPipelineState(rtpDesc);
-    if (!m_RTPipeline) {
-        HE_CORE_ERROR("RTPass: RT Pipeline State 创建失败");
-        return false;
-    }
+        m_RTPipeline = device->CreateRTPipelineState(rtpDesc);
+        if (!m_RTPipeline) {
+            HE_CORE_ERROR("RTPass: RT Pipeline State 创建失败");
+            return false;
+        }
 
-    // 2. 创建 SBT
-    if (!CreateSBT(device)) {
-        HE_CORE_ERROR("RTPass: SBT 创建失败");
-        return false;
+        // 2. 创建 SBT
+        if (!CreateSBT(device)) {
+            HE_CORE_ERROR("RTPass: SBT 创建失败");
+            return false;
+        }
+    } else {
+        HE_CORE_INFO("RTPass: AS-only 模式（无独立管线，效果管线由 RTEffectPass 创建）");
     }
 
     // 3. 预创建 TLAS（构建在 BuildAS 中完成）
@@ -118,12 +119,20 @@ bool RTPass::Initialize(rhi::IRHIDevice* device,
     return true;
 }
 
-bool RTPass::CreateSBT(rhi::IRHIDevice* device) {
-    if (!m_RTPipeline) return false;
+// ============================================================
+// BuildSBT — 从 RT PSO 句柄填充 Shader Binding Table（静态辅助）
+// 被 CreateSBT 与 CreateEffectPipeline 共用
+// ============================================================
+static bool BuildSBT(rhi::IRHIDevice* device,
+                     rhi::IRHIRayTracingPipelineState* pipeline,
+                     const std::vector<rhi::RTShaderGroup>& shaderGroups,
+                     rhi::SBTDesc& outSBT,
+                     std::unique_ptr<rhi::IRHIBuffer>& outBuffer) {
+    if (!pipeline) return false;
 
-    u32 groupCount   = m_RTPipeline->GetShaderGroupCount();
-    u32 handleSize   = m_RTPipeline->GetShaderGroupHandleSize();
-    auto handles     = m_RTPipeline->GetShaderGroupHandles();
+    u32 groupCount   = pipeline->GetShaderGroupCount();
+    u32 handleSize   = pipeline->GetShaderGroupHandleSize();
+    auto handles     = pipeline->GetShaderGroupHandles();
 
     u32 align = device->GetCaps().shaderGroupBaseAlignment;
     auto aligned = [align](u32 size) -> u32 {
@@ -133,7 +142,7 @@ bool RTPass::CreateSBT(rhi::IRHIDevice* device) {
     // ── 分类统计各组类型 ──
     std::vector<u32> rgIdx, missIdx, hitIdx, callIdx;
     for (u32 g = 0; g < groupCount; ++g) {
-        auto t = m_ShaderGroups[g].type;
+        auto t = shaderGroups[g].type;
         if (t == rhi::RTShaderGroupType::RayGen)      rgIdx.push_back(g);
         else if (t == rhi::RTShaderGroupType::Miss)    missIdx.push_back(g);
         else if (t == rhi::RTShaderGroupType::Hit)     hitIdx.push_back(g);
@@ -150,11 +159,13 @@ bool RTPass::CreateSBT(rhi::IRHIDevice* device) {
 
     rhi::BufferDesc sbtDesc;
     sbtDesc.size  = total;
+    // SBT 缓冲必须带 VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR，
+    // 否则 vkCmdTraceRaysKHR 的 deviceAddress 无有效缓冲（Validation 报错）
     sbtDesc.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::AccelerationStruct
-                  | rhi::BufferUsage::Uniform;
-    m_SBTBuffer = device->CreateBuffer(sbtDesc);
+                  | rhi::BufferUsage::Uniform | rhi::BufferUsage::ShaderBindingTable;
+    outBuffer = device->CreateBuffer(sbtDesc);
 
-    u8* mapped = static_cast<u8*>(m_SBTBuffer->Map());
+    u8* mapped = static_cast<u8*>(outBuffer->Map());
     if (!mapped) return false;
 
     for (u32 i = 0; i < rgIdx.size(); ++i)
@@ -165,27 +176,80 @@ bool RTPass::CreateSBT(rhi::IRHIDevice* device) {
         std::memcpy(mapped + htOff + i * stride, handles.data() + hitIdx[i] * handleSize, handleSize);
     for (u32 i = 0; i < callIdx.size(); ++i)
         std::memcpy(mapped + caOff + i * stride, handles.data() + callIdx[i] * handleSize, handleSize);
-    m_SBTBuffer->Unmap();
+    outBuffer->Unmap();
 
-    m_SBT.buffer = m_SBTBuffer.get();
-    m_SBT.rayGen.handleOffset  = rgOff;
-    m_SBT.rayGen.stride        = rgIdx.empty()  ? 0 : stride;
-    m_SBT.miss.handleOffset    = msOff;
-    m_SBT.miss.stride          = missIdx.empty()? 0 : stride;
-    m_SBT.hit.handleOffset     = htOff;
-    m_SBT.hit.stride           = hitIdx.empty() ? 0 : stride;
-    m_SBT.callable.handleOffset = caOff;
-    m_SBT.callable.stride       = callIdx.empty()? 0 : stride;
+    outSBT.buffer = outBuffer.get();
+    outSBT.rayGen.handleOffset  = rgOff;
+    outSBT.rayGen.stride        = rgIdx.empty()  ? 0 : stride;
+    outSBT.miss.handleOffset    = msOff;
+    outSBT.miss.stride          = missIdx.empty()? 0 : stride;
+    outSBT.hit.handleOffset     = htOff;
+    outSBT.hit.stride           = hitIdx.empty() ? 0 : stride;
+    outSBT.callable.handleOffset = caOff;
+    outSBT.callable.stride       = callIdx.empty()? 0 : stride;
 
     HE_CORE_INFO("RTPass: SBT 创建完成 ({} groups: {}RG {}Miss {}Hit {}Call, {}B)",
                  groupCount, rgIdx.size(), missIdx.size(), hitIdx.size(), callIdx.size(), total);
     return true;
 }
 
+bool RTPass::CreateSBT(rhi::IRHIDevice* device) {
+    if (!m_RTPipeline) return false;
+    return BuildSBT(device, m_RTPipeline.get(), m_ShaderGroups, m_SBT, m_SBTBuffer);
+}
+
+// ============================================================
+// CreateEffectPipeline — 创建独立 RT 效果管线 + SBT（HybridRT 使用）
+// ============================================================
+RTPass::RTEffectPipeline RTPass::CreateEffectPipeline(
+    rhi::IRHIDevice* device,
+    const std::vector<rhi::ShaderBytecode>& rtShaders,
+    const std::vector<rhi::RTShaderGroup>& shaderGroups,
+    const std::vector<rhi::DescriptorSetLayoutHandle>& descLayouts,
+    rhi::PushConstantRange pushConstRange,
+    u32 maxPayloadSize,
+    u32 maxRecursionDepth,
+    StringView debugName) {
+    RTEffectPipeline result;
+
+    // ── 创建 RT Pipeline State ──
+    rhi::RTPipelineStateDesc rtpDesc;
+    rtpDesc.shaders        = rtShaders;
+    rtpDesc.shaderGroups   = shaderGroups;
+    rtpDesc.maxRecursionDepth = maxRecursionDepth;
+    rtpDesc.maxPayloadSize    = maxPayloadSize;
+    rtpDesc.maxHitAttributeSize = rhi::kRTMaxHitAttributeSize;
+    rtpDesc.debugName       = String(debugName);
+    for (auto& l : descLayouts) {
+        if (l != rhi::kInvalidLayout)
+            rtpDesc.descriptorSetLayouts.push_back(l);
+    }
+    if (pushConstRange.size > 0)
+        rtpDesc.pushConstantRanges.push_back(pushConstRange);
+
+    result.pipeline = device->CreateRTPipelineState(rtpDesc);
+    if (!result.pipeline) {
+        HE_CORE_ERROR("RTPass::CreateEffectPipeline: RT PSO 创建失败 ({})", debugName);
+        return result;
+    }
+
+    // ── 创建 SBT ──
+    if (!BuildSBT(device, result.pipeline.get(), shaderGroups, result.sbt, result.sbtBuffer)) {
+        HE_CORE_ERROR("RTPass::CreateEffectPipeline: SBT 创建失败 ({})", debugName);
+        result.pipeline.reset();
+        return result;
+    }
+
+    HE_CORE_INFO("RTPass::CreateEffectPipeline: {} 管线+SBT 创建完成", debugName);
+    return result;
+}
+
 void RTPass::Shutdown() {
     m_VertexPullBuffer.reset();
     m_IndexPullBuffer.reset();
     m_MaterialTex.reset();
+    m_SceneMaterialTex.reset();
+    m_SceneTriangleNormals.reset();
     m_LightUB.reset();
     m_BindlessSampler.reset();
     m_BindlessTextures.clear();
@@ -220,6 +284,22 @@ bool RTPass::HasGeometryChanged(he::MeshComponent* mesh) {
     return it->second.geometryHash != HashGeometry(mesh);
 }
 
+// 收集场景中所有可渲染网格（MeshComponent 及其派生类型 Cube/Sphere，
+// 与 SceneRenderer 的收集方式保持一致——ECS 按精确类型分桶存储）
+// 同时保存 Entity 以便获取世界变换矩阵
+static void CollectMeshList(he::World& world,
+                            std::vector<std::pair<he::Entity, he::MeshComponent*>>& out) {
+    world.ForEach<he::MeshComponent>([&](he::Entity e, he::MeshComponent& m) {
+        if (m.GetIndexCount() > 0) out.emplace_back(e, &m);
+    });
+    world.ForEach<he::CubeComponent>([&](he::Entity e, he::CubeComponent& c) {
+        if (c.GetIndexCount() > 0) out.emplace_back(e, static_cast<he::MeshComponent*>(&c));
+    });
+    world.ForEach<he::SphereComponent>([&](he::Entity e, he::SphereComponent& s) {
+        if (s.GetIndexCount() > 0) out.emplace_back(e, static_cast<he::MeshComponent*>(&s));
+    });
+}
+
 // float4x4 → float3x4 行主序变换（Vulkan VkTransformMatrixKHR 格式）
 static float3x4 ToTransformMatrix(const float4x4& m) {
     // float3x4 有 3 列，每列 float4（= 3 行 × 4 元素的行主序矩阵）
@@ -237,17 +317,19 @@ void RTPass::BuildAS(rhi::IRHICommandList* cmd,
     if (!m_Initialized) return;
 
     // ── 阶段 1: 构建/更新 BLAS ──
+    std::vector<std::pair<he::Entity, he::MeshComponent*>> meshList;
+    CollectMeshList(world, meshList);
+
     u32 blasIdx = 0;
-    world.ForEach<he::MeshComponent>([&](he::Entity entity, he::MeshComponent& mesh) {
+    for (auto& [entity, meshPtr] : meshList) {
         (void)entity;
-        // 跳过无索引的空 mesh
-        if (mesh.GetIndexCount() == 0) return;
+        he::MeshComponent& mesh = *meshPtr;
         auto* vb = mesh.GetVertexBuffer().get();
         auto* ib = mesh.GetIndexBuffer().get();
-        if (!vb || !ib) return;
+        if (!vb || !ib) continue;
 
         bool needsBuild = HasGeometryChanged(&mesh);
-        if (!needsBuild) return;  // 几何未变，跳过 BLAS 重建
+        if (!needsBuild) continue;  // 几何未变，跳过此网格 BLAS 重建
 
         // 创建或复用 BLAS entry
         auto& entry = m_BLASMap[&mesh];
@@ -290,16 +372,16 @@ void RTPass::BuildAS(rhi::IRHICommandList* cmd,
                      blasIdx++, mesh.GetVertexCount(),
                      mesh.GetIndexCount() / 3,
                      sizes.accelerationStructureSize / 1024);
-    });
+    }
 
     // ── 阶段 2: 构建 TLAS（每帧）──
     std::vector<rhi::TLASInstanceDesc> instances;
     u32 instanceID = 0;
 
-    world.ForEach<he::MeshComponent>([&](he::Entity entity, he::MeshComponent& mesh) {
-        if (mesh.GetIndexCount() == 0) return;
+    for (auto& [entity, meshPtr] : meshList) {
+        he::MeshComponent& mesh = *meshPtr;
         auto it = m_BLASMap.find(&mesh);
-        if (it == m_BLASMap.end()) return;
+        if (it == m_BLASMap.end()) continue;
 
         // 获取世界变换矩阵（通过 SceneGraph）
         float4x4 worldMatrix = sg.GetWorldMatrix(entity);
@@ -312,7 +394,7 @@ void RTPass::BuildAS(rhi::IRHICommandList* cmd,
         inst.flags       = 0;                // VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR
         inst.blasAddress = it->second.blas->GetDeviceAddress();
         instances.push_back(inst);
-    });
+    }
 
     if (!instances.empty()) {
         // 上传实例数据到 GPU
@@ -420,6 +502,126 @@ bool RTPass::CreateMaterialTexture(rhi::IRHIDevice* device, u32 maxInstances,
     m_MaterialTex = device->CreateTexture(texDesc);
     HE_CORE_INFO("RTPass: 材质纹理创建 ({}×3 RGBA32F, {} meshes)", m_MaterialInstanceCount, idx);
     return m_MaterialTex != nullptr;
+}
+
+// ============================================================
+// BuildSceneMaterialTexture — 场景材质纹理（3×N）+ 三角形法线纹理
+// 供 RT 反射/GI 的 ClosestHit 用 InstanceID() 查询材质、
+// PrimitiveIndex() 查询三角形顶点法线（重心插值 → 平滑法线）。
+// 列索引与 BuildAS 的 TLAS 实例顺序一致（Mesh → Cube → Sphere）。
+// 用纹理而非 SSBO：ClosestHitKHR 中访问 StructuredBuffer 已知 GPU fault；
+// 不依赖 position_fetch：GTX 1070 等设备不支持 VK_KHR_ray_tracing_position_fetch。
+// ============================================================
+bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world) {
+    if (!device) return false;
+
+    // 收集可渲染网格（与 BuildAS 的实例顺序一致）
+    std::vector<std::pair<he::Entity, he::MeshComponent*>> meshList;
+    CollectMeshList(world, meshList);
+    if (meshList.empty()) {
+        HE_CORE_WARN("RTPass: BuildSceneMaterialTexture — 场景无网格，跳过");
+        return false;
+    }
+
+    u32 n = (u32)meshList.size();
+    u64 totalTris = 0;
+    for (auto& [e, m] : meshList) totalTris += m->GetIndexCount() / 3;
+
+    // ── 材质纹理数据（3 行 × N 列）──
+    // row0=albedo.rgb+metallic, row1=roughness+ao,
+    // row2=(法线线性起始=tri*3, 三角形数, 法线纹理宽度, 0)
+    std::vector<float> matData(n * 4 * 3, 0.0f);
+
+    // ── 三角形顶点法线扁平数组（每三角形 3 条，跨所有实例）──
+    // 2D 纹理布局：width=W, height=kNormTexHeight；线性索引 lin → (row=lin/W, col=lin%W)
+    constexpr u32 kNormTexHeight = 1024;
+    u64 entries = totalTris * 3;
+    u32 normTexWidth = (u32)((entries + kNormTexHeight - 1) / kNormTexHeight);
+    if (normTexWidth == 0) normTexWidth = 1;
+    std::vector<float> normalData((u64)normTexWidth * kNormTexHeight * 4, 0.0f);
+
+    // ── 顶点缓冲布局（用 offsetof 适配 32B/48B 两种 GLM 布局）──
+    constexpr size_t kStride  = sizeof(he::StaticVertex);
+    constexpr size_t kNormOff = offsetof(he::StaticVertex, normal);
+
+    u64 triFlat = 0;  // 跨实例的扁平三角形索引
+    for (u32 i = 0; i < n; ++i) {
+        he::MeshComponent& m = *meshList[i].second;
+        u32 triCount = m.GetIndexCount() / 3;
+
+        // 材质纹理三行
+        float* row0 = &matData[i * 4];
+        row0[0] = m.baseColorFactor.r; row0[1] = m.baseColorFactor.g;
+        row0[2] = m.baseColorFactor.b; row0[3] = m.metallicFactor;
+        float* row1 = &matData[n * 4 + i * 4];
+        row1[0] = m.roughnessFactor; row1[1] = m.aoFactor; row1[2] = 0.0f; row1[3] = 0.0f;
+        float* row2 = &matData[n * 8 + i * 4];
+        row2[0] = float(triFlat * 3);      // 本实例法线数组线性起始
+        row2[1] = float(triCount);
+        row2[2] = float(normTexWidth);     // 法线纹理宽度（shader 用 lin%W 计算坐标）
+        row2[3] = 0.0f;
+
+        // 读取顶点/索引缓冲 → 每三角形 3 条顶点法线
+        auto* vb = m.GetVertexBuffer().get();
+        auto* ib = m.GetIndexBuffer().get();
+        if (!vb || !ib || triCount == 0) { triFlat += triCount; continue; }
+        const u8* vdata = static_cast<const u8*>(vb->Map());
+        const u32* idata = static_cast<const u32*>(ib->Map());
+        if (!vdata || !idata) {
+            if (vdata) vb->Unmap();
+            if (idata) ib->Unmap();
+            triFlat += triCount;
+            continue;
+        }
+        for (u32 t = 0; t < triCount; ++t) {
+            for (u32 v = 0; v < 3; ++v) {
+                u32 vidx = idata[t * 3 + v];
+                const float* vn = reinterpret_cast<const float*>(vdata + vidx * kStride + kNormOff);
+                u64 lin = (triFlat + t) * 3 + v;   // 法线线性索引
+                float* dst = &normalData[lin * 4];
+                dst[0] = vn[0]; dst[1] = vn[1]; dst[2] = vn[2]; dst[3] = 0.0f;
+            }
+        }
+        vb->Unmap();
+        ib->Unmap();
+        triFlat += triCount;
+    }
+
+    // ── 创建材质纹理（3×N RGBA32F）──
+    {
+        rhi::TextureDesc desc;
+        desc.format      = rhi::Format::RGBA32_FLOAT;
+        desc.width       = n;
+        desc.height      = 3;
+        desc.mipLevels   = 1;
+        desc.usage       = rhi::TextureUsage::ShaderResource;
+        desc.initialData = matData.data();
+        m_SceneMaterialTex = device->CreateTexture(desc);
+        if (!m_SceneMaterialTex) {
+            HE_CORE_ERROR("RTPass: 场景材质纹理创建失败");
+            return false;
+        }
+    }
+
+    // ── 创建三角形法线纹理（width×1024 RGBA32F）──
+    {
+        rhi::TextureDesc desc;
+        desc.format      = rhi::Format::RGBA32_FLOAT;
+        desc.width       = normTexWidth;
+        desc.height      = kNormTexHeight;
+        desc.mipLevels   = 1;
+        desc.usage       = rhi::TextureUsage::ShaderResource;
+        desc.initialData = normalData.data();
+        m_SceneTriangleNormals = device->CreateTexture(desc);
+        if (!m_SceneTriangleNormals) {
+            HE_CORE_ERROR("RTPass: 三角形法线纹理创建失败");
+            return false;
+        }
+    }
+
+    HE_CORE_INFO("RTPass: 场景材质纹理(3×{}) + 法线纹理({}×{} RGBA32F)创建, {} 实例 {} 三角形",
+                 n, normTexWidth, kNormTexHeight, n, totalTris);
+    return true;
 }
 
 // 创建光源 Uniform Buffer（8 盏灯 * 2 float4 + count = 272 字节）

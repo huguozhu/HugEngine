@@ -70,6 +70,19 @@ public:
     bool CreateMaterialTexture(rhi::IRHIDevice* device, u32 maxInstances,
                                he::World& world);
 
+    // 构建场景材质 + 三角形法线纹理（反射/GI ClosestHit 用）
+    // 材质纹理 3×N RGBA32F：row0=albedo.rgb+metallic, row1=roughness+ao,
+    //   row2=基础色(法线线性起始=tri*3, 三角形数, 法线纹理宽度, 0)
+    // 法线纹理 RGBA32F（每三角形 3 条顶点法线，按 TLAS 实例顺序扁平排列）
+    // 列索引与 BuildAS 的 TLAS 实例顺序一致（Mesh → Cube → Sphere），
+    // ClosestHit 用 InstanceID() 查询材质 + PrimitiveIndex() 查询法线。
+    // 注意：必须用纹理而非 SSBO——已知 slangc 在 ClosestHitKHR 中访问
+    // StructuredBuffer 会 GPU fault（见文档 P0 节）；且不依赖 position_fetch
+    //（GTX 1070 等设备不支持 VK_KHR_ray_tracing_position_fetch）。
+    bool BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world);
+    rhi::IRHITexture* GetSceneMaterialTexture() const { return m_SceneMaterialTex.get(); }
+    rhi::IRHITexture* GetSceneTriangleNormals() const { return m_SceneTriangleNormals.get(); }
+
     // 创建 + 更新光源 Uniform Buffer
     bool CreateLightBuffer(rhi::IRHIDevice* device, u32 maxLights = 8);
     void UpdateLightBuffer(rhi::IRHIBuffer* lightBuffer);
@@ -104,9 +117,39 @@ public:
     // 绑定所有描述符集
     void BindDescriptorSets(rhi::IRHICommandList* cmd);
 
-    // 状态查询
-    bool IsValid() const { return m_RTPipeline != nullptr && m_TLAS != nullptr; }
+    // 状态查询（AS-only 模式 m_RTPipeline 可为空，只要 TLAS 有效即可用）
+    bool IsValid() const { return m_TLAS != nullptr; }
     rhi::IRHIAccelerationStructure* GetTLAS() const { return m_TLAS.get(); }
+
+    // ============================================================
+    // 多管线工厂（HybridRT 效果 Pass 使用）
+    // RTPass 本身保留单一管线（向后兼容 03.Sponza），此工厂用于
+    // 为每个 RT 效果（阴影/反射/AO/GI）创建独立管线 + SBT。
+    // ============================================================
+    struct RTEffectPipeline {
+        std::unique_ptr<rhi::IRHIRayTracingPipelineState> pipeline;
+        rhi::SBTDesc sbt;
+        std::unique_ptr<rhi::IRHIBuffer> sbtBuffer;
+    };
+
+    // 创建独立的 RT 效果管线 + SBT
+    // @param descLayouts  set0(效果 RayGen) + 可选 set1/set2 布局
+    // @param maxPayloadSize  Reflection/GI 需要 32 字节（Shadow/AO 16 字节）
+    static RTEffectPipeline CreateEffectPipeline(
+        rhi::IRHIDevice* device,
+        const std::vector<rhi::ShaderBytecode>& rtShaders,
+        const std::vector<rhi::RTShaderGroup>& shaderGroups,
+        const std::vector<rhi::DescriptorSetLayoutHandle>& descLayouts,
+        rhi::PushConstantRange pushConstRange = {},
+        u32 maxPayloadSize = rhi::kRTMaxPayloadSize,
+        u32 maxRecursionDepth = rhi::kRTMaxRecursionDepth,
+        StringView debugName = "RTEffect");
+
+    // 描述符集/布局访问器（供效果 pass 绑定 set1/set2 场景资源）
+    rhi::DescriptorSetHandle       GetMaterialDescSet() const { return m_DescSet1; }
+    rhi::DescriptorSetHandle       GetBindlessDescSet() const { return m_DescSet2; }
+    rhi::DescriptorSetLayoutHandle GetMaterialLayout()  const { return m_DescLayout1; }
+    rhi::DescriptorSetLayoutHandle GetBindlessLayout()  const { return m_DescLayout2; }
 
     // Shader 热重载
     int ReloadShader(StringView shaderName, const std::vector<u32>& newSpirv);
@@ -150,6 +193,8 @@ private:
 
     // set=1 资源（ClosestHit 使用）
     std::unique_ptr<rhi::IRHITexture> m_MaterialTex;                     // 材质 1D 纹理 (b=0)
+    std::unique_ptr<rhi::IRHITexture> m_SceneMaterialTex;               // 场景材质纹理（3×N RGBA32F，反射/GI 用）
+    std::unique_ptr<rhi::IRHITexture> m_SceneTriangleNormals;           // 三角形顶点法线纹理（反射/GI ClosestHit 用）
     std::unique_ptr<rhi::IRHIBuffer>  m_LightUB;                        // 光源 UB (b=1)
     std::unique_ptr<rhi::IRHIBuffer>  m_VertexPullBuffer;               // 顶点拉取 SSBO (b=2, GPU 标量布局)
     std::unique_ptr<rhi::IRHIBuffer>  m_IndexPullBuffer;                // 索引拉取 SSBO (b=3, 直接拷贝)

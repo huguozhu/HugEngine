@@ -145,6 +145,7 @@ enum class BufferUsage : u32 {
     AccelerationStruct= 1 << 5,
     TransferSrc       = 1 << 6,
     TransferDst       = 1 << 7,
+    ShaderBindingTable= 1 << 8,  // VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR（RT SBT 专用）
 };
 inline BufferUsage operator|(BufferUsage a, BufferUsage b) { return BufferUsage(u32(a) | u32(b)); }
 inline BufferUsage operator&(BufferUsage a, BufferUsage b) { return BufferUsage(u32(a) & u32(b)); }
