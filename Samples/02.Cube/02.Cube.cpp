@@ -507,6 +507,7 @@ int main() {
 
         // 渲染模式切换（读 CVar → RadioButton → 写回 CVar）
         int mode = cvPipelineMode.Get();
+        ImGui::SeparatorText("渲染模式");
         ImGui::RadioButton("Forward 前向渲染", &mode, 0);
         ImGui::SameLine();
         ImGui::RadioButton("Deferred 延迟渲染", &mode, 1);

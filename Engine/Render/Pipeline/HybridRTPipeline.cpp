@@ -20,6 +20,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/matrix_inverse.hpp>
 #include <cstring>
+#include <algorithm>
 
 namespace he::render {
 
@@ -528,10 +529,11 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     CollectLights(world, sg, camera, lightCount);
 
     // ── CVar 热更新：降噪时域混合因子（每帧应用，Render 时写入 push constant）──
-    if (m_ShadowDenoiser)     m_ShadowDenoiser->SetTemporalBlend(cvRTDenoiseShadowBlend.Get());
-    if (m_AODenoiser)         m_AODenoiser->SetTemporalBlend(cvRTDenoiseAOBlend.Get());
-    if (m_ReflectionDenoiser) m_ReflectionDenoiser->SetTemporalBlend(cvRTDenoiseReflectionBlend.Get());
-    if (m_GIDenoiser)         m_GIDenoiser->SetTemporalBlend(cvRTDenoiseGIBlend.Get());
+    // 混合因子限制在 [0,1]：0=纯历史累积, 1=纯当前帧，越界值会使时域累积失效
+    if (m_ShadowDenoiser)     m_ShadowDenoiser->SetTemporalBlend(std::clamp(cvRTDenoiseShadowBlend.Get(), 0.0f, 1.0f));
+    if (m_AODenoiser)         m_AODenoiser->SetTemporalBlend(std::clamp(cvRTDenoiseAOBlend.Get(), 0.0f, 1.0f));
+    if (m_ReflectionDenoiser) m_ReflectionDenoiser->SetTemporalBlend(std::clamp(cvRTDenoiseReflectionBlend.Get(), 0.0f, 1.0f));
+    if (m_GIDenoiser)         m_GIDenoiser->SetTemporalBlend(std::clamp(cvRTDenoiseGIBlend.Get(), 0.0f, 1.0f));
 
     // ── RT Shadow — 对 GBuffer 有效像素发射阴影射线（半分辨率遮罩）──
     rhi::IRHITexture* rtShadowTex = nullptr;
@@ -653,21 +655,27 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 m_ReflectionDenoiser->Render(c);
             });
     }
+    // 空间滤波输入：优先时域累积输出；Temporal 关闭时回退到原始 RT 输出（空间直接滤波原始）
+    rhi::IRHITexture* rtReflectionSpatialInTex =
+        rtReflectionTemporalHandle != kInvalidHandle ? rtReflectionTemporalTex : rtReflectionTex;
+    ResourceHandle rtReflectionSpatialInHandle =
+        rtReflectionTemporalHandle != kInvalidHandle ? rtReflectionTemporalHandle : rtReflectionHandle;
     rhi::IRHITexture* rtReflectionDenoisedTex = rtReflectionTemporalTex;
     ResourceHandle rtReflectionDenoisedHandle = rtReflectionTemporalHandle;
     if (m_ReflectionSpatial.IsReady() && cvRTDenoiseSpatial.Get()
-        && rtReflectionTemporalHandle != kInvalidHandle) {
+        && rtReflectionSpatialInHandle != kInvalidHandle) {
         rtReflectionDenoisedTex = m_ReflectionSpatial.GetOutput();
         rtReflectionDenoisedHandle = rg.ImportTexture("RT_Reflection_Denoised", rtReflectionDenoisedTex);
         rg.AddPass("RT_Reflection_Spatial",
-            {{rtReflectionTemporalHandle, ResourceAccess::Read},
+            {{rtReflectionSpatialInHandle, ResourceAccess::Read},
              {gbDepth, ResourceAccess::Read}, {gbB, ResourceAccess::Read}},
             {{rtReflectionDenoisedHandle, ResourceAccess::Write}},
-            [this, rtReflectionTemporalTex, rw = m_ReflectionDenoiser->GetWidth(),
-             rh = m_ReflectionDenoiser->GetHeight()](rhi::IRHICommandList* c) {
+            [this, rtReflectionSpatialInTex, rw = m_RTReflection->GetWidth(),
+             rh = m_RTReflection->GetHeight()](rhi::IRHICommandList* c) {
                 m_ReflectionSpatial.PreBind(c);
-                // 输入为时域累积输出（构建时捕获，时域 Pass 已交换历史角色，不能用 GetOutput()）
-                m_ReflectionSpatial.SetInputs(rtReflectionTemporalTex,
+                // 输入优先为时域累积输出（构建时捕获，时域 Pass 已交换历史角色，不能用 GetOutput()）；
+                // Temporal 关闭时回退到原始 RT 输出，空间直接滤波原始
+                m_ReflectionSpatial.SetInputs(rtReflectionSpatialInTex,
                     m_GBuffer->GetDepth(), m_GBuffer->GetNormal());
                 rhi::ClearValue clr{};
                 c->BeginOffscreenPass(m_ReflectionSpatial.GetOutput()->GetNativeHandle(),
@@ -718,21 +726,27 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 m_GIDenoiser->Render(c);
             });
     }
+    // 空间滤波输入：优先时域累积输出；Temporal 关闭时回退到原始 RT 输出（空间直接滤波原始）
+    rhi::IRHITexture* rtGISpatialInTex =
+        rtGITemporalHandle != kInvalidHandle ? rtGITemporalTex : rtGITex;
+    ResourceHandle rtGISpatialInHandle =
+        rtGITemporalHandle != kInvalidHandle ? rtGITemporalHandle : rtGIHandle;
     rhi::IRHITexture* rtGIDenoisedTex = rtGITemporalTex;
     ResourceHandle rtGIDenoisedHandle = rtGITemporalHandle;
     if (m_GISpatial.IsReady() && cvRTDenoiseSpatial.Get()
-        && rtGITemporalHandle != kInvalidHandle) {
+        && rtGISpatialInHandle != kInvalidHandle) {
         rtGIDenoisedTex = m_GISpatial.GetOutput();
         rtGIDenoisedHandle = rg.ImportTexture("RT_GI_Denoised", rtGIDenoisedTex);
         rg.AddPass("RT_GI_Spatial",
-            {{rtGITemporalHandle, ResourceAccess::Read},
+            {{rtGISpatialInHandle, ResourceAccess::Read},
              {gbDepth, ResourceAccess::Read}, {gbB, ResourceAccess::Read}},
             {{rtGIDenoisedHandle, ResourceAccess::Write}},
-            [this, rtGITemporalTex, rw = m_GIDenoiser->GetWidth(),
-             rh = m_GIDenoiser->GetHeight()](rhi::IRHICommandList* c) {
+            [this, rtGISpatialInTex, rw = m_RTGI->GetWidth(),
+             rh = m_RTGI->GetHeight()](rhi::IRHICommandList* c) {
                 m_GISpatial.PreBind(c);
-                // 输入为时域累积输出（构建时捕获，时域 Pass 已交换历史角色，不能用 GetOutput()）
-                m_GISpatial.SetInputs(rtGITemporalTex,
+                // 输入优先为时域累积输出（构建时捕获，时域 Pass 已交换历史角色，不能用 GetOutput()）；
+                // Temporal 关闭时回退到原始 RT 输出，空间直接滤波原始
+                m_GISpatial.SetInputs(rtGISpatialInTex,
                     m_GBuffer->GetDepth(), m_GBuffer->GetNormal());
                 rhi::ClearValue clr{};
                 c->BeginOffscreenPass(m_GISpatial.GetOutput()->GetNativeHandle(),
