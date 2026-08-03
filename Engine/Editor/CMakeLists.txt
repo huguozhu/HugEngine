@@ -2,12 +2,10 @@
 add_library(HugEngineEditor STATIC)
 
 set(EDITOR_SOURCES
-    Editor/CVar.h
     Editor/Command.h
     Editor/ImGuiIntegration.h
     Editor/EditorContext.h
     Editor/SceneSerializer.h
-    Editor/CVar.cpp
     Editor/Command.cpp
     Editor/ImGuiIntegration.cpp
     Editor/EditorContext.cpp

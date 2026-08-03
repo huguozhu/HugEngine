@@ -1,6 +1,6 @@
 // Panels/ConsolePanel.cpp — 控制台实现
 #include "ConsolePanel.h"
-#include "Editor/CVar.h"
+#include "Core/CVar.h"
 #include "imgui.h"
 
 namespace he::editor {

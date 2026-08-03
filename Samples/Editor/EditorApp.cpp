@@ -46,7 +46,7 @@ static std::vector<std::string> s_DroppedFiles;
 #include "Panels/ConsolePanel.h"
 #include "Panels/MaterialEditor.h"
 #include "Panels/LevelLoader.h"
-#include "Editor/CVar.h"
+#include "Core/CVar.h"
 
 EditorApp::EditorApp()  = default;
 EditorApp::~EditorApp() = default;

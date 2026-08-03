@@ -9,6 +9,8 @@ set(CORE_SOURCES
     Core/Log.cpp
     Core/Log.h
     Core/Assert.h
+    Core/CVar.cpp
+    Core/CVar.h
     Core/Core.h
     Core/Platform.h
     Core/Types.h

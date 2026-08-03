@@ -2,7 +2,7 @@
 
 #include "ProjectSettingsPanel.h"
 #include "Editor/EditorContext.h"
-#include "Editor/CVar.h"
+#include "Core/CVar.h"
 #include "imgui.h"
 
 namespace he::editor {

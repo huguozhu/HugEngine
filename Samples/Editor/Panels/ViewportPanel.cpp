@@ -13,7 +13,7 @@
 #include "Scene/CameraComponent.h"
 #include "Core/Log.h"
 #include "imgui.h"
-#include "Editor/CVar.h"
+#include "Core/CVar.h"
 
 extern he::CVar<float> cvCamSpeed;
 extern he::CVar<float> cvSnapGrid;
