@@ -28,8 +28,9 @@
 // 避免与 GPULight SSBO 的 64B 布局不匹配——旧版 bug 根源）
 struct ShadowLight {
     float4 pos_type;      // xyz=位置/方向, w=类型(0=方向光, 1=点光源, 2=聚光灯)
-    float4 color_radius;  // rgb=颜色, w=光源半径（软阴影预留）
+    float4 color_radius;  // rgb=颜色, w=强度（用于剔除无效光源）
     float4 spotDir_angle; // xyz=聚光方向, w=cos(内锥角)（聚光灯专用）
+    float4 radius;        // x=光源半径（软阴影），与 C++ ShadowLightGPU 布局一致（16×64B）
 };
 [[vk::binding(4, 0)]] cbuffer ShadowLightCB {
     ShadowLight g_Lights[16];
@@ -43,6 +44,22 @@ struct ShadowPayload {
     bool blocked;  // true=被遮挡, false=可见
 };
 
+// === 随机数工具（与 RT_AO/RT_GI 等共享同款实现，供软阴影面光源采样使用）===
+uint Hash(uint x) {
+    x = (x ^ 61u) ^ (x >> 16u);
+    x *= 9u;
+    x ^= x >> 4u;
+    x *= 0x27d4eb2du;
+    x ^= x >> 15u;
+    return x;
+}
+
+// 基于像素索引 + 帧号 + 样本号的确定性随机数（[0,1)）
+float Rand(uint2 idx, uint frame, uint s) {
+    uint seed = idx.x * 1973u + idx.y * 9277u + frame * 26699u + s * 479u;
+    return float(Hash(seed) & 0xFFFFu) / 65536.0;
+}
+
 // 从深度和 UV 重建世界坐标
 // 注意：Vulkan 像素坐标 y 向下，而相机 ViewProj 为 GLM 约定（y 向上），
 // 必须先翻转 NDC y（与 RT_Sponza.rgen 一致），否则重建结果上下颠倒。
@@ -55,9 +72,13 @@ float3 ReconstructWorldPos(uint2 idx, float depth) {
     return worldPos4.xyz / worldPos4.w;
 }
 
-// 对单个光源发射阴影射线
-float TraceShadowRay(float3 worldPos, float3 N, ShadowLight light) {
-    // ── 确定光线方向和最大距离 ──
+// 软阴影：面光源采样（在光源面上采样 spp 个发射点，发射 spp 条射线取平均）。
+// spp<=1 且 radius.x=0 时退化为硬阴影（单条精确射线，与旧版行为一致）。
+float TraceShadowRaySoft(float3 worldPos, float3 N, ShadowLight light, uint spp) {
+    // 射线生成阶段：取当前像素索引作为随机种子（与 main() 一致）
+    uint2 idx = DispatchRaysIndex().xy;
+
+    // ── 确定基础光线方向和最大距离 ──
     float3 L;
     float  tMax;
 
@@ -68,35 +89,63 @@ float TraceShadowRay(float3 worldPos, float3 N, ShadowLight light) {
     } else {
         // 点光源/聚光灯：光线方向 = 指向光源，最大距离 = 到光源距离
         float3 lightPos = light.pos_type.xyz;
-        float3 toLight = lightPos - worldPos;
-        float  dist = length(toLight);
-        L = toLight / dist;
-        tMax = dist;
+        float3 toLight  = lightPos - worldPos;
+        float  dist     = length(toLight);
+        L     = toLight / dist;
+        tMax  = dist;
     }
 
-    // ── 发射阴影射线（AnyHit 检测遮挡，见 RT_Shadow.rahit.slang）──
-    RayDesc ray;
-    ray.Origin    = worldPos + N * 0.01;  // 沿法线偏移避免自交
-    ray.Direction = L;
-    ray.TMin      = 0.01;
-    ray.TMax      = tMax - 0.01;  // 减去微小偏移避免光线刚好命中光源位置
+    float shadow = 0.0;
+    for (uint s = 0; s < spp; s++) {
+        float3 dir = L;
+        if (light.pos_type.w == 0.0) {
+            // 方向光：光锥内按角度半径抖动（radius.x 为弧度）
+            float3 up = abs(L.y) < 0.999 ? float3(0, 1, 0) : float3(1, 0, 0);
+            float3 T  = normalize(cross(up, L));
+            float3 B  = cross(L, T);
+            float  ang = light.radius.x * sqrt(Rand(idx, g_PC.frameIdx, s * 2));
+            float  phi = 6.2831853 * Rand(idx, g_PC.frameIdx, s * 2 + 1);
+            dir = normalize(L + (T * cos(phi) + B * sin(phi)) * tan(ang));
+        } else {
+            // 点/聚光：面向 shade point 的圆盘上采样发射点（半径 radius.x）
+            float3 toL = normalize(light.pos_type.xyz - worldPos);
+            float3 up  = abs(toL.y) < 0.999 ? float3(0, 1, 0) : float3(1, 0, 0);
+            float3 T   = normalize(cross(up, toL));
+            float3 B   = cross(toL, T);
+            float  r   = light.radius.x * sqrt(Rand(idx, g_PC.frameIdx, s * 2));
+            float  phi = 6.2831853 * Rand(idx, g_PC.frameIdx, s * 2 + 1);
+            float3 offset = (T * cos(phi) + B * sin(phi)) * r;
+            float3 lp     = light.pos_type.xyz + offset;  // 采样后的光源发射点
+            float3 toP    = lp - worldPos;
+            float  dist   = length(toP);
+            dir  = toP / dist;
+            tMax = dist;
+        }
 
-    ShadowPayload payload;
-    payload.blocked = false;
+        // ── 发射阴影射线（AnyHit 检测遮挡，见 RT_Shadow.rahit.slang）──
+        RayDesc ray;
+        ray.Origin    = worldPos + N * 0.01;  // 沿法线偏移避免自交
+        ray.Direction = dir;
+        ray.TMin      = 0.01;
+        ray.TMax      = tMax - 0.01;  // 减去微小偏移避免光线刚好命中光源位置
 
-    TraceRay(
-        g_TLAS,
-        RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
-        RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,  // 跳过 ClosestHit，仅用 AnyHit 检测遮挡
-        0xFF,   // instanceMask：追踪所有实例
-        0,      // sbtRecordOffset：阴影 Hit Group
-        0,      // sbtRecordStride
-        0,      // missIndex：阴影 Miss Shader
-        ray,
-        payload
-    );
+        ShadowPayload payload;
+        payload.blocked = false;
 
-    return payload.blocked ? 0.0 : 1.0;
+        TraceRay(
+            g_TLAS,
+            RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+            RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,  // 跳过 ClosestHit，仅用 AnyHit 检测遮挡
+            0xFF,   // instanceMask：追踪所有实例
+            0,      // sbtRecordOffset：阴影 Hit Group
+            0,      // sbtRecordStride
+            0,      // missIndex：阴影 Miss Shader
+            ray,
+            payload
+        );
+        shadow += payload.blocked ? 0.0 : 1.0;
+    }
+    return shadow / float(spp);
 }
 
 // ============================================================
@@ -142,7 +191,10 @@ void main() {
         float NdotL = dot(N, L_test);
         if (NdotL <= 0.0) continue;
 
-        shadow *= TraceShadowRay(worldPos, N, light);
+        // 软阴影：shadowFlags bit2 开启时按 softSPP 采样面光源；关闭时 spp=1 退化为硬阴影
+        bool  soft = (g_PC.shadowFlags & 4u) != 0u;   // bit2=软阴影
+        uint  spp  = soft ? g_PC.softSPP : 1u;
+        shadow *= TraceShadowRaySoft(worldPos, N, light, spp);
         if (shadow <= 0.0) break;  // 任何光源已完全遮挡 → 提前退出
     }
 
