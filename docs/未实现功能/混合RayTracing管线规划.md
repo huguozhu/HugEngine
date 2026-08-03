@@ -478,7 +478,7 @@ W1:  尝试方案 1 (slangc 升级)
 W1:  并行: 方案 2 接入 (position_fetch 已在引擎中启用，仅需 shader 侧实现)
      ↓ 如果 W1 结束时方案 1 和方案 2 都不可行
 W2:  实施方案 4 (Texture2D 化) — 作为最终 fallback
-同时: 在多 GPU 上交叉验证以确定根因
+同时: 在多 GPU 上交叉验证以确定根因（~~不实施~~：单 GPU 验证足够）
 ```
 
 ---
@@ -501,7 +501,7 @@ struct ShadowPushConstant {
     float4x4 viewProj;
     float3   cameraPos;
     uint     lightCount;
-    uint     shadowFlags;   // bit0=硬阴影, bit1=半分辨率, bit2=透明阴影(未实现)
+    uint     shadowFlags;   // bit0=硬阴影, bit1=半分辨率, bit2=软阴影（透明阴影不实施）
     uint     sampleIdx;     // 时间抖动索引
 };
 [[vk::push_constant]] ShadowPushConstant g_PC;
@@ -659,6 +659,9 @@ void main() {
 粗糙度 > 0.6:   不发射 RT 光线 (直接用 IBL prefilter)
 ```
 
+> **不实施**：完整多分辨率分级（<0.2 全 / 0.2-0.4 半 / 0.4-0.6 四分之一）已取消。
+> 仅实现核心阈值跳过：`roughness > r.RT.Reflection.MaxRoughness`（默认 0.6）不发射 RT 线，回退 IBL prefilter。
+
 ### 5.4 Miss 回退
 
 ```hlsl
@@ -780,7 +783,9 @@ void main() {
   filterColor = sum(w_d*w_n*w_c * color) / sum(weights)
 ```
 
-**Phase C: NRD 集成（3w）— 高质量降噪（远期）**
+**Phase C: NRD 集成（3w）— 高质量降噪（远期）~~不实施~~**
+
+> 已决定不引入 NVIDIA NRD 第三方库，保持自研时域累积 + 空间滤波降噪方案。
 
 ```
 NRD 组件匹配:
@@ -863,7 +868,7 @@ Week 1-2:  SSBO 兼容性修复
   ├── 并行: slangc 升级测试 (NVIDIA/AMD/Intel)
   ├── 并行: VK_KHR_ray_tracing_position_fetch 接入
   ├── 保底: Texture2D 化场景数据方案
-  └── 在多 GPU 上交叉验证以确定根因
+  └── 在多 GPU 上交叉验证以确定根因（不实施）
 
 Week 3-4:  提取共享组件 ← 新增步骤
   ├── 从 DeferredPipeline 提取 GBufferRenderer（纹理所有权迁移）
@@ -900,7 +905,7 @@ Week 12-13: 降噪 Pass
   ├── 空间滤波（RT GI + RT Reflection）
   └── 集成到 BuildFrameGraph
 
-Week 14:   集成测试 + 文档
+Week 14:   集成测试 + 文档（~~不实施~~）
   ├── r.Pipeline.Mode 0/1 切换全测试
   ├── Sponza 场景: RT Shadow + Reflection + AO + GI 全开性能基准
   ├── 光栅化 vs RT 视觉对比 (PSNR)
