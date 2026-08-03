@@ -147,6 +147,7 @@ void RTReflectionPass::Execute(rhi::IRHICommandList* cmd,
     pc.frameIndex   = ctx.frameIndex;
     pc.maxDistance  = std::max(cvRTReflectionMaxDist.Get(), 0.01f);  // 反射最大追踪距离（CVar 热更新）
     pc.sampleCount  = std::clamp(cvRTReflectionSPP.Get(), 1, 16);    // 每像素采样数
+    pc.maxRoughness = std::max(cvRTReflectionMaxRoughness.Get(), 0.01f);  // 反射最大粗糙度（超过用 IBL）
     pc.flags        = m_HalfRes ? 1u : 0u;  // bit0=半分辨率
     pc.lightCount   = ctx.lightCount;
     // ── 先绑 RT 管线（设置正确 push constant 布局），再推常量，最后发射光线 ──

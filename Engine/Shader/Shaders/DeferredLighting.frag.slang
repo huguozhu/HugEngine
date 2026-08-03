@@ -333,7 +333,8 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
     // SSR 间接镜面反射；rtSpecularSource=1 时改用 RT 反射输出
     float4 ssr = u_SSR.Sample(u_GBufferSampler, uv);
     float4 rtRefl = (rtSpecularSource != 0u) ? u_RT_Reflection.Sample(u_GBufferSampler, uv) : ssr;
-    color += rtRefl.rgb;
+    // a<0（高粗糙度跳过或 miss）不叠加 RT 反射，specular IBL prefilter 已提供回退
+    if (rtRefl.a >= 0.0) color += rtRefl.rgb;
 
     color += gbC.rgb;  // emissive
     return float4(color, 1.0);

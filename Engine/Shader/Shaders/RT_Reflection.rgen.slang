@@ -84,6 +84,12 @@ void main() {
     float3 N = normalize(gbB.xyz * 2.0 - 1.0);
     float roughness = gbB.w;
 
+    // 粗糙度超过阈值：不发射 RT 反射线，回退 IBL prefilter（a=-1 标记无效）
+    if (roughness > g_PC.maxRoughness) {
+        g_Output[idx] = float4(0, 0, 0, -1);
+        return;
+    }
+
     // ── 重建世界坐标 + 视线方向 ──
     float3 worldPos = ReconstructWorldPos(idx, depth);
     float3 V = normalize(g_PC.cameraPos.xyz - worldPos);

@@ -225,7 +225,7 @@ GPU_STRUCT RTShadowPushConstant {
     GPU_UINT softSPP;               // [104]     软阴影每光源采样数
 };                                  // 共 108B（alignas(16) 后 112B）
 
-// --- RTRayEffectPushConstant: RT 反射/AO/GI 效果共享 Push Constant（108B，alignas 后 112B）---
+// --- RTRayEffectPushConstant: RT 反射/AO/GI 效果共享 Push Constant（112B，alignas 后 112B）---
 // 被 Reflection / AO / GI 三个效果 Pass 复用；未使用字段由各 Pass 置 0。
 GPU_STRUCT RTRayEffectPushConstant {
     float4x4 invViewProj;           // [0..64]   逆 ViewProj（深度 → 世界坐标）
@@ -235,9 +235,10 @@ GPU_STRUCT RTRayEffectPushConstant {
     GPU_UINT frameIndex;            // [88]      帧索引（时域抖动 / 随机种子）
     float    maxDistance;           // [92]      最大追踪距离（AO=2m, GI=30m, Refl=500m）
     GPU_UINT sampleCount;           // [96]      AO/GI 每像素采样数（Reflection=1）
-    GPU_UINT flags;                 // [100]     bit0=半分辨率
-    GPU_UINT lightCount;            // [104]     直接光源数（ClosestHit 光照用）
-};                                  // 共 108B（alignas(16) 后 112B）
+    float    maxRoughness;          // [100]     反射最大粗糙度（超过回退 IBL prefilter）
+    GPU_UINT flags;                 // [104]     bit0=半分辨率
+    GPU_UINT lightCount;            // [108]     直接光源数（ClosestHit 光照用）
+};                                  // 共 112B（alignas(16) 后 112B）
 
 // ---- 清理宏 ----
 #undef GPU_UINT
