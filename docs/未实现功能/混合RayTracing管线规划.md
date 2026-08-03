@@ -1047,8 +1047,12 @@ r.RT.Denoise.Spatial     1   // 空间滤波
 | Phase 4-2 (P2) | ✅ | 工作区 | RTReflectionPass：RT_Reflection.rgen/rchit/rmiss + GGX 反射 + 半分辨率 |
 | Phase 4-3 (P3) | ✅ | 工作区 | RTAOPass：RT_AO.rgen + 余弦半球采样 + 半分辨率 R8 遮罩 |
 | Phase 4-4 (P4) | ✅ | 工作区 | RTGIPass：RT_GI.rgen/rchit/rmiss + 一次反弹间接漫反射 + 四分之一分辨率 |
-| 降噪 Phase A (时域) | ✅ | 工作区 | RTDenoiser 时域累积（velocity 重投影 + 去遮挡检测 + 自适应混合），四效果全覆盖 |
-| 降噪 Phase B (空间) | ✅ | 工作区 | RT 反射/GI 复用 Denoiser 5×5 双边模糊（深度+法线边感知） |
+| 降噪 Phase A (时域) | ✅ | `191dc7e` | RTDenoiser 时域累积（velocity 重投影 + 去遮挡检测 + 自适应混合），四效果全覆盖 |
+| 降噪 Phase B (空间) | ✅ | `191dc7e` | RT 反射/GI 复用 Denoiser 5×5 双边模糊（深度+法线边感知） |
+| CVar 质量体系（11.3） | ✅ | `c2744f9`-`d4f6484` | CVar 系统迁到 Core；`RTQualityCVars` 集中 21+3 个 `r.RT.*` CVar；开关/分辨率/SPP/追踪距离/降噪参数全部运行时热更新；`r.Pipeline.Mode` 控制管线切换 |
+| 软阴影扩展（4.4） | ✅ | `9236457`-`816774b` | `LightComponent.shadowRadius` 贯穿 CPU→GPU；面光源采样软阴影（`r.RT.Shadow.Soft`/`SPP`）；SPP=1 退化为硬阴影 |
+| 反射粗糙度分级（5.3 核心） | ✅ | `426ae44` | `roughness > MaxRoughness` 不发射 RT 线，回退 IBL prefilter（`r.RT.Reflection.MaxRoughness`） |
+| RT GI 回退 DDGI（7.4） | ✅ | `1f28508` `91f6198` | 提取 `SampleDDGI` 到共享 `RT_DDGI.slang`；GI 射线 miss 时探针查询替代纯天空色 |
 
 **当前已知限制（2026-08-01，不影响正确性）**：
 - GTX 1070 等 Pascal 设备不支持 `VK_KHR_ray_tracing_position_fetch` → ClosestHit 用「材质纹理 + 三角形法线纹理」查询几何（而非 position_fetch / SSBO，SSBO 在 ClosestHit 中已知 slangc GPU fault）。
@@ -1075,15 +1079,10 @@ r.RT.Denoise.Spatial     1   // 空间滤波
 
 ### 已知问题
 
-**HybridRTPipeline 运行时崩溃**（2026-07-28，待修复）
+~~**HybridRTPipeline 运行时崩溃**（2026-07-28，待修复）~~ → ✅ **已解决**（`bf5e077` 重新引入管线时修复：AsyncCompute/Compute 后恢复 graphics pipeline + ToneMap PreBind 保证 RP 兼容）
 
-- **症状**: `VulkanCommandList::EndRenderPass()` 崩溃
-- **日志**: `BeginRenderPass: no swapchain views or render pass set`
-- **定位**: HybridRTPipeline 的最后一个 Pass（ToneMap → LDR → FXAA → BackBuffer）中调用 `BeginRenderPass` 时，`m_CurrentRenderPass` 与 SwapChain 兼容性问题
-- **分析**: 
-  - DeferredPipeline 通过 TAA/SMAA/FXAA 等中间 Pass 的 `SetPipeline` 自然设置正确的 RP
-  - HybridRTPipeline 缺少这些中间 Pass（TAA/DOF/MotionBlur 均未启用）
-  - FXAA PSO 的 depthFormat=Unknown 理论上应生成 1-attachment RP 与 SwapChain 兼容，但仍失败
-  - 可能与 RenderGraph 的 swapchain 管理有关（DeferredPipeline 不调用 `rg.SetSwapChain()` 却能正常工作）
-- **绕过方案**: 暂使用 DeferredPipeline（renderMode=1）
+- ~~**症状**: `VulkanCommandList::EndRenderPass()` 崩溃~~
+- ~~**日志**: `BeginRenderPass: no swapchain views or render pass set`~~
+- ~~**定位**: HybridRTPipeline 的最后一个 Pass（ToneMap → LDR → FXAA → BackBuffer）中调用 `BeginRenderPass` 时，`m_CurrentRenderPass` 与 SwapChain 兼容性问题~~
+- ~~**绕过方案**: 暂使用 DeferredPipeline（renderMode=1）~~
 - **下一步**: 深入调试 VulkanCommandList 的 render pass 状态管理，或参考 DeferredPipeline 的完整后处理链
