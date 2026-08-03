@@ -6,6 +6,8 @@
 #include "Core/Assert.h"
 // 通过 Material.h 引入 ShaderTypes.slang（RTRayEffectPushConstant 等共享结构）
 #include "Pipeline/Material.h"
+// RT 质量参数 CVar（r.RT.*，运行时热更新 SPP / 追踪距离）
+#include "Pipeline/RTQualityCVars.h"
 
 // RT 着色器 SPIR-V
 #include "RT_GI.rgen.spv.h"
@@ -14,6 +16,7 @@
 
 #include <glm/gtc/type_ptr.hpp>
 #include <cstring>
+#include <algorithm>  // std::max / std::clamp
 
 namespace he::render {
 
@@ -142,8 +145,8 @@ void RTGIPass::Execute(rhi::IRHICommandList* cmd,
     pc.dispatchDimX = m_Width;
     pc.dispatchDimY = m_Height;
     pc.frameIndex   = ctx.frameIndex;
-    pc.maxDistance  = 30.0f;    // GI 追踪范围（m）
-    pc.sampleCount  = 1;        // SPP（时域累积提升质量）
+    pc.maxDistance  = std::max(cvRTGIMaxDist.Get(), 0.01f);  // GI 追踪范围（m，CVar 热更新）
+    pc.sampleCount  = std::clamp(cvRTGISPP.Get(), 1, 16);    // SPP（时域累积提升质量）
     pc.flags        = m_QuarterRes ? 1u : 0u;  // bit0=四分之一分辨率
     pc.lightCount   = ctx.lightCount;
     // ── 先绑 RT 管线（设置正确 push constant 布局），再推常量，最后发射光线 ──

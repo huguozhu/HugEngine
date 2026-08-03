@@ -6,6 +6,8 @@
 #include "Core/Assert.h"
 // 通过 Material.h 引入 ShaderTypes.slang（RTRayEffectPushConstant 等共享结构）
 #include "Pipeline/Material.h"
+// RT 质量参数 CVar（r.RT.*，运行时热更新 SPP / 追踪距离）
+#include "Pipeline/RTQualityCVars.h"
 
 // RT 着色器 SPIR-V
 #include "RT_Reflection.rgen.spv.h"
@@ -14,6 +16,7 @@
 
 #include <glm/gtc/type_ptr.hpp>
 #include <cstring>
+#include <algorithm>  // std::max / std::clamp
 
 namespace he::render {
 
@@ -142,8 +145,8 @@ void RTReflectionPass::Execute(rhi::IRHICommandList* cmd,
     pc.dispatchDimX = m_Width;
     pc.dispatchDimY = m_Height;
     pc.frameIndex   = ctx.frameIndex;
-    pc.maxDistance  = 500.0f;   // 反射最大追踪距离
-    pc.sampleCount  = 1;
+    pc.maxDistance  = std::max(cvRTReflectionMaxDist.Get(), 0.01f);  // 反射最大追踪距离（CVar 热更新）
+    pc.sampleCount  = std::clamp(cvRTReflectionSPP.Get(), 1, 16);    // 每像素采样数
     pc.flags        = m_HalfRes ? 1u : 0u;  // bit0=半分辨率
     pc.lightCount   = ctx.lightCount;
     // ── 先绑 RT 管线（设置正确 push constant 布局），再推常量，最后发射光线 ──

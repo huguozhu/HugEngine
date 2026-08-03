@@ -6,6 +6,8 @@
 #include "Core/Assert.h"
 // 通过 Material.h 引入 ShaderTypes.slang（其内部先包含 Math.h，保证 float4 等类型可用）
 #include "Pipeline/Material.h"  // RTShadowPushConstant / GPULight（C++/Slang 共享）
+// RT 质量参数 CVar（r.RT.*，运行时热更新 SPP / 追踪距离）
+#include "Pipeline/RTQualityCVars.h"
 
 // RT 着色器 SPIR-V
 #include "RT_Shadow.rgen.spv.h"
@@ -14,6 +16,7 @@
 
 #include <glm/gtc/type_ptr.hpp>
 #include <cstring>
+#include <algorithm>  // std::max / std::clamp
 
 namespace he::render {
 
@@ -153,7 +156,7 @@ void RTShadowPass::Execute(rhi::IRHICommandList* cmd,
     pc.dispatchDimX = m_Width;
     pc.dispatchDimY = m_Height;
     pc.frameIdx     = ctx.frameIndex;
-    pc.maxShadowDist = 200.0f;
+    pc.maxShadowDist = std::max(cvRTShadowMaxDist.Get(), 0.01f);  // 阴影最大追踪距离（CVar 热更新）
     pc.shadowFlags  = m_HalfRes ? 2u : 0u;   // bit1=半分辨率
     pc.lightCount   = ctx.lightCount;
 
