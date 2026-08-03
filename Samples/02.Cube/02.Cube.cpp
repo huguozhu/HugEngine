@@ -9,6 +9,7 @@
 // ============================================================
 
 #include "Core/Core.h"
+#include "Core/CVar.h"
 #include "Core/Engine.h"
 #include "Platform/Window.h"
 #include "RHI/RHI.h"
@@ -41,6 +42,12 @@
 #include <GLFW/glfw3.h>
 
 using namespace he;
+
+// ============================================================
+// 渲染管线模式 CVar
+// ============================================================
+// 渲染管线模式 CVar（0=Forward, 1=Deferred, 2=HybridRT）
+he::CVar<int> cvPipelineMode("r.Pipeline.Mode", 2, "渲染管线模式 0=Forward 1=Deferred 2=HybridRT");
 
 // ============================================================
 // 相机配置读写（简易 key=value 格式）
@@ -373,7 +380,6 @@ int main() {
     HE_CORE_INFO("02.Cube demo started — WASD=移动, 右键拖拽=旋转, 滚轮=缩放, Shift=加速");
     u64  frameIndex = 0;
     f64  lastTime   = glfwGetTime();
-    int  renderMode  = 2;  // 0=Forward, 1=Deferred, 2=HybridRT
 
     while (!engine.GetWindow()->ShouldClose()) {
         // 计算帧时间
@@ -428,7 +434,7 @@ int main() {
         cmdList->Begin();
 
         // --- Forward 模式 ---
-        if (renderMode == 0) {
+        if (cvPipelineMode.Get() == 0) {
             forwardPipeline.NextFrame();
 
             auto* shadowSys = forwardPipeline.GetShadowSystem();
@@ -447,7 +453,7 @@ int main() {
             forwardPipeline.RenderToneMapPass(cmdList.get());
         }
         // --- Deferred 模式 ---
-        else if (renderMode == 1) {
+        else if (cvPipelineMode.Get() == 1) {
             deferredPipeline.NextFrame();
             deferredPipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera(), deltaTime);
             // ImGui 叠加：Deferred 已写 BackBuffer，Load 保留内容
@@ -455,7 +461,7 @@ int main() {
                 rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
         }
         // --- Hybrid RT 模式 ---
-        else if (renderMode == 2) {
+        else if (cvPipelineMode.Get() == 2) {
             hybridPipeline.NextFrame();
             hybridPipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera(), deltaTime);
             // ImGui 叠加：管线已写 BackBuffer，Load 保留内容
@@ -499,15 +505,16 @@ int main() {
         if (ImGui::DragFloat("移动速度", &speed, 1.0f, 0.1f, 500.0f, "%.1f"))
             camCtrl.SetMoveSpeed(speed);
 
-        // 渲染模式切换
-        ImGui::SeparatorText("渲染模式");
-        ImGui::RadioButton("Forward 前向渲染", &renderMode, 0);
+        // 渲染模式切换（读 CVar → RadioButton → 写回 CVar）
+        int mode = cvPipelineMode.Get();
+        ImGui::RadioButton("Forward 前向渲染", &mode, 0);
         ImGui::SameLine();
-        ImGui::RadioButton("Deferred 延迟渲染", &renderMode, 1);
+        ImGui::RadioButton("Deferred 延迟渲染", &mode, 1);
         if (device->GetCaps().supportsRayTracing) {
             ImGui::SameLine();
-            ImGui::RadioButton("Hybrid RT 混合光追", &renderMode, 2);
+            ImGui::RadioButton("Hybrid RT 混合光追", &mode, 2);
         }
+        cvPipelineMode.Set(mode);
 
         // GPU 剔除开关
         ImGui::Spacing();
@@ -525,7 +532,7 @@ int main() {
         }
 
         // Hybrid RT 效果开关（仅 HybridRT 模式显示）
-        if (renderMode == 2 && device->GetCaps().supportsRayTracing) {
+        if (cvPipelineMode.Get() == 2 && device->GetCaps().supportsRayTracing) {
             ImGui::SeparatorText("Hybrid RT 效果");
             bool rtShadowOn = hybridPipeline.IsRTShadowEnabled();
             if (ImGui::Checkbox("RT Shadow##RTShadow", &rtShadowOn))
