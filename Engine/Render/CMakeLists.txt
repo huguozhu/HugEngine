@@ -97,6 +97,8 @@ set(RENDER_SOURCES
     PostProcess/SSAO.cpp
     PostProcess/Denoiser.h
     PostProcess/Denoiser.cpp
+    PostProcess/RTDenoiser.h
+    PostProcess/RTDenoiser.cpp
     PostProcess/GaussianBlurPass.h
     PostProcess/GaussianBlurPass.cpp
     PostProcess/BloomPass.h

@@ -36,8 +36,10 @@ struct RTExecuteContext {
 //   3. 输出 UAV 纹理创建
 //   4. BindRTPipeline + 绑描述符集 + TraceRays 调度
 //
-// 子类职责：在 Execute() 中更新 set0 描述符 + push constants，
-// 然后调用 BindAndTrace() 发射光线。
+// 子类职责：在 Execute() 中更新 set0 描述符，然后按顺序
+// BindRT() → SetPushConstants() → TraceRays() 发射光线。
+//（必须先绑 RT 管线再推常量：vkCmdPushConstants 使用当前绑定布局，
+//  若先推常量会应用到上一 Pass 的布局，范围不匹配导致写入失败）
 // ============================================================
 // 反射/GI ClosestHit 光源（48B/个，从 GPULight[] 显式抽取 → UniformBuffer）
 // 与 RT_HitCommon.slang 的 RTHitLight 布局一致（避免 ClosestHit 访问 SSBO）
@@ -88,10 +90,14 @@ public:
     bool IsValid() const { return m_Pipeline && m_Pipeline->pipeline != nullptr; }
 
 protected:
-    // 绑定效果管线 + set0（+ 可选 set1/set2）+ TraceRays
-    void BindAndTrace(rhi::IRHICommandList* cmd, u32 w, u32 h,
-                      rhi::DescriptorSetHandle set1 = rhi::kInvalidSet,
-                      rhi::DescriptorSetHandle set2 = rhi::kInvalidSet);
+    // 绑定效果管线 + set0（+ 可选 set1/set2）——必须在 SetPushConstants 之前调用，
+    // 否则 push constant 会应用到上一 Pass 的管线布局（降噪等图形 Pass 布局范围不匹配 → 写入失败）
+    void BindRT(rhi::IRHICommandList* cmd,
+                rhi::DescriptorSetHandle set1 = rhi::kInvalidSet,
+                rhi::DescriptorSetHandle set2 = rhi::kInvalidSet);
+
+    // 发射光线（SetPushConstants 之后调用）
+    void TraceRays(rhi::IRHICommandList* cmd, u32 w, u32 h);
 
     // 输出纹理 → UnorderedAccess（RT 写）。首帧从 Undefined 过渡，
     // 后续帧从 ShaderResource 过渡（上一帧被 Lighting 以 SRV 采样结束）。

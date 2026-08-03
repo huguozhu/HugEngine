@@ -23,6 +23,7 @@ public:
     void Render(rhi::IRHICommandList* cmd);
 
     rhi::IRHITexture* GetOutput() const { return m_Denoised.get(); }
+    bool IsReady() const { return m_Ready; }
     void PreBind(rhi::IRHICommandList* cmd) const { if(m_Ready) cmd->SetPipeline(m_PSO.get()); }
 
 private:

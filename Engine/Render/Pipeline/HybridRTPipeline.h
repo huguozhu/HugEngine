@@ -15,6 +15,8 @@
 #include "Pipeline/ClusteredShading.h"
 #include "Pipeline/ParticleRenderer.h"
 #include "GI/GI_DDGI.h"
+#include "PostProcess/RTDenoiser.h"
+#include "PostProcess/Denoiser.h"
 #include "RHI/RHI.h"
 #include "RenderGraph.h"
 #include "Profiler/ProfilerManager.h"
@@ -123,6 +125,14 @@ private:
     std::unique_ptr<RTAOPass> m_RTAO;          // RT AO 效果 Pass
     std::unique_ptr<RTReflectionPass> m_RTReflection;  // RT 反射效果 Pass
     std::unique_ptr<RTGIPass> m_RTGI;          // RT GI 效果 Pass
+    // ── RT 降噪器（时域累积，每效果独立实例）──
+    std::unique_ptr<RTDenoiser> m_ShadowDenoiser;      // RT 阴影时域累积
+    std::unique_ptr<RTDenoiser> m_AODenoiser;          // RT AO 时域累积
+    std::unique_ptr<RTDenoiser> m_ReflectionDenoiser;  // RT 反射时域累积
+    std::unique_ptr<RTDenoiser> m_GIDenoiser;          // RT GI 时域累积
+    // ── RT 空间滤波（5×5 双边模糊，仅反射/GI，复用 DeferredPipeline 的 Denoiser）──
+    Denoiser m_ReflectionSpatial;
+    Denoiser m_GISpatial;
     bool m_RTEnabled = false;
     bool m_RTShadowEnabled = true;      // RT 阴影开关（ImGui/CVar 控制）
     bool m_RTAOEnabled = true;          // RT AO 开关

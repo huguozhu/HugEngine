@@ -156,10 +156,12 @@ void RTShadowPass::Execute(rhi::IRHICommandList* cmd,
     pc.maxShadowDist = 200.0f;
     pc.shadowFlags  = m_HalfRes ? 2u : 0u;   // bit1=半分辨率
     pc.lightCount   = ctx.lightCount;
-    cmd->SetPushConstants(0, sizeof(pc), &pc);
 
-    // ── 绑定管线 + set0 + TraceRays ──
-    BindAndTrace(cmd, m_Width, m_Height);
+    // ── 先绑 RT 管线（设置正确 push constant 布局），再推常量，最后发射光线 ──
+    //（若先推常量，会应用到上一 Pass 的布局——降噪等图形 Pass 范围不匹配 → 写入失败）
+    BindRT(cmd);
+    cmd->SetPushConstants(0, sizeof(pc), &pc);
+    TraceRays(cmd, m_Width, m_Height);
     // 输出纹理的 UAV → ShaderResource 转换由 RenderGraph 依据 Lighting 对
     // "RT_ShadowMask" 的读取依赖自动生成屏障，此处不再重复转换——否则双重
     // 屏障会因 oldLayout 不匹配触发 Validation 报错（VUID-VkImageMemoryBarrier-oldLayout-01197）。

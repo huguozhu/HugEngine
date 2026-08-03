@@ -139,13 +139,16 @@ void RTEffectPass::FillHitLightUB(const RTExecuteContext& ctx) {
 }
 
 // ============================================================
-// BindAndTrace — 绑定效果管线 + 描述符集 + 发射光线
+// BindRT — 绑定效果管线 + 描述符集（不发射光线）
+// 必须在 SetPushConstants 之前调用：vkCmdPushConstants 使用当前绑定管线的布局，
+// 若先推常量再绑 RT 管线，常量会应用到上一 Pass（如降噪图形 PSO）的布局，
+// 范围不匹配导致写入失败 → RT 着色器读到过期数据。
 // ============================================================
-void RTEffectPass::BindAndTrace(rhi::IRHICommandList* cmd, u32 w, u32 h,
-                                rhi::DescriptorSetHandle set1, rhi::DescriptorSetHandle set2) {
+void RTEffectPass::BindRT(rhi::IRHICommandList* cmd,
+                          rhi::DescriptorSetHandle set1, rhi::DescriptorSetHandle set2) {
     if (!m_Pipeline || !m_Pipeline->pipeline) return;
 
-    // 绑定 RT 管线
+    // 绑定 RT 管线（设置正确的 push constant 布局）
     cmd->BindRTPipeline(m_Pipeline->pipeline.get());
 
     // 绑定描述符集（set0 效果必绑；set1/set2 场景资源可选）
@@ -155,8 +158,13 @@ void RTEffectPass::BindAndTrace(rhi::IRHICommandList* cmd, u32 w, u32 h,
         cmd->BindDescriptorSet(rhi::kDescSetMaterial, set1);
     if (set2 != rhi::kInvalidSet)
         cmd->BindDescriptorSet(rhi::kDescSetBindless, set2);
+}
 
-    // 发射光线
+// ============================================================
+// TraceRays — 发射光线（SetPushConstants 之后调用）
+// ============================================================
+void RTEffectPass::TraceRays(rhi::IRHICommandList* cmd, u32 w, u32 h) {
+    if (!m_Pipeline || !m_Pipeline->pipeline) return;
     cmd->TraceRays(m_Pipeline->sbt, w, h, 1);
 }
 

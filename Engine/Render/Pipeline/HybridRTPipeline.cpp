@@ -106,6 +106,86 @@ bool HybridRTPipeline::Initialize(rhi::IRHIDevice* device) {
                 HE_CORE_WARN("HybridRTPipeline: RTGIPass 初始化失败，RT GI 禁用");
                 m_RTGI.reset();
             }
+
+            // ── RT 降噪器（时域累积；反射/GI 追加空间滤波）──
+            // 阴影/AO：半分辨率，仅时域累积（遮蔽信号时域变化慢，用低混合比获得最大累积）
+            if (m_RTShadow && m_RTShadow->IsValid()) {
+                RTDenoiser::Config cfg;
+                cfg.format          = rhi::Format::R16_FLOAT;
+                cfg.width           = m_RTShadow->GetWidth();
+                cfg.height          = m_RTShadow->GetHeight();
+                cfg.temporalBlend   = 0.05f;
+                cfg.depthThreshold  = 0.02f;
+                cfg.normalThreshold = 0.85f;
+                cfg.debugName       = "RTShadowDenoiser";
+                m_ShadowDenoiser = std::make_unique<RTDenoiser>();
+                if (m_ShadowDenoiser->Initialize(device, cfg))
+                    HE_CORE_INFO("HybridRTPipeline: RTShadowDenoiser 初始化完成");
+                else {
+                    m_ShadowDenoiser.reset();
+                    HE_CORE_WARN("HybridRTPipeline: RTShadowDenoiser 初始化失败，RT 阴影降噪禁用");
+                }
+            }
+            if (m_RTAO && m_RTAO->IsValid()) {
+                RTDenoiser::Config cfg;
+                cfg.format          = rhi::Format::R8_UNORM;
+                cfg.width           = m_RTAO->GetWidth();
+                cfg.height          = m_RTAO->GetHeight();
+                cfg.temporalBlend   = 0.05f;
+                cfg.depthThreshold  = 0.02f;
+                cfg.normalThreshold = 0.85f;
+                cfg.debugName       = "RTAODenoiser";
+                m_AODenoiser = std::make_unique<RTDenoiser>();
+                if (m_AODenoiser->Initialize(device, cfg))
+                    HE_CORE_INFO("HybridRTPipeline: RTAODenoiser 初始化完成");
+                else {
+                    m_AODenoiser.reset();
+                    HE_CORE_WARN("HybridRTPipeline: RTAODenoiser 初始化失败，RT AO 降噪禁用");
+                }
+            }
+            // 反射：半分辨率 RGBA16_FLOAT，时域累积 + 空间滤波
+            if (m_RTReflection && m_RTReflection->IsValid()) {
+                RTDenoiser::Config cfg;
+                cfg.format          = rhi::Format::RGBA16_FLOAT;
+                cfg.width           = m_RTReflection->GetWidth();
+                cfg.height          = m_RTReflection->GetHeight();
+                cfg.temporalBlend   = 0.10f;
+                cfg.depthThreshold  = 0.05f;
+                cfg.normalThreshold = 0.80f;
+                cfg.debugName       = "RTReflectionDenoiser";
+                m_ReflectionDenoiser = std::make_unique<RTDenoiser>();
+                if (m_ReflectionDenoiser->Initialize(device, cfg))
+                    HE_CORE_INFO("HybridRTPipeline: RTReflectionDenoiser 初始化完成");
+                else {
+                    m_ReflectionDenoiser.reset();
+                    HE_CORE_WARN("HybridRTPipeline: RTReflectionDenoiser 初始化失败，RT 反射降噪禁用");
+                }
+                // 空间滤波：5×5 双边模糊（复用 DeferredPipeline 的 Denoiser）
+                if (!m_ReflectionSpatial.Initialize(device,
+                        m_RTReflection->GetWidth(), m_RTReflection->GetHeight()))
+                    HE_CORE_WARN("HybridRTPipeline: RTReflectionSpatial 初始化失败");
+            }
+            // GI：四分之一分辨率 RGBA16_FLOAT，时域累积 + 空间滤波（低分辨率锯齿用滤波补足）
+            if (m_RTGI && m_RTGI->IsValid()) {
+                RTDenoiser::Config cfg;
+                cfg.format          = rhi::Format::RGBA16_FLOAT;
+                cfg.width           = m_RTGI->GetWidth();
+                cfg.height          = m_RTGI->GetHeight();
+                cfg.temporalBlend   = 0.15f;
+                cfg.depthThreshold  = 0.05f;
+                cfg.normalThreshold = 0.80f;
+                cfg.debugName       = "RTGIDenoiser";
+                m_GIDenoiser = std::make_unique<RTDenoiser>();
+                if (m_GIDenoiser->Initialize(device, cfg))
+                    HE_CORE_INFO("HybridRTPipeline: RTGIDenoiser 初始化完成");
+                else {
+                    m_GIDenoiser.reset();
+                    HE_CORE_WARN("HybridRTPipeline: RTGIDenoiser 初始化失败，RT GI 降噪禁用");
+                }
+                if (!m_GISpatial.Initialize(device,
+                        m_RTGI->GetWidth(), m_RTGI->GetHeight()))
+                    HE_CORE_WARN("HybridRTPipeline: RTGISpatial 初始化失败");
+            }
         } else {
             m_RTEnabled = false;
             m_RTPass.reset();
@@ -131,6 +211,13 @@ void HybridRTPipeline::Shutdown() {
     if (m_RTReflection) { m_RTReflection->Shutdown(); m_RTReflection.reset(); }
     if (m_RTGI) { m_RTGI->Shutdown(); m_RTGI.reset(); }
     if (m_RTPass) { m_RTPass->Shutdown(); m_RTPass.reset(); }
+    // RT 降噪器
+    if (m_ShadowDenoiser) { m_ShadowDenoiser->Shutdown(); m_ShadowDenoiser.reset(); }
+    if (m_AODenoiser) { m_AODenoiser->Shutdown(); m_AODenoiser.reset(); }
+    if (m_ReflectionDenoiser) { m_ReflectionDenoiser->Shutdown(); m_ReflectionDenoiser.reset(); }
+    if (m_GIDenoiser) { m_GIDenoiser->Shutdown(); m_GIDenoiser.reset(); }
+    m_ReflectionSpatial.Shutdown();
+    m_GISpatial.Shutdown();
     m_PostProcess.Shutdown();
     m_Profiler.Shutdown();
     m_Lighting.Shutdown();
@@ -174,6 +261,19 @@ void HybridRTPipeline::OnResize(u32 w, u32 h) {
         bool qr = m_RTGI->IsQuarterRes();
         m_RTGI->Shutdown();
         m_RTGI->Initialize(m_Device, w, h, qr);
+    }
+    // RT 降噪器随 RT Pass 分辨率重建（RT Pass 已用新尺寸重新初始化）
+    if (m_ShadowDenoiser && m_RTShadow)
+        m_ShadowDenoiser->OnResize(m_RTShadow->GetWidth(), m_RTShadow->GetHeight());
+    if (m_AODenoiser && m_RTAO)
+        m_AODenoiser->OnResize(m_RTAO->GetWidth(), m_RTAO->GetHeight());
+    if (m_ReflectionDenoiser && m_RTReflection) {
+        m_ReflectionDenoiser->OnResize(m_RTReflection->GetWidth(), m_RTReflection->GetHeight());
+        m_ReflectionSpatial.OnResize(m_RTReflection->GetWidth(), m_RTReflection->GetHeight());
+    }
+    if (m_GIDenoiser && m_RTGI) {
+        m_GIDenoiser->OnResize(m_RTGI->GetWidth(), m_RTGI->GetHeight());
+        m_GISpatial.OnResize(m_RTGI->GetWidth(), m_RTGI->GetHeight());
     }
     m_SceneMaterialBuilt = false;  // 材质纹理无需重建（场景不变），但置位以便懒重建
 }
@@ -368,6 +468,24 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             });
     }
 
+    // ── RT Shadow Denoise — 时域累积（velocity 重投影 + 去遮挡检测）──
+    // 用降噪输出替代原始噪声遮罩供 Lighting 采样，消除单帧 RT 阴影噪声闪烁
+    rhi::IRHITexture* rtShadowDenoisedTex = nullptr;
+    ResourceHandle rtShadowDenoisedHandle = kInvalidHandle;
+    if (m_ShadowDenoiser && m_ShadowDenoiser->IsReady() && rtShadowHandle != kInvalidHandle) {
+        rtShadowDenoisedTex = m_ShadowDenoiser->GetOutput();
+        rtShadowDenoisedHandle = rg.ImportTexture("RT_ShadowMask_Denoised", rtShadowDenoisedTex);
+        rg.AddPass("RT_Shadow_Denoise",
+            {{rtShadowHandle, ResourceAccess::Read},
+             {gbDepth, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbVel, ResourceAccess::Read}},
+            {{rtShadowDenoisedHandle, ResourceAccess::Write}},
+            [this](rhi::IRHICommandList* c) {
+                m_ShadowDenoiser->SetInputs(m_RTShadow->GetOutput(),
+                    m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetVelocity());
+                m_ShadowDenoiser->Render(c);
+            });
+    }
+
     // ── RT AO — 对 GBuffer 有效像素发射遮蔽射线（半分辨率遮罩）──
     rhi::IRHITexture* rtAOTex = nullptr;
     ResourceHandle rtAOHandle = kInvalidHandle;
@@ -385,6 +503,23 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 ctx.gbDepth     = m_GBuffer->GetDepth();
                 ctx.gbNormal    = m_GBuffer->GetNormal();
                 m_RTAO->Execute(c, m_RTPass->GetTLAS(), ctx);
+            });
+    }
+
+    // ── RT AO Denoise — 时域累积（AO 是低频信号，累积消除单帧噪声）──
+    rhi::IRHITexture* rtAODenoisedTex = nullptr;
+    ResourceHandle rtAODenoisedHandle = kInvalidHandle;
+    if (m_AODenoiser && m_AODenoiser->IsReady() && rtAOHandle != kInvalidHandle) {
+        rtAODenoisedTex = m_AODenoiser->GetOutput();
+        rtAODenoisedHandle = rg.ImportTexture("RT_AO_Denoised", rtAODenoisedTex);
+        rg.AddPass("RT_AO_Denoise",
+            {{rtAOHandle, ResourceAccess::Read},
+             {gbDepth, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbVel, ResourceAccess::Read}},
+            {{rtAODenoisedHandle, ResourceAccess::Write}},
+            [this](rhi::IRHICommandList* c) {
+                m_AODenoiser->SetInputs(m_RTAO->GetOutput(),
+                    m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetVelocity());
+                m_AODenoiser->Render(c);
             });
     }
 
@@ -412,6 +547,45 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             });
     }
 
+    // ── RT Reflection Denoise — 时域累积 + 空间滤波（5×5 双边模糊）──
+    rhi::IRHITexture* rtReflectionTemporalTex = nullptr;
+    ResourceHandle rtReflectionTemporalHandle = kInvalidHandle;
+    if (m_ReflectionDenoiser && m_ReflectionDenoiser->IsReady() && rtReflectionHandle != kInvalidHandle) {
+        rtReflectionTemporalTex = m_ReflectionDenoiser->GetOutput();
+        rtReflectionTemporalHandle = rg.ImportTexture("RT_Reflection_Temporal", rtReflectionTemporalTex);
+        rg.AddPass("RT_Reflection_Temporal",
+            {{rtReflectionHandle, ResourceAccess::Read},
+             {gbDepth, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbVel, ResourceAccess::Read}},
+            {{rtReflectionTemporalHandle, ResourceAccess::Write}},
+            [this](rhi::IRHICommandList* c) {
+                m_ReflectionDenoiser->SetInputs(m_RTReflection->GetOutput(),
+                    m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetVelocity());
+                m_ReflectionDenoiser->Render(c);
+            });
+    }
+    rhi::IRHITexture* rtReflectionDenoisedTex = rtReflectionTemporalTex;
+    ResourceHandle rtReflectionDenoisedHandle = rtReflectionTemporalHandle;
+    if (m_ReflectionSpatial.IsReady() && rtReflectionTemporalHandle != kInvalidHandle) {
+        rtReflectionDenoisedTex = m_ReflectionSpatial.GetOutput();
+        rtReflectionDenoisedHandle = rg.ImportTexture("RT_Reflection_Denoised", rtReflectionDenoisedTex);
+        rg.AddPass("RT_Reflection_Spatial",
+            {{rtReflectionTemporalHandle, ResourceAccess::Read},
+             {gbDepth, ResourceAccess::Read}, {gbB, ResourceAccess::Read}},
+            {{rtReflectionDenoisedHandle, ResourceAccess::Write}},
+            [this, rtReflectionTemporalTex, rw = m_ReflectionDenoiser->GetWidth(),
+             rh = m_ReflectionDenoiser->GetHeight()](rhi::IRHICommandList* c) {
+                m_ReflectionSpatial.PreBind(c);
+                // 输入为时域累积输出（构建时捕获，时域 Pass 已交换历史角色，不能用 GetOutput()）
+                m_ReflectionSpatial.SetInputs(rtReflectionTemporalTex,
+                    m_GBuffer->GetDepth(), m_GBuffer->GetNormal());
+                rhi::ClearValue clr{};
+                c->BeginOffscreenPass(m_ReflectionSpatial.GetOutput()->GetNativeHandle(),
+                    nullptr, rw, rh, &clr, false);
+                m_ReflectionSpatial.Render(c);
+                c->EndOffscreenPass();
+            });
+    }
+
     // ── RT GI — 对 GBuffer 像素发射间接光射线（四分之一分辨率）──
     rhi::IRHITexture* rtGITex = nullptr;
     ResourceHandle rtGIHandle = kInvalidHandle;
@@ -433,6 +607,45 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 ctx.sceneMaterialTex = m_RTPass->GetSceneMaterialTexture();
                 ctx.sceneTriangleNormals = m_RTPass->GetSceneTriangleNormals();
                 m_RTGI->Execute(c, m_RTPass->GetTLAS(), ctx);
+            });
+    }
+
+    // ── RT GI Denoise — 时域累积 + 空间滤波（四分之一分辨率低频信号，滤波补足锯齿）──
+    rhi::IRHITexture* rtGITemporalTex = nullptr;
+    ResourceHandle rtGITemporalHandle = kInvalidHandle;
+    if (m_GIDenoiser && m_GIDenoiser->IsReady() && rtGIHandle != kInvalidHandle) {
+        rtGITemporalTex = m_GIDenoiser->GetOutput();
+        rtGITemporalHandle = rg.ImportTexture("RT_GI_Temporal", rtGITemporalTex);
+        rg.AddPass("RT_GI_Temporal",
+            {{rtGIHandle, ResourceAccess::Read},
+             {gbDepth, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbVel, ResourceAccess::Read}},
+            {{rtGITemporalHandle, ResourceAccess::Write}},
+            [this](rhi::IRHICommandList* c) {
+                m_GIDenoiser->SetInputs(m_RTGI->GetOutput(),
+                    m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetVelocity());
+                m_GIDenoiser->Render(c);
+            });
+    }
+    rhi::IRHITexture* rtGIDenoisedTex = rtGITemporalTex;
+    ResourceHandle rtGIDenoisedHandle = rtGITemporalHandle;
+    if (m_GISpatial.IsReady() && rtGITemporalHandle != kInvalidHandle) {
+        rtGIDenoisedTex = m_GISpatial.GetOutput();
+        rtGIDenoisedHandle = rg.ImportTexture("RT_GI_Denoised", rtGIDenoisedTex);
+        rg.AddPass("RT_GI_Spatial",
+            {{rtGITemporalHandle, ResourceAccess::Read},
+             {gbDepth, ResourceAccess::Read}, {gbB, ResourceAccess::Read}},
+            {{rtGIDenoisedHandle, ResourceAccess::Write}},
+            [this, rtGITemporalTex, rw = m_GIDenoiser->GetWidth(),
+             rh = m_GIDenoiser->GetHeight()](rhi::IRHICommandList* c) {
+                m_GISpatial.PreBind(c);
+                // 输入为时域累积输出（构建时捕获，时域 Pass 已交换历史角色，不能用 GetOutput()）
+                m_GISpatial.SetInputs(rtGITemporalTex,
+                    m_GBuffer->GetDepth(), m_GBuffer->GetNormal());
+                rhi::ClearValue clr{};
+                c->BeginOffscreenPass(m_GISpatial.GetOutput()->GetNativeHandle(),
+                    nullptr, rw, rh, &clr, false);
+                m_GISpatial.Render(c);
+                c->EndOffscreenPass();
             });
     }
 
@@ -463,19 +676,34 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         {gbC, ResourceAccess::Read}, {gbWorldPos, ResourceAccess::Read},
         {gbDepth, ResourceAccess::Read},  // 深度转换由 RG 统一管理（RT 效果 Pass 先读，Lighting 后读）
     };
-    if (rtShadowHandle != kInvalidHandle)
+    // Lighting 采样降噪后输出（若降噪器就绪），否则回退到原始 RT 输出
+    if (rtShadowDenoisedHandle != kInvalidHandle)
+        lightingReads.push_back({rtShadowDenoisedHandle, ResourceAccess::Read});
+    else if (rtShadowHandle != kInvalidHandle)
         lightingReads.push_back({rtShadowHandle, ResourceAccess::Read});
-    if (rtAOHandle != kInvalidHandle)
+    if (rtAODenoisedHandle != kInvalidHandle)
+        lightingReads.push_back({rtAODenoisedHandle, ResourceAccess::Read});
+    else if (rtAOHandle != kInvalidHandle)
         lightingReads.push_back({rtAOHandle, ResourceAccess::Read});
-    if (rtReflectionHandle != kInvalidHandle)
+    if (rtReflectionDenoisedHandle != kInvalidHandle)
+        lightingReads.push_back({rtReflectionDenoisedHandle, ResourceAccess::Read});
+    else if (rtReflectionHandle != kInvalidHandle)
         lightingReads.push_back({rtReflectionHandle, ResourceAccess::Read});
-    if (rtGIHandle != kInvalidHandle)
+    if (rtGIDenoisedHandle != kInvalidHandle)
+        lightingReads.push_back({rtGIDenoisedHandle, ResourceAccess::Read});
+    else if (rtGIHandle != kInvalidHandle)
         lightingReads.push_back({rtGIHandle, ResourceAccess::Read});
+
+    // 降噪纹理指针（优先降噪输出；反射/GI 有空间滤波时用空间输出，否则用时域输出）
+    rhi::IRHITexture* lightingShadowTex = rtShadowDenoisedTex ? rtShadowDenoisedTex : rtShadowTex;
+    rhi::IRHITexture* lightingAOTex     = rtAODenoisedTex     ? rtAODenoisedTex     : rtAOTex;
+    rhi::IRHITexture* lightingReflTex   = rtReflectionDenoisedTex ? rtReflectionDenoisedTex : rtReflectionTex;
+    rhi::IRHITexture* lightingGITex     = rtGIDenoisedTex     ? rtGIDenoisedTex     : rtGITex;
 
     rg.AddPass("Lighting",
         std::move(lightingReads),
         {{hdrC, ResourceAccess::Write}},
-        [this, &camera, w, h, lightCount, rtShadowTex, rtReflectionTex, rtAOTex, rtGITex](rhi::IRHICommandList* c) {
+        [this, &camera, w, h, lightCount, lightingShadowTex, lightingReflTex, lightingAOTex, lightingGITex](rhi::IRHICommandList* c) {
             // 深度 DepthStencilWrite→DepthStencilRead 转换由 RenderGraph 依据
             // gbDepth 的读取依赖（RT 效果 Pass + Lighting）自动生成，此处不再手动
             // 转换——否则 RT Pass 已把深度转成 Read 后再次 Write→Read 会 oldLayout 不匹配。
@@ -495,7 +723,7 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 nullptr,  // 无 Clustered
                 m_LightGridBuffer.get(), m_LightIndexListBuffer.get(),
                 &m_CachedLights,
-                rtShadowTex, rtReflectionTex, rtAOTex, rtGITex,  // RT 纹理
+                lightingShadowTex, lightingReflTex, lightingAOTex, lightingGITex,  // RT 纹理（降噪后）
                 float4(camera.position, 0), 1.0f, lightCount, w, h);
         });
 

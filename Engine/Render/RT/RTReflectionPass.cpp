@@ -146,10 +146,11 @@ void RTReflectionPass::Execute(rhi::IRHICommandList* cmd,
     pc.sampleCount  = 1;
     pc.flags        = m_HalfRes ? 1u : 0u;  // bit0=半分辨率
     pc.lightCount   = ctx.lightCount;
+    // ── 先绑 RT 管线（设置正确 push constant 布局），再推常量，最后发射光线 ──
+    //（若先推常量，会应用到上一 Pass 的布局——降噪等图形 Pass 范围不匹配 → 写入失败）
+    BindRT(cmd);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
-
-    // ── 绑定管线 + set0 + TraceRays ──
-    BindAndTrace(cmd, m_Width, m_Height);
+    TraceRays(cmd, m_Width, m_Height);
 }
 
 } // namespace he::render

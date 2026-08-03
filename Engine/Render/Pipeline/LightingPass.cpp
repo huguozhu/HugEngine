@@ -275,6 +275,14 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
             device->UpdateDescriptorSet(m_Set, 26, rhi::DescriptorType::CombinedImageSampler, pt.get(), ps.get());
             device->UpdateDescriptorSet(m_Set, 25, rhi::DescriptorType::CombinedImageSampler, bt.get(), ps.get());
             device->UpdateDescriptorSet(m_Set, 27, rhi::DescriptorType::CombinedImageSampler, bt.get(), ps.get());
+
+            // SSGI/SSAO/SSR 占位（19/20/21）：
+            // HybridRT 不计算屏幕空间效果，对应 RT 效果关闭时 shader 回退采样这些纹理。
+            // 必须绑定中性占位，避免采样未初始化描述符 → 黑屏。
+            //   SSGI → 黑（无间接漫反射），SSAO → 白（无遮蔽），SSR → 黑（无镜面反射）
+            device->UpdateDescriptorSet(m_Set, 19, rhi::DescriptorType::CombinedImageSampler, bt.get(), ps.get());
+            device->UpdateDescriptorSet(m_Set, 20, rhi::DescriptorType::CombinedImageSampler, pt.get(), ps.get());
+            device->UpdateDescriptorSet(m_Set, 21, rhi::DescriptorType::CombinedImageSampler, bt.get(), ps.get());
         }
 
         // 绑定 12=Irradiance, 13=Prefilter 需要 Cubemap（Shader 声明为 TextureCube）

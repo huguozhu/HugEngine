@@ -1047,6 +1047,8 @@ r.RT.Denoise.Spatial     1   // 空间滤波
 | Phase 4-2 (P2) | ✅ | 工作区 | RTReflectionPass：RT_Reflection.rgen/rchit/rmiss + GGX 反射 + 半分辨率 |
 | Phase 4-3 (P3) | ✅ | 工作区 | RTAOPass：RT_AO.rgen + 余弦半球采样 + 半分辨率 R8 遮罩 |
 | Phase 4-4 (P4) | ✅ | 工作区 | RTGIPass：RT_GI.rgen/rchit/rmiss + 一次反弹间接漫反射 + 四分之一分辨率 |
+| 降噪 Phase A (时域) | ✅ | 工作区 | RTDenoiser 时域累积（velocity 重投影 + 去遮挡检测 + 自适应混合），四效果全覆盖 |
+| 降噪 Phase B (空间) | ✅ | 工作区 | RT 反射/GI 复用 Denoiser 5×5 双边模糊（深度+法线边感知） |
 
 **当前已知限制（2026-08-01，不影响正确性）**：
 - GTX 1070 等 Pascal 设备不支持 `VK_KHR_ray_tracing_position_fetch` → ClosestHit 用「材质纹理 + 三角形法线纹理」查询几何（而非 position_fetch / SSBO，SSBO 在 ClosestHit 中已知 slangc GPU fault）。
@@ -1066,6 +1068,10 @@ r.RT.Denoise.Spatial     1   // 空间滤波
 | `Engine/Render/Pipeline/DeferredPipeline_FrameGraph.cpp` | 修改 | ImportToRenderGraph + getter 替换 |
 | `Engine/Render/Pipeline/ForwardPipeline.h/cpp` | 修改 | 移除 RTPass 死代码 (~70 行) |
 | `Samples/02.Cube/02.Cube.cpp` | 修改 | HybridRTPipeline + 简化渲染模式 |
+| `Engine/Render/PostProcess/RTDenoiser.h/cpp` | 新建 | RT 时域累积降噪器（velocity 重投影 + 去遮挡 + 历史双缓冲） |
+| `Engine/Shader/Shaders/RT_DenoiseTemporal.frag.slang` | 新建 | 时域累积降噪着色器（float4 通道无关，兼容 R16/R8/RGBA16） |
+| `Engine/Render/Pipeline/HybridRTPipeline.cpp` | 修改 | 各 RT Pass 后插入降噪 Pass，Lighting 改读降噪输出 |
+| `Engine/Render/PostProcess/Denoiser.h` | 修改 | 新增 IsReady() 访问器（供 HybridRT 空间滤波守卫） |
 
 ### 已知问题
 
