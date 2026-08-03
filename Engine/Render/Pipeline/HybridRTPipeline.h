@@ -74,15 +74,15 @@ public:
     RTGIPass*             GetRTGI()             { return m_RTGI.get(); }
     GI_DDGI*              GetDDGI()             { return &m_DDGI; }
 
-    // RT 效果开关（供 ImGui / CVar 控制）
-    void SetRTShadowEnabled(bool e) { m_RTShadowEnabled = e; }
-    bool IsRTShadowEnabled() const  { return m_RTShadowEnabled; }
-    void SetRTAOEnabled(bool e) { m_RTAOEnabled = e; }
-    bool IsRTAOEnabled() const  { return m_RTAOEnabled; }
-    void SetRTReflectionEnabled(bool e) { m_RTReflectionEnabled = e; }
-    bool IsRTReflectionEnabled() const  { return m_RTReflectionEnabled; }
-    void SetRTGIEnabled(bool e) { m_RTGIEnabled = e; }
-    bool IsRTGIEnabled() const  { return m_RTGIEnabled; }
+    // RT 效果开关（CVar 薄封装：读写 r.RT.* 开关，实现见 .cpp，供 ImGui / CVar 控制）
+    void SetRTShadowEnabled(bool e);
+    bool IsRTShadowEnabled() const;
+    void SetRTAOEnabled(bool e);
+    bool IsRTAOEnabled() const;
+    void SetRTReflectionEnabled(bool e);
+    bool IsRTReflectionEnabled() const;
+    void SetRTGIEnabled(bool e);
+    bool IsRTGIEnabled() const;
     ClusteredShading&     GetClusteredShading() { return m_ClusteredShading; }
     GPUCulling&           GetGPUCulling()       { return m_GPUCulling; }
     ParticleRenderer&     GetParticleRenderer() { return m_ParticleRenderer; }
@@ -134,10 +134,12 @@ private:
     Denoiser m_ReflectionSpatial;
     Denoiser m_GISpatial;
     bool m_RTEnabled = false;
-    bool m_RTShadowEnabled = true;      // RT 阴影开关（ImGui/CVar 控制）
-    bool m_RTAOEnabled = true;          // RT AO 开关
-    bool m_RTReflectionEnabled = true;  // RT 反射开关
-    bool m_RTGIEnabled = true;          // RT GI 开关
+    // 分辨率 CVar 热更新缓存：记录当前已应用到 RT Pass/降噪器的分辨率模式，
+    // 初值与 CVar 默认 halfRes/quarterRes=true 一致，避免首帧触发重建
+    bool m_ShadowHalfResApplied = true;      // RT 阴影当前应用的分辨率模式
+    bool m_AOHalfResApplied = true;          // RT AO 当前应用的分辨率模式
+    bool m_ReflectionHalfResApplied = true;  // RT 反射当前应用的分辨率模式
+    bool m_GIQuarterResApplied = true;       // RT GI 当前应用的分辨率模式
     bool m_SceneMaterialBuilt = false;  // 场景材质纹理是否已构建（延迟到首帧）
 
     // ── 专有 GI ──
