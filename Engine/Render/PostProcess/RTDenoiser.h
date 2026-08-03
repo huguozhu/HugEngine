@@ -46,6 +46,9 @@ public:
     void SetInputs(rhi::IRHITexture* noisyColor, rhi::IRHITexture* depth,
                    rhi::IRHITexture* normal, rhi::IRHITexture* velocity);
 
+    // 运行时更新时域混合因子（CVar 热更新用；Render 时写入 push constant）
+    void SetTemporalBlend(float blend) { m_Cfg.temporalBlend = blend; }
+
     // 执行时域累积降噪。内部管理离屏 Pass + 历史角色交换。
     void Render(rhi::IRHICommandList* cmd);
 

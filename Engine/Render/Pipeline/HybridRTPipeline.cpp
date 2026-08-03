@@ -9,6 +9,7 @@
 //   3. FXAA → BackBuffer 前通过 ToneMap PreBind 保证 RP 兼容。
 // ============================================================
 #include "Pipeline/HybridRTPipeline.h"
+#include "Pipeline/RTQualityCVars.h"
 #include "Pipeline/PhysicalLight.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
@@ -445,6 +446,12 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     // ── 收集光源（RT 阴影与 Lighting 共用当前帧槽位数据）──
     u32 lightCount = 0;
     CollectLights(world, sg, camera, lightCount);
+
+    // ── CVar 热更新：降噪时域混合因子（每帧应用，Render 时写入 push constant）──
+    if (m_ShadowDenoiser)     m_ShadowDenoiser->SetTemporalBlend(cvRTDenoiseShadowBlend.Get());
+    if (m_AODenoiser)         m_AODenoiser->SetTemporalBlend(cvRTDenoiseAOBlend.Get());
+    if (m_ReflectionDenoiser) m_ReflectionDenoiser->SetTemporalBlend(cvRTDenoiseReflectionBlend.Get());
+    if (m_GIDenoiser)         m_GIDenoiser->SetTemporalBlend(cvRTDenoiseGIBlend.Get());
 
     // ── RT Shadow — 对 GBuffer 有效像素发射阴影射线（半分辨率遮罩）──
     rhi::IRHITexture* rtShadowTex = nullptr;
