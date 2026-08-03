@@ -20,13 +20,14 @@
 
 namespace he::render {
 
-// 阴影光源结构（GPU 侧，48B/个，与 RT_Shadow.rgen.slang 的 ShadowLight 一致）
+// 阴影光源结构（GPU 侧，64B/个，与 RT_Shadow.rgen.slang 的 ShadowLight 一致）
 struct ShadowLightGPU {
     float4 pos_type;      // xyz=位置/方向, w=类型(0=Dir,1=Point,2=Spot)
     float4 color_radius;  // rgb=颜色, w=光源半径（软阴影预留）
     float4 spotDir_angle; // xyz=聚光方向, w=cos(内锥角)
+    float4 radius;        // x=光源半径（软阴影）
 };
-static_assert(sizeof(ShadowLightGPU) == 48, "ShadowLightGPU must be 48 bytes");
+static_assert(sizeof(ShadowLightGPU) == 64, "ShadowLightGPU must be 64 bytes");
 
 static constexpr u32 kShadowMaxLights = 16;
 
@@ -157,7 +158,9 @@ void RTShadowPass::Execute(rhi::IRHICommandList* cmd,
     pc.dispatchDimY = m_Height;
     pc.frameIdx     = ctx.frameIndex;
     pc.maxShadowDist = std::max(cvRTShadowMaxDist.Get(), 0.01f);  // 阴影最大追踪距离（CVar 热更新）
-    pc.shadowFlags  = m_HalfRes ? 2u : 0u;   // bit1=半分辨率
+    pc.softSPP      = std::clamp(cvRTShadowSPP.Get(), 1, 16);         // 软阴影每光源采样数
+    pc.shadowFlags  = (m_HalfRes ? 2u : 0u)
+                    | (cvRTShadowSoft.Get() ? 4u : 0u);               // bit1=半分辨率, bit2=软阴影
     pc.lightCount   = ctx.lightCount;
 
     // ── 先绑 RT 管线（设置正确 push constant 布局），再推常量，最后发射光线 ──
@@ -189,6 +192,7 @@ void RTShadowPass::FillLightBuffer(const RTExecuteContext& ctx) {
         sl.color_radius = src[i].colorIntensity;
         // 避免 GLM swizzle（.xyz），用 vec3(vec4) 构造提取前三分量
         sl.spotDir_angle = float4(glm::vec3(src[i].directionType), src[i].coneAngles.x);
+        sl.radius.x = src[i].shadowRadius;  // 光源半径（软阴影）
     }
 
     m_LightUB->Unmap();

@@ -43,6 +43,7 @@ public:
     float     shadowBias       = 0.005f;           // 深度偏移（防止阴影痤疮）
     float     shadowNormalBias = 0.02f;            // 法线偏移（防止自阴影）
     float     shadowStrength   = 1.0f;             // 阴影强度 [0,1]
+    float     shadowRadius     = 0.0f;             // 光源半径（软阴影用；0=硬阴影）
 };
 
 // --- 平行光（无限远方向光）---

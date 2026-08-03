@@ -406,6 +406,7 @@ void HybridRTPipeline::CollectLights(he::World& world, he::SceneGraph& sg,
         if (lightCount >= MAX_LIGHTS || !lc.enabled) return;
         GPULight gl{};
         gl.shadowIndex = -1;  // 混合 RT 管线无传统阴影系统，阴影由 RT 阴影 Pass 覆盖
+        gl.shadowRadius = lc.shadowRadius;  // 光源半径（软阴影）
 
         // 色温 → RGB 颜色（叠加到 color 滤镜色上）
         float3 lightColor = lc.color;

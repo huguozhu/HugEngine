@@ -128,7 +128,7 @@ GPU_STRUCT GPULight {
     float4 positionRange;     // xyz=位置, w=范围
     float2 coneAngles;        // x=内锥角, y=外锥角 (Spot 专用)
     GPU_INT shadowIndex;      // -1=无阴影, >=0 指向 u_ShadowData 数组
-    GPU_INT _padLight;
+    float   shadowRadius;     // 光源半径（软阴影用，0=硬阴影）
 };
 
 // --- GPUShadowData: 阴影数据（256 字节，std430 布局）---
@@ -212,7 +212,7 @@ GPU_STRUCT DeferredLightingPushConstant {
     GPU_UINT rtDiffuseSource;       // [60]      0=SSGI, 1=RT GI
 };
 
-// --- RTShadowPushConstant: RT 阴影 Pass Push Constant（104B，C++/Slang 单一数据源）---
+// --- RTShadowPushConstant: RT 阴影 Pass Push Constant（108B，C++/Slang 单一数据源）---
 GPU_STRUCT RTShadowPushConstant {
     float4x4 invViewProj;           // [0..64]   逆 ViewProj（深度 → 世界坐标）
     float4   cameraPos;             // [64..80]  xyz=相机世界位置, w=近平面
@@ -220,9 +220,10 @@ GPU_STRUCT RTShadowPushConstant {
     GPU_UINT dispatchDimY;          // [84]      DispatchRaysDimensions.y
     GPU_UINT frameIdx;              // [88]      帧索引（时域抖动用）
     float    maxShadowDist;         // [92]      最大阴影距离
-    GPU_UINT shadowFlags;           // [96]      bit0=硬阴影, bit1=半分辨率
+    GPU_UINT shadowFlags;           // [96]      bit0=硬阴影, bit1=半分辨率, bit2=软阴影
     GPU_UINT lightCount;            // [100]     阴影光源数
-};                                  // 共 104B（alignas(16) 后 112B）
+    GPU_UINT softSPP;               // [104]     软阴影每光源采样数
+};                                  // 共 108B（alignas(16) 后 112B）
 
 // --- RTRayEffectPushConstant: RT 反射/AO/GI 效果共享 Push Constant（108B，alignas 后 112B）---
 // 被 Reflection / AO / GI 三个效果 Pass 复用；未使用字段由各 Pass 置 0。
