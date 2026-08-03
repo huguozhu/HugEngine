@@ -1,7 +1,7 @@
 // RT_GI.rgen.slang — 硬件 Ray Tracing 间接漫反射（GI）射线生成着色器
 //
 // 对 GBuffer 有效像素在法线半球余弦采样 N 条射线（SPP=1-2），
-// ClosestHit 评估命中表面出射辐射度（一次反弹），Miss 回退天空色。
+// ClosestHit 评估命中表面出射辐射度（一次反弹），Miss 回退 DDGI 探针查询（替代纯天空色）。
 // 输出 RGBA16_FLOAT 四分之一分辨率间接漫反射（rgb + 有效性 a）。
 //
 // 与 DDGI 配合：RT GI 覆盖中距离（5-30m）精确间接光，
@@ -103,11 +103,14 @@ void main() {
         payload.radianceT = float4(0, 0, 0, -1);
         TraceRay(g_TLAS, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
 
-        radiance += payload.radianceT.rgb;
-        // miss（a<0）回退 DDGI 探针查询（远距离低频间接光），替代纯天空色
-        if (payload.radianceT.a < 0.0)
+        if (payload.radianceT.a < 0.0) {
+            // miss：DDGI 探针查询替代纯天空色（远距离低频间接光）
             radiance += SampleDDGI(worldPos, dir);
-        if (payload.radianceT.a > 0.0) valid++;
+        } else {
+            // hit：ClosestHit 返回的出射辐射度
+            radiance += payload.radianceT.rgb;
+        }
+        valid++;   // 每条射线（命中或 DDGI 回退）都提供了间接光，计为有效
     }
     radiance /= float(n);
 

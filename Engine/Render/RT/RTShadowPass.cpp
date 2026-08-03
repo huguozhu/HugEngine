@@ -23,7 +23,7 @@ namespace he::render {
 // 阴影光源结构（GPU 侧，64B/个，与 RT_Shadow.rgen.slang 的 ShadowLight 一致）
 struct ShadowLightGPU {
     float4 pos_type;      // xyz=位置/方向, w=类型(0=Dir,1=Point,2=Spot)
-    float4 color_radius;  // rgb=颜色, w=光源半径（软阴影预留）
+    float4 color_radius;  // rgb=颜色, w=强度（用于剔除无效光源）
     float4 spotDir_angle; // xyz=聚光方向, w=cos(内锥角)
     float4 radius;        // x=光源半径（软阴影）
 };
