@@ -10,12 +10,14 @@
 // 输出由 LightingPass 在 rtDiffuseSource=1 时采样（u_RT_GI）。
 
 #include "ShaderTypes.slang"  // RTRayEffectPushConstant
+#include "RT_DDGI.slang"     // DDGI 探针查询共享库（miss 回退低频间接光）
 
 // === RayGen 资源 (set=0) ===
 [[vk::binding(0, 0)]] RaytracingAccelerationStructure g_TLAS;
 [[vk::binding(1, 0)]] RWTexture2D<float4> g_Output;   // RGBA16F 间接漫反射
 [[vk::binding(2, 0)]] Texture2D<float>  g_Depth;       // GBuffer 深度
 [[vk::binding(3, 0)]] Texture2D<float4> g_NormalRough; // GBufferB: worldNormal.xyz
+[[vk::binding(7, 0)]] StructuredBuffer<float4> u_DDGIProbes;  // DDGI 探针（miss 回退）
 
 // === Push Constant ===
 [[vk::push_constant]] RTRayEffectPushConstant g_PC;
@@ -102,6 +104,9 @@ void main() {
         TraceRay(g_TLAS, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
 
         radiance += payload.radianceT.rgb;
+        // miss（a<0）回退 DDGI 探针查询（远距离低频间接光），替代纯天空色
+        if (payload.radianceT.a < 0.0)
+            radiance += SampleDDGI(worldPos, dir);
         if (payload.radianceT.a > 0.0) valid++;
     }
     radiance /= float(n);

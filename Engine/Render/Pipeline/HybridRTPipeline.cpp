@@ -706,6 +706,7 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 ctx.lightCount  = lightCount;
                 ctx.sceneMaterialTex = m_RTPass->GetSceneMaterialTexture();
                 ctx.sceneTriangleNormals = m_RTPass->GetSceneTriangleNormals();
+                ctx.ddgiProbeBuffer = m_DDGI.GetProbeBuffer();  // DDGI 探针（GI miss 回退）
                 m_RTGI->Execute(c, m_RTPass->GetTLAS(), ctx);
             });
     }

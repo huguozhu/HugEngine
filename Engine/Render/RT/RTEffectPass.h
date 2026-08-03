@@ -25,6 +25,7 @@ struct RTExecuteContext {
     u32               lightCount  = 0;       // 有效光源数
     rhi::IRHITexture* sceneMaterialTex = nullptr; // 场景材质纹理（3×N RGBA32F，ClosestHit 查询用）
     rhi::IRHITexture* sceneTriangleNormals = nullptr; // 三角形顶点法线纹理（ClosestHit 平滑法线用）
+    rhi::IRHIBuffer*  ddgiProbeBuffer = nullptr;  // DDGI 探针 SSBO（GI miss 回退用）
 };
 
 // ============================================================

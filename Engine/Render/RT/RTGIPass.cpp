@@ -30,7 +30,8 @@ bool RTGIPass::Initialize(rhi::IRHIDevice* device, u32 fullWidth, u32 fullHeight
 
     // ── set0 资源绑定（与 RTReflectionPass 相同的场景数据布局）──
     // b0=TLAS(RG), b1=Output(RG), b2=GBDepth(RG), b3=GBNormal(RG),
-    // b4=材质纹理(CH), b5=光源UB(CH), b6=三角形法线纹理(CH)
+    // b4=材质纹理(CH), b5=光源UB(CH), b6=三角形法线纹理(CH),
+    // b7=DDGI 探针 SSBO(RG, miss 回退低频间接光)
     std::vector<rhi::DescriptorSetLayoutBinding> bindings = {
         {0, rhi::DescriptorType::AccelerationStructure, 1, rhi::kStageMaskRayGen},
         {1, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskRayGen},
@@ -39,6 +40,7 @@ bool RTGIPass::Initialize(rhi::IRHIDevice* device, u32 fullWidth, u32 fullHeight
         {4, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskClosestHit},  // 场景材质纹理
         {5, rhi::DescriptorType::UniformBuffer, 1, rhi::kStageMaskClosestHit}, // 命中点光源
         {6, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskClosestHit},  // 三角形顶点法线纹理
+        {7, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskRayGen},     // DDGI 探针
     };
 
     // ── push constant 范围（RayGen 深度重建 + ClosestHit 光照计数）──
@@ -134,6 +136,9 @@ void RTGIPass::Execute(rhi::IRHICommandList* cmd,
     if (ctx.sceneTriangleNormals)
         m_Device->UpdateDescriptorSet(m_RayGenSet, 6,
             rhi::DescriptorType::SampledImage, ctx.sceneTriangleNormals, nullptr);
+    if (ctx.ddgiProbeBuffer)
+        m_Device->UpdateDescriptorSet(m_RayGenSet, 7,
+            rhi::DescriptorType::StorageBuffer, ctx.ddgiProbeBuffer);
 
     // ── 填充 ClosestHit 光源数据 ──
     FillHitLightUB(ctx);
