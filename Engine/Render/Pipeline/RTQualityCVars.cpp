@@ -20,6 +20,10 @@ CVar<float> cvRTReflectionMaxDist("r.RT.Reflection.MaxDistance", 500.0f, "RT 反
 CVar<i32>   cvRTGISPP("r.RT.GI.SPP", 1, "RT GI 每像素采样数");
 CVar<float> cvRTGIMaxDist("r.RT.GI.MaxDistance", 30.0f, "RT GI 追踪范围(m)");
 CVar<float> cvRTShadowMaxDist("r.RT.Shadow.MaxDistance", 200.0f, "RT 阴影最大追踪距离");
+// 软阴影 / 反射分级
+CVar<bool>  cvRTShadowSoft("r.RT.Shadow.Soft", false, "RT 软阴影开关");
+CVar<i32>   cvRTShadowSPP("r.RT.Shadow.SPP", 4, "RT 软阴影每光源采样数（1=硬阴影）");
+CVar<float> cvRTReflectionMaxRoughness("r.RT.Reflection.MaxRoughness", 0.6f, "RT 反射最大粗糙度，超过用 IBL prefilter");
 // 降噪
 CVar<bool>  cvRTDenoiseTemporal("r.RT.Denoise.Temporal", true, "RT 时域降噪开关");
 CVar<bool>  cvRTDenoiseSpatial("r.RT.Denoise.Spatial", true, "RT 空间滤波开关");
