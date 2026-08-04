@@ -505,12 +505,14 @@ bool RTPass::CreateMaterialTexture(rhi::IRHIDevice* device, u32 maxInstances,
 }
 
 // ============================================================
-// BuildSceneMaterialTexture — 场景材质纹理（3×N）+ 三角形法线纹理
-// 供 RT 反射/GI 的 ClosestHit 用 InstanceID() 查询材质、
+// BuildSceneMaterialTexture — 场景材质纹理（4×N）+ 三角形法线纹理
+// 供 RT 反射/GI/PT 的 ClosestHit 用 InstanceID() 查询材质、
 // PrimitiveIndex() 查询三角形顶点法线（重心插值 → 平滑法线）。
 // 列索引与 BuildAS 的 TLAS 实例顺序一致（Mesh → Cube → Sphere）。
 // 用纹理而非 SSBO：ClosestHitKHR 中访问 StructuredBuffer 已知 GPU fault；
 // 不依赖 position_fetch：GTX 1070 等设备不支持 VK_KHR_ray_tracing_position_fetch。
+// 行布局：row0=albedo.rgb+metallic, row1=roughness+ao,
+//   row2=(法线线性起始=tri*3, 三角形数, 法线纹理宽度, 0), row3=emissive.rgb+0
 // ============================================================
 bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world) {
     if (!device) return false;
@@ -527,10 +529,10 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world
     u64 totalTris = 0;
     for (auto& [e, m] : meshList) totalTris += m->GetIndexCount() / 3;
 
-    // ── 材质纹理数据（3 行 × N 列）──
+    // ── 材质纹理数据（4 行 × N 列）──
     // row0=albedo.rgb+metallic, row1=roughness+ao,
-    // row2=(法线线性起始=tri*3, 三角形数, 法线纹理宽度, 0)
-    std::vector<float> matData(n * 4 * 3, 0.0f);
+    // row2=(法线线性起始=tri*3, 三角形数, 法线纹理宽度, 0), row3=emissive.rgb+0
+    std::vector<float> matData(n * 4 * 4, 0.0f);
 
     // ── 三角形顶点法线扁平数组（每三角形 3 条，跨所有实例）──
     // 2D 纹理布局：width=W, height=kNormTexHeight；线性索引 lin → (row=lin/W, col=lin%W)
@@ -549,7 +551,7 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world
         he::MeshComponent& m = *meshList[i].second;
         u32 triCount = m.GetIndexCount() / 3;
 
-        // 材质纹理三行
+        // 材质纹理四行
         float* row0 = &matData[i * 4];
         row0[0] = m.baseColorFactor.r; row0[1] = m.baseColorFactor.g;
         row0[2] = m.baseColorFactor.b; row0[3] = m.metallicFactor;
@@ -560,6 +562,9 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world
         row2[1] = float(triCount);
         row2[2] = float(normTexWidth);     // 法线纹理宽度（shader 用 lin%W 计算坐标）
         row2[3] = 0.0f;
+        float* row3 = &matData[n * 12 + i * 4];
+        row3[0] = m.emissiveFactor.r; row3[1] = m.emissiveFactor.g;
+        row3[2] = m.emissiveFactor.b; row3[3] = 0.0f;
 
         // 读取顶点/索引缓冲 → 每三角形 3 条顶点法线
         auto* vb = m.GetVertexBuffer().get();
@@ -587,12 +592,12 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world
         triFlat += triCount;
     }
 
-    // ── 创建材质纹理（3×N RGBA32F）──
+    // ── 创建材质纹理（4×N RGBA32F）──
     {
         rhi::TextureDesc desc;
         desc.format      = rhi::Format::RGBA32_FLOAT;
         desc.width       = n;
-        desc.height      = 3;
+        desc.height      = 4;
         desc.mipLevels   = 1;
         desc.usage       = rhi::TextureUsage::ShaderResource;
         desc.initialData = matData.data();
@@ -619,7 +624,7 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world
         }
     }
 
-    HE_CORE_INFO("RTPass: 场景材质纹理(3×{}) + 法线纹理({}×{} RGBA32F)创建, {} 实例 {} 三角形",
+    HE_CORE_INFO("RTPass: 场景材质纹理(4×{}) + 法线纹理({}×{} RGBA32F)创建, {} 实例 {} 三角形",
                  n, normTexWidth, kNormTexHeight, n, totalTris);
     return true;
 }

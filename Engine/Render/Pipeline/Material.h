@@ -53,6 +53,9 @@ static_assert(sizeof(PushConstantData) == 128, "PushConstantData must be 128 byt
 static_assert(sizeof(ShadowPushConstant) == 80, "ShadowPushConstant must be 80 bytes");
 static_assert(sizeof(RTShadowPushConstant) == 112, "RTShadowPushConstant must be 112 bytes");
 static_assert(sizeof(RTRayEffectPushConstant) == 112, "RTRayEffectPushConstant must be 112 bytes");
+static_assert(sizeof(PTPushConstant) == 176, "PTPushConstant must be 176 bytes");
+static_assert(sizeof(PTReservoir) == 32, "PTReservoir must be 32 bytes");
+static_assert(sizeof(ReSTIRPushConstant) == 128, "ReSTIRPushConstant must be 128 bytes");
 
 // ============================================================
 // glTF 2.0 PBR 材质（CPU 端资产数据）

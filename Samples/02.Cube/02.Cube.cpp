@@ -16,6 +16,8 @@
 #include "Pipeline/ForwardPipeline.h"
 #include "Pipeline/DeferredPipeline.h"
 #include "Pipeline/HybridRTPipeline.h"
+#include "Pipeline/PathTracingPipeline.h"
+#include "Pipeline/PTQualityCVars.h"
 #include "Pipeline/CameraController.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
@@ -46,8 +48,8 @@ using namespace he;
 // ============================================================
 // 渲染管线模式 CVar
 // ============================================================
-// 渲染管线模式 CVar（0=Forward, 1=Deferred, 2=HybridRT）
-he::CVar<int> cvPipelineMode("r.Pipeline.Mode", 2, "渲染管线模式 0=Forward 1=Deferred 2=HybridRT");
+// 渲染管线模式 CVar（0=Forward, 1=Deferred, 2=HybridRT, 3=PathTrace）
+he::CVar<int> cvPipelineMode("r.Pipeline.Mode", 3, "渲染管线模式 0=Forward 1=Deferred 2=HybridRT 3=PathTrace");
 
 // ============================================================
 // 相机配置读写（简易 key=value 格式）
@@ -137,7 +139,11 @@ int main() {
     // --- 2. 创建 RHI 设备 ---
     rhi::DeviceInitDesc rhiDesc;
     rhiDesc.backend          = rhi::Backend::Vulkan;
-    rhiDesc.enableValidation = true;
+    // 注意：本机（Intel Arc B370 + 该版驱动 + Vulkan SDK 1.4.341 验证层）存在
+    // 预先存在的驱动编译器崩溃（HEAD 同样复现）：开启验证层时 igc-default64.dll
+    // 在 shader 编译线程随机 SIGSEGV。关闭验证层后稳定（RT 管线编译约 20s/个）。
+    // 在 NVIDIA/其他稳定驱动上可恢复为 true 以获得验证信息。
+    rhiDesc.enableValidation = false;
     rhiDesc.windowHandle     = engine.GetWindow()->GetNativeHandleRaw();
 
     auto device = rhi::CreateDevice(rhiDesc.backend);
@@ -272,10 +278,11 @@ int main() {
 
     HE_CORE_INFO("Scene created: {} entities", world.GetEntityCount());
 
-    // --- 5. 初始化前向管线 + 延迟管线 + 混合 RT 管线 ---
+    // --- 5. 初始化前向管线 + 延迟管线 + 混合 RT 管线 + 全路径追踪管线 ---
     render::ForwardPipeline  forwardPipeline;
     render::DeferredPipeline deferredPipeline;
     render::HybridRTPipeline hybridPipeline;
+    render::PathTracingPipeline pathTracingPipeline;
     forwardPipeline.Initialize(device.get());
     forwardPipeline.SetUseRenderGraph(false);
     forwardPipeline.SetMultiThreadedRecording(false);
@@ -289,6 +296,11 @@ int main() {
     hybridPipeline.Initialize(device.get());
     hybridPipeline.SetSwapChain(swapchain.get());
     hybridPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+
+    // 全路径追踪管线（r.Pipeline.Mode=3，设备支持 RT 时才可用）
+    pathTracingPipeline.Initialize(device.get());
+    pathTracingPipeline.SetSwapChain(swapchain.get());
+    pathTracingPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
 
     // 启动时默认关闭 GPU 剔除和 CPU 视锥剔除
     forwardPipeline.GetGPUCulling().enabled = false;
@@ -373,6 +385,7 @@ int main() {
         forwardPipeline.OnResize(w, h);
         deferredPipeline.OnResize(w, h);
         hybridPipeline.OnResize(w, h);
+        pathTracingPipeline.OnResize(w, h);
         camCtrl.SetAspectRatio(static_cast<float>(w), static_cast<float>(h));
     });
 
@@ -468,6 +481,14 @@ int main() {
             cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
                 rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
         }
+        // --- 全路径追踪模式（Level 2: PT 参考） ---
+        else if (cvPipelineMode.Get() == 3) {
+            pathTracingPipeline.NextFrame();
+            pathTracingPipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera(), deltaTime);
+            // ImGui 叠加：管线已写 BackBuffer，Load 保留内容
+            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
+                rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
+        }
         imgui.BeginFrame();
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
         ImGui::SetNextWindowBgAlpha(0.5f);
@@ -505,17 +526,30 @@ int main() {
         if (ImGui::DragFloat("移动速度", &speed, 1.0f, 0.1f, 500.0f, "%.1f"))
             camCtrl.SetMoveSpeed(speed);
 
-        // 渲染模式切换（读 CVar → RadioButton → 写回 CVar）
+        // 渲染模式切换（读 CVar → Combo → 写回 CVar）
         int mode = cvPipelineMode.Get();
         ImGui::SeparatorText("渲染模式");
-        ImGui::RadioButton("Forward 前向渲染", &mode, 0);
-        ImGui::SameLine();
-        ImGui::RadioButton("Deferred 延迟渲染", &mode, 1);
-        if (device->GetCaps().supportsRayTracing) {
-            ImGui::SameLine();
-            ImGui::RadioButton("Hybrid RT 混合光追", &mode, 2);
+
+        // 下拉项：索引与模式值一一对应（0/1/2/3 连续）
+        const char* modeNames[] = {
+            "Forward 前向渲染",
+            "Deferred 延迟渲染",
+            "Hybrid RT 混合光追",
+            "PathTrace 全路径追踪",
+        };
+
+        // 无 RT 能力时仅提供前两种模式
+        const int itemCount = device->GetCaps().supportsRayTracing ? 4 : 2;
+
+        // 无 RT 能力且 CVar 停留在 RT 模式(2/3)时回退到 Deferred，避免下拉框越界
+        if (itemCount == 2 && mode >= 2) {
+            mode = 1;
+            cvPipelineMode.Set(mode);
         }
-        cvPipelineMode.Set(mode);
+
+        // 仅在用户改动时写回 CVar
+        if (ImGui::Combo("渲染管线", &mode, modeNames, itemCount))
+            cvPipelineMode.Set(mode);
 
         // GPU 剔除开关
         ImGui::Spacing();
@@ -624,6 +658,28 @@ int main() {
             }
         });
 
+        // PT 质量面板（仅 PathTrace 模式显示）
+        if (cvPipelineMode.Get() == 3 && device->GetCaps().supportsRayTracing) {
+            ImGui::SeparatorText("PT 质量");
+            int spp = pathTracingPipeline.GetPTSampleCount();
+            if (ImGui::SliderInt("SPP", &spp, 1, 8)) pathTracingPipeline.SetPTSampleCount(spp);
+            int bounces = pathTracingPipeline.GetPTMaxBounces();
+            if (ImGui::SliderInt("Bounces", &bounces, 1, 8)) pathTracingPipeline.SetPTMaxBounces(bounces);
+            bool denoiseOn = pathTracingPipeline.IsPTDenoise();
+            if (ImGui::Checkbox("时域降噪", &denoiseOn))
+                pathTracingPipeline.SetPTDenoise(denoiseOn);
+            bool restirOn = pathTracingPipeline.IsPTReSTIR();
+            if (ImGui::Checkbox("ReSTIR DI", &restirOn))
+                pathTracingPipeline.SetPTReSTIR(restirOn);
+            bool misOn = pathTracingPipeline.IsPTMIS();
+            if (ImGui::Checkbox("MIS", &misOn))
+                pathTracingPipeline.SetPTMIS(misOn);
+            bool rrOn = pathTracingPipeline.IsPTRoulette();
+            if (ImGui::Checkbox("俄罗斯轮盘赌", &rrOn))
+                pathTracingPipeline.SetPTRoulette(rrOn);
+            ImGui::Text("蓄水池: %s", pathTracingPipeline.IsReservoirReady() ? "有效" : "预热中/无效");
+        }
+
         ImGui::End();
         imgui.EndFrame(cmdList.get());
         cmdList->EndRenderPass();  // 关闭 ImGui RP（RG 和 non-RG 都需要）
@@ -671,6 +727,7 @@ int main() {
     forwardPipeline.Shutdown();
     deferredPipeline.Shutdown();
     hybridPipeline.Shutdown();
+    pathTracingPipeline.Shutdown();
 
     HE_CORE_INFO("Exiting after {} frames", frameIndex);
     return 0;

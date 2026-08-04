@@ -26,6 +26,10 @@ set(RENDER_SOURCES
     Pipeline/HybridRTPipeline.cpp
     Pipeline/RTQualityCVars.h
     Pipeline/RTQualityCVars.cpp
+    Pipeline/PathTracingPipeline.h
+    Pipeline/PathTracingPipeline.cpp
+    Pipeline/PTQualityCVars.h
+    Pipeline/PTQualityCVars.cpp
     Pipeline/ClusteredShading.h
     Pipeline/ClusteredShading.cpp
     Pipeline/GPUScene.h
@@ -58,6 +62,10 @@ set(RENDER_SOURCES
     RT/RTReflectionPass.cpp
     RT/RTGIPass.h
     RT/RTGIPass.cpp
+    RT/PTPass.h
+    RT/PTPass.cpp
+    RT/ReSTIRPass.h
+    RT/ReSTIRPass.cpp
     # RenderGraph
     RenderGraph.h
     RenderGraph.cpp

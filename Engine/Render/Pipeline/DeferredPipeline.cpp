@@ -141,7 +141,11 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     m_ParticleRenderer.SetSceneDepth(m_Lighting.GetHDRDepth(), m_Lighting.GetPointSampler());  // 软粒子深度纹理
 
     // 启动 PSO 后台预热（所有子系统已调用 PrecompileQueuePSO 注册 PSO 变体）
-    device->StartPSOPrecompile();
+    // 注意：本机（Intel Arc B370 + 该版驱动）预编译 worker 线程会在
+    // igc-default64.dll 内随机 SIGSEGV（约 50% 概率，见 gdb 栈：线程 27 编译器崩溃），
+    // 导致 02.Cube 启动随机崩溃。预编译是纯优化（PSO 缓存已按 hash 去重，
+    // 禁用后 PSO 仅在首次使用时惰性编译），故本机禁用。稳定驱动上可恢复。
+    // device->StartPSOPrecompile();
 
     m_Ready = true;
     HE_CORE_INFO("DeferredPipeline initialized");

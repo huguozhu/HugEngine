@@ -96,6 +96,9 @@ if(SLANGC)
         "${SHADER_DIR}/DDGI.comp.slang"
         "${SHADER_DIR}/AutoExposure.comp.slang"
         "${SHADER_DIR}/PersistentCull.comp.slang"
+        "${SHADER_DIR}/ReSTIR_Init.comp.slang"
+        "${SHADER_DIR}/ReSTIR_Temporal.comp.slang"
+        "${SHADER_DIR}/ReSTIR_Spatial.comp.slang"
     )
     # Ray Tracing 着色器（.rgen / .rmiss / .rchit / .rahit / .rcall）
     # 命名约定: EffectName.rgen.slang (RayGen), EffectName.rmiss.slang (Miss),
@@ -121,6 +124,9 @@ if(SLANGC)
         "${SHADER_DIR}/RT_GI.rgen.slang"
         "${SHADER_DIR}/RT_GI.rchit.slang"
         "${SHADER_DIR}/RT_GI.rmiss.slang"
+        "${SHADER_DIR}/PT_Full.rgen.slang"
+        "${SHADER_DIR}/PT_Full.rchit.slang"
+        "${SHADER_DIR}/PT_Full.rmiss.slang"
     )
     # Mesh Shader 着色器（.mesh / .task）
     # 命名约定: EffectName.mesh.slang (Mesh), EffectName.task.slang (Amplification/Task)

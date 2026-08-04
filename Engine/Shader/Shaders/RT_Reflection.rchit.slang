@@ -26,9 +26,9 @@ void main(inout ReflectionPayload payload, in BuiltInTriangleIntersectionAttribu
     // 不依赖 position_fetch（GTX 1070 等设备不支持 VK_KHR_ray_tracing_position_fetch）
     float3 N = LoadHitNormal(instanceID, primId, attr.barycentrics);
 
-    // ── 命中材质查询 ──
-    float3 albedo; float metallic; float roughness;
-    LoadHitMaterial(instanceID, albedo, metallic, roughness);
+    // ── 命中材质查询（emissive 供后续扩展，反射近似暂不使用）──
+    float3 albedo; float metallic; float roughness; float3 emissive;
+    LoadHitMaterial(instanceID, albedo, metallic, roughness, emissive);
 
     // ── 命中点出射辐射度（反射 = 命中表面被照亮的颜色）──
     float3 radiance = EvaluateHitRadiance(P, N, albedo, g_PC.lightCount);

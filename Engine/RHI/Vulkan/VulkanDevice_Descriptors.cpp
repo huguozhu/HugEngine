@@ -268,20 +268,25 @@ void VulkanDevice::UpdateDescriptorSet(DescriptorSetHandle setHandle, u32 bindin
                                         DescriptorType type, IRHITexture* texture,
                                         IRHISampler* sampler) {
     if (setHandle == 0 || setHandle > m_DescSets.size()) return;
-    if (!texture || !sampler) return;
+    if (!texture) return;   // 必须有纹理；采样器可空（SampledImage 的 Load/OpImageFetch 不需要采样器）
     VkDescriptorSet ds = m_DescSets[static_cast<usize>(setHandle - 1)];
     if (ds == VK_NULL_HANDLE) return;
 
-    auto* vkTex     = static_cast<VulkanTexture*>(texture);
-    auto* vkSampler = static_cast<VulkanSampler*>(sampler);
-
+    auto* vkTex = static_cast<VulkanTexture*>(texture);
     VkImageView imgView = vkTex->GetImageView();
-    VkSampler   vkSamp  = vkSampler->GetHandle();
+    VkSampler   vkSamp  = sampler ? static_cast<VulkanSampler*>(sampler)->GetHandle() : VK_NULL_HANDLE;
 
-    if (imgView == VK_NULL_HANDLE || imgView == (VkImageView)0xdddddddddddddddd ||
-        vkSamp == VK_NULL_HANDLE || vkSamp == (VkSampler)0xdddddddddddddddd) {
-        HE_CORE_ERROR("UpdateDescriptorSet: 非法句柄! binding={} imgView={:#018x} sampler={:#018x} texPtr={} sampPtr={}",
-            binding, (u64)imgView, (u64)vkSamp, (void*)texture, (void*)sampler);
+    if (imgView == VK_NULL_HANDLE || imgView == (VkImageView)0xdddddddddddddddd) {
+        HE_CORE_ERROR("UpdateDescriptorSet: 非法 imageView! binding={} imgView={:#018x} texPtr={}",
+            binding, (u64)imgView, (void*)texture);
+        return;
+    }
+
+    VkDescriptorType vkType = ToVkDescType(type);
+    // CombinedImageSampler 必须提供有效采样器；SampledImage 允许为空（Load 不采样）
+    if (vkType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &&
+        (vkSamp == VK_NULL_HANDLE || vkSamp == (VkSampler)0xdddddddddddddddd)) {
+        HE_CORE_ERROR("UpdateDescriptorSet: CombinedImageSampler 缺采样器! binding={}", binding);
         return;
     }
 
@@ -296,7 +301,7 @@ void VulkanDevice::UpdateDescriptorSet(DescriptorSetHandle setHandle, u32 bindin
     write.dstBinding      = binding;
     write.dstArrayElement = 0;
     write.descriptorCount = 1;
-    write.descriptorType  = ToVkDescType(type);
+    write.descriptorType  = vkType;
     write.pImageInfo      = &imageInfo;
 
     vkUpdateDescriptorSets(m_Device, 1, &write, 0, nullptr);

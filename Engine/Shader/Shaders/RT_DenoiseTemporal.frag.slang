@@ -22,7 +22,7 @@ struct VSOutput {
     float  depthThreshold;  // 去遮挡深度容差
     float  normalThreshold; // 去遮挡法线 dot 阈值
     uint   isFirstFrame;    // 首帧标志（无历史数据，直接输出当前帧）
-    float  _pad0;
+    float  motionBlend;     // 相机运动自适应混合权重（有效混合 = max(temporalBlend, motionBlend)）
     float  _pad1;
 };
 
@@ -55,7 +55,10 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
     float  depthDiff = abs(depth - histDepth);
     float  normalDot = dot(N, histN);
 
-    float historyWeight = 1.0 - temporalBlend;
+    // 相机运动自适应：运动时用更高混合权重缩短历史拖影；静止时保持低混合高质量累积。
+    // 快速运动时 PT 无累积（图像变噪）是路径追踪的固有取舍，停下后自动恢复。
+    float effectiveBlend = max(temporalBlend, motionBlend);
+    float historyWeight = 1.0 - effectiveBlend;
     if (depthDiff > depthThreshold || normalDot < normalThreshold) {
         historyWeight = 0.0;  // 去遮挡 → 完全使用当前帧
     }
