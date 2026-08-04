@@ -24,9 +24,9 @@ void main(inout GIPayload payload, in BuiltInTriangleIntersectionAttributes attr
     // ── 平滑法线（纹理查询 + 重心插值，不依赖 position_fetch）──
     float3 N = LoadHitNormal(instanceID, primId, attr.barycentrics);
 
-    // ── 命中材质查询 ──
-    float3 albedo; float metallic; float roughness;
-    LoadHitMaterial(instanceID, albedo, metallic, roughness);
+    // ── 命中材质查询（emissive 供后续扩展，间接光近似暂不使用）──
+    float3 albedo; float metallic; float roughness; float3 emissive;
+    LoadHitMaterial(instanceID, albedo, metallic, roughness, emissive);
 
     // ── 命中点出射辐射度（作为间接漫反射来源）──
     float3 radiance = EvaluateHitRadiance(P, N, albedo, g_PC.lightCount);

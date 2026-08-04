@@ -37,15 +37,18 @@ struct RTHitLight {
 
 // ============================================================
 // LoadHitMaterial — 按 TLAS 实例 ID 查询命中材质
+// 4×N 纹理：row0=albedo+metallic, row1=roughness+ao, row3=emissive
 // ============================================================
 void LoadHitMaterial(uint instanceID,
                      out float3 albedo,
                      out float metallic,
-                     out float roughness) {
+                     out float roughness,
+                     out float3 emissive) {
     float4 row0 = g_SceneMaterials.Load(int3(instanceID, 0, 0));
     albedo    = row0.rgb;
     metallic  = row0.a;
     roughness = g_SceneMaterials.Load(int3(instanceID, 1, 0)).r;
+    emissive  = g_SceneMaterials.Load(int3(instanceID, 3, 0)).rgb;
 }
 
 // ============================================================
