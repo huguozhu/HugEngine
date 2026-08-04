@@ -94,6 +94,11 @@ private:
     // 相机矩阵缓存（velocity 计算用）
     float4x4 m_PrevViewProj = float4x4(1.0f);
     float4x4 m_CurrViewProj = float4x4(1.0f);
+
+    // 相机运动自适应降噪：上一帧相机位置/朝向，用于计算运动量并抬升时域混合权重
+    float3 m_PrevCamPos = float3(0.0f);
+    float3 m_PrevCamFwd = float3(0.0f, 0.0f, -1.0f);
+    bool   m_CamInited  = false;
     u32 m_FrameIndex = 0;          // 帧索引（PT 抖动 / ReSTIR 种子）
     u32 m_PrevLightCount = 0;      // 上帧光源数（变化时 ReSTIR 历史失效）
     bool m_ReservoirReady = false; // ReSTIR 蓄水池可用（首帧/光源变化后一帧内为 false）

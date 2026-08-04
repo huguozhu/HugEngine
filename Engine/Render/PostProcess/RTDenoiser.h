@@ -49,6 +49,9 @@ public:
     // 运行时更新时域混合因子（CVar 热更新用；Render 时写入 push constant）
     void SetTemporalBlend(float blend) { m_Cfg.temporalBlend = blend; }
 
+    // 相机运动自适应混合权重（0=关闭，静止时沿用 temporalBlend；运动时抬升以缩短历史拖影）
+    void SetMotionBlend(float blend) { m_MotionBlend = blend < 0.0f ? 0.0f : (blend > 1.0f ? 1.0f : blend); }
+
     // 执行时域累积降噪。内部管理离屏 Pass + 历史角色交换。
     void Render(rhi::IRHICommandList* cmd);
 
@@ -88,6 +91,7 @@ private:
     rhi::IRHITexture* m_Velocity   = nullptr;
 
     u32 m_FrameIndex = 0;  // 帧索引（首帧无历史数据）
+    float m_MotionBlend = 0.0f;  // 相机运动自适应混合权重（默认 0=关闭，仅运动检测者设置）
 };
 
 } // namespace he::render

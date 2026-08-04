@@ -154,8 +154,9 @@ bool SampleLight(GPULight light, float3 P,
     if (light.colorIntensity.w <= 0.0) return false;
 
     if (light.directionType.w == 0.0) {
-        // 方向光：光强与距离无关，光源位置取任意远处点
-        L = normalize(light.directionType.xyz);
+        // 方向光：光强与距离无关，光源位置取任意远处点。
+        // L 指向光源，须取反——direction 字段为光传播方向（与光栅化 Deferred/PBR 管线一致）。
+        L = normalize(-light.directionType.xyz);
         lightPos = P + L * 10000.0;
         Li = light.colorIntensity.rgb * light.colorIntensity.w;
         return true;

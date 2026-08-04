@@ -7,12 +7,16 @@
 // miss 则本着色器写 a=-1 = 未遮挡。
 //
 // PathPayload 定义必须与 PT_Full.rchit 逐字节一致（SPIR-V 校验）。
+// 背景：程序渐变天空（曾尝试绑定天空盒 Cubemap，但 Slang 组合采样器
+// 声明会破坏描述符集使材质绑定读到 0，故回退程序天空）。
 
 #include "PT_Common.slang"  // PathPayload + SampleSky
+
+[[vk::push_constant]] PTPushConstant g_PC;
 
 [shader("miss")]
 void main(inout PathPayload payload) {
     payload.albedoMetallic = float4(0, 0, 0, 0);
     payload.normalRough    = float4(0, 0, 0, 1);
-    payload.emissiveT      = float4(SampleSky(WorldRayDirection(), 1.0), -1.0);
+    payload.emissiveT      = float4(SampleSky(WorldRayDirection(), g_PC.skyIntensity), -1.0);
 }

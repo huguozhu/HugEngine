@@ -49,7 +49,7 @@ using namespace he;
 // 渲染管线模式 CVar
 // ============================================================
 // 渲染管线模式 CVar（0=Forward, 1=Deferred, 2=HybridRT, 3=PathTrace）
-he::CVar<int> cvPipelineMode("r.Pipeline.Mode", 2, "渲染管线模式 0=Forward 1=Deferred 2=HybridRT 3=PathTrace");
+he::CVar<int> cvPipelineMode("r.Pipeline.Mode", 3, "渲染管线模式 0=Forward 1=Deferred 2=HybridRT 3=PathTrace");
 
 // ============================================================
 // 相机配置读写（简易 key=value 格式）
@@ -526,19 +526,30 @@ int main() {
         if (ImGui::DragFloat("移动速度", &speed, 1.0f, 0.1f, 500.0f, "%.1f"))
             camCtrl.SetMoveSpeed(speed);
 
-        // 渲染模式切换（读 CVar → RadioButton → 写回 CVar）
+        // 渲染模式切换（读 CVar → Combo → 写回 CVar）
         int mode = cvPipelineMode.Get();
         ImGui::SeparatorText("渲染模式");
-        ImGui::RadioButton("Forward 前向渲染", &mode, 0);
-        ImGui::SameLine();
-        ImGui::RadioButton("Deferred 延迟渲染", &mode, 1);
-        if (device->GetCaps().supportsRayTracing) {
-            ImGui::SameLine();
-            ImGui::RadioButton("Hybrid RT 混合光追", &mode, 2);
-            ImGui::SameLine();
-            ImGui::RadioButton("PathTrace 全路径追踪", &mode, 3);
+
+        // 下拉项：索引与模式值一一对应（0/1/2/3 连续）
+        const char* modeNames[] = {
+            "Forward 前向渲染",
+            "Deferred 延迟渲染",
+            "Hybrid RT 混合光追",
+            "PathTrace 全路径追踪",
+        };
+
+        // 无 RT 能力时仅提供前两种模式
+        const int itemCount = device->GetCaps().supportsRayTracing ? 4 : 2;
+
+        // 无 RT 能力且 CVar 停留在 RT 模式(2/3)时回退到 Deferred，避免下拉框越界
+        if (itemCount == 2 && mode >= 2) {
+            mode = 1;
+            cvPipelineMode.Set(mode);
         }
-        cvPipelineMode.Set(mode);
+
+        // 仅在用户改动时写回 CVar
+        if (ImGui::Combo("渲染管线", &mode, modeNames, itemCount))
+            cvPipelineMode.Set(mode);
 
         // GPU 剔除开关
         ImGui::Spacing();

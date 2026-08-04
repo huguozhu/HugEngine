@@ -179,6 +179,24 @@ void main() {
                 }
             }
 
+            // ── IBL 环境光（间接光近似）：按表面法线采样天空，填充阴影面 ──
+            // 场景方向光常位于物体背对相机一侧，无环境光时相机可见面几乎全黑。
+            // 反弹 0 直接加入环境光（金属无漫反射，不参与）。有天空盒时采样 Cubemap，
+            // 否则降级为程序渐变天空。
+            if (bounce == 0) {
+                // 漫反射 IBL：按法线采样程序天空，填充阴影面（金属无漫反射，不参与）。
+                // 注：曾尝试在 RayGen 绑定天空盒 Cubemap（binding 9），但 Slang 组合采样器
+                // 声明会破坏描述符集使材质绑定读到 0，故此处用程序天空。rmiss 仍用 Cubemap 作背景。
+                float3 env = SampleSky(N, g_PC.skyIntensity);
+                radiance += throughput * env * albedo * (1.0 - metallic);
+
+                // 镜面 IBL：按反射方向采样环境（金属/光滑表面获得环境反射，避免全黑）
+                float3 R = reflect(-V, N);
+                float3 envSpec = SampleSky(R, g_PC.skyIntensity);
+                float3 F0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
+                radiance += throughput * envSpec * F0;
+            }
+
             // ── 俄罗斯轮盘赌终止（bounce > 2 后按 throughput 概率终止）──
             if ((g_PC.flags & PT_FLAG_ROULETTE) != 0u) {
                 float survival = min(max(throughput.x, max(throughput.y, throughput.z)), 1.0);

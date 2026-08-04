@@ -42,9 +42,10 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         {8, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskRayGen},      // FinalReservoir
     };
 
-    // ── push constant 范围（RayGen 相机光线 + ClosestHit 共用，176B）──
+    // ── push constant 范围（RayGen + ClosestHit + Miss 共用，176B）──
+    // Miss 需要 g_PC 检查天空盒 flag / skyIntensity（背景用）
     rhi::PushConstantRange pc;
-    pc.stageMask = rhi::kStageMaskRayGen | rhi::kStageMaskClosestHit;
+    pc.stageMask = rhi::kStageMaskRayGen | rhi::kStageMaskClosestHit | rhi::kStageMaskMiss;
     pc.size      = sizeof(PTPushConstant);
 
     // ── 创建 set0 布局 + 描述符集 ──

@@ -23,6 +23,7 @@
 #include <glm/gtc/matrix_inverse.hpp>
 #include <cstring>
 #include <algorithm>
+#include <cmath>   // std::acos（相机旋转量）
 
 namespace he::render {
 
@@ -31,6 +32,9 @@ static constexpr u32 kPTFlag_ReSTIR   = 1u << 0;
 static constexpr u32 kPTFlag_MIS      = 1u << 1;
 static constexpr u32 kPTFlag_Roulette = 1u << 2;
 static constexpr u32 kPTFlag_NEE      = 1u << 3;
+
+// 相机运动 → 时域降噪混合权重缩放：约 0.33m 平移或 0.33rad(~19°) 旋转 → 混合抬到 1.0
+static constexpr float kMotionBlendScale = 3.0f;
 
 bool PathTracingPipeline::Initialize(rhi::IRHIDevice* device) {
     m_Device = device;
@@ -263,6 +267,21 @@ void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     m_CurrViewProj = camera.GetViewProjMatrix();
     static bool firstFrame = true;
     if (firstFrame) { m_PrevViewProj = m_CurrViewProj; firstFrame = false; }
+
+    // 相机运动自适应降噪：静止时低混合高质量累积；运动时抬升混合缩短历史拖影。
+    // （快速旋转时 PT 无累积、图像变噪，为路径追踪固有取舍，停下后自动恢复）
+    if (m_PTDenoiser) {
+        if (m_CamInited) {
+            float posDelta = glm::length(camera.position - m_PrevCamPos);
+            float fwdDot   = std::clamp(glm::dot(camera.forward, m_PrevCamFwd), -1.0f, 1.0f);
+            float rotDelta = std::acos(fwdDot);   // 相机旋转量（弧度）
+            float motionBlend = std::clamp((posDelta + rotDelta) * kMotionBlendScale, 0.0f, 1.0f);
+            m_PTDenoiser->SetMotionBlend(motionBlend);
+        }
+        m_PrevCamPos = camera.position;
+        m_PrevCamFwd = camera.forward;
+        m_CamInited  = true;
+    }
 
     // ── AS Build — BLAS/TLAS 构建 ──
     if (m_RTEnabled && m_RTPass && m_RTPass->IsValid()) {

@@ -167,14 +167,14 @@ void RTDenoiser::Render(rhi::IRHICommandList* cmd) {
     cmd->SetScissor({0, 0, m_Width, m_Height});
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
 
-    // Push constant：texelSize + blend/thresholds + firstFrame（32B）
+    // Push constant：texelSize + blend/thresholds + firstFrame + motionBlend（32B）
     struct {
         float2 texelSize;
         float  temporalBlend;
         float  depthThreshold;
         float  normalThreshold;
         u32    isFirstFrame;
-        float  pad0;
+        float  motionBlend;
         float  pad1;
     } pc;
     pc.texelSize      = float2(1.0f / (float)m_Width, 1.0f / (float)m_Height);
@@ -182,7 +182,7 @@ void RTDenoiser::Render(rhi::IRHICommandList* cmd) {
     pc.depthThreshold = m_Cfg.depthThreshold;
     pc.normalThreshold = m_Cfg.normalThreshold;
     pc.isFirstFrame   = isFirstFrame;
-    pc.pad0           = 0.0f;
+    pc.motionBlend    = m_MotionBlend;   // 相机运动自适应（0=关闭，静止时沿用 temporalBlend）
     pc.pad1           = 0.0f;
     cmd->SetPushConstants(0, sizeof(pc), &pc);
 
