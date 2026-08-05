@@ -91,8 +91,11 @@ bool PathTracingPipeline::Initialize(rhi::IRHIDevice* device) {
         // STBN 时空蓝噪声（PT RayGen + ReSTIR 三 Pass 共用，无采样器 Load 采样）
         m_STBN = std::make_unique<STBNTexture>();
         if (!m_STBN->Initialize(device)) {
+            // shader 随机已彻底走 STBN（无 Hash 回退），失败后继续 dispatch 会让
+            // g_BlueNoise.Load() 读未绑定描述符（UB）→ 直接禁用 RT。
             m_STBN.reset();
-            HE_CORE_WARN("PathTracingPipeline: STBN 不可用，随机数回退（注意 shader 已改为 STBN 采样）");
+            m_RTEnabled = false;
+            HE_CORE_ERROR("STBNTexture 初始化失败，禁用 PT（无 Hash 回退）");
         }
 
         // 时域降噪（RGBA16F，ptDepth 为米制 viewZ → depthThreshold=1.0）
