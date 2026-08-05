@@ -20,7 +20,7 @@
 namespace he::render {
 
 // ============================================================
-// Initialize — 创建 set0 + 效果管线 + 4 张输出纹理
+// Initialize — 创建 set0 + 效果管线 + 5 张输出纹理
 // ============================================================
 bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Device = device;

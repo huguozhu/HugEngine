@@ -3,7 +3,7 @@
 //
 // 提供：
 //   1. PathPayload（RayGen/ClosestHit/Miss 共享的 48B 载荷）
-//   2. 随机数工具（Hash/Rand，与 RT_GI/RT_Shadow 同款）
+//   2. 随机数工具（STBN 时空蓝噪声采样，确定性随机流）
 //   3. BSDF 采样（GGX 镜面 + 余弦漫反射混合，返回混合 pdf）
 //   4. MIS 幂次启发、光源采样（GPULight）、天空采样
 //   5. 深度重建世界坐标 / 世界坐标 → UV 投影（velocity 用）
@@ -30,17 +30,8 @@ struct PathPayload {
 // ============================================================
 // 随机数工具（确定性，像素索引 + 帧号 + 样本号）
 // 随机流由 STBN 时空蓝噪声 3D 纹理提供（g_BlueNoise 由各使用方 shader 声明），
-// 取代原 Hash/LCG 伪随机：相同 idx/frame/s → 同值（保持确定性），
-// 但空间/时间上更均匀，消除 Hash 的结构性条纹。
+// 相同 idx/frame/s → 同值（保持确定性），且空间/时间上更均匀。
 // ============================================================
-uint Hash(uint x) {
-    x = (x ^ 61u) ^ (x >> 16u);
-    x *= 9u;
-    x ^= x >> 4u;
-    x *= 0x27d4eb2du;
-    x ^= x >> 15u;
-    return x;
-}
 
 // STBN 采样：空间 (x,y) 取模 128，时间切层 (frame + offset) % 64。
 // 用 Load() 整数取像素（Texture3D 需 int4：xyz + mip=0）——无采样器，

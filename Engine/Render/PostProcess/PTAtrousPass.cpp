@@ -7,6 +7,18 @@
 
 namespace he::render {
 
+// A-Trous 空间滤波 push constant（与 PT_Atrous.comp.slang 的 AtrousPC 逐字段一致）
+// 布局：uint2(8) + u32(4) + 4×float(16) + 2×float pad(8) = 36B
+struct PTAtrousPushConstant {
+    uint2 dispatchDim;    // 分辨率
+    u32   iterations;     // 1-5
+    float sigmaDepth;     // 深度边权重 σ（米）
+    float normalPower;    // 法线边权重指数（如 128）
+    float sigmaColor;     // 颜色边权重 σ 系数
+    float clampThreshold; // 火萤钳制阈值（0=关）
+    float pad1, pad2;     // 对齐填充（与着色器布局保持一致）
+};
+
 bool PTAtrousPass::Initialize(rhi::IRHIDevice* device, const Config& cfg) {
     m_Device = device;
     m_Cfg    = cfg;
@@ -29,12 +41,12 @@ bool PTAtrousPass::Initialize(rhi::IRHIDevice* device, const Config& cfg) {
         return false;
     }
 
-    // compute PSO（40B push constant）
+    // compute PSO（36B push constant）
     rhi::ShaderBytecode cs;
     cs.stage = rhi::ShaderStage::Compute; cs.spirv = k_PT_Atrous_comp_spv; cs.entryPoint = "main";
     rhi::PushConstantRange pc;
     pc.stageMask = rhi::kStageMaskCompute;
-    pc.size      = 40;   // AtrousPC：uint2(8)+uint(4)+float×5(20)+float×2 pad(8)
+    pc.size      = sizeof(PTAtrousPushConstant);   // AtrousPC 共 36B（uint2+u32+4×float+pad×2）
     rhi::PipelineStateDesc d;
     d.bindPoint = rhi::PipelineBindPoint::Compute;
     d.computeShader = &cs;
@@ -99,15 +111,7 @@ void PTAtrousPass::Render(rhi::IRHICommandList* cmd) {
     m_Device->UpdateDescriptorSetWithImageView(m_Set, 3,
         rhi::DescriptorType::StorageImage, m_Output->GetNativeHandle());
 
-    struct {
-        uint2 dispatchDim;
-        u32   iterations;
-        float sigmaDepth;
-        float normalPower;
-        float sigmaColor;
-        float clampThreshold;
-        float pad1, pad2;
-    } pc;
+    PTAtrousPushConstant pc;
     pc.dispatchDim     = uint2(m_Width, m_Height);
     pc.iterations      = m_Cfg.iterations;
     pc.sigmaDepth      = m_Cfg.sigmaDepth;
