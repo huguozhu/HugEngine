@@ -47,7 +47,6 @@ public:
 
 private:
     void CreateTextures(u32 w, u32 h);
-    void CreatePipeline();
 
     Config m_Cfg;
     rhi::IRHIDevice* m_Device = nullptr;

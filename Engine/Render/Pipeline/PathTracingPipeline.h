@@ -3,11 +3,13 @@
 #include "Pipeline/IRenderPipeline.h"
 #include "Pipeline/Material.h"   // GPULight / MAX_LIGHTS / MAX_FRAMES_IN_FLIGHT
 #include "Pipeline/RTPass.h"
+#include "Pipeline/PTQualityCVars.h"  // cvPTAtrous（A-Trous 访问器内联读写）
 #include "RT/PTPass.h"
 #include "RT/ReSTIRPass.h"
 #include "RT/STBNTexture.h"
 #include "PostProcess/PostProcessChain.h"
 #include "PostProcess/RTDenoiser.h"
+#include "PostProcess/PTAtrousPass.h"  // A-Trous 空间滤波（时域降噪之后）
 #include "RHI/RHI.h"
 #include "RenderGraph.h"
 #include <memory>
@@ -52,6 +54,8 @@ public:
     // PT 质量开关（CVar 薄封装：读写 r.PT.* 开关，实现见 .cpp，供 ImGui / CVar 控制）
     void SetPTDenoise(bool e);
     bool IsPTDenoise() const;
+    void SetPTAtrous(bool e) { cvPTAtrous.Set(e); }   // A-Trous 空间滤波开关（内联读写 CVar）
+    bool IsPTAtrous() const  { return cvPTAtrous.Get(); }
     void SetPTReSTIR(bool e);
     bool IsPTReSTIR() const;
     void SetPTMIS(bool e);
@@ -83,6 +87,9 @@ private:
 
     // ── 时域降噪 ──
     std::unique_ptr<RTDenoiser> m_PTDenoiser;
+
+    // ── A-Trous 空间滤波（时域降噪之后，边缘感知多迭代滤波）──
+    std::unique_ptr<PTAtrousPass> m_PTAtrous;
 
     // ── STBN 时空蓝噪声（PT/ReSTIR 共用，3D 纹理 Load 采样）──
     std::unique_ptr<STBNTexture> m_STBN;

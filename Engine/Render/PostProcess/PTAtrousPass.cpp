@@ -4,7 +4,6 @@
 #include "PT_Atrous.comp.spv.h"   // k_PT_Atrous_comp_spv
 
 #include <algorithm>   // std::clamp
-#include <cstring>
 
 namespace he::render {
 

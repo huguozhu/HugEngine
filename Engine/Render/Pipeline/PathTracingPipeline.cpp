@@ -112,6 +112,21 @@ bool PathTracingPipeline::Initialize(rhi::IRHIDevice* device) {
             HE_CORE_WARN("PathTracingPipeline: RTDenoiser 初始化失败，时域降噪禁用");
             m_PTDenoiser.reset();
         }
+
+        // A-Trous 空间滤波（SVGF 风格多迭代边缘感知；配置初值从 CVar 读取）
+        m_PTAtrous = std::make_unique<PTAtrousPass>();
+        PTAtrousPass::Config acfg;
+        acfg.width  = m_Width;
+        acfg.height = m_Height;
+        acfg.iterations      = (u32)cvPTAtrousIterations.Get();
+        acfg.sigmaDepth      = cvPTAtrousSigmaDepth.Get();
+        acfg.normalPower     = cvPTAtrousSigmaNormal.Get();
+        acfg.sigmaColor      = cvPTAtrousSigmaColor.Get();
+        acfg.clampThreshold  = cvPTAtrousClamp.Get();
+        if (!m_PTAtrous->Initialize(device, acfg)) {
+            HE_CORE_WARN("PathTracingPipeline: PTAtrousPass 初始化失败，空间滤波禁用");
+            m_PTAtrous.reset();
+        }
     }
 
     m_Ready = true;
@@ -122,6 +137,7 @@ bool PathTracingPipeline::Initialize(rhi::IRHIDevice* device) {
 
 void PathTracingPipeline::Shutdown() {
     m_PTDenoiser.reset();
+    m_PTAtrous.reset();
     m_STBN.reset();
     m_ReSTIR.reset();
     if (m_PT) { m_PT->Shutdown(); m_PT.reset(); }
@@ -146,6 +162,7 @@ void PathTracingPipeline::OnResize(u32 w, u32 h) {
         if (m_PT) { m_PT->Shutdown(); m_PT->Initialize(m_Device, w, h); }
         if (m_ReSTIR) { m_ReSTIR->Shutdown(); m_ReSTIR->Initialize(m_Device, w, h); }
         if (m_PTDenoiser) m_PTDenoiser->OnResize(w, h);
+        if (m_PTAtrous) m_PTAtrous->OnResize(w, h);
     }
 }
 
@@ -429,9 +446,34 @@ void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             });
     }
 
-    // ── ToneMap（输入：降噪输出或原始 PT HDR）──
-    rhi::IRHITexture* toneMapInput = denoisedTex ? denoisedTex : ptHDR;
-    ResourceHandle toneMapInputHandle = denoisedHandle != kInvalidHandle ? denoisedHandle : ptHDRHandle;
+    // ── PT A-Trous — 空间滤波（时域累积之后；深度/法线边缘感知 + 方差钳制）──
+    rhi::IRHITexture* atrousTex = nullptr;
+    ResourceHandle atrousHandle = kInvalidHandle;
+    bool useAtrous = cvPTAtrous.Get() && m_PTAtrous && m_PTAtrous->IsReady()
+                     && denoisedHandle != kInvalidHandle && ptDepthHandle != kInvalidHandle;
+    if (useAtrous) {
+        atrousTex = m_PTAtrous->GetOutput();
+        atrousHandle = rg.ImportTexture("PT_AtrousOut", atrousTex);
+        rg.AddPass("PT_Atrous",
+            {{denoisedHandle, ResourceAccess::Read},
+             {ptDepthHandle, ResourceAccess::Read},
+             {ptNormalHandle, ResourceAccess::Read}},
+            {{atrousHandle, ResourceAccess::Write}},
+            [this, denoisedTex, ptDepth, ptNormal](rhi::IRHICommandList* c) {
+                m_PTAtrous->SetInputs(denoisedTex, ptDepth, ptNormal);
+                m_PTAtrous->SetParams((u32)cvPTAtrousIterations.Get(),
+                                      cvPTAtrousSigmaDepth.Get(),
+                                      cvPTAtrousSigmaNormal.Get(),
+                                      cvPTAtrousSigmaColor.Get(),
+                                      cvPTAtrousClamp.Get());
+                m_PTAtrous->Render(c);
+            });
+    }
+
+    // ── ToneMap（输入：A-Trous 输出优先，其次降噪输出，最后原始 PT HDR）──
+    rhi::IRHITexture* toneMapInput = atrousTex ? atrousTex : (denoisedTex ? denoisedTex : ptHDR);
+    ResourceHandle toneMapInputHandle = atrousHandle != kInvalidHandle ? atrousHandle
+                                      : (denoisedHandle != kInvalidHandle ? denoisedHandle : ptHDRHandle);
 
     auto ldrTarget = rg.ImportTexture("LDR", m_PostProcess.GetLDRTarget());
     bool useFXAA  = m_PostProcess.IsFXAAEnabled();

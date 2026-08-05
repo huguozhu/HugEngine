@@ -660,6 +660,7 @@ int main() {
 
         // PT 质量面板（仅 PathTrace 模式显示）
         if (cvPipelineMode.Get() == 3 && device->GetCaps().supportsRayTracing) {
+            using namespace he::render;  // 直接读写 r.PT.Atrous.* CVar（本块作用域）
             ImGui::SeparatorText("PT 质量");
             int spp = pathTracingPipeline.GetPTSampleCount();
             if (ImGui::SliderInt("SPP", &spp, 1, 8)) pathTracingPipeline.SetPTSampleCount(spp);
@@ -668,6 +669,20 @@ int main() {
             bool denoiseOn = pathTracingPipeline.IsPTDenoise();
             if (ImGui::Checkbox("时域降噪", &denoiseOn))
                 pathTracingPipeline.SetPTDenoise(denoiseOn);
+            // A-Trous 空间滤波（时域降噪之后的多迭代边缘感知滤波）
+            bool atrousOn = pathTracingPipeline.IsPTAtrous();
+            if (ImGui::Checkbox("A-Trous 空间滤波", &atrousOn))
+                pathTracingPipeline.SetPTAtrous(atrousOn);
+            int atrousIter = cvPTAtrousIterations.Get();
+            if (ImGui::SliderInt("A-Trous 迭代", &atrousIter, 1, 5)) {
+                cvPTAtrousIterations.Set(atrousIter);
+            }
+            float atrousSigmaC = cvPTAtrousSigmaColor.Get();
+            if (ImGui::SliderFloat("A-Trous 颜色 σ", &atrousSigmaC, 0.05f, 2.0f, "%.2f"))
+                cvPTAtrousSigmaColor.Set(atrousSigmaC);
+            float atrousClamp = cvPTAtrousClamp.Get();
+            if (ImGui::SliderFloat("A-Trous 火萤钳制", &atrousClamp, 0.0f, 10.0f, "%.1f"))
+                cvPTAtrousClamp.Set(atrousClamp);
             bool restirOn = pathTracingPipeline.IsPTReSTIR();
             if (ImGui::Checkbox("ReSTIR DI", &restirOn))
                 pathTracingPipeline.SetPTReSTIR(restirOn);

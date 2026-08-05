@@ -20,6 +20,13 @@ extern CVar<bool>  cvPTMIS;            // r.PT.MIS            NEE MIS 开关
 extern CVar<bool>  cvPTRoulette;       // r.PT.Roulette      俄罗斯轮盘赌开关
 // 降噪参数
 extern CVar<float> cvPTDenoiseBlend;   // r.PT.Denoise.Blend 时域混合因子
+// A-Trous 空间滤波
+extern CVar<bool>  cvPTAtrous;              // r.PT.Atrous           空间滤波开关
+extern CVar<i32>   cvPTAtrousIterations;    // r.PT.Atrous.Iterations 迭代数（1-5）
+extern CVar<float> cvPTAtrousSigmaDepth;    // r.PT.Atrous.SigmaDepth 深度边权重 σ
+extern CVar<float> cvPTAtrousSigmaNormal;   // r.PT.Atrous.SigmaNormal 法线边权重指数
+extern CVar<float> cvPTAtrousSigmaColor;    // r.PT.Atrous.SigmaColor 颜色边 σ 系数
+extern CVar<float> cvPTAtrousClamp;         // r.PT.Atrous.Clamp      火萤钳制阈值
 // ReSTIR 参数
 extern CVar<i32>   cvPTRestirCandidates; // r.PT.ReSTIR.Candidates  初始采样候选数 M
 extern CVar<i32>   cvPTRestirRadius;     // r.PT.ReSTIR.Radius      空间复用采样半径
