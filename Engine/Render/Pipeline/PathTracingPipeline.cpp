@@ -323,20 +323,24 @@ void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     rhi::IRHITexture* ptDepth  = m_PT ? m_PT->GetDepth() : nullptr;
     rhi::IRHITexture* ptNormal = m_PT ? m_PT->GetNormal() : nullptr;
     rhi::IRHITexture* ptVel    = m_PT ? m_PT->GetVelocity() : nullptr;
+    rhi::IRHITexture* ptAlbedo = m_PT ? m_PT->GetAlbedoMetallic() : nullptr;
 
     ResourceHandle ptHDRHandle = kInvalidHandle, ptDepthHandle = kInvalidHandle;
     ResourceHandle ptNormalHandle = kInvalidHandle, ptVelHandle = kInvalidHandle;
+    ResourceHandle ptAlbedoHandle = kInvalidHandle;
 
     if (m_RTEnabled && m_PT && m_PT->IsValid() && m_RTPass) {
         ptHDRHandle    = rg.ImportTexture("PT_HDR", ptHDR);
         ptDepthHandle  = rg.ImportTexture("PT_Depth", ptDepth);
         ptNormalHandle = rg.ImportTexture("PT_Normal", ptNormal);
         ptVelHandle    = rg.ImportTexture("PT_Velocity", ptVel);
+        ptAlbedoHandle = rg.ImportTexture("PT_AlbedoMetallic", ptAlbedo);
 
         rg.AddPass("PT_Render",
             {},
             {{ptHDRHandle, ResourceAccess::UAV}, {ptDepthHandle, ResourceAccess::UAV},
-             {ptNormalHandle, ResourceAccess::UAV}, {ptVelHandle, ResourceAccess::UAV}},
+             {ptNormalHandle, ResourceAccess::UAV}, {ptVelHandle, ResourceAccess::UAV},
+             {ptAlbedoHandle, ResourceAccess::UAV}},
             [this, &camera, lightCount, ptFlags, useReSTIR](rhi::IRHICommandList* c) {
                 PTRenderContext ctx;
                 ctx.invViewProj  = glm::inverse(camera.GetViewProjMatrix());
@@ -360,11 +364,12 @@ void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     // 读 PT 输出（RAW 依赖 → RG 强制排在 PT_Render 之后）；SSBO 对 RG 不可见，
     // 同一命令缓冲内按提交序顺序执行（无重排风险，无需 token 链）。
     if (cvPTReSTIR.Get() && m_ReSTIR && m_ReSTIR->IsValid()
-        && ptDepthHandle != kInvalidHandle) {
+        && ptDepthHandle != kInvalidHandle && ptAlbedoHandle != kInvalidHandle) {
         rg.AddPass("ReSTIR_DI",
             {{ptDepthHandle, ResourceAccess::Read},
              {ptNormalHandle, ResourceAccess::Read},
-             {ptVelHandle, ResourceAccess::Read}},
+             {ptVelHandle, ResourceAccess::Read},
+             {ptAlbedoHandle, ResourceAccess::Read}},
             {},
             [this, &camera, lightCount, reservoirReady, ptDepth, ptNormal, ptVel](
                 rhi::IRHICommandList* c) {
