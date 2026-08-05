@@ -15,6 +15,10 @@
 // 阴影射线用"哨兵 hitT"技巧：命中不执行任何着色器（payload 保持 a=0 =
 // 被遮挡），miss 由 PT_Full.rmiss 写 a=-1 = 未遮挡。
 
+// STBN 时空蓝噪声（Load 采样）：必须先于 PT_Common.slang 解析，
+// 其随机函数体引用本全局（Rand/RandInt/StratifiedJitter）。
+[[vk::binding(10, 0)]] Texture3D<float4> g_BlueNoise;
+
 #include "PT_Common.slang"  // PathPayload + 随机数 + BSDF 采样 + SampleLight
 
 // === RayGen 资源 (set=0) ===

@@ -5,6 +5,7 @@
 #include "Pipeline/RTPass.h"
 #include "RT/PTPass.h"
 #include "RT/ReSTIRPass.h"
+#include "RT/STBNTexture.h"
 #include "PostProcess/PostProcessChain.h"
 #include "PostProcess/RTDenoiser.h"
 #include "RHI/RHI.h"
@@ -82,6 +83,9 @@ private:
 
     // ── 时域降噪 ──
     std::unique_ptr<RTDenoiser> m_PTDenoiser;
+
+    // ── STBN 时空蓝噪声（PT/ReSTIR 共用，3D 纹理 Load 采样）──
+    std::unique_ptr<STBNTexture> m_STBN;
 
     // ── 后处理 ──
     PostProcessChain m_PostProcess;

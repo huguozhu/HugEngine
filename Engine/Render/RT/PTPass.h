@@ -26,6 +26,7 @@ struct PTRenderContext {
     rhi::IRHIBuffer* finalReservoir = nullptr; // ReSTIR FinalReservoir SSBO（上帧数据，可为空）
     rhi::IRHITexture* sceneMaterialTex = nullptr;   // 场景材质纹理（4×N，ClosestHit 用）
     rhi::IRHITexture* sceneTriangleNormals = nullptr; // 三角形顶点法线纹理（ClosestHit 用）
+    rhi::IRHITexture* blueNoise = nullptr;          // STBN 3D 纹理（RayGen Load 采样）
 };
 
 // ============================================================
@@ -40,7 +41,8 @@ struct PTRenderContext {
 //
 // set0 绑定：
 //   b0=TLAS(RG), b1..b4=四输出 UAV(RG), b5=GPULight[] SSBO(RG),
-//   b6=材质纹理(CH), b7=三角形法线(CH), b8=FinalReservoir SSBO(RG), b9=albedoMetallic UAV(RG)
+//   b6=材质纹理(CH), b7=三角形法线(CH), b8=FinalReservoir SSBO(RG), b9=albedoMetallic UAV(RG),
+//   b10=STBN 3D 蓝噪声(RG, 无采样器 Load 采样)
 // ============================================================
 class PTPass {
     HE_DECLARE_NON_COPYABLE(PTPass);

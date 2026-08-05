@@ -14,6 +14,7 @@
 [[vk::binding(3, 0)]] RWStructuredBuffer<PTReservoir> g_Final;    // FinalReservoir（本帧）
 [[vk::binding(4, 0)]] StructuredBuffer<GPULight> g_Lights;        // 光源 SSBO
 [[vk::binding(5, 0)]] Texture2D<float4> g_AlbedoMetallic;  // PT 第 5 UAV: albedo(rgb)+metallic(a)
+[[vk::binding(6, 0)]] Texture3D<float4> g_BlueNoise;       // STBN 时空蓝噪声（Load 采样，Rand 用）
 
 // === Push Constant ===
 [[vk::push_constant]] ReSTIRPushConstant g_PC;

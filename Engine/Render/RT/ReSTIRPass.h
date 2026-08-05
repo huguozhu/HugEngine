@@ -23,6 +23,7 @@ struct ReSTIRDispatchContext {
     rhi::IRHITexture* ptNormal   = nullptr;  // PT 输出：世界法线(0~1)+roughness
     rhi::IRHITexture* ptVelocity = nullptr;  // PT 输出：屏幕速度
     rhi::IRHITexture* ptAlbedo  = nullptr;   // PT 输出：albedo(rgb)+metallic(a)
+    rhi::IRHITexture* blueNoise = nullptr;   // STBN 3D 纹理（compute Load 采样）
     u32  candidateCount = 16;                // 初始采样候选数 M
     u32  spatialRadius  = 3;                 // 空间复用采样半径（像素）
     u32  spatialSamples = 5;                 // 空间复用采样数

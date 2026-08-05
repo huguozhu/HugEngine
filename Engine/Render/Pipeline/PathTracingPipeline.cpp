@@ -88,6 +88,13 @@ bool PathTracingPipeline::Initialize(rhi::IRHIDevice* device) {
             m_ReSTIR.reset();
         }
 
+        // STBN 时空蓝噪声（PT RayGen + ReSTIR 三 Pass 共用，无采样器 Load 采样）
+        m_STBN = std::make_unique<STBNTexture>();
+        if (!m_STBN->Initialize(device)) {
+            m_STBN.reset();
+            HE_CORE_WARN("PathTracingPipeline: STBN 不可用，随机数回退（注意 shader 已改为 STBN 采样）");
+        }
+
         // 时域降噪（RGBA16F，ptDepth 为米制 viewZ → depthThreshold=1.0）
         m_PTDenoiser = std::make_unique<RTDenoiser>();
         RTDenoiser::Config cfg;
@@ -112,6 +119,7 @@ bool PathTracingPipeline::Initialize(rhi::IRHIDevice* device) {
 
 void PathTracingPipeline::Shutdown() {
     m_PTDenoiser.reset();
+    m_STBN.reset();
     m_ReSTIR.reset();
     if (m_PT) { m_PT->Shutdown(); m_PT.reset(); }
     if (m_RTPass) { m_RTPass->Shutdown(); m_RTPass.reset(); }
@@ -356,6 +364,7 @@ void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 ctx.finalReservoir = useReSTIR && m_ReSTIR ? m_ReSTIR->GetFinalReservoir() : nullptr;
                 ctx.sceneMaterialTex = m_RTPass->GetSceneMaterialTexture();
                 ctx.sceneTriangleNormals = m_RTPass->GetSceneTriangleNormals();
+                ctx.blueNoise = m_STBN ? m_STBN->GetTexture() : nullptr;
                 m_PT->Execute(c, m_RTPass->GetTLAS(), ctx);
             });
     }
@@ -384,6 +393,7 @@ void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 ctx.ptNormal     = ptNormal;
                 ctx.ptVelocity   = ptVel;
                 ctx.ptAlbedo     = m_PT ? m_PT->GetAlbedoMetallic() : nullptr;
+                ctx.blueNoise    = m_STBN ? m_STBN->GetTexture() : nullptr;
                 ctx.candidateCount = std::clamp((u32)cvPTRestirCandidates.Get(), 1u, 64u);
                 ctx.spatialRadius  = std::clamp((u32)cvPTRestirRadius.Get(), 1u, 8u);
                 ctx.spatialSamples = std::clamp((u32)cvPTRestirSamples.Get(), 1u, 16u);

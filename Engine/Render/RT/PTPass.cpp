@@ -27,9 +27,10 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Width  = width;
     m_Height = height;
 
-    // ── set0 资源绑定（10 项）──
+    // ── set0 资源绑定（11 项）──
     // b0=TLAS(RG), b1..b4=四输出 UAV(RG), b5=光源 SSBO(RG),
-    // b6=材质纹理(CH), b7=三角形法线(CH), b8=FinalReservoir SSBO(RG), b9=albedoMetallic UAV(RG)
+    // b6=材质纹理(CH), b7=三角形法线(CH), b8=FinalReservoir SSBO(RG), b9=albedoMetallic UAV(RG),
+    // b10=STBN 3D 纹理(RG, 无采样器 Load 采样)
     std::vector<rhi::DescriptorSetLayoutBinding> bindings = {
         {0, rhi::DescriptorType::AccelerationStructure, 1, rhi::kStageMaskRayGen},
         {1, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskRayGen},
@@ -41,6 +42,7 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         {7, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskClosestHit},   // 三角形法线纹理
         {8, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskRayGen},      // FinalReservoir
         {9, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskRayGen},       // 第 5 输出 UAV: albedoMetallic
+        {10, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskRayGen},      // STBN 3D 蓝噪声（Load 采样）
     };
 
     // ── push constant 范围（RayGen + ClosestHit + Miss 共用，176B）──
@@ -208,6 +210,9 @@ void PTPass::Execute(rhi::IRHICommandList* cmd, rhi::IRHIAccelerationStructure* 
     if (ctx.finalReservoir)
         m_Device->UpdateDescriptorSet(m_Set, 8,
             rhi::DescriptorType::StorageBuffer, ctx.finalReservoir);
+    if (ctx.blueNoise)
+        m_Device->UpdateDescriptorSet(m_Set, 10,
+            rhi::DescriptorType::SampledImage, ctx.blueNoise, nullptr);
 
     // ── 设置 push constants（PTPushConstant，176B）──
     PTPushConstant pc{};

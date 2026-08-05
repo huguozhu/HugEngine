@@ -22,6 +22,7 @@
 [[vk::binding(9, 0)]] RWTexture2D<float4> g_CurNormal; // 下一帧历史法线槽（= 本帧 ptNormal 拷贝）
 [[vk::binding(10, 0)]] StructuredBuffer<GPULight> g_Lights;   // 光源 SSBO
 [[vk::binding(11, 0)]] Texture2D<float4> g_AlbedoMetallic;  // PT 第 5 UAV: albedo(rgb)+metallic(a)
+[[vk::binding(12, 0)]] Texture3D<float4> g_BlueNoise;       // STBN 时空蓝噪声（Load 采样，Rand 用）
 
 // === Push Constant ===
 [[vk::push_constant]] ReSTIRPushConstant g_PC;

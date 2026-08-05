@@ -29,6 +29,9 @@ struct PathPayload {
 
 // ============================================================
 // 随机数工具（确定性，像素索引 + 帧号 + 样本号）
+// 随机流由 STBN 时空蓝噪声 3D 纹理提供（g_BlueNoise 由各使用方 shader 声明），
+// 取代原 Hash/LCG 伪随机：相同 idx/frame/s → 同值（保持确定性），
+// 但空间/时间上更均匀，消除 Hash 的结构性条纹。
 // ============================================================
 uint Hash(uint x) {
     x = (x ^ 61u) ^ (x >> 16u);
@@ -39,26 +42,33 @@ uint Hash(uint x) {
     return x;
 }
 
+// STBN 采样：空间 (x,y) 取模 128，时间切层 (frame + offset) % 64。
+// 用 Load() 整数取像素（Texture3D 需 int4：xyz + mip=0）——无采样器，
+// 规避 RT 管线组合采样器坑。
+float SampleBlueNoise1(uint2 idx, uint frame, uint offset) {
+    uint z = (frame + offset * 23u) % 64u;
+    return g_BlueNoise.Load(int4(idx.x & 127u, idx.y & 127u, z, 0)).r;
+}
+
 float Rand(uint2 idx, uint frame, uint s) {
-    uint seed = idx.x * 1973u + idx.y * 9277u + frame * 26699u + s * 479u;
-    return float(Hash(seed) & 0xFFFFu) / 65536.0;
+    return SampleBlueNoise1(idx, frame, s);
 }
 
 uint RandInt(uint2 idx, uint frame, uint s, uint n) {
-    uint seed = idx.x * 1973u + idx.y * 9277u + frame * 26699u + s * 479u + 7919u;
-    return Hash(seed) % max(n, 1u);
+    // 用 g 通道 + 额外空间偏移，避免与 Rand 同层同坐标（降低相关性）
+    uint z = (frame + s * 29u) % 64u;
+    float v = g_BlueNoise.Load(int4((idx.x + 37u) & 127u, (idx.y + 61u) & 127u, z, 0)).g;
+    return uint(v * float(max(n, 1u))) % max(n, 1u);
 }
 
-// 分层抖动：将像素划分为 √N × √N 网格，每个采样取一个子格中心
+// 分层抖动：将像素划分为 √N × √N 网格，每个采样取一个子格中心（STBN 偏移）
 float2 StratifiedJitter(uint sampleIdx, uint sampleCount, uint frameIndex) {
     uint gridSize = uint(ceil(sqrt(float(sampleCount))));
     uint sx = sampleIdx % gridSize;
     uint sy = sampleIdx / gridSize;
-    uint seed = sampleIdx + frameIndex * sampleCount;
-    float rx = float((seed * 1664525u + 1013904223u) & 0xFFFF) / 65536.0;
-    float ry = float((seed * 22695477u + 1u) & 0xFFFF) / 65536.0;
-    return float2((float(sx) + rx) / float(gridSize),
-                  (float(sy) + ry) / float(gridSize));
+    float2 bn = g_BlueNoise.Load(int4(sx & 127u, sy & 127u, (frameIndex + sampleIdx * 11u) % 64u, 0)).xy;
+    return float2((float(sx) + bn.x) / float(gridSize),
+                  (float(sy) + bn.y) / float(gridSize));
 }
 
 // ============================================================

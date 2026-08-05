@@ -19,6 +19,9 @@
 // 三角形顶点法线纹理（每三角形 3 条，按 TLAS 实例顺序扁平排列）
 [[vk::binding(7, 0)]] Texture2D<float4> g_TriangleNormals;
 
+// STBN 时空蓝噪声（PT_Common 随机函数体引用，本 stage 未用但需声明以通过编译）
+[[vk::binding(10, 0)]] Texture3D<float4> g_BlueNoise;
+
 // === Push Constant（与 RayGen 共享，176B）===
 [[vk::push_constant]] PTPushConstant g_PC;
 

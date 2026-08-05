@@ -12,6 +12,9 @@
 
 #include "PT_Common.slang"  // PathPayload + SampleSky
 
+// STBN 时空蓝噪声（PT_Common 随机函数体引用，本 stage 未用但需声明以通过编译）
+[[vk::binding(10, 0)]] Texture3D<float4> g_BlueNoise;
+
 [[vk::push_constant]] PTPushConstant g_PC;
 
 [shader("miss")]
