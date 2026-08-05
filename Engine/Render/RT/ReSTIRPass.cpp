@@ -76,19 +76,21 @@ bool ReSTIRPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Height = height;
     u32 total = width * height;
 
-    // ── Init：b0=ptDepth, b1=ptNormal, b2=GPULight[] SSBO, b3=Initial RW SSBO ──
+    // ── Init：b0=ptDepth, b1=ptNormal, b2=GPULight[] SSBO, b3=Initial RW SSBO,
+    //    b4=ptAlbedo（PT 第 5 UAV：albedo(rgb)+metallic(a)）──
     {
         std::vector<rhi::DescriptorSetLayoutBinding> bindings = {
             {0, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskCompute},
             {1, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskCompute},
             {2, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
             {3, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+            {4, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskCompute},
         };
         if (!CreatePipeline(m_Init, bindings, k_ReSTIR_Init_comp_spv, "ReSTIR_Init")) return false;
     }
     // ── Temporal：b0=ptVel, b1=ptDepth, b2=ptNormal, b3=Initial, b4=History,
     //    b5=HistDepth, b6=HistNormal, b7=Temporal RW, b8=CurDepth RW,
-    //    b9=CurNormal RW, b10=GPULight[] ──
+    //    b9=CurNormal RW, b10=GPULight[], b11=ptAlbedo ──
     {
         std::vector<rhi::DescriptorSetLayoutBinding> bindings = {
             {0, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskCompute},
@@ -102,10 +104,12 @@ bool ReSTIRPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
             {8, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskCompute},
             {9, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskCompute},
             {10, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+            {11, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskCompute},
         };
         if (!CreatePipeline(m_Temporal, bindings, k_ReSTIR_Temporal_comp_spv, "ReSTIR_Temporal")) return false;
     }
-    // ── Spatial：b0=ptDepth, b1=ptNormal, b2=Temporal, b3=Final RW, b4=GPULight[] ──
+    // ── Spatial：b0=ptDepth, b1=ptNormal, b2=Temporal, b3=Final RW,
+    //    b4=GPULight[], b5=ptAlbedo ──
     {
         std::vector<rhi::DescriptorSetLayoutBinding> bindings = {
             {0, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskCompute},
@@ -113,6 +117,7 @@ bool ReSTIRPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
             {2, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
             {3, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
             {4, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+            {5, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskCompute},
         };
         if (!CreatePipeline(m_Spatial, bindings, k_ReSTIR_Spatial_comp_spv, "ReSTIR_Spatial")) return false;
     }
@@ -168,7 +173,8 @@ void ReSTIRPass::Shutdown() {
 // Execute — Init → Temporal → Spatial 顺序 dispatch
 // ============================================================
 void ReSTIRPass::Execute(rhi::IRHICommandList* cmd, const ReSTIRDispatchContext& ctx) {
-    if (!m_Ready || !ctx.lightBuffer || !ctx.ptDepth || !ctx.ptNormal || !ctx.ptVelocity) return;
+    if (!m_Ready || !ctx.lightBuffer || !ctx.ptDepth || !ctx.ptNormal || !ctx.ptVelocity
+        || !ctx.ptAlbedo) return;
 
     const u32 readSlot  = m_HistorySlot;         // 读取槽（上帧历史）
     const u32 writeSlot = m_HistorySlot ^ 1;     // 写入槽（本帧 → 下帧历史）
@@ -200,6 +206,8 @@ void ReSTIRPass::Execute(rhi::IRHICommandList* cmd, const ReSTIRDispatchContext&
             rhi::DescriptorType::StorageBuffer, ctx.lightBuffer);
         m_Device->UpdateDescriptorSet(m_Init.set, 3,
             rhi::DescriptorType::StorageBuffer, m_Initial.get());
+        m_Device->UpdateDescriptorSet(m_Init.set, 4,
+            rhi::DescriptorType::SampledImage, ctx.ptAlbedo, nullptr);
         cmd->SetPipeline(m_Init.pso.get());
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Init.set);
         cmd->SetPushConstants(0, sizeof(pc), &pc);
@@ -230,6 +238,8 @@ void ReSTIRPass::Execute(rhi::IRHICommandList* cmd, const ReSTIRDispatchContext&
             rhi::DescriptorType::StorageImage, m_HistNormal[writeSlot]->GetNativeHandle());
         m_Device->UpdateDescriptorSet(m_Temporal.set, 10,
             rhi::DescriptorType::StorageBuffer, ctx.lightBuffer);
+        m_Device->UpdateDescriptorSet(m_Temporal.set, 11,
+            rhi::DescriptorType::SampledImage, ctx.ptAlbedo, nullptr);
         cmd->SetPipeline(m_Temporal.pso.get());
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Temporal.set);
         cmd->SetPushConstants(0, sizeof(pc), &pc);
@@ -248,6 +258,8 @@ void ReSTIRPass::Execute(rhi::IRHICommandList* cmd, const ReSTIRDispatchContext&
             rhi::DescriptorType::StorageBuffer, m_Final.get());
         m_Device->UpdateDescriptorSet(m_Spatial.set, 4,
             rhi::DescriptorType::StorageBuffer, ctx.lightBuffer);
+        m_Device->UpdateDescriptorSet(m_Spatial.set, 5,
+            rhi::DescriptorType::SampledImage, ctx.ptAlbedo, nullptr);
         cmd->SetPipeline(m_Spatial.pso.get());
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Spatial.set);
         cmd->SetPushConstants(0, sizeof(pc), &pc);

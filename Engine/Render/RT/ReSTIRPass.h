@@ -22,6 +22,7 @@ struct ReSTIRDispatchContext {
     rhi::IRHITexture* ptDepth    = nullptr;  // PT 输出：线性视图深度
     rhi::IRHITexture* ptNormal   = nullptr;  // PT 输出：世界法线(0~1)+roughness
     rhi::IRHITexture* ptVelocity = nullptr;  // PT 输出：屏幕速度
+    rhi::IRHITexture* ptAlbedo  = nullptr;   // PT 输出：albedo(rgb)+metallic(a)
     u32  candidateCount = 16;                // 初始采样候选数 M
     u32  spatialRadius  = 3;                 // 空间复用采样半径（像素）
     u32  spatialSamples = 5;                 // 空间复用采样数

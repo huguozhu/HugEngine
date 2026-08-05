@@ -13,6 +13,7 @@
 [[vk::binding(2, 0)]] StructuredBuffer<PTReservoir> g_Temporal;   // TemporalReservoir（本帧）
 [[vk::binding(3, 0)]] RWStructuredBuffer<PTReservoir> g_Final;    // FinalReservoir（本帧）
 [[vk::binding(4, 0)]] StructuredBuffer<GPULight> g_Lights;        // 光源 SSBO
+[[vk::binding(5, 0)]] Texture2D<float4> g_AlbedoMetallic;  // PT 第 5 UAV: albedo(rgb)+metallic(a)
 
 // === Push Constant ===
 [[vk::push_constant]] ReSTIRPushConstant g_PC;
@@ -27,14 +28,15 @@ PTReservoir EmptyReservoir() {
     return r;
 }
 
-// 目标函数（与 Init/Temporal 一致）：p̂ = luminance(brdf·Li) / p_src
+// 目标函数（与 Init/Temporal 一致）：p̂ = luminance(brdf·Li) / p_src（含真实 albedo/metallic）
 float EvaluateTarget(float3 P, float3 N, float3 V, float roughness,
+                     float3 albedo, float metallic,
                      uint lightIndex, out float3 lightPos) {
-    uint li = min(lightIndex, g_PC.lightCount > 0 ? g_PC.lightCount - 1 : 0u);  // 越界防护
+    uint li = min(lightIndex, g_PC.lightCount > 0 ? g_PC.lightCount - 1u : 0u);  // 越界防护
     float3 L; float3 Li; float lightPdf;
     if (!SampleLight(g_Lights[li], P, lightPos, L, Li, lightPdf)) return 0.0;
     if (dot(N, L) <= 0.0) return 0.0;
-    float3 f = PBR_BRDF(float3(1, 1, 1), 0.0, roughness, N, V, L) * Li;
+    float3 f = PBR_BRDF(albedo, metallic, roughness, N, V, L) * Li;
     return Luminance(f) / max(lightPdf, 1e-6);
 }
 
@@ -43,6 +45,9 @@ void main(uint3 idx : SV_DispatchThreadID) {
     uint2 p = idx.xy;
     if (p.x >= g_PC.dispatchDimX || p.y >= g_PC.dispatchDimY) return;
     uint lin = p.y * g_PC.dispatchDimX + p.x;
+
+    // 读取 PT 第 5 UAV：真实 albedo(rgb) + metallic(a)（中心像素材质）
+    float4 am = g_AlbedoMetallic.Load(int3(p, 0));
 
     PTReservoir center = g_Temporal[lin];
     if (center.M == 0u) {
@@ -87,7 +92,7 @@ void main(uint3 idx : SV_DispatchThreadID) {
 
             // 对中心像素重新评估邻域样本的目标函数
             float3 nbrLightPos;
-            float pHat = EvaluateTarget(centerPos, centerN, V, roughness,
+            float pHat = EvaluateTarget(centerPos, centerN, V, roughness, am.rgb, am.a,
                                         nbr.lightIndex, nbrLightPos);
             if (pHat <= 0.0) continue;
 

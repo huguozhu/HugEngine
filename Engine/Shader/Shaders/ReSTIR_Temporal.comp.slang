@@ -21,6 +21,7 @@
 [[vk::binding(8, 0)]] RWTexture2D<float>  g_CurDepth;  // 下一帧历史深度槽（= 本帧 ptDepth 拷贝）
 [[vk::binding(9, 0)]] RWTexture2D<float4> g_CurNormal; // 下一帧历史法线槽（= 本帧 ptNormal 拷贝）
 [[vk::binding(10, 0)]] StructuredBuffer<GPULight> g_Lights;   // 光源 SSBO
+[[vk::binding(11, 0)]] Texture2D<float4> g_AlbedoMetallic;  // PT 第 5 UAV: albedo(rgb)+metallic(a)
 
 // === Push Constant ===
 [[vk::push_constant]] ReSTIRPushConstant g_PC;
@@ -35,14 +36,15 @@ PTReservoir EmptyReservoir() {
     return r;
 }
 
-// 目标函数（与 Init 一致）：p̂ = luminance(brdf·Li) / p_src
+// 目标函数（与 Init 一致）：p̂ = luminance(brdf·Li) / p_src（含真实 albedo/metallic）
 float EvaluateTarget(float3 P, float3 N, float3 V, float roughness,
+                     float3 albedo, float metallic,
                      uint lightIndex, out float3 lightPos) {
-    uint li = min(lightIndex, g_PC.lightCount > 0 ? g_PC.lightCount - 1 : 0u);  // 越界防护
+    uint li = min(lightIndex, g_PC.lightCount > 0 ? g_PC.lightCount - 1u : 0u);  // 越界防护
     float3 L; float3 Li; float lightPdf;
     if (!SampleLight(g_Lights[li], P, lightPos, L, Li, lightPdf)) return 0.0;
     if (dot(N, L) <= 0.0) return 0.0;
-    float3 f = PBR_BRDF(float3(1, 1, 1), 0.0, roughness, N, V, L) * Li;
+    float3 f = PBR_BRDF(albedo, metallic, roughness, N, V, L) * Li;
     return Luminance(f) / max(lightPdf, 1e-6);
 }
 
@@ -51,6 +53,9 @@ void main(uint3 idx : SV_DispatchThreadID) {
     uint2 p = idx.xy;
     if (p.x >= g_PC.dispatchDimX || p.y >= g_PC.dispatchDimY) return;
     uint lin = p.y * g_PC.dispatchDimX + p.x;
+
+    // 读取 PT 第 5 UAV：真实 albedo(rgb) + metallic(a)
+    float4 am = g_AlbedoMetallic.Load(int3(p, 0));
 
     PTReservoir current = g_Initial[lin];
 
@@ -105,7 +110,8 @@ void main(uint3 idx : SV_DispatchThreadID) {
         return;
     }
     float3 histLightPos;
-    float pHatHist = EvaluateTarget(worldPos, N, V, roughness, history.lightIndex, histLightPos);
+    float pHatHist = EvaluateTarget(worldPos, N, V, roughness, am.rgb, am.a,
+                                    history.lightIndex, histLightPos);
     if (pHatHist <= 0.0) {
         g_Temporal[lin] = current;
         return;

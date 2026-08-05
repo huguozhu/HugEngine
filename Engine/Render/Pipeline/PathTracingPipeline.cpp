@@ -378,6 +378,7 @@ void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 ctx.ptDepth      = ptDepth;
                 ctx.ptNormal     = ptNormal;
                 ctx.ptVelocity   = ptVel;
+                ctx.ptAlbedo     = m_PT ? m_PT->GetAlbedoMetallic() : nullptr;
                 ctx.candidateCount = std::clamp((u32)cvPTRestirCandidates.Get(), 1u, 64u);
                 ctx.spatialRadius  = std::clamp((u32)cvPTRestirRadius.Get(), 1u, 8u);
                 ctx.spatialSamples = std::clamp((u32)cvPTRestirSamples.Get(), 1u, 16u);

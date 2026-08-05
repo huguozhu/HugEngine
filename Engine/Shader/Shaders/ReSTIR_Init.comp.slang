@@ -6,8 +6,8 @@
 //   3. WRS（加权蓄水池采样）更新：以 p̂/Σp̂ 概率替换选中样本
 //   4. 输出 InitialReservoir
 //
-// 目标函数不含 albedo/metallic（用 albedo=1）：WRS 对 p̂ 的正缩放不变，
-// 无偏性保持，仅方差略大（后续可加 ptAlbedo 输出精化）。
+// 目标函数使用 PT 输出的真实 albedo/metallic（第 5 UAV），
+// 使 WRS 的 p̂ 与最终着色权重一致 → 降低有色物体的直接光噪声。
 
 #include "PT_Common.slang"  // Rand/RandInt/SampleLight/ReconstructWorldPos
 
@@ -16,6 +16,7 @@
 [[vk::binding(1, 0)]] Texture2D<float4> g_Normal;   // ptNormal：世界法线(0~1) + roughness.a
 [[vk::binding(2, 0)]] StructuredBuffer<GPULight> g_Lights;   // 光源 SSBO
 [[vk::binding(3, 0)]] RWStructuredBuffer<PTReservoir> g_Initial;  // InitialReservoir
+[[vk::binding(4, 0)]] Texture2D<float4> g_AlbedoMetallic;  // PT 第 5 UAV: albedo(rgb)+metallic(a)
 
 // === Push Constant（128B，见 ShaderTypes.slang）===
 [[vk::push_constant]] ReSTIRPushConstant g_PC;
@@ -34,14 +35,15 @@ PTReservoir EmptyReservoir() {
     return r;
 }
 
-// 目标函数：p̂ = luminance(brdf·Li) / p_src（不含 albedo/metallic，正缩放不变）
+// 目标函数：p̂ = luminance(brdf·Li) / p_src（含真实 albedo/metallic）
 float EvaluateTarget(float3 P, float3 N, float3 V, float roughness,
+                     float3 albedo, float metallic,
                      uint lightIndex, out float3 lightPos) {
-    uint li = min(lightIndex, g_PC.lightCount > 0 ? g_PC.lightCount - 1 : 0u);  // 越界防护
+    uint li = min(lightIndex, g_PC.lightCount > 0 ? g_PC.lightCount - 1u : 0u);
     float3 L; float3 Li; float lightPdf;
     if (!SampleLight(g_Lights[li], P, lightPos, L, Li, lightPdf)) return 0.0;
     if (dot(N, L) <= 0.0) return 0.0;
-    float3 f = PBR_BRDF(float3(1, 1, 1), 0.0, roughness, N, V, L) * Li;
+    float3 f = PBR_BRDF(albedo, metallic, roughness, N, V, L) * Li;
     return Luminance(f) / max(lightPdf, 1e-6);
 }
 
@@ -65,6 +67,11 @@ void main(uint3 idx : SV_DispatchThreadID) {
     float  roughness = nb.a;
     float3 V = normalize(g_PC.cameraPos.xyz - worldPos);
 
+    // 读取 PT 第 5 UAV：真实 albedo(rgb) + metallic(a)
+    float4 am = g_AlbedoMetallic.Load(int3(p, 0));
+    float3 albedo = am.rgb;
+    float  metallic = am.a;
+
     // ── WRS 初始采样 ──
     PTReservoir r = EmptyReservoir();
     uint candidates = max(1u, min(g_PC.candidateCount, 64u));
@@ -80,7 +87,7 @@ void main(uint3 idx : SV_DispatchThreadID) {
         if (!SampleLight(g_Lights[li], worldPos, lightPos, L, Li, lightPdf)) continue;
         if (dot(N, L) <= 0.0) continue;
 
-        float3 f = PBR_BRDF(float3(1, 1, 1), 0.0, roughness, N, V, L) * Li;
+        float3 f = PBR_BRDF(albedo, metallic, roughness, N, V, L) * Li;
         float pHat = Luminance(f) / max(lightPdf, 1e-6);
         if (pHat <= 0.0) continue;
 
