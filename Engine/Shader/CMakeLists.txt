@@ -99,6 +99,7 @@ if(SLANGC)
         "${SHADER_DIR}/ReSTIR_Init.comp.slang"
         "${SHADER_DIR}/ReSTIR_Temporal.comp.slang"
         "${SHADER_DIR}/ReSTIR_Spatial.comp.slang"
+        "${SHADER_DIR}/PT_Atrous.comp.slang"
     )
     # Ray Tracing 着色器（.rgen / .rmiss / .rchit / .rahit / .rcall）
     # 命名约定: EffectName.rgen.slang (RayGen), EffectName.rmiss.slang (Miss),
