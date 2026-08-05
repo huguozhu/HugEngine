@@ -32,15 +32,15 @@ struct PTRenderContext {
 // PTPass — 全路径追踪 Pass
 //
 // 迭代式路径追踪 RayGen 直接渲染整帧（NEE+MIS+俄罗斯轮盘赌+天空），
-// 输出 4 个 UAV（HDR 颜色 + GBuffer：深度/法线/速度），供 RTDenoiser
+// 输出 5 个 UAV（HDR 颜色 + GBuffer：深度/法线/速度/albedoMetallic），供 RTDenoiser
 // 时域累积与 ReSTIR_Init 重建世界坐标使用。
 //
-// 与 RTEffectPass 的区别：输出 4 张 UAV 纹理（而非 1 张），故不继承
+// 与 RTEffectPass 的区别：输出 5 张 UAV 纹理（而非 1 张），故不继承
 // 基类，直接复用 RTPass::CreateEffectPipeline 创建独立管线 + SBT。
 //
 // set0 绑定：
 //   b0=TLAS(RG), b1..b4=四输出 UAV(RG), b5=GPULight[] SSBO(RG),
-//   b6=材质纹理(CH), b7=三角形法线(CH), b8=FinalReservoir SSBO(RG)
+//   b6=材质纹理(CH), b7=三角形法线(CH), b8=FinalReservoir SSBO(RG), b9=albedoMetallic UAV(RG)
 // ============================================================
 class PTPass {
     HE_DECLARE_NON_COPYABLE(PTPass);
@@ -49,11 +49,11 @@ public:
     PTPass()  = default;
     ~PTPass() = default;
 
-    // 初始化：创建 set0 布局/描述符集 + 独立 RT 管线 + 4 张输出纹理
+    // 初始化：创建 set0 布局/描述符集 + 独立 RT 管线 + 5 张输出纹理
     bool Initialize(rhi::IRHIDevice* device, u32 width, u32 height);
     void Shutdown();
 
-    // 每帧执行：屏障 4 输出 → 更新 set0 描述符 → 推常量 → TraceRays
+    // 每帧执行：屏障 5 输出 → 更新 set0 描述符 → 推常量 → TraceRays
     void Execute(rhi::IRHICommandList* cmd, rhi::IRHIAccelerationStructure* tlas,
                  const PTRenderContext& ctx);
 
@@ -62,12 +62,13 @@ public:
     rhi::IRHITexture* GetDepth()    const { return m_Depth.get(); }
     rhi::IRHITexture* GetNormal()   const { return m_Normal.get(); }
     rhi::IRHITexture* GetVelocity() const { return m_Velocity.get(); }
+    rhi::IRHITexture* GetAlbedoMetallic() const { return m_AlbedoMetallic.get(); }
     u32 GetWidth()  const { return m_Width; }
     u32 GetHeight() const { return m_Height; }
     bool IsValid()  const { return m_Pipeline && m_Pipeline->pipeline != nullptr; }
 
 private:
-    // 4 张输出纹理 → UnorderedAccess（RT 写）。首帧从 Undefined 过渡，
+    // 5 张输出纹理 → UnorderedAccess（RT 写）。首帧从 Undefined 过渡，
     // 后续帧从 ShaderResource 过渡（上帧被降噪器/ReSTIR 以 SRV 采样结束）。
     void PrepareOutputUAV(rhi::IRHICommandList* cmd);
 
@@ -79,11 +80,12 @@ private:
     rhi::DescriptorSetHandle       m_Set    = rhi::kInvalidSet;
     rhi::PushConstantRange         m_PCRange;
 
-    // 4 张输出纹理（同生共死，单标志控制首帧屏障）
+    // 5 张输出纹理（同生共死，单标志控制首帧屏障）
     std::unique_ptr<rhi::IRHITexture> m_HDR;      // RGBA16_FLOAT 噪声 HDR
     std::unique_ptr<rhi::IRHITexture> m_Depth;    // R32_FLOAT 线性视图深度
     std::unique_ptr<rhi::IRHITexture> m_Normal;   // RGBA16_FLOAT 世界法线(0~1)+roughness
     std::unique_ptr<rhi::IRHITexture> m_Velocity; // RG16_FLOAT 屏幕速度
+    std::unique_ptr<rhi::IRHITexture> m_AlbedoMetallic; // RGBA16_FLOAT albedo(rgb)+metallic(a)
     bool m_OutputWritten = false;
 };
 

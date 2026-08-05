@@ -27,9 +27,9 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Width  = width;
     m_Height = height;
 
-    // ── set0 资源绑定（9 项）──
+    // ── set0 资源绑定（10 项）──
     // b0=TLAS(RG), b1..b4=四输出 UAV(RG), b5=光源 SSBO(RG),
-    // b6=材质纹理(CH), b7=三角形法线(CH), b8=FinalReservoir SSBO(RG)
+    // b6=材质纹理(CH), b7=三角形法线(CH), b8=FinalReservoir SSBO(RG), b9=albedoMetallic UAV(RG)
     std::vector<rhi::DescriptorSetLayoutBinding> bindings = {
         {0, rhi::DescriptorType::AccelerationStructure, 1, rhi::kStageMaskRayGen},
         {1, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskRayGen},
@@ -40,6 +40,7 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         {6, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskClosestHit},   // 场景材质纹理
         {7, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskClosestHit},   // 三角形法线纹理
         {8, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskRayGen},      // FinalReservoir
+        {9, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskRayGen},       // 第 5 输出 UAV: albedoMetallic
     };
 
     // ── push constant 范围（RayGen + ClosestHit + Miss 共用，176B）──
@@ -115,7 +116,7 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         return false;
     }
 
-    // ── 4 张输出纹理（RT 写 UAV，降噪/ReSTIR 读 SRV）──
+    // ── 5 张输出纹理（RT 写 UAV，降噪/ReSTIR 读 SRV）──
     rhi::TextureDesc d;
     d.width = m_Width; d.height = m_Height; d.mipLevels = 1;
     d.usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource;
@@ -127,7 +128,9 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Normal = device->CreateTexture(d);
     d.format = rhi::Format::RG16_FLOAT;
     m_Velocity = device->CreateTexture(d);
-    if (!m_HDR || !m_Depth || !m_Normal || !m_Velocity) {
+    d.format = rhi::Format::RGBA16_FLOAT;
+    m_AlbedoMetallic = device->CreateTexture(d);
+    if (!m_HDR || !m_Depth || !m_Normal || !m_Velocity || !m_AlbedoMetallic) {
         HE_CORE_ERROR("PTPass: 输出纹理创建失败");
         return false;
     }
@@ -137,7 +140,8 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
 }
 
 void PTPass::Shutdown() {
-    m_Velocity.reset(); m_Normal.reset(); m_Depth.reset(); m_HDR.reset();
+    m_Velocity.reset(); m_AlbedoMetallic.reset();
+    m_Normal.reset(); m_Depth.reset(); m_HDR.reset();
     m_Pipeline.reset();
     m_Set = rhi::kInvalidSet; m_Layout = rhi::kInvalidLayout;
     m_Device = nullptr; m_Width = m_Height = 0;
@@ -145,7 +149,7 @@ void PTPass::Shutdown() {
 }
 
 // ============================================================
-// PrepareOutputUAV — 4 张输出纹理 → UnorderedAccess（RT 写）
+// PrepareOutputUAV — 5 张输出纹理 → UnorderedAccess（RT 写）
 // 首帧从 Undefined 过渡（无历史访问）；后续帧从 ShaderResource 过渡
 //（上帧由 RTDenoiser 以 SRV 采样结束）。UAV→ShaderResource 的反向转换
 // 由 RenderGraph 依据降噪/ReSTIR 的读取依赖自动生成。
@@ -165,6 +169,7 @@ void PTPass::PrepareOutputUAV(rhi::IRHICommandList* cmd) {
     barrier(m_Depth.get());
     barrier(m_Normal.get());
     barrier(m_Velocity.get());
+    barrier(m_AlbedoMetallic.get());
     m_OutputWritten = true;
 }
 
@@ -175,7 +180,7 @@ void PTPass::Execute(rhi::IRHICommandList* cmd, rhi::IRHIAccelerationStructure* 
                      const PTRenderContext& ctx) {
     if (!IsValid() || !tlas || !m_HDR || !m_Device) return;
 
-    // ── 预屏障：4 输出 → UnorderedAccess（RT 写）──
+    // ── 预屏障：5 输出 → UnorderedAccess（RT 写）──
     PrepareOutputUAV(cmd);
 
     // ── 更新 set0 描述符 ──
@@ -189,6 +194,8 @@ void PTPass::Execute(rhi::IRHICommandList* cmd, rhi::IRHIAccelerationStructure* 
         rhi::DescriptorType::StorageImage, m_Normal->GetNativeHandle());
     m_Device->UpdateDescriptorSetWithImageView(m_Set, 4,
         rhi::DescriptorType::StorageImage, m_Velocity->GetNativeHandle());
+    m_Device->UpdateDescriptorSetWithImageView(m_Set, 9,
+        rhi::DescriptorType::StorageImage, m_AlbedoMetallic->GetNativeHandle());
     if (ctx.lightBuffer)
         m_Device->UpdateDescriptorSet(m_Set, 5,
             rhi::DescriptorType::StorageBuffer, ctx.lightBuffer);

@@ -7,7 +7,7 @@
 //      - ReSTIR DI（flags bit0）：反弹 0 从蓄水池采样 1 条阴影射线替代 NEE
 //      - 俄罗斯轮盘赌终止（flags bit2）
 //      - BSDF 采样（漫反射余弦 + GGX 镜面混合）→ 下一根光线
-//   3. 输出 4 个 UAV：HDR 颜色 / 线性视图深度 / 世界法线+粗糙度 / 屏幕速度
+//   3. 输出 5 个 UAV：HDR 颜色 / 线性视图深度 / 世界法线+粗糙度 / 屏幕速度 / albedoMetallic
 //
 // 输出 GBuffer 供：RTDenoiser 时域累积（depth/normal/velocity）+
 // ReSTIR_Init 重建世界坐标（depth+invViewProj）与粗糙度（normal.a）。
@@ -25,6 +25,7 @@
 [[vk::binding(4, 0)]] RWTexture2D<float2> g_Velocity;  // RG16F 屏幕速度（currUV - prevUV）
 [[vk::binding(5, 0)]] StructuredBuffer<GPULight> g_Lights;   // 光源（RayGen 可读 SSBO）
 [[vk::binding(8, 0)]] StructuredBuffer<PTReservoir> g_FinalReservoir;  // ReSTIR 蓄水池（上帧）
+[[vk::binding(9, 0)]] RWTexture2D<float4> g_AlbedoMetallic;  // 第 5 UAV: albedo(rgb)+metallic(a)
 
 // === Push Constant（176B，见 ShaderTypes.slang）===
 [[vk::push_constant]] PTPushConstant g_PC;
@@ -80,6 +81,8 @@ void main() {
     float  primaryRough = 1.0;
     float3 primaryP    = float3(0, 0, 0);
     bool   primaryHit  = false;
+    float3 primaryAlbedo   = float3(0, 0, 0);  // 主光线命中像素的 albedo（miss 保持 0）
+    float  primaryMetallic = 0.0;              // 主光线命中像素的 metallic（miss 保持 0）
     float2 currUV = (float2(idx) + 0.5) / float2(dim);
 
     for (uint s = 0; s < spp; s++) {
@@ -125,6 +128,8 @@ void main() {
                 primaryN     = N;
                 primaryRough = rough;
                 primaryP     = P;
+                primaryAlbedo   = albedo;
+                primaryMetallic = metallic;
             }
 
             // 自发光贡献（命中表面辐射）
@@ -224,7 +229,7 @@ void main() {
     }
     radiance /= float(spp);
 
-    // ── 输出 4 个 UAV（GBuffer 仅对主光线命中像素有效）──
+    // ── 输出 5 个 UAV（GBuffer 仅对主光线命中像素有效）──
     float2 velocity = float2(0, 0);
     if (primaryHit) {
         float2 prevUV = TransformWorldToUV(primaryP, g_PC.prevViewProj);
@@ -235,4 +240,5 @@ void main() {
     g_Depth[idx]   = viewZ;
     g_Normal[idx]  = float4(primaryN * 0.5 + 0.5, primaryRough);
     g_Velocity[idx] = velocity;
+    g_AlbedoMetallic[idx] = float4(primaryAlbedo, primaryMetallic);  // miss 像素为 0
 }
