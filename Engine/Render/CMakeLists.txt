@@ -66,6 +66,8 @@ set(RENDER_SOURCES
     RT/PTPass.cpp
     RT/ReSTIRPass.h
     RT/ReSTIRPass.cpp
+    RT/STBNTexture.h
+    RT/STBNTexture.cpp
     # RenderGraph
     RenderGraph.h
     RenderGraph.cpp
