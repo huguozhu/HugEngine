@@ -6,9 +6,8 @@
 
 ```
 HugEngine/
-├── Engine/         # 引擎全部源代码
-├── Samples/        # 示例项目
-├── External/       # 第三方依赖 (vcpkg 管理)
+├── Engine/         # 引擎全部源代码（含 External/ 第三方依赖）
+├── Samples/        # 示例项目（01.Triangle ~ 04.Deferred + HugEditor）
 ├── Docs/           # 设计文档、架构规划
 └── README.md
 ```
@@ -16,24 +15,26 @@ HugEngine/
 ## 构建
 
 ```bash
-# 配置 (需要 CMake 3.28+ 和 vcpkg)
+# 初始化第三方依赖 (git submodule) + 配置 (需要 CMake 3.28+ / Vulkan SDK)
+git submodule update --init --recursive
 cmake -B build -S . --preset=default
 cmake --build build
 ```
 
 ## 文档
 
-- [技术全景与实施计划](Docs/HugEngine_Technical_Plan.md)
-- [架构设计与任务划分](Docs/HugEngine_Architecture_And_Tasks.md)
+- [技术全景与实施计划](Docs/HugEngine技术全景与实施计划.md)
+- [架构设计与任务划分](Docs/HugEngine架构设计与任务划分.md)
+- [开发进度](Docs/HugEngine开发进度.md)
 
 ## 技术栈
 
 | 维度 | 选型 |
 |------|------|
-| 构建 | CMake + vcpkg |
-| 语言 | C++26 |
+| 构建 | CMake + git submodule（ImGui 由 CDN 下载） |
+| 语言 | C++20 |
 | 着色器 | Slang → SPIR-V / DXIL |
 | RHI | Vulkan 1.3+ / D3D12 SM 6.6+ |
 | 数学 | GLM |
 | 编辑器 | Dear ImGui |
-| 反射 | C++26 ^T + [[engine::]] 静态反射 |
+| 反射 | 宏驱动运行时反射（HE_CLASS 宏，预留 C++26 ^T 后端） |
