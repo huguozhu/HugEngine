@@ -306,8 +306,11 @@ void VulkanDevice::Shutdown() {
     // 4. 销毁 VMA 分配器（在清理 Vulkan 资源之前）
     if (m_VmaAllocator) { vmaDestroyAllocator(m_VmaAllocator); m_VmaAllocator = VK_NULL_HANDLE; }
 
-    for (auto& info : m_DescLayoutInfos)
-        vkDestroyDescriptorSetLayout(m_Device, info.layout, nullptr);
+    // 跳过已由 DestroyDescriptorSetLayout 提前销毁的 layout（避免双重销毁）
+    for (auto& info : m_DescLayoutInfos) {
+        if (info.layout != VK_NULL_HANDLE)
+            vkDestroyDescriptorSetLayout(m_Device, info.layout, nullptr);
+    }
     m_DescLayoutInfos.clear();
     m_DescSets.clear();
     m_DescSetLayoutParents.clear();

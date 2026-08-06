@@ -413,8 +413,12 @@ void VulkanDevice::DestroyTextureMipView(void* view) {
 
 void VulkanDevice::DestroyDescriptorSetLayout(DescriptorSetLayoutHandle handle) {
     if (handle == 0 || handle > m_DescLayoutInfos.size()) return;
-    VkDescriptorSetLayout layout = m_DescLayoutInfos[static_cast<usize>(handle - 1)].layout;
-    vkDestroyDescriptorSetLayout(m_Device, layout, nullptr);
+    auto& info = m_DescLayoutInfos[static_cast<usize>(handle - 1)];
+    // 防重复销毁：已销毁的 layout 标记为 VK_NULL_HANDLE，
+    // Shutdown 统一销毁时跳过，避免 Pass Shutdown + 设备析构的双重销毁崩溃
+    if (info.layout == VK_NULL_HANDLE) return;
+    vkDestroyDescriptorSetLayout(m_Device, info.layout, nullptr);
+    info.layout = VK_NULL_HANDLE;
 }
 
 } // namespace he::rhi
