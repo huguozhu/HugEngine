@@ -334,12 +334,16 @@ int main() {
         pc->Play();
         sceneGraph.SetParent(particleEntity, Entity{kInvalidEntity});
 
-        // 注册到延迟渲染管线与混合 RT 管线（粒子系统仅在 Deferred/HybridRT 模式下生效）
+        // 注册到延迟渲染管线、混合 RT 管线与全路径追踪管线
+        // （粒子系统在 Deferred / PathTracing 模式下生效；HybridRT 暂未接入渲染）
         u32 pid = deferredPipeline.GetParticleRenderer().RegisterComponent(pc, device.get());
         deferredPipeline.AddParticleComponent(pid);
         hybridPipeline.AddParticleComponent(pid);
+        u32 ptPid = pathTracingPipeline.GetParticleRenderer().RegisterComponent(pc, device.get());
+        pathTracingPipeline.AddParticleComponent(ptPid);
 
-        HE_CORE_INFO("粒子系统已注册: id={} maxParticles={}", pid, pc->GetMaxParticles());
+        HE_CORE_INFO("粒子系统已注册: Deferred/HybridRT id={} PT id={} maxParticles={}",
+                     pid, ptPid, pc->GetMaxParticles());
     }
 
     // --- 6. 创建命令列表 ---

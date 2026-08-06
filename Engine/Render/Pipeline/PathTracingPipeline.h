@@ -3,6 +3,7 @@
 #include "Pipeline/IRenderPipeline.h"
 #include "Pipeline/Material.h"   // GPULight / MAX_LIGHTS / MAX_FRAMES_IN_FLIGHT
 #include "Pipeline/RTPass.h"
+#include "Pipeline/ParticleRenderer.h"
 #include "Pipeline/PTQualityCVars.h"  // cvPTAtrous（A-Trous 访问器内联读写）
 #include "RT/PTPass.h"
 #include "RT/ReSTIRPass.h"
@@ -70,6 +71,10 @@ public:
     // ReSTIR 判定（供 BuildFrameGraph / ImGui 查询当前蓄水池是否可用）
     bool IsReservoirReady() const { return m_ReservoirReady; }
 
+    // GPU 粒子系统（PT 模式支持粒子渲染）
+    ParticleRenderer& GetParticleRenderer() { return m_ParticleRenderer; }
+    void AddParticleComponent(u32 id)       { m_ParticleComponentIDs.push_back(id); }
+
 private:
     void BuildFrameGraph(RenderGraph& rg, he::World& world,
                          he::SceneGraph& sg, const CameraData& camera);
@@ -97,6 +102,12 @@ private:
     // ── 后处理 ──
     PostProcessChain m_PostProcess;
     std::unique_ptr<rhi::IRHISampler> m_LinearSampler;  // ToneMap HDR 输入采样器
+
+    // ── GPU 粒子系统（PT HDR 上复合 Billboard 粒子）──
+    ParticleRenderer m_ParticleRenderer;
+    std::vector<u32> m_ParticleComponentIDs;   // 注册的粒子组件 ID 列表
+    std::unique_ptr<rhi::IRHITexture> m_ParticleDepth;       // 粒子深度附件（D32，每帧清远平面）
+    std::unique_ptr<rhi::IRHISampler> m_ParticleDepthSampler; // 软粒子采样器（点采样）
 
     // ── 三缓冲光源 SSBO ──
     std::unique_ptr<rhi::IRHIBuffer> m_LightBuffers[MAX_FRAMES_IN_FLIGHT];

@@ -597,6 +597,57 @@ void VulkanCommandList::CopyTextureToTexture(IRHITexture* src, IRHITexture* dst)
 }
 
 // ============================================================
+// ClearDepthStencil — 清除深度/模板纹理
+// 布局流程：UNDEFINED → TRANSFER_DST（写入确定值）→ DEPTH_STENCIL_ATTACHMENT
+// 供粒子 Pass 等需要每帧重置深度附件内容的场景使用
+// ============================================================
+void VulkanCommandList::ClearDepthStencil(IRHITexture* texture, float depth) {
+    if (!texture) return;
+    auto* vkTex = static_cast<VulkanTexture*>(texture);
+    VkImage image = vkTex->GetImage();
+    if (!image) return;
+
+    VkCommandBuffer cb = m_CmdBuffers[m_FrameIndex];
+
+    // ── 1. Undefined → TransferDst（丢弃旧内容，准备写入确定值）──
+    VkImageMemoryBarrier preBarrier{};
+    preBarrier.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    preBarrier.srcAccessMask       = 0;
+    preBarrier.dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+    preBarrier.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+    preBarrier.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    preBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    preBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    preBarrier.image               = image;
+    preBarrier.subresourceRange    = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &preBarrier);
+
+    // ── 2. 清除深度（默认远平面 1.0，保证所有粒子通过深度测试）──
+    VkClearDepthStencilValue dsv{};
+    dsv.depth   = depth;
+    dsv.stencil = 0;
+    vkCmdClearDepthStencilImage(cb, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                &dsv, 1, &preBarrier.subresourceRange);
+
+    // ── 3. TransferDst → DepthStencilAttachment（供后续渲染 Pass 深度测试）──
+    VkImageMemoryBarrier postBarrier{};
+    postBarrier.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    postBarrier.srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+    postBarrier.dstAccessMask       = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT
+                                    | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    postBarrier.oldLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    postBarrier.newLayout           = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    postBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    postBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    postBarrier.image               = image;
+    postBarrier.subresourceRange    = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &postBarrier);
+}
+
+// ============================================================
 // Pipeline Barrier
 // ============================================================
 

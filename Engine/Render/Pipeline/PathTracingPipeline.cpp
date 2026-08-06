@@ -54,6 +54,26 @@ bool PathTracingPipeline::Initialize(rhi::IRHIDevice* device) {
         if (!m_LinearSampler) HE_CORE_WARN("PathTracingPipeline: 线性采样器创建失败");
     }
 
+    // ── GPU 粒子系统（粒子 Billboard 复合到 PT HDR，降噪之前）──
+    // 粒子深度附件：D32 深度缓冲，每帧清成远平面 1.0，保证粒子始终通过深度测试
+    // （PT 场景深度由 RayGen 输出，未光栅化到深度附件，粒子不与场景做深度遮挡）
+    {
+        rhi::TextureDesc dd;
+        dd.format = rhi::Format::D32_FLOAT;
+        dd.width  = m_Width;
+        dd.height = m_Height;
+        dd.usage  = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
+        m_ParticleDepth = device->CreateTexture(dd);
+
+        rhi::SamplerDesc sd;
+        sd.minFilter = sd.magFilter = rhi::FilterMode::Nearest;   // 深度 Load 点采样
+        sd.addressU  = sd.addressV  = rhi::AddressMode::ClampToEdge;
+        m_ParticleDepthSampler = device->CreateSampler(sd);
+
+        m_ParticleRenderer.Initialize(device);
+        m_ParticleRenderer.SetSceneDepth(m_ParticleDepth.get(), m_ParticleDepthSampler.get());
+    }
+
     // ── 三缓冲光源 SSBO ──
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
         m_LightBuffers[i] = device->CreateBuffer(
@@ -142,6 +162,10 @@ void PathTracingPipeline::Shutdown() {
     m_ReSTIR.reset();
     if (m_PT) { m_PT->Shutdown(); m_PT.reset(); }
     if (m_RTPass) { m_RTPass->Shutdown(); m_RTPass.reset(); }
+    m_ParticleRenderer.Shutdown(m_Device);
+    m_ParticleDepthSampler.reset();
+    m_ParticleDepth.reset();
+    m_ParticleComponentIDs.clear();
     m_PostProcess.Shutdown();
     m_LinearSampler.reset();
     for (auto& b : m_LightBuffers) b.reset();
@@ -163,6 +187,17 @@ void PathTracingPipeline::OnResize(u32 w, u32 h) {
         if (m_ReSTIR) { m_ReSTIR->Shutdown(); m_ReSTIR->Initialize(m_Device, w, h); }
         if (m_PTDenoiser) m_PTDenoiser->OnResize(w, h);
         if (m_PTAtrous) m_PTAtrous->OnResize(w, h);
+    }
+    // 粒子深度附件跟随分辨率重建
+    if (m_Device) {
+        m_ParticleDepth.reset();
+        rhi::TextureDesc dd;
+        dd.format = rhi::Format::D32_FLOAT;
+        dd.width  = w;
+        dd.height = h;
+        dd.usage  = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
+        m_ParticleDepth = m_Device->CreateTexture(dd);
+        m_ParticleRenderer.SetSceneDepth(m_ParticleDepth.get(), m_ParticleDepthSampler.get());
     }
 }
 
@@ -186,8 +221,6 @@ i32  PathTracingPipeline::GetPTMaxBounces() const { return cvPTMaxBounces.Get();
 void PathTracingPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
                                  he::SceneGraph& sg, const CameraData& camera,
                                  float deltaTime) {
-    (void)deltaTime;
-
     if (!m_SwapChain || !m_Device) {
         HE_CORE_ERROR("PathTracingPipeline::Render: SwapChain 或 Device 未设置");
         return;
@@ -196,6 +229,12 @@ void PathTracingPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
     // 时域降噪混合因子（CVar 热更新）
     if (m_PTDenoiser)
         m_PTDenoiser->SetTemporalBlend(std::clamp(cvPTDenoiseBlend.Get(), 0.0f, 1.0f));
+
+    // ── 粒子模拟 (Compute，在 RenderGraph 之前) ──
+    float4x4 viewProj = camera.GetViewProjMatrix();
+    for (u32 pid : m_ParticleComponentIDs) {
+        m_ParticleRenderer.DispatchCompute(cmd, pid, deltaTime, viewProj);
+    }
 
     m_FrameIndex++;  // 帧索引递增（PT 抖动 / ReSTIR 种子）
 
@@ -387,6 +426,31 @@ void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 ctx.blueNoise = m_STBN ? m_STBN->GetTexture() : nullptr;
                 m_PT->Execute(c, m_RTPass->GetTLAS(), ctx);
             });
+    }
+
+    // ── Particle Render（粒子 Billboard 写入 PT HDR，PT_Render 之后、降噪之前）──
+    // 粒子作为 HDR 内容的一部分流向时域降噪 + ToneMap（与 Deferred 的粒子路径一致）。
+    // 深度附件每帧清成远平面：粒子始终通过深度测试（PT 场景深度未光栅化到该附件）。
+    if (!m_ParticleComponentIDs.empty() && m_PT && m_PT->IsValid()) {
+        for (u32 pid : m_ParticleComponentIDs) {
+            rg.AddPass("ParticleRender",
+                {{ptHDRHandle, ResourceAccess::Read}},
+                {{ptHDRHandle, ResourceAccess::Write}},
+                [this, pid, &camera, w, h](rhi::IRHICommandList* c) {
+                    // 先把粒子深度附件清成远平面（内容确定 + 保证粒子通过深度测试）
+                    c->ClearDepthStencil(m_ParticleDepth.get(), 1.0f);
+                    // 先设置粒子 PSO（BeginOffscreenPass 需要预绑定 PSO 来创建 RenderPass）
+                    c->SetPipeline(m_ParticleRenderer.GetRenderPSO());
+                    c->BeginOffscreenPass(
+                        m_PT->GetHDR()->GetNativeHandle(),
+                        m_ParticleDepth->GetNativeHandle(),
+                        w, h, nullptr, false);  // LoadOp::Load 保留 PT 结果
+                    c->SetViewport({0, (float)h, (float)w, -(float)h, 0, 1});
+                    c->SetScissor({0, 0, w, h});
+                    m_ParticleRenderer.Render(c, pid, camera.GetViewProjMatrix(), camera);
+                    c->EndOffscreenPass();
+                });
+        }
     }
 
     // ── ReSTIR DI（Init → Temporal → Spatial 顺序 dispatch，单 RG Pass）──

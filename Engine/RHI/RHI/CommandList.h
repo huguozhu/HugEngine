@@ -158,6 +158,11 @@ public:
     // 内部自动处理 TRANSFER_SRC / TRANSFER_DST 布局转换
     virtual void CopyTextureToTexture(IRHITexture* src, IRHITexture* dst) = 0;
 
+    // 深度/模板纹理清除（GPU 端，如每帧把粒子深度附件清成远平面 1.0）
+    // 内部自动处理 UNDEFINED → TRANSFER_DST → DEPTH_STENCIL_ATTACHMENT 布局转换。
+    // 默认空实现：后端不支持时安全跳过。
+    virtual void ClearDepthStencil(IRHITexture* texture, float depth = 1.0f) {}
+
     // 跨队列所有权转移（AsyncCompute Barrier）
     // 当资源从 Graphics 队列移交给 Compute 队列（或反向）时调用
     // Vulkan: PipelineBarrier 中设置 srcQueueFamilyIndex != dstQueueFamilyIndex
