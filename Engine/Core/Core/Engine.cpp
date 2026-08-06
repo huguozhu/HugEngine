@@ -1,5 +1,6 @@
 #include "Core/Engine.h"
 #include "Core/Log.h"
+#include "Core/CVar.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -25,10 +26,15 @@ void Engine::Initialize() {
     Logger::Initialize(m_Config.logLevel);
     HE_CORE_INFO("=== Initializing HugEngine v0.1.0 ===");
 
-    // 2. Job system
+    // 2. 调试功能开关：EngineConfig → CVar 桥接（启动时一次性应用）
+    // 配置开关写入对应 CVar，RHI 后端读取 CVar 决策；运行时仍可用控制台覆盖
+    if (auto* cvar = FindCVar("r.Debug.DrawMarker"))
+        cvar->SetFromString(m_Config.enableDrawMarkers ? "true" : "false");
+
+    // 3. Job system
     JobSystem::Initialize(m_Config.jobThreads);
 
-    // 3. Window
+    // 4. Window
     WindowDesc wdesc;
     wdesc.title  = m_Config.appName;
     wdesc.width  = m_Config.windowWidth;

@@ -4,6 +4,7 @@
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include <cstring>
+#include <cstdio>
 
 // Slang → SPIR-V headers
 #include "ParticleInit.comp.spv.h"
@@ -508,6 +509,10 @@ void ParticleRenderer::DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float 
         cmd->SetPipeline(m_InitPSO.get());
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, cs.initSet);
         cmd->SetPushConstants(0, sizeof(u32), &maxP);
+        // Dispatch 调试 marker（RenderDoc 定位用）
+        char label[64];
+        snprintf(label, sizeof(label), "Particle#%u Init", id);
+        cmd->SetDrawDebugLabel(label);
         cmd->Dispatch((cs.maxParticles + kCS_Threads - 1) / kCS_Threads, 1, 1);
 
         // Barrier: Init UAV → Emit SRV/UAV
@@ -592,6 +597,10 @@ void ParticleRenderer::DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float 
         cmd->SetPipeline(m_EmitPSO.get());
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, cs.emitSet);
         cmd->SetPushConstants(0, sizeof(GpuEmitParam), &emitParam);
+        // Dispatch 调试 marker（RenderDoc 定位用）
+        char label[64];
+        snprintf(label, sizeof(label), "Particle#%u Emit", id);
+        cmd->SetDrawDebugLabel(label);
         cmd->Dispatch((emitCount + kCS_Threads - 1) / kCS_Threads, 1, 1);
 
         cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
@@ -617,6 +626,10 @@ void ParticleRenderer::DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float 
         cmd->SetPipeline(m_SimPSO.get());
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, cs.simSet);
         cmd->SetPushConstants(0, sizeof(GpuSimulateParam), &simParam);
+        // Dispatch 调试 marker（RenderDoc 定位用）
+        char label[64];
+        snprintf(label, sizeof(label), "Particle#%u Simulate", id);
+        cmd->SetDrawDebugLabel(label);
         cmd->Dispatch((cs.maxParticles + kCS_Threads - 1) / kCS_Threads, 1, 1);
 
         cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
@@ -644,6 +657,10 @@ void ParticleRenderer::DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float 
         cmd->SetPipeline(m_CullingPSO.get());
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, cs.cullingSet);
         cmd->SetPushConstants(0, sizeof(GpuCullingParam), &cullParam);
+        // Dispatch 调试 marker（RenderDoc 定位用）
+        char label[64];
+        snprintf(label, sizeof(label), "Particle#%u Cull", id);
+        cmd->SetDrawDebugLabel(label);
         cmd->Dispatch((cs.maxParticles + kCS_Threads - 1) / kCS_Threads, 1, 1);
 
         if (verbose) {
@@ -658,6 +675,10 @@ void ParticleRenderer::DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float 
     {
         cmd->SetPipeline(m_SortPSO.get());
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, cs.sortSet);
+        // Dispatch 调试 marker（RenderDoc 定位用）
+        char label[64];
+        snprintf(label, sizeof(label), "Particle#%u Sort", id);
+        cmd->SetDrawDebugLabel(label);
         cmd->Dispatch(1, 1, 1);  // 单 workgroup 512 线程，shared memory 排序
 
         cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::VertexShader,

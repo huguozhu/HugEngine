@@ -9,6 +9,7 @@
 #include "Pipeline/Material.h"   // GPUObjectData
 #include "RSM_Generate.vert.spv.h"
 #include "RSM_Generate.frag.spv.h"
+#include <cstdio>
 
 namespace he::render {
 
@@ -164,6 +165,11 @@ void GI_RSM::RenderRSMPass(rhi::IRHICommandList* cmd, he::World& world, he::Scen
     auto renderMesh = [&](he::Entity e, he::MeshComponent& m) {
         if (m.GetIndexCount() == 0 || objectIndex >= MAX_OBJECTS) return;
         objData[objectIndex].worldMatrix = sg.GetWorldMatrix(e);
+
+        // DrawCall 调试 marker：标记当前 RSM 物体（RenderDoc 定位用）
+        char label[64];
+        snprintf(label, sizeof(label), "RSM Obj#%u", objectIndex);
+        cmd->SetDrawDebugLabel(label);
 
         // 设置 RSM push constants
         struct alignas(16) RSMPush { float4x4 lightVP; u32 objIdx; u32 lightIdx; u32 _pad[2]; } pc{};

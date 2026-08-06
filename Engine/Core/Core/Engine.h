@@ -19,6 +19,7 @@ struct EngineConfig {
     u32         jobThreads   = 0;    // 0 = auto-detect
     bool        enableValidation = true;
     bool        enableMultiThreadRecord = true;  // Phase 5-4: 多线程命令录制
+    bool        enableDrawMarkers = true;   // DrawCall 级调试 marker（RenderDoc 定位用，启动时写入 r.Debug.DrawMarker）
     LogLevel    logLevel     = LogLevel::Info;  // 默认日志等级
 };
 

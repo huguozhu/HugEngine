@@ -13,6 +13,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include "Core/Log.h"
 #include "Core/Assert.h"
+#include <cstdio>
 
 namespace he::render {
 
@@ -106,6 +107,10 @@ void SpotShadowTechnique::Render(rhi::IRHICommandList* cmd,he::World& w,he::Scen
         u32 oi=0;
         auto rm=[&](he::Entity,he::MeshComponent& m){
             if(m.GetIndexCount()==0||oi>=MAX_OBJECTS)return;
+            // DrawCall 调试 marker：标记当前聚光灯与物体（RenderDoc 定位用）
+            char label[64];
+            snprintf(label,sizeof(label),"Shadow S%u Obj#%u",li,oi);
+            cmd->SetDrawDebugLabel(label);
             ShadowPushConstant pc{};pc.lightViewProj=vp;pc.objectIndex=oi++;
             cmd->SetPushConstants(0,sizeof(ShadowPushConstant),&pc);
             cmd->SetVertexBuffer(m.GetVertexBuffer().get(),0);cmd->SetIndexBuffer(m.GetIndexBuffer().get());

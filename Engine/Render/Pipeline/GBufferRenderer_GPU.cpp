@@ -8,6 +8,7 @@
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
 #include "Core/Log.h"
+#include <cstdio>
 
 namespace he::render {
 
@@ -90,9 +91,16 @@ void GBufferRenderer_GPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
             dgcDesc.preprocessBufferSize   = ctx.dgc.preprocessBufferSize;
             dgcDesc.maxDrawCount           = visCount;
 
+            // DrawCall 调试 marker（RenderDoc 定位用）
+            char label[64];
+            snprintf(label, sizeof(label), "GBuffer DGC (%u)", visCount);
+            cmd->SetDrawDebugLabel(label);
             cmd->ExecuteGeneratedCommands(dgcDesc);
         } else {
             // 传统 ExecuteIndirect 路径：CPU 调用 vkCmdDrawIndexedIndirect
+            char label[64];
+            snprintf(label, sizeof(label), "GBuffer Indirect (%u)", visCount);
+            cmd->SetDrawDebugLabel(label);
             cmd->DrawIndexedIndirect(ctx.gpuCulling->GetIndirectBuffer(), 0,
                                       visCount, sizeof(IndirectDrawCommand));
         }
@@ -103,6 +111,10 @@ void GBufferRenderer_GPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
         for (auto& di : drawItems) {
             struct { float4x4 vp; float4x4 pvp; u32 oi; u32 uid; u32 _pad[14]; } pc;
             pc.vp = jvp; pc.pvp = ctx.prevViewProj; pc.oi = di.objectIndex; pc.uid = 0;
+            // DrawCall 调试 marker：标记当前绘制的物体（RenderDoc 定位用）
+            char label[64];
+            snprintf(label, sizeof(label), "GBuffer Obj#%u", di.objectIndex);
+            cmd->SetDrawDebugLabel(label);
             cmd->SetPushConstants(0, sizeof(pc), &pc);
             cmd->SetVertexBuffer(di.mesh->GetVertexBuffer().get(), 0);
             cmd->SetIndexBuffer(di.mesh->GetIndexBuffer().get());

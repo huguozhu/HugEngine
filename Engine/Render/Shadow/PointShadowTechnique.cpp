@@ -14,6 +14,7 @@
 #include <glm/ext/matrix_clip_space.hpp>
 #include "Core/Log.h"
 #include "Core/Assert.h"
+#include <cstdio>
 
 namespace he::render {
 
@@ -84,6 +85,10 @@ void PointShadowTechnique::Render(rhi::IRHICommandList* cmd,he::World& w,he::Sce
             u32 oi=0;float4x4 vp=proj*view;
             auto rm=[&](he::Entity,he::MeshComponent& m){
                 if(m.GetIndexCount()==0||oi>=MAX_OBJECTS)return;
+                // DrawCall 调试 marker：标记当前点光源/面与物体（RenderDoc 定位用）
+                char label[64];
+                snprintf(label,sizeof(label),"Shadow P%u F%u Obj#%u",li,face,oi);
+                cmd->SetDrawDebugLabel(label);
                 ShadowPushConstant pc{};pc.lightViewProj=vp;pc.objectIndex=oi++;
                 cmd->SetPushConstants(0,sizeof(ShadowPushConstant),&pc);
                 cmd->SetVertexBuffer(m.GetVertexBuffer().get(),0);cmd->SetIndexBuffer(m.GetIndexBuffer().get());

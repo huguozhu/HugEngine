@@ -8,6 +8,7 @@
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include <cstring>
+#include <cstdio>
 #include <glm/gtc/matrix_access.hpp>
 
 // ============================================================
@@ -380,6 +381,10 @@ void GPUCulling::Dispatch(rhi::IRHICommandList* cmd,
     cmd->SetPushConstants(0, sizeof(pc), &pc);
 
     u32 groups = (objectCount + 63) / 64;
+    // Dispatch 调试 marker（RenderDoc 定位用）
+    char label[64];
+    snprintf(label, sizeof(label), "Cull Single (%u obj)", objectCount);
+    cmd->SetDrawDebugLabel(label);
     cmd->Dispatch(groups, 1, 1);
     // Dispatch 后清零 visibleCount, GBuffer 渲染回退 CPU 逐对象路径
     // GPU Culling 结果仅用于 Readback（统计/调试），不直接驱动 DrawIndexedIndirect
@@ -418,6 +423,10 @@ void GPUCulling::DispatchPhase1(rhi::IRHICommandList* cmd, const float4x4& viewP
     cmd->SetPushConstants(0, sizeof(pc), &pc);
 
     u32 groups = (objectCount + 63) / 64;
+    // Dispatch 调试 marker（RenderDoc 定位用）
+    char label[64];
+    snprintf(label, sizeof(label), "Cull Phase1 (%u obj)", objectCount);
+    cmd->SetDrawDebugLabel(label);
     cmd->Dispatch(groups, 1, 1);
 }
 
@@ -479,6 +488,10 @@ void GPUCulling::BuildHiZPyramid(rhi::IRHICommandList* cmd, u32 screenW, u32 scr
         // ── Dispatch ──
         u32 groupsX = (dstW + 15) / 16;
         u32 groupsY = (dstH + 15) / 16;
+        // Dispatch 调试 marker：标记当前 HiZ mip 级别（RenderDoc 定位用）
+        char label[64];
+        snprintf(label, sizeof(label), "Cull HiZ Mip%u", mip);
+        cmd->SetDrawDebugLabel(label);
         cmd->Dispatch(groupsX, groupsY, 1);
 
         srcW = dstW;
@@ -518,6 +531,10 @@ void GPUCulling::DispatchPhase2(rhi::IRHICommandList* cmd, u32 screenW, u32 scre
     cmd->SetPushConstants(0, sizeof(pc), &pc);
 
     u32 groups = (candidateCount + 63) / 64;
+    // Dispatch 调试 marker（RenderDoc 定位用）
+    char label[64];
+    snprintf(label, sizeof(label), "Cull Phase2 (%u cand)", candidateCount);
+    cmd->SetDrawDebugLabel(label);
     cmd->Dispatch(groups, 1, 1);
 
     // Phase 2 完成后，最终可见物体数需要从 m_DrawCountBuf 读回
@@ -668,6 +685,8 @@ void GPUCulling::SignalPTG(rhi::IRHICommandList* cmd, const float4x4& viewProj,
     // 每帧 Dispatch PTG shader（替代持久化 spin-wait）
     cmd->SetPipeline(m_PTG_PSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_PTGSet);
+    // Dispatch 调试 marker（RenderDoc 定位用）
+    cmd->SetDrawDebugLabel("Cull PTG");
     cmd->Dispatch(kPTGGroupCount, 1, 1);
 
     // 全局屏障：确保 Compute Shader 写入对后续 Indirect Draw 可见

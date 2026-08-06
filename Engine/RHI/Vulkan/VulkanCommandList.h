@@ -108,6 +108,10 @@ public:
     void EndDebugLabel() override;
     void InsertDebugLabel(const char* name, const float color[4] = nullptr) override;
 
+    // DrawCall 级 Debug Marker（状态式，一次性语义）
+    void SetDrawDebugLabel(const char* name, const float color[4] = nullptr) override;
+    void ClearDrawDebugLabel() override;
+
     void Submit() override;
 
     // Phase 1 桥接
@@ -173,6 +177,13 @@ private:
     u32                       m_CurrentImageIndex = 0;
 
     bool          m_IsRecording = false;
+
+    // ── DrawCall 级调试 marker 状态（一次性语义）──
+    static constexpr u32 kDrawLabelMaxLen = 96;              // 标签缓冲上限
+    bool  m_DrawLabelSet    = false;                          // 是否存在待插入标签
+    char  m_DrawLabel[kDrawLabelMaxLen] = {};                 // 标签文本（拷贝存储，防悬垂）
+    float m_DrawLabelColor[4] = {0.25f, 0.75f, 0.35f, 1.0f};  // 绿色：区别于 Pass 级蓝色
+    void  EmitDrawLabel();                                    // 在 Draw/Dispatch 族函数开头调用
 
     VkRenderPass  m_OffscreenRP = VK_NULL_HANDLE;
     bool          m_InOffscreenPass = false;

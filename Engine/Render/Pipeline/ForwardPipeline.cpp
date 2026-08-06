@@ -24,6 +24,7 @@
 
 #include <chrono>
 #include <mutex>
+#include <cstdio>
 
 namespace he::render {
 
@@ -824,6 +825,10 @@ void ForwardPipeline::RenderScene(
                     pc.objectIndex = di.objectIndex;
                     secCmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[m_CurrentFrameSlot]);  // set=0: per-frame + bindless
                     // 不再需要 bind set=1 — 纹理采样通过 bindless u_Textures[] 访问
+                    // DrawCall 调试 marker：标记当前绘制的物体（RenderDoc 定位用，每线程独立 CB 安全）
+                    char label[64];
+                    snprintf(label, sizeof(label), "Forward Obj#%u", di.objectIndex);
+                    secCmd->SetDrawDebugLabel(label);
                     secCmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
                     secCmd->SetVertexBuffer(di.mesh->GetVertexBuffer().get(), 0);
                     secCmd->SetIndexBuffer(di.mesh->GetIndexBuffer().get());
@@ -849,6 +854,10 @@ void ForwardPipeline::RenderScene(
             framePC.useInstanceID = 1;  // SV_InstanceID 模式
             cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[m_CurrentFrameSlot]);
             cmd->SetPushConstants(0, sizeof(PushConstantData), &framePC);
+            // DrawCall 调试 marker（RenderDoc 定位用）
+            char label[64];
+            snprintf(label, sizeof(label), "Forward Indirect (%u)", m_GPUCulling.GetLastVisibleCount());
+            cmd->SetDrawDebugLabel(label);
             cmd->DrawIndexedIndirect(m_GPUCulling.GetIndirectBuffer(), 0,
                 m_GPUCulling.GetLastVisibleCount(), sizeof(IndirectDrawCommand));
             drawCount = m_GPUCulling.GetLastVisibleCount();
@@ -858,6 +867,10 @@ void ForwardPipeline::RenderScene(
                 PushConstantData pc = framePC;
                 pc.objectIndex = di.objectIndex;
                 cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[m_CurrentFrameSlot]);
+                // DrawCall 调试 marker：标记当前绘制的物体（RenderDoc 定位用）
+                char label[64];
+                snprintf(label, sizeof(label), "Forward Obj#%u", di.objectIndex);
+                cmd->SetDrawDebugLabel(label);
                 cmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
                 cmd->SetVertexBuffer(di.mesh->GetVertexBuffer().get(), 0);
                 cmd->SetIndexBuffer(di.mesh->GetIndexBuffer().get());
@@ -895,6 +908,10 @@ void ForwardPipeline::DrawMesh(
 {
     if (!mesh || mesh->GetIndexCount() == 0) return;
 
+    // DrawCall 调试 marker（RenderDoc 定位用）
+    char label[64];
+    snprintf(label, sizeof(label), "Forward Mesh Obj#%u", framePC.objectIndex);
+    cmd->SetDrawDebugLabel(label);
     cmd->SetPushConstants(0, sizeof(PushConstantData), &framePC);
     cmd->SetVertexBuffer(mesh->GetVertexBuffer().get(), 0);
     cmd->SetIndexBuffer(mesh->GetIndexBuffer().get());

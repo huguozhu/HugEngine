@@ -14,6 +14,7 @@
 #include <glm/ext/matrix_clip_space.hpp>
 #include "Core/Log.h"
 #include "Core/Assert.h"
+#include <cstdio>
 
 namespace he::render {
 
@@ -125,6 +126,10 @@ void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,he::World& w,h
     auto rm=[&](he::Entity e,he::MeshComponent& m){
         if(m.GetIndexCount()==0||oi>=MAX_OBJECTS)return;
         objData[oi].worldMatrix=sg.GetWorldMatrix(e);
+        // DrawCall 调试 marker：标记当前级联与物体（RenderDoc 定位用）
+        char label[64];
+        snprintf(label,sizeof(label),"Shadow C%u Obj#%u",ci,oi);
+        cmd->SetDrawDebugLabel(label);
         ShadowPushConstant pc{};pc.lightViewProj=sd.lightViewProj[ci];pc.objectIndex=oi++;
         cmd->SetPushConstants(0,sizeof(ShadowPushConstant),&pc);
         cmd->SetVertexBuffer(m.GetVertexBuffer().get(),0);cmd->SetIndexBuffer(m.GetIndexBuffer().get());

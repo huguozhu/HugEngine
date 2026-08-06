@@ -12,6 +12,7 @@
 #include "RHI/Shader.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
+#include "Core/CVar.h"
 
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
@@ -19,10 +20,20 @@
 #include <algorithm>
 #include <vector>
 #include <cstring>
+#include <cstdio>
 
 #include "VulkanCommandList.h"
 #include "VulkanDevice.h"
 #include "VulkanQueryPool.h"
+
+namespace {
+
+// DrawCall 级调试 marker 开关（r.Debug.DrawMarker 0 关闭；默认开启）
+// 关闭后 EmitDrawLabel 不再插入任何瞬时标签，渲染开销为零
+he::CVar<bool> cvDrawMarker("r.Debug.DrawMarker", true,
+    "DrawCall 级调试 marker：RenderDoc 中标记每个 Draw/Dispatch");
+
+} // namespace
 
 namespace he::rhi {
 
@@ -317,6 +328,7 @@ void VulkanCommandList::SetIndexBuffer(IRHIBuffer* buffer, u32 offset) {
 
 void VulkanCommandList::Draw(u32 vertexCount, u32 instanceCount,
                               u32 firstVertex, u32 firstInstance) {
+    EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）
     if (m_CurrentVB) {
         VkDeviceSize offset = 0;
         vkCmdBindVertexBuffers(m_CmdBuffers[m_FrameIndex], m_VBBinding, 1, &m_CurrentVB, &offset);
@@ -326,6 +338,7 @@ void VulkanCommandList::Draw(u32 vertexCount, u32 instanceCount,
 
 void VulkanCommandList::DrawIndexed(u32 indexCount, u32 instanceCount,
                                      u32 firstIndex, i32 vertexOffset, u32 firstInstance) {
+    EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）
     if (m_CurrentIB)
         vkCmdBindIndexBuffer(m_CmdBuffers[m_FrameIndex], m_CurrentIB, m_IBOffset, m_CurrentIndexType);
     if (m_CurrentVB) {
@@ -338,6 +351,7 @@ void VulkanCommandList::DrawIndexed(u32 indexCount, u32 instanceCount,
 
 void VulkanCommandList::DrawIndexedIndirect(rhi::IRHIBuffer* buffer, u64 offset,
                                              u32 drawCount, u32 stride) {
+    EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）
     auto* vkBuf = static_cast<VulkanBuffer*>(buffer);
     vkCmdDrawIndexedIndirect(m_CmdBuffers[m_FrameIndex], vkBuf->GetHandle(),
                               (VkDeviceSize)offset, drawCount, stride);
@@ -347,6 +361,7 @@ void VulkanCommandList::DrawIndexedIndirect(rhi::IRHIBuffer* buffer, u64 offset,
 // ExecuteGeneratedCommands — DGC 执行入口
 // ============================================================
 void VulkanCommandList::ExecuteGeneratedCommands(const DGCExecuteDesc& desc) {
+    EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）
     if (!m_VulkanDevice || !m_VulkanDevice->SupportsDGC()) {
         HE_CORE_WARN("ExecuteGeneratedCommands: 设备不支持 DGC");
         return;
@@ -395,10 +410,12 @@ void VulkanCommandList::SetPushConstants(u32 offset, u32 size, const void* data)
 }
 
 void VulkanCommandList::Dispatch(u32 groupCountX, u32 groupCountY, u32 groupCountZ) {
+    EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）
     vkCmdDispatch(m_CmdBuffers[m_FrameIndex], groupCountX, groupCountY, groupCountZ);
 }
 
 void VulkanCommandList::DispatchIndirect(IRHIBuffer* buffer, u64 offset) {
+    EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）
     auto* vkBuf = static_cast<VulkanBuffer*>(buffer);
     vkCmdDispatchIndirect(m_CmdBuffers[m_FrameIndex], vkBuf->GetHandle(), offset);
 }
@@ -480,6 +497,31 @@ void VulkanCommandList::InsertDebugLabel(const char* name, const float color[4])
         label.color[2] = color[2]; label.color[3] = color[3];
     }
     fn(m_CmdBuffers[m_FrameIndex], &label);
+}
+
+// ── DrawCall 级 Debug Marker（状态式，一次性语义）──
+void VulkanCommandList::SetDrawDebugLabel(const char* name, const float color[4]) {
+    // 空标签视为清除，避免残留到下一个 Draw
+    if (!name || !name[0]) { m_DrawLabelSet = false; return; }
+    strncpy(m_DrawLabel, name, kDrawLabelMaxLen - 1);
+    m_DrawLabel[kDrawLabelMaxLen - 1] = '\0';  // 截断保护
+    if (color) {
+        m_DrawLabelColor[0] = color[0]; m_DrawLabelColor[1] = color[1];
+        m_DrawLabelColor[2] = color[2]; m_DrawLabelColor[3] = color[3];
+    }
+    m_DrawLabelSet = true;
+}
+
+void VulkanCommandList::ClearDrawDebugLabel() {
+    m_DrawLabelSet = false;
+}
+
+void VulkanCommandList::EmitDrawLabel() {
+    // 一次性语义：插入后自动清除，防止跨 Pass 泄漏脏标签
+    if (!m_DrawLabelSet) return;
+    m_DrawLabelSet = false;
+    if (cvDrawMarker.Get())
+        InsertDebugLabel(m_DrawLabel, m_DrawLabelColor);
 }
 
 // ============================================================
@@ -619,6 +661,7 @@ void VulkanCommandList::PipelineBarrier(
 // ============================================================
 
 void VulkanCommandList::DrawMeshTasks(u32 groupCountX, u32 groupCountY, u32 groupCountZ) {
+    EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）
     if (!m_VulkanDevice->m_CmdDrawMeshTasks) {
         HE_CORE_WARN("DrawMeshTasks: 设备不支持 Mesh Shader");
         return;
@@ -629,6 +672,7 @@ void VulkanCommandList::DrawMeshTasks(u32 groupCountX, u32 groupCountY, u32 grou
 
 void VulkanCommandList::DrawMeshTasksIndirect(IRHIBuffer* buffer, u64 offset,
                                                u32 drawCount, u32 stride) {
+    EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）
     if (!m_VulkanDevice->m_CmdDrawMeshTasksIndirect) {
         HE_CORE_WARN("DrawMeshTasksIndirect: 设备不支持 Mesh Shader");
         return;
@@ -758,6 +802,7 @@ void VulkanCommandList::BindRTPipeline(IRHIRayTracingPipelineState* rtPSO) {
 }
 
 void VulkanCommandList::TraceRays(const SBTDesc& sbt, u32 width, u32 height, u32 depth) {
+    EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）
     auto& rt = m_VulkanDevice->GetRTDispatch();
     VkCommandBuffer cb = m_CmdBuffers[m_FrameIndex];
 

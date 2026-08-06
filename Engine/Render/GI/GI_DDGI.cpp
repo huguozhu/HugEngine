@@ -4,6 +4,7 @@
 #include "Subsystem/RenderSubsystem.h"
 #include "DDGI.comp.spv.h"
 #include <cstring>
+#include <cstdio>
 
 namespace he::render {
 
@@ -190,6 +191,10 @@ void GI_DDGI::Render(rhi::IRHICommandList* cmd) {
     // ---- Compute Dispatch ----
     cmd->SetPipeline(m_PSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
+    // Dispatch 调试 marker（RenderDoc 定位用）
+    char label[64];
+    snprintf(label, sizeof(label), "DDGI ProbeUpdate (%u probes)", probeCount);
+    cmd->SetDrawDebugLabel(label);
     cmd->Dispatch(DispatchGroupCount(probeCount), 1, 1);
 
     // 交换当前帧与历史帧缓冲（下一帧用本次结果作为历史）

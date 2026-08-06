@@ -5,6 +5,7 @@
 #include "Scene/MeshComponent.h"
 #include "Core/Log.h"
 #include <unordered_set>
+#include <cstdio>
 
 namespace he::render {
 
@@ -92,6 +93,10 @@ void GBufferRenderer_CPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
         pc.prevViewProjMatrix = ctx.prevViewProj;
         pc.objectIndex        = di.objectIndex;
         pc.useInstanceID      = 0;
+        // DrawCall 调试 marker：标记当前绘制的物体（RenderDoc 定位用）
+        char label[64];
+        snprintf(label, sizeof(label), "GBuffer Obj#%u", di.objectIndex);
+        cmd->SetDrawDebugLabel(label);
         cmd->SetPushConstants(0, sizeof(pc), &pc);
         cmd->SetVertexBuffer(di.mesh->GetVertexBuffer().get(), 0);
         cmd->SetIndexBuffer(di.mesh->GetIndexBuffer().get());

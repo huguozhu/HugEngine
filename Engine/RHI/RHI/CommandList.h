@@ -207,6 +207,18 @@ public:
     /// 插入一个瞬时调试标签（不嵌套）。
     virtual void InsertDebugLabel(const char* name, const float color[4] = nullptr) {}
 
+    // ============================================================
+    // DrawCall 级 Debug Marker — 状态式，一次性语义
+    // SetDrawDebugLabel 后，下一次 Draw/Dispatch 类调用会自动在其
+    // 命令流位置插入瞬时 marker（InsertDebugLabel），插入后自动清除。
+    // 用于在 RenderDoc 中快速定位具体 DrawCall。
+    // 默认空实现：后端不支持时安全跳过。
+    // ============================================================
+    /// 为下一次几何绘制/计算分发设置调试标签（自动插入，一次性）
+    virtual void SetDrawDebugLabel(const char* name, const float color[4] = nullptr) {}
+    /// 清除待插入的 Draw 标签（提前返回等路径的兜底，一般无需调用）
+    virtual void ClearDrawDebugLabel() {}
+
     virtual void Submit() = 0;
 };
 

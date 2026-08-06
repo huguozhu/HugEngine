@@ -16,6 +16,7 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <cstring>
 #include <algorithm>
+#include <cstdio>
 
 namespace he::render {
 
@@ -217,6 +218,8 @@ void ReSTIRPass::Execute(rhi::IRHICommandList* cmd, const ReSTIRDispatchContext&
         cmd->SetPipeline(m_Init.pso.get());
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Init.set);
         cmd->SetPushConstants(0, sizeof(pc), &pc);
+        // Dispatch 调试 marker（RenderDoc 定位用）
+        cmd->SetDrawDebugLabel("ReSTIR Init");
         cmd->Dispatch(groupsX, groupsY, 1);
     }
 
@@ -252,6 +255,8 @@ void ReSTIRPass::Execute(rhi::IRHICommandList* cmd, const ReSTIRDispatchContext&
         cmd->SetPipeline(m_Temporal.pso.get());
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Temporal.set);
         cmd->SetPushConstants(0, sizeof(pc), &pc);
+        // Dispatch 调试 marker（RenderDoc 定位用）
+        cmd->SetDrawDebugLabel("ReSTIR Temporal");
         cmd->Dispatch(groupsX, groupsY, 1);
     }
 
@@ -275,6 +280,8 @@ void ReSTIRPass::Execute(rhi::IRHICommandList* cmd, const ReSTIRDispatchContext&
         cmd->SetPipeline(m_Spatial.pso.get());
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Spatial.set);
         cmd->SetPushConstants(0, sizeof(pc), &pc);
+        // Dispatch 调试 marker（RenderDoc 定位用）
+        cmd->SetDrawDebugLabel("ReSTIR Spatial");
         cmd->Dispatch(groupsX, groupsY, 1);
     }
 }
