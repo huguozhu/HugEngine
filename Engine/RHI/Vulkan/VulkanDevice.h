@@ -24,6 +24,7 @@
 #include "VulkanDGC.h"
 #include "TransientResourceAllocator.h"
 #include "PSOPrecompileManager.h"
+#include "VulkanPipelineLibrary.h"
 
 // 子模块头文件
 #include "VulkanSwapChain.h"
@@ -197,6 +198,9 @@ public:
     /// VkPipelineCache 持久化缓存句柄（供 CreateVulkanPipeline / RT 管线创建使用）
     VkPipelineCache GetPipelineCache() const { return m_PipelineCache; }
 
+    /// PipelineLibraryCache 访问器（供 CreateVulkanPipeline 使用）
+    PipelineLibraryCache& GetPipelineLibraryCache() { return m_PipelineLibraryCache; }
+
     /// TransientResourceAllocator 访问器（供内部调试/统计使用）
     TransientResourceAllocator& GetTransientAllocator() { return m_TransientAllocator; }
 
@@ -277,6 +281,12 @@ private:
     // PSO 预热管理器 — 后台线程编译 PSO 预热驱动缓存
     // ============================================================
     PSOPrecompileManager m_PSOPrecompileManager;
+
+    // ============================================================
+    // Graphics Pipeline Library — 四段库缓存 + fast-link
+    // ============================================================
+    PipelineLibraryCache m_PipelineLibraryCache;
+
     VkSurfaceKHR     m_Surface        = VK_NULL_HANDLE;
 
     VkQueue          m_GraphicsQueue   = VK_NULL_HANDLE;

@@ -704,6 +704,48 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
         return nullptr;
     }
 
+    // ── GPL fast-link 分支（支持 GPL 时优先；任一段创建或 link 失败则回退单片路径）──
+    if (vulkanDevice && vulkanDevice->SupportsGraphicsPipelineLibrary()) {
+        u64 hVI = HashPipelinePart(desc, PipelinePartKind::VertexInput);
+        u64 hPR = HashPipelinePart(desc, PipelinePartKind::PreRaster);
+        u64 hFS = HashPipelinePart(desc, PipelinePartKind::FragmentShader);
+        u64 hFO = HashPipelinePart(desc, PipelinePartKind::FragmentOutput);
+
+        auto& libCache = vulkanDevice->GetPipelineLibraryCache();
+        VkPipeline libs[4] = {
+            libCache.GetOrCreateVertexInputLibrary(hVI, parts),
+            libCache.GetOrCreatePreRasterLibrary(hPR, parts),
+            libCache.GetOrCreateFragmentShaderLibrary(hFS, parts),
+            libCache.GetOrCreateFragmentOutputLibrary(hFO, parts),
+        };
+
+        if (libs[0] && libs[1] && libs[2] && libs[3]) {
+            VkPipeline pipeline = libCache.LinkPipeline(
+                libs, parts, /*linkTimeOptimize=*/!vulkanDevice->SupportsGPLFastLinking());
+            if (pipeline != VK_NULL_HANDLE) {
+                vkDestroyShaderModule(device, parts.vs, nullptr);
+                vkDestroyShaderModule(device, parts.fs, nullptr);
+
+                HE_CORE_INFO("Vulkan graphics pipeline created via GPL fast-link");
+                uint64_t hash = HashPipelineStateDesc(desc);
+                vulkanDevice->InsertPSOToCache(hash, pipeline, parts.layout, parts.renderPass);
+                VkPipeline cp = VK_NULL_HANDLE; VkPipelineLayout cl = VK_NULL_HANDLE;
+                VkRenderPass cr = VK_NULL_HANDLE;
+                auto ref = vulkanDevice->GetCachedPSORef(hash, cp, cl, cr);
+                if (ref) {
+                    return std::make_unique<VulkanPipelineState>(
+                        device, pipeline, parts.layout, parts.renderPass,
+                        VK_PIPELINE_BIND_POINT_GRAPHICS, ref,
+                        &vulkanDevice->GetDeferredDestroy());
+                }
+                return std::make_unique<VulkanPipelineState>(
+                    device, pipeline, parts.layout, parts.renderPass,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS);
+            }
+        }
+        // 任一段创建失败或 link 失败 → 回退下方单片路径（复用同一个 parts，无泄漏）
+    }
+
     // 组装完整单片 pipeline
     VkPipelineShaderStageCreateInfo stages[2] = { parts.vsStage, parts.fsStage };
     VkGraphicsPipelineCreateInfo pipeInfo{};

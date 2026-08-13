@@ -276,6 +276,9 @@ void VulkanDevice::Initialize(const DeviceInitDesc& desc) {
     // 10. 初始化 PSO 预热管理器（绑定主 VkPipelineCache，供后台编译使用）
     m_PSOPrecompileManager.Initialize(m_Device, m_Physical, m_PipelineCache);
 
+    // 11. 初始化 PipelineLibraryCache（GPL 四段库缓存）
+    m_PipelineLibraryCache.Initialize(m_Device, m_PipelineCache, &m_DeferredDestroy);
+
     HE_CORE_INFO("Vulkan device fully initialized");
 }
 
@@ -294,6 +297,9 @@ void VulkanDevice::Shutdown() {
 
     // 1.7. 销毁 PSO 预热管理器（等待后台线程完成 + 销毁 worker cache）
     m_PSOPrecompileManager.Shutdown();
+
+    // 1.8. 销毁 PipelineLibraryCache（延迟销毁四段库 VkPipeline）
+    m_PipelineLibraryCache.Shutdown();
 
     // 2. 清空 PSO 缓存（等待所有外部引用释放后销毁所有缓存的 Vulkan 对象）
     m_PSOCache.clear();
@@ -506,11 +512,18 @@ void VulkanDevice::CreateLogicalDevice() {
     timelineFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
     timelineFeature.timelineSemaphore = VK_TRUE;
 
-    // pNext 链: descIndexing → vulkan11 → addrFeature → timelineFeature → [RT] → [Mesh] → [DGC]
+    // Vulkan 1.3: dynamicRendering（GPL 库段在 renderPass=NULL 下创建需要该特性；
+    // 仅启用特性，实际渲染仍走传统 render pass）
+    VkPhysicalDeviceVulkan13Features vulkan13Features{};
+    vulkan13Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    vulkan13Features.dynamicRendering = VK_TRUE;
+
+    // pNext 链: descIndexing → vulkan11 → addrFeature → timelineFeature → vulkan13 → [RT] → [Mesh] → [DGC]
     void** ppNext = &descIndexing.pNext;
     *ppNext = &vulkan11Features; ppNext = &vulkan11Features.pNext;
     *ppNext = &addrFeature; ppNext = &addrFeature.pNext;
     *ppNext = &timelineFeature; ppNext = &timelineFeature.pNext;
+    *ppNext = &vulkan13Features; ppNext = &vulkan13Features.pNext;
     if (m_SupportsRT) {
         *ppNext = &asFeature; ppNext = &asFeature.pNext;
         *ppNext = &rtPipelineFeature; ppNext = &rtPipelineFeature.pNext;

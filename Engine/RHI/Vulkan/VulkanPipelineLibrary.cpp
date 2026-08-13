@@ -23,6 +23,13 @@ uint64_t FnvHashShader(uint64_t h, const ShaderBytecode* bc) {
 // 单段库哈希：仅纳入该段相关的 PipelineStateDesc 字段
 uint64_t HashPipelinePart(const PipelineStateDesc& desc, PipelinePartKind kind) {
     uint64_t h = 0xcbf29ce484222325ULL;
+    // 描述符集布局哈希：预光栅化/片元着色器/片元输出库都持有 pipeline layout，
+    // 同一着色器/状态但不同布局的 PSO 必须分配不同段库，否则 link 时 layout 不兼容
+    auto hashDescLayouts = [&](uint64_t hh) -> uint64_t {
+        for (auto& dsl : desc.descriptorSetLayouts)
+            hh = FnvHashU32(hh, static_cast<u32>(dsl));
+        return hh;
+    };
     switch (kind) {
     case PipelinePartKind::VertexInput:
         h = FnvHashU32(h, desc.vertexLayout.stride);
@@ -47,6 +54,7 @@ uint64_t HashPipelinePart(const PipelineStateDesc& desc, PipelinePartKind kind) 
             h = FnvHashU32(h, pc.offset);
             h = FnvHashU32(h, pc.size);
         }
+        h = hashDescLayouts(h);
         break;
     case PipelinePartKind::FragmentShader:
         h = FnvHashShader(h, desc.pixelShader);
@@ -55,6 +63,7 @@ uint64_t HashPipelinePart(const PipelineStateDesc& desc, PipelinePartKind kind) 
             h = FnvHashU32(h, pc.offset);
             h = FnvHashU32(h, pc.size);
         }
+        h = hashDescLayouts(h);
         break;
     case PipelinePartKind::FragmentOutput:
         h = FnvHashU32(h, desc.colorAttachmentCount);
@@ -71,6 +80,7 @@ uint64_t HashPipelinePart(const PipelineStateDesc& desc, PipelinePartKind kind) 
         }
         h = FnvHashU32(h, desc.sampleCount);
         h = FnvHashU32(h, desc.subpassIndex);
+        h = hashDescLayouts(h);
         break;
     }
     return h;
@@ -152,9 +162,10 @@ static VkPipeline CreateLibrarySegment(
 VkPipeline PipelineLibraryCache::GetOrCreateVertexInputLibrary(u64 hash, const GraphicsPipelineParts& p) {
     auto it = m_VertexInputLibs.find(hash);
     if (it != m_VertexInputLibs.end()) return it->second;
+    // 顶点输入接口库 = 顶点输入状态 + 输入装配状态（GPL 规范两者都属于顶点输入接口）
     VkPipeline lib = CreateLibrarySegment(
         m_Device, m_Cache, VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT, p,
-        nullptr, 0, &p.vertexInput, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+        nullptr, 0, &p.vertexInput, &p.inputAssembly, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
         VK_NULL_HANDLE, VK_NULL_HANDLE, 0);
     if (lib != VK_NULL_HANDLE) m_VertexInputLibs[hash] = lib;
     return lib;
@@ -164,9 +175,10 @@ VkPipeline PipelineLibraryCache::GetOrCreatePreRasterLibrary(u64 hash, const Gra
     auto it = m_PreRasterLibs.find(hash);
     if (it != m_PreRasterLibs.end()) return it->second;
     VkPipelineShaderStageCreateInfo stage = p.vsStage;
+    // 预光栅化库 = VS 阶段 + 视口/光栅化/深度模板/动态状态 + layout（输入装配属于顶点输入接口库）
     VkPipeline lib = CreateLibrarySegment(
         m_Device, m_Cache, VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT, p,
-        &stage, 1, nullptr, &p.inputAssembly, &p.viewportState, &p.rasterizer,
+        &stage, 1, nullptr, nullptr, &p.viewportState, &p.rasterizer,
         nullptr, &p.depthStencil, nullptr, &p.dynState,
         p.layout, VK_NULL_HANDLE, 0);
     if (lib != VK_NULL_HANDLE) m_PreRasterLibs[hash] = lib;
@@ -177,9 +189,11 @@ VkPipeline PipelineLibraryCache::GetOrCreateFragmentShaderLibrary(u64 hash, cons
     auto it = m_FragmentShaderLibs.find(hash);
     if (it != m_FragmentShaderLibs.end()) return it->second;
     VkPipelineShaderStageCreateInfo stage = p.fsStage;
+    // 片元着色器库 = FS 阶段 + 深度模板 + layout（深度/模板影响片元阶段的 early-z/深度写入，
+    // 非动态深度状态下需在此提供，否则触发 renderPass-09035 验证错误）
     VkPipeline lib = CreateLibrarySegment(
         m_Device, m_Cache, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT, p,
-        &stage, 1, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+        &stage, 1, nullptr, nullptr, nullptr, nullptr, nullptr, &p.depthStencil, nullptr, nullptr,
         p.layout, VK_NULL_HANDLE, 0);
     if (lib != VK_NULL_HANDLE) m_FragmentShaderLibs[hash] = lib;
     return lib;
@@ -198,13 +212,11 @@ VkPipeline PipelineLibraryCache::GetOrCreateFragmentOutputLibrary(u64 hash, cons
 
 VkPipeline PipelineLibraryCache::LinkPipeline(const VkPipeline libs[4], const GraphicsPipelineParts& p,
                                               bool linkTimeOptimize) {
-    VkGraphicsPipelineLibraryCreateInfoEXT libInfo{};
-    libInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT;
-    libInfo.flags = 0;  // 链接而非创建库段
-
+    // 链接阶段只需 VkPipelineLibraryCreateInfoKHR 列出库段；VkGraphicsPipelineLibraryCreateInfoEXT
+    // 仅用于库段创建（指定 flags），链接时不得提供（否则触发 flags-requiredbitmask 验证错误）
     VkPipelineLibraryCreateInfoKHR linkInfo{};
     linkInfo.sType        = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR;
-    linkInfo.pNext        = &libInfo;
+    linkInfo.pNext        = nullptr;
     linkInfo.libraryCount = 4;
     linkInfo.pLibraries   = libs;
 
@@ -215,6 +227,7 @@ VkPipeline PipelineLibraryCache::LinkPipeline(const VkPipeline libs[4], const Gr
     ci.layout    = p.layout;
     ci.renderPass = p.renderPass;
     ci.subpass   = p.subpass;
+    ci.pDepthStencilState = &p.depthStencil;  // 链接阶段需提供深度模板（非动态深度 + depth attachment）
 
     VkPipeline pipeline = VK_NULL_HANDLE;
     VkResult vr = vkCreateGraphicsPipelines(m_Device, m_Cache, 1, &ci, nullptr, &pipeline);
