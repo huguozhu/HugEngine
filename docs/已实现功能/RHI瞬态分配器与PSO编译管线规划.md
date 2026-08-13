@@ -1,7 +1,7 @@
 # RHI Transient Resource Allocator + PSO/Shader 编译管线规划
 
 > 2026-07-22 | 基于 HugEngine RHI vs UE5 差距分析
-> 最后更新：2026-07-22 | Phase 1 ✅ | Phase 2 ✅ | Phase 2.5 ✅ | Phase 3 ✅ | Phase 4 ⏳
+> 最后更新：2026-08-13 | Phase 1 ✅ | Phase 2 ✅ | Phase 2.5 ✅ | Phase 3 ✅ | Phase 4 ✅
 
 ---
 
@@ -13,7 +13,7 @@
 | **2** | Transient Allocator 基础版 | ✅ 已完成 | `fdf6a81` | ~200 行 (10 files) |
 | **2.5** | Transient Allocator 端到端验证 | ✅ 已完成 | `0a1c012` | ~60 行 (3 files) |
 | **3** | PSO 预热管理器 | ✅ 已完成 | `0a1c012` | ~380 行 (11 files) |
-| **4** | Pipeline Library (Fast Link) | ⏳ 待规划 | — | ~300 行 (预估) |
+| **4** | Pipeline Library (Fast Link) | ✅ 已完成 | `7161411`→`a65ce10` | ~600 行 (11 files) |
 
 ### Phase 1 实现详情：VkPipelineCache 持久化
 
@@ -455,18 +455,46 @@ Initialize():
 - ✅ `DeferredPipeline: PSO 预热完成`
 - ✅ 零 Vulkan Validation 错误
 
-**PSO 限流器（未实现）：**
-- 当前引擎所有 PSO 在 `Initialize()` 阶段一次性创建，帧循环中无运行时 PSO 创建
-- 限流器在当前阶段无触发场景，待未来材质变体系统（1000+ PSO）时再实现
+**PSO 限流器（✅ 已实现，提交 `6bf411b`）：**
+- `IRHIDevice` 新增 `EnqueuePSOCreate` / `ProcessPSOCreateQueue` / `GetPendingPSOCreateCount`，每帧最多创建 3 个排队 PSO
+- 当前引擎所有 PSO 仍在 `Initialize()` 阶段一次性创建，限流器暂无运行时触发场景，
+  待未来材质变体系统（1000+ PSO）时自动生效（基础设施已就绪）
 
-#### Phase 4：Pipeline Library (Fast Link)（待规划）
+#### Phase 4 实现详情：Pipeline Library (Fast Link) ✅
 
+**提交：** `7161411` → `a65ce10`（7 个提交，含 GPL 检测 / 四段库缓存 / 单片路径重构 / 集成 / 限流器 / 变体演示 / 哈希修复）
+
+**新增文件：**
+- `Engine/RHI/Vulkan/VulkanDevice_GPL.cpp` — GPL 能力检测（feature + properties）
+- `Engine/RHI/Vulkan/VulkanPipelineLibrary.h/.cpp` — 四段库缓存 + fast-link（~340 行）
+
+**修改文件：**
+- `VulkanDevice.h/.cpp` — 启用 `VK_KHR_pipeline_library` + `VK_EXT_graphics_pipeline_library` + `dynamicRendering` 特性；`PipelineLibraryCache` 生命周期
+- `VulkanPipeline.cpp` — 提取 `BuildGraphicsPipelineParts` 共享分解状态 + GPL fast-link 分支
+- `RHI/RHI.h` / `RHI/Types.h` — 限流器 3 虚方法 + `DeviceCaps.supportsGraphicsPipelineLibrary`
+- `Pipeline/DeferredPipeline.cpp/.h` — CVar 门控变体演示 Pass + `NextFrame()` 限流 drain
+
+**架构数据流：**
 ```
-场景: 开放世界 1000+ 材质 → 1000+ PSO 变体
-Fast Link: 将 PSO 拆分为 4 部分独立缓存，组合耗时 ~0.5ms
-
-（需要 VK_EXT_graphics_pipeline_library 支持）
+CreateVulkanPipeline（传统 VS+FS 图形管线）:
+  ├── BuildGraphicsPipelineParts(desc) → 分解状态（单片 / GPL 共享，仅构建一次）
+  ├── SupportsGraphicsPipelineLibrary() 为真 → 四段库查/建（缺失才编译）
+  │     ├── VertexInput 库    = 顶点输入 + 输入装配
+  │     ├── PreRaster 库     = VS + 视口/光栅化/深度模板/动态 + layout
+  │     ├── FragmentShader 库 = FS + 深度模板 + layout
+  │     └── FragmentOutput 库 = 多重采样 + 混合 + renderPass/subpass
+  │     └── LinkPipeline(libs) → 快链组合（fastLinking 支持时 ~0.5ms）
+  └── 不支持 GPL / 任一段失败 → 回退单片路径（复用同一分解状态，无泄漏）
 ```
+
+**测试结果（2026-08-13）：**
+- ✅ 19 个 graphics PSO 走 fast-link、12 compute 单片，GPL 专属 VUID 全消除
+- ✅ 变体演示（`cvGPLVariantTest`）：16 个变体经限流器逐帧 fast-link 创建
+- ✅ 硬件：RTX 4060（`graphicsPipelineLibraryFastLinking=1`）
+
+**遗留项（deferred）：**
+- 无 fast-linking 硬件路径缺 LTO bit（RTX 4060 走不到，VUID 待验证）
+- alpha-blend 字段未纳入哈希（演示只变 color 因子，当前无触发场景）
 
 ---
 
@@ -478,6 +506,6 @@ Fast Link: 将 PSO 拆分为 4 部分独立缓存，组合耗时 ~0.5ms
 | **2** | Transient Allocator 基础版 | ~200 行 | **内存节省 60-70%** | 中（需 RenderGraph 别名分析） | ✅ 已完成 |
 | **2.5** | Transient Allocator 端到端验证 | ~60 行 | 验证路径正确性 | 零风险（CVar 关闭） | ✅ 已完成 |
 | **3** | PSO 预热管理器 | ~380 行 | 后台编译 + 惰性 PSO 创建 | 低 | ✅ 已完成 |
-| **4** | Pipeline Library (Fast Link) | ~300 行 | PSO 链接 **100× 加速** | 中（需扩展支持） | ⏳ 待规划 |
+| **4** | Pipeline Library (Fast Link) | ~600 行 | PSO 链接 **100× 加速** | 中（需扩展支持） | ✅ 已完成 |
 
-**建议顺序：Phase 1 ✅ → Phase 2 ✅ → Phase 2.5 ✅ → Phase 3 ✅ → Phase 4 等待硬件普及。**
+**全部完成：Phase 1 ✅ → Phase 2 ✅ → Phase 2.5 ✅ → Phase 3 ✅ → Phase 4 ✅（含 PSO 限流器）。**
