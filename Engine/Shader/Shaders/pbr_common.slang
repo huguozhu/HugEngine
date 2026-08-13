@@ -33,6 +33,20 @@ float D_GGX(float NdotH, float roughness) {
 }
 
 // ============================================================
+// 各向异性 GGX 法线分布函数（Burley 2012 / Disney）
+//
+// ax, ay 为沿 T/B 方向的 GGX 粗糙度 alpha；当 ax == ay 时数学上
+// 精确退化为各向同性 D_GGX（HdotT² + HdotB² + NdotH² = 1）。
+// ============================================================
+float D_GGX_aniso(float NdotH, float HdotT, float HdotB, float ax, float ay) {
+    float a2 = ax * ay;
+    float3 V = float3(ay * HdotT, ax * HdotB, a2 * NdotH);
+    float V2 = dot(V, V);
+    float W2 = a2 / V2;
+    return a2 * W2 * W2 * (1.0 / HE_PI);
+}
+
+// ============================================================
 // Geometry Function — Smith + Schlick-GGX
 // ============================================================
 float G_SchlickGGX(float NdotV, float roughness) {
@@ -126,35 +140,77 @@ float SamplePointShadow(float3 worldPos, float3 lightPos, float lightRange,
 float3 PBR_BRDF(float3 albedo, float metallic, float roughness,
                 float3 N, float3 V, float3 L,
                 float dielectricF0 = 0.04,  // 默认 0.04 保持 ReSTIR/PT 调用点不变
-                float2 envBRDF = float2(0.0, 1.0))  // envBRDF 默认 (0,1) 表示无能量补偿
+                float2 envBRDF = float2(0.0, 1.0),  // envBRDF 默认 (0,1) 表示无能量补偿
+                float4 disneyA = float4(0, 0, 0.5, 0),   // anisotropic, subsurface, specular, sheen
+                float4 disneyB = float4(0, 1, 1, 1),      // clearcoat, clearcoatGloss, specularTint.rg
+                float  disneyC = 1.0)                     // specularTint.b
 {
+    float anisotropic = disneyA.x, subsurface = disneyA.y, specular = disneyA.z, sheen = disneyA.w;
+    float clearcoat = disneyB.x, clearcoatGloss = disneyB.y;
+    float3 specularTint = float3(disneyB.z, disneyB.w, disneyC);
+
     float3 H = normalize(V + L);
     float NdotL = max(dot(N, L), 0.0);
     float NdotV = max(dot(N, V), 0.0);
     float NdotH = max(dot(N, H), 0.0);
+    float HdotV = max(dot(H, V), 0.0);
 
+    // 各向异性切线基：由法线构造标准正交系（anisotropic=0 时不影响结果）
+    float3 T, B;
+    if (abs(N.y) < 0.999)
+        T = normalize(cross(float3(0, 1, 0), N));
+    else
+        T = normalize(cross(float3(1, 0, 0), N));
+    B = normalize(cross(N, T));
+    float HdotT = dot(H, T);
+    float HdotB = dot(H, B);
+
+    // specular/specularTint：电介质 F0 = 0.16*specular²（specular!=0.5 时覆盖 ior 派生 F0）
+    float dielectric = (abs(specular - 0.5f) > 1e-4f) ? (0.16f * specular * specular) : dielectricF0;
     // 菲涅尔反射率：电介质 = dielectricF0（由 IOR 预计算），金属 = albedo
-    float3 f0 = lerp(float3(dielectricF0), albedo, metallic);
+    float3 f0 = lerp(float3(dielectric), albedo, metallic) * specularTint;
 
     // Cook-Torrance 镜面项
-    float3 F = F_Schlick(f0, max(dot(H, V), 0.0));
-    float  D = D_GGX(NdotH, roughness);
+    float3 F = F_Schlick(f0, HdotV);
+    // 各向异性 GGX：aspect = sqrt(1-0.9*anisotropic)，ax=alpha/aspect，ay=alpha*aspect
+    float aspect = sqrt(1.0 - 0.9 * anisotropic);
+    float alpha = roughness * roughness;
+    float D = (anisotropic > 0.0)
+            ? D_GGX_aniso(NdotH, HdotT, HdotB, alpha / aspect, alpha * aspect)
+            : D_GGX(NdotH, roughness);
     float  G = G_Smith(NdotV, NdotL, roughness);
 
-    float3 specular = (D * G * F) / max(4.0 * NdotV * NdotL, HE_EPSILON);
+    float3 specularBRDF = (D * G * F) / max(4.0 * NdotV * NdotL, HE_EPSILON);
 
     // ── 多重散射能量补偿（Kulla-Conty / Frostbite）──
     // 方向反照率 E(f0) = f0 * A + B（split-sum LUT 的 scale/bias 即 Schlick Fresnel 分解的两项）
     // envBRDF 由调用方采样 u_BRDF_LUT(NdotV, roughness) 传入；默认 (0,1) 表示无补偿
     float3 directionalAlbedo = f0 * envBRDF.x + envBRDF.y;
     float3 energyCompensation = 1.0 + f0 * (1.0 / max(directionalAlbedo, 0.001) - 1.0);
-    specular *= energyCompensation;
+    specularBRDF *= energyCompensation;
 
     // Lambertian 漫反射项（金属无漫反射）
     float3 kD = (1.0 - F) * (1.0 - metallic);
     float3 diffuse = kD * albedo / HE_PI;
 
-    return (diffuse + specular) * NdotL;
+    // subsurface：diffuse = mix(Lambert, wrapDiffuse, subsurface)，wrap 余弦 (NdotL+ss)/(1+ss)
+    float NdotL_wrap = (NdotL + subsurface) / (1.0 + subsurface);
+    if (NdotL > 0.0) diffuse *= lerp(NdotL, NdotL_wrap, subsurface) / NdotL;
+
+    // sheen：边缘项 F_sheen = sheen * pow(1-HdotV,5) * albedo 加到漫反射
+    diffuse += albedo * (sheen * pow(1.0 - HdotV, 5.0));
+
+    // 基础 BRDF = 漫反射 + 镜面（末尾统一乘 NdotL）
+    float3 baseBRDF = diffuse + specularBRDF;
+
+    // clearcoat：第二层镜面（IOR 1.5，GGX），按 clearcoat 强度混合
+    float Fcc = 0.04 + 0.96 * pow(1.0 - HdotV, 5.0);   // 清漆层菲涅尔（IOR 1.5 → F0=0.04）
+    float Dcc = D_GGX(NdotH, clearcoatGloss);           // 内部 alpha = clearcoatGloss²
+    float Gcc = G_Smith(NdotV, NdotL, clearcoatGloss);
+    float3 clearcoatLobe = (Fcc * Dcc * Gcc) / max(4.0 * NdotV * NdotL, HE_EPSILON);
+    baseBRDF = lerp(baseBRDF, (1.0 - Fcc) * baseBRDF + Fcc * clearcoatLobe, clearcoat);
+
+    return baseBRDF * NdotL;
 }
 
 #endif // HUGENGINE_PBR_COMMON_SLANG
