@@ -58,6 +58,11 @@ uint64_t HashPipelinePart(const PipelineStateDesc& desc, PipelinePartKind kind) 
         break;
     case PipelinePartKind::FragmentShader:
         h = FnvHashShader(h, desc.pixelShader);
+        // FS 库内嵌 pDepthStencil（非动态深度下 VUID-09035 要求），
+        // 深度状态差异也须纳入哈希，否则同 FS 但不同深度的 PSO 会碰撞复用错误的 FS 库
+        h = FnvHashU32(h, desc.depthTest ? 1u : 0u);
+        h = FnvHashU32(h, desc.depthWrite ? 1u : 0u);
+        h = FnvHashU32(h, static_cast<u32>(desc.depthCompare));
         for (auto& pc : desc.pushConstantRanges) {
             h = FnvHashU32(h, pc.stageMask);
             h = FnvHashU32(h, pc.offset);
