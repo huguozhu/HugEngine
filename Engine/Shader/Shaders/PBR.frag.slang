@@ -85,7 +85,7 @@ struct LightGridCell { uint offset; uint count; };
 // ---- 光源遍历：传统 Forward 与 Forward+ 共用 PBR 计算 ----
 float3 ShadeWithLight(GPULight light, float3 worldPos, float3 N, float3 V,
                        float3 albedo, float metallic, float roughness,
-                       float dielectricF0) {  // 电介质 F0（由 IOR 预计算）
+                       float dielectricF0, float2 envBRDF) {  // 电介质 F0（由 IOR 预计算）
     uint ltype = uint(light.directionType.w);
     float3 L; float attenuation = 1.0;
     if (ltype == 0u) {
@@ -122,7 +122,7 @@ float3 ShadeWithLight(GPULight light, float3 worldPos, float3 N, float3 V,
         }
     }
 
-    return PBR_BRDF(albedo, metallic, roughness, N, V, L, dielectricF0) * radiance * shadow;
+    return PBR_BRDF(albedo, metallic, roughness, N, V, L, dielectricF0, envBRDF) * radiance * shadow;
 }
 
 float4 fragmentMain(FSInput input) : SV_Target0 {
@@ -145,6 +145,9 @@ float4 fragmentMain(FSInput input) : SV_Target0 {
     float roughness = clamp(obj.roughnessFactor * mrSample.g, 0.04, 1.0);
     float ao = obj.aoFactor * u_Textures[texBase + 3].Sample(u_Samplers[0], input.uv).r;
 
+    // BRDF LUT：用于直接光照的多重散射能量补偿，IBL 镜面项复用同一采样
+    float2 envBRDF = u_BRDF_LUT.Sample(u_IBLSampler, float2(max(dot(N, V), 0.0), roughness)).rg;
+
     // ---- 光源循环：Forward+ 或传统 Forward ----
     float3 color = albedo * 0.08 * ao;  // 低环境光
     if (useClustered != 0u && clusterTilesX > 0u) {
@@ -162,14 +165,14 @@ float4 fragmentMain(FSInput input) : SV_Target0 {
         for (uint li = cell.offset; li < endIdx; li++) {
             uint i = u_LightIndexList[li];
             GPULight light = u_Lights[i];
-            color += ShadeWithLight(light, input.worldPos, N, V, albedo, metallic, roughness, obj.dielectricF0);
+            color += ShadeWithLight(light, input.worldPos, N, V, albedo, metallic, roughness, obj.dielectricF0, envBRDF);
         }
     } else {
         // --- 传统路径：遍历所有光源 ---
         uint count = min(lightCount, 8u);
         for (uint i = 0; i < count; i++) {
             GPULight light = u_Lights[i];
-            color += ShadeWithLight(light, input.worldPos, N, V, albedo, metallic, roughness, obj.dielectricF0);
+            color += ShadeWithLight(light, input.worldPos, N, V, albedo, metallic, roughness, obj.dielectricF0, envBRDF);
         }
     }
     color *= ao;
@@ -185,7 +188,6 @@ float4 fragmentMain(FSInput input) : SV_Target0 {
     float3 R = reflect(-V, N);
     float mipLevel = roughness * float(kGPUPrefilterMips - 1);
     float3 prefilteredColor = u_PrefilterMap.SampleLevel(u_IBLSampler, R, mipLevel).rgb;
-    float2 envBRDF = u_BRDF_LUT.Sample(u_IBLSampler, float2(max(dot(N, V), 0.0), roughness)).rg;
     color += prefilteredColor * (F * envBRDF.r + envBRDF.g) * iblIntensity;
 
     // ---- RSM 间接光照（Reflective Shadow Maps） ----

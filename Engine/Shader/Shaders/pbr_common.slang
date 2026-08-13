@@ -125,7 +125,8 @@ float SamplePointShadow(float3 worldPos, float3 lightPos, float lightRange,
 // ============================================================
 float3 PBR_BRDF(float3 albedo, float metallic, float roughness,
                 float3 N, float3 V, float3 L,
-                float dielectricF0 = 0.04)  // 默认 0.04 保持 ReSTIR/PT 调用点不变
+                float dielectricF0 = 0.04,  // 默认 0.04 保持 ReSTIR/PT 调用点不变
+                float2 envBRDF = float2(0.0, 1.0))  // envBRDF 默认 (0,1) 表示无能量补偿
 {
     float3 H = normalize(V + L);
     float NdotL = max(dot(N, L), 0.0);
@@ -141,6 +142,13 @@ float3 PBR_BRDF(float3 albedo, float metallic, float roughness,
     float  G = G_Smith(NdotV, NdotL, roughness);
 
     float3 specular = (D * G * F) / max(4.0 * NdotV * NdotL, HE_EPSILON);
+
+    // ── 多重散射能量补偿（Kulla-Conty / Frostbite）──
+    // 方向反照率 E(f0) = f0 * A + B（split-sum LUT 的 scale/bias 即 Schlick Fresnel 分解的两项）
+    // envBRDF 由调用方采样 u_BRDF_LUT(NdotV, roughness) 传入；默认 (0,1) 表示无补偿
+    float3 directionalAlbedo = f0 * envBRDF.x + envBRDF.y;
+    float3 energyCompensation = 1.0 + f0 * (1.0 / max(directionalAlbedo, 0.001) - 1.0);
+    specular *= energyCompensation;
 
     // Lambertian 漫反射项（金属无漫反射）
     float3 kD = (1.0 - F) * (1.0 - metallic);

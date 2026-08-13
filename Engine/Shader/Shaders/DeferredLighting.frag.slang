@@ -94,6 +94,10 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
     float  ao        = gbC.a;
 
     float3 V = normalize(cameraPosition.xyz - worldPos);
+
+    // BRDF LUT：用于直接光照的多重散射能量补偿，IBL 镜面项复用同一采样
+    float2 envBRDF = u_BRDF_LUT.Sample(u_IBLSampler, float2(max(dot(N,V),0.0), roughness)).rg;
+
     float3 color = float3(0.0);
 
     // RT 阴影因子：RT 阴影遮罩覆盖所有阴影光源（全屏像素级乘积），
@@ -164,7 +168,7 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
                 }
             }
         }
-        color += PBR_BRDF(albedo, metallic, roughness, N, V, L, dielectricF0) * radiance * shadow;
+        color += PBR_BRDF(albedo, metallic, roughness, N, V, L, dielectricF0, envBRDF) * radiance * shadow;
         }  // end clustered for
     } else {
         // --- 线性回退（Clustered 禁用时）---
@@ -209,7 +213,7 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
                 }
             }
         }
-        color += PBR_BRDF(albedo, metallic, roughness, N, V, L, dielectricF0) * radiance * shadow;
+        color += PBR_BRDF(albedo, metallic, roughness, N, V, L, dielectricF0, envBRDF) * radiance * shadow;
         }
     }
 
@@ -223,7 +227,6 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
     color += kD * u_IrradianceMap.Sample(u_IBLSampler, N).rgb * albedo * iblIntensity;
     float3 R = reflect(-V, N);
     float3 prefiltered = u_PrefilterMap.SampleLevel(u_IBLSampler, R, roughness * (kGPUPrefilterMips - 1.0)).rgb;
-    float2 envBRDF = u_BRDF_LUT.Sample(u_IBLSampler, float2(max(dot(N,V),0.0), roughness)).rg;
     color += prefiltered * (F * envBRDF.r + envBRDF.g) * iblIntensity;
 
     // 5. RSM 间接
