@@ -33,3 +33,4 @@ imgui.ini
 *.lib
 *.exp
 screenshot.png
+pipeline_cache.bin
