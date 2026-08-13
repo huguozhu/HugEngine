@@ -57,6 +57,7 @@ if(HUGENGINE_RHI_VULKAN)
         Vulkan/VulkanResources.cpp
         Vulkan/VulkanConverters.cpp
         Vulkan/VulkanPipeline.cpp
+        Vulkan/VulkanPipelineLibrary.cpp
         Vulkan/VulkanDGC.cpp
         Vulkan/PSOPrecompileManager.cpp
         TransientResourceAllocator.cpp
