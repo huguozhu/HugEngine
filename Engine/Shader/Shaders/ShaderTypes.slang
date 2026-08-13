@@ -140,7 +140,7 @@ GPU_STRUCT GPUShadowData {
     float4   pointLightData;    // [240..256] xyz=光源世界位置, w=范围
 };
 
-// --- GPUObjectData: 物体数据（128 字节，std430 布局）---
+// --- GPUObjectData: 物体数据（176 字节，std430 布局）---
 GPU_STRUCT GPUObjectData {
     float4x4 worldMatrix;           // [0..64]   世界矩阵
     float4   baseColorFactor;       // [64..80]  基础色因子
@@ -151,8 +151,11 @@ GPU_STRUCT GPUObjectData {
     float    alphaCutoff;           // [108]
     GPU_UINT materialFlags;         // [112]
     GPU_UINT materialID;            // [116]     bindless 纹理基索引
-    float    dielectricF0;          // [120]     电介质 F0（由 IOR 预计算，默认 0.04）
-    GPU_UINT _pad;                  // [124..128] 对齐
+    float    dielectricF0;          // [120]     电介质 F0（由 IOR 预计算）
+    float4   disneyA;               // [128]     x=anisotropic, y=subsurface, z=specular, w=sheen
+    float4   disneyB;               // [144]     x=clearcoat, y=clearcoatGloss, z=specularTint.r, w=specularTint.g
+    float    disneyC;               // [160]     specularTint.b
+    GPU_UINT _pad;                  // [164..168] 对齐到 168 → 取整 176（std430 float4 对齐）
 };
 
 // LightGridCell 参见 ClusteredShading.h（暂不纳入共享定义，避免重定义冲突）

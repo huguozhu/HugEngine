@@ -48,7 +48,7 @@ static constexpr u32 CASCADE_COUNT        = kGPUCascadeCount;
 // 尺寸验证（保持与 ShaderTypes.slang 一致）
 static_assert(sizeof(GPUShadowData)   == 256, "GPUShadowData must be 256 bytes");
 static_assert(sizeof(GPULight)        == 64,  "GPULight must be 64 bytes");
-static_assert(sizeof(GPUObjectData)   == 128, "GPUObjectData must be 128 bytes");
+static_assert(sizeof(GPUObjectData)   == 176, "GPUObjectData must be 176 bytes");
 static_assert(sizeof(PushConstantData) == 128, "PushConstantData must be 128 bytes");
 static_assert(sizeof(ShadowPushConstant) == 80, "ShadowPushConstant must be 80 bytes");
 static_assert(sizeof(RTShadowPushConstant) == 112, "RTShadowPushConstant must be 112 bytes");
@@ -67,6 +67,14 @@ struct PBRMaterial {
     float    roughnessFactor       = 1.0f;
     float    aoFactor              = 1.0f;
     float    ior                  = 1.5f;   // 电介质折射率（F0 = (ior-1)^2/(ior+1)^2）
+    // ── Disney principled BSDF 扩展参数（默认值还原 glTF metallic/roughness）──
+    float    anisotropic       = 0.0f;   // 各向异性强度（0=各向同性）
+    float    subsurface        = 0.0f;   // 次表面散射混合（0=纯 Lambert）
+    float    specular          = 0.5f;   // 镜面强度（F0 = 0.16 * specular²，0.5→0.04）
+    float3   specularTint      = float3(1.0f);  // 镜面色调
+    float    sheen             = 0.0f;   // 光泽（天鹅绒边缘）
+    float    clearcoat         = 0.0f;   // 清漆层强度
+    float    clearcoatGloss    = 1.0f;   // 清漆粗糙度
     float    alphaCutoff           = 0.5f;
 
     AlphaMode alphaMode            = AlphaMode::Opaque;
@@ -109,6 +117,10 @@ inline void FillObjectData(GPUObjectData& obj, const PBRMaterial& mat) {
     if (mat.alphaMode == AlphaMode::Mask) flags |= MF_AlphaMask;
     if (mat.unlit)        flags |= MF_Unlit;
     obj.materialFlags = flags;
+    // Disney 参数打包（与 ShaderTypes.slang GPUObjectData 布局一致）
+    obj.disneyA = float4(mat.anisotropic, mat.subsurface, mat.specular, mat.sheen);
+    obj.disneyB = float4(mat.clearcoat, mat.clearcoatGloss, mat.specularTint.x, mat.specularTint.y);
+    obj.disneyC = mat.specularTint.z;
 }
 
 } // namespace he::render
