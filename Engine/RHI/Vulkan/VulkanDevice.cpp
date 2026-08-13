@@ -172,6 +172,9 @@ DeviceCaps VulkanDevice::GetCaps() const {
     // DGC
     caps.supportsDGC = m_SupportsDGC;
 
+    // GPL（VK_EXT_graphics_pipeline_library fast-link）
+    caps.supportsGraphicsPipelineLibrary = m_SupportsGPL;
+
     return caps;
 }
 

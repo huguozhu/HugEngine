@@ -30,6 +30,17 @@ static const char* kCVar_DGC_Enable_Name = "r.DGC.Enable";
 // 在控制台输入 "r.TransientTest 1" 可启用，验证 Transient Allocator 端到端路径
 static int32_t cvTransientTest = 0;
 
+// CVar: GPL 变体演示开关（0=关闭，1=开启，默认关闭）
+// 设为 1 重新编译启用：初始化时生成 N 个仅 blend 状态不同的变体 PSO，
+// 经限流器逐帧 fast-link 创建，验证 GPL 四段库缓存与限流协同工作。
+static int32_t cvGPLVariantTest = 0;
+static int32_t cvGPLVariantCount = 16;  // 变体数量 N
+
+// 变体演示用的全屏三角形 VS + 全屏复制 FS（SPIR-V 头内联字节码）
+// 位于全局命名空间，故使用完整限定名 he::rhi::ShaderBytecode
+static he::rhi::ShaderBytecode g_VariantVS;
+static he::rhi::ShaderBytecode g_VariantFS;
+
 namespace he::render {
 
 bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
@@ -147,6 +158,38 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     // 禁用后 PSO 仅在首次使用时惰性编译），故本机禁用。稳定驱动上可恢复。
     // device->StartPSOPrecompile();
 
+    // ── GPL 变体演示（cvGPLVariantTest=1 且设备支持 GPL 时启用）──
+    if (cvGPLVariantTest && device->GetCaps().supportsGraphicsPipelineLibrary) {
+        g_VariantVS.stage = rhi::ShaderStage::Vertex;
+        g_VariantVS.spirv = k_Fullscreen_vert_spv;
+        g_VariantFS.stage = rhi::ShaderStage::Pixel;
+        g_VariantFS.spirv = k_FullscreenCopy_frag_spv;
+
+        rhi::PipelineStateDesc base;
+        base.bindPoint        = rhi::PipelineBindPoint::Graphics;
+        base.vertexShader     = &g_VariantVS;
+        base.pixelShader      = &g_VariantFS;
+        base.vertexLayout.stride = 0;              // 全屏三角形（SV_VertexID），无顶点输入
+        base.colorAttachmentCount = 1;
+        base.colorFormats[0]  = rhi::Format::RGBA16_FLOAT;
+        base.depthFormat      = rhi::Format::Unknown;  // 无深度
+        base.depthTest        = false;
+        base.depthWrite       = false;
+        base.sampleCount      = 1;
+
+        for (int32_t i = 0; i < cvGPLVariantCount; ++i) {
+            // 变体维度：仅 blend 状态不同（改变 fragment-output 段，其余 3 段共享）
+            base.colorBlend[0].blendEnable         = true;
+            base.colorBlend[0].srcColorBlendFactor =
+                static_cast<rhi::BlendFactor>(i % 10);
+            base.colorBlend[0].dstColorBlendFactor =
+                static_cast<rhi::BlendFactor>((i / 10) % 10);
+            device->EnqueuePSOCreate(base);
+        }
+        HE_CORE_INFO("DeferredPipeline: GPL 变体演示 — 已入队 {} 个变体 PSO",
+                     cvGPLVariantCount);
+    }
+
     m_Ready = true;
     HE_CORE_INFO("DeferredPipeline initialized");
     return true;
@@ -158,6 +201,7 @@ void DeferredPipeline::Shutdown() {
     if (m_GBuffer) m_GBuffer->Shutdown();
     m_Lighting.Shutdown();
     m_TransientTestPSO.reset();
+    m_GPLVariantPSOs.clear();
     for (auto& b : m_LightBuffers) b.reset();
     for (auto& b : m_ObjectBuffers) b.reset();
     for (auto& b : m_ShadowBuffers) b.reset();
@@ -234,6 +278,16 @@ void DeferredPipeline::NextFrame() {
                 HE_CORE_INFO("DeferredPipeline: PSO 预热进度 {:.0f}%", progress * 100.0f);
             }
         }
+    }
+
+    // PSO 限流器：每帧最多创建 3 个排队 PSO（变体演示 / 未来材质变体系统）
+    static constexpr u32 kMaxPSOCreatesPerFrame = 3;
+    if (m_Device->GetPendingPSOCreateCount() > 0) {
+        auto created = m_Device->ProcessPSOCreateQueue(kMaxPSOCreatesPerFrame);
+        for (auto& pso : created) m_GPLVariantPSOs.push_back(std::move(pso));
+        HE_CORE_INFO("DeferredPipeline: 限流创建 {} 个 PSO（待处理 {}）",
+                     static_cast<u32>(created.size()),
+                     m_Device->GetPendingPSOCreateCount());
     }
 }
 

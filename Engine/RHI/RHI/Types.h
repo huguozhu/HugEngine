@@ -287,6 +287,7 @@ struct DeviceCaps {
     u32     maxSamplerAnisotropy   = 16;
     bool    supportsRayTracing     = false;
     bool    supportsMeshShaders    = false;
+    bool    supportsGraphicsPipelineLibrary = false;  // VK_EXT_graphics_pipeline_library fast-link
     bool    supportsWorkGraphs     = false;
     bool    supportsVRS            = false;
     bool    supportsSER            = false;  // Shader Execution Reordering

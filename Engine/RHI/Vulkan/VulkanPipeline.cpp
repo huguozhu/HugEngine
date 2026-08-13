@@ -110,6 +110,16 @@ static uint64_t HashPipelineStateDesc(const PipelineStateDesc& desc) {
     h = hashU32(h, desc.sampleCount);
     h = hashU32(h, desc.subpassIndex);
 
+    // 混合状态（per-MRT，索引对应 colorFormats）
+    // 缺失会导致仅 blend 状态不同的变体 PSO 错误地共享同一缓存条目（GPL 变体演示依赖此维度）
+    for (u32 i = 0; i < desc.colorAttachmentCount; ++i) {
+        h = hashU32(h, desc.colorBlend[i].blendEnable ? 1u : 0u);
+        h = hashU32(h, static_cast<u32>(desc.colorBlend[i].srcColorBlendFactor));
+        h = hashU32(h, static_cast<u32>(desc.colorBlend[i].dstColorBlendFactor));
+        h = hashU32(h, static_cast<u32>(desc.colorBlend[i].colorBlendOp));
+        h = hashU32(h, static_cast<u32>(desc.colorBlend[i].writeMask));
+    }
+
     // Push Constant 范围
     for (auto& pc : desc.pushConstantRanges) {
         h = hashU32(h, pc.stageMask);
