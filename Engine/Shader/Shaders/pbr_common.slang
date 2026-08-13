@@ -207,7 +207,7 @@ float3 PBR_BRDF(float3 albedo, float metallic, float roughness,
     float Fcc = 0.04 + 0.96 * pow(1.0 - HdotV, 5.0);   // 清漆层菲涅尔（IOR 1.5 → F0=0.04）
     float Dcc = D_GGX(NdotH, clearcoatGloss);           // 内部 alpha = clearcoatGloss²
     float Gcc = G_Smith(NdotV, NdotL, clearcoatGloss);
-    float3 clearcoatLobe = (Fcc * Dcc * Gcc) / max(4.0 * NdotV * NdotL, HE_EPSILON);
+    float3 clearcoatLobe = (Dcc * Gcc) / max(4.0 * NdotV * NdotL, HE_EPSILON);   // 不含 Fcc（Fcc 在下方混合时应用一次）
     baseBRDF = lerp(baseBRDF, (1.0 - Fcc) * baseBRDF + Fcc * clearcoatLobe, clearcoat);
 
     return baseBRDF * NdotL;
