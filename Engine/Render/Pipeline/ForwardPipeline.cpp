@@ -1,4 +1,5 @@
 #include "Pipeline/ForwardPipeline.h"
+#include "Pipeline/PhysicalLight.h"  // render::KelvinToRGB
 #include "GI/GI_IBL.h"
 #include "GI/GI_RSM.h"
 #include "Shadow/ShadowSystem.h"
@@ -480,19 +481,27 @@ void ForwardPipeline::CollectLights(
     pc.lightCount = 0;
 
     auto collectLight = [&](he::Entity e, he::LightComponent& lc) {
-        if (!lc.enabled) return;  // 禁用光源：不参与光照
+        if (!lc.enabled) return;
         u32 i = pc.lightCount;
         if (i >= MAX_LIGHTS) return;
 
+        // 色温 → RGB（叠加到 color 滤镜色）
+        float3 lightColor = lc.color;
+        if (lc.colorTemperature > 0.0f) lightColor *= render::KelvinToRGB(lc.colorTemperature);
+
         GPULight gl{};
-        gl.colorIntensity  = float4(lc.color, lc.intensity);
-        gl.shadowIndex     = m_ShadowSystem->GetShadowIndex(e);  // 从 ShadowSystem 获取阴影索引
+        gl.colorIntensity  = float4(lightColor, lc.intensity);
+        gl.shadowIndex     = m_ShadowSystem->GetShadowIndex(e);
 
         switch (lc.type) {
         case he::LightType::Directional: {
             auto* dl = static_cast<he::DirectionalLight*>(&lc);
             gl.directionType = float4(dl->direction, 0.0f);
             gl.positionRange = float4(0, 0, 0, 0);
+            if (lc.illuminance > 0.0f) {          // 物理模式：照度 lux
+                gl.colorIntensity.w = lc.illuminance;
+                gl.positionRange.w   = -1.0f;
+            }
             break;
         }
         case he::LightType::Point: {
@@ -500,14 +509,20 @@ void ForwardPipeline::CollectLights(
             float3 pos = sg.GetWorldPosition(e);
             gl.positionRange = float4(pos, pl->range);
             gl.directionType = float4(0, -1, 0, 1.0f);
+            if (lc.luminousIntensity > 0.0f) {    // 物理模式：发光强度 cd
+                gl.colorIntensity.w = lc.luminousIntensity;
+                gl.positionRange.w   = -(pl->range);
+            }
             break;
         }
         case he::LightType::Spot: {
             auto* sl = static_cast<he::SpotLight*>(&lc);
             float3 pos = sg.GetWorldPosition(e);
-            gl.positionRange = float4(pos, sl->range);
+            float r = lc.luminousIntensity > 0.0f ? -(sl->range) : sl->range;
+            gl.positionRange = float4(pos, r);
             gl.directionType = float4(sl->direction, 2.0f);
             gl.coneAngles   = float2(sl->innerConeAngle, sl->outerConeAngle);
+            if (lc.luminousIntensity > 0.0f) gl.colorIntensity.w = lc.luminousIntensity;
             break;
         }
         }
@@ -515,7 +530,7 @@ void ForwardPipeline::CollectLights(
         GPULight* lights = static_cast<GPULight*>(m_LightBuffers[m_CurrentFrameSlot]->Map());
         if (lights) lights[i] = gl;
         m_LightBuffers[m_CurrentFrameSlot]->Unmap();
-        pc.lightCount++;  // lightCount++
+        pc.lightCount++;
     };
 
     world.ForEach<he::DirectionalLight>(collectLight);
