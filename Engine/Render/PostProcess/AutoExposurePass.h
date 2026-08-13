@@ -30,6 +30,8 @@ public:
     void  SetAdaptSpeed(float s) { m_AdaptSpeed = s; }
     float GetTargetLum()  const { return m_TargetLum; }
     void  SetTargetLum(float t) { m_TargetLum = t; }
+    float GetDisplayWhitePoint() const { return m_DisplayWhitePoint; }
+    void  SetDisplayWhitePoint(float w) { m_DisplayWhitePoint = w; }
 
 private:
     static constexpr u32 kNumGroups = 256;  // 16×16 组
@@ -41,6 +43,7 @@ private:
     float m_Exposure   = 1.0f;
     float m_AdaptSpeed = 2.0f;
     float m_TargetLum  = 0.18f;
+    float m_DisplayWhitePoint = 80.0f;  // SDR 参考白点（尼特），默认 80
     float m_PrevLogLum = -2.47f;  // 历史平均对数亮度
 
     rhi::ShaderBytecode m_CS;

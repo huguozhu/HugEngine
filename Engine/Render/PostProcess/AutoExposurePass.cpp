@@ -2,10 +2,17 @@
 #include "AutoExposurePass.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
+#include "Core/CVar.h"
 #include "AutoExposure.comp.spv.h"
 #include <algorithm>
 
 namespace he::render {
+
+// SDR 参考白点（尼特，REC.709 标准白点），用于把 CVar 白点归一化为曝光亮度倍率 whitePoint/80
+static constexpr float kSdrReferenceWhitePoint = 80.0f;
+
+// SDR 参考白点 CVar：默认 80 = 参考值，用作曝光亮度倍率（whitePoint/80），控制台可热更新
+CVar<float> cvAutoExposureWhitePoint("r.AutoExposure.WhitePoint", 80.0f, "SDR 参考白点（尼特），默认 80 保持原亮度，增大则整体变亮");
 
 bool AutoExposurePass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Device = device; m_Width = width; m_Height = height;
@@ -57,6 +64,9 @@ void AutoExposurePass::SetInput(rhi::IRHITexture* hdr, rhi::IRHISampler* sampler
 void AutoExposurePass::Render(rhi::IRHICommandList* cmd) {
     if (!m_Ready || !m_Enabled || !m_HDRInput) return;
 
+    // 每帧从 CVar 读取显示白点，支持控制台 set r.AutoExposure.WhitePoint 热更新
+    m_DisplayWhitePoint = cvAutoExposureWhitePoint.Get();
+
     // 绑定 SSBO
     m_Device->UpdateDescriptorSet(m_Set, 1, rhi::DescriptorType::StorageBuffer, m_ResultBuf.get());
 
@@ -86,7 +96,11 @@ void AutoExposurePass::Render(rhi::IRHICommandList* cmd) {
             float curAvg = sum / float(valid);
             float t = std::min(m_AdaptSpeed * kDefaultDeltaTime, 1.0f);
             m_PrevLogLum = m_PrevLogLum + (curAvg - m_PrevLogLum) * t;  // 时间混合
-            m_Exposure = exp2(log2(m_TargetLum) - m_PrevLogLum);
+            // 曝光 = 白点 × 18% 灰 / 场景平均亮度，再除以 SDR 参考白点(80) 归一化：
+            // 默认白点 80 时 = targetLum/avgLum（与原公式一致，亮度不突变）；
+            // 调大白点（如 120）等价于曝光倍率 120/80 = 1.5 倍，整体变亮。
+            float avgLum = exp2(m_PrevLogLum);  // 场景平均亮度（对数域还原为线性）
+            m_Exposure = (m_DisplayWhitePoint * m_TargetLum) / (avgLum * kSdrReferenceWhitePoint);
             m_Exposure = std::max(kMinExposure, std::min(m_Exposure, kMaxExposure));
         }
     }
