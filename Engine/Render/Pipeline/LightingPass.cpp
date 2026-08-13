@@ -55,6 +55,7 @@ void LightingPass::OnResize(rhi::IRHIDevice* device, u32 width, u32 height) {
 void LightingPass::Render(rhi::IRHICommandList* cmd,
                            rhi::IRHITexture* gbA, rhi::IRHITexture* gbB, rhi::IRHITexture* gbC,
                            rhi::IRHITexture* gbDepth, rhi::IRHITexture* gbE,
+                           rhi::IRHITexture* gbDisneyA, rhi::IRHITexture* gbDisneyB,
                            rhi::IRHITexture* csmShadow0, rhi::IRHITexture* csmShadow1,
                            rhi::IRHITexture* csmShadow2, rhi::IRHITexture* spotShadow,
                            rhi::IRHIBuffer* lightBuffer, rhi::IRHIBuffer* shadowBuffer,
@@ -86,6 +87,8 @@ void LightingPass::Render(rhi::IRHICommandList* cmd,
     bindTex(1, gbB, m_HDRSampler.get());
     bindTex(2, gbC, m_HDRSampler.get());
     bindTex(23, gbE, m_PointSampler.get());
+    bindTex(28, gbDisneyA, m_HDRSampler.get());  // disneyA（anisotropic/subsurface/specular/sheen）
+    bindTex(29, gbDisneyB, m_HDRSampler.get());  // disneyB（clearcoat/clearcoatGloss/specularTint.rg）
     bindTex(3, gbDepth, m_PointSampler.get());
 
     // ── 绑定阴影贴图 ──
@@ -217,6 +220,8 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
         {2,  rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // GBufferC
         {3,  rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // Depth
         {23, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // GBufferE (worldPos)
+        {28, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // GBufferF (disneyA)
+        {29, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // GBufferG (disneyB)
         {4,  rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // Shadow0 (CSM0)
         {7,  rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment},         // LightGrid (Clustered)
         {8,  rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment},         // LightIndexList
@@ -256,8 +261,8 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
         sd.addressU = sd.addressV = rhi::AddressMode::ClampToEdge;
         auto ps = device->CreateSampler(sd);
 
-        // 更新所有 CombinedImageSampler 绑定（0-4, 9-11, 14-16, 23 — 2D 纹理）
-        for (u32 b : {0u,1u,2u,3u,4u,9u,10u,11u,14u,15u,16u,23u})
+        // 更新所有 CombinedImageSampler 绑定（0-4, 9-11, 14-16, 23, 28, 29 — 2D 纹理）
+        for (u32 b : {0u,1u,2u,3u,4u,9u,10u,11u,14u,15u,16u,23u,28u,29u})
             device->UpdateDescriptorSet(m_Set, b, rhi::DescriptorType::CombinedImageSampler, pt.get(), ps.get());
 
         // RT 效果占位纹理：

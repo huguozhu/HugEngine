@@ -474,6 +474,7 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     auto gb = m_GBuffer->ImportToRenderGraph(rg);
     auto gbA = gb.albedo, gbB = gb.normal, gbC = gb.emissive;
     auto gbDepth = gb.depth, gbVel = gb.velocity, gbWorldPos = gb.worldPos;
+    auto gbDisneyA = gb.disneyA, gbDisneyB = gb.disneyB;  // Disney BSDF 参数通道
     auto hdrC   = rg.ImportTexture("HDR_C", m_Lighting.GetHDRTarget());
     auto backBuf = rg.ImportBackBuffer();
 
@@ -518,7 +519,8 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     // ── GBuffer（光栅化，与 DeferredPipeline 相同）──
     rg.AddPass("GB_Clear", {}, {{gbA, ResourceAccess::Write}, {gbB, ResourceAccess::Write},
         {gbC, ResourceAccess::Write}, {gbVel, ResourceAccess::Write},
-        {gbWorldPos, ResourceAccess::Write}, {gbDepth, ResourceAccess::Write}},
+        {gbWorldPos, ResourceAccess::Write}, {gbDisneyA, ResourceAccess::Write},
+        {gbDisneyB, ResourceAccess::Write}, {gbDepth, ResourceAccess::Write}},
         [&](rhi::IRHICommandList* c) {
             m_GBuffer->SetObjectBuffer(m_ObjectBuffers[m_CurrentFrameSlot].get());
             m_GBuffer->SetPrevViewProj(m_PrevViewProj);
@@ -783,6 +785,7 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     std::vector<PassResource> lightingReads = {
         {gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read},
         {gbC, ResourceAccess::Read}, {gbWorldPos, ResourceAccess::Read},
+        {gbDisneyA, ResourceAccess::Read}, {gbDisneyB, ResourceAccess::Read},
         {gbDepth, ResourceAccess::Read},  // 深度转换由 RG 统一管理（RT 效果 Pass 先读，Lighting 后读）
     };
     // Lighting 采样降噪后输出（若降噪器就绪），否则回退到原始 RT 输出
@@ -822,6 +825,7 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 m_GBuffer->GetAlbedo(), m_GBuffer->GetNormal(),
                 m_GBuffer->GetEmissive(),
                 m_GBuffer->GetDepth(), m_GBuffer->GetWorldPos(),
+                m_GBuffer->GetDisneyA(), m_GBuffer->GetDisneyB(),
                 nullptr, nullptr, nullptr, nullptr,  // 无 CSM/Spot 阴影贴图（RT 阴影替代）
                 m_LightBuffers[m_CurrentFrameSlot].get(),
                 m_ShadowBuffers[m_CurrentFrameSlot].get(),

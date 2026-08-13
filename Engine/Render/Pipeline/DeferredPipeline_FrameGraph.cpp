@@ -40,6 +40,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     auto gb = m_GBuffer->ImportToRenderGraph(rg);
     auto gbA = gb.albedo; auto gbB = gb.normal; auto gbC = gb.emissive;
     auto gbDepth = gb.depth; auto gbVel = gb.velocity; auto gbWorldPos = gb.worldPos;
+    auto gbDisneyA = gb.disneyA; auto gbDisneyB = gb.disneyB;  // Disney BSDF 参数通道
     auto hdrC = rg.ImportTexture("HDR_C", m_Lighting.GetHDRTarget());
     auto backBuf = rg.ImportBackBuffer();
 
@@ -188,6 +189,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     // GBuffer 4×MRT + 绘制（委托给 IGBufferRenderer，支持 CPU/GPU 双模式）
     rg.AddPass("GB_Clear", {}, {{gbA, ResourceAccess::Write}, {gbB, ResourceAccess::Write},
         {gbC, ResourceAccess::Write}, {gbVel, ResourceAccess::Write}, {gbWorldPos, ResourceAccess::Write},
+        {gbDisneyA, ResourceAccess::Write}, {gbDisneyB, ResourceAccess::Write},
         {gbDepth, ResourceAccess::Write}},
         [&](rhi::IRHICommandList* c) {
             // 更新每帧动态参数
@@ -336,6 +338,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     rg.AddPass("Lighting",
         {{gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbC, ResourceAccess::Read},
          {gbWorldPos, ResourceAccess::Read},
+         {gbDisneyA, ResourceAccess::Read}, {gbDisneyB, ResourceAccess::Read},
          {ssgiDenoised, ResourceAccess::Read},
          {ssrDenoised, ResourceAccess::Read}},
         {{hdrC, ResourceAccess::Write}},
@@ -364,6 +367,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             m_Lighting.Render(c,
                 m_GBuffer->GetAlbedo(), m_GBuffer->GetNormal(), m_GBuffer->GetEmissive(),
                 m_GBuffer->GetDepth(), m_GBuffer->GetWorldPos(),
+                m_GBuffer->GetDisneyA(), m_GBuffer->GetDisneyB(),
                 m_ShadowSystem ? m_ShadowSystem->GetShadowMap(0) : nullptr,
                 m_ShadowSystem ? m_ShadowSystem->GetShadowMap(1) : nullptr,
                 m_ShadowSystem ? m_ShadowSystem->GetShadowMap(2) : nullptr,

@@ -15,6 +15,8 @@ struct VSOutput {
 [[vk::binding(kGPUBinding_GBufferC, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferC;  // emissive.rgb + ao
 [[vk::binding(kGPUBinding_Depth, kGPUDescSet_PerFrame)]] Texture2D<float>  u_Depth;
 [[vk::binding(kGPUBinding_GBufferE, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferE;  // worldPos.xyz（GBuffer MRT4 直接读取）
+[[vk::binding(kGPUBinding_GBufferF, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferF;  // disneyA：anisotropic, subsurface, specular, sheen（MRT5）
+[[vk::binding(kGPUBinding_GBufferG, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferG;  // disneyB：clearcoat, clearcoatGloss, specularTint.r, specularTint.g（MRT6）
 
 // Shadow + IBL + RSM (复用 Forward PBR 绑定)
 [[vk::binding(kGPUBinding_ShadowMap0, kGPUDescSet_PerFrame)]] Texture2D<float>  u_ShadowMap0;
@@ -86,12 +88,20 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
     float4 gbA = u_GBufferA.Sample(u_GBufferSampler, uv);
     float4 gbB = u_GBufferB.Sample(u_GBufferSampler, uv);
     float4 gbC = u_GBufferC.Sample(u_GBufferSampler, uv);
+    float4 gbF = u_GBufferF.Sample(u_GBufferSampler, uv);  // disneyA（MRT5）
+    float4 gbG = u_GBufferG.Sample(u_GBufferSampler, uv);  // disneyB（MRT6）
 
     float3 albedo    = gbA.rgb;
     float  metallic  = gbA.a;
     float3 N         = normalize(gbB.rgb * 2.0 - 1.0);
     float  roughness = gbB.a;
     float  ao        = gbC.a;
+
+    // Disney BSDF 参数（GBuffer 读取，透传给 PBR_BRDF）
+    float4 disneyA = gbF;  // anisotropic, subsurface, specular, sheen
+    float4 disneyB = gbG;  // clearcoat, clearcoatGloss, specularTint.r, specularTint.g
+    // specularTint.b 未随 GBuffer 携带（通道不足舍弃），Deferred 端固定为 1.0（默认中性色调）
+    float  disneyC = 1.0;
 
     float3 V = normalize(cameraPosition.xyz - worldPos);
 
@@ -168,7 +178,7 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
                 }
             }
         }
-        color += PBR_BRDF(albedo, metallic, roughness, N, V, L, dielectricF0, envBRDF) * radiance * shadow;
+        color += PBR_BRDF(albedo, metallic, roughness, N, V, L, dielectricF0, envBRDF, disneyA, disneyB, disneyC) * radiance * shadow;
         }  // end clustered for
     } else {
         // --- 线性回退（Clustered 禁用时）---
@@ -213,7 +223,7 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
                 }
             }
         }
-        color += PBR_BRDF(albedo, metallic, roughness, N, V, L, dielectricF0, envBRDF) * radiance * shadow;
+        color += PBR_BRDF(albedo, metallic, roughness, N, V, L, dielectricF0, envBRDF, disneyA, disneyB, disneyC) * radiance * shadow;
         }
     }
 

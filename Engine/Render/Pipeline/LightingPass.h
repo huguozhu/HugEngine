@@ -70,6 +70,7 @@ public:
                 // GBuffer 纹理（来自 GBufferRenderer）
                 rhi::IRHITexture* gbA, rhi::IRHITexture* gbB, rhi::IRHITexture* gbC,
                 rhi::IRHITexture* gbDepth, rhi::IRHITexture* gbE,
+                rhi::IRHITexture* gbDisneyA, rhi::IRHITexture* gbDisneyB,
                 // 阴影贴图（来自 ShadowSystem）
                 rhi::IRHITexture* csmShadow0, rhi::IRHITexture* csmShadow1,
                 rhi::IRHITexture* csmShadow2, rhi::IRHITexture* spotShadow,

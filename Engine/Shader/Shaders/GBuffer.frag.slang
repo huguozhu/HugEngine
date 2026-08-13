@@ -3,6 +3,9 @@
 // MRT 1: RGBA16  worldNormal.xyz * 0.5 + 0.5 + roughness
 // MRT 2: RGBA16  emissive.rgb + ao
 // MRT 3: RG16    velocity.xy = currUV - prevUV（UV 空间运动矢量）
+// MRT 4: RGBA16  worldPos.xyz + dielectricF0.a
+// MRT 5: RGBA16  disneyA（anisotropic/subsurface/specular/sheen）
+// MRT 6: RGBA16  disneyB（clearcoat/clearcoatGloss/specularTint.rg）
 
 #include "common.slang"
 
@@ -35,6 +38,8 @@ struct FSOutput {
     [[vk::location(2)]] float4 emissiveAO      : SV_Target2;
     [[vk::location(3)]] float2 velocity         : SV_Target3;  // UV 空间运动矢量
     [[vk::location(4)]] float4 worldPos         : SV_Target4;  // 世界坐标（Lighting pass 直接读取）
+    [[vk::location(5)]] float4 disneyA          : SV_Target5;  // 迪士尼参数A：anisotropic, subsurface, specular, sheen
+    [[vk::location(6)]] float4 disneyB          : SV_Target6;  // 迪士尼参数B：clearcoat, clearcoatGloss, specularTint.r, specularTint.g
 };
 
 FSOutput fragmentMain(VSOutput input) {
@@ -71,5 +76,7 @@ FSOutput fragmentMain(VSOutput input) {
     output.emissiveAO      = float4(obj.emissiveFactor.rgb, ao);
     output.velocity        = motion;
     output.worldPos        = float4(input.worldPos, obj.dielectricF0);  // 世界坐标存入 GBuffer（a 携带电介质 F0，延迟光照用）
+    output.disneyA         = obj.disneyA;  // 迪士尼参数A透传到 Deferred 光照（MRT5）
+    output.disneyB         = obj.disneyB;  // 迪士尼参数B透传到 Deferred 光照（MRT6）
     return output;
 }

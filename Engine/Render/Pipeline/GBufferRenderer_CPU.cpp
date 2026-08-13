@@ -32,16 +32,21 @@ void GBufferRenderer_CPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
     cmd->SetPipeline(ctx.pso);
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, ctx.descSet);
 
-    // 清除值（5 颜色 MRT + 深度）
-    rhi::ClearValue clears[6]{};
+    // 清除值（7 颜色 MRT + 深度）
+    rhi::ClearValue clears[8]{};
     clears[0].color[3] = 1.0f; clears[1].color[3] = 1.0f;
     clears[2].color[3] = 1.0f; clears[3].color[0] = 0.0f; // velocity=0
-    clears[3].color[1] = 0.0f; clears[5].depth = 1.0f;
+    clears[3].color[1] = 0.0f;
+    clears[5].color[2] = 0.5f; clears[5].color[3] = 0.0f;  // disneyA: specular=0.5, sheen=0（中性默认）
+    clears[6].color[1] = 1.0f; clears[6].color[2] = 1.0f;  // disneyB: clearcoatGloss=1, specularTint.r=1
+    clears[6].color[3] = 1.0f;                              // disneyB: specularTint.g=1
+    clears[7].depth = 1.0f;
 
-    void* cv[5] = { ctx.gbA->GetNativeHandle(), ctx.gbB->GetNativeHandle(),
+    void* cv[7] = { ctx.gbA->GetNativeHandle(), ctx.gbB->GetNativeHandle(),
                     ctx.gbC->GetNativeHandle(), ctx.gbVel->GetNativeHandle(),
-                    ctx.gbWorldPos->GetNativeHandle() };
-    cmd->BeginOffscreenPassMRT(cv, 5, ctx.gbDepth->GetNativeHandle(), w, h, clears, false);
+                    ctx.gbWorldPos->GetNativeHandle(), ctx.gbDisneyA->GetNativeHandle(),
+                    ctx.gbDisneyB->GetNativeHandle() };
+    cmd->BeginOffscreenPassMRT(cv, 7, ctx.gbDepth->GetNativeHandle(), w, h, clears, false);
     cmd->SetViewport({0, (float)h, (float)w, -(float)h, 0, 1});
     cmd->SetScissor({0, 0, w, h});
 

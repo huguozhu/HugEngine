@@ -40,6 +40,8 @@ bool GBufferRenderer::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
     m_Ctx.gbVel     = m_D.get();
     m_Ctx.gbDepth   = m_Depth.get();
     m_Ctx.gbWorldPos = m_E.get();
+    m_Ctx.gbDisneyA = m_F.get();
+    m_Ctx.gbDisneyB = m_G.get();
     m_Ctx.pso       = m_PSO.get();
     m_Ctx.descSet   = m_Set;
 
@@ -70,6 +72,8 @@ void GBufferRenderer::Shutdown() {
     // 销毁 PSO + 纹理
     m_PSO.reset();
     m_Depth.reset();
+    m_G.reset();
+    m_F.reset();
     m_E.reset();
     m_D.reset();
     m_C.reset();
@@ -97,6 +101,8 @@ void GBufferRenderer::OnResize(u32 width, u32 height) {
     m_Ctx.gbVel     = m_D.get();
     m_Ctx.gbDepth   = m_Depth.get();
     m_Ctx.gbWorldPos = m_E.get();
+    m_Ctx.gbDisneyA = m_F.get();
+    m_Ctx.gbDisneyB = m_G.get();
 }
 
 GBufferRenderer::Handles GBufferRenderer::ImportToRenderGraph(RenderGraph& rg) {
@@ -106,6 +112,8 @@ GBufferRenderer::Handles GBufferRenderer::ImportToRenderGraph(RenderGraph& rg) {
     h.emissive  = rg.ImportTexture("GB_C",        m_C.get());
     h.velocity = rg.ImportTexture("GB_Vel",      m_D.get());
     h.worldPos = rg.ImportTexture("GB_WorldPos", m_E.get());
+    h.disneyA  = rg.ImportTexture("GB_DisneyA",  m_F.get());
+    h.disneyB  = rg.ImportTexture("GB_DisneyB",  m_G.get());
     h.depth    = rg.ImportTexture("GB_Depth",    m_Depth.get());
     return h;
 }
@@ -149,6 +157,8 @@ void GBufferRenderer::CreateTextures(rhi::IRHIDevice* device) {
     m_B = createRGBA16F();  // Normal.xyz + Roughness.a
     m_C = createRGBA16F();  // Emissive.rgb + AO.a
     m_E = createRGBA16F();  // WorldPos.xyz
+    m_F = createRGBA16F();  // DisneyA（anisotropic/subsurface/specular/sheen）
+    m_G = createRGBA16F();  // DisneyB（clearcoat/clearcoatGloss/specularTint.rg）
 
     // GBuffer D: velocity（RG16_FLOAT，屏幕空间运动矢量）
     {
@@ -210,6 +220,8 @@ void GBufferRenderer::CreatePSO(rhi::IRHIDevice* device) {
     gbDesc.colorFormats[2] = rhi::Format::RGBA16_FLOAT;  // Emissive+AO
     gbDesc.colorFormats[3] = rhi::Format::RG16_FLOAT;    // Velocity
     gbDesc.colorFormats[4] = rhi::Format::RGBA16_FLOAT;  // WorldPos
+    gbDesc.colorFormats[5] = rhi::Format::RGBA16_FLOAT;  // DisneyA（anisotropic/subsurface/specular/sheen）
+    gbDesc.colorFormats[6] = rhi::Format::RGBA16_FLOAT;  // DisneyB（clearcoat/clearcoatGloss/specularTint.rg）
     gbDesc.pushConstantRanges = {pc};
     gbDesc.descriptorSetLayouts = {m_Layout};
     gbDesc.debugName = "GBuffer";

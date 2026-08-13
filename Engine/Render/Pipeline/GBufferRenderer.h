@@ -13,12 +13,14 @@
 namespace he::render {
 
 // GBuffer 附件布局常量
-constexpr u32 kGBufferAttachmentCount = 5;
+constexpr u32 kGBufferAttachmentCount = 7;
 constexpr u32 kGBufferSlotAlbedo      = 0;  // Albedo.rgb + Metallic.a（RGBA16_FLOAT）
 constexpr u32 kGBufferSlotNormal      = 1;  // Normal.xyz + Roughness.a（RGBA16_FLOAT）
 constexpr u32 kGBufferSlotEmissive    = 2;  // Emissive.rgb + AO.a（RGBA16_FLOAT）
 constexpr u32 kGBufferSlotVelocity    = 3;  // Velocity.xy（RG16_FLOAT）
 constexpr u32 kGBufferSlotWorldPos    = 4;  // WorldPos.xyz（RGBA16_FLOAT）
+constexpr u32 kGBufferSlotDisneyA     = 5;  // Disney A：anisotropic/subsurface/specular/sheen（RGBA16_FLOAT）
+constexpr u32 kGBufferSlotDisneyB     = 6;  // Disney B：clearcoat/clearcoatGloss/specularTint.rg（RGBA16_FLOAT）
 
 // ============================================================
 // GBuffer 渲染上下文（CPU/GPU 模式共用，内部实现细节）
@@ -35,6 +37,8 @@ struct GBufferContext {
     rhi::IRHITexture* gbVel      = nullptr;
     rhi::IRHITexture* gbDepth    = nullptr;
     rhi::IRHITexture* gbWorldPos = nullptr;  // MRT4: worldPos.xyz（RGBA16_FLOAT）
+    rhi::IRHITexture* gbDisneyA  = nullptr;  // MRT5: disneyA（anisotropic/subsurface/specular/sheen）
+    rhi::IRHITexture* gbDisneyB  = nullptr;  // MRT6: disneyB（clearcoat/clearcoatGloss/specularTint.rg）
 
     // PSO + DescriptorSet（由 GBufferRenderer 管理）
     rhi::IRHIPipelineState* pso     = nullptr;
@@ -116,6 +120,8 @@ public:
         ResourceHandle emissive;  // RGBA16_FLOAT  (emissive.rgb + ao)
         ResourceHandle velocity;  // RG16_FLOAT    (screen-space motion vector)
         ResourceHandle worldPos;  // RGBA16_FLOAT  (worldPos.xyz)
+        ResourceHandle disneyA;   // RGBA16_FLOAT  (disneyA: anisotropic/subsurface/specular/sheen)
+        ResourceHandle disneyB;   // RGBA16_FLOAT  (disneyB: clearcoat/clearcoatGloss/specularTint.rg)
         ResourceHandle depth;     // D32_FLOAT
     };
     Handles ImportToRenderGraph(RenderGraph& rg);
@@ -147,6 +153,8 @@ public:
     rhi::IRHITexture* GetEmissive() const { return m_C.get(); }
     rhi::IRHITexture* GetVelocity() const { return m_D.get(); }
     rhi::IRHITexture* GetWorldPos() const { return m_E.get(); }
+    rhi::IRHITexture* GetDisneyA()  const { return m_F.get(); }
+    rhi::IRHITexture* GetDisneyB()  const { return m_G.get(); }
     rhi::IRHITexture* GetDepth()    const { return m_Depth.get(); }
 
     // ── 描述符集访问器 ──
@@ -165,6 +173,8 @@ private:
     std::unique_ptr<rhi::IRHITexture> m_C;       // GBufferC: emissive.rgb + ao.a
     std::unique_ptr<rhi::IRHITexture> m_D;       // GBufferD: velocity.xy (RG16_FLOAT)
     std::unique_ptr<rhi::IRHITexture> m_E;       // GBufferE: worldPos.xyz
+    std::unique_ptr<rhi::IRHITexture> m_F;       // GBufferF: disneyA（anisotropic/subsurface/specular/sheen）
+    std::unique_ptr<rhi::IRHITexture> m_G;       // GBufferG: disneyB（clearcoat/clearcoatGloss/specularTint.rg）
     std::unique_ptr<rhi::IRHITexture> m_Depth;   // 深度缓冲 (D32_FLOAT)
 
     // ── PSO + 描述符集 ──
