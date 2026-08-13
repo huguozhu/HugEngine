@@ -75,7 +75,10 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
 
     // 1. 反算世界坐标
     // 1. 世界坐标直接从 GBuffer MRT4 读取（无需 Camera 矩阵，避免视角耦合）
-    float3 worldPos = u_GBufferE.Sample(u_GBufferSampler, uv).xyz;
+    float4 gbE = u_GBufferE.Sample(u_GBufferSampler, uv);
+    float3 worldPos = gbE.xyz;
+    // 电介质 F0（由 IOR 预计算，存于 GBuffer worldPos.a）
+    float  dielectricF0 = gbE.a;
     // 深度仅用于 Clustered Shading 的 Z-slice 计算（非世界坐标重建）
     float  depth    = u_Depth.Sample(u_GBufferSampler, uv).r;
 
@@ -161,7 +164,7 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
                 }
             }
         }
-        color += PBR_BRDF(albedo, metallic, roughness, N, V, L) * radiance * shadow;
+        color += PBR_BRDF(albedo, metallic, roughness, N, V, L, dielectricF0) * radiance * shadow;
         }  // end clustered for
     } else {
         // --- 线性回退（Clustered 禁用时）---
@@ -206,7 +209,7 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
                 }
             }
         }
-        color += PBR_BRDF(albedo, metallic, roughness, N, V, L) * radiance * shadow;
+        color += PBR_BRDF(albedo, metallic, roughness, N, V, L, dielectricF0) * radiance * shadow;
         }
     }
 
@@ -214,7 +217,7 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
     color *= rtShadowFactor;
 
     // 4. IBL
-    float3 F0_ibl = lerp(float3(0.04), albedo, metallic);
+    float3 F0_ibl = lerp(float3(dielectricF0), albedo, metallic);
     float3 F = F_SchlickRoughness(max(dot(N, V), 0.0), F0_ibl, roughness, metallic);
     float3 kD = (1.0 - F) * (1.0 - metallic);
     color += kD * u_IrradianceMap.Sample(u_IBLSampler, N).rgb * albedo * iblIntensity;

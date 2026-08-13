@@ -124,15 +124,16 @@ float SamplePointShadow(float3 worldPos, float3 lightPos, float lightRange,
 // PBR BRDF — Cook-Torrance + Lambertian
 // ============================================================
 float3 PBR_BRDF(float3 albedo, float metallic, float roughness,
-                float3 N, float3 V, float3 L)
+                float3 N, float3 V, float3 L,
+                float dielectricF0 = 0.04)  // 默认 0.04 保持 ReSTIR/PT 调用点不变
 {
     float3 H = normalize(V + L);
     float NdotL = max(dot(N, L), 0.0);
     float NdotV = max(dot(N, V), 0.0);
     float NdotH = max(dot(N, H), 0.0);
 
-    // 菲涅尔反射率：非金属 ~0.04，金属 = albedo
-    float3 f0 = lerp(float3(0.04), albedo, metallic);
+    // 菲涅尔反射率：电介质 = dielectricF0（由 IOR 预计算），金属 = albedo
+    float3 f0 = lerp(float3(dielectricF0), albedo, metallic);
 
     // Cook-Torrance 镜面项
     float3 F = F_Schlick(f0, max(dot(H, V), 0.0));

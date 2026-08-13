@@ -84,7 +84,8 @@ struct LightGridCell { uint offset; uint count; };
 
 // ---- 光源遍历：传统 Forward 与 Forward+ 共用 PBR 计算 ----
 float3 ShadeWithLight(GPULight light, float3 worldPos, float3 N, float3 V,
-                       float3 albedo, float metallic, float roughness) {
+                       float3 albedo, float metallic, float roughness,
+                       float dielectricF0) {  // 电介质 F0（由 IOR 预计算）
     uint ltype = uint(light.directionType.w);
     float3 L; float attenuation = 1.0;
     if (ltype == 0u) {
@@ -121,7 +122,7 @@ float3 ShadeWithLight(GPULight light, float3 worldPos, float3 N, float3 V,
         }
     }
 
-    return PBR_BRDF(albedo, metallic, roughness, N, V, L) * radiance * shadow;
+    return PBR_BRDF(albedo, metallic, roughness, N, V, L, dielectricF0) * radiance * shadow;
 }
 
 float4 fragmentMain(FSInput input) : SV_Target0 {
@@ -161,20 +162,20 @@ float4 fragmentMain(FSInput input) : SV_Target0 {
         for (uint li = cell.offset; li < endIdx; li++) {
             uint i = u_LightIndexList[li];
             GPULight light = u_Lights[i];
-            color += ShadeWithLight(light, input.worldPos, N, V, albedo, metallic, roughness);
+            color += ShadeWithLight(light, input.worldPos, N, V, albedo, metallic, roughness, obj.dielectricF0);
         }
     } else {
         // --- 传统路径：遍历所有光源 ---
         uint count = min(lightCount, 8u);
         for (uint i = 0; i < count; i++) {
             GPULight light = u_Lights[i];
-            color += ShadeWithLight(light, input.worldPos, N, V, albedo, metallic, roughness);
+            color += ShadeWithLight(light, input.worldPos, N, V, albedo, metallic, roughness, obj.dielectricF0);
         }
     }
     color *= ao;
 
     // ---- IBL（环境光照） ----
-    float3 F0_ibl = lerp(float3(0.04), albedo, metallic);
+    float3 F0_ibl = lerp(float3(obj.dielectricF0), albedo, metallic);
     float3 F = F_SchlickRoughness(max(dot(N, V), 0.0), F0_ibl, roughness, metallic);
     float3 kD = (1.0 - F) * (1.0 - metallic);
     float3 irradiance = u_IrradianceMap.Sample(u_IBLSampler, N).rgb;

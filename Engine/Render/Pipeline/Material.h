@@ -66,6 +66,7 @@ struct PBRMaterial {
     float    metallicFactor        = 1.0f;
     float    roughnessFactor       = 1.0f;
     float    aoFactor              = 1.0f;
+    float    ior                  = 1.5f;   // 电介质折射率（F0 = (ior-1)^2/(ior+1)^2）
     float    alphaCutoff           = 0.5f;
 
     AlphaMode alphaMode            = AlphaMode::Opaque;
@@ -99,6 +100,9 @@ inline void FillObjectData(GPUObjectData& obj, const PBRMaterial& mat) {
     obj.metallicFactor  = mat.metallicFactor;
     obj.roughnessFactor = mat.roughnessFactor;
     obj.aoFactor        = mat.aoFactor;
+    // 电介质 F0（标量）：由 IOR 预计算，替代硬编码 0.04
+    float ior = mat.ior;
+    obj.dielectricF0 = (ior - 1.0f) * (ior - 1.0f) / ((ior + 1.0f) * (ior + 1.0f));
     obj.alphaCutoff     = mat.alphaCutoff;
     u32 flags = MF_None;
     if (mat.doubleSided)  flags |= MF_DoubleSided;

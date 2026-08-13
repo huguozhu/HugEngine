@@ -151,7 +151,8 @@ GPU_STRUCT GPUObjectData {
     float    alphaCutoff;           // [108]
     GPU_UINT materialFlags;         // [112]
     GPU_UINT materialID;            // [116]     bindless 纹理基索引
-    GPU_UINT _pad[2];               // [120..128] 对齐
+    float    dielectricF0;          // [120]     电介质 F0（由 IOR 预计算，默认 0.04）
+    GPU_UINT _pad;                  // [124..128] 对齐
 };
 
 // LightGridCell 参见 ClusteredShading.h（暂不纳入共享定义，避免重定义冲突）

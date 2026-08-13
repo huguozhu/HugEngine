@@ -70,6 +70,6 @@ FSOutput fragmentMain(VSOutput input) {
     output.normalRoughness = float4(N * 0.5 + 0.5, roughness);
     output.emissiveAO      = float4(obj.emissiveFactor.rgb, ao);
     output.velocity        = motion;
-    output.worldPos        = float4(input.worldPos, 0.0);  // 世界坐标存入 GBuffer
+    output.worldPos        = float4(input.worldPos, obj.dielectricF0);  // 世界坐标存入 GBuffer（a 携带电介质 F0，延迟光照用）
     return output;
 }
