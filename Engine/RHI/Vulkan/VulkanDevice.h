@@ -167,6 +167,9 @@ public:
     bool    SupportsRayTracing()  const { return m_SupportsRT; }
     bool    SupportsMeshShaders() const { return m_SupportsMesh; }
     bool    SupportsDGC() const { return m_SupportsDGC; }
+    // Graphics Pipeline Library 支持状态（fast-link 四段库拆分）
+    bool    SupportsGraphicsPipelineLibrary() const { return m_SupportsGPL; }
+    bool    SupportsGPLFastLinking() const { return m_SupportsGPLFastLinking; }
     const VulkanDGCFuncs& GetDGCFuncs() const { return m_DGCFuncs; }
 
     // Debug Utils 函数访问器（供 VulkanCommandList Debug Label 使用）
@@ -250,6 +253,7 @@ private:
     void QueryRTCapabilities();
     void QueryMeshCapabilities();
     void QueryDGCCapabilities();
+    void QueryGPLCapabilities();
     void LoadDGCFunctions();
     void LoadRTFunctions();
     void LoadMeshFunctions();
@@ -287,6 +291,8 @@ private:
     bool             m_SupportsRTPositionFetch = false;
     bool             m_SupportsMesh            = false;
     bool             m_SupportsDGC             = false;
+    bool             m_SupportsGPL            = false;
+    bool             m_SupportsGPLFastLinking = false;
     // RT Pipeline 属性
     u32              m_MaxRayRecursionDepth     = 1;
     u32              m_ShaderGroupHandleSize    = 32;

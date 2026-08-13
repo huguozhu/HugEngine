@@ -258,6 +258,7 @@ void VulkanDevice::Initialize(const DeviceInitDesc& desc) {
     QueryRTCapabilities();       // → VulkanDevice_RT.cpp
     QueryMeshCapabilities();     // → VulkanDevice_MeshShader.cpp
     QueryDGCCapabilities();      // → VulkanDevice_MeshShader.cpp
+    QueryGPLCapabilities();      // → VulkanDevice_GPL.cpp
     FindQueueFamilies();
 
     // 6. Create logical device
@@ -451,6 +452,17 @@ void VulkanDevice::CreateLogicalDevice() {
         HE_CORE_INFO("DGC 扩展已启用: VK_EXT_device_generated_commands");
     }
 
+    // 条件启用 Graphics Pipeline Library 扩展（fast-link 依赖 VK_KHR_pipeline_library）
+    VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT gplFeature{};
+    gplFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT;
+    gplFeature.graphicsPipelineLibrary = VK_TRUE;
+
+    if (m_SupportsGPL) {
+        deviceExtensions.push_back(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);      // 依赖扩展
+        deviceExtensions.push_back(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);
+        HE_CORE_INFO("Graphics Pipeline Library 扩展已启用");
+    }
+
     // Bindless: descriptor indexing 特性
     // 先查询设备实际支持的特性，仅启用可用项——避免请求不支持的
     // descriptorBindingUniformBufferUpdateAfterBind 等导致设备创建失败
@@ -532,6 +544,9 @@ void VulkanDevice::CreateLogicalDevice() {
 
     if (m_SupportsDGC) {
         *ppNext = &dgcFeature; ppNext = &dgcFeature.pNext;
+    }
+    if (m_SupportsGPL) {
+        *ppNext = &gplFeature; ppNext = &gplFeature.pNext;
     }
     if (hasDerivatives) {
         *ppNext = &computeDerivativesFeature; ppNext = &computeDerivativesFeature.pNext;
