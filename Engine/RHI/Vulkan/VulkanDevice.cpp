@@ -1094,6 +1094,30 @@ float VulkanDevice::GetPSOPrecompileProgress() const {
     return m_PSOPrecompileManager.GetProgress();
 }
 
+// ============================================================
+// PSO 创建限流器 — 帧循环内按限流批量创建 PSO
+// ============================================================
+void VulkanDevice::EnqueuePSOCreate(const PipelineStateDesc& desc) {
+    m_PendingCreates.push_back(desc);
+}
+
+std::vector<std::unique_ptr<IRHIPipelineState>> VulkanDevice::ProcessPSOCreateQueue(u32 maxPerFrame) {
+    std::vector<std::unique_ptr<IRHIPipelineState>> created;
+    u32 processed = 0;
+    while (processed < maxPerFrame && !m_PendingCreates.empty()) {
+        PipelineStateDesc desc = m_PendingCreates.front();
+        m_PendingCreates.pop_front();
+        // 创建 PSO（内部走 GPL fast-link 或单片路径，取决于能力与 desc）
+        created.push_back(CreatePipelineState(desc));
+        processed++;
+    }
+    return created;
+}
+
+u32 VulkanDevice::GetPendingPSOCreateCount() const {
+    return static_cast<u32>(m_PendingCreates.size());
+}
+
 std::unique_ptr<IRHITexture> VulkanDevice::CreateTexture(const TextureDesc& desc) {
     return CreateVulkanTexture(m_VmaAllocator, m_GraphicsCmdPool, m_GraphicsQueue, desc);
 }

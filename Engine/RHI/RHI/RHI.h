@@ -63,6 +63,14 @@ public:
     // 获取预热进度（0.0 ~ 1.0，1.0 表示全部完成）
     virtual float GetPSOPrecompileProgress() const { return 1.0f; }
 
+    // --- PSO 创建限流器 ---
+    // 入队一个 PSO 描述符到限流队列（非阻塞，帧循环内不直接创建）
+    virtual void EnqueuePSOCreate(const PipelineStateDesc& desc) {}
+    // 每帧从队列取最多 maxPerFrame 个创建，返回本次创建的 PSO（供调用方持有）
+    virtual std::vector<std::unique_ptr<IRHIPipelineState>> ProcessPSOCreateQueue(u32 maxPerFrame) { return {}; }
+    // 队列中待创建的 PSO 数量
+    virtual u32 GetPendingPSOCreateCount() const { return 0; }
+
     // --- Ray Tracing 资源创建 ---
     virtual std::unique_ptr<IRHIAccelerationStructure>
         CreateBLAS(const BLASBuildDesc& desc) = 0;                                // 创建 Bottom-Level Acceleration Structure

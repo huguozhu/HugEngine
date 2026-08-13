@@ -34,6 +34,7 @@
 #include "VulkanPipelineState.h"
 #include "DeferredDestructionQueue.h"
 
+#include <deque>
 #include <span>
 #include <unordered_map>
 #include <vector>
@@ -68,6 +69,11 @@ public:
     void  PrecompileQueuePSO(const PipelineStateDesc& desc) override;
     void  StartPSOPrecompile() override;
     float GetPSOPrecompileProgress() const override;
+
+    // PSO 创建限流器 — 帧循环内按限流批量创建 PSO（避免单帧卡顿）
+    void EnqueuePSOCreate(const PipelineStateDesc& desc) override;
+    std::vector<std::unique_ptr<IRHIPipelineState>> ProcessPSOCreateQueue(u32 maxPerFrame) override;
+    u32 GetPendingPSOCreateCount() const override;
 
     // Ray Tracing 资源创建
     std::unique_ptr<IRHIAccelerationStructure>
@@ -281,6 +287,9 @@ private:
     // PSO 预热管理器 — 后台线程编译 PSO 预热驱动缓存
     // ============================================================
     PSOPrecompileManager m_PSOPrecompileManager;
+
+    // PSO 创建限流队列（主线程写入 → NextFrame 逐帧 drain）
+    std::deque<PipelineStateDesc> m_PendingCreates;
 
     // ============================================================
     // Graphics Pipeline Library — 四段库缓存 + fast-link
