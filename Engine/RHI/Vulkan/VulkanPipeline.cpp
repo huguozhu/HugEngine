@@ -4,6 +4,7 @@
 // 集成 PSO 缓存：相同配置的管线仅创建一次，后续请求共享 Vulkan 对象
 // ============================================================
 #include "VulkanPipelineState.h"
+#include "VulkanPipelineLibrary.h"  // GraphicsPipelineParts（单片与 GPL 共享的分解状态）
 #include "VulkanRT.h"  // ToVkFormat / ToVkCompareOp
 #include "VulkanDevice.h"  // VulkanDevice::PSOCacheEntry / DeferredDestructionQueue
 #include "DeferredDestructionQueue.h"
@@ -122,6 +123,243 @@ static uint64_t HashPipelineStateDesc(const PipelineStateDesc& desc) {
     }
 
     return h;
+}
+
+// ============================================================
+// BuildGraphicsPipelineParts — 构建传统 VS+FS 图形管线的全部分解状态
+//   单片（CreateVulkanPipeline）与 GPL fast-link 路径共享此函数。
+//   逻辑与原 CreateVulkanPipeline 传统路径逐行一致，仅将栈数组迁移到
+//   out.attachments / out.colorRefs / out.blendStates / out.attrs，
+//   并将 renderPass / layout / shader modules 写入 out 字段。
+// ============================================================
+static bool BuildGraphicsPipelineParts(VkDevice device, const PipelineStateDesc& desc,
+                                       const std::vector<VkDescriptorSetLayout>& descLayouts,
+                                       GraphicsPipelineParts& out)
+{
+    // 创建 ShaderModule（逻辑与原 createShader lambda 一致：空字节码返回空句柄）
+    auto makeShader = [&](const ShaderBytecode* bc) -> VkShaderModule {
+        if (!bc || bc->spirv.empty()) return VK_NULL_HANDLE;
+
+        VkShaderModuleCreateInfo info{};
+        info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        info.codeSize = bc->spirv.size() * sizeof(u32);
+        info.pCode    = bc->spirv.data();
+
+        VkShaderModule mod;
+        vkCreateShaderModule(device, &info, nullptr, &mod);
+        return mod;
+    };
+
+    out.vs = makeShader(desc.vertexShader);
+    out.fs = makeShader(desc.pixelShader);
+    // 顶点与片段着色器均缺失时无法构建图形管线（防御性守卫）
+    if (!out.vs && !out.fs) return false;
+
+    // 2. Render pass（颜色附件 + 可选的深度附件）
+    //    支持 depth-only 模式：colorAttachmentCount=0 时仅创建深度附件
+    bool hasColor = (desc.colorAttachmentCount > 0);
+    bool hasDepth = (desc.depthFormat != Format::Unknown);
+
+    // 构建颜色附件（支持 MRT：最多 8 个）——写入 out.attachments / out.colorRefs
+    for (u32 c = 0; c < desc.colorAttachmentCount; ++c) {
+        out.attachments[c].format        = ToVkFormat(desc.colorFormats[c]);
+        out.attachments[c].samples       = VK_SAMPLE_COUNT_1_BIT;
+        out.attachments[c].loadOp        = ToVkLoadOp(desc.colorLoadOp);
+        out.attachments[c].storeOp       = VK_ATTACHMENT_STORE_OP_STORE;
+        // LOAD 模式下 initialLayout 不能是 UNDEFINED（Vulkan 规范要求）
+        out.attachments[c].initialLayout = (desc.colorLoadOp == LoadOp::Load)
+            ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+            : VK_IMAGE_LAYOUT_UNDEFINED;
+        out.attachments[c].finalLayout   = (desc.colorFormats[c] == Format::BGRA8_UNORM ||
+                                             desc.colorFormats[c] == Format::BGRA8_SRGB)
+                                            ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+                                            : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        out.colorRefs[c].attachment = c;
+        out.colorRefs[c].layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    }
+
+    // 深度附件写入颜色之后的位置（out.attachments[colorAttachmentCount]）
+    VkAttachmentDescription& depthAttach = out.attachments[desc.colorAttachmentCount];
+    depthAttach.format         = hasDepth ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_UNDEFINED;
+    depthAttach.samples        = VK_SAMPLE_COUNT_1_BIT;
+    depthAttach.loadOp         = ToVkLoadOp(desc.depthLoadOp);
+    depthAttach.storeOp        = VK_ATTACHMENT_STORE_OP_STORE; // 阴影贴图需要 STORE
+    depthAttach.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    depthAttach.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depthAttach.initialLayout  = (desc.depthLoadOp == LoadOp::Load)
+        ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+        : VK_IMAGE_LAYOUT_UNDEFINED;
+    depthAttach.finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL; // 阴影贴图后续要采样
+
+    // depth-only 模式下，深度附件在颜色之后
+    u32 depthAttachIdx = desc.colorAttachmentCount;  // 深度在颜色附件之后
+    VkAttachmentReference depthRef{depthAttachIdx, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount    = desc.colorAttachmentCount;
+    subpass.pColorAttachments       = hasColor ? out.colorRefs.data() : nullptr;
+    subpass.pDepthStencilAttachment = hasDepth ? &depthRef : nullptr;
+
+    // 附件数组布局：颜色在前 [0..N-1]，深度在 [N]（out.attachments 即为此布局）
+    u32 attachmentCount = desc.colorAttachmentCount;
+    if (hasDepth) attachmentCount++;
+
+    VkSubpassDependency dep{};
+    dep.srcSubpass    = VK_SUBPASS_EXTERNAL;
+    dep.dstSubpass    = 0;
+    dep.srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dep.dstStageMask  = (hasColor ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT : 0u) |
+                        (hasDepth ? VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT : 0u);
+    dep.dstAccessMask = (hasColor ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT : 0u) |
+                        (hasDepth ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT : 0u);
+
+    VkRenderPassCreateInfo rpInfo{};
+    rpInfo.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    rpInfo.attachmentCount = attachmentCount;
+    rpInfo.pAttachments    = out.attachments.data();
+    rpInfo.subpassCount    = 1;
+    rpInfo.pSubpasses      = &subpass;
+    rpInfo.dependencyCount = (hasColor || hasDepth) ? 1u : 0u;
+    rpInfo.pDependencies   = (hasColor || hasDepth) ? &dep : nullptr;
+
+    vkCreateRenderPass(device, &rpInfo, nullptr, &out.renderPass);
+
+    // 3. Vertex input（空 layout → SV_VertexID 全屏三角形，无需 VB）
+    bool hasVertexInput = (desc.vertexLayout.stride > 0) || (!desc.vertexLayout.attributes.empty());
+    out.binding.binding   = 0;
+    out.binding.stride    = hasVertexInput ? (desc.vertexLayout.stride > 0 ? desc.vertexLayout.stride : 8) : 0;
+    out.binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    // VertexFormat -> VkFormat 映射
+    auto toVkVertexFormat = [](VertexFormat fmt) -> VkFormat {
+        switch (fmt) {
+            case VertexFormat::Float:   return VK_FORMAT_R32_SFLOAT;
+            case VertexFormat::Float2:  return VK_FORMAT_R32G32_SFLOAT;
+            case VertexFormat::Float3:  return VK_FORMAT_R32G32B32_SFLOAT;
+            case VertexFormat::Float4:  return VK_FORMAT_R32G32B32A32_SFLOAT;
+            case VertexFormat::UByte4_Norm: return VK_FORMAT_R8G8B8A8_UNORM;
+            case VertexFormat::Byte4_Norm:  return VK_FORMAT_R8G8B8A8_SNORM;
+            case VertexFormat::UInt:    return VK_FORMAT_R32_UINT;
+            case VertexFormat::UInt2:   return VK_FORMAT_R32G32_UINT;
+            case VertexFormat::UInt4:   return VK_FORMAT_R32G32B32A32_UINT;
+            default:                    return VK_FORMAT_R32G32B32_SFLOAT;
+        }
+    };
+
+    // 根据 desc.vertexLayout 构建 Vulkan 属性列表
+    if (desc.vertexLayout.attributes.empty()) {
+        // 回退：未指定属性时，根据 stride 推导默认格式
+        VkVertexInputAttributeDescription defaultAttr{};
+        defaultAttr.location = 0;
+        defaultAttr.binding  = 0;
+        defaultAttr.offset   = 0;
+        if (desc.vertexLayout.stride >= 32) defaultAttr.format = VK_FORMAT_R32G32B32_SFLOAT;
+        else if (desc.vertexLayout.stride >= 12) defaultAttr.format = VK_FORMAT_R32G32B32_SFLOAT;
+        else defaultAttr.format = VK_FORMAT_R32G32_SFLOAT;  // stride=8: vec2
+        out.attrs.push_back(defaultAttr);
+    } else {
+        for (auto& attr : desc.vertexLayout.attributes) {
+            VkVertexInputAttributeDescription va{};
+            va.location = attr.location;
+            va.binding  = attr.binding;
+            va.format   = toVkVertexFormat(attr.format);
+            va.offset   = attr.offset;
+            out.attrs.push_back(va);
+        }
+    }
+
+    out.vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    out.vertexInput.vertexBindingDescriptionCount   = hasVertexInput ? 1u : 0u;
+    out.vertexInput.pVertexBindingDescriptions      = hasVertexInput ? &out.binding : nullptr;
+    out.vertexInput.vertexAttributeDescriptionCount = hasVertexInput ? static_cast<u32>(out.attrs.size()) : 0u;
+    out.vertexInput.pVertexAttributeDescriptions    = hasVertexInput ? out.attrs.data() : nullptr;
+
+    // 4. Input assembly
+    out.inputAssembly.sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    out.inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    // 5. Dynamic viewport + scissor
+    out.viewportState.sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    out.viewportState.viewportCount = 1;
+    out.viewportState.scissorCount  = 1;
+
+    out.rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    out.rasterizer.lineWidth   = 1.0f;
+    out.rasterizer.cullMode    = ToVkCullMode(desc.cullMode);
+    out.rasterizer.frontFace   = ToVkFrontFace(desc.frontFace);
+    out.rasterizer.polygonMode = ToVkFillMode(desc.fillMode);
+
+    out.multisample.sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    out.multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    // 6. Depth stencil state
+    out.depthStencil.sType            = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    out.depthStencil.depthTestEnable  = desc.depthTest ? VK_TRUE : VK_FALSE;
+    out.depthStencil.depthWriteEnable = desc.depthWrite ? VK_TRUE : VK_FALSE;
+    out.depthStencil.depthCompareOp   = ToVkCompareOp(desc.depthCompare);
+    out.depthStencil.depthBoundsTestEnable = VK_FALSE;
+    out.depthStencil.stencilTestEnable     = VK_FALSE;
+
+    for (u32 c = 0; c < desc.colorAttachmentCount; ++c) {
+        const auto& cb = desc.colorBlend[c];
+        out.blendStates[c].blendEnable         = cb.blendEnable ? VK_TRUE : VK_FALSE;
+        out.blendStates[c].srcColorBlendFactor = ToVkBlendFactor(cb.srcColorBlendFactor);
+        out.blendStates[c].dstColorBlendFactor = ToVkBlendFactor(cb.dstColorBlendFactor);
+        out.blendStates[c].colorBlendOp        = ToVkBlendOp(cb.colorBlendOp);
+        out.blendStates[c].srcAlphaBlendFactor = ToVkBlendFactor(cb.srcAlphaBlendFactor);
+        out.blendStates[c].dstAlphaBlendFactor = ToVkBlendFactor(cb.dstAlphaBlendFactor);
+        out.blendStates[c].alphaBlendOp        = ToVkBlendOp(cb.alphaBlendOp);
+        out.blendStates[c].colorWriteMask      = ToVkColorWriteMask(cb.writeMask);
+    }
+
+    out.colorBlend.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    out.colorBlend.attachmentCount = desc.colorAttachmentCount;
+    out.colorBlend.pAttachments    = out.blendStates.data();
+
+    // 动态状态数组采用静态存储期，保证 out.dynState 引用在单片与 GPL 路径全程有效
+    static const VkDynamicState dyn[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    out.dynState.sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    out.dynState.dynamicStateCount = 2;
+    out.dynState.pDynamicStates    = dyn;
+
+    // 构建 push constant ranges（直接使用 stageMask 位掩码）
+    for (auto& pcRange : desc.pushConstantRanges) {
+        VkPushConstantRange vkRange{};
+        vkRange.stageFlags = pcRange.stageMask;  // 直接使用 Vulkan 兼容的位掩码
+        vkRange.offset     = pcRange.offset;
+        vkRange.size       = pcRange.size;
+        out.pushRanges.push_back(vkRange);
+    }
+    // 如果着色器使用 push constants 但没有显式声明 range，自动添加默认范围
+    // 避免 Vulkan 验证层警告 "push constants but no VkPushConstantRange found"
+    if (out.pushRanges.empty()) {
+        VkPushConstantRange defaultRange{};
+        defaultRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        defaultRange.size       = kDefaultPushConstantSize;  // 最小保证范围
+        out.pushRanges.push_back(defaultRange);
+    }
+
+    VkPipelineLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layoutInfo.setLayoutCount         = static_cast<u32>(descLayouts.size());
+    layoutInfo.pSetLayouts            = descLayouts.empty() ? nullptr : descLayouts.data();
+    layoutInfo.pushConstantRangeCount = static_cast<u32>(out.pushRanges.size());
+    layoutInfo.pPushConstantRanges    = out.pushRanges.empty() ? nullptr : out.pushRanges.data();
+    vkCreatePipelineLayout(device, &layoutInfo, nullptr, &out.layout);
+
+    // 6. Shader stages（写入 out.vsStage / out.fsStage，供单片与 GPL 路径消费）
+    out.vsStage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    out.vsStage.stage  = VK_SHADER_STAGE_VERTEX_BIT;
+    out.vsStage.module = out.vs;
+    out.vsStage.pName  = kDefaultShaderEntryPoint;
+    out.fsStage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    out.fsStage.stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
+    out.fsStage.module = out.fs;
+    out.fsStage.pName  = kDefaultShaderEntryPoint;
+
+    return true;
 }
 
 // ============================================================
@@ -458,270 +696,54 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     }
 
     // ── 传统 Graphics Pipeline（顶点着色器 + IA）──
-    VkShaderModule vert = createShader(desc.vertexShader,   VK_SHADER_STAGE_VERTEX_BIT);
-    VkShaderModule frag = createShader(desc.pixelShader,    VK_SHADER_STAGE_FRAGMENT_BIT);
-
-    // 2. Render pass（颜色附件 + 可选的深度附件）
-    //    支持 depth-only 模式：colorAttachmentCount=0 时仅创建深度附件
-    bool hasColor = (desc.colorAttachmentCount > 0);
-    bool hasDepth = (desc.depthFormat != Format::Unknown);
-
-    // 构建颜色附件（支持 MRT：最多 8 个）
-    VkAttachmentDescription colorAttachments[kMaxColorAttachments]{};
-    VkAttachmentReference   colorRefs[kMaxColorAttachments]{};
-    for (u32 c = 0; c < desc.colorAttachmentCount; ++c) {
-        colorAttachments[c].format        = ToVkFormat(desc.colorFormats[c]);
-        colorAttachments[c].samples       = VK_SAMPLE_COUNT_1_BIT;
-        colorAttachments[c].loadOp        = ToVkLoadOp(desc.colorLoadOp);
-        colorAttachments[c].storeOp       = VK_ATTACHMENT_STORE_OP_STORE;
-        // LOAD 模式下 initialLayout 不能是 UNDEFINED（Vulkan 规范要求）
-        colorAttachments[c].initialLayout = (desc.colorLoadOp == LoadOp::Load)
-            ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-            : VK_IMAGE_LAYOUT_UNDEFINED;
-        colorAttachments[c].finalLayout   = (desc.colorFormats[c] == Format::BGRA8_UNORM ||
-                                             desc.colorFormats[c] == Format::BGRA8_SRGB)
-                                            ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
-                                            : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        colorRefs[c].attachment = c;
-        colorRefs[c].layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    // 复用共享状态构建：填充 GraphicsPipelineParts（单片与 GPL 路径共用）
+    GraphicsPipelineParts parts;
+    if (!BuildGraphicsPipelineParts(device, desc, descLayouts, parts)) {
+        // 顶点/片段着色器均缺失时构建失败（原 createShader 空句柄路径的防御处理）
+        HE_ASSERT(false, "Graphics pipeline requires a vertex or fragment shader");
+        return nullptr;
     }
 
-    VkAttachmentDescription depthAttach{};
-    depthAttach.format         = hasDepth ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_UNDEFINED;
-    depthAttach.samples        = VK_SAMPLE_COUNT_1_BIT;
-    depthAttach.loadOp         = ToVkLoadOp(desc.depthLoadOp);
-    depthAttach.storeOp        = VK_ATTACHMENT_STORE_OP_STORE; // 阴影贴图需要 STORE
-    depthAttach.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    depthAttach.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    depthAttach.initialLayout  = (desc.depthLoadOp == LoadOp::Load)
-        ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-        : VK_IMAGE_LAYOUT_UNDEFINED;
-    depthAttach.finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL; // 阴影贴图后续要采样
-
-    // depth-only 模式下，深度附件在颜色之后
-    u32 depthAttachIdx = desc.colorAttachmentCount;  // 深度在颜色附件之后
-    VkAttachmentReference depthRef{depthAttachIdx, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
-
-    VkSubpassDescription subpass{};
-    subpass.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount    = desc.colorAttachmentCount;
-    subpass.pColorAttachments       = hasColor ? colorRefs : nullptr;
-    subpass.pDepthStencilAttachment = hasDepth ? &depthRef : nullptr;
-
-    // 构建附件数组：颜色在前 [0..N-1]，深度在 [N]
-    VkAttachmentDescription attachments[kMaxColorAttachments + 1];  // 最多 8 颜色 + 1 深度
-    u32 attachmentCount = 0;
-    for (u32 c = 0; c < desc.colorAttachmentCount; ++c)
-        attachments[attachmentCount++] = colorAttachments[c];
-    if (hasDepth) attachments[attachmentCount++] = depthAttach;
-
-    VkSubpassDependency dep{};
-    dep.srcSubpass    = VK_SUBPASS_EXTERNAL;
-    dep.dstSubpass    = 0;
-    dep.srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-                        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-    dep.dstStageMask  = (hasColor ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT : 0u) |
-                        (hasDepth ? VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT : 0u);
-    dep.dstAccessMask = (hasColor ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT : 0u) |
-                        (hasDepth ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT : 0u);
-
-    VkRenderPassCreateInfo rpInfo{};
-    rpInfo.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    rpInfo.attachmentCount = attachmentCount;
-    rpInfo.pAttachments    = attachments;
-    rpInfo.subpassCount    = 1;
-    rpInfo.pSubpasses      = &subpass;
-    rpInfo.dependencyCount = (hasColor || hasDepth) ? 1u : 0u;
-    rpInfo.pDependencies   = (hasColor || hasDepth) ? &dep : nullptr;
-
-    VkRenderPass renderPass;
-    vkCreateRenderPass(device, &rpInfo, nullptr, &renderPass);
-
-    // 3. Vertex input（空 layout → SV_VertexID 全屏三角形，无需 VB）
-    bool hasVertexInput = (desc.vertexLayout.stride > 0) || (!desc.vertexLayout.attributes.empty());
-    VkVertexInputBindingDescription binding{};
-    binding.binding   = 0;
-    binding.stride    = hasVertexInput ? (desc.vertexLayout.stride > 0 ? desc.vertexLayout.stride : 8) : 0;
-    binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-    // VertexFormat -> VkFormat 映射
-    auto toVkVertexFormat = [](VertexFormat fmt) -> VkFormat {
-        switch (fmt) {
-            case VertexFormat::Float:   return VK_FORMAT_R32_SFLOAT;
-            case VertexFormat::Float2:  return VK_FORMAT_R32G32_SFLOAT;
-            case VertexFormat::Float3:  return VK_FORMAT_R32G32B32_SFLOAT;
-            case VertexFormat::Float4:  return VK_FORMAT_R32G32B32A32_SFLOAT;
-            case VertexFormat::UByte4_Norm: return VK_FORMAT_R8G8B8A8_UNORM;
-            case VertexFormat::Byte4_Norm:  return VK_FORMAT_R8G8B8A8_SNORM;
-            case VertexFormat::UInt:    return VK_FORMAT_R32_UINT;
-            case VertexFormat::UInt2:   return VK_FORMAT_R32G32_UINT;
-            case VertexFormat::UInt4:   return VK_FORMAT_R32G32B32A32_UINT;
-            default:                    return VK_FORMAT_R32G32B32_SFLOAT;
-        }
-    };
-
-    // 根据 desc.vertexLayout 构建 Vulkan 属性列表
-    std::vector<VkVertexInputAttributeDescription> vkAttrs;
-    if (desc.vertexLayout.attributes.empty()) {
-        // 回退：未指定属性时，根据 stride 推导默认格式
-        VkVertexInputAttributeDescription defaultAttr{};
-        defaultAttr.location = 0;
-        defaultAttr.binding  = 0;
-        defaultAttr.offset   = 0;
-        if (desc.vertexLayout.stride >= 32) defaultAttr.format = VK_FORMAT_R32G32B32_SFLOAT;
-        else if (desc.vertexLayout.stride >= 12) defaultAttr.format = VK_FORMAT_R32G32B32_SFLOAT;
-        else defaultAttr.format = VK_FORMAT_R32G32_SFLOAT;  // stride=8: vec2
-        vkAttrs.push_back(defaultAttr);
-    } else {
-        for (auto& attr : desc.vertexLayout.attributes) {
-            VkVertexInputAttributeDescription va{};
-            va.location = attr.location;
-            va.binding  = attr.binding;
-            va.format   = toVkVertexFormat(attr.format);
-            va.offset   = attr.offset;
-            vkAttrs.push_back(va);
-        }
-    }
-
-    VkPipelineVertexInputStateCreateInfo vertexInput{};
-    vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    vertexInput.vertexBindingDescriptionCount   = hasVertexInput ? 1u : 0u;
-    vertexInput.pVertexBindingDescriptions      = hasVertexInput ? &binding : nullptr;
-    vertexInput.vertexAttributeDescriptionCount = hasVertexInput ? static_cast<u32>(vkAttrs.size()) : 0u;
-    vertexInput.pVertexAttributeDescriptions    = hasVertexInput ? vkAttrs.data() : nullptr;
-
-    // 4. Input assembly
-    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
-    inputAssembly.sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-
-    // 5. Dynamic viewport + scissor
-    VkPipelineViewportStateCreateInfo viewportState{};
-    viewportState.sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-    viewportState.viewportCount = 1;
-    viewportState.scissorCount  = 1;
-
-    VkPipelineRasterizationStateCreateInfo rasterizer{};
-    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-    rasterizer.lineWidth   = 1.0f;
-    rasterizer.cullMode    = ToVkCullMode(desc.cullMode);
-    rasterizer.frontFace   = ToVkFrontFace(desc.frontFace);
-    rasterizer.polygonMode = ToVkFillMode(desc.fillMode);
-
-    VkPipelineMultisampleStateCreateInfo ms{};
-    ms.sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-
-    // 6. Depth stencil state
-    VkPipelineDepthStencilStateCreateInfo depthStencil{};
-    depthStencil.sType            = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-    depthStencil.depthTestEnable  = desc.depthTest ? VK_TRUE : VK_FALSE;
-    depthStencil.depthWriteEnable = desc.depthWrite ? VK_TRUE : VK_FALSE;
-    depthStencil.depthCompareOp   = ToVkCompareOp(desc.depthCompare);
-    depthStencil.depthBoundsTestEnable = VK_FALSE;
-    depthStencil.stencilTestEnable     = VK_FALSE;
-
-    VkPipelineColorBlendAttachmentState blendAttachments[kMaxColorAttachments]{};  // 支持最多 8 个 MRT
-    for (u32 c = 0; c < desc.colorAttachmentCount; ++c) {
-        const auto& cb = desc.colorBlend[c];
-        blendAttachments[c].blendEnable         = cb.blendEnable ? VK_TRUE : VK_FALSE;
-        blendAttachments[c].srcColorBlendFactor = ToVkBlendFactor(cb.srcColorBlendFactor);
-        blendAttachments[c].dstColorBlendFactor = ToVkBlendFactor(cb.dstColorBlendFactor);
-        blendAttachments[c].colorBlendOp        = ToVkBlendOp(cb.colorBlendOp);
-        blendAttachments[c].srcAlphaBlendFactor = ToVkBlendFactor(cb.srcAlphaBlendFactor);
-        blendAttachments[c].dstAlphaBlendFactor = ToVkBlendFactor(cb.dstAlphaBlendFactor);
-        blendAttachments[c].alphaBlendOp        = ToVkBlendOp(cb.alphaBlendOp);
-        blendAttachments[c].colorWriteMask      = ToVkColorWriteMask(cb.writeMask);
-    }
-
-    VkPipelineColorBlendStateCreateInfo colorBlend{};
-    colorBlend.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    colorBlend.attachmentCount = desc.colorAttachmentCount;
-    colorBlend.pAttachments    = blendAttachments;
-
-    VkDynamicState dyn[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
-    VkPipelineDynamicStateCreateInfo dynState{};
-    dynState.sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-    dynState.dynamicStateCount = 2;
-    dynState.pDynamicStates    = dyn;
-
-    // 构建 push constant ranges（直接使用 stageMask 位掩码）
-    std::vector<VkPushConstantRange> vkPushRanges;
-    for (auto& pcRange : desc.pushConstantRanges) {
-        VkPushConstantRange vkRange{};
-        vkRange.stageFlags = pcRange.stageMask;  // 直接使用 Vulkan 兼容的位掩码
-        vkRange.offset     = pcRange.offset;
-        vkRange.size       = pcRange.size;
-        vkPushRanges.push_back(vkRange);
-    }
-    // 如果着色器使用 push constants 但没有显式声明 range，自动添加默认范围
-    // 避免 Vulkan 验证层警告 "push constants but no VkPushConstantRange found"
-    if (vkPushRanges.empty()) {
-        VkPushConstantRange defaultRange{};
-        defaultRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-        defaultRange.size       = kDefaultPushConstantSize;  // 最小保证范围
-        vkPushRanges.push_back(defaultRange);
-    }
-
-    VkPipelineLayoutCreateInfo layoutInfo{};
-    layoutInfo.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    layoutInfo.setLayoutCount         = static_cast<u32>(descLayouts.size());
-    layoutInfo.pSetLayouts            = descLayouts.empty() ? nullptr : descLayouts.data();
-    layoutInfo.pushConstantRangeCount = static_cast<u32>(vkPushRanges.size());
-    layoutInfo.pPushConstantRanges    = vkPushRanges.empty() ? nullptr : vkPushRanges.data();
-    VkPipelineLayout pipelineLayout;
-    vkCreatePipelineLayout(device, &layoutInfo, nullptr, &pipelineLayout);
-
-    // 6. Shader stages
-    VkPipelineShaderStageCreateInfo stages[kMaxShaderStages]{};
-    stages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;
-    stages[0].module = vert;
-    stages[0].pName  = kDefaultShaderEntryPoint;
-    stages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
-    stages[1].module = frag;
-    stages[1].pName  = kDefaultShaderEntryPoint;
-
-    // 7. Create pipeline
+    // 组装完整单片 pipeline
+    VkPipelineShaderStageCreateInfo stages[2] = { parts.vsStage, parts.fsStage };
     VkGraphicsPipelineCreateInfo pipeInfo{};
     pipeInfo.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
     pipeInfo.stageCount          = 2;
     pipeInfo.pStages             = stages;
-    pipeInfo.pVertexInputState   = &vertexInput;
-    pipeInfo.pInputAssemblyState = &inputAssembly;
-    pipeInfo.pViewportState      = &viewportState;
-    pipeInfo.pRasterizationState = &rasterizer;
-    pipeInfo.pMultisampleState   = &ms;
-    pipeInfo.pDepthStencilState  = &depthStencil;
-    pipeInfo.pColorBlendState    = &colorBlend;
-    pipeInfo.pDynamicState       = &dynState;
-    pipeInfo.layout              = pipelineLayout;
-    pipeInfo.renderPass          = renderPass;
+    pipeInfo.pVertexInputState   = &parts.vertexInput;
+    pipeInfo.pInputAssemblyState = &parts.inputAssembly;
+    pipeInfo.pViewportState      = &parts.viewportState;
+    pipeInfo.pRasterizationState = &parts.rasterizer;
+    pipeInfo.pMultisampleState   = &parts.multisample;
+    pipeInfo.pDepthStencilState  = &parts.depthStencil;
+    pipeInfo.pColorBlendState    = &parts.colorBlend;
+    pipeInfo.pDynamicState       = &parts.dynState;
+    pipeInfo.layout              = parts.layout;
+    pipeInfo.renderPass          = parts.renderPass;
     pipeInfo.subpass             = 0;
 
     VkPipeline pipeline;
     vkCreateGraphicsPipelines(device, pipelineCache, 1, &pipeInfo, nullptr, &pipeline);
 
-    vkDestroyShaderModule(device, vert, nullptr);
-    vkDestroyShaderModule(device, frag, nullptr);
+    vkDestroyShaderModule(device, parts.vs, nullptr);
+    vkDestroyShaderModule(device, parts.fs, nullptr);
 
     HE_CORE_INFO("Vulkan graphics pipeline created");
     // ── 插入 PSO 缓存 ──
     if (vulkanDevice) {
         uint64_t hash = HashPipelineStateDesc(desc);
-        vulkanDevice->InsertPSOToCache(hash, pipeline, pipelineLayout, renderPass);
+        vulkanDevice->InsertPSOToCache(hash, pipeline, parts.layout, parts.renderPass);
         VkPipeline cachedP = VK_NULL_HANDLE; VkPipelineLayout cachedL = VK_NULL_HANDLE;
         VkRenderPass cachedR = VK_NULL_HANDLE;
         auto ref = vulkanDevice->GetCachedPSORef(hash, cachedP, cachedL, cachedR);
         if (ref) {
-            return std::make_unique<VulkanPipelineState>(device, pipeline, pipelineLayout,
-                renderPass, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            return std::make_unique<VulkanPipelineState>(device, pipeline, parts.layout,
+                parts.renderPass, VK_PIPELINE_BIND_POINT_GRAPHICS,
                 ref, &vulkanDevice->GetDeferredDestroy());
         }
     }
-    return std::make_unique<VulkanPipelineState>(device, pipeline, pipelineLayout,
-                                                  renderPass, VK_PIPELINE_BIND_POINT_GRAPHICS);
+    return std::make_unique<VulkanPipelineState>(device, pipeline, parts.layout,
+                                                  parts.renderPass, VK_PIPELINE_BIND_POINT_GRAPHICS);
 }
 
 } // namespace he::rhi
