@@ -338,4 +338,13 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
     HE_CORE_INFO("LightingPass: PSO + DescriptorSet 创建完成");
 }
 
+void LightingPass::SetIBLTextures(rhi::IRHITexture* irradiance, rhi::IRHITexture* prefilter,
+                                  rhi::IRHITexture* brdfLut, rhi::IRHISampler* sampler) {
+    if (!m_Device || m_Set == rhi::kInvalidSet) return;
+    // 绑定 IBL 贴图到 Lighting 描述符集（12=Irradiance, 13=Prefilter, 14=BRDF LUT）
+    m_Device->UpdateDescriptorSet(m_Set, 12, rhi::DescriptorType::CombinedImageSampler, irradiance, sampler);
+    m_Device->UpdateDescriptorSet(m_Set, 13, rhi::DescriptorType::CombinedImageSampler, prefilter, sampler);
+    m_Device->UpdateDescriptorSet(m_Set, 14, rhi::DescriptorType::CombinedImageSampler, brdfLut, sampler);
+}
+
 } // namespace he::render

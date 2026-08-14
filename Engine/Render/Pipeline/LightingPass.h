@@ -105,6 +105,10 @@ public:
     rhi::IRHIPipelineState* GetPSO()     const { return m_PSO.get(); }
     rhi::DescriptorSetHandle GetDescriptorSet() const { return m_Set; }
 
+    // 设置 IBL 贴图（Irradiance/Prefilter/BRDF LUT），供天空盒喂 IBL 间接光
+    void SetIBLTextures(rhi::IRHITexture* irradiance, rhi::IRHITexture* prefilter,
+                        rhi::IRHITexture* brdfLut, rhi::IRHISampler* sampler);
+
 private:
     void CreateHDRTextures(rhi::IRHIDevice* device);
     void CreatePSOAndDescriptorSet(rhi::IRHIDevice* device);

@@ -11,6 +11,7 @@
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
 #include "Scene/LightComponent.h"
+#include "Scene/SkyboxComponent.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include <cmath>
@@ -340,6 +341,18 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             c->EndOffscreenPass();
         });
 
+    // ── 天空盒喂给 GI_IBL（脏标记触发 IBL 重生成，生成在 Lighting lambda 内联执行）──
+    {
+        auto* giIBL = dynamic_cast<GI_IBL*>(m_GI.get());
+        if (giIBL) {
+            world.ForEach<he::SkyboxComponent>([&](he::Entity, he::SkyboxComponent& sc) {
+                if (sc.enabled && sc.GetCubemap()) {
+                    giIBL->SetIBLSkybox(sc.GetCubemap(), sc.GetCubemapSampler());
+                }
+            });
+        }
+    }
+
     // Lighting Pass (全屏 PBR + 降噪后 SSGI/SSR/DDGI 读取，委托给 LightingPass 共享组件)
     rg.AddPass("Lighting",
         {{gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbC, ResourceAccess::Read},
@@ -349,6 +362,14 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
          {ssrDenoised, ResourceAccess::Read}},
         {{hdrC, ResourceAccess::Write}},
         [&, w, h](rhi::IRHICommandList* c) {
+            // IBL 生成（天空盒 → Irradiance/Prefilter/BRDF LUT，脏时才重建）+ 绑定到 Lighting 描述符集
+            auto* giIBL = dynamic_cast<GI_IBL*>(m_GI.get());
+            if (giIBL) {
+                if (giIBL->IsDirty()) giIBL->Render(c);
+                m_Lighting.SetIBLTextures(giIBL->GetIrradianceMap(), giIBL->GetPrefilterMap(),
+                                          giIBL->GetBRDF_LUT(), giIBL->GetIBLSampler());
+            }
+
             // 深度缓冲屏障（在 Lighting 读取前完成 GBuffer 写入）
             c->PipelineBarrier(rhi::PipelineStage::LateFragmentTests, rhi::PipelineStage::FragmentShader,
                 rhi::ResourceState::DepthStencilWrite, rhi::ResourceState::DepthStencilRead,
