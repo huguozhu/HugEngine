@@ -55,11 +55,6 @@ bool MotionBlurPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) 
     return true;
 }
 
-void MotionBlurPass::EnsureInitialized() {
-    if (m_Ready || !m_Device) return;
-    Initialize(m_Device, m_Width, m_Height);
-}
-
 void MotionBlurPass::Shutdown() {
     if (!m_Ready) return;
     m_PSO.reset(); m_Output.reset(); m_OutSampler.reset();

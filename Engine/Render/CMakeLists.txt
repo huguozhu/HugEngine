@@ -101,6 +101,7 @@ set(RENDER_SOURCES
     Shadow/SpotShadowTechnique.cpp
     # PostProcess
     PostProcess/PostProcessPass.h
+    PostProcess/LazyPostProcessPass.h
     PostProcess/ToneMapPass.h
     PostProcess/ToneMapPass.cpp
     PostProcess/SkyboxPass.h

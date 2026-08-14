@@ -174,11 +174,6 @@ void BloomPass::SetInput(rhi::IRHITexture* hdr, rhi::IRHISampler* sampler) {
     m_HDRSampler = sampler;
 }
 
-void BloomPass::EnsureInitialized() {
-    if (m_Ready || !m_Device) return;
-    Initialize(m_Device, m_Width, m_Height);
-}
-
 void BloomPass::Render(rhi::IRHICommandList* cmd) {
     if (!m_Ready || !m_Enabled) return;  // 未初始化或禁用 → 跳过
     if (!m_HDRInput) return;

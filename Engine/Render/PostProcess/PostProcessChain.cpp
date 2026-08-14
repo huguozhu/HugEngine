@@ -51,7 +51,13 @@ void PostProcessChain::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     }
 
     // ── 懒初始化的 Pass（Bloom/DOF/MotionBlur/ColorGrading/FXAA/SMAA/MSAA）──
-    // 首次调用 SetEnabled(true) 时才分配 GPU 资源
+    // 首次调用 SetEnabled(true) 时才分配 GPU 资源。
+    // 先注入设备/尺寸，否则 EnsureInitialized 拿不到 m_Device 永远不初始化（懒初始化失效）。
+    m_Bloom.SetDevice(device, width, height);
+    m_DOF.SetDevice(device, width, height);
+    m_MotionBlur.SetDevice(device, width, height);
+    m_ColorGrading.SetDevice(device, width, height);
+    m_CameraEffects.SetDevice(device, width, height);
 
     HE_CORE_INFO("PostProcessChain: 初始化完成 ({}x{})", width, height);
 }

@@ -94,11 +94,6 @@ bool DOFPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     return true;
 }
 
-void DOFPass::EnsureInitialized() {
-    if (m_Ready || !m_Device) return;
-    Initialize(m_Device, m_Width, m_Height);
-}
-
 void DOFPass::Shutdown() {
     if (!m_Ready) return;
     m_CoCPSO.reset(); m_CoCTex.reset();
