@@ -42,7 +42,7 @@ bool SkyboxPass::Initialize(rhi::IRHIDevice* device,u32,u32){
         d2.depthTest=true;d2.depthWrite=false;d2.depthCompare=rhi::CompareFunc::Equal;
         d2.depthFormat=rhi::Format::D32_FLOAT;
         d2.colorAttachmentCount=1;d2.colorFormats[0]=rhi::Format::RGBA16_FLOAT;
-        rhi::PushConstantRange pcr2;pcr2.stageMask=rhi::kStageMaskVertex|rhi::kStageMaskFragment;pcr2.offset=0;pcr2.size=96;
+        rhi::PushConstantRange pcr2;pcr2.stageMask=rhi::kStageMaskVertex|rhi::kStageMaskFragment;pcr2.offset=0;pcr2.size=112;
         d2.pushConstantRanges={pcr2};d2.descriptorSetLayouts={m_DescLayout};d2.debugName="PhysicalSky";
         m_PS_PSO=device->CreatePipelineState(d2);
         HE_ASSERT(m_PS_PSO,"SkyboxPass: PhysicalSky PSO failed");
@@ -98,14 +98,18 @@ void SkyboxPass::Render(rhi::IRHICommandList* cmd){
 
     // 物理天空：解析 Preetham 模型（无纹理绑定，推入天空参数）
     if(m_CachedPhysSky){
-        struct alignas(16){float4x4 invVP;float intensity;float sunDir[3];float turbidity;float groundAlbedo;float sunIntensity;float _pad;}pc;
+        // 注意：Slang push constant 用 std430 布局，float3 对齐到 16 字节，
+        // 故 intensity 后需补 3 个 float 的 padding，让 sunDir 落在 offset 80（与 shader 一致）
+        struct alignas(16){float4x4 invVP;float intensity;float _pad0[3];float sunDir[3];float turbidity;float groundAlbedo;float sunIntensity;float _pad;}pc;
         pc.invVP=invVP;pc.intensity=m_CachedPhysSky->intensity;
+        pc._pad0[0]=pc._pad0[1]=pc._pad0[2]=0.0f;
         pc.sunDir[0]=m_CachedPhysSky->sunDirection.x;
         pc.sunDir[1]=m_CachedPhysSky->sunDirection.y;
         pc.sunDir[2]=m_CachedPhysSky->sunDirection.z;
         pc.turbidity=m_CachedPhysSky->turbidity;
         pc.groundAlbedo=m_CachedPhysSky->groundAlbedo;
         pc.sunIntensity=m_CachedPhysSky->sunIntensity;
+        pc._pad=0.0f;
         cmd->SetPipeline(m_PS_PSO.get());
         cmd->SetPushConstants(0,sizeof(pc),&pc);
         cmd->Draw(3);
