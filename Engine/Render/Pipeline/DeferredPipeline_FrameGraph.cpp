@@ -40,6 +40,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     rhi::Format swapFmt = m_SwapChain ? m_SwapChain->GetColorFormat() : rhi::Format::BGRA8_UNORM;
     m_PostProcess.GetToneMap()->SetOutputFormat(swapFmt);
     m_PostProcess.GetToneMap()->SetHDREnabled(swapFmt == rhi::Format::A2B10G10R10_UNORM_PACK32);
+    // HDR 输出时，LDR 后处理（FXAA/SMAA/ColorGrading/CameraEffects）与 A2B10G10R10 后备缓冲不兼容，需禁用
+    bool isHDR = (swapFmt == rhi::Format::A2B10G10R10_UNORM_PACK32);
     // 从 GBufferRenderer 导入所有 GBuffer 纹理
     auto gb = m_GBuffer->ImportToRenderGraph(rg);
     auto gbA = gb.albedo; auto gbB = gb.normal; auto gbC = gb.emissive;
@@ -551,7 +553,12 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     bool useColor = m_PostProcess.GetColorGrading().IsEnabled() && m_PostProcess.GetColorGrading().GetOutput() != nullptr;
     bool useFX    = m_PostProcess.GetCameraEffects().IsEnabled() && m_PostProcess.GetCameraEffects().GetOutput() != nullptr;
     bool useTAA   = (m_PostProcess.GetTAA() && m_PostProcess.GetTAA()->IsEnabled());
-    bool needLDR  = useFXAA || useSMAA || useColor;  // 任一启用就需要 LDR 中间纹理
+    // HDR 与 LDR 后处理互斥：FXAA/SMAA/ColorGrading/CameraEffects 都是 BGRA8 LDR 空间，
+    // 与 A2B10G10R10 后备缓冲格式不匹配，HDR 下强制关闭（TAA 在 HDR 空间，不受影响）
+    if (isHDR) {
+        useFXAA = useSMAA = useColor = useFX = false;
+    }
+    bool needLDR  = useFXAA || useSMAA || useColor || useFX;  // 任一 LDR 后处理启用就需要 LDR 中间纹理
 
     // ToneMap Pass（HDR → LDR，输出到 LDR 或 BackBuffer）
     rg.AddPass("ToneMap",
