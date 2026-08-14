@@ -25,6 +25,7 @@
 #include "Scene/SphereComponent.h"
 #include "Scene/Transform.h"
 #include "Scene/SkyboxComponent.h"
+#include "Scene/PhysicalSkyComponent.h"
 #include "Scene/ParticleComponent.h"
 #include "Editor/ImGuiIntegration.h"
 #include "Asset/BindlessTextureManager.h"
@@ -50,6 +51,8 @@ using namespace he;
 // ============================================================
 // 渲染管线模式 CVar（0=Forward, 1=Deferred, 2=HybridRT, 3=PathTrace）
 he::CVar<int> cvPipelineMode("r.Pipeline.Mode", 3, "渲染管线模式 0=Forward 1=Deferred 2=HybridRT 3=PathTrace");
+// 物理天空开关（1=用 Preetham 物理天空替代 Cubemap 天空盒；需 Forward 模式 r.Pipeline.Mode 0 才可见）
+he::CVar<int> cvPhysicalSkyEnable("r.PhysicalSky.Enable", 1, "1=使用 Preetham 物理天空（替代 Cubemap 天空盒）");
 
 // ============================================================
 // 相机配置读写（简易 key=value 格式）
@@ -274,6 +277,20 @@ int main() {
             sc->SetCubemap(std::move(cm), std::move(cs));
             sceneGraph.SetParent(e, Entity{kInvalidEntity});
         }
+    }
+
+    // --- 物理天空（Preetham 解析模型，可选，替代 Cubemap 天空盒）---
+    // 需 r.PhysicalSky.Enable 1 + Forward 模式（r.Pipeline.Mode 0）才可见
+    if (cvPhysicalSkyEnable.Get() == 1) {
+        Entity pe = world.CreateEntity("PhysicalSky");
+        world.AddComponent<TransformComponent>(pe);
+        auto* ps = world.AddComponent<PhysicalSkyComponent>(pe);
+        ps->sunDirection = float3(0.4f, 0.6f, 0.2f);  // 太阳方向（OnCreate 会归一化）
+        ps->turbidity    = 4.0f;   // 大气浑浊度（1=极清，5=霾，10=浓霾）
+        ps->groundAlbedo = 0.1f;   // 地面反照率
+        ps->intensity    = 1.0f;   // 天空整体亮度倍率
+        ps->sunIntensity = 1.0f;   // 太阳盘亮度倍率
+        sceneGraph.SetParent(pe, Entity{kInvalidEntity});
     }
 
     HE_CORE_INFO("Scene created: {} entities", world.GetEntityCount());
