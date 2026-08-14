@@ -95,12 +95,17 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
     linearRGB.g = -0.9689 * X + 1.8758 * Y + 0.0415 * Z;
     linearRGB.b =  0.0557 * X - 0.2040 * Y + 1.0570 * Z;
 
-    linearRGB *= intensity;
+    // 增强蓝天饱和度（sRGB 编码会压缩色度，这里预补偿让天空更蓝）
+    linearRGB.r *= 0.65;
+    linearRGB.b *= 1.35;
 
-    // ── 太阳盘：视线接近太阳方向时叠加（~2° 视直径）──
+    // Preetham 输出是天顶亮度量级（Yz ~ 40 kcd/m²），除以归一化常数映射到 SDR 合理范围，避免天空全白
+    linearRGB *= intensity * (1.0 / 200.0);
+
+    // ── 太阳盘：视线接近太阳方向时叠加（~5° 视直径）──
     float sunDot  = dot(dir, sun);
-    float sunDisc = smoothstep(0.99935, 0.99990, sunDot);
-    linearRGB += float3(1.0, 0.95, 0.85) * sunDisc * sunIntensity * 2.0;
+    float sunDisc = smoothstep(0.9975, 0.9990, sunDot);
+    linearRGB += float3(1.0, 0.95, 0.85) * sunDisc * sunIntensity * 3.0;
 
     return float4(linearRGB, 1.0);
 }
