@@ -392,6 +392,21 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 w, h);
         });
 
+    // ── Skybox Pass（背景天空盒/物理天空，Lighting 之后合成，depth=Equal 只画无几何处）──
+    // 用 LoadOp=Load 保留 Lighting 结果，仅覆盖背景（GBuffer depth == 1.0）
+    rg.AddPass("Skybox",
+        {{gbDepth, ResourceAccess::Read}, {hdrC, ResourceAccess::Read}},
+        {{hdrC, ResourceAccess::Write}},
+        [&, w, h](rhi::IRHICommandList* c) {
+            SubsystemContext sctx; sctx.world = &world; sctx.camera = &camera;
+            m_PostProcess.GetSkybox()->Update(sctx);
+            m_PostProcess.GetSkybox()->PreBind(c);
+            c->BeginOffscreenPass(m_Lighting.GetHDRTarget()->GetNativeHandle(),
+                                  m_GBuffer->GetDepth()->GetNativeHandle(), w, h, nullptr, false);
+            m_PostProcess.GetSkybox()->Render(c);
+            c->EndOffscreenPass();
+        });
+
     // ── DDGI 前帧 HDR 捕获（将当前 Lighting 输出拷贝到 DDGI，供下帧探针采样真实辐射度）──
     rg.AddPass("DDGI_CaptureHDR",
         {{hdrC, ResourceAccess::Read}},  // 读 HDR 作为拷贝源

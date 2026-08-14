@@ -83,6 +83,8 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     }
     try { m_RSM = std::make_unique<GI_RSM>(); m_RSM->Initialize(device, 0, 0); } catch (...) { m_RSM.reset(); }
     m_PostProcess.Initialize(device, m_Width, m_Height);  // ToneMap/Skybox/TAA/LDR 纹理
+    // 延迟管线：SkyboxPass 用 LoadOp=Load 叠加到 Lighting 结果（背景天空盒，depth=Equal 只画无几何处）
+    m_PostProcess.GetSkybox()->SetColorLoadOp(rhi::LoadOp::Load);
     m_SceneRenderer = std::make_unique<SceneRenderer>();
     m_GPUCulling.Initialize(device);
     if (m_GPUCulling.usePTG) {

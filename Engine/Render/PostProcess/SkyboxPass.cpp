@@ -17,6 +17,7 @@ bool SkyboxPass::Initialize(rhi::IRHIDevice* device,u32,u32){
 
     m_VS.stage=rhi::ShaderStage::Vertex;m_VS.spirv=k_Skybox_vert_spv;m_VS.entryPoint="main";
     m_FS.stage=rhi::ShaderStage::Pixel;m_FS.spirv=k_Skybox_frag_spv;m_FS.entryPoint="main";
+    m_PS_FS.stage=rhi::ShaderStage::Pixel;m_PS_FS.spirv=k_PhysicalSky_frag_spv;m_PS_FS.entryPoint="main";
 
     rhi::DescriptorSetLayoutDesc layout;layout.bindings={
         {10,rhi::DescriptorType::CombinedImageSampler,1,16},
@@ -24,31 +25,50 @@ bool SkyboxPass::Initialize(rhi::IRHIDevice* device,u32,u32){
     m_DescLayout=device->CreateDescriptorSetLayout(layout);
     m_DescSet=device->AllocateDescriptorSet(m_DescLayout);
 
+    CreatePSOs();
+
+    m_Ready=true;HE_CORE_INFO("SkyboxPass init");return true;
+}
+
+void SkyboxPass::CreatePSOs(){
+    // Cubemap 天空盒 PSO
     rhi::PushConstantRange pcr;pcr.stageMask=rhi::kStageMaskVertex|rhi::kStageMaskFragment;pcr.offset=0;pcr.size=96;
     rhi::PipelineStateDesc d;d.vertexShader=&m_VS;d.pixelShader=&m_FS;
     d.topology=rhi::PrimitiveTopology::TriangleList;
     d.depthTest=true;d.depthWrite=false;d.depthCompare=rhi::CompareFunc::Equal;
     d.depthFormat=rhi::Format::D32_FLOAT;
     d.colorAttachmentCount=1;d.colorFormats[0]=rhi::Format::RGBA16_FLOAT;
+    d.colorLoadOp=m_ColorLoadOp;
+    d.depthLoadOp=rhi::LoadOp::Load;  // 保留深度（Deferred 用独立 render pass，depth=Equal 需读 GBuffer 深度）
     d.pushConstantRanges={pcr};d.descriptorSetLayouts={m_DescLayout};d.debugName="Skybox";
-    m_PSO=device->CreatePipelineState(d);
+    m_PSO=m_Device->CreatePipelineState(d);
     HE_ASSERT(m_PSO,"SkyboxPass: PSO failed");
 
-    // 物理天空 PSO：解析 Preetham 模型，无纹理采样（复用 Skybox.vert 的 m_VS，空描述符集）
-    m_PS_FS.stage=rhi::ShaderStage::Pixel;m_PS_FS.spirv=k_PhysicalSky_frag_spv;m_PS_FS.entryPoint="main";
-    {
-        rhi::PipelineStateDesc d2;d2.vertexShader=&m_VS;d2.pixelShader=&m_PS_FS;
-        d2.topology=rhi::PrimitiveTopology::TriangleList;
-        d2.depthTest=true;d2.depthWrite=false;d2.depthCompare=rhi::CompareFunc::Equal;
-        d2.depthFormat=rhi::Format::D32_FLOAT;
-        d2.colorAttachmentCount=1;d2.colorFormats[0]=rhi::Format::RGBA16_FLOAT;
-        rhi::PushConstantRange pcr2;pcr2.stageMask=rhi::kStageMaskVertex|rhi::kStageMaskFragment;pcr2.offset=0;pcr2.size=112;
-        d2.pushConstantRanges={pcr2};d2.descriptorSetLayouts={m_DescLayout};d2.debugName="PhysicalSky";
-        m_PS_PSO=device->CreatePipelineState(d2);
-        HE_ASSERT(m_PS_PSO,"SkyboxPass: PhysicalSky PSO failed");
-    }
+    // 物理天空 PSO（Preetham 解析模型）
+    // push constant 布局：invVP(64) + intensity(4) + pad(12) + sunDir(12) + turbidity/groundAlbedo/sunIntensity/pad(16) = 108，alignas(16) 对齐到 112
+    rhi::PushConstantRange pcr2;pcr2.stageMask=rhi::kStageMaskVertex|rhi::kStageMaskFragment;pcr2.offset=0;pcr2.size=112;
+    rhi::PipelineStateDesc d2;d2.vertexShader=&m_VS;d2.pixelShader=&m_PS_FS;
+    d2.topology=rhi::PrimitiveTopology::TriangleList;
+    d2.depthTest=true;d2.depthWrite=false;d2.depthCompare=rhi::CompareFunc::Equal;
+    d2.depthFormat=rhi::Format::D32_FLOAT;
+    d2.colorAttachmentCount=1;d2.colorFormats[0]=rhi::Format::RGBA16_FLOAT;
+    d2.colorLoadOp=m_ColorLoadOp;
+    d2.depthLoadOp=rhi::LoadOp::Load;  // 保留深度
+    d2.pushConstantRanges={pcr2};d2.descriptorSetLayouts={m_DescLayout};d2.debugName="PhysicalSky";
+    m_PS_PSO=m_Device->CreatePipelineState(d2);
+    HE_ASSERT(m_PS_PSO,"SkyboxPass: PhysicalSky PSO failed");
+}
 
-    m_Ready=true;HE_CORE_INFO("SkyboxPass init");return true;
+void SkyboxPass::SetColorLoadOp(rhi::LoadOp op){
+    if(op==m_ColorLoadOp)return;
+    m_ColorLoadOp=op;
+    if(m_Ready)CreatePSOs();
+}
+
+void SkyboxPass::PreBind(rhi::IRHICommandList* cmd) const {
+    if(!m_Ready)return;
+    // 物理天空优先于 Cubemap
+    cmd->SetPipeline(m_CachedPhysSky ? m_PS_PSO.get() : m_PSO.get());
 }
 
 void SkyboxPass::Shutdown(){
