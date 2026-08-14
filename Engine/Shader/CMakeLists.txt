@@ -74,6 +74,8 @@ if(SLANGC)
         "${SHADER_DIR}/DOF_Composite.frag.slang"
         "${SHADER_DIR}/MotionBlur.frag.slang"
         "${SHADER_DIR}/ColorGrading.frag.slang"
+        "${SHADER_DIR}/CameraEffects.frag.slang"
+        "${SHADER_DIR}/PhysicalSky.frag.slang"
         "${SHADER_DIR}/SMAA_EdgeDetect.frag.slang"
         "${SHADER_DIR}/SMAA_BlendWeight.frag.slang"
         "${SHADER_DIR}/SMAA_Neighborhood.frag.slang"

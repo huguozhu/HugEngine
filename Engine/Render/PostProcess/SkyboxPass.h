@@ -5,7 +5,7 @@
 #include "RHI/Shader.h"
 #include <memory>
 
-namespace he { class World; class SkyboxComponent; }
+namespace he { class World; class SkyboxComponent; class PhysicalSkyComponent; }
 
 namespace he::render {
 
@@ -37,7 +37,12 @@ private:
     rhi::DescriptorSetLayoutHandle m_DescLayout=rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_DescSet=rhi::kInvalidSet;
 
+    // 物理天空（Preetham 解析模型，优先级高于 Cubemap）
+    rhi::ShaderBytecode m_PS_FS;
+    std::unique_ptr<rhi::IRHIPipelineState> m_PS_PSO;
+
     const he::SkyboxComponent* m_CachedSkybox=nullptr;
+    const he::PhysicalSkyComponent* m_CachedPhysSky=nullptr;
     CameraData m_CachedCamera{};
     bool m_HasCamera=false;
     bool m_Ready=false;

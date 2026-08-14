@@ -116,6 +116,7 @@ static VkFormat ToVkFormat(Format fmt) {
     switch (fmt) {
     case Format::RGBA8_UNORM:  return VK_FORMAT_R8G8B8A8_UNORM;
     case Format::BGRA8_UNORM:  return VK_FORMAT_B8G8R8A8_UNORM;
+    case Format::A2B10G10R10_UNORM_PACK32: return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
     case Format::RGBA16_FLOAT: return VK_FORMAT_R16G16B16A16_SFLOAT;
     case Format::RG16_FLOAT:   return VK_FORMAT_R16G16_SFLOAT;
     case Format::R16_FLOAT:    return VK_FORMAT_R16_SFLOAT;

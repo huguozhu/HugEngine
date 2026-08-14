@@ -15,6 +15,7 @@ VulkanSwapChain::VulkanSwapChain(VkDevice device, VkPhysicalDevice physical,
     : m_Device(device), m_Physical(physical), m_Surface(surface)
     , m_PresentQueue(presentQueue)
     , m_Width(desc.width), m_Height(desc.height)
+    , m_HDR(desc.hdr)
 {
     CreateSwapchain();
     HE_CORE_INFO("Vulkan swapchain created: {}x{}", m_Width, m_Height);
@@ -34,12 +35,22 @@ void VulkanSwapChain::CreateSwapchain() {
     std::vector<VkSurfaceFormatKHR> formats(formatCount);
     vkGetPhysicalDeviceSurfaceFormatsKHR(m_Physical, m_Surface, &formatCount, formats.data());
 
-    // 优先选择 BGRA8 UNORM，否则使用第一个格式
+    // 优先选择格式：HDR10（A2B10G10R10 + ST.2084）否则 BGRA8 sRGB
     m_Format = VK_FORMAT_B8G8R8A8_UNORM;
+    m_ColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    if (m_HDR) {
+        for (auto& f : formats) {
+            if (f.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32
+                && f.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT) {
+                m_Format = f.format; m_ColorSpace = f.colorSpace; break;
+            }
+        }
+    }
+    // 未命中 HDR10 时回退 SDR
     for (auto& f : formats) {
-        if (f.format == VK_FORMAT_B8G8R8A8_UNORM && f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
-            m_Format = f.format;
-            break;
+        if (f.format == VK_FORMAT_B8G8R8A8_UNORM && f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
+            && m_Format == VK_FORMAT_B8G8R8A8_UNORM) {
+            m_Format = f.format; m_ColorSpace = f.colorSpace; break;
         }
     }
 
@@ -70,7 +81,7 @@ void VulkanSwapChain::CreateSwapchain() {
     swapInfo.surface = m_Surface;
     swapInfo.minImageCount = m_ImageCount;
     swapInfo.imageFormat = m_Format;
-    swapInfo.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    swapInfo.imageColorSpace = m_ColorSpace;
     swapInfo.imageExtent = {m_Width, m_Height};
     swapInfo.imageArrayLayers = 1;
     swapInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT

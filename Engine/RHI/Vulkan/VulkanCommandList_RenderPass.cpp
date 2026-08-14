@@ -34,7 +34,7 @@ void VulkanCommandList::BeginRenderPass(u32 colorCount, Format, Format depthForm
         if (m_LoadRenderPass == VK_NULL_HANDLE) {
             // 懒创建 LOAD 版本 RenderPass（保留 BackBuffer 内容 + 深度匹配 PSO RP 的 finalLayout）
             VkAttachmentDescription att[2]{};
-            att[0].format = VK_FORMAT_B8G8R8A8_UNORM; // SwapChain 格式
+            att[0].format = m_pSwapChain ? m_pSwapChain->GetVkFormat() : VK_FORMAT_B8G8R8A8_UNORM; // SwapChain 实际格式
             att[0].samples = VK_SAMPLE_COUNT_1_BIT;
             att[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;  // 保留 BackBuffer 内容
             att[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;

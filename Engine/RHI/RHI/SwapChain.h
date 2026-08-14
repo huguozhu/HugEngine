@@ -14,6 +14,7 @@ struct SwapChainDesc {
     u32     bufferCount     = kSwapchainImageCount;  // Double/Triple buffering
     Format  format          = Format::RGBA8_UNORM;
     bool    vsync           = true;
+    bool    hdr             = false;   // HDR10 输出（A2B10G10R10 + ST.2084）
 };
 
 class IRHISwapChain {
@@ -34,6 +35,8 @@ public:
     virtual void* GetDepthBufferView()       const = 0;
     // 后端像素格式（VkFormat / DXGI_FORMAT），供 ImGui 等后端代码查询
     virtual u32  GetBackendFormat()    const = 0;
+    // RHI 颜色格式（供 ToneMap 等查询实际交换链格式，HDR 时为 A2B10G10R10）
+    virtual Format GetColorFormat() const = 0;
 };
 
 } // namespace he::rhi

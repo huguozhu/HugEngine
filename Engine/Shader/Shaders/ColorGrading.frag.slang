@@ -27,9 +27,17 @@ struct VSOutput {
 
 float Luminance(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 
-// 简单 sRGB→Linear（近似）
-float3 SRGBToLinear(float3 c) { return c * c; }
-float3 LinearToSRGB(float3 c) { return sqrt(c); }
+// 标准分段 sRGB 传递函数（与 common.slang 保持一致）
+float3 SRGBToLinear(float3 c) {
+    float3 lo = c / 12.92;
+    float3 hi = pow((max(c, 0.0) + 0.055) / 1.055, float3(2.4));
+    return c <= 0.04045 ? lo : hi;
+}
+float3 LinearToSRGB(float3 c) {
+    float3 lo = c * 12.92;
+    float3 hi = 1.055 * pow(max(c, 0.0), float3(1.0 / 2.4)) - 0.055;
+    return c <= 0.0031308 ? lo : hi;
+}
 
 float4 fragmentMain(VSOutput input) : SV_Target0 {
     float4 color = u_Input.Sample(u_Sampler, input.uv);

@@ -11,6 +11,7 @@
 #include "Scene/SphereComponent.h"
 #include "Scene/LightComponent.h"
 #include "Scene/SkyboxComponent.h"
+#include "Scene/PhysicalSkyComponent.h"
 #include "Scene/CameraComponent.h"
 #include "Scene/AnimationComponent.h"
 #include "Scene/LevelComponent.h"
@@ -52,6 +53,9 @@ HE_BEGIN_REGISTER(he::SpotLight)
 HE_END_REGISTER()
 
 HE_BEGIN_REGISTER(he::SkyboxComponent)
+HE_END_REGISTER()
+
+HE_BEGIN_REGISTER(he::PhysicalSkyComponent)
 HE_END_REGISTER()
 
 HE_BEGIN_REGISTER(he::CameraComponent)

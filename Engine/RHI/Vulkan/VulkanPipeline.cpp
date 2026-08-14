@@ -181,7 +181,8 @@ static bool BuildGraphicsPipelineParts(VkDevice device, const PipelineStateDesc&
             ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
             : VK_IMAGE_LAYOUT_UNDEFINED;
         out.attachments[c].finalLayout   = (desc.colorFormats[c] == Format::BGRA8_UNORM ||
-                                             desc.colorFormats[c] == Format::BGRA8_SRGB)
+                                             desc.colorFormats[c] == Format::BGRA8_SRGB  ||
+                                             desc.colorFormats[c] == Format::A2B10G10R10_UNORM_PACK32)
                                             ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
                                             : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         out.colorRefs[c].attachment = c;
@@ -499,7 +500,8 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
                 ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
                 : VK_IMAGE_LAYOUT_UNDEFINED;
             colorAttachments[c].finalLayout   = (desc.colorFormats[c] == Format::BGRA8_UNORM ||
-                                                 desc.colorFormats[c] == Format::BGRA8_SRGB)
+                                                 desc.colorFormats[c] == Format::BGRA8_SRGB  ||
+                                                 desc.colorFormats[c] == Format::A2B10G10R10_UNORM_PACK32)
                                                 ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
                                                 : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             colorRefs[c].attachment = c;

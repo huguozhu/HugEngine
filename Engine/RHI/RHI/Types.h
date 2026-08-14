@@ -118,6 +118,9 @@ enum class Format : u32 {
 
     R11G11B10_FLOAT,
 
+    // HDR10（10-bit RGB + 2-bit alpha）
+    A2B10G10R10_UNORM_PACK32,
+
     // Depth / Stencil
     D16_UNORM,
     D32_FLOAT,

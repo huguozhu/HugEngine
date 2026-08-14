@@ -33,6 +33,7 @@ VkFormat ToVkFormat(Format fmt) {
         case Format::RGBA32_FLOAT:   return VK_FORMAT_R32G32B32A32_SFLOAT;
         // 特殊
         case Format::R11G11B10_FLOAT: return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
+        case Format::A2B10G10R10_UNORM_PACK32: return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
         // 深度/模板
         case Format::D16_UNORM:           return VK_FORMAT_D16_UNORM;
         case Format::D32_FLOAT:           return VK_FORMAT_D32_SFLOAT;

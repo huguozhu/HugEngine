@@ -32,6 +32,9 @@ public:
 
     VkSwapchainKHR GetHandle()                const { return m_Swapchain; }
     VkFormat       GetVkFormat()              const { return m_Format; }
+    Format         GetColorFormat()           const override {
+        return m_Format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 ? Format::A2B10G10R10_UNORM_PACK32 : Format::BGRA8_UNORM;
+    }
     u32            GetBackendFormat()         const override { return static_cast<u32>(m_Format); }
     VkImageView    GetImageView(u32 i)        const { return m_ImageViews[i]; }
     VkImageView    GetDepthImageView()        const { return m_DepthImageView; }
@@ -53,6 +56,8 @@ private:
 
     VkSwapchainKHR   m_Swapchain     = VK_NULL_HANDLE;
     VkFormat         m_Format        = VK_FORMAT_B8G8R8A8_UNORM;
+    VkColorSpaceKHR  m_ColorSpace    = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    bool             m_HDR           = false;
     u32              m_Width         = 0;
     u32              m_Height        = 0;
     u32              m_ImageCount    = 0;

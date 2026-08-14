@@ -140,7 +140,8 @@ static u32 GetFormatByteSize(Format fmt) {
         case Format::R8_UNORM:       case Format::R8_SRGB:        return 1;
         case Format::RG8_UNORM:      case Format::RG8_SRGB:       return 2;
         case Format::RGBA8_UNORM:    case Format::RGBA8_SRGB:
-        case Format::BGRA8_UNORM:    case Format::BGRA8_SRGB:      return 4;
+        case Format::BGRA8_UNORM:    case Format::BGRA8_SRGB:
+        case Format::A2B10G10R10_UNORM_PACK32:                     return 4;
         case Format::R16_FLOAT:                                    return 2;
         case Format::RG16_FLOAT:                                   return 4;
         case Format::RGBA16_FLOAT:                                 return 8;

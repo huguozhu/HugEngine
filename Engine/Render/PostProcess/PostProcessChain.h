@@ -5,6 +5,7 @@
 #include "PostProcess/MotionBlurPass.h"
 #include "PostProcess/AutoExposurePass.h"
 #include "PostProcess/ColorGradingPass.h"
+#include "PostProcess/CameraEffectsPass.h"
 #include "PostProcess/ToneMapPass.h"
 #include "PostProcess/SkyboxPass.h"
 #include "AntiAliasing/AntiAliasing.h"
@@ -43,6 +44,7 @@ public:
     MotionBlurPass&   GetMotionBlur()   { return m_MotionBlur; }
     AutoExposurePass& GetAutoExposure() { return m_AutoExposure; }
     ColorGradingPass& GetColorGrading() { return m_ColorGrading; }
+    CameraEffectsPass& GetCameraEffects() { return m_CameraEffects; }
     ToneMapPass*      GetToneMap()      { return m_ToneMap.get(); }
     SkyboxPass*       GetSkybox()       { return m_Skybox.get(); }
     IAntiAliasing*    GetTAA()          { return m_TAA.get(); }
@@ -72,6 +74,7 @@ private:
     MotionBlurPass   m_MotionBlur;
     AutoExposurePass m_AutoExposure;
     ColorGradingPass m_ColorGrading;
+    CameraEffectsPass m_CameraEffects;
     std::unique_ptr<ToneMapPass>  m_ToneMap;
     std::unique_ptr<SkyboxPass>   m_Skybox;
     std::unique_ptr<IAntiAliasing> m_TAA;

@@ -125,6 +125,8 @@ set(RENDER_SOURCES
     PostProcess/AutoExposurePass.cpp
     PostProcess/ColorGradingPass.h
     PostProcess/ColorGradingPass.cpp
+    PostProcess/CameraEffectsPass.h
+    PostProcess/CameraEffectsPass.cpp
     PostProcess/PostProcessChain.h
     PostProcess/PostProcessChain.cpp
     # Profiler

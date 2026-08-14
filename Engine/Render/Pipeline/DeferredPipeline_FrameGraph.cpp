@@ -36,6 +36,10 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                                         he::SceneGraph& sg, const CameraData& camera) {
     if (m_SwapChain) rg.SetSwapChain(m_SwapChain);
     u32 w = m_Width, h = m_Height;
+    // 交换链颜色格式（SDR=BGRA8，HDR=A2B10G10R10），同步到 ToneMap 输出格式与 HDR 开关
+    rhi::Format swapFmt = m_SwapChain ? m_SwapChain->GetColorFormat() : rhi::Format::BGRA8_UNORM;
+    m_PostProcess.GetToneMap()->SetOutputFormat(swapFmt);
+    m_PostProcess.GetToneMap()->SetHDREnabled(swapFmt == rhi::Format::A2B10G10R10_UNORM_PACK32);
     // 从 GBufferRenderer 导入所有 GBuffer 纹理
     auto gb = m_GBuffer->ImportToRenderGraph(rg);
     auto gbA = gb.albedo; auto gbB = gb.normal; auto gbC = gb.emissive;
@@ -545,6 +549,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     bool useFXAA  = IsFXAAEnabled();
     bool useSMAA  = IsSMAAEnabled();                                             // SMAA 互斥选项
     bool useColor = m_PostProcess.GetColorGrading().IsEnabled() && m_PostProcess.GetColorGrading().GetOutput() != nullptr;
+    bool useFX    = m_PostProcess.GetCameraEffects().IsEnabled() && m_PostProcess.GetCameraEffects().GetOutput() != nullptr;
     bool useTAA   = (m_PostProcess.GetTAA() && m_PostProcess.GetTAA()->IsEnabled());
     bool needLDR  = useFXAA || useSMAA || useColor;  // 任一启用就需要 LDR 中间纹理
 
@@ -552,7 +557,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     rg.AddPass("ToneMap",
         {},
         {{needLDR ? ldrTarget : backBuf, ResourceAccess::Write}},
-        [this, &camera, useTAA, needLDR, w, h, anyPostActive](rhi::IRHICommandList* c) {
+        [this, &camera, useTAA, needLDR, w, h, anyPostActive, swapFmt](rhi::IRHICommandList* c) {
             if (useTAA) {
                 m_PostProcess.GetToneMap()->SetInput(m_PostProcess.GetTAA()->GetOutputTexture(),
                                     m_PostProcess.GetTAA()->GetOutputSampler());
@@ -581,7 +586,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 m_PostProcess.GetToneMap()->Render(c);
                 c->EndOffscreenPass();
             } else {
-                c->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
+                c->BeginRenderPass(1, swapFmt);
                 m_PostProcess.GetToneMap()->Render(c);
                 c->EndRenderPass();
             }
@@ -605,15 +610,39 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             });
     }
 
+    // CameraEffects Pass（LDR 镜头后处理，ColorGrading 之后、AA 之前）
+    if (useFX) {
+        auto fxOut = rg.ImportTexture("FX_Out", m_PostProcess.GetCameraEffects().GetOutput());
+        rg.AddPass("CameraEffects",
+            {{ldrTarget, ResourceAccess::Read}},
+            {{fxOut, ResourceAccess::Write}},
+            [this, useColor, w, h](rhi::IRHICommandList* c) {
+                auto* fxIn = useColor ? m_PostProcess.GetColorGrading().GetOutput() : m_PostProcess.GetLDRTarget();
+                auto* fxSp = useColor ? m_PostProcess.GetColorGrading().GetOutputSampler() : m_PostProcess.GetLDRSampler();
+                m_PostProcess.GetCameraEffects().SetInput(fxIn, fxSp);
+                c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput, rhi::PipelineStage::FragmentShader,
+                    rhi::ResourceState::RenderTarget, rhi::ResourceState::ShaderResource, fxIn);
+                m_PostProcess.GetCameraEffects().PreBind(c);
+                rhi::ClearValue clr{};
+                c->BeginOffscreenPass(m_PostProcess.GetCameraEffects().GetOutput()->GetNativeHandle(), nullptr, w, h, &clr, false);
+                m_PostProcess.GetCameraEffects().Render(c);
+                c->EndOffscreenPass();
+            });
+    }
+
     // SMAA Pass（LDR 空间形态学抗锯齿，ColorGrading 之后、直接写 BackBuffer）
     // 与 FXAA 互斥：SMAA 启用时跳过后面的 FXAA Pass
     if (useSMAA) {
-        auto* smaaInput = useColor ? m_PostProcess.GetColorGrading().GetOutput() : m_PostProcess.GetLDRTarget();
-        auto* smaaSamp  = useColor ? m_PostProcess.GetColorGrading().GetOutputSampler() : m_PostProcess.GetLDRSampler();
+        auto* smaaInput = useFX    ? m_PostProcess.GetCameraEffects().GetOutput()
+                        : useColor ? m_PostProcess.GetColorGrading().GetOutput()
+                        :           m_PostProcess.GetLDRTarget();
+        auto* smaaSamp  = useFX    ? m_PostProcess.GetCameraEffects().GetOutputSampler()
+                        : useColor ? m_PostProcess.GetColorGrading().GetOutputSampler()
+                        :           m_PostProcess.GetLDRSampler();
         rg.AddPass("SMAA",
             {{ldrTarget, ResourceAccess::Read}},
             {{backBuf, ResourceAccess::Write}},
-            [this, smaaInput, smaaSamp](rhi::IRHICommandList* c) {
+            [this, smaaInput, smaaSamp, swapFmt](rhi::IRHICommandList* c) {
                 m_PostProcess.GetSMAA()->SetInput(smaaInput, smaaSamp);
                 // Barrier: 输入纹理 RT → SRV（供 SMAA Pass 1 采样）
                 c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput,
@@ -623,25 +652,29 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 // Pass 1+2（离屏渲染：边缘检测 + 混合权重）
                 m_PostProcess.GetSMAA()->Render(c);
                 // Pass 3（邻域混合 → BackBuffer）
-                c->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
+                c->BeginRenderPass(1, swapFmt);
                 m_PostProcess.GetSMAA()->RenderFinalPass(c);
                 c->EndRenderPass();
             });
     }
     // FXAA Pass（LDR 空间后处理抗锯齿，仅 SMAA 未启用时执行）
     else if (useFXAA) {
-        auto* fxaaInput = useColor ? m_PostProcess.GetColorGrading().GetOutput() : m_PostProcess.GetLDRTarget();
-        auto* fxaaSamp  = useColor ? m_PostProcess.GetColorGrading().GetOutputSampler() : m_PostProcess.GetLDRSampler();
+        auto* fxaaInput = useFX    ? m_PostProcess.GetCameraEffects().GetOutput()
+                        : useColor ? m_PostProcess.GetColorGrading().GetOutput()
+                        :           m_PostProcess.GetLDRTarget();
+        auto* fxaaSamp  = useFX    ? m_PostProcess.GetCameraEffects().GetOutputSampler()
+                        : useColor ? m_PostProcess.GetColorGrading().GetOutputSampler()
+                        :           m_PostProcess.GetLDRSampler();
         rg.AddPass("FXAA",
             {{ldrTarget, ResourceAccess::Read}},
             {{backBuf, ResourceAccess::Write}},
-            [this, fxaaInput, fxaaSamp](rhi::IRHICommandList* c) {
+            [this, fxaaInput, fxaaSamp, swapFmt](rhi::IRHICommandList* c) {
                 m_PostProcess.GetFXAA()->SetInput(fxaaInput, fxaaSamp);
                 c->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput,
                                    rhi::PipelineStage::FragmentShader,
                                    rhi::ResourceState::RenderTarget,
                                    rhi::ResourceState::ShaderResource, fxaaInput);
-                c->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
+                c->BeginRenderPass(1, swapFmt);
                 m_PostProcess.GetFXAA()->Render(c);
                 c->EndRenderPass();
             });

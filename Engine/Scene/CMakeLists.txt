@@ -26,6 +26,8 @@ set(SCENE_SOURCES
     Scene/SphereComponent.cpp
     Scene/LightComponent.cpp
     Scene/SkyboxComponent.cpp
+    Scene/PhysicalSkyComponent.h
+    Scene/PhysicalSkyComponent.cpp
     Scene/AnimationComponent.cpp
     Scene/ParticleComponent.cpp
 )

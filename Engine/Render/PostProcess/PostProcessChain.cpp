@@ -62,6 +62,7 @@ void PostProcessChain::Shutdown() {
     m_MotionBlur.Shutdown();
     m_AutoExposure.Shutdown();
     m_ColorGrading.Shutdown();
+    m_CameraEffects.Shutdown();
     if (m_ToneMap) m_ToneMap->Shutdown();
     if (m_Skybox)  m_Skybox->Shutdown();
     if (m_TAA)     m_TAA->Shutdown();
@@ -107,6 +108,7 @@ void PostProcessChain::OnResize(rhi::IRHIDevice* device, u32 width, u32 height) 
 
     m_Bloom.OnResize(width, height);
     m_AutoExposure.OnResize(width, height);
+    m_CameraEffects.OnResize(width, height);
 }
 
 void PostProcessChain::EnableFXAA(rhi::IRHIDevice* device, u32 w, u32 h, bool enable) {

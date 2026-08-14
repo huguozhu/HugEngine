@@ -36,17 +36,25 @@ public:
     void SetInput(rhi::IRHITexture* hdrTarget, rhi::IRHISampler* sampler) override;
 
     /// ToneMap 输出为 LDR sRGB（BGRA8_UNORM，匹配交换链）
-    [[nodiscard]] rhi::Format GetOutputFormat() const override { return rhi::Format::BGRA8_UNORM; }
+    [[nodiscard]] rhi::Format GetOutputFormat() const override { return m_OutputFormat; }
 
     // ---- ToneMap 特有 ----
 
     /// 设置自动曝光值
     void SetExposure(float e) { m_Exposure = e; }
+    /// 设置输出格式（SDR=BGRA8_UNORM，HDR=A2B10G10R10_UNORM_PACK32），格式变化时重建 PSO
+    void SetOutputFormat(rhi::Format f);
+    /// 设置 HDR 开关（1=PQ 输出，0=sRGB 输出）
+    void SetHDREnabled(bool h) { m_HDR = h ? 1.0f : 0.0f; }
+    /// 设置 HDR 参考白点（尼特）
+    void SetWhitePointNits(float w) { m_WhitePointNits = w; }
     /// 预设 PSO 为下一个 RenderPass 的初始管线
     void PreBind(rhi::IRHICommandList* cmd) { if (m_Ready) cmd->SetPipeline(m_PSO.get()); }
     rhi::IRHIPipelineState* GetPSO() const { return m_PSO.get(); }
 
 private:
+    void RecreatePSO();
+
     rhi::ShaderBytecode m_VS, m_FS;
     std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
     rhi::DescriptorSetLayoutHandle m_DescLayout = rhi::kInvalidLayout;
@@ -54,6 +62,9 @@ private:
     rhi::IRHITexture*  m_HDRTarget  = nullptr;
     rhi::IRHISampler*  m_HDRSampler = nullptr;
     float m_Exposure = 1.0f;
+    rhi::Format m_OutputFormat = rhi::Format::BGRA8_UNORM;
+    float m_HDR = 0.0f;                 // 1=HDR10 PQ，0=SDR sRGB
+    float m_WhitePointNits = 80.0f;     // HDR 参考白点（尼特）
     u32 m_Width = 0, m_Height = 0;
     bool m_Ready = false;
 };

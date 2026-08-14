@@ -19,20 +19,30 @@ bool ToneMapPass::Initialize(rhi::IRHIDevice* device,u32 width,u32 height){
     m_DescLayout=device->CreateDescriptorSetLayout(layout);
     m_DescSet=device->AllocateDescriptorSet(m_DescLayout);
 
-    rhi::PipelineStateDesc d;d.vertexShader=&m_VS;d.pixelShader=&m_FS;
-    d.topology=rhi::PrimitiveTopology::TriangleList;
-    d.depthTest=false;d.depthWrite=false;
-    d.depthFormat=rhi::Format::D32_FLOAT;
-    d.colorAttachmentCount=1;d.colorFormats[0]=rhi::Format::BGRA8_UNORM;
-    rhi::PushConstantRange pcr; pcr.stageMask=rhi::kStageMaskVertex|rhi::kStageMaskFragment; pcr.size=16;  // Vertex|Fragment
-    d.pushConstantRanges={pcr};
-    d.descriptorSetLayouts={m_DescLayout};d.debugName="ToneMap";
-    m_PSO=device->CreatePipelineState(d);
-    HE_ASSERT(m_PSO,"ToneMapPass: PSO failed");
+    RecreatePSO();
 
     m_Ready=true;
     HE_CORE_INFO("ToneMapPass init");
     return true;
+}
+
+void ToneMapPass::RecreatePSO(){
+    rhi::PipelineStateDesc d;d.vertexShader=&m_VS;d.pixelShader=&m_FS;
+    d.topology=rhi::PrimitiveTopology::TriangleList;
+    d.depthTest=false;d.depthWrite=false;
+    d.depthFormat=rhi::Format::D32_FLOAT;
+    d.colorAttachmentCount=1;d.colorFormats[0]=m_OutputFormat;
+    rhi::PushConstantRange pcr; pcr.stageMask=rhi::kStageMaskVertex|rhi::kStageMaskFragment; pcr.size=16;  // Vertex|Fragment
+    d.pushConstantRanges={pcr};
+    d.descriptorSetLayouts={m_DescLayout};d.debugName="ToneMap";
+    m_PSO=m_Device->CreatePipelineState(d);
+    HE_ASSERT(m_PSO,"ToneMapPass: PSO failed");
+}
+
+void ToneMapPass::SetOutputFormat(rhi::Format f){
+    if(f==m_OutputFormat)return;
+    m_OutputFormat=f;
+    if(m_Ready)RecreatePSO();
 }
 
 void ToneMapPass::Shutdown(){
@@ -54,8 +64,10 @@ void ToneMapPass::Render(rhi::IRHICommandList* cmd){
     cmd->SetViewport({0,(float)m_Height,(float)m_Width,-(float)m_Height,0,1});
     cmd->SetScissor({0,0,m_Width,m_Height});
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_DescSet);
-    struct { float exposure; float _pad[3]; } pc;
+    struct { float exposure; float hdrEnabled; float whitePointNits; float _pad; } pc;
     pc.exposure = m_Exposure;
+    pc.hdrEnabled = m_HDR;
+    pc.whitePointNits = m_WhitePointNits;
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     cmd->Draw(3);
 }
