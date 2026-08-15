@@ -9,6 +9,7 @@
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
 #include "Scene/SkyboxComponent.h"
+#include "Scene/PhysicalSkyComponent.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include "Threading/JobSystem.h"
@@ -33,7 +34,12 @@ namespace he::render {
 void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                                        he::SceneGraph& sg, const CameraData& camera)
 {
+    he::SyncPhysicalSkyToSun(world);  // 物理天空太阳→方向光同步（阴影/光照收集前）
     if (m_SwapChain) rg.SetSwapChain(m_SwapChain);
+    // 交换链颜色格式（SDR=BGRA8，HDR=A2B10G10R10），同步到 ToneMap 输出格式与 HDR 开关
+    rhi::Format swapFmt = m_SwapChain ? m_SwapChain->GetColorFormat() : rhi::Format::BGRA8_UNORM;
+    m_ToneMap->SetOutputFormat(swapFmt);
+    m_ToneMap->SetHDREnabled(swapFmt == rhi::Format::A2B10G10R10_UNORM_PACK32);
     u32 sw = m_SwapChain->GetWidth(), sh = m_SwapChain->GetHeight();
     if (m_ToneMap) m_ToneMap->OnResize(sw, sh);
     if (m_Skybox)  m_Skybox->OnResize(sw, sh);
@@ -210,10 +216,10 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
 
     // --- Pass 4: ToneMap — HDR → LDR 色调映射 ---
     rg.AddPass("ToneMap", {{hdrColor, ResourceAccess::Read}}, {{backBuf, ResourceAccess::Write}},
-        [this](rhi::IRHICommandList* c) {
+        [this, swapFmt](rhi::IRHICommandList* c) {
             m_ToneMap->SetInput(m_HDRTarget.get(), m_HDRSampler.get());
             m_ToneMap->PreBind(c);
-            c->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
+            c->BeginRenderPass(1, swapFmt);
             m_ToneMap->Render(c);
             c->EndRenderPass();
         });

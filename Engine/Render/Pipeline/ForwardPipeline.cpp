@@ -10,6 +10,7 @@
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
 #include "Scene/SkyboxComponent.h"
+#include "Scene/PhysicalSkyComponent.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include "Threading/JobSystem.h"
@@ -480,6 +481,11 @@ void ForwardPipeline::CollectLights(
 {
     pc.lightCount = 0;
 
+    // 空中透视参数：从物理天空组件读取太阳方向 + 浑浊度（无物理天空时保持 0=关闭）
+    float3 atmSunDir = float3(0, 1, 0); float atmTurbidity = 0.0f;
+    he::GetPhysicalSkySun(world, atmSunDir, atmTurbidity);
+    pc.atmosphere = float4(atmSunDir, atmTurbidity);
+
     auto collectLight = [&](he::Entity e, he::LightComponent& lc) {
         if (!lc.enabled) return;
         u32 i = pc.lightCount;
@@ -586,7 +592,7 @@ void ForwardPipeline::EndHDRPass(rhi::IRHICommandList* cmd) {
         rhi::ResourceState::ShaderResource,
         m_HDRTarget.get());
 
-    // 预设 ToneMap PSO 为下一个 RenderPass 的初始管线（匹配 SwapChain BGRA8_UNORM 格式）
+    // 预设 ToneMap PSO 为下一个 RenderPass 的初始管线（匹配 SwapChain 实际颜色格式：SDR=BGRA8，HDR=A2B10G10R10）
     if (m_ToneMap) m_ToneMap->PreBind(cmd);
 }
 
@@ -706,6 +712,11 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
         return;
     }
     // 非 RG 路径：手动渲染阴影
+    // 交换链颜色格式同步（SDR=BGRA8，HDR=A2B10G10R10），非 RG 路径 ToneMap 输出需与后备缓冲一致
+    rhi::Format swapFmt = m_SwapChain ? m_SwapChain->GetColorFormat() : rhi::Format::BGRA8_UNORM;
+    m_ToneMap->SetOutputFormat(swapFmt);
+    m_ToneMap->SetHDREnabled(swapFmt == rhi::Format::A2B10G10R10_UNORM_PACK32);
+    he::SyncPhysicalSkyToSun(world);  // 物理天空太阳→方向光同步（阴影/光照收集前）
     if (m_ShadowSystem && m_ShadowSystem->HasActiveShadows()) {
         u32 slot = m_CurrentFrameSlot;
         // 切换 binding 2 到阴影 Object Buffer（仅更新 set=0 per-frame 集）

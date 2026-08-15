@@ -53,6 +53,7 @@ public:
     void OnCreate() override;
 
     float3 direction = float3(0.5f, -1.0f, 0.5f);  // 世界空间光线方向（归一化）
+    bool   syncWithPhysicalSky = false;   // true=由物理天空太阳同步 direction/illuminance（空中透视与光照自动一致）
 };
 
 // --- 点光源（全向辐射，随距离衰减）---

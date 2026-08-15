@@ -22,7 +22,17 @@ public:
     float  groundAlbedo = 0.1f;   // 地面反照率（0~1，影响天空亮度）
     float  intensity    = 1.0f;   // 天空整体亮度倍率
     float  sunIntensity = 1.0f;   // 太阳盘亮度倍率
+    float  sunIlluminance = 120000.0f; // 太阳照度基准（lux，sunIntensity=1 时同步到方向光 illuminance）
     bool   enabled      = true;   // 是否渲染
 };
+
+class World;
+
+// 将物理天空太阳同步到标记了 syncWithPhysicalSky 的方向光（方向 + 照度）
+// 由各渲染管线帧入口在阴影/光照收集前调用（幂等，可每帧调用）
+void SyncPhysicalSkyToSun(World& world);
+
+// 查询第一个启用中的物理天空，返回太阳方向（指向太阳）与浑浊度；无则返回 false
+bool GetPhysicalSkySun(World& world, float3& sunDirection, float& turbidity);
 
 } // namespace he

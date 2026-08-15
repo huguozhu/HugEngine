@@ -53,6 +53,8 @@ using namespace he;
 he::CVar<int> cvPipelineMode("r.Pipeline.Mode", 3, "渲染管线模式 0=Forward 1=Deferred 2=HybridRT 3=PathTrace");
 // 物理天空开关（1=用 Preetham 物理天空替代 Cubemap 天空盒；需 Forward 模式 r.Pipeline.Mode 0 才可见）
 he::CVar<int> cvPhysicalSkyEnable("r.PhysicalSky.Enable", 1, "1=使用 Preetham 物理天空（替代 Cubemap 天空盒）");
+// HDR 输出开关（1=SwapChain 请求 A2B10G10R10 + HDR10 ST.2084；需 HDR10 显示器/扩展支持，否则自动回退 SDR）
+he::CVar<int> cvHDR("r.HDR.Enable", 0, "1=启用 HDR10 输出（需显示器/扩展支持，否则自动回退 SDR）");
 
 // ============================================================
 // 相机配置读写（简易 key=value 格式）
@@ -154,12 +156,17 @@ int main() {
     rhi::SetDevice(device.get());
 
     // --- 3. 创建 SwapChain ---
+    // HDR 开关：开启时 SwapChain 优先选 A2B10G10R10 + HDR10 ST.2084（需显示器/扩展支持，否则自动回退 SDR）
     auto swapchain = device->CreateSwapChain({
         .windowHandle = engine.GetWindow()->GetNativeHandleRaw(),
         .width  = engine.GetWindow()->GetWidth(),
         .height = engine.GetWindow()->GetHeight(),
         .vsync  = true,
+        .hdr    = cvHDR.Get() == 1,
     });
+    // 一次性验证日志：打印交换链实际协商到的颜色格式
+    HE_CORE_INFO("[SwapChain] 颜色格式: {}", swapchain->GetColorFormat() == rhi::Format::A2B10G10R10_UNORM_PACK32
+        ? "A2B10G10R10 (HDR10)" : "BGRA8 (SDR)");
 
     // --- 4. 初始化场景 ---
     World world;
@@ -206,6 +213,7 @@ int main() {
         mainDL->color     = float3(1.0f, 0.95f, 0.85f);
         mainDL->intensity = 5.0f;
         mainDL->castShadow = true;
+        mainDL->syncWithPhysicalSky = true;   // 由物理天空太阳驱动方向与照度
         mainDL->shadowBias = 0.003f;
         sceneGraph.SetParent(mainLightEntity, Entity{kInvalidEntity});
     }
@@ -464,6 +472,9 @@ int main() {
             camCtrl.Update(deltaTime, moveIn);
         }
 
+        // 交换链实际颜色格式（SDR=BGRA8，HDR=A2B10G10R10），主循环开头取一次
+        rhi::Format backFmt = swapchain->GetColorFormat();
+
         // 渲染一帧
         cmdList->Begin();
 
@@ -480,10 +491,11 @@ int main() {
             render::SubsystemContext shadowCtx;
             shadowCtx.world = &world; shadowCtx.sceneGraph = &sceneGraph;
             shadowCtx.camera = &camCtrl.GetCamera();
+            he::SyncPhysicalSkyToSun(world);   // 在阴影烘焙前同步太阳方向，保证阴影/光照同向
             shadowSys->Update(shadowCtx);
 
             forwardPipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
-            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
+            cmdList->BeginRenderPass(1, backFmt);
             forwardPipeline.RenderToneMapPass(cmdList.get());
         }
         // --- Deferred 模式 ---
@@ -491,7 +503,7 @@ int main() {
             deferredPipeline.NextFrame();
             deferredPipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera(), deltaTime);
             // ImGui 叠加：Deferred 已写 BackBuffer，Load 保留内容
-            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
+            cmdList->BeginRenderPass(1, backFmt,
                 rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
         }
         // --- Hybrid RT 模式 ---
@@ -499,7 +511,7 @@ int main() {
             hybridPipeline.NextFrame();
             hybridPipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera(), deltaTime);
             // ImGui 叠加：管线已写 BackBuffer，Load 保留内容
-            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
+            cmdList->BeginRenderPass(1, backFmt,
                 rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
         }
         // --- 全路径追踪模式（Level 2: PT 参考） ---
@@ -507,7 +519,7 @@ int main() {
             pathTracingPipeline.NextFrame();
             pathTracingPipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera(), deltaTime);
             // ImGui 叠加：管线已写 BackBuffer，Load 保留内容
-            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
+            cmdList->BeginRenderPass(1, backFmt,
                 rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
         }
         imgui.BeginFrame();

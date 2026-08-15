@@ -12,6 +12,7 @@
 #include "Scene/SphereComponent.h"
 #include "Scene/LightComponent.h"
 #include "Scene/SkyboxComponent.h"
+#include "Scene/PhysicalSkyComponent.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include <cmath>
@@ -35,6 +36,7 @@ namespace he::render {
 
 void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                                         he::SceneGraph& sg, const CameraData& camera) {
+    he::SyncPhysicalSkyToSun(world);  // 物理天空太阳→方向光同步（阴影/光照收集前）
     if (m_SwapChain) rg.SetSwapChain(m_SwapChain);
     u32 w = m_Width, h = m_Height;
     // 交换链颜色格式（SDR=BGRA8，HDR=A2B10G10R10），同步到 ToneMap 输出格式与 HDR 开关
@@ -354,6 +356,12 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     }
 
     // Lighting Pass (全屏 PBR + 降噪后 SSGI/SSR/DDGI 读取，委托给 LightingPass 共享组件)
+
+    // 空中透视参数：从物理天空组件读取太阳方向 + 浑浊度（无物理天空时保持 0=关闭）
+    float3 atmSunDir = float3(0, 1, 0); float atmTurbidity = 0.0f;
+    he::GetPhysicalSkySun(world, atmSunDir, atmTurbidity);   // 无条件更新，天空移除时复位浑浊度=0（与 Forward 一致）
+    m_Lighting.SetAtmosphere(atmSunDir, atmTurbidity);
+
     rg.AddPass("Lighting",
         {{gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbC, ResourceAccess::Read},
          {gbWorldPos, ResourceAccess::Read},

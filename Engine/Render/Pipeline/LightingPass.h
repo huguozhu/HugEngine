@@ -109,6 +109,9 @@ public:
     void SetIBLTextures(rhi::IRHITexture* irradiance, rhi::IRHITexture* prefilter,
                         rhi::IRHITexture* brdfLut, rhi::IRHISampler* sampler);
 
+    // 设置空中透视参数（太阳方向 + 浑浊度，来自 PhysicalSkyComponent）
+    void SetAtmosphere(float3 sunDir, float turbidity);
+
 private:
     void CreateHDRTextures(rhi::IRHIDevice* device);
     void CreatePSOAndDescriptorSet(rhi::IRHIDevice* device);
@@ -126,6 +129,8 @@ private:
 
     u32 m_Width = 0, m_Height = 0;
     bool m_MSAAEnabled = false;  // 供外部 MSAA 覆盖（Init 前设置）
+    float3 m_AtmSunDir    = float3(0, 1, 0);  // 空中透视太阳方向（默认朝天）
+    float  m_AtmTurbidity = 0.0f;             // 空中透视浑浊度（0=关闭哨兵；物理范围 1~10）
 };
 
 } // namespace he::render

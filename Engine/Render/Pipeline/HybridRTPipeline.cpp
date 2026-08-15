@@ -15,6 +15,7 @@
 #include "Scene/SceneGraph.h"
 #include "Scene/LightComponent.h"
 #include "Scene/MeshComponent.h"
+#include "Scene/PhysicalSkyComponent.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include <glm/gtc/matrix_transform.hpp>
@@ -304,6 +305,7 @@ bool HybridRTPipeline::IsRTGIEnabled() const      { return cvRTGI.Get(); }
 void HybridRTPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
                                he::SceneGraph& sg, const CameraData& camera,
                                float deltaTime) {
+    he::SyncPhysicalSkyToSun(world);  // 物理天空太阳→方向光同步（阴影/光照收集前）
     (void)deltaTime;
 
     if (!m_SwapChain || !m_Device) {
@@ -812,6 +814,11 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     rhi::IRHITexture* lightingReflTex   = rtReflectionDenoisedTex ? rtReflectionDenoisedTex : rtReflectionTex;
     rhi::IRHITexture* lightingGITex     = rtGIDenoisedTex     ? rtGIDenoisedTex     : rtGITex;
 
+    // 空中透视参数：从物理天空组件读取太阳方向 + 浑浊度（无物理天空时保持 0=关闭）
+    float3 atmSunDir = float3(0, 1, 0); float atmTurbidity = 0.0f;
+    he::GetPhysicalSkySun(world, atmSunDir, atmTurbidity);   // 无条件更新，天空移除时复位浑浊度=0（与 Forward 一致）
+    m_Lighting.SetAtmosphere(atmSunDir, atmTurbidity);
+
     rg.AddPass("Lighting",
         std::move(lightingReads),
         {{hdrC, ResourceAccess::Write}},
@@ -859,11 +866,17 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         },
         RGPassQueue::Compute);
 
+    // 交换链颜色格式同步（HDR=A2B10G10R10，SDR=BGRA8）
+    rhi::Format swapFmt = m_SwapChain ? m_SwapChain->GetColorFormat() : rhi::Format::BGRA8_UNORM;
+    m_PostProcess.GetToneMap()->SetOutputFormat(swapFmt);
+    m_PostProcess.GetToneMap()->SetHDREnabled(swapFmt == rhi::Format::A2B10G10R10_UNORM_PACK32);
+    bool isHDR = (swapFmt == rhi::Format::A2B10G10R10_UNORM_PACK32);   // HDR 下禁用 LDR 的 FXAA
+
     // ── 后处理链：Bloom → ToneMap → FXAA（与 DeferredPipeline 一致的 RP 状态管理）──
     bool bloomActive = m_PostProcess.GetBloom().IsEnabled()
                        && m_PostProcess.GetBloom().GetOutput() != nullptr;
     bool useFXAA  = IsFXAAEnabled();
-    bool needLDR  = useFXAA;  // HybridRT 终端 AA 为 FXAA，需要 LDR 中间纹理
+    bool needLDR  = useFXAA && !isHDR;  // HDR 下跳过 LDR 中间纹理（FXAA 关闭，ToneMap 直写交换链）
 
     // Bloom：显式声明对 hdrC 的读取依赖 → RG 自动插入 RenderTarget→ShaderResource
     // 屏障，pass 内不再手动 PipelineBarrier（避免与 RG 屏障重复转换）。
@@ -889,7 +902,7 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         toneMapReads.push_back({hdrC, ResourceAccess::Read});
     rg.AddPass("ToneMap", std::move(toneMapReads),
         {{needLDR ? ldrTarget : backBuf, ResourceAccess::Write}},
-        [&, w, h, needLDR, bloomActive](rhi::IRHICommandList* c) {
+        [&, w, h, needLDR, bloomActive, swapFmt](rhi::IRHICommandList* c) {
             if (bloomActive) {
                 m_PostProcess.GetToneMap()->SetInput(
                     m_PostProcess.GetBloom().GetOutput(),
@@ -910,7 +923,7 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 m_PostProcess.GetToneMap()->Render(c);
                 c->EndOffscreenPass();
             } else {
-                c->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
+                c->BeginRenderPass(1, swapFmt);
                 m_PostProcess.GetToneMap()->Render(c);
                 c->EndRenderPass();
             }
@@ -919,15 +932,15 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     // FXAA: LDR → BackBuffer（先 ToneMap PreBind 保证 RP 兼容，再进入 SwapChain RP）
     // 已声明对 ldrTarget 的读取依赖，RG 自动插入 RenderTarget→ShaderResource 屏障，
     // pass 内不再重复 PipelineBarrier。
-    if (useFXAA) {
+    if (useFXAA && !isHDR) {  // HDR 下禁用 LDR 的 FXAA（与 A2B10G10R10 后备缓冲不兼容）
         rg.AddPass("FXAA", {{ldrTarget, ResourceAccess::Read}}, {{backBuf, ResourceAccess::Write}},
-            [&](rhi::IRHICommandList* c) {
+            [&, swapFmt](rhi::IRHICommandList* c) {
                 m_PostProcess.GetFXAA()->SetInput(
                     m_PostProcess.GetLDRTarget(), m_PostProcess.GetLDRSampler());
                 // 关键：用 ToneMap 的 2 附件 RP 进入 BeginRenderPass，
                 // 确保 SwapChain Framebuffer（BGRA8+D32）与 RP 兼容
                 m_PostProcess.GetToneMap()->PreBind(c);
-                c->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
+                c->BeginRenderPass(1, swapFmt);
                 m_PostProcess.GetFXAA()->Render(c);
                 c->EndRenderPass();
             });

@@ -2,6 +2,7 @@
 // 读取 GBuffer MRT + Shadow/IBL/RSM 纹理，逐光源 PBR + 间接光
 #include "pbr_common.slang"
 #include "RT_DDGI.slang"  // DDGI 探针查询共享库（常量 + EvalDDGI_SH + SampleDDGI）
+#include "Atmosphere.slang"  // 空中透视（大气消光 + 入射散射）
 
 struct VSOutput {
     float4 position          : SV_Position;
@@ -68,6 +69,7 @@ struct LightGridCell { uint offset; uint count; };
     uint     rtAOSource;        // 0=SSAO, 1=RT AO（配合 u_RT_AO）
     uint     rtSpecularSource;  // 0=SSR, 1=RT 反射（配合 u_RT_Reflection）
     uint     rtDiffuseSource;   // 0=SSGI, 1=RT GI（配合 u_RT_GI）
+    float4   atmosphere;        // sunDir.xyz（指向太阳）+ turbidity（空中透视）
 };
 
 // kGPUPrefilterMips / kGPUClusterSlices 统一在 ShaderTypes.slang（kGPU*）
@@ -279,5 +281,8 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
     if (rtRefl.a >= 0.0) color += rtRefl.rgb;
 
     color += gbC.rgb;  // emissive
+
+    // 空中透视：对场景几何应用距离/高度相关大气消光 + 入射散射
+    ApplyAerialPerspective(color, cameraPosition.xyz, worldPos, atmosphere.xyz, atmosphere.w);
     return float4(color, 1.0);
 }

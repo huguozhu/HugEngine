@@ -168,6 +168,7 @@ void LightingPass::Render(rhi::IRHICommandList* cmd,
     lpc.rtAOSource       = rtAO         ? 1u : 0u;
     lpc.rtSpecularSource = rtReflection ? 1u : 0u;
     lpc.rtDiffuseSource  = rtGI         ? 1u : 0u;
+    lpc.atmosphere = float4(m_AtmSunDir, m_AtmTurbidity);  // 空中透视参数（太阳方向 + 浑浊度）
     cmd->SetPushConstants(0, sizeof(lpc), &lpc);
     cmd->Draw(3);
 
@@ -345,6 +346,19 @@ void LightingPass::SetIBLTextures(rhi::IRHITexture* irradiance, rhi::IRHITexture
     m_Device->UpdateDescriptorSet(m_Set, 12, rhi::DescriptorType::CombinedImageSampler, irradiance, sampler);
     m_Device->UpdateDescriptorSet(m_Set, 13, rhi::DescriptorType::CombinedImageSampler, prefilter, sampler);
     m_Device->UpdateDescriptorSet(m_Set, 14, rhi::DescriptorType::CombinedImageSampler, brdfLut, sampler);
+}
+
+void LightingPass::SetAtmosphere(float3 sunDir, float turbidity) {
+    m_AtmSunDir    = sunDir;
+    m_AtmTurbidity = turbidity;
+
+    // 一次性验证日志：仅在空中透视激活（turbidity>0）时打印，便于核对参数流入
+    static bool s_AtmLogged = false;
+    if (turbidity > 0.0f && !s_AtmLogged) {
+        s_AtmLogged = true;
+        HE_CORE_INFO("[AerialPerspective] sunDir=({:.3f},{:.3f},{:.3f}), turbidity={:.1f}",
+                     sunDir.x, sunDir.y, sunDir.z, turbidity);
+    }
 }
 
 } // namespace he::render

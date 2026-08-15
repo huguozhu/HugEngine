@@ -17,6 +17,7 @@
 #include "Scene/SceneGraph.h"
 #include "Scene/LightComponent.h"
 #include "Scene/MeshComponent.h"
+#include "Scene/PhysicalSkyComponent.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include <glm/gtc/matrix_transform.hpp>
@@ -221,6 +222,7 @@ i32  PathTracingPipeline::GetPTMaxBounces() const { return cvPTMaxBounces.Get();
 void PathTracingPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
                                  he::SceneGraph& sg, const CameraData& camera,
                                  float deltaTime) {
+    he::SyncPhysicalSkyToSun(world);  // 物理天空太阳→方向光同步（阴影/光照收集前）
     if (!m_SwapChain || !m_Device) {
         HE_CORE_ERROR("PathTracingPipeline::Render: SwapChain 或 Device 未设置");
         return;
@@ -534,6 +536,12 @@ void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             });
     }
 
+    // 交换链颜色格式同步（HDR=A2B10G10R10，SDR=BGRA8）
+    rhi::Format swapFmt = m_SwapChain ? m_SwapChain->GetColorFormat() : rhi::Format::BGRA8_UNORM;
+    m_PostProcess.GetToneMap()->SetOutputFormat(swapFmt);
+    m_PostProcess.GetToneMap()->SetHDREnabled(swapFmt == rhi::Format::A2B10G10R10_UNORM_PACK32);
+    bool isHDR = (swapFmt == rhi::Format::A2B10G10R10_UNORM_PACK32);   // HDR 下禁用 LDR 的 FXAA
+
     // ── ToneMap（输入：A-Trous 输出优先，其次降噪输出，最后原始 PT HDR）──
     rhi::IRHITexture* toneMapInput = atrousTex ? atrousTex : (denoisedTex ? denoisedTex : ptHDR);
     ResourceHandle toneMapInputHandle = atrousHandle != kInvalidHandle ? atrousHandle
@@ -541,13 +549,13 @@ void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
 
     auto ldrTarget = rg.ImportTexture("LDR", m_PostProcess.GetLDRTarget());
     bool useFXAA  = m_PostProcess.IsFXAAEnabled();
-    bool needLDR  = useFXAA;   // FXAA 需要 LDR 中间纹理
+    bool needLDR  = useFXAA && !isHDR;   // HDR 下跳过 LDR 中间纹理（FXAA 关闭，ToneMap 直写交换链）
 
     if (toneMapInputHandle != kInvalidHandle && m_PostProcess.GetToneMap()) {
         rg.AddPass("ToneMap",
             {{toneMapInputHandle, ResourceAccess::Read}},
             {{needLDR ? ldrTarget : backBuf, ResourceAccess::Write}},
-            [this, w, h, needLDR, toneMapInput, &camera](rhi::IRHICommandList* c) {
+            [this, w, h, needLDR, toneMapInput, &camera, swapFmt](rhi::IRHICommandList* c) {
                 m_PostProcess.GetToneMap()->SetInput(toneMapInput, m_LinearSampler.get());
                 m_PostProcess.GetToneMap()->SetExposure(exp2(camera.exposureBias));
                 // PreBind 调用 SetPipeline → 设置 m_CurrentRenderPass 为 BGRA8 兼容格式
@@ -559,7 +567,7 @@ void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                     m_PostProcess.GetToneMap()->Render(c);
                     c->EndOffscreenPass();
                 } else {
-                    c->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
+                    c->BeginRenderPass(1, swapFmt);
                     m_PostProcess.GetToneMap()->Render(c);
                     c->EndRenderPass();
                 }
@@ -567,15 +575,15 @@ void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     }
 
     // ── FXAA: LDR → BackBuffer（先 ToneMap PreBind 保证 RP 兼容，再进入 SwapChain RP）──
-    if (useFXAA && m_PostProcess.GetFXAA()) {
+    if (useFXAA && !isHDR && m_PostProcess.GetFXAA()) {  // HDR 下禁用 LDR 的 FXAA（与 A2B10G10R10 后备缓冲不兼容）
         rg.AddPass("FXAA", {{ldrTarget, ResourceAccess::Read}}, {{backBuf, ResourceAccess::Write}},
-            [this](rhi::IRHICommandList* c) {
+            [this, swapFmt](rhi::IRHICommandList* c) {
                 m_PostProcess.GetFXAA()->SetInput(
                     m_PostProcess.GetLDRTarget(), m_PostProcess.GetLDRSampler());
                 // 关键：用 ToneMap 的 2 附件 RP 进入 BeginRenderPass，
                 // 确保 SwapChain Framebuffer（BGRA8+D32）与 RP 兼容
                 m_PostProcess.GetToneMap()->PreBind(c);
-                c->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
+                c->BeginRenderPass(1, swapFmt);
                 m_PostProcess.GetFXAA()->Render(c);
                 c->EndRenderPass();
             });

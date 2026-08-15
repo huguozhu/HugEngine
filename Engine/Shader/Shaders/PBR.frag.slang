@@ -5,6 +5,7 @@
 // ============================================================
 
 #include "pbr_common.slang"
+#include "Atmosphere.slang"  // 空中透视（大气消光 + 入射散射）
 
 struct FSInput {
     float4 position : SV_Position;
@@ -78,6 +79,7 @@ struct LightGridCell { uint offset; uint count; };
     float    clusterFar;        // 远裁剪面
     float    clusterLogFactor;  // log(far/near) 用于 Z slice 计算
     uint     useClustered;      // 1=Forward+，0=传统 Forward
+    float4   atmosphere;        // sunDir.xyz（指向太阳）+ turbidity（空中透视）
 };
 
 // ACESFilm 定义在 common.slang 中，此处直接使用
@@ -227,5 +229,7 @@ float4 fragmentMain(FSInput input) : SV_Target0 {
 
     color += obj.emissiveFactor.rgb;
 
+    // 空中透视：对场景几何应用距离/高度相关大气消光 + 入射散射
+    ApplyAerialPerspective(color, cameraPosition.xyz, input.worldPos, atmosphere.xyz, atmosphere.w);
     return float4(color, alpha);
 }

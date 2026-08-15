@@ -166,7 +166,7 @@ GPU_STRUCT GPUObjectData {
 // Push Constant 结构体
 // ============================================================
 
-// --- ForwardPushConstant: 前向管线每帧 Push Constant（128 字节）---
+// --- ForwardPushConstant: 前向管线每帧 Push Constant（144 字节）---
 // C++ 端别名: PushConstantData
 // Forward+: cluster 参数由 m_UseForwardPlus 控制，运行时切换传统 / Forward+ 路径
 GPU_STRUCT PushConstantData {
@@ -182,6 +182,7 @@ GPU_STRUCT PushConstantData {
     float    clusterFar;            // [108]     远裁剪面
     float    clusterLogFactor;      // [112]     log(far/near)
     GPU_UINT useClustered;          // [116]     1=Forward+ / 0=传统 Forward
+    float4   atmosphere;            // sunDir.xyz（指向太阳）+ turbidity（空中透视；C++ 自动 16B 对齐，结构从 128→144B）
 };
 
 // --- ShadowPushConstant: 阴影通道 Push Constant（80 字节）---
@@ -200,7 +201,7 @@ GPU_STRUCT GBufferPushConstant {
     GPU_UINT _pad[14];              // [136..192] 填充到 192B
 };
 
-// --- DeferredLightingPushConstant: 延迟光照 Push Constant（64 字节）---
+// --- DeferredLightingPushConstant: 延迟光照 Push Constant（80 字节）---
 // 注意：worldPos 直接从 GBuffer MRT4 读取，不再需要 Camera invViewProj 做深度重建
 GPU_STRUCT DeferredLightingPushConstant {
     float4   cameraPosition;        // [0..16]   相机世界位置（仅用于 V 方向计算）
@@ -216,6 +217,7 @@ GPU_STRUCT DeferredLightingPushConstant {
     GPU_UINT rtAOSource;            // [52]      0=SSAO, 1=RT AO
     GPU_UINT rtSpecularSource;      // [56]      0=SSR, 1=RT 反射
     GPU_UINT rtDiffuseSource;       // [60]      0=SSGI, 1=RT GI
+    float4   atmosphere;            // [64..80] sunDir.xyz（指向太阳）+ turbidity（空中透视）
 };
 
 // --- RTShadowPushConstant: RT 阴影 Pass Push Constant（108B，C++/Slang 单一数据源）---
