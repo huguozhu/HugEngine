@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 完成 `基于物理的渲染管线剩余缺口.md` 末尾列出的 3 项剩余尾巴：① 物理天空「太阳盘→方向光 illuminance 同步」；②「空中透视（大气消光）」；③ HDR 输出接入 Forward/HybridRT/PathTracing 全部管线（当前仅 Deferred）。
+**Goal:** 完成 `基于物理的渲染管线实现.md` 末尾列出的 3 项剩余尾巴：① 物理天空「太阳盘→方向光 illuminance 同步」；②「空中透视（大气消光）」；③ HDR 输出接入 Forward/HybridRT/PathTracing 全部管线（当前仅 Deferred）。
 
 **Architecture:** 太阳同步在 Scene 层新增一个自由函数，由各管线帧入口在阴影/光照收集前调用一次；空中透视在 Slang 侧新增自包含的 `Atmosphere.slang`（瑞利+米氏单散射消光），把 `sunDir+turbidity`（一个 float4）塞进 Deferred/Forward 两套 push constant，在光照结算末尾对场景几何应用；HDR 复用 Deferred 已落地的 `IRHISwapChain::GetColorFormat()` + `ToneMapPass::SetOutputFormat()/SetHDREnabled()` 机制，逐处替换其余管线硬编码的 `BGRA8_UNORM`。
 
 **Tech Stack:** C++17 / Slang shader / Vulkan（CMake MSVC 2026）。
 
-**Spec:** `docs/未实现功能/基于物理的渲染管线剩余缺口.md`（「尚未完成的尾巴」一节，末尾两条）。
+**Spec:** `docs/已实现功能/基于物理的渲染管线实现.md`（「尚未完成的尾巴」一节，末尾两条）。
 
 ## Global Constraints
 
@@ -445,4 +445,4 @@ git commit -m "Render: 空中透视（瑞利+米氏大气消光）"
 1. 全量编译 `cmake --build build --config Debug` 零错误。
 2. 默认参数下 `02.Cube`（四模式）与 `04.Deferred` 渲染与改造前一致（HDR 关、无同步、无物理天空时空中透视 turbidity=0 自动关闭，无回归）。
 3. 太阳同步后方向光阴影与太阳盘方向一致；HDR 开启后四管线均 10-bit PQ 输出；空中透视远处几何向蓝天过渡。
-4. `HugEngine开发进度.md` 与 `基于物理的渲染管线剩余缺口.md` 由用户另行确认是否同步（本计划不含主文档同步）。
+4. `HugEngine开发进度.md` 与 `基于物理的渲染管线实现.md` 由用户另行确认是否同步（本计划不含主文档同步）。

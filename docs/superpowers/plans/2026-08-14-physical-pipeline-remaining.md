@@ -8,7 +8,7 @@
 
 **Tech Stack:** C++17 / Slang shader / Vulkan（CMake MSVC 2026）。
 
-**Spec:** `docs/未实现功能/基于物理的渲染管线剩余缺口.md`（第 5/7/8/9/10 项）。
+**Spec:** `docs/已实现功能/基于物理的渲染管线实现.md`（第 5/7/8/9/10 项）。
 
 ## Global Constraints
 
