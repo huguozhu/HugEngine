@@ -23,6 +23,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/ext/matrix_clip_space.hpp>  // orthoRH_ZO (Vulkan Z [0,1])
 #include <unordered_set>
+#include <unordered_map>
 
 #include <chrono>
 #include <mutex>
@@ -558,6 +559,60 @@ void ForwardPipeline::CollectLights(
 }
 
 // ============================================================
+// Bindless 材质 SSBO（per-material 材质数据）
+// ============================================================
+
+// 去重收集场景材质 → 写入单个 bindless 材质 SSBO 并注册
+// 每材质（materialID）只写一份 GPUMaterialData；buffer 内元素索引 = materialID >> 2
+void ForwardPipeline::UploadMaterialBindless(he::World& world) {
+    // 按 materialID 去重（同一 materialID 的多个物体共享一份材质数据）
+    std::unordered_map<u32, GPUMaterialData> uniqueMat;
+    auto collect = [&](he::Entity, he::MeshComponent& m) {
+        if (uniqueMat.count(m.materialID)) return;  // 已收集过该材质，跳过
+        PBRMaterial mat = GetDefaultMaterial();
+        mat.baseColorFactor = m.baseColorFactor;
+        mat.emissiveFactor  = m.emissiveFactor;
+        mat.metallicFactor  = m.metallicFactor;
+        mat.roughnessFactor = m.roughnessFactor;
+        mat.aoFactor        = m.aoFactor;
+        mat.alphaCutoff     = m.alphaCutoff;
+        mat.alphaMode       = static_cast<AlphaMode>(m.alphaMode);
+        mat.doubleSided     = m.doubleSided;
+        mat.unlit           = m.unlit;
+        GPUMaterialData g;
+        FillMaterialData(g, mat);                    // 摊平成 GPUMaterialData（bindless 材质 SSBO 元素）
+        uniqueMat[m.materialID] = g;
+    };
+    // 与 SceneRenderer 的绘制收集一致：MeshComponent + Cube/Sphere 派生组件都要收集
+    world.ForEach<he::MeshComponent>([&](he::Entity e, he::MeshComponent& m) { collect(e, m); });
+    world.ForEach<he::CubeComponent>([&](he::Entity e, he::CubeComponent& c) { collect(e, static_cast<he::MeshComponent&>(c)); });
+    world.ForEach<he::SphereComponent>([&](he::Entity e, he::SphereComponent& s) { collect(e, static_cast<he::MeshComponent&>(s)); });
+
+    if (uniqueMat.empty()) return;  // 场景无材质，跳过
+
+    // materialID 是纹理基索引（每材质占 4 个纹理槽），材质数据索引 = materialID >> 2
+    u32 maxSlot = 0;
+    for (auto& kv : uniqueMat) maxSlot = std::max(maxSlot, kv.first >> 2);
+    // 空槽位填默认 GPUMaterialData{}（值初始化 = 全 0），保证 buffer 内索引与 materialID>>2 对齐
+    std::vector<GPUMaterialData> data(maxSlot + 1, GPUMaterialData{});
+    for (auto& kv : uniqueMat) data[kv.first >> 2] = kv.second;
+
+    u32 newCount = (u32)data.size();
+    // 材质数变化时重建 buffer；否则复用（场景材质集通常静态，RegisterBuffer 只在首次/材质数变化时调用）
+    if (!m_MaterialBuffer || newCount != m_MaterialCount) {
+        rhi::BufferDesc desc;
+        desc.size        = sizeof(GPUMaterialData) * newCount;
+        desc.usage       = rhi::BufferUsage::Storage;
+        desc.initialData = data.data();
+        m_MaterialBuffer = m_Device->CreateBuffer(desc);
+        m_MaterialCount  = newCount;
+        // 注册到 bindless 堆（binding 30 = u_Materials[]；当前仅 1 个材质 buffer → handle=0）
+        u32 handle = m_Device->GetBindlessHeap()->RegisterBuffer(m_MaterialBuffer.get());
+        HE_CORE_INFO("ForwardPipeline: 上传 {} 个材质到 bindless SSBO (handle={})", newCount, handle);
+    }
+}
+
+// ============================================================
 // HDR 离屏渲染 + ToneMap 后处理
 // ============================================================
 
@@ -822,6 +877,9 @@ void ForwardPipeline::RenderScene(
     // 实际剔除由后续 DrawIndexedIndirect 根据 GPU IndirectCmdBuf 完成。
     filteredItems = std::move(allDrawItems);
     u32 totalDraws = (u32)filteredItems.size();
+
+    // 上传去重材质到 bindless SSBO（须在 Flush 之前调用，Flush 才会把材质 buffer 推送到 binding 30）
+    UploadMaterialBindless(world);
 
     // 推送 bindless 纹理到全部已注册描述符集（Flush 自动遍历全部 set）
     m_Device->GetBindlessHeap()->Flush();

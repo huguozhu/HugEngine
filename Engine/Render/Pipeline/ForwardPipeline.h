@@ -108,6 +108,7 @@ public:
 
 private:
     void CollectLights(PushConstantData& pc, he::World& world, he::SceneGraph& sg, const CameraData& camera);
+    void UploadMaterialBindless(he::World& world);  // 去重收集场景材质 → 写入 bindless 材质 SSBO 并注册（须在 heap->Flush() 前调用）
     void DrawMesh(rhi::IRHICommandList* cmd, he::MeshComponent* mesh,
                   const float4x4& worldMatrix, const float4x4& viewProjMatrix,
                   const PBRMaterial& material, const CameraData& camera,
@@ -135,6 +136,10 @@ private:
     // Bindless 占位纹理/采样器
     std::unique_ptr<rhi::IRHITexture> m_BindlessPlaceholder;
     std::unique_ptr<rhi::IRHISampler> m_BindlessSampler;
+
+    // Bindless 材质 SSBO（per-material 材质数据，去重后写入单个 buffer，binding 30 = u_Materials[]）
+    std::unique_ptr<rhi::IRHIBuffer> m_MaterialBuffer;  // 材质数据 SSBO（元素 = GPUMaterialData，按 materialID>>2 索引）
+    u32 m_MaterialCount = 0;                            // 已注册材质数（buffer 内元素数）
 
     // 多线程录制
     bool m_MultiThreadRecord = true;
