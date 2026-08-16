@@ -201,7 +201,8 @@ GPU_STRUCT PushConstantData {
     float    clusterFar;            // [108]     远裁剪面
     float    clusterLogFactor;      // [112]     log(far/near)
     GPU_UINT useClustered;          // [116]     1=Forward+ / 0=传统 Forward
-    float4   atmosphere;            // sunDir.xyz（指向太阳）+ turbidity（空中透视；C++ 自动 16B 对齐，结构从 128→144B）
+    GPU_UINT useBindlessMaterial;   // [120]     1=从 u_Materials[] 读材质参数（bindless），0=从 GPUObjectData 内联读
+    float4   atmosphere;            // [128]     sunDir.xyz（指向太阳）+ turbidity（空中透视；C++ 自动 16B 对齐，结构从 128→144B）
 };
 
 // --- ShadowPushConstant: 阴影通道 Push Constant（80 字节）---

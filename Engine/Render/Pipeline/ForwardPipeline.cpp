@@ -843,6 +843,9 @@ void ForwardPipeline::RenderScene(
         framePC.useClustered     = 0;
     }
 
+    // 材质参数读取开关：1=bindless（u_Materials[]），0=内联（GPUObjectData 字段）；默认内联
+    framePC.useBindlessMaterial = m_UseBindlessMaterial ? 1u : 0u;
+
     // ============================================================
     // GPU 视锥剔除（Compute Shader）— 读回上帧结果 → 调度下帧
     // ============================================================

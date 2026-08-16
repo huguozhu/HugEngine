@@ -79,6 +79,7 @@ struct LightGridCell { uint offset; uint count; };
     float    clusterFar;        // 远裁剪面
     float    clusterLogFactor;  // log(far/near) 用于 Z slice 计算
     uint     useClustered;      // 1=Forward+，0=传统 Forward
+    uint     useBindlessMaterial;  // 1=从 u_Materials[] 读材质参数（bindless），0=从 GPUObjectData 内联读
     float4   atmosphere;        // sunDir.xyz（指向太阳）+ turbidity（空中透视）
 };
 
@@ -141,10 +142,29 @@ float4 fragmentMain(FSInput input) : SV_Target0 {
     GPUObjectData obj = u_Objects[input.objectIndex];
 
     uint texBase = obj.materialID;
+
+    // 材质参数：bindless（u_Materials[materialID>>2]）或内联（GPUObjectData 字段）二选一
+    float4 baseColorF; float4 emissiveF;
+    float  metallicF, roughnessF, aoF, alphaCutoffF, dielectricF0F;
+    uint   matFlags;
+    float4 disneyA, disneyB; float disneyC;
+    if (useBindlessMaterial != 0u) {
+        GPUMaterialData m = u_Materials[0][obj.materialID >> 2];  // [0]=材质 buffer，[materialID>>2]=buffer 内元素
+        baseColorF = m.baseColorFactor; emissiveF = m.emissiveFactor;
+        metallicF = m.metallicFactor; roughnessF = m.roughnessFactor; aoF = m.aoFactor;
+        alphaCutoffF = m.alphaCutoff; dielectricF0F = m.dielectricF0; matFlags = m.materialFlags;
+        disneyA = m.disneyA; disneyB = m.disneyB; disneyC = m.disneyC;
+    } else {
+        baseColorF = obj.baseColorFactor; emissiveF = obj.emissiveFactor;
+        metallicF = obj.metallicFactor; roughnessF = obj.roughnessFactor; aoF = obj.aoFactor;
+        alphaCutoffF = obj.alphaCutoff; dielectricF0F = obj.dielectricF0; matFlags = obj.materialFlags;
+        disneyA = obj.disneyA; disneyB = obj.disneyB; disneyC = obj.disneyC;
+    }
+
     float4 baseColorSample = u_Textures[texBase + 0].Sample(u_Samplers[0], input.uv);
-    float3 albedo = obj.baseColorFactor.rgb * baseColorSample.rgb;
-    float alpha   = obj.baseColorFactor.a * baseColorSample.a;
-    if (alpha < obj.alphaCutoff) discard;
+    float3 albedo = baseColorF.rgb * baseColorSample.rgb;
+    float alpha   = baseColorF.a * baseColorSample.a;
+    if (alpha < alphaCutoffF) discard;
 
     // 法线贴图
     float3 texNormal = u_Textures[texBase + 1].Sample(u_Samplers[0], input.uv).rgb * 2.0 - 1.0;
@@ -153,9 +173,9 @@ float4 fragmentMain(FSInput input) : SV_Target0 {
 
     // 金属度/粗糙度贴图
     float4 mrSample = u_Textures[texBase + 2].Sample(u_Samplers[0], input.uv);
-    float metallic  = obj.metallicFactor  * mrSample.b;
-    float roughness = clamp(obj.roughnessFactor * mrSample.g, 0.04, 1.0);
-    float ao = obj.aoFactor * u_Textures[texBase + 3].Sample(u_Samplers[0], input.uv).r;
+    float metallic  = metallicF  * mrSample.b;
+    float roughness = clamp(roughnessF * mrSample.g, 0.04, 1.0);
+    float ao = aoF * u_Textures[texBase + 3].Sample(u_Samplers[0], input.uv).r;
 
     // BRDF LUT：用于直接光照的多重散射能量补偿，IBL 镜面项复用同一采样
     float2 envBRDF = u_BRDF_LUT.Sample(u_IBLSampler, float2(max(dot(N, V), 0.0), roughness)).rg;
@@ -178,7 +198,7 @@ float4 fragmentMain(FSInput input) : SV_Target0 {
             uint i = u_LightIndexList[li];
             GPULight light = u_Lights[i];
             color += ShadeWithLight(light, input.worldPos, N, V, albedo, metallic, roughness,
-                                    obj.dielectricF0, envBRDF, obj.disneyA, obj.disneyB, obj.disneyC);
+                                    dielectricF0F, envBRDF, disneyA, disneyB, disneyC);
         }
     } else {
         // --- 传统路径：遍历所有光源 ---
@@ -186,13 +206,13 @@ float4 fragmentMain(FSInput input) : SV_Target0 {
         for (uint i = 0; i < count; i++) {
             GPULight light = u_Lights[i];
             color += ShadeWithLight(light, input.worldPos, N, V, albedo, metallic, roughness,
-                                    obj.dielectricF0, envBRDF, obj.disneyA, obj.disneyB, obj.disneyC);
+                                    dielectricF0F, envBRDF, disneyA, disneyB, disneyC);
         }
     }
     color *= ao;
 
     // ---- IBL（环境光照） ----
-    float3 F0_ibl = lerp(float3(obj.dielectricF0), albedo, metallic);
+    float3 F0_ibl = lerp(float3(dielectricF0F), albedo, metallic);
     float3 F = F_SchlickRoughness(max(dot(N, V), 0.0), F0_ibl, roughness, metallic);
     float3 kD = (1.0 - F) * (1.0 - metallic);
     float3 irradiance = u_IrradianceMap.Sample(u_IBLSampler, N).rgb;
@@ -227,7 +247,7 @@ float4 fragmentMain(FSInput input) : SV_Target0 {
         color += rsmIndirect * 0.03 * iblIntensity;
     }
 
-    color += obj.emissiveFactor.rgb;
+    color += emissiveF.rgb;
 
     // 空中透视：对场景几何应用距离/高度相关大气消光 + 入射散射
     ApplyAerialPerspective(color, cameraPosition.xyz, input.worldPos, atmosphere.xyz, atmosphere.w);
