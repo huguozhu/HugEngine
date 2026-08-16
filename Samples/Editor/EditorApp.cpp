@@ -19,7 +19,6 @@
 #include "imgui.h"
 #include "Editor/SceneSerializer.h"
 #include "Asset/glTFLoader.h"
-#include "Asset/BindlessTextureManager.h"
 #include "Core/Log.h"
 #include <cctype>
 #include <unordered_map>
@@ -266,7 +265,7 @@ void EditorApp::MainLoop() {
                             rhi::SamplerDesc sd; sd.minFilter=sd.magFilter=rhi::FilterMode::Linear;
                             sd.addressU=sd.addressV=rhi::AddressMode::Repeat;
                             m_DefaultSampler = m_Device->CreateSampler(sd);
-                            asset::BindlessTextureManager::Instance().SetDefaultTexture(
+                            m_Device->GetBindlessHeap()->SetDefaultTexture(
                                 m_DefaultTex.get(), m_DefaultSampler.get());
                         }
                         m_World->ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent& mc) {
@@ -294,8 +293,12 @@ void EditorApp::MainLoop() {
                             auto [n, ns]   = loadTex(mc.normalTexture);
                             auto [mr, mrs] = loadTex(mc.metallicRoughnessTexture);
                             auto [ao, aos] = loadTex(mc.occlusionTexture);
-                            mc.materialID = asset::BindlessTextureManager::Instance().RegisterMaterial(
-                                bc, bcs, n, ns, mr, mrs, ao, aos);
+                            // 材质 = 4 个连续 bindless 纹理槽，首调用返回值即 materialID（基索引）
+                            auto* heap = m_Device->GetBindlessHeap();
+                            mc.materialID = heap->RegisterTexture(bc, bcs);
+                            heap->RegisterTexture(n, ns);
+                            heap->RegisterTexture(mr, mrs);
+                            heap->RegisterTexture(ao, aos);
                         });
                         // 选中并聚焦第一个导入实体
                         if (!result.entities.empty()) {

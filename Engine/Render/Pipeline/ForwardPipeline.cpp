@@ -83,6 +83,7 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         { 14, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // IBL BRDF LUT
         { 15, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // RSM Position
         { 16, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // RSM Normal+Flux
+        { 30, rhi::DescriptorType::StorageBuffer,     4096, rhi::kStageMaskVertex | rhi::kStageMaskFragment, true },  // u_SSBO[] bindless
     };
     m_PerFrameLayout = device->CreateDescriptorSetLayout(perFrameLayoutDesc);
 
@@ -146,16 +147,15 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         sampDesc.addressV  = rhi::AddressMode::Repeat;
         m_BindlessSampler = device->CreateSampler(sampDesc);
 
-        // 注册默认占位纹理到 BindlessTextureManager（作为 null/无纹理 mesh 的回退）
-        // 预分配 materialID=0 的 4 个纹理槽位（BaseColor, Normal, MetallicRoughness, Occlusion），
+        // 注册默认占位纹理到 bindless 堆（作为 null/无纹理 mesh 的回退）
+        auto* heap = device->GetBindlessHeap();
+        heap->SetDefaultTexture(m_BindlessPlaceholder.get(), m_BindlessSampler.get());
+        // 预分配 materialID=0 的 4 个纹理槽位（BaseColor/Normal/MetallicRoughness/Occlusion），
         // 确保 materialID=0 的 mesh（如 02.Cube 中无纹理的立方体/球体）始终有有效纹理
-        he::asset::BindlessTextureManager::Instance().SetDefaultTexture(
-            m_BindlessPlaceholder.get(), m_BindlessSampler.get());
-        he::asset::BindlessTextureManager::Instance().RegisterMaterial(
-            nullptr, nullptr,   // BaseColor → 默认白色纹理
-            nullptr, nullptr,   // Normal → 默认白色纹理(法线=[0.5,0.5,1.0]=无扰动)
-            nullptr, nullptr,   // MetallicRoughness → 默认白色纹理
-            nullptr, nullptr);  // Occlusion → 默认白色纹理(AO=1.0)
+        heap->RegisterTexture(nullptr, nullptr);
+        heap->RegisterTexture(nullptr, nullptr);
+        heap->RegisterTexture(nullptr, nullptr);
+        heap->RegisterTexture(nullptr, nullptr);
     }
 
     // --- 分配三缓冲共享描述符集（set=0: per-frame + bindless）---
@@ -178,7 +178,7 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
             device->UpdateDescriptorSet(set, binding, rhi::DescriptorType::CombinedImageSampler,
                 m_ShadowSystem->GetShadowMap(c), m_ShadowSystem->GetShadowSampler());
         }
-        // 绑定 5-6: bindless 占位符（BindlessTextureManager 在渲染时更新）
+        // 绑定 5-6: bindless 占位符（bindless 堆在渲染时更新）
         {
             rhi::IRHITexture* texPtrs[] = { m_BindlessPlaceholder.get() };
             rhi::IRHISampler* sampPtrs[] = { m_BindlessSampler.get() };
@@ -213,11 +213,12 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     // 初始化时使用第一个槽位
     m_CurrentFrameSlot = 0;
 
-    // 注册全部三缓冲描述符集到 BindlessTextureManager
-    // FlushPending() 会自动向全部已注册 set 推送纹理数组，无需调用方手动遍历
+    // 注册全部三缓冲描述符集到 bindless 堆
+    // Flush() 会自动向全部已注册 set 推送纹理数组，无需调用方手动遍历
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        he::asset::BindlessTextureManager::Instance().RegisterDescriptorSet(
-            device, m_DescSets[i], 5, 6);
+        device->GetBindlessHeap()->RegisterDescriptorSet(
+            m_DescSets[i], rhi::kBindingBindlessTextures,
+            rhi::kBindingBindlessSamplers, rhi::kBindingBindlessSSBO);
     }
 
     // --- 主管线 PSO ---
@@ -822,8 +823,8 @@ void ForwardPipeline::RenderScene(
     filteredItems = std::move(allDrawItems);
     u32 totalDraws = (u32)filteredItems.size();
 
-    // 推送 bindless 纹理到全部已注册描述符集（FlushPending 自动遍历全部 set）
-    he::asset::BindlessTextureManager::Instance().FlushPending();
+    // 推送 bindless 纹理到全部已注册描述符集（Flush 自动遍历全部 set）
+    m_Device->GetBindlessHeap()->Flush();
 
     // ============================================================
     // 录制绘制命令（ForwardPipeline 特有：PBR PSO + bindless 描述符集）

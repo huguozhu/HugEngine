@@ -6,7 +6,6 @@
 #include "GI/GlobalIllumination.h"
 #include "RHI/RHI.h"
 #include "RenderGraph.h"
-#include "Asset/BindlessTextureManager.h"
 #include "Pipeline/GPUCulling.h"
 #include "Pipeline/GPUScene.h"
 #include "Pipeline/MeshBatcher.h"

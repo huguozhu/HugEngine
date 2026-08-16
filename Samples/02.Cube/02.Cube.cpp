@@ -28,7 +28,6 @@
 #include "Scene/PhysicalSkyComponent.h"
 #include "Scene/ParticleComponent.h"
 #include "Editor/ImGuiIntegration.h"
-#include "Asset/BindlessTextureManager.h"
 #include "imgui.h"
 
 #include <cmath>

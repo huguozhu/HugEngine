@@ -22,7 +22,6 @@
 #include "Scene/SkyboxComponent.h"
 #include "Scene/AnimationComponent.h"
 #include "Asset/glTFLoader.h"
-#include "Asset/BindlessTextureManager.h"
 #include "Editor/ImGuiIntegration.h"
 #include "imgui.h"
 
@@ -383,19 +382,24 @@ int main() {
         rhi::SamplerDesc sd; sd.minFilter=sd.magFilter=rhi::FilterMode::Linear;
         sd.addressU=sd.addressV=rhi::AddressMode::Repeat;
         auto defaultSamp = device->CreateSampler(sd);
-        he::asset::BindlessTextureManager::Instance().SetDefaultTexture(
+        device->GetBindlessHeap()->SetDefaultTexture(
             defaultTex.get(), defaultSamp.get());
         g_TexCache["__default__"] = {std::move(defaultTex), std::move(defaultSamp)};
     }
 
-    // 加载纹理 + 注册到 BindlessTextureManager
+    // 加载纹理 + 注册到 bindless 堆
     world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent& mesh) {
         auto [bcTex, bcSamp] = loadTexture(mesh.baseColorTexture);
         auto [nTex, nSamp] = loadTexture(mesh.normalTexture);
         auto [mrTex, mrSamp] = loadTexture(mesh.metallicRoughnessTexture);
         auto [aoTex, aoSamp] = loadTexture(mesh.occlusionTexture);
-        u32 matID = he::asset::BindlessTextureManager::Instance().RegisterMaterial(
-            bcTex, bcSamp, nTex, nSamp, mrTex, mrSamp, aoTex, aoSamp);
+        // 材质 = 4 个连续 bindless 纹理槽（BaseColor/Normal/MetallicRoughness/Occlusion），
+        // 首调用返回值即 materialID（基索引），shader 用 texBase+0/1/2/3 采样
+        auto* heap = device->GetBindlessHeap();
+        u32 matID = heap->RegisterTexture(bcTex, bcSamp);
+        heap->RegisterTexture(nTex, nSamp);
+        heap->RegisterTexture(mrTex, mrSamp);
+        heap->RegisterTexture(aoTex, aoSamp);
         mesh.materialID = matID;
     });
     HE_CORE_INFO("纹理加载 + 注册完成: {} 张独立纹理", g_TexCache.size());
@@ -423,7 +427,7 @@ int main() {
         //   set=0: TLAS + BackBuffer（RayGen 使用）
         //   set=1: 材质纹理 + 光源 UB（ClosestHit 使用）
         // TODO Phase 5+: 添加 b=5 SampledImage[4096] + b=6 Sampler[4096] 到 set=0，
-        //   注册到 BindlessTextureManager，shader include "common.slang" 采样 u_Textures[]
+        //   注册到 bindless 堆，shader include "common.slang" 采样 u_Textures[]
         //   等待 slangc 修复 ClosestHit 动态数组索引 bug
         rhi::DescriptorSetLayoutDesc rtSet0Desc;
         rtSet0Desc.bindings = {
@@ -477,9 +481,10 @@ int main() {
         rtPass.CreateMaterialTexture(device.get(), 256, world);
         rtPass.CreateLightBuffer(device.get(), 8);
 
-        // 注册 RT set=0 到 BindlessTextureManager（Callable shader 需要 bindless 纹理）
-        he::asset::BindlessTextureManager::Instance().RegisterDescriptorSet(
-            device.get(), rtPass.GetDescriptorSet0(), 5, 6);
+        // 注册 RT set=0 到 bindless 堆（Callable shader 需要 bindless 纹理；RT set 无 SSBO 数组，bufferBinding=0）
+        device->GetBindlessHeap()->RegisterDescriptorSet(
+            rtPass.GetDescriptorSet0(), rhi::kBindingBindlessTextures,
+            rhi::kBindingBindlessSamplers, 0);
 
         HE_CORE_INFO("RT 路径初始化完成 (RT: {})",
             rtPass.IsValid() ? "就绪" : "不可用");

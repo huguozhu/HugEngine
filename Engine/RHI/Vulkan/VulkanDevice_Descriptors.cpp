@@ -41,12 +41,12 @@ VkDescriptorType VulkanDevice::ToVkDescType(DescriptorType type) const {
 // 描述符池容量常量 — Vulkan 后端资源预算
 // 需根据引擎实际负载（bindless 纹理数、材质数、RT 集数）调整
 // ============================================================
-static constexpr u32 kDescPoolSize_UniformBuffer         = 64;    // 逐帧 UBO 数量
-static constexpr u32 kDescPoolSize_StorageBuffer         = 4096;  // SSBO（Object/Light/Meshlet + bindless SSBO 数组）
-static constexpr u32 kDescPoolSize_CombinedImageSampler  = 8192;  // bindless 纹理数组
-static constexpr u32 kDescPoolSize_SampledImage          = 4096;  // 采样图像（非组合）
-static constexpr u32 kDescPoolSize_StorageImage          = 256;   // StorageImage（RT BackBuffer 等）
-static constexpr u32 kDescPoolSize_Sampler               = 4096;  // bindless 采样器数组
+static constexpr u32 kDescPoolSize_UniformBuffer         = 64;     // 逐帧 UBO 数量
+static constexpr u32 kDescPoolSize_StorageBuffer         = 16384;  // SSBO（Object/Light/Meshlet + bindless SSBO 数组 × 三缓冲）
+static constexpr u32 kDescPoolSize_CombinedImageSampler  = 8192;   // 组合图像采样器（阴影贴图/IBL 等，非 bindless）
+static constexpr u32 kDescPoolSize_SampledImage          = 16384;  // bindless 纹理数组（SampledImage × 三缓冲）
+static constexpr u32 kDescPoolSize_StorageImage          = 256;    // StorageImage（RT BackBuffer 等）
+static constexpr u32 kDescPoolSize_Sampler               = 16384;  // bindless 采样器数组（Sampler × 三缓冲）
 static constexpr u32 kDescPoolSize_AccelStruct           = 64;    // RT TLAS 绑定
 static constexpr u32 kDescPoolMaxSets                    = 1024;  // 最大描述符集总数
 
