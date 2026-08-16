@@ -6,7 +6,6 @@
 #include "Pipeline/GBufferRenderer.h"
 #include "Pipeline/GBufferRenderer_CPU.h"
 #include "Pipeline/GBufferRenderer_GPU.h"
-#include "Asset/BindlessTextureManager.h"
 #include "Scene/MeshComponent.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
@@ -186,6 +185,7 @@ void GBufferRenderer::CreatePSO(rhi::IRHIDevice* device) {
         {2, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskVertex | rhi::kStageMaskFragment},
         {5, rhi::DescriptorType::SampledImage, 4096, rhi::kStageMaskFragment, true},   // bindless 纹理
         {6, rhi::DescriptorType::Sampler, 4096, rhi::kStageMaskFragment, true},         // bindless 采样器
+        {30, rhi::DescriptorType::StorageBuffer, 4096, rhi::kStageMaskVertex | rhi::kStageMaskFragment, true},  // u_SSBO[] bindless
     };
     m_Layout = device->CreateDescriptorSetLayout(gbLayout);
 
@@ -247,9 +247,9 @@ void GBufferRenderer::CreateDescriptorSet(rhi::IRHIDevice* device) {
     sd.addressU = sd.addressV = rhi::AddressMode::Repeat;
     auto placeholderSamp = device->CreateSampler(sd);
 
-    // 设置 BindlessTextureManager 默认纹理
-    he::asset::BindlessTextureManager::Instance().SetDefaultTexture(
-        placeholderTex.get(), placeholderSamp.get());
+    // 设置 bindless 堆默认纹理（占位纹理/采样器回退用）
+    auto* heap = device->GetBindlessHeap();
+    heap->SetDefaultTexture(placeholderTex.get(), placeholderSamp.get());
 
     // 预填充 bindless 绑定
     rhi::IRHITexture* texPtrs[]  = { placeholderTex.get() };
@@ -259,9 +259,9 @@ void GBufferRenderer::CreateDescriptorSet(rhi::IRHIDevice* device) {
     device->UpdateDescriptorSet(m_Set, rhi::kBindingBindlessSamplers,
         rhi::DescriptorType::Sampler, nullptr, sampPtrs, 1);
 
-    // 注册到 BindlessTextureManager（纹理加载后自动推送）
-    he::asset::BindlessTextureManager::Instance().RegisterDescriptorSet(
-        device, m_Set, 5, 6);
+    // 注册到 bindless 堆（纹理加载后 Flush 自动推送）
+    heap->RegisterDescriptorSet(m_Set, rhi::kBindingBindlessTextures,
+        rhi::kBindingBindlessSamplers, rhi::kBindingBindlessSSBO);
 }
 
 } // namespace he::render

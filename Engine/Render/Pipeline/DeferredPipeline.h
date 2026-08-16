@@ -6,7 +6,6 @@
 #include "GI/GI_RSM.h"
 #include "RHI/RHI.h"
 #include "RenderGraph.h"
-#include "Asset/BindlessTextureManager.h"
 
 namespace he::render { class GI_IBL; class GI_RSM; }
 namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer; }

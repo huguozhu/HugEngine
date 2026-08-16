@@ -21,7 +21,6 @@
 #include "Scene/AnimationComponent.h"
 #include "Scene/ParticleComponent.h"
 #include "Asset/glTFLoader.h"
-#include "Asset/BindlessTextureManager.h"
 #include "Editor/ImGuiIntegration.h"
 #include "imgui.h"
 
@@ -405,7 +404,7 @@ int main() {
         rhi::SamplerDesc sd; sd.minFilter=sd.magFilter=rhi::FilterMode::Linear;
         sd.addressU=sd.addressV=rhi::AddressMode::Repeat;
         auto defaultSamp = device->CreateSampler(sd);
-        he::asset::BindlessTextureManager::Instance().SetDefaultTexture(
+        device->GetBindlessHeap()->SetDefaultTexture(
             defaultTex.get(), defaultSamp.get());
         g_TexCache["__default__"] = {std::move(defaultTex), std::move(defaultSamp)};
     }
@@ -417,8 +416,13 @@ int main() {
             auto [nTex, nSamp] = loadTexture(mesh.normalTexture);
             auto [mrTex, mrSamp] = loadTexture(mesh.metallicRoughnessTexture);
             auto [aoTex, aoSamp] = loadTexture(mesh.occlusionTexture);
-            u32 matID = he::asset::BindlessTextureManager::Instance().RegisterMaterial(
-                bcTex, bcSamp, nTex, nSamp, mrTex, mrSamp, aoTex, aoSamp);
+            // 材质 = 4 个连续 bindless 纹理槽（BaseColor/Normal/MetallicRoughness/Occlusion），
+            // 首调用返回值即 materialID（基索引），shader 用 texBase+0/1/2/3 采样
+            auto* heap = device->GetBindlessHeap();
+            u32 matID = heap->RegisterTexture(bcTex, bcSamp);
+            heap->RegisterTexture(nTex, nSamp);
+            heap->RegisterTexture(mrTex, mrSamp);
+            heap->RegisterTexture(aoTex, aoSamp);
             mesh.materialID = matID;
             texCount++;
         });

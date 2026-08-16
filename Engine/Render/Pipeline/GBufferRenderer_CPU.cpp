@@ -1,7 +1,6 @@
 // Pipeline/GBufferRenderer_CPU.cpp — CPU Driven GBuffer 渲染
 // 从 DeferredPipeline::BuildFrameGraph 提取的逐对象绘制逻辑
 #include "Pipeline/GBufferRenderer_CPU.h"
-#include "Asset/BindlessTextureManager.h"
 #include "Scene/MeshComponent.h"
 #include "Core/Log.h"
 #include <unordered_set>
@@ -23,8 +22,8 @@ void GBufferRenderer_CPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
                                   const CameraData& camera) {
     u32 w = ctx.width, h = ctx.height;
 
-    // 推送 bindless 纹理到全部已注册描述符集
-    he::asset::BindlessTextureManager::Instance().FlushPending();
+    // 推送 bindless 纹理到全部已注册描述符集（Flush 自动遍历全部 set）
+    ctx.device->GetBindlessHeap()->Flush();
 
     // 绑定 set=0（per-frame ObjectBuffer + bindless 纹理/采样器数组）
     ctx.device->UpdateDescriptorSet(ctx.descSet, rhi::kBindingObjectData, rhi::DescriptorType::StorageBuffer,

@@ -3,7 +3,6 @@
 // MeshBatcher::Build + FillGPUScene 在 DeferredPipeline::BuildFrameGraph 中完成
 #include "Pipeline/GBufferRenderer_GPU.h"
 #include "Pipeline/MeshBatcher.h"
-#include "Asset/BindlessTextureManager.h"
 #include "Scene/MeshComponent.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
@@ -28,8 +27,8 @@ void GBufferRenderer_GPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
 
     u32 w = ctx.width, h = ctx.height;
 
-    // 推送 bindless 纹理
-    he::asset::BindlessTextureManager::Instance().FlushPending();
+    // 推送 bindless 纹理（Flush 自动遍历全部已注册描述符集）
+    ctx.device->GetBindlessHeap()->Flush();
 
     // 绑定 set=0
     ctx.device->UpdateDescriptorSet(ctx.descSet, rhi::kBindingObjectData, rhi::DescriptorType::StorageBuffer,

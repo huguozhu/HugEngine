@@ -7,7 +7,6 @@
 #include "SceneRenderer.h"
 #include "AntiAliasing/AA_TAA.h"
 #include "AntiAliasing/AA_FXAA.h"
-#include "Asset/BindlessTextureManager.h"
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
 #include "Scene/LightComponent.h"
