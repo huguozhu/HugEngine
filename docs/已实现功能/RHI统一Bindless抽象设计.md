@@ -1,6 +1,6 @@
 # RHI 层统一 Bindless 抽象设计
 
-> 日期：2026-08-16 | 状态：设计草案（未实现）| 目标层：RHI + Vulkan
+> 日期：2026-08-16 | 状态：已实现（阶段 1）| 目标层：RHI + Vulkan
 >
 > 把当前散落在 Asset 层、以纹理/采样器为限的 bindless 实现，下沉为 RHI 层的统一描述符堆抽象，
 > 覆盖纹理 + 采样器 + StorageBuffer（SSBO），为 GPU Driven / RT / Nanite / Work Graph 铺路。
@@ -198,5 +198,5 @@ struct BindlessHeapDesc {
 
 ---
 
-> 生成日期：2026-08-16 | 状态：设计草案
+> 生成日期：2026-08-16 | 状态：已实现（阶段 1）
 > HugEngine 渲染引擎
