@@ -161,6 +161,24 @@ GPU_STRUCT GPUObjectData {
     GPU_UINT _pad;                  // [164..168] 对齐到 168 → 取整 176（std430 float4 对齐）
 };
 
+// --- GPUMaterialData: per-material 材质数据（bindless SSBO 元素，std430）---
+// 从 GPUObjectData 抽出材质参数部分（去掉 worldMatrix / materialID / object 专属字段），
+// 同一材质多物体共享一份，按 materialID>>2 索引（每材质占 4 个纹理槽）。
+GPU_STRUCT GPUMaterialData {
+    float4   baseColorFactor;       // 基础色因子
+    float4   emissiveFactor;        // 自发光因子
+    float    metallicFactor;        // 金属度
+    float    roughnessFactor;       // 粗糙度
+    float    aoFactor;              // 环境光遮蔽
+    float    alphaCutoff;           // alpha 截断阈值
+    GPU_UINT materialFlags;         // 材质标志位（双面/AlphaMask/Unlit）
+    float    dielectricF0;          // 电介质 F0（由 IOR 预计算）
+    float4   disneyA;               // x=anisotropic, y=subsurface, z=specular, w=sheen
+    float4   disneyB;               // x=clearcoat, y=clearcoatGloss, z=specularTint.r, w=specularTint.g
+    float    disneyC;               // specularTint.b
+    GPU_UINT _pad;                  // 对齐填充
+};
+
 // LightGridCell 参见 ClusteredShading.h（暂不纳入共享定义，避免重定义冲突）
 
 // ============================================================

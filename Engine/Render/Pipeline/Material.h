@@ -49,6 +49,7 @@ static constexpr u32 CASCADE_COUNT        = kGPUCascadeCount;
 static_assert(sizeof(GPUShadowData)   == 256, "GPUShadowData must be 256 bytes");
 static_assert(sizeof(GPULight)        == 64,  "GPULight must be 64 bytes");
 static_assert(sizeof(GPUObjectData)   == 176, "GPUObjectData must be 176 bytes");
+static_assert(sizeof(GPUMaterialData) == 112, "GPUMaterialData must be 112 bytes");
 static_assert(sizeof(PushConstantData) == 144, "PushConstantData must be 144 bytes");
 static_assert(sizeof(ShadowPushConstant) == 80, "ShadowPushConstant must be 80 bytes");
 static_assert(sizeof(RTShadowPushConstant) == 112, "RTShadowPushConstant must be 112 bytes");
@@ -121,6 +122,27 @@ inline void FillObjectData(GPUObjectData& obj, const PBRMaterial& mat) {
     obj.disneyA = float4(mat.anisotropic, mat.subsurface, mat.specular, mat.sheen);
     obj.disneyB = float4(mat.clearcoat, mat.clearcoatGloss, mat.specularTint.x, mat.specularTint.y);
     obj.disneyC = mat.specularTint.z;
+}
+
+// 填充 GPUMaterialData（bindless 材质 SSBO 元素，去重后的 per-material 数据）
+inline void FillMaterialData(GPUMaterialData& m, const PBRMaterial& mat) {
+    m.baseColorFactor = mat.baseColorFactor;
+    m.emissiveFactor  = float4(mat.emissiveFactor, 0.0f);
+    m.metallicFactor  = mat.metallicFactor;
+    m.roughnessFactor = mat.roughnessFactor;
+    m.aoFactor        = mat.aoFactor;
+    m.alphaCutoff     = mat.alphaCutoff;
+    float ior = mat.ior;
+    m.dielectricF0 = (ior - 1.0f) * (ior - 1.0f) / ((ior + 1.0f) * (ior + 1.0f));
+    u32 flags = MF_None;
+    if (mat.doubleSided)  flags |= MF_DoubleSided;
+    if (mat.alphaMode == AlphaMode::Mask) flags |= MF_AlphaMask;
+    if (mat.unlit)        flags |= MF_Unlit;
+    m.materialFlags = flags;
+    m.disneyA = float4(mat.anisotropic, mat.subsurface, mat.specular, mat.sheen);
+    m.disneyB = float4(mat.clearcoat, mat.clearcoatGloss, mat.specularTint.x, mat.specularTint.y);
+    m.disneyC = mat.specularTint.z;
+    m._pad = 0;
 }
 
 } // namespace he::render
