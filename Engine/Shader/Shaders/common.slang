@@ -68,7 +68,8 @@ float3 BT709ToBT2020(float3 c) {
 [[vk::binding(kGPUBinding_BindlessTextures, kGPUDescSet_PerFrame)]] Texture2D<float4> u_Textures[];
 [[vk::binding(kGPUBinding_BindlessSamplers, kGPUDescSet_PerFrame)]] SamplerState      u_Samplers[];
 
-// Bindless SSBO 数组（StructuredBuffer<GPUObjectData>，binding 30，供 GPU Driven / RT / 材质系统共用）
-[[vk::binding(kGPUBinding_BindlessSSBO, kGPUDescSet_PerFrame)]] StructuredBuffer<GPUObjectData> u_SSBO[];
+// Bindless 材质 SSBO 数组（StructuredBuffer<GPUMaterialData>，binding 30，per-material 数据）
+// 索引 = materialID >> 2（每材质占 4 个纹理槽）
+[[vk::binding(kGPUBinding_BindlessSSBO, kGPUDescSet_PerFrame)]] StructuredBuffer<GPUMaterialData> u_Materials[];
 
 #endif // HUGENGINE_COMMON_SLANG
