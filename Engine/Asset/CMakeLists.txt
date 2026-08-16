@@ -3,9 +3,7 @@ add_library(HugEngineAsset STATIC)
 
 set(ASSET_SOURCES
     Asset/glTFLoader.h
-    Asset/BindlessTextureManager.h
     Asset/glTFLoader.cpp
-    Asset/BindlessTextureManager.cpp
 )
 
 target_sources(HugEngineAsset PRIVATE ${ASSET_SOURCES})
