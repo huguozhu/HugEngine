@@ -9,6 +9,7 @@ set(RHI_SOURCES
     RHI/Shader.h
     RHI/CommandList.h
     RHI/Buffer.h
+    RHI/Bindless.h
     RHI/SwapChain.h
     RHI/QueryPool.h
     RHI/MeshShader.h
