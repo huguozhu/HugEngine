@@ -140,7 +140,7 @@ private:
     // Bindless 材质 SSBO（per-material 材质数据，去重后写入单个 buffer，binding 30 = u_Materials[]）
     std::unique_ptr<rhi::IRHIBuffer> m_MaterialBuffer;  // 材质数据 SSBO（元素 = GPUMaterialData，按 materialID>>2 索引）
     u32 m_MaterialCount = 0;                            // 已注册材质数（buffer 内元素数）
-    bool m_UseBindlessMaterial = true;  // 默认走内联路径（GPUObjectData 字段读材质参数）；验证 bindless 后切换
+    bool m_UseBindlessMaterial = false;  // 默认走内联路径（GPUObjectData 字段读材质参数）；验证 bindless 后切换
 
     // 多线程录制
     bool m_MultiThreadRecord = true;
