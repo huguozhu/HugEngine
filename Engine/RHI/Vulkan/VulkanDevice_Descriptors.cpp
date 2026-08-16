@@ -42,7 +42,7 @@ VkDescriptorType VulkanDevice::ToVkDescType(DescriptorType type) const {
 // 需根据引擎实际负载（bindless 纹理数、材质数、RT 集数）调整
 // ============================================================
 static constexpr u32 kDescPoolSize_UniformBuffer         = 64;    // 逐帧 UBO 数量
-static constexpr u32 kDescPoolSize_StorageBuffer         = 1024;  // SSBO（Object/Light/Meshlet 等）
+static constexpr u32 kDescPoolSize_StorageBuffer         = 4096;  // SSBO（Object/Light/Meshlet + bindless SSBO 数组）
 static constexpr u32 kDescPoolSize_CombinedImageSampler  = 8192;  // bindless 纹理数组
 static constexpr u32 kDescPoolSize_SampledImage          = 4096;  // 采样图像（非组合）
 static constexpr u32 kDescPoolSize_StorageImage          = 256;   // StorageImage（RT BackBuffer 等）
@@ -77,12 +77,13 @@ void VulkanDevice::EnsureDescriptorPool() {
 DescriptorSetLayoutHandle VulkanDevice::CreateDescriptorSetLayout(const DescriptorSetLayoutDesc& desc) {
     DescLayoutInfo info;
     std::vector<VkDescriptorSetLayoutBinding> vkBindings;
-    // 找到最后一个 bindless binding 的索引（Vulkan 要求 VARIABLE_DESCRIPTOR_COUNT_BIT
-    // 只能设置在最后一个 binding 上）
-    i32 lastBindlessIdx = -1;
+    // 找到 binding 号最大的 bindless 绑定（Vulkan 要求 VARIABLE_COUNT
+    // 只能设在 binding 号最大的绑定上，而非「vector 里最后一个 bindless」）
+    i32 varCountIdx = -1;
     for (i32 i = 0; i < (i32)desc.bindings.size(); ++i) {
-        if (desc.bindings[i].bindless)
-            lastBindlessIdx = i;
+        if (!desc.bindings[i].bindless) continue;
+        if (varCountIdx < 0 || desc.bindings[i].binding > desc.bindings[varCountIdx].binding)
+            varCountIdx = i;
     }
 
     for (i32 i = 0; i < (i32)desc.bindings.size(); ++i) {
@@ -98,8 +99,8 @@ DescriptorSetLayoutHandle VulkanDevice::CreateDescriptorSetLayout(const Descript
 
         VkDescriptorBindingFlags flags = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT
                                        | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
-        if (b.bindless && i == lastBindlessIdx) {
-            // 只有最后一个 bindless binding 允许设置 VARIABLE_COUNT
+        if (i == varCountIdx) {
+            // 只有 binding 号最大的 bindless binding 允许设置 VARIABLE_COUNT
             flags |= VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT;
         }
         info.bindingFlags.push_back(flags);
@@ -257,6 +258,37 @@ void VulkanDevice::UpdateDescriptorSet(DescriptorSetHandle setHandle, u32 bindin
     write.descriptorCount = count;
     write.descriptorType  = vkType;
     write.pImageInfo      = imageInfos.data();
+
+    vkUpdateDescriptorSets(m_Device, 1, &write, 0, nullptr);
+}
+
+// ============================================================
+// UpdateDescriptorSet — SSBO 数组绑定（bindless SSBO 数组）
+// ============================================================
+void VulkanDevice::UpdateDescriptorSet(DescriptorSetHandle setHandle, u32 binding,
+                                        DescriptorType type, IRHIBuffer** buffers, u32 count) {
+    if (setHandle == 0 || setHandle > m_DescSets.size()) return;
+    if (count == 0) return;
+    VkDescriptorSet ds = m_DescSets[static_cast<usize>(setHandle - 1)];
+    if (ds == VK_NULL_HANDLE) return;
+
+    // 空 buffer 槽位写入 VK_NULL_HANDLE + VK_WHOLE_SIZE（PARTIALLY_BOUND 允许部分未绑定）
+    std::vector<VkDescriptorBufferInfo> bufInfos(count);
+    for (u32 i = 0; i < count; ++i) {
+        auto* vkBuf = buffers ? static_cast<VulkanBuffer*>(buffers[i]) : nullptr;
+        bufInfos[i].buffer = vkBuf ? vkBuf->GetHandle() : VK_NULL_HANDLE;
+        bufInfos[i].offset = 0;
+        bufInfos[i].range  = vkBuf ? vkBuf->GetSize() : VK_WHOLE_SIZE;
+    }
+
+    VkWriteDescriptorSet write{};
+    write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet          = ds;
+    write.dstBinding      = binding;
+    write.dstArrayElement = 0;
+    write.descriptorCount = count;
+    write.descriptorType  = ToVkDescType(type);
+    write.pBufferInfo     = bufInfos.data();
 
     vkUpdateDescriptorSets(m_Device, 1, &write, 0, nullptr);
 }

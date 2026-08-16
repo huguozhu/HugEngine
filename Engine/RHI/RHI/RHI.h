@@ -8,6 +8,7 @@
 #include "RHI/QueryPool.h"
 #include "RHI/RayTracing.h"
 #include "RHI/MeshShader.h"
+#include "RHI/Bindless.h"
 #include "Core/Types.h"
 
 #include <memory>
@@ -46,6 +47,10 @@ public:
     virtual std::unique_ptr<IRHITexture>        CreateTexture(const TextureDesc& desc) = 0;
     virtual std::unique_ptr<IRHISampler>        CreateSampler(const SamplerDesc& desc) = 0;
     virtual std::unique_ptr<IRHIPipelineState>  CreatePipelineState(const PipelineStateDesc& desc) = 0;
+
+    // --- Bindless Heap ---
+    // 返回设备级 bindless 堆（懒创建；Vulkan 侧为 VulkanBindlessHeap）
+    virtual IRHIBindlessHeap* GetBindlessHeap() = 0;
 
     // --- Transient Resource ---
     // 创建使用瞬态内存的纹理（GPU 完成前帧后内存被回收）
@@ -94,6 +99,10 @@ public:
                                                           DescriptorType type,
                                                           IRHITexture** textures, IRHISampler** samplers,
                                                           u32 count) = 0;
+    /// 更新描述符数组（bindless SSBO 数组）
+    virtual void                      UpdateDescriptorSet(DescriptorSetHandle set, u32 binding,
+                                                          DescriptorType type,
+                                                          IRHIBuffer** buffers, u32 count) = 0;
     virtual void                      DestroyDescriptorSetLayout(DescriptorSetLayoutHandle layout) = 0;
 
     /// 直接绑定 ImageView 到描述符集（用于 SwapChain BackBuffer 等非 IRHITexture 图像）

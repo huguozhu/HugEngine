@@ -31,6 +31,7 @@
 #include "VulkanCommandList.h"
 #include "VulkanResources.h"
 #include "VulkanRT.h"
+#include "VulkanBindlessHeap.h"
 #include "VulkanPipelineState.h"
 #include "DeferredDestructionQueue.h"
 
@@ -60,6 +61,9 @@ public:
     std::unique_ptr<IRHITexture>      CreateTexture(const TextureDesc& desc) override;
     std::unique_ptr<IRHISampler>      CreateSampler(const SamplerDesc& desc) override;
     std::unique_ptr<IRHIPipelineState> CreatePipelineState(const PipelineStateDesc& desc) override;
+
+    // Bindless Heap — 懒创建设备级 bindless 堆
+    IRHIBindlessHeap* GetBindlessHeap() override;
 
     // Transient Resource — 使用瞬态内存池创建纹理（RenderGraph 别名分析驱动）
     std::unique_ptr<IRHITexture>        CreateTransientTexture(const TextureDesc& desc) override;
@@ -142,6 +146,9 @@ public:
                                                   DescriptorType type,
                                                   IRHITexture** textures, IRHISampler** samplers,
                                                   u32 count) override;
+    void                      UpdateDescriptorSet(DescriptorSetHandle set, u32 binding,
+                                                  DescriptorType type,
+                                                  IRHIBuffer** buffers, u32 count) override;
     void                      DestroyDescriptorSetLayout(DescriptorSetLayoutHandle layout) override;
     void                      UpdateDescriptorSetWithImageView(DescriptorSetHandle set, u32 binding,
                                                                 DescriptorType type, void* imageView) override;
@@ -351,6 +358,9 @@ private:
     VulkanDGC        m_DGC;  // DGC 封装对象（由 VulkanDevice 管理生命周期）
 
     VkDescriptorPool                  m_DescPool = VK_NULL_HANDLE;
+
+    // 设备级 bindless 堆（懒创建，GetBindlessHeap 首次调用时构造）
+    std::unique_ptr<VulkanBindlessHeap> m_BindlessHeap;
 
     struct DescLayoutInfo {
         VkDescriptorSetLayout layout = VK_NULL_HANDLE;

@@ -286,6 +286,14 @@ void VulkanDevice::Initialize(const DeviceInitDesc& desc) {
 }
 
 // ============================================================
+// GetBindlessHeap — 懒创建设备级 bindless 堆
+// ============================================================
+IRHIBindlessHeap* VulkanDevice::GetBindlessHeap() {
+    if (!m_BindlessHeap) m_BindlessHeap = std::make_unique<VulkanBindlessHeap>(this);
+    return m_BindlessHeap.get();
+}
+
+// ============================================================
 // Shutdown — 销毁所有 Vulkan 资源
 // ============================================================
 void VulkanDevice::Shutdown() {

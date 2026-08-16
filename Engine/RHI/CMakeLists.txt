@@ -46,6 +46,8 @@ if(HUGENGINE_RHI_VULKAN)
 
     set(RHI_VULKAN_SOURCES
         Vulkan/VulkanDevice.cpp
+        Vulkan/VulkanBindlessHeap.h
+        Vulkan/VulkanBindlessHeap.cpp
         Vulkan/VulkanRT.cpp
         Vulkan/VulkanDevice_MeshShader.cpp
         Vulkan/VulkanDevice_GPL.cpp
