@@ -29,6 +29,7 @@ constexpr u32 kDescSetBindless = 2;  // set=2: 无绑定资源（TLAS 等）
 constexpr u32 kBindingObjectData       = 2;   // Object SSBO（GBuffer / Shadow Pass 共用）
 constexpr u32 kBindingBindlessTextures = 5;   // Bindless 纹理数组（SampledImage）
 constexpr u32 kBindingBindlessSamplers = 6;   // Bindless 采样器数组（Sampler）
+constexpr u32 kBindingBindlessSSBO    = 30;  // Bindless SSBO 数组（StorageBuffer，binding 号最大以承载 VARIABLE_COUNT）
 constexpr u32 kBindingLightGrid        = 7;   // 光源网格（Clustered Shading SSBO）
 constexpr u32 kBindingLightIndexList   = 8;   // 光源索引列表（Clustered Shading SSBO）
 

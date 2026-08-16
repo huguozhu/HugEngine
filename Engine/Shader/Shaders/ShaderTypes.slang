@@ -47,6 +47,7 @@ GPU_CONST(GPU_UINT kGPUDescSet_Bindless = 2);   // set=2: 无绑定资源（TLAS
 GPU_CONST(GPU_UINT kGPUBinding_ObjectData       = 2);   // Object SSBO
 GPU_CONST(GPU_UINT kGPUBinding_BindlessTextures = 5);   // Bindless 纹理数组
 GPU_CONST(GPU_UINT kGPUBinding_BindlessSamplers = 6);   // Bindless 采样器数组
+GPU_CONST(GPU_UINT kGPUBinding_BindlessSSBO     = 30);  // Bindless SSBO 数组（最高 binding，VARIABLE_COUNT）
 GPU_CONST(GPU_UINT kGPUBinding_LightGrid        = 7);   // 光源网格 SSBO
 GPU_CONST(GPU_UINT kGPUBinding_LightIndexList   = 8);   // 光源索引列表 SSBO
 
