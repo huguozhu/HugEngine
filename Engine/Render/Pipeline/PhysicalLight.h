@@ -11,6 +11,18 @@
 
 namespace he::render {
 
+// ============================================================
+// 物理光照单位换算系数（lux/cd → 渲染强度）
+//
+// 物理光照系统（LightComponent::illuminance/luminousIntensity）使用真实
+// 物理单位：方向光太阳照度可达 12 万 lux、点光发光强度为坎德拉量级。
+// 若直接作为 shader 的 colorIntensity.w（radiance 乘数），会把 HDR 打到
+// ACES 饱和爆白。无自动曝光的管线（Forward/HybridRT/PathTracing）在收集
+// 光源时需乘此系数换算到渲染强度量级（≈EV15 晴日曝光）。
+// 注意：Deferred 管线有自动曝光（r.AutoExposure.WhitePoint），不需要此换算。
+// ============================================================
+static constexpr float kPhysicalLightExposure = 2.6e-5f;
+
 /// 色温 (Kelvin) → RGB 颜色（线性空间，近似归一化）
 /// 参考: Tanner Helland / Kryzysztof 近似
 /// @param kelvin 色温, 单位开尔文 (K), 范围 [1000, 40000]

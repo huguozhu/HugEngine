@@ -506,8 +506,8 @@ void ForwardPipeline::CollectLights(
             auto* dl = static_cast<he::DirectionalLight*>(&lc);
             gl.directionType = float4(dl->direction, 0.0f);
             gl.positionRange = float4(0, 0, 0, 0);
-            if (lc.illuminance > 0.0f) {          // 物理模式：照度 lux
-                gl.colorIntensity.w = lc.illuminance;
+            if (lc.illuminance > 0.0f) {          // 物理模式：照度 lux → 换算到渲染强度
+                gl.colorIntensity.w = lc.illuminance * kPhysicalLightExposure;
                 gl.positionRange.w   = -1.0f;
             }
             break;
@@ -517,8 +517,8 @@ void ForwardPipeline::CollectLights(
             float3 pos = sg.GetWorldPosition(e);
             gl.positionRange = float4(pos, pl->range);
             gl.directionType = float4(0, -1, 0, 1.0f);
-            if (lc.luminousIntensity > 0.0f) {    // 物理模式：发光强度 cd
-                gl.colorIntensity.w = lc.luminousIntensity;
+            if (lc.luminousIntensity > 0.0f) {    // 物理模式：发光强度 cd → 换算到渲染强度
+                gl.colorIntensity.w = lc.luminousIntensity * kPhysicalLightExposure;
                 gl.positionRange.w   = -(pl->range);
             }
             break;
@@ -530,7 +530,7 @@ void ForwardPipeline::CollectLights(
             gl.positionRange = float4(pos, r);
             gl.directionType = float4(sl->direction, 2.0f);
             gl.coneAngles   = float2(sl->innerConeAngle, sl->outerConeAngle);
-            if (lc.luminousIntensity > 0.0f) gl.colorIntensity.w = lc.luminousIntensity;
+            if (lc.luminousIntensity > 0.0f) gl.colorIntensity.w = lc.luminousIntensity * kPhysicalLightExposure;
             break;
         }
         }

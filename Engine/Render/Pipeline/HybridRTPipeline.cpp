@@ -424,7 +424,7 @@ void HybridRTPipeline::CollectLights(he::World& world, he::SceneGraph& sg,
             auto* dl = static_cast<DirectionalLight*>(&lc);
             gl.directionType = float4(dl->direction, 0.0f);
             if (lc.illuminance > 0.0f) {
-                gl.colorIntensity.w = lc.illuminance;
+                gl.colorIntensity.w = lc.illuminance * kPhysicalLightExposure;
                 gl.positionRange.w   = -1.0f;
             }
             break;
@@ -434,7 +434,7 @@ void HybridRTPipeline::CollectLights(he::World& world, he::SceneGraph& sg,
             gl.positionRange = float4(sg.GetWorldPosition(e), pl->range);
             gl.directionType.w = 1.0f;
             if (lc.luminousIntensity > 0.0f) {
-                gl.colorIntensity.w = lc.luminousIntensity;
+                gl.colorIntensity.w = lc.luminousIntensity * kPhysicalLightExposure;
                 gl.positionRange.w   = -(pl->range);
             }
             break;
@@ -446,7 +446,7 @@ void HybridRTPipeline::CollectLights(he::World& world, he::SceneGraph& sg,
             gl.directionType = float4(glm::normalize(sl->direction), 2.0f);
             gl.coneAngles = float2(sl->innerConeAngle, sl->outerConeAngle);
             if (lc.luminousIntensity > 0.0f) {
-                gl.colorIntensity.w = lc.luminousIntensity;
+                gl.colorIntensity.w = lc.luminousIntensity * kPhysicalLightExposure;
             }
             break;
         }
