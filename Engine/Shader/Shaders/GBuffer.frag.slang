@@ -47,19 +47,19 @@ FSOutput fragmentMain(VSOutput input) {
 
     // ── MRT 0-2：PBR 材质（bindless 纹理数组采样） ──
     uint texBase = obj.materialID;
-    float4 baseColorSample = u_Textures[texBase + 0].Sample(u_Samplers[0], input.uv);
+    float4 baseColorSample = u_Textures[texBase + 0].Sample(u_Samplers[texBase + 0], input.uv);
     float3 albedo   = obj.baseColorFactor.rgb * baseColorSample.rgb;
     float  alpha    = obj.baseColorFactor.a * baseColorSample.a;
-    float  metallic = obj.metallicFactor * u_Textures[texBase + 2].Sample(u_Samplers[0], input.uv).b;
+    float  metallic = obj.metallicFactor * u_Textures[texBase + 2].Sample(u_Samplers[texBase + 2], input.uv).b;
 
     if (alpha < obj.alphaCutoff) discard;
 
-    float3 texNormal = u_Textures[texBase + 1].Sample(u_Samplers[0], input.uv).rgb * 2.0 - 1.0;
+    float3 texNormal = u_Textures[texBase + 1].Sample(u_Samplers[texBase + 1], input.uv).rgb * 2.0 - 1.0;
     float3 N = normalize(input.worldNormal + texNormal * 0.5);
 
     float roughness = clamp(obj.roughnessFactor *
-        u_Textures[texBase + 2].Sample(u_Samplers[0], input.uv).g, 0.04, 1.0);
-    float ao = obj.aoFactor * u_Textures[texBase + 3].Sample(u_Samplers[0], input.uv).r;
+        u_Textures[texBase + 2].Sample(u_Samplers[texBase + 2], input.uv).g, 0.04, 1.0);
+    float ao = obj.aoFactor * u_Textures[texBase + 3].Sample(u_Samplers[texBase + 3], input.uv).r;
 
     // ── MRT 3：Velocity（UV 空间运动矢量 = currUV - prevUV） ──
     float3 currNDC = input.position.xyz / input.position.w;
