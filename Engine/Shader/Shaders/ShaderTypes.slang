@@ -116,6 +116,13 @@ GPU_CONST(GPU_UINT kGPUClusterTileSize    = 64);  // Clustered Shading 屏幕 ti
 GPU_CONST(GPU_UINT kGPUClusterSlices      = 12);  // Clustered Shading Z 切片数
 GPU_CONST(float   kGPUPrefilterMips       = 5.0); // IBL 预滤波 mip 层数
 
+// --- 材质纹理槽偏移（每材质占 4 个纹理槽，materialID 为基索引）---
+GPU_CONST(GPU_UINT kGPUMaterialTexSlot_BaseColor      = 0);  // 基础色 BaseColor
+GPU_CONST(GPU_UINT kGPUMaterialTexSlot_Normal         = 1);  // 法线 Normal
+GPU_CONST(GPU_UINT kGPUMaterialTexSlot_MetallicRough  = 2);  // 金属度/粗糙度 MetallicRoughness
+GPU_CONST(GPU_UINT kGPUMaterialTexSlot_Occlusion      = 3);  // 环境光遮蔽 Occlusion
+GPU_CONST(GPU_UINT kGPUMaterialTexSlot_Count          = 4);  // 每材质纹理槽数（materialID >> 2 的依据）
+
 GPU_CONST_END
 
 // ---- 清理宏（GPU struct 定义后统一清理）----
