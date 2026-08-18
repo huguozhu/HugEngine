@@ -384,8 +384,8 @@ void DeferredPipeline::CollectLights(PushConstantData& pc, he::World& world,
             auto* dl = static_cast<he::DirectionalLight*>(&lc);
             gl.directionType = float4(dl->direction, 0.0f);
             if (lc.illuminance > 0.0f) {
-                // 方向光物理模式：colorIntensity.w = 照度 (lux), positionRange.w = -1 (flag)
-                gl.colorIntensity.w = lc.illuminance;
+                // 方向光物理模式：colorIntensity.w = 照度 (lux) × 换算系数, positionRange.w = -1 (flag)
+                gl.colorIntensity.w = lc.illuminance * kPhysicalLightExposure;
                 gl.positionRange.w   = -1.0f;
             }
             break;
@@ -395,8 +395,8 @@ void DeferredPipeline::CollectLights(PushConstantData& pc, he::World& world,
             gl.positionRange = float4(sg.GetWorldPosition(e), pl->range);
             gl.directionType.w = 1.0f;
             if (lc.luminousIntensity > 0.0f) {
-                // 点光源物理模式：colorIntensity.w = 发光强度 (cd), 范围取负标记
-                gl.colorIntensity.w = lc.luminousIntensity;
+                // 点光源物理模式：colorIntensity.w = 发光强度 (cd) × 换算系数, 范围取负标记
+                gl.colorIntensity.w = lc.luminousIntensity * kPhysicalLightExposure;
                 gl.positionRange.w   = -(pl->range);
             }
             break;
@@ -408,8 +408,8 @@ void DeferredPipeline::CollectLights(PushConstantData& pc, he::World& world,
             gl.directionType = float4(glm::normalize(sl->direction), 2.0f); // Spot
             gl.coneAngles = float2(sl->innerConeAngle, sl->outerConeAngle);
             if (lc.luminousIntensity > 0.0f) {
-                // 聚光物理模式：colorIntensity.w = 发光强度 (cd)
-                gl.colorIntensity.w = lc.luminousIntensity;
+                // 聚光物理模式：colorIntensity.w = 发光强度 (cd) × 换算系数
+                gl.colorIntensity.w = lc.luminousIntensity * kPhysicalLightExposure;
             }
             break;
         }

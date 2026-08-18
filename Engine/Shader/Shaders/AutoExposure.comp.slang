@@ -19,8 +19,9 @@ float Luminance(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 
 [numthreads(16, 16, 1)]
 void main(uint3 dtid : SV_DispatchThreadID, uint gi : SV_GroupIndex, uint3 gid : SV_GroupID) {
-    // 每个线程处理一个像素（16×16 = 256 线程/组，覆盖全屏需要 ceil(W/16)×ceil(H/16) 组）
-    float2 uv = (float2(dtid.xy) + 0.5) / float2(1920.0, 1080.0);
+    // 固定 16×16 组 × 16×16 线程 = 256×256 线程，映射到全屏 [0,1]²（跨像素降采样），
+    // 而不是硬编码 1920×1080（否则只采样纹理左上角，曝光值错误）
+    float2 uv = (float2(dtid.xy) + 0.5) / float2(256.0, 256.0);
     float lum = Luminance(u_HDR.Sample(u_HDRSampler, uv).rgb);
     float logLum = log2(max(lum, 1e-5));
 
@@ -34,7 +35,7 @@ void main(uint3 dtid : SV_DispatchThreadID, uint gi : SV_GroupIndex, uint3 gid :
 
     // 每组写一个 partial sum 到 SSBO
     if (gi == 0) {
-        uint groupIdx = gid.y * ((1920 + 15) / 16) + gid.x;  // row-major group index
+        uint groupIdx = gid.y * 16 + gid.x;  // row-major group index（16 组/行）
         if (groupIdx < 256) u_Result[groupIdx] = g_Sum[0] / 256.0;
     }
 }
