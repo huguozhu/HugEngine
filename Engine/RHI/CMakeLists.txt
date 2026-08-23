@@ -41,7 +41,7 @@ target_link_libraries(HugEngineRHI PUBLIC HugEngineCore)
 
 # --- Vulkan backend (system SDK, not FetchContent) ---
 if(HUGENGINE_RHI_VULKAN)
-    # Find Vulkan SDK from system (VULKAN_SDK env var or standard install path)
+    # Vulkan SDK 路径已由 cmake/VulkanSDK.cmake 自动检测并写入 ENV{VULKAN_SDK}
     find_package(Vulkan REQUIRED)
 
     set(RHI_VULKAN_SOURCES

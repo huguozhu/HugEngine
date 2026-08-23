@@ -37,6 +37,9 @@ option(HUGENGINE_RHI_VULKAN      "Enable Vulkan backend" ON)
 
 # Vulkan SDK（ImGui Vulkan 后端 + RHI 均需要）
 if(HUGENGINE_RHI_VULKAN)
+    # 自动检测本机最新版本的 Vulkan SDK（cmake/VulkanSDK.cmake），
+    # 不写死版本路径、不下载；找不到则报错终止配置
+    include(cmake/VulkanSDK.cmake)
     find_package(Vulkan REQUIRED)
 endif()
 
