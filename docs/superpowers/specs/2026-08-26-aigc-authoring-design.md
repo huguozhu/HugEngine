@@ -1,0 +1,261 @@
+# AIGC 创作平台设计（AI-as-First-Class Citizen · 应用层）
+
+> **文档类型**: 架构设计 spec
+> **关联文档**: 底座层 spec 见 `2026-08-26-ai-foundation-design.md`
+> **状态**: 待评审
+> **日期**: 2026-08-26
+
+---
+
+## 1. 概述与目标
+
+### 1.1 问题陈述
+
+传统引擎里，AI 生成内容（AIGC）通常以"插件/第三方工具"形式存在：生成结果需要导出→导入→人工摆放，无法直接进入引擎的生产管线。其结果是 AI 产出与人工产出的资产是**两套东西**，渲染、编辑器、序列化都要为 AI 内容开特殊分支。
+
+### 1.2 目标
+
+让 AI 生成的内容走**与人工编辑器完全相同的生产管线**：生成 = 产出标准资产 + 标准 Entity/Component 树，渲染栈与序列化对"这堆东西是 AI 生成的还是 glTF 导入的"**零感知**。
+
+### 1.3 非目标
+
+- **不做模型训练**。文生图/文生 3D 等生成模型由底座层（`IAIDevice`）加载，本 spec 只做调度与资产落地。
+- **不做生成模型的算法研究**。复用现成模型（SD/Flux、文生 3D、LLM）。
+- **不在本 spec 覆盖"AI 驱动运行时代理"**（见底座层 spec 的 Agent 部分）。
+- **不做版权/审核的最终裁定**，但预留审核钩子。
+
+---
+
+## 2. 依赖
+
+| 依赖 | 位置 | 用途 |
+|---|---|---|
+| AI 推理运行时（底座） | `he::ai::IAIDevice` / `RemoteBackend` / `GPUBackend` | 生成模型的执行引擎 |
+| 宏驱动反射 | `he::reflect::TypeRegistry` + `ClassInfo::factory` | 按名构造组件 |
+| ECS | `he::World::AddComponent<T>` | 把生成结果装配成 Entity |
+| 资产导入同构 | `he::asset::LoadGLTF`（`glTFResult`） | 生成器返回形状对齐 |
+| 命令系统 | `he::Command` / `he::CommandHistory` | 生成可撤销 |
+| 序列化 | `he::Serialize`（`Archive` Binary/JSON） | 生成场景可保存 |
+
+---
+
+## 3. 核心设计原则
+
+1. **生成即标准资产**：AI 产出直接落成 `TextureAsset / StaticMeshAsset / MaterialAsset / AnimationClip / Entity树`，无"AI 专用"资产类型。
+2. **与 glTFLoader 同构**：`GenerativeAssetFactory` 的返回类型与 `LoadGLTF` 的 `glTFResult`（`TArray<Entity> entities; usize meshCount; bool success; String error;`）完全一致——调用方无需区分数据来源。
+3. **可撤销、可审核**：每次生成封装为 `he::Command`，走 `CommandHistory`；生成结果先入"待接受队列"，用户接受后才写入场景。
+4. **解耦开发**：先用 `RemoteBackend`（LLM 编排 + 云端生成）跑通"Prompt→场景"最小闭环，本地 GPU 生成（文生图/3D）等底座 GPU 后端就绪后再接入。
+5. **异步 + 增量刷新**：生成任务在后台队列执行，完成后按优先级增量刷新编辑器，不阻塞帧循环。
+
+---
+
+## 4. 模块与接口设计
+
+新增目录 `Engine/AI/AIGC/`（也可独立为 `Engine/AIGC/`，本 spec 放 `Engine/AI/AIGC/`，`namespace he::ai::aigc`）。
+
+```
+Engine/AI/AIGC/
+├── GenerativeAssetFactory.h/.cpp   # 「AI 版 glTFLoader」：prompt → 标准资产
+├── AIGCProvider.h                  # 生成后端抽象（本地/云端），并行 IAIBackend
+├── AICommand.h/.cpp                # 生成操作 = he::Command
+├── AIPipeline.h/.cpp               # 任务队列 / 调度 / 增量刷新
+└── Editor/
+    ├── PromptPanel.h/.cpp          # 提示词面板（场景/资产/材质三入口）
+    └── GenerationQueuePanel.h/.cpp # 生成队列 + 缩略图 + 接受/拒绝
+```
+
+### 4.1 GenerativeAssetFactory：与 `LoadGLTF` 同构的生成器
+
+```cpp
+// Engine/AI/AIGC/GenerativeAssetFactory.h
+namespace he::ai::aigc {
+
+// 生成结果 —— 与 asset::glTFResult 完全同构（对齐 Engine/Asset/Asset/glTFLoader.h）
+struct GenerationResult {
+    TArray<Entity> entities;    // 生成的实体树（与 glTF 导入一致）
+    usize          assetCount = 0;
+    bool           success    = false;
+    String         error;
+};
+
+// 生成器：数据源从「磁盘文件」换成「生成后端输出」，落地产物不变
+class GenerativeAssetFactory {
+public:
+    // 一句话生成一个场景（房间/村庄/关卡），返回标准 Entity 树
+    GenerationResult GenerateScene(World& world, SceneGraph& sg, const String& prompt);
+
+    // 单资产生成（产出标准资产句柄，供编辑器/材质系统消费）
+    AssetRef<TextureAsset>    TextToTexture(const String& prompt, const TextureGenParams& p);
+    AssetRef<StaticMeshAsset> TextToMesh(const String& prompt, const MeshGenParams& p);
+    AssetRef<MaterialAsset>   TextToMaterial(const String& prompt, const MaterialGenParams& p);
+    AssetRef<AnimationClip>   TextToAnimation(const String& prompt, const AnimationGenParams& p);
+};
+}
+```
+
+**关键**：`GenerateScene` 内部把 `prompt` 交给底座层的 `WorldModel` + LLM（`RemoteBackend`），LLM 规划出"需要哪些 Entity/Component、各自属性值"，然后走 `TypeRegistry::FindClass(name)->factory()` 构造 + `World::AddComponent<T>` 装配——与 glTF 导入器生成 Entity 的方式同源。
+
+### 4.2 AIGCProvider：生成后端抽象
+
+```cpp
+// Engine/AI/AIGC/AIGCProvider.h
+namespace he::ai::aigc {
+
+// 生成后端 —— 并行底座层的 IAIBackend，但语义是「生成」而非「通用推理」
+class IAIGCProvider {
+public:
+    virtual ~IAIGCProvider() = default;
+    virtual bool Supports(GenKind kind) const = 0;   // GenKind: Scene/Texture/Mesh/Material/Animation
+    virtual void Generate(const GenRequest& req, std::function<void(GenResult&&)> onDone) = 0;
+};
+
+// 后端选择：本地（经 GPUBackend 跑扩散/文生3D）或 云端（远程 API）
+// LocalAIGCProvider  /  CloudAIGCProvider
+}
+```
+
+### 4.3 AICommand：生成即命令（可撤销）
+
+复用现有 `he::Command`，一次生成 = 一条命令。
+
+```cpp
+// Engine/AI/AIGC/AICommand.h
+namespace he::ai::aigc {
+
+// 「生成场景」命令：Execute 创建实体，Undo 销毁它们
+class GenerateSceneCommand : public he::Command {
+public:
+    void Execute() override;   // factory 装配 → 记录创建的 Entity 列表
+    void Undo()    override;   // 遍历记录的 Entity → World::DestroyEntity
+    String GetDescription() const override { return "AI 生成场景: " + m_Prompt; }
+private:
+    World& m_World;
+    String m_Prompt;
+    TArray<Entity> m_Created;  // 回滚用
+};
+
+// 「修改属性」命令：直接复用现有 PropertyChangeCommand（Engine/Editor/Editor/Command.h）
+// 「添加资产」命令：Execute 写入 AssetRegistry，Undo 移除引用
+}
+```
+
+### 4.4 AIPipeline：异步生成管线
+
+```
+用户 prompt → AIPipeline.Enqueue(GenRequest)
+            → 后台线程（JobSystem）调用 IAIGCProvider.Generate
+            → onDone 回调投递主线程 → 生成结果入「待接受队列」
+            → 用户在 GenerationQueuePanel 接受/拒绝
+            → 接受 = CommandHistory.Execute(GenerateSceneCommand)  ← 可撤销
+```
+
+`AIPipeline` 负责：任务去重/合并、并发上限、取消、进度回调、失败重试。
+
+---
+
+## 5. 与现有生产管线的关系（为什么"零特殊处理"）
+
+| 生成目标 | 复用现有机制 | 特殊分支数 |
+|---|---|---|
+| 生成 Component / Entity | `TypeRegistry::FindClass` + `ClassInfo::factory` + `World::AddComponent<T>` | 0 |
+| 设置属性 | `PropertyInfo` + `GetMemberPtr`（偏移量写值） | 0 |
+| 产出网格/贴图/材质资产 | 与 `asset::LoadGLTF` 同构（数据源换成生成器输出） | 0 |
+| 撤销/重做一次生成 | `he::Command` / `he::CommandHistory` / `PropertyChangeCommand` | 0 |
+| 保存 AI 生成场景 | `he::Serialize`（`Archive` Binary/JSON，遍历 `PropertyInfo`） | 0 |
+
+**结论**：AIGC 不引入任何新的资产类型、存储结构或渲染分支；它只是把"人工在编辑器里点出来的操作"换成"模型输出的操作"，落点仍是同一套 Entity/Component/Asset/Command/Archive。
+
+---
+
+## 6. 数据流
+
+```
+用户 prompt
+   │
+   ▼
+AIPipeline.Enqueue ──► IAIGCProvider.Generate（Local=GPUBackend / Cloud=远程 API）
+   │                        │
+   │                        ▼
+   │              生成结果（纹理/网格/材质/Entity 计划）
+   │                        │
+   ▼                        ▼
+主线程 onDone ──► 待接受队列（GenerationQueuePanel）
+                       │
+              ┌────────┴─────────┐
+              ▼                  ▼
+           接受（Execute）      拒绝（丢弃）
+              │
+              ▼
+   CommandHistory.Execute(GenerateSceneCommand)
+              │
+              ▼
+   World::AddComponent / AssetRegistry 写入
+              │
+              ▼
+   渲染 / 编辑器 / 序列化（零感知，与 glTF 导入无差别）
+```
+
+---
+
+## 7. 对现有代码的改动清单
+
+| 文件/模块 | 改动 | 类型 |
+|---|---|---|
+| `Engine/AI/AIGC/**` | 新增整个模块 | 新增 |
+| `Engine/Asset/Asset/glTFLoader.h` | （不改动，仅作为 `GenerationResult` 的对齐基准） | 无 |
+| `Engine/Editor/Editor/Command.h` | 复用；如需批量原子化，新增 `CompositeCommand`（可选） | 可选 |
+| `Engine/Editor/` | 新增 `PromptPanel`、`GenerationQueuePanel` | 新增 |
+| `Engine/Editor/Editor/EditorContext` | 注入 `AIPipeline` 单例 + 面板注册 | 修改 |
+| `Engine/Core/Threading/JobSystem.h` | 复用底座的优先级车道（依赖底座 spec） | 依赖 |
+
+---
+
+## 8. 错误处理与审核
+
+- **生成失败**（模型不可用/网络/超时）：`GenResult.success=false` + `error`，入队列但标记失败态，面板显示重试按钮。
+- **生成内容不合法**（引用不存在资产、属性类型不符）：`GenerateSceneCommand::Execute` 内校验，失败则 `Undo` 已创建的部分，报错不落脏数据。
+- **审核钩子**：`IAIGCProvider` 结果先经可插拔的 `ContentPolicyFilter`（默认放行），再由用户接受；为版权/安全留接口，不做最终裁定。
+- **撤销一致性**：`GenerateSceneCommand::Undo` 必须销毁 `m_Created` 里的全部实体，并对资产引用计数做对应回滚。
+
+---
+
+## 9. 测试策略
+
+| 层级 | 覆盖 |
+|---|---|
+| 单元 | `GenerateSceneCommand` Execute/Undo 对称性（创建 N 实体 → Undo 后 `World::GetEntityCount` 复原）；`AIPipeline` 队列去重/取消/失败重试 |
+| 后端 | `CloudAIGCProvider` 用 mock 服务返回固定场景 JSON；`LocalAIGCProvider` 用小型文生图模型产出可加载纹理 |
+| 集成 | "一句话生成房间"端到端：prompt → 生成 → 接受 → 渲染可见 → 撤销 → 场景复原 |
+| 冒烟 | `Editor` 例程 PromptPanel 生成一个简单场景并出现在 Outliner；保存/加载后 Entity 树一致 |
+
+---
+
+## 10. 分阶段实施
+
+| 里程碑 | 内容 | 对齐现有 Phase | 前置 |
+|---|---|---|---|
+| G1 最小闭环 | `AIGCProvider` + `CloudAIGCProvider`(LLM 编排) + `GenerativeAssetFactory::GenerateScene` + `GenerateSceneCommand` + `PromptPanel`/`GenerationQueuePanel` | P2 末（可与 P3/P4 并行） | 底座 A1 + 反射 + Asset |
+| G2 资产生成 | `TextToTexture / TextToMesh / TextToMaterial / TextToAnimation` 接本地 `GPUBackend` | P5 | 底座 A3 |
+| G3 深度编辑 | AI 驱动的材质编辑、场景重排、批量修饰（全部走 `PropertyChangeCommand`） | P6+ | G1 |
+
+> 关键：G1 只依赖 `World`+`Reflect`+`Asset`+底座 `RemoteBackend`，**完全不依赖渲染进度**，可与 Nanite/GI 并行开发。
+
+---
+
+## 11. 风险
+
+| 风险 | 影响 | 缓解 |
+|---|---|---|
+| 生成结果质量不稳定 | 中 | 待接受队列 + 用户裁定 + 可重试；不自动提交 |
+| prompt 解析出的动作非法 | 中 | `CompileAction`/`Execute` 双重校验 + 可撤销 |
+| 生成任务阻塞主线程 | 中 | `AIPipeline` 全后台执行，主线程仅收回调 |
+| 云端生成依赖外部服务 | 低 | `IAIGCProvider` 抽象隔离，本地后端兜底 |
+
+---
+
+## 12. 验收标准
+
+1. `Editor` 里输入一句话，`GenerativeAssetFactory::GenerateScene` 生成一个可渲染、可选中、出现在 Outliner 的 Entity 树。
+2. 对生成结果执行 `Undo`，`World` 回到生成前的实体数量。
+3. 生成的场景经 `Archive` 保存→加载后 Entity/Component 树一致。
+4. 生成失败的请求在面板显示错误并可重试，不产生脏数据。

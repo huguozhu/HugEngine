@@ -1,0 +1,433 @@
+# AI 统一基座设计（AI-as-First-Class Citizen · 底座）
+
+> **文档类型**: 架构设计 spec
+> **关联文档**: 应用层 spec 见 `2026-08-26-aigc-authoring-design.md`
+> **状态**: 待评审
+> **日期**: 2026-08-26
+
+---
+
+## 1. 概述与目标
+
+### 1.1 问题陈述
+
+当前 HugEngine 中，AI 以两种"事后集成"的形态存在，且**代码层面为零**（`grep -r "Neural|Inference|Agent|LLM|AI" Engine/` 无结果）：
+
+1. **神经渲染**（技术全景 Phase 5，`M73~M79`）：DLSS/FSR/XeSS、NRC、神经材质、RTXNS、LinAlg 被当作渲染管线里一串各自为政的加速插件；
+2. **游戏性 AI**（架构文档 L7 游戏逻辑层）：一句 `Gameplay Systems (Physics, Audio, AI...)`，AI 与物理、音频并列为一个"系统"。
+
+其根因是：**引擎里没有一个与 RHI 平级的推理运行时，也没有一个 AI 可读写的世界表示**。因此任何 AI 能力都只能作为插件挂载，无法成为数据流的一等参与者。
+
+### 1.2 目标
+
+在引擎底层新增一个与 `Engine/RHI` 平级的 `Engine/AI` 模块，使：
+
+- **推理**成为与**渲染**平级的一等硬件抽象（RHI 之于渲染 = AI 运行时之于 AI）；
+- **AI 与渲染共享同一个反射类型化的 World** 作为唯一事实源，AI 读（观察）与写（动作）都走同一条反射通道；
+- Phase 5 的神经渲染从"散装 SDK 插件"重收编为该运行时的**消费者**，而非孤立模块。
+
+### 1.3 非目标（Non-Goals）
+
+- **不做训练框架**。只做推理 + 微调（LoRA 等）的**调用钩子**；训练由外部工具链完成，产出标准格式模型（ONNX / GGUF / SafeTensors / RTXNS）。
+- **不重新实现通用 ML 库**。复用 ONNX Runtime、GGUF、NVIDIA Streamline、RTX Kit；本层只做统一抽象与调度。
+- **不做 AI 状态的网络复制**（`HE_ATTR_REPLICATED` 暂不扩展到 AI 组件，留到后续）。
+- **不在本 spec 覆盖 AIGC 内容生成**（见应用层 spec）。
+
+---
+
+## 2. 现状与依据（为什么"几乎免费"）
+
+现有代码已具备的、本设计直接复用的能力：
+
+| 现有设施 | 位置 | 本设计的用途 |
+|---|---|---|
+| 宏驱动反射：`ClassInfo`（含 `factory`）、`PropertyInfo`（name/offset/typeName/attributes）、`TypeRegistry` | `Engine/Reflect/Reflect/ReflectionAPI.h` | WorldModel 内省世界、Agent/AIGC 按名构造组件 |
+| `ForEachProperty` / `GetMemberPtr`（偏移量读写属性） | 同上 | 观察/动作对属性的泛化读写 |
+| ECS：`World::AddComponent<T>` / `ForEachEntity` / `ForEachComponent` | `Engine/Scene/Scene/World.h` | 世界模型的数据源、动作的执行目标 |
+| `Component` 基类 + `HE_COMPONENT()` 生命周期 | `Engine/Scene/Scene/Component.h` | Agent 组件挂载 |
+| `Command` / `CommandHistory` / `PropertyChangeCommand` | `Engine/Editor/Editor/Command.h` | AI 动作的撤销/重做（可回滚） |
+| `rhi::DeviceCaps` 已声明 `supportsCooperativeVectors` / `supportsLinearAlgebra` | `Engine/RHI/RHI/Types.h:288` | GPU 推理能力探测（已预埋） |
+| `rhi::IRHIDevice`（`CreateBuffer/CreateTexture`） | `Engine/RHI/RHI/RHI.h` | GPU 后端的底层承载 + 零拷贝 |
+| `JobSystem`（Taskflow） | `Engine/Core/Threading/JobSystem.h` | 异步推理调度（需补流式车道） |
+| `render::IRenderSubsystem` | `Engine/Render/Subsystem/RenderSubsystem.h` | 神经渲染子系统复用的接口模式 |
+
+**结论**：AI 一等公民的改造重心不是"新造多少代码"，而是**在正确的位置插入一层抽象**，把上述已存在的反射/ECS/命令/RHI 能力串成一条 AI 可用的数据通路。
+
+---
+
+## 3. 核心设计原则
+
+1. **AI 与渲染平级**：`Engine/AI` 与 `Engine/RHI`、`Engine/Render` 平级，不隶属于 Render 或 Gameplay。
+2. **反射即世界模型**：不另造一套"AI 专用场景格式"；`World` + `TypeRegistry` 就是世界模型，观察/动作直接基于 `PropertyInfo` 生成。
+3. **动作可撤销**：AI 对世界的任何写操作都封装为 `he::Command`，走 `CommandHistory`，保证 AI 可回滚、可审查。
+4. **后端可插拔、能力可降级**：GPU / CPU / 远程后端统一接口；设备不支持时静默降级（如无 Cooperative Vectors 则走 CPU 或远程）。
+5. **流式优先**：LLM 是流式 token 输出，调度器必须支持流式回调，而非只有 `std::future`。
+6. **零拷贝优先**：神经渲染需要 AI 张量与 RHI 纹理/缓冲共享内存，避免 GPU↔CPU 拷贝。
+
+---
+
+## 4. 架构分层
+
+在现有 L0~L8 分层中插入一个新层 **L2.5 AI 运行时层**（与 L2 RHI 平级、共同位于 L3 着色器层之下），并向上支撑 L5 组件层（Agent 组件）与 L4 渲染层（神经渲染）：
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ L5 组件层   Agent/Memory/Goal 组件（新增，与 MeshComponent 平级）│
+├─────────────────────────────────────────────────────────────┤
+│ L4 渲染层   Neural（NRC/超分/神经材质）—— 作为 IRenderSubsystem   │
+├─────────────────────────────────────────────────────────────┤
+│ L2.5 AI 运行时层  ★ 新增  ★                                  │
+│   IAIDevice ─ WorldModel ─ InferenceScheduler                │
+│   ├ GPU Backend（CoopVec/linalg/RTXNS/DirectML）             │
+│   ├ CPU Backend（ONNX Runtime / GGUF）                       │
+│   └ Remote Backend（LLM：OpenAI/Anthropic/Ollama）            │
+├─────────────────────────────────────────────────────────────┤
+│ L2 RHI 层   Vulkan / D3D12 / Metal / WebGPU                 │
+├─────────────────────────────────────────────────────────────┤
+│ L1 反射层   TypeRegistry / ClassInfo / PropertyInfo          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 5. 模块与接口设计
+
+新增目录 `Engine/AI/`，`namespace he::ai`。四块：Runtime、WorldModel、Agent、Neural。
+
+```
+Engine/AI/
+├── CMakeLists.txt
+├── Runtime/
+│   ├── AIDevice.h/.cpp          # IAIDevice + AIDeviceCaps（门面）
+│   ├── AIModel.h                # IAIModel：编译后的模型句柄
+│   ├── AITensor.h               # IAITensor：张量资源（bindless 可见）
+│   ├── InferenceScheduler.h/.cpp# 流式/批处理/优先级车道
+│   └── Backend/
+│       ├── IAIBackend.h         # 后端接口
+│       ├── GPUBackend.h/.cpp    # 包装 RHI compute + CoopVec/linalg/RTXNS/DirectML
+│       ├── CPUBackend.h/.cpp    # ONNX Runtime / GGUF
+│       └── RemoteBackend.h/.cpp # LLM HTTP/SSE 流式
+├── WorldModel/
+│   ├── WorldModel.h/.cpp        # World → 语义快照（反射驱动）
+│   ├── Observation.h            # 观察（AI 读世界）
+│   └── Action.h/.cpp            # 动作（AI 写世界 → he::Command）
+├── Agent/
+│   ├── AgentComponent.h/.cpp    # 一等公民实体组件
+│   ├── Brain.h                  # IBrain 策略抽象
+│   ├── GoalComponent.h          # 目标
+│   ├── MemoryComponent.h/.cpp   # 记忆（短期/长期/情景）
+│   └── ToolUse.h/.cpp           # 工具调用原语
+├── Neural/
+│   ├── NeuralUpscaler.h         # DLSS/FSR/XeSS（Streamline）
+│   ├── NeuralRadianceCache.h    # NRC
+│   ├── NeuralMaterial.h         # NTC / neural BRDF
+│   └── RTXNeuralShader.h        # RTXNS
+└── Editor/
+    ├── AIObserverPanel.h/.cpp   # 世界模型观察面板
+    ├── AgentInspectorPanel.h    # Agent 状态检查器
+    └── PromptConsolePanel.h     # Prompt 控制台
+```
+
+### 5.1 Runtime：推理硬件接口（IHI）
+
+`IAIDevice` 是 `rhi::IRHIDevice` 的镜像，区别在于它抽象"模型执行"而非"图元绘制"。
+
+```cpp
+// Engine/AI/Runtime/AIDevice.h
+namespace he::ai {
+
+// AI 设备能力 —— 在 rhi::DeviceCaps 之上扩展 AI 专属能力
+struct AIDeviceCaps {
+    rhi::DeviceCaps gpu;                  // 复用 RHI 能力（已含 CoopVec/linalg）
+    bool supportsCPU       = false;       // ONNX Runtime / GGUF 可用
+    bool supportsRemoteLLM = false;       // 远程大模型可用
+    bool supportsNPU       = false;       // NPU 直通（预留）
+    u32  maxModelSizeMB    = 0;           // 单模型内存上限
+};
+
+// 模型格式
+enum class AIModelFormat { ONNX, GGUF, SafeTensors, RTXNS_Slang };
+
+// 张量数据类型
+enum class AIDataType { FP32, FP16, BF16, FP8, INT8, INT4 };
+
+// 张量描述 —— 镜像 rhi::BufferDesc/TextureDesc
+struct AITensorDesc {
+    u32        elementCount = 0;
+    AIDataType dtype        = AIDataType::FP32;
+    bool       bindlessVisible = true;   // 与渲染共享（零拷贝）
+};
+
+// 推理请求
+struct InferenceRequest {
+    IAIModel*               model = nullptr;
+    std::vector<IAITensor*> inputs;      // 输入张量（按模型签名顺序）
+    std::vector<IAITensor*> outputs;     // 输出张量
+    u32                     batchSize = 1;
+};
+
+// 推理句柄 —— 支持阻塞等待 + 流式回调（LLM）
+class IAIInference {
+public:
+    virtual ~IAIInference() = default;
+    virtual bool         IsDone() const = 0;
+    virtual void         Wait() = 0;
+    virtual void         Cancel() = 0;
+    // 流式：每个 token / 中间结果回调（LLM 必需）
+    virtual void         SetStreamCallback(std::function<void(const String&)> cb) = 0;
+};
+
+// ★ 推理设备 —— 与 rhi::IRHIDevice 同构
+class IAIDevice {
+public:
+    virtual ~IAIDevice() = default;
+    virtual AIDeviceCaps GetCaps() const = 0;
+
+    // 模型生命周期
+    virtual Ref<IAIModel>  LoadModel(AIModelFormat fmt,
+                                     Span<const u8> weights,
+                                     const String& path) = 0;
+
+    // 张量创建
+    virtual Ref<IAITensor> CreateTensor(const AITensorDesc& desc) = 0;
+
+    // 提交推理（异步，返回句柄）
+    virtual Ref<IAIInference> Submit(InferenceRequest&& req) = 0;
+
+    // ★ 与渲染零拷贝互操作（神经渲染的关键）
+    virtual Ref<IAITensor> WrapRHITexture(rhi::IRHITexture* tex) = 0;   // 读渲染纹理
+    virtual Ref<IAITensor> WrapRHIBuffer(rhi::IRHIBuffer* buf)  = 0;    // 读 bindless 缓冲
+    virtual rhi::IRHIBuffer* ExportBuffer(IAITensor* t)          = 0;   // 写回渲染缓冲
+};
+} // namespace he::ai
+```
+
+**后端**：`IAIBackend` 是 `IAIDevice` 的实现单元，`IAIDevice` 作为门面按模型格式 + 能力选择后端。
+
+```cpp
+// Engine/AI/Runtime/Backend/IAIBackend.h
+namespace he::ai {
+// 单个后端：GPU（包装 RHI compute）、CPU（ONNX/GGUF）、Remote（LLM）
+class IAIBackend {
+public:
+    virtual ~IAIBackend() = default;
+    virtual bool            Supports(AIModelFormat fmt) const = 0;
+    virtual Ref<IAIModel>   Load(AIModelFormat fmt, Span<const u8> weights, const String& path) = 0;
+    virtual Ref<IAITensor>  Allocate(const AITensorDesc& desc) = 0;
+    virtual Ref<IAIInference> Run(InferenceRequest&& req) = 0;
+};
+}
+```
+
+**流式调度器**（`InferenceScheduler`）：在 `JobSystem` 之上增加两条能力——
+- **优先级车道**：渲染耦合推理（NRC/超分）走"帧内高优先"车道，LLM 智能体走"低优先/后台"车道，互不阻塞；
+- **流式回调**：`SetStreamCallback` 的 token 按序投递到主线程（经 `JobSystem` 或自带的回调队列）。
+
+### 5.2 WorldModel：反射驱动的世界模型
+
+**不新增任何场景数据结构**。`WorldModel` 遍历 `World` + `TypeRegistry`，把反射属性自动序列化为 LLM 可读的语义快照。
+
+```cpp
+// Engine/AI/WorldModel/WorldModel.h
+namespace he::ai {
+
+// 观察过滤器 —— 控制快照范围（避免把整帧世界塞进 prompt）
+struct ObservationFilter {
+    float        radius = -1.0f;          // 以某个中心为球的空间范围（-1 = 全场景）
+    float3       center = {0,0,0};
+    u64          targetEntity = 0;        // 0 = 全部，否则仅该实体
+    std::vector<StringView> componentTypes; // 只导出这些组件类型
+};
+
+class WorldModel {
+public:
+    // 生成语义快照（LLM 可读 JSON 文本）
+    // 只导出带 HE_ATTR_AI_VISIBLE 标记的属性；附带 HE_ATTR_AI_DESCRIPTION 作为字段说明
+    String Snapshot(World& world, const ObservationFilter& filter) const;
+
+    // 生成类型 schema（供 LLM 了解"世界长什么样、能做什么"）
+    String TypeSchema() const;   // 遍历 TypeRegistry，输出所有组件类型的可读写字段清单
+};
+}
+```
+
+**新增反射注解**（`Engine/Reflect/Reflect/Attribute.h` 的 `AttrKey` + `ReflectionMacros.h` 的 `HE_ATTR_*`）：
+
+| 注解 | 语义 |
+|---|---|
+| `HE_ATTR_AI_VISIBLE` | 该属性进入世界模型快照 |
+| `HE_ATTR_AI_DESCRIPTION("...")` | 该属性/类型的自然语言说明（LLM 用） |
+| `HE_ATTR_AI_WRITABLE` | 该属性允许 AI 写入（否则只读） |
+| `HE_ATTR_AI_TOOL("name")` | 该方法暴露为 AI 可调用的工具 |
+
+### 5.3 Agent：一等公民智能体
+
+Agent 是**挂载到 Entity 上的组件**，与 `MeshComponent` 平级，享受同样的反射/序列化/编辑器内省。
+
+```cpp
+// Engine/AI/Agent/AgentComponent.h
+namespace he::ai {
+
+// 大脑策略抽象 —— LLM / RL / 行为树 可插拔
+class IBrain {
+public:
+    virtual ~IBrain() = default;
+    // 依据观察 + 记忆，产出动作计划
+    virtual ActionPlan Decide(const Observation& obs, const Memory& mem) = 0;
+};
+
+// 一等公民组件（与 MeshComponent 平级，沿用 HE_COMPONENT 宏注册反射）
+class AgentComponent : public he::Component {
+    HE_COMPONENT()                      // 等价 HE_CLASS()，生成 StaticClass()/GetClass()
+public:
+    String brainType     = "LLM";       // 策略类型（反射工厂构造 IBrain）
+    String systemPrompt;                // 系统提示词
+    f32    thinkInterval = 0.5f;        // 思考间隔（秒）
+    bool   enabled       = true;
+};
+
+// 在 SceneReflect.cpp 中注册（沿用 HE_BEGIN_REGISTER / HE_REGISTER_PROPERTY / HE_ATTR_*）
+// HE_BEGIN_REGISTER(AgentComponent)
+//     HE_REGISTER_PROPERTY(String, brainType)     HE_ATTR_CATEGORY("AI")
+//     HE_REGISTER_PROPERTY(String, systemPrompt)  HE_ATTR_CATEGORY("AI") HE_ATTR_AI_DESCRIPTION("系统提示词")
+//     HE_REGISTER_PROPERTY(f32,    thinkInterval) HE_ATTR_CATEGORY("AI") HE_ATTR_RANGE(0.1f, 10.0f)
+//     HE_REGISTER_PROPERTY(bool,   enabled)       HE_ATTR_CATEGORY("AI")
+// HE_END_REGISTER()
+
+// 记忆组件（短期/长期/情景三类，KV 风格，反射可序列化）
+struct MemoryComponent : he::Component { /* ... */ };
+// 目标组件
+struct GoalComponent : he::Component { /* 目标列表 + 优先级 */ };
+}
+```
+
+**动作 → 命令（可撤销）**：`Action` 内部映射到 `he::Command`，执行走 `he::CommandHistory`，因此 AI 的每次写世界都可回滚。
+
+```cpp
+// Engine/AI/WorldModel/Action.h
+namespace he::ai {
+struct Action {
+    u64    targetEntity;
+    String op;         // "SetProperty" / "AddComponent" / "SpawnEntity" / "CallTool"
+    String argsJson;   // 经反射反序列化到具体属性/参数
+};
+
+// 把一条 Action 编译成一条 he::Command（复用 Editor/Command.h）
+std::unique_ptr<he::Command> CompileAction(World& world, const Action& a);
+}
+```
+
+**工具调用**（`ToolUse`）：定义一组引擎侧原语（`SpawnEntity`、`SetTransform`、`QueryVisible`、`PlayAnimation`、`CaptureScreenshot` 等），每个工具 = `名字 + 参数 schema + 执行函数`，供 LLM Brain 以 function-calling 方式调用。工具参数 schema 也由反射自动生成。
+
+### 5.4 Neural：神经渲染收编
+
+Phase 5 的 `M73~M79`（DLSS/FSR/XeSS、NRC、神经材质、RTXNS）重定义为**`he::ai` 运行时的消费者**：
+
+- 每个神经渲染特性实现为 `he::render::IRenderSubsystem`（复用现有子系统模式），在其内部通过 `IAIDevice` 做推理；
+- NRC 用 `WrapRHITexture` 读取渲染结果、用 `ExportBuffer` 写回辐射缓存；
+- 神经材质权重以 bindless 缓冲存在，经 `WrapRHIBuffer` 零拷贝接入 `IAIDevice`。
+
+---
+
+## 6. 数据流重设计
+
+现状（单向）：
+
+```
+Asset → AssetRegistry → Entity+Components → RenderSystem::OnUpdate → RenderGraph → Present
+```
+
+目标（AI 与渲染共享 World，双向闭环）：
+
+```
+                       ┌──────────────────────────────────────────────┐
+                       │        WorldModel（反射驱动语义快照）           │
+  Asset ──► ECS World  │  ┌────────┐ ┌────────┐ ┌────────┐            │
+       ▲               │  │ 观察    │ │ 记忆    │ │ 目标    │ ← Agent 组件│
+       │               │  └────────┘ └────────┘ └────────┘            │
+       │               └─────────────┬────────────────▲──────────────┘
+       │                             │                │
+  AIGC(应用层)  ◄── 生成 ◄── Brain(LLM/RL) ── 动作 ──► he::Command(可撤销)
+       │                             │                │
+       └─────── IAIDevice 推理运行时 ◄┘                ▼
+                       │                      World::AddComponent / SetProperty
+              ┌────────┴─────────┐
+              ▼                  ▼
+      Neural(收编 Phase5)   RenderSystem → RenderGraph → Present
+```
+
+关键点：AI 读（`WorldModel::Snapshot`）与写（`Action → he::Command`）都与渲染走**同一条反射通道**，而不是在边上另开一个"AI 系统"。
+
+---
+
+## 7. 对现有代码的改动清单
+
+| 文件/模块 | 改动 | 类型 |
+|---|---|---|
+| `Engine/AI/**` | 新增整个模块 | 新增 |
+| `Engine/CMakeLists.txt` | 添加 `Engine/AI` 子目录 | 修改 |
+| `Engine/RHI/RHI/Types.h` | `DeviceCaps` 已含 `supportsCooperativeVectors`/`supportsLinearAlgebra`（无需改），确认导出即可 | 确认 |
+| `Engine/RHI/RHI/RHI.h` | 新增 `ExportBindlessHandle`/底层句柄导出（供 AI 零拷贝），或由 AI 层经 `Bindless.h` 取 index | 小改 |
+| `Engine/Core/Core/Engine.h` | `Engine` 顶层持有 `m_AIDevice`（`std::unique_ptr<he::ai::IAIDevice>`），`Initialize()` 按 caps 建后端 | 修改 |
+| `Engine/Core/Threading/JobSystem.h` | 增加优先级车道 + 流式回调投递 | 修改 |
+| `Engine/Reflect/Reflect/Attribute.h` | `AttrKey` 增加 `AiVisible/AiDescription/AiWritable/AiTool` | 修改 |
+| `Engine/Reflect/Reflect/ReflectionMacros.h` | 增加 `HE_ATTR_AI_*` 宏 | 修改 |
+| `Engine/Scene/Scene/Component.h` | （无需改基类，Agent 组件继承 `he::Component`） | 无 |
+| `Engine/Scene/Scene/SceneReflect.cpp` | 注册 `AgentComponent/MemoryComponent/GoalComponent` | 修改 |
+| `Engine/Editor/Editor/Command.h` | （复用 `Command/CommandHistory/PropertyChangeCommand`；可选新增 `CompositeCommand` 打包批动作） | 可选 |
+| `Engine/Editor/` | 新增 AI 观察/Agent/ Prompt 三面板 | 新增 |
+| `Engine/Render/**` | 神经渲染特性改为 `IRenderSubsystem` 且内部走 `IAIDevice` | 修改 |
+
+---
+
+## 8. 错误处理与降级
+
+- **后端不可用**：`LoadModel` 返回 `nullptr` 或抛出 `AIBackendUnavailable`；调用方按能力降级（GPU→CPU→Remote→功能禁用）。
+- **设备能力不足**（无 CoopVec/linalg）：`GPUBackend` 退化为普通 compute dispatch，或转交 `CPUBackend`。
+- **远程 LLM 失败**（网络/限流/超时）：`IAIInference` 状态置 `Failed`，流式回调触发 `onError`；Agent 侧进入退避重试。
+- **动作非法**（目标实体已销毁、属性不存在）：`CompileAction` 返回 `nullptr`，不产生副作用；`WorldModel` 快照时跳过脏引用。
+- **AI 写世界可回滚**：所有写操作经 `CommandHistory`，异常时 `Undo`。
+
+---
+
+## 9. 测试策略
+
+| 层级 | 覆盖 |
+|---|---|
+| 单元 | `WorldModel::Snapshot`/`TypeSchema` 对反射属性的正确导出；`CompileAction` 对各 op 的编译与 Undo；`InferenceScheduler` 流式回调顺序 |
+| 后端 | `CPUBackend` 用小型 ONNX 模型跑黄金输入输出比对；`RemoteBackend` 用 mock HTTP 服务；`GPUBackend` 用已知 compute 结果校验 |
+| 集成 | `AgentComponent + IBrain(mock) → Action → CommandHistory` 端到端；`NRC 经 WrapRHITexture 读写` 与渲染共享内存正确性 |
+| 冒烟 | 启动 `Editor` 例程，打开 AI 观察面板能看到 `Snapshot` 输出；远程 LLM 智能体完成一次"生成并撤销" |
+
+---
+
+## 10. 分阶段实施（映射现有 Phase）
+
+> 关键调整：**把 Runtime + WorldModel 提前到 Phase 1 末 / Phase 2 初**，否则 Phase 5 的神经渲染仍是"事后插件"。
+
+| 里程碑 | 内容 | 对齐现有 Phase | 前置 |
+|---|---|---|---|
+| A1 基座 | `IAIDevice` 门面 + `IAIBackend` + `CPUBackend` + `RemoteBackend` + `InferenceScheduler`(流式) + `WorldModel` + `HE_ATTR_AI_*` | P1 末 ~ P2 初 | RHI、Reflect、JobSystem |
+| A2 智能体 | `AgentComponent/Memory/Goal` + `IBrain` + `ToolUse` + `Action→Command` + 三个 Editor 面板 | P4 | A1 |
+| A3 神经收编 | `GPUBackend`(CoopVec/linalg/RTXNS/DirectML) + `NeuralUpscaler/NRC/NeuralMaterial/RTXNeuralShader` 落地为 `IRenderSubsystem` | P5 | A1 + 渲染管线 |
+
+---
+
+## 11. 风险与开放问题
+
+| 风险 | 影响 | 缓解 |
+|---|---|---|
+| `IAIDevice` 与 `IRHIDevice` 职责边界模糊 | 中 | 规则：`IAIDevice` 只做"模型执行"，不碰图元绘制；RHI 只提供底层句柄导出，不含模型语义 |
+| 零拷贝在不同 RHI 后端（Vulkan/D3D12）句柄导出方式不一 | 中 | `Wrap/Export` 定义为可选能力，不支持则回退 staging 拷贝 |
+| 流式回调线程安全 | 中 | 回调统一投递到主线程队列，禁止在推理线程直接改 World |
+| 远程 LLM 依赖外部服务 | 低 | `RemoteBackend` 抽象隔离；开源发布时排除密钥/端点配置 |
+| 反射快照体积过大（整帧世界塞进 prompt） | 中 | `ObservationFilter` 强制空间/类型裁剪 + token 预算上限 |
+
+---
+
+## 12. 验收标准
+
+1. `Editor` 例程启动后，AI 观察面板能对当前 `World` 生成 `Snapshot`，且字段来自 `HE_ATTR_AI_VISIBLE`。
+2. 一个 mock Brain 驱动 `AgentComponent` 完成一次 `SpawnEntity` 并经 `CommandHistory.Undo()` 完整回滚。
+3. `CPUBackend` 加载一个 ONNX 模型跑通推理；`RemoteBackend` 对接一个真实 LLM 流式返回 token。
+4. 神经渲染模块（NRC 或超分其一）通过 `IAIDevice`（而非直接调 SDK）完成一次推理并写入渲染资源。
