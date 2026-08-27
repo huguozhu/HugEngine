@@ -74,6 +74,14 @@ endif()
 add_subdirectory(Engine)
 
 # ============================================================
+# Tests（doctest 单元测试，默认关闭）
+# ============================================================
+if(HUGENGINE_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(Tests)
+endif()
+
+# ============================================================
 # Samples
 # ============================================================
 if(HUGENGINE_BUILD_SAMPLES)
@@ -92,7 +100,7 @@ endforeach()
 
 # Engine 模块
 foreach(_eng HugEngineCore HugEngineRHI HugEngineReflect HugEngineShader HugEngineSerialize
-            HugEngineScene HugEngineRender HugEngineAsset HugEngineEditor CompileShaders)
+            HugEngineScene HugEngineRender HugEngineAsset HugEngineEditor HugEngineAI CompileShaders)
     if(TARGET ${_eng})
         set_target_properties(${_eng} PROPERTIES FOLDER "Engine")
     endif()
@@ -110,6 +118,9 @@ if(TARGET 03.Sponza)
 endif()
 if(TARGET 04.Deferred)
     set_target_properties(04.Deferred PROPERTIES FOLDER "Samples")
+endif()
+if(TARGET 05.LLMScene)
+    set_target_properties(05.LLMScene PROPERTIES FOLDER "Samples")
 endif()
 if(TARGET Editor)
     set_target_properties(Editor PROPERTIES FOLDER "Samples")

@@ -20,6 +20,9 @@ add_subdirectory(Shader)
 # Scene — Entity-Component, SceneGraph (L5)
 add_subdirectory(Scene)
 
+# AI — LLM 场景生成与推理运行时 (L2.5)
+add_subdirectory(AI)
+
 # Asset — Resource loading, glTF, registry
 add_subdirectory(Asset)
 

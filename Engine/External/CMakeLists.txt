@@ -33,6 +33,13 @@ if(NOT TARGET stb)
     target_include_directories(stb INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/stb)
 endif()
 
+# --- nlohmann/json (header-only, 本地 vendor 零网络，源自 taskflow 3rd-party) ---
+# 头文件位于 Engine/External/nlohmann/json.hpp，include 根为 Engine/External（"nlohmann/json.hpp"）
+if(NOT TARGET nlohmann_json)
+    add_library(nlohmann_json INTERFACE)
+    target_include_directories(nlohmann_json INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
+endif()
+
 # --- ImGui (header+source, 非 submodule — CDN 下载的源文件) ---
 set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/imgui)
 add_library(imgui STATIC
@@ -49,9 +56,10 @@ target_link_libraries(imgui PUBLIC glfw Vulkan::Vulkan)
 # --- meshoptimizer v0.22 ---
 add_subdirectory(meshoptimizer)
 
-# --- Catch2 (tests only) ---
-if(HUGENGINE_BUILD_TESTS)
-    add_subdirectory(Catch2)
-endif()
+# --- 单元测试框架：doctest（header-only，本地 vendor，见 Engine/External/doctest）---
+# 注：原 Catch2 子模块未初始化，改用 doctest 单头文件（源自 taskflow 3rd-party，零网络）
+# if(HUGENGINE_BUILD_TESTS)
+#     add_subdirectory(Catch2)
+# endif()
 
 message(STATUS "HugEngine: all external dependencies resolved (submodules)")
