@@ -17,6 +17,18 @@ set(AI_SOURCES
     SceneBuilder.cpp
     TypeSchema.h
     TypeSchema.cpp
+    WorldModel/Observation.h
+    WorldModel/WorldModel.h
+    WorldModel/WorldModel.cpp
+    Runtime/AIDevice.h
+    Runtime/AIDevice.cpp
+    Runtime/InferenceScheduler.h
+    Runtime/InferenceScheduler.cpp
+    Runtime/AIModule.h
+    Runtime/AIModule.cpp
+    Runtime/Backend/IAIBackend.h
+    Runtime/Backend/RemoteBackend.h
+    Runtime/Backend/RemoteBackend.cpp
 )
 
 target_sources(HugEngineAI PRIVATE ${AI_SOURCES})

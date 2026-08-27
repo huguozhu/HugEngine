@@ -9,6 +9,9 @@ add_executable(HugEngineTests
     TestSceneBuilder.cpp
     TestDeepSeekProtocol.cpp
     TestPromptToScene.cpp
+    TestWorldModel.cpp
+    TestInferenceScheduler.cpp
+    TestAIModule.cpp
 )
 
 target_include_directories(HugEngineTests PRIVATE

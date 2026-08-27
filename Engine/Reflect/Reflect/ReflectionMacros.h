@@ -48,7 +48,10 @@ private:
             s_Info.typeHash = ::he::reflect::HashString(#ClassName); \
             s_Info.factory = []() -> void* { return new ClassName(); };
 
-#define HE_REGISTER_PROPERTY(Type, Member) \
+// 属性注册宏。
+// 注意：ClassName 必须显式传入（宏参数不能跨宏传递，
+// HE_BEGIN_REGISTER 的参数在 HE_REGISTER_PROPERTY 展开时不可见）。
+#define HE_REGISTER_PROPERTY(ClassName, Type, Member) \
             { \
                 ::he::reflect::PropertyInfo prop; \
                 prop.name = #Member; \
@@ -68,6 +71,16 @@ private:
 #define HE_ATTR_ASSET_PICKER(f)     prop.attributes.emplace_back("AssetPicker", f);
 #define HE_ATTR_COLOR()             prop.attributes.emplace_back("ColorWidget", "1");
 #define HE_ATTR_DEPRECATED(reason)  prop.flags |= ::he::reflect::PF_Deprecated; prop.attributes.emplace_back("Deprecated", reason);
+
+// --- AI 注解（AI 一等公民；键名见 Attribute.h 的 he::reflect::AttrKey::Ai*）---
+// 该属性进入世界模型快照（WorldModel::Snapshot 只导出带此注解的属性）
+#define HE_ATTR_AI_VISIBLE()        prop.attributes.emplace_back("AiVisible", "1");
+// 该属性/类型的自然语言说明（注入 LLM 帮助理解）
+#define HE_ATTR_AI_DESCRIPTION(text) prop.attributes.emplace_back("AiDescription", text);
+// 允许 AI 写入（否则只读）
+#define HE_ATTR_AI_WRITABLE()       prop.attributes.emplace_back("AiWritable", "1");
+// 该方法暴露为 AI 可调用的工具（值为工具名）
+#define HE_ATTR_AI_TOOL(name)       prop.attributes.emplace_back("AiTool", name);
 
 #define HE_END_PROPERTY() \
                 s_Info.properties.push_back(prop); \
