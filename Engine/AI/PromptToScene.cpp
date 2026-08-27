@@ -49,8 +49,14 @@ SceneBuildResult PromptToScene(ILLMClient& llm, World& world, SceneGraph& sg,
         return r;
     }
 
-    // 3. 取出模型输出的场景 JSON 文本
-    String sceneJson = resp["choices"][0]["message"]["content"].get<String>();
+    // 3. 取出模型输出的场景 JSON 文本（类型不符时降级为空串，避免抛异常）
+    const json& msg = resp["choices"][0]["message"];
+    if (!msg.contains("content") || !msg["content"].is_string()) {
+        SceneBuildResult r;
+        r.error = "LLM 响应缺少字符串类型的 content 字段";
+        return r;
+    }
+    String sceneJson = msg["content"].get<String>();
     HE_CORE_INFO("[PromptToScene] LLM 返回场景 JSON:\n{}", sceneJson);
 
     // 4. 交给 SceneBuilder 解释成真实 Entity/Component

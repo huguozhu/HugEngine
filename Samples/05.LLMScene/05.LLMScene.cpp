@@ -26,13 +26,49 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <exception>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
 using namespace he;
 
+// 取 UTF-8 编码的命令行参数。
+// Windows 下 main 的 argv 由 CRT 按系统 ANSI 代码页（如中文系统 GBK 936）转换，
+// 直接使用中文参数会乱码；这里改用宽字符命令行 API（CommandLineToArgvW）
+// 取回 UTF-16 参数再转成 UTF-8，与工程 /utf-8 约定一致。
+static String GetArgUtf8(int argc, char** argv, int index) {
+#ifdef _WIN32
+    int wargc = 0;
+    LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
+    if (wargv && index < wargc) {
+        int n = WideCharToMultiByte(CP_UTF8, 0, wargv[index], -1, nullptr, 0, nullptr, nullptr);
+        if (n > 1) {
+            String s(static_cast<size_t>(n - 1), '\0');
+            WideCharToMultiByte(CP_UTF8, 0, wargv[index], -1, s.data(), n, nullptr, nullptr);
+            LocalFree(wargv);
+            return s;
+        }
+    }
+    if (wargv) LocalFree(wargv);
+    return (argc > index) ? String(argv[index]) : String();
+#else
+    return (argc > index) ? String(argv[index]) : String();
+#endif
+}
+
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    // 本工程以 /utf-8 编译，日志（中文 prompt / LLM JSON）均为 UTF-8 字节；
+    // Windows 控制台默认代码页可能不是 UTF-8（如中文系统 GBK 936），
+    // 按 GBK 解码 UTF-8 会显示乱码，这里把输出代码页切到 UTF-8。
+    SetConsoleOutputCP(CP_UTF8);
+#endif
+
     // --- 1. 读 DeepSeek API Key（不硬编码，从环境变量读）---
     const char* key = std::getenv("DEEPSEEK_API_KEY");
     if (!key || !*key) {
@@ -41,8 +77,10 @@ int main(int argc, char** argv) {
     }
 
     // --- 2. 用户 prompt（命令行参数，或默认值）---
-    String prompt = (argc > 1) ? String(argv[1])
-                               : "一个黄昏下的中世纪村庄，几间石屋、一口井和一盏温暖的篝火";
+    // 用宽字符 API 取参数，保证中文 prompt 不乱码
+    String prompt = GetArgUtf8(argc, argv, 1);
+    if (prompt.empty())
+        prompt = "一个黄昏下的中世纪村庄，几间石屋、一口井和一盏温暖的篝火";
 
     // --- 3. 引擎 + RHI + SwapChain ---
     EngineConfig config;
@@ -73,7 +111,17 @@ int main(int argc, char** argv) {
     SceneGraph sceneGraph(world);
 
     he::ai::DeepSeekClient llm{String(key)};   // 花括号构造，避免最烦人解析
-    he::ai::SceneBuildResult result = he::ai::PromptToScene(llm, world, sceneGraph, prompt);
+    he::ai::SceneBuildResult result;
+    try {
+        result = he::ai::PromptToScene(llm, world, sceneGraph, prompt);
+    } catch (const std::exception& e) {
+        // 网络/解析异常兜底：打印异常信息后退出，不崩溃
+        HE_CORE_ERROR("[LLMScene] 场景生成过程异常: {}", e.what());
+        return -1;
+    } catch (...) {
+        HE_CORE_ERROR("[LLMScene] 场景生成过程未知异常");
+        return -1;
+    }
     if (!result.success) {
         HE_CORE_ERROR("[LLMScene] 场景生成失败: {}", result.error);
         return -1;

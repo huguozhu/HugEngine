@@ -17,19 +17,30 @@ namespace he::ai {
 
 // ============================================================
 // 解析辅助（JSON → 引擎类型）
+//
+// LLM 输出不可靠：字段可能缺失、类型不符、越界。
+// 所有读取都做类型检查，失败时返回默认值降级，绝不抛异常。
 // ============================================================
 
-// 解析 JSON 数组为 float3（默认 def，缺省/非法时返回）
+// 解析 JSON 数组为 float3（默认 def，缺省/非法时返回；元素逐个容错）
 static float3 ParseVec3(const json& j, const float3& def = float3(0.0f)) {
     if (!j.is_array() || j.size() < 3) return def;
-    return float3(j[0].get<float>(), j[1].get<float>(), j[2].get<float>());
+    float3 r = def;
+    if (j[0].is_number()) r.x = j[0].get<float>();
+    if (j[1].is_number()) r.y = j[1].get<float>();
+    if (j[2].is_number()) r.z = j[2].get<float>();
+    return r;
 }
 
-// 解析 JSON 数组为 float4（第 4 分量默认 1.0，用于 baseColor）
+// 解析 JSON 数组为 float4（第 4 分量默认 1.0，用于 baseColor；元素逐个容错）
 static float4 ParseVec4(const json& j, const float4& def = float4(1.0f)) {
     if (!j.is_array() || j.size() < 3) return def;
-    float w = j.size() >= 4 ? j[3].get<float>() : 1.0f;
-    return float4(j[0].get<float>(), j[1].get<float>(), j[2].get<float>(), w);
+    float4 r = def;
+    if (j[0].is_number()) r.x = j[0].get<float>();
+    if (j[1].is_number()) r.y = j[1].get<float>();
+    if (j[2].is_number()) r.z = j[2].get<float>();
+    if (j.size() >= 4 && j[3].is_number()) r.w = j[3].get<float>();
+    return r;
 }
 
 // 从 JSON 读取可选字符串字段（缺省返回 def）
@@ -38,12 +49,30 @@ static String GetString(const json& j, const char* key, const char* def) {
     return def;
 }
 
-// 设置网格材质参数（MeshComponent 基类字段，Cube/Sphere 共用）
+// 安全读取浮点字段：缺省/类型不符时返回默认值（LLM 可能给数组/字符串）
+static float GetFloatField(const json& j, const char* key, float def) {
+    if (j.contains(key) && j[key].is_number()) return j[key].get<float>();
+    return def;
+}
+
+// 安全读取无符号整数字段：缺省/类型不符时返回默认值
+static u32 GetU32Field(const json& j, const char* key, u32 def) {
+    if (j.contains(key) && j[key].is_number_integer()) return j[key].get<u32>();
+    return def;
+}
+
+// 安全读取布尔字段：缺省/类型不符时返回默认值
+static bool GetBoolField(const json& j, const char* key, bool def) {
+    if (j.contains(key) && j[key].is_boolean()) return j[key].get<bool>();
+    return def;
+}
+
+// 设置网格材质参数（MeshComponent 基类字段，Cube/Sphere 共用，全部安全读取）
 static void SetMeshMaterial(MeshComponent* mesh, const json& comp) {
     if (comp.contains("baseColor")) mesh->baseColorFactor = ParseVec4(comp["baseColor"]);
-    if (comp.contains("metallic"))  mesh->metallicFactor  = comp["metallic"].get<float>();
-    if (comp.contains("roughness")) mesh->roughnessFactor = comp["roughness"].get<float>();
-    if (comp.contains("emissive"))  mesh->emissiveFactor  = ParseVec3(comp["emissive"]);
+    mesh->metallicFactor  = GetFloatField(comp, "metallic",  mesh->metallicFactor);
+    mesh->roughnessFactor = GetFloatField(comp, "roughness", mesh->roughnessFactor);
+    if (comp.contains("emissive")) mesh->emissiveFactor = ParseVec3(comp["emissive"]);
 }
 
 // ============================================================
@@ -87,36 +116,36 @@ SceneBuildResult BuildScene(World& world, SceneGraph& sg, const String& sceneJso
 
                 if (type == "Cube") {
                     auto* c = world.AddComponent<CubeComponent>(e);
-                    if (comp.contains("halfExtent")) c->halfExtent = comp["halfExtent"].get<float>();
+                    c->halfExtent = GetFloatField(comp, "halfExtent", c->halfExtent);
                     SetMeshMaterial(static_cast<MeshComponent*>(c), comp);
                     c->OnCreate();  // 用新 halfExtent 重建几何
                 }
                 else if (type == "Sphere") {
                     auto* s = world.AddComponent<SphereComponent>(e);
-                    if (comp.contains("radius"))       s->radius       = comp["radius"].get<float>();
-                    if (comp.contains("segmentCount")) s->segmentCount = comp["segmentCount"].get<u32>();
-                    if (comp.contains("ringCount"))    s->ringCount    = comp["ringCount"].get<u32>();
+                    s->radius       = GetFloatField(comp, "radius", s->radius);
+                    s->segmentCount = GetU32Field(comp, "segmentCount", s->segmentCount);
+                    s->ringCount    = GetU32Field(comp, "ringCount", s->ringCount);
                     SetMeshMaterial(static_cast<MeshComponent*>(s), comp);
                     s->OnCreate();
                 }
                 else if (type == "DirectionalLight") {
                     auto* l = world.AddComponent<DirectionalLight>(e);
-                    if (comp.contains("direction"))  l->direction  = ParseVec3(comp["direction"], l->direction);
-                    if (comp.contains("color"))      l->color      = ParseVec3(comp["color"], l->color);
-                    if (comp.contains("intensity"))  l->intensity  = comp["intensity"].get<float>();
-                    if (comp.contains("castShadow")) l->castShadow = comp["castShadow"].get<bool>();
+                    if (comp.contains("direction")) l->direction = ParseVec3(comp["direction"], l->direction);
+                    if (comp.contains("color"))     l->color     = ParseVec3(comp["color"], l->color);
+                    l->intensity  = GetFloatField(comp, "intensity", l->intensity);
+                    l->castShadow = GetBoolField(comp, "castShadow", l->castShadow);
                 }
                 else if (type == "PointLight") {
                     auto* l = world.AddComponent<PointLight>(e);
-                    if (comp.contains("color"))     l->color     = ParseVec3(comp["color"], l->color);
-                    if (comp.contains("intensity")) l->intensity = comp["intensity"].get<float>();
-                    if (comp.contains("range"))     l->range     = comp["range"].get<float>();
+                    if (comp.contains("color")) l->color = ParseVec3(comp["color"], l->color);
+                    l->intensity = GetFloatField(comp, "intensity", l->intensity);
+                    l->range     = GetFloatField(comp, "range", l->range);
                 }
                 else if (type == "PhysicalSky") {
                     auto* s = world.AddComponent<PhysicalSkyComponent>(e);
                     if (comp.contains("sunDirection")) s->sunDirection = ParseVec3(comp["sunDirection"], s->sunDirection);
-                    if (comp.contains("turbidity"))    s->turbidity    = comp["turbidity"].get<float>();
-                    if (comp.contains("intensity"))    s->intensity    = comp["intensity"].get<float>();
+                    s->turbidity = GetFloatField(comp, "turbidity", s->turbidity);
+                    s->intensity = GetFloatField(comp, "intensity", s->intensity);
                     s->OnCreate();  // 归一化 sunDirection
                 }
                 else {
