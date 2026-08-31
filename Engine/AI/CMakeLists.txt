@@ -59,6 +59,8 @@ set(AI_SOURCES
     AIGC/AIPipeline.cpp
     AIGC/TextureGenerator.h
     AIGC/TextureGenerator.cpp
+    AIGC/MeshGenerator.h
+    AIGC/MeshGenerator.cpp
 )
 
 target_sources(HugEngineAI PRIVATE ${AI_SOURCES})

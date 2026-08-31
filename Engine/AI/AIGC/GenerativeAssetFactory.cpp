@@ -166,4 +166,96 @@ MaterialGenResult GenerativeAssetFactory::TextToMaterial(he::ai::IAIDevice& devi
     return result;
 }
 
+MeshGenResult GenerativeAssetFactory::TextToMesh(he::ai::IAIDevice& device,
+                                                 const String& prompt) {
+    MeshGenResult result;
+
+    // 1. LLM 输出形状规格 JSON
+    HE_CORE_INFO("[AIGC] 请求生成网格: {}", prompt);
+    String response = device.Chat(MeshGenerator::BuildSpecPrompt(), prompt);
+    String content  = ExtractSceneJsonFromResponse(response);
+    if (content.empty()) {
+        result.error = "LLM 无有效响应（设备/网络不可用）";
+        return result;
+    }
+    HE_CORE_INFO("[AIGC] 网格规格: {}", content);
+
+    // 2. 解析规格 → 程序化生成顶点/索引
+    String shape = "cube";
+    float  size  = 1.0f;
+    u32    segments = 16;
+    if (!MeshGenerator::ParseSpec(content, shape, size, segments)) {
+        result.error = "网格规格解析失败";
+        return result;
+    }
+    if (!MeshGenerator::Generate(shape, size, segments, result)) {
+        result.error = "网格生成失败";
+        return result;
+    }
+    return result;
+}
+
+AnimGenResult GenerativeAssetFactory::TextToAnimation(he::ai::IAIDevice& device,
+                                                      const String& prompt) {
+    AnimGenResult result;
+
+    // 1. 拼接动画规格词表并请求 LLM
+    String specPrompt = R"(
+生成一个 Transform 动画规格 JSON。格式：
+{"duration":2.0,"loop":true,
+ "keyframes":[{"time":0.0,"position":[x,y,z],"scale":[sx,sy,sz]},
+              {"time":1.0,"position":[x,y,z]}]}
+规则：
+- duration: 总时长（秒）
+- loop: 是否循环
+- keyframes: 按时间升序；每帧 time 必须、position 可选、scale 可选
+- 只输出 JSON，不要输出解释文字。
+)";
+    HE_CORE_INFO("[AIGC] 请求生成动画: {}", prompt);
+    String response = device.Chat(specPrompt, prompt);
+    String content  = ExtractSceneJsonFromResponse(response);
+    if (content.empty()) {
+        result.error = "LLM 无有效响应（设备/网络不可用）";
+        return result;
+    }
+    HE_CORE_INFO("[AIGC] 动画规格: {}", content);
+
+    // 2. 解析关键帧
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(content);
+    } catch (const std::exception&) {
+        result.error = "动画规格解析失败";
+        return result;
+    }
+    if (j.contains("duration") && j["duration"].is_number())
+        result.duration = j["duration"].get<float>();
+    if (j.contains("loop") && j["loop"].is_boolean())
+        result.loop = j["loop"].get<bool>();
+    if (j.contains("name") && j["name"].is_string())
+        result.name = j["name"].get<String>();
+
+    if (!j.contains("keyframes") || !j["keyframes"].is_array() || j["keyframes"].empty()) {
+        result.error = "动画缺少 keyframes";
+        return result;
+    }
+    for (auto& kf : j["keyframes"]) {
+        if (!kf.contains("time") || !kf["time"].is_number()) continue;
+        float t = kf["time"].get<float>();
+        auto readVec3 = [&](const char* key, float3& dst) {
+            if (kf.contains(key) && kf[key].is_array() && kf[key].size() >= 3)
+                dst = float3(kf[key][0].get<float>(), kf[key][1].get<float>(), kf[key][2].get<float>());
+        };
+        float3 pos(0), scl(1);
+        readVec3("position", pos);
+        readVec3("scale", scl);
+        result.translations.push_back({t, pos});
+        result.scales.push_back({t, scl});
+    }
+    result.success = !result.translations.empty();
+    if (!result.success)
+        result.error = "动画无有效关键帧";
+    return result;
+}
+
 } // namespace he::ai::aigc

@@ -3,7 +3,9 @@
 #include "Core/Types.h"
 #include "Containers/Array.h"
 #include "Scene/Entity.h"
+#include "Scene/AnimationComponent.h"   // TranslationKey / ScaleKey（动画生成结果）
 #include "AI/AIGC/TextureGenerator.h"   // TextureGenResult（纹理生成结果）
+#include "AI/AIGC/MeshGenerator.h"      // MeshGenResult（网格生成结果）
 
 // ============================================================
 // GenerativeAssetFactory — 「AI 版 glTFLoader」
@@ -47,6 +49,17 @@ struct MaterialGenResult {
     TextureGenResult texture;                       // 可选生成纹理（可空）
 };
 
+// 动画生成结果 —— 标准动画资产（Transform 关键帧轨道）
+struct AnimGenResult {
+    bool success = false;
+    String error;
+    String name = "gen_anim";
+    float duration = 1.0f;                          // 总时长（秒）
+    bool   loop    = true;                          // 循环播放
+    std::vector<TranslationKey> translations;       // 位置关键帧
+    std::vector<ScaleKey>       scales;             // 缩放关键帧
+};
+
 class GenerativeAssetFactory {
 public:
     /// 生成场景规格（LLM 输出的场景 JSON 文本），不装配实体。
@@ -68,6 +81,14 @@ public:
     /// 产物为标准材质（MeshComponent PBR 字段），可直接应用。
     MaterialGenResult TextToMaterial(he::ai::IAIDevice& device,
                                      const String& prompt, const String& textureOutPath);
+
+    /// 文生网格（G2.3）：LLM 输出形状规格 → 程序化生成顶点/索引。
+    /// 产物为标准网格数据（与 glTF 导入同构），可 SetMeshData 渲染。
+    MeshGenResult TextToMesh(he::ai::IAIDevice& device, const String& prompt);
+
+    /// 文生动画（G2.3）：LLM 输出关键帧规格 → 生成 Transform 动画轨道。
+    /// 产物为标准动画（AnimationComponent 可播放）。
+    AnimGenResult TextToAnimation(he::ai::IAIDevice& device, const String& prompt);
 };
 
 } // namespace he::ai::aigc
