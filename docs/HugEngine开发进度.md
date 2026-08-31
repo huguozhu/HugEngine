@@ -1,6 +1,6 @@
 # HugEngine 开发进度
 
-> 最后更新: 2026-09-01（今日更新: AI 一等公民 — A1 基座 / G1 AIGC / A2 智能体 / A3 GPU 推理后端与神经收编）
+> 最后更新: 2026-09-01（今日更新: AI 一等公民 — A1 基座 / G1 AIGC / A2 智能体 / A3 GPU 推理后端与神经收编 / G2 资产生成全链路）
 
 ## 整体进度
 
@@ -55,6 +55,9 @@ AI 一等公民（L2.5 AI 运行时层）：反射注解 + 世界模型 + 推理
 - **A2 智能体**: AgentComponent/Memory/Goal + IBrain/LLMBrain/MockBrain + Action→Command 编译 + AgentSystem 节律驱动 + ToolUse + 06.AgentScene ✅
 - **A3.1 GPU 张量后端**: GPUBackend（张量分配 + 内置/外部 SPIR-V 双路径 + PSO 缓存）+ 07.GPUInference ✅
 - **A3.2 神经渲染收编**: WrapRHITexture/ExportBuffer 零拷贝互操作 + GPUTextureTensor + NeuralUpscaler（首个 IRenderSubsystem 神经子系统）✅
+- **G2.1 文生纹理**: TextToTexture（LLM 纹理规格 → 程序化生成 → PNG 标准资产落盘）+ 08.TextureGen ✅
+- **G2.2 本地资产生成**: TextToMaterial（LLM 材质规格 → 标准材质应用到 MeshComponent）+ AITextureGen GPU 生成核 + 09.MaterialGen ✅
+- **G2.3 文生网格与动画**: MeshGenerator（cube/sphere/pyramid/torus）+ TextToMesh + TextToAnimation（关键帧 → AnimationComponent）+ 10.MeshAnimGen ✅
 - **HugEngineTests**: doctest 单元测试（30 用例 / 135 断言）✅
 
 ## 模块完成度
@@ -160,6 +163,10 @@ AI 一等公民（L2.5 AI 运行时层）：反射注解 + 世界模型 + 推理
 | InferenceScheduler (优先级车道 + 主线程回调投递) | ✅ |
 | AIModule (单例生命周期) | ✅ |
 | GenerateSceneCommand (AI 生成可撤销) | ✅ |
+| 纹理生成 (TextureGenerator: solid/gradient/checker/noise + PNG 写盘) | ✅ |
+| 网格生成 (MeshGenerator: cube/sphere/pyramid/torus 顶点/索引) | ✅ |
+| TextToTexture / TextToMaterial / TextToMesh / TextToAnimation | ✅ |
+| AITextureGen GPU 生成核 (经 GPUBackend 本地生成) | ✅ |
 | GenerativeAssetFactory / CloudAIGCProvider / AIPipeline (去重/取消/重试) | ✅ |
 | AgentComponent / MemoryComponent / GoalComponent + AgentReflect 注册 | ✅ |
 | IBrain / LLMBrain / MockBrain + AgentSystem (thinkInterval 驱动) | ✅ |
@@ -453,6 +460,9 @@ Camera → PushConstant → RayGen::invViewProj → world ray
 | 29 | G1 AIGC 闭环 (可撤销生成命令 + 异步管线 + 编辑器面板) | ✅ 2026-09-01 |
 | 30 | A2 智能体 (Agent 组件 + Brain + Action→Command + AgentSystem) | ✅ 2026-09-01 |
 | 31 | A3 GPU 推理后端 + 神经收编 (GPUBackend + 零拷贝 + NeuralUpscaler) | ✅ 2026-09-01 |
+| 32 | G2.1 文生纹理 (TextToTexture + 程序化生成 + PNG 资产落盘) | ✅ 2026-09-01 |
+| 33 | G2.2 本地资产生成 (TextToMaterial + AITextureGen GPU 核) | ✅ 2026-09-01 |
+| 34 | G2.3 文生网格与动画 (MeshGenerator + TextToMesh + TextToAnimation) | ✅ 2026-09-01 |
 
 ## 架构文档对比分析 (vs HugEngine_Architecture_And_Tasks.md)
 
@@ -464,7 +474,7 @@ Camera → PushConstant → RayGen::invViewProj → world ray
 | P2 | GPU Driven | ~95% | Bindless, GPU Culling, GPU Scene, CSM+Shadow, IBL, Clustered Shading, ExecuteIndirect+DGC (Deferred+Forward), VMA, 两阶段剔除, Hi-Z 金字塔, PTG, AsyncCompute, Forward+, WorkGraph 框架 | VSM, VRS, Decal/ReflProbe, Prefab |
 | P3 | 高级几何 | ~5% | — | Nanite, Mesh Shader, Virtual Texturing, OIT, Impostor |
 | P4 | GI + RT | ~30% | DDGI (HDR radiance), Denoiser, SSGI, SSR, **HW RT Phase 1-3** (BLAS/TLAS + TraceRays + 材质+光照) | Lumen GI, VXGI, ReSTIR, NRD, NRC, RT 顶点法线/纹理/阴影 |
-| P5 | 神经渲染 | ~15% | A3.1 GPU 张量后端 (GPUBackend + 内置/外部核), A3.2 零拷贝互操作 + 首个神经子系统 (NeuralUpscaler) | DLSS/FSR/XeSS, FrameGen, RayRecon, Neural Materials |
+| P5 | 神经渲染 + AI 资产生成 | ~25% | A3.1 GPU 张量后端 (GPUBackend + 内置/外部核), A3.2 零拷贝互操作 + 首个神经子系统 (NeuralUpscaler), G2 资产生成 (TextToTexture/Material/Mesh/Animation + GPU 生成核) | DLSS/FSR/XeSS, FrameGen, RayRecon, Neural Materials |
 | P6 | 大气+后处理+动画 | ~40% | Bloom, DOF, MotionBlur, AutoExposure, ColorGrading, 关键帧动画 | Atmosphere, Volumetrics, 骨骼动画, 地形植被 |
 | P7 | 高斯泼溅+焦散 | 0% | — | 3DGS, 4DGS, 焦散 |
 | P8 | 打磨发布 | 0% | — | WebGPU, PSO Cache, Full PT, VR/XR |
