@@ -1,6 +1,6 @@
 # HugEngine 开发进度
 
-> 最后更新: 2026-07-16（今日更新: GPU 粒子系统 P1-P3 + GPU Culling 修复 + RHI 重构 + 文档整理）
+> 最后更新: 2026-09-01（今日更新: AI 一等公民 — A1 基座 / G1 AIGC / A2 智能体 / A3 GPU 推理后端与神经收编）
 
 ## 整体进度
 
@@ -9,6 +9,7 @@
 屏幕空间效果 (SSAO/SSGI/SSR) + DDGI 动态探针 GI 完成。
 后处理链完整: Bloom + DOF + MotionBlur + AutoExposure + ColorGrading。
 基础 Transform 动画系统 + Shader 热重载 + GPU Profiling + AsyncCompute 基础设施。
+AI 一等公民（L2.5 AI 运行时层）：反射注解 + 世界模型 + 推理运行时 + AIGC + 智能体 + GPU 张量/神经收编。
 
 - **Phase 1**: 引擎模块 + PBR 前向管线 + 编辑器 + 阴影 + HDR + 后处理链 + TAA/FXAA + 动画基础 ✅
 - **Phase 1-4**: 全面完成后处理链 (Bloom/DOF/MotionBlur/AutoExposure/ColorGrading) ✅
@@ -48,6 +49,13 @@
 - **Animation**: Transform 关键帧动画组件 (Translation/Rotation/Scale) ✅
 - **GPU Particle System**: ParticleComponent + Compute Shader 模拟 (Init/Emit/Simulate) + Billboard 渲染 + ColorOverLife 渐变 + 视锥剔除 ✅
 - **Samples**: 02.Cube (Forward/Deferred/RT 三模式切换), 03.Sponza (Forward), 04.Deferred (Sponza+延迟) ✅
+- **AI Phase 1 最小竖切**: HugEngineAI 模块 (SceneBuilder/TypeSchema/DeepSeekClient/PromptToScene) + doctest 测试脚手架 + 05.LLMScene（一句话生成场景）✅
+- **A1 底座**: HE_ATTR_AI_* 反射注解 + WorldModel（反射化快照/词表）+ IAIDevice/IAIBackend/RemoteBackend + InferenceScheduler（优先级车道/流式投递）✅
+- **G1 AIGC 闭环**: GenerateSceneCommand（可撤销）+ GenerativeAssetFactory + CloudAIGCProvider + AIPipeline（去重/取消/重试）+ HugEditor 提示词/生成队列面板 ✅
+- **A2 智能体**: AgentComponent/Memory/Goal + IBrain/LLMBrain/MockBrain + Action→Command 编译 + AgentSystem 节律驱动 + ToolUse + 06.AgentScene ✅
+- **A3.1 GPU 张量后端**: GPUBackend（张量分配 + 内置/外部 SPIR-V 双路径 + PSO 缓存）+ 07.GPUInference ✅
+- **A3.2 神经渲染收编**: WrapRHITexture/ExportBuffer 零拷贝互操作 + GPUTextureTensor + NeuralUpscaler（首个 IRenderSubsystem 神经子系统）✅
+- **HugEngineTests**: doctest 单元测试（30 用例 / 135 断言）✅
 
 ## 模块完成度
 
@@ -141,6 +149,26 @@
 | CameraController (Free/Ground 模式 + 配置持久化) | ✅ |
 | ECS 反射系统 (Component/Tag/System 注册) | ✅ |
 | SceneSerializer (关卡序列化/反序列化) | ✅ |
+
+### L2.5 AI（AI 运行时层）✅
+| 特性 | 状态 |
+|------|:---:|
+| HE_ATTR_AI_* 反射注解 (AiVisible/AiDescription/AiWritable/AiTool) | ✅ |
+| WorldModel (反射驱动语义快照 + 组件类型词表 + 观察过滤器) | ✅ |
+| IAIDevice 门面 + IAIBackend + AIDeviceCaps (GPU/CPU/RemoteLLM) | ✅ |
+| RemoteBackend (DeepSeek OpenAI 兼容 WinHTTP 流式) | ✅ |
+| InferenceScheduler (优先级车道 + 主线程回调投递) | ✅ |
+| AIModule (单例生命周期) | ✅ |
+| GenerateSceneCommand (AI 生成可撤销) | ✅ |
+| GenerativeAssetFactory / CloudAIGCProvider / AIPipeline (去重/取消/重试) | ✅ |
+| AgentComponent / MemoryComponent / GoalComponent + AgentReflect 注册 | ✅ |
+| IBrain / LLMBrain / MockBrain + AgentSystem (thinkInterval 驱动) | ✅ |
+| Action→Command 编译 (SpawnEntity/SetTransform/SetProperty 反射读写) | ✅ |
+| ToolUse (工具清单 + schema) | ✅ |
+| GPUBackend (张量分配 + 内置/外部 SPIR-V 双路径 + PSO 缓存) | ✅ |
+| 零拷贝互操作 (WrapRHITexture / ExportBuffer / GPUTextureTensor) | ✅ |
+| NeuralUpscaler (首个 IRenderSubsystem 形态神经子系统) | ✅ |
+| HugEngineAI 测试 (doctest：Action/WorldModel/Scheduler/AIModule/AIGC/Agent) | ✅ |
 
 ### Editor ✅
 | 特性 | 状态 |
@@ -420,6 +448,11 @@ Camera → PushConstant → RayGen::invViewProj → world ray
 | 24 | RHI Vulkan 重构 (VulkanDevice/Internal/CommandList 拆分) | ✅ 2026-07-16 |
 | 25 | GPU Culling 修复 (首帧 Hi-Z + 索引不匹配 + min→max) | ✅ 2026-07-16 |
 | 26 | 02.Cube 支持 Forward/Deferred/RT 三模式切换 | ✅ 2026-07-16 |
+| 27 | AI 最小竖切 (HugEngineAI + SceneBuilder + DeepSeekClient + 05.LLMScene) | ✅ 2026-09-01 |
+| 28 | A1 底座 (HE_ATTR_AI_* + WorldModel + IAIDevice + InferenceScheduler) | ✅ 2026-09-01 |
+| 29 | G1 AIGC 闭环 (可撤销生成命令 + 异步管线 + 编辑器面板) | ✅ 2026-09-01 |
+| 30 | A2 智能体 (Agent 组件 + Brain + Action→Command + AgentSystem) | ✅ 2026-09-01 |
+| 31 | A3 GPU 推理后端 + 神经收编 (GPUBackend + 零拷贝 + NeuralUpscaler) | ✅ 2026-09-01 |
 
 ## 架构文档对比分析 (vs HugEngine_Architecture_And_Tasks.md)
 
@@ -431,7 +464,7 @@ Camera → PushConstant → RayGen::invViewProj → world ray
 | P2 | GPU Driven | ~95% | Bindless, GPU Culling, GPU Scene, CSM+Shadow, IBL, Clustered Shading, ExecuteIndirect+DGC (Deferred+Forward), VMA, 两阶段剔除, Hi-Z 金字塔, PTG, AsyncCompute, Forward+, WorkGraph 框架 | VSM, VRS, Decal/ReflProbe, Prefab |
 | P3 | 高级几何 | ~5% | — | Nanite, Mesh Shader, Virtual Texturing, OIT, Impostor |
 | P4 | GI + RT | ~30% | DDGI (HDR radiance), Denoiser, SSGI, SSR, **HW RT Phase 1-3** (BLAS/TLAS + TraceRays + 材质+光照) | Lumen GI, VXGI, ReSTIR, NRD, NRC, RT 顶点法线/纹理/阴影 |
-| P5 | 神经渲染 | 0% | — | DLSS/FSR/XeSS, FrameGen, RayRecon, Neural Materials |
+| P5 | 神经渲染 | ~15% | A3.1 GPU 张量后端 (GPUBackend + 内置/外部核), A3.2 零拷贝互操作 + 首个神经子系统 (NeuralUpscaler) | DLSS/FSR/XeSS, FrameGen, RayRecon, Neural Materials |
 | P6 | 大气+后处理+动画 | ~40% | Bloom, DOF, MotionBlur, AutoExposure, ColorGrading, 关键帧动画 | Atmosphere, Volumetrics, 骨骼动画, 地形植被 |
 | P7 | 高斯泼溅+焦散 | 0% | — | 3DGS, 4DGS, 焦散 |
 | P8 | 打磨发布 | 0% | — | WebGPU, PSO Cache, Full PT, VR/XR |
