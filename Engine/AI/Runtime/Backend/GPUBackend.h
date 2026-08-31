@@ -24,6 +24,7 @@ namespace he::ai {
 // 内置计算核名（InferenceRequest::kernel 取值）
 constexpr const char* kKernelTensorScale = "tensor_scale";     // 逐元素缩放：out = in × scale
 constexpr const char* kKernelTextureSample = "texture_sample"; // 纹理采样：out = tex(uv) × brightness
+constexpr const char* kKernelTextureGen  = "texture_gen";      // GPU 生成纹理：solid/gradient/checker/noise
 
 /// GPU 张量实现：承载 RHI 缓冲（Storage，可 Map 读写）
 class GPUTensor : public IAITensor {
@@ -93,13 +94,15 @@ private:
                        u32 pcSize, u32 bindingCount);
 
     // 执行已缓存的核：绑定张量/纹理 → 推参 → dispatch → 提交等待
+    // @param dispatchCount 线程数（0 = 默认按输出张量元素数推导）
     Ref<IAIInference> DispatchKernel(rhi::IRHIDevice* device,
                                      const rhi::IRHIPipelineState* pso,
                                      rhi::DescriptorSetHandle set,
                                      Span<const u8> pushConstants,
                                      const std::vector<IAITensor*>& inputs,
                                      const std::vector<IAITensor*>& textureInputs,
-                                     const std::vector<IAITensor*>& outputs);
+                                     const std::vector<IAITensor*>& outputs,
+                                     u32 dispatchCount = 0);
 
     // 单个核的缓存项（PSO + 描述符资源，按需构建）
     struct KernelEntry {

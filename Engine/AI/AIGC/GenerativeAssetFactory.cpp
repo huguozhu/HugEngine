@@ -6,7 +6,64 @@
 #include "Scene/SceneGraph.h"
 #include "Core/Log.h"
 
+#include "nlohmann/json.hpp"
+
 namespace he::ai::aigc {
+
+namespace {
+
+// 拼接材质规格词表（注入 LLM，约束输出字段）
+String BuildMaterialSpecPrompt() {
+    return R"(
+生成一个材质规格 JSON，用于 PBR 材质。格式：
+{"baseColor":[r,g,b],"metallic":0.0,"roughness":0.5,"emissive":[r,g,b],
+ "texture":{"pattern":"solid|gradient|checker|noise","size":64,"colorA":[r,g,b],"colorB":[r,g,b]}}
+规则：
+- baseColor: [r,g,b] 0~1（基础色）
+- metallic/roughness: 0~1
+- emissive: [r,g,b] 0~1（无自发光填 [0,0,0]）
+- texture 可选（无纹理需求可省略）；其 pattern/size/colorA/colorB 规则同纹理规格
+- 只输出 JSON，不要输出解释文字。
+)";
+}
+
+// 从材质规格 JSON 解析 → MaterialGenResult（含可选纹理规格）
+MaterialGenResult ParseMaterialSpec(const String& content) {
+    MaterialGenResult result;
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(content);
+    } catch (const std::exception&) {
+        result.error = "材质规格 JSON 解析失败";
+        return result;
+    }
+    auto readVec3 = [&](const char* key, float3& dst) {
+        if (j.contains(key) && j[key].is_array() && j[key].size() >= 3)
+            dst = float3(j[key][0].get<float>(), j[key][1].get<float>(), j[key][2].get<float>());
+    };
+    float3 bc = {1, 1, 1}, em = {0, 0, 0};
+    readVec3("baseColor", bc);
+    readVec3("emissive", em);
+    result.baseColor = float4(bc, 1.0f);
+    result.emissive  = em;
+    if (j.contains("metallic") && j["metallic"].is_number())
+        result.metallic = j["metallic"].get<float>();
+    if (j.contains("roughness") && j["roughness"].is_number())
+        result.roughness = j["roughness"].get<float>();
+
+    // 可选纹理规格
+    if (j.contains("texture") && j["texture"].is_object()) {
+        TextureSpec spec;
+        TextureGenerator::ParseSpec(j["texture"].dump(), spec);
+        TextureGenerator::Generate(spec, result.texture.pixels);
+        result.texture.width = result.texture.height = spec.size;
+        result.texture.success = !result.texture.pixels.empty();
+    }
+    result.success = true;
+    return result;
+}
+
+} // namespace
 
 TextureGenResult GenerativeAssetFactory::TextToTexture(he::ai::IAIDevice& device,
                                                       const String& prompt,
@@ -78,6 +135,34 @@ GenerationResult GenerativeAssetFactory::GenerateScene(World& world, SceneGraph&
     result.success = build.success;
     result.error   = build.error;
     result.entities = std::move(build.entities);
+    return result;
+}
+
+MaterialGenResult GenerativeAssetFactory::TextToMaterial(he::ai::IAIDevice& device,
+                                                        const String& prompt,
+                                                        const String& textureOutPath) {
+    MaterialGenResult result;
+
+    // 1. LLM 输出材质规格 JSON（注入规格词表约束字段）
+    HE_CORE_INFO("[AIGC] 请求生成材质: {}", prompt);
+    String response = device.Chat(BuildMaterialSpecPrompt(), prompt);
+    String content  = ExtractSceneJsonFromResponse(response);
+    if (content.empty()) {
+        result.error = "LLM 无有效响应（设备/网络不可用）";
+        return result;
+    }
+    HE_CORE_INFO("[AIGC] 材质规格: {}", content);
+
+    // 2. 解析材质参数（含可选纹理规格）
+    result = ParseMaterialSpec(content);
+    if (!result.success) return result;
+
+    // 3. 可选纹理：写盘为标准资产文件
+    if (result.texture.success && !textureOutPath.empty() && !result.texture.pixels.empty()) {
+        if (TextureGenerator::WritePNG(textureOutPath, result.texture.width,
+                                       result.texture.height, result.texture.pixels.data()))
+            result.texture.path = textureOutPath;
+    }
     return result;
 }
 

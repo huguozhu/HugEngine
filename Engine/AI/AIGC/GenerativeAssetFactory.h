@@ -36,6 +36,17 @@ struct GenerationResult {
     String         error;
 };
 
+// 材质生成结果 —— 标准材质资产（MeshComponent PBR 字段 + 可选纹理）
+struct MaterialGenResult {
+    bool success = false;
+    String error;
+    float4 baseColor = {1.0f, 1.0f, 1.0f, 1.0f};   // 基础色 RGBA
+    float3 emissive  = {0.0f, 0.0f, 0.0f};          // 自发光
+    float  metallic  = 0.0f;                        // 金属度
+    float  roughness = 0.8f;                        // 粗糙度
+    TextureGenResult texture;                       // 可选生成纹理（可空）
+};
+
 class GenerativeAssetFactory {
 public:
     /// 生成场景规格（LLM 输出的场景 JSON 文本），不装配实体。
@@ -52,6 +63,11 @@ public:
     /// @param outPath 生成资产文件路径（空 = 只产出内存像素，不写盘）
     TextureGenResult TextToTexture(he::ai::IAIDevice& device,
                                    const String& prompt, const String& outPath);
+
+    /// 文生材质（G2.2）：LLM 输出材质+可选纹理规格 → 材质参数与纹理。
+    /// 产物为标准材质（MeshComponent PBR 字段），可直接应用。
+    MaterialGenResult TextToMaterial(he::ai::IAIDevice& device,
+                                     const String& prompt, const String& textureOutPath);
 };
 
 } // namespace he::ai::aigc

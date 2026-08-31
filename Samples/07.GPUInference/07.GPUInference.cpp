@@ -31,6 +31,10 @@
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include <chrono>
 #include <cmath>
 #include <vector>
@@ -41,6 +45,11 @@ using namespace he;
 constexpr u32 kTensorCount = 4;
 
 int main() {
+#ifdef _WIN32
+    // 本工程以 /utf-8 编译，日志为 UTF-8 字节；控制台代码页切到 UTF-8，避免中文乱码
+    SetConsoleOutputCP(CP_UTF8);
+#endif
+
     // --- 1. 引擎 + RHI + SwapChain ---
     EngineConfig config;
     config.appName       = "HugEngine — GPU 推理后端验证";

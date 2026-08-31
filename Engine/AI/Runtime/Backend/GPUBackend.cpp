@@ -2,6 +2,7 @@
 
 #include "AITensorScale.comp.spv.h"    // k_AITensorScale_comp_spv（内置：逐元素缩放）
 #include "AITextureSample.comp.spv.h"  // k_AITextureSample_comp_spv（内置：纹理采样）
+#include "AITextureGen.comp.spv.h"     // k_AITextureGen_comp_spv（内置：GPU 生成纹理）
 #include "Core/Log.h"
 
 #include <cstring>
@@ -18,6 +19,20 @@ float GetParamFloat(const std::vector<std::pair<String, String>>& params,
         if (k == key) {
             try { return std::stof(v); }
             catch (const std::exception&) { return def; }
+        }
+    }
+    return def;
+}
+
+// 从参数表读取 float3（值格式 "r,g,b"）
+float3 GetParamVec3(const std::vector<std::pair<String, String>>& params,
+                    const char* key, const float3& def) {
+    for (auto& [k, v] : params) {
+        if (k == key) {
+            float3 r = def;
+            int n = std::sscanf(v.c_str(), "%f,%f,%f", &r.x, &r.y, &r.z);
+            if (n == 3) return r;
+            return def;
         }
     }
     return def;
@@ -66,8 +81,12 @@ GPUBackend::GPUBackend(rhi::IRHIDevice* device) : m_Device(device) {
                           {rhi::DescriptorType::CombinedImageSampler,  // binding 0: 纹理
                            rhi::DescriptorType::StorageBuffer},       // binding 1: 输出
                           sizeof(u32) * 2 + sizeof(float) * 2, 2);    // 推参 {w,h,brightness,pad}
-    HE_CORE_INFO("[GPUBackend] 已注册内置核: {}, {}",
-                 kKernelTensorScale, kKernelTextureSample);
+    RegisterBuiltinKernel(kKernelTextureGen,
+                          Span<const u32>(k_AITextureGen_comp_spv),
+                          {rhi::DescriptorType::StorageBuffer},       // binding 0: 输出
+                          sizeof(u32) * 4 + sizeof(float4) * 2, 1);   // 推参 {w,h,pattern,seed,ca,cb}
+    HE_CORE_INFO("[GPUBackend] 已注册内置核: {}, {}, {}",
+                 kKernelTensorScale, kKernelTextureSample, kKernelTextureGen);
 }
 
 GPUBackend::~GPUBackend() = default;
@@ -103,10 +122,7 @@ Ref<IAITensor> GPUBackend::Allocate(const AITensorDesc& desc) {
 
 Ref<IAIInference> GPUBackend::Run(InferenceRequest&& req) {
     if (!m_Device) return nullptr;
-    if (req.inputs.empty() && req.textureInputs.empty()) {
-        HE_CORE_WARN("[GPUBackend] Run 需要至少 1 个输入（缓冲或纹理）");
-        return nullptr;
-    }
+    // 至少 1 个输出（输入允许为空：纯生成核如 texture_gen 无输入）
     if (req.outputs.empty()) {
         HE_CORE_WARN("[GPUBackend] Run 需要至少 1 个输出张量");
         return nullptr;
@@ -168,6 +184,7 @@ Ref<IAIInference> GPUBackend::Run(InferenceRequest&& req) {
     // 推参：外部核直接用请求字节；内置核由 params + 张量元数据映射
     // ============================================================
     std::vector<u8> pcBytes;
+    u32 dispatchCount = 0;   // 0 = 由 DispatchKernel 按输出张量推导
     if (spirv.empty()) {
         if (name == kKernelTensorScale) {
             // {u32 count, float scale}
@@ -184,6 +201,20 @@ Ref<IAIInference> GPUBackend::Run(InferenceRequest&& req) {
                 GetParamFloat(req.params, "brightness", 1.0f), 0.0f };
             pcBytes.assign(reinterpret_cast<u8*>(&pc),
                            reinterpret_cast<u8*>(&pc) + sizeof(pc));
+        } else if (name == kKernelTextureGen) {
+            // {u32 w, u32 h, u32 pattern, u32 seed, float4 colorA, float4 colorB}
+            const u32 w = (u32)GetParamFloat(req.params, "width", 64.0f);
+            const u32 h = (u32)GetParamFloat(req.params, "height", 64.0f);
+            const u32 pattern = (u32)GetParamFloat(req.params, "pattern", 2.0f);
+            const float3 ca = GetParamVec3(req.params, "colorA", float3(0.2f, 0.4f, 0.9f));
+            const float3 cb = GetParamVec3(req.params, "colorB", float3(0.9f, 0.2f, 0.2f));
+            struct GenPC {
+                u32 w, h, pattern, seed;
+                float4 colorA, colorB;
+            } pc = { w, h, pattern, 0u, float4(ca, 1.0f), float4(cb, 1.0f) };
+            pcBytes.assign(reinterpret_cast<u8*>(&pc),
+                           reinterpret_cast<u8*>(&pc) + sizeof(pc));
+            dispatchCount = w * h;   // 一维派发：每线程 1 个 float4 像素
         } else {
             HE_CORE_WARN("[GPUBackend] 内置核 '{}' 无推参映射", name);
             return nullptr;
@@ -196,7 +227,7 @@ Ref<IAIInference> GPUBackend::Run(InferenceRequest&& req) {
     // 执行（同步：dispatch → submit → wait）
     // ============================================================
     auto result = DispatchKernel(m_Device, entry->pso.get(), entry->set, pcBytes,
-                                 req.inputs, req.textureInputs, req.outputs);
+                                 req.inputs, req.textureInputs, req.outputs, dispatchCount);
     if (result)
         HE_CORE_INFO("[GPUBackend] 核 '{}' 执行完成（{} 缓冲输入 / {} 纹理输入 / {} 输出）",
                      name, req.inputs.size(), req.textureInputs.size(), req.outputs.size());
@@ -306,7 +337,8 @@ Ref<IAIInference> GPUBackend::DispatchKernel(rhi::IRHIDevice* device,
                                              Span<const u8> pushConstants,
                                              const std::vector<IAITensor*>& inputs,
                                              const std::vector<IAITensor*>& textureInputs,
-                                             const std::vector<IAITensor*>& outputs) {
+                                             const std::vector<IAITensor*>& outputs,
+                                             u32 dispatchCount) {
     u32 binding = 0;
 
     // 1a. 绑定缓冲输入（StorageBuffer）
@@ -331,20 +363,24 @@ Ref<IAIInference> GPUBackend::DispatchKernel(rhi::IRHIDevice* device,
                                     gpu->GetBuffer());
     }
 
-    // 2. dispatch 组数：按输出张量元素数（MVP 约定输出与输入同规模）
-    u32 count = 0;
-    if (!outputs.empty()) {
-        if (auto* gpu = dynamic_cast<GPUTensor*>(outputs[0]))
-            count = gpu->GetDesc().elementCount;
-    }
-    // 纹理采样核：按纹理宽高分行列 dispatch（8×8 线程组）
+    // 2. dispatch 组数：
+    //    - 显式线程数（如 texture_gen 的 w*h 像素）优先
+    //    - 纹理采样核：按纹理宽高分行列 dispatch（8×8 线程组）
+    //    - 否则按输出张量元素数（默认一维 64 线程组）
     u32 groupsX = 1, groupsY = 1, groupsZ = 1;
-    if (!textureInputs.empty()) {
+    if (dispatchCount > 0) {
+        groupsX = (dispatchCount + 63) / 64;
+    } else if (!textureInputs.empty()) {
         if (auto* tex = dynamic_cast<GPUTextureTensor*>(textureInputs[0])) {
             groupsX = (tex->GetWidth()  + 7) / 8;
             groupsY = (tex->GetHeight() + 7) / 8;
         }
     } else {
+        u32 count = 0;
+        if (!outputs.empty()) {
+            if (auto* gpu = dynamic_cast<GPUTensor*>(outputs[0]))
+                count = gpu->GetDesc().elementCount;
+        }
         groupsX = (count + 63) / 64;
     }
 
