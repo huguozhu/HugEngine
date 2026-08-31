@@ -78,10 +78,14 @@ public:
         return m_GPU ? m_GPU->ReadTensor(t, out, offsetElems) : false;
     }
 
-    // 与渲染零拷贝互操作：A3 的 GPUBackend 落地前不支持，返回 nullptr
-    Ref<IAITensor> WrapRHITexture(rhi::IRHITexture* tex) override { (void)tex; return nullptr; }
+    // 与渲染零拷贝互操作（A3.2a：委托 GPUBackend；GPU 后端未注册时返回 nullptr）
+    Ref<IAITensor> WrapRHITexture(rhi::IRHITexture* tex) override {
+        return m_GPU ? m_GPU->WrapTexture(tex) : nullptr;
+    }
     Ref<IAITensor> WrapRHIBuffer(rhi::IRHIBuffer* buf) override { (void)buf; return nullptr; }
-    rhi::IRHIBuffer* ExportBuffer(IAITensor* t) override { (void)t; return nullptr; }
+    rhi::IRHIBuffer* ExportBuffer(IAITensor* t) override {
+        return m_GPU ? m_GPU->ExportBuffer(t) : nullptr;
+    }
 
     String Chat(const String& systemPrompt, const String& userPrompt) override {
         if (!m_LLM) {

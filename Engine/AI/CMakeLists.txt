@@ -47,6 +47,8 @@ set(AI_SOURCES
     Runtime/Backend/RemoteBackend.cpp
     Runtime/Backend/GPUBackend.h
     Runtime/Backend/GPUBackend.cpp
+    Neural/NeuralUpscaler.h
+    Neural/NeuralUpscaler.cpp
     AIGC/AICommand.h
     AIGC/AICommand.cpp
     AIGC/GenerativeAssetFactory.h
@@ -69,6 +71,7 @@ target_include_directories(HugEngineAI
 target_link_libraries(HugEngineAI PUBLIC
     HugEngineScene
     HugEngineCore
+    HugEngineRender   # IRenderSubsystem（神经子系统收编，A3.2b）
     HugEngineEditor   # 复用 he::Command / CommandHistory（GenerateSceneCommand）
     nlohmann_json
 )

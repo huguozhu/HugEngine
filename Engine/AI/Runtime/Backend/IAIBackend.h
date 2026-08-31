@@ -62,9 +62,13 @@ struct InferenceRequest {
     std::vector<std::pair<String, String>> params;  // KV 文本，如 {"scale","2.5"}；后端按核名解释
 
     // --- 张量与调度 ---
-    // 描述符绑定约定（MVP）：binding 0..n-1 = inputs（只读），binding n.. = outputs（可写），全部 StorageBuffer
-    std::vector<IAITensor*> inputs;               // 输入张量（按绑定顺序）
-    std::vector<IAITensor*> outputs;              // 输出张量（按绑定顺序）
+    // 描述符绑定约定（MVP）：
+    //   binding 0..n-1              = inputs（StorageBuffer，只读）
+    //   binding n..n+m-1            = textureInputs（CombinedImageSampler，只读）
+    //   binding n+m..               = outputs（StorageBuffer，可写）
+    std::vector<IAITensor*> inputs;               // 输入张量（GPU 缓冲）
+    std::vector<IAITensor*> textureInputs;        // 纹理输入张量（渲染纹理，经 WrapRHITexture 包装）
+    std::vector<IAITensor*> outputs;              // 输出张量（GPU 缓冲）
     u32                     batchSize = 1;
 };
 

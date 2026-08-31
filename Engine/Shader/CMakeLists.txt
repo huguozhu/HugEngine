@@ -104,6 +104,7 @@ if(SLANGC)
         "${SHADER_DIR}/PT_Atrous.comp.slang"
         "${SHADER_DIR}/AITensorScale.comp.slang"
         "${SHADER_DIR}/AITensorAdd.comp.slang"
+        "${SHADER_DIR}/AITextureSample.comp.slang"
     )
     # Ray Tracing 着色器（.rgen / .rmiss / .rchit / .rahit / .rcall）
     # 命名约定: EffectName.rgen.slang (RayGen), EffectName.rmiss.slang (Miss),

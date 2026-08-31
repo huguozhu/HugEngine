@@ -23,6 +23,7 @@
 #include "AI/Runtime/AIDevice.h"
 #include "AI/Runtime/InferenceScheduler.h"
 #include "AI/Runtime/Backend/GPUBackend.h"   // kKernelTensorScale（内置核名）
+#include "AI/Neural/NeuralUpscaler.h"        // 神经子系统（IRenderSubsystem 形态）
 #include "AITensorAdd.comp.spv.h"            // k_AITensorAdd_comp_spv（外部核 SPIR-V）
 #include "Editor/ImGuiIntegration.h"
 #include "imgui.h"
@@ -31,6 +32,8 @@
 #include <GLFW/glfw3.h>
 
 #include <chrono>
+#include <cmath>
+#include <vector>
 
 using namespace he;
 
@@ -67,6 +70,10 @@ int main() {
     auto aiDevice = he::ai::CreateAIDevice(&scheduler, device.get());
     const he::ai::AIDeviceCaps caps = aiDevice->GetCaps();
 
+    // --- 2.5 神经子系统（A3.2b：IRenderSubsystem 形态，内部经 IAIDevice 推理）---
+    he::render::NeuralUpscaler neuralUpscaler(aiDevice.get());
+    neuralUpscaler.Initialize(device.get(), swapchain->GetWidth(), swapchain->GetHeight());
+
     // --- 3. GPU 推理全链路（一次性，结果供 UI 展示）---
     // 演示两种计算核来源：
     //   A. 内置核：kernel="tensor_scale" + 参数 {scale:2.5}
@@ -102,6 +109,64 @@ int main() {
             if (scaleOut[i] != scaleIn[i] * kScale) { scaleOk = false; break; }
         HE_CORE_INFO("[GPUInference] 内置核: {} ({:.2f} ms)",
                      scaleOk ? "✅ [1..4] ×2.5 → [2.5,5,7.5,10]" : "❌ 失败", scaleMs);
+    }
+
+    // ── 推理 C：零拷贝互操作（texture_sample：渲染纹理 → 张量 → 推理 → 缓冲）──
+    // 创建 64×64 渐变纹理 → WrapRHITexture 包装（不拷贝）→ Submit 采样核 → 读回断言
+    constexpr u32 kTexSize = 64;
+    const float kBrightness = 2.0f;
+    float texOut[kTexSize * kTexSize * 4] = {};
+    bool  texOk = false;
+    double texMs = 0.0;
+    {
+        // 渐变纹理（RGBA8）：r = x/63, g = y/63, b = 0.5, a = 1
+        std::vector<u8> texData(kTexSize * kTexSize * 4);
+        for (u32 y = 0; y < kTexSize; ++y)
+            for (u32 x = 0; x < kTexSize; ++x) {
+                u8* p = &texData[(y * kTexSize + x) * 4];
+                p[0] = (u8)(x * 255 / (kTexSize - 1));
+                p[1] = (u8)(y * 255 / (kTexSize - 1));
+                p[2] = 128;
+                p[3] = 255;
+            }
+        rhi::TextureDesc tDesc;
+        tDesc.format = rhi::Format::RGBA8_UNORM;
+        tDesc.width  = kTexSize;
+        tDesc.height = kTexSize;
+        tDesc.mipLevels = 1;
+        tDesc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::TransferDst;
+        tDesc.initialData = texData.data();
+        auto tex = device->CreateTexture(tDesc);
+
+        // 输出张量：kTexSize×kTexSize 个 float4
+        he::ai::AITensorDesc desc;
+        desc.elementCount = kTexSize * kTexSize * 4;
+        desc.dtype        = he::ai::AIDataType::FP32;
+        auto out = aiDevice->CreateTensor(desc);
+
+        // 零拷贝包装纹理 → 提交采样核
+        auto texTensor = aiDevice->WrapRHITexture(tex.get());
+        if (texTensor && out) {
+            he::ai::InferenceRequest req;
+            req.kernel = he::ai::kKernelTextureSample;
+            req.params = {{"brightness", std::to_string(kBrightness)}};
+            req.textureInputs.push_back(texTensor.get());
+            req.outputs.push_back(out.get());
+            auto t0 = std::chrono::high_resolution_clock::now();
+            auto inf = aiDevice->Submit(std::move(req));
+            auto t1 = std::chrono::high_resolution_clock::now();
+            texMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            texOk = inf && aiDevice->ReadTensor(out.get(), Span<float>(texOut, kTexSize * kTexSize * 4));
+            // 校验（容差放宽，线性过滤下取像素中心附近）：左上角像素
+            //   b 通道 = 0.5 × 2.0 = 1.0，a 通道 = 1.0 × 2.0 = 2.0，r 通道 ≈ 0
+            if (texOk) {
+                texOk = (std::abs(texOut[2] - 0.5f * kBrightness) < 0.05f) &&
+                        (std::abs(texOut[3] - 1.0f * kBrightness) < 0.05f) &&
+                        (std::abs(texOut[0] - 0.0f) < 0.05f);
+            }
+        }
+        HE_CORE_INFO("[GPUInference] 零拷贝纹理核: {} ({:.2f} ms)",
+                     texOk ? "✅ 纹理→推理→读回" : "❌ 失败", texMs);
     }
 
     // ── 推理 B：外部核（customSpirv = AITensorAdd 的 SPIR-V，out = in + 10）──
@@ -247,6 +312,11 @@ int main() {
         shadowCtx.camera = &camCtrl.GetCamera();
         he::SyncPhysicalSkyToSun(world);
         shadowSys->Update(shadowCtx);
+
+        // ★ 神经子系统每帧驱动（Update 内经 IAIDevice 推理；Render 为预留 GPU 录制位）
+        neuralUpscaler.Update(shadowCtx);
+        neuralUpscaler.Render(cmdList.get());
+
         pipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
         cmdList->BeginRenderPass(1, backFmt);
         pipeline.RenderToneMapPass(cmdList.get());
@@ -261,27 +331,43 @@ int main() {
                     caps.supportsRemoteLLM ? "可用" : "不可用");
         ImGui::Separator();
         ImGui::Text("内置核 tensor_scale: %s (%.2f ms)",
-                    scaleOk ? "✅ 通过" : "❌ 失败", scaleMs);
+                    scaleOk ? "通过" : "失败", scaleMs);
         if (scaleOk) {
             String inStr, outStr;
             for (u32 i = 0; i < kCount; ++i) {
                 inStr  += (i ? ", " : "[") + std::to_string((int)scaleIn[i]);
                 outStr += (i ? ", " : "[") + std::to_string((int)scaleOut[i]);
             }
-            ImGui::TextWrapped("  %s → %s (×%.1f)", (inStr + "]").c_str(),
+            ImGui::TextWrapped("  %s -> %s (x%.1f)", (inStr + "]").c_str(),
                                (outStr + "]").c_str(), kScale);
         }
         ImGui::Text("外部核 customSpirv(add): %s (%.2f ms)",
-                    addOk ? "✅ 通过" : "❌ 失败", addMs);
+                    addOk ? "通过" : "失败", addMs);
         if (addOk) {
             String inStr, outStr;
             for (u32 i = 0; i < kCount; ++i) {
                 inStr  += (i ? ", " : "[") + std::to_string((int)addIn[i]);
                 outStr += (i ? ", " : "[") + std::to_string((int)addOut[i]);
             }
-            ImGui::TextWrapped("  %s → %s (+%.0f)", (inStr + "]").c_str(),
+            ImGui::TextWrapped("  %s -> %s (+%.0f)", (inStr + "]").c_str(),
                                (outStr + "]").c_str(), kAdd);
         }
+        ImGui::Text("零拷贝纹理核 texture_sample: %s (%.2f ms)",
+                    texOk ? "通过" : "失败", texMs);
+        if (texOk) {
+            ImGui::TextWrapped("  64x64 渐变纹理采样 x%.1f 后读回", kBrightness);
+        }
+        ImGui::Separator();
+        // 神经子系统状态（IRenderSubsystem 形态，每帧经 IAIDevice 推理）
+        ImGui::Text("神经子系统 NeuralUpscaler: %s",
+                    neuralUpscaler.IsReady() ? "就绪" : "未初始化");
+        static bool s_neuralEnabled = true;   // 开关镜像（Checkbox 需要 bool*）
+        if (ImGui::Checkbox("启用", &s_neuralEnabled))
+            neuralUpscaler.SetEnabled(s_neuralEnabled);
+        ImGui::Text("累计推理: %u 次 | 上次用时: %.2f ms | 平均亮度: %.3f",
+                    neuralUpscaler.GetInferenceCount(),
+                    neuralUpscaler.GetLastInferenceMs(),
+                    neuralUpscaler.GetLastAvgBrightness());
         ImGui::End();
         imgui.EndFrame(cmdList.get());
         cmdList->EndRenderPass();
