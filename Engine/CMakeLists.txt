@@ -20,9 +20,6 @@ add_subdirectory(Shader)
 # Scene — Entity-Component, SceneGraph (L5)
 add_subdirectory(Scene)
 
-# AI — LLM 场景生成与推理运行时 (L2.5)
-add_subdirectory(AI)
-
 # Asset — Resource loading, glTF, registry
 add_subdirectory(Asset)
 
@@ -33,3 +30,7 @@ add_subdirectory(Render)
 if(HUGENGINE_BUILD_EDITOR)
     add_subdirectory(Editor)
 endif()
+
+# AI — LLM 场景生成与推理运行时 (L2.5)
+# 注意：放在 Editor 之后 —— AIGC 复用 Editor 的 Command 系统（GenerateSceneCommand）
+add_subdirectory(AI)

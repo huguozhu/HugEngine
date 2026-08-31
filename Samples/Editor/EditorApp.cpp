@@ -45,7 +45,12 @@ static std::vector<std::string> s_DroppedFiles;
 #include "Panels/ConsolePanel.h"
 #include "Panels/MaterialEditor.h"
 #include "Panels/LevelLoader.h"
+#include "Panels/PromptPanel.h"
+#include "Panels/GenerationQueuePanel.h"
 #include "Core/CVar.h"
+#include "AI/Runtime/AIModule.h"
+#include "AI/AIGC/AIPipeline.h"
+#include "AI/AIGC/AIGCProvider.h"
 
 EditorApp::EditorApp()  = default;
 EditorApp::~EditorApp() = default;
@@ -55,6 +60,7 @@ int EditorApp::Run() {
     InitScene();
     InitPipeline();
     InitEditor();
+    InitAIGC();
     MainLoop();
     Shutdown();
     return 0;
@@ -197,6 +203,30 @@ void EditorApp::InitEditor() {
     m_ProjectSettings->Initialize(m_EditorCtx.get());
 
     m_LastTime = glfwGetTime();
+}
+
+void EditorApp::InitAIGC() {
+    // 1. 启动 AI 运行时（调度器 + 设备 + RemoteBackend）
+    he::ai::AIModule::Initialize();
+    he::ai::IAIDevice* device = he::ai::AIModule::GetDevice();
+    if (!device) {
+        HE_CORE_ERROR("[Editor] AI 设备不可用，AIGC 面板将不可用");
+        return;
+    }
+
+    // 2. 生成后端 + 异步管线（后台任务经调度器执行，回调投递主线程）
+    m_AIGCProvider = std::make_unique<he::ai::aigc::CloudAIGCProvider>(device);
+    m_AIPipeline   = std::make_unique<he::ai::aigc::AIPipeline>(
+        m_AIGCProvider.get(), he::ai::AIModule::GetScheduler());
+
+    // 3. 面板接线：提示词面板 → 管线 → 待接受队列；队列 → 世界/命令历史（接受时装配）
+    m_PromptPanel = std::make_unique<editor::PromptPanel>();
+    m_GenQueue    = std::make_unique<editor::GenerationQueuePanel>();
+    m_PromptPanel->SetTargets(m_AIPipeline.get(), m_GenQueue.get());
+    m_GenQueue->Initialize(m_World.get(), m_SceneGraph.get(), m_CmdHistory.get());
+
+    HE_CORE_INFO("[Editor] AIGC 生成管线已就绪（RemoteLLM={}）",
+                 device->GetCaps().supportsRemoteLLM);
 }
 
 void EditorApp::MainLoop() {
@@ -486,6 +516,11 @@ void EditorApp::MainLoop() {
             m_Stats->Render(dt, drawCount, triCount);
             m_Console->Render();
             m_MaterialEditor->Render();
+
+            // AIGC 面板：先派发完成回调（主线程），再渲染队列
+            if (m_AIPipeline) m_AIPipeline->Poll();
+            if (m_PromptPanel) m_PromptPanel->Render();
+            if (m_GenQueue) m_GenQueue->Render();
         }
 
         m_ImGui->EndFrame(m_CmdList.get());
@@ -507,6 +542,10 @@ void EditorApp::Shutdown() {
 
     m_Device->WaitIdle();
     m_ImGui->Shutdown();
+    // 先关 AIGC 管线与 AI 运行时，再销毁引擎场景
+    m_AIPipeline.reset();
+    m_AIGCProvider.reset();
+    he::ai::AIModule::Shutdown();
     // �?Engine 销毁前释放所有子系统（避免析构时 Logger 已失效）
     m_Pipeline.reset();
     m_SceneGraph.reset();

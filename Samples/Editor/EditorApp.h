@@ -45,6 +45,14 @@ namespace he::editor {
     class StatsPanel;
     class ConsolePanel;
     class MaterialEditor;
+    class PromptPanel;
+    class GenerationQueuePanel;
+}
+
+// AIGC 前向声明
+namespace he::ai::aigc {
+    class AIPipeline;
+    class CloudAIGCProvider;
 }
 
 class EditorApp {
@@ -58,6 +66,7 @@ private:
     void InitEngine();      // GLFW 窗口 + RHI 设备 + SwapChain
     void InitScene();       // 默认场景（地面 + 光源）
     void InitEditor();      // ImGui + EditorContext + 面板
+    void InitAIGC();        // AI 运行时 + AIGC 生成管线 + 面板接线
     void InitPipeline();    // ForwardPipeline
     void MainLoop();        // 帧循环
     void Shutdown();
@@ -94,6 +103,12 @@ private:
     std::unique_ptr<he::editor::StatsPanel> m_Stats;
     std::unique_ptr<he::editor::ConsolePanel> m_Console;
     std::unique_ptr<he::editor::MaterialEditor> m_MaterialEditor;
+    std::unique_ptr<he::editor::PromptPanel> m_PromptPanel;            // AIGC 提示词面板
+    std::unique_ptr<he::editor::GenerationQueuePanel> m_GenQueue;      // 生成队列面板
+
+    // --- AIGC 生成管线（G1）---
+    std::unique_ptr<he::ai::aigc::CloudAIGCProvider> m_AIGCProvider;   // 云端生成后端
+    std::unique_ptr<he::ai::aigc::AIPipeline> m_AIPipeline;            // 异步生成管线
 
     // --- Shader 热重载 ---
     std::unique_ptr<he::render::ShaderHotReload> m_ShaderHotReload;

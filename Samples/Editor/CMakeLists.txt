@@ -23,6 +23,10 @@ set(HUGEDITOR_SOURCES
     Panels/ConsolePanel.h
     Panels/MaterialEditor.cpp
     Panels/MaterialEditor.h
+    Panels/PromptPanel.cpp
+    Panels/PromptPanel.h
+    Panels/GenerationQueuePanel.cpp
+    Panels/GenerationQueuePanel.h
 )
 
 add_executable(HugEditor ${HUGEDITOR_SOURCES})
@@ -45,6 +49,7 @@ target_link_libraries(HugEditor PRIVATE
     HugEngineScene
     HugEngineEditor
     HugEngineAsset
+    HugEngineAI
     stb
 )
 

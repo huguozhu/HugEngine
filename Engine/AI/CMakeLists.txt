@@ -29,6 +29,14 @@ set(AI_SOURCES
     Runtime/Backend/IAIBackend.h
     Runtime/Backend/RemoteBackend.h
     Runtime/Backend/RemoteBackend.cpp
+    AIGC/AICommand.h
+    AIGC/AICommand.cpp
+    AIGC/GenerativeAssetFactory.h
+    AIGC/GenerativeAssetFactory.cpp
+    AIGC/AIGCProvider.h
+    AIGC/AIGCProvider.cpp
+    AIGC/AIPipeline.h
+    AIGC/AIPipeline.cpp
 )
 
 target_sources(HugEngineAI PRIVATE ${AI_SOURCES})
@@ -43,6 +51,7 @@ target_include_directories(HugEngineAI
 target_link_libraries(HugEngineAI PUBLIC
     HugEngineScene
     HugEngineCore
+    HugEngineEditor   # 复用 he::Command / CommandHistory（GenerateSceneCommand）
     nlohmann_json
 )
 target_link_libraries(HugEngineAI PRIVATE winhttp)

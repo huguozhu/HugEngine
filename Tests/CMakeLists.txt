@@ -12,6 +12,9 @@ add_executable(HugEngineTests
     TestWorldModel.cpp
     TestInferenceScheduler.cpp
     TestAIModule.cpp
+    TestAICommand.cpp
+    TestAIGCProvider.cpp
+    TestAIPipeline.cpp
 )
 
 target_include_directories(HugEngineTests PRIVATE

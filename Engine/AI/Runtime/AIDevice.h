@@ -18,10 +18,11 @@
 // 基础类型（IAIModel/IAITensor/AIModelFormat 等）见 IAIBackend.h。
 // ============================================================
 
-namespace rhi {
+// 前向声明 RHI 类型（RHI 的命名空间是 he::rhi，与 RHI/RHI.h 一致）
+namespace he::rhi {
 class IRHITexture;
 class IRHIBuffer;
-} // namespace rhi
+} // namespace he::rhi
 
 namespace he::ai {
 class InferenceScheduler;   // 前向声明（工厂参数用）
@@ -55,7 +56,7 @@ public:
     virtual Ref<IAIInference> Submit(InferenceRequest&& req) = 0;
 
     // ★ 与渲染零拷贝互操作（神经渲染的关键；后端不支持则返回 nullptr）
-    virtual Ref<IAITensor> WrapRHITexture(rhi::IRHITexture* tex) = 0;   // 读渲染纹理
+    virtual Ref<IAITensor> WrapRHITexture(rhi::IRHITexture* tex) = 0;   // 读渲染纹理（he::rhi）
     virtual Ref<IAITensor> WrapRHIBuffer(rhi::IRHIBuffer* buf)  = 0;    // 读 bindless 缓冲
     virtual rhi::IRHIBuffer* ExportBuffer(IAITensor* t)          = 0;   // 写回渲染缓冲
 
