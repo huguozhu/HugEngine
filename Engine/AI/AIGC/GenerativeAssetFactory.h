@@ -3,6 +3,7 @@
 #include "Core/Types.h"
 #include "Containers/Array.h"
 #include "Scene/Entity.h"
+#include "AI/AIGC/TextureGenerator.h"   // TextureGenResult（纹理生成结果）
 
 // ============================================================
 // GenerativeAssetFactory — 「AI 版 glTFLoader」
@@ -46,6 +47,11 @@ public:
     /// 内部：GenerateSceneJson + SceneBuilder。
     GenerationResult GenerateScene(World& world, SceneGraph& sg,
                                    he::ai::IAIDevice& device, const String& prompt);
+
+    /// 文生纹理（G2.1）：LLM 输出纹理规格 → 程序化生成像素 → 写盘 PNG。
+    /// @param outPath 生成资产文件路径（空 = 只产出内存像素，不写盘）
+    TextureGenResult TextToTexture(he::ai::IAIDevice& device,
+                                   const String& prompt, const String& outPath);
 };
 
 } // namespace he::ai::aigc

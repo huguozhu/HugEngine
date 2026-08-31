@@ -34,3 +34,6 @@ imgui.ini
 *.exp
 screenshot.png
 pipeline_cache.bin
+
+# AI 生成资产（运行时产物）
+Content/Generated/

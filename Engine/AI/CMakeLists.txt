@@ -57,6 +57,8 @@ set(AI_SOURCES
     AIGC/AIGCProvider.cpp
     AIGC/AIPipeline.h
     AIGC/AIPipeline.cpp
+    AIGC/TextureGenerator.h
+    AIGC/TextureGenerator.cpp
 )
 
 target_sources(HugEngineAI PRIVATE ${AI_SOURCES})
@@ -75,4 +77,4 @@ target_link_libraries(HugEngineAI PUBLIC
     HugEngineEditor   # 复用 he::Command / CommandHistory（GenerateSceneCommand）
     nlohmann_json
 )
-target_link_libraries(HugEngineAI PRIVATE winhttp)
+target_link_libraries(HugEngineAI PRIVATE winhttp stb)   # stb: TextureGenerator 写 PNG
