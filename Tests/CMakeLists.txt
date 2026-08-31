@@ -15,6 +15,8 @@ add_executable(HugEngineTests
     TestAICommand.cpp
     TestAIGCProvider.cpp
     TestAIPipeline.cpp
+    TestAgentAction.cpp
+    TestAgentBrain.cpp
 )
 
 target_include_directories(HugEngineTests PRIVATE

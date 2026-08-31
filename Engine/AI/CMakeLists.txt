@@ -20,6 +20,22 @@ set(AI_SOURCES
     WorldModel/Observation.h
     WorldModel/WorldModel.h
     WorldModel/WorldModel.cpp
+    WorldModel/Action.h
+    WorldModel/Action.cpp
+    Agent/AgentComponent.h
+    Agent/MemoryComponent.h
+    Agent/MemoryComponent.cpp
+    Agent/GoalComponent.h
+    Agent/GoalComponent.cpp
+    Agent/Brain.h
+    Agent/LLMBrain.h
+    Agent/LLMBrain.cpp
+    Agent/MockBrain.h
+    Agent/ToolUse.h
+    Agent/ToolUse.cpp
+    Agent/AgentSystem.h
+    Agent/AgentSystem.cpp
+    Agent/AgentReflect.cpp
     Runtime/AIDevice.h
     Runtime/AIDevice.cpp
     Runtime/InferenceScheduler.h
