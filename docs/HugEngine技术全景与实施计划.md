@@ -771,6 +771,21 @@ Phase 8: 打磨+发布    (10 周)  ── 优化+文档+示例
 
 ---
 
+### 前置 · AI 一等公民运行时层（L2.5）✅ 已落地（2026-09）
+
+在 Phase 5 神经网络渲染之前，AI 运行时基座已先行落地（见 `docs/AI相关/` 系列文档）：
+
+- **反射注解** `HE_ATTR_AI_*`（可见/描述/可写/工具）+ WorldModel（反射驱动语义快照/组件词表）
+- **推理运行时**：IAIDevice 门面 + GPUBackend / RemoteBackend + InferenceScheduler（优先级车道/流式投递）
+- **AIGC**：场景生成（可撤销命令 + 异步管线 + 编辑器面板）、纹理/材质/网格/动画四类资产生成
+- **智能体**：Agent 组件（记忆/目标）+ LLM/Mock 大脑 + Action→Command（可撤销）
+- **GPU 张量后端**：内置/外部 SPIR-V 双路径 + PSO 缓存 + 零拷贝互操作（WrapRHITexture/ExportBuffer）+ 首个神经子系统 NeuralUpscaler（IRenderSubsystem 形态）
+
+> 说明：下方 Phase 5 的 Streamline/DLSS/FSR 等真实 SDK 集成仍为**规划项**（需第三方 SDK 与许可），
+> 其架构接入位（IRenderSubsystem + IAIDevice + 可插拔超分后端）已就绪。
+
+---
+
 ### 第五阶段 · 神经网络渲染 (14 周)
 
 **目标**: AI 驱动的渲染管线
