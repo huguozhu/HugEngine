@@ -22,6 +22,7 @@
 namespace he::rhi {
 class IRHITexture;
 class IRHIBuffer;
+class IRHIDevice;
 } // namespace he::rhi
 
 namespace he::ai {
@@ -32,6 +33,7 @@ namespace he::ai {
 
 // AI 设备能力 —— 在 rhi::DeviceCaps 之上扩展 AI 专属能力
 struct AIDeviceCaps {
+    bool supportsGPU       = false;   // GPUBackend 可用（张量 + compute 推理）
     bool supportsCPU       = false;   // ONNX Runtime / GGUF 可用
     bool supportsRemoteLLM = false;   // 远程大模型可用
     bool supportsNPU       = false;   // NPU 直通（预留）
@@ -65,10 +67,19 @@ public:
     // 流式对话：token 经调度器按序投递到主线程回调
     virtual void ChatStream(const String& systemPrompt, const String& userPrompt,
                             std::function<void(const String&)> onToken) = 0;
+
+    // --- 张量数据交换（CPU ↔ GPU，A3.1 验证用；神经渲染走 Wrap/Export 零拷贝）---
+    /// 上传数据到张量（FP32 元素）。失败返回 false。
+    virtual bool WriteTensor(IAITensor* t, Span<const float> data, u32 offsetElems = 0) = 0;
+    /// 从张量读取数据（FP32 元素）。失败返回 false。
+    virtual bool ReadTensor(IAITensor* t, Span<float> out, u32 offsetElems = 0) = 0;
 };
 
-// 工厂：创建默认 AI 设备（注册 RemoteBackend；API key 从环境变量 DEEPSEEK_API_KEY 读取）。
+// 工厂：创建默认 AI 设备（注册 RemoteBackend + GPUBackend）。
+// API key 从环境变量 DEEPSEEK_API_KEY 读取（远程 LLM）；
+// rhiDevice 非空时注册 GPU 后端（张量分配 + compute 推理）。
 // scheduler 用于流式回调投递到主线程（可为空 = 直接同步回调）。
-std::unique_ptr<IAIDevice> CreateAIDevice(InferenceScheduler* scheduler = nullptr);
+std::unique_ptr<IAIDevice> CreateAIDevice(InferenceScheduler* scheduler = nullptr,
+                                          rhi::IRHIDevice* rhiDevice = nullptr);
 
 } // namespace he::ai

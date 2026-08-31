@@ -45,6 +45,8 @@ set(AI_SOURCES
     Runtime/Backend/IAIBackend.h
     Runtime/Backend/RemoteBackend.h
     Runtime/Backend/RemoteBackend.cpp
+    Runtime/Backend/GPUBackend.h
+    Runtime/Backend/GPUBackend.cpp
     AIGC/AICommand.h
     AIGC/AICommand.cpp
     AIGC/GenerativeAssetFactory.h

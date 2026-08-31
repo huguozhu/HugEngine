@@ -1,6 +1,7 @@
 #include "AI/Runtime/AIDevice.h"
 #include "AI/Runtime/InferenceScheduler.h"
 #include "AI/Runtime/Backend/RemoteBackend.h"
+#include "AI/Runtime/Backend/GPUBackend.h"
 #include "Core/Log.h"
 
 #include <cstdlib>
@@ -27,10 +28,18 @@ public:
 
     void SetScheduler(InferenceScheduler* scheduler) { m_Scheduler = scheduler; }
 
+    // 注册 GPU 后端（构造时注入 RHI 设备）
+    void RegisterGPUBackend(rhi::IRHIDevice* rhiDevice) {
+        if (!rhiDevice) return;
+        RegisterBackend(std::make_unique<GPUBackend>(rhiDevice));
+        m_GPU = dynamic_cast<GPUBackend*>(m_Backends.back().get());
+    }
+
     // --- IAIDevice ---
     AIDeviceCaps GetCaps() const override {
         AIDeviceCaps caps;
-        caps.supportsRemoteLLM = (m_LLM != nullptr);   // 当前仅远程 LLM 可用
+        caps.supportsGPU       = (m_GPU != nullptr);   // GPU 张量/推理后端
+        caps.supportsRemoteLLM = (m_LLM != nullptr);   // 远程 LLM 后端
         return caps;
     }
 
@@ -46,15 +55,27 @@ public:
     }
 
     Ref<IAITensor> CreateTensor(const AITensorDesc& desc) override {
-        (void)desc;
-        HE_CORE_WARN("[AIDevice] GPU/CPU 张量后端未就绪（A3 落地），返回 nullptr");
-        return nullptr;
+        if (!m_GPU) {
+            HE_CORE_WARN("[AIDevice] GPU 张量后端未注册，返回 nullptr");
+            return nullptr;
+        }
+        return m_GPU->Allocate(desc);
     }
 
     Ref<IAIInference> Submit(InferenceRequest&& req) override {
-        (void)req;
-        HE_CORE_WARN("[AIDevice] 通用推理后端未就绪（A3 落地），返回 nullptr");
-        return nullptr;
+        if (!m_GPU) {
+            HE_CORE_WARN("[AIDevice] GPU 推理后端未注册，返回 nullptr");
+            return nullptr;
+        }
+        return m_GPU->Run(std::move(req));
+    }
+
+    bool WriteTensor(IAITensor* t, Span<const float> data, u32 offsetElems) override {
+        return m_GPU ? m_GPU->WriteTensor(t, data, offsetElems) : false;
+    }
+
+    bool ReadTensor(IAITensor* t, Span<float> out, u32 offsetElems) override {
+        return m_GPU ? m_GPU->ReadTensor(t, out, offsetElems) : false;
     }
 
     // 与渲染零拷贝互操作：A3 的 GPUBackend 落地前不支持，返回 nullptr
@@ -90,6 +111,7 @@ public:
 private:
     std::vector<std::unique_ptr<IAIBackend>> m_Backends;  // 已注册后端
     RemoteBackend* m_LLM = nullptr;                       // LLM 后端快捷指针
+    GPUBackend*    m_GPU = nullptr;                       // GPU 后端快捷指针
     InferenceScheduler* m_Scheduler = nullptr;            // 流式回调投递目标
 };
 
@@ -99,9 +121,15 @@ private:
 // 工厂：创建默认 AI 设备
 // ============================================================
 
-std::unique_ptr<IAIDevice> CreateAIDevice(InferenceScheduler* scheduler) {
+std::unique_ptr<IAIDevice> CreateAIDevice(InferenceScheduler* scheduler,
+                                          rhi::IRHIDevice* rhiDevice) {
     auto device = std::make_unique<AIDeviceImpl>();
     device->SetScheduler(scheduler);
+
+    // 注册 GPU 推理后端（张量分配 + compute 核；需真实 RHI 设备）
+    if (rhiDevice) {
+        device->RegisterGPUBackend(rhiDevice);
+    }
 
     // 注册远程 LLM 后端（key 从环境变量读取，不硬编码）
     const char* key = std::getenv("DEEPSEEK_API_KEY");

@@ -48,9 +48,23 @@ struct AITensorDesc {
 
 // 推理请求
 struct InferenceRequest {
-    IAIModel*               model = nullptr;      // 编译后的模型句柄
-    std::vector<IAITensor*> inputs;               // 输入张量（按模型签名顺序）
-    std::vector<IAITensor*> outputs;              // 输出张量
+    IAIModel*               model = nullptr;      // 编译后的模型句柄（真实模型推理用；预置核可空）
+
+    // --- 计算核选择（二选一）---
+    String                  kernel;               // 内置核名（如 "tensor_scale"；customSpirv 非空时忽略）
+    Span<const u32>         customSpirv = {};     // 外部核 SPIR-V 二进制（运行时提供的自定义着色器，优先于 kernel）
+
+    // --- 外部核描述（customSpirv 非空时使用）---
+    u32                     pushConstantSize = 0;   // push constant 布局大小（字节）
+    std::vector<u8>         pushConstants;          // push constant 数据（原始字节，与 shader 布局对齐）
+
+    // --- 内置核便利参数（kernel 非空时使用）---
+    std::vector<std::pair<String, String>> params;  // KV 文本，如 {"scale","2.5"}；后端按核名解释
+
+    // --- 张量与调度 ---
+    // 描述符绑定约定（MVP）：binding 0..n-1 = inputs（只读），binding n.. = outputs（可写），全部 StorageBuffer
+    std::vector<IAITensor*> inputs;               // 输入张量（按绑定顺序）
+    std::vector<IAITensor*> outputs;              // 输出张量（按绑定顺序）
     u32                     batchSize = 1;
 };
 

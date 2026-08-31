@@ -91,6 +91,8 @@ struct FakeAgentDevice : IAIDevice {
         return resp.dump();
     }
     void ChatStream(const String&, const String&, std::function<void(const String&)>) override {}
+    bool WriteTensor(IAITensor*, Span<const float>, u32) override { return false; }
+    bool ReadTensor(IAITensor*, Span<float>, u32) override { return false; }
 };
 
 } // namespace
