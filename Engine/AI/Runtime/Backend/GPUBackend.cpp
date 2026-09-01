@@ -227,7 +227,7 @@ Ref<IAIInference> GPUBackend::Run(InferenceRequest&& req) {
     // 执行（同步：dispatch → submit → wait）
     // ============================================================
     auto result = DispatchKernel(m_Device, entry->pso.get(), entry->set, pcBytes,
-                                 req.inputs, req.textureInputs, req.outputs, dispatchCount);
+                                 req.inputs, req.textureInputs, req.outputs, dispatchCount, name);
     if (result)
         HE_CORE_INFO("[GPUBackend] 核 '{}' 执行完成（{} 缓冲输入 / {} 纹理输入 / {} 输出）",
                      name, req.inputs.size(), req.textureInputs.size(), req.outputs.size());
@@ -338,7 +338,8 @@ Ref<IAIInference> GPUBackend::DispatchKernel(rhi::IRHIDevice* device,
                                              const std::vector<IAITensor*>& inputs,
                                              const std::vector<IAITensor*>& textureInputs,
                                              const std::vector<IAITensor*>& outputs,
-                                             u32 dispatchCount) {
+                                             u32 dispatchCount,
+                                             const String& kernelName) {
     u32 binding = 0;
 
     // 1a. 绑定缓冲输入（StorageBuffer）
@@ -390,7 +391,9 @@ Ref<IAIInference> GPUBackend::DispatchKernel(rhi::IRHIDevice* device,
     cmdList->SetPipeline(const_cast<rhi::IRHIPipelineState*>(pso));
     cmdList->BindDescriptorSet(rhi::kDescSetPerFrame, set);
     cmdList->SetPushConstants(0, (u32)pushConstants.size(), pushConstants.data());
-    cmdList->SetDrawDebugLabel("AI Kernel");
+    // dispatch 级调试标记：标记当前计算核（RenderDoc 定位用）
+    String label = "AI " + kernelName;
+    cmdList->SetDrawDebugLabel(label.c_str());
     cmdList->Dispatch(groupsX, groupsY, groupsZ);
     cmdList->End();
 

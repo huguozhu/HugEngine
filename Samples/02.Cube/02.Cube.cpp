@@ -49,7 +49,8 @@ using namespace he;
 // 渲染管线模式 CVar
 // ============================================================
 // 渲染管线模式 CVar（0=Forward, 1=Deferred, 2=HybridRT, 3=PathTrace）
-he::CVar<int> cvPipelineMode("r.Pipeline.Mode", 3, "渲染管线模式 0=Forward 1=Deferred 2=HybridRT 3=PathTrace");
+// 默认 0 = 前向渲染（与示例标题一致；其他模式可在面板切换）
+he::CVar<int> cvPipelineMode("r.Pipeline.Mode", 0, "渲染管线模式 0=Forward 1=Deferred 2=HybridRT 3=PathTrace");
 // 物理天空开关（1=用 Preetham 物理天空替代 Cubemap 天空盒；需 Forward 模式 r.Pipeline.Mode 0 才可见）
 he::CVar<int> cvPhysicalSkyEnable("r.PhysicalSky.Enable", 1, "1=使用 Preetham 物理天空（替代 Cubemap 天空盒）");
 // HDR 输出开关（1=SwapChain 请求 A2B10G10R10 + HDR10 ST.2084；需 HDR10 显示器/扩展支持，否则自动回退 SDR）
@@ -173,17 +174,17 @@ int main() {
 
     // 地板（深灰色立方体，粗糙，长宽 2x）
     CreateShapeEntity(world, sceneGraph,
-        float3(0.0f, -1.5f, 0.0f), float3(20.0f, 0.2f, 20.0f),
+        float3(0.0f, -1.5f, 0.0f), float3(200.0f, 0.2f, 200.0f),
         float4(0.3f, 0.3f, 0.35f, 1.0f), 0.0f, 0.9f);
 
     // 金球（金属，光滑）
     CreateShapeEntity(world, sceneGraph,
-        float3(-1.5f, 2.0f, 0.0f), float3(0.8f),
+        float3(-1.5f, 5.0f, 0.0f), float3(0.8f),
         float4(1.0f, 0.72f, 0.0f, 1.0f), 1.0f, 0.15f, true);
 
     // 铜球（金属，中度粗糙）
     CreateShapeEntity(world, sceneGraph,
-        float3(0.0f, 3.0f, 0.0f), float3(0.8f),
+        float3(0.0f, 4.0f, 0.0f), float3(0.8f),
         float4(0.85f, 0.45f, 0.2f, 1.0f), 0.95f, 0.4f, true);
 
     // 蓝色塑料立方体（非金属，光滑）
@@ -193,12 +194,12 @@ int main() {
 
     // 红色橡胶立方体（非金属，粗糙）
     CreateShapeEntity(world, sceneGraph,
-        float3(0.0f, 2.0f, 1.5f), float3(0.7f),
+        float3(0.0f, 6.0f, 1.5f), float3(0.7f),
         float4(0.9f, 0.15f, 0.1f, 1.0f), 0.0f, 0.85f);
 
     // 白色陶瓷球
     CreateShapeEntity(world, sceneGraph,
-        float3(0.0f, 1.2f, -1.5f), float3(0.6f),
+        float3(0.0f, 5.2f, -1.5f), float3(0.6f),
         float4(0.95f, 0.93f, 0.88f, 1.0f), 0.0f, 0.35f, true);
 
     // --- 方向光 ---
@@ -213,7 +214,7 @@ int main() {
         mainDL->intensity = 5.0f;
         mainDL->castShadow = true;
         mainDL->syncWithPhysicalSky = true;   // 由物理天空太阳驱动方向与照度
-        mainDL->shadowBias = 0.003f;
+        mainDL->shadowBias = 0.0003f;   // 深度偏移（CSM 深度范围动态适配后的小偏移）
         sceneGraph.SetParent(mainLightEntity, Entity{kInvalidEntity});
     }
 
@@ -292,7 +293,8 @@ int main() {
         Entity pe = world.CreateEntity("PhysicalSky");
         world.AddComponent<TransformComponent>(pe);
         auto* ps = world.AddComponent<PhysicalSkyComponent>(pe);
-        ps->sunDirection = float3(0.4f, 0.6f, 0.2f);  // 太阳方向（OnCreate 会归一化）
+        ps->sunDirection = glm::normalize(-mainDL->direction);  // 太阳方向对齐方向光意图 (0.5,-1,1)
+                                                                 // （syncWithPhysicalSky 由天空驱动光照/阴影方向）
         ps->turbidity    = 4.0f;   // 大气浑浊度（1=极清，5=霾，10=浓霾）
         ps->groundAlbedo = 0.1f;   // 地面反照率
         ps->intensity    = 1.0f;   // 天空整体亮度倍率
@@ -494,6 +496,8 @@ int main() {
             shadowSys->Update(shadowCtx);
 
             forwardPipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
+            // pass 级调试标记：BackBuffer 合成（ToneMap + ImGui），RenderDoc 可识别
+            cmdList->BeginDebugLabel("ToneMap + ImGui (BackBuffer)");
             cmdList->BeginRenderPass(1, backFmt);
             forwardPipeline.RenderToneMapPass(cmdList.get());
         }
@@ -502,6 +506,7 @@ int main() {
             deferredPipeline.NextFrame();
             deferredPipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera(), deltaTime);
             // ImGui 叠加：Deferred 已写 BackBuffer，Load 保留内容
+            cmdList->BeginDebugLabel("Deferred + ImGui (BackBuffer)");
             cmdList->BeginRenderPass(1, backFmt,
                 rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
         }
@@ -510,6 +515,7 @@ int main() {
             hybridPipeline.NextFrame();
             hybridPipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera(), deltaTime);
             // ImGui 叠加：管线已写 BackBuffer，Load 保留内容
+            cmdList->BeginDebugLabel("HybridRT + ImGui (BackBuffer)");
             cmdList->BeginRenderPass(1, backFmt,
                 rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
         }
@@ -518,6 +524,7 @@ int main() {
             pathTracingPipeline.NextFrame();
             pathTracingPipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera(), deltaTime);
             // ImGui 叠加：管线已写 BackBuffer，Load 保留内容
+            cmdList->BeginDebugLabel("PathTrace + ImGui (BackBuffer)");
             cmdList->BeginRenderPass(1, backFmt,
                 rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
         }
@@ -729,6 +736,7 @@ int main() {
 
         ImGui::End();
         imgui.EndFrame(cmdList.get());
+        cmdList->EndDebugLabel();  // 闭合 BackBuffer pass 级标记
         cmdList->EndRenderPass();  // 关闭 ImGui RP（RG 和 non-RG 都需要）
         cmdList->End();
 

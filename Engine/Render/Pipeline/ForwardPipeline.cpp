@@ -630,6 +630,8 @@ void ForwardPipeline::BeginHDRPass(rhi::IRHICommandList* cmd, u32 width, u32 hei
     rhi::ClearValue clear{};
     clear.depth = 1.0f;
 
+    // pass 级调试标记：包裹整个场景渲染 pass（RenderDoc 中识别为「Forward Scene (HDR)」）
+    cmd->BeginDebugLabel("Forward Scene (HDR)");
     cmd->BeginOffscreenPass(colorView, depthView, width, height, &clear, true);
 
     cmd->SetViewport({ 0, static_cast<float>(height),
@@ -639,6 +641,7 @@ void ForwardPipeline::BeginHDRPass(rhi::IRHICommandList* cmd, u32 width, u32 hei
 
 void ForwardPipeline::EndHDRPass(rhi::IRHICommandList* cmd) {
     cmd->EndOffscreenPass();
+    cmd->EndDebugLabel();   // 闭合 "Forward Scene (HDR)" pass 级标记
 
     // 布局转换：COLOR_ATTACHMENT → 着色器只读（ToneMap 采样）
     cmd->PipelineBarrier(
@@ -724,6 +727,8 @@ void ForwardPipeline::RenderSkybox(rhi::IRHICommandList* cmd, he::World& world,
 }
 
 void ForwardPipeline::RenderToneMapPass(rhi::IRHICommandList* cmd) {
+    // pass 级调试标记：RenderDoc 中识别为「色调映射输出到屏幕」
+    cmd->SetDrawDebugLabel("ToneMap -> BackBuffer");
     if (m_ToneMap) {
         m_ToneMap->SetInput(m_HDRTarget.get(), m_HDRSampler.get());
         m_ToneMap->Render(cmd);

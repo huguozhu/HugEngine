@@ -182,10 +182,13 @@ int main() {
             he::SyncPhysicalSkyToSun(*fWorld);
             shadowSys->Update(shadowCtx);
             pipeline.Render(cmdList.get(), *fWorld, *fSG, camCtrl.GetCamera());
+            // pass 级调试标记：BackBuffer 合成（ToneMap + ImGui），RenderDoc 可识别
+            cmdList->BeginDebugLabel("ToneMap + ImGui (BackBuffer)");
             cmdList->BeginRenderPass(1, backFmt);
             pipeline.RenderToneMapPass(cmdList.get());
         } else {
             // 无 3D 场景：仅 ImGui 面板（用 LoadOp::Load 保留背景色）
+            cmdList->BeginDebugLabel("ImGui Only (BackBuffer)");
             cmdList->BeginRenderPass(1, backFmt, rhi::Format::Unknown, nullptr, rhi::LoadOp::Clear);
         }
 
@@ -218,6 +221,7 @@ int main() {
         cur->RenderUI();   // 当前功能面板
 
         imgui.EndFrame(cmdList.get());
+        cmdList->EndDebugLabel();   // 闭合 BackBuffer pass 级标记
         cmdList->EndRenderPass();
         cmdList->End();
 

@@ -40,15 +40,27 @@ float4x4 CSMTechnique::ComputeCascadeViewProj(const float3& ld,const CameraData&
     for(int i=0;i<8;++i) scn+=corners[i];
     scn/=8.0f;
 
-    // 光源视图矩阵：从光源方向观察场景中心
+    // 光源视图矩阵：从光源方向观察场景中心（虚拟光源置于 500m 外，对 20m 级场景近似平行光）
     float3 lu=(abs(ld.y)<.999f)?float3(0,1,0):float3(1,0,0);
-    float4x4 lv=glm::lookAtRH(scn-ld*4000.f,scn,lu);
+    float4x4 lv=glm::lookAtRH(scn-ld*500.f,scn,lu);
 
     // 将所有角点变换到光源视图空间，计算包围盒
     float mnX=FLT_MAX,mxX=-FLT_MAX,mnY=FLT_MAX,mxY=-FLT_MAX;
     for(auto&c:corners){float4 ls=lv*float4(c,1.f);mnX=glm::min(mnX,ls.x);mxX=glm::max(mxX,ls.x);mnY=glm::min(mnY,ls.y);mxY=glm::max(mxY,ls.y);}
     float h=glm::max(glm::max(-mnX,mxX),glm::max(-mnY,mxY));h=glm::max(h,200.f);
-    return glm::orthoRH_ZO(-h,h,-h,h,.1f,8000.f)*lv;
+
+    // 正交深度范围：动态适配视锥沿光源方向的深度跨度（世界单位，带余量）。
+    // 修复：原先固定 near=0.1/far=8000 时，光源置于 4000m 外导致物体深度挤在
+    // ndc 0.5 附近，深度分辨率 1/8000 米，bias(0.003) 折算约 24 米 → 阴影被偏置吞掉。
+    float mnZ=FLT_MAX,mxZ=-FLT_MAX;
+    for(auto&c:corners){
+        float4 ls=lv*float4(c,1.f);
+        mnZ=glm::min(mnZ,ls.z);mxZ=glm::max(mxZ,ls.z);
+    }
+    const float kDepthPad=50.f;                      // 深度方向余量（米）
+    float zn=glm::max(-mxZ-kDepthPad,0.1f);          // 近裁剪（最近角点 - 余量）
+    float zf=glm::max(-mnZ+kDepthPad,zn+1.f);        // 远裁剪（最远角点 + 余量）
+    return glm::orthoRH_ZO(-h,h,-h,h,zn,zf)*lv;
 }
 
 bool CSMTechnique::Initialize(rhi::IRHIDevice* device){
@@ -116,6 +128,10 @@ void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,he::World& w,h
     m_LightVPs[ci] = sd.lightViewProj[ci];  // 缓存供 RSM 查询
     void*dv=m_ShadowMaps[ci]->GetNativeHandle();if(!dv)return;
     rhi::ClearValue cv{};cv.depth=1.f;
+    // pass 级调试标记：RenderDoc 中可识别阴影级联 pass
+    char passLabel[32];
+    snprintf(passLabel,sizeof(passLabel),"CSM Shadow C%u",ci);
+    cmd->SetDrawDebugLabel(passLabel);
     cmd->SetPipeline(m_ShadowPSO.get());cmd->BeginOffscreenPass(nullptr,dv,m_ShadowMapSize,m_ShadowMapSize,&cv);
     cmd->SetPipeline(m_ShadowPSO.get());
     cmd->SetViewport({0,(float)m_ShadowMapSize,(float)m_ShadowMapSize,-(float)m_ShadowMapSize,0,1});
@@ -138,7 +154,14 @@ void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,he::World& w,h
     w.ForEach<he::MeshComponent>(rm);
     w.ForEach<he::CubeComponent>([&](he::Entity e,he::CubeComponent&c){rm(e,static_cast<he::MeshComponent&>(c));});
     w.ForEach<he::SphereComponent>([&](he::Entity e,he::SphereComponent&s){rm(e,static_cast<he::MeshComponent&>(s));});
-    m_ExternalObjectBuffer->Unmap();cmd->EndOffscreenPass();
+    m_ExternalObjectBuffer->Unmap();
+    // 一次性诊断日志：确认阴影级联实际绘制了物体数（RenderDoc 复核用）
+    static bool s_CSMDrawDiagLogged = false;
+    if (!s_CSMDrawDiagLogged && ci == 0) {
+        s_CSMDrawDiagLogged = true;
+        HE_CORE_INFO("[CSMTechnique] Cascade0 绘制物体数: {}", oi);
+    }
+    cmd->EndOffscreenPass();
 }
 
 rhi::IRHITexture* CSMTechnique::GetShadowMap(u32 i)const{return i<CASCADE_COUNT?m_ShadowMaps[i].get():nullptr;}

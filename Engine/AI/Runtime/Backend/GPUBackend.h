@@ -94,6 +94,7 @@ private:
                        u32 pcSize, u32 bindingCount);
 
     // 执行已缓存的核：绑定张量/纹理 → 推参 → dispatch → 提交等待
+    // @param kernelName 核名（用于 debug label，如 "tensor_scale"）
     // @param dispatchCount 线程数（0 = 默认按输出张量元素数推导）
     Ref<IAIInference> DispatchKernel(rhi::IRHIDevice* device,
                                      const rhi::IRHIPipelineState* pso,
@@ -102,7 +103,8 @@ private:
                                      const std::vector<IAITensor*>& inputs,
                                      const std::vector<IAITensor*>& textureInputs,
                                      const std::vector<IAITensor*>& outputs,
-                                     u32 dispatchCount = 0);
+                                     u32 dispatchCount = 0,
+                                     const String& kernelName = "kernel");
 
     // 单个核的缓存项（PSO + 描述符资源，按需构建）
     struct KernelEntry {
