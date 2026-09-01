@@ -1,6 +1,7 @@
 # HugEngine 中 AI 与反射系统的配合分析
 
 > 基于实际代码与设计文档（`docs/AI相关/1~7` 系列）的分析，只读未修改任何源码。
+> 最后更新: 2026-09-01（覆盖至 G2.3；"现状评估"随 AI 模块演进同步修正）
 
 ## 一、核心设计原则："反射即世界模型"
 
@@ -98,11 +99,11 @@ SceneBuilder::BuildScene：JSON → 真实 Entity/Component 树
 ## 六、推理运行时：与 RHI 同构（A1 基座）
 
 `Engine/AI/Runtime/` 进一步把 AI 提升为与渲染平级的抽象：
-- `IAIDevice` 是 `IRHIDevice` 的镜像（`AIDevice.h` 注释原话："抽象『模型执行』而非『图元绘制』"），按模型格式 + 能力选择后端（GPU/CPU/Remote，当前仅 RemoteBackend 可用）；
-- **零拷贝互操作**：`WrapRHITexture` / `WrapRHIBuffer` / `ExportBuffer` 让神经渲染权重以 bindless 缓冲直接接入推理，不复制 GPU↔CPU；
+- `IAIDevice` 是 `IRHIDevice` 的镜像（`AIDevice.h` 注释原话："抽象『模型执行』而非『图元绘制』"），按模型格式 + 能力选择后端（GPU/CPU/Remote；当前 **GPUBackend + RemoteBackend 可用**，CPUBackend 未接入）；
+- **零拷贝互操作**：`WrapRHITexture` / `ExportBuffer` 已实现（A3.2，`GPUTextureTensor` 包装渲染纹理、推理输出缓冲导出），`WrapRHIBuffer` 仍为占位；
 - `AIModule` 单例（进程级入口）+ `InferenceScheduler`（流式 token 按序投递主线程）。
 
-设计文档中的目标形态（`docs/AI相关/3.HugEngine AI统一基座设计规格.md`）：AI 写世界封装为 `he::Command` 走 `CommandHistory`（**可撤销/可审查**）；AIGC 平台生成的内容与人工编辑走完全相同的 Entity/Component/Asset/Command/Archive 管线。
+设计文档中的目标形态（`docs/AI相关/3.HugEngine AI统一基座设计规格.md`）：AI 写世界封装为 `he::Command` 走 `CommandHistory`（**可撤销/可审查**）——已实现（A2 的 `Action→CompileAction→he::Command`）；AIGC 平台生成的内容与人工编辑走完全相同的 Entity/Component/Asset/Command/Archive 管线——已实现（G1/G2）。
 
 ## 七、配合关系总览（数据流闭环）
 
@@ -125,11 +126,21 @@ SceneBuilder::BuildScene：JSON → 真实 Entity/Component 树
 - **AI 是反射的"消费者"**（也是编辑器 Details 面板之外反射系统的第二个主要消费方）；
 - 两者通过 `PropertyInfo`（offset/typeName/attributes）这一个数据契约解耦——AI 层完全不需要包含任何 `Scene/*Component.h` 的具体头文件依赖。
 
-## 八、现状评估
+## 八、现状评估（2026-09-01，覆盖至 G2.3）
 
-**已落地**（git 记录 `4ca47f1` / `d75d56d`）：
+**已落地**（git 记录 `4ca47f1` / `d75d56d` / `113fb4e` / `fd97458` / `132c599` / `a8b720d` / `4c21a87` / `6d5024f` / `9da585d`）：
 - 反射侧：4 个 `HE_ATTR_AI_*` 宏 + `AttrKey::Ai*` 键 + 3 个组件类型的实际注解；
-- AI 侧：`WorldModel`（反射读）、`SceneBuilder`/`PromptToScene`/`DeepSeekClient`（LLM 写）、`IAIDevice`/`InferenceScheduler`/`AIModule`（推理运行时骨架）；
-- 6 组 doctest 单元测试（含 `TestWorldModel` 直接验证 AI 注解驱动快照/词表）+ `05.LLMScene` 端到端示例。
+- AI 侧：`WorldModel`（反射读）、`SceneBuilder`/`PromptToScene`/`DeepSeekClient`（LLM 写）、`IAIDevice`/`InferenceScheduler`/`AIModule`/`GPUBackend`/`RemoteBackend`（推理运行时）；
+- AIGC：`GenerateSceneCommand`（可撤销）+ `GenerativeAssetFactory`（场景/纹理/材质/网格/动画四类）+ `AIPipeline` + 编辑器面板；
+- 智能体：`AgentComponent`/`Memory`/`Goal` + `IBrain`/`LLMBrain`/`MockBrain` + `Action→Command`（SpawnEntity/SetTransform/SetProperty 可撤销）+ `AgentSystem` 节律驱动 + `ToolUse`；
+- 神经收编：零拷贝互操作（`WrapRHITexture`/`ExportBuffer`）+ 首个神经子系统 `NeuralUpscaler`（IRenderSubsystem 形态）+ GPU 纹理生成核；
+- 测试：doctest 30 用例 / 135 断言；Samples 05~10 端到端。
 
-**未落地**（设计文档中的后续路线）：SceneBuilder 反射泛型化、AI 动作 → `he::Command` 可撤销接入、`HE_ATTR_AI_TOOL` 工具调用、Agent 组件（LLM/RL/行为树可插拔）、编辑器 AI 观察面板、神经渲染零拷贝接入 `IAIDevice`。
+**未落地**（设计文档中的后续路线，多数依赖外部 SDK/模型或属较大工程）：
+- `SceneBuilder` 反射泛型化（硬编码组件映射 → `ClassInfo::factory` 按名构造）——MVP 与反射通路合流的演进点；
+- `CPUBackend`（ONNX Runtime / GGUF）；
+- 真实神经特性：NRC / NeuralMaterial / RTXNS / 超分 SDK（DLSS/FSR/XeSS，需 Streamline SDK 与许可）；
+- 模式 B 完整 agentic 工具（`capture_screenshot` / `list_assets` 等；当前仅 SpawnEntity/SetTransform/SetProperty）；
+- 编辑器 AI 观察面板（AIObserver / AgentInspector / PromptConsole）；
+- G3 深度编辑（AI 驱动材质编辑 / 场景重排 / 批量修饰）与 `ContentPolicyFilter` 审核钩子；
+- 能力降级链（无 CoopVec 设备自动降级逻辑）与正式 JSON Schema 校验。
