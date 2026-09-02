@@ -586,6 +586,12 @@ void ForwardPipeline::UploadMaterialBindless(he::World& world) {
         mat.alphaMode       = static_cast<AlphaMode>(m.alphaMode);
         mat.doubleSided     = m.doubleSided;
         mat.unlit           = m.unlit;
+        // 纹理路径 → textureMask（无纹理槽 shader 不采样，避免占位纹理污染）
+        mat.baseColorTexture         = m.baseColorTexture;
+        mat.normalTexture            = m.normalTexture;
+        mat.metallicRoughnessTexture = m.metallicRoughnessTexture;
+        mat.occlusionTexture         = m.occlusionTexture;
+        mat.emissiveTexture          = m.emissiveTexture;
         GPUMaterialData g;
         FillMaterialData(g, mat);                    // 摊平成 GPUMaterialData（bindless 材质 SSBO 元素）
         uniqueMat[m.materialID] = g;

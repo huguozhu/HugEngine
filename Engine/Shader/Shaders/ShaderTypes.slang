@@ -123,6 +123,13 @@ GPU_CONST(GPU_UINT kGPUMaterialTexSlot_MetallicRough  = 2);  // 金属度/粗糙
 GPU_CONST(GPU_UINT kGPUMaterialTexSlot_Occlusion      = 3);  // 环境光遮蔽 Occlusion
 GPU_CONST(GPU_UINT kGPUMaterialTexSlot_Count          = 4);  // 每材质纹理槽数（materialID >> 2 的依据）
 
+// --- 纹理存在位掩码（textureMask：bit n = 槽 n 绑定真实纹理）---
+// 无纹理的槽不做采样（占位纹理内容不可信，如白色会污染法线），用中性默认值。
+GPU_CONST(GPU_UINT kGPUMaterialTexMask_BaseColor     = 1u << 0);  // 有 BaseColor 纹理
+GPU_CONST(GPU_UINT kGPUMaterialTexMask_Normal        = 1u << 1);  // 有法线贴图
+GPU_CONST(GPU_UINT kGPUMaterialTexMask_MetallicRough = 1u << 2);  // 有金属度/粗糙度纹理
+GPU_CONST(GPU_UINT kGPUMaterialTexMask_Occlusion     = 1u << 3);  // 有 AO 纹理
+
 GPU_CONST_END
 
 // ---- 清理宏（GPU struct 定义后统一清理）----
@@ -162,6 +169,7 @@ GPU_STRUCT GPUObjectData {
     GPU_UINT materialFlags;         // [112]
     GPU_UINT materialID;            // [116]     bindless 纹理基索引
     float    dielectricF0;          // [120]     电介质 F0（由 IOR 预计算）
+    GPU_UINT textureMask;           // [124]     纹理存在位掩码（bit=槽有真实纹理）
     float4   disneyA;               // [128]     x=anisotropic, y=subsurface, z=specular, w=sheen
     float4   disneyB;               // [144]     x=clearcoat, y=clearcoatGloss, z=specularTint.r, w=specularTint.g
     float    disneyC;               // [160]     specularTint.b
@@ -179,6 +187,7 @@ GPU_STRUCT GPUMaterialData {
     float    aoFactor;              // 环境光遮蔽
     float    alphaCutoff;           // alpha 截断阈值
     GPU_UINT materialFlags;         // 材质标志位（双面/AlphaMask/Unlit）
+    GPU_UINT textureMask;           // 纹理存在位掩码（bit=槽有真实纹理）
     float    dielectricF0;          // 电介质 F0（由 IOR 预计算）
     float4   disneyA;               // x=anisotropic, y=subsurface, z=specular, w=sheen
     float4   disneyB;               // x=clearcoat, y=clearcoatGloss, z=specularTint.r, w=specularTint.g

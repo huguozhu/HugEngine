@@ -75,6 +75,12 @@ std::vector<DrawItem> SceneRenderer::Prepare(he::World& world, he::SceneGraph& s
         mat.alphaMode       = static_cast<AlphaMode>(e.mesh->alphaMode);
         mat.doubleSided     = e.mesh->doubleSided;
         mat.unlit           = e.mesh->unlit;
+        // 纹理路径 → textureMask（无纹理槽 shader 不采样，避免占位纹理污染）
+        mat.baseColorTexture         = e.mesh->baseColorTexture;
+        mat.normalTexture            = e.mesh->normalTexture;
+        mat.metallicRoughnessTexture = e.mesh->metallicRoughnessTexture;
+        mat.occlusionTexture         = e.mesh->occlusionTexture;
+        mat.emissiveTexture          = e.mesh->emissiveTexture;
 
         GPUObjectData& obj = objData[vi];
         obj.worldMatrix = e.worldMatrix;

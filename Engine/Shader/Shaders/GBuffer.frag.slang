@@ -45,21 +45,32 @@ struct FSOutput {
 FSOutput fragmentMain(VSOutput input) {
     GPUObjectData obj = u_Objects[objectIndex];
 
-    // ── MRT 0-2：PBR 材质（bindless 纹理数组采样） ──
+    // ── MRT 0-2：PBR 材质（bindless 纹理数组采样，按 textureMask 判断槽有无纹理） ──
     uint texBase = obj.materialID;
-    float4 baseColorSample = u_Textures[texBase + kGPUMaterialTexSlot_BaseColor].Sample(u_Samplers[texBase + kGPUMaterialTexSlot_BaseColor], input.uv);
+    float4 baseColorSample = (obj.textureMask & kGPUMaterialTexMask_BaseColor) != 0u
+        ? u_Textures[texBase + kGPUMaterialTexSlot_BaseColor].Sample(u_Samplers[texBase + kGPUMaterialTexSlot_BaseColor], input.uv)
+        : float4(1.0);
     float3 albedo   = obj.baseColorFactor.rgb * baseColorSample.rgb;
     float  alpha    = obj.baseColorFactor.a * baseColorSample.a;
-    float  metallic = obj.metallicFactor * u_Textures[texBase + kGPUMaterialTexSlot_MetallicRough].Sample(u_Samplers[texBase + kGPUMaterialTexSlot_MetallicRough], input.uv).b;
+    float4 mrSample = (obj.textureMask & kGPUMaterialTexMask_MetallicRough) != 0u
+        ? u_Textures[texBase + kGPUMaterialTexSlot_MetallicRough].Sample(u_Samplers[texBase + kGPUMaterialTexSlot_MetallicRough], input.uv)
+        : float4(0.0, 1.0, 0.0, 1.0);   // 中性：g=1(rough 不动) b=0(metallic 不动)
+    float  metallic = obj.metallicFactor * mrSample.b;
 
     if (alpha < obj.alphaCutoff) discard;
 
-    float3 texNormal = u_Textures[texBase + kGPUMaterialTexSlot_Normal].Sample(u_Samplers[texBase + kGPUMaterialTexSlot_Normal], input.uv).rgb * 2.0 - 1.0;
-    float3 N = normalize(input.worldNormal + texNormal * 0.5);
+    // 法线：有真实法线贴图才混合；无法线贴图（占位白会错误偏转 N）直接用几何法线
+    float3 N = normalize(input.worldNormal);
+    if ((obj.textureMask & kGPUMaterialTexMask_Normal) != 0u) {
+        float3 texNormal = u_Textures[texBase + kGPUMaterialTexSlot_Normal]
+            .Sample(u_Samplers[texBase + kGPUMaterialTexSlot_Normal], input.uv).rgb * 2.0 - 1.0;
+        N = normalize(N + texNormal * 0.5);
+    }
 
-    float roughness = clamp(obj.roughnessFactor *
-        u_Textures[texBase + kGPUMaterialTexSlot_MetallicRough].Sample(u_Samplers[texBase + kGPUMaterialTexSlot_MetallicRough], input.uv).g, 0.04, 1.0);
-    float ao = obj.aoFactor * u_Textures[texBase + kGPUMaterialTexSlot_Occlusion].Sample(u_Samplers[texBase + kGPUMaterialTexSlot_Occlusion], input.uv).r;
+    float roughness = clamp(obj.roughnessFactor * mrSample.g, 0.04, 1.0);
+    float ao = obj.aoFactor * (((obj.textureMask & kGPUMaterialTexMask_Occlusion) != 0u)
+        ? u_Textures[texBase + kGPUMaterialTexSlot_Occlusion].Sample(u_Samplers[texBase + kGPUMaterialTexSlot_Occlusion], input.uv).r
+        : 1.0);
 
     // ── MRT 3：Velocity（UV 空间运动矢量 = currUV - prevUV） ──
     float3 currNDC = input.position.xyz / input.position.w;

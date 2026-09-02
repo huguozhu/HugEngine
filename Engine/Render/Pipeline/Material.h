@@ -102,6 +102,16 @@ inline PBRMaterial GetDefaultMaterial() {
     return mat;
 }
 
+// 根据材质纹理路径计算纹理存在位掩码（bit n = 槽 n 有真实纹理）
+inline u32 ComputeMaterialTextureMask(const PBRMaterial& mat) {
+    u32 mask = 0;
+    if (!mat.baseColorTexture.empty())          mask |= (1u << 0);  // BaseColor 槽
+    if (!mat.normalTexture.empty())             mask |= (1u << 1);  // Normal 槽
+    if (!mat.metallicRoughnessTexture.empty())  mask |= (1u << 2);  // MetallicRough 槽
+    if (!mat.occlusionTexture.empty())          mask |= (1u << 3);  // Occlusion 槽
+    return mask;
+}
+
 // 填充 GPUObjectData（每帧上传到 Storage Buffer）
 inline void FillObjectData(GPUObjectData& obj, const PBRMaterial& mat) {
     obj.baseColorFactor = mat.baseColorFactor;
@@ -118,6 +128,7 @@ inline void FillObjectData(GPUObjectData& obj, const PBRMaterial& mat) {
     if (mat.alphaMode == AlphaMode::Mask) flags |= MF_AlphaMask;
     if (mat.unlit)        flags |= MF_Unlit;
     obj.materialFlags = flags;
+    obj.textureMask = ComputeMaterialTextureMask(mat);   // 纹理存在位掩码（无纹理槽 shader 不采样）
     // Disney 参数打包（与 ShaderTypes.slang GPUObjectData 布局一致）
     obj.disneyA = float4(mat.anisotropic, mat.subsurface, mat.specular, mat.sheen);
     obj.disneyB = float4(mat.clearcoat, mat.clearcoatGloss, mat.specularTint.x, mat.specularTint.y);
@@ -139,6 +150,7 @@ inline void FillMaterialData(GPUMaterialData& m, const PBRMaterial& mat) {
     if (mat.alphaMode == AlphaMode::Mask) flags |= MF_AlphaMask;
     if (mat.unlit)        flags |= MF_Unlit;
     m.materialFlags = flags;
+    m.textureMask = ComputeMaterialTextureMask(mat);   // 纹理存在位掩码（无纹理槽 shader 不采样）
     m.disneyA = float4(mat.anisotropic, mat.subsurface, mat.specular, mat.sheen);
     m.disneyB = float4(mat.clearcoat, mat.clearcoatGloss, mat.specularTint.x, mat.specularTint.y);
     m.disneyC = mat.specularTint.z;
