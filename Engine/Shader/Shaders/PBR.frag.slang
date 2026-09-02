@@ -240,7 +240,11 @@ float4 fragmentMain(FSInput input) : SV_Target0 {
     color += prefilteredColor * (F * envBRDF.r + envBRDF.g) * iblIntensity;
 
     // ---- RSM 间接光照（Reflective Shadow Maps） ----
-    if (iblIntensity > 0.0 && u_ShadowData[0].shadowParams.z > 0.0) {
+    // 仅方向光（CSM 主阴影，shadowParams.w<0.5）生效：RSM 依赖 lightViewProj[0]
+    //（方向光 CSM 投影）。点光/聚光场景的 u_ShadowData[0] 无 lightViewProj（0 矩阵），
+    // 若误执行会用零矩阵变换产生垃圾坐标 → 阴影区出现异常图案（"钱币"伪影）。
+    if (iblIntensity > 0.0 && u_ShadowData[0].shadowParams.z > 0.0
+        && u_ShadowData[0].shadowParams.w < 0.5) {
         float4 lightSpacePos = mul(u_ShadowData[0].lightViewProj[0], float4(input.worldPos, 1.0));
         float2 rsmCoord = lightSpacePos.xy / lightSpacePos.w * 0.5 + 0.5;
         float3 rsmIndirect = float3(0.0);

@@ -79,7 +79,11 @@ void PointShadowTechnique::Render(rhi::IRHICommandList* cmd,he::World& w,he::Sce
             rhi::ClearValue cv{};cv.depth=1.f;
             cmd->SetPipeline(m_ShadowPSO.get());cmd->BeginOffscreenPass(nullptr,fv,m_MapSize,m_MapSize,&cv);
             cmd->SetPipeline(m_ShadowPSO.get());
-            cmd->SetViewport({0,(float)m_MapSize,(float)m_MapSize,-(float)m_MapSize,0,1});
+            // 实验：点光 cubemap 渲染用正高度视口（去掉 y-flip）。
+            // 排查：CSM 阴影在 shader 采样时用 uv.y=0.5-ndc.y*0.5 补偿了负高度视口的
+            // y-flip；而点光 SamplePointShadow 用方向向量采样 cubemap 无补偿，
+            // y-flip 会让深度图上下颠倒 → 采样错位 → 地板出现环形/方形伪影。
+            cmd->SetViewport({0,0,(float)m_MapSize,(float)m_MapSize,0,1});
             cmd->SetScissor({0,0,m_MapSize,m_MapSize});
             cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_ExternalDescSet);
             u32 oi=0;float4x4 vp=proj*view;
