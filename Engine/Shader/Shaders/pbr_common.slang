@@ -130,8 +130,14 @@ float SamplePointShadow(float3 worldPos, float3 lightPos, float lightRange,
     // 归一化距离用于比较：世界空间距离 / 光源范围
     float normalizedDist = dist / lightRange;
 
-    // 应用深度偏移后比较
-    return (normalizedDist - sm.shadowParams.x <= shadowDepth) ? 1.0 : 0.0;
+    // 贴图深度是透视投影深度（n=0.1, f=lightRange，非线性）。
+    // 反算线性距离后再归一化比较，否则线性距离 vs 非线性深度恒失配（阴影失效）。
+    const float kPointShadowNear = 0.1;
+    float linDepth = kPointShadowNear * lightRange
+                   / (lightRange - shadowDepth * (lightRange - kPointShadowNear));
+
+    // 应用深度偏移后比较（深度偏移在归一化空间）
+    return (normalizedDist - sm.shadowParams.x <= linDepth / lightRange) ? 1.0 : 0.0;
 }
 
 // ============================================================

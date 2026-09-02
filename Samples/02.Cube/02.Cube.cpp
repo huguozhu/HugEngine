@@ -202,21 +202,21 @@ int main() {
         float3(0.0f, 5.2f, -1.5f), float3(0.6f),
         float4(0.95f, 0.93f, 0.88f, 1.0f), 0.0f, 0.35f, true);
 
-    // --- 方向光 ---
+    // --- 方向光（已注释：测试点光源阴影时禁用，避免混淆）---
     Entity mainLightEntity;
     DirectionalLight* mainDL = nullptr;
-    {
-        mainLightEntity = world.CreateEntity("DirectionalLight");
-        world.AddComponent<TransformComponent>(mainLightEntity);
-        mainDL = world.AddComponent<DirectionalLight>(mainLightEntity);
-        mainDL->direction = float3(0.5f, -1.0f, 1.0f);
-        mainDL->color     = float3(1.0f, 0.95f, 0.85f);
-        mainDL->intensity = 5.0f;
-        mainDL->castShadow = true;
-        mainDL->syncWithPhysicalSky = true;   // 由物理天空太阳驱动方向与照度
-        mainDL->shadowBias = 0.0003f;   // 深度偏移（CSM 深度范围动态适配后的小偏移）
-        sceneGraph.SetParent(mainLightEntity, Entity{kInvalidEntity});
-    }
+    //{
+    //    mainLightEntity = world.CreateEntity("DirectionalLight");
+    //    world.AddComponent<TransformComponent>(mainLightEntity);
+    //    mainDL = world.AddComponent<DirectionalLight>(mainLightEntity);
+    //    mainDL->direction = float3(0.5f, -1.0f, 1.0f);
+    //    mainDL->color     = float3(1.0f, 0.95f, 0.85f);
+    //    mainDL->intensity = 5.0f;
+    //    mainDL->castShadow = true;
+    //    mainDL->syncWithPhysicalSky = true;   // 由物理天空太阳驱动方向与照度
+    //    mainDL->shadowBias = 0.0003f;   // 深度偏移（CSM 深度范围动态适配后的小偏移）
+    //    sceneGraph.SetParent(mainLightEntity, Entity{kInvalidEntity});
+    //}
 
     // --- 点光源（投射阴影）---
     Entity pointLightEntity;
@@ -293,8 +293,10 @@ int main() {
         Entity pe = world.CreateEntity("PhysicalSky");
         world.AddComponent<TransformComponent>(pe);
         auto* ps = world.AddComponent<PhysicalSkyComponent>(pe);
-        ps->sunDirection = glm::normalize(-mainDL->direction);  // 太阳方向对齐方向光意图 (0.5,-1,1)
-                                                                 // （syncWithPhysicalSky 由天空驱动光照/阴影方向）
+        // 太阳方向对齐方向光意图 (0.5,-1,1)；方向光被禁用（测试点光阴影）时用默认太阳方向
+        ps->sunDirection = mainDL
+            ? glm::normalize(-mainDL->direction)
+            : float3(0.0f, 0.6f, 0.4f);
         ps->turbidity    = 4.0f;   // 大气浑浊度（1=极清，5=霾，10=浓霾）
         ps->groundAlbedo = 0.1f;   // 地面反照率
         ps->intensity    = 1.0f;   // 天空整体亮度倍率
