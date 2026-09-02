@@ -134,8 +134,8 @@ int main() {
     // --- 1. 引擎启动 ---
     EngineConfig config;
     config.appName      = "HugEngine — PBR Forward Pipeline";
-    config.windowWidth  = 960;
-    config.windowHeight = 500;
+    config.windowWidth  = 1920;
+    config.windowHeight = 1080;
     config.enableVSync  = true;
 
     Engine engine(config);
@@ -174,33 +174,33 @@ int main() {
 
     // 地板（深灰色立方体，粗糙，长宽 2x）
     CreateShapeEntity(world, sceneGraph,
-        float3(0.0f, -1.5f, 0.0f), float3(200.0f, 0.2f, 200.0f),
+        float3(0.0f, 0.0f, 0.0f), float3(200.0f, 0.2f, 200.0f),
         float4(0.3f, 0.3f, 0.35f, 1.0f), 0.0f, 0.9f);
 
-    // 金球（金属，光滑）
-    CreateShapeEntity(world, sceneGraph,
-        float3(-1.5f, 5.0f, 0.0f), float3(0.8f),
-        float4(1.0f, 0.72f, 0.0f, 1.0f), 1.0f, 0.15f, true);
+    //// 金球（金属，光滑）
+    //CreateShapeEntity(world, sceneGraph,
+    //    float3(-1.5f, 5.0f, 0.0f), float3(0.8f),
+    //    float4(1.0f, 0.72f, 0.0f, 1.0f), 1.0f, 0.15f, true);
 
-    // 铜球（金属，中度粗糙）
-    CreateShapeEntity(world, sceneGraph,
-        float3(0.0f, 4.0f, 0.0f), float3(0.8f),
-        float4(0.85f, 0.45f, 0.2f, 1.0f), 0.95f, 0.4f, true);
+    //// 铜球（金属，中度粗糙）
+    //CreateShapeEntity(world, sceneGraph,
+    //    float3(0.0f, 4.0f, 0.0f), float3(0.8f),
+    //    float4(0.85f, 0.45f, 0.2f, 1.0f), 0.95f, 0.4f, true);
 
-    // 蓝色塑料立方体（非金属，光滑）
-    CreateShapeEntity(world, sceneGraph,
-        float3(1.5f, 3.0f, 0.0f), float3(0.8f),
-        float4(0.2f, 0.5f, 1.0f, 1.0f), 0.0f, 0.2f);
+    //// 蓝色塑料立方体（非金属，光滑）
+    //CreateShapeEntity(world, sceneGraph,
+    //    float3(1.5f, 3.0f, 0.0f), float3(0.8f),
+    //    float4(0.2f, 0.5f, 1.0f, 1.0f), 0.0f, 0.2f);
 
-    // 红色橡胶立方体（非金属，粗糙）
-    CreateShapeEntity(world, sceneGraph,
-        float3(0.0f, 6.0f, 1.5f), float3(0.7f),
-        float4(0.9f, 0.15f, 0.1f, 1.0f), 0.0f, 0.85f);
+    //// 红色橡胶立方体（非金属，粗糙）
+    //CreateShapeEntity(world, sceneGraph,
+    //    float3(0.0f, 6.0f, 1.5f), float3(0.7f),
+    //    float4(0.9f, 0.15f, 0.1f, 1.0f), 0.0f, 0.85f);
 
-    // 白色陶瓷球
-    CreateShapeEntity(world, sceneGraph,
-        float3(0.0f, 5.2f, -1.5f), float3(0.6f),
-        float4(0.95f, 0.93f, 0.88f, 1.0f), 0.0f, 0.35f, true);
+    //// 白色陶瓷球
+    //CreateShapeEntity(world, sceneGraph,
+    //    float3(0.0f, 5.2f, -1.5f), float3(0.6f),
+    //    float4(0.95f, 0.93f, 0.88f, 1.0f), 0.0f, 0.35f, true);
 
     // --- 方向光（已注释：测试点光源阴影时禁用，避免混淆）---
     Entity mainLightEntity;
@@ -243,6 +243,7 @@ int main() {
         sphere->radius = 0.15f;
         sphere->segmentCount = 12;
         sphere->ringCount = 6;
+        sphere->castShadow = false;   // 光源可视化球不投射阴影（避免渲染进阴影 cubemap 遮挡一切）
         sphere->OnCreate();
         auto* sphereTransform = world.GetComponent<TransformComponent>(pointLightSphere);
         if (sphereTransform) sphereTransform->position = float3(2.0f, 2.0f, 3.0f);

@@ -107,6 +107,7 @@ void SpotShadowTechnique::Render(rhi::IRHICommandList* cmd,he::World& w,he::Scen
         u32 oi=0;
         auto rm=[&](he::Entity,he::MeshComponent& m){
             if(m.GetIndexCount()==0||oi>=MAX_OBJECTS)return;
+            if(!m.castShadow)return;   // castShadow=false 不写入阴影（光源可视化球等）
             // DrawCall 调试 marker：标记当前聚光灯与物体（RenderDoc 定位用）
             char label[64];
             snprintf(label,sizeof(label),"Shadow S%u Obj#%u",li,oi);

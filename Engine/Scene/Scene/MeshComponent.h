@@ -50,6 +50,7 @@ public:
     float  alphaCutoff       = 0.5f;             // Alpha 截断阈值
     bool   doubleSided       = false;            // 双面渲染
     bool   unlit             = false;            // 无光照模式
+    bool   castShadow        = true;             // 是否投射阴影（false 的网格不进入阴影贴图，如光源可视化球）
     u8     alphaMode         = 0;                // AlphaMode: 0=Opaque, 1=Mask, 2=Blend
     u32    materialID        = 0;                // Bindless 纹理数组基索引
 

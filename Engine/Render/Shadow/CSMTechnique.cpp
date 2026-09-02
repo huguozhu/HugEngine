@@ -141,6 +141,7 @@ void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,he::World& w,h
     u32 oi=0;
     auto rm=[&](he::Entity e,he::MeshComponent& m){
         if(m.GetIndexCount()==0||oi>=MAX_OBJECTS)return;
+        if(!m.castShadow)return;   // castShadow=false 不写入阴影（光源可视化球等）
         objData[oi].worldMatrix=sg.GetWorldMatrix(e);
         // DrawCall 调试 marker：标记当前级联与物体（RenderDoc 定位用）
         char label[64];
