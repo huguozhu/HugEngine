@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Math/Math.h"
+#include "Core/CVar.h"
 
 // ============================================================
 // PhysicalLight.h — 基于物理的光源工具函数
@@ -10,6 +11,23 @@
 // ============================================================
 
 namespace he::render {
+
+// ============================================================
+// 物理光照单位全局开关（r.Light.PhysicalUnits）
+//
+// 默认关闭（0）：所有光源走传统 intensity 模式，光源的
+// illuminance/luminousIntensity 字段被忽略（向后兼容）。
+// 开启（1）：光源设置了物理量（illuminance>0 / luminousIntensity>0）
+// 时按物理单位换算。
+// 定义于 ForwardPipeline.cpp；Engine::Initialize 从
+// EngineConfig::usePhysicalLights 桥接写入，运行时可用控制台覆盖。
+// ============================================================
+extern he::CVar<bool> cvLightPhysicalUnits;
+
+/// 物理模式是否生效：全局开关打开 且 光源设置了物理量
+inline bool IsPhysicalLightEnabled(float physicalValue) {
+    return cvLightPhysicalUnits.Get() && physicalValue > 0.0f;
+}
 
 // ============================================================
 // 物理光照单位换算系数（lux/cd → 渲染强度）

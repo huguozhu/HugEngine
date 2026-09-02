@@ -239,6 +239,7 @@ int main() {
         pointLightSphere = world.CreateEntity("PointLightSphere");
         world.AddComponent<TransformComponent>(pointLightSphere);
         auto* sphere = world.AddComponent<SphereComponent>(pointLightSphere);
+        sphere->baseColorFactor = float4(1.0, 0.0, 0.0, 1.0);
         sphere->radius = 0.15f;
         sphere->segmentCount = 12;
         sphere->ringCount = 6;
@@ -249,7 +250,8 @@ int main() {
     }
 
     // --- 天空盒（从 skybox 目录加载 6 面纹理）---
-    {
+    // 【已注释】测试点光阴影：移除天空盒（连同物理天空，场景无天空光照）
+    if (false) {
         String skyDir = String(HUGE_CONTENT_DIR) + "Textures/skybox/";
         const char* faceFiles[6] = {
             "daylight0.png", "daylight1.png", "daylight2.png",
@@ -289,19 +291,20 @@ int main() {
 
     // --- 物理天空（Preetham 解析模型，可选，替代 Cubemap 天空盒）---
     // 需 r.PhysicalSky.Enable 1 + Forward 模式（r.Pipeline.Mode 0）才可见
+    // 【已注释】测试点光阴影：移除天空环境光干扰（场景只剩点光照明）
     if (cvPhysicalSkyEnable.Get() == 1) {
-        Entity pe = world.CreateEntity("PhysicalSky");
-        world.AddComponent<TransformComponent>(pe);
-        auto* ps = world.AddComponent<PhysicalSkyComponent>(pe);
-        // 太阳方向对齐方向光意图 (0.5,-1,1)；方向光被禁用（测试点光阴影）时用默认太阳方向
-        ps->sunDirection = mainDL
-            ? glm::normalize(-mainDL->direction)
-            : float3(0.0f, 0.6f, 0.4f);
-        ps->turbidity    = 4.0f;   // 大气浑浊度（1=极清，5=霾，10=浓霾）
-        ps->groundAlbedo = 0.1f;   // 地面反照率
-        ps->intensity    = 1.0f;   // 天空整体亮度倍率
-        ps->sunIntensity = 1.0f;   // 太阳盘亮度倍率
-        sceneGraph.SetParent(pe, Entity{kInvalidEntity});
+        //Entity pe = world.CreateEntity("PhysicalSky");
+        //world.AddComponent<TransformComponent>(pe);
+        //auto* ps = world.AddComponent<PhysicalSkyComponent>(pe);
+        //// 太阳方向对齐方向光意图 (0.5,-1,1)；方向光被禁用（测试点光阴影）时用默认太阳方向
+        //ps->sunDirection = mainDL
+        //    ? glm::normalize(-mainDL->direction)
+        //    : float3(0.0f, 0.6f, 0.4f);
+        //ps->turbidity    = 4.0f;   // 大气浑浊度（1=极清，5=霾，10=浓霾）
+        //ps->groundAlbedo = 0.1f;   // 地面反照率
+        //ps->intensity    = 1.0f;   // 天空整体亮度倍率
+        //ps->sunIntensity = 1.0f;   // 太阳盘亮度倍率
+        //sceneGraph.SetParent(pe, Entity{kInvalidEntity});
     }
 
     HE_CORE_INFO("Scene created: {} entities", world.GetEntityCount());
@@ -340,6 +343,7 @@ int main() {
     // ============================================================
     // 5.5 粒子系统测试
     // ============================================================
+    if (0)
     {
         Entity particleEntity = world.CreateEntity("TestParticle");
         auto* ptTransform = world.AddComponent<TransformComponent>(particleEntity);

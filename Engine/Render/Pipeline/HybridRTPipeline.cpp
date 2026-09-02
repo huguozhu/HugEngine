@@ -423,7 +423,7 @@ void HybridRTPipeline::CollectLights(he::World& world, he::SceneGraph& sg,
         case LightType::Directional: {
             auto* dl = static_cast<DirectionalLight*>(&lc);
             gl.directionType = float4(dl->direction, 0.0f);
-            if (lc.illuminance > 0.0f) {
+            if (IsPhysicalLightEnabled(lc.illuminance)) {   // 物理模式需全局开关 r.Light.PhysicalUnits
                 gl.colorIntensity.w = lc.illuminance * kPhysicalLightExposure;
                 gl.positionRange.w   = -1.0f;
             }
@@ -433,7 +433,7 @@ void HybridRTPipeline::CollectLights(he::World& world, he::SceneGraph& sg,
             auto* pl = static_cast<PointLight*>(&lc);
             gl.positionRange = float4(sg.GetWorldPosition(e), pl->range);
             gl.directionType.w = 1.0f;
-            if (lc.luminousIntensity > 0.0f) {
+            if (IsPhysicalLightEnabled(lc.luminousIntensity)) {
                 gl.colorIntensity.w = lc.luminousIntensity * kPhysicalLightExposure;
                 gl.positionRange.w   = -(pl->range);
             }
@@ -441,11 +441,11 @@ void HybridRTPipeline::CollectLights(he::World& world, he::SceneGraph& sg,
         }
         case LightType::Spot: {
             auto* sl = static_cast<SpotLight*>(&lc);
-            float r = lc.luminousIntensity > 0.0f ? -(sl->range) : sl->range;
+            float r = IsPhysicalLightEnabled(lc.luminousIntensity) ? -(sl->range) : sl->range;
             gl.positionRange = float4(sg.GetWorldPosition(e), r);
             gl.directionType = float4(glm::normalize(sl->direction), 2.0f);
             gl.coneAngles = float2(sl->innerConeAngle, sl->outerConeAngle);
-            if (lc.luminousIntensity > 0.0f) {
+            if (IsPhysicalLightEnabled(lc.luminousIntensity)) {
                 gl.colorIntensity.w = lc.luminousIntensity * kPhysicalLightExposure;
             }
             break;

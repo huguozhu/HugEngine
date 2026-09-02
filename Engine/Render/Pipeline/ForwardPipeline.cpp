@@ -1,5 +1,12 @@
 #include "Pipeline/ForwardPipeline.h"
 #include "Pipeline/PhysicalLight.h"  // render::KelvinToRGB
+
+// 物理光照单位全局开关定义（声明见 PhysicalLight.h；EngineConfig::usePhysicalLights 启动时桥接）
+namespace he::render {
+he::CVar<bool> cvLightPhysicalUnits("r.Light.PhysicalUnits", false,
+    "1=启用物理光照单位（光源 illuminance/luminousIntensity 生效）；0=传统 intensity 模式");
+} // namespace he::render
+
 #include "GI/GI_IBL.h"
 #include "GI/GI_RSM.h"
 #include "Shadow/ShadowSystem.h"
@@ -506,7 +513,7 @@ void ForwardPipeline::CollectLights(
             auto* dl = static_cast<he::DirectionalLight*>(&lc);
             gl.directionType = float4(dl->direction, 0.0f);
             gl.positionRange = float4(0, 0, 0, 0);
-            if (lc.illuminance > 0.0f) {          // 物理模式：照度 lux → 换算到渲染强度
+            if (IsPhysicalLightEnabled(lc.illuminance)) {   // 物理模式（需全局开关）：照度 lux → 换算到渲染强度
                 gl.colorIntensity.w = lc.illuminance * kPhysicalLightExposure;
                 gl.positionRange.w   = -1.0f;
             }
@@ -517,7 +524,7 @@ void ForwardPipeline::CollectLights(
             float3 pos = sg.GetWorldPosition(e);
             gl.positionRange = float4(pos, pl->range);
             gl.directionType = float4(0, -1, 0, 1.0f);
-            if (lc.luminousIntensity > 0.0f) {    // 物理模式：发光强度 cd → 换算到渲染强度
+            if (IsPhysicalLightEnabled(lc.luminousIntensity)) {   // 物理模式（需全局开关）：发光强度 cd → 换算到渲染强度
                 gl.colorIntensity.w = lc.luminousIntensity * kPhysicalLightExposure;
                 gl.positionRange.w   = -(pl->range);
             }
@@ -526,11 +533,11 @@ void ForwardPipeline::CollectLights(
         case he::LightType::Spot: {
             auto* sl = static_cast<he::SpotLight*>(&lc);
             float3 pos = sg.GetWorldPosition(e);
-            float r = lc.luminousIntensity > 0.0f ? -(sl->range) : sl->range;
+            float r = IsPhysicalLightEnabled(lc.luminousIntensity) ? -(sl->range) : sl->range;
             gl.positionRange = float4(pos, r);
             gl.directionType = float4(sl->direction, 2.0f);
             gl.coneAngles   = float2(sl->innerConeAngle, sl->outerConeAngle);
-            if (lc.luminousIntensity > 0.0f) gl.colorIntensity.w = lc.luminousIntensity * kPhysicalLightExposure;
+            if (IsPhysicalLightEnabled(lc.luminousIntensity)) gl.colorIntensity.w = lc.luminousIntensity * kPhysicalLightExposure;
             break;
         }
         }

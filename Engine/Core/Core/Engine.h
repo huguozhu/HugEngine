@@ -20,6 +20,7 @@ struct EngineConfig {
     bool        enableValidation = true;
     bool        enableMultiThreadRecord = true;  // Phase 5-4: 多线程命令录制
     bool        enableDrawMarkers = true;   // DrawCall 级调试 marker（RenderDoc 定位用，启动时写入 r.Debug.DrawMarker）
+    bool        usePhysicalLights = false;  // 1=启用物理光照单位（illuminance/luminousIntensity 生效，默认关）；0=传统 intensity 模式
     LogLevel    logLevel     = LogLevel::Info;  // 默认日志等级
 };
 

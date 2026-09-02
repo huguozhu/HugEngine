@@ -31,6 +31,10 @@ void Engine::Initialize() {
     if (auto* cvar = FindCVar("r.Debug.DrawMarker"))
         cvar->SetFromString(m_Config.enableDrawMarkers ? "true" : "false");
 
+    // 物理光照单位开关（默认关闭：所有光源走传统 intensity 模式）
+    if (auto* cvar = FindCVar("r.Light.PhysicalUnits"))
+        cvar->SetFromString(m_Config.usePhysicalLights ? "true" : "false");
+
     // 3. Job system
     JobSystem::Initialize(m_Config.jobThreads);
 
