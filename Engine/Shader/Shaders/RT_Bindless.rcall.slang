@@ -1,4 +1,12 @@
 // RT_Bindless.rcall.slang — Callable: bindless PBR 纹理采样
+//
+// ⚠️ TODO（结构性问题）：本 Callable 引用的 bindless 材质（u_Textures /
+// u_Materials，set 0）在 RT 渲染器（HybridRT/PathTracing）中尚未上传绑定
+// （RT 场景走 u_MatTex 简化材质）。当前直接采样会命中未绑定/占位纹理，
+// 覆盖调用方（rchit）已填好的正确初值（白占位会把法线等污染为错误值）。
+// 修复方向：RT 渲染器接入 bindless 材质上传（UploadMaterialBindless +
+// u_Materials 绑定）后，按 textureMask 判断各槽有无真实纹理再采样
+// （与 PBR.frag/GBuffer.frag 的 kGPUMaterialTexMask_* 一致）。
 
 #include "common.slang"
 
