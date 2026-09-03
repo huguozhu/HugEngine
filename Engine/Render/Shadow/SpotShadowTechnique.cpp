@@ -69,7 +69,9 @@ u32 SpotShadowTechnique::CollectLights(he::World& w,he::SceneGraph& sg,const Cam
         float3 dir=glm::normalize(lc.direction);
         float fov=lc.outerConeAngle*2.0f;
         float4x4 proj=glm::perspectiveRH_ZO(glm::radians(glm::degrees(fov)),1.0f,.1f,std::max(lc.range,.2f));
-        float4x4 view=glm::lookAtRH(lp,lp+dir,float3(0,1,0));
+        // lookAt 的 up 不能与光方向(锥轴)平行，否则矩阵 NaN（方向接近 ±Y 时 up 改用 (1,0,0)）
+        float3 lu=(std::abs(dir.y)<0.999f)?float3(0,1,0):float3(1,0,0);
+        float4x4 view=glm::lookAtRH(lp,lp+dir,lu);
         GPUShadowData sd{};
         sd.lightViewProj[0]=proj*view; // Spot 透视 VP（光源矩阵，非 Camera 矩阵）
         sd.pointLightData=float4(lp,lc.range);

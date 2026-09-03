@@ -66,11 +66,14 @@ u32 RectLightShadowTechnique::CollectLights(he::World& w,he::SceneGraph& sg,cons
         if(!lc.enabled||!lc.castShadow||out.size()-start>=MAX_SHADOWS)return;
         float3 lp=sg.GetWorldPosition(e);
         float3 n=glm::normalize(lc.normal);
-        // 透视投影 FOV：覆盖矩形对角，近似用宽高/范围
-        float halfDiag=0.5f*glm::length(float2(lc.width,lc.height));
-        float fov=2.0f*glm::atan(halfDiag/glm::max(lc.range,halfDiag+0.1f));
+        // 面光阴影视锥：覆盖面光前方（发光法线半球）主要区域。
+        // 原用矩形对角/range 的窄锥（~17°），遮挡物（如球）偏离法线即不在视锥内 → 渲染不到 → 无阴影。
+        float fov=glm::radians(90.0f);
         float4x4 proj=glm::perspectiveRH_ZO(fov,1.0f,.1f,std::max(lc.range,.2f));
-        float4x4 view=glm::lookAtRH(lp,lp+n,float3(0,1,0));
+        // lookAt 的 up 不能与光方向(法线)平行，否则 right=normalize(cross(f,up))=0 → 矩阵 NaN → 深度不写入。
+        // 法线接近 ±Y 时 up 改用 (1,0,0)（参照 CSM 的 lu 处理）。
+        float3 lu=(std::abs(n.y)<0.999f)?float3(0,1,0):float3(1,0,0);
+        float4x4 view=glm::lookAtRH(lp,lp+n,lu);
         GPUShadowData sd{};
         sd.lightViewProj[0]=proj*view;                 // Rect 透视 VP
         sd.pointLightData=float4(lp,lc.range);

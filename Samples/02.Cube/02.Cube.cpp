@@ -262,7 +262,7 @@ int main() {
         rl->intensity  = 15.0f;
         rl->width      = 4.0f;
         rl->height     = 2.0f;
-        rl->normal     = float3(0.0f, 1.0f, 0.0f);   // 朝上
+        rl->normal     = float3(0.0f, -1.0f, 0.0f);   // 朝下（照亮下方地板/金球区）
         rl->range      = 15.0f;
         rl->castShadow = true;   // Phase 2：Rect 阴影
         rl->softness   = 0.5f;   // 软阴影
