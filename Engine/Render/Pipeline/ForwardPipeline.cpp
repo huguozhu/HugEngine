@@ -545,6 +545,15 @@ void ForwardPipeline::CollectLights(
             if (IsPhysicalLightEnabled(lc.luminousIntensity)) gl.colorIntensity.w = lc.luminousIntensity * kPhysicalLightExposure;
             break;
         }
+        case he::LightType::Rect: {
+            auto* rl = static_cast<he::RectLight*>(&lc);
+            float3 pos = sg.GetWorldPosition(e);
+            gl.positionRange = float4(pos, rl->range);
+            gl.directionType = float4(rl->normal, 3.0f);   // w=3 标记 Rect 类型；xyz=发光面法线
+            gl.coneAngles   = float2(rl->width, rl->height); // 复用：x=宽度, y=高度
+            if (IsPhysicalLightEnabled(lc.luminousIntensity)) gl.colorIntensity.w = lc.luminousIntensity * kPhysicalLightExposure;
+            break;
+        }
         }
 
         GPULight* lights = static_cast<GPULight*>(m_LightBuffers[m_CurrentFrameSlot]->Map());
@@ -556,6 +565,7 @@ void ForwardPipeline::CollectLights(
     world.ForEach<he::DirectionalLight>(collectLight);
     world.ForEach<he::PointLight>(collectLight);
     world.ForEach<he::SpotLight>(collectLight);
+    world.ForEach<he::RectLight>(collectLight);
 
     // 无光源时提供默认方向光
     if (pc.lightCount == 0) {

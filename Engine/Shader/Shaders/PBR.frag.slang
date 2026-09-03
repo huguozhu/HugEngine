@@ -116,6 +116,15 @@ float3 ShadeWithLight(GPULight light, float3 worldPos, float3 N, float3 V,
             // 原用弧度角(outer,inner)当 edge 与 cos 值比较且 edge0>edge1，导致锥内映射为 0（光照反了）。
             attenuation *= smoothstep(cos(light.coneAngles.y), cos(light.coneAngles.x), spotDot);
         }
+        if (ltype == 3u) {
+            // 矩形面光：朝向（面法线）敏感 + 面积因子 + 距离衰减
+            float3 rectN = normalize(light.directionType.xyz);   // 发光面法线
+            float2 rectWH = light.coneAngles;                     // x=宽, y=高
+            float facing = dot(rectN, -L);   // 面法线 vs 光传播方向（面光→表面）；正面发光、背面不发光
+            // 面积因子：矩形面积 / 距离²（面光展宽，越靠近越亮）
+            float areaF = (rectWH.x * rectWH.y) / max(dist * dist, 0.001);
+            attenuation *= areaF * clamp(facing, 0.0, 1.0);
+        }
     }
     float3 radiance = light.colorIntensity.rgb * light.colorIntensity.w * attenuation;
 

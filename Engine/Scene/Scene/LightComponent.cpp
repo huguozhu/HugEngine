@@ -23,4 +23,10 @@ void SpotLight::OnCreate() {
     direction = glm::normalize(direction);
 }
 
+void RectLight::OnCreate() {
+    LightComponent::OnCreate();
+    type = LightType::Rect;
+    normal = glm::normalize(normal);
+}
+
 } // namespace he

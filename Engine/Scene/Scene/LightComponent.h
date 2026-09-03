@@ -21,6 +21,7 @@ enum class LightType : u8 {
     Directional = 0,  // 平行光（无限远）
     Point       = 1,  // 点光源
     Spot        = 2,  // 聚光灯
+    Rect        = 3,  // 矩形面光（面积光）
 };
 
 // --- 光源基类 ---
@@ -75,6 +76,19 @@ public:
     float3 direction      = float3(0.0f, -1.0f, 0.0f);  // 局部空间锥轴方向
     float innerConeAngle  = 0.3f;                   // 内锥角（弧度，~17°）
     float outerConeAngle  = 0.6f;                   // 外锥角（弧度，~34°）
+};
+
+// --- 矩形面光（面积光：矩形发光面，光照/阴影为软效果）---
+class RectLight : public LightComponent {
+    HE_COMPONENT()
+public:
+    void OnCreate() override;
+
+    float  width  = 2.0f;                       // 矩形宽度（世界单位）
+    float  height = 1.0f;                       // 矩形高度（世界单位）
+    float3 normal = float3(0.0f, 1.0f, 0.0f);   // 发光面朝向（法线方向，通常与世界 up 有偏移）
+    float  range  = 10.0f;                      // 影响范围
+    float  softness = 0.5f;                     // 软阴影系数 [0,1]（PCF 半径缩放）
 };
 
 } // namespace he

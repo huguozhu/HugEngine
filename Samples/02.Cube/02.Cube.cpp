@@ -252,6 +252,38 @@ int main() {
         sceneGraph.SetParent(spotLightSphere, Entity{kInvalidEntity});
     }
 
+    // --- 矩形面光（测试 Rect 光照，带可视化球）---
+    Entity rectLightSphere;  // 可视化球体
+    {
+        Entity rlEntity = world.CreateEntity("RectLight");
+        world.AddComponent<TransformComponent>(rlEntity);
+        auto* rl = world.AddComponent<RectLight>(rlEntity);
+        rl->color      = float3(1.0f, 0.8f, 0.6f);   // 暖色
+        rl->intensity  = 15.0f;
+        rl->width      = 4.0f;
+        rl->height     = 2.0f;
+        rl->normal     = float3(0.0f, 1.0f, 0.0f);   // 朝上
+        rl->range      = 15.0f;
+        rl->castShadow = false;   // Phase 2 再接阴影
+        auto* rlTransform = world.GetComponent<TransformComponent>(rlEntity);
+        if (rlTransform) rlTransform->position = float3(-2.0f, 6.0f, 4.0f);
+        sceneGraph.SetParent(rlEntity, Entity{kInvalidEntity});
+
+        // 可视化球体（绿色，区别于点光红球 / Spot 蓝球）
+        rectLightSphere = world.CreateEntity("RectLightSphere");
+        world.AddComponent<TransformComponent>(rectLightSphere);
+        auto* sphere = world.AddComponent<SphereComponent>(rectLightSphere);
+        sphere->baseColorFactor = float4(0.0, 1.0, 0.3, 1.0);
+        sphere->radius = 0.15f;
+        sphere->segmentCount = 12;
+        sphere->ringCount = 6;
+        sphere->castShadow = false;   // 光源可视化球不投射阴影
+        sphere->OnCreate();
+        auto* sphereTransform = world.GetComponent<TransformComponent>(rectLightSphere);
+        if (sphereTransform) sphereTransform->position = float3(-2.0f, 6.0f, 4.0f);
+        sceneGraph.SetParent(rectLightSphere, Entity{kInvalidEntity});
+    }
+
     // --- 点光源（可调节，带可视化球）---
     Entity pointLightEntity;
     Entity pointLightSphere;  // 可视化球体
@@ -776,6 +808,31 @@ int main() {
                     ImGuiSliderFlags_Logarithmic);
                 ImGui::Unindent(12.0f);
             }
+        });
+
+        // 矩形面光控制
+        world.ForEach<he::RectLight>([&](he::Entity e, he::RectLight& rl) {
+            ImGui::SeparatorText("矩形面光");
+
+            ImGui::Checkbox("启用##RLEnabled", &rl.enabled);
+
+            auto* rlTransform = world.GetComponent<TransformComponent>(e);
+            if (rlTransform) {
+                if (ImGui::DragFloat3("位置##RLPos", &rlTransform->position[0], 0.1f)) {
+                    // 同步可视化球体位置
+                    auto* sphereTransform = world.GetComponent<TransformComponent>(rectLightSphere);
+                    if (sphereTransform)
+                        sphereTransform->position = rlTransform->position;
+                }
+            }
+
+            ImGui::SliderFloat3("法线##RLNormal", &rl.normal[0], -1.0f, 1.0f, "%.2f");
+            ImGui::ColorEdit3("颜色##RLColor", &rl.color[0]);
+            ImGui::DragFloat("强度##RLIntensity", &rl.intensity, 0.5f, 0.0f, 200.0f, "%.1f");
+            ImGui::DragFloat("宽度##RLWidth", &rl.width, 0.1f, 0.2f, 20.0f, "%.2f");
+            ImGui::DragFloat("高度##RLHeight", &rl.height, 0.1f, 0.2f, 20.0f, "%.2f");
+            ImGui::DragFloat("范围##RLRange", &rl.range, 0.5f, 0.5f, 60.0f, "%.1f");
+            ImGui::SliderFloat("软阴影##RLSoftness", &rl.softness, 0.0f, 1.0f, "%.2f");
         });
 
         // PT 质量面板（仅 PathTrace 模式显示）
