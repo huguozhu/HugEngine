@@ -91,6 +91,7 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         { 14, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // IBL BRDF LUT
         { 15, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // RSM Position
         { 16, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // RSM Normal+Flux
+        { 24, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Spot Shadow Map（独立 binding，避免与点光 9 冲突）
         { 30, rhi::DescriptorType::StorageBuffer,     4096, rhi::kStageMaskVertex | rhi::kStageMaskFragment, true },  // u_SSBO[] bindless
     };
     m_PerFrameLayout = device->CreateDescriptorSetLayout(perFrameLayoutDesc);
@@ -216,6 +217,10 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         device->UpdateDescriptorSet(set, 16,
             rhi::DescriptorType::CombinedImageSampler,
             m_BindlessPlaceholder.get(), m_BindlessSampler.get());
+        // 绑定 24: 聚光灯 2D 阴影贴图（来自 ShadowSystem，原 9 与点光冲突）
+        device->UpdateDescriptorSet(set, 24,
+            rhi::DescriptorType::CombinedImageSampler,
+            m_ShadowSystem->GetSpotShadowMap(), m_ShadowSystem->GetSpotShadowSampler());
         m_DescSets[i] = set;
     }
     // 初始化时使用第一个槽位

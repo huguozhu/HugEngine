@@ -127,6 +127,16 @@ rhi::IRHISampler* ShadowSystem::GetPointShadowSampler()const{
     return nullptr;
 }
 
+rhi::IRHITexture* ShadowSystem::GetSpotShadowMap()const{
+    for(auto& t:m_Techniques)if(auto*s=dynamic_cast<SpotShadowTechnique*>(t.get()))return s->GetShadowMap(0);
+    return nullptr;
+}
+
+rhi::IRHISampler* ShadowSystem::GetSpotShadowSampler()const{
+    for(auto& t:m_Techniques)if(auto*s=dynamic_cast<SpotShadowTechnique*>(t.get()))return s->GetShadowSampler();
+    return nullptr;
+}
+
 i32 ShadowSystem::GetShadowIndex(Entity light)const{
     for(usize i=0;i<m_AllEntities.size();++i)
         if(m_AllEntities[i]==light)return (i32)i;

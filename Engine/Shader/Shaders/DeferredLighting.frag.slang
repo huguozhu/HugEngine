@@ -202,7 +202,7 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
                 attenuation = 1.0 / (1.0 + 2.0 * d + d * d);
             }
             if (ltype == 2u) { float spotDot = dot(-L, normalize(light.directionType.xyz));
-                attenuation *= smoothstep(light.coneAngles.y, light.coneAngles.x, spotDot); }
+                attenuation *= smoothstep(cos(light.coneAngles.y), cos(light.coneAngles.x), spotDot); }
         }
         float3 radiance = light.colorIntensity.rgb * light.colorIntensity.w * attenuation;
         float shadow = 1.0;

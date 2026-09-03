@@ -49,6 +49,8 @@ struct FSInput {
 // 偏移: materialID + 0 = BaseColor, +1 = Normal, +2 = MetallicRoughness, +3 = Occlusion
 [[vk::binding(kGPUBinding_PointShadow, kGPUDescSet_PerFrame)]] TextureCube<float> u_PointShadowCube;
 [[vk::binding(kGPUBinding_PointShadow, kGPUDescSet_PerFrame)]] SamplerState u_PointShadowSampler;
+[[vk::binding(kGPUBinding_SpotShadow, kGPUDescSet_PerFrame)]] Texture2D<float> u_SpotShadowMap;   // 聚光灯阴影贴图（独立 binding）
+[[vk::binding(kGPUBinding_SpotShadow, kGPUDescSet_PerFrame)]] SamplerState u_SpotShadowSampler;
 
 // Forward+ LightGrid 和 LightIndexList（Cluster 光源剔除结果）
 struct LightGridCell { uint offset; uint count; };
@@ -110,7 +112,9 @@ float3 ShadeWithLight(GPULight light, float3 worldPos, float3 N, float3 V,
         }
         if (ltype == 2u) {
             float spotDot = dot(-L, normalize(light.directionType.xyz));
-            attenuation *= smoothstep(light.coneAngles.y, light.coneAngles.x, spotDot);
+            // 锥内 spotDot ∈ [cos(outer), 1]；用 cos 阈值做平滑衰减（锥内亮、锥外无光）。
+            // 原用弧度角(outer,inner)当 edge 与 cos 值比较且 edge0>edge1，导致锥内映射为 0（光照反了）。
+            attenuation *= smoothstep(cos(light.coneAngles.y), cos(light.coneAngles.x), spotDot);
         }
     }
     float3 radiance = light.colorIntensity.rgb * light.colorIntensity.w * attenuation;
@@ -125,6 +129,21 @@ float3 ShadeWithLight(GPULight light, float3 worldPos, float3 N, float3 V,
                           u_ShadowMap0, u_ShadowMap1, u_ShadowMap2,
                           u_ShadowSampler),
                           sm.shadowParams.z);
+        } else if (sm.shadowParams.w > 1.5f) {
+            // 聚光灯阴影：透视投影到 2D 阴影贴图
+            float4 spotClip = mul(sm.lightViewProj[0], float4(worldPos + N * sm.shadowParams.y, 1.0));
+            float3 spotNdc = spotClip.xyz / spotClip.w;
+            float2 spotUv = float2(spotNdc.x * 0.5 + 0.5, 0.5 - spotNdc.y * 0.5);
+            float  spotZ  = spotNdc.z - sm.shadowParams.x;
+            float2 ts = 1.0 / 1024.0;
+            float spotShadow = 0.0;
+            if (spotUv.x > 0.0 && spotUv.x < 1.0 && spotUv.y > 0.0 && spotUv.y < 1.0) {
+                for (int sx = -1; sx <= 1; sx++)
+                    for (int sy = -1; sy <= 1; sy++)
+                        spotShadow += (spotZ <= u_SpotShadowMap.Sample(u_SpotShadowSampler, spotUv + float2(sx, sy) * ts)) ? 1.0 : 0.0;
+                shadow = spotShadow / 9.0;
+            }
+            shadow = lerp(1.0, shadow, sm.shadowParams.z);
         } else {
             float3 lightPos = sm.pointLightData.xyz;
             float  range    = sm.pointLightData.w;

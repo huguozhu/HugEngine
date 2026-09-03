@@ -50,6 +50,8 @@ public:
 
     virtual rhi::IRHITexture* GetPointShadowMap() const { return nullptr; }
     virtual rhi::IRHISampler* GetPointShadowSampler() const { return nullptr; }
+    virtual rhi::IRHITexture* GetSpotShadowMap() const { return nullptr; }
+    virtual rhi::IRHISampler* GetSpotShadowSampler() const { return nullptr; }
 
     // ---- 光源 → 阴影数据索引 ----
 

@@ -182,25 +182,25 @@ int main() {
         float3(-1.5f, 5.0f, 0.0f), float3(0.8f),
         float4(1.0f, 0.72f, 0.0f, 1.0f), 1.0f, 0.15f, true);
 
-    //// 铜球（金属，中度粗糙）
-    //CreateShapeEntity(world, sceneGraph,
-    //    float3(0.0f, 4.0f, 0.0f), float3(0.8f),
-    //    float4(0.85f, 0.45f, 0.2f, 1.0f), 0.95f, 0.4f, true);
+    // 铜球（金属，中度粗糙）
+    CreateShapeEntity(world, sceneGraph,
+        float3(0.0f, 4.0f, 0.0f), float3(0.8f),
+        float4(0.85f, 0.45f, 0.2f, 1.0f), 0.95f, 0.4f, true);
 
-    //// 蓝色塑料立方体（非金属，光滑）
-    //CreateShapeEntity(world, sceneGraph,
-    //    float3(1.5f, 3.0f, 0.0f), float3(0.8f),
-    //    float4(0.2f, 0.5f, 1.0f, 1.0f), 0.0f, 0.2f);
+    // 蓝色塑料立方体（非金属，光滑）
+    CreateShapeEntity(world, sceneGraph,
+        float3(1.5f, 3.0f, 0.0f), float3(0.8f),
+        float4(0.2f, 0.5f, 1.0f, 1.0f), 0.0f, 0.2f);
 
-    //// 红色橡胶立方体（非金属，粗糙）
-    //CreateShapeEntity(world, sceneGraph,
-    //    float3(0.0f, 6.0f, 1.5f), float3(0.7f),
-    //    float4(0.9f, 0.15f, 0.1f, 1.0f), 0.0f, 0.85f);
+    // 红色橡胶立方体（非金属，粗糙）
+    CreateShapeEntity(world, sceneGraph,
+        float3(0.0f, 6.0f, 1.5f), float3(0.7f),
+        float4(0.9f, 0.15f, 0.1f, 1.0f), 0.0f, 0.85f);
 
-    //// 白色陶瓷球
-    //CreateShapeEntity(world, sceneGraph,
-    //    float3(0.0f, 5.2f, -1.5f), float3(0.6f),
-    //    float4(0.95f, 0.93f, 0.88f, 1.0f), 0.0f, 0.35f, true);
+    // 白色陶瓷球
+    CreateShapeEntity(world, sceneGraph,
+        float3(0.0f, 5.2f, -1.5f), float3(0.6f),
+        float4(0.95f, 0.93f, 0.88f, 1.0f), 0.0f, 0.35f, true);
 
     // --- 方向光（恢复启用：测试 CSM 阴影，点光源已注释）---
     Entity mainLightEntity;
@@ -219,10 +219,43 @@ int main() {
         sceneGraph.SetParent(mainLightEntity, Entity{kInvalidEntity});
     }
 
-    // --- 点光源（已注释：测试方向光 CSM 阴影时禁用）---
+    // --- 聚光灯（测试 Spot 阴影）---
+    Entity spotLightSphere;  // 可视化球体
+    {
+        Entity slEntity = world.CreateEntity("SpotLight");
+        world.AddComponent<TransformComponent>(slEntity);
+        auto* sl = world.AddComponent<SpotLight>(slEntity);
+        sl->color      = float3(1.0f, 0.9f, 0.7f);   // 暖白
+        sl->intensity  = 25.0f;
+        sl->range      = 20.0f;
+        sl->direction  = float3(-0.3f, -1.0f, 0.2f);  // 朝下偏 -x/z，照射金球区
+        sl->innerConeAngle = 0.35f;
+        sl->outerConeAngle = 0.6f;
+        sl->castShadow = true;
+        sl->shadowBias = 0.005f;
+        auto* slTransform = world.GetComponent<TransformComponent>(slEntity);
+        if (slTransform) slTransform->position = float3(0.5f, 12.0f, 2.0f);
+        sceneGraph.SetParent(slEntity, Entity{kInvalidEntity});
+
+        // 可视化球体
+        spotLightSphere = world.CreateEntity("SpotLightSphere");
+        world.AddComponent<TransformComponent>(spotLightSphere);
+        auto* sphere = world.AddComponent<SphereComponent>(spotLightSphere);
+        sphere->baseColorFactor = float4(0.0, 0.6, 1.0, 1.0);   // 蓝青色（区别于点光红球）
+        sphere->radius = 0.15f;
+        sphere->segmentCount = 12;
+        sphere->ringCount = 6;
+        sphere->castShadow = false;   // 光源可视化球不投射阴影
+        sphere->OnCreate();
+        auto* sphereTransform = world.GetComponent<TransformComponent>(spotLightSphere);
+        if (sphereTransform) sphereTransform->position = float3(0.5f, 12.0f, 2.0f);
+        sceneGraph.SetParent(spotLightSphere, Entity{kInvalidEntity});
+    }
+
+    // --- 点光源（可调节，带可视化球）---
     Entity pointLightEntity;
     Entity pointLightSphere;  // 可视化球体
-    if (false) {
+    {
         pointLightEntity = world.CreateEntity("PointLight");
         world.AddComponent<TransformComponent>(pointLightEntity);
         auto* pl = world.AddComponent<PointLight>(pointLightEntity);
@@ -231,7 +264,6 @@ int main() {
         pl->range      = 15.0f;
         pl->castShadow = true;
         pl->shadowBias = 0.005f;
-
         auto* plTransform = world.GetComponent<TransformComponent>(pointLightEntity);
         if (plTransform) plTransform->position = float3(2.0f, 4.0f, 3.0f);
         sceneGraph.SetParent(pointLightEntity, Entity{kInvalidEntity});
@@ -244,10 +276,10 @@ int main() {
         sphere->radius = 0.15f;
         sphere->segmentCount = 12;
         sphere->ringCount = 6;
-        sphere->castShadow = false;   // 光源可视化球不投射阴影（避免渲染进阴影 cubemap 遮挡一切）
+        sphere->castShadow = false;   // 光源可视化球不投射阴影
         sphere->OnCreate();
         auto* sphereTransform = world.GetComponent<TransformComponent>(pointLightSphere);
-        if (sphereTransform) sphereTransform->position = float3(2.0f, 2.0f, 3.0f);
+        if (sphereTransform) sphereTransform->position = float3(2.0f, 4.0f, 3.0f);
         sceneGraph.SetParent(pointLightSphere, Entity{kInvalidEntity});
     }
 
@@ -630,6 +662,12 @@ int main() {
                 hybridPipeline.SetRTGIEnabled(rtGIOn);
         }
 
+        // 天空盒开关（SkyboxPass 读取 enabled 决定是否渲染）
+        world.ForEach<he::SkyboxComponent>([&](he::Entity, he::SkyboxComponent& sb) {
+            ImGui::SeparatorText("天空盒");
+            ImGui::Checkbox("启用##Skybox", &sb.enabled);
+        });
+
         // GI 控制
         auto* gi = forwardPipeline.GetGI();
         if (gi) {
@@ -700,6 +738,41 @@ int main() {
             if (pl.castShadow) {
                 ImGui::Indent(12.0f);
                 ImGui::DragFloat("深度偏移##PTBias", &pl.shadowBias, 0.0001f, 0.0f, 0.1f, "%.4f",
+                    ImGuiSliderFlags_Logarithmic);
+                ImGui::Unindent(12.0f);
+            }
+        });
+
+        // 聚光灯控制
+        world.ForEach<he::SpotLight>([&](he::Entity e, he::SpotLight& sl) {
+            ImGui::SeparatorText("聚光灯");
+
+            ImGui::Checkbox("启用##SLEnabled", &sl.enabled);
+
+            auto* slTransform = world.GetComponent<TransformComponent>(e);
+            if (slTransform) {
+                if (ImGui::DragFloat3("位置##SLPos", &slTransform->position[0], 0.1f)) {
+                    // 同步可视化球体位置
+                    auto* sphereTransform = world.GetComponent<TransformComponent>(spotLightSphere);
+                    if (sphereTransform)
+                        sphereTransform->position = slTransform->position;
+                }
+            }
+
+            ImGui::SliderFloat3("方向##SLDir", &sl.direction[0], -1.0f, 1.0f, "%.2f");
+            ImGui::ColorEdit3("颜色##SLColor", &sl.color[0]);
+            ImGui::DragFloat("强度##SLIntensity", &sl.intensity, 0.5f, 0.0f, 200.0f, "%.1f");
+            ImGui::DragFloat("范围##SLRange", &sl.range, 0.5f, 0.5f, 60.0f, "%.1f");
+            ImGui::SliderFloat("内锥角##SLInner", &sl.innerConeAngle, 0.05f, 1.5f, "%.3f");
+            ImGui::SliderFloat("外锥角##SLOuter", &sl.outerConeAngle, 0.1f, 1.6f, "%.3f");
+
+            bool slShadow = sl.castShadow;
+            if (ImGui::Checkbox("投射阴影##SLShadow", &slShadow))
+                sl.castShadow = slShadow;
+
+            if (sl.castShadow) {
+                ImGui::Indent(12.0f);
+                ImGui::DragFloat("深度偏移##SLBias", &sl.shadowBias, 0.0001f, 0.0f, 0.1f, "%.4f",
                     ImGuiSliderFlags_Logarithmic);
                 ImGui::Unindent(12.0f);
             }
