@@ -141,7 +141,19 @@ if(SLANGC)
         "${SHADER_DIR}/Triangle.mesh.slang"
         "${SHADER_DIR}/GBuffer.mesh.slang"
     )
-    file(GLOB SLANG_INCLUDES "${SHADER_DIR}/*.slang")  # 公共头文件（用 glob 自动收集即可）
+    # 公共共享头（被多个 shader include）——每个 shader 编译依赖这些；
+    # 单个着色器文件本身由各自 SRC 依赖。改为显式列表而非 glob 所有 .slang，
+    # 否则修改任一 shader（如 PBR.frag）会因 "DEPENDS 所有 shader" 触发全部重编译。
+    set(SLANG_INCLUDES
+        "${SHADER_DIR}/ShaderTypes.slang"
+        "${SHADER_DIR}/common.slang"
+        "${SHADER_DIR}/pbr_common.slang"
+        "${SHADER_DIR}/Atmosphere.slang"
+        "${SHADER_DIR}/PT_Common.slang"
+        "${SHADER_DIR}/RT_DDGI.slang"
+        "${SHADER_DIR}/RT_HitCommon.slang"
+        "${SHADER_DIR}/Particles/ParticleTypes.slang"
+    )
 
     set(COMPILE_SOURCES ${VERT_SLANG} ${FRAG_SLANG} ${COMP_SLANG} ${RT_SLANG} ${MESH_SLANG})
     set(SPV_FILES "")
