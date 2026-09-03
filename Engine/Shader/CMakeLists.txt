@@ -13,7 +13,7 @@ target_include_directories(HugEngineShader INTERFACE
 target_link_libraries(HugEngineShader INTERFACE HugEngineRHI)
 
 # ============================================================
-# Shader compilation: Slang → SPIR-V → embedded C header
+# Shader compilation: Slang -> SPIR-V → embedded C header
 # ============================================================
 
 find_program(SLANGC
@@ -157,7 +157,7 @@ if(SLANGC)
             COMMAND ${SLANGC} ${SRC} -target spirv -entry vertexMain -stage vertex
                     -I "${SHADER_DIR}" -o ${SPV} -Wno-39001
             DEPENDS ${SRC} ${SLANG_INCLUDES}
-            COMMENT "Slang → SPIR-V: ${NAME}"
+            COMMENT "Slang -> SPIR-V: ${NAME}"
         )
         list(APPEND SPV_FILES ${SPV})
     endforeach()
@@ -173,7 +173,7 @@ if(SLANGC)
             COMMAND ${SLANGC} ${SRC} -target spirv -entry fragmentMain -stage fragment
                     -I "${SHADER_DIR}" -o ${SPV} -Wno-39001
             DEPENDS ${SRC} ${SLANG_INCLUDES}
-            COMMENT "Slang → SPIR-V: ${NAME}"
+            COMMENT "Slang -> SPIR-V: ${NAME}"
         )
         list(APPEND SPV_FILES ${SPV})
     endforeach()
@@ -189,7 +189,7 @@ if(SLANGC)
             COMMAND ${SLANGC} ${SRC} -target spirv -entry main -stage compute
                     -I "${SHADER_DIR}" -o ${SPV} -Wno-39001
             DEPENDS ${SRC} ${SLANG_INCLUDES}
-            COMMENT "Slang → SPIR-V: ${NAME}"
+            COMMENT "Slang -> SPIR-V: ${NAME}"
         )
         list(APPEND SPV_FILES ${SPV})
     endforeach()
@@ -218,7 +218,7 @@ if(SLANGC)
             COMMAND ${SLANGC} ${SRC} -target spirv -entry main -stage ${SLANGC_STAGE}
                     -I "${SHADER_DIR}" -o ${SPV} -Wno-39001
             DEPENDS ${SRC} ${SLANG_INCLUDES}
-            COMMENT "Slang → SPIR-V (RT): ${NAME} [${SLANGC_STAGE}]"
+            COMMENT "Slang -> SPIR-V (RT): ${NAME} [${SLANGC_STAGE}]"
         )
         list(APPEND SPV_FILES ${SPV})
     endforeach()
@@ -241,7 +241,7 @@ if(SLANGC)
             COMMAND ${SLANGC} ${SRC} -target spirv -entry main -stage ${SLANGC_STAGE}
                     -I "${SHADER_DIR}" -o ${SPV} -Wno-39001
             DEPENDS ${SRC} ${SLANG_INCLUDES}
-            COMMENT "Slang → SPIR-V (Mesh): ${NAME} [${SLANGC_STAGE}]"
+            COMMENT "Slang -> SPIR-V (Mesh): ${NAME} [${SLANGC_STAGE}]"
         )
         list(APPEND SPV_FILES ${SPV})
     endforeach()
