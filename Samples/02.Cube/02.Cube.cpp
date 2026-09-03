@@ -182,46 +182,47 @@ int main() {
         float3(-1.5f, 5.0f, 0.0f), float3(0.8f),
         float4(1.0f, 0.72f, 0.0f, 1.0f), 1.0f, 0.15f, true);
 
-    // 铜球（金属，中度粗糙）
-    CreateShapeEntity(world, sceneGraph,
-        float3(0.0f, 4.0f, 0.0f), float3(0.8f),
-        float4(0.85f, 0.45f, 0.2f, 1.0f), 0.95f, 0.4f, true);
+    //// 铜球（金属，中度粗糙）
+    //CreateShapeEntity(world, sceneGraph,
+    //    float3(0.0f, 4.0f, 0.0f), float3(0.8f),
+    //    float4(0.85f, 0.45f, 0.2f, 1.0f), 0.95f, 0.4f, true);
 
-    // 蓝色塑料立方体（非金属，光滑）
-    CreateShapeEntity(world, sceneGraph,
-        float3(1.5f, 3.0f, 0.0f), float3(0.8f),
-        float4(0.2f, 0.5f, 1.0f, 1.0f), 0.0f, 0.2f);
+    //// 蓝色塑料立方体（非金属，光滑）
+    //CreateShapeEntity(world, sceneGraph,
+    //    float3(1.5f, 3.0f, 0.0f), float3(0.8f),
+    //    float4(0.2f, 0.5f, 1.0f, 1.0f), 0.0f, 0.2f);
 
-    // 红色橡胶立方体（非金属，粗糙）
-    CreateShapeEntity(world, sceneGraph,
-        float3(0.0f, 6.0f, 1.5f), float3(0.7f),
-        float4(0.9f, 0.15f, 0.1f, 1.0f), 0.0f, 0.85f);
+    //// 红色橡胶立方体（非金属，粗糙）
+    //CreateShapeEntity(world, sceneGraph,
+    //    float3(0.0f, 6.0f, 1.5f), float3(0.7f),
+    //    float4(0.9f, 0.15f, 0.1f, 1.0f), 0.0f, 0.85f);
 
-    // 白色陶瓷球
-    CreateShapeEntity(world, sceneGraph,
-        float3(0.0f, 5.2f, -1.5f), float3(0.6f),
-        float4(0.95f, 0.93f, 0.88f, 1.0f), 0.0f, 0.35f, true);
+    //// 白色陶瓷球
+    //CreateShapeEntity(world, sceneGraph,
+    //    float3(0.0f, 5.2f, -1.5f), float3(0.6f),
+    //    float4(0.95f, 0.93f, 0.88f, 1.0f), 0.0f, 0.35f, true);
 
-    // --- 方向光（已注释：测试点光源阴影时禁用，避免混淆）---
+    // --- 方向光（恢复启用：测试 CSM 阴影，点光源已注释）---
     Entity mainLightEntity;
     DirectionalLight* mainDL = nullptr;
-    //{
-    //    mainLightEntity = world.CreateEntity("DirectionalLight");
-    //    world.AddComponent<TransformComponent>(mainLightEntity);
-    //    mainDL = world.AddComponent<DirectionalLight>(mainLightEntity);
-    //    mainDL->direction = float3(0.5f, -1.0f, 1.0f);
-    //    mainDL->color     = float3(1.0f, 0.95f, 0.85f);
-    //    mainDL->intensity = 5.0f;
-    //    mainDL->castShadow = true;
-    //    mainDL->syncWithPhysicalSky = true;   // 由物理天空太阳驱动方向与照度
-    //    mainDL->shadowBias = 0.0003f;   // 深度偏移（CSM 深度范围动态适配后的小偏移）
-    //    sceneGraph.SetParent(mainLightEntity, Entity{kInvalidEntity});
-    //}
+    {
+        mainLightEntity = world.CreateEntity("DirectionalLight");
+        world.AddComponent<TransformComponent>(mainLightEntity);
+        mainDL = world.AddComponent<DirectionalLight>(mainLightEntity);
+        mainDL->direction = float3(0.5f, -1.0f, 1.0f);
+        mainDL->color     = float3(1.0f, 0.95f, 0.85f);
+        mainDL->intensity = 5.0f;
+        mainDL->castShadow = true;
+        mainDL->syncWithPhysicalSky = false;   // 物理天空已注释，不启用天空同步
+        mainDL->shadowBias = 0.0015f;   // 深度偏移（CSM 深度范围动态适配后的小偏移；调大测试地板自影）
+        mainDL->shadowNormalBias = 0.05f;   // 法线偏移（沿法线偏移采样点，避免地板自影）
+        sceneGraph.SetParent(mainLightEntity, Entity{kInvalidEntity});
+    }
 
-    // --- 点光源（投射阴影）---
+    // --- 点光源（已注释：测试方向光 CSM 阴影时禁用）---
     Entity pointLightEntity;
     Entity pointLightSphere;  // 可视化球体
-    {
+    if (false) {
         pointLightEntity = world.CreateEntity("PointLight");
         world.AddComponent<TransformComponent>(pointLightEntity);
         auto* pl = world.AddComponent<PointLight>(pointLightEntity);
@@ -252,7 +253,7 @@ int main() {
 
     // --- 天空盒（从 skybox 目录加载 6 面纹理）---
     // 【已注释】测试点光阴影：移除天空盒（连同物理天空，场景无天空光照）
-    if (false) {
+    if (true) {
         String skyDir = String(HUGE_CONTENT_DIR) + "Textures/skybox/";
         const char* faceFiles[6] = {
             "daylight0.png", "daylight1.png", "daylight2.png",

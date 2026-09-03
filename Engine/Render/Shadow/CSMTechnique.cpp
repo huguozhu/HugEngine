@@ -47,7 +47,7 @@ float4x4 CSMTechnique::ComputeCascadeViewProj(const float3& ld,const CameraData&
     // 将所有角点变换到光源视图空间，计算包围盒
     float mnX=FLT_MAX,mxX=-FLT_MAX,mnY=FLT_MAX,mxY=-FLT_MAX;
     for(auto&c:corners){float4 ls=lv*float4(c,1.f);mnX=glm::min(mnX,ls.x);mxX=glm::max(mxX,ls.x);mnY=glm::min(mnY,ls.y);mxY=glm::max(mxY,ls.y);}
-    float h=glm::max(glm::max(-mnX,mxX),glm::max(-mnY,mxY));h=glm::max(h,200.f);
+    float h=glm::max(glm::max(-mnX,mxX),glm::max(-mnY,mxY));h=glm::max(h,5.f);   // h 基于视锥包围盒实际（下限 5m，避免 200m 大视口导致分辨率低自影）
 
     // 正交深度范围：动态适配视锥沿光源方向的深度跨度（世界单位，带余量）。
     // 修复：原先固定 near=0.1/far=8000 时，光源置于 4000m 外导致物体深度挤在
@@ -101,14 +101,17 @@ u32 CSMTechnique::CollectLights(he::World& w,he::SceneGraph&,const CameraData& c
     w.ForEach<he::DirectionalLight>([&](he::Entity e,he::DirectionalLight& lc){
         if(!lc.enabled||!lc.castShadow||out.size()-start>=MAX_SHADOWS)return;
         float3 ld=glm::normalize(lc.direction);GPUShadowData sd{};float la=.5f;
+        // CSM 有效阴影距离：限制在近处（避免用 farPlane=2000 导致级联覆盖巨大、
+        // 贴图分辨率低、地板自影出现风车状伪影）
+        float shDist=glm::min(cam.farPlane,120.f);
         for(u32 c=0;c<CASCADE_COUNT;++c){
             float p=(c+1)/(float)CASCADE_COUNT;
-            float ls=cam.nearPlane*std::pow(cam.farPlane/cam.nearPlane,p);
-            float us=cam.nearPlane+(cam.farPlane-cam.nearPlane)*p;
+            float ls=cam.nearPlane*std::pow(shDist/cam.nearPlane,p);
+            float us=cam.nearPlane+(shDist-cam.nearPlane)*p;
             sd.splitDistances[c]=la*ls+(1.f-la)*us;
             sd.lightViewProj[c]=ComputeCascadeViewProj(ld,cam,c==0?cam.nearPlane:sd.splitDistances[c-1],sd.splitDistances[c]);
         }
-        sd.splitDistances[3]=cam.farPlane;sd.cameraForward=float4(glm::normalize(cam.forward),0);
+        sd.splitDistances[3]=shDist;sd.cameraForward=float4(glm::normalize(cam.forward),0);
         sd.shadowParams=float4(lc.shadowBias,lc.shadowNormalBias,lc.shadowStrength,0);
         out.push_back(sd);ent.push_back(e);
     });
