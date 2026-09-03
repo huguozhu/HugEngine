@@ -463,9 +463,10 @@ int main() {
         static_cast<float>(swapchain->GetWidth()),
         static_cast<float>(swapchain->GetHeight()));
 
-    // 从配置文件加载相机状态
+    // 从配置文件加载全部面板参数（相机 + 渲染模式 + 天空盒 + 各光源）
     auto cfgData = LoadConfigFile(g_ConfigPath);
     if (!cfgData.empty()) {
+        // 相机
         camCtrl.SetPosition(float3(
             GetFloat(cfgData, "cam_pos_x", 0.0f),
             GetFloat(cfgData, "cam_pos_y", 3.0f),
@@ -473,7 +474,106 @@ int main() {
         camCtrl.SetOrientation(
             GetFloat(cfgData, "cam_yaw", -1.57f),
             GetFloat(cfgData, "cam_pitch", -0.1f));
-        HE_CORE_INFO("加载相机配置: {}", g_ConfigPath);
+        auto& cam = camCtrl.GetCamera();
+        cam.nearPlane = GetFloat(cfgData, "cam_near", cam.nearPlane);
+        cam.farPlane  = GetFloat(cfgData, "cam_far",  cam.farPlane);
+        cam.fov       = GetFloat(cfgData, "cam_fov",  cam.fov);
+        // 渲染模式
+        cvPipelineMode.Set(static_cast<int>(GetFloat(cfgData, "render.pipelineMode", static_cast<float>(cvPipelineMode.Get()))));
+        // 天空盒
+        world.ForEach<he::SkyboxComponent>([&](he::Entity, he::SkyboxComponent& sb) {
+            sb.enabled = GetFloat(cfgData, "skybox.enabled", sb.enabled ? 1.0f : 0.0f) > 0.5f;
+        });
+        // 方向光
+        world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& dl) {
+            dl.enabled    = GetFloat(cfgData, "dir.enabled", dl.enabled ? 1.0f : 0.0f) > 0.5f;
+            dl.direction  = glm::normalize(float3(
+                GetFloat(cfgData, "dir.dir_x", dl.direction.x),
+                GetFloat(cfgData, "dir.dir_y", dl.direction.y),
+                GetFloat(cfgData, "dir.dir_z", dl.direction.z)));
+            dl.color      = float3(
+                GetFloat(cfgData, "dir.color_r", dl.color.x),
+                GetFloat(cfgData, "dir.color_g", dl.color.y),
+                GetFloat(cfgData, "dir.color_b", dl.color.z));
+            dl.intensity  = GetFloat(cfgData, "dir.intensity", dl.intensity);
+            dl.castShadow = GetFloat(cfgData, "dir.castShadow", dl.castShadow ? 1.0f : 0.0f) > 0.5f;
+            dl.shadowBias = GetFloat(cfgData, "dir.bias", dl.shadowBias);
+            dl.shadowNormalBias = GetFloat(cfgData, "dir.normalBias", dl.shadowNormalBias);
+            dl.shadowStrength   = GetFloat(cfgData, "dir.strength", dl.shadowStrength);
+        });
+        // 点光源
+        world.ForEach<he::PointLight>([&](he::Entity e, he::PointLight& pl) {
+            pl.enabled    = GetFloat(cfgData, "pt.enabled", pl.enabled ? 1.0f : 0.0f) > 0.5f;
+            if (auto* t = world.GetComponent<TransformComponent>(e)) {
+                t->position = float3(
+                    GetFloat(cfgData, "pt.pos_x", t->position.x),
+                    GetFloat(cfgData, "pt.pos_y", t->position.y),
+                    GetFloat(cfgData, "pt.pos_z", t->position.z));
+            }
+            pl.color      = float3(
+                GetFloat(cfgData, "pt.color_r", pl.color.x),
+                GetFloat(cfgData, "pt.color_g", pl.color.y),
+                GetFloat(cfgData, "pt.color_b", pl.color.z));
+            pl.intensity  = GetFloat(cfgData, "pt.intensity", pl.intensity);
+            pl.range      = GetFloat(cfgData, "pt.range", pl.range);
+            pl.castShadow = GetFloat(cfgData, "pt.castShadow", pl.castShadow ? 1.0f : 0.0f) > 0.5f;
+            pl.shadowBias = GetFloat(cfgData, "pt.bias", pl.shadowBias);
+        });
+        // 聚光灯
+        world.ForEach<he::SpotLight>([&](he::Entity e, he::SpotLight& sl) {
+            sl.enabled = GetFloat(cfgData, "spot.enabled", sl.enabled ? 1.0f : 0.0f) > 0.5f;
+            if (auto* t = world.GetComponent<TransformComponent>(e)) {
+                t->position = float3(
+                    GetFloat(cfgData, "spot.pos_x", t->position.x),
+                    GetFloat(cfgData, "spot.pos_y", t->position.y),
+                    GetFloat(cfgData, "spot.pos_z", t->position.z));
+            }
+            sl.direction = glm::normalize(float3(
+                GetFloat(cfgData, "spot.dir_x", sl.direction.x),
+                GetFloat(cfgData, "spot.dir_y", sl.direction.y),
+                GetFloat(cfgData, "spot.dir_z", sl.direction.z)));
+            sl.color      = float3(
+                GetFloat(cfgData, "spot.color_r", sl.color.x),
+                GetFloat(cfgData, "spot.color_g", sl.color.y),
+                GetFloat(cfgData, "spot.color_b", sl.color.z));
+            sl.intensity = GetFloat(cfgData, "spot.intensity", sl.intensity);
+            sl.range     = GetFloat(cfgData, "spot.range", sl.range);
+            sl.innerConeAngle = GetFloat(cfgData, "spot.inner", sl.innerConeAngle);
+            sl.outerConeAngle = GetFloat(cfgData, "spot.outer", sl.outerConeAngle);
+            sl.castShadow = GetFloat(cfgData, "spot.castShadow", sl.castShadow ? 1.0f : 0.0f) > 0.5f;
+            sl.shadowBias = GetFloat(cfgData, "spot.bias", sl.shadowBias);
+        });
+        // 矩形面光
+        world.ForEach<he::RectLight>([&](he::Entity e, he::RectLight& rl) {
+            rl.enabled = GetFloat(cfgData, "rect.enabled", rl.enabled ? 1.0f : 0.0f) > 0.5f;
+            if (auto* t = world.GetComponent<TransformComponent>(e)) {
+                t->position = float3(
+                    GetFloat(cfgData, "rect.pos_x", t->position.x),
+                    GetFloat(cfgData, "rect.pos_y", t->position.y),
+                    GetFloat(cfgData, "rect.pos_z", t->position.z));
+            }
+            rl.normal = glm::normalize(float3(
+                GetFloat(cfgData, "rect.normal_x", rl.normal.x),
+                GetFloat(cfgData, "rect.normal_y", rl.normal.y),
+                GetFloat(cfgData, "rect.normal_z", rl.normal.z)));
+            rl.color      = float3(
+                GetFloat(cfgData, "rect.color_r", rl.color.x),
+                GetFloat(cfgData, "rect.color_g", rl.color.y),
+                GetFloat(cfgData, "rect.color_b", rl.color.z));
+            rl.intensity = GetFloat(cfgData, "rect.intensity", rl.intensity);
+            rl.width     = GetFloat(cfgData, "rect.width", rl.width);
+            rl.height    = GetFloat(cfgData, "rect.height", rl.height);
+            rl.range     = GetFloat(cfgData, "rect.range", rl.range);
+            rl.softness  = GetFloat(cfgData, "rect.softness", rl.softness);
+            rl.castShadow = GetFloat(cfgData, "rect.castShadow", rl.castShadow ? 1.0f : 0.0f) > 0.5f;
+        });
+        // GI 强度
+        if (auto* gi = forwardPipeline.GetGI()) {
+            auto gs = gi->GetSettings();
+            gs.intensity = GetFloat(cfgData, "gi.intensity", gs.intensity);
+            gi->SetSettings(gs);
+        }
+        HE_CORE_INFO("加载面板参数: {}", g_ConfigPath);
     }
 
     // 鼠标状态
@@ -902,16 +1002,102 @@ int main() {
         }
     }
 
-    // 保存相机配置
+    // 保存全部面板参数（相机 + 渲染模式 + 天空盒 + 各光源）到 ini
     {
         std::unordered_map<String, String> out;
+        // 相机
         out["cam_pos_x"] = std::to_string(camCtrl.GetCamera().position.x);
         out["cam_pos_y"] = std::to_string(camCtrl.GetCamera().position.y);
         out["cam_pos_z"] = std::to_string(camCtrl.GetCamera().position.z);
         out["cam_yaw"]   = std::to_string(camCtrl.GetYaw());
         out["cam_pitch"] = std::to_string(camCtrl.GetPitch());
+        out["cam_near"]  = std::to_string(camCtrl.GetCamera().nearPlane);
+        out["cam_far"]   = std::to_string(camCtrl.GetCamera().farPlane);
+        out["cam_fov"]   = std::to_string(camCtrl.GetCamera().fov);
+        // 渲染模式
+        out["render.pipelineMode"] = std::to_string(cvPipelineMode.Get());
+        // 天空盒
+        world.ForEach<he::SkyboxComponent>([&](he::Entity, he::SkyboxComponent& sb) {
+            out["skybox.enabled"] = sb.enabled ? "1" : "0";
+        });
+        // 方向光
+        world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& dl) {
+            out["dir.enabled"]    = dl.enabled ? "1" : "0";
+            out["dir.dir_x"]      = std::to_string(dl.direction.x);
+            out["dir.dir_y"]      = std::to_string(dl.direction.y);
+            out["dir.dir_z"]      = std::to_string(dl.direction.z);
+            out["dir.color_r"]    = std::to_string(dl.color.x);
+            out["dir.color_g"]    = std::to_string(dl.color.y);
+            out["dir.color_b"]    = std::to_string(dl.color.z);
+            out["dir.intensity"]  = std::to_string(dl.intensity);
+            out["dir.castShadow"] = dl.castShadow ? "1" : "0";
+            out["dir.bias"]       = std::to_string(dl.shadowBias);
+            out["dir.normalBias"] = std::to_string(dl.shadowNormalBias);
+            out["dir.strength"]   = std::to_string(dl.shadowStrength);
+        });
+        // 点光源
+        world.ForEach<he::PointLight>([&](he::Entity e, he::PointLight& pl) {
+            out["pt.enabled"]   = pl.enabled ? "1" : "0";
+            if (auto* t = world.GetComponent<TransformComponent>(e)) {
+                out["pt.pos_x"] = std::to_string(t->position.x);
+                out["pt.pos_y"] = std::to_string(t->position.y);
+                out["pt.pos_z"] = std::to_string(t->position.z);
+            }
+            out["pt.color_r"]    = std::to_string(pl.color.x);
+            out["pt.color_g"]    = std::to_string(pl.color.y);
+            out["pt.color_b"]    = std::to_string(pl.color.z);
+            out["pt.intensity"]  = std::to_string(pl.intensity);
+            out["pt.range"]      = std::to_string(pl.range);
+            out["pt.castShadow"] = pl.castShadow ? "1" : "0";
+            out["pt.bias"]       = std::to_string(pl.shadowBias);
+        });
+        // 聚光灯
+        world.ForEach<he::SpotLight>([&](he::Entity e, he::SpotLight& sl) {
+            out["spot.enabled"] = sl.enabled ? "1" : "0";
+            if (auto* t = world.GetComponent<TransformComponent>(e)) {
+                out["spot.pos_x"] = std::to_string(t->position.x);
+                out["spot.pos_y"] = std::to_string(t->position.y);
+                out["spot.pos_z"] = std::to_string(t->position.z);
+            }
+            out["spot.dir_x"]     = std::to_string(sl.direction.x);
+            out["spot.dir_y"]     = std::to_string(sl.direction.y);
+            out["spot.dir_z"]     = std::to_string(sl.direction.z);
+            out["spot.color_r"]   = std::to_string(sl.color.x);
+            out["spot.color_g"]   = std::to_string(sl.color.y);
+            out["spot.color_b"]   = std::to_string(sl.color.z);
+            out["spot.intensity"] = std::to_string(sl.intensity);
+            out["spot.range"]     = std::to_string(sl.range);
+            out["spot.inner"]     = std::to_string(sl.innerConeAngle);
+            out["spot.outer"]     = std::to_string(sl.outerConeAngle);
+            out["spot.castShadow"] = sl.castShadow ? "1" : "0";
+            out["spot.bias"]      = std::to_string(sl.shadowBias);
+        });
+        // 矩形面光
+        world.ForEach<he::RectLight>([&](he::Entity e, he::RectLight& rl) {
+            out["rect.enabled"] = rl.enabled ? "1" : "0";
+            if (auto* t = world.GetComponent<TransformComponent>(e)) {
+                out["rect.pos_x"] = std::to_string(t->position.x);
+                out["rect.pos_y"] = std::to_string(t->position.y);
+                out["rect.pos_z"] = std::to_string(t->position.z);
+            }
+            out["rect.normal_x"]    = std::to_string(rl.normal.x);
+            out["rect.normal_y"]    = std::to_string(rl.normal.y);
+            out["rect.normal_z"]    = std::to_string(rl.normal.z);
+            out["rect.color_r"]     = std::to_string(rl.color.x);
+            out["rect.color_g"]     = std::to_string(rl.color.y);
+            out["rect.color_b"]     = std::to_string(rl.color.z);
+            out["rect.intensity"]   = std::to_string(rl.intensity);
+            out["rect.width"]       = std::to_string(rl.width);
+            out["rect.height"]      = std::to_string(rl.height);
+            out["rect.range"]       = std::to_string(rl.range);
+            out["rect.softness"]    = std::to_string(rl.softness);
+            out["rect.castShadow"]  = rl.castShadow ? "1" : "0";
+        });
+        // GI 强度
+        if (auto* gi = forwardPipeline.GetGI())
+            out["gi.intensity"] = std::to_string(gi->GetSettings().intensity);
         SaveConfigFile(g_ConfigPath, out);
-        HE_CORE_INFO("相机配置已保存: {}", g_ConfigPath);
+        HE_CORE_INFO("面板参数已保存: {}", g_ConfigPath);
     }
 
     // 清理
