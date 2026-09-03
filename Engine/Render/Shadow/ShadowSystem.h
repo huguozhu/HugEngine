@@ -47,6 +47,8 @@ public:
     rhi::IRHISampler* GetPointShadowSampler()const override;
     rhi::IRHITexture* GetSpotShadowMap()const;    // 聚光灯 2D 阴影贴图
     rhi::IRHISampler* GetSpotShadowSampler()const;
+    rhi::IRHITexture* GetRectShadowMap()const;    // 矩形面光阴影贴图
+    rhi::IRHISampler* GetRectShadowSampler()const;
     i32 GetShadowIndex(Entity light)const override;
     bool HasActiveShadows()const override{return m_ActiveCount>0;}
     float4x4 GetLightViewProj(u32 cascade)const override;

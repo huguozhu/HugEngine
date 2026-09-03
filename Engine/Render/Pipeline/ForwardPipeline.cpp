@@ -92,6 +92,7 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         { 15, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // RSM Position
         { 16, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // RSM Normal+Flux
         { 24, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Spot Shadow Map（独立 binding，避免与点光 9 冲突）
+        { 25, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Rect Shadow Map（矩形面光）
         { 30, rhi::DescriptorType::StorageBuffer,     4096, rhi::kStageMaskVertex | rhi::kStageMaskFragment, true },  // u_SSBO[] bindless
     };
     m_PerFrameLayout = device->CreateDescriptorSetLayout(perFrameLayoutDesc);
@@ -221,6 +222,10 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
         device->UpdateDescriptorSet(set, 24,
             rhi::DescriptorType::CombinedImageSampler,
             m_ShadowSystem->GetSpotShadowMap(), m_ShadowSystem->GetSpotShadowSampler());
+        // 绑定 25: 矩形面光 2D 阴影贴图（来自 ShadowSystem）
+        device->UpdateDescriptorSet(set, 25,
+            rhi::DescriptorType::CombinedImageSampler,
+            m_ShadowSystem->GetRectShadowMap(), m_ShadowSystem->GetRectShadowSampler());
         m_DescSets[i] = set;
     }
     // 初始化时使用第一个槽位

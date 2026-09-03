@@ -264,7 +264,8 @@ int main() {
         rl->height     = 2.0f;
         rl->normal     = float3(0.0f, 1.0f, 0.0f);   // 朝上
         rl->range      = 15.0f;
-        rl->castShadow = false;   // Phase 2 再接阴影
+        rl->castShadow = true;   // Phase 2：Rect 阴影
+        rl->softness   = 0.5f;   // 软阴影
         auto* rlTransform = world.GetComponent<TransformComponent>(rlEntity);
         if (rlTransform) rlTransform->position = float3(-2.0f, 6.0f, 4.0f);
         sceneGraph.SetParent(rlEntity, Entity{kInvalidEntity});

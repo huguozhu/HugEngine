@@ -51,6 +51,8 @@ struct FSInput {
 [[vk::binding(kGPUBinding_PointShadow, kGPUDescSet_PerFrame)]] SamplerState u_PointShadowSampler;
 [[vk::binding(kGPUBinding_SpotShadow, kGPUDescSet_PerFrame)]] Texture2D<float> u_SpotShadowMap;   // 聚光灯阴影贴图（独立 binding）
 [[vk::binding(kGPUBinding_SpotShadow, kGPUDescSet_PerFrame)]] SamplerState u_SpotShadowSampler;
+[[vk::binding(kGPUBinding_RectShadow, kGPUDescSet_PerFrame)]] Texture2D<float> u_RectShadowMap;   // 矩形面光阴影贴图（独立 binding）
+[[vk::binding(kGPUBinding_RectShadow, kGPUDescSet_PerFrame)]] SamplerState u_RectShadowSampler;
 
 // Forward+ LightGrid 和 LightIndexList（Cluster 光源剔除结果）
 struct LightGridCell { uint offset; uint count; };
@@ -151,6 +153,22 @@ float3 ShadeWithLight(GPULight light, float3 worldPos, float3 N, float3 V,
                     for (int sy = -1; sy <= 1; sy++)
                         spotShadow += (spotZ <= u_SpotShadowMap.Sample(u_SpotShadowSampler, spotUv + float2(sx, sy) * ts)) ? 1.0 : 0.0;
                 shadow = spotShadow / 9.0;
+            }
+            shadow = lerp(1.0, shadow, sm.shadowParams.z);
+        } else if (sm.shadowParams.w > 2.5f) {
+            // 矩形面光阴影：透视投影 + 大半径 PCF 软阴影（softness 控制半影宽度）
+            float4 rectClip = mul(sm.lightViewProj[0], float4(worldPos + N * sm.shadowParams.y, 1.0));
+            float3 rectNdc = rectClip.xyz / rectClip.w;
+            float2 rectUv = float2(rectNdc.x * 0.5 + 0.5, 0.5 - rectNdc.y * 0.5);
+            float  rectZ  = rectNdc.z - sm.shadowParams.x;
+            float softness = sm.splitDistances.w;              // 软阴影系数 [0,1]
+            float2 ts = (1.0 / 1024.0) * (1.0 + softness * 4.0); // PCF 采样半径随 softness 放大
+            float rectShadow = 0.0;
+            if (rectUv.x > 0.0 && rectUv.x < 1.0 && rectUv.y > 0.0 && rectUv.y < 1.0) {
+                for (int sx = -2; sx <= 2; sx++)
+                    for (int sy = -2; sy <= 2; sy++)
+                        rectShadow += (rectZ <= u_RectShadowMap.Sample(u_RectShadowSampler, rectUv + float2(sx, sy) * ts)) ? 1.0 : 0.0;
+                shadow = rectShadow / 25.0;
             }
             shadow = lerp(1.0, shadow, sm.shadowParams.z);
         } else {

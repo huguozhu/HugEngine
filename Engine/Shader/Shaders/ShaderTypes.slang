@@ -73,6 +73,7 @@ GPU_CONST(GPU_UINT kGPUBinding_GBufferE      = 23);  // GBuffer worldPos（MRT4�
 GPU_CONST(GPU_UINT kGPUBinding_GBufferF      = 28);  // GBuffer disneyA（anisotropic/subsurface/specular/sheen，MRT5）
 GPU_CONST(GPU_UINT kGPUBinding_GBufferG      = 29);  // GBuffer disneyB（clearcoat/clearcoatGloss/specularTint.rg，MRT6）
 GPU_CONST(GPU_UINT kGPUBinding_SpotShadow    = 24); // 聚光灯阴影（原 9 与点光冲突，改独立 binding 24）
+GPU_CONST(GPU_UINT kGPUBinding_RectShadow    = 25); // 矩形面光阴影（独立 binding）
 GPU_CONST(GPU_UINT kGPUBinding_Lights_DL     = 17);  // GPULight[] SSBO
 GPU_CONST(GPU_UINT kGPUBinding_ShadowData_DL = 18);  // GPUShadowData[] SSBO
 GPU_CONST(GPU_UINT kGPUBinding_SSGI          = 19);  // SSGI 间接光照

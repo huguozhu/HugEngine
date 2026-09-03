@@ -99,6 +99,8 @@ set(RENDER_SOURCES
     Shadow/PointShadowTechnique.cpp
     Shadow/SpotShadowTechnique.h
     Shadow/SpotShadowTechnique.cpp
+    Shadow/RectLightShadowTechnique.h
+    Shadow/RectLightShadowTechnique.cpp
     # PostProcess
     PostProcess/PostProcessPass.h
     PostProcess/LazyPostProcessPass.h

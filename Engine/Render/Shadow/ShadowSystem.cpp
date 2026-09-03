@@ -2,6 +2,7 @@
 #include "Shadow/CSMTechnique.h"
 #include "Shadow/PointShadowTechnique.h"
 #include "Shadow/SpotShadowTechnique.h"
+#include "Shadow/RectLightShadowTechnique.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
 
@@ -23,6 +24,10 @@ bool ShadowSystem::Initialize(rhi::IRHIDevice* device,u32,u32){
     spot->Initialize(device);
     m_Techniques.push_back(std::move(spot));
 
+    auto rect=std::make_unique<RectLightShadowTechnique>();
+    rect->Initialize(device);
+    m_Techniques.push_back(std::move(rect));
+
     m_Ready=true;
     HE_CORE_INFO("ShadowSystem init ({} techniques)",m_Techniques.size());
     return true;
@@ -34,6 +39,7 @@ void ShadowSystem::CreateShadowPSO(rhi::DescriptorSetLayoutHandle layout){
         if(auto* csm=dynamic_cast<CSMTechnique*>(t.get())) csm->CreatePSO(layout);
         if(auto* pt=dynamic_cast<PointShadowTechnique*>(t.get())) pt->CreatePSO(layout);
         if(auto* spot=dynamic_cast<SpotShadowTechnique*>(t.get())) spot->CreatePSO(layout);
+        if(auto* rect=dynamic_cast<RectLightShadowTechnique*>(t.get())) rect->CreatePSO(layout);
     }
 }
 
@@ -134,6 +140,16 @@ rhi::IRHITexture* ShadowSystem::GetSpotShadowMap()const{
 
 rhi::IRHISampler* ShadowSystem::GetSpotShadowSampler()const{
     for(auto& t:m_Techniques)if(auto*s=dynamic_cast<SpotShadowTechnique*>(t.get()))return s->GetShadowSampler();
+    return nullptr;
+}
+
+rhi::IRHITexture* ShadowSystem::GetRectShadowMap()const{
+    for(auto& t:m_Techniques)if(auto*s=dynamic_cast<RectLightShadowTechnique*>(t.get()))return s->GetShadowMap(0);
+    return nullptr;
+}
+
+rhi::IRHISampler* ShadowSystem::GetRectShadowSampler()const{
+    for(auto& t:m_Techniques)if(auto*s=dynamic_cast<RectLightShadowTechnique*>(t.get()))return s->GetShadowSampler();
     return nullptr;
 }
 
