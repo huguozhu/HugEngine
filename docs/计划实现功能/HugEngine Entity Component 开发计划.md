@@ -29,7 +29,8 @@
 | DecalComponent | UDecalComponent | ✅（P2 A3，MVP 半透明投射片） | ✅ 5 属性 | ✅ | ✅ Decal |
 | BillboardComponent | UBillboardComponent | ✅（P2 A4，billboard 矩阵对齐相机） | ✅ 3 属性 | ✅ | — |
 | TextRenderComponent | UTextRenderComponent | ✅（P2 A5，stb_truetype + 系统字体兜底） | ✅ 4 属性 | ✅ | — |
-| InstancedMesh / Spline / CharacterMovement / Ability / Collision | UE5 对应组件 | ❌ 未实现 | — | — | — |
+| CollisionComponent | UCapsuleComponent/UBoxComponent | ✅（P3 B5，`CollisionSystem`） | ✅ 5 属性 | ✅ | — |
+| InstancedMesh / Spline / CharacterMovement / Ability | UE5 对应组件 | ❌ 未实现 | — | — | — |
 | SkeletalMesh / Physics / Audio / NavMesh | UE5 对应组件 | ❌（依赖路线图 P6/P3） | — | — | — |
 
 **结论**：文档初版「缺 SpotLight / RectLight」的描述已过时（两者均已实现）；当前最大缺口反而落在 **反射/AI/词表层**——SpotLight、CameraComponent 等已实现组件尚未注册反射属性，导致编辑器 Details 面板与 AI 世界模型看不到它们，LLM 也无法生成它们。
@@ -212,7 +213,7 @@
 - **系统接入**：`AbilitySystem::Update`（冷却计时）+ Agent 动作 `CastAbility`（Action→Command 新增 op）
 - **验证**：Agent 每 5 秒施放一次"火球"（SpawnEntity + 移动）
 
-### B5. CollisionComponent
+### B5. CollisionComponent（✅ 已完成 2026-09-06）
 
 - **对应 UE5**：UCapsuleComponent / UBoxComponent（碰撞）
 - **用途**：基础碰撞体积（AABB/Sphere/Capsule）——物理与移动的前置
