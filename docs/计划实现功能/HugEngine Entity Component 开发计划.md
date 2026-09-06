@@ -235,7 +235,7 @@
 
 | Component | 依赖 | 备注 |
 |---|---|---|
-| SkeletalMeshComponent | 骨骼动画系统（路线图 P6 缺项） | glTF 骨骼 + 蒙皮 + AnimBP 简化 |
+| SkeletalMeshComponent | 骨骼动画系统（路线图 P6 缺项） | ✅ 已完成（2026-09-07，提交 `4d94460`）：glTF skins/动画解析 + GPU 蒙皮（骨骼 SSBO + 蒙皮 PSO）+ Fox 演示 |
 | PhysicsComponent / RigidBody | 物理引擎集成（BEPU/PhysX/Jolt） | 刚体 + 约束 |
 | AudioComponent | 音频系统（引擎尚无） | 3D 声源 + 衰减 |
 | NavMesh 寻路 | 导航网格 + A*/Recast | Agent 移动寻路 |
@@ -293,4 +293,4 @@ P4（大工程）: Phase C（等待路线图）
   2. Decal 为投射片 MVP（无 GBuffer 投影 Pass）；InstancedMesh 仅支持 Forward 非 GPU-Culling 路径，逐实例剔除未接
   3. 实体引用类属性（homingTarget/targetEntity/cameraEntity 等）不进反射/词表（u64 无法快照序列化）
   4. maxSlopeAngle（坡度过滤）、SpringArm 碰撞缩臂、Collision 调试线框、SplineMesh 沿样条生成等预留未接
-- **遗留**：Phase C 大工程（SkeletalMesh/Physics/Audio/NavMesh，依赖路线图 P6/P3）；既有组件 Animation/Particle/Memory/Goal 的反射/AI 补齐
+- **遗留**：Phase C 剩余（Physics/Audio/NavMesh，依赖路线图 P6/P3）；SkeletalMesh 后续扩展（剪辑混合、动画重定向、SplineMesh 沿样条生成）；既有组件 Animation/Particle/Memory/Goal 的反射/AI 补齐
