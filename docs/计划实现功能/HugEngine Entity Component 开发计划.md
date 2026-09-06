@@ -41,7 +41,7 @@
 
 | 阶段 | 内容 | 预估成本 | 说明 |
 |---|---|---|---|
-| **S0（基线补齐）** | 已有组件补齐反射/AI 注解/词表/主相机接入 | 1~2 天 | 见 §四；收益最大，建议先行 |
+| **S0（基线补齐）** | 已有组件补齐反射/AI 注解/词表/主相机接入 | 1~2 天 | ✅ 已完成（2026-09-06）：S0.1~S0.4 全部落地，doctest 38 用例通过 |
 | **A（低成本）** | Camera(系统接入) / Decal / Billboard / TextRender / SpringArm / ProjectileMovement / Health | 2~3 天/个 | SpotLight 本体已完成，仅剩 S0 词表项 |
 | **B（中成本）** | InstancedMesh / Spline / CharacterMovement / Ability(简化 GAS) / Collision | 1~2 周/个 | 涉及渲染实例化/移动物理/技能循环 |
 | **C（大工程）** | SkeletalMesh / Physics / Audio / NavMesh | 数周~数月 | 依赖路线图 P6/P3 或第三方库 |
@@ -255,11 +255,11 @@
 ## 十、优先级建议（修订版）
 
 ```
-P0（立即）: Phase S0 全部 —— S0.1 SpotLight 反射+AI 注解
+P0（立即）: Phase S0 全部 —— ✅ 已完成（2026-09-06）
+             S0.1 SpotLight 反射+AI 注解
              S0.2 Camera 反射+AI 注解
              S0.3 词表 + SceneBuilder 扩到 8 组件
-             S0.4 主相机接入（World::GetPrimaryCamera）
-             （低成本 + LLM 场景生成立刻受益）
+             S0.4 主相机接入（World::GetPrimaryCamera / ResolveFrameCamera）
 P1（随后）: A7 ProjectileMovement + A8 Health（玩法底座）+ A6 SpringArm（第三人称，依赖 S0.4）
 P2（视需要）: A3 Decal / A4 Billboard / A5 TextRender
 P3（中成本）: B1 InstancedMesh → B2 Spline → B5 Collision → B3 CharacterMovement → B4 Ability

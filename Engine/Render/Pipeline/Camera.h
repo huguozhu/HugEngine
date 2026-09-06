@@ -11,7 +11,7 @@
 // CameraComponent 通过 MakeCameraData() 转换为 CameraData
 // ============================================================
 
-namespace he { class CameraComponent; class TransformComponent; }
+namespace he { class CameraComponent; class TransformComponent; class World; }
 
 namespace he::render {
 
@@ -71,5 +71,11 @@ struct CameraData {
 /// 从 CameraComponent + TransformComponent 构造渲染用 CameraData
 CameraData MakeCameraData(const he::CameraComponent& camComp,
                           const he::TransformComponent& transform);
+
+/// 帧入口相机解析（S0.4 主相机接入）：
+/// 优先取 World 主相机实体（isMain 的 CameraComponent + 其 Transform）组装 CameraData；
+/// 无主相机实体（或缺 Transform）时回退 fallback（如 CameraController 的自由相机）。
+/// 各渲染管线帧入口用本函数替代直接传 camCtrl.GetCamera()。
+CameraData ResolveFrameCamera(he::World& world, const CameraData& fallback);
 
 } // namespace he::render

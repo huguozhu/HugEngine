@@ -13,6 +13,8 @@
 #include "Scene/SceneGraph.h"
 #include "Scene/SphereComponent.h"
 #include "Scene/Transform.h"
+#include "Scene/LightComponent.h"
+#include "Scene/CameraComponent.h"
 
 #include "nlohmann/json.hpp"
 
@@ -49,4 +51,61 @@ TEST_CASE("PromptToScene 用假 LLM 生成场景") {
     auto* xform = world.GetComponent<TransformComponent>(r.entities[0]);
     REQUIRE(xform != nullptr);
     CHECK(xform->position.x == doctest::Approx(1.0f));
+}
+
+TEST_CASE("BuildSceneSystemPrompt 词表包含 S0.3 新增组件") {
+    // S0.3：LLM system prompt 词表必须包含 SpotLight/RectLight/Camera
+    //（「一个路灯照着的街角」类 prompt 依赖 SpotLight 词条）
+    String p = BuildSceneSystemPrompt();
+    CHECK(p.find("SpotLight") != String::npos);
+    CHECK(p.find("RectLight") != String::npos);
+    CHECK(p.find("Camera") != String::npos);
+    CHECK(p.find("innerConeAngle") != String::npos);   // SpotLight 字段
+    CHECK(p.find("softness") != String::npos);         // RectLight 字段
+    CHECK(p.find("isMain") != String::npos);           // Camera 字段
+}
+
+// 假 LLM：返回「路灯 + 相机」场景（S0.3 冒烟用例的离线等价）
+struct FakeStreetLLM : ILLMClient {
+    String Chat(const String&, const String&) override {
+        nlohmann::json scene = {
+            {"entities", {{
+                {"name","StreetLamp"},
+                {"transform",{{"position",{0,4,0}}}},
+                {"components",{ {{"type","SpotLight"},{"direction",{0,-1,0}},
+                                 {"intensity",30},{"range",12},
+                                 {"innerConeAngle",0.35},{"outerConeAngle",0.7},
+                                 {"castShadow",true}} }}
+            },{
+                {"name","MainCamera"},
+                {"transform",{{"position",{0,2,6}}}},
+                {"components",{ {{"type","Camera"},{"fov",50},{"isMain",true}} }}
+            }}}
+        };
+        nlohmann::json resp = { {"choices", { {{"message", {{"content", scene.dump()}}}} }} };
+        return resp.dump();
+    }
+};
+
+TEST_CASE("PromptToScene 生成路灯场景：SpotLight + 主相机（S0.3/S0.4 冒烟）") {
+    World world;
+    SceneGraph sg(world);
+    FakeStreetLLM fake;
+
+    SceneBuildResult r = PromptToScene(fake, world, sg, "一个路灯照着的街角");
+    REQUIRE(r.success == true);
+    REQUIRE(r.entities.size() == 2);
+
+    // SpotLight 组件 + 关键字段
+    auto* sl = world.GetComponent<SpotLight>(r.entities[0]);
+    REQUIRE(sl != nullptr);
+    CHECK(sl->intensity == doctest::Approx(30.0f));
+    CHECK(sl->innerConeAngle == doctest::Approx(0.35f));
+    CHECK(sl->castShadow == true);
+
+    // 相机实体成为主相机（渲染帧入口 ResolveFrameCamera 的前提成立）
+    auto* cam = world.GetComponent<CameraComponent>(r.entities[1]);
+    REQUIRE(cam != nullptr);
+    CHECK(cam->fov == doctest::Approx(50.0f));
+    CHECK(world.GetPrimaryCamera() == cam);
 }

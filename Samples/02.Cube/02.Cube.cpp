@@ -19,6 +19,7 @@
 #include "Pipeline/PathTracingPipeline.h"
 #include "Pipeline/PTQualityCVars.h"
 #include "Pipeline/CameraController.h"
+#include "Pipeline/Camera.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
 #include "Scene/CubeComponent.h"
@@ -646,6 +647,10 @@ int main() {
             camCtrl.Update(deltaTime, moveIn);
         }
 
+        // 帧相机解析（S0.4）：场景含主相机实体时优先使用，否则回退自由相机
+        // 本示例场景无 CameraComponent 实体，行为与之前一致（始终走 CameraController 回退）
+        render::CameraData frameCamera = render::ResolveFrameCamera(world, camCtrl.GetCamera());
+
         // 交换链实际颜色格式（SDR=BGRA8，HDR=A2B10G10R10），主循环开头取一次
         rhi::Format backFmt = swapchain->GetColorFormat();
 
@@ -664,11 +669,11 @@ int main() {
 
             render::SubsystemContext shadowCtx;
             shadowCtx.world = &world; shadowCtx.sceneGraph = &sceneGraph;
-            shadowCtx.camera = &camCtrl.GetCamera();
+            shadowCtx.camera = &frameCamera;
             he::SyncPhysicalSkyToSun(world);   // 在阴影烘焙前同步太阳方向，保证阴影/光照同向
             shadowSys->Update(shadowCtx);
 
-            forwardPipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
+            forwardPipeline.Render(cmdList.get(), world, sceneGraph, frameCamera);
             // pass 级调试标记：BackBuffer 合成（ToneMap + ImGui），RenderDoc 可识别
             cmdList->BeginDebugLabel("ToneMap + ImGui (BackBuffer)");
             cmdList->BeginRenderPass(1, backFmt);
@@ -677,7 +682,7 @@ int main() {
         // --- Deferred 模式 ---
         else if (cvPipelineMode.Get() == 1) {
             deferredPipeline.NextFrame();
-            deferredPipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera(), deltaTime);
+            deferredPipeline.Render(cmdList.get(), world, sceneGraph, frameCamera, deltaTime);
             // ImGui 叠加：Deferred 已写 BackBuffer，Load 保留内容
             cmdList->BeginDebugLabel("Deferred + ImGui (BackBuffer)");
             cmdList->BeginRenderPass(1, backFmt,
@@ -686,7 +691,7 @@ int main() {
         // --- Hybrid RT 模式 ---
         else if (cvPipelineMode.Get() == 2) {
             hybridPipeline.NextFrame();
-            hybridPipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera(), deltaTime);
+            hybridPipeline.Render(cmdList.get(), world, sceneGraph, frameCamera, deltaTime);
             // ImGui 叠加：管线已写 BackBuffer，Load 保留内容
             cmdList->BeginDebugLabel("HybridRT + ImGui (BackBuffer)");
             cmdList->BeginRenderPass(1, backFmt,
@@ -695,7 +700,7 @@ int main() {
         // --- 全路径追踪模式（Level 2: PT 参考） ---
         else if (cvPipelineMode.Get() == 3) {
             pathTracingPipeline.NextFrame();
-            pathTracingPipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera(), deltaTime);
+            pathTracingPipeline.Render(cmdList.get(), world, sceneGraph, frameCamera, deltaTime);
             // ImGui 叠加：管线已写 BackBuffer，Load 保留内容
             cmdList->BeginDebugLabel("PathTrace + ImGui (BackBuffer)");
             cmdList->BeginRenderPass(1, backFmt,

@@ -2,6 +2,7 @@
 
 #include "Scene/Entity.h"
 #include "Scene/Component.h"
+#include "Scene/CameraComponent.h"
 #include "Containers/Array.h"
 
 #include <memory>
@@ -54,6 +55,11 @@ public:
     void ForEach(std::function<void(Entity, T&)> callback);
 
     usize GetEntityCount() const { return m_Entities.size(); }
+
+    /// 查找主相机组件：返回第一个 isMain==true 的 CameraComponent。
+    /// 无相机实体 / 无主相机时返回 nullptr，调用方回退自由相机（如 CameraController）。
+    /// 配合 GetComponent<TransformComponent>(cam->GetEntity()) 可组装渲染 CameraData。
+    CameraComponent* GetPrimaryCamera() const;
 
     /// 遍历所有存活实体（供编辑器等遍历使用）
     void ForEachEntity(std::function<void(Entity)> callback) const {

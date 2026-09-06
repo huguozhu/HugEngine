@@ -12,8 +12,11 @@
 #include "Scene/SceneGraph.h"
 #include "Scene/Transform.h"
 #include "Scene/LightComponent.h"
+#include "Scene/CameraComponent.h"
 
 #include "nlohmann/json.hpp"
+
+#include <set>
 
 using namespace he;
 using namespace he::ai;
@@ -80,6 +83,93 @@ TEST_CASE("WorldModel::TypeSchema 输出组件词汇表") {
         }
     }
     REQUIRE(foundTransform);
+}
+
+TEST_CASE("WorldModel::TypeSchema 包含 SpotLight/RectLight/CameraComponent（S0.1/S0.2）") {
+    // TypeRegistry 为惰性注册（StaticClass() 首次调用才注册），先触发这三个类的注册
+    he::SpotLight::StaticClass();
+    he::RectLight::StaticClass();
+    he::CameraComponent::StaticClass();
+
+    WorldModel wm;
+    auto j = nlohmann::json::parse(wm.TypeSchema());
+
+    // 收集所有反射类型名（S0 注册后应有 3 个光源类型 + 相机）
+    std::set<String> types;
+    for (auto& t : j["component_types"]) types.insert(t["type"].get<String>());
+    REQUIRE(types.count("SpotLight") == 1);
+    REQUIRE(types.count("RectLight") == 1);
+    REQUIRE(types.count("CameraComponent") == 1);
+
+    // 逐类型校验字段清单（含可写性 + 中文说明）
+    for (auto& t : j["component_types"]) {
+        if (t["type"] != "SpotLight") continue;
+        std::set<String> fields;
+        for (auto& f : t["fields"]) {
+            fields.insert(f["name"].get<String>());
+            if (f["name"] == "direction" || f["name"] == "color" ||
+                f["name"] == "intensity" || f["name"] == "range" ||
+                f["name"] == "innerConeAngle" || f["name"] == "outerConeAngle" ||
+                f["name"] == "castShadow") {
+                CHECK(f["writable"] == true);       // 数值类全部 AI 可写
+                CHECK(f["description"].get<String>().size() > 0);
+            }
+        }
+        for (auto n : {"direction", "color", "intensity", "range",
+                       "innerConeAngle", "outerConeAngle", "castShadow"})
+            CHECK(fields.count(n) == 1);
+    }
+    for (auto& t : j["component_types"]) {
+        if (t["type"] != "CameraComponent") continue;
+        bool hasMain = false;
+        for (auto& f : t["fields"]) {
+            if (f["name"] == "fov" || f["name"] == "nearPlane" || f["name"] == "farPlane") {
+                CHECK(f["writable"] == true);
+                CHECK(f["description"].get<String>().size() > 0);
+            }
+            if (f["name"] == "isMain") {
+                hasMain = true;
+                CHECK(f["writable"] == false);   // isMain 仅 AI_VISIBLE，AI 不可写
+            }
+        }
+        CHECK(hasMain);
+    }
+}
+
+TEST_CASE("WorldModel::Snapshot 导出 SpotLight AI_VISIBLE 字段") {
+    World world;
+    SceneGraph sg(world);
+
+    // 路灯实体：SpotLight（S0.1 注册的 7 个 AI 字段应全部进快照）
+    Entity e = world.CreateEntity("StreetLamp");
+    world.AddComponent<TransformComponent>(e);
+    auto* sl = world.AddComponent<SpotLight>(e);
+    sl->direction = float3(0.0f, -1.0f, 0.0f);
+    sl->color     = float3(1.0f, 0.9f, 0.7f);
+    sl->intensity = 25.0f;
+    sl->range     = 15.0f;
+    sl->innerConeAngle = 0.3f;
+    sl->outerConeAngle = 0.6f;
+    sl->castShadow = true;
+    sg.SetParent(e, Entity{kInvalidEntity});
+
+    WorldModel wm;
+    auto j = nlohmann::json::parse(wm.Snapshot(world, {}));
+
+    REQUIRE(j["entities"].size() == 1);
+    auto comps = j["entities"][0]["components"];
+    bool foundSpot = false;
+    for (auto& c : comps) {
+        if (c["type"] != "SpotLight") continue;
+        foundSpot = true;
+        CHECK(c["fields"].contains("direction"));
+        CHECK(c["fields"]["direction"][1] == -1.0f);
+        CHECK(c["fields"]["color"][2] == 0.7f);
+        CHECK(c["fields"]["intensity"] == 25.0f);
+        CHECK(c["fields"]["innerConeAngle"].get<float>() == doctest::Approx(0.3f));
+        CHECK(c["fields"]["castShadow"] == true);
+    }
+    CHECK(foundSpot);
 }
 
 TEST_CASE("WorldModel::Snapshot 过滤器生效") {

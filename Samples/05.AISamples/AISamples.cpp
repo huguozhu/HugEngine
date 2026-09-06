@@ -13,6 +13,7 @@
 #include "Pipeline/ForwardPipeline.h"
 #include "SceneRenderer.h"
 #include "Pipeline/CameraController.h"
+#include "Pipeline/Camera.h"
 #include "Scene/PhysicalSkyComponent.h"
 #include "AI/Runtime/AIDevice.h"
 #include "AI/Runtime/InferenceScheduler.h"
@@ -176,12 +177,15 @@ int main() {
                 pipeline.GetCurrentShadowObjectBuffer(),
                 pipeline.GetCurrentShadowBuffer(),
                 pipeline.GetCurrentDescSet());
+            // 帧相机解析：LLM 生成的场景含主相机实体（Camera 组件 isMain=true）时优先使用，
+            // 否则回退自由相机 CameraController（S0.4 主相机接入）
+            render::CameraData frameCamera = render::ResolveFrameCamera(*fWorld, camCtrl.GetCamera());
             render::SubsystemContext shadowCtx;
             shadowCtx.world = fWorld; shadowCtx.sceneGraph = fSG;
-            shadowCtx.camera = &camCtrl.GetCamera();
+            shadowCtx.camera = &frameCamera;
             he::SyncPhysicalSkyToSun(*fWorld);
             shadowSys->Update(shadowCtx);
-            pipeline.Render(cmdList.get(), *fWorld, *fSG, camCtrl.GetCamera());
+            pipeline.Render(cmdList.get(), *fWorld, *fSG, frameCamera);
             // pass 级调试标记：BackBuffer 合成（ToneMap + ImGui），RenderDoc 可识别
             cmdList->BeginDebugLabel("ToneMap + ImGui (BackBuffer)");
             cmdList->BeginRenderPass(1, backFmt);

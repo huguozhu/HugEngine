@@ -15,6 +15,7 @@
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
 #include "Scene/LightComponent.h"
+#include "Scene/CameraComponent.h"
 
 using namespace he;
 using namespace he::ai;
@@ -70,4 +71,76 @@ TEST_CASE("BuildScene 跳过未知组件类型且不崩溃") {
     REQUIRE(r.success == true);       // 实体仍被创建
     REQUIRE(r.entities.size() == 1);
     REQUIRE(world.GetComponent<TransformComponent>(r.entities[0]) != nullptr);
+}
+
+TEST_CASE("BuildScene 解析 SpotLight/RectLight/Camera 组件（S0.3）") {
+    World world;
+    SceneGraph sg(world);
+
+    String json = R"({
+      "entities": [
+        {"name":"StreetLamp","transform":{"position":[2,4,0]},
+         "components":[{"type":"SpotLight","direction":[0,-1,0],"color":[1,0.9,0.7],
+                        "intensity":25,"range":15,"innerConeAngle":0.3,"outerConeAngle":0.6,
+                        "castShadow":true,"unknownField":"忽略"}]},
+        {"name":"WindowLight","transform":{"position":[-2,3,1]},
+         "components":[{"type":"RectLight","normal":[0,-1,0],"color":[0.8,0.9,1],
+                        "intensity":10,"width":2,"height":1,"range":8,"softness":0.4,"castShadow":true}]},
+        {"name":"MainCamera","transform":{"position":[0,2,8]},
+         "components":[{"type":"Camera","fov":45,"nearPlane":0.2,"farPlane":500,"isMain":true}]}
+      ]
+    })";
+
+    SceneBuildResult r = BuildScene(world, sg, json);
+    REQUIRE(r.success == true);
+    REQUIRE(r.entities.size() == 3);
+
+    // --- SpotLight：字段逐一解析 + 未知字段容错跳过 ---
+    auto* sl = world.GetComponent<SpotLight>(r.entities[0]);
+    REQUIRE(sl != nullptr);
+    CHECK(sl->direction.y == doctest::Approx(-1.0f));
+    CHECK(sl->color.x == doctest::Approx(1.0f));
+    CHECK(sl->color.g == doctest::Approx(0.9f));
+    CHECK(sl->intensity == doctest::Approx(25.0f));
+    CHECK(sl->range == doctest::Approx(15.0f));
+    CHECK(sl->innerConeAngle == doctest::Approx(0.3f));
+    CHECK(sl->outerConeAngle == doctest::Approx(0.6f));
+    CHECK(sl->castShadow == true);
+
+    // --- RectLight：含 softness/castShadow ---
+    auto* rl = world.GetComponent<RectLight>(r.entities[1]);
+    REQUIRE(rl != nullptr);
+    CHECK(rl->normal.y == doctest::Approx(-1.0f));
+    CHECK(rl->color.b == doctest::Approx(1.0f));
+    CHECK(rl->intensity == doctest::Approx(10.0f));
+    CHECK(rl->width == doctest::Approx(2.0f));
+    CHECK(rl->height == doctest::Approx(1.0f));
+    CHECK(rl->range == doctest::Approx(8.0f));
+    CHECK(rl->softness == doctest::Approx(0.4f));
+    CHECK(rl->castShadow == true);
+
+    // --- Camera：投影参数 + 主相机标记 ---
+    auto* cam = world.GetComponent<CameraComponent>(r.entities[2]);
+    REQUIRE(cam != nullptr);
+    CHECK(cam->fov == doctest::Approx(45.0f));
+    CHECK(cam->nearPlane == doctest::Approx(0.2f));
+    CHECK(cam->farPlane == doctest::Approx(500.0f));
+    CHECK(cam->isMain == true);
+
+    // 生成的相机是主相机（S0.4 前提：GetPrimaryCamera 能找到它）
+    CHECK(world.GetPrimaryCamera() == cam);
+}
+
+TEST_CASE("BuildScene 非法字段类型安全降级（SpotLight 强度给数组）") {
+    World world;
+    SceneGraph sg(world);
+    // intensity 字段给数组（LLM 常见错误）→ 应保持默认值 1.0 而非崩溃
+    String json = R"({"entities":[{"name":"L",
+        "components":[{"type":"SpotLight","intensity":[1,2],"castShadow":"yes"}]}]})";
+    SceneBuildResult r = BuildScene(world, sg, json);
+    REQUIRE(r.success == true);
+    auto* sl = world.GetComponent<SpotLight>(r.entities[0]);
+    REQUIRE(sl != nullptr);
+    CHECK(sl->intensity == doctest::Approx(1.0f));   // 默认值
+    CHECK(sl->castShadow == false);                  // 默认值
 }

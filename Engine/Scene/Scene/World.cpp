@@ -47,6 +47,17 @@ bool World::IsValid(Entity entity) const {
     return false;
 }
 
+CameraComponent* World::GetPrimaryCamera() const {
+    // 遍历相机组件桶，返回第一个 isMain 主相机（无相机实体时返回 nullptr）
+    auto it = m_Store.find(std::type_index(typeid(CameraComponent)));
+    if (it == m_Store.end()) return nullptr;
+    for (auto& entry : it->second) {
+        auto* cam = static_cast<CameraComponent*>(entry.ptr.get());
+        if (cam->isMain) return cam;
+    }
+    return nullptr;
+}
+
 std::vector<World::ComponentEntry>& World::GetBucket(std::type_index type) {
     return m_Store[type];
 }

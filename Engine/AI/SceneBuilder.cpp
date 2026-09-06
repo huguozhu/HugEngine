@@ -7,6 +7,7 @@
 #include "Scene/SphereComponent.h"
 #include "Scene/LightComponent.h"
 #include "Scene/PhysicalSkyComponent.h"
+#include "Scene/CameraComponent.h"
 #include "Core/Log.h"
 
 #include "nlohmann/json.hpp"
@@ -140,6 +141,37 @@ SceneBuildResult BuildScene(World& world, SceneGraph& sg, const String& sceneJso
                     if (comp.contains("color")) l->color = ParseVec3(comp["color"], l->color);
                     l->intensity = GetFloatField(comp, "intensity", l->intensity);
                     l->range     = GetFloatField(comp, "range", l->range);
+                }
+                else if (type == "SpotLight") {
+                    // 聚光灯：锥轴方向 + 内外锥角 + 基类光照参数（全部安全降级）
+                    auto* l = world.AddComponent<SpotLight>(e);
+                    if (comp.contains("direction")) l->direction = ParseVec3(comp["direction"], l->direction);
+                    if (comp.contains("color"))     l->color     = ParseVec3(comp["color"], l->color);
+                    l->intensity      = GetFloatField(comp, "intensity", l->intensity);
+                    l->range          = GetFloatField(comp, "range", l->range);
+                    l->innerConeAngle = GetFloatField(comp, "innerConeAngle", l->innerConeAngle);
+                    l->outerConeAngle = GetFloatField(comp, "outerConeAngle", l->outerConeAngle);
+                    l->castShadow     = GetBoolField(comp, "castShadow", l->castShadow);
+                }
+                else if (type == "RectLight") {
+                    // 矩形面光：发光面尺寸/法线 + 软阴影 + 基类光照参数（全部安全降级）
+                    auto* l = world.AddComponent<RectLight>(e);
+                    if (comp.contains("normal")) l->normal = ParseVec3(comp["normal"], l->normal);
+                    if (comp.contains("color"))  l->color  = ParseVec3(comp["color"], l->color);
+                    l->intensity  = GetFloatField(comp, "intensity", l->intensity);
+                    l->width      = GetFloatField(comp, "width", l->width);
+                    l->height     = GetFloatField(comp, "height", l->height);
+                    l->range      = GetFloatField(comp, "range", l->range);
+                    l->softness   = GetFloatField(comp, "softness", l->softness);
+                    l->castShadow = GetBoolField(comp, "castShadow", l->castShadow);
+                }
+                else if (type == "Camera") {
+                    // 相机组件：投影参数 + 主相机标记；isMain 缺省为组件默认值 true
+                    auto* c = world.AddComponent<CameraComponent>(e);
+                    c->fov       = GetFloatField(comp, "fov", c->fov);
+                    c->nearPlane = GetFloatField(comp, "nearPlane", c->nearPlane);
+                    c->farPlane  = GetFloatField(comp, "farPlane", c->farPlane);
+                    c->isMain    = GetBoolField(comp, "isMain", c->isMain);
                 }
                 else if (type == "PhysicalSky") {
                     auto* s = world.AddComponent<PhysicalSkyComponent>(e);
