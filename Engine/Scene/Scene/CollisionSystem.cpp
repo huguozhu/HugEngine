@@ -230,7 +230,8 @@ bool CollisionSystem::Contains(World& world, Entity e, const float3& point) {
 }
 
 bool CollisionSystem::Raycast(World& world, const float3& origin, const float3& dir,
-                              float maxDistance, Entity& outHit, float& outT) {
+                              float maxDistance, Entity& outHit, float& outT,
+                              EntityID ignore) {
     // 归一化方向（球体/胶囊公式基于单位向量；零向量直接返回未命中）
     float lenSq = glm::dot(dir, dir);
     if (lenSq < 1e-12f) return false;
@@ -240,6 +241,7 @@ bool CollisionSystem::Raycast(World& world, const float3& origin, const float3& 
     Entity best = Entity{kInvalidEntity};
 
     world.ForEach<CollisionComponent>([&](Entity e, CollisionComponent& cc) {
+        if (e.id == ignore) return;   // 排除自身（如角色地面检测）
         WorldShape s;
         if (!ExtractShape(world, e, s)) return;   // 禁用/缺失 Transform 跳过
         float t = RaycastShape(s, origin, d, maxDistance);

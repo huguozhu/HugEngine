@@ -23,6 +23,7 @@
 #include "Scene/TextRenderComponent.h"
 #include "Scene/DecalComponent.h"
 #include "Scene/CollisionComponent.h"
+#include "Scene/CharacterMovementComponent.h"
 
 namespace he {
 
@@ -288,6 +289,26 @@ HE_BEGIN_REGISTER(he::CollisionComponent)
     HE_END_PROPERTY()
     HE_REGISTER_PROPERTY(he::CollisionComponent, bool, bEnabled)
         HE_ATTR_CATEGORY("Collision") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("是否参与碰撞检测")
+    HE_END_PROPERTY()
+HE_END_REGISTER()
+
+// --- CharacterMovementComponent 注册（Phase B3）---
+// 输入与运行时字段（inputDirection/bWantsJump/bRunning/velocity/bOnGround）不注册：由系统/代码驱动
+HE_BEGIN_REGISTER(he::CharacterMovementComponent)
+    HE_REGISTER_PROPERTY(he::CharacterMovementComponent, float, walkSpeed)
+        HE_ATTR_CATEGORY("Movement") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("步行速度（米/秒）")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::CharacterMovementComponent, float, runSpeed)
+        HE_ATTR_CATEGORY("Movement") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("跑步速度（米/秒）")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::CharacterMovementComponent, float, jumpHeight)
+        HE_ATTR_CATEGORY("Movement") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("跳跃高度（米）")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::CharacterMovementComponent, float, gravity)
+        HE_ATTR_CATEGORY("Movement") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("重力加速度（米/秒²）")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::CharacterMovementComponent, float, maxSlopeAngle)
+        HE_ATTR_CATEGORY("Movement") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("最大可站立坡度（度）")
     HE_END_PROPERTY()
 HE_END_REGISTER()
 

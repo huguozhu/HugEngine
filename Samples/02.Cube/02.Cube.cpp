@@ -34,6 +34,8 @@
 #include "Scene/DecalComponent.h"
 #include "Scene/CollisionComponent.h"
 #include "Scene/CollisionSystem.h"
+#include "Scene/CharacterMovementComponent.h"
+#include "Scene/MovementSystem.h"
 #include "Editor/ImGuiIntegration.h"
 #include "imgui.h"
 
@@ -179,10 +181,15 @@ int main() {
     World world;
     SceneGraph sceneGraph(world);
 
-    // 地板（深灰色立方体，粗糙，长宽 2x）
-    CreateShapeEntity(world, sceneGraph,
+    // 地板（深灰色立方体，粗糙，长宽 2x）+ 碰撞体（B3 角色地面检测用）
+    Entity floorEntity = CreateShapeEntity(world, sceneGraph,
         float3(0.0f, 0.0f, 0.0f), float3(200.0f, 0.2f, 200.0f),
         float4(0.3f, 0.3f, 0.35f, 1.0f), 0.0f, 0.9f);
+    {
+        auto* fc = world.AddComponent<CollisionComponent>(floorEntity);
+        fc->shape       = CollisionShape::AABB;
+        fc->halfExtents = float3(100.0f, 0.1f, 100.0f);   // 与视觉尺寸一致
+    }
 
     // 金球（金属，光滑）
     CreateShapeEntity(world, sceneGraph,
@@ -288,6 +295,27 @@ int main() {
         auto* px = world.GetComponent<TransformComponent>(collisionProbeEntity);
         if (px) px->position = float3(6.0f, 1.0f, 0.0f);   // 初始距盒 4 米（未重叠）
         sceneGraph.SetParent(collisionProbeEntity, Entity{kInvalidEntity});
+    }
+
+    // --- 角色移动演示（B3：方向键移动 + 空格跳 + R 跑，落在地板上）---
+    Entity characterEntity;
+    {
+        characterEntity = world.CreateEntity("Character");
+        world.AddComponent<TransformComponent>(characterEntity);
+        auto* vis = world.AddComponent<SphereComponent>(characterEntity);
+        vis->radius = 0.4f;
+        vis->baseColorFactor = float4(0.3f, 0.7f, 1.0f, 1.0f);   // 浅蓝
+        vis->castShadow = false;
+        vis->OnCreate();
+        auto* cc = world.AddComponent<CollisionComponent>(characterEntity);
+        cc->shape  = CollisionShape::Capsule;   // 与视觉球同半径的胶囊
+        cc->radius = 0.4f;
+        cc->height = 1.6f;
+        auto* cm = world.AddComponent<CharacterMovementComponent>(characterEntity);
+        (void)cm;   // 默认参数即可
+        auto* cx = world.GetComponent<TransformComponent>(characterEntity);
+        if (cx) cx->position = float3(0.0f, 3.0f, 3.0f);   // 悬空出生，落到地板
+        sceneGraph.SetParent(characterEntity, Entity{kInvalidEntity});
     }
 
     // --- 方向光（恢复启用：测试 CSM 阴影，点光源已注释）---
@@ -812,6 +840,23 @@ int main() {
             }
         }
 
+        // ============================================================
+        // 角色移动演示（B3）：方向键移动 + 空格跳 + R 跑
+        // ============================================================
+        {
+            auto* cm = world.GetComponent<CharacterMovementComponent>(characterEntity);
+            if (cm) {
+                cm->inputDirection = float2(0.0f);
+                if (glfwGetKey(glfwWin, GLFW_KEY_LEFT)  == GLFW_PRESS) cm->inputDirection.x -= 1.0f;
+                if (glfwGetKey(glfwWin, GLFW_KEY_RIGHT) == GLFW_PRESS) cm->inputDirection.x += 1.0f;
+                if (glfwGetKey(glfwWin, GLFW_KEY_UP)    == GLFW_PRESS) cm->inputDirection.y -= 1.0f;
+                if (glfwGetKey(glfwWin, GLFW_KEY_DOWN)  == GLFW_PRESS) cm->inputDirection.y += 1.0f;
+                cm->bRunning   = glfwGetKey(glfwWin, GLFW_KEY_R) == GLFW_PRESS;
+                if (glfwGetKey(glfwWin, GLFW_KEY_SPACE) == GLFW_PRESS) cm->bWantsJump = true;
+            }
+            he::MovementSystem::Update(world, deltaTime);
+        }
+
         // 帧相机解析（S0.4）：场景含主相机实体时优先使用，否则回退自由相机
         // 本示例场景无 CameraComponent 实体，行为与之前一致（始终走 CameraController 回退）
         render::CameraData frameCamera = render::ResolveFrameCamera(world, camCtrl.GetCamera());
@@ -932,6 +977,19 @@ int main() {
             ImGui::TextWrapped("IJKL 移动红球，碰到橙色碰撞盒变绿");
             ImGui::TextColored(overlap ? ImVec4(0.2f, 1.0f, 0.3f, 1.0f) : ImVec4(1.0f, 0.3f, 0.3f, 1.0f),
                 "当前状态: %s", overlap ? "重叠" : "未重叠");
+        }
+
+        // 角色移动演示状态（B3）
+        {
+            auto* cm = world.GetComponent<CharacterMovementComponent>(characterEntity);
+            if (cm) {
+                ImGui::SeparatorText("角色移动 (B3)");
+                ImGui::TextWrapped("方向键移动浅蓝球，空格跳跃，R 跑");
+                ImGui::TextColored(cm->bOnGround ? ImVec4(0.2f, 1.0f, 0.3f, 1.0f) : ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
+                    "状态: %s", cm->bOnGround ? "地面" : "空中");
+                ImGui::Text("速度: (%.1f, %.1f, %.1f) m/s",
+                    cm->velocity.x, cm->velocity.y, cm->velocity.z);
+            }
         }
 
         // 渲染模式切换（读 CVar → Combo → 写回 CVar）

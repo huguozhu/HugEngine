@@ -49,6 +49,9 @@ set(SCENE_SOURCES
     Scene/CollisionComponent.h
     Scene/CollisionSystem.h
     Scene/CollisionSystem.cpp
+    Scene/CharacterMovementComponent.h
+    Scene/MovementSystem.h
+    Scene/MovementSystem.cpp
 )
 
 target_sources(HugEngineScene PRIVATE ${SCENE_SOURCES})

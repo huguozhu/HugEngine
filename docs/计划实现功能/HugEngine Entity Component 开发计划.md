@@ -30,7 +30,8 @@
 | BillboardComponent | UBillboardComponent | ✅（P2 A4，billboard 矩阵对齐相机） | ✅ 3 属性 | ✅ | — |
 | TextRenderComponent | UTextRenderComponent | ✅（P2 A5，stb_truetype + 系统字体兜底） | ✅ 4 属性 | ✅ | — |
 | CollisionComponent | UCapsuleComponent/UBoxComponent | ✅（P3 B5，`CollisionSystem`） | ✅ 5 属性 | ✅ | — |
-| InstancedMesh / Spline / CharacterMovement / Ability | UE5 对应组件 | ❌ 未实现 | — | — | — |
+| CharacterMovementComponent | UCharacterMovementComponent | ✅（P3 B3，`MovementSystem`，地面射线检测） | ✅ 5 属性 | ✅ | — |
+| InstancedMesh / Spline / Ability | UE5 对应组件 | ❌ 未实现 | — | — | — |
 | SkeletalMesh / Physics / Audio / NavMesh | UE5 对应组件 | ❌（依赖路线图 P6/P3） | — | — | — |
 
 **结论**：文档初版「缺 SpotLight / RectLight」的描述已过时（两者均已实现）；当前最大缺口反而落在 **反射/AI/词表层**——SpotLight、CameraComponent 等已实现组件尚未注册反射属性，导致编辑器 Details 面板与 AI 世界模型看不到它们，LLM 也无法生成它们。
@@ -197,7 +198,7 @@
 - **系统接入**：`SplineSystem` 提供 `EvaluateAtDistance/GetTangent`；SplineMesh 沿样条生成 MeshSection
 - **验证**：Agent 沿样条巡逻（与 AgentSystem 对接）
 
-### B3. CharacterMovementComponent
+### B3. CharacterMovementComponent（✅ 已完成 2026-09-06）
 
 - **对应 UE5**：UCharacterMovementComponent
 - **用途**：角色移动（走/跑/跳/重力/地面检测）
