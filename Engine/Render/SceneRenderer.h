@@ -16,6 +16,7 @@ namespace he::render {
 struct DrawItem {
     he::MeshComponent* mesh = nullptr;
     u32 objectIndex = 0;  // GPUObjectData SSBO 中的索引
+    bool bInstanced = false;  // 实例化网格：普通绘制循环跳过，由实例化 Pass 单次 Draw 渲染
 };
 
 // ============================================================================

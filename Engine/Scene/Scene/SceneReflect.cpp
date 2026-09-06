@@ -26,6 +26,7 @@
 #include "Scene/CharacterMovementComponent.h"
 #include "Scene/AbilityComponent.h"
 #include "Scene/SplineComponent.h"
+#include "Scene/InstancedMeshComponent.h"
 
 namespace he {
 
@@ -333,6 +334,17 @@ HE_BEGIN_REGISTER(he::SplineComponent)
     HE_END_PROPERTY()
     HE_REGISTER_PROPERTY(he::SplineComponent, bool, bShowPath)
         HE_ATTR_CATEGORY("Spline") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("是否显示调试路径（预留）")
+    HE_END_PROPERTY()
+HE_END_REGISTER()
+
+// --- InstancedMeshComponent 注册（Phase B1）---
+// 实例变换数组（instanceTransforms）为运行时数据不注册，由代码设置
+HE_BEGIN_REGISTER(he::InstancedMeshComponent)
+    HE_REGISTER_PROPERTY(he::InstancedMeshComponent, String, meshPath)
+        HE_ATTR_CATEGORY("InstancedMesh") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_DESCRIPTION("网格资产路径（MVP 用内置立方体，预留 glTF 实例化）")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::InstancedMeshComponent, bool, enableFrustumCull)
+        HE_ATTR_CATEGORY("InstancedMesh") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("逐实例视锥剔除（预留）")
     HE_END_PROPERTY()
 HE_END_REGISTER()
 

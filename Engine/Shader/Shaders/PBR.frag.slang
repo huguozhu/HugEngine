@@ -85,6 +85,8 @@ struct LightGridCell { uint offset; uint count; };
     uint     useClustered;      // 1=Forward+，0=传统 Forward
     uint     useBindlessMaterial;  // 1=从 u_Materials[] 读材质参数（bindless），0=从 GPUObjectData 内联读
     float4   atmosphere;        // sunDir.xyz（指向太阳）+ turbidity（空中透视）
+    uint     instanceSSBOHandle;  // B1 实例化网格：FS 不使用，仅占位对齐 VS
+    uint     instancePad[3];
 };
 
 // ACESFilm 定义在 common.slang 中，此处直接使用

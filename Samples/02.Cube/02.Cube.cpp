@@ -36,6 +36,7 @@
 #include "Scene/CollisionSystem.h"
 #include "Scene/CharacterMovementComponent.h"
 #include "Scene/MovementSystem.h"
+#include "Scene/InstancedMeshComponent.h"
 #include "Editor/ImGuiIntegration.h"
 #include "imgui.h"
 
@@ -316,6 +317,30 @@ int main() {
         auto* cx = world.GetComponent<TransformComponent>(characterEntity);
         if (cx) cx->position = float3(0.0f, 3.0f, 3.0f);   // 悬空出生，落到地板
         sceneGraph.SetParent(characterEntity, Entity{kInvalidEntity});
+    }
+
+    // --- 实例化网格（B1：100×100 = 10000 实例，单次 DrawIndexed）---
+    Entity instancedEntity;
+    std::vector<float4x4> instancedTransformsBackup;   // 面板显隐开关用
+    {
+        instancedEntity = world.CreateEntity("InstancedGrid");
+        world.AddComponent<TransformComponent>(instancedEntity);
+        auto* im = world.AddComponent<InstancedMeshComponent>(instancedEntity);
+        im->baseColorFactor = float4(0.3f, 0.9f, 0.4f, 1.0f);   // 绿色
+        im->metallicFactor  = 0.3f;
+        im->roughnessFactor = 0.6f;
+        const int kGrid = 100;
+        for (int ix = 0; ix < kGrid; ++ix) {
+            for (int iz = 0; iz < kGrid; ++iz) {
+                float4x4 m(1.0f);
+                m[0][0] = m[1][1] = m[2][2] = 0.5f;   // 边长 0.5 米
+                m[3] = float4(-75.0f + ix * 1.5f, 0.35f, -75.0f + iz * 1.5f, 1.0f);
+                instancedTransformsBackup.push_back(m);
+            }
+        }
+        im->SetInstanceTransforms(instancedTransformsBackup);
+        sceneGraph.SetParent(instancedEntity, Entity{kInvalidEntity});
+        HE_CORE_INFO("实例化网格: {} 实例（单次 DrawIndexed）", im->GetInstanceCount());
     }
 
     // --- 方向光（恢复启用：测试 CSM 阴影，点光源已注释）---
@@ -977,6 +1002,16 @@ int main() {
             ImGui::TextWrapped("IJKL 移动红球，碰到橙色碰撞盒变绿");
             ImGui::TextColored(overlap ? ImVec4(0.2f, 1.0f, 0.3f, 1.0f) : ImVec4(1.0f, 0.3f, 0.3f, 1.0f),
                 "当前状态: %s", overlap ? "重叠" : "未重叠");
+        }
+
+        // 实例化网格显隐（B1：万级实例 FPS 对比）
+        if (auto* im = world.GetComponent<InstancedMeshComponent>(instancedEntity)) {
+            ImGui::SeparatorText("实例化网格 (B1)");
+            bool visible = im->GetInstanceCount() > 0;
+            if (ImGui::Checkbox("显示 10000 实例", &visible)) {
+                im->SetInstanceTransforms(visible ? instancedTransformsBackup
+                                                  : std::vector<float4x4>{});
+            }
         }
 
         // 角色移动演示状态（B3）

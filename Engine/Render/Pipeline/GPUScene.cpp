@@ -9,6 +9,7 @@
 #include "Scene/BillboardComponent.h"
 #include "Scene/TextRenderComponent.h"
 #include "Scene/DecalComponent.h"
+#include "Scene/InstancedMeshComponent.h"
 #include "Core/Log.h"
 #include <cstring>
 
@@ -66,6 +67,7 @@ void GPUScene::Collect(World& world, SceneGraph& sg, const CameraData& camera) {
         world.ForEach<BillboardComponent>([&](Entity e, BillboardComponent& bb){ collectBillboard(e, bb); });
         world.ForEach<TextRenderComponent>([&](Entity e, TextRenderComponent& tr){ collectBillboard(e, tr); });
         world.ForEach<DecalComponent>([&](Entity e, DecalComponent& dc){ collect(e, dc, sg.GetWorldMatrix(e), dc.materialID); });
+        world.ForEach<InstancedMeshComponent>([&](Entity e, InstancedMeshComponent& im){ collect(e, im, sg.GetWorldMatrix(e), im.materialID); });
     } else {
         // 增量：只更新变化的对象
         u32 idx=0;
@@ -89,6 +91,7 @@ void GPUScene::Collect(World& world, SceneGraph& sg, const CameraData& camera) {
         world.ForEach<BillboardComponent>([&](Entity e, BillboardComponent& bb){ updateBillboard(e, bb); });
         world.ForEach<TextRenderComponent>([&](Entity e, TextRenderComponent& tr){ updateBillboard(e, tr); });
         world.ForEach<DecalComponent>([&](Entity e, DecalComponent& dc){ update(e, dc, sg.GetWorldMatrix(e)); });
+        world.ForEach<InstancedMeshComponent>([&](Entity e, InstancedMeshComponent& im){ update(e, im, sg.GetWorldMatrix(e)); });
     }
     m_ObjectCount=(u32)m_Objects.size();
 }

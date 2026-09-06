@@ -50,7 +50,7 @@ static_assert(sizeof(GPUShadowData)   == 256, "GPUShadowData must be 256 bytes")
 static_assert(sizeof(GPULight)        == 64,  "GPULight must be 64 bytes");
 static_assert(sizeof(GPUObjectData)   == 176, "GPUObjectData must be 176 bytes");
 static_assert(sizeof(GPUMaterialData) == 112, "GPUMaterialData must be 112 bytes");
-static_assert(sizeof(PushConstantData) == 144, "PushConstantData must be 144 bytes");
+static_assert(sizeof(PushConstantData) == 160, "PushConstantData must be 160 bytes");
 static_assert(sizeof(ShadowPushConstant) == 80, "ShadowPushConstant must be 80 bytes");
 static_assert(sizeof(RTShadowPushConstant) == 112, "RTShadowPushConstant must be 112 bytes");
 static_assert(sizeof(RTRayEffectPushConstant) == 112, "RTRayEffectPushConstant must be 112 bytes");

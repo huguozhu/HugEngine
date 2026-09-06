@@ -16,6 +16,7 @@ he::CVar<bool> cvLightPhysicalUnits("r.Light.PhysicalUnits", false,
 #include "SceneRenderer.h"
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
+#include "Scene/InstancedMeshComponent.h"
 #include "Scene/SkyboxComponent.h"
 #include "Scene/PhysicalSkyComponent.h"
 #include "Core/Log.h"
@@ -620,6 +621,7 @@ void ForwardPipeline::UploadMaterialBindless(he::World& world) {
     world.ForEach<he::MeshComponent>([&](he::Entity e, he::MeshComponent& m) { collect(e, m); });
     world.ForEach<he::CubeComponent>([&](he::Entity e, he::CubeComponent& c) { collect(e, static_cast<he::MeshComponent&>(c)); });
     world.ForEach<he::SphereComponent>([&](he::Entity e, he::SphereComponent& s) { collect(e, static_cast<he::MeshComponent&>(s)); });
+    world.ForEach<he::InstancedMeshComponent>([&](he::Entity e, he::InstancedMeshComponent& im) { collect(e, im); });
 
     if (uniqueMat.empty()) return;  // 场景无材质，跳过
 
@@ -922,6 +924,52 @@ void ForwardPipeline::RenderScene(
     // 上传去重材质到 bindless SSBO（须在 Flush 之前调用，Flush 才会把材质 buffer 推送到 binding 30）
     UploadMaterialBindless(world);
 
+    // ============================================================
+    // 实例化网格 Pass（B1）：脏标记 → 重建实例变换 SSBO → 注册 bindless
+    // 须在 Flush 之前注册（Flush 才把新 SSBO 句柄推送进描述符集）；
+    // useInstanceID=2 模式，单次 DrawIndexed 渲染 N 个实例。
+    // MVP 限制：Forward 非 GPU-Culling 路径；Deferred/间接路径后续扩展。
+    // ============================================================
+    world.ForEach<he::InstancedMeshComponent>([&](he::Entity, he::InstancedMeshComponent& im) {
+        u32 count = im.GetInstanceCount();
+        if (count == 0 || im.GetIndexCount() == 0) return;
+
+        // 实例变换上传（脏标记触发；首次创建）
+        if (im.bTransformsDirty || !im.instanceBuffer) {
+            rhi::BufferDesc desc;
+            desc.size        = sizeof(float4x4) * count;
+            desc.usage       = rhi::BufferUsage::Storage;
+            desc.initialData = im.instanceTransforms.data();
+            desc.cpuAccess   = true;
+            // 旧缓冲退役保活（bindless 堆 append-only，销毁会悬垂）
+            if (im.instanceBuffer) im.retiredBuffers.push_back(std::move(im.instanceBuffer));
+            im.instanceBuffer = m_Device->CreateBuffer(desc);
+            im.instanceSSBOHandle = m_Device->GetBindlessHeap()->RegisterBuffer(im.instanceBuffer.get());
+            im.bTransformsDirty = false;
+        }
+
+        // 定位该组件的对象条目（objectIndex → 材质数据）
+        u32 objIndex = 0;
+        bool found = false;
+        for (auto& di : filteredItems) {
+            if (di.mesh == static_cast<he::MeshComponent*>(&im)) { objIndex = di.objectIndex; found = true; break; }
+        }
+        if (!found) return;
+
+        // 实例化绘制（模式 2：VS 按 SV_InstanceID 取实例变换）
+        PushConstantData pc = framePC;
+        pc.objectIndex       = objIndex;
+        pc.useInstanceID     = 2;
+        pc.instanceSSBOHandle = im.instanceSSBOHandle;
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[m_CurrentFrameSlot]);
+        cmd->SetDrawDebugLabel("Forward InstancedMesh");
+        cmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
+        cmd->SetVertexBuffer(im.GetVertexBuffer().get(), 0);
+        cmd->SetIndexBuffer(im.GetIndexBuffer().get());
+        cmd->DrawIndexed(im.GetIndexCount(), count);
+        drawCount += count;   // 实例计入绘制统计
+    });
+
     // 推送 bindless 纹理到全部已注册描述符集（Flush 自动遍历全部 set）
     m_Device->GetBindlessHeap()->Flush();
 
@@ -947,6 +995,7 @@ void ForwardPipeline::RenderScene(
 
                 for (u32 i = start; i < end; ++i) {
                     auto& di = filteredItems[i];
+                    if (di.bInstanced) continue;   // 实例化网格由专用 Pass 绘制
                     PushConstantData pc = framePC;
                     pc.objectIndex = di.objectIndex;
                     secCmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[m_CurrentFrameSlot]);  // set=0: per-frame + bindless
@@ -990,6 +1039,7 @@ void ForwardPipeline::RenderScene(
         } else {
             framePC.useInstanceID = 0;  // push constant 模式
             for (auto& di : filteredItems) {
+                if (di.bInstanced) continue;   // 实例化网格由专用 Pass 绘制
                 PushConstantData pc = framePC;
                 pc.objectIndex = di.objectIndex;
                 cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[m_CurrentFrameSlot]);

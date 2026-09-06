@@ -16,6 +16,7 @@ add_executable(HugEngineTests
     TestCharacterMovement.cpp
     TestAbility.cpp
     TestSpline.cpp
+    TestInstancedMesh.cpp
     TestDeepSeekProtocol.cpp
     TestPromptToScene.cpp
     TestWorldModel.cpp

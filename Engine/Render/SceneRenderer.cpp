@@ -7,6 +7,7 @@
 #include "Scene/BillboardComponent.h"
 #include "Scene/TextRenderComponent.h"
 #include "Scene/DecalComponent.h"
+#include "Scene/InstancedMeshComponent.h"
 #include "Threading/JobSystem.h"
 #include "Core/Log.h"
 #include <mutex>
@@ -21,13 +22,13 @@ std::vector<DrawItem> SceneRenderer::Prepare(he::World& world, he::SceneGraph& s
     if (!objectBuffer) return result;
 
     // ---- Step 1: 收集所有可绘制实体 + 预计算包围盒 ----
-    struct Entry { he::MeshComponent* mesh; AABB worldBounds; float4x4 worldMatrix; };
+    struct Entry { he::MeshComponent* mesh; AABB worldBounds; float4x4 worldMatrix; bool bInstanced = false; };
     std::vector<Entry> entries;
 
     auto gather = [&](he::Entity e, he::MeshComponent& m) {
         if (m.GetIndexCount() == 0) return;
         float4x4 wm = sg.GetWorldMatrix(e);
-        entries.push_back({&m, m.GetBounds().Transform(wm), wm});
+        entries.push_back({&m, m.GetBounds().Transform(wm), wm, false});
     };
     world.ForEach<he::MeshComponent>([&](he::Entity e, he::MeshComponent& m) { gather(e, m); });
     world.ForEach<he::CubeComponent>([&](he::Entity e, he::CubeComponent& c) { gather(e, static_cast<he::MeshComponent&>(c)); });
@@ -46,6 +47,13 @@ std::vector<DrawItem> SceneRenderer::Prepare(he::World& world, he::SceneGraph& s
     world.ForEach<he::TextRenderComponent>([&](he::Entity e, he::TextRenderComponent& t) { gatherBillboard(e, t); });
     // 贴花：固定朝向（Transform 摆放），走普通 mesh 路径
     world.ForEach<he::DecalComponent>([&](he::Entity e, he::DecalComponent& d) { gather(e, d); });
+    // 实例化网格（B1）：登记一个对象条目（材质数据用），实例由专用 Pass 绘制
+    world.ForEach<he::InstancedMeshComponent>([&](he::Entity e, he::InstancedMeshComponent& im) {
+        if (im.GetIndexCount() == 0) return;
+        float4x4 wm = sg.GetWorldMatrix(e);
+        entries.push_back({static_cast<he::MeshComponent*>(&im),
+                           im.GetBounds().Transform(wm), wm, true});
+    });
 
     u32 total = (u32)entries.size();
     if (total == 0) return result;
@@ -104,7 +112,7 @@ std::vector<DrawItem> SceneRenderer::Prepare(he::World& world, he::SceneGraph& s
         FillObjectData(obj, mat);
         obj.materialID = e.mesh->materialID;
 
-        result.push_back({e.mesh, vi});
+        result.push_back({e.mesh, vi, e.bInstanced});
     }
     objectBuffer->Unmap();
 

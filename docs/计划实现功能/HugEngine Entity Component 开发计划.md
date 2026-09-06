@@ -33,7 +33,7 @@
 | CharacterMovementComponent | UCharacterMovementComponent | ✅（P3 B3，`MovementSystem`，地面射线检测） | ✅ 5 属性 | ✅ | — |
 | AbilityComponent | UAbilitySystemComponent | ✅（P3 B4，`AbilitySystem` + Action op CastAbility） | ✅ 2 属性 | ✅ | — |
 | SplineComponent | USplineComponent | ✅（P3 B2，Hermite+自动切线，弧长求值/闭环回绕） | ✅ 2 属性 | ✅ | — |
-| InstancedMesh | UE5 对应组件 | ❌ 未实现 | — | — | — |
+| InstancedMeshComponent | UInstancedStaticMeshComponent | ✅（P3 B1，单次 DrawIndexed 万级实例） | ✅ 2 属性 | ✅ | — |
 | SkeletalMesh / Physics / Audio / NavMesh | UE5 对应组件 | ❌（依赖路线图 P6/P3） | — | — | — |
 
 **结论**：文档初版「缺 SpotLight / RectLight」的描述已过时（两者均已实现）；当前最大缺口反而落在 **反射/AI/词表层**——SpotLight、CameraComponent 等已实现组件尚未注册反射属性，导致编辑器 Details 面板与 AI 世界模型看不到它们，LLM 也无法生成它们。
@@ -184,7 +184,7 @@
 
 > 前置提示：B 组每个组件落地时同步补词表 + `BuildScene` 分支；新增光源/组件类扩散成本高（8-12 处），B1 前建议先做 CollectLights/词表的数据驱动化重构（参照 `docs/技术分析文档/HugEngine架构可扩展性分析.md`）。
 
-### B1. InstancedMeshComponent
+### B1. InstancedMeshComponent（✅ 已完成 2026-09-06）
 
 - **对应 UE5**：UInstancedStaticMeshComponent / HISM（植被）
 - **用途**：同一网格大量实例（草丛/森林/建筑群），单次 DrawIndexedIndirect
@@ -271,6 +271,6 @@ P0（立即）: Phase S0 全部 —— ✅ 已完成（2026-09-06）
              S0.4 主相机接入（World::GetPrimaryCamera / ResolveFrameCamera）
 P1（随后）: ✅ 已完成（2026-09-06）—— A7 ProjectileMovement + A8 Health（玩法底座）+ A6 SpringArm
 P2（视需要）: ✅ 已完成（2026-09-06）—— A3 Decal（MVP 投射片）/ A4 Billboard / A5 TextRender
-P3（中成本）: B1 InstancedMesh → B2 Spline → B5 Collision → B3 CharacterMovement → B4 Ability
+P3（中成本）: ✅ 已完成（2026-09-06）—— B5 Collision → B3 CharacterMovement → B4 Ability → B2 Spline → B1 InstancedMesh
 P4（大工程）: Phase C（等待路线图）
 ```

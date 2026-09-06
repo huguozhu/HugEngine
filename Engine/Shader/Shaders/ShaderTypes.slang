@@ -202,7 +202,7 @@ GPU_STRUCT GPUMaterialData {
 // Push Constant 结构体
 // ============================================================
 
-// --- ForwardPushConstant: 前向管线每帧 Push Constant（144 字节）---
+// --- ForwardPushConstant: 前向管线每帧 Push Constant（160 字节）---
 // C++ 端别名: PushConstantData
 // Forward+: cluster 参数由 m_UseForwardPlus 控制，运行时切换传统 / Forward+ 路径
 GPU_STRUCT PushConstantData {
@@ -210,7 +210,7 @@ GPU_STRUCT PushConstantData {
     float4   cameraPosition;        // [64..80]  相机世界位置
     GPU_UINT lightCount;            // [80]      光源总数
     GPU_UINT objectIndex;           // [84]      GPU 对象索引
-    GPU_UINT useInstanceID;         // [88]      1=GPU Driven (SV_InstanceID)
+    GPU_UINT useInstanceID;         // [88]      1=GPU Driven (SV_InstanceID) 2=实例化网格（SV_InstanceID → 实例变换 SSBO）
     float    iblIntensity;          // [92]      IBL 环境光强度
     GPU_UINT clusterTilesX;         // [96]      Cluster X 方向 tile 数（0=传统模式）
     GPU_UINT clusterTilesY;         // [100]     Cluster Y 方向 tile 数
@@ -219,7 +219,9 @@ GPU_STRUCT PushConstantData {
     float    clusterLogFactor;      // [112]     log(far/near)
     GPU_UINT useClustered;          // [116]     1=Forward+ / 0=传统 Forward
     GPU_UINT useBindlessMaterial;   // [120]     1=从 u_Materials[] 读材质参数（bindless），0=从 GPUObjectData 内联读
-    float4   atmosphere;            // [128]     sunDir.xyz（指向太阳）+ turbidity（空中透视；C++ 自动 16B 对齐，结构从 128→144B）
+    float4   atmosphere;            // [128]     sunDir.xyz（指向太阳）+ turbidity（空中透视）
+    GPU_UINT instanceSSBOHandle;    // [144]     实例化网格的实例变换 SSBO（bindless u_SSBO[] 句柄；useInstanceID=2 时有效）
+    GPU_UINT instancePad[3];        // [148..160] 对齐填充
 };
 
 // --- ShadowPushConstant: 阴影通道 Push Constant（80 字节）---

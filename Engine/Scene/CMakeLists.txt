@@ -60,6 +60,8 @@ set(SCENE_SOURCES
     Scene/SplineComponent.cpp
     Scene/SplineSystem.h
     Scene/SplineSystem.cpp
+    Scene/InstancedMeshComponent.h
+    Scene/InstancedMeshComponent.cpp
 )
 
 target_sources(HugEngineScene PRIVATE ${SCENE_SOURCES})
