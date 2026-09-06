@@ -22,6 +22,7 @@
 #include "Scene/BillboardComponent.h"
 #include "Scene/TextRenderComponent.h"
 #include "Scene/DecalComponent.h"
+#include "Scene/CollisionComponent.h"
 
 namespace he {
 
@@ -268,6 +269,25 @@ HE_BEGIN_REGISTER(he::DecalComponent)
     HE_END_PROPERTY()
     HE_REGISTER_PROPERTY(he::DecalComponent, String, decalTexture)
         HE_ATTR_CATEGORY("Decal") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("贴花纹理路径（空 = 纯色片）")
+    HE_END_PROPERTY()
+HE_END_REGISTER()
+
+// --- CollisionComponent 注册（Phase B5，物理与移动的前置）---
+HE_BEGIN_REGISTER(he::CollisionComponent)
+    HE_REGISTER_PROPERTY(he::CollisionComponent, u8, shape)
+        HE_ATTR_CATEGORY("Collision") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("碰撞形状：0=AABB 盒 1=球体 2=胶囊")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::CollisionComponent, float3, halfExtents)
+        HE_ATTR_CATEGORY("Collision") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("AABB 三轴半尺寸（米）")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::CollisionComponent, float, radius)
+        HE_ATTR_CATEGORY("Collision") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("球体/胶囊半径（米）")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::CollisionComponent, float, height)
+        HE_ATTR_CATEGORY("Collision") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("胶囊总高（米，含两端半球）")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::CollisionComponent, bool, bEnabled)
+        HE_ATTR_CATEGORY("Collision") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("是否参与碰撞检测")
     HE_END_PROPERTY()
 HE_END_REGISTER()
 

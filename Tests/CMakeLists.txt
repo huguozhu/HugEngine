@@ -12,6 +12,7 @@ add_executable(HugEngineTests
     TestBillboard.cpp
     TestTextRender.cpp
     TestDecal.cpp
+    TestCollision.cpp
     TestDeepSeekProtocol.cpp
     TestPromptToScene.cpp
     TestWorldModel.cpp

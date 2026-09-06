@@ -32,6 +32,8 @@
 #include "Scene/TextRenderComponent.h"
 #include "Scene/TextRenderSystem.h"
 #include "Scene/DecalComponent.h"
+#include "Scene/CollisionComponent.h"
+#include "Scene/CollisionSystem.h"
 #include "Editor/ImGuiIntegration.h"
 #include "imgui.h"
 
@@ -253,6 +255,39 @@ int main() {
         if (fx) fx->position = float3(-3.0f, 8.0f, -2.0f);
         sceneGraph.SetParent(fe, Entity{kInvalidEntity});
         fpsTextEntity = fe;
+    }
+
+    // --- 碰撞检测演示（B5：IJKL 移动探测球，碰到橙色盒变绿）---
+    Entity collisionBoxEntity;
+    Entity collisionProbeEntity;
+    {
+        // 静态碰撞盒：视觉立方体 + AABB 碰撞体（尺寸一致）
+        collisionBoxEntity = world.CreateEntity("CollisionBox");
+        world.AddComponent<TransformComponent>(collisionBoxEntity);
+        auto* cb = world.AddComponent<CubeComponent>(collisionBoxEntity);
+        cb->halfExtent = 1.0f;
+        cb->baseColorFactor = float4(0.9f, 0.6f, 0.2f, 1.0f);   // 橙色
+        auto* cc = world.AddComponent<CollisionComponent>(collisionBoxEntity);
+        cc->shape       = CollisionShape::AABB;
+        cc->halfExtents = float3(1.0f);
+        auto* bx = world.GetComponent<TransformComponent>(collisionBoxEntity);
+        if (bx) bx->position = float3(6.0f, 1.0f, -4.0f);
+        sceneGraph.SetParent(collisionBoxEntity, Entity{kInvalidEntity});
+
+        // 探测球：红 = 未重叠，绿 = 重叠（每帧 Overlap 驱动颜色）
+        collisionProbeEntity = world.CreateEntity("CollisionProbe");
+        world.AddComponent<TransformComponent>(collisionProbeEntity);
+        auto* ps = world.AddComponent<SphereComponent>(collisionProbeEntity);
+        ps->radius = 0.5f;
+        ps->baseColorFactor = float4(1.0f, 0.2f, 0.2f, 1.0f);
+        ps->castShadow = false;
+        ps->OnCreate();
+        auto* pc = world.AddComponent<CollisionComponent>(collisionProbeEntity);
+        pc->shape  = CollisionShape::Sphere;
+        pc->radius = 0.5f;
+        auto* px = world.GetComponent<TransformComponent>(collisionProbeEntity);
+        if (px) px->position = float3(6.0f, 1.0f, 0.0f);   // 初始距盒 4 米（未重叠）
+        sceneGraph.SetParent(collisionProbeEntity, Entity{kInvalidEntity});
     }
 
     // --- 方向光（恢复启用：测试 CSM 阴影，点光源已注释）---
@@ -746,6 +781,37 @@ int main() {
             camCtrl.Update(deltaTime, moveIn);
         }
 
+        // ============================================================
+        // 碰撞检测演示（B5）：IJKL 移动探测球，重叠变绿
+        // ============================================================
+        {
+            auto* px = world.GetComponent<TransformComponent>(collisionProbeEntity);
+            if (px) {
+                float3 move(0.0f);
+                if (glfwGetKey(glfwWin, GLFW_KEY_J) == GLFW_PRESS) move.x -= 1.0f;
+                if (glfwGetKey(glfwWin, GLFW_KEY_L) == GLFW_PRESS) move.x += 1.0f;
+                if (glfwGetKey(glfwWin, GLFW_KEY_I) == GLFW_PRESS) move.z += 1.0f;
+                if (glfwGetKey(glfwWin, GLFW_KEY_K) == GLFW_PRESS) move.z -= 1.0f;
+                if (glm::dot(move, move) > 0.0f)
+                    px->position += glm::normalize(move) * 5.0f * deltaTime;
+
+                // 每帧检测：探测球（Sphere）vs 碰撞盒（AABB）
+                bool overlap = he::CollisionSystem::Overlap(world, collisionProbeEntity, collisionBoxEntity);
+                auto* ps = world.GetComponent<SphereComponent>(collisionProbeEntity);
+                if (ps) {
+                    ps->baseColorFactor = overlap
+                        ? float4(0.2f, 1.0f, 0.3f, 1.0f)    // 绿 = 重叠
+                        : float4(1.0f, 0.2f, 0.2f, 1.0f);   // 红 = 未重叠
+                }
+                static bool s_LastOverlap = true;
+                if (overlap != s_LastOverlap) {
+                    s_LastOverlap = overlap;
+                    HE_CORE_INFO("[Collision] 探测球与碰撞盒 {} 重叠",
+                        overlap ? "开始" : "结束");
+                }
+            }
+        }
+
         // 帧相机解析（S0.4）：场景含主相机实体时优先使用，否则回退自由相机
         // 本示例场景无 CameraComponent 实体，行为与之前一致（始终走 CameraController 回退）
         render::CameraData frameCamera = render::ResolveFrameCamera(world, camCtrl.GetCamera());
@@ -858,6 +924,15 @@ int main() {
         float speed = camCtrl.GetMoveSpeed();
         if (ImGui::DragFloat("移动速度", &speed, 1.0f, 0.1f, 500.0f, "%.1f"))
             camCtrl.SetMoveSpeed(speed);
+
+        // 碰撞检测演示状态（B5）
+        {
+            bool overlap = he::CollisionSystem::Overlap(world, collisionProbeEntity, collisionBoxEntity);
+            ImGui::SeparatorText("碰撞检测 (B5)");
+            ImGui::TextWrapped("IJKL 移动红球，碰到橙色碰撞盒变绿");
+            ImGui::TextColored(overlap ? ImVec4(0.2f, 1.0f, 0.3f, 1.0f) : ImVec4(1.0f, 0.3f, 0.3f, 1.0f),
+                "当前状态: %s", overlap ? "重叠" : "未重叠");
+        }
 
         // 渲染模式切换（读 CVar → Combo → 写回 CVar）
         int mode = cvPipelineMode.Get();

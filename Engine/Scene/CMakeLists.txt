@@ -46,6 +46,9 @@ set(SCENE_SOURCES
     Scene/TextRenderSystem.cpp
     Scene/DecalComponent.h
     Scene/DecalComponent.cpp
+    Scene/CollisionComponent.h
+    Scene/CollisionSystem.h
+    Scene/CollisionSystem.cpp
 )
 
 target_sources(HugEngineScene PRIVATE ${SCENE_SOURCES})
