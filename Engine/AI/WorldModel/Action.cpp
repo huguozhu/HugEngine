@@ -6,6 +6,7 @@
 #include "Scene/SceneGraph.h"
 #include "Scene/Transform.h"
 #include "Scene/Component.h"
+#include "Scene/AbilityComponent.h"
 #include "Editor/Command.h"
 #include "Core/Log.h"
 
@@ -197,6 +198,37 @@ std::unique_ptr<he::Command> CompileAction(World& world, SceneGraph& sg, const A
             String("AI SetProperty ") + String(propName),
             [comp, prop, oldVal] { SetValueFromJson(*prop, reinterpret_cast<char*>(comp) + prop->offset, oldVal); },
             [comp, prop, args]   { SetValueFromJson(*prop, reinterpret_cast<char*>(comp) + prop->offset, args["value"]); });
+    }
+
+    // ---------- CastAbility：施放技能（B4 简化 GAS 对接点，可撤销） ----------
+    if (a.op == "CastAbility") {
+        auto* ability = world.GetComponent<AbilityComponent>(Entity{a.targetEntity});
+        if (!ability) {
+            HE_CORE_WARN("[Action] CastAbility 目标实体 {} 无 AbilityComponent", a.targetEntity);
+            return nullptr;
+        }
+        // argsJson = {"skill":"Fireball","target":[x,y,z]}
+        String skillName = args.value("skill", String{});
+        int idx = ability->FindSkill(skillName);
+        if (idx < 0) {
+            HE_CORE_WARN("[Action] CastAbility 技能不存在: {}", skillName);
+            return nullptr;
+        }
+        if (!ability->CanCast(idx)) {
+            HE_CORE_WARN("[Action] CastAbility 技能冷却中或资源不足: {}", skillName);
+            return nullptr;
+        }
+        float3 target = args.contains("target") ? ParseVec3(args["target"], float3(0.0f)) : float3(0.0f);
+        // Undo 恢复资源与冷却；Execute 触发 Cast（扣资源 + 进冷却 + onCast 回调）
+        float oldResource  = ability->resource;
+        float oldCooldown  = ability->cooldownRemaining[idx];
+        return std::make_unique<he::PropertyChangeCommand>(
+            "AI CastAbility " + skillName,
+            [ability, idx, oldResource, oldCooldown] {
+                ability->resource = oldResource;
+                ability->cooldownRemaining[idx] = oldCooldown;
+            },
+            [ability, idx, target] { ability->Cast(idx, target); });
     }
 
     // 其他 op（CallTool 等）暂不支持

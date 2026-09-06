@@ -24,9 +24,6 @@ public:
     he::SceneGraph* GetSceneGraph() override { return &m_SG; }
 
 private:
-    // 生成一枚抛物线抛射物（P1 A7 演示）
-    void SpawnProjectile();
-
     he::World m_World;
     he::SceneGraph m_SG{m_World};
     he::CommandHistory m_History;         // 智能体动作历史（可撤销）
@@ -35,5 +32,6 @@ private:
 
     int m_ThinkCount = 0;                 // 累计思考次数
     int m_LastEntityCount = 0;
-    float m_ProjectileTimer = 0.0f;       // 抛射物补射计时（每 5 秒一枚）
+    int   m_FireballSkill = -1;           // 火球技能下标（B4 演示）
+    bool  m_AutoCast = true;              // 自动施放开关（关闭后用手动按钮）
 };

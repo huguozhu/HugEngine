@@ -11,8 +11,12 @@
 #include "Scene/HealthComponent.h"
 #include "Scene/ProjectileMovementComponent.h"
 #include "Scene/ProjectileSystem.h"
+#include "Scene/AbilityComponent.h"
+#include "Scene/AbilitySystem.h"
 #include "Core/Log.h"
 #include "imgui.h"
+
+#include <algorithm>
 
 using namespace he;
 
@@ -59,10 +63,35 @@ bool FeatureAgentScene::Initialize(rhi::IRHIDevice* device, rhi::IRHISwapChain* 
         auto* health = m_World.AddComponent<HealthComponent>(e);
         health->maxHealth     = 100.0f;
         health->currentHealth = 100.0f;
+        // 技能组件（P1 B4 演示）：火球，冷却 5 秒，消耗 10 资源
+        auto* ability = m_World.AddComponent<AbilityComponent>(e);
+        m_FireballSkill = ability->AddSkill("Fireball", 5.0f, 10.0f);
+        // 施放回调 = 生成火球实体（橙色球 + 抛射物运动，飞向目标点）
+        ability->onCast = [this](Entity caster, const SkillDef&, const float3& target) {
+            Entity fireball = m_World.CreateEntity("Fireball");
+            auto* fx = m_World.AddComponent<TransformComponent>(fireball);
+            if (auto* cx = m_World.GetComponent<TransformComponent>(caster))
+                fx->position = cx->position + float3(0.0f, 1.0f, 0.0f);
+            float3 dir = glm::normalize(target - fx->position + float3(0.0001f));
+            fx->rotation = glm::quatLookAtRH(dir, float3(0, 1, 0));
+            auto* vis = m_World.AddComponent<SphereComponent>(fireball);
+            vis->radius = 0.25f;
+            vis->segmentCount = 12;
+            vis->ringCount = 6;
+            vis->baseColorFactor = float4(1.0f, 0.5f, 0.1f, 1.0f);
+            vis->emissiveFactor  = float3(1.0f, 0.4f, 0.05f);   // 自发光火球
+            vis->castShadow = false;
+            vis->OnCreate();
+            auto* proj = m_World.AddComponent<ProjectileMovementComponent>(fireball);
+            proj->initialSpeed = 8.0f;
+            proj->gravityScale = 0.3f;   // 轻微下坠的火球弹道
+            proj->lifetime     = 2.5f;   // 超时自动销毁
+            m_SG.SetParent(fireball, Entity{kInvalidEntity});
+            HE_CORE_INFO("[AgentScene] 施放技能: Fireball → 目标 ({:.1f},{:.1f},{:.1f})",
+                target.x, target.y, target.z);
+        };
         m_SG.SetParent(e, Entity{kInvalidEntity});
     }
-    // 首枚抛射物（P1 A7 演示：45° 抛物线飞出，3 秒后超时销毁）
-    SpawnProjectile();
     m_LastEntityCount = (int)m_World.GetEntityCount();
     HE_CORE_INFO("[AgentScene] 智能体已挂载（Mock 大脑，每 2s 思考一次）");
     return true;
@@ -79,41 +108,43 @@ void FeatureAgentScene::Update(float dt) {
         HE_CORE_INFO("[AgentScene] 智能体思考完成，实体数: {}", m_LastEntityCount);
     }
 
-    // 抛射物系统：积分运动 + 超时销毁（P1 A7）
+    // 抛射物系统：积分运动 + 超时销毁（P1 A7；火球技能复用此组件飞行）
     he::ProjectileSystem::Update(m_World, dt);
 
-    // 每 5 秒补射一枚，形成连续抛物线演示
-    m_ProjectileTimer += dt;
-    if (m_ProjectileTimer >= 5.0f) {
-        m_ProjectileTimer = 0.0f;
-        SpawnProjectile();
+    // 技能系统（P3 B4）：冷却计时 + 资源回复 + 自动施放（开关可关，留给手动按钮）
+    he::AbilitySystem::Update(m_World, dt);
+    if (auto* ability = m_World.GetComponent<AbilityComponent>(m_AgentEntity)) {
+        // 回复 10/s：平均消耗 2/s（10 资源 / 5 秒冷却），可长期维持
+        ability->resource = std::min(ability->maxResource, ability->resource + 10.0f * dt);
+        if (m_AutoCast && ability->CanCast(m_FireballSkill)) {
+            // 朝右侧方块堆自动施放（Agent 动作链 CastAbility 的等价演示）
+            ability->Cast(m_FireballSkill, float3(6.0f, 0.5f, 0.0f));
+        }
     }
-}
-
-void FeatureAgentScene::SpawnProjectile() {
-    // 橙色小球：初速 8 m/s、仰角 45°（绕 X 轴 +45° 使前向 -Z 抬升到斜上方）
-    Entity e = m_World.CreateEntity("Projectile");
-    auto* xform = m_World.AddComponent<TransformComponent>(e);
-    xform->position = float3(0.0f, 2.0f, -4.0f);
-    xform->rotation = glm::angleAxis(glm::radians(45.0f), float3(1.0f, 0.0f, 0.0f));
-    auto* sphere = m_World.AddComponent<SphereComponent>(e);
-    sphere->radius = 0.15f;
-    sphere->segmentCount = 12;
-    sphere->ringCount = 6;
-    sphere->baseColorFactor = float4(1.0f, 0.55f, 0.1f, 1.0f);
-    sphere->castShadow = false;
-    sphere->OnCreate();
-    auto* proj = m_World.AddComponent<ProjectileMovementComponent>(e);
-    proj->initialSpeed = 8.0f;
-    proj->gravityScale = 1.0f;
-    proj->lifetime     = 3.0f;   // 落地后继续下落，3 秒超时销毁
-    m_SG.SetParent(e, Entity{kInvalidEntity});
 }
 
 void FeatureAgentScene::RenderUI() {
     ImGui::Begin("AI 智能体");
     ImGui::Text("实体数: %d | 思考次数: %d", m_LastEntityCount, m_ThinkCount);
     ImGui::Separator();
+    // 技能状态（P3 B4）：资源/冷却 + 自动施放开关 + 手动施放按钮
+    if (auto* ability = m_World.GetComponent<AbilityComponent>(m_AgentEntity)) {
+        ImGui::Text("技能 Fireball：资源 %.0f/%.0f | 冷却 %.1fs",
+            ability->resource, ability->maxResource,
+            ability->cooldownRemaining[m_FireballSkill]);
+        ImGui::Checkbox("自动施放（每 5 秒）", &m_AutoCast);
+        // 冷却中/资源不足时按钮置灰（ImGui 禁用态），避免"点不动"困惑
+        bool canCast = ability->CanCast(m_FireballSkill);
+        if (!canCast) ImGui::BeginDisabled();
+        if (ImGui::Button("立即施放火球")) {
+            if (ability->Cast(m_FireballSkill, float3(6.0f, 0.5f, 0.0f)))
+                HE_CORE_INFO("[AgentScene] 手动施放火球");
+        }
+        if (!canCast) ImGui::EndDisabled();
+        if (!canCast && !m_AutoCast)
+            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "冷却中或资源不足");
+        ImGui::Separator();
+    }
     auto* agent = m_World.GetComponent<he::ai::AgentComponent>(m_AgentEntity);
     if (agent) {
         ImGui::Checkbox("enabled", &agent->enabled);

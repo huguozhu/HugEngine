@@ -52,6 +52,10 @@ set(SCENE_SOURCES
     Scene/CharacterMovementComponent.h
     Scene/MovementSystem.h
     Scene/MovementSystem.cpp
+    Scene/AbilityComponent.h
+    Scene/AbilityComponent.cpp
+    Scene/AbilitySystem.h
+    Scene/AbilitySystem.cpp
 )
 
 target_sources(HugEngineScene PRIVATE ${SCENE_SOURCES})

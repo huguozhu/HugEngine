@@ -31,7 +31,8 @@
 | TextRenderComponent | UTextRenderComponent | ✅（P2 A5，stb_truetype + 系统字体兜底） | ✅ 4 属性 | ✅ | — |
 | CollisionComponent | UCapsuleComponent/UBoxComponent | ✅（P3 B5，`CollisionSystem`） | ✅ 5 属性 | ✅ | — |
 | CharacterMovementComponent | UCharacterMovementComponent | ✅（P3 B3，`MovementSystem`，地面射线检测） | ✅ 5 属性 | ✅ | — |
-| InstancedMesh / Spline / Ability | UE5 对应组件 | ❌ 未实现 | — | — | — |
+| AbilityComponent | UAbilitySystemComponent | ✅（P3 B4，`AbilitySystem` + Action op CastAbility） | ✅ 2 属性 | ✅ | — |
+| InstancedMesh / Spline | UE5 对应组件 | ❌ 未实现 | — | — | — |
 | SkeletalMesh / Physics / Audio / NavMesh | UE5 对应组件 | ❌（依赖路线图 P6/P3） | — | — | — |
 
 **结论**：文档初版「缺 SpotLight / RectLight」的描述已过时（两者均已实现）；当前最大缺口反而落在 **反射/AI/词表层**——SpotLight、CameraComponent 等已实现组件尚未注册反射属性，导致编辑器 Details 面板与 AI 世界模型看不到它们，LLM 也无法生成它们。
@@ -206,7 +207,7 @@
 - **系统接入**：`MovementSystem` 每帧积分（输入方向 + 重力 + 碰撞（依赖 Collision））；MVP 可无碰撞地面投影
 - **验证**：角色在场景中可移动跳跃
 
-### B4. AbilityComponent（简化 GAS）
+### B4. AbilityComponent（简化 GAS）（✅ 已完成 2026-09-06）
 
 - **对应 UE5**：UAbilitySystemComponent
 - **用途**：技能注册/冷却/释放/消耗（智能体动作链对接点）

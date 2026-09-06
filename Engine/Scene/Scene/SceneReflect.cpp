@@ -24,6 +24,7 @@
 #include "Scene/DecalComponent.h"
 #include "Scene/CollisionComponent.h"
 #include "Scene/CharacterMovementComponent.h"
+#include "Scene/AbilityComponent.h"
 
 namespace he {
 
@@ -309,6 +310,17 @@ HE_BEGIN_REGISTER(he::CharacterMovementComponent)
     HE_END_PROPERTY()
     HE_REGISTER_PROPERTY(he::CharacterMovementComponent, float, maxSlopeAngle)
         HE_ATTR_CATEGORY("Movement") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("最大可站立坡度（度）")
+    HE_END_PROPERTY()
+HE_END_REGISTER()
+
+// --- AbilityComponent 注册（Phase B4，简化 GAS）---
+// 技能列表（skills/cooldownRemaining）为复合结构不注册，由代码注册技能
+HE_BEGIN_REGISTER(he::AbilityComponent)
+    HE_REGISTER_PROPERTY(he::AbilityComponent, float, resource)
+        HE_ATTR_CATEGORY("Ability") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("当前资源（技能消耗用）")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::AbilityComponent, float, maxResource)
+        HE_ATTR_CATEGORY("Ability") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("资源上限")
     HE_END_PROPERTY()
 HE_END_REGISTER()
 
