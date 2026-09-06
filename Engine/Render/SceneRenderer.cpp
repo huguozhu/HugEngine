@@ -4,6 +4,9 @@
 #include "Scene/MeshComponent.h"
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
+#include "Scene/BillboardComponent.h"
+#include "Scene/TextRenderComponent.h"
+#include "Scene/DecalComponent.h"
 #include "Threading/JobSystem.h"
 #include "Core/Log.h"
 #include <mutex>
@@ -29,6 +32,20 @@ std::vector<DrawItem> SceneRenderer::Prepare(he::World& world, he::SceneGraph& s
     world.ForEach<he::MeshComponent>([&](he::Entity e, he::MeshComponent& m) { gather(e, m); });
     world.ForEach<he::CubeComponent>([&](he::Entity e, he::CubeComponent& c) { gather(e, static_cast<he::MeshComponent&>(c)); });
     world.ForEach<he::SphereComponent>([&](he::Entity e, he::SphereComponent& s) { gather(e, static_cast<he::MeshComponent&>(s)); });
+    // 广告牌：世界矩阵替换为对齐相机的 billboard 矩阵（每帧随相机旋转）
+    auto gatherBillboard = [&](he::Entity e, he::BillboardComponent& b) {
+        if (b.GetIndexCount() == 0) return;
+        // 位置取世界矩阵平移分量（支持挂在父节点下；旋转/缩放忽略，MVP）
+        float4x4 base = sg.GetWorldMatrix(e);
+        float4x4 wm = he::BillboardComponent::MakeBillboardMatrix(
+            float3(base[3]), camera.forward, camera.up, b.size);
+        entries.push_back({static_cast<he::MeshComponent*>(&b), b.GetBounds().Transform(wm), wm});
+    };
+    world.ForEach<he::BillboardComponent>([&](he::Entity e, he::BillboardComponent& b) { gatherBillboard(e, b); });
+    // 3D 文字（继承 Billboard，同样对齐相机）
+    world.ForEach<he::TextRenderComponent>([&](he::Entity e, he::TextRenderComponent& t) { gatherBillboard(e, t); });
+    // 贴花：固定朝向（Transform 摆放），走普通 mesh 路径
+    world.ForEach<he::DecalComponent>([&](he::Entity e, he::DecalComponent& d) { gather(e, d); });
 
     u32 total = (u32)entries.size();
     if (total == 0) return result;

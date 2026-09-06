@@ -26,7 +26,9 @@
 | ProjectileMovementComponent | UProjectileMovementComponent | ✅（P1 A7，`ProjectileSystem`） | ✅ 5 属性 | ✅ | ❌（实体引用无法表达） |
 | HealthComponent | UHealthComponent | ✅（P1 A8，`DamageSystem`） | ✅ 3 属性 | ✅ | ✅ Health |
 | SpringArmComponent | USpringArmComponent | ✅（P1 A6，`SpringArmSystem`） | ✅ 4 属性 | ✅ | ❌（实体引用无法表达） |
-| Decal / Billboard / TextRender | UE5 对应组件 | ❌ 未实现 | — | — | — |
+| DecalComponent | UDecalComponent | ✅（P2 A3，MVP 半透明投射片） | ✅ 5 属性 | ✅ | ✅ Decal |
+| BillboardComponent | UBillboardComponent | ✅（P2 A4，billboard 矩阵对齐相机） | ✅ 3 属性 | ✅ | — |
+| TextRenderComponent | UTextRenderComponent | ✅（P2 A5，stb_truetype + 系统字体兜底） | ✅ 4 属性 | ✅ | — |
 | InstancedMesh / Spline / CharacterMovement / Ability / Collision | UE5 对应组件 | ❌ 未实现 | — | — | — |
 | SkeletalMesh / Physics / Audio / NavMesh | UE5 对应组件 | ❌（依赖路线图 P6/P3） | — | — | — |
 
@@ -123,7 +125,7 @@
 - **SceneBuilder 词表**：S0.3 补 `"SpotLight": {"fields": [...]}`
 - **验证**：S0.3 的 LLM"一盏路灯"用例
 
-### A3. DecalComponent
+### A3. DecalComponent（✅ 已完成 2026-09-06）
 
 - **对应 UE5**：UDecalComponent
 - **用途**：贴花（弹孔/污渍/路面标线），绘制到场景表面
@@ -132,7 +134,7 @@
 - **SceneBuilder 词表**：`"Decal": {"fields": ["decalTexture", "size", "opacity"]}`
 - **验证**：贴花可见性 + 大小/透明度参数生效
 
-### A4. BillboardComponent
+### A4. BillboardComponent（✅ 已完成 2026-09-06）
 
 - **对应 UE5**：UBillboardComponent
 - **用途**：始终面向相机的四边形（粒子替代、UI 指示、调试标记）
@@ -140,7 +142,7 @@
 - **系统接入**：渲染管线每帧把 Billboard 的旋转对齐相机（计算 billboard 矩阵）
 - **验证**：任意相机角度下四边形朝向正确
 
-### A5. TextRenderComponent
+### A5. TextRenderComponent（✅ 已完成 2026-09-06）
 
 - **对应 UE5**：UTextRenderComponent
 - **用途**：3D 世界文字（标签/数值/调试）
@@ -264,7 +266,7 @@ P0（立即）: Phase S0 全部 —— ✅ 已完成（2026-09-06）
              S0.3 词表 + SceneBuilder 扩到 8 组件
              S0.4 主相机接入（World::GetPrimaryCamera / ResolveFrameCamera）
 P1（随后）: ✅ 已完成（2026-09-06）—— A7 ProjectileMovement + A8 Health（玩法底座）+ A6 SpringArm
-P2（视需要）: A3 Decal / A4 Billboard / A5 TextRender
+P2（视需要）: ✅ 已完成（2026-09-06）—— A3 Decal（MVP 投射片）/ A4 Billboard / A5 TextRender
 P3（中成本）: B1 InstancedMesh → B2 Spline → B5 Collision → B3 CharacterMovement → B4 Ability
 P4（大工程）: Phase C（等待路线图）
 ```

@@ -9,6 +9,9 @@ add_executable(HugEngineTests
     TestSceneBuilder.cpp
     TestPrimaryCamera.cpp
     TestGameplayComponents.cpp
+    TestBillboard.cpp
+    TestTextRender.cpp
+    TestDecal.cpp
     TestDeepSeekProtocol.cpp
     TestPromptToScene.cpp
     TestWorldModel.cpp

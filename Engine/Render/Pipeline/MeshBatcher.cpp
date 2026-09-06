@@ -5,6 +5,9 @@
 #include "RHI/RHI.h"
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
+#include "Scene/BillboardComponent.h"
+#include "Scene/TextRenderComponent.h"
+#include "Scene/DecalComponent.h"
 #include "Core/Log.h"
 
 namespace he::render {
@@ -70,6 +73,10 @@ bool MeshBatcher::Build(World& world) {
     world.ForEach<MeshComponent>([&](Entity, MeshComponent& mc) { collect(mc); });
     world.ForEach<CubeComponent>([&](Entity, CubeComponent& cc) { collect(cc); });
     world.ForEach<SphereComponent>([&](Entity, SphereComponent& sc) { collect(sc); });
+    // 广告牌/3D 文字/贴花：追加在最后（与 GPUScene::Collect 的枚举顺序一致，保证 objectIndex 对齐）
+    world.ForEach<BillboardComponent>([&](Entity, BillboardComponent& bb) { collect(bb); });
+    world.ForEach<TextRenderComponent>([&](Entity, TextRenderComponent& tr) { collect(tr); });
+    world.ForEach<DecalComponent>([&](Entity, DecalComponent& dc) { collect(dc); });
 
     m_TotalVertices = (u32)m_MergedVertices.size();
     m_TotalIndices  = (u32)m_MergedIndices.size();

@@ -28,6 +28,10 @@
 #include "Scene/SkyboxComponent.h"
 #include "Scene/PhysicalSkyComponent.h"
 #include "Scene/ParticleComponent.h"
+#include "Scene/BillboardComponent.h"
+#include "Scene/TextRenderComponent.h"
+#include "Scene/TextRenderSystem.h"
+#include "Scene/DecalComponent.h"
 #include "Editor/ImGuiIntegration.h"
 #include "imgui.h"
 
@@ -202,6 +206,54 @@ int main() {
     CreateShapeEntity(world, sceneGraph,
         float3(0.0f, 5.2f, -1.5f), float3(0.6f),
         float4(0.95f, 0.93f, 0.88f, 1.0f), 0.0f, 0.35f, true);
+
+    // --- 广告牌（A4：始终面向相机的四边形，调试标记/粒子替代演示）---
+    {
+        // 大号品红不透明广告牌（醒目可见，验证朝向正确性）
+        Entity be = world.CreateEntity("Billboard");
+        world.AddComponent<TransformComponent>(be);
+        auto* bb = world.AddComponent<BillboardComponent>(be);
+        bb->size = float2(4.0f, 4.0f);
+        bb->baseColorFactor = float4(1.0f, 0.0f, 1.0f, 1.0f);
+        auto* bx = world.GetComponent<TransformComponent>(be);
+        if (bx) bx->position = float3(0.0f, 4.0f, -6.0f);
+        sceneGraph.SetParent(be, Entity{kInvalidEntity});
+
+        // 半透明青色广告牌（粒子替代风格；天空背景下对比度低，转视角可见）
+        Entity be2 = world.CreateEntity("BillboardCyan");
+        world.AddComponent<TransformComponent>(be2);
+        auto* bb2 = world.AddComponent<BillboardComponent>(be2);
+        bb2->size = float2(2.0f, 2.0f);
+        bb2->baseColorFactor = float4(0.2f, 0.8f, 1.0f, 0.75f);
+        auto* bx2 = world.GetComponent<TransformComponent>(be2);
+        if (bx2) bx2->position = float3(3.5f, 5.0f, -2.0f);
+        sceneGraph.SetParent(be2, Entity{kInvalidEntity});
+    }
+
+    // --- 3D 文字（A5：始终面向相机的世界空间标签，CJK 走系统字体兜底）---
+    Entity fpsTextEntity;  // 主循环中每 0.5 秒更新文字，验证脏标记 → 重栅格化路径
+    {
+        Entity te = world.CreateEntity("TextLabel");
+        world.AddComponent<TransformComponent>(te);
+        auto* tr = world.AddComponent<TextRenderComponent>(te);
+        tr->text      = "HugEngine 广告牌";
+        tr->textColor = float4(1.0f, 0.9f, 0.2f, 1.0f);
+        tr->fontSize  = 64.0f;
+        auto* tx = world.GetComponent<TransformComponent>(te);
+        if (tx) tx->position = float3(3.5f, 7.0f, -2.0f);
+        sceneGraph.SetParent(te, Entity{kInvalidEntity});
+
+        Entity fe = world.CreateEntity("TextFPS");
+        world.AddComponent<TransformComponent>(fe);
+        auto* fps = world.AddComponent<TextRenderComponent>(fe);
+        fps->text      = "FPS: --";
+        fps->textColor = float4(0.4f, 1.0f, 0.6f, 1.0f);
+        fps->fontSize  = 40.0f;
+        auto* fx = world.GetComponent<TransformComponent>(fe);
+        if (fx) fx->position = float3(-3.0f, 8.0f, -2.0f);
+        sceneGraph.SetParent(fe, Entity{kInvalidEntity});
+        fpsTextEntity = fe;
+    }
 
     // --- 方向光（恢复启用：测试 CSM 阴影，点光源已注释）---
     Entity mainLightEntity;
@@ -400,6 +452,53 @@ int main() {
     pathTracingPipeline.Initialize(device.get());
     pathTracingPipeline.SetSwapChain(swapchain.get());
     pathTracingPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+
+    // --- 贴花（A3：地板路面标线式棋盘格纹理片，半透明混合）---
+    // 纹理注册须在管线初始化之后（bindless 槽 0-3 保留给管线占位纹理）；
+    // 纹理/采样器由 main 作用域持有整个运行期（bindless 堆只存裸指针）
+    std::unique_ptr<rhi::IRHITexture> decalTextureOwn;
+    std::unique_ptr<rhi::IRHISampler> decalSamplerOwn;
+    {
+        String texPath = String(HUGE_CONTENT_DIR) + "Generated/tex_gen_checker.png";
+        int w = 0, h = 0, ch = 0;
+        u8* pixels = stbi_load(texPath.c_str(), &w, &h, &ch, 4);
+        if (pixels) {
+            rhi::TextureDesc td;
+            td.format = rhi::Format::RGBA8_UNORM; td.width = (u32)w; td.height = (u32)h;
+            td.mipLevels = 1; td.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::TransferDst;
+            td.initialData = pixels;
+            decalTextureOwn = device->CreateTexture(td);
+            stbi_image_free(pixels);
+
+            rhi::SamplerDesc sd;
+            sd.minFilter = sd.magFilter = rhi::FilterMode::Linear;
+            sd.addressU = sd.addressV = rhi::AddressMode::Repeat;
+            decalSamplerOwn = device->CreateSampler(sd);
+
+            // materialID = baseColor 槽句柄；textureMask 只置 bit0，其余槽不会被采样
+            auto* heap = device->GetBindlessHeap();
+            u32 matID = heap->RegisterTexture(decalTextureOwn.get(), decalSamplerOwn.get());
+
+            Entity de = world.CreateEntity("CheckerDecal");
+            world.AddComponent<TransformComponent>(de);
+            auto* decal = world.AddComponent<DecalComponent>(de);
+            decal->size         = float2(6.0f, 6.0f);
+            decal->opacity      = 0.6f;
+            decal->decalTexture = texPath;
+            decal->materialID   = matID;
+            decal->OnCreate();
+            auto* dx = world.GetComponent<TransformComponent>(de);
+            if (dx) {
+                // 平放于地面（地板顶面 y=0.1，贴花略抬高避免 z-fighting），法线朝上
+                dx->position = float3(0.0f, 0.12f, 0.0f);
+                dx->rotation = glm::angleAxis(glm::radians(-90.0f), float3(1.0f, 0.0f, 0.0f));
+            }
+            sceneGraph.SetParent(de, Entity{kInvalidEntity});
+            HE_CORE_INFO("贴花已创建: {} ({}x{})", texPath, w, h);
+        } else {
+            HE_CORE_WARN("贴花纹理加载失败（跳过）: {}", texPath);
+        }
+    }
 
     // 启动时默认关闭 GPU 剔除和 CPU 视锥剔除
     forwardPipeline.GetGPUCulling().enabled = false;
@@ -650,6 +749,23 @@ int main() {
         // 帧相机解析（S0.4）：场景含主相机实体时优先使用，否则回退自由相机
         // 本示例场景无 CameraComponent 实体，行为与之前一致（始终走 CameraController 回退）
         render::CameraData frameCamera = render::ResolveFrameCamera(world, camCtrl.GetCamera());
+
+        // 3D 文字系统：脏标记 → 重栅格化 → 纹理更新（A5）
+        he::TextRenderSystem::Update(world, device.get());
+
+        // 每 2 秒刷新 FPS 文字（验证实时文字更新路径；
+        // bindless 堆 append-only，更新会追加槽位，故降低刷新频率）
+        {
+            static f32 s_TextTimer = 0.0f;
+            s_TextTimer += deltaTime;
+            if (s_TextTimer >= 2.0f) {
+                s_TextTimer = 0.0f;
+                if (auto* tr = world.GetComponent<TextRenderComponent>(fpsTextEntity)) {
+                    f64 fps = 1.0 / (deltaTime > 0 ? deltaTime : 0.016);
+                    tr->text = "FPS: " + std::to_string((int)fps);
+                }
+            }
+        }
 
         // 交换链实际颜色格式（SDR=BGRA8，HDR=A2B10G10R10），主循环开头取一次
         rhi::Format backFmt = swapchain->GetColorFormat();

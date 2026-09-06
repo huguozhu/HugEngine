@@ -19,6 +19,9 @@
 #include "Scene/ProjectileMovementComponent.h"
 #include "Scene/HealthComponent.h"
 #include "Scene/SpringArmComponent.h"
+#include "Scene/BillboardComponent.h"
+#include "Scene/TextRenderComponent.h"
+#include "Scene/DecalComponent.h"
 
 namespace he {
 
@@ -216,6 +219,55 @@ HE_BEGIN_REGISTER(he::SpringArmComponent)
     HE_END_PROPERTY()
     HE_REGISTER_PROPERTY(he::SpringArmComponent, bool, bUsePawnControlRotation)
         HE_ATTR_CATEGORY("SpringArm") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("相机朝向是否跟随目标朝向")
+    HE_END_PROPERTY()
+HE_END_REGISTER()
+
+// --- BillboardComponent 注册（Phase A4）---
+// baseColorFactor/baseColorTexture 为 MeshComponent 基类成员（offsetof 对继承公有成员有效）
+HE_BEGIN_REGISTER(he::BillboardComponent)
+    HE_REGISTER_PROPERTY(he::BillboardComponent, float2, size)
+        HE_ATTR_CATEGORY("Billboard") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("广告牌尺寸（世界单位，X=右，Y=上）")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::BillboardComponent, float4, baseColorFactor)
+        HE_ATTR_CATEGORY("Billboard") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("颜色 [r,g,b,a] 0~1（半透明混合，a 为不透明度）")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::BillboardComponent, String, baseColorTexture)
+        HE_ATTR_CATEGORY("Billboard") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("纹理路径（空 = 纯色）")
+    HE_END_PROPERTY()
+HE_END_REGISTER()
+
+// --- TextRenderComponent 注册（Phase A5）---
+HE_BEGIN_REGISTER(he::TextRenderComponent)
+    HE_REGISTER_PROPERTY(he::TextRenderComponent, String, text)
+        HE_ATTR_CATEGORY("TextRender") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("显示的文字内容（UTF-8）")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::TextRenderComponent, float4, textColor)
+        HE_ATTR_CATEGORY("TextRender") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("文字颜色 [r,g,b,a] 0~1")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::TextRenderComponent, float, fontSize)
+        HE_ATTR_CATEGORY("TextRender") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("字号（像素高，世界高度 = 位图高/100 米）")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::TextRenderComponent, String, fontPath)
+        HE_ATTR_CATEGORY("TextRender") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_DESCRIPTION("字体文件路径（空 = 系统字体兜底）")
+    HE_END_PROPERTY()
+HE_END_REGISTER()
+
+// --- DecalComponent 注册（Phase A3）---
+HE_BEGIN_REGISTER(he::DecalComponent)
+    HE_REGISTER_PROPERTY(he::DecalComponent, float2, size)
+        HE_ATTR_CATEGORY("Decal") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("贴花尺寸（世界单位，X=宽，Y=高）")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::DecalComponent, float, rotation)
+        HE_ATTR_CATEGORY("Decal") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("绕贴花法线旋转（弧度）")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::DecalComponent, float, opacity)
+        HE_ATTR_CATEGORY("Decal") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("不透明度 [0,1]")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::DecalComponent, u8, blendMode)
+        HE_ATTR_CATEGORY("Decal") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("混合模式：0=不透明 1=Alpha 截断 2=半透明混合")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::DecalComponent, String, decalTexture)
+        HE_ATTR_CATEGORY("Decal") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("贴花纹理路径（空 = 纯色片）")
     HE_END_PROPERTY()
 HE_END_REGISTER()
 

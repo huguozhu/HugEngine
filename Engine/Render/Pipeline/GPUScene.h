@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Pipeline/Material.h"
+#include "Pipeline/Camera.h"
 #include "Math/Geometry.h"
 #include "RHI/RHI.h"
 #include <vector>
@@ -46,7 +47,8 @@ public:
     void Shutdown();
 
     /// 从 World 收集所有可渲染物体的数据
-    void Collect(class World& world, class SceneGraph& sg);
+    /// @param camera 当前帧相机（广告牌矩阵对齐相机用）
+    void Collect(class World& world, class SceneGraph& sg, const CameraData& camera);
 
     /// 上传到 GPU（仅 Dirty 部分增量写入 SSBO）
     void Upload(rhi::IRHIDevice* device);

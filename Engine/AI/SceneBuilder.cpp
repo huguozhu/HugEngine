@@ -9,6 +9,7 @@
 #include "Scene/PhysicalSkyComponent.h"
 #include "Scene/CameraComponent.h"
 #include "Scene/HealthComponent.h"
+#include "Scene/DecalComponent.h"
 #include "Core/Log.h"
 
 #include "nlohmann/json.hpp"
@@ -23,6 +24,15 @@ namespace he::ai {
 // LLM 输出不可靠：字段可能缺失、类型不符、越界。
 // 所有读取都做类型检查，失败时返回默认值降级，绝不抛异常。
 // ============================================================
+
+// 解析 JSON 数组为 float2（默认 def，缺省/非法时返回；元素逐个容错）
+static float2 ParseVec2(const json& j, const float2& def = float2(0.0f)) {
+    if (!j.is_array() || j.size() < 2) return def;
+    float2 r = def;
+    if (j[0].is_number()) r.x = j[0].get<float>();
+    if (j[1].is_number()) r.y = j[1].get<float>();
+    return r;
+}
 
 // 解析 JSON 数组为 float3（默认 def，缺省/非法时返回；元素逐个容错）
 static float3 ParseVec3(const json& j, const float3& def = float3(0.0f)) {
@@ -180,6 +190,14 @@ SceneBuildResult BuildScene(World& world, SceneGraph& sg, const String& sceneJso
                     h->maxHealth     = GetFloatField(comp, "maxHealth", h->maxHealth);
                     h->currentHealth = GetFloatField(comp, "currentHealth", h->currentHealth);
                     h->bInvincible   = GetBoolField(comp, "bInvincible", h->bInvincible);
+                }
+                else if (type == "Decal") {
+                    // 贴花组件（P2 A3）：纹理路径/尺寸/不透明度（纹理缺失时渲染为纯色片）
+                    auto* d = world.AddComponent<DecalComponent>(e);
+                    d->decalTexture = GetString(comp, "decalTexture", d->decalTexture.c_str());
+                    d->size    = ParseVec2(comp["size"], d->size);
+                    d->opacity = GetFloatField(comp, "opacity", d->opacity);
+                    d->OnCreate();  // 用新 size/opacity 重建几何
                 }
                 else if (type == "PhysicalSky") {
                     auto* s = world.AddComponent<PhysicalSkyComponent>(e);

@@ -486,7 +486,7 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     if (firstFrame) { m_PrevViewProj = m_CurrViewProj; firstFrame = false; }
 
     // ── Mesh 批处理 + GPUScene 上传 ──
-    m_GPUScene.Collect(world, sg);
+    m_GPUScene.Collect(world, sg, camera);
     if (m_GBuffer->GetMode() == GBufferRenderer::Mode::GPU) {
         if (!m_BatchBuilt) { m_MeshBatcher.Build(world); m_BatchBuilt = true; }
         m_MeshBatcher.FillGPUScene(m_GPUScene);

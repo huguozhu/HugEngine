@@ -898,7 +898,7 @@ void ForwardPipeline::RenderScene(
 
     // 3) GPU 剔除：绑定 GPUScene SSBO → Dispatch Compute → 恢复 Graphics PSO
     if (m_GPUCulling.enabled) {
-        m_GPUScene.Collect(world, sceneGraph);
+        m_GPUScene.Collect(world, sceneGraph, camera);
         // FillGPUScene 必须在 Collect 之后、Upload 之前（与 Deferred 一致）
         if (!m_BatchBuilt) { m_MeshBatcher.Build(world); m_BatchBuilt = true; }
         m_MeshBatcher.FillGPUScene(m_GPUScene);

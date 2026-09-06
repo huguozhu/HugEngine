@@ -39,6 +39,13 @@ set(SCENE_SOURCES
     Scene/SpringArmComponent.h
     Scene/SpringArmSystem.h
     Scene/SpringArmSystem.cpp
+    Scene/BillboardComponent.h
+    Scene/BillboardComponent.cpp
+    Scene/TextRenderComponent.h
+    Scene/TextRenderSystem.h
+    Scene/TextRenderSystem.cpp
+    Scene/DecalComponent.h
+    Scene/DecalComponent.cpp
 )
 
 target_sources(HugEngineScene PRIVATE ${SCENE_SOURCES})
@@ -55,4 +62,5 @@ target_link_libraries(HugEngineScene PUBLIC
     HugEngineReflect
     HugEngineCore
     HugEngineRHI
+    PRIVATE stb   # stb_truetype/stb_easy_font（TextRenderSystem 文字栅格化）
 )

@@ -70,7 +70,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     // exposureBias 叠加到 AutoExposure 输出（在 ToneMap Pass 前处理）
 
     // GPUScene 收集 → [GPU 模式: 填充 IndirectDraw 参数] → 上传
-    m_GPUScene.Collect(world, sg);
+    m_GPUScene.Collect(world, sg, camera);
     if (m_GBuffer->GetMode() == GBufferRenderer::Mode::GPU) {
         if (!m_BatchBuilt) { m_MeshBatcher.Build(world); m_BatchBuilt = true; }
         m_MeshBatcher.FillGPUScene(m_GPUScene);  // 在 Upload 前写入 draw 参数

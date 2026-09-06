@@ -15,6 +15,12 @@ void MeshComponent::SetMeshData(
     m_VertexCount = static_cast<u32>(vertices.size());
     m_IndexCount  = static_cast<u32>(indices.size());
 
+    // 计算包围盒（纯 CPU，不依赖 RHI 设备；视锥剔除在无设备场景下也可用）
+    m_Bounds = AABB();
+    for (auto& v : vertices) {
+        m_Bounds.Expand(v.position);
+    }
+
     // 通过 RHI 创建顶点缓冲
     auto* device = rhi::GetDevice();
     if (!device) {
@@ -37,12 +43,6 @@ void MeshComponent::SetMeshData(
     ibDesc.initialData = indices.data();
     ibDesc.stride      = sizeof(u32);
     m_IndexBuffer = device->CreateBuffer(ibDesc);
-
-    // 计算包围盒
-    m_Bounds = AABB();
-    for (auto& v : vertices) {
-        m_Bounds.Expand(v.position);
-    }
 
     HE_CORE_INFO("MeshComponent: {} vertices, {} indices, bounds: [{},{},{}]→[{},{},{}]",
         m_VertexCount, m_IndexCount,
