@@ -25,6 +25,7 @@
 #include "Scene/CollisionComponent.h"
 #include "Scene/CharacterMovementComponent.h"
 #include "Scene/AbilityComponent.h"
+#include "Scene/SplineComponent.h"
 
 namespace he {
 
@@ -321,6 +322,17 @@ HE_BEGIN_REGISTER(he::AbilityComponent)
     HE_END_PROPERTY()
     HE_REGISTER_PROPERTY(he::AbilityComponent, float, maxResource)
         HE_ATTR_CATEGORY("Ability") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("资源上限")
+    HE_END_PROPERTY()
+HE_END_REGISTER()
+
+// --- SplineComponent 注册（Phase B2）---
+// 控制点数组（points）为复合结构不注册，由代码 AddPoint 构建
+HE_BEGIN_REGISTER(he::SplineComponent)
+    HE_REGISTER_PROPERTY(he::SplineComponent, bool, bClosedLoop)
+        HE_ATTR_CATEGORY("Spline") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("是否闭合路径（末点回连首点）")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::SplineComponent, bool, bShowPath)
+        HE_ATTR_CATEGORY("Spline") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("是否显示调试路径（预留）")
     HE_END_PROPERTY()
 HE_END_REGISTER()
 

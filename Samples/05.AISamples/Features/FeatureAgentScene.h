@@ -34,4 +34,6 @@ private:
     int m_LastEntityCount = 0;
     int   m_FireballSkill = -1;           // 火球技能下标（B4 演示）
     bool  m_AutoCast = true;              // 自动施放开关（关闭后用手动按钮）
+    he::Entity m_PatrolEntity;            // 巡逻样条实体（B2 演示）
+    float m_PatrolDistance = 0.0f;        // 巡逻弧长里程（闭环回绕）
 };

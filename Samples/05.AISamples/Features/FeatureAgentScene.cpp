@@ -13,6 +13,8 @@
 #include "Scene/ProjectileSystem.h"
 #include "Scene/AbilityComponent.h"
 #include "Scene/AbilitySystem.h"
+#include "Scene/SplineComponent.h"
+#include "Scene/SplineSystem.h"
 #include "Core/Log.h"
 #include "imgui.h"
 
@@ -52,11 +54,19 @@ bool FeatureAgentScene::Initialize(rhi::IRHIDevice* device, rhi::IRHISwapChain* 
         m_SG.SetParent(e, Entity{kInvalidEntity});
     }
     // 智能体实体（Mock 大脑，2 秒思考一次；带 100 点血，P1 A8 演示——
-    // Health 属性进 WorldModel 快照，LLM 大脑可读到智能体血量）
+    // Health 属性进 WorldModel 快照，LLM 大脑可读到智能体血量；
+    // 紫色小球 = 巡逻中的智能体本体）
     {
         Entity e = m_World.CreateEntity("Agent");
         m_AgentEntity = e;
         m_World.AddComponent<TransformComponent>(e);
+        auto* vis = m_World.AddComponent<SphereComponent>(e);
+        vis->radius = 0.3f;
+        vis->segmentCount = 12;
+        vis->ringCount = 6;
+        vis->baseColorFactor = float4(0.7f, 0.3f, 1.0f, 1.0f);   // 紫色
+        vis->castShadow = false;
+        vis->OnCreate();
         auto* agent = m_World.AddComponent<he::ai::AgentComponent>(e);
         agent->brainType     = "Mock";
         agent->thinkInterval = 2.0f;
@@ -92,6 +102,19 @@ bool FeatureAgentScene::Initialize(rhi::IRHIDevice* device, rhi::IRHISwapChain* 
         };
         m_SG.SetParent(e, Entity{kInvalidEntity});
     }
+    // 巡逻路径（P3 B2 演示）：闭合样条，智能体沿弧长匀速巡逻
+    {
+        Entity e = m_World.CreateEntity("PatrolPath");
+        m_World.AddComponent<TransformComponent>(e);
+        auto* spline = m_World.AddComponent<SplineComponent>(e);
+        spline->bClosedLoop = true;
+        spline->AddPoint(float3(-4, 0.5f, -4));
+        spline->AddPoint(float3( 4, 0.5f, -4));
+        spline->AddPoint(float3( 4, 0.5f,  4));
+        spline->AddPoint(float3(-4, 0.5f,  4));
+        m_PatrolEntity = e;
+        HE_CORE_INFO("[AgentScene] 巡逻路径总长: {:.1f} 米", spline->GetTotalLength());
+    }
     m_LastEntityCount = (int)m_World.GetEntityCount();
     HE_CORE_INFO("[AgentScene] 智能体已挂载（Mock 大脑，每 2s 思考一次）");
     return true;
@@ -110,6 +133,15 @@ void FeatureAgentScene::Update(float dt) {
 
     // 抛射物系统：积分运动 + 超时销毁（P1 A7；火球技能复用此组件飞行）
     he::ProjectileSystem::Update(m_World, dt);
+
+    // 巡逻路径（P3 B2）：智能体沿闭合样条以 2 m/s 匀速巡逻
+    if (auto* spline = m_World.GetComponent<SplineComponent>(m_PatrolEntity)) {
+        m_PatrolDistance += 2.0f * dt;
+        float3 pos = SplineSystem::EvaluateAtDistance(*spline, m_PatrolDistance);
+        if (auto* xf = m_World.GetComponent<TransformComponent>(m_AgentEntity)) {
+            xf->position = pos;
+        }
+    }
 
     // 技能系统（P3 B4）：冷却计时 + 资源回复 + 自动施放（开关可关，留给手动按钮）
     he::AbilitySystem::Update(m_World, dt);

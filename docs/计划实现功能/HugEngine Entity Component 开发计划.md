@@ -32,7 +32,8 @@
 | CollisionComponent | UCapsuleComponent/UBoxComponent | ✅（P3 B5，`CollisionSystem`） | ✅ 5 属性 | ✅ | — |
 | CharacterMovementComponent | UCharacterMovementComponent | ✅（P3 B3，`MovementSystem`，地面射线检测） | ✅ 5 属性 | ✅ | — |
 | AbilityComponent | UAbilitySystemComponent | ✅（P3 B4，`AbilitySystem` + Action op CastAbility） | ✅ 2 属性 | ✅ | — |
-| InstancedMesh / Spline | UE5 对应组件 | ❌ 未实现 | — | — | — |
+| SplineComponent | USplineComponent | ✅（P3 B2，Hermite+自动切线，弧长求值/闭环回绕） | ✅ 2 属性 | ✅ | — |
+| InstancedMesh | UE5 对应组件 | ❌ 未实现 | — | — | — |
 | SkeletalMesh / Physics / Audio / NavMesh | UE5 对应组件 | ❌（依赖路线图 P6/P3） | — | — | — |
 
 **结论**：文档初版「缺 SpotLight / RectLight」的描述已过时（两者均已实现）；当前最大缺口反而落在 **反射/AI/词表层**——SpotLight、CameraComponent 等已实现组件尚未注册反射属性，导致编辑器 Details 面板与 AI 世界模型看不到它们，LLM 也无法生成它们。
@@ -191,7 +192,7 @@
 - **系统接入**：复用 `MeshBatcher` + GPU Instancing（现有管线已有 InstanceBuffer 支持）；`enableFrustumCull` 按实例剔除
 - **验证**：万级实例 FPS 对比
 
-### B2. SplineComponent / SplineMeshComponent
+### B2. SplineComponent / SplineMeshComponent（SplineComponent ✅ 已完成 2026-09-06；SplineMesh 后续扩展）
 
 - **对应 UE5**：USplineComponent / USplineMeshComponent
 - **用途**：样条路径（道路/管线/摄像机轨道/Agent 巡逻路线）
