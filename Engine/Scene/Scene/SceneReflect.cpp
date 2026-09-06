@@ -16,6 +16,9 @@
 #include "Scene/AnimationComponent.h"
 #include "Scene/LevelComponent.h"
 #include "Scene/ParticleComponent.h"
+#include "Scene/ProjectileMovementComponent.h"
+#include "Scene/HealthComponent.h"
+#include "Scene/SpringArmComponent.h"
 
 namespace he {
 
@@ -164,6 +167,56 @@ HE_BEGIN_REGISTER(he::LevelComponent)
 HE_END_REGISTER()
 
 HE_BEGIN_REGISTER(he::ParticleComponent)
+HE_END_REGISTER()
+
+// --- ProjectileMovementComponent 注册（Phase A7，玩法底座）---
+// 实体引用（homingTarget）不注册：反射序列化不支持 u64 实体 ID，追踪目标由代码设置
+HE_BEGIN_REGISTER(he::ProjectileMovementComponent)
+    HE_REGISTER_PROPERTY(he::ProjectileMovementComponent, float, initialSpeed)
+        HE_ATTR_CATEGORY("Projectile") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("初速（米/秒，方向 = 实体前向）")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::ProjectileMovementComponent, float, maxSpeed)
+        HE_ATTR_CATEGORY("Projectile") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("最大速度（米/秒，0 = 不限速）")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::ProjectileMovementComponent, float, gravityScale)
+        HE_ATTR_CATEGORY("Projectile") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("重力倍率（0 = 无重力直线运动）")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::ProjectileMovementComponent, bool, bHoming)
+        HE_ATTR_CATEGORY("Projectile") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("是否追踪目标")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::ProjectileMovementComponent, float, lifetime)
+        HE_ATTR_CATEGORY("Projectile") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("生命周期（秒，超时自动销毁；0 = 无限）")
+    HE_END_PROPERTY()
+HE_END_REGISTER()
+
+// --- HealthComponent 注册（Phase A8，玩法底座：LLM 可"给敌人 100 点血"）---
+HE_BEGIN_REGISTER(he::HealthComponent)
+    HE_REGISTER_PROPERTY(he::HealthComponent, float, maxHealth)
+        HE_ATTR_CATEGORY("Health") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("最大生命值")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::HealthComponent, float, currentHealth)
+        HE_ATTR_CATEGORY("Health") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("当前生命值（0 = 死亡）")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::HealthComponent, bool, bInvincible)
+        HE_ATTR_CATEGORY("Health") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("是否无敌（免疫伤害）")
+    HE_END_PROPERTY()
+HE_END_REGISTER()
+
+// --- SpringArmComponent 注册（Phase A6，第三人称相机）---
+// 实体引用（targetEntity/cameraEntity）不注册：由代码/场景装配时设置
+HE_BEGIN_REGISTER(he::SpringArmComponent)
+    HE_REGISTER_PROPERTY(he::SpringArmComponent, float3, targetOffset)
+        HE_ATTR_CATEGORY("SpringArm") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("锚点偏移（目标局部空间，米）")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::SpringArmComponent, float, armLength)
+        HE_ATTR_CATEGORY("SpringArm") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("弹簧臂长度（米）")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::SpringArmComponent, float, rotationLagSpeed)
+        HE_ATTR_CATEGORY("SpringArm") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("旋转滞后速度（越大跟随越快，0 = 硬跟随）")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::SpringArmComponent, bool, bUsePawnControlRotation)
+        HE_ATTR_CATEGORY("SpringArm") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("相机朝向是否跟随目标朝向")
+    HE_END_PROPERTY()
 HE_END_REGISTER()
 
 } // namespace he

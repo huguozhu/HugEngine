@@ -5,8 +5,12 @@
 #include "AI/Agent/AgentSystem.h"
 #include "Scene/Transform.h"
 #include "Scene/CubeComponent.h"
+#include "Scene/SphereComponent.h"
 #include "Scene/LightComponent.h"
 #include "Scene/PhysicalSkyComponent.h"
+#include "Scene/HealthComponent.h"
+#include "Scene/ProjectileMovementComponent.h"
+#include "Scene/ProjectileSystem.h"
 #include "Core/Log.h"
 #include "imgui.h"
 
@@ -43,7 +47,8 @@ bool FeatureAgentScene::Initialize(rhi::IRHIDevice* device, rhi::IRHISwapChain* 
         m_World.AddComponent<PhysicalSkyComponent>(e);
         m_SG.SetParent(e, Entity{kInvalidEntity});
     }
-    // 智能体实体（Mock 大脑，2 秒思考一次）
+    // 智能体实体（Mock 大脑，2 秒思考一次；带 100 点血，P1 A8 演示——
+    // Health 属性进 WorldModel 快照，LLM 大脑可读到智能体血量）
     {
         Entity e = m_World.CreateEntity("Agent");
         m_AgentEntity = e;
@@ -51,8 +56,13 @@ bool FeatureAgentScene::Initialize(rhi::IRHIDevice* device, rhi::IRHISwapChain* 
         auto* agent = m_World.AddComponent<he::ai::AgentComponent>(e);
         agent->brainType     = "Mock";
         agent->thinkInterval = 2.0f;
+        auto* health = m_World.AddComponent<HealthComponent>(e);
+        health->maxHealth     = 100.0f;
+        health->currentHealth = 100.0f;
         m_SG.SetParent(e, Entity{kInvalidEntity});
     }
+    // 首枚抛射物（P1 A7 演示：45° 抛物线飞出，3 秒后超时销毁）
+    SpawnProjectile();
     m_LastEntityCount = (int)m_World.GetEntityCount();
     HE_CORE_INFO("[AgentScene] 智能体已挂载（Mock 大脑，每 2s 思考一次）");
     return true;
@@ -68,6 +78,36 @@ void FeatureAgentScene::Update(float dt) {
         ++m_ThinkCount;
         HE_CORE_INFO("[AgentScene] 智能体思考完成，实体数: {}", m_LastEntityCount);
     }
+
+    // 抛射物系统：积分运动 + 超时销毁（P1 A7）
+    he::ProjectileSystem::Update(m_World, dt);
+
+    // 每 5 秒补射一枚，形成连续抛物线演示
+    m_ProjectileTimer += dt;
+    if (m_ProjectileTimer >= 5.0f) {
+        m_ProjectileTimer = 0.0f;
+        SpawnProjectile();
+    }
+}
+
+void FeatureAgentScene::SpawnProjectile() {
+    // 橙色小球：初速 8 m/s、仰角 45°（绕 X 轴 +45° 使前向 -Z 抬升到斜上方）
+    Entity e = m_World.CreateEntity("Projectile");
+    auto* xform = m_World.AddComponent<TransformComponent>(e);
+    xform->position = float3(0.0f, 2.0f, -4.0f);
+    xform->rotation = glm::angleAxis(glm::radians(45.0f), float3(1.0f, 0.0f, 0.0f));
+    auto* sphere = m_World.AddComponent<SphereComponent>(e);
+    sphere->radius = 0.15f;
+    sphere->segmentCount = 12;
+    sphere->ringCount = 6;
+    sphere->baseColorFactor = float4(1.0f, 0.55f, 0.1f, 1.0f);
+    sphere->castShadow = false;
+    sphere->OnCreate();
+    auto* proj = m_World.AddComponent<ProjectileMovementComponent>(e);
+    proj->initialSpeed = 8.0f;
+    proj->gravityScale = 1.0f;
+    proj->lifetime     = 3.0f;   // 落地后继续下落，3 秒超时销毁
+    m_SG.SetParent(e, Entity{kInvalidEntity});
 }
 
 void FeatureAgentScene::RenderUI() {

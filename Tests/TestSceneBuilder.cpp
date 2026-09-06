@@ -16,6 +16,7 @@
 #include "Scene/SphereComponent.h"
 #include "Scene/LightComponent.h"
 #include "Scene/CameraComponent.h"
+#include "Scene/HealthComponent.h"
 
 using namespace he;
 using namespace he::ai;
@@ -129,6 +130,22 @@ TEST_CASE("BuildScene 解析 SpotLight/RectLight/Camera 组件（S0.3）") {
 
     // 生成的相机是主相机（S0.4 前提：GetPrimaryCamera 能找到它）
     CHECK(world.GetPrimaryCamera() == cam);
+}
+
+TEST_CASE("BuildScene 解析 Health 组件（P1 A8：高血量守卫）") {
+    World world;
+    SceneGraph sg(world);
+    String json = R"({"entities":[{"name":"Guard","transform":{"position":[0,0,3]},
+        "components":[{"type":"Cube","halfExtent":0.5},
+                      {"type":"Health","maxHealth":300,"currentHealth":250,"bInvincible":true}]}]})";
+    SceneBuildResult r = BuildScene(world, sg, json);
+    REQUIRE(r.success == true);
+
+    auto* h = world.GetComponent<HealthComponent>(r.entities[0]);
+    REQUIRE(h != nullptr);
+    CHECK(h->maxHealth == doctest::Approx(300.0f));
+    CHECK(h->currentHealth == doctest::Approx(250.0f));
+    CHECK(h->bInvincible == true);
 }
 
 TEST_CASE("BuildScene 非法字段类型安全降级（SpotLight 强度给数组）") {

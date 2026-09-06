@@ -8,6 +8,7 @@
 #include "Scene/LightComponent.h"
 #include "Scene/PhysicalSkyComponent.h"
 #include "Scene/CameraComponent.h"
+#include "Scene/HealthComponent.h"
 #include "Core/Log.h"
 
 #include "nlohmann/json.hpp"
@@ -172,6 +173,13 @@ SceneBuildResult BuildScene(World& world, SceneGraph& sg, const String& sceneJso
                     c->nearPlane = GetFloatField(comp, "nearPlane", c->nearPlane);
                     c->farPlane  = GetFloatField(comp, "farPlane", c->farPlane);
                     c->isMain    = GetBoolField(comp, "isMain", c->isMain);
+                }
+                else if (type == "Health") {
+                    // 生命值组件（P1 A8）：LLM 可"给敌人 100 点血"（全部安全降级）
+                    auto* h = world.AddComponent<HealthComponent>(e);
+                    h->maxHealth     = GetFloatField(comp, "maxHealth", h->maxHealth);
+                    h->currentHealth = GetFloatField(comp, "currentHealth", h->currentHealth);
+                    h->bInvincible   = GetBoolField(comp, "bInvincible", h->bInvincible);
                 }
                 else if (type == "PhysicalSky") {
                     auto* s = world.AddComponent<PhysicalSkyComponent>(e);

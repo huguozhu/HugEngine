@@ -15,6 +15,7 @@
 #include "Scene/Transform.h"
 #include "Scene/LightComponent.h"
 #include "Scene/CameraComponent.h"
+#include "Scene/HealthComponent.h"
 
 #include "nlohmann/json.hpp"
 
@@ -63,6 +64,43 @@ TEST_CASE("BuildSceneSystemPrompt 词表包含 S0.3 新增组件") {
     CHECK(p.find("innerConeAngle") != String::npos);   // SpotLight 字段
     CHECK(p.find("softness") != String::npos);         // RectLight 字段
     CHECK(p.find("isMain") != String::npos);           // Camera 字段
+    // P1 A8：Health 词条（LLM 可"给敌人 100 点血"）
+    CHECK(p.find("Health") != String::npos);
+    CHECK(p.find("maxHealth") != String::npos);
+}
+
+// 假 LLM：返回「高血量守卫」场景（P1 A8 用例的离线等价）
+struct FakeGuardLLM : ILLMClient {
+    String Chat(const String&, const String&) override {
+        nlohmann::json scene = {
+            {"entities", {{
+                {"name","EliteGuard"},
+                {"transform",{{"position",{0,0,4}}}},
+                {"components",{
+                    {{"type","Cube"},{"halfExtent",0.5},{"baseColor",{0.8,0.1,0.1}}},
+                    {{"type","Health"},{"maxHealth",300},{"currentHealth",300}}
+                }}
+            }}}
+        };
+        nlohmann::json resp = { {"choices", { {{"message", {{"content", scene.dump()}}}} }} };
+        return resp.dump();
+    }
+};
+
+TEST_CASE("PromptToScene 生成高血量守卫（P1 A8 用例）") {
+    World world;
+    SceneGraph sg(world);
+    FakeGuardLLM fake;
+
+    SceneBuildResult r = PromptToScene(fake, world, sg, "一个高血量的守卫");
+    REQUIRE(r.success == true);
+    REQUIRE(r.entities.size() == 1);
+
+    auto* h = world.GetComponent<HealthComponent>(r.entities[0]);
+    REQUIRE(h != nullptr);
+    CHECK(h->maxHealth == doctest::Approx(300.0f));
+    CHECK(h->currentHealth == doctest::Approx(300.0f));
+    CHECK_FALSE(h->IsDead());
 }
 
 // 假 LLM：返回「路灯 + 相机」场景（S0.3 冒烟用例的离线等价）

@@ -23,7 +23,10 @@
 | ParticleComponent | Niagara 简化 | ✅（GPU 粒子） | 仅类型注册 | ❌ | ❌ |
 | AgentComponent | Pawn+AI Controller+BehaviorTree | ✅ `Engine/AI/Agent/` | ✅ brainType/systemPrompt/thinkInterval/enabled | ✅ | ❌ |
 | MemoryComponent / GoalComponent | （AI 配套） | ✅ | 仅类型注册 | ❌ | ❌ |
-| Decal / Billboard / TextRender / SpringArm / ProjectileMovement / Health | UE5 对应组件 | ❌ 未实现 | — | — | — |
+| ProjectileMovementComponent | UProjectileMovementComponent | ✅（P1 A7，`ProjectileSystem`） | ✅ 5 属性 | ✅ | ❌（实体引用无法表达） |
+| HealthComponent | UHealthComponent | ✅（P1 A8，`DamageSystem`） | ✅ 3 属性 | ✅ | ✅ Health |
+| SpringArmComponent | USpringArmComponent | ✅（P1 A6，`SpringArmSystem`） | ✅ 4 属性 | ✅ | ❌（实体引用无法表达） |
+| Decal / Billboard / TextRender | UE5 对应组件 | ❌ 未实现 | — | — | — |
 | InstancedMesh / Spline / CharacterMovement / Ability / Collision | UE5 对应组件 | ❌ 未实现 | — | — | — |
 | SkeletalMesh / Physics / Audio / NavMesh | UE5 对应组件 | ❌（依赖路线图 P6/P3） | — | — | — |
 
@@ -145,7 +148,7 @@
 - **系统接入**：MVP 用 CPU 生成文字纹理（stb_truetype 或位图字体）→ Billboard 渲染
 - **验证**：实体名称/血量实时显示
 
-### A6. SpringArmComponent
+### A6. SpringArmComponent（✅ 已完成 2026-09-06）
 
 - **对应 UE5**：USpringArmComponent
 - **用途**：第三人称相机跟随（延迟 + 平滑回弹 + 碰撞防穿墙）
@@ -153,7 +156,7 @@
 - **系统接入**：每帧把目标 Transform + 弹簧臂长度合成相机 Transform（写入关联 CameraComponent，依赖 S0.4 主相机）
 - **验证**：目标移动时相机平滑跟随，碰撞时缩短臂长
 
-### A7. ProjectileMovementComponent
+### A7. ProjectileMovementComponent（✅ 已完成 2026-09-06）
 
 - **对应 UE5**：UProjectileMovementComponent
 - **用途**：抛射物运动（直线/抛物线/命中回调/生命周期）
@@ -161,7 +164,7 @@
 - **系统接入**：系统级 `ProjectileSystem::Update`（每帧积分位置 + 超时销毁 + 命中事件）
 - **验证**：doctest（给定初速/重力 → 位置符合抛物线）
 
-### A8. HealthComponent
+### A8. HealthComponent（✅ 已完成 2026-09-06）
 
 - **对应 UE5**：UHealthComponent（Gameplay 基础）
 - **用途**：生命值/伤害/死亡事件（玩法数值底座）
@@ -260,7 +263,7 @@ P0（立即）: Phase S0 全部 —— ✅ 已完成（2026-09-06）
              S0.2 Camera 反射+AI 注解
              S0.3 词表 + SceneBuilder 扩到 8 组件
              S0.4 主相机接入（World::GetPrimaryCamera / ResolveFrameCamera）
-P1（随后）: A7 ProjectileMovement + A8 Health（玩法底座）+ A6 SpringArm（第三人称，依赖 S0.4）
+P1（随后）: ✅ 已完成（2026-09-06）—— A7 ProjectileMovement + A8 Health（玩法底座）+ A6 SpringArm
 P2（视需要）: A3 Decal / A4 Billboard / A5 TextRender
 P3（中成本）: B1 InstancedMesh → B2 Spline → B5 Collision → B3 CharacterMovement → B4 Ability
 P4（大工程）: Phase C（等待路线图）

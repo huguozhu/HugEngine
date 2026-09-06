@@ -30,6 +30,15 @@ set(SCENE_SOURCES
     Scene/PhysicalSkyComponent.cpp
     Scene/AnimationComponent.cpp
     Scene/ParticleComponent.cpp
+    Scene/ProjectileMovementComponent.h
+    Scene/ProjectileSystem.h
+    Scene/ProjectileSystem.cpp
+    Scene/HealthComponent.h
+    Scene/DamageSystem.h
+    Scene/DamageSystem.cpp
+    Scene/SpringArmComponent.h
+    Scene/SpringArmSystem.h
+    Scene/SpringArmSystem.cpp
 )
 
 target_sources(HugEngineScene PRIVATE ${SCENE_SOURCES})
