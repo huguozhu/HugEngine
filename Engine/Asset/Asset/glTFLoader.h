@@ -3,6 +3,9 @@
 #include "Core/Types.h"
 #include "Scene/Entity.h"
 #include "Containers/Array.h"
+#include "Scene/SkeletonAsset.h"
+
+#include <memory>
 
 // ============================================================
 // glTF 2.0 加载器（cgltf 驱动）
@@ -29,6 +32,8 @@ struct glTFResult {
     usize          meshCount = 0;
     bool           success   = false;
     String         error;
+    // 蒙皮骨架资产（C1a：skins 解析结果；静态模型为空）
+    std::vector<std::shared_ptr<SkeletonAsset>> skeletons;
 };
 
 /// 加载 glTF 2.0 文件（.glb 或 .gltf）

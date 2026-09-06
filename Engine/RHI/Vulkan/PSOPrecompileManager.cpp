@@ -255,6 +255,7 @@ void PSOPrecompileManager::WorkerThreadFunc() {
                     case VertexFormat::Float2: ad.format = VK_FORMAT_R32G32_SFLOAT; break;
                     case VertexFormat::Float3: ad.format = VK_FORMAT_R32G32B32_SFLOAT; break;
                     case VertexFormat::Float4: ad.format = VK_FORMAT_R32G32B32A32_SFLOAT; break;
+                    case VertexFormat::UByte4: ad.format = VK_FORMAT_R8G8B8A8_UINT; break;
                     default:                   ad.format = VK_FORMAT_R32G32B32_SFLOAT; break;
                     }
                     attrs.push_back(ad);

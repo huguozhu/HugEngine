@@ -9,6 +9,7 @@
 #include "Scene/TextRenderComponent.h"
 #include "Scene/DecalComponent.h"
 #include "Scene/InstancedMeshComponent.h"
+#include "Scene/SkeletalMeshComponent.h"
 #include "Core/Log.h"
 
 namespace he::render {
@@ -79,6 +80,8 @@ bool MeshBatcher::Build(World& world) {
     world.ForEach<TextRenderComponent>([&](Entity, TextRenderComponent& tr) { collect(tr); });
     world.ForEach<DecalComponent>([&](Entity, DecalComponent& dc) { collect(dc); });
     world.ForEach<InstancedMeshComponent>([&](Entity, InstancedMeshComponent& im) { collect(im); });
+    // 骨骼网格：顶点布局不同（SkinnedVertex），不适合合批——跳过（蒙皮 Pass 单独绘制）
+    world.ForEach<SkeletalMeshComponent>([&](Entity, SkeletalMeshComponent&) { /* 不并入合批 */ });
 
     m_TotalVertices = (u32)m_MergedVertices.size();
     m_TotalIndices  = (u32)m_MergedIndices.size();

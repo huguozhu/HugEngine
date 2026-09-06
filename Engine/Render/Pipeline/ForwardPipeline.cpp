@@ -17,6 +17,7 @@ he::CVar<bool> cvLightPhysicalUnits("r.Light.PhysicalUnits", false,
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
 #include "Scene/InstancedMeshComponent.h"
+#include "Scene/SkeletalMeshComponent.h"
 #include "Scene/SkyboxComponent.h"
 #include "Scene/PhysicalSkyComponent.h"
 #include "Core/Log.h"
@@ -32,6 +33,7 @@ he::CVar<bool> cvLightPhysicalUnits("r.Light.PhysicalUnits", false,
 #include <glm/ext/matrix_clip_space.hpp>  // orthoRH_ZO (Vulkan Z [0,1])
 #include <unordered_set>
 #include <unordered_map>
+#include <cstring>
 
 #include <chrono>
 #include <mutex>
@@ -263,6 +265,23 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
 
     m_PBR_PSO = device->CreatePipelineState(psoDesc);
     HE_ASSERT(m_PBR_PSO, "ForwardPipeline: failed to create PBR PSO");
+
+    // --- 蒙皮网格 PSO（C1b）：同着色器，扩展顶点布局（+JOINTS/WEIGHTS）---
+    {
+        rhi::VertexInputLayout skinnedLayout;
+        skinnedLayout.stride = sizeof(he::asset::SkinnedVertex);
+        skinnedLayout.attributes = {
+            { 0, 0, rhi::VertexFormat::Float3, offsetof(he::asset::SkinnedVertex, position) },
+            { 1, 0, rhi::VertexFormat::Float3, offsetof(he::asset::SkinnedVertex, normal) },
+            { 2, 0, rhi::VertexFormat::Float2, offsetof(he::asset::SkinnedVertex, uv) },
+            { 3, 0, rhi::VertexFormat::UByte4, offsetof(he::asset::SkinnedVertex, joint) },
+            { 4, 0, rhi::VertexFormat::Float4, offsetof(he::asset::SkinnedVertex, weight) },
+        };
+        psoDesc.vertexLayout = skinnedLayout;
+        psoDesc.debugName    = "ForwardPBR_Skinned";
+        m_PBR_Skinned_PSO = device->CreatePipelineState(psoDesc);
+        HE_ASSERT(m_PBR_Skinned_PSO, "ForwardPipeline: failed to create skinned PBR PSO");
+    }
 
     // --- ToneMap 后处理子系统 ---
     m_ToneMap = std::make_unique<ToneMapPass>();
@@ -622,6 +641,7 @@ void ForwardPipeline::UploadMaterialBindless(he::World& world) {
     world.ForEach<he::CubeComponent>([&](he::Entity e, he::CubeComponent& c) { collect(e, static_cast<he::MeshComponent&>(c)); });
     world.ForEach<he::SphereComponent>([&](he::Entity e, he::SphereComponent& s) { collect(e, static_cast<he::MeshComponent&>(s)); });
     world.ForEach<he::InstancedMeshComponent>([&](he::Entity e, he::InstancedMeshComponent& im) { collect(e, im); });
+    world.ForEach<he::SkeletalMeshComponent>([&](he::Entity e, he::SkeletalMeshComponent& sm) { collect(e, sm); });
 
     if (uniqueMat.empty()) return;  // 场景无材质，跳过
 
@@ -968,6 +988,61 @@ void ForwardPipeline::RenderScene(
         cmd->SetIndexBuffer(im.GetIndexBuffer().get());
         cmd->DrawIndexed(im.GetIndexCount(), count);
         drawCount += count;   // 实例计入绘制统计
+    });
+
+    // ============================================================
+    // 骨骼蒙皮 Pass（Phase C C1b）：骨骼矩阵 SSBO 上传（脏标记）
+    // → 蒙皮 PSO + useInstanceID=3 绘制（顶点着色器按权重混合 4 骨骼矩阵）
+    // MVP 限制：Forward 非 GPU-Culling 路径；Deferred/间接路径后续扩展。
+    // ============================================================
+    world.ForEach<he::SkeletalMeshComponent>([&](he::Entity, he::SkeletalMeshComponent& sm) {
+        if (!sm.skeleton || sm.GetIndexCount() == 0 || sm.boneMatrices.empty()) return;
+
+        // 骨骼矩阵上传：缓冲只创建/注册一次；每帧脏标记 → Map 复用更新内容
+        //（禁止每帧重建缓冲：bindless SSBO 数组容量 4096，重建会导致句柄无限增长）
+        if (sm.bBonesDirty || !sm.boneBuffer) {
+            if (!sm.boneBuffer) {
+                rhi::BufferDesc desc;
+                desc.size        = sizeof(float4x4) * sm.boneMatrices.size();
+                desc.usage       = rhi::BufferUsage::Storage;
+                desc.initialData = sm.boneMatrices.data();
+                desc.cpuAccess   = true;
+                sm.boneBuffer = m_Device->CreateBuffer(desc);
+                sm.boneSSBOHandle = m_Device->GetBindlessHeap()->RegisterBuffer(sm.boneBuffer.get());
+            } else {
+                // 复用缓冲：重映射写入最新骨骼矩阵（与 GPUScene::Upload 同一模式）
+                void* mapped = sm.boneBuffer->Map();
+                if (mapped) {
+                    std::memcpy(mapped, sm.boneMatrices.data(),
+                                sizeof(float4x4) * sm.boneMatrices.size());
+                    sm.boneBuffer->Unmap();
+                }
+            }
+            sm.bBonesDirty = false;
+        }
+
+        // 定位对象条目（objectIndex → 材质数据）
+        u32 objIndex = 0;
+        bool found = false;
+        for (auto& di : filteredItems) {
+            if (di.mesh == static_cast<he::MeshComponent*>(&sm)) { objIndex = di.objectIndex; found = true; break; }
+        }
+        if (!found) return;
+
+        // 蒙皮绘制（模式 3）
+        PushConstantData pc = framePC;
+        pc.objectIndex       = objIndex;
+        pc.useInstanceID     = 3;
+        pc.instanceSSBOHandle = sm.boneSSBOHandle;
+        cmd->SetPipeline(m_PBR_Skinned_PSO.get());
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[m_CurrentFrameSlot]);
+        cmd->SetDrawDebugLabel("Forward SkeletalMesh");
+        cmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
+        cmd->SetVertexBuffer(sm.GetVertexBuffer().get(), 0);
+        cmd->SetIndexBuffer(sm.GetIndexBuffer().get());
+        cmd->DrawIndexed(sm.GetIndexCount());
+        cmd->SetPipeline(m_PBR_PSO.get());   // 恢复主 PSO
+        ++drawCount;
     });
 
     // 推送 bindless 纹理到全部已注册描述符集（Flush 自动遍历全部 set）

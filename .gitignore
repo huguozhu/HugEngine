@@ -37,3 +37,12 @@ pipeline_cache.bin
 
 # AI Éú³É×Ê²ú£¨ÔËĞĞÊ±²úÎï£©
 Content/Generated/
+
+# é˜²å‘†ï¼šè¯¯åœ¨æºç ç›®å½•æ‰§è¡Œ cmake äº§ç”Ÿçš„æ„å»ºäº§ç‰©ï¼ˆin-source build æ±¡æŸ“ï¼‰
+CMakeCache.txt
+cmake_install.cmake
+*.vcxproj
+*.vcxproj.filters
+*.dir/
+CMakeFiles/
+*.slnx

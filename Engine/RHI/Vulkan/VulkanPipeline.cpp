@@ -250,6 +250,7 @@ static bool BuildGraphicsPipelineParts(VkDevice device, const PipelineStateDesc&
             case VertexFormat::Float2:  return VK_FORMAT_R32G32_SFLOAT;
             case VertexFormat::Float3:  return VK_FORMAT_R32G32B32_SFLOAT;
             case VertexFormat::Float4:  return VK_FORMAT_R32G32B32A32_SFLOAT;
+            case VertexFormat::UByte4:      return VK_FORMAT_R8G8B8A8_UINT;
             case VertexFormat::UByte4_Norm: return VK_FORMAT_R8G8B8A8_UNORM;
             case VertexFormat::Byte4_Norm:  return VK_FORMAT_R8G8B8A8_SNORM;
             case VertexFormat::UInt:    return VK_FORMAT_R32_UINT;

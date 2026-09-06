@@ -37,6 +37,7 @@ struct ShaderBytecode {
 // --- Vertex input layout ---
 enum class VertexFormat {
     Float, Float2, Float3, Float4,
+    UByte4,            // 4×u8 整数（蒙皮关节索引等，非归一化）
     UByte4_Norm, Byte4_Norm,
     UInt, UInt2, UInt4,
 };

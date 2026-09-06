@@ -37,6 +37,9 @@
 #include "Scene/CharacterMovementComponent.h"
 #include "Scene/MovementSystem.h"
 #include "Scene/InstancedMeshComponent.h"
+#include "Scene/SkeletalMeshComponent.h"
+#include "Scene/SkeletalMeshSystem.h"
+#include "Asset/glTFLoader.h"
 #include "Editor/ImGuiIntegration.h"
 #include "imgui.h"
 
@@ -341,6 +344,31 @@ int main() {
         im->SetInstanceTransforms(instancedTransformsBackup);
         sceneGraph.SetParent(instancedEntity, Entity{kInvalidEntity});
         HE_CORE_INFO("实例化网格: {} 实例（单次 DrawIndexed）", im->GetInstanceCount());
+    }
+
+    // --- 骨骼网格（C1c：Fox 模型加载 + GPU 蒙皮动画播放演示）---
+    Entity skeletalEntity;
+    {
+        he::asset::glTFResult foxResult = he::asset::LoadGLTF(
+            world, sceneGraph, String(HUGE_CONTENT_DIR) + "Models/Skeletal/Fox.glb");
+        if (foxResult.success && !foxResult.skeletons.empty()) {
+            auto foxSkeleton = foxResult.skeletons[0];
+            skeletalEntity = world.CreateEntity("SkeletalFox");
+            world.AddComponent<TransformComponent>(skeletalEntity);
+            auto* sm = world.AddComponent<SkeletalMeshComponent>(skeletalEntity);
+            sm->SetSkeleton(foxSkeleton);
+            sm->PlayClip(2, true);   // 默认播 Run（动作幅度最大）
+            sm->baseColorFactor = float4(0.95f, 0.55f, 0.2f, 1.0f);   // 橙色狐狸
+            sm->metallicFactor  = 0.0f;
+            sm->roughnessFactor = 0.6f;
+            auto* sx = world.GetComponent<TransformComponent>(skeletalEntity);
+            if (sx) sx->position = float3(4.0f, 0.3f, -6.0f);
+            sceneGraph.SetParent(skeletalEntity, Entity{kInvalidEntity});
+            HE_CORE_INFO("骨骼网格已创建: {}（{} 关节, {} 剪辑）",
+                foxSkeleton->name, foxSkeleton->joints.size(), foxSkeleton->clips.size());
+        } else {
+            HE_CORE_WARN("Fox 模型加载失败，跳过骨骼网格演示: {}", foxResult.error);
+        }
     }
 
     // --- 方向光（恢复启用：测试 CSM 阴影，点光源已注释）---
@@ -889,6 +917,9 @@ int main() {
         // 3D 文字系统：脏标记 → 重栅格化 → 纹理更新（A5）
         he::TextRenderSystem::Update(world, device.get());
 
+        // 骨骼动画系统（C1c）：剪辑时间推进 + 关节蒙皮矩阵
+        he::SkeletalMeshSystem::Update(world, deltaTime);
+
         // 每 2 秒刷新 FPS 文字（验证实时文字更新路径；
         // bindless 堆 append-only，更新会追加槽位，故降低刷新频率）
         {
@@ -1012,6 +1043,23 @@ int main() {
                 im->SetInstanceTransforms(visible ? instancedTransformsBackup
                                                   : std::vector<float4x4>{});
             }
+        }
+
+        // 骨骼网格演示状态（C1c）
+        if (auto* sm = world.GetComponent<SkeletalMeshComponent>(skeletalEntity)) {
+            ImGui::SeparatorText("骨骼网格 (C1c)");
+            const char* clipNames[] = { "绑定姿势", "Survey", "Walk", "Run" };
+            int cur = sm->currentClip + 1;   // -1(绑定) → 0
+            if (ImGui::Combo("剪辑", &cur, clipNames, 4)) {
+                if (cur == 0) sm->currentClip = -1;
+                else sm->PlayClip(cur - 1, sm->looping);
+            }
+            ImGui::Checkbox("播放", &sm->playing);
+            ImGui::SameLine();
+            ImGui::Checkbox("循环", &sm->looping);
+            ImGui::SliderFloat("速度", &sm->playSpeed, 0.1f, 3.0f);
+            ImGui::Text("时间: %.2fs | 关节: %d", sm->clipTime,
+                (int)sm->jointWorldMatrices.size());
         }
 
         // 角色移动演示状态（B3）

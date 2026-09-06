@@ -17,6 +17,8 @@ add_executable(HugEngineTests
     TestAbility.cpp
     TestSpline.cpp
     TestInstancedMesh.cpp
+    TestSkeletonLoader.cpp
+    TestSkeletalMesh.cpp
     TestDeepSeekProtocol.cpp
     TestPromptToScene.cpp
     TestWorldModel.cpp
@@ -34,8 +36,13 @@ target_include_directories(HugEngineTests PRIVATE
     ${CMAKE_SOURCE_DIR}/Engine/External
 )
 
+target_compile_definitions(HugEngineTests PRIVATE
+    HUGE_CONTENT_DIR="${CMAKE_SOURCE_DIR}/Content/"
+)
+
 target_link_libraries(HugEngineTests PRIVATE
     HugEngineAI
     HugEngineScene
+    HugEngineAsset
     HugEngineCore
 )

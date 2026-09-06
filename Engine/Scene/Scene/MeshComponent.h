@@ -61,7 +61,8 @@ public:
     String occlusionTexture;            // 环境光遮蔽纹理
     String emissiveTexture;             // 自发光纹理
 
-private:
+protected:
+    // 派生组件（SkeletalMeshComponent 等）直接管理自有顶点布局的缓冲
     std::unique_ptr<rhi::IRHIBuffer> m_VertexBuffer;
     std::unique_ptr<rhi::IRHIBuffer> m_IndexBuffer;
     u32 m_VertexCount = 0;

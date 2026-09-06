@@ -8,6 +8,7 @@
 #include "Scene/TextRenderComponent.h"
 #include "Scene/DecalComponent.h"
 #include "Scene/InstancedMeshComponent.h"
+#include "Scene/SkeletalMeshComponent.h"
 #include "Threading/JobSystem.h"
 #include "Core/Log.h"
 #include <mutex>
@@ -53,6 +54,13 @@ std::vector<DrawItem> SceneRenderer::Prepare(he::World& world, he::SceneGraph& s
         float4x4 wm = sg.GetWorldMatrix(e);
         entries.push_back({static_cast<he::MeshComponent*>(&im),
                            im.GetBounds().Transform(wm), wm, true});
+    });
+    // 骨骼网格（C1b）：同实例化处理——对象条目供材质/世界变换，顶点由蒙皮 Pass 绘制
+    world.ForEach<he::SkeletalMeshComponent>([&](he::Entity e, he::SkeletalMeshComponent& sm) {
+        if (sm.GetIndexCount() == 0) return;
+        float4x4 wm = sg.GetWorldMatrix(e);
+        entries.push_back({static_cast<he::MeshComponent*>(&sm),
+                           sm.GetBounds().Transform(wm), wm, true});
     });
 
     u32 total = (u32)entries.size();

@@ -27,6 +27,7 @@
 #include "Scene/AbilityComponent.h"
 #include "Scene/SplineComponent.h"
 #include "Scene/InstancedMeshComponent.h"
+#include "Scene/SkeletalMeshComponent.h"
 
 namespace he {
 
@@ -345,6 +346,22 @@ HE_BEGIN_REGISTER(he::InstancedMeshComponent)
     HE_END_PROPERTY()
     HE_REGISTER_PROPERTY(he::InstancedMeshComponent, bool, enableFrustumCull)
         HE_ATTR_CATEGORY("InstancedMesh") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("逐实例视锥剔除（预留）")
+    HE_END_PROPERTY()
+HE_END_REGISTER()
+
+// --- SkeletalMeshComponent 注册（Phase C C1b）---
+HE_BEGIN_REGISTER(he::SkeletalMeshComponent)
+    HE_REGISTER_PROPERTY(he::SkeletalMeshComponent, float, playSpeed)
+        HE_ATTR_CATEGORY("SkeletalMesh") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("动画播放速度倍率")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::SkeletalMeshComponent, bool, playing)
+        HE_ATTR_CATEGORY("SkeletalMesh") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("是否播放动画")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::SkeletalMeshComponent, bool, looping)
+        HE_ATTR_CATEGORY("SkeletalMesh") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("动画是否循环")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::SkeletalMeshComponent, i32, currentClip)
+        HE_ATTR_CATEGORY("SkeletalMesh") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("当前播放剪辑下标（-1 = 绑定姿势）")
     HE_END_PROPERTY()
 HE_END_REGISTER()
 

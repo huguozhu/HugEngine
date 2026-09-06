@@ -62,6 +62,11 @@ set(SCENE_SOURCES
     Scene/SplineSystem.cpp
     Scene/InstancedMeshComponent.h
     Scene/InstancedMeshComponent.cpp
+    Scene/SkeletonAsset.h
+    Scene/SkeletalMeshComponent.h
+    Scene/SkeletalMeshComponent.cpp
+    Scene/SkeletalMeshSystem.h
+    Scene/SkeletalMeshSystem.cpp
 )
 
 target_sources(HugEngineScene PRIVATE ${SCENE_SOURCES})

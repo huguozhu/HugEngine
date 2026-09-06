@@ -119,6 +119,8 @@ private:
 
     rhi::IRHIDevice* m_Device = nullptr;
     std::unique_ptr<rhi::IRHIPipelineState> m_PBR_PSO;
+    // 蒙皮网格 PSO（C1b）：扩展顶点布局（location 3/4 = JOINTS/WEIGHTS），同着色器
+    std::unique_ptr<rhi::IRHIPipelineState> m_PBR_Skinned_PSO;
 
     rhi::DescriptorSetLayoutHandle m_PerFrameLayout = rhi::kInvalidLayout;  // set=0: per-frame + bindless
     rhi::DescriptorSetHandle       m_DescSets[MAX_FRAMES_IN_FLIGHT] = {};   // set=0 三缓冲

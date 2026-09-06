@@ -172,6 +172,27 @@ bool HasAttribute(const cgltf_attribute* attr) {
     return attr && attr->data && attr->data->count > 0;
 }
 
+/// 提取节点本地 TRS（C1a：骨架关节静态姿态）
+/// 优先 TRS 字段；matrix 节点做基本分解（忽略剪切，列长=缩放，quat_cast 得旋转）
+void ExtractNodeTRS(const cgltf_node* node, float3& t, quat& r, float3& s) {
+    if (node->has_matrix) {
+        float4x4 m = glm::make_mat4(node->matrix);
+        t = float3(m[3]);
+        float3 c0(m[0]), c1(m[1]), c2(m[2]);
+        s = float3(glm::length(c0), glm::length(c1), glm::length(c2));
+        glm::mat3 rot;
+        rot[0] = (s.x > 1e-9f) ? c0 / s.x : float3(1, 0, 0);
+        rot[1] = (s.y > 1e-9f) ? c1 / s.y : float3(0, 1, 0);
+        rot[2] = (s.z > 1e-9f) ? c2 / s.z : float3(0, 0, 1);
+        r = glm::quat_cast(rot);
+    } else {
+        t = float3(node->translation[0], node->translation[1], node->translation[2]);
+        // cgltf 四元数 {x,y,z,w} → glm quat(w,x,y,z)
+        r = quat(node->rotation[3], node->rotation[0], node->rotation[1], node->rotation[2]);
+        s = float3(node->scale[0], node->scale[1], node->scale[2]);
+    }
+}
+
 /// 加载单个 glTF primitive 的数据并创建 MeshComponent
 ///
 /// 使用 cgltf_accessor_unpack_floats / cgltf_accessor_unpack_indices
@@ -329,7 +350,9 @@ void ProcessNode(
     nodeEntityMap[node] = nodeEntity; // 注册映射，供未来蒙皮/动画等扩展使用
 
     // --- 2. 如有 mesh，为每个 primitive 创建子实体 ---
-    if (node->mesh) {
+    // 蒙皮节点（node->skin）跳过静态网格创建：蒙皮网格由 SkeletonAsset 承载，
+    // 渲染走 SkeletalMeshComponent（Phase C C1b），避免绑定姿势静态网格重复绘制
+    if (node->mesh && !node->skin) {
         for (cgltf_size p = 0; p < node->mesh->primitives_count; ++p) {
             LoadPrimitive(node->mesh->primitives[p],
                           world, nodeEntity, sceneGraph, result);
@@ -463,13 +486,198 @@ glTFResult LoadGLTF(World& world, SceneGraph& sceneGraph, const String& filePath
         }
 
         // 完成所有 channel 的添加后 Finalize
+        // 注意：实体已挂 AnimationComponent（后续动画重复目标节点）时 map 值为 nullptr，跳过
         for (auto& [node, ac] : nodeAnimMap) {
+            if (!ac) continue;
             ac->FinalizeClip();
             ac->playing = true;
         }
     }
     if (animCount > 0) {
         HE_CORE_INFO("  加载 {} 个动画, {} 个被驱动节点", data->animations_count, animCount);
+    }
+
+    // 5.5 加载蒙皮骨架 → SkeletonAsset（Phase C C1a：GPU 蒙皮资产管线）
+    u32 skinCount = 0;
+    for (cgltf_size si = 0; si < data->skins_count; ++si) {
+        const cgltf_skin& skin = data->skins[si];
+        auto skel = std::make_shared<SkeletonAsset>();
+        skel->name = skin.name ? String(reinterpret_cast<const char*>(skin.name))
+                               : String("Skin_") + std::to_string(si);
+
+        // --- 关节层级 + 逆绑定矩阵 + 静态 TRS ---
+        for (cgltf_size j = 0; j < skin.joints_count; ++j) {
+            const cgltf_node* jn = skin.joints[j];
+            SkeletonJoint joint;
+            joint.name = jn->name ? String(reinterpret_cast<const char*>(jn->name))
+                                  : String("Joint_") + std::to_string(j);
+            // 父关节：在 joints 列表中按指针查找（-1 = 根）
+            joint.parent = -1;
+            if (jn->parent) {
+                for (cgltf_size k = 0; k < skin.joints_count; ++k) {
+                    if (skin.joints[k] == jn->parent) { joint.parent = static_cast<i32>(k); break; }
+                }
+            }
+            ExtractNodeTRS(jn, joint.translation, joint.rotation, joint.scale);
+            if (skin.inverse_bind_matrices) {
+                float m[16];
+                cgltf_accessor_read_float(skin.inverse_bind_matrices, j, m, 16);
+                joint.inverseBind = glm::make_mat4(m);
+            } else {
+                joint.inverseBind = float4x4(1.0f);
+            }
+            skel->joints.push_back(std::move(joint));
+        }
+
+        // --- 蒙皮网格顶点（skin 挂在 node 上：引用该 skin 的节点 → 其 mesh 全部 primitive）---
+        for (cgltf_size ni = 0; ni < data->nodes_count; ++ni) {
+            const cgltf_node* n = &data->nodes[ni];
+            if (n->skin != &skin || !n->mesh) continue;
+            const cgltf_mesh& mesh = *n->mesh;
+            for (cgltf_size p = 0; p < mesh.primitives_count; ++p) {
+                const cgltf_primitive& prim = mesh.primitives[p];
+                if (prim.type != cgltf_primitive_type_triangles) continue;
+
+                const cgltf_attribute* posAttr    = nullptr;
+                const cgltf_attribute* normalAttr = nullptr;
+                const cgltf_attribute* uvAttr     = nullptr;
+                const cgltf_attribute* jointAttr  = nullptr;
+                const cgltf_attribute* weightAttr = nullptr;
+                for (cgltf_size a = 0; a < prim.attributes_count; ++a) {
+                    const auto& attr = prim.attributes[a];
+                    switch (attr.type) {
+                        case cgltf_attribute_type_position: posAttr    = &attr; break;
+                        case cgltf_attribute_type_normal:   normalAttr = &attr; break;
+                        case cgltf_attribute_type_texcoord: uvAttr     = &attr; break;
+                        case cgltf_attribute_type_joints:   jointAttr  = &attr; break;
+                        case cgltf_attribute_type_weights:  weightAttr = &attr; break;
+                        default: break;
+                    }
+                }
+                // 关节/权重缺失的 primitive 跳过（非蒙皮或数据不全）
+                if (!HasAttribute(posAttr) || !HasAttribute(jointAttr) || !HasAttribute(weightAttr)) {
+                    HE_CORE_WARN("[Skeleton] primitive 缺少 JOINTS/WEIGHTS，跳过（skin {}）", skel->name);
+                    continue;
+                }
+
+                cgltf_size vc = posAttr->data->count;
+                u32 baseVertex = (u32)skel->vertices.size();
+
+                std::vector<float> pos(vc * 3);
+                cgltf_accessor_unpack_floats(posAttr->data, pos.data(), vc * 3);
+                std::vector<float> nrm(vc * 3, 0.0f);
+                if (HasAttribute(normalAttr))
+                    cgltf_accessor_unpack_floats(normalAttr->data, nrm.data(), vc * 3);
+                std::vector<float> uv(vc * 2, 0.0f);
+                if (HasAttribute(uvAttr))
+                    cgltf_accessor_unpack_floats(uvAttr->data, uv.data(), vc * 2);
+                // JOINTS_0/WEIGHTS_0：逐顶点读取（read_uint 支持 VEC4 整数属性）
+                std::vector<float> weights(vc * 4, 0.0f);
+                cgltf_accessor_unpack_floats(weightAttr->data, weights.data(), vc * 4);
+
+                for (cgltf_size i = 0; i < vc; ++i) {
+                    SkinnedVertex v{};
+                    v.position = float3(pos[i*3+0], pos[i*3+1], pos[i*3+2]);
+                    v.normal   = HasAttribute(normalAttr)
+                        ? float3(nrm[i*3], nrm[i*3+1], nrm[i*3+2]) : float3(0, 1, 0);
+                    v.uv       = HasAttribute(uvAttr)
+                        ? float2(uv[i*2], uv[i*2+1]) : float2(0, 0);
+                    cgltf_uint joints[4] = { 0, 0, 0, 0 };
+                    cgltf_accessor_read_uint(jointAttr->data, i, joints, 4);
+                    float wsum = 0.0f;
+                    for (int k = 0; k < 4; ++k) {
+                        v.joint[k]  = static_cast<u8>(std::min<cgltf_uint>(joints[k], 255));
+                        v.weight[k] = weights[i*4+k];
+                        wsum += weights[i*4+k];
+                    }
+                    if (wsum > 1e-6f)
+                        for (int k = 0; k < 4; ++k) v.weight[k] /= wsum;   // 权重归一化
+                    skel->vertices.push_back(v);
+                }
+
+                // 索引（跨 primitive 追加，偏移 baseVertex）；无索引的资产（如 Fox）生成顺序索引
+                if (prim.indices) {
+                    cgltf_size ic = cgltf_accessor_unpack_indices(prim.indices, nullptr, sizeof(u32), 0);
+                    if (ic > 0) {
+                        u32 oldSize = (u32)skel->indices.size();
+                        skel->indices.resize(oldSize + ic);
+                        cgltf_accessor_unpack_indices(prim.indices, skel->indices.data() + oldSize, sizeof(u32), ic);
+                        for (u32 i = oldSize; i < oldSize + (u32)ic; ++i)
+                            skel->indices[i] += baseVertex;   // 顶点偏移
+                    }
+                } else {
+                    u32 oldSize = (u32)skel->indices.size();
+                    skel->indices.resize(oldSize + (u32)vc);
+                    for (u32 i = 0; i < (u32)vc; ++i)
+                        skel->indices[oldSize + i] = baseVertex + i;
+                }
+                HE_CORE_INFO("  [Skeleton] {} primitive: {} 蒙皮顶点", skel->name, vc);
+            }
+        }
+
+        // --- 动画剪辑（目标为骨架关节的通道，TRS 关键帧）---
+        for (cgltf_size a = 0; a < data->animations_count; ++a) {
+            const cgltf_animation& anim = data->animations[a];
+            AnimationClip clip;
+            clip.name = anim.name ? String(reinterpret_cast<const char*>(anim.name))
+                                  : String("Clip_") + std::to_string(a);
+            for (cgltf_size c = 0; c < anim.channels_count; ++c) {
+                const cgltf_animation_channel& channel = anim.channels[c];
+                if (!channel.target_node) continue;
+                // 目标必须是本骨架的关节
+                i32 jointIdx = -1;
+                for (cgltf_size k = 0; k < skin.joints_count; ++k) {
+                    if (skin.joints[k] == channel.target_node) { jointIdx = static_cast<i32>(k); break; }
+                }
+                if (jointIdx < 0) continue;
+
+                const cgltf_animation_sampler& sampler = *channel.sampler;
+                cgltf_size kc = sampler.input->count;
+                if (kc == 0) continue;
+
+                JointAnimationChannel jch;
+                jch.jointIndex = jointIdx;
+                jch.times.resize(kc);
+                for (cgltf_size k = 0; k < kc; ++k)
+                    cgltf_accessor_read_float(sampler.input, k, &jch.times[k], 1);
+
+                if (channel.target_path == cgltf_animation_path_type_translation) {
+                    jch.translations.resize(kc);
+                    for (cgltf_size k = 0; k < kc; ++k) {
+                        float v[3];
+                        cgltf_accessor_read_float(sampler.output, k, v, 3);
+                        jch.translations[k] = float3(v[0], v[1], v[2]);
+                    }
+                } else if (channel.target_path == cgltf_animation_path_type_rotation) {
+                    jch.rotations.resize(kc);
+                    for (cgltf_size k = 0; k < kc; ++k) {
+                        float q[4];
+                        cgltf_accessor_read_float(sampler.output, k, q, 4);
+                        jch.rotations[k] = quat(q[3], q[0], q[1], q[2]);   // {x,y,z,w} → quat(w,x,y,z)
+                    }
+                } else if (channel.target_path == cgltf_animation_path_type_scale) {
+                    jch.scales.resize(kc);
+                    for (cgltf_size k = 0; k < kc; ++k) {
+                        float v[3];
+                        cgltf_accessor_read_float(sampler.output, k, v, 3);
+                        jch.scales[k] = float3(v[0], v[1], v[2]);
+                    }
+                } else {
+                    continue;   // 其他路径（weights/morph）暂不支持
+                }
+                clip.duration = std::max(clip.duration, jch.times.back());
+                clip.channels.push_back(std::move(jch));
+            }
+            if (!clip.channels.empty()) skel->clips.push_back(std::move(clip));
+        }
+
+        if (!skel->joints.empty()) {
+            result.skeletons.push_back(std::move(skel));
+            ++skinCount;
+        }
+    }
+    if (skinCount > 0) {
+        HE_CORE_INFO("  加载 {} 个蒙皮骨架", skinCount);
     }
 
     // 6. 清理
