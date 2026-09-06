@@ -1,8 +1,10 @@
 # HugEngine Entity Component 开发计划（对照 UE5）
 
-> 日期：2026-09-01（初版）| 状态：计划（待评审）
-> 修订：对齐 2026-09-04 代码基线（`404de09`，含 SpotLight/RectLight/Agent/AIGC/05.AISamples 落地），
->       校正过时现状并新增 **Phase S0（已有组件补齐 AI 一等公民）**。
+> 日期：2026-09-01（初版）| 状态：✅ S0/P1/P2/P3 全部完成（2026-09-06）
+> 修订记录：
+>   - 2026-09-04：对齐代码基线（`404de09`），新增 **Phase S0（已有组件补齐 AI 一等公民）**
+>   - 2026-09-06：S0~P3 全部落地（提交 `8813211` → `56696ea` 共 9 个），doctest 85 用例 / 509 断言通过；
+>     剩余仅 Phase C 大工程（依赖路线图 P6/P3）
 > 目标：补齐 UE5 Actor 组件体系在 HugEngine 的对应实现；**每个组件（含已有组件）都是 AI 可读写的一等公民**（`HE_ATTR_AI_*` 注解 + SceneBuilder 词表同步），并自动获得编辑器 Details 面板的反射编辑能力。
 
 ---
@@ -15,9 +17,9 @@
 | MeshComponent（Cube/Sphere） | UStaticMeshComponent | ✅ | 仅类型注册 | ❌（材质类属性未注册） | ✅ Cube/Sphere |
 | DirectionalLight | UDirectionalLightComponent | ✅ | ✅ 4 属性 | ✅ | ✅ |
 | PointLight | UPointLightComponent | ✅ | ✅ 3 属性 | ✅ | ✅ |
-| SpotLight | USpotLightComponent | ✅（`86856de` 光照+阴影） | ❌ 仅类型注册 | ❌ | ❌ |
-| RectLight | URectLightComponent | ✅（`a7cde15`~`404de09` P1+P2） | ✅ width/height/normal/range | ✅ | ❌ |
-| CameraComponent | UCameraComponent | ✅（类 + `MakeCameraData`） | ❌ 仅类型注册 | ❌ | ❌ |
+| SpotLight | USpotLightComponent | ✅（`86856de` 光照+阴影） | ✅ 7 属性（S0.1） | ✅ | ✅ SpotLight（S0.3） |
+| RectLight | URectLightComponent | ✅（`a7cde15`~`404de09` P1+P2） | ✅ 8 属性（S0 补齐 color/intensity/castShadow/softness） | ✅ | ✅ RectLight（S0.3） |
+| CameraComponent | UCameraComponent | ✅（类 + `MakeCameraData`） | ✅ 4 属性（S0.2） | ✅ | ✅ Camera（S0.3） |
 | PhysicalSkyComponent | 引擎级天空 | ✅ | 仅类型注册 | ❌ | ✅ PhysicalSky |
 | AnimationComponent | 简化动画 | ✅（Transform 关键帧） | 仅类型注册 | ❌ | ❌ |
 | ParticleComponent | Niagara 简化 | ✅（GPU 粒子） | 仅类型注册 | ❌ | ❌ |
@@ -36,7 +38,7 @@
 | InstancedMeshComponent | UInstancedStaticMeshComponent | ✅（P3 B1，单次 DrawIndexed 万级实例） | ✅ 2 属性 | ✅ | — |
 | SkeletalMesh / Physics / Audio / NavMesh | UE5 对应组件 | ❌（依赖路线图 P6/P3） | — | — | — |
 
-**结论**：文档初版「缺 SpotLight / RectLight」的描述已过时（两者均已实现）；当前最大缺口反而落在 **反射/AI/词表层**——SpotLight、CameraComponent 等已实现组件尚未注册反射属性，导致编辑器 Details 面板与 AI 世界模型看不到它们，LLM 也无法生成它们。
+**结论**：计划内组件全部落地。LLM 词表 5 → 10 组件（新增 SpotLight/RectLight/Camera/Health/Decal）；所有新组件按「一个组件 = 四件事」补齐类定义/反射/AI 注解/系统接入。剩余缺口：Phase C 大工程（SkeletalMesh/Physics/Audio/NavMesh，依赖路线图 P6/P3）；既有组件 Animation/Particle/Memory/Goal 的反射与 AI 注解未补齐（当前无阻断，归追溯清单待办）。
 
 ## 二、总体原则
 
@@ -51,8 +53,8 @@
 | 阶段 | 内容 | 预估成本 | 说明 |
 |---|---|---|---|
 | **S0（基线补齐）** | 已有组件补齐反射/AI 注解/词表/主相机接入 | 1~2 天 | ✅ 已完成（2026-09-06）：S0.1~S0.4 全部落地，doctest 38 用例通过 |
-| **A（低成本）** | Camera(系统接入) / Decal / Billboard / TextRender / SpringArm / ProjectileMovement / Health | 2~3 天/个 | SpotLight 本体已完成，仅剩 S0 词表项 |
-| **B（中成本）** | InstancedMesh / Spline / CharacterMovement / Ability(简化 GAS) / Collision | 1~2 周/个 | 涉及渲染实例化/移动物理/技能循环 |
+| **A（低成本）** | Camera(系统接入) / Decal / Billboard / TextRender / SpringArm / ProjectileMovement / Health | 2~3 天/个 | ✅ 已完成（2026-09-06）：A3~A8 落地；A1/A2 并入 S0 |
+| **B（中成本）** | InstancedMesh / Spline / CharacterMovement / Ability(简化 GAS) / Collision | 1~2 周/个 | ✅ 已完成（2026-09-06）：B1~B5 落地；前置重构经评估非必要（见 §六注记） |
 | **C（大工程）** | SkeletalMesh / Physics / Audio / NavMesh | 数周~数月 | 依赖路线图 P6/P3 或第三方库 |
 
 ---
@@ -61,7 +63,7 @@
 
 > 目的：兑现总则"一个组件 = 四件事"，让**已实现**组件立即可被编辑器与 AI 使用。
 
-### S0.1 SpotLight 反射注册 + AI 注解
+### S0.1 SpotLight 反射注册 + AI 注解（✅ 已完成 2026-09-06）
 
 - **改动**：`Engine/Scene/Scene/SceneReflect.cpp`（`HE_BEGIN_REGISTER(he::SpotLight)` 空注册 → 注册属性）
 - **注册属性（全部 `AI_VISIBLE + AI_WRITABLE + AI_DESCRIPTION`）**：
@@ -76,13 +78,13 @@
   | castShadow | bool | 是否投射阴影 |
 - **验证**：doctest（`WorldModel::TypeSchema()` 输出含 SpotLight 字段）；编辑器 Details 面板可编辑；AI Snapshot 可见。
 
-### S0.2 CameraComponent 反射注册 + AI 注解
+### S0.2 CameraComponent 反射注册 + AI 注解（✅ 已完成 2026-09-06）
 
 - **改动**：`Engine/Scene/Scene/SceneReflect.cpp`（`HE_BEGIN_REGISTER(he::CameraComponent)` 空注册 → 注册属性）
 - **注册属性**：`fov`（默认 60°）/ `nearPlane` / `farPlane` / `isMain`（bool，仅 AI_VISIBLE）——全部数值类加 AI 注解。
 - **验证**：doctest + Details 面板可编辑。
 
-### S0.3 LLM 词表与 SceneBuilder 扩展（5 组件 → 8 组件）
+### S0.3 LLM 词表与 SceneBuilder 扩展（5 组件 → 8 组件）（✅ 已完成 2026-09-06）
 
 - **改动**：`Engine/AI/TypeSchema.cpp`（词表加 SpotLight/RectLight/Camera）；`Engine/AI/SceneBuilder.cpp`（`else if (type == ...)` 分支，安全降级：字段逐一类型检查、未知字段跳过）
 - **词表新增**：
@@ -93,7 +95,7 @@
   ```
 - **验证**：doctest（LLM 场景 JSON 含"一盏路灯"→ 生成 SpotLight 组件断言方向/锥角）；05.AISamples 冒烟（prompt「一个路灯照着的街角」）。
 
-### S0.4 主相机系统接入（A1 的系统接入部分）
+### S0.4 主相机系统接入（A1 的系统接入部分）（✅ 已完成 2026-09-06）
 
 - **改动**：`Engine/Scene/Scene/World.h/.cpp` 新增 `GetPrimaryCamera()`（遍历 CameraComponent，返回首个 `isMain`）；各渲染管线帧入口优先取主相机组装 ViewMatrix，无相机实体时回退现有 `CameraController`。
 - **现状**：`render::MakeCameraData(CameraComponent, Transform)`（`Pipeline/Camera.h:72`）已存在，缺的是"从 World 选主相机"这层。
@@ -106,7 +108,7 @@
 > 状态注记：**A2 SpotLight 本体已完成**（光照/阴影/方向修复，`86856de`），剩余词表工作归 S0.3；
 > **A1 CameraComponent 类已完成**，剩余系统接入归 S0.4。以下保留原始设计供参考。
 
-### A1. CameraComponent（主体已完成，剩 S0.4 接入）
+### A1. CameraComponent（✅ 已完成 2026-09-06，注册归 S0.2、接入归 S0.4）
 
 - **对应 UE5**：UCameraComponent
 - **用途**：相机作为 Entity 属性（替代全局 CameraController），多相机切换、过场、AI 观察视角
@@ -120,7 +122,7 @@
 - **SceneBuilder 词表**（= S0.3）：`"Camera": {"fields": ["fov", "nearPlane", "farPlane"]}`
 - **验证**：doctest（创建相机实体 → 取主相机）+ 05.AISamples 场景生成"带相机"的关卡
 
-### A2. SpotLightComponent（本体已完成 ✅ `86856de`，剩余见 S0.1/S0.3）
+### A2. SpotLightComponent（✅ 已完成 2026-09-06，本体 `86856de` + S0.1 注册 + S0.3 词表）
 
 - **对应 UE5**：USpotLightComponent
 - **用途**：聚光灯（手电/路灯/舞台），LLM 场景生成高需求
@@ -182,7 +184,10 @@
 
 ## 六、Phase B 详细设计（中成本，按需推进）
 
-> 前置提示：B 组每个组件落地时同步补词表 + `BuildScene` 分支；新增光源/组件类扩散成本高（8-12 处），B1 前建议先做 CollectLights/词表的数据驱动化重构（参照 `docs/技术分析文档/HugEngine架构可扩展性分析.md`）。
+> 前置提示（已评估，2026-09-06）：原计划建议 B 组落地前做 CollectLights/词表数据驱动化重构。
+> 实测评估结论：B 组无新光源类型（CollectLights 4 份复制不受影响）；B2~B5 为数据+系统组件，
+> 走 4 处低成本路径；仅 B1 触渲染枚举（3 文件约 8 行一次性成本）——**重构非必要，直接落地**。
+> 渲染枚举收敛为注册表留待第 8+ 个渲染类型出现时再做（规则三）；CollectLights 抽取留待下一个光源类型。
 
 ### B1. InstancedMeshComponent（✅ 已完成 2026-09-06）
 
@@ -254,10 +259,10 @@
 
 ## 九、与 AI / Editor 的结合总结
 
-- **LLM 生成**：词表同步后，"一个手电筒照着的山洞"（SpotLight，S0.3 后可用）、"门口有贴花的仓库"（Decal，A3 后可用）即可生成
-- **智能体动作**：`Action` 增加 `CastAbility`/`SetHealth` 等 op，走 Action→Command 可撤销
-- **编辑器**：反射注册自动获得 Details 编辑（S0.1/S0.2 后 SpotLight/Camera 立即可编辑）；`AgentInspector` 面板可显示新组件的 AI 可读字段
-- **观察面板**：WorldModel 快照自动包含新组件（带 AI_VISIBLE 注解的属性）
+- **LLM 生成**：词表 10 组件同步完成；已实测（真实 DeepSeek）：「一个路灯照着的街角」生成路灯几何 + 光源 + Camera 实体并驱动主相机；SpotLight/Decal/Health 等组件可被 LLM 生成
+- **智能体动作**：`CastAbility` op 已落地（Action→Command 可撤销，doctest 覆盖执行/撤销）；SetProperty/SpawnEntity/SetTransform 原有 op 保持不变
+- **编辑器**：所有新组件反射注册后自动获得 Details 面板编辑能力；`AgentInspector` 可显示 AI 可读字段
+- **观察面板**：WorldModel 快照自动包含所有带 AI_VISIBLE 注解的新组件（Health 血量、CharacterMovement 参数等 LLM 大脑可见）
 
 ---
 
@@ -274,3 +279,18 @@ P2（视需要）: ✅ 已完成（2026-09-06）—— A3 Decal（MVP 投射片�
 P3（中成本）: ✅ 已完成（2026-09-06）—— B5 Collision → B3 CharacterMovement → B4 Ability → B2 Spline → B1 InstancedMesh
 P4（大工程）: Phase C（等待路线图）
 ```
+
+---
+
+## 十一、完成总结（2026-09-06）
+
+- **组件总数**：新增 11 个组件（A 组 6：Decal/Billboard/TextRender/SpringArm/ProjectileMovement/Health；B 组 5：Collision/CharacterMovement/Ability/Spline/InstancedMesh）+ S0 补齐 3 个既有组件（SpotLight/RectLight/Camera）的反射/词表 + 主相机接入（GetPrimaryCamera/ResolveFrameCamera）；doctest **85 用例 / 509 断言**全部通过
+- **词表**：LLM 组件词表 5 → 10（SpotLight/RectLight/Camera/Health/Decal 新增），SceneBuilder 全部带安全降级解析
+- **提交序列**：`8813211`（S0）→ `7683686`（P1）→ `3eb963a`（P2）→ `8299254`/`11e4f14`/`1ae6637`/`3c0f571`/`56696ea`（P3 五件）
+- **交互验证**：02.Cube（广告牌/文字/贴花/碰撞变色/角色移动/万级实例）、05.AISamples（真实 LLM 场景生成、主相机、火球技能、样条巡逻）
+- **已知 MVP 限制（技术债清单）**：
+  1. bindless 堆 append-only：TextRender/InstancedMesh 动态更新以「旧资源保活」换安全，高频更新需 Heap 环形化改造
+  2. Decal 为投射片 MVP（无 GBuffer 投影 Pass）；InstancedMesh 仅支持 Forward 非 GPU-Culling 路径，逐实例剔除未接
+  3. 实体引用类属性（homingTarget/targetEntity/cameraEntity 等）不进反射/词表（u64 无法快照序列化）
+  4. maxSlopeAngle（坡度过滤）、SpringArm 碰撞缩臂、Collision 调试线框、SplineMesh 沿样条生成等预留未接
+- **遗留**：Phase C 大工程（SkeletalMesh/Physics/Audio/NavMesh，依赖路线图 P6/P3）；既有组件 Animation/Particle/Memory/Goal 的反射/AI 补齐
