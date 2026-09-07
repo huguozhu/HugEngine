@@ -285,7 +285,7 @@ P4（大工程）: Phase C（等待路线图）
 ## 十一、完成总结（2026-09-06）
 
 - **组件总数**：新增 11 个组件（A 组 6：Decal/Billboard/TextRender/SpringArm/ProjectileMovement/Health；B 组 5：Collision/CharacterMovement/Ability/Spline/InstancedMesh）+ S0 补齐 3 个既有组件（SpotLight/RectLight/Camera）的反射/词表 + 主相机接入（GetPrimaryCamera/ResolveFrameCamera）；doctest **85 用例 / 509 断言**全部通过（2026-09-06 基线；C1 SkeletalMesh 见 §十二）
-- **词表**：LLM 组件词表 5 → 10（SpotLight/RectLight/Camera/Health/Decal 新增，截至 2026-09-06），后 Animation 补齐（`98c4080`）→ **11 种**；SceneBuilder 全部带安全降级解析
+- **词表**：LLM 组件词表 5 → 10（SpotLight/RectLight/Camera/Health/Decal 新增，截至 2026-09-06），后 Animation 补齐（`98c4080`）→ **11 种**，RigidBody 补齐（`1d4de6e`，Jolt C2）→ **12 种**；SceneBuilder 全部带安全降级解析
 - **提交序列**：`8813211`（S0）→ `7683686`（P1）→ `3eb963a`（P2）→ `8299254`/`11e4f14`/`1ae6637`/`3c0f571`/`56696ea`（P3 五件）
 - **交互验证**：02.Cube（广告牌/文字/贴花/碰撞变色/角色移动/万级实例）、05.AISamples（真实 LLM 场景生成、主相机、火球技能、样条巡逻）
 - **已知 MVP 限制（技术债清单）**：
@@ -293,7 +293,7 @@ P4（大工程）: Phase C（等待路线图）
   2. Decal 为投射片 MVP（无 GBuffer 投影 Pass）；InstancedMesh 仅支持 Forward 非 GPU-Culling 路径，逐实例剔除未接
   3. 实体引用类属性（homingTarget/targetEntity/cameraEntity 等）不进反射/词表（u64 无法快照序列化）
   4. Collision 调试线框、SplineMesh 沿样条生成等预留未接（maxSlopeAngle 坡度过滤 ✅ `28ae06b`、SpringArm 碰撞缩臂 ✅ `bc14c57` 已于 2026-09-07 落地）
-- **遗留**：Phase C 剩余（Physics/Audio/NavMesh，依赖路线图 P6/P3）；SkeletalMesh 后续扩展（剪辑混合、动画重定向）；既有组件 Particle/Memory/Goal 的反射/AI 补齐（Animation ✅ `98c4080` 已完成）
+- **遗留**：Phase C 剩余（Audio/NavMesh，依赖路线图 P6/P3；Physics C2 ✅ `7eb1a66`~`2b0ae5c` 已完成）；SkeletalMesh 后续扩展（剪辑混合、动画重定向）；既有组件 Particle/Memory/Goal 的反射/AI 补齐（Animation ✅ `98c4080` 已完成）
 
 ---
 
@@ -307,6 +307,7 @@ P4（大工程）: Phase C（等待路线图）
 | `98c4080` | **Animation 组件反射 + AI 注解 + 词表补齐**（词表 10 → 11） | §十一 词表行 / 遗留行 ✅ |
 | `28ae06b` | **maxSlopeAngle 坡度过滤落地**（前向渲染移动系统，B3 收尾） | §十一 技术债④ ✅ |
 | `bc14c57` | **SpringArm 碰撞缩臂落地（防穿墙）**（A6 收尾） | §十一 技术债④ ✅ |
+| `7eb1a66`~`2b0ae5c` | **Phase C C2 Physics（Jolt）完整落地**：Engine/Physics 模块（PhysicsWorld/JoltConversions/RigidBodyComponent/PhysicsSystem）+ 静态碰撞体 + 词表（RigidBody→12）+ 02 彩球演示 + ImGui 激活刚体数 + doctest（103 用例） | §七 Physics 行 ✅ / §十一 词表+遗留 ✅ |
 
 **仍待办（对应后续计划）**：
 - Phase C 剩余：Physics（C2）/ NavMesh（C4）/ Audio（C3），依赖路线图 P6/P3 或第三方库

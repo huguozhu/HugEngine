@@ -524,10 +524,12 @@ void ParticleRenderer::DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float 
 
     // ── 计算本帧发射数 ──
     cs.elapsed += deltaTime;
-    float minInterval = 1.0f / comp->GetParam().particlesPerSec;
+    // 发射率优先用组件的反射可调 emitRate（>0）；否则回退 m_Param.particlesPerSec（兼容旧调用）
+    float emitRate = comp->emitRate > 0.0f ? comp->emitRate : comp->GetParam().particlesPerSec;
+    float minInterval = 1.0f / emitRate;
     u32 emitCount = 0;
     if (cs.elapsed - cs.lastEmitTime > minInterval) {
-        emitCount = u32((cs.elapsed - cs.lastEmitTime) * comp->GetParam().particlesPerSec);
+        emitCount = u32((cs.elapsed - cs.lastEmitTime) * emitRate);
         if (emitCount > cs.maxParticles) emitCount = cs.maxParticles;
         cs.lastEmitTime += emitCount * minInterval;
     }

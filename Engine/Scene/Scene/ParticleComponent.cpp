@@ -37,7 +37,9 @@ void ParticleComponent::Play() {
     m_ParticleState         = ParticleState::Playing;
 
     // 计算最大粒子数: particlesPerSec * maxLifeTime * 1.5 (安全余量)
-    m_MaxParticles = u32(m_Param.particlesPerSec * m_Param.maxLifeTime * 1.5f + 15) / 16 * 16;
+    // 发射率优先用反射可调 emitRate（>0），否则回退 m_Param.particlesPerSec
+    float effRate = emitRate > 0.0f ? emitRate : m_Param.particlesPerSec;
+    m_MaxParticles = u32(effRate * m_Param.maxLifeTime * 1.5f + 15) / 16 * 16;
     m_EmitCount    = 0;
 
     if (m_Callback)

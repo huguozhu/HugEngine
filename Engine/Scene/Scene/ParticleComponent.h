@@ -222,6 +222,10 @@ public:
     ParticleComponent() = default;
     ~ParticleComponent() override = default;
 
+    // --- 反射/AI 可调发射参数（深补 P1）---
+    /// 每秒粒子数覆盖；<=0 时用 m_Param.particlesPerSec（保留旧调用/SceneBuilder 兼容）
+    float emitRate = -1.0f;
+
     // 生命周期
     void Play();
     void Pause();

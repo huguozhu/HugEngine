@@ -188,6 +188,9 @@ HE_BEGIN_REGISTER(he::LevelComponent)
 HE_END_REGISTER()
 
 HE_BEGIN_REGISTER(he::ParticleComponent)
+    HE_REGISTER_PROPERTY(he::ParticleComponent, float, emitRate)
+        HE_ATTR_CATEGORY("Particle") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("每秒粒子数（>0 覆盖默认发射率；<=0 用配置值）")
+    HE_END_PROPERTY()
 HE_END_REGISTER()
 
 // --- ProjectileMovementComponent 注册（Phase A7，玩法底座）---
