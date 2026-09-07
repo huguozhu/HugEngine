@@ -11,6 +11,7 @@
 #include "Scene/HealthComponent.h"
 #include "Scene/DecalComponent.h"
 #include "Scene/AnimationComponent.h"
+#include "Physics/Physics/RigidBodyComponent.h"
 #include "Core/Log.h"
 
 #include "nlohmann/json.hpp"
@@ -213,6 +214,18 @@ SceneBuildResult BuildScene(World& world, SceneGraph& sg, const String& sceneJso
                     a->time        = GetFloatField(comp, "time", a->time);
                     a->speed       = GetFloatField(comp, "speed", a->speed);
                     a->playing     = GetBoolField(comp, "playing", a->playing);
+                }
+                else if (type == "RigidBody") {
+                    auto* rb = world.AddComponent<RigidBodyComponent>(e);
+                    rb->shape       = static_cast<u8>(GetFloatField(comp, "shape", (float)rb->shape));
+                    rb->radius      = GetFloatField(comp, "radius", rb->radius);
+                    rb->halfExtent  = GetFloatField(comp, "halfExtent", rb->halfExtent);
+                    rb->height      = GetFloatField(comp, "height", rb->height);
+                    rb->mass        = GetFloatField(comp, "mass", rb->mass);
+                    rb->friction    = GetFloatField(comp, "friction", rb->friction);
+                    rb->restitution = GetFloatField(comp, "restitution", rb->restitution);
+                    rb->isDynamic   = GetBoolField(comp, "isDynamic", rb->isDynamic);
+                    rb->enabled     = GetBoolField(comp, "enabled", rb->enabled);
                 }
                 else {
                     // 未知组件类型：跳过并告警（容错，不影响其余实体）

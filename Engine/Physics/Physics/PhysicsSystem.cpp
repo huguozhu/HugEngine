@@ -14,6 +14,7 @@
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
 #include "Scene/Transform.h"
+#include "Scene/CollisionComponent.h"
 
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
@@ -50,7 +51,7 @@ void PhysicsSystem::Update(he::World& world, he::SceneGraph&, f32 dt) {
     if (!s_World.IsReady()) s_World.Initialize();
     auto& bi = s_World.GetBodyInterface();
 
-    // ---- 1. 新增 body（实体有 RigidBodyComponent 但未入物理世界）----
+    // ---- 1. 新增动态 body（实体有 RigidBodyComponent 但未入物理世界）----
     world.ForEach<RigidBodyComponent>([&](he::Entity e, RigidBodyComponent& rb) {
         if (s_Bodies.count(e)) return;   // 已在物理世界
         auto* xf = world.GetComponent<TransformComponent>(e);
@@ -73,6 +74,38 @@ void PhysicsSystem::Update(he::World& world, he::SceneGraph&, f32 dt) {
         if (!body) return;
         body->SetUserData(e.id);   // 记录 Entity 用于回写/回收
         bi.AddBody(body->GetID(), rb.isDynamic ? JPH::EActivation::Activate : JPH::EActivation::DontActivate);
+        s_Bodies[e] = body->GetID();
+    });
+
+    // ---- 1b. 新增静态碰撞体（T5：带 CollisionComponent 且无 RigidBodyComponent → Jolt static body）----
+    world.ForEach<CollisionComponent>([&](he::Entity e, CollisionComponent& cc) {
+        if (!cc.bEnabled) return;                                        // 禁用
+        if (s_Bodies.count(e)) return;                                   // 已在物理世界
+        if (world.GetComponent<RigidBodyComponent>(e)) return;           // 动态刚体走 RigidBody 路径
+        auto* xf = world.GetComponent<TransformComponent>(e);
+        if (!xf) return;
+
+        JPH::Ref<JPH::Shape> shape;
+        switch (cc.shape) {
+        case CollisionShape::Sphere:
+            shape = new JPH::SphereShape(cc.radius);
+            break;
+        case CollisionShape::Capsule: {
+            float halfH = std::max(cc.height * 0.5f - cc.radius, 0.01f);   // 段半长（Jolt 需 >0）
+            shape = new JPH::CapsuleShape(halfH, cc.radius);
+            break;
+        }
+        default:   // AABB
+            shape = new JPH::BoxShape(ToJolt(cc.halfExtents));
+            break;
+        }
+
+        JPH::BodyCreationSettings bcs(shape, ToJoltPos(xf->position), ToJolt(xf->rotation),
+            JPH::EMotionType::Static, Layers::NON_MOVING);
+        JPH::Body* body = bi.CreateBody(bcs);
+        if (!body) return;
+        body->SetUserData(e.id);
+        bi.AddBody(body->GetID(), JPH::EActivation::DontActivate);
         s_Bodies[e] = body->GetID();
     });
 

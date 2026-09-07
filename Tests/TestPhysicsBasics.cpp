@@ -13,6 +13,7 @@
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
 #include "Scene/Transform.h"
+#include "Scene/CollisionComponent.h"
 
 #include <cmath>
 
@@ -54,4 +55,32 @@ TEST_CASE("PhysicsSystem 实体销毁后 body 回收（无泄漏）") {
     world.DestroyEntity(e);
     PhysicsSystem::Update(world, sg, 1.0f / 60.0f);
     CHECK(PhysicsSystem::HasBody(world, e) == false);
+}
+
+TEST_CASE("PhysicsSystem 球落在静态碰撞盒上停住（T5）") {
+    World world;
+    SceneGraph sg(world);
+
+    // 静态地面：CollisionComponent（AABB）+ Transform（顶部 y=0）
+    Entity ground = world.CreateEntity("Ground");
+    auto* gxf = world.AddComponent<TransformComponent>(ground);
+    gxf->position = float3(0.0f, -0.5f, 0.0f);
+    auto* gc = world.AddComponent<CollisionComponent>(ground);
+    gc->shape = CollisionShape::AABB;
+    gc->halfExtents = float3(100.0f, 0.5f, 100.0f);
+    gc->bEnabled = true;
+
+    // 动态球：从 y=5 下落
+    Entity ball = world.CreateEntity("Ball");
+    auto* bxf = world.AddComponent<TransformComponent>(ball);
+    bxf->position = float3(0.0f, 5.0f, 0.0f);
+    auto* rb = world.AddComponent<RigidBodyComponent>(ball);
+    rb->shape = 0; rb->radius = 0.5f; rb->isDynamic = true; rb->mass = 1.0f;
+
+    // 模拟 3 秒（180 帧）→ 球应落到地面（地面顶面 y=0 + 球半径 0.5 = 球心 y≈0.5）静止
+    for (int i = 0; i < 180; ++i)
+        PhysicsSystem::Update(world, sg, 1.0f / 60.0f);
+
+    CHECK(std::fabs(bxf->position.y - 0.5f) < 0.15f);   // 球心停在半径高度（地面顶面上）
+    CHECK(PhysicsSystem::HasBody(world, ground) == true);   // 地面注册为静态 body
 }

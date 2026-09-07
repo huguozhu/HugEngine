@@ -18,6 +18,7 @@
 #include "Scene/CameraComponent.h"
 #include "Scene/HealthComponent.h"
 #include "Scene/AnimationComponent.h"
+#include "Physics/RigidBodyComponent.h"
 
 using namespace he;
 using namespace he::ai;
@@ -184,4 +185,31 @@ TEST_CASE("BuildScene 解析 Animation 组件（技术债：反射/AI 补齐）"
     CHECK(a->time == doctest::Approx(1.5f));
     CHECK(a->speed == doctest::Approx(2.0f));
     CHECK(a->playing == true);
+}
+
+TEST_CASE("BuildScene 解析 RigidBody 组件（T6：高处掉落的球）") {
+    World world;
+    SceneGraph sg(world);
+
+    String json = R"({
+      "entities": [
+        {"name":"FallingBall","transform":{"position":[0,10,0]},
+         "components":[{"type":"RigidBody","shape":0,"radius":0.5,"mass":2.0,
+                        "friction":0.5,"restitution":0.3,"isDynamic":true,"enabled":true}]}
+      ]
+    })";
+
+    SceneBuildResult r = BuildScene(world, sg, json);
+    REQUIRE(r.success == true);
+    REQUIRE(r.entities.size() == 1);
+
+    auto* rb = world.GetComponent<RigidBodyComponent>(r.entities[0]);
+    REQUIRE(rb != nullptr);
+    CHECK(rb->shape == 0);
+    CHECK(rb->radius == doctest::Approx(0.5f));
+    CHECK(rb->mass == doctest::Approx(2.0f));
+    CHECK(rb->friction == doctest::Approx(0.5f));
+    CHECK(rb->restitution == doctest::Approx(0.3f));
+    CHECK(rb->isDynamic == true);
+    CHECK(rb->enabled == true);
 }

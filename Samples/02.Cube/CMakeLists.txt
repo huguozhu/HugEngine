@@ -7,6 +7,7 @@ target_link_libraries(02.Cube PRIVATE
     HugEngineShader
     HugEngineScene
     HugEngineRender
+    HugEnginePhysics
     HugEngineEditor
     stb   # stb_image.h 纹理解码
 )

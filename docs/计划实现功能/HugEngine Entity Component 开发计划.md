@@ -236,7 +236,7 @@
 | Component | 依赖 | 备注 |
 |---|---|---|
 | SkeletalMeshComponent | 骨骼动画系统（路线图 P6 缺项） | ✅ 已完成（2026-09-07，提交 `4d94460`）：glTF skins/动画解析 + GPU 蒙皮（骨骼 SSBO + 蒙皮 PSO）+ Fox 演示 |
-| PhysicsComponent / RigidBody | 物理引擎集成（BEPU/PhysX/Jolt） | 刚体 + 约束 |
+| PhysicsComponent / RigidBody | 物理引擎集成（BEPU/PhysX/Jolt） | ✅ 已完成（2026-09-07，Jolt 提交 `7eb1a66`~C2 竖切）：Engine/Physics 模块（PhysicsWorld/JoltConversions/RigidBodyComponent/PhysicsSystem）+ 彩球下落/碰撞/回写演示 + doctest（100+ 用例） |
 | AudioComponent | 音频系统（引擎尚无） | 3D 声源 + 衰减 |
 | NavMesh 寻路 | 导航网格 + A*/Recast | Agent 移动寻路 |
 

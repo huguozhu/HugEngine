@@ -39,6 +39,8 @@
 #include "Scene/InstancedMeshComponent.h"
 #include "Scene/SkeletalMeshComponent.h"
 #include "Scene/SkeletalMeshSystem.h"
+#include "Physics/Physics/RigidBodyComponent.h"
+#include "Physics/Physics/PhysicsSystem.h"
 #include "Asset/glTFLoader.h"
 #include "Editor/ImGuiIntegration.h"
 #include "imgui.h"
@@ -200,7 +202,30 @@ int main() {
         float3(-1.5f, 5.0f, 0.0f), float3(0.8f),
         float4(1.0f, 0.72f, 0.0f, 1.0f), 1.0f, 0.15f, true);
 
-    // 铜球（金属，中度粗糙）
+    // 物理演示彩球（Jolt C2）：RigidBodyComponent 动态球从高处下落，撞击地面弹跳
+    {
+        const float3 ballColors[4] = {
+            float3(1.0f, 0.2f, 0.2f), float3(0.2f, 1.0f, 0.3f),
+            float3(0.2f, 0.4f, 1.0f), float3(1.0f, 0.9f, 0.2f),
+        };
+        for (int i = 0; i < 4; ++i) {
+            Entity ball = world.CreateEntity("PhysBall");
+            world.AddComponent<TransformComponent>(ball);
+            auto* sphere = world.AddComponent<SphereComponent>(ball);
+            sphere->baseColorFactor = float4(ballColors[i], 1.0f);
+            sphere->radius = 0.4f;
+            sphere->segmentCount = 16;
+            sphere->ringCount = 8;
+            sphere->castShadow = true;
+            sphere->OnCreate();
+            auto* bxf = world.GetComponent<TransformComponent>(ball);
+            bxf->position = float3(-3.0f + i * 2.0f, 4.0f + i, -5.0f);   // 相机前方偏低，下落可见
+            auto* rb = world.AddComponent<RigidBodyComponent>(ball);
+            rb->shape = 0; rb->radius = 0.4f; rb->isDynamic = true; rb->mass = 1.0f;
+            rb->friction = 0.4f; rb->restitution = 0.3f + i * 0.15f;   // 不同弹性，弹跳高度区分
+            sceneGraph.SetParent(ball, Entity{kInvalidEntity});
+        }
+    }
     CreateShapeEntity(world, sceneGraph,
         float3(0.0f, 4.0f, 0.0f), float3(0.8f),
         float4(0.85f, 0.45f, 0.2f, 1.0f), 0.95f, 0.4f, true);
@@ -909,6 +934,9 @@ int main() {
             }
             he::MovementSystem::Update(world, deltaTime);
         }
+
+        // 物理系统（Jolt C2）：RigidBody 刚体 + CollisionComponent 静态碰撞体步进/回写
+        he::physics::PhysicsSystem::Update(world, sceneGraph, deltaTime);
 
         // 帧相机解析（S0.4）：场景含主相机实体时优先使用，否则回退自由相机
         // 本示例场景无 CameraComponent 实体，行为与之前一致（始终走 CameraController 回退）
