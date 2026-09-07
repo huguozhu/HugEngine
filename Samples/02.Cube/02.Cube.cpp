@@ -1103,6 +1103,10 @@ int main() {
             }
         }
 
+        // 物理系统 (C2)：激活刚体数
+        ImGui::SeparatorText("物理 (C2)");
+        ImGui::Text("激活刚体: %d", he::physics::PhysicsSystem::GetActiveBodyCount());
+
         // 渲染模式切换（读 CVar → Combo → 写回 CVar）
         int mode = cvPipelineMode.Get();
         ImGui::SeparatorText("渲染模式");

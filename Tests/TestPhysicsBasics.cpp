@@ -84,3 +84,29 @@ TEST_CASE("PhysicsSystem 球落在静态碰撞盒上停住（T5）") {
     CHECK(std::fabs(bxf->position.y - 0.5f) < 0.15f);   // 球心停在半径高度（地面顶面上）
     CHECK(PhysicsSystem::HasBody(world, ground) == true);   // 地面注册为静态 body
 }
+
+TEST_CASE("PhysicsSystem 盒/胶囊刚体形状覆盖（下落）") {
+    World world;
+    SceneGraph sg(world);
+
+    // 盒（shape=1）
+    Entity box = world.CreateEntity("Box");
+    auto* boxXf = world.AddComponent<TransformComponent>(box);
+    boxXf->position = float3(-2.0f, 6.0f, 0.0f);
+    auto* boxRb = world.AddComponent<RigidBodyComponent>(box);
+    boxRb->shape = 1; boxRb->halfExtent = 0.5f; boxRb->isDynamic = true; boxRb->mass = 1.0f;
+
+    // 胶囊（shape=2）
+    Entity cap = world.CreateEntity("Capsule");
+    auto* capXf = world.AddComponent<TransformComponent>(cap);
+    capXf->position = float3(2.0f, 6.0f, 0.0f);
+    auto* capRb = world.AddComponent<RigidBodyComponent>(cap);
+    capRb->shape = 2; capRb->radius = 0.4f; capRb->height = 1.2f; capRb->isDynamic = true; capRb->mass = 1.0f;
+
+    // 盒/胶囊 body 创建（shape 覆盖：CreateShape 0/1/2 均能建 body）
+    for (int i = 0; i < 30; ++i)
+        PhysicsSystem::Update(world, sg, 1.0f / 60.0f);
+
+    CHECK(PhysicsSystem::HasBody(world, box) == true);   // 盒 body 创建
+    CHECK(PhysicsSystem::HasBody(world, cap) == true);   // 胶囊 body 创建
+}

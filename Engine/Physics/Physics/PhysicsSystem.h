@@ -27,6 +27,9 @@ public:
 
     /// 供管线/工具查询：某实体是否已在物理世界
     static bool HasBody(he::World& world, he::Entity e);
+
+    /// 当前物理世界中激活（移动中）的刚体数量（ImGui 调试显示用）
+    static int GetActiveBodyCount();
 };
 
 } // namespace he::physics

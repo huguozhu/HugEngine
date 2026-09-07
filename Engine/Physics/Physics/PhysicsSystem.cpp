@@ -146,4 +146,13 @@ bool PhysicsSystem::HasBody(he::World&, he::Entity e) {
     return s_Bodies.count(e) != 0;
 }
 
+int PhysicsSystem::GetActiveBodyCount() {
+    if (!s_World.IsReady()) return 0;
+    auto& bi = s_World.GetBodyInterface();
+    int count = 0;
+    for (auto& [e, bid] : s_Bodies)
+        if (bi.IsActive(bid)) ++count;
+    return count;
+}
+
 } // namespace he::physics
