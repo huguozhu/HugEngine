@@ -36,9 +36,9 @@
 | AbilityComponent | UAbilitySystemComponent | ✅（P3 B4，`AbilitySystem` + Action op CastAbility） | ✅ 2 属性 | ✅ | — |
 | SplineComponent | USplineComponent | ✅（P3 B2，Hermite+自动切线，弧长求值/闭环回绕） | ✅ 2 属性 | ✅ | — |
 | InstancedMeshComponent | UInstancedStaticMeshComponent | ✅（P3 B1，单次 DrawIndexed 万级实例） | ✅ 2 属性 | ✅ | — |
-| SkeletalMesh / Physics / Audio / NavMesh | UE5 对应组件 | ❌（依赖路线图 P6/P3） | — | — | — |
+| SkeletalMesh / Physics / NavMesh | UE5 对应组件 | ✅ 均已落地（SkeletalMesh `4d94460` / Physics Jolt C2 / NavMesh `97aaa00`） | — | — | — |
 
-**结论**：计划内组件全部落地。LLM 词表 5 → 10 组件（新增 SpotLight/RectLight/Camera/Health/Decal）；所有新组件按「一个组件 = 四件事」补齐类定义/反射/AI 注解/系统接入。剩余缺口：Phase C 大工程（SkeletalMesh/Physics/Audio/NavMesh，依赖路线图 P6/P3）；既有组件 Animation/Particle/Memory/Goal 的反射与 AI 注解未补齐（当前无阻断，归追溯清单待办）。
+**结论**：计划内组件全部落地。LLM 词表 5 → 10 组件（新增 SpotLight/RectLight/Camera/Health/Decal）；所有新组件按「一个组件 = 四件事」补齐类定义/反射/AI 注解/系统接入。Phase C 仅剩后续扩展（SkeletalMesh 剪辑混合/动画重定向）；Audio（C3）已从本计划移除。既有组件 Animation/Particle/Memory/Goal 的反射与 AI 注解 ✅ 已补齐。
 
 ## 二、总体原则
 
@@ -55,7 +55,7 @@
 | **S0（基线补齐）** | 已有组件补齐反射/AI 注解/词表/主相机接入 | 1~2 天 | ✅ 已完成（2026-09-06）：S0.1~S0.4 全部落地，doctest 38 用例通过 |
 | **A（低成本）** | Camera(系统接入) / Decal / Billboard / TextRender / SpringArm / ProjectileMovement / Health | 2~3 天/个 | ✅ 已完成（2026-09-06）：A3~A8 落地；A1/A2 并入 S0 |
 | **B（中成本）** | InstancedMesh / Spline / CharacterMovement / Ability(简化 GAS) / Collision | 1~2 周/个 | ✅ 已完成（2026-09-06）：B1~B5 落地；前置重构经评估非必要（见 §六注记） |
-| **C（大工程）** | SkeletalMesh / Physics / Audio / NavMesh | 数周~数月 | 依赖路线图 P6/P3 或第三方库 |
+| **C（大工程）** | SkeletalMesh / Physics / NavMesh | 数周~数月 | ✅ 均已落地（SkeletalMesh `4d94460` / Physics Jolt C2 / NavMesh `97aaa00`）；Audio（C3）已移除 |
 
 ---
 
@@ -237,8 +237,9 @@
 |---|---|---|
 | SkeletalMeshComponent | 骨骼动画系统（路线图 P6 缺项） | ✅ 已完成（2026-09-07，提交 `4d94460`）：glTF skins/动画解析 + GPU 蒙皮（骨骼 SSBO + 蒙皮 PSO）+ Fox 演示 |
 | PhysicsComponent / RigidBody | 物理引擎集成（BEPU/PhysX/Jolt） | ✅ 已完成（2026-09-07，Jolt 提交 `7eb1a66`~C2 竖切）：Engine/Physics 模块（PhysicsWorld/JoltConversions/RigidBodyComponent/PhysicsSystem）+ 彩球下落/碰撞/回写演示 + doctest（100+ 用例） |
-| AudioComponent | 音频系统（引擎尚无） | 3D 声源 + 衰减 |
-| NavMesh 寻路 | 导航网格 + A*/Recast | Agent 移动寻路 |
+| NavMesh 寻路 | 导航网格 + A*/Recast | ✅ 已完成（2026-09-07，提交 `97aaa00` C4 竖切）：NavMeshComponent + A* 寻路（绕阻挡墙）+ NavAgent 沿路径移动 + 词表/SceneBuilder + 02 演示 |
+
+> Audio（C3）已从本计划移除（引擎暂不接入音频系统）。
 
 ---
 
@@ -285,7 +286,7 @@ P4（大工程）: Phase C（等待路线图）
 ## 十一、完成总结（2026-09-06）
 
 - **组件总数**：新增 11 个组件（A 组 6：Decal/Billboard/TextRender/SpringArm/ProjectileMovement/Health；B 组 5：Collision/CharacterMovement/Ability/Spline/InstancedMesh）+ S0 补齐 3 个既有组件（SpotLight/RectLight/Camera）的反射/词表 + 主相机接入（GetPrimaryCamera/ResolveFrameCamera）；doctest **85 用例 / 509 断言**全部通过（2026-09-06 基线；C1 SkeletalMesh 见 §十二）
-- **词表**：LLM 组件词表 5 → 10（SpotLight/RectLight/Camera/Health/Decal 新增，截至 2026-09-06），后 Animation 补齐（`98c4080`）→ **11 种**，RigidBody 补齐（`1d4de6e`，Jolt C2）→ **12 种**；SceneBuilder 全部带安全降级解析
+- **词表**：LLM 组件词表 5 → 10（SpotLight/RectLight/Camera/Health/Decal 新增，截至 2026-09-06），后 Animation 补齐（`98c4080`）→ **11 种**，RigidBody 补齐（`1d4de6e`，Jolt C2）→ **12 种**，NavMesh/NavAgent 补齐（`97aaa00`，C4）→ **14 种**；SceneBuilder 全部带安全降级解析
 - **提交序列**：`8813211`（S0）→ `7683686`（P1）→ `3eb963a`（P2）→ `8299254`/`11e4f14`/`1ae6637`/`3c0f571`/`56696ea`（P3 五件）
 - **交互验证**：02.Cube（广告牌/文字/贴花/碰撞变色/角色移动/万级实例）、05.AISamples（真实 LLM 场景生成、主相机、火球技能、样条巡逻）
 - **已知 MVP 限制（技术债清单）**：
@@ -293,7 +294,7 @@ P4（大工程）: Phase C（等待路线图）
   2. Decal 为投射片 MVP（无 GBuffer 投影 Pass）；InstancedMesh 仅支持 Forward 非 GPU-Culling 路径，逐实例剔除未接
   3. 实体引用类属性（homingTarget/targetEntity/cameraEntity 等）不进反射/词表（u64 无法快照序列化）
   4. Collision 调试线框、SplineMesh 沿样条生成等预留未接（maxSlopeAngle 坡度过滤 ✅ `28ae06b`、SpringArm 碰撞缩臂 ✅ `bc14c57` 已于 2026-09-07 落地）
-- **遗留**：Phase C 剩余（Audio/NavMesh，依赖路线图 P6/P3；Physics C2 ✅ `7eb1a66`~`2b0ae5c` 已完成）；SkeletalMesh 后续扩展（剪辑混合、动画重定向）；**既有组件 Particle/Memory/Goal 的反射/AI 补齐 ✅ 已完成**（Animation `98c4080`；Particle emitRate 深补 `fa1410c`；Memory/Goal 类型注册——内部结构按文档不暴露）
+- **遗留**：Phase C 全部落地（Physics C2 ✅ `7eb1a66`~`2b0ae5c`；NavMesh C4 ✅ `97aaa00`；SkeletalMesh ✅ `4d94460`）；Audio（C3）已从本计划移除。SkeletalMesh 后续扩展（剪辑混合、动画重定向）；**既有组件 Particle/Memory/Goal 的反射/AI 补齐 ✅ 已完成**（Animation `98c4080`；Particle emitRate 深补 `fa1410c`；Memory/Goal 类型注册——内部结构按文档不暴露）
 
 ---
 
@@ -309,9 +310,10 @@ P4（大工程）: Phase C（等待路线图）
 | `bc14c57` | **SpringArm 碰撞缩臂落地（防穿墙）**（A6 收尾） | §十一 技术债④ ✅ |
 | `7eb1a66`~`2b0ae5c` | **Phase C C2 Physics（Jolt）完整落地**：Engine/Physics 模块（PhysicsWorld/JoltConversions/RigidBodyComponent/PhysicsSystem）+ 静态碰撞体 + 词表（RigidBody→12）+ 02 彩球演示 + ImGui 激活刚体数 + doctest（103 用例） | §七 Physics 行 ✅ / §十一 词表+遗留 ✅ |
 | `fa1410c` | **ParticleComponent 反射/AI 发射参数补齐（emitRate 深补）**：emitaRate（>0 覆盖默认发射率）+ 粒子逻辑接入（兼容旧调用）；Memory/Goal 类型注册（AgentReflect，内部结构不暴露） | §十一 遗留 ✅ |
+| `97aaa00` | **Phase C C4 NavMesh 寻路落地**：NavMeshComponent（格子+阻挡）+ NavMeshSystem（8 向 A* 绕墙）+ NavAgentComponent/System（沿路径移动）+ 词表（NavMesh/NavAgent→14）+ 02 演示（紫球绕墙走到目标）+ doctest（108 用例） | §七 NavMesh 行 ✅ / §十一 词表 ✅ |
 
 **仍待办（对应后续计划）**：
-- Phase C 剩余：NavMesh（C4）/ Audio（C3），依赖路线图 P6/P3 或第三方库（Physics C2 ✅）
+- Phase C 已全部落地（Physics C2 / NavMesh C4 / SkeletalMesh）；Audio（C3）已从本计划移除
 - SkeletalMesh 后续扩展：剪辑混合、动画重定向
 - 组件 AI 补齐已完成（Animation/RigidBody/Particle 反射+词表；Memory/Goal 类型注册）——后续仅当需暴露内部结构时再议
 - MVP 技术债：bindless 堆环形化（TextRender/InstancedMesh 高频更新）、Decal GBuffer 投影 Pass、InstancedMesh 接 GPU-Culling + 逐实例剔除、Collision 调试线框、SplineMesh 沿样条生成
