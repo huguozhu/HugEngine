@@ -284,13 +284,33 @@ P4（大工程）: Phase C（等待路线图）
 
 ## 十一、完成总结（2026-09-06）
 
-- **组件总数**：新增 11 个组件（A 组 6：Decal/Billboard/TextRender/SpringArm/ProjectileMovement/Health；B 组 5：Collision/CharacterMovement/Ability/Spline/InstancedMesh）+ S0 补齐 3 个既有组件（SpotLight/RectLight/Camera）的反射/词表 + 主相机接入（GetPrimaryCamera/ResolveFrameCamera）；doctest **85 用例 / 509 断言**全部通过
-- **词表**：LLM 组件词表 5 → 10（SpotLight/RectLight/Camera/Health/Decal 新增），SceneBuilder 全部带安全降级解析
+- **组件总数**：新增 11 个组件（A 组 6：Decal/Billboard/TextRender/SpringArm/ProjectileMovement/Health；B 组 5：Collision/CharacterMovement/Ability/Spline/InstancedMesh）+ S0 补齐 3 个既有组件（SpotLight/RectLight/Camera）的反射/词表 + 主相机接入（GetPrimaryCamera/ResolveFrameCamera）；doctest **85 用例 / 509 断言**全部通过（2026-09-06 基线；C1 SkeletalMesh 见 §十二）
+- **词表**：LLM 组件词表 5 → 10（SpotLight/RectLight/Camera/Health/Decal 新增，截至 2026-09-06），后 Animation 补齐（`98c4080`）→ **11 种**；SceneBuilder 全部带安全降级解析
 - **提交序列**：`8813211`（S0）→ `7683686`（P1）→ `3eb963a`（P2）→ `8299254`/`11e4f14`/`1ae6637`/`3c0f571`/`56696ea`（P3 五件）
 - **交互验证**：02.Cube（广告牌/文字/贴花/碰撞变色/角色移动/万级实例）、05.AISamples（真实 LLM 场景生成、主相机、火球技能、样条巡逻）
 - **已知 MVP 限制（技术债清单）**：
   1. bindless 堆 append-only：TextRender/InstancedMesh 动态更新以「旧资源保活」换安全，高频更新需 Heap 环形化改造
   2. Decal 为投射片 MVP（无 GBuffer 投影 Pass）；InstancedMesh 仅支持 Forward 非 GPU-Culling 路径，逐实例剔除未接
   3. 实体引用类属性（homingTarget/targetEntity/cameraEntity 等）不进反射/词表（u64 无法快照序列化）
-  4. maxSlopeAngle（坡度过滤）、SpringArm 碰撞缩臂、Collision 调试线框、SplineMesh 沿样条生成等预留未接
-- **遗留**：Phase C 剩余（Physics/Audio/NavMesh，依赖路线图 P6/P3）；SkeletalMesh 后续扩展（剪辑混合、动画重定向、SplineMesh 沿样条生成）；既有组件 Animation/Particle/Memory/Goal 的反射/AI 补齐
+  4. Collision 调试线框、SplineMesh 沿样条生成等预留未接（maxSlopeAngle 坡度过滤 ✅ `28ae06b`、SpringArm 碰撞缩臂 ✅ `bc14c57` 已于 2026-09-07 落地）
+- **遗留**：Phase C 剩余（Physics/Audio/NavMesh，依赖路线图 P6/P3）；SkeletalMesh 后续扩展（剪辑混合、动画重定向）；既有组件 Particle/Memory/Goal 的反射/AI 补齐（Animation ✅ `98c4080` 已完成）
+
+---
+
+## 十二、后续状态更新（2026-09-07，对齐 HEAD `bc14c57`）
+
+上一节为 2026-09-06 完成快照；本节记录其后落地项（文档内相关行已就地标注 ✅）：
+
+| 提交 | 内容 | 对应文档条目 |
+|---|---|---|
+| `4d94460` + `ef8b75d` | **Phase C C1 SkeletalMeshComponent 完成**：glTF skins/动画解析 + GPU 蒙皮（骨骼 SSBO + 蒙皮 PSO）+ Fox 演示 | §七 SkeletalMesh 行 ✅ |
+| `98c4080` | **Animation 组件反射 + AI 注解 + 词表补齐**（词表 10 → 11） | §十一 词表行 / 遗留行 ✅ |
+| `28ae06b` | **maxSlopeAngle 坡度过滤落地**（前向渲染移动系统，B3 收尾） | §十一 技术债④ ✅ |
+| `bc14c57` | **SpringArm 碰撞缩臂落地（防穿墙）**（A6 收尾） | §十一 技术债④ ✅ |
+
+**仍待办（对应后续计划）**：
+- Phase C 剩余：Physics（C2）/ NavMesh（C4）/ Audio（C3），依赖路线图 P6/P3 或第三方库
+- SkeletalMesh 后续扩展：剪辑混合、动画重定向
+- 既有组件 AI 补齐：Particle / Memory / Goal 的反射属性注册（Particle 需选定暴露的发射参数；Memory/Goal 决定是否暴露内部结构）
+- MVP 技术债：bindless 堆环形化（TextRender/InstancedMesh 高频更新）、Decal GBuffer 投影 Pass、InstancedMesh 接 GPU-Culling + 逐实例剔除、Collision 调试线框、SplineMesh 沿样条生成
+- 架构触发项：渲染类型注册表化（InstancedMesh 为第 7 个渲染组件，下一个渲染组件即触发）、CollectLights 数据驱动抽取（下一个光源类型触发）
