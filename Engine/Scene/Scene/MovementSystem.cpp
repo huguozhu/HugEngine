@@ -68,17 +68,25 @@ void MovementSystem::Update(World& world, f32 dt) {
         // 4. 位置积分
         xf->position += m.velocity * dt;
 
-        // 5. 地面检测：下落/静止时向下射线（排除自身碰撞体）
+        // 5. 地面检测：下落/静止时向下射线（排除自身碰撞体），并做坡度过滤（maxSlopeAngle）
         if (m.velocity.y <= 0.0f) {
             Entity hit;
             float t = 0.0f;
+            float3 groundNormal;
             if (CollisionSystem::Raycast(world, xf->position, float3(0, -1, 0),
                                          halfHeight + kGroundTolerance,
-                                         hit, t, e.id)) {
-                // 命中地面：贴地吸附（把半高误差修正回精确贴地）
-                m.bOnGround = true;
-                xf->position.y += (halfHeight - t);
-                m.velocity.y = 0.0f;
+                                         hit, t, e.id, &groundNormal)) {
+                // 坡度过滤：地面法线与 up 的夹角超过 maxSlopeAngle 则视为墙壁/陡坡，不可站立
+                float upDot = glm::clamp(groundNormal.y, -1.0f, 1.0f);
+                float slopeAngle = glm::degrees(std::acos(upDot));
+                if (slopeAngle <= m.maxSlopeAngle) {
+                    // 命中且坡度可站立：贴地吸附（把半高误差修正回精确贴地）
+                    m.bOnGround = true;
+                    xf->position.y += (halfHeight - t);
+                    m.velocity.y = 0.0f;
+                } else {
+                    m.bOnGround = false;   // 陡坡不可站立/不可上
+                }
             } else {
                 m.bOnGround = false;
             }

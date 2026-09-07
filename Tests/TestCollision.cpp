@@ -148,6 +148,24 @@ TEST_CASE("CollisionSystem Raycast 最近命中") {
     CHECK(hit3 == sideCap);
 }
 
+TEST_CASE("CollisionSystem Raycast 返回命中法线（坡度判断基础）") {
+    World world;
+    // 顶面朝 +Y 的盒（地面）
+    Entity ground = MakeShape(world, "Ground", CollisionShape::AABB, float3(0, -1, 0),
+                              float3(10, 1, 10), 0, 0);
+
+    Entity hit; float t = 0; float3 n;
+    // 从上方下射命中盒顶面 → 法线 +Y（up）
+    REQUIRE(CollisionSystem::Raycast(world, float3(0, 5, 0), float3(0, -1, 0), 100.0f, hit, t, kInvalidEntity, &n));
+    CHECK(hit == ground);
+    CHECK(n.y == doctest::Approx(1.0f));   // 顶面法线朝上（可站立）
+
+    // 从 +Z 侧射入盒（起点 y=-1 在盒内避开顶面，z=20 在盒外）→ 命中 +Z 面 → 法线 +Z（侧面 → 陡坡不可站立）
+    REQUIRE(CollisionSystem::Raycast(world, float3(0, -1, 20), float3(0, 0, -1), 100.0f, hit, t, kInvalidEntity, &n));
+    CHECK(hit == ground);
+    CHECK(n.z == doctest::Approx(1.0f));   // +Z 面法线（坡度 90°）
+}
+
 TEST_CASE("CollisionSystem 禁用与缺失容错") {
     World world;
     Entity a = MakeShape(world, "A", CollisionShape::Sphere, float3(0, 0, 0),

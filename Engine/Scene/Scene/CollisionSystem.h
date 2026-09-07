@@ -26,10 +26,11 @@ public:
 
     /// 射线检测：返回沿方向 dir 最近的命中实体与距离 t（0~maxDistance）。
     /// @param ignore 跳过的实体（如角色地面检测时排除自身碰撞体）
+    /// @param outNormal 命中点法线（可空；供坡度/弹射角判断）
     /// @return 是否命中；无命中时 outHit/outT 不变
     static bool Raycast(World& world, const float3& origin, const float3& dir,
                         float maxDistance, Entity& outHit, float& outT,
-                        EntityID ignore = kInvalidEntity);
+                        EntityID ignore = kInvalidEntity, float3* outNormal = nullptr);
 };
 
 } // namespace he

@@ -163,8 +163,8 @@ bool ContainsShape(const WorldShape& s, const float3& p) {
     return false;
 }
 
-// --- 射线检测（返回命中距离；未命中返回 < 0）---
-float RaycastShape(const WorldShape& s, const float3& origin, const float3& dir, float maxDist) {
+// --- 射线检测（返回命中距离 + 命中法线；未命中返回 < 0）---
+float RaycastShape(const WorldShape& s, const float3& origin, const float3& dir, float maxDist, float3& outNormal) {
     switch (s.shape) {
     case CollisionShape::AABB: {
         // slab 法：逐轴求进出区间，求交集
@@ -182,6 +182,18 @@ float RaycastShape(const WorldShape& s, const float3& origin, const float3& dir,
                 if (t0 > t1) return -1.0f;
             }
         }
+        // 命中面法线：找命中点最接近的盒面（对应轴朝向）
+        float3 hitPoint = origin + dir * t0;
+        float dxm = std::abs(hitPoint.x - boxMin.x), dxM = std::abs(hitPoint.x - boxMax.x);
+        float dym = std::abs(hitPoint.y - boxMin.y), dyM = std::abs(hitPoint.y - boxMax.y);
+        float dzm = std::abs(hitPoint.z - boxMin.z), dzM = std::abs(hitPoint.z - boxMax.z);
+        float best = std::min(std::min(dxm, dxM), std::min(std::min(dym, dyM), std::min(dzm, dzM)));
+        if      (best == dxm) outNormal = float3(-1, 0, 0);
+        else if (best == dxM) outNormal = float3( 1, 0, 0);
+        else if (best == dym) outNormal = float3(0, -1, 0);
+        else if (best == dyM) outNormal = float3(0,  1, 0);
+        else if (best == dzm) outNormal = float3(0, 0, -1);
+        else                  outNormal = float3(0, 0,  1);
         return t0;
     }
     case CollisionShape::Sphere: {
@@ -192,12 +204,16 @@ float RaycastShape(const WorldShape& s, const float3& origin, const float3& dir,
         if (disc < 0.0f) return -1.0f;
         float t = -b - std::sqrt(disc);
         if (t < 0.0f) t = -b + std::sqrt(disc);   // 起点在球内时取远交点
-        return (t >= 0.0f && t <= maxDist) ? t : -1.0f;
+        if (t >= 0.0f && t <= maxDist) {
+            float3 hitPoint = origin + dir * t;
+            outNormal = (hitPoint - s.center) / s.radius;
+            return t;
+        }
+        return -1.0f;
     }
     case CollisionShape::Capsule: {
         // MVP：射线与胶囊 = 射线与段的最近距离 <= 半径（端点半球近似，掠射角有误差）
         float3 d = dir;   // 入口已归一化
-        // 射线上离段最近的点：参数化 ray(t) = origin + d*t，最小化 dist(ray(t), seg)
         float3 w0 = origin - s.segA;
         float3 v  = s.segB - s.segA;
         float a = glm::dot(d, d), b = glm::dot(d, v), c = glm::dot(v, v);
@@ -208,8 +224,13 @@ float RaycastShape(const WorldShape& s, const float3& origin, const float3& dir,
             t = std::clamp((b * f - c * e) / denom, 0.0f, maxDist);
         }
         float3 closest = origin + d * t;
-        float dist = glm::length(closest - ClosestPointOnSegment(closest, s.segA, s.segB));
-        return dist <= s.radius ? t : -1.0f;
+        float3 segClosest = ClosestPointOnSegment(closest, s.segA, s.segB);
+        float dist = glm::length(closest - segClosest);
+        if (dist <= s.radius) {
+            outNormal = (closest - segClosest) / std::max(dist, 1e-6f);   // 胶囊侧面指向射线
+            return t;
+        }
+        return -1.0f;
     }
     }
     return -1.0f;
@@ -231,7 +252,7 @@ bool CollisionSystem::Contains(World& world, Entity e, const float3& point) {
 
 bool CollisionSystem::Raycast(World& world, const float3& origin, const float3& dir,
                               float maxDistance, Entity& outHit, float& outT,
-                              EntityID ignore) {
+                              EntityID ignore, float3* outNormal) {
     // 归一化方向（球体/胶囊公式基于单位向量；零向量直接返回未命中）
     float lenSq = glm::dot(dir, dir);
     if (lenSq < 1e-12f) return false;
@@ -239,21 +260,25 @@ bool CollisionSystem::Raycast(World& world, const float3& origin, const float3& 
 
     float bestT = maxDistance + 1.0f;
     Entity best = Entity{kInvalidEntity};
+    float3 bestNormal = float3(0, 1, 0);
 
     world.ForEach<CollisionComponent>([&](Entity e, CollisionComponent& cc) {
         if (e.id == ignore) return;   // 排除自身（如角色地面检测）
         WorldShape s;
         if (!ExtractShape(world, e, s)) return;   // 禁用/缺失 Transform 跳过
-        float t = RaycastShape(s, origin, d, maxDistance);
+        float3 n;
+        float t = RaycastShape(s, origin, d, maxDistance, n);
         if (t >= 0.0f && t < bestT) {
             bestT = t;
             best = e;
+            bestNormal = n;
         }
     });
 
     if (!best.IsValid()) return false;
     outHit = best;
     outT = bestT;
+    if (outNormal) *outNormal = bestNormal;
     return true;
 }
 
