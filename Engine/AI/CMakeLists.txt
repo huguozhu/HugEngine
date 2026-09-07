@@ -77,6 +77,7 @@ target_link_libraries(HugEngineAI PUBLIC
     HugEngineCore
     HugEngineRender   # IRenderSubsystem（神经子系统收编，A3.2b）
     HugEngineEditor   # 复用 he::Command / CommandHistory（GenerateSceneCommand）
+    HugEnginePhysics  # SceneBuilder 解析 RigidBodyComponent（反射/词表）
     nlohmann_json
 )
 target_link_libraries(HugEngineAI PRIVATE winhttp stb)   # stb: TextureGenerator 写 PNG
