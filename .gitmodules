@@ -16,3 +16,6 @@
 [submodule "Engine/External/meshoptimizer"]
 	path = Engine/External/meshoptimizer
 	url = https://github.com/zeux/meshoptimizer.git
+[submodule "Engine/External/JoltPhysics"]
+	path = Engine/External/JoltPhysics
+	url = https://github.com/jrouwe/JoltPhysics.git

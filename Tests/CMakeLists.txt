@@ -19,6 +19,7 @@ add_executable(HugEngineTests
     TestInstancedMesh.cpp
     TestSkeletonLoader.cpp
     TestSkeletalMesh.cpp
+    TestJoltSmoke.cpp
     TestDeepSeekProtocol.cpp
     TestPromptToScene.cpp
     TestWorldModel.cpp
@@ -45,4 +46,5 @@ target_link_libraries(HugEngineTests PRIVATE
     HugEngineScene
     HugEngineAsset
     HugEngineCore
+    Jolt
 )

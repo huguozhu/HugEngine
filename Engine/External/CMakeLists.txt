@@ -56,6 +56,17 @@ target_link_libraries(imgui PUBLIC glfw Vulkan::Vulkan)
 # --- meshoptimizer v0.22 ---
 add_subdirectory(meshoptimizer)
 
+# --- Jolt Physics（刚体物理引擎，submodule；根 CMake 在 Build/ 子目录）---
+# 集成指南：https://github.com/jrouwe/JoltPhysics/blob/master/Build/CMakeLists.txt
+set(ENABLE_INSTALL OFF CACHE BOOL "" FORCE)                    # 不生成安装目标
+set(OVERRIDE_CXX_FLAGS OFF CACHE BOOL "" FORCE)                # 跟随工程全局 flags
+set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)   # 用动态 CRT（/MDd），与工程链接一致
+set(JPH_USE_DX12 OFF CACHE BOOL "" FORCE)                      # 不需要 Jolt 自带图形渲染后端
+set(JPH_USE_VK   OFF CACHE BOOL "" FORCE)
+set(JPH_USE_MTL  OFF CACHE BOOL "" FORCE)
+add_subdirectory(JoltPhysics/Build)
+# Jolt 库目标名固定为 "Jolt"（Build/Jolt/CMakeLists.txt）
+
 # --- 单元测试框架：doctest（header-only，本地 vendor，见 Engine/External/doctest）---
 # 注：原 Catch2 子模块未初始化，改用 doctest 单头文件（源自 taskflow 3rd-party，零网络）
 # if(HUGENGINE_BUILD_TESTS)
