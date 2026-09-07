@@ -10,6 +10,7 @@
 #include "Scene/CameraComponent.h"
 #include "Scene/HealthComponent.h"
 #include "Scene/DecalComponent.h"
+#include "Scene/AnimationComponent.h"
 #include "Core/Log.h"
 
 #include "nlohmann/json.hpp"
@@ -205,6 +206,13 @@ SceneBuildResult BuildScene(World& world, SceneGraph& sg, const String& sceneJso
                     s->turbidity = GetFloatField(comp, "turbidity", s->turbidity);
                     s->intensity = GetFloatField(comp, "intensity", s->intensity);
                     s->OnCreate();  // 归一化 sunDirection
+                }
+                else if (type == "Animation") {
+                    auto* a = world.AddComponent<AnimationComponent>(e);
+                    a->currentClip = static_cast<i32>(GetFloatField(comp, "currentClip", (float)a->currentClip));
+                    a->time        = GetFloatField(comp, "time", a->time);
+                    a->speed       = GetFloatField(comp, "speed", a->speed);
+                    a->playing     = GetBoolField(comp, "playing", a->playing);
                 }
                 else {
                     // 未知组件类型：跳过并告警（容错，不影响其余实体）

@@ -17,7 +17,8 @@ String BuildTypeSchema() {
     "Camera":           {"fields": ["fov", "nearPlane", "farPlane", "isMain"]},
     "Health":           {"fields": ["maxHealth", "currentHealth", "bInvincible"]},
     "Decal":            {"fields": ["decalTexture", "size", "opacity"]},
-    "PhysicalSky":      {"fields": ["sunDirection", "turbidity", "intensity"]}
+    "PhysicalSky":      {"fields": ["sunDirection", "turbidity", "intensity"]},
+    "Animation":        {"fields": ["currentClip", "time", "speed", "playing"]}
   },
   "transform": {"fields": ["position [x,y,z] 米", "scale [x,y,z] 可选"]},
   "color_format": "[r,g,b] 0~1",

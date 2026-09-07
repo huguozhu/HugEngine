@@ -17,6 +17,7 @@
 #include "Scene/LightComponent.h"
 #include "Scene/CameraComponent.h"
 #include "Scene/HealthComponent.h"
+#include "Scene/AnimationComponent.h"
 
 using namespace he;
 using namespace he::ai;
@@ -160,4 +161,27 @@ TEST_CASE("BuildScene 非法字段类型安全降级（SpotLight 强度给数组
     REQUIRE(sl != nullptr);
     CHECK(sl->intensity == doctest::Approx(1.0f));   // 默认值
     CHECK(sl->castShadow == false);                  // 默认值
+}
+
+TEST_CASE("BuildScene 解析 Animation 组件（技术债：反射/AI 补齐）") {
+    World world;
+    SceneGraph sg(world);
+
+    String json = R"({
+      "entities": [
+        {"name":"AnimatedCube","transform":{"position":[1,1,0]},
+         "components":[{"type":"Animation","currentClip":2,"time":1.5,"speed":2.0,"playing":true}]}
+      ]
+    })";
+
+    SceneBuildResult r = BuildScene(world, sg, json);
+    REQUIRE(r.success == true);
+    REQUIRE(r.entities.size() == 1);
+
+    auto* a = world.GetComponent<AnimationComponent>(r.entities[0]);
+    REQUIRE(a != nullptr);
+    CHECK(a->currentClip == 2);
+    CHECK(a->time == doctest::Approx(1.5f));
+    CHECK(a->speed == doctest::Approx(2.0f));
+    CHECK(a->playing == true);
 }
