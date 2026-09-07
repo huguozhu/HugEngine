@@ -35,7 +35,10 @@ void ImGuiIntegration::Initialize(GLFWwindow* window, rhi::IRHIDevice* device,
 
         static const ImWchar chineseRanges[] = {
             0x0020, 0x00FF,  // Basic Latin + Latin Supplement
+            0x2000, 0x206F,  // General Punctuation（—— 破折号等）
+            0x3000, 0x303F,  // CJK Symbols and Punctuation（。、？；）
             0x4E00, 0x9FFF,  // CJK Unified Ideographs
+            0xFF00, 0xFFEF,  // Fullwidth Forms（全角括号（）等）
             0,
         };
 
