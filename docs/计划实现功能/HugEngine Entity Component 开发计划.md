@@ -293,7 +293,7 @@ P4（大工程）: Phase C（等待路线图）
   2. Decal 为投射片 MVP（无 GBuffer 投影 Pass）；InstancedMesh 仅支持 Forward 非 GPU-Culling 路径，逐实例剔除未接
   3. 实体引用类属性（homingTarget/targetEntity/cameraEntity 等）不进反射/词表（u64 无法快照序列化）
   4. Collision 调试线框、SplineMesh 沿样条生成等预留未接（maxSlopeAngle 坡度过滤 ✅ `28ae06b`、SpringArm 碰撞缩臂 ✅ `bc14c57` 已于 2026-09-07 落地）
-- **遗留**：Phase C 剩余（Audio/NavMesh，依赖路线图 P6/P3；Physics C2 ✅ `7eb1a66`~`2b0ae5c` 已完成）；SkeletalMesh 后续扩展（剪辑混合、动画重定向）；既有组件 Particle/Memory/Goal 的反射/AI 补齐（Animation ✅ `98c4080` 已完成）
+- **遗留**：Phase C 剩余（Audio/NavMesh，依赖路线图 P6/P3；Physics C2 ✅ `7eb1a66`~`2b0ae5c` 已完成）；SkeletalMesh 后续扩展（剪辑混合、动画重定向）；**既有组件 Particle/Memory/Goal 的反射/AI 补齐 ✅ 已完成**（Animation `98c4080`；Particle emitRate 深补 `fa1410c`；Memory/Goal 类型注册——内部结构按文档不暴露）
 
 ---
 
@@ -308,10 +308,11 @@ P4（大工程）: Phase C（等待路线图）
 | `28ae06b` | **maxSlopeAngle 坡度过滤落地**（前向渲染移动系统，B3 收尾） | §十一 技术债④ ✅ |
 | `bc14c57` | **SpringArm 碰撞缩臂落地（防穿墙）**（A6 收尾） | §十一 技术债④ ✅ |
 | `7eb1a66`~`2b0ae5c` | **Phase C C2 Physics（Jolt）完整落地**：Engine/Physics 模块（PhysicsWorld/JoltConversions/RigidBodyComponent/PhysicsSystem）+ 静态碰撞体 + 词表（RigidBody→12）+ 02 彩球演示 + ImGui 激活刚体数 + doctest（103 用例） | §七 Physics 行 ✅ / §十一 词表+遗留 ✅ |
+| `fa1410c` | **ParticleComponent 反射/AI 发射参数补齐（emitRate 深补）**：emitaRate（>0 覆盖默认发射率）+ 粒子逻辑接入（兼容旧调用）；Memory/Goal 类型注册（AgentReflect，内部结构不暴露） | §十一 遗留 ✅ |
 
 **仍待办（对应后续计划）**：
-- Phase C 剩余：Physics（C2）/ NavMesh（C4）/ Audio（C3），依赖路线图 P6/P3 或第三方库
+- Phase C 剩余：NavMesh（C4）/ Audio（C3），依赖路线图 P6/P3 或第三方库（Physics C2 ✅）
 - SkeletalMesh 后续扩展：剪辑混合、动画重定向
-- 既有组件 AI 补齐：Particle / Memory / Goal 的反射属性注册（Particle 需选定暴露的发射参数；Memory/Goal 决定是否暴露内部结构）
+- 组件 AI 补齐已完成（Animation/RigidBody/Particle 反射+词表；Memory/Goal 类型注册）——后续仅当需暴露内部结构时再议
 - MVP 技术债：bindless 堆环形化（TextRender/InstancedMesh 高频更新）、Decal GBuffer 投影 Pass、InstancedMesh 接 GPU-Culling + 逐实例剔除、Collision 调试线框、SplineMesh 沿样条生成
 - 架构触发项：渲染类型注册表化（InstancedMesh 为第 7 个渲染组件，下一个渲染组件即触发）、CollectLights 数据驱动抽取（下一个光源类型触发）

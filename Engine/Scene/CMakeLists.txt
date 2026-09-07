@@ -60,6 +60,12 @@ set(SCENE_SOURCES
     Scene/SplineComponent.cpp
     Scene/SplineSystem.h
     Scene/SplineSystem.cpp
+    Scene/NavMeshComponent.h
+    Scene/NavMeshSystem.h
+    Scene/NavMeshSystem.cpp
+    Scene/NavAgentComponent.h
+    Scene/NavAgentSystem.h
+    Scene/NavAgentSystem.cpp
     Scene/InstancedMeshComponent.h
     Scene/InstancedMeshComponent.cpp
     Scene/SkeletonAsset.h

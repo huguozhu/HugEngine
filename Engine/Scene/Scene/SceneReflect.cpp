@@ -27,6 +27,8 @@
 #include "Scene/AbilityComponent.h"
 #include "Scene/SplineComponent.h"
 #include "Scene/InstancedMeshComponent.h"
+#include "Scene/NavMeshComponent.h"
+#include "Scene/NavAgentComponent.h"
 #include "Scene/SkeletalMeshComponent.h"
 
 namespace he {
@@ -350,6 +352,30 @@ HE_BEGIN_REGISTER(he::SplineComponent)
     HE_END_PROPERTY()
     HE_REGISTER_PROPERTY(he::SplineComponent, bool, bShowPath)
         HE_ATTR_CATEGORY("Spline") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("是否显示调试路径（预留）")
+    HE_END_PROPERTY()
+HE_END_REGISTER()
+
+HE_BEGIN_REGISTER(he::NavMeshComponent)
+    HE_REGISTER_PROPERTY(he::NavMeshComponent, float, cellSize)
+        HE_ATTR_CATEGORY("NavMesh") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("导航网格每格尺寸（米）")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::NavMeshComponent, int, width)
+        HE_ATTR_CATEGORY("NavMesh") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_DESCRIPTION("网格列数")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::NavMeshComponent, int, height)
+        HE_ATTR_CATEGORY("NavMesh") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_DESCRIPTION("网格行数")
+    HE_END_PROPERTY()
+HE_END_REGISTER()
+
+HE_BEGIN_REGISTER(he::NavAgentComponent)
+    HE_REGISTER_PROPERTY(he::NavAgentComponent, float3, target)
+        HE_ATTR_CATEGORY("NavMesh") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("寻路目标点（世界坐标）")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::NavAgentComponent, bool, hasTarget)
+        HE_ATTR_CATEGORY("NavMesh") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_DESCRIPTION("是否有寻路目标")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::NavAgentComponent, float, speed)
+        HE_ATTR_CATEGORY("NavMesh") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("移动速度（米/秒）")
     HE_END_PROPERTY()
 HE_END_REGISTER()
 

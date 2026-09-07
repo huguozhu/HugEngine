@@ -19,7 +19,9 @@ String BuildTypeSchema() {
     "Decal":            {"fields": ["decalTexture", "size", "opacity"]},
     "PhysicalSky":      {"fields": ["sunDirection", "turbidity", "intensity"]},
     "Animation":        {"fields": ["currentClip", "time", "speed", "playing"]},
-    "RigidBody":        {"fields": ["shape", "radius", "halfExtent", "height", "mass", "friction", "restitution", "isDynamic", "enabled"]}
+    "RigidBody":        {"fields": ["shape", "radius", "halfExtent", "height", "mass", "friction", "restitution", "isDynamic", "enabled"]},
+    "NavMesh":          {"fields": ["cellSize", "width", "height"]},
+    "NavAgent":         {"fields": ["target", "speed"]}
   },
   "transform": {"fields": ["position [x,y,z] 米", "scale [x,y,z] 可选"]},
   "color_format": "[r,g,b] 0~1",

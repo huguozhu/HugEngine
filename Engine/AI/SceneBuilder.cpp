@@ -12,6 +12,8 @@
 #include "Scene/DecalComponent.h"
 #include "Scene/AnimationComponent.h"
 #include "Physics/Physics/RigidBodyComponent.h"
+#include "Scene/NavMeshComponent.h"
+#include "Scene/NavAgentComponent.h"
 #include "Core/Log.h"
 
 #include "nlohmann/json.hpp"
@@ -226,6 +228,20 @@ SceneBuildResult BuildScene(World& world, SceneGraph& sg, const String& sceneJso
                     rb->restitution = GetFloatField(comp, "restitution", rb->restitution);
                     rb->isDynamic   = GetBoolField(comp, "isDynamic", rb->isDynamic);
                     rb->enabled     = GetBoolField(comp, "enabled", rb->enabled);
+                }
+                else if (type == "NavMesh") {
+                    auto* nav = world.AddComponent<NavMeshComponent>(e);
+                    float cell = GetFloatField(comp, "cellSize", nav->cellSize);
+                    int   w = (int)GetFloatField(comp, "width", (float)nav->width);
+                    int   h = (int)GetFloatField(comp, "height", (float)nav->height);
+                    if (w > 0 && h > 0) nav->Resize(w, h, cell);
+                }
+                else if (type == "NavAgent") {
+                    auto* na = world.AddComponent<NavAgentComponent>(e);
+                    if (comp.contains("target")) {
+                        na->SetTarget(ParseVec3(comp["target"], float3(0,0,0)));
+                    }
+                    na->speed = GetFloatField(comp, "speed", na->speed);
                 }
                 else {
                     // 未知组件类型：跳过并告警（容错，不影响其余实体）

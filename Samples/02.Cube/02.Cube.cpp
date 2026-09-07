@@ -41,6 +41,10 @@
 #include "Scene/SkeletalMeshSystem.h"
 #include "Physics/Physics/RigidBodyComponent.h"
 #include "Physics/Physics/PhysicsSystem.h"
+#include "Scene/NavMeshComponent.h"
+#include "Scene/NavMeshSystem.h"
+#include "Scene/NavAgentComponent.h"
+#include "Scene/NavAgentSystem.h"
 #include "Asset/glTFLoader.h"
 #include "Editor/ImGuiIntegration.h"
 #include "imgui.h"
@@ -225,6 +229,36 @@ int main() {
             rb->friction = 0.4f; rb->restitution = 0.3f + i * 0.15f;   // 不同弹性，弹跳高度区分
             sceneGraph.SetParent(ball, Entity{kInvalidEntity});
         }
+    }
+
+    // 寻路演示（NavMesh C4）：NavMeshComponent + NavAgent 沿网格绕过阻挡墙走到目标
+    Entity navEntity;
+    Entity navAgentEntity;
+    {
+        navEntity = world.CreateEntity("NavMesh");
+        world.AddComponent<TransformComponent>(navEntity);
+        auto* nav = world.AddComponent<NavMeshComponent>(navEntity);
+        nav->Resize(20, 20, 1.0f);   // 20x20 格，每格 1m
+        nav->origin = float3(-10.0f, 0.0f, -20.0f);   // 网格覆盖 z ∈ [-20,0]（相机前方）
+        // 中间阻挡墙（col 5..14, row 10）→ 需绕行
+        for (int c = 5; c <= 14; ++c) nav->SetBlocked(c, 10, true);
+        sceneGraph.SetParent(navEntity, Entity{kInvalidEntity});
+
+        navAgentEntity = world.CreateEntity("NavAgent");
+        auto* axf = world.AddComponent<TransformComponent>(navAgentEntity);
+        axf->position = float3(-9.0f, 0.0f, -19.0f);   // 网格 (1,1)
+        auto* sphere = world.AddComponent<SphereComponent>(navAgentEntity);
+        sphere->baseColorFactor = float4(0.6f, 0.0f, 1.0f, 1.0f);   // 紫色寻路代理
+        sphere->radius = 0.3f;
+        sphere->segmentCount = 16;
+        sphere->ringCount = 8;
+        sphere->castShadow = true;
+        sphere->OnCreate();
+        auto* agent = world.AddComponent<NavAgentComponent>(navAgentEntity);
+        agent->navMeshEntity = navEntity;
+        agent->speed = 4.0f;
+        agent->SetTarget(float3(8.0f, 0.0f, -2.0f));   // 目标（墙对侧，网格 (18,18)）→ 绕行
+        sceneGraph.SetParent(navAgentEntity, Entity{kInvalidEntity});
     }
     CreateShapeEntity(world, sceneGraph,
         float3(0.0f, 4.0f, 0.0f), float3(0.8f),
@@ -937,6 +971,9 @@ int main() {
 
         // 物理系统（Jolt C2）：RigidBody 刚体 + CollisionComponent 静态碰撞体步进/回写
         he::physics::PhysicsSystem::Update(world, sceneGraph, deltaTime);
+
+        // 寻路系统（C4）：NavAgent 沿 NavMesh A* 路径移动
+        he::NavAgentSystem::Update(world, sceneGraph, deltaTime);
 
         // 帧相机解析（S0.4）：场景含主相机实体时优先使用，否则回退自由相机
         // 本示例场景无 CameraComponent 实体，行为与之前一致（始终走 CameraController 回退）
