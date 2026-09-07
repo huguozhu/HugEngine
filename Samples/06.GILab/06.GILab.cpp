@@ -21,7 +21,6 @@
 #include "Scene/SphereComponent.h"
 #include "Scene/SkyboxComponent.h"
 #include "Scene/AnimationComponent.h"
-#include "Scene/ParticleComponent.h"
 #include "Asset/glTFLoader.h"
 #include "Editor/ImGuiIntegration.h"
 #include "imgui.h"
@@ -124,8 +123,8 @@ int main() {
     // ============================================================
     EngineConfig config;
     config.appName      = "HugEngine — 06.GILab (Cornell Box GI 对比)";
-    config.windowWidth  = 960;
-    config.windowHeight = 540;
+    config.windowWidth  = 1920;   // 窗口宽（960×2）
+    config.windowHeight = 1080;   // 窗口高（540×2）
     config.enableVSync  = true;
     config.logLevel     = LogLevel::Info;
 
@@ -178,133 +177,8 @@ int main() {
         HE_CORE_INFO("加载配置文件: {}", g_ConfigPath);
     }
 
-    // --- 添加方向光 ---
-    Entity mainLightEntity;
-    DirectionalLight* mainDL = nullptr;
-    {
-        mainLightEntity = world.CreateEntity("DirectionalLight");
-        world.AddComponent<TransformComponent>(mainLightEntity);
-        mainDL = world.AddComponent<DirectionalLight>(mainLightEntity);
-        mainDL->direction    = float3(
-            GetFloat(cfgData, "light_dir_x", 0.4f),
-            GetFloat(cfgData, "light_dir_y", -1.0f),
-            GetFloat(cfgData, "light_dir_z", 0.6f));
-        mainDL->color        = float3(
-            GetFloat(cfgData, "light_color_r", 1.0f),
-            GetFloat(cfgData, "light_color_g", 0.95f),
-            GetFloat(cfgData, "light_color_b", 0.85f));
-        mainDL->intensity    = GetFloat(cfgData, "light_intensity", 15.0f);
-        mainDL->castShadow       = GetInt(cfgData, "shadow_enabled", 1) != 0;
-        mainDL->shadowBias       = GetFloat(cfgData, "shadow_bias", 0.003f);
-        mainDL->shadowNormalBias = GetFloat(cfgData, "shadow_normal_bias", 0.02f);
-        mainDL->shadowStrength   = GetFloat(cfgData, "shadow_strength", 1.0f);
-        mainDL->enabled          = GetInt(cfgData, "light_enabled", 1) != 0;
-        sceneGraph.SetParent(mainLightEntity, Entity{kInvalidEntity});
-    }
+    // 场景无任何直接光源：光照完全由 GI 提供（IBL 环境光 + SSGI/DDGI 间接光）
 
-    // --- 添加半球环境光补光 ---
-    {
-        Entity lightEntity = world.CreateEntity("FillLight");
-        world.AddComponent<TransformComponent>(lightEntity);
-        auto* dl = world.AddComponent<DirectionalLight>(lightEntity);
-        dl->direction = float3(
-            GetFloat(cfgData, "fill_dir_x", -0.3f),
-            GetFloat(cfgData, "fill_dir_y", -0.4f),
-            GetFloat(cfgData, "fill_dir_z", -0.5f));
-        dl->color     = float3(
-            GetFloat(cfgData, "fill_color_r", 0.6f),
-            GetFloat(cfgData, "fill_color_g", 0.7f),
-            GetFloat(cfgData, "fill_color_b", 0.9f));
-        dl->intensity = GetFloat(cfgData, "fill_intensity", 2.0f);
-        dl->enabled   = GetInt(cfgData, "fill_enabled", 1) != 0;
-        sceneGraph.SetParent(lightEntity, Entity{kInvalidEntity});
-    }
-
-    // --- 添加点光源 + 可视化球体 ---
-    Entity pointLightEntity, pointLightSphereEntity;
-    {
-        pointLightEntity = world.CreateEntity("PointLight");
-        world.AddComponent<TransformComponent>(pointLightEntity);
-        auto* pl = world.AddComponent<PointLight>(pointLightEntity);
-        pl->color      = float3(
-            GetFloat(cfgData, "point_color_r", 1.0f),
-            GetFloat(cfgData, "point_color_g", 0.85f),
-            GetFloat(cfgData, "point_color_b", 0.6f));
-        pl->intensity  = GetFloat(cfgData, "point_intensity", 20.0f);
-        pl->range      = GetFloat(cfgData, "point_range", 600.0f);
-        pl->castShadow = GetInt(cfgData, "point_shadow", 1) != 0;
-        pl->shadowBias = GetFloat(cfgData, "point_bias", 0.005f);
-        pl->enabled    = GetInt(cfgData, "point_enabled", 1) != 0;
-
-        auto* plTransform = world.GetComponent<TransformComponent>(pointLightEntity);
-        if (plTransform) {
-            plTransform->position = float3(
-                GetFloat(cfgData, "point_pos_x", -300.0f),
-                GetFloat(cfgData, "point_pos_y", 100.0f),
-                GetFloat(cfgData, "point_pos_z", 0.0f));
-        }
-        sceneGraph.SetParent(pointLightEntity, Entity{kInvalidEntity});
-
-        // 可视化球体
-        pointLightSphereEntity = world.CreateEntity("PointLightSphere");
-        world.AddComponent<TransformComponent>(pointLightSphereEntity);
-        auto* sphere = world.AddComponent<SphereComponent>(pointLightSphereEntity);
-        sphere->radius       = 15.0f;
-        sphere->segmentCount = 16;
-        sphere->ringCount    = 8;
-        sphere->OnCreate();
-
-        auto* sphereTransform = world.GetComponent<TransformComponent>(pointLightSphereEntity);
-        if (sphereTransform && plTransform)
-            sphereTransform->position = plTransform->position;
-        sceneGraph.SetParent(pointLightSphereEntity, Entity{kInvalidEntity});
-    }
-
-    // --- 聚光灯 ---
-    Entity spotLightEntity, spotLightConeEntity;
-    {
-        spotLightEntity = world.CreateEntity("SpotLight");
-        world.AddComponent<TransformComponent>(spotLightEntity);
-        auto* sl = world.AddComponent<SpotLight>(spotLightEntity);
-        sl->color           = float3(
-            GetFloat(cfgData, "spot_color_r", 1.0f),
-            GetFloat(cfgData, "spot_color_g", 0.9f),
-            GetFloat(cfgData, "spot_color_b", 0.7f));
-        sl->intensity       = GetFloat(cfgData, "spot_intensity", 80.0f);
-        sl->range           = GetFloat(cfgData, "spot_range", 1200.0f);
-        sl->innerConeAngle  = GetFloat(cfgData, "spot_inner_angle", 0.25f);
-        sl->outerConeAngle  = GetFloat(cfgData, "spot_outer_angle", 0.50f);
-        sl->direction       = float3(
-            GetFloat(cfgData, "spot_dir_x", 0.0f),
-            GetFloat(cfgData, "spot_dir_y", -1.0f),
-            GetFloat(cfgData, "spot_dir_z", 0.3f));
-        sl->castShadow      = GetInt(cfgData, "spot_shadow", 1) != 0;
-        sl->shadowBias      = GetFloat(cfgData, "spot_bias", 0.005f);
-        sl->enabled         = GetInt(cfgData, "spot_enabled", 1) != 0;
-
-        auto* slTransform = world.GetComponent<TransformComponent>(spotLightEntity);
-        if (slTransform) {
-            slTransform->position = float3(
-                GetFloat(cfgData, "spot_pos_x", 0.0f),
-                GetFloat(cfgData, "spot_pos_y", 200.0f),
-                GetFloat(cfgData, "spot_pos_z", -200.0f));
-        }
-        sceneGraph.SetParent(spotLightEntity, Entity{kInvalidEntity});
-
-        // 可视化锥体（小圆锥表示光源位置）
-        spotLightConeEntity = world.CreateEntity("SpotLightCone");
-        world.AddComponent<TransformComponent>(spotLightConeEntity);
-        auto* coneSphere = world.AddComponent<SphereComponent>(spotLightConeEntity);
-        coneSphere->radius       = 10.0f;
-        coneSphere->segmentCount = 8;
-        coneSphere->ringCount    = 4;
-        coneSphere->OnCreate();
-
-        auto* coneTransform = world.GetComponent<TransformComponent>(spotLightConeEntity);
-        if (coneTransform && slTransform)
-            coneTransform->position = slTransform->position;
-        sceneGraph.SetParent(spotLightConeEntity, Entity{kInvalidEntity});
-    }
 
     // --- 天空盒 ---
     {
@@ -468,31 +342,6 @@ int main() {
     pipeline.Initialize(device.get());
     pipeline.SetSwapChain(swapchain.get());
     pipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
-
-    // ── 测试粒子效果 ──
-    {
-        Entity particleEntity = world.CreateEntity("TestParticle");
-        world.AddComponent<TransformComponent>(particleEntity);
-        auto* pc = world.AddComponent<ParticleComponent>(particleEntity);
-        pc->GetParam().particlesPerSec  = 100.0f;
-        pc->GetParam().minLifeTime      = 0.5f;
-        pc->GetParam().maxLifeTime      = 2.0f;
-        pc->GetParam().minInitSpeed     = 2.0f;
-        pc->GetParam().maxInitSpeed     = 10.0f;
-        pc->GetParam().emitShape        = EmitShapeType::Sphere;
-        pc->GetParam().sphereRadius     = 5.0f;
-        pc->GetParam().emitDirectionType = EmitDirectionType::Uniform_3D;
-        pc->GetParam().gravity          = float3(0, -9.8f, 0);
-        pc->GetParam().duration         = -1.0f;  // 无限
-        pc->Play();
-        sceneGraph.SetParent(particleEntity, Entity{kInvalidEntity});
-
-        // 注册到渲染管线
-        u32 pid = pipeline.GetParticleRenderer().RegisterComponent(pc, device.get());
-        pipeline.AddParticleComponent(pid);
-
-        HE_CORE_INFO("粒子系统已注册: id={} maxParticles={}", pid, pc->GetMaxParticles());
-    }
 
     // ── 从配置文件恢复管线 / GI / 后处理设置 ──
     if (hasConfig) {
@@ -746,20 +595,20 @@ int main() {
                     pipeline.GetGPUCulling().GetLastVisibleCount());
             }
 
+            // ── GI 实验室：只看 GI（关闭直接光）→ 逐个开启 GI 看间接光贡献 ──
+            ImGui::SeparatorText("GI 实验室");
+            static bool s_gISolo = false;
+            if (ImGui::Checkbox("只看 GI（关闭直接光）", &s_gISolo)) {
+                // 关闭/恢复所有直接光源：画面只剩 GI（IBL/SSGI/DDGI/RSM 等）的间接光
+                world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& l){ l.enabled = !s_gISolo; });
+                world.ForEach<he::PointLight>([&](he::Entity, he::PointLight& l){ l.enabled = !s_gISolo; });
+                world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight& l){ l.enabled = !s_gISolo; });
+                world.ForEach<he::RectLight>([&](he::Entity, he::RectLight& l){ l.enabled = !s_gISolo; });
+            }
+            ImGui::TextWrapped("开启后画面只剩 GI 间接光——\n逐个启用 SSGI/DDGI 看各自贡献；IBL 强度即环境 GI 强度。");
+
             // 相机
             ImGui::SeparatorText("相机");
-            if (animCameraMode) {
-                ImGui::TextColored({0.3f, 1.0f, 0.5f, 1.0f}, "动画相机 (按 T 切换手动)");
-                bool playing = camAnim->playing;
-                if (ImGui::Checkbox("播放动画", &playing))
-                    camAnim->playing = playing;
-                ImGui::SameLine();
-                float s = camAnim->speed;
-                if (ImGui::SliderFloat("动画速度", &s, 0.1f, 3.0f, "%.1f"))
-                    camAnim->speed = s;
-            } else {
-                ImGui::TextColored({1.0f, 1.0f, 0.3f, 1.0f}, "手动相机 (按 T 切换动画)");
-            }
             ImGui::DragFloat3("位置##Camera", &camCtrl.GetCamera().position[0], 5.0f);
             float yawDeg   = glm::degrees(camCtrl.GetYaw());
             float pitchDeg = glm::degrees(camCtrl.GetPitch());
@@ -778,50 +627,6 @@ int main() {
                 camCtrl.GetCamera().farPlane = farP;
 
             // ── 物理相机参数 ──
-            ImGui::SeparatorText("物理相机");
-            static render::PhysicalCameraParams physCam;
-            static bool usePhysicalCamera = false;
-            ImGui::Checkbox("启用物理相机", &usePhysicalCamera);
-            if (usePhysicalCamera) {
-                ImGui::Indent(12.0f);
-                // 镜头
-                ImGui::DragFloat("焦距 (mm)", &physCam.focalLength, 1.0f, 10.0f, 200.0f, "%.0f");
-                ImGui::DragFloat("光圈 f/", &physCam.fStop, 0.1f, 1.0f, 22.0f, "%.1f");
-                // 快门 + ISO
-                float shutterRecip = 1.0f / physCam.shutterSpeed;
-                ImGui::DragFloat("快门 1/", &shutterRecip, 1.0f, 1.0f, 8000.0f, "%.0f");
-                physCam.shutterSpeed = 1.0f / std::max(shutterRecip, 1.0f);
-                ImGui::DragFloat("ISO", &physCam.iso, 10.0f, 50.0f, 25600.0f, "%.0f");
-                // 传感器预设
-                static int sensorPreset = 0;
-                const char* sensorNames[] = {"全画幅 36×24", "APS-C 23.6×15.6", "M4/3 17.3×13.0"};
-                if (ImGui::Combo("传感器", &sensorPreset, sensorNames, 3)) {
-                    if (sensorPreset == 0) physCam.sensor = render::SensorSize::FullFrame();
-                    else if (sensorPreset == 1) physCam.sensor = render::SensorSize::APSC();
-                    else physCam.sensor = render::SensorSize::Micro43();
-                }
-                // 对焦距离
-                ImGui::DragFloat("对焦距离 (m)", &physCam.focusDistance, 0.1f, 0.1f, 500.0f, "%.1f");
-
-                // 应用物理相机参数到 CameraData
-                auto derived = render::DerivePhysicalCamera(physCam,
-                    camCtrl.GetCamera().aspectRatio);
-                camCtrl.GetCamera().fov               = derived.fov;
-                camCtrl.GetCamera().apertureDiameter   = derived.apertureDiameter;
-                camCtrl.GetCamera().exposureBias       = derived.exposureBias;
-                camCtrl.GetCamera().motionBlurIntensity = derived.motionBlurIntensity;
-                camCtrl.GetCamera().focusDistance      = derived.focusDistance;
-                camCtrl.GetCamera().maxCoC             = derived.maxCoC;
-                camCtrl.GetCamera().nearPlane          = physCam.nearPlane;
-                camCtrl.GetCamera().farPlane           = physCam.farPlane;
-
-                // 显示推导值
-                ImGui::Text("推导 FOV: %.1f°  |  光圈孔径: %.2f mm", derived.fov, derived.apertureDiameter);
-                ImGui::Text("EV 偏置: %+.2f  |  运动模糊: %.2f×", derived.exposureBias, derived.motionBlurIntensity);
-                ImGui::Text("弥散圆 max: %.3f", derived.maxCoC);
-                ImGui::Unindent(12.0f);
-            }
-
             // GI — IBL
             auto* gi = pipeline.GetGI();
             if (gi) {
@@ -892,14 +697,6 @@ int main() {
                 ImGui::Text("耗时 %.2f ms", ssr->GetDebugData().avgRenderTimeMs);
             }
 
-            // ── GBuffer 模式 ──
-            ImGui::SeparatorText("GBuffer 渲染模式");
-            int gbMode = (int)pipeline.GetGBufferMode();
-            ImGui::RadioButton("CPU Driven", &gbMode, 0); ImGui::SameLine();
-            ImGui::RadioButton("GPU Driven (ExecuteIndirect)", &gbMode, 1);
-            if (gbMode != (int)pipeline.GetGBufferMode())
-                pipeline.SetGBufferMode((render::GBufferRenderer::Mode)gbMode);
-
             // ── AutoExposure ──
             ImGui::SeparatorText("AutoExposure");
             {
@@ -917,222 +714,12 @@ int main() {
                 }
             }
 
-            // ── ColorGrading ──
-            ImGui::SeparatorText("色彩分级");
-            {
-                auto& cg = pipeline.GetColorGrading();
-                bool cgOn = cg.IsEnabled();
-                if (ImGui::Checkbox("启用色彩分级", &cgOn)) cg.SetEnabled(cgOn);
-                if (cgOn) {
-                    ImGui::Indent(12.0f);
-                    float s = cg.GetSaturation();
-                    if (ImGui::SliderFloat("饱和度", &s, 0.0f, 2.0f, "%.2f")) cg.SetSaturation(s);
-                    float c = cg.GetContrast();
-                    if (ImGui::SliderFloat("对比度", &c, 0.5f, 2.0f, "%.2f")) cg.SetContrast(c);
-                    float v = cg.GetVibrance();
-                    if (ImGui::SliderFloat("Vibrance", &v, 0.0f, 2.0f, "%.2f")) cg.SetVibrance(v);
-                    ImGui::Unindent(12.0f);
-                }
-            }
-
-            // ── 后处理 ──
+            // ── 后处理（仅保留与 GI/AO 相关的 SSAO）──
             ImGui::SeparatorText("后处理");
             {
-                // SSAO
                 bool ssaoOn = pipeline.GetSSAO().enabled;
-                if (ImGui::Checkbox("SSAO", &ssaoOn))
+                if (ImGui::Checkbox("SSAO（环境光遮蔽）", &ssaoOn))
                     pipeline.GetSSAO().enabled = ssaoOn;
-
-                // Bloom
-                auto& bloom = pipeline.GetBloom();
-                bool bloomOn = bloom.IsEnabled();
-                if (ImGui::Checkbox("Bloom", &bloomOn)) bloom.SetEnabled(bloomOn);
-                if (bloomOn) {
-                    ImGui::Indent(12.0f);
-                    float t = bloom.GetThreshold();
-                    if (ImGui::SliderFloat("阈值##bloom", &t, 0.1f, 10.0f, "%.1f")) bloom.SetThreshold(t);
-                    float i = bloom.GetIntensity();
-                    if (ImGui::SliderFloat("强度##bloom", &i, 0.0f, 2.0f, "%.2f")) bloom.SetIntensity(i);
-                    ImGui::Unindent(12.0f);
-                }
-
-                // DOF
-                auto& dof = pipeline.GetDOF();
-                bool dofOn = dof.IsEnabled();
-                if (ImGui::Checkbox("景深 (DOF)", &dofOn)) dof.SetEnabled(dofOn);
-                if (dofOn) {
-                    ImGui::Indent(12.0f);
-                    float fd = dof.GetFocusDepth();
-                    if (ImGui::SliderFloat("对焦深度##dof", &fd, 0.0f, 1.0f, "%.3f")) dof.SetFocusDepth(fd);
-                    float fr = dof.GetFocusRange();
-                    if (ImGui::SliderFloat("过渡范围##dof", &fr, 0.001f, 0.5f, "%.3f")) dof.SetFocusRange(fr);
-                    float di = dof.GetIntensity();
-                    if (ImGui::SliderFloat("强度##dof", &di, 0.0f, 2.0f, "%.2f")) dof.SetIntensity(di);
-                    ImGui::Unindent(12.0f);
-                }
-
-                // MotionBlur
-                auto& mb = pipeline.GetMotionBlur();
-                bool mbOn = mb.IsEnabled();
-                if (ImGui::Checkbox("运动模糊 (MB)", &mbOn)) mb.SetEnabled(mbOn);
-                if (mbOn) {
-                    ImGui::Indent(12.0f);
-                    float mi = mb.GetIntensity();
-                    if (ImGui::SliderFloat("强度##mb", &mi, 0.0f, 2.0f, "%.2f")) mb.SetIntensity(mi);
-                    ImGui::Unindent(12.0f);
-                }
-
-                // 硬件 MSAA（HDR 目标多采样，需重启应用生效）
-                ImGui::Spacing();
-                bool msaaOn = pipeline.IsMSAAEnabled();
-                if (ImGui::Checkbox("MSAA 4x (硬件)", &msaaOn)) {
-                    pipeline.EnableMSAA(msaaOn);
-                }
-                if (msaaOn) {
-                    ImGui::SameLine();
-                    ImGui::TextColored({0.5f, 1.0f, 0.5f, 1.0f}, "(重启生效)");
-                }
-
-                // LDR 抗锯齿（SMAA 与 FXAA 互斥二选一，与 MSAA 可叠加）
-                bool smaaOn = pipeline.IsSMAAEnabled();
-                bool fxaaOn = pipeline.IsFXAAEnabled();
-                int ldrAA = smaaOn ? 1 : (fxaaOn ? 2 : 0);
-                if (ImGui::Combo("LDR 抗锯齿", &ldrAA, "关闭\0SMAA\0FXAA\0")) {
-                    pipeline.EnableSMAA(ldrAA == 1);
-                    pipeline.EnableFXAA(ldrAA == 2);
-                }
-                if (ldrAA == 1) {
-                    ImGui::SameLine();
-                    ImGui::TextColored({0.5f, 0.8f, 1.0f, 1.0f}, "(形态学)");
-                } else if (ldrAA == 2) {
-                    ImGui::SameLine();
-                    ImGui::TextColored({1.0f, 0.8f, 0.5f, 1.0f}, "(快速近似)");
-                }
-            }
-
-            // 光源
-            world.ForEach<he::DirectionalLight>([&](he::Entity e, he::DirectionalLight& dl) {
-                bool isMain = (e == mainLightEntity);
-                ImGui::SeparatorText(isMain ? "主方向光" : "补光");
-                ImGui::Checkbox(isMain ? "启用##MainDL" : "启用##FillDL", &dl.enabled);
-
-                float3 dir = dl.direction;
-                if (ImGui::SliderFloat3(isMain ? "方向##MainDL" : "方向##FillDL", &dir[0], -1.0f, 1.0f, "%.2f")) {
-                    if (glm::dot(dir, dir) > 0.0001f)
-                        dl.direction = glm::normalize(dir);
-                }
-                ImGui::ColorEdit3(isMain ? "颜色##MainDL" : "颜色##FillDL", &dl.color[0]);
-                ImGui::DragFloat(isMain ? "强度##MainDL" : "强度##FillDL", &dl.intensity, 0.1f, 0.0f, 100.0f, "%.1f");
-
-                // 物理光源参数（方向光）
-                static bool physDirLight = false;
-                ImGui::Checkbox(isMain ? "物理模式##PhysDL" : "物理模式##PhysFillDL", &physDirLight);
-                if (physDirLight) {
-                    ImGui::Indent(12.0f);
-                    ImGui::DragFloat(isMain ? "照度 lux##MainDL" : "照度 lux##FillDL",
-                        &dl.illuminance, 1000.0f, 0.0f, 200000.0f, "%.0f");
-                    if (dl.illuminance > 0.0f) {
-                        ImGui::TextDisabled(isMain ? "(!) 强度将被忽略，使用物理模式" : "(!) intensity ignored, using physical");
-                    }
-                    ImGui::DragFloat(isMain ? "色温 K##MainDL" : "色温 K##FillDL",
-                        &dl.colorTemperature, 50.0f, 0.0f, 12000.0f, "%.0f");
-                    ImGui::Unindent(12.0f);
-                }
-
-                if (isMain) {
-                    bool shadowOn = dl.castShadow;
-                    if (ImGui::Checkbox("投射阴影", &shadowOn))
-                        dl.castShadow = shadowOn;
-                    if (dl.castShadow) {
-                        ImGui::Indent(12.0f);
-                        ImGui::DragFloat("深度偏移", &dl.shadowBias, 0.0001f, 0.0f, 0.1f, "%.4f",
-                            ImGuiSliderFlags_Logarithmic);
-                        ImGui::DragFloat("法线偏移", &dl.shadowNormalBias, 0.001f, 0.0f, 0.5f, "%.3f");
-                        ImGui::SliderFloat("阴影强度", &dl.shadowStrength, 0.0f, 1.0f, "%.2f");
-                        ImGui::Unindent(12.0f);
-                    }
-                }
-            });
-
-            // 点光源
-            world.ForEach<he::PointLight>([&](he::Entity e, he::PointLight& pl) {
-                ImGui::SeparatorText("点光源");
-                ImGui::Checkbox("启用##PointEnable", &pl.enabled);
-                auto* plTransform = world.GetComponent<TransformComponent>(e);
-                if (plTransform) {
-                    if (ImGui::DragFloat3("位置##PointLight", &plTransform->position[0], 5.0f)) {
-                        auto* sphereTransform = world.GetComponent<TransformComponent>(pointLightSphereEntity);
-                        if (sphereTransform)
-                            sphereTransform->position = plTransform->position;
-                    }
-                }
-                ImGui::ColorEdit3("颜色", &pl.color[0]);
-                ImGui::DragFloat("强度", &pl.intensity, 0.1f, 0.0f, 200.0f, "%.1f");
-                ImGui::DragFloat("范围", &pl.range, 10.0f, 10.0f, 5000.0f, "%.0f");
-
-                // 物理光源参数（点光源）
-                static bool physPointLight = false;
-                ImGui::Checkbox("物理模式##PhysPoint", &physPointLight);
-                if (physPointLight) {
-                    ImGui::Indent(12.0f);
-                    ImGui::DragFloat("发光强度 cd##Point", &pl.luminousIntensity, 1.0f, 0.0f, 100000.0f, "%.0f");
-                    if (pl.luminousIntensity > 0.0f) {
-                        ImGui::TextDisabled("(!) 强度将被忽略，使用物理模式");
-                    }
-                    ImGui::DragFloat("色温 K##Point", &pl.colorTemperature, 50.0f, 0.0f, 12000.0f, "%.0f");
-                    ImGui::Unindent(12.0f);
-                }
-
-                bool shadowOn = pl.castShadow;
-                if (ImGui::Checkbox("投射阴影##PointShadow", &shadowOn))
-                    pl.castShadow = shadowOn;
-                if (pl.castShadow) {
-                    ImGui::Indent(12.0f);
-                    ImGui::DragFloat("深度偏移##PointBias", &pl.shadowBias, 0.0001f, 0.0f, 0.1f, "%.4f",
-                        ImGuiSliderFlags_Logarithmic);
-                    ImGui::Unindent(12.0f);
-                }
-            });
-
-            // 聚光灯
-            world.ForEach<he::SpotLight>([&](he::Entity e, he::SpotLight& sl) {
-                ImGui::SeparatorText("聚光灯");
-                ImGui::Checkbox("启用##SpotEnable", &sl.enabled);
-                auto* slTransform = world.GetComponent<TransformComponent>(e);
-                if (slTransform) {
-                    if (ImGui::DragFloat3("位置##SpotLight", &slTransform->position[0], 5.0f)) {
-                        auto* coneTransform = world.GetComponent<TransformComponent>(spotLightConeEntity);
-                        if (coneTransform)
-                            coneTransform->position = slTransform->position;
-                    }
-                }
-                float3 dir = sl.direction;
-                if (ImGui::SliderFloat3("方向##SpotDir", &dir[0], -1.0f, 1.0f, "%.2f")) {
-                    if (glm::dot(dir, dir) > 0.0001f)
-                        sl.direction = glm::normalize(dir);
-                }
-                ImGui::ColorEdit3("颜色##SpotColor", &sl.color[0]);
-                ImGui::DragFloat("强度##SpotIntensity", &sl.intensity, 0.1f, 0.0f, 200.0f, "%.1f");
-                ImGui::DragFloat("范围##SpotRange", &sl.range, 10.0f, 10.0f, 5000.0f, "%.0f");
-                ImGui::SliderFloat("内锥角##SpotInner", &sl.innerConeAngle, 0.01f, 1.5f, "%.2f rad");
-                ImGui::SliderFloat("外锥角##SpotOuter", &sl.outerConeAngle, 0.01f, 1.5f, "%.2f rad");
-                bool shadowOn = sl.castShadow;
-                if (ImGui::Checkbox("投射阴影##SpotShadow", &shadowOn))
-                    sl.castShadow = shadowOn;
-                if (sl.castShadow) {
-                    ImGui::Indent(12.0f);
-                    ImGui::DragFloat("深度偏移##SpotBias", &sl.shadowBias, 0.0001f, 0.0f, 0.1f, "%.4f",
-                        ImGuiSliderFlags_Logarithmic);
-                    ImGui::Unindent(12.0f);
-                }
-            });
-
-            // 同步球体位置
-            {
-                auto* plTransform = world.GetComponent<TransformComponent>(pointLightEntity);
-                auto* sphereTransform = world.GetComponent<TransformComponent>(pointLightSphereEntity);
-                if (plTransform && sphereTransform)
-                    sphereTransform->position = plTransform->position;
             }
 
             // ── GPU Profiler ──
@@ -1192,75 +779,6 @@ int main() {
         out["cam_near"]  = std::to_string(camCtrl.GetCamera().nearPlane);
         out["cam_far"]   = std::to_string(camCtrl.GetCamera().farPlane);
 
-        // ── 主方向光 ──
-        if (mainDL) {
-            out["light_enabled"]      = std::to_string(mainDL->enabled ? 1 : 0);
-            out["light_dir_x"]        = std::to_string(mainDL->direction.x);
-            out["light_dir_y"]        = std::to_string(mainDL->direction.y);
-            out["light_dir_z"]        = std::to_string(mainDL->direction.z);
-            out["light_color_r"]      = std::to_string(mainDL->color.x);
-            out["light_color_g"]      = std::to_string(mainDL->color.y);
-            out["light_color_b"]      = std::to_string(mainDL->color.z);
-            out["light_intensity"]    = std::to_string(mainDL->intensity);
-            out["shadow_enabled"]     = std::to_string(mainDL->castShadow ? 1 : 0);
-            out["shadow_bias"]        = std::to_string(mainDL->shadowBias);
-            out["shadow_normal_bias"] = std::to_string(mainDL->shadowNormalBias);
-            out["shadow_strength"]    = std::to_string(mainDL->shadowStrength);
-        }
-
-        // ── 补光 ──
-        world.ForEach<he::DirectionalLight>([&](he::Entity e, he::DirectionalLight& l) {
-            if (e == mainLightEntity) return;
-            out["fill_enabled"]   = std::to_string(l.enabled ? 1 : 0);
-            out["fill_dir_x"]     = std::to_string(l.direction.x);
-            out["fill_dir_y"]     = std::to_string(l.direction.y);
-            out["fill_dir_z"]     = std::to_string(l.direction.z);
-            out["fill_color_r"]   = std::to_string(l.color.x);
-            out["fill_color_g"]   = std::to_string(l.color.y);
-            out["fill_color_b"]   = std::to_string(l.color.z);
-            out["fill_intensity"] = std::to_string(l.intensity);
-        });
-
-        // ── 点光源 ──
-        world.ForEach<he::PointLight>([&](he::Entity e, he::PointLight& pl) {
-            out["point_enabled"]   = std::to_string(pl.enabled ? 1 : 0);
-            out["point_color_r"]   = std::to_string(pl.color.x);
-            out["point_color_g"]   = std::to_string(pl.color.y);
-            out["point_color_b"]   = std::to_string(pl.color.z);
-            out["point_intensity"] = std::to_string(pl.intensity);
-            out["point_range"]     = std::to_string(pl.range);
-            out["point_shadow"]    = std::to_string(pl.castShadow ? 1 : 0);
-            out["point_bias"]      = std::to_string(pl.shadowBias);
-            auto* t = world.GetComponent<TransformComponent>(e);
-            if (t) {
-                out["point_pos_x"] = std::to_string(t->position.x);
-                out["point_pos_y"] = std::to_string(t->position.y);
-                out["point_pos_z"] = std::to_string(t->position.z);
-            }
-        });
-
-        // ── 聚光灯 ──
-        world.ForEach<he::SpotLight>([&](he::Entity e, he::SpotLight& sl) {
-            out["spot_enabled"]     = std::to_string(sl.enabled ? 1 : 0);
-            out["spot_dir_x"]       = std::to_string(sl.direction.x);
-            out["spot_dir_y"]       = std::to_string(sl.direction.y);
-            out["spot_dir_z"]       = std::to_string(sl.direction.z);
-            out["spot_color_r"]     = std::to_string(sl.color.x);
-            out["spot_color_g"]     = std::to_string(sl.color.y);
-            out["spot_color_b"]     = std::to_string(sl.color.z);
-            out["spot_intensity"]   = std::to_string(sl.intensity);
-            out["spot_range"]       = std::to_string(sl.range);
-            out["spot_inner_angle"] = std::to_string(sl.innerConeAngle);
-            out["spot_outer_angle"] = std::to_string(sl.outerConeAngle);
-            out["spot_shadow"]      = std::to_string(sl.castShadow ? 1 : 0);
-            out["spot_bias"]        = std::to_string(sl.shadowBias);
-            auto* t = world.GetComponent<TransformComponent>(e);
-            if (t) {
-                out["spot_pos_x"] = std::to_string(t->position.x);
-                out["spot_pos_y"] = std::to_string(t->position.y);
-                out["spot_pos_z"] = std::to_string(t->position.z);
-            }
-        });
 
         // ── 渲染设置 ──
         out["clustered"]    = std::to_string(pipeline.GetClusteredShading().enabled ? 1 : 0);
@@ -1273,23 +791,6 @@ int main() {
         out["ae_adapt_speed"] = std::to_string(ae.GetAdaptSpeed());
         out["ae_target_lum"]  = std::to_string(ae.GetTargetLum());
 
-        // ── Bloom ──
-        auto& bloom = pipeline.GetBloom();
-        out["bloom_enabled"]   = std::to_string(bloom.IsEnabled() ? 1 : 0);
-        out["bloom_threshold"] = std::to_string(bloom.GetThreshold());
-        out["bloom_intensity"] = std::to_string(bloom.GetIntensity());
-
-        // ── DOF ──
-        auto& dof = pipeline.GetDOF();
-        out["dof_enabled"]   = std::to_string(dof.IsEnabled() ? 1 : 0);
-        out["dof_focus"]     = std::to_string(dof.GetFocusDepth());
-        out["dof_range"]     = std::to_string(dof.GetFocusRange());
-        out["dof_intensity"] = std::to_string(dof.GetIntensity());
-
-        // ── MotionBlur ──
-        auto& mb = pipeline.GetMotionBlur();
-        out["mb_enabled"]   = std::to_string(mb.IsEnabled() ? 1 : 0);
-        out["mb_intensity"] = std::to_string(mb.GetIntensity());
 
         // ── GI ──
         if (auto* gi = pipeline.GetGI()) {
