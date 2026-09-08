@@ -45,6 +45,61 @@ struct LightingInputSources {
 };
 
 // ============================================================
+// LightingInputs — 渲染输入（打包 Render 的全部输入）
+//
+// M1.1：把 LightingPass::Render 的 33 参数收敛为结构体。
+// 仅承载输入数据，不持有资源；生命周期由调用方管理。
+// ============================================================
+struct LightingInputs {
+    // GBuffer 纹理
+    rhi::IRHITexture* gbA = nullptr;
+    rhi::IRHITexture* gbB = nullptr;
+    rhi::IRHITexture* gbC = nullptr;
+    rhi::IRHITexture* gbDepth = nullptr;
+    rhi::IRHITexture* gbE = nullptr;
+    rhi::IRHITexture* gbDisneyA = nullptr;
+    rhi::IRHITexture* gbDisneyB = nullptr;
+    // 阴影贴图
+    rhi::IRHITexture* csmShadow0 = nullptr;
+    rhi::IRHITexture* csmShadow1 = nullptr;
+    rhi::IRHITexture* csmShadow2 = nullptr;
+    rhi::IRHITexture* spotShadow = nullptr;
+    // 光源/阴影数据 SSBO
+    rhi::IRHIBuffer* lightBuffer = nullptr;
+    rhi::IRHIBuffer* shadowBuffer = nullptr;
+    // 屏幕空间效果
+    rhi::IRHITexture* ssaoTex = nullptr;
+    rhi::IRHITexture* ssgiTex = nullptr;
+    rhi::IRHISampler* ssgiSampler = nullptr;
+    rhi::IRHITexture* ssrTex = nullptr;
+    rhi::IRHISampler* ssrSampler = nullptr;
+    // DDGI 探针
+    rhi::IRHIBuffer* ddgiProbeBuffer = nullptr;
+    rhi::IRHIBuffer* ddgiGridUniform = nullptr;
+    // RT 效果输出（可选，非空才替换占位）
+    rhi::IRHITexture* rtShadowMask = nullptr;
+    rhi::IRHITexture* rtReflection = nullptr;
+    rhi::IRHITexture* rtAO = nullptr;
+    rhi::IRHITexture* rtGI = nullptr;
+    // 聚集着色（可选）
+    ClusteredShading* clusteredShading = nullptr;
+    rhi::IRHIBuffer* lightGridBuffer = nullptr;
+    rhi::IRHIBuffer* lightIndexListBuffer = nullptr;
+    std::vector<GPULight>* cachedLights = nullptr;
+    // 相机/渲染参数
+    float4 cameraPos = float4(0, 0, 0, 1);
+    float  iblIntensity = 1.0f;
+    u32    lightCount = 0;
+    u32    width = 0, height = 0;
+    // GI 通道参数（M1：强度由 push constant 驱动，替代 shader 魔法系数）
+    float giIntensity = 1.0f;    // 间接漫反射 GI 总强度（ambient 系数）
+    float aoIntensity = 1.0f;    // AO 强度
+    float ddgiScale   = 1.0f;    // DDGI 贡献缩放
+    bool  ddgiEnabled = true;    // DDGI 探针 GI 是否采样
+    LightingInputSources sources; // 通道选择（shadow/ao/specular/diffuse）
+};
+
+// ============================================================
 // LightingPass — 延迟光照 Pass（共享组件）
 //
 // 拥有 HDR 目标纹理 + Lighting PSO + 描述符集
@@ -65,40 +120,8 @@ public:
     void OnResize(rhi::IRHIDevice* device, u32 width, u32 height);
 
     // ── 渲染（每帧调用，由 BuildFrameGraph 的 Lighting pass lambda 调用）──
-    // 执行完整的延迟光照：描述符集绑定 → 聚集着色（可选）→ 全屏三角形绘制
-    void Render(rhi::IRHICommandList* cmd,
-                // GBuffer 纹理（来自 GBufferRenderer）
-                rhi::IRHITexture* gbA, rhi::IRHITexture* gbB, rhi::IRHITexture* gbC,
-                rhi::IRHITexture* gbDepth, rhi::IRHITexture* gbE,
-                rhi::IRHITexture* gbDisneyA, rhi::IRHITexture* gbDisneyB,
-                // 阴影贴图（来自 ShadowSystem）
-                rhi::IRHITexture* csmShadow0, rhi::IRHITexture* csmShadow1,
-                rhi::IRHITexture* csmShadow2, rhi::IRHITexture* spotShadow,
-                // 光源/阴影数据 SSBO
-                rhi::IRHIBuffer* lightBuffer, rhi::IRHIBuffer* shadowBuffer,
-                // 屏幕空间效果
-                rhi::IRHITexture* ssaoTex,
-                rhi::IRHITexture* ssgiTex, rhi::IRHISampler* ssgiSampler,
-                rhi::IRHITexture* ssrTex,  rhi::IRHISampler* ssrSampler,
-                rhi::IRHIBuffer*  ddgiProbeBuffer,
-                rhi::IRHIBuffer*  ddgiGridUniform,
-                bool              ddgiEnabled,
-                float             ddgiScale,
-                // 聚集着色（可选，nullptr 时跳过）
-                ClusteredShading* clusteredShading,
-                rhi::IRHIBuffer* lightGridBuffer,
-                rhi::IRHIBuffer* lightIndexListBuffer,
-                std::vector<GPULight>* cachedLights,
-                // RT 效果纹理（可选，暂未使用，保留供未来 RT 管线扩展）
-                rhi::IRHITexture* rtShadowMask  = nullptr,
-                rhi::IRHITexture* rtReflection  = nullptr,
-                rhi::IRHITexture* rtAO          = nullptr,
-                rhi::IRHITexture* rtGI          = nullptr,
-                // 相机参数
-                const float4& cameraPos = float4(0,0,0,1),
-                float iblIntensity = 1.0f,
-                u32 lightCount = 0,
-                u32 width = 0, u32 height = 0);
+    // M1.1：33 参数收敛为 LightingInputs 结构体
+    void Render(rhi::IRHICommandList* cmd, const LightingInputs& in);
 
     // ── 访问器 ──
     rhi::IRHITexture*   GetHDRTarget()  const { return m_HDRTarget.get(); }

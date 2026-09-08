@@ -397,30 +397,40 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 m_LightBuffers[m_CurrentFrameSlot]->Unmap();
             }
 
-            // 委托 LightingPass 执行完整光照
-            m_Lighting.Render(c,
-                m_GBuffer->GetAlbedo(), m_GBuffer->GetNormal(), m_GBuffer->GetEmissive(),
-                m_GBuffer->GetDepth(), m_GBuffer->GetWorldPos(),
-                m_GBuffer->GetDisneyA(), m_GBuffer->GetDisneyB(),
-                m_ShadowSystem ? m_ShadowSystem->GetShadowMap(0) : nullptr,
-                m_ShadowSystem ? m_ShadowSystem->GetShadowMap(1) : nullptr,
-                m_ShadowSystem ? m_ShadowSystem->GetShadowMap(2) : nullptr,
-                m_ShadowSystem ? m_ShadowSystem->GetShadowMap(4) : nullptr,
-                m_LightBuffers[m_CurrentFrameSlot].get(),
-                m_ShadowBuffers[m_CurrentFrameSlot].get(),
-                m_SSAO.GetAOTexture(),
-                m_DenoiseSSGI.GetOutput(), m_SSGI.GetOutputSampler(),
-                m_DenoiseSSR.GetOutput(), m_SSR.GetOutputSampler(),
-                m_DDGI.GetProbeBuffer(),
-                m_DDGI.GetGridUniform(),
-                m_DDGI.IsEnabled(),
-                m_DDGI.debugScale,
-                &m_ClusteredShading,
-                m_LightGridBuffer.get(), m_LightIndexListBuffer.get(),
-                &m_CachedLights,
-                nullptr, nullptr, nullptr, nullptr,  // RT 纹理（暂未使用）
-                float4(camera.position, 0), iblIntensity, fpc.lightCount,
-                w, h);
+            // 委托 LightingPass 执行完整光照（M1.1：LightingInputs 打包输入）
+            render::LightingInputs in{};
+            in.gbA        = m_GBuffer->GetAlbedo();
+            in.gbB        = m_GBuffer->GetNormal();
+            in.gbC        = m_GBuffer->GetEmissive();
+            in.gbDepth    = m_GBuffer->GetDepth();
+            in.gbE        = m_GBuffer->GetWorldPos();
+            in.gbDisneyA  = m_GBuffer->GetDisneyA();
+            in.gbDisneyB  = m_GBuffer->GetDisneyB();
+            in.csmShadow0 = m_ShadowSystem ? m_ShadowSystem->GetShadowMap(0) : nullptr;
+            in.csmShadow1 = m_ShadowSystem ? m_ShadowSystem->GetShadowMap(1) : nullptr;
+            in.csmShadow2 = m_ShadowSystem ? m_ShadowSystem->GetShadowMap(2) : nullptr;
+            in.spotShadow = m_ShadowSystem ? m_ShadowSystem->GetShadowMap(4) : nullptr;
+            in.lightBuffer  = m_LightBuffers[m_CurrentFrameSlot].get();
+            in.shadowBuffer = m_ShadowBuffers[m_CurrentFrameSlot].get();
+            in.ssaoTex    = m_SSAO.GetAOTexture();
+            in.ssgiTex    = m_DenoiseSSGI.GetOutput();
+            in.ssgiSampler = m_SSGI.GetOutputSampler();
+            in.ssrTex     = m_DenoiseSSR.GetOutput();
+            in.ssrSampler = m_SSR.GetOutputSampler();
+            in.ddgiProbeBuffer = m_DDGI.GetProbeBuffer();
+            in.ddgiGridUniform = m_DDGI.GetGridUniform();
+            in.ddgiEnabled     = m_DDGI.IsEnabled();
+            in.ddgiScale       = m_DDGI.debugScale;
+            in.clusteredShading     = &m_ClusteredShading;
+            in.lightGridBuffer      = m_LightGridBuffer.get();
+            in.lightIndexListBuffer = m_LightIndexListBuffer.get();
+            in.cachedLights         = &m_CachedLights;
+            // RT 纹理暂未使用（保持 nullptr）
+            in.cameraPos    = float4(camera.position, 0);
+            in.iblIntensity = iblIntensity;
+            in.lightCount   = fpc.lightCount;
+            in.width = w; in.height = h;
+            m_Lighting.Render(c, in);
         });
 
     // ── Skybox Pass（背景天空盒/物理天空，Lighting 之后合成，depth=Equal 只画无几何处）──

@@ -828,27 +828,37 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             // gbDepth 的读取依赖（RT 效果 Pass + Lighting）自动生成，此处不再手动
             // 转换——否则 RT Pass 已把深度转成 Read 后再次 Write→Read 会 oldLayout 不匹配。
 
-            // 委托 LightingPass 执行（RT 纹理传入 null 时回退到占位/屏幕空间路径）
-            m_Lighting.Render(c,
-                m_GBuffer->GetAlbedo(), m_GBuffer->GetNormal(),
-                m_GBuffer->GetEmissive(),
-                m_GBuffer->GetDepth(), m_GBuffer->GetWorldPos(),
-                m_GBuffer->GetDisneyA(), m_GBuffer->GetDisneyB(),
-                nullptr, nullptr, nullptr, nullptr,  // 无 CSM/Spot 阴影贴图（RT 阴影替代）
-                m_LightBuffers[m_CurrentFrameSlot].get(),
-                m_ShadowBuffers[m_CurrentFrameSlot].get(),
-                nullptr,  // 无 SSAO（RT AO 替代）
-                nullptr, nullptr,  // 无 SSGI（RT GI 替代）
-                nullptr, nullptr,  // 无 SSR（RT 反射替代）
-                m_DDGI.GetProbeBuffer(),
-                m_DDGI.GetGridUniform(),
-                m_DDGI.IsEnabled(),
-                m_DDGI.debugScale,
-                nullptr,  // 无 Clustered
-                m_LightGridBuffer.get(), m_LightIndexListBuffer.get(),
-                &m_CachedLights,
-                lightingShadowTex, lightingReflTex, lightingAOTex, lightingGITex,  // RT 纹理（降噪后）
-                float4(camera.position, 0), 1.0f, lightCount, w, h);
+            // 委托 LightingPass 执行（M1.1：LightingInputs；RT 纹理非空时走 RT 路径）
+            render::LightingInputs in{};
+            in.gbA = m_GBuffer->GetAlbedo();
+            in.gbB = m_GBuffer->GetNormal();
+            in.gbC = m_GBuffer->GetEmissive();
+            in.gbDepth = m_GBuffer->GetDepth();
+            in.gbE = m_GBuffer->GetWorldPos();
+            in.gbDisneyA = m_GBuffer->GetDisneyA();
+            in.gbDisneyB = m_GBuffer->GetDisneyB();
+            // 无 CSM/Spot 阴影贴图（RT 阴影替代）
+            in.lightBuffer  = m_LightBuffers[m_CurrentFrameSlot].get();
+            in.shadowBuffer = m_ShadowBuffers[m_CurrentFrameSlot].get();
+            // 无 SSAO/SSGI/SSR（RT 效果替代）
+            in.ddgiProbeBuffer = m_DDGI.GetProbeBuffer();
+            in.ddgiGridUniform = m_DDGI.GetGridUniform();
+            in.ddgiEnabled     = m_DDGI.IsEnabled();
+            in.ddgiScale       = m_DDGI.debugScale;
+            // 无 Clustered
+            in.lightGridBuffer      = m_LightGridBuffer.get();
+            in.lightIndexListBuffer = m_LightIndexListBuffer.get();
+            in.cachedLights         = &m_CachedLights;
+            // RT 纹理（降噪后）——非空则 shader 走 RT 路径
+            in.rtShadowMask = lightingShadowTex;
+            in.rtReflection = lightingReflTex;
+            in.rtAO         = lightingAOTex;
+            in.rtGI         = lightingGITex;
+            in.cameraPos    = float4(camera.position, 0);
+            in.iblIntensity = 1.0f;
+            in.lightCount   = lightCount;
+            in.width = w; in.height = h;
+            m_Lighting.Render(c, in);
         });
 
     // ── DDGI 前帧 HDR 捕获 ──

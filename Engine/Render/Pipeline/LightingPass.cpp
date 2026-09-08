@@ -52,32 +52,7 @@ void LightingPass::OnResize(rhi::IRHIDevice* device, u32 width, u32 height) {
 // ============================================================
 // Render — 执行完整延迟光照 Pass
 // ============================================================
-void LightingPass::Render(rhi::IRHICommandList* cmd,
-                           rhi::IRHITexture* gbA, rhi::IRHITexture* gbB, rhi::IRHITexture* gbC,
-                           rhi::IRHITexture* gbDepth, rhi::IRHITexture* gbE,
-                           rhi::IRHITexture* gbDisneyA, rhi::IRHITexture* gbDisneyB,
-                           rhi::IRHITexture* csmShadow0, rhi::IRHITexture* csmShadow1,
-                           rhi::IRHITexture* csmShadow2, rhi::IRHITexture* spotShadow,
-                           rhi::IRHIBuffer* lightBuffer, rhi::IRHIBuffer* shadowBuffer,
-                           rhi::IRHITexture* ssaoTex,
-                           rhi::IRHITexture* ssgiTex, rhi::IRHISampler* ssgiSampler,
-                           rhi::IRHITexture* ssrTex,  rhi::IRHISampler* ssrSampler,
-                           rhi::IRHIBuffer*  ddgiProbeBuffer,
-                           rhi::IRHIBuffer*  ddgiGridUniform,
-                           bool              ddgiEnabled,
-                           float             ddgiScale,
-                           ClusteredShading* clusteredShading,
-                           rhi::IRHIBuffer* lightGridBuffer,
-                           rhi::IRHIBuffer* lightIndexListBuffer,
-                           std::vector<GPULight>* cachedLights,
-                           rhi::IRHITexture* rtShadowMask,
-                           rhi::IRHITexture* rtReflection,
-                           rhi::IRHITexture* rtAO,
-                           rhi::IRHITexture* rtGI,
-                           const float4& cameraPos,
-                           float iblIntensity, u32 lightCount,
-                           u32 width, u32 height) {
-
+void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
     auto bindTex = [&](u32 binding, rhi::IRHITexture* tex, rhi::IRHISampler* sampler) {
         if (tex && sampler && m_Device) {
             m_Device->UpdateDescriptorSet(m_Set, binding,
@@ -86,65 +61,62 @@ void LightingPass::Render(rhi::IRHICommandList* cmd,
     };
 
     // ── 绑定 GBuffer 纹理 ──
-    bindTex(0, gbA, m_HDRSampler.get());
-    bindTex(1, gbB, m_HDRSampler.get());
-    bindTex(2, gbC, m_HDRSampler.get());
-    bindTex(23, gbE, m_PointSampler.get());
-    bindTex(28, gbDisneyA, m_HDRSampler.get());  // disneyA（anisotropic/subsurface/specular/sheen）
-    bindTex(29, gbDisneyB, m_HDRSampler.get());  // disneyB（clearcoat/clearcoatGloss/specularTint.rg）
-    bindTex(3, gbDepth, m_PointSampler.get());
+    bindTex(0, in.gbA, m_HDRSampler.get());
+    bindTex(1, in.gbB, m_HDRSampler.get());
+    bindTex(2, in.gbC, m_HDRSampler.get());
+    bindTex(23, in.gbE, m_PointSampler.get());
+    bindTex(28, in.gbDisneyA, m_HDRSampler.get());  // disneyA（anisotropic/subsurface/specular/sheen）
+    bindTex(29, in.gbDisneyB, m_HDRSampler.get());  // disneyB（clearcoat/clearcoatGloss/specularTint.rg）
+    bindTex(3, in.gbDepth, m_PointSampler.get());
 
     // ── 绑定阴影贴图 ──
-    bindTex(4, csmShadow0, m_HDRSampler.get());
-    bindTex(10, csmShadow1, m_HDRSampler.get());
-    bindTex(11, csmShadow2, m_HDRSampler.get());
-    bindTex(9, spotShadow, m_HDRSampler.get());
+    bindTex(4, in.csmShadow0, m_HDRSampler.get());
+    bindTex(10, in.csmShadow1, m_HDRSampler.get());
+    bindTex(11, in.csmShadow2, m_HDRSampler.get());
+    bindTex(9, in.spotShadow, m_HDRSampler.get());
 
     // ── 绑定光源/阴影数据 SSBO ──
-    if (lightBuffer && m_Device)
-        m_Device->UpdateDescriptorSet(m_Set, 17, rhi::DescriptorType::StorageBuffer, lightBuffer);
-    if (shadowBuffer && m_Device)
-        m_Device->UpdateDescriptorSet(m_Set, 18, rhi::DescriptorType::StorageBuffer, shadowBuffer);
+    if (in.lightBuffer && m_Device)
+        m_Device->UpdateDescriptorSet(m_Set, 17, rhi::DescriptorType::StorageBuffer, in.lightBuffer);
+    if (in.shadowBuffer && m_Device)
+        m_Device->UpdateDescriptorSet(m_Set, 18, rhi::DescriptorType::StorageBuffer, in.shadowBuffer);
 
     // ── 绑定屏幕空间效果 ──
-    bindTex(19, ssgiTex, ssgiSampler);
-    bindTex(20, ssaoTex, m_HDRSampler.get());
-    bindTex(21, ssrTex, ssrSampler);
+    bindTex(19, in.ssgiTex, in.ssgiSampler);
+    bindTex(20, in.ssaoTex, m_HDRSampler.get());
+    bindTex(21, in.ssrTex, in.ssrSampler);
 
     // ── 绑定 DDGI 探针 ──
-    if (ddgiProbeBuffer && m_Device)
-        m_Device->UpdateDescriptorSet(m_Set, 22, rhi::DescriptorType::StorageBuffer, ddgiProbeBuffer);
+    if (in.ddgiProbeBuffer && m_Device)
+        m_Device->UpdateDescriptorSet(m_Set, 22, rhi::DescriptorType::StorageBuffer, in.ddgiProbeBuffer);
     // ── 绑定 DDGI 网格参数 UBO（SampleDDGI 三线性插值用）──
-    if (ddgiGridUniform && m_Device)
-        m_Device->UpdateDescriptorSet(m_Set, 6, rhi::DescriptorType::UniformBuffer, ddgiGridUniform);
+    if (in.ddgiGridUniform && m_Device)
+        m_Device->UpdateDescriptorSet(m_Set, 6, rhi::DescriptorType::UniformBuffer, in.ddgiGridUniform);
 
     // ── 绑定 Hybrid RT 效果输出纹理（非空时才替换占位）──
     // 阴影/AO 遮罩用线性采样上采样到全分辨率；反射/GI HDR 结果用线性采样
-    bindTex(24, rtShadowMask, m_HDRSampler.get());   // RT 阴影遮罩
-    bindTex(25, rtReflection, m_HDRSampler.get());   // RT 反射
-    bindTex(26, rtAO,         m_HDRSampler.get());   // RT AO
-    bindTex(27, rtGI,         m_HDRSampler.get());   // RT GI
+    bindTex(24, in.rtShadowMask, m_HDRSampler.get());   // RT 阴影遮罩
+    bindTex(25, in.rtReflection, m_HDRSampler.get());   // RT 反射
+    bindTex(26, in.rtAO,         m_HDRSampler.get());   // RT AO
+    bindTex(27, in.rtGI,         m_HDRSampler.get());   // RT GI
 
     // ── 聚集着色（可选）──
     u32 useClustered = 0;
     u32 clusterTilesX = 0, clusterTilesY = 0;
     float clusterNear = 0.1f, clusterFar = 2000.0f, clusterLogFactor = 1.0f;
 
-    if (clusteredShading && clusteredShading->enabled && m_Device
-        && lightGridBuffer && lightIndexListBuffer && cachedLights && !cachedLights->empty()) {
-        // 用当前参数调用 BuildClusters（需要 invProj 矩阵，这里用近似值）
-        clusterTilesX = (width  + 63) / 64;
-        clusterTilesY = (height + 63) / 64;
-        // 实际 invProj 由调用方在 Lighting pass lambda 中已将数据收集好
-        // ClusteredShading 自动存储 BuildClusters 结果供后续使用
-        clusteredShading->CullLights(cachedLights->data(), (u32)cachedLights->size());
+    if (in.clusteredShading && in.clusteredShading->enabled && m_Device
+        && in.lightGridBuffer && in.lightIndexListBuffer && in.cachedLights && !in.cachedLights->empty()) {
+        clusterTilesX = (in.width  + 63) / 64;
+        clusterTilesY = (in.height + 63) / 64;
+        in.clusteredShading->CullLights(in.cachedLights->data(), (u32)in.cachedLights->size());
 
         // 上传 LightGrid + LightIndexList
-        m_Device->UpdateDescriptorSet(m_Set, 7, rhi::DescriptorType::StorageBuffer, lightGridBuffer);
-        m_Device->UpdateDescriptorSet(m_Set, 8, rhi::DescriptorType::StorageBuffer, lightIndexListBuffer);
+        m_Device->UpdateDescriptorSet(m_Set, 7, rhi::DescriptorType::StorageBuffer, in.lightGridBuffer);
+        m_Device->UpdateDescriptorSet(m_Set, 8, rhi::DescriptorType::StorageBuffer, in.lightIndexListBuffer);
 
-        clusterTilesX = clusteredShading->GetTileCountX();
-        clusterTilesY = clusteredShading->GetTileCountY();
+        clusterTilesX = in.clusteredShading->GetTileCountX();
+        clusterTilesY = in.clusteredShading->GetTileCountY();
         useClustered = 1;
     }
 
@@ -154,15 +126,15 @@ void LightingPass::Render(rhi::IRHICommandList* cmd,
 
     rhi::ClearValue clr{};
     cmd->BeginOffscreenPass(m_HDRTarget->GetNativeHandle(), m_HDRDepth->GetNativeHandle(),
-                            width, height, &clr, false);
-    cmd->SetViewport({0, (float)height, (float)width, -(float)height, 0, 1});
-    cmd->SetScissor({0, 0, width, height});
+                            in.width, in.height, &clr, false);
+    cmd->SetViewport({0, (float)in.height, (float)in.width, -(float)in.height, 0, 1});
+    cmd->SetScissor({0, 0, in.width, in.height});
 
     // Push constants
     DeferredLightingPushConstant lpc{};
-    lpc.cameraPosition  = cameraPos;
-    lpc.lightCount      = lightCount;
-    lpc.iblIntensity    = iblIntensity;
+    lpc.cameraPosition  = in.cameraPos;
+    lpc.lightCount      = in.lightCount;
+    lpc.iblIntensity    = in.iblIntensity;
     lpc.useClustered    = useClustered;
     lpc.clusterTilesX   = clusterTilesX;
     lpc.clusterTilesY   = clusterTilesY;
@@ -170,13 +142,13 @@ void LightingPass::Render(rhi::IRHICommandList* cmd,
     lpc.clusterFar      = clusterFar;
     lpc.clusterLogFactor = clusterLogFactor;
     // RT 效果输入源标志：纹理非空则 shader 侧使用 RT 输出替代屏幕空间效果
-    lpc.rtShadowSource   = rtShadowMask ? 1u : 0u;
-    lpc.rtAOSource       = rtAO         ? 1u : 0u;
-    lpc.rtSpecularSource = rtReflection ? 1u : 0u;
-    lpc.rtDiffuseSource  = rtGI         ? 1u : 0u;
+    lpc.rtShadowSource   = in.rtShadowMask ? 1u : 0u;
+    lpc.rtAOSource       = in.rtAO         ? 1u : 0u;
+    lpc.rtSpecularSource = in.rtReflection ? 1u : 0u;
+    lpc.rtDiffuseSource  = in.rtGI         ? 1u : 0u;
     lpc.atmosphere = float4(m_AtmSunDir, m_AtmTurbidity);  // 空中透视参数（太阳方向 + 浑浊度）
-    lpc.useDDGI    = ddgiEnabled ? 1u : 0u;                // DDGI 探针 GI 是否采样（关闭后不叠加陈旧探针数据）
-    lpc.ddgiScale  = ddgiScale;                            // DDGI 贡献缩放（替代硬编码 0.5）
+    lpc.useDDGI    = in.ddgiEnabled ? 1u : 0u;             // DDGI 探针 GI 是否采样（关闭后不叠加陈旧探针数据）
+    lpc.ddgiScale  = in.ddgiScale;                         // DDGI 贡献缩放（替代硬编码 0.5）
     cmd->SetPushConstants(0, sizeof(lpc), &lpc);
     cmd->Draw(3);
 
