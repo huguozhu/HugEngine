@@ -241,8 +241,9 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
     float3 prefiltered = u_PrefilterMap.SampleLevel(u_IBLSampler, R, roughness * (kGPUPrefilterMips - 1.0)).rgb;
     color += prefiltered * (F * envBRDF.r + envBRDF.g) * iblIntensity;
 
-    // 5. RSM 间接
-    if (iblIntensity > 0.0 && u_ShadowData[0].shadowParams.z > 0.0) {
+    // 5. RSM 间接（反射阴影贴图，仅当存在方向光阴影时才采样：
+    //    shadowParams.w 为光源类型 0=方向光/1=点光/2=聚光，w<0.5 判定为方向光）
+    if (iblIntensity > 0.0 && lightCount > 0u && u_ShadowData[0].shadowParams.w < 0.5f) {
         float4 lsp = mul(u_ShadowData[0].lightViewProj[0], float4(worldPos, 1.0));
         float2 rsmUV = saturate(lsp.xy / lsp.w * 0.5 + 0.5);
         float3 rsmIndirect = float3(0.0);

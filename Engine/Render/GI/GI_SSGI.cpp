@@ -27,9 +27,9 @@ bool GI_SSGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Device=device;m_Width=width;m_Height=height;
     m_Settings.enabled=false; m_Settings.intensity=1.0f; m_Settings.mode=GIMode::SSGI;
 
-    // Uniform Buffer: 592 字节（kernel[32]×16 + params[16] + proj[64]）
+    // Uniform Buffer: 656 字节（kernel[32]×16 + params[16] + invProj[64] + proj[64]）
     rhi::BufferDesc ubDesc;
-    ubDesc.size = 32*sizeof(float4) + sizeof(float4) + sizeof(float4x4);
+    ubDesc.size = 32*sizeof(float4) + sizeof(float4) + 2*sizeof(float4x4);
     ubDesc.usage = rhi::BufferUsage::Uniform;
     ubDesc.cpuAccess = true;
     m_UniformBuffer = device->CreateBuffer(ubDesc);
@@ -86,11 +86,13 @@ void GI_SSGI::Render(rhi::IRHICommandList* cmd){
 
     // 通过 Uniform Buffer 传递参数（替代 push constant，避免 592 字节溢出 256 限制）
     static std::vector<float4> kernel; if(kernel.empty())GenSSGISamples(kernel,32);
-    struct alignas(16){float4 k[32];float4 p;float4x4 proj;} ub;
+    struct alignas(16){float4 k[32];float4 p;float4x4 invProj;float4x4 proj;} ub;
     memcpy(ub.k,kernel.data(),32*sizeof(float4));
     ub.p=float4(radius, m_Settings.intensity, float(sampleCount), 0);
     float a=float(m_Width)/float(m_Height);
-    ub.proj=glm::inverse(glm::perspectiveRH_ZO(glm::radians(kDefaultFOV),a,kDefaultNearPlane,kDefaultFarPlane));
+    float4x4 proj = glm::perspectiveRH_ZO(glm::radians(kDefaultFOV),a,kDefaultNearPlane,kDefaultFarPlane);
+    ub.invProj = glm::inverse(proj);  // 逆投影：clip→view，重建 view-space
+    ub.proj    = proj;                // 正投影：view→clip，采样点投影到屏幕
     void* mapped=m_UniformBuffer->Map();
     if(mapped){memcpy(mapped,&ub,sizeof(ub));m_UniformBuffer->Unmap();}
     cmd->Draw(3);
