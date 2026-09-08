@@ -89,6 +89,7 @@ set(RENDER_SOURCES
     GI/GI_DDGI.cpp
     GI/GIConfig.h
     GI/GIConfig.cpp
+    GI/GIRegistry.h
     # Shadow
     Shadow/IShadowSystem.h
     Shadow/IShadowTechnique.h

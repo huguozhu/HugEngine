@@ -76,7 +76,7 @@ struct LightGridCell { uint offset; uint count; };
     uint     rtSpecularSource;  // 0=SSR, 1=RT 反射（配合 u_RT_Reflection）
     uint     rtDiffuseSource;   // 0=SSGI, 1=RT GI（配合 u_RT_GI）
     float4   atmosphere;        // sunDir.xyz（指向太阳）+ turbidity（空中透视）
-    uint     useDDGI;           // DDGI 探针 GI 是否启用（0=关, 1=开）
+    uint     ddgiOverlay;           // DDGI 探针 GI 是否启用（0=关, 1=开）
     float    ddgiScale;         // DDGI 贡献缩放（由 debugScale 驱动）
     float    giIntensity;       // 间接漫反射 GI 总强度（SSGI/RT GI/DDGI/RSM 统一驱动）
     float    aoIntensity;       // AO 强度（0=无 AO，1=完整 AO）
@@ -283,8 +283,8 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
     color += rtGI.rgb * giIntensity;
 
     // DDGI 间接漫反射（探针网格，世界空间三线性插值 + SH 评估）
-    // useDDGI=0 时严格不加（关 DDGI 贡献为 0）
-    if (useDDGI != 0u) {
+    // ddgiOverlay=0 时严格不加（关 DDGI 贡献为 0）
+    if (ddgiOverlay != 0u) {
         float3 ddgi = SampleDDGI(worldPos, N);
         color += ddgi * ddgiScale * giIntensity;  // 贡献缩放（debugScale）+ 统一 GI 强度
     }

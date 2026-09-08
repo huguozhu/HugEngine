@@ -843,7 +843,7 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             // 无 SSAO/SSGI/SSR（RT 效果替代）
             in.ddgiProbeBuffer = m_DDGI.GetProbeBuffer();
             in.ddgiGridUniform = m_DDGI.GetGridUniform();
-            in.ddgiEnabled     = m_DDGI.IsEnabled();
+            in.ddgiOverlay     = m_DDGI.IsEnabled();
             in.ddgiScale       = m_DDGI.debugScale;
             // 无 Clustered
             in.lightGridBuffer      = m_LightGridBuffer.get();

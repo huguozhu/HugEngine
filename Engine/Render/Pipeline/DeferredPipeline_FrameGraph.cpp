@@ -427,7 +427,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             in.ssrSampler = m_SSR.GetOutputSampler();
             in.ddgiProbeBuffer = m_DDGI.GetProbeBuffer();
             in.ddgiGridUniform = m_DDGI.GetGridUniform();
-            in.ddgiEnabled     = m_DDGI.IsEnabled();
+            in.ddgiOverlay     = m_DDGI.IsEnabled();
             in.ddgiScale       = m_DDGI.debugScale;
             in.clusteredShading     = &m_ClusteredShading;
             in.lightGridBuffer      = m_LightGridBuffer.get();

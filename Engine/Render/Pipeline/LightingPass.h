@@ -14,34 +14,22 @@ class GBufferRenderer;
 struct RenderGraph;
 
 // ============================================================
-// 光源输入模式枚举（LightingPass 支持多种输入源组合）
+// 4 个通道的独立枚举（类型安全：每个通道只能选本通道技术）
 // ============================================================
-enum class LightingSource : u8 {
-    None = 0,
-    // 阴影
-    Shadow_CSM,     // 传统 CSM + Spot Shadow Maps
-    Shadow_RT,      // 硬件 Ray Tracing 阴影
-    // 环境光遮蔽
-    AO_SSAO,        // 屏幕空间 AO
-    AO_RTAO,        // 硬件 Ray Tracing AO
-    // 镜面反射
-    Specular_SSR,   // 屏幕空间反射
-    Specular_RT,    // 硬件 Ray Tracing 反射
-    // 间接漫反射
-    Diffuse_SSGI,   // 屏幕空间 GI
-    Diffuse_RTGI,   // 硬件 Ray Tracing GI
-    Diffuse_DDGI,   // DDGI 探针 GI
-};
+enum class ShadowChannel : u8 { None = 0, CSM, RT };          // 阴影：CSM / 硬件光追
+enum class AOChannel : u8 { None = 0, SSAO, RTAO };           // 环境光遮蔽：SSAO / RT AO
+enum class SpecularChannel : u8 { None = 0, SSR, RT };        // 镜面反射：SSR / RT 反射
+enum class DiffuseChannel : u8 { None = 0, SSGI, RTGI };// 间接漫反射：SSGI / RT GI（DDGI 由 ddgiOverlay 独立叠加）
 
 // ============================================================
-// 光照输入源配置
+// 光照通道配置（4 通道技术选型）
 // ============================================================
-struct LightingInputSources {
-    LightingSource shadow   = LightingSource::Shadow_CSM;
-    LightingSource ao       = LightingSource::AO_SSAO;
-    LightingSource specular = LightingSource::Specular_SSR;
-    LightingSource diffuse  = LightingSource::Diffuse_SSGI;
-    bool useDDGI = true;  // DDGI 可与任意 diffuse 模式叠加
+struct GIChannels {
+    ShadowChannel   shadow   = ShadowChannel::CSM;
+    AOChannel       ao       = AOChannel::SSAO;
+    SpecularChannel specular = SpecularChannel::SSR;
+    DiffuseChannel  diffuse  = DiffuseChannel::SSGI;
+    bool ddgiOverlay = true;  // DDGI 可与任意 diffuse 模式叠加
 };
 
 // ============================================================
@@ -95,8 +83,8 @@ struct LightingInputs {
     float giIntensity = 1.0f;    // 间接漫反射 GI 总强度（ambient 系数）
     float aoIntensity = 1.0f;    // AO 强度
     float ddgiScale   = 1.0f;    // DDGI 贡献缩放
-    bool  ddgiEnabled = true;    // DDGI 探针 GI 是否采样
-    LightingInputSources sources; // 通道选择（shadow/ao/specular/diffuse）
+    bool  ddgiOverlay = true;    // DDGI 探针 GI 是否采样
+    GIChannels sources; // 通道选择（shadow/ao/specular/diffuse）
 };
 
 // ============================================================
