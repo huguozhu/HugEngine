@@ -149,6 +149,8 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
     lpc.atmosphere = float4(m_AtmSunDir, m_AtmTurbidity);  // 空中透视参数（太阳方向 + 浑浊度）
     lpc.useDDGI    = in.ddgiEnabled ? 1u : 0u;             // DDGI 探针 GI 是否采样（关闭后不叠加陈旧探针数据）
     lpc.ddgiScale  = in.ddgiScale;                         // DDGI 贡献缩放（替代硬编码 0.5）
+    lpc.giIntensity = in.giIntensity;                      // 间接漫反射 GI 总强度（默认 1.0）
+    lpc.aoIntensity = in.aoIntensity;                      // AO 强度（默认 1.0）
     cmd->SetPushConstants(0, sizeof(lpc), &lpc);
     cmd->Draw(3);
 

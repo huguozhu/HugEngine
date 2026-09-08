@@ -260,6 +260,8 @@ GPU_STRUCT DeferredLightingPushConstant {
     float4   atmosphere;            // [64..80] sunDir.xyz（指向太阳）+ turbidity（空中透视）
     GPU_UINT useDDGI;               // [80]      DDGI 探针 GI 是否启用（0=关, 1=开）
     float    ddgiScale;             // [84]      DDGI 贡献缩放（替代硬编码 0.5）
+    float    giIntensity;           // [88]      间接漫反射 GI 总强度（SSGI/RT GI/DDGI/RSM 统一驱动，替代魔法系数）
+    float    aoIntensity;           // [92]      AO 强度（0=无 AO，1=完整 AO）
 };
 
 // --- RTShadowPushConstant: RT 阴影 Pass Push Constant（108B，C++/Slang 单一数据源）---

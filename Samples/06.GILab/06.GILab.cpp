@@ -45,7 +45,7 @@ using namespace he;
 // ============================================================
 // 配置读写（简易 key=value 格式）
 // ============================================================
-static String g_ConfigPath = String(HUGE_CONTENT_DIR) + "Config/04_Deferred.cfg";
+static String g_ConfigPath = String(HUGE_CONTENT_DIR) + "Config/06_GILab.cfg";
 
 static std::unordered_map<String, String> LoadConfigFile(const String& path) {
     std::unordered_map<String, String> map;
@@ -177,8 +177,18 @@ int main() {
         HE_CORE_INFO("加载配置文件: {}", g_ConfigPath);
     }
 
-    // 场景无任何直接光源：光照完全由 GI 提供（IBL 环境光 + SSGI/DDGI 间接光）
-
+    // 场景默认无直接光源（纯 GI）；DDGI 探针需首次照明输入（直接从 Lighting HDR 学习会自反馈发散），
+    // 故加一个弱主方向光提供 DDGI 首次照明（强度低，画面仍以 GI 为主导）
+    {
+        Entity mainLightEntity = world.CreateEntity("DirectionalLight");
+        world.AddComponent<TransformComponent>(mainLightEntity);
+        auto* mainDL = world.AddComponent<DirectionalLight>(mainLightEntity);
+        mainDL->direction = float3(0.3f, -1.0f, 0.4f);
+        mainDL->color     = float3(1.0f, 0.95f, 0.9f);
+        mainDL->intensity = 3.0f;   // 弱光：DDGI 输入，不喧宾夺主
+        mainDL->castShadow = true;
+        sceneGraph.SetParent(mainLightEntity, Entity{kInvalidEntity});
+    }
 
     // --- 天空盒 ---
     {

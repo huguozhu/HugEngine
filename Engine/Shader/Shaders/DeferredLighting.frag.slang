@@ -78,6 +78,8 @@ struct LightGridCell { uint offset; uint count; };
     float4   atmosphere;        // sunDir.xyz（指向太阳）+ turbidity（空中透视）
     uint     useDDGI;           // DDGI 探针 GI 是否启用（0=关, 1=开）
     float    ddgiScale;         // DDGI 贡献缩放（由 debugScale 驱动）
+    float    giIntensity;       // 间接漫反射 GI 总强度（SSGI/RT GI/DDGI/RSM 统一驱动）
+    float    aoIntensity;       // AO 强度（0=无 AO，1=完整 AO）
 };
 
 // kGPUPrefilterMips / kGPUClusterSlices 统一在 ShaderTypes.slang（kGPU*）
@@ -251,6 +253,7 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
 
     // 5. RSM 间接（反射阴影贴图，仅当存在方向光阴影时才采样：
     //    shadowParams.w 为光源类型 0=方向光/1=点光/2=聚光，w<0.5 判定为方向光）
+    //    0.03 为 RSM 25-VPL 能量归一（保留）；giIntensity 为间接光总强度（统一驱动，替代魔法系数）
     if (iblIntensity > 0.0 && lightCount > 0u && u_ShadowData[0].shadowParams.w < 0.5f) {
         float4 lsp = mul(u_ShadowData[0].lightViewProj[0], float4(worldPos, 1.0));
         float2 rsmUV = saturate(lsp.xy / lsp.w * 0.5 + 0.5);
@@ -266,23 +269,24 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
                 rsmIndirect += fs.a * max(dot(N, normalize(dir)), 0.0) * max(dot(sN, -normalize(dir)), 0.0) / d2;
             }
         }
-        color += rsmIndirect * 0.03 * iblIntensity;
+        color += rsmIndirect * (0.03 * giIntensity) * iblIntensity;
     }
 
     // SSAO 屏幕空间遮蔽（与 GBuffer AO 相乘）；rtAOSource=1 时改用 RT AO 遮罩
     float ssao = u_SSAO.Sample(u_GBufferSampler, uv).r;
     float aoVal = (rtAOSource != 0u) ? u_RT_AO.Sample(u_GBufferSampler, uv).r : ssao;
-    color *= ao * aoVal;
+    color *= lerp(1.0, ao * aoVal, aoIntensity);   // aoIntensity 控制 AO 强度（0=无 AO）
 
-    // SSGI 间接漫反射（屏幕空间）；rtDiffuseSource=1 时改用 RT GI 输出
+    // SSGI 间接漫反射（屏幕空间）；rtDiffuseSource=1 时改用 RT GI 输出；乘 giIntensity 统一强度
     float4 ssgi = u_SSGI.Sample(u_GBufferSampler, uv);
     float4 rtGI = (rtDiffuseSource != 0u) ? u_RT_GI.Sample(u_GBufferSampler, uv) : ssgi;
-    color += rtGI.rgb;
+    color += rtGI.rgb * giIntensity;
 
     // DDGI 间接漫反射（探针网格，世界空间三线性插值 + SH 评估）
+    // useDDGI=0 时严格不加（关 DDGI 贡献为 0）
     if (useDDGI != 0u) {
         float3 ddgi = SampleDDGI(worldPos, N);
-        color += ddgi * ddgiScale;  // 贡献缩放（由 debugScale 驱动，替代硬编码 0.5）
+        color += ddgi * ddgiScale * giIntensity;  // 贡献缩放（debugScale）+ 统一 GI 强度
     }
 
     // SSR 间接镜面反射；rtSpecularSource=1 时改用 RT 反射输出
