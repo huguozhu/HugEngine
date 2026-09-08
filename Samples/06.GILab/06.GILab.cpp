@@ -437,7 +437,7 @@ int main() {
     camCtrl.SetAspectRatio(
         static_cast<float>(swapchain->GetWidth()),
         static_cast<float>(swapchain->GetHeight()));
-    camCtrl.SetMoveSpeed(3.0f);   // 移动速度默认 3（GILab 慢速检查 Cornell）
+    camCtrl.SetMoveSpeed(200.0f);   // 移动速度 200（快速浏览 Sponza 场景）
 
     if (hasConfig) {
         camCtrl.SetPosition(float3(
@@ -448,7 +448,7 @@ int main() {
             GetFloat(cfgData, "cam_yaw", -1.57f),
             GetFloat(cfgData, "cam_pitch", -0.1f));
         camCtrl.GetCamera().nearPlane = GetFloat(cfgData, "cam_near", 0.1f);
-        camCtrl.GetCamera().farPlane  = GetFloat(cfgData, "cam_far", 2000.0f);
+        camCtrl.GetCamera().farPlane  = GetFloat(cfgData, "cam_far", 3000.0f);
     } else {
         camCtrl.SetPosition(float3(0.0f, 3.0f, 0.0f));
         camCtrl.SetOrientation(-1.57f, -0.1f);
