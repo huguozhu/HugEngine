@@ -80,6 +80,7 @@ GPU_CONST(GPU_UINT kGPUBinding_SSGI          = 19);  // SSGI 间接光照
 GPU_CONST(GPU_UINT kGPUBinding_SSAO_DL       = 20);  // SSAO
 GPU_CONST(GPU_UINT kGPUBinding_SSR           = 21);  // SSR
 GPU_CONST(GPU_UINT kGPUBinding_DDGIProbes    = 22);  // DDGI 探针
+GPU_CONST(GPU_UINT kGPUBinding_DDGIGridParams = 6);  // DDGI 探针网格参数 UBO（Lighting 采样 DDGI 用，binding 6 在 Deferred Lighting set 中空闲）
 
 // --- Hybrid RT 管线 Binding 索引（Lighting 采样 RT 效果输出纹理）---
 GPU_CONST(GPU_UINT kGPUBinding_RT_ShadowMask = 24);  // RT 阴影遮罩（R16_FLOAT）
@@ -257,6 +258,8 @@ GPU_STRUCT DeferredLightingPushConstant {
     GPU_UINT rtSpecularSource;      // [56]      0=SSR, 1=RT 反射
     GPU_UINT rtDiffuseSource;       // [60]      0=SSGI, 1=RT GI
     float4   atmosphere;            // [64..80] sunDir.xyz（指向太阳）+ turbidity（空中透视）
+    GPU_UINT useDDGI;               // [80]      DDGI 探针 GI 是否启用（0=关, 1=开）
+    float    ddgiScale;             // [84]      DDGI 贡献缩放（替代硬编码 0.5）
 };
 
 // --- RTShadowPushConstant: RT 阴影 Pass Push Constant（108B，C++/Slang 单一数据源）---

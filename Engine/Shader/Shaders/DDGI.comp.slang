@@ -10,7 +10,7 @@
 // GBuffer 输入（只读，CombinedImageSampler）
 [[vk::binding(kGPUBinding_GBufferA, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferA;
 [[vk::binding(kGPUBinding_GBufferB, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferB;
-[[vk::binding(kGPUBinding_Depth, kGPUDescSet_PerFrame)]] Texture2D<float>  u_Depth;
+[[vk::binding(2, 0)]] Texture2D<float>  u_Depth;  // 深度（DDGI 计算描述符集 binding 2，与 GI_DDGI.cpp 布局一致；勿用 kGPUBinding_Depth=3，那是 Deferred GBuffer 的绑定号）
 [[vk::binding(0, 0)]] SamplerState      u_PointSampler; // 点采样（GBuffer 读取）
 
 // 探针输出（读写，当前帧结果）
@@ -160,9 +160,9 @@ void main(uint3 id : SV_DispatchThreadID) {
         validSamples += 1.0;
     }
 
-    // 归一化：蒙特卡洛积分缩放因子 4π/N
+    // 归一化：蒙特卡洛积分缩放因子 4π/N × 强度（u_Params.x）
     if (validSamples > 0.0) {
-        float scale = (4.0 * 3.14159265359) / validSamples;
+        float scale = (4.0 * 3.14159265359) / validSamples * u_Params.x;
         for (int j = 0; j < 9; j++) {
             sh[j].rgb *= scale;
         }

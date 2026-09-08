@@ -1,14 +1,14 @@
-// RT_DDGI.slang — DDGI 探针查询共享库（纯函数 + 常量，无资源绑定）
+// RT_DDGI.slang — DDGI 探针查询共享库（纯函数，无资源绑定）
 // 由 DeferredLighting.frag（binding 22）与 RT_GI.rgen（binding 7）各自声明
 // [[vk::binding(N, 0)]] StructuredBuffer<float4> u_DDGIProbes 后 include 本文件使用。
+// 此外 includer 需在 include 之前声明 DDGI 网格参数 cbuffer
+// （u_DDGIGridOrigin / u_DDGIGridSize），供 SampleDDGI 三线性插值使用。
 
-// ---- DDGI 探针网格参数（TODO: 改为 Uniform Buffer，当前与 GI_DDGI 默认值保持同步） ----
-static const uint   kDDGI_GridX    = 8;
-static const uint   kDDGI_GridY    = 4;
-static const uint   kDDGI_GridZ    = 8;
-static const float  kDDGI_CellSize = 3.0;
-static const float3 kDDGI_Origin   = float3(-10.0, -2.0, -10.0);
-static const uint   kDDGI_Stride   = 16;  // 每探针 16 float4
+// ---- DDGI 探针网格参数 ----
+// 网格参数（gridX/gridY/gridZ/cellSize/origin）为运行时字段，由 includer 声明为 cbuffer
+// （u_DDGIGridOrigin / u_DDGIGridSize），与 GI_DDGI 的 ProbeGridUniform 前两个 float4 一致，
+// 避免 C++ 侧改网格后 shader 硬编码常量不同步。
+static const uint   kDDGI_Stride   = 16;  // 每探针 16 float4（布局不变量，与 C++ kFloats4PerProbe 一致）
 
 // SH 基函数常量
 static const float kDDGI_SH_Y00 = 0.28209479177387814;       // l=0: sqrt(1/(4π))
@@ -35,14 +35,16 @@ float3 EvalDDGI_SH(float4 sh[9], float3 dir) {
 
 // 三线性插值采样 DDGI 探针网格，返回间接漫反射辐照度
 float3 SampleDDGI(float3 worldPos, float3 normal) {
-    // 世界坐标 → 探针网格坐标
-    float3 gridCoord = (worldPos - kDDGI_Origin) / kDDGI_CellSize;
+    // 世界坐标 → 探针网格坐标（u_DDGIGridSize.w = cellSize）
+    float3 gridCoord = (worldPos - u_DDGIGridOrigin.xyz) / u_DDGIGridSize.w;
     int3   baseCoord = int3(floor(gridCoord));
     float3 frac      = frac(gridCoord);
 
     // 钳制到网格边界内
     baseCoord = clamp(baseCoord, int3(0, 0, 0),
-                      int3(kDDGI_GridX - 1, kDDGI_GridY - 1, kDDGI_GridZ - 1));
+                      int3(int(u_DDGIGridSize.x) - 1,
+                           int(u_DDGIGridSize.y) - 1,
+                           int(u_DDGIGridSize.z) - 1));
 
     float3 result      = float3(0.0, 0.0, 0.0);
     float  totalWeight = 0.0;
@@ -53,7 +55,9 @@ float3 SampleDDGI(float3 worldPos, float3 normal) {
             for (int dx = 0; dx <= 1; dx++) {
                 int3 coord = baseCoord + int3(dx, dy, dz);
                 coord = clamp(coord, int3(0, 0, 0),
-                              int3(kDDGI_GridX - 1, kDDGI_GridY - 1, kDDGI_GridZ - 1));
+                              int3(int(u_DDGIGridSize.x) - 1,
+                                   int(u_DDGIGridSize.y) - 1,
+                                   int(u_DDGIGridSize.z) - 1));
 
                 // 三线性插值权重
                 float weight = (1.0 - abs(float(dx) - frac.x))
@@ -61,8 +65,8 @@ float3 SampleDDGI(float3 worldPos, float3 normal) {
                              * (1.0 - abs(float(dz) - frac.z));
 
                 // 读取探针 SH 系数（每探针 16 × float4，前 9 个是 SH）
-                uint   baseIdx = coord.z * kDDGI_GridX * kDDGI_GridY
-                               + coord.y * kDDGI_GridX + coord.x;
+                uint   baseIdx = coord.z * uint(u_DDGIGridSize.x) * uint(u_DDGIGridSize.y)
+                               + coord.y * uint(u_DDGIGridSize.x) + coord.x;
                 uint   bufBase = baseIdx * kDDGI_Stride;
                 float4 sh[9];
                 for (int i = 0; i < 9; i++) {

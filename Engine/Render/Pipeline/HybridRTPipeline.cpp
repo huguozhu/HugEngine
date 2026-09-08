@@ -711,6 +711,7 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 ctx.sceneMaterialTex = m_RTPass->GetSceneMaterialTexture();
                 ctx.sceneTriangleNormals = m_RTPass->GetSceneTriangleNormals();
                 ctx.ddgiProbeBuffer = m_DDGI.GetProbeBuffer();  // DDGI 探针（GI miss 回退）
+                ctx.ddgiGridUniform = m_DDGI.GetGridUniform();  // DDGI 网格参数 UBO（SampleDDGI 三线性插值）
                 m_RTGI->Execute(c, m_RTPass->GetTLAS(), ctx);
             });
     }
@@ -840,6 +841,9 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 nullptr, nullptr,  // 无 SSGI（RT GI 替代）
                 nullptr, nullptr,  // 无 SSR（RT 反射替代）
                 m_DDGI.GetProbeBuffer(),
+                m_DDGI.GetGridUniform(),
+                m_DDGI.IsEnabled(),
+                m_DDGI.debugScale,
                 nullptr,  // 无 Clustered
                 m_LightGridBuffer.get(), m_LightIndexListBuffer.get(),
                 &m_CachedLights,

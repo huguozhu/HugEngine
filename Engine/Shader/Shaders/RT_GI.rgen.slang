@@ -10,6 +10,11 @@
 // 输出由 LightingPass 在 rtDiffuseSource=1 时采样（u_RT_GI）。
 
 #include "ShaderTypes.slang"  // RTRayEffectPushConstant
+// DDGI 探针网格参数（与 DeferredLighting.frag / GI_DDGI 的 ProbeGridUniform 前两字段一致）
+[[vk::binding(8, 0)]] cbuffer DDGIGridParams {
+    float4 u_DDGIGridOrigin;  // xyz=世界空间原点
+    float4 u_DDGIGridSize;    // xyz=探针数量(gridX/gridY/gridZ), w=cellSize
+};
 #include "RT_DDGI.slang"     // DDGI 探针查询共享库（miss 回退低频间接光）
 
 // === RayGen 资源 (set=0) ===

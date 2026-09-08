@@ -41,6 +41,7 @@ bool RTGIPass::Initialize(rhi::IRHIDevice* device, u32 fullWidth, u32 fullHeight
         {5, rhi::DescriptorType::UniformBuffer, 1, rhi::kStageMaskClosestHit}, // 命中点光源
         {6, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskClosestHit},  // 三角形顶点法线纹理
         {7, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskRayGen},     // DDGI 探针
+        {8, rhi::DescriptorType::UniformBuffer, 1, rhi::kStageMaskRayGen},     // DDGI 探针网格参数
     };
 
     // ── push constant 范围（RayGen 深度重建 + ClosestHit 光照计数）──
@@ -139,6 +140,9 @@ void RTGIPass::Execute(rhi::IRHICommandList* cmd,
     if (ctx.ddgiProbeBuffer)
         m_Device->UpdateDescriptorSet(m_RayGenSet, 7,
             rhi::DescriptorType::StorageBuffer, ctx.ddgiProbeBuffer);
+    if (ctx.ddgiGridUniform)
+        m_Device->UpdateDescriptorSet(m_RayGenSet, 8,
+            rhi::DescriptorType::UniformBuffer, ctx.ddgiGridUniform);
 
     // ── 填充 ClosestHit 光源数据 ──
     FillHitLightUB(ctx);

@@ -81,6 +81,9 @@ public:
                 rhi::IRHITexture* ssgiTex, rhi::IRHISampler* ssgiSampler,
                 rhi::IRHITexture* ssrTex,  rhi::IRHISampler* ssrSampler,
                 rhi::IRHIBuffer*  ddgiProbeBuffer,
+                rhi::IRHIBuffer*  ddgiGridUniform,
+                bool              ddgiEnabled,
+                float             ddgiScale,
                 // 聚集着色（可选，nullptr 时跳过）
                 ClusteredShading* clusteredShading,
                 rhi::IRHIBuffer* lightGridBuffer,

@@ -63,6 +63,9 @@ void LightingPass::Render(rhi::IRHICommandList* cmd,
                            rhi::IRHITexture* ssgiTex, rhi::IRHISampler* ssgiSampler,
                            rhi::IRHITexture* ssrTex,  rhi::IRHISampler* ssrSampler,
                            rhi::IRHIBuffer*  ddgiProbeBuffer,
+                           rhi::IRHIBuffer*  ddgiGridUniform,
+                           bool              ddgiEnabled,
+                           float             ddgiScale,
                            ClusteredShading* clusteredShading,
                            rhi::IRHIBuffer* lightGridBuffer,
                            rhi::IRHIBuffer* lightIndexListBuffer,
@@ -111,6 +114,9 @@ void LightingPass::Render(rhi::IRHICommandList* cmd,
     // ── 绑定 DDGI 探针 ──
     if (ddgiProbeBuffer && m_Device)
         m_Device->UpdateDescriptorSet(m_Set, 22, rhi::DescriptorType::StorageBuffer, ddgiProbeBuffer);
+    // ── 绑定 DDGI 网格参数 UBO（SampleDDGI 三线性插值用）──
+    if (ddgiGridUniform && m_Device)
+        m_Device->UpdateDescriptorSet(m_Set, 6, rhi::DescriptorType::UniformBuffer, ddgiGridUniform);
 
     // ── 绑定 Hybrid RT 效果输出纹理（非空时才替换占位）──
     // 阴影/AO 遮罩用线性采样上采样到全分辨率；反射/GI HDR 结果用线性采样
@@ -169,6 +175,8 @@ void LightingPass::Render(rhi::IRHICommandList* cmd,
     lpc.rtSpecularSource = rtReflection ? 1u : 0u;
     lpc.rtDiffuseSource  = rtGI         ? 1u : 0u;
     lpc.atmosphere = float4(m_AtmSunDir, m_AtmTurbidity);  // 空中透视参数（太阳方向 + 浑浊度）
+    lpc.useDDGI    = ddgiEnabled ? 1u : 0u;                // DDGI 探针 GI 是否采样（关闭后不叠加陈旧探针数据）
+    lpc.ddgiScale  = ddgiScale;                            // DDGI 贡献缩放（替代硬编码 0.5）
     cmd->SetPushConstants(0, sizeof(lpc), &lpc);
     cmd->Draw(3);
 
@@ -240,6 +248,7 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
         {20, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // SSAO
         {21, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // SSR
         {22, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment},         // DDGI Probes
+        {6,  rhi::DescriptorType::UniformBuffer, 1, rhi::kStageMaskFragment},         // DDGI 网格参数 UBO
         {24, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RT 阴影遮罩
         {25, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RT 反射
         {26, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RT AO

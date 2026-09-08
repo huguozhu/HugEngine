@@ -37,6 +37,19 @@ bool GI_DDGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     uniformDesc.cpuAccess = true;  // 每帧 Map/Unmap 更新
     m_GridUniform = device->CreateBuffer(uniformDesc);
 
+    // 一次性写入默认网格参数，确保 DDGI 未启用时 Lighting Pass 采样到的 UBO 内容有效
+    // （避免 gridSize.w=0 导致 SampleDDGI 中 (worldPos-origin)/cellSize 除零）
+    {
+        ProbeGridUniform init{};
+        init.gridOrigin = float4(gridOrigin, 0.0f);
+        init.gridSize   = float4(float(gridX), float(gridY), float(gridZ), cellSize);
+        init.cameraPos  = float4(0, 0, 0, 0);
+        init.params     = float4(1.0f, 32.0f, 0.0f, 0.0f);
+        init.viewProj   = float4x4(1.0f);
+        void* mapped = m_GridUniform->Map();
+        if (mapped) { memcpy(mapped, &init, sizeof(ProbeGridUniform)); m_GridUniform->Unmap(); }
+    }
+
     // ---- 采样器 ----
     rhi::SamplerDesc psd;
     psd.minFilter  = psd.magFilter = rhi::FilterMode::Nearest;

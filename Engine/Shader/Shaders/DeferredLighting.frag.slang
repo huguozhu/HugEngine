@@ -1,7 +1,13 @@
 // DeferredLighting.frag — 延迟光照全屏片段着色器
 // 读取 GBuffer MRT + Shadow/IBL/RSM 纹理，逐光源 PBR + 间接光
 #include "pbr_common.slang"
-#include "RT_DDGI.slang"  // DDGI 探针查询共享库（常量 + EvalDDGI_SH + SampleDDGI）
+// DDGI 探针网格参数（由 GI_DDGI 每帧上传，替代 RT_DDGI.slang 硬编码常量；
+// 布局与 GI_DDGI.h 的 ProbeGridUniform 前两个 float4 一致）
+[[vk::binding(kGPUBinding_DDGIGridParams, kGPUDescSet_PerFrame)]] cbuffer DDGIGridParams {
+    float4 u_DDGIGridOrigin;  // xyz=世界空间原点
+    float4 u_DDGIGridSize;    // xyz=探针数量(gridX/gridY/gridZ), w=cellSize
+};
+#include "RT_DDGI.slang"  // DDGI 探针查询共享库（EvalDDGI_SH + SampleDDGI）
 #include "Atmosphere.slang"  // 空中透视（大气消光 + 入射散射）
 
 struct VSOutput {
@@ -70,6 +76,8 @@ struct LightGridCell { uint offset; uint count; };
     uint     rtSpecularSource;  // 0=SSR, 1=RT 反射（配合 u_RT_Reflection）
     uint     rtDiffuseSource;   // 0=SSGI, 1=RT GI（配合 u_RT_GI）
     float4   atmosphere;        // sunDir.xyz（指向太阳）+ turbidity（空中透视）
+    uint     useDDGI;           // DDGI 探针 GI 是否启用（0=关, 1=开）
+    float    ddgiScale;         // DDGI 贡献缩放（由 debugScale 驱动）
 };
 
 // kGPUPrefilterMips / kGPUClusterSlices 统一在 ShaderTypes.slang（kGPU*）
@@ -272,8 +280,10 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
     color += rtGI.rgb;
 
     // DDGI 间接漫反射（探针网格，世界空间三线性插值 + SH 评估）
-    float3 ddgi = SampleDDGI(worldPos, N);
-    color += ddgi * 0.5;  // 强度缩放（与 SSGI 叠加，避免过度照亮）
+    if (useDDGI != 0u) {
+        float3 ddgi = SampleDDGI(worldPos, N);
+        color += ddgi * ddgiScale;  // 贡献缩放（由 debugScale 驱动，替代硬编码 0.5）
+    }
 
     // SSR 间接镜面反射；rtSpecularSource=1 时改用 RT 反射输出
     float4 ssr = u_SSR.Sample(u_GBufferSampler, uv);

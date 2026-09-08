@@ -26,6 +26,7 @@ struct RTExecuteContext {
     rhi::IRHITexture* sceneMaterialTex = nullptr; // 场景材质纹理（3×N RGBA32F，ClosestHit 查询用）
     rhi::IRHITexture* sceneTriangleNormals = nullptr; // 三角形顶点法线纹理（ClosestHit 平滑法线用）
     rhi::IRHIBuffer*  ddgiProbeBuffer = nullptr;  // DDGI 探针 SSBO（GI miss 回退用）
+    rhi::IRHIBuffer*  ddgiGridUniform = nullptr;  // DDGI 探针网格参数 UBO（SampleDDGI 三线性插值用）
 };
 
 // ============================================================

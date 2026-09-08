@@ -43,6 +43,9 @@ public:
     // 探针数据缓冲（供 Lighting Pass 绑定，每帧更新后为最新 blend 结果）
     rhi::IRHIBuffer* GetProbeBuffer() const { return m_ProbeBuffer.get(); }
 
+    // 探针网格参数 UBO（供 Lighting Pass / RT GI 采样 DDGI 时读取网格参数，替代 shader 硬编码常量）
+    rhi::IRHIBuffer* GetGridUniform() const { return m_GridUniform.get(); }
+
     // 探针网格参数
     u32 gridX = 8, gridY = 4, gridZ = 8;
     float3 gridOrigin = float3(-10, -2, -10);
