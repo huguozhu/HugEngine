@@ -26,7 +26,7 @@ enum class GIQualityPreset : u8 {
 /// GI 配置（单一数据源，面板与帧图共用）
 struct GIConfig {
     // 4 通道技术选型（独立枚举，类型安全）
-    ShadowChannel   shadow   = ShadowChannel::CSM;
+    ShadowChannel   shadow   = ShadowChannel::Raster;
     AOChannel       ao       = AOChannel::SSAO;
     SpecularChannel specular = SpecularChannel::SSR;
     DiffuseChannel  diffuse  = DiffuseChannel::SSGI;

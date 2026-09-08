@@ -16,7 +16,7 @@ struct RenderGraph;
 // ============================================================
 // 4 个通道的独立枚举（类型安全：每个通道只能选本通道技术）
 // ============================================================
-enum class ShadowChannel : u8 { None = 0, CSM, RT };          // 阴影：CSM / 硬件光追
+enum class ShadowChannel : u8 { None = 0, Raster, RT };  // 阴影：光栅化（CSM/点光 cubemap/聚光 map）/ 硬件光追
 enum class AOChannel : u8 { None = 0, SSAO, RTAO };           // 环境光遮蔽：SSAO / RT AO
 enum class SpecularChannel : u8 { None = 0, SSR, RT };        // 镜面反射：SSR / RT 反射
 enum class DiffuseChannel : u8 { None = 0, SSGI, RTGI };// 间接漫反射：SSGI / RT GI（DDGI 由 ddgiOverlay 独立叠加）
@@ -25,7 +25,7 @@ enum class DiffuseChannel : u8 { None = 0, SSGI, RTGI };// 间接漫反射：SSG
 // 光照通道配置（4 通道技术选型）
 // ============================================================
 struct GIChannels {
-    ShadowChannel   shadow   = ShadowChannel::CSM;
+    ShadowChannel   shadow   = ShadowChannel::Raster;
     AOChannel       ao       = AOChannel::SSAO;
     SpecularChannel specular = SpecularChannel::SSR;
     DiffuseChannel  diffuse  = DiffuseChannel::SSGI;

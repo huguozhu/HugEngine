@@ -25,7 +25,7 @@ public:
 
     /// 降级链：不可用的技术 → 可用的替代
     static ShadowChannel FallbackOf(ShadowChannel s) {
-        return s == ShadowChannel::RT ? ShadowChannel::CSM : s;
+        return s == ShadowChannel::RT ? ShadowChannel::Raster : s;
     }
     static AOChannel FallbackOf(AOChannel s) {
         return s == AOChannel::RTAO ? AOChannel::SSAO : s;
