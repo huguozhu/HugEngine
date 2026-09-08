@@ -73,6 +73,9 @@ float SampleShadowPCF(float3 worldPos, float3 worldNormal, float3 lightDir,
 {
     // CSM 级联选择
     float viewZ = dot(worldPos - cameraPos, sm.cameraForward.xyz);
+    // 超出最远级联（shadow distance 外）→ 无阴影（避免采样越界/clear 值造成方形暗区）
+    if (viewZ > sm.splitDistances[2])
+        return 1.0;
     uint cascade = 0u;
     if (viewZ > sm.splitDistances[0]) cascade = 1u;
     if (viewZ > sm.splitDistances[1]) cascade = 2u;
