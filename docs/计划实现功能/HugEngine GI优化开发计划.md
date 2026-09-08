@@ -154,3 +154,36 @@
 - **重构等价性风险**（M1）：最大风险是"改了但视觉变了"。用 `06.GILab` 重构前后截图/帧时间对比，逐项确认无回归。
 - **枚举/结构体跨文件改动**：`LightingSource` 枚举、push constant 是 C++/slang 双侧同步，改一处必须两侧一起改（这是文档强调的 F1 痛点）。
 - **每个任务开工前**先复核文档引用的行号是否仍准确（代码可能已漂移），再动手。
+
+---
+
+## 六、进度状态更新（2026-09-08）
+
+> 依据执行约定：每里程碑在 `06.GILab`（Sponza GI 对比）冒烟验证，用户实测确认后合入。
+
+| 里程碑 | 状态 | 提交 |
+|---|---|---|
+| **M0** 正确性 Bug | ✅ | `5712721` / `55d1038` |
+| **M1** 接口收敛 + shader 通道化 | ✅ | `59c3382`（LightingInputs 33→结构体）+ `65d9cf5`（giIntensity/aoIntensity push constant） |
+| **M2** 数据驱动 + 帧图自动编排 | ✅ | `2b06045`（GIConfig + 4 质量档位 + 帧图条件注册） |
+| **M3** Provider 注册表 + 自动降级 | ✅ | `66faf5c`（GIRegistry IsAvailable/FallbackOf/Degrade） |
+| 命名/语义优化 | ✅ | `9f09c87`（ShadowChannel::CSM→Raster）、4 通道枚举拆分 + `ddgiOverlay` 叠加语义（`66faf5c`） |
+| 能力查询修正 | ✅ | `da2bbb4`（GIRegistry::IsAvailable 基于 device->GetCaps().supportsRayTracing，非硬编码 RT 不可用） |
+| CSM 阴影越界修复 | ✅ | `2d2db2a`（SampleShadowPCF 超出 splitDistances[2] 返回无阴影，消除方形暗区） |
+| **M4** 性能优化 | ⏳ 未开始 | — |
+| **M5** 质量提升 | ⏳ 部分 | 见下 |
+| **M6** 工业界进阶 | ⏳ 按需 | — |
+
+### M5 进展说明
+
+- **M5.2 DDGI 探针屏幕外更新**（视角相关根因）：
+  - 根因确认：`DDGI.comp` 探针辐射度来自**屏幕 HDR**（`u_PrevHDR` + `u_ViewProj` 投影）——视锥外采样点被丢弃，视角转动 → 探针变化 → Medium 档（DDGI 叠加）效果随视角变化（Low 档无 DDGI 稳定）。
+  - 方案：A（硬件光追射线 march，RT 支持时）与 B（RSM 世界辐射度采样，无 RT 时）都实现，按 `supportsRayTracing` 自动选择。
+  - 现状：**B 的 shader + GI_DDGI 接口已实现**（DDGI.comp RSM 采样 + `SetRSM()` + binding 7/8），但**管线喂 RSM 未完成**（Deferred 需接入 RSM 渲染 pass + 对象缓冲描述符集），未喂会采样空纹理变蓝，故**已回退**保持 DDGI 工作。
+  - 待办：① Deferred 接入 RSM 渲染 → ② 喂 DDGI `SetRSM` → ③ A（RT march）→ ④ 自动选择。
+- **M5.3 DDGI SH 修正**（cos 投影 / 去截断——M0.2 遗留"均匀变蓝"）：未开始。
+
+### 命名与结构演进（本批）
+
+- `LightingSource`（大枚举混 4 通道）→ **4 个独立枚举**：`ShadowChannel`（Raster/RT）/ `AOChannel`（SSAO/RTAO）/ `SpecularChannel`（SSR/RT）/ `DiffuseChannel`（SSGI/RTGI）——类型安全。
+- `LightingInputSources` → `GIChannels`；`useDDGI`/`ddgiEnabled` → `ddgiOverlay`（DDGI 叠加语义）；`ShadowChannel::CSM` → `Raster`（光栅化阴影统称）。
