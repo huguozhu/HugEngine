@@ -7,11 +7,17 @@
 namespace he::render {
 
 bool ToneMapPass::Initialize(rhi::IRHIDevice* device,u32 width,u32 height){
-    m_Device=device;m_Width=width;m_Height=height;
+    m_Device=device;
+    m_Width=width;
+    m_Height=height;
     HE_ASSERT(m_Device,"ToneMapPass: null device");
 
-    m_VS.stage=rhi::ShaderStage::Vertex;m_VS.spirv=k_ToneMap_vert_spv;m_VS.entryPoint="main";
-    m_FS.stage=rhi::ShaderStage::Pixel;m_FS.spirv=k_ToneMap_frag_spv;m_FS.entryPoint="main";
+    m_VS.stage=rhi::ShaderStage::Vertex;
+    m_VS.spirv=k_ToneMap_vert_spv;
+    m_VS.entryPoint="main";
+    m_FS.stage=rhi::ShaderStage::Pixel;
+    m_FS.spirv=k_ToneMap_frag_spv;
+    m_FS.entryPoint="main";
 
     rhi::DescriptorSetLayoutDesc layout;layout.bindings={
         {0,rhi::DescriptorType::CombinedImageSampler,1,16},
@@ -27,12 +33,19 @@ bool ToneMapPass::Initialize(rhi::IRHIDevice* device,u32 width,u32 height){
 }
 
 void ToneMapPass::RecreatePSO(){
-    rhi::PipelineStateDesc d;d.vertexShader=&m_VS;d.pixelShader=&m_FS;
+    rhi::PipelineStateDesc d;
+    d.vertexShader=&m_VS;
+    d.pixelShader=&m_FS;
     d.topology=rhi::PrimitiveTopology::TriangleList;
-    d.depthTest=false;d.depthWrite=false;
+    d.depthTest=false;
+    d.depthWrite=false;
     d.depthFormat=rhi::Format::D32_FLOAT;
-    d.colorAttachmentCount=1;d.colorFormats[0]=m_OutputFormat;
-    rhi::PushConstantRange pcr; pcr.stageMask=rhi::kStageMaskVertex|rhi::kStageMaskFragment; pcr.size=16;  // Vertex|Fragment
+    d.colorAttachmentCount=1;
+    d.colorFormats[0]=m_OutputFormat;
+    rhi::PushConstantRange pcr;
+    pcr.stageMask=rhi::kStageMaskVertex|rhi::kStageMaskFragment;
+    pcr.size=16;
+    // Vertex|Fragment;
     d.pushConstantRanges={pcr};
     d.descriptorSetLayouts={m_DescLayout};d.debugName="ToneMap";
     m_PSO=m_Device->CreatePipelineState(d);
@@ -47,12 +60,15 @@ void ToneMapPass::SetOutputFormat(rhi::Format f){
 
 void ToneMapPass::Shutdown(){
     if(m_Device&&m_DescLayout!=rhi::kInvalidLayout)m_Device->DestroyDescriptorSetLayout(m_DescLayout);
-    m_PSO.reset();m_Device=nullptr;m_Ready=false;
+    m_PSO.reset();
+    m_Device=nullptr;
+    m_Ready=false;
 }
 
 void ToneMapPass::SetInput(rhi::IRHITexture* hdr,rhi::IRHISampler* sampler){
     if(hdr!=m_HDRTarget||sampler!=m_HDRSampler){
-        m_HDRTarget=hdr;m_HDRSampler=sampler;
+        m_HDRTarget=hdr;
+        m_HDRSampler=sampler;
         if(m_HDRTarget&&m_HDRSampler)
             m_Device->UpdateDescriptorSet(m_DescSet,0,rhi::DescriptorType::CombinedImageSampler,m_HDRTarget,m_HDRSampler);
     }
@@ -74,7 +90,8 @@ void ToneMapPass::Render(rhi::IRHICommandList* cmd){
 
 void ToneMapPass::OnResize(u32 width,u32 height){
     if(width==m_Width&&height==m_Height)return;
-    m_Width=width;m_Height=height;
+    m_Width=width;
+    m_Height=height;
 }
 
 } // namespace he::render

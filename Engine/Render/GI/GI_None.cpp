@@ -3,7 +3,9 @@
 namespace he::render {
 
 bool GI_None::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
-    (void)device; (void)width; (void)height;
+    (void)device;
+    (void)width;
+    (void)height;
     return true; // 空实现：无需创建任何资源
 }
 
@@ -24,7 +26,9 @@ void GI_None::Bind(rhi::IRHICommandList* cmdList) const {
 }
 
 void GI_None::OnResize(u32 width, u32 height) {
-    (void)width; (void)height; // 空实现：无分辨率相关资源
+    (void)width;
+    (void)height;
+    // 空实现：无分辨率相关资源;
 }
 
 } // namespace he::render

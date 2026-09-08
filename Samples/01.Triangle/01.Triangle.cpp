@@ -127,8 +127,10 @@ int main() {
         rtSBTBuf->Unmap();
 
         sbt.buffer = rtSBTBuf.get();
-        sbt.rayGen.handleOffset = 0;         sbt.rayGen.stride = handleSize;
-        sbt.miss.handleOffset   = handleSize; sbt.miss.stride   = handleSize;
+        sbt.rayGen.handleOffset = 0;
+        sbt.rayGen.stride = handleSize;
+        sbt.miss.handleOffset   = handleSize;
+        sbt.miss.stride   = handleSize;
 
         HE_CORE_INFO("RT 管线就绪: {} groups, {}B SBT (直接渲染到 BackBuffer)", groupCount, sbtSize);
     }

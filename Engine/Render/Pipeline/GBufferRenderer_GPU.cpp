@@ -38,11 +38,17 @@ void GBufferRenderer_GPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
 
     // 清除 + 开始 MRT（7 颜色 + 深度）
     rhi::ClearValue clears[8]{};
-    clears[0].color[3] = 1.0f; clears[1].color[3] = 1.0f;
-    clears[2].color[3] = 1.0f; clears[3].color[0] = 0.0f;
+    clears[0].color[3] = 1.0f;
+    clears[1].color[3] = 1.0f;
+    clears[2].color[3] = 1.0f;
+    clears[3].color[0] = 0.0f;
     clears[3].color[1] = 0.0f;
-    clears[5].color[2] = 0.5f; clears[5].color[3] = 0.0f;  // disneyA: specular=0.5, sheen=0（中性默认）
-    clears[6].color[1] = 1.0f; clears[6].color[2] = 1.0f;  // disneyB: clearcoatGloss=1, specularTint.r=1
+    clears[5].color[2] = 0.5f;
+    clears[5].color[3] = 0.0f;
+    // disneyA: specular=0.5, sheen=0（中性默认）;
+    clears[6].color[1] = 1.0f;
+    clears[6].color[2] = 1.0f;
+    // disneyB: clearcoatGloss=1, specularTint.r=1;
     clears[6].color[3] = 1.0f;                              // disneyB: specularTint.g=1
     clears[7].depth = 1.0f;
     void* cv[7] = { ctx.gbA->GetNativeHandle(), ctx.gbB->GetNativeHandle(),
@@ -114,7 +120,10 @@ void GBufferRenderer_GPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
         float4x4 jvp = camera.GetViewProjMatrix();
         for (auto& di : drawItems) {
             struct { float4x4 vp; float4x4 pvp; u32 oi; u32 uid; u32 _pad[14]; } pc;
-            pc.vp = jvp; pc.pvp = ctx.prevViewProj; pc.oi = di.objectIndex; pc.uid = 0;
+            pc.vp = jvp;
+            pc.pvp = ctx.prevViewProj;
+            pc.oi = di.objectIndex;
+            pc.uid = 0;
             // DrawCall 调试 marker：标记当前绘制的物体（RenderDoc 定位用）
             char label[64];
             snprintf(label, sizeof(label), "GBuffer Obj#%u", di.objectIndex);

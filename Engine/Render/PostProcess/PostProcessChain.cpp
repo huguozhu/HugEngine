@@ -32,7 +32,8 @@ void PostProcessChain::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     {
         rhi::TextureDesc d;
         d.format = rhi::Format::BGRA8_UNORM;
-        d.width  = width; d.height = height;
+        d.width  = width;
+        d.height = height;
         d.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
         m_LDRTarget = device->CreateTexture(d);
 
@@ -45,7 +46,8 @@ void PostProcessChain::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
         // 必须与 LDR target 同尺寸，否则 vkCreateFramebuffer 因附件尺寸不匹配失败
         rhi::TextureDesc dd;
         dd.format = rhi::Format::D32_FLOAT;
-        dd.width  = width; dd.height = height;
+        dd.width  = width;
+        dd.height = height;
         dd.usage  = rhi::TextureUsage::DepthStencil;
         m_LDRDummyDepth = device->CreateTexture(dd);
     }
@@ -100,14 +102,16 @@ void PostProcessChain::OnResize(rhi::IRHIDevice* device, u32 width, u32 height) 
     {
         rhi::TextureDesc d;
         d.format = rhi::Format::BGRA8_UNORM;
-        d.width  = width; d.height = height;
+        d.width  = width;
+        d.height = height;
         d.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
         m_LDRTarget = device->CreateTexture(d);
     }
     {
         rhi::TextureDesc dd;
         dd.format = rhi::Format::D32_FLOAT;
-        dd.width  = width; dd.height = height;
+        dd.width  = width;
+        dd.height = height;
         dd.usage  = rhi::TextureUsage::DepthStencil;
         m_LDRDummyDepth = device->CreateTexture(dd);
     }

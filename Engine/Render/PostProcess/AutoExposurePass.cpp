@@ -15,7 +15,9 @@ static constexpr float kSdrReferenceWhitePoint = 80.0f;
 CVar<float> cvAutoExposureWhitePoint("r.AutoExposure.WhitePoint", 80.0f, "SDR 参考白点（尼特），默认 80 保持原亮度，增大则整体变亮");
 
 bool AutoExposurePass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
-    m_Device = device; m_Width = width; m_Height = height;
+    m_Device = device;
+    m_Width = width;
+    m_Height = height;
 
     // 描述符集：HDR(0) + Result SSBO(1)
     rhi::DescriptorSetLayoutDesc layout;
@@ -27,18 +29,25 @@ bool AutoExposurePass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     m_Set    = device->AllocateDescriptorSet(m_Layout);
 
     // Compute PSO
-    m_CS.stage = rhi::ShaderStage::Compute; m_CS.spirv = k_AutoExposure_comp_spv; m_CS.entryPoint = "main";
-    rhi::PushConstantRange pc; pc.stageMask = rhi::kStageMaskCompute; pc.size = 16;
+    m_CS.stage = rhi::ShaderStage::Compute;
+    m_CS.spirv = k_AutoExposure_comp_spv;
+    m_CS.entryPoint = "main";
+    rhi::PushConstantRange pc;
+    pc.stageMask = rhi::kStageMaskCompute;
+    pc.size = 16;
     rhi::PipelineStateDesc d;
-    d.bindPoint = rhi::PipelineBindPoint::Compute; d.computeShader = &m_CS;
+    d.bindPoint = rhi::PipelineBindPoint::Compute;
+    d.computeShader = &m_CS;
     d.pushConstantRanges = {pc}; d.descriptorSetLayouts = {m_Layout}; d.debugName = "AutoExposure";
     m_PSO = device->CreatePipelineState(d);
     HE_ASSERT(m_PSO, "AutoExposurePass: PSO failed");
 
     // SSBO: 256 个 partial sum（16×16 组 × 256 线程/组 → 256 组）
     {
-        rhi::BufferDesc bd; bd.size = kNumGroups * sizeof(float);
-        bd.usage = rhi::BufferUsage::Storage; bd.cpuAccess = true;
+        rhi::BufferDesc bd;
+        bd.size = kNumGroups * sizeof(float);
+        bd.usage = rhi::BufferUsage::Storage;
+        bd.cpuAccess = true;
         m_ResultBuf = device->CreateBuffer(bd);
     }
 
@@ -48,15 +57,18 @@ bool AutoExposurePass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
 }
 
 void AutoExposurePass::Shutdown() {
-    m_PSO.reset(); m_ResultBuf.reset();
+    m_PSO.reset();
+    m_ResultBuf.reset();
     if (m_Device && m_Layout != rhi::kInvalidLayout) m_Device->DestroyDescriptorSetLayout(m_Layout);
-    m_Device = nullptr; m_Ready = false;
+    m_Device = nullptr;
+    m_Ready = false;
 }
 
 void AutoExposurePass::OnResize(u32 w, u32 h) { m_Width = w; m_Height = h; }
 
 void AutoExposurePass::SetInput(rhi::IRHITexture* hdr, rhi::IRHISampler* sampler) {
-    m_HDRInput = hdr; m_HDRSampler = sampler;
+    m_HDRInput = hdr;
+    m_HDRSampler = sampler;
     if (m_HDRInput && m_HDRSampler)
         m_Device->UpdateDescriptorSet(m_Set, 0, rhi::DescriptorType::CombinedImageSampler, m_HDRInput, m_HDRSampler);
 }
@@ -77,7 +89,8 @@ void AutoExposurePass::Render(rhi::IRHICommandList* cmd) {
     pc.deltaTime    = kDefaultDeltaTime;
     pc.totalPixels  = m_Width * m_Height;
 
-    cmd->SetPipeline(m_PSO.get()); cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
+    cmd->SetPipeline(m_PSO.get());
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     cmd->Dispatch(16, rhi::kStageMaskFragment, 1);  // 256 组
 
@@ -85,7 +98,8 @@ void AutoExposurePass::Render(rhi::IRHICommandList* cmd) {
     void* data = m_ResultBuf->Map();
     if (data) {
         auto* vals = static_cast<float*>(data);
-        float sum = 0; u32 valid = 0;
+        float sum = 0;
+        u32 valid = 0;
         for (u32 i = 0; i < kNumGroups; ++i) {
             float v = vals[i];
             if (v > -20.0f && v < 20.0f) { sum += v; valid++; }  // 剔除异常值

@@ -123,13 +123,15 @@ TEST_CASE("CollisionSystem Raycast 最近命中") {
                                float3(0), 0.5f, 2.0f);
 
     // 盒命中：t = 5 - 1 = 4
-    Entity hit; float t = 0;
+    Entity hit;
+    float t = 0;
     REQUIRE(CollisionSystem::Raycast(world, float3(0, 0, 0), float3(0, 0, 1), 100.0f, hit, t));
     CHECK(hit == nearBox);
     CHECK(t == doctest::Approx(4.0f));
 
     // 最近命中仍是近盒（球在 x=2，该射线不经过）
-    Entity hit2; float t2 = 0;
+    Entity hit2;
+    float t2 = 0;
     REQUIRE(CollisionSystem::Raycast(world, float3(0, 0, 0), float3(0, 0, 1), 100.0f, hit2, t2));
     CHECK(hit2 == nearBox);
 
@@ -143,7 +145,8 @@ TEST_CASE("CollisionSystem Raycast 最近命中") {
 
     // 侧面胶囊命中：胶囊 (2,0,2) 恰好压住射线路径（射线 x=z），最近距离 0 < 0.5
     float3 dir = glm::normalize(float3(1, 0, 1));
-    Entity hit3; float t3 = 0;
+    Entity hit3;
+    float t3 = 0;
     REQUIRE(CollisionSystem::Raycast(world, float3(0, 0, 0), dir, 100.0f, hit3, t3));
     CHECK(hit3 == sideCap);
 }
@@ -154,7 +157,9 @@ TEST_CASE("CollisionSystem Raycast 返回命中法线（坡度判断基础）") 
     Entity ground = MakeShape(world, "Ground", CollisionShape::AABB, float3(0, -1, 0),
                               float3(10, 1, 10), 0, 0);
 
-    Entity hit; float t = 0; float3 n;
+    Entity hit;
+    float t = 0;
+    float3 n;
     // 从上方下射命中盒顶面 → 法线 +Y（up）
     REQUIRE(CollisionSystem::Raycast(world, float3(0, 5, 0), float3(0, -1, 0), 100.0f, hit, t, kInvalidEntity, &n));
     CHECK(hit == ground);
@@ -184,7 +189,8 @@ TEST_CASE("CollisionSystem 禁用与缺失容错") {
     CHECK(CollisionSystem::Contains(world, c, float3(0)) == false);
 
     // 射线：禁用/无碰撞实体被跳过，仍可命中 A
-    Entity hit; float t = 0;
+    Entity hit;
+    float t = 0;
     REQUIRE(CollisionSystem::Raycast(world, float3(0, 0, 5), float3(0, 0, -1), 100.0f, hit, t));
     CHECK(hit == a);
 }

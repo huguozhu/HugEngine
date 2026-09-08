@@ -37,9 +37,16 @@ void GPUScene::Shutdown() {
 }
 
 static void FillObj(GPUSceneObject& o, const float4x4& wm, const AABB& b, u32 idx) {
-    o.localToWorld = wm; o.boundsMin=float4(b.min,0); o.boundsMax=float4(b.max,0);
-    o.objectID=idx; o.visibilityFlags=1; o.meshIndex=0;
-    o.indexCount=0; o.firstIndex=0; o.vertexOffset=0;  // 由 MeshBatcher 填充
+    o.localToWorld = wm;
+    o.boundsMin=float4(b.min,0);
+    o.boundsMax=float4(b.max,0);
+    o.objectID=idx;
+    o.visibilityFlags=1;
+    o.meshIndex=0;
+    o.indexCount=0;
+    o.firstIndex=0;
+    o.vertexOffset=0;
+    // 由 MeshBatcher 填充;
 }
 
 void GPUScene::Collect(World& world, SceneGraph& sg, const CameraData& camera) {
@@ -51,7 +58,8 @@ void GPUScene::Collect(World& world, SceneGraph& sg, const CameraData& camera) {
             if (comp.GetIndexCount()==0) return;
             GPUSceneObject o{};
             FillObj(o,wm,comp.GetBounds().Transform(wm),(u32)m_Objects.size());
-            o.materialIndex=matID; m_Objects.push_back(o);
+            o.materialIndex=matID;
+            m_Objects.push_back(o);
             m_CachedMatrices.push_back(wm);
             m_DirtyIndices.push_back((u32)m_Objects.size()-1);
         };
@@ -78,7 +86,8 @@ void GPUScene::Collect(World& world, SceneGraph& sg, const CameraData& camera) {
             if (idx>=m_Objects.size()) return;
             if (wm!=m_CachedMatrices[idx]) {
                 FillObj(m_Objects[idx],wm,comp.GetBounds().Transform(wm),idx);
-                m_CachedMatrices[idx]=wm; m_DirtyIndices.push_back(idx);
+                m_CachedMatrices[idx]=wm;
+                m_DirtyIndices.push_back(idx);
             }
             idx++;
         };

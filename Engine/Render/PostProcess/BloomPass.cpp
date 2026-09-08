@@ -55,7 +55,8 @@ bool BloomPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         // 半分辨率 bright 纹理
         rhi::TextureDesc td;
         td.format = rhi::Format::RGBA16_FLOAT;
-        td.width  = hw; td.height = hh;
+        td.width  = hw;
+        td.height = hh;
         td.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
         m_BrightTex = device->CreateTexture(td);
 
@@ -108,7 +109,8 @@ bool BloomPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         // 全分辨率输出纹理
         rhi::TextureDesc td;
         td.format = rhi::Format::RGBA16_FLOAT;
-        td.width  = width; td.height = height;
+        td.width  = width;
+        td.height = height;
         td.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
         m_Output = device->CreateTexture(td);
 
@@ -157,7 +159,8 @@ void BloomPass::OnResize(u32 w, u32 h) {
     // 重建 bright 纹理
     rhi::TextureDesc td;
     td.format = rhi::Format::RGBA16_FLOAT;
-    td.width  = hw; td.height = hh;
+    td.width  = hw;
+    td.height = hh;
     td.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
     m_BrightTex = m_Device->CreateTexture(td);
 
@@ -165,7 +168,8 @@ void BloomPass::OnResize(u32 w, u32 h) {
     m_Blur.OnResize(hw, hh);
 
     // 重建输出纹理
-    td.width  = w; td.height = h;
+    td.width  = w;
+    td.height = h;
     m_Output = m_Device->CreateTexture(td);
 }
 

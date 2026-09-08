@@ -43,7 +43,9 @@ bool PTAtrousPass::Initialize(rhi::IRHIDevice* device, const Config& cfg) {
 
     // compute PSO（36B push constant）
     rhi::ShaderBytecode cs;
-    cs.stage = rhi::ShaderStage::Compute; cs.spirv = k_PT_Atrous_comp_spv; cs.entryPoint = "main";
+    cs.stage = rhi::ShaderStage::Compute;
+    cs.spirv = k_PT_Atrous_comp_spv;
+    cs.entryPoint = "main";
     rhi::PushConstantRange pc;
     pc.stageMask = rhi::kStageMaskCompute;
     pc.size      = sizeof(PTAtrousPushConstant);   // AtrousPC 共 36B（uint2+u32+4×float+pad×2）
@@ -65,7 +67,9 @@ bool PTAtrousPass::Initialize(rhi::IRHIDevice* device, const Config& cfg) {
 void PTAtrousPass::CreateTextures(u32 w, u32 h) {
     rhi::TextureDesc d;
     d.format = rhi::Format::RGBA16_FLOAT;
-    d.width = w; d.height = h; d.mipLevels = 1;
+    d.width = w;
+    d.height = h;
+    d.mipLevels = 1;
     d.usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource;
     m_Output = m_Device->CreateTexture(d);
 }
@@ -78,18 +82,22 @@ void PTAtrousPass::Shutdown() {
         m_Device->DestroyDescriptorSetLayout(m_Layout);
         m_Layout = rhi::kInvalidLayout;
     }
-    m_Device = nullptr; m_Ready = false;
+    m_Device = nullptr;
+    m_Ready = false;
 }
 
 void PTAtrousPass::OnResize(u32 w, u32 h) {
     if (w == m_Width && h == m_Height) return;
-    m_Width = w; m_Height = h;
+    m_Width = w;
+    m_Height = h;
     m_Output.reset();
     CreateTextures(w, h);
 }
 
 void PTAtrousPass::SetInputs(rhi::IRHITexture* color, rhi::IRHITexture* depth, rhi::IRHITexture* normal) {
-    m_Color = color; m_Depth = depth; m_Normal = normal;
+    m_Color = color;
+    m_Depth = depth;
+    m_Normal = normal;
     if (!m_Device) return;
     m_Device->UpdateDescriptorSet(m_Set, 0, rhi::DescriptorType::SampledImage, color, nullptr);
     m_Device->UpdateDescriptorSet(m_Set, 1, rhi::DescriptorType::SampledImage, depth, nullptr);

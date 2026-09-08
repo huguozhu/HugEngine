@@ -228,7 +228,8 @@ void HybridRTPipeline::Shutdown() {
     for (auto& b : m_LightBuffers) b.reset();
     for (auto& b : m_ObjectBuffers) b.reset();
     for (auto& b : m_ShadowBuffers) b.reset();
-    m_Device = nullptr; m_Ready = false;
+    m_Device = nullptr;
+    m_Ready = false;
     HE_CORE_INFO("HybridRTPipeline: shutdown");
 }
 
@@ -238,7 +239,8 @@ void HybridRTPipeline::NextFrame() {
 
 void HybridRTPipeline::OnResize(u32 w, u32 h) {
     if (w == m_Width && h == m_Height) return;
-    m_Width = w; m_Height = h;
+    m_Width = w;
+    m_Height = h;
     if (m_GBuffer) m_GBuffer->OnResize(w, h);
     m_Lighting.OnResize(m_Device, w, h);
     m_ParticleRenderer.SetSceneDepth(m_Lighting.GetHDRDepth(), m_Lighting.GetPointSampler());
@@ -324,9 +326,11 @@ void HybridRTPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
         m_ShadowDenoiser->Shutdown();
         RTDenoiser::Config cfg;
         cfg.format          = rhi::Format::R16_FLOAT;
-        cfg.width           = m_RTShadow->GetWidth(); cfg.height = m_RTShadow->GetHeight();
+        cfg.width           = m_RTShadow->GetWidth();
+        cfg.height = m_RTShadow->GetHeight();
         cfg.temporalBlend   = cvRTDenoiseShadowBlend.Get();
-        cfg.depthThreshold  = 0.02f; cfg.normalThreshold = 0.85f;
+        cfg.depthThreshold  = 0.02f;
+        cfg.normalThreshold = 0.85f;
         cfg.debugName       = "RTShadowDenoiser";
         m_ShadowDenoiser->Initialize(m_Device, cfg);
     }
@@ -340,9 +344,11 @@ void HybridRTPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
         m_AODenoiser->Shutdown();
         RTDenoiser::Config cfg;
         cfg.format          = rhi::Format::R8_UNORM;
-        cfg.width           = m_RTAO->GetWidth(); cfg.height = m_RTAO->GetHeight();
+        cfg.width           = m_RTAO->GetWidth();
+        cfg.height = m_RTAO->GetHeight();
         cfg.temporalBlend   = cvRTDenoiseAOBlend.Get();
-        cfg.depthThreshold  = 0.02f; cfg.normalThreshold = 0.85f;
+        cfg.depthThreshold  = 0.02f;
+        cfg.normalThreshold = 0.85f;
         cfg.debugName       = "RTAODenoiser";
         m_AODenoiser->Initialize(m_Device, cfg);
     }
@@ -356,9 +362,11 @@ void HybridRTPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
         m_ReflectionDenoiser->Shutdown();
         RTDenoiser::Config cfg;
         cfg.format          = rhi::Format::RGBA16_FLOAT;
-        cfg.width           = m_RTReflection->GetWidth(); cfg.height = m_RTReflection->GetHeight();
+        cfg.width           = m_RTReflection->GetWidth();
+        cfg.height = m_RTReflection->GetHeight();
         cfg.temporalBlend   = cvRTDenoiseReflectionBlend.Get();
-        cfg.depthThreshold  = 0.05f; cfg.normalThreshold = 0.80f;
+        cfg.depthThreshold  = 0.05f;
+        cfg.normalThreshold = 0.80f;
         cfg.debugName       = "RTReflectionDenoiser";
         m_ReflectionDenoiser->Initialize(m_Device, cfg);
         m_ReflectionSpatial.Shutdown();
@@ -374,9 +382,11 @@ void HybridRTPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
         m_GIDenoiser->Shutdown();
         RTDenoiser::Config cfg;
         cfg.format          = rhi::Format::RGBA16_FLOAT;
-        cfg.width           = m_RTGI->GetWidth(); cfg.height = m_RTGI->GetHeight();
+        cfg.width           = m_RTGI->GetWidth();
+        cfg.height = m_RTGI->GetHeight();
         cfg.temporalBlend   = cvRTDenoiseGIBlend.Get();
-        cfg.depthThreshold  = 0.05f; cfg.normalThreshold = 0.80f;
+        cfg.depthThreshold  = 0.05f;
+        cfg.normalThreshold = 0.80f;
         cfg.debugName       = "RTGIDenoiser";
         m_GIDenoiser->Initialize(m_Device, cfg);
         m_GISpatial.Shutdown();
@@ -816,7 +826,8 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     rhi::IRHITexture* lightingGITex     = rtGIDenoisedTex     ? rtGIDenoisedTex     : rtGITex;
 
     // 空中透视参数：从物理天空组件读取太阳方向 + 浑浊度（无物理天空时保持 0=关闭）
-    float3 atmSunDir = float3(0, 1, 0); float atmTurbidity = 0.0f;
+    float3 atmSunDir = float3(0, 1, 0);
+    float atmTurbidity = 0.0f;
     he::GetPhysicalSkySun(world, atmSunDir, atmTurbidity);   // 无条件更新，天空移除时复位浑浊度=0（与 Forward 一致）
     m_Lighting.SetAtmosphere(atmSunDir, atmTurbidity);
 
@@ -857,7 +868,8 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             in.cameraPos    = float4(camera.position, 0);
             in.iblIntensity = 1.0f;
             in.lightCount   = lightCount;
-            in.width = w; in.height = h;
+            in.width = w;
+            in.height = h;
             m_Lighting.Render(c, in);
         });
 

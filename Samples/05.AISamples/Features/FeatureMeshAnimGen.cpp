@@ -15,7 +15,8 @@ using namespace he;
 bool FeatureMeshAnimGen::Initialize(rhi::IRHIDevice* device, rhi::IRHISwapChain* sc,
                                     he::ai::IAIDevice* ai) {
     m_AI = ai;
-    (void)device; (void)sc;
+    (void)device;
+    (void)sc;
     if (!m_AI) return false;
 
     // 生成对象实体（先用默认几何，下面覆盖为生成网格）

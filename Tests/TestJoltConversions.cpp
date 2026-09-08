@@ -33,7 +33,11 @@ TEST_CASE("JoltConversions 向量往返一致") {
 
 TEST_CASE("JoltConversions 四元数往返一致") {
     he::quat a;   // 直接设分量（避免 glm 构造序歧义）
-    a.x = 0.1f; a.y = -0.3f; a.z = 0.5f; a.w = 0.8f;   // 不必归一化，仅验证往返
+    a.x = 0.1f;
+    a.y = -0.3f;
+    a.z = 0.5f;
+    a.w = 0.8f;
+    // 不必归一化，仅验证往返;
     auto j = ToJolt(a);
     auto back = ToGlm(j);
     CHECK(back.x == doctest::Approx(a.x));

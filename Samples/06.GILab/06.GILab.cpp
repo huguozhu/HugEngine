@@ -292,15 +292,18 @@ int main() {
             u32 mipLevels = 1;
             while (maxDim > 1) { maxDim >>= 1; ++mipLevels; }
 
-            rhi::TextureDesc td; td.format=rhi::Format::RGBA8_UNORM;
-            td.width=static_cast<u32>(w); td.height=static_cast<u32>(h);
+            rhi::TextureDesc td;
+            td.format=rhi::Format::RGBA8_UNORM;
+            td.width=static_cast<u32>(w);
+            td.height=static_cast<u32>(h);
             td.mipLevels = mipLevels;
             td.usage=rhi::TextureUsage::ShaderResource
                    | rhi::TextureUsage::TransferSrc
                    | rhi::TextureUsage::TransferDst;
             td.initialData=pixels;
             auto t = device->CreateTexture(td);
-            rhi::SamplerDesc sd; sd.minFilter=rhi::FilterMode::Linear;
+            rhi::SamplerDesc sd;
+            sd.minFilter=rhi::FilterMode::Linear;
             sd.magFilter=rhi::FilterMode::Linear;
             sd.mipFilter=rhi::FilterMode::Linear;
             sd.maxLod = static_cast<float>(mipLevels);
@@ -316,11 +319,16 @@ int main() {
     {
         // 创建 bindless 默认占位纹理（必须在 RegisterMaterial 之前设置）
         u8 white[4]={255,255,255,255};
-        rhi::TextureDesc td; td.format=rhi::Format::RGBA8_UNORM;
-        td.width=1; td.height=1; td.mipLevels=1;
-        td.usage=rhi::TextureUsage::ShaderResource; td.initialData=white;
+        rhi::TextureDesc td;
+        td.format=rhi::Format::RGBA8_UNORM;
+        td.width=1;
+        td.height=1;
+        td.mipLevels=1;
+        td.usage=rhi::TextureUsage::ShaderResource;
+        td.initialData=white;
         auto defaultTex = device->CreateTexture(td);
-        rhi::SamplerDesc sd; sd.minFilter=sd.magFilter=rhi::FilterMode::Linear;
+        rhi::SamplerDesc sd;
+        sd.minFilter=sd.magFilter=rhi::FilterMode::Linear;
         sd.addressU=sd.addressV=rhi::AddressMode::Repeat;
         auto defaultSamp = device->CreateSampler(sd);
         device->GetBindlessHeap()->SetDefaultTexture(

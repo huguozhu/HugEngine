@@ -71,19 +71,22 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     {
         rhi::ShaderBytecode bc;
         bc.stage = rhi::ShaderStage::RayGen;
-        bc.spirv = k_PT_Full_rgen_spv; bc.entryPoint = "main";
+        bc.spirv = k_PT_Full_rgen_spv;
+        bc.entryPoint = "main";
         shaders.push_back(bc);
     }
     {
         rhi::ShaderBytecode bc;
         bc.stage = rhi::ShaderStage::ClosestHit;
-        bc.spirv = k_PT_Full_rchit_spv; bc.entryPoint = "main";
+        bc.spirv = k_PT_Full_rchit_spv;
+        bc.entryPoint = "main";
         shaders.push_back(bc);
     }
     {
         rhi::ShaderBytecode bc;
         bc.stage = rhi::ShaderStage::Miss;
-        bc.spirv = k_PT_Full_rmiss_spv; bc.entryPoint = "main";
+        bc.spirv = k_PT_Full_rmiss_spv;
+        bc.entryPoint = "main";
         shaders.push_back(bc);
     }
 
@@ -93,19 +96,22 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     {
         rhi::RTShaderGroup rg;
         rg.type = rhi::RTShaderGroupType::RayGen;
-        rg.generalShader = 0; rg.name = "PTRayGen";
+        rg.generalShader = 0;
+        rg.name = "PTRayGen";
         groups.push_back(rg);
     }
     {
         rhi::RTShaderGroup hg;
         hg.type = rhi::RTShaderGroupType::Hit;
-        hg.closestHitShader = 1; hg.name = "PTClosestHit";
+        hg.closestHitShader = 1;
+        hg.name = "PTClosestHit";
         groups.push_back(hg);
     }
     {
         rhi::RTShaderGroup mg;
         mg.type = rhi::RTShaderGroupType::Miss;
-        mg.generalShader = 2; mg.name = "PTMiss";
+        mg.generalShader = 2;
+        mg.name = "PTMiss";
         groups.push_back(mg);
     }
 
@@ -120,7 +126,9 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
 
     // ── 5 张输出纹理（RT 写 UAV，降噪/ReSTIR 读 SRV）──
     rhi::TextureDesc d;
-    d.width = m_Width; d.height = m_Height; d.mipLevels = 1;
+    d.width = m_Width;
+    d.height = m_Height;
+    d.mipLevels = 1;
     d.usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource;
     d.format = rhi::Format::RGBA16_FLOAT;
     m_HDR = device->CreateTexture(d);
@@ -142,11 +150,16 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
 }
 
 void PTPass::Shutdown() {
-    m_Velocity.reset(); m_AlbedoMetallic.reset();
-    m_Normal.reset(); m_Depth.reset(); m_HDR.reset();
+    m_Velocity.reset();
+    m_AlbedoMetallic.reset();
+    m_Normal.reset();
+    m_Depth.reset();
+    m_HDR.reset();
     m_Pipeline.reset();
-    m_Set = rhi::kInvalidSet; m_Layout = rhi::kInvalidLayout;
-    m_Device = nullptr; m_Width = m_Height = 0;
+    m_Set = rhi::kInvalidSet;
+    m_Layout = rhi::kInvalidLayout;
+    m_Device = nullptr;
+    m_Width = m_Height = 0;
     m_OutputWritten = false;
 }
 

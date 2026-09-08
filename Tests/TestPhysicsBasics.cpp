@@ -28,7 +28,10 @@ TEST_CASE("PhysicsSystem 丢球自由下落符合 ½gt²") {
     auto* xf = world.AddComponent<TransformComponent>(e);
     xf->position = float3(0.0f, 10.0f, 0.0f);
     auto* rb = world.AddComponent<RigidBodyComponent>(e);
-    rb->shape = 0; rb->radius = 0.5f; rb->isDynamic = true; rb->mass = 1.0f;
+    rb->shape = 0;
+    rb->radius = 0.5f;
+    rb->isDynamic = true;
+    rb->mass = 1.0f;
 
     // 模拟 0.5s（60fps × 30 帧）；物理固定步 1/120s 内部累计
     for (int i = 0; i < 30; ++i)
@@ -75,7 +78,10 @@ TEST_CASE("PhysicsSystem 球落在静态碰撞盒上停住（T5）") {
     auto* bxf = world.AddComponent<TransformComponent>(ball);
     bxf->position = float3(0.0f, 5.0f, 0.0f);
     auto* rb = world.AddComponent<RigidBodyComponent>(ball);
-    rb->shape = 0; rb->radius = 0.5f; rb->isDynamic = true; rb->mass = 1.0f;
+    rb->shape = 0;
+    rb->radius = 0.5f;
+    rb->isDynamic = true;
+    rb->mass = 1.0f;
 
     // 模拟 3 秒（180 帧）→ 球应落到地面（地面顶面 y=0 + 球半径 0.5 = 球心 y≈0.5）静止
     for (int i = 0; i < 180; ++i)
@@ -94,14 +100,21 @@ TEST_CASE("PhysicsSystem 盒/胶囊刚体形状覆盖（下落）") {
     auto* boxXf = world.AddComponent<TransformComponent>(box);
     boxXf->position = float3(-2.0f, 6.0f, 0.0f);
     auto* boxRb = world.AddComponent<RigidBodyComponent>(box);
-    boxRb->shape = 1; boxRb->halfExtent = 0.5f; boxRb->isDynamic = true; boxRb->mass = 1.0f;
+    boxRb->shape = 1;
+    boxRb->halfExtent = 0.5f;
+    boxRb->isDynamic = true;
+    boxRb->mass = 1.0f;
 
     // 胶囊（shape=2）
     Entity cap = world.CreateEntity("Capsule");
     auto* capXf = world.AddComponent<TransformComponent>(cap);
     capXf->position = float3(2.0f, 6.0f, 0.0f);
     auto* capRb = world.AddComponent<RigidBodyComponent>(cap);
-    capRb->shape = 2; capRb->radius = 0.4f; capRb->height = 1.2f; capRb->isDynamic = true; capRb->mass = 1.0f;
+    capRb->shape = 2;
+    capRb->radius = 0.4f;
+    capRb->height = 1.2f;
+    capRb->isDynamic = true;
+    capRb->mass = 1.0f;
 
     // 盒/胶囊 body 创建（shape 覆盖：CreateShape 0/1/2 均能建 body）
     for (int i = 0; i < 30; ++i)

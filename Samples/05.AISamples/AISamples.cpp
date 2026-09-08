@@ -145,9 +145,11 @@ int main() {
             rightMouseDown = false;
             glfwSetInputMode(glfwWin, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
         } else if (mouseDown && rightMouseDown) {
-            double cx, cy; glfwGetCursorPos(glfwWin, &cx, &cy);
+            double cx, cy;
+            glfwGetCursorPos(glfwWin, &cx, &cy);
             float dx = (float)(cx - lastMouseX), dy = (float)(cy - lastMouseY);
-            lastMouseX = cx; lastMouseY = cy;
+            lastMouseX = cx;
+            lastMouseY = cy;
             camCtrl.Rotate(dx * 0.003f, -dy * 0.003f);
         }
         render::CameraController::MoveInput moveIn;
@@ -181,7 +183,8 @@ int main() {
             // 否则回退自由相机 CameraController（S0.4 主相机接入）
             render::CameraData frameCamera = render::ResolveFrameCamera(*fWorld, camCtrl.GetCamera());
             render::SubsystemContext shadowCtx;
-            shadowCtx.world = fWorld; shadowCtx.sceneGraph = fSG;
+            shadowCtx.world = fWorld;
+            shadowCtx.sceneGraph = fSG;
             shadowCtx.camera = &frameCamera;
             he::SyncPhysicalSkyToSun(*fWorld);
             shadowSys->Update(shadowCtx);

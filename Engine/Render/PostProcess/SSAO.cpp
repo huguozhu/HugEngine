@@ -34,31 +34,44 @@ void SSAO::GenerateNoise(u32 size) {
     std::vector<float4> noise(size * size);
     for (u32 i = 0; i < size * size; ++i)
         noise[i] = float4(rnd(gen), rnd(gen), 0, 0);  // 2D 旋转向量
-    rhi::TextureDesc td; td.format=rhi::Format::RGBA16_FLOAT;
-    td.width=size; td.height=size; td.mipLevels=1;
-    td.usage=rhi::TextureUsage::ShaderResource; td.initialData=noise.data();
+    rhi::TextureDesc td;
+    td.format=rhi::Format::RGBA16_FLOAT;
+    td.width=size;
+    td.height=size;
+    td.mipLevels=1;
+    td.usage=rhi::TextureUsage::ShaderResource;
+    td.initialData=noise.data();
     m_NoiseTex = m_Device->CreateTexture(td);
 }
 
 void SSAO::CreateAOTexture(u32 w, u32 h) {
-    rhi::TextureDesc td; td.format=rhi::Format::R16_FLOAT;
-    td.width=w; td.height=h; td.mipLevels=1;
+    rhi::TextureDesc td;
+    td.format=rhi::Format::R16_FLOAT;
+    td.width=w;
+    td.height=h;
+    td.mipLevels=1;
     td.usage=rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
     m_AOTexture = m_Device->CreateTexture(td);
-    rhi::SamplerDesc sd; sd.minFilter=sd.magFilter=rhi::FilterMode::Linear;
+    rhi::SamplerDesc sd;
+    sd.minFilter=sd.magFilter=rhi::FilterMode::Linear;
     sd.addressU=sd.addressV=rhi::AddressMode::ClampToEdge;
     m_AOSampler = m_Device->CreateSampler(sd);
 }
 
 void SSAO::CreateBlurTexture(u32 w, u32 h) {
-    rhi::TextureDesc td; td.format=rhi::Format::R16_FLOAT;
-    td.width=w; td.height=h; td.mipLevels=1;
+    rhi::TextureDesc td;
+    td.format=rhi::Format::R16_FLOAT;
+    td.width=w;
+    td.height=h;
+    td.mipLevels=1;
     td.usage=rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
     m_BlurTexture = m_Device->CreateTexture(td);
 }
 
 bool SSAO::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
-    m_Device = device; m_Width = width; m_Height = height;
+    m_Device = device;
+    m_Width = width;
+    m_Height = height;
 
     GenerateKernel();
     GenerateNoise(4);
@@ -90,10 +103,14 @@ bool SSAO::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         m_SSAO_FS.entryPoint = "fragmentMain";
 
         rhi::PipelineStateDesc d;
-        d.vertexShader = &m_SSAO_VS; d.pixelShader = &m_SSAO_FS;
+        d.vertexShader = &m_SSAO_VS;
+        d.pixelShader = &m_SSAO_FS;
         d.topology = rhi::PrimitiveTopology::TriangleList;
-        d.depthTest = false; d.depthWrite = false; d.depthFormat = rhi::Format::Unknown;
-        d.colorAttachmentCount = 1; d.colorFormats[0] = rhi::Format::R16_FLOAT;
+        d.depthTest = false;
+        d.depthWrite = false;
+        d.depthFormat = rhi::Format::Unknown;
+        d.colorAttachmentCount = 1;
+        d.colorFormats[0] = rhi::Format::R16_FLOAT;
         d.descriptorSetLayouts = {m_SSAOLayout}; d.debugName = "SSAO";
         m_SSAO_PsoDesc = d;  // 保存描述符供惰性创建
 
@@ -116,10 +133,14 @@ bool SSAO::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         m_Blur_FS.entryPoint = "fragmentMain";
 
         rhi::PipelineStateDesc d;
-        d.vertexShader = &m_Blur_VS; d.pixelShader = &m_Blur_FS;
+        d.vertexShader = &m_Blur_VS;
+        d.pixelShader = &m_Blur_FS;
         d.topology = rhi::PrimitiveTopology::TriangleList;
-        d.depthTest = false; d.depthWrite = false; d.depthFormat = rhi::Format::Unknown;
-        d.colorAttachmentCount = 1; d.colorFormats[0] = rhi::Format::R16_FLOAT;
+        d.depthTest = false;
+        d.depthWrite = false;
+        d.depthFormat = rhi::Format::Unknown;
+        d.colorAttachmentCount = 1;
+        d.colorFormats[0] = rhi::Format::R16_FLOAT;
         d.descriptorSetLayouts = {m_BlurLayout}; d.debugName = "SSAO_Blur";
         m_Blur_PsoDesc = d;
 
@@ -127,7 +148,8 @@ bool SSAO::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     }
 
     // 输出纹理 + 采样器
-    rhi::SamplerDesc ptSamp; ptSamp.minFilter=ptSamp.magFilter=rhi::FilterMode::Nearest;
+    rhi::SamplerDesc ptSamp;
+    ptSamp.minFilter=ptSamp.magFilter=rhi::FilterMode::Nearest;
     ptSamp.addressU=ptSamp.addressV=rhi::AddressMode::ClampToEdge;
     m_PointSampler = device->CreateSampler(ptSamp);
 
@@ -142,16 +164,23 @@ bool SSAO::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
 void SSAO::Shutdown() {
     if (m_Device && m_SSAOLayout!=rhi::kInvalidLayout) m_Device->DestroyDescriptorSetLayout(m_SSAOLayout);
     if (m_Device && m_BlurLayout!=rhi::kInvalidLayout) m_Device->DestroyDescriptorSetLayout(m_BlurLayout);
-    m_SSAO_PSO.reset(); m_Blur_PSO.reset();
-    m_AOTexture.reset(); m_BlurTexture.reset(); m_AOSampler.reset(); m_PointSampler.reset(); m_NoiseTex.reset();
+    m_SSAO_PSO.reset();
+    m_Blur_PSO.reset();
+    m_AOTexture.reset();
+    m_BlurTexture.reset();
+    m_AOSampler.reset();
+    m_PointSampler.reset();
+    m_NoiseTex.reset();
     m_ParamUBO.reset();
-    m_Device = nullptr; m_Ready = false;
+    m_Device = nullptr;
+    m_Ready = false;
 }
 
 void SSAO::OnResize(u32 w, u32 h) { m_Width=w; m_Height=h; CreateAOTexture(w,h); CreateBlurTexture(w,h); }
 
 void SSAO::SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal) {
-    m_DepthTex = depth; m_NormalTex = normal;
+    m_DepthTex = depth;
+    m_NormalTex = normal;
     if (m_DepthTex) m_Device->UpdateDescriptorSet(m_SSAOSet,0,rhi::DescriptorType::CombinedImageSampler,m_DepthTex,m_PointSampler.get());
     if (m_NormalTex) m_Device->UpdateDescriptorSet(m_SSAOSet,1,rhi::DescriptorType::CombinedImageSampler,m_NormalTex,m_PointSampler.get());
     m_Device->UpdateDescriptorSet(m_SSAOSet,2,rhi::DescriptorType::CombinedImageSampler,m_NoiseTex.get(),m_PointSampler.get());

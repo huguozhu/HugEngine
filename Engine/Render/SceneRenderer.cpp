@@ -69,11 +69,13 @@ std::vector<DrawItem> SceneRenderer::Prepare(he::World& world, he::SceneGraph& s
     // ---- Step 2: 并行视锥剔除 ----
     Frustum frustum = camera.GetFrustum();
     std::mutex mtx;
-    std::vector<u32> visibleIdx; visibleIdx.reserve(total);
+    std::vector<u32> visibleIdx;
+    visibleIdx.reserve(total);
 
     if (enableFrustumCull) {
         JobSystem::Instance().ParallelForChunked(total, 64, [&](u32 start, u32 end) {
-            std::vector<u32> local; local.reserve(end - start);
+            std::vector<u32> local;
+            local.reserve(end - start);
             for (u32 i = start; i < end; ++i) {
                 if (!entries[i].worldBounds.IsValid() || frustum.Intersects(entries[i].worldBounds))
                     local.push_back(i);

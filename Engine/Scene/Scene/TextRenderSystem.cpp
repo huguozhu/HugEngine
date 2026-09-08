@@ -50,13 +50,19 @@ u32 DecodeUtf8(const String& s, usize& i) {
     u8 c = p[i];
     if (c < 0x80) { i += 1; return c; }
     if ((c & 0xE0) == 0xC0 && i + 1 < s.size()) {
-        u32 cp = ((c & 0x1F) << 6) | (p[i+1] & 0x3F); i += 2; return cp;
+        u32 cp = ((c & 0x1F) << 6) | (p[i+1] & 0x3F);
+        i += 2;
+        return cp;
     }
     if ((c & 0xF0) == 0xE0 && i + 2 < s.size()) {
-        u32 cp = ((c & 0x0F) << 12) | ((p[i+1] & 0x3F) << 6) | (p[i+2] & 0x3F); i += 3; return cp;
+        u32 cp = ((c & 0x0F) << 12) | ((p[i+1] & 0x3F) << 6) | (p[i+2] & 0x3F);
+        i += 3;
+        return cp;
     }
     if ((c & 0xF8) == 0xF0 && i + 3 < s.size()) {
-        u32 cp = ((c & 0x07) << 18) | ((p[i+1] & 0x3F) << 12) | ((p[i+2] & 0x3F) << 6) | (p[i+3] & 0x3F); i += 4; return cp;
+        u32 cp = ((c & 0x07) << 18) | ((p[i+1] & 0x3F) << 12) | ((p[i+2] & 0x3F) << 6) | (p[i+3] & 0x3F);
+        i += 4;
+        return cp;
     }
     i += 1;   // 非法序列：吞掉一字节继续
     return 0;
@@ -135,7 +141,8 @@ bool RasterizeWithTTF(const std::vector<u8>& fontData, const String& text, float
             outPixels[dst + 3] = topDown[src + 3];     // alpha = 字形覆盖
         }
     }
-    outW = W; outH = H;
+    outW = W;
+    outH = H;
     return true;
 }
 
@@ -161,8 +168,10 @@ bool RasterizeWithEasyFont(const String& text, float fontSize,
     for (int q = 0; q < numQuads; ++q) {
         const float* v = buf.data() + q * 16;
         for (int k = 0; k < 4; ++k) {
-            minX = std::min(minX, v[k*4+0] * s); maxX = std::max(maxX, v[k*4+0] * s);
-            minY = std::min(minY, v[k*4+1] * s); maxY = std::max(maxY, v[k*4+1] * s);
+            minX = std::min(minX, v[k*4+0] * s);
+            maxX = std::max(maxX, v[k*4+0] * s);
+            minY = std::min(minY, v[k*4+1] * s);
+            maxY = std::max(maxY, v[k*4+1] * s);
         }
     }
     u32 W = (u32)(maxX - minX) + 4;
@@ -173,8 +182,10 @@ bool RasterizeWithEasyFont(const String& text, float fontSize,
         const float* v = buf.data() + q * 16;
         int qx0 = 1e9, qy0 = 1e9, qx1 = -1e9, qy1 = -1e9;
         for (int k = 0; k < 4; ++k) {
-            qx0 = std::min(qx0, (int)(v[k*4+0] * s)); qx1 = std::max(qx1, (int)(v[k*4+0] * s));
-            qy0 = std::min(qy0, (int)(v[k*4+1] * s)); qy1 = std::max(qy1, (int)(v[k*4+1] * s));
+            qx0 = std::min(qx0, (int)(v[k*4+0] * s));
+            qx1 = std::max(qx1, (int)(v[k*4+0] * s));
+            qy0 = std::min(qy0, (int)(v[k*4+1] * s));
+            qy1 = std::max(qy1, (int)(v[k*4+1] * s));
         }
         for (int y = qy0; y <= qy1; ++y)
             for (int x = qx0; x <= qx1; ++x) {
@@ -196,7 +207,8 @@ bool RasterizeWithEasyFont(const String& text, float fontSize,
             outPixels[dst + 3] = topDown[src + 3];
         }
     }
-    outW = W; outH = H;
+    outW = W;
+    outH = H;
     return true;
 }
 

@@ -54,7 +54,8 @@ bool RTEffectPass::Initialize(rhi::IRHIDevice* device,
     // ── 创建输出 UAV 纹理 ──
     rhi::TextureDesc d;
     d.format = outFormat;
-    d.width  = m_Width; d.height = m_Height;
+    d.width  = m_Width;
+    d.height = m_Height;
     d.usage  = outUsage;
     m_Output = device->CreateTexture(d);
     if (!m_Output) {

@@ -463,7 +463,8 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
         if (vulkanDevice) {
             uint64_t hash = HashPipelineStateDesc(desc);
             vulkanDevice->InsertPSOToCache(hash, pipeline, pipelineLayout, VK_NULL_HANDLE);
-            VkPipeline cachedP = VK_NULL_HANDLE; VkPipelineLayout cachedL = VK_NULL_HANDLE;
+            VkPipeline cachedP = VK_NULL_HANDLE;
+            VkPipelineLayout cachedL = VK_NULL_HANDLE;
             VkRenderPass cachedR = VK_NULL_HANDLE;
             auto ref = vulkanDevice->GetCachedPSORef(hash, cachedP, cachedL, cachedR);
             if (ref) {
@@ -695,7 +696,8 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
         if (vulkanDevice) {
             uint64_t hash = HashPipelineStateDesc(desc);
             vulkanDevice->InsertPSOToCache(hash, pipeline, pipelineLayout, renderPass);
-            VkPipeline cachedP = VK_NULL_HANDLE; VkPipelineLayout cachedL = VK_NULL_HANDLE;
+            VkPipeline cachedP = VK_NULL_HANDLE;
+            VkPipelineLayout cachedL = VK_NULL_HANDLE;
             VkRenderPass cachedR = VK_NULL_HANDLE;
             auto ref = vulkanDevice->GetCachedPSORef(hash, cachedP, cachedL, cachedR);
             if (ref) {
@@ -742,7 +744,8 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
                 HE_CORE_INFO("Vulkan graphics pipeline created via GPL fast-link");
                 uint64_t hash = HashPipelineStateDesc(desc);
                 vulkanDevice->InsertPSOToCache(hash, pipeline, parts.layout, parts.renderPass);
-                VkPipeline cp = VK_NULL_HANDLE; VkPipelineLayout cl = VK_NULL_HANDLE;
+                VkPipeline cp = VK_NULL_HANDLE;
+                VkPipelineLayout cl = VK_NULL_HANDLE;
                 VkRenderPass cr = VK_NULL_HANDLE;
                 auto ref = vulkanDevice->GetCachedPSORef(hash, cp, cl, cr);
                 if (ref) {
@@ -788,7 +791,8 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     if (vulkanDevice) {
         uint64_t hash = HashPipelineStateDesc(desc);
         vulkanDevice->InsertPSOToCache(hash, pipeline, parts.layout, parts.renderPass);
-        VkPipeline cachedP = VK_NULL_HANDLE; VkPipelineLayout cachedL = VK_NULL_HANDLE;
+        VkPipeline cachedP = VK_NULL_HANDLE;
+        VkPipelineLayout cachedL = VK_NULL_HANDLE;
         VkRenderPass cachedR = VK_NULL_HANDLE;
         auto ref = vulkanDevice->GetCachedPSORef(hash, cachedP, cachedL, cachedR);
         if (ref) {

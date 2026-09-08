@@ -353,11 +353,16 @@ VulkanDevice::CreateRTPipelineState(const RTPipelineStateDesc& desc) {
 
         VkShaderStageFlagBits vkStage;
         switch (bc.stage) {
-            case ShaderStage::RayGen:       vkStage = VK_SHADER_STAGE_RAYGEN_BIT_KHR; break;
-            case ShaderStage::Miss:         vkStage = VK_SHADER_STAGE_MISS_BIT_KHR; break;
-            case ShaderStage::ClosestHit:   vkStage = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR; break;
-            case ShaderStage::AnyHit:       vkStage = VK_SHADER_STAGE_ANY_HIT_BIT_KHR; break;
-            case ShaderStage::Callable:     vkStage = VK_SHADER_STAGE_CALLABLE_BIT_KHR; break;
+            case ShaderStage::RayGen:       vkStage = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+            break;
+            case ShaderStage::Miss:         vkStage = VK_SHADER_STAGE_MISS_BIT_KHR;
+            break;
+            case ShaderStage::ClosestHit:   vkStage = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+            break;
+            case ShaderStage::AnyHit:       vkStage = VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
+            break;
+            case ShaderStage::Callable:     vkStage = VK_SHADER_STAGE_CALLABLE_BIT_KHR;
+            break;
             default:
                 HE_CORE_WARN("CreateRTPipelineState: 跳过不支持的 stage 类型 ({})", int(bc.stage));
                 continue;

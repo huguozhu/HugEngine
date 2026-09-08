@@ -49,17 +49,20 @@ void OutlinerPanel::Render() {
         if (ImGui::MenuItem("Point Light")) {
             Entity e = createEntity("PointLight");
             auto* pl = world->AddComponent<PointLight>(e);
-            pl->color = float3(1, 0.8f, 0.6f); pl->intensity = 20;
+            pl->color = float3(1, 0.8f, 0.6f);
+            pl->intensity = 20;
         }
         if (ImGui::MenuItem("Spot Light")) {
             Entity e = createEntity("SpotLight");
             auto* sl = world->AddComponent<SpotLight>(e);
-            sl->color = float3(1, 0.9f, 0.7f); sl->intensity = 30;
+            sl->color = float3(1, 0.9f, 0.7f);
+            sl->intensity = 30;
         }
         if (ImGui::MenuItem("Directional Light")) {
             Entity e = createEntity("DirLight");
             auto* dl = world->AddComponent<DirectionalLight>(e);
-            dl->color = float3(1, 0.95f, 0.85f); dl->intensity = 10;
+            dl->color = float3(1, 0.95f, 0.85f);
+            dl->intensity = 10;
         }
         ImGui::EndPopup();
     }

@@ -73,12 +73,14 @@ bool NavMeshSystem::FindPath(World&, NavMeshComponent& nav,
     open.push({startIdx, nodes[startIdx].f});
 
     while (!open.empty()) {
-        QItem cur = open.top(); open.pop();
+        QItem cur = open.top();
+        open.pop();
         int curIdx = cur.idx;
         if (closed[curIdx]) continue;
         closed[curIdx] = true;
 
-        int cc, cr; idxToCell(curIdx, cc, cr);
+        int cc, cr;
+        idxToCell(curIdx, cc, cr);
         if (cc == tc && cr == tr) {   // 到达目标 → 回溯路径
             std::vector<int> pathIdx;
             int n = curIdx;
@@ -88,7 +90,8 @@ bool NavMeshSystem::FindPath(World&, NavMeshComponent& nav,
             }
             std::reverse(pathIdx.begin(), pathIdx.end());
             for (size_t i = 0; i < pathIdx.size(); ++i) {
-                int c2, r2; idxToCell((int)pathIdx[i], c2, r2);
+                int c2, r2;
+                idxToCell((int)pathIdx[i], c2, r2);
                 outPath.push_back(nav.CellToWorld(c2, r2));
             }
             return true;

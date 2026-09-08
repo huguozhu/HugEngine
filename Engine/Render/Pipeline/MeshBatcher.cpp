@@ -87,13 +87,17 @@ bool MeshBatcher::Build(World& world) {
     m_TotalIndices  = (u32)m_MergedIndices.size();
 
     // 创建合并后的 GPU 缓冲
-    rhi::BufferDesc vbDesc; vbDesc.size = m_MergedVertices.size() * sizeof(StaticVertex);
-    vbDesc.usage = rhi::BufferUsage::Vertex; vbDesc.initialData = m_MergedVertices.data();
+    rhi::BufferDesc vbDesc;
+    vbDesc.size = m_MergedVertices.size() * sizeof(StaticVertex);
+    vbDesc.usage = rhi::BufferUsage::Vertex;
+    vbDesc.initialData = m_MergedVertices.data();
     vbDesc.stride = sizeof(StaticVertex);
     m_MergedVB = rhi::GetDevice()->CreateBuffer(vbDesc);
 
-    rhi::BufferDesc ibDesc; ibDesc.size = m_MergedIndices.size() * sizeof(u32);
-    ibDesc.usage = rhi::BufferUsage::Index; ibDesc.initialData = m_MergedIndices.data();
+    rhi::BufferDesc ibDesc;
+    ibDesc.size = m_MergedIndices.size() * sizeof(u32);
+    ibDesc.usage = rhi::BufferUsage::Index;
+    ibDesc.initialData = m_MergedIndices.data();
     ibDesc.stride = sizeof(u32);
     m_MergedIB = rhi::GetDevice()->CreateBuffer(ibDesc);
 

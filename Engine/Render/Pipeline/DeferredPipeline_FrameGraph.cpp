@@ -46,13 +46,20 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     bool isHDR = (swapFmt == rhi::Format::A2B10G10R10_UNORM_PACK32);
     // 从 GBufferRenderer 导入所有 GBuffer 纹理
     auto gb = m_GBuffer->ImportToRenderGraph(rg);
-    auto gbA = gb.albedo; auto gbB = gb.normal; auto gbC = gb.emissive;
-    auto gbDepth = gb.depth; auto gbVel = gb.velocity; auto gbWorldPos = gb.worldPos;
-    auto gbDisneyA = gb.disneyA; auto gbDisneyB = gb.disneyB;  // Disney BSDF 参数通道
+    auto gbA = gb.albedo;
+    auto gbB = gb.normal;
+    auto gbC = gb.emissive;
+    auto gbDepth = gb.depth;
+    auto gbVel = gb.velocity;
+    auto gbWorldPos = gb.worldPos;
+    auto gbDisneyA = gb.disneyA;
+    auto gbDisneyB = gb.disneyB;
+    // Disney BSDF 参数通道;
     auto hdrC = rg.ImportTexture("HDR_C", m_Lighting.GetHDRTarget());
     auto backBuf = rg.ImportBackBuffer();
 
-    (void)world; (void)sg;
+    (void)world;
+    (void)sg;
 
     // ── 帧首：更新成员变量（lambda 内通过 this 安全访问，无悬垂引用风险）──
     m_CurrViewProj = camera.GetViewProjMatrix();
@@ -278,7 +285,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         rg.AddPass("SSAO", {}, {{ssaoOut, ResourceAccess::Write}},
             [&, w, h](rhi::IRHICommandList* c) {
                 m_SSAO.PreBind(c);
-                rhi::ClearValue aoClear; aoClear.color[0]=aoClear.color[1]=aoClear.color[2]=aoClear.color[3]=1.0f;
+                rhi::ClearValue aoClear;
+                aoClear.color[0]=aoClear.color[1]=aoClear.color[2]=aoClear.color[3]=1.0f;
                 c->BeginOffscreenPass(m_SSAO.GetAOTexture()->GetNativeHandle(), nullptr, w, h, &aoClear, false);
                 if (m_SSAO.enabled) {
                     m_SSAO.SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal());
@@ -379,7 +387,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     // Lighting Pass (全屏 PBR + 降噪后 SSGI/SSR/DDGI 读取，委托给 LightingPass 共享组件)
 
     // 空中透视参数：从物理天空组件读取太阳方向 + 浑浊度（无物理天空时保持 0=关闭）
-    float3 atmSunDir = float3(0, 1, 0); float atmTurbidity = 0.0f;
+    float3 atmSunDir = float3(0, 1, 0);
+    float atmTurbidity = 0.0f;
     he::GetPhysicalSkySun(world, atmSunDir, atmTurbidity);   // 无条件更新，天空移除时复位浑浊度=0（与 Forward 一致）
     m_Lighting.SetAtmosphere(atmSunDir, atmTurbidity);
 
@@ -453,7 +462,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             in.giIntensity  = m_GIConfig.giIntensity;   // M2：间接漫反射总强度（GIConfig 数据驱动）
             in.aoIntensity  = m_GIConfig.aoIntensity;   // M2：AO 强度
             in.lightCount   = fpc.lightCount;
-            in.width = w; in.height = h;
+            in.width = w;
+            in.height = h;
             m_Lighting.Render(c, in);
         });
 
@@ -463,7 +473,9 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         {{gbDepth, ResourceAccess::Read}, {hdrC, ResourceAccess::Read}},
         {{hdrC, ResourceAccess::Write}},
         [&, w, h](rhi::IRHICommandList* c) {
-            SubsystemContext sctx; sctx.world = &world; sctx.camera = &camera;
+            SubsystemContext sctx;
+            sctx.world = &world;
+            sctx.camera = &camera;
             m_PostProcess.GetSkybox()->Update(sctx);
             m_PostProcess.GetSkybox()->PreBind(c);
             c->BeginOffscreenPass(m_Lighting.GetHDRTarget()->GetNativeHandle(),

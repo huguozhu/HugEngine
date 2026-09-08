@@ -9,7 +9,8 @@
 namespace he::render {
 
 bool ShadowSystem::Initialize(rhi::IRHIDevice* device,u32,u32){
-    m_Device=device;HE_ASSERT(m_Device,"ShadowSystem: null device");
+    m_Device=device;
+    HE_ASSERT(m_Device,"ShadowSystem: null device");
 
     // 注册默认技术
     auto csm=std::make_unique<CSMTechnique>();
@@ -46,7 +47,8 @@ void ShadowSystem::CreateShadowPSO(rhi::DescriptorSetLayoutHandle layout){
 void ShadowSystem::Shutdown(){
     for(auto& t:m_Techniques)t->Shutdown();
     m_Techniques.clear();
-    m_Device=nullptr;m_Ready=false;
+    m_Device=nullptr;
+    m_Ready=false;
     HE_CORE_INFO("ShadowSystem shutdown");
 }
 
@@ -65,10 +67,12 @@ void ShadowSystem::SetRenderResources(rhi::IRHIBuffer* objBuf,rhi::IRHIBuffer* s
 
 void ShadowSystem::Update(const SubsystemContext& ctx){
     if(!m_Ready||!m_Enabled)return;
-    m_CachedWorld=ctx.world;m_CachedSceneGraph=ctx.sceneGraph;
+    m_CachedWorld=ctx.world;
+    m_CachedSceneGraph=ctx.sceneGraph;
     if(!ctx.world||!ctx.sceneGraph||!ctx.camera)return;
 
-    m_AllShadowData.clear();m_AllEntities.clear();
+    m_AllShadowData.clear();
+    m_AllEntities.clear();
     m_PerTechniqueCounts.clear();
 
     for(auto& t:m_Techniques){

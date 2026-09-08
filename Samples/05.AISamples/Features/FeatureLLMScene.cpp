@@ -15,7 +15,8 @@ using namespace he;
 bool FeatureLLMScene::Initialize(rhi::IRHIDevice* device, rhi::IRHISwapChain* sc,
                                  he::ai::IAIDevice* ai) {
     m_AI = ai;
-    (void)device; (void)sc;
+    (void)device;
+    (void)sc;
     Generate();   // 启动即生成一次
     return true;
 }

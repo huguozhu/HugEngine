@@ -68,13 +68,19 @@ bool ShaderHotReload::InferShaderType(StringView filename,
                                        String& outStage, String& outEntry) {
     // 例如 "PBR.frag.slang" → stage=fragment, entry=fragmentMain
     if (filename.find(".vert.slang") != StringView::npos) {
-        outStage = "vertex"; outEntry = "vertexMain"; return true;
+        outStage = "vertex";
+        outEntry = "vertexMain";
+        return true;
     }
     if (filename.find(".frag.slang") != StringView::npos) {
-        outStage = "fragment"; outEntry = "fragmentMain"; return true;
+        outStage = "fragment";
+        outEntry = "fragmentMain";
+        return true;
     }
     if (filename.find(".comp.slang") != StringView::npos) {
-        outStage = "compute"; outEntry = "main"; return true;
+        outStage = "compute";
+        outEntry = "main";
+        return true;
     }
     return false;
 }

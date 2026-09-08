@@ -288,11 +288,15 @@ void EditorApp::MainLoop() {
                         // 占位纹理（持久化）
                         if (!m_DefaultTex.get()) {
                             u8 w4[4]={255,255,255,255};
-                            rhi::TextureDesc td; td.format=rhi::Format::RGBA8_UNORM;
-                            td.width=td.height=1; td.mipLevels=1;
-                            td.usage=rhi::TextureUsage::ShaderResource; td.initialData=w4;
+                            rhi::TextureDesc td;
+                            td.format=rhi::Format::RGBA8_UNORM;
+                            td.width=td.height=1;
+                            td.mipLevels=1;
+                            td.usage=rhi::TextureUsage::ShaderResource;
+                            td.initialData=w4;
                             m_DefaultTex = m_Device->CreateTexture(td);
-                            rhi::SamplerDesc sd; sd.minFilter=sd.magFilter=rhi::FilterMode::Linear;
+                            rhi::SamplerDesc sd;
+                            sd.minFilter=sd.magFilter=rhi::FilterMode::Linear;
                             sd.addressU=sd.addressV=rhi::AddressMode::Repeat;
                             m_DefaultSampler = m_Device->CreateSampler(sd);
                             m_Device->GetBindlessHeap()->SetDefaultTexture(
@@ -307,15 +311,21 @@ void EditorApp::MainLoop() {
                                 int w, h, c;
                                 u8* px = stbi_load(fullPath.c_str(), &w, &h, &c, 4);
                                 if (!px) { HE_CORE_WARN("纹理加载失败: {}", fullPath); return {nullptr, nullptr}; }
-                                rhi::TextureDesc td; td.format=rhi::Format::RGBA8_UNORM;
-                                td.width=u32(w); td.height=u32(h); td.mipLevels=1;
-                                td.usage=rhi::TextureUsage::ShaderResource; td.initialData=px;
+                                rhi::TextureDesc td;
+                                td.format=rhi::Format::RGBA8_UNORM;
+                                td.width=u32(w);
+                                td.height=u32(h);
+                                td.mipLevels=1;
+                                td.usage=rhi::TextureUsage::ShaderResource;
+                                td.initialData=px;
                                 auto tex = m_Device->CreateTexture(td);
-                                rhi::SamplerDesc sd; sd.minFilter=sd.magFilter=rhi::FilterMode::Linear;
+                                rhi::SamplerDesc sd;
+                                sd.minFilter=sd.magFilter=rhi::FilterMode::Linear;
                                 sd.addressU=sd.addressV=rhi::AddressMode::Repeat;
                                 auto samp = m_Device->CreateSampler(sd);
                                 stbi_image_free(px);
-                                auto* tp = tex.get(); auto* sp = samp.get();
+                                auto* tp = tex.get();
+                                auto* sp = samp.get();
                                 m_TexCache[fullPath] = {std::move(tex), std::move(samp)};
                                 return {tp, sp};
                             };

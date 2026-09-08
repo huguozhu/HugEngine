@@ -51,19 +51,22 @@ bool RTReflectionPass::Initialize(rhi::IRHIDevice* device, u32 fullWidth, u32 fu
     {
         rhi::ShaderBytecode bc;
         bc.stage = rhi::ShaderStage::RayGen;
-        bc.spirv = k_RT_Reflection_rgen_spv; bc.entryPoint = "main";
+        bc.spirv = k_RT_Reflection_rgen_spv;
+        bc.entryPoint = "main";
         shaders.push_back(bc);
     }
     {
         rhi::ShaderBytecode bc;
         bc.stage = rhi::ShaderStage::ClosestHit;
-        bc.spirv = k_RT_Reflection_rchit_spv; bc.entryPoint = "main";
+        bc.spirv = k_RT_Reflection_rchit_spv;
+        bc.entryPoint = "main";
         shaders.push_back(bc);
     }
     {
         rhi::ShaderBytecode bc;
         bc.stage = rhi::ShaderStage::Miss;
-        bc.spirv = k_RT_Reflection_rmiss_spv; bc.entryPoint = "main";
+        bc.spirv = k_RT_Reflection_rmiss_spv;
+        bc.entryPoint = "main";
         shaders.push_back(bc);
     }
 
@@ -72,19 +75,22 @@ bool RTReflectionPass::Initialize(rhi::IRHIDevice* device, u32 fullWidth, u32 fu
     {
         rhi::RTShaderGroup rg;
         rg.type = rhi::RTShaderGroupType::RayGen;
-        rg.generalShader = 0; rg.name = "ReflectionRayGen";
+        rg.generalShader = 0;
+        rg.name = "ReflectionRayGen";
         groups.push_back(rg);
     }
     {
         rhi::RTShaderGroup hg;
         hg.type = rhi::RTShaderGroupType::Hit;
-        hg.closestHitShader = 1; hg.name = "ReflectionClosestHit";
+        hg.closestHitShader = 1;
+        hg.name = "ReflectionClosestHit";
         groups.push_back(hg);
     }
     {
         rhi::RTShaderGroup mg;
         mg.type = rhi::RTShaderGroupType::Miss;
-        mg.generalShader = 2; mg.name = "ReflectionMiss";
+        mg.generalShader = 2;
+        mg.name = "ReflectionMiss";
         groups.push_back(mg);
     }
 

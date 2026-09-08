@@ -63,7 +63,8 @@ void LevelLoader::LoadLevel(World& world, LevelComponent& lc) {
     if (!f) { HE_CORE_WARN("LevelLoader: {} not found", lc.levelPath); return; }
 
     std::vector<u8> buf((usize)f.tellg());
-    f.seekg(0); f.read((char*)buf.data(), buf.size());
+    f.seekg(0);
+    f.read((char*)buf.data(), buf.size());
     usize p = 0;
     auto r32=[&](){u32 v=0;for(int i=0;i<4;++i)v|=(u32)buf[p++]<<(i*8);return v;};
     auto r64=[&](){u64 v=0;for(int i=0;i<8;++i)v|=(u64)buf[p++]<<(i*8);return v;};
@@ -88,7 +89,8 @@ void LevelLoader::LoadLevel(World& world, LevelComponent& lc) {
 
         u32 cc = r32();
         for (u32 ci = 0; ci < cc; ++ci) {
-            u64 hash = r64(); u32 ds = r32();
+            u64 hash = r64();
+            u32 ds = r32();
             Component* added = AddComponentByHash(&world, ent, hash);
             if (!added) { p += ds; continue; }
 

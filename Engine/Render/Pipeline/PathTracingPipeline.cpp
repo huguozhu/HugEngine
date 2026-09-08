@@ -170,7 +170,8 @@ void PathTracingPipeline::Shutdown() {
     m_PostProcess.Shutdown();
     m_LinearSampler.reset();
     for (auto& b : m_LightBuffers) b.reset();
-    m_Device = nullptr; m_Ready = false;
+    m_Device = nullptr;
+    m_Ready = false;
     HE_CORE_INFO("PathTracingPipeline: shutdown");
 }
 
@@ -180,7 +181,8 @@ void PathTracingPipeline::NextFrame() {
 
 void PathTracingPipeline::OnResize(u32 w, u32 h) {
     if (w == m_Width && h == m_Height) return;
-    m_Width = w; m_Height = h;
+    m_Width = w;
+    m_Height = h;
     m_PostProcess.OnResize(m_Device, w, h);
     if (m_Device && m_RTEnabled) {
         // PT/ReSTIR Pass 重建输出纹理与蓄水池

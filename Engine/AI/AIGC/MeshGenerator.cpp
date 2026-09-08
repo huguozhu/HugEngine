@@ -58,8 +58,12 @@ void GenSphere(float radius, u32 segs, u32 rings, MeshGenResult& out) {
     for (u32 ring = 0; ring < rings; ++ring) {
         for (u32 seg = 0; seg < segs; ++seg) {
             u32 a = ring * (segs + 1) + seg, b = a + segs + 1;
-            out.indices.push_back(a); out.indices.push_back(b); out.indices.push_back(a + 1);
-            out.indices.push_back(a + 1); out.indices.push_back(b); out.indices.push_back(b + 1);
+            out.indices.push_back(a);
+            out.indices.push_back(b);
+            out.indices.push_back(a + 1);
+            out.indices.push_back(a + 1);
+            out.indices.push_back(b);
+            out.indices.push_back(b + 1);
         }
     }
     out.name = "sphere";
@@ -86,7 +90,9 @@ void GenPyramid(float size, MeshGenResult& out) {
         out.vertices.push_back({ a, n, float2(0, 0) });
         out.vertices.push_back({ b, n, float2(1, 0) });
         out.vertices.push_back({ c, n, float2(0.5f, 1) });
-        out.indices.push_back(base); out.indices.push_back(base + 1); out.indices.push_back(base + 2);
+        out.indices.push_back(base);
+        out.indices.push_back(base + 1);
+        out.indices.push_back(base + 2);
     }
     out.name = "pyramid";
 }
@@ -111,8 +117,12 @@ void GenTorus(float majorR, float minorR, u32 majorSegs, u32 minorSegs, MeshGenR
     for (u32 i = 0; i < majorSegs; ++i) {
         for (u32 j = 0; j < minorSegs; ++j) {
             u32 a = i * (minorSegs + 1) + j, b = a + minorSegs + 1;
-            out.indices.push_back(a); out.indices.push_back(b); out.indices.push_back(a + 1);
-            out.indices.push_back(a + 1); out.indices.push_back(b); out.indices.push_back(b + 1);
+            out.indices.push_back(a);
+            out.indices.push_back(b);
+            out.indices.push_back(a + 1);
+            out.indices.push_back(a + 1);
+            out.indices.push_back(b);
+            out.indices.push_back(b + 1);
         }
     }
     out.name = "torus";

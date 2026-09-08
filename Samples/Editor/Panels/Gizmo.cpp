@@ -87,8 +87,10 @@ bool Gizmo::Render(const render::CameraData& camera, float3& position, quat& rot
                     dl->AddLine(ImVec2(center.x, center.y), ImVec2(hEnd.x, hEnd.y), kColorSel, 3.0f);
                     hovered = true;
                     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                        m_Dragging = true; m_ActiveAxis = i;
-                        m_DragStartPos = position; m_DragStartMouse = mPos;
+                        m_Dragging = true;
+                        m_ActiveAxis = i;
+                        m_DragStartPos = position;
+                        m_DragStartMouse = mPos;
                     }
                     break;
                 }
@@ -142,7 +144,8 @@ bool Gizmo::Render(const render::CameraData& camera, float3& position, quat& rot
                 dl->AddCircle(ImVec2(center.x, center.y), ringR, kColorSel, 48, 3.5f);
                 hovered = true;
                 if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                    m_Dragging = true; m_ActiveAxis = rotateAxis;
+                    m_Dragging = true;
+                    m_ActiveAxis = rotateAxis;
                     m_DragStartRot = rotation;
                     m_DragStartAngle = std::atan2(mPos.y - center.y, mPos.x - center.x);
                 }
@@ -186,8 +189,10 @@ bool Gizmo::Render(const render::CameraData& camera, float3& position, quat& rot
                                 ImVec2(end2D.x + cubeSz, end2D.y + cubeSz), kColorSel, 0, 0, 2.0f);
                     hovered = true;
                     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                        m_Dragging = true; m_ActiveAxis = i;
-                        m_DragStartScale = scale; m_DragStartMouse = mPos;
+                        m_Dragging = true;
+                        m_ActiveAxis = i;
+                        m_DragStartScale = scale;
+                        m_DragStartMouse = mPos;
                     }
                     break;
                 }
@@ -197,8 +202,11 @@ bool Gizmo::Render(const render::CameraData& camera, float3& position, quat& rot
                             ImVec2(center.x + cs + 2, center.y + cs + 2), kColorSel, 0, 0, 2.0f);
                 hovered = true;
                 if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                    m_Dragging = true; m_ActiveAxis = -1;  // -1 = 等比缩放
-                    m_DragStartScale = scale; m_DragStartMouse = mPos;
+                    m_Dragging = true;
+                    m_ActiveAxis = -1;
+                    // -1 = 等比缩放;
+                    m_DragStartScale = scale;
+                    m_DragStartMouse = mPos;
                 }
             }
         } else {

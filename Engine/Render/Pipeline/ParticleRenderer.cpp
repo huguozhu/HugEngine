@@ -62,32 +62,43 @@ void ParticleRenderer::CompState::CreateBuffers(rhi::IRHIDevice* device, u32 sor
         float4(-1, 1, 0,1), float4( 1,-1, 1,0), float4( 1, 1, 1,1),
     };
     {
-        rhi::BufferDesc d; d.size = sizeof(verts); d.usage = rhi::BufferUsage::Storage; d.cpuAccess = true;
+        rhi::BufferDesc d;
+        d.size = sizeof(verts);
+        d.usage = rhi::BufferUsage::Storage;
+        d.cpuAccess = true;
         billboardVB = device->CreateBuffer(d);
         std::memcpy(billboardVB->Map(), verts, sizeof(verts));
         billboardVB->Unmap();
     }
     // Particle pool
     {
-        rhi::BufferDesc d; d.size = sizeof(Particle) * maxParticles;
+        rhi::BufferDesc d;
+        d.size = sizeof(Particle) * maxParticles;
         d.usage = rhi::BufferUsage::Storage;
         particleBuf = device->CreateBuffer(d);
     }
     // DeadList + AliveIndices
     {
-        rhi::BufferDesc d; d.size = sizeof(u32) * maxParticles; d.usage = rhi::BufferUsage::Storage;
+        rhi::BufferDesc d;
+        d.size = sizeof(u32) * maxParticles;
+        d.usage = rhi::BufferUsage::Storage;
         deadList  = device->CreateBuffer(d);
         alivePre  = device->CreateBuffer(d);
         alivePost = device->CreateBuffer(d);
     }
     // SortIndices
     {
-        rhi::BufferDesc d; d.size = sizeof(SortInfo) * sortCapacity; d.usage = rhi::BufferUsage::Storage;
+        rhi::BufferDesc d;
+        d.size = sizeof(SortInfo) * sortCapacity;
+        d.usage = rhi::BufferUsage::Storage;
         sortIndices = device->CreateBuffer(d);
     }
     // Counters — CPU 读回渲染数量，需要 host-visible，初始化为零避免垃圾数据
     {
-        rhi::BufferDesc d; d.size = sizeof(ParticleCounters); d.usage = rhi::BufferUsage::Storage; d.cpuAccess = true;
+        rhi::BufferDesc d;
+        d.size = sizeof(ParticleCounters);
+        d.usage = rhi::BufferUsage::Storage;
+        d.cpuAccess = true;
         counters = device->CreateBuffer(d);
         ParticleCounters zero = {};
         std::memcpy(counters->Map(), &zero, sizeof(ParticleCounters));
@@ -95,7 +106,10 @@ void ParticleRenderer::CompState::CreateBuffers(rhi::IRHIDevice* device, u32 sor
     }
     // Random floats — CPU 写入一次
     {
-        rhi::BufferDesc d; d.size = sizeof(float) * kRandomFloatNum; d.usage = rhi::BufferUsage::Storage; d.cpuAccess = true;
+        rhi::BufferDesc d;
+        d.size = sizeof(float) * kRandomFloatNum;
+        d.usage = rhi::BufferUsage::Storage;
+        d.cpuAccess = true;
         randomFloats = device->CreateBuffer(d);
         float* mapped = static_cast<float*>(randomFloats->Map());
         for (u32 i = 0; i < kRandomFloatNum; ++i)
@@ -104,7 +118,10 @@ void ParticleRenderer::CompState::CreateBuffers(rhi::IRHIDevice* device, u32 sor
     }
     // Uniform buffers — CPU 写入每帧参数，需要 host-visible
     {
-        rhi::BufferDesc d; d.size = sizeof(GpuEmitParam); d.usage = rhi::BufferUsage::Uniform; d.cpuAccess = true;
+        rhi::BufferDesc d;
+        d.size = sizeof(GpuEmitParam);
+        d.usage = rhi::BufferUsage::Uniform;
+        d.cpuAccess = true;
         emitUB    = device->CreateBuffer(d);
         d.size = sizeof(GpuSimulateParam);
         simUB     = device->CreateBuffer(d);
@@ -115,7 +132,8 @@ void ParticleRenderer::CompState::CreateBuffers(rhi::IRHIDevice* device, u32 sor
     }
     // Indirect args
     {
-        rhi::BufferDesc d; d.size = sizeof(ParticleDrawArgs);
+        rhi::BufferDesc d;
+        d.size = sizeof(ParticleDrawArgs);
         d.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::Indirect;
         drawIndirectArgs = device->CreateBuffer(d);
         d.size = sizeof(DispatchArgs);
@@ -127,7 +145,9 @@ void ParticleRenderer::CompState::CreateBuffers(rhi::IRHIDevice* device, u32 sor
     {
         rhi::TextureDesc td;
         td.format = rhi::Format::RGBA8_UNORM;
-        td.width = 32; td.height = 1; td.depth = 1;
+        td.width = 32;
+        td.height = 1;
+        td.depth = 1;
         td.usage = rhi::TextureUsage::ShaderResource;
         colorOverLifeTex = device->CreateTexture(td);
 
@@ -170,7 +190,8 @@ void ParticleRenderer::CompState::UpdateGradientTextures(rhi::IRHIDevice* device
 
     // 上传到纹理 (简化: 用 Buffer 中转)
     // TODO: 通过 RHI 正确上传纹理数据
-    (void)colorData; (void)device;
+    (void)colorData;
+    (void)device;
 }
 
 // ============================================================
@@ -203,13 +224,16 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
 
     // Layouts
     auto createLayout = [device](std::vector<rhi::DescriptorSetLayoutBinding> b) {
-        rhi::DescriptorSetLayoutDesc ld; ld.bindings = std::move(b);
+        rhi::DescriptorSetLayoutDesc ld;
+        ld.bindings = std::move(b);
         return device->CreateDescriptorSetLayout(ld);
     };
 
     rhi::PushConstantRange pcRange;
     pcRange.stageMask = rhi::kStageMaskCompute; // VK_SHADER_STAGE_COMPUTE_BIT
-    pcRange.offset = 0; pcRange.size = rhi::kMaxPushConstantSize; // Vulkan 保证最小值 128B，部分 GPU 支持 256B
+    pcRange.offset = 0;
+    pcRange.size = rhi::kMaxPushConstantSize;
+    // Vulkan 保证最小值 128B，部分 GPU 支持 256B;
 
     auto createComputePSO = [&](rhi::DescriptorSetLayoutHandle layout,
                                  rhi::ShaderBytecode* cs, const char* name) {
@@ -293,7 +317,8 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
         // Push constant for render (Vertex + Fragment stages)
         rhi::PushConstantRange renderPCRange;
         renderPCRange.stageMask = rhi::kStageMaskVertex | rhi::kStageMaskFragment;  // VERTEX_BIT | FRAGMENT_BIT
-        renderPCRange.offset = 0; renderPCRange.size = rhi::kMaxPushConstantSize;
+        renderPCRange.offset = 0;
+        renderPCRange.size = rhi::kMaxPushConstantSize;
         desc.pushConstantRanges = {renderPCRange};
 
         m_RenderPSO = device->CreatePipelineState(desc);
@@ -306,7 +331,12 @@ bool ParticleRenderer::Initialize(rhi::IRHIDevice* device) {
 
 void ParticleRenderer::Shutdown(rhi::IRHIDevice* device) {
     m_Components.clear();
-    m_InitPSO.reset(); m_EmitPSO.reset(); m_SimPSO.reset(); m_CullingPSO.reset(); m_SortPSO.reset(); m_RenderPSO.reset();
+    m_InitPSO.reset();
+    m_EmitPSO.reset();
+    m_SimPSO.reset();
+    m_CullingPSO.reset();
+    m_SortPSO.reset();
+    m_RenderPSO.reset();
     if (m_InitLayout    != rhi::kInvalidLayout) device->DestroyDescriptorSetLayout(m_InitLayout);
     if (m_EmitLayout    != rhi::kInvalidLayout) device->DestroyDescriptorSetLayout(m_EmitLayout);
     if (m_SimLayout     != rhi::kInvalidLayout) device->DestroyDescriptorSetLayout(m_SimLayout);
@@ -323,7 +353,8 @@ u32 ParticleRenderer::RegisterComponent(ParticleComponent* comp, rhi::IRHIDevice
     CompState cs;
     cs.comp         = comp;
     cs.maxParticles = comp->GetMaxParticles();
-    u32 sortCap = 1; while (sortCap < cs.maxParticles) sortCap *= 2;
+    u32 sortCap = 1;
+    while (sortCap < cs.maxParticles) sortCap *= 2;
     cs.CreateBuffers(device, sortCap);
 
     // 创建 DescriptorSets 并绑定 buffers

@@ -1154,13 +1154,20 @@ std::unique_ptr<IRHITexture> VulkanDevice::CreateTransientTexture(const TextureD
     imageInfo.arrayLayers = isCubemap ? kCubemapFaceCount : desc.arrayLayers;
     VkSampleCountFlagBits vkSamples = VK_SAMPLE_COUNT_1_BIT;
     switch (desc.sampleCount) {
-        case 2:  vkSamples = VK_SAMPLE_COUNT_2_BIT;  break;
-        case 4:  vkSamples = VK_SAMPLE_COUNT_4_BIT;  break;
-        case 8:  vkSamples = VK_SAMPLE_COUNT_8_BIT;  break;
-        case 16: vkSamples = VK_SAMPLE_COUNT_16_BIT; break;
-        case 32: vkSamples = VK_SAMPLE_COUNT_32_BIT; break;
-        case 64: vkSamples = VK_SAMPLE_COUNT_64_BIT; break;
-        default: vkSamples = VK_SAMPLE_COUNT_1_BIT;  break;
+        case 2:  vkSamples = VK_SAMPLE_COUNT_2_BIT;
+        break;
+        case 4:  vkSamples = VK_SAMPLE_COUNT_4_BIT;
+        break;
+        case 8:  vkSamples = VK_SAMPLE_COUNT_8_BIT;
+        break;
+        case 16: vkSamples = VK_SAMPLE_COUNT_16_BIT;
+        break;
+        case 32: vkSamples = VK_SAMPLE_COUNT_32_BIT;
+        break;
+        case 64: vkSamples = VK_SAMPLE_COUNT_64_BIT;
+        break;
+        default: vkSamples = VK_SAMPLE_COUNT_1_BIT;
+        break;
     }
     imageInfo.samples     = vkSamples;
     imageInfo.tiling      = VK_IMAGE_TILING_OPTIMAL;

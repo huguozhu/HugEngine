@@ -62,9 +62,12 @@ void ProfilerPanel::Draw() {
     DrawControlBar();
 
     switch (m_ViewMode) {
-        case 0: DrawTimeline(); break;
-        case 1: DrawHeatmap();  break;
-        case 2: DrawHistory();  break;
+        case 0: DrawTimeline();
+        break;
+        case 1: DrawHeatmap();
+        break;
+        case 2: DrawHistory();
+        break;
     }
 
     // 帧预算警告

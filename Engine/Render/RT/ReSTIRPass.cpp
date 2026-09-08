@@ -42,7 +42,9 @@ bool ReSTIRPass::CreatePipeline(ComputePipe& pipe,
 
     // compute PSO（128B push constant）
     rhi::ShaderBytecode cs;
-    cs.stage = rhi::ShaderStage::Compute; cs.spirv = spirv; cs.entryPoint = "main";
+    cs.stage = rhi::ShaderStage::Compute;
+    cs.spirv = spirv;
+    cs.entryPoint = "main";
     rhi::PushConstantRange pc;
     pc.stageMask = rhi::kStageMaskCompute;
     pc.size      = sizeof(ReSTIRPushConstant);
@@ -141,7 +143,9 @@ bool ReSTIRPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
 
     // ── 历史纹理（双缓冲）──
     rhi::TextureDesc td;
-    td.width = width; td.height = height; td.mipLevels = 1;
+    td.width = width;
+    td.height = height;
+    td.mipLevels = 1;
     td.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::UnorderedAccess;
     td.format = rhi::Format::R32_FLOAT;
     m_HistDepth[0] = device->CreateTexture(td);
@@ -162,9 +166,14 @@ bool ReSTIRPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
 }
 
 void ReSTIRPass::Shutdown() {
-    m_HistNormal[1].reset(); m_HistNormal[0].reset();
-    m_HistDepth[1].reset();  m_HistDepth[0].reset();
-    m_Final.reset(); m_TemporalBuf[1].reset(); m_TemporalBuf[0].reset(); m_Initial.reset();
+    m_HistNormal[1].reset();
+    m_HistNormal[0].reset();
+    m_HistDepth[1].reset();
+    m_HistDepth[0].reset();
+    m_Final.reset();
+    m_TemporalBuf[1].reset();
+    m_TemporalBuf[0].reset();
+    m_Initial.reset();
     DestroyPipeline(m_Spatial);
     DestroyPipeline(m_Temporal);
     DestroyPipeline(m_Init);

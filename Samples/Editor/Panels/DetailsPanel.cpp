@@ -65,7 +65,8 @@ void DetailsPanel::Render() {
         RenderLightBase(world, entity);
 
     // === Add Component 按钮 ===
-    ImGui::Spacing(); ImGui::Separator();
+    ImGui::Spacing();
+    ImGui::Separator();
     if (ImGui::Button("Add Component", ImVec2(-1, 0)))
         ImGui::OpenPopup("AddComponentPopup");
 

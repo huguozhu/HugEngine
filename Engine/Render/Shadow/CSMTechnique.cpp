@@ -47,7 +47,9 @@ float4x4 CSMTechnique::ComputeCascadeViewProj(const float3& ld,const CameraData&
     // 将所有角点变换到光源视图空间，计算包围盒
     float mnX=FLT_MAX,mxX=-FLT_MAX,mnY=FLT_MAX,mxY=-FLT_MAX;
     for(auto&c:corners){float4 ls=lv*float4(c,1.f);mnX=glm::min(mnX,ls.x);mxX=glm::max(mxX,ls.x);mnY=glm::min(mnY,ls.y);mxY=glm::max(mxY,ls.y);}
-    float h=glm::max(glm::max(-mnX,mxX),glm::max(-mnY,mxY));h=glm::max(h,5.f);   // h 基于视锥包围盒实际（下限 5m，避免 200m 大视口导致分辨率低自影）
+    float h=glm::max(glm::max(-mnX,mxX),glm::max(-mnY,mxY));
+    h=glm::max(h,5.f);
+    // h 基于视锥包围盒实际（下限 5m，避免 200m 大视口导致分辨率低自影）;
 
     // 正交深度范围：动态适配视锥沿光源方向的深度跨度（世界单位，带余量）。
     // 修复：原先固定 near=0.1/far=8000 时，光源置于 4000m 外导致物体深度挤在
@@ -55,7 +57,8 @@ float4x4 CSMTechnique::ComputeCascadeViewProj(const float3& ld,const CameraData&
     float mnZ=FLT_MAX,mxZ=-FLT_MAX;
     for(auto&c:corners){
         float4 ls=lv*float4(c,1.f);
-        mnZ=glm::min(mnZ,ls.z);mxZ=glm::max(mxZ,ls.z);
+        mnZ=glm::min(mnZ,ls.z);
+        mxZ=glm::max(mxZ,ls.z);
     }
     const float kDepthPad=50.f;                      // 深度方向余量（米）
     float zn=glm::max(-mxZ-kDepthPad,0.1f);          // 近裁剪（最近角点 - 余量）
@@ -65,28 +68,48 @@ float4x4 CSMTechnique::ComputeCascadeViewProj(const float3& ld,const CameraData&
 
 bool CSMTechnique::Initialize(rhi::IRHIDevice* device){
     m_Device=device;
-    m_ShadowVS.stage=rhi::ShaderStage::Vertex;m_ShadowVS.spirv=k_Shadow_vert_spv;m_ShadowVS.entryPoint="main";
-    m_ShadowFS.stage=rhi::ShaderStage::Pixel;m_ShadowFS.spirv=k_Shadow_frag_spv;m_ShadowFS.entryPoint="main";
+    m_ShadowVS.stage=rhi::ShaderStage::Vertex;
+    m_ShadowVS.spirv=k_Shadow_vert_spv;
+    m_ShadowVS.entryPoint="main";
+    m_ShadowFS.stage=rhi::ShaderStage::Pixel;
+    m_ShadowFS.spirv=k_Shadow_frag_spv;
+    m_ShadowFS.entryPoint="main";
     for(u32 c=0;c<CASCADE_COUNT;++c){
-        rhi::TextureDesc d;d.format=rhi::Format::D32_FLOAT;d.width=m_ShadowMapSize;d.height=m_ShadowMapSize;
-        d.depth=1;d.mipLevels=1;d.arrayLayers=1;
+        rhi::TextureDesc d;
+        d.format=rhi::Format::D32_FLOAT;
+        d.width=m_ShadowMapSize;
+        d.height=m_ShadowMapSize;
+        d.depth=1;
+        d.mipLevels=1;
+        d.arrayLayers=1;
         d.usage=rhi::TextureUsage::DepthStencil|rhi::TextureUsage::ShaderResource;
         m_ShadowMaps[c]=device->CreateTexture(d);
     }
-    rhi::SamplerDesc sd;sd.minFilter=rhi::FilterMode::Linear;sd.magFilter=rhi::FilterMode::Linear;
+    rhi::SamplerDesc sd;
+    sd.minFilter=rhi::FilterMode::Linear;
+    sd.magFilter=rhi::FilterMode::Linear;
     sd.addressU=sd.addressV=sd.addressW=rhi::AddressMode::ClampToEdge;
     m_ShadowSampler=device->CreateSampler(sd);
     return true;
 }
 
 void CSMTechnique::CreatePSO(rhi::DescriptorSetLayoutHandle layout){
-    rhi::VertexInputLayout vl;vl.stride=sizeof(he::StaticVertex);
+    rhi::VertexInputLayout vl;
+    vl.stride=sizeof(he::StaticVertex);
     vl.attributes={{0,0,rhi::VertexFormat::Float3,offsetof(he::StaticVertex,position)}};
-    rhi::PushConstantRange pcr; pcr.stageMask=rhi::kStageMaskVertex|rhi::kStageMaskFragment;pcr.offset=0;pcr.size=sizeof(ShadowPushConstant);
-    rhi::PipelineStateDesc d;d.vertexShader=&m_ShadowVS;d.pixelShader=&m_ShadowFS;
-    d.vertexLayout=vl;d.topology=rhi::PrimitiveTopology::TriangleList;
-    d.depthTest=d.depthWrite=true;d.depthCompare=rhi::CompareFunc::LessEqual;
-    d.depthFormat=rhi::Format::D32_FLOAT;d.colorAttachmentCount=0;
+    rhi::PushConstantRange pcr;
+    pcr.stageMask=rhi::kStageMaskVertex|rhi::kStageMaskFragment;
+    pcr.offset=0;
+    pcr.size=sizeof(ShadowPushConstant);
+    rhi::PipelineStateDesc d;
+    d.vertexShader=&m_ShadowVS;
+    d.pixelShader=&m_ShadowFS;
+    d.vertexLayout=vl;
+    d.topology=rhi::PrimitiveTopology::TriangleList;
+    d.depthTest=d.depthWrite=true;
+    d.depthCompare=rhi::CompareFunc::LessEqual;
+    d.depthFormat=rhi::Format::D32_FLOAT;
+    d.colorAttachmentCount=0;
     d.pushConstantRanges={pcr};d.descriptorSetLayouts={layout};d.debugName="CSMDepth";
     m_ShadowPSO=m_Device->CreatePipelineState(d);
     HE_ASSERT(m_ShadowPSO,"CSMTechnique: PSO failed");
@@ -111,9 +134,11 @@ u32 CSMTechnique::CollectLights(he::World& w,he::SceneGraph&,const CameraData& c
             sd.splitDistances[c]=la*ls+(1.f-la)*us;
             sd.lightViewProj[c]=ComputeCascadeViewProj(ld,cam,c==0?cam.nearPlane:sd.splitDistances[c-1],sd.splitDistances[c]);
         }
-        sd.splitDistances[3]=shDist;sd.cameraForward=float4(glm::normalize(cam.forward),0);
+        sd.splitDistances[3]=shDist;
+        sd.cameraForward=float4(glm::normalize(cam.forward),0);
         sd.shadowParams=float4(lc.shadowBias,lc.shadowNormalBias,lc.shadowStrength,0);
-        out.push_back(sd);ent.push_back(e);
+        out.push_back(sd);
+        ent.push_back(e);
     });
     return (u32)(out.size()-start);
 }
@@ -129,13 +154,15 @@ void CSMTechnique::Render(rhi::IRHICommandList* cmd,he::World& w,he::SceneGraph&
 
 void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,he::World& w,he::SceneGraph& sg,const GPUShadowData& sd){
     m_LightVPs[ci] = sd.lightViewProj[ci];  // 缓存供 RSM 查询
-    void*dv=m_ShadowMaps[ci]->GetNativeHandle();if(!dv)return;
+    void*dv=m_ShadowMaps[ci]->GetNativeHandle();
+    if(!dv)return;
     rhi::ClearValue cv{};cv.depth=1.f;
     // pass 级调试标记：RenderDoc 中可识别阴影级联 pass
     char passLabel[32];
     snprintf(passLabel,sizeof(passLabel),"CSM Shadow C%u",ci);
     cmd->SetDrawDebugLabel(passLabel);
-    cmd->SetPipeline(m_ShadowPSO.get());cmd->BeginOffscreenPass(nullptr,dv,m_ShadowMapSize,m_ShadowMapSize,&cv);
+    cmd->SetPipeline(m_ShadowPSO.get());
+    cmd->BeginOffscreenPass(nullptr,dv,m_ShadowMapSize,m_ShadowMapSize,&cv);
     cmd->SetPipeline(m_ShadowPSO.get());
     cmd->SetViewport({0,(float)m_ShadowMapSize,(float)m_ShadowMapSize,-(float)m_ShadowMapSize,0,1});
     cmd->SetScissor({0,0,m_ShadowMapSize,m_ShadowMapSize});
@@ -152,7 +179,8 @@ void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,he::World& w,h
         cmd->SetDrawDebugLabel(label);
         ShadowPushConstant pc{};pc.lightViewProj=sd.lightViewProj[ci];pc.objectIndex=oi++;
         cmd->SetPushConstants(0,sizeof(ShadowPushConstant),&pc);
-        cmd->SetVertexBuffer(m.GetVertexBuffer().get(),0);cmd->SetIndexBuffer(m.GetIndexBuffer().get());
+        cmd->SetVertexBuffer(m.GetVertexBuffer().get(),0);
+        cmd->SetIndexBuffer(m.GetIndexBuffer().get());
         cmd->DrawIndexed(m.GetIndexCount());
     };
     w.ForEach<he::MeshComponent>(rm);

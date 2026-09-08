@@ -317,7 +317,8 @@ void ViewportPanel::RenderDebugOverlay() {
     world->ForEach<he::PointLight>([&](he::Entity e, he::PointLight& pl) {
         if (!pl.enabled || e != selEnt) return;
         float3 pos = world->GetComponent<TransformComponent>(e)->position;
-        float r = pl.range; u32 col = 0xFFFFAA33;
+        float r = pl.range;
+        u32 col = 0xFFFFAA33;
         struct { float3 dir; float3 up; } faces[6] = {
             {{ 1,0,0},{0,1,0}}, {{-1,0,0},{0,1,0}}, {{0,1,0},{0,0,1}},
             {{0,-1,0},{0,0,-1}}, {{0,0,1},{0,1,0}}, {{0,0,-1},{0,1,0}},
@@ -349,7 +350,8 @@ void ViewportPanel::RenderDebugOverlay() {
         float3 right = tf ? tf->GetRight() : glm::normalize(glm::cross(dir, up));
         float r = sl.range, outerR = std::tan(sl.outerConeAngle*0.5f)*r, innerR = std::tan(sl.innerConeAngle*0.5f)*r;
         float3 base = pos + dir * r;
-        int segs = 20; float2 prevO, prevI;
+        int segs = 20;
+        float2 prevO, prevI;
         for (int i = 0; i <= segs; ++i) {
             float a = float(i)/segs * glm::radians(360.0f);
             float3 po = base + (right*std::cos(a)+up*std::sin(a))*outerR;
@@ -360,7 +362,8 @@ void ViewportPanel::RenderDebugOverlay() {
                 dl->AddLine(ImVec2(prevI.x,prevI.y), ImVec2(si.x,si.y), 0xFF66FFCC, 1.0f);
             }
             dl->AddLine(ImVec2(project(pos).x,project(pos).y), ImVec2(so.x,so.y), 0xFF33FFAA, 1.0f);
-            prevO = so; prevI = si;
+            prevO = so;
+            prevI = si;
         }
         dl->AddText(ImVec2(project(pos).x + 10, project(pos).y - 8), 0xFF33FFAA, "SpotLight");
     });
@@ -377,13 +380,18 @@ void ViewportPanel::RenderDebugOverlay() {
         float nearD = 0.1f, farD = 10.0f, halfSz = 3.0f;
         float3 nearC = lPos + lDir * nearD, farC = lPos + lDir * farD;
         float3 b[8];
-        b[0]=nearC+lUp*halfSz-lRight*halfSz; b[1]=nearC+lUp*halfSz+lRight*halfSz;
-        b[2]=nearC-lUp*halfSz+lRight*halfSz; b[3]=nearC-lUp*halfSz-lRight*halfSz;
-        b[4]=farC+lUp*halfSz-lRight*halfSz;  b[5]=farC+lUp*halfSz+lRight*halfSz;
-        b[6]=farC-lUp*halfSz+lRight*halfSz;  b[7]=farC-lUp*halfSz-lRight*halfSz;
+        b[0]=nearC+lUp*halfSz-lRight*halfSz;
+        b[1]=nearC+lUp*halfSz+lRight*halfSz;
+        b[2]=nearC-lUp*halfSz+lRight*halfSz;
+        b[3]=nearC-lUp*halfSz-lRight*halfSz;
+        b[4]=farC+lUp*halfSz-lRight*halfSz;
+        b[5]=farC+lUp*halfSz+lRight*halfSz;
+        b[6]=farC-lUp*halfSz+lRight*halfSz;
+        b[7]=farC-lUp*halfSz-lRight*halfSz;
         u32 dCol = 0xFFFF6666;
         for (int i = 0; i < 4; ++i) {
-            drawLine3D(b[i], b[(i+1)%4], dCol); drawLine3D(b[i+4], b[4+(i+1)%4], dCol);
+            drawLine3D(b[i], b[(i+1)%4], dCol);
+            drawLine3D(b[i+4], b[4+(i+1)%4], dCol);
             drawLine3D(b[i], b[i+4], dCol);
         }
         dl->AddText(ImVec2(project(lPos).x + 10, project(lPos).y - 8), dCol, "DirLight");

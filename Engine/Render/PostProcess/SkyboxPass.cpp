@@ -13,11 +13,18 @@
 namespace he::render {
 
 bool SkyboxPass::Initialize(rhi::IRHIDevice* device,u32,u32){
-    m_Device=device;HE_ASSERT(m_Device,"SkyboxPass: null device");
+    m_Device=device;
+    HE_ASSERT(m_Device,"SkyboxPass: null device");
 
-    m_VS.stage=rhi::ShaderStage::Vertex;m_VS.spirv=k_Skybox_vert_spv;m_VS.entryPoint="main";
-    m_FS.stage=rhi::ShaderStage::Pixel;m_FS.spirv=k_Skybox_frag_spv;m_FS.entryPoint="main";
-    m_PS_FS.stage=rhi::ShaderStage::Pixel;m_PS_FS.spirv=k_PhysicalSky_frag_spv;m_PS_FS.entryPoint="main";
+    m_VS.stage=rhi::ShaderStage::Vertex;
+    m_VS.spirv=k_Skybox_vert_spv;
+    m_VS.entryPoint="main";
+    m_FS.stage=rhi::ShaderStage::Pixel;
+    m_FS.spirv=k_Skybox_frag_spv;
+    m_FS.entryPoint="main";
+    m_PS_FS.stage=rhi::ShaderStage::Pixel;
+    m_PS_FS.spirv=k_PhysicalSky_frag_spv;
+    m_PS_FS.entryPoint="main";
 
     rhi::DescriptorSetLayoutDesc layout;layout.bindings={
         {10,rhi::DescriptorType::CombinedImageSampler,1,16},
@@ -27,17 +34,27 @@ bool SkyboxPass::Initialize(rhi::IRHIDevice* device,u32,u32){
 
     CreatePSOs();
 
-    m_Ready=true;HE_CORE_INFO("SkyboxPass init");return true;
+    m_Ready=true;
+    HE_CORE_INFO("SkyboxPass init");
+    return true;
 }
 
 void SkyboxPass::CreatePSOs(){
     // Cubemap 天空盒 PSO
-    rhi::PushConstantRange pcr;pcr.stageMask=rhi::kStageMaskVertex|rhi::kStageMaskFragment;pcr.offset=0;pcr.size=96;
-    rhi::PipelineStateDesc d;d.vertexShader=&m_VS;d.pixelShader=&m_FS;
+    rhi::PushConstantRange pcr;
+    pcr.stageMask=rhi::kStageMaskVertex|rhi::kStageMaskFragment;
+    pcr.offset=0;
+    pcr.size=96;
+    rhi::PipelineStateDesc d;
+    d.vertexShader=&m_VS;
+    d.pixelShader=&m_FS;
     d.topology=rhi::PrimitiveTopology::TriangleList;
-    d.depthTest=true;d.depthWrite=false;d.depthCompare=rhi::CompareFunc::Equal;
+    d.depthTest=true;
+    d.depthWrite=false;
+    d.depthCompare=rhi::CompareFunc::Equal;
     d.depthFormat=rhi::Format::D32_FLOAT;
-    d.colorAttachmentCount=1;d.colorFormats[0]=rhi::Format::RGBA16_FLOAT;
+    d.colorAttachmentCount=1;
+    d.colorFormats[0]=rhi::Format::RGBA16_FLOAT;
     d.colorLoadOp=m_ColorLoadOp;
     d.depthLoadOp=rhi::LoadOp::Load;  // 保留深度（Deferred 用独立 render pass，depth=Equal 需读 GBuffer 深度）
     d.pushConstantRanges={pcr};d.descriptorSetLayouts={m_DescLayout};d.debugName="Skybox";
@@ -46,12 +63,20 @@ void SkyboxPass::CreatePSOs(){
 
     // 物理天空 PSO（Preetham 解析模型）
     // push constant 布局：invVP(64) + intensity(4) + pad(12) + sunDir(12) + turbidity/groundAlbedo/sunIntensity/pad(16) = 108，alignas(16) 对齐到 112
-    rhi::PushConstantRange pcr2;pcr2.stageMask=rhi::kStageMaskVertex|rhi::kStageMaskFragment;pcr2.offset=0;pcr2.size=112;
-    rhi::PipelineStateDesc d2;d2.vertexShader=&m_VS;d2.pixelShader=&m_PS_FS;
+    rhi::PushConstantRange pcr2;
+    pcr2.stageMask=rhi::kStageMaskVertex|rhi::kStageMaskFragment;
+    pcr2.offset=0;
+    pcr2.size=112;
+    rhi::PipelineStateDesc d2;
+    d2.vertexShader=&m_VS;
+    d2.pixelShader=&m_PS_FS;
     d2.topology=rhi::PrimitiveTopology::TriangleList;
-    d2.depthTest=true;d2.depthWrite=false;d2.depthCompare=rhi::CompareFunc::Equal;
+    d2.depthTest=true;
+    d2.depthWrite=false;
+    d2.depthCompare=rhi::CompareFunc::Equal;
     d2.depthFormat=rhi::Format::D32_FLOAT;
-    d2.colorAttachmentCount=1;d2.colorFormats[0]=rhi::Format::RGBA16_FLOAT;
+    d2.colorAttachmentCount=1;
+    d2.colorFormats[0]=rhi::Format::RGBA16_FLOAT;
     d2.colorLoadOp=m_ColorLoadOp;
     d2.depthLoadOp=rhi::LoadOp::Load;  // 保留深度
     d2.pushConstantRanges={pcr2};d2.descriptorSetLayouts={m_DescLayout};d2.debugName="PhysicalSky";
@@ -77,7 +102,8 @@ void SkyboxPass::Shutdown(){
     m_PS_PSO.reset();
     m_CachedSkybox=nullptr;
     m_CachedPhysSky=nullptr;
-    m_Device=nullptr;m_Ready=false;
+    m_Device=nullptr;
+    m_Ready=false;
 }
 
 void SkyboxPass::Update(const SubsystemContext& ctx){
@@ -121,7 +147,8 @@ void SkyboxPass::Render(rhi::IRHICommandList* cmd){
         // 注意：Slang push constant 用 std430 布局，float3 对齐到 16 字节，
         // 故 intensity 后需补 3 个 float 的 padding，让 sunDir 落在 offset 80（与 shader 一致）
         struct alignas(16){float4x4 invVP;float intensity;float _pad0[3];float sunDir[3];float turbidity;float groundAlbedo;float sunIntensity;float _pad;}pc;
-        pc.invVP=invVP;pc.intensity=m_CachedPhysSky->intensity;
+        pc.invVP=invVP;
+        pc.intensity=m_CachedPhysSky->intensity;
         pc._pad0[0]=pc._pad0[1]=pc._pad0[2]=0.0f;
         pc.sunDir[0]=m_CachedPhysSky->sunDirection.x;
         pc.sunDir[1]=m_CachedPhysSky->sunDirection.y;
@@ -137,7 +164,8 @@ void SkyboxPass::Render(rhi::IRHICommandList* cmd){
     }
 
     struct alignas(16){float4x4 invVP;float intensity;float _pad[7];}pc;
-    pc.invVP=invVP;pc.intensity=m_CachedSkybox->intensity;
+    pc.invVP=invVP;
+    pc.intensity=m_CachedSkybox->intensity;
 
     cmd->SetPipeline(m_PSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_DescSet);

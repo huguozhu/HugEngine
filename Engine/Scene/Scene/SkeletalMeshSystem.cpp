@@ -95,7 +95,9 @@ void SkeletalMeshSystem::ComputeSkinMatrices(const asset::SkeletonAsset& skel, i
     // 1. 采样全部关节本地 TRS → 本地矩阵
     std::vector<float4x4> local(n);
     for (usize i = 0; i < n; ++i) {
-        float3 t; quat r; float3 s;
+        float3 t;
+        quat r;
+        float3 s;
         SampleJointTRS(skel, clipIndex, time, (i32)i, t, r, s);
         local[i] = TRSToMatrix(t, r, s);
     }

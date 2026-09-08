@@ -553,18 +553,25 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world
 
         // 材质纹理四行
         float* row0 = &matData[i * 4];
-        row0[0] = m.baseColorFactor.r; row0[1] = m.baseColorFactor.g;
-        row0[2] = m.baseColorFactor.b; row0[3] = m.metallicFactor;
+        row0[0] = m.baseColorFactor.r;
+        row0[1] = m.baseColorFactor.g;
+        row0[2] = m.baseColorFactor.b;
+        row0[3] = m.metallicFactor;
         float* row1 = &matData[n * 4 + i * 4];
-        row1[0] = m.roughnessFactor; row1[1] = m.aoFactor; row1[2] = 0.0f; row1[3] = 0.0f;
+        row1[0] = m.roughnessFactor;
+        row1[1] = m.aoFactor;
+        row1[2] = 0.0f;
+        row1[3] = 0.0f;
         float* row2 = &matData[n * 8 + i * 4];
         row2[0] = float(triFlat * 3);      // 本实例法线数组线性起始
         row2[1] = float(triCount);
         row2[2] = float(normTexWidth);     // 法线纹理宽度（shader 用 lin%W 计算坐标）
         row2[3] = 0.0f;
         float* row3 = &matData[n * 12 + i * 4];
-        row3[0] = m.emissiveFactor.r; row3[1] = m.emissiveFactor.g;
-        row3[2] = m.emissiveFactor.b; row3[3] = 0.0f;
+        row3[0] = m.emissiveFactor.r;
+        row3[1] = m.emissiveFactor.g;
+        row3[2] = m.emissiveFactor.b;
+        row3[3] = 0.0f;
 
         // 读取顶点/索引缓冲 → 每三角形 3 条顶点法线
         auto* vb = m.GetVertexBuffer().get();
@@ -584,7 +591,10 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world
                 const float* vn = reinterpret_cast<const float*>(vdata + vidx * kStride + kNormOff);
                 u64 lin = (triFlat + t) * 3 + v;   // 法线线性索引
                 float* dst = &normalData[lin * 4];
-                dst[0] = vn[0]; dst[1] = vn[1]; dst[2] = vn[2]; dst[3] = 0.0f;
+                dst[0] = vn[0];
+                dst[1] = vn[1];
+                dst[2] = vn[2];
+                dst[3] = 0.0f;
             }
         }
         vb->Unmap();

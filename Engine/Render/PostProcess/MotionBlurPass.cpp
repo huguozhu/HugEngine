@@ -24,16 +24,24 @@ bool MotionBlurPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) 
 
     rhi::ShaderBytecode vs, fs;
     vs.stage = rhi::ShaderStage::Vertex;
-    vs.spirv = k_SSAO_vert_spv; vs.entryPoint = "vertexMain";
+    vs.spirv = k_SSAO_vert_spv;
+    vs.entryPoint = "vertexMain";
     fs.stage = rhi::ShaderStage::Pixel;
-    fs.spirv = k_MotionBlur_frag_spv; fs.entryPoint = "fragmentMain";
+    fs.spirv = k_MotionBlur_frag_spv;
+    fs.entryPoint = "fragmentMain";
 
-    rhi::PushConstantRange pc; pc.stageMask = rhi::kStageMaskFragment; pc.size = 16;
+    rhi::PushConstantRange pc;
+    pc.stageMask = rhi::kStageMaskFragment;
+    pc.size = 16;
     rhi::PipelineStateDesc d;
-    d.vertexShader = &vs; d.pixelShader = &fs;
+    d.vertexShader = &vs;
+    d.pixelShader = &fs;
     d.topology = rhi::PrimitiveTopology::TriangleList;
-    d.depthTest = false; d.depthWrite = false; d.depthFormat = rhi::Format::Unknown;
-    d.colorAttachmentCount = 1; d.colorFormats[0] = rhi::Format::RGBA16_FLOAT;
+    d.depthTest = false;
+    d.depthWrite = false;
+    d.depthFormat = rhi::Format::Unknown;
+    d.colorAttachmentCount = 1;
+    d.colorFormats[0] = rhi::Format::RGBA16_FLOAT;
     d.pushConstantRanges = {pc}; d.descriptorSetLayouts = {m_Layout};
     d.debugName = "MotionBlur";
     m_PSO = device->CreatePipelineState(d);
@@ -41,7 +49,8 @@ bool MotionBlurPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) 
 
     rhi::TextureDesc td;
     td.format = rhi::Format::RGBA16_FLOAT;
-    td.width = width; td.height = height;
+    td.width = width;
+    td.height = height;
     td.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
     m_Output = device->CreateTexture(td);
 
@@ -57,18 +66,23 @@ bool MotionBlurPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) 
 
 void MotionBlurPass::Shutdown() {
     if (!m_Ready) return;
-    m_PSO.reset(); m_Output.reset(); m_OutSampler.reset();
+    m_PSO.reset();
+    m_Output.reset();
+    m_OutSampler.reset();
     if (m_Device && m_Layout != rhi::kInvalidLayout) m_Device->DestroyDescriptorSetLayout(m_Layout);
-    m_Device = nullptr; m_Ready = false;
+    m_Device = nullptr;
+    m_Ready = false;
 }
 
 void MotionBlurPass::OnResize(u32 w, u32 h) {
     if (!m_Ready) return;
     if (w == m_Width && h == m_Height) return;
-    m_Width = w; m_Height = h;
+    m_Width = w;
+    m_Height = h;
     rhi::TextureDesc td;
     td.format = rhi::Format::RGBA16_FLOAT;
-    td.width = w; td.height = h;
+    td.width = w;
+    td.height = h;
     td.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
     m_Output = m_Device->CreateTexture(td);
 }

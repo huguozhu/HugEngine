@@ -95,7 +95,10 @@ void MaterialEditor::DrawLink(const MLink& l) {
 }
 
 void MaterialEditor::AddNode(const std::string& type, const float2& pos) {
-    MNode n; n.id=m_NextId++; n.name=type; n.pos=pos - m_CanvasOffset;
+    MNode n;
+    n.id=m_NextId++;
+    n.name=type;
+    n.pos=pos - m_CanvasOffset;
     if(type=="PBR Output"){n.inputs.push_back({m_NextId++,"BaseColor",PinKind::Color,true,n.id});n.inputs.push_back({m_NextId++,"Metallic",PinKind::Float,true,n.id});n.inputs.push_back({m_NextId++,"Roughness",PinKind::Float,true,n.id});}
     else if(type=="Texture2D"){n.outputs.push_back({m_NextId++,"Color",PinKind::Color,false,n.id});n.outputs.push_back({m_NextId++,"Alpha",PinKind::Float,false,n.id});}
     else if(type=="Float"){n.outputs.push_back({m_NextId++,"Value",PinKind::Float,false,n.id});}
@@ -115,11 +118,16 @@ void MaterialEditor::Render() {
 
     // 工具栏
     if (ImGui::Button("+ PBR Output")) AddNode("PBR Output", float2(300, 100));
-    ImGui::SameLine(); if (ImGui::Button("+ Float")) AddNode("Float", float2(100, 100));
-    ImGui::SameLine(); if (ImGui::Button("+ Color")) AddNode("Color", float2(100, 250));
-    ImGui::SameLine(); if (ImGui::Button("+ Texture2D")) AddNode("Texture2D", float2(100, 400));
-    ImGui::SameLine(); if (ImGui::Button("+ Multiply")) AddNode("Multiply", float2(100, 100));
-    ImGui::SameLine(); if (ImGui::Button("+ Lerp")) AddNode("Lerp", float2(100, 100));
+    ImGui::SameLine();
+    if (ImGui::Button("+ Float")) AddNode("Float", float2(100, 100));
+    ImGui::SameLine();
+    if (ImGui::Button("+ Color")) AddNode("Color", float2(100, 250));
+    ImGui::SameLine();
+    if (ImGui::Button("+ Texture2D")) AddNode("Texture2D", float2(100, 400));
+    ImGui::SameLine();
+    if (ImGui::Button("+ Multiply")) AddNode("Multiply", float2(100, 100));
+    ImGui::SameLine();
+    if (ImGui::Button("+ Lerp")) AddNode("Lerp", float2(100, 100));
     ImGui::Separator();
 
     // 画布

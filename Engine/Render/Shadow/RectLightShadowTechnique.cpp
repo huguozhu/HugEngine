@@ -19,17 +19,26 @@ namespace he::render {
 
 bool RectLightShadowTechnique::Initialize(rhi::IRHIDevice* device){
     m_Device=device;
-    m_ShadowVS.stage=rhi::ShaderStage::Vertex;m_ShadowVS.spirv=k_Shadow_vert_spv;m_ShadowVS.entryPoint="main";
-    m_ShadowFS.stage=rhi::ShaderStage::Pixel;m_ShadowFS.spirv=k_Shadow_frag_spv;m_ShadowFS.entryPoint="main";
+    m_ShadowVS.stage=rhi::ShaderStage::Vertex;
+    m_ShadowVS.spirv=k_Shadow_vert_spv;
+    m_ShadowVS.entryPoint="main";
+    m_ShadowFS.stage=rhi::ShaderStage::Pixel;
+    m_ShadowFS.spirv=k_Shadow_frag_spv;
+    m_ShadowFS.entryPoint="main";
 
     rhi::TextureDesc d;
-    d.format=rhi::Format::D32_FLOAT;d.width=m_MapSize;d.height=m_MapSize;
-    d.depth=1;d.mipLevels=1;d.arrayLayers=1;
+    d.format=rhi::Format::D32_FLOAT;
+    d.width=m_MapSize;
+    d.height=m_MapSize;
+    d.depth=1;
+    d.mipLevels=1;
+    d.arrayLayers=1;
     d.usage=rhi::TextureUsage::DepthStencil|rhi::TextureUsage::ShaderResource;
     m_RectShadowMap=device->CreateTexture(d);
 
     rhi::SamplerDesc sd;
-    sd.minFilter=rhi::FilterMode::Linear;sd.magFilter=rhi::FilterMode::Linear;
+    sd.minFilter=rhi::FilterMode::Linear;
+    sd.magFilter=rhi::FilterMode::Linear;
     sd.addressU=sd.addressV=rhi::AddressMode::ClampToEdge;
     m_RectShadowSampler=device->CreateSampler(sd);
 
@@ -38,25 +47,37 @@ bool RectLightShadowTechnique::Initialize(rhi::IRHIDevice* device){
 }
 
 void RectLightShadowTechnique::CreatePSO(rhi::DescriptorSetLayoutHandle layout){
-    rhi::VertexInputLayout vl;vl.stride=sizeof(he::StaticVertex);
+    rhi::VertexInputLayout vl;
+    vl.stride=sizeof(he::StaticVertex);
     vl.attributes={{0,0,rhi::VertexFormat::Float3,offsetof(he::StaticVertex,position)}};
-    rhi::PushConstantRange pcr; pcr.stageMask=rhi::kStageMaskVertex|rhi::kStageMaskFragment;pcr.offset=0;pcr.size=sizeof(ShadowPushConstant);
-    rhi::PipelineStateDesc d;d.vertexShader=&m_ShadowVS;d.pixelShader=&m_ShadowFS;
-    d.vertexLayout=vl;d.topology=rhi::PrimitiveTopology::TriangleList;
-    d.depthTest=d.depthWrite=true;d.depthCompare=rhi::CompareFunc::LessEqual;
-    d.depthFormat=rhi::Format::D32_FLOAT;d.colorAttachmentCount=0;
+    rhi::PushConstantRange pcr;
+    pcr.stageMask=rhi::kStageMaskVertex|rhi::kStageMaskFragment;
+    pcr.offset=0;
+    pcr.size=sizeof(ShadowPushConstant);
+    rhi::PipelineStateDesc d;
+    d.vertexShader=&m_ShadowVS;
+    d.pixelShader=&m_ShadowFS;
+    d.vertexLayout=vl;
+    d.topology=rhi::PrimitiveTopology::TriangleList;
+    d.depthTest=d.depthWrite=true;
+    d.depthCompare=rhi::CompareFunc::LessEqual;
+    d.depthFormat=rhi::Format::D32_FLOAT;
+    d.colorAttachmentCount=0;
     d.pushConstantRanges={pcr};d.descriptorSetLayouts={layout};d.debugName="RectDepth";
     m_ShadowPSO=m_Device->CreatePipelineState(d);
     HE_ASSERT(m_ShadowPSO,"RectLightShadowTechnique: PSO failed");
 }
 
 void RectLightShadowTechnique::Shutdown(){
-    m_RectShadowMap.reset();m_RectShadowSampler.reset();m_ShadowPSO.reset();
+    m_RectShadowMap.reset();
+    m_RectShadowSampler.reset();
+    m_ShadowPSO.reset();
     m_Device=nullptr;
 }
 
 void RectLightShadowTechnique::SetRenderResources(rhi::IRHIBuffer* ob,rhi::DescriptorSetHandle ds){
-    m_ExternalObjectBuffer=ob;m_ExternalDescSet=ds;
+    m_ExternalObjectBuffer=ob;
+    m_ExternalDescSet=ds;
 }
 
 u32 RectLightShadowTechnique::CollectLights(he::World& w,he::SceneGraph& sg,const CameraData&,
@@ -81,7 +102,8 @@ u32 RectLightShadowTechnique::CollectLights(he::World& w,he::SceneGraph& sg,cons
         // 复用 splitDistances 存 法线 + 宽/高（供 Render 重建 + 主 pass 软阴影）
         sd.splitDistances=float4(n,0.0f);
         sd.splitDistances.w=lc.softness;               // 软阴影系数（PCF 半径缩放）
-        out.push_back(sd);ent.push_back(e);
+        out.push_back(sd);
+        ent.push_back(e);
     });
     return (u32)(out.size()-start);
 }
@@ -115,7 +137,8 @@ void RectLightShadowTechnique::Render(rhi::IRHICommandList* cmd,he::World& w,he:
             cmd->SetDrawDebugLabel(label);
             ShadowPushConstant pc{};pc.lightViewProj=vp;pc.objectIndex=oi++;
             cmd->SetPushConstants(0,sizeof(ShadowPushConstant),&pc);
-            cmd->SetVertexBuffer(m.GetVertexBuffer().get(),0);cmd->SetIndexBuffer(m.GetIndexBuffer().get());
+            cmd->SetVertexBuffer(m.GetVertexBuffer().get(),0);
+            cmd->SetIndexBuffer(m.GetIndexBuffer().get());
             cmd->DrawIndexed(m.GetIndexCount());
         };
         w.ForEach<he::MeshComponent>(rm);

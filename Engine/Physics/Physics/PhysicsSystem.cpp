@@ -127,7 +127,8 @@ void PhysicsSystem::Update(he::World& world, he::SceneGraph&, f32 dt) {
         auto* xf = world.GetComponent<TransformComponent>(e);
         if (!xf) {
             // 实体已销毁 → 回收 body 并清映射
-            bi.RemoveBody(bid); bi.DestroyBody(bid);
+            bi.RemoveBody(bid);
+            bi.DestroyBody(bid);
             it = s_Bodies.erase(it);
             continue;
         }

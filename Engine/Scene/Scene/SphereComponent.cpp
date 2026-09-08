@@ -38,8 +38,12 @@ void SphereComponent::OnCreate() {
             u32 c = a + 1;
             u32 d = b + 1;
 
-            indices.push_back(a); indices.push_back(b); indices.push_back(c);
-            indices.push_back(c); indices.push_back(b); indices.push_back(d);
+            indices.push_back(a);
+            indices.push_back(b);
+            indices.push_back(c);
+            indices.push_back(c);
+            indices.push_back(b);
+            indices.push_back(d);
         }
     }
 

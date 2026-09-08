@@ -148,7 +148,8 @@ void GBufferRenderer::CreateTextures(rhi::IRHIDevice* device) {
     auto createRGBA16F = [&]() {
         rhi::TextureDesc d;
         d.format = rhi::Format::RGBA16_FLOAT;
-        d.width  = m_Width; d.height = m_Height;
+        d.width  = m_Width;
+        d.height = m_Height;
         d.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
         return device->CreateTexture(d);
     };
@@ -163,7 +164,8 @@ void GBufferRenderer::CreateTextures(rhi::IRHIDevice* device) {
     {
         rhi::TextureDesc d;
         d.format = rhi::Format::RG16_FLOAT;
-        d.width  = m_Width; d.height = m_Height;
+        d.width  = m_Width;
+        d.height = m_Height;
         d.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
         m_D = device->CreateTexture(d);
     }
@@ -172,7 +174,8 @@ void GBufferRenderer::CreateTextures(rhi::IRHIDevice* device) {
     {
         rhi::TextureDesc d;
         d.format = rhi::Format::D32_FLOAT;
-        d.width  = m_Width; d.height = m_Height;
+        d.width  = m_Width;
+        d.height = m_Height;
         d.usage  = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
         m_Depth = device->CreateTexture(d);
     }
@@ -191,8 +194,12 @@ void GBufferRenderer::CreatePSO(rhi::IRHIDevice* device) {
 
     // 着色器
     rhi::ShaderBytecode gbVS, gbFS;
-    gbVS.stage = rhi::ShaderStage::Vertex; gbVS.spirv = k_GBuffer_vert_spv; gbVS.entryPoint = "main";
-    gbFS.stage = rhi::ShaderStage::Pixel;  gbFS.spirv = k_GBuffer_frag_spv;  gbFS.entryPoint = "main";
+    gbVS.stage = rhi::ShaderStage::Vertex;
+    gbVS.spirv = k_GBuffer_vert_spv;
+    gbVS.entryPoint = "main";
+    gbFS.stage = rhi::ShaderStage::Pixel;
+    gbFS.spirv = k_GBuffer_frag_spv;
+    gbFS.entryPoint = "main";
 
     // 顶点布局
     rhi::VertexInputLayout vl;
@@ -210,9 +217,11 @@ void GBufferRenderer::CreatePSO(rhi::IRHIDevice* device) {
 
     // PSO 描述
     rhi::PipelineStateDesc gbDesc;
-    gbDesc.vertexShader = &gbVS; gbDesc.pixelShader = &gbFS;
+    gbDesc.vertexShader = &gbVS;
+    gbDesc.pixelShader = &gbFS;
     gbDesc.vertexLayout = vl;
-    gbDesc.depthTest  = true; gbDesc.depthWrite = true;
+    gbDesc.depthTest  = true;
+    gbDesc.depthWrite = true;
     gbDesc.depthFormat = rhi::Format::D32_FLOAT;
     gbDesc.colorAttachmentCount = kGBufferAttachmentCount;
     gbDesc.colorFormats[0] = rhi::Format::RGBA16_FLOAT;  // Albedo+Metallic
@@ -237,7 +246,10 @@ void GBufferRenderer::CreateDescriptorSet(rhi::IRHIDevice* device) {
     u8 white[4] = {255, 255, 255, 255};
     rhi::TextureDesc defDesc;
     defDesc.format = rhi::Format::RGBA8_UNORM;
-    defDesc.width = 1; defDesc.height = 1; defDesc.mipLevels = 1; defDesc.arrayLayers = 1;
+    defDesc.width = 1;
+    defDesc.height = 1;
+    defDesc.mipLevels = 1;
+    defDesc.arrayLayers = 1;
     defDesc.usage = rhi::TextureUsage::ShaderResource;
     defDesc.initialData = white;
     auto placeholderTex = device->CreateTexture(defDesc);

@@ -136,12 +136,18 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     // 瞬态资源路径验证 PSO（全屏三角形 + 纹理拷贝，用于验证 Transient Allocator 端到端路径）
     {
         rhi::ShaderBytecode tVS, tFS;
-        tVS.stage = rhi::ShaderStage::Vertex; tVS.spirv = k_Fullscreen_vert_spv; tVS.entryPoint = "main";
-        tFS.stage = rhi::ShaderStage::Pixel;  tFS.spirv = k_FullscreenCopy_frag_spv; tFS.entryPoint = "main";
+        tVS.stage = rhi::ShaderStage::Vertex;
+        tVS.spirv = k_Fullscreen_vert_spv;
+        tVS.entryPoint = "main";
+        tFS.stage = rhi::ShaderStage::Pixel;
+        tFS.spirv = k_FullscreenCopy_frag_spv;
+        tFS.entryPoint = "main";
         rhi::PipelineStateDesc tDesc;
-        tDesc.vertexShader = &tVS; tDesc.pixelShader = &tFS;
+        tDesc.vertexShader = &tVS;
+        tDesc.pixelShader = &tFS;
         tDesc.topology = rhi::PrimitiveTopology::TriangleList;
-        tDesc.depthTest = false; tDesc.depthWrite = false;
+        tDesc.depthTest = false;
+        tDesc.depthWrite = false;
         tDesc.colorAttachmentCount = 1;
         tDesc.colorFormats[0] = rhi::Format::RGBA16_FLOAT;  // 匹配瞬态纹理格式
         tDesc.debugName = "TransientTest";
@@ -229,7 +235,8 @@ void DeferredPipeline::Shutdown() {
     m_DenoiseSSGI.Shutdown();
     m_DenoiseSSR.Shutdown();
     m_SSAO.Shutdown();
-    m_Device = nullptr; m_Ready = false;
+    m_Device = nullptr;
+    m_Ready = false;
     HE_CORE_INFO("DeferredPipeline shutdown");
 }
 
@@ -294,7 +301,8 @@ void DeferredPipeline::NextFrame() {
 
 void DeferredPipeline::OnResize(u32 w, u32 h) {
     if (w == m_Width && h == m_Height) return;
-    m_Width = w; m_Height = h;
+    m_Width = w;
+    m_Height = h;
     // 重建 GBuffer 纹理（委托给 GBufferRenderer）
     if (m_GBuffer) m_GBuffer->OnResize(w, h);
     // 重建 HDR 目标（通过 LightingPass）
@@ -365,7 +373,8 @@ void DeferredPipeline::CollectLights(PushConstantData& pc, he::World& world,
                                       he::SceneGraph& sg, const CameraData& camera) {
     pc.lightCount = 0;
     auto cl = [&](he::Entity e, he::LightComponent& lc) {
-        u32 i = pc.lightCount; if (i >= MAX_LIGHTS || !lc.enabled) return;
+        u32 i = pc.lightCount;
+        if (i >= MAX_LIGHTS || !lc.enabled) return;
         GPULight gl{};
 
         // 色温 → RGB 颜色（叠加到 color 滤镜色上）

@@ -21,15 +21,19 @@ namespace {
 std::shared_ptr<asset::SkeletonAsset> MakeChain() {
     auto skel = std::make_shared<asset::SkeletonAsset>();
     asset::SkeletonJoint j0;
-    j0.name = "root"; j0.parent = -1; j0.inverseBind = float4x4(1.0f);
+    j0.name = "root";
+    j0.parent = -1;
+    j0.inverseBind = float4x4(1.0f);
     asset::SkeletonJoint j1;
-    j1.name = "child"; j1.parent = 0;
+    j1.name = "child";
+    j1.parent = 0;
     j1.translation = float3(1, 0, 0);
     j1.inverseBind = float4x4(1.0f);
     skel->joints = { j0, j1 };
 
     asset::AnimationClip clip;
-    clip.name = "Test"; clip.duration = 1.0f;
+    clip.name = "Test";
+    clip.duration = 1.0f;
     asset::JointAnimationChannel ch;
     ch.jointIndex = 1;
     ch.times = { 0.0f, 1.0f };
@@ -57,7 +61,9 @@ std::shared_ptr<asset::SkeletonAsset> MakeSkinned() {
 
 TEST_CASE("SkeletalMeshSystem 关节 TRS 采样") {
     auto skel = MakeChain();
-    float3 t; quat r; float3 s;
+    float3 t;
+    quat r;
+    float3 s;
 
     // 无剪辑（-1）→ 静态 TRS
     SkeletalMeshSystem::SampleJointTRS(*skel, -1, 0.0f, 1, t, r, s);

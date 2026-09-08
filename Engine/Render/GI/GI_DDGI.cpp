@@ -15,7 +15,8 @@ static u32 DispatchGroupCount(u32 probeCount) {
 
 bool GI_DDGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Device = device;
-    m_Width = width; m_Height = height;
+    m_Width = width;
+    m_Height = height;
     m_Settings.enabled   = false;
     m_Settings.intensity = 1.0f;
     m_Settings.mode      = GIMode::DDGI;
@@ -137,7 +138,8 @@ void GI_DDGI::Shutdown() {
 }
 
 void GI_DDGI::OnResize(u32 w, u32 h) {
-    m_Width = w; m_Height = h;
+    m_Width = w;
+    m_Height = h;
 }
 
 void GI_DDGI::SetGBufferInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal, rhi::IRHITexture* albedo) {

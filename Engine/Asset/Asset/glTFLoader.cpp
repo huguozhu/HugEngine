@@ -153,10 +153,14 @@ void ApplyMaterial(const cgltf_material* material, MeshComponent* meshComp) {
 
     // --- Alpha 模式 ---
     switch (material->alpha_mode) {
-        case cgltf_alpha_mode_opaque: meshComp->alphaMode = 0; break;
-        case cgltf_alpha_mode_mask:   meshComp->alphaMode = 1; break;
-        case cgltf_alpha_mode_blend:  meshComp->alphaMode = 2; break;
-        default:                      meshComp->alphaMode = 0; break;
+        case cgltf_alpha_mode_opaque: meshComp->alphaMode = 0;
+        break;
+        case cgltf_alpha_mode_mask:   meshComp->alphaMode = 1;
+        break;
+        case cgltf_alpha_mode_blend:  meshComp->alphaMode = 2;
+        break;
+        default:                      meshComp->alphaMode = 0;
+        break;
     }
     meshComp->alphaCutoff = material->alpha_cutoff;
 
@@ -224,9 +228,12 @@ void LoadPrimitive(
     for (cgltf_size a = 0; a < prim.attributes_count; ++a) {
         const auto& attr = prim.attributes[a];
         switch (attr.type) {
-            case cgltf_attribute_type_position: posAttr    = &attr; break;
-            case cgltf_attribute_type_normal:   normalAttr = &attr; break;
-            case cgltf_attribute_type_texcoord: uvAttr     = &attr; break;
+            case cgltf_attribute_type_position: posAttr    = &attr;
+            break;
+            case cgltf_attribute_type_normal:   normalAttr = &attr;
+            break;
+            case cgltf_attribute_type_texcoord: uvAttr     = &attr;
+            break;
             default: break; // TANGENT / COLOR / JOINTS / WEIGHTS 暂不处理
         }
     }
@@ -546,11 +553,16 @@ glTFResult LoadGLTF(World& world, SceneGraph& sceneGraph, const String& filePath
                 for (cgltf_size a = 0; a < prim.attributes_count; ++a) {
                     const auto& attr = prim.attributes[a];
                     switch (attr.type) {
-                        case cgltf_attribute_type_position: posAttr    = &attr; break;
-                        case cgltf_attribute_type_normal:   normalAttr = &attr; break;
-                        case cgltf_attribute_type_texcoord: uvAttr     = &attr; break;
-                        case cgltf_attribute_type_joints:   jointAttr  = &attr; break;
-                        case cgltf_attribute_type_weights:  weightAttr = &attr; break;
+                        case cgltf_attribute_type_position: posAttr    = &attr;
+                        break;
+                        case cgltf_attribute_type_normal:   normalAttr = &attr;
+                        break;
+                        case cgltf_attribute_type_texcoord: uvAttr     = &attr;
+                        break;
+                        case cgltf_attribute_type_joints:   jointAttr  = &attr;
+                        break;
+                        case cgltf_attribute_type_weights:  weightAttr = &attr;
+                        break;
                         default: break;
                     }
                 }

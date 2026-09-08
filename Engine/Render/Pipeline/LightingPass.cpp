@@ -166,7 +166,8 @@ void LightingPass::CreateHDRTextures(rhi::IRHIDevice* device) {
     {
         rhi::TextureDesc d;
         d.format = rhi::Format::RGBA16_FLOAT;
-        d.width  = m_Width; d.height = m_Height;
+        d.width  = m_Width;
+        d.height = m_Height;
         d.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
         m_HDRTarget = device->CreateTexture(d);
     }
@@ -174,7 +175,8 @@ void LightingPass::CreateHDRTextures(rhi::IRHIDevice* device) {
     {
         rhi::TextureDesc dd;
         dd.format = rhi::Format::D32_FLOAT;
-        dd.width  = m_Width; dd.height = m_Height;
+        dd.width  = m_Width;
+        dd.height = m_Height;
         dd.usage  = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
         m_HDRDepth = device->CreateTexture(dd);
     }
@@ -235,9 +237,13 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
     {
         u8 w4[4] = {255,255,255,255};
         rhi::TextureDesc ptd;
-        ptd.format = rhi::Format::RGBA8_UNORM; ptd.width = 1; ptd.height = 1;
-        ptd.mipLevels = 1; ptd.arrayLayers = 1;
-        ptd.usage = rhi::TextureUsage::ShaderResource; ptd.initialData = w4;
+        ptd.format = rhi::Format::RGBA8_UNORM;
+        ptd.width = 1;
+        ptd.height = 1;
+        ptd.mipLevels = 1;
+        ptd.arrayLayers = 1;
+        ptd.usage = rhi::TextureUsage::ShaderResource;
+        ptd.initialData = w4;
         auto pt = device->CreateTexture(ptd);
 
         rhi::SamplerDesc sd;
@@ -255,9 +261,13 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
         {
             u8 bk[4] = {0,0,0,0};
             rhi::TextureDesc btd;
-            btd.format = rhi::Format::RGBA8_UNORM; btd.width = 1; btd.height = 1;
-            btd.mipLevels = 1; btd.arrayLayers = 1;
-            btd.usage = rhi::TextureUsage::ShaderResource; btd.initialData = bk;
+            btd.format = rhi::Format::RGBA8_UNORM;
+            btd.width = 1;
+            btd.height = 1;
+            btd.mipLevels = 1;
+            btd.arrayLayers = 1;
+            btd.usage = rhi::TextureUsage::ShaderResource;
+            btd.initialData = bk;
             auto bt = device->CreateTexture(btd);
 
             device->UpdateDescriptorSet(m_Set, 24, rhi::DescriptorType::CombinedImageSampler, pt.get(), ps.get());
@@ -281,8 +291,11 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
             // 不能使用白色——白色 Cubemap 会产生非零环境光贡献，导致画面异常
             u8 w4cube[6*4] = {};  // 6 面 × 4 通道，全部为 0（黑色）
             rhi::TextureDesc ctd;
-            ctd.format = rhi::Format::RGBA8_UNORM; ctd.width = 1; ctd.height = 1;
-            ctd.mipLevels = 1; ctd.arrayLayers = 6;
+            ctd.format = rhi::Format::RGBA8_UNORM;
+            ctd.width = 1;
+            ctd.height = 1;
+            ctd.mipLevels = 1;
+            ctd.arrayLayers = 6;
             ctd.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::Cubemap;
             ctd.initialData = w4cube;
             auto cubeTex = device->CreateTexture(ctd);
@@ -291,7 +304,9 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
         }
 
         // Cluster SSBO 占位（binding 7/8）
-        rhi::BufferDesc gd; gd.size = 16; gd.usage = rhi::BufferUsage::Storage;
+        rhi::BufferDesc gd;
+        gd.size = 16;
+        gd.usage = rhi::BufferUsage::Storage;
         auto gb = device->CreateBuffer(gd);
         device->UpdateDescriptorSet(m_Set, 7, rhi::DescriptorType::StorageBuffer, gb.get());
         device->UpdateDescriptorSet(m_Set, 8, rhi::DescriptorType::StorageBuffer, gb.get());
@@ -302,16 +317,23 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
 
     // ── 创建 PSO ──
     rhi::ShaderBytecode lVS, lFS;
-    lVS.stage = rhi::ShaderStage::Vertex; lVS.spirv = k_DeferredLighting_vert_spv; lVS.entryPoint = "main";
-    lFS.stage = rhi::ShaderStage::Pixel;  lFS.spirv = k_DeferredLighting_frag_spv; lFS.entryPoint = "main";
+    lVS.stage = rhi::ShaderStage::Vertex;
+    lVS.spirv = k_DeferredLighting_vert_spv;
+    lVS.entryPoint = "main";
+    lFS.stage = rhi::ShaderStage::Pixel;
+    lFS.spirv = k_DeferredLighting_frag_spv;
+    lFS.entryPoint = "main";
 
     rhi::PushConstantRange lpc;
-    lpc.stageMask = rhi::kStageMaskVertex | rhi::kStageMaskFragment; lpc.size = 128;
+    lpc.stageMask = rhi::kStageMaskVertex | rhi::kStageMaskFragment;
+    lpc.size = 128;
 
     rhi::PipelineStateDesc lDesc;
-    lDesc.vertexShader = &lVS; lDesc.pixelShader = &lFS;
+    lDesc.vertexShader = &lVS;
+    lDesc.pixelShader = &lFS;
     lDesc.topology = rhi::PrimitiveTopology::TriangleList;
-    lDesc.depthTest = false; lDesc.depthWrite = false;
+    lDesc.depthTest = false;
+    lDesc.depthWrite = false;
     lDesc.colorAttachmentCount = 1;
     lDesc.colorFormats[0] = rhi::Format::RGBA16_FLOAT;
     lDesc.pushConstantRanges = {lpc};

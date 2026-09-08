@@ -155,8 +155,10 @@ void AA_SMAA::Render(rhi::IRHICommandList* cmd) {
         cmd->SetPushConstants(0, sizeof(pc), &pc);
 
         rhi::ClearValue edgeClr{};
-        edgeClr.color[0] = 0.0f; edgeClr.color[1] = 0.0f;
-        edgeClr.color[2] = 0.0f; edgeClr.color[3] = 0.0f;
+        edgeClr.color[0] = 0.0f;
+        edgeClr.color[1] = 0.0f;
+        edgeClr.color[2] = 0.0f;
+        edgeClr.color[3] = 0.0f;
         cmd->BeginOffscreenPass(m_EdgeTex->GetNativeHandle(), nullptr,
             m_Width, m_Height, &edgeClr, false);
         cmd->Draw(3);  // 全屏三角形
@@ -189,8 +191,10 @@ void AA_SMAA::Render(rhi::IRHICommandList* cmd) {
         cmd->SetPushConstants(0, sizeof(pc), &pc);
 
         rhi::ClearValue blendClr{};
-        blendClr.color[0] = 0.0f; blendClr.color[1] = 0.0f;
-        blendClr.color[2] = 0.0f; blendClr.color[3] = 0.0f;
+        blendClr.color[0] = 0.0f;
+        blendClr.color[1] = 0.0f;
+        blendClr.color[2] = 0.0f;
+        blendClr.color[3] = 0.0f;
         cmd->BeginOffscreenPass(m_BlendTex->GetNativeHandle(), nullptr,
             m_Width, m_Height, &blendClr, false);
         cmd->Draw(3);

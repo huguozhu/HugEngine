@@ -46,7 +46,8 @@ bool SceneSerializer::Save(StringView filePath, World& world, SceneGraph& sg) {
     auto w32 = [&](u32 v) { for(int i=0;i<4;++i) buffer.push_back((u8)(v>>(i*8))); };
     auto w64 = [&](u64 v) { for(int i=0;i<8;++i) buffer.push_back((u8)(v>>(i*8))); };
 
-    w32(kMagic); w32(kVersion);
+    w32(kMagic);
+    w32(kVersion);
 
     // --- Entities ---
     u32 ec = 0; world.ForEachEntity([&](Entity){ec++;}); w32(ec);
@@ -56,7 +57,8 @@ bool SceneSerializer::Save(StringView filePath, World& world, SceneGraph& sg) {
         struct CD { u64 hash; std::vector<u8> data; };
         std::vector<CD> comps;
         world.ForEachComponent(e, [&](Component* comp) {
-            auto* cls = comp->GetClass(); if(!cls) return;
+            auto* cls = comp->GetClass();
+            if(!cls) return;
             serialize::BinaryArchive ar(serialize::ArchiveMode::Write);
             ar.BeginObject("comp");
             reflect::ForEachProperty<Component>(comp, [&](const reflect::PropertyInfo& p, void* ptr) {
@@ -90,7 +92,9 @@ bool SceneSerializer::Save(StringView filePath, World& world, SceneGraph& sg) {
 bool SceneSerializer::Load(StringView filePath, World& world, SceneGraph& sg) {
     std::ifstream f(String(filePath),std::ios::binary|std::ios::ate);
     if(!f) { HE_CORE_ERROR("SceneSerializer: open failed: {}", filePath); return false; }
-    std::vector<u8> buf((usize)f.tellg()); f.seekg(0); f.read((char*)buf.data(),buf.size());
+    std::vector<u8> buf((usize)f.tellg());
+    f.seekg(0);
+    f.read((char*)buf.data(),buf.size());
     usize p=0;
     auto r32=[&](){u32 v=0;for(int i=0;i<4;++i)v|=(u32)buf[p++]<<(i*8);return v;};
     auto r64=[&](){u64 v=0;for(int i=0;i<8;++i)v|=(u64)buf[p++]<<(i*8);return v;};
@@ -114,7 +118,8 @@ bool SceneSerializer::Load(StringView filePath, World& world, SceneGraph& sg) {
 
         u32 cc=r32();
         for(u32 ci=0;ci<cc;++ci){
-            u64 hash=r64(); u32 ds=r32();
+            u64 hash=r64();
+            u32 ds=r32();
 
             auto* cls=reflect::TypeRegistry::Instance().FindClassByHash(hash);
             if(!cls){ p+=ds; continue; }

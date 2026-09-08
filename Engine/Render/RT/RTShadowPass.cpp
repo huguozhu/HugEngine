@@ -59,19 +59,22 @@ bool RTShadowPass::Initialize(rhi::IRHIDevice* device, u32 fullWidth, u32 fullHe
     {
         rhi::ShaderBytecode bc;
         bc.stage = rhi::ShaderStage::RayGen;
-        bc.spirv = k_RT_Shadow_rgen_spv; bc.entryPoint = "main";
+        bc.spirv = k_RT_Shadow_rgen_spv;
+        bc.entryPoint = "main";
         shaders.push_back(bc);
     }
     {
         rhi::ShaderBytecode bc;
         bc.stage = rhi::ShaderStage::AnyHit;
-        bc.spirv = k_RT_Shadow_rahit_spv; bc.entryPoint = "main";
+        bc.spirv = k_RT_Shadow_rahit_spv;
+        bc.entryPoint = "main";
         shaders.push_back(bc);
     }
     {
         rhi::ShaderBytecode bc;
         bc.stage = rhi::ShaderStage::Miss;
-        bc.spirv = k_RT_Common_rmiss_spv; bc.entryPoint = "main";
+        bc.spirv = k_RT_Common_rmiss_spv;
+        bc.entryPoint = "main";
         shaders.push_back(bc);
     }
 
@@ -80,19 +83,22 @@ bool RTShadowPass::Initialize(rhi::IRHIDevice* device, u32 fullWidth, u32 fullHe
     {
         rhi::RTShaderGroup rg;
         rg.type = rhi::RTShaderGroupType::RayGen;
-        rg.generalShader = 0; rg.name = "ShadowRayGen";
+        rg.generalShader = 0;
+        rg.name = "ShadowRayGen";
         groups.push_back(rg);
     }
     {
         rhi::RTShaderGroup hg;
         hg.type = rhi::RTShaderGroupType::Hit;
-        hg.anyHitShader = 1; hg.name = "ShadowAnyHit";
+        hg.anyHitShader = 1;
+        hg.name = "ShadowAnyHit";
         groups.push_back(hg);
     }
     {
         rhi::RTShaderGroup mg;
         mg.type = rhi::RTShaderGroupType::Miss;
-        mg.generalShader = 2; mg.name = "ShadowMiss";
+        mg.generalShader = 2;
+        mg.name = "ShadowMiss";
         groups.push_back(mg);
     }
 

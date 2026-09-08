@@ -521,7 +521,8 @@ void ForwardPipeline::CollectLights(
     pc.lightCount = 0;
 
     // 空中透视参数：从物理天空组件读取太阳方向 + 浑浊度（无物理天空时保持 0=关闭）
-    float3 atmSunDir = float3(0, 1, 0); float atmTurbidity = 0.0f;
+    float3 atmSunDir = float3(0, 1, 0);
+    float atmTurbidity = 0.0f;
     he::GetPhysicalSkySun(world, atmSunDir, atmTurbidity);
     pc.atmosphere = float4(atmSunDir, atmTurbidity);
 
@@ -776,7 +777,9 @@ void ForwardPipeline::UpdateIBLBindings(GI_IBL* gi) {
 void ForwardPipeline::RenderSkybox(rhi::IRHICommandList* cmd, he::World& world,
                                     const CameraData& camera) {
     if (!m_Skybox) return;
-    SubsystemContext ctx; ctx.world = &world; ctx.camera = &camera;
+    SubsystemContext ctx;
+    ctx.world = &world;
+    ctx.camera = &camera;
     m_Skybox->Update(ctx);
     m_Skybox->Render(cmd);
 }

@@ -25,7 +25,8 @@ using namespace he;
 bool FeatureAgentScene::Initialize(rhi::IRHIDevice* device, rhi::IRHISwapChain* sc,
                                    he::ai::IAIDevice* ai) {
     m_AI = ai;
-    (void)device; (void)sc;
+    (void)device;
+    (void)sc;
 
     // 场景：地面 + 光源 + 天空
     {

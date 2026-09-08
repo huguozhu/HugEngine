@@ -225,8 +225,13 @@ int main() {
             auto* bxf = world.GetComponent<TransformComponent>(ball);
             bxf->position = float3(-3.0f + i * 2.0f, 4.0f + i, -5.0f);   // 相机前方偏低，下落可见
             auto* rb = world.AddComponent<RigidBodyComponent>(ball);
-            rb->shape = 0; rb->radius = 0.4f; rb->isDynamic = true; rb->mass = 1.0f;
-            rb->friction = 0.4f; rb->restitution = 0.3f + i * 0.15f;   // 不同弹性，弹跳高度区分
+            rb->shape = 0;
+            rb->radius = 0.4f;
+            rb->isDynamic = true;
+            rb->mass = 1.0f;
+            rb->friction = 0.4f;
+            rb->restitution = 0.3f + i * 0.15f;
+            // 不同弹性，弹跳高度区分;
             sceneGraph.SetParent(ball, Entity{kInvalidEntity});
         }
     }
@@ -568,12 +573,16 @@ int main() {
 
         if (!allFaces.empty()) {
             rhi::TextureDesc cmDesc;
-            cmDesc.format=rhi::Format::RGBA8_UNORM; cmDesc.width=faceW; cmDesc.height=faceH;
-            cmDesc.mipLevels=1; cmDesc.arrayLayers=6;
+            cmDesc.format=rhi::Format::RGBA8_UNORM;
+            cmDesc.width=faceW;
+            cmDesc.height=faceH;
+            cmDesc.mipLevels=1;
+            cmDesc.arrayLayers=6;
             cmDesc.usage=rhi::TextureUsage::ShaderResource|rhi::TextureUsage::Cubemap|rhi::TextureUsage::TransferDst;
             cmDesc.initialData=allFaces.data();
             auto cm = device->CreateTexture(cmDesc);
-            rhi::SamplerDesc s; s.minFilter=s.magFilter=rhi::FilterMode::Linear;
+            rhi::SamplerDesc s;
+            s.minFilter=s.magFilter=rhi::FilterMode::Linear;
             s.addressU=s.addressV=s.addressW=rhi::AddressMode::ClampToEdge;
             auto cs = device->CreateSampler(s);
             Entity e = world.CreateEntity("Skybox");
@@ -639,8 +648,11 @@ int main() {
         u8* pixels = stbi_load(texPath.c_str(), &w, &h, &ch, 4);
         if (pixels) {
             rhi::TextureDesc td;
-            td.format = rhi::Format::RGBA8_UNORM; td.width = (u32)w; td.height = (u32)h;
-            td.mipLevels = 1; td.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::TransferDst;
+            td.format = rhi::Format::RGBA8_UNORM;
+            td.width = (u32)w;
+            td.height = (u32)h;
+            td.mipLevels = 1;
+            td.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::TransferDst;
             td.initialData = pixels;
             decalTextureOwn = device->CreateTexture(td);
             stbi_image_free(pixels);
@@ -1016,7 +1028,8 @@ int main() {
                 forwardPipeline.GetCurrentDescSet());
 
             render::SubsystemContext shadowCtx;
-            shadowCtx.world = &world; shadowCtx.sceneGraph = &sceneGraph;
+            shadowCtx.world = &world;
+            shadowCtx.sceneGraph = &sceneGraph;
             shadowCtx.camera = &frameCamera;
             he::SyncPhysicalSkyToSun(world);   // 在阴影烘焙前同步太阳方向，保证阴影/光照同向
             shadowSys->Update(shadowCtx);

@@ -75,14 +75,18 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
     // Single-phase: IndirectDraw + DrawCount SSBO
     // IndirectDrawCommand 在 MeshBatcher.h 定义为 20B（匹配 VkDrawIndexedIndirectCommand）
     {
-        rhi::BufferDesc d; d.size = sizeof(IndirectDrawCommand) * kMaxObjects;
-        d.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::Indirect; d.cpuAccess = true;
+        rhi::BufferDesc d;
+        d.size = sizeof(IndirectDrawCommand) * kMaxObjects;
+        d.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::Indirect;
+        d.cpuAccess = true;
         m_IndirectCmdBuf = device->CreateBuffer(d);
         device->UpdateDescriptorSet(m_DescSet, 1, rhi::DescriptorType::StorageBuffer, m_IndirectCmdBuf.get());
     }
     {
-        rhi::BufferDesc d; d.size = sizeof(u32) * 4;
-        d.usage = rhi::BufferUsage::Storage; d.cpuAccess = true;
+        rhi::BufferDesc d;
+        d.size = sizeof(u32) * 4;
+        d.usage = rhi::BufferUsage::Storage;
+        d.cpuAccess = true;
         m_DrawCountBuf = device->CreateBuffer(d);
         // 零初始化：首帧 Readback 读到 count=0 → 安全回退 CPU 路径
         u32* pCount = static_cast<u32*>(m_DrawCountBuf->Map());
@@ -125,14 +129,18 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
 
     // Phase 1 候选缓冲
     {
-        rhi::BufferDesc d; d.size = sizeof(u32) * kMaxObjects;
-        d.usage = rhi::BufferUsage::Storage; d.cpuAccess = true;
+        rhi::BufferDesc d;
+        d.size = sizeof(u32) * kMaxObjects;
+        d.usage = rhi::BufferUsage::Storage;
+        d.cpuAccess = true;
         m_CandidateBuf = device->CreateBuffer(d);
         device->UpdateDescriptorSet(m_Phase1Set, 1, rhi::DescriptorType::StorageBuffer, m_CandidateBuf.get());
     }
     {
-        rhi::BufferDesc d; d.size = sizeof(u32) * 4;
-        d.usage = rhi::BufferUsage::Storage; d.cpuAccess = true;
+        rhi::BufferDesc d;
+        d.size = sizeof(u32) * 4;
+        d.usage = rhi::BufferUsage::Storage;
+        d.cpuAccess = true;
         m_CandidateCountBuf = device->CreateBuffer(d);
         device->UpdateDescriptorSet(m_Phase1Set, 2, rhi::DescriptorType::StorageBuffer, m_CandidateCountBuf.get());
     }
@@ -408,7 +416,9 @@ void GPUCulling::DispatchPhase1(rhi::IRHICommandList* cmd, const float4x4& viewP
     for (int i = 0; i < 6; ++i) pc.planes[i] = planes[i];
     pc.vp    = viewProj;
     pc.sSize = float2((float)screenW, (float)screenH);
-    u32 hizMips = (m_FrameIndex == 0) ? 0 : m_HiZMipCount; pc.mips = hizMips; m_FrameIndex++;
+    u32 hizMips = (m_FrameIndex == 0) ? 0 : m_HiZMipCount;
+    pc.mips = hizMips;
+    m_FrameIndex++;
     pc.count = objectCount;
 
     // 清零候选计数
@@ -523,7 +533,9 @@ void GPUCulling::DispatchPhase2(rhi::IRHICommandList* cmd, u32 screenW, u32 scre
     struct { float4x4 vp; float2 sSize; u32 mips; u32 count; } pc;
     pc.vp    = m_LastViewProj;
     pc.sSize = float2((float)screenW, (float)screenH);
-    u32 hizMips = (m_FrameIndex == 0) ? 0 : m_HiZMipCount; pc.mips = hizMips; m_FrameIndex++;
+    u32 hizMips = (m_FrameIndex == 0) ? 0 : m_HiZMipCount;
+    pc.mips = hizMips;
+    m_FrameIndex++;
     pc.count = candidateCount;
 
     cmd->SetPipeline(m_Phase2PSO.get());
@@ -677,7 +689,8 @@ void GPUCulling::SignalPTG(rhi::IRHICommandList* cmd, const float4x4& viewProj,
     for (int i = 0; i < 6; ++i) params->frustumPlanes[i] = planes[i];
     params->screenSize = float2((float)screenW, (float)screenH);
     params->objectCount = objectCount;
-    params->hizMipCount = (m_FrameIndex == 0) ? 0 : m_HiZMipCount; m_FrameIndex++;
+    params->hizMipCount = (m_FrameIndex == 0) ? 0 : m_HiZMipCount;
+    m_FrameIndex++;
     params->frameIndex = m_PTGFrameCounter++;
 
     m_PTGParamBuf->Unmap();

@@ -251,12 +251,18 @@ void PSOPrecompileManager::WorkerThreadFunc() {
                     ad.offset   = a.offset;
                     // 简化映射：基于字节数估算格式
                     switch (a.format) {
-                    case VertexFormat::Float:  ad.format = VK_FORMAT_R32_SFLOAT; break;
-                    case VertexFormat::Float2: ad.format = VK_FORMAT_R32G32_SFLOAT; break;
-                    case VertexFormat::Float3: ad.format = VK_FORMAT_R32G32B32_SFLOAT; break;
-                    case VertexFormat::Float4: ad.format = VK_FORMAT_R32G32B32A32_SFLOAT; break;
-                    case VertexFormat::UByte4: ad.format = VK_FORMAT_R8G8B8A8_UINT; break;
-                    default:                   ad.format = VK_FORMAT_R32G32B32_SFLOAT; break;
+                    case VertexFormat::Float:  ad.format = VK_FORMAT_R32_SFLOAT;
+                    break;
+                    case VertexFormat::Float2: ad.format = VK_FORMAT_R32G32_SFLOAT;
+                    break;
+                    case VertexFormat::Float3: ad.format = VK_FORMAT_R32G32B32_SFLOAT;
+                    break;
+                    case VertexFormat::Float4: ad.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+                    break;
+                    case VertexFormat::UByte4: ad.format = VK_FORMAT_R8G8B8A8_UINT;
+                    break;
+                    default:                   ad.format = VK_FORMAT_R32G32B32_SFLOAT;
+                    break;
                     }
                     attrs.push_back(ad);
                 }
