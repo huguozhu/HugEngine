@@ -170,9 +170,23 @@
 | 命名/语义优化 | ✅ | `9f09c87`（ShadowChannel::CSM→Raster）、4 通道枚举拆分 + `ddgiOverlay` 叠加语义（`66faf5c`） |
 | 能力查询修正 | ✅ | `da2bbb4`（GIRegistry::IsAvailable 基于 device->GetCaps().supportsRayTracing，非硬编码 RT 不可用） |
 | CSM 阴影越界修复 | ✅ | `2d2db2a`（SampleShadowPCF 超出 splitDistances[2] 返回无阴影，消除方形暗区） |
-| **M4** 性能优化 | ⏳ 未开始 | — |
+| **M4** 性能优化 | 🔄 部分 | 见下（4.1 halfRes SSGI/SSR 完成） |
 | **M5** 质量提升 | ⏳ 部分 | 见下 |
 | **M6** 工业界进阶 | ⏳ 按需 | — |
+
+### M4 进展说明
+
+- **4.1 halfRes**（最大杠杆，SSGI/SSR 完成——`52d8280` + `9b6e612`）：
+  - SSGI/SSR：`halfResW/H` helper + Initialize/OnResize 半分辨率纹理；帧图 viewport 用纹理实际尺寸。
+  - halfRes 时跳过 Denoise（省开销、避免尺寸不匹配）。
+  - 06 档位应用：Low 档 `halfRes=true` 同步 `GISettings.halfRes` + `OnResize` 重建。
+  - 待做：SSAO / RSM / DDGI 的 halfRes。
+- **4.2 SSR Hi-Z / 4.3 DDGI 1/4 分辨率 HDR / 4.4 RSM VPL 降采样 / 4.5 GBuffer 通道合并**：未开始。
+
+### 代码可读性整理（本批）
+
+- `GI_SSGI.cpp` / `GI_SSR.cpp`：每语句一行 + 分段注释 + 变量命名。
+- 遍历引擎自有 cpp（排除 External 第三方库）：把一行多语句拆为每语句一行（拆 80 文件 558 行，`c536951`；保守跳过 for 头/宏/块/lambda）。
 
 ### M5 进展说明
 
