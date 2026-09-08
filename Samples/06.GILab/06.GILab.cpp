@@ -644,8 +644,9 @@ int main() {
             const char* presetNames[] = {"Low", "Medium", "High", "Ultra"};
             if (ImGui::Combo("质量档位", &giPreset, presetNames, 4)) {
                 auto& gc = pipeline.GetGIConfig();
-                // M3：应用预设并经 GIRegistry 自动降级（不可用的源落到可用组合）
-                gc = render::GIRegistry::Degrade(render::GIConfigFromPreset((render::GIQualityPreset)giPreset));
+                // M3：应用预设并经 GIRegistry 自动降级（RT 源按设备光追能力决定，不可用则降级）
+                gc = render::GIRegistry::Degrade(render::GIConfigFromPreset((render::GIQualityPreset)giPreset),
+                                                 device->GetCaps().supportsRayTracing);
                 // 应用档位到 GI 子系统开关（帧图按 config 条件注册）
                 pipeline.GetSSGI()->SetEnabled(gc.ShouldRunSSGI());
                 pipeline.GetDDGI()->SetEnabled(gc.ShouldRunDDGI());

@@ -17,11 +17,11 @@ namespace he::render {
 
 class GIRegistry {
 public:
-    /// 各通道技术是否可用（MVP：RT 系列需硬件光追，Deferred 光栅管线不提供）
-    static bool IsAvailable(ShadowChannel s)   { return s != ShadowChannel::RT; }
-    static bool IsAvailable(AOChannel s)       { return s != AOChannel::RTAO; }
-    static bool IsAvailable(SpecularChannel s) { return s != SpecularChannel::RT; }
-    static bool IsAvailable(DiffuseChannel s)  { return s != DiffuseChannel::RTGI; }
+    /// 各通道技术是否可用（RT 系列需硬件光追能力，由设备 caps.supportsRayTracing 决定）
+    static bool IsAvailable(ShadowChannel s, bool rtSupported)   { return s != ShadowChannel::RT   || rtSupported; }
+    static bool IsAvailable(AOChannel s, bool rtSupported)       { return s != AOChannel::RTAO       || rtSupported; }
+    static bool IsAvailable(SpecularChannel s, bool rtSupported) { return s != SpecularChannel::RT || rtSupported; }
+    static bool IsAvailable(DiffuseChannel s, bool rtSupported)  { return s != DiffuseChannel::RTGI  || rtSupported; }
 
     /// 降级链：不可用的技术 → 可用的替代
     static ShadowChannel FallbackOf(ShadowChannel s) {
@@ -38,15 +38,15 @@ public:
     }
 
     /// 把 GIConfig 中不可用的通道技术自动降级（直至可用）
-    static GIConfig Degrade(const GIConfig& c) {
+    static GIConfig Degrade(const GIConfig& c, bool rtSupported) {
         GIConfig out = c;
-        for (int i = 0; i < 4 && !IsAvailable(out.diffuse); ++i)
+        for (int i = 0; i < 4 && !IsAvailable(out.diffuse, rtSupported); ++i)
             out.diffuse = FallbackOf(out.diffuse);
-        for (int i = 0; i < 4 && !IsAvailable(out.shadow); ++i)
+        for (int i = 0; i < 4 && !IsAvailable(out.shadow, rtSupported); ++i)
             out.shadow = FallbackOf(out.shadow);
-        for (int i = 0; i < 4 && !IsAvailable(out.ao); ++i)
+        for (int i = 0; i < 4 && !IsAvailable(out.ao, rtSupported); ++i)
             out.ao = FallbackOf(out.ao);
-        for (int i = 0; i < 4 && !IsAvailable(out.specular); ++i)
+        for (int i = 0; i < 4 && !IsAvailable(out.specular, rtSupported); ++i)
             out.specular = FallbackOf(out.specular);
         return out;
     }
