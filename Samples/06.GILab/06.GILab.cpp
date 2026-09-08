@@ -189,6 +189,7 @@ int main() {
         mainDL->color     = float3(1.0f, 0.95f, 0.9f);
         mainDL->intensity = 3.0f;   // 弱光：DDGI 输入，不喧宾夺主
         mainDL->castShadow = true;
+        mainDL->enabled    = false; // 默认只看 GI（直接光关闭，勾选「只看 GI」可切回）
         sceneGraph.SetParent(mainLightEntity, Entity{kInvalidEntity});
     }
 
@@ -609,7 +610,7 @@ int main() {
 
             // ── GI 实验室：只看 GI（关闭直接光）→ 逐个开启 GI 看间接光贡献 ──
             ImGui::SeparatorText("GI 实验室");
-            static bool s_gISolo = false;
+            static bool s_gISolo = true;   // 默认只看 GI（关闭直接光）
             if (ImGui::Checkbox("只看 GI（关闭直接光）", &s_gISolo)) {
                 // 关闭/恢复所有直接光源：画面只剩 GI（IBL/SSGI/DDGI/RSM 等）的间接光
                 world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& l){ l.enabled = !s_gISolo; });
@@ -652,6 +653,15 @@ int main() {
                 pipeline.GetDDGI()->SetEnabled(gc.ShouldRunDDGI());
                 pipeline.GetSSR()->SetEnabled(gc.ShouldRunSpecular());
                 pipeline.GetSSAO().enabled = gc.ShouldRunAO();
+                // M4.1 halfRes 应用：档位的 halfRes 同步到 GI 子系统并重建输出纹理
+                auto sgiSettings = pipeline.GetSSGI()->GetSettings();
+                sgiSettings.halfRes = gc.halfRes;
+                pipeline.GetSSGI()->SetSettings(sgiSettings);
+                auto ssrSettings = pipeline.GetSSR()->GetSettings();
+                ssrSettings.halfRes = gc.halfRes;
+                pipeline.GetSSR()->SetSettings(ssrSettings);
+                pipeline.GetSSGI()->OnResize(config.windowWidth, config.windowHeight);
+                pipeline.GetSSR()->OnResize(config.windowWidth, config.windowHeight);
             }
             auto& gc2 = pipeline.GetGIConfig();
             ImGui::SliderFloat("GI 强度", &gc2.giIntensity, 0.0f, 2.0f, "%.2f");

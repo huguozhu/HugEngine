@@ -42,6 +42,9 @@ public:
 
 private:
     void CreateOutputTex(u32 w, u32 h);
+    // 半分辨率尺寸（GISettings.halfRes 时输出纹理降半——省约 3/4 像素着色）
+    u32 halfResW(u32 w) const { return m_Settings.halfRes ? std::max(w / 2, 1u) : w; }
+    u32 halfResH(u32 h) const { return m_Settings.halfRes ? std::max(h / 2, 1u) : h; }
 
     rhi::IRHIDevice* m_Device = nullptr;
     u32 m_Width = 0, m_Height = 0;

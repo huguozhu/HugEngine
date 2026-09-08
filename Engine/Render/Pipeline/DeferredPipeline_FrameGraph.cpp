@@ -292,31 +292,38 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     render::ResourceHandle ssrDenoised;
     if (m_GIConfig.ShouldRunSpecular()) {
         auto ssrOut = rg.ImportTexture("SSR_Output", m_SSR.GetIndirectSpecularTexture());
+        // halfRes：输出纹理可能为半分辨率，viewport 用纹理实际尺寸
+        u32 ssw = m_SSR.GetIndirectSpecularTexture()->GetWidth();
+        u32 ssh = m_SSR.GetIndirectSpecularTexture()->GetHeight();
         rg.AddPass("SSR", {}, {{ssrOut, ResourceAccess::Write}},
-            [&, w, h](rhi::IRHICommandList* c) {
+            [&, ssw, ssh](rhi::IRHICommandList* c) {
                 m_SSR.PreBind(c);
                 rhi::ClearValue clr{};
                 if (m_SSR.IsEnabled()) {
                     m_SSR.SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetAlbedo());
-                    c->BeginOffscreenPass(m_SSR.GetIndirectSpecularTexture()->GetNativeHandle(), nullptr, w, h, &clr, false);
+                    c->BeginOffscreenPass(m_SSR.GetIndirectSpecularTexture()->GetNativeHandle(), nullptr, ssw, ssh, &clr, false);
                     m_SSR.Render(c);
                 } else {
-                    c->BeginOffscreenPass(m_SSR.GetIndirectSpecularTexture()->GetNativeHandle(), nullptr, w, h, &clr, false);
+                    c->BeginOffscreenPass(m_SSR.GetIndirectSpecularTexture()->GetNativeHandle(), nullptr, ssw, ssh, &clr, false);
                 }
                 c->EndOffscreenPass();
             });
 
-        // SSR Denoise
-        ssrDenoised = rg.ImportTexture("SSR_Denoised", m_DenoiseSSR.GetOutput());
-        rg.AddPass("SSR_Denoise", {{ssrOut, ResourceAccess::Read}}, {{ssrDenoised, ResourceAccess::Write}},
-            [&, w, h](rhi::IRHICommandList* c) {
-                m_DenoiseSSR.PreBind(c);
-                m_DenoiseSSR.SetInputs(m_SSR.GetIndirectSpecularTexture(), m_GBuffer->GetDepth(), m_GBuffer->GetNormal());
-                rhi::ClearValue clr{};
-                c->BeginOffscreenPass(m_DenoiseSSR.GetOutput()->GetNativeHandle(), nullptr, w, h, &clr, false);
-                m_DenoiseSSR.Render(c);
-                c->EndOffscreenPass();
-            });
+        // SSR Denoise（halfRes 时跳过：半分辨率输出直接采样）
+        if (m_SSR.GetSettings().halfRes) {
+            ssrDenoised = ssrOut;
+        } else {
+            ssrDenoised = rg.ImportTexture("SSR_Denoised", m_DenoiseSSR.GetOutput());
+            rg.AddPass("SSR_Denoise", {{ssrOut, ResourceAccess::Read}}, {{ssrDenoised, ResourceAccess::Write}},
+                [&, w, h](rhi::IRHICommandList* c) {
+                    m_DenoiseSSR.PreBind(c);
+                    m_DenoiseSSR.SetInputs(m_SSR.GetIndirectSpecularTexture(), m_GBuffer->GetDepth(), m_GBuffer->GetNormal());
+                    rhi::ClearValue clr{};
+                    c->BeginOffscreenPass(m_DenoiseSSR.GetOutput()->GetNativeHandle(), nullptr, w, h, &clr, false);
+                    m_DenoiseSSR.Render(c);
+                    c->EndOffscreenPass();
+                });
+        }
     }
 
     // SSGI Pass（屏幕空间间接漫反射，仅当 GIConfig 选中 SSGI 才注册）
@@ -340,17 +347,21 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 c->EndOffscreenPass();
             });
 
-        // SSGI Denoise
-        ssgiDenoised = rg.ImportTexture("SSGI_Denoised", m_DenoiseSSGI.GetOutput());
-        rg.AddPass("SSGI_Denoise", {{ssgiOut, ResourceAccess::Read}}, {{ssgiDenoised, ResourceAccess::Write}},
-            [&, w, h](rhi::IRHICommandList* c) {
-                m_DenoiseSSGI.PreBind(c);
-                m_DenoiseSSGI.SetInputs(m_SSGI.GetIndirectDiffuseTexture(), m_GBuffer->GetDepth(), m_GBuffer->GetNormal());
-                rhi::ClearValue clr{};
-                c->BeginOffscreenPass(m_DenoiseSSGI.GetOutput()->GetNativeHandle(), nullptr, w, h, &clr, false);
-                m_DenoiseSSGI.Render(c);
-                c->EndOffscreenPass();
-            });
+        // SSGI Denoise（halfRes 时跳过：半分辨率输出直接采样，省 Denoise 开销）
+        if (m_SSGI.GetSettings().halfRes) {
+            ssgiDenoised = ssgiOut;
+        } else {
+            ssgiDenoised = rg.ImportTexture("SSGI_Denoised", m_DenoiseSSGI.GetOutput());
+            rg.AddPass("SSGI_Denoise", {{ssgiOut, ResourceAccess::Read}}, {{ssgiDenoised, ResourceAccess::Write}},
+                [&, w, h](rhi::IRHICommandList* c) {
+                    m_DenoiseSSGI.PreBind(c);
+                    m_DenoiseSSGI.SetInputs(m_SSGI.GetIndirectDiffuseTexture(), m_GBuffer->GetDepth(), m_GBuffer->GetNormal());
+                    rhi::ClearValue clr{};
+                    c->BeginOffscreenPass(m_DenoiseSSGI.GetOutput()->GetNativeHandle(), nullptr, w, h, &clr, false);
+                    m_DenoiseSSGI.Render(c);
+                    c->EndOffscreenPass();
+                });
+        }
     }
 
     // ── 天空盒喂给 GI_IBL（脏标记触发 IBL 重生成，生成在 Lighting lambda 内联执行）──
