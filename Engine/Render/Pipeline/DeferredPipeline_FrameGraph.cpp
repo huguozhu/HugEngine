@@ -254,93 +254,101 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     // DDGI Probe Update（Compute Shader：必须放在所有 offscreen pass 之前，
     // 避免 compute pipeline 切换影响后续 render pass 状态）
     // ============================================================
-    rg.AddPass("DDGI_Update",
-        {{gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbDepth, ResourceAccess::Read}},
-        {},
-        [&](rhi::IRHICommandList* c) {
-            if (m_DDGI.IsEnabled()) {
-                m_DDGI.SetGBufferInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetAlbedo());
-                SubsystemContext dgiCtx;
-                dgiCtx.camera = &camera;
-                m_DDGI.Update(dgiCtx);
-                m_DDGI.Render(c);
-                // Compute dispatch 后恢复 graphics pipeline，
-                // 确保后续 pass 的 SetPipeline / BeginOffscreenPass 状态正确
-                c->SetPipeline(m_Lighting.GetPSO());
-            }
-        },
-        RGPassQueue::Compute);  // AsyncCompute: DDGI 探针更新在 Compute 队列执行
+    // DDGI Probe Update（仅当 GIConfig 选中 DDGI 才注册，未选中不注册不分配）
+    if (m_GIConfig.ShouldRunDDGI()) {
+        rg.AddPass("DDGI_Update",
+            {{gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbDepth, ResourceAccess::Read}},
+            {},
+            [&](rhi::IRHICommandList* c) {
+                if (m_DDGI.IsEnabled()) {
+                    m_DDGI.SetGBufferInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetAlbedo());
+                    SubsystemContext dgiCtx;
+                    dgiCtx.camera = &camera;
+                    m_DDGI.Update(dgiCtx);
+                    m_DDGI.Render(c);
+                    c->SetPipeline(m_Lighting.GetPSO());
+                }
+            },
+            RGPassQueue::Compute);  // AsyncCompute: DDGI 探针更新在 Compute 队列执行
+    }
 
-    // SSAO Pass
-    auto ssaoOut = rg.ImportTexture("SSAO_Output", m_SSAO.GetAOTexture());
-    rg.AddPass("SSAO", {}, {{ssaoOut, ResourceAccess::Write}},
-        [&, w, h](rhi::IRHICommandList* c) {
-            m_SSAO.PreBind(c);
-            // 始终以白色清除（AO=1.0=无遮蔽），enabled 时 SSAO 在上面绘制 AO 结果
-            rhi::ClearValue aoClear; aoClear.color[0]=aoClear.color[1]=aoClear.color[2]=aoClear.color[3]=1.0f;
-            c->BeginOffscreenPass(m_SSAO.GetAOTexture()->GetNativeHandle(), nullptr, w, h, &aoClear, false);
-            if (m_SSAO.enabled) {
-                m_SSAO.SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal());
-                m_SSAO.Render(c);
-            }
-            c->EndOffscreenPass();
-        });
+    // SSAO Pass（仅当 GIConfig 选中 AO 才注册）
+    if (m_GIConfig.ShouldRunAO()) {
+        auto ssaoOut = rg.ImportTexture("SSAO_Output", m_SSAO.GetAOTexture());
+        rg.AddPass("SSAO", {}, {{ssaoOut, ResourceAccess::Write}},
+            [&, w, h](rhi::IRHICommandList* c) {
+                m_SSAO.PreBind(c);
+                rhi::ClearValue aoClear; aoClear.color[0]=aoClear.color[1]=aoClear.color[2]=aoClear.color[3]=1.0f;
+                c->BeginOffscreenPass(m_SSAO.GetAOTexture()->GetNativeHandle(), nullptr, w, h, &aoClear, false);
+                if (m_SSAO.enabled) {
+                    m_SSAO.SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal());
+                    m_SSAO.Render(c);
+                }
+                c->EndOffscreenPass();
+            });
+    }
 
-    // SSR Pass（屏幕空间反射）
-    auto ssrOut = rg.ImportTexture("SSR_Output", m_SSR.GetIndirectSpecularTexture());
-    rg.AddPass("SSR", {}, {{ssrOut, ResourceAccess::Write}},
-        [&, w, h](rhi::IRHICommandList* c) {
-            m_SSR.PreBind(c);
-            rhi::ClearValue clr{};
-            if (m_SSR.IsEnabled()) {
-                m_SSR.SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetAlbedo());
-                c->BeginOffscreenPass(m_SSR.GetIndirectSpecularTexture()->GetNativeHandle(), nullptr, w, h, &clr, false);
-                m_SSR.Render(c);
-            } else {
-                c->BeginOffscreenPass(m_SSR.GetIndirectSpecularTexture()->GetNativeHandle(), nullptr, w, h, &clr, false);
-            }
-            c->EndOffscreenPass();
-        });
+    // SSR Pass（屏幕空间反射，仅当 GIConfig 选中 SSR/RT 反射才注册）
+    render::ResourceHandle ssrDenoised;
+    if (m_GIConfig.ShouldRunSpecular()) {
+        auto ssrOut = rg.ImportTexture("SSR_Output", m_SSR.GetIndirectSpecularTexture());
+        rg.AddPass("SSR", {}, {{ssrOut, ResourceAccess::Write}},
+            [&, w, h](rhi::IRHICommandList* c) {
+                m_SSR.PreBind(c);
+                rhi::ClearValue clr{};
+                if (m_SSR.IsEnabled()) {
+                    m_SSR.SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetAlbedo());
+                    c->BeginOffscreenPass(m_SSR.GetIndirectSpecularTexture()->GetNativeHandle(), nullptr, w, h, &clr, false);
+                    m_SSR.Render(c);
+                } else {
+                    c->BeginOffscreenPass(m_SSR.GetIndirectSpecularTexture()->GetNativeHandle(), nullptr, w, h, &clr, false);
+                }
+                c->EndOffscreenPass();
+            });
 
-    // SSR Denoise
-    auto ssrDenoised = rg.ImportTexture("SSR_Denoised", m_DenoiseSSR.GetOutput());
-    rg.AddPass("SSR_Denoise", {{ssrOut, ResourceAccess::Read}}, {{ssrDenoised, ResourceAccess::Write}},
-        [&, w, h](rhi::IRHICommandList* c) {
-            m_DenoiseSSR.PreBind(c);
-            m_DenoiseSSR.SetInputs(m_SSR.GetIndirectSpecularTexture(), m_GBuffer->GetDepth(), m_GBuffer->GetNormal());
-            rhi::ClearValue clr{};
-            c->BeginOffscreenPass(m_DenoiseSSR.GetOutput()->GetNativeHandle(), nullptr, w, h, &clr, false);
-            m_DenoiseSSR.Render(c);
-            c->EndOffscreenPass();
-        });
+        // SSR Denoise
+        ssrDenoised = rg.ImportTexture("SSR_Denoised", m_DenoiseSSR.GetOutput());
+        rg.AddPass("SSR_Denoise", {{ssrOut, ResourceAccess::Read}}, {{ssrDenoised, ResourceAccess::Write}},
+            [&, w, h](rhi::IRHICommandList* c) {
+                m_DenoiseSSR.PreBind(c);
+                m_DenoiseSSR.SetInputs(m_SSR.GetIndirectSpecularTexture(), m_GBuffer->GetDepth(), m_GBuffer->GetNormal());
+                rhi::ClearValue clr{};
+                c->BeginOffscreenPass(m_DenoiseSSR.GetOutput()->GetNativeHandle(), nullptr, w, h, &clr, false);
+                m_DenoiseSSR.Render(c);
+                c->EndOffscreenPass();
+            });
+    }
 
-    // SSGI Pass（屏幕空间间接漫反射）
-    auto ssgiOut = rg.ImportTexture("SSGI_Output", m_SSGI.GetIndirectDiffuseTexture());
-    rg.AddPass("SSGI", {}, {{ssgiOut, ResourceAccess::Write}},
-        [&, w, h](rhi::IRHICommandList* c) {
-            m_SSGI.PreBind(c);
-            rhi::ClearValue clr{};
-            if (m_SSGI.IsEnabled()) {
-                m_SSGI.SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetAlbedo());
-                c->BeginOffscreenPass(m_SSGI.GetIndirectDiffuseTexture()->GetNativeHandle(), nullptr, w, h, &clr, false);
-                m_SSGI.Render(c);
-            } else {
-                c->BeginOffscreenPass(m_SSGI.GetIndirectDiffuseTexture()->GetNativeHandle(), nullptr, w, h, &clr, false);
-            }
-            c->EndOffscreenPass();
-        });
+    // SSGI Pass（屏幕空间间接漫反射，仅当 GIConfig 选中 SSGI 才注册）
+    render::ResourceHandle ssgiDenoised;
+    if (m_GIConfig.ShouldRunSSGI()) {
+        auto ssgiOut = rg.ImportTexture("SSGI_Output", m_SSGI.GetIndirectDiffuseTexture());
+        rg.AddPass("SSGI", {}, {{ssgiOut, ResourceAccess::Write}},
+            [&, w, h](rhi::IRHICommandList* c) {
+                m_SSGI.PreBind(c);
+                rhi::ClearValue clr{};
+                if (m_SSGI.IsEnabled()) {
+                    m_SSGI.SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetAlbedo());
+                    c->BeginOffscreenPass(m_SSGI.GetIndirectDiffuseTexture()->GetNativeHandle(), nullptr, w, h, &clr, false);
+                    m_SSGI.Render(c);
+                } else {
+                    c->BeginOffscreenPass(m_SSGI.GetIndirectDiffuseTexture()->GetNativeHandle(), nullptr, w, h, &clr, false);
+                }
+                c->EndOffscreenPass();
+            });
 
-    // SSGI Denoise
-    auto ssgiDenoised = rg.ImportTexture("SSGI_Denoised", m_DenoiseSSGI.GetOutput());
-    rg.AddPass("SSGI_Denoise", {{ssgiOut, ResourceAccess::Read}}, {{ssgiDenoised, ResourceAccess::Write}},
-        [&, w, h](rhi::IRHICommandList* c) {
-            m_DenoiseSSGI.PreBind(c);
-            m_DenoiseSSGI.SetInputs(m_SSGI.GetIndirectDiffuseTexture(), m_GBuffer->GetDepth(), m_GBuffer->GetNormal());
-            rhi::ClearValue clr{};
-            c->BeginOffscreenPass(m_DenoiseSSGI.GetOutput()->GetNativeHandle(), nullptr, w, h, &clr, false);
-            m_DenoiseSSGI.Render(c);
-            c->EndOffscreenPass();
-        });
+        // SSGI Denoise
+        ssgiDenoised = rg.ImportTexture("SSGI_Denoised", m_DenoiseSSGI.GetOutput());
+        rg.AddPass("SSGI_Denoise", {{ssgiOut, ResourceAccess::Read}}, {{ssgiDenoised, ResourceAccess::Write}},
+            [&, w, h](rhi::IRHICommandList* c) {
+                m_DenoiseSSGI.PreBind(c);
+                m_DenoiseSSGI.SetInputs(m_SSGI.GetIndirectDiffuseTexture(), m_GBuffer->GetDepth(), m_GBuffer->GetNormal());
+                rhi::ClearValue clr{};
+                c->BeginOffscreenPass(m_DenoiseSSGI.GetOutput()->GetNativeHandle(), nullptr, w, h, &clr, false);
+                m_DenoiseSSGI.Render(c);
+                c->EndOffscreenPass();
+            });
+    }
 
     // ── 天空盒喂给 GI_IBL（脏标记触发 IBL 重生成，生成在 Lighting lambda 内联执行）──
     {
@@ -428,6 +436,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             // RT 纹理暂未使用（保持 nullptr）
             in.cameraPos    = float4(camera.position, 0);
             in.iblIntensity = iblIntensity;
+            in.giIntensity  = m_GIConfig.giIntensity;   // M2：间接漫反射总强度（GIConfig 数据驱动）
+            in.aoIntensity  = m_GIConfig.aoIntensity;   // M2：AO 强度
             in.lightCount   = fpc.lightCount;
             in.width = w; in.height = h;
             m_Lighting.Render(c, in);

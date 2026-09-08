@@ -24,6 +24,7 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "PostProcess/SSAO.h"
 #include "GI/GI_SSR.h"
 #include "GI/GI_DDGI.h"
+#include "GI/GIConfig.h"
 #include "PostProcess/Denoiser.h"
 #include "Profiler/ProfilerManager.h"
 #include "Profiler/ProfilerPanel.h"
@@ -70,6 +71,9 @@ public:
     GI_DDGI*             GetDDGI()               { return &m_DDGI; }
     GI_SSGI*             GetSSGI()               { return &m_SSGI; }
     GI_SSR*              GetSSR()                { return &m_SSR; }
+    // GI 配置（M2 数据驱动：档位/通道/强度单一数据源）
+    GIConfig&            GetGIConfig()           { return m_GIConfig; }
+    const GIConfig&      GetGIConfig() const     { return m_GIConfig; }
     ClusteredShading&    GetClusteredShading()   { return m_ClusteredShading; }
     GPUCulling&          GetGPUCulling()         { return m_GPUCulling; }
     SceneRenderer&        GetSceneRenderer()       { return *m_SceneRenderer; }
@@ -165,6 +169,7 @@ private:
     GI_SSGI m_SSGI;
     GI_SSR  m_SSR;
     GI_DDGI m_DDGI;
+    GIConfig m_GIConfig;   // GI 配置（M2：档位/通道/强度单一数据源）
     Denoiser m_DenoiseSSGI;
     Denoiser m_DenoiseSSR;
     SSAO    m_SSAO;

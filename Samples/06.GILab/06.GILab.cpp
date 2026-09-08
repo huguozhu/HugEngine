@@ -11,6 +11,7 @@
 #include "Platform/Window.h"
 #include "RHI/RHI.h"
 #include "Pipeline/DeferredPipeline.h"
+#include "GI/GIConfig.h"
 #include "Pipeline/CameraController.h"
 #include "Pipeline/PhysicalCamera.h"
 #include "Scene/World.h"
@@ -636,7 +637,23 @@ int main() {
             if (ImGui::DragFloat("远裁剪面", &farP, 10.0f, 10.0f, 50000.0f, "%.0f"))
                 camCtrl.GetCamera().farPlane = farP;
 
-            // ── 物理相机参数 ──
+            // ── GI 质量档位（M2 数据驱动：档位/通道/强度）──
+            ImGui::SeparatorText("GI 质量 (M2)");
+            static int giPreset = -1;
+            const char* presetNames[] = {"Low", "Medium", "High", "Ultra"};
+            if (ImGui::Combo("质量档位", &giPreset, presetNames, 4)) {
+                auto& gc = pipeline.GetGIConfig();
+                gc = render::GIConfigFromPreset((render::GIQualityPreset)giPreset);
+                // 应用档位到 GI 子系统开关（帧图按 config 条件注册）
+                pipeline.GetSSGI()->SetEnabled(gc.ShouldRunSSGI());
+                pipeline.GetDDGI()->SetEnabled(gc.ShouldRunDDGI());
+                pipeline.GetSSR()->SetEnabled(gc.ShouldRunSpecular());
+                pipeline.GetSSAO().enabled = gc.ShouldRunAO();
+            }
+            auto& gc2 = pipeline.GetGIConfig();
+            ImGui::SliderFloat("GI 强度", &gc2.giIntensity, 0.0f, 2.0f, "%.2f");
+            ImGui::SliderFloat("AO 强度", &gc2.aoIntensity, 0.0f, 1.5f, "%.2f");
+
             // GI — IBL
             auto* gi = pipeline.GetGI();
             if (gi) {
