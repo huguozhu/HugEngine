@@ -323,16 +323,19 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     render::ResourceHandle ssgiDenoised;
     if (m_GIConfig.ShouldRunSSGI()) {
         auto ssgiOut = rg.ImportTexture("SSGI_Output", m_SSGI.GetIndirectDiffuseTexture());
+        // halfRes：输出纹理可能为半分辨率，viewport 用纹理实际尺寸
+        u32 ssw = m_SSGI.GetIndirectDiffuseTexture()->GetWidth();
+        u32 ssh = m_SSGI.GetIndirectDiffuseTexture()->GetHeight();
         rg.AddPass("SSGI", {}, {{ssgiOut, ResourceAccess::Write}},
-            [&, w, h](rhi::IRHICommandList* c) {
+            [&, ssw, ssh](rhi::IRHICommandList* c) {
                 m_SSGI.PreBind(c);
                 rhi::ClearValue clr{};
                 if (m_SSGI.IsEnabled()) {
                     m_SSGI.SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetAlbedo());
-                    c->BeginOffscreenPass(m_SSGI.GetIndirectDiffuseTexture()->GetNativeHandle(), nullptr, w, h, &clr, false);
+                    c->BeginOffscreenPass(m_SSGI.GetIndirectDiffuseTexture()->GetNativeHandle(), nullptr, ssw, ssh, &clr, false);
                     m_SSGI.Render(c);
                 } else {
-                    c->BeginOffscreenPass(m_SSGI.GetIndirectDiffuseTexture()->GetNativeHandle(), nullptr, w, h, &clr, false);
+                    c->BeginOffscreenPass(m_SSGI.GetIndirectDiffuseTexture()->GetNativeHandle(), nullptr, ssw, ssh, &clr, false);
                 }
                 c->EndOffscreenPass();
             });
