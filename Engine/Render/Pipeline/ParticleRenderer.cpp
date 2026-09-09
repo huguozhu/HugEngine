@@ -17,6 +17,40 @@
 
 namespace he::render {
 
+// ============================================================
+// 粒子系统各阶段描述符集绑定号（与 Particles/*.slang 一致）
+// ============================================================
+// Init
+static constexpr u32 kParticleInitBindDeadList  = 0;
+static constexpr u32 kParticleInitBindCounters  = 1;
+// Emit
+static constexpr u32 kParticleEmitBindDeadList      = 0;
+static constexpr u32 kParticleEmitBindCounters      = 1;
+static constexpr u32 kParticleEmitBindAliveIndices  = 2;
+static constexpr u32 kParticleEmitBindParticleBuffer = 3;
+static constexpr u32 kParticleEmitBindRandomFloats  = 4;
+// Simulate
+static constexpr u32 kParticleSimBindAlivePre       = 0;
+static constexpr u32 kParticleSimBindAlivePost      = 1;
+static constexpr u32 kParticleSimBindCounters       = 2;
+static constexpr u32 kParticleSimBindParticleBuffer = 3;
+static constexpr u32 kParticleSimBindDeadList       = 4;
+static constexpr u32 kParticleSimBindRandomFloats   = 5;
+// Culling
+static constexpr u32 kParticleCullBindAlivePost      = 0;
+static constexpr u32 kParticleCullBindParticleBuffer = 1;
+static constexpr u32 kParticleCullBindSortIndices    = 2;
+static constexpr u32 kParticleCullBindCounters       = 3;
+static constexpr u32 kParticleCullBindDrawArgs       = 4;
+// Sort
+static constexpr u32 kParticleSortBindSortIndices = 0;
+static constexpr u32 kParticleSortBindCounters    = 1;
+// Render
+static constexpr u32 kParticleRenderBindVertices      = 0;
+static constexpr u32 kParticleRenderBindSortIndices   = 1;
+static constexpr u32 kParticleRenderBindParticleBuffer = 2;
+static constexpr u32 kParticleRenderBindSceneDepth    = 3;
+
 using he::Particle;
 using he::ParticleCounters;
 using he::SortInfo;
@@ -359,46 +393,46 @@ u32 ParticleRenderer::RegisterComponent(ParticleComponent* comp, rhi::IRHIDevice
 
     // 创建 DescriptorSets 并绑定 buffers
     cs.initSet = device->AllocateDescriptorSet(m_InitLayout);
-    device->UpdateDescriptorSet(cs.initSet, 0, rhi::DescriptorType::StorageBuffer, cs.deadList.get());
-    device->UpdateDescriptorSet(cs.initSet, 1, rhi::DescriptorType::StorageBuffer, cs.counters.get());
+    device->UpdateDescriptorSet(cs.initSet, kParticleInitBindDeadList, rhi::DescriptorType::StorageBuffer, cs.deadList.get());
+    device->UpdateDescriptorSet(cs.initSet, kParticleInitBindCounters, rhi::DescriptorType::StorageBuffer, cs.counters.get());
 
     cs.emitSet = device->AllocateDescriptorSet(m_EmitLayout);
-    device->UpdateDescriptorSet(cs.emitSet, 0, rhi::DescriptorType::StorageBuffer, cs.deadList.get());
-    device->UpdateDescriptorSet(cs.emitSet, 1, rhi::DescriptorType::StorageBuffer, cs.counters.get());
-    device->UpdateDescriptorSet(cs.emitSet, 2, rhi::DescriptorType::StorageBuffer, cs.alivePre.get());
-    device->UpdateDescriptorSet(cs.emitSet, 3, rhi::DescriptorType::StorageBuffer, cs.particleBuf.get());
-    device->UpdateDescriptorSet(cs.emitSet, 4, rhi::DescriptorType::StorageBuffer, cs.randomFloats.get());
+    device->UpdateDescriptorSet(cs.emitSet, kParticleEmitBindDeadList, rhi::DescriptorType::StorageBuffer, cs.deadList.get());
+    device->UpdateDescriptorSet(cs.emitSet, kParticleEmitBindCounters, rhi::DescriptorType::StorageBuffer, cs.counters.get());
+    device->UpdateDescriptorSet(cs.emitSet, kParticleEmitBindAliveIndices, rhi::DescriptorType::StorageBuffer, cs.alivePre.get());
+    device->UpdateDescriptorSet(cs.emitSet, kParticleEmitBindParticleBuffer, rhi::DescriptorType::StorageBuffer, cs.particleBuf.get());
+    device->UpdateDescriptorSet(cs.emitSet, kParticleEmitBindRandomFloats, rhi::DescriptorType::StorageBuffer, cs.randomFloats.get());
 
     cs.simSet = device->AllocateDescriptorSet(m_SimLayout);
-    device->UpdateDescriptorSet(cs.simSet, 0, rhi::DescriptorType::StorageBuffer, cs.alivePre.get());
-    device->UpdateDescriptorSet(cs.simSet, 1, rhi::DescriptorType::StorageBuffer, cs.alivePost.get());
-    device->UpdateDescriptorSet(cs.simSet, 2, rhi::DescriptorType::StorageBuffer, cs.counters.get());
-    device->UpdateDescriptorSet(cs.simSet, 3, rhi::DescriptorType::StorageBuffer, cs.particleBuf.get());
-    device->UpdateDescriptorSet(cs.simSet, 4, rhi::DescriptorType::StorageBuffer, cs.deadList.get());
-    device->UpdateDescriptorSet(cs.simSet, 5, rhi::DescriptorType::StorageBuffer, cs.randomFloats.get());
+    device->UpdateDescriptorSet(cs.simSet, kParticleSimBindAlivePre, rhi::DescriptorType::StorageBuffer, cs.alivePre.get());
+    device->UpdateDescriptorSet(cs.simSet, kParticleSimBindAlivePost, rhi::DescriptorType::StorageBuffer, cs.alivePost.get());
+    device->UpdateDescriptorSet(cs.simSet, kParticleSimBindCounters, rhi::DescriptorType::StorageBuffer, cs.counters.get());
+    device->UpdateDescriptorSet(cs.simSet, kParticleSimBindParticleBuffer, rhi::DescriptorType::StorageBuffer, cs.particleBuf.get());
+    device->UpdateDescriptorSet(cs.simSet, kParticleSimBindDeadList, rhi::DescriptorType::StorageBuffer, cs.deadList.get());
+    device->UpdateDescriptorSet(cs.simSet, kParticleSimBindRandomFloats, rhi::DescriptorType::StorageBuffer, cs.randomFloats.get());
 
     cs.cullingSet = device->AllocateDescriptorSet(m_CullingLayout);
-    device->UpdateDescriptorSet(cs.cullingSet, 0, rhi::DescriptorType::StorageBuffer, cs.alivePost.get());
-    device->UpdateDescriptorSet(cs.cullingSet, 1, rhi::DescriptorType::StorageBuffer, cs.particleBuf.get());
-    device->UpdateDescriptorSet(cs.cullingSet, 2, rhi::DescriptorType::StorageBuffer, cs.sortIndices.get());
-    device->UpdateDescriptorSet(cs.cullingSet, 3, rhi::DescriptorType::StorageBuffer, cs.counters.get());
-    device->UpdateDescriptorSet(cs.cullingSet, 4, rhi::DescriptorType::StorageBuffer, cs.drawIndirectArgs.get());
+    device->UpdateDescriptorSet(cs.cullingSet, kParticleCullBindAlivePost, rhi::DescriptorType::StorageBuffer, cs.alivePost.get());
+    device->UpdateDescriptorSet(cs.cullingSet, kParticleCullBindParticleBuffer, rhi::DescriptorType::StorageBuffer, cs.particleBuf.get());
+    device->UpdateDescriptorSet(cs.cullingSet, kParticleCullBindSortIndices, rhi::DescriptorType::StorageBuffer, cs.sortIndices.get());
+    device->UpdateDescriptorSet(cs.cullingSet, kParticleCullBindCounters, rhi::DescriptorType::StorageBuffer, cs.counters.get());
+    device->UpdateDescriptorSet(cs.cullingSet, kParticleCullBindDrawArgs, rhi::DescriptorType::StorageBuffer, cs.drawIndirectArgs.get());
 
     // Sort descriptor set
     cs.sortSet = device->AllocateDescriptorSet(m_SortLayout);
-    device->UpdateDescriptorSet(cs.sortSet, 0, rhi::DescriptorType::StorageBuffer, cs.sortIndices.get());
-    device->UpdateDescriptorSet(cs.sortSet, 1, rhi::DescriptorType::StorageBuffer, cs.counters.get());
+    device->UpdateDescriptorSet(cs.sortSet, kParticleSortBindSortIndices, rhi::DescriptorType::StorageBuffer, cs.sortIndices.get());
+    device->UpdateDescriptorSet(cs.sortSet, kParticleSortBindCounters, rhi::DescriptorType::StorageBuffer, cs.counters.get());
 
     // Render descriptor set
     cs.renderSet = device->AllocateDescriptorSet(m_RenderLayout);
-    device->UpdateDescriptorSet(cs.renderSet, 0, rhi::DescriptorType::StorageBuffer, cs.billboardVB.get());
-    device->UpdateDescriptorSet(cs.renderSet, 1, rhi::DescriptorType::StorageBuffer, cs.sortIndices.get());
-    device->UpdateDescriptorSet(cs.renderSet, 2, rhi::DescriptorType::StorageBuffer, cs.particleBuf.get());
+    device->UpdateDescriptorSet(cs.renderSet, kParticleRenderBindVertices, rhi::DescriptorType::StorageBuffer, cs.billboardVB.get());
+    device->UpdateDescriptorSet(cs.renderSet, kParticleRenderBindSortIndices, rhi::DescriptorType::StorageBuffer, cs.sortIndices.get());
+    device->UpdateDescriptorSet(cs.renderSet, kParticleRenderBindParticleBuffer, rhi::DescriptorType::StorageBuffer, cs.particleBuf.get());
     // 场景深度纹理（软粒子），由 DeferredPipeline 在 Init 时通过 SetSceneDepth 设置
     cs.sceneDepthTex = m_SceneDepthTex;
     cs.sceneDepthSampler = m_SceneDepthSampler;
     if (cs.sceneDepthTex && cs.sceneDepthSampler) {
-        device->UpdateDescriptorSet(cs.renderSet, 3, rhi::DescriptorType::CombinedImageSampler,
+        device->UpdateDescriptorSet(cs.renderSet, kParticleRenderBindSceneDepth, rhi::DescriptorType::CombinedImageSampler,
                                     cs.sceneDepthTex, cs.sceneDepthSampler);
     }
     u32 id = (u32)m_Components.size();
@@ -799,7 +833,7 @@ void ParticleRenderer::SetSceneDepth(rhi::IRHITexture* depthTexture, rhi::IRHISa
         cs.sceneDepthTex = depthTexture;
         cs.sceneDepthSampler = depthSampler;
         if (cs.renderSet != rhi::kInvalidSet && depthTexture && depthSampler) {
-            m_Device->UpdateDescriptorSet(cs.renderSet, 3,
+            m_Device->UpdateDescriptorSet(cs.renderSet, kParticleRenderBindSceneDepth,
                 rhi::DescriptorType::CombinedImageSampler,
                 depthTexture, depthSampler);
         }
