@@ -21,6 +21,39 @@
 namespace he::render {
 
 // ============================================================
+// ReSTIR 三个 pass 的描述符集绑定号（与 ReSTIR_*.comp.slang 一致）
+// ============================================================
+// Init
+static constexpr u32 kReSTIRInitBindDepth          = 0;   // ptDepth
+static constexpr u32 kReSTIRInitBindNormal         = 1;   // ptNormal
+static constexpr u32 kReSTIRInitBindLights         = 2;   // 光源 SSBO
+static constexpr u32 kReSTIRInitBindInitial        = 3;   // InitialReservoir
+static constexpr u32 kReSTIRInitBindAlbedoMetallic = 4;   // albedo + metallic
+static constexpr u32 kReSTIRInitBindBlueNoise      = 5;   // STBN 蓝噪声
+// Temporal
+static constexpr u32 kReSTIRTemporalBindVelocity       = 0;   // 屏幕速度
+static constexpr u32 kReSTIRTemporalBindDepth          = 1;   // 当前深度
+static constexpr u32 kReSTIRTemporalBindNormal         = 2;   // 当前法线
+static constexpr u32 kReSTIRTemporalBindInitial        = 3;   // InitialReservoir
+static constexpr u32 kReSTIRTemporalBindHistory        = 4;   // 历史蓄水池
+static constexpr u32 kReSTIRTemporalBindHistDepth      = 5;   // 历史深度
+static constexpr u32 kReSTIRTemporalBindHistNormal     = 6;   // 历史法线
+static constexpr u32 kReSTIRTemporalBindTemporal       = 7;   // TemporalReservoir 输出
+static constexpr u32 kReSTIRTemporalBindCurDepth       = 8;   // 下一帧历史深度槽
+static constexpr u32 kReSTIRTemporalBindCurNormal      = 9;   // 下一帧历史法线槽
+static constexpr u32 kReSTIRTemporalBindLights         = 10;  // 光源 SSBO
+static constexpr u32 kReSTIRTemporalBindAlbedoMetallic = 11;  // albedo + metallic
+static constexpr u32 kReSTIRTemporalBindBlueNoise      = 12;  // STBN 蓝噪声
+// Spatial
+static constexpr u32 kReSTIRSpatialBindDepth          = 0;   // 当前深度
+static constexpr u32 kReSTIRSpatialBindNormal         = 1;   // 当前法线
+static constexpr u32 kReSTIRSpatialBindTemporal       = 2;   // TemporalReservoir
+static constexpr u32 kReSTIRSpatialBindFinal          = 3;   // FinalReservoir 输出
+static constexpr u32 kReSTIRSpatialBindLights         = 4;   // 光源 SSBO
+static constexpr u32 kReSTIRSpatialBindAlbedoMetallic = 5;   // albedo + metallic
+static constexpr u32 kReSTIRSpatialBindBlueNoise      = 6;   // STBN 蓝噪声
+
+// ============================================================
 // CreatePipeline — 创建 compute PSO + set0 布局 + 描述符集
 // ============================================================
 bool ReSTIRPass::CreatePipeline(ComputePipe& pipe,
@@ -211,18 +244,18 @@ void ReSTIRPass::Execute(rhi::IRHICommandList* cmd, const ReSTIRDispatchContext&
 
     // ── Pass 1: Init ──
     {
-        m_Device->UpdateDescriptorSet(m_Init.set, 0,
+        m_Device->UpdateDescriptorSet(m_Init.set, kReSTIRInitBindDepth,
             rhi::DescriptorType::SampledImage, ctx.ptDepth, nullptr);
-        m_Device->UpdateDescriptorSet(m_Init.set, 1,
+        m_Device->UpdateDescriptorSet(m_Init.set, kReSTIRInitBindNormal,
             rhi::DescriptorType::SampledImage, ctx.ptNormal, nullptr);
-        m_Device->UpdateDescriptorSet(m_Init.set, 2,
+        m_Device->UpdateDescriptorSet(m_Init.set, kReSTIRInitBindLights,
             rhi::DescriptorType::StorageBuffer, ctx.lightBuffer);
-        m_Device->UpdateDescriptorSet(m_Init.set, 3,
+        m_Device->UpdateDescriptorSet(m_Init.set, kReSTIRInitBindInitial,
             rhi::DescriptorType::StorageBuffer, m_Initial.get());
-        m_Device->UpdateDescriptorSet(m_Init.set, 4,
+        m_Device->UpdateDescriptorSet(m_Init.set, kReSTIRInitBindAlbedoMetallic,
             rhi::DescriptorType::SampledImage, ctx.ptAlbedo, nullptr);
         if (ctx.blueNoise)
-            m_Device->UpdateDescriptorSet(m_Init.set, 5,
+            m_Device->UpdateDescriptorSet(m_Init.set, kReSTIRInitBindBlueNoise,
                 rhi::DescriptorType::SampledImage, ctx.blueNoise, nullptr);
         cmd->SetPipeline(m_Init.pso.get());
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Init.set);
@@ -234,32 +267,32 @@ void ReSTIRPass::Execute(rhi::IRHICommandList* cmd, const ReSTIRDispatchContext&
 
     // ── Pass 2: Temporal（读历史槽，写 TemporalReservoir[writeSlot] + 下一帧历史）──
     {
-        m_Device->UpdateDescriptorSet(m_Temporal.set, 0,
+        m_Device->UpdateDescriptorSet(m_Temporal.set, kReSTIRTemporalBindVelocity,
             rhi::DescriptorType::SampledImage, ctx.ptVelocity, nullptr);
-        m_Device->UpdateDescriptorSet(m_Temporal.set, 1,
+        m_Device->UpdateDescriptorSet(m_Temporal.set, kReSTIRTemporalBindDepth,
             rhi::DescriptorType::SampledImage, ctx.ptDepth, nullptr);
-        m_Device->UpdateDescriptorSet(m_Temporal.set, 2,
+        m_Device->UpdateDescriptorSet(m_Temporal.set, kReSTIRTemporalBindNormal,
             rhi::DescriptorType::SampledImage, ctx.ptNormal, nullptr);
-        m_Device->UpdateDescriptorSet(m_Temporal.set, 3,
+        m_Device->UpdateDescriptorSet(m_Temporal.set, kReSTIRTemporalBindInitial,
             rhi::DescriptorType::StorageBuffer, m_Initial.get());
-        m_Device->UpdateDescriptorSet(m_Temporal.set, 4,
+        m_Device->UpdateDescriptorSet(m_Temporal.set, kReSTIRTemporalBindHistory,
             rhi::DescriptorType::StorageBuffer, m_TemporalBuf[readSlot].get());
-        m_Device->UpdateDescriptorSet(m_Temporal.set, 5,
+        m_Device->UpdateDescriptorSet(m_Temporal.set, kReSTIRTemporalBindHistDepth,
             rhi::DescriptorType::SampledImage, m_HistDepth[readSlot].get(), nullptr);
-        m_Device->UpdateDescriptorSet(m_Temporal.set, 6,
+        m_Device->UpdateDescriptorSet(m_Temporal.set, kReSTIRTemporalBindHistNormal,
             rhi::DescriptorType::SampledImage, m_HistNormal[readSlot].get(), nullptr);
-        m_Device->UpdateDescriptorSet(m_Temporal.set, 7,
+        m_Device->UpdateDescriptorSet(m_Temporal.set, kReSTIRTemporalBindTemporal,
             rhi::DescriptorType::StorageBuffer, m_TemporalBuf[writeSlot].get());
-        m_Device->UpdateDescriptorSetWithImageView(m_Temporal.set, 8,
+        m_Device->UpdateDescriptorSetWithImageView(m_Temporal.set, kReSTIRTemporalBindCurDepth,
             rhi::DescriptorType::StorageImage, m_HistDepth[writeSlot]->GetNativeHandle());
-        m_Device->UpdateDescriptorSetWithImageView(m_Temporal.set, 9,
+        m_Device->UpdateDescriptorSetWithImageView(m_Temporal.set, kReSTIRTemporalBindCurNormal,
             rhi::DescriptorType::StorageImage, m_HistNormal[writeSlot]->GetNativeHandle());
-        m_Device->UpdateDescriptorSet(m_Temporal.set, 10,
+        m_Device->UpdateDescriptorSet(m_Temporal.set, kReSTIRTemporalBindLights,
             rhi::DescriptorType::StorageBuffer, ctx.lightBuffer);
-        m_Device->UpdateDescriptorSet(m_Temporal.set, 11,
+        m_Device->UpdateDescriptorSet(m_Temporal.set, kReSTIRTemporalBindAlbedoMetallic,
             rhi::DescriptorType::SampledImage, ctx.ptAlbedo, nullptr);
         if (ctx.blueNoise)
-            m_Device->UpdateDescriptorSet(m_Temporal.set, 12,
+            m_Device->UpdateDescriptorSet(m_Temporal.set, kReSTIRTemporalBindBlueNoise,
                 rhi::DescriptorType::SampledImage, ctx.blueNoise, nullptr);
         cmd->SetPipeline(m_Temporal.pso.get());
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Temporal.set);
@@ -271,20 +304,20 @@ void ReSTIRPass::Execute(rhi::IRHICommandList* cmd, const ReSTIRDispatchContext&
 
     // ── Pass 3: Spatial（读 TemporalReservoir[writeSlot]，写 FinalReservoir）──
     {
-        m_Device->UpdateDescriptorSet(m_Spatial.set, 0,
+        m_Device->UpdateDescriptorSet(m_Spatial.set, kReSTIRSpatialBindDepth,
             rhi::DescriptorType::SampledImage, ctx.ptDepth, nullptr);
-        m_Device->UpdateDescriptorSet(m_Spatial.set, 1,
+        m_Device->UpdateDescriptorSet(m_Spatial.set, kReSTIRSpatialBindNormal,
             rhi::DescriptorType::SampledImage, ctx.ptNormal, nullptr);
-        m_Device->UpdateDescriptorSet(m_Spatial.set, 2,
+        m_Device->UpdateDescriptorSet(m_Spatial.set, kReSTIRSpatialBindTemporal,
             rhi::DescriptorType::StorageBuffer, m_TemporalBuf[writeSlot].get());
-        m_Device->UpdateDescriptorSet(m_Spatial.set, 3,
+        m_Device->UpdateDescriptorSet(m_Spatial.set, kReSTIRSpatialBindFinal,
             rhi::DescriptorType::StorageBuffer, m_Final.get());
-        m_Device->UpdateDescriptorSet(m_Spatial.set, 4,
+        m_Device->UpdateDescriptorSet(m_Spatial.set, kReSTIRSpatialBindLights,
             rhi::DescriptorType::StorageBuffer, ctx.lightBuffer);
-        m_Device->UpdateDescriptorSet(m_Spatial.set, 5,
+        m_Device->UpdateDescriptorSet(m_Spatial.set, kReSTIRSpatialBindAlbedoMetallic,
             rhi::DescriptorType::SampledImage, ctx.ptAlbedo, nullptr);
         if (ctx.blueNoise)
-            m_Device->UpdateDescriptorSet(m_Spatial.set, 6,
+            m_Device->UpdateDescriptorSet(m_Spatial.set, kReSTIRSpatialBindBlueNoise,
                 rhi::DescriptorType::SampledImage, ctx.blueNoise, nullptr);
         cmd->SetPipeline(m_Spatial.pso.get());
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Spatial.set);
