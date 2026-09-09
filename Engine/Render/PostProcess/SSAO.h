@@ -22,6 +22,7 @@ public:
     float bias        = 0.025f; // 深度偏移
     float intensity   = 1.0f;   // AO 强度
     int   sampleCount = 16;     // 每像素采样数
+    bool  halfRes     = false;  // 半分辨率计算（性能优先，省约 3/4 像素着色）
 
     bool Initialize(rhi::IRHIDevice* device, u32 width, u32 height);
     void Shutdown();
@@ -43,6 +44,9 @@ private:
     void CreateBlurTexture(u32 w, u32 h);
     void GenerateKernel();
     void GenerateNoise(u32 size);
+    // 半分辨率尺寸（halfRes 时 AO/Blur 纹理降半）
+    u32 halfResW(u32 w) const { return halfRes ? std::max(w / 2, 1u) : w; }
+    u32 halfResH(u32 h) const { return halfRes ? std::max(h / 2, 1u) : h; }
 
     rhi::IRHIDevice* m_Device = nullptr;
     u32 m_Width = 0, m_Height = 0;

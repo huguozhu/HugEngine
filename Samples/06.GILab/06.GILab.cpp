@@ -668,8 +668,10 @@ int main() {
                 auto ssrSettings = pipeline.GetSSR()->GetSettings();
                 ssrSettings.halfRes = gc.halfRes;
                 pipeline.GetSSR()->SetSettings(ssrSettings);
+                pipeline.GetSSAO().halfRes = gc.halfRes;
                 pipeline.GetSSGI()->OnResize(config.windowWidth, config.windowHeight);
                 pipeline.GetSSR()->OnResize(config.windowWidth, config.windowHeight);
+                pipeline.GetSSAO().OnResize(config.windowWidth, config.windowHeight);
             }
             auto& gc2 = pipeline.GetGIConfig();
             ImGui::SliderFloat("GI 强度", &gc2.giIntensity, 0.0f, 2.0f, "%.2f");

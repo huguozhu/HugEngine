@@ -153,8 +153,8 @@ bool SSAO::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     ptSamp.addressU=ptSamp.addressV=rhi::AddressMode::ClampToEdge;
     m_PointSampler = device->CreateSampler(ptSamp);
 
-    CreateAOTexture(width, height);
-    CreateBlurTexture(width, height);
+    CreateAOTexture(halfResW(width), halfResH(height));
+    CreateBlurTexture(halfResW(width), halfResH(height));
 
     m_Ready = true;
     HE_CORE_INFO("SSAO initialized ({}×{})", width, height);
@@ -176,7 +176,7 @@ void SSAO::Shutdown() {
     m_Ready = false;
 }
 
-void SSAO::OnResize(u32 w, u32 h) { m_Width=w; m_Height=h; CreateAOTexture(w,h); CreateBlurTexture(w,h); }
+void SSAO::OnResize(u32 w, u32 h) { m_Width=w; m_Height=h; CreateAOTexture(halfResW(w), halfResH(h)); CreateBlurTexture(halfResW(w), halfResH(h)); }
 
 void SSAO::SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal) {
     m_DepthTex = depth;
@@ -206,11 +206,13 @@ void SSAO::Render(rhi::IRHICommandList* cmd) {
         m_Blur_PSO = m_Device->CreatePipelineState(m_Blur_PsoDesc);
     }
 
-    // --- SSAO Pass ---
+    // --- SSAO Pass（视口用 AO 纹理实际尺寸，halfRes 时与渲染目标一致）---
     cmd->SetPipeline(m_SSAO_PSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_SSAOSet);
-    cmd->SetViewport({0,(float)m_Height,(float)m_Width,-(float)m_Height,0,1});
-    cmd->SetScissor({0,0,m_Width,m_Height});
+    u32 aoW = m_AOTexture->GetWidth();
+    u32 aoH = m_AOTexture->GetHeight();
+    cmd->SetViewport({0,(float)aoH,(float)aoW,-(float)aoH,0,1});
+    cmd->SetScissor({0,0,aoW,aoH});
 
     // 上传 SSAO 参数到 Uniform Buffer（kernel[64] + params + proj）
     // 对齐 shader 中 SSAOParams cbuffer 布局
@@ -243,7 +245,7 @@ void SSAO::Render(rhi::IRHICommandList* cmd) {
     m_Device->UpdateDescriptorSet(m_BlurSet,0,rhi::DescriptorType::CombinedImageSampler,m_AOTexture.get(),m_AOSampler.get());
 
     struct { float2 ts; float _pad[2]; } bpc;
-    bpc.ts = float2(1.0f/m_Width, 1.0f/m_Height);
+    bpc.ts = float2(1.0f/float(aoW), 1.0f/float(aoH));   // 模糊半径按 AO 纹理实际尺寸
     cmd->SetPushConstants(0, sizeof(bpc), &bpc);
     cmd->Draw(3);
 }

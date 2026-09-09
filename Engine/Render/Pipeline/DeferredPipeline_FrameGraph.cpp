@@ -282,12 +282,15 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     // SSAO Pass（仅当 GIConfig 选中 AO 才注册）
     if (m_GIConfig.ShouldRunAO()) {
         auto ssaoOut = rg.ImportTexture("SSAO_Output", m_SSAO.GetAOTexture());
+        // halfRes：AO 纹理可能为半分辨率，pass 尺寸用纹理实际尺寸
+        u32 aoW = m_SSAO.GetAOTexture()->GetWidth();
+        u32 aoH = m_SSAO.GetAOTexture()->GetHeight();
         rg.AddPass("SSAO", {}, {{ssaoOut, ResourceAccess::Write}},
-            [&, w, h](rhi::IRHICommandList* c) {
+            [&, aoW, aoH](rhi::IRHICommandList* c) {
                 m_SSAO.PreBind(c);
                 rhi::ClearValue aoClear;
                 aoClear.color[0]=aoClear.color[1]=aoClear.color[2]=aoClear.color[3]=1.0f;
-                c->BeginOffscreenPass(m_SSAO.GetAOTexture()->GetNativeHandle(), nullptr, w, h, &aoClear, false);
+                c->BeginOffscreenPass(m_SSAO.GetAOTexture()->GetNativeHandle(), nullptr, aoW, aoH, &aoClear, false);
                 if (m_SSAO.enabled) {
                     m_SSAO.SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal());
                     m_SSAO.Render(c);
