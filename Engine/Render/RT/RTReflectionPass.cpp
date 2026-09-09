@@ -20,6 +20,15 @@
 
 namespace he::render {
 
+// RT 鍙嶅皠鎻忚堪绗﹂泦缁戝畾鍙穈r
+static constexpr u32 kRTReflBindTLAS = 0;
+static constexpr u32 kRTReflBindOutput = 1;
+static constexpr u32 kRTReflBindDepth = 2;
+static constexpr u32 kRTReflBindNormal = 3;
+static constexpr u32 kRTReflBindMaterialTex = 4;
+static constexpr u32 kRTReflBindLights = 5;
+static constexpr u32 kRTReflBindNormalTex = 6;
+
 bool RTReflectionPass::Initialize(rhi::IRHIDevice* device, u32 fullWidth, u32 fullHeight,
                                   bool halfRes) {
     m_FullWidth  = fullWidth;
@@ -32,13 +41,13 @@ bool RTReflectionPass::Initialize(rhi::IRHIDevice* device, u32 fullWidth, u32 fu
     // b0=TLAS(RG), b1=Output(RG), b2=GBDepth(RG), b3=GBNormal(RG),
     // b4=材质纹理(CH), b5=光源UB(CH), b6=三角形法线纹理(CH)
     std::vector<rhi::DescriptorSetLayoutBinding> bindings = {
-        {0, rhi::DescriptorType::AccelerationStructure, 1, rhi::kStageMaskRayGen},
+        {kRTReflBindTLAS, rhi::DescriptorType::AccelerationStructure, 1, rhi::kStageMaskRayGen},
         {1, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskRayGen},
-        {2, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskRayGen},
-        {3, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskRayGen},
-        {4, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskClosestHit},  // 场景材质纹理
-        {5, rhi::DescriptorType::UniformBuffer, 1, rhi::kStageMaskClosestHit}, // 命中点光源
-        {6, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskClosestHit},  // 三角形顶点法线纹理
+        {kRTReflBindDepth, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskRayGen},
+        {kRTReflBindNormal, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskRayGen},
+        {kRTReflBindMaterialTex, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskClosestHit},  // 场景材质纹理
+        {kRTReflBindLights, rhi::DescriptorType::UniformBuffer, 1, rhi::kStageMaskClosestHit}, // 命中点光源
+        {kRTReflBindNormalTex, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskClosestHit},  // 三角形顶点法线纹理
     };
 
     // ── push constant 范围（RayGen 深度重建 + ClosestHit 光照计数）──
@@ -121,24 +130,24 @@ void RTReflectionPass::Execute(rhi::IRHICommandList* cmd,
     PrepareOutputUAV(cmd);
 
     // ── 更新 set0 描述符 ──
-    m_Device->UpdateDescriptorSet(m_RayGenSet, 0,
+    m_Device->UpdateDescriptorSet(m_RayGenSet, kRTReflBindTLAS,
         rhi::DescriptorType::AccelerationStructure, tlas);
     m_Device->UpdateDescriptorSetWithImageView(m_RayGenSet, 1,
         rhi::DescriptorType::StorageImage, m_Output->GetNativeHandle());
     if (ctx.gbDepth)
-        m_Device->UpdateDescriptorSet(m_RayGenSet, 2,
+        m_Device->UpdateDescriptorSet(m_RayGenSet, kRTReflBindDepth,
             rhi::DescriptorType::SampledImage, ctx.gbDepth, nullptr);
     if (ctx.gbNormal)
-        m_Device->UpdateDescriptorSet(m_RayGenSet, 3,
+        m_Device->UpdateDescriptorSet(m_RayGenSet, kRTReflBindNormal,
             rhi::DescriptorType::SampledImage, ctx.gbNormal, nullptr);
     if (ctx.sceneMaterialTex)
-        m_Device->UpdateDescriptorSet(m_RayGenSet, 4,
+        m_Device->UpdateDescriptorSet(m_RayGenSet, kRTReflBindMaterialTex,
             rhi::DescriptorType::SampledImage, ctx.sceneMaterialTex, nullptr);
     if (m_LightUB)
-        m_Device->UpdateDescriptorSet(m_RayGenSet, 5,
+        m_Device->UpdateDescriptorSet(m_RayGenSet, kRTReflBindLights,
             rhi::DescriptorType::UniformBuffer, m_LightUB.get());
     if (ctx.sceneTriangleNormals)
-        m_Device->UpdateDescriptorSet(m_RayGenSet, 6,
+        m_Device->UpdateDescriptorSet(m_RayGenSet, kRTReflBindNormalTex,
             rhi::DescriptorType::SampledImage, ctx.sceneTriangleNormals, nullptr);
 
     // ── 填充 ClosestHit 光源数据 ──

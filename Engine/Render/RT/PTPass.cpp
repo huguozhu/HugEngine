@@ -19,6 +19,19 @@
 
 namespace he::render {
 
+// PT 鎻忚堪绗﹂泦缁戝畾鍙穈r
+static constexpr u32 kPTBindTLAS = 0;
+static constexpr u32 kPTBindOutput1 = 1;
+static constexpr u32 kPTBindOutput2 = 2;
+static constexpr u32 kPTBindOutput3 = 3;
+static constexpr u32 kPTBindOutput4 = 4;
+static constexpr u32 kPTBindLights = 5;
+static constexpr u32 kPTBindMaterialTex = 6;
+static constexpr u32 kPTBindNormalTex = 7;
+static constexpr u32 kPTBindReservoir = 8;
+static constexpr u32 kPTBindAlbedoMetallic = 9;
+static constexpr u32 kPTBindSTBN = 10;
+
 // ============================================================
 // Initialize — 创建 set0 + 效果管线 + 5 张输出纹理
 // ============================================================
@@ -32,17 +45,17 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     // b6=材质纹理(CH), b7=三角形法线(CH), b8=FinalReservoir SSBO(RG), b9=albedoMetallic UAV(RG),
     // b10=STBN 3D 纹理(RG, 无采样器 Load 采样)
     std::vector<rhi::DescriptorSetLayoutBinding> bindings = {
-        {0, rhi::DescriptorType::AccelerationStructure, 1, rhi::kStageMaskRayGen},
-        {1, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskRayGen},
-        {2, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskRayGen},
-        {3, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskRayGen},
-        {4, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskRayGen},
-        {5, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskRayGen},      // GPULight[]
-        {6, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskClosestHit},   // 场景材质纹理
-        {7, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskClosestHit},   // 三角形法线纹理
-        {8, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskRayGen},      // FinalReservoir
-        {9, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskRayGen},       // 第 5 输出 UAV: albedoMetallic
-        {10, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskRayGen},      // STBN 3D 蓝噪声（Load 采样）
+        {kPTBindTLAS, rhi::DescriptorType::AccelerationStructure, 1, rhi::kStageMaskRayGen},
+        {kPTBindOutput1, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskRayGen},
+        {kPTBindOutput2, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskRayGen},
+        {kPTBindOutput3, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskRayGen},
+        {kPTBindOutput4, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskRayGen},
+        {kPTBindLights, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskRayGen},      // GPULight[]
+        {kPTBindMaterialTex, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskClosestHit},   // 场景材质纹理
+        {kPTBindNormalTex, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskClosestHit},   // 三角形法线纹理
+        {kPTBindReservoir, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskRayGen},      // FinalReservoir
+        {kPTBindAlbedoMetallic, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskRayGen},       // 第 5 输出 UAV: albedoMetallic
+        {kPTBindSTBN, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskRayGen},      // STBN 3D 蓝噪声（Load 采样）
     };
 
     // ── push constant 范围（RayGen + ClosestHit + Miss 共用，176B）──
@@ -199,7 +212,7 @@ void PTPass::Execute(rhi::IRHICommandList* cmd, rhi::IRHIAccelerationStructure* 
     PrepareOutputUAV(cmd);
 
     // ── 更新 set0 描述符 ──
-    m_Device->UpdateDescriptorSet(m_Set, 0,
+    m_Device->UpdateDescriptorSet(m_Set, kPTBindTLAS,
         rhi::DescriptorType::AccelerationStructure, tlas);
     m_Device->UpdateDescriptorSetWithImageView(m_Set, 1,
         rhi::DescriptorType::StorageImage, m_HDR->GetNativeHandle());
@@ -212,19 +225,19 @@ void PTPass::Execute(rhi::IRHICommandList* cmd, rhi::IRHIAccelerationStructure* 
     m_Device->UpdateDescriptorSetWithImageView(m_Set, 9,
         rhi::DescriptorType::StorageImage, m_AlbedoMetallic->GetNativeHandle());
     if (ctx.lightBuffer)
-        m_Device->UpdateDescriptorSet(m_Set, 5,
+        m_Device->UpdateDescriptorSet(m_Set, kPTBindLights,
             rhi::DescriptorType::StorageBuffer, ctx.lightBuffer);
     if (ctx.sceneMaterialTex)
-        m_Device->UpdateDescriptorSet(m_Set, 6,
+        m_Device->UpdateDescriptorSet(m_Set, kPTBindMaterialTex,
             rhi::DescriptorType::SampledImage, ctx.sceneMaterialTex, nullptr);
     if (ctx.sceneTriangleNormals)
-        m_Device->UpdateDescriptorSet(m_Set, 7,
+        m_Device->UpdateDescriptorSet(m_Set, kPTBindNormalTex,
             rhi::DescriptorType::SampledImage, ctx.sceneTriangleNormals, nullptr);
     if (ctx.finalReservoir)
-        m_Device->UpdateDescriptorSet(m_Set, 8,
+        m_Device->UpdateDescriptorSet(m_Set, kPTBindReservoir,
             rhi::DescriptorType::StorageBuffer, ctx.finalReservoir);
     if (ctx.blueNoise)
-        m_Device->UpdateDescriptorSet(m_Set, 10,
+        m_Device->UpdateDescriptorSet(m_Set, kPTBindSTBN,
             rhi::DescriptorType::SampledImage, ctx.blueNoise, nullptr);
 
     // ── 设置 push constants（PTPushConstant，176B）──

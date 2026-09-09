@@ -20,6 +20,17 @@
 
 namespace he::render {
 
+// RT GI 鎻忚堪绗﹂泦缁戝畾鍙穈r
+static constexpr u32 kRTGIBindTLAS = 0;
+static constexpr u32 kRTGIBindOutput = 1;
+static constexpr u32 kRTGIBindDepth = 2;
+static constexpr u32 kRTGIBindNormal = 3;
+static constexpr u32 kRTGIBindMaterialTex = 4;
+static constexpr u32 kRTGIBindLights = 5;
+static constexpr u32 kRTGIBindNormalTex = 6;
+static constexpr u32 kRTGIBindDDGIProbes = 7;
+static constexpr u32 kRTGIBindDDGIGrid = 8;
+
 bool RTGIPass::Initialize(rhi::IRHIDevice* device, u32 fullWidth, u32 fullHeight,
                           bool quarterRes) {
     m_FullWidth  = fullWidth;
@@ -33,15 +44,15 @@ bool RTGIPass::Initialize(rhi::IRHIDevice* device, u32 fullWidth, u32 fullHeight
     // b4=材质纹理(CH), b5=光源UB(CH), b6=三角形法线纹理(CH),
     // b7=DDGI 探针 SSBO(RG, miss 回退低频间接光)
     std::vector<rhi::DescriptorSetLayoutBinding> bindings = {
-        {0, rhi::DescriptorType::AccelerationStructure, 1, rhi::kStageMaskRayGen},
+        {kRTGIBindTLAS, rhi::DescriptorType::AccelerationStructure, 1, rhi::kStageMaskRayGen},
         {1, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskRayGen},
-        {2, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskRayGen},
-        {3, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskRayGen},
-        {4, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskClosestHit},  // 场景材质纹理
-        {5, rhi::DescriptorType::UniformBuffer, 1, rhi::kStageMaskClosestHit}, // 命中点光源
-        {6, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskClosestHit},  // 三角形顶点法线纹理
-        {7, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskRayGen},     // DDGI 探针
-        {8, rhi::DescriptorType::UniformBuffer, 1, rhi::kStageMaskRayGen},     // DDGI 探针网格参数
+        {kRTGIBindDepth, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskRayGen},
+        {kRTGIBindNormal, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskRayGen},
+        {kRTGIBindMaterialTex, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskClosestHit},  // 场景材质纹理
+        {kRTGIBindLights, rhi::DescriptorType::UniformBuffer, 1, rhi::kStageMaskClosestHit}, // 命中点光源
+        {kRTGIBindNormalTex, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskClosestHit},  // 三角形顶点法线纹理
+        {kRTGIBindDDGIProbes, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskRayGen},     // DDGI 探针
+        {kRTGIBindDDGIGrid, rhi::DescriptorType::UniformBuffer, 1, rhi::kStageMaskRayGen},     // DDGI 探针网格参数
     };
 
     // ── push constant 范围（RayGen 深度重建 + ClosestHit 光照计数）──
@@ -124,30 +135,30 @@ void RTGIPass::Execute(rhi::IRHICommandList* cmd,
     PrepareOutputUAV(cmd);
 
     // ── 更新 set0 描述符 ──
-    m_Device->UpdateDescriptorSet(m_RayGenSet, 0,
+    m_Device->UpdateDescriptorSet(m_RayGenSet, kRTGIBindTLAS,
         rhi::DescriptorType::AccelerationStructure, tlas);
     m_Device->UpdateDescriptorSetWithImageView(m_RayGenSet, 1,
         rhi::DescriptorType::StorageImage, m_Output->GetNativeHandle());
     if (ctx.gbDepth)
-        m_Device->UpdateDescriptorSet(m_RayGenSet, 2,
+        m_Device->UpdateDescriptorSet(m_RayGenSet, kRTGIBindDepth,
             rhi::DescriptorType::SampledImage, ctx.gbDepth, nullptr);
     if (ctx.gbNormal)
-        m_Device->UpdateDescriptorSet(m_RayGenSet, 3,
+        m_Device->UpdateDescriptorSet(m_RayGenSet, kRTGIBindNormal,
             rhi::DescriptorType::SampledImage, ctx.gbNormal, nullptr);
     if (ctx.sceneMaterialTex)
-        m_Device->UpdateDescriptorSet(m_RayGenSet, 4,
+        m_Device->UpdateDescriptorSet(m_RayGenSet, kRTGIBindMaterialTex,
             rhi::DescriptorType::SampledImage, ctx.sceneMaterialTex, nullptr);
     if (m_LightUB)
-        m_Device->UpdateDescriptorSet(m_RayGenSet, 5,
+        m_Device->UpdateDescriptorSet(m_RayGenSet, kRTGIBindLights,
             rhi::DescriptorType::UniformBuffer, m_LightUB.get());
     if (ctx.sceneTriangleNormals)
-        m_Device->UpdateDescriptorSet(m_RayGenSet, 6,
+        m_Device->UpdateDescriptorSet(m_RayGenSet, kRTGIBindNormalTex,
             rhi::DescriptorType::SampledImage, ctx.sceneTriangleNormals, nullptr);
     if (ctx.ddgiProbeBuffer)
-        m_Device->UpdateDescriptorSet(m_RayGenSet, 7,
+        m_Device->UpdateDescriptorSet(m_RayGenSet, kRTGIBindDDGIProbes,
             rhi::DescriptorType::StorageBuffer, ctx.ddgiProbeBuffer);
     if (ctx.ddgiGridUniform)
-        m_Device->UpdateDescriptorSet(m_RayGenSet, 8,
+        m_Device->UpdateDescriptorSet(m_RayGenSet, kRTGIBindDDGIGrid,
             rhi::DescriptorType::UniformBuffer, ctx.ddgiGridUniform);
 
     // ── 填充 ClosestHit 光源数据 ──
