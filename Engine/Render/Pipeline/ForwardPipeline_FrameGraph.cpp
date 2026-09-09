@@ -109,7 +109,8 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     }
 
     // --- Pass 2: RSM 生成（Reflective Shadow Maps）---
-    if (m_RSM && m_ShadowSystem && m_ShadowSystem->HasActiveShadows()) {
+    // GIConfig 门控：rsmIndirect=false 时不注册（Forward 的间接漫反射来源）
+    if (m_GIConfig.ShouldRunRSM() && m_RSM && m_ShadowSystem && m_ShadowSystem->HasActiveShadows()) {
         float4x4 lightVP = m_ShadowSystem->GetLightViewProj(0);
         if (glm::determinant(lightVP) != 0.0f) {
             auto rsmPos  = rg.ImportTexture("RSM_Position",  m_RSM->GetRSMPositionMap());

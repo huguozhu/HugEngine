@@ -84,24 +84,24 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     // set=0: per-frame 动态数据 + 全局 bindless 纹理数组
     rhi::DescriptorSetLayoutDesc perFrameLayoutDesc;
     perFrameLayoutDesc.bindings = {
-        { 1,  rhi::DescriptorType::StorageBuffer,        1, 16 },  // GPULight[]
-        { 2,  rhi::DescriptorType::StorageBuffer,        1, 17 },  // GPUObjectData[]
-        { 3,  rhi::DescriptorType::StorageBuffer,        1, 16 },  // GPUShadowData[]
-        { 7,  rhi::DescriptorType::StorageBuffer,        1, 16 },  // LightGrid（Forward+）
-        { 8,  rhi::DescriptorType::StorageBuffer,        1, 16 },  // LightIndexList（Forward+）
-        { 4,  rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // CSM cascade 0
+        {kGPUBinding_GBufferB, rhi::DescriptorType::StorageBuffer,        1, 16 },  // GPULight[]
+        {kGPUBinding_GBufferC, rhi::DescriptorType::StorageBuffer,        1, 17 },  // GPUObjectData[]
+        {kGPUBinding_Depth, rhi::DescriptorType::StorageBuffer,        1, 16 },  // GPUShadowData[]
+        {kGPUBinding_LightGrid, rhi::DescriptorType::StorageBuffer,        1, 16 },  // LightGrid（Forward+）
+        {kGPUBinding_LightIndexList, rhi::DescriptorType::StorageBuffer,        1, 16 },  // LightIndexList（Forward+）
+        {kGPUBinding_ShadowMap0, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // CSM cascade 0
         { 5,  rhi::DescriptorType::SampledImage,  4096, rhi::kStageMaskFragment, true },  // u_Textures[] bindless
-        { 6,  rhi::DescriptorType::Sampler,       4096, rhi::kStageMaskFragment, true },  // u_Samplers[] bindless
-        { 9,  rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Point Shadow Cubemap
-        { 10, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // CSM cascade 1
-        { 11, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // CSM cascade 2
-        { 12, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // IBL Irradiance Cubemap
-        { 13, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // IBL Prefilter Cubemap
-        { 14, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // IBL BRDF LUT
-        { 15, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // RSM Position
-        { 16, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // RSM Normal+Flux
-        { 24, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Spot Shadow Map（独立 binding，避免与点光 9 冲突）
-        { 25, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Rect Shadow Map（矩形面光）
+        {kGPUBinding_DDGIGridParams, rhi::DescriptorType::Sampler,       4096, rhi::kStageMaskFragment, true },  // u_Samplers[] bindless
+        {kGPUBinding_PointShadow, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Point Shadow Cubemap
+        {kGPUBinding_ShadowMap1, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // CSM cascade 1
+        {kGPUBinding_ShadowMap2, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // CSM cascade 2
+        {kGPUBinding_IrradianceMap, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // IBL Irradiance Cubemap
+        {kGPUBinding_PrefilterMap, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // IBL Prefilter Cubemap
+        {kGPUBinding_BRDF_LUT, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // IBL BRDF LUT
+        {kGPUBinding_RSMPosition, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // RSM Position
+        {kGPUBinding_RSMFlux, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // RSM Normal+Flux
+        {kGPUBinding_SpotShadow, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Spot Shadow Map（独立 binding，避免与点光 9 冲突）
+        {kGPUBinding_RectShadow, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Rect Shadow Map（矩形面光）
         { 30, rhi::DescriptorType::StorageBuffer,     4096, rhi::kStageMaskVertex | rhi::kStageMaskFragment, true },  // u_SSBO[] bindless
     };
     m_PerFrameLayout = device->CreateDescriptorSetLayout(perFrameLayoutDesc);
@@ -180,11 +180,11 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     // --- 分配三缓冲共享描述符集（set=0: per-frame + bindless）---
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
         rhi::DescriptorSetHandle set = device->AllocateDescriptorSet(m_PerFrameLayout);
-        device->UpdateDescriptorSet(set, 1, rhi::DescriptorType::StorageBuffer,
+        device->UpdateDescriptorSet(set, kGPUBinding_GBufferB, rhi::DescriptorType::StorageBuffer,
                                     m_LightBuffers[i].get());
         device->UpdateDescriptorSet(set, rhi::kBindingObjectData, rhi::DescriptorType::StorageBuffer,
                                     m_ObjectBuffers[i].get());
-        device->UpdateDescriptorSet(set, 3, rhi::DescriptorType::StorageBuffer,
+        device->UpdateDescriptorSet(set, kGPUBinding_Depth, rhi::DescriptorType::StorageBuffer,
                                     m_ShadowBuffers[i].get());
         // Forward+: LightGrid / LightIndexList 初始占位
         device->UpdateDescriptorSet(set, rhi::kBindingLightGrid, rhi::DescriptorType::StorageBuffer,
@@ -207,33 +207,25 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
                 nullptr, sampPtrs, 1);
         }
         // 绑定 9: 点光源阴影 Cubemap（来自 ShadowSystem）
-        device->UpdateDescriptorSet(set, 9,
-            rhi::DescriptorType::CombinedImageSampler,
+        device->UpdateDescriptorSet(set, kGPUBinding_PointShadow, rhi::DescriptorType::CombinedImageSampler,
             m_ShadowSystem->GetPointShadowMap(), m_ShadowSystem->GetPointShadowSampler());
         // 绑定 12-14: IBL 纹理占位（GI_IBL 生成后通过 UpdateIBLBindings 替换）
-        device->UpdateDescriptorSet(set, 12,
-            rhi::DescriptorType::CombinedImageSampler,
+        device->UpdateDescriptorSet(set, kGPUBinding_IrradianceMap, rhi::DescriptorType::CombinedImageSampler,
             m_ShadowSystem->GetPointShadowMap(), m_ShadowSystem->GetPointShadowSampler());
-        device->UpdateDescriptorSet(set, 13,
-            rhi::DescriptorType::CombinedImageSampler,
+        device->UpdateDescriptorSet(set, kGPUBinding_PrefilterMap, rhi::DescriptorType::CombinedImageSampler,
             m_ShadowSystem->GetPointShadowMap(), m_ShadowSystem->GetPointShadowSampler());
-        device->UpdateDescriptorSet(set, 14,
-            rhi::DescriptorType::CombinedImageSampler,
+        device->UpdateDescriptorSet(set, kGPUBinding_BRDF_LUT, rhi::DescriptorType::CombinedImageSampler,
             m_BindlessPlaceholder.get(), m_BindlessSampler.get());
         // 绑定 15-16: RSM 纹理占位（GI_RSM 渲染后替换）
-        device->UpdateDescriptorSet(set, 15,
-            rhi::DescriptorType::CombinedImageSampler,
+        device->UpdateDescriptorSet(set, kGPUBinding_RSMPosition, rhi::DescriptorType::CombinedImageSampler,
             m_BindlessPlaceholder.get(), m_BindlessSampler.get());
-        device->UpdateDescriptorSet(set, 16,
-            rhi::DescriptorType::CombinedImageSampler,
+        device->UpdateDescriptorSet(set, kGPUBinding_RSMFlux, rhi::DescriptorType::CombinedImageSampler,
             m_BindlessPlaceholder.get(), m_BindlessSampler.get());
         // 绑定 24: 聚光灯 2D 阴影贴图（来自 ShadowSystem，原 9 与点光冲突）
-        device->UpdateDescriptorSet(set, 24,
-            rhi::DescriptorType::CombinedImageSampler,
+        device->UpdateDescriptorSet(set, kGPUBinding_SpotShadow, rhi::DescriptorType::CombinedImageSampler,
             m_ShadowSystem->GetSpotShadowMap(), m_ShadowSystem->GetSpotShadowSampler());
         // 绑定 25: 矩形面光 2D 阴影贴图（来自 ShadowSystem）
-        device->UpdateDescriptorSet(set, 25,
-            rhi::DescriptorType::CombinedImageSampler,
+        device->UpdateDescriptorSet(set, kGPUBinding_RectShadow, rhi::DescriptorType::CombinedImageSampler,
             m_ShadowSystem->GetRectShadowMap(), m_ShadowSystem->GetRectShadowSampler());
         m_DescSets[i] = set;
     }
@@ -756,10 +748,8 @@ void ForwardPipeline::UpdateRSMBindings() {
     rhi::IRHISampler* sampler = m_RSM->GetRSMSampler();
     // RSM 绑定在 set=0（per-frame），只需更新共享描述符集
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        m_Device->UpdateDescriptorSet(m_DescSets[i], 15,
-            rhi::DescriptorType::CombinedImageSampler, posMap, sampler);
-        m_Device->UpdateDescriptorSet(m_DescSets[i], 16,
-            rhi::DescriptorType::CombinedImageSampler, fluxMap, sampler);
+        m_Device->UpdateDescriptorSet(m_DescSets[i], kGPUBinding_RSMPosition, rhi::DescriptorType::CombinedImageSampler, posMap, sampler);
+        m_Device->UpdateDescriptorSet(m_DescSets[i], kGPUBinding_RSMFlux, rhi::DescriptorType::CombinedImageSampler, fluxMap, sampler);
     }
 }
 
@@ -771,12 +761,9 @@ void ForwardPipeline::UpdateIBLBindings(GI_IBL* gi) {
 
     // IBL 绑定在 set=0（per-frame），只需更新共享描述符集
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        m_Device->UpdateDescriptorSet(m_DescSets[i], 12,
-            rhi::DescriptorType::CombinedImageSampler, irr, sampler);
-        m_Device->UpdateDescriptorSet(m_DescSets[i], 13,
-            rhi::DescriptorType::CombinedImageSampler, pref, sampler);
-        m_Device->UpdateDescriptorSet(m_DescSets[i], 14,
-            rhi::DescriptorType::CombinedImageSampler, lut, sampler);
+        m_Device->UpdateDescriptorSet(m_DescSets[i], kGPUBinding_IrradianceMap, rhi::DescriptorType::CombinedImageSampler, irr, sampler);
+        m_Device->UpdateDescriptorSet(m_DescSets[i], kGPUBinding_PrefilterMap, rhi::DescriptorType::CombinedImageSampler, pref, sampler);
+        m_Device->UpdateDescriptorSet(m_DescSets[i], kGPUBinding_BRDF_LUT, rhi::DescriptorType::CombinedImageSampler, lut, sampler);
     }
 }
 

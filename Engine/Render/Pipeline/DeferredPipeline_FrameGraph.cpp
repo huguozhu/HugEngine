@@ -524,6 +524,9 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             in.ssrSampler = m_SSR.GetOutputSampler();
             in.ddgiProbeBuffer = m_DDGI.GetProbeBuffer();
             in.ddgiGridUniform = m_DDGI.GetGridUniform();
+            // RSM 间接光（有 RSM 渲染时喂给 Lighting——shader 内 rsmIndirect 分支）
+            in.rsmPositionMap = m_RSM ? m_RSM->GetRSMPositionMap() : nullptr;
+            in.rsmFluxMap     = m_RSM ? m_RSM->GetRSMFluxMap()     : nullptr;
             // overlay 与 Pass 门控同源（避免 pass 跳过但 shader 仍采样陈旧探针）
             in.ddgiOverlay     = m_GIConfig.ShouldRunDDGI() && m_DDGI.IsEnabled();
             in.ddgiScale       = m_DDGI.debugScale;

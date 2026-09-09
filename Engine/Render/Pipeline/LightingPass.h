@@ -64,6 +64,9 @@ struct LightingInputs {
     // DDGI 探针
     rhi::IRHIBuffer* ddgiProbeBuffer = nullptr;
     rhi::IRHIBuffer* ddgiGridUniform = nullptr;
+    // RSM 间接光（可选，非空时 shader 采样 RSM 间接漫反射——Forward/Deferred 共用）
+    rhi::IRHITexture* rsmPositionMap = nullptr;
+    rhi::IRHITexture* rsmFluxMap     = nullptr;
     // RT 效果输出（可选，非空才替换占位）
     rhi::IRHITexture* rtShadowMask = nullptr;
     rhi::IRHITexture* rtReflection = nullptr;

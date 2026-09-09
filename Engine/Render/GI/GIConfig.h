@@ -76,9 +76,10 @@ inline u32 ToPipelineCap(DiffuseChannel s) {
 
 /// 各管线能力预设
 namespace PipelineCaps {
-    constexpr u32 Forward  = kPipelineGIShadowRaster | kPipelineGIAOSSAO | kPipelineGISpecSSR
-                           | kPipelineGIDiffIBL | kPipelineGIDiffRSM;
-    constexpr u32 Deferred = Forward | kPipelineGIDiffSSGI | kPipelineGIDiffDDGI;
+    // Forward：光栅阴影 + IBL 环境 + RSM 间接（无屏幕空间 SSGI/SSR/SSAO，无 DDGI）
+    constexpr u32 Forward  = kPipelineGIShadowRaster | kPipelineGIDiffIBL | kPipelineGIDiffRSM;
+    constexpr u32 Deferred = Forward | kPipelineGIAOSSAO | kPipelineGISpecSSR
+                           | kPipelineGIDiffSSGI | kPipelineGIDiffDDGI;
     constexpr u32 HybridRT = Deferred | kPipelineGIShadowRT | kPipelineGIAORTAO
                            | kPipelineGISpecRT | kPipelineGIDiffRTGI;
 }
@@ -95,6 +96,7 @@ struct GIConfig {
     float giIntensity = 1.0f;   // 间接漫反射 GI 总强度
     float aoIntensity = 1.0f;   // AO 强度
     bool  ddgiOverlay     = true;   // DDGI 是否叠加（可与 SSGI/RT GI 组合）
+    bool  rsmIndirect     = true;   // RSM 间接光（Forward 管线的间接漫反射来源）
     bool  halfRes     = false;  // 半分辨率计算（性能优先）
 
     /// 生成 GIChannels（M1 接口，供 LightingPass 消费）
@@ -113,6 +115,7 @@ struct GIConfig {
     bool ShouldRunSpecular() const { return specular != SpecularChannel::None; }
     bool ShouldRunSSGI()     const { return diffuse == DiffuseChannel::SSGI; }
     bool ShouldRunDDGI()     const { return ddgiOverlay && diffuse != DiffuseChannel::None; }
+    bool ShouldRunRSM()      const { return rsmIndirect; }
 };
 
 /// 按档位生成默认配置（4 档预设）

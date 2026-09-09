@@ -61,44 +61,48 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
     };
 
     // ── 绑定 GBuffer 纹理 ──
-    bindTex(0, in.gbA, m_HDRSampler.get());
-    bindTex(1, in.gbB, m_HDRSampler.get());
-    bindTex(2, in.gbC, m_HDRSampler.get());
-    bindTex(23, in.gbE, m_PointSampler.get());
-    bindTex(28, in.gbDisneyA, m_HDRSampler.get());  // disneyA（anisotropic/subsurface/specular/sheen）
-    bindTex(29, in.gbDisneyB, m_HDRSampler.get());  // disneyB（clearcoat/clearcoatGloss/specularTint.rg）
-    bindTex(3, in.gbDepth, m_PointSampler.get());
+    bindTex(kGPUBinding_GBufferA, in.gbA, m_HDRSampler.get());
+    bindTex(kGPUBinding_GBufferB, in.gbB, m_HDRSampler.get());
+    bindTex(kGPUBinding_GBufferC, in.gbC, m_HDRSampler.get());
+    bindTex(kGPUBinding_GBufferE, in.gbE, m_PointSampler.get());
+    bindTex(kGPUBinding_GBufferF, in.gbDisneyA, m_HDRSampler.get());  // disneyA（anisotropic/subsurface/specular/sheen）
+    bindTex(kGPUBinding_GBufferG, in.gbDisneyB, m_HDRSampler.get());  // disneyB（clearcoat/clearcoatGloss/specularTint.rg）
+    bindTex(kGPUBinding_Depth, in.gbDepth, m_PointSampler.get());
 
     // ── 绑定阴影贴图 ──
-    bindTex(4, in.csmShadow0, m_HDRSampler.get());
-    bindTex(10, in.csmShadow1, m_HDRSampler.get());
-    bindTex(11, in.csmShadow2, m_HDRSampler.get());
-    bindTex(9, in.spotShadow, m_HDRSampler.get());
+    bindTex(kGPUBinding_ShadowMap0, in.csmShadow0, m_HDRSampler.get());
+    bindTex(kGPUBinding_ShadowMap1, in.csmShadow1, m_HDRSampler.get());
+    bindTex(kGPUBinding_ShadowMap2, in.csmShadow2, m_HDRSampler.get());
+    bindTex(kGPUBinding_SpotShadow_DL, in.spotShadow, m_HDRSampler.get());
 
     // ── 绑定光源/阴影数据 SSBO ──
     if (in.lightBuffer && m_Device)
-        m_Device->UpdateDescriptorSet(m_Set, 17, rhi::DescriptorType::StorageBuffer, in.lightBuffer);
+        m_Device->UpdateDescriptorSet(m_Set, kGPUBinding_Lights_DL, rhi::DescriptorType::StorageBuffer, in.lightBuffer);
     if (in.shadowBuffer && m_Device)
-        m_Device->UpdateDescriptorSet(m_Set, 18, rhi::DescriptorType::StorageBuffer, in.shadowBuffer);
+        m_Device->UpdateDescriptorSet(m_Set, kGPUBinding_ShadowData_DL, rhi::DescriptorType::StorageBuffer, in.shadowBuffer);
 
     // ── 绑定屏幕空间效果 ──
-    bindTex(19, in.ssgiTex, in.ssgiSampler);
-    bindTex(20, in.ssaoTex, m_HDRSampler.get());
-    bindTex(21, in.ssrTex, in.ssrSampler);
+    bindTex(kGPUBinding_SSGI, in.ssgiTex, in.ssgiSampler);
+    bindTex(kGPUBinding_SSAO_DL, in.ssaoTex, m_HDRSampler.get());
+    bindTex(kGPUBinding_SSR, in.ssrTex, in.ssrSampler);
 
     // ── 绑定 DDGI 探针 ──
     if (in.ddgiProbeBuffer && m_Device)
-        m_Device->UpdateDescriptorSet(m_Set, 22, rhi::DescriptorType::StorageBuffer, in.ddgiProbeBuffer);
+        m_Device->UpdateDescriptorSet(m_Set, kGPUBinding_DDGIProbes, rhi::DescriptorType::StorageBuffer, in.ddgiProbeBuffer);
     // ── 绑定 DDGI 网格参数 UBO（SampleDDGI 三线性插值用）──
     if (in.ddgiGridUniform && m_Device)
-        m_Device->UpdateDescriptorSet(m_Set, 6, rhi::DescriptorType::UniformBuffer, in.ddgiGridUniform);
+        m_Device->UpdateDescriptorSet(m_Set, kGPUBinding_DDGIGridParams, rhi::DescriptorType::UniformBuffer, in.ddgiGridUniform);
+
+    // ── 绑定 RSM 间接光（Forward/Deferred 共用；未提供时 shader 有守卫不采样）──
+    bindTex(kGPUBinding_RSMPosition, in.rsmPositionMap, m_HDRSampler.get());
+    bindTex(kGPUBinding_RSMFlux, in.rsmFluxMap,     m_HDRSampler.get());
 
     // ── 绑定 Hybrid RT 效果输出纹理（非空时才替换占位）──
     // 阴影/AO 遮罩用线性采样上采样到全分辨率；反射/GI HDR 结果用线性采样
-    bindTex(24, in.rtShadowMask, m_HDRSampler.get());   // RT 阴影遮罩
-    bindTex(25, in.rtReflection, m_HDRSampler.get());   // RT 反射
-    bindTex(26, in.rtAO,         m_HDRSampler.get());   // RT AO
-    bindTex(27, in.rtGI,         m_HDRSampler.get());   // RT GI
+    bindTex(kGPUBinding_RT_ShadowMask, in.rtShadowMask, m_HDRSampler.get());   // RT 阴影遮罩
+    bindTex(kGPUBinding_RT_Reflection, in.rtReflection, m_HDRSampler.get());   // RT 反射
+    bindTex(kGPUBinding_RT_AO, in.rtAO,         m_HDRSampler.get());   // RT AO
+    bindTex(kGPUBinding_RT_GI, in.rtGI,         m_HDRSampler.get());   // RT GI
 
     // ── 聚集着色（可选）──
     u32 useClustered = 0;
@@ -112,8 +116,8 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
         in.clusteredShading->CullLights(in.cachedLights->data(), (u32)in.cachedLights->size());
 
         // 上传 LightGrid + LightIndexList
-        m_Device->UpdateDescriptorSet(m_Set, 7, rhi::DescriptorType::StorageBuffer, in.lightGridBuffer);
-        m_Device->UpdateDescriptorSet(m_Set, 8, rhi::DescriptorType::StorageBuffer, in.lightIndexListBuffer);
+        m_Device->UpdateDescriptorSet(m_Set, kGPUBinding_LightGrid, rhi::DescriptorType::StorageBuffer, in.lightGridBuffer);
+        m_Device->UpdateDescriptorSet(m_Set, kGPUBinding_LightIndexList, rhi::DescriptorType::StorageBuffer, in.lightIndexListBuffer);
 
         clusterTilesX = in.clusteredShading->GetTileCountX();
         clusterTilesY = in.clusteredShading->GetTileCountY();
@@ -200,35 +204,35 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
     // ── 描述符集布局 ──
     rhi::DescriptorSetLayoutDesc ll;
     ll.bindings = {
-        {0,  rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // GBufferA
-        {1,  rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // GBufferB
-        {2,  rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // GBufferC
-        {3,  rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // Depth
-        {23, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // GBufferE (worldPos)
-        {28, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // GBufferF (disneyA)
-        {29, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // GBufferG (disneyB)
-        {4,  rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // Shadow0 (CSM0)
-        {7,  rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment},         // LightGrid (Clustered)
-        {8,  rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment},         // LightIndexList
-        {9,  rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // SpotShadow
-        {10, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // Shadow1 (CSM1)
-        {11, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // Shadow2 (CSM2)
-        {12, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // Irradiance
-        {13, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // Prefilter
-        {14, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // BRDF LUT
-        {15, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RSM Pos
-        {16, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RSM Flux
-        {17, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment},         // Lights SSBO
-        {18, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment},         // ShadowData SSBO
-        {19, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // SSGI
-        {20, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // SSAO
-        {21, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // SSR
-        {22, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment},         // DDGI Probes
-        {6,  rhi::DescriptorType::UniformBuffer, 1, rhi::kStageMaskFragment},         // DDGI 网格参数 UBO
-        {24, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RT 阴影遮罩
-        {25, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RT 反射
-        {26, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RT AO
-        {27, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RT GI
+        {kGPUBinding_GBufferA, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // GBufferA
+        {kGPUBinding_GBufferB, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // GBufferB
+        {kGPUBinding_GBufferC, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // GBufferC
+        {kGPUBinding_Depth, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // Depth
+        {kGPUBinding_GBufferE, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // GBufferE (worldPos)
+        {kGPUBinding_GBufferF, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // GBufferF (disneyA)
+        {kGPUBinding_GBufferG, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // GBufferG (disneyB)
+        {kGPUBinding_ShadowMap0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // Shadow0 (CSM0)
+        {kGPUBinding_LightGrid, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment},         // LightGrid (Clustered)
+        {kGPUBinding_LightIndexList, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment},         // LightIndexList
+        {kGPUBinding_SpotShadow_DL, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // SpotShadow
+        {kGPUBinding_ShadowMap1, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // Shadow1 (CSM1)
+        {kGPUBinding_ShadowMap2, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // Shadow2 (CSM2)
+        {kGPUBinding_IrradianceMap, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // Irradiance
+        {kGPUBinding_PrefilterMap, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // Prefilter
+        {kGPUBinding_BRDF_LUT, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // BRDF LUT
+        {kGPUBinding_RSMPosition, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RSM Pos
+        {kGPUBinding_RSMFlux, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RSM Flux
+        {kGPUBinding_Lights_DL, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment},         // Lights SSBO
+        {kGPUBinding_ShadowData_DL, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment},         // ShadowData SSBO
+        {kGPUBinding_SSGI, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // SSGI
+        {kGPUBinding_SSAO_DL, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // SSAO
+        {kGPUBinding_SSR, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // SSR
+        {kGPUBinding_DDGIProbes, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment},         // DDGI Probes
+        {kGPUBinding_DDGIGridParams, rhi::DescriptorType::UniformBuffer, 1, rhi::kStageMaskFragment},         // DDGI 网格参数 UBO
+        {kGPUBinding_RT_ShadowMask, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RT 阴影遮罩
+        {kGPUBinding_RT_Reflection, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RT 反射
+        {kGPUBinding_RT_AO, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RT AO
+        {kGPUBinding_RT_GI, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RT GI
     };
     m_Layout = device->CreateDescriptorSetLayout(ll);
     m_Set    = device->AllocateDescriptorSet(m_Layout);
@@ -270,18 +274,18 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
             btd.initialData = bk;
             auto bt = device->CreateTexture(btd);
 
-            device->UpdateDescriptorSet(m_Set, 24, rhi::DescriptorType::CombinedImageSampler, pt.get(), ps.get());
-            device->UpdateDescriptorSet(m_Set, 26, rhi::DescriptorType::CombinedImageSampler, pt.get(), ps.get());
-            device->UpdateDescriptorSet(m_Set, 25, rhi::DescriptorType::CombinedImageSampler, bt.get(), ps.get());
-            device->UpdateDescriptorSet(m_Set, 27, rhi::DescriptorType::CombinedImageSampler, bt.get(), ps.get());
+            device->UpdateDescriptorSet(m_Set, kGPUBinding_RT_ShadowMask, rhi::DescriptorType::CombinedImageSampler, pt.get(), ps.get());
+            device->UpdateDescriptorSet(m_Set, kGPUBinding_RT_AO, rhi::DescriptorType::CombinedImageSampler, pt.get(), ps.get());
+            device->UpdateDescriptorSet(m_Set, kGPUBinding_RT_Reflection, rhi::DescriptorType::CombinedImageSampler, bt.get(), ps.get());
+            device->UpdateDescriptorSet(m_Set, kGPUBinding_RT_GI, rhi::DescriptorType::CombinedImageSampler, bt.get(), ps.get());
 
             // SSGI/SSAO/SSR 占位（19/20/21）：
             // HybridRT 不计算屏幕空间效果，对应 RT 效果关闭时 shader 回退采样这些纹理。
             // 必须绑定中性占位，避免采样未初始化描述符 → 黑屏。
             //   SSGI → 黑（无间接漫反射），SSAO → 白（无遮蔽），SSR → 黑（无镜面反射）
-            device->UpdateDescriptorSet(m_Set, 19, rhi::DescriptorType::CombinedImageSampler, bt.get(), ps.get());
-            device->UpdateDescriptorSet(m_Set, 20, rhi::DescriptorType::CombinedImageSampler, pt.get(), ps.get());
-            device->UpdateDescriptorSet(m_Set, 21, rhi::DescriptorType::CombinedImageSampler, bt.get(), ps.get());
+            device->UpdateDescriptorSet(m_Set, kGPUBinding_SSGI, rhi::DescriptorType::CombinedImageSampler, bt.get(), ps.get());
+            device->UpdateDescriptorSet(m_Set, kGPUBinding_SSAO_DL, rhi::DescriptorType::CombinedImageSampler, pt.get(), ps.get());
+            device->UpdateDescriptorSet(m_Set, kGPUBinding_SSR, rhi::DescriptorType::CombinedImageSampler, bt.get(), ps.get());
         }
 
         // 绑定 12=Irradiance, 13=Prefilter 需要 Cubemap（Shader 声明为 TextureCube）
@@ -299,8 +303,8 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
             ctd.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::Cubemap;
             ctd.initialData = w4cube;
             auto cubeTex = device->CreateTexture(ctd);
-            device->UpdateDescriptorSet(m_Set, 12, rhi::DescriptorType::CombinedImageSampler, cubeTex.get(), ps.get());
-            device->UpdateDescriptorSet(m_Set, 13, rhi::DescriptorType::CombinedImageSampler, cubeTex.get(), ps.get());
+            device->UpdateDescriptorSet(m_Set, kGPUBinding_IrradianceMap, rhi::DescriptorType::CombinedImageSampler, cubeTex.get(), ps.get());
+            device->UpdateDescriptorSet(m_Set, kGPUBinding_PrefilterMap, rhi::DescriptorType::CombinedImageSampler, cubeTex.get(), ps.get());
         }
 
         // Cluster SSBO 占位（binding 7/8）
@@ -308,11 +312,11 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
         gd.size = 16;
         gd.usage = rhi::BufferUsage::Storage;
         auto gb = device->CreateBuffer(gd);
-        device->UpdateDescriptorSet(m_Set, 7, rhi::DescriptorType::StorageBuffer, gb.get());
-        device->UpdateDescriptorSet(m_Set, 8, rhi::DescriptorType::StorageBuffer, gb.get());
+        device->UpdateDescriptorSet(m_Set, kGPUBinding_LightGrid, rhi::DescriptorType::StorageBuffer, gb.get());
+        device->UpdateDescriptorSet(m_Set, kGPUBinding_LightIndexList, rhi::DescriptorType::StorageBuffer, gb.get());
 
         // DDGI 探针 SSBO 占位（binding 22）
-        device->UpdateDescriptorSet(m_Set, 22, rhi::DescriptorType::StorageBuffer, gb.get());
+        device->UpdateDescriptorSet(m_Set, kGPUBinding_DDGIProbes, rhi::DescriptorType::StorageBuffer, gb.get());
     }
 
     // ── 创建 PSO ──
@@ -348,9 +352,9 @@ void LightingPass::SetIBLTextures(rhi::IRHITexture* irradiance, rhi::IRHITexture
                                   rhi::IRHITexture* brdfLut, rhi::IRHISampler* sampler) {
     if (!m_Device || m_Set == rhi::kInvalidSet) return;
     // 绑定 IBL 贴图到 Lighting 描述符集（12=Irradiance, 13=Prefilter, 14=BRDF LUT）
-    m_Device->UpdateDescriptorSet(m_Set, 12, rhi::DescriptorType::CombinedImageSampler, irradiance, sampler);
-    m_Device->UpdateDescriptorSet(m_Set, 13, rhi::DescriptorType::CombinedImageSampler, prefilter, sampler);
-    m_Device->UpdateDescriptorSet(m_Set, 14, rhi::DescriptorType::CombinedImageSampler, brdfLut, sampler);
+    m_Device->UpdateDescriptorSet(m_Set, kGPUBinding_IrradianceMap, rhi::DescriptorType::CombinedImageSampler, irradiance, sampler);
+    m_Device->UpdateDescriptorSet(m_Set, kGPUBinding_PrefilterMap, rhi::DescriptorType::CombinedImageSampler, prefilter, sampler);
+    m_Device->UpdateDescriptorSet(m_Set, kGPUBinding_BRDF_LUT, rhi::DescriptorType::CombinedImageSampler, brdfLut, sampler);
 }
 
 void LightingPass::SetAtmosphere(float3 sunDir, float turbidity) {
