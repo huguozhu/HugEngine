@@ -196,6 +196,30 @@ int main() {
         sceneGraph.SetParent(mainLightEntity, Entity{kInvalidEntity});
     }
 
+    // --- 点光源（2 个：Sponza 走廊两端，用于测试点光 GI/阴影/DDGI 探针）---
+    // 位置/颜色/强度/范围可由面板编辑，并随 06_GILab.cfg 序列化
+    Entity pointLightEntities[2];
+    {
+        struct PointLightInit { float3 pos; float3 color; float intensity; float range; };
+        const PointLightInit inits[2] = {
+            { float3(-20.0f, 5.0f,  0.0f), float3(1.0f, 0.7f, 0.4f), 30.0f, 18.0f },  // 暖色，走廊左端（X 负侧）
+            { float3( 20.0f, 5.0f,  0.0f), float3(0.4f, 0.7f, 1.0f), 30.0f, 18.0f },  // 冷色，走廊右端（X 正侧）
+        };
+        for (int i = 0; i < 2; i++) {
+            Entity e = world.CreateEntity("PointLight");
+            auto* tf = world.AddComponent<TransformComponent>(e);
+            tf->position = inits[i].pos;
+            auto* pl = world.AddComponent<PointLight>(e);
+            pl->color     = inits[i].color;
+            pl->intensity = inits[i].intensity;
+            pl->range     = inits[i].range;
+            pl->castShadow = false;       // 点光阴影开销大，默认关闭（面板可开）
+            pl->enabled    = false;       // 默认只看 GI，与方向光一致
+            sceneGraph.SetParent(e, Entity{kInvalidEntity});
+            pointLightEntities[i] = e;
+        }
+    }
+
     // --- 天空盒 ---
     {
         String hdrPath = String(HUGE_CONTENT_DIR) + "Textures/skybox.hdr";
@@ -729,14 +753,6 @@ int main() {
                 }
             }
 
-            // ── 后处理（仅保留与 GI/AO 相关的 SSAO）──
-            ImGui::SeparatorText("后处理");
-            {
-                bool ssaoOn = pipeline.GetSSAO().enabled;
-                if (ImGui::Checkbox("SSAO（环境光遮蔽）", &ssaoOn))
-                    pipeline.GetSSAO().enabled = ssaoOn;
-            }
-
             // 场景统计
             ImGui::SeparatorText("场景");
             u32 meshCount = 0, dirLightCount = 0, spotCount = 0;
@@ -744,6 +760,68 @@ int main() {
             world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight&) { dirLightCount++; });
             world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight&) { spotCount++; });
             ImGui::Text("%u 网格  |  %u 方向光  |  %u 点光  |  %u 聚光", meshCount, dirLightCount, 1, spotCount);
+
+            // ── 光源列表：类型 / 开关 / 颜色 / 强度 / 方向（可直接编辑）──
+            ImGui::SeparatorText("光源");
+            int lightId = 0;
+            world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& l) {
+                ImGui::PushID(lightId++);
+                ImGui::TextUnformatted("方向光"); ImGui::SameLine();
+                ImGui::Checkbox("启用##dl", &l.enabled); ImGui::SameLine();
+                ImGui::ColorEdit3("颜色##dl", &l.color.x, ImGuiColorEditFlags_NoInputs); ImGui::SameLine();
+                ImGui::SetNextItemWidth(90.0f);
+                ImGui::DragFloat("强度##dl", &l.intensity, 0.05f, 0.0f, 100.0f, "%.2f");
+                ImGui::SetNextItemWidth(220.0f);
+                ImGui::DragFloat3("方向##dl", &l.direction.x, 0.01f, -1.0f, 1.0f, "%.2f");
+                ImGui::Checkbox("投射阴影##dl", &l.castShadow);
+                ImGui::PopID();
+            });
+            world.ForEach<he::PointLight>([&](he::Entity e, he::PointLight& l) {
+                ImGui::PushID(lightId++);
+                ImGui::TextUnformatted("点光  "); ImGui::SameLine();
+                ImGui::Checkbox("启用##pl", &l.enabled); ImGui::SameLine();
+                ImGui::ColorEdit3("颜色##pl", &l.color.x, ImGuiColorEditFlags_NoInputs); ImGui::SameLine();
+                ImGui::SetNextItemWidth(90.0f);
+                ImGui::DragFloat("强度##pl", &l.intensity, 0.05f, 0.0f, 100.0f, "%.2f");
+                ImGui::SetNextItemWidth(90.0f);
+                ImGui::DragFloat("范围##pl", &l.range, 0.1f, 0.1f, 500.0f, "%.1f");
+                // 位置编辑：修改本地变换后标记 SceneGraph 脏，GetWorldPosition 即时反映
+                if (auto* tf = world.GetComponent<he::TransformComponent>(e)) {
+                    float3 p = tf->position;
+                    if (ImGui::DragFloat3("位置##pl", &p.x, 0.1f, -500.0f, 500.0f, "%.1f")) {
+                        tf->position = p;
+                        sceneGraph.MarkDirty(e);
+                    }
+                }
+                ImGui::PopID();
+            });
+            world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight& l) {
+                ImGui::PushID(lightId++);
+                ImGui::TextUnformatted("聚光  "); ImGui::SameLine();
+                ImGui::Checkbox("启用##sl", &l.enabled); ImGui::SameLine();
+                ImGui::ColorEdit3("颜色##sl", &l.color.x, ImGuiColorEditFlags_NoInputs); ImGui::SameLine();
+                ImGui::SetNextItemWidth(90.0f);
+                ImGui::DragFloat("强度##sl", &l.intensity, 0.05f, 0.0f, 100.0f, "%.2f");
+                ImGui::SetNextItemWidth(90.0f);
+                ImGui::DragFloat("范围##sl", &l.range, 0.1f, 0.1f, 500.0f, "%.1f");
+                ImGui::SetNextItemWidth(160.0f);
+                ImGui::DragFloat3("方向##sl", &l.direction.x, 0.01f, -1.0f, 1.0f, "%.2f");
+                ImGui::PopID();
+            });
+            world.ForEach<he::RectLight>([&](he::Entity, he::RectLight& l) {
+                ImGui::PushID(lightId++);
+                ImGui::TextUnformatted("矩形光"); ImGui::SameLine();
+                ImGui::Checkbox("启用##rl", &l.enabled); ImGui::SameLine();
+                ImGui::ColorEdit3("颜色##rl", &l.color.x, ImGuiColorEditFlags_NoInputs); ImGui::SameLine();
+                ImGui::SetNextItemWidth(90.0f);
+                ImGui::DragFloat("强度##rl", &l.intensity, 0.05f, 0.0f, 100.0f, "%.2f");
+                ImGui::SetNextItemWidth(90.0f);
+                ImGui::DragFloat("范围##rl", &l.range, 0.1f, 0.1f, 500.0f, "%.1f");
+                ImGui::PopID();
+            });
+            if (lightId == 0) {
+                ImGui::TextUnformatted("（场景中无光源）");
+            }
         }
         ImGui::End();
 
