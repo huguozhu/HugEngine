@@ -16,7 +16,7 @@ bool GI_SSR::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Settings.mode = GIMode::SSGI;
 
     rhi::DescriptorSetLayoutDesc l;
-    l.bindings = {{0,rhi::DescriptorType::CombinedImageSampler,1,16},{1,rhi::DescriptorType::CombinedImageSampler,1,16},{2,rhi::DescriptorType::CombinedImageSampler,1,16},{3,rhi::DescriptorType::UniformBuffer,1,16}};
+    l.bindings = {{0,rhi::DescriptorType::CombinedImageSampler,1,16},{1,rhi::DescriptorType::CombinedImageSampler,1,16},{2,rhi::DescriptorType::CombinedImageSampler,1,16},{3,rhi::DescriptorType::UniformBuffer,1,16},{4,rhi::DescriptorType::CombinedImageSampler,1,16}};
     m_DescLayout = device->CreateDescriptorSetLayout(l);
     m_DescSet = device->AllocateDescriptorSet(m_DescLayout);
 
@@ -97,6 +97,15 @@ void GI_SSR::SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal, rhi::I
     }
 }
 
+void GI_SSR::SetHiZ(rhi::IRHITexture* hiZ, rhi::IRHISampler* sampler) {
+    m_HiZTex = hiZ;
+    m_HiZSampler = sampler;
+    if (m_Device && hiZ && sampler) {
+        m_Device->UpdateDescriptorSet(m_DescSet, 4, rhi::DescriptorType::CombinedImageSampler,
+            hiZ, sampler);
+    }
+}
+
 void GI_SSR::Render(rhi::IRHICommandList* cmd) {
     if (!m_Ready || !m_Settings.enabled || !m_Depth || !m_Normal || !m_Albedo) {
         return;
@@ -110,10 +119,14 @@ void GI_SSR::Render(rhi::IRHICommandList* cmd) {
     struct {
         float4x4 proj;
         float4 p;
+        float useHiZ;      // 1=Hi-Z 层次 march，0=线性 march
+        float _pad[3];
     } pc;
     float a = float(m_Width) / float(m_Height);
     pc.proj = glm::inverse(glm::perspectiveRH_ZO(glm::radians(kDefaultFOV), a, kDefaultNearPlane, kDefaultFarPlane));
     pc.p = float4(maxSteps, stepSize, maxDistance, thickness);
+    pc.useHiZ = (m_HiZTex != nullptr) ? 1.0f : 0.0f;   // Hi-Z 金字塔可用时启用层次追踪
+    pc._pad[0] = pc._pad[1] = pc._pad[2] = 0.0f;
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     cmd->Draw(3);
 }

@@ -32,6 +32,8 @@ public:
     rhi::IRHITexture* GetIndirectSpecularTexture() const override { return m_Output.get(); }
 
     void SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal, rhi::IRHITexture* albedo);
+    /// 设置 Hi-Z 深度金字塔（层次追踪加速：大步长跳过低空区域，替代线性 march）
+    void SetHiZ(rhi::IRHITexture* hiZ, rhi::IRHISampler* sampler);
     rhi::IRHISampler* GetOutputSampler() const { return m_Sampler.get(); }
     void PreBind(rhi::IRHICommandList* cmd) const { if (m_Ready) cmd->SetPipeline(m_PSO.get()); }
 
@@ -61,6 +63,8 @@ private:
     rhi::IRHITexture* m_Depth  = nullptr;
     rhi::IRHITexture* m_Albedo = nullptr;
     rhi::IRHITexture* m_Normal = nullptr;
+    rhi::IRHITexture* m_HiZTex = nullptr;      // Hi-Z 金字塔（不持有所有权）
+    rhi::IRHISampler* m_HiZSampler = nullptr;  // Hi-Z 点采样器
 };
 
 } // namespace he::render

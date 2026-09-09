@@ -234,27 +234,39 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             m_GBuffer->Render(c, world, sg, camera);
         });
 
-    // ── 两阶段剔除 Phase 2: 当前帧 Hi-Z 精筛（GBuffer 后，读取当前帧深度）──
-    if (m_GPUCulling.useTwoPhase && m_GPUCulling.enabled) {
+    // ── 两阶段剔除 Phase 2 + SSR Hi-Z（GBuffer 后，读取当前帧深度）──
+    // Hi-Z 金字塔同时服务 GPUCulling 精筛与 SSR 层次追踪
+    bool needHiZ = (m_GPUCulling.useTwoPhase && m_GPUCulling.enabled)
+                || m_GIConfig.ShouldRunSpecular();
+    if (needHiZ) {
         // 构建当前帧 Hi-Z 深度金字塔（从 GBuffer 刚写入的深度缓冲下采样）
         rg.AddPass("HiZ_Build",
             {{gbDepth, ResourceAccess::Read}},
             {},
             [&, w, h](rhi::IRHICommandList* c) {
+                if (m_GBuffer->GetDepth()) {
+                    m_GPUCulling.SetDepthTexture(m_Device, m_GBuffer->GetDepth(), w, h);
+                }
                 m_GPUCulling.BuildHiZPyramid(c, w, h);
+                // 喂给 SSR（层次追踪加速）
+                if (m_GIConfig.ShouldRunSpecular() && m_GPUCulling.GetHiZTexture()) {
+                    m_SSR.SetHiZ(m_GPUCulling.GetHiZTexture(), m_GPUCulling.GetHiZSampler());
+                }
             });
 
-        // Phase 2: 读取当前帧 Hi-Z，验证 Phase 1 候选 → 输出 IndirectDraw 命令
-        rg.AddPass("GPU_Cull_Phase2",
-            {{gbDepth, ResourceAccess::Read}},
-            {},
-            [&](rhi::IRHICommandList* c) {
-                // 更新 Phase 2 的深度/Hi-Z 绑定为当前帧 GBuffer 深度
-                m_Device->UpdateDescriptorSet(m_GPUCulling.GetPhase2Set(), 3,
-                    rhi::DescriptorType::CombinedImageSampler,
-                    m_GBuffer->GetDepth(), m_GPUCulling.GetHiZSampler());
-                m_GPUCulling.DispatchPhase2(c, m_Width, m_Height);
-            });
+        if (m_GPUCulling.useTwoPhase && m_GPUCulling.enabled) {
+            // Phase 2: 读取当前帧 Hi-Z，验证 Phase 1 候选 → 输出 IndirectDraw 命令
+            rg.AddPass("GPU_Cull_Phase2",
+                {{gbDepth, ResourceAccess::Read}},
+                {},
+                [&](rhi::IRHICommandList* c) {
+                    // 更新 Phase 2 的深度/Hi-Z 绑定为当前帧 GBuffer 深度
+                    m_Device->UpdateDescriptorSet(m_GPUCulling.GetPhase2Set(), 3,
+                        rhi::DescriptorType::CombinedImageSampler,
+                        m_GBuffer->GetDepth(), m_GPUCulling.GetHiZSampler());
+                    m_GPUCulling.DispatchPhase2(c, m_Width, m_Height);
+                });
+        }
     }
 
     // ============================================================

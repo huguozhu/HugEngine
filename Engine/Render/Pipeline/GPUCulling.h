@@ -91,6 +91,8 @@ public:
     rhi::IRHIBuffer* GetDrawCountBuffer() const { return m_DrawCountBuf.get(); }
     rhi::DescriptorSetHandle GetPhase2Set() const { return m_Phase2Set; }
     rhi::IRHISampler* GetHiZSampler() const { return m_HiZSampler.get(); }
+    /// Hi-Z 深度金字塔纹理（供 SSR 层次追踪复用）
+    rhi::IRHITexture* GetHiZTexture() const { return m_HiZTexture.get(); }
 
 private:
     bool m_Initialized = false;
