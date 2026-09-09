@@ -380,6 +380,8 @@ int main() {
 
     int  g_PipelineMode = 1;                       // 0=Forward 1=Deferred 2=HybridRT
     bool g_PendingHalfResApply = false;            // 档位切换后延迟到帧边界重建半分辨率纹理（ImGui 回调内重建会死锁）
+    bool g_GISolo = true;                          // 只看 GI（关闭直接光）
+    int  g_GIPreset = -1;                          // GI 质量档位（-1=未应用预设）
     render::IRenderPipeline* curPipeline = &pipeline;
 
     // ── 从配置文件恢复管线 / GI / 后处理设置 ──
@@ -437,6 +439,34 @@ int main() {
             ssr->stepSize = GetFloat(cfgData, "ssr_step_size", 0.5f);
         }
 
+        // ── 面板状态：管线 / GI 档位 / 只看 GI / GI 通道配置 ──
+        g_PipelineMode = GetInt(cfgData, "pipeline_mode", 1);
+        g_GISolo       = GetInt(cfgData, "gi_solo", 1) != 0;
+        // 应用「只看 GI」到场景光源（cfg 加载发生在场景创建之后）
+        world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& l){ l.enabled = !g_GISolo; });
+        world.ForEach<he::PointLight>([&](he::Entity, he::PointLight& l){ l.enabled = !g_GISolo; });
+        world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight& l){ l.enabled = !g_GISolo; });
+        world.ForEach<he::RectLight>([&](he::Entity, he::RectLight& l){ l.enabled = !g_GISolo; });
+        g_GIPreset     = GetInt(cfgData, "gi_preset", -1);
+        {
+            auto& gc = *pipeline.GetGIConfig();
+            gc.diffuse     = (render::DiffuseChannel)GetInt(cfgData, "gi_diffuse", (int)gc.diffuse);
+            gc.specular    = (render::SpecularChannel)GetInt(cfgData, "gi_specular", (int)gc.specular);
+            gc.ao          = (render::AOChannel)GetInt(cfgData, "gi_ao", (int)gc.ao);
+            gc.shadow      = (render::ShadowChannel)GetInt(cfgData, "gi_shadow", (int)gc.shadow);
+            gc.giIntensity = GetFloat(cfgData, "gi_intensity", 1.0f);
+            gc.aoIntensity = GetFloat(cfgData, "ao_intensity", 1.0f);
+            gc.ddgiOverlay = GetInt(cfgData, "gi_ddgi_overlay", 1) != 0;
+            gc.rsmIndirect = GetInt(cfgData, "gi_rsm_indirect", 1) != 0;
+            gc.halfRes     = GetInt(cfgData, "gi_half_res", 0) != 0;
+        }
+        {
+            auto& ssao = pipeline.GetSSAO();
+            ssao.radius      = GetFloat(cfgData, "ssao_radius", 1.0f);
+            ssao.sampleCount = GetInt(cfgData, "ssao_samples", 16);
+            ssao.halfRes     = GetInt(cfgData, "ssao_half_res", 0) != 0;
+        }
+
         HE_CORE_INFO("管道设置已从配置文件恢复");
     }
 
@@ -464,7 +494,7 @@ int main() {
     camCtrl.SetAspectRatio(
         static_cast<float>(swapchain->GetWidth()),
         static_cast<float>(swapchain->GetHeight()));
-    camCtrl.SetMoveSpeed(200.0f);   // 移动速度 200（快速浏览 Sponza 场景）
+    camCtrl.SetMoveSpeed(hasConfig ? GetFloat(cfgData, "cam_move_speed", 200.0f) : 200.0f);
 
     if (hasConfig) {
         camCtrl.SetPosition(float3(
@@ -680,13 +710,12 @@ int main() {
 
             // ── GI 实验室：只看 GI（关闭直接光）→ 逐个开启 GI 看间接光贡献 ──
             ImGui::SeparatorText("GI 实验室");
-            static bool s_gISolo = true;   // 默认只看 GI（关闭直接光）
-            if (ImGui::Checkbox("只看 GI（关闭直接光）", &s_gISolo)) {
+            if (ImGui::Checkbox("只看 GI（关闭直接光）", &g_GISolo)) {
                 // 关闭/恢复所有直接光源：画面只剩 GI（IBL/SSGI/DDGI/RSM 等）的间接光
-                world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& l){ l.enabled = !s_gISolo; });
-                world.ForEach<he::PointLight>([&](he::Entity, he::PointLight& l){ l.enabled = !s_gISolo; });
-                world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight& l){ l.enabled = !s_gISolo; });
-                world.ForEach<he::RectLight>([&](he::Entity, he::RectLight& l){ l.enabled = !s_gISolo; });
+                world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& l){ l.enabled = !g_GISolo; });
+                world.ForEach<he::PointLight>([&](he::Entity, he::PointLight& l){ l.enabled = !g_GISolo; });
+                world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight& l){ l.enabled = !g_GISolo; });
+                world.ForEach<he::RectLight>([&](he::Entity, he::RectLight& l){ l.enabled = !g_GISolo; });
             }
             ImGui::TextWrapped("开启后画面只剩 GI 间接光——\n逐个启用 SSGI/DDGI 看各自贡献；IBL 强度即环境 GI 强度。");
 
@@ -711,14 +740,13 @@ int main() {
 
             // ── GI 质量档位（紧随管线选择）──
             ImGui::SeparatorText("GI 质量档位");
-            static int giPreset = -1;
             const char* presetNames[] = {"Low", "Medium", "High", "Ultra"};
             render::GIConfig& gc = *curPipeline->GetGIConfig();
             const u32  giCaps = curPipeline->GetGIPipelineCaps();
             const bool rtOk   = device->GetCaps().supportsRayTracing;
-            if (ImGui::Combo("档位##preset", &giPreset, presetNames, 4)) {
+            if (ImGui::Combo("档位##preset", &g_GIPreset, presetNames, 4)) {
                 // 应用预设 + 按「管线能力 ∧ 设备能力」自动降级
-                gc = render::GIRegistry::Degrade(render::GIConfigFromPreset((render::GIQualityPreset)giPreset),
+                gc = render::GIRegistry::Degrade(render::GIConfigFromPreset((render::GIQualityPreset)g_GIPreset),
                                                  giCaps, rtOk);
                 if (auto* dp = dynamic_cast<render::DeferredPipeline*>(curPipeline)) {
                     dp->GetSSGI()->SetEnabled(gc.ShouldRunSSGI());
@@ -995,6 +1023,30 @@ int main() {
 
         // ── SSAO ──
         out["ssao_enabled"] = std::to_string(pipeline.GetSSAO().enabled ? 1 : 0);
+
+        // ── 面板状态：管线 / GI 档位 / 只看 GI / GI 通道配置 ──
+        out["pipeline_mode"] = std::to_string(g_PipelineMode);
+        out["gi_solo"]       = std::to_string(g_GISolo ? 1 : 0);
+        out["gi_preset"]     = std::to_string(g_GIPreset);
+        {
+            auto& gc = *pipeline.GetGIConfig();
+            out["gi_diffuse"]      = std::to_string((int)gc.diffuse);
+            out["gi_specular"]     = std::to_string((int)gc.specular);
+            out["gi_ao"]           = std::to_string((int)gc.ao);
+            out["gi_shadow"]       = std::to_string((int)gc.shadow);
+            out["gi_intensity"]    = std::to_string(gc.giIntensity);
+            out["ao_intensity"]    = std::to_string(gc.aoIntensity);
+            out["gi_ddgi_overlay"] = std::to_string(gc.ddgiOverlay ? 1 : 0);
+            out["gi_rsm_indirect"] = std::to_string(gc.rsmIndirect ? 1 : 0);
+            out["gi_half_res"]     = std::to_string(gc.halfRes ? 1 : 0);
+        }
+        {
+            auto& ssao = pipeline.GetSSAO();
+            out["ssao_radius"]   = std::to_string(ssao.radius);
+            out["ssao_samples"]  = std::to_string(ssao.sampleCount);
+            out["ssao_half_res"] = std::to_string(ssao.halfRes ? 1 : 0);
+        }
+        out["cam_move_speed"] = std::to_string(camCtrl.GetMoveSpeed());
 
         SaveConfigFile(g_ConfigPath, out);
         HE_CORE_INFO("配置已保存: {}", g_ConfigPath);
