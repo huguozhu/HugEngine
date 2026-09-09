@@ -7,13 +7,16 @@
 
 namespace he::render {
 
+// ColorGrading 描述符集绑定号（与 ColorGrading.frag 一致）
+static constexpr u32 kColorGradingBindInput = 0;   // 输入颜色
+
 bool ColorGradingPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Device = device;
     m_Width = width;
     m_Height = height;
 
     rhi::DescriptorSetLayoutDesc layout;
-    layout.bindings = {{0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}};
+    layout.bindings = {{kColorGradingBindInput, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}};
     m_Layout = device->CreateDescriptorSetLayout(layout);
     m_Set    = device->AllocateDescriptorSet(m_Layout);
 
@@ -82,7 +85,7 @@ void ColorGradingPass::SetInput(rhi::IRHITexture* color, rhi::IRHISampler* sampl
     m_Input = color;
     m_InputSampler = sampler;
     if (m_Input && m_InputSampler)
-        m_Device->UpdateDescriptorSet(m_Set, 0, rhi::DescriptorType::CombinedImageSampler, m_Input, m_InputSampler);
+        m_Device->UpdateDescriptorSet(m_Set, kColorGradingBindInput, rhi::DescriptorType::CombinedImageSampler, m_Input, m_InputSampler);
 }
 
 void ColorGradingPass::Render(rhi::IRHICommandList* cmd) {

@@ -6,6 +6,9 @@
 
 namespace he::render {
 
+// ToneMap 描述符集绑定号（与 ToneMap.frag 一致）
+static constexpr u32 kToneMapBindInput = 0;   // HDR 输入
+
 bool ToneMapPass::Initialize(rhi::IRHIDevice* device,u32 width,u32 height){
     m_Device=device;
     m_Width=width;
@@ -70,7 +73,7 @@ void ToneMapPass::SetInput(rhi::IRHITexture* hdr,rhi::IRHISampler* sampler){
         m_HDRTarget=hdr;
         m_HDRSampler=sampler;
         if(m_HDRTarget&&m_HDRSampler)
-            m_Device->UpdateDescriptorSet(m_DescSet,0,rhi::DescriptorType::CombinedImageSampler,m_HDRTarget,m_HDRSampler);
+            m_Device->UpdateDescriptorSet(m_DescSet,kToneMapBindInput,rhi::DescriptorType::CombinedImageSampler,m_HDRTarget,m_HDRSampler);
     }
 }
 

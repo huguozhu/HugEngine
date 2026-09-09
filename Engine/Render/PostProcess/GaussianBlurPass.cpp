@@ -10,6 +10,9 @@
 
 namespace he::render {
 
+// GaussianBlur 描述符集绑定号（与 GaussianBlur.frag 一致）
+static constexpr u32 kGaussianBlurBindInput = 0;   // 输入纹理
+
 bool GaussianBlurPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Device = device;
     m_Width  = width;
@@ -18,7 +21,7 @@ bool GaussianBlurPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     // 描述符集布局：单个 CombinedImageSampler
     rhi::DescriptorSetLayoutDesc layoutDesc;
     layoutDesc.bindings = {
-        {0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}  // stageMask = rhi::kStageMaskFragment (Fragment)
+        {kGaussianBlurBindInput, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}  // stageMask = rhi::kStageMaskFragment (Fragment)
     };
     m_Layout = device->CreateDescriptorSetLayout(layoutDesc);
     m_Set    = device->AllocateDescriptorSet(m_Layout);
@@ -105,7 +108,7 @@ void GaussianBlurPass::SetInput(rhi::IRHITexture* color, rhi::IRHISampler* sampl
     m_Input        = color;
     m_InputSampler = sampler;
     if (m_Input && m_InputSampler) {
-        m_Device->UpdateDescriptorSet(m_Set, 0,
+        m_Device->UpdateDescriptorSet(m_Set, kGaussianBlurBindInput,
             rhi::DescriptorType::CombinedImageSampler, m_Input, m_InputSampler);
     }
 }

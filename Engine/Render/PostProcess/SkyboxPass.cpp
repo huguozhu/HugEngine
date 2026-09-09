@@ -12,6 +12,9 @@
 
 namespace he::render {
 
+// Skybox 描述符集绑定号（与 Skybox.frag 一致）
+static constexpr u32 kSkyboxBindCubemap = 10;   // 天空盒 Cubemap
+
 bool SkyboxPass::Initialize(rhi::IRHIDevice* device,u32,u32){
     m_Device=device;
     HE_ASSERT(m_Device,"SkyboxPass: null device");
@@ -129,7 +132,7 @@ void SkyboxPass::Update(const SubsystemContext& ctx){
 
     if(found!=m_CachedSkybox){
         m_CachedSkybox=found;
-        m_Device->UpdateDescriptorSet(m_DescSet,10,
+        m_Device->UpdateDescriptorSet(m_DescSet,kSkyboxBindCubemap,
             rhi::DescriptorType::CombinedImageSampler,
             found->GetCubemap(),found->GetCubemapSampler());
     }
