@@ -486,6 +486,8 @@ int main() {
     GLFWwindow* glfwWin = engine.GetWindow()->GetNativeHandle();
     editor::ImGuiIntegration imgui;
     imgui.Initialize(glfwWin, device.get(), swapchain.get());
+    // 各面板的窗口位置/大小/折叠状态由 ImGui 自动序列化——保存到配置目录（与 06_GILab.cfg 同处）
+    ImGui::GetIO().IniFilename = "Content/Config/06_GILab_imgui.ini";
 
     // ============================================================
     // 9. 相机 — 从配置文件加载，否则使用默认位置
@@ -668,26 +670,6 @@ int main() {
             ImGui::SameLine(120);
             ImGui::TextColored({0.6f, 0.6f, 0.6f, 1.0f}, "(%.2f ms)", deltaTime * 1000.0f);
 
-            // ── 渲染管线选择（Forward / Deferred / HybridRT）──
-            ImGui::SeparatorText("渲染管线");
-            {
-                const char* pipelineNames[] = {"Forward", "Deferred", "HybridRT"};
-                int prevMode = g_PipelineMode;
-                ImGui::Combo("管线##pipeline", &g_PipelineMode, pipelineNames, 3);
-                if (g_PipelineMode == 2 && !device->GetCaps().supportsRayTracing) {
-                    ImGui::SameLine();
-                    ImGui::TextColored({1.0f, 0.6f, 0.2f, 1.0f}, "(设备不支持光追，回退 Deferred)");
-                }
-                if (g_PipelineMode != prevMode) {
-                    // 切换管线：确保交换链与视口尺寸同步
-                    curPipeline = (g_PipelineMode == 0) ? static_cast<render::IRenderPipeline*>(&forwardPipeline)
-                                : (g_PipelineMode == 2) ? static_cast<render::IRenderPipeline*>(&hybridPipeline)
-                                                        : static_cast<render::IRenderPipeline*>(&pipeline);
-                    curPipeline->SetSwapChain(swapchain.get());
-                    curPipeline->OnResize(swapchain->GetWidth(), swapchain->GetHeight());
-                }
-            }
-
             ImGui::SeparatorText("延迟渲染管线");
             ImGui::Text("GBuffer + Lighting Pass (全屏 PBR)");
             ImGui::Text("3×MRT (albedo+metallic | normal+roughness | emissive+ao) + D32");
@@ -708,17 +690,6 @@ int main() {
                     pipeline.GetGPUCulling().GetLastVisibleCount());
             }
 
-            // ── GI 实验室：只看 GI（关闭直接光）→ 逐个开启 GI 看间接光贡献 ──
-            ImGui::SeparatorText("GI 实验室");
-            if (ImGui::Checkbox("只看 GI（关闭直接光）", &g_GISolo)) {
-                // 关闭/恢复所有直接光源：画面只剩 GI（IBL/SSGI/DDGI/RSM 等）的间接光
-                world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& l){ l.enabled = !g_GISolo; });
-                world.ForEach<he::PointLight>([&](he::Entity, he::PointLight& l){ l.enabled = !g_GISolo; });
-                world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight& l){ l.enabled = !g_GISolo; });
-                world.ForEach<he::RectLight>([&](he::Entity, he::RectLight& l){ l.enabled = !g_GISolo; });
-            }
-            ImGui::TextWrapped("开启后画面只剩 GI 间接光——\n逐个启用 SSGI/DDGI 看各自贡献；IBL 强度即环境 GI 强度。");
-
             // 相机
             ImGui::SeparatorText("相机");
             ImGui::DragFloat3("位置##Camera", &camCtrl.GetCamera().position[0], 5.0f);
@@ -737,6 +708,82 @@ int main() {
                 camCtrl.GetCamera().nearPlane = nearP;
             if (ImGui::DragFloat("远裁剪面", &farP, 10.0f, 10.0f, 50000.0f, "%.0f"))
                 camCtrl.GetCamera().farPlane = farP;
+
+
+            // ── AutoExposure ──
+            ImGui::SeparatorText("AutoExposure");
+            {
+                auto& ae = pipeline.GetAutoExposure();
+                bool aeOn = ae.IsEnabled();
+                if (ImGui::Checkbox("启用自动曝光", &aeOn)) ae.SetEnabled(aeOn);
+                if (aeOn) {
+                    ImGui::Indent(12.0f);
+                    float s = ae.GetAdaptSpeed();
+                    if (ImGui::SliderFloat("适应速度", &s, 0.1f, 10.0f, "%.1f")) ae.SetAdaptSpeed(s);
+                    float t = ae.GetTargetLum();
+                    if (ImGui::SliderFloat("目标亮度", &t, 0.01f, 1.0f, "%.2f")) ae.SetTargetLum(t);
+                    ImGui::Text("当前曝光: %.2f", ae.GetExposure());
+                    ImGui::Unindent(12.0f);
+                }
+            }
+
+            // ── 后处理（仅保留与 GI/AO 相关的 SSAO）──
+            ImGui::SeparatorText("后处理");
+            {
+                bool ssaoOn = pipeline.GetSSAO().enabled;
+                if (ImGui::Checkbox("SSAO（环境光遮蔽）", &ssaoOn))
+                    pipeline.GetSSAO().enabled = ssaoOn;
+            }
+
+            // 场景统计
+            ImGui::SeparatorText("场景");
+            u32 meshCount = 0, dirLightCount = 0, spotCount = 0;
+            world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent&) { meshCount++; });
+            world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight&) { dirLightCount++; });
+            world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight&) { spotCount++; });
+            ImGui::Text("%u 网格  |  %u 方向光  |  %u 点光  |  %u 聚光", meshCount, dirLightCount, 1, spotCount);
+        }
+        ImGui::End();
+
+        // ============================================================
+        // 独立 GI 控制面板：渲染管线 → GI 质量档位 → GI 四通道（可用性 + 参数）
+        // 与主面板分离，便于独立摆放/查看
+        // ============================================================
+        // 首次使用时默认摆放在主面板右侧（之后由 imgui.ini 恢复用户位置/大小）
+        ImGui::SetNextWindowPos(ImVec2(560.0f, 10.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(430.0f, 700.0f), ImGuiCond_FirstUseEver);
+        ImGui::Begin("GI 控制台");
+        {
+            // ── 渲染管线选择（Forward / Deferred / HybridRT）──
+            ImGui::SeparatorText("渲染管线");
+            {
+                const char* pipelineNames[] = {"Forward", "Deferred", "HybridRT"};
+                int prevMode = g_PipelineMode;
+                ImGui::Combo("管线##pipeline", &g_PipelineMode, pipelineNames, 3);
+                if (g_PipelineMode == 2 && !device->GetCaps().supportsRayTracing) {
+                    ImGui::SameLine();
+                    ImGui::TextColored({1.0f, 0.6f, 0.2f, 1.0f}, "(设备不支持光追，回退 Deferred)");
+                }
+                if (g_PipelineMode != prevMode) {
+                    // 切换管线：确保交换链与视口尺寸同步
+                    curPipeline = (g_PipelineMode == 0) ? static_cast<render::IRenderPipeline*>(&forwardPipeline)
+                                : (g_PipelineMode == 2) ? static_cast<render::IRenderPipeline*>(&hybridPipeline)
+                                                        : static_cast<render::IRenderPipeline*>(&pipeline);
+                    curPipeline->SetSwapChain(swapchain.get());
+                    curPipeline->OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+                }
+            }
+
+            // ── GI 实验室：只看 GI（关闭直接光）→ 逐个开启 GI 看间接光贡献 ──
+            ImGui::SeparatorText("GI 实验室");
+            if (ImGui::Checkbox("只看 GI（关闭直接光）", &g_GISolo)) {
+                // 关闭/恢复所有直接光源：画面只剩 GI（IBL/SSGI/DDGI/RSM 等）的间接光
+                world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& l){ l.enabled = !g_GISolo; });
+                world.ForEach<he::PointLight>([&](he::Entity, he::PointLight& l){ l.enabled = !g_GISolo; });
+                world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight& l){ l.enabled = !g_GISolo; });
+                world.ForEach<he::RectLight>([&](he::Entity, he::RectLight& l){ l.enabled = !g_GISolo; });
+            }
+            ImGui::TextWrapped("开启后画面只剩 GI 间接光——\n逐个启用 SSGI/DDGI 看各自贡献；IBL 强度即环境 GI 强度。");
 
             // ── GI 质量档位（紧随管线选择）──
             ImGui::SeparatorText("GI 质量档位");
@@ -903,34 +950,17 @@ int main() {
                 ImGui::SameLine();
                 ImGui::TextColored(ok ? colOk : colBad, ok ? "[可用]" : "[不可用]");
             }
+        }
+        ImGui::End();
 
-            // ── AutoExposure ──
-            ImGui::SeparatorText("AutoExposure");
-            {
-                auto& ae = pipeline.GetAutoExposure();
-                bool aeOn = ae.IsEnabled();
-                if (ImGui::Checkbox("启用自动曝光", &aeOn)) ae.SetEnabled(aeOn);
-                if (aeOn) {
-                    ImGui::Indent(12.0f);
-                    float s = ae.GetAdaptSpeed();
-                    if (ImGui::SliderFloat("适应速度", &s, 0.1f, 10.0f, "%.1f")) ae.SetAdaptSpeed(s);
-                    float t = ae.GetTargetLum();
-                    if (ImGui::SliderFloat("目标亮度", &t, 0.01f, 1.0f, "%.2f")) ae.SetTargetLum(t);
-                    ImGui::Text("当前曝光: %.2f", ae.GetExposure());
-                    ImGui::Unindent(12.0f);
-                }
-            }
-
-            // ── 后处理（仅保留与 GI/AO 相关的 SSAO）──
-            ImGui::SeparatorText("后处理");
-            {
-                bool ssaoOn = pipeline.GetSSAO().enabled;
-                if (ImGui::Checkbox("SSAO（环境光遮蔽）", &ssaoOn))
-                    pipeline.GetSSAO().enabled = ssaoOn;
-            }
-
-            // ── GPU Profiler ──
-            ImGui::SeparatorText("GPU Profiler");
+        // ============================================================
+        // 独立 GPU Profiler 面板：各 pass 的 GPU 耗时统计
+        // ============================================================
+        // 首次使用时默认摆放在 GI 面板下方（之后由 imgui.ini 恢复）
+        ImGui::SetNextWindowPos(ImVec2(560.0f, 720.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(430.0f, 260.0f), ImGuiCond_FirstUseEver);
+        ImGui::Begin("GPU Profiler");
+        {
             auto& pdata = pipeline.GetProfiler().GetLastFrameData();
             float totalMs = 0;
             for (auto& p : pdata) {
@@ -940,14 +970,6 @@ int main() {
             }
             ImGui::Separator();
             ImGui::Text("Total GPU: %.2fms (%.0f FPS)", totalMs, totalMs > 0 ? 1000.0f / totalMs : 0);
-
-            // 场景统计
-            ImGui::SeparatorText("场景");
-            u32 meshCount = 0, dirLightCount = 0, spotCount = 0;
-            world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent&) { meshCount++; });
-            world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight&) { dirLightCount++; });
-            world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight&) { spotCount++; });
-            ImGui::Text("%u 网格  |  %u 方向光  |  %u 点光  |  %u 聚光", meshCount, dirLightCount, 1, spotCount);
         }
         ImGui::End();
 
