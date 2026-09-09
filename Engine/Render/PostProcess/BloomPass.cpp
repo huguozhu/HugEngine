@@ -12,6 +12,11 @@
 
 namespace he::render {
 
+// Bloom 鎻忚堪绗﹂泦缁戝畾鍙穈r
+static constexpr u32 kBloomBrightBindInput = 0;
+static constexpr u32 kBloomCompositeBindHDR = 0;
+static constexpr u32 kBloomCompositeBindBloom = 1;
+
 bool BloomPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Device = device;
     m_Width  = width;
@@ -21,7 +26,7 @@ bool BloomPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     // ── BrightPass PSO ──
     {
         rhi::DescriptorSetLayoutDesc layout;
-        layout.bindings = {{0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}};
+        layout.bindings = {{kBloomBrightBindInput, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}};
         m_BrightLayout = device->CreateDescriptorSetLayout(layout);
         m_BrightSet    = device->AllocateDescriptorSet(m_BrightLayout);
 
@@ -185,7 +190,7 @@ void BloomPass::Render(rhi::IRHICommandList* cmd) {
     rhi::ClearValue clr{};
 
     // ── Pass 1: BrightPass（阈值提取 → 半分辨率）──
-    m_Device->UpdateDescriptorSet(m_BrightSet, 0,
+    m_Device->UpdateDescriptorSet(m_BrightSet, kBloomBrightBindInput,
         rhi::DescriptorType::CombinedImageSampler, m_HDRInput, m_HDRSampler);
 
     cmd->SetPipeline(m_BrightPSO.get());
@@ -209,9 +214,9 @@ void BloomPass::Render(rhi::IRHICommandList* cmd) {
     cmd->EndOffscreenPass();
 
     // ── Pass 3: Composite（上采样 Bloom + 叠加到原始 HDR）──
-    m_Device->UpdateDescriptorSet(m_CompositeSet, 0,
+    m_Device->UpdateDescriptorSet(m_CompositeSet, kBloomCompositeBindHDR,
         rhi::DescriptorType::CombinedImageSampler, m_HDRInput, m_HDRSampler);
-    m_Device->UpdateDescriptorSet(m_CompositeSet, 1,
+    m_Device->UpdateDescriptorSet(m_CompositeSet, kBloomCompositeBindBloom,
         rhi::DescriptorType::CombinedImageSampler,
         m_Blur.GetOutput(), m_Blur.GetOutputSampler());
 

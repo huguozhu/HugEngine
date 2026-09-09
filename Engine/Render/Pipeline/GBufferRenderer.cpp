@@ -185,10 +185,10 @@ void GBufferRenderer::CreatePSO(rhi::IRHIDevice* device) {
     // 描述符集布局：set=0 = per-frame GPUObjectData[] + bindless 纹理/采样器数组
     rhi::DescriptorSetLayoutDesc gbLayout;
     gbLayout.bindings = {
-        {2, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskVertex | rhi::kStageMaskFragment},
-        {5, rhi::DescriptorType::SampledImage, 4096, rhi::kStageMaskFragment, true},   // bindless 纹理
-        {6, rhi::DescriptorType::Sampler, 4096, rhi::kStageMaskFragment, true},         // bindless 采样器
-        {30, rhi::DescriptorType::StorageBuffer, 4096, rhi::kStageMaskVertex | rhi::kStageMaskFragment, true},  // u_SSBO[] bindless
+        {kGPUBinding_ObjectData, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskVertex | rhi::kStageMaskFragment},
+        {kGPUBinding_BindlessTextures, rhi::DescriptorType::SampledImage, 4096, rhi::kStageMaskFragment, true},   // bindless 纹理
+        {kGPUBinding_BindlessSamplers, rhi::DescriptorType::Sampler, 4096, rhi::kStageMaskFragment, true},         // bindless 采样器
+        {kGPUBinding_BindlessSSBO, rhi::DescriptorType::StorageBuffer, 4096, rhi::kStageMaskVertex | rhi::kStageMaskFragment, true},  // u_SSBO[] bindless
     };
     m_Layout = device->CreateDescriptorSetLayout(gbLayout);
 

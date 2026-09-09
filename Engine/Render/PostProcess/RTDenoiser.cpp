@@ -7,6 +7,13 @@
 
 namespace he::render {
 
+// RT Denoiser 鎻忚堪绗﹂泦缁戝畾鍙穈r
+static constexpr u32 kRTDenoiseBindColor = 0;
+static constexpr u32 kRTDenoiseBindHistory = 1;
+static constexpr u32 kRTDenoiseBindDepth = 2;
+static constexpr u32 kRTDenoiseBindNormal = 3;
+static constexpr u32 kRTDenoiseBindVelocity = 4;
+
 // ============================================================
 // Initialize — 创建历史/输出纹理 + PSO + 描述符集
 // ============================================================
@@ -155,7 +162,7 @@ void RTDenoiser::Render(rhi::IRHICommandList* cmd) {
     if (!m_Ready) return;
 
     // 历史绑定：上一帧累积结果作为当前帧采样输入
-    m_Device->UpdateDescriptorSet(m_Set, 1,
+    m_Device->UpdateDescriptorSet(m_Set, kRTDenoiseBindHistory,
         rhi::DescriptorType::CombinedImageSampler,
         m_History.get(), m_PointSampler.get());
 

@@ -9,6 +9,10 @@
 
 namespace he::render {
 
+// MotionBlur 鎻忚堪绗﹂泦缁戝畾鍙穈r
+static constexpr u32 kMotionBlurBindHDR = 0;
+static constexpr u32 kMotionBlurBindVelocity = 1;
+
 bool MotionBlurPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Device = device;
     m_Width  = width;
@@ -98,9 +102,9 @@ void MotionBlurPass::SetInputs(rhi::IRHITexture* hdr, rhi::IRHISampler* hdrSampl
 void MotionBlurPass::Render(rhi::IRHICommandList* cmd) {
     if (!m_Ready || !m_Enabled || !m_HDRInput || !m_VelInput) return;
 
-    m_Device->UpdateDescriptorSet(m_Set, 0, rhi::DescriptorType::CombinedImageSampler,
+    m_Device->UpdateDescriptorSet(m_Set, kMotionBlurBindHDR, rhi::DescriptorType::CombinedImageSampler,
         m_HDRInput, m_HDRSampler);
-    m_Device->UpdateDescriptorSet(m_Set, 1, rhi::DescriptorType::CombinedImageSampler,
+    m_Device->UpdateDescriptorSet(m_Set, kMotionBlurBindVelocity, rhi::DescriptorType::CombinedImageSampler,
         m_VelInput, m_VelSampler);
 
     struct { float intensity; u32 samples; float2 _pad; } pc;

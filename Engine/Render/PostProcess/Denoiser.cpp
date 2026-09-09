@@ -6,6 +6,11 @@
 
 namespace he::render {
 
+// Denoiser 鎻忚堪绗﹂泦缁戝畾鍙穈r
+static constexpr u32 kDenoiseBindColor = 0;
+static constexpr u32 kDenoiseBindDepth = 1;
+static constexpr u32 kDenoiseBindNormal = 2;
+
 bool Denoiser::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Device=device;
     m_Width=width;
@@ -58,9 +63,9 @@ void Denoiser::SetInputs(rhi::IRHITexture* color, rhi::IRHITexture* depth, rhi::
     m_Input=color;
     m_Depth=depth;
     m_Normal=normal;
-    if(color) m_Device->UpdateDescriptorSet(m_Set,0,rhi::DescriptorType::CombinedImageSampler,color,m_Sampler.get());
-    if(depth) m_Device->UpdateDescriptorSet(m_Set,1,rhi::DescriptorType::CombinedImageSampler,depth,m_Sampler.get());
-    if(normal)m_Device->UpdateDescriptorSet(m_Set,2,rhi::DescriptorType::CombinedImageSampler,normal,m_Sampler.get());
+    if(color) m_Device->UpdateDescriptorSet(m_Set,kDenoiseBindColor,rhi::DescriptorType::CombinedImageSampler,color,m_Sampler.get());
+    if(depth) m_Device->UpdateDescriptorSet(m_Set,kDenoiseBindDepth,rhi::DescriptorType::CombinedImageSampler,depth,m_Sampler.get());
+    if(normal)m_Device->UpdateDescriptorSet(m_Set,kDenoiseBindNormal,rhi::DescriptorType::CombinedImageSampler,normal,m_Sampler.get());
 }
 void Denoiser::Render(rhi::IRHICommandList* cmd){
     cmd->SetPipeline(m_PSO.get());

@@ -9,6 +9,9 @@
 
 namespace he::render {
 
+// FXAA 鎻忚堪绗﹂泦缁戝畾鍙穈r
+static constexpr u32 kFXAABindInput = 0;
+
 bool AA_FXAA::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Device = device;
     m_Width  = width;
@@ -54,7 +57,7 @@ void AA_FXAA::SetInput(rhi::IRHITexture* color, rhi::IRHISampler* sampler) {
     m_Input = color;
     m_InputSampler = sampler;
     if (m_Input && m_InputSampler)
-        m_Device->UpdateDescriptorSet(m_DescSet, 0,
+        m_Device->UpdateDescriptorSet(m_DescSet, kFXAABindInput,
             rhi::DescriptorType::CombinedImageSampler, m_Input, m_InputSampler);
 }
 
@@ -76,7 +79,7 @@ void AA_FXAA::Render(rhi::IRHICommandList* cmd) {
 void AA_FXAA::CreatePSO() {
     // 描述符集
     rhi::DescriptorSetLayoutDesc layout;
-    layout.bindings = {{0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}};
+    layout.bindings = {{kFXAABindInput, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}};
     m_DescLayout = m_Device->CreateDescriptorSetLayout(layout);
     m_DescSet = m_Device->AllocateDescriptorSet(m_DescLayout);
 

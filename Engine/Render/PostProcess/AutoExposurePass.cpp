@@ -8,6 +8,10 @@
 
 namespace he::render {
 
+// AutoExposure 鎻忚堪绗﹂泦缁戝畾鍙穈r
+static constexpr u32 kAEBindHDR = 0;
+static constexpr u32 kAEBindResult = 1;
+
 // SDR 参考白点（尼特，REC.709 标准白点），用于把 CVar 白点归一化为曝光亮度倍率 whitePoint/80
 static constexpr float kSdrReferenceWhitePoint = 80.0f;
 
@@ -70,7 +74,7 @@ void AutoExposurePass::SetInput(rhi::IRHITexture* hdr, rhi::IRHISampler* sampler
     m_HDRInput = hdr;
     m_HDRSampler = sampler;
     if (m_HDRInput && m_HDRSampler)
-        m_Device->UpdateDescriptorSet(m_Set, 0, rhi::DescriptorType::CombinedImageSampler, m_HDRInput, m_HDRSampler);
+        m_Device->UpdateDescriptorSet(m_Set, kAEBindHDR, rhi::DescriptorType::CombinedImageSampler, m_HDRInput, m_HDRSampler);
 }
 
 void AutoExposurePass::Render(rhi::IRHICommandList* cmd) {
@@ -80,7 +84,7 @@ void AutoExposurePass::Render(rhi::IRHICommandList* cmd) {
     m_DisplayWhitePoint = cvAutoExposureWhitePoint.Get();
 
     // 绑定 SSBO
-    m_Device->UpdateDescriptorSet(m_Set, 1, rhi::DescriptorType::StorageBuffer, m_ResultBuf.get());
+    m_Device->UpdateDescriptorSet(m_Set, kAEBindResult, rhi::DescriptorType::StorageBuffer, m_ResultBuf.get());
 
     // 调度：16×16 = 256 组
     struct { float adaptSpeed, targetLogLum, deltaTime; u32 totalPixels; } pc;

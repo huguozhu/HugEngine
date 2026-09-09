@@ -9,6 +9,11 @@
 
 namespace he::render {
 
+// GPUWorkGraph 鎻忚堪绗﹂泦缁戝畾鍙穈r
+static constexpr u32 kWGBindInput = 0;
+static constexpr u32 kWGBindOutput = 1;
+static constexpr u32 kWGBindCounter = 2;
+
 // ============================================================
 // Initialize — 初始化 Work Graph 系统
 // ============================================================
@@ -134,11 +139,11 @@ u32 GPUWorkGraph::AddNode(const WGNodeDesc& desc) {
         HE_ASSERT(node.descSet != rhi::kInvalidSet,
                   "GPUWorkGraph: descSet 分配失败");
 
-        m_Device->UpdateDescriptorSet(node.descSet, 0,
+        m_Device->UpdateDescriptorSet(node.descSet, kWGBindInput,
             rhi::DescriptorType::StorageBuffer, node.inputBuffer.get());
-        m_Device->UpdateDescriptorSet(node.descSet, 1,
+        m_Device->UpdateDescriptorSet(node.descSet, kWGBindOutput,
             rhi::DescriptorType::StorageBuffer, node.outputBuffer.get());
-        m_Device->UpdateDescriptorSet(node.descSet, 2,
+        m_Device->UpdateDescriptorSet(node.descSet, kWGBindCounter,
             rhi::DescriptorType::StorageBuffer, node.counterBuffer.get());
 
         // ── 创建 Compute PSO（Entry 节点使用默认 WorkGraph_Entry shader）──
