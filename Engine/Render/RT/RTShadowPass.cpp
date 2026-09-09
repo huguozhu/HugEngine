@@ -20,6 +20,13 @@
 
 namespace he::render {
 
+// RT 闃村奖鎻忚堪绗﹂泦缁戝畾鍙穈r
+static constexpr u32 kRTShadowBindTLAS   = 0;   // TLAS
+static constexpr u32 kRTShadowBindOutput = 1;   // 闃村奖閬僵杈撳嚭
+static constexpr u32 kRTShadowBindDepth  = 2;   // 娣卞害
+static constexpr u32 kRTShadowBindNormal = 3;   // 娉曠嚎
+static constexpr u32 kRTShadowBindParams = 4;   // 鍙傛暟 UBO
+
 // 阴影光源结构（GPU 侧，64B/个，与 RT_Shadow.rgen.slang 的 ShadowLight 一致）
 struct ShadowLightGPU {
     float4 pos_type;      // xyz=位置/方向, w=类型(0=Dir,1=Point,2=Spot)
@@ -138,19 +145,19 @@ void RTShadowPass::Execute(rhi::IRHICommandList* cmd,
     PrepareOutputUAV(cmd);
 
     // ── 更新 set0 描述符 ──
-    m_Device->UpdateDescriptorSet(m_RayGenSet, 0,
+    m_Device->UpdateDescriptorSet(m_RayGenSet, kRTShadowBindTLAS,
         rhi::DescriptorType::AccelerationStructure, tlas);
     // StorageImage 用原生 ImageView 绑定（与 RTPass 的 backbuffer 模式一致）
     m_Device->UpdateDescriptorSetWithImageView(m_RayGenSet, 1,
         rhi::DescriptorType::StorageImage, m_Output->GetNativeHandle());
     if (ctx.gbDepth)
-        m_Device->UpdateDescriptorSet(m_RayGenSet, 2,
+        m_Device->UpdateDescriptorSet(m_RayGenSet, kRTShadowBindDepth,
             rhi::DescriptorType::SampledImage, ctx.gbDepth, nullptr);
     if (ctx.gbNormal)
-        m_Device->UpdateDescriptorSet(m_RayGenSet, 3,
+        m_Device->UpdateDescriptorSet(m_RayGenSet, kRTShadowBindNormal,
             rhi::DescriptorType::SampledImage, ctx.gbNormal, nullptr);
     if (m_LightUB)
-        m_Device->UpdateDescriptorSet(m_RayGenSet, 4,
+        m_Device->UpdateDescriptorSet(m_RayGenSet, kRTShadowBindParams,
             rhi::DescriptorType::UniformBuffer, m_LightUB.get());
 
     // ── 填充阴影光源数据（显式抽取 GPULight[] → ShadowLight[16]）──

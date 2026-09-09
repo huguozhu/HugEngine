@@ -20,6 +20,12 @@
 
 namespace he::render {
 
+// RT AO 鎻忚堪绗﹂泦缁戝畾鍙穈r
+static constexpr u32 kRTAOBindTLAS   = 0;   // TLAS
+static constexpr u32 kRTAOBindOutput = 1;   // AO 杈撳嚭
+static constexpr u32 kRTAOBindDepth  = 2;   // 娣卞害
+static constexpr u32 kRTAOBindNormal = 3;   // 娉曠嚎
+
 bool RTAOPass::Initialize(rhi::IRHIDevice* device, u32 fullWidth, u32 fullHeight,
                           bool halfRes) {
     m_FullWidth  = fullWidth;
@@ -114,15 +120,15 @@ void RTAOPass::Execute(rhi::IRHICommandList* cmd,
     PrepareOutputUAV(cmd);
 
     // ── 更新 set0 描述符 ──
-    m_Device->UpdateDescriptorSet(m_RayGenSet, 0,
+    m_Device->UpdateDescriptorSet(m_RayGenSet, kRTAOBindTLAS,
         rhi::DescriptorType::AccelerationStructure, tlas);
     m_Device->UpdateDescriptorSetWithImageView(m_RayGenSet, 1,
         rhi::DescriptorType::StorageImage, m_Output->GetNativeHandle());
     if (ctx.gbDepth)
-        m_Device->UpdateDescriptorSet(m_RayGenSet, 2,
+        m_Device->UpdateDescriptorSet(m_RayGenSet, kRTAOBindDepth,
             rhi::DescriptorType::SampledImage, ctx.gbDepth, nullptr);
     if (ctx.gbNormal)
-        m_Device->UpdateDescriptorSet(m_RayGenSet, 3,
+        m_Device->UpdateDescriptorSet(m_RayGenSet, kRTAOBindNormal,
             rhi::DescriptorType::SampledImage, ctx.gbNormal, nullptr);
 
     // ── 设置 push constants（RTRayEffectPushConstant 共享结构）──

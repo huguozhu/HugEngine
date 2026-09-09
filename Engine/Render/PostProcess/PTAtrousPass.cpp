@@ -7,6 +7,12 @@
 
 namespace he::render {
 
+// PT 脌-Trous 闄嶅櫔鎻忚堪绗﹂泦缁戝畾鍙穈r
+static constexpr u32 kAtrousBindColor  = 0;
+static constexpr u32 kAtrousBindDepth  = 1;
+static constexpr u32 kAtrousBindNormal = 2;
+static constexpr u32 kAtrousBindOutput = 3;
+
 // A-Trous 空间滤波 push constant（与 PT_Atrous.comp.slang 的 AtrousPC 逐字段一致）
 // 布局：uint2(8) + u32(4) + 4×float(16) + 2×float pad(8) = 36B
 struct PTAtrousPushConstant {
@@ -99,9 +105,9 @@ void PTAtrousPass::SetInputs(rhi::IRHITexture* color, rhi::IRHITexture* depth, r
     m_Depth = depth;
     m_Normal = normal;
     if (!m_Device) return;
-    m_Device->UpdateDescriptorSet(m_Set, 0, rhi::DescriptorType::SampledImage, color, nullptr);
-    m_Device->UpdateDescriptorSet(m_Set, 1, rhi::DescriptorType::SampledImage, depth, nullptr);
-    m_Device->UpdateDescriptorSet(m_Set, 2, rhi::DescriptorType::SampledImage, normal, nullptr);
+    m_Device->UpdateDescriptorSet(m_Set, kAtrousBindColor, rhi::DescriptorType::SampledImage, color, nullptr);
+    m_Device->UpdateDescriptorSet(m_Set, kAtrousBindDepth, rhi::DescriptorType::SampledImage, depth, nullptr);
+    m_Device->UpdateDescriptorSet(m_Set, kAtrousBindNormal, rhi::DescriptorType::SampledImage, normal, nullptr);
 }
 
 void PTAtrousPass::SetParams(u32 iterations, float sigmaDepth, float normalPower,
