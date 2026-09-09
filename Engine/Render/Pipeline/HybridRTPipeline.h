@@ -15,6 +15,7 @@
 #include "Pipeline/ClusteredShading.h"
 #include "Pipeline/ParticleRenderer.h"
 #include "GI/GI_DDGI.h"
+#include "GI/GI_IBL.h"
 #include "GI/GIConfig.h"
 #include "PostProcess/RTDenoiser.h"
 #include "PostProcess/Denoiser.h"
@@ -64,7 +65,7 @@ public:
                 float deltaTime = 0.016f) override;
 
     // ── 访问器（供 02.Cube 的 ImGui 调用）──
-    void SetSwapChain(rhi::IRHISwapChain* sc) { m_SwapChain = sc; }
+    void SetSwapChain(rhi::IRHISwapChain* sc) override { m_SwapChain = sc; }
     GBufferRenderer*      GetGBuffer()          { return m_GBuffer.get(); }
     LightingPass*         GetLighting()         { return &m_Lighting; }
     PostProcessChain*     GetPostProcess()      { return &m_PostProcess; }
@@ -74,6 +75,8 @@ public:
     RTReflectionPass*     GetRTReflection()     { return m_RTReflection.get(); }
     RTGIPass*             GetRTGI()             { return m_RTGI.get(); }
     GI_DDGI*              GetDDGI()             { return &m_DDGI; }
+    // GI 子系统（IBL 环境光——HybridRT 同样需要，否则 Lighting 采样占位纹理）
+    IGlobalIllumination*  GetGI() override        { return m_GI.get(); }
     // 该管线的 GI 通道配置（HybridRT：含 RT 阴影/AO/反射/GI）
     GIConfig*             GetGIConfig() override { return &m_GIConfig; }
     u32                   GetGIPipelineCaps() const override { return PipelineCaps::HybridRT; }
@@ -149,6 +152,7 @@ private:
     // ── 专有 GI ──
     GI_DDGI m_DDGI;
     GIConfig m_GIConfig;   // 该管线的 GI 通道配置（可用子集见 PipelineCaps::HybridRT）
+    std::unique_ptr<IGlobalIllumination> m_GI;   // IBL 环境光（Irradiance/Prefilter/BRDF LUT）
 
     // ── GPU Driven 基础设施 ──
     GPUCulling m_GPUCulling;

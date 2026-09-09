@@ -11,6 +11,9 @@
 #include "Platform/Window.h"
 #include "RHI/RHI.h"
 #include "Pipeline/DeferredPipeline.h"
+#include "Pipeline/ForwardPipeline.h"
+#include "Pipeline/HybridRTPipeline.h"
+#include "Pipeline/IRenderPipeline.h"
 #include "GI/GIConfig.h"
 #include "GI/GIRegistry.h"
 #include "Pipeline/CameraController.h"
@@ -357,12 +360,27 @@ int main() {
     }
 
     // ============================================================
-    // 6. 初始化延迟管线
+    // 6. 初始化渲染管线（三管线可选：Forward / Deferred / HybridRT）
     // ============================================================
-    render::DeferredPipeline pipeline;
+    render::DeferredPipeline   pipeline;          // 延迟管线（默认，GI 对比主用）
+    render::ForwardPipeline    forwardPipeline;   // 前向管线
+    render::HybridRTPipeline   hybridPipeline;    // 混合光追管线
+
     pipeline.Initialize(device.get());
     pipeline.SetSwapChain(swapchain.get());
     pipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+
+    forwardPipeline.Initialize(device.get());
+    forwardPipeline.SetSwapChain(swapchain.get());
+    forwardPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+
+    hybridPipeline.Initialize(device.get());
+    hybridPipeline.SetSwapChain(swapchain.get());
+    hybridPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+
+    int  g_PipelineMode = 1;                       // 0=Forward 1=Deferred 2=HybridRT
+    bool g_PendingHalfResApply = false;            // 档位切换后延迟到帧边界重建半分辨率纹理（ImGui 回调内重建会死锁）
+    render::IRenderPipeline* curPipeline = &pipeline;
 
     // ── 从配置文件恢复管线 / GI / 后处理设置 ──
     if (hasConfig) {
@@ -504,6 +522,8 @@ int main() {
         swapchain->Resize(w, h);
         cmdList->SetSwapChain(swapchain.get());
         pipeline.OnResize(w, h);
+        forwardPipeline.OnResize(w, h);
+        hybridPipeline.OnResize(w, h);
         camCtrl.SetAspectRatio(static_cast<float>(w), static_cast<float>(h));
     });
 
@@ -577,10 +597,32 @@ int main() {
             if (tf) anim.Update(deltaTime, tf);
         });
 
-        // --- 渲染（DeferredPipeline 通过 RenderGraph 全自动编排）---
+        // --- 渲染（按选择的管线执行；各管线均通过 RenderGraph 自动编排）---
         cmdList->Begin();
-        pipeline.NextFrame();
-        pipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
+        switch (g_PipelineMode) {
+        case 0:  // Forward
+            curPipeline = &forwardPipeline;
+            break;
+        case 2:  // HybridRT（设备不支持光追时回退 Deferred）
+            curPipeline = device->GetCaps().supportsRayTracing ? static_cast<render::IRenderPipeline*>(&hybridPipeline)
+                                                               : static_cast<render::IRenderPipeline*>(&pipeline);
+            break;
+        default: // Deferred
+            curPipeline = &pipeline;
+            break;
+        }
+        curPipeline->NextFrame();
+        // 帧边界应用延迟的半分辨率纹理重建（先等待 GPU 空闲，避免销毁正在使用的纹理）
+        if (g_PendingHalfResApply) {
+            device->WaitIdle();
+            if (auto* dpApply = dynamic_cast<render::DeferredPipeline*>(curPipeline)) {
+                dpApply->GetSSGI()->OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+                dpApply->GetSSR()->OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+                dpApply->GetSSAO().OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+            }
+            g_PendingHalfResApply = false;
+        }
+        curPipeline->Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
 
         // --- ImGui（LOAD 保留 ToneMap 输出）---
         cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
@@ -595,6 +637,26 @@ int main() {
             ImGui::TextColored({0.3f, 1.0f, 0.3f, 1.0f}, "FPS: %.0f", fps);
             ImGui::SameLine(120);
             ImGui::TextColored({0.6f, 0.6f, 0.6f, 1.0f}, "(%.2f ms)", deltaTime * 1000.0f);
+
+            // ── 渲染管线选择（Forward / Deferred / HybridRT）──
+            ImGui::SeparatorText("渲染管线");
+            {
+                const char* pipelineNames[] = {"Forward", "Deferred", "HybridRT"};
+                int prevMode = g_PipelineMode;
+                ImGui::Combo("管线##pipeline", &g_PipelineMode, pipelineNames, 3);
+                if (g_PipelineMode == 2 && !device->GetCaps().supportsRayTracing) {
+                    ImGui::SameLine();
+                    ImGui::TextColored({1.0f, 0.6f, 0.2f, 1.0f}, "(设备不支持光追，回退 Deferred)");
+                }
+                if (g_PipelineMode != prevMode) {
+                    // 切换管线：确保交换链与视口尺寸同步
+                    curPipeline = (g_PipelineMode == 0) ? static_cast<render::IRenderPipeline*>(&forwardPipeline)
+                                : (g_PipelineMode == 2) ? static_cast<render::IRenderPipeline*>(&hybridPipeline)
+                                                        : static_cast<render::IRenderPipeline*>(&pipeline);
+                    curPipeline->SetSwapChain(swapchain.get());
+                    curPipeline->OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+                }
+            }
 
             ImGui::SeparatorText("延迟渲染管线");
             ImGui::Text("GBuffer + Lighting Pass (全屏 PBR)");
@@ -647,105 +709,171 @@ int main() {
             if (ImGui::DragFloat("远裁剪面", &farP, 10.0f, 10.0f, 50000.0f, "%.0f"))
                 camCtrl.GetCamera().farPlane = farP;
 
-            // ── GI 质量档位（M2 数据驱动：档位/通道/强度）──
-            ImGui::SeparatorText("GI 质量 (M2)");
+            // ── GI 质量档位（紧随管线选择）──
+            ImGui::SeparatorText("GI 质量档位");
             static int giPreset = -1;
             const char* presetNames[] = {"Low", "Medium", "High", "Ultra"};
-            if (ImGui::Combo("质量档位", &giPreset, presetNames, 4)) {
-                auto& gc = *pipeline.GetGIConfig();
-                // M3：应用预设并经 GIRegistry 自动降级（管线能力 ∧ 设备光追能力）
+            render::GIConfig& gc = *curPipeline->GetGIConfig();
+            const u32  giCaps = curPipeline->GetGIPipelineCaps();
+            const bool rtOk   = device->GetCaps().supportsRayTracing;
+            if (ImGui::Combo("档位##preset", &giPreset, presetNames, 4)) {
+                // 应用预设 + 按「管线能力 ∧ 设备能力」自动降级
                 gc = render::GIRegistry::Degrade(render::GIConfigFromPreset((render::GIQualityPreset)giPreset),
-                                                 pipeline.GetGIPipelineCaps(),
-                                                 device->GetCaps().supportsRayTracing);
-                // 应用档位到 GI 子系统开关（帧图按 config 条件注册）
-                pipeline.GetSSGI()->SetEnabled(gc.ShouldRunSSGI());
-                pipeline.GetDDGI()->SetEnabled(gc.ShouldRunDDGI());
-                pipeline.GetSSR()->SetEnabled(gc.ShouldRunSpecular());
-                pipeline.GetSSAO().enabled = gc.ShouldRunAO();
-                // M4.1 halfRes 应用：档位的 halfRes 同步到 GI 子系统并重建输出纹理
-                auto sgiSettings = pipeline.GetSSGI()->GetSettings();
-                sgiSettings.halfRes = gc.halfRes;
-                pipeline.GetSSGI()->SetSettings(sgiSettings);
-                auto ssrSettings = pipeline.GetSSR()->GetSettings();
-                ssrSettings.halfRes = gc.halfRes;
-                pipeline.GetSSR()->SetSettings(ssrSettings);
-                pipeline.GetSSAO().halfRes = gc.halfRes;
-                pipeline.GetSSGI()->OnResize(config.windowWidth, config.windowHeight);
-                pipeline.GetSSR()->OnResize(config.windowWidth, config.windowHeight);
-                pipeline.GetSSAO().OnResize(config.windowWidth, config.windowHeight);
-            }
-            auto& gc2 = *pipeline.GetGIConfig();
-            ImGui::SliderFloat("GI 强度", &gc2.giIntensity, 0.0f, 2.0f, "%.2f");
-            ImGui::SliderFloat("AO 强度", &gc2.aoIntensity, 0.0f, 1.5f, "%.2f");
-
-            // GI — IBL
-            auto* gi = pipeline.GetGI();
-            if (gi) {
-                ImGui::SeparatorText("GI — IBL");
-                auto settings = gi->GetSettings();
-                float intensity = settings.intensity;
-                if (ImGui::SliderFloat("IBL 强度", &intensity, 0.0f, 3.0f, "%.2f")) {
-                    settings.intensity = intensity;
-                    gi->SetSettings(settings);
+                                                 giCaps, rtOk);
+                if (auto* dp = dynamic_cast<render::DeferredPipeline*>(curPipeline)) {
+                    dp->GetSSGI()->SetEnabled(gc.ShouldRunSSGI());
+                    dp->GetDDGI()->SetEnabled(gc.ShouldRunDDGI());
+                    dp->GetSSR()->SetEnabled(gc.ShouldRunSpecular());
+                    dp->GetSSAO().enabled = gc.ShouldRunAO();
+                    auto sg = dp->GetSSGI()->GetSettings();
+                    sg.halfRes = gc.halfRes;
+                    dp->GetSSGI()->SetSettings(sg);
+                    auto sr = dp->GetSSR()->GetSettings();
+                    sr.halfRes = gc.halfRes;
+                    dp->GetSSR()->SetSettings(sr);
+                    dp->GetSSAO().halfRes = gc.halfRes;
+                    // 纹理重建延迟到帧边界（NextFrame 之后），避免在 ImGui 回调内销毁/创建正在使用的纹理
+                    g_PendingHalfResApply = true;
+                } else if (auto* hp = dynamic_cast<render::HybridRTPipeline*>(curPipeline)) {
+                    hp->GetDDGI()->SetEnabled(gc.ShouldRunDDGI());
                 }
-                auto gdbg = gi->GetDebugData();
-                ImGui::Text("耗时 %.2f ms", gdbg.avgRenderTimeMs);
             }
 
-            // GI — SSGI（屏幕空间间接漫反射）
-            if (auto* ssgi = pipeline.GetSSGI()) {
-                ImGui::SeparatorText("GI — SSGI");
-                bool ssgiOn = ssgi->IsEnabled();
-                if (ImGui::Checkbox("启用 SSGI", &ssgiOn))
-                    ssgi->SetEnabled(ssgiOn);
-                if (ssgiOn) {
-                    ImGui::Indent(12.0f);
-                    ImGui::DragFloat("采样半径##ssgi", &ssgi->radius, 0.1f, 0.1f, 5.0f, "%.1f");
-                    ImGui::SliderInt("采样数##ssgi", &ssgi->sampleCount, 4, 64);
-                    auto ssgiSettings = ssgi->GetSettings();
-                    if (ImGui::SliderFloat("强度##ssgi", &ssgiSettings.intensity, 0.0f, 2.0f, "%.2f"))
-                        ssgi->SetSettings(ssgiSettings);
-                    ImGui::Unindent(12.0f);
+            // 当前管线可用的 GI 子系统（按管线类型获取，Forward 无屏幕空间/探针 GI）
+            auto* dp = dynamic_cast<render::DeferredPipeline*>(curPipeline);
+            auto* hp = dynamic_cast<render::HybridRTPipeline*>(curPipeline);
+            auto* giSSGI = dp ? dp->GetSSGI() : nullptr;
+            auto* giSSR  = dp ? dp->GetSSR()  : nullptr;
+            auto* giDDGI = dp ? dp->GetDDGI() : (hp ? hp->GetDDGI() : nullptr);
+
+            // ── GI 通道：Diffuse / Specular / AO / Shadow ──
+            ImGui::SeparatorText("GI 通道");
+            const ImVec4 colOk  = ImVec4(0.4f, 1.0f, 0.4f, 1.0f);
+            const ImVec4 colBad = ImVec4(1.0f, 0.55f, 0.2f, 1.0f);
+
+            // ---- Diffuse（间接漫反射）----
+            ImGui::TextUnformatted("Diffuse — 间接漫反射");
+            {
+                const char* names[] = {"None", "SSGI", "RTGI"};
+                int cur = (int)gc.diffuse;
+                if (ImGui::Combo("##diffuse", &cur, names, 3)) {
+                    gc.diffuse = (render::DiffuseChannel)cur;
+                    gc = render::GIRegistry::Degrade(gc, giCaps, rtOk);   // 不可用则降级
                 }
-                ImGui::Text("耗时 %.2f ms", ssgi->GetDebugData().avgRenderTimeMs);
-            }
-
-            // GI — DDGI（探针网格动态 GI）
-            if (auto* ddgi = pipeline.GetDDGI()) {
-                ImGui::SeparatorText("GI — DDGI");
-                bool ddgiOn = ddgi->IsEnabled();
-                if (ImGui::Checkbox("启用 DDGI", &ddgiOn))
-                    ddgi->SetEnabled(ddgiOn);
-                if (ddgiOn) {
-                    ImGui::Indent(12.0f);
-                    ImGui::SliderFloat("时间混合##ddgi", &ddgi->blendAlpha, 0.0f, 0.98f, "%.2f");
-                    ImGui::SliderFloat("贡献缩放##ddgi", &ddgi->debugScale, 0.0f, 2.0f, "%.2f");
-                    auto ddgiSettings = ddgi->GetSettings();
-                    if (ImGui::SliderFloat("强度##ddgi", &ddgiSettings.intensity, 0.0f, 2.0f, "%.2f"))
-                        ddgi->SetSettings(ddgiSettings);
-                    if (ImGui::Button("重建探针网格##ddgi")) {
-                        // 重新创建探针缓冲以响应参数变化
+                bool ok = render::GIRegistry::IsAvailable(gc.diffuse, giCaps, rtOk);
+                ImGui::SameLine();
+                ImGui::TextColored(ok ? colOk : colBad, ok ? "[可用]" : "[不可用]");
+                ImGui::Indent(12.0f);
+                ImGui::SliderFloat("GI 强度", &gc.giIntensity, 0.0f, 2.0f, "%.2f");
+                ImGui::Checkbox("半分辨率", &gc.halfRes);
+                if (giCaps & render::kPipelineGIDiffDDGI) {
+                    ImGui::Checkbox("DDGI 叠加", &gc.ddgiOverlay);
+                }
+                if (giSSGI) {
+                    bool on = giSSGI->IsEnabled();
+                    if (ImGui::Checkbox("启用 SSGI", &on)) giSSGI->SetEnabled(on);
+                    if (on) {
+                        ImGui::Indent(12.0f);
+                        ImGui::DragFloat("采样半径##ssgi", &giSSGI->radius, 0.1f, 0.1f, 5.0f, "%.1f");
+                        ImGui::SliderInt("采样数##ssgi", &giSSGI->sampleCount, 4, 64);
+                        ImGui::Unindent(12.0f);
                     }
-                    u32 pc = ddgi->gridX * ddgi->gridY * ddgi->gridZ;
-                    ImGui::Text("%u 探针 (%u×%u×%u)", pc, ddgi->gridX, ddgi->gridY, ddgi->gridZ);
-                    ImGui::Unindent(12.0f);
+                    ImGui::Text("SSGI 耗时 %.2f ms", giSSGI->GetDebugData().avgRenderTimeMs);
                 }
-                ImGui::Text("耗时 %.2f ms", ddgi->GetDebugData().avgRenderTimeMs);
+                if (giDDGI) {
+                    bool on = giDDGI->IsEnabled();
+                    if (ImGui::Checkbox("启用 DDGI", &on)) giDDGI->SetEnabled(on);
+                    if (on) {
+                        ImGui::Indent(12.0f);
+                        ImGui::SliderFloat("时间混合##ddgi", &giDDGI->blendAlpha, 0.0f, 0.98f, "%.2f");
+                        ImGui::SliderFloat("贡献缩放##ddgi", &giDDGI->debugScale, 0.0f, 2.0f, "%.2f");
+                        u32 pc = giDDGI->gridX * giDDGI->gridY * giDDGI->gridZ;
+                        ImGui::Text("%u 探针 (%u×%u×%u)", pc, giDDGI->gridX, giDDGI->gridY, giDDGI->gridZ);
+                        ImGui::Unindent(12.0f);
+                    }
+                    ImGui::Text("DDGI 耗时 %.2f ms", giDDGI->GetDebugData().avgRenderTimeMs);
+                }
+                // IBL 环境光（所有管线共用）
+                if (auto* gi = curPipeline->GetGI()) {
+                    auto s = gi->GetSettings();
+                    float inten = s.intensity;
+                    if (ImGui::SliderFloat("IBL 强度", &inten, 0.0f, 3.0f, "%.2f")) {
+                        s.intensity = inten;
+                        gi->SetSettings(s);
+                    }
+                    ImGui::Text("IBL 耗时 %.2f ms", gi->GetDebugData().avgRenderTimeMs);
+                }
+                ImGui::Unindent(12.0f);
             }
 
-            // GI — SSR（屏幕空间反射）
-            if (auto* ssr = pipeline.GetSSR()) {
-                ImGui::SeparatorText("GI — SSR");
-                bool ssrOn = ssr->IsEnabled();
-                if (ImGui::Checkbox("启用 SSR", &ssrOn))
-                    ssr->SetEnabled(ssrOn);
-                if (ssrOn) {
-                    ImGui::Indent(12.0f);
-                    ImGui::SliderFloat("最大步数##ssr", &ssr->maxSteps, 16.0f, 256.0f, "%.0f");
-                    ImGui::SliderFloat("步长##ssr", &ssr->stepSize, 0.1f, 2.0f, "%.1f");
-                    ImGui::Unindent(12.0f);
+            // ---- Specular（镜面反射）----
+            ImGui::TextUnformatted("Specular — 镜面反射");
+            {
+                const char* names[] = {"None", "SSR", "RT"};
+                int cur = (int)gc.specular;
+                if (ImGui::Combo("##specular", &cur, names, 3)) {
+                    gc.specular = (render::SpecularChannel)cur;
+                    gc = render::GIRegistry::Degrade(gc, giCaps, rtOk);
                 }
-                ImGui::Text("耗时 %.2f ms", ssr->GetDebugData().avgRenderTimeMs);
+                bool ok = render::GIRegistry::IsAvailable(gc.specular, giCaps, rtOk);
+                ImGui::SameLine();
+                ImGui::TextColored(ok ? colOk : colBad, ok ? "[可用]" : "[不可用]");
+                ImGui::Indent(12.0f);
+                if (giSSR) {
+                    bool on = giSSR->IsEnabled();
+                    if (ImGui::Checkbox("启用 SSR", &on)) giSSR->SetEnabled(on);
+                    if (on) {
+                        ImGui::Indent(12.0f);
+                        ImGui::SliderFloat("最大步数##ssr", &giSSR->maxSteps, 16.0f, 256.0f, "%.0f");
+                        ImGui::SliderFloat("步长##ssr", &giSSR->stepSize, 0.1f, 2.0f, "%.1f");
+                        ImGui::Unindent(12.0f);
+                    }
+                    ImGui::Text("SSR 耗时 %.2f ms", giSSR->GetDebugData().avgRenderTimeMs);
+                }
+                ImGui::Unindent(12.0f);
+            }
+
+            // ---- AO（环境光遮蔽）----
+            ImGui::TextUnformatted("AO — 环境光遮蔽");
+            {
+                const char* names[] = {"None", "SSAO", "RTAO"};
+                int cur = (int)gc.ao;
+                if (ImGui::Combo("##ao", &cur, names, 3)) {
+                    gc.ao = (render::AOChannel)cur;
+                    gc = render::GIRegistry::Degrade(gc, giCaps, rtOk);
+                }
+                bool ok = render::GIRegistry::IsAvailable(gc.ao, giCaps, rtOk);
+                ImGui::SameLine();
+                ImGui::TextColored(ok ? colOk : colBad, ok ? "[可用]" : "[不可用]");
+                ImGui::Indent(12.0f);
+                ImGui::SliderFloat("AO 强度##gc", &gc.aoIntensity, 0.0f, 1.5f, "%.2f");
+                if (dp) {
+                    auto& ssao = dp->GetSSAO();
+                    bool on = ssao.enabled;
+                    if (ImGui::Checkbox("启用 SSAO", &on)) ssao.enabled = on;
+                    if (on) {
+                        ImGui::Indent(12.0f);
+                        ImGui::DragFloat("半径##ssao", &ssao.radius, 0.05f, 0.1f, 5.0f, "%.2f");
+                        ImGui::SliderInt("采样数##ssao", &ssao.sampleCount, 4, 32);
+                        ImGui::Checkbox("半分辨率##ssao", &ssao.halfRes);
+                        ImGui::Unindent(12.0f);
+                    }
+                }
+                ImGui::Unindent(12.0f);
+            }
+
+            // ---- Shadow（阴影）----
+            ImGui::TextUnformatted("Shadow — 阴影");
+            {
+                const char* names[] = {"None", "Raster", "RT"};
+                int cur = (int)gc.shadow;
+                if (ImGui::Combo("##shadow", &cur, names, 3)) {
+                    gc.shadow = (render::ShadowChannel)cur;
+                    gc = render::GIRegistry::Degrade(gc, giCaps, rtOk);
+                }
+                bool ok = render::GIRegistry::IsAvailable(gc.shadow, giCaps, rtOk);
+                ImGui::SameLine();
+                ImGui::TextColored(ok ? colOk : colBad, ok ? "[可用]" : "[不可用]");
             }
 
             // ── AutoExposure ──

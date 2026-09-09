@@ -71,7 +71,7 @@ public:
                          const CameraData& camera);
     bool UseRenderGraph() const { return m_UseRenderGraph; }
     void SetUseRenderGraph(bool use) { m_UseRenderGraph = use; }
-    void SetSwapChain(rhi::IRHISwapChain* sc) { m_SwapChain = sc; }
+    void SetSwapChain(rhi::IRHISwapChain* sc) override { m_SwapChain = sc; }
     rhi::IRHIPipelineState* GetPipelineState() const { return m_PBR_PSO.get(); }
 
     void SetMultiThreadedRecording(bool e) { m_MultiThreadRecord = e; }

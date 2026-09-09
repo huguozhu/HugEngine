@@ -55,6 +55,17 @@ bool HybridRTPipeline::Initialize(rhi::IRHIDevice* device) {
     m_GPUCulling.Initialize(device);
     m_GPUScene.Initialize(device);
     m_DDGI.Initialize(device, m_Width, m_Height);
+    // IBL 环境光（Irradiance/Prefilter/BRDF LUT）：HybridRT 的 Lighting 同样需要，
+    // 否则描述符集 12/13/14 保持占位纹理 → 环境光错误
+    {
+        auto gi = std::make_unique<GI_IBL>();
+        if (gi->Initialize(device, m_Width, m_Height)) {
+            m_GI = std::move(gi);
+            HE_CORE_INFO("HybridRTPipeline: GI_IBL initialized");
+        } else {
+            HE_CORE_WARN("HybridRTPipeline: GI_IBL init failed, IBL disabled");
+        }
+    }
     m_ParticleRenderer.Initialize(device);
     m_ParticleRenderer.SetSceneDepth(m_Lighting.GetHDRDepth(), m_Lighting.GetPointSampler());
 
@@ -211,6 +222,7 @@ bool HybridRTPipeline::Initialize(rhi::IRHIDevice* device) {
 }
 
 void HybridRTPipeline::Shutdown() {
+    if (m_GI) { m_GI->Shutdown(); m_GI.reset(); }
     m_DDGI.Shutdown();
     m_ParticleRenderer.Shutdown(m_Device);
     m_GPUCulling.Shutdown(m_Device);
@@ -844,6 +856,15 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             // 深度 DepthStencilWrite→DepthStencilRead 转换由 RenderGraph 依据
             // gbDepth 的读取依赖（RT 效果 Pass + Lighting）自动生成，此处不再手动
             // 转换——否则 RT Pass 已把深度转成 Read 后再次 Write→Read 会 oldLayout 不匹配。
+
+            // IBL 生成（天空盒 → Irradiance/Prefilter/BRDF LUT，脏时才重建）+ 绑定到 Lighting
+            if (auto* giIBL = dynamic_cast<GI_IBL*>(m_GI.get())) {
+                if (giIBL->IsDirty()) {
+                    giIBL->Render(c);
+                }
+                m_Lighting.SetIBLTextures(giIBL->GetIrradianceMap(), giIBL->GetPrefilterMap(),
+                                          giIBL->GetBRDF_LUT(), giIBL->GetIBLSampler());
+            }
 
             // 委托 LightingPass 执行（M1.1：LightingInputs；RT 纹理非空时走 RT 路径）
             render::LightingInputs in{};

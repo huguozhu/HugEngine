@@ -5,7 +5,7 @@
 
 // 前向声明
 namespace he { class World; class SceneGraph; }
-namespace he::rhi { class IRHIDevice; class IRHICommandList; }
+namespace he::rhi { class IRHIDevice; class IRHICommandList; class IRHISwapChain; }
 namespace he::render { class IShadowSystem; class IGlobalIllumination; struct GIConfig; }
 
 namespace he::render {
@@ -52,6 +52,9 @@ public:
 
     /// 视口尺寸变更时调用（交换链重建 / 窗口拉伸）
     virtual void OnResize(u32 width, u32 height) = 0;
+
+    /// 设置输出交换链（各管线覆写；用于运行时切换管线）
+    virtual void SetSwapChain(rhi::IRHISwapChain* swapChain) { (void)swapChain; }
 
     // ---- 调试 ----
 

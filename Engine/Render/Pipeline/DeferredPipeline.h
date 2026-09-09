@@ -79,7 +79,7 @@ public:
     SceneRenderer&        GetSceneRenderer()       { return *m_SceneRenderer; }
     ParticleRenderer&     GetParticleRenderer()   { return m_ParticleRenderer; }
     void AddParticleComponent(u32 id)             { m_ParticleComponentIDs.push_back(id); }
-    void SetSwapChain(rhi::IRHISwapChain* sc)  { m_SwapChain = sc; }
+    void SetSwapChain(rhi::IRHISwapChain* sc) override  { m_SwapChain = sc; }
     BloomPass&      GetBloom()      { return m_PostProcess.GetBloom(); }
     DOFPass&        GetDOF()        { return m_PostProcess.GetDOF(); }
     MotionBlurPass& GetMotionBlur() { return m_PostProcess.GetMotionBlur(); }
