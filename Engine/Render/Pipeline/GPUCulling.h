@@ -90,6 +90,8 @@ public:
     rhi::IRHIBuffer* GetIndirectBuffer() const { return m_IndirectCmdBuf.get(); }
     rhi::IRHIBuffer* GetDrawCountBuffer() const { return m_DrawCountBuf.get(); }
     rhi::DescriptorSetHandle GetPhase2Set() const { return m_Phase2Set; }
+    // Phase 2 描述符集绑定号（供外部引用——如 DeferredPipeline_FrameGraph 每帧更新 Hi-Z 绑定）
+    static constexpr u32 kPhase2BindHiZ = 3;
     rhi::IRHISampler* GetHiZSampler() const { return m_HiZSampler.get(); }
     /// Hi-Z 深度金字塔纹理（供 SSR 层次追踪复用）
     rhi::IRHITexture* GetHiZTexture() const { return m_HiZTexture.get(); }

@@ -261,7 +261,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 {},
                 [&](rhi::IRHICommandList* c) {
                     // 更新 Phase 2 的深度/Hi-Z 绑定为当前帧 GBuffer 深度
-                    m_Device->UpdateDescriptorSet(m_GPUCulling.GetPhase2Set(), 3,
+                    m_Device->UpdateDescriptorSet(m_GPUCulling.GetPhase2Set(), GPUCulling::kPhase2BindHiZ,
                         rhi::DescriptorType::CombinedImageSampler,
                         m_GBuffer->GetDepth(), m_GPUCulling.GetHiZSampler());
                     m_GPUCulling.DispatchPhase2(c, m_Width, m_Height);
