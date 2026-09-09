@@ -7,6 +7,14 @@
 
 namespace he::render {
 
+// TAA 描述符集绑定号（与 TAA_Resolve.frag 一致）
+static constexpr u32 kTAABindCurrentColor = 0;   // 当前帧颜色
+static constexpr u32 kTAABindHistoryColor = 1;   // 历史颜色
+static constexpr u32 kTAABindDepth        = 2;   // 深度
+static constexpr u32 kTAABindNormal       = 3;   // 法线
+static constexpr u32 kTAABindVelocity     = 4;   // 运动矢量
+static constexpr u32 kTAABindUniforms     = 5;   // TAA 参数 UBO
+
 // ── Halton(2, 3) 序列，8 样本循环 ──
 float2 AA_TAA::HaltonSample(u32 index) {
     // Halton(2): 0.5, -0.5, 0.25, -0.75, 0.875, -0.875, -0.125, 0.125
@@ -26,12 +34,12 @@ bool AA_TAA::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     // 描述符布局：bindings 0-4 为输入纹理，binding 5 为 uniform buffer
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = {
-        {0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // u_CurrentColor
-        {1, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // u_HistoryColor
-        {2, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // u_Depth
-        {3, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // u_Normal
-        {4, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // u_Velocity
-        {5, rhi::DescriptorType::UniformBuffer, 1, rhi::kStageMaskVertex | rhi::kStageMaskFragment},         // u_TAAUniforms
+        {kTAABindCurrentColor, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // u_CurrentColor
+        {kTAABindHistoryColor, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // u_HistoryColor
+        {kTAABindDepth, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // u_Depth
+        {kTAABindNormal, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // u_Normal
+        {kTAABindVelocity, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // u_Velocity
+        {kTAABindUniforms, rhi::DescriptorType::UniformBuffer, 1, rhi::kStageMaskVertex | rhi::kStageMaskFragment},         // u_TAAUniforms
     };
     m_DescLayout = device->CreateDescriptorSetLayout(layout);
     m_DescSet    = device->AllocateDescriptorSet(m_DescLayout);
@@ -40,7 +48,7 @@ bool AA_TAA::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_UniformBuffer = device->CreateBuffer({144, rhi::BufferUsage::Uniform});
 
     // 绑定 uniform buffer 到描述符（内容每帧 Map/Unmap 更新）
-    device->UpdateDescriptorSet(m_DescSet, 5, rhi::DescriptorType::UniformBuffer,
+    device->UpdateDescriptorSet(m_DescSet, kTAABindUniforms, rhi::DescriptorType::UniformBuffer,
                                 m_UniformBuffer.get());
 
     // 历史缓冲
@@ -140,7 +148,7 @@ void AA_TAA::SetInput(rhi::IRHITexture* color, rhi::IRHISampler* /*sampler*/) {
     m_InputColor = color;
     if (m_InputColor) {
         // CurrentColor 使用点采样（最近邻），避免对已抖动 HDR 颜色做线性插值模糊
-        m_Device->UpdateDescriptorSet(m_DescSet, 0, rhi::DescriptorType::CombinedImageSampler,
+        m_Device->UpdateDescriptorSet(m_DescSet, kTAABindCurrentColor, rhi::DescriptorType::CombinedImageSampler,
                                       m_InputColor, m_PointSampler.get());
     }
 }
@@ -223,7 +231,7 @@ void AA_TAA::Render(rhi::IRHICommandList* cmd) {
     if (!m_Ready || !m_Enabled) return;
 
     // 更新 history 纹理绑定到当前 read buffer
-    m_Device->UpdateDescriptorSet(m_DescSet, 1, rhi::DescriptorType::CombinedImageSampler,
+    m_Device->UpdateDescriptorSet(m_DescSet, kTAABindHistoryColor, rhi::DescriptorType::CombinedImageSampler,
                                   m_HistoryColor[m_HistoryRead].get(), m_HistorySampler.get());
 
     cmd->SetPipeline(m_PSO.get());

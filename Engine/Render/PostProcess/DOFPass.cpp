@@ -10,6 +10,14 @@
 
 namespace he::render {
 
+// DOF CoC 集绑定号（与 DOF_CoC.frag 一致）
+static constexpr u32 kDOFCoCBindInput = 0;   // 输入颜色 + 深度
+
+// DOF Composite 集绑定号（与 DOF_Composite.frag 一致）
+static constexpr u32 kDOFCompositeBindColor = 0;   // 原始颜色
+static constexpr u32 kDOFCompositeBindCoC   = 1;   // CoC 纹理
+static constexpr u32 kDOFCompositeBindBlur  = 2;   // 模糊颜色
+
 bool DOFPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Device = device;
     m_Width  = width;
@@ -18,7 +26,7 @@ bool DOFPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     // ── CoC PSO ──
     {
         rhi::DescriptorSetLayoutDesc layout;
-        layout.bindings = {{0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}};
+        layout.bindings = {{kDOFCoCBindInput, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment}};
         m_CoCLayout = device->CreateDescriptorSetLayout(layout);
         m_CoCSet    = device->AllocateDescriptorSet(m_CoCLayout);
 
@@ -162,7 +170,7 @@ void DOFPass::Render(rhi::IRHICommandList* cmd) {
         depthSamp.addressU = depthSamp.addressV = rhi::AddressMode::ClampToEdge;
         auto ds = m_Device->CreateSampler(depthSamp);  // 简便：每帧创建（可优化为复用）
 
-        m_Device->UpdateDescriptorSet(m_CoCSet, 0, rhi::DescriptorType::CombinedImageSampler,
+        m_Device->UpdateDescriptorSet(m_CoCSet, kDOFCoCBindInput, rhi::DescriptorType::CombinedImageSampler,
             m_DepthInput, ds.get());
 
         struct { float focusDepth, focusRange, maxCoC, _pad; } pc;
@@ -189,11 +197,11 @@ void DOFPass::Render(rhi::IRHICommandList* cmd) {
 
     // ── Pass 3: Composite ──
     {
-        m_Device->UpdateDescriptorSet(m_CompositeSet, 0, rhi::DescriptorType::CombinedImageSampler,
+        m_Device->UpdateDescriptorSet(m_CompositeSet, kDOFCompositeBindColor, rhi::DescriptorType::CombinedImageSampler,
             m_HDRInput, m_HDRSampler);
-        m_Device->UpdateDescriptorSet(m_CompositeSet, 1, rhi::DescriptorType::CombinedImageSampler,
+        m_Device->UpdateDescriptorSet(m_CompositeSet, kDOFCompositeBindCoC, rhi::DescriptorType::CombinedImageSampler,
             m_Blur.GetOutput(), m_Blur.GetOutputSampler());
-        m_Device->UpdateDescriptorSet(m_CompositeSet, 2, rhi::DescriptorType::CombinedImageSampler,
+        m_Device->UpdateDescriptorSet(m_CompositeSet, kDOFCompositeBindBlur, rhi::DescriptorType::CombinedImageSampler,
             m_CoCTex.get(), m_Blur.GetOutputSampler());
 
         struct { float intensity; float _pad[3]; } pc;

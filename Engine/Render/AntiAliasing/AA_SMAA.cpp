@@ -17,6 +17,12 @@
 
 namespace he::render {
 
+// SMAA 各 pass 描述符集绑定号
+static constexpr u32 kSMAAEdgeBindInput     = 0;   // 边缘检测输入
+static constexpr u32 kSMAABlendBindInput    = 0;   // 混合权重输入
+static constexpr u32 kSMAANeighborBindInput = 0;   // 邻域检测输入
+static constexpr u32 kSMAANeighborBindBlend = 1;   // 混合权重纹理
+
 // ============================================================
 // Initialize — 创建所有 GPU 资源
 // ============================================================
@@ -131,7 +137,7 @@ void AA_SMAA::SetInput(rhi::IRHITexture* color, rhi::IRHISampler* sampler) {
 
     // 更新 EdgeDetection Pass 的输入描述符（binding 0 = 输入颜色）
     if (m_Input && m_InputSampler && m_EdgeSet != rhi::kInvalidSet) {
-        m_Device->UpdateDescriptorSet(m_EdgeSet, 0,
+        m_Device->UpdateDescriptorSet(m_EdgeSet, kSMAAEdgeBindInput,
             rhi::DescriptorType::CombinedImageSampler, m_Input, m_InputSampler);
     }
 }
@@ -176,7 +182,7 @@ void AA_SMAA::Render(rhi::IRHICommandList* cmd) {
     // ── Pass 2: Blending Weight Calculation → m_BlendTex ──
     {
         // 更新描述符：binding 0 = 边缘纹理（Point 采样）
-        m_Device->UpdateDescriptorSet(m_BlendSet, 0,
+        m_Device->UpdateDescriptorSet(m_BlendSet, kSMAABlendBindInput,
             rhi::DescriptorType::CombinedImageSampler,
             m_EdgeTex.get(), m_PointSampler.get());
 
@@ -219,11 +225,11 @@ void AA_SMAA::RenderFinalPass(rhi::IRHICommandList* cmd) {
 
     // 更新描述符
     // binding 0 = 原始输入颜色（Linear 采样）
-    m_Device->UpdateDescriptorSet(m_NeighborSet, 0,
+    m_Device->UpdateDescriptorSet(m_NeighborSet, kSMAANeighborBindInput,
         rhi::DescriptorType::CombinedImageSampler,
         m_Input, m_InputSampler);
     // binding 1 = 混合权重纹理（Point 采样）
-    m_Device->UpdateDescriptorSet(m_NeighborSet, 1,
+    m_Device->UpdateDescriptorSet(m_NeighborSet, kSMAANeighborBindBlend,
         rhi::DescriptorType::CombinedImageSampler,
         m_BlendTex.get(), m_PointSampler.get());
 

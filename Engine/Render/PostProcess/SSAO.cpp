@@ -12,6 +12,15 @@
 
 namespace he::render {
 
+// SSAO 描述符集绑定号（与 SSAO.frag 一致）
+static constexpr u32 kSSAOBindDepth  = 0;   // 深度
+static constexpr u32 kSSAOBindNormal = 1;   // 法线
+static constexpr u32 kSSAOBindNoise  = 2;   // 噪声纹理
+static constexpr u32 kSSAOBindParams = 3;   // 参数 UBO
+
+// SSAO 模糊集绑定号（与 SSAO_Blur.frag 一致）
+static constexpr u32 kSSAOBlurBindInput = 0;   // 待模糊的 AO 纹理
+
 void SSAO::GenerateKernel() {
     m_Kernel.resize(kKernelSize);
     std::uniform_real_distribution<float> rnd(0.0f, 1.0f);
@@ -79,10 +88,10 @@ bool SSAO::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     // SSAO PSO — 描述符布局 + 参数 UBO 在 Init 中创建，PSO 本体惰性编译
     {
         rhi::DescriptorSetLayoutDesc l;
-        l.bindings = {{0,rhi::DescriptorType::CombinedImageSampler,1,16},  // Depth
-                      {1,rhi::DescriptorType::CombinedImageSampler,1,16},  // Normal
-                      {2,rhi::DescriptorType::CombinedImageSampler,1,16},  // Noise
-                      {3,rhi::DescriptorType::UniformBuffer,1,16}};         // Params
+        l.bindings = {{kSSAOBindDepth,rhi::DescriptorType::CombinedImageSampler,1,16},  // Depth
+                      {kSSAOBindNormal,rhi::DescriptorType::CombinedImageSampler,1,16},  // Normal
+                      {kSSAOBindNoise,rhi::DescriptorType::CombinedImageSampler,1,16},  // Noise
+                      {kSSAOBindParams,rhi::DescriptorType::UniformBuffer,1,16}};         // Params
         m_SSAOLayout = device->CreateDescriptorSetLayout(l);
         m_SSAOSet    = device->AllocateDescriptorSet(m_SSAOLayout);
 
@@ -92,7 +101,7 @@ bool SSAO::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         ubDesc.usage = rhi::BufferUsage::Uniform;
         ubDesc.cpuAccess = true;
         m_ParamUBO = device->CreateBuffer(ubDesc);
-        device->UpdateDescriptorSet(m_SSAOSet, 3, rhi::DescriptorType::UniformBuffer, m_ParamUBO.get());
+        device->UpdateDescriptorSet(m_SSAOSet, kSSAOBindParams, rhi::DescriptorType::UniformBuffer, m_ParamUBO.get());
 
         // 存储 ShaderBytecode 副本（供惰性创建 PSO 时使用）
         m_SSAO_VS.stage = rhi::ShaderStage::Vertex;
@@ -121,7 +130,7 @@ bool SSAO::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     // Blur PSO — 同样采用惰性创建模式
     {
         rhi::DescriptorSetLayoutDesc l;
-        l.bindings = {{0,rhi::DescriptorType::CombinedImageSampler,1,16}};
+        l.bindings = {{kSSAOBlurBindInput,rhi::DescriptorType::CombinedImageSampler,1,16}};
         m_BlurLayout = device->CreateDescriptorSetLayout(l);
         m_BlurSet    = device->AllocateDescriptorSet(m_BlurLayout);
 
@@ -181,9 +190,9 @@ void SSAO::OnResize(u32 w, u32 h) { m_Width=w; m_Height=h; CreateAOTexture(halfR
 void SSAO::SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal) {
     m_DepthTex = depth;
     m_NormalTex = normal;
-    if (m_DepthTex) m_Device->UpdateDescriptorSet(m_SSAOSet,0,rhi::DescriptorType::CombinedImageSampler,m_DepthTex,m_PointSampler.get());
-    if (m_NormalTex) m_Device->UpdateDescriptorSet(m_SSAOSet,1,rhi::DescriptorType::CombinedImageSampler,m_NormalTex,m_PointSampler.get());
-    m_Device->UpdateDescriptorSet(m_SSAOSet,2,rhi::DescriptorType::CombinedImageSampler,m_NoiseTex.get(),m_PointSampler.get());
+    if (m_DepthTex) m_Device->UpdateDescriptorSet(m_SSAOSet, kSSAOBindDepth,rhi::DescriptorType::CombinedImageSampler,m_DepthTex,m_PointSampler.get());
+    if (m_NormalTex) m_Device->UpdateDescriptorSet(m_SSAOSet, kSSAOBindNormal,rhi::DescriptorType::CombinedImageSampler,m_NormalTex,m_PointSampler.get());
+    m_Device->UpdateDescriptorSet(m_SSAOSet, kSSAOBindNoise,rhi::DescriptorType::CombinedImageSampler,m_NoiseTex.get(),m_PointSampler.get());
 }
 
 void SSAO::PreBind(rhi::IRHICommandList* cmd) {
@@ -242,7 +251,7 @@ void SSAO::Render(rhi::IRHICommandList* cmd) {
     // --- Blur Pass ---
     cmd->SetPipeline(m_Blur_PSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_BlurSet);
-    m_Device->UpdateDescriptorSet(m_BlurSet,0,rhi::DescriptorType::CombinedImageSampler,m_AOTexture.get(),m_AOSampler.get());
+    m_Device->UpdateDescriptorSet(m_BlurSet, kSSAOBlurBindInput,rhi::DescriptorType::CombinedImageSampler,m_AOTexture.get(),m_AOSampler.get());
 
     struct { float2 ts; float _pad[2]; } bpc;
     bpc.ts = float2(1.0f/float(aoW), 1.0f/float(aoH));   // 模糊半径按 AO 纹理实际尺寸
