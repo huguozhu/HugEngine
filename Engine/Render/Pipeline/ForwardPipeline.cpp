@@ -9,6 +9,7 @@ he::CVar<bool> cvLightPhysicalUnits("r.Light.PhysicalUnits", false,
 
 #include "GI/GI_IBL.h"
 #include "GI/GI_RSM.h"
+#include "GI/GIRegistry.h"
 #include "Shadow/ShadowSystem.h"
 #include "Shadow/ShadowNone.h"
 #include "PostProcess/ToneMapPass.h"
@@ -51,6 +52,11 @@ ForwardPipeline::~ForwardPipeline() {
 bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
     m_Device = device;
     HE_ASSERT(m_Device, "ForwardPipeline: device is null");
+
+    // GI 通道配置：按本管线能力（Forward：Raster 阴影 + SSAO + SSR + IBL/RSM）初始化，
+    // 不可用通道（如 SSGI/DDGI/RT 系列）自动降级
+    m_GIConfig = GIRegistry::Degrade(GIConfig{}, PipelineCaps::Forward,
+                                     device->GetCaps().supportsRayTracing);
 
     // --- PBR 着色器 ---
     m_VS.stage      = rhi::ShaderStage::Vertex;

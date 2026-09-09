@@ -72,8 +72,8 @@ public:
     GI_SSGI*             GetSSGI()               { return &m_SSGI; }
     GI_SSR*              GetSSR()                { return &m_SSR; }
     // GI 配置（M2 数据驱动：档位/通道/强度单一数据源）
-    GIConfig&            GetGIConfig()           { return m_GIConfig; }
-    const GIConfig&      GetGIConfig() const     { return m_GIConfig; }
+    GIConfig*            GetGIConfig() override { return &m_GIConfig; }
+    u32                  GetGIPipelineCaps() const override { return PipelineCaps::Deferred; }
     ClusteredShading&    GetClusteredShading()   { return m_ClusteredShading; }
     GPUCulling&          GetGPUCulling()         { return m_GPUCulling; }
     SceneRenderer&        GetSceneRenderer()       { return *m_SceneRenderer; }

@@ -4,6 +4,7 @@
 #include "Pipeline/Material.h"
 #include "Pipeline/ClusteredShading.h"
 #include "GI/GlobalIllumination.h"
+#include "GI/GIConfig.h"
 #include "RHI/RHI.h"
 #include "RenderGraph.h"
 #include "Pipeline/GPUCulling.h"
@@ -52,6 +53,9 @@ public:
     // 子系统访问
     IShadowSystem*       GetShadowSystem() override { return m_ShadowSystem.get(); }
     IGlobalIllumination* GetGI()           override { return m_GI.get(); }
+    // 该管线的 GI 通道配置（Forward：Raster 阴影 + SSAO + SSR + IBL/RSM）
+    GIConfig*            GetGIConfig() override { return &m_GIConfig; }
+    u32                  GetGIPipelineCaps() const override { return PipelineCaps::Forward; }
     int ReloadShader(StringView shaderName, const std::vector<u32>& newSpirv) override;
     ToneMapPass*         GetToneMap()            { return m_ToneMap.get(); }
     SkyboxPass*          GetSkybox()             { return m_Skybox.get(); }
@@ -158,6 +162,7 @@ private:
     // 子系统
     std::unique_ptr<IGlobalIllumination> m_GI;
     std::unique_ptr<GI_RSM>              m_RSM;
+    GIConfig                             m_GIConfig;   // 该管线的 GI 通道配置（可用子集见 PipelineCaps::Forward）
     std::unique_ptr<IShadowSystem>       m_ShadowSystem;
     std::unique_ptr<IAntiAliasing>       m_AntiAliasing;
     rhi::IRHISwapChain* m_SwapChain = nullptr;

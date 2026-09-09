@@ -9,6 +9,7 @@
 //   3. FXAA → BackBuffer 前通过 ToneMap PreBind 保证 RP 兼容。
 // ============================================================
 #include "Pipeline/HybridRTPipeline.h"
+#include "GI/GIRegistry.h"
 #include "Pipeline/RTQualityCVars.h"
 #include "Pipeline/PhysicalLight.h"
 #include "Scene/World.h"
@@ -29,6 +30,11 @@ bool HybridRTPipeline::Initialize(rhi::IRHIDevice* device) {
     m_Device = device;
     m_Width  = rhi::kDefaultBackBufferWidth;
     m_Height = rhi::kDefaultBackBufferHeight;
+
+    // GI 通道配置：按本管线能力（HybridRT：含 RT 阴影/AO/反射/GI）初始化，
+    // 设备不支持光追时 RT 系列自动降级到光栅/屏幕空间替代
+    m_GIConfig = GIRegistry::Degrade(GIConfig{}, PipelineCaps::HybridRT,
+                                     device->GetCaps().supportsRayTracing);
 
     // ── 共享组件 ──
     m_GBuffer = std::make_unique<GBufferRenderer>();

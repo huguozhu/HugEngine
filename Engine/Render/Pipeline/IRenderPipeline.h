@@ -6,7 +6,7 @@
 // 前向声明
 namespace he { class World; class SceneGraph; }
 namespace he::rhi { class IRHIDevice; class IRHICommandList; }
-namespace he::render { class IShadowSystem; class IGlobalIllumination; }
+namespace he::render { class IShadowSystem; class IGlobalIllumination; struct GIConfig; }
 
 namespace he::render {
 
@@ -65,6 +65,12 @@ public:
 
     /// 获取 GI 子系统，无 GI 时返回 nullptr
     virtual IGlobalIllumination* GetGI() { return nullptr; }
+
+    /// 获取该管线的 GI 通道配置（各管线独立——可用通道子集不同）
+    virtual GIConfig* GetGIConfig() { return nullptr; }
+
+    /// 该管线支持的 GI 通道能力位（PipelineCaps::Forward/Deferred/HybridRT）
+    virtual u32 GetGIPipelineCaps() const { return 0; }
 
     // ---- Shader 热重载 ----
 

@@ -652,9 +652,10 @@ int main() {
             static int giPreset = -1;
             const char* presetNames[] = {"Low", "Medium", "High", "Ultra"};
             if (ImGui::Combo("质量档位", &giPreset, presetNames, 4)) {
-                auto& gc = pipeline.GetGIConfig();
-                // M3：应用预设并经 GIRegistry 自动降级（RT 源按设备光追能力决定，不可用则降级）
+                auto& gc = *pipeline.GetGIConfig();
+                // M3：应用预设并经 GIRegistry 自动降级（管线能力 ∧ 设备光追能力）
                 gc = render::GIRegistry::Degrade(render::GIConfigFromPreset((render::GIQualityPreset)giPreset),
+                                                 pipeline.GetGIPipelineCaps(),
                                                  device->GetCaps().supportsRayTracing);
                 // 应用档位到 GI 子系统开关（帧图按 config 条件注册）
                 pipeline.GetSSGI()->SetEnabled(gc.ShouldRunSSGI());
@@ -673,7 +674,7 @@ int main() {
                 pipeline.GetSSR()->OnResize(config.windowWidth, config.windowHeight);
                 pipeline.GetSSAO().OnResize(config.windowWidth, config.windowHeight);
             }
-            auto& gc2 = pipeline.GetGIConfig();
+            auto& gc2 = *pipeline.GetGIConfig();
             ImGui::SliderFloat("GI 强度", &gc2.giIntensity, 0.0f, 2.0f, "%.2f");
             ImGui::SliderFloat("AO 强度", &gc2.aoIntensity, 0.0f, 1.5f, "%.2f");
 

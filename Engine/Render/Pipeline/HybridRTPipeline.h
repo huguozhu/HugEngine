@@ -15,6 +15,7 @@
 #include "Pipeline/ClusteredShading.h"
 #include "Pipeline/ParticleRenderer.h"
 #include "GI/GI_DDGI.h"
+#include "GI/GIConfig.h"
 #include "PostProcess/RTDenoiser.h"
 #include "PostProcess/Denoiser.h"
 #include "RHI/RHI.h"
@@ -73,6 +74,9 @@ public:
     RTReflectionPass*     GetRTReflection()     { return m_RTReflection.get(); }
     RTGIPass*             GetRTGI()             { return m_RTGI.get(); }
     GI_DDGI*              GetDDGI()             { return &m_DDGI; }
+    // 该管线的 GI 通道配置（HybridRT：含 RT 阴影/AO/反射/GI）
+    GIConfig*             GetGIConfig() override { return &m_GIConfig; }
+    u32                   GetGIPipelineCaps() const override { return PipelineCaps::HybridRT; }
 
     // RT 效果开关（CVar 薄封装：读写 r.RT.* 开关，实现见 .cpp，供 ImGui / CVar 控制）
     void SetRTShadowEnabled(bool e);
@@ -144,6 +148,7 @@ private:
 
     // ── 专有 GI ──
     GI_DDGI m_DDGI;
+    GIConfig m_GIConfig;   // 该管线的 GI 通道配置（可用子集见 PipelineCaps::HybridRT）
 
     // ── GPU Driven 基础设施 ──
     GPUCulling m_GPUCulling;
