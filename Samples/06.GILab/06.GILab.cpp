@@ -487,7 +487,9 @@ int main() {
     editor::ImGuiIntegration imgui;
     imgui.Initialize(glfwWin, device.get(), swapchain.get());
     // 各面板的窗口位置/大小/折叠状态由 ImGui 自动序列化——保存到配置目录（与 06_GILab.cfg 同处）
-    ImGui::GetIO().IniFilename = "Content/Config/06_GILab_imgui.ini";
+    // 用绝对路径（HUGE_CONTENT_DIR）避免依赖当前工作目录
+    static String g_ImGuiIniPath = String(HUGE_CONTENT_DIR) + "Config/06_GILab_imgui.ini";
+    ImGui::GetIO().IniFilename = g_ImGuiIniPath.c_str();
 
     // ============================================================
     // 9. 相机 — 从配置文件加载，否则使用默认位置
@@ -989,6 +991,12 @@ int main() {
     }
 
     // 清理
+    // 面板几何（位置/大小/折叠状态）显式落盘：ImGui 自动保存有 5 秒节流，
+    // 拖动窗口后立即退出会丢失；必须在 imgui.Shutdown()（销毁上下文）之前调用
+    if (ImGui::GetIO().IniFilename) {
+        ImGui::SaveIniSettingsToDisk(ImGui::GetIO().IniFilename);
+        HE_CORE_INFO("面板布局已保存: {}", ImGui::GetIO().IniFilename);
+    }
     imgui.Shutdown();
     device->WaitIdle();
     pipeline.Shutdown();
