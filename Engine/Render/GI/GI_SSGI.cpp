@@ -9,6 +9,12 @@
 
 namespace he::render {
 
+// SSGI 描述符集绑定号（与 SSGI.frag 的 vk::binding 一致）
+static constexpr u32 kSSGIBindDepth  = 0;   // 深度
+static constexpr u32 kSSGIBindNormal = 1;   // 法线
+static constexpr u32 kSSGIBindAlbedo = 2;   // 反照率
+static constexpr u32 kSSGIBindParams = 3;   // 参数 Uniform Buffer
+
 // SSGI 半球采样核大小（CPU 生成随机方向，GPU 逐采样点求间接光）
 static constexpr u32 kSSGIKernelSize = 32;
 
@@ -47,16 +53,16 @@ bool GI_SSGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     // 3. 创建描述符集（binding 0-2：深度/法线/反照率，binding 3：Uniform Buffer）
     rhi::DescriptorSetLayoutDesc layoutDesc;
     layoutDesc.bindings = {
-        {0, rhi::DescriptorType::CombinedImageSampler, 1, 16},
-        {1, rhi::DescriptorType::CombinedImageSampler, 1, 16},
-        {2, rhi::DescriptorType::CombinedImageSampler, 1, 16},
-        {3, rhi::DescriptorType::UniformBuffer, 1, 16},
+        {kSSGIBindDepth,  rhi::DescriptorType::CombinedImageSampler, 1, 16},
+        {kSSGIBindNormal, rhi::DescriptorType::CombinedImageSampler, 1, 16},
+        {kSSGIBindAlbedo, rhi::DescriptorType::CombinedImageSampler, 1, 16},
+        {kSSGIBindParams, rhi::DescriptorType::UniformBuffer, 1, 16},
     };
     m_DescLayout = device->CreateDescriptorSetLayout(layoutDesc);
     m_DescSet    = device->AllocateDescriptorSet(m_DescLayout);
 
-    // Uniform Buffer 固定绑定到 binding 3（每帧只更新内容，不重绑）
-    device->UpdateDescriptorSet(m_DescSet, 3, rhi::DescriptorType::UniformBuffer, m_UniformBuffer.get());
+    // Uniform Buffer 固定绑定到参数 binding（每帧只更新内容，不重绑）
+    device->UpdateDescriptorSet(m_DescSet, kSSGIBindParams, rhi::DescriptorType::UniformBuffer, m_UniformBuffer.get());
 
     // 4. 编译管线（顶点 = 全屏三角，像素 = SSGI 计算）
     rhi::ShaderBytecode vs, fs;
@@ -134,15 +140,15 @@ void GI_SSGI::SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal, rhi::
     m_Albedo = albedo;
     // 每帧纹理可能变化，动态更新描述符集绑定
     if (m_Depth) {
-        m_Device->UpdateDescriptorSet(m_DescSet, 0, rhi::DescriptorType::CombinedImageSampler,
+        m_Device->UpdateDescriptorSet(m_DescSet, kSSGIBindDepth, rhi::DescriptorType::CombinedImageSampler,
             m_Depth, m_PointSampler.get());
     }
     if (m_Normal) {
-        m_Device->UpdateDescriptorSet(m_DescSet, 1, rhi::DescriptorType::CombinedImageSampler,
+        m_Device->UpdateDescriptorSet(m_DescSet, kSSGIBindNormal, rhi::DescriptorType::CombinedImageSampler,
             m_Normal, m_PointSampler.get());
     }
     if (m_Albedo) {
-        m_Device->UpdateDescriptorSet(m_DescSet, 2, rhi::DescriptorType::CombinedImageSampler,
+        m_Device->UpdateDescriptorSet(m_DescSet, kSSGIBindAlbedo, rhi::DescriptorType::CombinedImageSampler,
             m_Albedo, m_PointSampler.get());
     }
 }

@@ -17,6 +17,34 @@
 
 namespace he::render {
 
+// ============================================================
+// GPUCulling 各描述符集绑定号（与对应 compute shader 一致）
+// ============================================================
+// 主剔除集（m_DescSet）
+static constexpr u32 kCullBindSceneObjects = 0;   // GPUObjectData[] SSBO
+static constexpr u32 kCullBindIndirectCmds = 1;   // IndirectDraw 命令
+static constexpr u32 kCullBindDrawCount    = 2;   // 绘制计数
+static constexpr u32 kCullBindDepth        = 3;   // 深度缓冲（Hi-Z 来源）
+
+// Phase 1 粗筛集（m_Phase1Set）
+static constexpr u32 kPhase1BindSceneObjects   = 0;
+static constexpr u32 kPhase1BindCandidates     = 1;   // 候选索引
+static constexpr u32 kPhase1BindCandidateCount = 2;   // 候选计数
+
+// Phase 2 精筛集（m_Phase2Set）
+static constexpr u32 kPhase2BindSceneObjects = 0;
+static constexpr u32 kPhase2BindCandidates   = 1;
+static constexpr u32 kPhase2BindDrawCount    = 2;
+static constexpr u32 kPhase2BindHiZ          = 3;   // Hi-Z 金字塔
+static constexpr u32 kPhase2BindIndirectCmds = 4;
+
+// Hi-Z 下采样集（m_HiZSet）
+static constexpr u32 kHiZBindSrcDepth = 0;   // 源深度
+static constexpr u32 kHiZBindDstDepth = 1;   // 目标 mip（StorageImage）
+
+// 持久化线程组集（m_PTGSet）
+static constexpr u32 kPTGBindSceneObjects = 1;
+
 // PTGParams — 持久化线程组每帧参数结构体
 // 布局必须与 PersistentCull.comp.slang 中的 PTGParams 一致
 struct PTGParams {
@@ -64,10 +92,10 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
 
     rhi::DescriptorSetLayoutDesc layoutDesc;
     layoutDesc.bindings = {
-        {0, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
-        {1, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
-        {2, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
-        {3, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
+        {kCullBindSceneObjects, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+        {kCullBindIndirectCmds, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+        {kCullBindDrawCount,    rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+        {kCullBindDepth,        rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
     };
     m_DescLayout = device->CreateDescriptorSetLayout(layoutDesc);
     m_DescSet    = device->AllocateDescriptorSet(m_DescLayout);
@@ -80,7 +108,7 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
         d.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::Indirect;
         d.cpuAccess = true;
         m_IndirectCmdBuf = device->CreateBuffer(d);
-        device->UpdateDescriptorSet(m_DescSet, 1, rhi::DescriptorType::StorageBuffer, m_IndirectCmdBuf.get());
+        device->UpdateDescriptorSet(m_DescSet, kCullBindIndirectCmds, rhi::DescriptorType::StorageBuffer, m_IndirectCmdBuf.get());
     }
     {
         rhi::BufferDesc d;
@@ -91,7 +119,7 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
         // 零初始化：首帧 Readback 读到 count=0 → 安全回退 CPU 路径
         u32* pCount = static_cast<u32*>(m_DrawCountBuf->Map());
         if (pCount) { *pCount = 0; m_DrawCountBuf->Unmap(); }
-        device->UpdateDescriptorSet(m_DescSet, 2, rhi::DescriptorType::StorageBuffer, m_DrawCountBuf.get());
+        device->UpdateDescriptorSet(m_DescSet, kCullBindDrawCount, rhi::DescriptorType::StorageBuffer, m_DrawCountBuf.get());
     }
 
     // Push constants: 6 planes + float4x4 VP + float2 screen + 2 uint
@@ -134,7 +162,7 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
         d.usage = rhi::BufferUsage::Storage;
         d.cpuAccess = true;
         m_CandidateBuf = device->CreateBuffer(d);
-        device->UpdateDescriptorSet(m_Phase1Set, 1, rhi::DescriptorType::StorageBuffer, m_CandidateBuf.get());
+        device->UpdateDescriptorSet(m_Phase1Set, kPhase1BindCandidates, rhi::DescriptorType::StorageBuffer, m_CandidateBuf.get());
     }
     {
         rhi::BufferDesc d;
@@ -142,7 +170,7 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
         d.usage = rhi::BufferUsage::Storage;
         d.cpuAccess = true;
         m_CandidateCountBuf = device->CreateBuffer(d);
-        device->UpdateDescriptorSet(m_Phase1Set, 2, rhi::DescriptorType::StorageBuffer, m_CandidateCountBuf.get());
+        device->UpdateDescriptorSet(m_Phase1Set, kPhase1BindCandidateCount, rhi::DescriptorType::StorageBuffer, m_CandidateCountBuf.get());
     }
 
     // ── Phase 2 PSO（5 个 binding）──
@@ -152,19 +180,19 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
 
     rhi::DescriptorSetLayoutDesc p2Layout;
     p2Layout.bindings = {
-        {0, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},        // u_SceneObjects
-        {1, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},        // u_Candidates
-        {2, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},        // u_DrawCount
-        {3, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute}, // u_HiZ
-        {4, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},        // u_IndirectCmds
+        {kPhase2BindSceneObjects, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},        // u_SceneObjects
+        {kPhase2BindCandidates,   rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},        // u_Candidates
+        {kPhase2BindDrawCount,    rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},        // u_DrawCount
+        {kPhase2BindHiZ,          rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute}, // u_HiZ
+        {kPhase2BindIndirectCmds, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},        // u_IndirectCmds
     };
     m_Phase2Layout = device->CreateDescriptorSetLayout(p2Layout);
     m_Phase2Set    = device->AllocateDescriptorSet(m_Phase2Layout);
 
     // Phase 2 固定绑定（不变的生命周期）
-    device->UpdateDescriptorSet(m_Phase2Set, 1, rhi::DescriptorType::StorageBuffer, m_CandidateBuf.get());
-    device->UpdateDescriptorSet(m_Phase2Set, 2, rhi::DescriptorType::StorageBuffer, m_DrawCountBuf.get());
-    device->UpdateDescriptorSet(m_Phase2Set, 4, rhi::DescriptorType::StorageBuffer, m_IndirectCmdBuf.get());
+    device->UpdateDescriptorSet(m_Phase2Set, kPhase2BindCandidates, rhi::DescriptorType::StorageBuffer, m_CandidateBuf.get());
+    device->UpdateDescriptorSet(m_Phase2Set, kPhase2BindDrawCount, rhi::DescriptorType::StorageBuffer, m_DrawCountBuf.get());
+    device->UpdateDescriptorSet(m_Phase2Set, kPhase2BindIndirectCmds, rhi::DescriptorType::StorageBuffer, m_IndirectCmdBuf.get());
     // binding 0 和 3 由 SetSceneBuffer / SetDepthTexture 设置
 
     // Phase 2 push constants: float4x4 vp + float2 screenSize + uint mips + uint count
@@ -185,8 +213,8 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
     // ── Hi-Z 下采样 PSO ──
     {
         rhi::DescriptorSetLayoutDesc hizLayout;
-        hizLayout.bindings = {{0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
-                              {1, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskCompute}};
+        hizLayout.bindings = {{kHiZBindSrcDepth, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
+                              {kHiZBindDstDepth, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskCompute}};
         m_HiZLayout = device->CreateDescriptorSetLayout(hizLayout);
         m_HiZSet    = device->AllocateDescriptorSet(m_HiZLayout);
 
@@ -300,11 +328,11 @@ void GPUCulling::Shutdown(rhi::IRHIDevice* device) {
 
 void GPUCulling::SetSceneBuffer(rhi::IRHIDevice* device, rhi::IRHIBuffer* gpuSceneSSBO) {
     if (!m_Initialized || !gpuSceneSSBO) return;
-    device->UpdateDescriptorSet(m_DescSet,   0, rhi::DescriptorType::StorageBuffer, gpuSceneSSBO);
-    device->UpdateDescriptorSet(m_Phase1Set, 0, rhi::DescriptorType::StorageBuffer, gpuSceneSSBO);
-    device->UpdateDescriptorSet(m_Phase2Set, 0, rhi::DescriptorType::StorageBuffer, gpuSceneSSBO);
+    device->UpdateDescriptorSet(m_DescSet, kCullBindSceneObjects, rhi::DescriptorType::StorageBuffer, gpuSceneSSBO);
+    device->UpdateDescriptorSet(m_Phase1Set, kPhase1BindSceneObjects, rhi::DescriptorType::StorageBuffer, gpuSceneSSBO);
+    device->UpdateDescriptorSet(m_Phase2Set, kPhase2BindSceneObjects, rhi::DescriptorType::StorageBuffer, gpuSceneSSBO);
     if (m_PTGActive) {
-        device->UpdateDescriptorSet(m_PTGSet, 1, rhi::DescriptorType::StorageBuffer, gpuSceneSSBO);
+        device->UpdateDescriptorSet(m_PTGSet, kPTGBindSceneObjects, rhi::DescriptorType::StorageBuffer, gpuSceneSSBO);
     }
 }
 
@@ -315,13 +343,13 @@ void GPUCulling::SetDepthTexture(rhi::IRHIDevice* device, rhi::IRHITexture* dept
     m_HiZMipCount = 1;  // 当前仅使用全分辨率深度
 
     // 单阶段/Phase 1: 绑定上帧深度
-    device->UpdateDescriptorSet(m_DescSet,   3, rhi::DescriptorType::CombinedImageSampler,
+    device->UpdateDescriptorSet(m_DescSet, kCullBindDepth, rhi::DescriptorType::CombinedImageSampler,
                                 depthTex, m_HiZSampler.get());
     device->UpdateDescriptorSet(m_Phase1Set, 3, rhi::DescriptorType::CombinedImageSampler,
                                 depthTex, m_HiZSampler.get());
 
     // Phase 2: 绑定当前帧深度（GBuffer 之后由外部更新）
-    device->UpdateDescriptorSet(m_Phase2Set, 3, rhi::DescriptorType::CombinedImageSampler,
+    device->UpdateDescriptorSet(m_Phase2Set, kPhase2BindHiZ, rhi::DescriptorType::CombinedImageSampler,
                                 depthTex, m_HiZSampler.get());
 
     // PTG: 绑定深度纹理（与单阶段共用上帧深度）
@@ -509,7 +537,7 @@ void GPUCulling::BuildHiZPyramid(rhi::IRHICommandList* cmd, u32 screenW, u32 scr
     }
 
     // 金字塔构建完成后，将 Phase 2 的深度绑定切换为 Hi-Z 纹理
-    m_Device->UpdateDescriptorSet(m_Phase2Set, 3,
+    m_Device->UpdateDescriptorSet(m_Phase2Set, kPhase2BindHiZ,
         rhi::DescriptorType::CombinedImageSampler,
         m_HiZTexture.get(), m_HiZSampler.get());
 }

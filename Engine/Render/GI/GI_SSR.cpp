@@ -7,6 +7,13 @@
 
 namespace he::render {
 
+// SSR 描述符集绑定号（与 SSR.frag 的 vk::binding 一致）
+static constexpr u32 kSSRBindDepth  = 0;   // 深度
+static constexpr u32 kSSRBindNormal = 1;   // 法线
+static constexpr u32 kSSRBindAlbedo = 2;   // 反照率
+static constexpr u32 kSSRBindParams = 3;   // 参数（push constant 之外的结构描述）
+static constexpr u32 kSSRBindHiZ    = 4;   // Hi-Z 深度金字塔
+
 bool GI_SSR::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Device = device;
     m_Width = width;
@@ -16,7 +23,13 @@ bool GI_SSR::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Settings.mode = GIMode::SSGI;
 
     rhi::DescriptorSetLayoutDesc l;
-    l.bindings = {{0,rhi::DescriptorType::CombinedImageSampler,1,16},{1,rhi::DescriptorType::CombinedImageSampler,1,16},{2,rhi::DescriptorType::CombinedImageSampler,1,16},{3,rhi::DescriptorType::UniformBuffer,1,16},{4,rhi::DescriptorType::CombinedImageSampler,1,16}};
+    l.bindings = {
+        {kSSRBindDepth,  rhi::DescriptorType::CombinedImageSampler, 1, 16},
+        {kSSRBindNormal, rhi::DescriptorType::CombinedImageSampler, 1, 16},
+        {kSSRBindAlbedo, rhi::DescriptorType::CombinedImageSampler, 1, 16},
+        {kSSRBindParams, rhi::DescriptorType::UniformBuffer, 1, 16},
+        {kSSRBindHiZ,    rhi::DescriptorType::CombinedImageSampler, 1, 16},
+    };
     m_DescLayout = device->CreateDescriptorSetLayout(l);
     m_DescSet = device->AllocateDescriptorSet(m_DescLayout);
 
@@ -86,14 +99,15 @@ void GI_SSR::SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal, rhi::I
     m_Depth = depth;
     m_Normal = normal;
     m_Albedo = albedo;
+    // 每帧纹理可能变化，动态更新描述符集绑定
     if (m_Depth) {
-        m_Device->UpdateDescriptorSet(m_DescSet, 0, rhi::DescriptorType::CombinedImageSampler, m_Depth, m_PointSampler.get());
+        m_Device->UpdateDescriptorSet(m_DescSet, kSSRBindDepth, rhi::DescriptorType::CombinedImageSampler, m_Depth, m_PointSampler.get());
     }
     if (m_Normal) {
-        m_Device->UpdateDescriptorSet(m_DescSet, 1, rhi::DescriptorType::CombinedImageSampler, m_Normal, m_PointSampler.get());
+        m_Device->UpdateDescriptorSet(m_DescSet, kSSRBindNormal, rhi::DescriptorType::CombinedImageSampler, m_Normal, m_PointSampler.get());
     }
     if (m_Albedo) {
-        m_Device->UpdateDescriptorSet(m_DescSet, 2, rhi::DescriptorType::CombinedImageSampler, m_Albedo, m_PointSampler.get());
+        m_Device->UpdateDescriptorSet(m_DescSet, kSSRBindAlbedo, rhi::DescriptorType::CombinedImageSampler, m_Albedo, m_PointSampler.get());
     }
 }
 
@@ -101,7 +115,7 @@ void GI_SSR::SetHiZ(rhi::IRHITexture* hiZ, rhi::IRHISampler* sampler) {
     m_HiZTex = hiZ;
     m_HiZSampler = sampler;
     if (m_Device && hiZ && sampler) {
-        m_Device->UpdateDescriptorSet(m_DescSet, 4, rhi::DescriptorType::CombinedImageSampler,
+        m_Device->UpdateDescriptorSet(m_DescSet, kSSRBindHiZ, rhi::DescriptorType::CombinedImageSampler,
             hiZ, sampler);
     }
 }

@@ -10,6 +10,21 @@
 
 namespace he::render {
 
+// DDGI 探针更新描述符集绑定号（与 DDGI.comp.slang 一致）
+static constexpr u32 kDDGIBindAlbedo      = 0;   // GBuffer 反照率
+static constexpr u32 kDDGIBindNormal      = 1;   // GBuffer 法线
+static constexpr u32 kDDGIBindDepth       = 2;   // GBuffer 深度
+static constexpr u32 kDDGIBindProbes      = 3;   // 探针输出（RW）
+static constexpr u32 kDDGIBindGridParams  = 4;   // 探针网格参数 UBO
+static constexpr u32 kDDGIBindHistory     = 5;   // 上一帧探针历史
+static constexpr u32 kDDGIBindPrevHDR     = 6;   // 前帧 HDR（屏幕回退）
+static constexpr u32 kDDGIBindRSMPosition = 7;   // RSM 位置图
+static constexpr u32 kDDGIBindRSMFlux     = 8;   // RSM 通量图
+static constexpr u32 kDDGIBindIBL         = 9;   // IBL 辐照度（Cubemap）
+
+// HDR 下采样描述符集绑定号
+static constexpr u32 kDDGIBindDownsampleInput = 0;   // 下采样源（全分辨率 HDR）
+
 // 计算调度所需的 Dispatch 组数（每线程处理一个探针，64 线程/组）
 static u32 DispatchGroupCount(u32 probeCount) {
     return (probeCount + 63) / 64;
@@ -110,26 +125,26 @@ bool GI_DDGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     // binding 7/8: RSM Position/Flux CombinedImageSampler（B 路径世界辐射度）
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = {
-        {0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
-        {1, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
-        {2, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
-        {3, rhi::DescriptorType::StorageBuffer,         1, rhi::kStageMaskCompute},
-        {4, rhi::DescriptorType::UniformBuffer,         1, rhi::kStageMaskCompute},
-        {5, rhi::DescriptorType::StorageBuffer,         1, rhi::kStageMaskCompute},
-        {6, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // 前帧 HDR
-        {7, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // RSM Position
-        {8, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // RSM Flux
-        {9, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // IBL Irradiance (Cubemap)
+        {kDDGIBindAlbedo,      rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
+        {kDDGIBindNormal,      rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
+        {kDDGIBindDepth,       rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
+        {kDDGIBindProbes,      rhi::DescriptorType::StorageBuffer,         1, rhi::kStageMaskCompute},
+        {kDDGIBindGridParams,  rhi::DescriptorType::UniformBuffer,         1, rhi::kStageMaskCompute},
+        {kDDGIBindHistory,     rhi::DescriptorType::StorageBuffer,         1, rhi::kStageMaskCompute},
+        {kDDGIBindPrevHDR,     rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // 前帧 HDR
+        {kDDGIBindRSMPosition, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // RSM Position
+        {kDDGIBindRSMFlux,     rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // RSM Flux
+        {kDDGIBindIBL,         rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // IBL Irradiance (Cubemap)
     };
     m_Layout = device->CreateDescriptorSetLayout(layout);
     m_Set    = device->AllocateDescriptorSet(m_Layout);
 
     // 预绑定前帧 HDR（纹理创建后不变，只需更新 sampler）
-    device->UpdateDescriptorSet(m_Set, 6, rhi::DescriptorType::CombinedImageSampler,
+    device->UpdateDescriptorSet(m_Set, kDDGIBindPrevHDR, rhi::DescriptorType::CombinedImageSampler,
         m_PrevHDR.get(), m_LinearSampler.get());
 
     // 预绑定不变的 binding：uniform buffer（每帧只需 Map/Unmap 更新内容）
-    device->UpdateDescriptorSet(m_Set, 4, rhi::DescriptorType::UniformBuffer, m_GridUniform.get());
+    device->UpdateDescriptorSet(m_Set, kDDGIBindGridParams, rhi::DescriptorType::UniformBuffer, m_GridUniform.get());
 
     // ---- Compute PSO ----
     rhi::ShaderBytecode cs;
@@ -184,15 +199,15 @@ void GI_DDGI::SetGBufferInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal
 
     // 更新描述符集中 GBuffer 绑定（每帧纹理可能变化）
     if (m_Albedo && m_Device) {
-        m_Device->UpdateDescriptorSet(m_Set, 0, rhi::DescriptorType::CombinedImageSampler,
+        m_Device->UpdateDescriptorSet(m_Set, kDDGIBindAlbedo, rhi::DescriptorType::CombinedImageSampler,
             m_Albedo, m_PointSampler.get());
     }
     if (m_Normal && m_Device) {
-        m_Device->UpdateDescriptorSet(m_Set, 1, rhi::DescriptorType::CombinedImageSampler,
+        m_Device->UpdateDescriptorSet(m_Set, kDDGIBindNormal, rhi::DescriptorType::CombinedImageSampler,
             m_Normal, m_PointSampler.get());
     }
     if (m_Depth && m_Device) {
-        m_Device->UpdateDescriptorSet(m_Set, 2, rhi::DescriptorType::CombinedImageSampler,
+        m_Device->UpdateDescriptorSet(m_Set, kDDGIBindDepth, rhi::DescriptorType::CombinedImageSampler,
             m_Depth, m_PointSampler.get());
     }
 }
@@ -218,8 +233,8 @@ void GI_DDGI::Render(rhi::IRHICommandList* cmd) {
     static bool s_FirstFrame = true;
 
     // 更新 descriptor set：绑定当前输出缓冲和历史缓冲（每帧因 swap 而变化）
-    m_Device->UpdateDescriptorSet(m_Set, 3, rhi::DescriptorType::StorageBuffer, m_ProbeBuffer.get());
-    m_Device->UpdateDescriptorSet(m_Set, 5, rhi::DescriptorType::StorageBuffer, m_ProbeHistory.get());
+    m_Device->UpdateDescriptorSet(m_Set, kDDGIBindProbes, rhi::DescriptorType::StorageBuffer, m_ProbeBuffer.get());
+    m_Device->UpdateDescriptorSet(m_Set, kDDGIBindHistory, rhi::DescriptorType::StorageBuffer, m_ProbeHistory.get());
 
     // ---- 上传探针网格 Uniform（含时间混合参数） ----
     ProbeGridUniform uniforms;
@@ -277,12 +292,12 @@ void GI_DDGI::CaptureHDR(rhi::IRHICommandList* cmd, rhi::IRHITexture* hdr) {
         hdrDesc.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
         m_PrevHDR = m_Device->CreateTexture(hdrDesc);
         // 重新绑定到探针描述符集
-        m_Device->UpdateDescriptorSet(m_Set, 6, rhi::DescriptorType::CombinedImageSampler,
+        m_Device->UpdateDescriptorSet(m_Set, kDDGIBindPrevHDR, rhi::DescriptorType::CombinedImageSampler,
             m_PrevHDR.get(), m_LinearSampler.get());
     }
 
     // 下采样渲染：全分辨率 HDR → 1/4（线性采样自动降采样）
-    m_Device->UpdateDescriptorSet(m_DownsampleSet, 0, rhi::DescriptorType::CombinedImageSampler,
+    m_Device->UpdateDescriptorSet(m_DownsampleSet, kDDGIBindDownsampleInput, rhi::DescriptorType::CombinedImageSampler,
         hdr, m_LinearSampler.get());
     cmd->SetPipeline(m_DownsamplePSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DownsampleSet);
@@ -299,9 +314,9 @@ void GI_DDGI::SetRSM(rhi::IRHITexture* pos, rhi::IRHITexture* flux, const float4
     m_RSMFluxMap       = flux;
     m_RSMLightViewProj = lightViewProj;
     if (m_Device && pos && flux) {
-        m_Device->UpdateDescriptorSet(m_Set, 7, rhi::DescriptorType::CombinedImageSampler,
+        m_Device->UpdateDescriptorSet(m_Set, kDDGIBindRSMPosition, rhi::DescriptorType::CombinedImageSampler,
             pos, m_LinearSampler.get());
-        m_Device->UpdateDescriptorSet(m_Set, 8, rhi::DescriptorType::CombinedImageSampler,
+        m_Device->UpdateDescriptorSet(m_Set, kDDGIBindRSMFlux, rhi::DescriptorType::CombinedImageSampler,
             flux, m_LinearSampler.get());
     }
 }
@@ -309,7 +324,7 @@ void GI_DDGI::SetRSM(rhi::IRHITexture* pos, rhi::IRHITexture* flux, const float4
 void GI_DDGI::SetIBL(rhi::IRHITexture* irradiance, rhi::IRHISampler* sampler) {
     m_IBLIrradiance = irradiance;
     if (m_Device && irradiance && sampler) {
-        m_Device->UpdateDescriptorSet(m_Set, 9, rhi::DescriptorType::CombinedImageSampler,
+        m_Device->UpdateDescriptorSet(m_Set, kDDGIBindIBL, rhi::DescriptorType::CombinedImageSampler,
             irradiance, sampler);
     }
 }

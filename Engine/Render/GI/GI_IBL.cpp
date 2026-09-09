@@ -18,6 +18,9 @@ using namespace he::rhi;
 
 namespace he::render {
 
+// IBL 各生成 pass 的描述符集绑定号（源纹理统一为 binding 0）
+static constexpr u32 kIBLBindInput = 0;
+
 // ============================================================
 // Cubemap 6 面方向 + 对应的上向量（Vulkan Cubemap 约定）
 // Face 0:+X, 1:-X, 2:+Y, 3:-Y, 4:+Z, 5:-Z
@@ -120,7 +123,7 @@ bool GI_IBL::Initialize(rhi::IRHIDevice* device, u32, u32) {
     {
         rhi::DescriptorSetLayoutDesc iblLayout;
         iblLayout.bindings = {
-            { 0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment },
+            { kIBLBindInput, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment },
         };
         m_IrradianceLayout = device->CreateDescriptorSetLayout(iblLayout);
 
@@ -156,7 +159,7 @@ bool GI_IBL::Initialize(rhi::IRHIDevice* device, u32, u32) {
     {
         rhi::DescriptorSetLayoutDesc pfLayout;
         pfLayout.bindings = {
-            { 0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment },
+            { kIBLBindInput, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment },
         };
         m_PrefilterLayout = device->CreateDescriptorSetLayout(pfLayout);
 
@@ -251,11 +254,11 @@ void GI_IBL::SetIBLSkybox(rhi::IRHITexture* cubemap, rhi::IRHISampler* sampler) 
 
     // 更新描述符集绑定
     if (m_IrradianceSet != rhi::kInvalidSet)
-        m_Device->UpdateDescriptorSet(m_IrradianceSet, 0,
+        m_Device->UpdateDescriptorSet(m_IrradianceSet, kIBLBindInput,
             rhi::DescriptorType::CombinedImageSampler,
             m_SkyboxCubemap, m_SkyboxSampler);
     if (m_PrefilterSet != rhi::kInvalidSet)
-        m_Device->UpdateDescriptorSet(m_PrefilterSet, 0,
+        m_Device->UpdateDescriptorSet(m_PrefilterSet, kIBLBindInput,
             rhi::DescriptorType::CombinedImageSampler,
             m_SkyboxCubemap, m_SkyboxSampler);
 }

@@ -13,6 +13,10 @@
 
 namespace he::render {
 
+// RSM 渲染描述符集绑定号（与 RSM_Generate shader 一致）
+static constexpr u32 kRSMBindLights  = 1;   // GPULight[] SSBO
+static constexpr u32 kRSMBindObjects = 2;   // GPUObjectData[] SSBO
+
 bool GI_RSM::Initialize(rhi::IRHIDevice* device, u32, u32) {
     m_Device = device;
     HE_CORE_INFO("GI_RSM::Initialize");
@@ -55,8 +59,8 @@ bool GI_RSM::Initialize(rhi::IRHIDevice* device, u32, u32) {
     // RSM PSO（双 MRT：pos + normal+flux，深度附件复用 Shadow Map 的 D32）
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = {
-        { 1, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskVertex | rhi::kStageMaskFragment },  // u_Lights (Vertex | Fragment)
-        { 2, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskVertex | rhi::kStageMaskFragment },  // u_Objects (Vertex | Fragment)
+        { kRSMBindLights,  rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskVertex | rhi::kStageMaskFragment },  // u_Lights (Vertex | Fragment)
+        { kRSMBindObjects, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskVertex | rhi::kStageMaskFragment },  // u_Objects (Vertex | Fragment)
     };
     m_RSMLayout = device->CreateDescriptorSetLayout(layout);
     m_RSMSet    = device->AllocateDescriptorSet(m_RSMLayout);
@@ -136,9 +140,9 @@ void GI_RSM::Render(rhi::IRHICommandList* cmd) {
 void GI_RSM::RenderRSMPass(rhi::IRHICommandList* cmd, he::World& world, he::SceneGraph& sg) {
     if (!m_Ready || !m_ExternalObjBuf || !m_RSMDepth) return;
 
-    m_Device->UpdateDescriptorSet(m_RSMSet, 1,
+    m_Device->UpdateDescriptorSet(m_RSMSet, kRSMBindLights,
         rhi::DescriptorType::StorageBuffer, m_ExternalObjBuf);
-    m_Device->UpdateDescriptorSet(m_RSMSet, 2,
+    m_Device->UpdateDescriptorSet(m_RSMSet, kRSMBindObjects,
         rhi::DescriptorType::StorageBuffer, m_ExternalObjBuf);
 
     cmd->SetPipeline(m_RSMPSO.get());
