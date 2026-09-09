@@ -20,9 +20,16 @@
 [[vk::binding(5, 0)]] StructuredBuffer<float4> u_ProbeHistory;
 
 // 前帧 HDR 辐射度（CombinedImageSampler, 与 u_LinearSampler 共享 binding slot）
-// 替代之前的 albedo * 0.3 近似，提供探针采样的真实光照
+// 屏幕空间来源：视角相关（视锥外采样点被跳过）——仅作 RSM 不可用时的回退
 [[vk::binding(6, 0)]] Texture2D<float4> u_PrevHDR;
 [[vk::binding(6, 0)]] SamplerState u_LinearSampler;
+
+// RSM 世界辐射度（B 路径：单次反弹 VPL，视角无关——优先来源）
+[[vk::binding(7, 0)]] Texture2D<float4> u_RSMPositionMap;
+[[vk::binding(8, 0)]] Texture2D<float4> u_RSMFluxMap;
+
+// IBL 环境辐照度（Cubemap，按方向采样——世界空间、视角无关；RSM 不可用时的回退）
+[[vk::binding(9, 0)]] TextureCube<float4> u_IBLIrradiance;
 
 // 探针网格 + 相机参数
 [[vk::binding(4, 0)]] cbuffer DDGIParams {
@@ -31,6 +38,8 @@
     float4   u_CameraPos;    // xyz=相机世界位置
     float4   u_Params;       // x=intensity, y=numSamples, z=blendAlpha, w=historyValid
     float4x4 u_ViewProj;     // 相机 View→Proj（世界→裁剪空间）
+    float4x4 u_RSMLightViewProj;  // RSM 光源 VP（世界→RSM 光源空间投影）
+    float4   u_Flags;        // x=useRSM（1=RSM 世界辐射度，0=屏幕 HDR 回退）
 };
 
 // 每探针 float4 数量（与 C++ kFloats4PerProbe 保持一致）
@@ -124,31 +133,30 @@ void main(uint3 id : SV_DispatchThreadID) {
         // 沿方向步进到采样点（世界空间）
         float3 samplePos = probePos + dir * stepDist;
 
-        // 世界 → 屏幕投影
-        float4 clipPos = mul(u_ViewProj, float4(samplePos, 1.0));
-        float3 ndc = clipPos.xyz / max(clipPos.w, 0.0001);
-        float2 uv = ndc.xy * 0.5 + 0.5;
+        float3 radiance = float3(0.0);
+        bool   valid    = false;
 
-        // 检查是否在屏幕范围内（Vulkan NDC: x,y ∈ [-1,1], z ∈ [0,1]）
-        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
+        if (u_Flags.x > 0.5) {
+            // ── B 路径：RSM 世界辐射度（视角无关，单次反弹 VPL）──
+            float4 rsmClip = mul(u_RSMLightViewProj, float4(samplePos, 1.0));
+            if (rsmClip.w > 0.0001) {
+                float2 rsmUV = rsmClip.xy / rsmClip.w * 0.5 + 0.5;
+                if (rsmUV.x >= 0.0 && rsmUV.x <= 1.0 && rsmUV.y >= 0.0 && rsmUV.y <= 1.0) {
+                    float4 flux = u_RSMFluxMap.SampleLevel(u_LinearSampler, rsmUV, 0);
+                    radiance = flux.rgb;
+                    valid = dot(radiance, radiance) > 0.0001;
+                }
+            }
+        } else {
+            // ── 回退：IBL 环境辐照度（世界空间、视角无关）──
+            // 原屏幕 HDR 回退依赖视锥（视锥外采样点被跳过）→ 探针随相机位置/视角变化，
+            // 改用天空盒辐照度（按采样方向查询），彻底移除屏幕空间依赖
+            radiance = u_IBLIrradiance.SampleLevel(u_LinearSampler, dir, 0).rgb;
+            valid = dot(radiance, radiance) > 0.0001;
+        }
+
+        if (!valid) {
             continue;
-        }
-
-        // 深度可见性测试：比较采样点投影深度与 GBuffer 深度（SampleLevel 避免 compute derivative）
-        float gbufDepth = u_Depth.SampleLevel(u_PointSampler, uv, 0).r;
-        // Reverse-Z 约定：近=1, 远=0。ndc.z < gbufDepth 表示在几何体前方（被遮挡）
-        // 允许小阈值避免浮点误差
-        if (ndc.z > gbufDepth + 0.003) {
-            continue;  // 采样点被遮挡
-        }
-
-        // 可见：读取前帧 HDR 作为真实辐射度（包含完整 PBR+IBL+阴影）
-        // 灰度兜底：首帧 HDR 可能为全零，用 0.03 防止全黑
-        float3 radiance = u_PrevHDR.SampleLevel(u_LinearSampler, uv, 0).rgb;
-        if (dot(radiance, radiance) < 0.0001) {
-            // 首帧或采样点屏幕外：回退到 albedo 近似
-            float3 albedo = u_GBufferA.SampleLevel(u_PointSampler, uv, 0).rgb;
-            radiance = albedo * 0.03;  // 极弱光兜底，首帧后会被 HDR 覆盖
         }
 
         // SH 投影

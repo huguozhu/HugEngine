@@ -270,6 +270,54 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     }
 
     // ============================================================
+    // DDGI 探针的辐射度来源绑定
+    //   - IBL 辐照度：RSM 不可用时的回退（世界空间、视角无关）
+    //   - RSM：有方向阴影时优先（单次反弹 VPL，视角无关）
+    // ============================================================
+    if (m_GIConfig.ShouldRunDDGI()) {
+        if (auto* giIBL = dynamic_cast<GI_IBL*>(m_GI.get())) {
+            m_DDGI.SetIBL(giIBL->GetIrradianceMap(), giIBL->GetIBLSampler());
+        }
+    }
+
+    // ============================================================
+    // RSM 渲染（B 路径：DDGI 探针的世界辐射度来源——视角无关）
+    // 必须在 DDGI_Update 之前：探针从 RSM 采样单次反弹辐射度，
+    // 替代屏幕 HDR（视锥外采样点被跳过 → 视角相关）
+    // ============================================================
+    if (m_GIConfig.ShouldRunDDGI() && m_RSM && m_ShadowSystem
+        && m_ShadowSystem->HasActiveShadows()) {
+        // 固定光源视锥（不随相机）：CSM 的 lightViewProj 拟合相机视锥，
+        // 视角变化会让 RSM 内容随之变化 → 探针辐射度视角相关。
+        // RSM 改用覆盖场景的固定光源视锥，保证探针数据与视角无关。
+        float3 ldir = float3(0.3f, -1.0f, 0.4f);   // 无方向光时的默认方向
+        world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& l) {
+            if (l.enabled && l.castShadow) {
+                ldir = glm::normalize(l.direction);
+            }
+        });
+        const float3 sceneCenter = float3(0.0f, 3.0f, 0.0f);   // 场景中心（Sponza）
+        const float  sceneRadius = 60.0f;                       // 覆盖半径
+        float3 eye = sceneCenter - ldir * sceneRadius * 2.0f;
+        float3 up  = (glm::abs(ldir.y) > 0.99f) ? float3(0.0f, 0.0f, 1.0f) : float3(0.0f, 1.0f, 0.0f);
+        float4x4 lview = glm::lookAt(eye, sceneCenter, up);
+        float4x4 lproj = glm::orthoRH_ZO(-sceneRadius, sceneRadius,
+                                          -sceneRadius, sceneRadius,
+                                          0.1f, sceneRadius * 4.0f);
+        float4x4 lightVP = lproj * lview;
+        m_RSM->SetLightViewProj(lightVP, m_RSM->GetRSMPositionMap()->GetWidth(),
+                                m_ObjectBuffers[m_CurrentFrameSlot].get(),
+                                m_ShadowSystem->GetShadowSampler(),
+                                rhi::kInvalidSet);
+        rg.AddPass("RSM_Generate", {}, {},
+            [&](rhi::IRHICommandList* c) {
+                m_RSM->RenderRSMPass(c, world, sg);
+            });
+        // 喂 DDGI：探针改用 RSM 世界辐射度
+        m_DDGI.SetRSM(m_RSM->GetRSMPositionMap(), m_RSM->GetRSMFluxMap(), lightVP);
+    }
+
+    // ============================================================
     // DDGI Probe Update（Compute Shader：必须放在所有 offscreen pass 之前，
     // 避免 compute pipeline 切换影响后续 render pass 状态）
     // ============================================================
@@ -288,7 +336,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                     c->SetPipeline(m_Lighting.GetPSO());
                 }
             },
-            RGPassQueue::Compute);  // AsyncCompute: DDGI 探针更新在 Compute 队列执行
+            RGPassQueue::Graphics);  // 与 RSM_Generate 同队列顺序执行：探针采样 RSM 前必须确保 RSM 渲染完成
     }
 
     // SSAO Pass（仅当 GIConfig 选中 AO 才注册）

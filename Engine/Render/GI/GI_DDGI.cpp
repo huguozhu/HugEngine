@@ -3,6 +3,8 @@
 #include "Core/Log.h"
 #include "Subsystem/RenderSubsystem.h"
 #include "DDGI.comp.spv.h"
+#include "Fullscreen.vert.spv.h"
+#include "FullscreenCopy.frag.spv.h"
 #include <cstring>
 #include <cstdio>
 
@@ -62,20 +64,50 @@ bool GI_DDGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     lsd.addressU   = lsd.addressV   = rhi::AddressMode::ClampToEdge;
     m_LinearSampler = device->CreateSampler(lsd);
 
-    // ---- 前帧 HDR 纹理（存储上一帧 Lighting 输出，供探针采样真实辐射度） ----
+    // ---- 前帧 HDR 纹理（1/4 分辨率：存储上一帧 Lighting 下采样结果，供探针采样真实辐射度）----
     rhi::TextureDesc hdrDesc;
-    hdrDesc.width  = width;
-    hdrDesc.height = height;
+    hdrDesc.width  = (width  / 4 > 0) ? width  / 4 : 1;
+    hdrDesc.height = (height / 4 > 0) ? height / 4 : 1;
     hdrDesc.format = rhi::Format::RGBA16_FLOAT;
-    hdrDesc.usage  = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::TransferDst;
+    hdrDesc.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
     m_PrevHDR = device->CreateTexture(hdrDesc);
+
+    // ---- 下采样 PSO（HDR 全分辨率 → 1/4，线性采样自动降采样）----
+    {
+        rhi::DescriptorSetLayoutDesc dl;
+        dl.bindings = {{0, rhi::DescriptorType::CombinedImageSampler, 1, 16}};
+        m_DownsampleLayout = device->CreateDescriptorSetLayout(dl);
+        m_DownsampleSet    = device->AllocateDescriptorSet(m_DownsampleLayout);
+
+        rhi::ShaderBytecode vs, fs;
+        vs.stage      = rhi::ShaderStage::Vertex;
+        vs.spirv      = k_Fullscreen_vert_spv;
+        vs.entryPoint = "vertexMain";
+        fs.stage      = rhi::ShaderStage::Pixel;
+        fs.spirv      = k_FullscreenCopy_frag_spv;
+        fs.entryPoint = "fragmentMain";
+
+        rhi::PipelineStateDesc pd;
+        pd.vertexShader        = &vs;
+        pd.pixelShader         = &fs;
+        pd.topology            = rhi::PrimitiveTopology::TriangleList;
+        pd.depthTest           = false;
+        pd.depthWrite          = false;
+        pd.depthFormat         = rhi::Format::Unknown;
+        pd.colorAttachmentCount = 1;
+        pd.colorFormats[0]     = rhi::Format::RGBA16_FLOAT;
+        pd.descriptorSetLayouts = {m_DownsampleLayout};
+        pd.debugName           = "DDGI_HDRDownsample";
+        m_DownsamplePSO = device->CreatePipelineState(pd);
+    }
 
     // ---- DescriptorSet 布局 ----
     // binding 0-2: GBuffer CombinedImageSampler
     // binding 3:   ProbeBuffer  StorageBuffer（RW, 当前帧输出）
     // binding 4:   GridUniform  UniformBuffer（探针网格参数）
     // binding 5:   HistoryBuffer StorageBuffer（只读, 上一帧历史）
-    // binding 6:   PrevHDR CombinedImageSampler（前帧 HDR 辐射度）
+    // binding 6:   PrevHDR CombinedImageSampler（前帧 HDR 辐射度，屏幕回退）
+    // binding 7/8: RSM Position/Flux CombinedImageSampler（B 路径世界辐射度）
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = {
         {0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
@@ -85,6 +117,9 @@ bool GI_DDGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         {4, rhi::DescriptorType::UniformBuffer,         1, rhi::kStageMaskCompute},
         {5, rhi::DescriptorType::StorageBuffer,         1, rhi::kStageMaskCompute},
         {6, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // 前帧 HDR
+        {7, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // RSM Position
+        {8, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // RSM Flux
+        {9, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // IBL Irradiance (Cubemap)
     };
     m_Layout = device->CreateDescriptorSetLayout(layout);
     m_Set    = device->AllocateDescriptorSet(m_Layout);
@@ -196,6 +231,8 @@ void GI_DDGI::Render(rhi::IRHICommandList* cmd) {
                                  blendAlpha,
                                  s_FirstFrame ? 0.0f : 1.0f);  // w=historyValid
     uniforms.viewProj   = m_ViewProj;
+    uniforms.rsmLightViewProj = m_RSMLightViewProj;   // B 路径：RSM 光源 VP
+    uniforms.flags = float4((m_RSMPositionMap && m_RSMFluxMap) ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);  // x=useRSM
 
     void* mapped = m_GridUniform->Map();
     if (mapped) {
@@ -227,21 +264,54 @@ void GI_DDGI::Render(rhi::IRHICommandList* cmd) {
 void GI_DDGI::CaptureHDR(rhi::IRHICommandList* cmd, rhi::IRHITexture* hdr) {
     if (!hdr || !m_PrevHDR) return;
 
+    // 目标尺寸 = 源 1/4（探针采样不需要全分辨率，省带宽）
+    u32 qw = (hdr->GetWidth()  / 4 > 0) ? hdr->GetWidth()  / 4 : 1;
+    u32 qh = (hdr->GetHeight() / 4 > 0) ? hdr->GetHeight() / 4 : 1;
+
     // 确保前帧 HDR 尺寸匹配（窗口 resize 可能改变尺寸）
-    if (m_PrevHDR->GetWidth() != hdr->GetWidth() || m_PrevHDR->GetHeight() != hdr->GetHeight()) {
+    if (m_PrevHDR->GetWidth() != qw || m_PrevHDR->GetHeight() != qh) {
         rhi::TextureDesc hdrDesc;
-        hdrDesc.width  = hdr->GetWidth();
-        hdrDesc.height = hdr->GetHeight();
+        hdrDesc.width  = qw;
+        hdrDesc.height = qh;
         hdrDesc.format = rhi::Format::RGBA16_FLOAT;
-        hdrDesc.usage  = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::TransferDst;
+        hdrDesc.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
         m_PrevHDR = m_Device->CreateTexture(hdrDesc);
-        // 重新绑定到描述符集
+        // 重新绑定到探针描述符集
         m_Device->UpdateDescriptorSet(m_Set, 6, rhi::DescriptorType::CombinedImageSampler,
             m_PrevHDR.get(), m_LinearSampler.get());
     }
 
-    // 将当前 HDR → PrevHDR（GPU 端拷贝，自动处理布局转换）
-    cmd->CopyTextureToTexture(hdr, m_PrevHDR.get());
+    // 下采样渲染：全分辨率 HDR → 1/4（线性采样自动降采样）
+    m_Device->UpdateDescriptorSet(m_DownsampleSet, 0, rhi::DescriptorType::CombinedImageSampler,
+        hdr, m_LinearSampler.get());
+    cmd->SetPipeline(m_DownsamplePSO.get());
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DownsampleSet);
+    rhi::ClearValue clr{};
+    cmd->BeginOffscreenPass(m_PrevHDR->GetNativeHandle(), nullptr, qw, qh, &clr, false);
+    cmd->SetViewport({0, (float)qh, (float)qw, -(float)qh, 0, 1});
+    cmd->SetScissor({0, 0, qw, qh});
+    cmd->Draw(3);
+    cmd->EndOffscreenPass();
+}
+
+void GI_DDGI::SetRSM(rhi::IRHITexture* pos, rhi::IRHITexture* flux, const float4x4& lightViewProj) {
+    m_RSMPositionMap   = pos;
+    m_RSMFluxMap       = flux;
+    m_RSMLightViewProj = lightViewProj;
+    if (m_Device && pos && flux) {
+        m_Device->UpdateDescriptorSet(m_Set, 7, rhi::DescriptorType::CombinedImageSampler,
+            pos, m_LinearSampler.get());
+        m_Device->UpdateDescriptorSet(m_Set, 8, rhi::DescriptorType::CombinedImageSampler,
+            flux, m_LinearSampler.get());
+    }
+}
+
+void GI_DDGI::SetIBL(rhi::IRHITexture* irradiance, rhi::IRHISampler* sampler) {
+    m_IBLIrradiance = irradiance;
+    if (m_Device && irradiance && sampler) {
+        m_Device->UpdateDescriptorSet(m_Set, 9, rhi::DescriptorType::CombinedImageSampler,
+            irradiance, sampler);
+    }
 }
 
 } // namespace he::render

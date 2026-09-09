@@ -37,6 +37,13 @@ public:
 
     void SetGBufferInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal, rhi::IRHITexture* albedo);
 
+    // 设置 RSM 世界辐射度输入（B 路径：探针从 RSM 采样单次反弹辐射度，视角无关）
+    // pos/flux 为空时回退屏幕 HDR（视角相关）
+    void SetRSM(rhi::IRHITexture* pos, rhi::IRHITexture* flux, const float4x4& lightViewProj);
+
+    // 设置 IBL 辐照度（Cubemap）：RSM 不可用时的回退来源（世界空间、视角无关）
+    void SetIBL(rhi::IRHITexture* irradiance, rhi::IRHISampler* sampler);
+
     // 捕获当前帧 HDR 到前帧纹理（供下帧 DDGI 探针采样真实辐射度）
     void CaptureHDR(rhi::IRHICommandList* cmd, rhi::IRHITexture* hdr);
 
@@ -65,6 +72,8 @@ private:
         float4   cameraPos;     // xyz=相机世界位置, w=未使用
         float4   params;        // x=intensity, y=numSamples, z=blendAlpha, w=historyValid
         float4x4 viewProj;      // 相机 View→Proj（世界→裁剪，用于探针→屏幕投影）
+        float4x4 rsmLightViewProj;  // RSM 光源 VP（世界→RSM 光源空间投影）
+        float4   flags;         // x=useRSM（1=RSM 世界辐射度，0=屏幕 HDR 回退）
     };
 
     rhi::IRHIDevice* m_Device = nullptr;
@@ -93,10 +102,23 @@ private:
     rhi::DescriptorSetLayoutHandle m_PrevHDR_Layout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_PrevHDR_Set    = rhi::kInvalidSet;  // set=0 的追加描述符
 
+    // HDR → 1/4 分辨率下采样（FullscreenCopy：线性采样源 HDR 自动降采样，省探针采样带宽）
+    std::unique_ptr<rhi::IRHIPipelineState> m_DownsamplePSO;
+    rhi::DescriptorSetLayoutHandle m_DownsampleLayout = rhi::kInvalidLayout;
+    rhi::DescriptorSetHandle       m_DownsampleSet    = rhi::kInvalidSet;
+
     // GBuffer 输入（不持有所有权）
     rhi::IRHITexture* m_Depth  = nullptr;
     rhi::IRHITexture* m_Normal = nullptr;
     rhi::IRHITexture* m_Albedo = nullptr;
+
+    // RSM 世界辐射度输入（B 路径，不持有所有权）
+    rhi::IRHITexture* m_RSMPositionMap = nullptr;
+    rhi::IRHITexture* m_RSMFluxMap      = nullptr;
+    float4x4 m_RSMLightViewProj = float4x4(1.0f);
+
+    // IBL 辐照度（回退来源，不持有所有权）
+    rhi::IRHITexture* m_IBLIrradiance = nullptr;
 
     // 相机
     bool m_CameraReady = false;
