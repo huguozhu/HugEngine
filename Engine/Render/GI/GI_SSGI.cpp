@@ -155,8 +155,11 @@ void GI_SSGI::Render(rhi::IRHICommandList* cmd) {
     // 1. 绑定管线 + 描述符集，设置视口/裁剪
     cmd->SetPipeline(m_PSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSet);
-    cmd->SetViewport({0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1});
-    cmd->SetScissor({0, 0, m_Width, m_Height});
+    // 视口用输出纹理实际尺寸（halfRes 时为半分辨率，与渲染目标一致）
+    u32 ow = m_Output->GetWidth();
+    u32 oh = m_Output->GetHeight();
+    cmd->SetViewport({0, (float)oh, (float)ow, -(float)oh, 0, 1});
+    cmd->SetScissor({0, 0, ow, oh});
 
     // 2. 生成采样核（首次生成，之后复用；通过 UBO 传递避免 push constant 溢出 256 字节限制）
     static std::vector<float4> kernel;

@@ -297,7 +297,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     }
 
     // SSR Pass（屏幕空间反射，仅当 GIConfig 选中 SSR/RT 反射才注册）
-    render::ResourceHandle ssrDenoised;
+    render::ResourceHandle ssrDenoised = kInvalidHandle;   // 通道未启用时保持无效句柄
     if (m_GIConfig.ShouldRunSpecular()) {
         auto ssrOut = rg.ImportTexture("SSR_Output", m_SSR.GetIndirectSpecularTexture());
         // halfRes：输出纹理可能为半分辨率，viewport 用纹理实际尺寸
@@ -335,7 +335,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     }
 
     // SSGI Pass（屏幕空间间接漫反射，仅当 GIConfig 选中 SSGI 才注册）
-    render::ResourceHandle ssgiDenoised;
+    render::ResourceHandle ssgiDenoised = kInvalidHandle;  // 通道未启用时保持无效句柄
     if (m_GIConfig.ShouldRunSSGI()) {
         auto ssgiOut = rg.ImportTexture("SSGI_Output", m_SSGI.GetIndirectDiffuseTexture());
         // halfRes：输出纹理可能为半分辨率，viewport 用纹理实际尺寸
@@ -392,12 +392,20 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     he::GetPhysicalSkySun(world, atmSunDir, atmTurbidity);   // 无条件更新，天空移除时复位浑浊度=0（与 Forward 一致）
     m_Lighting.SetAtmosphere(atmSunDir, atmTurbidity);
 
+    // Lighting 读取依赖：仅在对应通道注册了 pass 时才加入（避免无效句柄）
+    std::vector<render::PassResource> lightingReads = {
+        {gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbC, ResourceAccess::Read},
+        {gbWorldPos, ResourceAccess::Read},
+        {gbDisneyA, ResourceAccess::Read}, {gbDisneyB, ResourceAccess::Read},
+    };
+    if (ssgiDenoised != kInvalidHandle) {
+        lightingReads.push_back({ssgiDenoised, ResourceAccess::Read});
+    }
+    if (ssrDenoised != kInvalidHandle) {
+        lightingReads.push_back({ssrDenoised, ResourceAccess::Read});
+    }
     rg.AddPass("Lighting",
-        {{gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbC, ResourceAccess::Read},
-         {gbWorldPos, ResourceAccess::Read},
-         {gbDisneyA, ResourceAccess::Read}, {gbDisneyB, ResourceAccess::Read},
-         {ssgiDenoised, ResourceAccess::Read},
-         {ssrDenoised, ResourceAccess::Read}},
+        lightingReads,
         {{hdrC, ResourceAccess::Write}},
         [&, w, h](rhi::IRHICommandList* c) {
             // IBL 生成（天空盒 → Irradiance/Prefilter/BRDF LUT，脏时才重建）+ 绑定到 Lighting 描述符集
@@ -444,13 +452,17 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             in.lightBuffer  = m_LightBuffers[m_CurrentFrameSlot].get();
             in.shadowBuffer = m_ShadowBuffers[m_CurrentFrameSlot].get();
             in.ssaoTex    = m_SSAO.GetAOTexture();
-            in.ssgiTex    = m_DenoiseSSGI.GetOutput();
+            // halfRes 时跳过 Denoise，Lighting 直接采样 SSGI/SSR 原始输出（与帧图注册的纹理一致）
+            in.ssgiTex    = m_SSGI.GetSettings().halfRes
+                          ? m_SSGI.GetIndirectDiffuseTexture() : m_DenoiseSSGI.GetOutput();
             in.ssgiSampler = m_SSGI.GetOutputSampler();
-            in.ssrTex     = m_DenoiseSSR.GetOutput();
+            in.ssrTex     = m_SSR.GetSettings().halfRes
+                          ? m_SSR.GetIndirectSpecularTexture() : m_DenoiseSSR.GetOutput();
             in.ssrSampler = m_SSR.GetOutputSampler();
             in.ddgiProbeBuffer = m_DDGI.GetProbeBuffer();
             in.ddgiGridUniform = m_DDGI.GetGridUniform();
-            in.ddgiOverlay     = m_DDGI.IsEnabled();
+            // overlay 与 Pass 门控同源（避免 pass 跳过但 shader 仍采样陈旧探针）
+            in.ddgiOverlay     = m_GIConfig.ShouldRunDDGI() && m_DDGI.IsEnabled();
             in.ddgiScale       = m_DDGI.debugScale;
             in.clusteredShading     = &m_ClusteredShading;
             in.lightGridBuffer      = m_LightGridBuffer.get();
