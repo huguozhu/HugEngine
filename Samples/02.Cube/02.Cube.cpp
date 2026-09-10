@@ -15,7 +15,6 @@
 #include "RHI/RHI.h"
 #include "Pipeline/ForwardPipeline.h"
 #include "Pipeline/DeferredPipeline.h"
-#include "Pipeline/HybridRTPipeline.h"
 #include "Pipeline/PathTracingPipeline.h"
 #include "Pipeline/PTQualityCVars.h"
 #include "Pipeline/CameraController.h"
@@ -70,9 +69,9 @@ using namespace he;
 // ============================================================
 // 渲染管线模式 CVar
 // ============================================================
-// 渲染管线模式 CVar（0=Forward, 1=Deferred, 2=HybridRT, 3=PathTrace）
+// 渲染管线模式 CVar（0=Forward, 1=Deferred, 2=同 Deferred（HybridRT 已并入，光追经 GI 层栈 RT 源）, 3=PathTrace）
 // 默认 0 = 前向渲染（与示例标题一致；其他模式可在面板切换）
-he::CVar<int> cvPipelineMode("r.Pipeline.Mode", 0, "渲染管线模式 0=Forward 1=Deferred 2=HybridRT 3=PathTrace");
+he::CVar<int> cvPipelineMode("r.Pipeline.Mode", 0, "渲染管线模式 0=Forward 1=Deferred 2=Deferred(RT sources) 3=PathTrace");
 // 物理天空开关（1=用 Preetham 物理天空替代 Cubemap 天空盒；需 Forward 模式 r.Pipeline.Mode 0 才可见）
 he::CVar<int> cvPhysicalSkyEnable("r.PhysicalSky.Enable", 1, "1=使用 Preetham 物理天空（替代 Cubemap 天空盒）");
 // HDR 输出开关（1=SwapChain 请求 A2B10G10R10 + HDR10 ST.2084；需 HDR10 显示器/扩展支持，否则自动回退 SDR）
@@ -649,8 +648,7 @@ int main() {
     // --- 5. 初始化前向管线 + 延迟管线 + 混合 RT 管线 + 全路径追踪管线 ---
     render::ForwardPipeline  forwardPipeline;
     render::DeferredPipeline deferredPipeline;
-    render::HybridRTPipeline hybridPipeline;
-    render::PathTracingPipeline pathTracingPipeline;
+        render::PathTracingPipeline pathTracingPipeline;
     forwardPipeline.Initialize(device.get());
     forwardPipeline.SetUseRenderGraph(false);
     forwardPipeline.SetMultiThreadedRecording(false);
@@ -661,10 +659,7 @@ int main() {
     deferredPipeline.SetSwapChain(swapchain.get());
     deferredPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
 
-    hybridPipeline.Initialize(device.get());
-    hybridPipeline.SetSwapChain(swapchain.get());
-    hybridPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
-
+            
     // 全路径追踪管线（r.Pipeline.Mode=3，设备支持 RT 时才可用）
     pathTracingPipeline.Initialize(device.get());
     pathTracingPipeline.SetSwapChain(swapchain.get());
@@ -723,8 +718,7 @@ int main() {
     // 启动时默认关闭 GPU 剔除和 CPU 视锥剔除
     forwardPipeline.GetGPUCulling().enabled = false;
     deferredPipeline.GetGPUCulling().enabled = false;
-    hybridPipeline.GetGPUCulling().enabled = false;
-    forwardPipeline.GetSceneRenderer().enableFrustumCull = false;
+        forwardPipeline.GetSceneRenderer().enableFrustumCull = false;
     deferredPipeline.GetSceneRenderer().enableFrustumCull = false;
 
     // ============================================================
@@ -753,15 +747,13 @@ int main() {
         pc->Play();
         sceneGraph.SetParent(particleEntity, Entity{kInvalidEntity});
 
-        // 注册到延迟渲染管线、混合 RT 管线与全路径追踪管线
-        // （粒子系统在 Deferred / PathTracing 模式下生效；HybridRT 暂未接入渲染）
+        // 注册到延迟渲染管线（光追已并入 Deferred，不再需要独立的混合 RT 管线）与全路径追踪管线
         u32 pid = deferredPipeline.GetParticleRenderer().RegisterComponent(pc, device.get());
         deferredPipeline.AddParticleComponent(pid);
-        hybridPipeline.AddParticleComponent(pid);
         u32 ptPid = pathTracingPipeline.GetParticleRenderer().RegisterComponent(pc, device.get());
         pathTracingPipeline.AddParticleComponent(ptPid);
 
-        HE_CORE_INFO("粒子系统已注册: Deferred/HybridRT id={} PT id={} maxParticles={}",
+        HE_CORE_INFO("粒子系统已注册: Deferred id={} PT id={} maxParticles={}",
                      pid, ptPid, pc->GetMaxParticles());
     }
 
@@ -907,8 +899,7 @@ int main() {
         cmdList->SetSwapChain(swapchain.get());
         forwardPipeline.OnResize(w, h);
         deferredPipeline.OnResize(w, h);
-        hybridPipeline.OnResize(w, h);
-        pathTracingPipeline.OnResize(w, h);
+                pathTracingPipeline.OnResize(w, h);
         camCtrl.SetAspectRatio(static_cast<float>(w), static_cast<float>(h));
     });
 
@@ -1085,12 +1076,12 @@ int main() {
             cmdList->BeginRenderPass(1, backFmt,
                 rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
         }
-        // --- Hybrid RT 模式 ---
+        // --- 兼容旧模式 2：HybridRT 已并入 Deferred（光追经 GI 层栈的 RT 源启用）---
         else if (cvPipelineMode.Get() == 2) {
-            hybridPipeline.NextFrame();
-            hybridPipeline.Render(cmdList.get(), world, sceneGraph, frameCamera, deltaTime);
+            deferredPipeline.NextFrame();
+            deferredPipeline.Render(cmdList.get(), world, sceneGraph, frameCamera, deltaTime);
             // ImGui 叠加：管线已写 BackBuffer，Load 保留内容
-            cmdList->BeginDebugLabel("HybridRT + ImGui (BackBuffer)");
+            cmdList->BeginDebugLabel("Deferred(RT sources) + ImGui (BackBuffer)");
             cmdList->BeginRenderPass(1, backFmt,
                 rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
         }
@@ -1224,8 +1215,7 @@ int main() {
         if (ImGui::Checkbox("GPU Culling", &gpuCullOn)) {
             forwardPipeline.GetGPUCulling().enabled = gpuCullOn;
             deferredPipeline.GetGPUCulling().enabled = gpuCullOn;
-            hybridPipeline.GetGPUCulling().enabled = gpuCullOn;
-        }
+            }
         // CPU 视锥剔除开关
         bool cpuCullOn = forwardPipeline.GetSceneRenderer().enableFrustumCull;
         if (ImGui::Checkbox("CPU Frustum Cull", &cpuCullOn)) {
@@ -1233,22 +1223,8 @@ int main() {
             deferredPipeline.GetSceneRenderer().enableFrustumCull = cpuCullOn;
         }
 
-        // Hybrid RT 效果开关（仅 HybridRT 模式显示）
-        if (cvPipelineMode.Get() == 2 && device->GetCaps().supportsRayTracing) {
-            ImGui::SeparatorText("Hybrid RT 效果");
-            bool rtShadowOn = hybridPipeline.IsRTShadowEnabled();
-            if (ImGui::Checkbox("RT Shadow##RTShadow", &rtShadowOn))
-                hybridPipeline.SetRTShadowEnabled(rtShadowOn);
-            bool rtAOOn = hybridPipeline.IsRTAOEnabled();
-            if (ImGui::Checkbox("RT AO##RTAO", &rtAOOn))
-                hybridPipeline.SetRTAOEnabled(rtAOOn);
-            bool rtReflOn = hybridPipeline.IsRTReflectionEnabled();
-            if (ImGui::Checkbox("RT Reflection##RTReflection", &rtReflOn))
-                hybridPipeline.SetRTReflectionEnabled(rtReflOn);
-            bool rtGIOn = hybridPipeline.IsRTGIEnabled();
-            if (ImGui::Checkbox("RT GI##RTGI", &rtGIOn))
-                hybridPipeline.SetRTGIEnabled(rtGIOn);
-        }
+        // 注：RT 效果开关已随 HybridRT 管线一并移除——
+        //     Deferred 下光追作为 GI 源由 GIConfig 层栈控制（见 06.GILab 的 GI 控制台）
 
         // 天空盒开关（SkyboxPass 读取 enabled 决定是否渲染）
         world.ForEach<he::SkyboxComponent>([&](he::Entity, he::SkyboxComponent& sb) {
@@ -1561,8 +1537,7 @@ int main() {
 
     forwardPipeline.Shutdown();
     deferredPipeline.Shutdown();
-    hybridPipeline.Shutdown();
-    pathTracingPipeline.Shutdown();
+        pathTracingPipeline.Shutdown();
 
     HE_CORE_INFO("Exiting after {} frames", frameIndex);
     return 0;

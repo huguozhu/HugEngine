@@ -12,7 +12,6 @@
 #include "RHI/RHI.h"
 #include "Pipeline/DeferredPipeline.h"
 #include "Pipeline/ForwardPipeline.h"
-#include "Pipeline/HybridRTPipeline.h"
 #include "Pipeline/IRenderPipeline.h"
 #include "GI/GIConfig.h"
 #include "GI/GIRegistry.h"
@@ -384,7 +383,7 @@ int main() {
     }
 
     // ============================================================
-    // 6. 初始化渲染管线（三管线可选：Forward / Deferred / HybridRT）
+    // 6. 初始化渲染管线（Forward / Deferred；光追经 GI 层栈的 RT 源启用）
     // ============================================================
     render::DeferredPipeline   pipeline;          // 延迟管线（默认，GI 对比主用）
     render::ForwardPipeline    forwardPipeline;   // 前向管线
@@ -899,17 +898,14 @@ int main() {
                     dp->GetSSAO().halfRes = gc.halfRes;
                     // 纹理重建延迟到帧边界（NextFrame 之后），避免在 ImGui 回调内销毁/创建正在使用的纹理
                     g_PendingHalfResApply = true;
-                } else if (auto* hp = dynamic_cast<render::HybridRTPipeline*>(curPipeline)) {
-                    hp->GetDDGI()->SetEnabled(gc.ShouldRunDDGI());
                 }
             }
 
             // 当前管线可用的 GI 子系统（按管线类型获取，Forward 无屏幕空间/探针 GI）
             auto* dp = dynamic_cast<render::DeferredPipeline*>(curPipeline);
-            auto* hp = dynamic_cast<render::HybridRTPipeline*>(curPipeline);
             auto* giSSGI = dp ? dp->GetSSGI() : nullptr;
             auto* giSSR  = dp ? dp->GetSSR()  : nullptr;
-            auto* giDDGI = dp ? dp->GetDDGI() : (hp ? hp->GetDDGI() : nullptr);
+            auto* giDDGI = dp ? dp->GetDDGI() : nullptr;
 
             // ── GI 通道：Diffuse / Specular / AO / Shadow ──
             ImGui::SeparatorText("GI 通道");

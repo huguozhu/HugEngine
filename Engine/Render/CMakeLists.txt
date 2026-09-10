@@ -22,8 +22,6 @@ set(RENDER_SOURCES
     Pipeline/DeferredPipeline.h
     Pipeline/DeferredPipeline.cpp
     Pipeline/DeferredPipeline_FrameGraph.cpp
-    Pipeline/HybridRTPipeline.h
-    Pipeline/HybridRTPipeline.cpp
     Pipeline/RTQualityCVars.h
     Pipeline/RTQualityCVars.cpp
     Pipeline/PathTracingPipeline.h
