@@ -283,39 +283,60 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
         color += rsmIndirect * (0.03 * giIntensity) * iblIntensity;
     }
 
-    // SSAO 屏幕空间遮蔽（与 GBuffer AO 相乘）；rtAOSource=1 时改用 RT AO 遮罩
-    float ssao = u_SSAO.Sample(u_GBufferSampler, uv).r;
-    float aoVal = (rtAOSource != 0u) ? u_RT_AO.Sample(u_GBufferSampler, uv).r : ssao;
-    color *= lerp(1.0, ao * aoVal, aoIntensity);   // aoIntensity 控制 AO 强度（0=无 AO）
+    // ── AO 分层合成（S1.5：SSAO 与 RTAO 可同时参与，归一化加权）──
+    // 两者都是「环境光遮蔽」这一物理量的估计 → 权重归一化，避免重复遮蔽
+    //（旧行为是二选一：rtAOSource 切换）
+    {
+        GIChannelBlendParams ba = u_GIBlendParams.ao;
+        float aoNum = 0.0;
+        float aoDen = 0.0;
+        if (ba.screenSpaceWeight > 0.0) {
+            aoNum += u_SSAO.Sample(u_GBufferSampler, uv).r * ba.screenSpaceWeight;
+            aoDen += ba.screenSpaceWeight;
+        }
+        if (ba.rayTracingWeight > 0.0) {
+            aoNum += u_RT_AO.Sample(u_GBufferSampler, uv).r * ba.rayTracingWeight;
+            aoDen += ba.rayTracingWeight;
+        }
+        float aoVal = (aoDen > 0.0) ? (aoNum / aoDen) : 1.0;   // 无 AO 源 → 不遮蔽
+        color *= lerp(1.0, ao * aoVal, aoIntensity);   // aoIntensity 控制 AO 强度（0=无 AO）
+    }
 
-    // ── 间接漫反射分层合成（P2）──
+    // ── 间接漫反射分层合成（P2/P3）──
     // 多个 GI 源（屏幕空间 / 光追 / 探针）描述的是同一个物理量——间接入射辐射度。
     // 直接相加会造成「双重计数」（能量翻倍、白炉测试失败）→ 归一化加权（权重和 = 1）。
     // 权重以「各源置信度」为主、用户权重为辅；距离让位默认关闭——它是性能/艺术控制，
     // 不是物理判据（远处但屏幕内清晰可见的物体，屏幕空间 GI 依然可信）。
+    // S1.5：屏幕空间源与光追源**各自独立采样、同时参与**（不再二选一），
+    //       二者的权重由层栈分别给出（SSGI 权重 / RTGI 权重）。
     GIChannelBlendParams bl = u_GIBlendParams.diffuse;
-    float4 ssgi = u_SSGI.Sample(u_GBufferSampler, uv);
-    float4 rtGI = (rtDiffuseSource != 0u) ? u_RT_GI.Sample(u_GBufferSampler, uv) : ssgi;
 
     float3 num = float3(0.0);
     float  den = 0.0;
+    // 屏幕内可见性置信度（屏幕外无数据 → 靠近边缘 5% 内线性降权）
+    float2 edge     = min(uv, 1.0 - uv);
+    float  confEdge = saturate(min(edge.x, edge.y) / 0.05);
+    float  camDist  = length(cameraPosition.xyz - worldPos);
 
-    // ① 屏幕空间 / 光追源（weight=0 表示该源不参与，如 SSGI/RTGI 关闭）
-    if (bl.screenSpaceWeight > 0.0 || bl.rayTracingWeight > 0.0) {
-        float wBase   = (rtDiffuseSource != 0u) ? bl.rayTracingWeight : bl.screenSpaceWeight;
-        float falloff = (rtDiffuseSource != 0u) ? bl.rayTracingFalloffDistance : bl.screenSpaceFalloffDistance;
-        // 置信度：屏幕外无数据 → 靠近屏幕边缘（5% 内）线性降权
-        float2 edge     = min(uv, 1.0 - uv);
-        float  confEdge = saturate(min(edge.x, edge.y) / 0.05);
-        // 可选的距离让位（falloff > 0 才启用）
-        float  confDist = (falloff > 0.0)
-                        ? saturate(1.0 - length(cameraPosition.xyz - worldPos) / falloff) : 1.0;
-        float  w = wBase * confEdge * confDist;
-        num += rtGI.rgb * w;
+    // ① 屏幕空间源（SSGI）
+    if (bl.screenSpaceWeight > 0.0) {
+        float confDist = (bl.screenSpaceFalloffDistance > 0.0)
+                       ? saturate(1.0 - camDist / bl.screenSpaceFalloffDistance) : 1.0;
+        float w = bl.screenSpaceWeight * confEdge * confDist;
+        num += u_SSGI.Sample(u_GBufferSampler, uv).rgb * w;
         den += w;
     }
 
-    // ② 低频探针源（DDGI）：世界空间、全方向，作为远场兜底
+    // ② 光追源（RTGI）——可与屏幕空间源同时生效
+    if (bl.rayTracingWeight > 0.0) {
+        float confDist = (bl.rayTracingFalloffDistance > 0.0)
+                       ? saturate(1.0 - camDist / bl.rayTracingFalloffDistance) : 1.0;
+        float w = bl.rayTracingWeight * confEdge * confDist;
+        num += u_RT_GI.Sample(u_GBufferSampler, uv).rgb * w;
+        den += w;
+    }
+
+    // ③ 低频探针源（DDGI）：世界空间、全方向，作为远场兜底
     if (bl.probeWeight > 0.0) {
         float w = bl.probeWeight;
         num += SampleDDGI(worldPos, N) * ddgiScale * w;
@@ -337,21 +358,30 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
     // 而非叠加：命中时按权重分配（权重和=1），未命中（a<0，高粗糙度跳过或 miss）时
     // 完全由环境镜面提供回退。
     GIChannelBlendParams bs = u_GIBlendParams.specular;
-    float4 ssr = u_SSR.Sample(u_GBufferSampler, uv);
-    float4 rtRefl = (rtSpecularSource != 0u) ? u_RT_Reflection.Sample(u_GBufferSampler, uv) : ssr;
 
     float3 specNum = specEnv * bs.probeWeight;   // 环境镜面 = 低频「探针/环境」源
     float  specDen = bs.probeWeight;
-    if (rtRefl.a >= 0.0) {                       // 反射命中（a>=0）
-        float wBase   = (rtSpecularSource != 0u) ? bs.rayTracingWeight : bs.screenSpaceWeight;
-        float falloff = (rtSpecularSource != 0u) ? bs.rayTracingFalloffDistance : bs.screenSpaceFalloffDistance;
-        float2 edge     = min(uv, 1.0 - uv);
-        float  confEdge = saturate(min(edge.x, edge.y) / 0.05);
-        float  confDist = (falloff > 0.0)
-                        ? saturate(1.0 - length(cameraPosition.xyz - worldPos) / falloff) : 1.0;
-        float  w = wBase * confEdge * confDist;
-        specNum += rtRefl.rgb * w;
-        specDen += w;
+    // 屏幕空间反射（SSR）与光追反射（RT 反射）各自独立采样、可同时参与（S1.5）；
+    // a<0 表示该源本条光线无效（高粗糙度跳过或 miss）——该源权重记 0，由其他源兜底
+    if (bs.screenSpaceWeight > 0.0) {
+        float4 ssr = u_SSR.Sample(u_GBufferSampler, uv);
+        if (ssr.a >= 0.0) {
+            float confDist = (bs.screenSpaceFalloffDistance > 0.0)
+                           ? saturate(1.0 - camDist / bs.screenSpaceFalloffDistance) : 1.0;
+            float w = bs.screenSpaceWeight * confEdge * confDist;
+            specNum += ssr.rgb * w;
+            specDen += w;
+        }
+    }
+    if (bs.rayTracingWeight > 0.0) {
+        float4 rtRefl = u_RT_Reflection.Sample(u_GBufferSampler, uv);
+        if (rtRefl.a >= 0.0) {
+            float confDist = (bs.rayTracingFalloffDistance > 0.0)
+                           ? saturate(1.0 - camDist / bs.rayTracingFalloffDistance) : 1.0;
+            float w = bs.rayTracingWeight * confEdge * confDist;
+            specNum += rtRefl.rgb * w;
+            specDen += w;
+        }
     }
     color += (bs.mode != 0u) ? (specNum / max(specDen, 1e-4)) : specNum;
 
