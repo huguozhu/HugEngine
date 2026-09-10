@@ -388,7 +388,6 @@ int main() {
     // ============================================================
     render::DeferredPipeline   pipeline;          // 延迟管线（默认，GI 对比主用）
     render::ForwardPipeline    forwardPipeline;   // 前向管线
-    render::HybridRTPipeline   hybridPipeline;    // 混合光追管线
 
     pipeline.Initialize(device.get());
     pipeline.SetSwapChain(swapchain.get());
@@ -398,9 +397,6 @@ int main() {
     forwardPipeline.SetSwapChain(swapchain.get());
     forwardPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
 
-    hybridPipeline.Initialize(device.get());
-    hybridPipeline.SetSwapChain(swapchain.get());
-    hybridPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
 
     int  g_PipelineMode = 1;                       // 0=Forward 1=Deferred 2=HybridRT
     bool g_PendingHalfResApply = false;            // 档位切换后延迟到帧边界重建半分辨率纹理（ImGui 回调内重建会死锁）
@@ -465,6 +461,7 @@ int main() {
 
         // ── 面板状态：管线 / GI 档位 / 只看 GI / GI 通道配置 ──
         g_PipelineMode = GetInt(cfgData, "pipeline_mode", 1);
+        if (g_PipelineMode > 1) g_PipelineMode = 1;   // 兼容旧配置：HybridRT(2) 已并入 Deferred + RT 层栈
         g_GISolo       = GetInt(cfgData, "gi_solo", 1) != 0;
         // 应用「只看 GI」到场景光源（cfg 加载发生在场景创建之后）
         world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& l){ l.enabled = !g_GISolo; });
@@ -602,7 +599,6 @@ int main() {
         cmdList->SetSwapChain(swapchain.get());
         pipeline.OnResize(w, h);
         forwardPipeline.OnResize(w, h);
-        hybridPipeline.OnResize(w, h);
         camCtrl.SetAspectRatio(static_cast<float>(w), static_cast<float>(h));
     });
 
@@ -682,11 +678,7 @@ int main() {
         case 0:  // Forward
             curPipeline = &forwardPipeline;
             break;
-        case 2:  // HybridRT（设备不支持光追时回退 Deferred）
-            curPipeline = device->GetCaps().supportsRayTracing ? static_cast<render::IRenderPipeline*>(&hybridPipeline)
-                                                               : static_cast<render::IRenderPipeline*>(&pipeline);
-            break;
-        default: // Deferred
+        default: // Deferred（含光追源：RT 已归入 GI 层栈，无需独立管线）
             curPipeline = &pipeline;
             break;
         }
@@ -855,20 +847,17 @@ int main() {
         ImGui::SetNextWindowSize(ImVec2(430.0f, 700.0f), ImGuiCond_FirstUseEver);
         ImGui::Begin("GI 控制台");
         {
-            // ── 渲染管线选择（Forward / Deferred / HybridRT）──
+            // ── 渲染管线选择（Forward / Deferred）──
+            // 注：光追已归入 GI 源（层栈中的 RTGI/RT 反射/RTAO/RT 阴影），
+            //     Deferred 管线勾选 RT 源即等价于此前的 HybridRT，无需独立管线
             ImGui::SeparatorText("渲染管线");
             {
-                const char* pipelineNames[] = {"Forward", "Deferred", "HybridRT"};
+                const char* pipelineNames[] = {"Forward", "Deferred"};
                 int prevMode = g_PipelineMode;
-                ImGui::Combo("管线##pipeline", &g_PipelineMode, pipelineNames, 3);
-                if (g_PipelineMode == 2 && !device->GetCaps().supportsRayTracing) {
-                    ImGui::SameLine();
-                    ImGui::TextColored({1.0f, 0.6f, 0.2f, 1.0f}, "(设备不支持光追，回退 Deferred)");
-                }
+                ImGui::Combo("管线##pipeline", &g_PipelineMode, pipelineNames, 2);
                 if (g_PipelineMode != prevMode) {
                     // 切换管线：确保交换链与视口尺寸同步
                     curPipeline = (g_PipelineMode == 0) ? static_cast<render::IRenderPipeline*>(&forwardPipeline)
-                                : (g_PipelineMode == 2) ? static_cast<render::IRenderPipeline*>(&hybridPipeline)
                                                         : static_cast<render::IRenderPipeline*>(&pipeline);
                     curPipeline->SetSwapChain(swapchain.get());
                     curPipeline->OnResize(swapchain->GetWidth(), swapchain->GetHeight());
