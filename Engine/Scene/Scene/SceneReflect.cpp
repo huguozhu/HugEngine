@@ -26,6 +26,7 @@
 #include "Scene/CharacterMovementComponent.h"
 #include "Scene/AbilityComponent.h"
 #include "Scene/SplineComponent.h"
+#include "Scene/SplineMeshComponent.h"
 #include "Scene/InstancedMeshComponent.h"
 #include "Scene/NavMeshComponent.h"
 #include "Scene/NavAgentComponent.h"
@@ -352,6 +353,23 @@ HE_BEGIN_REGISTER(he::SplineComponent)
     HE_END_PROPERTY()
     HE_REGISTER_PROPERTY(he::SplineComponent, bool, bShowPath)
         HE_ATTR_CATEGORY("Spline") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("是否显示调试路径（预留）")
+    HE_END_PROPERTY()
+HE_END_REGISTER()
+
+// --- SplineMeshComponent 注册（Phase B2 遗留：沿样条生成条带网格）---
+// 关联样条（splineEntity，u64 实体 ID）不入反射/词表——与 homingTarget 等实体引用同策略
+HE_BEGIN_REGISTER(he::SplineMeshComponent)
+    HE_REGISTER_PROPERTY(he::SplineMeshComponent, float, width)
+        HE_ATTR_CATEGORY("SplineMesh") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("条带全宽（米）")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::SplineMeshComponent, int, segments)
+        HE_ATTR_CATEGORY("SplineMesh") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("沿样条采样段数（≥1）")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::SplineMeshComponent, float, uvTiling)
+        HE_ATTR_CATEGORY("SplineMesh") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("V 方向 UV 平铺（沿路径每米重复次数）")
+    HE_END_PROPERTY()
+    HE_REGISTER_PROPERTY(he::SplineMeshComponent, bool, enabled)
+        HE_ATTR_CATEGORY("SplineMesh") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("是否生成网格")
     HE_END_PROPERTY()
 HE_END_REGISTER()
 

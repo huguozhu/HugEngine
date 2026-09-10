@@ -54,11 +54,16 @@ public:
     /// distance 处单位切向
     float3 GetTangent(float distance);
 
+    /// 数据版本号：控制点增删/自动切线重建时递增。
+    /// 供 SplineMeshComponent 等下游做"内容是否变化"的脏检测（避免每帧重建网格）。
+    u32 GetVersion() const { return m_Version; }
+
 private:
     /// 重建缓存：自动切线 + 弧长表（AddPoint/Clear 置脏后惰性触发）
     void Rebuild();
 
     bool m_Dirty = true;
+    u32  m_Version = 1;            // 数据版本（AddPoint/Clear/Rebuild 时递增）
     float m_TotalLength = 0.0f;
     std::vector<float> m_CumLen;   // 每段累计弧长（n+1 项，末项 = 总长）
 };

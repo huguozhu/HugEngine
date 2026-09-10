@@ -7,6 +7,7 @@
 #include "Scene/BillboardComponent.h"
 #include "Scene/TextRenderComponent.h"
 #include "Scene/DecalComponent.h"
+#include "Scene/SplineMeshComponent.h"
 #include "Scene/InstancedMeshComponent.h"
 #include "Scene/SkeletalMeshComponent.h"
 #include "Threading/JobSystem.h"
@@ -48,6 +49,8 @@ std::vector<DrawItem> SceneRenderer::Prepare(he::World& world, he::SceneGraph& s
     world.ForEach<he::TextRenderComponent>([&](he::Entity e, he::TextRenderComponent& t) { gatherBillboard(e, t); });
     // 贴花：固定朝向（Transform 摆放），走普通 mesh 路径
     world.ForEach<he::DecalComponent>([&](he::Entity e, he::DecalComponent& d) { gather(e, d); });
+    // 样条网格（B2 遗留）：沿样条生成的条带，走普通 mesh 路径
+    world.ForEach<he::SplineMeshComponent>([&](he::Entity e, he::SplineMeshComponent& sm) { gather(e, sm); });
     // 实例化网格（B1）：登记一个对象条目（材质数据用），实例由专用 Pass 绘制
     world.ForEach<he::InstancedMeshComponent>([&](he::Entity e, he::InstancedMeshComponent& im) {
         if (im.GetIndexCount() == 0) return;

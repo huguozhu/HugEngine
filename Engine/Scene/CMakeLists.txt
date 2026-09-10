@@ -60,6 +60,10 @@ set(SCENE_SOURCES
     Scene/SplineComponent.cpp
     Scene/SplineSystem.h
     Scene/SplineSystem.cpp
+    Scene/SplineMeshComponent.h
+    Scene/SplineMeshComponent.cpp
+    Scene/SplineMeshSystem.h
+    Scene/SplineMeshSystem.cpp
     Scene/NavMeshComponent.h
     Scene/NavMeshSystem.h
     Scene/NavMeshSystem.cpp

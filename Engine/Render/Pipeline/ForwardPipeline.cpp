@@ -19,6 +19,7 @@ he::CVar<bool> cvLightPhysicalUnits("r.Light.PhysicalUnits", false,
 #include "Scene/SphereComponent.h"
 #include "Scene/InstancedMeshComponent.h"
 #include "Scene/SkeletalMeshComponent.h"
+#include "Scene/SplineMeshComponent.h"
 #include "Scene/SkyboxComponent.h"
 #include "Scene/PhysicalSkyComponent.h"
 #include "Core/Log.h"
@@ -641,6 +642,7 @@ void ForwardPipeline::UploadMaterialBindless(he::World& world) {
     world.ForEach<he::SphereComponent>([&](he::Entity e, he::SphereComponent& s) { collect(e, static_cast<he::MeshComponent&>(s)); });
     world.ForEach<he::InstancedMeshComponent>([&](he::Entity e, he::InstancedMeshComponent& im) { collect(e, im); });
     world.ForEach<he::SkeletalMeshComponent>([&](he::Entity e, he::SkeletalMeshComponent& sm) { collect(e, sm); });
+    world.ForEach<he::SplineMeshComponent>([&](he::Entity e, he::SplineMeshComponent& sm) { collect(e, sm); });
 
     if (uniqueMat.empty()) return;  // 场景无材质，跳过
 

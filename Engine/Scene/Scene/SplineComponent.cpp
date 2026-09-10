@@ -27,6 +27,7 @@ inline float D11(float t) { return 3.0f * t * t - 2.0f * t; }
 void SplineComponent::AddPoint(const float3& position, const float3& tangent) {
     points.push_back({ position, tangent });
     m_Dirty = true;
+    ++m_Version;   // 数据变化：通知下游（SplineMesh）重建
 }
 
 void SplineComponent::Clear() {
@@ -34,6 +35,7 @@ void SplineComponent::Clear() {
     m_CumLen.clear();
     m_TotalLength = 0.0f;
     m_Dirty = true;
+    ++m_Version;
 }
 
 int SplineComponent::GetSegmentCount() const {
@@ -48,6 +50,7 @@ float SplineComponent::GetTotalLength() {
 
 void SplineComponent::Rebuild() {
     m_Dirty = false;
+    ++m_Version;   // 自动切线写回/弧长表刷新：算作一次数据变化
     m_TotalLength = 0.0f;
     m_CumLen.clear();
     const int n = (int)points.size();

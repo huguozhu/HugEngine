@@ -39,6 +39,9 @@
 #include "Scene/InstancedMeshComponent.h"
 #include "Scene/SkeletalMeshComponent.h"
 #include "Scene/SkeletalMeshSystem.h"
+#include "Scene/SplineComponent.h"
+#include "Scene/SplineMeshComponent.h"
+#include "Scene/SplineMeshSystem.h"
 #include "Physics/Physics/RigidBodyComponent.h"
 #include "Physics/Physics/PhysicsSystem.h"
 #include "Scene/NavMeshComponent.h"
@@ -433,6 +436,36 @@ int main() {
         } else {
             HE_CORE_WARN("Fox 模型加载失败，跳过骨骼网格演示: {}", foxResult.error);
         }
+    }
+
+    // --- 样条网格（B2 遗留：沿样条生成的条带，如道路/赛道）---
+    Entity splineRoadEntity;
+    {
+        // 样条控制点：一条绕场景的弯曲路径（切向留零 → 自动 Catmull-Rom 光滑）
+        Entity splineEntity = world.CreateEntity("RoadSpline");
+        auto* spline = world.AddComponent<SplineComponent>(splineEntity);
+        spline->AddPoint(float3(-10.0f, 0.06f,  6.0f));
+        spline->AddPoint(float3( -3.0f, 0.06f,  9.0f));
+        spline->AddPoint(float3(  4.0f, 0.06f,  6.0f));
+        spline->AddPoint(float3(  8.0f, 0.06f, -2.0f));
+        spline->AddPoint(float3(  2.0f, 0.06f, -9.0f));
+        spline->AddPoint(float3( -6.0f, 0.06f, -8.0f));
+        sceneGraph.SetParent(splineEntity, Entity{kInvalidEntity});
+
+        // 条带网格：宽 2 米、48 段，关联上面的样条（网格由 SplineMeshSystem 生成）
+        splineRoadEntity = world.CreateEntity("RoadMesh");
+        world.AddComponent<TransformComponent>(splineRoadEntity);
+        auto* road = world.AddComponent<SplineMeshComponent>(splineRoadEntity);
+        road->splineEntity     = splineEntity.id;
+        road->width            = 2.0f;
+        road->segments         = 48;
+        road->uvTiling         = 0.5f;
+        road->baseColorFactor  = float4(0.22f, 0.22f, 0.26f, 1.0f);   // 深灰路面
+        road->roughnessFactor  = 0.9f;
+        road->metallicFactor   = 0.0f;
+        sceneGraph.SetParent(splineRoadEntity, Entity{kInvalidEntity});
+        HE_CORE_INFO("样条网格（B2）: 沿 {} 控制点样条生成 {} 段条带",
+                     spline->points.size(), road->segments);
     }
 
     // --- 方向光（恢复启用：测试 CSM 阴影，点光源已注释）---
@@ -986,6 +1019,9 @@ int main() {
 
         // 寻路系统（C4）：NavAgent 沿 NavMesh A* 路径移动
         he::NavAgentSystem::Update(world, sceneGraph, deltaTime);
+
+        // 样条网格（B2 遗留）：样条数据变化时重建条带几何（版本脏检测，未变化则零成本）
+        he::SplineMeshSystem::Update(world, device.get());
 
         // 帧相机解析（S0.4）：场景含主相机实体时优先使用，否则回退自由相机
         // 本示例场景无 CameraComponent 实体，行为与之前一致（始终走 CameraController 回退）

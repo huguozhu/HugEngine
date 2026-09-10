@@ -197,13 +197,13 @@
 - **系统接入**：复用 `MeshBatcher` + GPU Instancing（现有管线已有 InstanceBuffer 支持）；`enableFrustumCull` 按实例剔除
 - **验证**：万级实例 FPS 对比
 
-### B2. SplineComponent / SplineMeshComponent（SplineComponent ✅ 已完成 2026-09-06；SplineMesh 后续扩展）
+### B2. SplineComponent / SplineMeshComponent（✅ 全部完成：SplineComponent 2026-09-06；SplineMeshComponent 见 §十三）
 
 - **对应 UE5**：USplineComponent / USplineMeshComponent
 - **用途**：样条路径（道路/管线/摄像机轨道/Agent 巡逻路线）
-- **属性**：`控制点数组（位置+切向）/ bClosedLoop / bShowPath`
-- **系统接入**：`SplineSystem` 提供 `EvaluateAtDistance/GetTangent`；SplineMesh 沿样条生成 MeshSection
-- **验证**：Agent 沿样条巡逻（与 AgentSystem 对接）
+- **属性**：`控制点数组（位置+切向）/ bClosedLoop / bShowPath`（SplineComponent）；`width / segments / uvTiling / enabled`（SplineMeshComponent）
+- **系统接入**：`SplineSystem` 提供 `EvaluateAtDistance/GetTangent`；`SplineMeshSystem` 按样条版本脏检测沿样条生成条带网格
+- **验证**：Agent 沿样条巡逻（与 AgentSystem 对接）；02.Cube 道路条带演示 ✅
 
 ### B3. CharacterMovementComponent（✅ 已完成 2026-09-06）
 
@@ -316,5 +316,28 @@ P4（大工程）: Phase C（等待路线图）
 - Phase C 已全部落地（Physics C2 / NavMesh C4 / SkeletalMesh）；Audio（C3）已从本计划移除
 - SkeletalMesh 后续扩展：剪辑混合、动画重定向
 - 组件 AI 补齐已完成（Animation/RigidBody/Particle 反射+词表；Memory/Goal 类型注册）——后续仅当需暴露内部结构时再议
-- MVP 技术债：bindless 堆环形化（TextRender/InstancedMesh 高频更新）、Decal GBuffer 投影 Pass、InstancedMesh 接 GPU-Culling + 逐实例剔除、Collision 调试线框、SplineMesh 沿样条生成
+- MVP 技术债：bindless 堆环形化（TextRender/InstancedMesh 高频更新）、Decal GBuffer 投影 Pass、InstancedMesh 接 GPU-Culling + 逐实例剔除、Collision 调试线框
 - 架构触发项：渲染类型注册表化（InstancedMesh 为第 7 个渲染组件，下一个渲染组件即触发）、CollectLights 数据驱动抽取（下一个光源类型触发）
+
+---
+
+## 十三、B2 遗留落地：SplineMeshComponent（沿样条生成条带网格）
+
+承接 §十二 待办中的"SplineMesh 沿样条生成"，本次完成：
+
+**新增**
+- `Engine/Scene/Scene/SplineMeshComponent.h/.cpp`：继承 `MeshComponent`（对齐 UE5 USplineMeshComponent）；生成参数 `width / segments / uvTiling / enabled`，关联样条 `splineEntity`（实体 ID，按既有策略不入反射/词表）
+- `Engine/Scene/Scene/SplineMeshSystem.h/.cpp`：静态 `Update(World&, IRHIDevice*)`，按**样条数据版本**脏检测重建（未变化零成本；无效样条清空网格不崩溃）
+- `Tests/TestSplineMesh.cpp`：3 用例 / 19 断言（顶点索引数量、包围盒宽度、版本脏检测、无效样条容错）
+
+**修改**
+- `SplineComponent.h/.cpp`：新增数据版本号 `GetVersion()`（AddPoint/Clear/Rebuild 递增），供下游做内容变化检测
+- `SceneReflect.cpp`：注册 `SplineMeshComponent` 属性（全部带 `HE_ATTR_AI_*` 注解）
+- `SceneRenderer.cpp` / `ForwardPipeline.cpp`：按既有"派生渲染组件显式列举"惯例接入绘制收集
+- `Samples/02.Cube`：新增绕场景的样条道路演示（6 控制点 → 48 段、宽 2m 条带），主循环调用 `SplineMeshSystem::Update`
+
+**验证**
+- 全量 doctest：111 用例 / 3316 断言全部通过
+- 02.Cube 运行冒烟：`样条网格（B2）: 沿 6 控制点样条生成 48 段条带` → 运行期 `MeshComponent: 98 vertices, 288 indices`（=(48+1)×2 / 48×6）、包围盒覆盖样条范围、场景渲染 24 draws 正常、退出无崩溃
+
+**说明**：条带为单面几何，默认 `doubleSided = true`（便于从下方观察）；实体引用类依赖（`splineEntity`）保持不可由 LLM 生成，与 `homingTarget` 等同一策略。
