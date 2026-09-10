@@ -231,3 +231,96 @@
 - **面板状态序列化**：管线/档位/只看 GI/四通道/强度/SSAO 参数/相机速度（`b9349dd`）；面板几何（位置/大小/折叠）经 ImGui ini（`Content/Config/06_GILab_imgui.ini`，退出前显式保存 + 绝对路径——`dd7c1b9` `8767837`）。
 - **主面板光源信息**：方向光/点光/聚光/矩形光列表（开关/颜色/强度/方向/范围，可编辑）+ 场景新增 2 个点光源（X 轴 ±20 冷暖双色，供点光 GI/阴影测试）（`fb1e7c8`）。
 - 移除主面板重复的 SSAO 选项（SSAO 统一在 GI 控制台 AO 通道）；修复档位切换卡死（纹理重建延迟帧边界 + WaitIdle）。
+
+---
+
+## 七、GI 分层合成架构演进（2026-09-10 晚，本批）
+
+> 起因：多个 diffuse GI（SSGI/DDGI/RTGI）描述的是**同一个物理量**（间接入射辐射度），
+> 简单相加会**双重计数**（能量翻倍、白炉测试失败）；而"单值枚举选一个"无法表达
+> 「远场探针管低频 + 屏幕空间管中频 + 光追管高频」的分工。
+> 详见设计文档 `HugEngine GI分层合成架构设计.md`。
+
+### P1/P2 · 分层合成基础（`105911b`）
+
+- **GIBand**（低频/中频/高频）+ **GIBlendMode**（相加 / 归一化加权）。
+- **间接光改为归一化加权** `Σ(源×w)/Σw`，修掉多源相加的双重计数。
+- **权重以各源置信度为主**（屏幕边缘可见性），用户权重为辅；**距离让位默认关闭**
+  ——它是性能/艺术控制，不是物理判据（远处但屏幕内清晰可见的物体，屏幕空间 GI 依然可信）。
+- **参数按「源类型」命名**：`screenSpaceWeight` / `rayTracingWeight` / `probeWeight`
+  + 可选 `...FalloffDistance`——不再绑定 SSGI/RTGI 等具体技术名，diffuse/specular/AO 三通道同构。
+- **specular 同构化**：修掉 SSR 与 IBL prefilter 的双重计数（`105911b`）。
+- 移除与 `probeWeight` 语义重复的 `ddgiOverlay`（统一由权重表达参与程度）。
+
+### P3 · 源层栈架构（`105911b`）
+
+- **`GIConfig` 的 4 个单值枚举 → 4 个 `GIChannelStack`（源集合）**：
+  「选技术」= 该源 `weight>0`；「融合」= 多个源同时 `weight>0`。
+- 新增 **`GISourceId`**（12 种源）+ `GIBandOf` / `GISourceName` / `IsRayTracingSource`。
+- **帧图门控全部由层栈派生**（`ShouldRunSSGI/DDGI/AO/RTReflection/...`）。
+- **`GIRegistry::Degrade` 改为逐源裁剪**（管线能力 ∧ 设备能力）+ 通道裁空兜底。
+- **混合参数改经 `GIBlendParams` UBO（binding 31）**传递——3 通道 × 32B 超出
+  push constant 128B 上限，且便于后续层栈扩展。
+- 06.GILab：GI 通道改为**源列表 UI**（源 / 频段 / 权重 / 让位距离 / 合成方式），
+  层栈逐源权重写入 cfg。
+
+### 回归修复（`105911b`）
+
+- **DeferredPipeline 此前未初始化 `m_GIConfig`**（默认构造 = 空层栈 → 无 GI → 画面发黑）；
+  现以 Medium 档位为默认基线并逐源裁剪，且**按层栈同步 GI 子系统开关**（层栈说"参与"就必须真的跑）。
+- Forward/HybridRT 默认基线同样改为 Medium 预设。
+
+### S1 · 光追归入 Deferred（`90649ba` `aac5690`）
+
+> **关键认识**：光追是「GI 源」，**不是「管线类型」**——HybridRT 与 Deferred 共享
+> GBuffer/Lighting/后处理，差异仅在效果来源。
+
+- DeferredPipeline 新增 RT 基础设施：`RTPass`（AS/TLAS）+ `RTShadowPass`/`RTAOPass`/
+  `RTReflectionPass`/`RTGIPass` + 4 个时域降噪器 + 反射/GI 空间滤波。
+- 帧图：`AnyRTSource()` 为真 → `AS_Build` + 场景材质纹理（首帧）+ 各 RT 效果 + 降噪链，
+  **全部以 `ShouldRunRT*()` 层栈条件门控**（不再依赖 CVar）。
+- Lighting 接入：`in.rtGI` / `in.rtShadowMask` / `in.rtAO` / `in.rtReflection` → shader 走光追路径。
+- **四个 RT 源全部可用**（RTGI + RT 反射 + RTAO + RT 阴影）。
+
+### S2 · 管线维度收敛（`06c8580`）
+
+- 06.GILab 管线下拉收敛为 **Forward / Deferred** 两项，移除 `hybridPipeline` 实例
+  （少一份 GBuffer/Lighting/后处理资源）；旧配置 `pipeline_mode=2` 自动映射到 Deferred。
+
+### S3 · 移除 HybridRTPipeline（`0f8aca8`，净删 1245 行）
+
+- 删除 `Engine/Render/Pipeline/HybridRTPipeline.h/.cpp` 及 CMakeLists 条目。
+- 02.Cube 迁移：移除实例/初始化/GPU Culling 同步/OnResize/Shutdown/粒子注册/RT 效果开关面板；
+  模式 2 改为走 Deferred（光追经层栈 RT 源）。
+
+### PT · 参考渲染器定位与资源复用（`3301040`）
+
+- **明确 PT 的定位**：参考渲染器（ground truth）——不参与实时渲染、**不使用 GI 层栈**
+  （自己求解完整渲染方程），收敛结果作为其他近似 GI 的判定基准。
+- 与 HybridRT 的区别写明：后者只是效果配置差异（已并入层栈），PT 是完全不同的渲染范式。
+- **加速结构共享**：`DeferredPipeline::GetRTPass()` + `PathTracingPipeline::SetSharedRTPass()`
+  ——PT 复用 Deferred 的 BLAS/TLAS，加速结构内存减半。
+
+### S1.5 · 各通道两类源可真正同时参与（`5c2b84b`）
+
+- 此前屏幕空间源与光追源是「二选一」（`rtDiffuseSource`/`rtSpecularSource`/`rtAOSource` 切换），
+  层栈里两个源的权重实际只有一个能生效。
+- 现改为**各自独立采样、同时参与归一化合成**：
+  - **Diffuse**：SSGI + RTGI + DDGI 三者可同时融合
+  - **Specular**：SSR + RT 反射 + IBL prefilter
+  - **AO**：SSAO + RTAO（由二选一改为归一化加权）
+- 每源各自计算置信度与可选距离让位，权重和归一化 → 多开一个源不会变亮；单源行为不变。
+
+### 终态架构
+
+```
+渲染管线（架构差异）              GI 源层栈（效果差异，自由组合）
+├─ ForwardPipeline               低频： IBL / Lightmap(预留) / DDGI
+├─ DeferredPipeline              中频： SSGI / SSR / SSAO / RSM
+└─ PathTracingPipeline（参考）    高频： RTGI / RT 反射 / RTAO / RT 阴影
+        ↓                                   ↓
+   架构不可合并                       归一化加权合成（物理正确）
+```
+
+**待办**：① 白炉测试（用 PT 做基准验证层栈能量守恒）② P5 频率分离
+③ M4.4 RSM VPL 降采样 ④ M4.5 GBuffer 通道合并 ⑤ M5.3 DDGI SH 修正 ⑥ M6.3 GTAO。

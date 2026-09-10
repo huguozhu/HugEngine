@@ -215,16 +215,44 @@ public:
 
 ## 五、演进路线（渐进、每步可回退）
 
-| Phase | 内容 | 风险 |
-|---|---|---|
-| **P1 · 数据模型** | `GIConfig` 引入 `GIChannelStack`（层栈）+ `GIBand` / `range` / `weight` / `blendMode`；保留 `DiffuseChannel` 便捷构造 | 低（纯数据） |
-| **P2 · 合成改造** | `DeferredLighting.frag` 合成改**归一化**（保留 Additive 分支作对照）；push constant 传层参数 | 低（单源等价） |
-| **P3 · 多源启用** | Medium/High 档启用 `{DDGI, SSGI}` 分层；面板可调每层 range/weight | 中（画面变化，需对比） |
-| **P4 · Provider 抽象** | 重构 SSGI/DDGI/SSR/RTGI 为 `IGIProvider`；帧图按注册表遍历构建 pass | 中（结构性重构） |
-| **P5 · 频率分离** | DDGI 低频 + SSGI/RTGI 高频细节（去低频叠加）；Specular 同理（IBL prefilter 低频 + SSR/RT 高频） | 高（需低频分解） |
-| **P6 · 统一估计器** | 长期：ReSTIR GI 把各源统一为"重采样 + 回退"框架（探针作为 miss 回退） | 高 |
+> **实施状态（2026-09-10）**：P1 / P2 / P3 已落地，并额外完成了 S1（光追归入 GI 源）、
+> S2（管线维度收敛）、S3（移除 HybridRTPipeline）、PT 定位与加速结构共享、S1.5（两类源可同时参与）。
 
-**建议从 P1 + P2 开始**——低风险、可对照、立即修正"多源相加过亮"的现有问题。
+| Phase | 内容 | 风险 | 状态 |
+|---|---|---|---|
+| **P1 · 数据模型** | `GIConfig` 引入层栈 + `GIBand` / `weight` / `falloffDistance` / `blendMode` | 低 | ✅ `105911b` |
+| **P2 · 合成改造** | `DeferredLighting.frag` 合成改**归一化**（保留 Additive 分支作对照）；参数经 UBO 传递 | 低 | ✅ `105911b` |
+| **P3 · 源层栈** | 4 个单值枚举 → `GIChannelStack`；帧图门控与降级全部逐源；06 源列表 UI | 中 | ✅ `105911b` |
+| **S1 · 光追归入 Deferred** | 光追作为 GI 源（RTGI/RT 反射/RTAO/RT 阴影）接入 Deferred，层栈条件门控 | 中 | ✅ `90649ba` `aac5690` |
+| **S2 · 管线维度收敛** | 管线下拉收敛为 Forward / Deferred；HybridRT 不再是管线 | 低 | ✅ `06c8580` |
+| **S3 · 移除 HybridRT 管线** | 删除 `HybridRTPipeline`（-1245 行），02.Cube 迁移 | 中 | ✅ `0f8aca8` |
+| **PT · 参考渲染器定位** | 明确 PT 为 ground truth + 与 Deferred 共享加速结构 | 低 | ✅ `3301040` |
+| **S1.5 · 两类源同时参与** | SSGI+RTGI（specular/AO 同理）由二选一改为各自独立采样、归一化合成 | 低 | ✅ `5c2b84b` |
+| **P4 · Provider 抽象** | 重构各 GI 为 `IGIProvider`；帧图按注册表遍历构建 pass | 中 | ⏳ 待做 |
+| **P5 · 频率分离** | DDGI 低频 + SSGI/RTGI 高频细节（去低频叠加） | 高 | ⏳ 待做 |
+| **P6 · 统一估计器** | 长期：ReSTIR GI 把各源统一为「重采样 + 回退」框架 | 高 | ⏳ 待做 |
+
+**下一步优先级建议**：① **白炉测试**（用 PT 做基准验证层栈能量守恒——正好用上 PT 的新定位）
+② P4 Provider 抽象（新增 GI 不改管线/shader） ③ P5 频率分离。
+
+---
+
+## 五之二、已落地的终态架构（2026-09-10）
+
+```
+渲染管线（架构差异，不可合并）        GI 源层栈（效果差异，自由组合 + 权重）
+├─ ForwardPipeline                    低频： IBL / Lightmap(预留) / DDGI
+├─ DeferredPipeline                   中频： SSGI / SSR / SSAO / RSM
+└─ PathTracingPipeline（参考渲染器）   高频： RTGI / RT 反射 / RTAO / RT 阴影
+        ↓                                        ↓
+   GBuffer / Lighting / 后处理          归一化加权合成（权重和 = 1，物理正确）
+```
+
+**关键不变量（已实现并需长期保持）**：
+1. 通道的「层栈」与「子系统开关」**同源**——层栈说参与，子系统就必须真的启用
+   （曾因两者不一致导致画面发黑）
+2. **权重归一化**是物理正确性的来源；距离让位只是性能/艺术控制，默认关闭
+3. **多开一个源不会变亮**（归一化保证）；**单源时行为与二选一时代完全一致**
 
 ---
 
