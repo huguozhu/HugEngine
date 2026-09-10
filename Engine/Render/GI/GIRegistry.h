@@ -1,14 +1,14 @@
 #pragma once
 
 // ============================================================
-// GI/GIRegistry.h — GI Provider 注册表 + 自动降级（M3）
+// GI/GIRegistry.h — GI Provider 注册表 + 自动降级（M3 → P3 层栈）
 //
-// 可用性判断 = 管线能力（PipelineCaps：该管线是否提供此通道技术）
-//            ∧ 设备能力（rtSupported：RT 系列需硬件光追）
+// 可用性判断 = 管线能力（PipelineCaps：该管线是否提供此 GI 源）
+//            ∧ 设备能力（rtSupported：光追源需硬件光追）
 //
-//   1. IsAvailable：查询某通道技术在当前管线 + 设备下是否可用
-//   2. FallbackOf：降级链（RTGI→SSGI、RTAO→SSAO、RT→SSR、RT 阴影→Raster）
-//   3. Degrade：把 GIConfig 中不可用的通道技术自动降级到可用组合
+//   1. IsAvailable：查询某 GI 源在当前管线 + 设备下是否可用
+//   2. Degrade：对 GIConfig 的四个通道层栈逐源裁剪（移除不可用源），
+//               并保证每通道至少保留一个可用兜底源
 // ============================================================
 
 #include "Pipeline/LightingPass.h"
@@ -18,62 +18,49 @@ namespace he::render {
 
 class GIRegistry {
 public:
-    /// 各通道技术是否可用（管线能力 ∧ 设备能力）
-    static bool IsAvailable(ShadowChannel s, u32 pipelineCaps, bool rtSupported) {
-        if (s == ShadowChannel::None) return true;
-        if ((pipelineCaps & ToPipelineCap(s)) == 0) return false;   // 管线不提供
-        if (s == ShadowChannel::RT && !rtSupported) return false;   // 设备无光追
-        return true;
-    }
-    static bool IsAvailable(AOChannel s, u32 pipelineCaps, bool rtSupported) {
-        if (s == AOChannel::None) return true;
-        if ((pipelineCaps & ToPipelineCap(s)) == 0) return false;
-        if (s == AOChannel::RTAO && !rtSupported) return false;
-        return true;
-    }
-    static bool IsAvailable(SpecularChannel s, u32 pipelineCaps, bool rtSupported) {
-        if (s == SpecularChannel::None) return true;
-        if ((pipelineCaps & ToPipelineCap(s)) == 0) return false;
-        if (s == SpecularChannel::RT && !rtSupported) return false;
-        return true;
-    }
-    static bool IsAvailable(DiffuseChannel s, u32 pipelineCaps, bool rtSupported) {
-        if (s == DiffuseChannel::None) return true;
-        if ((pipelineCaps & ToPipelineCap(s)) == 0) return false;
-        if (s == DiffuseChannel::RTGI && !rtSupported) return false;
+    /// 某 GI 源是否可用（管线能力 ∧ 设备能力）
+    static bool IsAvailable(GISourceId id, u32 pipelineCaps, bool rtSupported) {
+        if (id == GISourceId::None) return false;
+        const u32 cap = ToPipelineCap(id);
+        if (cap == kPipelineGINone) return false;                 // 未注册的源
+        if ((pipelineCaps & cap) != cap) return false;            // 管线不提供
+        if (IsRayTracingSource(id) && !rtSupported) return false; // 设备无光追
         return true;
     }
 
-    /// 降级链：不可用的技术 → 可用的替代
-    static ShadowChannel FallbackOf(ShadowChannel s) {
-        return s == ShadowChannel::RT ? ShadowChannel::Raster : s;
-    }
-    static AOChannel FallbackOf(AOChannel s) {
-        return s == AOChannel::RTAO ? AOChannel::SSAO : s;
-    }
-    static SpecularChannel FallbackOf(SpecularChannel s) {
-        return s == SpecularChannel::RT ? SpecularChannel::SSR : s;
-    }
-    static DiffuseChannel FallbackOf(DiffuseChannel s) {
-        // RTGI→SSGI→None（DDGI 由 ddgiOverlay 独立叠加）
-        if (s == DiffuseChannel::RTGI) return DiffuseChannel::SSGI;
-        return DiffuseChannel::None;
+    /// 对单个通道层栈逐源裁剪（移除不可用源；weight<=0 的源也一并清理）
+    static void DegradeStack(GIChannelStack& st, u32 pipelineCaps, bool rtSupported) {
+        for (u32 i = 0; i < st.count; ) {
+            const GISourceId id = st.sources[i].id;
+            if (st.sources[i].weight <= 0.0f || !IsAvailable(id, pipelineCaps, rtSupported)) {
+                st.Remove(id);   // Remove 会前移后续元素，故索引不递增
+            } else {
+                i++;
+            }
+        }
     }
 
-    /// 把 GIConfig 中不可用的通道技术自动降级（直至可用）
+    /// 把 GIConfig 四个通道层栈中的不可用源全部裁剪
     static GIConfig Degrade(const GIConfig& c, u32 pipelineCaps, bool rtSupported) {
         GIConfig out = c;
-        for (int i = 0; i < 4 && !IsAvailable(out.diffuse, pipelineCaps, rtSupported); ++i)
-            out.diffuse = FallbackOf(out.diffuse);
-        for (int i = 0; i < 4 && !IsAvailable(out.shadow, pipelineCaps, rtSupported); ++i)
-            out.shadow = FallbackOf(out.shadow);
-        for (int i = 0; i < 4 && !IsAvailable(out.ao, pipelineCaps, rtSupported); ++i)
-            out.ao = FallbackOf(out.ao);
-        for (int i = 0; i < 4 && !IsAvailable(out.specular, pipelineCaps, rtSupported); ++i)
-            out.specular = FallbackOf(out.specular);
-        // DDGI 仅 Deferred/HybridRT 提供，管线不支持时关闭叠加
-        if ((pipelineCaps & kPipelineGIDiffDDGI) == 0) {
-            out.ddgiOverlay = false;
+        DegradeStack(out.diffuse,  pipelineCaps, rtSupported);
+        DegradeStack(out.specular, pipelineCaps, rtSupported);
+        DegradeStack(out.ao,       pipelineCaps, rtSupported);
+        DegradeStack(out.shadow,   pipelineCaps, rtSupported);
+
+        // ── 兜底：通道被裁空时补一个管线支持的源，避免该通道完全丢失 ──
+        // 环境源（IBL）几乎所有管线都支持，作为最后兜底
+        if (out.diffuse.count == 0 && IsAvailable(GISourceId::IBL, pipelineCaps, rtSupported)) {
+            out.diffuse.Set(GISourceId::IBL, 1.0f);
+        }
+        if (out.specular.count == 0 && IsAvailable(GISourceId::IBL, pipelineCaps, rtSupported)) {
+            out.specular.Set(GISourceId::IBL, 1.0f);
+        }
+        if (out.ao.count == 0 && IsAvailable(GISourceId::SSAO, pipelineCaps, rtSupported)) {
+            out.ao.Set(GISourceId::SSAO, 1.0f);
+        }
+        if (out.shadow.count == 0 && IsAvailable(GISourceId::RasterShadow, pipelineCaps, rtSupported)) {
+            out.shadow.Set(GISourceId::RasterShadow, 1.0f);
         }
         return out;
     }

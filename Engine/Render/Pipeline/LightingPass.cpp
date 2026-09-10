@@ -151,10 +151,32 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
     lpc.rtSpecularSource = in.rtReflection ? 1u : 0u;
     lpc.rtDiffuseSource  = in.rtGI         ? 1u : 0u;
     lpc.atmosphere = float4(m_AtmSunDir, m_AtmTurbidity);  // 空中透视参数（太阳方向 + 浑浊度）
-    lpc.ddgiOverlay    = in.ddgiOverlay ? 1u : 0u;             // DDGI 探针 GI 是否采样（关闭后不叠加陈旧探针数据）
     lpc.ddgiScale  = in.ddgiScale;                         // DDGI 贡献缩放（替代硬编码 0.5）
     lpc.giIntensity = in.giIntensity;                      // 间接漫反射 GI 总强度（默认 1.0）
     lpc.aoIntensity = in.aoIntensity;                      // AO 强度（默认 1.0）
+    // ── 分层合成（P2）：填充 GIBlendParams UBO（3 通道 × 32B）──
+    // 屏幕空间/光追源的 weight 在源无效时置 0（等效于该源不参与合成）
+    {
+        GIBlendParams bp{};
+        auto fill = [](GIChannelBlendParams& d, const GIChannelBlend& s, bool screenSourceValid) {
+            d.mode = (u32)s.mode;
+            d.screenSpaceWeight = screenSourceValid ? s.screenSpaceWeight : 0.0f;
+            d.rayTracingWeight  = screenSourceValid ? s.rayTracingWeight  : 0.0f;
+            d.probeWeight       = s.probeWeight;
+            d.screenSpaceFalloffDistance = s.screenSpaceFalloffDistance;
+            d.rayTracingFalloffDistance  = s.rayTracingFalloffDistance;
+        };
+        fill(bp.diffuse,  in.diffuseBlend,  in.useScreenGI);   // 漫反射：SSGI/RTGI 关闭时降权为 0
+        fill(bp.specular, in.specularBlend, true);             // 镜面：命中与否由 shader 按 rtRefl.a 判定
+        fill(bp.ao,       in.aoBlend,       true);
+        if (m_BlendUBO) {
+            void* mapped = m_BlendUBO->Map();
+            if (mapped) {
+                std::memcpy(mapped, &bp, sizeof(bp));
+                m_BlendUBO->Unmap();
+            }
+        }
+    }
     cmd->SetPushConstants(0, sizeof(lpc), &lpc);
     cmd->Draw(3);
 
@@ -233,9 +255,21 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
         {kGPUBinding_RT_Reflection, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RT 反射
         {kGPUBinding_RT_AO, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RT AO
         {kGPUBinding_RT_GI, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RT GI
+        {kGPUBinding_GIBlendParams, rhi::DescriptorType::UniformBuffer, 1, rhi::kStageMaskFragment},  // GI 分层合成参数 UBO
     };
     m_Layout = device->CreateDescriptorSetLayout(ll);
     m_Set    = device->AllocateDescriptorSet(m_Layout);
+
+    // ── GI 分层合成参数 UBO（3 通道 × 32B）──
+    {
+        rhi::BufferDesc bd;
+        bd.size      = sizeof(GIBlendParams);
+        bd.usage     = rhi::BufferUsage::Uniform;
+        bd.cpuAccess = true;
+        m_BlendUBO   = device->CreateBuffer(bd);
+        device->UpdateDescriptorSet(m_Set, kGPUBinding_GIBlendParams,
+            rhi::DescriptorType::UniformBuffer, m_BlendUBO.get());
+    }
 
     // ── 预填充所有 binding 占位纹理（避免未绑定 → Intel GPU 白屏）──
     {

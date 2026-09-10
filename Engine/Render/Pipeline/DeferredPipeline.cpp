@@ -1,6 +1,7 @@
 #include "Pipeline/DeferredPipeline.h"
 #include "GI/GI_IBL.h"
 #include "GI/GI_RSM.h"
+#include "GI/GIRegistry.h"
 #include "Shadow/ShadowSystem.h"
 #include "PostProcess/ToneMapPass.h"
 #include "PostProcess/SkyboxPass.h"
@@ -45,6 +46,12 @@ namespace he::render {
 bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     m_Device = device;
     HE_ASSERT(m_Device, "DeferredPipeline: null device");
+
+    // GI 通道配置：以 Medium 档位为默认基线（层栈：IBL + SSGI + DDGI），
+    // 再按本管线能力 + 设备能力逐源裁剪——避免默认构造出「空层栈」导致无 GI
+    m_GIConfig = GIRegistry::Degrade(GIConfigFromPreset(GIQualityPreset::Medium),
+                                     PipelineCaps::Deferred,
+                                     device->GetCaps().supportsRayTracing);
 
     // GBuffer 渲染器（纹理所有权 + PSO + 描述符集，共享组件）
     m_GBuffer = std::make_unique<GBufferRenderer>();
@@ -104,7 +111,15 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     m_DenoiseSSGI.Initialize(device, m_Width, m_Height);
     m_DenoiseSSR.Initialize(device, m_Width, m_Height);
     m_SSAO.Initialize(device, m_Width, m_Height);
-    m_SSAO.enabled = false;  // 默认关闭
+
+    // 按 GIConfig 层栈启用对应子系统（两者必须一致：层栈说"参与"就必须真的跑）
+    m_SSGI.SetEnabled(m_GIConfig.ShouldRunSSGI());
+    m_SSR.SetEnabled(m_GIConfig.ShouldRunSSR());
+    m_DDGI.SetEnabled(m_GIConfig.ShouldRunDDGI());
+    m_SSAO.enabled = m_GIConfig.ShouldRunSSAO();
+    m_SSGI.OnResize(m_Width, m_Height);
+    m_SSR.OnResize(m_Width, m_Height);
+    m_SSAO.OnResize(m_Width, m_Height);
     // Bloom / FXAA / TAA / AutoExposure 已在 PostProcessChain::Initialize() 中创建
 
     // GBuffer PSO + 描述符集 + DGC 初始化已在 GBufferRenderer::Initialize() 中完成

@@ -528,7 +528,6 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             in.rsmPositionMap = m_RSM ? m_RSM->GetRSMPositionMap() : nullptr;
             in.rsmFluxMap     = m_RSM ? m_RSM->GetRSMFluxMap()     : nullptr;
             // overlay 与 Pass 门控同源（避免 pass 跳过但 shader 仍采样陈旧探针）
-            in.ddgiOverlay     = m_GIConfig.ShouldRunDDGI() && m_DDGI.IsEnabled();
             in.ddgiScale       = m_DDGI.debugScale;
             in.clusteredShading     = &m_ClusteredShading;
             in.lightGridBuffer      = m_LightGridBuffer.get();
@@ -539,6 +538,27 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             in.iblIntensity = iblIntensity;
             in.giIntensity  = m_GIConfig.giIntensity;   // M2：间接漫反射总强度（GIConfig 数据驱动）
             in.aoIntensity  = m_GIConfig.aoIntensity;   // M2：AO 强度
+            // ── 分层合成（P3）：从各通道层栈派生混合参数（UBO）──
+            // 每通道的「屏幕空间源 / 光追源 / 低频环境源」权重取自层栈；
+            // 距离让位取对应源的 falloffDistance（0=不启用）
+            {
+                auto fillBlend = [](GIChannelBlend& b, const GIChannelStack& st,
+                                    GISourceId screenId, GISourceId rtId, GISourceId probeId) {
+                    b.mode              = st.mode;
+                    b.screenSpaceWeight = st.WeightOf(screenId);
+                    b.rayTracingWeight  = st.WeightOf(rtId);
+                    b.probeWeight       = (probeId == GISourceId::None) ? 0.0f : st.WeightOf(probeId);
+                    b.screenSpaceFalloffDistance = st.FalloffOf(screenId);
+                    b.rayTracingFalloffDistance  = st.FalloffOf(rtId);
+                };
+                fillBlend(in.diffuseBlend,  m_GIConfig.diffuse,  GISourceId::SSGI, GISourceId::RTGI,
+                          GISourceId::DDGI);
+                fillBlend(in.specularBlend, m_GIConfig.specular, GISourceId::SSR,  GISourceId::RTReflection,
+                          GISourceId::IBL);
+                fillBlend(in.aoBlend,       m_GIConfig.ao,       GISourceId::SSAO, GISourceId::RTAO,
+                          GISourceId::None);
+                in.useScreenGI = m_GIConfig.UseScreenDiffuse();   // SSGI/RTGI 是否参与
+            }
             in.lightCount   = fpc.lightCount;
             in.width = w;
             in.height = h;

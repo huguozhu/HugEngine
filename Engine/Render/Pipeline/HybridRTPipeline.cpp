@@ -33,7 +33,7 @@ bool HybridRTPipeline::Initialize(rhi::IRHIDevice* device) {
 
     // GI 通道配置：按本管线能力（HybridRT：含 RT 阴影/AO/反射/GI）初始化，
     // 设备不支持光追时 RT 系列自动降级到光栅/屏幕空间替代
-    m_GIConfig = GIRegistry::Degrade(GIConfig{}, PipelineCaps::HybridRT,
+    m_GIConfig = GIRegistry::Degrade(GIConfigFromPreset(GIQualityPreset::Medium), PipelineCaps::HybridRT,
                                      device->GetCaps().supportsRayTracing);
 
     // ── 共享组件 ──
@@ -881,7 +881,6 @@ void HybridRTPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             // 无 SSAO/SSGI/SSR（RT 效果替代）
             in.ddgiProbeBuffer = m_DDGI.GetProbeBuffer();
             in.ddgiGridUniform = m_DDGI.GetGridUniform();
-            in.ddgiOverlay     = m_DDGI.IsEnabled();
             in.ddgiScale       = m_DDGI.debugScale;
             // 无 Clustered
             in.lightGridBuffer      = m_LightGridBuffer.get();

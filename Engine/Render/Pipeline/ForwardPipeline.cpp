@@ -56,7 +56,7 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
 
     // GI 通道配置：按本管线能力（Forward：Raster 阴影 + SSAO + SSR + IBL/RSM）初始化，
     // 不可用通道（如 SSGI/DDGI/RT 系列）自动降级
-    m_GIConfig = GIRegistry::Degrade(GIConfig{}, PipelineCaps::Forward,
+    m_GIConfig = GIRegistry::Degrade(GIConfigFromPreset(GIQualityPreset::Medium), PipelineCaps::Forward,
                                      device->GetCaps().supportsRayTracing);
 
     // --- PBR 着色器 ---

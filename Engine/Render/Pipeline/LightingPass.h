@@ -19,7 +19,7 @@ struct RenderGraph;
 enum class ShadowChannel : u8 { None = 0, Raster, RT };  // 阴影：光栅化（CSM/点光 cubemap/聚光 map）/ 硬件光追
 enum class AOChannel : u8 { None = 0, SSAO, RTAO };           // 环境光遮蔽：SSAO / RT AO
 enum class SpecularChannel : u8 { None = 0, SSR, RT };        // 镜面反射：SSR / RT 反射
-enum class DiffuseChannel : u8 { None = 0, SSGI, RTGI };// 间接漫反射：SSGI / RT GI（DDGI 由 ddgiOverlay 独立叠加）
+enum class DiffuseChannel : u8 { None = 0, SSGI, RTGI };// 间接漫反射：SSGI / RT GI（DDGI 作为低频探针源参与合成）
 
 // ============================================================
 // 光照通道配置（4 通道技术选型）
@@ -29,7 +29,42 @@ struct GIChannels {
     AOChannel       ao       = AOChannel::SSAO;
     SpecularChannel specular = SpecularChannel::SSR;
     DiffuseChannel  diffuse  = DiffuseChannel::SSGI;
-    bool ddgiOverlay = true;  // DDGI 可与任意 diffuse 模式叠加
+    // 注：DDGI 是否参与合成由 diffuseBlend.probeWeight 表达（不再有独立开关）
+};
+
+// ============================================================
+// GI 分层合成（通道通用——diffuse / specular / AO 同构）
+//
+// 每个通道都可能同时有多个 GI 源（屏幕空间 / 光追 / 低频探针或环境），
+// 它们描述的是同一个物理量 → 直接相加会双重计数，必须归一化合成。
+//
+//   · 权重（Weight）        —— 各源相对权重（配合各源内部置信度使用）
+//   · 衰减距离（FalloffDistance）—— 可选的「距离让位」（0=不启用）
+//
+// 注意：物理正确性来自「权重归一化」，距离衰减只是性能/艺术控制的让位机制；
+// 各源可信度主要由置信度决定（屏幕空间看可见性、光追看收敛度、探针看可见性），
+// 与「距离」无必然关系。
+// ============================================================
+
+/// 多源间接光的合成方式
+enum class GIBlendMode : u8 {
+    Additive   = 0,   // 直接相加（旧行为——双重计数，仅作 A/B 对照）
+    Normalized = 1,   // 归一化加权：Σ(源×w)/Σw，权重和=1 → 无双重计数（推荐）
+};
+
+/// 单通道的混合参数（按「源类型」命名——三通道通用，不绑定具体技术）
+struct GIChannelBlend {
+    GIBlendMode mode = GIBlendMode::Normalized;
+
+    // 各源相对权重（0=不参与合成；配合各源内部置信度共同决定最终权重）
+    float screenSpaceWeight = 1.0f;   // 屏幕空间源（SSGI / SSR / SSAO）
+    float rayTracingWeight  = 1.0f;   // 光追源（RTGI / RT 反射 / RTAO）
+    float probeWeight       = 1.0f;   // 低频探针/环境源（DDGI / IBL / Lightmap）
+
+    // 可选的距离让位（0 = 不启用；>0 时超出该距离权重线性衰减到 0）
+    // 仅用于性能/艺术控制，不改变物理正确性（正确性由归一化保证）
+    float screenSpaceFalloffDistance = 0.0f;   // 米
+    float rayTracingFalloffDistance  = 0.0f;   // 米
 };
 
 // ============================================================
@@ -86,8 +121,13 @@ struct LightingInputs {
     float giIntensity = 1.0f;    // 间接漫反射 GI 总强度（ambient 系数）
     float aoIntensity = 1.0f;    // AO 强度
     float ddgiScale   = 1.0f;    // DDGI 贡献缩放
-    bool  ddgiOverlay = true;    // DDGI 探针 GI 是否采样
     GIChannels sources; // 通道选择（shadow/ao/specular/diffuse）
+    // ── 分层合成（P2：多源间接光的归一化加权，通道通用）──
+    // 混合参数经 UBO 传递给 shader（3 通道 × 24B，避免超出 push constant 128B 上限）
+    GIChannelBlend diffuseBlend;    // 间接漫反射（SSGI/RTGI + DDGI）
+    GIChannelBlend specularBlend;   // 间接镜面（SSR/RT 反射 + IBL prefilter）
+    GIChannelBlend aoBlend;         // 环境光遮蔽（SSAO/RTAO）
+    bool  useScreenGI = false;      // 屏幕空间/光追漫反射源是否有效（SSGI/RTGI 关闭时为 false）
 };
 
 // ============================================================
@@ -142,6 +182,7 @@ private:
     // ── Lighting PSO + 描述符集 ──
     std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
     rhi::DescriptorSetLayoutHandle m_Layout = rhi::kInvalidLayout;
+    std::unique_ptr<rhi::IRHIBuffer> m_BlendUBO;   // GI 分层合成参数 UBO（3 通道混合参数）
     rhi::DescriptorSetHandle       m_Set    = rhi::kInvalidSet;
 
     u32 m_Width = 0, m_Height = 0;

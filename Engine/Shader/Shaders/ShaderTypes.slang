@@ -88,6 +88,29 @@ GPU_CONST(GPU_UINT kGPUBinding_RT_ShadowMask = 24);  // RT 阴影遮罩（R16_FL
 GPU_CONST(GPU_UINT kGPUBinding_RT_Reflection = 25);  // RT 反射（RGBA16_FLOAT）
 GPU_CONST(GPU_UINT kGPUBinding_RT_AO         = 26);  // RT 环境光遮蔽（R8_UNORM）
 GPU_CONST(GPU_UINT kGPUBinding_RT_GI         = 27);  // RT 间接漫反射（RGBA16_FLOAT）
+GPU_CONST(GPU_UINT kGPUBinding_GIBlendParams = 31);  // GI 各通道分层合成参数 UBO（3 通道 × 32B）
+
+// ============================================================
+// GI 分层合成参数（UBO）——通道通用
+//
+// 三个通道（diffuse/specular/ao）结构同构：屏幕空间源 / 光追源 / 低频探针或环境源。
+// 参数放在 UBO 而非 push constant：3 通道 × 7 字段会超出 128B 上限，且便于后续层栈扩展。
+// ============================================================
+GPU_STRUCT GIChannelBlendParams {
+    GPU_UINT mode;                       // 0=相加（对照）, 1=归一化加权
+    float    screenSpaceWeight;          // 屏幕空间源权重（0=不参与合成）
+    float    rayTracingWeight;           // 光追源权重
+    float    probeWeight;                // 低频探针/环境源权重
+    float    screenSpaceFalloffDistance; // 屏幕空间源「距离让位」（0=不启用）
+    float    rayTracingFalloffDistance;  // 光追源「距离让位」（0=不启用）
+    float    _pad[2];                    // 对齐到 32B
+};
+
+GPU_STRUCT GIBlendParams {
+    GIChannelBlendParams diffuse;        // 间接漫反射
+    GIChannelBlendParams specular;       // 间接镜面
+    GIChannelBlendParams ao;             // 环境光遮蔽
+};
 
 // --- 渲染管线限制 ---
 GPU_CONST(GPU_UINT kGPUMaxFramesInFlight       = 3);     // 最大飞行帧数
@@ -259,10 +282,11 @@ GPU_STRUCT DeferredLightingPushConstant {
     GPU_UINT rtSpecularSource;      // [56]      0=SSR, 1=RT 反射
     GPU_UINT rtDiffuseSource;       // [60]      0=SSGI, 1=RT GI
     float4   atmosphere;            // [64..80] sunDir.xyz（指向太阳）+ turbidity（空中透视）
-    GPU_UINT ddgiOverlay;           // [80]      DDGI 探针 GI 是否启用（0=关, 1=开）
     float    ddgiScale;             // [84]      DDGI 贡献缩放（替代硬编码 0.5）
     float    giIntensity;           // [88]      间接漫反射 GI 总强度（SSGI/RT GI/DDGI/RSM 统一驱动，替代魔法系数）
     float    aoIntensity;           // [92]      AO 强度（0=无 AO，1=完整 AO）
+    // 注：GI 各通道的分层合成参数经 GIBlendParams UBO 传递（见 kGPUBinding_GIBlendParams），
+    // 不占用 push constant——3 通道 × 7 字段会超出 128B 上限
 };
 
 // --- RTShadowPushConstant: RT 阴影 Pass Push Constant（108B，C++/Slang 单一数据源）---

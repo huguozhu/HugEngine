@@ -405,7 +405,7 @@ int main() {
     int  g_PipelineMode = 1;                       // 0=Forward 1=Deferred 2=HybridRT
     bool g_PendingHalfResApply = false;            // 档位切换后延迟到帧边界重建半分辨率纹理（ImGui 回调内重建会死锁）
     bool g_GISolo = true;                          // 只看 GI（关闭直接光）
-    int  g_GIPreset = -1;                          // GI 质量档位（-1=未应用预设）
+    int  g_GIPreset = 1;                           // GI 质量档位（默认 Medium=1）
     render::IRenderPipeline* curPipeline = &pipeline;
 
     // ── 从配置文件恢复管线 / GI / 后处理设置 ──
@@ -473,16 +473,37 @@ int main() {
         world.ForEach<he::RectLight>([&](he::Entity, he::RectLight& l){ l.enabled = !g_GISolo; });
         g_GIPreset     = GetInt(cfgData, "gi_preset", -1);
         {
+            // 层栈恢复：从 cfg 的「每通道源权重」重建（键缺失时保留默认预设值）
             auto& gc = *pipeline.GetGIConfig();
-            gc.diffuse     = (render::DiffuseChannel)GetInt(cfgData, "gi_diffuse", (int)gc.diffuse);
-            gc.specular    = (render::SpecularChannel)GetInt(cfgData, "gi_specular", (int)gc.specular);
-            gc.ao          = (render::AOChannel)GetInt(cfgData, "gi_ao", (int)gc.ao);
-            gc.shadow      = (render::ShadowChannel)GetInt(cfgData, "gi_shadow", (int)gc.shadow);
             gc.giIntensity = GetFloat(cfgData, "gi_intensity", 1.0f);
             gc.aoIntensity = GetFloat(cfgData, "ao_intensity", 1.0f);
-            gc.ddgiOverlay = GetInt(cfgData, "gi_ddgi_overlay", 1) != 0;
             gc.rsmIndirect = GetInt(cfgData, "gi_rsm_indirect", 1) != 0;
             gc.halfRes     = GetInt(cfgData, "gi_half_res", 0) != 0;
+
+            auto loadStack = [&](render::GIChannelStack& st, const char* key, int cap0, int cap1, int cap2, int cap3) {
+                const float w[4] = {
+                    GetFloat(cfgData, (String(key) + "_w0").c_str(), st.WeightOf((render::GISourceId)cap0)),
+                    GetFloat(cfgData, (String(key) + "_w1").c_str(), st.WeightOf((render::GISourceId)cap1)),
+                    GetFloat(cfgData, (String(key) + "_w2").c_str(), st.WeightOf((render::GISourceId)cap2)),
+                    GetFloat(cfgData, (String(key) + "_w3").c_str(), st.WeightOf((render::GISourceId)cap3)),
+                };
+                const int ids[4] = { cap0, cap1, cap2, cap3 };
+                st.Clear();
+                for (int i = 0; i < 4; i++) {
+                    if (ids[i] >= 0 && w[i] > 0.0f) st.Set((render::GISourceId)ids[i], w[i]);
+                }
+            };
+            // 通道源顺序与面板一致（低频 → 高频）
+            loadStack(gc.diffuse, "gi_blend_diffuse",
+                      (int)render::GISourceId::IBL, (int)render::GISourceId::DDGI,
+                      (int)render::GISourceId::SSGI, (int)render::GISourceId::RTGI);
+            loadStack(gc.specular, "gi_blend_specular",
+                      (int)render::GISourceId::IBL, (int)render::GISourceId::SSR,
+                      (int)render::GISourceId::RTReflection, (int)-1);
+            loadStack(gc.ao, "gi_blend_ao",
+                      (int)render::GISourceId::SSAO, (int)render::GISourceId::RTAO, (int)-1, (int)-1);
+            loadStack(gc.shadow, "gi_blend_shadow",
+                      (int)render::GISourceId::RasterShadow, (int)render::GISourceId::RTShadow, (int)-1, (int)-1);
         }
         {
             auto& ssao = pipeline.GetSSAO();
@@ -906,24 +927,59 @@ int main() {
             const ImVec4 colOk  = ImVec4(0.4f, 1.0f, 0.4f, 1.0f);
             const ImVec4 colBad = ImVec4(1.0f, 0.55f, 0.2f, 1.0f);
 
-            // ---- Diffuse（间接漫反射）----
-            ImGui::TextUnformatted("Diffuse — 间接漫反射");
-            {
-                const char* names[] = {"None", "SSGI", "RTGI"};
-                int cur = (int)gc.diffuse;
-                if (ImGui::Combo("##diffuse", &cur, names, 3)) {
-                    gc.diffuse = (render::DiffuseChannel)cur;
-                    gc = render::GIRegistry::Degrade(gc, giCaps, rtOk);   // 不可用则降级
+            // ── 通道 UI 辅助：显示该通道的「源层栈」（源 / 频段 / 权重 / 让位距离）──
+            // 勾选 = 该源参与合成（weight>0）；多个源同时勾选即为「融合」
+            auto channelUI = [&](const char* label, render::GIChannelStack& st,
+                                 const render::GISourceId* candidates, int candCount) {
+                ImGui::TextUnformatted(label);
+                ImGui::Indent(12.0f);
+                for (int i = 0; i < candCount; i++) {
+                    const render::GISourceId id = candidates[i];
+                    const bool  avail  = render::GIRegistry::IsAvailable(id, giCaps, rtOk);
+                    const float weight = st.WeightOf(id);
+                    bool active = weight > 0.0f;
+                    ImGui::PushID((int)id);
+                    if (ImGui::Checkbox(render::GISourceName(id), &active)) {
+                        st.Set(id, active ? 1.0f : 0.0f, st.FalloffOf(id));
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextColored(avail ? colOk : colBad, "[%s]",
+                        avail ? render::GIBandName(render::GIBandOf(id)) : "不可用");
+                    if (active) {
+                        ImGui::SameLine();
+                        ImGui::SetNextItemWidth(80.0f);
+                        float w = st.WeightOf(id);
+                        if (ImGui::DragFloat("权重", &w, 0.05f, 0.0f, 2.0f, "%.2f")) {
+                            st.Set(id, w, st.FalloffOf(id));
+                        }
+                        ImGui::SameLine();
+                        ImGui::SetNextItemWidth(80.0f);
+                        float fo = st.FalloffOf(id);
+                        if (ImGui::DragFloat("让位", &fo, 0.5f, 0.0f, 200.0f, "%.0f")) {
+                            st.Set(id, w, fo);
+                        }
+                    }
+                    ImGui::PopID();
                 }
-                bool ok = render::GIRegistry::IsAvailable(gc.diffuse, giCaps, rtOk);
-                ImGui::SameLine();
-                ImGui::TextColored(ok ? colOk : colBad, ok ? "[可用]" : "[不可用]");
+                // 该通道的合成方式（相加仅作对照；归一化保证无双重计数）
+                int mode = (int)st.mode;
+                const char* modes[] = {"相加(对照)", "归一化加权"};
+                ImGui::SetNextItemWidth(140.0f);
+                if (ImGui::Combo("合成", &mode, modes, 2)) {
+                    st.mode = (render::GIBlendMode)mode;
+                }
+                ImGui::Unindent(12.0f);
+            };
+
+            // ---- Diffuse（间接漫反射）----
+            {
+                static const render::GISourceId kDiffuseSources[] = {
+                    render::GISourceId::IBL, render::GISourceId::DDGI, render::GISourceId::SSGI,
+                    render::GISourceId::RSM, render::GISourceId::RTGI };
+                channelUI("Diffuse — 间接漫反射（低频 → 高频）", gc.diffuse, kDiffuseSources, 5);
                 ImGui::Indent(12.0f);
                 ImGui::SliderFloat("GI 强度", &gc.giIntensity, 0.0f, 2.0f, "%.2f");
                 ImGui::Checkbox("半分辨率", &gc.halfRes);
-                if (giCaps & render::kPipelineGIDiffDDGI) {
-                    ImGui::Checkbox("DDGI 叠加", &gc.ddgiOverlay);
-                }
                 if (giSSGI) {
                     bool on = giSSGI->IsEnabled();
                     if (ImGui::Checkbox("启用 SSGI", &on)) giSSGI->SetEnabled(on);
@@ -962,17 +1018,11 @@ int main() {
             }
 
             // ---- Specular（镜面反射）----
-            ImGui::TextUnformatted("Specular — 镜面反射");
             {
-                const char* names[] = {"None", "SSR", "RT"};
-                int cur = (int)gc.specular;
-                if (ImGui::Combo("##specular", &cur, names, 3)) {
-                    gc.specular = (render::SpecularChannel)cur;
-                    gc = render::GIRegistry::Degrade(gc, giCaps, rtOk);
-                }
-                bool ok = render::GIRegistry::IsAvailable(gc.specular, giCaps, rtOk);
-                ImGui::SameLine();
-                ImGui::TextColored(ok ? colOk : colBad, ok ? "[可用]" : "[不可用]");
+                static const render::GISourceId kSpecularSources[] = {
+                    render::GISourceId::IBL, render::GISourceId::SSR,
+                    render::GISourceId::RTReflection };
+                channelUI("Specular — 镜面反射（低频 → 高频）", gc.specular, kSpecularSources, 3);
                 ImGui::Indent(12.0f);
                 if (giSSR) {
                     bool on = giSSR->IsEnabled();
@@ -989,17 +1039,10 @@ int main() {
             }
 
             // ---- AO（环境光遮蔽）----
-            ImGui::TextUnformatted("AO — 环境光遮蔽");
             {
-                const char* names[] = {"None", "SSAO", "RTAO"};
-                int cur = (int)gc.ao;
-                if (ImGui::Combo("##ao", &cur, names, 3)) {
-                    gc.ao = (render::AOChannel)cur;
-                    gc = render::GIRegistry::Degrade(gc, giCaps, rtOk);
-                }
-                bool ok = render::GIRegistry::IsAvailable(gc.ao, giCaps, rtOk);
-                ImGui::SameLine();
-                ImGui::TextColored(ok ? colOk : colBad, ok ? "[可用]" : "[不可用]");
+                static const render::GISourceId kAOSources[] = {
+                    render::GISourceId::SSAO, render::GISourceId::RTAO };
+                channelUI("AO — 环境光遮蔽", gc.ao, kAOSources, 2);
                 ImGui::Indent(12.0f);
                 ImGui::SliderFloat("AO 强度##gc", &gc.aoIntensity, 0.0f, 1.5f, "%.2f");
                 if (dp) {
@@ -1018,17 +1061,10 @@ int main() {
             }
 
             // ---- Shadow（阴影）----
-            ImGui::TextUnformatted("Shadow — 阴影");
             {
-                const char* names[] = {"None", "Raster", "RT"};
-                int cur = (int)gc.shadow;
-                if (ImGui::Combo("##shadow", &cur, names, 3)) {
-                    gc.shadow = (render::ShadowChannel)cur;
-                    gc = render::GIRegistry::Degrade(gc, giCaps, rtOk);
-                }
-                bool ok = render::GIRegistry::IsAvailable(gc.shadow, giCaps, rtOk);
-                ImGui::SameLine();
-                ImGui::TextColored(ok ? colOk : colBad, ok ? "[可用]" : "[不可用]");
+                static const render::GISourceId kShadowSources[] = {
+                    render::GISourceId::RasterShadow, render::GISourceId::RTShadow };
+                channelUI("Shadow — 阴影", gc.shadow, kShadowSources, 2);
             }
         }
         ImGui::End();
@@ -1138,15 +1174,31 @@ int main() {
         out["gi_preset"]     = std::to_string(g_GIPreset);
         {
             auto& gc = *pipeline.GetGIConfig();
-            out["gi_diffuse"]      = std::to_string((int)gc.diffuse);
-            out["gi_specular"]     = std::to_string((int)gc.specular);
-            out["gi_ao"]           = std::to_string((int)gc.ao);
-            out["gi_shadow"]       = std::to_string((int)gc.shadow);
             out["gi_intensity"]    = std::to_string(gc.giIntensity);
             out["ao_intensity"]    = std::to_string(gc.aoIntensity);
-            out["gi_ddgi_overlay"] = std::to_string(gc.ddgiOverlay ? 1 : 0);
             out["gi_rsm_indirect"] = std::to_string(gc.rsmIndirect ? 1 : 0);
             out["gi_half_res"]     = std::to_string(gc.halfRes ? 1 : 0);
+
+            // 层栈序列化：每通道按「源顺序」写出各源权重（0 = 不参与）
+            auto saveStack = [&](const render::GIChannelStack& st, const char* key,
+                                 int cap0, int cap1, int cap2, int cap3) {
+                const int ids[4] = { cap0, cap1, cap2, cap3 };
+                for (int i = 0; i < 4; i++) {
+                    if (ids[i] < 0) continue;
+                    out[String(key) + "_w" + std::to_string(i)] =
+                        std::to_string(st.WeightOf((render::GISourceId)ids[i]));
+                }
+            };
+            saveStack(gc.diffuse, "gi_blend_diffuse",
+                      (int)render::GISourceId::IBL, (int)render::GISourceId::DDGI,
+                      (int)render::GISourceId::SSGI, (int)render::GISourceId::RTGI);
+            saveStack(gc.specular, "gi_blend_specular",
+                      (int)render::GISourceId::IBL, (int)render::GISourceId::SSR,
+                      (int)render::GISourceId::RTReflection, (int)-1);
+            saveStack(gc.ao, "gi_blend_ao",
+                      (int)render::GISourceId::SSAO, (int)render::GISourceId::RTAO, (int)-1, (int)-1);
+            saveStack(gc.shadow, "gi_blend_shadow",
+                      (int)render::GISourceId::RasterShadow, (int)render::GISourceId::RTShadow, (int)-1, (int)-1);
         }
         {
             auto& ssao = pipeline.GetSSAO();
