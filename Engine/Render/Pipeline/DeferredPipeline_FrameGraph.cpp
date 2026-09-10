@@ -435,6 +435,94 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         }
     }
 
+    // ============================================================
+    // RT 效果段（P3：光追作为「GI 源」，按层栈启用——Deferred 亦可使用）
+    //   AS_Build → RT_GI (+时域/空间降噪) ；其余 RT 源（反射/AO/阴影）后续接入
+    // ============================================================
+    rhi::IRHITexture* rtGITex = nullptr;
+    if (m_RTEnabled && m_GIConfig.AnyRTSource() && m_RTPass && m_RTGI && m_RTGI->IsValid()) {
+        // RT 效果需要光源数据（光照缓冲已在帧首填充）；此处收集一次供 RT pass 使用
+        PushConstantData rtfpc{};
+        CollectLights(rtfpc, world, sg, camera);
+
+        // 加速结构（TLAS）构建：每帧一次，供所有 RT 效果使用
+        rg.AddPass("AS_Build", {}, {},
+            [this, &world, &sg](rhi::IRHICommandList* c) {
+                m_RTPass->BuildAS(c, world, sg);
+            });
+
+        // 场景材质纹理（ClosestHit 材质查询）：首帧延迟构建一次（CPU 侧，场景静态时无需重建）
+        if (!m_SceneMaterialBuilt) {
+            if (m_RTPass->BuildSceneMaterialTexture(m_Device, world)) {
+                m_SceneMaterialBuilt = true;
+            } else {
+                HE_CORE_WARN("DeferredPipeline: 场景材质纹理构建失败，RTGI 材质查询不可用");
+            }
+        }
+
+        if (m_GIConfig.ShouldRunRTGI()) {
+            rtGITex = m_RTGI->GetOutput();
+            const ResourceHandle rtGIHandle = rg.ImportTexture("RT_GI", rtGITex);
+            rg.AddPass("RT_GI",
+                {{gbDepth, ResourceAccess::Read}, {gbB, ResourceAccess::Read}},
+                {{rtGIHandle, ResourceAccess::UAV}},
+                [this, &camera, rtfpc](rhi::IRHICommandList* c) {
+                    RTExecuteContext ctx;
+                    ctx.invViewProj = glm::inverse(camera.GetViewProjMatrix());
+                    ctx.cameraPos   = camera.position;
+                    ctx.frameIndex  = m_CurrentFrameSlot;
+                    ctx.gbDepth     = m_GBuffer->GetDepth();
+                    ctx.gbNormal    = m_GBuffer->GetNormal();
+                    ctx.lightBuffer = m_LightBuffers[m_CurrentFrameSlot].get();
+                    ctx.lightCount  = rtfpc.lightCount;
+                    ctx.sceneMaterialTex     = m_RTPass->GetSceneMaterialTexture();
+                    ctx.sceneTriangleNormals = m_RTPass->GetSceneTriangleNormals();
+                    ctx.ddgiProbeBuffer = m_DDGI.GetProbeBuffer();   // miss 回退：DDGI 探针
+                    ctx.ddgiGridUniform = m_DDGI.GetGridUniform();
+                    m_RTGI->Execute(c, m_RTPass->GetTLAS(), ctx);
+                });
+
+            // 时域累积（低分辨率信号用历史累积降噪）
+            rhi::IRHITexture* rtGITemporalTex = nullptr;
+            ResourceHandle rtGITemporalHandle = kInvalidHandle;
+            if (m_GIDenoiser && m_GIDenoiser->IsReady()) {
+                rtGITemporalTex = m_GIDenoiser->GetOutput();
+                rtGITemporalHandle = rg.ImportTexture("RT_GI_Temporal", rtGITemporalTex);
+                rg.AddPass("RT_GI_Temporal",
+                    {{rtGIHandle, ResourceAccess::Read}, {gbDepth, ResourceAccess::Read},
+                     {gbB, ResourceAccess::Read}, {gbVel, ResourceAccess::Read}},
+                    {{rtGITemporalHandle, ResourceAccess::Write}},
+                    [this](rhi::IRHICommandList* c) {
+                        m_GIDenoiser->SetInputs(m_RTGI->GetOutput(),
+                            m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetVelocity());
+                        m_GIDenoiser->Render(c);
+                    });
+            }
+            // 空间滤波（四分之一分辨率锯齿用 5×5 双边滤波补足）
+            if (rtGITemporalHandle != kInvalidHandle) rtGITex = rtGITemporalTex;
+            if (m_GISpatial.IsReady() && rtGITemporalTex) {
+                const ResourceHandle rtGISpatialIn = rtGITemporalHandle;
+                rtGITex = m_GISpatial.GetOutput();
+                const ResourceHandle rtGISpatialHandle = rg.ImportTexture("RT_GI_Denoised", rtGITex);
+                rg.AddPass("RT_GI_Spatial",
+                    {{rtGISpatialIn, ResourceAccess::Read}, {gbDepth, ResourceAccess::Read},
+                     {gbB, ResourceAccess::Read}},
+                    {{rtGISpatialHandle, ResourceAccess::Write}},
+                    [this, rtGITemporalTex, rw = m_RTGI->GetWidth(), rh = m_RTGI->GetHeight()]
+                    (rhi::IRHICommandList* c) {
+                        m_GISpatial.PreBind(c);
+                        m_GISpatial.SetInputs(rtGITemporalTex,
+                            m_GBuffer->GetDepth(), m_GBuffer->GetNormal());
+                        rhi::ClearValue clr{};
+                        c->BeginOffscreenPass(m_GISpatial.GetOutput()->GetNativeHandle(),
+                            nullptr, rw, rh, &clr, false);
+                        m_GISpatial.Render(c);
+                        c->EndOffscreenPass();
+                    });
+            }
+        }
+    }
+
     // ── 天空盒喂给 GI_IBL（脏标记触发 IBL 重生成，生成在 Lighting lambda 内联执行）──
     {
         auto* giIBL = dynamic_cast<GI_IBL*>(m_GI.get());
@@ -466,6 +554,12 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     }
     if (ssrDenoised != kInvalidHandle) {
         lightingReads.push_back({ssrDenoised, ResourceAccess::Read});
+    }
+    // RT GI 纹理（层栈启用 RTGI 时）需声明读取依赖，保证屏障正确
+    ResourceHandle rtGILightingHandle = kInvalidHandle;
+    if (rtGITex) {
+        rtGILightingHandle = rg.ImportTexture("RT_GI_LightingIn", rtGITex);
+        lightingReads.push_back({rtGILightingHandle, ResourceAccess::Read});
     }
     rg.AddPass("Lighting",
         lightingReads,
@@ -559,6 +653,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                           GISourceId::None);
                 in.useScreenGI = m_GIConfig.UseScreenDiffuse();   // SSGI/RTGI 是否参与
             }
+            // RT GI 输出（层栈启用 RTGI 且降噪完成时非空 → shader 走光追路径）
+            if (rtGITex) in.rtGI = rtGITex;
             in.lightCount   = fpc.lightCount;
             in.width = w;
             in.height = h;

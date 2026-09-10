@@ -120,6 +120,102 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
     m_SSGI.OnResize(m_Width, m_Height);
     m_SSR.OnResize(m_Width, m_Height);
     m_SSAO.OnResize(m_Width, m_Height);
+
+    // ============================================================
+    // RT 基础设施（P3：光追是「GI 源」而非「管线类型」）
+    // 设备支持光追时创建 RTPass + RT 效果 Pass + 降噪链；
+    // 实际是否参与画面由层栈中的 RT 源决定（帧图按 AnyRTSource() 注册 pass）
+    // ============================================================
+    m_RTEnabled = device->GetCaps().supportsRayTracing;
+    if (m_RTEnabled) {
+        m_RTPass = std::make_unique<RTPass>();
+        if (m_RTPass->Initialize(device, {}, {})) {   // AS-only 模式：只构建 BLAS/TLAS + 场景资源
+            HE_CORE_INFO("DeferredPipeline: RTPass 初始化完成 (AS-only)");
+
+            m_RTShadow = std::make_unique<RTShadowPass>();
+            if (!m_RTShadow->Initialize(device, m_Width, m_Height, true)) {
+                HE_CORE_WARN("DeferredPipeline: RTShadowPass 初始化失败，RT 阴影禁用");
+                m_RTShadow.reset();
+            }
+            m_RTAO = std::make_unique<RTAOPass>();
+            if (!m_RTAO->Initialize(device, m_Width, m_Height, true)) {
+                HE_CORE_WARN("DeferredPipeline: RTAOPass 初始化失败，RT AO 禁用");
+                m_RTAO.reset();
+            }
+            m_RTReflection = std::make_unique<RTReflectionPass>();
+            if (!m_RTReflection->Initialize(device, m_Width, m_Height, true)) {
+                HE_CORE_WARN("DeferredPipeline: RTReflectionPass 初始化失败，RT 反射禁用");
+                m_RTReflection.reset();
+            }
+            m_RTGI = std::make_unique<RTGIPass>();
+            if (!m_RTGI->Initialize(device, m_Width, m_Height, true)) {
+                HE_CORE_WARN("DeferredPipeline: RTGIPass 初始化失败，RT GI 禁用");
+                m_RTGI.reset();
+            }
+
+            // ── RT 降噪器（时域累积；反射/GI 追加 5×5 空间滤波）──
+            if (m_RTShadow && m_RTShadow->IsValid()) {
+                RTDenoiser::Config cfg;
+                cfg.format          = rhi::Format::R16_FLOAT;
+                cfg.width           = m_RTShadow->GetWidth();
+                cfg.height          = m_RTShadow->GetHeight();
+                cfg.temporalBlend   = 0.05f;
+                cfg.depthThreshold  = 0.02f;
+                cfg.normalThreshold = 0.85f;
+                cfg.debugName       = "RTShadowDenoiser";
+                m_ShadowDenoiser = std::make_unique<RTDenoiser>();
+                if (!m_ShadowDenoiser->Initialize(device, cfg)) m_ShadowDenoiser.reset();
+            }
+            if (m_RTAO && m_RTAO->IsValid()) {
+                RTDenoiser::Config cfg;
+                cfg.format          = rhi::Format::R8_UNORM;
+                cfg.width           = m_RTAO->GetWidth();
+                cfg.height          = m_RTAO->GetHeight();
+                cfg.temporalBlend   = 0.05f;
+                cfg.depthThreshold  = 0.02f;
+                cfg.normalThreshold = 0.85f;
+                cfg.debugName       = "RTAODenoiser";
+                m_AODenoiser = std::make_unique<RTDenoiser>();
+                if (!m_AODenoiser->Initialize(device, cfg)) m_AODenoiser.reset();
+            }
+            if (m_RTReflection && m_RTReflection->IsValid()) {
+                RTDenoiser::Config cfg;
+                cfg.format          = rhi::Format::RGBA16_FLOAT;
+                cfg.width           = m_RTReflection->GetWidth();
+                cfg.height          = m_RTReflection->GetHeight();
+                cfg.temporalBlend   = 0.10f;
+                cfg.depthThreshold  = 0.05f;
+                cfg.normalThreshold = 0.80f;
+                cfg.debugName       = "RTReflectionDenoiser";
+                m_ReflectionDenoiser = std::make_unique<RTDenoiser>();
+                if (!m_ReflectionDenoiser->Initialize(device, cfg)) m_ReflectionDenoiser.reset();
+                if (!m_ReflectionSpatial.Initialize(device,
+                        m_RTReflection->GetWidth(), m_RTReflection->GetHeight())) {
+                    HE_CORE_WARN("DeferredPipeline: RTReflectionSpatial 初始化失败");
+                }
+            }
+            if (m_RTGI && m_RTGI->IsValid()) {
+                RTDenoiser::Config cfg;
+                cfg.format          = rhi::Format::RGBA16_FLOAT;
+                cfg.width           = m_RTGI->GetWidth();
+                cfg.height          = m_RTGI->GetHeight();
+                cfg.temporalBlend   = 0.15f;
+                cfg.depthThreshold  = 0.05f;
+                cfg.normalThreshold = 0.80f;
+                cfg.debugName       = "RTGIDenoiser";
+                m_GIDenoiser = std::make_unique<RTDenoiser>();
+                if (!m_GIDenoiser->Initialize(device, cfg)) m_GIDenoiser.reset();
+                if (!m_GISpatial.Initialize(device,
+                        m_RTGI->GetWidth(), m_RTGI->GetHeight())) {
+                    HE_CORE_WARN("DeferredPipeline: RTGISpatial 初始化失败");
+                }
+            }
+        } else {
+            m_RTEnabled = false;
+            m_RTPass.reset();
+            HE_CORE_WARN("DeferredPipeline: RTPass 初始化失败，RT 禁用");
+        }
+    }
     // Bloom / FXAA / TAA / AutoExposure 已在 PostProcessChain::Initialize() 中创建
 
     // GBuffer PSO + 描述符集 + DGC 初始化已在 GBufferRenderer::Initialize() 中完成
@@ -218,6 +314,20 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
 }
 
 void DeferredPipeline::Shutdown() {
+    // RT 基础设施释放（P3：Deferred 可按层栈启用光追源）
+    m_GIDenoiser.reset();
+    m_ReflectionDenoiser.reset();
+    m_AODenoiser.reset();
+    m_ShadowDenoiser.reset();
+    m_GISpatial.Shutdown();
+    m_ReflectionSpatial.Shutdown();
+    if (m_RTGI)         { m_RTGI->Shutdown();         m_RTGI.reset(); }
+    if (m_RTReflection) { m_RTReflection->Shutdown(); m_RTReflection.reset(); }
+    if (m_RTAO)         { m_RTAO->Shutdown();         m_RTAO.reset(); }
+    if (m_RTShadow)     { m_RTShadow->Shutdown();     m_RTShadow.reset(); }
+    if (m_RTPass)       { m_RTPass->Shutdown();       m_RTPass.reset(); }
+    m_RTEnabled = false;
+
     if (m_ShadowSystem) m_ShadowSystem->Shutdown();
     m_PostProcess.Shutdown();
     if (m_GBuffer) m_GBuffer->Shutdown();

@@ -26,6 +26,12 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "GI/GI_DDGI.h"
 #include "GI/GIConfig.h"
 #include "PostProcess/Denoiser.h"
+// RT 效果（P3 统一后 Deferred 亦可按层栈启用光追源）
+#include "RT/RTShadowPass.h"
+#include "RT/RTAOPass.h"
+#include "RT/RTReflectionPass.h"
+#include "RT/RTGIPass.h"
+#include "PostProcess/RTDenoiser.h"
 #include "Profiler/ProfilerManager.h"
 #include "Profiler/ProfilerPanel.h"
 #include "Scene/World.h"
@@ -169,7 +175,24 @@ private:
     GI_SSGI m_SSGI;
     GI_SSR  m_SSR;
     GI_DDGI m_DDGI;
-    GIConfig m_GIConfig;   // GI 配置（M2：档位/通道/强度单一数据源）
+    GIConfig m_GIConfig;   // GI 配置（M2 档位/通道/强度 → P3 源层栈单一数据源）
+
+    // ── RT 基础设施（设备支持光追时创建；是否参与由层栈的 RT 源决定）──
+    // P3：光追是「GI 源」而非「管线类型」，故 Deferred 亦可直接启用 RTGI/RT 反射/RTAO/RT 阴影
+    std::unique_ptr<RTPass>           m_RTPass;             // AS 构建 + TLAS + 场景资源
+    std::unique_ptr<RTShadowPass>     m_RTShadow;
+    std::unique_ptr<RTAOPass>         m_RTAO;
+    std::unique_ptr<RTReflectionPass> m_RTReflection;
+    std::unique_ptr<RTGIPass>         m_RTGI;
+    // RT 降噪（时域累积 + 反射/GI 的空间滤波）
+    std::unique_ptr<RTDenoiser> m_ShadowDenoiser;
+    std::unique_ptr<RTDenoiser> m_AODenoiser;
+    std::unique_ptr<RTDenoiser> m_ReflectionDenoiser;
+    std::unique_ptr<RTDenoiser> m_GIDenoiser;
+    Denoiser m_ReflectionSpatial;
+    Denoiser m_GISpatial;
+    bool m_RTEnabled = false;   // 设备支持光追且 RTPass 初始化成功
+    bool m_SceneMaterialBuilt = false;   // 场景材质纹理是否已构建（延迟到首帧）
     Denoiser m_DenoiseSSGI;
     Denoiser m_DenoiseSSR;
     SSAO    m_SSAO;

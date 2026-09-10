@@ -273,6 +273,11 @@ struct GIConfig {
     [[nodiscard]] bool ShouldRunRTAO()    const { return ao.Has(GISourceId::RTAO); }
     [[nodiscard]] bool ShouldRunAO()      const { return ao.AnyActive(); }
     [[nodiscard]] bool ShouldRunShadow()  const { return shadow.AnyActive(); }
+    [[nodiscard]] bool ShouldRunRTShadow() const { return shadow.Has(GISourceId::RTShadow); }
+    /// 任一通道是否启用了光追源（决定是否需要构建 TLAS 与 RT 效果 / 降噪链）
+    [[nodiscard]] bool AnyRTSource() const {
+        return ShouldRunRTGI() || ShouldRunRTReflection() || ShouldRunRTAO() || ShouldRunRTShadow();
+    }
     /// 使用横跨屏幕空间/光追的"精确"漫反射源（决定 shader 的 rtDiffuseSource 与有效性）
     [[nodiscard]] bool UseScreenDiffuse() const { return ShouldRunSSGI() || ShouldRunRTGI(); }
 
