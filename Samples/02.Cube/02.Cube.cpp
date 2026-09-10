@@ -661,9 +661,12 @@ int main() {
 
             
     // 全路径追踪管线（r.Pipeline.Mode=3，设备支持 RT 时才可用）
+    // 定位：参考渲染器（ground truth），用于校验实时 GI 近似的正确性
     pathTracingPipeline.Initialize(device.get());
     pathTracingPipeline.SetSwapChain(swapchain.get());
     pathTracingPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+    // PT 复用 Deferred 的加速结构（同一份 BLAS/TLAS，避免重复内存）
+    pathTracingPipeline.SetSharedRTPass(deferredPipeline.GetRTPass());
 
     // --- 贴花（A3：地板路面标线式棋盘格纹理片，半透明混合）---
     // 纹理注册须在管线初始化之后（bindless 槽 0-3 保留给管线占位纹理）；

@@ -91,6 +91,8 @@ public:
     MotionBlurPass& GetMotionBlur() { return m_PostProcess.GetMotionBlur(); }
     SSAO&           GetSSAO()       { return m_SSAO; }
     ProfilerManager&    GetProfiler()      { return m_Profiler; }
+    // RT 基础设施访问（供 PathTracingPipeline 共享同一份 TLAS，避免重复内存）
+    RTPass*             GetRTPass()        { return m_RTPass.get(); }
     ProfilerPanel&      GetProfilerPanel() { return m_ProfilerPanel; }
     AutoExposurePass&   GetAutoExposure()  { return m_PostProcess.GetAutoExposure(); }
     ColorGradingPass&   GetColorGrading()  { return m_PostProcess.GetColorGrading(); }

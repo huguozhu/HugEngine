@@ -85,11 +85,16 @@ bool PathTracingPipeline::Initialize(rhi::IRHIDevice* device) {
     m_RTEnabled = device->GetCaps().supportsRayTracing;
     if (m_RTEnabled) {
         // RTPass：AS-only 模式（构建 BLAS/TLAS + 场景资源）
-        m_RTPass = std::make_unique<RTPass>();
-        if (!m_RTPass->Initialize(device, {}, {})) {
-            HE_CORE_WARN("PathTracingPipeline: RTPass 初始化失败，禁用 PT");
-            m_RTPass.reset();
-            m_RTEnabled = false;
+        // 若外部已提供共享 RTPass（DeferredPipeline 的），则无需自建，省一份加速结构内存
+        if (m_SharedRTPass && m_SharedRTPass->IsValid()) {
+            HE_CORE_INFO("PathTracingPipeline: 复用共享 RTPass（TLAS 不重复构建）");
+        } else {
+            m_RTPass = std::make_unique<RTPass>();
+            if (!m_RTPass->Initialize(device, {}, {})) {
+                HE_CORE_WARN("PathTracingPipeline: RTPass 初始化失败，禁用 PT");
+                m_RTPass.reset();
+                m_RTEnabled = false;
+            }
         }
     }
     if (m_RTEnabled) {
@@ -156,6 +161,16 @@ bool PathTracingPipeline::Initialize(rhi::IRHIDevice* device) {
     return true;
 }
 
+void PathTracingPipeline::SetSharedRTPass(RTPass* shared) {
+    if (!shared || !shared->IsValid()) return;
+    m_SharedRTPass = shared;
+    // 释放自建实例，改用共享的加速结构（BLAS/TLAS 由共享实例统一维护）
+    if (m_RTPass) {
+        m_RTPass->Shutdown();
+        m_RTPass.reset();
+    }
+    HE_CORE_INFO("PathTracingPipeline: 已切换为共享 RTPass");
+}
 void PathTracingPipeline::Shutdown() {
     m_PTDenoiser.reset();
     m_PTAtrous.reset();
@@ -355,15 +370,15 @@ void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     }
 
     // ── AS Build — BLAS/TLAS 构建 ──
-    if (m_RTEnabled && m_RTPass && m_RTPass->IsValid()) {
+    if (m_RTEnabled && m_RTPass && GetRTPass() && GetRTPass()->IsValid()) {
         rg.AddPass("AS_Build", {}, {},
             [this, &world, &sg](rhi::IRHICommandList* c) {
-                m_RTPass->BuildAS(c, world, sg);
+                GetRTPass()->BuildAS(c, world, sg);
             });
 
         // 场景材质纹理（4×N，PT ClosestHit 用）：首帧延迟构建一次
         if (!m_SceneMaterialBuilt) {
-            if (m_RTPass->BuildSceneMaterialTexture(m_Device, world)) {
+            if (GetRTPass()->BuildSceneMaterialTexture(m_Device, world)) {
                 m_SceneMaterialBuilt = true;
             } else {
                 HE_CORE_WARN("PathTracingPipeline: 场景材质纹理构建失败，PT 材质查询不可用");
@@ -425,10 +440,10 @@ void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 ctx.lightBuffer  = m_LightBuffers[m_CurrentFrameSlot].get();
                 ctx.lightCount   = lightCount;
                 ctx.finalReservoir = useReSTIR && m_ReSTIR ? m_ReSTIR->GetFinalReservoir() : nullptr;
-                ctx.sceneMaterialTex = m_RTPass->GetSceneMaterialTexture();
-                ctx.sceneTriangleNormals = m_RTPass->GetSceneTriangleNormals();
+                ctx.sceneMaterialTex = GetRTPass()->GetSceneMaterialTexture();
+                ctx.sceneTriangleNormals = GetRTPass()->GetSceneTriangleNormals();
                 ctx.blueNoise = m_STBN ? m_STBN->GetTexture() : nullptr;
-                m_PT->Execute(c, m_RTPass->GetTLAS(), ctx);
+                m_PT->Execute(c, GetRTPass()->GetTLAS(), ctx);
             });
     }
 
