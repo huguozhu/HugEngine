@@ -444,12 +444,12 @@ int main() {
         // 样条控制点：一条绕场景的弯曲路径（切向留零 → 自动 Catmull-Rom 光滑）
         Entity splineEntity = world.CreateEntity("RoadSpline");
         auto* spline = world.AddComponent<SplineComponent>(splineEntity);
-        spline->AddPoint(float3(-10.0f, 0.06f,  6.0f));
-        spline->AddPoint(float3( -3.0f, 0.06f,  9.0f));
-        spline->AddPoint(float3(  4.0f, 0.06f,  6.0f));
-        spline->AddPoint(float3(  8.0f, 0.06f, -2.0f));
-        spline->AddPoint(float3(  2.0f, 0.06f, -9.0f));
-        spline->AddPoint(float3( -6.0f, 0.06f, -8.0f));
+        spline->AddPoint(float3(-10.0f, 3.06f,  6.0f));
+        spline->AddPoint(float3( -3.0f, 3.06f,  9.0f));
+        spline->AddPoint(float3(  4.0f, 3.06f,  6.0f));
+        spline->AddPoint(float3(  8.0f, 3.06f, -2.0f));
+        spline->AddPoint(float3(  2.0f, 3.06f, -9.0f));
+        spline->AddPoint(float3( -6.0f, 3.06f, -8.0f));
         sceneGraph.SetParent(splineEntity, Entity{kInvalidEntity});
 
         // 条带网格：宽 2 米、48 段，关联上面的样条（网格由 SplineMeshSystem 生成）
@@ -460,7 +460,7 @@ int main() {
         road->width            = 2.0f;
         road->segments         = 48;
         road->uvTiling         = 0.5f;
-        road->baseColorFactor  = float4(0.22f, 0.22f, 0.26f, 1.0f);   // 深灰路面
+        road->baseColorFactor  = float4(0.99f, 0.0f, 0.0f, 1.0f);   // 深灰路面
         road->roughnessFactor  = 0.9f;
         road->metallicFactor   = 0.0f;
         sceneGraph.SetParent(splineRoadEntity, Entity{kInvalidEntity});
