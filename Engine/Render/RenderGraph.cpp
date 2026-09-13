@@ -250,6 +250,22 @@ void RenderGraph::DeriveBarriers() {
 
         for (auto& r : pass->reads)  checkResource(r.handle, r.access);
         for (auto& w : pass->writes) checkResource(w.handle, w.access);
+
+        // ── 深度附件写之后的真实布局修正 ──
+        // 引擎创建 render pass 时把深度附件的 finalLayout 声明为
+        // DEPTH_STENCIL_READ_ONLY_OPTIMAL（"写完即可采样"，见 VulkanPipeline.cpp），
+        // 因此一个写深度的 pass 结束后，该图的真实布局是 READ_ONLY 而不是 ATTACHMENT。
+        // 若模型仍记为 ATTACHMENT，后续 barrier 会声明错误的 oldLayout，实测产生：
+        //   · VUID-VkImageMemoryBarrier-oldLayout-01197（barrier 声明 oldLayout 不符）
+        //   · VUID-vkCmdBeginRenderPass-initialLayout-00900（下次作为深度附件时布局不符）
+        // 这里让模型与 render pass 的实际 finalLayout 保持一致。
+        for (auto& w : pass->writes) {
+            if (w.handle >= m_ResourceStates.size()) continue;
+            auto& st = m_ResourceStates[w.handle];
+            if (st.isDepth && st.layout == rhi::ResourceState::DepthStencilWrite) {
+                st.layout = rhi::ResourceState::DepthStencilRead;
+            }
+        }
     }
 }
 

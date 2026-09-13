@@ -695,11 +695,22 @@ void VulkanCommandList::PipelineBarrier(
     imageBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     imageBarrier.image = vkTex->GetImage();
 
-    // 深度纹理不能使用 COLOR_ATTACHMENT_OPTIMAL layout，需替换为深度对应 layout
+    // 深度纹理不能使用颜色类 layout，需替换为深度对应 layout
+    //
+    // 实测背景（VUID-vkCmdBeginRenderPass-initialLayout-00900）：
+    // 引擎里采样深度贴图（阴影贴图等）时会走 `ResourceState::ShaderResource`
+    // → ToVkImageLayout 得到 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL（颜色布局），
+    // 于是深度图的实际布局变成 SHADER_READ_ONLY_OPTIMAL，随后该图作为深度附件
+    // 开始 render pass 时（initialLayout 要求 DEPTH_STENCIL_ATTACHMENT）即报错。
+    // 这里统一做深度感知的重映射，作为单一收口点。
     auto fixLayout = [&](ResourceState state) -> VkImageLayout {
         VkImageLayout layout = ToVkImageLayout(state);
-        if (isDepth && layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-            return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        if (isDepth) {
+            if (layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+                return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            if (layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+                return VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+        }
         return layout;
     };
     imageBarrier.oldLayout = fixLayout(srcState);
