@@ -50,9 +50,14 @@ ForwardPipeline::~ForwardPipeline() {
     Shutdown();
 }
 
-bool ForwardPipeline::Initialize(rhi::IRHIDevice* device) {
+bool ForwardPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Device = device;
     HE_ASSERT(m_Device, "ForwardPipeline: device is null");
+
+    // 采用调用方给出的初始尺寸（0 = 沿用默认），避免"先按默认尺寸建 HDR/后处理资源、
+    // 随即被 OnResize 全量销毁重建"造成的启动期 churn（详见 IRenderPipeline::Initialize）
+    if (width  > 0) m_HDRWidth  = width;
+    if (height > 0) m_HDRHeight = height;
 
     // GI 通道配置：按本管线能力（Forward：Raster 阴影 + SSAO + SSR + IBL/RSM）初始化，
     // 不可用通道（如 SSGI/DDGI/RT 系列）自动降级

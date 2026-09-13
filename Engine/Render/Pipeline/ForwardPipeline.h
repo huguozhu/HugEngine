@@ -41,7 +41,7 @@ public:
     ~ForwardPipeline() override;
 
     // IRenderPipeline
-    bool Initialize(rhi::IRHIDevice* device) override;
+    bool Initialize(rhi::IRHIDevice* device, u32 width = 0, u32 height = 0) override;
     void Shutdown() override;
     void NextFrame() override;
     void OnResize(u32 width, u32 height) override;

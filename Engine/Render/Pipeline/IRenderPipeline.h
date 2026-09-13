@@ -32,7 +32,16 @@ public:
     // ---- 生命周期 ----
 
     /// 创建 GPU 资源（PSO / 描述符集 / 纹理 / 缓冲区等）
-    virtual bool Initialize(rhi::IRHIDevice* device) = 0;
+    /// width/height：**初始视口尺寸**（像素）；传 0 = 沿用默认尺寸
+    /// （rhi::kDefaultBackBufferWidth/Height）。
+    ///
+    /// 为什么必须能传尺寸：管线内所有尺寸相关资源（GBuffer / HDR / 后处理 /
+    /// GI 半分辨率纹理 / RT 输出）都在 Initialize 里按此尺寸创建。若这里用默认
+    /// 尺寸而真实交换链尺寸不同（例：请求窗口 1920x1080，客户区实际 1920x1061），
+    /// 紧随其后的 OnResize 会把整套资源销毁重建——实测这会在启动期造成纹理/
+    /// framebuffer churn：校验层报大量 "command buffer ... objects bound ...
+    /// were invalidated"，并给"已销毁纹理仍被引用"留下窗口（偶发访问违例）。
+    virtual bool Initialize(rhi::IRHIDevice* device, u32 width = 0, u32 height = 0) = 0;
 
     /// 释放所有 GPU 资源
     virtual void Shutdown() = 0;

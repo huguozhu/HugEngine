@@ -37,10 +37,11 @@ static constexpr u32 kPTFlag_NEE      = 1u << 3;
 // 相机运动 → 时域降噪混合权重缩放：约 0.33m 平移或 0.33rad(~19°) 旋转 → 混合抬到 1.0
 static constexpr float kMotionBlendScale = 3.0f;
 
-bool PathTracingPipeline::Initialize(rhi::IRHIDevice* device) {
+bool PathTracingPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Device = device;
-    m_Width  = rhi::kDefaultBackBufferWidth;
-    m_Height = rhi::kDefaultBackBufferHeight;
+    // 采用调用方给出的初始尺寸（0 = 沿用默认），避免启动期被 OnResize 全量重建
+    m_Width  = (width  > 0) ? width  : rhi::kDefaultBackBufferWidth;
+    m_Height = (height > 0) ? height : rhi::kDefaultBackBufferHeight;
 
     // ── 后处理（ToneMap → LDR → FXAA）──
     m_PostProcess.Initialize(device, m_Width, m_Height);

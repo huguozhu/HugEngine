@@ -43,9 +43,15 @@ static he::rhi::ShaderBytecode g_VariantFS;
 
 namespace he::render {
 
-bool DeferredPipeline::Initialize(rhi::IRHIDevice* device) {
+bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Device = device;
     HE_ASSERT(m_Device, "DeferredPipeline: null device");
+
+    // 采用调用方给出的初始尺寸（0 = 沿用默认），避免"先按默认尺寸建整套资源、
+    // 随即被 OnResize 全量销毁重建"造成的启动期纹理/framebuffer churn
+    //（详见 IRenderPipeline::Initialize 的注释）
+    if (width  > 0) m_Width  = width;
+    if (height > 0) m_Height = height;
 
     // GI 通道配置：以 Medium 档位为默认基线（层栈：IBL + SSGI + DDGI），
     // 再按本管线能力 + 设备能力逐源裁剪——避免默认构造出「空层栈」导致无 GI

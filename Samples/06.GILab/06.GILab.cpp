@@ -385,14 +385,19 @@ int main() {
     // ============================================================
     // 6. 初始化渲染管线（Forward / Deferred；光追经 GI 层栈的 RT 源启用）
     // ============================================================
-    render::DeferredPipeline   pipeline;          // 延迟管线（默认，GI 对比主用）
-    render::ForwardPipeline    forwardPipeline;   // 前向管线
+    render::DeferredPipeline   deferredPipeline;   // 延迟管线（默认，GI 对比主用）
+    render::ForwardPipeline    forwardPipeline;    // 前向管线
 
-    pipeline.Initialize(device.get());
-    pipeline.SetSwapChain(swapchain.get());
-    pipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+    // 初始尺寸必须用**交换链的真实尺寸**：请求的窗口是 1920x1080，但客户区实际是
+    // 1920x1061；若 Initialize 用默认尺寸建资源，紧随其后的 OnResize 会把 GBuffer /
+    // HDR / 后处理 / GI 半分辨率纹理 / RT 输出**整套销毁重建**，在启动期制造纹理与
+    // framebuffer churn（校验层大量 "command buffer ... were invalidated"，
+    // 并给"已销毁纹理仍被引用"留下窗口）。尺寸一致时 OnResize 会提前返回，等于空操作。
+    deferredPipeline.Initialize(device.get(), swapchain->GetWidth(), swapchain->GetHeight());
+    deferredPipeline.SetSwapChain(swapchain.get());
+    deferredPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
 
-    forwardPipeline.Initialize(device.get());
+    forwardPipeline.Initialize(device.get(), swapchain->GetWidth(), swapchain->GetHeight());
     forwardPipeline.SetSwapChain(swapchain.get());
     forwardPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
 
@@ -401,42 +406,42 @@ int main() {
     bool g_PendingHalfResApply = false;            // 档位切换后延迟到帧边界重建半分辨率纹理（ImGui 回调内重建会死锁）
     bool g_GISolo = true;                          // 只看 GI（关闭直接光）
     int  g_GIPreset = 1;                           // GI 质量档位（默认 Medium=1）
-    render::IRenderPipeline* curPipeline = &pipeline;
+    render::IRenderPipeline* curPipeline = &deferredPipeline;
 
     // ── 从配置文件恢复管线 / GI / 后处理设置 ──
     if (hasConfig) {
-        pipeline.GetClusteredShading().enabled = GetInt(cfgData, "clustered", 1) != 0;
-        pipeline.GetGPUCulling().enabled       = GetInt(cfgData, "gpu_cull", 1) != 0;
-        pipeline.SetGBufferMode((render::GBufferRenderer::Mode)GetInt(cfgData, "gbuffer_mode", 0));
+        deferredPipeline.GetClusteredShading().enabled = GetInt(cfgData, "clustered", 1) != 0;
+        deferredPipeline.GetGPUCulling().enabled       = GetInt(cfgData, "gpu_cull", 1) != 0;
+        deferredPipeline.SetGBufferMode((render::GBufferRenderer::Mode)GetInt(cfgData, "gbuffer_mode", 0));
 
-        auto& ae = pipeline.GetAutoExposure();
+        auto& ae = deferredPipeline.GetAutoExposure();
         ae.SetEnabled(GetInt(cfgData, "ae_enabled", 0) != 0);
         ae.SetAdaptSpeed(GetFloat(cfgData, "ae_adapt_speed", 2.0f));
         ae.SetTargetLum(GetFloat(cfgData, "ae_target_lum", 0.18f));
 
-        auto& bloom = pipeline.GetBloom();
+        auto& bloom = deferredPipeline.GetBloom();
         bloom.SetEnabled(GetInt(cfgData, "bloom_enabled", 0) != 0);
         bloom.SetThreshold(GetFloat(cfgData, "bloom_threshold", 1.0f));
         bloom.SetIntensity(GetFloat(cfgData, "bloom_intensity", 0.5f));
 
-        auto& dof = pipeline.GetDOF();
+        auto& dof = deferredPipeline.GetDOF();
         dof.SetEnabled(GetInt(cfgData, "dof_enabled", 0) != 0);
         dof.SetFocusDepth(GetFloat(cfgData, "dof_focus", 0.5f));
         dof.SetFocusRange(GetFloat(cfgData, "dof_range", 0.1f));
         dof.SetIntensity(GetFloat(cfgData, "dof_intensity", 1.0f));
 
-        auto& mb = pipeline.GetMotionBlur();
+        auto& mb = deferredPipeline.GetMotionBlur();
         mb.SetEnabled(GetInt(cfgData, "mb_enabled", 0) != 0);
         mb.SetIntensity(GetFloat(cfgData, "mb_intensity", 0.5f));
 
-        pipeline.GetSSAO().enabled = GetInt(cfgData, "ssao_enabled", 0) != 0;
+        deferredPipeline.GetSSAO().enabled = GetInt(cfgData, "ssao_enabled", 0) != 0;
 
-        if (auto* gi = pipeline.GetGI()) {
+        if (auto* gi = deferredPipeline.GetGI()) {
             auto s = gi->GetSettings();
             s.intensity = GetFloat(cfgData, "ibl_intensity", 1.0f);
             gi->SetSettings(s);
         }
-        if (auto* ssgi = pipeline.GetSSGI()) {
+        if (auto* ssgi = deferredPipeline.GetSSGI()) {
             ssgi->SetEnabled(GetInt(cfgData, "ssgi_enabled", 0) != 0);
             ssgi->radius      = GetFloat(cfgData, "ssgi_radius", 1.0f);
             ssgi->sampleCount = GetInt(cfgData, "ssgi_samples", 16);
@@ -444,7 +449,7 @@ int main() {
             s.intensity = GetFloat(cfgData, "ssgi_intensity", 1.0f);
             ssgi->SetSettings(s);
         }
-        if (auto* ddgi = pipeline.GetDDGI()) {
+        if (auto* ddgi = deferredPipeline.GetDDGI()) {
             ddgi->SetEnabled(GetInt(cfgData, "ddgi_enabled", 0) != 0);
             ddgi->blendAlpha = GetFloat(cfgData, "ddgi_blend", 0.9f);
             ddgi->debugScale = GetFloat(cfgData, "ddgi_scale", 1.0f);
@@ -452,7 +457,7 @@ int main() {
             s.intensity = GetFloat(cfgData, "ddgi_intensity", 1.0f);
             ddgi->SetSettings(s);
         }
-        if (auto* ssr = pipeline.GetSSR()) {
+        if (auto* ssr = deferredPipeline.GetSSR()) {
             ssr->SetEnabled(GetInt(cfgData, "ssr_enabled", 0) != 0);
             ssr->maxSteps = GetFloat(cfgData, "ssr_max_steps", 64.0f);
             ssr->stepSize = GetFloat(cfgData, "ssr_step_size", 0.5f);
@@ -470,7 +475,7 @@ int main() {
         g_GIPreset     = GetInt(cfgData, "gi_preset", -1);
         {
             // 层栈恢复：从 cfg 的「每通道源权重」重建（键缺失时保留默认预设值）
-            auto& gc = *pipeline.GetGIConfig();
+            auto& gc = *deferredPipeline.GetGIConfig();
             gc.giIntensity = GetFloat(cfgData, "gi_intensity", 1.0f);
             gc.aoIntensity = GetFloat(cfgData, "ao_intensity", 1.0f);
             gc.rsmIndirect = GetInt(cfgData, "gi_rsm_indirect", 1) != 0;
@@ -502,7 +507,7 @@ int main() {
                       (int)render::GISourceId::RasterShadow, (int)render::GISourceId::RTShadow, (int)-1, (int)-1);
         }
         {
-            auto& ssao = pipeline.GetSSAO();
+            auto& ssao = deferredPipeline.GetSSAO();
             ssao.radius      = GetFloat(cfgData, "ssao_radius", 1.0f);
             ssao.sampleCount = GetInt(cfgData, "ssao_samples", 16);
             ssao.halfRes     = GetInt(cfgData, "ssao_half_res", 0) != 0;
@@ -519,7 +524,7 @@ int main() {
     auto cmdList = device->CreateCommandList();
     cmdList->SetSwapChain(swapchain.get());
     // 预设 ToneMap PSO → 匹配 BGRA8_UNORM RP（ImGui LoadOp 兼容）
-    cmdList->SetPipeline(pipeline.GetToneMap()->GetPSO());
+    cmdList->SetPipeline(deferredPipeline.GetToneMap()->GetPSO());
 
     // ============================================================
     // 8. ImGui 初始化
@@ -596,7 +601,7 @@ int main() {
         if (w == 0 || h == 0) return;
         swapchain->Resize(w, h);
         cmdList->SetSwapChain(swapchain.get());
-        pipeline.OnResize(w, h);
+        deferredPipeline.OnResize(w, h);
         forwardPipeline.OnResize(w, h);
         camCtrl.SetAspectRatio(static_cast<float>(w), static_cast<float>(h));
     });
@@ -678,7 +683,7 @@ int main() {
             curPipeline = &forwardPipeline;
             break;
         default: // Deferred（含光追源：RT 已归入 GI 层栈，无需独立管线）
-            curPipeline = &pipeline;
+            curPipeline = &deferredPipeline;
             break;
         }
         curPipeline->NextFrame();
@@ -711,21 +716,21 @@ int main() {
             ImGui::SeparatorText("延迟渲染管线");
             ImGui::Text("GBuffer + Lighting Pass (全屏 PBR)");
             ImGui::Text("3×MRT (albedo+metallic | normal+roughness | emissive+ao) + D32");
-            bool clustered = pipeline.GetClusteredShading().enabled;
+            bool clustered = deferredPipeline.GetClusteredShading().enabled;
             if (ImGui::Checkbox("Clustered Shading", &clustered))
-                pipeline.GetClusteredShading().enabled = clustered;
+                deferredPipeline.GetClusteredShading().enabled = clustered;
             if (clustered) {
                 ImGui::SameLine();
                 ImGui::TextColored({0.5f, 1.0f, 0.5f, 1.0f}, "%u clusters",
-                    pipeline.GetClusteredShading().GetClusterCount());
+                    deferredPipeline.GetClusteredShading().GetClusterCount());
             }
-            bool gpuCull = pipeline.GetGPUCulling().enabled;
+            bool gpuCull = deferredPipeline.GetGPUCulling().enabled;
             if (ImGui::Checkbox("GPU 视锥剔除", &gpuCull))
-                pipeline.GetGPUCulling().enabled = gpuCull;
+                deferredPipeline.GetGPUCulling().enabled = gpuCull;
             if (gpuCull) {
                 ImGui::SameLine();
                 ImGui::TextColored({0.5f, 1.0f, 0.5f, 1.0f}, "%u 可见",
-                    pipeline.GetGPUCulling().GetLastVisibleCount());
+                    deferredPipeline.GetGPUCulling().GetLastVisibleCount());
             }
 
             // 相机
@@ -751,7 +756,7 @@ int main() {
             // ── AutoExposure ──
             ImGui::SeparatorText("AutoExposure");
             {
-                auto& ae = pipeline.GetAutoExposure();
+                auto& ae = deferredPipeline.GetAutoExposure();
                 bool aeOn = ae.IsEnabled();
                 if (ImGui::Checkbox("启用自动曝光", &aeOn)) ae.SetEnabled(aeOn);
                 if (aeOn) {
@@ -857,7 +862,7 @@ int main() {
                 if (g_PipelineMode != prevMode) {
                     // 切换管线：确保交换链与视口尺寸同步
                     curPipeline = (g_PipelineMode == 0) ? static_cast<render::IRenderPipeline*>(&forwardPipeline)
-                                                        : static_cast<render::IRenderPipeline*>(&pipeline);
+                                                        : static_cast<render::IRenderPipeline*>(&deferredPipeline);
                     curPipeline->SetSwapChain(swapchain.get());
                     curPipeline->OnResize(swapchain->GetWidth(), swapchain->GetHeight());
                 }
@@ -1062,7 +1067,7 @@ int main() {
         ImGui::SetNextWindowSize(ImVec2(430.0f, 260.0f), ImGuiCond_FirstUseEver);
         ImGui::Begin("GPU Profiler");
         {
-            auto& pdata = pipeline.GetProfiler().GetLastFrameData();
+            auto& pdata = deferredPipeline.GetProfiler().GetLastFrameData();
             float totalMs = 0;
             for (auto& p : pdata) {
                 if (p.gpuMs < 0) continue;  // 未使用
@@ -1076,15 +1081,15 @@ int main() {
 
         // GPU Profiler 面板（按 F1 切换）
         if (ImGui::IsKeyPressed(ImGuiKey_F1))
-            pipeline.GetProfilerPanel().Toggle();
-        pipeline.GetProfilerPanel().Draw();
+            deferredPipeline.GetProfilerPanel().Toggle();
+        deferredPipeline.GetProfilerPanel().Draw();
 
         imgui.EndFrame(cmdList.get());
         cmdList->EndRenderPass();
         cmdList->End();
 
         device->Submit(cmdList.get());
-        pipeline.FlushComputeWork();  // AsyncCompute: Graphics Submit 之后提交 Compute 工作
+        deferredPipeline.FlushComputeWork();  // AsyncCompute: Graphics Submit 之后提交 Compute 工作
         swapchain->Present(true);
         frameIndex++;
     }
@@ -1098,7 +1103,7 @@ int main() {
     }
     imgui.Shutdown();
     device->WaitIdle();
-    pipeline.Shutdown();
+    deferredPipeline.Shutdown();
 
     // ============================================================
     // 保存配置（所有 ImGui 可控参数）
@@ -1117,48 +1122,48 @@ int main() {
 
 
         // ── 渲染设置 ──
-        out["clustered"]    = std::to_string(pipeline.GetClusteredShading().enabled ? 1 : 0);
-        out["gpu_cull"]     = std::to_string(pipeline.GetGPUCulling().enabled ? 1 : 0);
-        out["gbuffer_mode"] = std::to_string((int)pipeline.GetGBufferMode());
+        out["clustered"]    = std::to_string(deferredPipeline.GetClusteredShading().enabled ? 1 : 0);
+        out["gpu_cull"]     = std::to_string(deferredPipeline.GetGPUCulling().enabled ? 1 : 0);
+        out["gbuffer_mode"] = std::to_string((int)deferredPipeline.GetGBufferMode());
 
         // ── AutoExposure ──
-        auto& ae = pipeline.GetAutoExposure();
+        auto& ae = deferredPipeline.GetAutoExposure();
         out["ae_enabled"]     = std::to_string(ae.IsEnabled() ? 1 : 0);
         out["ae_adapt_speed"] = std::to_string(ae.GetAdaptSpeed());
         out["ae_target_lum"]  = std::to_string(ae.GetTargetLum());
 
 
         // ── GI ──
-        if (auto* gi = pipeline.GetGI()) {
+        if (auto* gi = deferredPipeline.GetGI()) {
             out["ibl_intensity"] = std::to_string(gi->GetSettings().intensity);
         }
-        if (auto* ssgi = pipeline.GetSSGI()) {
+        if (auto* ssgi = deferredPipeline.GetSSGI()) {
             out["ssgi_enabled"]   = std::to_string(ssgi->IsEnabled() ? 1 : 0);
             out["ssgi_radius"]    = std::to_string(ssgi->radius);
             out["ssgi_samples"]   = std::to_string(ssgi->sampleCount);
             out["ssgi_intensity"] = std::to_string(ssgi->GetSettings().intensity);
         }
-        if (auto* ddgi = pipeline.GetDDGI()) {
+        if (auto* ddgi = deferredPipeline.GetDDGI()) {
             out["ddgi_enabled"]   = std::to_string(ddgi->IsEnabled() ? 1 : 0);
             out["ddgi_blend"]     = std::to_string(ddgi->blendAlpha);
             out["ddgi_scale"]     = std::to_string(ddgi->debugScale);
             out["ddgi_intensity"] = std::to_string(ddgi->GetSettings().intensity);
         }
-        if (auto* ssr = pipeline.GetSSR()) {
+        if (auto* ssr = deferredPipeline.GetSSR()) {
             out["ssr_enabled"]   = std::to_string(ssr->IsEnabled() ? 1 : 0);
             out["ssr_max_steps"] = std::to_string(ssr->maxSteps);
             out["ssr_step_size"] = std::to_string(ssr->stepSize);
         }
 
         // ── SSAO ──
-        out["ssao_enabled"] = std::to_string(pipeline.GetSSAO().enabled ? 1 : 0);
+        out["ssao_enabled"] = std::to_string(deferredPipeline.GetSSAO().enabled ? 1 : 0);
 
         // ── 面板状态：管线 / GI 档位 / 只看 GI / GI 通道配置 ──
         out["pipeline_mode"] = std::to_string(g_PipelineMode);
         out["gi_solo"]       = std::to_string(g_GISolo ? 1 : 0);
         out["gi_preset"]     = std::to_string(g_GIPreset);
         {
-            auto& gc = *pipeline.GetGIConfig();
+            auto& gc = *deferredPipeline.GetGIConfig();
             out["gi_intensity"]    = std::to_string(gc.giIntensity);
             out["ao_intensity"]    = std::to_string(gc.aoIntensity);
             out["gi_rsm_indirect"] = std::to_string(gc.rsmIndirect ? 1 : 0);
@@ -1186,7 +1191,7 @@ int main() {
                       (int)render::GISourceId::RasterShadow, (int)render::GISourceId::RTShadow, (int)-1, (int)-1);
         }
         {
-            auto& ssao = pipeline.GetSSAO();
+            auto& ssao = deferredPipeline.GetSSAO();
             out["ssao_radius"]   = std::to_string(ssao.radius);
             out["ssao_samples"]  = std::to_string(ssao.sampleCount);
             out["ssao_half_res"] = std::to_string(ssao.halfRes ? 1 : 0);
