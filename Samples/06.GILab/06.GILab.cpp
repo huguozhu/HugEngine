@@ -28,12 +28,15 @@
 #include "Asset/glTFLoader.h"
 #include "Editor/ImGuiIntegration.h"
 #include "imgui.h"
+#include "CrashHandler.h"   // 崩溃处理器（Wave 0.8）：崩溃时打印完整调用栈 + minidump
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>   // std::getenv（HE_CRASH_TEST 自检开关）
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -122,6 +125,16 @@ Entity CreateShapeEntity(World& world, SceneGraph& sg,
 }
 
 int main() {
+    // ============================================================
+    // 0. 安装崩溃处理器（Wave 0.8 诊断基建）
+    //    崩溃时打印"函数名 + 源文件:行号"的完整调用栈，并写出 minidump。
+    //    之所以放在最前面：初始化阶段（设备/交换链/资源创建）同样是崩溃高发区。
+    // ============================================================
+    {
+        const std::string crashLog = std::string(HUGE_CONTENT_DIR) + "Config/06_GILab_crash.log";
+        he::sample::InstallCrashHandler(crashLog.c_str(), nullptr);
+    }
+
     // ============================================================
     // 1. 引擎启动
     // ============================================================
@@ -698,6 +711,19 @@ int main() {
             g_PendingHalfResApply = false;
         }
         curPipeline->Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
+
+        // --- 崩溃处理器自检（Wave 0.8）---
+        // 设置环境变量 HE_CRASH_TEST=1 启动，会在第 3 帧主动解引用空指针，
+        // 用于验证崩溃处理器能否打出完整调用栈（默认关闭，不影响正常使用）。
+        // 放在 Render 之后是为了让调用栈具备真实深度。
+        if (std::getenv("HE_CRASH_TEST")) {
+            static int s_CrashTestFrame = 0;
+            if (++s_CrashTestFrame == 3) {
+                HE_CORE_ERROR("HE_CRASH_TEST=1：主动触发崩溃，用于验证崩溃处理器");
+                volatile int* nullPtr = nullptr;   // volatile 保证编译器不优化掉这次写入
+                *nullPtr = 1;
+            }
+        }
 
         // --- ImGui（LOAD 保留 ToneMap 输出）---
         cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
