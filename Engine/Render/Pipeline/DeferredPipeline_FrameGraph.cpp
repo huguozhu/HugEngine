@@ -779,6 +779,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 fillBlend(in.aoBlend,       m_GIConfig.ao,       GISourceId::SSAO, GISourceId::RTAO,
                           GISourceId::None);
                 in.useScreenGI = m_GIConfig.UseScreenDiffuse();   // SSGI/RTGI 是否参与
+                // 白炉数值测试（Wave 0.2）：置位后由 shader 代入白炉条件（见 DeferredLighting.frag）
+                in.diffuseBlend.furnaceMode = m_GIConfig.furnaceMode;
             }
             // RT 输出（层栈启用对应源且降噪完成时非空 → shader 走光追路径）
             if (rtGITex)        in.rtGI         = rtGITex;
@@ -793,10 +795,13 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
 
     // ── Skybox Pass（背景天空盒/物理天空，Lighting 之后合成，depth=Equal 只画无几何处）──
     // 用 LoadOp=Load 保留 Lighting 结果，仅覆盖背景（GBuffer depth == 1.0）
+    // 白炉数值测试下**跳过**：白炉判据要求背景与物体亮度都等于环境真值（1.0），
+    // 画出真实天空会把背景改写成非 1，破坏读回判据
     rg.AddPass("Skybox",
         {{gbDepth, ResourceAccess::Read}, {hdrC, ResourceAccess::Read}},
         {{hdrC, ResourceAccess::Write}},
         [&, w, h](rhi::IRHICommandList* c) {
+            if (m_GIConfig.furnaceMode) return;   // 白炉模式：不画天空（见上）
             SubsystemContext sctx;
             sctx.world = &world;
             sctx.camera = &camera;

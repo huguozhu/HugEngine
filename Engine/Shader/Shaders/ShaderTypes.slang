@@ -103,7 +103,8 @@ GPU_STRUCT GIChannelBlendParams {
     float    probeWeight;                // 低频探针/环境源权重
     float    screenSpaceFalloffDistance; // 屏幕空间源「距离让位」（0=不启用）
     float    rayTracingFalloffDistance;  // 光追源「距离让位」（0=不启用）
-    float    _pad[2];                    // 对齐到 32B
+    GPU_UINT furnaceMode;                // 白炉数值测试：1=把各源真值与场景条件取白炉值（见 frag）
+    GPU_UINT _pad;                       // 对齐到 32B
 };
 
 GPU_STRUCT GIBlendParams {

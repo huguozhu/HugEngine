@@ -260,6 +260,10 @@ struct GIConfig {
     float aoIntensity = 1.0f;   // AO 强度
     bool  rsmIndirect = true;   // RSM 间接光（Forward 管线的间接漫反射来源）
     bool  halfRes     = false;  // 半分辨率计算（性能优先）
+    // 白炉数值测试（Wave 0.2）：把白炉条件（全白环境 + albedo=1 + 关直接光）下的源真值
+    // 代入**真实**合成路径，正确实现应恰好得到 1.0；>1 即存在归一化之外的双重计数。
+    // 详见 LightingPass.h 的 GIChannelBlend::furnaceMode
+    bool  furnaceMode = false;
 
     // ── 帧图门控（从层栈派生——不再有单值枚举）──
     [[nodiscard]] bool ShouldRunSSGI()    const { return diffuse.Has(GISourceId::SSGI); }

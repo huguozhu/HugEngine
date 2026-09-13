@@ -65,6 +65,11 @@ struct GIChannelBlend {
     // 仅用于性能/艺术控制，不改变物理正确性（正确性由归一化保证）
     float screenSpaceFalloffDistance = 0.0f;   // 米
     float rayTracingFalloffDistance  = 0.0f;   // 米
+
+    // 白炉数值测试（Wave 0.2）：置位后 shader 把"全白环境 + albedo=1 + 关闭直接光"的
+    // 白炉条件直接代入，各源真值恒为 1 —— 正确的分层合成应恰好得到 1.0；
+    // 任何 >1 的结果都说明有源被加在归一化之外（双重计数）。经 GIBlendParams UBO 传递。
+    bool  furnaceMode = false;
 };
 
 // ============================================================

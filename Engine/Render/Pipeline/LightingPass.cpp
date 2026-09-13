@@ -165,6 +165,7 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
             d.probeWeight       = s.probeWeight;
             d.screenSpaceFalloffDistance = s.screenSpaceFalloffDistance;
             d.rayTracingFalloffDistance  = s.rayTracingFalloffDistance;
+            d.furnaceMode = s.furnaceMode ? 1u : 0u;   // 白炉数值测试（Wave 0.2）
         };
         fill(bp.diffuse,  in.diffuseBlend,  in.useScreenGI);   // 漫反射：SSGI/RTGI 关闭时降权为 0
         fill(bp.specular, in.specularBlend, true);             // 镜面：命中与否由 shader 按 rtRefl.a 判定

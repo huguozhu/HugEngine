@@ -127,6 +127,21 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
 
     float3 color = float3(0.0);
 
+    // ============================================================
+    // 白炉数值测试（Wave 0.2）——能量守恒的硬判据
+    //
+    // 白炉条件：全白环境（各方向入射辐射度 = 1）+ 表面 albedo = 1 + 关闭直接光 + 无自发光。
+    // 此时**每个间接光源的真值都是 1**，因此正确的分层合成（权重归一化、权重和 = 1）
+    // 必须恰好得到 1.0。任何 > 1 的结果都说明有源被加在归一化之外（双重计数）。
+    //
+    // 实现方式：不是绕过真实路径另写一份，而是把"白炉下的源真值"代入**同一条**真实合成
+    // 代码，这样测的就是真正的合成数学（也能暴露 IBL 环境项、RSM 之类在归一化之外累加的项）。
+    // ============================================================
+    const bool furnace = (u_GIBlendParams.diffuse.furnaceMode != 0u);
+    if (furnace) {
+        albedo = float3(1.0, 1.0, 1.0);   // 全白反照率
+    }
+
     // RT 阴影因子：RT 阴影遮罩覆盖所有阴影光源（全屏像素级乘积），
     // 在直接光照结算后整体乘一次；rtShadowSource=0 时使用传统逐光源 CSM
     float rtShadowFactor = (rtShadowSource != 0u)
@@ -251,7 +266,13 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
     float3 F0_ibl = lerp(float3(dielectricF0), albedo, metallic);
     float3 F = F_SchlickRoughness(max(dot(N, V), 0.0), F0_ibl, roughness, metallic);
     float3 kD = (1.0 - F) * (1.0 - metallic);
-    color += kD * u_IrradianceMap.Sample(u_IBLSampler, N).rgb * albedo * iblIntensity;
+    if (furnace) {
+        // 白炉测试聚焦"合成数学"，不掺 BRDF 的菲涅耳分布：把 kD 取 1
+        kD = float3(1.0, 1.0, 1.0);
+    }
+    // 白炉下环境入射辐射度 = 1（全白环境）
+    float3 irrEnv = furnace ? float3(1.0, 1.0, 1.0) : u_IrradianceMap.Sample(u_IBLSampler, N).rgb;
+    color += kD * irrEnv * albedo * iblIntensity;
     float3 R = reflect(-V, N);
     float3 prefiltered = u_PrefilterMap.SampleLevel(u_IBLSampler, R, roughness * (kGPUPrefilterMips - 1.0)).rgb;
     // 环境镜面（低频源）：不直接累加——与屏幕空间/光追反射一起归一化合成（见第 6 步），
@@ -286,7 +307,8 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
     // ── AO 分层合成（S1.5：SSAO 与 RTAO 可同时参与，归一化加权）──
     // 两者都是「环境光遮蔽」这一物理量的估计 → 权重归一化，避免重复遮蔽
     //（旧行为是二选一：rtAOSource 切换）
-    {
+    // 白炉数值测试下 AO 不参与判据（白炉里遮蔽真值也是 1），故跳过整段
+    if (!furnace) {
         GIChannelBlendParams ba = u_GIBlendParams.ao;
         float aoNum = 0.0;
         float aoDen = 0.0;
@@ -323,7 +345,9 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
         float confDist = (bl.screenSpaceFalloffDistance > 0.0)
                        ? saturate(1.0 - camDist / bl.screenSpaceFalloffDistance) : 1.0;
         float w = bl.screenSpaceWeight * confEdge * confDist;
-        num += u_SSGI.Sample(u_GBufferSampler, uv).rgb * w;
+        // 白炉下该源真值 = 1
+        float3 c = furnace ? float3(1.0, 1.0, 1.0) : u_SSGI.Sample(u_GBufferSampler, uv).rgb;
+        num += c * w;
         den += w;
     }
 
@@ -332,14 +356,16 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
         float confDist = (bl.rayTracingFalloffDistance > 0.0)
                        ? saturate(1.0 - camDist / bl.rayTracingFalloffDistance) : 1.0;
         float w = bl.rayTracingWeight * confEdge * confDist;
-        num += u_RT_GI.Sample(u_GBufferSampler, uv).rgb * w;
+        float3 c = furnace ? float3(1.0, 1.0, 1.0) : u_RT_GI.Sample(u_GBufferSampler, uv).rgb;
+        num += c * w;
         den += w;
     }
 
     // ③ 低频探针源（DDGI）：世界空间、全方向，作为远场兜底
     if (bl.probeWeight > 0.0) {
         float w = bl.probeWeight;
-        num += SampleDDGI(worldPos, N) * ddgiScale * w;
+        float3 c = furnace ? float3(1.0, 1.0, 1.0) : SampleDDGI(worldPos, N) * ddgiScale;
+        num += c * w;
         den += w;
     }
 
@@ -352,6 +378,14 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
         indirect = num;
     }
     color += indirect * giIntensity;
+
+    // ── 白炉数值测试：到此即返回 ──
+    // 白炉下 diffuse 通道的间接光真值 = 1；这里**带上**所有在归一化之外累加的项
+    //（例如上面的 IBL 环境项），因此若存在双重计数，读回值会 > 1 并被探针抓住。
+    // 镜面 / AO / 自发光 / 空中透视都不参与本次判据，直接跳过。
+    if (furnace) {
+        return float4(color, 1.0);
+    }
 
     // ── 间接镜面分层合成（P2：与 diffuse 同构）──
     // 环境镜面（IBL prefilter）与屏幕空间/光追反射描述的是同一物理量 → 归一化合成，

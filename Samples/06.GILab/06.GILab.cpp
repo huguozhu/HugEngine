@@ -30,6 +30,8 @@
 #include "imgui.h"
 #include "CrashHandler.h"   // 崩溃处理器（Wave 0.8）：崩溃时打印完整调用栈 + minidump
 
+#include <glm/gtc/packing.hpp>   // 白炉探针：half float 解码（RGBA16F 读回）
+
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>   // std::getenv（HE_CRASH_TEST 自检开关）
@@ -420,6 +422,50 @@ int main() {
     bool g_GISolo = true;                          // 只看 GI（关闭直接光）
     int  g_GIPreset = 1;                           // GI 质量档位（默认 Medium=1）
     render::IRenderPipeline* curPipeline = &deferredPipeline;
+
+    // ============================================================
+    // 白炉探针（Wave 0.2）—— 能量守恒判据的读数设施
+    //
+    // 目的：白炉测试要求"全白环境 + albedo=1 + 关闭直接光"时物体应消失，即
+    //       任意两点亮度应相等。这里读回 HDR 目标（**色调映射之前**，线性值）
+    //       上两个像素：画面中心（物体所在）与背景点，输出亮度比供数值断言。
+    // 实现：RHI 的 CopyTextureToBuffer 把 1×1 像素拷进 host 可见缓冲，等 GPU 完成后
+    //       映射读取（RGBA16_FLOAT → half 解码）。仅在启用探针时每 N 帧执行一次，
+    //       且会 WaitIdle（测试用途，不追求性能）。
+    // ============================================================
+    bool  g_ProbeEnabled   = (std::getenv("HE_FURNACE_PROBE") != nullptr);   // 也可用 HE_FURNACE_PROBE=1 直接开启（便于自动化验证）
+    int   g_ProbeInterval  = 30;      // 每 N 帧采一次
+    float g_ProbeCenter[3] = {0, 0, 0};   // 中心像素 RGB（线性）
+    float g_ProbeBg[3]     = {0, 0, 0};   // 背景像素 RGB（线性）
+    float g_ProbeRatio     = 0.0f;        // 中心亮度 / 背景亮度（白炉正确时应 ≈ 1）
+    float g_ProbeLumCenter = 0.0f;        // 中心亮度绝对值（白炉正确时应 = 1.0）
+    // 白炉数值测试（Wave 0.2）：源真值取白炉条件（全白环境 + albedo=1 + 关直接光）
+    bool  g_FurnaceMode    = (std::getenv("HE_FURNACE") != nullptr);   // HE_FURNACE=1 直接开启
+    std::unique_ptr<rhi::IRHIBuffer> probeBuffer;   // 2 个 RGBA16F 像素 = 32 B
+    {
+        rhi::BufferDesc pd;
+        pd.size      = 32;
+        pd.usage     = rhi::BufferUsage::Storage;   // 该路径恒定带 TRANSFER_DST，可作拷贝目标
+        pd.cpuAccess = true;                        // 需要 Map 读回
+        probeBuffer  = device->CreateBuffer(pd);
+    }
+
+    // 启动即应用白炉条件（HE_FURNACE=1 路径；面板开关在 GI 控制台里）
+    if (g_FurnaceMode) {
+        deferredPipeline.GetGIConfig()->furnaceMode = true;
+        g_ProbeEnabled = true;
+        g_GISolo       = true;
+        world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& l){ l.enabled = false; });
+        world.ForEach<he::PointLight>([&](he::Entity, he::PointLight& l){ l.enabled = false; });
+        world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight& l){ l.enabled = false; });
+        world.ForEach<he::RectLight>([&](he::Entity, he::RectLight& l){ l.enabled = false; });
+        if (auto* gi = deferredPipeline.GetGI()) {   // 环境强度取 1（白炉真值）
+            auto s = gi->GetSettings();               // GetSettings 返回 const& → 取副本改用 SetSettings
+            s.intensity = 1.0f;
+            gi->SetSettings(s);
+        }
+        HE_CORE_INFO("[白炉] 已启用白炉数值测试：关闭直接光、环境强度=1、探针已开");
+    }
 
     // ── 从配置文件恢复管线 / GI / 后处理设置 ──
     if (hasConfig) {
@@ -905,6 +951,40 @@ int main() {
             }
             ImGui::TextWrapped("开启后画面只剩 GI 间接光——\n逐个启用 SSGI/DDGI 看各自贡献；IBL 强度即环境 GI 强度。");
 
+            // ── 白炉探针（Wave 0.2）：能量守恒的数值读数 ──
+            ImGui::SeparatorText("白炉探针（能量守恒）");
+            ImGui::Checkbox("启用探针（读回 HDR 目标像素）", &g_ProbeEnabled);
+            ImGui::SetNextItemWidth(120.0f);
+            ImGui::SliderInt("采样间隔(帧)", &g_ProbeInterval, 1, 120);
+            if (ImGui::Checkbox("白炉数值测试（源真值=1）", &g_FurnaceMode)) {
+                // 白炉条件：全白环境 + albedo=1 + 关闭直接光（源真值由 shader 代入，这里保证场景端一致）
+                if (auto* gcPtr = curPipeline->GetGIConfig()) gcPtr->furnaceMode = g_FurnaceMode;
+                if (g_FurnaceMode) g_ProbeEnabled = true;   // 打开白炉即自动开探针
+                if (g_FurnaceMode) {
+                    g_GISolo = true;   // 关闭全部直接光
+                    world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& l){ l.enabled = false; });
+                    world.ForEach<he::PointLight>([&](he::Entity, he::PointLight& l){ l.enabled = false; });
+                    world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight& l){ l.enabled = false; });
+                    world.ForEach<he::RectLight>([&](he::Entity, he::RectLight& l){ l.enabled = false; });
+                    if (auto* gi = curPipeline->GetGI()) {   // 环境强度取 1（白炉真值）
+                        auto s = gi->GetSettings();
+                        s.intensity = 1.0f;
+                        gi->SetSettings(s);
+                    }
+                }
+            }
+            ImGui::TextWrapped("白炉条件：全白环境 + albedo=1 + 关闭直接光 → 各源真值均为 1，\n"
+                               "正确的分层合成应恰好读回 1.0；>1 即存在归一化之外的双重计数。");
+            if (g_ProbeEnabled) {
+                ImGui::Text("中心像素 (线性 RGB): %.4f %.4f %.4f", g_ProbeCenter[0], g_ProbeCenter[1], g_ProbeCenter[2]);
+                ImGui::Text("背景像素 (线性 RGB): %.4f %.4f %.4f", g_ProbeBg[0], g_ProbeBg[1], g_ProbeBg[2]);
+                // 白炉正确时：物体消失 → 中心与背景都应等于环境真值 1.0
+                const bool ok = (g_ProbeRatio > 0.98f && g_ProbeRatio < 1.02f);
+                const ImVec4 col = ok ? ImVec4(0.3f, 0.9f, 0.3f, 1.0f) : ImVec4(1.0f, 0.6f, 0.2f, 1.0f);
+                ImGui::TextColored(col, "亮度比 中心/背景 = %.4f   (白炉判据 0.98 ~ 1.02)", g_ProbeRatio);
+                ImGui::TextColored(col, "中心亮度 = %.4f   (白炉真值 1.0)", g_ProbeLumCenter);
+            }
+
             // ── GI 质量档位（紧随管线选择）──
             ImGui::SeparatorText("GI 质量档位");
             const char* presetNames[] = {"Low", "Medium", "High", "Ultra"};
@@ -1112,10 +1192,50 @@ int main() {
 
         imgui.EndFrame(cmdList.get());
         cmdList->EndRenderPass();
+
+        // ── 白炉探针：把 HDR 目标上的两个像素拷进 host 可见缓冲 ──
+        // 必须在 render pass 之外录制（拷贝不能在 pass 内），因此放在 EndRenderPass 之后、End 之前
+        const bool probeThisFrame = g_ProbeEnabled && (frameIndex % (u64)std::max(1, g_ProbeInterval) == 0);
+        if (probeThisFrame && probeBuffer) {
+            rhi::IRHITexture* hdr = deferredPipeline.GetLighting().GetHDRTarget();
+            if (hdr) {
+                const u32 pw = swapchain->GetWidth(), ph = swapchain->GetHeight();
+                const u32 cx = pw / 2,           cy = ph / 2;            // 中心（物体所在）
+                const u32 bx = pw / 10,          by = ph / 10;           // 背景取样点
+                // RGBA16_FLOAT：每像素 8 字节 → 第二个像素偏移 16 字节
+                cmdList->CopyTextureToBuffer(hdr, probeBuffer.get(), cx, cy, 1, 1, 0);
+                cmdList->CopyTextureToBuffer(hdr, probeBuffer.get(), bx, by, 1, 1, 16);
+            }
+        }
+
         cmdList->End();
 
         device->Submit(cmdList.get());
         deferredPipeline.FlushComputeWork();  // AsyncCompute: Graphics Submit 之后提交 Compute 工作
+
+        // ── 白炉探针：等 GPU 完成后读回（half → float），算亮度比并打日志 ──
+        if (probeThisFrame && probeBuffer) {
+            device->WaitIdle();   // 测试用途，允许停顿
+            const auto* texels = static_cast<const uint16_t*>(probeBuffer->Map());
+            if (texels) {
+                for (int i = 0; i < 3; ++i) {
+                    g_ProbeCenter[i] = glm::unpackHalf1x16(texels[i]);          // 像素 0：中心
+                    g_ProbeBg[i]     = glm::unpackHalf1x16(texels[8 + i]);      // 像素 1：背景（16B 偏移 = 8 个 half）
+                }
+                const float lumCenter = 0.2126f * g_ProbeCenter[0] + 0.7152f * g_ProbeCenter[1] + 0.0722f * g_ProbeCenter[2];
+                const float lumBg     = 0.2126f * g_ProbeBg[0]     + 0.7152f * g_ProbeBg[1]     + 0.0722f * g_ProbeBg[2];
+                g_ProbeLumCenter = lumCenter;
+                g_ProbeRatio = (lumBg > 1e-6f) ? (lumCenter / lumBg) : 0.0f;
+                HE_CORE_INFO("[白炉探针] 中心 RGB=({:.4f},{:.4f},{:.4f}) 背景 RGB=({:.4f},{:.4f},{:.4f}) "
+                             "亮度 中心={:.4f} 背景={:.4f} 比值={:.4f} 白炉={}",
+                             g_ProbeCenter[0], g_ProbeCenter[1], g_ProbeCenter[2],
+                             g_ProbeBg[0], g_ProbeBg[1], g_ProbeBg[2],
+                             lumCenter, lumBg, g_ProbeRatio,
+                             g_FurnaceMode ? "ON" : "off");
+                probeBuffer->Unmap();
+            }
+        }
+
         swapchain->Present(true);
         frameIndex++;
     }
