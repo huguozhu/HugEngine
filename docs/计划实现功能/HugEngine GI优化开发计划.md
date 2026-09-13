@@ -251,13 +251,15 @@ cmake --build D:\Source\HugEngine\Build --config Debug --target 06.GILab -j 8
 
 #### 1.3.3 Wave 0.1 当前状态（诚实口径）
 
-- 合并统计：**约 100 次启动 / 1 次真实崩溃**（唯一一次发生在"新链接二进制的首次启动"，约 5 秒处，且**早于两项修复**）。
-- 崩溃点已定位到函数级；两项修复已落地（尺寸 churn 已验证消除；"纹理存活守卫"为防御 + 诊断，冒烟中未被命中）。
-- **根因尚未被证明**——因此 Wave 0.1 **不算完成**。修复后累计 **58 次连续启动零崩溃**（18 + 40 次 soak），
-  但在 1/55 量级的概率下，"零崩溃"仍可能只是运气，不足以断言已修。
-- **崩溃处理器（Wave 0.8）已完成并自检通过**：下次偶发崩溃会直接产出"函数名 + 源文件:行号"的调用栈与 minidump
-  （见 §二 的 0.8 验收项），届时可一步定位根因，无需再靠偏移反查。
-- 另一条更有把握的路径：**修掉 §1.3.2③ 的周期性校验违规**（确定性、可验证，见 §二 Wave 0.7）。
+- 合并统计：**约 100 次启动 / 1 次真实崩溃**（唯一一次发生在"新链接二进制的首次启动"，约 5 秒处，且**早于各项修复**）。
+- 崩溃点已定位到函数级（`VulkanTexture::GetImageView()`，野指针）。
+- **修复后累计约 100 次启动零崩溃**（含 Wave 0.7 修复后的 40 次 soak：0 次异常退出、0 份崩溃报告）。
+  其中最可疑的根因已消除：**framebuffer 在命令缓冲仍引用（且 GPU 可能仍在使用）时被同帧销毁**——
+  这与崩溃点"对象生命周期越界"在机理上同源。
+- 但仍**不足以断言已修**：原崩溃率约 1/55，100 次干净仍有约 16% 概率只是运气；且崩溃处理器（0.8）
+  至今未被真实崩溃触发过（堆栈尚未验证于真实场景，仅自检验证）。
+- ⇒ Wave 0.1 的判据仍保持"连续 10 次冷启动零崩溃"（**已满足**）；**根因证明**作为观察项保留，
+  下次若再现，崩溃处理器会直接给出调用栈。
 
 #### 1.3.4 Wave 0.7 实测进展（每帧违规 · 修正两次性质误判 · invalidState 已修复）
 
@@ -400,6 +402,10 @@ render pass 的 initial/final 都更新），并让图的导入资源初始化�
 - `DeferredLighting.frag.slang:254`：`color += kD * IrradianceMap.Sample(N) * albedo * iblIntensity;` —— **无条件加法**，在 `:346-354` 的归一化合成之外。
 - 同时 diffuse 层栈的 `IBL` 权重**无人读取**：`DeferredPipeline_FrameGraph.cpp:771` 只把 `GISourceId::DDGI` 传给 `probeId`，`:340-344` 的 probe 分支只调 `SampleDDGI()`，而 `RT_DDGI.slang:37` 的 `SampleDDGI` 是**纯探针插值、无 IBL 回退**。
 - 后果：① 层栈里给 IBL 权重完全不生效（06 面板上是"假开关"）；② DDGI/SSGI 与 IBL 环境项叠加 → 能量 > 1，**设计文档"不变量 3（多开一个源不会变亮）"在环境源上不成立**；③ 白炉测试必失败。
+- ✅ **已定量证实（Wave 0.2 白炉探针实测）**：白炉模式（源真值全为 1、albedo=1、kD=1、关直接光）下，
+  正确实现应恰好读回 **1.0**；实测 **1.7998（+80% 能量）**，且中心/背景完全一致（1.7998/1.7998，
+  比值 1.0000）——**比值正常但绝对值超标**，正是"归一化之外的加法项"的指纹（比值判据抓不到均匀误差，
+  必须用绝对值判据；这也是本次把判据定为"绝对值 = 1.0"的原因）。
 - 补充：M5.2-B 之后 DDGI 探针辐射度本身来自 RSM/IBL 回退 → 「DDGI 与 IBL 环境项」天然是同一份能量的两条路径，**必须二选一或归一化，不能叠加**。
 
 **(B) RSM 间接光仍是归一化之外的加法 + 魔法系数 0.03**
@@ -426,7 +432,7 @@ render pass 的 initial/final 都更新），并让图的导入资源初始化�
 |---|---|---|
 | **0.0 重建验证基线（工具链）** | 环境 | ✅ **已完成（§1.3.1）**：VS 2026 v18 已装、Vulkan SDK 1.4.357.0 已装、JoltPhysics 子模块已补齐、Python 走 `C:\anaconda3`（构建前需入 PATH）；configure + 编译 `06.GILab` **BUILD EXIT: 0**、0 错误 |
 | **0.1 偶发崩溃定位与修复** | `06.GILab` 首帧 / RenderGraph 深度 barrier | 5 次启动 1 次崩（`0xc0000005 @0x38216b`，约 5 s、Frame 1，§1.3.1③）。做法：① 用 `/Zi` 的 `06.GILab.pdb` 把偏移 `0x38216b` 解析到函数（`dumpbin`/调试器）；② 复现手段——**反复冷启动**（首启更易触发，疑似初始化/首帧竞态）；③ 同时修 RenderGraph 深度图 `oldLayout` 推导（校验告警 `VUID-…-oldLayout-01197`）；④ 判据：连续 10 次启动零崩溃 |
-| **0.2 白炉测试设施** | `06.GILab`（新） | ① 场景"白炉模式"：封闭白炉 + 全白环境 + albedo=1 + 关闭直接光（或能量归一），正确结果 = **白球消失**；② 数值判据：读回中心/背景像素亮度，比值 ∈ [0.98, 1.02]；③ 需**新增读回设施**（当前无截图/readback 代码）：离屏 RT → buffer → 面板显示数值（先做面板数值断言，自动化截图对比可后置） |
+| **0.2 白炉测试设施** | `06.GILab` + RHI 读回 + shader `furnaceMode` | ✅ **设施与判据均已建成**：① RHI 新增 `IRHICommandList::CopyTextureToBuffer`（纹理→缓冲，内部按追踪布局转 `TRANSFER_SRC` 并还原）；② `06.GILab` 探针读回 HDR 目标（**色调映射之前**）的中心与背景像素（RGBA16F → half 解码）、面板显示与日志输出，`HE_FURNACE_PROBE=1` 可免手点开启；③ **白炉条件经 `furnaceMode` 代入真实合成路径**（源真值=1、albedo=1、kD=1、关直接光、跳 AO/天空/自发光/空中透视），`HE_FURNACE=1` 一键开启；④ **判据：绝对值 = 1.0**（比值判据抓不到均匀误差）。**首测结果：1.7998（+80%）——定量证实缺口 (A)**，见 §1.4(A) |
 | **0.3 纯数学单测（可先落）** | `Tests/` | 层栈权重归一化的 CPU 单测（`Σw` 归一、`WeightOf/FalloffOf/Set/Remove` 边界、`Degrade` 逐源裁剪 + 兜底）。现行障碍已定位：`GIConfig.h:18` → `LightingPass.h:3` → `RHI/RHI.h`，即层栈数学**挂在 RHI 依赖链上**；而 `Tests/CMakeLists.txt:48-54` 只链接 AI/Scene/Asset/Core/Physics。解法：把 `GISourceId`/`GIBand`/`GIBlendMode`/`GISourceDesc`/`GIChannelStack`/`PipelineGICap`/`ToPipelineCap`/`IsRayTracingSource`/`PipelineCaps` 抽到新的 **RHI-free `GI/GITypes.h`**（只 `#include "Core/Types.h"`，实测该约定是轻量头），`GIConfig.h` 再 include 它；改动的引用面很小（全仓仅 4 个 .cpp 引用 `GIConfig.h`/`GIRegistry.h`） |
 | **0.4 IBL 归位** | `DeferredLighting.frag.slang:250-259` + `DeferredPipeline_FrameGraph.cpp:762-776` | 把 IBL 漫反射环境项**移入 diffuse 层栈归一化**（作为低频 probe/env 源）；层栈 `IBL` 权重真正生效；明确"DDGI 内部已含 IBL 回退"时二者的互斥或权重语义 |
 | **0.5 RSM 归位** | `DeferredLighting.frag.slang:261-284` | RSM 间接作为 diffuse 层栈的一个源参与归一化；去掉 `0.03` 魔法系数（或显式定义为 VPL 能量归一常数、纳入层栈权重）；面板 RSM 开关与 shader 路径同源 |
@@ -447,6 +453,8 @@ render pass 的 initial/final 都更新），并让图的导入资源初始化�
       同时 WER 仍记录 `APPCRASH 0xc0000005`（两种证据并存）。产物位置：崩溃日志
       `Content/Config/06_GILab_crash.log`（该目录已在 .gitignore），dump 在 exe 同目录。
 - [ ] 白炉模式下球体消失，中心/背景亮度比 ∈ [0.98, 1.02]。
+      → **设施已建成、判据已升级为绝对值判据**：白炉读数应为 **1.0**（`HE_FURNACE=1` + `HE_FURNACE_PROBE=1`）；
+      现状 **1.7998**（能量 +80%），原因即缺口 (A) 的归一化之外加法项，待 0.4/0.5 与 Wave 1 修复后应收敛到 1.0。
 - [ ] **Low/Medium/High/Ultra 四档 + 单源/多源组合（IBL / DDGI / SSGI / RTGI 任意权重）比值不变** —— 即归一化不变量成立。
 - [ ] 单源配置画面与改造前**逐像素级一致**（回归截图对比）。
 - [ ] `06.GILab` 各档位冒烟 + 用户实测确认后才进入 Wave 1。
