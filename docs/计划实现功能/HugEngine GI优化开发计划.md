@@ -311,6 +311,22 @@ cmake --build D:\Source\HugEngine\Build --config Debug --target 06.GILab -j 8
 | `AdvanceFrame()` 挂在 `CommandList::Begin()`，一帧内多命令列表推进多次 | 仪器化：推进 141 次 / 最大帧号 140 ⇒ 严格一帧一次 | ❌ |
 | 四类违规是"启动阶段一次性" | 关闭去重后真实计数 **438 / 146 / 145**（每帧复发） | ❌（去重假象） |
 
+**第二轮尝试与实测（同一"先量基线 → 改 → 用真实计数验证"流程）**：
+
+| 尝试 | 思路 | 实测结果 | 结论 |
+|---|---|---|---|
+| 让深度 pass 结束时保持 `ATTACHMENT`（改 `VulkanPipeline.cpp` 两处 `finalLayout`），并把 `CSM`/`PointShadow` 的采样 barrier `srcState` 改成 `DepthStencilWrite` | 让现实与模型（"写深度=ATTACHMENT"）一致 | barrier 3.0→2.0/帧，但 **renderPass 1.0→2.0/帧（变差）**，且**新增** `VUID-vkCmdDraw-None-09600` 1/帧（采样方期望 READ_ONLY） | ❌ **方向相反，已回退**。正确方向是"现实保持 READ_ONLY，模型学会它" |
+| 把 `RectLight`/`SpotShadow` 采样 barrier 的 `srcState` 由 `DepthStencilWrite` 改为 `DepthStencilRead` | 与 `CSM`/`PointShadow` 保持一致 | 计数**无变化** | 🟡 语义上更自洽，保留；但不是本因 |
+| 把 GBuffer depth 采样 barrier（`DeferredPipeline_FrameGraph.cpp:700`）的 `srcState` 由 `DepthStencilWrite` 改为 `DepthStencilRead` | GBuffer 的 RP 结束时深度就是 READ_ONLY，声明 Write 与现实不符 | **barrier 3.0 → 2.0/帧**（每帧少 1 次） | ✅ **有效** |
+| 纹理创建日志增加 `image=<handle>` | 与校验层报的 `VkImage 0x…` 对账 | 定位出问题 image 只有**两个**：均为 **1920x1061、aspect=2** 的全屏深度图（GBuffer depth 与 Lighting HDR depth） | ✅ 保留（长期可用的定位手段） |
+
+**当前残留（每帧 1 次 × 2 个深度图）的机制推断**：RenderGraph 对**导入纹理**在每帧开始时假设布局为
+`Undefined`，于是"首次使用不发射 barrier"——但这两个深度图在**上一帧结束时实际停在 `READ_ONLY`**。
+当本帧首次使用是"写深度"时：模型记为 `ATTACHMENT` 且不发 barrier ⇒ 既触发
+`render pass initialLayout-00900`（1/帧），也触发紧随其后的 `barrier oldLayout-01197`（1/帧）。
+⇒ 正解即计划中的 **"跨帧真实布局"** 一项：需要 RHI 记录每个 `VkImage` 的当前布局（barrier 与
+render pass 的 initial/final 都更新），并让图的导入资源初始化查询它，而不是假设 `Undefined`。
+
 **下一步（Wave 0.7 收尾）**：
 
 - **RHI 布局追踪**（治 438 + 146）：给 `VulkanTexture` 记录**当前布局**（每次 barrier、每次 render pass 的
