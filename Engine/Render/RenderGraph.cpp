@@ -1,6 +1,7 @@
 #include "RenderGraph.h"
 #include "Profiler/ProfilerManager.h"
 #include "Core/Log.h"
+#include "RHI/TextureLayoutTracker.h"   // 查询导入纹理的真实布局（跨帧持久资源）
 
 #include <algorithm>
 #include <unordered_set>
@@ -216,9 +217,27 @@ void RenderGraph::DeriveBarriers() {
             auto& cur = m_ResourceStates[h];
             rhi::ResourceState needed = AccessToState(access, cur.isDepth);
             if (cur.layout == rhi::ResourceState::Undefined) {
-                // 首次使用：从 Undefined 过渡，不需要显式 Barrier
-                cur.layout = needed;
-                return;
+                // ── 本帧首次使用 ──
+                // 导入纹理是**跨帧持久**资源（GBuffer depth、Lighting HDR depth 等）：
+                // 它们上一帧结束时停在某个布局（引擎的 render pass 会把深度留在
+                // DEPTH_STENCIL_READ_ONLY），此时若直接假设 Undefined 并跳过 barrier，
+                // 真实布局与本帧记录就会分歧 —— 实测每帧各 1 次
+                // VUID-...-initialLayout-00900 与 VUID-...-oldLayout-01197。
+                // 因此先向 RHI 查询该视图记录的真实布局，只有真正没记录过（新资源）才按
+                // Undefined 处理。
+                rhi::ResourceState tracked;
+                if (m_ImportedTextures.count(h)) {
+                    rhi::IRHITexture* tex = m_ImportedTextures[h];
+                    if (tex && rhi::QueryTrackedTextureLayout(tex->GetNativeHandle(), tracked) &&
+                        tracked != rhi::ResourceState::Undefined) {
+                        cur.layout = tracked;   // 用真实布局继续走下面的"需要 Barrier"分支
+                    }
+                }
+                if (cur.layout == rhi::ResourceState::Undefined) {
+                    // 真正首次使用：从 Undefined 过渡，不需要显式 Barrier
+                    cur.layout = needed;
+                    return;
+                }
             }
             if (cur.layout != needed) {
                 // 需要 Barrier

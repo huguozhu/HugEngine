@@ -10,6 +10,7 @@
 #include "RHI/CommandList.h"
 #include "RHI/Buffer.h"
 #include "RHI/Shader.h"
+#include "RHI/TextureLayoutTracker.h"   // 纹理布局追踪（跨帧真实布局，供 RenderGraph 查询）
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include "Core/CVar.h"
@@ -753,6 +754,10 @@ void VulkanCommandList::PipelineBarrier(
         0, vkTex->GetMipLevels(),
         0, vkTex->GetArrayLayers()
     };
+
+    // 记录该图转换后的真实布局：RenderGraph 对导入纹理（跨帧持久资源）在每帧开始时
+    // 需要知道真实布局，否则会假设 Undefined 而漏发 barrier（详见 TextureLayoutTracker.h）
+    TrackTextureLayout(reinterpret_cast<void*>(vkTex->GetImageView()), dstState);
 
     vkCmdPipelineBarrier(m_CmdBuffers[m_FrameIndex],
         ToVkPipelineStageFlags(srcStage), ToVkPipelineStageFlags(dstStage),

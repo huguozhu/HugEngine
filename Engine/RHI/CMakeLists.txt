@@ -14,6 +14,8 @@ set(RHI_SOURCES
     RHI/QueryPool.h
     RHI/MeshShader.h
     RHI/RayTracing.h
+    RHI/TextureLayoutTracker.h
+    RHI/TextureLayoutTracker.cpp
     RHI/RHIBase.cpp
     Vulkan/VulkanDevice.h
     Vulkan/VulkanSwapChain.h

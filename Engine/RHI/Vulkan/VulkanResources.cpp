@@ -18,6 +18,7 @@
 #include "VulkanResources.h"
 #include "VulkanConverters.h"
 #include "VulkanTextureLiveness.h"   // 纹理存活登记（诊断野指针，见该头文件说明）
+#include "RHI/TextureLayoutTracker.h"   // 布局追踪清理（纹理销毁时移除记录）
 
 namespace he::rhi {
 
@@ -347,6 +348,9 @@ VulkanTexture::VulkanTexture(VmaAllocator allocator, VkCommandPool cmdPool, VkQu
 VulkanTexture::~VulkanTexture() {
     // 先注销存活登记：此后任何仍持有本指针的使用者都应被判定为野指针
     MarkTextureDead(this);
+
+    // 同时清理布局追踪记录（视图句柄会被销毁，避免复用导致误判）
+    ForgetTrackedTextureLayout(reinterpret_cast<void*>(m_ImageView));
 
     for (auto& fv : m_FaceViews)
         if (fv) vkDestroyImageView(m_Device, fv, nullptr);
