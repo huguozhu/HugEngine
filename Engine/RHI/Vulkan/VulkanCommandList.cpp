@@ -18,6 +18,7 @@
 #include <vulkan/vulkan.h>
 
 #include <algorithm>
+#include <cstdlib>   // std::getenv（HE_TRACE_FB 帧缓冲追踪开关）
 #include <vector>
 #include <cstring>
 #include <cstdio>
@@ -135,14 +136,37 @@ VulkanCommandList::VulkanCommandList(VkDevice device, u32 queueFamily,
 }
 
 VulkanCommandList::~VulkanCommandList() {
-    // 等待 GPU 完成所有工作，确保延迟销毁队列中的资源可以安全释放
+    // 等待 GPU 完成所有工作，确保本对象自己的资源（池/栅栏）可以安全释放
     vkDeviceWaitIdle(m_Device);
 
-    // 清空延迟销毁队列中的 Framebuffer（由 VulkanDevice 统一管理）
-    if (m_VulkanDevice) {
-        m_VulkanDevice->GetDeferredDestroy().FlushAll();
-    }
+    // ── 注意：**不要**在这里清空设备级的延迟销毁队列 ──
+    //
+    // 曾经这里调用 GetDeferredDestroy().FlushAll()，实测造成启动期 110 次校验错误：
+    // RenderGraph::ExecuteWithAsyncCompute 每帧创建一个**临时** Compute 命令列表
+    // （device->CreateCommandList(QueueType::Compute)），它在帧中途析构时即执行到这里——
+    // 而此刻主命令缓冲仍在录制、且已绑定本帧离屏 pass 创建并"待延迟销毁"的 framebuffer。
+    // FlushAll() 会把它们立即销毁（HE_TRACE_FB 实测 delay=0 的同帧销毁），于是校验层报
+    // "vkCmdBeginRenderPass(): ... command buffer ... was in an invalid state ...
+    //  VkFramebuffer ... was destroyed"。
+    //
+    // 该队列由 VulkanDevice 拥有，`VulkanDevice::Shutdown()` 已在 vkDeviceWaitIdle 之后
+    // 统一 FlushAll()，因此这里无需（也不应）代它清理。
+    //
+    // 另注：本析构里的 vkDeviceWaitIdle 对"每帧创建的临时命令列表"意味着每帧一次 GPU 停顿，
+    // 属独立的性能问题，另行处理（不在本次修复范围）。
 
+    // 【诊断】析构里是**立即销毁**（未走延迟队列）——若在校验层报"FB 被销毁"时命中这里，
+    // 说明存在"命令列表析构早于命令缓冲完成"的生命周期问题。见 HE_TRACE_FB。
+    if (std::getenv("HE_TRACE_FB")) {
+        for (auto& fb : m_Framebuffers) {
+            if (fb) HE_CORE_WARN("[FB] {:<20} handle={} frame={}", "destroy(dtor-now)", (void*)fb,
+                                 m_VulkanDevice ? m_VulkanDevice->GetCurrentFrame() : 0);
+        }
+        if (m_CurrentOffscreenFB) {
+            HE_CORE_WARN("[FB] {:<20} handle={} frame={}", "destroy(dtor-now)", (void*)m_CurrentOffscreenFB,
+                         m_VulkanDevice ? m_VulkanDevice->GetCurrentFrame() : 0);
+        }
+    }
     for (auto& fb : m_Framebuffers) vkDestroyFramebuffer(m_Device, fb, nullptr);
     if (m_CurrentOffscreenFB) { vkDestroyFramebuffer(m_Device, m_CurrentOffscreenFB, nullptr); }
     if (m_LoadRenderPass) { vkDestroyRenderPass(m_Device, m_LoadRenderPass, nullptr); }
@@ -217,7 +241,16 @@ void VulkanCommandList::Begin() {
         for (VkFramebuffer fb : m_Framebuffers) {
             if (fb && queue) {
                 VkDevice dev = m_Device;
-                queue->Enqueue([dev, fb]() {
+                VulkanDevice* vd = m_VulkanDevice;
+                const u64 enq = vd ? vd->GetCurrentFrame() : 0;
+                queue->Enqueue([dev, fb, vd, enq]() {
+                    // 【诊断】切换 FE 追踪：见 VulkanCommandList_RenderPass.cpp 顶部说明
+                    if (std::getenv("HE_TRACE_FB")) {
+                        HE_CORE_WARN("[FB] {:<20} handle={} enqueueFrame={} execFrame={} delay={}",
+                                     "destroy(swap-rebuild)", (void*)fb, enq,
+                                     vd ? vd->GetCurrentFrame() : 0,
+                                     (vd ? vd->GetCurrentFrame() : 0) - enq);
+                    }
                     vkDestroyFramebuffer(dev, fb, nullptr);
                 });
             }

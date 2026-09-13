@@ -11,7 +11,33 @@
 #include "VulkanCommandList.h"
 #include "VulkanDevice.h"
 
+#include <cstdlib>
+
 namespace he::rhi {
+
+// ============================================================
+// Framebuffer 创建/销毁追踪（诊断，默认关闭）
+//
+// 用途：校验层报 "command buffer ... was in an invalid state ... VkFramebuffer ...
+// was destroyed" 时，需要知道**这些句柄是谁、何时**创建与销毁的，才能对账定位
+// （06.GILab 启动阶段实测 110 次，其中一次列出 20 个句柄）。
+// 打开方式：环境变量 HE_TRACE_FB=1（首次调用时读取，运行时零开销）。
+// enqueueFrame / execFrame 两个帧号用来暴露"入队到真正销毁之间隔了几帧"。
+// ============================================================
+static void TraceFramebuffer(const char* action, VkFramebuffer fb,
+                             u64 enqueueFrame, u64 execFrame) {
+    static const bool s_Enabled = (std::getenv("HE_TRACE_FB") != nullptr);
+    if (!s_Enabled) return;
+    if (execFrame == UINT64_MAX) {
+        HE_CORE_WARN("[FB] {:<20} handle={} frame={}", action, (void*)fb, enqueueFrame);
+    } else {
+        HE_CORE_WARN("[FB] {:<20} handle={} enqueueFrame={} execFrame={} delay={}",
+                     action, (void*)fb, enqueueFrame, execFrame, execFrame - enqueueFrame);
+    }
+}
+
+/// 当前帧号（无设备时返回 0）
+static u64 CurrentFrameOf(VulkanDevice* dev) { return dev ? dev->GetCurrentFrame() : 0; }
 
 // ============================================================
 // BeginRenderPass — SwapChain 渲染目标
@@ -98,7 +124,10 @@ void VulkanCommandList::BeginRenderPass(u32 colorCount, Format, Format depthForm
             for (VkFramebuffer fb : m_Framebuffers) {
                 if (fb && queue) {
                     VkDevice dev = m_Device;
-                    queue->Enqueue([dev, fb]() {
+                    VulkanDevice* vd = m_VulkanDevice;
+                    const u64 enq = CurrentFrameOf(vd);
+                    queue->Enqueue([dev, fb, vd, enq]() {
+                        TraceFramebuffer("destroy(swap-rebuild)", fb, enq, CurrentFrameOf(vd));
                         vkDestroyFramebuffer(dev, fb, nullptr);
                     });
                 }
@@ -127,6 +156,7 @@ void VulkanCommandList::BeginRenderPass(u32 colorCount, Format, Format depthForm
             fbInfo.layers          = 1;
 
             vkCreateFramebuffer(m_Device, &fbInfo, nullptr, &m_Framebuffers[i]);
+            TraceFramebuffer("create(swapchain)", m_Framebuffers[i], CurrentFrameOf(m_VulkanDevice), UINT64_MAX);
         }
     }
 
@@ -202,6 +232,7 @@ void VulkanCommandList::BeginOffscreenPass(
     fbInfo.height          = height;
     fbInfo.layers          = 1;
     vkCreateFramebuffer(m_Device, &fbInfo, nullptr, &offscreenFB);
+    TraceFramebuffer("create(offscreen)", offscreenFB, CurrentFrameOf(m_VulkanDevice), UINT64_MAX);
     m_CurrentOffscreenFB = offscreenFB;
 
     VkClearValue vkClearValues[2]{};
@@ -274,6 +305,7 @@ void VulkanCommandList::BeginOffscreenPassMRT(
     fbInfo.height          = height;
     fbInfo.layers          = 1;
     vkCreateFramebuffer(m_Device, &fbInfo, nullptr, &offscreenFB);
+    TraceFramebuffer("create(offscreen)", offscreenFB, CurrentFrameOf(m_VulkanDevice), UINT64_MAX);
     m_CurrentOffscreenFB = offscreenFB;
 
     // 清除值（最多 7 个颜色 + 1 个深度，共 8 个）
@@ -326,7 +358,10 @@ void VulkanCommandList::EndOffscreenPass() {
         VkFramebuffer fb = m_CurrentOffscreenFB;
         auto* queue = m_VulkanDevice ? &m_VulkanDevice->GetDeferredDestroy() : nullptr;
         if (queue) {
-            queue->Enqueue([dev, fb]() {
+            VulkanDevice* vd = m_VulkanDevice;
+            const u64 enq = CurrentFrameOf(vd);
+            queue->Enqueue([dev, fb, vd, enq]() {
+                TraceFramebuffer("destroy(offscreen)", fb, enq, CurrentFrameOf(vd));
                 vkDestroyFramebuffer(dev, fb, nullptr);
             });
         }
