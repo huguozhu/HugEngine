@@ -79,6 +79,10 @@ public:
     void CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst,
                     u64 size, u64 srcOffset, u64 dstOffset) override;
     void CopyTextureToTexture(IRHITexture* src, IRHITexture* dst) override;
+    /// 纹理 → 缓冲 读回（供白炉测试等结果校验；内部处理布局转换，见接口注释）
+    void CopyTextureToBuffer(IRHITexture* src, IRHIBuffer* dst,
+                             u32 x, u32 y, u32 width, u32 height,
+                             u64 bufferOffset) override;
     void ClearDepthStencil(IRHITexture* texture, float depth) override;
 
     // 跨队列所有权转移

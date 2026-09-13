@@ -158,6 +158,19 @@ public:
     // 内部自动处理 TRANSFER_SRC / TRANSFER_DST 布局转换
     virtual void CopyTextureToTexture(IRHITexture* src, IRHITexture* dst) = 0;
 
+    // 纹理 → 缓冲 读回（GPU 端拷贝指定像素区域）
+    //
+    // 用途：结果校验类功能（例如 GI 白炉测试需要读回指定像素的亮度做数值断言）。
+    // 语义：内部先把源纹理转到 TRANSFER_SRC、拷完再转回"可采样"布局；
+    //       dst 需按**紧凑**布局容纳 width*height 个像素（行距 = width × 纹素字节数），
+    //       并把 bufferOffset 作为该次拷贝在缓冲内的起始偏移（便于一次读回多个像素）。
+    // 同步：调用方需自行保证 GPU 已完成（例如下一帧等待帧栅栏后再 Map）。
+    // 默认空实现：后端不支持时安全跳过。
+    virtual void CopyTextureToBuffer(IRHITexture* /*src*/, IRHIBuffer* /*dst*/,
+                                     u32 /*x*/ = 0, u32 /*y*/ = 0,
+                                     u32 /*width*/ = 0, u32 /*height*/ = 0,
+                                     u64 /*bufferOffset*/ = 0) {}
+
     // 深度/模板纹理清除（GPU 端，如每帧把粒子深度附件清成远平面 1.0）
     // 内部自动处理 UNDEFINED → TRANSFER_DST → DEPTH_STENCIL_ATTACHMENT 布局转换。
     // 默认空实现：后端不支持时安全跳过。

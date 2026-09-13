@@ -639,6 +639,73 @@ void VulkanCommandList::CopyTextureToTexture(IRHITexture* src, IRHITexture* dst)
 }
 
 // ============================================================
+// CopyTextureToBuffer — 纹理 → 缓冲 读回
+//
+// 供"结果校验"类功能使用（例如 GI 白炉测试要读回指定像素亮度做数值断言）。
+// 布局流程：当前真实布局 → TRANSFER_SRC → 拷贝 → 还原为 SHADER_READ_ONLY。
+// 当前布局优先取追踪器记录（跨帧持久纹理的真实布局），没记录过才按"被采样"假设。
+// ============================================================
+void VulkanCommandList::CopyTextureToBuffer(IRHITexture* src, IRHIBuffer* dst,
+                                            u32 x, u32 y, u32 width, u32 height,
+                                            u64 bufferOffset) {
+    if (!src || !dst) return;
+    auto* vkTex = static_cast<VulkanTexture*>(src);
+    auto* vkBuf = static_cast<VulkanBuffer*>(dst);
+    if (!vkTex->GetImage()) return;
+
+    const u32 w = (width  == 0) ? vkTex->GetWidth()  : width;
+    const u32 h = (height == 0) ? vkTex->GetHeight() : height;
+
+    void* view = reinterpret_cast<void*>(vkTex->GetImageView());
+
+    // 源纹理当前布局：优先用追踪到的真实布局
+    VkImageLayout oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    rhi::ResourceState tracked;
+    if (QueryTrackedTextureLayout(view, tracked)) {
+        VkImageLayout mapped = ToVkImageLayout(tracked);
+        if (mapped != VK_IMAGE_LAYOUT_UNDEFINED) oldLayout = mapped;
+    }
+
+    VkImageMemoryBarrier pre{};
+    pre.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    pre.srcAccessMask       = VK_ACCESS_MEMORY_READ_BIT;
+    pre.dstAccessMask       = VK_ACCESS_TRANSFER_READ_BIT;
+    pre.oldLayout           = oldLayout;
+    pre.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    pre.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    pre.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    pre.image               = vkTex->GetImage();
+    pre.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+    vkCmdPipelineBarrier(m_CmdBuffers[m_FrameIndex],
+        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &pre);
+
+    VkBufferImageCopy region{};
+    region.bufferOffset      = bufferOffset;
+    region.bufferRowLength   = 0;   // 0 = 紧凑排布（行距 = imageExtent.width × 纹素字节数）
+    region.bufferImageHeight = 0;
+    region.imageSubresource  = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    region.imageOffset       = { static_cast<int32_t>(x), static_cast<int32_t>(y), 0 };
+    region.imageExtent       = { w, h, 1 };
+
+    vkCmdCopyImageToBuffer(m_CmdBuffers[m_FrameIndex], vkTex->GetImage(),
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, vkBuf->GetHandle(), 1, &region);
+
+    // 还原为可采样布局，并同步追踪器（后续 pass 采样/再次读回都依赖它）
+    VkImageMemoryBarrier post = pre;
+    post.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    post.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    post.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    post.newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    vkCmdPipelineBarrier(m_CmdBuffers[m_FrameIndex],
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &post);
+
+    TrackTextureLayout(view, rhi::ResourceState::ShaderResource);
+}
+
+// ============================================================
 // ClearDepthStencil — 清除深度/模板纹理
 // 布局流程：UNDEFINED → TRANSFER_DST（写入确定值）→ DEPTH_STENCIL_ATTACHMENT
 // 供粒子 Pass 等需要每帧重置深度附件内容的场景使用

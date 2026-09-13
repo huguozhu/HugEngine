@@ -91,6 +91,8 @@ public:
     MotionBlurPass& GetMotionBlur() { return m_PostProcess.GetMotionBlur(); }
     SSAO&           GetSSAO()       { return m_SSAO; }
     ProfilerManager&    GetProfiler()      { return m_Profiler; }
+    /// Lighting 通道（暴露 HDR 目标等，供结果校验类功能读取，如白炉测试探针）
+    LightingPass&       GetLighting()      { return m_Lighting; }
     // RT 基础设施访问（供 PathTracingPipeline 共享同一份 TLAS，避免重复内存）
     RTPass*             GetRTPass()        { return m_RTPass.get(); }
     ProfilerPanel&      GetProfilerPanel() { return m_ProfilerPanel; }
