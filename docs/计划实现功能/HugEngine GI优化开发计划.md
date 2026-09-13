@@ -327,6 +327,20 @@ cmake --build D:\Source\HugEngine\Build --config Debug --target 06.GILab -j 8
 ⇒ 正解即计划中的 **"跨帧真实布局"** 一项：需要 RHI 记录每个 `VkImage` 的当前布局（barrier 与
 render pass 的 initial/final 都更新），并让图的导入资源初始化查询它，而不是假设 `Undefined`。
 
+**第三轮：跨帧真实布局追踪（已实现，但实测尚未生效——原因已查明）**
+
+- 新增 `RHI/TextureLayoutTracker.{h,cpp}`：按**纹理视图句柄**记录每个图的当前布局；
+  barrier 路径写入、纹理销毁时清理；`RenderGraph::DeriveBarriers` 在"本帧首次使用"时查询它来替代 `Undefined` 假设。
+- **实测无变化**（bar 仍 2/帧、rp 仍 1/帧）⇒ 说明该路径没被命中。
+- **原因已查明（重要）**：`gbDepth` **不是**通过 `rg.ImportTexture()` 注册的，而是 `gbDepth = gb.depth`
+  （来自 GBuffer 上下文里预先注册的句柄），因此 seeding 的判断 `m_ImportedTextures.count(h)` 对它**不成立**；
+  `HDR_C` 才是 `ImportTexture` 注册的。⇒ 下一步应把 seeding 条件从"是否在 imported 表里"改为
+  **直接按句柄查询追踪器**（对图的持久资源一律查询），并为 GBuffer 上下文这类预注册资源建立同样的登记。
+- **另一条强线索**：`DeferredPipeline_FrameGraph.cpp:183-184` 为了让 Shadow 先于 GB_Clear 执行，
+  给 `gbDepth` 声明了**假的 WAW 写**（`shadowWrites.push_back(RG_WRITE(gbDepth))`）——该 pass 并不真的写深度。
+  这会让布局模型在一个"未被真实写入"的图上推进状态，是残留 barrier 报错的重要嫌疑。
+  修法方向：把假依赖改为真实的执行顺序约束（图内显式边），而不是借用一个写依赖。
+
 **下一步（Wave 0.7 收尾）**：
 
 - **RHI 布局追踪**（治 438 + 146）：给 `VulkanTexture` 记录**当前布局**（每次 barrier、每次 render pass 的
