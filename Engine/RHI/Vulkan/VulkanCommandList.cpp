@@ -749,6 +749,22 @@ void VulkanCommandList::PipelineBarrier(
     };
     imageBarrier.oldLayout = fixLayout(srcState);
     imageBarrier.newLayout = fixLayout(dstState);
+
+    // ── 用「追踪到的真实布局」纠正 oldLayout ──
+    // 调用方声明的 srcState 可能与图片的真实布局不符（实测 Lighting 与 TAA_Resolve 处
+    // 每帧各触发一次 VUID-VkImageMemoryBarrier-oldLayout-01197）。既然 RHI 自己记录了
+    // 每个图的真实布局（见 RHI/TextureLayoutTracker.h），就在这里以真实布局为准，
+    // 使 barrier 永远合法；未记录过（新资源）时才回退到调用方声明。
+    {
+        rhi::ResourceState trackedState;
+        void* view = reinterpret_cast<void*>(vkTex->GetImageView());
+        if (QueryTrackedTextureLayout(view, trackedState)) {
+            const VkImageLayout trackedLayout = fixLayout(trackedState);
+            if (trackedLayout != imageBarrier.oldLayout) {
+                imageBarrier.oldLayout = trackedLayout;
+            }
+        }
+    }
     imageBarrier.subresourceRange = {
         aspect,
         0, vkTex->GetMipLevels(),

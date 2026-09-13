@@ -3,6 +3,8 @@
 #include "Core/Log.h"
 #include "RHI/TextureLayoutTracker.h"   // 查询导入纹理的真实布局（跨帧持久资源）
 
+#include <cstdlib>   // std::getenv（HE_TRACE_PASSES 诊断开关）
+
 #include <algorithm>
 #include <unordered_set>
 
@@ -547,6 +549,9 @@ void RenderGraph::ExecuteWithAsyncCompute(rhi::IRHICommandList* mainCmd,
         }
 
         if (m_Profiler) m_Profiler->BeginPass(computeCmd.get(), passIdx, pass->name);
+        // 【诊断】HE_TRACE_PASSES=1 时打印每个 pass 的开始：把 pass 名与校验层报错在时间上对齐，
+        // 用于定位"是哪个 pass 触发了布局类校验错误"（见开发计划 §1.3.4）
+        if (std::getenv("HE_TRACE_PASSES")) HE_CORE_WARN("[PASS] {}", pass->name);
         if (pass->execute) pass->execute(computeCmd.get());
         if (m_Profiler) m_Profiler->EndPass(computeCmd.get(), passIdx);
 
@@ -587,6 +592,8 @@ void RenderGraph::ExecuteWithAsyncCompute(rhi::IRHICommandList* mainCmd,
         }
 
         if (m_Profiler) m_Profiler->BeginPass(mainCmd, passIdx, pass->name);
+        // 【诊断】HE_TRACE_PASSES=1：打印 pass 开始，用于与校验层报错对齐定位（见 §1.3.4）
+        if (std::getenv("HE_TRACE_PASSES")) HE_CORE_WARN("[PASS] {}", pass->name);
         if (pass->execute) pass->execute(mainCmd);
         if (m_Profiler) m_Profiler->EndPass(mainCmd, passIdx);
         mainCmd->EndDebugLabel();
