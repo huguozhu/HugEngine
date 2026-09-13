@@ -243,9 +243,11 @@ cmake --build D:\Source\HugEngine\Build --config Debug --target 06.GILab -j 8
 | `vkCmdBeginRenderPass ... You cannot start a render pass`（附件布局不符） | 10 | **10** |
 | `vkAcquireNextImageKHR ... Semaphore must not have any pending operations` | 10 | **10** |
 
-三次运行数字完全相同 → 这些是**确定性、周期性**发生的问题（约每 N 帧一轮，每轮 1 barrier + 1 renderPass + 1 semaphore + 11 invalidState），
-与启动 churn 无关，需单独定位（见 Wave 0.7）。它们属于"命令缓冲引用的对象在提交完成前被销毁"这一类，
-是**长期运行稳定性与 GPU 同步正确性**的隐患，也让偶发崩溃持续可行。
+三次运行数字完全相同 → 与启动 churn 无关，需单独定位（见 Wave 0.7 与 §1.3.4）。
+⚠️ **判断更正**：这里的"确定性"成立，但当时推论的"**周期性**（约每 N 帧一轮）**是错的**——
+后续用 8 秒与 25 秒两种时长实测，计数完全相同（110/10/10/10），且时间戳全部集中在
+**约 20 毫秒的启动窗口内**，其后 530 次帧记录零违规 ⇒ 实为**启动阶段（首帧附近）的一次性问题**。
+它仍属于"命令缓冲引用的对象在提交完成前被销毁"这一类，是需要修的 GPU 同步正确性问题。
 
 #### 1.3.3 Wave 0.1 当前状态（诚实口径）
 
@@ -256,6 +258,49 @@ cmake --build D:\Source\HugEngine\Build --config Debug --target 06.GILab -j 8
 - **崩溃处理器（Wave 0.8）已完成并自检通过**：下次偶发崩溃会直接产出"函数名 + 源文件:行号"的调用栈与 minidump
   （见 §二 的 0.8 验收项），届时可一步定位根因，无需再靠偏移反查。
 - 另一条更有把握的路径：**修掉 §1.3.2③ 的周期性校验违规**（确定性、可验证，见 §二 Wave 0.7）。
+
+#### 1.3.4 Wave 0.7 实测进展（启动阶段一次性违规 · 修正"周期性"判断）
+
+> **判断更正**：此前（§1.3.2③）把四类校验违规记为"确定性、**周期性**（约每 N 帧一轮）"。
+> 后续用两种时长实测（8 秒 / 25 秒，后者最大帧号 541–578）发现计数**完全相同**（110 / 10 / 10 / 10），
+> 且时间戳全部落在 **约 20 毫秒的启动窗口内**（`19:18:32.42`–`.44`），其后 530 次帧记录中**零违规**。
+> 正确结论：**这是启动阶段（首帧附近）的一次性问题，不是每帧复发**。
+
+| 违规（含 VUID） | 启动阶段次数 | 已定位的成因 | 状态 |
+|---|---|---|---|
+| `VUID-VkImageMemoryBarrier-oldLayout-01197`：barrier 声明 `oldLayout=DEPTH_STENCIL_ATTACHMENT` 而实际为 `DEPTH_STENCIL_READ_ONLY` | 10 | RenderGraph 的布局模型与 render pass 的**实际** `finalLayout` 不一致（引擎把深度附件声明为"写完即可采样"的 READ_ONLY） | 🟡 已修模型（见下），但启动首帧仍缺一次 `READ_ONLY→ATTACHMENT` 的纠正 barrier |
+| `VUID-vkCmdBeginRenderPass-initialLayout-00900`：深度附件声明 `initialLayout=DEPTH_STENCIL_ATTACHMENT` 而实际为 `SHADER_READ_ONLY` | 10 | 采样深度贴图走 `ResourceState::ShaderResource` → 得到**颜色布局** `SHADER_READ_ONLY_OPTIMAL`（`CSMTechnique.cpp:152`、`PointShadowTechnique.cpp:133`） | ✅ 已修（RHI 收口）：告警措辞已从 `SHADER_READ_ONLY_OPTIMAL` 变为 `DEPTH_STENCIL_READ_ONLY_OPTIMAL`，深度图不再被套颜色布局 |
+| `VUID-vkAcquireNextImageKHR-semaphore-01779`：acquire 信号量有未完成操作 | 10 | 与上述启动期状态错乱同源（级联），未单独定位 | ⏳ |
+| `command buffer ... was in an invalid state ... VkFramebuffer ... was destroyed`（110 次，其中一次列出 **20 个** FB） | 110 | 启动窗口内有 framebuffer 在命令缓冲仍引用时被销毁；**不在延迟销毁队列的时间控制之下**（把队列槽位 3→6 后计数不变）→ 存在**绕过队列的销毁路径**，需仪器化定位 | ⏳ |
+
+**本轮已实施的修改（均已编译通过、实测无回归）**：1. `DeferredDestructionQueue`：槽位 3 → **2 × kMaxFramesInFlight**（延迟销毁必须大于在飞帧数并留余量）。
+   实测对上述 4 类计数**无影响**——说明那 110 次并非队列路径所致，但它仍是更保守的安全边界。
+2. `VulkanCommandList::PipelineBarrier`：`fixLayout` 补上 **`SHADER_READ_ONLY` → `DEPTH_STENCIL_READ_ONLY`** 的重映射
+   （此前只拦了 `COLOR_ATTACHMENT`）→ 位置 ② 的告警内容已改善。
+3. `RenderGraph::DeriveBarriers`：写深度资源之后，把追踪布局修正为 `DepthStencilRead`
+   （与 render pass 实际 `finalLayout` 一致），使后续 barrier 的 `oldLayout` 不再凭空声称 `ATTACHMENT`。
+
+**已被实测否证的两个假说（记录以免重复走弯路）**：
+
+| 假说 | 实测证据 | 结论 |
+|---|---|---|
+| "队列槽位 3 对 3 帧在飞没有余量，导致同帧销毁" | 槽位 3 → 6 后，4 类计数**完全不变**（110/10/10/10） | ❌ 否证 |
+| "`AdvanceFrame()` 挂在 `CommandList::Begin()` 上，一帧内多个命令列表会把帧计数器/延迟销毁推进多次" | 仪器化统计：总推进 **141** 次、最大渲染帧号 **140** ⇒ **严格一帧一次**；启动阶段仅推进 1 次 | ❌ 否证（队列的帧语义是正确的） |
+
+⇒ 因此那 110 次 `invalidState` 对应的 20 个被销毁 framebuffer **既不是队列推进过快、也不是槽位不足**所致，
+下一步必须**仪器化销毁点本身**（在 3 个 FB 销毁 lambda 里打印句柄 + 当时的 frameId），与校验层列出的 20 个句柄对账，
+才能定位真正绕过/提前于预期时机的销毁路径。
+
+**下一步（下一轮 Wave 0.7 的入口）**：
+
+- **布局类（前两类）的正确收口**：在 RHI 里给 `VulkanTexture` 记录**当前布局**（由每次 barrier 与 render pass 的
+  initial/final 更新），`PipelineBarrier` 用**追踪到的真实布局**作为 `oldLayout`；并在 `BeginRenderPass`/`BeginOffscreenPass`
+  之前按需自动补一次 `→ 附件 initialLayout` 的纠正 barrier。这样启动首帧与跨帧的持久资源都不会再错。
+- **`invalidState`（110 次）**：给 3 个 FB 销毁点加带 `frameId` 与句柄的日志，与校验层列出的 20 个 FB 句柄对账，
+  找出绕过延迟销毁队列的销毁路径。
+- 判据不变：四类违规在完整启动 + 稳定运行窗口内**归零**。
+
+---
 
 ### 1.4 ⚠️ 文档未记录的缺口（本次审计新发现，是后续计划的真正起点）
 
@@ -296,7 +341,7 @@ cmake --build D:\Source\HugEngine\Build --config Debug --target 06.GILab -j 8
 | **0.4 IBL 归位** | `DeferredLighting.frag.slang:250-259` + `DeferredPipeline_FrameGraph.cpp:762-776` | 把 IBL 漫反射环境项**移入 diffuse 层栈归一化**（作为低频 probe/env 源）；层栈 `IBL` 权重真正生效；明确"DDGI 内部已含 IBL 回退"时二者的互斥或权重语义 |
 | **0.5 RSM 归位** | `DeferredLighting.frag.slang:261-284` | RSM 间接作为 diffuse 层栈的一个源参与归一化；去掉 `0.03` 魔法系数（或显式定义为 VPL 能量归一常数、纳入层栈权重）；面板 RSM 开关与 shader 路径同源 |
 | **0.6 `ddgiScale` 语义收敛** | `:342` + `GI_DDGI.h` | `debugScale` 只影响调试可视化路径，**合成路径恒 1.0**（或折算进层栈权重），消除能量守恒破坏项 |
-| **0.7 周期性校验违规（确定性，必现）** | `RenderingPass`/RHI 资源生命周期 + RenderGraph barrier | 实测每轮稳定出现：`command buffer … invalid state`（110 次/8 秒，因 framebuffer 被销毁）、`barrier oldLayout`（10）、`render pass 附件布局`（10）、`swapchain semaphore pending`（10），三次运行数字完全相同 ⇒ 确定性、周期性（§1.3.2③）。方向：① 命令缓冲引用的 framebuffer/texture **延迟到帧可复用后再销毁**（按 frame-in-flight 回收）；② RenderGraph 的布局模型要纳入 render pass 自身的 `finalLayout`（阴影贴图 `VulkanPipeline.cpp:203` 声明结束时为 `DEPTH_STENCIL_READ_ONLY`，而模型记为 `ATTACHMENT`）与跨帧真实布局（导入资源不能假设 `Undefined`）；③ 交换链信号量按 image 索引持有、避免复用未完成者 |
+| **0.7 启动阶段校验违规（确定性，一次性）** | `RenderingPass`/RHI 资源生命周期 + RenderGraph barrier | 实测**启动窗口约 20 ms 内**一次性出现：`command buffer … invalid state`（110 次，因 framebuffer 被销毁）、`barrier oldLayout`（10）、`render pass 附件布局`（10）、`swapchain semaphore pending`（10）；其后 530 帧零违规（详见 §1.3.4 与其中的 VUID 表）。**已修**：深度图的颜色布局重映射（`fixLayout`，告警措辞已改善）、RenderGraph 深度写后布局修正、延迟销毁槽位加余量。**待做**：① 给 `VulkanTexture` 记录当前布局并用真实布局作为 `oldLayout`，`BeginRenderPass` 前按需补纠正 barrier（治前两类与跨帧持久资源）；② 仪器化定位 110 次 `invalidState` 那条**绕过延迟销毁队列**的 FB 销毁路径 |
 | **0.8 崩溃处理器（诊断基建）** | `06.GILab/CrashHandler.{h,cpp}` | ✅ **已完成**：`SetUnhandledExceptionFilter` + `StackWalk64`/DbgHelp，崩溃时打印**函数名 + 源文件:行号**的完整调用栈，并写出 minidump；记录后返回 `EXCEPTION_CONTINUE_SEARCH`，**故意让 WER 继续记录 APPCRASH**，两种证据都不丢。自检方式：`HE_CRASH_TEST=1` 启动会在第 3 帧主动解引用空指针 |
 
 **验收**：
@@ -304,7 +349,9 @@ cmake --build D:\Source\HugEngine\Build --config Debug --target 06.GILab -j 8
 - [x] 启动期尺寸 churn 消除（`1920x1080` 纹理创建 26 → 0；§1.3.2②）。
 - [ ] **（0.1 门槛）** 连续 10 次冷启动零崩溃；白炉测试期间可长时间稳定运行。→ 崩溃点已定位到函数（§1.3.2①），
       防御守卫已加，但**根因未证明**，故此项**未通过**（当前连续干净 18 次，不足以在 1/40 概率下断言已修）。
-- [ ] **（0.7 门槛）** 上述 4 类周期性校验违规归零（这是确定性、可验证的硬判据，比偶发崩溃更适合作门槛）。
+- [ ] **（0.7 门槛）** 上述 4 类校验违规在"完整启动 + 稳定运行"窗口内**归零**
+      （110 / 10 / 10 / 10 → 0 / 0 / 0 / 0）——确定性、可量化的硬判据，比偶发崩溃更适合作门槛。
+      当前进展与已修/待修项见 §1.3.4。
 - [x] **（0.8）** 崩溃处理器已安装并自检通过——自检输出示例（`HE_CRASH_TEST=1` 主动崩溃）：
       `#0 06.GILab!main + 0x41C2 [06.GILab.cpp:724]` + 完整调用栈 + 9.7 MB minidump；
       同时 WER 仍记录 `APPCRASH 0xc0000005`（两种证据并存）。产物位置：崩溃日志
