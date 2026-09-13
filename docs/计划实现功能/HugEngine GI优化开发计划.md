@@ -354,6 +354,33 @@ render pass 的 initial/final 都更新），并让图的导入资源初始化�
   与引擎 render pass 的 initial/final 声明一致），并在 begin 前按需补一次 `→ ATTACHMENT` 的纠正 barrier
   （需要 视图→VkImage 的登记，因为 barrier 只能作用于 image 而非 view）。
 
+**第五轮：render pass 边界维护 + 交换链同步原语 —— **Wave 0.7 判据达成（四类违规全部归零）****
+
+- **render pass 边界维护布局**（治两类布局违规）：render pass 自身的 `initialLayout`/`finalLayout`
+  转变**不经过 barrier**，因此在 RHI 侧同步给追踪器（offscreen pass 开始时深度记 `ATTACHMENT`、
+  结束时记 `READ_ONLY`）；并新增 `EnsureDepthAttachmentLayout()`：开始 pass 前若真实布局不是
+  `ATTACHMENT` 就补一次纠正 barrier。为此新增**视图 → `VkImage` 登记**（`VulkanTexture` 构造时
+  同时持有两者）——barrier 只能作用于 image，而 render pass 附件是以 view 传入的。
+- **交换链同步原语多份化**（治信号量违规）：原先每帧复用**同一个** acquire / render-complete
+  信号量，上一帧的等待尚未完成就再次交给 acquire → `VUID-vkAcquireNextImageKHR-semaphore-01779`。
+  现改为：acquire 按**飞行帧槽位**各一份（配栅栏，复用前先等该槽位栅栏）；render-complete 按
+  **交换链图像**各一份（同一图像再次被 acquire 即蕴含上次 present 已完成）。
+
+**最终实测（关闭校验层重复消息上限；25 秒 / 504 帧 / 进程稳定存活）：**
+
+| 违规 | 最初（每帧） | 现在 |
+|---|---|---|
+| `command buffer … invalid state`（framebuffer 被同帧销毁） | 每帧复发 | **0** ✅ |
+| `VUID-VkImageMemoryBarrier-oldLayout-01197` | 3.0 | **0** ✅ |
+| `VUID-vkCmdBeginRenderPass-initialLayout-00900` | 1.0 | **0** ✅ |
+| `VUID-vkAcquireNextImageKHR-semaphore-01779` | 1.0 | **0** ✅ |
+| `[error]` 日志行 | 0 | **0** |
+
+残留告警均为**初始化期一次性**且与逐帧渲染路径无关（`descriptorBinding…UpdateAfterBind`、SPIR-V capability 等）。
+
+> **过程教训（值得单独记住）**：本轮第一次测量曾显示"0 违规"，但那次进程**只输出 0 行日志、根本没进入
+> 帧循环**（紧接预热进程被强杀后 1 秒启动的竞态）。**"提前退出 / 日志为空"必须先核实，不能当成好结果**。
+
 **下一步（Wave 0.7 收尾）**：
 
 - **RHI 布局追踪**（治 438 + 146）：给 `VulkanTexture` 记录**当前布局**（每次 barrier、每次 render pass 的
@@ -404,7 +431,7 @@ render pass 的 initial/final 都更新），并让图的导入资源初始化�
 | **0.4 IBL 归位** | `DeferredLighting.frag.slang:250-259` + `DeferredPipeline_FrameGraph.cpp:762-776` | 把 IBL 漫反射环境项**移入 diffuse 层栈归一化**（作为低频 probe/env 源）；层栈 `IBL` 权重真正生效；明确"DDGI 内部已含 IBL 回退"时二者的互斥或权重语义 |
 | **0.5 RSM 归位** | `DeferredLighting.frag.slang:261-284` | RSM 间接作为 diffuse 层栈的一个源参与归一化；去掉 `0.03` 魔法系数（或显式定义为 VPL 能量归一常数、纳入层栈权重）；面板 RSM 开关与 shader 路径同源 |
 | **0.6 `ddgiScale` 语义收敛** | `:342` + `GI_DDGI.h` | `debugScale` 只影响调试可视化路径，**合成路径恒 1.0**（或折算进层栈权重），消除能量守恒破坏项 |
-| **0.7 每帧校验违规** | `RenderingPass`/RHI 资源生命周期 + RenderGraph barrier + 交换链信号量 | 真实计数（关闭校验层去重后，12 秒 / 146 帧）：`invalidState` **0 ✅ 已修**（根因：`VulkanCommandList` 析构擅自清空设备级延迟销毁队列 → 同帧销毁主命令缓冲已绑定的 framebuffer，见 §1.3.4）；`barrier oldLayout` **438**、`render pass initialLayout` **146**、`swapchain semaphore pending` **145** —— 后三类每帧复发，**待做**：① RHI 侧布局追踪（`VulkanTexture` 记当前布局 + `Begin*Pass` 前补纠正 barrier）；② 交换链 acquire 信号量按 image 索引持有 |
+| **0.7 每帧校验违规** | RHI 资源生命周期 / 布局追踪 / 交换链同步 | ✅ **已达成判据**：真实计数（关闭校验去重）由 invalidState 每帧复发 + barrier 3.0/帧 + renderPass 1.0/帧 + semaphore 1.0/帧，全部降为 **0 / 0 / 0 / 0**（25 秒 / 504 帧）。三处根因：① 命令列表析构擅自清空设备级延迟销毁队列（同帧销毁 framebuffer）；② render pass 自身的 initial/final 布局转变未同步给布局追踪器（需在 pass 边界维护 + begin 前补纠正 barrier）；③ 交换链每帧复用同一个 acquire/render-complete 信号量。详见 §1.3.4 |
 | **0.8 崩溃处理器（诊断基建）** | `06.GILab/CrashHandler.{h,cpp}` | ✅ **已完成**：`SetUnhandledExceptionFilter` + `StackWalk64`/DbgHelp，崩溃时打印**函数名 + 源文件:行号**的完整调用栈，并写出 minidump；记录后返回 `EXCEPTION_CONTINUE_SEARCH`，**故意让 WER 继续记录 APPCRASH**，两种证据都不丢。自检方式：`HE_CRASH_TEST=1` 启动会在第 3 帧主动解引用空指针 |
 
 **验收**：
@@ -412,9 +439,9 @@ render pass 的 initial/final 都更新），并让图的导入资源初始化�
 - [x] 启动期尺寸 churn 消除（`1920x1080` 纹理创建 26 → 0；§1.3.2②）。
 - [ ] **（0.1 门槛）** 连续 10 次冷启动零崩溃；白炉测试期间可长时间稳定运行。→ 崩溃点已定位到函数（§1.3.2①），
       防御守卫已加，但**根因未证明**，故此项**未通过**（当前连续干净 18 次，不足以在 1/40 概率下断言已修）。
-- [ ] **（0.7 门槛）** 上述 4 类校验违规在"完整启动 + 稳定运行"窗口内**归零**
-      （110 / 10 / 10 / 10 → 0 / 0 / 0 / 0）——确定性、可量化的硬判据，比偶发崩溃更适合作门槛。
-      当前进展与已修/待修项见 §1.3.4。
+- [x] **（0.7 门槛）✅ 已达成** 四类校验违规在"完整启动 + 稳定运行"窗口内**归零**
+      （关闭校验层重复消息上限后的真实计数：原来 invalidState 每帧复发、barrier 3.0/帧、
+      renderPass 1.0/帧、semaphore 1.0/帧 → 现在 **0 / 0 / 0 / 0**，25 秒 / 504 帧实测）。过程与证据见 §1.3.4。
 - [x] **（0.8）** 崩溃处理器已安装并自检通过——自检输出示例（`HE_CRASH_TEST=1` 主动崩溃）：
       `#0 06.GILab!main + 0x41C2 [06.GILab.cpp:724]` + 完整调用栈 + 9.7 MB minidump；
       同时 WER 仍记录 `APPCRASH 0xc0000005`（两种证据并存）。产物位置：崩溃日志
