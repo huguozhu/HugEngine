@@ -244,9 +244,9 @@ cmake --build D:\Source\HugEngine\Build --config Debug --target 06.GILab -j 8
 | `vkAcquireNextImageKHR ... Semaphore must not have any pending operations` | 10 | **10** |
 
 三次运行数字完全相同 → 与启动 churn 无关，需单独定位（见 Wave 0.7 与 §1.3.4）。
-⚠️ **判断更正**：这里的"确定性"成立，但当时推论的"**周期性**（约每 N 帧一轮）**是错的**——
-后续用 8 秒与 25 秒两种时长实测，计数完全相同（110/10/10/10），且时间戳全部集中在
-**约 20 毫秒的启动窗口内**，其后 530 次帧记录零违规 ⇒ 实为**启动阶段（首帧附近）的一次性问题**。
+⚠️ **本节此处的性质判断已被两次更正**：先记为"周期性（约每 N 帧一轮）"，后改为"启动阶段一次性"，
+**两次都不对**——根因是校验层的**重复消息去重（上限 10）**掩盖了真实次数；关闭去重后实测为
+**每帧复发**（barrier 438 / renderPass 146 / semaphore 145，12 秒）。完整证据链与教训见 §1.3.4。
 它仍属于"命令缓冲引用的对象在提交完成前被销毁"这一类，是需要修的 GPU 同步正确性问题。
 
 #### 1.3.3 Wave 0.1 当前状态（诚实口径）
@@ -259,46 +259,66 @@ cmake --build D:\Source\HugEngine\Build --config Debug --target 06.GILab -j 8
   （见 §二 的 0.8 验收项），届时可一步定位根因，无需再靠偏移反查。
 - 另一条更有把握的路径：**修掉 §1.3.2③ 的周期性校验违规**（确定性、可验证，见 §二 Wave 0.7）。
 
-#### 1.3.4 Wave 0.7 实测进展（启动阶段一次性违规 · 修正"周期性"判断）
+#### 1.3.4 Wave 0.7 实测进展（每帧违规 · 修正两次性质误判 · invalidState 已修复）
 
-> **判断更正**：此前（§1.3.2③）把四类校验违规记为"确定性、**周期性**（约每 N 帧一轮）"。
-> 后续用两种时长实测（8 秒 / 25 秒，后者最大帧号 541–578）发现计数**完全相同**（110 / 10 / 10 / 10），
-> 且时间戳全部落在 **约 20 毫秒的启动窗口内**（`19:18:32.42`–`.44`），其后 530 次帧记录中**零违规**。
-> 正确结论：**这是启动阶段（首帧附近）的一次性问题，不是每帧复发**。
+> **两次判断更正（测量方法本身出过问题，记录下来）**：
+> 1. 曾记为"周期性（约每 N 帧一轮）"；
+> 2. 随后改为"启动阶段一次性"——理由是 8 秒 / 25 秒运行的计数完全相同（110/10/10/10）且时间戳集中在
+>    约 20 毫秒的启动窗口内。**这一条同样是错的**。
+>
+> 真相：**校验层启用了重复消息去重**（日志中可见 "This VUID has now been reported 10 times,
+> which is the duplicate_message_limit value"）。因此 `10` 是**去重上限**而非真实次数；
+> `110 = 11 个不同 VUID × 上限 10`（不同命令类型各有一个 VUID）。在运行目录放 `vk_layer_settings.txt`
+> 并设置 `khronos_validation.duplicate_message_limit = 0`（配 `VK_LAYER_SETTINGS_PATH`）后，
+> 12 秒运行（最大帧号 146）得到**真实计数**：`invalidState = 0`（已修）、`barrier = 438`（≈3/帧）、
+> `renderPass = 146`（1/帧）、`semaphore = 145`（≈1/帧）⇒ 后三类是**每帧复发**的。
+>
+> **方法论教训**：校验层的"报告数"不能直接当指标——要么关闭去重，要么用独立仪器
+> （如 `HE_TRACE_FB` 的 `delay=0` 计数）交叉验证。
 
-| 违规（含 VUID） | 启动阶段次数 | 已定位的成因 | 状态 |
+| 违规（含 VUID） | 真实次数（12 秒 / 146 帧，去重已关） | 已定位的成因 | 状态 |
 |---|---|---|---|
-| `VUID-VkImageMemoryBarrier-oldLayout-01197`：barrier 声明 `oldLayout=DEPTH_STENCIL_ATTACHMENT` 而实际为 `DEPTH_STENCIL_READ_ONLY` | 10 | RenderGraph 的布局模型与 render pass 的**实际** `finalLayout` 不一致（引擎把深度附件声明为"写完即可采样"的 READ_ONLY） | 🟡 已修模型（见下），但启动首帧仍缺一次 `READ_ONLY→ATTACHMENT` 的纠正 barrier |
-| `VUID-vkCmdBeginRenderPass-initialLayout-00900`：深度附件声明 `initialLayout=DEPTH_STENCIL_ATTACHMENT` 而实际为 `SHADER_READ_ONLY` | 10 | 采样深度贴图走 `ResourceState::ShaderResource` → 得到**颜色布局** `SHADER_READ_ONLY_OPTIMAL`（`CSMTechnique.cpp:152`、`PointShadowTechnique.cpp:133`） | ✅ 已修（RHI 收口）：告警措辞已从 `SHADER_READ_ONLY_OPTIMAL` 变为 `DEPTH_STENCIL_READ_ONLY_OPTIMAL`，深度图不再被套颜色布局 |
-| `VUID-vkAcquireNextImageKHR-semaphore-01779`：acquire 信号量有未完成操作 | 10 | 与上述启动期状态错乱同源（级联），未单独定位 | ⏳ |
-| `command buffer ... was in an invalid state ... VkFramebuffer ... was destroyed`（110 次，其中一次列出 **20 个** FB） | 110 | 启动窗口内有 framebuffer 在命令缓冲仍引用时被销毁；**不在延迟销毁队列的时间控制之下**（把队列槽位 3→6 后计数不变）→ 存在**绕过队列的销毁路径**，需仪器化定位 | ⏳ |
+| `command buffer ... was in an invalid state ... VkFramebuffer ... was destroyed` | **0**（修复前每帧复发） | **`VulkanCommandList::~VulkanCommandList()` 里的 `GetDeferredDestroy().FlushAll()`**：`RenderGraph::ExecuteWithAsyncCompute` 每帧创建一个**临时** Compute 命令列表，其析构发生在**主命令缓冲仍在录制**时，却清空了**设备级**延迟销毁队列——把本帧离屏 pass 刚创建、已绑定且待延迟销毁的 framebuffer **立即销毁**（`HE_TRACE_FB` 实测 `delay=0`） | ✅ **已修并验证**：移除析构里的 `FlushAll()`（队列由 `VulkanDevice::Shutdown()` 在 `vkDeviceWaitIdle` 后统一清理）→ `delay=0` 计数 **0**、该 VUID 真实计数 **0** |
+| `VUID-VkImageMemoryBarrier-oldLayout-01197`：barrier 声明 `oldLayout=DEPTH_STENCIL_ATTACHMENT` 而实际为 `DEPTH_STENCIL_READ_ONLY` | **438**（≈3/帧） | RenderGraph 布局模型与 render pass 实际 `finalLayout` 不一致；显式调用点声明的 `srcState` 与实际不符；跨帧持久资源（导入纹理）起始状态被当作 `Undefined` | 🟡 部分已修（`fixLayout` + 深度写后布局修正）；**待做：RHI 侧布局追踪** |
+| `VUID-vkCmdBeginRenderPass-initialLayout-00900`：深度附件声明 `initialLayout=DEPTH_STENCIL_ATTACHMENT` 而实际为 `DEPTH_STENCIL_READ_ONLY` | **146**（1/帧） | 同源：深度图被采样后停在 READ_ONLY，下次作为附件开始 pass 前缺少 `READ_ONLY → ATTACHMENT` 的纠正 barrier | 🟡 同上（措辞已从 `SHADER_READ_ONLY` 改善为 `DEPTH_STENCIL_READ_ONLY`） |
+| `VUID-vkAcquireNextImageKHR-semaphore-01779`：acquire 信号量有未完成操作 | **145**（≈1/帧） | 交换链 acquire 信号量的持有/复用策略（未单独定位） | ⏳ |
 
-**本轮已实施的修改（均已编译通过、实测无回归）**：1. `DeferredDestructionQueue`：槽位 3 → **2 × kMaxFramesInFlight**（延迟销毁必须大于在飞帧数并留余量）。
-   实测对上述 4 类计数**无影响**——说明那 110 次并非队列路径所致，但它仍是更保守的安全边界。
-2. `VulkanCommandList::PipelineBarrier`：`fixLayout` 补上 **`SHADER_READ_ONLY` → `DEPTH_STENCIL_READ_ONLY`** 的重映射
-   （此前只拦了 `COLOR_ATTACHMENT`）→ 位置 ② 的告警内容已改善。
-3. `RenderGraph::DeriveBarriers`：写深度资源之后，把追踪布局修正为 `DepthStencilRead`
-   （与 render pass 实际 `finalLayout` 一致），使后续 barrier 的 `oldLayout` 不再凭空声称 `ATTACHMENT`。
+**本轮已实施的修改**：
 
-**已被实测否证的两个假说（记录以免重复走弯路）**：
+1. ✅ **移除 `VulkanCommandList::~VulkanCommandList()` 中的 `FlushAll()`**（本轮关键修复）：队列由 `VulkanDevice`
+   持有，`VulkanDevice::Shutdown()` 已在 `vkDeviceWaitIdle` 之后统一清理；命令列表析构代它清理是错的，
+   因为临时命令列表会在**主命令缓冲录制期间**析构。
+2. ✅ `VulkanCommandList::PipelineBarrier` 的 `fixLayout` 补上 **`SHADER_READ_ONLY` → `DEPTH_STENCIL_READ_ONLY`**
+   重映射（此前只拦 `COLOR_ATTACHMENT`）→ 深度图不再被套**颜色布局**，render pass 告警措辞随之改善。
+3. ✅ `RenderGraph::DeriveBarriers`：写深度资源之后把追踪布局修正为 `DepthStencilRead`（与 render pass 实际
+   `finalLayout` 一致），使后续 barrier 不再凭空声称 `ATTACHMENT`。
+4. 🟡 `DeferredDestructionQueue`：槽位 3 → **2 × kMaxFramesInFlight**。对计数无影响（不是本因），
+   但"延迟销毁经过的帧数必须大于飞行帧数并留余量"本身是对的，保留为安全边界。
+
+**新增诊断设施（保留，关闭时零开销）**：
+
+- **`HE_TRACE_FB=1`**：追踪 framebuffer 创建/销毁，输出句柄与 `enqueueFrame / execFrame / delay`。
+  `delay=0` 即"同帧销毁"，是本类问题的直接指标（本次即由它定位根因）。实现见
+  `VulkanCommandList_RenderPass.cpp` 顶部；`VulkanCommandList` 析构与交换链重建路径同样打了标记。
+- **`vk_layer_settings.txt` + `VK_LAYER_SETTINGS_PATH`**：关闭校验层重复消息上限（`duplicate_message_limit = 0`），
+  得到违规**真实次数**——这是本轮修正测量方法的关键。
+
+**已被实测否证的假说（记录以免重走弯路）**：
 
 | 假说 | 实测证据 | 结论 |
 |---|---|---|
-| "队列槽位 3 对 3 帧在飞没有余量，导致同帧销毁" | 槽位 3 → 6 后，4 类计数**完全不变**（110/10/10/10） | ❌ 否证 |
-| "`AdvanceFrame()` 挂在 `CommandList::Begin()` 上，一帧内多个命令列表会把帧计数器/延迟销毁推进多次" | 仪器化统计：总推进 **141** 次、最大渲染帧号 **140** ⇒ **严格一帧一次**；启动阶段仅推进 1 次 | ❌ 否证（队列的帧语义是正确的） |
+| 队列槽位 3 对 3 帧在飞没有余量，导致同帧销毁 | 槽位 3 → 6 后计数不变 | ❌ |
+| `AdvanceFrame()` 挂在 `CommandList::Begin()`，一帧内多命令列表推进多次 | 仪器化：推进 141 次 / 最大帧号 140 ⇒ 严格一帧一次 | ❌ |
+| 四类违规是"启动阶段一次性" | 关闭去重后真实计数 **438 / 146 / 145**（每帧复发） | ❌（去重假象） |
 
-⇒ 因此那 110 次 `invalidState` 对应的 20 个被销毁 framebuffer **既不是队列推进过快、也不是槽位不足**所致，
-下一步必须**仪器化销毁点本身**（在 3 个 FB 销毁 lambda 里打印句柄 + 当时的 frameId），与校验层列出的 20 个句柄对账，
-才能定位真正绕过/提前于预期时机的销毁路径。
+**下一步（Wave 0.7 收尾）**：
 
-**下一步（下一轮 Wave 0.7 的入口）**：
-
-- **布局类（前两类）的正确收口**：在 RHI 里给 `VulkanTexture` 记录**当前布局**（由每次 barrier 与 render pass 的
-  initial/final 更新），`PipelineBarrier` 用**追踪到的真实布局**作为 `oldLayout`；并在 `BeginRenderPass`/`BeginOffscreenPass`
-  之前按需自动补一次 `→ 附件 initialLayout` 的纠正 barrier。这样启动首帧与跨帧的持久资源都不会再错。
-- **`invalidState`（110 次）**：给 3 个 FB 销毁点加带 `frameId` 与句柄的日志，与校验层列出的 20 个 FB 句柄对账，
-  找出绕过延迟销毁队列的销毁路径。
-- 判据不变：四类违规在完整启动 + 稳定运行窗口内**归零**。
+- **RHI 布局追踪**（治 438 + 146）：给 `VulkanTexture` 记录**当前布局**（每次 barrier、每次 render pass 的
+  initial/final 都更新）；`PipelineBarrier` 用**真实布局**作为 `oldLayout`；在 `BeginRenderPass` /
+  `BeginOffscreenPass` 之前按需自动补一次 `→ 附件 initialLayout` 的纠正 barrier。
+  这同时覆盖"同一帧内"与"跨帧持久资源"两种场景。
+- **交换链 acquire 信号量**（治 145）：按 swapchain image 索引持有信号量，避免复用未完成者。
+- **判据**：关闭去重后**真实计数全部为 0**（不再采用会被去重掩盖的"报告数 ≤ 10"）。
 
 ---
 
@@ -341,7 +361,7 @@ cmake --build D:\Source\HugEngine\Build --config Debug --target 06.GILab -j 8
 | **0.4 IBL 归位** | `DeferredLighting.frag.slang:250-259` + `DeferredPipeline_FrameGraph.cpp:762-776` | 把 IBL 漫反射环境项**移入 diffuse 层栈归一化**（作为低频 probe/env 源）；层栈 `IBL` 权重真正生效；明确"DDGI 内部已含 IBL 回退"时二者的互斥或权重语义 |
 | **0.5 RSM 归位** | `DeferredLighting.frag.slang:261-284` | RSM 间接作为 diffuse 层栈的一个源参与归一化；去掉 `0.03` 魔法系数（或显式定义为 VPL 能量归一常数、纳入层栈权重）；面板 RSM 开关与 shader 路径同源 |
 | **0.6 `ddgiScale` 语义收敛** | `:342` + `GI_DDGI.h` | `debugScale` 只影响调试可视化路径，**合成路径恒 1.0**（或折算进层栈权重），消除能量守恒破坏项 |
-| **0.7 启动阶段校验违规（确定性，一次性）** | `RenderingPass`/RHI 资源生命周期 + RenderGraph barrier | 实测**启动窗口约 20 ms 内**一次性出现：`command buffer … invalid state`（110 次，因 framebuffer 被销毁）、`barrier oldLayout`（10）、`render pass 附件布局`（10）、`swapchain semaphore pending`（10）；其后 530 帧零违规（详见 §1.3.4 与其中的 VUID 表）。**已修**：深度图的颜色布局重映射（`fixLayout`，告警措辞已改善）、RenderGraph 深度写后布局修正、延迟销毁槽位加余量。**待做**：① 给 `VulkanTexture` 记录当前布局并用真实布局作为 `oldLayout`，`BeginRenderPass` 前按需补纠正 barrier（治前两类与跨帧持久资源）；② 仪器化定位 110 次 `invalidState` 那条**绕过延迟销毁队列**的 FB 销毁路径 |
+| **0.7 每帧校验违规** | `RenderingPass`/RHI 资源生命周期 + RenderGraph barrier + 交换链信号量 | 真实计数（关闭校验层去重后，12 秒 / 146 帧）：`invalidState` **0 ✅ 已修**（根因：`VulkanCommandList` 析构擅自清空设备级延迟销毁队列 → 同帧销毁主命令缓冲已绑定的 framebuffer，见 §1.3.4）；`barrier oldLayout` **438**、`render pass initialLayout` **146**、`swapchain semaphore pending` **145** —— 后三类每帧复发，**待做**：① RHI 侧布局追踪（`VulkanTexture` 记当前布局 + `Begin*Pass` 前补纠正 barrier）；② 交换链 acquire 信号量按 image 索引持有 |
 | **0.8 崩溃处理器（诊断基建）** | `06.GILab/CrashHandler.{h,cpp}` | ✅ **已完成**：`SetUnhandledExceptionFilter` + `StackWalk64`/DbgHelp，崩溃时打印**函数名 + 源文件:行号**的完整调用栈，并写出 minidump；记录后返回 `EXCEPTION_CONTINUE_SEARCH`，**故意让 WER 继续记录 APPCRASH**，两种证据都不丢。自检方式：`HE_CRASH_TEST=1` 启动会在第 3 帧主动解引用空指针 |
 
 **验收**：
