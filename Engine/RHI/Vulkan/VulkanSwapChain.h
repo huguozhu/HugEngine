@@ -42,8 +42,11 @@ public:
     void* GetDepthBufferView()       const override { return reinterpret_cast<void*>(m_DepthImageView); }
     VkExtent2D     GetExtent()                const { return {m_Width, m_Height}; }
     VkImage        GetImage(u32 i)            const { return m_Images[i]; }
-    VkSemaphore    GetImageAcquiredSemaphore() const { return m_ImageAcquired; }
-    VkSemaphore    GetRenderCompleteSemaphore() const { return m_RenderComplete; }
+    VkSemaphore    GetImageAcquiredSemaphore() const { return m_AcquireSemaphores[m_AcquireSlot]; }
+    VkSemaphore    GetRenderCompleteSemaphore() const {
+        return m_RenderCompleteSemaphores.empty() ? VK_NULL_HANDLE
+                                                  : m_RenderCompleteSemaphores[m_CurrentImage];
+    }
 
 private:
     void CreateSwapchain();
@@ -64,8 +67,22 @@ private:
     u32              m_CurrentImage  = 0;
 
     bool             m_IsMinimized    = false;
-    VkSemaphore      m_ImageAcquired  = VK_NULL_HANDLE;
-    VkSemaphore      m_RenderComplete = VK_NULL_HANDLE;
+
+    // ── 同步原语：必须"多份"，不能每帧复用同一个 ──
+    // 曾经每帧复用单个 acquire / render-complete 信号量，实测每帧触发一次
+    // VUID-vkAcquireNextImageKHR-semaphore-01779（"Semaphore must not have any pending
+    // operations"）：上一帧对该信号量的等待尚未完成时又把它交给 acquire。
+    //
+    // 现在：
+    //   · acquire 信号量按**飞行帧槽位**各一份（配套一个栅栏；复用前先等该槽位的栅栏，
+    //     即保证上一轮 acquire 的等待已经完成）
+    //   · render-complete 信号量按**交换链图像**各一份（同一图像能再次被 acquire，
+    //     本身就蕴含上一次 present 已完成，因而该信号量的等待也已完成）
+    static constexpr u32 kAcquireSlots = 3;   // 与 RHI 的飞行帧数（kMaxFramesInFlight）一致
+    VkSemaphore      m_AcquireSemaphores[kAcquireSlots] = {};
+    VkFence          m_AcquireFences[kAcquireSlots]     = {};
+    u32              m_AcquireSlot = 0;
+    std::vector<VkSemaphore> m_RenderCompleteSemaphores;
 
     VkImage         m_DepthImage        = VK_NULL_HANDLE;
     VkImageView     m_DepthImageView    = VK_NULL_HANDLE;

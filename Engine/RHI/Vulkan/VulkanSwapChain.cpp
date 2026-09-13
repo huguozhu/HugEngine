@@ -119,11 +119,25 @@ void VulkanSwapChain::CreateSwapchain() {
         vkCreateImageView(m_Device, &viewInfo, nullptr, &m_ImageViews[i]);
     }
 
-    // 创建同步原语（信号量）
-    VkSemaphoreCreateInfo semInfo{};
-    semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-    vkCreateSemaphore(m_Device, &semInfo, nullptr, &m_ImageAcquired);
-    vkCreateSemaphore(m_Device, &semInfo, nullptr, &m_RenderComplete);
+    // 创建同步原语：acquire 信号量按飞行帧槽位各一份（配栅栏），render-complete 按图像各一份
+    //（原因见 VulkanSwapChain.h 的成员注释：每帧复用同一个信号量会触发
+    //  VUID-vkAcquireNextImageKHR-semaphore-01779）
+    {
+        VkSemaphoreCreateInfo semInfo{};
+        semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        VkFenceCreateInfo fenceInfo{};
+        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;   // 首次使用时无需等待
+        for (u32 i = 0; i < kAcquireSlots; ++i) {
+            vkCreateSemaphore(m_Device, &semInfo, nullptr, &m_AcquireSemaphores[i]);
+            vkCreateFence(m_Device, &fenceInfo, nullptr, &m_AcquireFences[i]);
+        }
+        m_RenderCompleteSemaphores.resize(m_ImageCount);
+        for (u32 i = 0; i < m_ImageCount; ++i) {
+            vkCreateSemaphore(m_Device, &semInfo, nullptr, &m_RenderCompleteSemaphores[i]);
+        }
+        m_AcquireSlot = 0;
+    }
 
     // 创建深度模板纹理（与 SwapChain 同尺寸）
     VkImageCreateInfo depthInfo{};
@@ -176,8 +190,15 @@ void VulkanSwapChain::DestroySwapchain() {
     if (m_DepthImageView)   { vkDestroyImageView(m_Device, m_DepthImageView, nullptr); m_DepthImageView = VK_NULL_HANDLE; }
     if (m_DepthImage)       { vkDestroyImage(m_Device, m_DepthImage, nullptr); m_DepthImage = VK_NULL_HANDLE; }
     if (m_DepthImageMemory) { vkFreeMemory(m_Device, m_DepthImageMemory, nullptr); m_DepthImageMemory = VK_NULL_HANDLE; }
-    if (m_ImageAcquired)  { vkDestroySemaphore(m_Device, m_ImageAcquired, nullptr);  m_ImageAcquired  = VK_NULL_HANDLE; }
-    if (m_RenderComplete) { vkDestroySemaphore(m_Device, m_RenderComplete, nullptr); m_RenderComplete = VK_NULL_HANDLE; }
+    // 销毁同步原语：acquire 信号量（按槽位）+ 各自的栅栏 + render-complete 信号量（按图像）
+    for (u32 i = 0; i < kAcquireSlots; ++i) {
+        if (m_AcquireSemaphores[i]) { vkDestroySemaphore(m_Device, m_AcquireSemaphores[i], nullptr); m_AcquireSemaphores[i] = VK_NULL_HANDLE; }
+        if (m_AcquireFences[i])     { vkDestroyFence(m_Device, m_AcquireFences[i], nullptr);         m_AcquireFences[i]     = VK_NULL_HANDLE; }
+    }
+    for (auto& sem : m_RenderCompleteSemaphores) {
+        if (sem) vkDestroySemaphore(m_Device, sem, nullptr);
+    }
+    m_RenderCompleteSemaphores.clear();
     if (m_Swapchain) vkDestroySwapchainKHR(m_Device, m_Swapchain, nullptr);
     m_Swapchain = VK_NULL_HANDLE;
 }
@@ -199,20 +220,34 @@ void VulkanSwapChain::Resize(u32 width, u32 height) {
 bool VulkanSwapChain::AcquireNextImage() {
     // 窗口最小化时跳过图像获取
     if (m_IsMinimized || m_Swapchain == VK_NULL_HANDLE) return false;
+
+    // 轮转到下一个 acquire 槽位；复用该槽位的信号量之前，先等它的栅栏 ——
+    // 这保证"上一次使用该信号量的等待操作"已经完成，否则会触发
+    // VUID-vkAcquireNextImageKHR-semaphore-01779
+    m_AcquireSlot = (m_AcquireSlot + 1) % kAcquireSlots;
+    if (m_AcquireFences[m_AcquireSlot] != VK_NULL_HANDLE) {
+        vkWaitForFences(m_Device, 1, &m_AcquireFences[m_AcquireSlot], VK_TRUE, UINT64_MAX);
+        vkResetFences(m_Device, 1, &m_AcquireFences[m_AcquireSlot]);
+    }
+
     VkResult result = vkAcquireNextImageKHR(m_Device, m_Swapchain, UINT64_MAX,
-                                            m_ImageAcquired, VK_NULL_HANDLE, &m_CurrentImage);
+                                            m_AcquireSemaphores[m_AcquireSlot],
+                                            m_AcquireFences[m_AcquireSlot],
+                                            &m_CurrentImage);
     return result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR;
 }
 
 void VulkanSwapChain::Present(bool /*vsync*/) {
-    VkSemaphore waitSem = m_RenderComplete;
+    // 用"当前图像自己的" render-complete 信号量：同一图像再次被 acquire 蕴含上次 present
+    // 已完成，因此不会出现"信号量仍有未完成操作"（详见头文件成员注释）
+    VkSemaphore waitSem = GetRenderCompleteSemaphore();
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     presentInfo.swapchainCount  = 1;
     presentInfo.pSwapchains     = &m_Swapchain;
     presentInfo.pImageIndices   = &m_CurrentImage;
-    presentInfo.waitSemaphoreCount = 1;
-    presentInfo.pWaitSemaphores    = &waitSem;
+    presentInfo.waitSemaphoreCount = waitSem ? 1u : 0u;
+    presentInfo.pWaitSemaphores    = waitSem ? &waitSem : nullptr;
 
     vkQueuePresentKHR(m_PresentQueue, &presentInfo);
 }
