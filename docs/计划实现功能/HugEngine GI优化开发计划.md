@@ -341,6 +341,19 @@ render pass 的 initial/final 都更新），并让图的导入资源初始化�
   这会让布局模型在一个"未被真实写入"的图上推进状态，是残留 barrier 报错的重要嫌疑。
   修法方向：把假依赖改为真实的执行顺序约束（图内显式边），而不是借用一个写依赖。
 
+**第四轮：pass 级定位 + 以真实布局纠正 `oldLayout`（已验证再降 1 次/帧）**
+
+- 新增诊断 `HE_TRACE_PASSES=1`：打印每个 pass 的开始，把 pass 名与校验层报错在时间上对齐。
+  **定位结果**：barrier 违规发生在 **Lighting**（2/帧）与 **TAA_Resolve**；render pass 违规发生在 **Skybox**（1/帧）。
+- 据此在 RHI 的纹理 barrier 里**用追踪到的真实布局纠正 `oldLayout`**（未记录过才回退到调用方声明）：
+  **barrier 违规 2/帧 → 1/帧**（151/151，可复现）。
+- 剩余两类计数**完全相等**（各 1/帧）⇒ 同源，机制已明确：**Skybox pass 以 `Load` 方式开始深度 pass，
+  而深度此时实际停在 `READ_ONLY`**（Lighting pass 的 `finalLayout`）；由于追踪器**尚未记录 render pass 自身
+  的布局转变**，纠正用的 `oldLayout` 仍是旧值，于是既报 `initialLayout-00900` 又报 `oldLayout-01197`。
+- ⇒ 收尾只差一步：**在 render pass 边界更新追踪器**（begin 时深度记为 ATTACHMENT、end 时记为 READ_ONLY，
+  与引擎 render pass 的 initial/final 声明一致），并在 begin 前按需补一次 `→ ATTACHMENT` 的纠正 barrier
+  （需要 视图→VkImage 的登记，因为 barrier 只能作用于 image 而非 view）。
+
 **下一步（Wave 0.7 收尾）**：
 
 - **RHI 布局追踪**（治 438 + 146）：给 `VulkanTexture` 记录**当前布局**（每次 barrier、每次 render pass 的
