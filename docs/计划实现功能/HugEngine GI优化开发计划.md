@@ -211,6 +211,7 @@ minidump `Build/bin/Debug/06.GILab_crash.dmp`（可用 Visual Studio 打开）�
 | JoltPhysics 子模块 | ❌→✅ **原本未初始化（目录为空），导致 configure 直接失败**；已用可达镜像 `ghfast.top` 克隆，并**校验 `HEAD == 仓库钉住的 a45f543`** |
 | Python | ⚠️ `C:\anaconda3`（3.14.6）。构建规则 `Engine/Shader/CMakeLists.txt:271` 调用的是**裸 `python`**（跑 `spv_to_header.py`，仅用标准库）→ **必须把 `C:\anaconda3` 加进 PATH**，否则 Slang 之后的 SPV→头文件步骤以 `MSB8066 / 9009` 失败，且报错文案会误导成"去 Microsoft Store 装 Python" |
 | 网络 | ⚠️ `github.com:443` **不可达**（连接被重置，DNS 正常）；`ghfast.top` / `ghproxy.net` / `gh-proxy.com` / `gitee.com` 可达 |
+| **仓库卫生（子模块状态）** | ✅ 已解决：此前 `git status` 永远挂着 5 个子模块噪声，实为**三个独立原因**——① `.git/modules/*` 的**属主是另一个 Windows 账户**（工程树从别处拷来），被 Git 所有权保护拒绝检查 → 已为 7 个子模块路径补 `safe.directory`；② VS「打开文件夹」/CMake 在子模块源码树里生成了 `*.slnx`、`*Config.cmake`、`*Targets.cmake`、`*.pc` → 已写入各子模块 **`info/exclude`**（本地忽略，不碰上游仓库、不产生提交）；③ taskflow 有 **33 个已跟踪文件在磁盘上缺失**（`3rd-party/tbb/**.vcxproj`，拷贝丢文件）→ 已 `git checkout -- .` 恢复。现状：父仓库 `git status` **完全干净**，`git submodule status` 全部与索引一致 |
 
 **② 构建已通过（对首轮预判的修正）**
 
