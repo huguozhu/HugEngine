@@ -189,6 +189,15 @@ private:
     VkRenderPass  m_OffscreenRP = VK_NULL_HANDLE;
     bool          m_InOffscreenPass = false;
     VkFramebuffer m_CurrentOffscreenFB = VK_NULL_HANDLE;
+    /// 当前离屏 pass 的深度附件视图（用于 pass 结束时把追踪布局记回 READ_ONLY）
+    void*         m_CurrentOffscreenDepthView = nullptr;
+
+    /// 开始 render pass 前，确保深度附件的真实布局与该 pass 期望的初始布局一致：
+    /// 引擎的 render pass 把深度附件的 initialLayout 声明为 ATTACHMENT（Load 路径）或
+    /// UNDEFINED（Clear 路径），若追踪到的真实布局不是 ATTACHMENT，就补一次转换，
+    /// 否则校验层报 VUID-vkCmdBeginRenderPass-initialLayout-00900
+    ///（实测 Skybox pass 每帧 1 次：它以 Load 开始，而深度此时停在 READ_ONLY）
+    void EnsureDepthAttachmentLayout(void* depthImageView);
     // m_PendingFBs 已移除，改用 m_VulkanDevice->GetDeferredDestroy() 统一管理
 
     VkImage        m_DummyDepthImage  = VK_NULL_HANDLE;

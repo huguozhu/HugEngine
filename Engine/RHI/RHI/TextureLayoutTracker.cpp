@@ -39,4 +39,38 @@ void ForgetTrackedTextureLayout(void* imageView) {
     g_Layouts.erase(imageView);
 }
 
+// ---- 视图 → 底层图像 登记 ----
+
+namespace {
+    struct ViewImageInfo {
+        void* image       = nullptr;
+        u32   mipLevels   = 1;
+        u32   arrayLayers = 1;
+    };
+    std::unordered_map<void*, ViewImageInfo> g_ViewImages;
+}
+
+void TrackViewImage(void* imageView, void* image, u32 mipLevels, u32 arrayLayers) {
+    if (!imageView) return;
+    std::lock_guard<std::mutex> lock(g_Mutex);
+    g_ViewImages[imageView] = ViewImageInfo{ image, mipLevels ? mipLevels : 1, arrayLayers ? arrayLayers : 1 };
+}
+
+bool QueryViewImage(void* imageView, void*& outImage, u32& outMipLevels, u32& outArrayLayers) {
+    if (!imageView) return false;
+    std::lock_guard<std::mutex> lock(g_Mutex);
+    auto it = g_ViewImages.find(imageView);
+    if (it == g_ViewImages.end()) return false;
+    outImage       = it->second.image;
+    outMipLevels   = it->second.mipLevels;
+    outArrayLayers = it->second.arrayLayers;
+    return outImage != nullptr;
+}
+
+void ForgetViewImage(void* imageView) {
+    if (!imageView) return;
+    std::lock_guard<std::mutex> lock(g_Mutex);
+    g_ViewImages.erase(imageView);
+}
+
 } // namespace he::rhi

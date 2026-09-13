@@ -10,6 +10,7 @@
 
 #include "VulkanCommandList.h"
 #include "VulkanDevice.h"
+#include "RHI/TextureLayoutTracker.h"   // 布局追踪 + 视图→图像登记（render pass 边界维护）
 
 #include <cstdlib>
 
@@ -38,6 +39,62 @@ static void TraceFramebuffer(const char* action, VkFramebuffer fb,
 
 /// 当前帧号（无设备时返回 0）
 static u64 CurrentFrameOf(VulkanDevice* dev) { return dev ? dev->GetCurrentFrame() : 0; }
+
+// ============================================================
+// render pass 边界的深度布局维护
+//
+// 引擎的 render pass 对深度附件声明：
+//   initialLayout = ATTACHMENT（depthLoadOp == Load）或 UNDEFINED（Clear）
+//   finalLayout   = READ_ONLY（"写完即可采样"，见 VulkanPipeline.cpp）
+// 但 pass 自身的这些转变不经过 barrier，所以必须在这里同步给布局追踪器；
+// 并在开始 pass 前把真实布局修正到 ATTACHMENT，否则以 Load 开始的 pass 会报
+//   VUID-vkCmdBeginRenderPass-initialLayout-00900（实测 Skybox pass 每帧 1 次）。
+// ============================================================
+
+/// 深度相关的 ResourceState → VkImageLayout（只覆盖深度会用到的状态）
+static VkImageLayout ToDepthLayout(u32 state) {
+    using RS = rhi::ResourceState;
+    if (state & u32(RS::DepthStencilWrite)) return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    if (state & u32(RS::DepthStencilRead))  return VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    if (state & u32(RS::ShaderResource))    return VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+}
+
+void VulkanCommandList::EnsureDepthAttachmentLayout(void* depthImageView) {
+    if (!depthImageView) return;
+
+    // 需要由视图反查底层图像（image barrier 只能作用于 VkImage）
+    void* image = nullptr;
+    u32   mips = 1, layers = 1;
+    if (!QueryViewImage(depthImageView, image, mips, layers) || !image) return;
+
+    // 从未记录过（该图还没参与过任何 barrier）→ 交给 render pass 的 UNDEFINED/首次使用语义
+    rhi::ResourceState tracked;
+    if (!QueryTrackedTextureLayout(depthImageView, tracked)) return;
+
+    const VkImageLayout oldLayout = ToDepthLayout(u32(tracked));
+    if (oldLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) return;   // 已经就位
+
+    VkImageMemoryBarrier b{};
+    b.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    // 保守的访问范围：来源可能是"被采样"或"被当作深度附件写"
+    b.srcAccessMask       = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    b.dstAccessMask       = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+    b.oldLayout           = oldLayout;
+    b.newLayout           = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image               = static_cast<VkImage>(image);
+    b.subresourceRange    = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, mips, 0, layers };
+
+    vkCmdPipelineBarrier(m_CmdBuffers[m_FrameIndex],
+        VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &b);
+
+    // 同步追踪器：此后该图处于 ATTACHMENT
+    TrackTextureLayout(depthImageView, rhi::ResourceState::DepthStencilWrite);
+}
 
 // ============================================================
 // BeginRenderPass — SwapChain 渲染目标
@@ -260,11 +317,18 @@ void VulkanCommandList::BeginOffscreenPass(
     rpBegin.clearValueCount   = clearCount;
     rpBegin.pClearValues      = vkClearValues;
 
+    // 开始 pass 前：把深度附件的真实布局修正到本 pass 期望的 ATTACHMENT
+    EnsureDepthAttachmentLayout(depthImageView);
+
     VkSubpassContents contents = allowSecondary
         ? VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_KHR
         : VK_SUBPASS_CONTENTS_INLINE;
     vkCmdBeginRenderPass(m_CmdBuffers[m_FrameIndex], &rpBegin, contents);
     m_InOffscreenPass = true;
+
+    // pass 期间深度是附件：同步追踪器，并记住深度视图供 EndOffscreenPass 收尾
+    m_CurrentOffscreenDepthView = depthImageView;
+    if (depthImageView) TrackTextureLayout(depthImageView, rhi::ResourceState::DepthStencilWrite);
 
     // 仅图形管线：RT/Compute 管线 bind point 不匹配 GRAPHICS
     if (m_CurrentPipeline != VK_NULL_HANDLE && m_CurrentBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS) {
@@ -334,11 +398,18 @@ void VulkanCommandList::BeginOffscreenPassMRT(
     rpBegin.clearValueCount   = clearCount;
     rpBegin.pClearValues      = vkClearValues;
 
+    // 开始 pass 前：把深度附件的真实布局修正到本 pass 期望的 ATTACHMENT
+    EnsureDepthAttachmentLayout(depthImageView);
+
     VkSubpassContents contents = allowSecondary
         ? VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_KHR
         : VK_SUBPASS_CONTENTS_INLINE;
     vkCmdBeginRenderPass(m_CmdBuffers[m_FrameIndex], &rpBegin, contents);
     m_InOffscreenPass = true;
+
+    // pass 期间深度是附件：同步追踪器，并记住深度视图供 EndOffscreenPass 收尾
+    m_CurrentOffscreenDepthView = depthImageView;
+    if (depthImageView) TrackTextureLayout(depthImageView, rhi::ResourceState::DepthStencilWrite);
 
     // 仅图形管线：RT/Compute 管线 bind point 不匹配 GRAPHICS
     if (m_CurrentPipeline != VK_NULL_HANDLE && m_CurrentBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS) {
@@ -350,6 +421,14 @@ void VulkanCommandList::EndOffscreenPass() {
     if (!m_InOffscreenPass) return;
     vkCmdEndRenderPass(m_CmdBuffers[m_FrameIndex]);
     m_InOffscreenPass = false;
+
+    // pass 结束后深度停在 READ_ONLY（引擎 render pass 的 finalLayout 声明），
+    // 这个转变不经过 barrier，必须在这里同步给追踪器，否则后续以 Load 开始的 pass
+    // 会用错误的 oldLayout（见 EnsureDepthAttachmentLayout 的说明）
+    if (m_CurrentOffscreenDepthView) {
+        TrackTextureLayout(m_CurrentOffscreenDepthView, rhi::ResourceState::DepthStencilRead);
+        m_CurrentOffscreenDepthView = nullptr;
+    }
 
     // FB 不能立即销毁 — CB 尚未提交。
     // 通过 VulkanDevice 的延迟销毁队列统一管理，3 帧后安全销毁。

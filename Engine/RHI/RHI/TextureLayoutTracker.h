@@ -33,4 +33,21 @@ bool QueryTrackedTextureLayout(void* imageView, ResourceState& outState);
 /// 纹理销毁时清理记录（避免句柄复用造成误判）
 void ForgetTrackedTextureLayout(void* imageView);
 
+// ============================================================
+// 视图 → 底层图像 登记
+//
+// 为什么需要：Vulkan 的 image barrier 只能作用于 VkImage，而 render pass 的附件是以
+// **视图**（VkImageView）形式传入的（`BeginOffscreenPass(void* colorView, void* depthView, …)`）。
+// 因此在"开始 render pass 前按需补一次布局转换"时，需要由视图反查图像与 mip/layer 范围。
+// ============================================================
+
+/// 登记视图对应的底层图像与 mip / array layer 数量（纹理创建时调用）
+void TrackViewImage(void* imageView, void* image, u32 mipLevels, u32 arrayLayers);
+
+/// 查询视图对应的图像与范围；返回 false 表示未登记
+bool QueryViewImage(void* imageView, void*& outImage, u32& outMipLevels, u32& outArrayLayers);
+
+/// 纹理销毁时清理登记
+void ForgetViewImage(void* imageView);
+
 } // namespace he::rhi

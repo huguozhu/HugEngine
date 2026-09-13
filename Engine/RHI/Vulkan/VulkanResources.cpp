@@ -339,6 +339,10 @@ VulkanTexture::VulkanTexture(VmaAllocator allocator, VkCommandPool cmdPool, VkQu
     }
 
     // 日志里带上 VkImage 句柄：便于与校验层报错（如 "VkImage 0x…" 布局不符）对账定位
+    // 同时登记「视图 → 底层图像」：render pass 附件以视图形式传入，而 image barrier 只能
+    // 作用于 VkImage，需要靠这份登记在开始 render pass 前补布局转换（见 TextureLayoutTracker.h）
+    TrackViewImage(reinterpret_cast<void*>(m_ImageView), reinterpret_cast<void*>(m_Image),
+                   m_MipLevels, m_ArrayLayers);
     HE_CORE_INFO("Vulkan texture created: {}x{} [{}]{} image={}", m_Width, m_Height,
                  m_Format == Format::RGBA8_UNORM ? "RGBA8" : "other",
                  isCubemap ? " cubemap" : "",
@@ -351,6 +355,7 @@ VulkanTexture::~VulkanTexture() {
 
     // 同时清理布局追踪记录（视图句柄会被销毁，避免复用导致误判）
     ForgetTrackedTextureLayout(reinterpret_cast<void*>(m_ImageView));
+    ForgetViewImage(reinterpret_cast<void*>(m_ImageView));
 
     for (auto& fv : m_FaceViews)
         if (fv) vkDestroyImageView(m_Device, fv, nullptr);
