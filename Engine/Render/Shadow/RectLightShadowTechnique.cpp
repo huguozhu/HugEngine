@@ -145,8 +145,12 @@ void RectLightShadowTechnique::Render(rhi::IRHICommandList* cmd,he::World& w,he:
         w.ForEach<he::CubeComponent>([&](he::Entity e,he::CubeComponent&c){rm(e,static_cast<he::MeshComponent&>(c));});
         w.ForEach<he::SphereComponent>([&](he::Entity e,he::SphereComponent&s){rm(e,static_cast<he::MeshComponent&>(s));});
         cmd->EndOffscreenPass();
+        // 阴影 pass 的深度附件结束时停在 DEPTH_STENCIL_READ_ONLY（见 VulkanPipeline.cpp
+        // 的 depthAttach.finalLayout），因此 srcState 必须是 DepthStencilRead；
+        // 若声明为 DepthStencilWrite 会给出错误的 oldLayout
+        //（VUID-VkImageMemoryBarrier-oldLayout-01197，实测每帧触发）
         cmd->PipelineBarrier(rhi::PipelineStage::LateFragmentTests,rhi::PipelineStage::FragmentShader,
-            rhi::ResourceState::DepthStencilWrite,rhi::ResourceState::DepthStencilRead,m_RectShadowMap.get());
+            rhi::ResourceState::DepthStencilRead,rhi::ResourceState::DepthStencilRead,m_RectShadowMap.get());
     }
 }
 

@@ -146,9 +146,11 @@ void SpotShadowTechnique::Render(rhi::IRHICommandList* cmd,he::World& w,he::Scen
         w.ForEach<he::CubeComponent>([&](he::Entity e,he::CubeComponent&c){rm(e,static_cast<he::MeshComponent&>(c));});
         w.ForEach<he::SphereComponent>([&](he::Entity e,he::SphereComponent&s){rm(e,static_cast<he::MeshComponent&>(s));});
         cmd->EndOffscreenPass();
-        // barrier: depth write → shader read
+        // barrier: depth 已在阴影 pass 结束时停在 READ_ONLY（VulkanPipeline.cpp 的
+        // depthAttach.finalLayout），故 srcState 必须是 DepthStencilRead
+        //（声明 Write 会给出错误的 oldLayout：VUID-VkImageMemoryBarrier-oldLayout-01197）
         cmd->PipelineBarrier(rhi::PipelineStage::LateFragmentTests,rhi::PipelineStage::FragmentShader,
-            rhi::ResourceState::DepthStencilWrite,rhi::ResourceState::DepthStencilRead,m_SpotShadowMap.get());
+            rhi::ResourceState::DepthStencilRead,rhi::ResourceState::DepthStencilRead,m_SpotShadowMap.get());
     }
 }
 

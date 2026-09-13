@@ -337,9 +337,11 @@ VulkanTexture::VulkanTexture(VmaAllocator allocator, VkCommandPool cmdPool, VkQu
         }
     }
 
-    HE_CORE_INFO("Vulkan texture created: {}x{} [{}]{}", m_Width, m_Height,
+    // 日志里带上 VkImage 句柄：便于与校验层报错（如 "VkImage 0x…" 布局不符）对账定位
+    HE_CORE_INFO("Vulkan texture created: {}x{} [{}]{} image={}", m_Width, m_Height,
                  m_Format == Format::RGBA8_UNORM ? "RGBA8" : "other",
-                 isCubemap ? " cubemap" : "");
+                 isCubemap ? " cubemap" : "",
+                 reinterpret_cast<const void*>(m_Image));
 }
 
 VulkanTexture::~VulkanTexture() {

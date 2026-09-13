@@ -696,9 +696,13 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                                           giIBL->GetBRDF_LUT(), giIBL->GetIBLSampler());
             }
 
-            // 深度缓冲屏障（在 Lighting 读取前完成 GBuffer 写入）
+            // GBuffer 深度屏障（在 Lighting 采样前完成 GBuffer 写入的可见性）
+            // 注意 srcState 必须是 DepthStencilRead：GBuffer 的 render pass 在创建时把深度附件的
+            // finalLayout 声明为 DEPTH_STENCIL_READ_ONLY_OPTIMAL（见 VulkanPipeline.cpp），
+            // 因此写入完成后真实布局就是 READ_ONLY；若声明 DepthStencilWrite（ATTACHMENT）
+            // 会给出错误的 oldLayout（VUID-VkImageMemoryBarrier-oldLayout-01197，实测每帧触发）
             c->PipelineBarrier(rhi::PipelineStage::LateFragmentTests, rhi::PipelineStage::FragmentShader,
-                rhi::ResourceState::DepthStencilWrite, rhi::ResourceState::DepthStencilRead,
+                rhi::ResourceState::DepthStencilRead, rhi::ResourceState::DepthStencilRead,
                 m_GBuffer->GetDepth());
 
             // 收集光源数据
