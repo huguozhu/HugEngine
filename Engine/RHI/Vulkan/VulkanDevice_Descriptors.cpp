@@ -13,6 +13,7 @@
 #include <vulkan/vulkan.h>
 
 #include "VulkanDevice.h"
+#include "VulkanTextureLiveness.h"   // 纹理存活登记：描述符更新前识别野指针（防偶发访问违例）
 #include "Core/Assert.h"
 
 #include <algorithm>
@@ -210,7 +211,13 @@ void VulkanDevice::UpdateDescriptorSet(DescriptorSetHandle setHandle, u32 bindin
     for (u32 i = 0; i < count; ++i) {
         // SampledImage: 仅使用 imageView，sampler 字段忽略
         if (vkType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) {
-            if (!textures || !textures[i]) {
+            // 存活校验：null 检查挡不住"已销毁纹理的野指针"（曾导致偶发访问违例），
+            // 故在解引用前先查存活登记表（见 VulkanTextureLiveness.h）
+            if (!textures || !IsTextureAlive(textures[i])) {
+                if (textures && textures[i]) {
+                    HE_CORE_ERROR("UpdateDescriptorSet(SampledImage 数组): binding={} 第 {} 项是野指针 texPtr={}（纹理已销毁）→ 跳过写入",
+                        binding, i, (void*)textures[i]);
+                }
                 imageInfos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
                 imageInfos[i].imageView   = VK_NULL_HANDLE;
                 imageInfos[i].sampler     = VK_NULL_HANDLE;
@@ -237,7 +244,11 @@ void VulkanDevice::UpdateDescriptorSet(DescriptorSetHandle setHandle, u32 bindin
             continue;
         }
         // CombinedImageSampler: 同时使用 imageView + sampler
-        if (!textures || !textures[i] || !samplers || !samplers[i]) {
+        if (!textures || !IsTextureAlive(textures[i]) || !samplers || !samplers[i]) {
+            if (textures && textures[i] && !IsTextureAlive(textures[i])) {
+                HE_CORE_ERROR("UpdateDescriptorSet(CombinedImageSampler 数组): binding={} 第 {} 项是野指针 texPtr={}（纹理已销毁）→ 跳过写入",
+                    binding, i, (void*)textures[i]);
+            }
             imageInfos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
             imageInfos[i].imageView   = VK_NULL_HANDLE;
             imageInfos[i].sampler     = VK_NULL_HANDLE;
@@ -301,6 +312,13 @@ void VulkanDevice::UpdateDescriptorSet(DescriptorSetHandle setHandle, u32 bindin
                                         IRHISampler* sampler) {
     if (setHandle == 0 || setHandle > m_DescSets.size()) return;
     if (!texture) return;   // 必须有纹理；采样器可空（SampledImage 的 Load/OpImageFetch 不需要采样器）
+    // 存活校验：null 检查挡不住"已销毁纹理的野指针"——本函数是崩溃点的调用者之一
+    //（崩溃落在 VulkanTexture::GetImageView()，见 VulkanTextureLiveness.h）
+    if (!IsTextureAlive(texture)) {
+        HE_CORE_ERROR("UpdateDescriptorSet(单纹理): binding={} 是野指针 texPtr={}（纹理已销毁）→ 跳过写入",
+            binding, (void*)texture);
+        return;
+    }
     VkDescriptorSet ds = m_DescSets[static_cast<usize>(setHandle - 1)];
     if (ds == VK_NULL_HANDLE) return;
 

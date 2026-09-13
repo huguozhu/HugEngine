@@ -17,6 +17,7 @@
 // Vulkan 类型的完整定义（供 inline 方法使用）
 #include "VulkanResources.h"
 #include "VulkanConverters.h"
+#include "VulkanTextureLiveness.h"   // 纹理存活登记（诊断野指针，见该头文件说明）
 
 namespace he::rhi {
 
@@ -241,6 +242,10 @@ VulkanTexture::VulkanTexture(VmaAllocator allocator, VkCommandPool cmdPool, VkQu
     , m_Format(desc.format)
     , m_VkFormat(ToVkFormat(desc.format))
 {
+    // 登记纹理存活（诊断用）：让"已销毁纹理的野指针"在解引用前可被识别
+    //（背景见 VulkanTextureLiveness.h —— 曾导致 06.GILab 的偶发访问违例）
+    MarkTextureAlive(this);
+
     // 从 VMA 分配器获取 VkDevice（供 vkCreateImage / vkDestroyImageView 使用）
     VmaAllocatorInfo allocInfo;
     vmaGetAllocatorInfo(allocator, &allocInfo);
@@ -338,6 +343,9 @@ VulkanTexture::VulkanTexture(VmaAllocator allocator, VkCommandPool cmdPool, VkQu
 }
 
 VulkanTexture::~VulkanTexture() {
+    // 先注销存活登记：此后任何仍持有本指针的使用者都应被判定为野指针
+    MarkTextureDead(this);
+
     for (auto& fv : m_FaceViews)
         if (fv) vkDestroyImageView(m_Device, fv, nullptr);
     m_FaceViews.clear();
