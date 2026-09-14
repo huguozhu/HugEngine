@@ -375,6 +375,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
 
     // ── 屏幕空间反射源：遍历 Provider（主 pass + 附属 pass，与 SSGI 同构）──
     render::ResourceHandle ssrDenoised = kInvalidHandle;   // 通道未启用时保持无效句柄
+    rhi::IRHITexture* ssrFinalTex = nullptr;   // Provider 给出的最终输出
     for (auto& prov : m_GIProviders) {
         if (!prov->Handles(GISourceId::SSR)) continue;
         prov->SyncToStack(m_GIConfig.specular);
@@ -414,12 +415,14 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             lastOut = auxH;
         }
         ssrDenoised = lastOut;
+        ssrFinalTex = prov->GetFinalSpecularOutput();
     }
 
     // ── 屏幕空间漫反射源：遍历 Provider（主 pass + 附属 pass）──
     // Wave 2 阶段 2：SSGI 的「主 pass + 降噪」链路由 Provider 自报（GetAuxPass*），
     // 帧图不再为其手写降噪 pass；新增屏幕空间 GI 只需注册 Provider。
     render::ResourceHandle ssgiDenoised = kInvalidHandle;  // 通道未启用时保持无效句柄
+    rhi::IRHITexture* ssgiFinalTex = nullptr;   // Provider 给出的最终输出（含降噪/半分辨率选择）
     for (auto& prov : m_GIProviders) {
         if (!prov->Handles(GISourceId::SSGI)) continue;
         prov->SyncToStack(m_GIConfig.diffuse);
@@ -460,6 +463,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             lastOut = auxH;
         }
         ssgiDenoised = lastOut;
+        ssgiFinalTex = prov->GetFinalDiffuseOutput();
     }
 
     // ============================================================
@@ -655,13 +659,12 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             in.lightBuffer  = m_LightBuffers[m_CurrentFrameSlot].get();
             in.shadowBuffer = m_ShadowBuffers[m_CurrentFrameSlot].get();
             in.ssaoTex    = m_SSAO.GetAOTexture();
-            // halfRes 时跳过 Denoise，Lighting 直接采样 SSGI/SSR 原始输出（与帧图注册的纹理一致）
-            in.ssgiTex    = m_SSGI.GetSettings().halfRes
-                          ? m_SSGI.GetIndirectDiffuseTexture() : m_DenoiseSSGI.GetOutput();
+            // 屏幕空间源的最终输出由 Provider 给出（已封装「有降噪取降噪、halfRes 取原始」
+            // 的选择），帧图不再重复判断 halfRes——避免两处逻辑不一致
+            in.ssgiTex     = ssgiFinalTex ? ssgiFinalTex : m_SSGI.GetIndirectDiffuseTexture();
             in.ssgiSampler = m_SSGI.GetOutputSampler();
-            in.ssrTex     = m_SSR.GetSettings().halfRes
-                          ? m_SSR.GetIndirectSpecularTexture() : m_DenoiseSSR.GetOutput();
-            in.ssrSampler = m_SSR.GetOutputSampler();
+            in.ssrTex      = ssrFinalTex ? ssrFinalTex : m_SSR.GetIndirectSpecularTexture();
+            in.ssrSampler  = m_SSR.GetOutputSampler();
             in.ddgiProbeBuffer = m_DDGI.GetProbeBuffer();
             in.ddgiGridUniform = m_DDGI.GetGridUniform();
             // RSM 间接光（有 RSM 渲染时喂给 Lighting——shader 内 rsmIndirect 分支）

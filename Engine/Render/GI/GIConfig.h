@@ -296,8 +296,6 @@ struct GIConfig {
     [[nodiscard]] bool AnyRTSource() const {
         return ShouldRunRTGI() || ShouldRunRTReflection() || ShouldRunRTAO() || ShouldRunRTShadow();
     }
-    /// 使用横跨屏幕空间/光追的"精确"漫反射源（决定 shader 的 rtDiffuseSource 与有效性）
-    [[nodiscard]] bool UseScreenDiffuse() const { return ShouldRunSSGI() || ShouldRunRTGI(); }
 
 
 };
