@@ -50,7 +50,9 @@ public:
     bool Initialize(rhi::IRHIDevice*, u32, u32) override { return m_Pass != nullptr; }
     void Shutdown() override {}
     void OnResize(u32, u32) override {}
-    void Render(rhi::IRHICommandList* cmd) override { if (m_Pass) m_Pass->Render(cmd); }
+    void Render(rhi::IRHICommandList* cmd, const GIProviderContext& /*ctx*/) override {
+        if (m_Pass) m_Pass->Render(cmd);
+    }
     void PreBind(rhi::IRHICommandList* cmd) override { if (m_Pass) m_Pass->PreBind(cmd); }
     void SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal) override {
         if (m_Pass) m_Pass->SetInputs(depth, normal);

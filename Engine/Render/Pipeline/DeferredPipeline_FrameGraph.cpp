@@ -309,10 +309,19 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                                 m_ObjectBuffers[m_CurrentFrameSlot].get(),
                                 m_ShadowSystem->GetShadowSampler(),
                                 rhi::kInvalidSet);
-        rg.AddPass("RSM_Generate", {}, {},
-            [&](rhi::IRHICommandList* c) {
-                m_RSM->RenderRSMPass(c, world, sg);
-            });
+        // ── RSM pass：遍历 Provider 注册（Wave 2 推广）──
+        // Provider 自报「是否需要本帧的 pass」（层栈含 RSM ∧ 源有效），
+        // 帧图只负责按注册顺序建 pass 并注入执行上下文。
+        for (auto& prov : m_GIProviders) {
+            if (!prov->Handles(GISourceId::RSM)) continue;
+            prov->SyncToStack(m_GIConfig.diffuse);
+            if (!prov->NeedsPass(m_GIConfig.diffuse)) continue;
+            rg.AddPass(prov->GetName(), {}, {},
+                [&, p = prov.get()](rhi::IRHICommandList* c) {
+                    GIProviderContext ctx{ &world, &sg, &camera, m_CurrentFrameSlot };
+                    p->Render(c, ctx);
+                });
+        }
         // 喂 DDGI：探针改用 RSM 世界辐射度
         m_DDGI.SetRSM(m_RSM->GetRSMPositionMap(), m_RSM->GetRSMFluxMap(), lightVP);
     }
@@ -354,13 +363,13 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         u32 aoW = aoTex->GetWidth();
         u32 aoH = aoTex->GetHeight();
         rg.AddPass(prov->GetName(), {}, {{ssaoOut, ResourceAccess::Write}},
-            [&, aoW, aoH, p = prov.get()](rhi::IRHICommandList* c) {
+            [&, aoW, aoH, p = prov.get(), aoCtx = GIProviderContext{ &world, &sg, &camera, m_CurrentFrameSlot }](rhi::IRHICommandList* c) {
                 p->PreBind(c);                                  // 绑定该源 pass 的管线状态
                 p->SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal());
                 rhi::ClearValue aoClear;
                 aoClear.color[0]=aoClear.color[1]=aoClear.color[2]=aoClear.color[3]=1.0f;
                 c->BeginOffscreenPass(p->GetAOOutput()->GetNativeHandle(), nullptr, aoW, aoH, &aoClear, false);
-                p->Render(c);
+                p->Render(c, aoCtx);
                 c->EndOffscreenPass();
             });
     }

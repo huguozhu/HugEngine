@@ -134,6 +134,19 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
         aoProvider->SetPass(&m_SSAO);
         aoProvider->Initialize(device, m_Width, m_Height);
         m_GIProviders.push_back(std::move(aoProvider));
+
+        // IBL（低频环境源，同时服务 diffuse 与 specular）
+        auto iblProvider = std::make_unique<IBLProvider>();
+        iblProvider->SetPass(dynamic_cast<GI_IBL*>(m_GI.get()));
+        m_GIProviders.push_back(std::move(iblProvider));
+
+        // RSM（中频单次反弹，Forward 与 Deferred 共用，需要场景数据）
+        if (m_RSM) {
+            auto rsmProvider = std::make_unique<RSMProvider>();
+            rsmProvider->SetPass(m_RSM.get());
+            m_GIProviders.push_back(std::move(rsmProvider));
+        }
+
         HE_CORE_INFO("DeferredPipeline: 已注册 {} 个 GI Provider", m_GIProviders.size());
     }
 

@@ -24,9 +24,12 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "PostProcess/SSAO.h"
 #include "GI/GI_SSR.h"
 #include "GI/GI_DDGI.h"
+#include "GI/GI_IBL.h"
 #include "GI/GIConfig.h"
 #include "GI/IGIProvider.h"   // GI 源统一抽象（P4）
 #include "GI/AOProvider.h"   // 屏幕空间 AO Provider（Wave 2 试点）
+#include "GI/IBLProvider.h"  // IBL 环境源 Provider
+#include "GI/RSMProvider.h"  // RSM 间接光 Provider
 #include "PostProcess/Denoiser.h"
 // RT 效果（P3 统一后 Deferred 亦可按层栈启用光追源）
 #include "RT/RTShadowPass.h"
