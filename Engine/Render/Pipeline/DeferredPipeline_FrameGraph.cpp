@@ -329,23 +329,22 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     // ============================================================
     // DDGI Probe Update（Compute Shader：必须放在所有 offscreen pass 之前，
     // 避免 compute pipeline 切换影响后续 render pass 状态）
+    // Wave 2 阶段 4：改为遍历 Provider（compute 类源，无通道纹理输出）
     // ============================================================
-    // DDGI Probe Update（仅当 GIConfig 选中 DDGI 才注册，未选中不注册不分配）
-    if (m_GIConfig.ShouldRunDDGI()) {
-        rg.AddPass("DDGI_Update",
+    for (auto& prov : m_GIProviders) {
+        if (!prov->Handles(GISourceId::DDGI)) continue;
+        prov->SyncToStack(m_GIConfig.diffuse);
+        if (!prov->NeedsPass(m_GIConfig.diffuse)) continue;
+        prov->SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetAlbedo());
+        if (auto* dp = dynamic_cast<DDGIProvider*>(prov.get())) dp->SetCamera(&camera);
+        rg.AddPass(prov->GetName(),
             {{gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbDepth, ResourceAccess::Read}},
             {},
-            [&](rhi::IRHICommandList* c) {
-                if (m_DDGI.IsEnabled()) {
-                    m_DDGI.SetGBufferInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetAlbedo());
-                    SubsystemContext dgiCtx;
-                    dgiCtx.camera = &camera;
-                    m_DDGI.Update(dgiCtx);
-                    m_DDGI.Render(c);
-                    c->SetPipeline(m_Lighting.GetPSO());
-                }
+            [&, p = prov.get(), cam = &camera](rhi::IRHICommandList* c) {
+                p->Render(c, GIProviderContext{ &world, &sg, cam, m_CurrentFrameSlot });
+                c->SetPipeline(m_Lighting.GetPSO());
             },
-            RGPassQueue::Graphics);  // 与 RSM_Generate 同队列顺序执行：探针采样 RSM 前必须确保 RSM 渲染完成
+            RGPassQueue::Graphics);  // 与 RSM 同队列顺序执行：探针采样 RSM 前必须确保 RSM 完成
     }
 
     // ── AO Pass：遍历已注册的 Provider（P4 / Wave 2）──

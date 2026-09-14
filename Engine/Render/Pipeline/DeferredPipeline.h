@@ -32,6 +32,7 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "GI/RSMProvider.h"  // RSM 间接光 Provider
 #include "GI/SSGIProvider.h" // 屏幕空间 GI Provider（含降噪附属 pass）
 #include "GI/SSRProvider.h"  // 屏幕空间反射 Provider
+#include "GI/DDGIProvider.h" // 动态漫反射探针 Provider（compute、无纹理输出）
 #include "PostProcess/Denoiser.h"
 // RT 效果（P3 统一后 Deferred 亦可按层栈启用光追源）
 #include "RT/RTShadowPass.h"

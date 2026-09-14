@@ -35,6 +35,13 @@ struct GIProviderContext {
 /// GI Provider 接口
 class IGIProvider {
 public:
+    /// pass 类型：决定帧图如何注册本源的 pass
+    enum class GIPassKind : u8 {
+        Offscreen,   // 全屏 offscreen pass（屏幕空间类：SSGI/SSR/SSAO/GTAO）
+        Compute,     // 计算着色器 pass（探针更新类：DDGI）
+        Custom,      // 自定义（如仅重建资源：IBL 烘焙）
+    };
+
     virtual ~IGIProvider() = default;
 
     // ── 身份：这个 Provider 代表哪个源 ──
@@ -46,6 +53,13 @@ public:
     /// 该 Provider 还能代表哪些源（用于「同 pass 多模式」：如 SSAO / GTAO 共用一个 pass）
     /// 默认只代表 GetSourceId()；返回 true 的 id 参与面板候选与层栈匹配
     [[nodiscard]] virtual bool Handles(GISourceId id) const { return id == GetSourceId(); }
+
+    /// 本源的 pass 类型（帧图据此选择注册方式）
+    [[nodiscard]] virtual GIPassKind GetPassKind() const { return GIPassKind::Offscreen; }
+    /// 本源的输出是否需要「通道纹理」供 Lighting 采样。
+    /// 探针/RSM 类源的产物由 shader 直接读取内部资源（缓冲/贴图集），故返回 false，
+    /// 帧图据此不做 ImportTexture 与输出依赖声明。
+    [[nodiscard]] virtual bool HasTextureOutput() const { return true; }
 
     // ── 状态与调度 ──
     /// 该源当前是否有效（可承载置信度语义：SSGI 全屏外、RTGI 未收敛、AO 关闭等）

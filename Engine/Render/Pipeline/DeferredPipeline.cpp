@@ -159,6 +159,11 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
         ssrProvider->SetDenoiser(&m_DenoiseSSR);
         m_GIProviders.push_back(std::move(ssrProvider));
 
+        // DDGI（动态漫反射探针；compute pass，无通道纹理输出）
+        auto ddgiProvider = std::make_unique<DDGIProvider>();
+        ddgiProvider->SetPass(&m_DDGI);
+        m_GIProviders.push_back(std::move(ddgiProvider));
+
         HE_CORE_INFO("DeferredPipeline: 已注册 {} 个 GI Provider", m_GIProviders.size());
     }
 
