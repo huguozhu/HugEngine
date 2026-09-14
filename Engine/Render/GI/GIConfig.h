@@ -236,14 +236,24 @@ inline bool IsRayTracingSource(GISourceId id) {
 }
 
 /// 各管线能力预设
+///
+/// 注意区分两层判断：
+///   · 管线能力（此处的位）：该管线**架构上**能否承载这个源
+///   · 设备能力（Degrade 的 rtSupported）：光追源还需硬件支持
+/// 由于光追已并入 Deferred（HybridRT 管线已移除），Deferred 的位包含全部
+/// 光追源；无光追设备由 GIRegistry::Degrade 的 rtSupported 逐源裁剪。
 namespace PipelineCaps {
-    // Forward：光栅阴影 + IBL 环境 + RSM 间接（无屏幕空间 SSGI/SSR/SSAO，无 DDGI）
+    // Forward：光栅阴影 + IBL 环境 + RSM 间接
+    //（前向着色无 GBuffer，故无屏幕空间源 SSGI/SSR/SSAO/GTAO，也无探针 DDGI）
     constexpr u32 Forward  = kPipelineGIShadowRaster | kPipelineGIDiffIBL | kPipelineGISpecIBL
                            | kPipelineGIDiffRSM;
+    // Deferred：Forward + 屏幕空间源 + 探针 + 全部光追源
     constexpr u32 Deferred = Forward | kPipelineGIAOSSAO | kPipelineGISpecSSR
-                           | kPipelineGIDiffSSGI | kPipelineGIDiffDDGI;
-    constexpr u32 HybridRT = Deferred | kPipelineGIShadowRT | kPipelineGIAORTAO
+                           | kPipelineGIDiffSSGI | kPipelineGIDiffDDGI
+                           | kPipelineGIShadowRT | kPipelineGIAORTAO
                            | kPipelineGISpecRT | kPipelineGIDiffRTGI;
+    // 注：原先的 HybridRT 预设已移除——HybridRT 管线本身已删除，
+    //     其光追能力位已并入 Deferred（无光追设备由 rtSupported 进一步裁剪）。
 }
 
 // ============================================================
