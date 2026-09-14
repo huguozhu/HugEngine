@@ -207,6 +207,24 @@ minidump `Build/bin/Debug/06.GILab_crash.dmp`（可用 Visual Studio 打开）�
 （光追源需 `rtSupported`）× 层栈选择（`weight>0`）。
 **实测**：Deferred + RTX 4060 下单次运行同时启用全部 10 源，RG pass 链完整生成。
 
+### 遗留任务清理进度（2026-09-14）
+
+> 主线任务（Wave 0/1/2）完成后，对文档中记录的遗留项按「先易后难」分批清理。
+
+| 批次 | 任务 | 状态 | 提交 |
+|---|---|---|---|
+| **第 1 批** | **M4.4 RSM VPL 降采样 25→16** | ✅ 完成：5×5 规则网格（条纹伪影）→ **16 点 Poisson 盘**；能量常数按 `E ≈ (1/N)·Σ VPL` 由 0.03 重标定为 0.046875 | `42db644` |
+| | **M4.5 GBuffer 通道合并** | ⏭️ **不适用**（经核查）：metallic/roughness 嵌在需 16 位精度的 MRT0/MRT1 的 alpha 通道，拆独立 MRT 反增带宽；真正可降的是 MRT5/6 的 Disney 参数（优先级低） | `42db644` |
+| | **06 面板候选全部由注册表派生** | ✅ 完成：Diffuse / Specular 也改为从 Provider 注册表派生（与 AO 一致），未接入 Provider 的源（如预留的 Lightmap）不再出现在面板 | `42db644` |
+| | **文档同步（E1/E2）** | ✅ 完成：§1.2 待做表与主线 M5/M6/P4/P5 标记更新；设计文档 3.1 数据模型按实现回写（`GISourceDesc`/`kMaxSources`/`mode`/`Fallback` 与 `FrequencySplit` 未实现） | `42db644` |
+| **第 2 批** | **B4 · M5.2-A DDGI 光追射线 march**（+ 按 `supportsRayTracing` 自动选择） | ⏳ 待做 | — |
+| | **B3 · RSM VPL 的 halfRes** | ⏳ 待做 | — |
+| | **D2 · 层栈权重归一化的 CPU 单测**（需先抽 RHI-free 的 `GI/GITypes.h`） | ⏳ 待做 | — |
+| **第 3 批** | **Wave 3 · P5 频率分离**（`FrequencySplit` 合成模式 + 低频基底/高频残差 + 时序稳定 + 面板 A/B） | ⏳ 待做（前提已全部就绪） | — |
+| **第 4 批** | **Wave 5**：P6 ReSTIR 统一估计器 · Lightmap 源落地 · **D1** 崩溃根因获证 | ⏳ 待做（长期） | — |
+
+**当前验证基线**：编译通过 ✅ · 06 运行正常 ✅ · 白炉读数 **1.0000** ✅ · 校验违规 **0/0/0/0** ✅
+
 ---
 
 ## 一、现状核对（文档声明 ∧ 代码实证）
