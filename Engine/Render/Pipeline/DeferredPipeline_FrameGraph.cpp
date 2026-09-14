@@ -463,25 +463,24 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     }
 
     // ============================================================
-    // RT 效果段（P3：光追作为「GI 源」，按层栈启用——Deferred 亦可使用）
-    //   AS_Build → RT_GI (+时域/空间降噪) ；其余 RT 源（反射/AO/阴影）后续接入
+    // RT 效果段（Wave 2 阶段 5：四种 RT 效果共用 Provider，按层栈/阴影枚举启用）
+    //   AS_Build（共享前置，不是"源"）→ 各效果主 pass + 时域/空间降噪附属 pass
+    //   新增 RT 效果只需注册一个 RTEffectProvider 实例，帧图无需改动
     // ============================================================
     rhi::IRHITexture* rtGITex = nullptr;
     rhi::IRHITexture* rtShadowTex = nullptr;
     rhi::IRHITexture* rtAOTex = nullptr;
     rhi::IRHITexture* rtReflectionTex = nullptr;
     if (m_RTEnabled && m_GIConfig.AnyRTSource() && m_RTPass) {
-        // RT 效果需要光源数据（光照缓冲已在帧首填充）；此处收集一次供 RT pass 使用
+        // RT 效果需要光源数据（光照缓冲已在帧首填充）
         PushConstantData rtfpc{};
         CollectLights(rtfpc, world, sg, camera);
 
-        // 加速结构（TLAS）构建：每帧一次，供所有 RT 效果使用
+        // 加速结构（TLAS）构建：每帧一次，由所有 RT 效果共享
         rg.AddPass("AS_Build", {}, {},
-            [this, &world, &sg](rhi::IRHICommandList* c) {
-                m_RTPass->BuildAS(c, world, sg);
-            });
+            [this, &world, &sg](rhi::IRHICommandList* c) { m_RTPass->BuildAS(c, world, sg); });
 
-        // 场景材质纹理（ClosestHit 材质查询）：首帧延迟构建一次（CPU 侧，场景静态时无需重建）
+        // 场景材质纹理（ClosestHit 材质查询）：首帧延迟构建一次（CPU 侧）
         if (!m_SceneMaterialBuilt) {
             if (m_RTPass->BuildSceneMaterialTexture(m_Device, world)) {
                 m_SceneMaterialBuilt = true;
@@ -490,190 +489,70 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             }
         }
 
-        if (m_GIConfig.ShouldRunRTShadow() && m_RTShadow && m_RTShadow->IsValid()) {
-            // ── RT 阴影（半分辨率遮罩 → 时域降噪）──
-            rtShadowTex = m_RTShadow->GetOutput();
-            const ResourceHandle rtShadowHandle = rg.ImportTexture("RT_ShadowMask", rtShadowTex);
-            rg.AddPass("RT_Shadow",
-                {{gbDepth, ResourceAccess::Read}, {gbB, ResourceAccess::Read}},
-                {{rtShadowHandle, ResourceAccess::UAV}},
-                [this, &camera, rtfpc](rhi::IRHICommandList* c) {
-                    RTExecuteContext ctx;
-                    ctx.invViewProj = glm::inverse(camera.GetViewProjMatrix());
-                    ctx.cameraPos   = camera.position;
-                    ctx.frameIndex  = m_CurrentFrameSlot;
-                    ctx.gbDepth     = m_GBuffer->GetDepth();
-                    ctx.gbNormal    = m_GBuffer->GetNormal();
-                    ctx.lightBuffer = m_LightBuffers[m_CurrentFrameSlot].get();
-                    ctx.lightCount  = rtfpc.lightCount;
-                    m_RTShadow->Execute(c, m_RTPass->GetTLAS(), ctx);
-                });
-            if (m_ShadowDenoiser && m_ShadowDenoiser->IsReady()) {
-                rtShadowTex = m_ShadowDenoiser->GetOutput();
-                const ResourceHandle rtShadowDenoised = rg.ImportTexture("RT_ShadowMask_Denoised", rtShadowTex);
-                rg.AddPass("RT_Shadow_Denoise",
-                    {{rtShadowHandle, ResourceAccess::Read}, {gbDepth, ResourceAccess::Read},
-                     {gbB, ResourceAccess::Read}, {gbVel, ResourceAccess::Read}},
-                    {{rtShadowDenoised, ResourceAccess::Write}},
-                    [this](rhi::IRHICommandList* c) {
-                        m_ShadowDenoiser->SetInputs(m_RTShadow->GetOutput(),
-                            m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetVelocity());
-                        m_ShadowDenoiser->Render(c);
-                    });
-            }
-        }
+        const GIProviderContext rtCtx{ &world, &sg, &camera, m_CurrentFrameSlot,
+                                       m_LightBuffers[m_CurrentFrameSlot].get(), rtfpc.lightCount,
+                                       m_RTPass->GetTLAS() };
 
-        if (m_GIConfig.ShouldRunRTAO() && m_RTAO && m_RTAO->IsValid()) {
-            // ── RT AO（半分辨率遮罩 → 时域降噪）──
-            rtAOTex = m_RTAO->GetOutput();
-            const ResourceHandle rtAOHandle = rg.ImportTexture("RT_AO", rtAOTex);
-            rg.AddPass("RT_AO",
-                {{gbDepth, ResourceAccess::Read}, {gbB, ResourceAccess::Read}},
-                {{rtAOHandle, ResourceAccess::UAV}},
-                [this, &camera](rhi::IRHICommandList* c) {
-                    RTExecuteContext ctx;
-                    ctx.invViewProj = glm::inverse(camera.GetViewProjMatrix());
-                    ctx.cameraPos   = camera.position;
-                    ctx.frameIndex  = m_CurrentFrameSlot;
-                    ctx.gbDepth     = m_GBuffer->GetDepth();
-                    ctx.gbNormal    = m_GBuffer->GetNormal();
-                    m_RTAO->Execute(c, m_RTPass->GetTLAS(), ctx);
-                });
-            if (m_AODenoiser && m_AODenoiser->IsReady()) {
-                rtAOTex = m_AODenoiser->GetOutput();
-                const ResourceHandle rtAODenoised = rg.ImportTexture("RT_AO_Denoised", rtAOTex);
-                rg.AddPass("RT_AO_Denoise",
-                    {{rtAOHandle, ResourceAccess::Read}, {gbDepth, ResourceAccess::Read},
-                     {gbB, ResourceAccess::Read}, {gbVel, ResourceAccess::Read}},
-                    {{rtAODenoised, ResourceAccess::Write}},
-                    [this](rhi::IRHICommandList* c) {
-                        m_AODenoiser->SetInputs(m_RTAO->GetOutput(),
-                            m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetVelocity());
-                        m_AODenoiser->Render(c);
-                    });
-            }
-        }
+        for (auto& prov : m_GIProviders) {
+            auto* rtp = dynamic_cast<RTEffectProvider*>(prov.get());
+            if (!rtp) continue;   // 只处理光追效果源
+            rtp->SetRTShadowWanted(m_GIConfig.ShouldRunRTShadow());
+            rtp->SetVelocity(m_GBuffer->GetVelocity());
+            rtp->SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetAlbedo());
 
-        if (m_GIConfig.ShouldRunRTReflection() && m_RTReflection && m_RTReflection->IsValid()) {
-            // ── RT 反射（半分辨率 → 时域累积 + 空间滤波）──
-            rtReflectionTex = m_RTReflection->GetOutput();
-            const ResourceHandle rtReflectionHandle = rg.ImportTexture("RT_Reflection", rtReflectionTex);
-            rg.AddPass("RT_Reflection",
+            // 该效果对应的层栈通道（RT 阴影为独立枚举，不属三通道）
+            const GIChannelStack& stack =
+                  rtp->IsShadowEffect()                            ? m_GIConfig.diffuse
+                : (rtp->GetSourceId() == GISourceId::RTAO)         ? m_GIConfig.ao
+                : (rtp->GetSourceId() == GISourceId::RTReflection) ? m_GIConfig.specular
+                                                                   : m_GIConfig.diffuse;
+            if (!rtp->NeedsPass(stack)) continue;
+
+            rhi::IRHITexture* mainTex =
+                  rtp->IsShadowEffect()                            ? rtp->GetShadowOutput()
+                : (rtp->GetSourceId() == GISourceId::RTAO)         ? rtp->GetAOOutput()
+                : (rtp->GetSourceId() == GISourceId::RTReflection) ? rtp->GetSpecularOutput()
+                                                                   : rtp->GetDiffuseOutput();
+            if (!mainTex) continue;
+
+            const u32 pw = mainTex->GetWidth();
+            const u32 ph = mainTex->GetHeight();
+            const auto mainH = rg.ImportTexture(prov->GetName(), mainTex);
+            rg.AddPass(prov->GetName(),
                 {{gbDepth, ResourceAccess::Read}, {gbB, ResourceAccess::Read}},
-                {{rtReflectionHandle, ResourceAccess::UAV}},
-                [this, &camera, rtfpc](rhi::IRHICommandList* c) {
-                    RTExecuteContext ctx;
-                    ctx.invViewProj = glm::inverse(camera.GetViewProjMatrix());
-                    ctx.cameraPos   = camera.position;
-                    ctx.frameIndex  = m_CurrentFrameSlot;
-                    ctx.gbDepth     = m_GBuffer->GetDepth();
-                    ctx.gbNormal    = m_GBuffer->GetNormal();
-                    ctx.lightBuffer = m_LightBuffers[m_CurrentFrameSlot].get();
-                    ctx.lightCount  = rtfpc.lightCount;
-                    ctx.sceneMaterialTex     = m_RTPass->GetSceneMaterialTexture();
-                    ctx.sceneTriangleNormals = m_RTPass->GetSceneTriangleNormals();
-                    m_RTReflection->Execute(c, m_RTPass->GetTLAS(), ctx);
-                });
-            rhi::IRHITexture* rtReflSpatialIn = rtReflectionTex;
-            if (m_ReflectionDenoiser && m_ReflectionDenoiser->IsReady()) {
-                rtReflectionTex = m_ReflectionDenoiser->GetOutput();
-                rtReflSpatialIn = rtReflectionTex;
-                const ResourceHandle rtReflectionTemporal = rg.ImportTexture("RT_Reflection_Temporal", rtReflectionTex);
-                rg.AddPass("RT_Reflection_Temporal",
-                    {{rtReflectionHandle, ResourceAccess::Read}, {gbDepth, ResourceAccess::Read},
+                {{mainH, ResourceAccess::UAV}},
+                [p = prov.get(), rtCtx](rhi::IRHICommandList* c) { p->Render(c, rtCtx); });
+
+            // 附属 pass（时域累积 → 空间滤波）
+            render::ResourceHandle lastOut = mainH;
+            for (u32 i = 0; i < rtp->GetAuxPassCount(); i++) {
+                rhi::IRHITexture* auxTex = rtp->GetAuxPassOutput(i);
+                if (!auxTex) continue;
+                const auto auxH = rg.ImportTexture(rtp->GetAuxPassName(i), auxTex);
+                const u32 aw = auxTex->GetWidth();
+                const u32 ah = auxTex->GetHeight();
+                rg.AddPass(rtp->GetAuxPassName(i),
+                    {{lastOut, ResourceAccess::Read}, {gbDepth, ResourceAccess::Read},
                      {gbB, ResourceAccess::Read}, {gbVel, ResourceAccess::Read}},
-                    {{rtReflectionTemporal, ResourceAccess::Write}},
-                    [this](rhi::IRHICommandList* c) {
-                        m_ReflectionDenoiser->SetInputs(m_RTReflection->GetOutput(),
-                            m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetVelocity());
-                        m_ReflectionDenoiser->Render(c);
-                    });
-            }
-            if (m_ReflectionSpatial.IsReady()) {
-                rtReflectionTex = m_ReflectionSpatial.GetOutput();
-                const ResourceHandle rtReflectionDenoised = rg.ImportTexture("RT_Reflection_Denoised", rtReflectionTex);
-                rg.AddPass("RT_Reflection_Spatial",
-                    {{rtReflectionHandle, ResourceAccess::Read}, {gbDepth, ResourceAccess::Read},
-                     {gbB, ResourceAccess::Read}},
-                    {{rtReflectionDenoised, ResourceAccess::Write}},
-                    [this, rtReflSpatialIn, rw = m_RTReflection->GetWidth(), rh = m_RTReflection->GetHeight()]
-                    (rhi::IRHICommandList* c) {
-                        m_ReflectionSpatial.PreBind(c);
-                        m_ReflectionSpatial.SetInputs(rtReflSpatialIn,
-                            m_GBuffer->GetDepth(), m_GBuffer->GetNormal());
+                    {{auxH, ResourceAccess::Write}},
+                    [p = prov.get(), i, aw, ah](rhi::IRHICommandList* c) {
+                        p->PreBindAux(c, i);
                         rhi::ClearValue clr{};
-                        c->BeginOffscreenPass(m_ReflectionSpatial.GetOutput()->GetNativeHandle(),
-                            nullptr, rw, rh, &clr, false);
-                        m_ReflectionSpatial.Render(c);
+                        c->BeginOffscreenPass(p->GetAuxPassOutput(i)->GetNativeHandle(),
+                            nullptr, aw, ah, &clr, false);
+                        p->RenderAux(c, i, GIProviderContext{});
                         c->EndOffscreenPass();
                     });
+                lastOut = auxH;
             }
-        }
 
-        if (m_GIConfig.ShouldRunRTGI()) {
-            rtGITex = m_RTGI->GetOutput();
-            const ResourceHandle rtGIHandle = rg.ImportTexture("RT_GI", rtGITex);
-            rg.AddPass("RT_GI",
-                {{gbDepth, ResourceAccess::Read}, {gbB, ResourceAccess::Read}},
-                {{rtGIHandle, ResourceAccess::UAV}},
-                [this, &camera, rtfpc](rhi::IRHICommandList* c) {
-                    RTExecuteContext ctx;
-                    ctx.invViewProj = glm::inverse(camera.GetViewProjMatrix());
-                    ctx.cameraPos   = camera.position;
-                    ctx.frameIndex  = m_CurrentFrameSlot;
-                    ctx.gbDepth     = m_GBuffer->GetDepth();
-                    ctx.gbNormal    = m_GBuffer->GetNormal();
-                    ctx.lightBuffer = m_LightBuffers[m_CurrentFrameSlot].get();
-                    ctx.lightCount  = rtfpc.lightCount;
-                    ctx.sceneMaterialTex     = m_RTPass->GetSceneMaterialTexture();
-                    ctx.sceneTriangleNormals = m_RTPass->GetSceneTriangleNormals();
-                    ctx.ddgiProbeBuffer = m_DDGI.GetProbeBuffer();   // miss 回退：DDGI 探针
-                    ctx.ddgiGridUniform = m_DDGI.GetGridUniform();
-                    m_RTGI->Execute(c, m_RTPass->GetTLAS(), ctx);
-                });
-
-            // 时域累积（低分辨率信号用历史累积降噪）
-            rhi::IRHITexture* rtGITemporalTex = nullptr;
-            ResourceHandle rtGITemporalHandle = kInvalidHandle;
-            if (m_GIDenoiser && m_GIDenoiser->IsReady()) {
-                rtGITemporalTex = m_GIDenoiser->GetOutput();
-                rtGITemporalHandle = rg.ImportTexture("RT_GI_Temporal", rtGITemporalTex);
-                rg.AddPass("RT_GI_Temporal",
-                    {{rtGIHandle, ResourceAccess::Read}, {gbDepth, ResourceAccess::Read},
-                     {gbB, ResourceAccess::Read}, {gbVel, ResourceAccess::Read}},
-                    {{rtGITemporalHandle, ResourceAccess::Write}},
-                    [this](rhi::IRHICommandList* c) {
-                        m_GIDenoiser->SetInputs(m_RTGI->GetOutput(),
-                            m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetVelocity());
-                        m_GIDenoiser->Render(c);
-                    });
-            }
-            // 空间滤波（四分之一分辨率锯齿用 5×5 双边滤波补足）
-            if (rtGITemporalHandle != kInvalidHandle) rtGITex = rtGITemporalTex;
-            if (m_GISpatial.IsReady() && rtGITemporalTex) {
-                const ResourceHandle rtGISpatialIn = rtGITemporalHandle;
-                rtGITex = m_GISpatial.GetOutput();
-                const ResourceHandle rtGISpatialHandle = rg.ImportTexture("RT_GI_Denoised", rtGITex);
-                rg.AddPass("RT_GI_Spatial",
-                    {{rtGISpatialIn, ResourceAccess::Read}, {gbDepth, ResourceAccess::Read},
-                     {gbB, ResourceAccess::Read}},
-                    {{rtGISpatialHandle, ResourceAccess::Write}},
-                    [this, rtGITemporalTex, rw = m_RTGI->GetWidth(), rh = m_RTGI->GetHeight()]
-                    (rhi::IRHICommandList* c) {
-                        m_GISpatial.PreBind(c);
-                        m_GISpatial.SetInputs(rtGITemporalTex,
-                            m_GBuffer->GetDepth(), m_GBuffer->GetNormal());
-                        rhi::ClearValue clr{};
-                        c->BeginOffscreenPass(m_GISpatial.GetOutput()->GetNativeHandle(),
-                            nullptr, rw, rh, &clr, false);
-                        m_GISpatial.Render(c);
-                        c->EndOffscreenPass();
-                    });
-            }
+            // 记录各通道最终输出（供 Lighting 采样）
+            if (rtp->IsShadowEffect())                               rtShadowTex     = rtp->GetShadowOutput();
+            else if (rtp->GetSourceId() == GISourceId::RTAO)         rtAOTex         = rtp->GetFinalAOOutput();
+            else if (rtp->GetSourceId() == GISourceId::RTReflection) rtReflectionTex = rtp->GetFinalSpecularOutput();
+            else                                                     rtGITex         = rtp->GetFinalDiffuseOutput();
         }
     }
-
-    // ── 天空盒喂给 GI_IBL（脏标记触发 IBL 重生成，生成在 Lighting lambda 内联执行）──
     {
         auto* giIBL = dynamic_cast<GI_IBL*>(m_GI.get());
         if (giIBL) {

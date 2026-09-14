@@ -24,12 +24,18 @@ namespace he::render {
 struct CameraData;   // 前向声明（避免头文件循环）
 
 /// Provider 执行上下文（帧图在调用 Render/RenderAux 时注入）
-/// 有些源只依赖 GBuffer（如屏幕空间 AO），有些需要场景数据（RSM/DDGI 需要光源与几何）
+/// 有些源只依赖 GBuffer（如屏幕空间 AO），有些需要场景数据（RSM/DDGI 需要光源与几何），
+/// 光追类源还需要加速结构与光照缓冲。
 struct GIProviderContext {
     he::World*       world      = nullptr;   // 场景（RSM/DDGI 生成探针用）
     he::SceneGraph*  sceneGraph = nullptr;
     const CameraData* camera    = nullptr;
     u32              frameIndex = 0;
+
+    // ── 光追类源所需（由帧图注入）──
+    rhi::IRHIBuffer* lightBuffer = nullptr;   // 光照缓冲（射线命中着色用）
+    u32              lightCount  = 0;
+    rhi::IRHIAccelerationStructure* tlas = nullptr;   // 顶层加速结构（AS_Build 产物）
 };
 
 /// GI Provider 接口

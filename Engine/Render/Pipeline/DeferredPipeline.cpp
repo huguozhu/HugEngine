@@ -164,7 +164,10 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
         ddgiProvider->SetPass(&m_DDGI);
         m_GIProviders.push_back(std::move(ddgiProvider));
 
-        HE_CORE_INFO("DeferredPipeline: 已注册 {} 个 GI Provider", m_GIProviders.size());
+        // 光追效果（RT 阴影 / RTAO / RT 反射 / RTGI）在 RT 基础设施初始化之后注册
+        //（见下方 RT 基础设施段落末尾）——此处 m_RTPass 等尚未创建。
+
+        HE_CORE_INFO("DeferredPipeline: 已注册 {} 个 GI Provider（不含 RT）", m_GIProviders.size());
     }
 
     // ============================================================
@@ -261,6 +264,35 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
             m_RTPass.reset();
             HE_CORE_WARN("DeferredPipeline: RTPass 初始化失败，RT 禁用");
         }
+    }
+
+    // ── 光追效果 Provider 注册（必须在 RT 基础设施初始化之后）──
+    // 四种效果（RT 阴影 / RTAO / RT 反射 / RTGI）共用一个参数化 Provider 实现
+    if (m_RTEnabled && m_RTPass) {
+        auto makeRT = [&](RTEffectProvider::Effect eff) {
+            auto p = std::make_unique<RTEffectProvider>(eff);
+            p->SetAS(m_RTPass.get());
+            switch (eff) {
+            case RTEffectProvider::Effect::Shadow:
+                p->SetShadowPass(m_RTShadow.get(), m_ShadowDenoiser.get()); break;
+            case RTEffectProvider::Effect::AO:
+                p->SetAOPass(m_RTAO.get(), m_AODenoiser.get()); break;
+            case RTEffectProvider::Effect::Reflection:
+                p->SetReflectionPass(m_RTReflection.get(), m_ReflectionDenoiser.get(),
+                                     &m_ReflectionSpatial); break;
+            default:
+                p->SetGIPass(m_RTGI.get(), m_GIDenoiser.get(), &m_GISpatial);
+                p->SetDDGIFallback(m_DDGI.GetProbeBuffer(), m_DDGI.GetGridUniform());
+                break;
+            }
+            m_GIProviders.push_back(std::move(p));
+        };
+        makeRT(RTEffectProvider::Effect::Shadow);
+        makeRT(RTEffectProvider::Effect::AO);
+        makeRT(RTEffectProvider::Effect::Reflection);
+        makeRT(RTEffectProvider::Effect::GI);
+        HE_CORE_INFO("DeferredPipeline: 光追 Provider 注册完成（共 {} 个 Provider）",
+                     m_GIProviders.size());
     }
     // Bloom / FXAA / TAA / AutoExposure 已在 PostProcessChain::Initialize() 中创建
 
