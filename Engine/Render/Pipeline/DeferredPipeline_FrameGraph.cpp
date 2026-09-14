@@ -572,6 +572,19 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     he::GetPhysicalSkySun(world, atmSunDir, atmTurbidity);   // 无条件更新，天空移除时复位浑浊度=0（与 Forward 一致）
     m_Lighting.SetAtmosphere(atmSunDir, atmTurbidity);
 
+    // ── 低频环境源（IBL）烘焙：遍历 Provider ──
+    // IBL 无独立 offscreen pass，其辐照度/预滤波贴图由天空盒烘焙而来（脏时重建）；
+    // 产物由 Lighting 直接采样，故本 pass 必须排在 Lighting 之前。
+    for (auto& prov : m_GIProviders) {
+        if (!prov->Handles(GISourceId::IBL)) continue;
+        prov->SyncToStack(m_GIConfig.diffuse);
+        if (!prov->NeedsPass(m_GIConfig.diffuse)) continue;
+        rg.AddPass("IBL_Bake", {}, {},
+            [&, p = prov.get()](rhi::IRHICommandList* c) {
+                p->Render(c, GIProviderContext{ &world, &sg, &camera, m_CurrentFrameSlot });
+            });
+    }
+
     // Lighting 读取依赖：仅在对应通道注册了 pass 时才加入（避免无效句柄）
     std::vector<render::PassResource> lightingReads = {
         {gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbC, ResourceAccess::Read},
@@ -597,7 +610,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             // IBL 生成（天空盒 → Irradiance/Prefilter/BRDF LUT，脏时才重建）+ 绑定到 Lighting 描述符集
             auto* giIBL = dynamic_cast<GI_IBL*>(m_GI.get());
             if (giIBL) {
-                if (giIBL->IsDirty()) giIBL->Render(c);
+                // 烘焙已由帧图主线的 IBL_Bake pass（Provider 遍历）完成，此处只做绑定
                 m_Lighting.SetIBLTextures(giIBL->GetIrradianceMap(), giIBL->GetPrefilterMap(),
                                           giIBL->GetBRDF_LUT(), giIBL->GetIBLSampler());
             }

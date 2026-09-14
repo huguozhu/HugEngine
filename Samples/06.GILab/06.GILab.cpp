@@ -1076,6 +1076,7 @@ int main() {
 
             // ---- Diffuse（间接漫反射）----
             {
+                // P4：候选源按「低频 → 高频」排列（IBL/DDGI → SSGI/RSM → RTGI）
                 static const render::GISourceId kDiffuseSources[] = {
                     render::GISourceId::IBL, render::GISourceId::DDGI, render::GISourceId::SSGI,
                     render::GISourceId::RSM, render::GISourceId::RTGI };
