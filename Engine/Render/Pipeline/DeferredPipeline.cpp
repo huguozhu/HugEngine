@@ -122,10 +122,20 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     m_SSGI.SetEnabled(m_GIConfig.ShouldRunSSGI());
     m_SSR.SetEnabled(m_GIConfig.ShouldRunSSR());
     m_DDGI.SetEnabled(m_GIConfig.ShouldRunDDGI());
-    m_SSAO.enabled = m_GIConfig.ShouldRunSSAO();
+    m_SSAO.enabled = m_GIConfig.ShouldRunAO();
     m_SSGI.OnResize(m_Width, m_Height);
     m_SSR.OnResize(m_Width, m_Height);
     m_SSAO.OnResize(m_Width, m_Height);
+
+    // ── GI Provider 注册（P4 / Wave 2：帧图按注册表遍历构建 pass）──
+    // 试点：AO 通道（SSAO / GTAO 共用一个 pass，由 Provider 表达「同 pass 多模式」）
+    {
+        auto aoProvider = std::make_unique<ScreenAOProvider>();
+        aoProvider->SetPass(&m_SSAO);
+        aoProvider->Initialize(device, m_Width, m_Height);
+        m_GIProviders.push_back(std::move(aoProvider));
+        HE_CORE_INFO("DeferredPipeline: 已注册 {} 个 GI Provider", m_GIProviders.size());
+    }
 
     // ============================================================
     // RT 基础设施（P3：光追是「GI 源」而非「管线类型」）

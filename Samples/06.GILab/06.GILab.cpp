@@ -1136,9 +1136,20 @@ int main() {
 
             // ---- AO（环境光遮蔽）----
             {
-                static const render::GISourceId kAOSources[] = {
-                    render::GISourceId::SSAO, render::GISourceId::GTAO, render::GISourceId::RTAO };
-                channelUI("AO — 环境光遮蔽", gc.ao, kAOSources, 3);
+                // P4：候选源从已注册的 GI Provider 派生（不再硬编码源列表）。
+                // 目前 SSAO/GTAO 已 Provider 化；RTAO 尚未（留待下一波次推广）。
+                std::vector<render::GISourceId> aoSources;
+                if (dp) {
+                    for (auto& p : dp->GetGIProviders()) {
+                        if (p->Handles(render::GISourceId::SSAO)) {
+                            aoSources.push_back(render::GISourceId::SSAO);
+                            aoSources.push_back(render::GISourceId::GTAO);
+                        }
+                    }
+                }
+                if (aoSources.empty()) aoSources.push_back(render::GISourceId::SSAO);
+                aoSources.push_back(render::GISourceId::RTAO);   // 尚未 Provider 化
+                channelUI("AO — 环境光遮蔽", gc.ao, aoSources.data(), (int)aoSources.size());
                 ImGui::Indent(12.0f);
                 ImGui::SliderFloat("AO 强度##gc", &gc.aoIntensity, 0.0f, 1.5f, "%.2f");
                 if (dp) {

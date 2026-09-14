@@ -25,6 +25,8 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "GI/GI_SSR.h"
 #include "GI/GI_DDGI.h"
 #include "GI/GIConfig.h"
+#include "GI/IGIProvider.h"   // GI 源统一抽象（P4）
+#include "GI/AOProvider.h"   // 屏幕空间 AO Provider（Wave 2 试点）
 #include "PostProcess/Denoiser.h"
 // RT 效果（P3 统一后 Deferred 亦可按层栈启用光追源）
 #include "RT/RTShadowPass.h"
@@ -93,6 +95,9 @@ public:
     ProfilerManager&    GetProfiler()      { return m_Profiler; }
     /// Lighting 通道（暴露 HDR 目标等，供结果校验类功能读取，如白炉测试探针）
     LightingPass&       GetLighting()      { return m_Lighting; }
+    /// 已注册的 GI Provider（帧图按注册表遍历构建 pass，而非手写门控）
+    std::vector<std::unique_ptr<IGIProvider>>& GetGIProviders() { return m_GIProviders; }
+
     // RT 基础设施访问（供 PathTracingPipeline 共享同一份 TLAS，避免重复内存）
     RTPass*             GetRTPass()        { return m_RTPass.get(); }
     ProfilerPanel&      GetProfilerPanel() { return m_ProfilerPanel; }
@@ -180,6 +185,7 @@ private:
     GI_SSR  m_SSR;
     GI_DDGI m_DDGI;
     GIConfig m_GIConfig;   // GI 配置（M2 档位/通道/强度 → P3 源层栈单一数据源）
+    std::vector<std::unique_ptr<IGIProvider>> m_GIProviders;   // 已注册的 GI 源（P4）
 
     // ── RT 基础设施（设备支持光追时创建；是否参与由层栈的 RT 源决定）──
     // P3：光追是「GI 源」而非「管线类型」，故 Deferred 亦可直接启用 RTGI/RT 反射/RTAO/RT 阴影

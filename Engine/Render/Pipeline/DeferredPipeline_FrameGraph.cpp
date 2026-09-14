@@ -339,25 +339,28 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             RGPassQueue::Graphics);  // 与 RSM_Generate 同队列顺序执行：探针采样 RSM 前必须确保 RSM 渲染完成
     }
 
-    // AO Pass（SSAO 或 GTAO——仅当 GIConfig 的 AO 层栈含源才注册）
-    // M6.3：GTAO 与 SSAO 是同类互斥算法（都估计「环境光遮蔽」），共用同一 pass，
-    //       由层栈决定用哪个着色器；二者同时启用时 GTAO 生效。
-    if (m_GIConfig.ShouldRunAO()) {
-        m_SSAO.useGTAO = m_GIConfig.ShouldRunGTAO();
-        auto ssaoOut = rg.ImportTexture("SSAO_Output", m_SSAO.GetAOTexture());
+    // ── AO Pass：遍历已注册的 Provider（P4 / Wave 2）──
+    // 替代原先手写的「ShouldRunAO + useGTAO 赋值 + 固定 pass 名」：
+    // 只要 Provider 声明处理该通道的源且 NeedsPass 为真，就为它注册 pass。
+    // 新增 AO 类算法（如 HBAO/VXAO）只需注册一个新 Provider，此处不再改动。
+    for (auto& prov : m_GIProviders) {
+        if (!prov->Handles(GISourceId::SSAO) && !prov->Handles(GISourceId::GTAO)) continue;  // 非 AO 通道
+        prov->SyncToStack(m_GIConfig.ao);                       // 层栈要求 GTAO → 切 pass 模式
+        if (!prov->NeedsPass(m_GIConfig.ao)) continue;
+        rhi::IRHITexture* aoTex = prov->GetAOOutput();
+        if (!aoTex) continue;
+        auto ssaoOut = rg.ImportTexture("AO_Output", aoTex);
         // halfRes：AO 纹理可能为半分辨率，pass 尺寸用纹理实际尺寸
-        u32 aoW = m_SSAO.GetAOTexture()->GetWidth();
-        u32 aoH = m_SSAO.GetAOTexture()->GetHeight();
-        rg.AddPass("SSAO", {}, {{ssaoOut, ResourceAccess::Write}},
-            [&, aoW, aoH](rhi::IRHICommandList* c) {
-                m_SSAO.PreBind(c);
+        u32 aoW = aoTex->GetWidth();
+        u32 aoH = aoTex->GetHeight();
+        rg.AddPass(prov->GetName(), {}, {{ssaoOut, ResourceAccess::Write}},
+            [&, aoW, aoH, p = prov.get()](rhi::IRHICommandList* c) {
+                p->PreBind(c);                                  // 绑定该源 pass 的管线状态
+                p->SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal());
                 rhi::ClearValue aoClear;
                 aoClear.color[0]=aoClear.color[1]=aoClear.color[2]=aoClear.color[3]=1.0f;
-                c->BeginOffscreenPass(m_SSAO.GetAOTexture()->GetNativeHandle(), nullptr, aoW, aoH, &aoClear, false);
-                if (m_SSAO.enabled) {
-                    m_SSAO.SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal());
-                    m_SSAO.Render(c);
-                }
+                c->BeginOffscreenPass(p->GetAOOutput()->GetNativeHandle(), nullptr, aoW, aoH, &aoClear, false);
+                p->Render(c);
                 c->EndOffscreenPass();
             });
     }
