@@ -562,8 +562,8 @@ int main() {
                       (int)render::GISourceId::RTReflection, (int)-1);
             loadStack(gc.ao, "gi_blend_ao",
                       (int)render::GISourceId::SSAO, (int)render::GISourceId::RTAO, (int)-1, (int)-1);
-            loadStack(gc.shadow, "gi_blend_shadow",
-                      (int)render::GISourceId::RasterShadow, (int)render::GISourceId::RTShadow, (int)-1, (int)-1);
+            // 阴影通道独立于层栈（可见性乘法项，非能量源）→ 用枚举恢复
+            gc.shadow = (render::ShadowChannel)GetInt(cfgData, "gi_shadow", (int)gc.shadow);
         }
         {
             auto& ssao = deferredPipeline.GetSSAO();
@@ -1157,10 +1157,23 @@ int main() {
             }
 
             // ---- Shadow（阴影）----
+            // 阴影是「可见性（乘法项）」而非「能量（加法项）」——不适用层栈的
+            // 频段/权重/距离让位语义，故用独立枚举：None / Raster / RT
             {
-                static const render::GISourceId kShadowSources[] = {
-                    render::GISourceId::RasterShadow, render::GISourceId::RTShadow };
-                channelUI("Shadow — 阴影", gc.shadow, kShadowSources, 2);
+                const char* shadowNames[] = {"None", "Raster（光栅 CSM 等）", "RT（光追阴影）"};
+                int sh = (int)gc.shadow;
+                ImGui::TextUnformatted("Shadow — 阴影（可见性，不参与能量合成）");
+                ImGui::Indent(12.0f);
+                ImGui::SetNextItemWidth(220.0f);
+                if (ImGui::Combo("##shadow", &sh, shadowNames, 3)) {
+                    gc.shadow = (render::ShadowChannel)sh;
+                    gc = render::GIRegistry::Degrade(gc, giCaps, rtOk);   // 不可用则回退
+                }
+                const bool shOk = render::GIRegistry::IsAvailable(gc.shadow, giCaps, rtOk)
+                               || gc.shadow == render::ShadowChannel::None;
+                ImGui::SameLine();
+                ImGui::TextColored(shOk ? colOk : colBad, shOk ? "[可用]" : "[不可用]");
+                ImGui::Unindent(12.0f);
             }
         }
         ImGui::End();
@@ -1333,8 +1346,8 @@ int main() {
                       (int)render::GISourceId::RTReflection, (int)-1);
             saveStack(gc.ao, "gi_blend_ao",
                       (int)render::GISourceId::SSAO, (int)render::GISourceId::RTAO, (int)-1, (int)-1);
-            saveStack(gc.shadow, "gi_blend_shadow",
-                      (int)render::GISourceId::RasterShadow, (int)render::GISourceId::RTShadow, (int)-1, (int)-1);
+            // 阴影通道独立于层栈 → 按枚举序列化
+            out["gi_shadow"] = std::to_string((int)gc.shadow);
         }
         {
             auto& ssao = deferredPipeline.GetSSAO();

@@ -15,7 +15,7 @@ GIConfig GIConfigFromPreset(GIQualityPreset p) {
     c.diffuse.Set(GISourceId::IBL, 1.0f);              // 环境辐照度（远场兜底）
     c.specular.Set(GISourceId::IBL, 1.0f);             // 环境镜面（预滤波）
     c.ao.Set(GISourceId::SSAO, 1.0f);
-    c.shadow.Set(GISourceId::RasterShadow, 1.0f);
+    c.shadow = ShadowChannel::Raster;   // 阴影独立于层栈（可见性乘法项）
 
     switch (p) {
     case GIQualityPreset::Low:
@@ -39,7 +39,7 @@ GIConfig GIConfigFromPreset(GIQualityPreset p) {
         c.diffuse.Set(GISourceId::DDGI, 1.0f);
         c.specular.Set(GISourceId::RTReflection, 1.0f);
         c.ao.Set(GISourceId::RTAO, 1.0f);
-        c.shadow.Set(GISourceId::RTShadow, 1.0f);
+        c.shadow = ShadowChannel::RT;       // 参考级：光追阴影（无 RT 设备经 Degrade 回退光栅）
         c.halfRes     = false;
         c.giIntensity = 1.2f;
         break;

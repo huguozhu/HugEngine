@@ -28,6 +28,16 @@ public:
         return true;
     }
 
+    /// 阴影通道是否可用（阴影独立于层栈，单独判断）
+    static bool IsAvailable(ShadowChannel s, u32 pipelineCaps, bool rtSupported) {
+        if (s == ShadowChannel::None) return true;
+        const u32 cap = ToPipelineCap(s);
+        if (cap == kPipelineGINone) return false;
+        if ((pipelineCaps & cap) != cap) return false;
+        if (s == ShadowChannel::RT && !rtSupported) return false;
+        return true;
+    }
+
     /// 对单个通道层栈逐源裁剪（移除不可用源；weight<=0 的源也一并清理）
     static void DegradeStack(GIChannelStack& st, u32 pipelineCaps, bool rtSupported) {
         for (u32 i = 0; i < st.count; ) {
@@ -46,7 +56,15 @@ public:
         DegradeStack(out.diffuse,  pipelineCaps, rtSupported);
         DegradeStack(out.specular, pipelineCaps, rtSupported);
         DegradeStack(out.ao,       pipelineCaps, rtSupported);
-        DegradeStack(out.shadow,   pipelineCaps, rtSupported);
+        // 阴影通道独立于层栈（可见性乘法项，不是能量源）→ 单独降级
+        if (out.shadow == ShadowChannel::RT
+            && (!rtSupported || (pipelineCaps & kPipelineGIShadowRT) == 0)) {
+            out.shadow = ShadowChannel::Raster;   // RT 阴影不可用 → 回退光栅阴影
+        }
+        if (out.shadow == ShadowChannel::Raster
+            && (pipelineCaps & kPipelineGIShadowRaster) == 0) {
+            out.shadow = ShadowChannel::None;     // 该管线连光栅阴影都不支持
+        }
 
         // ── 兜底：通道被裁空时补一个管线支持的源，避免该通道完全丢失 ──
         // 环境源（IBL）几乎所有管线都支持，作为最后兜底
@@ -58,9 +76,6 @@ public:
         }
         if (out.ao.count == 0 && IsAvailable(GISourceId::SSAO, pipelineCaps, rtSupported)) {
             out.ao.Set(GISourceId::SSAO, 1.0f);
-        }
-        if (out.shadow.count == 0 && IsAvailable(GISourceId::RasterShadow, pipelineCaps, rtSupported)) {
-            out.shadow.Set(GISourceId::RasterShadow, 1.0f);
         }
         return out;
     }

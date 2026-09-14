@@ -49,16 +49,13 @@ enum class GISourceId : u8 {
     RTGI          = 8,   // 硬件光追间接漫反射
     RTReflection  = 9,   // 硬件光追反射
     RTAO          = 10,  // 硬件光追环境光遮蔽
-    RTShadow      = 11,  // 硬件光追阴影
-    // 光栅阴影
-    RasterShadow  = 12,  // CSM + 点光/聚光/矩形阴影贴图
 };
 
 /// GI 源的天然频段
 enum class GIBand : u8 {
     Low  = 0,   // 低频、大范围（IBL / Lightmap / DDGI）
     Mid  = 1,   // 中频、近处细节（SSGI / SSR / SSAO / RSM）
-    High = 2,   // 高频、精确（RTGI / RTReflection / RTAO / RTShadow）
+    High = 2,   // 高频、精确（RTGI / RTReflection / RTAO）
 };
 
 /// 源 → 频段
@@ -70,7 +67,6 @@ inline GIBand GIBandOf(GISourceId id) {
     case GISourceId::RTGI:
     case GISourceId::RTReflection:
     case GISourceId::RTAO:
-    case GISourceId::RTShadow:      return GIBand::High;
     default:                        return GIBand::Mid;
     }
 }
@@ -88,8 +84,6 @@ inline const char* GISourceName(GISourceId id) {
     case GISourceId::RTGI:         return "RTGI";
     case GISourceId::RTReflection: return "RT Reflection";
     case GISourceId::RTAO:         return "RTAO";
-    case GISourceId::RTShadow:     return "RT Shadow";
-    case GISourceId::RasterShadow: return "Raster Shadow";
     default:                       return "None";
     }
 }
@@ -210,8 +204,6 @@ enum PipelineGICap : u32 {
 /// GI 源 → 管线能力位
 inline u32 ToPipelineCap(GISourceId id) {
     switch (id) {
-    case GISourceId::RasterShadow:  return kPipelineGIShadowRaster;
-    case GISourceId::RTShadow:      return kPipelineGIShadowRT;
     case GISourceId::SSAO:          return kPipelineGIAOSSAO;
     case GISourceId::RTAO:          return kPipelineGIAORTAO;
     case GISourceId::SSR:           return kPipelineGISpecSSR;
@@ -225,10 +217,19 @@ inline u32 ToPipelineCap(GISourceId id) {
     }
 }
 
+/// 阴影通道 → 管线能力位（阴影独立于层栈，单独做可用性/降级判断）
+inline u32 ToPipelineCap(ShadowChannel s) {
+    switch (s) {
+    case ShadowChannel::Raster: return kPipelineGIShadowRaster;
+    case ShadowChannel::RT:     return kPipelineGIShadowRT;
+    default:                    return kPipelineGINone;
+    }
+}
+
 /// 是否为「需要硬件光追」的源
 inline bool IsRayTracingSource(GISourceId id) {
     return id == GISourceId::RTGI || id == GISourceId::RTReflection
-        || id == GISourceId::RTAO || id == GISourceId::RTShadow;
+        || id == GISourceId::RTAO;
 }
 
 /// 各管线能力预设
@@ -249,11 +250,19 @@ namespace PipelineCaps {
 //     "选哪个技术" = 该源 weight > 0，"融合" = 多个源 weight > 0。
 // ============================================================
 struct GIConfig {
-    // ── 4 个通道的源层栈 ──
+    // ── 3 个「能量通道」的源层栈 ──
+    // （每个通道内的多个源描述的是**同一个物理量** → 归一化加权合成）
     GIChannelStack diffuse;    // 间接漫反射（IBL/DDGI/SSGI/RSM/RTGI）
     GIChannelStack specular;   // 间接镜面（IBL/SSR/RTReflection）
     GIChannelStack ao;         // 环境光遮蔽（SSAO/RTAO）
-    GIChannelStack shadow;     // 阴影（RasterShadow/RTShadow）
+
+    // ── 阴影通道：独立枚举，不进层栈 ──
+    // 原因：阴影是**可见性（乘法项）**而非**能量（加法项）**——
+    //   · 合成运算是 color *= visibility，不是加权求和
+    //   · 没有频段概念（不参与低频/中频/高频分工）
+    //   · 没有「距离让位」（阴影不该随距离让位给另一种阴影）
+    // 故用既有的 ShadowChannel 枚举表达，避免语义污染层栈。
+    ShadowChannel shadow = ShadowChannel::Raster;
 
     // ── 强度与全局开关 ──
     float giIntensity = 1.0f;   // 间接漫反射 GI 总强度（与 push constant 对齐）
@@ -265,7 +274,7 @@ struct GIConfig {
     // 详见 LightingPass.h 的 GIChannelBlend::furnaceMode
     bool  furnaceMode = false;
 
-    // ── 帧图门控（从层栈派生——不再有单值枚举）──
+    // ── 帧图门控 ──
     [[nodiscard]] bool ShouldRunSSGI()    const { return diffuse.Has(GISourceId::SSGI); }
     [[nodiscard]] bool ShouldRunDDGI()    const { return diffuse.Has(GISourceId::DDGI); }
     [[nodiscard]] bool ShouldRunRTGI()    const { return diffuse.Has(GISourceId::RTGI); }
@@ -276,8 +285,9 @@ struct GIConfig {
     [[nodiscard]] bool ShouldRunSSAO()    const { return ao.Has(GISourceId::SSAO); }
     [[nodiscard]] bool ShouldRunRTAO()    const { return ao.Has(GISourceId::RTAO); }
     [[nodiscard]] bool ShouldRunAO()      const { return ao.AnyActive(); }
-    [[nodiscard]] bool ShouldRunShadow()  const { return shadow.AnyActive(); }
-    [[nodiscard]] bool ShouldRunRTShadow() const { return shadow.Has(GISourceId::RTShadow); }
+    // 阴影（从 ShadowChannel 枚举派生——与层栈无关）
+    [[nodiscard]] bool ShouldRunShadow()  const { return shadow != ShadowChannel::None; }
+    [[nodiscard]] bool ShouldRunRTShadow() const { return shadow == ShadowChannel::RT; }
     /// 任一通道是否启用了光追源（决定是否需要构建 TLAS 与 RT 效果 / 降噪链）
     [[nodiscard]] bool AnyRTSource() const {
         return ShouldRunRTGI() || ShouldRunRTReflection() || ShouldRunRTAO() || ShouldRunRTShadow();
@@ -285,10 +295,10 @@ struct GIConfig {
     /// 使用横跨屏幕空间/光追的"精确"漫反射源（决定 shader 的 rtDiffuseSource 与有效性）
     [[nodiscard]] bool UseScreenDiffuse() const { return ShouldRunSSGI() || ShouldRunRTGI(); }
 
-    /// 生成 GIChannels（M1 接口，供 LightingPass 消费——从层栈派生）
+    /// 生成 GIChannels（M1 接口，供 LightingPass 消费）
     GIChannels ToInputSources() const {
         GIChannels s;
-        s.shadow   = shadow.Has(GISourceId::RTShadow) ? ShadowChannel::RT : ShadowChannel::Raster;
+        s.shadow   = shadow;   // 阴影本就用枚举表达
         s.ao       = ShouldRunRTAO() ? AOChannel::RTAO : (ShouldRunSSAO() ? AOChannel::SSAO : AOChannel::None);
         s.specular = ShouldRunRTReflection() ? SpecularChannel::RT
                    : (ShouldRunSSR() ? SpecularChannel::SSR : SpecularChannel::None);
