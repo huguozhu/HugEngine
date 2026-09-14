@@ -88,23 +88,48 @@ GPU_CONST(GPU_UINT kGPUBinding_RT_ShadowMask = 24);  // RT 阴影遮罩（R16_FL
 GPU_CONST(GPU_UINT kGPUBinding_RT_Reflection = 25);  // RT 反射（RGBA16_FLOAT）
 GPU_CONST(GPU_UINT kGPUBinding_RT_AO         = 26);  // RT 环境光遮蔽（R8_UNORM）
 GPU_CONST(GPU_UINT kGPUBinding_RT_GI         = 27);  // RT 间接漫反射（RGBA16_FLOAT）
-GPU_CONST(GPU_UINT kGPUBinding_GIBlendParams = 31);  // GI 各通道分层合成参数 UBO（3 通道 × 32B）
+GPU_CONST(GPU_UINT kGPUBinding_GIBlendParams = 31);  // GI 各通道分层合成参数 UBO（3 通道 × 源数组）
 
 // ============================================================
-// GI 分层合成参数（UBO）——通道通用
+// GI 分层合成参数（UBO）——通道通用，按「源数组」表达（Wave 1）
 //
-// 三个通道（diffuse/specular/ao）结构同构：屏幕空间源 / 光追源 / 低频探针或环境源。
-// 参数放在 UBO 而非 push constant：3 通道 × 7 字段会超出 128B 上限，且便于后续层栈扩展。
+// 为什么是数组而不是三个固定语义槽（screenSpace/rayTracing/probe）：
+//   · 固定槽位等价于"每个算法预留一个专属席位"——每加一种 GI 都要改 UBO 结构 +
+//     帧图映射 + shader 分支，且第 4 个源无处安放（RSM/Lightmap 曾因此进不了 shader）
+//   · 数组化后，「槽位」是通用容器，语义由 id 决定 → 新增算法只需
+//     GISourceId 加一项 + SampleSource 加一个 case
+//   · count 与 GIChannelStack::kMaxSources 一致，容量按「同时启用数」而非「算法总数」定
 // ============================================================
+GPU_CONST(GPU_UINT kGIMaxSourcesPerChannel = 4);   // 每通道最多同时参与的源数
+
+// ── GISourceId（必须与 C++ 的 he::render::GISourceId 数值一致）──
+// 源的语义（属于哪个频段、采样什么数据）由 id 决定；新增算法在此加一项 +
+// 在 shader 的 SampleXxxSource 加一个 case 即可，无需改动 UBO 结构。
+GPU_CONST(GPU_UINT GISOURCE_NONE          = 0);
+GPU_CONST(GPU_UINT GISOURCE_IBL           = 1);   // 低频：环境辐照度 / 预滤波
+GPU_CONST(GPU_UINT GISOURCE_LIGHTMAP      = 2);   // 低频：烘焙光照（预留）
+GPU_CONST(GPU_UINT GISOURCE_DDGI          = 3);   // 低频：动态漫反射探针
+GPU_CONST(GPU_UINT GISOURCE_SSGI          = 4);   // 中频：屏幕空间间接漫反射
+GPU_CONST(GPU_UINT GISOURCE_SSR           = 5);   // 中频：屏幕空间反射
+GPU_CONST(GPU_UINT GISOURCE_SSAO          = 6);   // 中频：屏幕空间环境光遮蔽
+GPU_CONST(GPU_UINT GISOURCE_RSM           = 7);   // 中频：反射阴影贴图间接光
+GPU_CONST(GPU_UINT GISOURCE_RTGI          = 8);   // 高频：光追间接漫反射
+GPU_CONST(GPU_UINT GISOURCE_RT_REFLECTION = 9);   // 高频：光追反射
+GPU_CONST(GPU_UINT GISOURCE_RTAO          = 10);  // 高频：光追环境光遮蔽
+
+GPU_STRUCT GISourceSlot {
+    GPU_UINT id;                 // GISourceId（决定 SampleSource 走哪条分支）
+    float    weight;             // 相对权重（0 = 不参与合成）
+    float    falloffDistance;    // 「距离让位」（0 = 不启用）
+    GPU_UINT _pad;               // 对齐到 16B
+};
+
 GPU_STRUCT GIChannelBlendParams {
-    GPU_UINT mode;                       // 0=相加（对照）, 1=归一化加权
-    float    screenSpaceWeight;          // 屏幕空间源权重（0=不参与合成）
-    float    rayTracingWeight;           // 光追源权重
-    float    probeWeight;                // 低频探针/环境源权重
-    float    screenSpaceFalloffDistance; // 屏幕空间源「距离让位」（0=不启用）
-    float    rayTracingFalloffDistance;  // 光追源「距离让位」（0=不启用）
-    GPU_UINT furnaceMode;                // 白炉数值测试：1=把各源真值与场景条件取白炉值（见 frag）
-    GPU_UINT _pad;                       // 对齐到 32B
+    GISourceSlot sources[kGIMaxSourcesPerChannel];   // 参与合成的源（低频 → 高频）
+    GPU_UINT     count;                              // 实际源数
+    GPU_UINT     mode;                               // 0=相加（对照）, 1=归一化加权
+    GPU_UINT     furnaceMode;                        // 白炉数值测试（见 frag）
+    GPU_UINT     _pad;
 };
 
 GPU_STRUCT GIBlendParams {

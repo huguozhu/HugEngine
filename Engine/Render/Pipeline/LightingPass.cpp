@@ -154,26 +154,21 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
     lpc.ddgiScale  = in.ddgiScale;                         // DDGI 贡献缩放（替代硬编码 0.5）
     lpc.giIntensity = in.giIntensity;                      // 间接漫反射 GI 总强度（默认 1.0）
     lpc.aoIntensity = in.aoIntensity;                      // AO 强度（默认 1.0）
-    // ── 分层合成（P2）：填充 GIBlendParams UBO（3 通道 × 32B）──
-    // 屏幕空间/光追源的 weight 在源无效时置 0（等效于该源不参与合成）
+    // ── 分层合成（Wave 1）：填充 GIBlendParams UBO（3 通道 × 源数组）──
+    // C++ 侧 GIChannelBlendData 与 shader 侧 GIChannelBlendParams 布局一致，
+    // 按通道 memcpy；源的具体分派由 shader 按 id 完成
     {
-        GIBlendParams bp{};
-        auto fill = [](GIChannelBlendParams& d, const GIChannelBlend& s, bool screenSourceValid) {
-            d.mode = (u32)s.mode;
-            d.screenSpaceWeight = screenSourceValid ? s.screenSpaceWeight : 0.0f;
-            d.rayTracingWeight  = screenSourceValid ? s.rayTracingWeight  : 0.0f;
-            d.probeWeight       = s.probeWeight;
-            d.screenSpaceFalloffDistance = s.screenSpaceFalloffDistance;
-            d.rayTracingFalloffDistance  = s.rayTracingFalloffDistance;
-            d.furnaceMode = s.furnaceMode ? 1u : 0u;   // 白炉数值测试（Wave 0.2）
-        };
-        fill(bp.diffuse,  in.diffuseBlend,  in.useScreenGI);   // 漫反射：SSGI/RTGI 关闭时降权为 0
-        fill(bp.specular, in.specularBlend, true);             // 镜面：命中与否由 shader 按 rtRefl.a 判定
-        fill(bp.ao,       in.aoBlend,       true);
+        static_assert(sizeof(GISourceSlotData) == sizeof(GISourceSlot),
+                      "GISourceSlotData 必须与 shader 的 GISourceSlot 布局一致");
+        static_assert(sizeof(GIChannelBlendData) == sizeof(GIChannelBlendParams),
+                      "GIChannelBlendData 必须与 shader 的 GIChannelBlendParams 布局一致");
         if (m_BlendUBO) {
             void* mapped = m_BlendUBO->Map();
             if (mapped) {
-                std::memcpy(mapped, &bp, sizeof(bp));
+                auto* bp = static_cast<GIBlendParams*>(mapped);
+                std::memcpy(&bp->diffuse,  &in.diffuseBlend,  sizeof(GIChannelBlendData));
+                std::memcpy(&bp->specular, &in.specularBlend, sizeof(GIChannelBlendData));
+                std::memcpy(&bp->ao,       &in.aoBlend,       sizeof(GIChannelBlendData));
                 m_BlendUBO->Unmap();
             }
         }

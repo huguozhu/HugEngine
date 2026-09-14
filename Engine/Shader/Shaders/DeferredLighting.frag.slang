@@ -89,6 +89,93 @@ struct LightGridCell { uint offset; uint count; };
 
 // kGPUPrefilterMips / kGPUClusterSlices 统一在 ShaderTypes.slang（kGPU*）
 
+// ============================================================
+// GI 分层合成（Wave 1）：源采样与权重
+//
+// 合成按「源 id」分派而不是固定语义槽 —— 新增一种 GI 算法只需：
+//   ① ShaderTypes.slang 加 GISOURCE_XXX 常量（与 C++ GISourceId 同步）
+//   ② 在下面的 SampleXxxSource 加一个 case
+//   ③ 实现算法本体（Provider）
+// 无需改动 UBO 结构、帧图映射或合成循环。
+// ============================================================
+
+/// 源权重 = 用户权重 × 置信度 × 可选「距离让位」
+/// 屏幕空间源（SSGI/SSR/SSAO/RTGI/RT 反射/RTAO）在屏幕边缘降权（屏幕外无数据）；
+/// 世界空间源（IBL/DDGI/RSM）不依赖屏幕覆盖，不受 confEdge 影响。
+float SourceWeight(GISourceSlot s, float confEdge, float camDist) {
+    const bool screenSpace =
+        (s.id == GISOURCE_SSGI || s.id == GISOURCE_SSR || s.id == GISOURCE_SSAO ||
+         s.id == GISOURCE_RTGI || s.id == GISOURCE_RT_REFLECTION || s.id == GISOURCE_RTAO);
+    float w = s.weight;
+    if (screenSpace) w *= confEdge;
+    if (s.falloffDistance > 0.0) w *= saturate(1.0 - camDist / s.falloffDistance);
+    return w;
+}
+
+/// RSM 间接光（反射阴影贴图，单次反弹 VPL 求和）
+///
+/// 仅当存在方向光阴影时才采样：shadowParams.w 为光源类型（0=方向光/1=点光/2=聚光，
+/// w<0.5 判定方向光），shadowParams.z 为阴影强度 >0 才有效——避免无方向阴影时
+/// u_ShadowData[0] 全零（w==0 恰好匹配方向光编码）导致零矩阵投影注入 NaN。
+/// 0.03 为 RSM 25-VPL 的离散化能量归一常数（VPL 数量有限，需按数量缩放总能量）。
+float3 SampleRSMIndirect(float3 worldPos, float3 N, uint lightCount) {
+    if (iblIntensity <= 0.0 || lightCount == 0u) return float3(0.0);
+    if (u_ShadowData[0].shadowParams.w >= 0.5f) return float3(0.0);
+    if (u_ShadowData[0].shadowParams.z <= 0.0) return float3(0.0);
+
+    float4 lsp = mul(u_ShadowData[0].lightViewProj[0], float4(worldPos, 1.0));
+    float2 rsmUV = saturate(lsp.xy / lsp.w * 0.5 + 0.5);
+    float3 rsmIndirect = float3(0.0);
+    for (int dx = -2; dx <= 2; dx++) {
+        for (int dy = -2; dy <= 2; dy++) {
+            float2 suv = saturate(rsmUV + float2(dx, dy) * 0.005);
+            float4 ps = u_RSMPositionMap.Sample(u_IBLSampler, suv);
+            float4 fs = u_RSMFluxMap.Sample(u_IBLSampler, suv);
+            float3 sN  = normalize(fs.rgb * 2.0 - 1.0);
+            float3 dir = ps.xyz - worldPos;
+            float  d2  = max(dot(dir, dir), 0.01);
+            rsmIndirect += fs.a * max(dot(N, normalize(dir)), 0.0)
+                         * max(dot(sN, -normalize(dir)), 0.0) / d2;
+        }
+    }
+    return rsmIndirect * 0.03 * iblIntensity;
+}
+
+/// 漫反射源采样（按 GISourceId 分派）
+/// 注意：各源的输出都已是「已乘 albedo/BRDF 的间接漫反射贡献」，彼此可直接加权平均。
+float3 SampleDiffuseSource(uint id, float3 worldPos, float3 N, float2 uv,
+                           float3 albedo, float3 kD, bool furnace) {
+    if (furnace) return float3(1.0, 1.0, 1.0);   // 白炉：各源入射辐射度真值 = 1
+    switch (id) {
+    case GISOURCE_IBL:   // 低频：环境辐照度（含 kD 与 albedo）
+        return kD * u_IrradianceMap.Sample(u_IBLSampler, N).rgb * albedo * iblIntensity;
+    case GISOURCE_DDGI:  // 低频：动态漫反射探针（世界空间）
+        return SampleDDGI(worldPos, N) * ddgiScale;
+    case GISOURCE_SSGI:  // 中频：屏幕空间
+        return u_SSGI.Sample(u_GBufferSampler, uv).rgb;
+    case GISOURCE_RSM:   // 中频：反射阴影贴图
+        return SampleRSMIndirect(worldPos, N, lightCount);
+    case GISOURCE_RTGI:  // 高频：硬件光追
+        return u_RT_GI.Sample(u_GBufferSampler, uv).rgb;
+    default:
+        return float3(0.0);
+    }
+}
+
+/// 镜面源采样（按 GISourceId 分派）
+float3 SampleSpecularSource(uint id, float2 uv, float3 R, float roughness,
+                            float3 F, float2 envBRDF) {
+    switch (id) {
+    case GISOURCE_IBL:   // 低频：环境预滤波（含菲涅耳与环境 BRDF）
+        return u_PrefilterMap.SampleLevel(u_IBLSampler, R,
+                   roughness * (kGPUPrefilterMips - 1.0)).rgb
+             * (F * envBRDF.r + envBRDF.g) * iblIntensity;
+    case GISOURCE_SSR:           return u_SSR.Sample(u_GBufferSampler, uv).rgb;
+    case GISOURCE_RT_REFLECTION: return u_RT_Reflection.Sample(u_GBufferSampler, uv).rgb;
+    default:                     return float3(0.0);
+    }
+}
+
 float4 fragmentMain(VSOutput input) : SV_Target0 {
     float2 uv = input.uv;
 
@@ -262,162 +349,94 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
     // RT 阴影整体因子（覆盖所有阴影光源；rtShadowSource=0 时恒为 1.0）
     color *= rtShadowFactor;
 
-    // 4. IBL
+    // 4. IBL / BRDF 公共项（供源分派使用）
     float3 F0_ibl = lerp(float3(dielectricF0), albedo, metallic);
     float3 F = F_SchlickRoughness(max(dot(N, V), 0.0), F0_ibl, roughness, metallic);
     float3 kD = (1.0 - F) * (1.0 - metallic);
+    float3 R = reflect(-V, N);
     if (furnace) {
-        // 白炉测试聚焦"合成数学"，不掺 BRDF 的菲涅耳分布：把 kD 取 1
+        // 白炉测试聚焦「合成数学」，不掺 BRDF 的菲涅耳分布：kD 取 1
         kD = float3(1.0, 1.0, 1.0);
     }
-    // 白炉下环境入射辐射度 = 1（全白环境）
-    float3 irrEnv = furnace ? float3(1.0, 1.0, 1.0) : u_IrradianceMap.Sample(u_IBLSampler, N).rgb;
-    color += kD * irrEnv * albedo * iblIntensity;
-    float3 R = reflect(-V, N);
-    float3 prefiltered = u_PrefilterMap.SampleLevel(u_IBLSampler, R, roughness * (kGPUPrefilterMips - 1.0)).rgb;
-    // 环境镜面（低频源）：不直接累加——与屏幕空间/光追反射一起归一化合成（见第 6 步），
-    // 否则 SSR/RT 命中区域会与 IBL prefilter 重复计算（双重计数）
-    float3 specEnv = prefiltered * (F * envBRDF.r + envBRDF.g) * iblIntensity;
 
-    // 5. RSM 间接（反射阴影贴图，仅当存在方向光阴影时才采样：
-    //    shadowParams.w 为光源类型 0=方向光/1=点光/2=聚光，w<0.5 判定为方向光；
-    //    shadowParams.z 为阴影强度 >0 才有效——避免无方向阴影时 u_ShadowData[0] 全零
-    //    （w==0 恰好匹配方向光编码）导致零矩阵投影注入 NaN）
-    //    0.03 为 RSM 25-VPL 能量归一（保留）；giIntensity 为间接光总强度（统一驱动，替代魔法系数）
-    if (iblIntensity > 0.0 && lightCount > 0u
-        && u_ShadowData[0].shadowParams.w < 0.5f
-        && u_ShadowData[0].shadowParams.z > 0.0) {
-        float4 lsp = mul(u_ShadowData[0].lightViewProj[0], float4(worldPos, 1.0));
-        float2 rsmUV = saturate(lsp.xy / lsp.w * 0.5 + 0.5);
-        float3 rsmIndirect = float3(0.0);
-        for (int dx = -2; dx <= 2; dx++) {
-            for (int dy = -2; dy <= 2; dy++) {
-                float2 suv = saturate(rsmUV + float2(dx, dy) * 0.005);
-                float4 ps = u_RSMPositionMap.Sample(u_IBLSampler, suv);
-                float4 fs = u_RSMFluxMap.Sample(u_IBLSampler, suv);
-                float3 sN = normalize(fs.rgb * 2.0 - 1.0);
-                float3 dir = ps.xyz - worldPos;
-                float d2 = max(dot(dir, dir), 0.01);
-                rsmIndirect += fs.a * max(dot(N, normalize(dir)), 0.0) * max(dot(sN, -normalize(dir)), 0.0) / d2;
-            }
-        }
-        color += rsmIndirect * (0.03 * giIntensity) * iblIntensity;
-    }
-
-    // ── AO 分层合成（S1.5：SSAO 与 RTAO 可同时参与，归一化加权）──
-    // 两者都是「环境光遮蔽」这一物理量的估计 → 权重归一化，避免重复遮蔽
-    //（旧行为是二选一：rtAOSource 切换）
-    // 白炉数值测试下 AO 不参与判据（白炉里遮蔽真值也是 1），故跳过整段
-    if (!furnace) {
-        GIChannelBlendParams ba = u_GIBlendParams.ao;
-        float aoNum = 0.0;
-        float aoDen = 0.0;
-        if (ba.screenSpaceWeight > 0.0) {
-            aoNum += u_SSAO.Sample(u_GBufferSampler, uv).r * ba.screenSpaceWeight;
-            aoDen += ba.screenSpaceWeight;
-        }
-        if (ba.rayTracingWeight > 0.0) {
-            aoNum += u_RT_AO.Sample(u_GBufferSampler, uv).r * ba.rayTracingWeight;
-            aoDen += ba.rayTracingWeight;
-        }
-        float aoVal = (aoDen > 0.0) ? (aoNum / aoDen) : 1.0;   // 无 AO 源 → 不遮蔽
-        color *= lerp(1.0, ao * aoVal, aoIntensity);   // aoIntensity 控制 AO 强度（0=无 AO）
-    }
-
-    // ── 间接漫反射分层合成（P2/P3）──
-    // 多个 GI 源（屏幕空间 / 光追 / 探针）描述的是同一个物理量——间接入射辐射度。
-    // 直接相加会造成「双重计数」（能量翻倍、白炉测试失败）→ 归一化加权（权重和 = 1）。
-    // 权重以「各源置信度」为主、用户权重为辅；距离让位默认关闭——它是性能/艺术控制，
-    // 不是物理判据（远处但屏幕内清晰可见的物体，屏幕空间 GI 依然可信）。
-    // S1.5：屏幕空间源与光追源**各自独立采样、同时参与**（不再二选一），
-    //       二者的权重由层栈分别给出（SSGI 权重 / RTGI 权重）。
-    GIChannelBlendParams bl = u_GIBlendParams.diffuse;
-
-    float3 num = float3(0.0);
-    float  den = 0.0;
     // 屏幕内可见性置信度（屏幕外无数据 → 靠近边缘 5% 内线性降权）
     float2 edge     = min(uv, 1.0 - uv);
     float  confEdge = saturate(min(edge.x, edge.y) / 0.05);
     float  camDist  = length(cameraPosition.xyz - worldPos);
 
-    // ① 屏幕空间源（SSGI）
-    if (bl.screenSpaceWeight > 0.0) {
-        float confDist = (bl.screenSpaceFalloffDistance > 0.0)
-                       ? saturate(1.0 - camDist / bl.screenSpaceFalloffDistance) : 1.0;
-        float w = bl.screenSpaceWeight * confEdge * confDist;
-        // 白炉下该源真值 = 1
-        float3 c = furnace ? float3(1.0, 1.0, 1.0) : u_SSGI.Sample(u_GBufferSampler, uv).rgb;
-        num += c * w;
-        den += w;
-    }
+    // ═══════════════════════════════════════════════════════════════
+    // GI 分层合成（Wave 1：按源 id 分派，遍历通道的源数组）
+    //
+    // 每个通道的多个源描述的是**同一个物理量** → 归一化加权（权重和 = 1）避免双重计数。
+    // IBL 与 RSM 也作为**普通源**参与（Wave 0.4 / 0.5）——不再有归一化之外的加法项。
+    // 采样函数定义在文件作用域（见下方 SampleXxxSource / SourceWeight）。
+    // ═══════════════════════════════════════════════════════════════
 
-    // ② 光追源（RTGI）——可与屏幕空间源同时生效
-    if (bl.rayTracingWeight > 0.0) {
-        float confDist = (bl.rayTracingFalloffDistance > 0.0)
-                       ? saturate(1.0 - camDist / bl.rayTracingFalloffDistance) : 1.0;
-        float w = bl.rayTracingWeight * confEdge * confDist;
-        float3 c = furnace ? float3(1.0, 1.0, 1.0) : u_RT_GI.Sample(u_GBufferSampler, uv).rgb;
-        num += c * w;
-        den += w;
+    // ── 间接漫反射合成 ──
+    {
+        GIChannelBlendParams bl = u_GIBlendParams.diffuse;
+        float3 num = float3(0.0);
+        float  den = 0.0;
+        for (uint i = 0u; i < bl.count; ++i) {
+            GISourceSlot s = bl.sources[i];
+            if (s.weight <= 0.0) continue;
+            float w = SourceWeight(s, confEdge, camDist);
+            num += SampleDiffuseSource(s.id, worldPos, N, uv, albedo, kD, furnace) * w;
+            den += w;
+        }
+        float3 indirect = (bl.mode != 0u)
+                        ? ((den > 0.0) ? (num / den) : float3(0.0))   // 归一化：无双重计数
+                        : num;                                        // 相加（对照）
+        // 白炉判据只反映「合成数学」：giIntensity 是用户强度调节，判据下取 1 以便读回值即合成结果
+        color += indirect * (furnace ? 1.0 : giIntensity);
     }
-
-    // ③ 低频探针源（DDGI）：世界空间、全方向，作为远场兜底
-    if (bl.probeWeight > 0.0) {
-        float w = bl.probeWeight;
-        float3 c = furnace ? float3(1.0, 1.0, 1.0) : SampleDDGI(worldPos, N) * ddgiScale;
-        num += c * w;
-        den += w;
-    }
-
-    float3 indirect;
-    if (bl.mode != 0u) {
-        // 归一化加权：权重和 = 1 → 无双重计数（推荐，白炉测试通过）
-        indirect = (den > 0.0) ? (num / den) : float3(0.0);
-    } else {
-        // 相加（旧行为——仅作 A/B 对照，存在双重计数）
-        indirect = num;
-    }
-    color += indirect * giIntensity;
 
     // ── 白炉数值测试：到此即返回 ──
-    // 白炉下 diffuse 通道的间接光真值 = 1；这里**带上**所有在归一化之外累加的项
-    //（例如上面的 IBL 环境项），因此若存在双重计数，读回值会 > 1 并被探针抓住。
-    // 镜面 / AO / 自发光 / 空中透视都不参与本次判据，直接跳过。
+    // 白炉下 diffuse 通道的间接光真值 = 1；此时**所有**源都已进入归一化，
+    // 若仍读到 > 1，说明存在归一化之外的加法项（双重计数）。
     if (furnace) {
         return float4(color, 1.0);
     }
 
-    // ── 间接镜面分层合成（P2：与 diffuse 同构）──
-    // 环境镜面（IBL prefilter）与屏幕空间/光追反射描述的是同一物理量 → 归一化合成，
-    // 而非叠加：命中时按权重分配（权重和=1），未命中（a<0，高粗糙度跳过或 miss）时
-    // 完全由环境镜面提供回退。
-    GIChannelBlendParams bs = u_GIBlendParams.specular;
+    // ── AO 合成（归一化加权：SSAO / RTAO 可同时参与）──
+    {
+        GIChannelBlendParams ba = u_GIBlendParams.ao;
+        float aoNum = 0.0;
+        float aoDen = 0.0;
+        for (uint i = 0u; i < ba.count; ++i) {
+            GISourceSlot s = ba.sources[i];
+            if (s.weight <= 0.0) continue;
+            float v = (s.id == GISOURCE_RTAO)
+                    ? u_RT_AO.Sample(u_GBufferSampler, uv).r
+                    : u_SSAO.Sample(u_GBufferSampler, uv).r;
+            aoNum += v * s.weight;
+            aoDen += s.weight;
+        }
+        float aoVal = (aoDen > 0.0) ? (aoNum / aoDen) : 1.0;   // 无 AO 源 → 不遮蔽
+        color *= lerp(1.0, ao * aoVal, aoIntensity);   // aoIntensity 控制 AO 强度（0=无 AO）
+    }
 
-    float3 specNum = specEnv * bs.probeWeight;   // 环境镜面 = 低频「探针/环境」源
-    float  specDen = bs.probeWeight;
-    // 屏幕空间反射（SSR）与光追反射（RT 反射）各自独立采样、可同时参与（S1.5）；
-    // a<0 表示该源本条光线无效（高粗糙度跳过或 miss）——该源权重记 0，由其他源兜底
-    if (bs.screenSpaceWeight > 0.0) {
-        float4 ssr = u_SSR.Sample(u_GBufferSampler, uv);
-        if (ssr.a >= 0.0) {
-            float confDist = (bs.screenSpaceFalloffDistance > 0.0)
-                           ? saturate(1.0 - camDist / bs.screenSpaceFalloffDistance) : 1.0;
-            float w = bs.screenSpaceWeight * confEdge * confDist;
-            specNum += ssr.rgb * w;
+    // ── 间接镜面合成（与 diffuse 同构）──
+    // 环境镜面（IBL prefilter）与屏幕空间/光追反射描述同一物理量 → 归一化合成；
+    // a<0 表示该源本条光线无效（高粗糙度跳过或 miss）→ 该源权重记 0，由其他源兜底
+    {
+        GIChannelBlendParams bs = u_GIBlendParams.specular;
+        float3 specNum = float3(0.0);
+        float  specDen = 0.0;
+        for (uint i = 0u; i < bs.count; ++i) {
+            GISourceSlot s = bs.sources[i];
+            if (s.weight <= 0.0) continue;
+            if (s.id == GISOURCE_SSR) {
+                if (u_SSR.Sample(u_GBufferSampler, uv).a < 0.0) continue;              // 本条无效
+            } else if (s.id == GISOURCE_RT_REFLECTION) {
+                if (u_RT_Reflection.Sample(u_GBufferSampler, uv).a < 0.0) continue;
+            }
+            float w = SourceWeight(s, confEdge, camDist);
+            specNum += SampleSpecularSource(s.id, uv, R, roughness, F, envBRDF) * w;
             specDen += w;
         }
+        color += (bs.mode != 0u) ? (specNum / max(specDen, 1e-4)) : specNum;
     }
-    if (bs.rayTracingWeight > 0.0) {
-        float4 rtRefl = u_RT_Reflection.Sample(u_GBufferSampler, uv);
-        if (rtRefl.a >= 0.0) {
-            float confDist = (bs.rayTracingFalloffDistance > 0.0)
-                           ? saturate(1.0 - camDist / bs.rayTracingFalloffDistance) : 1.0;
-            float w = bs.rayTracingWeight * confEdge * confDist;
-            specNum += rtRefl.rgb * w;
-            specDen += w;
-        }
-    }
-    color += (bs.mode != 0u) ? (specNum / max(specDen, 1e-4)) : specNum;
 
     color += gbC.rgb;  // emissive
 

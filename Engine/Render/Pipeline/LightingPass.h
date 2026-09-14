@@ -52,24 +52,35 @@ enum class GIBlendMode : u8 {
     Normalized = 1,   // 归一化加权：Σ(源×w)/Σw，权重和=1 → 无双重计数（推荐）
 };
 
-/// 单通道的混合参数（按「源类型」命名——三通道通用，不绑定具体技术）
-struct GIChannelBlend {
-    GIBlendMode mode = GIBlendMode::Normalized;
+/// 单个 GI 源槽（与 shader 的 GISourceSlot 布局一致）
+struct GISourceSlotData {
+    u32   id              = 0;        // GISourceId（决定 shader 走哪条采样分支）
+    float weight          = 0.0f;     // 相对权重（0 = 不参与）
+    float falloffDistance = 0.0f;     // 「距离让位」（0 = 不启用）
+    u32   _pad            = 0;
+};
 
-    // 各源相对权重（0=不参与合成；配合各源内部置信度共同决定最终权重）
-    float screenSpaceWeight = 1.0f;   // 屏幕空间源（SSGI / SSR / SSAO）
-    float rayTracingWeight  = 1.0f;   // 光追源（RTGI / RT 反射 / RTAO）
-    float probeWeight       = 1.0f;   // 低频探针/环境源（DDGI / IBL / Lightmap）
+/// 单通道的合成参数（与 shader 的 GIChannelBlendParams 布局一致）
+///
+/// Wave 1：由「三个固定语义槽」改为「源数组」——槽位是通用容器，语义由 id 决定。
+/// 这样新增 GI 只需 GISourceId 加一项 + SampleSource 加一个 case，
+/// 不再需要改 UBO 结构 / 帧图映射 / shader 分支。
+struct GIChannelBlendData {
+    static constexpr u32 kMaxSources = 4;
+    GISourceSlotData sources[kMaxSources];
+    u32 count       = 0;
+    u32 mode        = 1;   // GIBlendMode（0=相加对照, 1=归一化加权）
+    u32 furnaceMode = 0;   // 白炉数值测试（Wave 0.2）
+    u32 _pad        = 0;
 
-    // 可选的距离让位（0 = 不启用；>0 时超出该距离权重线性衰减到 0）
-    // 仅用于性能/艺术控制，不改变物理正确性（正确性由归一化保证）
-    float screenSpaceFalloffDistance = 0.0f;   // 米
-    float rayTracingFalloffDistance  = 0.0f;   // 米
-
-    // 白炉数值测试（Wave 0.2）：置位后 shader 把"全白环境 + albedo=1 + 关闭直接光"的
-    // 白炉条件直接代入，各源真值恒为 1 —— 正确的分层合成应恰好得到 1.0；
-    // 任何 >1 的结果都说明有源被加在归一化之外（双重计数）。经 GIBlendParams UBO 传递。
-    bool  furnaceMode = false;
+    /// 追加一个源（weight<=0 忽略；超出容量忽略）
+    void Add(u32 sourceId, float w, float falloff = 0.0f) {
+        if (w <= 0.0f || count >= kMaxSources) return;
+        sources[count].id              = sourceId;
+        sources[count].weight          = w;
+        sources[count].falloffDistance = falloff;
+        count++;
+    }
 };
 
 // ============================================================
@@ -129,10 +140,10 @@ struct LightingInputs {
     GIChannels sources; // 通道选择（shadow/ao/specular/diffuse）
     // ── 分层合成（P2：多源间接光的归一化加权，通道通用）──
     // 混合参数经 UBO 传递给 shader（3 通道 × 24B，避免超出 push constant 128B 上限）
-    GIChannelBlend diffuseBlend;    // 间接漫反射（SSGI/RTGI + DDGI）
-    GIChannelBlend specularBlend;   // 间接镜面（SSR/RT 反射 + IBL prefilter）
-    GIChannelBlend aoBlend;         // 环境光遮蔽（SSAO/RTAO）
-    bool  useScreenGI = false;      // 屏幕空间/光追漫反射源是否有效（SSGI/RTGI 关闭时为 false）
+    // ── 分层合成（Wave 1：源数组，按源 id 分派采样）──
+    GIChannelBlendData diffuseBlend;    // 间接漫反射（IBL/DDGI/SSGI/RSM/RTGI 任意组合）
+    GIChannelBlendData specularBlend;   // 间接镜面（IBL/SSR/RT 反射）
+    GIChannelBlendData aoBlend;         // 环境光遮蔽（SSAO/RTAO）
 };
 
 // ============================================================

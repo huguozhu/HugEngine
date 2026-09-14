@@ -763,24 +763,21 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             // 每通道的「屏幕空间源 / 光追源 / 低频环境源」权重取自层栈；
             // 距离让位取对应源的 falloffDistance（0=不启用）
             {
-                auto fillBlend = [](GIChannelBlend& b, const GIChannelStack& st,
-                                    GISourceId screenId, GISourceId rtId, GISourceId probeId) {
-                    b.mode              = st.mode;
-                    b.screenSpaceWeight = st.WeightOf(screenId);
-                    b.rayTracingWeight  = st.WeightOf(rtId);
-                    b.probeWeight       = (probeId == GISourceId::None) ? 0.0f : st.WeightOf(probeId);
-                    b.screenSpaceFalloffDistance = st.FalloffOf(screenId);
-                    b.rayTracingFalloffDistance  = st.FalloffOf(rtId);
+                // Wave 1：层栈直传为「源数组」——每通道的源（IBL/DDGI/SSGI/RSM/RTGI…）
+                // 逐项写入 UBO 槽位，shader 按 id 分派采样；新增算法无需改动此处
+                auto fillSlots = [](GIChannelBlendData& b, const GIChannelStack& st) {
+                    b.count = 0;
+                    b.mode  = (u32)st.mode;
+                    for (u32 i = 0; i < st.count; i++) {
+                        const GISourceDesc& s = st.sources[i];
+                        b.Add((u32)s.id, s.weight, s.falloffDistance);
+                    }
                 };
-                fillBlend(in.diffuseBlend,  m_GIConfig.diffuse,  GISourceId::SSGI, GISourceId::RTGI,
-                          GISourceId::DDGI);
-                fillBlend(in.specularBlend, m_GIConfig.specular, GISourceId::SSR,  GISourceId::RTReflection,
-                          GISourceId::IBL);
-                fillBlend(in.aoBlend,       m_GIConfig.ao,       GISourceId::SSAO, GISourceId::RTAO,
-                          GISourceId::None);
-                in.useScreenGI = m_GIConfig.UseScreenDiffuse();   // SSGI/RTGI 是否参与
+                fillSlots(in.diffuseBlend,  m_GIConfig.diffuse);
+                fillSlots(in.specularBlend, m_GIConfig.specular);
+                fillSlots(in.aoBlend,       m_GIConfig.ao);
                 // 白炉数值测试（Wave 0.2）：置位后由 shader 代入白炉条件（见 DeferredLighting.frag）
-                in.diffuseBlend.furnaceMode = m_GIConfig.furnaceMode;
+                in.diffuseBlend.furnaceMode = m_GIConfig.furnaceMode ? 1u : 0u;
             }
             // RT 输出（层栈启用对应源且降噪完成时非空 → shader 走光追路径）
             if (rtGITex)        in.rtGI         = rtGITex;
