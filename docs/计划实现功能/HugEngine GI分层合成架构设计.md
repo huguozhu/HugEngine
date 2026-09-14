@@ -215,8 +215,9 @@ public:
 
 ## 五、演进路线（渐进、每步可回退）
 
-> **实施状态（2026-09-10）**：P1 / P2 / P3 已落地，并额外完成了 S1（光追归入 GI 源）、
-> S2（管线维度收敛）、S3（移除 HybridRTPipeline）、PT 定位与加速结构共享、S1.5（两类源可同时参与）。
+> **实施状态（2026-09-14 更新）**：**P1–P4 已全部落地**，并额外完成了 S1（光追归入 GI 源）、
+> S2（管线维度收敛）、S3（移除 HybridRTPipeline）、PT 定位与加速结构共享、
+> S1.5（两类源可同时参与）、M6.3（GTAO）。**余下 P5 频率分离与 P6 统一估计器。**
 
 | Phase | 内容 | 风险 | 状态 |
 |---|---|---|---|
@@ -228,31 +229,55 @@ public:
 | **S3 · 移除 HybridRT 管线** | 删除 `HybridRTPipeline`（-1245 行），02.Cube 迁移 | 中 | ✅ `0f8aca8` |
 | **PT · 参考渲染器定位** | 明确 PT 为 ground truth + 与 Deferred 共享加速结构 | 低 | ✅ `3301040` |
 | **S1.5 · 两类源同时参与** | SSGI+RTGI（specular/AO 同理）由二选一改为各自独立采样、归一化合成 | 低 | ✅ `5c2b84b` |
-| **P4 · Provider 抽象** | 重构各 GI 为 `IGIProvider`；帧图按注册表遍历构建 pass | 中 | ⏳ 待做 |
+| **P4 · Provider 抽象** | **全部 10 个 GI 源接入注册表**；帧图 pass 与面板候选由注册表生成 | 中 | ✅ `3a4075b` `8fc6091` `2b6b51a` `fd2510d` `48984e9` `51b8c98` `ea4620d` |
+| **Wave 0 缺口修复** | IBL/RSM 归位归一化（白炉 1.7998→**1.0000**）、3 槽位数组化、M5.3 DDGI SH 卷积、ddgiScale 收敛 | 中 | ✅ `2211e4c` `e862931` |
+| **M6.3 · GTAO** | 地平线切片 AO，作为 AO 通道独立源（同时验证「新增源零侵入」） | 低 | ✅ `c487109` |
 | **P5 · 频率分离** | DDGI 低频 + SSGI/RTGI 高频细节（去低频叠加） | 高 | ⏳ 待做 |
 | **P6 · 统一估计器** | 长期：ReSTIR GI 把各源统一为「重采样 + 回退」框架 | 高 | ⏳ 待做 |
 
-**下一步优先级建议**：① **白炉测试**（用 PT 做基准验证层栈能量守恒——正好用上 PT 的新定位）
-② P4 Provider 抽象（新增 GI 不改管线/shader） ③ P5 频率分离。
+**P4 已兑现的承诺**（新增一种 GI 源的实际改动）：
+实现 Provider（算法本体）+ **注册 1 行**；**帧图 / UBO / 合成循环 / 层栈结构 0 行**；
+AO 通道的面板候选已由注册表自动派生。该承诺在 **GTAO**（先于 P4 落地，需改帧图 1 行 +
+面板 1 行）与随后的 **10 源 Provider 化**中均获验证。
+
+**下一步优先级建议**：① **P5 频率分离**（前提已全部就绪：Wave 0 白炉判据 + Wave 1 按源合成 +
+Wave 2 Provider 注册表） ② Wave 4 遗留小项（M4.4 RSM VPL 降采样 / M4.5 GBuffer 合并 /
+M5.2-A DDGI 光追 march） ③ P6。
 
 ---
 
-## 五之二、已落地的终态架构（2026-09-10）
+## 五之二、已落地的终态架构（2026-09-14 更新）
 
 ```
-渲染管线（架构差异，不可合并）        GI 源层栈（效果差异，自由组合 + 权重）
-├─ ForwardPipeline                    低频： IBL / Lightmap(预留) / DDGI
-├─ DeferredPipeline                   中频： SSGI / SSR / SSAO / RSM
-└─ PathTracingPipeline（参考渲染器）   高频： RTGI / RT 反射 / RTAO / RT 阴影
-        ↓                                        ↓
-   GBuffer / Lighting / 后处理          归一化加权合成（权重和 = 1，物理正确）
+渲染管线（架构差异，不可合并）            GI 源（效果差异，自由组合 + 权重）
+├─ ForwardPipeline                        低频： IBL · Lightmap(预留) · DDGI
+├─ DeferredPipeline                       中频： SSGI · SSR · SSAO · GTAO · RSM
+│   └─ 内含全部 10 个 GI Provider          高频： RTGI · RT 反射 · RTAO
+└─ PathTracingPipeline（参考渲染器）       （可见性：光栅阴影 / RT 阴影 —— 独立枚举）
+         ↓                                          ↓
+    GBuffer / Lighting / 后处理            归一化加权合成（权重和 = 1，物理正确）
 ```
+
+**每帧 pass 由 Provider 注册表生成**（帧图不再手写任何源的 pass 与门控）：
+
+| Provider | 源 | pass 链 |
+|---|---|---|
+| `IBLProvider` | IBL | `IBL_Bake`（脏时重建） |
+| `DDGIProvider` | DDGI | `DDGI`（compute） |
+| `ScreenAOProvider` | SSAO / GTAO | `AO`（同 pass 两种模式） |
+| `SSGIProvider` | SSGI | `SSGI` → `SSGI_Denoise` |
+| `SSRProvider` | SSR | `SSR` → `SSR_Denoise` |
+| `RSMProvider` | RSM | `RSM` |
+| `RTEffectProvider`×4 | RT 阴影 / RTAO / RT 反射 / RTGI | 主 pass → 时域（→ 空间滤波），共享 `AS_Build` |
 
 **关键不变量（已实现并需长期保持）**：
 1. 通道的「层栈」与「子系统开关」**同源**——层栈说参与，子系统就必须真的启用
-   （曾因两者不一致导致画面发黑）
+   （曾因两者不一致导致画面发黑；后又在 06 被旧 cfg 开关覆盖，由 Provider 诊断暴露并修复）
 2. **权重归一化**是物理正确性的来源；距离让位只是性能/艺术控制，默认关闭
 3. **多开一个源不会变亮**（归一化保证）；**单源时行为与二选一时代完全一致**
+4. **光追是「GI 源」而非「管线类型」**——管线能力位（架构）× 设备能力（`rtSupported`）
+   两层判断，Deferred 的位已包含全部光追源
+5. **阴影是「可见性（乘法项）」而非「能量（加法项）」**——不进层栈，用独立 `ShadowChannel`
 
 ---
 

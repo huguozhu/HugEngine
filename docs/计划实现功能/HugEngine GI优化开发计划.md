@@ -103,7 +103,7 @@ minidump `Build/bin/Debug/06.GILab_crash.dmp`（可用 Visual Studio 打开）�
 
 ---
 
-## 进度快照（2026-09-13）
+## 进度快照（2026-09-14 更新）
 
 > 每一项都附**可复现的证据**（命令与判据见对应小节），不写"看起来好了"。
 
@@ -111,19 +111,77 @@ minidump `Build/bin/Debug/06.GILab_crash.dmp`（可用 Visual Studio 打开）�
 |---|---|---|---|
 | **0.0 验证基线** | ✅ 完成 | configure 成功、编译 `BUILD EXIT: 0`、0 错误；`06.GILab` 可运行（§1.3.1） | （环境修复，见 §1.3.1④） |
 | **0.1 偶发崩溃** | 🔄 判据满足，根因未证 | 崩溃点符号化到 `VulkanTexture::GetImageView()`（野指针）；最可疑根因（FB 被同帧销毁）已修 → **40/40 soak 零崩溃**，累计约 100 次启动零崩溃（§1.3.3） | `a869210` |
-| **0.2 白炉测试** | ✅ 设施与判据建成（数值待收敛） | RHI 读回 + 探针 + `furnaceMode` 代入真实合成路径；**首测 1.7998（应 1.0，+80%）**，读数逐帧稳定（§1.4(A)、§二 0.2 行） | `1f4b39b` `0f01148` |
+| **0.2 白炉测试** | ✅ **判据达成（读数 1.0000）** | RHI 读回 + 探针 + `furnaceMode` 代入真实合成路径；修复缺口 (A)(B) 后由 **1.7998 → 1.0000**，中心/背景一致（详见下方「Wave 0 缺口修复」） | `1f4b39b` `0f01148` `2211e4c` |
 | **0.7 每帧校验违规** | ✅ 判据达成 | 关闭校验去重后的真实计数：invalidState 每帧复发 + barrier 3.0/帧 + renderPass 1.0/帧 + semaphore 1.0/帧 → **0 / 0 / 0 / 0**（25 秒 / 504 帧，§1.3.4） | `a869210` `9d39dce` `0e5fd63` `15ca7fe` `4b1e379` |
 | **0.8 崩溃处理器** | ✅ 完成并自检 | `HE_CRASH_TEST=1` 输出 `#0 06.GILab!main + 0x41C2 [06.GILab.cpp:724]` + 完整调用栈 + minidump，且 WER 仍记录 APPCRASH | `06dbafc` |
-| **Wave 1 层栈与合成路径对齐** | ⏳ **未开始（下一步）** | — | — |
-| Wave 2 / 3 / 4 / 5 | ⏳ 未开始 | 依赖 Wave 1 | — |
+| **Wave 0 缺口 (A) IBL 在归一化之外** | ✅ 完成 | 层栈 IBL 权重从死参数变为真正生效；白炉读数由 1.7998 降至 1.0000 | `2211e4c` |
+| **Wave 0 缺口 (B) RSM 旁路加法** | ✅ 完成 | RSM 归入层栈中频源（`SampleRSMIndirect`），0.03 明确为 VPL 能量归一常数 | `2211e4c` |
+| **Wave 0 缺口 (C) 3 槽位限制** | ✅ 完成 | UBO 改为源数组（`GISourceSlot[4]` + count + mode），第 4 个源可接入 | `2211e4c` |
+| **M5.3 DDGI SH 修正** | ✅ 完成 | 评估端补 Lambert 卷积系数 A_l；说明「投影乘 cos」不可行（cos 依赖评估方向） | `e862931` |
+| **0.6 ddgiScale 语义收敛** | ✅ 完成 | 合成路径恒用真实辐照度，非物理缩放移出 | `e862931` |
+| **Wave 1 层栈与合成路径对齐** | ✅ **完成** | UBO 源数组化 + shader 按 id 分派（`SampleDiffuse/SpecularSource`）+ 层栈直传 + 删除 `useScreenGI` 隐式耦合 | `2211e4c` |
+| **Wave 2 P4 Provider 抽象** | ✅ **完成（10 源全部接入）** | `IGIProvider` + 附属 pass 机制；10 个 Provider 注册；帧图 pass 全部由注册表生成（详见下方） | `3a4075b` `8fc6091` `2b6b51a` `fd2510d` `48984e9` `51b8c98` `ea4620d` |
+| **M6.3 SSAO→GTAO** | ✅ 完成 | 新增 `GTAO.frag.slang`（地平线切片 + 解析积分），作为 AO 通道独立源 | `c487109` |
+| **M5.1 RTGI 时域累积** | ✅ 已划掉（S1 覆盖） | rgen 保持 SPP=1，累积与重投影由 `RTDenoiser` 完成 | — |
+| **Wave 3 频率分离** | ⏳ 未开始 | 前提（Wave 0 判据 + Wave 1 按源合成 + Wave 2 Provider）已就绪 | — |
+| **Wave 4 其余项** | 🔶 部分 | M4.4 RSM VPL 降采样 / M4.5 GBuffer 合并 / M5.2-A DDGI 光追 march 未做 | — |
+| **Wave 5 长期** | ⏳ 未开始 | P6 ReSTIR 统一估计器 / Lightmap 源落地 | — |
 
 **三个关键指标（当前实测值）**：
 
 | 指标 | 当前 | 目标 | 判据来源 |
 |---|---|---|---|
-| 每帧校验违规（四类） | **0 / 0 / 0 / 0** | 0 | 关闭校验层去重后的真实计数（§1.3.4） |
-| **白炉读数（绝对亮度）** | **1.7998** | **1.0**（±2%） | `HE_FURNACE=1` + `HE_FURNACE_PROBE=1`（§1.4(A)） |
-| 偶发崩溃 | 约 100 次启动零崩溃 | 持续为 0 且根因获证 | soak + 崩溃处理器（§1.3.3） |
+| 每帧校验违规（四类） | **0 / 0 / 0 / 0** ✅ | 0 | 关闭校验层去重后的真实计数（§1.3.4） |
+| **白炉读数（绝对亮度）** | **1.0000** ✅ | **1.0**（±2%） | `HE_FURNACE=1` + `HE_FURNACE_PROBE=1`（§1.4(A)） |
+| 偶发崩溃 | 约 100 次启动零崩溃 ✅ | 持续为 0 且根因获证 | soak + 崩溃处理器（§1.3.3） |
+
+### Wave 2 落地详情：GI Provider 抽象（10 源全覆盖）
+
+**全部 10 个 GI 源的 pass 已由 Provider 注册表生成**，帧图不再为任何一种源手写 pass 与门控：
+
+| Provider | 覆盖的源 | 形态 |
+|---|---|---|
+| `ScreenAOProvider` | **SSAO / GTAO**（同 pass 两种模式，由 `Handles()` 表达） | 全屏 offscreen |
+| `IBLProvider` | **IBL**（一个 Provider 同时服务 diffuse 与 specular） | 无 pass（烘焙，脏时重建） |
+| `RSMProvider` | **RSM** | 单 pass，需场景数据 |
+| `SSGIProvider` | **SSGI** | 主 pass + 降噪附属 pass |
+| `SSRProvider` | **SSR** | 主 pass + 降噪附属 pass |
+| `DDGIProvider` | **DDGI** | compute pass，无通道纹理输出 |
+| `RTEffectProvider` ×4 | **RT 阴影 / RTAO / RT 反射 / RTGI**（一个参数化实现覆盖四种） | 主 pass + 时域降噪（+ 反射/GI 空间滤波） |
+
+**接口能力**：身份（`GetSourceId`/`Handles`/`GetName`）、调度（`NeedsPass`/`SyncToStack`、
+`GetPassKind`/`HasTextureOutput`）、输出（`GetDiffuse/Specular/AOOutput` +
+`GetFinalXxxOutput`）、附属 pass（`GetAuxPassCount/Name/Output/Input` +
+`PreBindAux`/`RenderAux`）、生命周期、`GIProviderContext`（含 RT 所需的光源缓冲/TLAS）。
+
+**「零侵入」量化**（新增一种 GI 源的改动）：
+
+| 步骤 | 改动量 |
+|---|---|
+| 实现 Provider（算法本体） | 新文件 |
+| 注册 | **1 行** |
+| 帧图 / UBO / 合成循环 / 层栈结构 | **0 行** |
+| 面板候选 | AO 通道已由注册表派生；diffuse/specular 仍为静态列表 |
+
+### 本轮修复的真实缺陷（均由系统性测试暴露）
+
+| 缺陷 | 症状 | 修复 |
+|---|---|---|
+| **层栈与子系统开关不同源** | 06 用旧的 per-subsystem cfg 开关（默认 0=关）覆盖了层栈同步 → 所有 Provider `IsValid=false`，**AO/SSGI/SSR 的 pass 完全不注册**（画面只剩 IBL） | 06 不再独立配置启用状态，改为层栈恢复后统一同步（`fd2510d`） |
+| **RT Provider 注册时机错误** | 注册代码置于 RT 基础设施初始化之前（`m_RTEnabled` 尚为 false）→ **四个 RT Provider 完全未注册** | 移至 RT 基础设施之后（`51b8c98`） |
+| **Deferred 能力位缺光追源** | HybridRT 删除时其能力位未并入 Deferred → `Degrade` 会把所有 RT 源判为「管线不提供」而裁剪（切档位时静默丢失光追） | `PipelineCaps::Deferred` 补齐四个 RT 位，移除废弃的 `HybridRT` 预设（`1aa0b41`） |
+
+### 架构演进后的冗余清理
+
+| 项 | 结论 |
+|---|---|
+| push constant 的 `rtAOSource`/`rtSpecularSource`/`rtDiffuseSource`/`useScreenGI`/`ddgiScale` | Wave 1 后 shader 已不读取 → 删除（C++/slang 同步，push constant 96B→80B） |
+| `GIChannels` / `ToInputSources()` / `AOChannel`/`SpecularChannel`/`DiffuseChannel` / `LightingInputs::sources` | 无使用者 → 删除（保留 `ShadowChannel`：阴影是可见性乘法项） |
+| `LightingInputs::ddgiScale`、`UseScreenDiffuse()` | 无使用者 → 删除 |
+| 06 保存端的 `ssgi_enabled` 等旧键 | 加载端已改，保存端残留死键 → 删除 |
+| 帧图自行判断 `halfRes` 选 SSGI/SSR 纹理 | 与 Provider 的 `GetFinalXxxOutput()` 重复 → 改由 Provider 给出 |
+| `PipelineCaps::HybridRT` | 管线已删 → 移除 |
+| **shadow 移出 GI 层栈** | 阴影是**可见性（乘法项）**而非能量（加法项），不适用层栈语义 → 回归独立 `ShadowChannel` 枚举（`e175c2e`） |
 
 **新增的诊断设施（都能免手点、可用环境变量开启）**：
 
@@ -134,6 +192,20 @@ minidump `Build/bin/Debug/06.GILab_crash.dmp`（可用 Visual Studio 打开）�
 | `HE_CRASH_TEST=1` | 主动崩溃，自检崩溃处理器 |
 | `HE_FURNACE=1` / `HE_FURNACE_PROBE=1` | 白炉数值测试 / 像素探针读回 |
 | `vk_layer_settings.txt` + `VK_LAYER_SETTINGS_PATH` | 关闭校验层重复消息上限，得到违规**真实次数**（否则计数会被去重掩盖） |
+
+### 当前 GI 能力总览（10 种算法 · 全部可同时启用）
+
+| 通道 | 算法 | 频段 |
+|---|---|---|
+| **间接漫反射** | IBL · DDGI · SSGI · RSM · RTGI | 低 · 低 · 中 · 中 · 高 |
+| **间接镜面** | IBL · SSR · RTReflection | 低 · 中 · 高 |
+| **环境光遮蔽** | SSAO · GTAO · RTAO | 中 · 中 · 高 |
+| （可见性） | 光栅阴影 · RT 阴影 | — |
+| （参考） | Path Tracing（ground truth） | — |
+
+**可用性三层判断**：管线能力（Forward 仅 IBL+RSM；Deferred 全部）× 设备能力
+（光追源需 `rtSupported`）× 层栈选择（`weight>0`）。
+**实测**：Deferred + RTX 4060 下单次运行同时启用全部 10 源，RG pass 链完整生成。
 
 ---
 
