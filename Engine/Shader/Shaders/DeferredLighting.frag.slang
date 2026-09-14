@@ -150,7 +150,9 @@ float3 SampleDiffuseSource(uint id, float3 worldPos, float3 N, float2 uv,
     case GISOURCE_IBL:   // 低频：环境辐照度（含 kD 与 albedo）
         return kD * u_IrradianceMap.Sample(u_IBLSampler, N).rgb * albedo * iblIntensity;
     case GISOURCE_DDGI:  // 低频：动态漫反射探针（世界空间）
-        return SampleDDGI(worldPos, N) * ddgiScale;
+        // 合成路径恒用真实辐照度——ddgiScale（GI_DDGI::debugScale）只用于调试可视化，
+        // 若在此相乘会破坏能量守恒（归一化之内引入非物理缩放，Wave 0.6）
+        return SampleDDGI(worldPos, N);
     case GISOURCE_SSGI:  // 中频：屏幕空间
         return u_SSGI.Sample(u_GBufferSampler, uv).rgb;
     case GISOURCE_RSM:   // 中频：反射阴影贴图
