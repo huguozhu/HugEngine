@@ -54,7 +54,8 @@ public:
         if (m_Pass) m_Pass->Render(cmd);
     }
     void PreBind(rhi::IRHICommandList* cmd) override { if (m_Pass) m_Pass->PreBind(cmd); }
-    void SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal) override {
+    void SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal,
+                   rhi::IRHITexture* /*albedo*/) override {
         if (m_Pass) m_Pass->SetInputs(depth, normal);
     }
 

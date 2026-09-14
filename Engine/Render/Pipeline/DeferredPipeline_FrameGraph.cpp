@@ -365,7 +365,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         rg.AddPass(prov->GetName(), {}, {{ssaoOut, ResourceAccess::Write}},
             [&, aoW, aoH, p = prov.get(), aoCtx = GIProviderContext{ &world, &sg, &camera, m_CurrentFrameSlot }](rhi::IRHICommandList* c) {
                 p->PreBind(c);                                  // 绑定该源 pass 的管线状态
-                p->SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal());
+                p->SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetAlbedo());
                 rhi::ClearValue aoClear;
                 aoClear.color[0]=aoClear.color[1]=aoClear.color[2]=aoClear.color[3]=1.0f;
                 c->BeginOffscreenPass(p->GetAOOutput()->GetNativeHandle(), nullptr, aoW, aoH, &aoClear, false);
@@ -412,42 +412,50 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         }
     }
 
-    // SSGI Pass（屏幕空间间接漫反射，仅当 GIConfig 选中 SSGI 才注册）
+    // ── 屏幕空间漫反射源：遍历 Provider（主 pass + 附属 pass）──
+    // Wave 2 阶段 2：SSGI 的「主 pass + 降噪」链路由 Provider 自报（GetAuxPass*），
+    // 帧图不再为其手写降噪 pass；新增屏幕空间 GI 只需注册 Provider。
     render::ResourceHandle ssgiDenoised = kInvalidHandle;  // 通道未启用时保持无效句柄
-    if (m_GIConfig.ShouldRunSSGI()) {
-        auto ssgiOut = rg.ImportTexture("SSGI_Output", m_SSGI.GetIndirectDiffuseTexture());
-        // halfRes：输出纹理可能为半分辨率，viewport 用纹理实际尺寸
-        u32 ssw = m_SSGI.GetIndirectDiffuseTexture()->GetWidth();
-        u32 ssh = m_SSGI.GetIndirectDiffuseTexture()->GetHeight();
-        rg.AddPass("SSGI", {}, {{ssgiOut, ResourceAccess::Write}},
-            [&, ssw, ssh](rhi::IRHICommandList* c) {
-                m_SSGI.PreBind(c);
+    for (auto& prov : m_GIProviders) {
+        if (!prov->Handles(GISourceId::SSGI)) continue;
+        prov->SyncToStack(m_GIConfig.diffuse);
+        if (!prov->NeedsPass(m_GIConfig.diffuse)) continue;
+        prov->SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetAlbedo());
+
+        rhi::IRHITexture* mainTex = prov->GetDiffuseOutput();
+        if (!mainTex) continue;
+        const u32 pw = mainTex->GetWidth();
+        const u32 ph = mainTex->GetHeight();
+        const auto mainH = rg.ImportTexture(prov->GetName(), mainTex);
+        rg.AddPass(prov->GetName(), {}, {{mainH, ResourceAccess::Write}},
+            [&, p = prov.get(), pw, ph](rhi::IRHICommandList* c) {
+                p->PreBind(c);
                 rhi::ClearValue clr{};
-                if (m_SSGI.IsEnabled()) {
-                    m_SSGI.SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetAlbedo());
-                    c->BeginOffscreenPass(m_SSGI.GetIndirectDiffuseTexture()->GetNativeHandle(), nullptr, ssw, ssh, &clr, false);
-                    m_SSGI.Render(c);
-                } else {
-                    c->BeginOffscreenPass(m_SSGI.GetIndirectDiffuseTexture()->GetNativeHandle(), nullptr, ssw, ssh, &clr, false);
-                }
+                c->BeginOffscreenPass(p->GetDiffuseOutput()->GetNativeHandle(), nullptr, pw, ph, &clr, false);
+                p->Render(c, GIProviderContext{ &world, &sg, &camera, m_CurrentFrameSlot });
                 c->EndOffscreenPass();
             });
 
-        // SSGI Denoise（halfRes 时跳过：半分辨率输出直接采样，省 Denoise 开销）
-        if (m_SSGI.GetSettings().halfRes) {
-            ssgiDenoised = ssgiOut;
-        } else {
-            ssgiDenoised = rg.ImportTexture("SSGI_Denoised", m_DenoiseSSGI.GetOutput());
-            rg.AddPass("SSGI_Denoise", {{ssgiOut, ResourceAccess::Read}}, {{ssgiDenoised, ResourceAccess::Write}},
-                [&, w, h](rhi::IRHICommandList* c) {
-                    m_DenoiseSSGI.PreBind(c);
-                    m_DenoiseSSGI.SetInputs(m_SSGI.GetIndirectDiffuseTexture(), m_GBuffer->GetDepth(), m_GBuffer->GetNormal());
+        // 附属 pass（降噪等）：依次串联，最后一个输出即该源的最终输出
+        render::ResourceHandle lastOut = mainH;
+        for (u32 i = 0; i < prov->GetAuxPassCount(); i++) {
+            rhi::IRHITexture* auxTex = prov->GetAuxPassOutput(i);
+            if (!auxTex) continue;
+            const auto auxH = rg.ImportTexture(prov->GetAuxPassName(i), auxTex);
+            const u32 aw = auxTex->GetWidth();
+            const u32 ah = auxTex->GetHeight();
+            rg.AddPass(prov->GetAuxPassName(i),
+                {{lastOut, ResourceAccess::Read}}, {{auxH, ResourceAccess::Write}},
+                [&, p = prov.get(), i, aw, ah](rhi::IRHICommandList* c) {
+                    p->PreBindAux(c, i);
                     rhi::ClearValue clr{};
-                    c->BeginOffscreenPass(m_DenoiseSSGI.GetOutput()->GetNativeHandle(), nullptr, w, h, &clr, false);
-                    m_DenoiseSSGI.Render(c);
+                    c->BeginOffscreenPass(p->GetAuxPassOutput(i)->GetNativeHandle(), nullptr, aw, ah, &clr, false);
+                    p->RenderAux(c, i, GIProviderContext{});
                     c->EndOffscreenPass();
                 });
+            lastOut = auxH;
         }
+        ssgiDenoised = lastOut;
     }
 
     // ============================================================

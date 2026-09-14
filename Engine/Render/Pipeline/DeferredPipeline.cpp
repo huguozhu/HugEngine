@@ -147,6 +147,12 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
             m_GIProviders.push_back(std::move(rsmProvider));
         }
 
+        // SSGI（屏幕空间间接漫反射；主 pass + 降噪附属 pass）
+        auto ssgiProvider = std::make_unique<SSGIProvider>();
+        ssgiProvider->SetPass(&m_SSGI);
+        ssgiProvider->SetDenoiser(&m_DenoiseSSGI);
+        m_GIProviders.push_back(std::move(ssgiProvider));
+
         HE_CORE_INFO("DeferredPipeline: 已注册 {} 个 GI Provider", m_GIProviders.size());
     }
 

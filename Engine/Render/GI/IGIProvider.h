@@ -92,8 +92,9 @@ public:
     /// 绑定附属 pass 的管线状态
     virtual void PreBindAux(rhi::IRHICommandList* /*cmd*/, u32 /*i*/) {}
 
-    /// 可选：由帧图注入 GBuffer 输入（深度/法线）；不使用的 Provider 可忽略
-    virtual void SetInputs(rhi::IRHITexture* /*depth*/, rhi::IRHITexture* /*normal*/) {}
+    /// 可选：由帧图注入 GBuffer 输入（深度/法线/反照率）；不使用的 Provider 可忽略
+    virtual void SetInputs(rhi::IRHITexture* /*depth*/, rhi::IRHITexture* /*normal*/,
+                           rhi::IRHITexture* /*albedo*/) {}
 };
 
 } // namespace he::render
