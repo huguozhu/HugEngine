@@ -1076,11 +1076,22 @@ int main() {
 
             // ---- Diffuse（间接漫反射）----
             {
-                // P4：候选源按「低频 → 高频」排列（IBL/DDGI → SSGI/RSM → RTGI）
-                static const render::GISourceId kDiffuseSources[] = {
-                    render::GISourceId::IBL, render::GISourceId::DDGI, render::GISourceId::SSGI,
-                    render::GISourceId::RSM, render::GISourceId::RTGI };
-                channelUI("Diffuse — 间接漫反射（低频 → 高频）", gc.diffuse, kDiffuseSources, 5);
+                // P4：候选源从已注册的 Provider 派生（低频 → 高频排列）。
+                // 频段顺序用于面板可读性；未接入 Provider 的源（如预留的 Lightmap）不出现。
+                static const render::GISourceId kAllDiffuse[] = {
+                    render::GISourceId::IBL, render::GISourceId::Lightmap, render::GISourceId::DDGI,
+                    render::GISourceId::SSGI, render::GISourceId::RSM, render::GISourceId::RTGI };
+                std::vector<render::GISourceId> diffuseSources;
+                if (dp) {
+                    for (auto id : kAllDiffuse) {
+                        for (auto& p : dp->GetGIProviders()) {
+                            if (p->Handles(id)) { diffuseSources.push_back(id); break; }
+                        }
+                    }
+                }
+                if (diffuseSources.empty()) diffuseSources.push_back(render::GISourceId::IBL);
+                channelUI("Diffuse — 间接漫反射（低频 → 高频）", gc.diffuse,
+                          diffuseSources.data(), (int)diffuseSources.size());
                 ImGui::Indent(12.0f);
                 ImGui::SliderFloat("GI 强度", &gc.giIntensity, 0.0f, 2.0f, "%.2f");
                 ImGui::Checkbox("半分辨率", &gc.halfRes);
@@ -1123,10 +1134,21 @@ int main() {
 
             // ---- Specular（镜面反射）----
             {
-                static const render::GISourceId kSpecularSources[] = {
+                // P4：候选源从已注册的 Provider 派生
+                static const render::GISourceId kAllSpecular[] = {
                     render::GISourceId::IBL, render::GISourceId::SSR,
                     render::GISourceId::RTReflection };
-                channelUI("Specular — 镜面反射（低频 → 高频）", gc.specular, kSpecularSources, 3);
+                std::vector<render::GISourceId> specSources;
+                if (dp) {
+                    for (auto id : kAllSpecular) {
+                        for (auto& p : dp->GetGIProviders()) {
+                            if (p->Handles(id)) { specSources.push_back(id); break; }
+                        }
+                    }
+                }
+                if (specSources.empty()) specSources.push_back(render::GISourceId::IBL);
+                channelUI("Specular — 镜面反射（低频 → 高频）", gc.specular,
+                          specSources.data(), (int)specSources.size());
                 ImGui::Indent(12.0f);
                 if (giSSR) {
                     bool on = giSSR->IsEnabled();

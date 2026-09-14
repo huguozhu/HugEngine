@@ -47,52 +47,70 @@
 
 ### 3.1 数据模型：从"单枚举"到"层栈"
 
+> **⚠️ 本节已于 2026-09-14 按实现回写**（原设计稿与实现存在漂移：`GILayerDesc`→`GISourceDesc`、
+> `GIBand` 不进层描述、`range`→`falloffDistance`、`enabled`→`weight>0`、
+> `kMaxLayers`→`kMaxSources`、`blend`→`mode`、`GIBlendMode::Fallback` 未实现）。
+> 以下为**当前实现**（`Engine/Render/GI/GIConfig.h`）。
+
 ```cpp
-// ---- GI 源标识（与具体实现解耦）----
+// ---- GI 源标识（与具体实现解耦；共 11 项，含 1 项预留）----
+// 频段不写进层描述，而是由 id 推导（GIBandOf）——避免"同一算法被填成不同频段"的不一致
 enum class GISourceId : u8 {
     None = 0,
-    IBL,        // 环境辐照度（远场、全方向、低频）
-    Lightmap,   // 烘焙（远场、静态、低频）
-    DDGI,       // 探针网格（远场/中距、低频）
-    SSGI,       // 屏幕空间（近处、中频）
-    RSM,        // 反射阴影贴图（中距、中频）
-    RTGI,       // 硬件光追（近处、高频）
-    ReSTIR,     // 时空重采样（近处、高频，RTGI 的进阶）
+    // 低频（远场 / 环境）
+    IBL = 1,        // 环境辐照度 / 预滤波（同时服务 diffuse 与 specular）
+    Lightmap = 2,   // 烘焙光照（预留，尚未实现）
+    DDGI = 3,       // 动态漫反射探针网格
+    // 中频（近处细节）
+    SSGI = 4,       // 屏幕空间间接漫反射
+    SSR = 5,        // 屏幕空间反射
+    SSAO = 6,       // 屏幕空间环境光遮蔽
+    RSM = 7,        // 反射阴影贴图间接光
+    GTAO = 11,      // 地平线切片 AO（SSAO 的高质量替代）
+    // 高频（精确光追）
+    RTGI = 8,       // 硬件光追间接漫反射
+    RTReflection = 9,   // 硬件光追反射
+    RTAO = 10,      // 硬件光追环境光遮蔽
 };
+// 注：ReSTIR 未列入枚举——它属于 P6 统一估计器（Wave 5），届时再作为源接入。
+// 注：阴影不进 GISourceId——它是「可见性（乘法项）」而非能量（加法项），
+//     用独立 ShadowChannel 枚举表达（见 §3.x 与不变量 5）。
 
-// ---- 频段（决定该源在合成中的角色）----
+// ---- 频段（决定该源在合成中的角色；由 id 推导，不存储）----
 enum class GIBand : u8 { Low, Mid, High };
+GIBand GIBandOf(GISourceId id);   // IBL/Lightmap/DDGI→Low；RT*→High；其余→Mid
 
-// ---- 单个 GI 层描述 ----
-struct GILayerDesc {
-    GISourceId id      = GISourceId::None;
-    GIBand     band    = GIBand::Low;    // 该源天然的频段
-    float      range   = 30.0f;          // 有效作用范围（米；超出 → 权重衰减让位）
-    float      weight  = 1.0f;           // 用户/档位给的相对权重（0..1）
-    bool       enabled = false;
+// ---- 单个 GI 源描述 ----
+struct GISourceDesc {
+    GISourceId id              = GISourceId::None;
+    float      weight          = 1.0f;   // 相对权重（0 = 不参与，等价于旧设计的 enabled）
+    float      falloffDistance = 0.0f;   // 可选「距离让位」（0 = 不启用）
 };
+// 注：原设计的 `range`（有效作用范围）更名并改为可选的 `falloffDistance`——
+//     因为物理正确性来自权重归一化，距离衰减只是性能/艺术控制，默认关闭。
 
-// ---- 一个通道的层栈（有序：低频 → 高频）----
+// ---- 一个通道的源层栈（有序：低频 → 高频）----
 struct GIChannelStack {
-    static constexpr u32 kMaxLayers = 4;
-    GILayerDesc layers[kMaxLayers];
-    u32         count  = 0;
-    GIBlendMode blend  = GIBlendMode::Normalized;
+    static constexpr u32 kMaxSources = 4;
+    GISourceDesc sources[kMaxSources];
+    u32          count = 0;
+    GIBlendMode  mode  = GIBlendMode::Normalized;   // 通道级合成模式
 };
 
-// ---- 合成模式 ----
+// ---- 合成模式（当前实现）----
 enum class GIBlendMode : u8 {
-    Fallback,     // 分层回退：RTGI → SSGI → DDGI/IBL（最简，绝对无双重计数）
-    Normalized,   // 归一化加权（推荐；权重来自置信度）
-    FrequencySplit, // 频率分离（低频+高频细节；进阶）
+    Additive,    // 直接相加（旧行为——双重计数，仅作 A/B 对照）
+    Normalized,  // 归一化加权 Σ(源×w)/Σw（推荐，权重和=1 → 无双重计数）
 };
+// 注：原设计的 Fallback（分层回退）与 FrequencySplit（频率分离）尚未实现——
+//     前者可由"只用最精确的源"的层栈组合表达；后者是 P5 / Wave 3 的目标。
 
 // ---- 扩展后的 GIConfig ----
 struct GIConfig {
     GIChannelStack diffuse;    // 间接漫反射层栈
     GIChannelStack specular;   // 间接镜面层栈
     GIChannelStack ao;         // 环境光遮蔽层栈
-    ShadowChannel  shadow = ShadowChannel::Raster;
+    ShadowChannel  shadow = ShadowChannel::Raster;   // 阴影：独立枚举，不进层栈
     float giIntensity = 1.0f;
     float aoIntensity = 1.0f;
     bool  halfRes = false;
@@ -100,7 +118,18 @@ struct GIConfig {
 ```
 
 **兼容性**：单源时 `diffuse.count == 1` —— 合成退化为"直接取用"，与现有行为一致。
-现有的 `DiffuseChannel` 枚举可作为**便捷构造器**保留（`DiffuseChannel::SSGI` → 生成单层栈）。
+
+**已实现的配套机制**（原设计未展开、实现时补充）：
+1. **按源 id 分派采样**：合成的 UBO 用**源数组**（`GISourceSlot{id, weight, falloffDistance} × 4`
+   + `count` + `mode`），shader 遍历数组并调 `SampleDiffuse/SpecularSource(id)` ——
+   新增算法只需加 `GISOURCE_XXX` 常量 + 一个 `case`，**不改 UBO 结构/合成循环**
+2. **Provider 注册表**：每个源由 `IGIProvider` 实现自报身份/门控/输出/附属 pass，
+   帧图的 pass 与面板候选均由注册表生成（P4 已落地）
+3. **逐源降级**：`GIRegistry::Degrade(stack, pipelineCaps, rtSupported)` 按
+   「管线能力 × 设备能力」逐源裁剪，并保证通道不空
+
+> 注：原设计提到的「`DiffuseChannel` 枚举作为便捷构造器保留」**未采用**——
+> P4 完成后层栈成为唯一表达方式，这些枚举已无使用者并已删除（见不变量 4）。
 
 ### 3.2 权重来源（关键——不是"相机距离"）
 

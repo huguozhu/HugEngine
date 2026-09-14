@@ -81,14 +81,14 @@ minidump `Build/bin/Debug/06.GILab_crash.dmp`（可用 Visual Studio 打开）�
 | **M2** 数据驱动 + 帧图自动编排 | ✅（`2b06045`） | 附录 |
 | **M3** Provider 注册表 + 自动降级 | ✅（`66faf5c`；后被 P3 层栈化重写为逐源裁剪） | 附录 |
 | **M4** 性能优化 | 🔄 部分（4.1 halfRes / 4.2 SSR Hi-Z / 4.3 DDGI 1/4 HDR 已完成） | 余项 **M4.4 / M4.5 → Wave 4（§六）** |
-| **M5** 质量提升 | ⏳ 部分（M5.2-B 完成；**M5.1 已划掉**，S1 覆盖） | **M5.3 / M5.2-A → Wave 4（§六）** |
-| **M6** 工业界进阶 | ⏳ 按需 | **M6.3 GTAO → Wave 4**（兼作 Wave 2 零侵入验证载体）；**M6.1 ReSTIR GI → Wave 5（§七）** |
+| **M5** 质量提升 | ✅ 主要项完成（M5.2-B；**M5.1 由 S1 覆盖**；**M5.3 已完成**） | 余 **M5.2-A → Wave 4（§六）** |
+| **M6** 工业界进阶 | 🔶 部分（**M6.3 GTAO 已完成**） | **M6.1 ReSTIR GI → Wave 5（§七）** |
 | **P1/P2/P3** 数据模型 / 归一化合成 / 源层栈 | ✅（`105911b`） | 附录 |
 | **S1 / S1.5** 光追归入 Deferred / 两类源同时参与 | ✅（`90649ba`/`aac5690`/`5c2b84b`） | 附录 |
 | **S2 / S3** 管线维度收敛 / 移除 `HybridRTPipeline` | ✅（`06c8580`/`0f8aca8`） | 附录 |
 | **PT** 参考渲染器定位与加速结构共享 | ✅（`3301040`） | 附录 |
-| **P4** Provider 抽象 | ⏳ 未做（无 `IGIProvider`） | **Wave 2（§四）** |
-| **P5** 频率分离 | ⏳ 未做（无 `FrequencySplit`） | **Wave 3（§五）** |
+| **P4** Provider 抽象 | ✅ **已完成**（10 个 GI 源全部接入注册表） | Wave 2（§四） |
+| **P5** 频率分离 | ⏳ 未做（无 `FrequencySplit`） | **Wave 3（§五）← 下一步** |
 | **P6** 统一估计器（ReSTIR GI） | ⏳ 未做 | **Wave 5（§七）** |
 | —— 本次审计新增 —— | | |
 | 验证基线（工具链 / 编译 / 运行） | ✅ 已打通 | **Wave 0.0（§二）** |
@@ -233,9 +233,11 @@ minidump `Build/bin/Debug/06.GILab_crash.dmp`（可用 Visual Studio 打开）�
 | **白炉测试** | 全仓无 furnace/能量守恒测试；`Samples` 无截图/读回设施；`Tests/` 为 doctest 且**不链接 Render 模块**（`Tests/CMakeLists.txt:48-54`） |
 | **P4 Provider 抽象** | 无 `IGIProvider`（glob 无结果）；`IGlobalIllumination` 与 SSGI/DDGI/SSR/RSM 仍是管线独立成员，帧图手写 ~40 个 `AddPass` |
 | **P5 频率分离** | `GIBlendMode` 仅 `Additive` / `Normalized`（`LightingPass.h:50-53`），无 `FrequencySplit` |
-| M4.4 RSM VPL 降采样 / M4.5 GBuffer 通道合并 | 未做 |
-| M5.2-A DDGI 光追 march / M5.3 DDGI SH 修正 | 未做 |
-| M6.3 GTAO | 未做 |
+| M4.4 RSM VPL 降采样 | ✅ 已完成（16 点 Poisson 盘 + 能量常数按 1/N 重标定） |
+| M4.5 GBuffer 通道合并 | ⏭️ 不适用（metallic/roughness 嵌在需 16 位精度的 MRT 内，详见 §六） |
+| M5.3 DDGI SH 修正 | ✅ 已完成（评估端补 Lambert 卷积 A_l） |
+| M5.2-A DDGI 光追 march | ⏳ 未做 |
+| M6.3 GTAO | ✅ 已完成 |
 | ~~M5.1 RTGI 时域累积~~ | ✅ **实际已被 S1 覆盖，应从待办划掉**（详见 §六）：`RTDenoiser` 已有 history + 基于 velocity 的重投影 + 时域混合 + 去遮挡（`PostProcess/RTDenoiser.h:18,75`、`RT_DenoiseTemporal.frag.slang:44-68`），且 Deferred 帧图已把它挂在 RTGI 输出上（`DeferredPipeline.h:193` `m_GIDenoiser`）。rgen 内 SPP=1、无 history 是**正确设计**（累积归降噪器）。剩余价值仅为降噪参数调优 / SPP 提升 |
 
 ### 1.3 🚨 验证基线实证：`06.GILab` 从未编译、从未运行，且本机无任何工具链
@@ -633,12 +635,12 @@ render pass 的 initial/final 都更新），并让图的导入资源初始化�
 
 | 任务 | 位置 | 说明 | 规模 |
 |---|---|---|---|
-| M4.4 RSM VPL 降采样 25→16 | `DeferredLighting.frag.slang:272-281` | Poisson 盘替代 5×5；注意与 Wave 0.5 的 RSM 归位**同一处代码**，建议合并做 | 小 |
-| M4.5 GBuffer 通道合并 | `DeferredLighting.frag.slang:82-94` | metallic/roughness 打包 R8G8B8A8 | 小 |
-| M5.3 DDGI SH 修正 | `DDGI.comp.slang:155-159` + `RT_DDGI.slang:33` | 投影乘 `cos` + 评估端去 `max(result,0)` 截断（"均匀变蓝"根因）；**直接影响白炉测试的 DDGI 项正确性** | 中 |
-| M5.2-A DDGI 光追射线 march | `DDGI.comp.slang:133` | 方案 A + 按 `supportsRayTracing` 自动选择（M5.2-B 已解决视角相关） | 中 |
+| M4.4 RSM VPL 降采样 25→16 | `DeferredLighting.frag.slang` 的 `SampleRSMIndirect` | ✅ **已完成**：5×5 规则网格（有条纹伪影）改为 **16 点 Poisson 盘**，采样数省 36%；离散化能量常数按 `E ≈ (1/N)·Σ VPL` 由 `0.03`（25 点）重标定为 `0.046875`（16 点）以保持总能量不变 | 小 |
+| M4.5 GBuffer 通道合并 | `DeferredLighting.frag.slang` / `GBuffer.frag.slang` | ⏭️ **不适用（经核查）**：metallic/roughness 已嵌在 **MRT0（albedo.rgb+metallic）/ MRT1（normal.xyz+roughness）** 的 alpha 通道，而 albedo 与法线都需要 16 位精度，无法单独降到 R8G8B8A8；若拆成独立 MRT 反而增加带宽。真正可降的是 MRT5/6 的 Disney 参数（RGBA16→RGBA8，收益 2×4B/像素，优先级低） | 小 |
+| M5.3 DDGI SH 修正 | `DDGI.comp.slang` + `RT_DDGI.slang` | ✅ **已完成**：评估端补 **Lambert 卷积系数 A_l**（`E(n)=Σ A_l·L_lm·Y_lm(n)`）。注：文档原提的「投影乘 cos」**物理上不成立**——cos 依赖评估方向（法线），探针存储时未知，卷积只能在评估端以与 n 无关的 A_l 施加 | 中 |
+| M5.2-A DDGI 光追射线 march | `DDGI.comp.slang` | 方案 A + 按 `supportsRayTracing` 自动选择（M5.2-B 已解决视角相关） | 中 |
 | M5.1 ~~RTGI 时域累积~~ | `RT_GI.rgen.slang` | ✅ **已划掉——S1 已覆盖**（见 §1.2）：rgen 保持 SPP=1 无 history，累积与重投影由 `RTDenoiser`（velocity + 去遮挡）在帧图里完成。剩余可做项仅"降噪参数调优 / SPP 提升"，非缺口 | 小 |
-| M6.3 SSAO→GTAO | `SSAO` | **建议作为 Wave 2.5 的"零侵入新增源"验证载体**，一石二鸟 | 中 |
+| M6.3 SSAO→GTAO | `SSAO` + `GTAO.frag.slang` | ✅ **已完成**：新增地平线切片 + 解析积分的 GTAO，作为 AO 通道独立源（与 SSAO 互斥替代，共用一个 pass 的两种模式） | 中 |
 
 > **注意**：M5.3（DDGI SH 修正）与白炉测试强相关——DDGI 是低频兜底源，其 SH 评估的 `max(...,0)` 截断会系统性丢失能量，白炉测试会把它暴露为"低频源偏暗"。**建议 M5.3 提前到 Wave 0 之后、Wave 1 之前**。
 
