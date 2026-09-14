@@ -374,42 +374,47 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             });
     }
 
-    // SSR Pass（屏幕空间反射，仅当 GIConfig 选中 SSR/RT 反射才注册）
+    // ── 屏幕空间反射源：遍历 Provider（主 pass + 附属 pass，与 SSGI 同构）──
     render::ResourceHandle ssrDenoised = kInvalidHandle;   // 通道未启用时保持无效句柄
-    if (m_GIConfig.ShouldRunSpecular()) {
-        auto ssrOut = rg.ImportTexture("SSR_Output", m_SSR.GetIndirectSpecularTexture());
-        // halfRes：输出纹理可能为半分辨率，viewport 用纹理实际尺寸
-        u32 ssw = m_SSR.GetIndirectSpecularTexture()->GetWidth();
-        u32 ssh = m_SSR.GetIndirectSpecularTexture()->GetHeight();
-        rg.AddPass("SSR", {}, {{ssrOut, ResourceAccess::Write}},
-            [&, ssw, ssh](rhi::IRHICommandList* c) {
-                m_SSR.PreBind(c);
+    for (auto& prov : m_GIProviders) {
+        if (!prov->Handles(GISourceId::SSR)) continue;
+        prov->SyncToStack(m_GIConfig.specular);
+        if (!prov->NeedsPass(m_GIConfig.specular)) continue;
+        prov->SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetAlbedo());
+
+        rhi::IRHITexture* mainTex = prov->GetSpecularOutput();
+        if (!mainTex) continue;
+        const u32 pw = mainTex->GetWidth();
+        const u32 ph = mainTex->GetHeight();
+        const auto mainH = rg.ImportTexture(prov->GetName(), mainTex);
+        rg.AddPass(prov->GetName(), {}, {{mainH, ResourceAccess::Write}},
+            [&, p = prov.get(), pw, ph](rhi::IRHICommandList* c) {
+                p->PreBind(c);
                 rhi::ClearValue clr{};
-                if (m_SSR.IsEnabled()) {
-                    m_SSR.SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetAlbedo());
-                    c->BeginOffscreenPass(m_SSR.GetIndirectSpecularTexture()->GetNativeHandle(), nullptr, ssw, ssh, &clr, false);
-                    m_SSR.Render(c);
-                } else {
-                    c->BeginOffscreenPass(m_SSR.GetIndirectSpecularTexture()->GetNativeHandle(), nullptr, ssw, ssh, &clr, false);
-                }
+                c->BeginOffscreenPass(p->GetSpecularOutput()->GetNativeHandle(), nullptr, pw, ph, &clr, false);
+                p->Render(c, GIProviderContext{ &world, &sg, &camera, m_CurrentFrameSlot });
                 c->EndOffscreenPass();
             });
 
-        // SSR Denoise（halfRes 时跳过：半分辨率输出直接采样）
-        if (m_SSR.GetSettings().halfRes) {
-            ssrDenoised = ssrOut;
-        } else {
-            ssrDenoised = rg.ImportTexture("SSR_Denoised", m_DenoiseSSR.GetOutput());
-            rg.AddPass("SSR_Denoise", {{ssrOut, ResourceAccess::Read}}, {{ssrDenoised, ResourceAccess::Write}},
-                [&, w, h](rhi::IRHICommandList* c) {
-                    m_DenoiseSSR.PreBind(c);
-                    m_DenoiseSSR.SetInputs(m_SSR.GetIndirectSpecularTexture(), m_GBuffer->GetDepth(), m_GBuffer->GetNormal());
+        render::ResourceHandle lastOut = mainH;
+        for (u32 i = 0; i < prov->GetAuxPassCount(); i++) {
+            rhi::IRHITexture* auxTex = prov->GetAuxPassOutput(i);
+            if (!auxTex) continue;
+            const auto auxH = rg.ImportTexture(prov->GetAuxPassName(i), auxTex);
+            const u32 aw = auxTex->GetWidth();
+            const u32 ah = auxTex->GetHeight();
+            rg.AddPass(prov->GetAuxPassName(i),
+                {{lastOut, ResourceAccess::Read}}, {{auxH, ResourceAccess::Write}},
+                [&, p = prov.get(), i, aw, ah](rhi::IRHICommandList* c) {
+                    p->PreBindAux(c, i);
                     rhi::ClearValue clr{};
-                    c->BeginOffscreenPass(m_DenoiseSSR.GetOutput()->GetNativeHandle(), nullptr, w, h, &clr, false);
-                    m_DenoiseSSR.Render(c);
+                    c->BeginOffscreenPass(p->GetAuxPassOutput(i)->GetNativeHandle(), nullptr, aw, ah, &clr, false);
+                    p->RenderAux(c, i, GIProviderContext{});
                     c->EndOffscreenPass();
                 });
+            lastOut = auxH;
         }
+        ssrDenoised = lastOut;
     }
 
     // ── 屏幕空间漫反射源：遍历 Provider（主 pass + 附属 pass）──

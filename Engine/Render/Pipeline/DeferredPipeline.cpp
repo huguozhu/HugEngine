@@ -153,6 +153,12 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
         ssgiProvider->SetDenoiser(&m_DenoiseSSGI);
         m_GIProviders.push_back(std::move(ssgiProvider));
 
+        // SSR（屏幕空间反射；主 pass + 降噪附属 pass，与 SSGI 同构）
+        auto ssrProvider = std::make_unique<SSRProvider>();
+        ssrProvider->SetPass(&m_SSR);
+        ssrProvider->SetDenoiser(&m_DenoiseSSR);
+        m_GIProviders.push_back(std::move(ssrProvider));
+
         HE_CORE_INFO("DeferredPipeline: 已注册 {} 个 GI Provider", m_GIProviders.size());
     }
 

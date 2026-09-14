@@ -493,7 +493,9 @@ int main() {
         mb.SetEnabled(GetInt(cfgData, "mb_enabled", 0) != 0);
         mb.SetIntensity(GetFloat(cfgData, "mb_intensity", 0.5f));
 
-        deferredPipeline.GetSSAO().enabled = GetInt(cfgData, "ssao_enabled", 0) != 0;
+        // 注：AO/SSGI/DDGI/SSR 的「启用」不再独立配置——统一由 GI 层栈派生
+        //（见下方层栈恢复后的同步），避免出现「层栈说参与、子系统却关着」的不一致。
+        // 这里只恢复各源的算法参数。
 
         if (auto* gi = deferredPipeline.GetGI()) {
             auto s = gi->GetSettings();
@@ -501,7 +503,6 @@ int main() {
             gi->SetSettings(s);
         }
         if (auto* ssgi = deferredPipeline.GetSSGI()) {
-            ssgi->SetEnabled(GetInt(cfgData, "ssgi_enabled", 0) != 0);
             ssgi->radius      = GetFloat(cfgData, "ssgi_radius", 1.0f);
             ssgi->sampleCount = GetInt(cfgData, "ssgi_samples", 16);
             auto s = ssgi->GetSettings();
@@ -509,7 +510,6 @@ int main() {
             ssgi->SetSettings(s);
         }
         if (auto* ddgi = deferredPipeline.GetDDGI()) {
-            ddgi->SetEnabled(GetInt(cfgData, "ddgi_enabled", 0) != 0);
             ddgi->blendAlpha = GetFloat(cfgData, "ddgi_blend", 0.9f);
             ddgi->debugScale = GetFloat(cfgData, "ddgi_scale", 1.0f);
             auto s = ddgi->GetSettings();
@@ -517,7 +517,6 @@ int main() {
             ddgi->SetSettings(s);
         }
         if (auto* ssr = deferredPipeline.GetSSR()) {
-            ssr->SetEnabled(GetInt(cfgData, "ssr_enabled", 0) != 0);
             ssr->maxSteps = GetFloat(cfgData, "ssr_max_steps", 64.0f);
             ssr->stepSize = GetFloat(cfgData, "ssr_step_size", 0.5f);
         }
@@ -564,6 +563,14 @@ int main() {
                       (int)render::GISourceId::SSAO, (int)render::GISourceId::RTAO, (int)-1, (int)-1);
             // 阴影通道独立于层栈（可见性乘法项，非能量源）→ 用枚举恢复
             gc.shadow = (render::ShadowChannel)GetInt(cfgData, "gi_shadow", (int)gc.shadow);
+
+            // ── 关键：层栈恢复后同步子系统开关（层栈与子系统必须同源）──
+            // 此前这里由各子系统独立的 cfg 开关控制，会出现「层栈要求参与、
+            // 子系统却处于关闭」的不一致（诊断中表现为 Provider IsValid=false）。
+            deferredPipeline.GetSSAO().enabled = gc.ShouldRunAO();
+            if (auto* ssgi = deferredPipeline.GetSSGI()) ssgi->SetEnabled(gc.ShouldRunSSGI());
+            if (auto* ddgi = deferredPipeline.GetDDGI()) ddgi->SetEnabled(gc.ShouldRunDDGI());
+            if (auto* ssr  = deferredPipeline.GetSSR())  ssr->SetEnabled(gc.ShouldRunSSR());
         }
         {
             auto& ssao = deferredPipeline.GetSSAO();
