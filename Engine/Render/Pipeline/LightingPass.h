@@ -14,23 +14,14 @@ class GBufferRenderer;
 struct RenderGraph;
 
 // ============================================================
-// 4 个通道的独立枚举（类型安全：每个通道只能选本通道技术）
+// 阴影通道枚举
+//
+// 注（架构演进后）：diffuse / specular / ao 三个「能量通道」已由 GIConfig 的
+// 层栈（GIChannelStack + GISourceId）表达，原先的 AOChannel / SpecularChannel /
+// DiffuseChannel 三个单值枚举与 GIChannels 结构已无使用者，已移除。
+// 阴影是「可见性（乘法项）」而非能量（加法项），不适用层栈语义，故保留本枚举。
 // ============================================================
 enum class ShadowChannel : u8 { None = 0, Raster, RT };  // 阴影：光栅化（CSM/点光 cubemap/聚光 map）/ 硬件光追
-enum class AOChannel : u8 { None = 0, SSAO, RTAO };           // 环境光遮蔽：SSAO / RT AO
-enum class SpecularChannel : u8 { None = 0, SSR, RT };        // 镜面反射：SSR / RT 反射
-enum class DiffuseChannel : u8 { None = 0, SSGI, RTGI };// 间接漫反射：SSGI / RT GI（DDGI 作为低频探针源参与合成）
-
-// ============================================================
-// 光照通道配置（4 通道技术选型）
-// ============================================================
-struct GIChannels {
-    ShadowChannel   shadow   = ShadowChannel::Raster;
-    AOChannel       ao       = AOChannel::SSAO;
-    SpecularChannel specular = SpecularChannel::SSR;
-    DiffuseChannel  diffuse  = DiffuseChannel::SSGI;
-    // 注：DDGI 是否参与合成由 diffuseBlend.probeWeight 表达（不再有独立开关）
-};
 
 // ============================================================
 // GI 分层合成（通道通用——diffuse / specular / AO 同构）
@@ -136,8 +127,6 @@ struct LightingInputs {
     // GI 通道参数（M1：强度由 push constant 驱动，替代 shader 魔法系数）
     float giIntensity = 1.0f;    // 间接漫反射 GI 总强度（ambient 系数）
     float aoIntensity = 1.0f;    // AO 强度
-    float ddgiScale   = 1.0f;    // DDGI 贡献缩放
-    GIChannels sources; // 通道选择（shadow/ao/specular/diffuse）
     // ── 分层合成（P2：多源间接光的归一化加权，通道通用）──
     // 混合参数经 UBO 传递给 shader（3 通道 × 24B，避免超出 push constant 128B 上限）
     // ── 分层合成（Wave 1：源数组，按源 id 分派采样）──

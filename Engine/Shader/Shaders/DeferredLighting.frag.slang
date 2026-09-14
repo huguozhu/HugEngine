@@ -72,13 +72,12 @@ struct LightGridCell { uint offset; uint count; };
     float    clusterLogFactor;  // log(far/near) 用于计算 Z slice
     uint     useClustered;      // 是否启用 clustered shading
     uint     rtShadowSource;    // 0=CSM, 1=RT 阴影（配合 u_RT_ShadowMask）
-    uint     rtAOSource;        // 0=SSAO, 1=RT AO（配合 u_RT_AO）
-    uint     rtSpecularSource;  // 0=SSR, 1=RT 反射（配合 u_RT_Reflection）
-    uint     rtDiffuseSource;   // 0=SSGI, 1=RT GI（配合 u_RT_GI）
-    float4   atmosphere;        // sunDir.xyz（指向太阳）+ turbidity（空中透视）
-    float    ddgiScale;         // DDGI 贡献缩放（由 debugScale 驱动）
-    float    giIntensity;       // 间接漫反射 GI 总强度（SSGI/RT GI/DDGI/RSM 统一驱动）
+    // 注：rtAOSource/rtSpecularSource/rtDiffuseSource/useScreenGI/ddgiScale 已随
+    // Wave 1「按源 id 分派」移除——源的选择与模式由层栈（UBO 源数组）表达
+    float    giIntensity;       // 间接漫反射 GI 总强度（层栈合成总倍率）
     float    aoIntensity;       // AO 强度（0=无 AO，1=完整 AO）
+    uint     _pad0;             // 对齐到 16 字节边界（atmosphere 需 16B 对齐）
+    float4   atmosphere;        // sunDir.xyz（指向太阳）+ turbidity（空中透视）
     // GI 分层合成参数经 GIBlendParams UBO 传递（见 kGPUBinding_GIBlendParams）
 };
 

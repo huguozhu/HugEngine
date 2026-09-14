@@ -1316,25 +1316,21 @@ int main() {
             out["ibl_intensity"] = std::to_string(gi->GetSettings().intensity);
         }
         if (auto* ssgi = deferredPipeline.GetSSGI()) {
-            out["ssgi_enabled"]   = std::to_string(ssgi->IsEnabled() ? 1 : 0);
             out["ssgi_radius"]    = std::to_string(ssgi->radius);
             out["ssgi_samples"]   = std::to_string(ssgi->sampleCount);
             out["ssgi_intensity"] = std::to_string(ssgi->GetSettings().intensity);
         }
         if (auto* ddgi = deferredPipeline.GetDDGI()) {
-            out["ddgi_enabled"]   = std::to_string(ddgi->IsEnabled() ? 1 : 0);
             out["ddgi_blend"]     = std::to_string(ddgi->blendAlpha);
             out["ddgi_scale"]     = std::to_string(ddgi->debugScale);
             out["ddgi_intensity"] = std::to_string(ddgi->GetSettings().intensity);
         }
         if (auto* ssr = deferredPipeline.GetSSR()) {
-            out["ssr_enabled"]   = std::to_string(ssr->IsEnabled() ? 1 : 0);
             out["ssr_max_steps"] = std::to_string(ssr->maxSteps);
             out["ssr_step_size"] = std::to_string(ssr->stepSize);
         }
 
         // ── SSAO ──
-        out["ssao_enabled"] = std::to_string(deferredPipeline.GetSSAO().enabled ? 1 : 0);
 
         // ── 面板状态：管线 / GI 档位 / 只看 GI / GI 通道配置 ──
         out["pipeline_mode"] = std::to_string(g_PipelineMode);

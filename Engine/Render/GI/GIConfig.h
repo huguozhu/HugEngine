@@ -7,7 +7,7 @@
 //   - 4 质量档位（Low/Medium/High/Ultra）一键切换
 //   - 每通道一个「源层栈」：可同时启用多个 GI 源（低频探针 / 屏幕空间 / 光追）
 //   - 帧图按各源是否参与（weight>0）注册 pass
-// 依赖 M1 的 GIChannel/GIChannels（LightingPass.h）。
+// 依赖 LightingPass.h 的 ShadowChannel 与 GIBlendMode。
 //
 // 为什么用层栈而不是「单值枚举」：
 //   多个 GI 源描述的是同一个物理量（间接入射辐射度），"选一个"无法表达
@@ -299,18 +299,7 @@ struct GIConfig {
     /// 使用横跨屏幕空间/光追的"精确"漫反射源（决定 shader 的 rtDiffuseSource 与有效性）
     [[nodiscard]] bool UseScreenDiffuse() const { return ShouldRunSSGI() || ShouldRunRTGI(); }
 
-    /// 生成 GIChannels（M1 接口，供 LightingPass 消费）
-    GIChannels ToInputSources() const {
-        GIChannels s;
-        s.shadow   = shadow;   // 阴影本就用枚举表达
-        s.ao       = ShouldRunRTAO() ? AOChannel::RTAO
-                   : ((ShouldRunSSAO() || ShouldRunGTAO()) ? AOChannel::SSAO : AOChannel::None);   // GTAO 与 SSAO 共用 AO 通道
-        s.specular = ShouldRunRTReflection() ? SpecularChannel::RT
-                   : (ShouldRunSSR() ? SpecularChannel::SSR : SpecularChannel::None);
-        s.diffuse  = ShouldRunRTGI() ? DiffuseChannel::RTGI
-                   : (ShouldRunSSGI() ? DiffuseChannel::SSGI : DiffuseChannel::None);
-        return s;
-    }
+
 };
 
 /// 按档位生成默认配置（4 档预设——层栈形态）

@@ -147,11 +147,7 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
     lpc.clusterLogFactor = clusterLogFactor;
     // RT 效果输入源标志：纹理非空则 shader 侧使用 RT 输出替代屏幕空间效果
     lpc.rtShadowSource   = in.rtShadowMask ? 1u : 0u;
-    lpc.rtAOSource       = in.rtAO         ? 1u : 0u;
-    lpc.rtSpecularSource = in.rtReflection ? 1u : 0u;
-    lpc.rtDiffuseSource  = in.rtGI         ? 1u : 0u;
     lpc.atmosphere = float4(m_AtmSunDir, m_AtmTurbidity);  // 空中透视参数（太阳方向 + 浑浊度）
-    lpc.ddgiScale  = in.ddgiScale;                         // DDGI 贡献缩放（替代硬编码 0.5）
     lpc.giIntensity = in.giIntensity;                      // 间接漫反射 GI 总强度（默认 1.0）
     lpc.aoIntensity = in.aoIntensity;                      // AO 强度（默认 1.0）
     // ── 分层合成（Wave 1）：填充 GIBlendParams UBO（3 通道 × 源数组）──

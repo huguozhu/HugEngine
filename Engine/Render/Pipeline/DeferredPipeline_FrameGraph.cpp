@@ -668,7 +668,6 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             in.rsmPositionMap = m_RSM ? m_RSM->GetRSMPositionMap() : nullptr;
             in.rsmFluxMap     = m_RSM ? m_RSM->GetRSMFluxMap()     : nullptr;
             // overlay 与 Pass 门控同源（避免 pass 跳过但 shader 仍采样陈旧探针）
-            in.ddgiScale       = m_DDGI.debugScale;
             in.clusteredShading     = &m_ClusteredShading;
             in.lightGridBuffer      = m_LightGridBuffer.get();
             in.lightIndexListBuffer = m_LightIndexListBuffer.get();

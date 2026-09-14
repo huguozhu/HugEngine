@@ -305,15 +305,13 @@ GPU_STRUCT DeferredLightingPushConstant {
     float    clusterLogFactor;      // [40]      log(far/near)
     GPU_UINT useClustered;          // [44]      1=启用 Clustered Shading
     GPU_UINT rtShadowSource;        // [48]      0=CSM, 1=RT 阴影（RT 遮罩）
-    GPU_UINT rtAOSource;            // [52]      0=SSAO, 1=RT AO
-    GPU_UINT rtSpecularSource;      // [56]      0=SSR, 1=RT 反射
-    GPU_UINT rtDiffuseSource;       // [60]      0=SSGI, 1=RT GI
+    // 注：rtAOSource / rtSpecularSource / rtDiffuseSource / useScreenGI / ddgiScale
+    // 已随 Wave 1「按源 id 分派」移除——各源的参与与模式完全由层栈
+    // （GIBlendParams UBO 的源数组）表达，不再需要 shader 侧的源选择开关。
+    float    giIntensity;           // [52]      间接漫反射 GI 总强度（层栈合成总倍率）
+    float    aoIntensity;           // [56]      AO 强度（0=无 AO，1=完整 AO）
+    GPU_UINT _pad0;                 // [60]      对齐到 16 字节边界
     float4   atmosphere;            // [64..80] sunDir.xyz（指向太阳）+ turbidity（空中透视）
-    float    ddgiScale;             // [84]      DDGI 贡献缩放（替代硬编码 0.5）
-    float    giIntensity;           // [88]      间接漫反射 GI 总强度（SSGI/RT GI/DDGI/RSM 统一驱动，替代魔法系数）
-    float    aoIntensity;           // [92]      AO 强度（0=无 AO，1=完整 AO）
-    // 注：GI 各通道的分层合成参数经 GIBlendParams UBO 传递（见 kGPUBinding_GIBlendParams），
-    // 不占用 push constant——3 通道 × 7 字段会超出 128B 上限
 };
 
 // --- RTShadowPushConstant: RT 阴影 Pass Push Constant（108B，C++/Slang 单一数据源）---
