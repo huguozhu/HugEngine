@@ -1137,8 +1137,8 @@ int main() {
             // ---- AO（环境光遮蔽）----
             {
                 static const render::GISourceId kAOSources[] = {
-                    render::GISourceId::SSAO, render::GISourceId::RTAO };
-                channelUI("AO — 环境光遮蔽", gc.ao, kAOSources, 2);
+                    render::GISourceId::SSAO, render::GISourceId::GTAO, render::GISourceId::RTAO };
+                channelUI("AO — 环境光遮蔽", gc.ao, kAOSources, 3);
                 ImGui::Indent(12.0f);
                 ImGui::SliderFloat("AO 强度##gc", &gc.aoIntensity, 0.0f, 1.5f, "%.2f");
                 if (dp) {

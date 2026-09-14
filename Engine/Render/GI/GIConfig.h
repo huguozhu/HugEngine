@@ -49,6 +49,7 @@ enum class GISourceId : u8 {
     RTGI          = 8,   // 硬件光追间接漫反射
     RTReflection  = 9,   // 硬件光追反射
     RTAO          = 10,  // 硬件光追环境光遮蔽
+    GTAO          = 11,  // 地平线切片 AO（Ground Truth AO，SSAO 的高质量替代）
 };
 
 /// GI 源的天然频段
@@ -80,6 +81,7 @@ inline const char* GISourceName(GISourceId id) {
     case GISourceId::SSGI:         return "SSGI";
     case GISourceId::SSR:          return "SSR";
     case GISourceId::SSAO:         return "SSAO";
+    case GISourceId::GTAO:         return "GTAO";
     case GISourceId::RSM:          return "RSM";
     case GISourceId::RTGI:         return "RTGI";
     case GISourceId::RTReflection: return "RT Reflection";
@@ -205,6 +207,7 @@ enum PipelineGICap : u32 {
 inline u32 ToPipelineCap(GISourceId id) {
     switch (id) {
     case GISourceId::SSAO:          return kPipelineGIAOSSAO;
+    case GISourceId::GTAO:          return kPipelineGIAOSSAO;   // 同属 AO 通道能力（与 SSAO 互为替代）
     case GISourceId::RTAO:          return kPipelineGIAORTAO;
     case GISourceId::SSR:           return kPipelineGISpecSSR;
     case GISourceId::RTReflection:  return kPipelineGISpecRT;
@@ -283,6 +286,7 @@ struct GIConfig {
     [[nodiscard]] bool ShouldRunRTReflection() const { return specular.Has(GISourceId::RTReflection); }
     [[nodiscard]] bool ShouldRunSpecular() const { return ShouldRunSSR() || ShouldRunRTReflection(); }
     [[nodiscard]] bool ShouldRunSSAO()    const { return ao.Has(GISourceId::SSAO); }
+    [[nodiscard]] bool ShouldRunGTAO()    const { return ao.Has(GISourceId::GTAO); }
     [[nodiscard]] bool ShouldRunRTAO()    const { return ao.Has(GISourceId::RTAO); }
     [[nodiscard]] bool ShouldRunAO()      const { return ao.AnyActive(); }
     // 阴影（从 ShadowChannel 枚举派生——与层栈无关）
@@ -299,7 +303,8 @@ struct GIConfig {
     GIChannels ToInputSources() const {
         GIChannels s;
         s.shadow   = shadow;   // 阴影本就用枚举表达
-        s.ao       = ShouldRunRTAO() ? AOChannel::RTAO : (ShouldRunSSAO() ? AOChannel::SSAO : AOChannel::None);
+        s.ao       = ShouldRunRTAO() ? AOChannel::RTAO
+                   : ((ShouldRunSSAO() || ShouldRunGTAO()) ? AOChannel::SSAO : AOChannel::None);   // GTAO 与 SSAO 共用 AO 通道
         s.specular = ShouldRunRTReflection() ? SpecularChannel::RT
                    : (ShouldRunSSR() ? SpecularChannel::SSR : SpecularChannel::None);
         s.diffuse  = ShouldRunRTGI() ? DiffuseChannel::RTGI

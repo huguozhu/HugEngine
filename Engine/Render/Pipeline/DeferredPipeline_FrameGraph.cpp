@@ -339,8 +339,11 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             RGPassQueue::Graphics);  // 与 RSM_Generate 同队列顺序执行：探针采样 RSM 前必须确保 RSM 渲染完成
     }
 
-    // SSAO Pass（仅当 GIConfig 选中 AO 才注册）
+    // AO Pass（SSAO 或 GTAO——仅当 GIConfig 的 AO 层栈含源才注册）
+    // M6.3：GTAO 与 SSAO 是同类互斥算法（都估计「环境光遮蔽」），共用同一 pass，
+    //       由层栈决定用哪个着色器；二者同时启用时 GTAO 生效。
     if (m_GIConfig.ShouldRunAO()) {
+        m_SSAO.useGTAO = m_GIConfig.ShouldRunGTAO();
         auto ssaoOut = rg.ImportTexture("SSAO_Output", m_SSAO.GetAOTexture());
         // halfRes：AO 纹理可能为半分辨率，pass 尺寸用纹理实际尺寸
         u32 aoW = m_SSAO.GetAOTexture()->GetWidth();

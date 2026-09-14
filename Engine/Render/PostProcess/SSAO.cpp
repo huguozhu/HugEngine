@@ -4,6 +4,7 @@
 #include "Core/Assert.h"
 #include "SSAO.vert.spv.h"
 #include "SSAO.frag.spv.h"
+#include "GTAO.frag.spv.h"   // GTAO 模式（M6.3）
 #include "SSAO_Blur.vert.spv.h"
 #include "SSAO_Blur.frag.spv.h"
 #include <glm/gtc/matrix_transform.hpp>
@@ -127,6 +128,29 @@ bool SSAO::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         device->PrecompileQueuePSO(d);
     }
 
+    // GTAO PSO（M6.3）——复用同一描述符布局与参数 UBO，仅替换片段着色器
+    // （顶点着色器沿用 SSAO 的全屏三角，UBO 布局一致：u_Params.w 复用为切片数）
+    {
+        m_GTAO_FS.stage = rhi::ShaderStage::Pixel;
+        m_GTAO_FS.spirv = k_GTAO_frag_spv;
+        m_GTAO_FS.entryPoint = "fragmentMain";
+
+        rhi::PipelineStateDesc d;
+        d.vertexShader = &m_SSAO_VS;
+        d.pixelShader = &m_GTAO_FS;
+        d.topology = rhi::PrimitiveTopology::TriangleList;
+        d.depthTest = false;
+        d.depthWrite = false;
+        d.depthFormat = rhi::Format::Unknown;
+        d.colorAttachmentCount = 1;
+        d.colorFormats[0] = rhi::Format::R16_FLOAT;
+        d.descriptorSetLayouts = {m_SSAOLayout};
+        d.debugName = "GTAO";
+        m_GTAO_PsoDesc = d;
+
+        device->PrecompileQueuePSO(d);
+    }
+
     // Blur PSO — 同样采用惰性创建模式
     {
         rhi::DescriptorSetLayoutDesc l;
@@ -197,26 +221,31 @@ void SSAO::SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal) {
 
 void SSAO::PreBind(rhi::IRHICommandList* cmd) {
     if (!m_Ready) return;
-    // 惰性创建 SSAO PSO（首次调用时，VkPipelineCache 可能已被后台预热）
-    if (!m_SSAO_PSO) {
-        m_SSAO_PSO = m_Device->CreatePipelineState(m_SSAO_PsoDesc);
+    // 惰性创建 PSO（首次调用时，VkPipelineCache 可能已被后台预热）
+    if (useGTAO) {
+        if (!m_GTAO_PSO) m_GTAO_PSO = m_Device->CreatePipelineState(m_GTAO_PsoDesc);
+        cmd->SetPipeline(m_GTAO_PSO.get());
+    } else {
+        if (!m_SSAO_PSO) m_SSAO_PSO = m_Device->CreatePipelineState(m_SSAO_PsoDesc);
+        cmd->SetPipeline(m_SSAO_PSO.get());
     }
-    cmd->SetPipeline(m_SSAO_PSO.get());
 }
 
 void SSAO::Render(rhi::IRHICommandList* cmd) {
     if (!m_Ready || !m_DepthTex || !m_NormalTex || !enabled) return;
 
     // 惰性创建 PSO（首次渲染时，VkPipelineCache 已被后台预热，创建耗时 ~2ms 而非 ~50ms）
-    if (!m_SSAO_PSO) {
+    if (useGTAO) {
+        if (!m_GTAO_PSO) m_GTAO_PSO = m_Device->CreatePipelineState(m_GTAO_PsoDesc);
+    } else if (!m_SSAO_PSO) {
         m_SSAO_PSO = m_Device->CreatePipelineState(m_SSAO_PsoDesc);
     }
     if (!m_Blur_PSO) {
         m_Blur_PSO = m_Device->CreatePipelineState(m_Blur_PsoDesc);
     }
 
-    // --- SSAO Pass（视口用 AO 纹理实际尺寸，halfRes 时与渲染目标一致）---
-    cmd->SetPipeline(m_SSAO_PSO.get());
+    // --- SSAO / GTAO Pass（按模式选择 PSO；视口用 AO 纹理实际尺寸）---
+    cmd->SetPipeline(useGTAO ? m_GTAO_PSO.get() : m_SSAO_PSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_SSAOSet);
     u32 aoW = m_AOTexture->GetWidth();
     u32 aoH = m_AOTexture->GetHeight();
@@ -231,8 +260,10 @@ void SSAO::Render(rhi::IRHICommandList* cmd) {
             // kernel[64] — 半球采样方向（view-space）
             memcpy(dst, m_Kernel.data(), 64 * sizeof(float4));
             dst += 64 * sizeof(float4);
-            // params — x=radius, y=bias, z=intensity, w=sampleCount
-            float4 p(radius, bias, intensity, float(sampleCount));
+            // params — SSAO: x=radius,y=bias,z=intensity,w=sampleCount
+            //          GTAO: x=radius,y=bias,z=intensity,w=sliceCount（复用同一 UBO 布局）
+            float4 p(radius, bias, intensity,
+                     useGTAO ? float(sliceCount) : float(sampleCount));
             memcpy(dst, &p, sizeof(float4));
             dst += sizeof(float4);
             // u_InvProj: 逆投影矩阵（clip→view，用于从深度重建 view-space 位置）

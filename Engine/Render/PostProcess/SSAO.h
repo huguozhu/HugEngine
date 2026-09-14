@@ -21,8 +21,15 @@ public:
     float radius      = 1.0f;   // 采样半径
     float bias        = 0.025f; // 深度偏移
     float intensity   = 1.0f;   // AO 强度
-    int   sampleCount = 16;     // 每像素采样数
+    int   sampleCount = 16;     // 每像素采样数（SSAO 模式）
     bool  halfRes     = false;  // 半分辨率计算（性能优先，省约 3/4 像素着色）
+
+    // ── GTAO 模式（M6.3）──
+    // GTAO 与 SSAO 是同类互斥算法（都估计「环境光遮蔽」这一物理量），故共用同一 pass：
+    // 切换 useGTAO 即改用 GTAO 着色器（地平线切片 + 解析积分）。
+    // 层栈中二者是独立的 GI 源（GISourceId::SSAO / GISourceId::GTAO），同一时刻启用其一。
+    bool  useGTAO    = false;
+    int   sliceCount = 4;       // GTAO 方位角切片数（每像素）
 
     bool Initialize(rhi::IRHIDevice* device, u32 width, u32 height);
     void Shutdown();
@@ -54,11 +61,14 @@ private:
 
     // PSOs（惰性创建：首次 PreBind/Render 时由 CreatePipelineState 生成）
     std::unique_ptr<rhi::IRHIPipelineState> m_SSAO_PSO;
+    std::unique_ptr<rhi::IRHIPipelineState> m_GTAO_PSO;   // GTAO 模式（M6.3）
     std::unique_ptr<rhi::IRHIPipelineState> m_Blur_PSO;
     // PSO 描述符 + ShaderBytecode 副本（供惰性创建 + 预热队列使用）
     rhi::PipelineStateDesc m_SSAO_PsoDesc;
+    rhi::PipelineStateDesc m_GTAO_PsoDesc;
     rhi::PipelineStateDesc m_Blur_PsoDesc;
     rhi::ShaderBytecode    m_SSAO_VS, m_SSAO_FS;   // ShaderBytecode 副本（生命周期与 SSAO 对象一致）
+    rhi::ShaderBytecode    m_GTAO_FS;              // GTAO 片段着色器（顶点着色器复用 SSAO 的）
     rhi::ShaderBytecode    m_Blur_VS,  m_Blur_FS;
 
     // 描述符集

@@ -58,6 +58,7 @@ if(SLANGC)
         "${SHADER_DIR}/Shadow.frag.slang"
         "${SHADER_DIR}/Skybox.frag.slang"
         "${SHADER_DIR}/SSAO.frag.slang"
+        "${SHADER_DIR}/GTAO.frag.slang"
         "${SHADER_DIR}/SSAO_Blur.frag.slang"
         "${SHADER_DIR}/SSGI.frag.slang"
         "${SHADER_DIR}/SSR.frag.slang"

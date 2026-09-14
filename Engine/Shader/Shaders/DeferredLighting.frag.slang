@@ -408,6 +408,7 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
         for (uint i = 0u; i < ba.count; ++i) {
             GISourceSlot s = ba.sources[i];
             if (s.weight <= 0.0) continue;
+            // SSAO 与 GTAO 共用同一张 AO 输出（二者互为替代，不会同时启用）
             float v = (s.id == GISOURCE_RTAO)
                     ? u_RT_AO.Sample(u_GBufferSampler, uv).r
                     : u_SSAO.Sample(u_GBufferSampler, uv).r;
