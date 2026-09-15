@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.11+ / meshoptimizer / C++20 / Slang Compute / VK 1.3 / DeferredPipeline
 
-**Spec:** `docs/superpowers/specs/2026-07-15-lumen-nanite-design.md`
+**Spec:** `docs/计划实现功能/Lumen与Nanite完整设计规范.md`
 
 ## Global Constraints
 
