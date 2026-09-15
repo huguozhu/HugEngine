@@ -128,7 +128,7 @@ void ShaderHotReload::WatchThread(StringView shaderDir) {
         overlapped.hEvent = hEvent;
 
         BOOL ok = ReadDirectoryChangesW(
-            hDir, buffer, kBufSize, FALSE,
+            hDir, buffer, kBufSize, TRUE,   // bWatchSubtree=TRUE：递归监控 —— shader 已按功能分目录，非递归会漏掉子目录
             FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME,
             &bytesReturned, &overlapped, nullptr);
 
