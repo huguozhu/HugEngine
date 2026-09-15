@@ -28,119 +28,152 @@ if(SLANGC)
     set(SPV_OUT_DIR  "${CMAKE_CURRENT_BINARY_DIR}/Shaders")
 
     # 显式列出所有需编译的 shader（file(GLOB) 无法跟踪新增文件，故用显式列表）
+    #
+    # 目录按功能划分：Lighting / GBuffer / GI / RayTracing / PathTracing / ReSTIR /
+    # PostProcess / AntiAliasing / Culling / AI / Utility / Particles。
+    # 共享头（ShaderTypes.slang / common.slang / pbr_common.slang / Atmosphere.slang /
+    # PT_Common.slang / RT_DDGI.slang / RT_HitCommon.slang）留在 Shaders/ 根目录：
+    #   · 各目录中的 shader 以裸文件名 include 它们，靠 -I "${SHADER_DIR}" 解析
+    #   · ShaderTypes.slang 还被 C++ 直接 include（Material.h / LightingPass.cpp），
+    #     依赖 Shaders/ 在 target_include_directories 中
+    # 故移动入口 shader 无需改写任何 include；但不要让共享头离开根目录。
     set(VERT_SLANG
-        "${SHADER_DIR}/DeferredLighting.vert.slang"
-        "${SHADER_DIR}/FXAA.vert.slang"
-        "${SHADER_DIR}/GBuffer.vert.slang"
-        "${SHADER_DIR}/IBL_BRDF_LUT.vert.slang"
-        "${SHADER_DIR}/IBL_Irradiance.vert.slang"
-        "${SHADER_DIR}/IBL_Prefilter.vert.slang"
-        "${SHADER_DIR}/PBR.vert.slang"
-        "${SHADER_DIR}/RSM_Generate.vert.slang"
-        "${SHADER_DIR}/Shadow.vert.slang"
-        "${SHADER_DIR}/Skybox.vert.slang"
-        "${SHADER_DIR}/SSAO.vert.slang"
-        "${SHADER_DIR}/SSAO_Blur.vert.slang"
-        "${SHADER_DIR}/TAA_Resolve.vert.slang"
-        "${SHADER_DIR}/ToneMap.vert.slang"
-        "${SHADER_DIR}/Triangle.vert.slang"
-        "${SHADER_DIR}/Fullscreen.vert.slang"
+        # Lighting
+        "${SHADER_DIR}/Lighting/DeferredLighting.vert.slang"
+        "${SHADER_DIR}/Lighting/PBR.vert.slang"
+        "${SHADER_DIR}/Lighting/Shadow.vert.slang"
+        "${SHADER_DIR}/Lighting/Skybox.vert.slang"
+        # GBuffer
+        "${SHADER_DIR}/GBuffer/GBuffer.vert.slang"
+        # GI
+        "${SHADER_DIR}/GI/IBL_BRDF_LUT.vert.slang"
+        "${SHADER_DIR}/GI/IBL_Irradiance.vert.slang"
+        "${SHADER_DIR}/GI/IBL_Prefilter.vert.slang"
+        "${SHADER_DIR}/GI/RSM_Generate.vert.slang"
+        "${SHADER_DIR}/GI/SSAO.vert.slang"
+        "${SHADER_DIR}/GI/SSAO_Blur.vert.slang"
+        # AntiAliasing
+        "${SHADER_DIR}/AntiAliasing/TAA_Resolve.vert.slang"
+        "${SHADER_DIR}/AntiAliasing/FXAA.vert.slang"
+        # PostProcess
+        "${SHADER_DIR}/PostProcess/ToneMap.vert.slang"
+        # Utility
+        "${SHADER_DIR}/Utility/Fullscreen.vert.slang"
+        "${SHADER_DIR}/Utility/Triangle.vert.slang"
+        # Particles
         "${SHADER_DIR}/Particles/ParticleRender.vert.slang"
     )
     set(FRAG_SLANG
-        "${SHADER_DIR}/DeferredLighting.frag.slang"
-        "${SHADER_DIR}/GBuffer.frag.slang"
-        "${SHADER_DIR}/IBL_BRDF_LUT.frag.slang"
-        "${SHADER_DIR}/IBL_Irradiance.frag.slang"
-        "${SHADER_DIR}/IBL_Prefilter.frag.slang"
-        "${SHADER_DIR}/PBR.frag.slang"
-        "${SHADER_DIR}/RSM_Generate.frag.slang"
-        "${SHADER_DIR}/Shadow.frag.slang"
-        "${SHADER_DIR}/Skybox.frag.slang"
-        "${SHADER_DIR}/SSAO.frag.slang"
-        "${SHADER_DIR}/GTAO.frag.slang"
-        "${SHADER_DIR}/SSAO_Blur.frag.slang"
-        "${SHADER_DIR}/SSGI.frag.slang"
-        "${SHADER_DIR}/SSR.frag.slang"
-        "${SHADER_DIR}/Denoise.frag.slang"
-        "${SHADER_DIR}/RT_DenoiseTemporal.frag.slang"
-        "${SHADER_DIR}/TAA_Resolve.frag.slang"
-        "${SHADER_DIR}/ToneMap.frag.slang"
-        "${SHADER_DIR}/Triangle.frag.slang"
-        "${SHADER_DIR}/FXAA.frag.slang"
-        "${SHADER_DIR}/GaussianBlur.frag.slang"
-        "${SHADER_DIR}/BrightPass.frag.slang"
-        "${SHADER_DIR}/BloomComposite.frag.slang"
-        "${SHADER_DIR}/DOF_CoC.frag.slang"
-        "${SHADER_DIR}/DOF_Composite.frag.slang"
-        "${SHADER_DIR}/MotionBlur.frag.slang"
-        "${SHADER_DIR}/ColorGrading.frag.slang"
-        "${SHADER_DIR}/CameraEffects.frag.slang"
-        "${SHADER_DIR}/PhysicalSky.frag.slang"
-        "${SHADER_DIR}/SMAA_EdgeDetect.frag.slang"
-        "${SHADER_DIR}/SMAA_BlendWeight.frag.slang"
-        "${SHADER_DIR}/SMAA_Neighborhood.frag.slang"
-        "${SHADER_DIR}/FullscreenCopy.frag.slang"
-        "${SHADER_DIR}/TriangleMesh.frag.slang"
+        # Lighting
+        "${SHADER_DIR}/Lighting/DeferredLighting.frag.slang"
+        "${SHADER_DIR}/Lighting/PBR.frag.slang"
+        "${SHADER_DIR}/Lighting/Shadow.frag.slang"
+        "${SHADER_DIR}/Lighting/Skybox.frag.slang"
+        "${SHADER_DIR}/Lighting/PhysicalSky.frag.slang"
+        # GBuffer
+        "${SHADER_DIR}/GBuffer/GBuffer.frag.slang"
+        # GI
+        "${SHADER_DIR}/GI/IBL_BRDF_LUT.frag.slang"
+        "${SHADER_DIR}/GI/IBL_Irradiance.frag.slang"
+        "${SHADER_DIR}/GI/IBL_Prefilter.frag.slang"
+        "${SHADER_DIR}/GI/RSM_Generate.frag.slang"
+        "${SHADER_DIR}/GI/SSAO.frag.slang"
+        "${SHADER_DIR}/GI/SSAO_Blur.frag.slang"
+        "${SHADER_DIR}/GI/GTAO.frag.slang"
+        "${SHADER_DIR}/GI/SSGI.frag.slang"
+        "${SHADER_DIR}/GI/SSR.frag.slang"
+        # AntiAliasing
+        "${SHADER_DIR}/AntiAliasing/TAA_Resolve.frag.slang"
+        "${SHADER_DIR}/AntiAliasing/FXAA.frag.slang"
+        "${SHADER_DIR}/AntiAliasing/SMAA_EdgeDetect.frag.slang"
+        "${SHADER_DIR}/AntiAliasing/SMAA_BlendWeight.frag.slang"
+        "${SHADER_DIR}/AntiAliasing/SMAA_Neighborhood.frag.slang"
+        # PostProcess
+        "${SHADER_DIR}/PostProcess/ToneMap.frag.slang"
+        "${SHADER_DIR}/PostProcess/Denoise.frag.slang"
+        "${SHADER_DIR}/PostProcess/RT_DenoiseTemporal.frag.slang"
+        "${SHADER_DIR}/PostProcess/GaussianBlur.frag.slang"
+        "${SHADER_DIR}/PostProcess/BrightPass.frag.slang"
+        "${SHADER_DIR}/PostProcess/BloomComposite.frag.slang"
+        "${SHADER_DIR}/PostProcess/DOF_CoC.frag.slang"
+        "${SHADER_DIR}/PostProcess/DOF_Composite.frag.slang"
+        "${SHADER_DIR}/PostProcess/MotionBlur.frag.slang"
+        "${SHADER_DIR}/PostProcess/ColorGrading.frag.slang"
+        "${SHADER_DIR}/PostProcess/CameraEffects.frag.slang"
+        # Utility
+        "${SHADER_DIR}/Utility/FullscreenCopy.frag.slang"
+        "${SHADER_DIR}/Utility/Triangle.frag.slang"
+        "${SHADER_DIR}/Utility/TriangleMesh.frag.slang"
+        # Particles
         "${SHADER_DIR}/Particles/ParticleRender.frag.slang"
     )
     set(COMP_SLANG
+        # GI
+        "${SHADER_DIR}/GI/DDGI.comp.slang"
+        # PathTracing
+        "${SHADER_DIR}/PathTracing/PT_Atrous.comp.slang"
+        # PathTracing — ReSTIR DI（直接光重采样，非 GI；由 PathTracingPipeline 独占驱动）
+        "${SHADER_DIR}/PathTracing/ReSTIR_Init.comp.slang"
+        "${SHADER_DIR}/PathTracing/ReSTIR_Temporal.comp.slang"
+        "${SHADER_DIR}/PathTracing/ReSTIR_Spatial.comp.slang"
+        # Culling
+        "${SHADER_DIR}/Culling/GPUCull.comp.slang"
+        "${SHADER_DIR}/Culling/GPUCull_Phase1.comp.slang"
+        "${SHADER_DIR}/Culling/GPUCull_TwoPhase.comp.slang"
+        "${SHADER_DIR}/Culling/HiZDownsample.comp.slang"
+        "${SHADER_DIR}/Culling/PersistentCull.comp.slang"
+        # PostProcess
+        "${SHADER_DIR}/PostProcess/AutoExposure.comp.slang"
+        # AI
+        "${SHADER_DIR}/AI/AITensorScale.comp.slang"
+        "${SHADER_DIR}/AI/AITensorAdd.comp.slang"
+        "${SHADER_DIR}/AI/AITextureSample.comp.slang"
+        "${SHADER_DIR}/AI/AITextureGen.comp.slang"
+        # Utility
+        "${SHADER_DIR}/Utility/WorkGraph_Entry.comp.slang"
+        "${SHADER_DIR}/Utility/TestClear.comp.slang"
+        # Particles
         "${SHADER_DIR}/Particles/ParticleInit.comp.slang"
         "${SHADER_DIR}/Particles/ParticleEmit.comp.slang"
         "${SHADER_DIR}/Particles/ParticleSimulate.comp.slang"
         "${SHADER_DIR}/Particles/ParticleCulling.comp.slang"
         "${SHADER_DIR}/Particles/ParticleSort.comp.slang"
-        "${SHADER_DIR}/WorkGraph_Entry.comp.slang"
-        "${SHADER_DIR}/GPUCull.comp.slang"
-        "${SHADER_DIR}/GPUCull_Phase1.comp.slang"
-        "${SHADER_DIR}/GPUCull_TwoPhase.comp.slang"
-        "${SHADER_DIR}/HiZDownsample.comp.slang"
-        "${SHADER_DIR}/TestClear.comp.slang"
-        "${SHADER_DIR}/DDGI.comp.slang"
-        "${SHADER_DIR}/AutoExposure.comp.slang"
-        "${SHADER_DIR}/PersistentCull.comp.slang"
-        "${SHADER_DIR}/ReSTIR_Init.comp.slang"
-        "${SHADER_DIR}/ReSTIR_Temporal.comp.slang"
-        "${SHADER_DIR}/ReSTIR_Spatial.comp.slang"
-        "${SHADER_DIR}/PT_Atrous.comp.slang"
-        "${SHADER_DIR}/AITensorScale.comp.slang"
-        "${SHADER_DIR}/AITensorAdd.comp.slang"
-        "${SHADER_DIR}/AITextureSample.comp.slang"
-        "${SHADER_DIR}/AITextureGen.comp.slang"
     )
     # Ray Tracing 着色器（.rgen / .rmiss / .rchit / .rahit / .rcall）
     # 命名约定: EffectName.rgen.slang (RayGen), EffectName.rmiss.slang (Miss),
     #           EffectName.rchit.slang (ClosestHit), EffectName.rahit.slang (AnyHit)
     set(RT_SLANG
-        "${SHADER_DIR}/RT_Triangle.rgen.slang"
-        "${SHADER_DIR}/RT_Background.rmiss.slang"
-        "${SHADER_DIR}/RT_Sponza.rgen.slang"
-        "${SHADER_DIR}/RT_Sponza.rmiss.slang"
-        "${SHADER_DIR}/RT_Sponza.rchit.slang"
-        "${SHADER_DIR}/RT_Bindless.rcall.slang"
-        "${SHADER_DIR}/RT_Shadow.rgen.slang"
-        "${SHADER_DIR}/RT_Shadow.rahit.slang"
-        "${SHADER_DIR}/RT_Shadow.rmiss.slang"
-        "${SHADER_DIR}/RT_Common.rmiss.slang"
-        "${SHADER_DIR}/RT_Common.rchit.slang"
-        "${SHADER_DIR}/RT_PBR.rchit.slang"
-        "${SHADER_DIR}/RT_PositionFetch.rchit.slang"
-        "${SHADER_DIR}/RT_AO.rgen.slang"
-        "${SHADER_DIR}/RT_Reflection.rgen.slang"
-        "${SHADER_DIR}/RT_Reflection.rchit.slang"
-        "${SHADER_DIR}/RT_Reflection.rmiss.slang"
-        "${SHADER_DIR}/RT_GI.rgen.slang"
-        "${SHADER_DIR}/RT_GI.rchit.slang"
-        "${SHADER_DIR}/RT_GI.rmiss.slang"
-        "${SHADER_DIR}/PT_Full.rgen.slang"
-        "${SHADER_DIR}/PT_Full.rchit.slang"
-        "${SHADER_DIR}/PT_Full.rmiss.slang"
+        # RayTracing
+        "${SHADER_DIR}/RayTracing/RT_Triangle.rgen.slang"
+        "${SHADER_DIR}/RayTracing/RT_Background.rmiss.slang"
+        "${SHADER_DIR}/RayTracing/RT_Sponza.rgen.slang"
+        "${SHADER_DIR}/RayTracing/RT_Sponza.rmiss.slang"
+        "${SHADER_DIR}/RayTracing/RT_Sponza.rchit.slang"
+        "${SHADER_DIR}/RayTracing/RT_Bindless.rcall.slang"
+        "${SHADER_DIR}/RayTracing/RT_Shadow.rgen.slang"
+        "${SHADER_DIR}/RayTracing/RT_Shadow.rahit.slang"
+        "${SHADER_DIR}/RayTracing/RT_Shadow.rmiss.slang"
+        "${SHADER_DIR}/RayTracing/RT_Common.rmiss.slang"
+        "${SHADER_DIR}/RayTracing/RT_Common.rchit.slang"
+        "${SHADER_DIR}/RayTracing/RT_PBR.rchit.slang"
+        "${SHADER_DIR}/RayTracing/RT_PositionFetch.rchit.slang"
+        "${SHADER_DIR}/RayTracing/RT_AO.rgen.slang"
+        "${SHADER_DIR}/RayTracing/RT_Reflection.rgen.slang"
+        "${SHADER_DIR}/RayTracing/RT_Reflection.rchit.slang"
+        "${SHADER_DIR}/RayTracing/RT_Reflection.rmiss.slang"
+        "${SHADER_DIR}/RayTracing/RT_GI.rgen.slang"
+        "${SHADER_DIR}/RayTracing/RT_GI.rchit.slang"
+        "${SHADER_DIR}/RayTracing/RT_GI.rmiss.slang"
+        # PathTracing
+        "${SHADER_DIR}/PathTracing/PT_Full.rgen.slang"
+        "${SHADER_DIR}/PathTracing/PT_Full.rchit.slang"
+        "${SHADER_DIR}/PathTracing/PT_Full.rmiss.slang"
     )
     # Mesh Shader 着色器（.mesh / .task）
     # 命名约定: EffectName.mesh.slang (Mesh), EffectName.task.slang (Amplification/Task)
     set(MESH_SLANG
-        "${SHADER_DIR}/Triangle.mesh.slang"
-        "${SHADER_DIR}/GBuffer.mesh.slang"
+        "${SHADER_DIR}/GBuffer/GBuffer.mesh.slang"
+        "${SHADER_DIR}/Utility/Triangle.mesh.slang"
     )
     # 公共共享头（被多个 shader include）——每个 shader 编译依赖这些；
     # 单个着色器文件本身由各自 SRC 依赖。改为显式列表而非 glob 所有 .slang，
@@ -275,7 +308,24 @@ if(SLANGC)
         )
     endforeach()
 
-    add_custom_target(CompileShaders ALL DEPENDS ${SPV_HEADERS})
+    # ── IDE 浏览：把 shader 源文件挂到 CompileShaders 项目 ──
+    # 仅用于在 VS 解决方案中浏览/搜索，不参与编译（编译依赖仍由各 add_custom_command 的
+    # DEPENDS 保证）。列表直接取自上面的显式编译列表 + 共享 include 列表，从而保证
+    # 「IDE 里看到的 == 真正参与构建的」；若改用 GLOB，未列入编译的 .slang 也会显示出来，
+    # 造成"看起来编了、其实没编"的错觉。
+    # 转成相对路径，便于 huge_source_group 生成 Shaders / Shaders\Particles 目录树。
+    set(SHADER_IDE_SOURCES "")
+    foreach(_shader_src ${COMPILE_SOURCES} ${SLANG_INCLUDES})
+        file(RELATIVE_PATH _shader_rel "${CMAKE_CURRENT_SOURCE_DIR}" "${_shader_src}")
+        list(APPEND SHADER_IDE_SOURCES "${_shader_rel}")
+    endforeach()
+    list(REMOVE_DUPLICATES SHADER_IDE_SOURCES)
+
+    add_custom_target(CompileShaders ALL
+        DEPENDS ${SPV_HEADERS}
+        SOURCES ${SHADER_IDE_SOURCES}   # IDE 视图：SOURCES 只影响工程文件，不构成构建依赖
+    )
+    huge_source_group(${SHADER_IDE_SOURCES})
     add_dependencies(HugEngineShader CompileShaders)
 
 else()
