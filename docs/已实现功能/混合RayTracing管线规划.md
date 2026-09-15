@@ -975,7 +975,7 @@ r.RT.Denoise.Spatial     1   // 空间滤波
 | RT 性能不达标 | 全部效果开启超过 16.6ms | 逐效果分辨率缩放 + 自适应 SPP + DLSS/FSR 降低渲染分辨率 |
 | 提取共享组件引入回归 | DeferredPipeline 功能损坏 | 提取时保留 DeferredPipeline 的 BuildFrameGraph 无需改动，仅改成员所有权，通过 screenshot 对比 CI guard |
 | 光栅化 vs RT 视觉差异 | 切换时 pop | 共用 `pbr_common.slang` BRDF，CI 中 PSNR 对比 |
-| slangc RT 着色器兼容性 | ClosestHit 中某些特性不可用 | 准备 glslangValidator 回退路径，复杂逻辑放 RayGen |
+| slangc RT 着色器兼容性 | ClosestHit 中某些特性不可用 | 复杂逻辑放 RayGen。原计划的 glslangValidator 回退路径**未实现（已放弃）**，对应的 `CompileShaders.cmake` 脚本已删除 |
 
 ---
 
