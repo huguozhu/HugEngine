@@ -14,6 +14,7 @@ set(RENDER_SOURCES
     Pipeline/Camera.cpp
     Pipeline/PhysicalCamera.h
     Pipeline/PhysicalCamera.cpp
+    Pipeline/PhysicalLight.h
     Pipeline/ForwardPipeline.h
     Pipeline/ForwardPipeline.cpp
     Pipeline/ForwardPipeline_FrameGraph.cpp
@@ -66,6 +67,8 @@ set(RENDER_SOURCES
     RT/ReSTIRPass.cpp
     RT/STBNTexture.h
     RT/STBNTexture.cpp
+    # STBN 数据由 Tools/gen_stbn.py 离线生成（~20MB，列入仅为 IDE 浏览）
+    RT/STBNData.h
     # RenderGraph
     RenderGraph.h
     RenderGraph.cpp
@@ -88,6 +91,15 @@ set(RENDER_SOURCES
     GI/GIConfig.h
     GI/GIConfig.cpp
     GI/GIRegistry.h
+    # GI Provider（P4 / Wave 2：GI 源统一抽象 + 各源实现）
+    GI/IGIProvider.h
+    GI/IBLProvider.h
+    GI/RSMProvider.h
+    GI/AOProvider.h
+    GI/SSGIProvider.h
+    GI/SSRProvider.h
+    GI/DDGIProvider.h
+    GI/RTProvider.h
     # Shadow
     Shadow/IShadowSystem.h
     Shadow/IShadowTechnique.h

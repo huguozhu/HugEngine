@@ -64,9 +64,12 @@ if(HUGENGINE_RHI_VULKAN)
         Vulkan/VulkanTextureLiveness.cpp
         Vulkan/VulkanConverters.cpp
         Vulkan/VulkanPipeline.cpp
+        Vulkan/VulkanPipelineLibrary.h
         Vulkan/VulkanPipelineLibrary.cpp
         Vulkan/VulkanDGC.cpp
+        Vulkan/PSOPrecompileManager.h
         Vulkan/PSOPrecompileManager.cpp
+        Vulkan/DeferredDestructionQueue.h
         TransientResourceAllocator.cpp
     )
 
