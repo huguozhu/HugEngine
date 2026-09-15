@@ -228,8 +228,8 @@ Work Graph 概念（Cull → Draw → PostProcess）：
 
 | 文件 | 里程碑 | 说明 |
 |------|:---:|------|
-| `Engine/Shader/Shaders/GPUCull_TwoPhase.comp.slang` | M2 | 两阶段遮挡剔除 Compute Shader |
-| `Engine/Shader/Shaders/PersistentCull.comp.slang` | M2 | 持久化线程组剔除 Shader |
+| `Engine/Shader/Shaders/Culling/GPUCull_TwoPhase.comp.slang` | M2 | 两阶段遮挡剔除 Compute Shader |
+| `Engine/Shader/Shaders/Culling/PersistentCull.comp.slang` | M2 | 持久化线程组剔除 Shader |
 | `Engine/Shader/Shaders/DGC_Generate.comp.slang` | M3 | DGC 命令序列生成 Compute Shader |
 | `Engine/RHI/DGC/` | M3 | DGC 抽象层（类似 RT 目录结构） |
 | `Engine/Render/Pipeline/GPUWorkGraph.h` | M3 | GPU Work Graph 基础设施 |

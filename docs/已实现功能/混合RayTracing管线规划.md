@@ -90,7 +90,7 @@ void Engine::Tick(float dt) {
 | RHI RT 接口 | `Engine/RHI/RHI/RayTracing.h` | ✅ 完整 |
 | Vulkan RT 后端 | `Engine/RHI/Vulkan/VulkanRT.cpp/h` | ✅ 完整 |
 | RTPass 管理器 | `Engine/Render/Pipeline/RTPass.h/cpp` | ⚠️ 独立运行（需重构为 RTManager + 各 RT Pass 类） |
-| RT 着色器 | `Engine/Shader/Shaders/RT_*.slang` | ⚠️ 基础可用（缺阴影/间接光） |
+| RT 着色器 | `Engine/Shader/Shaders/RayTracing/RT_*.slang` | ⚠️ 基础可用（缺阴影/间接光） |
 | SBT 管理 | `RTPass::CreateSBT()` | ✅ 完整 |
 | 材质纹理 | `RTPass::CreateMaterialTexture()` | ✅ 3×N RGBA32F |
 | Bindless 纹理 | `RTPass::RegisterBindlessTexture()` | ✅ CallableKHR 绕行 |
@@ -1010,16 +1010,16 @@ r.RT.Denoise.Spatial     1   // 空间滤波
 | `Engine/Render/RT/RTAOPass.h/cpp` | 新建 | RT AO Pass |
 | `Engine/Render/RT/RTGIPass.h/cpp` | 新建 | RT GI Pass |
 | **着色器** | | |
-| `Engine/Shader/Shaders/RT_Shadow.rgen.slang` | 新建 | 阴影 RayGen |
-| `Engine/Shader/Shaders/RT_Shadow.rmiss.slang` | 新建 | 阴影 Miss |
-| `Engine/Shader/Shaders/RT_Reflection.rgen.slang` | 新建 | 反射 RayGen |
-| `Engine/Shader/Shaders/RT_Reflection.rchit.slang` | 新建 | 反射 ClosestHit |
-| `Engine/Shader/Shaders/RT_Reflection.rmiss.slang` | 新建 | 反射 Miss |
-| `Engine/Shader/Shaders/RT_GI.rgen.slang` | 新建 | GI RayGen |
-| `Engine/Shader/Shaders/RT_GI.rchit.slang` | 新建 | GI ClosestHit |
-| `Engine/Shader/Shaders/RT_AO.rgen.slang` | 新建 | AO RayGen |
+| `Engine/Shader/Shaders/RayTracing/RT_Shadow.rgen.slang` | 新建 | 阴影 RayGen |
+| `Engine/Shader/Shaders/RayTracing/RT_Shadow.rmiss.slang` | 新建 | 阴影 Miss |
+| `Engine/Shader/Shaders/RayTracing/RT_Reflection.rgen.slang` | 新建 | 反射 RayGen |
+| `Engine/Shader/Shaders/RayTracing/RT_Reflection.rchit.slang` | 新建 | 反射 ClosestHit |
+| `Engine/Shader/Shaders/RayTracing/RT_Reflection.rmiss.slang` | 新建 | 反射 Miss |
+| `Engine/Shader/Shaders/RayTracing/RT_GI.rgen.slang` | 新建 | GI RayGen |
+| `Engine/Shader/Shaders/RayTracing/RT_GI.rchit.slang` | 新建 | GI ClosestHit |
+| `Engine/Shader/Shaders/RayTracing/RT_AO.rgen.slang` | 新建 | AO RayGen |
 | `Engine/Shader/Shaders/pbr_common.slang` | 重构 | 光栅化 + RT 共用 BRDF |
-| `Engine/Shader/Shaders/DeferredLighting.frag.slang` | 修改 | 新增 RT 纹理绑定 + inputSource 分支 |
+| `Engine/Shader/Shaders/Lighting/DeferredLighting.frag.slang` | 修改 | 新增 RT 纹理绑定 + inputSource 分支 |
 | `Engine/Shader/Shaders/ShaderTypes.slang` | 修改 | 新增 RT 相关 Push Constant 结构体 |
 | **管线类** | | |
 | `Engine/Render/Pipeline/HybridRTPipeline.h/cpp` | **新建** | 混合 RT 管线类 |
@@ -1078,7 +1078,7 @@ r.RT.Denoise.Spatial     1   // 空间滤波
 | `Engine/Render/Pipeline/ForwardPipeline.h/cpp` | 修改 | 移除 RTPass 死代码 (~70 行) |
 | `Samples/02.Cube/02.Cube.cpp` | 修改 | HybridRTPipeline + 简化渲染模式 |
 | `Engine/Render/PostProcess/RTDenoiser.h/cpp` | 新建 | RT 时域累积降噪器（velocity 重投影 + 去遮挡 + 历史双缓冲） |
-| `Engine/Shader/Shaders/RT_DenoiseTemporal.frag.slang` | 新建 | 时域累积降噪着色器（float4 通道无关，兼容 R16/R8/RGBA16） |
+| `Engine/Shader/Shaders/PostProcess/RT_DenoiseTemporal.frag.slang` | 新建 | 时域累积降噪着色器（float4 通道无关，兼容 R16/R8/RGBA16） |
 | `Engine/Render/Pipeline/HybridRTPipeline.cpp` | 修改 | 各 RT Pass 后插入降噪 Pass，Lighting 改读降噪输出 |
 | `Engine/Render/PostProcess/Denoiser.h` | 修改 | 新增 IsReady() 访问器（供 HybridRT 空间滤波守卫） |
 

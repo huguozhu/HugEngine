@@ -69,7 +69,7 @@ enum class GIMode : u8 {
 ## 2. GI_IBL —— 基于图像的光照
 
 **实现文件**：`Engine/Render/GI/GI_IBL.cpp`、`Engine/Render/GI/GI_IBL.h`
-**着色器**：`Engine/Shader/Shaders/IBL_Irradiance.frag.slang`、`IBL_Prefilter.frag.slang`、`IBL_BRDF_LUT.frag.slang`
+**着色器**：`Engine/Shader/Shaders/GI/IBL_Irradiance.frag.slang`、`IBL_Prefilter.frag.slang`、`IBL_BRDF_LUT.frag.slang`
 
 ### 2.1 原理：Split-Sum 近似
 
@@ -177,7 +177,7 @@ color += prefiltered * (F * envBRDF.r + envBRDF.g) * iblIntensity;
 ## 3. GI_SSGI —— 屏幕空间全局光照
 
 **实现文件**：`Engine/Render/GI/GI_SSGI.cpp`
-**着色器**：`Engine/Shader/Shaders/SSGI.frag.slang`
+**着色器**：`Engine/Shader/Shaders/GI/SSGI.frag.slang`
 
 ### 3.1 原理
 
@@ -225,7 +225,7 @@ return float4(albedo * indirect * u_Params.y, 1.0);         // 乘自身 albedo 
 ## 4. GI_SSR —— 屏幕空间反射
 
 **实现文件**：`Engine/Render/GI/GI_SSR.cpp`
-**着色器**：`Engine/Shader/Shaders/SSR.frag.slang`
+**着色器**：`Engine/Shader/Shaders/GI/SSR.frag.slang`
 
 ### 4.1 原理
 
@@ -266,7 +266,7 @@ return float4(albedo * hitAlbedo * NdotR * hit, 1.0);
 ## 5. GI_RSM —— 反射阴影贴图
 
 **实现文件**：`Engine/Render/GI/GI_RSM.cpp`
-**着色器**：`Engine/Shader/Shaders/RSM_Generate.vert.slang`、`RSM_Generate.frag.slang`
+**着色器**：`Engine/Shader/Shaders/GI/RSM_Generate.vert.slang`、`RSM_Generate.frag.slang`
 
 ### 5.1 原理
 
@@ -315,7 +315,7 @@ color += rsmIndirect * 0.03 * iblIntensity;  // 强度缩放
 ## 6. GI_DDGI —— 动态漫反射全局光照
 
 **实现文件**：`Engine/Render/GI/GI_DDGI.cpp`、`Engine/Render/GI/GI_DDGI.h`
-**着色器**：`Engine/Shader/Shaders/DDGI.comp.slang`（探针更新）、`Engine/Shader/Shaders/RT_DDGI.slang`（探针查询共享库）
+**着色器**：`Engine/Shader/Shaders/GI/DDGI.comp.slang`（探针更新）、`Engine/Shader/Shaders/RT_DDGI.slang`（探针查询共享库）
 
 ### 6.1 原理
 
@@ -415,7 +415,7 @@ color += ddgi * 0.5;  // 与 SSGI 叠加，强度缩放避免过度照亮
 ## 7. RTGIPass —— 硬件光线追踪 GI
 
 **实现文件**：`Engine/Render/RT/RTGIPass.cpp`、`Engine/Render/RT/RTGIPass.h`
-**着色器**：`Engine/Shader/Shaders/RT_GI.rgen.slang`、`RT_GI.rchit.slang`、`RT_GI.rmiss.slang`
+**着色器**：`Engine/Shader/Shaders/RayTracing/RT_GI.rgen.slang`、`RT_GI.rchit.slang`、`RT_GI.rmiss.slang`
 
 ### 7.1 原理
 
@@ -475,7 +475,7 @@ payload.radianceT = float4(radiance, RayTCurrent());
 
 ## 8. 间接光在延迟光照中的集成
 
-`Engine/Shader/Shaders/DeferredLighting.frag.slang` 是间接光（以及直接光）的最终消费点。间接光累加顺序：
+`Engine/Shader/Shaders/Lighting/DeferredLighting.frag.slang` 是间接光（以及直接光）的最终消费点。间接光累加顺序：
 
 ```hlsl
 // DeferredLighting.frag.slang —— 间接光集成顺序

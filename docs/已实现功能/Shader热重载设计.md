@@ -158,7 +158,7 @@ virtual int ReloadShader(StringView shaderName,
 ### 6.1 测试步骤
 
 1. 启动 HugEditor
-2. 打开 `Engine/Shader/Shaders/PBR.frag.slang`
+2. 打开 `Engine/Shader/Shaders/Lighting/PBR.frag.slang`
 3. 找到 `float4(1,0,0,1)` → 保存
 4. **预期**: Editor 视口中 PBR 材质立即变红
 5. Console 输出: `[HotReload] PBR.frag changed → recompiled (12ms) → 1 PSO rebuilt in 3ms`

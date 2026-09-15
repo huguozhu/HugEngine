@@ -51,15 +51,15 @@ TAA 放在 HDR 空间，ToneMap 之前。继承 `IAntiAliasing` + `IPostProcessP
 |------|------|
 | `Engine/Render/AntiAliasing/AA_TAA.h` | AA_TAA 类声明 |
 | `Engine/Render/AntiAliasing/AA_TAA.cpp` | AA_TAA 实现（初始化、PSO、SetInput、Render、抖动序列） |
-| `Engine/Shader/Shaders/TAA_Resolve.vert.slang` | 全屏三角形 VS（3 顶点无 VB） |
-| `Engine/Shader/Shaders/TAA_Resolve.frag.slang` | TAA resolve FS（重投影 + 邻域裁剪 + 混合） |
+| `Engine/Shader/Shaders/AntiAliasing/TAA_Resolve.vert.slang` | 全屏三角形 VS（3 顶点无 VB） |
+| `Engine/Shader/Shaders/AntiAliasing/TAA_Resolve.frag.slang` | TAA resolve FS（重投影 + 邻域裁剪 + 混合） |
 
 ### 3.2 修改文件
 
 | 文件 | 改动内容 |
 |------|---------|
-| `Engine/Shader/Shaders/GBuffer.vert.slang` | 新增双矩阵投影：输出 `prevClipPos` 到 location 3 |
-| `Engine/Shader/Shaders/GBuffer.frag.slang` | 新增 MRT3：输出 `float2 velocity`（UV 空间运动矢量） |
+| `Engine/Shader/Shaders/GBuffer/GBuffer.vert.slang` | 新增双矩阵投影：输出 `prevClipPos` 到 location 3 |
+| `Engine/Shader/Shaders/GBuffer/GBuffer.frag.slang` | 新增 MRT3：输出 `float2 velocity`（UV 空间运动矢量） |
 | `Engine/Render/Pipeline/DeferredPipeline.h` | 添加 `m_AntiAliasing`、`m_GBufferD`、`m_PrevViewProj`、`m_CurrViewProj` |
 | `Engine/Render/Pipeline/DeferredPipeline.cpp` | 4 MRT 创建 + PSO 修改 + TAA Pass 集成 + 矩阵管理 |
 | `Engine/Shader/CMakeLists.txt` | 添加 TAA_Resolve shader 编译目标 |

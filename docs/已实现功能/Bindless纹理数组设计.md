@@ -32,9 +32,9 @@ BindlessTextureManager（全局单例）
 | 修改 | `Engine/Asset/Private/glTFLoader.cpp` — 加载纹理时注册 |
 | 修改 | `Engine/Render/Pipeline/DeferredPipeline.h/.cpp` — 删除 set=1，全局 bindless |
 | 修改 | `Engine/Render/Pipeline/ForwardPipeline.h/.cpp` — 同上 |
-| 修改 | `Engine/Shader/Shaders/GBuffer.frag.slang` — Texture2D[] |
-| 修改 | `Engine/Shader/Shaders/PBR.frag.slang` — 同上 |
-| 修改 | `Engine/Shader/Shaders/PBR.vert.slang` — 同上 |
+| 修改 | `Engine/Shader/Shaders/GBuffer/GBuffer.frag.slang` — Texture2D[] |
+| 修改 | `Engine/Shader/Shaders/Lighting/PBR.frag.slang` — 同上 |
+| 修改 | `Engine/Shader/Shaders/Lighting/PBR.vert.slang` — 同上 |
 | 修改 | `Engine/Shader/Shaders/common.slang` — 共享 bindless 声明 |
 | 修改 | `Engine/Scene/Public/Scene/MeshComponent.h` — 删除 m_DescSetHandle |
 

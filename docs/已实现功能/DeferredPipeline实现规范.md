@@ -12,10 +12,10 @@
 |------|------|
 | `Engine/Render/Pipeline/DeferredPipeline.h` | 类声明 |
 | `Engine/Render/Pipeline/DeferredPipeline.cpp` | 初始化 + BuildFrameGraph |
-| `Engine/Shader/Shaders/GBuffer.vert.slang` | GBuffer 顶点着色器 |
-| `Engine/Shader/Shaders/GBuffer.frag.slang` | GBuffer 片段着色器（3 MRT） |
-| `Engine/Shader/Shaders/DeferredLighting.vert.slang` | 全屏三角形 |
-| `Engine/Shader/Shaders/DeferredLighting.frag.slang` | PBR 光照 + IBL + RSM + Shadow |
+| `Engine/Shader/Shaders/GBuffer/GBuffer.vert.slang` | GBuffer 顶点着色器 |
+| `Engine/Shader/Shaders/GBuffer/GBuffer.frag.slang` | GBuffer 片段着色器（3 MRT） |
+| `Engine/Shader/Shaders/Lighting/DeferredLighting.vert.slang` | 全屏三角形 |
+| `Engine/Shader/Shaders/Lighting/DeferredLighting.frag.slang` | PBR 光照 + IBL + RSM + Shadow |
 | `Samples/04.Deferred/main.cpp` | 测试 Sample |
 
 ## 3. 类声明

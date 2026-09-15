@@ -651,7 +651,7 @@ lpc.rtDiffuseSource  = (src.diffuse  == LightingSource::Diffuse_RTGI)? 1u : 0u;
 `DeferredLighting.frag` 去掉散落魔法系数，改为每通道显式强度；DDGI 从"无条件叠加"变成"由 `diffuseFallback` 控制"。
 
 ### 改动文件
-- `Engine/Shader/Shaders/DeferredLighting.frag.slang`
+- `Engine/Shader/Shaders/Lighting/DeferredLighting.frag.slang`
 - `Engine/Shader/Shaders/ShaderTypes.slang`（`DeferredLightingPushConstant` 结构）
 
 ### 3.1 push constant 增加每通道强度字段
