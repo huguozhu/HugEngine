@@ -4,7 +4,7 @@
 #include "Pipeline/Material.h"
 #include "Pipeline/ClusteredShading.h"
 #include "GI/GlobalIllumination.h"
-#include "GI/GIConfig.h"
+#include "GI/GITypes.h"   // GIConfig（通道层栈 + 档位）
 #include "RHI/RHI.h"
 #include "RenderGraph.h"
 #include "Pipeline/GPUCulling.h"

@@ -88,9 +88,8 @@ set(RENDER_SOURCES
     GI/GI_SSR.cpp
     GI/GI_DDGI.h
     GI/GI_DDGI.cpp
-    GI/GIConfig.h
-    GI/GIConfig.cpp
-    GI/GIRegistry.h
+    # GI — 数据模型（RHI-free，可被 Tests 直接包含）
+    GI/GITypes.h
     # GI Provider（P4 / Wave 2：GI 源统一抽象 + 各源实现）
     GI/IGIProvider.h
     GI/IBLProvider.h

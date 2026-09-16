@@ -16,7 +16,7 @@
 // ============================================================
 
 #include "Pipeline/LightingPass.h"
-#include "GI/GIConfig.h"
+#include "GI/GITypes.h"
 #include "RHI/RHI.h"
 
 namespace he::render {

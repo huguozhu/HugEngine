@@ -9,7 +9,7 @@ he::CVar<bool> cvLightPhysicalUnits("r.Light.PhysicalUnits", false,
 
 #include "GI/GI_IBL.h"
 #include "GI/GI_RSM.h"
-#include "GI/GIRegistry.h"
+#include "GI/GITypes.h"   // GIRegistry（可用性与降级）
 #include "Shadow/ShadowSystem.h"
 #include "Shadow/ShadowNone.h"
 #include "PostProcess/ToneMapPass.h"

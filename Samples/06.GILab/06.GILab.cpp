@@ -13,8 +13,7 @@
 #include "Pipeline/DeferredPipeline.h"
 #include "Pipeline/ForwardPipeline.h"
 #include "Pipeline/IRenderPipeline.h"
-#include "GI/GIConfig.h"
-#include "GI/GIRegistry.h"
+#include "GI/GITypes.h"   // GI 数据模型 + GIRegistry（RHI-free）
 #include "Pipeline/CameraController.h"
 #include "Pipeline/PhysicalCamera.h"
 #include "Scene/World.h"

@@ -1,7 +1,7 @@
 #include "Pipeline/DeferredPipeline.h"
 #include "GI/GI_IBL.h"
 #include "GI/GI_RSM.h"
-#include "GI/GIRegistry.h"
+#include "GI/GITypes.h"   // GIRegistry（可用性与降级）
 #include "Shadow/ShadowSystem.h"
 #include "PostProcess/ToneMapPass.h"
 #include "PostProcess/SkyboxPass.h"
