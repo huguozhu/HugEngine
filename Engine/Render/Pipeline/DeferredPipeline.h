@@ -102,6 +102,8 @@ public:
     ProfilerManager&    GetProfiler()      { return m_Profiler; }
     /// Lighting 通道（暴露 HDR 目标等，供结果校验类功能读取，如白炉测试探针）
     LightingPass&       GetLighting()      { return m_Lighting; }
+    /// GBuffer 通道（暴露 albedo/normal 等 MRT，供结果校验类功能读取，如离线频谱采样）
+    GBufferRenderer*    GetGBuffer()       { return m_GBuffer.get(); }
     /// 已注册的 GI Provider（帧图按注册表遍历构建 pass，而非手写门控）
     std::vector<std::unique_ptr<IGIProvider>>& GetGIProviders() { return m_GIProviders; }
 

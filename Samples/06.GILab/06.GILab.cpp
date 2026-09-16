@@ -53,7 +53,12 @@ using namespace he;
 // ============================================================
 // 配置读写（简易 key=value 格式）
 // ============================================================
-static String g_ConfigPath = String(HUGE_CONTENT_DIR) + "Config/06_GILab.cfg";
+// 默认读写内容目录下的正式配置；自动化实验可用 HE_GILAB_CONFIG=<路径> 指向临时文件
+// （读写同一路径，因此指向临时文件即完全不触碰仓库内的正式配置）
+static String g_ConfigPath = []{
+    if (const char* p = std::getenv("HE_GILAB_CONFIG")) return String(p);
+    return String(HUGE_CONTENT_DIR) + "Config/06_GILab.cfg";
+}();
 
 static std::unordered_map<String, String> LoadConfigFile(const String& path) {
     std::unordered_map<String, String> map;
@@ -448,6 +453,44 @@ int main() {
         pd.cpuAccess = true;                        // 需要 Map 读回
         probeBuffer  = device->CreateBuffer(pd);
     }
+
+    // ============================================================
+    // GI 频谱采样（P5 步骤 0）—— 判定 DDGI 与 SSGI 是否需要"频率分离"
+    //
+    // 目的：把"单个漫反射源独开"时的 HDR 结果与 GBuffer albedo 原样落盘，供离线做
+    //       频谱分析，回答那个决定性问题——"低通(SSGI) 是否 ≈ DDGI"。
+    //       只有两者近似相等，SSGI − LowPass(SSGI) 才真正代表"DDGI 未覆盖的部分"；
+    //       若不相等，频率分离就只是把一个源的偏差当成另一个源的补充，不如直接用加法。
+    // 用法：HE_DUMP_GI=<标签>   [HE_DUMP_GI_FRAME=<帧号，默认 60>]
+    //       输出 build/verify/gi_<标签>_<目标>.f16（RGBA16F 原始像素、无文件头、行紧密排布）
+    //       与 _meta.txt（逐目标一行：名称 宽 高 格式）。目标含：
+    //         hdr / albedo      —— 合成结果与接收端反照率
+    //         provN_raw/final   —— 第 N 个有效 Provider 的原始输出 / 降噪后输出
+    //       落盘后自动请求退出窗口，便于脚本化。
+    // albedo 必须一并落盘：A 修复后各源都带接收端 albedo，albedo 纹理自身的高频会淹没
+    //       要观察的 GI 频谱，离线分析必须先把 albedo 除掉。
+    // 采样三组配置以便做差：漫反射栈=空（基线：天空+自发光+空气透视+镜面）、=[DDGI]、=[SSGI]；
+    //       后两者减去基线即得各源自身的贡献（且两者带同一 albedo，比值即频谱之比）。
+    // 实现：整幅 CopyTextureToBuffer 到 host 可见缓冲。仅测试路径使用，会 WaitIdle，不追求性能。
+    // ============================================================
+    const char*  dumpTagEnv   = std::getenv("HE_DUMP_GI");
+    const char*  dumpFrameEnv = std::getenv("HE_DUMP_GI_FRAME");
+    const String g_DumpTag    = dumpTagEnv ? dumpTagEnv : "";
+    bool         g_DumpGI     = !g_DumpTag.empty();   // 非 const：失败时关闭以免每帧重试
+    const u64    g_DumpFrame  = dumpFrameEnv ? (u64)std::max(1, std::atoi(dumpFrameEnv)) : 60ull;
+    bool g_DumpDone    = false;   // 已录制拷贝（防止重复录制）
+    bool g_DumpWritten = false;   // 已落盘（防止每帧重复写文件）
+    // 采样目标列表：每项一张纹理 + 一条读回缓冲（尺寸各自取自纹理本身，故可混放不同分辨率）
+    struct DumpTarget {
+        String                          name;
+        rhi::IRHITexture*               tex = nullptr;
+        std::unique_ptr<rhi::IRHIBuffer> buf;
+        u32                             w = 0, h = 0;
+    };
+    std::vector<DumpTarget> g_DumpTargets;
+    if (g_DumpGI)
+        HE_CORE_INFO("[GI采样] 已启用：标签={} 目标帧={} 输出 build/verify/gi_{}_*.f16",
+                     g_DumpTag, g_DumpFrame, g_DumpTag);
 
     // 启动即应用白炉条件（HE_FURNACE=1 路径；面板开关在 GI 控制台里）
     if (g_FurnaceMode) {
@@ -1328,6 +1371,47 @@ int main() {
             }
         }
 
+        // ── GI 频谱采样：把若干张纹理整幅拷进 host 可见缓冲（仅测试路径）──
+        // 同样必须在 render pass 之外录制；缓冲在采样帧才创建，尺寸取自纹理本身
+        // 目标分三类：
+        //   hdr / albedo  —— 合成结果与接收端反照率（做差 + 除 albedo 后即得 E/π）
+        //   provN_raw/final —— 各有效 Provider 的原始输出 / 降噪后输出（定位"某源为 0"发生在哪一级）
+        if (g_DumpGI && !g_DumpDone && frameIndex >= g_DumpFrame) {
+            auto addTarget = [&](const String& name, rhi::IRHITexture* tex) {
+                if (!tex) return;
+                DumpTarget t;
+                t.name = name;
+                t.tex  = tex;
+                t.w    = tex->GetWidth();
+                t.h    = tex->GetHeight();
+                rhi::BufferDesc dd;                             // 宽×高×8 B（RGBA16F）
+                dd.size      = (usize)t.w * t.h * 8;
+                dd.usage     = rhi::BufferUsage::Storage;       // 该路径恒定带 TRANSFER_DST，可作拷贝目标
+                dd.cpuAccess = true;                            // 需要 Map 读回
+                t.buf = device->CreateBuffer(dd);
+                if (!t.buf) { HE_CORE_ERROR("[GI采样] 读回缓冲创建失败: {}（{}x{}）", name, t.w, t.h); return; }
+                // x=y=0 且取满宽高 ⇒ bufferRowLength=0 的紧密排布正好等于线性落盘布局
+                cmdList->CopyTextureToBuffer(tex, t.buf.get(), 0, 0, t.w, t.h, 0);
+                g_DumpTargets.push_back(std::move(t));
+            };
+            addTarget("hdr", deferredPipeline.GetLighting().GetHDRTarget());
+            if (auto* gb = deferredPipeline.GetGBuffer()) addTarget("albedo", gb->GetAlbedo());
+            const auto& providers = deferredPipeline.GetGIProviders();
+            for (size_t i = 0; i < providers.size(); ++i) {
+                auto* p = providers[i].get();
+                if (!p || !p->IsValid()) continue;
+                const String pre = "prov" + std::to_string(i) + "_";
+                addTarget(pre + "raw",   p->GetDiffuseOutput());
+                addTarget(pre + "final", p->GetFinalDiffuseOutput());
+            }
+            if (!g_DumpTargets.empty()) {
+                g_DumpDone = true;   // 已录制；实际读取放在 Submit 之后
+            } else {
+                g_DumpGI = false;
+                HE_CORE_WARN("[GI采样] 没有可用目标（HDR 未创建？），本次跳过");
+            }
+        }
+
         cmdList->End();
 
         device->Submit(cmdList.get());
@@ -1354,6 +1438,32 @@ int main() {
                              g_FurnaceMode ? "ON" : "off");
                 probeBuffer->Unmap();
             }
+        }
+
+        // ── GI 频谱采样：等 GPU 完成后原样落盘（RGBA16F 原始像素、无文件头、行紧密排布）──
+        if (g_DumpDone && !g_DumpWritten) {
+            device->WaitIdle();   // 测试用途，允许停顿
+            const String dir  = "build/verify/";
+            const String base = dir + "gi_" + g_DumpTag;
+            std::filesystem::create_directories(dir);
+            std::ofstream meta(base + "_meta.txt");
+            for (auto& t : g_DumpTargets) {                        // 逐目标写：像素直落，无头
+                const usize bytes = (usize)t.w * t.h * 8;
+                const void* p = t.buf ? t.buf->Map() : nullptr;
+                if (p) {
+                    std::ofstream f(base + "_" + t.name + ".f16", std::ios::binary);
+                    f.write(static_cast<const char*>(p), (std::streamsize)bytes);
+                    t.buf->Unmap();
+                    meta << t.name << " " << t.w << " " << t.h << " RGBA16F\n";
+                    HE_CORE_INFO("[GI采样] {}_{}.f16  {}x{}  {} B", base, t.name, t.w, t.h, bytes);
+                } else {
+                    HE_CORE_ERROR("[GI采样] 映射失败: {}_{}", base, t.name);
+                }
+            }
+            HE_CORE_INFO("[GI采样] 共落盘 {} 个目标，请求退出", g_DumpTargets.size());
+            g_DumpWritten = true;
+            // 采样完成即请求关窗：让脚本无需超时等待，也保证退出前正常走完清理与保存流程
+            glfwSetWindowShouldClose(engine.GetWindow()->GetNativeHandle(), GLFW_TRUE);
         }
 
         swapchain->Present(true);
