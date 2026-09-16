@@ -8,6 +8,8 @@
 
 namespace he::render {
 
+struct CameraData;   // 前向声明（与 GI_DDGI 同做法，避免头文件循环）
+
 // ============================================================
 // GI_SSGI — 屏幕空间全局光照（间接漫反射）
 // 继承 IGlobalIllumination，纳入统一 GI 架构
@@ -34,6 +36,11 @@ public:
 
     // SSGI 特有
     void SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal, rhi::IRHITexture* albedo);
+    /// 注入真实相机（每帧由帧图给出）。屏幕空间重建必须用**渲染深度图时的那套**投影参数：
+    /// 此前用硬编码的 kDefaultFOV/0.1/2000 自行拼投影矩阵，非默认相机（PhysicalCamera 会由
+    /// 焦距反算 fov）下 viewPos 重建错位（§9.2-E）。同时视图矩阵用于把 GBuffer 的世界空间
+    /// 法线转到 view 空间。传 nullptr 时退化为默认投影，保证独立运行该 pass 也不会拿到未初始化矩阵。
+    void SetCamera(const CameraData* camera) { m_Camera = camera; }
     rhi::IRHISampler* GetOutputSampler() const { return m_Sampler.get(); }
     void PreBind(rhi::IRHICommandList* cmd) const { if (m_Ready) cmd->SetPipeline(m_PSO.get()); }
 
@@ -64,6 +71,7 @@ private:
     rhi::IRHITexture* m_Depth   = nullptr;
     rhi::IRHITexture* m_Albedo  = nullptr;
     rhi::IRHITexture* m_Normal  = nullptr;
+    const CameraData* m_Camera  = nullptr;   // 非拥有；帧图每帧注入（见 SetCamera）
 };
 
 } // namespace he::render

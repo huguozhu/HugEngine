@@ -1,6 +1,7 @@
 // PostProcess/SSGI.cpp — 屏幕空间全局光照
 #include "GI/GI_SSGI.h"
 #include "Core/Log.h"
+#include "Pipeline/Camera.h"   // CameraData：SetCamera 注入的真实相机（GetViewMatrix/GetProjMatrix）
 #include "SSAO.vert.spv.h"
 #include "SSGI.frag.spv.h"
 #include <glm/gtc/matrix_transform.hpp>
@@ -43,9 +44,9 @@ bool GI_SSGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Settings.intensity = 1.0f;
     m_Settings.mode      = GIMode::SSGI;
 
-    // 2. 创建 Uniform Buffer（656 字节：kernel[32]×16 + params[16] + invProj[64] + proj[64]）
+    // 2. 创建 Uniform Buffer（720 字节：kernel[32]×16 + params[16] + invProj[64] + proj[64] + view[64]）
     rhi::BufferDesc ubDesc;
-    ubDesc.size      = 32 * sizeof(float4) + sizeof(float4) + 2 * sizeof(float4x4);
+    ubDesc.size      = 32 * sizeof(float4) + sizeof(float4) + 3 * sizeof(float4x4);
     ubDesc.usage     = rhi::BufferUsage::Uniform;
     ubDesc.cpuAccess = true;
     m_UniformBuffer  = device->CreateBuffer(ubDesc);
@@ -173,19 +174,32 @@ void GI_SSGI::Render(rhi::IRHICommandList* cmd) {
         GenSSGISamples(kernel, kSSGIKernelSize);
     }
 
-    // 3. 填充 Uniform Buffer（采样核 + 参数 + 投影矩阵）
+    // 3. 填充 Uniform Buffer（采样核 + 参数 + 投影/视图矩阵）
     struct alignas(16) {
         float4   k[32];        // 采样核（32 个方向）
         float4   p;            // x=半径, y=强度, z=采样数
         float4x4 invProj;      // 逆投影：clip→view，重建 view-space
         float4x4 proj;         // 正投影：view→clip，采样点投影到屏幕
+        float4x4 view;         // 视图：world→view，把世界空间法线转到 view 空间
     } ub;
     memcpy(ub.k, kernel.data(), kSSGIKernelSize * sizeof(float4));
     ub.p = float4(radius, m_Settings.intensity, float(sampleCount), 0);
-    float aspect = float(m_Width) / float(m_Height);
-    float4x4 proj = glm::perspectiveRH_ZO(glm::radians(kDefaultFOV), aspect, kDefaultNearPlane, kDefaultFarPlane);
+    // 优先用真实相机：深度图是用它的投影渲染的，重建必须用同一套参数（否则非默认
+    // fov/near/far 下 viewPos 系统性错位——§9.2-E）。无相机时退化为默认投影，
+    // 保证不会读到未初始化矩阵。
+    float4x4 proj, view;
+    if (m_Camera) {
+        proj = m_Camera->GetProjMatrix();
+        view = m_Camera->GetViewMatrix();
+    } else {
+        const float aspect = float(m_Width) / float(m_Height);
+        proj = glm::perspectiveRH_ZO(glm::radians(kDefaultFOV), aspect,
+                                     kDefaultNearPlane, kDefaultFarPlane);
+        view = float4x4(1.0f);
+    }
     ub.invProj = glm::inverse(proj);
     ub.proj    = proj;
+    ub.view    = view;
 
     void* mapped = m_UniformBuffer->Map();
     if (mapped) {

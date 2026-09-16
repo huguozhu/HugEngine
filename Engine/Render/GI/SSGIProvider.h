@@ -65,8 +65,11 @@ public:
     void Shutdown() override {}
     void OnResize(u32, u32) override {}
     void PreBind(rhi::IRHICommandList* cmd) override { if (m_SSGI) m_SSGI->PreBind(cmd); }
-    void Render(rhi::IRHICommandList* cmd, const GIProviderContext& /*ctx*/) override {
+    void Render(rhi::IRHICommandList* cmd, const GIProviderContext& ctx) override {
         if (m_SSGI) {
+            // ctx 必须消费：屏幕空间重建要用渲染深度图时的那套相机参数（§9.2-E）。
+            // 此前这里把 ctx 整个忽略（形参写作 /*ctx*/），SSGI 只能自力拼默认投影矩阵。
+            m_SSGI->SetCamera(ctx.camera);
             m_SSGI->SetInputs(m_Depth, m_Normal, m_Albedo);
             m_SSGI->Render(cmd);
         }
