@@ -29,7 +29,10 @@
 
 ## 2. 数据模型
 
-> 实现位置：`Engine/Render/GI/GIConfig.h`
+> 实现位置：`Engine/Render/GI/GITypes.h`（**RHI-free**，只依赖 `Core/Types.h`，可被 `Tests/` 直接包含）
+>
+> 注：原先的 `GI/GIConfig.h` 与 `GI/GIRegistry.h` 两个转发头已在 P0/D2 一并移除——
+> 数据模型只保留 `GITypes.h` 一个头文件，避免「GIConfig 到底在哪」的歧义。
 
 ### 2.1 GI 源标识
 
@@ -66,11 +69,11 @@ GIBand GIBandOf(GISourceId id);
 
 频段**不写进层描述**，而是由 id 推导——避免「同一算法被填成不同频段」的不一致。
 
-> ⚠️ **实现缺陷**：`GIBandOf` 中 `GIBand::High` **永远不会被返回**。
-> `case RTGI / RTReflection / RTAO:` 与 `default:` 共用同一条 fallthrough，全部返回 `GIBand::Mid`
-> （`GIConfig.h:63-73`）。影响面是**面板标签与候选排序**——06.GILab 用
-> `GIBandName(GIBandOf(id))` 显示频段，故 RT 系列会显示为「中频」（`06.GILab.cpp:1049-1050`），
-> 不影响合成数学。文档原先声称「RT*→High」，与代码不符。详见 §9.1。
+> 注：`GIBandOf` 曾有一处缺陷——`RTGI / RTReflection / RTAO` 与 `default:` 共用同一条
+> fallthrough，导致 `GIBand::High` **永不可达**，06.GILab 的面板把光追源显示成「中频」
+> （`GIBandName(GIBandOf(id))`，`06.GILab.cpp:1049-1050`）。
+> 已在 **P0/D2 修复**为显式 `return GIBand::High`，并在 `Tests/TestGITypes.cpp` 中补了
+> 「`High` 可达」的回归断言（详见 §9.1 第 1 行）。
 
 ### 2.3 层描述与层栈
 
@@ -306,6 +309,7 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 | **S1 / S1.5 / S2 / S3** | 光追归入 Deferred / 两类源同时参与 / 管线维度收敛 / 删除 `HybridRTPipeline` | ✅ 完成 |
 | **PT** | 参考渲染器定位 + 与 Deferred 共享加速结构 | ✅ 完成 |
 | **第 1 批遗留** | M4.4 RSM VPL 25→16（Poisson 盘 + 能量常数按 1/N 重标定）· M4.5（经核查**不适用**）· 06 面板候选由注册表派生 · 文档同步 | ✅ 完成 |
+| **P0 / D2** | GI 数据模型下沉为 RHI-free `GI/GITypes.h`（断开旧 `GIConfig.h → LightingPass.h → RHI` 传导链，并移除 `GIConfig.h`/`GIRegistry.h` 两个转发头）；`Tests/TestGITypes.cpp` 36 用例 / 427 断言 | ✅ 完成 |
 
 ### 8.2 三个关键指标（实测）
 
@@ -334,12 +338,13 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 
 | # | 项 | 文档原述 | 代码实际 |
 |---|---|---|---|
-| 1 | `GIBandOf` 频段映射 | 「RT*→High」 | **`High` 永不返回**；RT* 与 `default` 共用 fallthrough → 全部 `Mid` |
+| 1 | `GIBandOf` 频段映射 | 「RT*→High」 | 实现曾与文档不符：`High` **永不可达**（RT* 与 `default` 共用 fallthrough → 全部 `Mid`）。**已在 P0/D2 修复为显式 `High`，并加回归断言** |
 | 2 | 四档档位内容 | Low = 仅 DDGI | 每档均含 IBL/SSAO/光栅阴影基线；Low = IBL+SSGI 且 `halfRes=true` |
 | 3 | 降级行为 | 「RTGI→SSGI 同频段替代」 | 实际只做**移除 + 通道兜底**（diffuse/specular→IBL，ao→SSAO），无同频段替换 |
 | 4 | 置信度体系 | 5 源各自的置信度依据表 | UBO 无 confidence 字段；实际只有「屏幕边缘 5% 降权」一条 |
 | 5 | `IGIProvider` 签名 | `GetBand`/`GetRange`/`IsValid`/输出/生命周期 | 多出 `Handles`/`NeedsPass`/`SyncToStack`/`GetPassKind`/`HasTextureOutput`/附属 pass 一组；`GetRange` 已移除 |
 | 6 | `Lightmap` 可用性 | 「预留，可用」 | `ToPipelineCap` 无该分支 → `IsAvailable` 恒 false，面板选不到 |
+| 7 | **`Tests` 的可测性前提** | 「`Tests` 不链接 Render 模块，故 GI 无法被单测」（依据 `Tests/CMakeLists.txt:48-54` 的直接列表） | **不成立**：直接列表虽无 Render，但 `HugEngineAI`(PUBLIC) → `HugEngineRender` + `HugEngineEditor` → `HugEngineRender`，**传递依赖早已把 Render/RHI/Vulkan 拉入**，`Engine/Render` 也已在包含路径上。GI 本就可测；抽 `GITypes.h` 的真实价值是**分层解耦**（纯数据头不再拉全量 RHI）与**显式依赖**，而非「否则测不了」 |
 
 ### 9.2 代码复核发现的缺陷（**未经运行时验证**，需实测确认后修复）
 
@@ -368,7 +373,7 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 
 | 顺位 | 任务 | 规模/风险 | 理由 |
 |:---:|---|---|---|
-| **P0** | **D2 · 抽 `GITypes.h` + 层栈/降级 CPU 单测** | 小 / 低 | 唯一能让 GI 进入 `Tests/` 的前置；守的是**已经咬过两次**的不变量 1 |
+| **P0** | ✅ **D2 · 抽 `GITypes.h` + 层栈/降级 CPU 单测**（**已完成**） | 小 / 低 | 守的是**已经咬过两次**的不变量 1；同时把 RHI 依赖从 GI 数据模型中剥离 |
 | **P1** | **P5 · 频率分离**（Wave 3） | 大 / **高** | 合成正确性主题的收尾；前提（Wave 0 判据 + Wave 1 按源合成 + Wave 2 Provider）已全部就绪 |
 | **P2** | **B3 · RSM VPL halfRes** | 小 / 低 | 与 P1 并行 |
 | **P2** | **D1 · 偶发崩溃根因获证** | 未知 / 中 | 与 P1 并行；根因未证意味着已修项可能只是其中一个实例 |
@@ -379,11 +384,16 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 
 ### 10.1 各项详情
 
-**P0 · D2 层栈归一化 CPU 单测**
-- 前置：抽出 **RHI-free 的 `Engine/Render/GI/GITypes.h`**（当前 `Tests/CMakeLists.txt` 只链接
-  AI/Scene/Asset/Core/Physics/Jolt，**不含 `HugEngineRender`**，GI 在架构上无法被单测）
-- 覆盖目标：`GIChannelStack` 的增删改语义、权重归一化配置、`GIRegistry::Degrade` 的逐源裁剪与兜底、
-  **层栈与子系统开关的一致性断言**（不变量 1）
+**P0 · D2 层栈归一化 CPU 单测** —— ✅ **已完成**（36 用例 / 427 断言）
+- 产出：`Engine/Render/GI/GITypes.h`（RHI-free，只依赖 `Core/Types.h`）+ `Tests/TestGITypes.cpp`
+- **前置已澄清**：原述「`Tests` 不链接 Render 故 GI 无法单测」**不成立**（见 §9.1 第 7 行）——
+  `HugEngineAI`(PUBLIC) 已传递引入 `HugEngineRender`。故本次的价值是
+  **分层解耦**（断开旧 `GIConfig.h → LightingPass.h → RHI/RHI.h` 这条传导链）
+  与**显式依赖**（Tests 显式声明 `Engine/Render` 包含路径，不再依赖传递隐式可得）
+- 覆盖目标：频段映射（含 `High` 可达的回归断言）、能力位与可用性、
+  `GIChannelStack` 的增删改语义与容量上限、`GIConfig` 门控谓词**严格由层栈派生**（防影子开关）、
+  四档预设的基线与精度、`GIRegistry::Degrade` 的逐源裁剪与每通道兜底、
+  shader UBO 镜像结构的布局不漂移
 - 边界说明：测的是 **C++ 侧配置/注册表/降级**逻辑，**不是 shader 里的合成数学**——对 P5 的保护有限
 
 **P1 · P5 频率分离**（内部顺序，**不要跳过第 0 步**）

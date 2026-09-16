@@ -709,6 +709,11 @@ color *= ao * aoVal * g_PC.aoIntensity;
 - `Engine/Render/GI/GIConfig.h`（新增）
 - `Engine/Render/GI/GIConfig.cpp`（新增：质量档位预设表）
 
+> **后续演进（P0/D2）**：GI 数据模型已下沉到 `Engine/Render/GI/GITypes.h`（RHI-free，只依赖
+> `Core/Types.h`）；`GIConfig.cpp` 已删除（`GIConfigFromPreset` 转为 `inline`），
+> `GIConfig.h` 与 `GIRegistry.h` 两个转发头也已移除。当前状态见
+> 《HugEngine GI架构与开发计划.md》。
+
 ### 4.1 定义 `GIConfig`
 
 ```cpp
@@ -837,6 +842,8 @@ rg.AddPass("Lighting", ..., [&, w, h](auto c) {
 
 ### 改动文件
 - `Engine/Render/GI/GIRegistry.h`（新增）
+
+> **后续演进（P0/D2）**：`GIRegistry` 已并入 `Engine/Render/GI/GITypes.h`，本转发头已移除。
 
 ### 6.1 注册表 + 工厂
 
