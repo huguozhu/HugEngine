@@ -66,6 +66,27 @@ for t in ["ddgi", "ssgi"]:
           f"frac>1e-5={(d[valid]>1e-5).mean():.4f} frac<-1e-5={(d[valid]<-1e-5).mean():.4f}")
     print(f"      (diff/albedo) lum mean={e[valid].mean():.6g} p99.9={np.percentile(e[valid],99.9):.5f}")
 
+# --- per-provider intermediate textures -----------------------------------------------
+# This is the check that actually settles "is this source doing anything". A provider can
+# report IsValid() == true, show as enabled in the UI, and still hand the composite an
+# all-zero texture (that is exactly how the SSGI "never runs" bug hid). Switches and
+# validity flags are not evidence; the texture is.
+print("\nper-provider diffuse outputs (raw = before the provider's own denoise):")
+for t in TAGS:
+    m = meta(t)
+    names = sorted(n for n in m if n.startswith("prov"))
+    if not names:
+        print(f"  {t:5s} (no provider targets dumped)")
+        continue
+    for name in names:
+        c = load(t, name)
+        L = lum(c)
+        rgb = c[..., :3]
+        nz = int(np.count_nonzero(np.any(rgb != 0.0, axis=-1)))
+        print(f"  {t:5s} {name:12s} {m[name][0]:5d}x{m[name][1]:<5d} "
+              f"lum mean={L.mean():.6g} max={L.max():.6g} nonzero_px={nz}/{L.size} "
+              f"alpha_mean={c[...,3].mean():.4f}")
+
 lD = lum((imgs["ddgi"][0] - base)[..., :3] / np.maximum(alb[..., :3], 1e-3))
 lS = lum((imgs["ssgi"][0] - base)[..., :3] / np.maximum(alb[..., :3], 1e-3))
 if lS[valid].std() > 0 and lD[valid].std() > 0:
