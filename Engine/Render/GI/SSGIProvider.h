@@ -21,7 +21,13 @@ public:
     void SetPass(GI_SSGI* ssgi) { m_SSGI = ssgi; }
     void SetDenoiser(Denoiser* denoiser) { m_Denoise = denoiser; }
     /// 由帧图注入 GBuffer 输入
-    void SetGBuffer(rhi::IRHITexture* depth, rhi::IRHITexture* normal, rhi::IRHITexture* albedo) {
+    /// 【必须叫 SetInputs 且显式 override】帧图统一调用接口方法 IGIProvider::SetInputs，
+    /// 而该虚函数带**空实现的默认体**：方法改名（此处曾叫 SetGBuffer）不会触发任何编译
+    /// 错误，只会静默落到空实现 → m_Depth/m_Normal/m_Albedo 恒为 nullptr →
+    /// GI_SSGI::Render 在守卫处直接 return → SSGI 输出纹理只剩清屏值，
+    /// 表现为「SSGI 已启用、诊断也认为有效，但对画面的贡献恒为 0」。
+    void SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal,
+                   rhi::IRHITexture* albedo) override {
         m_Depth = depth; m_Normal = normal; m_Albedo = albedo;
     }
 
