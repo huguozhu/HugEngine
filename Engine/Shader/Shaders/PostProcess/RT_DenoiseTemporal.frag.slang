@@ -64,6 +64,15 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
     }
 
     // 6. 混合当前帧 + 历史（lerp(a, b, w) = a*(1-w) + b*w）
+    //
+    // 【有效性协议】alpha 的**符号**不参与混合 —— 它是**本帧的几何属性**
+    // （该像素本帧有没有反射/间接光数据），不是可以时域累积的量：
+    //   · 若一并 lerp，"本帧无数据"的像素会继承历史的合法性而**永不失效**（符号被平均）；
+    //   · 合成端以 `a < 0` 判定源无效（§9.2-C），符号被抹掉后判定即失效。
+    // 故有效性一律**取自当前帧**，只让 RGB 走时域累积。
+    // （对 R16/R8 格式的 RT 效果，写入 alpha 会被丢弃，无副作用。）
     float4 histColor = u_History.SampleLevel(u_PointSampler, historyUV, 0);
-    return lerp(noisyColor, histColor, historyWeight);
+    float4 outc = lerp(noisyColor, histColor, historyWeight);
+    outc.a = (noisyColor.a >= 0.0) ? 1.0 : -1.0;
+    return outc;
 }

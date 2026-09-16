@@ -60,6 +60,14 @@ private:
     std::unique_ptr<rhi::IRHISampler> m_Sampler;
     std::unique_ptr<rhi::IRHISampler> m_PointSampler;
 
+    /// 矩阵 UBO（binding 3）：invProj（clip→view）+ proj（view→clip）
+    ///
+    /// 为什么矩阵必须进 UBO：引擎保证的 push constant 范围只有 128B，而两个 mat4
+    /// 恰好用满。此前只往 push constant 里传了**逆**矩阵，而 shader 还拿它当**正**投影
+    /// 用（§9.2-B）——正投影无处安放正是该缺陷的成因。
+    /// SSAO 早已采用「矩阵进 UBO」的同一做法（`SSAO.cpp` 的 projInv + proj）。
+    std::unique_ptr<rhi::IRHIBuffer> m_UniformBuffer;
+
     rhi::IRHITexture* m_Depth  = nullptr;
     rhi::IRHITexture* m_Albedo = nullptr;
     rhi::IRHITexture* m_Normal = nullptr;
