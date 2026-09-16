@@ -201,20 +201,39 @@ float3 gi     = base + detail;                    // 频段不重叠 → 数学�
 
 ### 3.4 源量纲一致性（待修，详见 §9.2-A）
 
-归一化加权的前提是**所有源返回同一个物理量**。当前实现不满足：
+### 3.4 源量纲一致性 —— ✅ 已统一（P1·A）
 
-| 源 | 返回表达式 | 是否含**接收面** albedo |
-|---|---|---|
-| IBL | `kD × irradiance × albedo × iblIntensity` | ✅ |
-| SSGI | `albedo × indirect × intensity` | ✅ |
-| DDGI | `SampleDDGI()` 直接返回**辐照度 E** | ❌ |
-| RTGI | 命中点出射辐射度按余弦半球平均（≈ E/π） | ❌（含的是**命中面** albedo） |
+归一化加权的前提是**所有源返回同一个物理量**。
 
-Medium/High 档默认同时启用 SSGI+DDGI，Ultra 档启用 RTGI+DDGI，
-于是 `(SSGI×albedo + E_ddgi) / 2` 在混合不同量纲，结果随 albedo 偏移。
+**统一约定（基准由 IBL 确立）**：
 
-白炉测试**抓不到它**——`SampleDiffuseSource` 首行 `if (furnace) return float3(1,1,1)`
-把源真值短路了：白炉验证的是**归一化数学**，不是源量纲。
+```
+L_o = albedo × E/π          ← 已乘接收面 albedo 的间接出射辐射度
+```
+
+基准之所以是 IBL：其辐照度图在卷积时**已归一化为 E/π**（见 `GI/IBL_Irradiance.frag`
+末尾的 `× π / sampleCount`），故 `kD × irradianceMap × albedo` 本身就是出射辐射度。
+
+修复前后各源的量纲（`Lighting/DeferredLighting.frag.slang` 的 `SampleDiffuseSource`）：
+
+| 源 | 修复前返回 | 含接收面 albedo | 修复动作 |
+|---|---|---|---|
+| IBL | `kD × (E/π) × albedo` | ✅ | —（基准） |
+| SSGI | `albedo × indirect` | ✅ | —（标度仍是启发式，见下） |
+| DDGI | **E** | ❌ | 补 `albedo/π` |
+| RTGI | **E/π** | ❌（含的是命中面 albedo） | 补接收面 `albedo` |
+| RSM | **≈E**（经验常数已含 1/π） | ❌ | 补接收面 `albedo`，并**解耦 `iblIntensity`** |
+
+第 4 处（同一缺陷的另一实例）：`RayTracing/RT_GI.rgen.slang` 的 DDGI miss 回退
+把**辐照度 E** 当**辐射度 L** 累加（命中路径给的是 L），已补 `× 1/π`。
+
+**为什么白炉抓不到它**：`SampleDiffuseSource` 首行 `if (furnace) return float3(1,1,1)`
+把源真值**短路**了——白炉验证的是**归一化数学**，不是源量纲。
+故本次改用**单源亮度实测**验证（见 §9.2 的实测记录）。
+
+> **遗留（不影响 P5 前置）**：SSGI 的整体标度是启发式（`falloff = 1/(1+|sDir|²·radius)`，
+> 无量纲），未按 `E/π` 校准，靠用户 `intensity` 调节。严格统一标度需以 PT 为参考做实测校准，
+> 列为独立任务（§10 `SSGI-CAL`）。
 
 ### 3.5 执行模型：每帧成本结构
 
@@ -434,17 +453,41 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 
 | # | 严重度 | 问题 | 证据 |
 |---|---|---|---|
-| **A** | 严重 | **归一化混合了不同量纲的源**（§3.4）：IBL/SSGI 含接收面 albedo，DDGI/RTGI 不含 | `DeferredLighting.frag.slang` 的 `SampleDiffuseSource`；`RT_DDGI.slang` 返回辐照度 |
-| **B** | 严重 | **SSR 屏幕投影用错矩阵**：`GI_SSR.cpp` 传的是 `inverse(proj)`，而 shader 用它做 view→clip 投影（`SSR.frag.slang` 的 Hi-Z 与线性 march 两条路径） | `GI_SSR.cpp:140` vs `SSR.frag.slang:59,92` |
-| **C** | 严重 | **SSR 有效性协议未实现**：合成端判 `u_SSR.Sample().a < 0` 表示无效，但 `SSR.frag` 所有分支 alpha 都是 1.0，`Denoise.frag` 还会把 alpha 平均 → 判定永不成立，SSR miss 的黑色以全权重进入 `(IBL+0)/2` | `DeferredLighting.frag.slang:450` vs `SSR.frag.slang:32,110,112` |
-| **D** | 中 | **AO 乘到了直接光上**，且不作用于镜面：`color *= lerp(1, ao*aoVal, aoIntensity)` 位于直接光累加之后、间接镜面之前 | `DeferredLighting.frag.slang:436` |
+| ~~**A**~~ | ✅ **已修复** | **归一化混合了不同量纲的源**（§3.4）：IBL/SSGI 含接收面 albedo，DDGI/RTGI 不含 | 见下方「A 的修复与实测」 |
+| **B** | 严重 | **SSR 屏幕投影用错矩阵**：`GI_SSR.cpp` 传的是 `inverse(proj)`，而 shader 用它做 view→clip 投影（`GI/SSR.frag.slang` 的 Hi-Z 与线性 march 两条路径） | `GI_SSR.cpp:140` vs `GI/SSR.frag.slang:59,92` |
+| **C** | 严重 | **SSR 有效性协议未实现**：合成端判 `u_SSR.Sample().a < 0` 表示无效，但 `GI/SSR.frag.slang` 所有分支 alpha 都是 1.0，`PostProcess/Denoise.frag.slang` 还会把 alpha 平均 → 判定永不成立，SSR miss 的黑色以全权重进入 `(IBL+0)/2` | `Lighting/DeferredLighting.frag.slang:450` vs `GI/SSR.frag.slang:32,110,112` |
+| **D** | 中 | **AO 乘到了直接光上**，且不作用于镜面：`color *= lerp(1, ao*aoVal, aoIntensity)` 位于直接光累加之后、间接镜面之前 | `Lighting/DeferredLighting.frag.slang:436` |
 | **E** | 中 | **屏幕空间源用硬编码默认投影矩阵**而非真实相机：`kDefaultFOV=60°/0.1/2000`；`PhysicalCamera` 会由焦距反算 fov → 非默认相机下 SSGI/SSAO/SSR 重建错位。根因是 `IGIProvider` 未把相机传给屏幕空间源（只有 DDGI 有 `SetCamera`） | `GI_SSGI.cpp:186`、`GI_SSR.cpp:140`、`SSAO.cpp:271` |
 | **F** | 中 | **RSM 的 pass 被嵌套在 DDGI 门控内**：单独勾选 RSM 而关闭 DDGI 时，RSM 永不注册（Forward 侧却是独立的 `ShouldRunRSM()`） | `DeferredPipeline_FrameGraph.cpp:288` |
 | **G** | 中 | **层栈与子系统开关是两套真值**（不变量 1 的实际状态）：`IsValid()` 只读子系统 `enabled`，面板层栈 UI 只改层栈 → 勾选但静默失效。`halfRes` 还有第三重（需触发 `OnResize` 才重建纹理） | `SSRProvider.h:25` 等 + `06.GILab.cpp` 的通道 UI |
-| **H** | 中 | **Provider 抽象只在 Deferred 落地**：`ForwardPipeline` 无 `m_GIProviders`，且 Forward 的 PBR shader **没有 `GIBlendParams` UBO** → 层栈归一化在 Forward 完全不存在，但 `PipelineCaps::Forward` 声明支持 IBL+RSM | `ForwardPipeline.h`；全仓 `GIBlendParams` 仅 `DeferredLighting.frag` 使用 |
-| **I** | 中 | **RTGI 用 DDGI 做 miss 回退**，破坏「源独立」前提：Ultra 档同时含 RTGI+DDGI 时，DDGI 信息被用两次再归一化 → 加权平均失去无偏性 | `RT_GI.rgen.slang:111-113` + `RTProvider.h:243` |
+| **H** | 中 | **Provider 抽象只在 Deferred 落地**：`ForwardPipeline` 无 `m_GIProviders`，且 Forward 的 PBR shader **没有 `GIBlendParams` UBO** → 层栈归一化在 Forward 完全不存在，但 `PipelineCaps::Forward` 声明支持 IBL+RSM | `ForwardPipeline.h`；全仓 `GIBlendParams` 仅 DeferredLighting 使用 |
+| **I** | 中 | **RTGI 用 DDGI 做 miss 回退**，破坏「源独立」前提：Ultra 档同时含 RTGI+DDGI 时，DDGI 信息被用两次再归一化 → 加权平均失去无偏性 | `RT_GI.rgen.slang:111-117` + `RTProvider.h:243` |
 | **J** | 低 | 合成参数 UBO 是**单份**、非 per-frame-in-flight（`MAX_FRAMES_IN_FLIGHT=3`） | `LightingPass.cpp:155-168` |
 | **K** | 低 | **DDGI 网格外查询退化为「贴边常数外推」**，无 falloff 或无效标记；探针网格为固定参数，覆盖不到的区域静默缺失低频 GI | `RT_DDGI.slang:56-63,98`；`GI_DDGI.h:57-59` |
+
+**A 的修复与实测**（4 处量纲修正 + 单源亮度验证）
+
+改动：
+1. `Lighting/DeferredLighting.frag.slang` · `SampleDiffuseSource`：DDGI 补 `albedo/π`；RTGI 补接收面 `albedo`；RSM 补接收面 `albedo`
+2. 同上 · `SampleRSMIndirect`：移除对 `iblIntensity` 的**门控与缩放**（此前「把 IBL 调暗」会连带关掉 RSM）
+3. `RayTracing/RT_GI.rgen.slang`：DDGI miss 回退补 `× 1/π`（E → L，与命中路径量纲对齐）
+
+实测（`HE_FURNACE_PROBE=1`，不启白炉；cfg 设为 **diffuse 层栈 = 仅 DDGI**、无镜面/AO/阴影、关闭直接光）：
+
+| | 修复前 | 修复后 |
+|---|---|---|
+| 中心亮度 | 0.0279 | **0.0034** |
+| 中心 RGB | (0.0177, 0.0266, 0.0709) | (0.0024, 0.0033, 0.0075) |
+| **中心 vs 背景** | **完全相同（比值 1.0000）** | 0.0034 vs 0.0029（比值 1.16） |
+
+两条特征分别印证了缺陷与修复：
+- **修复前中心亮度与接收面 albedo 无关** → 中心与背景读数一模一样（都是 0.0279）——
+  这正是「DDGI 返回 E、不含 albedo」的直接指纹；
+- **修复后逐通道比值 = π/albedo_c**：整体 8.21× 反推 albedo ≈ 0.38；逐通道反推得
+  R = 0.43 / G = 0.39 / B = 0.33 —— Sponza 中心像素的**暖色** albedo，与 `albedo/π` 的预测关系一致。
+
+回归：白炉读数仍为 **1.0000**（预期——白炉短路源真值，本就不覆盖量纲）；VUID 46 = 改前 46。
+*（`build/verify/` 下保留了 before/after 两份运行日志可供查阅）*
 
 ---
 
@@ -456,7 +499,7 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 |:---:|---|---|---|
 | **P0** | ✅ **D2 · 抽 `GITypes.h` + 层栈/降级 CPU 单测**（**已完成**） | 小 / 低 | 守的是**已经咬过两次**的不变量 1；同时把 RHI 依赖从 GI 数据模型中剥离 |
 | **P0** | **REDUNDANCY · 冗余源诊断 + 可证等价去重**（**已完成**） | 小 / 低 | 同时命中**性能**与**正确性**（§3.5）；静态可测，复用 P0 的单测设施 |
-| **P1** | **§9.2 的 A/B/C 三项正确性缺陷** | 中 / 中 | **A（量纲统一）是 P5 的硬前置**（§3.4）：频率分离做 `base + detail` 直接相加，量纲不一致会立刻表现为过亮/过暗 |
+| **P1** | **§9.2 的 A/B/C 三项正确性缺陷**（**A ✅ 已完成**，B/C 待做） | 中 / 中 | **A（量纲统一）是 P5 的硬前置**（§3.4）——已完成；B/C 是 SSR 的空间正确性与有效性协议 |
 | **P2** | **P5 · 频率分离**（Wave 3） | 大 / **高** | 合成正确性主题的收尾；前提（Wave 0 判据 + Wave 1 按源合成 + Wave 2 Provider）已就绪，但需先完成 P1 |
 | **P2** | **B3 · RSM VPL halfRes** | 小 / 低 | 与 P2 并行 |
 | **P2** | **D1 · 偶发崩溃根因获证** | 未知 / 中 | 并行；根因未证意味着已修项可能只是其中一个实例 |
@@ -522,8 +565,17 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 **P2 · D1 崩溃根因** — 长跑 soak + `HE_TRACE_FB=1`（`delay=0` 即同帧销毁的直接指标）；
 现状：符号化落在 `VulkanTexture::GetImageView()` 野指针，最可疑根因（framebuffer 被同帧销毁）已修
 
-**P1 · §9.2 A/B/C** — 量纲统一（约定「所有 diffuse 源返回已乘接收面 albedo 的间接出射辐射度」）、
-SSR 投影矩阵正/逆分离、SSR 有效性协议落地。**A 是 P5 的硬前置**（§3.4）。
+**P1 · §9.2 A/B/C**
+- ✅ **A · 量纲统一**（本次完成）——约定 `L_o = albedo × E/π`，修 4 处（DDGI 补 `albedo/π`、
+  RTGI/RSM 补接收面 albedo、`RT_GI.rgen` 的 miss 回退补 `1/π`），并解耦 RSM 对 `iblIntensity`
+  的依赖。**单源亮度实测验证通过**（详见 §9.2 的「A 的修复与实测」）。
+- ⬜ **B · SSR 投影矩阵**——`GI_SSR.cpp` 传的是逆矩阵，而 `GI/SSR.frag.slang:59,92` 拿它做
+  view→clip。改法：正/逆矩阵**分开传**（两个字段），并给字段改名消除 `u_Proj` 的歧义。
+- ⬜ **C · SSR 有效性协议**——`GI/SSR.frag.slang` 的无效分支写**负数 alpha**，
+  `PostProcess/Denoise.frag.slang` 保留符号（或改用独立通道），与
+  `Lighting/DeferredLighting.frag.slang:450` 的判定对齐。
+- 遗留（独立任务，非 P5 前置）：`SSGI-CAL` —— SSGI 整体标度是启发式，未按 `E/π` 校准，
+  需以 PT 为参考实测标定。
 
 **P3 · AMORTIZE 时间维分摊** — DDGI 探针更新（256 探针 × numSamples）由「每帧全量」改为
 「每 N 帧 + 时域复用」。DDGI 已有 `blendAlpha` 历史混合，天生适配；需实测确认收敛速度可接受。
