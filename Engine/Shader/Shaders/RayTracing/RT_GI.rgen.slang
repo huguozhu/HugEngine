@@ -110,7 +110,12 @@ void main() {
 
         if (payload.radianceT.a < 0.0) {
             // miss：DDGI 探针查询替代纯天空色（远距离低频间接光）
-            radiance += SampleDDGI(worldPos, dir);
+            //
+            // 量纲对齐：SampleDDGI 返回的是**辐照度 E**（EvalDDGI_SH 已施加 Lambert 卷积
+            // A_l），而命中的 ClosestHit 给的是**辐射度 L** —— 二者不能直接相加。
+            // 本 rgen 把二者都当作「沿该方向的入射辐射度」累加，故 miss 路径需按
+            // 「局部环境近似均匀」的假设做 E/π = L 换算。
+            radiance += SampleDDGI(worldPos, dir) * (1.0 / 3.14159265);
         } else {
             // hit：ClosestHit 返回的出射辐射度
             radiance += payload.radianceT.rgb;

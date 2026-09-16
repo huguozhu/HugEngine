@@ -138,7 +138,11 @@ static const float2 kRSMPoisson16[RSM_VPL_COUNT] = {
 };
 
 float3 SampleRSMIndirect(float3 worldPos, float3 N, uint lightCount) {
-    if (iblIntensity <= 0.0 || lightCount == 0u) return float3(0.0);
+    // 注：此处**不**乘 iblIntensity、也**不**由它门控。
+    // RSM 与 IBL 是两个相互独立的源，用「IBL 强度」当 RSM 的开关会让
+    // 「把 IBL 调暗/关掉」连带把 RSM 一起关掉（此前的耦合缺陷）。
+    // 用户强度统一由层栈权重（GIChannelStack）表达。
+    if (lightCount == 0u) return float3(0.0);
     if (u_ShadowData[0].shadowParams.w >= 0.5f) return float3(0.0);
     if (u_ShadowData[0].shadowParams.z <= 0.0) return float3(0.0);
 
@@ -155,27 +159,37 @@ float3 SampleRSMIndirect(float3 worldPos, float3 N, uint lightCount) {
         rsmIndirect += fs.a * max(dot(N, normalize(dir)), 0.0)
                      * max(dot(sN, -normalize(dir)), 0.0) / d2;
     }
-    return rsmIndirect * RSM_VPL_ENERGY * iblIntensity;
+    // VPL 离散化能量归一（E ≈ (1/N)·Σ VPL），返回量纲为**辐照度 E**
+    // （1/π 已并入该经验常数）→ 调用方需再乘接收面 albedo，见 SampleDiffuseSource
+    return rsmIndirect * RSM_VPL_ENERGY;
 }
 
 /// 漫反射源采样（按 GISourceId 分派）
-/// 注意：各源的输出都已是「已乘 albedo/BRDF 的间接漫反射贡献」，彼此可直接加权平均。
+///
+/// 【统一量纲约定】所有 diffuse 源必须返回**已乘接收面 albedo 的间接出射辐射度**：
+///     L_o = albedo × E/π
+/// 基准来自 IBL：其辐照度图在卷积时已归一化为 E/π（见 IBL_Irradiance.frag 末尾的
+/// `× π / sampleCount`），故 `kD × irradianceMap × albedo` 本身就是出射辐射度。
+///
+/// 为什么必须统一：归一化加权平均 `Σ(c·w)/Σw` 的前提是各源在估**同一个量**。
+/// 量纲不一致会让结果随 albedo 偏移（§9.2-A），而白炉测试因源真值被短路而抓不到。
 float3 SampleDiffuseSource(uint id, float3 worldPos, float3 N, float2 uv,
                            float3 albedo, float3 kD, bool furnace) {
-    if (furnace) return float3(1.0, 1.0, 1.0);   // 白炉：各源入射辐射度真值 = 1
+    if (furnace) return float3(1.0, 1.0, 1.0);   // 白炉：各源真值 = 1（只验合成数学，不验量纲）
     switch (id) {
-    case GISOURCE_IBL:   // 低频：环境辐照度（含 kD 与 albedo）
+    case GISOURCE_IBL:   // 基准：辐照度图存 E/π，已含 kD 与接收面 albedo
         return kD * u_IrradianceMap.Sample(u_IBLSampler, N).rgb * albedo * iblIntensity;
     case GISOURCE_DDGI:  // 低频：动态漫反射探针（世界空间）
         // 合成路径恒用真实辐照度——ddgiScale（GI_DDGI::debugScale）只用于调试可视化，
         // 若在此相乘会破坏能量守恒（归一化之内引入非物理缩放，Wave 0.6）
-        return SampleDDGI(worldPos, N);
-    case GISOURCE_SSGI:  // 中频：屏幕空间
+        // EvalDDGI_SH 已施加 Lambert 卷积 A_l → 返回**辐照度 E** → 需补 albedo/π
+        return SampleDDGI(worldPos, N) * albedo * (1.0 / HE_PI);
+    case GISOURCE_SSGI:  // 中频：屏幕空间（SSGI.frag 输出已含接收面 albedo）
         return u_SSGI.Sample(u_GBufferSampler, uv).rgb;
-    case GISOURCE_RSM:   // 中频：反射阴影贴图
-        return SampleRSMIndirect(worldPos, N, lightCount);
-    case GISOURCE_RTGI:  // 高频：硬件光追
-        return u_RT_GI.Sample(u_GBufferSampler, uv).rgb;
+    case GISOURCE_RSM:   // 中频：反射阴影贴图（返回 E，经验常数已含 1/π）→ 补 albedo
+        return SampleRSMIndirect(worldPos, N, lightCount) * albedo;
+    case GISOURCE_RTGI:  // 高频：硬件光追（rgen 的余弦加权平均 ≈ E/π）→ 补接收面 albedo
+        return u_RT_GI.Sample(u_GBufferSampler, uv).rgb * albedo;
     default:
         return float3(0.0);
     }
