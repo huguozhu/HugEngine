@@ -1396,6 +1396,9 @@ int main() {
             };
             addTarget("hdr", deferredPipeline.GetLighting().GetHDRTarget());
             if (auto* gb = deferredPipeline.GetGBuffer()) addTarget("albedo", gb->GetAlbedo());
+            // 共享的前帧 HDR 辐射度（DDGI 探针 / SSGI 入射辐射度的共同输入）：
+            // 它是 GI 源吃进去的东西，出问题时第一个要看的中间量
+            addTarget("radiance", deferredPipeline.GetRadianceHistory().GetTexture());
             const auto& providers = deferredPipeline.GetGIProviders();
             for (size_t i = 0; i < providers.size(); ++i) {
                 auto* p = providers[i].get();
