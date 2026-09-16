@@ -60,20 +60,41 @@ enum class GISourceId : u8 {
 - **阴影不进 `GISourceId`**。阴影是**可见性（乘法项）**而非能量（加法项），
   没有频段、没有「距离让位」语义，用独立的 `ShadowChannel{None, Raster, RT}` 表达。
 
-### 2.2 频段
+### 2.2 源分类（谓词，不是「频段」）
 
 ```cpp
-enum class GIBand : u8 { Low = 0, Mid = 1, High = 2 };
-GIBand GIBandOf(GISourceId id);
+inline bool IsWorldSpaceSource(GISourceId);   // 环境（世界空间）：IBL · Lightmap · DDGI
+inline bool IsScreenSpaceSource(GISourceId);  // 屏幕空间/单次光栅：SSGI · SSR · SSAO · RSM · GTAO
+inline bool IsRayTracingSource(GISourceId);   // 光追：RTGI · RTReflection · RTAO
+inline const char* GISourceClassName(GISourceId);   // 面板标签，由上述三谓词推导
 ```
 
-频段**不写进层描述**，而是由 id 推导——避免「同一算法被填成不同频段」的不一致。
+三个谓词**互斥且完备**（对 11 个源构成一个无歧义的划分：3 + 5 + 3 = 11），
+`GISourceClassName` 由它们推导，保证「名字与语义同源」。
 
-> 注：`GIBandOf` 曾有一处缺陷——`RTGI / RTReflection / RTAO` 与 `default:` 共用同一条
-> fallthrough，导致 `GIBand::High` **永不可达**，06.GILab 的面板把光追源显示成「中频」
-> （`GIBandName(GIBandOf(id))`，`06.GILab.cpp:1049-1050`）。
-> 已在 **P0/D2 修复**为显式 `return GIBand::High`，并在 `Tests/TestGITypes.cpp` 中补了
-> 「`High` 可达」的回归断言（详见 §9.1 第 1 行）。
+> **⚠️ 为什么删掉了原来的 `GIBand {Low, Mid, High}`（P0·REDUNDANCY 期间的结论）**
+>
+> 该枚举显示为「低频 / 中频 / 高频」，但它实际表达的不是空间频段，而且**一个枚举混了
+> 两个正交维度**：
+>
+> | 分界 | 实际区别 | 维度 |
+> |---|---|---|
+> | `Low` ↔ `Mid` | 世界空间大范围（环境图 / 3 m 探针网格）vs 屏幕空间像素级 | **尺度** |
+> | `Mid` ↔ `High` | 屏幕空间近似 vs 光追精确 | **精度** |
+>
+> **反证**：`RTGI` 的输出是 **1/4 分辨率**，其**空间分辨率低于**全分辨率 `SSGI`，
+> 却被标为「高**频**」。可见 `High` 表达的是**精度高**，不是空间频率高。
+>
+> **直接后果**：`GIBandOf(SSGI)=Mid` 而 `GIBandOf(RTGI)=High`——二者估的是
+> **同一个物理量**（间接漫反射），却分属不同"频段"。这也使该枚举**无法充当 P5 的频率边界**。
+>
+> 它当时的全部实际用途只有**面板上显示一个标签**（`GIBandName(GIBandOf(id))`），
+> 而 `IGIProvider::GetBand()` 是**零调用点的死接口**（实测全仓无任何调用）。
+> 故连同 `GetBand()` 一并删除，改为上述谓词。
+>
+> **对 P5（频率分离）的影响**：不能拿「源分类」当频率边界做 `base + detail`——
+> 真正的空间频率差只有一处：**DDGI 的探针网格尺度（`cellSize` 3 m）vs 屏幕空间/光追的
+> 像素尺度**。故 P5 的落点应为「低频基底 = DDGI，高频残差 = SSGI/RTGI 去其网格尺度均值」。
 
 ### 2.3 层描述与层栈
 
@@ -159,6 +180,13 @@ float SourceWeight(GISourceSlot s, float confEdge, float camDist) {
 > RSM 光源视锥覆盖、RTGI SPP/时域收敛度）**均未落地**——`GIChannelBlendParams` UBO 里
 > 根本没有 confidence 字段。当前实际只有「屏幕边缘可见性」一条 + 可选的相机距离让位。
 > 距离衰减是**近似**而非物理判据：屏幕内清晰可见的远处物体，屏幕空间 GI 依然可信。
+>
+> ⚠️ **`falloffDistance` 不省性能（重要纠正）**：实测它只在两处被消费——
+> `DeferredLighting.frag.slang:110`（合成时缩放权重）与帧图填 UBO
+> （`DeferredPipeline_FrameGraph.cpp:685,694`）。**它不改变任何 pass 是否执行**：
+> 源照旧整幅、每帧跑完，只是合成时贡献被压小。
+> 故本节的「距离让位」是**纯艺术/合成控制，不具备性能意义**——
+> 早期文档把它写成「性能/艺术控制」，性能那半是错的，会误导优化方向。
 
 ### 3.3 频率分离（设计目标，未实现）
 
@@ -188,6 +216,58 @@ Medium/High 档默认同时启用 SSGI+DDGI，Ultra 档启用 RTGI+DDGI，
 白炉测试**抓不到它**——`SampleDiffuseSource` 首行 `if (furnace) return float3(1,1,1)`
 把源真值短路了：白炉验证的是**归一化数学**，不是源量纲。
 
+### 3.5 执行模型：每帧成本结构
+
+**执行单位是「源」。** 源分类（§2.2 的三个谓词）既不参与合成（§3.1），也不参与执行决策——
+它只用于面板标签与配置诊断。
+
+| 情况 | 成本 |
+|---|---|
+| 层栈里**未启用**的源 | **零**——帧图有 6 处 `NeedsPass` 门控（`DeferredPipeline_FrameGraph.cpp:318/337/357/382/429/585`），pass 根本不注册 |
+| 层栈里**已启用**的源 | **每帧整幅执行**，**没有任何**分区 / 分块 / 距离剔除 |
+
+各源每帧的实测量：
+
+| 源 | pass 形态 | 规模 |
+|---|---|---|
+| IBL | 无 pass（烘焙） | **仅脏时重建**——唯一非每帧的源 |
+| DDGI | compute | **256 探针**（8×4×8）× `numSamples` 次单步采样 |
+| SSGI | 全屏 offscreen | 全屏或**半分辨率** × 16–32 采样 |
+| SSR | 全屏 offscreen | 全屏或半分辨率，Hi-Z march |
+| SSAO / GTAO | 全屏 offscreen | 全屏或半分辨率（**同一 pass 的两种模式**） |
+| RSM | 光源视锥光栅化 | **整个场景**从光源视角再画一遍 |
+| RTGI | RT dispatch | **1/4 分辨率** |
+| RT 反射 / RTAO / RT 阴影 | RT dispatch | 各自 1/2 ~ 全分辨率 |
+| `AS_Build` | TLAS 重建 | **整个场景每帧重建**（只要开了任一 RT 源） |
+
+```
+每帧 GI 成本 ≈ Σ(所有启用的源) + AS_Build + Lighting 的逐像素采样
+```
+
+**线性随启用源数增长，没有亚线性项。**
+
+与主流引擎的结构差异值得记住：
+
+| | 组合发生在 | 每帧需要跑几套 |
+|---|---|---|
+| UE Lumen | 一个估计器**内部**，逐射线续接 | **1 套追踪**同时服务 GI + 反射 |
+| CryEngine SVOGI | 一个体素结构 | **1 次体素化**同时服务 GI + 大尺度 AO(+specular) |
+| **HugEngine** | **合成端**混合 N 个独立缓冲 | **N 个源各跑一遍** |
+
+**根因**：合成端做加权平均，就要求每个源都产出**完整的通道缓冲**（合成时要逐像素取它的值）。
+Lumen 不需要「SSGI 缓冲」与「DDGI 缓冲」——它只有一条射线。
+**本架构的组合方式决定了它必须付 N 份全量成本。**
+
+由此可识别的三类浪费（§10 有对应任务）：
+
+1. **严格冗余**：`SSAO + GTAO` 同时启用——二者共用**同一 pass、同一输出纹理**，
+   归一化平均会把同一纹理值平均回它自己：**零增益、纯浪费**。
+2. **重复估计**：`SSGI + RTGI`、`SSR + RTReflection`、`SSAO + RTAO`——同为逐屏幕像素的
+   同一物理量估计，成本翻倍且归一化会互相稀释。
+   *注：这是 S1.5 的**有意设计**（「两类源同时参与」），故只能提示、不宜强制剔除。*
+3. **相关性**：`RTGI + DDGI`——RTGI 的 miss 回退即 DDGI（§9.2-I），二者非独立估计，
+   归一化平均失去无偏性。
+
 ---
 
 ## 4. 统一抽象：`IGIProvider`
@@ -201,7 +281,7 @@ Medium/High 档默认同时启用 SSGI+DDGI，Ultra 档启用 RTGI+DDGI，
 
 | 分组 | 方法 |
 |---|---|
-| **身份** | `GetSourceId()` / `GetBand()`（默认由 `GIBandOf` 推导）/ `GetName()` / `Handles(id)` |
+| **身份** | `GetSourceId()` / `GetName()` / `Handles(id)`（源分类由 `IsWorldSpace/ScreenSpace/RayTracingSource` 三谓词给出，见 §2.2） |
 | **调度** | `GetPassKind()`（`Offscreen` / `Compute` / `Custom`）、`HasTextureOutput()`、`IsValid()`、`NeedsPass(stack)`、`SyncToStack(stack)` |
 | **通道输出** | `GetDiffuse/Specular/AOOutput()` + `GetFinalDiffuse/Specular/AOOutput()`（后者含降噪/半分辨率选择） |
 | **附属 pass** | `GetAuxPassCount/Name/Output/Input()` + `PreBindAux()` / `RenderAux()` |
@@ -309,7 +389,8 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 | **S1 / S1.5 / S2 / S3** | 光追归入 Deferred / 两类源同时参与 / 管线维度收敛 / 删除 `HybridRTPipeline` | ✅ 完成 |
 | **PT** | 参考渲染器定位 + 与 Deferred 共享加速结构 | ✅ 完成 |
 | **第 1 批遗留** | M4.4 RSM VPL 25→16（Poisson 盘 + 能量常数按 1/N 重标定）· M4.5（经核查**不适用**）· 06 面板候选由注册表派生 · 文档同步 | ✅ 完成 |
-| **P0 / D2** | GI 数据模型下沉为 RHI-free `GI/GITypes.h`（断开旧 `GIConfig.h → LightingPass.h → RHI` 传导链，并移除 `GIConfig.h`/`GIRegistry.h` 两个转发头）；`Tests/TestGITypes.cpp` 36 用例 / 427 断言 | ✅ 完成 |
+| **P0 / D2** | GI 数据模型下沉为 RHI-free `GI/GITypes.h`（断开旧 `GIConfig.h → LightingPass.h → RHI` 传导链，并移除 `GIConfig.h`/`GIRegistry.h` 两个转发头） | ✅ 完成 |
+| **P0 / REDUNDANCY** | 冗余源诊断（严格冗余 / 重复估计 / 相关估计 / 成本提示）+ 可证等价去重；删除语义混淆的 `GIBand` 与死接口 `GetBand()`，改为三个分类谓词；06.GILab 诊断面板 | ✅ 完成 |
 
 ### 8.2 三个关键指标（实测）
 
@@ -338,7 +419,7 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 
 | # | 项 | 文档原述 | 代码实际 |
 |---|---|---|---|
-| 1 | `GIBandOf` 频段映射 | 「RT*→High」 | 实现曾与文档不符：`High` **永不可达**（RT* 与 `default` 共用 fallthrough → 全部 `Mid`）。**已在 P0/D2 修复为显式 `High`，并加回归断言** |
+| 1 | ~~`GIBandOf` 频段映射~~ | 「RT*→High」 | 曾有两层问题：先是 `High` **永不可达**（RT* 与 `default` 共用 fallthrough → 全部 `Mid`，已在 P0/D2 修复）；随后发现**该枚举本身语义有误**——它混了「尺度」与「精度」两个正交维度，且 SSGI=Mid / RTGI=High 把同一物理量标成不同"频段"。**已整体删除**，改为 §2.2 的三个分类谓词 |
 | 2 | 四档档位内容 | Low = 仅 DDGI | 每档均含 IBL/SSAO/光栅阴影基线；Low = IBL+SSGI 且 `halfRes=true` |
 | 3 | 降级行为 | 「RTGI→SSGI 同频段替代」 | 实际只做**移除 + 通道兜底**（diffuse/specular→IBL，ao→SSAO），无同频段替换 |
 | 4 | 置信度体系 | 5 源各自的置信度依据表 | UBO 无 confidence 字段；实际只有「屏幕边缘 5% 降权」一条 |
@@ -374,13 +455,20 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 | 顺位 | 任务 | 规模/风险 | 理由 |
 |:---:|---|---|---|
 | **P0** | ✅ **D2 · 抽 `GITypes.h` + 层栈/降级 CPU 单测**（**已完成**） | 小 / 低 | 守的是**已经咬过两次**的不变量 1；同时把 RHI 依赖从 GI 数据模型中剥离 |
-| **P1** | **P5 · 频率分离**（Wave 3） | 大 / **高** | 合成正确性主题的收尾；前提（Wave 0 判据 + Wave 1 按源合成 + Wave 2 Provider）已全部就绪 |
-| **P2** | **B3 · RSM VPL halfRes** | 小 / 低 | 与 P1 并行 |
-| **P2** | **D1 · 偶发崩溃根因获证** | 未知 / 中 | 与 P1 并行；根因未证意味着已修项可能只是其中一个实例 |
-| **P3** | **§9.2 的 A/B/C 三项正确性缺陷** | 中 / 中 | 直接影响画面正确性，建议插在 P5 之前或紧随 |
+| **P0** | **REDUNDANCY · 冗余源诊断 + 可证等价去重**（**已完成**） | 小 / 低 | 同时命中**性能**与**正确性**（§3.5）；静态可测，复用 P0 的单测设施 |
+| **P1** | **§9.2 的 A/B/C 三项正确性缺陷** | 中 / 中 | **A（量纲统一）是 P5 的硬前置**（§3.4）：频率分离做 `base + detail` 直接相加，量纲不一致会立刻表现为过亮/过暗 |
+| **P2** | **P5 · 频率分离**（Wave 3） | 大 / **高** | 合成正确性主题的收尾；前提（Wave 0 判据 + Wave 1 按源合成 + Wave 2 Provider）已就绪，但需先完成 P1 |
+| **P2** | **B3 · RSM VPL halfRes** | 小 / 低 | 与 P2 并行 |
+| **P2** | **D1 · 偶发崩溃根因获证** | 未知 / 中 | 并行；根因未证意味着已修项可能只是其中一个实例 |
+| **P3** | **AMORTIZE · 时间维分摊**（DDGI 每 N 帧更新 + 时域复用） | 中 / 低 | DDGI 已有 `blendAlpha` 历史混合，天然适配；把 256 探针的全量更新摊到多帧 |
+| **P3** | **CULL · pass 级空间剔除**（tile / scissor） | 中 / 中 | 目前 `GPUCulling` **只服务 GBuffer 几何**，不服务 GI；GI pass 全是整幅执行（§3.5） |
 | **P4** | **B4 / M5.2-A · DDGI 光追 march** | 中 / 中 | 只提升单一源质量；DDGI 低频兜底已由 M5.3 修正，紧迫性下降 |
 | **P5** | **P6 · ReSTIR GI 统一估计器** | 大 / 高 | 长期 |
 | **P5** | **Lightmap 源落地** | 中 / 低 | 按需（PC 实时路线可缓） |
+
+> **顺位调整说明**：A/B/C 由原 P3 提前到 **P1**（因为它含 P5 的硬前置 A）；
+> 新增三项——`REDUNDANCY`（P0，本次实现）、`AMORTIZE` 与 `CULL`（P3，性能）；
+> 其余任务 ID 保持不变，仅顺位变化。
 
 ### 10.1 各项详情
 
@@ -390,20 +478,42 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
   `HugEngineAI`(PUBLIC) 已传递引入 `HugEngineRender`。故本次的价值是
   **分层解耦**（断开旧 `GIConfig.h → LightingPass.h → RHI/RHI.h` 这条传导链）
   与**显式依赖**（Tests 显式声明 `Engine/Render` 包含路径，不再依赖传递隐式可得）
-- 覆盖目标：频段映射（含 `High` 可达的回归断言）、能力位与可用性、
+- 覆盖目标：源分类谓词的**互斥性与完备性**（3+5+3=11 无重叠无遗漏）、能力位与可用性、
   `GIChannelStack` 的增删改语义与容量上限、`GIConfig` 门控谓词**严格由层栈派生**（防影子开关）、
   四档预设的基线与精度、`GIRegistry::Degrade` 的逐源裁剪与每通道兜底、
   shader UBO 镜像结构的布局不漂移
 - 边界说明：测的是 **C++ 侧配置/注册表/降级**逻辑，**不是 shader 里的合成数学**——对 P5 的保护有限
 
-**P1 · P5 频率分离**（内部顺序，**不要跳过第 0 步**）
+**P0 · REDUNDANCY 冗余源诊断 + 可证等价去重** —— ✅ **已完成**
+- 位置：`Engine/Render/GI/GITypes.h`（`GIRegistry`）+ `Tests/TestGITypes.cpp` + 06.GILab 面板
+- 动机（§3.5）：本架构要求每个启用的源都**整幅、每帧**产出完整通道缓冲，
+  于是"启用了一个没有增益的源"等于**白付一份全量成本**。当前层栈**允许**这类配置且无任何提示。
+- 检测三类问题（**只诊断，不强制改渲染行为**）：
+  | 类别 | 判定 | 处置 |
+  |---|---|---|
+  | **严格冗余** | `SSAO + GTAO` 同通道——共用同一 pass、同一输出纹理 | 可**安全去重**：归一化平均把同一纹理值平均回自身，去重后逐像素等价 |
+  | **重复估计** | `SSGI+RTGI` / `SSR+RTReflection` / `SSAO+RTAO`——同一物理量的多个逐屏幕像素估计 | **仅提示**：这是 S1.5 的有意设计，强制剔除会回退该决策 |
+  | **相关性** | `RTGI + DDGI`——RTGI 的 miss 回退即 DDGI（§9.2-I） | **仅提示**：归一化失去无偏性 |
+- 新增 API：`GIRegistry::Analyze()` / `IsStrictlyRedundant()` / `RTCounterpartOf()` /
+  `IsEffectiveSource()` / `DeduplicateRedundant()`
+- **顺带清理**：删除语义混淆的 `GIBand` 枚举与零调用的死接口 `IGIProvider::GetBand()`，
+  改为 §2.2 的三个分类谓词
+- 验收：诊断结果有单测覆盖；去重前后**逐像素等价**（配置层等价断言）；
+  06.GILab 面板显示诊断行并带一键去重按钮
+- 风险：低——纯静态分析，改动限于配置层
+
+**P2 · P5 频率分离**（内部顺序，**不要跳过第 0 步**）
 ```
-0. LowPass 选型小实验（降采样 vs SH 低阶；保留 Normalized 作对照）
+0. LowPass 选型小实验 —— 优先考虑「用估计器自身的核」（DDGI 的 SH 低阶 / march 半径），
+   而不是外挂高斯模糊 pass：UE 的 SDF 锥追踪、CryEngine 的体素锥本身就是低通，
+   频段差异应是估计器的属性，不是合成端的算子（可显著降低本项风险）
 1. GIBlendMode 增 FrequencySplit
 2. 低频基底 + 高频残差（detail = c - LowPass(c)，gi = base + detail）
+   落点建议：只对「探针尺度 vs 像素尺度」这一对做（DDGI vs SSGI/RTGI），不要每源都做
 3. 过渡与时序稳定（权重/层启用变化做时域平滑，避免模式切换跳变）
 4. 面板三模式 A/B（Additive 对照 / Normalized / FrequencySplit）
 ```
+- **硬前置**：P1 的缺陷 A（源量纲统一）——否则 `base + detail` 直接相加会过亮/过暗
 - 验收：FrequencySplit 下**白炉仍守恒**；Sponza 对比**无过亮、细节保留优于纯归一化**；切换无跳变
 - 风险：高——高频提取本身会引入噪声/振铃
 
@@ -412,8 +522,16 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 **P2 · D1 崩溃根因** — 长跑 soak + `HE_TRACE_FB=1`（`delay=0` 即同帧销毁的直接指标）；
 现状：符号化落在 `VulkanTexture::GetImageView()` 野指针，最可疑根因（framebuffer 被同帧销毁）已修
 
-**P3 · §9.2 A/B/C** — 量纲统一（约定「所有 diffuse 源返回已乘接收面 albedo 的间接出射辐射度」）、
-SSR 投影矩阵正/逆分离、SSR 有效性协议落地
+**P1 · §9.2 A/B/C** — 量纲统一（约定「所有 diffuse 源返回已乘接收面 albedo 的间接出射辐射度」）、
+SSR 投影矩阵正/逆分离、SSR 有效性协议落地。**A 是 P5 的硬前置**（§3.4）。
+
+**P3 · AMORTIZE 时间维分摊** — DDGI 探针更新（256 探针 × numSamples）由「每帧全量」改为
+「每 N 帧 + 时域复用」。DDGI 已有 `blendAlpha` 历史混合，天生适配；需实测确认收敛速度可接受。
+*（参考：UE 的 Surface Cache 明确是 "amortized over multiple frames"）*
+
+**P3 · CULL pass 级空间剔除** — 给 GI pass 加 tile / scissor 剔除（视锥外、被遮挡的 tile 不 dispatch）。
+现状：`GPUCulling` **只服务 GBuffer 几何**，GI pass 全是整幅执行（§3.5）。
+注意：这**不能**用逐像素距离判断代替（距离是视角相关的，会引入接缝爬行，见 §3.5 与 §3.2）。
 
 **P4 · B4 / M5.2-A DDGI 光追 march** — 方案 A（硬件光追 march）+ 按 `supportsRayTracing` 自动选择
 
@@ -497,7 +615,8 @@ cmake --build Build --config Debug --target 06.GILab -j 8
 
 | Phase | 内容 | 状态 | 提交 |
 |---|---|---|---|
-| P1 | 数据模型：`GIConfig` 层栈 + `GIBand` / `weight` / `falloffDistance` | ✅ | `105911b` |
+| P1 | 数据模型：`GIConfig` 层栈 + ~~`GIBand`~~ / `weight` / `falloffDistance` | ✅ | `105911b` |
+| ↑ | *（`GIBand` 后于 P0·REDUNDANCY 删除——语义混淆了「尺度」与「精度」两个维度，详见 §2.2）* | | |
 | P2 | 合成改归一化（保留 Additive 对照）+ 参数经 UBO 传递 | ✅ | `105911b` |
 | P3 | 4 个单值枚举 → `GIChannelStack`；帧图门控与降级逐源化 | ✅ | `105911b` |
 | S1 / S1.5 | 光追归入 Deferred（作为 GI 源）/ 两类源同时参与 | ✅ | `90649ba` `aac5690` `5c2b84b` |
