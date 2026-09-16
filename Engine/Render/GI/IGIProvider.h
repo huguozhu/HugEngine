@@ -53,7 +53,6 @@ public:
     // ── 身份：这个 Provider 代表哪个源 ──
     /// 当前生效的源标识（同 pass 多模式时返回「当前模式」对应的源）
     [[nodiscard]] virtual GISourceId GetSourceId() const = 0;
-    [[nodiscard]] virtual GIBand     GetBand() const { return GIBandOf(GetSourceId()); }
     [[nodiscard]] virtual const char* GetName() const { return GISourceName(GetSourceId()); }
 
     /// 该 Provider 还能代表哪些源（用于「同 pass 多模式」：如 SSAO / GTAO 共用一个 pass）

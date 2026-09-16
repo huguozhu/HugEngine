@@ -1046,7 +1046,7 @@ int main() {
                     }
                     ImGui::SameLine();
                     ImGui::TextColored(avail ? colOk : colBad, "[%s]",
-                        avail ? render::GIBandName(render::GIBandOf(id)) : "不可用");
+                        avail ? render::GISourceClassName(id) : "不可用");
                     if (active) {
                         ImGui::SameLine();
                         ImGui::SetNextItemWidth(80.0f);
@@ -1214,6 +1214,73 @@ int main() {
                 ImGui::SameLine();
                 ImGui::TextColored(shOk ? colOk : colBad, shOk ? "[可用]" : "[不可用]");
                 ImGui::Unindent(12.0f);
+            }
+
+            // ---- 配置诊断（P0 · REDUNDANCY）----
+            // 本架构要求每个已启用的源都**整幅、每帧**产出完整通道缓冲（文档 §3.5），
+            // 故「启用一个没有增益的源」= 白付一份全量成本。这里把这类配置显式列出来。
+            // 只做提示与可证等价的去重，不改变渲染语义。
+            {
+                const std::vector<render::GIDiagnostic> diags = render::GIRegistry::Analyze(gc);
+
+                // 诊断配色（本面板此前只定义了 colOk / colBad）
+                const ImVec4 colWarn = ImVec4(1.0f, 0.75f, 0.25f, 1.0f);   // 提示：可优化但不影响正确性
+                const ImVec4 colDim  = ImVec4(0.65f, 0.65f, 0.65f, 1.0f);  // 信息：性能提示
+
+                // 先统计各类别次数（连按钮的可见性判断也要用，故放在 if/else 之外）
+                u32 nRedundant = 0, nDupEst = 0, nCorr = 0, nCost = 0;
+                for (const auto& e : diags) {
+                    switch (e.kind) {
+                    case render::GIDiagnosticKind::RedundantDuplicate:  nRedundant++; break;
+                    case render::GIDiagnosticKind::DuplicateEstimate:   nDupEst++;    break;
+                    case render::GIDiagnosticKind::CorrelatedEstimates: nCorr++;      break;
+                    case render::GIDiagnosticKind::MultiSourceCost:     nCost++;      break;
+                    default: break;
+                    }
+                }
+
+                ImGui::SeparatorText("配置诊断");
+                if (diags.empty()) {
+                    ImGui::TextColored(colOk, "无问题：当前层栈无冗余或重复估计");
+                } else {
+                    if (nRedundant > 0) {
+                        ImGui::TextColored(colBad, "严格冗余 ×%u（零增益，可安全去重）", nRedundant);
+                    }
+                    if (nDupEst > 0) {
+                        ImGui::TextColored(colWarn, "重复估计 ×%u（成本翻倍、归一化互相稀释）", nDupEst);
+                    }
+                    if (nCorr > 0) {
+                        ImGui::TextColored(colWarn, "相关估计 ×%u（非独立，归一化失去无偏性）", nCorr);
+                    }
+                    if (nCost > 0) {
+                        ImGui::TextColored(colDim, "多源通道 ×%u（每源各跑一遍整幅 pass）", nCost);
+                    }
+
+                    ImGui::Indent(12.0f);
+                    for (const auto& e : diags) {
+                        const bool bad  = (e.kind == render::GIDiagnosticKind::RedundantDuplicate);
+                        const bool warn = (e.kind == render::GIDiagnosticKind::DuplicateEstimate ||
+                                           e.kind == render::GIDiagnosticKind::CorrelatedEstimates);
+                        const ImVec4 col = bad ? colBad : (warn ? colWarn : colDim);
+                        ImGui::TextColored(col, "[%s] %s: %s%s%s",
+                            render::GIDiagnosticKindName(e.kind),
+                            render::GIChannelName(e.channel),
+                            e.a != render::GISourceId::None ? render::GISourceName(e.a) : "",
+                            e.b != render::GISourceId::None ? " + " : "",
+                            e.b != render::GISourceId::None ? render::GISourceName(e.b) : "");
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", e.detail);
+                    }
+                    ImGui::Unindent(12.0f);
+                }
+
+                // 只在确有严格冗余时才提供一键去重
+                if (nRedundant > 0) {
+                    if (ImGui::Button("去除严格冗余（保留 GTAO）")) {
+                        render::GIRegistry::DeduplicateRedundant(gc);
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextColored(colDim, "可证与去重前逐像素等价");
+                }
             }
         }
         ImGui::End();

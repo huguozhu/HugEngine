@@ -2,7 +2,7 @@
 // Tests/TestGITypes.cpp — GI 数据模型与降级规则单元测试（P0 / D2）
 //
 // 覆盖范围（**纯 CPU、无 RHI**）：
-//   1. 频段映射 GIBandOf 的完整性（含「High 频段可达」的回归断言）
+//   1. 源分类谓词（世界空间 / 屏幕空间 / 光追）的互斥性与完备性
 //   2. 能力位 ToPipelineCap / IsRayTracingSource
 //   3. 层栈 GIChannelStack 的增删改查与容量上限
 //   4. GIConfig 门控谓词**严格由层栈派生**（防止再引入「影子开关」）
@@ -26,7 +26,7 @@ using namespace he;
 using namespace he::render;
 
 // ============================================================
-// doctest 可读化：断言失败时打印「源名 / 频段名」而非裸枚举值
+// doctest 可读化：断言失败时打印「源名」而非裸枚举值
 //
 // 注意：没有这层支持时，doctest 会尝试用 filldata<T[N]> 的数组分支去
 // 字符串化 C 数组（例如与字符串字面量 "None" 比较时），那会走
@@ -38,13 +38,6 @@ template <>
 struct StringMaker<he::render::GISourceId> {
     static String convert(const he::render::GISourceId& id) {
         return String(he::render::GISourceName(id));
-    }
-};
-
-template <>
-struct StringMaker<he::render::GIBand> {
-    static String convert(const he::render::GIBand& b) {
-        return String(he::render::GIBandName(b));
     }
 };
 
@@ -83,57 +76,91 @@ int ChannelOf(GISourceId id) {
 } // namespace
 
 // ============================================================
-// 1. 频段映射
+// 1. 源分类（谓词，而非「频段」枚举）
+//
+// 历史：这里原有一个 `GIBand { Low, Mid, High }`（显示为「低频/中频/高频」），
+// 但它的两条分界线管的是**两个正交维度**——Low↔Mid 是【尺度】（世界空间大范围
+// vs 屏幕空间像素级），Mid↔High 是【精度】（屏幕空间近似 vs 光追精确）。
+// 反证：RTGI 输出 1/4 分辨率，空间分辨率低于全分辨率 SSGI，却被标成「高频」。
+// 结果是 `SSGI=Mid` 而 `RTGI=High`——同一物理量的两面被标成不同"频段"。
+// 故该枚举已删除，改由三个**互斥且完备**的谓词表达。
 // ============================================================
-TEST_CASE("GIBandOf：低频/中频/高频映射正确") {
-    // 低频：远场 / 环境
-    CHECK(GIBandOf(GISourceId::IBL)      == GIBand::Low);
-    CHECK(GIBandOf(GISourceId::Lightmap) == GIBand::Low);
-    CHECK(GIBandOf(GISourceId::DDGI)     == GIBand::Low);
-
-    // 中频：近处细节
-    CHECK(GIBandOf(GISourceId::SSGI) == GIBand::Mid);
-    CHECK(GIBandOf(GISourceId::SSR)  == GIBand::Mid);
-    CHECK(GIBandOf(GISourceId::SSAO) == GIBand::Mid);
-    CHECK(GIBandOf(GISourceId::RSM)  == GIBand::Mid);
-    CHECK(GIBandOf(GISourceId::GTAO) == GIBand::Mid);
-
-    // 高频：光追三源（**回归断言**）
-    // 此前的实现里 RTGI/RTReflection/RTAO 与 default 共用同一条 fallthrough，
-    // 导致 GIBand::High 成为不可达枚举值、面板把光追源标成「中频」。
-    CHECK(GIBandOf(GISourceId::RTGI)         == GIBand::High);
-    CHECK(GIBandOf(GISourceId::RTReflection) == GIBand::High);
-    CHECK(GIBandOf(GISourceId::RTAO)         == GIBand::High);
-}
-
-TEST_CASE("GIBandOf：GIBand::High 确实可达（防 fallthrough 缺陷复发）") {
-    bool highReachable = false;
+TEST_CASE("源分类谓词：三个类别互斥且完备（对 11 个源构成划分）") {
+    u32 nWorld = 0, nScreen = 0, nRT = 0;
     for (GISourceId id : kAllSources) {
-        if (GIBandOf(id) == GIBand::High) { highReachable = true; break; }
+        const int hits = (IsWorldSpaceSource(id)  ? 1 : 0)
+                       + (IsScreenSpaceSource(id) ? 1 : 0)
+                       + (IsRayTracingSource(id)  ? 1 : 0);
+        CHECK(hits == 1);                    // 恰好属于一类
+        if (IsWorldSpaceSource(id))  nWorld++;
+        if (IsScreenSpaceSource(id)) nScreen++;
+        if (IsRayTracingSource(id))  nRT++;
     }
-    CHECK(highReachable);
+    CHECK(nWorld  == 3u);                    // IBL / Lightmap / DDGI
+    CHECK(nScreen == 5u);                    // SSGI / SSR / SSAO / RSM / GTAO
+    CHECK(nRT     == 3u);                    // RTGI / RTReflection / RTAO
+    CHECK(nWorld + nScreen + nRT == 11u);    // 覆盖全部（无遗漏、无重叠）
 }
 
-TEST_CASE("频段与源名称：每个已知源都有非空名称") {
+TEST_CASE("源分类谓词：各类别成员正确，None 不属于任何类别") {
+    // 世界空间 / 预计算环境
+    CHECK(IsWorldSpaceSource(GISourceId::IBL));
+    CHECK(IsWorldSpaceSource(GISourceId::Lightmap));
+    CHECK(IsWorldSpaceSource(GISourceId::DDGI));
+    // 屏幕空间 / 单次反弹光栅
+    CHECK(IsScreenSpaceSource(GISourceId::SSGI));
+    CHECK(IsScreenSpaceSource(GISourceId::SSR));
+    CHECK(IsScreenSpaceSource(GISourceId::SSAO));
+    CHECK(IsScreenSpaceSource(GISourceId::RSM));
+    CHECK(IsScreenSpaceSource(GISourceId::GTAO));
+    // 硬件光追
+    CHECK(IsRayTracingSource(GISourceId::RTGI));
+    CHECK(IsRayTracingSource(GISourceId::RTReflection));
+    CHECK(IsRayTracingSource(GISourceId::RTAO));
+
+    CHECK_FALSE(IsWorldSpaceSource(GISourceId::None));
+    CHECK_FALSE(IsScreenSpaceSource(GISourceId::None));
+    CHECK_FALSE(IsRayTracingSource(GISourceId::None));
+
+    // 交叉不成立（类别互斥）
+    CHECK_FALSE(IsScreenSpaceSource(GISourceId::IBL));
+    CHECK_FALSE(IsWorldSpaceSource(GISourceId::SSGI));
+    CHECK_FALSE(IsScreenSpaceSource(GISourceId::RTGI));
+    CHECK_FALSE(IsRayTracingSource(GISourceId::GTAO));
+}
+
+TEST_CASE("源分类：SS 源与其光追对应源属不同类别（删除 GIBand 的核心动因）") {
+    // 二者估**同一个物理量**（间接漫反射），却不在同一类别——
+    // 说明原枚举表达的是「估计器类别」而非「空间频段」。
+    CHECK(IsScreenSpaceSource(GISourceId::SSGI));
+    CHECK(IsRayTracingSource(GISourceId::RTGI));
+    CHECK_FALSE(IsScreenSpaceSource(GISourceId::RTGI));
+    CHECK_FALSE(IsRayTracingSource(GISourceId::SSGI));
+    CHECK(GIRegistry::RTCounterpartOf(GISourceId::SSGI) == GISourceId::RTGI);
+}
+
+TEST_CASE("源名称与类别名称：每个已知源都有非空名称") {
     // 说明：断言一律先归约为 bool 再 CHECK —— 直接与字符串字面量比较会让
     // doctest 去字符串化 const char[N]（见文件顶部注释）。
     for (GISourceId id : kAllSources) {
         const char* name = GISourceName(id);
-        const bool hasName   = (name != nullptr && name[0] != '\0');
-        const bool notNone   = (name != nullptr && StringView(name) != StringView("None"));
+        const char* cls  = GISourceClassName(id);
+        const bool hasName  = (name != nullptr && name[0] != '\0');
+        const bool notNone  = (name != nullptr && StringView(name) != StringView("None"));
+        const bool hasClass = (cls != nullptr && cls[0] != '\0'
+                               && StringView(cls) != StringView("?"));
         CHECK(hasName);
         CHECK(notNone);
+        CHECK(hasClass);
     }
 
     const bool noneIsNone =
         (StringView(GISourceName(GISourceId::None)) == StringView("None"));
     CHECK(noneIsNone);
-
-    const bool bandNamesOk =
-        (StringView(GIBandName(GIBand::Low))  != StringView("?")) &&
-        (StringView(GIBandName(GIBand::Mid))  != StringView("?")) &&
-        (StringView(GIBandName(GIBand::High)) != StringView("?"));
-    CHECK(bandNamesOk);
+    // None 无类别（返回 "?"）
+    const bool noneHasNoClass =
+        (StringView(GISourceClassName(GISourceId::None)) == StringView("?"));
+    CHECK(noneHasNoClass);
 }
 
 // ============================================================
@@ -625,4 +652,250 @@ TEST_CASE("GIChannelBlendData::Add：weight<=0 忽略、容量上限生效") {
 
     b.Add(static_cast<u32>(GISourceId::GTAO), 1.0f);         // 超容量 → 忽略
     CHECK(b.count == GIChannelBlendData::kMaxSources);
+}
+
+// ============================================================
+// 8. 配置诊断与冗余去重（P0 · REDUNDANCY）
+//
+// 动机：本架构要求每个已启用的源都整幅、每帧产出完整通道缓冲，
+// 故「启用一个没有增益的源」= 白付一份全量成本。层栈当前允许这类配置且无提示。
+// ============================================================
+
+namespace {
+
+/// 统计某类诊断出现的次数
+u32 CountKind(const std::vector<GIDiagnostic>& d, GIDiagnosticKind k) {
+    u32 n = 0;
+    for (const GIDiagnostic& e : d) if (e.kind == k) n++;
+    return n;
+}
+
+/// 某类诊断是否针对指定源对（无序）
+bool HasDiag(const std::vector<GIDiagnostic>& d, GIDiagnosticKind k,
+             GISourceId x, GISourceId y) {
+    for (const GIDiagnostic& e : d) {
+        if (e.kind != k) continue;
+        if ((e.a == x && e.b == y) || (e.a == y && e.b == x)) return true;
+    }
+    return false;
+}
+
+/// 模拟 shader 的**归一化加权**合成（用于证明去重的逐像素等价性）。
+///
+/// 关键前提：AO 通道的合成分支对 SSAO 与 GTAO **都采样同一张 u_SSAO 纹理**，
+/// 故两者取到的「源值」是同一个 v。
+float NormalizedBlend(const GIChannelStack& st, float sourceValue) {
+    float num = 0.0f, den = 0.0f;
+    for (u32 i = 0; i < st.count; i++) {
+        const float w = st.sources[i].weight;
+        if (w <= 0.0f) continue;
+        num += sourceValue * w;
+        den += w;
+    }
+    return (den > 0.0f) ? (num / den) : 1.0f;   // 无源 → 不遮蔽
+}
+
+} // namespace
+
+TEST_CASE("GIRegistry::IsStrictlyRedundant：只对共用输出纹理的源对为真") {
+    CHECK(GIRegistry::IsStrictlyRedundant(GISourceId::SSAO, GISourceId::GTAO));
+    CHECK(GIRegistry::IsStrictlyRedundant(GISourceId::GTAO, GISourceId::SSAO));   // 对称
+
+    // 其余任意组合都不算严格冗余（它们各有独立 pass / 纹理）
+    for (GISourceId x : kAllSources) {
+        for (GISourceId y : kAllSources) {
+            const bool expect = (x == GISourceId::SSAO && y == GISourceId::GTAO) ||
+                                (x == GISourceId::GTAO && y == GISourceId::SSAO);
+            CHECK(GIRegistry::IsStrictlyRedundant(x, y) == expect);
+        }
+    }
+    CHECK_FALSE(GIRegistry::IsStrictlyRedundant(GISourceId::SSAO, GISourceId::SSAO));
+    CHECK_FALSE(GIRegistry::IsStrictlyRedundant(GISourceId::None, GISourceId::None));
+}
+
+TEST_CASE("GIRegistry::RTCounterpartOf：屏幕空间源 → 同一物理量的光追源") {
+    CHECK(GIRegistry::RTCounterpartOf(GISourceId::SSGI) == GISourceId::RTGI);
+    CHECK(GIRegistry::RTCounterpartOf(GISourceId::SSR)  == GISourceId::RTReflection);
+    CHECK(GIRegistry::RTCounterpartOf(GISourceId::SSAO) == GISourceId::RTAO);
+    CHECK(GIRegistry::RTCounterpartOf(GISourceId::GTAO) == GISourceId::RTAO);
+
+    // 无对应关系者 → None
+    CHECK(GIRegistry::RTCounterpartOf(GISourceId::IBL)  == GISourceId::None);
+    CHECK(GIRegistry::RTCounterpartOf(GISourceId::DDGI) == GISourceId::None);
+    CHECK(GIRegistry::RTCounterpartOf(GISourceId::RSM)  == GISourceId::None);
+    CHECK(GIRegistry::RTCounterpartOf(GISourceId::RTGI) == GISourceId::None);
+    CHECK(GIRegistry::RTCounterpartOf(GISourceId::None) == GISourceId::None);
+
+    // 二者属不同**估计器类别**（前者屏幕空间、后者光追），但估同一物理量——
+    // 这正是「重复估计」诊断的依据（原 GIBand 把它们标成不同"频段"，语义是错的）
+    CHECK(IsScreenSpaceSource(GISourceId::SSGI));
+    CHECK(IsRayTracingSource(GISourceId::RTGI));
+}
+
+TEST_CASE("GIRegistry::IsEffectiveSource：严格冗余组内 GTAO 优先") {
+    GIChannelStack st;
+    st.Set(GISourceId::SSAO, 1.0f);
+    CHECK(GIRegistry::IsEffectiveSource(st, GISourceId::SSAO));    // 只有 SSAO → 它生效
+
+    st.Set(GISourceId::GTAO, 1.0f);
+    CHECK_FALSE(GIRegistry::IsEffectiveSource(st, GISourceId::SSAO)); // 两者在场 → SSAO 让位
+    CHECK(GIRegistry::IsEffectiveSource(st, GISourceId::GTAO));
+
+    CHECK(GIRegistry::IsEffectiveSource(st, GISourceId::IBL));     // 无关源恒为生效
+}
+
+TEST_CASE("GIRegistry::Analyze：空配置不产生任何诊断") {
+    const std::vector<GIDiagnostic> d = GIRegistry::Analyze(GIConfig{});
+    CHECK(d.empty());
+}
+
+TEST_CASE("GIRegistry::Analyze：SSAO + GTAO → 判为严格冗余") {
+    GIConfig c;
+    c.ao.Set(GISourceId::SSAO, 1.0f);
+    c.ao.Set(GISourceId::GTAO, 1.0f);
+
+    const std::vector<GIDiagnostic> d = GIRegistry::Analyze(c);
+    CHECK(CountKind(d, GIDiagnosticKind::RedundantDuplicate) == 1u);
+    CHECK(HasDiag(d, GIDiagnosticKind::RedundantDuplicate,
+                  GISourceId::SSAO, GISourceId::GTAO));
+    CHECK(d[0].channel == GIChannelId::AO);
+}
+
+TEST_CASE("GIRegistry::Analyze：SSAO + GTAO + RTAO → 重复估计只报一条") {
+    GIConfig c;
+    c.ao.Set(GISourceId::SSAO, 1.0f);
+    c.ao.Set(GISourceId::GTAO, 1.0f);
+    c.ao.Set(GISourceId::RTAO, 1.0f);
+
+    const std::vector<GIDiagnostic> d = GIRegistry::Analyze(c);
+    // 严格冗余一条（SSAO↔GTAO）
+    CHECK(CountKind(d, GIDiagnosticKind::RedundantDuplicate) == 1u);
+    // 重复估计只报「实际生效」的那个（GTAO↔RTAO），不因 SSAO 也对应 RTAO 而报两条
+    CHECK(CountKind(d, GIDiagnosticKind::DuplicateEstimate) == 1u);
+    CHECK(HasDiag(d, GIDiagnosticKind::DuplicateEstimate,
+                  GISourceId::GTAO, GISourceId::RTAO));
+}
+
+TEST_CASE("GIRegistry::Analyze：SS 源与其光追对应源 → 判为重复估计") {
+    struct Case { GISourceId ss; GISourceId rt; GIChannelId ch; };
+    const Case cases[] = {
+        { GISourceId::SSGI, GISourceId::RTGI,         GIChannelId::Diffuse  },
+        { GISourceId::SSR,  GISourceId::RTReflection, GIChannelId::Specular },
+        { GISourceId::SSAO, GISourceId::RTAO,         GIChannelId::AO       },
+    };
+    for (const Case& cs : cases) {
+        GIConfig c;
+        GIChannelStack* st = (cs.ch == GIChannelId::Diffuse)  ? &c.diffuse
+                           : (cs.ch == GIChannelId::Specular) ? &c.specular
+                                                              : &c.ao;
+        st->Set(cs.ss, 1.0f);
+        st->Set(cs.rt, 1.0f);
+
+        const std::vector<GIDiagnostic> d = GIRegistry::Analyze(c);
+        CHECK(HasDiag(d, GIDiagnosticKind::DuplicateEstimate, cs.ss, cs.rt));
+    }
+}
+
+TEST_CASE("GIRegistry::Analyze：RTGI + DDGI → 判为相关估计（miss 回退）") {
+    GIConfig c;
+    c.diffuse.Set(GISourceId::RTGI, 1.0f);
+    c.diffuse.Set(GISourceId::DDGI, 1.0f);
+
+    const std::vector<GIDiagnostic> d = GIRegistry::Analyze(c);
+    CHECK(HasDiag(d, GIDiagnosticKind::CorrelatedEstimates,
+                  GISourceId::RTGI, GISourceId::DDGI));
+    // 二者并非 SS↔RT 对应关系，故不应被误判为重复估计
+    CHECK(CountKind(d, GIDiagnosticKind::DuplicateEstimate) == 0u);
+}
+
+TEST_CASE("GIRegistry::Analyze：多源通道产生成本提示") {
+    GIConfig c;
+    c.diffuse.Set(GISourceId::IBL, 1.0f);
+    c.diffuse.Set(GISourceId::DDGI, 1.0f);
+    c.diffuse.Set(GISourceId::SSGI, 1.0f);
+    c.ao.Set(GISourceId::SSAO, 1.0f);      // 单源通道
+
+    const std::vector<GIDiagnostic> d = GIRegistry::Analyze(c);
+    // 只有 diffuse（3 源）与…… ao 是单源 → 不报
+    CHECK(CountKind(d, GIDiagnosticKind::MultiSourceCost) == 1u);
+    for (const GIDiagnostic& e : d) {
+        if (e.kind == GIDiagnosticKind::MultiSourceCost) {
+            CHECK(e.channel == GIChannelId::Diffuse);
+        }
+    }
+}
+
+TEST_CASE("GIRegistry::Analyze：四档预设都不含严格冗余（预设本身是干净的）") {
+    const GIQualityPreset presets[] = {
+        GIQualityPreset::Low, GIQualityPreset::Medium,
+        GIQualityPreset::High, GIQualityPreset::Ultra,
+    };
+    for (GIQualityPreset p : presets) {
+        const std::vector<GIDiagnostic> d =
+            GIRegistry::Analyze(GIConfigFromPreset(p));
+        CHECK(CountKind(d, GIDiagnosticKind::RedundantDuplicate) == 0u);
+    }
+}
+
+TEST_CASE("GIRegistry::DeduplicateRedundant：移除 SSAO、保留 GTAO、幂等") {
+    GIConfig c;
+    c.ao.Set(GISourceId::SSAO, 0.7f);
+    c.ao.Set(GISourceId::GTAO, 1.3f);
+
+    CHECK(GIRegistry::DeduplicateRedundant(c));           // 发生改动
+    CHECK_FALSE(c.ao.Has(GISourceId::SSAO));
+    CHECK(c.ao.Has(GISourceId::GTAO));
+    CHECK(c.ao.WeightOf(GISourceId::GTAO) == doctest::Approx(1.3f));
+    CHECK(c.ao.count == 1u);
+
+    CHECK_FALSE(GIRegistry::DeduplicateRedundant(c));     // 幂等
+    CHECK(c.ao.count == 1u);
+
+    // 去重后不再报严格冗余
+    const std::vector<GIDiagnostic> d = GIRegistry::Analyze(c);
+    CHECK(CountKind(d, GIDiagnosticKind::RedundantDuplicate) == 0u);
+}
+
+TEST_CASE("GIRegistry::DeduplicateRedundant：无可去重时不改动、返回 false") {
+    GIConfig c = GIConfigFromPreset(GIQualityPreset::Medium);
+    const GIConfig before = c;
+    CHECK_FALSE(GIRegistry::DeduplicateRedundant(c));
+    CHECK(c.ao.count == before.ao.count);
+    CHECK(c.diffuse.count == before.diffuse.count);
+    CHECK(c.ao.Has(GISourceId::SSAO));
+}
+
+TEST_CASE("GIRegistry::DeduplicateRedundant：去重前后合成结果逐值等价") {
+    // 这是去重「可证等价」的核心断言：
+    // shader 的 AO 合成分支对 SSAO/GTAO 都采样同一张 u_SSAO 纹理，
+    // 故归一化平均 Σ(v·w)/Σw ≡ v —— 与只留 GTAO 的结果完全相同。
+    GIConfig c;
+    c.ao.Set(GISourceId::SSAO, 0.7f);
+    c.ao.Set(GISourceId::GTAO, 1.3f);
+
+    // 在若干不同的「纹理值」上比较（含 0 / 1 / 中间值）
+    const float kSamples[] = { 0.0f, 0.25f, 0.5f, 1.0f, 0.8f };
+    for (float v : kSamples) {
+        const float before = NormalizedBlend(c.ao, v);
+        GIConfig deduped = c;
+        CHECK(GIRegistry::DeduplicateRedundant(deduped));
+        const float after = NormalizedBlend(deduped.ao, v);
+        CHECK(after == doctest::Approx(before));
+        CHECK(after == doctest::Approx(v));      // 且等于源值本身（归一化平均取自身）
+    }
+}
+
+TEST_CASE("GIRegistry::DeduplicateRedundant：只影响 SSAO/GTAO，不动其他源") {
+    GIConfig c;
+    c.diffuse.Set(GISourceId::IBL, 1.0f);
+    c.diffuse.Set(GISourceId::SSGI, 1.0f);
+    c.ao.Set(GISourceId::SSAO, 1.0f);
+    c.ao.Set(GISourceId::GTAO, 1.0f);
+
+    CHECK(GIRegistry::DeduplicateRedundant(c));
+    CHECK(c.diffuse.count == 2u);
+    CHECK(c.diffuse.Has(GISourceId::IBL));
+    CHECK(c.diffuse.Has(GISourceId::SSGI));
+    CHECK(c.ao.count == 1u);
+    CHECK(c.ao.Has(GISourceId::GTAO));
 }

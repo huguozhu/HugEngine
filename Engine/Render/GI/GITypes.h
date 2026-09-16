@@ -64,27 +64,44 @@ enum class GISourceId : u8 {
     GTAO          = 11,  // 地平线切片 AO（Ground Truth AO，SSAO 的高质量替代）
 };
 
-/// GI 源的天然频段
-enum class GIBand : u8 {
-    Low  = 0,   // 低频、大范围（IBL / Lightmap / DDGI）
-    Mid  = 1,   // 中频、近处细节（SSGI / SSR / SSAO / RSM / GTAO）
-    High = 2,   // 高频、精确（RTGI / RTReflection / RTAO）
-};
+// ============================================================
+// 源分类 —— 用**谓词**表达，不用「频段」枚举
+//
+// 历史：这里原有一个 `GIBand { Low, Mid, High }`（显示为「低频/中频/高频」）。
+// 它被删除，原因是**名字承诺了一个它并未表达的东西**：该枚举实际是按
+// **估计器类别**划分，而且混了两个正交维度——
+//   · Low ↔ Mid 的分界是【尺度】：世界空间大范围（环境图 / 3m 探针网格）
+//                               vs 屏幕空间像素级
+//   · Mid ↔ High 的分界是【精度】：屏幕空间近似 vs 光追精确
+// 反证：RTGI 输出为 1/4 分辨率，其**空间分辨率低于**全分辨率 SSGI，却被标成「高频」——
+//       可见 `High` 表达的是精度而非空间频率。
+// 直接后果：`GIBandOf(SSGI)=Mid` 而 `GIBandOf(RTGI)=High`，尽管二者估的是
+// **同一个物理量**（间接漫反射）。这也使该枚举无法充当 P5 的频率边界。
+//
+// 现在改为三个**互斥且完备**的谓词（对 11 个源构成一个无歧义的划分），
+// 面板标签由它们推导（见 GISourceClassName）。
+// ============================================================
 
-/// 源 → 频段
-///
-/// 注：光追三源必须显式返回 High。此前它们与 default 共用同一条 fallthrough，
-///     导致 GIBand::High 成为**不可达枚举值**、面板把 RT 源标成「中频」。
-inline GIBand GIBandOf(GISourceId id) {
-    switch (id) {
-    case GISourceId::IBL:
-    case GISourceId::Lightmap:
-    case GISourceId::DDGI:          return GIBand::Low;
-    case GISourceId::RTGI:
-    case GISourceId::RTReflection:
-    case GISourceId::RTAO:          return GIBand::High;
-    default:                        return GIBand::Mid;
-    }
+/// 世界空间 / 预计算环境类源：IBL · Lightmap · DDGI
+/// （不依赖屏幕覆盖，屏外依然有效）
+inline bool IsWorldSpaceSource(GISourceId id) {
+    return id == GISourceId::IBL || id == GISourceId::Lightmap
+        || id == GISourceId::DDGI;
+}
+
+/// 屏幕空间（或单次反弹光栅）类源：SSGI · SSR · SSAO · RSM · GTAO
+/// （逐屏幕像素估计，受屏幕覆盖限制）
+inline bool IsScreenSpaceSource(GISourceId id) {
+    return id == GISourceId::SSGI || id == GISourceId::SSR
+        || id == GISourceId::SSAO || id == GISourceId::RSM
+        || id == GISourceId::GTAO;
+}
+
+/// 硬件光追类源：RTGI · RTReflection · RTAO
+/// （定义在此处而非能力位一节：它是分类三谓词之一，且 `GISourceClassName` 依赖它）
+inline bool IsRayTracingSource(GISourceId id) {
+    return id == GISourceId::RTGI || id == GISourceId::RTReflection
+        || id == GISourceId::RTAO;
 }
 
 /// 源名称（日志 / 面板显示）
@@ -105,14 +122,13 @@ inline const char* GISourceName(GISourceId id) {
     }
 }
 
-/// 频段名称
-inline const char* GIBandName(GIBand b) {
-    switch (b) {
-    case GIBand::Low:  return "低频";
-    case GIBand::Mid:  return "中频";
-    case GIBand::High: return "高频";
-    default:           return "?";
-    }
+/// 源的**估计器类别**名称（面板显示用）。
+/// 由上述三个谓词推导，保证与谓词同源、不会再出现「名字与语义脱节」。
+inline const char* GISourceClassName(GISourceId id) {
+    if (IsWorldSpaceSource(id))   return "环境（世界空间）";
+    if (IsScreenSpaceSource(id))  return "屏幕空间";
+    if (IsRayTracingSource(id))   return "光追";
+    return "?";
 }
 
 // ============================================================
@@ -284,11 +300,11 @@ inline u32 ToPipelineCap(ShadowChannel s) {
     }
 }
 
-/// 是否为「需要硬件光追」的源
-inline bool IsRayTracingSource(GISourceId id) {
-    return id == GISourceId::RTGI || id == GISourceId::RTReflection
-        || id == GISourceId::RTAO;
-}
+/// 是否为「需要硬件光追」的源（分类三谓词之一；另两个见文件上方）
+///
+/// 定义在此处会晚于 `GISourceClassName` 的使用，故实际定义已上移至
+/// 源分类一节（那里的三个谓词共同构成对 11 个源的划分）。
+/// 此处仅保留注释作为交叉索引，避免后来者重复定义。
 
 /// 各管线能力预设
 ///
@@ -423,7 +439,64 @@ inline GIConfig GIConfigFromPreset(GIQualityPreset p) {
 }
 
 // ============================================================
-// GIRegistry — 可用性判断 + 自动降级
+// GI 配置诊断（P0 · REDUNDANCY）
+//
+// 动机（文档 §3.5）：本架构要求**每个已启用的源都整幅、每帧**产出完整通道缓冲，
+// 因此「启用一个没有增益的源」等于**白付一份全量成本**；而层栈当前**允许**
+// 这类配置且不给任何提示。
+//
+// 本组设施只做**静态诊断**，不改变渲染行为——唯一例外是
+// GIRegistry::DeduplicateRedundant（去重，且可证与去重前逐像素等价）。
+// ============================================================
+
+/// 通道标识（诊断报告用）
+enum class GIChannelId : u8 { Diffuse = 0, Specular = 1, AO = 2 };
+
+inline const char* GIChannelName(GIChannelId ch) {
+    switch (ch) {
+    case GIChannelId::Diffuse:  return "Diffuse（间接漫反射）";
+    case GIChannelId::Specular: return "Specular（间接镜面）";
+    case GIChannelId::AO:       return "AO（环境光遮蔽）";
+    default:                    return "?";
+    }
+}
+
+/// 诊断类别
+enum class GIDiagnosticKind : u8 {
+    None = 0,
+    /// 严格冗余：两个源在 shader 合成端解析到**同一张纹理**，
+    /// 归一化平均等于取自身 → 零增益。**可安全去重**。
+    RedundantDuplicate,
+    /// 重复估计：同一物理量的「屏幕空间」与「光追」两份估计。
+    /// 成本翻倍且归一化会互相稀释——但这是 S1.5 的**有意设计**，故仅提示、不强制剔除。
+    DuplicateEstimate,
+    /// 相关性：一方以另一方为 miss 回退来源 → 非独立估计，归一化失去无偏性。
+    CorrelatedEstimates,
+    /// 成本提示：通道含多个源 → 每帧为每个源各跑一遍整幅 pass。
+    MultiSourceCost,
+};
+
+/// 一条诊断结果
+struct GIDiagnostic {
+    GIChannelId      channel = GIChannelId::Diffuse;
+    GIDiagnosticKind kind    = GIDiagnosticKind::None;
+    GISourceId       a       = GISourceId::None;   // 涉及源（主）
+    GISourceId       b       = GISourceId::None;   // 涉及源（无则 None）
+    const char*      detail  = "";                 // 静态字符串，不做堆分配
+};
+
+inline const char* GIDiagnosticKindName(GIDiagnosticKind k) {
+    switch (k) {
+    case GIDiagnosticKind::RedundantDuplicate: return "严格冗余";
+    case GIDiagnosticKind::DuplicateEstimate:  return "重复估计";
+    case GIDiagnosticKind::CorrelatedEstimates:return "相关估计";
+    case GIDiagnosticKind::MultiSourceCost:    return "成本提示";
+    default:                                   return "无";
+    }
+}
+
+// ============================================================
+// GIRegistry — 可用性判断 + 自动降级 + 配置诊断
 //
 // 可用性判断 = 管线能力（PipelineCaps：该管线是否提供此 GI 源）
 //            ∧ 设备能力（rtSupported：光追源需硬件光追）
@@ -431,6 +504,7 @@ inline GIConfig GIConfigFromPreset(GIQualityPreset p) {
 //   1. IsAvailable：查询某 GI 源在当前管线 + 设备下是否可用
 //   2. Degrade：对 GIConfig 的四个通道层栈逐源裁剪（移除不可用源），
 //               并保证每通道至少保留一个可用兜底源
+//   3. Analyze / DeduplicateRedundant：冗余配置诊断与可证等价去重（P0）
 // ============================================================
 class GIRegistry {
 public:
@@ -494,6 +568,120 @@ public:
             out.ao.Set(GISourceId::SSAO, 1.0f);
         }
         return out;
+    }
+
+    // ────────────────────────────────────────────────────────
+    // 配置诊断（P0 · REDUNDANCY）
+    // ────────────────────────────────────────────────────────
+
+    /// 两个源是否「严格冗余」——即它们在 shader 合成端解析到**同一张纹理**。
+    ///
+    /// 目前只有 SSAO / GTAO：
+    ///   · `ScreenAOProvider` 用**同一个 SSAO pass**（`SyncToStack` 只切换片段着色器）；
+    ///   · `DeferredLighting.frag` 的 AO 合成分支对二者都采样 `u_SSAO`。
+    /// 故二者若同时入栈，归一化平均 Σ(v·w)/Σw ≡ v —— 与只留其一**逐像素等价**。
+    static bool IsStrictlyRedundant(GISourceId a, GISourceId b) {
+        return (a == GISourceId::SSAO && b == GISourceId::GTAO) ||
+               (a == GISourceId::GTAO && b == GISourceId::SSAO);
+    }
+
+    /// 屏幕空间源所对应的「同一物理量的光追源」（无对应则返回 None）
+    ///
+    /// 注意：二者属于**不同的估计器类别**（前者 `IsScreenSpaceSource`、
+    /// 后者 `IsRayTracingSource`），但估的是**同一个物理量**——
+    /// 这正是本对应关系存在的意义（用于诊断「重复估计」）。
+    static GISourceId RTCounterpartOf(GISourceId ss) {
+        switch (ss) {
+        case GISourceId::SSGI: return GISourceId::RTGI;         // 间接漫反射
+        case GISourceId::SSR:  return GISourceId::RTReflection; // 间接镜面
+        case GISourceId::SSAO: return GISourceId::RTAO;         // 环境光遮蔽
+        case GISourceId::GTAO: return GISourceId::RTAO;         // 环境光遮蔽
+        default:               return GISourceId::None;
+        }
+    }
+
+    /// 在该层栈内，该源是否为「实际生效」的那个。
+    /// 严格冗余组内取**高质量者**：GTAO 优先于 SSAO（GTAO 是 SSAO 的高质量替代，
+    /// 且 pass 模式由 stack.Has(GTAO) 决定）。
+    static bool IsEffectiveSource(const GIChannelStack& st, GISourceId id) {
+        if (id == GISourceId::SSAO && st.Has(GISourceId::GTAO)) return false;
+        return true;
+    }
+
+    /// 诊断单个通道层栈（结果**追加**到 out，不清空）
+    static void AnalyzeStack(GIChannelId ch, const GIChannelStack& st,
+                             std::vector<GIDiagnostic>& out) {
+        const auto has = [&st](GISourceId id) { return st.Has(id); };
+
+        // 1) 严格冗余：解析到同一纹理的重复源（当前仅 SSAO/GTAO）
+        for (u32 i = 0; i < st.count; i++) {
+            for (u32 j = i + 1; j < st.count; j++) {
+                if (!IsStrictlyRedundant(st.sources[i].id, st.sources[j].id)) continue;
+                out.push_back(GIDiagnostic{
+                    ch, GIDiagnosticKind::RedundantDuplicate,
+                    st.sources[i].id, st.sources[j].id,
+                    "两者共用同一 pass 与同一输出纹理，归一化平均等于取自身 → 零增益，可安全去重"});
+            }
+        }
+
+        // 2) 重复估计：屏幕空间源与其「同一物理量的光追源」同时启用
+        //    （只对实际生效的源报告，避免 SSAO/GTAO 同时在场时重复报两条）
+        for (u32 i = 0; i < st.count; i++) {
+            const GISourceId ss = st.sources[i].id;
+            if (!IsEffectiveSource(st, ss)) continue;
+            const GISourceId rt = RTCounterpartOf(ss);
+            if (rt == GISourceId::None || !has(rt)) continue;
+            out.push_back(GIDiagnostic{
+                ch, GIDiagnosticKind::DuplicateEstimate, ss, rt,
+                "同一物理量的两份逐屏幕像素估计：成本翻倍，且归一化会互相稀释"
+                "（S1.5 有意允许同时参与，故仅提示、不建议强制剔除）"});
+        }
+
+        // 3) 相关性：RTGI 的 miss 回退来源即 DDGI → 非独立估计
+        if (has(GISourceId::RTGI) && has(GISourceId::DDGI)) {
+            out.push_back(GIDiagnostic{
+                ch, GIDiagnosticKind::CorrelatedEstimates,
+                GISourceId::RTGI, GISourceId::DDGI,
+                "RTGI 的 miss 回退即 DDGI，两者非独立估计 → 归一化平均失去无偏性"});
+        }
+
+        // 4) 成本提示：多源 = 每帧多份整幅 pass（§3.5）
+        if (st.count > 1) {
+            out.push_back(GIDiagnostic{
+                ch, GIDiagnosticKind::MultiSourceCost,
+                GISourceId::None, GISourceId::None,
+                "通道含多个源：每帧将为每个源各跑一遍整幅 pass（成本随源数线性增长，见文档 §3.5）"});
+        }
+    }
+
+    /// 诊断整份配置（三个能量通道）
+    static std::vector<GIDiagnostic> Analyze(const GIConfig& c) {
+        std::vector<GIDiagnostic> out;
+        AnalyzeStack(GIChannelId::Diffuse,  c.diffuse,  out);
+        AnalyzeStack(GIChannelId::Specular, c.specular, out);
+        AnalyzeStack(GIChannelId::AO,       c.ao,       out);
+        return out;
+    }
+
+    /// 去掉「严格冗余」的重复源 —— **可证与去重前逐像素等价**。
+    ///
+    /// 规则：SSAO / GTAO 同时在场时保留 **GTAO**，移除 SSAO。
+    /// 等价性依据（两条同时成立才成立）：
+    ///   1. shader 的 AO 合成分支对二者都采样**同一张 `u_SSAO` 纹理**，
+    ///      故 Σ(v·w)/Σw ≡ v —— 权重取值不影响结果；
+    ///   2. pass 模式由 `stack.Has(GTAO)` 决定，去重前后都是 GTAO 模式。
+    ///
+    /// @return 是否发生了改动（幂等：再次调用返回 false）
+    static bool DeduplicateRedundant(GIConfig& c) {
+        bool changed = false;
+        GIChannelStack* stacks[] = { &c.diffuse, &c.specular, &c.ao };
+        for (GIChannelStack* st : stacks) {
+            if (st->Has(GISourceId::SSAO) && st->Has(GISourceId::GTAO)) {
+                st->Remove(GISourceId::SSAO);   // 保留 GTAO（高质量替代）
+                changed = true;
+            }
+        }
+        return changed;
     }
 };
 
