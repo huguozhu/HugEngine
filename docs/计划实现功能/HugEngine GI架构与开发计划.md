@@ -454,8 +454,8 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 | # | 严重度 | 问题 | 证据 |
 |---|---|---|---|
 | ~~**A**~~ | ✅ **已修复** | **归一化混合了不同量纲的源**（§3.4）：IBL/SSGI 含接收面 albedo，DDGI/RTGI 不含 | 见下方「A 的修复与实测」 |
-| **B** | 严重 | **SSR 屏幕投影用错矩阵**：`GI_SSR.cpp` 传的是 `inverse(proj)`，而 shader 用它做 view→clip 投影（`GI/SSR.frag.slang` 的 Hi-Z 与线性 march 两条路径） | `GI_SSR.cpp:140` vs `GI/SSR.frag.slang:59,92` |
-| **C** | 严重 | **SSR 有效性协议未实现**：合成端判 `u_SSR.Sample().a < 0` 表示无效，但 `GI/SSR.frag.slang` 所有分支 alpha 都是 1.0，`PostProcess/Denoise.frag.slang` 还会把 alpha 平均 → 判定永不成立，SSR miss 的黑色以全权重进入 `(IBL+0)/2` | `Lighting/DeferredLighting.frag.slang:450` vs `GI/SSR.frag.slang:32,110,112` |
+| ~~**B**~~ | ✅ **已修复** | **SSR 屏幕投影用错矩阵**：`GI_SSR.cpp` 传的是 `inverse(proj)`，而 shader 用它做 view→clip 投影（Hi-Z 与线性 march 两条路径都错） | 见下方「B/C 的修复与实测」 |
+| ~~**C**~~ | ✅ **已修复** | **SSR 有效性协议未实现**：合成端判 `u_SSR.Sample().a < 0` 表示无效，但 SSR 所有分支 alpha 都是 1.0，空间/时域降噪还会把 alpha 平均 → 判定永不成立，SSR miss 的黑色以全权重进入 `(IBL+0)/2` | 见下方「B/C 的修复与实测」 |
 | **D** | 中 | **AO 乘到了直接光上**，且不作用于镜面：`color *= lerp(1, ao*aoVal, aoIntensity)` 位于直接光累加之后、间接镜面之前 | `Lighting/DeferredLighting.frag.slang:436` |
 | **E** | 中 | **屏幕空间源用硬编码默认投影矩阵**而非真实相机：`kDefaultFOV=60°/0.1/2000`；`PhysicalCamera` 会由焦距反算 fov → 非默认相机下 SSGI/SSAO/SSR 重建错位。根因是 `IGIProvider` 未把相机传给屏幕空间源（只有 DDGI 有 `SetCamera`） | `GI_SSGI.cpp:186`、`GI_SSR.cpp:140`、`SSAO.cpp:271` |
 | **F** | 中 | **RSM 的 pass 被嵌套在 DDGI 门控内**：单独勾选 RSM 而关闭 DDGI 时，RSM 永不注册（Forward 侧却是独立的 `ShouldRunRSM()`） | `DeferredPipeline_FrameGraph.cpp:288` |
@@ -489,6 +489,47 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 回归：白炉读数仍为 **1.0000**（预期——白炉短路源真值，本就不覆盖量纲）；VUID 46 = 改前 46。
 *（`build/verify/` 下保留了 before/after 两份运行日志可供查阅）*
 
+**B/C 的修复与实测**（SSR 的空间正确性 + 有效性协议）
+
+**B · 投影矩阵正/逆分离**
+- 根因确认：引擎保证的 push constant 范围只有 **128B**，而 `GI_SSR.cpp` 原先只往它里面
+  传了**一个**矩阵（`inverse(proj)`）——**正投影无处安放**，于是 shader 拿逆矩阵当正投影用。
+- 修法（照 **SSAO 早已采用**的惯例）：矩阵进 UBO。`GI_SSR.cpp:30` 本就声明了
+  binding 3 是 `UniformBuffer` 却从未创建/绑定过——正好用它放 `invProj + proj`（128B）。
+  push constant 从 96B **缩到 32B**（只剩标量）。
+- shader 侧按用途命名：`u_InvProj`（clip→view）与 `u_Proj`（view→clip）。改完后 4 处用法
+  全部正确，其中 2 处（`mul(u_Proj, rayPos)` × 两条 march 路径）是**自动变正确**的
+  ——因为 `u_Proj` 现在真的持有正投影。
+
+**C · 有效性协议贯通**（此前断在**四处**，不止文档写的两处）
+
+| 环节 | 修复前 | 修复后 |
+|---|---|---|
+| `GI/SSR.frag.slang` | 天空/miss 分支返回 alpha **1.0** | 返回 **−1**（与 `RT_Reflection.rgen` 早已采用的协议一致） |
+| `PostProcess/Denoise.frag.slang`（空间降噪） | 把 alpha 一起加权平均 → **符号被抹掉** | **无效样本不参与**平均；有效性不参与平均，有有效贡献即 +1、全无则 −1 |
+| `PostProcess/RT_DenoiseTemporal.frag.slang`（时域降噪） | `lerp` 连 alpha 一起混 → 符号被抹掉，且"本帧无数据"的像素会**继承历史而永不失效** | 有效性**取自本帧**，只让 RGB 走时域累积 |
+| 合成端 `Lighting/DeferredLighting.frag.slang` | 判 `a < 0` —— **无生产者** | 有生产者了（链路贯通） |
+
+> 补充发现：**RT 反射侧其实早就写了 −1**（`RT_Reflection.rgen.slang:80,89`），
+> 但它的时域降噪同样会把符号 lerp 掉 —— 也就是说 RT 反射的有效性协议此前也**不生效**，
+> 本次一并修好。
+
+**实测**（cfg 设为 **specular = IBL + SSR**、diffuse 只留 IBL、无 AO/阴影、关直接光）
+
+| | 修复前 | 修复后 |
+|---|---|---|
+| 中心亮度 | 0.0833 | **0.0869**（+4.3%） |
+| 背景亮度 | 0.0490 | **0.0557**（+13.7%） |
+| 中心/背景 | 1.6988 | **1.5593**（更接近 1） |
+
+方向与预测一致：**整体变亮，且背景受惠（+13.7%）明显大于中心（+4.3%）**——
+这正是「SSR 无效像素不再以全权重把 IBL 压暗」的特征（背景像素更可能是 SSR 无效的）。
+幅度小于朴素的 2× 预测，原因是空间降噪会把无效像素**从有效邻居填补**回来，
+因此真正被排除的像素少于"所有 miss 像素"。比值从 1.70 降到 1.56 也说明屏幕上的反射更均匀了。
+
+回归：白炉 **1.0000**；VUID 46 = 改前 46；单元测试 159/159、3952/3952。
+*（`build/verify/ssr-before.log` 与 `ssr-after.log` 保留了这次 A/B）*
+
 ---
 
 ## 10. 后续任务与排序
@@ -499,7 +540,7 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 |:---:|---|---|---|
 | **P0** | ✅ **D2 · 抽 `GITypes.h` + 层栈/降级 CPU 单测**（**已完成**） | 小 / 低 | 守的是**已经咬过两次**的不变量 1；同时把 RHI 依赖从 GI 数据模型中剥离 |
 | **P0** | **REDUNDANCY · 冗余源诊断 + 可证等价去重**（**已完成**） | 小 / 低 | 同时命中**性能**与**正确性**（§3.5）；静态可测，复用 P0 的单测设施 |
-| **P1** | **§9.2 的 A/B/C 三项正确性缺陷**（**A ✅ 已完成**，B/C 待做） | 中 / 中 | **A（量纲统一）是 P5 的硬前置**（§3.4）——已完成；B/C 是 SSR 的空间正确性与有效性协议 |
+| **P1** | **§9.2 的 A/B/C 三项正确性缺陷** —— ✅ **全部已完成** | 中 / 中 | **A（量纲统一）是 P5 的硬前置**（§3.4）；B/C 修好了 SSR 的空间正确性与有效性协议 |
 | **P2** | **P5 · 频率分离**（Wave 3） | 大 / **高** | 合成正确性主题的收尾；前提（Wave 0 判据 + Wave 1 按源合成 + Wave 2 Provider）已就绪，但需先完成 P1 |
 | **P2** | **B3 · RSM VPL halfRes** | 小 / 低 | 与 P2 并行 |
 | **P2** | **D1 · 偶发崩溃根因获证** | 未知 / 中 | 并行；根因未证意味着已修项可能只是其中一个实例 |
@@ -565,15 +606,15 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 **P2 · D1 崩溃根因** — 长跑 soak + `HE_TRACE_FB=1`（`delay=0` 即同帧销毁的直接指标）；
 现状：符号化落在 `VulkanTexture::GetImageView()` 野指针，最可疑根因（framebuffer 被同帧销毁）已修
 
-**P1 · §9.2 A/B/C**
-- ✅ **A · 量纲统一**（本次完成）——约定 `L_o = albedo × E/π`，修 4 处（DDGI 补 `albedo/π`、
-  RTGI/RSM 补接收面 albedo、`RT_GI.rgen` 的 miss 回退补 `1/π`），并解耦 RSM 对 `iblIntensity`
-  的依赖。**单源亮度实测验证通过**（详见 §9.2 的「A 的修复与实测」）。
-- ⬜ **B · SSR 投影矩阵**——`GI_SSR.cpp` 传的是逆矩阵，而 `GI/SSR.frag.slang:59,92` 拿它做
-  view→clip。改法：正/逆矩阵**分开传**（两个字段），并给字段改名消除 `u_Proj` 的歧义。
-- ⬜ **C · SSR 有效性协议**——`GI/SSR.frag.slang` 的无效分支写**负数 alpha**，
-  `PostProcess/Denoise.frag.slang` 保留符号（或改用独立通道），与
-  `Lighting/DeferredLighting.frag.slang:450` 的判定对齐。
+**P1 · §9.2 A/B/C** —— ✅ **全部完成**（详见 §9.2 的「A/B/C 的修复与实测」）
+- ✅ **A · 量纲统一**——约定 `L_o = albedo × E/π`，修 4 处（DDGI 补 `albedo/π`、
+  RTGI/RSM 补接收面 albedo、`RT_GI.rgen` 的 miss 回退补 `1/π`），并解耦 RSM 对
+  `iblIntensity` 的依赖。**单源亮度实测验证**。
+- ✅ **B · SSR 投影矩阵**——矩阵进 UBO（用 `GI_SSR.cpp` 本就声明却未使用的 binding 3），
+  正/逆分开传；push constant 96B → 32B。4 处用法全部正确。
+- ✅ **C · SSR 有效性协议**——贯通**四处**：SSR.frag 写 −1、空间降噪保住符号、
+  时域降噪的有效性取自本帧、合成端判定终有生产者。**顺带修好了 RT 反射侧**
+  （它的 rgen 早已写 −1，但时域降噪把符号 lerp 掉了）。
 - 遗留（独立任务，非 P5 前置）：`SSGI-CAL` —— SSGI 整体标度是启发式，未按 `E/π` 校准，
   需以 PT 为参考实测标定。
 
