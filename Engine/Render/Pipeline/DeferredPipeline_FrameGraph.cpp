@@ -731,13 +731,15 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             c->EndOffscreenPass();
         });
 
-    // ── DDGI 前帧 HDR 捕获（将当前 Lighting 输出拷贝到 DDGI，供下帧探针采样真实辐射度）──
+    // ── 前帧 HDR 辐射度捕获（将当前 Lighting 输出下采样存一份，供下帧 GI 源采样真实辐射度）──
+    // 从 DDGI 自有一份改为 GI 源共享，避免每个源各付一次全屏下采样（§3.5）。
+    // 门控：目前只有 DDGI 消费它，故与 DDGI 是否启用一致（SSGI 接入后再加入其条件）。
     rg.AddPass("DDGI_CaptureHDR",
         {{hdrC, ResourceAccess::Read}},  // 读 HDR 作为拷贝源
         {},                               // 无 RenderGraph 管理的输出
         [&](rhi::IRHICommandList* c) {
             if (m_DDGI.IsEnabled()) {
-                m_DDGI.CaptureHDR(c, m_Lighting.GetHDRTarget());
+                m_RadianceHistory.Capture(c, m_Lighting.GetHDRTarget());
             }
         });
 

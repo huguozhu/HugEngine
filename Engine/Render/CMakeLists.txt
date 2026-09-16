@@ -84,6 +84,8 @@ set(RENDER_SOURCES
     GI/GI_RSM.cpp
     GI/GI_SSGI.h
     GI/GI_SSGI.cpp
+    GI/GIRadianceHistory.h
+    GI/GIRadianceHistory.cpp
     GI/GI_SSR.h
     GI/GI_SSR.cpp
     GI/GI_DDGI.h

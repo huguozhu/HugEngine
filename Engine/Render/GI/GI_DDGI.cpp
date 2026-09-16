@@ -3,8 +3,6 @@
 #include "Core/Log.h"
 #include "Subsystem/RenderSubsystem.h"
 #include "DDGI.comp.spv.h"
-#include "Fullscreen.vert.spv.h"
-#include "FullscreenCopy.frag.spv.h"
 #include <cstring>
 #include <cstdio>
 
@@ -21,9 +19,6 @@ static constexpr u32 kDDGIBindPrevHDR     = 6;   // 前帧 HDR（屏幕回退）
 static constexpr u32 kDDGIBindRSMPosition = 7;   // RSM 位置图
 static constexpr u32 kDDGIBindRSMFlux     = 8;   // RSM 通量图
 static constexpr u32 kDDGIBindIBL         = 9;   // IBL 辐照度（Cubemap）
-
-// HDR 下采样描述符集绑定号
-static constexpr u32 kDDGIBindDownsampleInput = 0;   // 下采样源（全分辨率 HDR）
 
 // 计算调度所需的 Dispatch 组数（每线程处理一个探针，64 线程/组）
 static u32 DispatchGroupCount(u32 probeCount) {
@@ -79,42 +74,8 @@ bool GI_DDGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     lsd.addressU   = lsd.addressV   = rhi::AddressMode::ClampToEdge;
     m_LinearSampler = device->CreateSampler(lsd);
 
-    // ---- 前帧 HDR 纹理（1/4 分辨率：存储上一帧 Lighting 下采样结果，供探针采样真实辐射度）----
-    rhi::TextureDesc hdrDesc;
-    hdrDesc.width  = (width  / 4 > 0) ? width  / 4 : 1;
-    hdrDesc.height = (height / 4 > 0) ? height / 4 : 1;
-    hdrDesc.format = rhi::Format::RGBA16_FLOAT;
-    hdrDesc.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
-    m_PrevHDR = device->CreateTexture(hdrDesc);
-
-    // ---- 下采样 PSO（HDR 全分辨率 → 1/4，线性采样自动降采样）----
-    {
-        rhi::DescriptorSetLayoutDesc dl;
-        dl.bindings = {{0, rhi::DescriptorType::CombinedImageSampler, 1, 16}};
-        m_DownsampleLayout = device->CreateDescriptorSetLayout(dl);
-        m_DownsampleSet    = device->AllocateDescriptorSet(m_DownsampleLayout);
-
-        rhi::ShaderBytecode vs, fs;
-        vs.stage      = rhi::ShaderStage::Vertex;
-        vs.spirv      = k_Fullscreen_vert_spv;
-        vs.entryPoint = "vertexMain";
-        fs.stage      = rhi::ShaderStage::Pixel;
-        fs.spirv      = k_FullscreenCopy_frag_spv;
-        fs.entryPoint = "fragmentMain";
-
-        rhi::PipelineStateDesc pd;
-        pd.vertexShader        = &vs;
-        pd.pixelShader         = &fs;
-        pd.topology            = rhi::PrimitiveTopology::TriangleList;
-        pd.depthTest           = false;
-        pd.depthWrite          = false;
-        pd.depthFormat         = rhi::Format::Unknown;
-        pd.colorAttachmentCount = 1;
-        pd.colorFormats[0]     = rhi::Format::RGBA16_FLOAT;
-        pd.descriptorSetLayouts = {m_DownsampleLayout};
-        pd.debugName           = "DDGI_HDRDownsample";
-        m_DownsamplePSO = device->CreatePipelineState(pd);
-    }
+    // ---- 前帧 HDR 纹理与下采样 PSO 已抽到共享组件 GIRadianceHistory ----
+    // （原先此处创建 m_PrevHDR + m_DownsamplePSO；多个 GI 源共用一份，避免重复下采样）
 
     // ---- DescriptorSet 布局 ----
     // binding 0-2: GBuffer CombinedImageSampler
@@ -139,9 +100,8 @@ bool GI_DDGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Layout = device->CreateDescriptorSetLayout(layout);
     m_Set    = device->AllocateDescriptorSet(m_Layout);
 
-    // 预绑定前帧 HDR（纹理创建后不变，只需更新 sampler）
-    device->UpdateDescriptorSet(m_Set, kDDGIBindPrevHDR, rhi::DescriptorType::CombinedImageSampler,
-        m_PrevHDR.get(), m_LinearSampler.get());
+    // 预绑定前帧 HDR：纹理由共享组件持有，可能因 resize 被重建，故按代次判断是否重绑
+    BindRadianceHistory();
 
     // 预绑定不变的 binding：uniform buffer（每帧只需 Map/Unmap 更新内容）
     device->UpdateDescriptorSet(m_Set, kDDGIBindGridParams, rhi::DescriptorType::UniformBuffer, m_GridUniform.get());
@@ -181,7 +141,8 @@ void GI_DDGI::Shutdown() {
     m_GridUniform.reset();
     m_PointSampler.reset();
     m_LinearSampler.reset();
-    m_PrevHDR.reset();
+    m_Radiance = nullptr;              // 非拥有，仅清引用
+    m_RadianceGeneration = 0;
     m_Device = nullptr;
     m_Ready  = false;
     HE_CORE_INFO("GI_DDGI shutdown");
@@ -219,6 +180,19 @@ void GI_DDGI::Update(const SubsystemContext& ctx) {
         m_ViewProj    = ctx.camera->GetViewProjMatrix();
         m_CameraReady = true;
     }
+    // 共享辐射度纹理可能因 resize 被重建 → 按代次补绑（未变化时是零开销的早退）
+    BindRadianceHistory();
+}
+
+void GI_DDGI::BindRadianceHistory() {
+    if (!m_Device || !m_Radiance || m_Set == rhi::kInvalidSet) return;
+    // 纹理未变（代次相同）则无需重绑，避免每帧无谓的 UpdateDescriptorSet
+    if (m_RadianceGeneration == m_Radiance->GetGeneration()) return;
+    rhi::IRHITexture* tex = m_Radiance->GetTexture();
+    if (!tex) return;
+    m_Device->UpdateDescriptorSet(m_Set, kDDGIBindPrevHDR, rhi::DescriptorType::CombinedImageSampler,
+                                  tex, m_Radiance->GetSampler());
+    m_RadianceGeneration = m_Radiance->GetGeneration();
 }
 
 void GI_DDGI::Render(rhi::IRHICommandList* cmd) {
@@ -274,39 +248,6 @@ void GI_DDGI::Render(rhi::IRHICommandList* cmd) {
         rhi::PipelineStage::FragmentShader,
         rhi::ResourceState::UnorderedAccess,
         rhi::ResourceState::ShaderResource);
-}
-
-void GI_DDGI::CaptureHDR(rhi::IRHICommandList* cmd, rhi::IRHITexture* hdr) {
-    if (!hdr || !m_PrevHDR) return;
-
-    // 目标尺寸 = 源 1/4（探针采样不需要全分辨率，省带宽）
-    u32 qw = (hdr->GetWidth()  / 4 > 0) ? hdr->GetWidth()  / 4 : 1;
-    u32 qh = (hdr->GetHeight() / 4 > 0) ? hdr->GetHeight() / 4 : 1;
-
-    // 确保前帧 HDR 尺寸匹配（窗口 resize 可能改变尺寸）
-    if (m_PrevHDR->GetWidth() != qw || m_PrevHDR->GetHeight() != qh) {
-        rhi::TextureDesc hdrDesc;
-        hdrDesc.width  = qw;
-        hdrDesc.height = qh;
-        hdrDesc.format = rhi::Format::RGBA16_FLOAT;
-        hdrDesc.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
-        m_PrevHDR = m_Device->CreateTexture(hdrDesc);
-        // 重新绑定到探针描述符集
-        m_Device->UpdateDescriptorSet(m_Set, kDDGIBindPrevHDR, rhi::DescriptorType::CombinedImageSampler,
-            m_PrevHDR.get(), m_LinearSampler.get());
-    }
-
-    // 下采样渲染：全分辨率 HDR → 1/4（线性采样自动降采样）
-    m_Device->UpdateDescriptorSet(m_DownsampleSet, kDDGIBindDownsampleInput, rhi::DescriptorType::CombinedImageSampler,
-        hdr, m_LinearSampler.get());
-    cmd->SetPipeline(m_DownsamplePSO.get());
-    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DownsampleSet);
-    rhi::ClearValue clr{};
-    cmd->BeginOffscreenPass(m_PrevHDR->GetNativeHandle(), nullptr, qw, qh, &clr, false);
-    cmd->SetViewport({0, (float)qh, (float)qw, -(float)qh, 0, 1});
-    cmd->SetScissor({0, 0, qw, qh});
-    cmd->Draw(3);
-    cmd->EndOffscreenPass();
 }
 
 void GI_DDGI::SetRSM(rhi::IRHITexture* pos, rhi::IRHITexture* flux, const float4x4& lightViewProj) {

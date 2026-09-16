@@ -1,5 +1,6 @@
 #pragma once
 
+#include "GI/GIRadianceHistory.h"   // 前帧 HDR 辐射度（共享组件）
 #include "GI/GlobalIllumination.h"
 #include "RHI/RHI.h"
 #include "Math/Math.h"
@@ -41,12 +42,14 @@ public:
     // pos/flux 为空时回退屏幕 HDR（视角相关）
     void SetRSM(rhi::IRHITexture* pos, rhi::IRHITexture* flux, const float4x4& lightViewProj);
 
+    // 把共享组件的纹理绑到本源的 binding 6；仅当组件代次变化（resize 重建）时才实际重绑
+    void BindRadianceHistory();
+
     // 设置 IBL 辐照度（Cubemap）：RSM 不可用时的回退来源（世界空间、视角无关）
     void SetIBL(rhi::IRHITexture* irradiance, rhi::IRHISampler* sampler);
 
-    // 捕获当前帧 HDR 到前帧纹理（供下帧 DDGI 探针采样真实辐射度）
-    void CaptureHDR(rhi::IRHICommandList* cmd, rhi::IRHITexture* hdr);
-
+    /// 注入共享的前帧 HDR 辐射度组件（非拥有）。须在 Initialize 之前调用。
+    void SetRadianceHistory(GIRadianceHistory* radiance) { m_Radiance = radiance; }
     // 探针数据缓冲（供 Lighting Pass 绑定，每帧更新后为最新 blend 结果）
     rhi::IRHIBuffer* GetProbeBuffer() const { return m_ProbeBuffer.get(); }
 
@@ -95,17 +98,13 @@ private:
 
     // 采样器
     std::unique_ptr<rhi::IRHISampler> m_PointSampler;    // 点采样（GBuffer 读取）
-    std::unique_ptr<rhi::IRHISampler> m_LinearSampler;   // 线性采样（前帧 HDR 读取）
+    std::unique_ptr<rhi::IRHISampler> m_LinearSampler;   // 线性采样（RSM 等读取）
 
-    // 前帧 HDR 辐射度纹理（上个帧的 Lighting 输出，供探针采真实辐照度）
-    std::unique_ptr<rhi::IRHITexture> m_PrevHDR;
-    rhi::DescriptorSetLayoutHandle m_PrevHDR_Layout = rhi::kInvalidLayout;
-    rhi::DescriptorSetHandle       m_PrevHDR_Set    = rhi::kInvalidSet;  // set=0 的追加描述符
-
-    // HDR → 1/4 分辨率下采样（FullscreenCopy：线性采样源 HDR 自动降采样，省探针采样带宽）
-    std::unique_ptr<rhi::IRHIPipelineState> m_DownsamplePSO;
-    rhi::DescriptorSetLayoutHandle m_DownsampleLayout = rhi::kInvalidLayout;
-    rhi::DescriptorSetHandle       m_DownsampleSet    = rhi::kInvalidSet;
+    // 前帧 HDR 辐射度：改为消费共享组件（GIRadianceHistory），不再自有一份纹理与下采样
+    // pass——多个 GI 源各拷一份等于每帧多付几次全屏下采样，正是 §3.5 反对的
+    // 「白付一份全量成本」。非拥有，由管线注入（见 SetRadianceHistory）。
+    GIRadianceHistory* m_Radiance = nullptr;
+    u32 m_RadianceGeneration = 0;   // 已绑定的纹理代次；与组件比对以决定是否重绑描述符
 
     // GBuffer 输入（不持有所有权）
     rhi::IRHITexture* m_Depth  = nullptr;

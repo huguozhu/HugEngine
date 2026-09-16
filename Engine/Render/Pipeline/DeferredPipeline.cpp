@@ -111,6 +111,10 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     m_GBuffer->SetVisibleIndices(&m_GPUVisibleIndices);
     m_GBuffer->SetMeshBatcher(&m_MeshBatcher);
 
+    // 前帧 HDR 辐射度：GI 源共享的一份（DDGI 探针、SSGI 的入射辐射度都用它）。
+    // 必须在各 GI 源 Initialize 之前建好并注入，使它们在 Initialize 阶段即可绑到有效纹理。
+    m_RadianceHistory.Initialize(device, m_Width, m_Height);
+    m_DDGI.SetRadianceHistory(&m_RadianceHistory);
     m_SSGI.Initialize(device, m_Width, m_Height);
     m_SSR.Initialize(device, m_Width, m_Height);
     m_DDGI.Initialize(device, m_Width, m_Height);
@@ -434,6 +438,7 @@ void DeferredPipeline::Shutdown() {
     m_SSGI.Shutdown();
     m_SSR.Shutdown();
     m_DDGI.Shutdown();
+    m_RadianceHistory.Shutdown();
     m_ParticleRenderer.Shutdown(m_Device);
     m_DenoiseSSGI.Shutdown();
     m_DenoiseSSR.Shutdown();

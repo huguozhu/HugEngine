@@ -24,6 +24,7 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "PostProcess/SSAO.h"
 #include "GI/GI_SSR.h"
 #include "GI/GI_DDGI.h"
+#include "GI/GIRadianceHistory.h"   // 前帧 HDR 辐射度（GI 源共享）
 #include "GI/GI_IBL.h"
 #include "GI/GITypes.h"   // GIConfig（通道层栈 + 档位）
 #include "GI/IGIProvider.h"   // GI 源统一抽象（P4）
@@ -84,6 +85,8 @@ public:
     IGlobalIllumination* GetGI()           override { return m_GI.get(); }
     ToneMapPass*         GetToneMap()            { return m_PostProcess.GetToneMap(); }
     GI_DDGI*             GetDDGI()               { return &m_DDGI; }
+    /// 前帧 HDR 辐射度（供需要真实入射辐射度的 GI 源消费）
+    GIRadianceHistory&   GetRadianceHistory()     { return m_RadianceHistory; }
     GI_SSGI*             GetSSGI()               { return &m_SSGI; }
     GI_SSR*              GetSSR()                { return &m_SSR; }
     // GI 配置（M2 数据驱动：档位/通道/强度单一数据源）
@@ -193,6 +196,8 @@ private:
     GI_SSGI m_SSGI;
     GI_SSR  m_SSR;
     GI_DDGI m_DDGI;
+    /// 前帧 HDR 辐射度（GI 源共享；DDGI 探针与 SSGI 的入射辐射度都取自它）
+    GIRadianceHistory m_RadianceHistory;
     GIConfig m_GIConfig;   // GI 配置（M2 档位/通道/强度 → P3 源层栈单一数据源）
     std::vector<std::unique_ptr<IGIProvider>> m_GIProviders;   // 已注册的 GI 源（P4）
 
