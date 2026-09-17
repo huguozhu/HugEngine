@@ -533,6 +533,99 @@ UE 用「设置间约束」表达耦合；HugEngine 的对应物是在 `GIRegist
 > `r.AmbientOcclusion.Method` 及其 help 原文；`RenderDiffuseIndirectAndAmbientOcclusion`、
 > `ELumenIndirectLightingSteps`、`URendererSettings::PostEditChangeProperty` 的联动逻辑。
 
+### 4.4 降噪现状与统一框架（待改造）
+
+> 本节回答「统一降噪框架和现在的实现有什么不同」。一句话概括：
+> **现在 = 两个通用滤波器类 + N 个手工拼装点；目标 = 一个按「信号类型」分派的降噪器 + N 份配置。**
+>
+> 它由 `IGIProvider` 的**附属 pass 机制**交付（`GetAuxPassCount/Name/Input/Output` +
+> `RenderAux`），因此与 §4.3 属同一层的架构问题。
+
+#### 4.4.1 现状：两个互不相关的类，9 个实例
+
+| 类 | 算法 | 实例 | 数量 |
+|---|---|---|---|
+| `Denoiser` | 空间 5×5 双边（`PostProcess/Denoise.frag`） | `m_DenoiseSSGI` · `m_DenoiseSSR` · `m_ReflectionSpatial` · `m_GISpatial` | **4** |
+| `RTDenoiser` | 时域累积（`PostProcess/RT_DenoiseTemporal.frag`） | `m_ShadowDenoiser` · `m_AODenoiser` · `m_ReflectionDenoiser` · `m_GIDenoiser` · `m_PTDenoiser` | **5** |
+
+⇒ **9 套 PSO、9 套描述符集、9 个点采样器、14 张纹理**
+（时域实例各 2 张 history/output，空间实例各 1 张；分辨率随源而不同）。
+
+两个类的接口差异：
+
+| | `Denoiser` | `RTDenoiser` |
+|---|---|---|
+| 输入 | `color, depth, normal` | `noisyColor, depth, normal, velocity` |
+| 参数 | **硬编码**：`pc.dS = kDefaultDepthSigma(10)`、`pc.nS = kDefaultNormalSigma(8)`，**没有任何 setter** | `Config{ temporalBlend, depthThreshold, normalThreshold, format, width, height, debugName }` |
+| 历史 | **无**（纯空间） | `m_History` + `m_Output`，`Render` 末尾 swap 角色 |
+| 输出 | `m_Denoised` 单张、语义稳定 | `GetOutput()`——**swap 后语义变**，调用方必须理解该约定 |
+
+#### 4.4.2 六处「不统一」
+
+1. **没有「信号类型」这个概念。** UE 的 `ESignalProcessing` 含
+   `AmbientOcclusion` / `Reflections` / `DiffuseAndAmbientOcclusion` / `ShadowVisibilityMask` /
+   `ScreenSpaceDiffuseIndirect` / `IndirectProbeHierarchy` / `DiffuseSphericalHarmonic` ——
+   **一套框架按信号类型选滤波器、核、重建与升采样策略**。这里只有两种**通用**算法，
+   信号语义完全由调用方在外部拼装。佐证：**4 个 `Denoiser` 实例的参数完全相同**（无 setter），
+   即同一个 σ 核被用在**漫反射间接光**与**镜面反射**这两个噪声分布与可容忍模糊度都不同的信号上。
+2. **链条形状写在调用方的 if/else 里，不是数据。** `RTProvider` 手工持有 `m_Temporal` +
+   `m_Spatial` 两个指针，并用**位置约定**表达顺序：
+
+   ```cpp
+   [[nodiscard]] rhi::IRHITexture* GetAuxPassInput(u32 i) {
+       return IsTemporalIndex(i) ? MainOutput() : TemporalOrMain();   // 时域=0、空间=1
+   }
+   void RenderAux(cmd, i, ...) {
+       if (IsTemporalIndex(i)) { m_Temporal->SetInputs(MainOutput(), ...);    m_Temporal->Render(cmd); }
+       else if (m_Spatial)     { m_Spatial->SetInputs(TemporalOrMain(), ...); m_Spatial->Render(cmd); }
+   }
+   ```
+
+   再加一级滤波就得改这段。而 `SSGIProvider` / `SSRProvider` 又各自复制了一份几乎逐行同构的
+   `SetInputs + Render`。
+3. **历史与资源各自管理**：9 个实例各自 `CreateTexture`、各自 `OnResize`、各自建采样器。
+4. **没有批量 dispatch**：UE 的 `FScreenSpaceDenoiser` 可把多个信号打进**同一个 dispatch**
+   （`DenoiseGroup` / `CommonSettings`）；这里 4 个 RT 效果就发 4 组（每组 1–2 pass），
+   **降噪成本随信号数线性增长**——与 §3.5 的「N 份全量成本」是同一个病。
+5. **有效性协议没有框架级契约**，每个 shader 各写一遍。§9.2-C 的协议曾在**四处**断裂
+   （`SSR.frag` 写 1.0、空间降噪把 alpha 一起平均、时域降噪把符号 `lerp` 掉、合成端判定无生产者）
+   正是这个原因。框架化后「有效性」应成为一个**显式的、所有降噪器统一遵守的类型**，
+   而不是每个 shader 作者必须记得的约定。
+6. **半分辨率时完全跳过降噪**：`SSGIProvider::AuxActive()` 在 `halfRes` 时返回 false
+   ⇒ 半分辨率输出被直接采样。这是被「固定 5×5 双边 + 双线性上采样会糊」逼出来的取舍；
+   根因是**缺少「需要重建升采样」这一信号属性**（UE 用 `SignalSupportsUpscaling` 表达它）。
+   **这是本项唯一现在就成立、不依赖 Lumen 的画质收益。**
+
+#### 4.4.3 目标形状
+
+```cpp
+enum class DenoiseSignal { ShadowMask, AO, DiffuseIndirect, Reflection, ProbeIrradiance };
+
+struct DenoiseRequest {
+    DenoiseSignal     signal;
+    rhi::IRHITexture* noisy;
+    bool              hasHistory;    // 是否需要时域
+    bool              needsUpscale;  // 是否半分辨率到全分辨率重建
+    // 其余参数按信号类型取默认值，可覆盖
+};
+
+// 一次提交多个请求；框架负责：统一分配历史、按时域到空间排序、批量 dispatch，
+// 并把「有效性」作为契约贯穿始终
+void Denoise(rhi::IRHICommandList* cmd, std::span<const DenoiseRequest> requests);
+```
+
+#### 4.4.4 切入路径：分三步，前两步不必等消费方
+
+| 步 | 内容 | 代价 | 即时收益 / 判据 |
+|---|---|---|---|
+| **11.1** | 把 `SSGIProvider` / `SSRProvider` 的重复合并成一个共享实现；顺带把 `Denoiser` 的 `depthSigma` / `normalSigma` 变成**可配置** | 小 / 低 | **有**：修掉「参数硬编码」（现在两个语义不同的信号用同一个核）。判据：背靠背单源采样逐项一致 |
+| **11.2** | 让 `RTProvider` 的降噪链**变成数据**（用 `std::vector<stage>` 取代两个指针 + 索引约定） | 小 / 中 | 纯去重：加第三级滤波不必改框架。判据同上 |
+| **11.3** | **按信号类型分派**（`DenoiseSignal` + 统一历史分配 + 批量 dispatch + 框架级有效性契约） | 中 / 大 | **需要消费方**（Lumen / P6 / 多信号共存）才能验证抽象选型是否对 |
+
+> **判断**：**11.1 与 11.2 值得提前做**（纯去重、判据现成，且 11.1 顺带修掉参数硬编码）；
+> **11.3 应等消费方**——否则就是在猜该有哪些信号类型、每种信号要什么核。
+> 「半分辨率也降噪」依赖 `needsUpscale` 这一信号属性，属 **11.3**，不是 11.1。
+
 ---
 
 ## 5. 可用性与降级
@@ -863,7 +956,10 @@ Vulkan 校验 46 条与改前一致。
 |:---:|---|---|---|
 | **9** | **§3.2 置信度体系**（屏幕空间源的逐像素可信度） | 中 / 中 | §3.2 自己写着这套东西"**均未落地**"，目前只有"屏幕边缘 5% 降权"一条。缺它 ⇒ 屏幕空间源在屏幕外/背面无数据时**无法按像素降权**，只能整幅参与加权——这正是归一化在屏幕空间源上最薄弱的地方。**也是以后接 Lumen 的前置**（§4.3） |
 | **10** | **SSGI-CAL · 标度与量纲标定**（= §9.2-P） | 中 / 中 | P5 退场后的接棒项。补入射辐射度项 + 余弦项归一化 + 以 PT 标定。**依赖第 1 项**（需要一个可信的参照量）；几何前置（M/N/O）已完成 |
-| **11** | **统一降噪框架**（AO / GI / 反射 / 阴影 / 探针共用） | 中 / 中 | 现在每个 Provider 自带降噪（`Denoiser` / `RTDenoiser`），**降噪器之间不组合**；这是接 Lumen 时会立刻撞上的问题（§4.3）。与第 10 项有协同——补 `L_in` 后噪声上升，需要更强的降噪。参照 UE 的 `ScreenSpaceDenoise` 一套服务多种信号 |
+| **11** | **统一降噪框架**（AO / GI / 反射 / 阴影 / 探针共用）—— 设计与现状对照见 **§4.4** | 中 / 大 | 现在每个 Provider 自带降噪（`Denoiser` / `RTDenoiser`，共 **9 个实例 / 9 套 PSO / 14 张纹理**），**降噪器之间不组合**——§9.2-C 的有效性协议四处断裂正由此而来。分三步： |
+| **11.1** | 合并 `SSGIProvider` / `SSRProvider` 的重复降噪实现；把 `Denoiser` 的 `depthSigma` / `normalSigma` 变成**可配置** | 小 / 低 | **有即时收益**：4 个 `Denoiser` 实例参数完全相同且无 setter，**同一个 σ 核被用在漫反射间接光与镜面反射两种语义不同的信号上**。判据：背靠背单源采样逐项一致 |
+| **11.2** | `RTProvider` 的降噪链**改为数据**（用 `std::vector<stage>` 取代 `m_Temporal`/`m_Spatial` 两指针 + 索引位置约定） | 小 / 中 | 纯去重：加第三级滤波不必再改 `RenderAux`。可与 11.1 合成一次提交 |
+| **11.3** | **按信号类型分派**（`DenoiseSignal` + 统一历史分配 + 批量 dispatch + 框架级有效性契约） | 中 / 大 | **需要消费方**（Lumen / P6 / 多信号共存）来验证抽象选型；并能让**半分辨率也降噪**（现在 `AuxActive()` 在 `halfRes` 时直接跳过） |
 
 **D 组 · 质量与性能**
 
@@ -944,13 +1040,35 @@ Vulkan 校验 46 条与改前一致。
   `SourceWeight` 需同步扩展（已有 `static_assert` 守布局漂移）。
 - 判据：屏幕边缘处屏幕空间源的权重降为 0 后，该处只剩 IBL/DDGI，且白炉仍守恒。
 
-**11 · 统一降噪框架**
+**11 · 统一降噪框架**（设计与现状的完整对照见 **§4.4**）
 
-- 现状：`Denoiser`（空间 5×5 双边）与 `RTDenoiser`（时域 + 空间）分属不同 Provider，
-  **降噪器之间不组合**——§9.2-C 的有效性协议此前正是被降噪器破坏的。
-- 目标：一套「按信号类型分派」的降噪（AO / 漫反射间接 / 反射 / 阴影 / 探针），照 UE 的
-  `ESignalProcessing` 做法。
-- 判据：多个带降噪的源共存时，任何一个的有效性/不可用标记都能正确穿透到合成端。
+现状：`Denoiser`（空间 5×5 双边）× 4 + `RTDenoiser`（时域累积）× 5 = **9 个实例、
+9 套 PSO、14 张纹理**；两个类的输入签名与参数机制互不相同；链条形状由调用方的
+`if (IsTemporalIndex(i))` 位置约定表达。
+
+分三步，**每步独立可提交、独立可回退**：
+
+- **11.1 · 去重 + 参数可配**（小 / 低，**有即时收益**）
+  - 做了什么：把 `SSGIProvider` / `SSRProvider` 里逐行同构的 `SetInputs + Render` 合并成
+    一个共享实现；给 `Denoiser` 补 `SetDepthSigma/SetNormalSigma`（现在 `Render` 里直接写
+    `kDefaultDepthSigma(10)` / `kDefaultNormalSigma(8)`，无任何 setter）。
+  - 为什么现在值得做：**4 个实例参数完全相同**，意味着同一个滤波核被用在漫反射间接光与
+    镜面反射上——这两种信号的噪声分布与可容忍模糊度不同。这是"统一"最省的第一步。
+  - 判据：背靠背单源采样逐项一致（`Tools/gi/analyze_gi.py`）+ 白炉 1.0000 + 单测全绿。
+- **11.2 · 链条数据化**（小 / 中）
+  - 做了什么：`RTProvider` 用 `std::vector<Stage>` 取代 `m_Temporal` + `m_Spatial` 两个指针
+    与 `IsTemporalIndex(i) ? MainOutput() : TemporalOrMain()` 的位置约定；
+    `GetAuxPassCount/Name/Input/Output` 与 `RenderAux` 改为遍历该向量。
+  - 判据：同上；并确认给 RT 效果加第三级滤波只需 push 一个 stage、不改框架代码。
+- **11.3 · 按信号类型分派**（中 / 大，**需要消费方**）
+  - 做了什么：引入 `DenoiseSignal`；统一分配历史纹理与采样器；支持把多个信号批量 dispatch；
+    把"有效性（`alpha<0`）"提升为框架级契约（见 §4.4.3 的目标形状）。
+  - 为什么必须等消费方：**要猜出该有哪些 `DenoiseSignal`、每种信号要什么核与升采样策略，
+    必须有真实的多信号共存场景**（Lumen / P6）。没有消费方的泛化无法验收。
+  - 顺带收益：让**半分辨率也降噪**——现在 `SSGIProvider::AuxActive()` 在 `halfRes` 时返回
+    false，半分辨率输出被直接采样；根治需要 `needsUpscale`（重建升采样）这一信号属性。
+  - 与其它项的协同：第 10 项（SSGI-CAL）补 `L_in` 后噪声会上升，需要更强的降噪；
+    第 20 项（P6 / Lumen）会立刻撞上"两边降噪器不组合"。
 
 **14（K）· 15（J）**：见 §9.2 对应行。两项都小，可与 B 组并行。
 
