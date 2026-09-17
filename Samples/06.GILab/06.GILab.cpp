@@ -1399,6 +1399,10 @@ int main() {
             // 共享的前帧 HDR 辐射度（DDGI 探针 / SSGI 入射辐射度的共同输入）：
             // 它是 GI 源吃进去的东西，出问题时第一个要看的中间量
             addTarget("radiance", deferredPipeline.GetRadianceHistory().GetTexture());
+            // IBL 辐照度：DDGI 探针更新的**唯一**辐射度回退来源（GI_DDGI::SetIBL）。
+            // 若它为空/未绑定，DDGI 会静默退化为 DDGI.comp.slang 的硬编码兜底常数。
+            if (auto* giIBL = dynamic_cast<render::GI_IBL*>(deferredPipeline.GetGI()))
+                addTarget("ibl_irr", giIBL->GetIrradianceMap());
             const auto& providers = deferredPipeline.GetGIProviders();
             for (size_t i = 0; i < providers.size(); ++i) {
                 auto* p = providers[i].get();
