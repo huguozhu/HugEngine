@@ -343,6 +343,15 @@ VulkanTexture::VulkanTexture(VmaAllocator allocator, VkCommandPool cmdPool, VkQu
     // 作用于 VkImage，需要靠这份登记在开始 render pass 前补布局转换（见 TextureLayoutTracker.h）
     TrackViewImage(reinterpret_cast<void*>(m_ImageView), reinterpret_cast<void*>(m_Image),
                    m_MipLevels, m_ArrayLayers);
+    // 逐面视图也必须登记：立方体贴图是**逐面**渲染的（BeginOffscreenPass 传的是面视图），
+    // 而按面视图反查底层图像此前会失败——布局修正与纹理级判定都需要这份登记。
+    // 注意：非 cubemap 时 m_FaceViews 是空容器，故按 size() 遍历而不是按 kCubemapFaceCount 下标。
+    for (usize i = 0; i < m_FaceViews.size(); ++i) {
+        if (m_FaceViews[i] == VK_NULL_HANDLE) continue;
+        TrackViewImage(reinterpret_cast<void*>(m_FaceViews[i]), reinterpret_cast<void*>(m_Image),
+                       m_MipLevels, 1);
+    }
+
     HE_CORE_INFO("Vulkan texture created: {}x{} [{}]{} image={}", m_Width, m_Height,
                  m_Format == Format::RGBA8_UNORM ? "RGBA8" : "other",
                  isCubemap ? " cubemap" : "",
@@ -356,6 +365,12 @@ VulkanTexture::~VulkanTexture() {
     // 同时清理布局追踪记录（视图句柄会被销毁，避免复用导致误判）
     ForgetTrackedTextureLayout(reinterpret_cast<void*>(m_ImageView));
     ForgetViewImage(reinterpret_cast<void*>(m_ImageView));
+    // 逐面视图同样要注销：句柄会被销毁并可能复用，不注销会沿用上一张纹理的登记状态
+    for (auto& fv : m_FaceViews) {
+        if (!fv) continue;
+        ForgetTrackedTextureLayout(reinterpret_cast<void*>(fv));
+        ForgetViewImage(reinterpret_cast<void*>(fv));
+    }
 
     for (auto& fv : m_FaceViews)
         if (fv) vkDestroyImageView(m_Device, fv, nullptr);

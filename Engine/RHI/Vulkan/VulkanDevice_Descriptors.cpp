@@ -14,6 +14,7 @@
 
 #include "VulkanDevice.h"
 #include "VulkanTextureLiveness.h"   // 纹理存活登记：描述符更新前识别野指针（防偶发访问违例）
+#include "RHI/TextureLayoutTracker.h"   // 视图到图像登记：临时 mip 视图也要纳管（供「采样了从未写入的纹理」检测使用）
 #include "Core/Assert.h"
 
 #include <algorithm>
@@ -434,6 +435,11 @@ static void* CreateMipViewInternal(VkDevice device, VulkanTexture* vkTex,
     VkImageView view = VK_NULL_HANDLE;
     VkResult result = vkCreateImageView(device, &viewInfo, nullptr, &view);
     HE_ASSERT_MSG(result == VK_SUCCESS, label);
+    if (view == VK_NULL_HANDLE) return nullptr;
+    // 临时视图同样要登记「视图 → 底层图像」：它会被当作 render pass 附件写入
+    //（如 IBL 预滤波图的逐 mip 逐面视图），不登记则按该视图反查不到底层图像
+    TrackViewImage(reinterpret_cast<void*>(view), reinterpret_cast<void*>(vkTex->GetImage()),
+                   1, 1);
     return reinterpret_cast<void*>(view);
 }
 
@@ -457,6 +463,9 @@ void* VulkanDevice::CreateTextureMipSampledView(IRHITexture* texture, u32 mipLev
 
 void VulkanDevice::DestroyTextureMipView(void* view) {
     if (view) {
+        // 先注销登记：视图句柄会被销毁并可能被复用，不注销会沿用上一张纹理的登记状态
+        ForgetTrackedTextureLayout(view);
+        ForgetViewImage(view);
         vkDestroyImageView(m_Device, reinterpret_cast<VkImageView>(view), nullptr);
     }
 }
