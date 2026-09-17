@@ -354,6 +354,8 @@ L_o = albedo × E/π          ← 已乘接收面 albedo 的间接出射辐射�
 Lumen 不需要「SSGI 缓冲」与「DDGI 缓冲」——它只有一条射线。
 **本架构的组合方式决定了它必须付 N 份全量成本。**
 
+> 这条差异对"以后接 Lumen"的完整含义（哪些是硬冲突、哪些已有先例、怎么改造）见 **§4.3**。
+
 由此可识别的三类浪费（§10 有对应任务）：
 
 1. **严格冗余**：`SSAO + GTAO` 同时启用——二者共用**同一 pass、同一输出纹理**，
@@ -401,8 +403,135 @@ Lumen 不需要「SSGI 缓冲」与「DDGI 缓冲」——它只有一条射线�
 | `RSMProvider` | RSM | `RSM`（需场景数据） |
 | `RTEffectProvider` ×4 | RT 阴影 / RTAO / RT 反射 / RTGI | 主 pass → 时域累积（→ 空间滤波），共享 `AS_Build` |
 
-**「零侵入」实测结论**：新增一种源的改动量为——实现 Provider（新文件）+ 注册 **1 行**；
-帧图 / UBO / 合成循环 / 层栈结构 **0 行**。该承诺在 GTAO 与后续 10 源 Provider 化中均获验证。
+**「零侵入」实测结论（附限定条件）**：新增一种源、**且它落在已有 pass 类别覆盖范围内**时，
+改动量为——实现 Provider（新文件）+ 注册 **1 行**；帧图 / UBO / 合成循环 / 层栈结构 **0 行**。
+该承诺在 GTAO 与后续 10 源 Provider 化中均获验证。
+
+> ⚠️ **限定条件**：「0 行」只在**同类别内**成立。帧图目前有 **7 条按 source id 定制的循环**，
+> 且纹理绑定是「每个源一个具名字段 + 一个 shader `case`」——**引入一个"新类别"的源
+> （如 Lumen）需要新增循环与绑定，不是 0 行**。详见 §4.3。
+
+### 4.3 执行单位与跨通道耦合
+
+> 本节由「以后接 Lumen 会不会与现架构冲突」这一问题引出。**结论：合成端不冲突
+> （单元素栈已是精确直通），冲突在 Provider 的"执行单位"与"纹理绑定"两处。**
+
+#### 4.3.1 现状：执行单位是「Provider × 通道」，不是「Provider」
+
+帧图里共有 **7 条按 source id 定制的循环**（`DeferredPipeline_FrameGraph.cpp`）：
+
+| 行 | 循环守护的 id | pass 形状 |
+|---|---|---|
+| L315 | `RSM` | 全屏 offscreen（光源视锥光栅化） |
+| L334 | `DDGI` | compute，无通道纹理输出 |
+| L354 | `SSAO` 或 `GTAO` | 全屏 offscreen（AO 通道） |
+| L379 | `SSR` | 全屏 offscreen（镜面通道） |
+| L426 | `SSGI` | 全屏 offscreen（漫反射通道） |
+| L500 | `RTEffectProvider` 四实例 | RT dispatch（一次 `dynamic_cast`，再按 `GetSourceId()` 选通道输出） |
+| L582 | `IBL` | `Custom`：`rg.AddPass("IBL_Bake", {}, {}, ...)`，无 RG 资源，脏时重建 |
+
+每条形如
+`for (prov : m_GIProviders) { if (!prov->Handles(<某个 id>)) continue; ... rg.AddPass(...); prov->Render(...); }`。
+
+**后果**：若一个 Provider 同时 `Handles(SSGI)` 与 `Handles(SSR)`（Lumen 的天然形状），
+L379 与 L426 两条循环会**各注册一个同名 pass、各调一次 `Render`** ⇒ 追踪跑两遍、
+两条时域历史分裂、屏幕 trace 与 radiance cache 无法复用。**那样接入 Lumen，
+相对「SSGI + DDGI + RTGI 各付一份」几乎没有优势。**
+
+而且会**在 RenderGraph 里直接撞名**：两条循环都用 `prov->GetName()` 作为
+`rg.ImportTexture(...)` 的纹理名与 `rg.AddPass(...)` 的 pass 名 —— 同一个 Provider 就会被
+导入两次、注册两个同名 pass。这不是性能问题，是**帧图当前表达不了这个形状**。
+
+#### 4.3.2 另一半：纹理绑定是「每源一个具名字段 + 一个 shader case」
+
+权重侧**已经是数组**（`GIChannelStack::sources[4]` + 合成循环里的 `blend.sources[i]`），
+但纹理侧**仍是硬编码**：`LightingInputs` 每个源一个具名字段
+（`ssaoTex` / `ssgiTex` / `ssrTex` / `rtGI` / `rtAO` / `rtReflection` / `rtShadowMask` /
+`rsmPositionMap` / `rsmFluxMap`；IBL 另走专用的 `SetIBLTextures`），
+`SampleDiffuseSource(id)` / `SampleSpecularSource(id)` 里每个源一个 `case`。
+
+⇒ **「层栈里放哪个源」是数据，「那个源的纹理在哪」是代码。** 这正是 §4.2 那句
+「帧图 0 行」需要加限定条件的原因。
+
+**一个现成的实例（AO 通道走半条旁路）**：帧图里 AO 的输出既按 Provider 导入
+（L358-360 `prov->GetAOOutput()` → `"AO_Output"`），**又在喂给合成端时绕过 Provider 直接取模块成员**
+——`L661 in.ssaoTex = m_SSAO.GetAOTexture()`（而同通道的 RTAO 走的是 `L706 in.rtAO = rtAOTex`，
+即 Provider 路径）。也就是说 **AO 通道目前是"直接访问 + Provider 路径"混用**：
+若将来把 SSAO 换成另一个 AO Provider，合成端仍会读 `m_SSAO` 的纹理。
+这也意味着合并循环时 **AO 那条不能与 specular/diffuse 同等对待**（见 §4.3.5 迁移策略）。
+
+另：`IGIProvider::GetPassKind()` 这个本该用于"帧图据此选择注册方式"的调度声明，
+**实际是死接口** —— `IGIProvider.h:63` 声明（默认 `Offscreen`）、`DDGIProvider.h:34`
+覆写为 `Compute`，**全仓无任何读取点**（§9.1 第 9 行）。
+
+#### 4.3.3 可照抄的模板就在代码里：`IBLProvider`
+
+`IBLProvider` **已经实现了** Lumen 需要的全部三点：
+
+| Lumen 的"不合群"之处 | IBL 的现有做法 |
+|---|---|
+| 一个源填**两个通道** | `GetDiffuseOutput()` → 辐照度；`GetSpecularOutput()` → 预滤波；**同一个 pass** |
+| **非每帧**的摊销阶段 | `Render()` 内 `if (m_IBL->IsDirty())` 脏时重建 |
+| 输出**不是通道纹理**的 pass | `rg.AddPass("IBL_Bake", {}, {}, ...)` |
+
+而 `GISourceId::IBL` **本来就同时出现在 diffuse 与 specular 两个层栈里**（§5.2 每档预设皆然）。
+**所以「同一个源 id 出现在多个通道 → 解析到同一个 Provider 实例 → 只跑一次 pass →
+产出多个通道的输出」这个形状已经跑通了。** 需要做的不是发明它，而是把它从「IBL 特例」
+提升为通用路径。
+
+`RTEffectProvider`（L500）是另一个半成品：**一次 `dynamic_cast`，再按 `GetSourceId()`
+选出该用哪个通道的输出**（L517-519），是通用分发的雏形。
+
+#### 4.3.4 对照 UE：它用「同一系统出现在两个槽位」表达耦合
+
+UE 的 `r.DynamicGlobalIlluminationMethod` 与 `r.ReflectionMethod` 是两个独立的「选一个」枚举，
+但选 Lumen GI 时 `URendererSettings::PostEditChangeProperty` 会**自动把反射也设为 Lumen**
+并弹框告知；Lumen 内部用
+`ELumenIndirectLightingSteps = ScreenProbeGather | Reflections | StoreDepthHistory | Composite`
+表示 GI 与反射是**同一系统的两个阶段**，由单一入口
+`RenderDiffuseIndirectAndAmbientOcclusion` 一起产出。
+
+**关键：UE 不是靠「一个 provider 填两个通道」，而是靠「两个槽位指向同一个系统」。**
+HugEngine 的等价表达更简单——**两个通道的层栈里出现同一个源 id**。
+
+**不学 UE 的部分**：不要改成「每槽位选一个」。单元素栈时 `Σ(c·w)/Σw ⇒ num/den = c`
+已是**精确直通**，**「选一个」本就是「加权平均」的特例**；换过去是纯损失表达力，
+而这个表达力正是 §1.1 声称要从那类模型里挣回来的东西。另外 UE 的方法枚举还带来锁死
+（前向着色下 GI/反射/阴影三个方法**都不可编辑**；选 Lumen GI 强制 Lumen 反射），
+正是本架构要避免的。
+
+#### 4.3.5 改造分三层（代价从小到大）
+
+| 层 | 内容 | 代价 | 性质 |
+|---|---|---|---|
+| **一** | 把 IBL 的形状写成**显式契约**：一个 Provider 可占多个通道；帧图保证每 Provider 每帧只注册一次 pass；「服务哪些通道」由 `GetDiffuse/Specular/AOOutput()` 是否非空表达 | **0 行代码**（注释/文档） | 立刻暴露 §4.2 的限定条件 |
+| **二** | 帧图从「按通道 7 条循环」→「**按 Provider 1 条循环**」；pass 形状按已被声明却零消费的 `GetPassKind()` 选择 | 中 / 集中在帧图一个文件 | **整洁性收益，不是硬前置**（见下方"逃生口"） |
+| **三** | 纹理绑定**数组化**：`LightingInputs` 具名字段 + shader per-id `case` → 每通道一组源纹理，按槽位索引取样 | 大（UBO + 描述符 + shader + 合成循环） | **真正的泛化**；唯一能同时让 Lumen 与 P6 不以特例形式落地的改动 |
+
+> **逃生口（重要）**：**第二层并不是解锁 Lumen 的必要条件。** 因为帧图在自己手里，
+> 随时可以像 IBL / RSM / RT 那样**给 Lumen 加第 8 条定制循环** —— 那条循环只认
+> `Handles(Lumen)`，diffuse 循环（认 `SSGI`）与 specular 循环（认 `SSR`）都不会命中它，
+> **Lumen 的 pass 因此只注册一次，不存在双跑问题**。
+> 所以第二层的价值是**消掉 7 条循环的重复**（可维护性），不是"解锁"。
+> 真正让 Lumen 不以特例形式落地的是第三层。
+
+**明确不做**：
+- 不加 `GetChannelMask()` —— "我服务哪些通道"已经由三个 `GetXOutput()` 是否非空表达；
+- 不给 `GIChannelStack` 加 `primary` / `exclusive` 标志 —— 单元素栈已经是直通；
+- 不改合成公式。
+
+#### 4.3.6 可纯配置层做的一条（零渲染风险）
+
+UE 用「设置间约束」表达耦合；HugEngine 的对应物是在 `GIRegistry::Analyze()` 加一条诊断：
+
+> **某 Provider 服务多个通道，但只有部分通道的层栈里含它 ⇒ 它仍会整幅跑一次，另一半成本白付。**
+> 建议两个通道要么都启用、要么都禁用。
+
+这是 UE 那个弹框的等价物，且完全落在已有诊断框架内。
+
+> **外部依据**：UE 的 `r.DynamicGlobalIlluminationMethod` / `r.ReflectionMethod` /
+> `r.AmbientOcclusion.Method` 及其 help 原文；`RenderDiffuseIndirectAndAmbientOcclusion`、
+> `ELumenIndirectLightingSteps`、`URendererSettings::PostEditChangeProperty` 的联动逻辑。
 
 ---
 
@@ -527,6 +656,8 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 | 5 | `IGIProvider` 签名 | `GetBand`/`GetRange`/`IsValid`/输出/生命周期 | 多出 `Handles`/`NeedsPass`/`SyncToStack`/`GetPassKind`/`HasTextureOutput`/附属 pass 一组；`GetRange` 已移除 |
 | 6 | `Lightmap` 可用性 | 「预留，可用」 | `ToPipelineCap` 无该分支 → `IsAvailable` 恒 false，面板选不到 |
 | 7 | **`Tests` 的可测性前提** | 「`Tests` 不链接 Render 模块，故 GI 无法被单测」（依据 `Tests/CMakeLists.txt:48-54` 的直接列表） | **不成立**：直接列表虽无 Render，但 `HugEngineAI`(PUBLIC) → `HugEngineRender` + `HugEngineEditor` → `HugEngineRender`，**传递依赖早已把 Render/RHI/Vulkan 拉入**，`Engine/Render` 也已在包含路径上。GI 本就可测；抽 `GITypes.h` 的真实价值是**分层解耦**（纯数据头不再拉全量 RHI）与**显式依赖**，而非「否则测不了」 |
+| 8 | §4.2「帧图 0 行」 | 新增一种源，帧图 0 行 | **只在"落在已有 pass 类别内"时成立**。帧图实有 **7 条按 source id 定制的循环**（§4.3.1），引入新类别需新增循环。已在 §4.2 就地加限定条件 |
+| 9 | `IGIProvider::GetPassKind()` | §4.1 把它列为「调度」：决定帧图如何注册本源 pass | **实际是死接口**：`IGIProvider.h:63` 声明（默认 `Offscreen`）、`DDGIProvider.h:34` 覆写为 `Compute`，**全仓无任何读取点**——帧图实际按 source id 硬编码选择 pass 形状（§4.3.2） |
 
 ### 9.2 代码复核发现的缺陷（A/B/C/L 已实测修复，其余待验证）
 
