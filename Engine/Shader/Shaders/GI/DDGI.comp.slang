@@ -147,6 +147,13 @@ void main(uint3 id : SV_DispatchThreadID) {
                     valid = dot(radiance, radiance) > 0.0001;
                 }
             }
+            // 【逐样本回退】RSM 采不到（未渲染／不在光源视锥内／该处无 VPL）时退回 IBL 辐照度。
+            // 否则一旦 useRSM 被置位而 RSM 实际不可用，**整片探针**都会采不到数据，
+            // 全部落入下方的硬编码兜底常数 —— DDGI 会在"看起来正常"的情况下静默失去全部 GI。
+            if (!valid) {
+                radiance = u_IBLIrradiance.SampleLevel(u_LinearSampler, dir, 0).rgb;
+                valid = dot(radiance, radiance) > 0.0001;
+            }
         } else {
             // ── 回退：IBL 环境辐照度（世界空间、视角无关）──
             // 原屏幕 HDR 回退依赖视锥（视锥外采样点被跳过）→ 探针随相机位置/视角变化，

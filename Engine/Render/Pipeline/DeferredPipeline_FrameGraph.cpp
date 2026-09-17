@@ -312,6 +312,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         // ── RSM pass：遍历 Provider 注册（Wave 2 推广）──
         // Provider 自报「是否需要本帧的 pass」（层栈含 RSM ∧ 源有效），
         // 帧图只负责按注册顺序建 pass 并注入执行上下文。
+        bool rsmPassRegistered = false;
         for (auto& prov : m_GIProviders) {
             if (!prov->Handles(GISourceId::RSM)) continue;
             prov->SyncToStack(m_GIConfig.diffuse);
@@ -321,9 +322,16 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                     GIProviderContext ctx{ &world, &sg, &camera, m_CurrentFrameSlot };
                     p->Render(c, ctx);
                 });
+            rsmPassRegistered = true;
         }
         // 喂 DDGI：探针改用 RSM 世界辐射度
-        m_DDGI.SetRSM(m_RSM->GetRSMPositionMap(), m_RSM->GetRSMFluxMap(), lightVP);
+        // 【必须与上面的 pass 注册条件一致】RSM 未入漫反射层栈时本帧**不会渲染** RSM，
+        // 若仍把 position/flux 图交给 DDGI，探针会采到空数据；且 m_RSMPositionMap 一旦
+        // 置位永不清除 ⇒ useRSM 恒为 1 ⇒ DDGI 永久走空 RSM 路径、静默丢掉全部 GI
+        // （表现为 DDGI.comp.slang 的硬编码兜底常数被当成 GI 结果，见 §11.3.1）。
+        if (rsmPassRegistered) {
+            m_DDGI.SetRSM(m_RSM->GetRSMPositionMap(), m_RSM->GetRSMFluxMap(), lightVP);
+        }
     }
 
     // ============================================================
