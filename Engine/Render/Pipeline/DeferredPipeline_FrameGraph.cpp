@@ -590,7 +590,15 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     for (auto& prov : m_GIProviders) {
         if (!prov->Handles(GISourceId::IBL)) continue;
         prov->SyncToStack(m_GIConfig.diffuse);
-        if (!prov->NeedsPass(m_GIConfig.diffuse)) continue;
+        // IBL 的产物被三处共用：diffuse 通道（辐照度）、specular 通道（预滤波），
+        // 以及 DDGI 探针更新的辐射度回退（GI_DDGI::SetIBL，无条件注入）。
+        // 故门控不能只看 diffuse——否则「IBL 只在镜面栈」或「漫反射栈只放 DDGI」时
+        // 辐照度图永不烘焙，DDGI 会静默退化为 DDGI.comp.slang 里的硬编码兜底常数
+        // （sh[0] = 0.02/0.03/0.08），即 DDGI 实际不做任何 GI。
+        const bool neededByDiffuse  = prov->NeedsPass(m_GIConfig.diffuse);
+        const bool neededBySpecular = prov->NeedsPass(m_GIConfig.specular);
+        const bool neededByDDGI     = m_DDGI.IsEnabled();   // 探针更新要采辐照度
+        if (!neededByDiffuse && !neededBySpecular && !neededByDDGI) continue;
         rg.AddPass("IBL_Bake", {}, {},
             [&, p = prov.get()](rhi::IRHICommandList* c) {
                 p->Render(c, GIProviderContext{ &world, &sg, &camera, m_CurrentFrameSlot });
