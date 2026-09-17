@@ -279,6 +279,10 @@ void VulkanCommandList::BeginOffscreenPass(
     if (colorView) attachments[attachmentCount++] = colorView;
     if (depthView) attachments[attachmentCount++] = depthView;
 
+    // 该 pass 会写入这两个附件：登记为"已写入"，供「采样了从未写入的纹理」检测使用（§9.2-S）
+    MarkViewWritten(colorImageView);
+    MarkViewWritten(depthImageView);
+
     VkFramebuffer offscreenFB = VK_NULL_HANDLE;
     VkFramebufferCreateInfo fbInfo{};
     fbInfo.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
@@ -358,6 +362,10 @@ void VulkanCommandList::BeginOffscreenPassMRT(
     auto depthView = static_cast<VkImageView>(depthImageView);
     u32 depthIndex = attachmentCount;
     if (depthView) attachments[attachmentCount++] = depthView;
+
+    // 同上：本 pass 会写入这些附件，登记为"已写入"
+    for (u32 i = 0; i < colorCount && i < 7; ++i) MarkViewWritten(colorImageViews[i]);
+    MarkViewWritten(depthImageView);
 
     VkFramebuffer offscreenFB = VK_NULL_HANDLE;
     VkFramebufferCreateInfo fbInfo{};

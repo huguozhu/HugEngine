@@ -334,6 +334,27 @@ void VulkanDevice::UpdateDescriptorSet(DescriptorSetHandle setHandle, u32 bindin
     }
 
     VkDescriptorType vkType = ToVkDescType(type);
+
+    // ── 采样「从未被写入的纹理」检测（§9.2-S）──
+    // 未初始化显存被采样会把一个消费者门控写漏放大成静默的物理错误：读到 NaN 或垃圾时画面
+    // 只是看起来偏暗、不报任何错，且读数随内存布局变化而不可复现。
+    // 判定带累计阈值（见 TextureLayoutTracker.h），故不会因为首帧先采样后写入而误报；
+    // 这里只每张图告警一次，把它变成一条带尺寸与格式的明确日志，不改写纹理内容、不阻断渲染。
+    // 例外：UnorderedAccess 纹理由 compute 着色器写入、RHI 无法跟踪写路径，创建时已登记为豁免。
+    if (vkType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+        bool firstWarn = false;
+        if (!IsViewWritten(reinterpret_cast<void*>(imgView), &firstWarn) && firstWarn) {
+            HE_CORE_WARN("[RHI] 描述符指向一张从未被写入的纹理：binding={} {}x{} Format={} VkFormat={} 层数={} usage={:#x} image={:#018x} —— "
+                         "读到的是未初始化显存（可能是 NaN 或垃圾，且随内存布局变化）。"
+                         "若该效果本次未产出（门控关闭），请在绑定时改用占位纹理；"
+                         "否则请检查该纹理的写入方是否被某个消费者门控漏掉了。",
+                         binding, vkTex->GetWidth(), vkTex->GetHeight(),
+                         (u32)vkTex->GetFormat(), (u32)vkTex->GetVkFormat(),
+                         vkTex->GetArrayLayers(), (u32)vkTex->GetUsage(),
+                         (u64)(uintptr_t)vkTex->GetImage());
+        }
+    }
+
     // CombinedImageSampler 必须提供有效采样器；SampledImage 允许为空（Load 不采样）
     if (vkType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &&
         (vkSamp == VK_NULL_HANDLE || vkSamp == (VkSampler)0xdddddddddddddddd)) {

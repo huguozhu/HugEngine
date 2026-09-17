@@ -586,6 +586,8 @@ void VulkanCommandList::CopyBuffer(IRHIBuffer* src, IRHIBuffer* dst,
 void VulkanCommandList::CopyTextureToTexture(IRHITexture* src, IRHITexture* dst) {
     auto* vkSrc = static_cast<VulkanTexture*>(src);
     auto* vkDst = static_cast<VulkanTexture*>(dst);
+    // 拷贝目标被写入确定内容：登记为"已写入"（供「采样了从未写入的纹理」检测使用，§9.2-S）
+    MarkViewWritten(vkDst->GetNativeHandle());
     u32 w = vkSrc->GetWidth(), h = vkSrc->GetHeight();
 
     VkImageMemoryBarrier preBarriers[2]{};
@@ -715,6 +717,9 @@ void VulkanCommandList::ClearDepthStencil(IRHITexture* texture, float depth) {
     auto* vkTex = static_cast<VulkanTexture*>(texture);
     VkImage image = vkTex->GetImage();
     if (!image) return;
+
+    // 清除即写入确定值：登记为"已写入"（供「采样了从未写入的纹理」检测使用，§9.2-S）
+    MarkViewWritten(vkTex->GetNativeHandle());
 
     VkCommandBuffer cb = m_CmdBuffers[m_FrameIndex];
 

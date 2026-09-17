@@ -242,6 +242,7 @@ VulkanTexture::VulkanTexture(VmaAllocator allocator, VkCommandPool cmdPool, VkQu
     , m_SampleCount(desc.sampleCount)
     , m_Format(desc.format)
     , m_VkFormat(ToVkFormat(desc.format))
+    , m_Usage(desc.usage)
 {
     // 登记纹理存活（诊断用）：让"已销毁纹理的野指针"在解引用前可被识别
     //（背景见 VulkanTextureLiveness.h —— 曾导致 06.GILab 的偶发访问违例）
@@ -350,6 +351,14 @@ VulkanTexture::VulkanTexture(VmaAllocator allocator, VkCommandPool cmdPool, VkQu
         if (m_FaceViews[i] == VK_NULL_HANDLE) continue;
         TrackViewImage(reinterpret_cast<void*>(m_FaceViews[i]), reinterpret_cast<void*>(m_Image),
                        m_MipLevels, 1);
+    }
+
+    // 「已写入」登记（供「采样了从未被写入的纹理」检测使用，见 TextureLayoutTracker.h）：
+    //  1) 带初始数据的纹理已由 UploadInitialData 写入确定内容；
+    //  2) UnorderedAccess 纹理由 compute 着色器写入，RHI 无法跟踪写出路径，这里直接登记为豁免，
+    //     否则会把它们全部误报成从未写入（该检测只告警、不改写纹理内容）。
+    if (desc.initialData || (u32(desc.usage) & u32(TextureUsage::UnorderedAccess))) {
+        MarkViewWritten(reinterpret_cast<void*>(m_ImageView));
     }
 
     HE_CORE_INFO("Vulkan texture created: {}x{} [{}]{} image={}", m_Width, m_Height,

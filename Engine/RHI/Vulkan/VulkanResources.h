@@ -69,6 +69,8 @@ public:
     }
     VkFormat   GetVkFormat() const { return m_VkFormat; }
     VkDevice   GetDevice()   const { return m_Device; }
+    /// 创建时声明的用途位（诊断用：判断某纹理是否可能由 compute 写入，见 TextureLayoutTracker.h）
+    TextureUsage GetUsage()  const { return m_Usage; }
 private:
     void UploadInitialData(VkCommandPool cmdPool, VkQueue queue, const TextureDesc& desc);
     VkDevice         m_Device       = VK_NULL_HANDLE;
@@ -85,6 +87,7 @@ private:
     u32              m_SampleCount  = 1;
     Format           m_Format       = Format::RGBA8_UNORM;
     VkFormat         m_VkFormat     = VK_FORMAT_R8G8B8A8_UNORM;
+    TextureUsage     m_Usage        = TextureUsage::ShaderResource;   // 创建时声明的用途位
 };
 
 // ============================================================
