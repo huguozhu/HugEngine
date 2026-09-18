@@ -35,8 +35,12 @@ struct VSOutput {
 [[vk::binding(kGPUBinding_IrradianceMap, kGPUDescSet_PerFrame)]] SamplerState        u_IBLSampler;
 [[vk::binding(kGPUBinding_PrefilterMap, kGPUDescSet_PerFrame)]] TextureCube<float4> u_PrefilterMap;
 [[vk::binding(kGPUBinding_BRDF_LUT, kGPUDescSet_PerFrame)]] Texture2D<float2>   u_BRDF_LUT;
+// RSM 贴图（15/16）：**本着色器不采样它们**。Deferred 的 RSM 源由共享的半分辨率 pass
+// （GI/RSM_Indirect.frag.slang）求值，这里只采下面的 u_RSMIndirect（L_o/albedo = E/π）。
+// 声明保留是为了与 Forward 的 PBR.frag（内联 RSM 求和，同样用 15/16）共用同一套 binding 号，
+// 两套 per-frame set 的布局各自独立。任务 30 起 16 号只存编码法线（此前 .a 兼存通量）。
 [[vk::binding(kGPUBinding_RSMPosition, kGPUDescSet_PerFrame)]] Texture2D<float4>   u_RSMPositionMap;
-[[vk::binding(kGPUBinding_RSMFlux, kGPUDescSet_PerFrame)]] Texture2D<float4>   u_RSMFluxMap;
+[[vk::binding(kGPUBinding_RSMFlux, kGPUDescSet_PerFrame)]] Texture2D<float4>   u_RSMNormalMap;
 // RSM 间接光辐照度 E（半分辨率，由 GI/RSM_Indirect.frag.slang 产出；任务 16）
 [[vk::binding(kGPUBinding_RSMIndirect, kGPUDescSet_PerFrame)]] Texture2D<float4> u_RSMIndirect;
 

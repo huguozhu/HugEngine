@@ -67,6 +67,13 @@ public:
         bool allowSecondary = false
     ) = 0;
     // MRT 版本：多个颜色附件（用于 Deferred GBuffer / RSM 等）
+    //
+    // `clears` 的**长度契约**：`colorCount` 个颜色项 + 末尾**一个**深度项（共 colorCount+1 项），
+    // 深度项在 `clears[colorCount]`。写成 `ClearValue clears[colorCount]` 会让实现读到数组尾后
+    // 的一个 ClearValue 当深度清除值（越界读）——症状不是崩溃，而是**深度被清成垃圾值**
+    // ⇒ 该 pass 的几何全被深度测试丢掉、附件里只剩颜色清除值，而 pass 耗时照付。
+    // 这正是 §9.2-AA 里"RSM 位置/法线/通量图恒为 0"的直接原因（RSM 调用点当时写的是
+    // `ClearValue clears[2]` 而 colorCount=2）。参考写法见 `GBufferRenderer_GPU.cpp`（7+1）。
     virtual void BeginOffscreenPassMRT(
         void* const* colorImageViews, u32 colorCount,
         void* depthImageView,

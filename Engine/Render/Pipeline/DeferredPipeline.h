@@ -112,6 +112,11 @@ public:
     GBufferRenderer*    GetGBuffer()       { return m_GBuffer.get(); }
     /// 已注册的 GI Provider（帧图按注册表遍历构建 pass，而非手写门控）
     std::vector<std::unique_ptr<IGIProvider>>& GetGIProviders() { return m_GIProviders; }
+    /// RSM 子系统与它的半分辨率求值 pass（供离线采样设施逐级查看 RSM 链路：
+    /// 位置 / 法线 / VPL 辐射度 / 间接光输出。任务 30 的缺陷正是"pass 在跑、输出恒空"，
+    /// 没有这几级就只能猜 —— 见文档 §11.3 的采样目标清单）。
+    GI_RSM*      GetRSM()         { return m_RSM.get(); }
+    RSMIndirect& GetRSMIndirect() { return m_RSMIndirect; }
 
     // RT 基础设施访问（供 PathTracingPipeline 共享同一份 TLAS，避免重复内存）
     RTPass*             GetRTPass()        { return m_RTPass.get(); }
@@ -211,11 +216,15 @@ private:
     /// **不要用 `m_FrameCounter` 代替**：它只在启用异步计算时才自增，普通路径恒为 0。
     u32 m_DiagFrameCounter = 0;
 
-    // ── 场景包围盒（DDGI 网格自动拟合用，任务 14）──
+    // ── 场景包围盒（DDGI 网格自动拟合 + RSM 光源视锥，任务 14 / 任务 30）──
     /// 包围盒重算倒计时：遍历带变换的网格包围盒不是零成本，而场景几何很少变。
     /// **不能用 `m_FrameCounter` 代替**：它只在启用异步计算时才自增（普通路径恒为 0）。
     static constexpr u32 kSceneBoundsRefreshFrames = 30;
     u32 m_SceneBoundsCountdown = 0;
+    /// 最近一次算出的场景包围盒（`IsValid()` 为假表示还没有几何 / 场景为空）。
+    /// 两个消费者共用同一份：DDGI 探针网格拟合、RSM 光源正交视锥拟合（§9.2-AA ④
+    /// 之前 RSM 用的是硬编码的 sceneCenter=(0,3,0) / sceneRadius=60）。
+    he::AABB m_SceneBounds;
 
     // ── RT 基础设施（设备支持光追时创建；是否参与由层栈的 RT 源决定）──
     // P3：光追是「GI 源」而非「管线类型」，故 Deferred 亦可直接启用 RTGI/RT 反射/RTAO/RT 阴影

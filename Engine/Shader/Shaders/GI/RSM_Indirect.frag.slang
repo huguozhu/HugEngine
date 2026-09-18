@@ -7,12 +7,23 @@
 // （比 SSGI 的 0.436 ms 还大）。搬到半分辨率后这项成本降到 1/4 量级。
 //
 // 【为什么可以半分辨率】这一项的空间变化来自接收点位置与法线，而 16 个 VPL 分布在光源
-// 空间的一个 Poisson 盘上、`1/d²` 与两个余弦项在场景尺度上都变得很慢（最近与最远的 VPL
-// 距离比远小于像素尺度），所以它本身是低频量，与 SSGI 同类。判定不靠这句话，靠 A/B：
-// 搬走前后的单源做差 `S_rsm` 必须一致到噪声量级（见文档 §10.2 任务 16）。
+// 空间的一个 Poisson 盘上。判定不靠"它是低频量"这句话，靠 A/B：任务 16 用放大信号的
+// 方式量过全分辨率与半分辨率的逐像素一致性，任务 30 修好量级之后重测（见文档 §10.2）。
 //
-// 【与 Lighting 的分工】本 pass 输出**辐照度 E**（`RSM_VPL_ENERGY` 里已经含 1/π 的经验
-// 归一），Lighting 侧只再乘接收面 albedo，与搬走之前逐项一致。
+// 【通道约定】三张 RSM 贴图一个附件一个量，见 ShaderTypes.slang 的「RSM 贴图通道约定」：
+//   position = worldPos，normal = 编码法线，radiance = 该 VPL 的出射辐射度
+//   L_v = albedo·lightColor·intensity·NdotL/π（生成端已除 π）
+//
+// 【量级归一 / 任务 30 + §9.2-AA ①】本 pass 返回的是 `E/π`（与 IBL / DDGI / RTGI 同约定，
+// 调用方再乘接收面 albedo），估的是
+//     E/π = scale · Σ_i L_v,i · max(N·dir,0) · max(N_i·−dir,0) / |dir|²
+// 其中 `scale = u_Params.w`。**它必须由光源视锥的实际覆盖范围推出**，而不是一个常数：
+// 旧实现的 `RSM_VPL_ENERGY = 0.046875` 等于"一个 RSM texel 在 120 世界单位宽的光锥下的面积"
+// —— 也就是把场景钉死在半径 60 的假设上；而 Sponza 是 3720 单位宽，`1/d²` 让整项掉到 1e-8
+// （16 位浮点转储的噪声底），于是"pass 在跑、成本在付、画面里什么都没有"。
+// 现在 scale 由 C++ 侧 `GI/RSMFrustum.h` 的 `RSMVplScale(halfExtent, radiusUV, 16)` 算出：
+// scale = (radiusUV·2·halfExtent)² / 16。分母的 16 是"每个采样点均分采样盘面积"的 MC 归一，
+// 不是可调的艺术参数。
 //
 // 【天空像素写 0】这是与 SSGI 相同的约定：天空像素没有接收面，写 0 之后双线性升采样会在
 // 物体轮廓处混入一点 0（一圈很细的偏暗）。若改成"不写"，插值到的就是上一步的垃圾值。
@@ -23,21 +34,24 @@ struct VSOutput { float4 p:SV_Position; [[vk::location(0)]] float2 uv; };
 [[vk::binding(1,0)]] Texture2D<float4>  u_WorldPos;       // GBuffer MRT4：世界坐标
 [[vk::binding(2,0)]] Texture2D<float4>  u_Normal;         // GBuffer MRT1：世界空间法线
 [[vk::binding(3,0)]] Texture2D<float4>  u_RSMPositionMap; // RSM：世界位置
-[[vk::binding(4,0)]] Texture2D<float4>  u_RSMFluxMap;     // RSM：法线 + 通量（a = flux 权重）
+[[vk::binding(4,0)]] Texture2D<float4>  u_RSMNormalMap;   // RSM：编码法线
+[[vk::binding(6,0)]] Texture2D<float4>  u_RSMRadianceMap; // RSM：VPL 出射辐射度
 [[vk::binding(0,0)]] SamplerState       u_PointSampler;   // GBuffer 精确读取
 [[vk::binding(1,0)]] SamplerState       u_IBLSampler;     // 线性 clamp（沿用 Lighting 侧对该贴图的既有采样器名）
 [[vk::binding(5,0)]] cbuffer Params {
     float4x4 u_LightViewProj;   // 方向光的 RSM 光源 VP（与 RSM pass 同源，帧图传入）
-    float4   u_Params;          // x=lightCount, y=shadowParams.w(光源类型), z=shadowParams.z(阴影强度)
+    // x=lightCount, y=shadowParams.w(光源类型), z=shadowParams.z(阴影强度), w=VPL 采样缩放
+    float4   u_Params;
 };
 
-// VPL 采样点数与能量归一（M4.4）：
+// VPL 采样点数与采样盘半径（UV 空间）：
 //   原先用 5×5 规则网格（25 点）——规则网格会在斜面上产生条纹状伪影；
 //   改为 16 点 Poisson 盘（径向分布更均匀），采样数省 36%，伪影更少。
-//   离散化能量归一常数与 VPL 数量成反比：E ≈ (1/N)·Σ VPL_i，
-//   故系数由 25 点的 0.03 调整为 16 点的 0.03 × 25/16 ≈ 0.0469（保持总能量不变）。
-#define RSM_VPL_COUNT   16
-#define RSM_VPL_ENERGY  0.046875   // 0.03 × 25/16：按 VPL 数量反比归一
+//   半径与点数一起决定"这次求和覆盖多大的区域"，而该区域的世界面积就是每个采样点
+//   代表面积的分母（见文件头的 `scale` 公式），故这两个数**不要单独改**：
+//   改了半径必须重算 C++ 侧传给 `u_Params.w` 的 scale。
+#define RSM_VPL_COUNT      16
+#define RSM_VPL_RADIUS_UV  0.0125
 
 // 16 点 Poisson 盘（单位半径内近似均匀分布）
 static const float2 kRSMPoisson16[RSM_VPL_COUNT] = {
@@ -58,6 +72,7 @@ float4 fragmentMain(VSOutput input):SV_Target0{
     uint  lightCount     = uint(u_Params.x + 0.5);
     float shadowType     = u_Params.y;   // shadowParams.w：0=方向光 / 1=点光 / 2=聚光
     float shadowStrength = u_Params.z;   // shadowParams.z：<=0 表示该光源不投影
+    float vplScale       = u_Params.w;   // 每个 VPL 采样点代表的世界面积 / π（见文件头）
 
     // 仅当存在方向光阴影时才求值（与搬走之前逐条一致）：
     // shadowType >= 0.5 表示不是方向光；shadowStrength <= 0 表示没有阴影数据
@@ -75,16 +90,15 @@ float4 fragmentMain(VSOutput input):SV_Target0{
     float2 rsmUV = saturate(lsp.xy / lsp.w * 0.5 + 0.5);
     float3 rsmIndirect = float3(0.0);
     for (int i = 0; i < RSM_VPL_COUNT; i++) {
-        float2 suv = saturate(rsmUV + kRSMPoisson16[i] * 0.0125);   // 半径按 Poisson 盘归一后放大
+        float2 suv = saturate(rsmUV + kRSMPoisson16[i] * RSM_VPL_RADIUS_UV);   // 半径按 Poisson 盘归一后放大
         float4 ps = u_RSMPositionMap.Sample(u_IBLSampler, suv);
-        float4 fs = u_RSMFluxMap.Sample(u_IBLSampler, suv);
-        float3 sN  = normalize(fs.rgb * 2.0 - 1.0);
+        float3 sN = normalize(u_RSMNormalMap.Sample(u_IBLSampler, suv).rgb * 2.0 - 1.0);
+        float3 Lv = u_RSMRadianceMap.Sample(u_IBLSampler, suv).rgb;
         float3 dir = ps.xyz - worldPos;
         float  d2  = max(dot(dir, dir), 0.01);
-        rsmIndirect += fs.a * max(dot(N, normalize(dir)), 0.0)
-                     * max(dot(sN, -normalize(dir)), 0.0) / d2;
+        rsmIndirect += Lv * max(dot(N, normalize(dir)), 0.0)
+                         * max(dot(sN, -normalize(dir)), 0.0) / d2;
     }
-    // VPL 离散化能量归一（E ≈ (1/N)·Σ VPL），返回量纲为**辐照度 E**
-    // （1/π 已并入该经验常数）→ 调用方（Lighting）再乘接收面 albedo。
-    return float4(rsmIndirect * RSM_VPL_ENERGY, 1.0);
+    // 返回 E/π：调用方（Lighting）只再乘接收面 albedo
+    return float4(rsmIndirect * vplScale, 1.0);
 }

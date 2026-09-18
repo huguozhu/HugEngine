@@ -62,7 +62,11 @@ GPU_CONST(GPU_UINT kGPUBinding_IrradianceMap   = 12);  // IBL 辐照度图
 GPU_CONST(GPU_UINT kGPUBinding_PrefilterMap    = 13);  // IBL 预滤波环境图
 GPU_CONST(GPU_UINT kGPUBinding_BRDF_LUT        = 14);  // BRDF 积分 LUT
 GPU_CONST(GPU_UINT kGPUBinding_RSMPosition     = 15);  // RSM 位置图
-GPU_CONST(GPU_UINT kGPUBinding_RSMFlux         = 16);  // RSM 通量图
+GPU_CONST(GPU_UINT kGPUBinding_RSMFlux         = 16);  // RSM 法线图（任务 30 起：只放编码法线）
+// RSM VPL 辐射度图（任务 30）。绑定号只对 **Forward 的 per-frame set** 有意义：
+// Deferred 的 Lighting set 里 17 是 kGPUBinding_Lights_DL，而 Deferred 的 RSM 源走共享的
+// `RSM_Indirect` pass（它有自己的描述符集），故两边不会同时声明同一个号。
+GPU_CONST(GPU_UINT kGPUBinding_RSMRadiance     = 17);  // RSM VPL 辐射度图（Forward 内联路径用）
 
 // --- Deferred 管线 Binding 索引 ---
 GPU_CONST(GPU_UINT kGPUBinding_GBufferA      = 0);   // GBuffer albedo+metallic
@@ -143,6 +147,15 @@ GPU_STRUCT GIBlendParams {
     GIChannelBlendParams diffuse;        // 间接漫反射
     GIChannelBlendParams specular;       // 间接镜面
     GIChannelBlendParams ao;             // 环境光遮蔽
+    // 本帧 RSM VPL 采样缩放（任务 30 / §9.2-AA 的量级归一）：
+    //   `E/π = rsmVplScale · Σ (L_v · cosθ_s · cosθ_r / d²)`
+    // 由**该管线自己的** RSM 光源视锥与采样图案推出（C++ 侧 `GI/RSMFrustum.h` 的
+    // `RSMVplScale`，单测锁住"场景均匀缩放时估计量不变"）。
+    // 【谁读它】只有 `PBR.frag`（Forward）的**内联** RSM 求和读 —— Forward 没有 GBuffer，
+    // 无法使用共享的半分辨率 `RSM_Indirect` pass。Deferred 的 RSM 源走那个 pass，
+    // 其缩放由该 pass 自己的参数 UBO 传入，故 Deferred 侧这里填 0（**不要**误认为它生效）。
+    float        rsmVplScale;
+    float        _padBlend[3];           // 对齐到 16 字节边界，保持 std140 布局
 };
 
 // --- 渲染管线限制 ---

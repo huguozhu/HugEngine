@@ -18,7 +18,7 @@ static constexpr u32 kDDGIBindGridParams  = 4;   // 探针网格参数 UBO
 static constexpr u32 kDDGIBindHistory     = 5;   // 上一帧探针历史
 static constexpr u32 kDDGIBindPrevHDR     = 6;   // 前帧 HDR（屏幕回退）
 static constexpr u32 kDDGIBindRSMPosition = 7;   // RSM 位置图
-static constexpr u32 kDDGIBindRSMFlux     = 8;   // RSM 通量图
+static constexpr u32 kDDGIBindRSMRadiance     = 8;   // RSM 辐射度图（任务 30）
 static constexpr u32 kDDGIBindIBL         = 9;   // IBL 辐照度（Cubemap）
 static constexpr u32 kDDGIBindTracedRadiance = 10;  // 光追 march 的探针射线辐射度（任务 17）
 
@@ -86,7 +86,7 @@ bool GI_DDGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     // binding 4:   GridUniform  UniformBuffer（探针网格参数）
     // binding 5:   HistoryBuffer StorageBuffer（只读, 上一帧历史）
     // binding 6:   PrevHDR CombinedImageSampler（前帧 HDR 辐射度，屏幕回退）
-    // binding 7/8: RSM Position/Flux CombinedImageSampler（B 路径世界辐射度）
+    // binding 7/8: RSM Position/Radiance CombinedImageSampler（B 路径世界辐射度）
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = {
         {kDDGIBindAlbedo,      rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
@@ -97,7 +97,7 @@ bool GI_DDGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         {kDDGIBindHistory,     rhi::DescriptorType::StorageBuffer,         1, rhi::kStageMaskCompute},
         {kDDGIBindPrevHDR,     rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // 前帧 HDR
         {kDDGIBindRSMPosition, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // RSM Position
-        {kDDGIBindRSMFlux,     rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // RSM Flux
+        {kDDGIBindRSMRadiance,     rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // RSM Radiance（VPL 出射辐射度）
         {kDDGIBindIBL,         rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // IBL Irradiance (Cubemap)
         // 光追 march 的探针射线辐射度（任务 17）：A 路径的输入，未启用时 u_Flags.w=0 不采样
         {kDDGIBindTracedRadiance, rhi::DescriptorType::StorageBuffer,     1, rhi::kStageMaskCompute},
@@ -251,7 +251,7 @@ void GI_DDGI::Render(rhi::IRHICommandList* cmd) {
     const u32 phase  = updatePhase % stride;
     // 【A 路径优先】光追 march 可用时走真实可见性；RSM 是给不支持光追的设备留的 B 路径
     const bool tracedReady = (m_TracedRadiance != nullptr && m_TracedSamples == kNumSamples);
-    uniforms.flags = float4((m_RSMPositionMap && m_RSMFluxMap) ? 1.0f : 0.0f,
+    uniforms.flags = float4((m_RSMPositionMap && m_RSMRadianceMap) ? 1.0f : 0.0f,
                             float(stride), float(phase), tracedReady ? 1.0f : 0.0f);
     ++updatePhase;
 
@@ -282,15 +282,15 @@ void GI_DDGI::Render(rhi::IRHICommandList* cmd) {
         rhi::ResourceState::ShaderResource);
 }
 
-void GI_DDGI::SetRSM(rhi::IRHITexture* pos, rhi::IRHITexture* flux, const float4x4& lightViewProj) {
+void GI_DDGI::SetRSM(rhi::IRHITexture* pos, rhi::IRHITexture* radiance, const float4x4& lightViewProj) {
     m_RSMPositionMap   = pos;
-    m_RSMFluxMap       = flux;
+    m_RSMRadianceMap   = radiance;
     m_RSMLightViewProj = lightViewProj;
-    if (m_Device && pos && flux) {
+    if (m_Device && pos && radiance) {
         m_Device->UpdateDescriptorSet(m_Set, kDDGIBindRSMPosition, rhi::DescriptorType::CombinedImageSampler,
             pos, m_LinearSampler.get());
-        m_Device->UpdateDescriptorSet(m_Set, kDDGIBindRSMFlux, rhi::DescriptorType::CombinedImageSampler,
-            flux, m_LinearSampler.get());
+        m_Device->UpdateDescriptorSet(m_Set, kDDGIBindRSMRadiance, rhi::DescriptorType::CombinedImageSampler,
+            radiance, m_LinearSampler.get());
     }
 }
 
@@ -298,7 +298,7 @@ void GI_DDGI::ClearRSM() {
     // 只清成员（useRSM 由它们推导）；描述符留着不重绑——着色器在 useRSM=0 时
     // 根本不会采样 RSM 纹理（见 DDGI.comp.slang 的 u_Flags.x 分支），重绑反而多一次写。
     m_RSMPositionMap = nullptr;
-    m_RSMFluxMap     = nullptr;
+    m_RSMRadianceMap     = nullptr;
 }
 
 void GI_DDGI::FitGridToBounds(const float3& mn, const float3& mx) {

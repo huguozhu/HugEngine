@@ -38,8 +38,12 @@ public:
 
     /// 本帧 RSM 光源参数。lightViewProj 必须与 RSM pass 用**同一个**矩阵，
     /// 否则 VPL 查表位置与写入位置不一致（帧图把同一个值同时给两边）。
-    void SetRSM(rhi::IRHITexture* positionMap, rhi::IRHITexture* fluxMap,
-                const float4x4& lightViewProj, float shadowType, float shadowStrength, u32 lightCount);
+    /// `vplScale` = 每个 VPL 采样点代表的世界面积 / π，由 `GI/RSMFrustum.h` 的 `RSMVplScale`
+    /// 从该光锥的半宽推出（任务 30 / §9.2-AA ①：量级必须随场景尺度走，不能是常数）。
+    void SetRSM(rhi::IRHITexture* positionMap, rhi::IRHITexture* normalMap,
+                rhi::IRHITexture* radianceMap,
+                const float4x4& lightViewProj, float vplScale,
+                float shadowType, float shadowStrength, u32 lightCount);
 
     /// **必须在 BeginOffscreenPass 之前调用**：RHI 用「当前已绑定的 PSO」推导 RenderPass
     /// 来建 Framebuffer，先开 pass 再绑管线会建出附件数不匹配的 Framebuffer
@@ -55,7 +59,7 @@ public:
     u32 GetOutputHeight() const { return m_Output ? m_Output->GetHeight() : 0u; }
     bool IsReady() const { return m_Ready; }
 
-    /// 半分辨率系数（固定 1/2）：这一项是低频量，见文件头与文档 §10.2
+    /// 半分辨率系数（默认 1/2；任务 30 的半分辨率保真度 A/B 会临时改成 1 再改回）
     static constexpr u32 kDownscale = 2;
 
 private:
@@ -66,8 +70,9 @@ private:
     static constexpr u32 kBindWorldPos = 1;
     static constexpr u32 kBindNormal   = 2;
     static constexpr u32 kBindRSMPos   = 3;
-    static constexpr u32 kBindRSMFlux  = 4;
+    static constexpr u32 kBindRSMNrm   = 4;   // 任务 30：法线图（此前这张图的 .a 兼作通量）
     static constexpr u32 kBindParams   = 5;
+    static constexpr u32 kBindRadiance = 6;   // 任务 30：VPL 出射辐射度图
 
     rhi::IRHIDevice* m_Device = nullptr;
     u32 m_Width = 0, m_Height = 0;
@@ -85,7 +90,8 @@ private:
     rhi::IRHITexture* m_WorldPos = nullptr;
     rhi::IRHITexture* m_Normal   = nullptr;
     rhi::IRHITexture* m_RSMPos   = nullptr;
-    rhi::IRHITexture* m_RSMFlux  = nullptr;
+    rhi::IRHITexture* m_RSMNrm   = nullptr;
+    rhi::IRHITexture* m_RSMRad   = nullptr;
 
     bool m_Ready = false;
 };

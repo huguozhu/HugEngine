@@ -1,6 +1,7 @@
 #include "Pipeline/DeferredPipeline.h"
 #include "GI/GI_IBL.h"
 #include "GI/GI_RSM.h"
+#include "GI/RSMFrustum.h"   // RSM 光源视锥拟合 + VPL 采样缩放（任务 30 / §9.2-AA）
 #include "Shadow/ShadowSystem.h"
 #include "PostProcess/ToneMapPass.h"
 #include "PostProcess/SkyboxPass.h"
@@ -270,7 +271,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     }
 
     // ============================================================
-    // 场景包围盒 → DDGI 探针网格自动拟合（任务 14 / §9.2-K）
+    // 场景包围盒 → DDGI 探针网格自动拟合（任务 14 / §9.2-K）+ RSM 光源视锥（任务 30 / §9.2-AA ④）
     //   【为什么要拟合】网格是固定参数时，覆盖不到的区域会被 SampleDDGI 的 clamp 变成
     //   **贴边常数外推**（对世界坐标超界的查询，8 个采样坐标全被钳到同一个边界探针）。
     //   实测：默认网格 8×4×8 格距 3 只覆盖 21×9×21 世界单位，场景却是 3720.9×1555.9×2288.2
@@ -279,19 +280,23 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     //   包围盒每 30 帧重算一次：场景几何很少变，而遍历带变换的网格包围盒不是零成本。
     //   【不要用 m_FrameCounter 当这个计时器】它只在启用异步计算时才自增，普通路径上恒为 0
     //   —— 用它做 `% 30` 判据会变成"每帧都重算"（实测日志每帧一行）。
+    //   【为什么 RSM 也要它】RSM 的光源正交视锥此前硬编码 sceneCenter=(0,3,0)/radius=60：
+    //   只覆盖场景的 1/60，于是绝大多数接收像素在 RSM 里**找不到邻近 VPL**，`1/d²` 把整项
+    //   压到 1e-8（噪声底），而 pass 的成本照付（§9.2-AA ①④）。两个消费者共用同一份包围盒。
     // ============================================================
-    if (m_DDGI.autoFitGrid) {
-        if (m_SceneBoundsCountdown == 0u) {
-            he::AABB sceneBounds;
-            world.ForEach<he::MeshComponent>([&](he::Entity e, he::MeshComponent& mesh) {
-                if (auto* tf = world.GetComponent<TransformComponent>(e)) {
-                    sceneBounds.Expand(mesh.GetBounds().Transform(tf->GetLocalMatrix()));
-                }
-            });
-            if (sceneBounds.IsValid()) m_DDGI.FitGridToBounds(sceneBounds.min, sceneBounds.max);
-            m_SceneBoundsCountdown = kSceneBoundsRefreshFrames;
-        }
-        --m_SceneBoundsCountdown;
+    if (m_SceneBoundsCountdown == 0u) {
+        he::AABB sceneBounds;
+        world.ForEach<he::MeshComponent>([&](he::Entity e, he::MeshComponent& mesh) {
+            if (auto* tf = world.GetComponent<TransformComponent>(e)) {
+                sceneBounds.Expand(mesh.GetBounds().Transform(tf->GetLocalMatrix()));
+            }
+        });
+        if (sceneBounds.IsValid()) m_SceneBounds = sceneBounds;
+        m_SceneBoundsCountdown = kSceneBoundsRefreshFrames;
+    }
+    --m_SceneBoundsCountdown;
+    if (m_DDGI.autoFitGrid && m_SceneBounds.IsValid()) {
+        m_DDGI.FitGridToBounds(m_SceneBounds.min, m_SceneBounds.max);
     }
 
     //   - IBL 辐照度：RSM 不可用时的回退（世界空间、视角无关）
@@ -326,6 +331,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     bool rsmPassRegistered = false;
     bool rsmDirLightValid  = false;   // 存在「启用且投影」的方向光（RSM 间接光的适用前提，见下）
     float4x4 rsmLightViewProj(1.0f);   // 光源 VP：喂给 DDGI 时与 RSM pass 同源
+    float    rsmHalfExtent = 0.0f;     // 该视锥的正交半宽（世界单位）→ VPL 采样面积（任务 30）
     // 【独立门控】RSM 有两个消费方，任一需要就要渲染（§9.2-F）：
     //   1) Lighting 的漫反射间接光——由 ShouldRunRSM()（层栈含 RSM ∧ rsmIndirect）表达，
     //      与 Forward 侧用的是**同一个谓词**；
@@ -339,6 +345,9 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         // 固定光源视锥（不随相机）：CSM 的 lightViewProj 拟合相机视锥，
         // 视角变化会让 RSM 内容随之变化 → 探针辐射度视角相关。
         // RSM 改用覆盖场景的固定光源视锥，保证探针数据与视角无关。
+        // 【任务 30 / §9.2-AA ④】覆盖范围由**场景包围盒**推出（纯几何在 GI/RSMFrustum.h，
+        // 有单测）：此前是硬编码的 sceneCenter=(0,3,0) / sceneRadius=60 —— 那等于把 RSM
+        // 钉在一个半径 60 的球里，几乎没有接收像素能找到邻近 VPL。
         float3 ldir = float3(0.3f, -1.0f, 0.4f);   // 无方向光时的默认方向
         world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& l) {
             if (l.enabled && l.castShadow) {
@@ -346,17 +355,14 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 rsmDirLightValid = true;           // RSM 间接光只在有方向光投影时才有意义
             }
         });
-        const float3 sceneCenter = float3(0.0f, 3.0f, 0.0f);   // 场景中心（Sponza）
-        const float  sceneRadius = 60.0f;                       // 覆盖半径
-        float3 eye = sceneCenter - ldir * sceneRadius * 2.0f;
-        float3 up  = (glm::abs(ldir.y) > 0.99f) ? float3(0.0f, 0.0f, 1.0f) : float3(0.0f, 1.0f, 0.0f);
-        float4x4 lview = glm::lookAt(eye, sceneCenter, up);
-        float4x4 lproj = glm::orthoRH_ZO(-sceneRadius, sceneRadius,
-                                          -sceneRadius, sceneRadius,
-                                          0.1f, sceneRadius * 4.0f);
-        rsmLightViewProj = lproj * lview;
+        // 场景包围盒还没算出来时（首帧 / 空场景）退回一个覆盖相机附近的保守视锥，
+        // 保证"有产出"而不是"零覆盖"。包围盒通常在第 0 帧就算好了。
+        const float3 fitMin = m_SceneBounds.IsValid() ? m_SceneBounds.min : (camera.position - float3(50.0f));
+        const float3 fitMax = m_SceneBounds.IsValid() ? m_SceneBounds.max : (camera.position + float3(50.0f));
+        const auto   rsmFit = FitRSMFrustumToBounds(fitMin, fitMax, ldir);
+        if (rsmFit) rsmLightViewProj = rsmFit->viewProj;
+        rsmHalfExtent = rsmFit ? rsmFit->halfExtent : 0.0f;
         m_RSM->SetLightViewProj(rsmLightViewProj, m_RSM->GetRSMPositionMap()->GetWidth(),
-                                m_ObjectBuffers[m_CurrentFrameSlot].get(),
                                 m_ShadowSystem->GetShadowSampler(),
                                 rhi::kInvalidSet);
         // 通量计算要读方向光的颜色/强度：本帧的光源缓冲（上面已收集，见 §9.2-AA）
@@ -395,8 +401,15 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         m_RSMIndirect.SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetWorldPos(), m_GBuffer->GetNormal());
         // 光源类型恒为方向光、阴影强度恒有效：不满足这两条的情形已被上面的门控排除
         // （等价于旧着色器里 `shadowParams.w >= 0.5` / `shadowParams.z <= 0` 两条提前返回）
+        // 【VPL 采样缩放】由上面拟合出的光锥半宽推出（GI/RSMFrustum.h，单测锁住尺度不变性）：
+        // 每个采样点代表的世界面积随场景尺度平方增长，正好抵消 `1/d²` 的变化 —— 旧的硬编码
+        // 常数隐含"半径 60 的场景"，在 3720 单位宽的 Sponza 上把整项压到 1e-8（§9.2-AA ①）。
+        const float rsmVplScale = RSMVplScale(rsmHalfExtent, kRSMIndirectRadiusUV,
+                                             kRSMIndirectVplCount);
         m_RSMIndirect.SetRSM(m_RSM->GetRSMPositionMap(), m_RSM->GetRSMFluxMap(),
-                             rsmLightViewProj, /*shadowType=*/0.0f, /*shadowStrength=*/1.0f,
+                             m_RSM->GetRSMRadianceMap(),
+                             rsmLightViewProj, rsmVplScale,
+                             /*shadowType=*/0.0f, /*shadowStrength=*/1.0f,
                              /*lightCount=*/1u);
         auto rsmIndirectH = rg.ImportTexture("RSM_Indirect", m_RSMIndirect.GetOutput());
         const u32 riW = m_RSMIndirect.GetOutputWidth();
@@ -415,13 +428,13 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         rsmIndirectTex = m_RSMIndirect.GetOutput();
     }
     // 喂 DDGI：探针改用 RSM 世界辐射度
-    // 【必须与上面的 pass 注册条件一致】RSM 未渲染时把 position/flux 图交给 DDGI，探针会采到
+    // 【必须与上面的 pass 注册条件一致】RSM 未渲染时把 position/radiance 图交给 DDGI，探针会采到
     // 空数据；且 useRSM 是由这两个成员推导的**闩锁**（只置位、永不清除，§9.2-R）⇒ 一旦漏判就
     // 永久走空 RSM 路径、静默丢掉全部 GI（§11.3.1）。因此这里给出**逐帧明确结论**：
     // 注册了才 SetRSM，没注册就 ClearRSM，绝不"什么都不做"。
     if (m_GIConfig.ShouldRunDDGI()) {
         if (rsmPassRegistered) {
-            m_DDGI.SetRSM(m_RSM->GetRSMPositionMap(), m_RSM->GetRSMFluxMap(), rsmLightViewProj);
+            m_DDGI.SetRSM(m_RSM->GetRSMPositionMap(), m_RSM->GetRSMRadianceMap(), rsmLightViewProj);
         } else {
             m_DDGI.ClearRSM();
         }
@@ -890,7 +903,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             // 【与上面的 pass 注册同源】rsmPassRegistered 为假时本帧没有 RSM 内容，
             // 必须传 nullptr 回落到占位纹理；否则描述符指向从未写入的图（§9.2-T）。
             in.rsmPositionMap = rsmPassRegistered ? m_RSM->GetRSMPositionMap() : nullptr;
-            in.rsmFluxMap     = rsmPassRegistered ? m_RSM->GetRSMFluxMap()     : nullptr;
+            in.rsmNormalMap   = rsmPassRegistered ? m_RSM->GetRSMFluxMap()     : nullptr;
             // RSM 间接光 E（半分辨率，任务 16）。与上面两个 RSM 输入用**同一份**门控结论：
             // 本帧没产出就必须传 nullptr 让 LightingPass 回绑黑色占位（§9.2-T）。
             in.rsmIndirectTex = rsmPassRegistered ? rsmIndirectTex : nullptr;

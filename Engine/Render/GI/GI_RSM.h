@@ -16,9 +16,10 @@ constexpr u32 kDefaultRSMResolution = 512;
 // 在方向光 Shadow Pass 后用相同视角渲染 RSM 数据（位置/法线/通量），
 // PBR Shader 中在 light space 采样 RSM 获取单次反弹间接漫反射。
 //
-// 纹理：
+// 纹理（任务 30 起：一个附件一个量，约定见 ShaderTypes.slang 的「RSM 贴图通道约定」）：
 //   - RSM_Position: RGBA16_FLOAT（worldPos.xyz）
-//   - RSM_Flux:     RGBA16_FLOAT（worldNormal.xy + flux）
+//   - RSM_Normal:   RGBA16_FLOAT（worldNormal 编码到 [0,1]）
+//   - RSM_Radiance: RGBA16_FLOAT（该 VPL 的出射辐射度 L_v = albedo·lightColor·intensity·NdotL/π）
 // ============================================================================
 class GI_RSM : public IGlobalIllumination {
 public:
@@ -42,8 +43,14 @@ public:
     GIMode GetMode() const override { return GIMode::RSM; }
 
     // ---- 设置 RSM 参数 ----
+    /// 【不再接收管线侧的物体缓冲】本 pass 自己持有 GPUObjectData[]：
+    /// 管线那份是**相机可见性列表**（SceneRenderer 只写可见物体，索引是相机列表下标），
+    /// 而本 pass 遍历全部网格、索引是自己的计数器 —— 借用它有两个后果：
+    ///   ① 读到的材质字段（albedo）大多来自没填过的槽（实测只有 3% 的 texel 有非零辐射度）；
+    ///   ② 本 pass 往里写 worldMatrix 会让"谁的数据在缓冲里"变得不可推理。
+    /// 现在本 pass 只写自己的缓冲（只写 worldMatrix 这一个字段，其余字段不需要）。
     void SetLightViewProj(const float4x4& vp, u32 resolution,
-                          rhi::IRHIBuffer* objBuf, rhi::IRHISampler* shadowSampler,
+                          rhi::IRHISampler* shadowSampler,
                           rhi::DescriptorSetHandle descSet);
 
     // 设置 Shadow Map 深度附件（渲染 RSM 时复用）
@@ -62,13 +69,19 @@ public:
 
     // 纹理访问
     rhi::IRHITexture* GetRSMPositionMap() const { return m_RSMPos.get(); }
+    /// 法线图（历史名 `GetRSMFluxMap`：任务 30 之前这张图的 .a 存通量，现在只存编码法线）
     rhi::IRHITexture* GetRSMFluxMap()     const { return m_RSMFlux.get(); }
+    /// VPL 出射辐射度图（任务 30 新增；消费端不再需要"解包"法线与通量）
+    rhi::IRHITexture* GetRSMRadianceMap() const { return m_RSMRadiance.get(); }
     rhi::IRHISampler* GetRSMSampler()     const { return m_RSMSampler.get(); }
 
 private:
-    std::unique_ptr<rhi::IRHITexture> m_RSMPos;   // RGBA16_FLOAT worldPos
-    std::unique_ptr<rhi::IRHITexture> m_RSMFlux;   // RGBA16_FLOAT normal+flux
+    std::unique_ptr<rhi::IRHITexture> m_RSMPos;        // RGBA16_FLOAT worldPos
+    std::unique_ptr<rhi::IRHITexture> m_RSMFlux;       // RGBA16_FLOAT 编码法线
+    std::unique_ptr<rhi::IRHITexture> m_RSMRadiance;   // RGBA16_FLOAT VPL 出射辐射度
     std::unique_ptr<rhi::IRHITexture> m_RSMDepth;  // D32_FLOAT 独立深度缓冲（不依赖 CSM ShadowMap）
+    /// 本 pass 自己的 GPUObjectData[]（每帧重写 worldMatrix；见 SetLightViewProj 的说明）
+    std::unique_ptr<rhi::IRHIBuffer>  m_ObjectBuf;
     std::unique_ptr<rhi::IRHISampler> m_RSMSampler;
 
     std::unique_ptr<rhi::IRHIPipelineState> m_RSMPSO;
@@ -78,7 +91,6 @@ private:
 
     float4x4 m_LightVP;
     u32      m_RSMResolution = kDefaultRSMResolution;
-    rhi::IRHIBuffer*        m_ExternalObjBuf = nullptr;
     rhi::IRHIBuffer*        m_ExternalLightBuf = nullptr;   // GPULight SSBO（见 SetLightBuffer）
     rhi::DescriptorSetHandle m_ExternalDescSet = rhi::kInvalidSet;
 

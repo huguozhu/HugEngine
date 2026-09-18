@@ -39,12 +39,14 @@ public:
     void SetGBufferInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal, rhi::IRHITexture* albedo);
 
     // 设置 RSM 世界辐射度输入（B 路径：探针从 RSM 采样单次反弹辐射度，视角无关）
-    // pos/flux 为空时回退屏幕 HDR（视角相关）
-    void SetRSM(rhi::IRHITexture* pos, rhi::IRHITexture* flux, const float4x4& lightViewProj);
+    // 任务 30 起第二张图是 **VPL 出射辐射度**（此前是"编码法线.rgb + 通量.a"的打包图，
+    // 探针端必须知道解包规则才拿得到通量，§9.2-AA ②）。
+    // pos/radiance 为空时回退 IBL 辐照度
+    void SetRSM(rhi::IRHITexture* pos, rhi::IRHITexture* radiance, const float4x4& lightViewProj);
 
     // 清除 RSM 输入，回退到 IBL 辐照度（useRSM 归零）。
     // 【为什么需要显式清除】SetRSM 只有一个"置位"方向，而 useRSM 是由
-    // m_RSMPositionMap/m_RSMFluxMap 是否为空**推导**出来的：帧图若只是"本帧不再调用 SetRSM"，
+    // m_RSMPositionMap/m_RSMRadianceMap 是否为空**推导**出来的：帧图若只是"本帧不再调用 SetRSM"，
     // 成员仍非空 ⇒ useRSM 恒为 1，探针会一直消费过期甚至已被重建的 RSM 纹理。
     // 因此帧图每帧都要给出明确结论：注册了就 SetRSM，没注册就 ClearRSM（§9.2-F/R）。
     void ClearRSM();
@@ -174,7 +176,7 @@ private:
 
     // RSM 世界辐射度输入（B 路径，不持有所有权）
     rhi::IRHITexture* m_RSMPositionMap = nullptr;
-    rhi::IRHITexture* m_RSMFluxMap      = nullptr;
+    rhi::IRHITexture* m_RSMRadianceMap = nullptr;   // VPL 出射辐射度（任务 30 前是"法线+通量"打包图）
     float4x4 m_RSMLightViewProj = float4x4(1.0f);
 
     // IBL 辐照度（回退来源，不持有所有权）

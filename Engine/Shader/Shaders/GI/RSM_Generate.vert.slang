@@ -17,7 +17,9 @@ layout(location = 1) in float3 inNormal;
 [[vk::push_constant]] cbuffer RSMConstants {
     float4x4 lightViewProj;
     uint     objectIndex;
-    uint     _pad[3];
+    uint     lightIndex;   // Fragment 侧用（光源颜色/强度），VS 不读但必须保持布局一致
+    uint     _pad[2];
+    float4   vplAlbedo;    // Fragment 侧用（VPL 漫反射率），同样只为布局一致
 };
 
 struct VSOutput {

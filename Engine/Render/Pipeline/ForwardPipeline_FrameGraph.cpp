@@ -125,17 +125,28 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
 
     // --- Pass 2: RSM 生成（Reflective Shadow Maps）---
     // GIConfig 门控：rsmIndirect=false 时不注册（Forward 的间接漫反射来源）
+    // 【§9.2-AD / 任务 34：本分支在 06.GILab 的 Forward 模式下目前恒不注册】
+    //   ① Forward 管线的阴影系统要由**调用方**先 SetRenderResources + Update
+    //      （02.Cube / 03.Sponza / AISamples 都这么做，06.GILab 没有）⇒ `HasActiveShadows()`
+    //      恒为 false、`GetLightViewProj(0)` 行列式为 0。
+    //   ② 即使补上那一步（实测），RSM 仍不产出：本 pass 用的是 **CSM 级联 0** 的 VP，而它由
+    //      Shadow pass 的 `RenderCascade` 才写进 `m_LightVPs`；帧图里两个 pass 声明的是**互不
+    //      相干的纹理**（阴影图 vs RSM 三张图），**没有依赖边** ⇒ 执行顺序不受保证。
+    //   ③ 更根本的是：CSM 的 VP 拟合**相机视锥**，于是 RSM 内容随视角变化（探针/世界空间使用
+    //      它的前提被破坏）。Deferred 侧已改成**按场景包围盒拟合的固定光锥**（任务 30）。
+    //   任务 34 的方向：Forward 也用同一份固定光锥，并把那个 VP 交给 PBR 的内联查表。
     if (m_GIConfig.ShouldRunRSM() && m_RSM && m_ShadowSystem && m_ShadowSystem->HasActiveShadows()) {
         float4x4 lightVP = m_ShadowSystem->GetLightViewProj(0);
         if (glm::determinant(lightVP) != 0.0f) {
             auto rsmPos  = rg.ImportTexture("RSM_Position",  m_RSM->GetRSMPositionMap());
-            auto rsmFlux = rg.ImportTexture("RSM_Flux",      m_RSM->GetRSMFluxMap());
+            auto rsmNrm  = rg.ImportTexture("RSM_Normal",    m_RSM->GetRSMFluxMap());
+            auto rsmRad  = rg.ImportTexture("RSM_Radiance",  m_RSM->GetRSMRadianceMap());
             rg.AddPass("RSM_Generate", {},
-                {{rsmPos, ResourceAccess::Write}, {rsmFlux, ResourceAccess::Write}},
+                {{rsmPos, ResourceAccess::Write}, {rsmNrm, ResourceAccess::Write},
+                 {rsmRad, ResourceAccess::Write}},
                 [this, &world, &sg](rhi::IRHICommandList* c) {
                     m_RSM->SetLightViewProj(m_ShadowSystem->GetLightViewProj(0),
                         m_RSM->GetRSMPositionMap()->GetWidth(),
-                        m_ObjectBuffers[m_CurrentFrameSlot].get(),
                         m_ShadowSystem->GetShadowSampler(),
                         m_DescSets[m_CurrentFrameSlot]);
                     // 通量要读方向光的颜色/强度：不绑光源缓冲就会读到对象缓冲（§9.2-AA ①）。

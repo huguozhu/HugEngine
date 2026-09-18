@@ -53,9 +53,14 @@ struct LightingInputs {
     // DDGI 探针
     rhi::IRHIBuffer* ddgiProbeBuffer = nullptr;
     rhi::IRHIBuffer* ddgiGridUniform = nullptr;
-    // RSM 间接光（可选，非空时 shader 采样 RSM 间接漫反射——Forward/Deferred 共用）
+    // RSM 贴图（可选）。【任务 30 起 Deferred 的 Lighting **不再采样它们**】——
+    // RSM 间接光已由共享的半分辨率 pass（RSMIndirect）求值，Lighting 只采 `rsmIndirectTex`。
+    // 保留这两个绑定是因为 PBR.frag（Forward 的内联路径）仍在同一套 binding 号上读它们，
+    // 而 Deferred 的 Lighting set 与 Forward 的 per-frame set 各自独立。未产出时绑黑色占位。
     rhi::IRHITexture* rsmPositionMap = nullptr;
-    rhi::IRHITexture* rsmFluxMap     = nullptr;
+    /// VPL 世界法线（编码）。历史名 `rsmFluxMap`：任务 30 之前这张图的 .a 存通量，
+    /// 现在法线与通量各自独立成附件（见 ShaderTypes.slang 的「RSM 贴图通道约定」）。
+    rhi::IRHITexture* rsmNormalMap   = nullptr;
     /// RSM 间接光**辐照度 E**（半分辨率，任务 16）：由 GI/RSM_Indirect.frag.slang 产出。
     /// 为空 = 本帧没有产出（RSM 不在层栈 / 没有活动阴影）⇒ 必须显式回绑黑色占位，
     /// 否则会接着采样上一帧的绑定（§9.2-T）。采样用线性 clamp 以便升采样。

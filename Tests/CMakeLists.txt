@@ -36,6 +36,7 @@ add_executable(HugEngineTests
     TestAgentBrain.cpp
     TestGITypes.cpp
     TestGIProbeGrid.cpp
+    TestRSMFrustum.cpp
 )
 
 target_include_directories(HugEngineTests PRIVATE

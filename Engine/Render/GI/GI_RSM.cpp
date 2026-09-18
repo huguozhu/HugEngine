@@ -40,6 +40,17 @@ bool GI_RSM::Initialize(rhi::IRHIDevice* device, u32, u32) {
     fluxDesc.usage     = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
     m_RSMFlux = device->CreateTexture(fluxDesc);
 
+    // 第三个附件：VPL 出射辐射度（任务 30）。独立附件换来"一个附件一个量"——
+    // 通量此前挤在法线图的 .a 通道里，消费端必须记住"rgb 是法线、a 才是通量"，
+    // DDGI 就曾把编码法线当辐射度读（§9.2-AA ②）；而标量通道也装不下 albedo 与光源颜色。
+    rhi::TextureDesc radDesc;
+    radDesc.format    = rhi::Format::RGBA16_FLOAT;
+    radDesc.width     = m_RSMResolution;
+    radDesc.height    = m_RSMResolution;
+    radDesc.mipLevels = 1;
+    radDesc.usage     = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
+    m_RSMRadiance = device->CreateTexture(radDesc);
+
     // 独立深度缓冲（不再复用 CSM ShadowMap，避免布局冲突导致白屏）
     rhi::TextureDesc depthDesc;
     depthDesc.format    = rhi::Format::D32_FLOAT;
@@ -56,7 +67,15 @@ bool GI_RSM::Initialize(rhi::IRHIDevice* device, u32, u32) {
     sampDesc.addressV  = rhi::AddressMode::ClampToEdge;
     m_RSMSampler = device->CreateSampler(sampDesc);
 
-    // RSM PSO（双 MRT：pos + normal+flux，深度附件复用 Shadow Map 的 D32）
+    // 本 pass 自己的物体缓冲（每帧重写 worldMatrix）。Storage 用法 + CPU 可写。
+    rhi::BufferDesc objDesc;
+    objDesc.size      = sizeof(GPUObjectData) * MAX_OBJECTS;
+    objDesc.usage     = rhi::BufferUsage::Storage;
+    objDesc.cpuAccess = true;
+    m_ObjectBuf = device->CreateBuffer(objDesc);
+    HE_ASSERT(m_ObjectBuf, "GI_RSM: failed to create RSM object buffer");
+
+    // RSM PSO（三 MRT：位置 / 编码法线 / VPL 辐射度；深度附件为 RSM 自己的 D32）
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = {
         { kRSMBindLights,  rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskVertex | rhi::kStageMaskFragment },  // u_Lights (Vertex | Fragment)
@@ -95,9 +114,10 @@ bool GI_RSM::Initialize(rhi::IRHIDevice* device, u32, u32) {
     psoDesc.depthWrite           = true;
     psoDesc.depthCompare         = rhi::CompareFunc::LessEqual;
     psoDesc.depthFormat          = rhi::Format::D32_FLOAT;
-    psoDesc.colorAttachmentCount = 2;  // MRT 双输出
+    psoDesc.colorAttachmentCount = 3;  // MRT 三输出（位置 / 法线 / VPL 辐射度）
     psoDesc.colorFormats[0]      = rhi::Format::RGBA16_FLOAT;
     psoDesc.colorFormats[1]      = rhi::Format::RGBA16_FLOAT;
+    psoDesc.colorFormats[2]      = rhi::Format::RGBA16_FLOAT;
     psoDesc.pushConstantRanges   = { pcRange };
     psoDesc.descriptorSetLayouts = { m_RSMLayout };
     psoDesc.debugName            = "RSM_Generate";
@@ -112,7 +132,9 @@ bool GI_RSM::Initialize(rhi::IRHIDevice* device, u32, u32) {
 void GI_RSM::Shutdown() {
     m_RSMPos.reset();
     m_RSMFlux.reset();
+    m_RSMRadiance.reset();
     m_RSMSampler.reset();
+    m_ObjectBuf.reset();
     m_RSMPSO.reset();
     m_Ready = false;
 }
@@ -122,23 +144,22 @@ void GI_RSM::Update(const SubsystemContext&) {
 }
 
 void GI_RSM::SetLightViewProj(const float4x4& vp, u32 resolution,
-                               rhi::IRHIBuffer* objBuf, rhi::IRHISampler* shadowSampler,
+                               rhi::IRHISampler* shadowSampler,
                                rhi::DescriptorSetHandle descSet) {
     m_LightVP          = vp;
     m_RSMResolution    = resolution;
-    m_ExternalObjBuf   = objBuf;
     m_ExternalDescSet  = descSet;
     // 更新 RSM 采样器绑定（与 Shadow Sampler 一致，但使用 RSM 自有采样器）
     (void)shadowSampler;
 }
 
 void GI_RSM::Render(rhi::IRHICommandList* cmd) {
-    if (!m_Ready || !m_ExternalObjBuf || !m_RSMDepth) return;
+    if (!m_Ready || !m_ObjectBuf || !m_RSMDepth) return;
     // 实际渲染委托给 RenderRSMPass（由 ForwardPipeline 在 Render 中调用）
 }
 
 void GI_RSM::RenderRSMPass(rhi::IRHICommandList* cmd, he::World& world, he::SceneGraph& sg) {
-    if (!m_Ready || !m_ExternalObjBuf || !m_RSMDepth) return;
+    if (!m_Ready || !m_ObjectBuf || !m_RSMDepth) return;
 
     // binding 1 = GPULight[]：**必须是光源缓冲**。此前这里绑的是对象缓冲
     // （与下一行的 binding 2 同一个），于是着色器读到的"光源"其实是 GPUObjectData[0]，
@@ -147,20 +168,29 @@ void GI_RSM::RenderRSMPass(rhi::IRHICommandList* cmd, he::World& world, he::Scen
         m_Device->UpdateDescriptorSet(m_RSMSet, kRSMBindLights,
             rhi::DescriptorType::StorageBuffer, m_ExternalLightBuf);
     }
+    // binding 2 = **本 pass 自己的** GPUObjectData[]。见头文件：不能借用管线的相机可见列表
+    // 对象缓冲（索引空间不同，会读到没填过的槽）。
     m_Device->UpdateDescriptorSet(m_RSMSet, kRSMBindObjects,
-        rhi::DescriptorType::StorageBuffer, m_ExternalObjBuf);
+        rhi::DescriptorType::StorageBuffer, m_ObjectBuf.get());
 
     cmd->SetPipeline(m_RSMPSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_RSMSet);
 
-    rhi::ClearValue clears[2]{};
+    // 【长度契约】colorCount(3) 个颜色项 + 末尾一个深度项 = 4 项，深度项在 clears[colorCount]。
+    // 此前这里是 `rhi::ClearValue clears[2]{}`（当时 2 个颜色附件）⇒ 实现去读 `clears[2]` 的
+    // 越界内存当深度清除值，深度被清成垃圾 ⇒ **几何全被深度测试丢掉**，三张 RSM 图里只剩颜色
+    // 清除值 (0,0,0,1)，而 pass 耗时照付（实测 RSM 0.086 ms、图全 0）。这就是 §9.2-AA 里
+    // "RSM 间接光整项不产出"的直接原因之一：不是量级太小，而是**根本没有产出**。
+    rhi::ClearValue clears[4]{};
+    clears[3].depth = 1.0f;   // 深度项：远平面（与 PSO 的 LessEqual + zero-to-one 约定配套）
 
-    void* colorViews[2] = {
+    void* colorViews[3] = {
         m_RSMPos->GetNativeHandle(),
-        m_RSMFlux->GetNativeHandle()
+        m_RSMFlux->GetNativeHandle(),
+        m_RSMRadiance->GetNativeHandle()
     };
 
-    cmd->BeginOffscreenPassMRT(colorViews, 2, m_RSMDepth->GetNativeHandle(),
+    cmd->BeginOffscreenPassMRT(colorViews, 3, m_RSMDepth->GetNativeHandle(),
                                m_RSMResolution, m_RSMResolution, clears, false);
     cmd->SetViewport({ 0, static_cast<float>(m_RSMResolution),
         static_cast<float>(m_RSMResolution), -static_cast<float>(m_RSMResolution),
@@ -168,7 +198,7 @@ void GI_RSM::RenderRSMPass(rhi::IRHICommandList* cmd, he::World& world, he::Scen
     cmd->SetScissor({ 0, 0, m_RSMResolution, m_RSMResolution });
 
     // 上传对象数据到 GPU（从光源 POV 不需要世界矩阵，直接用 objectIndex 索引）
-    auto* objData = static_cast<GPUObjectData*>(m_ExternalObjBuf->Map());
+    auto* objData = static_cast<GPUObjectData*>(m_ObjectBuf->Map());
     u32 objectIndex = 0;
 
     auto renderMesh = [&](he::Entity e, he::MeshComponent& m) {
@@ -181,10 +211,16 @@ void GI_RSM::RenderRSMPass(rhi::IRHICommandList* cmd, he::World& world, he::Scen
         cmd->SetDrawDebugLabel(label);
 
         // 设置 RSM push constants
-        struct alignas(16) RSMPush { float4x4 lightVP; u32 objIdx; u32 lightIdx; u32 _pad[2]; } pc{};
+        // albedo 随 push constant 走：对象缓冲的索引空间是**相机可见性列表**（SceneRenderer
+        // 只写可见物体），而本 pass 遍历全部网格、索引是自己的计数器 —— 从对象缓冲读
+        // `baseColorFactor` 会读到没填过的槽（= 0），实测只有 3% 的 texel 有非零辐射度。
+        struct alignas(16) RSMPush {
+            float4x4 lightVP; u32 objIdx; u32 lightIdx; u32 _pad[2]; float4 albedo;
+        } pc{};
         pc.lightVP = m_LightVP;
         pc.objIdx  = objectIndex;
         pc.lightIdx = 0;  // 使用第一个方向光
+        pc.albedo  = m.baseColorFactor;
         cmd->SetPushConstants(0, sizeof(RSMPush), &pc);
 
         cmd->SetVertexBuffer(m.GetVertexBuffer().get(), 0);
@@ -194,7 +230,7 @@ void GI_RSM::RenderRSMPass(rhi::IRHICommandList* cmd, he::World& world, he::Scen
     };
 
     world.ForEach<he::MeshComponent>(renderMesh);
-    m_ExternalObjBuf->Unmap();
+    m_ObjectBuf->Unmap();
 
     cmd->EndOffscreenPass();
 
@@ -211,6 +247,12 @@ void GI_RSM::RenderRSMPass(rhi::IRHICommandList* cmd, he::World& world, he::Scen
         rhi::ResourceState::RenderTarget,
         rhi::ResourceState::ShaderResource,
         m_RSMFlux.get());
+    cmd->PipelineBarrier(
+        rhi::PipelineStage::ColorAttachmentOutput,
+        rhi::PipelineStage::FragmentShader,
+        rhi::ResourceState::RenderTarget,
+        rhi::ResourceState::ShaderResource,
+        m_RSMRadiance.get());
 }
 
 void GI_RSM::Bind(rhi::IRHICommandList* cmd) const {

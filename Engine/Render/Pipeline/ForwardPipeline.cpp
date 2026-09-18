@@ -9,6 +9,7 @@ he::CVar<bool> cvLightPhysicalUnits("r.Light.PhysicalUnits", false,
 
 #include "GI/GI_IBL.h"
 #include "GI/GI_RSM.h"
+#include "GI/RSMFrustum.h"   // RSM 光锥尺度 → VPL 采样缩放（任务 30 / §9.2-AA）
 #include "GI/GITypes.h"   // GIRegistry（可用性与降级）
 #include "ShaderTypes.slang"   // GIBlendParams（C++ 侧镜像，任务 26）
 #include "Shadow/ShadowSystem.h"
@@ -109,7 +110,8 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
         {kGPUBinding_PrefilterMap, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // IBL Prefilter Cubemap
         {kGPUBinding_BRDF_LUT, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // IBL BRDF LUT
         {kGPUBinding_RSMPosition, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // RSM Position
-        {kGPUBinding_RSMFlux, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // RSM Normal+Flux
+        {kGPUBinding_RSMFlux, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // RSM Normal（任务 30 起只存法线）
+        {kGPUBinding_RSMRadiance, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // RSM VPL Radiance（任务 30）
         {kGPUBinding_SpotShadow, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Spot Shadow Map（独立 binding，避免与点光 9 冲突）
         {kGPUBinding_RectShadow, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Rect Shadow Map（矩形面光）
         { 30, rhi::DescriptorType::StorageBuffer,     4096, rhi::kStageMaskVertex | rhi::kStageMaskFragment, true },  // u_SSBO[] bindless
@@ -229,10 +231,13 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
             m_ShadowSystem->GetPointShadowMap(), m_ShadowSystem->GetPointShadowSampler());
         device->UpdateDescriptorSet(set, kGPUBinding_BRDF_LUT, rhi::DescriptorType::CombinedImageSampler,
             m_BindlessPlaceholder.get(), m_BindlessSampler.get());
-        // 绑定 15-16: RSM 纹理占位（GI_RSM 渲染后替换）
+        // 绑定 15-17: RSM 纹理占位（GI_RSM 渲染后替换）
+        //   15=位置，16=编码法线，17=VPL 出射辐射度（任务 30 起一个附件一个量）
         device->UpdateDescriptorSet(set, kGPUBinding_RSMPosition, rhi::DescriptorType::CombinedImageSampler,
             m_BindlessPlaceholder.get(), m_BindlessSampler.get());
         device->UpdateDescriptorSet(set, kGPUBinding_RSMFlux, rhi::DescriptorType::CombinedImageSampler,
+            m_BindlessPlaceholder.get(), m_BindlessSampler.get());
+        device->UpdateDescriptorSet(set, kGPUBinding_RSMRadiance, rhi::DescriptorType::CombinedImageSampler,
             m_BindlessPlaceholder.get(), m_BindlessSampler.get());
         // 绑定 24: 聚光灯 2D 阴影贴图（来自 ShadowSystem，原 9 与点光冲突）
         device->UpdateDescriptorSet(set, kGPUBinding_SpotShadow, rhi::DescriptorType::CombinedImageSampler,
@@ -757,7 +762,6 @@ void ForwardPipeline::PrepareGI(rhi::IRHICommandList* cmd, he::World& world, he:
         float4x4 lightVP = m_ShadowSystem->GetLightViewProj(0);
         if (glm::determinant(lightVP) != 0.0f) {  // 有效光源 VP
             m_RSM->SetLightViewProj(lightVP, m_RSM->GetRSMPositionMap()->GetWidth(),
-                                    m_ObjectBuffers[m_CurrentFrameSlot].get(),
                                     m_ShadowSystem->GetShadowSampler(),
                                     m_DescSets[m_CurrentFrameSlot]);
             // 通量计算要读方向光的颜色/强度（§9.2-AA：不绑光源缓冲就会读到对象缓冲）
@@ -772,12 +776,14 @@ void ForwardPipeline::PrepareGI(rhi::IRHICommandList* cmd, he::World& world, he:
 void ForwardPipeline::UpdateRSMBindings() {
     if (!m_RSM) return;
     rhi::IRHITexture* posMap  = m_RSM->GetRSMPositionMap();
-    rhi::IRHITexture* fluxMap = m_RSM->GetRSMFluxMap();
+    rhi::IRHITexture* nrmMap  = m_RSM->GetRSMFluxMap();      // 任务 30 起只存编码法线
+    rhi::IRHITexture* radMap  = m_RSM->GetRSMRadianceMap();  // VPL 出射辐射度
     rhi::IRHISampler* sampler = m_RSM->GetRSMSampler();
     // RSM 绑定在 set=0（per-frame），只需更新共享描述符集
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
         m_Device->UpdateDescriptorSet(m_DescSets[i], kGPUBinding_RSMPosition, rhi::DescriptorType::CombinedImageSampler, posMap, sampler);
-        m_Device->UpdateDescriptorSet(m_DescSets[i], kGPUBinding_RSMFlux, rhi::DescriptorType::CombinedImageSampler, fluxMap, sampler);
+        m_Device->UpdateDescriptorSet(m_DescSets[i], kGPUBinding_RSMFlux, rhi::DescriptorType::CombinedImageSampler, nrmMap, sampler);
+        m_Device->UpdateDescriptorSet(m_DescSets[i], kGPUBinding_RSMRadiance, rhi::DescriptorType::CombinedImageSampler, radMap, sampler);
     }
 }
 
@@ -863,6 +869,20 @@ void ForwardPipeline::FillGIBlendUBO() {
     std::memcpy(&bp.diffuse,  &d,  sizeof(GIChannelBlendData));
     std::memcpy(&bp.specular, &sp, sizeof(GIChannelBlendData));
     std::memcpy(&bp.ao,       &ao, sizeof(GIChannelBlendData));
+
+    // RSM 内联求和的 VPL 采样缩放（任务 30 / §9.2-AA ①）：Forward 用 CSM 第 0 级的
+    // 光源 VP 渲染并查找 RSM，所以它的尺度必须由**那个**正交盒推出（不是全局常数）。
+    // 采样图案是 5×5 网格、步长 `kRSMInlineStepUV` ⇒ 覆盖 ±2 步的方框。
+    bp.rsmVplScale = 0.0f;
+    if (m_ShadowSystem && m_GIConfig.ShouldRunRSM()) {
+        float halfX = 0.0f, halfY = 0.0f;
+        const float4x4 lightVP = m_ShadowSystem->GetLightViewProj(0);
+        if (glm::determinant(lightVP) != 0.0f
+            && RSMHalfExtentsOfProjection(lightVP, halfX, halfY)) {
+            bp.rsmVplScale = RSMVplScaleFromArea(
+                RSMSquareArea(halfX, halfY, 2.0f * kRSMInlineStepUV), kRSMInlineSampleCount);
+        }
+    }
 
     void* mapped = m_GIBuffers[m_CurrentFrameSlot]->Map();
     if (mapped) {

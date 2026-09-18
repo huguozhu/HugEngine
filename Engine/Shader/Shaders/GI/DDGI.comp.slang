@@ -26,7 +26,7 @@
 
 // RSM 世界辐射度（B 路径：单次反弹 VPL，视角无关——优先来源）
 [[vk::binding(7, 0)]] Texture2D<float4> u_RSMPositionMap;
-[[vk::binding(8, 0)]] Texture2D<float4> u_RSMFluxMap;
+[[vk::binding(8, 0)]] Texture2D<float4> u_RSMRadianceMap;   // VPL 出射辐射度（见 ShaderTypes 的 RSM 通道约定）
 
 // IBL 环境辐照度（Cubemap，按方向采样——世界空间、视角无关；RSM 不可用时的回退）
 [[vk::binding(9, 0)]] TextureCube<float4> u_IBLIrradiance;
@@ -171,10 +171,11 @@ void main(uint3 id : SV_DispatchThreadID) {
             if (rsmClip.w > 0.0001) {
                 float2 rsmUV = rsmClip.xy / rsmClip.w * 0.5 + 0.5;
                 if (rsmUV.x >= 0.0 && rsmUV.x <= 1.0 && rsmUV.y >= 0.0 && rsmUV.y <= 1.0) {
-                    // RSM 贴图：rgb=编码法线，a=通量（见 RSM_Generate.frag 的通道约定）。
-                    // 这里只要通量；此前误取 rgb（其实是法线）当辐射度用，见 §9.2-AA ③。
-                    float4 flux = u_RSMFluxMap.SampleLevel(u_LinearSampler, rsmUV, 0);
-                    radiance = flux.a;
+                    // RSM 贴图：一个附件一个量（任务 30）。这里要的是该 VPL 的**出射辐射度**，
+                    // 与 RSM_Indirect 读的是同一个通道 —— 此前这张图把编码法线放在 rgb、
+                    // 把标量通量放在 a，探针端曾把编码法线当辐射度用（§9.2-AA ②）。
+                    float4 rad = u_RSMRadianceMap.SampleLevel(u_LinearSampler, rsmUV, 0);
+                    radiance = rad.rgb;
                     valid = dot(radiance, radiance) > 0.0001;
                 }
             }

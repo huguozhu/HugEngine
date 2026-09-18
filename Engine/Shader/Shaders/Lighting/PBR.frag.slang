@@ -65,10 +65,12 @@ struct LightGridCell { uint offset; uint count; };
 [[vk::binding(kGPUBinding_PrefilterMap, kGPUDescSet_PerFrame)]] TextureCube<float4> u_PrefilterMap;
 [[vk::binding(kGPUBinding_BRDF_LUT, kGPUDescSet_PerFrame)]] Texture2D<float2>   u_BRDF_LUT;
 
-// RSM 纹理（Reflective Shadow Maps）
+// RSM 纹理（Reflective Shadow Maps）。任务 30 起一个附件一个量，约定见 ShaderTypes.slang
+// 的「RSM 贴图通道约定」：位置 / 编码法线 / VPL 出射辐射度（此前法线与通量挤在同一张图里）。
 [[vk::binding(kGPUBinding_RSMPosition, kGPUDescSet_PerFrame)]] Texture2D<float4> u_RSMPositionMap;   // worldPos.xyz
 [[vk::binding(kGPUBinding_RSMPosition, kGPUDescSet_PerFrame)]] SamplerState      u_RSMSampler;
-[[vk::binding(kGPUBinding_RSMFlux, kGPUDescSet_PerFrame)]] Texture2D<float4> u_RSMFluxMap;       // normal.xy + flux
+[[vk::binding(kGPUBinding_RSMFlux, kGPUDescSet_PerFrame)]] Texture2D<float4> u_RSMNormalMap;      // 编码法线
+[[vk::binding(kGPUBinding_RSMRadiance, kGPUDescSet_PerFrame)]] Texture2D<float4> u_RSMRadianceMap; // VPL 出射辐射度
 
 // GI 分层合成参数（任务 26）：与 Deferred 侧**同一份布局与同一份语义** —— Forward 的 IBL/RSM
 // 不再是"管线级开关 + 硬编码求和"，而是和 Deferred 一样：逐通道、按源数组、归一化加权。
@@ -206,10 +208,17 @@ float3 ShadeWithLight(GPULight light, float3 worldPos, float3 N, float3 V,
 /// 连带关掉 RSM" 是 §9.2-A 修过的耦合，Forward 侧这里是它的残留，一并去掉。
 /// 【保留的有效性判据】必须是有阴影的方向光：点光/聚光场景的 `u_ShadowData[0]` 没有
 /// `lightViewProj`（零矩阵），照做会得到垃圾坐标 → 阴影区出现"钱币"伪影。
+/// 【量级归一 / 任务 30】与共享的 `RSM_Indirect` pass 同一个约定与同一套推导：
+///   `E/π = scale · Σ L_v · cosθ_s · cosθ_r / d²`
+/// 其中 scale 由**本管线自己的**光源视锥尺度推出（C++ 侧 `RSMVplScale`/`RSMSquareArea`，
+/// 经 `u_GIBlendParams.rsmVplScale` 传入）。此前这里是硬编码的 0.03（25 点归一），
+/// 那个常数把结果钉在一个隐含的场景尺度上 —— 与 Deferred 侧被修掉的是同一个缺陷（§9.2-AA ①）。
 float3 FwdSampleRSMIndirect(float3 worldPos, float3 N) {
     if (u_ShadowData[0].shadowParams.z <= 0.0 || u_ShadowData[0].shadowParams.w >= 0.5) {
         return float3(0.0);
     }
+    // 5×5 采样步长与跨度必须与 C++ 侧 `kRSMInlineStepUV` / `kRSMInlineSampleCount` 一致
+    // （scale 是按这个图案覆盖的世界面积算的；改这里必须同时改常量）
     float4 lightSpacePos = mul(u_ShadowData[0].lightViewProj[0], float4(worldPos, 1.0));
     float2 rsmCoord = lightSpacePos.xy / lightSpacePos.w * 0.5 + 0.5;
     float3 rsmIndirect = float3(0.0);
@@ -218,17 +227,16 @@ float3 FwdSampleRSMIndirect(float3 worldPos, float3 N) {
         for (int dy = -2; dy <= 2; dy++) {
             float2 uv = saturate(rsmCoord + float2(dx, dy) * rsmRadius);
             float4 posSample  = u_RSMPositionMap.Sample(u_RSMSampler, uv);
-            float4 fluxSample = u_RSMFluxMap.Sample(u_RSMSampler, uv);
-            float3 samplePos  = posSample.xyz;
-            float3 sampleN    = normalize(fluxSample.rgb * 2.0 - 1.0);
-            float  flux       = fluxSample.a;
-            float3 dir        = samplePos - worldPos;
+            float3 sampleN    = normalize(u_RSMNormalMap.Sample(u_RSMSampler, uv).rgb * 2.0 - 1.0);
+            float3 vplRad     = u_RSMRadianceMap.Sample(u_RSMSampler, uv).rgb;
+            float3 dir        = posSample.xyz - worldPos;
             float  dist2      = max(dot(dir, dir), 0.01);
             float  cosDir     = max(dot(sampleN, -normalize(dir)), 0.0);
-            rsmIndirect += flux * max(dot(N, normalize(dir)), 0.0) * cosDir / dist2;
+            rsmIndirect += vplRad * max(dot(N, normalize(dir)), 0.0) * cosDir / dist2;
         }
     }
-    return rsmIndirect * 0.03;   // 25 点离散化能量归一（与改前同一个常数）
+    // VPL 采样缩放（每个采样点代表的世界面积 / π）：由 C++ 从本管线的 RSM 光源视锥推出
+    return rsmIndirect * u_GIBlendParams.rsmVplScale;
 }
 
 /// 漫反射源分派：返回"已乘接收面 albedo 的间接出射辐射度"（与 Deferred 侧同约定）
@@ -238,8 +246,8 @@ float3 FwdDiffuseSource(uint id, float3 N, float3 albedo, float3 kD, float3 worl
         return kD * u_IrradianceMap.Sample(u_IBLSampler, N).rgb * albedo * iblIntensity;
     }
     if (id == GISOURCE_RSM) {
-        // 量纲：FwdSampleRSMIndirect 返回 E（经验常数已含 1/π）→ 补接收面 albedo，
-        // 与 Deferred 的 `SampleRSMIndirect(...) * albedo` 完全一致
+        // 量纲：FwdSampleRSMIndirect 返回 E/π（VPL 辐射度里已含 1/π，缩放由光锥尺度推出）
+        // → 补接收面 albedo，与 Deferred 的 `u_RSMIndirect × albedo` 完全一致
         return FwdSampleRSMIndirect(worldPos, N) * albedo;
     }
     return float3(0.0);

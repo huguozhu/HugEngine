@@ -118,7 +118,7 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
 
     // ── 绑定 RSM 间接光（Forward/Deferred 共用；未提供时回落到黑色占位 = 无间接光）──
     bindTex(kGPUBinding_RSMPosition, in.rsmPositionMap, m_HDRSampler.get(), black);
-    bindTex(kGPUBinding_RSMFlux, in.rsmFluxMap,     m_HDRSampler.get(), black);
+    bindTex(kGPUBinding_RSMFlux, in.rsmNormalMap,     m_HDRSampler.get(), black);
     // RSM 间接光 E（半分辨率）：线性采样以便升采样到全分辨率；未产出时黑色占位（无间接光）
     bindTex(kGPUBinding_RSMIndirect, in.rsmIndirectTex, m_HDRSampler.get(), black);
 
@@ -260,7 +260,7 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
         {kGPUBinding_PrefilterMap, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // Prefilter
         {kGPUBinding_BRDF_LUT, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // BRDF LUT
         {kGPUBinding_RSMPosition, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RSM Pos
-        {kGPUBinding_RSMFlux, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RSM Flux
+        {kGPUBinding_RSMFlux, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RSM Normal（VPL 世界法线，任务 30 起独立附件）
         {kGPUBinding_RSMIndirect, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RSM 间接光 E（半分辨率）
         {kGPUBinding_Lights_DL, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment},         // Lights SSBO
         {kGPUBinding_ShadowData_DL, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment},         // ShadowData SSBO
@@ -366,7 +366,7 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
             // 对 u_RSMFluxMap，白色是 flux=1.0，即一个"全亮 VPL"——一旦门控与 RSM pass 的真实
             // 产出不一致，回落就从一个安全值变成一个偏亮的错误值。黑色才是"无间接光"的中性值。
             updateAllTex(kGPUBinding_RSMPosition, m_PlaceholderBlack.get());
-            updateAllTex(kGPUBinding_RSMFlux, m_PlaceholderBlack.get());
+            updateAllTex(kGPUBinding_RSMFlux, m_PlaceholderBlack.get());   // RSM 法线图：中性值不会让它"有效"
             // RSM 间接光 E（binding 5）→ 黑色（无间接光），理由同上
             updateAllTex(kGPUBinding_RSMIndirect, m_PlaceholderBlack.get());
         }

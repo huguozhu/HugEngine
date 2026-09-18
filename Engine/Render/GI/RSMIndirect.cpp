@@ -12,7 +12,7 @@ bool RSMIndirect::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Width  = width;
     m_Height = height;
 
-    // ---- 参数 UBO：光源 VP + (lightCount, 光源类型, 阴影强度) ----
+    // ---- 参数 UBO：光源 VP + (lightCount, 光源类型, 阴影强度, VPL 采样缩放) ----
     rhi::BufferDesc ubDesc;
     ubDesc.size      = sizeof(float4x4) + sizeof(float4);
     ubDesc.usage     = rhi::BufferUsage::Uniform;
@@ -26,8 +26,9 @@ bool RSMIndirect::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         {kBindWorldPos, rhi::DescriptorType::CombinedImageSampler, 1, 16},
         {kBindNormal,   rhi::DescriptorType::CombinedImageSampler, 1, 16},
         {kBindRSMPos,   rhi::DescriptorType::CombinedImageSampler, 1, 16},
-        {kBindRSMFlux,  rhi::DescriptorType::CombinedImageSampler, 1, 16},
+        {kBindRSMNrm,   rhi::DescriptorType::CombinedImageSampler, 1, 16},
         {kBindParams,   rhi::DescriptorType::UniformBuffer,        1, 16},
+        {kBindRadiance, rhi::DescriptorType::CombinedImageSampler, 1, 16},
     };
     m_Layout = device->CreateDescriptorSetLayout(layoutDesc);
     m_Set    = device->AllocateDescriptorSet(m_Layout);
@@ -120,21 +121,24 @@ void RSMIndirect::SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* worldPos,
     }
 }
 
-void RSMIndirect::SetRSM(rhi::IRHITexture* positionMap, rhi::IRHITexture* fluxMap,
-                         const float4x4& lightViewProj, float shadowType, float shadowStrength,
-                         u32 lightCount) {
-    m_RSMPos  = positionMap;
-    m_RSMFlux = fluxMap;
+void RSMIndirect::SetRSM(rhi::IRHITexture* positionMap, rhi::IRHITexture* normalMap,
+                         rhi::IRHITexture* radianceMap,
+                         const float4x4& lightViewProj, float vplScale,
+                         float shadowType, float shadowStrength, u32 lightCount) {
+    m_RSMPos = positionMap;
+    m_RSMNrm = normalMap;
+    m_RSMRad = radianceMap;
     if (!m_Device) return;
-    if (m_RSMPos)  m_Device->UpdateDescriptorSet(m_Set, kBindRSMPos,  rhi::DescriptorType::CombinedImageSampler, m_RSMPos,  m_LinearSampler.get());
-    if (m_RSMFlux) m_Device->UpdateDescriptorSet(m_Set, kBindRSMFlux, rhi::DescriptorType::CombinedImageSampler, m_RSMFlux, m_LinearSampler.get());
+    if (m_RSMPos) m_Device->UpdateDescriptorSet(m_Set, kBindRSMPos,   rhi::DescriptorType::CombinedImageSampler, m_RSMPos, m_LinearSampler.get());
+    if (m_RSMNrm) m_Device->UpdateDescriptorSet(m_Set, kBindRSMNrm,   rhi::DescriptorType::CombinedImageSampler, m_RSMNrm, m_LinearSampler.get());
+    if (m_RSMRad) m_Device->UpdateDescriptorSet(m_Set, kBindRadiance, rhi::DescriptorType::CombinedImageSampler, m_RSMRad, m_LinearSampler.get());
 
     struct alignas(16) {
         float4x4 lightViewProj;
-        float4   params;   // x=lightCount, y=光源类型, z=阴影强度
+        float4   params;   // x=lightCount, y=光源类型, z=阴影强度, w=VPL 采样缩放
     } ub;
     ub.lightViewProj = lightViewProj;
-    ub.params = float4(float(lightCount), shadowType, shadowStrength, 0.0f);
+    ub.params = float4(float(lightCount), shadowType, shadowStrength, vplScale);
     void* mapped = m_ParamsUBO->Map();
     if (mapped) {
         memcpy(mapped, &ub, sizeof(ub));
@@ -156,7 +160,7 @@ void RSMIndirect::PreBind(rhi::IRHICommandList* cmd) {
 
 void RSMIndirect::Render(rhi::IRHICommandList* cmd) {
     if (!m_Ready || !m_PSO || !m_Output) return;
-    if (!m_Depth || !m_WorldPos || !m_Normal || !m_RSMPos || !m_RSMFlux) return;
+    if (!m_Depth || !m_WorldPos || !m_Normal || !m_RSMPos || !m_RSMNrm || !m_RSMRad) return;
     cmd->Draw(3);   // 全屏三角（顶点着色器覆盖整个视口 ⇒ 每个像素都被写）
 }
 
