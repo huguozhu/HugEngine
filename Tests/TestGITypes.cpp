@@ -657,6 +657,46 @@ TEST_CASE("GIChannelBlendData::Add：weight<=0 忽略、容量上限生效") {
     CHECK(b.count == GIChannelBlendData::kMaxSources);
 }
 
+// ── 逐像素置信度判据（§3.2，任务 9）──
+// 判据掩码由 C++ 逐槽写进 UBO，着色器按位计算 —— 两侧不再各有一份 id 列表。
+TEST_CASE("ToConfidenceMask：受相机视口限制的源才带 CAMERA_COVERAGE 位") {
+    // 屏幕空间 + 光追：入射方向从本像素出发，视口外/边缘无数据 ⇒ 受屏幕覆盖限制
+    const GISourceId limited[] = {
+        GISourceId::SSGI, GISourceId::SSR, GISourceId::SSAO, GISourceId::GTAO,
+        GISourceId::RTGI, GISourceId::RTReflection, GISourceId::RTAO,
+    };
+    for (GISourceId id : limited) {
+        CHECK(IsCameraViewLimitedSource(id));
+        CHECK(ToConfidenceMask(id) == kGIConfCameraCoverage);
+    }
+    // 世界空间源不受相机屏幕覆盖限制
+    const GISourceId world[] = { GISourceId::IBL, GISourceId::Lightmap, GISourceId::DDGI };
+    for (GISourceId id : world) {
+        CHECK_FALSE(IsCameraViewLimitedSource(id));
+        CHECK(ToConfidenceMask(id) == kGIConfNone);
+    }
+    // RSM 是**故意**不在这个谓词里的：它的产物是光源视锥下的 VPL 图，着色器按世界空间
+    // 求和，与相机视口无关。它与 IsScreenSpaceSource 的分类不同，两个谓词不可互相替代。
+    CHECK_FALSE(IsCameraViewLimitedSource(GISourceId::RSM));
+    CHECK(IsScreenSpaceSource(GISourceId::RSM));
+    CHECK(ToConfidenceMask(GISourceId::RSM) == kGIConfNone);
+    CHECK(ToConfidenceMask(GISourceId::None) == kGIConfNone);
+}
+
+TEST_CASE("GIChannelBlendData::Add：置信度掩码由源 id 统一推导") {
+    GIChannelBlendData b;
+    b.Add(static_cast<u32>(GISourceId::IBL),  1.0f);
+    b.Add(static_cast<u32>(GISourceId::SSGI), 1.0f);
+    b.Add(static_cast<u32>(GISourceId::RSM),  1.0f);
+    CHECK(b.count == 3u);
+    // 调用方不填置信度，Add 自己推导 —— 少一个"忘记填"的机会
+    CHECK(b.sources[0].confidence == kGIConfNone);
+    CHECK(b.sources[1].confidence == kGIConfCameraCoverage);
+    CHECK(b.sources[2].confidence == kGIConfNone);
+    // 边缘淡出带宽有非零默认值（UBO 里不再是硬编码 5%）
+    CHECK(b.edgeFade > 0.0f);
+}
+
 // ============================================================
 // 8. 配置诊断与冗余去重（P0 · REDUNDANCY）
 //

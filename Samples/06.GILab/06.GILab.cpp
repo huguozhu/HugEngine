@@ -578,6 +578,9 @@ int main() {
             auto& gc = *deferredPipeline.GetGIConfig();
             gc.giIntensity = GetFloat(cfgData, "gi_intensity", 1.0f);
             gc.aoIntensity = GetFloat(cfgData, "ao_intensity", 1.0f);
+            // 屏幕覆盖置信度的边缘带宽（§3.2）：默认 5% 只影响贴边的一条，调大即可把它
+            // 变成「整屏可见」的实验——用于验证置信度确实作用于权重，而不是死代码。
+            gc.edgeFade    = GetFloat(cfgData, "gi_edge_fade", 0.05f);
             gc.rsmIndirect = GetInt(cfgData, "gi_rsm_indirect", 1) != 0;
             gc.halfRes     = GetInt(cfgData, "gi_half_res", 0) != 0;
 
@@ -1577,6 +1580,7 @@ int main() {
             auto& gc = *deferredPipeline.GetGIConfig();
             out["gi_intensity"]    = std::to_string(gc.giIntensity);
             out["ao_intensity"]    = std::to_string(gc.aoIntensity);
+            out["gi_edge_fade"]    = std::to_string(gc.edgeFade);
             out["gi_rsm_indirect"] = std::to_string(gc.rsmIndirect ? 1 : 0);
             out["gi_half_res"]     = std::to_string(gc.halfRes ? 1 : 0);
 
