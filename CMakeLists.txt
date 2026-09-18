@@ -120,7 +120,7 @@ foreach(_eng HugEngineCore HugEngineRHI HugEngineReflect HugEngineShader HugEngi
 endforeach()
 
 # Samples（含 06.GILab 与编辑器；编辑器目标名是 HugEditor）
-foreach(_sample 01.Triangle 02.Cube 03.Sponza-Forward 04.Sponza-Deferred 06.GILab 07.AISamples HugEditor)
+foreach(_sample 01.Triangle 02.Cube 03.Sponza-Forward 04.Sponza-Deferred 05.Sponza-PathTracing 06.GILab 07.AISamples HugEditor)
     if(TARGET ${_sample})
         set_target_properties(${_sample} PROPERTIES FOLDER "Samples")
     endif()
