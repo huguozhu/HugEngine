@@ -1,5 +1,6 @@
 // GI/GI_DDGI.cpp — 动态探针 GI（Compute Shader 更新 + 时间混合 + 探针网格）
 #include "GI/GI_DDGI.h"
+#include "GI/GIProbeGrid.h"   // 探针网格拟合规则（纯几何、可单测）
 #include "Core/Log.h"
 #include "Subsystem/RenderSubsystem.h"
 #include "DDGI.comp.spv.h"
@@ -42,6 +43,7 @@ bool GI_DDGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     probeDesc.usage = rhi::BufferUsage::Storage;
     m_ProbeBuffer  = device->CreateBuffer(probeDesc);
     m_ProbeHistory = device->CreateBuffer(probeDesc);
+    m_ProbeBufferCount = probeCount;   // 网格拟合改变探针数时按此判断要不要重建
 
     // ---- 探针网格参数 Uniform Buffer（CPU 可写，每帧更新） ----
     rhi::BufferDesc uniformDesc;
@@ -201,10 +203,21 @@ void GI_DDGI::Render(rhi::IRHICommandList* cmd) {
 
     u32 probeCount = gridX * gridY * gridZ;
 
+    // 网格探针数变了就重建探针缓冲：自动拟合按场景包围盒定网格，而它只能发生在 Initialize
+    // 之后（那时拿不到场景）。重建只在包围盒首次稳定时发生一次。
+    if (probeCount != m_ProbeBufferCount) {
+        rhi::BufferDesc probeDesc;
+        probeDesc.size  = (u64)probeCount * kFloats4PerProbe * sizeof(float4);
+        probeDesc.usage = rhi::BufferUsage::Storage;
+        m_ProbeBuffer  = m_Device->CreateBuffer(probeDesc);
+        m_ProbeHistory = m_Device->CreateBuffer(probeDesc);
+        m_ProbeBufferCount = probeCount;
+        m_HistoryValid = false;   // 新缓冲是未初始化显存：本帧必须按"无历史"更新（见成员注释）
+        HE_CORE_INFO("DDGI 探针缓冲已按新网格重建：{} 个探针", probeCount);
+    }
+
     // 球面采样数
     static const u32 kNumSamples = 32;
-    // 时间混合历史有效性（首帧无历史）
-    static bool s_FirstFrame = true;
 
     // 更新 descriptor set：绑定当前输出缓冲和历史缓冲（每帧因 swap 而变化）
     m_Device->UpdateDescriptorSet(m_Set, kDDGIBindProbes, rhi::DescriptorType::StorageBuffer, m_ProbeBuffer.get());
@@ -218,7 +231,7 @@ void GI_DDGI::Render(rhi::IRHICommandList* cmd) {
     uniforms.params     = float4(m_Settings.intensity,
                                  float(kNumSamples),
                                  blendAlpha,
-                                 s_FirstFrame ? 0.0f : 1.0f);  // w=historyValid
+                                 m_HistoryValid ? 1.0f : 0.0f);  // w=historyValid
     uniforms.viewProj   = m_ViewProj;
     uniforms.rsmLightViewProj = m_RSMLightViewProj;   // B 路径：RSM 光源 VP
     // x=useRSM；y/z=时间维分摊的步长与相位（任务 12）：每帧只更新 probeIndex % stride == phase
@@ -246,7 +259,7 @@ void GI_DDGI::Render(rhi::IRHICommandList* cmd) {
 
     // 交换当前帧与历史帧缓冲（下一帧用本次结果作为历史）
     m_ProbeBuffer.swap(m_ProbeHistory);
-    s_FirstFrame = false;
+    m_HistoryValid = true;
 
     // 全局 Barrier：确保 Compute Shader 所有 UAV 写入完成后，后续 Fragment Shader 可读取
     cmd->PipelineBarrier(
@@ -273,6 +286,21 @@ void GI_DDGI::ClearRSM() {
     // 根本不会采样 RSM 纹理（见 DDGI.comp.slang 的 u_Flags.x 分支），重绑反而多一次写。
     m_RSMPositionMap = nullptr;
     m_RSMFluxMap     = nullptr;
+}
+
+void GI_DDGI::FitGridToBounds(const float3& mn, const float3& mx) {
+    // 拟合规则在 GI/GIProbeGrid.h（纯几何、有单元测试）；这里只负责应用与记账
+    const auto fit = FitProbeGridToBounds(mn, mx, fitCellsMax);
+    if (!fit) return;   // 退化包围盒（无几何 / NaN）：保持原参数不动
+    gridX = fit->countX;
+    gridY = fit->countY;
+    gridZ = fit->countZ;
+    cellSize   = fit->cellSize;
+    gridOrigin = fit->origin;
+
+    HE_CORE_INFO("DDGI 网格已按场景拟合：场景 {}x{}x{} -> 探针 {}x{}x{} 格距 {:.2f}（共 {} 个）",
+                 mx.x - mn.x, mx.y - mn.y, mx.z - mn.z,
+                 gridX, gridY, gridZ, cellSize, gridX * gridY * gridZ);
 }
 
 void GI_DDGI::SetIBL(rhi::IRHITexture* irradiance, rhi::IRHISampler* sampler) {

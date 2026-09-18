@@ -79,6 +79,25 @@ public:
     /// 当前轮转相位（每帧自增，渲染时对 updateStride 取模）
     u32 updatePhase  = 0;
 
+    /// 是否按场景包围盒自动拟合探针网格（任务 14 / §9.2-K）。
+    ///
+    /// 【为什么需要】网格是固定参数时，覆盖不到的区域会被 `SampleDDGI` 的 clamp 变成
+    /// **贴边常数外推**：开着 DDGI、却在大半屏幕上拿到同一个常数，且没有任何标记。
+    /// 实测（本仓库 GILab/Sponza）：默认网格 8×4×8 格距 3 ⇒ 只覆盖 21×9×21 世界单位，
+    /// 而场景包围盒是 3720.9×1555.9×2288.2 —— 加上覆盖语义（`kGIConfProbeGrid`）之后
+    /// DDGI 的贡献直接归零，即此前测到的"DDGI 贡献"**全部**来自那次 clamp。
+    /// 自动拟合让网格真正罩住场景；覆盖语义负责把仍在外面的部分标记为无效。
+    bool autoFitGrid = true;
+    /// 自动拟合时**最长边**上的探针数（其余两轴按同一格距推出各自需要的探针数）。
+    /// 格距 `cellSize = maxExtent / (fitCellsMax - 1)`，三轴共用同一个格距，
+    /// 因此不会出现各向异性拉伸；每轴探针数取"刚好罩住该轴"，
+    /// 不按最长边统一取值（否则短轴会白铺一半以上的探针）。
+    u32 fitCellsMax = 16;
+
+    /// 用场景包围盒拟合网格：格距由**最长边**推出，每轴独立取刚好罩住该轴的探针数，
+    /// 网格以包围盒最小角为原点。传入退化包围盒（min > max）时不改动任何参数。
+    void FitGridToBounds(const float3& mn, const float3& mx);
+
 private:
     // 每探针存储的 float4 数量（9 SH + 7 保留）
     static constexpr u32 kFloats4PerProbe = 16;
@@ -111,6 +130,13 @@ private:
     std::unique_ptr<rhi::IRHIBuffer> m_ProbeBuffer;
     // 上一帧探针历史（SSBO，时间混合源）
     std::unique_ptr<rhi::IRHIBuffer> m_ProbeHistory;
+    /// 当前探针缓冲的探针数（网格拟合改变探针数时据此重建）
+    u32 m_ProbeBufferCount = 0;
+    /// 历史探针缓冲中是否有**已写入**的数据（着色器 `historyValid`）。
+    /// 初次运行与「探针数变化导致重建」之后都必须为 false：新缓冲是未初始化显存，
+    /// 若当作有效历史参与 `blendAlpha` 混合，等于把垃圾按 0.85 的权重逐帧喂进 GI
+    /// （静默偏色，且读数随显存布局变化 —— 与 §9.2-T 同类）。
+    bool m_HistoryValid = false;
 
     // 探针网格参数 Uniform Buffer
     std::unique_ptr<rhi::IRHIBuffer> m_GridUniform;

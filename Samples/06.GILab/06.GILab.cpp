@@ -556,6 +556,10 @@ int main() {
             ddgi->debugScale = GetFloat(cfgData, "ddgi_scale", 1.0f);
             // 时间维分摊（任务 12）：每 N 帧更新一轮探针；1 = 每帧全量（默认）
             ddgi->updateStride = (u32)std::max(1, GetInt(cfgData, "ddgi_update_stride", 1));
+            // 网格自动拟合（任务 14 / §9.2-K）：默认开启；关闭后沿用固定网格参数，
+            // 覆盖不到的区域会被 clamp 成贴边常数外推（实测贡献几乎全部来自该外推）。
+            ddgi->autoFitGrid = GetInt(cfgData, "ddgi_grid_auto", 1) != 0;
+            ddgi->fitCellsMax = (u32)std::max(2, GetInt(cfgData, "ddgi_fit_cells", 16));
             auto s = ddgi->GetSettings();
             s.intensity = GetFloat(cfgData, "ddgi_intensity", 1.0f);
             ddgi->SetSettings(s);
@@ -1567,6 +1571,8 @@ int main() {
             out["ddgi_scale"]     = std::to_string(ddgi->debugScale);
             out["ddgi_intensity"] = std::to_string(ddgi->GetSettings().intensity);
             out["ddgi_update_stride"] = std::to_string(ddgi->updateStride);
+            out["ddgi_grid_auto"]     = std::to_string(ddgi->autoFitGrid ? 1 : 0);
+            out["ddgi_fit_cells"]     = std::to_string(ddgi->fitCellsMax);
         }
         if (auto* ssr = deferredPipeline.GetSSR()) {
             out["ssr_max_steps"] = std::to_string(ssr->maxSteps);

@@ -94,6 +94,8 @@ set(RENDER_SOURCES
     GI/GI_DDGI.cpp
     # GI — 数据模型（RHI-free，可被 Tests 直接包含）
     GI/GITypes.h
+    # GI — 探针网格拟合规则（RHI-free，可被 Tests 直接包含）
+    GI/GIProbeGrid.h
     # GI Provider（P4 / Wave 2：GI 源统一抽象 + 各源实现）
     GI/IGIProvider.h
     GI/IBLProvider.h

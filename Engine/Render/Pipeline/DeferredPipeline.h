@@ -205,6 +205,12 @@ private:
     /// 在**该飞行帧槽位下一次被复用时**读回并写进源自己的 GIDebugData。
     GITimer m_GITimer;
 
+    // ── 场景包围盒（DDGI 网格自动拟合用，任务 14）──
+    /// 包围盒重算倒计时：遍历带变换的网格包围盒不是零成本，而场景几何很少变。
+    /// **不能用 `m_FrameCounter` 代替**：它只在启用异步计算时才自增（普通路径恒为 0）。
+    static constexpr u32 kSceneBoundsRefreshFrames = 30;
+    u32 m_SceneBoundsCountdown = 0;
+
     // ── RT 基础设施（设备支持光追时创建；是否参与由层栈的 RT 源决定）──
     // P3：光追是「GI 源」而非「管线类型」，故 Deferred 亦可直接启用 RTGI/RT 反射/RTAO/RT 阴影
     std::unique_ptr<RTPass>           m_RTPass;             // AS 构建 + TLAS + 场景资源

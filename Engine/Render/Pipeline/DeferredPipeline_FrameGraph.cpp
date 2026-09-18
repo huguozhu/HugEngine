@@ -270,7 +270,30 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     }
 
     // ============================================================
-    // DDGI 探针的辐射度来源绑定
+    // 场景包围盒 → DDGI 探针网格自动拟合（任务 14 / §9.2-K）
+    //   【为什么要拟合】网格是固定参数时，覆盖不到的区域会被 SampleDDGI 的 clamp 变成
+    //   **贴边常数外推**（对世界坐标超界的查询，8 个采样坐标全被钳到同一个边界探针）。
+    //   实测：默认网格 8×4×8 格距 3 只覆盖 21×9×21 世界单位，场景却是 3720.9×1555.9×2288.2
+    //   —— 加上覆盖语义（kGIConfProbeGrid）后 DDGI 贡献从 0.019594 掉到 1.1e-7，
+    //   即此前那个贡献**整个**来自那次 clamp。网格必须真的罩住场景。
+    //   包围盒每 30 帧重算一次：场景几何很少变，而遍历带变换的网格包围盒不是零成本。
+    //   【不要用 m_FrameCounter 当这个计时器】它只在启用异步计算时才自增，普通路径上恒为 0
+    //   —— 用它做 `% 30` 判据会变成"每帧都重算"（实测日志每帧一行）。
+    // ============================================================
+    if (m_DDGI.autoFitGrid) {
+        if (m_SceneBoundsCountdown == 0u) {
+            he::AABB sceneBounds;
+            world.ForEach<he::MeshComponent>([&](he::Entity e, he::MeshComponent& mesh) {
+                if (auto* tf = world.GetComponent<TransformComponent>(e)) {
+                    sceneBounds.Expand(mesh.GetBounds().Transform(tf->GetLocalMatrix()));
+                }
+            });
+            if (sceneBounds.IsValid()) m_DDGI.FitGridToBounds(sceneBounds.min, sceneBounds.max);
+            m_SceneBoundsCountdown = kSceneBoundsRefreshFrames;
+        }
+        --m_SceneBoundsCountdown;
+    }
+
     //   - IBL 辐照度：RSM 不可用时的回退（世界空间、视角无关）
     //   - RSM：有方向阴影时优先（单次反弹 VPL，视角无关）
     // ============================================================
