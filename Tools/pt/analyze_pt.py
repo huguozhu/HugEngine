@@ -75,6 +75,83 @@ def stats(arr):
     }
 
 
+def luminance(arr):
+    """线性 HDR 的亮度（RGB 均值）。"""
+    return arr[..., :3].mean(axis=2) if arr.shape[2] >= 3 else arr[..., 0]
+
+
+def cmd_converge(tags, target, conv_tol):
+    """收敛判据：相邻档位（不同 SPP / 采样帧号）之间的读数变化率是否低于阈值。
+
+    「收敛」的工程定义（写进 §12 任务 6）：
+      **主判据**用鲁棒统计量 —— P50（图像中心趋势）与 P95（高频尾部），
+      相邻两档的相对变化都 < 阈值（默认 1%）即认为后一档已收敛。
+      `mean` 只作辅助读数：它被极少数超亮像素（镜面/直接光边缘的高方差样本，
+      实测 max 在 300~10000 之间跳）拖动，拿它当主判据会把"只有几个像素在抖"
+      误判成"整幅没收敛"，故同时打印 max 以便识别这种情形。
+    """
+    rows = []
+    for tag in tags:
+        arr, w, h, _ = load(tag, target)
+        s = stats(arr)
+        rows.append((tag, s))
+        print("%-16s p50=%.6f p95=%.6f | mean=%.6f max=%.6f (辅助)" %
+              (tag, s["p50"], s["p95"], s["mean"], s["max"]))
+
+    print("\n相邻档位变化率（主判据 p50/p95，阈值 %.2f%%）：" % (conv_tol * 100.0))
+    converged = True
+    for i in range(1, len(rows)):
+        (tag_a, sa), (tag_b, sb) = rows[i - 1], rows[i]
+        r_p50 = abs(sb["p50"] - sa["p50"]) / max(abs(sa["p50"]), 1e-12)
+        r_p95 = abs(sb["p95"] - sa["p95"]) / max(abs(sa["p95"]), 1e-12)
+        r_mean = abs(sb["mean"] - sa["mean"]) / max(abs(sa["mean"]), 1e-12)
+        ok = (r_p50 < conv_tol) and (r_p95 < conv_tol)
+        print("  %s -> %s : p50 %.3f%%  p95 %.3f%%  [mean %.3f%%]  %s"
+              % (tag_a, tag_b, r_p50 * 100.0, r_p95 * 100.0, r_mean * 100.0,
+                 "收敛" if ok else "未收敛"))
+        if not ok:
+            converged = False
+
+    print("\n判定：%s" % ("最后一档已达收敛判据" if converged else "仍需继续加 SPP / 帧数"))
+    return 0 if converged else 1
+
+
+def cmd_compare(a, b, target, tol, rel_tol):
+    """两版统计对照（例如 PT 当作标准答案 vs Deferred 的 GI 层栈）。"""
+    arr_a, wa, ha, _ = load(a, target)
+    arr_b, wb, hb, _ = load(b, target)
+    if arr_a.shape != arr_b.shape:
+        raise SystemExit("两版尺寸不同: %s %s vs %s %s" % (a, arr_a.shape, b, arr_b.shape))
+
+    la, lb = luminance(arr_a), luminance(arr_b)
+    sa, sb = stats(arr_a), stats(arr_b)
+    print("%-16s mean=%.6f p50=%.6f p95=%.6f max=%.6f" % (a, sa["mean"], sa["p50"], sa["p95"], sa["max"]))
+    print("%-16s mean=%.6f p50=%.6f p95=%.6f max=%.6f" % (b, sb["mean"], sb["p50"], sb["p95"], sb["max"]))
+    print("\n以 %s 为基准（标准答案）的偏差：" % a)
+    for key in ("mean", "p50", "p95"):
+        rel = (sb[key] - sa[key]) / max(abs(sa[key]), 1e-12)
+        print("  %-4s 相对偏差 = %+.2f%%" % (key, rel * 100.0))
+
+    d = lb - la
+    absd = np.abs(d)
+    denom = np.maximum(np.abs(la), 1e-12)
+    print("  逐像素（亮度）平均带符号偏差 = %+.6f" % float(d.mean()))
+    print("  逐像素绝对偏差 P50 = %.6f  P95 = %.6f  max = %.6f"
+          % (float(np.percentile(absd, 50)), float(np.percentile(absd, 95)), float(absd.max())))
+    print("  相对偏差 P50 = %.2f%%  P95 = %.2f%%"
+          % (float(np.percentile(absd / denom, 50)) * 100.0,
+             float(np.percentile(absd / denom, 95)) * 100.0))
+    # 亮度分档偏差：暗部/亮部各自的表现（GI 近似通常在暗部偏差最大）
+    for lo, hi in ((0.0, 0.1), (0.1, 1.0), (1.0, 1e9)):
+        m = (la >= lo) & (la < hi)
+        if m.sum() == 0:
+            continue
+        print("  基准亮度 [%.2f, %s) 像素 %7d：平均相对偏差 %+.2f%%"
+              % (lo, ("inf" if hi > 1e8 else "%.2f" % hi), int(m.sum()),
+                 float(((lb[m] - la[m]) / np.maximum(la[m], 1e-12)).mean()) * 100.0))
+    return 0
+
+
 def cmd_repro(tags, target, tol):
     rows = []
     for tag in tags:
@@ -140,9 +217,13 @@ def cmd_diff(a, b, target, tol, rel_tol, strict):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="PT 落盘读数 / 两版对照")
-    ap.add_argument("tags", nargs="*", help="可复现性检查用的 tag 列表（>=2）")
-    ap.add_argument("--diff", nargs=2, metavar=("TAG_A", "TAG_B"), help="两版逐像素对照")
+    ap = argparse.ArgumentParser(description="PT 落盘读数 / 两版对照 / 收敛判定")
+    ap.add_argument("tags", nargs="*", help="可复现性检查或收敛检查用的 tag 列表")
+    ap.add_argument("--diff", nargs=2, metavar=("TAG_A", "TAG_B"), help="两版逐像素对照（要求一致）")
+    ap.add_argument("--compare", nargs=2, metavar=("TAG_BASE", "TAG_TEST"),
+                    help="两版统计对照（PT 当作标准答案时用 BASE=pt、TEST=deferred）")
+    ap.add_argument("--converge", nargs="+", metavar="TAG", help="收敛判定：相邻档位变化率 < 阈值")
+    ap.add_argument("--conv-tol", type=float, default=0.01, help="收敛阈值（默认 1%）")
     ap.add_argument("--target", default="hdr", help="落盘目标名（默认 hdr）")
     ap.add_argument("--tol", type=float, default=1e-4, help="绝对容差（默认 1e-4）")
     ap.add_argument("--rel-tol", type=float, default=1e-3,
@@ -152,8 +233,14 @@ def main():
 
     if args.diff:
         return cmd_diff(args.diff[0], args.diff[1], args.target, args.tol, args.rel_tol, args.strict)
+    if args.compare:
+        return cmd_compare(args.compare[0], args.compare[1], args.target, args.tol, args.rel_tol)
+    if args.converge:
+        if len(args.converge) < 2:
+            ap.error("--converge 需要至少 2 个 tag")
+        return cmd_converge(args.converge, args.target, args.conv_tol)
     if len(args.tags) < 2:
-        ap.error("请给出 >=2 个 tag（可复现性检查）或使用 --diff")
+        ap.error("请给出 >=2 个 tag（可复现性检查）或使用 --diff / --compare / --converge")
     return cmd_repro(args.tags, args.target, args.tol)
 
 

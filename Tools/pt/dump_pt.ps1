@@ -12,6 +12,9 @@
 #   powershell -ExecutionPolicy Bypass -File Tools/pt/dump_pt.ps1                 # 默认 3 次、第 60 帧
 #   powershell -ExecutionPolicy Bypass -File Tools/pt/dump_pt.ps1 -Tag base -Runs 4 -Frame 120
 #   powershell -ExecutionPolicy Bypass -File Tools/pt/dump_pt.ps1 -Tag a -Runs 1 -SkipAnalyze
+#   powershell -ExecutionPolicy Bypass -File Tools/pt/dump_pt.ps1 -Tag pt -Runs 1 -Mode pt      # 参考渲染器
+#   powershell -ExecutionPolicy Bypass -File Tools/pt/dump_pt.ps1 -Tag df -Runs 1 -Mode deferred  # GI 层栈（对照）
+#   powershell -ExecutionPolicy Bypass -File Tools/pt/dump_pt.ps1 -Tag spp4 -Runs 1 -Frame 120 -Spp 4   # SPP 维收敛
 #
 # 输出（build/verify/）：
 #   pt_<tag>_runN_{hdr,depth,normal,albedo}.f16 + pt_<tag>_runN_meta.txt + _camera.txt
@@ -22,6 +25,9 @@ param(
     [int]$Runs = 3,
     [int]$Frame = 60,
     [string]$Config = 'Release',
+    [ValidateSet('pt','deferred')][string]$Mode = 'pt',   # pt=参考渲染器；deferred=GI 层栈（对照）
+    [int]$Spp = 0,                 # >0 时把私有 cfg 副本的 pt_spp 改成该值（SPP 维收敛实验）
+    [string[]]$Set = @(),          # 额外覆盖的 cfg 键，形如 'pt_bounces=8'
     [int]$TimeoutSec = 900,
     [switch]$SkipAnalyze
 )
@@ -49,6 +55,15 @@ for ($i = 1; $i -le $Runs; $i++) {
     } else {
         Remove-Item -Force $runCfg -ErrorAction SilentlyContinue   # 没有基准则用示例默认值
     }
+    # 实验参数只改进程的私有副本：SPP 维收敛实验与任意键覆盖（经 set_cfg.py）
+    if (Test-Path $runCfg) {
+        $overrides = @()
+        if ($Spp -gt 0) { $overrides += "pt_spp=$Spp" }
+        $overrides += $Set
+        if ($overrides.Count -gt 0) {
+            & python (Join-Path $root 'Tools\pt\set_cfg.py') $runCfg @overrides | Out-Null
+        }
+    }
 
     # ── stale-dump 守卫（1/2）：先清掉该 tag 的旧产物 ──
     Get-ChildItem -Path $out -Filter "pt_${runTag}_*" -ErrorAction SilentlyContinue |
@@ -58,17 +73,18 @@ for ($i = 1; $i -le $Runs; $i++) {
     $env:HE_DUMP_PT       = $runTag
     $env:HE_DUMP_PT_FRAME = "$Frame"
     $env:HE_CFG           = $runCfg
+    $env:HE_DUMP_MODE     = $Mode
 
     $log = Join-Path $out "pt_${runTag}.log"
     $err = Join-Path $out "pt_${runTag}.err.log"
-    Write-Output "[dump_pt] run $i/$Runs  tag=$runTag  frame=$Frame"
+    Write-Output "[dump_pt] run $i/$Runs  tag=$runTag  frame=$Frame  mode=$Mode  spp=$Spp"
     $proc = Start-Process -FilePath $exe -RedirectStandardOutput $log -RedirectStandardError $err -PassThru
     if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
         $proc.Kill()
         Write-Warning "[dump_pt] run $i 超时 ${TimeoutSec}s，已终止"
     }
 
-    Remove-Item Env:HE_DUMP_PT, Env:HE_DUMP_PT_FRAME, Env:HE_CFG -ErrorAction SilentlyContinue
+    Remove-Item Env:HE_DUMP_PT, Env:HE_DUMP_PT_FRAME, Env:HE_CFG, Env:HE_DUMP_MODE -ErrorAction SilentlyContinue
 
     # ── stale-dump 守卫（2/2）：产物必须存在且比本次启动新 ──
     $dump = Join-Path $out "pt_${runTag}_hdr.f16"
