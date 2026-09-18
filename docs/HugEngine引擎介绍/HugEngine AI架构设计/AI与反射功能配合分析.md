@@ -1,11 +1,11 @@
 # HugEngine 中 AI 与反射系统的配合分析
 
-> 基于实际代码与设计文档（`docs/AI相关/1~7` 系列）的分析，只读未修改任何源码。
+> 基于实际代码与设计文档（`docs/HugEngine引擎介绍/HugEngine AI架构设计/1~7` 系列）的分析，只读未修改任何源码。
 > 最后更新: 2026-09-01（覆盖至 G2.3；"现状评估"随 AI 模块演进同步修正）
 
 ## 一、核心设计原则："反射即世界模型"
 
-HugEngine 的 AI 架构（`docs/AI相关/1.HugEngine AI一等公民架构设计.md`）有一个关键设计决策：
+HugEngine 的 AI 架构（`docs/HugEngine引擎介绍/HugEngine AI架构设计/1.HugEngine AI一等公民架构设计.md`）有一个关键设计决策：
 
 > **不另造"AI 专用场景格式"**。`World`（ECS）+ `TypeRegistry`（反射注册表）本身就是世界模型，AI 读（观察）与写（动作）都走**同一条反射通道**。
 
@@ -103,7 +103,7 @@ SceneBuilder::BuildScene：JSON → 真实 Entity/Component 树
 - **零拷贝互操作**：`WrapRHITexture` / `ExportBuffer` 已实现（A3.2，`GPUTextureTensor` 包装渲染纹理、推理输出缓冲导出），`WrapRHIBuffer` 仍为占位；
 - `AIModule` 单例（进程级入口）+ `InferenceScheduler`（流式 token 按序投递主线程）。
 
-设计文档中的目标形态（`docs/AI相关/3.HugEngine AI统一基座设计规格.md`）：AI 写世界封装为 `he::Command` 走 `CommandHistory`（**可撤销/可审查**）——已实现（A2 的 `Action→CompileAction→he::Command`）；AIGC 平台生成的内容与人工编辑走完全相同的 Entity/Component/Asset/Command/Archive 管线——已实现（G1/G2）。
+设计文档中的目标形态（`docs/HugEngine引擎介绍/HugEngine AI架构设计/3.HugEngine AI统一基座设计规格.md`）：AI 写世界封装为 `he::Command` 走 `CommandHistory`（**可撤销/可审查**）——已实现（A2 的 `Action→CompileAction→he::Command`）；AIGC 平台生成的内容与人工编辑走完全相同的 Entity/Component/Asset/Command/Archive 管线——已实现（G1/G2）。
 
 ## 七、配合关系总览（数据流闭环）
 

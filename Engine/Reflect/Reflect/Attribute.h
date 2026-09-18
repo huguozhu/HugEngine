@@ -45,7 +45,7 @@ namespace AttrKey {
     constexpr const char* SortPriority = "SortPriority";
     constexpr const char* EditCondition = "EditCondition";
 
-    // --- AI 相关注解（AI 一等公民，见 docs/AI相关/2.HugEngine AI统一基座设计.md）---
+    // --- AI 相关注解（AI 一等公民，见 docs/HugEngine引擎介绍/HugEngine AI架构设计/2.HugEngine AI统一基座设计.md）---
     constexpr const char* AiVisible    = "AiVisible";    // 该属性进入世界模型快照
     constexpr const char* AiDescription = "AiDescription"; // 自然语言说明（LLM 用）
     constexpr const char* AiWritable   = "AiWritable";   // 允许 AI 写入（否则只读）
