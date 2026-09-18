@@ -629,6 +629,16 @@ public:
     }
 
     /// 把 GIConfig 四个通道层栈中的不可用源全部裁剪
+    ///
+    /// 【任务 28 / §9.2-Y：这里**只裁不加**】原先末尾还有一段"兜底"：某个通道被裁空时补一个
+    /// IBL（AO 补 SSAO）。它制造了「同一份配置两种含义」的缺陷 —— 走配置加载路径（不经过本
+    /// 函数）时空层栈就是空，而任何经过本函数的路径（预设按钮、阴影下拉）都会把它悄悄补成
+    /// `{IBL}`；示例程序退出时又把**内存里的那份**回写成配置文件，于是下一次运行读到的是被补
+    /// 过的配置，读数相差 32%（§9.2-Y）。
+    /// 现在统一成"只移除、不添加"：同一份输入在**任何**调用路径上都得到同一个有效层栈。
+    /// 空通道是**有定义的合法状态**（§3.1：漫反射/镜面合成返回 0、AO 取 1 不遮蔽），也是采样
+    /// 设施做差实验的基线，所以不该被静默改写。若将来某个调用方确实想要"保证非空"，
+    /// 应由它自己显式补源并在 UI 上说清楚，而不是让这个裁剪函数替它做决定。
     static GIConfig Degrade(const GIConfig& c, u32 pipelineCaps, bool rtSupported) {
         GIConfig out = c;
         DegradeStack(out.diffuse,  pipelineCaps, rtSupported);
@@ -642,18 +652,6 @@ public:
         if (out.shadow == ShadowChannel::Raster
             && (pipelineCaps & kPipelineGIShadowRaster) == 0) {
             out.shadow = ShadowChannel::None;     // 该管线连光栅阴影都不支持
-        }
-
-        // ── 兜底：通道被裁空时补一个管线支持的源，避免该通道完全丢失 ──
-        // 环境源（IBL）几乎所有管线都支持，作为最后兜底
-        if (out.diffuse.count == 0 && IsAvailable(GISourceId::IBL, pipelineCaps, rtSupported)) {
-            out.diffuse.Set(GISourceId::IBL, 1.0f);
-        }
-        if (out.specular.count == 0 && IsAvailable(GISourceId::IBL, pipelineCaps, rtSupported)) {
-            out.specular.Set(GISourceId::IBL, 1.0f);
-        }
-        if (out.ao.count == 0 && IsAvailable(GISourceId::SSAO, pipelineCaps, rtSupported)) {
-            out.ao.Set(GISourceId::SSAO, 1.0f);
         }
         return out;
     }

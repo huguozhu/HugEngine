@@ -586,21 +586,34 @@ TEST_CASE("GIRegistry::Degrade：weight<=0 的残留槽位也会被清理") {
     CHECK(d.diffuse.sources[0].id == GISourceId::IBL);
 }
 
-TEST_CASE("GIRegistry::Degrade：通道被裁空时兜底（IBL / SSAO）") {
-    // 构造一个只含不可用源的配置：diffuse/specular 含 Lightmap（预留源，恒不可用），
-    // ao 含 RTAO（无光追设备不可用）
+TEST_CASE("GIRegistry::Degrade：只裁不加 —— 空通道保持空（同一份配置在任何路径上同义）") {
+    // 任务 28 / §9.2-Y 的核心性质：`Degrade` 只移除不可用源，**不补源**。
+    // 这条性质保证「同一份配置 → 同一个有效层栈」与调用路径无关：
+    // 配置加载路径不经过 Degrade、面板的预设/阴影下拉经过它，两边必须同义。
+    // 反例（改前的兜底行为）：全 0 权重的配置在加载路径上是空栈（做差实验的基线），
+    // 一旦经过 Degrade 就被补成 {IBL}，而示例退出时又把内存那份回写成文件 ⇒
+    // 下一次运行读到的是被补过的配置，读数差 32%。
+    GIConfig empty;                                    // 三通道全空
+    const GIConfig d = GIRegistry::Degrade(empty, PipelineCaps::Deferred, true);
+    CHECK(d.diffuse.count  == 0u);
+    CHECK(d.specular.count == 0u);
+    CHECK(d.ao.count       == 0u);
+
+    // 只含不可用源的通道：裁完之后同样保持空，而不是被补上 IBL/SSAO
     GIConfig c;
-    c.diffuse.Set(GISourceId::Lightmap, 1.0f);
+    c.diffuse.Set(GISourceId::Lightmap, 1.0f);         // 恒不可用
     c.specular.Set(GISourceId::Lightmap, 1.0f);
-    c.ao.Set(GISourceId::RTAO, 1.0f);
+    c.ao.Set(GISourceId::RTAO, 1.0f);                  // 无光追设备不可用
+    const GIConfig d2 = GIRegistry::Degrade(c, PipelineCaps::Deferred, false);
+    CHECK(d2.diffuse.count  == 0u);
+    CHECK(d2.specular.count == 0u);
+    CHECK(d2.ao.count       == 0u);
 
-    const GIConfig d = GIRegistry::Degrade(c, PipelineCaps::Deferred, false);
-
-    CHECK(d.diffuse.Has(GISourceId::IBL));           // 兜底 IBL
-    CHECK_FALSE(d.diffuse.Has(GISourceId::Lightmap));
-    CHECK(d.specular.Has(GISourceId::IBL));
-    CHECK(d.ao.Has(GISourceId::SSAO));               // 兜底 SSAO
-    CHECK_FALSE(d.ao.Has(GISourceId::RTAO));
+    // 幂等：再裁一次结果不变（这正是"任何路径都同义"的可操作表述）
+    const GIConfig d3 = GIRegistry::Degrade(d2, PipelineCaps::Deferred, false);
+    CHECK(d3.diffuse.count  == 0u);
+    CHECK(d3.specular.count == 0u);
+    CHECK(d3.ao.count       == 0u);
 }
 
 TEST_CASE("GIRegistry::Degrade：结果自洽 —— 无不可用源残留、无权重<=0 槽位") {
@@ -626,7 +639,9 @@ TEST_CASE("GIRegistry::Degrade：结果自洽 —— 无不可用源残留、无
                         // 2) 不再含 weight<=0 的僵尸槽位
                         CHECK(st->sources[i].weight > 0.0f);
                     }
-                    // 3) 只要该通道存在可用源，降级后就必须非空（兜底生效）
+                    // 3) 只要该通道存在可用源，降级后就必须非空
+                    //（注意：这不依赖任何"兜底"——四档预设的每个通道本来就带有可用源，
+                    //  `Degrade` 只是把不可用的裁掉；任务 28 起它不再补源）
                     bool anyAvailable = false;
                     for (GISourceId id : kAllSources) {
                         if (ChannelOf(id) == 0) continue;
