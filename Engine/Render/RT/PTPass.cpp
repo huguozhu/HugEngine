@@ -128,12 +128,15 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         groups.push_back(mg);
     }
 
-    // ── 创建独立 RT 管线 + SBT（48B payload，深度 2 够用——循环在 RayGen 内）──
+    // ── 创建独立 RT 管线 + SBT（96B payload：命中信息 + Disney 材质参数，
+    //    深度 2 够用——循环在 RayGen 内）。大小取自 C++ 镜像结构，
+    //    避免字面量与 shader 侧 struct 漂移（PT 任务 1）──
     m_Pipeline = std::make_unique<RTPass::RTEffectPipeline>(
         RTPass::CreateEffectPipeline(device, shaders, groups, {m_Layout}, m_PCRange,
-                                     48, rhi::kRTMaxRecursionDepth, "FullPT"));
+                                     kPathPayloadSize, rhi::kRTMaxRecursionDepth, "FullPT"));
     if (!m_Pipeline->pipeline) {
-        HE_CORE_ERROR("PTPass: 全路径追踪管线创建失败（设备 maxPayloadSize 可能 < 48B）");
+        HE_CORE_ERROR("PTPass: 全路径追踪管线创建失败（设备 maxPayloadSize 可能 < {}B）",
+                      kPathPayloadSize);
         return false;
     }
 
@@ -158,7 +161,7 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         return false;
     }
 
-    HE_CORE_INFO("PTPass: 初始化完成 ({}x{}, payload=48B)", m_Width, m_Height);
+    HE_CORE_INFO("PTPass: 初始化完成 ({}x{}, payload={}B)", m_Width, m_Height, kPathPayloadSize);
     return true;
 }
 

@@ -1,6 +1,8 @@
 // PT_Full.rchit.slang — 全路径追踪 ClosestHit 着色器
 //
-// 填充 PathPayload（48B）：albedo+metallic / normal+roughness / emissive+hitT。
+// 填充 PathPayload（96B）：albedo+metallic / normal+roughness / emissive+hitT，
+// 以及 Disney 材质参数（disneyA / disneyB / surfaceParams，供 RayGen 的
+// PBR_BRDF 求值与采样使用）。
 // 材质用 Texture2D（SampledImage）而非 SSBO——ClosestHitKHR 中访问
 // StructuredBuffer 已知 slangc GPU fault；法线用三角形法线纹理重心插值，
 // 不依赖 position_fetch（GTX 1070 等设备不支持）。
@@ -12,8 +14,12 @@
 #include "PT_Common.slang"  // PathPayload + 随机数（SampleSky 等）
 
 // === 材质资源（set=0, ClosestHit 阶段）===
-// 4×N RGBA32F：row0=albedo.rgb+metallic, row1=roughness+ao,
-// row2=(法线线性起始=tri*3, 三角形数, 法线纹理宽度, 0), row3=emissive.rgb+0
+// 7×N RGBA32F（与 RTPass::BuildSceneMaterialTexture 的行布局一致）：
+//   row0=albedo.rgb+metallic, row1=roughness+ao,
+//   row2=(法线线性起始=tri*3, 三角形数, 法线纹理宽度, 0), row3=emissive.rgb+0,
+//   row4=disneyA(aniso, subsurface, specular, sheen),
+//   row5=disneyB(clearcoat, clearcoatGloss, specularTint.rg),
+//   row6=(disneyC, dielectricF0, ior, transmission)
 [[vk::binding(6, 0)]] Texture2D<float4> g_SceneMaterials;
 
 // 三角形顶点法线纹理（每三角形 3 条，按 TLAS 实例顺序扁平排列）
@@ -26,18 +32,25 @@
 [[vk::push_constant]] PTPushConstant g_PC;
 
 // ============================================================
-// LoadHitMaterial — 按 TLAS 实例 ID 查询命中材质（4×N 纹理）
+// LoadHitMaterial — 按 TLAS 实例 ID 查询命中材质（7×N 纹理）
 // ============================================================
 void LoadHitMaterial(uint instanceID,
                      out float3 albedo,
                      out float metallic,
                      out float roughness,
-                     out float3 emissive) {
+                     out float3 emissive,
+                     out float4 disneyA,
+                     out float4 disneyB,
+                     out float4 surfaceParams) {
     float4 row0 = g_SceneMaterials.Load(int3(instanceID, 0, 0));
     albedo    = row0.rgb;
     metallic  = row0.a;
     roughness = g_SceneMaterials.Load(int3(instanceID, 1, 0)).r;
     emissive  = g_SceneMaterials.Load(int3(instanceID, 3, 0)).rgb;
+    // Disney 参数（row4/row5）与表面参数（row6：disneyC / F0 / IOR / 透射）
+    disneyA       = g_SceneMaterials.Load(int3(instanceID, 4, 0));
+    disneyB       = g_SceneMaterials.Load(int3(instanceID, 5, 0));
+    surfaceParams = g_SceneMaterials.Load(int3(instanceID, 6, 0));
 }
 
 // ============================================================
@@ -73,10 +86,17 @@ void main(inout PathPayload payload, in BuiltInTriangleIntersectionAttributes at
     uint primId     = NonUniformResourceIndex(PrimitiveIndex());
 
     float3 albedo; float metallic; float roughness; float3 emissive;
-    LoadHitMaterial(instanceID, albedo, metallic, roughness, emissive);
+    float4 disneyA; float4 disneyB; float4 surfaceParams;
+    LoadHitMaterial(instanceID, albedo, metallic, roughness, emissive,
+                    disneyA, disneyB, surfaceParams);
     float3 N = LoadHitNormal(instanceID, primId, attr.barycentrics);
 
     payload.albedoMetallic = float4(albedo, metallic);
     payload.normalRough    = float4(N, roughness);
     payload.emissiveT      = float4(emissive, RayTCurrent());
+    // Disney 材质参数随载荷带回 RayGen（PT 任务 1：为共享 BRDF 求值/采样准备数据；
+    // 任务 2/3 才真正在采样端使用，故此刻读数与扩展前一致）
+    payload.disneyA        = disneyA;
+    payload.disneyB        = disneyB;
+    payload.surfaceParams  = surfaceParams;
 }

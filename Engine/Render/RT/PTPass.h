@@ -3,6 +3,7 @@
 #include "RHI/RHI.h"
 #include "Pipeline/RTPass.h"
 #include "Pipeline/Camera.h"
+#include "RT/PathPayload.h"   // PathPayload 的 C++ 镜像（载荷大小传给 RT 管线）
 #include "Math/Math.h"
 #include <memory>
 

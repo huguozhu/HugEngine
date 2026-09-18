@@ -18,14 +18,26 @@
 #include "pbr_common.slang"    // D_GGX / F_Schlick / PBR_BRDF（含 common.slang）
 
 // ============================================================
-// PathPayload — 路径追踪载荷（rchit/rmiss 定义必须逐字节一致）
-// 48B：albedoMetallic + normalRough + emissiveT
+// PathPayload — 路径追踪载荷（rchit/rmiss 必须逐字节一致）
+// 96B = 6 × float4：基础命中信息 3 个 + Disney 材质参数 3 个
+//
+// 字段顺序/偏移与 C++ 侧镜像结构 he::render::PathPayload
+// （Engine/Render/RT/PathPayload.h）逐一对应：C++ 侧用
+// static_assert(sizeof == 96) + 逐字段 offsetof 钉住；Slang 编译器不支持
+// `sizeof` 形式的静态断言（实测 static_assert(sizeof(X) == N) 报 E20001），
+// 故两端一致性由 Tools/check_path_payload.py 解析两份源码交叉校验
+// （字段名、顺序、逐字段偏移），改动任一侧而不同步会被该脚本拦下。
 // ============================================================
 struct PathPayload {
-    float4 albedoMetallic;  // rgb=albedo, a=metallic
-    float4 normalRough;     // xyz=normal(世界空间), w=roughness
-    float4 emissiveT;       // rgb=emissive, a=hitT（miss: a=-1, rgb=sky）
+    float4 albedoMetallic;  // 0  rgb=albedo, a=metallic
+    float4 normalRough;     // 16 xyz=normal(世界空间), w=roughness
+    float4 emissiveT;       // 32 rgb=emissive, a=hitT（miss: a=-1, rgb=sky）
+    // ── Disney 参数（与 Material.h / RTPass 材质纹理 row4~row6 同源）──
+    float4 disneyA;         // 48 x=anisotropic, y=subsurface, z=specular, w=sheen
+    float4 disneyB;         // 64 x=clearcoat, y=clearcoatGloss, z=specularTint.r, w=specularTint.g
+    float4 surfaceParams;   // 80 x=disneyC(specularTint.b), y=dielectricF0, z=ior, w=transmission
 };
+
 
 // ============================================================
 // 随机数工具（确定性，像素索引 + 帧号 + 样本号）
