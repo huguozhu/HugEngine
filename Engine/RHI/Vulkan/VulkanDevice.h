@@ -227,6 +227,9 @@ public:
         if (frameId != m_LastDeferredAdvanceFrame) {
             m_LastDeferredAdvanceFrame = frameId;
             m_DeferredDestroy.Advance();
+            // 任务 23：bindless 槽位的保护期回收与延迟销毁同一帧边界推进
+            //（两者的安全前提相同：引用它的帧已完成 + fence 已 signal）
+            if (m_BindlessHeap) m_BindlessHeap->BeginFrame(frameId);
         }
     }
 

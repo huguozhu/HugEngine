@@ -19,6 +19,7 @@ add_executable(HugEngineTests
     TestSplineMesh.cpp
     TestNavMesh.cpp
     TestInstancedMesh.cpp
+    TestBindlessHeap.cpp
     TestSkeletonLoader.cpp
     TestSkeletalMesh.cpp
     TestJoltSmoke.cpp

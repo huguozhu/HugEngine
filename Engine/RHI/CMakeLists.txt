@@ -10,6 +10,8 @@ set(RHI_SOURCES
     RHI/CommandList.h
     RHI/Buffer.h
     RHI/Bindless.h
+    RHI/BindlessSlotRing.h
+    RHI/FrameRetireQueue.h
     RHI/SwapChain.h
     RHI/QueryPool.h
     RHI/MeshShader.h
