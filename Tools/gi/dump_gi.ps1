@@ -17,6 +17,15 @@
 #   * configs are written to the output dir and pointed at with HE_GILAB_CONFIG, so the
 #     sample never rewrites the repo's Content/Config/06_GILab.cfg (it saves on exit).
 #
+# STALE-DUMP GUARD (added after a measurement was misread): a run that crashes or times
+# out never reaches the dump, so `gi_<tag>_*.f16` simply keeps whatever the PREVIOUS run
+# wrote. Any analysis then silently reports old numbers as if they were new -- that is
+# exactly how a 44% "absolute reading shift" was once mis-attributed to binary layout
+# (docs §9.2-U / §11.3.1). So now, per variant:
+#   1. the tag's outputs are DELETED before the run, and
+#   2. after the run the HDR dump must exist AND be newer than the run start.
+# A variant that fails either check is reported as FAILED and the script exits non-zero.
+#
 # Output: <repo>/Build/verify/gi_<tag>_{hdr,albedo,provN_raw,provN_final}.f16 plus
 #         gi_<tag>_meta.txt. Analyse with analyze_gi.py / p5_spectrum.py next to this file.
 # ============================================================
@@ -59,6 +68,7 @@ $variants = @(
     @{ tag = 'ssgi'; w = @(0, 0, 1, 0) }
 )
 
+$failed = 0
 foreach ($v in $variants) {
     $tag = $v.tag
     $cfg = Join-Path $outDir "dump_$tag.cfg"
@@ -73,10 +83,15 @@ foreach ($v in $variants) {
     $log = Join-Path $outDir "dump_$tag.log"
     $err = Join-Path $outDir "dump_$tag.err.log"
 
+    # --- stale-dump guard (1/2): drop this tag's previous outputs before the run ---
+    Get-ChildItem $outDir -Filter "gi_${tag}_*" -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+
     $env:HE_GILAB_CONFIG  = $cfg
     $env:HE_DUMP_GI       = $tag
     $env:HE_DUMP_GI_FRAME = "$Frame"
     Write-Output "=== sampling $tag (diffuse w=$($v.w -join ',')) ==="
+    $t0 = Get-Date
 
     $p = Start-Process -FilePath $exe -WorkingDirectory $root -PassThru -NoNewWindow `
                        -RedirectStandardOutput $log -RedirectStandardError $err
@@ -86,8 +101,15 @@ foreach ($v in $variants) {
     Select-String -Path $log, $err -Pattern 'GI' -ErrorAction SilentlyContinue |
         Where-Object { $_.Line -match '\[GI' } |
         ForEach-Object { "  " + $_.Line.Trim() }
-    if ((Test-Path $log) -and -not (Select-String -Path $log -Pattern 'GI' -Quiet)) {
-        Write-Output "  (no [GI...] lines in $log -- check the sample actually dumped)"
+
+    # --- stale-dump guard (2/2): the dump must exist and be newer than this run ---
+    $hdr = Join-Path $outDir "gi_${tag}_hdr.f16"
+    if (-not (Test-Path $hdr)) {
+        Write-Output "  !! FAILED: no dump produced (run crashed or never reached frame $Frame) -- this variant's numbers are unusable"
+        $failed++
+    } elseif ((Get-Item $hdr).LastWriteTime -lt $t0) {
+        Write-Output "  !! FAILED: dump is OLDER than this run (stale file) -- this variant's numbers are unusable"
+        $failed++
     }
 }
 
@@ -98,3 +120,9 @@ Get-ChildItem $outDir -Filter 'gi_*.f16' | Sort-Object Name |
     ForEach-Object { "  {0,-34} {1,12:N0} B" -f $_.Name, $_.Length }
 Get-ChildItem $outDir -Filter 'gi_*_meta.txt' | Sort-Object Name |
     ForEach-Object { "  {0,-34} {1}" -f $_.Name, ([System.IO.File]::ReadAllText($_.FullName) -replace "`r?`n", ' | ').Trim() }
+
+if ($failed -gt 0) {
+    Write-Output ""
+    Write-Output "!! $failed variant(s) FAILED -- do NOT analyse gi_*.f16 from this run."
+    exit 1
+}
