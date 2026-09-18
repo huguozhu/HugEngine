@@ -39,6 +39,11 @@ public:
 
     /// 探针更新是计算着色器 pass
     [[nodiscard]] GIPassKind GetPassKind() const override { return GIPassKind::Compute; }
+    /// DDGI 探针的辐射度回退来源就是「前帧 HDR 辐射度」共享组件（见 GI_DDGI::SetIBL 的注释：
+    /// 探头更新会采样它）→ 捕获门控必须把它算进消费者。
+    [[nodiscard]] bool NeedsRadianceHistory() const override {
+        return m_DDGI != nullptr && m_DDGI->IsEnabled();
+    }
     /// 无通道纹理：产物是探针缓冲，由 shader 的 SampleDDGI() 直接读取
     [[nodiscard]] bool HasTextureOutput() const override { return false; }
     [[nodiscard]] rhi::IRHITexture* GetDiffuseOutput() const override { return nullptr; }

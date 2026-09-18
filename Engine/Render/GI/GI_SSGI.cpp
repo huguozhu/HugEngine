@@ -11,10 +11,11 @@
 namespace he::render {
 
 // SSGI 描述符集绑定号（与 SSGI.frag 的 vk::binding 一致）
-static constexpr u32 kSSGIBindDepth  = 0;   // 深度
-static constexpr u32 kSSGIBindNormal = 1;   // 法线
-static constexpr u32 kSSGIBindAlbedo = 2;   // 反照率
-static constexpr u32 kSSGIBindParams = 3;   // 参数 Uniform Buffer
+static constexpr u32 kSSGIBindDepth   = 0;   // 深度
+static constexpr u32 kSSGIBindNormal  = 1;   // 法线
+static constexpr u32 kSSGIBindAlbedo  = 2;   // 反照率
+static constexpr u32 kSSGIBindParams  = 3;   // 参数 Uniform Buffer
+static constexpr u32 kSSGIBindRadiance = 4;  // 前帧 HDR 辐射度（入射辐射度 L_in）
 
 // SSGI 半球采样核大小（CPU 生成随机方向，GPU 逐采样点求间接光）
 static constexpr u32 kSSGIKernelSize = 32;
@@ -54,10 +55,12 @@ bool GI_SSGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     // 3. 创建描述符集（binding 0-2：深度/法线/反照率，binding 3：Uniform Buffer）
     rhi::DescriptorSetLayoutDesc layoutDesc;
     layoutDesc.bindings = {
-        {kSSGIBindDepth,  rhi::DescriptorType::CombinedImageSampler, 1, 16},
-        {kSSGIBindNormal, rhi::DescriptorType::CombinedImageSampler, 1, 16},
-        {kSSGIBindAlbedo, rhi::DescriptorType::CombinedImageSampler, 1, 16},
-        {kSSGIBindParams, rhi::DescriptorType::UniformBuffer, 1, 16},
+        {kSSGIBindDepth,   rhi::DescriptorType::CombinedImageSampler, 1, 16},
+        {kSSGIBindNormal,  rhi::DescriptorType::CombinedImageSampler, 1, 16},
+        {kSSGIBindAlbedo,  rhi::DescriptorType::CombinedImageSampler, 1, 16},
+        {kSSGIBindParams,  rhi::DescriptorType::UniformBuffer, 1, 16},
+        // 前帧 HDR 辐射度：命中点的入射辐射度来源（没有它就不是 E/π 的估计，§9.2-P）
+        {kSSGIBindRadiance, rhi::DescriptorType::CombinedImageSampler, 1, 16},
     };
     m_DescLayout = device->CreateDescriptorSetLayout(layoutDesc);
     m_DescSet    = device->AllocateDescriptorSet(m_DescLayout);
@@ -95,6 +98,8 @@ bool GI_SSGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
 
     // 6. 创建输出纹理（halfRes 时降半，省约 3/4 像素着色）
     CreateOutputTex(halfResW(width), halfResH(height));
+    // 前帧 HDR 辐射度（若已在 Initialize 之前注入则立刻绑定；否则首次 Render 时补绑）
+    BindRadianceHistory();
     m_Ready = true;
     HE_CORE_INFO("SSGI initialized ({}x{})", m_Output->GetWidth(), m_Output->GetHeight());
     return true;
@@ -176,22 +181,27 @@ void GI_SSGI::Render(rhi::IRHICommandList* cmd) {
     cmd->SetViewport({0, (float)oh, (float)ow, -(float)oh, 0, 1});
     cmd->SetScissor({0, 0, ow, oh});
 
-    // 2. 生成采样核（首次生成，之后复用；通过 UBO 传递避免 push constant 溢出 256 字节限制）
+    // 2. 绑定「前帧 HDR 辐射度」（入射辐射度来源；纹理代次变化时才重绑）
+    BindRadianceHistory();
+
+    // 3. 生成采样核（首次生成，之后复用；通过 UBO 传递避免 push constant 溢出 256 字节限制）
     static std::vector<float4> kernel;
     if (kernel.empty()) {
         GenSSGISamples(kernel, kSSGIKernelSize);
     }
 
-    // 3. 填充 Uniform Buffer（采样核 + 参数 + 投影/视图矩阵）
+    // 4. 填充 Uniform Buffer（采样核 + 参数 + 投影/视图矩阵）
     struct alignas(16) {
         float4   k[32];        // 采样核（32 个方向）
-        float4   p;            // x=半径, y=强度, z=采样数
+        float4   p;            // x=半径, y=强度, z=采样数, w=白炉标志
         float4x4 invProj;      // 逆投影：clip→view，重建 view-space
         float4x4 proj;         // 正投影：view→clip，采样点投影到屏幕
         float4x4 view;         // 视图：world→view，把世界空间法线转到 view 空间
     } ub;
     memcpy(ub.k, kernel.data(), kSSGIKernelSize * sizeof(float4));
-    ub.p = float4(radius, m_Settings.intensity, float(sampleCount), 0);
+    // w = 白炉标志：白炉条件是「全白环境 + 接收面 albedo = 1」，本 pass 也必须按该条件求值，
+    // 否则白炉判据只能靠 Lighting 侧的短路，SSGI 的**标度**永远测不出来（SSGI-CAL 的关键）。
+    ub.p = float4(radius, m_Settings.intensity, float(sampleCount), m_Furnace ? 1.0f : 0.0f);
     // 优先用真实相机：深度图是用它的投影渲染的，重建必须用同一套参数（否则非默认
     // fov/near/far 下 viewPos 系统性错位——§9.2-E）。无相机时退化为默认投影，
     // 保证不会读到未初始化矩阵。
@@ -215,8 +225,21 @@ void GI_SSGI::Render(rhi::IRHICommandList* cmd) {
         m_UniformBuffer->Unmap();
     }
 
-    // 4. 绘制全屏三角（3 顶点覆盖全屏）
+    // 5. 绘制全屏三角（3 顶点覆盖全屏）
     cmd->Draw(3);
+}
+
+void GI_SSGI::BindRadianceHistory() {
+    if (!m_Device || !m_Radiance || !m_Radiance->IsValid()) return;
+    // 只在组件代次变化时重绑：纹理可能因 resize 被重建，而每帧无条件写描述符既浪费
+    // 又容易与其它源的绑定互相干扰（与 GI_DDGI::BindRadianceHistory 同一做法）。
+    const u32 gen = m_Radiance->GetGeneration();
+    if (gen == m_RadianceGeneration) return;
+    m_RadianceGeneration = gen;
+    m_Device->UpdateDescriptorSet(m_DescSet, kSSGIBindRadiance,
+        rhi::DescriptorType::CombinedImageSampler,
+        m_Radiance->GetTexture(), m_Radiance->GetSampler());
+    HE_CORE_INFO("SSGI: 前帧 HDR 辐射度已绑定（generation={}）", gen);
 }
 
 } // namespace he::render

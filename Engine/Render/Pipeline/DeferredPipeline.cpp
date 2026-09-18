@@ -115,6 +115,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     // 必须在各 GI 源 Initialize 之前建好并注入，使它们在 Initialize 阶段即可绑到有效纹理。
     m_RadianceHistory.Initialize(device, m_Width, m_Height);
     m_DDGI.SetRadianceHistory(&m_RadianceHistory);
+    m_SSGI.SetRadianceHistory(&m_RadianceHistory);   // SSGI 的入射辐射度来源（§9.2-P）
     m_SSGI.Initialize(device, m_Width, m_Height);
     m_SSR.Initialize(device, m_Width, m_Height);
     m_DDGI.Initialize(device, m_Width, m_Height);

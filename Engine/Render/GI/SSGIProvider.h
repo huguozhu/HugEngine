@@ -35,6 +35,13 @@ public:
     [[nodiscard]] bool Handles(GISourceId id) const override { return id == GISourceId::SSGI; }
     [[nodiscard]] bool IsValid() const override { return m_SSGI && m_SSGI->IsEnabled(); }
 
+    /// SSGI 的入射辐射度 L_in 取自「前帧 HDR 辐射度」共享组件（§9.2-P）→ 捕获门控必须把它
+    /// 算进消费者。此前帧图只按 DDGI 判断，于是「diffuse = {SSGI}」时从不捕获，
+    /// 本源采样到一张从未写入的纹理、输出恒为 0（与 §9.2-Q 同一类"消费者门控写漏"）。
+    [[nodiscard]] bool NeedsRadianceHistory() const override {
+        return m_SSGI != nullptr && m_SSGI->IsEnabled();
+    }
+
     /// 同步到层栈：层栈是唯一真值（不变量 1）。
     /// 调用点由帧图在**构图之前**调用，因此这里也是让 halfRes 当场生效的正确时机 ——
     /// 输出纹理尺寸若等到下次 OnResize 才变，本帧导入渲染图的句柄就会指向旧尺寸纹理。
@@ -79,6 +86,9 @@ public:
             // ctx 必须消费：屏幕空间重建要用渲染深度图时的那套相机参数（§9.2-E）。
             // 此前这里把 ctx 整个忽略（形参写作 /*ctx*/），SSGI 只能自力拼默认投影矩阵。
             m_SSGI->SetCamera(ctx.camera);
+            // 白炉条件（全白环境 + albedo=1）也必须传给本 pass：只靠 Lighting 侧短路的话，
+            // 白炉判据就不覆盖 SSGI 的标度（§11.4 的风险项）。
+            m_SSGI->SetFurnaceMode(ctx.furnace);
             m_SSGI->SetInputs(m_Depth, m_Normal, m_Albedo);
             m_SSGI->Render(cmd);
         }

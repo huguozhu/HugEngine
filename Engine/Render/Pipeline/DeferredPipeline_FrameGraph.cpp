@@ -367,7 +367,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             {{gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbDepth, ResourceAccess::Read}},
             {},
             [&, p = prov.get(), cam = &camera](rhi::IRHICommandList* c) {
-                p->Render(c, GIProviderContext{ &world, &sg, cam, m_CurrentFrameSlot });
+                p->Render(c, GIProviderContext{ &world, &sg, cam, m_CurrentFrameSlot, m_GIConfig.furnaceMode });
                 c->SetPipeline(m_Lighting.GetPSO());
             },
             RGPassQueue::Graphics);  // 与 RSM 同队列顺序执行：探针采样 RSM 前必须确保 RSM 完成
@@ -388,7 +388,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         u32 aoW = aoTex->GetWidth();
         u32 aoH = aoTex->GetHeight();
         rg.AddPass(prov->GetName(), {}, {{ssaoOut, ResourceAccess::Write}},
-            [&, aoW, aoH, p = prov.get(), aoCtx = GIProviderContext{ &world, &sg, &camera, m_CurrentFrameSlot }](rhi::IRHICommandList* c) {
+            [&, aoW, aoH, p = prov.get(), aoCtx = GIProviderContext{ &world, &sg, &camera, m_CurrentFrameSlot, m_GIConfig.furnaceMode }](rhi::IRHICommandList* c) {
                 p->PreBind(c);                                  // 绑定该源 pass 的管线状态
                 p->SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetAlbedo());
                 rhi::ClearValue aoClear;
@@ -418,7 +418,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 p->PreBind(c);
                 rhi::ClearValue clr{};
                 c->BeginOffscreenPass(p->GetSpecularOutput()->GetNativeHandle(), nullptr, pw, ph, &clr, false);
-                p->Render(c, GIProviderContext{ &world, &sg, &camera, m_CurrentFrameSlot });
+                p->Render(c, GIProviderContext{ &world, &sg, &camera, m_CurrentFrameSlot, m_GIConfig.furnaceMode });
                 c->EndOffscreenPass();
             });
 
@@ -465,7 +465,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 p->PreBind(c);
                 rhi::ClearValue clr{};
                 c->BeginOffscreenPass(p->GetDiffuseOutput()->GetNativeHandle(), nullptr, pw, ph, &clr, false);
-                p->Render(c, GIProviderContext{ &world, &sg, &camera, m_CurrentFrameSlot });
+                p->Render(c, GIProviderContext{ &world, &sg, &camera, m_CurrentFrameSlot, m_GIConfig.furnaceMode });
                 c->EndOffscreenPass();
             });
 
@@ -520,6 +520,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         }
 
         const GIProviderContext rtCtx{ &world, &sg, &camera, m_CurrentFrameSlot,
+                                       m_GIConfig.furnaceMode,
                                        m_LightBuffers[m_CurrentFrameSlot].get(), rtfpc.lightCount,
                                        m_RTPass->GetTLAS() };
 
@@ -622,7 +623,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         if (!neededByDiffuse && !neededBySpecular && !neededByDDGI) continue;
         rg.AddPass("IBL_Bake", {}, {},
             [&, p = prov.get()](rhi::IRHICommandList* c) {
-                p->Render(c, GIProviderContext{ &world, &sg, &camera, m_CurrentFrameSlot });
+                p->Render(c, GIProviderContext{ &world, &sg, &camera, m_CurrentFrameSlot, m_GIConfig.furnaceMode });
             });
     }
 
@@ -802,12 +803,17 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
 
     // ── 前帧 HDR 辐射度捕获（将当前 Lighting 输出下采样存一份，供下帧 GI 源采样真实辐射度）──
     // 从 DDGI 自有一份改为 GI 源共享，避免每个源各付一次全屏下采样（§3.5）。
-    // 门控：目前只有 DDGI 消费它，故与 DDGI 是否启用一致（SSGI 接入后再加入其条件）。
-    rg.AddPass("DDGI_CaptureHDR",
+    // 门控由**消费者声明**（IGIProvider::NeedsRadianceHistory）：写漏一个消费者 ⇒ 它采样到
+    // 一张从未写入的纹理、输出恒为 0，而且表面上一切正常（§9.2-Q 的同类缺陷）。
+    const bool radianceNeeded = [&] {
+        for (auto& prov : m_GIProviders) if (prov->NeedsRadianceHistory()) return true;
+        return false;
+    }();
+    rg.AddPass("CaptureRadiance",
         {{hdrC, ResourceAccess::Read}},  // 读 HDR 作为拷贝源
         {},                               // 无 RenderGraph 管理的输出
-        [&](rhi::IRHICommandList* c) {
-            if (m_DDGI.IsEnabled()) {
+        [&, radianceNeeded](rhi::IRHICommandList* c) {
+            if (radianceNeeded) {
                 m_RadianceHistory.Capture(c, m_Lighting.GetHDRTarget());
             }
         });

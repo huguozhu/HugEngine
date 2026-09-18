@@ -32,6 +32,11 @@ struct GIProviderContext {
     const CameraData* camera    = nullptr;
     u32              frameIndex = 0;
 
+    /// 白炉数值测试是否开启（GIConfig::furnaceMode）。源用它把自己的输入也切到
+    /// 白炉条件（全白环境 + albedo=1），否则「各源真值 = 1」这条判据只能靠短路，
+    /// 量纲错误就永远抓不到（§11.4；SSGI-CAL 就靠它把 SSGI 的标度真正测出来）。
+    bool furnace = false;
+
     // ── 光追类源所需（由帧图注入）──
     rhi::IRHIBuffer* lightBuffer = nullptr;   // 光照缓冲（射线命中着色用）
     u32              lightCount  = 0;
@@ -75,6 +80,17 @@ public:
     }
     /// 在层栈「要求了但模式不同」时的同步钩子（如层栈选 GTAO → 切换 pass 模式）
     virtual void SyncToStack(const GIChannelStack& /*stack*/) {}
+
+    /// 该 Provider 是否需要「前帧 HDR 辐射度」这一共享输入（`GIRadianceHistory`）。
+    /// 声明为真即表示：它会在 pass 里采样**上一帧的 Lighting 结果**当作入射辐射度
+    /// （DDGI 的探针辐射度回退、SSGI 的 L_in）。
+    ///
+    /// 【为什么要声明而不是在帧图里写死】该输入的**捕获**必须与消费者一致：捕获写漏 ⇒
+    /// 消费者采样到一张从未写入的纹理，而且**表面一切正常、输出恒为 0**。此前帧图里只写了
+    /// `m_DDGI.IsEnabled()`，于是「diffuse = {SSGI}」这一配置下从不捕获，SSGI 恒为 0
+    /// ——与 §9.2-Q（IBL 烘焙门控只看漫反射栈）属于同一类"消费者门控写漏"。
+    /// 统一走这个谓词，新增消费者不会再被漏掉。
+    [[nodiscard]] virtual bool NeedsRadianceHistory() const { return false; }
 
     // ── 通道输出（不适用则返回 nullptr）──
     [[nodiscard]] virtual rhi::IRHITexture* GetDiffuseOutput()  const { return nullptr; }
