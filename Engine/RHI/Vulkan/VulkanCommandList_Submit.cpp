@@ -206,6 +206,12 @@ void VulkanCommandList::Submit() {
     vkResetFences(m_Device, 1, &m_Fences[m_FrameIndex]);
     vkQueueSubmit(m_Queue, 1, &submitInfo, m_Fences[m_FrameIndex]);
 
+    // 【必须】告知交换链：本槽位的 acquire 信号量已被这次提交等待消费。
+    // 交换链复用一个 acquire 槽位前会等这个栅栏 —— 只等它自己的 acquire 栅栏是不够的：
+    // 那只证明"信号已发出"，不证明"已被等待消费"，而处于已发信号未被等待状态的信号量
+    // 不能再交给 vkAcquireNextImageKHR（VUID-vkAcquireNextImageKHR-semaphore-01779）。
+    if (m_pSwapChain) m_pSwapChain->SetAcquireConsumedFence(m_Fences[m_FrameIndex]);
+
     // 清除 Timeline 信号量状态
     m_TimelineSignalSem = VK_NULL_HANDLE;
     m_TimelineSignalVal = 0;

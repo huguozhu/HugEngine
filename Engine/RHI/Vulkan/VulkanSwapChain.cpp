@@ -194,7 +194,11 @@ void VulkanSwapChain::DestroySwapchain() {
     for (u32 i = 0; i < kAcquireSlots; ++i) {
         if (m_AcquireSemaphores[i]) { vkDestroySemaphore(m_Device, m_AcquireSemaphores[i], nullptr); m_AcquireSemaphores[i] = VK_NULL_HANDLE; }
         if (m_AcquireFences[i])     { vkDestroyFence(m_Device, m_AcquireFences[i], nullptr);         m_AcquireFences[i]     = VK_NULL_HANDLE; }
+        // 消费栅栏属于命令列表，不在此销毁；只清掉引用，避免重建后指向旧栅栏
+        m_AcquireConsumedFences[i] = VK_NULL_HANDLE;
     }
+    // 槽位回到 0：调用方在这之前已 vkDeviceWaitIdle，新信号量从确定状态开始
+    m_AcquireSlot = 0;
     for (auto& sem : m_RenderCompleteSemaphores) {
         if (sem) vkDestroySemaphore(m_Device, sem, nullptr);
     }
@@ -221,10 +225,21 @@ bool VulkanSwapChain::AcquireNextImage() {
     // 窗口最小化时跳过图像获取
     if (m_IsMinimized || m_Swapchain == VK_NULL_HANDLE) return false;
 
-    // 轮转到下一个 acquire 槽位；复用该槽位的信号量之前，先等它的栅栏 ——
-    // 这保证"上一次使用该信号量的等待操作"已经完成，否则会触发
-    // VUID-vkAcquireNextImageKHR-semaphore-01779
+    // 轮转到下一个 acquire 槽位
     m_AcquireSlot = (m_AcquireSlot + 1) % kAcquireSlots;
+
+    // 【必须】先等"上一次用该槽位的提交"完成：
+    //   处于"已发信号、尚未被任何提交等待"状态的信号量不能再交给
+    //   vkAcquireNextImageKHR（VUID-vkAcquireNextImageKHR-semaphore-01779）。
+    //   下面的 acquire 栅栏只能证明"信号已经发出"，证明不了"已被等待消费"；
+    //   真正等待过该信号量的是那次提交，所以必须等它的栅栏。
+    //   只等待、不重置 —— 该栅栏由命令列表拥有并在提交前自行重置。
+    if (m_AcquireConsumedFences[m_AcquireSlot] != VK_NULL_HANDLE) {
+        vkWaitForFences(m_Device, 1, &m_AcquireConsumedFences[m_AcquireSlot], VK_TRUE, UINT64_MAX);
+        m_AcquireConsumedFences[m_AcquireSlot] = VK_NULL_HANDLE;
+    }
+
+    // 复用该槽位的信号量之前，先等它的栅栏 —— 保证上一轮 acquire 本身已经完成
     if (m_AcquireFences[m_AcquireSlot] != VK_NULL_HANDLE) {
         vkWaitForFences(m_Device, 1, &m_AcquireFences[m_AcquireSlot], VK_TRUE, UINT64_MAX);
         vkResetFences(m_Device, 1, &m_AcquireFences[m_AcquireSlot]);

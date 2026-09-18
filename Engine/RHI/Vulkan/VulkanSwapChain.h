@@ -78,11 +78,27 @@ private:
     //     即保证上一轮 acquire 的等待已经完成）
     //   · render-complete 信号量按**交换链图像**各一份（同一图像能再次被 acquire，
     //     本身就蕴含上一次 present 已完成，因而该信号量的等待也已完成）
+    //
+    // ⚠️ acquire 槽位的栅栏只证明"信号已经发出"，**不证明"信号量已被等待消费"**：
+    //    处于"已发信号、尚未被任何提交等待"状态的信号量不能再交给
+    //    vkAcquireNextImageKHR。因此复用槽位前还必须等 SetAcquireConsumedFence 登记进来的
+    //    **提交栅栏**（提交才是真正等待该信号量的那一方）。缺这一等会偶发卡死：
+    //    实测 24 次启动中有 1 次在第 42 帧挂住并报该 VUID（见 GI 文档 §10.1 第 2 项）。
     static constexpr u32 kAcquireSlots = 3;   // 与 RHI 的飞行帧数（kMaxFramesInFlight）一致
     VkSemaphore      m_AcquireSemaphores[kAcquireSlots] = {};
     VkFence          m_AcquireFences[kAcquireSlots]     = {};
+    // 每个槽位最近一次"等待过该槽位 acquire 信号量"的提交栅栏（提交方在提交后登记）
+    VkFence          m_AcquireConsumedFences[kAcquireSlots] = {};
     u32              m_AcquireSlot = 0;
     std::vector<VkSemaphore> m_RenderCompleteSemaphores;
+
+public:
+    /// 提交方在提交后调用：告知"本槽位的 acquire 信号量已被这次提交等待消费"。
+    /// 复用该槽位前会等这个栅栏，从而保证信号量不再处于已发信号未被等待的状态。
+    /// 只等待、不重置：这个栅栏由命令列表拥有并自行重置。
+    void SetAcquireConsumedFence(VkFence fence) { m_AcquireConsumedFences[m_AcquireSlot] = fence; }
+
+private:
 
     VkImage         m_DepthImage        = VK_NULL_HANDLE;
     VkImageView     m_DepthImageView    = VK_NULL_HANDLE;
