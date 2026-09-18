@@ -262,6 +262,13 @@ void GI_DDGI::SetRSM(rhi::IRHITexture* pos, rhi::IRHITexture* flux, const float4
     }
 }
 
+void GI_DDGI::ClearRSM() {
+    // 只清成员（useRSM 由它们推导）；描述符留着不重绑——着色器在 useRSM=0 时
+    // 根本不会采样 RSM 纹理（见 DDGI.comp.slang 的 u_Flags.x 分支），重绑反而多一次写。
+    m_RSMPositionMap = nullptr;
+    m_RSMFluxMap     = nullptr;
+}
+
 void GI_DDGI::SetIBL(rhi::IRHITexture* irradiance, rhi::IRHISampler* sampler) {
     m_IBLIrradiance = irradiance;
     if (m_Device && irradiance && sampler) {

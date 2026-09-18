@@ -281,7 +281,9 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     }
 
     // ============================================================
-    // RSM 渲染（B 路径：DDGI 探针的世界辐射度来源——视角无关）
+    // RSM 渲染（两个独立消费方，见下方 rsmNeeded）
+    //   - Lighting 的漫反射间接光：层栈含 RSM 时作为单次反弹 VPL
+    //   - DDGI 探针的世界辐射度来源（B 路径，视角无关）
     // 必须在 DDGI_Update 之前：探针从 RSM 采样单次反弹辐射度，
     // 替代屏幕 HDR（视锥外采样点被跳过 → 视角相关）
     // ============================================================
@@ -289,7 +291,16 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     // 喂 DDGI（下方）与绑给 Lighting（LightingInputs）都读它，避免"pass 没跑但描述符
     // 仍绑着真实纹理"——那样采样到的是未初始化显存（§9.2-T）。
     bool rsmPassRegistered = false;
-    if (m_GIConfig.ShouldRunDDGI() && m_RSM && m_ShadowSystem
+    float4x4 rsmLightViewProj(1.0f);   // 光源 VP：喂给 DDGI 时与 RSM pass 同源
+    // 【独立门控】RSM 有两个消费方，任一需要就要渲染（§9.2-F）：
+    //   1) Lighting 的漫反射间接光——由 ShouldRunRSM()（层栈含 RSM ∧ rsmIndirect）表达，
+    //      与 Forward 侧用的是**同一个谓词**；
+    //   2) DDGI 探针的世界辐射度来源（RSM 不可用时才回退 IBL 辐照度）。
+    // 此前整段被嵌套在 ShouldRunDDGI() 之内，于是「只勾 RSM、关掉 DDGI」时 RSM **永不注册**，
+    // 而 Forward 侧的 ShouldRunRSM() 本来就是独立判据 —— 同一份配置在两套管线下行为不同，
+    // 就是"配置说谎"。改为上面的并集：门控谓词与 Provider 侧 NeedsPass 同源。
+    const bool rsmNeeded = m_GIConfig.ShouldRunDDGI() || m_GIConfig.ShouldRunRSM();
+    if (rsmNeeded && m_RSM && m_ShadowSystem
         && m_ShadowSystem->HasActiveShadows()) {
         // 固定光源视锥（不随相机）：CSM 的 lightViewProj 拟合相机视锥，
         // 视角变化会让 RSM 内容随之变化 → 探针辐射度视角相关。
@@ -308,8 +319,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         float4x4 lproj = glm::orthoRH_ZO(-sceneRadius, sceneRadius,
                                           -sceneRadius, sceneRadius,
                                           0.1f, sceneRadius * 4.0f);
-        float4x4 lightVP = lproj * lview;
-        m_RSM->SetLightViewProj(lightVP, m_RSM->GetRSMPositionMap()->GetWidth(),
+        rsmLightViewProj = lproj * lview;
+        m_RSM->SetLightViewProj(rsmLightViewProj, m_RSM->GetRSMPositionMap()->GetWidth(),
                                 m_ObjectBuffers[m_CurrentFrameSlot].get(),
                                 m_ShadowSystem->GetShadowSampler(),
                                 rhi::kInvalidSet);
@@ -327,13 +338,17 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 });
             rsmPassRegistered = true;
         }
-        // 喂 DDGI：探针改用 RSM 世界辐射度
-        // 【必须与上面的 pass 注册条件一致】RSM 未入漫反射层栈时本帧**不会渲染** RSM，
-        // 若仍把 position/flux 图交给 DDGI，探针会采到空数据；且 m_RSMPositionMap 一旦
-        // 置位永不清除 ⇒ useRSM 恒为 1 ⇒ DDGI 永久走空 RSM 路径、静默丢掉全部 GI
-        // （表现为 DDGI.comp.slang 的硬编码兜底常数被当成 GI 结果，见 §11.3.1）。
+    }
+    // 喂 DDGI：探针改用 RSM 世界辐射度
+    // 【必须与上面的 pass 注册条件一致】RSM 未渲染时把 position/flux 图交给 DDGI，探针会采到
+    // 空数据；且 useRSM 是由这两个成员推导的**闩锁**（只置位、永不清除，§9.2-R）⇒ 一旦漏判就
+    // 永久走空 RSM 路径、静默丢掉全部 GI（§11.3.1）。因此这里给出**逐帧明确结论**：
+    // 注册了才 SetRSM，没注册就 ClearRSM，绝不"什么都不做"。
+    if (m_GIConfig.ShouldRunDDGI()) {
         if (rsmPassRegistered) {
-            m_DDGI.SetRSM(m_RSM->GetRSMPositionMap(), m_RSM->GetRSMFluxMap(), lightVP);
+            m_DDGI.SetRSM(m_RSM->GetRSMPositionMap(), m_RSM->GetRSMFluxMap(), rsmLightViewProj);
+        } else {
+            m_DDGI.ClearRSM();
         }
     }
 

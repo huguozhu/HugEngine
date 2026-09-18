@@ -42,6 +42,13 @@ public:
     // pos/flux 为空时回退屏幕 HDR（视角相关）
     void SetRSM(rhi::IRHITexture* pos, rhi::IRHITexture* flux, const float4x4& lightViewProj);
 
+    // 清除 RSM 输入，回退到 IBL 辐照度（useRSM 归零）。
+    // 【为什么需要显式清除】SetRSM 只有一个"置位"方向，而 useRSM 是由
+    // m_RSMPositionMap/m_RSMFluxMap 是否为空**推导**出来的：帧图若只是"本帧不再调用 SetRSM"，
+    // 成员仍非空 ⇒ useRSM 恒为 1，探针会一直消费过期甚至已被重建的 RSM 纹理。
+    // 因此帧图每帧都要给出明确结论：注册了就 SetRSM，没注册就 ClearRSM（§9.2-F/R）。
+    void ClearRSM();
+
     // 把共享组件的纹理绑到本源的 binding 6；仅当组件代次变化（resize 重建）时才实际重绑
     void BindRadianceHistory();
 
