@@ -1292,6 +1292,6 @@ int main() {
         HE_CORE_INFO("配置已保存: {}", g_ConfigPath);
     }
 
-    HE_CORE_INFO("06.GILab 退出 ({} 帧)", frameIndex);
+    HE_CORE_INFO("04.Sponza-Deferred 退出 ({} 帧)", frameIndex);
     return 0;
 }
