@@ -737,16 +737,19 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 
 | 管线 | 能力位 |
 |---|---|
-| `PipelineCaps::Forward` | 光栅阴影 —— **GI 源位为空**（见下方说明） |
+| `PipelineCaps::Forward` | 光栅阴影 + **世界空间 GI 源**：IBL（diffuse+specular）· RSM（diffuse）。**任务 26 起这三个位是真的**（Forward 已按层栈归一化合成，见下方说明） |
 | `PipelineCaps::Deferred` | `Forward \| AllSources \| RT 阴影` = 光栅/光追阴影 + IBL（diffuse+specular）+ RSM + SSGI · SSR · SSAO/GTAO · DDGI · RTGI · RT 反射 · RTAO |
 
-> **为什么 `Forward` 一个 GI 源位都不声明**（§9.2-H 的结论）：能力位的语义是「该管线在
-> **GI 层栈模型**下能承载哪些源」——被声明的源会被面板放进层栈、被 `Degrade` 保留，并预期
-> 由管线消费。而 Forward 的 IBL 与 RSM 是**管线级开关**（`iblIntensity` / `rsmIndirect`）
-> 加内部硬编码路径：它既不读层栈，PBR 着色器里也没有 `GIBlendParams`、不做归一化合成。
-> 此前声明 IBL + RSM 的实际效果是把源放进一个没人消费的层栈里。**Forward 仍然照常使用
-> IBL 与 RSM 渲染**，只是它们不再被描述为「层栈 GI 源」；让它们真正走层栈归一化是任务 26。
-> 另外前向着色无 GBuffer，屏幕空间源与探针本来也不可用。
+> **`Forward` 的能力位经历了"声明 → 撤回 → 补实现再加回"三步**（§9.2-H 及其另一半）：
+> 能力位的语义是「该管线在 **GI 层栈模型**下能承载哪些源」——被声明的源会被面板放进层栈、
+> 被 `Degrade` 保留，并预期由管线消费。
+> · **任务 8 之前**：声明了 IBL + RSM，但 Forward 的 IBL/RSM 是管线级开关 + PBR 里硬编码相加，
+>   既不读层栈也没有 `GIBlendParams` UBO ⇒ 源被放进一个没人消费的层栈，**配置说谎**。
+> · **任务 8**：把声明改成"只有光栅阴影"，让声明与实现一致（零渲染风险）。
+> · **任务 26**：给 `PBR.frag` 补上 `GIBlendParams` UBO 与逐通道归一化合成、
+>   `ForwardPipeline` 每帧填充，于是**前向真能消费**的那三个源位被加回来。
+>   仍然不声明屏幕空间源/探针/光追源 —— 前向着色没有 GBuffer，声明了就是第三次说谎。
+> 判据是 `Tools/gi/forward_stack_check.ps1`（双源读数必须等于两单源的加权平均）。
 
 `GISourceId::Lightmap` **刻意不给能力位**（任务 18 起在 `ToPipelineCap()` 里显式写成
 `case GISourceId::Lightmap: return kPipelineGINone;`）⇒ `IsAvailable()` 恒为 false。
@@ -918,6 +921,7 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 | **X** | 中 | **镜面层栈为空时画面出现 463 量级的异常亮点**：同一场景、同一相机、只改层栈，三个配置的 HDR 读数为 —— 三通道全空 `mean 0.2022 / max 463.32`；只放 `specular={IBL}` `mean 0.0695 / max 42.20`；只放 `ao={SSAO}`（specular 仍空）`mean 0.2022 / max 463.32`。即**亮点只在 specular 层栈为空时出现**，一旦有任一镜面源（哪怕是世界空间的 IBL 预滤波，且该像素不需要它）就消失；位置固定在画面内（本相机下 (416, 996)），量级相当于直接光高光的几十倍。**排除**：不是 albedo/半分辨率/白炉（未开炉）、不是后处理（读的是 Lighting 的 HDR 目标，在 tonemap 之前）。**推断方向**：与"通道计数为 0 时 `specNum/max(specDen,1e-4)` 仍参与、或空通道时着色器对某纹理的采样未守卫"有关，需按 §9.2-S 的"未写入纹理"思路查一遍空通道分支 | 复现配置与读数写在 §10.1 任务 27 |
 | **Y** | 中 | **同一份「写进配置文件的键」在不同写法下落到了不同的兜底路径**：`dump_gi.ps1` 与标定脚本都要产出「漫反射层栈为空」的基线，两者写出的 `gi_blend_diffuse_w0..w3` 全为 0 的配置**逐字节等价**，但实测基线稳定地分成两组 —— 0.05720（`dump_gi.ps1` 与手工复制同一文件的运行，三次一致）与 0.07554（标定脚本的 cfg，文件在运行后被示例程序回写为 `gi_blend_diffuse_w0=1.000000`）。后者说明该次运行里空层栈被**兜底补上了 IBL**（`GIRegistry::Degrade` 的兜底），前者没有。⇒ **"空层栈"这个配置状态本身不可靠**：同一份配置能落到两种不同的有效层栈，而读数相差 32%。这会直接污染任何以"空栈"为基线的做差实验（本轮双源判据因此改为全部走同一份采样设施）。**后续证据（任务 11.1 的 A/B 期间取得，把范围缩小了）**：同一个**二进制**、同一份**字节内容相同**的 cfg 连跑四次，得到 0.057733 / 0.057194 / 0.057193 / 0.057166 —— 组内一致（±0.05%）、组间差 **1%**；改前二进制的同配置读数落在第二组。也就是说它至少有"同二进制同配置也分成两组"的一面，更像与**运行状态**（首次运行 / PSO 缓存预热 / 帧时序）相关的效应，而不是单纯由配置文件内容决定。要查清的是：该效应从哪条链路上来（提示：与帧时序相关的东西只有异步计算提交计数与时间维状态），以及**空层栈到底该不该被允许** | 复现见 §10.1 任务 28；另见 §11.3 的采样注意事项（每次对照必须用私有 cfg 副本） |
 | **AA** | **高**（部分已修） | **RSM 间接光整条链路实际不产出**（任务 16 的测量中发现）。实测指纹：`S_rsm = lum(HDR{diffuse=RSM}) − lum(HDR{空漫反射栈})` 在**三个不同构建**上都只有 **1e-8 量级**（噪声底），而同一配置下 Lighting 的 GPU 耗时从 0.433 ms 涨到 **0.882 ms** —— 即**这段 VPL 求和在真实地跑，结果却什么也没进画面**，与 §9.2-L/W 同一种失效形态（开关为真、pass 在跑、成本在付、内容恒空）。根因不止一个，按影响排序：① **通量读错了缓冲**：`GI_RSM::RenderRSMPass` 把**对象缓冲**同时绑到 `binding 1 (u_Lights)` 与 `binding 2 (u_Objects)`，于是 `RSM_Generate.frag` 里的 `u_Lights[0]` 实际是 `GPUObjectData[0]`（世界矩阵被当成颜色/强度解释），通量是人造值。**已修**（新增 `GI_RSM::SetLightBuffer`，Deferred/Forward 两个调用点都传真实光源缓冲；同时把 `CollectLights` 提前到帧图开头，否则 RSM 只能读到上一帧的光源数据）。② **受光项的量级是场景尺度相关的**：累加项是 `flux · cos·cos / d²`，而本场景的接收点与 VPL 相距数百到数千世界单位 ⇒ `1/d² ≈ 1e-6`，再乘经验常数 `RSM_VPL_ENERGY = 0.046875`（那个常数是按 **25/16 点积分**归一、并隐含"场景约 60 单位"的假设推出来的）⇒ 整项落在 1e-8 量级、低于 16 位浮点转储在该亮度下的分辨率。**未修**（需要 VPL 面积/能量项与一次标定，属独立任务 30）。③ 生成端与消费端对 `flux` 的**通道约定不一致**：`RSM_Generate.frag` 写的是 `(N·0.5+0.5).rgb + flux.a`，新建的 `RSM_Indirect` 按这个约定读（rgb=法线、a=通量），而 `DDGI.comp.slang` 的探针更新把 `flux.rgb`（其实是编码法线）当辐射度用。④ 生成端注释说通量含 `albedo * lightColor`，实际只写了 `intensity * NdotL`（标量、没有颜色）⇒ 这一项目前只能是灰度的。**修 RSM 质量时应四项一起过一遍** | `GI/GI_RSM.{h,cpp}`（①②）；`Pipeline/DeferredPipeline_FrameGraph.cpp`、`ForwardPipeline.cpp`（①）；`GI/DDGI.comp.slang`（③）；`Shader/GI/RSM_Generate.frag.slang`（④）；复现与判据见 §10.2 任务 16 与 `Tools/gi/rsm_indirect_check.ps1` |
+| **AB** | **高** → ✅ **已修复**（任务 26 顺带） | **Forward 的 IBL 从未被交给天空盒 ⇒ 烘焙出的辐照度/预滤波图近全黑，PBR 里的 IBL 漫反射与镜面恒为 0**。`ForwardPipeline` 走 RenderGraph 时，帧图直接按 `giIBL->IsDirty()` 注册烘焙 pass，而**全工程没有一处在 RG 路径上调用 `SetIBLSkybox`**（只有不走 RG 的 `PrepareGI` 里有）—— 于是烘焙的输入是"未设置的天空盒"。这与 §9.2-Q（IBL 从不烘焙、消费者照样采样）是同一类失效，只是发生在 Forward：**层栈、能力位、面板、日志全都正常，输出恒为 0**。**实测指纹**：`pipeline_mode=0` 下把漫反射层栈从 `{IBL}` 换成 `{IBL,RSM}`、甚至只放 `{RSM}`，HDR 读数**逐位相同**（0.1836214）；而把 UBO 的 `count` 直接画到颜色上又能看到 1 与 2 的差别 ⇒ 配置与 UBO 都是通的，是这两个源**本身的贡献**为 0。**修法**：RG 路径在注册烘焙 pass 之前先从 `SkyboxComponent` 调 `SetIBLSkybox`（与 Deferred / `PrepareGI` 同源），并在同一处补上 Forward RG 路径漏掉的 `m_RSM->SetLightBuffer(...)`（§9.2-AA ① 的同一个坑，Forward 有两条路径就漏了一条）。修后 Forward 的读数变成 `{IBL}` **0.1269305** / `{RSM}` **0.0865436** / `{IBL,RSM}` **0.1067366**（恰为前两者的加权平均） | `Pipeline/ForwardPipeline_FrameGraph.cpp`；回归检查 `Tools/gi/forward_stack_check.ps1` |
 | ~~**Z**~~ | ✅ **已修复** | **面板上的「每源耗时」是假信息**：`GIDebugData::avgRenderTimeMs` 只有声明与显示两处，**全仓没有一处给它赋值**，因此 06.GILab 面板上「SSGI 耗时 / DDGI 耗时 / IBL 耗时 / SSR 耗时」**恒为 0.00 ms**。危害在于它长得像一个可用的性能读数：性能类任务（时间维分摊、pass 级剔除、march 换实现）都会自然地去读它，而它会一直回答 0 —— 与 §9.2-U（旧转储）、§9.2-Y（基线分两组）同属**测量可靠性**这一类。**修法**：每源每帧一对 GPU 时间戳 → 环形查询池 → 不阻塞地读回（`TryGetQueryResults`）→ 滚动平均写回源自己的 `GIDebugData`；`HE_GI_TIMING=1` 时每 120 帧打一行日志，便于脚本读取。**实测**：SSGI 16 采样 **0.436 ms**、64 采样 **1.271 ms**（×2.92，随工作量线性变化）；不启用 SSGI 的配置里它恒为 **0**；重复运行离散度 **0.0%**。过程中踩到三个坑（写进 §10.2）：`GetQueryResults` 带 `WAIT_BIT` 会把进程挂死；整池可用性判断因"从未写过的查询永远不可用"而恒假；pass 注册但内部直接返回（IBL 不在脏时）会留下**过期读数** | `GI/GITiming.{h,cpp}`；`RHI/CommandList.h` + `VulkanCommandList`（新增不阻塞读回）；`GI/GlobalIllumination.h`（`SetRenderTimeMs`）；`GI/IGIProvider.h`（`GetTimedPass`）；`DeferredPipeline{,_FrameGraph}`；回归检查 `Tools/gi/timing_check.ps1` |
 
 **A 的修复与实测**（4 处量纲修正 + 单源亮度验证）
@@ -1229,7 +1233,7 @@ Vulkan 校验 46 条与改前一致。
 |:---:|---|---|---|
 | **21** | ~~**文档一致性修正**~~ —— ✅ **已完成** | 小 / 低 | 逐条核过并改掉：① §3.1 的合成片段与着色器不符（文档写的 `num/max(den,1e-4)`，实际是 `(den>0)?num/den:0` —— 通道里没有源时前者会放大一万倍）；② §11.3 的采样目标清单缺 `radiance`/`ibl_irr`，补成与 `addTarget` 逐项一致；③ §6 不变量 2（"距离让位是性能控制"→ 更正为纯艺术控制）与不变量 6（"量纲未统一"已过期 → 已满足，并注明 `EvaluateHitRadiance` 的 π 残留见任务 30）；④ §9.2 标题漏 M/N/O/P → 改为按行标注的口径；⑤ §11.4 两条随 P5 退场的风险（`LowPass` 选型、P5 抽象过度）标为已失效；⑥ §11.3 的运行示例自相矛盾（写"运行目录必须是 `Build\bin\Debug`"，而所有工具都以仓库根目录启动 Release 版且正常工作——Content 路径是编译期绝对路径）→ 改成实际用法；⑦ 顺带把"逐 pass 耗时不可当判据"补成 §11.3.1 方法论第 7 条 |
 | **25** | ~~**§9.2-W · SSR 的 Hi-Z march 恒 miss**~~ —— ✅ **已完成**（解析对照缺席，见任务 32） | 中 / 中 | SSR 此前**一个命中都没有**（全屏 alpha=−1、RGB=0），镜面层栈里有没有它完全等价。**三处独立叠加的错**都修了：Hi-Z 深度判据方向反了（min 金字塔 + zero-to-one ⇒ 应当"射线更近才前进"）、层级步长方向反了（`1/2^level` 让 level 0 一步跨完整条射线 ⇒ 改成按屏幕像素折算的 DDA）、level 0 命中阈值量纲不对（NDC 差比世界厚度 ⇒ 改成与线性 march 同一个 view 空间判据）；线性回退路径的假命中（`rayPos.z > rpZ` 记成命中）也一并改掉。**判据**：`Tools/gi/ssr_check.ps1` 三条全过 —— Hi-Z 有效像素 **0% → 13.03%**、Hi-Z 命中最少是线性的 0.5 倍（实测 **1.28 倍**）、把 SSR 放进 `{IBL}` 镜面栈后 HDR 必须变化（**0.0577333 → 0.0596849，+3.38%**）。**顺带量出 Hi-Z 真的在加速**：SSR pass **0.254 ms**（层次）对 **0.806 ms**（线性），3.2 倍。**未做**：平面镜解析对照（场景里没有平面镜）→ 任务 32 |
-| **26** | **让 Forward 真正走「层栈 + 归一化合成」**（§9.2-H 的另一半） | 中 / 中 | 任务 8 把**声明**改对了，但 Forward 的 IBL/RSM 仍是管线级开关。要补齐需要：PBR 着色器补混合参数 UBO（push constant 已满，必须新开 binding）、把硬编码的 IBL 漫反射/镜面与 RSM 改成按层栈槽位归一化合成、帧图/管线每帧填充 UBO。**影响面大**：`PBR.frag` 被 02.Cube / 03.Sponza / 05.AISamples / Editor 共用，需逐个回归。判据：`pipeline_mode=0` 下把 `diffuse` 层栈从 `{IBL}` 改成 `{IBL,RSM}` 时读数符合归一化预期（多开一个源不变亮、单源与改前一致） |
+| **26** | ~~**让 Forward 真正走「层栈 + 归一化合成」**（§9.2-H 的另一半）~~ —— ✅ **已完成** | 中 / 中 | 任务 8 把**声明**改对了（Forward 不再声明它消费不了的源），这一项补上另一半：`PBR.frag` 新增 `GIBlendParams` UBO（复用 Deferred 的绑定号 31 与同一结构）+ 逐通道遍历层栈做 `Σ(贡献×权重)/Σ权重`；`ForwardPipeline` 每飞行帧一份 UBO、每帧在 `Render` 开头填一次；`PipelineCaps::Forward` 加回**前向真能消费**的三个源位（漫反射 IBL/RSM、镜面 IBL）。**判据**：`Tools/gi/forward_stack_check.ps1` 三条全过 —— 改漫反射层栈会改画面（改前 cfg 键只写给 Deferred，`pipeline_mode=0` 完全忽略它们）、多开一个源**不变亮**、双源读数**恰等于**两单源的加权平均（`both 0.1067366` 对 `(0.1269305+0.0865436)/2 = 0.1067371`，相对误差 **0.000%**）。**顺带修掉 Forward 侧一个 §9.2-Q 同族的缺陷**（IBL 从未被交给天空盒 ⇒ 恒为 0，见 §9.2-AB）。单测 168 例 / 4242 断言全过 |
 | **27** | **§9.2-X · 镜面层栈为空时出现 463 量级亮点** | 中 / 低 | 复现：同一场景相机，`specular` 层栈空 ⇒ `mean 0.2022 / max 463.32`；放 `{IBL}` ⇒ `0.0695 / 42.20`；只放 `{SSAO}`（specular 仍空）⇒ 回到 `0.2022 / 463.32`。⇒ 亮点由"镜面通道没有任何源"触发。排查方向：空通道分支（`specNum/max(specDen,1e-4)`、以及空通道时对镜面纹理/占位纹理的采样是否被守卫）—— 与 §9.2-T 的"效果未产出时描述符仍绑定真实纹理"同类，但这次是**空层栈**这一更极端的情形。判据：三种配置的 `max` 都应落在 42 量级 |
 | **28** | **§9.2-Y · "空层栈"这一配置状态不可靠（兜底把 IBL 悄悄补回）** | 中 / 中 | 同一份逐字节等价的配置（漫反射四个权重全 0）在两次实验中落到两种有效层栈：一次保持空（基线 0.05720，三次可复现），一次被兜底补成 `{IBL}`（0.07554，且运行后示例程序把配置文件回写为 `gi_blend_diffuse_w0=1.000000`）。差别达 **32%**，足以污染任何"以空栈为基线"的做差实验。要做的是把这条路径查清并消除二义性：`GIRegistry::Degrade` 的兜底在什么时机、对哪个对象生效？为什么两次运行不同？以及**空层栈到底该不该被允许**（若不允许，就把它变成一个显式的、可复现的状态，而不是看运气）。判据：同一份配置连续 5 次运行必须给出同一个有效层栈与同一个读数。**已排除一个候选成因**：任务 15 把 Lighting 的逐帧轮换资源改成每飞行帧一份描述符集/UBO 之后，两组读数**照样**出现（改前/改后各跑 4 次：改前 0.05719370/0.05773345/0.05719362/0.05717655，改后 0.05719373/0.05719364/0.05773368/0.05773326，都是组内 <0.01%、组间约 1%）⇒ 跨帧重绑不是它的原因 |
 | **29** | ~~**§9.2-Z · 给 GI 源装真实耗时读数**（面板现在恒显示 0.00 ms）~~ —— ✅ **已完成** | 中 / 低 | 每源每帧一对 GPU 时间戳 → 环形查询池 → **不阻塞**读回 → 滚动平均写回源自己的 `GIDebugData`；`HE_GI_TIMING=1` 时每 120 帧打一行日志供脚本读取。**判据（读数是真的）**：SSGI 16 采样 **0.436 ms** → 64 采样 **1.271 ms**（×2.92，随工作量变化）；不启用 SSGI 的配置里恒为 0；重复运行离散度 **0.0%**。**顺带第一次拿到真实成本结构**：SSGI 0.44 ms、DDGI 探针更新 **0.019 ms**、IBL 首次烘焙约 5 ms（之后不再跑）—— 这也解释了为什么任务 12 的分摊收益在这个网格尺寸下量不出来 |
@@ -1301,6 +1305,57 @@ Vulkan 校验 46 条与改前一致。
   （它们本来就由 `iblIntensity` / `rsmIndirect` 驱动、不读层栈）。
   同时补了 UI 侧的同源问题：面板的候选源列表此前只看「有没有 Provider」，现在也按能力位过滤，
   并在本管线没有层栈 GI 源时显示说明并置灰控件——否则用户会对着一个改了也不生效的开关操作。
+  （**任务 26 已完成那一半**：Forward 现在真的按层栈归一化合成，声明也随之加回了
+  IBL/RSM 三个源位；见下方「26」那一节。）
+
+**26 · 让 Forward 真正走「层栈 + 归一化合成」** —— ✅ **已完成**
+
+- **改前的状态**（任务 8 之后）：`PipelineCaps::Forward` 只有光栅阴影，声明与实现一致、没有
+  配置说谎；但 `pipeline_mode=0` 下 **cfg 里的 GI 键完全不起作用** —— 采样脚本里那一段
+  "层栈恢复"只写 `deferredPipeline.GetGIConfig()`，Forward 那份配置始终是初始化时的默认值。
+- **做了什么**
+  1. `PBR.frag`：新增 `GIBlendParams` UBO（**复用 Deferred 的绑定号 31 与同一结构**，
+     C++ 侧仍用 `GIChannelBlendData` 构造后 memcpy，`static_assert` 保证布局一致），
+     把原先硬编码相加的 IBL 漫反射 / IBL 镜面 / RSM 三项改成**逐通道遍历层栈的源数组**：
+     `Σ(逐源贡献 × 权重) / Σ权重`（含"通道里没有源时返回 0"这条与 Deferred 相同的语义）。
+     逐源表达式一字未动 ⇒ 单源时归一化精确抵消。
+  2. `ForwardPipeline`：每飞行帧一份 UBO（与 `m_LightBuffers` 同样三份），`FillGIBlendUBO()`
+     每帧在 `Render` 开头填一次（RG 与非 RG 两条路径都要用）。
+  3. `PipelineCaps::Forward` 加回**前向真能消费**的三个源位：漫反射 IBL/RSM、镜面 IBL。
+     仍然不声明屏幕空间源、探针与光追源 —— 前向着色没有 GBuffer，声明了就是又一次
+     "把源放进没人消费的层栈"（任务 8 的教训）。
+  4. 示例：那段层栈恢复抽成 lambda，对两个管线各套一次；Forward 从**它自己的预设基线**出发
+     套同一份键，再按 Forward 的能力位 `Degrade`（不降级就会带着跑不了的源进层栈）。
+  5. 采样设施：`HE_DUMP_GI` 现在按**当前管线**取 HDR 目标 —— 此前它无条件取
+     `deferredPipeline` 的 HDR，`pipeline_mode=0` 下落盘的**根本不是 Forward 的画面**，
+     也就是说 Forward 侧的读数一直不可测（§11.3 早就把这写成"注意事项"，本轮修掉）。
+- **判据**（`Tools/gi/forward_stack_check.ps1`，三条全过；Frame 120 / Sponza）
+
+  | Forward 漫反射层栈 | HDR 亮度均值 |
+  |---|---|
+  | `{IBL}` | **0.1269305** |
+  | `{RSM}` | **0.0865436** |
+  | `{IBL,RSM}` | **0.1067366** |
+
+  - **层栈真的起作用**（改前三种配置逐位相同）；
+  - **多开一个源不变亮**：`{IBL,RSM}` 0.1067 < `{IBL}` 0.1269（改前是硬编码相加，只会更亮）；
+  - **双源读数恰等于两单源的加权平均**：`(0.1269305 + 0.0865436)/2 = 0.1067371`，
+    实测 0.1067366，相对误差 **0.000%** —— 与 Deferred 侧对 SSGI 用的那条判据（SSGI-CAL
+    的"双源差分 = 加权平均"）完全同构，只是这次是在 Forward。
+- **顺带修掉的 §9.2-AB**（不修这一项就没法做上面任何一条判据）：Forward 的 RG 路径从不把
+  场景天空盒交给 `GI_IBL` ⇒ 烘焙出近全黑的辐照度图 ⇒ Forward 的 IBL 漫反射/镜面恒为 0。
+  实测指纹：改层栈时读数逐位相同（0.1836214），而把 UBO 的 `count` 画到颜色上又能看到
+  1 与 2 的差别 ⇒ 配置与 UBO 都通，是源的贡献本身为 0。修法与读数见 §9.2-AB。
+- **回归**：Deferred 侧逐项不变（`none` 0.0577337 / `ddgi` 0.0873535 / `ssgi` 0.0662770、
+  `S_ddgi` 0.0308173、p5 3.4× / corr 0.6817）；`confidence_check` 2/2、`ssgi_cal_check` 3/3、
+  `rtgi_coupling_check` 0.000%、`rsm_gate_check` 3/3、`ssr_check` 全过、`ddgi_grid_check` 全过；
+  单元测试 **168 例 / 4242 断言**全过（其中两条断言正是"任务 8 与任务 26 的分界线"：
+  `IsAvailable(IBL/RSM, Forward)` 必须为真，以及 Forward 的 `Degrade` 必须留下 IBL、
+  且不留下任何屏幕空间源）。
+- **未做**：`PBR.frag` 被 02.Cube / 03.Sponza / 05.AISamples / Editor 共用，本轮只在
+  06.GILab 上做了数值判据（其余示例只保证编译通过、未逐个跑图）。它们的 Forward 路径
+  与 06.GILab 同源，风险在于"原先 IBL 恒为 0"这个缺陷被修掉之后，这几个示例的画面会**变亮**
+  （那是修复而不是回归），但需要一次目视确认 —— 记在 §11.4 的风险表里。
 
 **9 · §3.2 置信度体系** —— ✅ **已完成**（屏幕覆盖项落地）
 
@@ -1990,7 +2045,7 @@ cmake --build Build --config Release --target 06.GILab -j 8
 | `HE_TRACE_PASSES=1` | 打印每个 pass 开始，把 pass 名与校验层报错在时间上对齐 |
 | `HE_CRASH_TEST=1` | 主动崩溃，自检崩溃处理器 |
 | `HE_FURNACE_PROBE=1` 单用 | 只开探针不开白炉 |
-| `HE_DUMP_GI=<标签>`（+ `HE_DUMP_GI_FRAME=<帧号>`，默认 60） | **GI 纹理级采样**：在指定帧整幅落盘到 `Build/verify/gi_<标签>_*.f16`（RGBA16F 原始像素、无文件头、行紧密排布），并写 `_meta.txt` 记录逐目标尺寸；落盘后**自动关窗退出**，便于脚本化。**完整目标清单**（`06.GILab.cpp` 的 `addTarget`，纹理为空则跳过）：`hdr`（Lighting 的 HDR 目标）、`albedo`（GBuffer MRT0）、**`radiance`（共享的前帧 HDR 辐射度 —— DDGI 探针与 SSGI 入射辐射度的共同输入，出问题时第一个要看的中间量）**、`ibl_irr`（IBL 辐照度，DDGI 探针更新的唯一辐射度回退来源），以及**逐 Provider** 的 `provN_raw`/`provN_final`（漫反射）、`provN_spec_raw`/`provN_spec_final`（镜面）、`provN_ao_raw`/`provN_ao_final`（AO）。**多落盘几张纹理会增加校验层中与拷贝/屏障相关的条数，因此校验计数只在同一采样设置下可比**。注意：当前采样设施引用的是 `deferredPipeline` 的 HDR 目标与 Provider 列表，因此 `pipeline_mode=0`（Forward）下这些目标并不是 Forward 的产物——Forward 的冒烟验证只能看"正常跑完不崩"与日志 |
+| `HE_DUMP_GI=<标签>`（+ `HE_DUMP_GI_FRAME=<帧号>`，默认 60） | **GI 纹理级采样**：在指定帧整幅落盘到 `Build/verify/gi_<标签>_*.f16`（RGBA16F 原始像素、无文件头、行紧密排布），并写 `_meta.txt` 记录逐目标尺寸；落盘后**自动关窗退出**，便于脚本化。**HDR 目标按当前管线取**（任务 26 起）：`pipeline_mode=1` 取 `deferredPipeline` 的 Lighting HDR，`pipeline_mode=0` 取 `forwardPipeline` 的 HDR —— 此前无条件取前者，于是 Forward 模式下转储的**根本不是 Forward 的画面**（那时 Forward 的读数一直不可测；任务 26 的判据正是修好这一点之后才做得出来的）。**完整目标清单**（`06.GILab.cpp` 的 `addTarget`，纹理为空则跳过）：`hdr`（当前管线的 HDR 目标）、`albedo`（GBuffer MRT0，仅 Deferred）、**`radiance`（共享的前帧 HDR 辐射度 —— DDGI 探针与 SSGI 入射辐射度的共同输入，出问题时第一个要看的中间量，仅 Deferred）**、`ibl_irr`（IBL 辐照度，仅 Deferred），以及**逐 Provider** 的 `provN_raw`/`provN_final`（漫反射）、`provN_spec_raw`/`provN_spec_final`（镜面）、`provN_ao_raw`/`provN_ao_final`（AO）。**多落盘几张纹理会增加校验层中与拷贝/屏障相关的条数，因此校验计数只在同一采样设置下可比**。Forward 侧目前只有 `hdr` 一个目标（它没有 GBuffer，也没有 Provider 输出） |
 | `HE_GILAB_CONFIG=<路径>` | 覆盖示例程序的配置读写路径（读写同一路径），使自动化实验**完全不触碰**仓库内的 `Content/Config/06_GILab.cfg`——否则每次实验都会被示例程序退出时回写覆盖 |
 | `HE_GI_TIMING=1` | 每 120 帧打一行 `[GI 耗时] NAME=x.xxxms`（各源主 pass 的 GPU 耗时滚动平均），作为**面板之外**的脚本可读出口；面板上那四行读数本身就是同一份数据（§9.2-Z 修好后不再是恒 0） |
 | `HE_PASS_TIMING=1` | 每 120 帧打一行 `[Pass 耗时] NAME=x.xxxms …`：**逐 pass** 的 GPU 耗时（含 `Lighting` / `GB_Clear` / `Shadow` / 非 GI 源自有的 pass），末尾附帧合计。与 `HE_GI_TIMING` 的分工：后者只覆盖"注册为 GI 源的 pass"，判断"把某一项搬出 Lighting 到底省了多少"必须看 Lighting 自己（任务 16 的判据就是靠它）。两者都走 `ProfilerManager` 已有的时间戳数据，**不是**新增测量机制 |
@@ -2033,6 +2088,7 @@ cmake --build Build --config Release --target 06.GILab -j 8
 | `Tools/gi/timing_check.ps1` + `timing_check.py` | **GI 耗时读数检查**（任务 29 / §9.2-Z 的回归测试）：读 `HE_GI_TIMING=1` 打出的 `[GI 耗时]` 行，三例——在跑的源必须有非零读数（且 > 0.05 ms）、不在层栈的源必须**恰好为 0**、把 SSGI 的采样数从 16 提到 64 读数必须明显变大（实测 ×2.92，判据 ≥1.5×），另记两次相同运行的离散度（实测 0.0%）。**这条检查的意义是"读数必须对工作量有响应"**：修好之前它恒为 0 |
 | `Tools/gi/cost_report.ps1` | **GI 耗时成本表**（§3.5 的数字来源 / 任务 13 的判据）：跑四种配置（`{SSGI}`、`{RTGI}`、`{DDGI}`、`{DDGI,RTGI}+RT 反射+RT 阴影`）并打印各 GI 项与 `AS_Build` 的 GPU 耗时。读法：**只有真跑过的项才非零**（不在层栈的源没有 pass；IBL 只在脏时烘焙），所以 0 表示"没跑"而不是"没测" |
 | `Tools/gi/ddgi_grid_check.ps1` + `ddgi_grid_check.py` | **DDGI 探针网格检查**（任务 14 / §9.2-K 与任务 17 的回归测试），四个配置 × 各自 `none` 基线：固定网格（`ddgi_grid_auto=0`，罩不住场景）贡献必须塌到噪声量级（**覆盖语义**）；三种拟合（8/16/32 ⇒ 192/1408/9408 探针）必须都恢复贡献，且**彼此显著不同（≥5%）**（**任务 17 的判据**：探针位置真的参与运算）。注意第三条判定在任务 17 **反转了方向** —— 任务 14 时它断言"三种分辨率一致"，因为当时探针场是均匀的（0.0015%），那正是被修的缺陷；现在断言"必须不同"（实测 37.93%）。配置里必须把 RSM 权重置 0，否则 DDGI 走 `useRSM=1` 路径，第三类判定不成立 |
+| `Tools/gi/forward_stack_check.ps1` + `forward_stack_check.py` | **Forward 层栈归一化检查**（任务 26 / §9.2-H 的回归测试），三例：`pipeline_mode=0` 下漫反射层栈分别为 `{IBL}` / `{RSM}` / `{IBL,RSM}`（镜面固定 `{IBL}`，只隔离漫反射通道）。三条判定——① 三种层栈的 HDR 读数两两可区分（改前 cfg 键只写给 Deferred，`pipeline_mode=0` 完全忽略它们）；② 多开一个源**不变亮**（`{IBL,RSM}` < `{IBL}`）；③ 双源读数**等于**两单源的加权平均（实测相对误差 0.000%）。**依赖任务 26 给 `HE_DUMP_GI` 加的"按当前管线取 HDR"**：此前它无条件转储 Deferred 的 HDR，Forward 的画面根本测不到 |
 | `Tools/gi/ssr_check.ps1` + `ssr_check.py` | **SSR 检查**（任务 25 / §9.2-W 的回归测试），四例：`specular={SSR}` 走 Hi-Z、`specular={SSR}` 走线性 march（`ssr_use_hiz=0`）、`specular={IBL}`、`specular={IBL,SSR}`。三条判定——① Hi-Z 的有效像素（输出 alpha > 0）≥ 5%（改前恰为 0）；② Hi-Z 的命中最少是线性 march 的一半（实测 1.28 倍）；③ 把 SSR 加进已有 IBL 的镜面栈后 HDR 必须变化（改前逐像素相同）。**它取的是 `prov4_spec_raw`**（dump 按 Provider 注册序命名：0=AO、1=IBL、2=RSM、3=SSGI、4=SSR、5=DDGI，之后是四个 RT 效果），脚本会把实际用的文件打印出来，注册序变了不会静默读错源 |
 | `Tools/gi/rsm_indirect_check.ps1` + `rsm_indirect_check.py` | **RSM 间接光检查**（任务 16 的回归测试），两例：空漫反射栈 / `diffuse={RSM}`，都带 `HE_PASS_TIMING=1`。两条判定——① 半分辨率 `RSM_Indirect` pass 在跑且耗时非零（这是任务 16 的全部要点）；② RSM 光栅化 pass 在。**第三条原本是耗时阈值，任务 17 期间被改成只报告**：本机的逐 pass GPU 耗时跨会话整体漂移（同一二进制连跑两次 `Lighting(rsm)` 读到 0.774 与 1.105 ms），任何绝对阈值都会判翻；耗时证据留在 §10.2 任务 16（改前 0.882 / 改后 0.513 ms，带 `GB_Clear` 作对照），检查只守**结构**——把求和搬回 Lighting 就会让它失败。**`S_rsm` 也只报告不断言**：它当前在 1e-8 量级（§9.2-AA 未闭合），把"约等于 0"写成断言等于把缺陷冻结成期望行为。**镜面栈必须非空**（否则触发 §9.2-X 的 463 亮点，把要看的量淹掉） |
 | `Tools/gi/vk_layer_settings.txt` | 校验层设置（配 `VK_LAYER_SETTINGS_PATH=Tools/gi`）：关闭重复消息上限，得到违规**真实次数**。**注意计数随该设置变化**——关掉去重后同一次运行为 `75/75/81`，不设该文件则为 `49/49/51`；两种都稳定，但**不可互相比较**（§11.3.1 方法论第 6 条） |
@@ -2174,6 +2230,7 @@ cmake --build Build --config Release --target 06.GILab -j 8
 | ~~P5 抽象/改造过度~~ | ~~大范围回归~~ | **已随 P5 退场失效**（§3.3 判定"不需要频率分离"，整波不再实施）。当年为它准备的对策（分步提交、保留 Additive 对照、同环境背靠背单源采样）已沉淀成通用做法，见 §11.3.1 |
 | **帧图从「按通道」改为「按 Provider」执行** | 核心路径回归 | 逐类迁移 + 每步判据：**先只合并 specular 与 diffuse 两条循环**（形状相同、且正是 Lumen 需要共享的一对），AO 因存在旁路暂不动，`Compute`(DDGI) 与 `Custom`(IBL) 暂留；判据是**同一环境下背靠背的单源采样逐项一致**（§11.3.1 已修复，绝对量级现在也可复现） |
 | 文档与代码持续漂移 | 后续照文档实现出错 | 完成每个波次时同步回写本文 §2/§5 与状态表 |
+| **Forward 修好 IBL 之后其它示例会变亮**（§9.2-AB） | 02.Cube / 03.Sponza / 05.AISamples / Editor 都用 `PBR.frag`，而这些示例此前也在"IBL 恒为 0"的状态下跑 | 这是**修复**而不是回归（它们的间接光本来就该有），但必须在那些示例上目视确认一遍：任务 26 只在 06.GILab 上做了数值判据。任务 26 的收尾项 |
 
 ---
 
