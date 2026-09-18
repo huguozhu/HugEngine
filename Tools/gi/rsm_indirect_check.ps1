@@ -5,20 +5,20 @@
 #   A) empty stack        -> Lighting does not evaluate the RSM VPL sum at all
 #   B) diffuse = {RSM}    -> RSM_Indirect pass runs + Lighting samples its result
 #
-# What this check asserts (all from the pass-timing log, so it needs HE_PASS_TIMING=1):
+# What this check asserts:
 #   1. the dedicated `RSM_Indirect` pass is registered and its GPU time is non-zero
 #      (that is the whole point of task 16: the 16-tap VPL sum must no longer be evaluated
 #       per full-resolution pixel inside Lighting);
-#   2. Lighting's own cost with RSM in the stack must stay close to the empty-stack case
-#      (relative threshold, so it does not depend on the machine; before the change this
-#       ratio was about 1.04, i.e. Lighting more than doubled);
-#   3. the `[GI 耗时]`-style `RSM` raster pass is present in the RSM case (a sanity check
-#      that case B really has RSM enabled rather than silently skipped).
+#   2. the `RSM` raster pass is present in the RSM case (a sanity check that case B really has
+#      RSM enabled rather than silently skipped);
+#   3. TASK 30 -- the RSM chain must produce data at every level (position map holds geometry,
+#      normal map covers the same texels, the VPL radiance map is non-empty and of real
+#      magnitude, the half-resolution result is non-empty, and the source reaches the HDR).
+#      All of that failed for the lifetime of defect 9.2-AA: the pass ran, the cost was paid,
+#      and the attachments held nothing but the clear value.
 #
-# It also reports S_rsm = lum(HDR_rsm) - lum(HDR_none). That number is currently ~0 because
-# of defect 9.2-AA (the VPL 1/d^2 term is ~1e-6 at this scene's scale, and the flux used to
-# be read from the wrong buffer), so it is REPORTED, not asserted -- asserting "about zero"
-# would freeze a defect as expected behaviour.
+# It also reports the pass timings and S_rsm for the record. The timing verdict that is *not*
+# here is explained in the .py.
 #
 # NOTE: ASCII-only on purpose -- Windows PowerShell 5.1 reads .ps1 as ANSI.
 #

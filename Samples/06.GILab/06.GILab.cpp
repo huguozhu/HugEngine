@@ -1458,7 +1458,14 @@ int main() {
             addTarget("hdr", forwardMode ? forwardPipeline.GetHDRTarget()
                                          : deferredPipeline.GetLighting().GetHDRTarget());
             if (!forwardMode) {
-            if (auto* gb = deferredPipeline.GetGBuffer()) addTarget("albedo", gb->GetAlbedo());
+            if (auto* gb = deferredPipeline.GetGBuffer()) {
+                addTarget("albedo", gb->GetAlbedo());
+                // GBuffer 的世界坐标/法线：屏幕空间 GI pass 的**输入**。少了它们，
+                // "某个源的输出纹理对不对"就只能靠形状相关性猜；有了它们才能把那个 pass
+                // 的公式在 CPU 上原样重算一遍做逐像素对照（任务 30 就是这么定位 RSM 链路的）。
+                addTarget("gb_worldpos", gb->GetWorldPos());
+                addTarget("gb_normal",   gb->GetNormal());
+            }
             // 共享的前帧 HDR 辐射度（DDGI 探针 / SSGI 入射辐射度的共同输入）：
             // 它是 GI 源吃进去的东西，出问题时第一个要看的中间量
             addTarget("radiance", deferredPipeline.GetRadianceHistory().GetTexture());
@@ -1482,6 +1489,17 @@ int main() {
                 addTarget(pre + "ao_final",   p->GetFinalAOOutput());
             }
             }   // if (!forwardMode)
+            // RSM 链路的逐级中间量（任务 30）：位置 / 编码法线 / VPL 辐射度 / 间接光输出。
+            // 该链路的典型失效是"pass 在跑、成本在付、画面里什么都没有"（§9.2-AA），
+            // 只看最终 HDR 无法分辨是"没产出"还是"产出被合成丢掉"——所以四级都落盘。
+            // 两条管线各有自己的 GI_RSM 实例（同样是"同一个着色器、各自的光源视锥"），
+            // 故这里按当前管线取，才能对照两个视锥各自的产出。
+            if (auto* rsm = forwardMode ? forwardPipeline.GetRSM() : deferredPipeline.GetRSM()) {
+                addTarget("rsm_pos", rsm->GetRSMPositionMap());
+                addTarget("rsm_nrm", rsm->GetRSMFluxMap());
+                addTarget("rsm_rad", rsm->GetRSMRadianceMap());
+            }
+            if (!forwardMode) addTarget("rsm_indirect", deferredPipeline.GetRSMIndirect().GetOutput());
             if (!g_DumpTargets.empty()) {
                 g_DumpDone = true;   // 已录制；实际读取放在 Submit 之后
             } else {

@@ -1,7 +1,7 @@
 # ============================================================
 # Forward layer-stack check (docs section 10.2 task 26 / 9.2-H)
 #
-# `pipeline_mode=0` runs three diffuse stacks over the same scene/camera: { IBL },
+# `pipeline_mode=0` runs four diffuse stacks over the same scene/camera: empty, { IBL },
 # { RSM } and { IBL, RSM }. Two facts have to hold for "Forward really went through the
 # layer stack + normalized composite":
 #
@@ -11,6 +11,12 @@
 #      not their sum: equal weights (1,1) => mean({IBL,RSM}) == (mean({IBL}) + mean({RSM}))/2.
 #      That is the same criterion the Deferred path is held to (SSGI-CAL); it is what makes
 #      "adding a source does not brighten the picture" quantitative instead of hand-wavy.
+#
+# WHAT THESE CRITERIA CANNOT SEE (defect 9.2-AD): all three hold even when one source
+# contributes EXACTLY zero -- measured: `fwd_rsm` (0.0865436) is byte-identical to the EMPTY
+# stack, i.e. Forward's RSM currently has no producer at all (task 34). The empty-stack run
+# and the reported differential in the .py exist to make that visible; the differential is
+# reported, not asserted, because asserting it would freeze an open defect into the suite.
 #
 # The numbers come from `gi_<tag>_hdr.f16`, which the sample only started writing for the
 # Forward pipeline in task 26 (before that it always dumped the *Deferred* HDR target, so the
@@ -40,8 +46,12 @@ foreach ($l in [System.IO.File]::ReadAllLines($baseCfg)) {
     if ($l -match '^\s*([A-Za-z0-9_]+)\s*=\s*(.*?)\s*$') { $baseMap[$Matches[1]] = $Matches[2] }
 }
 
-# diffuse stacks: w0=IBL, w1=DDGI, w2=SSGI, w3=RTGI; RSM has its own key
+# diffuse stacks: w0=IBL, w1=DDGI, w2=SSGI, w3=RTGI; RSM has its own key.
+# `fwd_none` is the EMPTY diffuse stack: without it the three criteria below cannot tell
+# "RSM contributes a dim picture" from "RSM contributes nothing at all" (see the .py header
+# and defect 9.2-AD -- the {RSM} reading measured here is byte-identical to the empty stack).
 $cases = @(
+    @{ tag = 'fwd_none';    ibl = '0.000000'; rsm = '0.000000' },
     @{ tag = 'fwd_ibl';     ibl = '1.000000'; rsm = '0.000000' },
     @{ tag = 'fwd_rsm';     ibl = '0.000000'; rsm = '1.000000' },
     @{ tag = 'fwd_ibl_rsm'; ibl = '1.000000'; rsm = '1.000000' }
