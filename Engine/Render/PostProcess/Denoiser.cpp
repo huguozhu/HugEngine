@@ -6,7 +6,7 @@
 
 namespace he::render {
 
-// Denoiser 鎻忚堪绗﹂泦缁戝畾鍙穈r
+// Denoiser 描述符集绑定号（与 Denoise.frag 的 vk::binding 一致）
 static constexpr u32 kDenoiseBindColor = 0;
 static constexpr u32 kDenoiseBindDepth = 1;
 static constexpr u32 kDenoiseBindNormal = 2;
@@ -73,8 +73,8 @@ void Denoiser::Render(rhi::IRHICommandList* cmd){
     cmd->SetViewport({0,(float)m_Height,(float)m_Width,-(float)m_Height,0,1}); cmd->SetScissor({0,0,m_Width,m_Height});
     struct{float2 ts; float dS; float nS;}pc;
     pc.ts=float2(1.0f/m_Width,1.0f/m_Height);
-    pc.dS=kDefaultDepthSigma;
-    pc.nS=kDefaultNormalSigma;
+    pc.dS=m_DepthSigma;      // 可配：按信号类型区分（见 Denoiser.h 文件头）
+    pc.nS=m_NormalSigma;
     cmd->SetPushConstants(0,sizeof(pc),&pc);
     cmd->Draw(3);
 }

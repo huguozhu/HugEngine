@@ -11,6 +11,7 @@
 
 #include "GI/IGIProvider.h"
 #include "GI/GI_SSGI.h"
+#include "GI/SpatialDenoiseAux.h"   // 降噪附属 pass 的共享实现（任务 11.1）
 #include "PostProcess/Denoiser.h"
 
 namespace he::render {
@@ -19,7 +20,7 @@ namespace he::render {
 class SSGIProvider final : public IGIProvider {
 public:
     void SetPass(GI_SSGI* ssgi) { m_SSGI = ssgi; }
-    void SetDenoiser(Denoiser* denoiser) { m_Denoise = denoiser; }
+    void SetDenoiser(Denoiser* denoiser) { m_Aux.SetPass(denoiser); }
     /// 由帧图注入 GBuffer 输入
     /// 【必须叫 SetInputs 且显式 override】帧图统一调用接口方法 IGIProvider::SetInputs，
     /// 而该虚函数带**空实现的默认体**：方法改名（此处曾叫 SetGBuffer）不会触发任何编译
@@ -56,25 +57,20 @@ public:
     }
     /// 最终输出：有降噪则取降噪结果，否则取主输出
     [[nodiscard]] rhi::IRHITexture* GetFinalDiffuseOutput() const override {
-        if (AuxActive() && m_Denoise) return m_Denoise->GetOutput();
+        if (AuxActive()) return m_Aux.Output();
         return GetDiffuseOutput();
     }
 
     // ── 附属 pass：降噪（halfRes 时跳过）──
-    [[nodiscard]] u32 GetAuxPassCount() const override { return AuxActive() ? 1u : 0u; }
+    // 实现全部委托给 SpatialDenoiseAux：与 SSRProvider 共用同一条链，避免两处逐行同构
+    // 的代码各自漂移（任务 11.1）。
+    [[nodiscard]] u32 GetAuxPassCount() const override { return m_Aux.Count(AuxActive()); }
     [[nodiscard]] const char* GetAuxPassName(u32 /*i*/) const override { return "SSGI_Denoise"; }
     [[nodiscard]] rhi::IRHITexture* GetAuxPassInput(u32 /*i*/) const override { return GetDiffuseOutput(); }
-    [[nodiscard]] rhi::IRHITexture* GetAuxPassOutput(u32 /*i*/) const override {
-        return m_Denoise ? m_Denoise->GetOutput() : nullptr;
-    }
-    void PreBindAux(rhi::IRHICommandList* cmd, u32 /*i*/) override {
-        if (m_Denoise) m_Denoise->PreBind(cmd);
-    }
+    [[nodiscard]] rhi::IRHITexture* GetAuxPassOutput(u32 /*i*/) const override { return m_Aux.Output(); }
+    void PreBindAux(rhi::IRHICommandList* cmd, u32 /*i*/) override { m_Aux.PreBind(cmd); }
     void RenderAux(rhi::IRHICommandList* cmd, u32 /*i*/, const GIProviderContext& /*ctx*/) override {
-        if (m_Denoise && m_SSGI) {
-            m_Denoise->SetInputs(GetDiffuseOutput(), m_Depth, m_Normal);
-            m_Denoise->Render(cmd);
-        }
+        m_Aux.Render(cmd, GetDiffuseOutput(), m_Depth, m_Normal);
     }
 
     bool Initialize(rhi::IRHIDevice*, u32, u32) override { return m_SSGI != nullptr; }
@@ -95,7 +91,7 @@ public:
     }
 
     [[nodiscard]] GI_SSGI*  GetPass() const { return m_SSGI; }
-    [[nodiscard]] Denoiser* GetDenoiser() const { return m_Denoise; }
+    [[nodiscard]] Denoiser* GetDenoiser() const { return m_Aux.GetPass(); }
     [[nodiscard]] u32 GetOutputWidth() const {
         auto* t = GetDiffuseOutput(); return t ? t->GetWidth() : 0u;
     }
@@ -106,11 +102,11 @@ public:
 private:
     /// 降噪是否启用：halfRes 时半分辨率输出直接采样，省去 Denoise 开销
     [[nodiscard]] bool AuxActive() const {
-        return m_SSGI && m_Denoise && !m_SSGI->GetSettings().halfRes;
+        return m_SSGI && m_Aux.GetPass() && !m_SSGI->GetSettings().halfRes;
     }
 
-    GI_SSGI*  m_SSGI    = nullptr;   // 非拥有
-    Denoiser* m_Denoise = nullptr;   // 非拥有
+    GI_SSGI*          m_SSGI = nullptr;   // 非拥有
+    SpatialDenoiseAux m_Aux;              // 降噪附属 pass（与 SSRProvider 共用实现）
     rhi::IRHITexture* m_Depth  = nullptr;
     rhi::IRHITexture* m_Normal = nullptr;
     rhi::IRHITexture* m_Albedo = nullptr;

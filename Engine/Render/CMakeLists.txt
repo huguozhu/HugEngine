@@ -97,6 +97,7 @@ set(RENDER_SOURCES
     GI/IBLProvider.h
     GI/RSMProvider.h
     GI/AOProvider.h
+    GI/SpatialDenoiseAux.h
     GI/SSGIProvider.h
     GI/SSRProvider.h
     GI/DDGIProvider.h

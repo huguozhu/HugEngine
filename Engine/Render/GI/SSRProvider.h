@@ -10,6 +10,7 @@
 
 #include "GI/IGIProvider.h"
 #include "GI/GI_SSR.h"
+#include "GI/SpatialDenoiseAux.h"   // 降噪附属 pass 的共享实现（任务 11.1）
 #include "PostProcess/Denoiser.h"
 #include "Core/Log.h"
 
@@ -19,7 +20,7 @@ namespace he::render {
 class SSRProvider final : public IGIProvider {
 public:
     void SetPass(GI_SSR* ssr) { m_SSR = ssr; }
-    void SetDenoiser(Denoiser* denoiser) { m_Denoise = denoiser; }
+    void SetDenoiser(Denoiser* denoiser) { m_Aux.SetPass(denoiser); }
 
     [[nodiscard]] GISourceId GetSourceId() const override { return GISourceId::SSR; }
     [[nodiscard]] bool Handles(GISourceId id) const override { return id == GISourceId::SSR; }
@@ -38,25 +39,19 @@ public:
         return m_SSR ? m_SSR->GetIndirectSpecularTexture() : nullptr;
     }
     [[nodiscard]] rhi::IRHITexture* GetFinalSpecularOutput() const override {
-        if (AuxActive() && m_Denoise) return m_Denoise->GetOutput();
+        if (AuxActive()) return m_Aux.Output();
         return GetSpecularOutput();
     }
 
     // ── 附属 pass：降噪（halfRes 时跳过）──
-    [[nodiscard]] u32 GetAuxPassCount() const override { return AuxActive() ? 1u : 0u; }
+    // 与 SSGIProvider 共用 SpatialDenoiseAux（任务 11.1）：同一条链只有一份实现。
+    [[nodiscard]] u32 GetAuxPassCount() const override { return m_Aux.Count(AuxActive()); }
     [[nodiscard]] const char* GetAuxPassName(u32 /*i*/) const override { return "SSR_Denoise"; }
     [[nodiscard]] rhi::IRHITexture* GetAuxPassInput(u32 /*i*/) const override { return GetSpecularOutput(); }
-    [[nodiscard]] rhi::IRHITexture* GetAuxPassOutput(u32 /*i*/) const override {
-        return m_Denoise ? m_Denoise->GetOutput() : nullptr;
-    }
-    void PreBindAux(rhi::IRHICommandList* cmd, u32 /*i*/) override {
-        if (m_Denoise) m_Denoise->PreBind(cmd);
-    }
+    [[nodiscard]] rhi::IRHITexture* GetAuxPassOutput(u32 /*i*/) const override { return m_Aux.Output(); }
+    void PreBindAux(rhi::IRHICommandList* cmd, u32 /*i*/) override { m_Aux.PreBind(cmd); }
     void RenderAux(rhi::IRHICommandList* cmd, u32 /*i*/, const GIProviderContext& /*ctx*/) override {
-        if (m_Denoise && m_SSR) {
-            m_Denoise->SetInputs(GetSpecularOutput(), m_Depth, m_Normal);
-            m_Denoise->Render(cmd);
-        }
+        m_Aux.Render(cmd, GetSpecularOutput(), m_Depth, m_Normal);
     }
 
     /// 由帧图注入 GBuffer 输入（SSR 需要反照率做降噪引导）
@@ -79,14 +74,15 @@ public:
     }
 
     [[nodiscard]] GI_SSR* GetPass() const { return m_SSR; }
+    [[nodiscard]] Denoiser* GetDenoiser() const { return m_Aux.GetPass(); }
 
 private:
     [[nodiscard]] bool AuxActive() const {
-        return m_SSR && m_Denoise && !m_SSR->GetSettings().halfRes;
+        return m_SSR && m_Aux.GetPass() && !m_SSR->GetSettings().halfRes;
     }
 
-    GI_SSR*   m_SSR     = nullptr;   // 非拥有
-    Denoiser* m_Denoise = nullptr;   // 非拥有
+    GI_SSR*           m_SSR = nullptr;   // 非拥有
+    SpatialDenoiseAux m_Aux;             // 降噪附属 pass（与 SSGIProvider 共用实现）
     rhi::IRHITexture* m_Depth  = nullptr;
     rhi::IRHITexture* m_Normal = nullptr;
     rhi::IRHITexture* m_Albedo = nullptr;

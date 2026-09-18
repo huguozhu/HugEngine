@@ -121,6 +121,22 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     m_DDGI.Initialize(device, m_Width, m_Height);
     m_DenoiseSSGI.Initialize(device, m_Width, m_Height);
     m_DenoiseSSR.Initialize(device, m_Width, m_Height);
+    // ── 降噪参数按信号区分（任务 11.1）──
+    // 此前 4 个 Denoiser 实例的参数完全相同（着色器里的固定常量 10 / 8）—— 也就是同一个
+    // 滤波核同时用在间接漫反射、镜面反射、光追漫反射与光追反射上，而它们的可容忍模糊度
+    // 并不相同。现在参数可配，并且**集中在这一处**按信号赋值（此前连改的地方都没有）。
+    //
+    // 当前仍取默认值 10 / 8，这是实测结论而不是"忘了改"：把 SSGI 放宽到 2 / 2（更不挑边、
+    // 邻域更多参与）只能把高频代理 |Δx| 再降 5%（0.000984 → 0.000935），而整体 std/mean
+    // 基本不动（1.7921 → 1.8137）——说明瓶颈是 **5×5 的核本身**（以及缺少时域累积），
+    // 而不是这两个权重。选真正的"按信号"取值需要 11.3 的信号分派框架与一条质量判据，
+    // 否则就是拿一个量不出来的旋钮冒充改进。
+    const float kSpatialDepthSigma  = Denoiser::kDefaultDepthSigma;
+    const float kSpatialNormalSigma = Denoiser::kDefaultNormalSigma;
+    m_DenoiseSSGI.SetDepthSigma(kSpatialDepthSigma);
+    m_DenoiseSSGI.SetNormalSigma(kSpatialNormalSigma);
+    m_DenoiseSSR.SetDepthSigma(kSpatialDepthSigma);
+    m_DenoiseSSR.SetNormalSigma(kSpatialNormalSigma);
     m_SSAO.Initialize(device, m_Width, m_Height);
 
     // 按 GIConfig 层栈启用对应子系统（两者必须一致：层栈说"参与"就必须真的跑）

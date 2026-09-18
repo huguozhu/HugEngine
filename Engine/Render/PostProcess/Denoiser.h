@@ -8,16 +8,27 @@ namespace he::render {
 
 // ============================================================
 // Denoiser — 5×5 双边模糊降噪（SSGI/SSR 共用）
+//
+// 两个权重（`depthSigma` / `normalSigma`）此前是着色器里的**固定常量**，4 个实例参数
+// 完全相同 —— 也就是说同一个滤波核同时用在「间接漫反射」与「镜面反射」上，而这两种
+// 信号的噪声分布与可容忍模糊度并不相同（§4.4 / 任务 11.1）。现在它们可配：
+// 数值越大越"挑边"（越不容易跨过深度/法线不连续处，滤波越弱）。
 // ============================================================
 class Denoiser {
 public:
-    // 双边模糊默认 sigma 值
+    // 双边模糊默认 sigma 值（= 改造前的固定常量，保持既有行为）
     static constexpr float kDefaultDepthSigma  = 10.0f;
     static constexpr float kDefaultNormalSigma = 8.0f;
 
     bool Initialize(rhi::IRHIDevice* device, u32 width, u32 height);
     void Shutdown();
     void OnResize(u32 w, u32 h);
+
+    /// 设置双边权重的敏感度（越大越挑边 = 滤波越弱）。按信号类型区分时调用。
+    void SetDepthSigma(float s)  { m_DepthSigma  = s; }
+    void SetNormalSigma(float s) { m_NormalSigma = s; }
+    [[nodiscard]] float GetDepthSigma()  const { return m_DepthSigma; }
+    [[nodiscard]] float GetNormalSigma() const { return m_NormalSigma; }
 
     void SetInputs(rhi::IRHITexture* color, rhi::IRHITexture* depth, rhi::IRHITexture* normal);
     void Render(rhi::IRHICommandList* cmd);
@@ -35,6 +46,8 @@ private:
     rhi::DescriptorSetLayoutHandle m_Layout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_Set    = rhi::kInvalidSet;
     rhi::IRHITexture* m_Input=nullptr,*m_Depth=nullptr,*m_Normal=nullptr;
+    float m_DepthSigma  = kDefaultDepthSigma;    // 见文件头：可配，默认保持既有行为
+    float m_NormalSigma = kDefaultNormalSigma;
 };
 
 } // namespace he::render
