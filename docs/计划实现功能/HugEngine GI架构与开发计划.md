@@ -717,6 +717,7 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 | **B / I·V** | **RTGI 的 miss 不再回退 DDGI**（§9.2-I）+ **时域降噪不绑管线导致启用 RTGI 即挂死**（§9.2-V）。前者恢复「源独立」：同一份 RTGI 的读数不再取决于别的源在不在层栈里（0.2034 → 0.0575，与仅 RTGI 时差 0.000%）；后者是前者的**验证前提**——不修它，任何 RT 相关测量都跑不起来。新增回归检查 `Tools/gi/rtgi_coupling_check.ps1` | ✅ 完成 |
 | **B / G** | **层栈成为子系统开关的唯一真值**（§9.2-G，不变量 1）：把 `enabled` 与 halfRes 输出尺寸的对齐放进框架的 `SyncToStack`，并删掉 `06.GILab.cpp` 里那份「复发过」的手工补丁。实测 `specular={SSR}` 时 pass 列表由无 SSR 变为出现 `SSR` 与 `SSR_Denoise`；新增回归检查 `Tools/gi/stack_switch_check.ps1` | ✅ 完成 |
 | **B / D** | **AO 不再压暗直接光、并开始作用于镜面**（§9.2-D）：合成顺序改为「直接光单独记下 → 间接漫反射/镜面各自累积 → 只对间接项乘 AO」。实测：纯直接光下 AO 不再改变画面（0.1007917 → 0.2021757，与关 AO 一致）；镜面 IBL 下 AO 生效（0.02649925 → 0.01478481）。§3.3 的比值/相关性不变（21.1× / 0.9234），白炉 1.0000 | ✅ 完成 |
+| **B / F** | **RSM 的注册脱离 DDGI 门控**（§9.2-F）：门控改为两个消费方的并集（`ShouldRunDDGI() \|\| ShouldRunRSM()`），并新增 `GI_DDGI::ClearRSM` 让"本帧不注册"也成为明确结论（消除 useRSM 闩锁的残留面）。实测 `diffuse={RSM}` 且 DDGI 关时 pass 列表由无 `RSM` 变为有；新增 `Tools/gi/rsm_gate_check.ps1` 三例，A 例在改前必失败 | ✅ 完成 |
 
 ### 8.2 三个关键指标（实测）
 
@@ -774,7 +775,7 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 | ~~**C**~~ | ✅ **已修复** | **SSR 有效性协议未实现**：合成端判 `u_SSR.Sample().a < 0` 表示无效，但 SSR 所有分支 alpha 都是 1.0，空间/时域降噪还会把 alpha 平均 → 判定永不成立，SSR miss 的黑色以全权重进入 `(IBL+0)/2` | 见下方「B/C 的修复与实测」 |
 | ~~**D**~~ | ✅ **已修复** | **AO 乘到了直接光上，且不作用于镜面**：`color *= lerp(1, ao*aoVal, aoIntensity)` 位于直接光累加之后、间接镜面之前 ⇒ (1) **每帧把直接光按材质 AO 压暗一次**（能量错误，不是遮蔽近似），(2) 间接镜面完全不受 AO 影响。修法：先把直接光记下（`directColor`），间接漫反射与间接镜面各自累积，最后 `color = directColor + (indirectDiffuse * giIntensity + indirectSpecular) * aoFactor`，自发光同样不受遮蔽。**实测指纹**：纯直接光 + `AO={SSAO}` 读数 **0.1007917 → 0.2021757**，与「AO 栈为空」**完全一致** ⇒ AO 不再碰直接光；只留镜面 IBL（并关掉直接光）+ `AO={SSAO}` 时 **0.02649925 → 0.01478481（×0.558）** ⇒ AO 开始遮蔽镜面。回归：DDGI 差分不变（0.0195947），§3.3 的比值与相关性不变（`p5_spectrum`：21.1× / corr 0.9234），白炉 1.0000；绝对基线随之变化（`none` 0.0472 → 0.0577，`max` 19.68 → 42.20） | `Lighting/DeferredLighting.frag.slang` |
 | **E** | 中 → **SSGI 已修** | **屏幕空间源用硬编码默认投影矩阵**而非真实相机：`kDefaultFOV=60°/0.1/2000`；`PhysicalCamera` 会由焦距反算 fov → 非默认相机下 SSGI/SSAO/SSR 重建错位。根因是 `IGIProvider` 未把相机传给屏幕空间源（只有 DDGI 有 `SetCamera`） | SSGI 已修（见 M）；`GI_SSR.cpp:140`、`SSAO.cpp:271` **仍待修** |
-| **F** | 中 | **RSM 的 pass 被嵌套在 DDGI 门控内**：单独勾选 RSM 而关闭 DDGI 时，RSM 永不注册（Forward 侧却是独立的 `ShouldRunRSM()`） | `DeferredPipeline_FrameGraph.cpp:288` |
+| ~~**F**~~ | ✅ **已修复** | **RSM 的 pass 被嵌套在 DDGI 门控内**：单独勾选 RSM 而关闭 DDGI 时，RSM 永不注册（Forward 侧却是独立的 `ShouldRunRSM()`）。RSM 实际有**两个独立消费方**——Lighting 的漫反射间接光（`ShouldRunRSM()`）与 DDGI 探针的世界辐射度来源——门控应取并集。**实测指纹**：`diffuse={RSM}` 且 DDGI 关时 pass 列表里**没有 `RSM`**，改后出现；同时新增 `GI_DDGI::ClearRSM`，让"没注册"也成为一个**逐帧明确结论**（`useRSM` 是由两个纹理成员推导的闩锁，此前"不注册就什么都不做"会把上一帧的绑定留在原地，是 §9.2-R 的残留面） | `DeferredPipeline_FrameGraph.cpp`；`GI/GI_DDGI.{h,cpp}`；`06.GILab.cpp`（新增 `gi_blend_diffuse_rsm` 配置键，此前 RSM 只能靠面板勾选）；回归检查 `Tools/gi/rsm_gate_check.ps1` |
 | ~~**G**~~ | ✅ **已修复** | **层栈与子系统开关是两套真值**（不变量 1 的实际状态）：子系统 `enabled` 只在管线 `Initialize` 时按当时的层栈算**一次**，之后层栈再变（配置加载 / 预设 / 面板）就与子系统脱节 ⇒ `IsValid()` 为假、pass 不注册，而层栈仍以正权重把它计入归一化：**勾选却静默失效**。`halfRes` 是第三重（要等下次 `OnResize` 才重建纹理）。**实测指纹**：`specular={SSR}`（其余层栈为空）时，pass 列表里**完全没有 SSR**；把「层栈 → 开关」的对齐交给框架后，`SSR` 与 `SSR_Denoise` 都出现。**「复发过」的实体已找到**：`06.GILab.cpp` 里有一份手工补丁逐个子系统同步开关 —— 把不变量的维护放到调用方，必然有下一个忘记同步的调用方。修法：在 `IGIProvider::SyncToStack`（帧图构图前每帧调用）里对齐 `enabled` 与输出尺寸，并删除那份手工补丁 | `GI/AOProvider.h`、`SSGIProvider.h`、`SSRProvider.h`、`DDGIProvider.h`；`GI_SSGI.{h,cpp}`、`GI_SSR.{h,cpp}`；`06.GILab.cpp`；回归检查 `Tools/gi/stack_switch_check.ps1` |
 | **H** | 中 | **Provider 抽象只在 Deferred 落地**：`ForwardPipeline` 无 `m_GIProviders`，且 Forward 的 PBR shader **没有 `GIBlendParams` UBO** → 层栈归一化在 Forward 完全不存在，但 `PipelineCaps::Forward` 声明支持 IBL+RSM | `ForwardPipeline.h`；全仓 `GIBlendParams` 仅 DeferredLighting 使用 |
 | ~~**I**~~ | ✅ **已修复** | **RTGI 用 DDGI 做 miss 回退**，破坏「源独立」前提：Ultra 档同时含 RTGI+DDGI 时，DDGI 信息被用两次再归一化 → 加权平均失去无偏性。**实测指纹**：同一帧、同一相机，只改漫反射层栈 —— `diffuse={RTGI}` 时 RTGI 原始输出均值 **0.0575**，`diffuse={DDGI,RTGI}` 时 **0.2034**（3.5 倍）⇒ 同一份 RTGI 的读数完全由「DDGI 在不在层栈里」决定。修法：把「DDGI 是否是层栈源」作为每帧状态交给 rgen（`flags` bit1），是则 miss 贡献 0、否则保留回退（降级路径）。修后两者均值 **0.0575 对 0.0575（差 0.000%）** | `RT_GI.rgen.slang`；`RTEffectPass.h`；`RTGIPass.cpp`；`RTProvider.h`；`DeferredPipeline_FrameGraph.cpp`；回归检查 `Tools/gi/rtgi_coupling_check.ps1` |
@@ -933,9 +934,10 @@ Vulkan 校验 46 条与改前一致。
 > 标定才能解决——归 §10.1 `SSGI-CAL`。在补齐之前，SSGI 无论怎么调 `intensity` 都不是
 > `E/π` 的估计。
 
-> ⚠️ **校验层条数只在同一配置内纵向比较。** 本节及后面各处出现的「46 / 49 / 51 / 54 条」
-> 分别来自不同运行配置（默认配置 / 白炉 / §11.3 采样设施的三个层栈变体），绝对值**不可横向
-> 比较**；有效的判据始终是「与**同配置**的改前基线**逐项相同**」。
+> ⚠️ **校验层条数只在同一配置、同一去重条件下纵向比较。** 各处出现的「46 / 49 / 51 / 75 / 81 条」
+> 来自不同运行配置与不同去重设置（默认配置与白炉为 46；§11.3 采样设施的三个层栈变体在**关闭
+> 去重**时为 75 / 75 / 81，在**开启去重**时为 49 / 49 / 51），绝对值**不可横向比较**；有效的判据
+> 始终是「与**同条件**的改前基线**逐项相同**」（§11.3.1 方法论第 6 条）。
 
 **S 的修复与实测**（RHI 纹理「已写入」登记 + 一次性告警）
 
@@ -999,8 +1001,8 @@ Vulkan 校验 46 条与改前一致。
   pass 执行时已随 `BuildFrameGraph` 的栈帧失效（见 §9.2-U）。改为按值捕获后，每次运行约
   **186 条「是野指针」报错归零**
 
-验证：未写入告警 **4/4/3 → 0/0/0**；野指针报错约 **186 → 0**；Vulkan 校验 51/51/54 与改前
-逐项相同；单元测试 159/159、3952/3952；白炉比值与绝对值均 1.0000；同一二进制连续 6 次运行
+验证：未写入告警 **4/4/3 → 0/0/0**；野指针报错约 **186 → 0**；Vulkan 校验 49/49/51 与改前
+逐项相同（同一计数条件下；见 §11.3.1 方法论第 6 条）；单元测试 159/159、3952/3952；白炉比值与绝对值均 1.0000；同一二进制连续 6 次运行
 均正常收尾。**DDGI 的差分贡献不变**（0.0195943 → 0.0195936），故 §3.3 与 P5 的结论不受影响。
 
 **同时发现 U（已修）**：一度以为 `none` 层栈的**绝对**基线在两个只差「一处 lambda 捕获列表」的
@@ -1058,7 +1060,7 @@ Vulkan 校验 46 条与改前一致。
 | ~~**3**~~ | ~~**§9.2-I · RTGI 用 DDGI 做 miss 回退**~~ —— ✅ **已完成** | 中 / 中 | **直接破坏架构核心主张**——「归一化 ⇒ 无双重计数」。已立「DDGI 是否是层栈源」为每帧状态：是则 RTGI 的 miss 不再回退 DDGI。实测同一份 RTGI 的均值为 0.0575 与 0.2034（3.5 倍）→ 修后 0.0575 对 0.0575（差 0.000%）。**顺带修掉挡住所有 RT 测量的 §9.2-V**（时域降噪不绑管线 → 启用 RTGI 稳定挂死） |
 | ~~**4**~~ | ~~**§9.2-G · 层栈与子系统开关是两套真值**~~ —— ✅ **已完成** | 中 / 中 | **不变量 1**，且是**复发过**的一项。已把对齐放进框架：`IGIProvider::SyncToStack`（帧图构图前每帧调用）里让子系统的 `enabled` 与输出尺寸都跟着层栈走，并**删掉 `06.GILab.cpp` 里那份手工补丁**——「复发」的实体就是它。实测：`specular={SSR}` 时 pass 列表由「完全没有 SSR」变为出现 `SSR` 与 `SSR_Denoise` |
 | ~~**5**~~ | ~~**§9.2-D · AO 乘到了直接光上**~~ —— ✅ **已完成** | 中 / 中 | 每帧生效的能量错误（AO 把**直接光**也压暗了），且 AO 不作用于镜面。修法同预期：直接光单独记下，AO 只乘间接项（漫反射 + 镜面），自发光不受遮蔽。实测：纯直接光下 AO 不再改变画面（0.1007917 → 0.2021757，与关 AO 完全一致），镜面 IBL 下 AO 开始生效（×0.558）；§3.3 的比值与相关性不受影响 |
-| **6** | **§9.2-F · RSM 的 pass 被嵌套在 DDGI 门控内** | 中 / 中 | 单独勾选 RSM 而关闭 DDGI 时 **RSM 永不注册**——配置说谎，属功能失效 |
+| ~~**6**~~ | ~~**§9.2-F · RSM 的 pass 被嵌套在 DDGI 门控内**~~ —— ✅ **已完成** | 中 / 中 | 单独勾选 RSM 而关闭 DDGI 时 **RSM 永不注册**——配置说谎，属功能失效。修法：门控改为「两个消费方的并集」（`ShouldRunDDGI() \|\| ShouldRunRSM()`，后者与 Forward 侧同一个谓词），并新增 `GI_DDGI::ClearRSM` 让"本帧不注册"也成为明确结论。**实测**：`diffuse={RSM}` 且 DDGI 关时 pass 列表由**无** `RSM` 变为**有**；三例回归检查全过，「层栈无 RSM」的两例不注册（防止改过头）。三变体读数、每帧告警、白炉、单测与改前逐项一致 |
 | **7** | **§9.2-E · SSR 与 SSAO 仍用硬编码投影** | 中 / 中 | 同一缺陷的**两个剩余实例**（SSGI 已修，见 §9.2-M）；修法与先例都已具备。非默认相机（`PhysicalCamera` 由焦距反算 fov）下空间错位 |
 | **8** | **§9.2-H · Forward 无 Provider、无 `GIBlendParams` UBO** | 中 / 中 | 要么补齐 Forward 的层栈归一化，要么把 `PipelineCaps::Forward` 的声明改对——**当前是"声称支持但实际不存在"**，与 §5.1 的能力位表不符 |
 
@@ -1141,7 +1143,9 @@ Vulkan 校验 46 条与改前一致。
 - **5（D · AO 乘到直接光）**：`color *= lerp(1, ao*aoVal, aoIntensity)` 要移到**只作用于间接项**
   的位置；同时明确它是否作用于镜面（现状不作用）。
 - **6（F · RSM 被 DDGI 门控）**：把 RSM 的注册从 DDGI 循环里移出，成为独立门控
-  （Forward 侧本就是独立的 `ShouldRunRSM()`）。
+  （Forward 侧本就是独立的 `ShouldRunRSM()`）。**已完成**：门控取两个消费方的并集，并补
+  `GI_DDGI::ClearRSM`（"不注册"也要显式写回，否则闩锁留着上一帧的绑定）；回归检查
+  `Tools/gi/rsm_gate_check.ps1` 三例，其中 A 例在改前必失败。
 - **7（E · SSR/SSAO 硬编码投影）**：照 SSGI 已修的路径（`SetCamera` + UBO 补 `u_View`）。
   判据：改用非默认 `PhysicalCamera`（由焦距反算 fov）后空间重建不再错位。
 - **8（H · Forward）**：二选一——补齐 Forward 的 Provider 与 `GIBlendParams` UBO，
@@ -1305,7 +1309,7 @@ Vulkan 校验 46 条与改前一致。
 | 现象 | 采样 soak 24 次启动中有 **1 次**在第 42 帧挂住；日志末尾是 `VUID-vkAcquireNextImageKHR-semaphore-01779`（"Semaphore must not have any pending operations"） |
 | 根因 | `VulkanSwapChain::AcquireNextImage` 复用一个 acquire 槽位前，只等了**该槽位自己的 acquire 栅栏** —— 它只能证明"信号已经发出"，证明不了信号量"**已被某次提交等待消费**"。真正等待该信号量的是那次 `vkQueueSubmit`，而它的完成没有任何一处在 acquire 之前被等待。帧循环的顺序（`AcquireNextImage` → … → `cmd->Begin()` 才等提交栅栏）让这个缺口必然存在，只在负载抖动时暴露 |
 | 修法 | 提交后由命令列表登记该帧的提交栅栏（`SetAcquireConsumedFence`），复用一个 acquire 槽位前先等它；只等待、不重置（栅栏归命令列表所有）。交换链重建时清空登记并把槽位归零 |
-| 验证 | 同配置 soak **40 次全部正常收尾**（OK 40 / CRASH 0 / TIMEOUT 0），且 40 份日志中该 VUID 出现 **0 次**（改前 1/24）。三变体回归：VUID 51/51/54、告警 0/0/0、读数与改前一致 |
+| 验证 | 同配置 soak **40 次全部正常收尾**（OK 40 / CRASH 0 / TIMEOUT 0），且 40 份日志中该 VUID 出现 **0 次**（改前 1/24）。三变体回归：VUID 49/49/51、告警 0/0/0、读数与改前一致 |
 
 顺带补齐了**让 D1 可查**的两件工具基础：
 
@@ -1389,7 +1393,7 @@ cmake --build Build --config Debug --target 06.GILab -j 8
 | `HE_FURNACE_PROBE=1` 单用 | 只开探针不开白炉 |
 | `HE_DUMP_GI=<标签>`（+ `HE_DUMP_GI_FRAME=<帧号>`，默认 60） | **GI 纹理级采样**：在指定帧整幅落盘 HDR / GBuffer albedo / **各有效 Provider 的原始与降噪后输出**到 `Build/verify/gi_<标签>_*.f16`（RGBA16F 原始像素、无文件头、行紧密排布），并写 `_meta.txt` 记录逐目标尺寸；落盘后**自动关窗退出**，便于脚本化 |
 | `HE_GILAB_CONFIG=<路径>` | 覆盖示例程序的配置读写路径（读写同一路径），使自动化实验**完全不触碰**仓库内的 `Content/Config/06_GILab.cfg`——否则每次实验都会被示例程序退出时回写覆盖 |
-| `vk_layer_settings.txt` + `VK_LAYER_SETTINGS_PATH` | 关闭校验层重复消息上限，得到违规**真实次数** |
+| `Tools/gi/vk_layer_settings.txt` + `VK_LAYER_SETTINGS_PATH=Tools/gi` | 关闭校验层重复消息上限，得到违规**真实次数**。**计数只在同一条件下可比**（关去重 75/75/81、不设该文件 49/49/51，见 §11.3.1 方法论第 6 条） |
 
 **纹理「已写入」检测** —— 「采样了从未被写入的纹理」会自动报警（§9.2-S）
 
@@ -1421,6 +1425,8 @@ cmake --build Build --config Debug --target 06.GILab -j 8
 | `Tools/gi/soak_launch.ps1` | **批量启动 soak**（D1 用）：逐次判定 OK / CRASH / TIMEOUT / NODUMP 并汇总，崩溃报告单独留存；把"偶发"变成可度量的频率。**注意该脚本刻意只用 ASCII** —— Windows PowerShell 5.1 按 ANSI 读 `.ps1`，非 ASCII 注释会破坏解析 |
 | `Tools/gi/rtgi_coupling_check.ps1` | **RTGI 源独立性检查**（§9.2-I 的回归测试）：只改漫反射层栈跑两次，比较 RTGI 原始输出的**均值**是否一致。判据用均值而非逐字节——射线抖动种子取自帧计数器，而多一个 DDGI pass 会改变每帧的提交次数，逐像素必然不同；要保证不变的是**估计量本身**。修前是 0.0575 对 0.2034（3.5 倍），修后 0.000% |
 | `Tools/gi/stack_switch_check.ps1` | **层栈与子系统开关一致性检查**（不变量 1 / §9.2-G 的回归测试）：把 SSR 放进镜面层栈（默认档位的镜面栈只有 IBL，故初始化时 SSR 开关是关的），带 `HE_TRACE_PASSES=1` 跑一帧，**要求 pass 列表里出现 `SSR`**。修前该列表里完全没有 SSR |
+| `Tools/gi/rsm_gate_check.ps1` | **RSM 独立门控检查**（§9.2-F 的回归测试）：三例——关 DDGI 且 RSM 在漫反射层栈（**必须注册**，改前必失败）、关 DDGI 且层栈无 RSM（不得注册）、开 DDGI 且层栈无 RSM（不得注册，探针应回退 IBL）。第 2、3 例是防"改过头"的反向对照 |
+| `Tools/gi/vk_layer_settings.txt` | 校验层设置（配 `VK_LAYER_SETTINGS_PATH=Tools/gi`）：关闭重复消息上限，得到违规**真实次数**。**注意计数随该设置变化**——关掉去重后同一次运行为 `75/75/81`，不设该文件则为 `49/49/51`；两种都稳定，但**不可互相比较**（§11.3.1 方法论第 6 条） |
 
 采样时有两个易踩的坑：
 
@@ -1495,7 +1501,7 @@ cmake --build Build --config Debug --target 06.GILab -j 8
 
 回归：单元测试 159/159、3952/3952；白炉 **1.0000**；Vulkan 校验 **46 条与基线一致**。
 
-##### 方法论收获（五条，都写进约定）
+##### 方法论收获（六条，都写进约定）
 
 1. **GI 源「吃进去」的中间量必须和「吐出来」的一样纳入纹理级对照。** 本次是靠 dump
    `ibl_irr` 一步定性的——只看 DDGI 的输出只会看到「一个暗色常数」，看不出原因。
@@ -1513,6 +1519,13 @@ cmake --build Build --config Debug --target 06.GILab -j 8
    增量构建直接跳过编译，于是新代码根本没进二进制。本次即因此得到一次"改动前后完全一致"的
    假读数。**约定**：回滚或复制着色器后必须 `(Get-Item <src>).LastWriteTime = Get-Date`，
    并确认 `build` 输出里出现了该 shader 的编译行。
+6. **校验层条数必须连同「是否关闭去重」一起记录，否则这个数字没有意义。** §11.3 的表格
+   写着用 `vk_layer_settings.txt` 关闭 `duplicate_message_limit` 以得到"真实次数"，但**该文件
+   此前并不在仓库里**，于是所有实际跑出来的计数都是在**开着去重**的条件下得到的。本次核账发现
+   文档里记的 `51/51/54` 与全部历史日志不符（`Tools/gi/` 采样三变体一致为 **49/49/51**，而关闭
+   去重后为 **75/75/81**）：两者都稳定可复现，差别只在去重上限截断了重复消息。
+   **约定**：计数一律标注条件，只与**同条件**的改前基线比较；设置文件已入库
+   （`Tools/gi/vk_layer_settings.txt`，配 `VK_LAYER_SETTINGS_PATH=Tools/gi` 使用）。
 
 > **给 S 的告警定基线**：它在 06.GILab 上曾固定报 4 条，已由任务 23 清零（§9.2-T）；
 > **此后新增的任何一条都要当场查清** —— 基线为空，告警才真正具备信噪比。
@@ -1533,7 +1546,7 @@ cmake --build Build --config Debug --target 06.GILab -j 8
 | **消费者门控写漏 → 未初始化纹理被采样** | **静默的物理错误 + 读数跨构建不可复现**（本次 §9.2-Q/R 正是如此被放大的） | 已落地 RHI「已写入」登记 + 一次性告警（§9.2-S）：任何被采样却从未写入的纹理都会报出 set/binding/尺寸/格式；告警基线已由任务 23 清零（§9.2-T）。且 GI 源**吃进去**的中间量也要纳入纹理级对照（§11.3.1） |
 | **帧图 pass lambda 读失效栈帧**（§9.2-U 的一个已修实例） | **把已销毁的纹理指针交给描述符更新**：实测每次运行约 186 条「是野指针」 | 已随任务 23 修掉（Lighting lambda 改按值捕获）；帧图其余 pass lambda 逐个审过，捕获列表干净 |
 | **崩溃/超时的运行留下旧转储**（§9.2-U，已修） | **把上一次的数字当成本次读数**：本次即因此虚构出一个"绝对读数依赖二进制布局"的缺陷追查了很久 | 采样脚本改为运行前删除产物、运行后校验转储新鲜度、失败则以非零码退出（`Tools/gi/dump_gi.ps1`）；**任何读数差异先确认"这个数字是本次跑出来的"** |
-| 校验层重复消息去重掩盖计数 | 误把「报告数」当真实次数（历史上两次误判） | 关闭 `duplicate_message_limit`，或用 `HE_TRACE_FB` 交叉验证 |
+| 校验层重复消息去重掩盖计数 | 误把「报告数」当真实次数（历史上两次误判） | 设置文件**已入库**：`Tools/gi/vk_layer_settings.txt` + `VK_LAYER_SETTINGS_PATH=Tools/gi` 关闭 `duplicate_message_limit`（关去重为 75/75/81，不设为 49/49/51）；**计数必须连同条件一起记录**（§11.3.1 方法论第 6 条），或用 `HE_TRACE_FB` 交叉验证 |
 | P5 抽象/改造过度 | 大范围回归 | 分步提交（3.1→3.4），每步实测；保留 Additive/Normalized 作对照 |
 | **帧图从「按通道」改为「按 Provider」执行** | 核心路径回归 | 逐类迁移 + 每步判据：**先只合并 specular 与 diffuse 两条循环**（形状相同、且正是 Lumen 需要共享的一对），AO 因存在旁路暂不动，`Compute`(DDGI) 与 `Custom`(IBL) 暂留；判据是**同一环境下背靠背的单源采样逐项一致**（§11.3.1 已修复，绝对量级现在也可复现） |
 | 文档与代码持续漂移 | 后续照文档实现出错 | 完成每个波次时同步回写本文 §2/§5 与状态表 |
