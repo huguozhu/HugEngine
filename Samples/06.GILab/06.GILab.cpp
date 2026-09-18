@@ -606,13 +606,10 @@ int main() {
             // 阴影通道独立于层栈（可见性乘法项，非能量源）→ 用枚举恢复
             gc.shadow = (render::ShadowChannel)GetInt(cfgData, "gi_shadow", (int)gc.shadow);
 
-            // ── 关键：层栈恢复后同步子系统开关（层栈与子系统必须同源）──
-            // 此前这里由各子系统独立的 cfg 开关控制，会出现「层栈要求参与、
-            // 子系统却处于关闭」的不一致（诊断中表现为 Provider IsValid=false）。
-            deferredPipeline.GetSSAO().enabled = gc.ShouldRunAO();
-            if (auto* ssgi = deferredPipeline.GetSSGI()) ssgi->SetEnabled(gc.ShouldRunSSGI());
-            if (auto* ddgi = deferredPipeline.GetDDGI()) ddgi->SetEnabled(gc.ShouldRunDDGI());
-            if (auto* ssr  = deferredPipeline.GetSSR())  ssr->SetEnabled(gc.ShouldRunSSR());
+            // 层栈恢复后**不需要**在这里同步子系统开关：框架的 IGIProvider::SyncToStack
+            // 每帧按层栈对齐子系统的 enabled（不变量 1：层栈与子系统开关同源）。
+            // 这里曾有一份手工补丁，正是「复发过一次」的那一处 —— 把不变量的维护交给调用方，
+            // 就必然会有下一个忘记同步的调用方（§9.2-G）。
         }
         {
             auto& ssao = deferredPipeline.GetSSAO();

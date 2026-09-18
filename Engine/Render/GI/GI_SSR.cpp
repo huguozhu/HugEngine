@@ -99,6 +99,14 @@ void GI_SSR::OnResize(u32 w, u32 h) {
     CreateOutputTex(halfResW(w), halfResH(h));
 }
 
+void GI_SSR::SyncOutputSize() {
+    if (!m_Device || !m_Ready) return;
+    const u32 w = halfResW(m_Width), h = halfResH(m_Height);
+    if (!m_Output || m_Output->GetWidth() != w || m_Output->GetHeight() != h) {
+        CreateOutputTex(w, h);
+    }
+}
+
 void GI_SSR::CreateOutputTex(u32 w, u32 h) {
     rhi::TextureDesc td;
     td.format = rhi::Format::RGBA16_FLOAT;

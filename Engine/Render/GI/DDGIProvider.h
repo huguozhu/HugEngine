@@ -30,6 +30,13 @@ public:
     [[nodiscard]] bool Handles(GISourceId id) const override { return id == GISourceId::DDGI; }
     [[nodiscard]] bool IsValid() const override { return m_DDGI && m_DDGI->IsEnabled(); }
 
+    /// 同步到层栈：层栈是唯一真值（不变量 1）。
+    /// DDGI 的开关此前只在管线 Initialize 时按层栈算一次，之后层栈再变（面板/配置/预设）
+    /// 就与子系统脱节 —— 层栈里有 DDGI 而开关仍是关的，pass 不注册却照常参与归一化（§9.2-G）。
+    void SyncToStack(const GIChannelStack& stack) override {
+        if (m_DDGI) m_DDGI->SetEnabled(stack.Has(GISourceId::DDGI));
+    }
+
     /// 探针更新是计算着色器 pass
     [[nodiscard]] GIPassKind GetPassKind() const override { return GIPassKind::Compute; }
     /// 无通道纹理：产物是探针缓冲，由 shader 的 SampleDDGI() 直接读取

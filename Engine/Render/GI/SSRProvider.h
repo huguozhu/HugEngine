@@ -11,6 +11,7 @@
 #include "GI/IGIProvider.h"
 #include "GI/GI_SSR.h"
 #include "PostProcess/Denoiser.h"
+#include "Core/Log.h"
 
 namespace he::render {
 
@@ -23,6 +24,15 @@ public:
     [[nodiscard]] GISourceId GetSourceId() const override { return GISourceId::SSR; }
     [[nodiscard]] bool Handles(GISourceId id) const override { return id == GISourceId::SSR; }
     [[nodiscard]] bool IsValid() const override { return m_SSR && m_SSR->IsEnabled(); }
+
+    /// 同步到层栈：层栈是唯一真值（不变量 1）。必须在构图之前对齐 enabled，
+    /// 否则「镜面层栈要求 SSR、SSR 子系统却关闭」会静默失效（IsValid 为假、pass 不注册）。
+    /// 同时让 halfRes 当场生效（尺寸等下次 OnResize 才变会让本帧句柄指向旧纹理）。
+    void SyncToStack(const GIChannelStack& stack) override {
+        if (!m_SSR) return;
+        m_SSR->SetEnabled(stack.Has(GISourceId::SSR));
+        m_SSR->SyncOutputSize();
+    }
 
     [[nodiscard]] rhi::IRHITexture* GetSpecularOutput() const override {
         return m_SSR ? m_SSR->GetIndirectSpecularTexture() : nullptr;

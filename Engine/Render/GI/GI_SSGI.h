@@ -36,6 +36,10 @@ public:
 
     // SSGI 特有
     void SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal, rhi::IRHITexture* albedo);
+    /// 让输出纹理尺寸与当前设置一致（`halfRes` 是运行时开关）。
+    /// 必须在帧图**构图之前**调用（Provider::SyncToStack 正是这个时机）：否则本帧导入渲染图
+    /// 的句柄会指向旧尺寸纹理，而设置要等到下次 OnResize 才生效（§9.2-G 的第三重真值）。
+    void SyncOutputSize();
     /// 注入真实相机（每帧由帧图给出）。屏幕空间重建必须用**渲染深度图时的那套**投影参数：
     /// 此前用硬编码的 kDefaultFOV/0.1/2000 自行拼投影矩阵，非默认相机（PhysicalCamera 会由
     /// 焦距反算 fov）下 viewPos 重建错位（§9.2-E）。同时视图矩阵用于把 GBuffer 的世界空间

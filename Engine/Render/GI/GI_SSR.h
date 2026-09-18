@@ -32,6 +32,10 @@ public:
     rhi::IRHITexture* GetIndirectSpecularTexture() const override { return m_Output.get(); }
 
     void SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal, rhi::IRHITexture* albedo);
+    /// 让输出纹理尺寸与当前设置一致（`halfRes` 是运行时开关）。
+    /// 必须在帧图**构图之前**调用（Provider::SyncToStack 正是这个时机）：否则本帧导入渲染图
+    /// 的句柄会指向旧尺寸纹理，而设置要等到下次 OnResize 才生效（§9.2-G 的第三重真值）。
+    void SyncOutputSize();
     /// 设置 Hi-Z 深度金字塔（层次追踪加速：大步长跳过低空区域，替代线性 march）
     void SetHiZ(rhi::IRHITexture* hiZ, rhi::IRHISampler* sampler);
     rhi::IRHISampler* GetOutputSampler() const { return m_Sampler.get(); }

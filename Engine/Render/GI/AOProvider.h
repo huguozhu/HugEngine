@@ -36,9 +36,13 @@ public:
     [[nodiscard]] bool NeedsPass(const GIChannelStack& stack) const override {
         return (stack.Has(GISourceId::SSAO) || stack.Has(GISourceId::GTAO)) && IsValid();
     }
-    /// 同步 pass 模式：层栈要求 GTAO 则切到 GTAO 着色器
+    /// 同步到层栈：层栈是唯一真值。
+    /// 除了切 GTAO/SSAO 模式，还必须把子系统 enabled 也对齐 —— 层栈说参与，子系统就得
+    /// 真的启用。此前只切模式、开关留给调用方设置，于是「层栈要求参与、子系统却关闭」会
+    /// 静默失效（Provider::IsValid 为假、pass 不注册，见 §9.2-G）。
     void SyncToStack(const GIChannelStack& stack) override {
         if (!m_Pass) return;
+        m_Pass->enabled = stack.Has(GISourceId::SSAO) || stack.Has(GISourceId::GTAO);
         m_Pass->useGTAO = stack.Has(GISourceId::GTAO);
     }
 

@@ -35,6 +35,15 @@ public:
     [[nodiscard]] bool Handles(GISourceId id) const override { return id == GISourceId::SSGI; }
     [[nodiscard]] bool IsValid() const override { return m_SSGI && m_SSGI->IsEnabled(); }
 
+    /// 同步到层栈：层栈是唯一真值（不变量 1）。
+    /// 调用点由帧图在**构图之前**调用，因此这里也是让 halfRes 当场生效的正确时机 ——
+    /// 输出纹理尺寸若等到下次 OnResize 才变，本帧导入渲染图的句柄就会指向旧尺寸纹理。
+    void SyncToStack(const GIChannelStack& stack) override {
+        if (!m_SSGI) return;
+        m_SSGI->SetEnabled(stack.Has(GISourceId::SSGI));
+        m_SSGI->SyncOutputSize();
+    }
+
     [[nodiscard]] rhi::IRHITexture* GetDiffuseOutput() const override {
         return m_SSGI ? m_SSGI->GetIndirectDiffuseTexture() : nullptr;
     }
