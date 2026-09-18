@@ -983,6 +983,8 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
             rhi::DescriptorType::StorageBuffer, m_ObjectBuffers[slot].get());
     }
     PrepareGI(cmd, world, sg);
+    // GPU 视锥剔除：必须在 render pass 之外（BeginHDRPass 会 Begin 本帧的 HDR pass）
+    RunGPUCulling(cmd, world, sg, camera);
     BeginHDRPass(cmd, m_HDRWidth, m_HDRHeight);
     BeginFrame(cmd, m_HDRWidth, m_HDRHeight);
     RenderScene(cmd, world, sg, camera);
@@ -1003,6 +1005,38 @@ void ForwardPipeline::OnResize(u32 width, u32 height) {
     ResizeHDRTarget(width, height);
     if (m_ToneMap) m_ToneMap->OnResize(width, height);
     if (m_Skybox)  m_Skybox->OnResize(width, height);
+}
+
+// ============================================================
+// GPU 视锥剔除（Compute）— 读回上帧结果 → 调度下帧
+// 必须在 render pass **之外**调用（见头文件说明）。
+// ============================================================
+void ForwardPipeline::RunGPUCulling(
+    rhi::IRHICommandList* cmd,
+    he::World& world,
+    he::SceneGraph& sceneGraph,
+    const CameraData& camera)
+{
+    if (!m_GPUCulling.enabled) return;
+
+    // 1) 读回上一帧 GPU culling 结果（该帧已 submit 执行完毕）
+    m_GPUCulling.Readback(m_Device, m_GPUVisibleIndices);
+
+    // 2) 收集场景对象 → GPUScene SSBO
+    m_GPUScene.Collect(world, sceneGraph, camera);
+    // FillGPUScene 必须在 Collect 之后、Upload 之前（与 Deferred 一致）
+    if (!m_BatchBuilt) { m_MeshBatcher.Build(world); m_BatchBuilt = true; }
+    m_MeshBatcher.FillGPUScene(m_GPUScene);
+    m_GPUScene.Upload(m_Device);
+
+    // 3) 绑定 GPUScene SSBO / HDR 深度 → Dispatch Compute
+    m_GPUCulling.SetSceneBuffer(m_Device, m_GPUScene.GetObjectBuffer());
+    if (m_HDRDepth) m_GPUCulling.SetDepthTexture(m_Device, m_HDRDepth.get(),
+                                                 m_HDRWidth, m_HDRHeight);
+    m_GPUCulling.Dispatch(cmd, camera.GetViewProjMatrix(), m_GPUScene.GetObjectCount(),
+                          m_HDRWidth, m_HDRHeight);
+    // Dispatch 会改绑 compute 管线：恢复后续绘制要用的 PBR 管线
+    cmd->SetPipeline(m_PBR_PSO.get());
 }
 
 void ForwardPipeline::RenderScene(
@@ -1049,31 +1083,18 @@ void ForwardPipeline::RenderScene(
     framePC.useBindlessMaterial = m_UseBindlessMaterial ? 1u : 0u;
 
     // ============================================================
-    // GPU 视锥剔除（Compute Shader）— 读回上帧结果 → 调度下帧
+    // GPU 视锥剔除由 RunGPUCulling 完成 —— 见下方方法与本文件的 RGBuildFrameGraph
     // ============================================================
-    // 1) 读回上一帧 GPU culling 结果（已 submit 执行完毕）
-    if (m_GPUCulling.enabled) {
-        m_GPUCulling.Readback(m_Device, m_GPUVisibleIndices);
-    }
+    // 【§0.6.2 校验修复】此前这段（读回 + 收集场景 + Dispatch）就在本函数里，而本函数由
+    // Scene pass 在 render pass 已经 Begin 之后调用 ⇒ 每帧一条
+    // VUID-vkCmdDispatch-None-10672（dispatch 出现在 render pass 内部，实测 10 条），
+    // 且 dispatch 采样 hdrDepth 时它正作为该 pass 的深度附件（非法反馈）。
+    // 现拆成独立的 RunGPUCulling：RG 路径由 "GPU_Cull" compute pass 调用，非 RG 路径在
+    // BeginHDRPass 之前调用，两条路径都不再落在 render pass 里。
 
-    // 2) SceneRenderer 准备所有 draw items
+    // SceneRenderer 准备所有 draw items
     auto allDrawItems = m_SceneRenderer->Prepare(world, sceneGraph, camera,
                                                   m_ObjectBuffers[m_CurrentFrameSlot].get());
-
-    // 3) GPU 剔除：绑定 GPUScene SSBO → Dispatch Compute → 恢复 Graphics PSO
-    if (m_GPUCulling.enabled) {
-        m_GPUScene.Collect(world, sceneGraph, camera);
-        // FillGPUScene 必须在 Collect 之后、Upload 之前（与 Deferred 一致）
-        if (!m_BatchBuilt) { m_MeshBatcher.Build(world); m_BatchBuilt = true; }
-        m_MeshBatcher.FillGPUScene(m_GPUScene);
-        m_GPUScene.Upload(m_Device);
-        m_GPUCulling.SetSceneBuffer(m_Device, m_GPUScene.GetObjectBuffer());
-        if (m_HDRDepth) m_GPUCulling.SetDepthTexture(m_Device, m_HDRDepth.get(),
-                                                       m_HDRWidth, m_HDRHeight);
-        m_GPUCulling.Dispatch(cmd, viewProj, m_GPUScene.GetObjectCount(),
-                              m_HDRWidth, m_HDRHeight);
-        cmd->SetPipeline(m_PBR_PSO.get());
-    }
 
     // GPU 剔除后过滤：构建可见 draw 列表
     std::vector<DrawItem> filteredItems;

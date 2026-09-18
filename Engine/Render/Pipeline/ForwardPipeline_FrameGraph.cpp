@@ -227,6 +227,22 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             RGPassQueue::Compute);
     }
 
+    // --- Pass 2.6: GPU 视锥剔除（Compute Pass）---
+    // 【§0.6.2 校验修复】此前这段工作在 RenderScene 里、Scene pass 的 render pass 已经
+    // Begin 之后执行：vkCmdDispatch 不允许出现在 render pass 内部
+    // （VUID-vkCmdDispatch-None-10672，实测每帧 1 条 × 10 帧），而且它采样的 hdrDepth
+    // 此时正是同一个 pass 的深度附件（非法反馈）。作为独立 compute pass 注册在 Scene
+    // 之前：既在 render pass 之外，采样到的也仍是上一帧的深度（与 Deferred 的 GPU_Cull 同一做法）。
+    if (m_GPUCulling.enabled) {
+        rg.AddPass("GPU_Cull",
+            {{hdrDepth, ResourceAccess::Read}},
+            {},
+            [this, &world, &sg, &camera](rhi::IRHICommandList* c) {
+                RunGPUCulling(c, world, sg, camera);
+            },
+            RGPassQueue::Compute);
+    }
+
     // --- Pass 3: Scene — HDR 几何 + 天空盒渲染 ---
     rg.AddPass("Scene",
         {{hdrDepth, ResourceAccess::Read}},  // 读深度确保在 Shadow 之后
