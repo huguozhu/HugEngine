@@ -851,6 +851,13 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 | **D / §9.2-Z** | **给 GI 源装真实耗时读数**（任务 29）：每源每帧一对 GPU 时间戳 → 环形查询池 → **不阻塞**读回 → 滚动平均写回源的 `GIDebugData`；`HE_GI_TIMING=1` 输出脚本可读日志。**实测**：SSGI 16→64 采样 **0.436 → 1.271 ms**（×2.92，随工作量线性）、不在层栈的源恰好为 0、重复运行离散度 **0.0%**。**第一次拿到成本结构**：IBL 首次烘焙 ~5 ms、SSGI(16) 0.44 ms、DDGI 更新 **0.019 ms**（后者解释了任务 12 为何量不出收益） | ✅ 完成 |
 | **D / §9.2-J** | **跨帧重绑**（任务 15）：不止合成参数 UBO —— Lighting 的逐帧轮换资源（光源/阴影/探针 SSBO、UBO）此前全绑在**同一份**描述符集上，逐帧重绑跨帧串味。改为**每飞行帧一份描述符集 + 一份 UBO**，`LightingInputs::frameSlot` 指明本帧用哪份。**判据**：读数逐位不变、校验 56/56/56/56 不变、白炉 1.0000、单测全过。**顺带证伪**：它不是 §9.2-Y 基线分成两组的成因（改前/改后各跑 4 次，两组都照样出现） | ✅ 完成 |
 | **D / CULL** | **pass 级空间剔除：实测判定不做**（任务 13）：先补齐计时覆盖（RT 源与 `AS_Build`），量出**全部 GI 项合计约 0.7 ms/帧**（SSGI 0.44 占六成，其余每项 0.02~0.09 ms）；可剔除的只有"无几何 tile"，由 albedo 判据得空像素 7.2%，且屏幕空间着色器本来就对天空像素深度早退 ⇒ **收益上限约 0.03 ms（GI 预算的 4%）**，代价是上一帧掩码造成的边界缺失条带。**不做**，并写明改判条件；新增 `Tools/gi/cost_report.ps1` | ✅ 完成 |
+| **E / §9.2-AA** | **RSM 链路的量级与通道约定**（任务 30）：逐级落盘证明三张 RSM 附件此前只有清除值（`BeginOffscreenPassMRT` 的清除值长度契约被越界读破坏）、VPL 的 albedo 读错索引空间（3.18% 覆盖）；四项一起修 —— 受光项按**解析面积**归一（旧经验常数隐含"半径 60 场景"，比值 3942）、RSM 改**三个附件一个量**、辐射度带 albedo 与光源颜色、光源视锥按**场景包围盒**拟合。**判据**：三中间层 0% → **53%** 覆盖、`S_rsm` 0 → **4.28e-5**（与 `E/π×albedo` 相关 0.966）、`rsm_indirect_check` 全过 | ✅ 完成 |
+| **E / §9.2-W 解析对照** | **SSR 的平面镜解析对照**（任务 32）：地面镜 + 两个已知立方体，把物体中心按镜面镜像后经同一相机投影得到"反射该出现的像素"。查出并修掉四处方向/尺度错（view/world 法线混用、y 约定两处漏翻、起点偏移小于容差导致自交、假的"仍在几何之前"命中），并按场景尺度重取 march 参数。**判据**：反射落点 **0.44 / 0.35 px**、远像素 **0.00%**、相机平移 40 后位移差 **2.39 px**、米制参数负对照 **2432 vs 30676**（`Tools/gi/ssr_mirror_check.ps1`） | ✅ 完成 |
+| **E / §9.2-AC** | **光追命中点的量纲**（任务 33）：共用的 `EvaluateHitRadiance` 缺命中面 albedo、整体缺 1/π；改为返回 `albedo/π·(E_ambient + E_direct)` 并加**白炉分支**（命中与未命中都返回理想值 ⇒ 读数与几何无关）。**判据**：白炉 `diffuse={RTGI}` 中心 **1.0000**（负对照 0.0000）、SSGI 仍 1.0000、RTGI/RT 反射原始输出比 0.209 / 0.541，DDGI 绝对读数方向正确地下移 | ✅ 完成 |
+| **E / §9.2-AD + §9.2-AF** | **Forward 的 RSM 真有生产者**（任务 34）：四层根因 —— 示例不驱动阴影系统（Forward 此前连阴影都没有）、RSM 用相机视锥的 CSM VP 且帧图无序、RG 路径从不绑定 RSM 纹理、以及共享结构体布局漂移（`float[3]` 在 std140 里占 48 字节 ⇒ `rsmValid` 恒读 0）。**判据**：`forward_stack_check` **10 条全过** —— `S_rsm` 恰好 0 → **8.875e-05**、三张 RSM 图覆盖 53.36%/53.36%/53.31%、换相机后逐字节相同；`GIBlendParams` 的 `sizeof` 与三个 `offsetof` 已被静态断言钉死 | ✅ 完成 |
+| **E / §9.2-AE** | **SSR 的 Hi-Z 路径漏反射**（任务 35）：Hi-Z 把屏幕段参数当成射线参数用（实测在目标像素处偏差 **1251 / 1481** 世界单位 = 容差的 100 倍以上），改用透视校正的 `w(t)`/`tau(t)` 精确换算；并按实测把默认步数预算提到 256。**判据**：`ssr_mirror_check` **13 条全过**（两条路径都落在预测像素 0.44/0.35 px、远像素 0.00%、步数 256 ≤ 600 的 60%）。**同时更正**任务 25 的"Hi-Z 快 3.2 倍"（实测 4.256 对 4.505 ms） | ✅ 完成 |
+| **E / §9.2-AG** | **MRT 帧缓冲写死 7 个颜色附件**（RHI，第 8 个 GBuffer MRT 接入时暴露）：附件数组与循环都写死 7，而 render pass 按 PSO 的 `colorAttachmentCount` 建（上限 8）⇒ `vkCreateFramebuffer` 与 render pass 附件数不一致，驱动在 `vkCmdBeginRenderPass` 崩溃。改为按"颜色上限 + 1（深度）"开数组、循环用 `kMaxColorAttachments` | ✅ 完成 |
+| **A / D1** | **偶发崩溃根因获证 + 崩溃处理器**（任务 2）：`CrashHandler` 移到 `Engine/Core`（VEH + 分阶段报告 + minidump + 看门狗 + 线程表 + 栈扫描兜底），并修掉那条**可复现**的退出期崩溃（`JoltRuntimeGuard`：Jolt 的 `Free` 在静态析构时为空）。**判据**：自检 2 s 退出 / 14.3 MB dump / 4.7 KB 报告含 `06.GILab!main + 0x276B [06.GILab.cpp:853]`；过滤单跑 175/175 退出码 0；soak 76 次启动零崩溃 | ✅ 完成 |
 
 ### 8.2 三个关键指标（实测）
 
@@ -911,10 +918,10 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 | ~~**E**~~ | ✅ **已修复** | **屏幕空间源用硬编码默认投影矩阵**而非真实相机：`kDefaultFOV=60°/0.1/2000`；`PhysicalCamera` 会由焦距反算 fov → 非默认相机下 SSGI/SSAO/SSR 重建错位。根因是 `IGIProvider` 未把相机传给屏幕空间源（只有 DDGI 有 `SetCamera`）。**三个实例全部修完**：SSGI（见 M/N/O）、SSR 与 SSAO（本次）。修法与 SSGI 同源：Provider 把 `ctx.camera` 交给 pass，pass 用 `CameraData::GetProjMatrix()`，无相机时退化为默认投影。**实测指纹**（单源层栈、Frame=120、对 AO 输出纹理逐像素对照）：`cam_fov=60`（默认）时改前改后只在**运行间抖动**范围内（最大差 0.069，同配置重复运行对照 0.078）⇒ 标准路径不变；`cam_fov=100` 时最大差 **0.387**、均值差 **−0.79%** ⇒ 硬编码常量与真实相机不一致时确实错位 | `GI/GI_SSR.{h,cpp}`、`GI/SSRProvider.h`、`PostProcess/SSAO.{h,cpp}`、`GI/AOProvider.h`；采样设施补 `cam_fov` 配置项与镜面/AO 落盘 |
 | ~~**F**~~ | ✅ **已修复** | **RSM 的 pass 被嵌套在 DDGI 门控内**：单独勾选 RSM 而关闭 DDGI 时，RSM 永不注册（Forward 侧却是独立的 `ShouldRunRSM()`）。RSM 实际有**两个独立消费方**——Lighting 的漫反射间接光（`ShouldRunRSM()`）与 DDGI 探针的世界辐射度来源——门控应取并集。**实测指纹**：`diffuse={RSM}` 且 DDGI 关时 pass 列表里**没有 `RSM`**，改后出现；同时新增 `GI_DDGI::ClearRSM`，让"没注册"也成为一个**逐帧明确结论**（`useRSM` 是由两个纹理成员推导的闩锁，此前"不注册就什么都不做"会把上一帧的绑定留在原地，是 §9.2-R 的残留面） | `DeferredPipeline_FrameGraph.cpp`；`GI/GI_DDGI.{h,cpp}`；`06.GILab.cpp`（新增 `gi_blend_diffuse_rsm` 配置键，此前 RSM 只能靠面板勾选）；回归检查 `Tools/gi/rsm_gate_check.ps1` |
 | ~~**G**~~ | ✅ **已修复** | **层栈与子系统开关是两套真值**（不变量 1 的实际状态）：子系统 `enabled` 只在管线 `Initialize` 时按当时的层栈算**一次**，之后层栈再变（配置加载 / 预设 / 面板）就与子系统脱节 ⇒ `IsValid()` 为假、pass 不注册，而层栈仍以正权重把它计入归一化：**勾选却静默失效**。`halfRes` 是第三重（要等下次 `OnResize` 才重建纹理）。**实测指纹**：`specular={SSR}`（其余层栈为空）时，pass 列表里**完全没有 SSR**；把「层栈 → 开关」的对齐交给框架后，`SSR` 与 `SSR_Denoise` 都出现。**「复发过」的实体已找到**：`06.GILab.cpp` 里有一份手工补丁逐个子系统同步开关 —— 把不变量的维护放到调用方，必然有下一个忘记同步的调用方。修法：在 `IGIProvider::SyncToStack`（帧图构图前每帧调用）里对齐 `enabled` 与输出尺寸，并删除那份手工补丁 | `GI/AOProvider.h`、`SSGIProvider.h`、`SSRProvider.h`、`DDGIProvider.h`；`GI_SSGI.{h,cpp}`、`GI_SSR.{h,cpp}`；`06.GILab.cpp`；回归检查 `Tools/gi/stack_switch_check.ps1` |
-| **H** | 中 → ✅ **已按「把声明改对」解决** | **Provider 抽象只在 Deferred 落地**：`ForwardPipeline` 无 `m_GIProviders`，Forward 的 PBR shader **没有 `GIBlendParams` UBO** → 层栈归一化在 Forward 完全不存在。**但 `PipelineCaps::Forward` 却声明支持 IBL + RSM** ⇒ 面板与 `Degrade` 会把这些源放进一个**没有任何代码消费**的层栈里：配置说谎。**修法取「把声明改成实际支持的范围」**：`PipelineCaps::Forward` 现在**只有光栅阴影**（GI 源位为空），新增 `PipelineCaps::AllSources` 汇总全部 GI 源位供 Deferred 与 UI 使用。判据是单元测试（`IsAvailable(IBL/RSM, Forward)` 必须为假、`Degrade` 后 Forward 的三个 GI 通道必须为空且兜底不得发生）；GILab 面板在本管线无层栈 GI 源时显示说明并**置灰**层栈控件（内容仍可查看，但不可编辑）。「让 Forward 真正走层栈归一化」拆为独立任务 26 | `GITypes.h`（`PipelineCaps`）；`ForwardPipeline.cpp`（注释）；`06.GILab.cpp`（面板置灰 + 候选源按能力位过滤）；`Tests/TestGITypes.cpp` |
+| **H** | 中 → ✅ **已按「把声明改对」解决** | **Provider 抽象只在 Deferred 落地**：`ForwardPipeline` 无 `m_GIProviders`，Forward 的 PBR shader **没有 `GIBlendParams` UBO** → 层栈归一化在 Forward 完全不存在。**但 `PipelineCaps::Forward` 却声明支持 IBL + RSM** ⇒ 面板与 `Degrade` 会把这些源放进一个**没有任何代码消费**的层栈里：配置说谎。**修法取「把声明改成实际支持的范围」**：`PipelineCaps::Forward` 现在**只有光栅阴影**（GI 源位为空），新增 `PipelineCaps::AllSources` 汇总全部 GI 源位供 Deferred 与 UI 使用。判据是单元测试（`IsAvailable(IBL/RSM, Forward)` 必须为假、`Degrade` 后 Forward 的三个 GI 通道必须为空且兜底不得发生）；GILab 面板在本管线无层栈 GI 源时显示说明并**置灰**层栈控件（内容仍可查看，但不可编辑）。「让 Forward 真正走层栈归一化」拆为独立任务 26 —— **任务 26 已完成**（`GIBlendParams` UBO + 逐通道归一化，见 §10.1） | `GITypes.h`（`PipelineCaps`）；`ForwardPipeline.cpp`（注释）；`06.GILab.cpp`（面板置灰 + 候选源按能力位过滤）；`Tests/TestGITypes.cpp` |
 | ~~**I**~~ | ✅ **已修复** | **RTGI 用 DDGI 做 miss 回退**，破坏「源独立」前提：Ultra 档同时含 RTGI+DDGI 时，DDGI 信息被用两次再归一化 → 加权平均失去无偏性。**实测指纹**：同一帧、同一相机，只改漫反射层栈 —— `diffuse={RTGI}` 时 RTGI 原始输出均值 **0.0575**，`diffuse={DDGI,RTGI}` 时 **0.2034**（3.5 倍）⇒ 同一份 RTGI 的读数完全由「DDGI 在不在层栈里」决定。修法：把「DDGI 是否是层栈源」作为每帧状态交给 rgen（`flags` bit1），是则 miss 贡献 0、否则保留回退（降级路径）。修后两者均值 **0.0575 对 0.0575（差 0.000%）** | `RT_GI.rgen.slang`；`RTEffectPass.h`；`RTGIPass.cpp`；`RTProvider.h`；`DeferredPipeline_FrameGraph.cpp`；回归检查 `Tools/gi/rtgi_coupling_check.ps1` |
 | ~~**V**~~ | ✅ **已修复** | **时域降噪在 `BeginOffscreenPass` 之前没有绑管线** ⇒ 建出附件数与 RenderPass 不符的 Framebuffer（`VUID-VkFramebufferCreateInfo-attachmentCount-00876`：1 个附件对 2 个附件），**设备直接挂住、进程再也不推进**。表现为「只要 diffuse 层栈含 RTGI 就稳定挂死在第 1 帧」，因此**任何 RT 相关的测量都做不了**（任务 3/17/20 都被它挡住）。根因：帧图的附属 pass 先 `BeginOffscreenPass`（用它取 RenderPass 建 Framebuffer）再 `RenderAux`，而 `RTDenoiser` 自己不绑管线、由 `Render` 内部另起一个 pass。修法：`RTDenoiser` 增加 `PreBind`（绑 PSO/视口/裁剪/描述符集），`Render` 不再自起 pass，`RTEffectProvider::PreBindAux` 的时域分支改为调用它 | `PostProcess/RTDenoiser.{h,cpp}`；`GI/RTProvider.h` |
-| **J** | 低 | 合成参数 UBO 是**单份**、非 per-frame-in-flight（`MAX_FRAMES_IN_FLIGHT=3`） | `LightingPass.cpp:155-168` |
+| ~~**J**~~ | 低 → ✅ **已修复**（任务 15） | 合成参数 UBO 是**单份**、非 per-frame-in-flight（`MAX_FRAMES_IN_FLIGHT=3`）。**修法比这一行记的更宽**：Lighting 的一批逐帧轮换资源（光源/阴影/探针 SSBO、合成参数 UBO）此前全绑在**同一份**描述符集上 ⇒ 改为**每飞行帧一份描述符集 + 一份 UBO**，`LightingInputs::frameSlot` 指明本帧用哪份。判据：读数逐位不变、校验条数不变、白炉与单测全过（见 §10.1 的任务 15 行） | `LightingPass.{h,cpp}`、`DeferredPipeline_FrameGraph.cpp` |
 | ~~**K**~~ | ✅ **已修复**（任务 14） | **DDGI 网格外查询退化为「贴边常数外推」**，无 falloff 或无效标记；探针网格为固定参数，覆盖不到的区域静默缺失低频 GI。**修法两半一起做**：(1) 新增「探针网格覆盖」置信度位（`kGIConfProbeGrid`，网格 AABB 外一格起线性淡出、再外面归零，权重让给同通道其他源）；(2) 探针网格按场景包围盒自动拟合（每 30 帧重算；拟合规则抽为纯几何 `GI/GIProbeGrid.h` 并被单元测试覆盖）。**实测**：固定网格 8×4×8 格距 3 只覆盖 21×9×21 世界单位，而场景包围盒是 3720.9×1555.9×2288.2 ⇒ 打开覆盖语义后 DDGI 贡献 **0.019595 → 噪声量级**（两次运行 2.9e-08 / −3.9e-07），即此前那个贡献**整个**来自 clamp（`SampleDDGI` 对超界查询把 8 个采样坐标全钳到同一个边界探针）；拟合后网格 16×8×11 格距 248 真罩住场景，贡献回到 **0.019596**，与改前逐位一致。回归检查 `Tools/gi/ddgi_grid_check.ps1`（4 配置 5 判定全过） | `GI/GITypes.h`（`kGIConfProbeGrid`）；`GI/GIProbeGrid.h`（新）；`GI/GI_DDGI.{h,cpp}`；`ShaderTypes.slang` + `Lighting/DeferredLighting.frag.slang`（`ProbeGridConfidence`）；`Pipeline/DeferredPipeline{,_FrameGraph}`；`Samples/06.GILab`；`Tests/TestGIProbeGrid.cpp`（新） |
 | ~~**L**~~ | ✅ **已修复** | **SSGI 完全不生效**：`SSGIProvider` 把接口覆写写成了 `SetGBuffer`，而基类 `IGIProvider::SetInputs` 带**空实现的默认体** → 改名既不报错也不警告，静默落到空实现 → `m_Depth/m_Normal/m_Albedo` 恒为 `nullptr` → `GI_SSGI::Render` 在守卫处提前返回，SSGI 输出纹理只剩清屏值 `(0,0,0,1)`。表现为「SSGI 已启用、`IsValid()` 为真、面板一切正常，但对画面的贡献恒为 0」 | 见下方「L 的修复与实测」 |
 | ~~**M**~~ | ✅ **已修复** | **SSGI 的 TBN 变换方向反了**（L 修好后暴露的主因）：`mul(TBN, 样本)` 算的是 `(T·v, B·v, N·v)`——把切线空间样本**投影到** TBN 轴上，而非变换到本空间。结果采样方向几乎与法线垂直，半球采样失效 | 见下方「M/N/O 的修复与实测」 |
@@ -926,7 +933,7 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 | ~~**R**~~ | **高** → ✅ **已修复** | **DDGI 的 `useRSM` 是只置位、永不清除的闩锁**：帧图把 RSM 的 position/flux 图交给 DDGI 是**无条件**的，而 RSM pass 的注册条件是「RSM 在漫反射层栈里」⇒ 在「DDGI 开 + 有活动阴影 + RSM 不在漫反射栈」时，DDGI 永久走**从未渲染**的 RSM 路径，全部探针样本无效，落入着色器硬编码兜底 —— **DDGI 表面正常却完全不做 GI** | 同上；判定指纹：贡献的 R:G:B 恰为 1:1.5:4（= 兜底常数 `(0.02,0.03,0.08)`） |
 | ~~**S**~~ | ✅ **已修复** | **RHI 允许纹理以未初始化状态被采样**：没有任何默认零初始化或有效性标记，于是一个「消费者门控写漏」就能被放大成**静默的物理错误 + 跨构建不可复现的读数**（Q/R 两项正是这样被放大的）。修复采取**检测 + 一次性告警**而非改写纹理内容（见下方「S 的修复与实测」） | `Engine/RHI/RHI/TextureLayoutTracker.{h,cpp}`；`VulkanDevice_Descriptors.cpp`；`VulkanCommandList.cpp`；`VulkanCommandList_RenderPass.cpp`；`VulkanResources.{h,cpp}` |
 | ~~**T**~~ | ✅ **已修复** | **「效果本次未产出」时描述符仍绑定真实纹理**：`LightingPass` 无条件把 RSM 位置/通量图、SSGI 输出、聚光灯阴影图等绑到 set=0，而这些 pass 的门控是「是否在层栈里 / 是否有该类光源」⇒ 这些描述符指向**从未被写入**的纹理。当前无害（着色器按权重与光源数自行守卫），但只要守卫被改动就会读到未初始化显存 —— 正是 S 所描述的危险形态。**由 S 的检测机制在 06.GILab 首次跑出**，固定 4 处。修复见「T 的修复与实测」 | `LightingPass.cpp`；`Shadow/IShadowSystem.h` + `ShadowSystem`；`DeferredPipeline_FrameGraph.cpp` |
-| **U** | 中 | **测量方法缺陷：崩溃/超时的运行会留下"上一次的转储"，分析脚本无法分辨**。`HE_DUMP_GI` 只有在跑到目标帧才落盘；运行崩溃或超时时，`gi_<tag>_*.f16` 只是**上一次**运行留下的旧文件，而后续分析会把它当成本次读数照样出数字。本次即因此把一个**不存在的"绝对读数依赖二进制布局"**当成缺陷追了很久：`rep1/rep2/bis_none/ibl_none` 四次"暗读数"全部取自崩溃运行（这四次都没有落盘），而唯一两次**真实**读数（改动前 0.0327534、改动后 0.0472109，都是 crash=0/dumped=1）之间的差异另有原因（任务 23 的占位纹理存活期修复）。**已修**：采样脚本改为"运行前删除该标签产物 + 运行后校验转储存在且晚于本次启动 + 失败则不分析并以非零码退出"，并实测了失败路径 | `Tools/gi/dump_gi.ps1`；同时见 §11.3.1 的方法论条目 |
+| ~~**U**~~ | 中 → ✅ **已修复**（任务 24） | **测量方法缺陷：崩溃/超时的运行会留下"上一次的转储"，分析脚本无法分辨**。`HE_DUMP_GI` 只有在跑到目标帧才落盘；运行崩溃或超时时，`gi_<tag>_*.f16` 只是**上一次**运行留下的旧文件，而后续分析会把它当成本次读数照样出数字。本次即因此把一个**不存在的"绝对读数依赖二进制布局"**当成缺陷追了很久：`rep1/rep2/bis_none/ibl_none` 四次"暗读数"全部取自崩溃运行（这四次都没有落盘），而唯一两次**真实**读数（改动前 0.0327534、改动后 0.0472109，都是 crash=0/dumped=1）之间的差异另有原因（任务 23 的占位纹理存活期修复）。**已修**：采样脚本改为"运行前删除该标签产物 + 运行后校验转储存在且晚于本次启动 + 失败则不分析并以非零码退出"，并实测了失败路径 | `Tools/gi/dump_gi.ps1`；同时见 §11.3.1 的方法论条目 |
 | ~~**W**~~ | **高** → ✅ **已修复**（任务 25） | **SSR 一个命中都没有**：新增的镜面通道落盘显示 SSR 输出**逐像素全为 0**，且有效性 alpha **100% 为 −1**（= 全部 miss），改前改后皆然。因此镜面层栈里"有 SSR"与"没有 SSR"在画面上完全等价 —— 与 §9.2-L（SSGI 恒为 0）同一种失效形态。**根因不止一处，三处独立叠加**：① Hi-Z 的深度判据方向反了（金字塔是 **min** 深度 = 每格最近的几何，而引擎是 **zero-to-one**；正确判据是"射线点深度**小于**该格最小深度 ⇒ 该格空 ⇒ 前进"，代码写的是大于）；② **层级步长方向也反了**（`stepT = 1/2^level` 在 level 0 一步跨完整条射线，第二轮就越界退出 —— 层级是**屏幕空间**的金字塔，步长必须折算成 `2^L / 屏幕段长(像素)`）；③ level 0 的命中阈值把 **NDC 深度差**与 `thickness*0.1`（世界单位）比，量纲不对。另外线性回退路径把"射线仍在几何之前"（`rayPos.z > rpZ`）记成命中 0.5：把它单独放回去会让有效像素从 10.22% 涨到 **73.91%**，也就是说历史文档里那个"线性 march 有 34.66% 有效命中"正是被这条假命中抬起来的。**【任务 32 的后续】任务 25 的"有效率 + 两条 march 同量级"只证明了内部一致，随后用平面镜解析真值又逮到三处它看不见的错**（世界/view 空间法线混用、y 约定两处漏翻让重建几何上下镜像、起点偏移小于命中容差导致自交），并发现**默认 Hi-Z 路径仍漏掉一个反射**（§9.2-AE / 任务 35） | 见下方「25 · §9.2-W 的修复与实测」与「32 · SSR 的解析对照（平面镜）」 |
 | **X** | 中 → ✅ **已修复**（任务 27） | **镜面层栈为空时画面出现 463 量级的异常亮点**：三通道全空 `mean 0.2022 / max 463.32`；只放 `specular={IBL}` `0.0694 / 42.20`；只放 `ao={SSAO}`（specular 仍空）⇒ 回到 `0.2022 / 463.32`。**根因不在镜面通道的合成里**（空栈时那里给 0），而是 **IBL 烘焙门控漏了第四个消费者**：`u_BRDF_LUT` 由 PBR 在**直接光路径**上无条件采样，而烘焙 pass 只在「漫反射栈要它 ∨ 镜面栈要它 ∨ DDGI 要它」时注册 ⇒ 镜面栈为空且 IBL 不在别处时 LUT 从未写入，直接光的 BRDF 读未初始化显存。**所以它不是一个亮点，而是整幅画面的直接光都算错了**（均值 0.2022 → 修后 0.0429，4.7 倍）。修法：IBL 烘焙**恒注册**、由 pass 内部 `IsDirty()` 早退 | 见下方「27 · §9.2-X 的修复与实测」 |
 | **Y** | 中 → ✅ **已修复**（任务 28） | **同一份「写进配置文件的键」在不同写法下落到了不同的兜底路径**：`dump_gi.ps1` 与标定脚本都要产出「漫反射层栈为空」的基线，两者写出的 `gi_blend_diffuse_w0..w3` 全为 0 的配置**逐字节等价**，但实测基线稳定地分成两组 —— 0.05720 与 0.07554（后者运行后配置文件被回写成 `gi_blend_diffuse_w0=1.000000`）。**根因（任务 28 查清）**：`GIRegistry::Degrade` 末尾有一段**静默兜底**——某个通道被裁空时补一个 IBL（AO 补 SSAO）。于是"空层栈"这个状态**取决于经过哪条路径**：配置加载路径直接重建层栈（空就是空），而任何经过 `Degrade` 的路径（预设按钮、阴影下拉）都会把它补成 `{IBL}`；示例退出时把**内存里那份**回写成文件 ⇒ 下一次运行读到被补过的配置。**修法**：`Degrade` 只裁不加（空通道是有定义的合法状态，见 §3.1），同一份输入在任何路径上同义；单测锁住"只裁不加 + 幂等"。**修后判据**：同一份配置连跑 5 次，读数离散 **0.0003%**、cfg 的层栈键逐键不变（`Tools/gi/repeatability_check.ps1`）。**另一条历史观察同时降级**：早期"同一二进制同一 cfg 分成 0.057733 / 0.05719x 两组（差 1%）"今天**未复现**，最可能是当时尚未装 §9.2-U 的陈旧转储护栏 | 见下方「28 · §9.2-Y 的修复与实测」；另见 §11.3 的采样注意事项（每次对照必须用私有 cfg 副本） |
@@ -1197,7 +1204,7 @@ Vulkan 校验 46 条与改前一致。
 > **31（Lightmap 真落地）已删除**（§10.2 留有取消记录）。表里保留的已完成项是历史记录，
 > 编号不重排 —— 后续新任务接着往下编号，**不要复活已迁出/已删除的编号**。
 
-**A 组 · 先让验收可信**（第 1 项已完成；第 2、24 项未完成前，其余验收仍缺判据）
+**A 组 · 先让验收可信**（第 1、2、24 项**均已完成** —— 验收设施已可信）
 
 | # | 任务 | 规模/风险 | 理由 / 依赖 |
 |:---:|---|---|---|
@@ -1573,9 +1580,9 @@ Vulkan 校验 46 条与改前一致。
 - **取默认项的落点**：`autoFitGrid = true`、`fitCellsMax = 16`（Sponza ⇒ 格距 248、
   1408 探针）、`updateStride` 仍为 1。新增配置键 `ddgi_grid_auto` / `ddgi_fit_cells`
   （`06.GILab.cpp`，读写对称）。
-- **相邻但未做**（记在这里免得下次重新发现）：`GI_RSM` 的 `sceneCenter = (0,3,0)` /
-  `sceneRadius = 60` 也是硬编码的，对 Sponza 这个 3720 单位宽的场景同样不合适；
-  现在帧图已经会算场景包围盒，RSM 侧将来可以直接消费它。
+- **相邻但未做 → 已由任务 30 修掉**（原记录留在这里作对照）：`GI_RSM` 的 `sceneCenter = (0,3,0)` /
+  `sceneRadius = 60` 也曾是硬编码的，对 Sponza 这个 3720 单位宽的场景不合适。**任务 30 已改成
+  按场景包围盒拟合**（`GI/RSMFrustum.h`，帧图每 30 帧重算包围盒并喂给 RSM），见 §9.2-AA ④。
 
 - **15（J · 跨帧重绑）** —— ✅ **已完成**。要点：问题比 §9.2-J 记的更宽 —— 不止合成参数 UBO，
   Lighting 的一批**逐帧轮换资源**（光源/阴影/探针 SSBO、合成参数 UBO）全都绑在**同一份**
@@ -2721,7 +2728,7 @@ cmake --build Build --config Release --target 06.GILab -j 8
 | 偶发崩溃根因未证 | 长跑 + 读回类验收被污染 | **已结项（任务 2）**：可复现的那条（单元测试退出期崩溃，Jolt 注册生命期）根因获证并修掉，回归检查 `crash_handler_check.ps1` 守住；历史偶发违例 76 次启动零复现，按测量结案。证据链现在是可信的（VEH + 分阶段报告 + minidump + 看门狗），任何新崩溃都能直接定位 |
 | 合成改造后「画面变了」 | 回归难判断 | 单源配置逐像素截图对比 + 白炉数值判据（已可量化） |
 | **C++/slang 双侧同步漏改** | 静默错值 | `static_assert(sizeof)` + 双侧常量同源；**结构体布局**另需 `offsetof` + `slangc -reflection-json` 复核 —— §9.2-AF：std140 下**非 float4 数组**的元素步长是 16，`float[3]` 在 Slang 里占 48 字节而 C++ 只占 12，数组之后的字段两端偏移错开、着色器静默读 0（共享结构体里的填充一律用 `float4`，`Pipeline/Material.h` 已把 `GIBlendParams` 的 `sizeof` 与三个 `offsetof` 钉死）。**往对象缓冲加字段也一样**：（已取消的）任务 31 曾给 `GPUObjectData` 加 `boundsMin/boundsMax`（176 → 208 字节），三个写对象缓冲的地方（`SceneRenderer`、`CSMTechnique`、`GI_RSM`）必须一起填，否则未初始化的字段会被其它消费者当数据读 |
-| **白炉测试只验归一化、不验量纲** | 源的量纲错误被掩盖 | §9.2-A；**对 SSGI 已解决**（任务 10：白炉下不再短路它，白炉条件恰是它的解析真值条件，读数必须为 1.0；改回旧形式则为 0.444）。其余源（IBL/DDGI/RSM/RT）在白炉下仍走短路——它们在白炉条件下的真值不是"估计式自然给出 1"，要逐个补的是**逐源真值校验**，仍待做 |
+| **白炉测试只验归一化、不验量纲** | 源的量纲错误被掩盖 | §9.2-A；**SSGI 已解决**（任务 10：白炉下不再短路它，白炉条件恰是它的解析真值条件，读数必须为 1.0；改回旧形式则为 0.444）；**RTGI 已解决**（任务 33：`RT_GI.rgen` 的 miss 在白炉下取 1、`DeferredLighting` 的白炉短路把它排除 ⇒ 读数恒 1.0000，负对照 0.0000）。**剩余未做**：IBL / DDGI / RSM 在白炉下仍走短路 —— 它们在白炉条件下的真值不是"估计式自然给出 1"，要逐个补的是**逐源真值校验**（记录在案，不是代码缺陷，也不是任务表里的项） |
 | 频率分离的 `LowPass` 选型不当 | 噪声/振铃/跳变 | 已随 P5 退场失效（§3.3 判定不需要） |
 | **消费者门控写漏 → 未初始化纹理被采样** | **静默的物理错误 + 读数跨构建不可复现**（本次 §9.2-Q/R 正是如此被放大的） | 已落地 RHI「已写入」登记 + 一次性告警（§9.2-S）：任何被采样却从未写入的纹理都会报出 set/binding/尺寸/格式；告警基线已由任务 23 清零（§9.2-T）。且 GI 源**吃进去**的中间量也要纳入纹理级对照（§11.3.1） |
 | **帧图 pass lambda 读失效栈帧**（§9.2-U 的一个已修实例） | **把已销毁的纹理指针交给描述符更新**：实测每次运行约 186 条「是野指针」 | 已随任务 23 修掉（Lighting lambda 改按值捕获）；帧图其余 pass lambda 逐个审过，捕获列表干净 |
@@ -2731,8 +2738,8 @@ cmake --build Build --config Release --target 06.GILab -j 8
 | ~~P5 抽象/改造过度~~ | ~~大范围回归~~ | **已随 P5 退场失效**（§3.3 判定"不需要频率分离"，整波不再实施）。当年为它准备的对策（分步提交、保留 Additive 对照、同环境背靠背单源采样）已沉淀成通用做法，见 §11.3.1 |
 | **帧图从「按通道」改为「按 Provider」执行**（原任务 19，**已迁至 Lumen 文档 §5.2**） | 核心路径回归 | 逐类迁移 + 每步判据：**先只合并 specular 与 diffuse 两条循环**（形状相同、且正是 Lumen 需要共享的一对），AO 因存在旁路暂不动，`Compute`(DDGI) 与 `Custom`(IBL) 暂留；判据是**同一环境下背靠背的单源采样逐项一致**（§11.3.1 已修复，绝对量级现在也可复现） |
 | 文档与代码持续漂移 | 后续照文档实现出错 | 完成每个波次时同步回写本文 §2/§5 与状态表 |
-| **Forward 修好 IBL 之后其它示例会变亮**（§9.2-AB） | 02.Cube / 03.Sponza / 05.AISamples / Editor 都用 `PBR.frag`，而这些示例此前也在"IBL 恒为 0"的状态下跑 | 这是**修复**而不是回归（它们的间接光本来就该有），但必须在那些示例上目视确认一遍：任务 26 只在 06.GILab 上做了数值判据。任务 26 的收尾项 |
-| **Forward 的 RSM 改用固定光锥后，其它示例的 RSM 内容会变**（§9.2-AD / 任务 34） | 02.Cube / 03.Sponza / AISamples 也走 Forward 且都驱动阴影系统；它们的 RSM 此前用 CSM 级联 0 的 VP（随视角变），现在与 Deferred 同源、视角无关 | 这是**修复**（世界空间源的前提被恢复），且 06.GILab 上的数值判据已全过（`S_rsm` 非零、三图非空、换相机逐字节相同）；但那些示例的 RSM/阴影观感需目视确认一次。另：06.GILab 的 Forward 模式现在**第一次有阴影**（此前阴影系统没被驱动），画面变暗是修复 |
+| **Forward 修好 IBL 之后其它示例会变亮**（§9.2-AB） | 02.Cube / 03.Sponza / 05.AISamples / Editor 都用 `PBR.frag`，而这些示例此前也在"IBL 恒为 0"的状态下跑 | 这是**修复**而不是回归（它们的间接光本来就该有），但必须在那些示例上目视确认一遍：任务 26 只在 06.GILab 上做了数值判据。**状态：未做（记录在案的验证余额）** —— 本工作区只构建了 `06.GILab` 目标，其余示例未逐跑；若将来构建它们，按这里的说明确认"变亮是修复" |
+| **Forward 的 RSM 改用固定光锥后，其它示例的 RSM 内容会变**（§9.2-AD / 任务 34） | 02.Cube / 03.Sponza / AISamples 也走 Forward 且都驱动阴影系统；它们的 RSM 此前用 CSM 级联 0 的 VP（随视角变），现在与 Deferred 同源、视角无关 | 这是**修复**（世界空间源的前提被恢复），且 06.GILab 上的数值判据已全过（`S_rsm` 非零、三图非空、换相机逐字节相同）；但那些示例的 RSM/阴影观感需目视确认一次（**状态：未做**，同上一行的原因）。另：06.GILab 的 Forward 模式现在**第一次有阴影**（此前阴影系统没被驱动），画面变暗是修复 |
 
 ---
 
@@ -2785,14 +2792,14 @@ cmake --build Build --config Release --target 06.GILab -j 8
 | Wave 1 | UBO 按源数组化 + shader 按源分派 | ✅ |
 | Wave 2 | `IGIProvider` 抽象（10 源） | ✅ |
 | ~~**Wave 3**~~ | ~~**频率分离**~~ —— ❌ **已判定不需要**，整波退场（§3.3） | ✅ 已判定 |
-| Wave 4 余项 | M5.2-A DDGI 光追 march · B3 RSM halfRes · D2 CPU 单测 | ⏳ |
-| **Wave 5** | **P6 统一估计器 · ~~Lightmap 源~~ · D1 崩溃根因** —— Lightmap 源**已取消**（原任务 31，见 §10.2） | **⏳**（Lightmap 除外） |
+| Wave 4 余项 | M5.2-A DDGI 光追 march（任务 17）· B3 RSM halfRes（任务 16）· D2 CPU 单测 | ✅ 完成 |
+| **Wave 5** | **~~P6 统一估计器~~（任务已迁至《Lumen与Nanite完整设计规范》§5.2）· ~~Lightmap 源~~（任务 31 已取消）· D1 崩溃根因（任务 2）** | P6 ➡️ 已迁出；Lightmap ❌ 已取消；D1 ✅ 完成 |
 
 ### A.4 遗留任务批次
 
 | 批次 | 内容 | 状态 |
 |---|---|---|
 | 第 1 批 | M4.4 · M4.5（不适用）· 面板候选派生 · 文档同步 | ✅ `42db644` |
-| 第 2 批 | B4 DDGI 光追 march · B3 RSM halfRes · D2 CPU 单测 | ⏳ |
+| 第 2 批 | B4 DDGI 光追 march（任务 17）· B3 RSM halfRes（任务 16）· D2 CPU 单测 | ✅ 完成 |
 | 第 3 批 | ~~Wave 3 频率分离~~ —— ❌ 已判定不需要（§3.3）；顺位由 `SSGI-CAL` 接棒 | ✅ 已判定 |
-| 第 4 批 | Wave 5（P6 / ~~Lightmap~~ 已取消 / D1） | ⏳ |
+| 第 4 批 | Wave 5（~~P6~~ 已迁至 Lumen 文档 §5.2 / ~~Lightmap~~ 已取消 / D1 崩溃根因 ✅ 任务 2） | ✅ / ➡️ / ❌ |
