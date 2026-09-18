@@ -125,6 +125,12 @@ void main() {
             float  rough = payload.normalRough.w;
             float3 albedo = payload.albedoMetallic.rgb;
             float  metallic = payload.albedoMetallic.a;
+            // Disney 材质参数（PT 任务 1 由 rchit 带回；任务 2 起求值端显式传入
+            // 共享的 PBR_BRDF，不再吃函数的默认实参——两者在「材质无 Disney 扩展」
+            // 时数值完全等价，有扩展时才体现差异）
+            float4 disneyA       = payload.disneyA;
+            float4 disneyB       = payload.disneyB;
+            float4 surfaceParams = payload.surfaceParams;   // (disneyC, dielectricF0, ior, transmission)
 
             if (bounce == 0) {
                 primaryHit   = true;
@@ -151,7 +157,10 @@ void main() {
                     float3 lightPos2, L; float3 Li; float lightPdf;
                     if (SampleLight(g_Lights[res.lightIndex], P, lightPos2, L, Li, lightPdf)
                         && dot(N, L) > 0.0) {
-                        float3 brdf = PBR_BRDF(albedo, metallic, rough, N, V, L);
+                        // 共享 Disney BRDF 求值（与光栅化 PBR.frag / DeferredLighting.frag 同一函数、同一组参数）
+                        float3 brdf = PBR_BRDF(albedo, metallic, rough, N, V, L,
+                                               surfaceParams.y, float2(0.0, 1.0),
+                                               disneyA, disneyB, surfaceParams.x);
                         float vis = TraceShadowRay(P, N, L, length(lightPos2 - P));
                         // RTXDI 无偏估计：f(y)·W·M / weightSum
                         // （W 为选中样本目标函数，时空复用 Pass 已对当前像素重评估）
@@ -169,9 +178,14 @@ void main() {
                     float ndl = dot(N, L);
                     if (ndl <= 0.0) continue;
 
-                    float3 brdf = PBR_BRDF(albedo, metallic, rough, N, V, L);
+                    float3 brdf = PBR_BRDF(albedo, metallic, rough, N, V, L,
+                                           surfaceParams.y, float2(0.0, 1.0),
+                                           disneyA, disneyB, surfaceParams.x);
 
                     // BRDF 采样 pdf（与 SampleBSDF 相同的混合分布，MIS 用）
+                    // 已知限制：这里只覆盖「余弦漫反射 + 各向同性 GGX」两瓣；
+                    // 材质带 clearcoat / sheen / anisotropy 时该 pdf 与 PBR_BRDF 的
+                    // 真实 lobe 不完全匹配（PT 任务 3 统一采样端后修正）。
                     float3 H = normalize(V + L);
                     float NdotV = max(dot(N, V), 1e-4);
                     float NdotH = max(dot(N, H), 0.0);
@@ -202,7 +216,9 @@ void main() {
                 // 镜面 IBL：按反射方向采样环境（金属/光滑表面获得环境反射，避免全黑）
                 float3 R = reflect(-V, N);
                 float3 envSpec = SampleSky(R, g_PC.skyIntensity);
-                float3 F0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
+                // 电介质 F0 用材质的 dielectricF0（由 IOR 推导，默认 1.5 → 0.04，
+                // 与原先的硬编码常量在默认材质下等价）
+                float3 F0 = lerp(float3(surfaceParams.y, surfaceParams.y, surfaceParams.y), albedo, metallic);
                 radiance += throughput * envSpec * F0;
             }
 
@@ -222,7 +238,9 @@ void main() {
             float3 wi = SampleBSDF(N, V, metallic, rough, uLobe, uDir, pdf);
             if (pdf <= 0.0 || dot(N, wi) <= 0.0) break;
 
-            float3 f = PBR_BRDF(albedo, metallic, rough, N, V, wi);
+            float3 f = PBR_BRDF(albedo, metallic, rough, N, V, wi,
+                                surfaceParams.y, float2(0.0, 1.0),
+                                disneyA, disneyB, surfaceParams.x);
             throughput *= f * max(dot(N, wi), 0.0) / pdf;
 
             ray.Origin    = P + N * 0.001;
