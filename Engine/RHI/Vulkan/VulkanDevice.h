@@ -181,6 +181,7 @@ public:
     bool    SupportsRayTracing()  const { return m_SupportsRT; }
     bool    SupportsMeshShaders() const { return m_SupportsMesh; }
     bool    SupportsDGC() const { return m_SupportsDGC; }
+    bool    SupportsMaintenance7() const { return m_SupportsMaintenance7; }   // 嵌套命令缓冲能力
     // Graphics Pipeline Library 支持状态（fast-link 四段库拆分）
     bool    SupportsGraphicsPipelineLibrary() const { return m_SupportsGPL; }
     bool    SupportsGPLFastLinking() const { return m_SupportsGPLFastLinking; }
@@ -319,6 +320,7 @@ private:
     bool             m_SupportsRT              = false;
     bool             m_SupportsRTPositionFetch = false;
     bool             m_SupportsASUpdateAfterBind = false;   // AS 描述符可否 UPDATE_AFTER_BIND
+    bool             m_SupportsMaintenance7 = false;       // VK_KHR_maintenance7（嵌套命令缓冲）
     bool             m_SupportsMesh            = false;
     bool             m_SupportsDGC             = false;
     bool             m_SupportsGPL            = false;

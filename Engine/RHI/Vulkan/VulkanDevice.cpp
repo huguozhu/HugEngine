@@ -464,6 +464,17 @@ void VulkanDevice::CreateLogicalDevice() {
         HE_CORE_INFO("Mesh Shader 扩展已启用: VK_EXT_mesh_shader");
     }
 
+    // 条件启用 VK_KHR_maintenance7：render pass 内混录 inline + secondary（嵌套命令缓冲）需要它，
+    // 否则 vkCmdBeginRenderPass 用 VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_KHR 时
+    // 校验层报 VUID-vkCmdBeginRenderPass-contents-parameter / -contents-09640。
+    VkPhysicalDeviceMaintenance7FeaturesKHR maint7Feature{};
+    maint7Feature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_7_FEATURES_KHR;
+    maint7Feature.maintenance7 = VK_TRUE;
+    if (m_SupportsMaintenance7) {
+        deviceExtensions.push_back(VK_KHR_MAINTENANCE_7_EXTENSION_NAME);
+        HE_CORE_INFO("VK_KHR_maintenance7 已启用（嵌套命令缓冲）");
+    }
+
     // 条件启用 DGC 扩展
     VkPhysicalDeviceDeviceGeneratedCommandsFeaturesEXT dgcFeature{};
     dgcFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_GENERATED_COMMANDS_FEATURES_EXT;
@@ -577,6 +588,9 @@ void VulkanDevice::CreateLogicalDevice() {
 
     if (m_SupportsDGC) {
         *ppNext = &dgcFeature; ppNext = &dgcFeature.pNext;
+    }
+    if (m_SupportsMaintenance7) {
+        *ppNext = &maint7Feature; ppNext = &maint7Feature.pNext;
     }
     if (m_SupportsGPL) {
         *ppNext = &gplFeature; ppNext = &gplFeature.pNext;

@@ -179,6 +179,13 @@ void VulkanDevice::QueryRTCapabilities() {
                      m_SupportsASUpdateAfterBind);
     }
 
+    // 记录 VK_KHR_maintenance7（嵌套命令缓冲）：BeginOffscreenPass 的
+    // VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_KHR 需要它
+    for (auto& ext : extensions) {
+        if (strcmp(ext.extensionName, VK_KHR_MAINTENANCE_7_EXTENSION_NAME) == 0)
+            m_SupportsMaintenance7 = true;
+    }
+
     m_SupportsRT = hasAS && hasRTP;
     if (!m_SupportsRT) {
         HE_CORE_INFO("Ray Tracing: 不支持（缺少 VK_KHR_acceleration_structure 或 VK_KHR_ray_tracing_pipeline）");
