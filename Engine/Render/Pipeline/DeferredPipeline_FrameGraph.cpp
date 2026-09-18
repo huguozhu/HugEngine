@@ -285,6 +285,10 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     // 必须在 DDGI_Update 之前：探针从 RSM 采样单次反弹辐射度，
     // 替代屏幕 HDR（视锥外采样点被跳过 → 视角相关）
     // ============================================================
+    // 【单一真值】本帧 RSM pass 是否真的注册。它是 RSM 相关的**所有**消费方唯一的判据：
+    // 喂 DDGI（下方）与绑给 Lighting（LightingInputs）都读它，避免"pass 没跑但描述符
+    // 仍绑着真实纹理"——那样采样到的是未初始化显存（§9.2-T）。
+    bool rsmPassRegistered = false;
     if (m_GIConfig.ShouldRunDDGI() && m_RSM && m_ShadowSystem
         && m_ShadowSystem->HasActiveShadows()) {
         // 固定光源视锥（不随相机）：CSM 的 lightViewProj 拟合相机视锥，
@@ -312,7 +316,6 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         // ── RSM pass：遍历 Provider 注册（Wave 2 推广）──
         // Provider 自报「是否需要本帧的 pass」（层栈含 RSM ∧ 源有效），
         // 帧图只负责按注册顺序建 pass 并注入执行上下文。
-        bool rsmPassRegistered = false;
         for (auto& prov : m_GIProviders) {
             if (!prov->Handles(GISourceId::RSM)) continue;
             prov->SyncToStack(m_GIConfig.diffuse);
@@ -611,10 +614,14 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         {gbWorldPos, ResourceAccess::Read},
         {gbDisneyA, ResourceAccess::Read}, {gbDisneyB, ResourceAccess::Read},
     };
-    if (ssgiDenoised != kInvalidHandle) {
+    // 屏幕空间源本帧是否真的产出了内容（= 其 pass 是否注册）。这是**唯一**判据：
+    // 它同时决定「声明读取依赖」与「绑给 Lighting 的纹理」，避免两处判断不一致。
+    const bool ssgiProduced = (ssgiDenoised != kInvalidHandle);
+    const bool ssrProduced  = (ssrDenoised  != kInvalidHandle);
+    if (ssgiProduced) {
         lightingReads.push_back({ssgiDenoised, ResourceAccess::Read});
     }
-    if (ssrDenoised != kInvalidHandle) {
+    if (ssrProduced) {
         lightingReads.push_back({ssrDenoised, ResourceAccess::Read});
     }
     // RT GI 纹理（层栈启用 RTGI 时）需声明读取依赖，保证屏障正确
@@ -626,7 +633,14 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     rg.AddPass("Lighting",
         lightingReads,
         {{hdrC, ResourceAccess::Write}},
-        [&, w, h](rhi::IRHICommandList* c) {
+        // 【必须按值捕获这些局部量】帧图只负责**注册** pass，真正的执行发生在 BuildFrameGraph
+        // 返回之后（DeferredPipeline.cpp：BuildFrameGraph → Compile → Execute）。那时本函数的
+        // 栈帧已经失效，按引用捕获读到的是垃圾——表现为「本帧没产出的纹理被绑上」（§9.2-T）乃至
+        // 指向已销毁纹理的野指针（实测每条运行约 190 条此类报错）。w/h 早已按值捕获，
+        // 这里把光照输入的解析结果一并按值捕获。
+        [&, w, h,
+         ssgiProduced, ssgiFinalTex, ssrProduced, ssrFinalTex, rsmPassRegistered,
+         rtGITex, rtShadowTex, rtAOTex, rtReflectionTex](rhi::IRHICommandList* c) {
             // IBL 生成（天空盒 → Irradiance/Prefilter/BRDF LUT，脏时才重建）+ 绑定到 Lighting 描述符集
             auto* giIBL = dynamic_cast<GI_IBL*>(m_GI.get());
             if (giIBL) {
@@ -668,24 +682,42 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             in.gbE        = m_GBuffer->GetWorldPos();
             in.gbDisneyA  = m_GBuffer->GetDisneyA();
             in.gbDisneyB  = m_GBuffer->GetDisneyB();
-            in.csmShadow0 = m_ShadowSystem ? m_ShadowSystem->GetShadowMap(0) : nullptr;
-            in.csmShadow1 = m_ShadowSystem ? m_ShadowSystem->GetShadowMap(1) : nullptr;
-            in.csmShadow2 = m_ShadowSystem ? m_ShadowSystem->GetShadowMap(2) : nullptr;
-            in.spotShadow = m_ShadowSystem ? m_ShadowSystem->GetShadowMap(4) : nullptr;
+            // ── 阴影贴图：本帧**没被写入**的图必须传 nullptr，回落到 LightingPass 预绑的
+            // 1×1 占位纹理。传真实纹理会让描述符指向未初始化显存（§9.2-T）：这类采样是
+            // 静默的（不报错、画面只是偏暗），读数还随显存布局变化。占位为白色（采样深度 1.0
+            // = 无遮挡），正好是该通道的中性值。
+            auto shadowMap = [this](u32 index) -> rhi::IRHITexture* {
+                if (!m_ShadowSystem || !m_ShadowSystem->WasShadowMapWritten(index)) return nullptr;
+                return m_ShadowSystem->GetShadowMap(index);
+            };
+            in.csmShadow0 = shadowMap(0);
+            in.csmShadow1 = shadowMap(1);
+            in.csmShadow2 = shadowMap(2);
+            in.spotShadow = shadowMap(4);
             in.lightBuffer  = m_LightBuffers[m_CurrentFrameSlot].get();
             in.shadowBuffer = m_ShadowBuffers[m_CurrentFrameSlot].get();
             in.ssaoTex    = m_SSAO.GetAOTexture();
             // 屏幕空间源的最终输出由 Provider 给出（已封装「有降噪取降噪、halfRes 取原始」
-            // 的选择），帧图不再重复判断 halfRes——避免两处逻辑不一致
-            in.ssgiTex     = ssgiFinalTex ? ssgiFinalTex : m_SSGI.GetIndirectDiffuseTexture();
-            in.ssgiSampler = m_SSGI.GetOutputSampler();
-            in.ssrTex      = ssrFinalTex ? ssrFinalTex : m_SSR.GetIndirectSpecularTexture();
-            in.ssrSampler  = m_SSR.GetOutputSampler();
+            // 的选择），帧图不再重复判断 halfRes——避免两处逻辑不一致。
+            // 【门控】没注册 pass 就不能绑它的输出纹理：Provider 持有纹理 ≠ 本帧写过它。
+            // ssgiProduced / ssrProduced 是在注册期算好、按值捕获进来的（与 lightingReads
+            // 用的是同一个判据），不是在这里重新判断。
+            in.ssgiTex     = ssgiProduced
+                             ? (ssgiFinalTex ? ssgiFinalTex : m_SSGI.GetIndirectDiffuseTexture())
+                             : nullptr;
+            in.ssgiSampler = ssgiProduced ? m_SSGI.GetOutputSampler() : nullptr;
+            // SSR 同理：未注册 pass 就不绑它的输出纹理
+            in.ssrTex      = ssrProduced
+                             ? (ssrFinalTex ? ssrFinalTex : m_SSR.GetIndirectSpecularTexture())
+                             : nullptr;
+            in.ssrSampler  = ssrProduced ? m_SSR.GetOutputSampler() : nullptr;
             in.ddgiProbeBuffer = m_DDGI.GetProbeBuffer();
             in.ddgiGridUniform = m_DDGI.GetGridUniform();
             // RSM 间接光（有 RSM 渲染时喂给 Lighting——shader 内 rsmIndirect 分支）
-            in.rsmPositionMap = m_RSM ? m_RSM->GetRSMPositionMap() : nullptr;
-            in.rsmFluxMap     = m_RSM ? m_RSM->GetRSMFluxMap()     : nullptr;
+            // 【与上面的 pass 注册同源】rsmPassRegistered 为假时本帧没有 RSM 内容，
+            // 必须传 nullptr 回落到占位纹理；否则描述符指向从未写入的图（§9.2-T）。
+            in.rsmPositionMap = rsmPassRegistered ? m_RSM->GetRSMPositionMap() : nullptr;
+            in.rsmFluxMap     = rsmPassRegistered ? m_RSM->GetRSMFluxMap()     : nullptr;
             // overlay 与 Pass 门控同源（避免 pass 跳过但 shader 仍采样陈旧探针）
             in.clusteredShading     = &m_ClusteredShading;
             in.lightGridBuffer      = m_LightGridBuffer.get();
