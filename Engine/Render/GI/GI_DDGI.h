@@ -60,6 +60,18 @@ public:
     // 探针数据缓冲（供 Lighting Pass 绑定，每帧更新后为最新 blend 结果）
     rhi::IRHIBuffer* GetProbeBuffer() const { return m_ProbeBuffer.get(); }
 
+    /// 每个探针的球面采样数（DDGI.comp 的 SH 投影次数）。
+    /// 必须与 DDGI_Trace pass 的采样数一致：光追 march 的射线结果按
+    /// `[probeIndex * kSamplesPerProbe + i]` 索引，二者不一致就会读错。
+    static constexpr u32 kSamplesPerProbe = 32;
+
+    /// 注入本帧光追 march 的探针射线辐射度（任务 17 / B4）。
+    /// 传 nullptr 或缺省采样数即回退到 RSM/IBL 路径（不支持光追的设备）。
+    void SetTracedRadiance(rhi::IRHIBuffer* radiance, u32 samplesPerProbe) {
+        m_TracedRadiance = radiance;
+        m_TracedSamples  = samplesPerProbe;
+    }
+
     // 探针网格参数 UBO（供 Lighting Pass / RT GI 采样 DDGI 时读取网格参数，替代 shader 硬编码常量）
     rhi::IRHIBuffer* GetGridUniform() const { return m_GridUniform.get(); }
 
@@ -137,6 +149,10 @@ private:
     /// 若当作有效历史参与 `blendAlpha` 混合，等于把垃圾按 0.85 的权重逐帧喂进 GI
     /// （静默偏色，且读数随显存布局变化 —— 与 §9.2-T 同类）。
     bool m_HistoryValid = false;
+
+    // 光追 march 的探针射线辐射度（任务 17）：非拥有，由帧图每帧注入
+    rhi::IRHIBuffer* m_TracedRadiance = nullptr;
+    u32 m_TracedSamples = 0;
 
     // 探针网格参数 Uniform Buffer
     std::unique_ptr<rhi::IRHIBuffer> m_GridUniform;

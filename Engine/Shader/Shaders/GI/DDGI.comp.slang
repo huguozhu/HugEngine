@@ -31,6 +31,10 @@
 // IBL 环境辐照度（Cubemap，按方向采样——世界空间、视角无关；RSM 不可用时的回退）
 [[vk::binding(9, 0)]] TextureCube<float4> u_IBLIrradiance;
 
+// 光追 march 的探针射线辐射度（任务 17 / B4，由 DDGI_Trace pass 每帧写入）
+// 布局：每探针 numSamples 条，[probeIndex * numSamples + i]；不可用时 u_Flags.w=0
+[[vk::binding(10, 0)]] StructuredBuffer<float4> u_TracedRadiance;
+
 // 探针网格 + 相机参数
 [[vk::binding(4, 0)]] cbuffer DDGIParams {
     float4   u_GridOrigin;   // xyz=世界空间原点
@@ -39,7 +43,7 @@
     float4   u_Params;       // x=intensity, y=numSamples, z=blendAlpha, w=historyValid
     float4x4 u_ViewProj;     // 相机 View→Proj（世界→裁剪空间）
     float4x4 u_RSMLightViewProj;  // RSM 光源 VP（世界→RSM 光源空间投影）
-    float4   u_Flags;        // x=useRSM；y=updateStride（时间维分摊步长）；z=updatePhase
+    float4   u_Flags;        // x=useRSM；y=updateStride；z=updatePhase；w=光追 march 可用
 };
 
 // 每探针 float4 数量（与 C++ kFloats4PerProbe 保持一致）
@@ -152,14 +156,25 @@ void main(uint3 id : SV_DispatchThreadID) {
         float3 radiance = float3(0.0);
         bool   valid    = false;
 
-        if (u_Flags.x > 0.5) {
+        if (u_Flags.w > 0.5) {
+            // ── A 路径（任务 17 / B4）：光追 march 给出的真实辐射度 ──
+            // 每条探针射线由 DDGI_Trace pass 用硬件光追求解：命中 → 命中点出射辐射度，
+            // 未命中 → 该方向的 IBL 辐照度。缓冲布局 = [probeIndex * numSamples + i]。
+            // 【为什么优先于 RSM 路径】它也满足"世界空间、视角无关"，而且带真实可见性；
+            // RSM 路径保留给不支持光追的设备（u_Flags.w 为 0 时走下面两条回退）。
+            float4 traced = u_TracedRadiance[probeIndex * uint(numSamples) + uint(i)];
+            radiance = traced.rgb;
+            valid    = dot(radiance, radiance) > 0.0001;
+        } else if (u_Flags.x > 0.5) {
             // ── B 路径：RSM 世界辐射度（视角无关，单次反弹 VPL）──
             float4 rsmClip = mul(u_RSMLightViewProj, float4(samplePos, 1.0));
             if (rsmClip.w > 0.0001) {
                 float2 rsmUV = rsmClip.xy / rsmClip.w * 0.5 + 0.5;
                 if (rsmUV.x >= 0.0 && rsmUV.x <= 1.0 && rsmUV.y >= 0.0 && rsmUV.y <= 1.0) {
+                    // RSM 贴图：rgb=编码法线，a=通量（见 RSM_Generate.frag 的通道约定）。
+                    // 这里只要通量；此前误取 rgb（其实是法线）当辐射度用，见 §9.2-AA ③。
                     float4 flux = u_RSMFluxMap.SampleLevel(u_LinearSampler, rsmUV, 0);
-                    radiance = flux.rgb;
+                    radiance = flux.a;
                     valid = dot(radiance, radiance) > 0.0001;
                 }
             }

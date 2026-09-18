@@ -428,6 +428,75 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     }
 
     // ============================================================
+    // DDGI 探针射线的光追 march（任务 17 / B4 · M5.2-A）
+    //   【为什么必须在这里】它是 DDGI 探针更新的**输入**：探针的 SH 投影要读本 pass 写出的
+    //   射线辐射度，所以必须排在下面的 DDGI compute 之前（同队列 + 注册顺序即执行顺序）。
+    //   【为什么要 AS + 材质纹理也提前】两者都在更靠后的 RT 段里；DDGI 走 march 时它们必须
+    //   先就绪，故把 AS_Build 的注册从 RT 段提到这里，门控改成"开了任一 RT 源 **或** DDGI
+    //   走 march"——否则"只开 DDGI"的配置里 AS 根本不会构建。
+    //   【回退】设备不支持光追（m_RTEnabled 为假）时不注册，DDGI.comp 走原来的 RSM/IBL 路径。
+    // ============================================================
+    {
+        const bool ddgiTraceWanted = m_RTEnabled && m_RTPass && m_GIConfig.ShouldRunDDGI();
+        const bool anyRT = m_RTEnabled && m_RTPass && m_GIConfig.AnyRTSource();
+        if (anyRT || ddgiTraceWanted) {
+            // 加速结构（TLAS）：每帧一次，被所有 RT 消费者共享（含本帧的 DDGI march）
+            rg.AddPass("AS_Build", {}, {},
+                [this, &world, &sg](rhi::IRHICommandList* c) {
+                    m_GITimer.Begin(c, GITimer::kCommonItemIdx);
+                    m_RTPass->BuildAS(c, world, sg);
+                    m_GITimer.End(c, GITimer::kCommonItemIdx);
+                });
+            // 场景材质纹理（ClosestHit 材质查询）：首帧延迟构建一次（CPU 侧）
+            if (!m_SceneMaterialBuilt) {
+                if (m_RTPass->BuildSceneMaterialTexture(m_Device, world)) {
+                    m_SceneMaterialBuilt = true;
+                } else {
+                    HE_CORE_WARN("DeferredPipeline: 场景材质纹理构建失败，RT 材质查询不可用");
+                }
+            }
+        }
+
+        if (ddgiTraceWanted && m_DDGI_Trace) {
+            const u32 probes = m_DDGI.gridX * m_DDGI.gridY * m_DDGI.gridZ;
+            if (m_DDGI_Trace->EnsureCapacity(probes, GI_DDGI::kSamplesPerProbe)) {
+                m_DDGI_Trace->SetGrid(m_DDGI.gridOrigin, m_DDGI.gridX, m_DDGI.gridY, m_DDGI.gridZ,
+                                      m_DDGI.cellSize);
+                // 追踪距离与起始偏移：用"探针网格的实际尺度"而不是固定米数——本场景的
+                // 世界单位远大于米（Sponza 包围盒 3720 单位），固定 30m 会只覆盖到探针脚下。
+                const float maxDist   = std::max(m_DDGI.cellSize * 4.0f, 1.0f);
+                const float stepRatio = 0.4f;   // 与 DDGI.comp 的 stepDist = cellSize*0.4 一致
+                m_DDGI_Trace->SetSampling(GI_DDGI::kSamplesPerProbe, maxDist, stepRatio);
+                if (auto* giIBL = dynamic_cast<GI_IBL*>(m_GI.get())) {
+                    m_DDGI_Trace->SetIBL(giIBL->GetIrradianceMap(), giIBL->GetIBLSampler());
+                }
+                // 探针更新读它 ⇒ 必须先把"本帧有光追结果"这件事告诉 DDGI（u_Flags.w）
+                m_DDGI.SetTracedRadiance(m_DDGI_Trace->GetRadianceBuffer(), GI_DDGI::kSamplesPerProbe);
+
+                rg.AddPass("DDGI_Trace", {}, {},
+                    [this, camPos = camera.position, lightCount = fpc.lightCount](rhi::IRHICommandList* c) {
+                        RTExecuteContext tctx{};
+                        tctx.cameraPos            = camPos;
+                        tctx.frameIndex           = m_DiagFrameCounter;
+                        tctx.lightBuffer          = m_LightBuffers[m_CurrentFrameSlot].get();
+                        tctx.lightCount           = lightCount;
+                        tctx.sceneMaterialTex     = m_RTPass->GetSceneMaterialTexture();
+                        tctx.sceneTriangleNormals = m_RTPass->GetSceneTriangleNormals();
+                        // 本 pass 不读 GBuffer：每条射线是"探针位置 + 球面方向"，与屏幕无关。
+                        // 网格与采样数在参数 UBO 里，dispatch 的射线数在 EnsureCapacity 里定。
+                        m_DDGI_Trace->Execute(c, m_RTPass->GetTLAS(), tctx);
+                    },
+                    RGPassQueue::Graphics);   // 与 DDGI 的 compute 同队列 ⇒ 靠注册顺序保证先后
+            } else {
+                // 缓冲建不出来：明确回退，不能让 DDGI 去读一个没绑的缓冲（§9.2-T）
+                m_DDGI.SetTracedRadiance(nullptr, 0);
+            }
+        } else {
+            m_DDGI.SetTracedRadiance(nullptr, 0);   // 无光追：DDGI 走 RSM/IBL 路径
+        }
+    }
+
+    // ============================================================
     // DDGI Probe Update（Compute Shader：必须放在所有 offscreen pass 之前，
     // 避免 compute pipeline 切换影响后续 render pass 状态）
     // Wave 2 阶段 4：改为遍历 Provider（compute 类源，无通道纹理输出）
@@ -589,28 +658,12 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     rhi::IRHITexture* rtAOTex = nullptr;
     rhi::IRHITexture* rtReflectionTex = nullptr;
     if (m_RTEnabled && m_GIConfig.AnyRTSource() && m_RTPass) {
-        // RT 效果需要光源数据（光照缓冲已在帧首填充）
+        // RT 效果需要光源数据（与本帧帧首那次同源；Lighting 的那份按值捕获复用）
         PushConstantData rtfpc{};
         CollectLights(rtfpc, world, sg, camera);
 
-        // 加速结构（TLAS）构建：每帧一次，由所有 RT 效果共享
-        // 【计入耗时】它不属于任何"源"，但在开了任一 RT 源的配置里是**每帧**成本，
-        // 且很可能比单个 RT 效果本身还大 —— 用约定的下标 kGITimerASBuildIdx 单独计时。
-        rg.AddPass("AS_Build", {}, {},
-            [this, &world, &sg](rhi::IRHICommandList* c) {
-                m_GITimer.Begin(c, GITimer::kCommonItemIdx);
-                m_RTPass->BuildAS(c, world, sg);
-                m_GITimer.End(c, GITimer::kCommonItemIdx);
-            });
-
-        // 场景材质纹理（ClosestHit 材质查询）：首帧延迟构建一次（CPU 侧）
-        if (!m_SceneMaterialBuilt) {
-            if (m_RTPass->BuildSceneMaterialTexture(m_Device, world)) {
-                m_SceneMaterialBuilt = true;
-            } else {
-                HE_CORE_WARN("DeferredPipeline: 场景材质纹理构建失败，RT 材质查询不可用");
-            }
-        }
+        // 加速结构（TLAS）与场景材质纹理已在 **DDGI 段之前**注册/构建（见那里的说明：
+        // DDGI 的光追 march 也要用它们）。此处不再重复注册，否则同一帧会构建两次 TLAS。
 
         const GIProviderContext rtCtx{ &world, &sg, &camera, m_CurrentFrameSlot,
                                        m_GIConfig.furnaceMode,

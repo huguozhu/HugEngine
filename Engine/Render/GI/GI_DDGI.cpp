@@ -20,6 +20,7 @@ static constexpr u32 kDDGIBindPrevHDR     = 6;   // 前帧 HDR（屏幕回退）
 static constexpr u32 kDDGIBindRSMPosition = 7;   // RSM 位置图
 static constexpr u32 kDDGIBindRSMFlux     = 8;   // RSM 通量图
 static constexpr u32 kDDGIBindIBL         = 9;   // IBL 辐照度（Cubemap）
+static constexpr u32 kDDGIBindTracedRadiance = 10;  // 光追 march 的探针射线辐射度（任务 17）
 
 // 计算调度所需的 Dispatch 组数（每线程处理一个探针，64 线程/组）
 static u32 DispatchGroupCount(u32 probeCount) {
@@ -98,6 +99,8 @@ bool GI_DDGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         {kDDGIBindRSMPosition, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // RSM Position
         {kDDGIBindRSMFlux,     rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // RSM Flux
         {kDDGIBindIBL,         rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // IBL Irradiance (Cubemap)
+        // 光追 march 的探针射线辐射度（任务 17）：A 路径的输入，未启用时 u_Flags.w=0 不采样
+        {kDDGIBindTracedRadiance, rhi::DescriptorType::StorageBuffer,     1, rhi::kStageMaskCompute},
     };
     m_Layout = device->CreateDescriptorSetLayout(layout);
     m_Set    = device->AllocateDescriptorSet(m_Layout);
@@ -217,11 +220,18 @@ void GI_DDGI::Render(rhi::IRHICommandList* cmd) {
     }
 
     // 球面采样数
-    static const u32 kNumSamples = 32;
+    static const u32 kNumSamples = kSamplesPerProbe;
 
     // 更新 descriptor set：绑定当前输出缓冲和历史缓冲（每帧因 swap 而变化）
     m_Device->UpdateDescriptorSet(m_Set, kDDGIBindProbes, rhi::DescriptorType::StorageBuffer, m_ProbeBuffer.get());
     m_Device->UpdateDescriptorSet(m_Set, kDDGIBindHistory, rhi::DescriptorType::StorageBuffer, m_ProbeHistory.get());
+    // 光追 march 的射线辐射度（任务 17）：由帧图在本帧的 DDGI_Trace pass 之后注入；
+    // 未注入时保持上一次绑定，但 u_Flags.w=0 ⇒ 着色器根本不采样它（与 §9.2-T 同一约定：
+    // "没用到的绑定"不会读，只是不能让"用了却没绑"发生）。
+    if (m_TracedRadiance) {
+        m_Device->UpdateDescriptorSet(m_Set, kDDGIBindTracedRadiance,
+            rhi::DescriptorType::StorageBuffer, m_TracedRadiance);
+    }
 
     // ---- 上传探针网格 Uniform（含时间混合参数） ----
     ProbeGridUniform uniforms;
@@ -234,12 +244,15 @@ void GI_DDGI::Render(rhi::IRHICommandList* cmd) {
                                  m_HistoryValid ? 1.0f : 0.0f);  // w=historyValid
     uniforms.viewProj   = m_ViewProj;
     uniforms.rsmLightViewProj = m_RSMLightViewProj;   // B 路径：RSM 光源 VP
-    // x=useRSM；y/z=时间维分摊的步长与相位（任务 12）：每帧只更新 probeIndex % stride == phase
-    // 的那一批探针，未轮到的探针原样继承上一次结果（见 DDGI.comp.slang 的早退分支）。
+    // x=useRSM；y/z=时间维分摊的步长与相位（任务 12）；w=光追 march 是否可用（任务 17）
+    // 每帧只更新 probeIndex % stride == phase 的那一批探针，未轮到的探针原样继承上一次结果
+    // （见 DDGI.comp.slang 的早退分支）。
     const u32 stride = std::max(1u, updateStride);
     const u32 phase  = updatePhase % stride;
+    // 【A 路径优先】光追 march 可用时走真实可见性；RSM 是给不支持光追的设备留的 B 路径
+    const bool tracedReady = (m_TracedRadiance != nullptr && m_TracedSamples == kNumSamples);
     uniforms.flags = float4((m_RSMPositionMap && m_RSMFluxMap) ? 1.0f : 0.0f,
-                            float(stride), float(phase), 0.0f);
+                            float(stride), float(phase), tracedReady ? 1.0f : 0.0f);
     ++updatePhase;
 
     void* mapped = m_GridUniform->Map();

@@ -230,6 +230,15 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
                 m_RTGI.reset();
             }
 
+            // ── DDGI 探针射线的光追 march（任务 17 / B4）──
+            // 与上面四个效果不同：它不属于任何层栈源，而是 DDGI 的**求值前置**。
+            // 创建失败只降级（DDGI 回到 RSM/IBL 路径），不影响其它 RT 效果。
+            m_DDGI_Trace = std::make_unique<DDGITracePass>();
+            if (!m_DDGI_Trace->Initialize(device)) {
+                HE_CORE_WARN("DeferredPipeline: DDGITracePass 初始化失败，DDGI 使用 IBL/RSM 路径");
+                m_DDGI_Trace.reset();
+            }
+
             // ── RT 降噪器（时域累积；反射/GI 追加 5×5 空间滤波）──
             if (m_RTShadow && m_RTShadow->IsValid()) {
                 RTDenoiser::Config cfg;
@@ -427,6 +436,7 @@ void DeferredPipeline::Shutdown() {
     m_ShadowDenoiser.reset();
     m_GISpatial.Shutdown();
     m_ReflectionSpatial.Shutdown();
+    if (m_DDGI_Trace)   { m_DDGI_Trace->Shutdown();   m_DDGI_Trace.reset(); }   // 早于 m_RTPass
     if (m_RTGI)         { m_RTGI->Shutdown();         m_RTGI.reset(); }
     if (m_RTReflection) { m_RTReflection->Shutdown(); m_RTReflection.reset(); }
     if (m_RTAO)         { m_RTAO->Shutdown();         m_RTAO.reset(); }

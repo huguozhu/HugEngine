@@ -5,6 +5,7 @@
 #include "GI/GlobalIllumination.h"
 #include "GI/GI_RSM.h"
 #include "GI/RSMIndirect.h"   // RSM 间接光的半分辨率求值 pass（任务 16）
+#include "GI/DDGITracePass.h" // DDGI 探针射线的光追 march（任务 17）
 #include "RHI/RHI.h"
 #include "RenderGraph.h"
 
@@ -239,6 +240,9 @@ private:
     /// 它不是 GI 源（没有通道输出、不参与归一化），只是 Lighting 采样 GISOURCE_RSM 的
     /// **求值前置**，故与 SSAO 同类由管线持有，不注册进 IGIProvider 表。
     RSMIndirect m_RSMIndirect;
+    /// DDGI 探针射线的硬件光追 march（任务 17 / B4）：设备支持光追时创建，否则为 nullptr
+    /// ⇒ DDGI 的探针更新回退到 RSM/IBL 路径（`supportsRayTracing` 自动选择）。
+    std::unique_ptr<DDGITracePass> m_DDGI_Trace;
     ProfilerManager m_Profiler;  // GPU 时间戳 Profiler
     ProfilerPanel   m_ProfilerPanel; // ImGui 可视化面板
     std::unique_ptr<rhi::IRHIPipelineState> m_TransientTestPSO;  // 瞬态资源路径验证 PSO

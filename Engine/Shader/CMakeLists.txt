@@ -165,6 +165,8 @@ if(SLANGC)
         "${SHADER_DIR}/RayTracing/RT_GI.rgen.slang"
         "${SHADER_DIR}/RayTracing/RT_GI.rchit.slang"
         "${SHADER_DIR}/RayTracing/RT_GI.rmiss.slang"
+        # DDGI 探针射线的光追 march（任务 17 / B4；复用 RT_GI 的 rchit/rmiss）
+        "${SHADER_DIR}/RayTracing/DDGI_Trace.rgen.slang"
         # PathTracing
         "${SHADER_DIR}/PathTracing/PT_Full.rgen.slang"
         "${SHADER_DIR}/PathTracing/PT_Full.rchit.slang"
