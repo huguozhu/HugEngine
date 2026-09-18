@@ -423,7 +423,11 @@ int main() {
             world.AddComponent<TransformComponent>(skeletalEntity);
             auto* sm = world.AddComponent<SkeletalMeshComponent>(skeletalEntity);
             sm->SetSkeleton(foxSkeleton);
-            sm->PlayClip(2, true);   // 默认播 Run（动作幅度最大）
+            // 任务 21：剪辑混合演示 —— 从 Walk 交叉淡入到 Run（1.5s），结束后收敛成单层
+            sm->PlayClip(1, true);                 // Walk
+            sm->CrossFadeTo(2, 1.5f, true);        // → Run
+            HE_CORE_INFO("[任务 21] 骨骼剪辑混合：Walk → Run 交叉淡入 1.5s（最多 {} 层；"
+                         "面板可调 Blend Space 与手动淡入）", he::SkeletalMeshComponent::kMaxBlendLayers);
             sm->baseColorFactor = float4(0.95f, 0.55f, 0.2f, 1.0f);   // 橙色狐狸
             sm->metallicFactor  = 0.0f;
             sm->roughnessFactor = 0.6f;
@@ -1027,6 +1031,17 @@ int main() {
         // 骨骼动画系统（C1c）：剪辑时间推进 + 关节蒙皮矩阵
         he::SkeletalMeshSystem::Update(world, deltaTime);
 
+        // 任务 21 冒烟证据：交叉淡入结束（层数收敛为 1）时打一行 —— 证明混合路径真的跑了
+        if (auto* sm = world.GetComponent<SkeletalMeshComponent>(skeletalEntity)) {
+            static bool s_LoggedBlendDone = false;
+            if (!s_LoggedBlendDone && !sm->bCrossFading && sm->blendLayerCount == 1 &&
+                sm->blendLayers[0].clipIndex >= 0) {
+                s_LoggedBlendDone = true;
+                HE_CORE_INFO("[任务 21] 交叉淡入完成：收敛为单层剪辑 #{}（权重 {:.2f}）",
+                             sm->blendLayers[0].clipIndex, sm->blendLayers[0].weight);
+            }
+        }
+
         // 每 2 秒刷新 FPS 文字（验证实时文字更新路径；
         // bindless 堆 append-only，更新会追加槽位，故降低刷新频率）
         {
@@ -1168,6 +1183,29 @@ int main() {
             ImGui::SliderFloat("速度", &sm->playSpeed, 0.1f, 3.0f);
             ImGui::Text("时间: %.2fs | 关节: %d", sm->clipTime,
                 (int)sm->jointWorldMatrices.size());
+
+            // 剪辑混合（任务 21）：两层 Blend Space（Walk ↔ Run，时间同步）+ 手动交叉淡入
+            ImGui::SeparatorText("剪辑混合 (任务 21)");
+            static float s_BlendWalkRun = 0.0f;   // 0 = 全 Walk、1 = 全 Run
+            if (ImGui::SliderFloat("Blend Walk↔Run", &s_BlendWalkRun, 0.0f, 1.0f)) {
+                he::asset::AnimationBlendLayer layers[2];
+                layers[0].clipIndex = 1;   // Walk
+                layers[0].weight    = 1.0f - s_BlendWalkRun;
+                layers[0].time      = sm->clipTime;   // 两层时间同步（Blend Space 的常见约定）
+                layers[1].clipIndex = 2;   // Run
+                layers[1].weight    = s_BlendWalkRun;
+                layers[1].time      = sm->clipTime;
+                sm->SetBlendLayers(layers, 2);
+            }
+            if (ImGui::Button("交叉淡入 → Run")) { sm->CrossFadeTo(2, 0.6f, true); s_BlendWalkRun = 1.0f; }
+            ImGui::SameLine();
+            if (ImGui::Button("交叉淡入 → Walk")) { sm->CrossFadeTo(1, 0.6f, true); s_BlendWalkRun = 0.0f; }
+            {
+                float bw[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+                sm->GetBlendWeights(bw, 4);
+                ImGui::Text("混合层: %u  Walk %.2f / Run %.2f%s", sm->blendLayerCount, bw[0], bw[1],
+                            sm->bCrossFading ? "  （淡入中）" : "");
+            }
         }
 
         // 角色移动演示状态（B3）
