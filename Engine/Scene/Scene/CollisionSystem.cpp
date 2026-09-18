@@ -20,55 +20,9 @@ namespace he {
 
 namespace {
 
-// 提取后的世界空间形状（供各检测函数统一使用）
-struct WorldShape {
-    CollisionShape shape = CollisionShape::AABB;
-    float3 min, max;        // AABB 世界轴对齐范围（旋转后重轴，保守）
-    float3 center;          // Sphere 球心 / Capsule 段中点
-    float  radius = 0.0f;   // Sphere / Capsule 半径
-    float3 segA, segB;      // Capsule 段两端点
-};
-
-// 从实体提取世界形状（缺失组件/无 Transform/禁用时返回 false，容错）
-bool ExtractShape(World& world, Entity e, WorldShape& out) {
-    auto* cc = world.GetComponent<CollisionComponent>(e);
-    auto* xf = world.GetComponent<TransformComponent>(e);
-    if (!cc || !xf || !cc->bEnabled) return false;
-
-    // 世界矩阵：优先场景图（支持父层级），无场景图回退局部矩阵
-    float4x4 wm = xf->GetLocalMatrix();
-    if (auto* sg = world.GetSceneGraph()) {
-        wm = sg->GetWorldMatrix(e);
-    }
-    // 半径/半尺寸统一乘最大缩放分量（MVP 约定）
-    float scale = std::max({xf->scale.x, xf->scale.y, xf->scale.z});
-    if (scale <= 0.0f) scale = 1.0f;
-
-    out.shape = cc->shape;
-    out.center = float3(wm[3]);
-    out.radius = cc->radius * scale;
-
-    switch (cc->shape) {
-    case CollisionShape::AABB: {
-        AABB local(-cc->halfExtents, cc->halfExtents);
-        AABB worldBox = local.Transform(wm);
-        out.min = worldBox.min;
-        out.max = worldBox.max;
-        break;
-    }
-    case CollisionShape::Sphere:
-        // 球体：仅球心与半径（与旋转无关）
-        break;
-    case CollisionShape::Capsule: {
-        // 垂直胶囊：段沿变换上方向，段半长 = max(0, height/2 - radius)
-        float halfSeg = std::max(0.0f, cc->height * 0.5f - cc->radius) * scale;
-        float3 up = glm::normalize(xf->rotation * float3(0.0f, 1.0f, 0.0f));
-        out.segA = out.center + up * halfSeg;
-        out.segB = out.center - up * halfSeg;
-        break;
-    }
-    }
-    return true;
+// 内部别名：检测代码沿用短名（形状提取已提升为公开 API，见 CollisionSystem::ExtractWorldShape）
+bool ExtractShape(World& world, Entity e, CollisionWorldShape& out) {
+    return CollisionSystem::ExtractWorldShape(world, e, out);
 }
 
 // --- 基础几何工具 ---
@@ -110,7 +64,7 @@ float SegmentSegmentDistance(const float3& a0, const float3& a1,
 
 // --- 形状对重叠（全组合）---
 
-bool OverlapShapes(const WorldShape& A, const WorldShape& B) {
+bool OverlapShapes(const CollisionWorldShape& A, const CollisionWorldShape& B) {
     if (A.shape == CollisionShape::AABB && B.shape == CollisionShape::AABB) {
         return A.min.x <= B.max.x && A.max.x >= B.min.x &&
                A.min.y <= B.max.y && A.max.y >= B.min.y &&
@@ -149,7 +103,7 @@ bool OverlapShapes(const WorldShape& A, const WorldShape& B) {
 }
 
 // --- 点包含 ---
-bool ContainsShape(const WorldShape& s, const float3& p) {
+bool ContainsShape(const CollisionWorldShape& s, const float3& p) {
     switch (s.shape) {
     case CollisionShape::AABB:
         return p.x >= s.min.x && p.x <= s.max.x &&
@@ -164,7 +118,7 @@ bool ContainsShape(const WorldShape& s, const float3& p) {
 }
 
 // --- 射线检测（返回命中距离 + 命中法线；未命中返回 < 0）---
-float RaycastShape(const WorldShape& s, const float3& origin, const float3& dir, float maxDist, float3& outNormal) {
+float RaycastShape(const CollisionWorldShape& s, const float3& origin, const float3& dir, float maxDist, float3& outNormal) {
     switch (s.shape) {
     case CollisionShape::AABB: {
         // slab 法：逐轴求进出区间，求交集
@@ -239,13 +193,13 @@ float RaycastShape(const WorldShape& s, const float3& origin, const float3& dir,
 } // namespace
 
 bool CollisionSystem::Overlap(World& world, Entity a, Entity b) {
-    WorldShape sa, sb;
+    CollisionWorldShape sa, sb;
     if (!ExtractShape(world, a, sa) || !ExtractShape(world, b, sb)) return false;
     return OverlapShapes(sa, sb);
 }
 
 bool CollisionSystem::Contains(World& world, Entity e, const float3& point) {
-    WorldShape s;
+    CollisionWorldShape s;
     if (!ExtractShape(world, e, s)) return false;
     return ContainsShape(s, point);
 }
@@ -264,7 +218,7 @@ bool CollisionSystem::Raycast(World& world, const float3& origin, const float3& 
 
     world.ForEach<CollisionComponent>([&](Entity e, CollisionComponent& cc) {
         if (e.id == ignore) return;   // 排除自身（如角色地面检测）
-        WorldShape s;
+        CollisionWorldShape s;
         if (!ExtractShape(world, e, s)) return;   // 禁用/缺失 Transform 跳过
         float3 n;
         float t = RaycastShape(s, origin, d, maxDistance, n);
@@ -279,6 +233,53 @@ bool CollisionSystem::Raycast(World& world, const float3& origin, const float3& 
     outHit = best;
     outT = bestT;
     if (outNormal) *outNormal = bestNormal;
+    return true;
+}
+
+// ============================================================
+// ExtractWorldShape — 世界空间形状提取（任务 26 起对外公开）
+//
+// 原来只作为文件内部的 ExtractShape 存在；调试线框需要画"检测用的那个形状"，
+// 所以提升为公开 API：一处语义、两个消费者（检测 + 可视化），不会各算一套而互相矛盾。
+// ============================================================
+bool CollisionSystem::ExtractWorldShape(World& world, Entity e, CollisionWorldShape& out) {
+    auto* cc = world.GetComponent<CollisionComponent>(e);
+    auto* xf = world.GetComponent<TransformComponent>(e);
+    if (!cc || !xf || !cc->bEnabled) return false;
+
+    // 世界矩阵：优先场景图（支持父层级），无场景图回退局部矩阵
+    float4x4 wm = xf->GetLocalMatrix();
+    if (auto* sg = world.GetSceneGraph()) {
+        wm = sg->GetWorldMatrix(e);
+    }
+    // 半径/半尺寸统一乘最大缩放分量（MVP 约定）
+    float scale = std::max({ xf->scale.x, xf->scale.y, xf->scale.z });
+    if (scale <= 0.0f) scale = 1.0f;
+
+    out.shape  = cc->shape;
+    out.center = float3(wm[3]);
+    out.radius = cc->radius * scale;
+
+    switch (cc->shape) {
+    case CollisionShape::AABB: {
+        AABB local(-cc->halfExtents, cc->halfExtents);
+        AABB worldBox = local.Transform(wm);
+        out.min = worldBox.min;
+        out.max = worldBox.max;
+        break;
+    }
+    case CollisionShape::Sphere:
+        // 球体：仅球心与半径（与旋转无关）
+        break;
+    case CollisionShape::Capsule: {
+        // 垂直胶囊：段沿变换上方向，段半长 = max(0, height/2 - radius)
+        float halfSeg = std::max(0.0f, cc->height * 0.5f - cc->radius) * scale;
+        float3 up = glm::normalize(xf->rotation * float3(0.0f, 1.0f, 0.0f));
+        out.segA = out.center + up * halfSeg;
+        out.segB = out.center - up * halfSeg;
+        break;
+    }
+    }
     return true;
 }
 

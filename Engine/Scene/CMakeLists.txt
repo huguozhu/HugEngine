@@ -49,6 +49,9 @@ set(SCENE_SOURCES
     Scene/CollisionComponent.h
     Scene/CollisionSystem.h
     Scene/CollisionSystem.cpp
+    Scene/CollisionDebugComponent.h
+    Scene/CollisionDebugSystem.h
+    Scene/CollisionDebugSystem.cpp
     Scene/CharacterMovementComponent.h
     Scene/MovementSystem.h
     Scene/MovementSystem.cpp

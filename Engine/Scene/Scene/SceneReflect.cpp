@@ -23,6 +23,7 @@
 #include "Scene/TextRenderComponent.h"
 #include "Scene/DecalComponent.h"
 #include "Scene/CollisionComponent.h"
+#include "Scene/CollisionDebugComponent.h"   // 任务 26：调试线框（空注册，不进编辑器/AI 词表）
 #include "Scene/CharacterMovementComponent.h"
 #include "Scene/AbilityComponent.h"
 #include "Scene/SplineComponent.h"
@@ -425,6 +426,13 @@ HE_BEGIN_REGISTER(he::SkeletalMeshComponent)
     HE_REGISTER_PROPERTY(he::SkeletalMeshComponent, i32, currentClip)
         HE_ATTR_CATEGORY("SkeletalMesh") HE_ATTR_AI_VISIBLE() HE_ATTR_AI_WRITABLE() HE_ATTR_AI_DESCRIPTION("当前播放剪辑下标（-1 = 绑定姿势）")
     HE_END_PROPERTY()
+HE_END_REGISTER()
+
+// --- CollisionDebugComponent 注册（任务 26）---
+// **空注册**：调试线框由 CollisionDebugSystem 生成，是纯可视化产物，
+// 不进编辑器属性面板、不进 LLM 词表（避免 AI 生成"调试线框"这种无意义实体）。
+// 这里注册只为让 HE_COMPONENT 的 StaticClass() 有定义（组件工厂/类型系统需要它）。
+HE_BEGIN_REGISTER(he::CollisionDebugComponent)
 HE_END_REGISTER()
 
 } // namespace he

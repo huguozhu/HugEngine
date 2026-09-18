@@ -3,6 +3,8 @@
 //
 // 覆盖：AABB/Sphere/Capsule 三形状全组合 Overlap、
 //       Contains 点包含、Raycast 最近命中与容错。
+//   任务 26 追加：碰撞体调试线框（12 棱 / 3 大圆 / 胶囊组合、与检测共用世界形状、
+//     退化参数安全、开关与禁用状态）。
 // ============================================================
 
 #include "doctest.h"
@@ -11,6 +13,11 @@
 #include "Scene/Transform.h"
 #include "Scene/CollisionComponent.h"
 #include "Scene/CollisionSystem.h"
+#include "Scene/CollisionDebugComponent.h"
+#include "Scene/CollisionDebugSystem.h"
+#include "Math/Geometry.h"
+
+#include <cmath>
 
 using namespace he;
 
@@ -194,3 +201,127 @@ TEST_CASE("CollisionSystem 禁用与缺失容错") {
     REQUIRE(CollisionSystem::Raycast(world, float3(0, 0, 5), float3(0, 0, -1), 100.0f, hit, t));
     CHECK(hit == a);
 }
+
+// ============================================================
+// 任务 26：碰撞体调试线框
+// ============================================================
+
+TEST_CASE("调试线框：AABB 12 条棱，包围盒与检测用的世界 AABB 一致") {
+    World world;
+    Entity e = MakeShape(world, "Box", CollisionShape::AABB, float3(1, 2, 3),
+                         float3(1.0f, 0.5f, 2.0f), 0.5f, 1.0f);
+
+    CollisionWorldShape shape;
+    REQUIRE(CollisionSystem::ExtractWorldShape(world, e, shape));
+
+    TArray<StaticVertex> verts;
+    TArray<u32>          indices;
+    const u32 segments = CollisionDebugSystem::BuildWireframe(shape, 0.02f, verts, indices);
+
+    CHECK(segments == 12);                       // 12 条棱
+    CHECK(verts.size() == 12 * 8);               // 每段十字片 = 8 顶点
+    CHECK(indices.size() == 12 * 12);            // 每段 2 片 × 2 三角形
+
+    // 线框包围盒 = 世界 AABB ± 半线宽（线框必须就是检测用的那个形状）
+    AABB box;
+    for (const auto& v : verts) box.Expand(v.position);
+    CHECK(box.min.x == doctest::Approx(shape.min.x - 0.01f).epsilon(0.01));
+    CHECK(box.min.y == doctest::Approx(shape.min.y - 0.01f).epsilon(0.01));
+    CHECK(box.max.x == doctest::Approx(shape.max.x + 0.01f).epsilon(0.01));
+    CHECK(box.max.z == doctest::Approx(shape.max.z + 0.01f).epsilon(0.01));
+}
+
+TEST_CASE("调试线框：球 = 3 个正交大圆，胶囊 = 两圆 + 竖线 + 半球弧") {
+    World world;
+    // 球：半径 2，球心 (0,0,0)
+    Entity s = MakeShape(world, "Sphere", CollisionShape::Sphere, float3(0, 0, 0),
+                         float3(0.5f), 2.0f, 1.0f);
+    CollisionWorldShape shape;
+    REQUIRE(CollisionSystem::ExtractWorldShape(world, s, shape));
+
+    TArray<StaticVertex> verts;
+    TArray<u32>          indices;
+    u32 segments = CollisionDebugSystem::BuildWireframe(shape, 0.02f, verts, indices);
+    CHECK(segments == CollisionDebugSystem::kCircleSegments * 3);
+    CHECK(verts.size() == segments * 8);
+    // 半径正确：顶点到球心距离 ≈ 2（± 半线宽）——聚合检查，避免上千条断言
+    float minD = 1e30f, maxD = 0.0f;
+    for (const auto& v : verts) {
+        const float d = glm::length(v.position - shape.center);
+        minD = std::min(minD, d);
+        maxD = std::max(maxD, d);
+    }
+    CHECK(minD >= doctest::Approx(2.0f).epsilon(0.02));
+    CHECK(maxD <= doctest::Approx(2.0f).epsilon(0.02));
+
+    // 胶囊：半径 0.5、总高 3（段半长 = 1.5 - 0.5 = 1）
+    Entity c = MakeShape(world, "Capsule", CollisionShape::Capsule, float3(0, 5, 0),
+                         float3(0.5f), 0.5f, 3.0f);
+    REQUIRE(CollisionSystem::ExtractWorldShape(world, c, shape));
+    CHECK(glm::length(shape.segA - shape.segB) == doctest::Approx(2.0f).epsilon(0.001));
+    segments = CollisionDebugSystem::BuildWireframe(shape, 0.02f, verts, indices);
+    const u32 expected = CollisionDebugSystem::kCircleSegments * 2 + 4
+                       + CollisionDebugSystem::kCapArcSegments * 8;
+    CHECK(segments == expected);
+    // 竖直范围 = 段长 + 两端半径
+    AABB box;
+    for (const auto& v : verts) box.Expand(v.position);
+    CHECK(box.max.y - box.min.y == doctest::Approx(3.0f).epsilon(0.02));
+}
+
+TEST_CASE("调试线框：退化参数不产生 NaN；系统开关与禁用状态") {
+    World world;
+    Entity e = MakeShape(world, "Degenerate", CollisionShape::Capsule, float3(0, 0, 0),
+                         float3(0.5f), 0.0f, 0.1f);   // 半径 0、height < 2r
+    CollisionWorldShape shape;
+    REQUIRE(CollisionSystem::ExtractWorldShape(world, e, shape));
+
+    TArray<StaticVertex> verts;
+    TArray<u32>          indices;
+    CollisionDebugSystem::BuildWireframe(shape, 0.0f, verts, indices);   // 线宽 0 也该安全
+    bool allFinite = true;
+    for (const auto& v : verts) {
+        allFinite = allFinite && std::isfinite(v.position.x)
+                              && std::isfinite(v.position.y)
+                              && std::isfinite(v.position.z);
+    }
+    CHECK(allFinite);
+
+    // 系统：打开的碰撞体生成线框；关闭后几何清空（组件保留）
+    Entity box = MakeShape(world, "Box", CollisionShape::AABB, float3(0, 1, 0),
+                           float3(1.0f), 0.5f, 1.0f);
+    CHECK(CollisionDebugSystem::Update(world, true) >= 1);
+    auto* dbg = world.GetComponent<CollisionDebugComponent>(box);
+    REQUIRE(dbg != nullptr);
+    CHECK(dbg->segmentCount == 12);
+    CHECK(dbg->GetVertexCount() == 96);
+    CHECK(dbg->unlit == true);
+    CHECK(dbg->castShadow == false);
+    CHECK(dbg->alphaMode == 2);
+
+    // 形状没变 → 不重复重建（缓存命中，顶点数保持一致）
+    const u32 vtxBefore = dbg->GetVertexCount();
+    CollisionDebugSystem::Update(world, true);
+    CHECK(dbg->GetVertexCount() == vtxBefore);
+
+    // 移动实体 → 形状变了 → 重建（线框跟随）
+    auto* xf = world.GetComponent<TransformComponent>(box);
+    xf->position = float3(10, 1, 0);
+    CollisionDebugSystem::Update(world, true);
+    AABB boxBounds = dbg->GetBounds();
+    CHECK(boxBounds.min.x == doctest::Approx(9.0f).epsilon(0.05));
+
+    // 关闭开关 → 清空几何但保留组件
+    CHECK(CollisionDebugSystem::Update(world, false) >= 1);
+    CHECK(dbg->segmentCount == 0);
+    CHECK(dbg->GetVertexCount() == 0);
+    CHECK(world.GetComponent<CollisionDebugComponent>(box) == dbg);
+
+    // 碰撞体被禁用 → 线框消失
+    CollisionDebugSystem::Update(world, true);
+    CHECK(dbg->segmentCount == 12);
+    world.GetComponent<CollisionComponent>(box)->bEnabled = false;
+    CollisionDebugSystem::Update(world, true);
+    CHECK(dbg->segmentCount == 0);
+}
+
