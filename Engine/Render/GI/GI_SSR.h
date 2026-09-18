@@ -52,6 +52,10 @@ public:
     float stepSize   = 0.5f;
     float maxDistance = 50.0f;
     float thickness   = 0.1f;
+    /// 是否走 Hi-Z 层次 march（默认 1 = 有金字塔时走层次追踪）。
+    /// 置 0 强制走线性 march：两条路径的**有效性占比**必须同量级（任务 25 / §9.2-W 的判据），
+    /// 保留这个开关就是为了能随时把两者摆在一起对照，而不是靠临时改代码重编。
+    bool  useHiZ      = true;
 
 private:
     void CreateOutputTex(u32 w, u32 h);

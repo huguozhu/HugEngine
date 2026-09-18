@@ -567,6 +567,8 @@ int main() {
         if (auto* ssr = deferredPipeline.GetSSR()) {
             ssr->maxSteps = GetFloat(cfgData, "ssr_max_steps", 64.0f);
             ssr->stepSize = GetFloat(cfgData, "ssr_step_size", 0.5f);
+            // Hi-Z 层次 march 开关（任务 25）：默认 1；置 0 强制线性 march，用于两条路径对照
+            ssr->useHiZ   = GetInt(cfgData, "ssr_use_hiz", 1) != 0;
         }
 
         // ── 面板状态：管线 / GI 档位 / 只看 GI / GI 通道配置 ──
@@ -1577,6 +1579,7 @@ int main() {
         if (auto* ssr = deferredPipeline.GetSSR()) {
             out["ssr_max_steps"] = std::to_string(ssr->maxSteps);
             out["ssr_step_size"] = std::to_string(ssr->stepSize);
+            out["ssr_use_hiz"]   = std::to_string(ssr->useHiZ ? 1 : 0);
         }
 
         // ── SSAO ──

@@ -187,7 +187,7 @@ void GI_SSR::Render(rhi::IRHICommandList* cmd) {
         float  _pad[3];
     } pc;
     pc.p = float4(maxSteps, stepSize, maxDistance, thickness);
-    pc.useHiZ = (m_HiZTex != nullptr) ? 1.0f : 0.0f;   // Hi-Z 金字塔可用时启用层次追踪
+    pc.useHiZ = (m_HiZTex != nullptr && useHiZ) ? 1.0f : 0.0f;   // 金字塔可用且未被禁用时走层次追踪
     pc._pad[0] = pc._pad[1] = pc._pad[2] = 0.0f;
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     cmd->Draw(3);
