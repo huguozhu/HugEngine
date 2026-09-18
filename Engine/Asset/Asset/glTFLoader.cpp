@@ -207,9 +207,18 @@ void ApplyMaterial(const cgltf_material* material, MeshComponent* meshComp) {
         meshComp->anisotropic = material->anisotropy.anisotropy_strength;
     }
 
-    // 透射（当前仅记录，参与折射要等 PT 任务 4）
+    // 透射与参与介质（PT 任务 4：折射 + Beer-Lambert 吸收）
     if (material->has_transmission) {
         meshComp->transmission = material->transmission.transmission_factor;
+    }
+    if (material->has_volume) {
+        meshComp->attenuationColor = float3(
+            material->volume.attenuation_color[0],
+            material->volume.attenuation_color[1],
+            material->volume.attenuation_color[2]);
+        // glTF 未写 attenuationDistance 时是 +inf（无衰减）→ 引擎侧用 0 表示"不衰减"
+        const float dist = material->volume.attenuation_distance;
+        meshComp->attenuationDistance = (dist > 0.0f && dist < 1e30f) ? dist : 0.0f;
     }
 }
 

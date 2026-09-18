@@ -66,7 +66,10 @@ public:
     float  sheen              = 0.0f;            // 光泽强度（天鹅绒边缘）
     float  clearcoat          = 0.0f;            // 清漆层强度
     float  clearcoatGloss     = 1.0f;            // 清漆光泽度（1=光滑，由粗糙度取反而来）
-    float  transmission       = 0.0f;            // 透射（预留字段位：0=不透明，任务 4 才参与折射）
+    float  transmission       = 0.0f;            // 透射（0=不透明；>0 走折射，见 PT 任务 4）
+    // glTF KHR_materials_volume（参与介质）：Beer-Lambert 吸收
+    float3 attenuationColor    = float3(1.0f);   // 体积吸收色（1=不吸收）
+    float  attenuationDistance = 0.0f;           // 吸收特征距离（0 = 不衰减，对应 glTF 的 +inf）
 
     // --- 纹理路径 ---
     String baseColorTexture;            // 基础色纹理

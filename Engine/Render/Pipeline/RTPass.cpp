@@ -14,6 +14,7 @@
 #include "RT/PTMaterialParams.h"   // Disney 参数打包（与光栅化 CPU 侧、PT 载荷同源）
 
 #include <glm/gtc/matrix_transform.hpp>
+#include <cmath>   // std::log（介质吸收系数 σ_t 推导）
 #include <cstring>
 
 namespace he::render {
@@ -516,9 +517,11 @@ bool RTPass::CreateMaterialTexture(rhi::IRHIDevice* device, u32 maxInstances,
 //   row2=(法线线性起始=tri*3, 三角形数, 法线纹理宽度, 0), row3=emissive.rgb+0,
 //   row4=disneyA(aniso, subsurface, specular, sheen),
 //   row5=disneyB(clearcoat, clearcoatGloss, specularTint.rg),
-//   row6=(disneyC=specularTint.b, dielectricF0, ior, transmission)
-// 行 4~6 与 Material.h 的 disneyA/disneyB/disneyC 打包逐字段一致，
-// 供路径追踪的 PathPayload（PT 任务 1）带上完整 Disney 参数。
+//   row6=(disneyC=specularTint.b, dielectricF0, ior, transmission),
+//   row7=(σ_t.rgb, 0) —— 参与介质的 Beer-Lambert 吸收系数（由 attenuationColor /
+//        attenuationDistance 推导；不吸收时为 0）
+// 行 4~7 与 Material.h 的 disneyA/disneyB/disneyC 打包逐字段一致，
+// 供路径追踪的 PathPayload（PT 任务 1 / 4）带上完整 Disney 参数与介质参数。
 // ============================================================
 bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world) {
     if (!device) return false;
@@ -535,11 +538,12 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world
     u64 totalTris = 0;
     for (auto& [e, m] : meshList) totalTris += m->GetIndexCount() / 3;
 
-    // ── 材质纹理数据（7 行 × N 列）──
+    // ── 材质纹理数据（8 行 × N 列）──
     // row0=albedo.rgb+metallic, row1=roughness+ao,
     // row2=(法线线性起始=tri*3, 三角形数, 法线纹理宽度, 0), row3=emissive.rgb+0,
-    // row4=disneyA, row5=disneyB, row6=(disneyC, dielectricF0, ior, transmission)
-    std::vector<float> matData(n * 7 * 4, 0.0f);
+    // row4=disneyA, row5=disneyB, row6=(disneyC, dielectricF0, ior, transmission),
+    // row7=(σ_t.rgb, 0) 介质吸收系数
+    std::vector<float> matData(n * 8 * 4, 0.0f);
 
     // ── 三角形顶点法线扁平数组（每三角形 3 条，跨所有实例）──
     // 2D 纹理布局：width=W, height=kNormTexHeight；线性索引 lin → (row=lin/W, col=lin%W)
@@ -600,7 +604,18 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world
         row6[0] = disney.surfaceParams.x;   // disneyC = specularTint.b
         row6[1] = disney.surfaceParams.y;   // dielectricF0（由 IOR 推导）
         row6[2] = disney.surfaceParams.z;   // ior
-        row6[3] = disney.surfaceParams.w;   // transmission（预留：任务 4 才参与折射）
+        row6[3] = m.transmission;           // 透射（>0 时 PT 走折射/介质分支）
+        // 介质吸收系数 σ_t：Beer-Lambert 透射率 = exp(-σ_t · d)
+        //   σ_t = -ln(attenuationColor) / attenuationDistance（逐通道）
+        // attenuationDistance<=0（glTF 的 +inf）或颜色为 1（不吸收）时为 0 = 不衰减
+        float* row7 = &matData[n * 28 + i * 4];
+        row7[0] = row7[1] = row7[2] = row7[3] = 0.0f;
+        if (m.attenuationDistance > 0.0f) {
+            const float inv = 1.0f / m.attenuationDistance;
+            row7[0] = -std::log(std::max(m.attenuationColor.r, 1e-6f)) * inv;
+            row7[1] = -std::log(std::max(m.attenuationColor.g, 1e-6f)) * inv;
+            row7[2] = -std::log(std::max(m.attenuationColor.b, 1e-6f)) * inv;
+        }
 
         // 读取顶点/索引缓冲 → 每三角形 3 条顶点法线
         auto* vb = m.GetVertexBuffer().get();
@@ -631,12 +646,12 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world
         triFlat += triCount;
     }
 
-    // ── 创建材质纹理（7×N RGBA32F）──
+    // ── 创建材质纹理（8×N RGBA32F）──
     {
         rhi::TextureDesc desc;
         desc.format      = rhi::Format::RGBA32_FLOAT;
         desc.width       = n;
-        desc.height      = 7;
+        desc.height      = 8;
         desc.mipLevels   = 1;
         desc.usage       = rhi::TextureUsage::ShaderResource;
         desc.initialData = matData.data();
@@ -663,7 +678,7 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world
         }
     }
 
-    HE_CORE_INFO("RTPass: 场景材质纹理(7×{}) + 法线纹理({}×{} RGBA32F)创建, {} 实例 {} 三角形",
+    HE_CORE_INFO("RTPass: 场景材质纹理(8×{}) + 法线纹理({}×{} RGBA32F)创建, {} 实例 {} 三角形",
                  n, normTexWidth, kNormTexHeight, n, totalTris);
     return true;
 }
