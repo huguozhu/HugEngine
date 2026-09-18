@@ -643,8 +643,16 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 
 | 管线 | 能力位 |
 |---|---|
-| `PipelineCaps::Forward` | 光栅阴影 · IBL（diffuse+specular）· RSM — **无 GBuffer，故无屏幕空间源与探针** |
-| `PipelineCaps::Deferred` | Forward 的全部 + SSGI · SSR · SSAO · DDGI · 光追阴影 · RTGI · RT 反射 · RTAO |
+| `PipelineCaps::Forward` | 光栅阴影 —— **GI 源位为空**（见下方说明） |
+| `PipelineCaps::Deferred` | `Forward \| AllSources \| RT 阴影` = 光栅/光追阴影 + IBL（diffuse+specular）+ RSM + SSGI · SSR · SSAO/GTAO · DDGI · RTGI · RT 反射 · RTAO |
+
+> **为什么 `Forward` 一个 GI 源位都不声明**（§9.2-H 的结论）：能力位的语义是「该管线在
+> **GI 层栈模型**下能承载哪些源」——被声明的源会被面板放进层栈、被 `Degrade` 保留，并预期
+> 由管线消费。而 Forward 的 IBL 与 RSM 是**管线级开关**（`iblIntensity` / `rsmIndirect`）
+> 加内部硬编码路径：它既不读层栈，PBR 着色器里也没有 `GIBlendParams`、不做归一化合成。
+> 此前声明 IBL + RSM 的实际效果是把源放进一个没人消费的层栈里。**Forward 仍然照常使用
+> IBL 与 RSM 渲染**，只是它们不再被描述为「层栈 GI 源」；让它们真正走层栈归一化是任务 26。
+> 另外前向着色无 GBuffer，屏幕空间源与探针本来也不可用。
 
 `GISourceId::Lightmap` **在 `ToPipelineCap()` 中没有分支**，落到 `default` 返回
 `kPipelineGINone` → `IsAvailable()` 恒为 false。这是「预留但不可用」的准确语义（§9.2-F）。
@@ -719,6 +727,7 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 | **B / D** | **AO 不再压暗直接光、并开始作用于镜面**（§9.2-D）：合成顺序改为「直接光单独记下 → 间接漫反射/镜面各自累积 → 只对间接项乘 AO」。实测：纯直接光下 AO 不再改变画面（0.1007917 → 0.2021757，与关 AO 一致）；镜面 IBL 下 AO 生效（0.02649925 → 0.01478481）。§3.3 的比值/相关性不变（21.1× / 0.9234），白炉 1.0000 | ✅ 完成 |
 | **B / F** | **RSM 的注册脱离 DDGI 门控**（§9.2-F）：门控改为两个消费方的并集（`ShouldRunDDGI() \|\| ShouldRunRSM()`），并新增 `GI_DDGI::ClearRSM` 让"本帧不注册"也成为明确结论（消除 useRSM 闩锁的残留面）。实测 `diffuse={RSM}` 且 DDGI 关时 pass 列表由无 `RSM` 变为有；新增 `Tools/gi/rsm_gate_check.ps1` 三例，A 例在改前必失败 | ✅ 完成 |
 | **B / E** | **SSR 与 SSAO 的投影改用真实相机**（§9.2-E 的两个剩余实例）：Provider 把 `ctx.camera` 交给 pass，pass 用 `CameraData::GetProjMatrix()`，无相机时才退化为原来的默认投影。实测 `cam_fov=100` 时 AO 输出逐像素最大差 0.387、均值差 −0.79%；`cam_fov=60` 时与同配置重复运行的抖动同量级（0.069 对 0.078）⇒ 标准路径不变 | ✅ 完成 |
+| **B / H** | **Forward 的能力位不再"声称支持但不存在"**（§9.2-H）：`PipelineCaps::Forward` 改为只含光栅阴影（GI 源位为空），新增 `AllSources` 供 Deferred 与 UI 使用；面板对无层栈 GI 源的管线显示说明并置灰层栈控件。判据为单元测试：`IsAvailable(IBL/RSM, Forward)` 为假、`Degrade(Ultra, Forward)` 后三个 GI 通道为空且兜底不发生；Forward 的 IBL/RSM 渲染不受影响（本就不读层栈） | ✅ 完成 |
 
 ### 8.2 三个关键指标（实测）
 
@@ -778,7 +787,7 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 | ~~**E**~~ | ✅ **已修复** | **屏幕空间源用硬编码默认投影矩阵**而非真实相机：`kDefaultFOV=60°/0.1/2000`；`PhysicalCamera` 会由焦距反算 fov → 非默认相机下 SSGI/SSAO/SSR 重建错位。根因是 `IGIProvider` 未把相机传给屏幕空间源（只有 DDGI 有 `SetCamera`）。**三个实例全部修完**：SSGI（见 M/N/O）、SSR 与 SSAO（本次）。修法与 SSGI 同源：Provider 把 `ctx.camera` 交给 pass，pass 用 `CameraData::GetProjMatrix()`，无相机时退化为默认投影。**实测指纹**（单源层栈、Frame=120、对 AO 输出纹理逐像素对照）：`cam_fov=60`（默认）时改前改后只在**运行间抖动**范围内（最大差 0.069，同配置重复运行对照 0.078）⇒ 标准路径不变；`cam_fov=100` 时最大差 **0.387**、均值差 **−0.79%** ⇒ 硬编码常量与真实相机不一致时确实错位 | `GI/GI_SSR.{h,cpp}`、`GI/SSRProvider.h`、`PostProcess/SSAO.{h,cpp}`、`GI/AOProvider.h`；采样设施补 `cam_fov` 配置项与镜面/AO 落盘 |
 | ~~**F**~~ | ✅ **已修复** | **RSM 的 pass 被嵌套在 DDGI 门控内**：单独勾选 RSM 而关闭 DDGI 时，RSM 永不注册（Forward 侧却是独立的 `ShouldRunRSM()`）。RSM 实际有**两个独立消费方**——Lighting 的漫反射间接光（`ShouldRunRSM()`）与 DDGI 探针的世界辐射度来源——门控应取并集。**实测指纹**：`diffuse={RSM}` 且 DDGI 关时 pass 列表里**没有 `RSM`**，改后出现；同时新增 `GI_DDGI::ClearRSM`，让"没注册"也成为一个**逐帧明确结论**（`useRSM` 是由两个纹理成员推导的闩锁，此前"不注册就什么都不做"会把上一帧的绑定留在原地，是 §9.2-R 的残留面） | `DeferredPipeline_FrameGraph.cpp`；`GI/GI_DDGI.{h,cpp}`；`06.GILab.cpp`（新增 `gi_blend_diffuse_rsm` 配置键，此前 RSM 只能靠面板勾选）；回归检查 `Tools/gi/rsm_gate_check.ps1` |
 | ~~**G**~~ | ✅ **已修复** | **层栈与子系统开关是两套真值**（不变量 1 的实际状态）：子系统 `enabled` 只在管线 `Initialize` 时按当时的层栈算**一次**，之后层栈再变（配置加载 / 预设 / 面板）就与子系统脱节 ⇒ `IsValid()` 为假、pass 不注册，而层栈仍以正权重把它计入归一化：**勾选却静默失效**。`halfRes` 是第三重（要等下次 `OnResize` 才重建纹理）。**实测指纹**：`specular={SSR}`（其余层栈为空）时，pass 列表里**完全没有 SSR**；把「层栈 → 开关」的对齐交给框架后，`SSR` 与 `SSR_Denoise` 都出现。**「复发过」的实体已找到**：`06.GILab.cpp` 里有一份手工补丁逐个子系统同步开关 —— 把不变量的维护放到调用方，必然有下一个忘记同步的调用方。修法：在 `IGIProvider::SyncToStack`（帧图构图前每帧调用）里对齐 `enabled` 与输出尺寸，并删除那份手工补丁 | `GI/AOProvider.h`、`SSGIProvider.h`、`SSRProvider.h`、`DDGIProvider.h`；`GI_SSGI.{h,cpp}`、`GI_SSR.{h,cpp}`；`06.GILab.cpp`；回归检查 `Tools/gi/stack_switch_check.ps1` |
-| **H** | 中 | **Provider 抽象只在 Deferred 落地**：`ForwardPipeline` 无 `m_GIProviders`，且 Forward 的 PBR shader **没有 `GIBlendParams` UBO** → 层栈归一化在 Forward 完全不存在，但 `PipelineCaps::Forward` 声明支持 IBL+RSM | `ForwardPipeline.h`；全仓 `GIBlendParams` 仅 DeferredLighting 使用 |
+| **H** | 中 → ✅ **已按「把声明改对」解决** | **Provider 抽象只在 Deferred 落地**：`ForwardPipeline` 无 `m_GIProviders`，Forward 的 PBR shader **没有 `GIBlendParams` UBO** → 层栈归一化在 Forward 完全不存在。**但 `PipelineCaps::Forward` 却声明支持 IBL + RSM** ⇒ 面板与 `Degrade` 会把这些源放进一个**没有任何代码消费**的层栈里：配置说谎。**修法取「把声明改成实际支持的范围」**：`PipelineCaps::Forward` 现在**只有光栅阴影**（GI 源位为空），新增 `PipelineCaps::AllSources` 汇总全部 GI 源位供 Deferred 与 UI 使用。判据是单元测试（`IsAvailable(IBL/RSM, Forward)` 必须为假、`Degrade` 后 Forward 的三个 GI 通道必须为空且兜底不得发生）；GILab 面板在本管线无层栈 GI 源时显示说明并**置灰**层栈控件（内容仍可查看，但不可编辑）。「让 Forward 真正走层栈归一化」拆为独立任务 26 | `GITypes.h`（`PipelineCaps`）；`ForwardPipeline.cpp`（注释）；`06.GILab.cpp`（面板置灰 + 候选源按能力位过滤）；`Tests/TestGITypes.cpp` |
 | ~~**I**~~ | ✅ **已修复** | **RTGI 用 DDGI 做 miss 回退**，破坏「源独立」前提：Ultra 档同时含 RTGI+DDGI 时，DDGI 信息被用两次再归一化 → 加权平均失去无偏性。**实测指纹**：同一帧、同一相机，只改漫反射层栈 —— `diffuse={RTGI}` 时 RTGI 原始输出均值 **0.0575**，`diffuse={DDGI,RTGI}` 时 **0.2034**（3.5 倍）⇒ 同一份 RTGI 的读数完全由「DDGI 在不在层栈里」决定。修法：把「DDGI 是否是层栈源」作为每帧状态交给 rgen（`flags` bit1），是则 miss 贡献 0、否则保留回退（降级路径）。修后两者均值 **0.0575 对 0.0575（差 0.000%）** | `RT_GI.rgen.slang`；`RTEffectPass.h`；`RTGIPass.cpp`；`RTProvider.h`；`DeferredPipeline_FrameGraph.cpp`；回归检查 `Tools/gi/rtgi_coupling_check.ps1` |
 | ~~**V**~~ | ✅ **已修复** | **时域降噪在 `BeginOffscreenPass` 之前没有绑管线** ⇒ 建出附件数与 RenderPass 不符的 Framebuffer（`VUID-VkFramebufferCreateInfo-attachmentCount-00876`：1 个附件对 2 个附件），**设备直接挂住、进程再也不推进**。表现为「只要 diffuse 层栈含 RTGI 就稳定挂死在第 1 帧」，因此**任何 RT 相关的测量都做不了**（任务 3/17/20 都被它挡住）。根因：帧图的附属 pass 先 `BeginOffscreenPass`（用它取 RenderPass 建 Framebuffer）再 `RenderAux`，而 `RTDenoiser` 自己不绑管线、由 `Render` 内部另起一个 pass。修法：`RTDenoiser` 增加 `PreBind`（绑 PSO/视口/裁剪/描述符集），`Render` 不再自起 pass，`RTEffectProvider::PreBindAux` 的时域分支改为调用它 | `PostProcess/RTDenoiser.{h,cpp}`；`GI/RTProvider.h` |
 | **J** | 低 | 合成参数 UBO 是**单份**、非 per-frame-in-flight（`MAX_FRAMES_IN_FLIGHT=3`） | `LightingPass.cpp:155-168` |
@@ -1065,7 +1074,7 @@ Vulkan 校验 46 条与改前一致。
 | ~~**5**~~ | ~~**§9.2-D · AO 乘到了直接光上**~~ —— ✅ **已完成** | 中 / 中 | 每帧生效的能量错误（AO 把**直接光**也压暗了），且 AO 不作用于镜面。修法同预期：直接光单独记下，AO 只乘间接项（漫反射 + 镜面），自发光不受遮蔽。实测：纯直接光下 AO 不再改变画面（0.1007917 → 0.2021757，与关 AO 完全一致），镜面 IBL 下 AO 开始生效（×0.558）；§3.3 的比值与相关性不受影响 |
 | ~~**6**~~ | ~~**§9.2-F · RSM 的 pass 被嵌套在 DDGI 门控内**~~ —— ✅ **已完成** | 中 / 中 | 单独勾选 RSM 而关闭 DDGI 时 **RSM 永不注册**——配置说谎，属功能失效。修法：门控改为「两个消费方的并集」（`ShouldRunDDGI() \|\| ShouldRunRSM()`，后者与 Forward 侧同一个谓词），并新增 `GI_DDGI::ClearRSM` 让"本帧不注册"也成为明确结论。**实测**：`diffuse={RSM}` 且 DDGI 关时 pass 列表由**无** `RSM` 变为**有**；三例回归检查全过，「层栈无 RSM」的两例不注册（防止改过头）。三变体读数、每帧告警、白炉、单测与改前逐项一致 |
 | **7** | ~~**§9.2-E · SSR 与 SSAO 仍用硬编码投影**~~ —— ✅ **已完成** | 中 / 中 | 同一缺陷的**两个剩余实例**（SSGI 已修，见 §9.2-M）；修法与先例都已具备。非默认相机（`PhysicalCamera` 由焦距反算 fov）下空间错位。**实测**：`cam_fov=100` 时 AO 输出纹理最大差 0.387、均值差 −0.79%；`cam_fov=60` 时与同配置重复运行对照量级相同（0.069 对 0.078）⇒ 标准路径不变。过程中顺带发现 **§9.2-W**（SSR 恒 miss），SSR 一半的数值验证因此要等第 25 项 |
-| **8** | **§9.2-H · Forward 无 Provider、无 `GIBlendParams` UBO** | 中 / 中 | 要么补齐 Forward 的层栈归一化，要么把 `PipelineCaps::Forward` 的声明改对——**当前是"声称支持但实际不存在"**，与 §5.1 的能力位表不符 |
+| **8** | ~~**§9.2-H · Forward 无 Provider、无 `GIBlendParams` UBO**~~ —— ✅ **已完成**（取「把声明改对」） | 中 / 中 | 此前是"声称支持但实际不存在"：`Degrade` 会把 IBL/RSM 放进 Forward 的层栈，而 Forward 根本不读它。**实测判据**（单元测试）：`IsAvailable(IBL/RSM, Forward)` 为假、`Degrade(Ultra, Forward)` 后三个 GI 通道**全为空**且兜底不发生、属性测试（管线×设备×四档全组合）仍自洽；面板对无层栈 GI 源的管线显示说明并置灰控件。**Forward 的 IBL/RSM 渲染不受影响**（它们本来就不读层栈）。「真正走层栈归一化」拆为任务 26 |
 
 **C 组 · 补齐「归一化」的前提**
 
@@ -1103,6 +1112,7 @@ Vulkan 校验 46 条与改前一致。
 |:---:|---|---|---|
 | **21** | **文档一致性修正**（可随时做） | 小 / 低 | §3.1 的合成片段与 shader 不符（`max(den,1e-4)` vs `(den>0)?num/den:0`）；§11.3 的采样目标列表缺 `radiance`；§6 不变量 2 与 6 已过期；§9.2 标题漏 M/N/O/P；§11.4 两条随 P5 退场的失效风险；§11.3 的运行示例自相矛盾 |
 | **25** | **§9.2-W · SSR 的 Hi-Z march 恒 miss** | 中 / 中 | SSR 现在**一个命中都没有**（全屏 alpha=−1、RGB=0），镜面层栈里有没有它完全等价。已定位到 Hi-Z 分支（强制走线性 march 立刻有 34.66% 命中）；根因是深度约定反了（min 金字塔 + reverse-Z 判断 vs 引擎的 zero-to-one）。修法：按真实约定改判据（并复核线性分支的命中/遮挡方向），判据：同一配置下 SSR 有效像素占比从 0 变为与线性路径同量级，且反射在**平面镜像**处与解析解一致；回归：镜面层栈三种配置的读数与 §3.3 不变 |
+| **26** | **让 Forward 真正走「层栈 + 归一化合成」**（§9.2-H 的另一半） | 中 / 中 | 任务 8 把**声明**改对了，但 Forward 的 IBL/RSM 仍是管线级开关。要补齐需要：PBR 着色器补混合参数 UBO（push constant 已满，必须新开 binding）、把硬编码的 IBL 漫反射/镜面与 RSM 改成按层栈槽位归一化合成、帧图/管线每帧填充 UBO。**影响面大**：`PBR.frag` 被 02.Cube / 03.Sponza / 05.AISamples / Editor 共用，需逐个回归。判据：`pipeline_mode=0` 下把 `diffuse` 层栈从 `{IBL}` 改成 `{IBL,RSM}` 时读数符合归一化预期（多开一个源不变亮、单源与改前一致） |
 
 > **本次重排说明**：
 > 1. **引入 A 组**：把两个"调查项"提到最前，理由是**它们决定其余任务的验收是否可信**——
@@ -1160,6 +1170,12 @@ Vulkan 校验 46 条与改前一致。
   > SSAO 一侧已用逐像素对照验证；SSR 一侧要在第 25 项修好 march 之后才能补上同样的对照。
 - **8（H · Forward）**：二选一——补齐 Forward 的 Provider 与 `GIBlendParams` UBO，
   或把 `PipelineCaps::Forward` 的声明改成实际支持的范围。**不能保持"声称支持但不存在"。**
+  **已选后者**：`PipelineCaps::Forward` 现在只有光栅阴影，GI 源位为空。理由是这条路
+  零渲染风险、可被单元测试完全覆盖，而前者要动 `PBR.frag`——它被 4 个示例与编辑器共用，
+  属于必须单独安排回归面的改造，已拆为任务 26。**Forward 的 IBL/RSM 渲染不受影响**
+  （它们本来就由 `iblIntensity` / `rsmIndirect` 驱动、不读层栈）。
+  同时补了 UI 侧的同源问题：面板的候选源列表此前只看「有没有 Provider」，现在也按能力位过滤，
+  并在本管线没有层栈 GI 源时显示说明并置灰控件——否则用户会对着一个改了也不生效的开关操作。
 
 **9 · §3.2 置信度体系**
 
@@ -1423,7 +1439,7 @@ cmake --build Build --config Debug --target 06.GILab -j 8
 | `HE_TRACE_PASSES=1` | 打印每个 pass 开始，把 pass 名与校验层报错在时间上对齐 |
 | `HE_CRASH_TEST=1` | 主动崩溃，自检崩溃处理器 |
 | `HE_FURNACE_PROBE=1` 单用 | 只开探针不开白炉 |
-| `HE_DUMP_GI=<标签>`（+ `HE_DUMP_GI_FRAME=<帧号>`，默认 60） | **GI 纹理级采样**：在指定帧整幅落盘 HDR / GBuffer albedo / **各有效 Provider 的原始与降噪后输出**到 `Build/verify/gi_<标签>_*.f16`（RGBA16F 原始像素、无文件头、行紧密排布），并写 `_meta.txt` 记录逐目标尺寸；落盘后**自动关窗退出**，便于脚本化。逐 Provider 的目标按通道分：`raw`/`final`（漫反射）、`spec_raw`/`spec_final`（镜面）、`ao_raw`/`ao_final`（AO），无该通道输出时自动跳过。**多落盘几张纹理会增加校验层中与拷贝/屏障相关的条数，因此校验计数只在同一采样设置下可比** |
+| `HE_DUMP_GI=<标签>`（+ `HE_DUMP_GI_FRAME=<帧号>`，默认 60） | **GI 纹理级采样**：在指定帧整幅落盘 HDR / GBuffer albedo / **各有效 Provider 的原始与降噪后输出**到 `Build/verify/gi_<标签>_*.f16`（RGBA16F 原始像素、无文件头、行紧密排布），并写 `_meta.txt` 记录逐目标尺寸；落盘后**自动关窗退出**，便于脚本化。逐 Provider 的目标按通道分：`raw`/`final`（漫反射）、`spec_raw`/`spec_final`（镜面）、`ao_raw`/`ao_final`（AO），无该通道输出时自动跳过。**多落盘几张纹理会增加校验层中与拷贝/屏障相关的条数，因此校验计数只在同一采样设置下可比**。注意：当前采样设施引用的是 `deferredPipeline` 的 HDR 目标与 Provider 列表，因此 `pipeline_mode=0`（Forward）下这些目标并不是 Forward 的产物——Forward 的冒烟验证只能看"正常跑完不崩"与日志 |
 | `HE_GILAB_CONFIG=<路径>` | 覆盖示例程序的配置读写路径（读写同一路径），使自动化实验**完全不触碰**仓库内的 `Content/Config/06_GILab.cfg`——否则每次实验都会被示例程序退出时回写覆盖 |
 | `Tools/gi/vk_layer_settings.txt` + `VK_LAYER_SETTINGS_PATH=Tools/gi` | 关闭校验层重复消息上限，得到违规**真实次数**。**计数只在同一采样设置、同一去重条件下可比**：当前采样设施下关去重为 104 / 104 / 110、不设该文件为 56 / 56 / 56（补镜面/AO 落盘之前分别是 75 / 75 / 81 与 49 / 49 / 51）。见 §11.3.1 方法论第 6 条 |
 
