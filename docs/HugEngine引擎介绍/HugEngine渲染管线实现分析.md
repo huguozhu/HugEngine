@@ -31,7 +31,7 @@
 | CPU 并行 | MTCR：≤8 Secondary CB 并行录制 | AsyncCompute（帧首连续 Compute 前缀） | 同 Deferred | 同 Deferred |
 | GPU 驱动 | GPUCulling + ExecuteIndirect | GPUCulling（单阶段/两阶段/PTG）+ DGC 可选 | 同 Deferred | 无（全 RT） |
 | Shader 热重载 | ✅ PBR.vert/frag | ❌ | ❌ | ❌ |
-| 使用方 | 02.Cube mode0 / Editor / 03.Sponza-Forward | 02.Cube mode1 / 04.Sponza-Deferred | 02.Cube mode2 | 02.Cube mode3 |
+| 使用方 | 02.Cube mode0 / Editor / 03.Sponza-Forward | 02.Cube mode1 / 04.Sponza-Deferred | 02.Cube mode2 | 02.Cube mode3 / 05.Sponza-PathTracing |
 
 ```mermaid
 flowchart LR

@@ -31,11 +31,12 @@
 
 ```mermaid
 flowchart TD
-    subgraph samples["Samples 应用层（27 文件，各自独立 main，无共享基类）"]
+    subgraph samples["Samples 应用层（各自独立 main，无共享基类）"]
         s01["01.Triangle<br/>裸 RHI 演示"]
         s02["02.Cube<br/>四管线全功能演示"]
         s03["03.Sponza-Forward<br/>glTF + Forward"]
         s04["04.Sponza-Deferred<br/>GBuffer + Lighting"]
+        s05["05.Sponza-PathTracing<br/>glTF + 全路径追踪"]
         sedit["HugEditor<br/>EditorApp 编辑器"]
     end
 

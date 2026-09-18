@@ -29,6 +29,7 @@ cmake --build Build         # 需要 Release：cmake --build Build --config Rele
 | `02.Cube` | PBR 前向渲染 + 全组件演示场 | 相机 / 天空 / 贴花 / 文字 / 粒子 / 碰撞 / 移动 / 万级实例 / 骨骼动画 / 样条（组件能力的综合载体） |
 | `03.Sponza-Forward` | glTF 加载 Sponza 场景 + 自由相机漫游 | glTFLoader、PBR 纹理、RT 着色器 |
 | `04.Sponza-Deferred` | 同一 Sponza 场景改走延迟管线 | GBuffer + 全屏 Lighting Pass |
+| `05.Sponza-PathTracing` | 同一 Sponza 场景改走全路径追踪管线 | PT 参考渲染器（NEE + MIS + 俄罗斯轮盘赌 → ReSTIR DI → 时域降噪 → A-Trous）、RT 加速结构、r.PT.* 质量参数 |
 | `07.AISamples` | AI 综合示例（TabBar 切 6 个模块，场景相互隔离） | LLM 场景生成 / 智能体 / GPU 推理 / 文生纹理 / 文生材质 / 文生网格动画 |
 | `06.GILab` | Cornell Box + GI 对比与开发实验室 | IBL / RSM / SSGI / DDGI / SSR / RTGI 同场景对比、白炉探针、纹理落盘 |
 | `Editor` | 编辑器应用 | Outliner / Details / Viewport / Content Browser / Stats / Console 面板、场景序列化、命令撤销、拖放导入 |
