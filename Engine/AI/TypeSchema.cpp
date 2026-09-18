@@ -16,7 +16,7 @@ String BuildTypeSchema() {
     "RectLight":        {"fields": ["normal", "color", "intensity", "width", "height", "range", "softness", "castShadow"]},
     "Camera":           {"fields": ["fov", "nearPlane", "farPlane", "isMain"]},
     "Health":           {"fields": ["maxHealth", "currentHealth", "bInvincible"]},
-    "Decal":            {"fields": ["decalTexture", "size", "opacity"]},
+    "Decal":            {"fields": ["decalTexture", "size", "opacity", "projectionDepth"]},
     "PhysicalSky":      {"fields": ["sunDirection", "turbidity", "intensity"]},
     "Animation":        {"fields": ["currentClip", "time", "speed", "playing"]},
     "RigidBody":        {"fields": ["shape", "radius", "halfExtent", "height", "mass", "friction", "restitution", "isDynamic", "enabled"]},
