@@ -182,29 +182,64 @@ float3 indirect = (bl.mode != 0u) ? (num / max(den, 1e-4)) : num;
 
 ### 3.2 权重来源
 
-实现里只有一条规则（`DeferredLighting.frag.slang` 的 `SourceWeight`）：
+权重 = **用户权重 × 逐像素置信度 × 可选「距离让位」**。置信度判据由 C++ 逐槽写进
+UBO（`GISourceSlotData::confidence`，位掩码），着色器只负责按位计算：
 
 ```hlsl
-float SourceWeight(GISourceSlot s, float confEdge, float camDist) {
-    bool screenSpace = (id ∈ {SSGI, SSR, SSAO, RTGI, RT_REFLECTION, RTAO});
+// 判据位（与 C++ GISourceConfidence 一致，见 ShaderTypes.slang 的 GICONF_*）
+//   GICONF_CAMERA_COVERAGE：相机屏幕覆盖（视口外/边缘淡出 ⇒ 0）
+
+float CameraCoverageConfidence(float2 uv, float edgeFade) {   // 带宽来自 UBO
+    float2 edge = min(uv, 1.0 - uv);
+    return saturate(min(edge.x, edge.y) / max(edgeFade, 1e-5));
+}
+
+float SourceWeight(GISourceSlot s, float camCoverage, float camDist) {
     float w = s.weight;
-    if (screenSpace) w *= confEdge;                                   // 屏幕内可见性
+    if ((s.confidence & GICONF_CAMERA_COVERAGE) != 0u) w *= camCoverage;
     if (s.falloffDistance > 0.0) w *= saturate(1.0 - camDist / s.falloffDistance);
     return w;
 }
 ```
 
-其中 `confEdge` = 屏幕边缘 5% 内线性降权（屏幕外无数据）。
+**判据从哪来，为什么**：掩码由 `ToConfidenceMask(id)` 在**填 UBO 时**统一推导
+（`GIChannelBlendData::Add` 内部完成，调用方无从忘记）。此前着色器里硬编码了一份
+源 id 列表、C++ 侧另有一份谓词，两份真值必然漂移 —— GTAO 就曾被着色器漏掉。现在
+新增源只要写对谓词，两个通道（含 AO）自动一致。
 
-> ⚠️ **与设计稿的差距**：早期设计的置信度表（DDGI 探针可见性、SSGI march 有效距离、
-> RSM 光源视锥覆盖、RTGI SPP/时域收敛度）**均未落地**——`GIChannelBlendParams` UBO 里
-> 根本没有 confidence 字段。当前实际只有「屏幕边缘可见性」一条 + 可选的相机距离让位。
-> 距离衰减是**近似**而非物理判据：屏幕内清晰可见的远处物体，屏幕空间 GI 依然可信。
+**「受相机视口限制」的源** = `IsCameraViewLimitedSource`：SSGI · SSR · SSAO · GTAO ·
+RTGI · RT 反射 · RTAO。注意它**不等于**分类谓词 `IsScreenSpaceSource`：
+
+- RSM 虽是「屏幕空间/单次反弹光栅」类，但它的产物是**光源视锥**下的 VPL 图、着色器按
+  世界空间求和，与相机视口无关 ⇒ 给它乘屏幕覆盖置信度是错的，故排除在外；
+- 光追三源不在 `IsScreenSpaceSource` 里，但入射方向由**本像素**出发，同样受屏幕覆盖限制
+  ⇒ 必须包含。
+
+**置信度是「相对再加权」，不是亮度缩放**：它只决定某像素信不信某个源，不信就把权重让给
+同通道的其他源（`Σ(c·w)/Σw`）。两个直接推论：
+
+1. 通道里只有**一个**源时，置信度在 `num/den` 里**精确抵消**，看不出任何效果 ——
+   它的作用是「屏幕边缘只剩 IBL/DDGI」这类**多源**语义；
+2. 边缘处所有源都被判不可信时，该通道权重和为 0，AO 通道取 `aoVal = 1`（不遮蔽），
+   diffuse/specular 取 0（不注入）—— 这正是「屏幕外没有数据就不该编数据」。
+
+**边缘淡出带宽 `edgeFade` 也进了 UBO**（默认 0.05）：原先它是着色器里的常量 `0.05`，
+既不可配也无法验证「置信度到底有没有作用于权重」。现在它逐通道来自 `GIConfig.edgeFade`，
+调大即成为可控实验（`Tools/gi/confidence_check.ps1`）。
+
+> ⚠️ **与设计稿的差距（已缩小，仍有）**：设计稿的置信度表有四类——
+> 屏幕覆盖（**已落地**）、探针网格覆盖外 ⇒ 0、RSM 光源视锥覆盖、光追收敛度/SPP。
+> 后三类**刻意不声明**（掩码里没有对应的位），理由分别是：
+> · **探针网格覆盖**：与任务 14 的「网格覆盖/让位」一起做。当前网格参数（原点
+>   `(-10,-2,-10)`、8×4×8、cell 3 ⇒ 约 21×9×21 世界单位）远小于场景（RSM 侧取
+>   `sceneRadius = 60` 覆盖全场景），现在就打开会让 DDGI 在大部分屏幕上归零 ——
+>   那是**行为级**变更，属 §9.2-K 的范畴，不能混在置信度机制里做。
+> · **RSM 光源视锥覆盖**：着色器已按 RSM 的投影 UV 直接判无效并返回 0，无需再声明。
+> · **光追收敛度/SPP**：当前没有任何逐像素收敛信息可用，声明了就是空头承诺。
 >
 > ⚠️ **`falloffDistance` 不省性能（重要纠正）**：实测它只在两处被消费——
-> `DeferredLighting.frag.slang:110`（合成时缩放权重）与帧图填 UBO
-> （`DeferredPipeline_FrameGraph.cpp:685,694`）。**它不改变任何 pass 是否执行**：
-> 源照旧整幅、每帧跑完，只是合成时贡献被压小。
+> `DeferredLighting.frag.slang`（合成时缩放权重，三个通道都走 `SourceWeight`）与帧图填 UBO。
+> **它不改变任何 pass 是否执行**：源照旧整幅、每帧跑完，只是合成时贡献被压小。
 > 故本节的「距离让位」是**纯艺术/合成控制，不具备性能意义**——
 > 早期文档把它写成「性能/艺术控制」，性能那半是错的，会误导优化方向。
 
@@ -728,6 +763,7 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 | **B / F** | **RSM 的注册脱离 DDGI 门控**（§9.2-F）：门控改为两个消费方的并集（`ShouldRunDDGI() \|\| ShouldRunRSM()`），并新增 `GI_DDGI::ClearRSM` 让"本帧不注册"也成为明确结论（消除 useRSM 闩锁的残留面）。实测 `diffuse={RSM}` 且 DDGI 关时 pass 列表由无 `RSM` 变为有；新增 `Tools/gi/rsm_gate_check.ps1` 三例，A 例在改前必失败 | ✅ 完成 |
 | **B / E** | **SSR 与 SSAO 的投影改用真实相机**（§9.2-E 的两个剩余实例）：Provider 把 `ctx.camera` 交给 pass，pass 用 `CameraData::GetProjMatrix()`，无相机时才退化为原来的默认投影。实测 `cam_fov=100` 时 AO 输出逐像素最大差 0.387、均值差 −0.79%；`cam_fov=60` 时与同配置重复运行的抖动同量级（0.069 对 0.078）⇒ 标准路径不变 | ✅ 完成 |
 | **B / H** | **Forward 的能力位不再"声称支持但不存在"**（§9.2-H）：`PipelineCaps::Forward` 改为只含光栅阴影（GI 源位为空），新增 `AllSources` 供 Deferred 与 UI 使用；面板对无层栈 GI 源的管线显示说明并置灰层栈控件。判据为单元测试：`IsAvailable(IBL/RSM, Forward)` 为假、`Degrade(Ultra, Forward)` 后三个 GI 通道为空且兜底不发生；Forward 的 IBL/RSM 渲染不受影响（本就不读层栈） | ✅ 完成 |
+| **C / §3.2** | **逐像素置信度进 UBO、判据数据驱动**（任务 9）：`GISourceSlotData::confidence` 掩码由 `ToConfidenceMask` 在 `Add` 里统一推导（着色器不再硬编码源 id 列表，GTAO 与 AO 通道一并归位），边缘带宽 `edgeFade` 从着色器常量变为 UBO 字段。实测：默认 5% 带宽下最外圈 SSGI 贡献仅为中央的 1.6%，带宽调到 50% 后 5%~15% 环带的贡献降到 32.4%（解析预测 33%）；改前二进制该检查必失败。三变体读数与白炉、各回归检查不变 | ✅ 完成 |
 
 ### 8.2 三个关键指标（实测）
 
@@ -1080,7 +1116,7 @@ Vulkan 校验 46 条与改前一致。
 
 | # | 任务 | 规模/风险 | 理由 / 依赖 |
 |:---:|---|---|---|
-| **9** | **§3.2 置信度体系**（屏幕空间源的逐像素可信度） | 中 / 中 | §3.2 自己写着这套东西"**均未落地**"，目前只有"屏幕边缘 5% 降权"一条。缺它 ⇒ 屏幕空间源在屏幕外/背面无数据时**无法按像素降权**，只能整幅参与加权——这正是归一化在屏幕空间源上最薄弱的地方。**也是以后接 Lumen 的前置**（§4.3） |
+| ~~**9**~~ | ~~**§3.2 置信度体系**（屏幕空间源的逐像素可信度）~~ —— ✅ **已完成**（屏幕覆盖一项落地；探针网格归任务 14，其余两项已写明为何不做） | 中 / 中 | §3.2 此前只有硬编码在着色器里的「屏幕边缘 5% 降权」，UBO 里根本没有 confidence 字段，且 C++ 与着色器**各有一份源 id 列表**（GTAO 就被漏掉）。现在置信度掩码逐槽进 UBO、由 `ToConfidenceMask` 统一推导，着色器不再认识任何源 id，边缘带宽也从着色器常量变成 UBO 字段。**实测**（新增 `Tools/gi/confidence_check.ps1`）：默认 5% 带宽下屏幕最外圈 SSGI 的贡献只为中央的 **1.6%**（≈ 像素中心偏移的理论值 2%），中央仍正常贡献；带宽调到 50% 后同一环带（距边 5%~15%）的贡献降到 **32.4%**，与解析预测 `2c/(1+c) = 33%` 吻合。**改前二进制该检查必失败**（5%→50% 的比值为 **1.000**）。三变体读数、白炉、告警、各回归检查与改前逐项一致 |
 | **10** | **SSGI-CAL · 标度与量纲标定**（= §9.2-P） | 中 / 中 | P5 退场后的接棒项。补入射辐射度项 + 余弦项归一化 + 以 PT 标定。**第 1 项已完成、依赖已解除**（DDGI 的绝对量级现已确定性可复现，参照量可信）；几何前置（M/N/O）已完成 |
 | **11** | **统一降噪框架**（AO / GI / 反射 / 阴影 / 探针共用）—— 设计与现状对照见 **§4.4** | 中 / 大 | 现在每个 Provider 自带降噪（`Denoiser` / `RTDenoiser`，共 **9 个实例 / 9 套 PSO / 14 张纹理**），**降噪器之间不组合**——§9.2-C 的有效性协议四处断裂正由此而来。分三步： |
 | **11.1** | 合并 `SSGIProvider` / `SSRProvider` 的重复降噪实现；把 `Denoiser` 的 `depthSigma` / `normalSigma` 变成**可配置** | 小 / 低 | **有即时收益**：4 个 `Denoiser` 实例参数完全相同且无 setter，**同一个 σ 核被用在漫反射间接光与镜面反射两种语义不同的信号上**。判据：背靠背单源采样逐项一致 |
@@ -1177,13 +1213,23 @@ Vulkan 校验 46 条与改前一致。
   同时补了 UI 侧的同源问题：面板的候选源列表此前只看「有没有 Provider」，现在也按能力位过滤，
   并在本管线没有层栈 GI 源时显示说明并置灰控件——否则用户会对着一个改了也不生效的开关操作。
 
-**9 · §3.2 置信度体系**
+**9 · §3.2 置信度体系** —— ✅ **已完成**（屏幕覆盖项落地）
 
-- 现状：`GIChannelBlendParams` UBO 里**没有 confidence 字段**，实际只有"屏幕边缘 5% 降权"一条。
-- 要做的：给每个通道的每个源加一个**逐像素可信度乘子**（屏幕空间源：屏幕外/背面/被遮挡 ⇒ 0；
-  探针源：网格覆盖外 ⇒ 0，与第 14 项合并；光追源：收敛度 / SPP）。UBO 结构与 shader 的
-  `SourceWeight` 需同步扩展（已有 `static_assert` 守布局漂移）。
-- 判据：屏幕边缘处屏幕空间源的权重降为 0 后，该处只剩 IBL/DDGI，且白炉仍守恒。
+- 现状（改前）：`GIChannelBlendParams` UBO 里没有 confidence 字段，实际只有"屏幕边缘 5% 降权"
+  一条，且降权对象是一份**硬编码在着色器里的 id 列表**，与 C++ 的分类谓词各说各话。
+- 做了什么：`GISourceSlotData::confidence`（复用原来的 `_pad`，**UBO 尺寸不变**）承载判据位掩码，
+  由 `ToConfidenceMask` 在 `GIChannelBlendData::Add` 里统一推导；着色器只按位计算，
+  源 id 列表从着色器里彻底消失（GTAO 从此自动获得同等待遇，AO 通道也一并走 `SourceWeight`）；
+  边缘带宽 `edgeFade` 由着色器常量改为逐通道 UBO 字段（`GIConfig.edgeFade`，默认 0.05）。
+- 判据（`Tools/gi/confidence_check.ps1` + `confidence_check.py`，两例）：
+  1. `diffuse={IBL}` 与 `diffuse={IBL,SSGI}` 之差：最外圈（1 像素环）只为中央的 **1.6%**，
+     中央仍为 **1.7e-2**（正对照：SSGI 没有变成死源）；
+  2. 带宽 5%→50% 后，距边 5%~15% 环带上的同一差值降到 **32.4%**（解析预测 `2c/(1+c)=33%`）。
+  **改前二进制第 2 例必失败（比值 1.000）**，第 1 例两边数值完全相同 ⇒ 默认路径未变。
+- 未做的三类判据与理由见 §3.2 的说明（探针网格归任务 14；RSM 已在着色器内判无效；
+  光追收敛度无逐像素信息可用）。
+- 一个必须记住的数学性质：**置信度是相对再加权**——通道里只有一个源时它在 `num/den` 里
+  精确抵消，因此**不能用"单源读数变化"来验证它**，必须用同通道双源做差。
 
 **11 · 统一降噪框架**（设计与现状的完整对照见 **§4.4**）
 
@@ -1474,6 +1520,7 @@ cmake --build Build --config Debug --target 06.GILab -j 8
 | `Tools/gi/rtgi_coupling_check.ps1` | **RTGI 源独立性检查**（§9.2-I 的回归测试）：只改漫反射层栈跑两次，比较 RTGI 原始输出的**均值**是否一致。判据用均值而非逐字节——射线抖动种子取自帧计数器，而多一个 DDGI pass 会改变每帧的提交次数，逐像素必然不同；要保证不变的是**估计量本身**。修前是 0.0575 对 0.2034（3.5 倍），修后 0.000% |
 | `Tools/gi/stack_switch_check.ps1` | **层栈与子系统开关一致性检查**（不变量 1 / §9.2-G 的回归测试）：把 SSR 放进镜面层栈（默认档位的镜面栈只有 IBL，故初始化时 SSR 开关是关的），带 `HE_TRACE_PASSES=1` 跑一帧，**要求 pass 列表里出现 `SSR`**。修前该列表里完全没有 SSR |
 | `Tools/gi/rsm_gate_check.ps1` | **RSM 独立门控检查**（§9.2-F 的回归测试）：三例——关 DDGI 且 RSM 在漫反射层栈（**必须注册**，改前必失败）、关 DDGI 且层栈无 RSM（不得注册）、开 DDGI 且层栈无 RSM（不得注册，探针应回退 IBL）。第 2、3 例是防"改过头"的反向对照 |
+| `Tools/gi/confidence_check.ps1` + `confidence_check.py` | **逐像素置信度检查**（§3.2 / 任务 9 的回归测试）：两例——最外圈屏幕空间源的贡献必须降到中央的很小比例（默认 5% 带宽）、把带宽调到 50% 后同一环带的贡献必须按比例下降（证明带宽来自 UBO 而非着色器常量）。**必须用同通道双源做差**：只有一个源时置信度在归一化里精确抵消，单源读数看不出任何变化。可加 `-Exe <改前的可执行文件>` 证明该检查在改前会失败 |
 | `Tools/gi/vk_layer_settings.txt` | 校验层设置（配 `VK_LAYER_SETTINGS_PATH=Tools/gi`）：关闭重复消息上限，得到违规**真实次数**。**注意计数随该设置变化**——关掉去重后同一次运行为 `75/75/81`，不设该文件则为 `49/49/51`；两种都稳定，但**不可互相比较**（§11.3.1 方法论第 6 条） |
 
 采样时有两个易踩的坑：
