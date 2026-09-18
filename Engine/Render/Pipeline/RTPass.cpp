@@ -505,14 +505,19 @@ bool RTPass::CreateMaterialTexture(rhi::IRHIDevice* device, u32 maxInstances,
 }
 
 // ============================================================
-// BuildSceneMaterialTexture — 场景材质纹理（4×N）+ 三角形法线纹理
+// BuildSceneMaterialTexture — 场景材质纹理（7×N）+ 三角形法线纹理
 // 供 RT 反射/GI/PT 的 ClosestHit 用 InstanceID() 查询材质、
 // PrimitiveIndex() 查询三角形顶点法线（重心插值 → 平滑法线）。
 // 列索引与 BuildAS 的 TLAS 实例顺序一致（Mesh → Cube → Sphere）。
 // 用纹理而非 SSBO：ClosestHitKHR 中访问 StructuredBuffer 已知 GPU fault；
 // 不依赖 position_fetch：GTX 1070 等设备不支持 VK_KHR_ray_tracing_position_fetch。
-// 行布局：row0=albedo.rgb+metallic, row1=roughness+ao,
-//   row2=(法线线性起始=tri*3, 三角形数, 法线纹理宽度, 0), row3=emissive.rgb+0
+// 行布局（每实例一列）：row0=albedo.rgb+metallic, row1=roughness+ao,
+//   row2=(法线线性起始=tri*3, 三角形数, 法线纹理宽度, 0), row3=emissive.rgb+0,
+//   row4=disneyA(aniso, subsurface, specular, sheen),
+//   row5=disneyB(clearcoat, clearcoatGloss, specularTint.rg),
+//   row6=(disneyC=specularTint.b, dielectricF0, ior, transmission)
+// 行 4~6 与 Material.h 的 disneyA/disneyB/disneyC 打包逐字段一致，
+// 供路径追踪的 PathPayload（PT 任务 1）带上完整 Disney 参数。
 // ============================================================
 bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world) {
     if (!device) return false;
@@ -529,10 +534,11 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world
     u64 totalTris = 0;
     for (auto& [e, m] : meshList) totalTris += m->GetIndexCount() / 3;
 
-    // ── 材质纹理数据（4 行 × N 列）──
+    // ── 材质纹理数据（7 行 × N 列）──
     // row0=albedo.rgb+metallic, row1=roughness+ao,
-    // row2=(法线线性起始=tri*3, 三角形数, 法线纹理宽度, 0), row3=emissive.rgb+0
-    std::vector<float> matData(n * 4 * 4, 0.0f);
+    // row2=(法线线性起始=tri*3, 三角形数, 法线纹理宽度, 0), row3=emissive.rgb+0,
+    // row4=disneyA, row5=disneyB, row6=(disneyC, dielectricF0, ior, transmission)
+    std::vector<float> matData(n * 7 * 4, 0.0f);
 
     // ── 三角形顶点法线扁平数组（每三角形 3 条，跨所有实例）──
     // 2D 纹理布局：width=W, height=kNormTexHeight；线性索引 lin → (row=lin/W, col=lin%W)
@@ -572,6 +578,26 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world
         row3[1] = m.emissiveFactor.g;
         row3[2] = m.emissiveFactor.b;
         row3[3] = 0.0f;
+        // Disney 参数（与 Material.h 的 disneyA/disneyB/disneyC 打包一致）
+        float* row4 = &matData[n * 16 + i * 4];
+        row4[0] = m.anisotropic;
+        row4[1] = m.subsurface;
+        row4[2] = m.specular;
+        row4[3] = m.sheen;
+        float* row5 = &matData[n * 20 + i * 4];
+        row5[0] = m.clearcoat;
+        row5[1] = m.clearcoatGloss;
+        row5[2] = m.specularTint.r;
+        row5[3] = m.specularTint.g;
+        float* row6 = &matData[n * 24 + i * 4];
+        row6[0] = m.specularTint.b;                     // disneyC
+        {
+            // 电介质 F0 由 IOR 预计算（与 FillObjectData / FillMaterialData 同式）
+            const float ior = m.ior;
+            row6[1] = (ior - 1.0f) * (ior - 1.0f) / ((ior + 1.0f) * (ior + 1.0f));
+        }
+        row6[2] = m.ior;
+        row6[3] = m.transmission;                       // 预留：任务 4 才参与折射
 
         // 读取顶点/索引缓冲 → 每三角形 3 条顶点法线
         auto* vb = m.GetVertexBuffer().get();
@@ -602,12 +628,12 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world
         triFlat += triCount;
     }
 
-    // ── 创建材质纹理（4×N RGBA32F）──
+    // ── 创建材质纹理（7×N RGBA32F）──
     {
         rhi::TextureDesc desc;
         desc.format      = rhi::Format::RGBA32_FLOAT;
         desc.width       = n;
-        desc.height      = 4;
+        desc.height      = 7;
         desc.mipLevels   = 1;
         desc.usage       = rhi::TextureUsage::ShaderResource;
         desc.initialData = matData.data();
@@ -634,7 +660,7 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world
         }
     }
 
-    HE_CORE_INFO("RTPass: 场景材质纹理(4×{}) + 法线纹理({}×{} RGBA32F)创建, {} 实例 {} 三角形",
+    HE_CORE_INFO("RTPass: 场景材质纹理(7×{}) + 法线纹理({}×{} RGBA32F)创建, {} 实例 {} 三角形",
                  n, normTexWidth, kNormTexHeight, n, totalTris);
     return true;
 }

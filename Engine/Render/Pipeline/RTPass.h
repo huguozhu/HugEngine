@@ -193,7 +193,7 @@ private:
 
     // set=1 资源（ClosestHit 使用）
     std::unique_ptr<rhi::IRHITexture> m_MaterialTex;                     // 材质 1D 纹理 (b=0)
-    std::unique_ptr<rhi::IRHITexture> m_SceneMaterialTex;               // 场景材质纹理（3×N RGBA32F，反射/GI 用）
+    std::unique_ptr<rhi::IRHITexture> m_SceneMaterialTex;               // 场景材质纹理（7×N RGBA32F：基础 PBR 4 行 + Disney 3 行，反射/GI/PT 用）
     std::unique_ptr<rhi::IRHITexture> m_SceneTriangleNormals;           // 三角形顶点法线纹理（反射/GI ClosestHit 用）
     std::unique_ptr<rhi::IRHIBuffer>  m_LightUB;                        // 光源 UB (b=1)
     std::unique_ptr<rhi::IRHIBuffer>  m_VertexPullBuffer;               // 顶点拉取 SSBO (b=2, GPU 标量布局)

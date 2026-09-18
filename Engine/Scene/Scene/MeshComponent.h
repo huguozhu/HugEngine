@@ -54,6 +54,20 @@ public:
     u8     alphaMode         = 0;                // AlphaMode: 0=Opaque, 1=Mask, 2=Blend
     u32    materialID        = 0;                // Bindless 纹理数组基索引
 
+    // --- Disney principled BSDF / 折射扩展参数 ---
+    // 默认值还原 glTF metallic-roughness 的行为（等价于「没有扩展」），
+    // 由 glTF 的 KHR_materials_* 扩展填充；光栅化侧打包成 GPUObjectData 的
+    // disneyA/disneyB/disneyC，路径追踪侧随 PathPayload 传给 ClosestHit。
+    float  ior                = 1.5f;            // 电介质折射率（F0 = (ior-1)²/(ior+1)²）
+    float  anisotropic        = 0.0f;            // 各向异性强度（0=各向同性）
+    float  subsurface         = 0.0f;            // 次表面散射混合（0=纯 Lambert）
+    float  specular           = 0.5f;            // 镜面强度（0.5 → F0=0.04）
+    float3 specularTint       = float3(1.0f);    // 镜面色调
+    float  sheen              = 0.0f;            // 光泽强度（天鹅绒边缘）
+    float  clearcoat          = 0.0f;            // 清漆层强度
+    float  clearcoatGloss     = 1.0f;            // 清漆光泽度（1=光滑，由粗糙度取反而来）
+    float  transmission       = 0.0f;            // 透射（预留字段位：0=不透明，任务 4 才参与折射）
+
     // --- 纹理路径 ---
     String baseColorTexture;            // 基础色纹理
     String normalTexture;               // 法线贴图
