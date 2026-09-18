@@ -464,6 +464,12 @@ void VulkanDevice::CreateLogicalDevice() {
         HE_CORE_INFO("Mesh Shader 扩展已启用: VK_EXT_mesh_shader");
     }
 
+    // 着色器用了 SPIR-V Int8 能力（校验层报 VUID-vkCreateShaderModule-pCode-08740），
+    // 需要启用 shaderInt8
+    VkPhysicalDeviceShaderFloat16Int8Features shaderInt8Feature{};
+    shaderInt8Feature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES;
+    shaderInt8Feature.shaderInt8 = VK_TRUE;
+
     // 条件启用 VK_KHR_maintenance7：render pass 内混录 inline + secondary（嵌套命令缓冲）需要它，
     // 否则 vkCmdBeginRenderPass 用 VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_KHR 时
     // 校验层报 VUID-vkCmdBeginRenderPass-contents-parameter / -contents-09640。
@@ -592,6 +598,7 @@ void VulkanDevice::CreateLogicalDevice() {
     if (m_SupportsMaintenance7) {
         *ppNext = &maint7Feature; ppNext = &maint7Feature.pNext;
     }
+    *ppNext = &shaderInt8Feature; ppNext = &shaderInt8Feature.pNext;
     if (m_SupportsGPL) {
         *ppNext = &gplFeature; ppNext = &gplFeature.pNext;
     }
@@ -601,7 +608,11 @@ void VulkanDevice::CreateLogicalDevice() {
     *ppNext = nullptr;
 
     VkPhysicalDeviceFeatures features{};
-    features.multiDrawIndirect = VK_TRUE;  // GPU Driven 需要多绘制间接
+    features.multiDrawIndirect = VK_TRUE;
+    // GBuffer 等 MRT 管线各附件的混合状态不同，必须启用 independentBlend，
+    // 否则 vkCreateGraphicsPipelines 报
+    // VUID-VkPipelineColorBlendStateCreateInfo-pAttachments-00605（04/06 各 2 条）
+    features.independentBlend = VK_TRUE;  // GPU Driven 需要多绘制间接
 
     VkDeviceCreateInfo deviceInfo{};
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
