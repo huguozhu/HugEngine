@@ -9,8 +9,10 @@
 #   powershell -File Tools/gi/dump_gi.ps1 -Frame 120
 #
 # Reference counts on the three diffuse-stack variants at frame 120:
-#   with this file (dedup off)  : none 75 / ddgi 75 / ssgi 81
-#   without this file (dedup on): none 49 / ddgi 49 / ssgi 51
-# Both are stable; they are NOT comparable with each other. Only same-condition
-# before/after comparisons are valid.
+#   with this file (dedup off)  : none 104 / ddgi 104 / ssgi 110
+#   without this file (dedup on): none  56 / ddgi  56 / ssgi  56
+# Earlier, before the sampling added the specular/AO dump targets, the same two rows were
+#   75 / 75 / 81  and  49 / 49 / 51. The counts are therefore sensitive to the dump target
+# set as well as to dedup. Only a same-harness before/after comparison of two binaries is
+# meaningful.
 khronos_validation.duplicate_message_limit = 0
