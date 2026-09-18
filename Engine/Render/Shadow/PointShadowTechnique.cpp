@@ -38,7 +38,12 @@ bool PointShadowTechnique::Initialize(rhi::IRHIDevice* device){
     d.height=m_MapSize;
     d.depth=1;
     d.mipLevels=1;
-    d.arrayLayers=1;
+    // cubemap 深度图必须是 6 层：此前写成 1 层，而描述符按 cubemap 采样整张（6 面），
+    // 于是只有层 0 被转换过，层 1..5 一直是 UNDEFINED —— 提交时校验层报
+    //   "expects VkImage … (arrayLayer = 1/2/…) to be in layout DEPTH_STENCIL_READ_ONLY_OPTIMAL
+    //    -- instead, current layout is UNDEFINED"
+    // （03.Sponza-Forward 5 条、04.Sponza-Deferred 6 条 vkCmdDraw-None-09600）。
+    d.arrayLayers=rhi::kCubemapFaceCount;
     d.usage=rhi::TextureUsage::DepthStencil|rhi::TextureUsage::ShaderResource|rhi::TextureUsage::Cubemap;
     m_PointShadowMap=device->CreateTexture(d);
     rhi::SamplerDesc sd;
@@ -91,6 +96,12 @@ u32 PointShadowTechnique::CollectLights(he::World& w,he::SceneGraph& sg,const Ca
 void PointShadowTechnique::Render(rhi::IRHICommandList* cmd,he::World& w,he::SceneGraph&,
                                    const std::vector<GPUShadowData>& sd,u32 start){
     if(!m_PointShadowMap||!m_ExternalObjectBuffer||m_ExternalDescSet==rhi::kInvalidSet)return;
+    // 进入面循环前先把整张 cubemap 置为可采样：光照 pass 可能在首帧就采样它，
+    // 而那时 6 个面都还没渲染过（层布局是 UNDEFINED）→ 校验层在提交时报
+    //   "expects VkImage … (arrayLayer = n) to be in layout DEPTH_STENCIL_READ_ONLY_OPTIMAL"
+    // 这一次转换覆盖全部 6 层，等价于给深度图一个确定的初始布局。
+    cmd->PipelineBarrier(rhi::PipelineStage::BottomOfPipe,rhi::PipelineStage::LateFragmentTests,
+        rhi::ResourceState::Undefined,rhi::ResourceState::DepthStencilRead,m_PointShadowMap.get());
     for(u32 li=start;li<(u32)sd.size()&&li-start<MAX_SHADOWS;++li){
         float3 lp(sd[li].pointLightData);
         float rng=sd[li].pointLightData.w;
