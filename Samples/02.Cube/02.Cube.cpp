@@ -33,6 +33,8 @@
 #include "Scene/DecalComponent.h"
 #include "Scene/CollisionComponent.h"
 #include "Scene/CollisionSystem.h"
+#include "Scene/CollisionDebugComponent.h"   // 任务 26：碰撞体调试线框
+#include "Scene/CollisionDebugSystem.h"
 #include "Scene/CharacterMovementComponent.h"
 #include "Scene/MovementSystem.h"
 #include "Scene/InstancedMeshComponent.h"
@@ -337,6 +339,7 @@ int main() {
     // --- 碰撞检测演示（B5：IJKL 移动探测球，碰到橙色盒变绿）---
     Entity collisionBoxEntity;
     Entity collisionProbeEntity;
+    bool   demoCollisionDebug = true;   // 任务 26：碰撞体调试线框（面板可关）
     {
         // 静态碰撞盒：视觉立方体 + AABB 碰撞体（尺寸一致）
         collisionBoxEntity = world.CreateEntity("CollisionBox");
@@ -347,6 +350,9 @@ int main() {
         auto* cc = world.AddComponent<CollisionComponent>(collisionBoxEntity);
         cc->shape       = CollisionShape::AABB;
         cc->halfExtents = float3(1.0f);
+        // 任务 26：调试线框（AABB 12 条棱）——与检测共用的世界形状
+        auto* cdbg = he::CollisionDebugSystem::Ensure(world, collisionBoxEntity);
+        if (cdbg) cdbg->color = float4(0.2f, 1.0f, 0.5f, 0.85f);
         auto* bx = world.GetComponent<TransformComponent>(collisionBoxEntity);
         if (bx) bx->position = float3(6.0f, 1.0f, -4.0f);
         sceneGraph.SetParent(collisionBoxEntity, Entity{kInvalidEntity});
@@ -362,6 +368,9 @@ int main() {
         auto* pc = world.AddComponent<CollisionComponent>(collisionProbeEntity);
         pc->shape  = CollisionShape::Sphere;
         pc->radius = 0.5f;
+        // 任务 26：探测球的调试线框（3 个正交大圆）+ 角色胶囊（下方）
+        auto* pdbg = he::CollisionDebugSystem::Ensure(world, collisionProbeEntity);
+        if (pdbg) pdbg->color = float4(1.0f, 0.9f, 0.2f, 0.85f);
         auto* px = world.GetComponent<TransformComponent>(collisionProbeEntity);
         if (px) px->position = float3(6.0f, 1.0f, 0.0f);   // 初始距盒 4 米（未重叠）
         sceneGraph.SetParent(collisionProbeEntity, Entity{kInvalidEntity});
@@ -1066,6 +1075,10 @@ int main() {
         // 骨骼动画系统（C1c）：剪辑时间推进 + 关节蒙皮矩阵
         he::SkeletalMeshSystem::Update(world, deltaTime);
 
+        // 任务 26：碰撞体调试线框（AABB/球/胶囊；形状或变换变化时才重建网格）
+        const u32 wireTouched = he::CollisionDebugSystem::Update(world, demoCollisionDebug);
+        (void)wireTouched;
+
         // 任务 21 冒烟证据：交叉淡入结束（层数收敛为 1）时打一行 —— 证明混合路径真的跑了
         if (auto* sm = world.GetComponent<SkeletalMeshComponent>(skeletalEntity)) {
             static bool s_LoggedBlendDone = false;
@@ -1116,6 +1129,24 @@ int main() {
                                  "退役缓冲 {}（原地复用，未新建）",
                                  s_UpdateCount, im->instanceSSBOHandle,
                                  im->GetInstanceBufferCapacity(), im->GetRetiredBufferCount());
+                }
+            }
+        }
+
+        // 任务 26 冒烟证据：每 300 帧统计一次调试线框（形状 → 线段数）
+        {
+            static u32 s_WireFrame = 0;
+            if (++s_WireFrame % 300 == 0) {
+                u32 bodies = 0, segs = 0, verts = 0;
+                world.ForEach<he::CollisionDebugComponent>([&](he::Entity, he::CollisionDebugComponent& d) {
+                    if (d.segmentCount == 0) return;
+                    ++bodies;
+                    segs  += d.segmentCount;
+                    verts += d.GetVertexCount();
+                });
+                if (bodies > 0) {
+                    HE_CORE_INFO("[任务 26] 碰撞调试线框：{} 个碰撞体，共 {} 条线段 / {} 顶点"
+                                 "（线与检测共用同一份世界形状）", bodies, segs, verts);
                 }
             }
         }
@@ -1288,6 +1319,17 @@ int main() {
             ImGui::TextWrapped("IJKL 移动红球，碰到橙色碰撞盒变绿");
             ImGui::TextColored(overlap ? ImVec4(0.2f, 1.0f, 0.3f, 1.0f) : ImVec4(1.0f, 0.3f, 0.3f, 1.0f),
                 "当前状态: %s", overlap ? "重叠" : "未重叠");
+
+            // 任务 26：调试线框开关 + 统计（线段数随形状：AABB 12 / 球 72 / 胶囊 68）
+            ImGui::Checkbox("显示碰撞调试线框 (任务 26)", &demoCollisionDebug);
+            ImGui::SameLine();
+            u32 wireBodies = 0, wireSegs = 0;
+            world.ForEach<he::CollisionDebugComponent>([&](he::Entity, he::CollisionDebugComponent& d) {
+                if (d.segmentCount == 0) return;
+                ++wireBodies;
+                wireSegs += d.segmentCount;
+            });
+            ImGui::TextDisabled("%u 个碰撞体 / %u 条线段", wireBodies, wireSegs);
         }
 
         // 实例化网格显隐（B1：万级实例 FPS 对比）
