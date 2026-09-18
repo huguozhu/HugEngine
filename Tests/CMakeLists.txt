@@ -38,14 +38,16 @@ add_executable(HugEngineTests
     TestGITypes.cpp
     TestGIProbeGrid.cpp
     TestRSMFrustum.cpp
+    TestPathPayload.cpp
 )
 
 target_include_directories(HugEngineTests PRIVATE
     ${CMAKE_SOURCE_DIR}/Engine/External/doctest
     ${CMAKE_SOURCE_DIR}/Engine/External
-    # GI 数据模型（GI/GITypes.h）与探针网格拟合（GI/GIProbeGrid.h）——**只加包含路径、
-    # 不链接 HugEngineRender**：这两个头只依赖 Core/Types.h 与 Math/Math.h，链接 Render
-    # 会连带拉入 RHI/Vulkan 以及 slangc 生成的 SPV 头，对单元测试是不必要的重负担。
+    # GI 数据模型（GI/GITypes.h）、探针网格拟合（GI/GIProbeGrid.h）与路径追踪载荷镜像
+    # （RT/PathPayload.h）——**只加包含路径、不链接 HugEngineRender**：这些头只依赖
+    # Core/Types.h 与 Math/Math.h，链接 Render 会连带拉入 RHI/Vulkan 以及 slangc 生成的
+    # SPV 头，对单元测试是不必要的重负担。
     ${CMAKE_SOURCE_DIR}/Engine/Render
 )
 
