@@ -414,11 +414,12 @@ int main() {
 
     // --- 骨骼网格（C1c：Fox 模型加载 + GPU 蒙皮动画播放演示）---
     Entity skeletalEntity;
+    std::shared_ptr<he::asset::SkeletonAsset> foxSkeleton;   // 源骨架（任务 22 的重定向来源）
     {
         he::asset::glTFResult foxResult = he::asset::LoadGLTF(
             world, sceneGraph, String(HUGE_CONTENT_DIR) + "Models/Skeletal/Fox.glb");
         if (foxResult.success && !foxResult.skeletons.empty()) {
-            auto foxSkeleton = foxResult.skeletons[0];
+            foxSkeleton = foxResult.skeletons[0];
             skeletalEntity = world.CreateEntity("SkeletalFox");
             world.AddComponent<TransformComponent>(skeletalEntity);
             auto* sm = world.AddComponent<SkeletalMeshComponent>(skeletalEntity);
@@ -438,6 +439,37 @@ int main() {
                 foxSkeleton->name, foxSkeleton->joints.size(), foxSkeleton->clips.size());
         } else {
             HE_CORE_WARN("Fox 模型加载失败，跳过骨骼网格演示: {}", foxResult.error);
+        }
+    }
+
+    // --- 任务 22：动画重定向（同一套剪辑驱动**另一副骨架**）---
+    Entity retargetEntity;
+    {
+        if (foxSkeleton) {
+            // 目标骨架 = Fox 骨架的副本，但绑定姿势不同：所有关节的绑定平移 ×1.5（更高、腿更长的骨架）。
+            // 改完绑定姿势必须重算逆绑定矩阵，否则蒙皮矩阵 ≠ 单位，连绑定姿势都会炸开。
+            auto tallSkeleton = std::make_shared<he::asset::SkeletonAsset>(*foxSkeleton);
+            tallSkeleton->name = foxSkeleton->name + "_Tall";
+            for (auto& j : tallSkeleton->joints) j.translation *= 1.5f;
+            he::SkeletalMeshSystem::RebuildInverseBindMatrices(*tallSkeleton);
+
+            retargetEntity = world.CreateEntity("SkeletalFoxTall");
+            world.AddComponent<TransformComponent>(retargetEntity);
+            auto* sm2 = world.AddComponent<SkeletalMeshComponent>(retargetEntity);
+            sm2->SetSkeleton(tallSkeleton);        // 网格/绑定姿势 = 高个骨架
+            sm2->SetAnimationSource(foxSkeleton);  // 动画 = 原 Fox（按关节名字自动映射）
+            sm2->PlayClip(1, true);                // 同一套 Walk 剪辑，直接拿来用
+            sm2->baseColorFactor = float4(0.35f, 0.7f, 1.0f, 1.0f);   // 蓝色高个狐狸
+            sm2->metallicFactor  = 0.0f;
+            sm2->roughnessFactor = 0.6f;
+            auto* sx2 = world.GetComponent<TransformComponent>(retargetEntity);
+            if (sx2) sx2->position = float3(7.5f, 0.3f, -6.0f);
+            sceneGraph.SetParent(retargetEntity, Entity{kInvalidEntity});
+            HE_CORE_INFO("[任务 22] 动画重定向：{} → {}（映射 {}/{} 关节，{}），播放源骨架的 Walk 剪辑",
+                foxSkeleton->name, tallSkeleton->name,
+                sm2->retargetProfile ? sm2->retargetProfile->MappedJointCount() : 0,
+                tallSkeleton->joints.size(),
+                (sm2->retargetProfile && sm2->retargetProfile->retargetTranslation) ? "含平移" : "仅旋转");
         }
     }
 
@@ -1042,6 +1074,26 @@ int main() {
             }
         }
 
+        // 任务 22 冒烟证据：源骨架与目标骨架都在播放时各打一行关节世界位置 —— 目标骨架的
+        // 关节距离是源骨架的 1.5 倍（绑定姿势不同），但两者借的是同一套旋转动画。
+        {
+            static bool s_LoggedRetarget = false;
+            auto* smSrc = world.GetComponent<SkeletalMeshComponent>(skeletalEntity);
+            auto* smDst = world.GetComponent<SkeletalMeshComponent>(retargetEntity);
+            if (!s_LoggedRetarget && smSrc && smDst && !smSrc->jointWorldMatrices.empty() &&
+                !smDst->jointWorldMatrices.empty() && smDst->clipTime > 0.5f) {
+                s_LoggedRetarget = true;
+                // 取最后一个关节（尾尖）的世界位置：目标 = 源 × 1.5（重定向只借旋转，不搬平移）
+                const usize k = smSrc->jointWorldMatrices.size() - 1;
+                const float3 a(smSrc->jointWorldMatrices[k][3]);
+                const float3 b(smDst->jointWorldMatrices[k][3]);
+                HE_CORE_INFO("[任务 22] 重定向生效：同一套 Walk 剪辑下，源尾尖世界位置 "
+                             "({:.2f}, {:.2f}, {:.2f})、目标 ({:.2f}, {:.2f}, {:.2f})"
+                             "（目标骨架绑定平移是源的 1.5 倍，各自独立时间轴）",
+                             a.x, a.y, a.z, b.x, b.y, b.z);
+            }
+        }
+
         // 每 2 秒刷新 FPS 文字（验证实时文字更新路径；
         // bindless 堆 append-only，更新会追加槽位，故降低刷新频率）
         {
@@ -1206,6 +1258,28 @@ int main() {
                 ImGui::Text("混合层: %u  Walk %.2f / Run %.2f%s", sm->blendLayerCount, bw[0], bw[1],
                             sm->bCrossFading ? "  （淡入中）" : "");
             }
+        }
+
+        // 动画重定向演示状态（任务 22）
+        if (auto* sm2 = world.GetComponent<SkeletalMeshComponent>(retargetEntity)) {
+            ImGui::SeparatorText("动画重定向 (任务 22)");
+            const char* srcName  = (sm2->sourceSkeleton && sm2->skeleton)
+                                 ? sm2->sourceSkeleton->name.c_str() : "-";
+            const char* dstName  = sm2->skeleton ? sm2->skeleton->name.c_str() : "-";
+            const int   jointCnt = sm2->skeleton ? (int)sm2->skeleton->joints.size() : 0;
+            ImGui::Text("%s → %s（映射 %d/%d 关节）", srcName, dstName,
+                sm2->retargetProfile ? sm2->retargetProfile->MappedJointCount() : 0, jointCnt);
+            if (sm2->retargetProfile) {
+                // 平移重定向开关：关 = 只借旋转（保持目标骨架自己的骨骼长度/体型）；
+                // 开 = 按各关节绑定长度比缩放平移（适合"同比例放大/缩小"的骨架）
+                ImGui::Checkbox("平移也重定向（按绑定长度比缩放）",
+                                &sm2->retargetProfile->retargetTranslation);
+                ImGui::SameLine();
+                ImGui::Checkbox("自动比例", &sm2->retargetProfile->autoProportion);
+                if (!sm2->retargetProfile->retargetTranslation)
+                    ImGui::TextDisabled("当前只借旋转：腿长/体型沿用目标骨架，步子幅度不缩放");
+            }
+            ImGui::Text("时间: %.2fs", sm2->clipTime);
         }
 
         // 角色移动演示状态（B3）
