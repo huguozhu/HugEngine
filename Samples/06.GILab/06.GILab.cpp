@@ -23,6 +23,7 @@
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
 #include "Scene/SkyboxComponent.h"
+#include "Scene/PhysicalSkyComponent.h"   // SyncPhysicalSkyToSun（Forward 的阴影/光照同向，任务 34）
 #include "Scene/AnimationComponent.h"
 #include "Asset/glTFLoader.h"
 #include "Editor/ImGuiIntegration.h"
@@ -891,6 +892,29 @@ int main() {
             break;
         }
         curPipeline->NextFrame();
+        // --- Forward 的阴影系统必须由**调用方**驱动（任务 34 / §9.2-AD）---
+        // `ShadowSystem` 不像 GI 子系统那样自己从帧图拿数据：它要靠调用方先
+        // `SetRenderResources`（对象/阴影缓冲 + 描述符集）再 `Update`（收集投影光源、拟合 CSM），
+        // 之后 `HasActiveShadows()` 才为真。02.Cube / 03.Sponza / AISamples 都这么做，
+        // **06.GILab 此前漏了** ⇒ Forward 模式下 `Shadow` 与 `RSM_Generate` 两个 pass 都不注册：
+        // 画面**没有阴影**，RSM 源恒为 0（而"层栈改变画面 / 多源不变亮 / 双源等于加权平均"
+        // 三条判据在"某个源恒为 0"时全部成立，看不出这件事）。
+        // 位置：必须在 NextFrame 之后（阴影缓冲按飞行帧轮换）且在本帧 Render 之前（帧图按
+        // `HasActiveShadows()` 门控）。Deferred 侧由管线内部自己驱动，这里只处理 Forward。
+        if (g_PipelineMode == 0) {
+            if (auto* shadowSys = forwardPipeline.GetShadowSystem()) {
+                shadowSys->SetRenderResources(forwardPipeline.GetCurrentShadowObjectBuffer(),
+                                              forwardPipeline.GetCurrentShadowBuffer(),
+                                              forwardPipeline.GetCurrentDescSet());
+                render::SubsystemContext shadowCtx;
+                shadowCtx.world      = &world;
+                shadowCtx.sceneGraph = &sceneGraph;
+                shadowCtx.camera     = &camCtrl.GetCamera();
+                // 物理天空的太阳方向先同步到方向光：阴影与光照必须同向（02.Cube 同款做法）
+                he::SyncPhysicalSkyToSun(world);
+                shadowSys->Update(shadowCtx);
+            }
+        }
         // 帧边界应用延迟的半分辨率纹理重建（先等待 GPU 空闲，避免销毁正在使用的纹理）
         if (g_PendingHalfResApply) {
             device->WaitIdle();
