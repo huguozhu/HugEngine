@@ -197,7 +197,7 @@
 - `docs/HugEngine引擎介绍/HugEngine AI架构设计/1.HugEngine AI一等公民架构设计.md`
 - `docs/HugEngine引擎介绍/HugEngine AI架构设计/2.HugEngine AI统一基座设计.md`、`3.AI统一基座设计规格.md`
 - `docs/HugEngine引擎介绍/HugEngine AI架构设计/4.HugEngine AIGC创作平台设计.md`、`6.LLM与引擎通信协议.md`
-- `docs/技术分析文档/RHI功能缺口分析-与UE5对比.md`
+- `docs/HugEngine引擎介绍/HugEngine RHI功能缺口分析-与UE5对比.md`
 
 ---
 

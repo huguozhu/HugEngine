@@ -2,7 +2,7 @@
 
 > 基于全工程源码逐行分析（2026-08-19），覆盖 JobSystem 任务并行、MTCR 多线程命令录制、
 > AsyncCompute 跨队列并行、背景线程（PSO 预编译 / Shader 热重载）、多帧在飞行 CPU-GPU 同步。
-> 本文是对 `docs/技术分析文档/HugEngine多线程架构分析.md`（2026-07-17）的代码级更新与纠错，
+> 本文是对 `docs/HugEngine引擎介绍/HugEngine多线程架构分析.md`（2026-07-17）的代码级更新与纠错，
 > 差异对照见 [§10](#10-与旧文档差异对照)。
 
 ---
@@ -467,7 +467,7 @@ HotReload：lastChange map、4096B 缓冲、句柄；PSO worker：m_WorkerCache�
 
 ## 10. 与旧文档差异对照
 
-对照 `docs/技术分析文档/HugEngine多线程架构分析.md`（2026-07-17）：
+对照 `docs/HugEngine引擎介绍/HugEngine多线程架构分析.md`（2026-07-17）：
 
 | # | 旧文档表述 | 代码事实（2026-08-19） |
 |---|---|---|

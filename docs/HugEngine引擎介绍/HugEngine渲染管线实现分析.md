@@ -2,7 +2,7 @@
 
 > 基于 `Engine/Render/Pipeline` 四个管线全部源码的逐行分析（2026-08-19），
 > 覆盖公共基础设施（RenderGraph / GPU Scene / ShaderTypes / 粒子 / Profiler / PSO 预热 / 热重载）。
-> 架构总览见 [HugEngine架构UML文档.md](../HugEngine引擎介绍/HugEngine架构UML文档.md)。
+> 架构总览见 [HugEngine架构UML文档.md](HugEngine架构UML文档.md)。
 
 ---
 

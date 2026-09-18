@@ -18,7 +18,7 @@
 # 第一部分 · GI 实现分析（现状盘点 + 正确性缺陷 + 优化建议 + 工业界缺口）
 
 > 范围：`Engine/Render/GI/` 光栅化 GI 子系统 + `Engine/Render/RT/` 硬件光追路径 + `Engine/Render/PostProcess/SSAO`
-> 说明：本部分在 `docs/技术分析文档/HugEngine全局光照GI实现原理.md`（实现细节）之上，聚焦"现有实现的正确性缺陷与优化空间"。
+> 说明：本部分在 `docs/HugEngine引擎介绍/HugEngine全局光照GI实现原理.md`（实现细节）之上，聚焦"现有实现的正确性缺陷与优化空间"。
 
 ---
 
