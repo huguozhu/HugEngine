@@ -70,6 +70,13 @@ struct LightGridCell { uint offset; uint count; };
 [[vk::binding(kGPUBinding_RSMPosition, kGPUDescSet_PerFrame)]] SamplerState      u_RSMSampler;
 [[vk::binding(kGPUBinding_RSMFlux, kGPUDescSet_PerFrame)]] Texture2D<float4> u_RSMFluxMap;       // normal.xy + flux
 
+// GI 分层合成参数（任务 26）：与 Deferred 侧**同一份布局与同一份语义** —— Forward 的 IBL/RSM
+// 不再是"管线级开关 + 硬编码求和"，而是和 Deferred 一样：逐通道、按源数组、归一化加权。
+// 绑定号复用 kGPUBinding_GIBlendParams（Forward 的 per-frame set 里它是空的）。
+[[vk::binding(kGPUBinding_GIBlendParams, kGPUDescSet_PerFrame)]] cbuffer GIBlendParamsCB {
+    GIBlendParams u_GIBlendParams;
+};
+
 [[vk::push_constant]] cbuffer FrameConstants {
     float4x4 viewProjMatrix;
     float4   cameraPosition;
@@ -186,6 +193,67 @@ float3 ShadeWithLight(GPULight light, float3 worldPos, float3 N, float3 V,
                     disneyA, disneyB, disneyC) * radiance * shadow;
 }
 
+// ============================================================
+// 间接光源分派（任务 26）：与 DeferredLighting.frag 的 SampleDiffuseSource /
+// SampleSpecularSource 一一对应 —— 同名、同签名形状、同量纲（都返回"该源估计的间接出射
+// 辐射度"）。Forward 目前只支持世界空间源，故这里只有 IBL 与 RSM 两个分支；
+// 将来往 Forward 加源，照着加一个 case 即可，合成循环不必改。
+// ============================================================
+
+/// RSM 间接光（反射阴影贴图，5×5 VPL 求和）—— 从 fragmentMain 里提出来供分派调用
+///
+/// 【与改前的差别】不再由 `iblIntensity` 门控：RSM 与 IBL 是两个独立的源，"把 IBL 调暗会
+/// 连带关掉 RSM" 是 §9.2-A 修过的耦合，Forward 侧这里是它的残留，一并去掉。
+/// 【保留的有效性判据】必须是有阴影的方向光：点光/聚光场景的 `u_ShadowData[0]` 没有
+/// `lightViewProj`（零矩阵），照做会得到垃圾坐标 → 阴影区出现"钱币"伪影。
+float3 FwdSampleRSMIndirect(float3 worldPos, float3 N) {
+    if (u_ShadowData[0].shadowParams.z <= 0.0 || u_ShadowData[0].shadowParams.w >= 0.5) {
+        return float3(0.0);
+    }
+    float4 lightSpacePos = mul(u_ShadowData[0].lightViewProj[0], float4(worldPos, 1.0));
+    float2 rsmCoord = lightSpacePos.xy / lightSpacePos.w * 0.5 + 0.5;
+    float3 rsmIndirect = float3(0.0);
+    const float rsmRadius = 0.005;
+    for (int dx = -2; dx <= 2; dx++) {
+        for (int dy = -2; dy <= 2; dy++) {
+            float2 uv = saturate(rsmCoord + float2(dx, dy) * rsmRadius);
+            float4 posSample  = u_RSMPositionMap.Sample(u_RSMSampler, uv);
+            float4 fluxSample = u_RSMFluxMap.Sample(u_RSMSampler, uv);
+            float3 samplePos  = posSample.xyz;
+            float3 sampleN    = normalize(fluxSample.rgb * 2.0 - 1.0);
+            float  flux       = fluxSample.a;
+            float3 dir        = samplePos - worldPos;
+            float  dist2      = max(dot(dir, dir), 0.01);
+            float  cosDir     = max(dot(sampleN, -normalize(dir)), 0.0);
+            rsmIndirect += flux * max(dot(N, normalize(dir)), 0.0) * cosDir / dist2;
+        }
+    }
+    return rsmIndirect * 0.03;   // 25 点离散化能量归一（与改前同一个常数）
+}
+
+/// 漫反射源分派：返回"已乘接收面 albedo 的间接出射辐射度"（与 Deferred 侧同约定）
+float3 FwdDiffuseSource(uint id, float3 N, float3 albedo, float3 kD, float3 worldPos,
+                        float iblIntensity) {
+    if (id == GISOURCE_IBL) {
+        return kD * u_IrradianceMap.Sample(u_IBLSampler, N).rgb * albedo * iblIntensity;
+    }
+    if (id == GISOURCE_RSM) {
+        // 量纲：FwdSampleRSMIndirect 返回 E（经验常数已含 1/π）→ 补接收面 albedo，
+        // 与 Deferred 的 `SampleRSMIndirect(...) * albedo` 完全一致
+        return FwdSampleRSMIndirect(worldPos, N) * albedo;
+    }
+    return float3(0.0);
+}
+
+/// 镜面源分派：返回"已含菲涅耳与环境 BRDF 的间接镜面辐射度"
+float3 FwdSpecularSource(uint id, float3 F, float2 envBRDF, float3 prefilteredColor,
+                         float iblIntensity) {
+    if (id == GISOURCE_IBL) {
+        return prefilteredColor * (F * envBRDF.r + envBRDF.g) * iblIntensity;
+    }
+    return float3(0.0);
+}
+
 float4 fragmentMain(FSInput input) : SV_Target0 {
     GPUObjectData obj = u_Objects[input.objectIndex];
 
@@ -274,44 +342,56 @@ float4 fragmentMain(FSInput input) : SV_Target0 {
     }
     color *= ao;
 
-    // ---- IBL（环境光照） ----
+    // ---- 间接光：**层栈驱动的归一化合成**（任务 26 / §9.2-H 的另一半）----
+    //
+    // 改前这里是把 IBL 漫反射、IBL 镜面、RSM 三项**硬编码相加**，而 RSM 还被
+    // `iblIntensity > 0` 门控（"把 IBL 调暗会连带关掉 RSM" —— 正是 §9.2-A 修过的那个耦合在
+    // Forward 侧的残留）。现在与 Deferred 走同一套语义：逐通道遍历层栈的源数组，
+    // 算 `Σ(贡献 × 权重) / Σ权重`。
+    //
+    // 【为什么单源读数与改前一致】逐源表达式一字未动（IBL 漫反射/镜面仍是原来那两行），
+    // 归一化在只有一个源时精确抵消 ⇒ {IBL} 的读数与改前逐位相同。
+    // 【为什么多开一个源不会变亮】加权平均 ≤ 两者之和，且权重和归一到 1。
+    // 【Forward 支持哪些源】只有世界空间源能用（前向着色没有 GBuffer，也没有屏幕空间缓冲）：
+    // 漫反射 IBL/RSM、镜面 IBL。能力位由 PipelineCaps::Forward 声明，面板与 Degrade 都读它。
     float3 F0_ibl = lerp(float3(dielectricF0F), albedo, metallic);
     float3 F = F_SchlickRoughness(max(dot(N, V), 0.0), F0_ibl, roughness, metallic);
     float3 kD = (1.0 - F) * (1.0 - metallic);
-    float3 irradiance = u_IrradianceMap.Sample(u_IBLSampler, N).rgb;
-    color += kD * irradiance * albedo * iblIntensity;
-
-    // 镜面反射 IBL：预滤波环境图（roughness→mip）+ BRDF LUT
     float3 R = reflect(-V, N);
-    float mipLevel = roughness * float(kGPUPrefilterMips - 1);
+    float  mipLevel = roughness * float(kGPUPrefilterMips - 1);
     float3 prefilteredColor = u_PrefilterMap.SampleLevel(u_IBLSampler, R, mipLevel).rgb;
-    color += prefilteredColor * (F * envBRDF.r + envBRDF.g) * iblIntensity;
+    float  camDist = length(cameraPosition.xyz - input.worldPos);
 
-    // ---- RSM 间接光照（Reflective Shadow Maps） ----
-    // 仅方向光（CSM 主阴影，shadowParams.w<0.5）生效：RSM 依赖 lightViewProj[0]
-    //（方向光 CSM 投影）。点光/聚光场景的 u_ShadowData[0] 无 lightViewProj（0 矩阵），
-    // 若误执行会用零矩阵变换产生垃圾坐标 → 阴影区出现异常图案（"钱币"伪影）。
-    if (iblIntensity > 0.0 && u_ShadowData[0].shadowParams.z > 0.0
-        && u_ShadowData[0].shadowParams.w < 0.5) {
-        float4 lightSpacePos = mul(u_ShadowData[0].lightViewProj[0], float4(input.worldPos, 1.0));
-        float2 rsmCoord = lightSpacePos.xy / lightSpacePos.w * 0.5 + 0.5;
-        float3 rsmIndirect = float3(0.0);
-        const float rsmRadius = 0.005;
-        for (int dx = -2; dx <= 2; dx++) {
-            for (int dy = -2; dy <= 2; dy++) {
-                float2 uv = saturate(rsmCoord + float2(dx, dy) * rsmRadius);
-                float4 posSample  = u_RSMPositionMap.Sample(u_RSMSampler, uv);
-                float4 fluxSample = u_RSMFluxMap.Sample(u_RSMSampler, uv);
-                float3 samplePos  = posSample.xyz;
-                float3 sampleN    = normalize(fluxSample.rgb * 2.0 - 1.0);
-                float  flux       = fluxSample.a;
-                float3 dir        = samplePos - input.worldPos;
-                float  dist2      = max(dot(dir, dir), 0.01);
-                float  cosDir     = max(dot(sampleN, -normalize(dir)), 0.0);
-                rsmIndirect += flux * max(dot(N, normalize(dir)), 0.0) * cosDir / dist2;
-            }
+    // 通道合成：与 Deferred 完全同构（含"通道里没有源时返回 0"这条语义）
+    {
+        GIChannelBlendParams bl = u_GIBlendParams.diffuse;
+        float3 num = float3(0.0);
+        float  den = 0.0;
+        for (uint i = 0u; i < bl.count; ++i) {
+            GISourceSlot s = bl.sources[i];
+            if (s.weight <= 0.0) continue;
+            // 前向没有屏幕空间源 ⇒ 置信度掩码全是 None ⇒ 权重就是用户权重（与 Deferred 一致：
+            // 世界空间源不带 CAMERA_COVERAGE/PROBE_GRID 位）。falloff 仍按 UBO 生效。
+            float w = s.weight;
+            if (s.falloffDistance > 0.0) w *= saturate(1.0 - camDist / s.falloffDistance);
+            num += FwdDiffuseSource(s.id, N, albedo, kD, input.worldPos, iblIntensity) * w;
+            den += w;
         }
-        color += rsmIndirect * 0.03 * iblIntensity;
+        color += (bl.mode != 0u) ? ((den > 0.0) ? (num / den) : float3(0.0)) : num;
+    }
+    {
+        GIChannelBlendParams bl = u_GIBlendParams.specular;
+        float3 num = float3(0.0);
+        float  den = 0.0;
+        for (uint i = 0u; i < bl.count; ++i) {
+            GISourceSlot s = bl.sources[i];
+            if (s.weight <= 0.0) continue;
+            float w = s.weight;
+            if (s.falloffDistance > 0.0) w *= saturate(1.0 - camDist / s.falloffDistance);
+            num += FwdSpecularSource(s.id, F, envBRDF, prefilteredColor, iblIntensity) * w;
+            den += w;
+        }
+        color += (bl.mode != 0u) ? ((den > 0.0) ? (num / den) : float3(0.0)) : num;
     }
 
     color += emissiveF.rgb;

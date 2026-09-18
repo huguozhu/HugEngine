@@ -380,22 +380,26 @@ inline u32 ToPipelineCap(ShadowChannel s) {
 /// 由于光追已并入 Deferred（HybridRT 管线已移除），Deferred 的位包含全部
 /// 光追源；无光追设备由 GIRegistry::Degrade 的 rtSupported 逐源裁剪。
 namespace PipelineCaps {
-    // Forward：**只有光栅阴影**，没有任何 GI 源位。
+    // Forward：光栅阴影 + **世界空间 GI 源**（IBL 漫反射/镜面、RSM 漫反射）。
     //
-    // 【为什么 Forward 一个 GI 源位都不声明】能力位的语义是「该管线在 **GI 层栈模型**下
-    // 能承载哪些源」——被声明的源会被面板放进层栈、被 `Degrade` 保留，并预期由管线消费。
-    // 而 `ForwardPipeline` 的 IBL 与 RSM 是**管线级开关**（`iblIntensity` / `rsmIndirect`）
-    // 加上内部硬编码的使用：它既不读层栈，PBR 着色器里也没有 `GIBlendParams` UBO、
-    // 不做归一化合成（§9.2-H）。此前声明 IBL + RSM 的实际效果是**把源放进一个没人消费的
-    // 层栈里**——正是「配置说谎」的形态，与其留一个假的声明，不如把声明改对。
-    //
-    // 前向着色无 GBuffer，故屏幕空间源（SSGI/SSR/SSAO/GTAO）与探针（DDGI）本来也不可用。
-    // 「让 Forward 真正走层栈归一化」是独立的改造项（见文档任务 26），需要给 PBR 补
-    // 混合参数 UBO，且会影响全部使用 PBR 的示例，故不在这里顺手做。
-    constexpr u32 Forward  = kPipelineGIShadowRaster;
+    // 【任务 26 起这里的声明是真的了】能力位的语义是「该管线在 **GI 层栈模型**下能承载哪些
+    // 源」——被声明的源会被面板放进层栈、被 `Degrade` 保留，并预期由管线消费。
+    // 任务 8 之前 Forward 声明了 IBL+RSM，但 `ForwardPipeline` 的 IBL/RSM 是**管线级开关**
+    // 加上 PBR 里的硬编码求和：既不读层栈，也没有 `GIBlendParams` UBO、不做归一化合成
+    // （§9.2-H）—— 那是「配置说谎」，故任务 8 把声明改成了"只有光栅阴影"。
+    // 任务 26 补齐了另一半：PBR.frag 现在**逐通道遍历层栈的源数组**做 `Σ(贡献×权重)/Σ权重`，
+    // ForwardPipeline 每帧填同一份 `GIBlendParams` UBO（与 Deferred 同一个绑定号与结构）。
+    // 故这里把**前向真能消费**的源位加回来：
+    //   · 漫反射：IBL、RSM（都是世界空间、逐像素可求值，不需要 GBuffer）
+    //   · 镜面：IBL（预滤波环境图）
+    // 仍然**不能**声明的是屏幕空间源（SSGI/SSR/SSAO/GTAO）、探针（DDGI）与光追源 ——
+    // 前向着色没有 GBuffer、没有屏幕空间缓冲，声明了就是又一次"放进没人消费的层栈"。
+    constexpr u32 Forward  = kPipelineGIShadowRaster
+                           | kPipelineGIDiffIBL | kPipelineGISpecIBL | kPipelineGIDiffRSM;
     // 全部 GI **源**位（不含两个阴影位）：阴影是可见性乘法项，独立于层栈。
     // 单独列出来有两个用处：判断「某管线是否在层栈模型下承载任何 GI 源」，
-    // 以及让 Deferred 不必依赖 Forward 的位（Forward 现在一个源位都没有）。
+    // 以及让 Deferred 不必依赖 Forward 的位（任务 26 起 Forward 也带了三个源位，
+    // 若 Deferred 用 `Forward | ...` 就会把这三个重复算进去 —— 语义没错但不再是"全部"）。
     constexpr u32 AllSources = kPipelineGIDiffIBL | kPipelineGISpecIBL | kPipelineGIDiffRSM
                              | kPipelineGIAOSSAO | kPipelineGISpecSSR
                              | kPipelineGIDiffSSGI | kPipelineGIDiffDDGI

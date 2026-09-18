@@ -583,7 +583,12 @@ int main() {
         g_GIPreset     = GetInt(cfgData, "gi_preset", -1);
         {
             // 层栈恢复：从 cfg 的「每通道源权重」重建（键缺失时保留默认预设值）
-            auto& gc = *deferredPipeline.GetGIConfig();
+            //
+            // 【任务 26 起这段是**两个管线共用**的】原先它只写 `deferredPipeline.GetGIConfig()`，
+            // 于是 `pipeline_mode=0`（Forward）下这些 GI 键对画面**没有任何影响** ——
+            // 任务 26 的判据（把 diffuse 从 {IBL} 改成 {IBL,RSM} 看读数）根本做不了。
+            // 现在抽成 lambda 对两个管线各套一次，各自再按**自己的能力位**降级。
+            auto applyGIConfig = [&](render::GIConfig& gc) {
             gc.giIntensity = GetFloat(cfgData, "gi_intensity", 1.0f);
             gc.aoIntensity = GetFloat(cfgData, "ao_intensity", 1.0f);
             // 屏幕覆盖置信度的边缘带宽（§3.2）：默认 5% 只影响贴边的一条，调大即可把它
@@ -627,6 +632,17 @@ int main() {
             // 每帧按层栈对齐子系统的 enabled（不变量 1：层栈与子系统开关同源）。
             // 这里曾有一份手工补丁，正是「复发过一次」的那一处 —— 把不变量的维护交给调用方，
             // 就必然会有下一个忘记同步的调用方（§9.2-G）。
+            };
+            applyGIConfig(*deferredPipeline.GetGIConfig());
+            // Forward：从**它自己的预设基线**出发套同一份键，再按 Forward 的能力位降级 ——
+            // 不降级的话 Forward 会带着它跑不了的源（SSGI/DDGI/光追）进层栈，
+            // 正是 §9.2-G 那个"归一化里计权重、却没人产出"的失效形态。
+            {
+                render::GIConfig fwd = render::GIConfigFromPreset((render::GIQualityPreset)g_GIPreset);
+                applyGIConfig(fwd);
+                *forwardPipeline.GetGIConfig() = render::GIRegistry::Degrade(
+                    fwd, render::PipelineCaps::Forward, device->GetCaps().supportsRayTracing);
+            }
         }
         {
             auto& ssao = deferredPipeline.GetSSAO();
@@ -1396,7 +1412,11 @@ int main() {
         // 必须在 render pass 之外录制（拷贝不能在 pass 内），因此放在 EndRenderPass 之后、End 之前
         const bool probeThisFrame = g_ProbeEnabled && (frameIndex % (u64)std::max(1, g_ProbeInterval) == 0);
         if (probeThisFrame && probeBuffer) {
-            rhi::IRHITexture* hdr = deferredPipeline.GetLighting().GetHDRTarget();
+            // 白炉探针也要按**当前管线**取 HDR：Forward 有自己的一张（任务 26 起层栈归一化
+            // 也在 Forward 生效，白炉判据必须能覆盖它）
+            rhi::IRHITexture* hdr = (g_PipelineMode == 0)
+                ? forwardPipeline.GetHDRTarget()
+                : deferredPipeline.GetLighting().GetHDRTarget();
             if (hdr) {
                 const u32 pw = swapchain->GetWidth(), ph = swapchain->GetHeight();
                 const u32 cx = pw / 2,           cy = ph / 2;            // 中心（物体所在）
@@ -1430,7 +1450,14 @@ int main() {
                 cmdList->CopyTextureToBuffer(tex, t.buf.get(), 0, 0, t.w, t.h, 0);
                 g_DumpTargets.push_back(std::move(t));
             };
-            addTarget("hdr", deferredPipeline.GetLighting().GetHDRTarget());
+            // HDR 取**当前管线**的那张（任务 26）：Forward 没有 GBuffer / Provider 输出，
+            // 但它的 HDR 目标就是层栈归一化的产物 —— 这正是 Forward 侧唯一可读的判据出口。
+            // 此前这里无条件取 deferredPipeline 的 HDR，于是 `pipeline_mode=0` 下落盘的
+            // 根本不是 Forward 的画面（文档 §11.3 早就把这点写成了注意事项，任务 26 修掉）。
+            const bool forwardMode = (g_PipelineMode == 0);
+            addTarget("hdr", forwardMode ? forwardPipeline.GetHDRTarget()
+                                         : deferredPipeline.GetLighting().GetHDRTarget());
+            if (!forwardMode) {
             if (auto* gb = deferredPipeline.GetGBuffer()) addTarget("albedo", gb->GetAlbedo());
             // 共享的前帧 HDR 辐射度（DDGI 探针 / SSGI 入射辐射度的共同输入）：
             // 它是 GI 源吃进去的东西，出问题时第一个要看的中间量
@@ -1454,6 +1481,7 @@ int main() {
                 addTarget(pre + "ao_raw",     p->GetAOOutput());
                 addTarget(pre + "ao_final",   p->GetFinalAOOutput());
             }
+            }   // if (!forwardMode)
             if (!g_DumpTargets.empty()) {
                 g_DumpDone = true;   // 已录制；实际读取放在 Submit 之后
             } else {

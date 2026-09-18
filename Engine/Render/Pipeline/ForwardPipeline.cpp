@@ -10,6 +10,7 @@ he::CVar<bool> cvLightPhysicalUnits("r.Light.PhysicalUnits", false,
 #include "GI/GI_IBL.h"
 #include "GI/GI_RSM.h"
 #include "GI/GITypes.h"   // GIRegistry（可用性与降级）
+#include "ShaderTypes.slang"   // GIBlendParams（C++ 侧镜像，任务 26）
 #include "Shadow/ShadowSystem.h"
 #include "Shadow/ShadowNone.h"
 #include "PostProcess/ToneMapPass.h"
@@ -112,6 +113,9 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
         {kGPUBinding_SpotShadow, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Spot Shadow Map（独立 binding，避免与点光 9 冲突）
         {kGPUBinding_RectShadow, rhi::DescriptorType::CombinedImageSampler,  1, 16 },  // Rect Shadow Map（矩形面光）
         { 30, rhi::DescriptorType::StorageBuffer,     4096, rhi::kStageMaskVertex | rhi::kStageMaskFragment, true },  // u_SSBO[] bindless
+        // GI 分层合成参数 UBO（任务 26）：与 Deferred 侧同一绑定号与同一结构 —— Forward 的
+        // IBL/RSM 从"管线级开关 + 硬编码求和"改为层栈驱动的归一化合成
+        {kGPUBinding_GIBlendParams, rhi::DescriptorType::UniformBuffer, 1, rhi::kStageMaskFragment},
     };
     m_PerFrameLayout = device->CreateDescriptorSetLayout(perFrameLayoutDesc);
 
@@ -237,6 +241,18 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
         device->UpdateDescriptorSet(set, kGPUBinding_RectShadow, rhi::DescriptorType::CombinedImageSampler,
             m_ShadowSystem->GetRectShadowMap(), m_ShadowSystem->GetRectShadowSampler());
         m_DescSets[i] = set;
+    }
+    // --- GI 分层合成参数 UBO（每飞行帧一份，任务 26）---
+    for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        rhi::BufferDesc giDesc;
+        giDesc.size      = sizeof(GIBlendParams);
+        giDesc.usage     = rhi::BufferUsage::Uniform;
+        giDesc.cpuAccess = true;
+        m_GIBuffers[i] = device->CreateBuffer(giDesc);
+        if (m_GIBuffers[i]) {
+            device->UpdateDescriptorSet(m_DescSets[i], kGPUBinding_GIBlendParams,
+                rhi::DescriptorType::UniformBuffer, m_GIBuffers[i].get());
+        }
     }
     // 初始化时使用第一个槽位
     m_CurrentFrameSlot = 0;
@@ -823,10 +839,44 @@ void ForwardPipeline::ResizeHDRTarget(u32 width, u32 height) {
 
 // ---- IRenderPipeline 包装方法 ----
 
+void ForwardPipeline::FillGIBlendUBO() {
+    if (!m_GIBuffers[m_CurrentFrameSlot]) return;
+    // 与 Deferred 帧图里那段 fillSlots **同构**：逐通道把层栈的源写进 UBO 槽位，
+    // 置信度掩码由 GIChannelBlendData::Add 统一推导（前向没有屏幕空间源 ⇒ 掩码全 None）。
+    GIBlendParams bp{};
+    auto fillSlots = [this](GIChannelBlendData& b, const GIChannelStack& st) {
+        b.count = 0;
+        b.mode  = (u32)st.mode;
+        b.edgeFade = m_GIConfig.edgeFade;
+        for (u32 i = 0; i < st.count; i++) {
+            const GISourceDesc& s = st.sources[i];
+            b.Add((u32)s.id, s.weight, s.falloffDistance);
+        }
+    };
+    // CPU 侧用 GIChannelBlendData 逐槽构造（置信度掩码在那里统一推导），
+    // 再按 LightingPass 的同一做法 memcpy 进 shader 结构 —— 两份布局有 static_assert 保证一致
+    GIChannelBlendData d{}, sp{}, ao{};
+    fillSlots(d,  m_GIConfig.diffuse);
+    fillSlots(sp, m_GIConfig.specular);
+    fillSlots(ao, m_GIConfig.ao);
+    d.furnaceMode = m_GIConfig.furnaceMode ? 1u : 0u;
+    std::memcpy(&bp.diffuse,  &d,  sizeof(GIChannelBlendData));
+    std::memcpy(&bp.specular, &sp, sizeof(GIChannelBlendData));
+    std::memcpy(&bp.ao,       &ao, sizeof(GIChannelBlendData));
+
+    void* mapped = m_GIBuffers[m_CurrentFrameSlot]->Map();
+    if (mapped) {
+        std::memcpy(mapped, &bp, sizeof(GIBlendParams));
+        m_GIBuffers[m_CurrentFrameSlot]->Unmap();
+    }
+}
+
 void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
                               he::SceneGraph& sg, const CameraData& camera,
                               float deltaTime)
 {
+    // GI 分层合成参数：RG 路径与非 RG 路径都要用，故在分支之前填（每帧一次的小 UBO 写入）
+    FillGIBlendUBO();
     if (m_UseRenderGraph) {
         RenderGraph rg;
         rg.SetProfiler(&m_Profiler);

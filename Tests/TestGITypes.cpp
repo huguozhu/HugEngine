@@ -465,15 +465,18 @@ TEST_CASE("GIConfigFromPreset：层栈不超容量（否则源会被静默丢弃
 // 6. 可用性与降级
 // ============================================================
 TEST_CASE("GIRegistry::IsAvailable：管线能力 ∧ 设备能力") {
-    // 管线不提供 → 不可用（Forward 无 GBuffer，故无屏幕空间源）
+    // 管线不提供 → 不可用。前向着色没有 GBuffer，故屏幕空间源、探针与光追源都不可用
     CHECK_FALSE(GIRegistry::IsAvailable(GISourceId::SSGI, PipelineCaps::Forward, true));
     CHECK_FALSE(GIRegistry::IsAvailable(GISourceId::DDGI, PipelineCaps::Forward, true));
     CHECK_FALSE(GIRegistry::IsAvailable(GISourceId::SSAO, PipelineCaps::Forward, true));
-    // Forward 的 IBL 与 RSM 是管线级开关（iblIntensity / rsmIndirect）+ 内部硬编码使用，
-    // 既不读层栈、也没有 GIBlendParams 归一化合成 → 在「层栈模型」里它们**不是**该管线的
-    // 可用源。声明它们只会把源放进一个没人消费的层栈（§9.2-H 的「配置说谎」）。
-    CHECK_FALSE(GIRegistry::IsAvailable(GISourceId::IBL, PipelineCaps::Forward, true));
-    CHECK_FALSE(GIRegistry::IsAvailable(GISourceId::RSM, PipelineCaps::Forward, true));
+    CHECK_FALSE(GIRegistry::IsAvailable(GISourceId::SSR, PipelineCaps::Forward, true));
+    CHECK_FALSE(GIRegistry::IsAvailable(GISourceId::RTGI, PipelineCaps::Forward, true));
+    // **世界空间源在 Forward 可用**（任务 26）：PBR.frag 现在逐通道遍历层栈的源数组做
+    // 归一化合成，ForwardPipeline 每帧填同一份 GIBlendParams UBO。任务 8 当时声明它们
+    // 是"配置说谎"（没有消费者），任务 26 补上了消费者 ⇒ 这三条从"必须为假"变成"必须为真"。
+    // 这条断言是这两个任务之间的**分界线**：谁把 Forward 的 IBL/RSM 消费者删掉，它就红。
+    CHECK(GIRegistry::IsAvailable(GISourceId::IBL, PipelineCaps::Forward, true));
+    CHECK(GIRegistry::IsAvailable(GISourceId::RSM, PipelineCaps::Forward, true));
 
     // Deferred 提供屏幕空间源与探针
     CHECK(GIRegistry::IsAvailable(GISourceId::SSGI, PipelineCaps::Deferred, false));
@@ -531,24 +534,44 @@ TEST_CASE("GIRegistry::Degrade：Ultra + Deferred 无光追 → 裁掉光追源�
     CHECK(d.specular.Has(GISourceId::IBL));
 }
 
-TEST_CASE("GIRegistry::Degrade：Ultra + Forward 无光追 → GI 通道被裁空，只剩阴影") {
+TEST_CASE("GIRegistry::Degrade：Ultra + Forward 无光追 → 只留世界空间源与光栅阴影") {
     const GIConfig ultra = GIConfigFromPreset(GIQualityPreset::Ultra);
     const GIConfig d = GIRegistry::Degrade(ultra, PipelineCaps::Forward, false);
 
-    // Forward 不声明任何 GI 源位 → 三个 GI 通道全被裁空，且兜底（补 IBL）也不会发生，
-    // 因为兜底同样要求该源在本管线下可用。**这是正确结果**：Forward 的 IBL/RSM 是
-    // 管线级开关，层栈内容对它没有任何影响，留着只会让配置说谎（§9.2-H）。
-    CHECK(d.diffuse.count == 0u);
-    CHECK(d.specular.count == 0u);
-    CHECK(d.ao.count == 0u);
+    // 任务 26 起 Forward 声明并**消费**三个世界空间源位（漫反射 IBL/RSM、镜面 IBL）：
+    // Ultra 预设的 diffuse = {IBL, RTGI, DDGI}、specular = {IBL, RTReflection}、ao = {SSAO, RTAO}
+    // ⇒ 降级后只剩 IBL（漫反射与镜面各一份），屏幕空间/探针/光追源全部被裁掉。
+    CHECK(d.diffuse.count == 1u);
+    CHECK(d.diffuse.Has(GISourceId::IBL));
+    CHECK(d.specular.count == 1u);
+    CHECK(d.specular.Has(GISourceId::IBL));
+    CHECK(d.ao.count == 0u);            // Forward 没有 AO 源（无 GBuffer / 无屏幕空间）
+
     CHECK_FALSE(d.ShouldRunSSGI());
     CHECK_FALSE(d.ShouldRunDDGI());
-    CHECK_FALSE(d.ShouldRunRSM());
+    CHECK_FALSE(d.ShouldRunRSM());      // Ultra 的 diffuse 里本来就没有 RSM
     CHECK_FALSE(d.ShouldRunAO());
-    CHECK_FALSE(d.ShouldRunSpecular());
+    // 注：`ShouldRunSpecular()` 只覆盖 SSR/RTReflection（屏幕空间/光追的特例谓词），
+    // 不含 IBL —— 所以"镜面通道还在"要看层栈本身，而不是这个谓词。
+    CHECK(d.specular.Has(GISourceId::IBL));
 
     // 阴影通道独立于层栈，Forward 的光栅阴影保留
     CHECK(d.shadow == ShadowChannel::Raster);
+}
+
+TEST_CASE("GIRegistry::Degrade：Forward 的漫反射层栈可以同时留 IBL 与 RSM") {
+    // 任务 26 的验收前提：`pipeline_mode=0` 下把 diffuse 从 {IBL} 改成 {IBL,RSM} 必须**真的**
+    // 走到着色器里（两者都在 Forward 的能力位内），而不是被 Degrade 悄悄裁掉。
+    GIConfig c;
+    c.diffuse.Set(GISourceId::IBL, 1.0f);
+    c.diffuse.Set(GISourceId::RSM, 1.0f);
+    c.specular.Set(GISourceId::IBL, 1.0f);
+
+    const GIConfig d = GIRegistry::Degrade(c, PipelineCaps::Forward, /*rtSupported=*/false);
+    CHECK(d.diffuse.count == 2u);
+    CHECK(d.diffuse.Has(GISourceId::IBL));
+    CHECK(d.diffuse.Has(GISourceId::RSM));
+    CHECK(d.ShouldRunRSM());
 }
 
 TEST_CASE("GIRegistry::Degrade：weight<=0 的残留槽位也会被清理") {

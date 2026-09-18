@@ -120,7 +120,10 @@ private:
     void UploadLightBuffer();
     void UpdateIBLBindings(GI_IBL* gi);
     void UpdateRSMBindings();
-
+    /// 把 `m_GIConfig` 的三个通道层栈打包进 GI 合成参数 UBO（任务 26）。
+    /// 与 Deferred 走同一套语义：着色器按源数组 + 权重归一化，Forward 的 IBL/RSM 不再是
+    /// 管线级开关。每帧在 Render 开头填一次（RG 路径与非 RG 路径都要用）。
+    void FillGIBlendUBO();
     rhi::IRHIDevice* m_Device = nullptr;
     std::unique_ptr<rhi::IRHIPipelineState> m_PBR_PSO;
     // 蒙皮网格 PSO（C1b）：扩展顶点布局（location 3/4 = JOINTS/WEIGHTS），同着色器
@@ -129,6 +132,8 @@ private:
     rhi::DescriptorSetLayoutHandle m_PerFrameLayout = rhi::kInvalidLayout;  // set=0: per-frame + bindless
     rhi::DescriptorSetHandle       m_DescSets[MAX_FRAMES_IN_FLIGHT] = {};   // set=0 三缓冲
     std::unique_ptr<rhi::IRHIBuffer> m_LightBuffers[MAX_FRAMES_IN_FLIGHT];
+    /// GI 分层合成参数 UBO（每飞行帧一份，与 Deferred 的 LightingPass 同结构同语义）
+    std::unique_ptr<rhi::IRHIBuffer> m_GIBuffers[MAX_FRAMES_IN_FLIGHT];
     std::unique_ptr<rhi::IRHIBuffer> m_ObjectBuffers[MAX_FRAMES_IN_FLIGHT];
     std::unique_ptr<rhi::IRHIBuffer> m_ShadowBuffers[MAX_FRAMES_IN_FLIGHT];
     std::unique_ptr<rhi::IRHIBuffer> m_ShadowObjBuffers[MAX_FRAMES_IN_FLIGHT];  // 阴影专用 Object Buffer
