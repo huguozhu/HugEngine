@@ -47,7 +47,8 @@ namespace {
         void* image       = nullptr;
         u32   mipLevels   = 1;
         u32   arrayLayers = 1;
-    };
+        u32   format = 0;   // u32(Format)：render pass 边界回写真实布局时用
+};
     std::unordered_map<void*, ViewImageInfo> g_ViewImages;
 
     // 「该图像是否被写入过」与「是否已就该图像告过警」——均按**图像**记：
@@ -71,10 +72,20 @@ namespace {
     }
 }
 
-void TrackViewImage(void* imageView, void* image, u32 mipLevels, u32 arrayLayers) {
+void TrackViewImage(void* imageView, void* image, u32 mipLevels, u32 arrayLayers, u32 format) {
     if (!imageView) return;
     std::lock_guard<std::mutex> lock(g_Mutex);
-    g_ViewImages[imageView] = ViewImageInfo{ image, mipLevels ? mipLevels : 1, arrayLayers ? arrayLayers : 1 };
+    g_ViewImages[imageView] = ViewImageInfo{ image, mipLevels ? mipLevels : 1,
+                                            arrayLayers ? arrayLayers : 1, format };
+}
+
+bool QueryViewFormat(void* imageView, u32& outFormat) {
+    if (!imageView) return false;
+    std::lock_guard<std::mutex> lock(g_Mutex);
+    auto it = g_ViewImages.find(imageView);
+    if (it == g_ViewImages.end()) return false;
+    outFormat = it->second.format;
+    return true;
 }
 
 bool QueryViewImage(void* imageView, void*& outImage, u32& outMipLevels, u32& outArrayLayers) {

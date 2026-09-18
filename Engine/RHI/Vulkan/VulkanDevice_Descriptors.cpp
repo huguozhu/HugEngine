@@ -466,7 +466,7 @@ static void* CreateMipViewInternal(VkDevice device, VulkanTexture* vkTex,
     // 临时视图同样要登记「视图 → 底层图像」：它会被当作 render pass 附件写入
     //（如 IBL 预滤波图的逐 mip 逐面视图），不登记则按该视图反查不到底层图像
     TrackViewImage(reinterpret_cast<void*>(view), reinterpret_cast<void*>(vkTex->GetImage()),
-                   1, 1);
+                   1, 1, u32(vkTex->GetFormat()));
     return reinterpret_cast<void*>(view);
 }
 

@@ -42,10 +42,16 @@ void ForgetTrackedTextureLayout(void* imageView);
 // ============================================================
 
 /// 登记视图对应的底层图像与 mip / array layer 数量（纹理创建时调用）
-void TrackViewImage(void* imageView, void* image, u32 mipLevels, u32 arrayLayers);
+/// @param format 纹理的 RHI 格式（u32(Format)）：render pass 边界回写真实布局时要用它
+///               判断该附件结束在 PRESENT_SRC 还是 COLOR_ATTACHMENT（见 VulkanConverters.h）
+void TrackViewImage(void* imageView, void* image, u32 mipLevels, u32 arrayLayers,
+                    u32 format = 0);
 
 /// 查询视图对应的图像与范围；返回 false 表示未登记
 bool QueryViewImage(void* imageView, void*& outImage, u32& outMipLevels, u32& outArrayLayers);
+
+/// 查询视图对应纹理的格式（u32(Format)）；返回 false 表示未登记
+bool QueryViewFormat(void* imageView, u32& outFormat);
 
 /// 纹理销毁时清理登记
 void ForgetViewImage(void* imageView);
