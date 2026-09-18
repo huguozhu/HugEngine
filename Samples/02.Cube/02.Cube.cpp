@@ -391,6 +391,7 @@ int main() {
     // --- 实例化网格（B1：100×100 = 10000 实例，单次 DrawIndexed）---
     Entity instancedEntity;
     std::vector<float4x4> instancedTransformsBackup;   // 面板显隐开关用
+    bool  demoInstanceUpdate = true;                   // 任务 23：每帧更新实例变换（复用演示，面板可关）
     {
         instancedEntity = world.CreateEntity("InstancedGrid");
         world.AddComponent<TransformComponent>(instancedEntity);
@@ -1094,12 +1095,36 @@ int main() {
             }
         }
 
-        // 每 2 秒刷新 FPS 文字（验证实时文字更新路径；
-        // bindless 堆 append-only，更新会追加槽位，故降低刷新频率）
+        // 任务 23：每帧更新 10000 个实例变换（"高频更新"压力演示）。
+        // 环形化之前：每次更新都会新建 SSBO + 注册新 bindless 槽位 + 旧缓冲无界保活；
+        // 现在：容量够 → Map 原地复用，SSBO 句柄与槽位都不变（日志每 300 帧打一行证据）。
+        if (demoInstanceUpdate) {
+            if (auto* im = world.GetComponent<InstancedMeshComponent>(instancedEntity)) {
+                static f32 s_Wave = 0.0f;
+                s_Wave += deltaTime;
+                std::vector<float4x4> transforms = instancedTransformsBackup;
+                const float amp = 0.6f * std::sin(s_Wave * 1.5f);
+                for (usize i = 0; i < transforms.size(); ++i)
+                    transforms[i][3].y += amp;                 // 整片草皮上下起伏
+                im->SetInstanceTransforms(std::move(transforms));
+
+                static u32 s_UpdateCount = 0;
+                if (++s_UpdateCount % 300 == 0) {
+                    HE_CORE_INFO("[任务 23] 实例变换已连续更新 {} 帧：SSBO 句柄 {}（容量 {}），"
+                                 "退役缓冲 {}（原地复用，未新建）",
+                                 s_UpdateCount, im->instanceSSBOHandle,
+                                 im->GetInstanceBufferCapacity(), im->GetRetiredBufferCount());
+                }
+            }
+        }
+
+        // 每 0.25 秒刷新 FPS 文字。任务 23 之前这里是 2 秒 —— 因为 bindless 堆是
+        // append-only，每次更新都追加纹理槽位（旧纹理只能保活）。槽位环形化之后，
+        // 高频更新复用同一个槽位，刷新频率可以提上来（日志会打印槽位总数不增）。
         {
             static f32 s_TextTimer = 0.0f;
             s_TextTimer += deltaTime;
-            if (s_TextTimer >= 2.0f) {
+            if (s_TextTimer >= 0.25f) {
                 s_TextTimer = 0.0f;
                 if (auto* tr = world.GetComponent<TextRenderComponent>(fpsTextEntity)) {
                     f64 fps = 1.0 / (deltaTime > 0 ? deltaTime : 0.016);
@@ -1218,6 +1243,11 @@ int main() {
                 im->SetInstanceTransforms(visible ? instancedTransformsBackup
                                                   : std::vector<float4x4>{});
             }
+            // 任务 23：打开后每帧写 10000 个实例变换（验证 SSBO 原地复用、槽位不涨）
+            ImGui::Checkbox("每帧更新实例变换 (任务 23)", &demoInstanceUpdate);
+            ImGui::SameLine();
+            ImGui::TextDisabled("句柄 %u / 容量 %u / 退役 %u", im->instanceSSBOHandle,
+                                im->GetInstanceBufferCapacity(), im->GetRetiredBufferCount());
         }
 
         // 骨骼网格演示状态（C1c）
