@@ -27,6 +27,10 @@ static void EnsureJoltRegistered() {
     (void)s_Registered;
 }
 
+// 见头文件：基类先于成员构造 ⇒ 任何 PhysicsWorld（含进程级静态那份）在构造其
+// JPH::PhysicsSystem 之前，分配器/Factory 一定已经就绪；退出时析构也就不会踩到空指针。
+JoltRuntimeGuard::JoltRuntimeGuard() { EnsureJoltRegistered(); }
+
 bool PhysicsWorld::Initialize(const PhysicsInitDesc& desc) {
     if (m_Ready) return true;
     EnsureJoltRegistered();
