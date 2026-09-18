@@ -11,6 +11,7 @@
 #include "Scene/SphereComponent.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
+#include "RT/PTMaterialParams.h"   // Disney 参数打包（与光栅化 CPU 侧、PT 载荷同源）
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <cstring>
@@ -578,26 +579,28 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world
         row3[1] = m.emissiveFactor.g;
         row3[2] = m.emissiveFactor.b;
         row3[3] = 0.0f;
-        // Disney 参数（与 Material.h 的 disneyA/disneyB/disneyC 打包一致）
+        // Disney 参数（统一走 RT/PTMaterialParams.h 的打包规则：
+        // 与 Material.h 的 disneyA/disneyB/disneyC、PT 载荷逐字段同源）
+        const PTMaterialParams disney = PackDisneyParams(
+            m.anisotropic, m.subsurface, m.specular, m.sheen,
+            m.clearcoat, m.clearcoatGloss,
+            m.specularTint.r, m.specularTint.g, m.specularTint.b,
+            m.ior, m.transmission);
         float* row4 = &matData[n * 16 + i * 4];
-        row4[0] = m.anisotropic;
-        row4[1] = m.subsurface;
-        row4[2] = m.specular;
-        row4[3] = m.sheen;
+        row4[0] = disney.disneyA.x;
+        row4[1] = disney.disneyA.y;
+        row4[2] = disney.disneyA.z;
+        row4[3] = disney.disneyA.w;
         float* row5 = &matData[n * 20 + i * 4];
-        row5[0] = m.clearcoat;
-        row5[1] = m.clearcoatGloss;
-        row5[2] = m.specularTint.r;
-        row5[3] = m.specularTint.g;
+        row5[0] = disney.disneyB.x;
+        row5[1] = disney.disneyB.y;
+        row5[2] = disney.disneyB.z;
+        row5[3] = disney.disneyB.w;
         float* row6 = &matData[n * 24 + i * 4];
-        row6[0] = m.specularTint.b;                     // disneyC
-        {
-            // 电介质 F0 由 IOR 预计算（与 FillObjectData / FillMaterialData 同式）
-            const float ior = m.ior;
-            row6[1] = (ior - 1.0f) * (ior - 1.0f) / ((ior + 1.0f) * (ior + 1.0f));
-        }
-        row6[2] = m.ior;
-        row6[3] = m.transmission;                       // 预留：任务 4 才参与折射
+        row6[0] = disney.surfaceParams.x;   // disneyC = specularTint.b
+        row6[1] = disney.surfaceParams.y;   // dielectricF0（由 IOR 推导）
+        row6[2] = disney.surfaceParams.z;   // ior
+        row6[3] = disney.surfaceParams.w;   // transmission（预留：任务 4 才参与折射）
 
         // 读取顶点/索引缓冲 → 每三角形 3 条顶点法线
         auto* vb = m.GetVertexBuffer().get();
