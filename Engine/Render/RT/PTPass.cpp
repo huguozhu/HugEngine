@@ -141,11 +141,13 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     }
 
     // ── 5 张输出纹理（RT 写 UAV，降噪/ReSTIR 读 SRV）──
+    // TransferSrc：供对照流程把结果整幅拷回 host 落盘（Tools/pt/dump_pt.ps1，PT 任务 5）
     rhi::TextureDesc d;
     d.width = m_Width;
     d.height = m_Height;
     d.mipLevels = 1;
-    d.usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource;
+    d.usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource
+            | rhi::TextureUsage::TransferSrc;
     d.format = rhi::Format::RGBA16_FLOAT;
     m_HDR = device->CreateTexture(d);
     d.format = rhi::Format::R32_FLOAT;

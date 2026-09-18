@@ -34,9 +34,11 @@
 #include "imgui.h"
 
 #include <algorithm>
+#include <cstdlib>      // std::getenv / std::atoi（HE_DUMP_PT / HE_CFG）
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <sstream>
 #include <unordered_map>
 #include <vector>
@@ -53,6 +55,7 @@ using namespace he;
 // ============================================================
 // 配置读写（简易 key=value 格式）
 // ============================================================
+// 配置文件路径（示例退出时会回写该文件；对照流程用 HE_CFG 指定私有副本，见 main）
 static String g_ConfigPath = String(HUGE_CONTENT_DIR) + "Config/05_Sponza-PathTracing.cfg";
 
 static std::unordered_map<String, String> LoadConfigFile(const String& path) {
@@ -96,6 +99,16 @@ static int GetInt(const std::unordered_map<String, String>& m,
 }
 
 int main() {
+    // ============================================================
+    // 0. 环境变量：cfg 路径覆盖（对照流程的私有副本）
+    // ============================================================
+    // 本示例退出时会把面板参数回写 g_ConfigPath，多次运行会互相覆盖。
+    // 对照 / 复现实验因此支持 HE_CFG=<路径> 指定本次运行的私有 cfg 副本
+    // （Tools/pt/dump_pt.ps1 就是这么用的），避免污染基准配置。
+    if (const char* cfgEnv = std::getenv("HE_CFG")) {
+        if (*cfgEnv) g_ConfigPath = cfgEnv;
+    }
+
     // ============================================================
     // 1. 引擎启动
     // ============================================================
@@ -583,6 +596,37 @@ int main() {
         camCtrl.SetAspectRatio(static_cast<float>(w), static_cast<float>(h));
     });
     // ============================================================
+    // 10.5 PT 参考图落盘（对照流程，PT 任务 5）
+    // ============================================================
+    // 用法：HE_DUMP_PT=<标签>  [HE_DUMP_PT_FRAME=<帧号，默认 60>]  [HE_CFG=<私有 cfg>]
+    //   输出 build/verify/pt_<标签>_<目标>.f16（原始像素、无文件头、行紧密排布）
+    //       + _meta.txt（逐目标一行：名称 宽 高 格式）+ _camera.txt（渲染该帧时的相机参数）
+    //   目标：hdr / depth / normal / albedo（PT 的四张输出；velocity 未落盘）
+    //   落盘后自动请求退出窗口，便于脚本化（脚本见 Tools/pt/dump_pt.ps1）。
+    //
+    // 为什么需要它：PT 是"标准答案"，对照结论必须建立在**可复现的读数**上。
+    // 落盘的是未 ToneMap 的线性 HDR（降噪 + A-Trous 之后的最终辐射度），
+    // 离线脚本据此算均值/分位数/两版差值，避免用截图或目测下结论。
+    const char* dumpTagEnv   = std::getenv("HE_DUMP_PT");
+    const char* dumpFrameEnv = std::getenv("HE_DUMP_PT_FRAME");
+    const String g_DumpTag   = dumpTagEnv ? dumpTagEnv : "";
+    bool         g_DumpPT    = !g_DumpTag.empty();   // 非 const：失败时关闭以免每帧重试
+    const u64    g_DumpFrame = dumpFrameEnv ? (u64)std::max(1, std::atoi(dumpFrameEnv)) : 60ull;
+    bool g_DumpDone    = false;   // 已录制拷贝（防止重复录制）
+    bool g_DumpWritten = false;   // 已落盘（防止每帧重复写文件）
+    struct DumpTarget {
+        String                           name;
+        rhi::IRHITexture*                tex = nullptr;
+        std::unique_ptr<rhi::IRHIBuffer> buf;
+        u32                              w = 0, h = 0;
+        u32                              bytesPerPixel = 8;   // RGBA16F=8，R32F=4
+    };
+    std::vector<DumpTarget> g_DumpTargets;
+    if (g_DumpPT)
+        HE_CORE_INFO("[PT采样] 已启用：标签={} 目标帧={} 输出 build/verify/pt_{}_*.f16",
+                     g_DumpTag, g_DumpFrame, g_DumpTag);
+
+    // ============================================================
     // 11. 主渲染循环
     // ============================================================
     HE_CORE_INFO("05.Sponza-PathTracing 启动 — WASD=移动, 右键拖拽=旋转, Shift=加速, E/Q=升降");
@@ -656,6 +700,44 @@ int main() {
         cmdList->Begin();
         pathTracingPipeline.NextFrame();
         pathTracingPipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera(), deltaTime);
+
+        // ── PT 参考图落盘：整幅 CopyTextureToBuffer 到 host 可见缓冲（仅对照路径）──
+        // 必须在 render pass 之外录制；缓冲在采样帧才创建，尺寸取自纹理本身。
+        if (g_DumpPT && !g_DumpDone && frameIndex >= g_DumpFrame) {
+            auto addTarget = [&](const String& name, rhi::IRHITexture* tex, u32 bytesPerPixel) {
+                if (!tex) return;
+                DumpTarget t;
+                t.name = name;
+                t.tex  = tex;
+                t.w    = tex->GetWidth();
+                t.h    = tex->GetHeight();
+                t.bytesPerPixel = bytesPerPixel;
+                rhi::BufferDesc dd;
+                dd.size      = (usize)t.w * t.h * bytesPerPixel;
+                dd.usage     = rhi::BufferUsage::Storage;   // 该路径恒定带 TRANSFER_DST，可作拷贝目标
+                dd.cpuAccess = true;                        // 需要 Map 读回
+                t.buf = device->CreateBuffer(dd);
+                if (!t.buf) {
+                    HE_CORE_ERROR("[PT采样] 读回缓冲创建失败: {}（{}x{}）", name, t.w, t.h);
+                    return;
+                }
+                // x=y=0 且取满宽高 ⇒ bufferRowLength=0 的紧密排布正好等于线性落盘布局
+                cmdList->CopyTextureToBuffer(tex, t.buf.get(), 0, 0, t.w, t.h, 0);
+                g_DumpTargets.push_back(std::move(t));
+            };
+            if (auto* pt = pathTracingPipeline.GetPT()) {
+                addTarget("hdr",    pt->GetHDR(),            8);   // RGBA16F 最终辐射度
+                addTarget("depth",  pt->GetDepth(),          4);   // R32F 线性视图深度
+                addTarget("normal", pt->GetNormal(),         8);   // RGBA16F 世界法线 + roughness
+                addTarget("albedo", pt->GetAlbedoMetallic(), 8);   // RGBA16F albedo + metallic
+            }
+            if (!g_DumpTargets.empty()) {
+                g_DumpDone = true;   // 已录制；实际读取放在 Submit 之后
+            } else {
+                HE_CORE_WARN("[PT采样] 无可用目标，关闭落盘");
+                g_DumpPT = false;
+            }
+        }
 
         // --- ImGui（LOAD 保留 ToneMap 输出）---
         cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
@@ -818,6 +900,48 @@ int main() {
         cmdList->End();
 
         device->Submit(cmdList.get());
+
+        // ── PT 参考图落盘：等 GPU 完成后原样写文件（原始像素、无文件头）──
+        if (g_DumpDone && !g_DumpWritten) {
+            device->WaitIdle();   // 对照用途，允许停顿
+            const String dir  = "build/verify/";
+            const String base = dir + "pt_" + g_DumpTag;
+            std::filesystem::create_directories(dir);
+            std::ofstream meta(base + "_meta.txt");
+            for (auto& t : g_DumpTargets) {
+                const usize bytes = (usize)t.w * t.h * t.bytesPerPixel;
+                const void* p = t.buf ? t.buf->Map() : nullptr;
+                if (p) {
+                    std::ofstream f(base + "_" + t.name + ".f16", std::ios::binary);
+                    f.write(static_cast<const char*>(p), (std::streamsize)bytes);
+                    t.buf->Unmap();
+                    meta << t.name << " " << t.w << " " << t.h << " "
+                         << (t.bytesPerPixel == 4 ? "R32F" : "RGBA16F") << "\n";
+                    HE_CORE_INFO("[PT采样] {}_{}.f16  {}x{}  {} B", base, t.name, t.w, t.h, bytes);
+                } else {
+                    HE_CORE_ERROR("[PT采样] 映射失败: {}_{}", base, t.name);
+                }
+            }
+            // 相机参数一并落盘：离线对照需要**渲染这一帧时**的相机参数，
+            // 否则判据只能靠硬编码，而硬编码一旦被 cfg 改动就失效
+            {
+                const render::CameraData& cam = camCtrl.GetCamera();
+                std::ofstream cm(base + "_camera.txt");
+                cm << "pos "     << cam.position.x << " " << cam.position.y << " " << cam.position.z << "\n";
+                cm << "forward " << cam.forward.x  << " " << cam.forward.y  << " " << cam.forward.z  << "\n";
+                cm << "up "      << cam.up.x       << " " << cam.up.y       << " " << cam.up.z       << "\n";
+                cm << "fov "     << cam.fov        << "\n";
+                cm << "near "    << cam.nearPlane  << "\n";
+                cm << "far "     << cam.farPlane   << "\n";
+                cm << "aspect "  << cam.aspectRatio << "\n";
+                cm << "frame "   << frameIndex << "\n";
+            }
+            HE_CORE_INFO("[PT采样] 共落盘 {} 个目标，请求退出", g_DumpTargets.size());
+            g_DumpWritten = true;
+            // 采样完成即请求关窗：脚本无需超时等待，也保证退出前正常走完清理与保存流程
+            glfwSetWindowShouldClose(glfwWin, GLFW_TRUE);
+        }
+
         swapchain->Present(true);
         frameIndex++;
     }
