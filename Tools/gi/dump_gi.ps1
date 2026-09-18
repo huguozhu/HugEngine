@@ -65,7 +65,11 @@ function New-Cfg([string]$path, [System.Collections.IDictionary]$overrides) {
 $variants = @(
     @{ tag = 'none'; w = @(0, 0, 0, 0) },   # empty stack: baseline (direct + specular + sky)
     @{ tag = 'ddgi'; w = @(0, 1, 0, 0) },
-    @{ tag = 'ssgi'; w = @(0, 0, 1, 0) }
+    @{ tag = 'ssgi'; w = @(0, 0, 1, 0) },
+    # two sources at once: the "normalised composite == weighted mean" criterion (SSGI-CAL).
+    # It MUST come from this same script: different writers can land on different fallback
+    # paths in this sample (docs 9.2-X), and then the difference no longer isolates the stack.
+    @{ tag = 'both'; w = @(0, 1, 1, 0) }
 )
 
 $failed = 0
