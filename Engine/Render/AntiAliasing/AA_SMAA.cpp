@@ -361,7 +361,9 @@ void AA_SMAA::CreateNeighborPSO() {
     d.topology            = rhi::PrimitiveTopology::TriangleList;
     d.depthTest           = false;
     d.depthWrite          = false;
-    d.depthFormat         = rhi::Format::Unknown;
+    // 终稿 pass 输出到交换链 RenderPass（带 D32 深度附件），管线 RP 必须同样声明深度，
+    // 否则报 VUID-vkCmdDraw-renderPass-02684；前两个 pass 写自己的离屏目标，保持 Unknown。
+    d.depthFormat         = rhi::Format::D32_FLOAT;
     d.colorAttachmentCount = 1;
     d.colorFormats[0]      = rhi::Format::BGRA8_UNORM;  // 终端输出到 BackBuffer
     d.pushConstantRanges   = {pcr};

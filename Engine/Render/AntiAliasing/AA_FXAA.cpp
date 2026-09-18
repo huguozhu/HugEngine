@@ -103,7 +103,11 @@ void AA_FXAA::CreatePSO() {
     d.topology=rhi::PrimitiveTopology::TriangleList;
     d.depthTest=false;
     d.depthWrite=false;
-    d.depthFormat=rhi::Format::Unknown;
+    // 终稿 pass 画进交换链 RenderPass（BeginRenderPass(1, swapFmt)），而那个 RP 带 D32
+    // 深度附件：管线 RP 必须同样声明深度，否则每帧报
+    // VUID-vkCmdDraw-renderPass-02684（当前 RP 深度附件=1，管线 RP=VK_ATTACHMENT_UNUSED）。
+    // 与 ToneMapPass 的处理一致（depthTest/Write 仍为 false，附件只是要求兼容）。
+    d.depthFormat=rhi::Format::D32_FLOAT;
     d.colorAttachmentCount=1;
     d.colorFormats[0]=rhi::Format::BGRA8_UNORM;
     d.pushConstantRanges={pcr}; d.descriptorSetLayouts={m_DescLayout}; d.debugName="FXAA";
