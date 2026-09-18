@@ -69,6 +69,16 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 if(MSVC)
     add_compile_options(/Zc:preprocessor /bigobj /MP /utf-8 )
     add_compile_definitions(NOMINMAX)
+
+    # 所有配置都生成 PDB（含 Release）。
+    # 理由：崩溃处理器（Samples/06.GILab/CrashHandler.cpp）用 DbgHelp + exe 同目录的 .pdb
+    # 解析调用栈；Release 默认不带调试信息，于是崩溃报告只有「模块 + 偏移 + (无符号信息)」，
+    # 偶发崩溃（GI 文档 §10.1 第 2 项）根本无法定位。代价是构建产物变大、链接略慢。
+    set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT ProgramDatabase)
+    # VS 生成器给 Release 预置了 GenerateDebugInformation=false，只设上面的编译期格式还不够，
+    # 链接器必须显式开 /DEBUG，否则不产出可解析的 exe PDB（只剩编译期 PDB 引用）。
+    set(CMAKE_EXE_LINKER_FLAGS_RELEASE    "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /DEBUG")
+    set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "${CMAKE_SHARED_LINKER_FLAGS_RELEASE} /DEBUG")
 endif()
 
 add_subdirectory(Engine)

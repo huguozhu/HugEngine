@@ -173,10 +173,19 @@ LONG WINAPI OnUnhandledException(EXCEPTION_POINTERS* info) {
     }
     Out("线程 ID : %lu", GetCurrentThreadId());
 
+    // ---- minidump：先落盘，再做符号化 ----
+    // 【顺序很重要】符号解析（DbgHelp 加载 PDB + StackWalk64）可能很慢甚至卡住，而它只是
+    // "锦上添花"；minidump 才是唯一不可再生的证据。先写 dump，保证即使符号化失败或超时，
+    // 现场仍然留着（可离线用调试器解析）。
+    const std::string exeDir = ExecutableDirectory();
+    if (!exeDir.empty()) {
+        const std::string dumpPath = exeDir + "\\06.GILab_crash.dmp";
+        WriteMiniDump(dumpPath.c_str(), info);
+    }
+
     // ---- 初始化符号 ----
     HANDLE process = GetCurrentProcess();
-    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
-    const std::string exeDir = ExecutableDirectory();
+    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
     if (!SymInitialize(process, exeDir.empty() ? nullptr : exeDir.c_str(), TRUE)) {
         Out("[崩溃处理器] SymInitialize 失败（GetLastError=%lu），将只打印模块+偏移", GetLastError());
     }
@@ -213,11 +222,7 @@ LONG WINAPI OnUnhandledException(EXCEPTION_POINTERS* info) {
         if (index == 0) Out("  （StackWalk64 无法回溯，可能栈已损坏）");
     }
 
-    // ---- minidump ----
-    if (!exeDir.empty()) {
-        const std::string dumpPath = exeDir + "\\06.GILab_crash.dmp";
-        WriteMiniDump(dumpPath.c_str(), info);
-    }
+    // minidump 已在前面写出（见"先落盘，再做符号化"的说明），此处不再重复
 
     SymCleanup(process);
     Out("==================== 崩溃报告结束 ====================");
