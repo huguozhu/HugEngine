@@ -344,11 +344,11 @@ void VulkanDevice::UpdateDescriptorSet(DescriptorSetHandle setHandle, u32 bindin
     if (vkType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
         bool firstWarn = false;
         if (!IsViewWritten(reinterpret_cast<void*>(imgView), &firstWarn) && firstWarn) {
-            HE_CORE_WARN("[RHI] 描述符指向一张从未被写入的纹理：binding={} {}x{} Format={} VkFormat={} 层数={} usage={:#x} image={:#018x} —— "
+            HE_CORE_WARN("[RHI] 描述符指向一张从未被写入的纹理：set={} binding={} {}x{} Format={} VkFormat={} 层数={} usage={:#x} image={:#018x} —— "
                          "读到的是未初始化显存（可能是 NaN 或垃圾，且随内存布局变化）。"
                          "若该效果本次未产出（门控关闭），请在绑定时改用占位纹理；"
                          "否则请检查该纹理的写入方是否被某个消费者门控漏掉了。",
-                         binding, vkTex->GetWidth(), vkTex->GetHeight(),
+                         setHandle, binding, vkTex->GetWidth(), vkTex->GetHeight(),
                          (u32)vkTex->GetFormat(), (u32)vkTex->GetVkFormat(),
                          vkTex->GetArrayLayers(), (u32)vkTex->GetUsage(),
                          (u64)(uintptr_t)vkTex->GetImage());
