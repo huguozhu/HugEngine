@@ -1,5 +1,6 @@
 // GI/GI_SSR.cpp — 屏幕空间反射
 #include "GI/GI_SSR.h"
+#include "Pipeline/Camera.h"   // CameraData：SetCamera 注入的真实相机（GetProjMatrix）
 #include "Core/Log.h"
 #include "SSAO.vert.spv.h"
 #include "SSR.frag.spv.h"
@@ -159,11 +160,17 @@ void GI_SSR::Render(rhi::IRHICommandList* cmd) {
     // ── 矩阵上传（UBO binding 3）：**正/逆投影分开传** ──
     // 此前只传了 inverse(proj)，而 shader 还拿它做 view→clip 投影 —— 于是
     // Hi-Z 层次 march 与线性 march **两条路径都在错误的屏幕位置采样深度**（§9.2-B）。
+    // 投影矩阵的来源也已改为**真实相机**：深度图是用它的投影渲染的，重建与回投影必须同源，
+    // 否则非默认相机（PhysicalCamera 由焦距反算 fov）下两处都会系统性错位（§9.2-E）。
     {
-        const float aspect = float(m_Width) / float(m_Height);
         SSRMatrices mats;
-        mats.proj    = glm::perspectiveRH_ZO(glm::radians(kDefaultFOV), aspect,
-                                             kDefaultNearPlane, kDefaultFarPlane);
+        if (m_Camera) {
+            mats.proj = m_Camera->GetProjMatrix();
+        } else {
+            const float aspect = float(m_Width) / float(m_Height);
+            mats.proj = glm::perspectiveRH_ZO(glm::radians(kDefaultFOV), aspect,
+                                              kDefaultNearPlane, kDefaultFarPlane);
+        }
         mats.invProj = glm::inverse(mats.proj);
         void* mapped = m_UniformBuffer->Map();
         if (mapped) {

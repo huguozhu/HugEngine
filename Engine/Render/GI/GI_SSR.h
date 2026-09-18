@@ -7,6 +7,8 @@
 
 namespace he::render {
 
+struct CameraData;   // 前向声明（与 GI_SSGI / GI_DDGI 同做法，避免头文件循环）
+
 // ============================================================
 // GI_SSR — 屏幕空间反射
 //
@@ -38,6 +40,11 @@ public:
     void SyncOutputSize();
     /// 设置 Hi-Z 深度金字塔（层次追踪加速：大步长跳过低空区域，替代线性 march）
     void SetHiZ(rhi::IRHITexture* hiZ, rhi::IRHISampler* sampler);
+    /// 注入真实相机（每帧由帧图给出）。屏幕空间重建必须用**渲染深度图时的那套**投影参数：
+    /// 此前用硬编码的 kDefaultFOV/0.1/2000 自行拼投影矩阵，非默认相机（PhysicalCamera 会由
+    /// 焦距反算 fov）下 viewPos 重建与采样点投影同时错位（§9.2-E，SSGI 已修，此处是同类实例）。
+    /// 传 nullptr 时退化为默认投影，保证独立运行该 pass 也不会拿到未初始化矩阵。
+    void SetCamera(const CameraData* camera) { m_Camera = camera; }
     rhi::IRHISampler* GetOutputSampler() const { return m_Sampler.get(); }
     void PreBind(rhi::IRHICommandList* cmd) const { if (m_Ready) cmd->SetPipeline(m_PSO.get()); }
 
@@ -77,6 +84,7 @@ private:
     rhi::IRHITexture* m_Normal = nullptr;
     rhi::IRHITexture* m_HiZTex = nullptr;      // Hi-Z 金字塔（不持有所有权）
     rhi::IRHISampler* m_HiZSampler = nullptr;  // Hi-Z 点采样器
+    const CameraData* m_Camera = nullptr;      // 非拥有；帧图每帧注入（见 SetCamera）
 };
 
 } // namespace he::render

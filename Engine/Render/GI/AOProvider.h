@@ -54,8 +54,12 @@ public:
     bool Initialize(rhi::IRHIDevice*, u32, u32) override { return m_Pass != nullptr; }
     void Shutdown() override {}
     void OnResize(u32, u32) override {}
-    void Render(rhi::IRHICommandList* cmd, const GIProviderContext& /*ctx*/) override {
-        if (m_Pass) m_Pass->Render(cmd);
+    void Render(rhi::IRHICommandList* cmd, const GIProviderContext& ctx) override {
+        if (m_Pass) {
+            // 屏幕空间重建/回投影必须用渲染深度图的那套投影参数（§9.2-E）
+            m_Pass->SetCamera(ctx.camera);
+            m_Pass->Render(cmd);
+        }
     }
     void PreBind(rhi::IRHICommandList* cmd) override { if (m_Pass) m_Pass->PreBind(cmd); }
     void SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal,

@@ -15,6 +15,8 @@
 
 namespace he::render {
 
+struct CameraData;   // 前向声明（与 GI_SSGI / GI_SSR 同做法，避免头文件循环）
+
 class SSAO {
 public:
     bool enabled = true;
@@ -37,6 +39,12 @@ public:
 
     /// 设置输入（GBuffer Depth + Normal）
     void SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal);
+
+    /// 注入真实相机（每帧由帧图给出）。重建 view-space 位置与把采样点投影回屏幕，都必须用
+    /// **渲染深度图时的那套**投影参数；此前用硬编码的 kDefaultFOV/0.1/2000 自行拼投影矩阵，
+    /// 非默认相机（PhysicalCamera 由焦距反算 fov）下 AO 的采样位置系统性错位（§9.2-E）。
+    /// 传 nullptr 时退化为默认投影，保证独立运行该 pass 也不会拿到未初始化矩阵。
+    void SetCamera(const CameraData* camera) { m_Camera = camera; }
 
     /// 执行 SSAO + Blur Pass，写入 m_AOTexture
     void Render(rhi::IRHICommandList* cmd);
@@ -86,6 +94,7 @@ private:
     // 输入（不持有所有权）
     rhi::IRHITexture* m_DepthTex  = nullptr;
     rhi::IRHITexture* m_NormalTex = nullptr;
+    const CameraData* m_Camera    = nullptr;   // 非拥有；帧图每帧注入（见 SetCamera）
 
     // 随机采样内核 + 噪声
     static constexpr u32 kKernelSize = 64;  // SSAO 采样核大小

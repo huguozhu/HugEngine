@@ -69,9 +69,11 @@ public:
     void Shutdown() override {}
     void OnResize(u32, u32) override {}
     void PreBind(rhi::IRHICommandList* cmd) override { if (m_SSR) m_SSR->PreBind(cmd); }
-    void Render(rhi::IRHICommandList* cmd, const GIProviderContext& /*ctx*/) override {
+    void Render(rhi::IRHICommandList* cmd, const GIProviderContext& ctx) override {
         if (m_SSR) {
             m_SSR->SetInputs(m_Depth, m_Normal, m_Albedo);
+            // 屏幕空间重建/回投影必须用渲染深度图的那套投影参数（§9.2-E）
+            m_SSR->SetCamera(ctx.camera);
             m_SSR->Render(cmd);
         }
     }

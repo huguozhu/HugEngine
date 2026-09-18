@@ -1,5 +1,6 @@
 // PostProcess/SSAO.cpp — SSAO 实现
 #include "PostProcess/SSAO.h"
+#include "Pipeline/Camera.h"   // CameraData：SetCamera 注入的真实相机（GetProjMatrix）
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include "SSAO.vert.spv.h"
@@ -267,12 +268,20 @@ void SSAO::Render(rhi::IRHICommandList* cmd) {
             memcpy(dst, &p, sizeof(float4));
             dst += sizeof(float4);
             // u_InvProj: 逆投影矩阵（clip→view，用于从深度重建 view-space 位置）
-            float a=float(m_Width)/float(m_Height);
-            float4x4 proj = glm::perspectiveRH_ZO(glm::radians(kDefaultFOV), a, kDefaultNearPlane, kDefaultFarPlane);
+            // u_Proj:    正投影矩阵（view→clip，用于将采样点投影到屏幕）
+            // 两者都取自**真实相机**：深度图是用它的投影渲染的，重建必须同源，
+            // 否则非默认相机下 AO 的采样位置会系统性错位（§9.2-E）。
+            float4x4 proj;
+            if (m_Camera) {
+                proj = m_Camera->GetProjMatrix();
+            } else {
+                float a = float(m_Width) / float(m_Height);
+                proj = glm::perspectiveRH_ZO(glm::radians(kDefaultFOV), a,
+                                             kDefaultNearPlane, kDefaultFarPlane);
+            }
             float4x4 projInv = glm::inverse(proj);
             memcpy(dst, &projInv, sizeof(float4x4));
             dst += sizeof(float4x4);
-            // u_Proj: 正投影矩阵（view→clip，用于将采样点投影到屏幕）
             memcpy(dst, &proj, sizeof(float4x4));
             m_ParamUBO->Unmap();
         }
