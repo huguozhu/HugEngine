@@ -204,6 +204,13 @@ void GI_RSM::RenderRSMPass(rhi::IRHICommandList* cmd, he::World& world, he::Scen
     auto renderMesh = [&](he::Entity e, he::MeshComponent& m) {
         if (m.GetIndexCount() == 0 || objectIndex >= MAX_OBJECTS) return;
         objData[objectIndex].worldMatrix = sg.GetWorldMatrix(e);
+        // 光照图展开用的世界 AABB（任务 31）：本 pass 不读它，但对象缓冲的同一元素会被别的
+        // 消费者看到，留成未初始化会让"读 AABB"变成读垃圾 ⇒ 一并填上。
+        {
+            const he::AABB wb = m.GetBounds().Transform(objData[objectIndex].worldMatrix);
+            objData[objectIndex].boundsMin = float4(wb.min, 0.0f);
+            objData[objectIndex].boundsMax = float4(wb.max, 0.0f);
+        }
 
         // DrawCall 调试 marker：标记当前 RSM 物体（RenderDoc 定位用）
         char label[64];

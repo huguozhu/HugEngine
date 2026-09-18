@@ -48,7 +48,7 @@ static constexpr u32 CASCADE_COUNT        = kGPUCascadeCount;
 // 尺寸验证（保持与 ShaderTypes.slang 一致）
 static_assert(sizeof(GPUShadowData)   == 256, "GPUShadowData must be 256 bytes");
 static_assert(sizeof(GPULight)        == 64,  "GPULight must be 64 bytes");
-static_assert(sizeof(GPUObjectData)   == 176, "GPUObjectData must be 176 bytes");
+static_assert(sizeof(GPUObjectData)   == 208, "GPUObjectData must be 208 bytes");
 static_assert(sizeof(GPUMaterialData) == 112, "GPUMaterialData must be 112 bytes");
 static_assert(sizeof(PushConstantData) == 160, "PushConstantData must be 160 bytes");
 static_assert(sizeof(ShadowPushConstant) == 80, "ShadowPushConstant must be 80 bytes");

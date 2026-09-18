@@ -173,6 +173,13 @@ void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,he::World& w,h
         if(m.GetIndexCount()==0||oi>=MAX_OBJECTS)return;
         if(!m.castShadow)return;   // castShadow=false 不写入阴影（光源可视化球等）
         objData[oi].worldMatrix=sg.GetWorldMatrix(e);
+        // 光照图展开用的世界 AABB（任务 31）：阴影路径不读它，但对象缓冲的同一元素会被
+        // 别的消费者看到，留成未初始化会让"读 AABB"变成读垃圾 ⇒ 一并填上（成本可忽略）。
+        {
+            const he::AABB wb = m.GetBounds().Transform(objData[oi].worldMatrix);
+            objData[oi].boundsMin = float4(wb.min, 0.0f);
+            objData[oi].boundsMax = float4(wb.max, 0.0f);
+        }
         // DrawCall 调试 marker：标记当前级联与物体（RenderDoc 定位用）
         char label[64];
         snprintf(label,sizeof(label),"Shadow C%u Obj#%u",ci,oi);

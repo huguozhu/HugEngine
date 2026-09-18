@@ -271,7 +271,13 @@ GPU_STRUCT GPUObjectData {
     float4   disneyA;               // [128]     x=anisotropic, y=subsurface, z=specular, w=sheen
     float4   disneyB;               // [144]     x=clearcoat, y=clearcoatGloss, z=specularTint.r, w=specularTint.g
     float    disneyC;               // [160]     specularTint.b
-    GPU_UINT _pad;                  // [164..168] 对齐到 168 → 取整 176（std430 float4 对齐）
+    // 物体**世界空间** AABB（任务 31）：光照图的程序化展开需要它。
+    // 【为什么放在这里而不是顶点里】展开要的是"这个物体有多大"，是**每物体**的量：放进
+    // 对象缓冲后，GBuffer 就能直接用（世界位置 + 世界法线 + 本物体 AABB）算出光照图键
+    // （页 = objectIndex、tile = 主导轴、tile 内 = 归一化投影），不需要给网格加 UV1 通道，
+    // 也不需要额外的逐顶点数据。烘培端用同一套公式，保证写入与查找同源。
+    float4   boundsMin;             // [168]     xyz = 世界 AABB 最小角
+    float4   boundsMax;             // [184]     xyz = 世界 AABB 最大角
 };
 
 // --- GPUMaterialData: per-material 材质数据（bindless SSBO 元素，std430）---

@@ -97,8 +97,41 @@ FSOutput fragmentMain(VSOutput input) {
     output.worldPos        = float4(input.worldPos, obj.dielectricF0);  // 世界坐标存入 GBuffer（a 携带电介质 F0，延迟光照用）
     output.disneyA         = obj.disneyA;  // 迪士尼参数A透传到 Deferred 光照（MRT5）
     output.disneyB         = obj.disneyB;  // 迪士尼参数B透传到 Deferred 光照（MRT6）
-    // 光照图键（任务 31）：页号用 objectIndex 的原值（float 可精确表示 < 2^24 的整数，
-    // 物体数上限 kGPUMaxObjects=1024 ⇒ 无精度问题）；UV0 直接原样写入，不做任何包装
-    output.lightmapKey     = float4(input.uv, float(objectIndex), 0.0);
+    // ── MRT 7：光照图键（任务 31）────────────────────────────────────────────────
+    // 页号 = objectIndex（每物体一页，GPUScene 按组件收集 ⇒ 一页只装一个物体）。
+    // 页内坐标 = **按主导轴的箱式投影**：6 个面各占一个 tile（3 列 × 2 行），世界位置用
+    // **本物体自己的 AABB**（obj.boundsMin/Max）归一化到 tile 内。
+    //
+    // 【为什么不用 uv0】uv0 是平铺纹理坐标：实测 128² 页下 70.60% 的 texel 会被 ≥2 个不同
+    // 世界位置命中（uv 范围 [-1.42, 28.97]，只有 67% 的像素在 [0,1] 内）⇒ 用它当键会把无关
+    // 表面点混进同一个 texel。箱式投影不需要给网格加 UV1 通道、也不需要离线展开工具，且
+    // **烘焙端可以用同一个公式**（写页与读页同源）。
+    // 【已知边界】箱式投影对"同一法线方向的多个平行面"不唯一（空心壳体的内外表面、两层
+    // 平行墙会有部分重叠）—— 可见面上这种重叠很少（见 lightmap_key_check 的实测），真正
+    // 的唯一展开留给后续（离线展开 / UV1）。
+    {
+        const float3 sz = max(obj.boundsMax.xyz - obj.boundsMin.xyz, float3(1e-4, 1e-4, 1e-4));
+        float3 lp = (input.worldPos - obj.boundsMin.xyz) / sz;   // 归一化到 [0,1]
+        lp = saturate(lp);
+        const float3 an = abs(N);                                // 主导轴（法线越大越正对）
+        uint face;
+        float2 tuv;
+        if (an.x >= an.y && an.x >= an.z) {
+            face = (N.x >= 0.0) ? 0u : 1u;   // ±X：u 取 z、v 取 y
+            tuv  = float2(lp.z, lp.y);
+        } else if (an.y >= an.z) {
+            face = (N.y >= 0.0) ? 2u : 3u;   // ±Y：u 取 x、v 取 z
+            tuv  = float2(lp.x, lp.z);
+        } else {
+            face = (N.z >= 0.0) ? 4u : 5u;   // ±Z：u 取 x、v 取 y
+            tuv  = float2(lp.x, lp.y);
+        }
+        // 负轴方向翻转 u，让"从物体外面看"的 tile 朝向一致
+        if ((face & 1u) != 0u) tuv.x = 1.0 - tuv.x;
+        tuv.y = 1.0 - tuv.y;                 // 与引擎的 uv 约定（v 向下）一致
+        const float2 tile = float2(1.0 / 3.0, 0.5);              // 3 列 × 2 行
+        const float2 origin = float2(float(face % 3u) * tile.x, float(face / 3u) * tile.y);
+        output.lightmapKey = float4(origin + saturate(tuv) * tile, float(objectIndex), 0.0);
+    }
     return output;
 }

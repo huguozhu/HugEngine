@@ -124,6 +124,14 @@ std::vector<DrawItem> SceneRenderer::Prepare(he::World& world, he::SceneGraph& s
         obj.worldMatrix = e.worldMatrix;
         FillObjectData(obj, mat);
         obj.materialID = e.mesh->materialID;
+        // 物体世界空间 AABB（任务 31）：光照图的程序化展开要用它把世界位置归一化到页内，
+        // 从而**不依赖 uv0**（uv0 是平铺纹理坐标，实测 128² 页下 70% 的 texel 会被多个不同
+        // 世界位置命中）。这里用"网格局部包围盒 × 世界矩阵"，与场景包围盒同一套算法。
+        {
+            const he::AABB wb = e.mesh->GetBounds().Transform(e.worldMatrix);
+            obj.boundsMin = float4(wb.min, 0.0f);
+            obj.boundsMax = float4(wb.max, 0.0f);
+        }
 
         result.push_back({e.mesh, vi, e.bInstanced});
     }
