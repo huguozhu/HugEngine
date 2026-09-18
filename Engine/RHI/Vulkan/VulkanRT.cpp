@@ -164,6 +164,21 @@ void VulkanDevice::QueryRTCapabilities() {
     }
     m_SupportsRTPositionFetch = hasPosFetch;
 
+    // 加速结构描述符的「绑定后更新」特性：绑定默认带 UPDATE_AFTER_BIND，
+    // 只有设备支持时才能启用该特性（见 VulkanDevice.cpp 的 asFeature）
+    {
+        VkPhysicalDeviceAccelerationStructureFeaturesKHR asFeat{};
+        asFeat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+        VkPhysicalDeviceFeatures2 feat2{};
+        feat2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        feat2.pNext = &asFeat;
+        vkGetPhysicalDeviceFeatures2(m_Physical, &feat2);
+        m_SupportsASUpdateAfterBind =
+            (asFeat.descriptorBindingAccelerationStructureUpdateAfterBind == VK_TRUE);
+        HE_CORE_INFO("RT: descriptorBindingAccelerationStructureUpdateAfterBind = {}",
+                     m_SupportsASUpdateAfterBind);
+    }
+
     m_SupportsRT = hasAS && hasRTP;
     if (!m_SupportsRT) {
         HE_CORE_INFO("Ray Tracing: 不支持（缺少 VK_KHR_acceleration_structure 或 VK_KHR_ray_tracing_pipeline）");

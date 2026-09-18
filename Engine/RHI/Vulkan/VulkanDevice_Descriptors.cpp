@@ -99,8 +99,14 @@ DescriptorSetLayoutHandle VulkanDevice::CreateDescriptorSetLayout(const Descript
 
         info.bindings.push_back(b);
 
-        VkDescriptorBindingFlags flags = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT
-                                       | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+        // 加速结构绑定只有在设备启用了 descriptorBindingAccelerationStructureUpdateAfterBind
+        // 时才允许带 UPDATE_AFTER_BIND（否则校验层报 VUID-...-03570）；
+        // 其余绑定类型照旧一律带该位。
+        VkDescriptorBindingFlags flags = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+        const bool isAccelStruct = (ToVkDescType(b.type) == VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR);
+        if (!isAccelStruct || m_SupportsASUpdateAfterBind) {
+            flags |= VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
+        }
         if (i == varCountIdx) {
             // 只有 binding 号最大的 bindless binding 允许设置 VARIABLE_COUNT
             flags |= VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT;

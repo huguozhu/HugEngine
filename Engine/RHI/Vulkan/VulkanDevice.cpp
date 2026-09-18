@@ -431,6 +431,11 @@ void VulkanDevice::CreateLogicalDevice() {
     VkPhysicalDeviceAccelerationStructureFeaturesKHR asFeature{};
     asFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
     asFeature.accelerationStructure = VK_TRUE;
+    // 加速结构描述符是否允许在绑定后更新（rhi 的绑定默认带 UPDATE_AFTER_BIND）。
+    // 必须按设备是否支持来启用，否则描述符集布局会报
+    // VUID-VkDescriptorSetLayoutBindingFlagsCreateInfo-descriptorBindingAccelerationStructureUpdateAfterBind-03570。
+    asFeature.descriptorBindingAccelerationStructureUpdateAfterBind =
+        m_SupportsASUpdateAfterBind ? VK_TRUE : VK_FALSE;
 
     VkPhysicalDeviceRayTracingPositionFetchFeaturesKHR posFetchFeature{};
     posFetchFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_POSITION_FETCH_FEATURES_KHR;
@@ -465,8 +470,12 @@ void VulkanDevice::CreateLogicalDevice() {
     dgcFeature.deviceGeneratedCommands = VK_TRUE;
 
     if (m_SupportsDGC) {
+        // VK_EXT_device_generated_commands **要求**同时启用 VK_KHR_maintenance5
+        // （此前只推了自己 → vkCreateDevice 报
+        //   VUID-vkCreateDevice-ppEnabledExtensionNames-01387：缺少依赖扩展）
+        deviceExtensions.push_back(VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
         deviceExtensions.push_back(VK_EXT_DEVICE_GENERATED_COMMANDS_EXTENSION_NAME);
-        HE_CORE_INFO("DGC 扩展已启用: VK_EXT_device_generated_commands");
+        HE_CORE_INFO("DGC 扩展已启用: VK_EXT_device_generated_commands (+ VK_KHR_maintenance5)");
     }
 
     // 条件启用 Graphics Pipeline Library 扩展（fast-link 依赖 VK_KHR_pipeline_library）

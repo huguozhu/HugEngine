@@ -318,6 +318,7 @@ private:
     // RT / Mesh / DGC 支持状态 + 硬件属性
     bool             m_SupportsRT              = false;
     bool             m_SupportsRTPositionFetch = false;
+    bool             m_SupportsASUpdateAfterBind = false;   // AS 描述符可否 UPDATE_AFTER_BIND
     bool             m_SupportsMesh            = false;
     bool             m_SupportsDGC             = false;
     bool             m_SupportsGPL            = false;
