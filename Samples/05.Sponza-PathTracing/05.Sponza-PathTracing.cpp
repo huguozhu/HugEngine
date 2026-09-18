@@ -511,9 +511,11 @@ int main() {
     // 注意：PT 对比测试（白炉 / 参考图）要求场景材质纹理与光源先于首帧就绪，
     //       场景纹理已在上一节注册进 bindless 堆，光照由管线的 CollectLights 收集。
     render::PathTracingPipeline pathTracingPipeline;
-    pathTracingPipeline.Initialize(device.get());
+    // 按**真实交换链尺寸**初始化（而不是先按默认 1920×1080 建资源、再 OnResize 全量重建）：
+    // RHI 的 IRenderPipeline::Initialize 文档写明，后者会在启动期造成纹理/framebuffer churn，
+    // 并让 VkImage 句柄被复用（校验层据此对复用到的图报 stale 布局告警）。
+    pathTracingPipeline.Initialize(device.get(), swapchain->GetWidth(), swapchain->GetHeight());
     pathTracingPipeline.SetSwapChain(swapchain.get());
-    pathTracingPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
 
     if (!pathTracingPipeline.IsRTEnabled()) {
         HE_CORE_ERROR("设备不支持硬件光追（RT），05.Sponza-PathTracing 无法运行");
@@ -572,9 +574,9 @@ int main() {
 
     render::DeferredPipeline deferredPipeline;
     if (g_UseDeferred) {
-        deferredPipeline.Initialize(device.get());
+        // 同上：用真实交换链尺寸初始化，避免启动期资源重建
+        deferredPipeline.Initialize(device.get(), swapchain->GetWidth(), swapchain->GetHeight());
         deferredPipeline.SetSwapChain(swapchain.get());
-        deferredPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
         HE_CORE_INFO("对照模式：本次运行改走 DeferredPipeline（GI 层栈），其余参数与 PT 模式一致");
     }
 
