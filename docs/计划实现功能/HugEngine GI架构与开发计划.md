@@ -715,6 +715,7 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 | **P1 / T** | **未产出的效果改绑中性占位纹理**（§9.2-T）：立「pass 注册结果」为单一真值 + 帧图按值捕获 + 门控通道回绑中性占位；占位改成员、RSM 占位由白改黑。告警基线 **4/4/3 → 0/0/0**，「是野指针」约 **186 → 0**；DDGI 差分贡献不变。同时发现 §9.2-U | ✅ 完成 |
 | **P1 / U** | **采样脚本的陈旧转储缺陷**（§9.2-U）：崩溃/超时的运行会留下上一次的转储而分析照样出数字——一度据此虚构出"绝对读数依赖二进制布局"并追查很久。结论已推翻（只改注释重编译读数不变），缺陷改写为测量方法缺陷并修掉：运行前删除产物 + 运行后校验新鲜度 + 失败非零退出（失败路径已实测）。方法论第 4 条由此而来 | ✅ 完成 |
 | **B / I·V** | **RTGI 的 miss 不再回退 DDGI**（§9.2-I）+ **时域降噪不绑管线导致启用 RTGI 即挂死**（§9.2-V）。前者恢复「源独立」：同一份 RTGI 的读数不再取决于别的源在不在层栈里（0.2034 → 0.0575，与仅 RTGI 时差 0.000%）；后者是前者的**验证前提**——不修它，任何 RT 相关测量都跑不起来。新增回归检查 `Tools/gi/rtgi_coupling_check.ps1` | ✅ 完成 |
+| **B / G** | **层栈成为子系统开关的唯一真值**（§9.2-G，不变量 1）：把 `enabled` 与 halfRes 输出尺寸的对齐放进框架的 `SyncToStack`，并删掉 `06.GILab.cpp` 里那份「复发过」的手工补丁。实测 `specular={SSR}` 时 pass 列表由无 SSR 变为出现 `SSR` 与 `SSR_Denoise`；新增回归检查 `Tools/gi/stack_switch_check.ps1` | ✅ 完成 |
 
 ### 8.2 三个关键指标（实测）
 
@@ -773,7 +774,7 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 | **D** | 中 | **AO 乘到了直接光上**，且不作用于镜面：`color *= lerp(1, ao*aoVal, aoIntensity)` 位于直接光累加之后、间接镜面之前 | `Lighting/DeferredLighting.frag.slang:436` |
 | **E** | 中 → **SSGI 已修** | **屏幕空间源用硬编码默认投影矩阵**而非真实相机：`kDefaultFOV=60°/0.1/2000`；`PhysicalCamera` 会由焦距反算 fov → 非默认相机下 SSGI/SSAO/SSR 重建错位。根因是 `IGIProvider` 未把相机传给屏幕空间源（只有 DDGI 有 `SetCamera`） | SSGI 已修（见 M）；`GI_SSR.cpp:140`、`SSAO.cpp:271` **仍待修** |
 | **F** | 中 | **RSM 的 pass 被嵌套在 DDGI 门控内**：单独勾选 RSM 而关闭 DDGI 时，RSM 永不注册（Forward 侧却是独立的 `ShouldRunRSM()`） | `DeferredPipeline_FrameGraph.cpp:288` |
-| **G** | 中 | **层栈与子系统开关是两套真值**（不变量 1 的实际状态）：`IsValid()` 只读子系统 `enabled`，面板层栈 UI 只改层栈 → 勾选但静默失效。`halfRes` 还有第三重（需触发 `OnResize` 才重建纹理） | `SSRProvider.h:25` 等 + `06.GILab.cpp` 的通道 UI |
+| ~~**G**~~ | ✅ **已修复** | **层栈与子系统开关是两套真值**（不变量 1 的实际状态）：子系统 `enabled` 只在管线 `Initialize` 时按当时的层栈算**一次**，之后层栈再变（配置加载 / 预设 / 面板）就与子系统脱节 ⇒ `IsValid()` 为假、pass 不注册，而层栈仍以正权重把它计入归一化：**勾选却静默失效**。`halfRes` 是第三重（要等下次 `OnResize` 才重建纹理）。**实测指纹**：`specular={SSR}`（其余层栈为空）时，pass 列表里**完全没有 SSR**；把「层栈 → 开关」的对齐交给框架后，`SSR` 与 `SSR_Denoise` 都出现。**「复发过」的实体已找到**：`06.GILab.cpp` 里有一份手工补丁逐个子系统同步开关 —— 把不变量的维护放到调用方，必然有下一个忘记同步的调用方。修法：在 `IGIProvider::SyncToStack`（帧图构图前每帧调用）里对齐 `enabled` 与输出尺寸，并删除那份手工补丁 | `GI/AOProvider.h`、`SSGIProvider.h`、`SSRProvider.h`、`DDGIProvider.h`；`GI_SSGI.{h,cpp}`、`GI_SSR.{h,cpp}`；`06.GILab.cpp`；回归检查 `Tools/gi/stack_switch_check.ps1` |
 | **H** | 中 | **Provider 抽象只在 Deferred 落地**：`ForwardPipeline` 无 `m_GIProviders`，且 Forward 的 PBR shader **没有 `GIBlendParams` UBO** → 层栈归一化在 Forward 完全不存在，但 `PipelineCaps::Forward` 声明支持 IBL+RSM | `ForwardPipeline.h`；全仓 `GIBlendParams` 仅 DeferredLighting 使用 |
 | ~~**I**~~ | ✅ **已修复** | **RTGI 用 DDGI 做 miss 回退**，破坏「源独立」前提：Ultra 档同时含 RTGI+DDGI 时，DDGI 信息被用两次再归一化 → 加权平均失去无偏性。**实测指纹**：同一帧、同一相机，只改漫反射层栈 —— `diffuse={RTGI}` 时 RTGI 原始输出均值 **0.0575**，`diffuse={DDGI,RTGI}` 时 **0.2034**（3.5 倍）⇒ 同一份 RTGI 的读数完全由「DDGI 在不在层栈里」决定。修法：把「DDGI 是否是层栈源」作为每帧状态交给 rgen（`flags` bit1），是则 miss 贡献 0、否则保留回退（降级路径）。修后两者均值 **0.0575 对 0.0575（差 0.000%）** | `RT_GI.rgen.slang`；`RTEffectPass.h`；`RTGIPass.cpp`；`RTProvider.h`；`DeferredPipeline_FrameGraph.cpp`；回归检查 `Tools/gi/rtgi_coupling_check.ps1` |
 | ~~**V**~~ | ✅ **已修复** | **时域降噪在 `BeginOffscreenPass` 之前没有绑管线** ⇒ 建出附件数与 RenderPass 不符的 Framebuffer（`VUID-VkFramebufferCreateInfo-attachmentCount-00876`：1 个附件对 2 个附件），**设备直接挂住、进程再也不推进**。表现为「只要 diffuse 层栈含 RTGI 就稳定挂死在第 1 帧」，因此**任何 RT 相关的测量都做不了**（任务 3/17/20 都被它挡住）。根因：帧图的附属 pass 先 `BeginOffscreenPass`（用它取 RenderPass 建 Framebuffer）再 `RenderAux`，而 `RTDenoiser` 自己不绑管线、由 `Render` 内部另起一个 pass。修法：`RTDenoiser` 增加 `PreBind`（绑 PSO/视口/裁剪/描述符集），`Render` 不再自起 pass，`RTEffectProvider::PreBindAux` 的时域分支改为调用它 | `PostProcess/RTDenoiser.{h,cpp}`；`GI/RTProvider.h` |
@@ -1054,7 +1055,7 @@ Vulkan 校验 46 条与改前一致。
 | # | 任务 | 规模/风险 | 理由 / 依赖 |
 |:---:|---|---|---|
 | ~~**3**~~ | ~~**§9.2-I · RTGI 用 DDGI 做 miss 回退**~~ —— ✅ **已完成** | 中 / 中 | **直接破坏架构核心主张**——「归一化 ⇒ 无双重计数」。已立「DDGI 是否是层栈源」为每帧状态：是则 RTGI 的 miss 不再回退 DDGI。实测同一份 RTGI 的均值为 0.0575 与 0.2034（3.5 倍）→ 修后 0.0575 对 0.0575（差 0.000%）。**顺带修掉挡住所有 RT 测量的 §9.2-V**（时域降噪不绑管线 → 启用 RTGI 稳定挂死） |
-| **4** | **§9.2-G · 层栈与子系统开关是两套真值** | 中 / 中 | **不变量 1**。文档明确写着"曾因两者不一致导致画面发黑，**且在同一处复发过一次**"。复发过的根因 |
+| ~~**4**~~ | ~~**§9.2-G · 层栈与子系统开关是两套真值**~~ —— ✅ **已完成** | 中 / 中 | **不变量 1**，且是**复发过**的一项。已把对齐放进框架：`IGIProvider::SyncToStack`（帧图构图前每帧调用）里让子系统的 `enabled` 与输出尺寸都跟着层栈走，并**删掉 `06.GILab.cpp` 里那份手工补丁**——「复发」的实体就是它。实测：`specular={SSR}` 时 pass 列表由「完全没有 SSR」变为出现 `SSR` 与 `SSR_Denoise` |
 | **5** | **§9.2-D · AO 乘到了直接光上** | 中 / 中 | 每帧生效的能量错误（`color *= lerp(1, ao*aoVal, aoIntensity)` 位于直接光累加之后、间接镜面之前），且使 AO 不作用于镜面 |
 | **6** | **§9.2-F · RSM 的 pass 被嵌套在 DDGI 门控内** | 中 / 中 | 单独勾选 RSM 而关闭 DDGI 时 **RSM 永不注册**——配置说谎，属功能失效 |
 | **7** | **§9.2-E · SSR 与 SSAO 仍用硬编码投影** | 中 / 中 | 同一缺陷的**两个剩余实例**（SSGI 已修，见 §9.2-M）；修法与先例都已具备。非默认相机（`PhysicalCamera` 由焦距反算 fov）下空间错位 |
@@ -1418,6 +1419,7 @@ cmake --build Build --config Debug --target 06.GILab -j 8
 | `Tools/gi/p5_spectrum.py` | 径向功率谱 + 频率域低通扫描 + 互补高通相关性（P5 判定所用） |
 | `Tools/gi/soak_launch.ps1` | **批量启动 soak**（D1 用）：逐次判定 OK / CRASH / TIMEOUT / NODUMP 并汇总，崩溃报告单独留存；把"偶发"变成可度量的频率。**注意该脚本刻意只用 ASCII** —— Windows PowerShell 5.1 按 ANSI 读 `.ps1`，非 ASCII 注释会破坏解析 |
 | `Tools/gi/rtgi_coupling_check.ps1` | **RTGI 源独立性检查**（§9.2-I 的回归测试）：只改漫反射层栈跑两次，比较 RTGI 原始输出的**均值**是否一致。判据用均值而非逐字节——射线抖动种子取自帧计数器，而多一个 DDGI pass 会改变每帧的提交次数，逐像素必然不同；要保证不变的是**估计量本身**。修前是 0.0575 对 0.2034（3.5 倍），修后 0.000% |
+| `Tools/gi/stack_switch_check.ps1` | **层栈与子系统开关一致性检查**（不变量 1 / §9.2-G 的回归测试）：把 SSR 放进镜面层栈（默认档位的镜面栈只有 IBL，故初始化时 SSR 开关是关的），带 `HE_TRACE_PASSES=1` 跑一帧，**要求 pass 列表里出现 `SSR`**。修前该列表里完全没有 SSR |
 
 采样时有两个易踩的坑：
 
