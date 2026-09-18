@@ -485,9 +485,28 @@ TEST_CASE("GIRegistry::IsAvailable：管线能力 ∧ 设备能力") {
     CHECK_FALSE(GIRegistry::IsAvailable(GISourceId::RTAO, PipelineCaps::Deferred, false));
     CHECK(GIRegistry::IsAvailable(GISourceId::RTGI, PipelineCaps::Deferred, true));
 
-    // None 与预留源恒不可用
+    // None 与 **刻意未实现**的 Lightmap 恒不可用（任务 18：把「文档说可用、实际不可用」
+    // 这处配置说谎改成明确的声明；原因与前置条件见 ToPipelineCap 的注释与文档任务 31）
     CHECK_FALSE(GIRegistry::IsAvailable(GISourceId::None, PipelineCaps::Deferred, true));
     CHECK_FALSE(GIRegistry::IsAvailable(GISourceId::Lightmap, PipelineCaps::Deferred, true));
+}
+
+TEST_CASE("GIRegistry::Degrade：层栈里的未实现源（Lightmap）会被裁掉，不会留下空承诺") {
+    // 这是 Lightmap「不给能力位」这条决定的**安全性质**：本仓库最怕的失效形态是
+    // 「源在归一化里计权重、却没有任何 pass 产出它」（§9.2-G/L）—— 单测把这个性质锁住：
+    // 无论谁把 Lightmap 塞进层栈（预设、配置文件、面板），Degrade 都必须把它摘掉，
+    // 而同通道里真正可用的源一个都不能少。
+    GIConfig c;
+    c.diffuse.Set(GISourceId::Lightmap, 1.0f);
+    c.diffuse.Set(GISourceId::IBL, 1.0f);
+    c.specular.Set(GISourceId::IBL, 1.0f);
+    REQUIRE(c.diffuse.Has(GISourceId::Lightmap));
+
+    const GIConfig d = GIRegistry::Degrade(c, PipelineCaps::Deferred, /*rtSupported=*/true);
+    CHECK_FALSE(d.diffuse.Has(GISourceId::Lightmap));   // 摘掉
+    CHECK(d.diffuse.Has(GISourceId::IBL));              // 同通道可用源不受影响
+    CHECK(d.diffuse.count == 1u);
+    CHECK(d.specular.Has(GISourceId::IBL));
 }
 
 TEST_CASE("GIRegistry::IsAvailable(ShadowChannel)：RT 阴影需设备光追") {

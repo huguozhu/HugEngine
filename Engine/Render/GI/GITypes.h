@@ -50,7 +50,7 @@ enum class GISourceId : u8 {
     None = 0,
     // 低频（远场 / 环境，无距离限制）
     IBL           = 1,   // 环境辐照度 / 预滤波（所有管线）
-    Lightmap      = 2,   // 烘焙光照（预留）
+    Lightmap      = 2,   // 烘焙光照（**未实现**：见 ToPipelineCap 里的说明与文档任务 31）
     DDGI          = 3,   // 动态漫反射探针网格
     // 中频（近处细节）
     SSGI          = 4,   // 屏幕空间间接漫反射
@@ -336,6 +336,23 @@ inline u32 ToPipelineCap(GISourceId id) {
     case GISourceId::RTGI:          return kPipelineGIDiffRTGI;
     case GISourceId::IBL:           return kPipelineGIDiffIBL | kPipelineGISpecIBL;
     case GISourceId::RSM:           return kPipelineGIDiffRSM;
+    // Lightmap：**刻意不给能力位**（任务 18 的结论，见文档 §10.2）
+    //
+    // 这一条此前靠 `default` 兜到 kPipelineGINone，行为正确但看不出来是"没想到"还是"故意的"，
+    // 而文档的 §5.1 一直写着「预留，**可用**」—— 这就是一处「配置说谎」：面板按能力位过滤
+    // （所以选不到，是对的），文档却说它可用。
+    //
+    // 现在明确写成"不给位"，理由是**它现在还落不了地**：真正要落地需要两样东西，
+    // 而两样都不在现有架构里 ——
+    //   1. **逐像素的光照图键**：lightmap 必须按每像素的 UV2（或物体 id）查表，而 GBuffer 的
+    //      七个 MRT 槽位（A/B/C/D/E/F/G）已经全部占满，拿不到新通道；
+    //   2. **一条烘焙路径**（离线或载入时多次弹射）。
+    // 而"不做新通道、用世界坐标查表"的替代方案（世界空间辐照度体）与 DDGI 是**同一个估计量**，
+    // 会被本仓库自己的 REDUNDANCY 诊断判为冗余源（§2.2 的「重复估计」）—— 那等于白付一份全量
+    // 成本。故：**先不给位**，前置条件与判据记在文档任务 31。
+    // 关键性质由单元测试锁定：即使有人把 Lightmap 放进层栈，`GIRegistry::Degrade` 也会把它裁掉，
+    // 绝不会留下一个"归一化里计权重、却没人产出"的源（§9.2-G 的失效形态）。
+    case GISourceId::Lightmap:      return kPipelineGINone;
     default:                        return kPipelineGINone;
     }
 }
