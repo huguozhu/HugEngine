@@ -38,6 +38,30 @@ static VkBufferUsageFlags ToVkBufferUsage(BufferUsage usage) {
 }
 
 // ============================================================
+// MakeAtomAlignedMappedRange — 构造符合 nonCoherentAtomSize 约束的映射范围
+//
+// 为什么必须对齐：Vulkan 要求 VkMappedMemoryRange.offset 是
+// VkPhysicalDeviceLimits::nonCoherentAtomSize 的整数倍（VUID-VkMappedMemoryRange-offset-00687），
+// 而 VMA 给的分配偏移是任意值（实测 12435872，不是 64 的倍数）。
+// 做法：offset 向下取整到该对齐，size 用 VK_WHOLE_SIZE（多刷一点无害）。
+// ============================================================
+static VkMappedMemoryRange MakeAtomAlignedMappedRange(VmaAllocator allocator,
+                                                      VkDeviceMemory memory,
+                                                      VkDeviceSize offset) {
+    const VkPhysicalDeviceProperties* props = nullptr;
+    vmaGetPhysicalDeviceProperties(allocator, &props);
+    VkDeviceSize atom = (props && props->limits.nonCoherentAtomSize)
+                      ? props->limits.nonCoherentAtomSize : 1;
+    VkMappedMemoryRange range{};
+    range.sType  = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+    range.memory = memory;
+    range.offset = offset & ~(atom - 1);
+    range.size   = VK_WHOLE_SIZE;
+    return range;
+}
+
+
+// ============================================================
 // VulkanBuffer 实现
 // ============================================================
 
@@ -87,11 +111,8 @@ VulkanBuffer::VulkanBuffer(VmaAllocator allocator, const BufferDesc& desc)
     if (desc.initialData && m_MappedPtr) {
         std::memcpy(m_MappedPtr, desc.initialData, desc.size);
         if (!m_IsCoherent) {
-            VkMappedMemoryRange range{};
-            range.sType  = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
-            range.memory = allocInfo.deviceMemory;
-            range.offset = allocInfo.offset;
-            range.size   = desc.size;
+            VkMappedMemoryRange range = MakeAtomAlignedMappedRange(
+                m_Allocator, allocInfo.deviceMemory, allocInfo.offset);
             vkFlushMappedMemoryRanges(m_Device, 1, &range);
         }
     }
@@ -108,11 +129,8 @@ void* VulkanBuffer::Map() {
     if (m_IsMapped) {
         VmaAllocationInfo allocInfo;
         vmaGetAllocationInfo(m_Allocator, m_Allocation, &allocInfo);
-        VkMappedMemoryRange range{};
-        range.sType  = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
-        range.memory = allocInfo.deviceMemory;
-        range.offset = allocInfo.offset;
-        range.size   = VK_WHOLE_SIZE;
+        VkMappedMemoryRange range = MakeAtomAlignedMappedRange(
+            m_Allocator, allocInfo.deviceMemory, allocInfo.offset);
         vkInvalidateMappedMemoryRanges(m_Device, 1, &range);
     }
     return m_MappedPtr;
@@ -123,11 +141,8 @@ void VulkanBuffer::Unmap() {
     if (m_IsMapped) {
         VmaAllocationInfo allocInfo;
         vmaGetAllocationInfo(m_Allocator, m_Allocation, &allocInfo);
-        VkMappedMemoryRange range{};
-        range.sType  = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
-        range.memory = allocInfo.deviceMemory;
-        range.offset = allocInfo.offset;
-        range.size   = VK_WHOLE_SIZE;
+        VkMappedMemoryRange range = MakeAtomAlignedMappedRange(
+            m_Allocator, allocInfo.deviceMemory, allocInfo.offset);
         vkFlushMappedMemoryRanges(m_Device, 1, &range);
     }
 }
