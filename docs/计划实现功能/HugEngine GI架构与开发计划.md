@@ -616,8 +616,11 @@ UE 用「设置间约束」表达耦合；HugEngine 的对应物是在 `GIRegist
    即同一个 σ 核被用在**漫反射间接光**与**镜面反射**这两个噪声分布与可容忍模糊度都不同的信号上。
    （11.1 已让参数**可配**并集中在一处赋值，但取值仍是同一个 —— 因为实测表明瓶颈不在这里，
    见 §4.4.1 末尾的说明。）
-2. **链条形状写在调用方的 if/else 里，不是数据。** `RTProvider` 手工持有 `m_Temporal` +
-   `m_Spatial` 两个指针，并用**位置约定**表达顺序：
+2. **链条形状写在调用方的 if/else 里，不是数据。** `RTProvider` 曾手工持有 `m_Temporal` +
+   `m_Spatial` 两个指针，并用**位置约定**表达顺序（时域=0、空间=1，空间取"时域输出或主输出"）。
+
+   > ✅ **11.2 已解决**：现在是一条 `std::vector<Stage>`，"顺序即执行顺序"，加一级滤波只需在
+   > `SetXxxPass` 里多 push 一个。下面这段是改造前的形状，保留作对照：
 
    ```cpp
    [[nodiscard]] rhi::IRHITexture* GetAuxPassInput(u32 i) {
@@ -629,8 +632,7 @@ UE 用「设置间约束」表达耦合；HugEngine 的对应物是在 `GIRegist
    }
    ```
 
-   再加一级滤波就得改这段。（`SSGIProvider` / `SSRProvider` 那份逐行同构的复制已在 11.1
-   合并为 `GI/SpatialDenoiseAux.h`。）
+   而 `SSGIProvider` / `SSRProvider` 那份逐行同构的复制已在 11.1 合并为 `GI/SpatialDenoiseAux.h`。
 3. **历史与资源各自管理**：9 个实例各自 `CreateTexture`、各自 `OnResize`、各自建采样器。
 4. **没有批量 dispatch**：UE 的 `FScreenSpaceDenoiser` 可把多个信号打进**同一个 dispatch**
    （`DenoiseGroup` / `CommonSettings`）；这里 4 个 RT 效果就发 4 组（每组 1–2 pass），
@@ -782,6 +784,7 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 | **C / §3.2** | **逐像素置信度进 UBO、判据数据驱动**（任务 9）：`GISourceSlotData::confidence` 掩码由 `ToConfidenceMask` 在 `Add` 里统一推导（着色器不再硬编码源 id 列表，GTAO 与 AO 通道一并归位），边缘带宽 `edgeFade` 从着色器常量变为 UBO 字段。实测：默认 5% 带宽下最外圈 SSGI 贡献仅为中央的 1.6%，带宽调到 50% 后 5%~15% 环带的贡献降到 32.4%（解析预测 33%）；改前二进制该检查必失败。三变体读数与白炉、各回归检查不变 | ✅ 完成 |
 | **C / P** | **SSGI 成为真正的 `E/π` 估计**（任务 10 / §9.2-P）：补入射辐射度（前帧 HDR，**捕获门控改由消费者声明**）、余弦归一化、估计量改为 `Σ(L_in·cosθ)/Σcosθ`（解析归一化，无需拟合增益）、删除量纲不对的距离项；白炉下不再短路 SSGI，白炉因此同时校验它的标度。实测：白炉单源 **1.0000**（旧形式 0.444）、量级比 **21×→2.2×**、输出占比 **4.5%→31%**、与 DDGI 相关性 **0.9238→0.1480**；新增 `Tools/gi/ssgi_cal_check.ps1` 三例全过 | ✅ 完成 |
 | **C / 11.1** | **降噪去重 + 参数可配**（任务 11.1）：SSGI/SSR 的降噪附属 pass 合并为 `GI/SpatialDenoiseAux.h`；`Denoiser` 的 σ 可配并集中在一处按信号赋值。**判据**：改前/改后两个二进制、每次运行用私有 cfg 副本，`ssgi` 变体 −0.0009%、`both` 变体 +0.0002%（均在抖动内）；白炉 1.0000、单测全绿。**参数仍取默认值**是实测结论（放宽 σ 只再降 5% 高频，瓶颈是核大小与时域），并据此指出 11.3 的方向 | ✅ 完成 |
+| **C / 11.2** | **降噪链条数据化**（任务 11.2）：`RTProvider` 的 `m_Temporal` + `m_Spatial` 与位置约定改为 `std::vector<Stage>`（顺序即执行顺序），框架侧改为遍历。**判据**：三种 RT 效果的 pass 链与改造前同名同序；`rtgi_coupling_check` 0.000% PASS；三变体读数、白炉、单测不变；**临时多 push 一级即多出一个 pass、框架代码零改动**（已演示并还原） | ✅ 完成 |
 
 ### 8.2 三个关键指标（实测）
 
@@ -1141,7 +1144,7 @@ Vulkan 校验 46 条与改前一致。
 | **10** | ~~**SSGI-CAL · 标度与量纲标定**（= §9.2-P）~~ —— ✅ **已完成** | 中 / 中 | P5 退场后的接棒项。**做了什么**：累加项补入射辐射度 `L_in`（**前帧 HDR**，由 Provider 声明消费者、帧图据此捕获 —— 此前捕获门控只写死 DDGI，只放 SSGI 时该纹理从未被写入，SSGI 恒 0）；余弦项改为 `dot(N, normalize(sDir))`；估计量改为 `Σ(L_in·cosθ)/Σcosθ`，由 `∫cosθ dω = π` 可知它**精确等于 `E/π`**，归一化常数是解析值 1，**不需要"以 PT 为参考标定一个增益"**；量纲不对的距离项删除。**白炉判据升级**：白炉下不再短路 SSGI（白炉条件恰是它的解析真值条件），白炉因此同时校验它的标度。**实测**：白炉单源 **1.0000**（改回旧「除以 N」形式则 **0.444**）；量级比 **21× → 2.2×**；输出占比 **4.5% → 31%**；与 DDGI 相关性 **0.9238 → 0.1480**（§3.3 的结论方向不变、理由被改写）。新增回归检查 `Tools/gi/ssgi_cal_check.ps1` 三例全过 |
 | **11** | **统一降噪框架**（AO / GI / 反射 / 阴影 / 探针共用）—— 设计与现状对照见 **§4.4** | 中 / 大 | 现在每个 Provider 自带降噪（`Denoiser` / `RTDenoiser`，共 **9 个实例 / 9 套 PSO / 14 张纹理**），**降噪器之间不组合**——§9.2-C 的有效性协议四处断裂正由此而来。分三步： |
 | **11.1** | ~~合并 `SSGIProvider` / `SSRProvider` 的重复降噪实现；把 `Denoiser` 的 `depthSigma` / `normalSigma` 变成**可配置**~~ —— ✅ **已完成** | 小 / 低 | 合并为 `GI/SpatialDenoiseAux.h` 一份实现；σ 已可配并集中在一处按信号赋值。**判据（背靠背逐项一致）**：用改前/改后两个可执行文件、同一份**私有 cfg 副本**（防止示例程序退出时回写污染下一次运行）对照 —— `ssgi` 变体 **−0.0009%**、`both` 变体 **+0.0002%**（改前 0.06627705 / 0.07206258 → 改后 0.06627642 / 0.07206271），都在实测抖动内。`none`/`ddgi` 两个变体上看到的 0.09%~1% 差异**与本改造无关**：SSGI 不在它们的层栈里（`HE_TRACE_PASSES` 实测 `ddgi` 配置下没有 `SSGI_Denoise` 这个 pass），且同一个二进制、同一份 cfg 连跑四次就能给出两组值（0.057733 / 0.057194 / 0.057193 / 0.057166）——那是 §9.2-Y 的既有不稳定 |
-| **11.2** | `RTProvider` 的降噪链**改为数据**（用 `std::vector<stage>` 取代 `m_Temporal`/`m_Spatial` 两指针 + 索引位置约定） | 小 / 中 | 纯去重：加第三级滤波不必再改 `RenderAux` |
+| **11.2** | ~~`RTProvider` 的降噪链**改为数据**~~ —— ✅ **已完成** | 小 / 中 | 纯去重：`std::vector<Stage>` 取代 `m_Temporal` + `m_Spatial` 两个指针与「索引 0 是时域、1 是空间」的位置约定；`GetAuxPassCount/Name/Input/Output` 与 `PreBindAux`/`RenderAux` 全部改为遍历该向量（索引在**已就绪**的级上紧凑编号，保持改造前的语义）。**判据**：三种 RT 效果的 pass 链与改造前逐个同名同序（RTGI → `RT_GI_Temporal` → `RT_GI_Denoise`；RT 反射 → `RT_Reflection_Temporal` → `RT_Reflection_Denoise`；RT 阴影 → `RT_Shadow_Denoise`）；`rtgi_coupling_check` 0.000% PASS；三变体读数、白炉、单测不变。**「加一级只需 push」已当场演示**：临时给 RTGI 多 push 一个 stage，pass 列表立刻多出 `RT_GI_Denoise_Third`，**框架代码一行未改**（演示后已还原） |
 | **11.3** | **按信号类型分派**（`DenoiseSignal` + 统一历史分配 + 批量 dispatch + 框架级有效性契约） | 中 / 大 | **需要消费方**（Lumen / P6 / 多信号共存）来验证抽象选型；并能让**半分辨率也降噪**（现在 `AuxActive()` 在 `halfRes` 时直接跳过） |
 
 **D 组 · 质量与性能**
@@ -1281,11 +1284,18 @@ Vulkan 校验 46 条与改前一致。
     示例程序退出时会把 `HE_GILAB_CONFIG` 指向的文件回写，复用同一个文件会让"后一次运行
     读到前一次运行写的配置"，从而把配置差异误读成代码差异（本轮第一次 A/B 就因此得到
     −2% 的假差异）。
-- **11.2 · 链条数据化**（小 / 中）
+- **11.2 · 链条数据化**（小 / 中）—— ✅ **已完成**
   - 做了什么：`RTProvider` 用 `std::vector<Stage>` 取代 `m_Temporal` + `m_Spatial` 两个指针
     与 `IsTemporalIndex(i) ? MainOutput() : TemporalOrMain()` 的位置约定；
-    `GetAuxPassCount/Name/Input/Output` 与 `RenderAux` 改为遍历该向量。
-  - 判据：同上；并确认给 RT 效果加第三级滤波只需 push 一个 stage、不改框架代码。
+    `GetAuxPassCount/Name/Input/Output`、`PreBindAux`、`RenderAux` 与 `FinalOutput` 全部改为
+    遍历该向量（索引只在**已就绪**的级上紧凑编号，因此"时域未就绪时空间滤波前移为 0"这条
+    既有语义被完整保留）。每级的 `SetXxxPass` 负责按顺序 push。
+  - 判据：三种 RT 效果的 pass 链与改造前**逐个同名同序**（实测 pass 列表）；
+    `rtgi_coupling_check` 0.000% PASS；三变体读数（`none` 0.0577331 / `ddgi` 0.0766956 /
+    `ssgi` 0.0662560，DDGI 差分 0.0195946）、白炉 1.0000、单元测试 161/161 与 3941/3941 不变。
+  - **「加第三级只需 push」当场验证**：临时给 RTGI 多 push 一个 stage（名字 `RT_GI_Denoise_Third`），
+    pass 列表立刻多出这一级，**帧图/框架代码一行未改**；演示后已还原。
+  - 这一步同时消掉了 §4.4.2 里"链条形状写在调用方的 if/else 里"那一处不统一。
 - **11.3 · 按信号类型分派**（中 / 大，**需要消费方**）
   - 做了什么：引入 `DenoiseSignal`；统一分配历史纹理与采样器；支持把多个信号批量 dispatch；
     把"有效性（`alpha<0`）"提升为框架级契约（见 §4.4.3 的目标形状）。
