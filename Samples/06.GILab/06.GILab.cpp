@@ -103,6 +103,22 @@ static int GetInt(const std::unordered_map<String, String>& m,
 // ============================================================
 // 创建形状实体（立方体/球）——Cornell Box 场景构件
 // ============================================================
+// 平面镜测试台的几何（任务 32）：判据要在 CPU 侧做解析计算，所以参数必须**从同一处**导出，
+// 不能一边写在场景搭建里、一边抄进检查脚本（那种"两份真值"迟早漂移）。
+struct MirrorRigSpec {
+    bool   valid = false;
+    float3 planeNormal   = float3(0.0f, 1.0f, 0.0f);   // 镜面平面法线（朝向相机）
+    float  planeOffset   = -1700.0f;                    // 平面方程 n·P + d = 0 的 d
+    float3 slabCenter    = float3(0.0f, 1699.5f, 0.0f); // 镜面板中心
+    float3 slabHalf      = float3(400.0f, 0.5f, 400.0f);// 镜面板半尺寸
+    // 两个标记物（**立方体**，half* 是半边长；默认值与实际创建保持一致，避免两份真值漂移）
+    float3 boxRed        = float3(-150.0f, 1750.0f, 100.0f);
+    float  halfRed       = 50.0f;
+    float3 boxGreen      = float3(170.0f, 1770.0f, -120.0f);
+    float  halfGreen     = 45.0f;
+};
+static MirrorRigSpec g_MirrorRig;
+
 Entity CreateShapeEntity(World& world, SceneGraph& sg,
                          const float3& position, const float3& scale,
                          const float4& baseColor, float metallic, float roughness,
@@ -236,6 +252,45 @@ int main() {
             sceneGraph.SetParent(e, Entity{kInvalidEntity});
             pointLightEntities[i] = e;
         }
+    }
+
+    // --- 平面镜测试台（任务 32 / §9.2-W 的解析对照用；HE_SSR_MIRROR=1 时创建）---
+    // 为什么要有它：任务 25 只证明了"射线有效性恢复、两条 march 同量级、Hi-Z 更快"，
+    // **没有**证明反射的位置/方向正确。平面镜恰好有一个闭式解析真值：物体中心 C 关于平面
+    // (n, d) 的镜像点 C' = C − 2(n·C + d)n，相机 E 与 C' 的连线与镜面的交点 Q 就是"镜面上
+    // 出现该物体反射"的那一点 —— 于是反射是否落在正确的像素上可以逐像素判定，而不靠肉眼。
+    // 台子架在 Sponza 建筑上方（y≈500）的开阔处，背景是天空，避免建筑几何干扰判据。
+    if (std::getenv("HE_SSR_MIRROR")) {
+        // 【为什么是**地面镜**而不是竖镜】SSR 的命中判据只能命中**深度缓冲里存着的那一面**
+        // （相机看到的那一面）。物体若夹在相机与竖镜之间，反射线打到的是物体的**背面**，
+        // 深度图上却是它的正面 ⇒ 永远判不出命中（实测：竖镜下 99.96% 的镜面像素"有效"但
+        // 一个物体颜色都没有）。地面镜不存在这个问题：反射线从镜面向上，命中的正是物体
+        // 朝相机的那一面。
+        // 【为什么架在 y=1700】Sponza 建筑高约 1556（y∈[-57,1499]），放进楼里会被墙挡住
+        // （实测：相机在楼内时整屏只剩一面 25 单位外的墙）。架在楼顶之上，背景是天空，
+        // 判据里"出现物体颜色"才唯一对应**反射**。
+        // 镜面 = y=1700 平面、法线 +Y。用一块薄板实现：+Y 面即镜面。
+        CreateShapeEntity(world, sceneGraph, float3(0.0f, 1699.5f, 0.0f), float3(800.0f, 1.0f, 800.0f),
+                          float4(0.95f, 0.95f, 0.95f, 1.0f), /*metallic=*/1.0f, /*roughness=*/0.0f);
+        // 两个已知物体（红/绿）。**必须用立方体而不是球**：地面镜里球体只有朝下的那一面
+        // 会被反射到，而相机看不到那一面（深度图里存的是朝上的面）⇒ SSR 永远判不出命中
+        // （实测：球体时预测像素附近 0.1% 有效）。立方体的**正面**朝相机，反射线从正面一侧
+        // 打到它，深度图里存的就是那一面 ✓。
+        CreateShapeEntity(world, sceneGraph, float3(-150.0f, 1750.0f, 100.0f), float3(100.0f, 100.0f, 100.0f),
+                          float4(1.0f, 0.05f, 0.05f, 1.0f), 0.0f, 0.7f, /*sphere=*/false);
+        CreateShapeEntity(world, sceneGraph, float3(170.0f, 1770.0f, -120.0f), float3(90.0f, 90.0f, 90.0f),
+                          float4(0.05f, 1.0f, 0.05f, 1.0f), 0.0f, 0.7f, /*sphere=*/false);
+        HE_CORE_INFO("[平面镜测试台] 已创建：地面镜 y=1700（法线 +Y）、红立方 (-150,1750,100) 半长 50、"
+                     "绿立方 (170,1770,-120) 半长 45");
+        g_MirrorRig.valid = true;   // 参数落盘给检查脚本用（见上方的 MirrorRigSpec 注释）
+        g_MirrorRig.planeNormal = float3(0.0f, 1.0f, 0.0f);
+        g_MirrorRig.planeOffset = -1700.0f;
+        g_MirrorRig.slabCenter  = float3(0.0f, 1699.5f, 0.0f);
+        g_MirrorRig.slabHalf    = float3(400.0f, 0.5f, 400.0f);
+        g_MirrorRig.boxRed     = float3(-150.0f, 1750.0f, 100.0f);
+        g_MirrorRig.halfRed    = 50.0f;
+        g_MirrorRig.boxGreen   = float3(170.0f, 1770.0f, -120.0f);
+        g_MirrorRig.halfGreen  = 45.0f;
     }
 
     // --- 天空盒 ---
@@ -569,6 +624,13 @@ int main() {
             ssr->stepSize = GetFloat(cfgData, "ssr_step_size", 0.5f);
             // Hi-Z 层次 march 开关（任务 25）：默认 1；置 0 强制线性 march，用于两条路径对照
             ssr->useHiZ   = GetInt(cfgData, "ssr_use_hiz", 1) != 0;
+            // march 参数按场景尺度自动推导（任务 32）：默认开。置 0 时用下面两个显式键，
+            // 把"场景尺度假设"单独摆出来做 A/B（判据见 Tools/gi/ssr_mirror_check.ps1）。
+            ssr->autoScaleMarch = GetInt(cfgData, "ssr_auto_scale", 1) != 0;
+            if (!ssr->autoScaleMarch) {
+                ssr->maxDistance = GetFloat(cfgData, "ssr_max_distance", 50.0f);
+                ssr->thickness   = GetFloat(cfgData, "ssr_thickness", 0.1f);
+            }
         }
 
         // ── 面板状态：管线 / GI 档位 / 只看 GI / GI 通道配置 ──
@@ -1500,6 +1562,12 @@ int main() {
                 addTarget("rsm_rad", rsm->GetRSMRadianceMap());
             }
             if (!forwardMode) addTarget("rsm_indirect", deferredPipeline.GetRSMIndirect().GetOutput());
+            // SSR 的输出单独给一个稳定名字（任务 32）：它的 provider 输出名是 `provN_spec_raw`，
+            // 而 N 取决于哪些 provider 有效 —— 判据不该依赖注册顺序。
+            if (!forwardMode) {
+                if (auto* ssr = deferredPipeline.GetSSR())
+                    addTarget("ssr", ssr->GetIndirectSpecularTexture());
+            }
             if (!g_DumpTargets.empty()) {
                 g_DumpDone = true;   // 已录制；实际读取放在 Submit 之后
             } else {
@@ -1557,6 +1625,32 @@ int main() {
                 }
             }
             HE_CORE_INFO("[GI采样] 共落盘 {} 个目标，请求退出", g_DumpTargets.size());
+            // 相机参数一并落盘：解析对照（平面镜的镜像点投影到屏幕）需要那套**渲染这一帧时**
+            // 的相机参数，否则判据只能靠硬编码 —— 而硬编码的相机参数一旦被 cfg 改动就失效。
+            {
+                const render::CameraData& cam = camCtrl.GetCamera();
+                std::ofstream cm(base + "_camera.txt");
+                cm << "pos "     << cam.position.x << " " << cam.position.y << " " << cam.position.z << "\n";
+                cm << "forward " << cam.forward.x  << " " << cam.forward.y  << " " << cam.forward.z  << "\n";
+                cm << "up "      << cam.up.x       << " " << cam.up.y       << " " << cam.up.z       << "\n";
+                cm << "fov "     << cam.fov        << "\n";
+                cm << "near "    << cam.nearPlane  << "\n";
+                cm << "far "     << cam.farPlane   << "\n";
+                cm << "aspect "  << cam.aspectRatio << "\n";
+            }
+            // 平面镜测试台的几何（任务 32）：与场景搭建同源，判据据此做解析镜像计算
+            if (g_MirrorRig.valid) {
+                std::ofstream mr(base + "_mirror.txt");
+                mr << "plane "  << g_MirrorRig.planeNormal.x << " " << g_MirrorRig.planeNormal.y << " "
+                                << g_MirrorRig.planeNormal.z << " " << g_MirrorRig.planeOffset << "\n";
+                mr << "slab "   << g_MirrorRig.slabCenter.x << " " << g_MirrorRig.slabCenter.y << " "
+                                << g_MirrorRig.slabCenter.z << " " << g_MirrorRig.slabHalf.x << " "
+                                << g_MirrorRig.slabHalf.y << " " << g_MirrorRig.slabHalf.z << "\n";
+                mr << "red "    << g_MirrorRig.boxRed.x << " " << g_MirrorRig.boxRed.y << " "
+                                << g_MirrorRig.boxRed.z << " " << g_MirrorRig.halfRed << "\n";
+                mr << "green "  << g_MirrorRig.boxGreen.x << " " << g_MirrorRig.boxGreen.y << " "
+                                << g_MirrorRig.boxGreen.z << " " << g_MirrorRig.halfGreen << "\n";
+            }
             g_DumpWritten = true;
             // 采样完成即请求关窗：让脚本无需超时等待，也保证退出前正常走完清理与保存流程
             glfwSetWindowShouldClose(engine.GetWindow()->GetNativeHandle(), GLFW_TRUE);
