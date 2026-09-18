@@ -551,7 +551,11 @@ void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             {{denoisedHandle, ResourceAccess::Read},
              {ptDepthHandle, ResourceAccess::Read},
              {ptNormalHandle, ResourceAccess::Read}},
-            {{atrousHandle, ResourceAccess::Write}},
+            // UAV 而非 Write：A-Trous 是 compute 写的 storage image，
+            // 声明成 Write 会被 RenderGraph 映射成"颜色附件"状态，对一张没有
+            // COLOR_ATTACHMENT 用途的图发 COLOR_ATTACHMENT_OPTIMAL 屏障
+            // （VUID-VkImageMemoryBarrier-oldLayout-01208）
+            {{atrousHandle, ResourceAccess::UAV}},
             [this, denoisedTex, ptDepth, ptNormal](rhi::IRHICommandList* c) {
                 m_PTAtrous->SetInputs(denoisedTex, ptDepth, ptNormal);
                 m_PTAtrous->SetParams((u32)cvPTAtrousIterations.Get(),
