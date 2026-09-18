@@ -981,7 +981,7 @@ r.RT.Denoise.Spatial     1   // 空间滤波
 
 ## 附录 A: 与 Full Path Tracing 规划的边界
 
-本规划覆盖 **Level 1: 混合 RT**。以下内容属于 [全路径追踪管线规划](全路径追踪管线规划.md)：
+本规划覆盖 **Level 1: 混合 RT**。以下内容属于 [全路径追踪管线规划](../计划实现功能/全路径追踪管线规划.md)：
 
 - Path Tracing 参考模式 (替代 GBuffer 光栅化)
 - ReSTIR DI / ReSTIR GI / ReSTIR PT

@@ -1,6 +1,6 @@
 # HugEngine 架构设计与任务划分
 
-> **目标**: 基于 [HugEngine_Technical_Plan.md](HugEngine_Technical_Plan.md) 中 340+ 项特性，给出可落地的模块化架构设计、任务依赖图和分阶段实施计划。
+> **目标**: 基于 [HugEngine技术全景与实施计划.md](HugEngine引擎介绍/HugEngine技术全景与实施计划.md) 中 340+ 项特性，给出可落地的模块化架构设计、任务依赖图和分阶段实施计划。
 >
 > **核心原则**: 每一阶段产出可运行/可演示的引擎 → 渐进式叠加能力 → 依赖关系单向无环
 >
@@ -1345,6 +1345,6 @@ private:
 ---
 
 > **文档版本**: v1.0  
-> **基于**: [HugEngine_Technical_Plan.md](HugEngine_Technical_Plan.md) v3.0  
+> **基于**: [HugEngine技术全景与实施计划.md](HugEngine引擎介绍/HugEngine技术全景与实施计划.md) v3.0  
 > **总模块数**: 145 (EP 58 + ST ~200)  
 > **关键路径**: 85 周 (可并行缓冲 34 周)

@@ -2,7 +2,7 @@
 
 > **日期**: 2026-07-06
 > **状态**: 设计完成，待实现
-> **关联**: [HugEngine_Architecture_And_Tasks.md](../HugEngine_Architecture_And_Tasks.md)
+> **关联**: [HugEngine架构设计与任务划分.md](../HugEngine架构设计与任务划分.md)
 
 ---
 
