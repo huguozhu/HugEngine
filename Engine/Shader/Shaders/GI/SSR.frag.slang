@@ -124,6 +124,33 @@ float4 fragmentMain(VSOutput input):SV_Target0{
             return float4(0,0,0,-1);   // 屏幕位移不足一个像素：SSR 无从谈起
         }
 
+        // ============================================================
+        // 【透视校正：屏幕段参数 t 不是射线参数】（任务 35 / §9.2-AE）
+        //
+        // 本 pass 在**屏幕空间**做 DDA（每步 2^level 像素），但深度比较需要"该屏幕位置
+        // 对应的射线点"。此前把屏幕段的参数 `t` 直接当成射线参数用：
+        //     rayPos = rayStart + R*(worldLen*t)      ← 错误
+        // 而 t 只在**屏幕**上是线性的：透视投影把"世界线性"映射成"屏幕分数"的**射影**函数，
+        // 两者只在射线两端深度相近时才近似一致。实测（地面镜 + 解析真值）：在预测反射像素
+        // 所在的屏幕分数处，这样算出的射线点比真实射线点远 **1251**（红盒）/ **1481**（绿盒）
+        // 世界单位 —— 是命中容差（11.6）的 **100 倍以上**，于是深度比较比的是别的点：
+        // 红盒的反射只是"蒙对"了附近的像素（最近命中 0.44 px 而整片图案是错的），绿盒则
+        // **一个像素都找不到**（§9.2-AE）。
+        //
+        // 正确做法用标准透视校正插值：clip 坐标沿射线是**线性**的
+        //     c(tau) = Proj·(rayStart,1) + tau·Proj·(R,0) = cA + tau·cR
+        // 而屏幕分数 t 与射线参数 tau 的关系是（1/w 在屏幕空间线性）
+        //     w(t)   = w0·wT / ((1-t)·wT + t·w0)          （w0/wT = 段两端的 clip.w）
+        //     tau(t) = t·worldLen·w0 / ((1-t)·wT + t·w0)
+        // 于是射线点的位置与 NDC 深度都能**精确**写出，不需要再投影一次：
+        //     rayPos = rayStart + R·tau(t)
+        //     rayZ   = (cA.z + tau·cR.z) / w(t)
+        // ============================================================
+        float4 cA=mul(u_Proj,float4(rayStart,1.0));
+        float4 cR=mul(u_Proj,float4(R,0.0));
+        float  w0=cA.w;
+        float  wT=cA.w+worldLen*cR.w;      // 段末端（t=1）的 clip.w
+
         int   level=0;
         float t=0.0;                       // 屏幕段参数 [0,1]
         for(int iter=0;iter<int(maxSteps);++iter){
@@ -134,11 +161,13 @@ float4 fragmentMain(VSOutput input):SV_Target0{
             float2 rpUV=s0+(s1-s0)*t;
             if(rpUV.x<0.0||rpUV.x>1.0||rpUV.y<0.0||rpUV.y>1.0)break;
 
-            // 射线点自身（世界 = view 空间的 z 由 R 与 worldLen 决定）→ 投影回 clip 取自己的深度
-            float3 rayPos=rayStart+R*(worldLen*t);
-            float4 rpClip=mul(u_Proj,float4(rayPos,1.0));
-            if(rpClip.w<=0.0001)break;
-            float  rayZ=rpClip.z/rpClip.w;     // NDC 深度：zero-to-one（近 0 / 远 1）
+            // 屏幕参数 → 射线参数（透视校正，见上面的推导）
+            float denom=(1.0-t)*wT+t*w0;
+            if(denom<=1e-6)break;          // 段内穿过相机平面：屏幕段不再是单调的
+            float wq=w0*wT/denom;          // 该屏幕位置处的 clip.w（= −viewZ）
+            float tau=t*worldLen*w0/denom; // 对应的射线参数（世界长度）
+            float3 rayPos=rayStart+R*tau;
+            float  rayZ=(cA.z+tau*cR.z)/wq;  // NDC 深度：zero-to-one（近 0 / 远 1）
 
             float hiZ=u_HiZ.SampleLevel(u_HiZSampler,rpUV,level).r;
 
