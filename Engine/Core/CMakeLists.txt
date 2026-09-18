@@ -8,6 +8,8 @@ set(CORE_SOURCES
     Core/Engine.h
     Core/Log.cpp
     Core/Log.h
+    Core/CrashHandler.cpp
+    Core/CrashHandler.h
     Core/Assert.h
     Core/CVar.cpp
     Core/CVar.h
@@ -38,3 +40,8 @@ target_link_libraries(HugEngineCore PUBLIC
     spdlog::spdlog
     Taskflow
 )
+
+# 崩溃处理器需要 DbgHelp（调用栈符号化 + MiniDumpWriteDump）
+if(WIN32)
+    target_link_libraries(HugEngineCore PUBLIC dbghelp)
+endif()

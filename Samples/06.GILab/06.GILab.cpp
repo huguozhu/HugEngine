@@ -27,7 +27,7 @@
 #include "Asset/glTFLoader.h"
 #include "Editor/ImGuiIntegration.h"
 #include "imgui.h"
-#include "CrashHandler.h"   // 崩溃处理器（Wave 0.8）：崩溃时打印完整调用栈 + minidump
+#include "Core/CrashHandler.h"   // 崩溃处理器（Wave 0.8）：崩溃时打印完整调用栈 + minidump
 
 #include <glm/gtc/packing.hpp>   // 白炉探针：half float 解码（RGBA16F 读回）
 
@@ -138,7 +138,7 @@ int main() {
     // ============================================================
     {
         const std::string crashLog = std::string(HUGE_CONTENT_DIR) + "Config/06_GILab_crash.log";
-        he::sample::InstallCrashHandler(crashLog.c_str(), nullptr);
+        he::InstallCrashHandler(crashLog.c_str(), nullptr);
     }
 
     // ============================================================
