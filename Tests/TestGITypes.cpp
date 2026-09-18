@@ -469,9 +469,11 @@ TEST_CASE("GIRegistry::IsAvailable：管线能力 ∧ 设备能力") {
     CHECK_FALSE(GIRegistry::IsAvailable(GISourceId::SSGI, PipelineCaps::Forward, true));
     CHECK_FALSE(GIRegistry::IsAvailable(GISourceId::DDGI, PipelineCaps::Forward, true));
     CHECK_FALSE(GIRegistry::IsAvailable(GISourceId::SSAO, PipelineCaps::Forward, true));
-    // Forward 提供的源
-    CHECK(GIRegistry::IsAvailable(GISourceId::IBL, PipelineCaps::Forward, true));
-    CHECK(GIRegistry::IsAvailable(GISourceId::RSM, PipelineCaps::Forward, true));
+    // Forward 的 IBL 与 RSM 是管线级开关（iblIntensity / rsmIndirect）+ 内部硬编码使用，
+    // 既不读层栈、也没有 GIBlendParams 归一化合成 → 在「层栈模型」里它们**不是**该管线的
+    // 可用源。声明它们只会把源放进一个没人消费的层栈（§9.2-H 的「配置说谎」）。
+    CHECK_FALSE(GIRegistry::IsAvailable(GISourceId::IBL, PipelineCaps::Forward, true));
+    CHECK_FALSE(GIRegistry::IsAvailable(GISourceId::RSM, PipelineCaps::Forward, true));
 
     // Deferred 提供屏幕空间源与探针
     CHECK(GIRegistry::IsAvailable(GISourceId::SSGI, PipelineCaps::Deferred, false));
@@ -510,22 +512,23 @@ TEST_CASE("GIRegistry::Degrade：Ultra + Deferred 无光追 → 裁掉光追源�
     CHECK(d.specular.Has(GISourceId::IBL));
 }
 
-TEST_CASE("GIRegistry::Degrade：Ultra + Forward 无光追 → 只剩管线支持的源") {
+TEST_CASE("GIRegistry::Degrade：Ultra + Forward 无光追 → GI 通道被裁空，只剩阴影") {
     const GIConfig ultra = GIConfigFromPreset(GIQualityPreset::Ultra);
     const GIConfig d = GIRegistry::Degrade(ultra, PipelineCaps::Forward, false);
 
-    // Forward 只提供 IBL 与 RSM（且 RS 源需场景，Ultra 未含）→ diffuse 只剩 IBL
-    CHECK(d.diffuse.Has(GISourceId::IBL));
-    CHECK_FALSE(d.diffuse.Has(GISourceId::RTGI));
-    CHECK_FALSE(d.diffuse.Has(GISourceId::DDGI));
-    CHECK(d.specular.Has(GISourceId::IBL));
-    CHECK_FALSE(d.specular.Has(GISourceId::RTReflection));
-
-    // Forward 无 GBuffer → 没有任何可用 AO 源，故 ao 通道为空是**正确**结果
-    CHECK_FALSE(GIRegistry::IsAvailable(GISourceId::SSAO, PipelineCaps::Forward, false));
+    // Forward 不声明任何 GI 源位 → 三个 GI 通道全被裁空，且兜底（补 IBL）也不会发生，
+    // 因为兜底同样要求该源在本管线下可用。**这是正确结果**：Forward 的 IBL/RSM 是
+    // 管线级开关，层栈内容对它没有任何影响，留着只会让配置说谎（§9.2-H）。
+    CHECK(d.diffuse.count == 0u);
+    CHECK(d.specular.count == 0u);
     CHECK(d.ao.count == 0u);
+    CHECK_FALSE(d.ShouldRunSSGI());
+    CHECK_FALSE(d.ShouldRunDDGI());
+    CHECK_FALSE(d.ShouldRunRSM());
     CHECK_FALSE(d.ShouldRunAO());
+    CHECK_FALSE(d.ShouldRunSpecular());
 
+    // 阴影通道独立于层栈，Forward 的光栅阴影保留
     CHECK(d.shadow == ShadowChannel::Raster);
 }
 
