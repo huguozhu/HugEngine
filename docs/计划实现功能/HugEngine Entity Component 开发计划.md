@@ -5,6 +5,7 @@
 >   - 2026-09-04：对齐代码基线（`404de09`），新增 **Phase S0（已有组件补齐 AI 一等公民）**
 >   - 2026-09-06：S0~P3 全部落地（提交 `8813211` → `56696ea` 共 9 个），doctest 85 用例 / 509 断言通过；
 >     剩余仅 Phase C 大工程（依赖路线图 P6/P3）
+>   - 2026-09-18：任务 26（Collision 调试线框）落地（见 §十九）；**21~26 全部完成**
 >   - 2026-09-18：任务 25（InstancedMesh 逐实例 GPU 剔除 + 接入间接绘制）落地（见 §十八）
 >   - 2026-09-18：任务 24（Decal GBuffer 投影 Pass）落地（见 §十七）
 >   - 2026-09-18：任务 23（bindless 堆环形化）落地（RHI 基础件 + 消费方接入，见 §十六）
@@ -40,7 +41,7 @@
 | DecalComponent | UDecalComponent | ✅（P2 A3 投射片 MVP；任务 24 追加 Deferred **GBuffer 投影**，见 §十七） | ✅ 6 属性 | ✅ | ✅ Decal |
 | BillboardComponent | UBillboardComponent | ✅（P2 A4，billboard 矩阵对齐相机） | ✅ 3 属性 | ✅ | — |
 | TextRenderComponent | UTextRenderComponent | ✅（P2 A5，stb_truetype + 系统字体兜底） | ✅ 4 属性 | ✅ | — |
-| CollisionComponent | UCapsuleComponent/UBoxComponent | ✅（P3 B5，`CollisionSystem`） | ✅ 5 属性 | ✅ | — |
+| CollisionComponent | UCapsuleComponent/UBoxComponent | ✅（P3 B5，`CollisionSystem`；任务 26 追加**调试线框** `CollisionDebugSystem`，见 §十九） | ✅ 5 属性 | ✅ | — |
 | CharacterMovementComponent | UCharacterMovementComponent | ✅（P3 B3，`MovementSystem`，地面射线检测） | ✅ 5 属性 | ✅ | — |
 | AbilityComponent | UAbilitySystemComponent | ✅（P3 B4，`AbilitySystem` + Action op CastAbility） | ✅ 2 属性 | ✅ | — |
 | SplineComponent | USplineComponent | ✅（P3 B2，Hermite+自动切线，弧长求值/闭环回绕） | ✅ 2 属性 | ✅ | — |
@@ -65,7 +66,7 @@
 | **A（低成本）** | Camera(系统接入) / Decal / Billboard / TextRender / SpringArm / ProjectileMovement / Health | 2~3 天/个 | ✅ 已完成（2026-09-06）：A3~A8 落地（**现编号 7~12**）；A1/A2 并入 S0（**现编号 5~6**） |
 | **B（中成本）** | InstancedMesh / Spline / CharacterMovement / Ability(简化 GAS) / Collision | 1~2 周/个 | ✅ 已完成（2026-09-06）：B1~B5 落地（**现编号 13~17**）；前置重构经评估非必要（见 §六注记） |
 | **C（大工程）** | SkeletalMesh / Physics / NavMesh | 数周~数月 | ✅ 均已落地（**现编号 18~20**；SkeletalMesh `4d94460` / Physics Jolt C2 / NavMesh `97aaa00`）；Audio（原 C3）已移除 |
-| **后续（待办）** | SkeletalMesh 扩展 / MVP 技术债 / 架构触发项 | 见总表 | ⏳ **现编号 21~28**（21~25 已于 2026-09-18 完成；26~28 待办），见下表与 §十二 |
+| **后续（待办）** | SkeletalMesh 扩展 / MVP 技术债 / 架构触发项 | 见总表 | ✅ **现编号 21~26 已完成**（2026-09-18）；27/28 为触发式待办，见下表与 §十二 |
 
 ### 任务总表（从 1 重新计数）
 
@@ -100,7 +101,7 @@
 | **20** | C4 | NavMesh 寻路（NavMesh + A* + NavAgent） | ✅ 2026-09-07 | §七 |
 
 **B. 待办（21~28）** —— 来源：§十一 已知 MVP 限制/技术债 + §十二 "仍待办" + §十二 架构触发项
-（**21~25 已于 2026-09-18 完成**，保留在表里以便追溯）
+（**21~26 已于 2026-09-18 全部完成**，保留在表里以便追溯）
 
 | 新编号 | 任务 | 类型 | 依赖 / 触发条件 | 详见 |
 |:---:|---|---|---|---|
@@ -109,11 +110,11 @@
 | **23** | ~~**bindless 堆环形化**（TextRender / InstancedMesh 高频更新不再靠"旧资源保活"）~~ —— ✅ **已完成**（2026-09-18，见 §十六） | 技术债 | 无（独立，涉 RHI 堆管理） | §十六 |
 | **24** | ~~**Decal GBuffer 投影 Pass**（替代半透明投射片 MVP）~~ —— ✅ **已完成**（2026-09-18，见 §十七；Forward 仍为投射片） | 技术债 → 功能 | 无（独立，需 GBuffer 可写 Pass） | §十七 |
 | **25** | ~~**InstancedMesh 接 GPU-Culling + 逐实例剔除**（现在仅 Forward 非 GPU-Culling 路径）~~ —— ✅ **已完成**（2026-09-18，见 §十八） | 技术债 | 无（独立） | §十八 |
-| **26** | **Collision 调试线框**（可视化 AABB/球/胶囊） | 技术债 | 无（独立，可复用 Billboard/线框） | §十一 ④/§十二 |
+| **26** | ~~**Collision 调试线框**（可视化 AABB/球/胶囊）~~ —— ✅ **已完成**（2026-09-18，见 §十九） | 技术债 | 无（独立，可复用 Billboard/线框） | §十九 |
 | **27** | **渲染类型注册表化**（替换"派生渲染组件显式列举"） | 架构 | **触发**：出现下一个渲染组件（InstancedMesh 是第 7 个） | §十二 |
 | **28** | **CollectLights 数据驱动抽取**（现在 4 份复制） | 架构 | **触发**：出现下一个光源类型 | §十二 |
 
-> **怎么用这张表**：`26` 无外部依赖、可随时开工（任务 26 = Collision 调试线框），
+> **怎么用这张表**：`21~26` 已全部完成（2026-09-18）；`27/28` 仍是触发式，条件未到不动。
 > 由"改动面小 → 大"排列）；`27/28` 是**触发式**任务，条件未到之前不动（提前做属于"没有消费方的
 > 泛化"，与 GI 那边的取舍一致）。每完成一项：把状态改成 ✅ 并补提交号，**不要改动已有编号**。
 
@@ -350,7 +351,7 @@ P2（表现）  : 7 Decal(原A3) / 8 Billboard(原A4) / 9 TextRender(原A5) —�
 P3（中成本）: 17 Collision(原B5) → 15 CharacterMovement(原B3) → 16 Ability(原B4)
               → 14 Spline(原B2) → 13 InstancedMesh(原B1) —— ✅ 已完成
 P4（大工程）: 18 SkeletalMesh(原C1) / 19 Physics(原C2) / 20 NavMesh(原C4) —— ✅ 已完成
-待办        : 21 ✅ / 22 ✅ / 23 ✅ / 24 ✅ / 25 ✅ 已完成；26（Collision 调试线框）
+待办        : 21 ✅ / 22 ✅ / 23 ✅ / 24 ✅ / 25 ✅ / 26 ✅ **全部完成**（27/28 为触发式）
               27/28（触发式：出现下一个渲染组件 / 下一个光源类型时再做）
 ```
 
@@ -366,7 +367,7 @@ P4（大工程）: 18 SkeletalMesh(原C1) / 19 Physics(原C2) / 20 NavMesh(原C4
   1. ~~bindless 堆 append-only：TextRender/InstancedMesh 动态更新以「旧资源保活」换安全，高频更新需 Heap 环形化改造~~ ✅ **已落地（任务 23，见 §十六）**
   2. ~~Decal 为投射片 MVP（无 GBuffer 投影 Pass）~~ ✅ **Deferred 已落地 GBuffer 投影（任务 24，见 §十七）**；Forward 无 GBuffer 可投影 ⇒ 仍为投射片（已知边界）；~~InstancedMesh 仅支持 Forward 非 GPU-Culling 路径，逐实例剔除未接~~ ✅ **已落地（任务 25，见 §十八）：Forward/Deferred 双路径 + 逐实例 GPU 剔除 + 间接绘制**
   3. 实体引用类属性（homingTarget/targetEntity/cameraEntity 等）不进反射/词表（u64 无法快照序列化）——**这是策略而非待办**
-  4. Collision 调试线框（**任务 26**）、SplineMesh 沿条生成 ✅ 已落地（`28ae06b` 坡度过滤、`bc14c57` 碰撞缩臂亦已落地）
+  4. ~~Collision 调试线框~~ ✅ **已落地（任务 26，见 §十九）**；SplineMesh 沿条生成 ✅ 已落地（`28ae06b` 坡度过滤、`bc14c57` 碰撞缩臂亦已落地）
 - **遗留**：任务 18~20（原 Phase C）全部落地（Physics C2 ✅ `7eb1a66`~`2b0ae5c`；NavMesh C4 ✅ `97aaa00`；SkeletalMesh ✅ `4d94460`）；Audio（C3）已从本计划移除。SkeletalMesh 后续扩展（剪辑混合、动画重定向）；**既有组件 Particle/Memory/Goal 的反射/AI 补齐 ✅ 已完成**（Animation `98c4080`；Particle emitRate 深补 `fa1410c`；Memory/Goal 类型注册——内部结构按文档不暴露）
 
 ---
@@ -392,7 +393,7 @@ P4（大工程）: 18 SkeletalMesh(原C1) / 19 Physics(原C2) / 20 NavMesh(原C4
 - ✅ **23** bindless 堆环形化（TextRender/InstancedMesh 高频更新）—— 已完成（2026-09-18，见 §十六）
 - ✅ **24** Decal GBuffer 投影 Pass（替代投射片 MVP）—— 已完成（2026-09-18，见 §十七）
 - ✅ **25** InstancedMesh 接 GPU-Culling + 逐实例剔除 —— 已完成（2026-09-18，见 §十八）
-- **26** Collision 调试线框
+- ✅ **26** Collision 调试线框 —— 已完成（2026-09-18，见 §十九）
 - **27** 渲染类型注册表化（**触发**：下一个渲染组件；InstancedMesh 是第 7 个）
 - **28** CollectLights 数据驱动抽取（**触发**：下一个光源类型）
 - 组件 AI 补齐已完成（Animation/RigidBody/Particle 反射+词表；Memory/Goal 类型注册）——后续仅当需暴露内部结构时再议
@@ -767,4 +768,61 @@ P4（大工程）: 18 SkeletalMesh(原C1) / 19 Physics(原C2) / 20 NavMesh(原C4
 - **Deferred 的 GPU-Driven（间接批次）路径不含实例化**：实例化在 Deferred 走的是 GBuffer 渲染器的
   逐组件绘制段（CPU 模式与 GPU 模式的回退分支都接了）；批处理（MeshBatcher + ExecuteIndirect）
   那条路仍未把实例并入，属后续工作。
+
+---
+
+## 十九、任务 26 落地：Collision 调试线框（AABB / 球 / 胶囊）
+
+承接 §十一 技术债④，也是本计划 `21~26` 的最后一项。**问题**：碰撞体是纯数据组件
+（`CollisionComponent`，检测走 `CollisionSystem`），场景里只有一个"看不见的盒子"——
+调试移动/物理问题时只能猜"到底检测的是哪个形状、多大、在哪"。
+
+**做法：把碰撞形状三角化成线框网格，复用现有网格渲染路径**
+
+| 步骤 | 内容 |
+|---|---|
+| ① 取形状 | `CollisionSystem::ExtractWorldShape`（**本轮把它从文件内部提升为公开 API**）：检测与可视化共用同一份世界形状语义 |
+| ② 三角化 | 新 `CollisionDebugSystem::BuildWireframe`：AABB → 12 条棱；球 → 3 个正交大圆（3×24 段）；胶囊 → 上下圆（2×24）+ 4 条竖线 + 两端半球弧（8 弧 × 8 段）= 116 段 |
+| ③ 落成几何 | 每段线生成**两片互相垂直的细四边形**（十字片，8 顶点 / 12 索引）写入同实体上的 `CollisionDebugComponent`（MeshComponent） |
+| ④ 渲染 | 走现有网格路径：顶点/索引缓冲 + 材质（无光照 + 半透明 + 双面 + 不投影），Forward/Deferred 两条管线都自动生效 |
+
+**设计要点（每条都有原因）**
+
+1. **线与检测共用 `ExtractWorldShape`**：这是整个任务的价值前提 —— 如果线框自己再算一遍形状
+   （尤其 AABB 的"旋转后重轴保守盒"、胶囊的"段半长 = max(0, h/2 − r)"、半径乘最大缩放分量），
+   迟早与检测语义漂移，调试可视化就会骗人。为此把提取函数提升为公开 API，并补了注释说明。
+2. **十字片而不是 billboard**：billboard 需要相机参数（系统调用方就得每帧传相机、还得处理朝向），
+   两片互相垂直的细带在任意视角至少有一片接近正对，效果等价而调用面为零。
+3. **不引入线拓扑管线**：RHI 里没有 LineList 管线，为调试线框新加一条（PSO/RenderPass/深度状态）
+   性价比很低；而线框本质就是"带颜色的几何"，复用网格路径后连 Forward/Deferred 的分支都不用碰。
+4. **形状不变就不重建网格**：组件缓存上一次的世界形状（min/max/center/radius/segA/segB + 形状类型
+   + 线宽），`epsilonEqual` 比较后才 `SetMeshData` —— 否则每帧为每个碰撞体重建 GPU 缓冲纯属浪费。
+5. **开关与禁用都收敛到"零几何"**：关闭开关或碰撞体 `bEnabled=false` 时清空网格（组件保留，便于再打开），
+   与检测的"禁用即跳过"行为保持一致。
+6. **调试组件空注册**：`CollisionDebugComponent` 在 `SceneReflect.cpp` 里只做空注册（让工厂/类型系统
+   有 `StaticClass`），**不注册属性、不进 LLM 词表** —— 避免 AI 生成"调试线框"这种无意义实体。
+
+**判据**
+
+- **doctest**：`Tests/TestCollision.cpp` 追加 3 例（全量 **200 例 / 5482 断言**全过）：
+  · AABB：12 段 / 96 顶点 / 144 索引，且**线框包围盒 == 检测用的世界 AABB ± 半线宽**（逐个分量的近似断言）；
+  · 球：3×24 段，所有顶点到球心距离都在 `2 ± 0.02` 内（聚合 min/max 检查）；
+  · 胶囊：`segA-segB` 长度 == `height − 2r`（3 − 1 = 2），竖直范围 == 总高 3，段数 = 2×24+4+8×8；
+  · 退化输入（`radius=0`、`height<2r`、线宽 0）不产生 NaN；
+  · 系统行为：打开 → 生成；形状没变 → 不重建；移动实体 → 线框跟随（包围盒随之变化）；
+    关闭开关 → 几何清零且组件保留；碰撞体被禁用 → 线框消失。
+- **示例冒烟**（02.Cube，Release，20 秒，**0 error / 0 VUID**）：
+  `[任务 26] 碰撞调试线框：4 个碰撞体，共 212 条线段 / 1696 顶点（线与检测共用同一份世界形状）`
+  —— 212 = 地板 AABB 12 + 碰撞盒 AABB 12 + 探测球 3×24 + 角色胶囊 116，与场景里的四个碰撞体逐一对上；
+  面板新增"显示碰撞调试线框 (任务 26)"开关与"N 个碰撞体 / M 条线段"读数。
+
+**已知边界**
+
+- 线框走的是普通网格路径，因此**线宽是世界单位**（不会随距离变细），远处线框看起来会偏粗；
+  想要屏幕恒定线宽需要真正的线段管线（LineList + 屏幕空间宽度）。
+- 线框不参与遮挡剔除/深度前置（半透明路径），大量碰撞体时会有一定 overdraw；
+  当前用法（几十个碰撞体）无所谓。
+- 球/胶囊的圆环段数是固定常量（24 / 8），超大半径时能看出一圈折线；需要的话按半径自适应分段。
+- 只在**示例/调用方**驱动（`CollisionDebugSystem::Update`），没有做成"编辑器全局开关"——
+  编辑器侧接入属于编辑器自己的可视化层。
 
