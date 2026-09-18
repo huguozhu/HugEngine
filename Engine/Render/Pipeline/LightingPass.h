@@ -137,6 +137,16 @@ private:
     std::unique_ptr<rhi::IRHIBuffer> m_BlendUBO;   // GI 分层合成参数 UBO（3 通道混合参数）
     rhi::DescriptorSetHandle       m_Set    = rhi::kInvalidSet;
 
+    // ── 中性占位纹理（1×1）──
+    // 输入为 null 时**必须显式回绑**其中一张，不能只是"跳过更新"：描述符集是持久的，
+    // 跳过会留下上一帧的绑定，于是本帧没有产出的纹理仍会被采样到（§9.2-T）。
+    //   White：语义 1.0 —— 无遮挡/无遮蔽（阴影图、AO）
+    //   Black：语义 0.0 —— 无贡献（间接光、反射、RSM 位置与通量）
+    std::unique_ptr<rhi::IRHITexture> m_PlaceholderWhite;
+    std::unique_ptr<rhi::IRHITexture> m_PlaceholderBlack;
+    std::unique_ptr<rhi::IRHITexture> m_PlaceholderCube;   // 黑色 Cubemap（IBL 无贡献）
+    std::unique_ptr<rhi::IRHISampler> m_PlaceholderSampler;
+
     u32 m_Width = 0, m_Height = 0;
     bool m_MSAAEnabled = false;  // 供外部 MSAA 覆盖（Init 前设置）
     float3 m_AtmSunDir    = float3(0, 1, 0);  // 空中透视太阳方向（默认朝天）

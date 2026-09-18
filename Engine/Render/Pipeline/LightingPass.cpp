@@ -53,14 +53,30 @@ void LightingPass::OnResize(rhi::IRHIDevice* device, u32 width, u32 height) {
 // Render — 执行完整延迟光照 Pass
 // ============================================================
 void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
-    auto bindTex = [&](u32 binding, rhi::IRHITexture* tex, rhi::IRHISampler* sampler) {
-        if (tex && sampler && m_Device) {
+    // 绑纹理。
+    // fallback == nullptr：输入为 null 时**不更新**该绑定（与原先一致）——用于那些"每帧必有"
+    //   的输入（GBuffer / 深度 / SSAO / IBL），它们的 null 只意味着"暂时取不到"，此时保留
+    //   上一次的有效绑定比换成占位更接近正确值。
+    // fallback != nullptr：输入为 null 表示**本帧没有产出**，必须显式回绑中性占位。不能只是
+    //   "跳过更新"——描述符集是持久的，跳过会留下上一帧（或初始化时）的绑定，于是本帧没有产出
+    //   的纹理仍会被采样到，读的是未初始化显存，而且描述符本身"看起来"合法，故障完全静默
+    //   （§9.2-T）。白 = 1.0（无遮挡/无遮蔽），黑 = 0.0（无贡献）。
+    auto bindTex = [&](u32 binding, rhi::IRHITexture* tex, rhi::IRHISampler* sampler,
+                       rhi::IRHITexture* fallback = nullptr) {
+        if (!m_Device) return;
+        if (tex && sampler) {
             m_Device->UpdateDescriptorSet(m_Set, binding,
                 rhi::DescriptorType::CombinedImageSampler, tex, sampler);
+            return;
         }
+        if (!fallback || !m_PlaceholderSampler) return;
+        m_Device->UpdateDescriptorSet(m_Set, binding,
+            rhi::DescriptorType::CombinedImageSampler, fallback, m_PlaceholderSampler.get());
     };
 
     // ── 绑定 GBuffer 纹理 ──
+    rhi::IRHITexture* black = m_PlaceholderBlack.get();
+    rhi::IRHITexture* white = m_PlaceholderWhite.get();
     bindTex(kGPUBinding_GBufferA, in.gbA, m_HDRSampler.get());
     bindTex(kGPUBinding_GBufferB, in.gbB, m_HDRSampler.get());
     bindTex(kGPUBinding_GBufferC, in.gbC, m_HDRSampler.get());
@@ -69,11 +85,13 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
     bindTex(kGPUBinding_GBufferG, in.gbDisneyB, m_HDRSampler.get());  // disneyB（clearcoat/clearcoatGloss/specularTint.rg）
     bindTex(kGPUBinding_Depth, in.gbDepth, m_PointSampler.get());
 
-    // ── 绑定阴影贴图 ──
-    bindTex(kGPUBinding_ShadowMap0, in.csmShadow0, m_HDRSampler.get());
-    bindTex(kGPUBinding_ShadowMap1, in.csmShadow1, m_HDRSampler.get());
-    bindTex(kGPUBinding_ShadowMap2, in.csmShadow2, m_HDRSampler.get());
-    bindTex(kGPUBinding_SpotShadow_DL, in.spotShadow, m_HDRSampler.get());
+    // ── 绑定阴影贴图（门控：本帧没产出就回绑白色占位 = 无遮挡）──
+    // 采样深度 1.0 = 无遮挡，正是"该光源不投影"的中性值。调用方必须传 nullptr 表示
+    // "本帧没有产出这张图"，不能传一张没写过的真实纹理。
+    bindTex(kGPUBinding_ShadowMap0, in.csmShadow0, m_HDRSampler.get(), white);
+    bindTex(kGPUBinding_ShadowMap1, in.csmShadow1, m_HDRSampler.get(), white);
+    bindTex(kGPUBinding_ShadowMap2, in.csmShadow2, m_HDRSampler.get(), white);
+    bindTex(kGPUBinding_SpotShadow_DL, in.spotShadow, m_HDRSampler.get(), white);
 
     // ── 绑定光源/阴影数据 SSBO ──
     if (in.lightBuffer && m_Device)
@@ -81,10 +99,10 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
     if (in.shadowBuffer && m_Device)
         m_Device->UpdateDescriptorSet(m_Set, kGPUBinding_ShadowData_DL, rhi::DescriptorType::StorageBuffer, in.shadowBuffer);
 
-    // ── 绑定屏幕空间效果 ──
-    bindTex(kGPUBinding_SSGI, in.ssgiTex, in.ssgiSampler);
+    // ── 绑定屏幕空间效果（门控：SSGI/SSR 未注册 pass 时回绑黑色占位 = 无贡献）──
+    bindTex(kGPUBinding_SSGI, in.ssgiTex, in.ssgiSampler, black);
     bindTex(kGPUBinding_SSAO_DL, in.ssaoTex, m_HDRSampler.get());
-    bindTex(kGPUBinding_SSR, in.ssrTex, in.ssrSampler);
+    bindTex(kGPUBinding_SSR, in.ssrTex, in.ssrSampler, black);
 
     // ── 绑定 DDGI 探针 ──
     if (in.ddgiProbeBuffer && m_Device)
@@ -93,16 +111,16 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
     if (in.ddgiGridUniform && m_Device)
         m_Device->UpdateDescriptorSet(m_Set, kGPUBinding_DDGIGridParams, rhi::DescriptorType::UniformBuffer, in.ddgiGridUniform);
 
-    // ── 绑定 RSM 间接光（Forward/Deferred 共用；未提供时 shader 有守卫不采样）──
-    bindTex(kGPUBinding_RSMPosition, in.rsmPositionMap, m_HDRSampler.get());
-    bindTex(kGPUBinding_RSMFlux, in.rsmFluxMap,     m_HDRSampler.get());
+    // ── 绑定 RSM 间接光（Forward/Deferred 共用；未提供时回落到黑色占位 = 无间接光）──
+    bindTex(kGPUBinding_RSMPosition, in.rsmPositionMap, m_HDRSampler.get(), black);
+    bindTex(kGPUBinding_RSMFlux, in.rsmFluxMap,     m_HDRSampler.get(), black);
 
-    // ── 绑定 Hybrid RT 效果输出纹理（非空时才替换占位）──
+    // ── 绑定 Hybrid RT 效果输出纹理（未提供时回落到中性占位）──
     // 阴影/AO 遮罩用线性采样上采样到全分辨率；反射/GI HDR 结果用线性采样
-    bindTex(kGPUBinding_RT_ShadowMask, in.rtShadowMask, m_HDRSampler.get());   // RT 阴影遮罩
-    bindTex(kGPUBinding_RT_Reflection, in.rtReflection, m_HDRSampler.get());   // RT 反射
-    bindTex(kGPUBinding_RT_AO, in.rtAO,         m_HDRSampler.get());   // RT AO
-    bindTex(kGPUBinding_RT_GI, in.rtGI,         m_HDRSampler.get());   // RT GI
+    bindTex(kGPUBinding_RT_ShadowMask, in.rtShadowMask, m_HDRSampler.get(), m_PlaceholderWhite.get());  // RT 阴影遮罩
+    bindTex(kGPUBinding_RT_Reflection, in.rtReflection, m_HDRSampler.get(), black);   // RT 反射
+    bindTex(kGPUBinding_RT_AO, in.rtAO,         m_HDRSampler.get(), m_PlaceholderWhite.get());   // RT AO
+    bindTex(kGPUBinding_RT_GI, in.rtGI,         m_HDRSampler.get(), black);   // RT GI
 
     // ── 聚集着色（可选）──
     u32 useClustered = 0;
@@ -264,6 +282,8 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
     }
 
     // ── 预填充所有 binding 占位纹理（避免未绑定 → Intel GPU 白屏）──
+    // 产物同时保存为成员：Render 里输入为 null 时要**显式回绑**它们，仅"跳过更新"会留下
+    // 上一帧的绑定（描述符集是持久的），本帧没产出的纹理会继续被采样（§9.2-T）。
     {
         u8 w4[4] = {255,255,255,255};
         rhi::TextureDesc ptd;
@@ -274,16 +294,19 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
         ptd.arrayLayers = 1;
         ptd.usage = rhi::TextureUsage::ShaderResource;
         ptd.initialData = w4;
-        auto pt = device->CreateTexture(ptd);
+        m_PlaceholderWhite = device->CreateTexture(ptd);
 
         rhi::SamplerDesc sd;
         sd.minFilter = sd.magFilter = rhi::FilterMode::Linear;
         sd.addressU = sd.addressV = rhi::AddressMode::ClampToEdge;
-        auto ps = device->CreateSampler(sd);
+        m_PlaceholderSampler = device->CreateSampler(sd);
 
-        // 更新所有 CombinedImageSampler 绑定（0-4, 9-11, 14-16, 23, 28, 29 — 2D 纹理）
-        for (u32 b : {0u,1u,2u,3u,4u,9u,10u,11u,14u,15u,16u,23u,28u,29u})
-            device->UpdateDescriptorSet(m_Set, b, rhi::DescriptorType::CombinedImageSampler, pt.get(), ps.get());
+        // 更新所有 CombinedImageSampler 绑定（0-4, 9-11, 14, 23, 28, 29 — 2D 纹理）
+        // 这些通道的语义都是"1.0 = 无效果"，故白色即为中性值：
+        //   阴影图采样出深度 1.0 = 无遮挡；AO/RT 阴影遮罩 = 无遮蔽
+        for (u32 b : {0u,1u,2u,3u,4u,9u,10u,11u,14u,23u,28u,29u})
+            device->UpdateDescriptorSet(m_Set, b, rhi::DescriptorType::CombinedImageSampler,
+                                        m_PlaceholderWhite.get(), m_PlaceholderSampler.get());
 
         // RT 效果占位纹理：
         //   24/26（RT 阴影/AO）→ 白色（无阴影/无遮蔽，语义上=1.0）
@@ -298,20 +321,27 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
             btd.arrayLayers = 1;
             btd.usage = rhi::TextureUsage::ShaderResource;
             btd.initialData = bk;
-            auto bt = device->CreateTexture(btd);
+            m_PlaceholderBlack = device->CreateTexture(btd);
 
-            device->UpdateDescriptorSet(m_Set, kGPUBinding_RT_ShadowMask, rhi::DescriptorType::CombinedImageSampler, pt.get(), ps.get());
-            device->UpdateDescriptorSet(m_Set, kGPUBinding_RT_AO, rhi::DescriptorType::CombinedImageSampler, pt.get(), ps.get());
-            device->UpdateDescriptorSet(m_Set, kGPUBinding_RT_Reflection, rhi::DescriptorType::CombinedImageSampler, bt.get(), ps.get());
-            device->UpdateDescriptorSet(m_Set, kGPUBinding_RT_GI, rhi::DescriptorType::CombinedImageSampler, bt.get(), ps.get());
+            device->UpdateDescriptorSet(m_Set, kGPUBinding_RT_ShadowMask, rhi::DescriptorType::CombinedImageSampler, m_PlaceholderWhite.get(), m_PlaceholderSampler.get());
+            device->UpdateDescriptorSet(m_Set, kGPUBinding_RT_AO, rhi::DescriptorType::CombinedImageSampler, m_PlaceholderWhite.get(), m_PlaceholderSampler.get());
+            device->UpdateDescriptorSet(m_Set, kGPUBinding_RT_Reflection, rhi::DescriptorType::CombinedImageSampler, m_PlaceholderBlack.get(), m_PlaceholderSampler.get());
+            device->UpdateDescriptorSet(m_Set, kGPUBinding_RT_GI, rhi::DescriptorType::CombinedImageSampler, m_PlaceholderBlack.get(), m_PlaceholderSampler.get());
 
             // SSGI/SSAO/SSR 占位（19/20/21）：
             // HybridRT 不计算屏幕空间效果，对应 RT 效果关闭时 shader 回退采样这些纹理。
             // 必须绑定中性占位，避免采样未初始化描述符 → 黑屏。
             //   SSGI → 黑（无间接漫反射），SSAO → 白（无遮蔽），SSR → 黑（无镜面反射）
-            device->UpdateDescriptorSet(m_Set, kGPUBinding_SSGI, rhi::DescriptorType::CombinedImageSampler, bt.get(), ps.get());
-            device->UpdateDescriptorSet(m_Set, kGPUBinding_SSAO_DL, rhi::DescriptorType::CombinedImageSampler, pt.get(), ps.get());
-            device->UpdateDescriptorSet(m_Set, kGPUBinding_SSR, rhi::DescriptorType::CombinedImageSampler, bt.get(), ps.get());
+            device->UpdateDescriptorSet(m_Set, kGPUBinding_SSGI, rhi::DescriptorType::CombinedImageSampler, m_PlaceholderBlack.get(), m_PlaceholderSampler.get());
+            device->UpdateDescriptorSet(m_Set, kGPUBinding_SSAO_DL, rhi::DescriptorType::CombinedImageSampler, m_PlaceholderWhite.get(), m_PlaceholderSampler.get());
+            device->UpdateDescriptorSet(m_Set, kGPUBinding_SSR, rhi::DescriptorType::CombinedImageSampler, m_PlaceholderBlack.get(), m_PlaceholderSampler.get());
+
+            // RSM 位置/通量图（15/16）→ 黑色：
+            // 这两张**不能**用白色占位。对 u_RSMPositionMap，白色是 worldPos≈(1,1,1)；
+            // 对 u_RSMFluxMap，白色是 flux=1.0，即一个"全亮 VPL"——一旦门控与 RSM pass 的真实
+            // 产出不一致，回落就从一个安全值变成一个偏亮的错误值。黑色才是"无间接光"的中性值。
+            device->UpdateDescriptorSet(m_Set, kGPUBinding_RSMPosition, rhi::DescriptorType::CombinedImageSampler, m_PlaceholderBlack.get(), m_PlaceholderSampler.get());
+            device->UpdateDescriptorSet(m_Set, kGPUBinding_RSMFlux, rhi::DescriptorType::CombinedImageSampler, m_PlaceholderBlack.get(), m_PlaceholderSampler.get());
         }
 
         // 绑定 12=Irradiance, 13=Prefilter 需要 Cubemap（Shader 声明为 TextureCube）
@@ -328,9 +358,9 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
             ctd.arrayLayers = 6;
             ctd.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::Cubemap;
             ctd.initialData = w4cube;
-            auto cubeTex = device->CreateTexture(ctd);
-            device->UpdateDescriptorSet(m_Set, kGPUBinding_IrradianceMap, rhi::DescriptorType::CombinedImageSampler, cubeTex.get(), ps.get());
-            device->UpdateDescriptorSet(m_Set, kGPUBinding_PrefilterMap, rhi::DescriptorType::CombinedImageSampler, cubeTex.get(), ps.get());
+            m_PlaceholderCube = device->CreateTexture(ctd);
+            device->UpdateDescriptorSet(m_Set, kGPUBinding_IrradianceMap, rhi::DescriptorType::CombinedImageSampler, m_PlaceholderCube.get(), m_PlaceholderSampler.get());
+            device->UpdateDescriptorSet(m_Set, kGPUBinding_PrefilterMap, rhi::DescriptorType::CombinedImageSampler, m_PlaceholderCube.get(), m_PlaceholderSampler.get());
         }
 
         // Cluster SSBO 占位（binding 7/8）
@@ -378,6 +408,9 @@ void LightingPass::SetIBLTextures(rhi::IRHITexture* irradiance, rhi::IRHITexture
                                   rhi::IRHITexture* brdfLut, rhi::IRHISampler* sampler) {
     if (!m_Device || m_Set == rhi::kInvalidSet) return;
     // 绑定 IBL 贴图到 Lighting 描述符集（12=Irradiance, 13=Prefilter, 14=BRDF LUT）
+    // 【这里不做占位回落】与上面"门控"通道不同：IBL 的产物由 GI_IBL 在启动时一次性创建，
+    // 传 null 只意味着"暂时取不到"，而不是"本帧没产出"。此时保留上一次的有效绑定才接近正确值；
+    // 若改用占位（BRDF LUT 会变成 1×1 白 = envBRDF 恒为 1），反而会把镜面环境项算大。
     m_Device->UpdateDescriptorSet(m_Set, kGPUBinding_IrradianceMap, rhi::DescriptorType::CombinedImageSampler, irradiance, sampler);
     m_Device->UpdateDescriptorSet(m_Set, kGPUBinding_PrefilterMap, rhi::DescriptorType::CombinedImageSampler, prefilter, sampler);
     m_Device->UpdateDescriptorSet(m_Set, kGPUBinding_BRDF_LUT, rhi::DescriptorType::CombinedImageSampler, brdfLut, sampler);
