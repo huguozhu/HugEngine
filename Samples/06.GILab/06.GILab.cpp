@@ -667,6 +667,10 @@ int main() {
             GetFloat(cfgData, "cam_pitch", -0.1f));
         camCtrl.GetCamera().nearPlane = GetFloat(cfgData, "cam_near", 0.1f);
         camCtrl.GetCamera().farPlane  = GetFloat(cfgData, "cam_far", 3000.0f);
+        // 视场角：屏幕空间源（SSGI/SSR/SSAO）的空间重建必须用渲染深度图时的那套投影参数，
+        // 而这条路径曾经用硬编码的 60°/0.1/2000 自拼矩阵。留一个配置入口才能把
+        // 「非默认相机」这一条判据做成可复现的回归检查（§9.2-E）。
+        camCtrl.GetCamera().fov        = GetFloat(cfgData, "cam_fov", kDefaultFOV);
     } else {
         camCtrl.SetPosition(float3(0.0f, 3.0f, 0.0f));
         camCtrl.SetOrientation(-1.57f, -0.1f);
@@ -1413,6 +1417,13 @@ int main() {
                 const String pre = "prov" + std::to_string(i) + "_";
                 addTarget(pre + "raw",   p->GetDiffuseOutput());
                 addTarget(pre + "final", p->GetFinalDiffuseOutput());
+                // 镜面通道与 AO 通道的输出也必须能落盘：只看得见漫反射输出的话，
+                // 「SSR/SSAO 是否真的产出了东西」就无从做纹理级对照（§9.2-B/C/E 都属这一类）。
+                // 名称带通道后缀，避免与漫反射的 raw/final 混淆；不存在该通道输出时自动跳过。
+                addTarget(pre + "spec_raw",   p->GetSpecularOutput());
+                addTarget(pre + "spec_final", p->GetFinalSpecularOutput());
+                addTarget(pre + "ao_raw",     p->GetAOOutput());
+                addTarget(pre + "ao_final",   p->GetFinalAOOutput());
             }
             if (!g_DumpTargets.empty()) {
                 g_DumpDone = true;   // 已录制；实际读取放在 Submit 之后
