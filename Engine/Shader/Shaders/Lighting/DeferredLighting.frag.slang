@@ -405,7 +405,15 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
     // 采样函数定义在文件作用域（见下方 SampleXxxSource / SourceWeight）。
     // ═══════════════════════════════════════════════════════════════
 
+    // 直接光到此为止。AO 是**环境光遮蔽**：它近似的是「周围环境光被遮住多少」，
+    // 不应作用于直接光（太阳/灯是明确方向的光源，与半球环境光无关），也不应作用于自发光。
+    // 先把直接光结果记下来，最后只对间接项施加 AO（§9.2-D）。
+    // 此前 `color *= lerp(1, ao*aoVal, aoIntensity)` 紧跟在直接光累加之后，于是每一帧都
+    // 把直接光按材质 AO 压暗了一次 —— 那是实打实的能量错误，而不是遮蔽近似。
+    const float3 directColor = color;
+
     // ── 间接漫反射合成 ──
+    float3 indirectDiffuse = float3(0.0);
     {
         GIChannelBlendParams bl = u_GIBlendParams.diffuse;
         float3 num = float3(0.0);
@@ -417,21 +425,24 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
             num += SampleDiffuseSource(s.id, worldPos, N, uv, albedo, kD, furnace) * w;
             den += w;
         }
-        float3 indirect = (bl.mode != 0u)
+        indirectDiffuse = (bl.mode != 0u)
                         ? ((den > 0.0) ? (num / den) : float3(0.0))   // 归一化：无双重计数
                         : num;                                        // 相加（对照）
-        // 白炉判据只反映「合成数学」：giIntensity 是用户强度调节，判据下取 1 以便读回值即合成结果
-        color += indirect * (furnace ? 1.0 : giIntensity);
     }
 
     // ── 白炉数值测试：到此即返回 ──
     // 白炉下 diffuse 通道的间接光真值 = 1；此时**所有**源都已进入归一化，
     // 若仍读到 > 1，说明存在归一化之外的加法项（双重计数）。
+    // giIntensity 是用户强度调节，判据下取 1 以便读回值即合成结果。
     if (furnace) {
-        return float4(color, 1.0);
+        return float4(directColor + indirectDiffuse, 1.0);
     }
 
     // ── AO 合成（归一化加权：SSAO / RTAO 可同时参与）──
+    // 只算出遮蔽因子，施加对象留给最后的合成：**间接漫反射与间接镜面**。
+    // 原先把 AO 乘在「直接光 + 间接漫反射」上、且在间接镜面之前，于是既压暗了直接光，
+    // 又完全没作用到镜面 —— 两处都是错的（§9.2-D）。
+    float aoFactor = 1.0;
     {
         GIChannelBlendParams ba = u_GIBlendParams.ao;
         float aoNum = 0.0;
@@ -447,12 +458,13 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
             aoDen += s.weight;
         }
         float aoVal = (aoDen > 0.0) ? (aoNum / aoDen) : 1.0;   // 无 AO 源 → 不遮蔽
-        color *= lerp(1.0, ao * aoVal, aoIntensity);   // aoIntensity 控制 AO 强度（0=无 AO）
+        aoFactor = lerp(1.0, ao * aoVal, aoIntensity);   // aoIntensity 控制 AO 强度（0=无 AO）
     }
 
     // ── 间接镜面合成（与 diffuse 同构）──
     // 环境镜面（IBL prefilter）与屏幕空间/光追反射描述同一物理量 → 归一化合成；
     // a<0 表示该源本条光线无效（高粗糙度跳过或 miss）→ 该源权重记 0，由其他源兜底
+    float3 indirectSpecular = float3(0.0);
     {
         GIChannelBlendParams bs = u_GIBlendParams.specular;
         float3 specNum = float3(0.0);
@@ -469,8 +481,12 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
             specNum += SampleSpecularSource(s.id, uv, R, roughness, F, envBRDF) * w;
             specDen += w;
         }
-        color += (bs.mode != 0u) ? (specNum / max(specDen, 1e-4)) : specNum;
+        indirectSpecular = (bs.mode != 0u) ? (specNum / max(specDen, 1e-4)) : specNum;
     }
+
+    // ── 合成：AO 只作用于间接项；直接光与自发光原样保留 ──
+    // giIntensity 仍只作用于间接漫反射（与改动前一致）
+    color = directColor + (indirectDiffuse * giIntensity + indirectSpecular) * aoFactor;
 
     color += gbC.rgb;  // emissive
 
