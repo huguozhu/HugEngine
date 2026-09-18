@@ -524,9 +524,18 @@ void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
              {ptNormalHandle, ResourceAccess::Read},
              {ptVelHandle, ResourceAccess::Read}},
             {{denoisedHandle, ResourceAccess::Write}},
-            [this, ptHDR, ptDepth, ptNormal, ptVel](rhi::IRHICommandList* c) {
+            [this, ptHDR, ptDepth, ptNormal, ptVel, denoisedTex, w, h](rhi::IRHICommandList* c) {
                 m_PTDenoiser->SetInputs(ptHDR, ptDepth, ptNormal, ptVel);
+                // 与 GI 侧一致（RTProvider::PreBindAux + 帧图的 BeginOffscreenPass）：
+                // **必须先绑 PSO 再进离屏 Pass，最后才 Draw**。此前这里只 SetInputs + Render，
+                // Draw 落在渲染通道之外（校验层报 vkCmdDraw-renderpass / -None-08606 /
+                // -renderPass-02684），降噪输出纹理永远不被写入 —— 表现为
+                // 「PT 打开时域降噪后整屏全黑」（ToneMap 的输入就是这张纹理）。
+                m_PTDenoiser->PreBind(c);
+                rhi::ClearValue clr{};
+                c->BeginOffscreenPass(denoisedTex->GetNativeHandle(), nullptr, w, h, &clr, false);
                 m_PTDenoiser->Render(c);
+                c->EndOffscreenPass();
             });
     }
 
