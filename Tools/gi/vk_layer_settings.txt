@@ -1,0 +1,16 @@
+# Vulkan validation layer settings used by the GI verification runs.
+# Purpose: lift the duplicate-message cap so the reported count is the REAL number of
+# validation messages (docs section 11.3 / methodology item 6 in 11.3.1). Without this the
+# layer collapses repeats and the count depends on message ordering, which makes
+# "same as baseline" meaningless.
+#
+# Usage (VK_LAYER_SETTINGS_PATH points at the DIRECTORY holding this file):
+#   $env:VK_LAYER_SETTINGS_PATH = "Tools\gi"
+#   powershell -File Tools/gi/dump_gi.ps1 -Frame 120
+#
+# Reference counts on the three diffuse-stack variants at frame 120:
+#   with this file (dedup off)  : none 75 / ddgi 75 / ssgi 81
+#   without this file (dedup on): none 49 / ddgi 49 / ssgi 51
+# Both are stable; they are NOT comparable with each other. Only same-condition
+# before/after comparisons are valid.
+khronos_validation.duplicate_message_limit = 0
