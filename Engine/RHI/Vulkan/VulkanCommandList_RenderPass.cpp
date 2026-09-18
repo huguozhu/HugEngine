@@ -354,17 +354,21 @@ void VulkanCommandList::BeginOffscreenPassMRT(
         return;
     }
 
-    // 构建附件列表：颜色在前，深度在后；支持最多 7 个颜色 + 1 个深度（共 8 个）
-    VkImageView attachments[kMaxColorAttachments] = {};
+    // 构建附件列表：颜色在前，深度在后。上限是 kMaxColorAttachments（8）个颜色 + 1 个深度。
+    // 【此前这里写死 7】颜色附件一律被截到 7 个，而 render pass 是按 PSO 的 colorAttachmentCount
+    // 建的（可到 8）⇒ `vkCreateFramebuffer` 收到 8 个而 render pass 期望 9 个，
+    // 校验层报 "attachmentCount 8 does not match 9"，随后驱动在 vkCmdBeginRenderPass 崩溃
+    // （任务 31 加第 8 个 GBuffer MRT 时踩到）。数组必须按"颜色上限 + 1（深度）"开。
+    VkImageView attachments[kMaxColorAttachments + 1] = {};
     u32 attachmentCount = 0;
-    for (u32 i = 0; i < colorCount && attachmentCount < 7; ++i)
+    for (u32 i = 0; i < colorCount && attachmentCount < kMaxColorAttachments; ++i)
         attachments[attachmentCount++] = static_cast<VkImageView>(colorImageViews[i]);
     auto depthView = static_cast<VkImageView>(depthImageView);
     u32 depthIndex = attachmentCount;
     if (depthView) attachments[attachmentCount++] = depthView;
 
     // 同上：本 pass 会写入这些附件，登记为"已写入"
-    for (u32 i = 0; i < colorCount && i < 7; ++i) MarkViewWritten(colorImageViews[i]);
+    for (u32 i = 0; i < colorCount && i < kMaxColorAttachments; ++i) MarkViewWritten(colorImageViews[i]);
     MarkViewWritten(depthImageView);
 
     VkFramebuffer offscreenFB = VK_NULL_HANDLE;
@@ -380,8 +384,8 @@ void VulkanCommandList::BeginOffscreenPassMRT(
     TraceFramebuffer("create(offscreen)", offscreenFB, CurrentFrameOf(m_VulkanDevice), UINT64_MAX);
     m_CurrentOffscreenFB = offscreenFB;
 
-    // 清除值（最多 7 个颜色 + 1 个深度，共 8 个）
-    VkClearValue vkClearValues[kMaxColorAttachments]{};
+    // 清除值（颜色数 + 1 个深度，与上面的附件数组同尺寸）
+    VkClearValue vkClearValues[kMaxColorAttachments + 1]{};
     u32 clearCount = 0;
     for (u32 i = 0; i < colorCount; ++i) {
         if (clears) {
