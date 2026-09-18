@@ -481,6 +481,22 @@ void VulkanCommandList::GetQueryResults(IRHIQueryPool* pool, u32 first, u32 coun
         VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
 }
 
+bool VulkanCommandList::TryGetQueryResults(IRHIQueryPool* pool, u32 first, u32 count, u64* data) {
+    auto* vkPool = static_cast<VulkanQueryPool*>(pool);
+    if (!data || count == 0) return false;
+    // WITH_AVAILABILITY：每个查询返回 (结果, 是否可用) 两个 u64；**不等待**
+    std::vector<u64> raw(size_t(count) * 2, 0);
+    vkGetQueryPoolResults(m_Device, vkPool->GetHandle(), first, count,
+        sizeof(u64) * 2 * count, raw.data(), sizeof(u64) * 2,
+        VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+    bool allAvailable = true;
+    for (u32 i = 0; i < count; ++i) {
+        data[i] = raw[size_t(i) * 2 + 0];
+        if (raw[size_t(i) * 2 + 1] == 0) allAvailable = false;
+    }
+    return allAvailable;
+}
+
 // ── GPU 通用查询（BeginQuery / EndQuery）──
 void VulkanCommandList::BeginQuery(IRHIQueryPool* pool, u32 queryIndex) {
     auto* vkPool = static_cast<VulkanQueryPool*>(pool);

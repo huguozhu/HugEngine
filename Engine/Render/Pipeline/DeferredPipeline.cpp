@@ -9,6 +9,8 @@
 #include "AntiAliasing/AA_TAA.h"
 #include "AntiAliasing/AA_FXAA.h"
 #include "Pipeline/PhysicalLight.h"
+#include <cstdlib>   // std::getenv（HE_GI_TIMING 诊断输出）
+#include <string>
 
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
@@ -116,6 +118,9 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     m_RadianceHistory.Initialize(device, m_Width, m_Height);
     m_DDGI.SetRadianceHistory(&m_RadianceHistory);
     m_SSGI.SetRadianceHistory(&m_RadianceHistory);   // SSGI 的入射辐射度来源（§9.2-P）
+    // GI 各源的 GPU 耗时读数（任务 29 / §9.2-Z）：每飞行帧槽位一个查询池。
+    // 放在各源 Initialize 之前没有依赖，只是让日志顺序更靠近初始化段。
+    m_GITimer.Initialize(device, device->GetTimestampPeriod());
     m_SSGI.Initialize(device, m_Width, m_Height);
     m_SSR.Initialize(device, m_Width, m_Height);
     m_DDGI.Initialize(device, m_Width, m_Height);
@@ -563,6 +568,33 @@ void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
         // 首次使用 AsyncCompute 时，创建跨队列时间线信号量
         m_CrossQueueFence = m_Device->CreateFence();
         HE_CORE_INFO("DeferredPipeline: AsyncCompute — CrossQueue fence created");
+    }
+
+    // ── GI 各源 GPU 耗时：先读回上一轮本槽位的结果，再复位本槽位（任务 29 / §9.2-Z）──
+    // 必须放在这里：命令列表的 Begin() 已经等过本槽位的 GPU 栅栏，因此上一轮的查询结果
+    // 必然可读 —— 既不需要额外同步，也不会阻塞 CPU。读数滞后 MAX_FRAMES_IN_FLIGHT 帧。
+    if (m_GITimer.IsReady()) {
+        m_GITimer.BeginFrame(cmd);
+        for (auto& prov : m_GIProviders) {
+            if (auto* timed = prov->GetTimedPass()) {
+                // 按 Provider 注册顺序对应帧图里打时间戳用的下标（见 BuildFrameGraph）
+                const u32 idx = (u32)(&prov - m_GIProviders.data());
+                timed->SetRenderTimeMs(m_GITimer.AvgMs(idx));
+            }
+        }
+        // 诊断输出：HE_GI_TIMING=1 时每 60 帧打一行，便于脚本读取（面板之外也要能拿到数）
+        static bool s_LogTiming = (std::getenv("HE_GI_TIMING") != nullptr);
+        if (s_LogTiming && (m_FrameCounter % 120u) == 0u) {
+            std::string line = "[GI 耗时]";
+            for (size_t i = 0; i < m_GIProviders.size(); ++i) {
+                if (!m_GIProviders[i]->GetTimedPass()) continue;
+                char buf[96];
+                snprintf(buf, sizeof(buf), " %s=%.3fms", m_GIProviders[i]->GetName(),
+                         m_GITimer.AvgMs((u32)i));
+                line += buf;
+            }
+            HE_CORE_INFO("{}", line);
+        }
     }
 
     // ── 粒子模拟 (Compute，在 RenderGraph 之前) ──

@@ -25,6 +25,7 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "GI/GI_SSR.h"
 #include "GI/GI_DDGI.h"
 #include "GI/GIRadianceHistory.h"   // 前帧 HDR 辐射度（GI 源共享）
+#include "GI/GITiming.h"            // 各源 GPU 耗时读数（任务 29 / §9.2-Z）
 #include "GI/GI_IBL.h"
 #include "GI/GITypes.h"   // GIConfig（通道层栈 + 档位）
 #include "GI/IGIProvider.h"   // GI 源统一抽象（P4）
@@ -200,6 +201,9 @@ private:
     GIRadianceHistory m_RadianceHistory;
     GIConfig m_GIConfig;   // GI 配置（M2 档位/通道/强度 → P3 源层栈单一数据源）
     std::vector<std::unique_ptr<IGIProvider>> m_GIProviders;   // 已注册的 GI 源（P4）
+    /// 各源 GPU 耗时读数（任务 29 / §9.2-Z）：帧图在 Provider 的主 pass 前后打时间戳，
+    /// 在**该飞行帧槽位下一次被复用时**读回并写进源自己的 GIDebugData。
+    GITimer m_GITimer;
 
     // ── RT 基础设施（设备支持光追时创建；是否参与由层栈的 RT 源决定）──
     // P3：光追是「GI 源」而非「管线类型」，故 Deferred 亦可直接启用 RTGI/RT 反射/RTAO/RT 阴影

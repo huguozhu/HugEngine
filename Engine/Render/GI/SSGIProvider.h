@@ -99,6 +99,9 @@ public:
         auto* t = GetDiffuseOutput(); return t ? t->GetHeight() : 0u;
     }
 
+    /// 计时读数落点（任务 29 / §9.2-Z）：帧图的 GPU 计时器把测得的耗时写回它
+    [[nodiscard]] IGlobalIllumination* GetTimedPass() const override { return m_SSGI; }
+
 private:
     /// 降噪是否启用：halfRes 时半分辨率输出直接采样，省去 Denoise 开销
     [[nodiscard]] bool AuxActive() const {

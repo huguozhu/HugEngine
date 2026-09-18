@@ -95,6 +95,14 @@ public:
 
     [[nodiscard]] virtual GIDebugData GetDebugData() const { return m_DebugData; }
 
+    /// 写入本源的 GPU 耗时读数（由帧图的 `GITimer` 在查询结果读回后调用，任务 29 / §9.2-Z）。
+    /// 在它出现之前，`avgRenderTimeMs` 只有声明与显示、**全仓没有一处赋值**，
+    /// 面板上的「每源耗时」因此恒为 0.00 ms —— 一个长得像读数、却永远回答 0 的假信息。
+    void SetRenderTimeMs(float ms) {
+        m_DebugData.avgRenderTimeMs = ms;
+        if (ms > m_DebugData.peakRenderTimeMs) m_DebugData.peakRenderTimeMs = ms;
+    }
+
     // ---- 可选：间接光照纹理访问 ----
 
     /// 间接漫反射贴图（如辐照度图）。

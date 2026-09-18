@@ -75,6 +75,8 @@ public:
 
     [[nodiscard]] GI_SSR* GetPass() const { return m_SSR; }
     [[nodiscard]] Denoiser* GetDenoiser() const { return m_Aux.GetPass(); }
+    /// 计时读数落点（任务 29 / §9.2-Z）：帧图的 GPU 计时器把测得的耗时写回它
+    [[nodiscard]] IGlobalIllumination* GetTimedPass() const override { return m_SSR; }
 
 private:
     [[nodiscard]] bool AuxActive() const {

@@ -209,6 +209,14 @@ public:
     virtual void ResetQueryPool(IRHIQueryPool* pool) = 0;
     virtual void GetQueryResults(IRHIQueryPool* pool, u32 first, u32 count, u64* data) = 0;
 
+    /// **不阻塞**地读回查询结果：结果尚未就绪时返回 false（`data` 内容未定义）。
+    ///
+    /// 为什么需要它：`GetQueryResults` 内部带 `VK_QUERY_RESULT_WAIT_BIT`，对"可能还没执行到"
+    /// 的查询会**永久阻塞**——多命令列表（图形 / 异步计算各一条）下，某个池里的时间戳是否已被
+    /// 提交并不是调用方一眼能确定的，等下去就是死锁。做按帧分区的耗时统计时应当用本函数，
+    /// 拿不到就跳过这一帧，下一帧再试。
+    virtual bool TryGetQueryResults(IRHIQueryPool* pool, u32 first, u32 count, u64* data) = 0;
+
     // GPU 通用查询（Pipeline Statistics、Occlusion 等）
     virtual void BeginQuery(IRHIQueryPool* pool, u32 queryIndex) {}
     virtual void EndQuery(IRHIQueryPool* pool, u32 queryIndex) {}

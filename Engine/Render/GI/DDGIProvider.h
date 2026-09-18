@@ -69,6 +69,8 @@ public:
 
     [[nodiscard]] GI_DDGI* GetPass() const { return m_DDGI; }
     [[nodiscard]] const CameraData* GetCamera() const { return m_Camera; }
+    /// 计时读数落点（任务 29 / §9.2-Z）：帧图的 GPU 计时器把测得的耗时写回它
+    [[nodiscard]] IGlobalIllumination* GetTimedPass() const override { return m_DDGI; }
 
 private:
     GI_DDGI* m_DDGI = nullptr;            // 非拥有

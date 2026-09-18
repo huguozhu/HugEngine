@@ -103,6 +103,7 @@ public:
     void WriteTimestamp(IRHIQueryPool* pool, u32 queryIndex) override;
     void ResetQueryPool(IRHIQueryPool* pool) override;
     void GetQueryResults(IRHIQueryPool* pool, u32 first, u32 count, u64* data) override;
+    bool TryGetQueryResults(IRHIQueryPool* pool, u32 first, u32 count, u64* data) override;
 
     // GPU 通用查询
     void BeginQuery(IRHIQueryPool* pool, u32 queryIndex) override;

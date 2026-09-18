@@ -48,6 +48,8 @@ public:
     }
 
     [[nodiscard]] GI_IBL* GetPass() const { return m_IBL; }
+    /// 计时读数落点（任务 29 / §9.2-Z）：IBL 只在脏时重建，因此它的耗时读数只在重建的帧上非零
+    [[nodiscard]] IGlobalIllumination* GetTimedPass() const override { return m_IBL; }
 
 private:
     GI_IBL* m_IBL = nullptr;   // 非拥有

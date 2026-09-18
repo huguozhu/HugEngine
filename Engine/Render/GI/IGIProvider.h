@@ -81,8 +81,7 @@ public:
     /// 在层栈「要求了但模式不同」时的同步钩子（如层栈选 GTAO → 切换 pass 模式）
     virtual void SyncToStack(const GIChannelStack& /*stack*/) {}
 
-    /// 该 Provider 是否需要「前帧 HDR 辐射度」这一共享输入（`GIRadianceHistory`）。
-    /// 声明为真即表示：它会在 pass 里采样**上一帧的 Lighting 结果**当作入射辐射度
+    /// 该 Provider 是否需要「前帧 HDR 辐射度」这一共享输入（`GIRadianceHistory`）。    /// 声明为真即表示：它会在 pass 里采样**上一帧的 Lighting 结果**当作入射辐射度
     /// （DDGI 的探针辐射度回退、SSGI 的 L_in）。
     ///
     /// 【为什么要声明而不是在帧图里写死】该输入的**捕获**必须与消费者一致：捕获写漏 ⇒
@@ -91,6 +90,11 @@ public:
     /// ——与 §9.2-Q（IBL 烘焙门控只看漫反射栈）属于同一类"消费者门控写漏"。
     /// 统一走这个谓词，新增消费者不会再被漏掉。
     [[nodiscard]] virtual bool NeedsRadianceHistory() const { return false; }
+
+    /// 计时读数落点：本源对应的 `IGlobalIllumination` 实现（没有则 nullptr）。
+    /// 帧图的 GPU 计时器把测得的耗时写回它，面板上那四行「每源耗时」才有真数
+    /// （任务 29 / §9.2-Z）。屏幕空间 AO 与光追效果不走 `IGlobalIllumination`，返回 nullptr。
+    [[nodiscard]] virtual IGlobalIllumination* GetTimedPass() const { return nullptr; }
 
     // ── 通道输出（不适用则返回 nullptr）──
     [[nodiscard]] virtual rhi::IRHITexture* GetDiffuseOutput()  const { return nullptr; }

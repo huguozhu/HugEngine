@@ -363,11 +363,14 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         if (!prov->NeedsPass(m_GIConfig.diffuse)) continue;
         prov->SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetAlbedo());
         if (auto* dp = dynamic_cast<DDGIProvider*>(prov.get())) dp->SetCamera(&camera);
+        const u32 giIdx = (u32)(&prov - m_GIProviders.data());   // 计时下标（任务 29）
         rg.AddPass(prov->GetName(),
             {{gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbDepth, ResourceAccess::Read}},
             {},
-            [&, p = prov.get(), cam = &camera](rhi::IRHICommandList* c) {
+            [&, p = prov.get(), cam = &camera, giIdx](rhi::IRHICommandList* c) {
+                m_GITimer.Begin(c, giIdx);
                 p->Render(c, GIProviderContext{ &world, &sg, cam, m_CurrentFrameSlot, m_GIConfig.furnaceMode });
+                m_GITimer.End(c, giIdx);
                 c->SetPipeline(m_Lighting.GetPSO());
             },
             RGPassQueue::Graphics);  // 与 RSM 同队列顺序执行：探针采样 RSM 前必须确保 RSM 完成
@@ -387,14 +390,17 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         // halfRes：AO 纹理可能为半分辨率，pass 尺寸用纹理实际尺寸
         u32 aoW = aoTex->GetWidth();
         u32 aoH = aoTex->GetHeight();
+        const u32 giIdx = (u32)(&prov - m_GIProviders.data());   // 计时下标（任务 29）
         rg.AddPass(prov->GetName(), {}, {{ssaoOut, ResourceAccess::Write}},
-            [&, aoW, aoH, p = prov.get(), aoCtx = GIProviderContext{ &world, &sg, &camera, m_CurrentFrameSlot, m_GIConfig.furnaceMode }](rhi::IRHICommandList* c) {
+            [&, aoW, aoH, p = prov.get(), giIdx, aoCtx = GIProviderContext{ &world, &sg, &camera, m_CurrentFrameSlot, m_GIConfig.furnaceMode }](rhi::IRHICommandList* c) {
                 p->PreBind(c);                                  // 绑定该源 pass 的管线状态
                 p->SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetAlbedo());
                 rhi::ClearValue aoClear;
                 aoClear.color[0]=aoClear.color[1]=aoClear.color[2]=aoClear.color[3]=1.0f;
                 c->BeginOffscreenPass(p->GetAOOutput()->GetNativeHandle(), nullptr, aoW, aoH, &aoClear, false);
+                m_GITimer.Begin(c, giIdx);
                 p->Render(c, aoCtx);
+                m_GITimer.End(c, giIdx);
                 c->EndOffscreenPass();
             });
     }
@@ -413,12 +419,15 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         const u32 pw = mainTex->GetWidth();
         const u32 ph = mainTex->GetHeight();
         const auto mainH = rg.ImportTexture(prov->GetName(), mainTex);
+        const u32 giIdx = (u32)(&prov - m_GIProviders.data());   // 计时下标（任务 29）
         rg.AddPass(prov->GetName(), {}, {{mainH, ResourceAccess::Write}},
-            [&, p = prov.get(), pw, ph](rhi::IRHICommandList* c) {
+            [&, p = prov.get(), pw, ph, giIdx](rhi::IRHICommandList* c) {
                 p->PreBind(c);
                 rhi::ClearValue clr{};
                 c->BeginOffscreenPass(p->GetSpecularOutput()->GetNativeHandle(), nullptr, pw, ph, &clr, false);
+                m_GITimer.Begin(c, giIdx);
                 p->Render(c, GIProviderContext{ &world, &sg, &camera, m_CurrentFrameSlot, m_GIConfig.furnaceMode });
+                m_GITimer.End(c, giIdx);
                 c->EndOffscreenPass();
             });
 
@@ -460,12 +469,15 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         const u32 pw = mainTex->GetWidth();
         const u32 ph = mainTex->GetHeight();
         const auto mainH = rg.ImportTexture(prov->GetName(), mainTex);
+        const u32 giIdx = (u32)(&prov - m_GIProviders.data());   // 计时下标（任务 29）
         rg.AddPass(prov->GetName(), {}, {{mainH, ResourceAccess::Write}},
-            [&, p = prov.get(), pw, ph](rhi::IRHICommandList* c) {
+            [&, p = prov.get(), pw, ph, giIdx](rhi::IRHICommandList* c) {
                 p->PreBind(c);
                 rhi::ClearValue clr{};
                 c->BeginOffscreenPass(p->GetDiffuseOutput()->GetNativeHandle(), nullptr, pw, ph, &clr, false);
+                m_GITimer.Begin(c, giIdx);
                 p->Render(c, GIProviderContext{ &world, &sg, &camera, m_CurrentFrameSlot, m_GIConfig.furnaceMode });
+                m_GITimer.End(c, giIdx);
                 c->EndOffscreenPass();
             });
 
@@ -621,9 +633,12 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         const bool neededBySpecular = prov->NeedsPass(m_GIConfig.specular);
         const bool neededByDDGI     = m_DDGI.IsEnabled();   // 探针更新要采辐照度
         if (!neededByDiffuse && !neededBySpecular && !neededByDDGI) continue;
+        const u32 giIdx = (u32)(&prov - m_GIProviders.data());   // 计时下标（任务 29）
         rg.AddPass("IBL_Bake", {}, {},
-            [&, p = prov.get()](rhi::IRHICommandList* c) {
+            [&, p = prov.get(), giIdx](rhi::IRHICommandList* c) {
+                m_GITimer.Begin(c, giIdx);
                 p->Render(c, GIProviderContext{ &world, &sg, &camera, m_CurrentFrameSlot, m_GIConfig.furnaceMode });
+                m_GITimer.End(c, giIdx);
             });
     }
 
