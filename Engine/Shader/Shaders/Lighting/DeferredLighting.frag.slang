@@ -185,7 +185,12 @@ float3 SampleRSMIndirect(float3 worldPos, float3 N, uint lightCount) {
 /// 量纲不一致会让结果随 albedo 偏移（§9.2-A），而白炉测试因源真值被短路而抓不到。
 float3 SampleDiffuseSource(uint id, float3 worldPos, float3 N, float2 uv,
                            float3 albedo, float3 kD, bool furnace) {
-    if (furnace) return float3(1.0, 1.0, 1.0);   // 白炉：各源真值 = 1（只验合成数学，不验量纲）
+    // 白炉：各源真值 = 1（只验合成数学，不验量纲）。
+    // **例外是 SSGI**：白炉条件（全白环境 + 接收面 albedo = 1）恰好就是它的解析真值条件
+    // （E/π = 1），所以白炉下让它走**真实路径** —— 这样白炉同时校验它的标度，而不是像
+    // 以前那样被短路掩盖（§11.4 的「白炉只验归一化、不验量纲」正是这一项）。
+    // SSGI 的 pass 自己也带白炉标志：把接收面 albedo 取 1 后，其输出即「估计的 E/π」。
+    if (furnace && id != GISOURCE_SSGI) return float3(1.0, 1.0, 1.0);
     switch (id) {
     case GISOURCE_IBL:   // 基准：辐照度图存 E/π，已含 kD 与接收面 albedo
         return kD * u_IrradianceMap.Sample(u_IBLSampler, N).rgb * albedo * iblIntensity;
