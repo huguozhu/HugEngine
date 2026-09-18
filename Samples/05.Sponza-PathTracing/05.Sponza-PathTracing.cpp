@@ -19,6 +19,7 @@
 #include "RHI/RHI.h"
 #include "Pipeline/PathTracingPipeline.h"
 #include "Pipeline/PTQualityCVars.h"
+#include "Pipeline/DeferredPipeline.h"   // 对照模式：PT 当标准答案 vs GI 层栈（HE_DUMP_MODE=deferred）
 #include "Pipeline/CameraController.h"
 #include "Pipeline/PhysicalCamera.h"
 #include "Scene/World.h"
@@ -515,12 +516,33 @@ int main() {
     HE_CORE_INFO("PathTracingPipeline 初始化完成 (RT={})", pathTracingPipeline.IsRTEnabled());
 
     // ============================================================
+    // 6.5 对照模式：延迟管线（PT = 标准答案 vs GI 层栈）
+    // ============================================================
+    // 常态下只跑 PT（本示例定位就是参考渲染器）。做「PT vs 近似 GI」的对照实验时，
+    // 用 HE_DUMP_MODE=deferred 让**同一场景、同一相机、同一帧号**改走 DeferredPipeline
+    // （IBL / RSM / SSGI / DDGI / SSR 的 GI 层栈齐全），两次运行各自落盘，
+    // 再用 Tools/pt/analyze_pt.py --compare 出偏差读数。
+    // 两条管线各自持有加速结构：只有对照模式才创建 Deferred，避免常态下重复占内存。
+    const String g_DumpMode    = std::getenv("HE_DUMP_MODE") ? String(std::getenv("HE_DUMP_MODE")) : String("pt");
+    const bool   g_UseDeferred = (g_DumpMode == "deferred");
+
+    render::DeferredPipeline deferredPipeline;
+    if (g_UseDeferred) {
+        deferredPipeline.Initialize(device.get());
+        deferredPipeline.SetSwapChain(swapchain.get());
+        deferredPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+        HE_CORE_INFO("对照模式：本次运行改走 DeferredPipeline（GI 层栈），其余参数与 PT 模式一致");
+    }
+
+    // ============================================================
     // 7. 创建命令列表
     // ============================================================
     auto cmdList = device->CreateCommandList();
     cmdList->SetSwapChain(swapchain.get());
     // 预设 ToneMap PSO → 匹配 BGRA8_UNORM RP（ImGui LoadOp 兼容）
-    cmdList->SetPipeline(pathTracingPipeline.GetPostProcess()->GetToneMap()->GetPSO());
+    cmdList->SetPipeline(g_UseDeferred
+        ? deferredPipeline.GetToneMap()->GetPSO()
+        : pathTracingPipeline.GetPostProcess()->GetToneMap()->GetPSO());
 
     // ============================================================
     // 8. ImGui 初始化
@@ -593,6 +615,7 @@ int main() {
         swapchain->Resize(w, h);
         cmdList->SetSwapChain(swapchain.get());
         pathTracingPipeline.OnResize(w, h);
+        if (g_UseDeferred) deferredPipeline.OnResize(w, h);
         camCtrl.SetAspectRatio(static_cast<float>(w), static_cast<float>(h));
     });
     // ============================================================
@@ -696,10 +719,15 @@ int main() {
             if (tf) anim.Update(deltaTime, tf);
         });
 
-        // --- 渲染（PathTracingPipeline 通过 RenderGraph 全自动编排）---
+        // --- 渲染（PathTracingPipeline / 对照模式下的 DeferredPipeline，均通过 RenderGraph 编排）---
         cmdList->Begin();
-        pathTracingPipeline.NextFrame();
-        pathTracingPipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera(), deltaTime);
+        if (g_UseDeferred) {
+            deferredPipeline.NextFrame();
+            deferredPipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera(), deltaTime);
+        } else {
+            pathTracingPipeline.NextFrame();
+            pathTracingPipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera(), deltaTime);
+        }
 
         // ── PT 参考图落盘：整幅 CopyTextureToBuffer 到 host 可见缓冲（仅对照路径）──
         // 必须在 render pass 之外录制；缓冲在采样帧才创建，尺寸取自纹理本身。
@@ -725,7 +753,14 @@ int main() {
                 cmdList->CopyTextureToBuffer(tex, t.buf.get(), 0, 0, t.w, t.h, 0);
                 g_DumpTargets.push_back(std::move(t));
             };
-            if (auto* pt = pathTracingPipeline.GetPT()) {
+            if (g_UseDeferred) {
+                // 对照模式：落盘延迟管线的 HDR（ToneMap 前的线性光照结果）+ GBuffer 的关键输入
+                addTarget("hdr", deferredPipeline.GetLighting().GetHDRTarget(), 8);
+                if (auto* gb = deferredPipeline.GetGBuffer()) {
+                    addTarget("albedo", gb->GetAlbedo(), 8);
+                    addTarget("normal", gb->GetNormal(), 8);
+                }
+            } else if (auto* pt = pathTracingPipeline.GetPT()) {
                 addTarget("hdr",    pt->GetHDR(),            8);   // RGBA16F 最终辐射度
                 addTarget("depth",  pt->GetDepth(),          4);   // R32F 线性视图深度
                 addTarget("normal", pt->GetNormal(),         8);   // RGBA16F 世界法线 + roughness
@@ -752,6 +787,12 @@ int main() {
             ImGui::TextColored({0.3f, 1.0f, 0.3f, 1.0f}, "FPS: %.0f", fps);
             ImGui::SameLine(120);
             ImGui::TextColored({0.6f, 0.6f, 0.6f, 1.0f}, "(%.2f ms)", deltaTime * 1000.0f);
+            // 当前渲染模式（HE_DUMP_MODE=deferred 时为对照模式，走 GI 层栈）
+            ImGui::SameLine(300);
+            if (g_UseDeferred)
+                ImGui::TextColored({1.0f, 0.7f, 0.3f, 1.0f}, "对照模式：Deferred（GI 层栈）");
+            else
+                ImGui::TextColored({0.5f, 1.0f, 0.5f, 1.0f}, "PathTracing（参考渲染器）");
 
 
                     // 相机
@@ -949,6 +990,7 @@ int main() {
     // 清理
     imgui.Shutdown();
     device->WaitIdle();
+    if (g_UseDeferred) deferredPipeline.Shutdown();
     pathTracingPipeline.Shutdown();
 
     // ============================================================
