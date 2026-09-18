@@ -109,14 +109,31 @@ float CameraCoverageConfidence(float2 uv, float edgeFade) {
     return saturate(min(edge.x, edge.y) / max(edgeFade, 1e-5));
 }
 
+/// 探针网格覆盖置信度（DDGI 的**有效域**，§9.2-K / 任务 14）
+///
+/// 探针网格只在 AABB 内插值才有意义：网格外 `SampleDDGI` 只能把网格坐标 clamp 到边界探针
+/// （贴边常数外推），于是"开着 DDGI"与"该处有一个常数 GI"变得不可区分，而且毫无标记。
+/// 这里给网格外留**一格**的淡出带，再外面直接归零；置信度为 0 时归一化合成会把这份权重
+/// 让给同通道的其他源（IBL / SSGI / RSM…），正是"没数据就别编数据"。
+float ProbeGridConfidence(float3 worldPos) {
+    float cell = max(u_DDGIGridSize.w, 1e-4);
+    float3 rel = (worldPos - u_DDGIGridOrigin.xyz) / cell;      // 世界 → 网格坐标
+    float3 hi  = u_DDGIGridSize.xyz - 1.0;                      // 探针索引范围 [0, N-1]
+    float3 d   = min(rel, hi - rel);                            // 到最近边界的距离（单位：格）
+    // d >= 0：在探针凸包内；d ∈ [-1,0)：刚出边界一格内，线性淡出；d < -1：完全在外
+    return saturate(min(min(d.x, d.y), d.z) + 1.0);
+}
+
 /// 源权重 = 用户权重 × 置信度 × 可选「距离让位」
 ///
 /// 置信度是**逐像素**的，判据由 UBO 的 `confidence` 掩码按位给出（见 ShaderTypes.slang
 /// 的 GICONF_*）——着色器里不再硬编码任何源 id 列表，新增源无需改这里。
-/// 世界空间源（IBL/DDGI/RSM）不依赖相机屏幕覆盖，其掩码里没有 CAMERA_COVERAGE 位。
-float SourceWeight(GISourceSlot s, float camCoverage, float camDist) {
+/// 世界空间源（IBL/DDGI/RSM）不依赖相机屏幕覆盖，其掩码里没有 CAMERA_COVERAGE 位；
+/// DDGI 另有探针网格覆盖位（网格外无数据）。
+float SourceWeight(GISourceSlot s, float camCoverage, float gridCoverage, float camDist) {
     float w = s.weight;
     if ((s.confidence & GICONF_CAMERA_COVERAGE) != 0u) w *= camCoverage;
+    if ((s.confidence & GICONF_PROBE_GRID) != 0u)      w *= gridCoverage;
     if (s.falloffDistance > 0.0) w *= saturate(1.0 - camDist / s.falloffDistance);
     return w;
 }
@@ -410,6 +427,8 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
     // 相机距离（供「距离让位」用）。屏幕覆盖置信度**逐通道**计算：每个通道的边缘淡出
     // 带宽来自自己的 UBO 字段（`edgeFade`），不再是一个全局硬编码的 5%（§3.2）。
     float  camDist  = length(cameraPosition.xyz - worldPos);
+    // 探针网格覆盖：只有带 GICONF_PROBE_GRID 位的源（当前仅 DDGI）会用到它
+    const float gridCoverage = ProbeGridConfidence(worldPos);
 
     // ═══════════════════════════════════════════════════════════════
     // GI 分层合成（Wave 1：按源 id 分派，遍历通道的源数组）
@@ -436,7 +455,7 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
         for (uint i = 0u; i < bl.count; ++i) {
             GISourceSlot s = bl.sources[i];
             if (s.weight <= 0.0) continue;
-            float w = SourceWeight(s, camCoverage, camDist);
+            float w = SourceWeight(s, camCoverage, gridCoverage, camDist);
             num += SampleDiffuseSource(s.id, worldPos, N, uv, albedo, kD, furnace) * w;
             den += w;
         }
@@ -473,7 +492,7 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
             float v = (s.id == GISOURCE_RTAO)
                     ? u_RT_AO.Sample(u_GBufferSampler, uv).r
                     : u_SSAO.Sample(u_GBufferSampler, uv).r;
-            float w = SourceWeight(s, camCoverageAO, camDist);
+            float w = SourceWeight(s, camCoverageAO, gridCoverage, camDist);
             aoNum += v * w;
             aoDen += w;
         }
@@ -498,7 +517,7 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
             } else if (s.id == GISOURCE_RT_REFLECTION) {
                 if (u_RT_Reflection.Sample(u_GBufferSampler, uv).a < 0.0) continue;
             }
-            float w = SourceWeight(s, camCoverageSpec, camDist);
+            float w = SourceWeight(s, camCoverageSpec, gridCoverage, camDist);
             specNum += SampleSpecularSource(s.id, uv, R, roughness, F, envBRDF) * w;
             specDen += w;
         }

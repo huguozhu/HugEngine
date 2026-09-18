@@ -128,6 +128,7 @@ GPU_STRUCT GISourceSlot {
 // ── 逐像素置信度判据位（与 C++ GISourceConfidence 逐位一致，由 UBO 逐槽传入）──
 // 放在 UBO 里而不是在着色器里按 id 判断：否则 C++ 与着色器各有一份 id 列表，必然漂移。
 GPU_CONST(GPU_UINT GICONF_CAMERA_COVERAGE = 1);  // 相机屏幕覆盖：视口外/边缘淡出 ⇒ 置信度 0
+GPU_CONST(GPU_UINT GICONF_PROBE_GRID      = 2);  // 探针网格覆盖：网格外 ⇒ 置信度 0（DDGI，§9.2-K）
 
 GPU_STRUCT GIChannelBlendParams {
     GISourceSlot sources[kGIMaxSourcesPerChannel];   // 参与合成的源（低频 → 高频）

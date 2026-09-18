@@ -132,18 +132,23 @@ enum GISourceConfidence : u32 {
     kGIConfNone           = 0,
     /// 屏幕覆盖：视口外与边缘淡出区 ⇒ 置信度 0（`IsCameraViewLimitedSource`）
     kGIConfCameraCoverage = 1u << 0,
-    // 预留（尚未实现，因此不赋给任何源 —— 登记出来是为了让「设计稿里的置信度表」有落点）：
-    //   · 探针网格覆盖（DDGI 探针网格外 ⇒ 0）：与任务 14 的网格覆盖/让位一起做，
-    //     因为当前网格参数（原点 (-10,-2,-10)、8×4×8、cell 3 ⇒ 约 21×9×21 世界单位）
-    //     远小于场景（RSM 取 sceneRadius=60 覆盖全场景），现在就打开会让 DDGI 在大部分
-    //     屏幕上归零，属行为级变更（§9.2-K）。
-    //   · 光源视锥覆盖（RSM）：着色器内已按 RSM 的投影 UV 直接判无效，无需再声明。
-    //   · 光追收敛度 / SPP：当前没有逐像素收敛信息可用，不声明。
+    /// 探针网格覆盖：DDGI 探针网格 AABB 之外 ⇒ 置信度 0（任务 14 / §9.2-K）。
+    /// 【为什么必须有】网格外 `SampleDDGI` 只能把网格坐标 clamp 到边界探针（贴边常数外推）——
+    /// 那不是"该处的 GI"，是编出来的数据：开着 DDGI 却在大半屏幕上得到同一个常数，且毫无标记。
+    /// 现在网格外一格起线性淡出、外面为 0，置信度归零后归一化合成会把权重让给同通道的其他源。
+    ///
+    /// 另两类判据仍然刻意不声明（登记出来是为了让"设计稿的置信度表"有落点）：
+    ///   · 光源视锥覆盖（RSM）：着色器内已按 RSM 的投影 UV 直接判无效，无需再声明；
+    ///   · 光追收敛度 / SPP：当前没有逐像素收敛信息可用，声明了就是空头承诺。
+    kGIConfProbeGrid      = 1u << 1,
 };
 
 /// 源 → 置信度判据掩码（单一真值：槽位填 UBO 时统一从这里取）
 inline u32 ToConfidenceMask(GISourceId id) {
-    return IsCameraViewLimitedSource(id) ? kGIConfCameraCoverage : kGIConfNone;
+    u32 mask = IsCameraViewLimitedSource(id) ? kGIConfCameraCoverage : kGIConfNone;
+    // DDGI 是唯一的探针网格源：网格外没有数据（§9.2-K）
+    if (id == GISourceId::DDGI) mask |= kGIConfProbeGrid;
+    return mask;
 }
 
 /// 源名称（日志 / 面板显示）
