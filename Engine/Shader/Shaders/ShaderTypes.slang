@@ -325,7 +325,8 @@ GPU_STRUCT PushConstantData {
     GPU_UINT useBindlessMaterial;   // [120]     1=从 u_Materials[] 读材质参数（bindless），0=从 GPUObjectData 内联读
     float4   atmosphere;            // [128]     sunDir.xyz（指向太阳）+ turbidity（空中透视）
     GPU_UINT instanceSSBOHandle;    // [144]     实例化网格的实例变换 SSBO（bindless u_SSBO[] 句柄；useInstanceID=2 时有效）
-    GPU_UINT instancePad[3];        // [148..160] 对齐填充
+    GPU_UINT instanceVisibleHandle; // [148]     逐实例剔除后的**可见实例索引列表**句柄（任务 25；0 = 未剔除，直接用 SV_InstanceID）
+    GPU_UINT instancePad[2];        // [152..160] 对齐填充
 };
 
 // --- ShadowPushConstant: 阴影通道 Push Constant（80 字节）---
@@ -340,8 +341,10 @@ GPU_STRUCT GBufferPushConstant {
     float4x4 viewProjMatrix;        // [0..64]   当前帧 VP（含 TAA jitter）
     float4x4 prevViewProjMatrix;    // [64..128] 上一帧 VP（无 jitter，velocity 用）
     GPU_UINT objectIndex;           // [128]
-    GPU_UINT useInstanceID;         // [132]     1=GPU Driven (SV_InstanceID)
-    GPU_UINT _pad[14];              // [136..192] 填充到 192B
+    GPU_UINT useInstanceID;         // [132]     1=GPU Driven (SV_InstanceID)；2=实例化网格（任务 25）
+    GPU_UINT instanceSSBOHandle;    // [136]     实例化网格的实例变换 SSBO 句柄（bindless u_SSBO[]）
+    GPU_UINT instanceVisibleHandle; // [140]     逐实例剔除后的可见实例索引列表句柄（0=未剔除）
+    GPU_UINT _pad[12];              // [144..192] 填充到 192B
 };
 
 // --- DeferredLightingPushConstant: 延迟光照 Push Constant（80 字节）---

@@ -30,7 +30,10 @@ public:
     void OnCreate() override;
 
     String meshPath;                  // 网格资产路径（预留：glTF 实例化；MVP 用内置立方体）
-    bool   enableFrustumCull = false; // 逐实例 CPU 视锥剔除（预留，MVP 未接）
+    /// 逐实例视锥剔除开关（任务 25）：开启后由 GPU 逐实例做六平面测试，
+    /// 只把可见实例写进压缩列表 + 间接命令计数（原来的路径是"整批实例一起画"）。
+    /// 默认关（与原行为一致：先看得到全量，再按需要打开对比）。
+    bool   enableFrustumCull = false;
 
     // --- CPU 实例变换（每实例一个世界矩阵）---
     std::vector<float4x4> instanceTransforms;
@@ -62,6 +65,14 @@ public:
     std::unique_ptr<rhi::IRHIBuffer> instanceBuffer;   // GPU 实例变换缓冲（随组件存活）
     // 退役缓冲（任务 23：**有界** N 帧延迟释放，替代原来的无界 vector 保活）
     rhi::FrameRetireQueue<std::unique_ptr<rhi::IRHIBuffer>> retiredBuffers;
+
+    // --- 逐实例剔除（任务 25）---
+    /// 间接绘制命令（20 字节；CPU 填 indexCount/firstIndex/vertexOffset，GPU 原子写 instanceCount）。
+    /// **每飞行帧一份**：单份会让"本帧 CPU 清零命令"与"上帧 GPU 仍在读该命令做间接绘制"打架。
+    std::unique_ptr<rhi::IRHIBuffer> instanceCullCmd[rhi::kMaxFramesInFlight];
+    u32 instanceCullCmdHandle[rhi::kMaxFramesInFlight] = { 0, 0, 0 };   // 命令缓冲的 bindless SSBO 句柄
+    /// 上一次读回的可见实例数（GPU 异步写入，可能滞后一帧；仅统计/调试用）
+    u32 visibleInstanceCount = 0;
 };
 
 } // namespace he

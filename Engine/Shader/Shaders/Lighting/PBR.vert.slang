@@ -19,6 +19,9 @@ layout(location = 4) in float4 inWeights;   // 权重 ×4
 
 // bindless SSBO 数组：实例化网格的实例变换（float4x4 元素缓冲，按句柄索引）
 [[vk::binding(kGPUBinding_BindlessSSBO, kGPUDescSet_PerFrame)]] StructuredBuffer<float4x4> u_InstanceTransforms[];
+// bindless SSBO 数组：逐实例剔除后的可见实例索引（u32 列表，任务 25）
+// 列表是**压缩**的：列表[i] = 第 i 个可见实例在实例变换数组里的下标
+[[vk::binding(kGPUBinding_BindlessSSBO, kGPUDescSet_PerFrame)]] StructuredBuffer<uint> u_VisibleInstanceIndices[];
 // bindless SSBO 数组：骨骼蒙皮矩阵（world × inverseBind，按句柄索引）
 [[vk::binding(kGPUBinding_BindlessSSBO, kGPUDescSet_PerFrame)]] StructuredBuffer<float4x4> u_BoneMatrices[];
 
@@ -39,7 +42,8 @@ layout(location = 4) in float4 inWeights;   // 权重 ×4
     uint     useBindlessMaterial;  // VS 不使用，仅占位对齐 FS
     float4   atmosphere;           // VS 不使用，仅占位对齐 FS
     uint     instanceSSBOHandle;   // useInstanceID=2 时的实例变换 SSBO 句柄
-    uint     instancePad[3];
+    uint     instanceVisibleHandle; // useInstanceID=2 时的可见实例索引列表句柄（任务 25；0=未剔除）
+    uint     instancePad[2];
 };
 
 struct VSOutput {
@@ -62,8 +66,13 @@ VSOutput vertexMain(uint instanceID : SV_InstanceID) {
         obj = u_Objects[objIdx];
         worldMatrix = obj.worldMatrix;
     } else if (useInstanceID == 2u) {
-        // 实例化网格（B1）：实例变换 SSBO[句柄][instanceID]，材质取单个对象条目
-        worldMatrix = u_InstanceTransforms[instanceSSBOHandle][instanceID];
+        // 实例化网格（B1）：实例变换 SSBO[句柄][实例下标]，材质取单个对象条目。
+        // 任务 25：若开启了逐实例剔除，SV_InstanceID 先查可见列表（压缩后的下标）——
+        // 于是只有通过视锥测试的实例才会被顶点着色器处理。
+        uint instIdx = instanceID;
+        if (instanceVisibleHandle != 0u)
+            instIdx = u_VisibleInstanceIndices[instanceVisibleHandle][instanceID];
+        worldMatrix = u_InstanceTransforms[instanceSSBOHandle][instIdx];
     } else if (useInstanceID == 3u) {
         // 骨骼蒙皮（C1b）：4 骨骼矩阵按权重加权；
         // 再乘实体世界矩阵（glTF 骨骼定义在网格节点局部空间）

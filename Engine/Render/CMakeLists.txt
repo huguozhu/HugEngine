@@ -47,6 +47,8 @@ set(RENDER_SOURCES
     Pipeline/GBufferRenderer_GPU.cpp
     Pipeline/DecalPass.h
     Pipeline/DecalPass.cpp
+    Pipeline/InstanceCuller.h
+    Pipeline/InstanceCuller.cpp
     Pipeline/GPUWorkGraph.h
     Pipeline/GPUWorkGraph.cpp
     Pipeline/Material.h

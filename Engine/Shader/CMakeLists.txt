@@ -126,6 +126,7 @@ if(SLANGC)
         "${SHADER_DIR}/Culling/GPUCull_Phase1.comp.slang"
         "${SHADER_DIR}/Culling/GPUCull_TwoPhase.comp.slang"
         "${SHADER_DIR}/Culling/HiZDownsample.comp.slang"
+        "${SHADER_DIR}/Culling/InstancedCull.comp.slang"
         "${SHADER_DIR}/Culling/PersistentCull.comp.slang"
         # PostProcess
         "${SHADER_DIR}/PostProcess/AutoExposure.comp.slang"

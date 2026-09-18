@@ -20,28 +20,44 @@ struct VSOutput {
 // GPUObjectData 定义来自 ShaderTypes.slang（C++/Slang 共享）
 
 [[vk::binding(kGPUBinding_ObjectData, kGPUDescSet_PerFrame)]] StructuredBuffer<GPUObjectData> u_Objects;
+// bindless SSBO 数组：实例化网格的实例变换 + 逐实例剔除的可见索引列表（任务 25）
+[[vk::binding(kGPUBinding_BindlessSSBO, kGPUDescSet_PerFrame)]] StructuredBuffer<float4x4> u_InstanceTransforms[];
+[[vk::binding(kGPUBinding_BindlessSSBO, kGPUDescSet_PerFrame)]] StructuredBuffer<uint>     u_VisibleInstanceIndices[];
 
 // offset 0:  viewProjMatrix     (64B) — 当前帧 VP（含抖动）
 // offset 64: prevViewProjMatrix (64B) — 上一帧 VP（不含抖动）
-// offset 128:objectIndex / useInstanceID
+// offset 128:objectIndex / useInstanceID / 实例句柄
 [[vk::push_constant]] cbuffer FrameConstants {
-    float4x4 viewProjMatrix;       // offset 0,  64B
-    float4x4 prevViewProjMatrix;   // offset 64, 64B
-    uint     objectIndex;          // offset 128, 4B
-    uint     useInstanceID;        // offset 132, 4B  [GPU Driven 模式：1=从 SV_InstanceID 读取]
-    uint     _pad[14];             // 填充到 192B
+    float4x4 viewProjMatrix;         // offset 0,  64B
+    float4x4 prevViewProjMatrix;     // offset 64, 64B
+    uint     objectIndex;            // offset 128, 4B
+    uint     useInstanceID;          // offset 132, 4B  [1=GPU Driven；2=实例化网格（任务 25）]
+    uint     instanceSSBOHandle;     // offset 136, 4B  实例变换 SSBO 句柄
+    uint     instanceVisibleHandle;  // offset 140, 4B  可见实例索引列表句柄（0=未剔除）
+    uint     _pad[12];               // 填充到 192B
 };
 
 VSOutput vertexMain(VSInput input, uint instanceID : SV_InstanceID) {
-    uint objIdx = (useInstanceID != 0u) ? instanceID : objectIndex;
+    // 对象/材质条目：GPU Driven 模式（1）用 SV_InstanceID 当对象下标；
+    // 实例化网格（2）是"一个对象条目 + N 个实例"——对象下标仍取 push constant 的 objectIndex，
+    // 只有世界矩阵来自实例 SSBO（这一点与 PBR.vert 的语义必须一致，否则会越界读到别的物体）。
+    uint objIdx = (useInstanceID == 1u) ? instanceID : objectIndex;
     GPUObjectData obj = u_Objects[objIdx];
-    float4 worldPos = mul(obj.worldMatrix, float4(input.positionOS, 1.0));
+    float4x4 worldMatrix = obj.worldMatrix;
+    if (useInstanceID == 2u) {
+        // 任务 25：可见列表非空时先查压缩后的实例下标（逐实例剔除的结果）
+        uint instIdx = instanceID;
+        if (instanceVisibleHandle != 0u)
+            instIdx = u_VisibleInstanceIndices[instanceVisibleHandle][instanceID];
+        worldMatrix = u_InstanceTransforms[instanceSSBOHandle][instIdx];
+    }
+    float4 worldPos = mul(worldMatrix, float4(input.positionOS, 1.0));
 
     VSOutput output;
     output.position    = mul(viewProjMatrix, worldPos);      // 含抖动
     output.prevClipPos = mul(prevViewProjMatrix, worldPos);  // 不含抖动，用于速度计算
     output.worldPos    = worldPos.xyz;
-    output.worldNormal = normalize(mul((float3x3)obj.worldMatrix, input.normalOS));
+    output.worldNormal = normalize(mul((float3x3)worldMatrix, input.normalOS));
     output.uv          = input.uv;
     return output;
 }
