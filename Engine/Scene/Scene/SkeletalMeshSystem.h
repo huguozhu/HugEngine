@@ -16,7 +16,7 @@
 namespace he {
 class World;
 
-namespace asset { struct SkeletonAsset; }
+namespace asset { struct SkeletonAsset; struct AnimationBlendLayer; }
 
 class SkeletalMeshSystem {
 public:
@@ -25,11 +25,24 @@ public:
                                float time, i32 jointIndex,
                                float3& outT, quat& outR, float3& outS);
 
+    /// 采样**多层混合**后的关节本地 TRS（任务 21：剪辑混合 / Blend Space）
+    /// · 权重按 Σw 归一化；`clipIndex<0` 或 w≤0 的层不参与；全部不参与 ⇒ 关节静态 TRS
+    /// · 平移/缩放线性加权；旋转按"符号对齐到首个参与层 → 加权求和 → 归一化"
+    static void SampleJointTRSBlended(const asset::SkeletonAsset& skel,
+                                      const asset::AnimationBlendLayer* layers, u32 layerCount,
+                                      i32 jointIndex, float3& outT, quat& outR, float3& outS);
+
     /// 合成全部关节的蒙皮矩阵（world × inverseBind；长度 = joints 数）
     /// @param outWorldMatrices 可选：同时输出关节世界矩阵（调试用）
     static void ComputeSkinMatrices(const asset::SkeletonAsset& skel, i32 clipIndex, float time,
                                     std::vector<float4x4>& outSkinMatrices,
                                     std::vector<float4x4>* outWorldMatrices = nullptr);
+
+    /// 用**多层混合**合成蒙皮矩阵（层级合成与蒙皮公式与上面完全一致，只换采样器）
+    static void ComputeSkinMatricesBlended(const asset::SkeletonAsset& skel,
+                                           const asset::AnimationBlendLayer* layers, u32 layerCount,
+                                           std::vector<float4x4>& outSkinMatrices,
+                                           std::vector<float4x4>* outWorldMatrices = nullptr);
 
     /// 驱动所有 SkeletalMeshComponent 一帧
     static void Update(World& world, f32 dt);

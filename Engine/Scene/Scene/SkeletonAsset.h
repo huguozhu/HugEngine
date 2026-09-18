@@ -52,6 +52,23 @@ struct AnimationClip {
     std::vector<JointAnimationChannel> channels;
 };
 
+/// 动画混合层（任务 21：剪辑混合 / Blend Space 的单层状态）
+///
+/// 一个层 = 一个剪辑 + **它自己的**播放时间 + 权重。系统按 Σweight 归一化后逐关节混合：
+/// 平移/缩放线性加权，旋转"符号对齐到首个参与层后加权求和、再归一化"（加权 nlerp，
+/// 避免 q 与 -q 的双覆盖把加权和拉向 0）；`clipIndex < 0`、权重 ≤ 0 的层不参与，
+/// **全部层都不参与时退回关节静态 TRS**（即绑定姿势，与单剪辑路径的 clipIndex=-1 一致）。
+///
+/// 【为什么把层状态放在资产头】它是纯数据、无 RHI 依赖：单元测试不必链接渲染模块，
+/// 采样/混合的判据可以只对着数学写（见 Tests/TestSkeletalMesh.cpp）。
+struct AnimationBlendLayer {
+    i32   clipIndex = -1;      // 剪辑下标（-1 = 绑定姿势/静态 TRS，不参与混合）
+    float weight    = 0.0f;    // 相对权重（≤0 视为不参与）
+    float time      = 0.0f;    // 该层自己的剪辑时间（秒）
+    float speed     = 1.0f;    // 该层播放速度
+    bool  looping   = true;    // 该层是否循环
+};
+
 /// 骨架资产（一个 glTF skin = 一份资产；多个 primitive 可共享）
 struct SkeletonAsset {
     String name;

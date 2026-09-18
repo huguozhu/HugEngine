@@ -55,39 +55,14 @@ float4x4 TRSToMatrix(const float3& t, const quat& r, const float3& s) {
     return m;
 }
 
-} // namespace
-
-void SkeletalMeshSystem::SampleJointTRS(const asset::SkeletonAsset& skel, i32 clipIndex,
-                                        float time, i32 jointIndex,
-                                        float3& outT, quat& outR, float3& outS) {
-    if (jointIndex < 0 || jointIndex >= (i32)skel.joints.size()) {
-        outT = float3(0.0f);
-        outR = glm::identity<quat>();
-        outS = float3(1.0f);
-        return;
-    }
-    const asset::SkeletonJoint& joint = skel.joints[jointIndex];
-    outT = joint.translation;
-    outR = joint.rotation;
-    outS = joint.scale;
-
-    // 剪辑通道覆盖静态 TRS（缺某分量的通道保持静态值）
-    if (clipIndex < 0 || clipIndex >= (i32)skel.clips.size()) return;
-    const asset::AnimationClip& clip = skel.clips[clipIndex];
-    for (const auto& ch : clip.channels) {
-        if (ch.jointIndex != jointIndex) continue;
-        if (!ch.translations.empty())
-            outT = SampleVec3Channel(ch.times, ch.translations, time, outT);
-        if (!ch.rotations.empty())
-            outR = SampleQuatChannel(ch.times, ch.rotations, time, outR);
-        if (!ch.scales.empty())
-            outS = SampleVec3Channel(ch.times, ch.scales, time, outS);
-    }
-}
-
-void SkeletalMeshSystem::ComputeSkinMatrices(const asset::SkeletonAsset& skel, i32 clipIndex,
-                                             float time, std::vector<float4x4>& outSkinMatrices,
-                                             std::vector<float4x4>* outWorldMatrices) {
+// 层级合成 + 蒙皮矩阵的**共用**实现：采样器由调用方给（单剪辑 / 多层混合各一份）
+//
+// 【为什么要抽出来】单剪辑与混合两条路径的层级合成、孤儿关节兜底、蒙皮公式必须逐字一致，
+// 否则“混合出来的姿势”与“单剪辑的姿势”会在层级/公式上分叉，权重=1 的混合也将不等于单剪辑。
+template <typename SampleFn>
+void ComposeSkinMatrices(const asset::SkeletonAsset& skel, SampleFn&& sample,
+                         std::vector<float4x4>& outSkinMatrices,
+                         std::vector<float4x4>* outWorldMatrices) {
     const usize n = skel.joints.size();
     outSkinMatrices.assign(n, float4x4(1.0f));
     if (n == 0) return;
@@ -98,7 +73,7 @@ void SkeletalMeshSystem::ComputeSkinMatrices(const asset::SkeletonAsset& skel, i
         float3 t;
         quat r;
         float3 s;
-        SampleJointTRS(skel, clipIndex, time, (i32)i, t, r, s);
+        sample((i32)i, t, r, s);
         local[i] = TRSToMatrix(t, r, s);
     }
 
@@ -134,12 +109,161 @@ void SkeletalMeshSystem::ComputeSkinMatrices(const asset::SkeletonAsset& skel, i
     }
 }
 
+} // namespace
+
+void SkeletalMeshSystem::SampleJointTRS(const asset::SkeletonAsset& skel, i32 clipIndex,
+                                        float time, i32 jointIndex,
+                                        float3& outT, quat& outR, float3& outS) {
+    if (jointIndex < 0 || jointIndex >= (i32)skel.joints.size()) {
+        outT = float3(0.0f);
+        outR = glm::identity<quat>();
+        outS = float3(1.0f);
+        return;
+    }
+    const asset::SkeletonJoint& joint = skel.joints[jointIndex];
+    outT = joint.translation;
+    outR = joint.rotation;
+    outS = joint.scale;
+
+    // 剪辑通道覆盖静态 TRS（缺某分量的通道保持静态值）
+    if (clipIndex < 0 || clipIndex >= (i32)skel.clips.size()) return;
+    const asset::AnimationClip& clip = skel.clips[clipIndex];
+    for (const auto& ch : clip.channels) {
+        if (ch.jointIndex != jointIndex) continue;
+        if (!ch.translations.empty())
+            outT = SampleVec3Channel(ch.times, ch.translations, time, outT);
+        if (!ch.rotations.empty())
+            outR = SampleQuatChannel(ch.times, ch.rotations, time, outR);
+        if (!ch.scales.empty())
+            outS = SampleVec3Channel(ch.times, ch.scales, time, outS);
+    }
+}
+
+void SkeletalMeshSystem::SampleJointTRSBlended(const asset::SkeletonAsset& skel,
+                                               const asset::AnimationBlendLayer* layers,
+                                               u32 layerCount, i32 jointIndex,
+                                               float3& outT, quat& outR, float3& outS) {
+    // 基准 = 关节静态 TRS：全部层不参与时就是绑定姿势（与 clipIndex=-1 的行为一致）
+    if (jointIndex < 0 || jointIndex >= (i32)skel.joints.size()) {
+        outT = float3(0.0f);
+        outR = glm::identity<quat>();
+        outS = float3(1.0f);
+        return;
+    }
+    const asset::SkeletonJoint& joint = skel.joints[jointIndex];
+    outT = joint.translation;
+    outR = joint.rotation;
+    outS = joint.scale;
+    if (!layers || layerCount == 0) return;
+
+    float  sumW = 0.0f;
+    float3 tSum(0.0f), sSum(0.0f);
+    quat   rSum(0.0f, 0.0f, 0.0f, 0.0f);   // 零四元数 = 尚未累加
+    bool   hasRotation = false;
+    for (u32 i = 0; i < layerCount; ++i) {
+        const asset::AnimationBlendLayer& L = layers[i];
+        if (L.weight <= 0.0f) continue;                              // 权重非正：不参与
+        if (L.clipIndex < 0 || L.clipIndex >= (i32)skel.clips.size())
+            continue;                                                // 绑定姿势层/越界：不参与
+
+        float3 t;
+        quat   r;
+        float3 s;
+        SampleJointTRS(skel, L.clipIndex, L.time, jointIndex, t, r, s);
+
+        tSum += L.weight * t;
+        sSum += L.weight * s;
+        // 四元数双覆盖：q 与 -q 表示同一旋转，加权求和前必须对齐到同一个半球，
+        // 否则两个"其实相同"的旋转会互相抵消（典型现象是混合到中途姿态突然抽搐/塌陷）。
+        if (hasRotation && glm::dot(rSum, r) < 0.0f) r = -r;
+        if (!hasRotation) hasRotation = true;
+        rSum += L.weight * r;
+        sumW += L.weight;
+    }
+    if (sumW <= 0.0f || !hasRotation) return;   // 全不参与 ⇒ 保持静态 TRS
+
+    outT = tSum / sumW;
+    outS = sSum / sumW;
+    outR = glm::normalize(rSum / sumW);          // 加权平均后归一化（加权 nlerp）
+}
+
+void SkeletalMeshSystem::ComputeSkinMatrices(const asset::SkeletonAsset& skel, i32 clipIndex,
+                                             float time, std::vector<float4x4>& outSkinMatrices,
+                                             std::vector<float4x4>* outWorldMatrices) {
+    ComposeSkinMatrices(skel,
+        [&](i32 jointIndex, float3& t, quat& r, float3& s) {
+            SampleJointTRS(skel, clipIndex, time, jointIndex, t, r, s);
+        },
+        outSkinMatrices, outWorldMatrices);
+}
+
+void SkeletalMeshSystem::ComputeSkinMatricesBlended(const asset::SkeletonAsset& skel,
+                                                    const asset::AnimationBlendLayer* layers,
+                                                    u32 layerCount,
+                                                    std::vector<float4x4>& outSkinMatrices,
+                                                    std::vector<float4x4>* outWorldMatrices) {
+    ComposeSkinMatrices(skel,
+        [&](i32 jointIndex, float3& t, quat& r, float3& s) {
+            SampleJointTRSBlended(skel, layers, layerCount, jointIndex, t, r, s);
+        },
+        outSkinMatrices, outWorldMatrices);
+}
+
 void SkeletalMeshSystem::Update(World& world, f32 dt) {
     if (dt <= 0.0f) return;
 
     world.ForEach<SkeletalMeshComponent>([&](Entity, SkeletalMeshComponent& sm) {
         if (!sm.skeleton) return;
 
+        if (sm.blendLayerCount > 0) {
+            // ── 混合路径（任务 21）──
+            // ① 交叉淡入推进：出层 1→0、入层 0→1（淡完收敛成单层，避免长期付两层的采样）
+            if (sm.bCrossFading) {
+                if (sm.blendLayerCount < 2) {
+                    sm.bCrossFading = false;                 // 中途被清层/被手工设层 → 取消
+                } else {
+                    sm.crossFadeTime += dt;
+                    const float k = (sm.crossFadeDuration > 0.0f)
+                                  ? std::min(sm.crossFadeTime / sm.crossFadeDuration, 1.0f)
+                                  : 1.0f;
+                    sm.blendLayers[0].weight = 1.0f - k;
+                    sm.blendLayers[1].weight = k;
+                    if (k >= 1.0f) {
+                        // 淡入完成：只留入层（权重 1），回到单层混合状态
+                        const asset::AnimationBlendLayer in = sm.blendLayers[1];
+                        sm.ClearBlendLayers();
+                        sm.blendLayers[0] = in;
+                        sm.blendLayers[0].weight = 1.0f;
+                        sm.blendLayerCount = 1;
+                        sm.currentClip = in.clipIndex;
+                        sm.clipTime    = in.time;
+                    }
+                }
+            }
+
+            // ② 逐层推进时间（每层有自己的速度/循环；权重为 0 的层**仍然推进** —— 否则淡入
+            //    的那一层会永远停在起点）
+            if (sm.playing) {
+                for (u32 i = 0; i < sm.blendLayerCount; ++i) {
+                    asset::AnimationBlendLayer& L = sm.blendLayers[i];
+                    if (L.clipIndex < 0 || L.clipIndex >= (i32)sm.skeleton->clips.size()) continue;
+                    const asset::AnimationClip& clip = sm.skeleton->clips[L.clipIndex];
+                    L.time += dt * L.speed;
+                    if (clip.duration > 0.0f) {
+                        L.time = L.looping ? std::fmod(L.time, clip.duration)
+                                           : std::min(L.time, clip.duration);
+                    }
+                }
+                if (sm.blendLayerCount > 0) sm.clipTime = sm.blendLayers[0].time;   // 显示用
+            }
+
+            ComputeSkinMatricesBlended(*sm.skeleton, sm.blendLayers, sm.blendLayerCount,
+                                       sm.boneMatrices, &sm.jointWorldMatrices);
+            sm.bBonesDirty = true;
+            return;
+        }
+
+        // ── 单剪辑路径（原有行为）──
         // 1. 推进剪辑时间（循环回绕 / 播完停止）
         if (sm.playing && sm.currentClip >= 0 &&
             sm.currentClip < (i32)sm.skeleton->clips.size()) {
