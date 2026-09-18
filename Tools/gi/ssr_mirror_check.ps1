@@ -89,10 +89,12 @@ function Run-Mirror([string]$tag, [hashtable]$overrides) {
     $env:HE_DUMP_GI       = $tag
     $env:HE_DUMP_GI_FRAME = "$Frame"
     $env:HE_SSR_MIRROR    = '1'
+    # pass GPU 时间戳：任务 35 要复核"Hi-Z 仍然比线性便宜"，脚本从 chk_<tag>.log 里读
+    $env:HE_PASS_TIMING   = '1'
     $p = Start-Process -FilePath $exe -WorkingDirectory $root -PassThru -NoNewWindow `
                        -RedirectStandardOutput $log -RedirectStandardError "$log.err"
     if (-not $p.WaitForExit($TimeoutSec * 1000)) { $p.Kill(); Write-Output "  !! $tag timed out" }
-    Remove-Item Env:\HE_GILAB_CONFIG, Env:\HE_DUMP_GI, Env:\HE_DUMP_GI_FRAME, Env:\HE_SSR_MIRROR -ErrorAction SilentlyContinue
+    Remove-Item Env:\HE_GILAB_CONFIG, Env:\HE_DUMP_GI, Env:\HE_DUMP_GI_FRAME, Env:\HE_SSR_MIRROR, Env:\HE_PASS_TIMING -ErrorAction SilentlyContinue
     if (-not (Test-Path (Join-Path $outDir "gi_${tag}_hdr.f16"))) { throw "$tag produced no dump" }
     Write-Output "sampled $tag"
 }
@@ -116,7 +118,11 @@ Run-Mirror 'ssrmirror_legacy' @{
     ssr_max_distance = '50.000000'; ssr_thickness = '0.100000'
     ssr_step_size = '0.500000'; ssr_max_steps = '64.000000'
 }
-# 4) the default path: Hi-Z hierarchy march with scene-scaled parameters (reported only)
+# 4) the default path: Hi-Z hierarchy march with scene-scaled parameters.
+#    Task 35 (defect 9.2-AE) made this path ASSERTED too: it must put BOTH reflections on the
+#    predicted pixel exactly like the linear reference. It used to miss the green box entirely
+#    because the screen-space march reused the screen fraction as the ray parameter (the depth
+#    it compared belonged to a different point of the ray).
 Run-Mirror 'ssrmirror_hiz' @{
     ssr_use_hiz = '1'; ssr_auto_scale = '1'
 }

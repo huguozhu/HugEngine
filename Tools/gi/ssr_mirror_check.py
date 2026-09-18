@@ -31,6 +31,7 @@ Checks
      -- that is what "stepSize/maxDistance were written for a 1 unit = 1 m world" means.
 """
 import os
+import re
 import sys
 
 import numpy as np
@@ -166,6 +167,43 @@ def nearest_distance(mask, target):
         return None
     d2 = (xs - target[0]) ** 2 + (ys - target[1]) ** 2
     return float(np.sqrt(d2.min()))
+
+
+def cfg_int(directory, tag, key):
+    """Read an integer config key from the private cfg the .ps1 wrote for that tag."""
+    path = os.path.join(directory, "chk_%s.cfg" % tag)
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                m = re.match(r"\s*%s\s*=\s*([0-9.]+)\s*$" % re.escape(key), line)
+                if m:
+                    return int(float(m.group(1)))
+    except OSError:
+        pass
+    return None
+
+
+def pass_time(directory, tag, name):
+    """GPU ms of a named pass from the last '[Pass ...]' line of chk_<tag>.log.
+
+    The .ps1 runs every variant with HE_PASS_TIMING=1, so chk_<tag>.log carries the per-pass
+    GPU timestamps of the sampled frame.
+    """
+    path = os.path.join(directory, "chk_%s.log" % tag)
+    line = None
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for l in f:
+                if "[Pass " in l:
+                    line = l
+    except OSError:
+        return None
+    if line is None:
+        return None
+    for n, ms in re.findall(r"([A-Za-z_][A-Za-z0-9_]*)=(-?\d+\.\d+)ms", line):
+        if n == name:
+            return float(ms)
+    return None
 
 
 def analyse(directory, tag, sphere, channel, other_a, other_b):
@@ -311,21 +349,62 @@ def main():
             red.get("coloured_px", 0) > 100 and leg.get("coloured_px", 0) * 10 < red.get("coloured_px", 0),
             "%d vs %d object-coloured pixels" % (red.get("coloured_px", 0), leg.get("coloured_px", 0)))
 
-    # 6. the DEFAULT path (Hi-Z hierarchy march, scene-scaled) -- REPORTED, not asserted:
-    #    it currently misses one of the two reflections (see defect 9.2-AE / task 35)
+    # 6. the DEFAULT path (Hi-Z hierarchy march, scene-scaled) -- ALSO ASSERTED (task 35):
+    #    until task 35 this path missed the green box entirely (defect 9.2-AE): the Hi-Z DDA
+    #    reuses the screen-space fraction as the ray parameter, so the depth it compared
+    #    belonged to a different point of the ray (measured: 1251 / 1481 world units off, i.e.
+    #    100x the hit tolerance). After the perspective-correct fix both reflections must land
+    #    on the predicted pixel with the same localisation as the linear reference.
     print("")
-    print("=== default path (Hi-Z hierarchy march, scene-scaled) -- reported ===")
+    print("=== default path (Hi-Z hierarchy march, scene-scaled) ===")
     hiz_red = analyse(directory, hiz_tag, "red", 0, 1, 2)
     hiz_grn = analyse(directory, hiz_tag, "green", 1, 0, 2)
     for name, r in (("red", hiz_red), ("green", hiz_grn)):
         pos = ("%.2f px" % r["hit_dist"]) if r.get("hit_dist") is not None else "no hit"
         print("  %-5s : %d object-coloured mirror pixels, nearest to prediction %s"
               % (name, r.get("coloured_px", 0), pos))
-    if hiz_grn.get("coloured_px", 0) == 0:
-        print("  [KNOWN] the Hi-Z path misses the green box's reflection entirely, while the linear")
-        print("          path puts it exactly on the predicted pixel. The analytic criterion is")
-        print("          therefore asserted on the linear path (a supported fallback with its own")
-        print("          switch); the Hi-Z miss is recorded as defect 9.2-AE / task 35.")
+    for name, r, ref in (("red", hiz_red, red), ("green", hiz_grn, grn)):
+        ok_pos = r.get("hit_dist") is not None and r["hit_dist"] <= HIT_PX
+        # the count must be a real reflection region, not a handful of lucky pixels: at least
+        # half of what the linear reference finds on the same frame
+        ref_px = max(ref.get("coloured_px", 0), 1)
+        ok_cnt = r.get("coloured_px", 0) >= 0.5 * ref_px
+        verdict("the Hi-Z path puts the %s box's reflection on the predicted pixel" % name,
+                ok_pos and ok_cnt,
+                "nearest %.2f px from prediction (<= %.1f), %d pixels (>= half of the linear "
+                "reference's %d)"
+                % (r.get("hit_dist") if r.get("hit_dist") is not None else -1, HIT_PX,
+                   r.get("coloured_px", 0), ref_px))
+        verdict("the Hi-Z path's %s reflection is localised" % name,
+                r.get("far_frac", 1.0) < 0.05,
+                "%.2f%% of object-coloured mirror pixels are far from the prediction (<= 5%%)"
+                % (100.0 * r.get("far_frac", 0.0)))
+
+    # 7. the Hi-Z path must still be the CHEAPER one (task 25's benefit, re-checked after the
+    #    fix). The algorithmic quantity is the march iteration budget, which is in the cfg;
+    #    the measured pass time is printed next to it.
+    print("")
+    print("=== march cost (task 25's benefit, re-checked) ===")
+    base_steps = cfg_int(directory, base_tag, "ssr_max_steps")
+    hiz_steps = cfg_int(directory, hiz_tag, "ssr_max_steps")
+    print("  march iteration budget: linear %s vs Hi-Z %s" % (base_steps, hiz_steps))
+    if base_steps and hiz_steps:
+        verdict("the Hi-Z path needs fewer march steps than the linear one",
+                hiz_steps <= 0.6 * base_steps,
+                "%s vs %s steps (<= 60%%)" % (hiz_steps, base_steps))
+    else:
+        verdict("the Hi-Z path needs fewer march steps than the linear one", False,
+                "could not read ssr_max_steps from chk_%s.cfg / chk_%s.cfg" % (base_tag, hiz_tag))
+    for tag in (base_tag, hiz_tag):
+        ms = pass_time(directory, tag, "SSR")
+        print("  measured SSR pass time (%s): %s"
+              % (tag, "%.3f ms" % ms if ms is not None else "no timing in chk_%s.log" % tag))
+    lin_ms = pass_time(directory, base_tag, "SSR")
+    hiz_ms = pass_time(directory, hiz_tag, "SSR")
+    if lin_ms and hiz_ms:
+        print("  [info] Hi-Z / linear pass time = %.2fx (each Hi-Z step costs a pyramid fetch"
+              " plus a level-0 refine, and a floor mirror keeps the level low, so the time win"
+              " is far smaller than the step-count win)" % (hiz_ms / lin_ms))
 
     print("")
     if failures:
