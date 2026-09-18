@@ -21,6 +21,7 @@
 #include "PostProcess/RTDenoiser.h"
 #include "PostProcess/Denoiser.h"
 #include "Pipeline/RTPass.h"
+#include <vector>
 
 namespace he::render {
 
@@ -32,18 +33,33 @@ public:
     explicit RTEffectProvider(Effect effect) : m_Effect(effect) {}
 
     // ── 注入底层 pass（均非拥有，由管线管理生命周期）──
+    //
+    // 【降噪链是数据，不是位置约定】每一级滤波 = `m_Stages` 里的一个元素，**顺序即执行顺序**。
+    // 此前是两个固定指针（`m_Temporal` / `m_Spatial`）加一条"索引 0 是时域、1 是空间"的
+    // 隐式约定：加第三级就必须改 `GetAuxPassInput` / `RenderAux` 里那串 if/else。
+    // 现在加一级只需 push 一个 stage（§4.4.2 的第 2 条不统一）。
     void SetAS(RTPass* as) { m_AS = as; }
     void SetShadowPass(RTShadowPass* pass, RTDenoiser* temporal) {
-        m_Shadow = pass; m_Temporal = temporal;
+        m_Shadow = pass;
+        m_Stages.clear();
+        if (temporal) m_Stages.push_back(Stage::Temporal(temporal, "RT_Shadow_Denoise"));
     }
     void SetAOPass(RTAOPass* pass, RTDenoiser* temporal) {
-        m_AO = pass; m_Temporal = temporal;
+        m_AO = pass;
+        m_Stages.clear();
+        if (temporal) m_Stages.push_back(Stage::Temporal(temporal, "RT_AO_Denoise"));
     }
     void SetReflectionPass(RTReflectionPass* pass, RTDenoiser* temporal, Denoiser* spatial) {
-        m_Reflection = pass; m_Temporal = temporal; m_Spatial = spatial;
+        m_Reflection = pass;
+        m_Stages.clear();
+        if (temporal) m_Stages.push_back(Stage::Temporal(temporal, "RT_Reflection_Temporal"));
+        if (spatial)  m_Stages.push_back(Stage::SpatialPass(spatial, "RT_Reflection_Denoise"));
     }
     void SetGIPass(RTGIPass* pass, RTDenoiser* temporal, Denoiser* spatial) {
-        m_GI = pass; m_Temporal = temporal; m_Spatial = spatial;
+        m_GI = pass;
+        m_Stages.clear();
+        if (temporal) m_Stages.push_back(Stage::Temporal(temporal, "RT_GI_Temporal"));
+        if (spatial)  m_Stages.push_back(Stage::SpatialPass(spatial, "RT_GI_Denoise"));
     }
     /// RTGI 的 miss 回退需要 DDGI 探针（由帧图注入）
     void SetDDGIFallback(rhi::IRHIBuffer* probeBuffer, rhi::IRHIBuffer* gridUniform) {
@@ -88,7 +104,7 @@ public:
     /// RT 阴影输出（不在层栈三通道内，供帧图单独取给 Lighting）
     [[nodiscard]] rhi::IRHITexture* GetShadowOutput() const {
         if (m_Effect != Effect::Shadow) return nullptr;
-        return HasTemporal() ? TemporalOutput() : MainOutput();
+        return FinalOutput();
     }
 
     // ── 通道输出 ──
@@ -102,19 +118,20 @@ public:
         return m_Effect == Effect::AO ? m_AO->GetOutput() : nullptr;
     }
 
-    // ── 附属 pass：时域累积（+ 反射/GI 的空间滤波）──
-    // 索引约定：0 = 时域（存在时），其后 = 空间滤波；时域缺失时空间滤波前移为 0
-    [[nodiscard]] u32 GetAuxPassCount() const override {
-        return (HasTemporal() ? 1u : 0u) + (HasSpatialPass() ? 1u : 0u);
-    }
+    // ── 附属 pass：降噪链（时域累积 →（反射/GI）空间滤波）──
+    // 索引在**已就绪的** stage 上紧凑编号（与改造前一致：时域未就绪时空间滤波前移为 0），
+    // 输入取自链上前一级的输出，第一级取主 pass 输出。
+    [[nodiscard]] u32 GetAuxPassCount() const override { return ActiveStageCount(); }
     [[nodiscard]] const char* GetAuxPassName(u32 i) const override {
-        return IsTemporalIndex(i) ? TemporalName() : SpatialName();
+        const Stage* st = ActiveStageAt(i);
+        return st ? st->name : "";
     }
     [[nodiscard]] rhi::IRHITexture* GetAuxPassInput(u32 i) const override {
-        return IsTemporalIndex(i) ? MainOutput() : TemporalOrMain();
+        return StageInput(i);
     }
     [[nodiscard]] rhi::IRHITexture* GetAuxPassOutput(u32 i) const override {
-        return IsTemporalIndex(i) ? TemporalOutput() : SpatialOutput();
+        const Stage* st = ActiveStageAt(i);
+        return st ? StageOutput(*st) : nullptr;
     }
     [[nodiscard]] rhi::IRHITexture* GetFinalDiffuseOutput() const override {
         return m_Effect == Effect::GI ? FinalOutput() : nullptr;
@@ -127,23 +144,26 @@ public:
     }
 
     void PreBindAux(rhi::IRHICommandList* cmd, u32 i) override {
-        // 【两者都必须在这里绑管线】帧图的附属 pass 会紧接着调 BeginOffscreenPass，而它是用
+        // 【每一级都必须在这里绑管线】帧图的附属 pass 会紧接着调 BeginOffscreenPass，而它是用
         // 「当前绑定的 PSO」去取 RenderPass 建 Framebuffer 的。若此刻还绑着上一 Pass 的 PSO
         // （例如 RTGI 的光线追踪管线、或带深度附件的图形 PSO），Framebuffer 附件数就会与
         // RenderPass 不匹配：校验层报 VUID-VkFramebufferCreateInfo-attachmentCount-00876，
-        // 实测更严重 —— 设备直接挂住，进程再也不会推进（启用 RTGI 时稳定复现）。
-        if (IsTemporalIndex(i)) { if (m_Temporal) m_Temporal->PreBind(cmd); }
-        else if (m_Spatial)     { m_Spatial->PreBind(cmd); }
+        // 实测更严重 —— 设备直接挂住，进程再也不会推进（启用 RTGI 时稳定复现，见 §9.2-V）。
+        const Stage* st = ActiveStageAt(i);
+        if (!st) return;
+        if (st->kind == Stage::Kind::Temporal) st->temporal->PreBind(cmd);
+        else                                   st->spatial->PreBind(cmd);
     }
     void RenderAux(rhi::IRHICommandList* cmd, u32 i, const GIProviderContext& /*ctx*/) override {
-        if (IsTemporalIndex(i)) {
-            if (m_Temporal) {
-                m_Temporal->SetInputs(MainOutput(), m_Depth, m_Normal, m_Velocity);
-                m_Temporal->Render(cmd);
-            }
-        } else if (m_Spatial) {
-            m_Spatial->SetInputs(TemporalOrMain(), m_Depth, m_Normal);
-            m_Spatial->Render(cmd);
+        const Stage* st = ActiveStageAt(i);
+        if (!st) return;
+        rhi::IRHITexture* input = StageInput(i);
+        if (st->kind == Stage::Kind::Temporal) {
+            st->temporal->SetInputs(input, m_Depth, m_Normal, m_Velocity);
+            st->temporal->Render(cmd);
+        } else {
+            st->spatial->SetInputs(input, m_Depth, m_Normal);
+            st->spatial->Render(cmd);
         }
     }
 
@@ -161,20 +181,54 @@ public:
     void Render(rhi::IRHICommandList* cmd, const GIProviderContext& ctx) override;
 
 private:
-    [[nodiscard]] bool HasSpatial() const {
-        return m_Effect == Effect::Reflection || m_Effect == Effect::GI;
+    /// 降噪链的一级。两种滤波器（时域累积 / 空间双边）用同一个结构表示，
+    /// 顺序即执行顺序 —— 这就是「链条是数据」的全部含义。
+    struct Stage {
+        enum class Kind : u8 { Temporal, Spatial };
+        Kind        kind     = Kind::Temporal;
+        RTDenoiser* temporal = nullptr;   // kind == Temporal 时有效
+        Denoiser*   spatial  = nullptr;   // kind == Spatial 时有效
+        const char* name     = "";
+
+        static Stage Temporal(RTDenoiser* d, const char* n) {
+            return Stage{ Kind::Temporal, d, nullptr, n };
+        }
+        static Stage SpatialPass(Denoiser* d, const char* n) {
+            return Stage{ Kind::Spatial, nullptr, d, n };
+        }
+    };
+
+    /// 该级是否可用（滤波器就绪才注册它的 pass）
+    [[nodiscard]] static bool StageReady(const Stage& s) {
+        return (s.kind == Stage::Kind::Temporal) ? (s.temporal && s.temporal->IsReady())
+                                                 : (s.spatial  && s.spatial->IsReady());
     }
-    [[nodiscard]] bool HasTemporal() const { return m_Temporal && m_Temporal->IsReady(); }
-    [[nodiscard]] bool HasSpatialPass() const { return HasSpatial() && m_Spatial && m_Spatial->IsReady(); }
-    /// 索引 i 是否为「时域」附属 pass（时域缺失时全部是空间）
-    [[nodiscard]] bool IsTemporalIndex(u32 i) const { return HasTemporal() && i == 0u; }
-    [[nodiscard]] rhi::IRHITexture* TemporalOrMain() const {
-        rhi::IRHITexture* t = TemporalOutput();
+    [[nodiscard]] u32 ActiveStageCount() const {
+        u32 n = 0;
+        for (const Stage& s : m_Stages) if (StageReady(s)) n++;
+        return n;
+    }
+    /// 第 i 个**已就绪**的级（未就绪的级被跳过，索引因此始终紧凑）
+    [[nodiscard]] const Stage* ActiveStageAt(u32 i) const {
+        u32 n = 0;
+        for (const Stage& s : m_Stages) {
+            if (!StageReady(s)) continue;
+            if (n == i) return &s;
+            n++;
+        }
+        return nullptr;
+    }
+    [[nodiscard]] static rhi::IRHITexture* StageOutput(const Stage& s) {
+        return (s.kind == Stage::Kind::Temporal) ? s.temporal->GetOutput() : s.spatial->GetOutput();
+    }
+    /// 第 i 级的输入：链上前一级的输出，第一级取主 pass 输出
+    [[nodiscard]] rhi::IRHITexture* StageInput(u32 i) const {
+        if (i == 0u) return MainOutput();
+        const Stage* prev = ActiveStageAt(i - 1u);
+        rhi::IRHITexture* t = prev ? StageOutput(*prev) : nullptr;
         return t ? t : MainOutput();
     }
-    [[nodiscard]] rhi::IRHITexture* SpatialOutput() const {
-        return m_Spatial ? m_Spatial->GetOutput() : nullptr;
-    }
+
     [[nodiscard]] bool MainPassValid() const {
         switch (m_Effect) {
         case Effect::Shadow:     return m_Shadow != nullptr;
@@ -191,25 +245,14 @@ private:
         default:                 return m_GI->GetOutput();
         }
     }
-    [[nodiscard]] rhi::IRHITexture* TemporalOutput() const {
-        return m_Temporal ? m_Temporal->GetOutput() : nullptr;
-    }
-    /// 最终输出：空间滤波 → 时域累积 → 主输出
+    /// 最终输出：链上最后一级的输出 → 主输出
+    /// （顺序由 `m_Stages` 决定，不再由"空间优先于时域"这种硬编码规则决定）
     [[nodiscard]] rhi::IRHITexture* FinalOutput() const {
-        if (HasSpatialPass()) return SpatialOutput();
-        if (HasTemporal()) return TemporalOutput();
-        return MainOutput();
-    }
-    [[nodiscard]] const char* TemporalName() const {
-        switch (m_Effect) {
-        case Effect::Shadow:     return "RT_Shadow_Denoise";
-        case Effect::AO:         return "RT_AO_Denoise";
-        case Effect::Reflection: return "RT_Reflection_Temporal";
-        default:                 return "RT_GI_Temporal";
-        }
-    }
-    [[nodiscard]] const char* SpatialName() const {
-        return m_Effect == Effect::Reflection ? "RT_Reflection_Denoise" : "RT_GI_Denoise";
+        const u32 n = ActiveStageCount();
+        if (n == 0u) return MainOutput();
+        const Stage* last = ActiveStageAt(n - 1u);
+        rhi::IRHITexture* t = last ? StageOutput(*last) : nullptr;
+        return t ? t : MainOutput();
     }
 
     Effect m_Effect;
@@ -220,8 +263,7 @@ private:
     RTAOPass*         m_AO         = nullptr;
     RTReflectionPass* m_Reflection = nullptr;
     RTGIPass*         m_GI         = nullptr;
-    RTDenoiser*       m_Temporal   = nullptr;
-    Denoiser*         m_Spatial    = nullptr;
+    std::vector<Stage> m_Stages;   // 降噪链（顺序即执行顺序）
 
     rhi::IRHITexture* m_Depth    = nullptr;
     rhi::IRHITexture* m_Normal   = nullptr;
