@@ -43,12 +43,14 @@ def read_meta(tag):
             if len(parts) != 4:
                 continue
             name, w, h, fmt = parts[0], int(parts[1]), int(parts[2]), parts[3]
-            meta[name] = (w, h, fmt, np.float16 if fmt == "RGBA16F" else np.float32)
+            dtype = {"RGBA16F": np.float16, "R32F": np.float32,
+                     "BGRA8": np.uint8, "RGBA8": np.uint8}.get(fmt, np.float16)
+            meta[name] = (w, h, fmt, dtype)
     return meta
 
 
 def load(tag, target):
-    """读一个落盘目标 → (array, w, h, channels)。"""
+    """读一个落盘目标 → (array, w, h, channels)。8 位目标归一化到 [0,1]。"""
     meta = read_meta(tag)
     if target not in meta:
         raise SystemExit("缺少目标 %s（tag=%s）；现有: %s" % (target, tag, sorted(meta)))
@@ -56,11 +58,16 @@ def load(tag, target):
     path = os.path.join(OUT, "pt_%s_%s.f16" % (tag, target))
     if not os.path.isfile(path):
         raise SystemExit("缺少落盘文件: %s" % path)
-    ch = 4 if fmt == "RGBA16F" else 1
+    ch = 1 if fmt == "R32F" else 4
     data = np.fromfile(path, dtype=dtype)
     if data.size != w * h * ch:
         raise SystemExit("尺寸不符: %s 期望 %d 实际 %d" % (path, w * h * ch, data.size))
-    return data.reshape(h, w, ch).astype(np.float32), w, h, ch
+    arr = data.reshape(h, w, ch)
+    if dtype == np.uint8:
+        arr = arr.astype(np.float32) / 255.0      # 8 位 LDR 归一化（BGRA/RGBA 顺序对亮度无影响）
+    else:
+        arr = arr.astype(np.float32)
+    return arr, w, h, ch
 
 
 def stats(arr):
