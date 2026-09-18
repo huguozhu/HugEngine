@@ -27,6 +27,9 @@ struct RTExecuteContext {
     rhi::IRHITexture* sceneTriangleNormals = nullptr; // 三角形顶点法线纹理（ClosestHit 平滑法线用）
     rhi::IRHIBuffer*  ddgiProbeBuffer = nullptr;  // DDGI 探针 SSBO（GI miss 回退用）
     rhi::IRHIBuffer*  ddgiGridUniform = nullptr;  // DDGI 探针网格参数 UBO（SampleDDGI 三线性插值用）
+    // DDGI 是否自己也是漫反射层栈里的一个源。为真时 GI 的 miss 分支**不得**回退 DDGI：
+    // 否则 DDGI 信息会以两个槽位的总权重进入归一化合成，加权平均失去无偏性（§9.2-I）。
+    bool              ddgiIsStackSource = false;
 };
 
 // ============================================================

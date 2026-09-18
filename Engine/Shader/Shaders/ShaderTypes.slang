@@ -338,7 +338,7 @@ GPU_STRUCT RTRayEffectPushConstant {
     float    maxDistance;           // [92]      最大追踪距离（AO=2m, GI=30m, Refl=500m）
     GPU_UINT sampleCount;           // [96]      AO/GI 每像素采样数（Reflection=1）
     float    maxRoughness;          // [100]     反射最大粗糙度（超过回退 IBL prefilter）
-    GPU_UINT flags;                 // [104]     bit0=半分辨率
+    GPU_UINT flags;                 // [104]     bit0=半分辨率, bit1=DDGI 是漫反射层栈的源（GI miss 不得回退 DDGI）
     GPU_UINT lightCount;            // [108]     直接光源数（ClosestHit 光照用）
 };                                  // 共 112B（alignas(16) 后 112B）
 

@@ -512,6 +512,9 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             auto* rtp = dynamic_cast<RTEffectProvider*>(prov.get());
             if (!rtp) continue;   // 只处理光追效果源
             rtp->SetRTShadowWanted(m_GIConfig.ShouldRunRTShadow());
+            // DDGI 自己也是漫反射层栈的源时，GI 的 miss 分支必须停止回退 DDGI ——
+            // 否则 DDGI 信息会以两个槽位的总权重进入归一化合成（§9.2-I）
+            rtp->SetDDGIInStack(m_GIConfig.diffuse.Has(GISourceId::DDGI));
             rtp->SetVelocity(m_GBuffer->GetVelocity());
             rtp->SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetAlbedo());
 

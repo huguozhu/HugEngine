@@ -109,19 +109,33 @@ void main() {
         TraceRay(g_TLAS, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
 
         if (payload.radianceT.a < 0.0) {
-            // miss：DDGI 探针查询替代纯天空色（远距离低频间接光）
+            // miss 分支
             //
-            // 量纲对齐：SampleDDGI 返回的是**辐照度 E**（EvalDDGI_SH 已施加 Lambert 卷积
-            // A_l），而命中的 ClosestHit 给的是**辐射度 L** —— 二者不能直接相加。
-            // 本 rgen 把二者都当作「沿该方向的入射辐射度」累加，故 miss 路径需按
-            // 「局部环境近似均匀」的假设做 E/π = L 换算。
-            radiance += SampleDDGI(worldPos, dir) * (1.0 / 3.14159265);
+            // 【源独立】DDGI 自己就是漫反射层栈里的一个源时，这里**不能再查它**：
+            // 归一化合成假定每个源给出的是「同一物理量的独立估计」。若 RTGI 的 miss 又去查
+            // DDGI，那么 DDGI 的信息会以 (RTGI 槽位权重 + DDGI 槽位权重) 的总权重进入画面，
+            // 权重和不再等于 1，加权平均失去无偏性（§9.2-I）。
+            // 实测（06.GILab，diffuse = 仅 RTGI vs DDGI+RTGI）：同一份 RTGI 输出的均值是
+            // 0.0575 与 0.2034 —— 相差 3.5 倍，完全由「DDGI 在不在层栈里」决定。
+            //
+            // 因此：DDGI 在层栈里 ⇒ miss 贡献 0（RTGI 只报告自己真正追踪到的部分，远场低频
+            // 交给 DDGI 槽位）；DDGI 不在层栈里 ⇒ 保留回退，这是**降级路径**，不构成双重计数。
+            if ((g_PC.flags & 2u) == 0u) {
+                // 量纲对齐：SampleDDGI 返回的是**辐照度 E**（EvalDDGI_SH 已施加 Lambert 卷积
+                // A_l），而命中的 ClosestHit 给的是**辐射度 L** —— 二者不能直接相加。
+                // 本 rgen 把二者都当作「沿该方向的入射辐射度」累加，故 miss 路径需按
+                // 「局部环境近似均匀」的假设做 E/π = L 换算。
+                radiance += SampleDDGI(worldPos, dir) * (1.0 / 3.14159265);
+                valid++;   // 回退提供了间接光信息
+            }
+            // else：本像素这条射线没有任何 RTGI 自己的信息，不计入 valid
         } else {
             // hit：ClosestHit 返回的出射辐射度
             radiance += payload.radianceT.rgb;
+            valid++;
         }
-        valid++;   // 每条射线（命中或 DDGI 回退）都提供了间接光，计为有效
     }
+    // 分母恒为采样数 n：miss 贡献 0 时结果只是「已追踪到的那部分」，不放大命中射线
     radiance /= float(n);
 
     // 时域抖动：单采样时输出原始值，由后续帧累积（或交由 Lighting 叠加）

@@ -72,6 +72,9 @@ public:
     }
     /// 由帧图每帧告知「阴影枚举当前是否选择 RT 阴影」
     void SetRTShadowWanted(bool wanted) { m_RTShadowWanted = wanted; }
+    /// 由帧图每帧告知「DDGI 是否自己也是漫反射层栈的源」。
+    /// 为真时 GI 的 miss 分支不得回退 DDGI，否则 DDGI 信息被用两次、归一化失去无偏性（§9.2-I）。
+    void SetDDGIInStack(bool inStack) { m_DDGIInStack = inStack; }
     [[nodiscard]] bool IsShadowEffect() const { return m_Effect == Effect::Shadow; }
     /// pass 名：RT 阴影不在 GI 源枚举内（阴影是独立枚举），单独给名
     [[nodiscard]] const char* GetName() const override {
@@ -226,6 +229,7 @@ private:
     rhi::IRHITexture* m_Velocity = nullptr;
     rhi::IRHIBuffer*  m_DDGIProbe = nullptr;
     rhi::IRHIBuffer*  m_DDGIGrid  = nullptr;
+    bool              m_DDGIInStack = false;   // 由帧图每帧告知（见 SetDDGIInStack）
 };
 
 // ── 主 pass 实现（向 GBuffer 有效像素发射射线）──
@@ -244,8 +248,9 @@ inline void RTEffectProvider::Render(rhi::IRHICommandList* cmd, const GIProvider
     rc.lightCount  = ctx.lightCount;
     rc.sceneMaterialTex     = m_AS->GetSceneMaterialTexture();
     rc.sceneTriangleNormals = m_AS->GetSceneTriangleNormals();
-    rc.ddgiProbeBuffer = m_DDGIProbe;   // GI 的 miss 回退：DDGI 探针
+    rc.ddgiProbeBuffer = m_DDGIProbe;   // GI 的 miss 回退：DDGI 探针（仅当 DDGI 不是层栈源时使用）
     rc.ddgiGridUniform = m_DDGIGrid;
+    rc.ddgiIsStackSource = m_DDGIInStack;   // 为真 ⇒ rgen 的 miss 不回退 DDGI（避免双重计数）
 
     rhi::IRHIAccelerationStructure* tlas = ctx.tlas ? ctx.tlas : m_AS->GetTLAS();
     switch (m_Effect) {
