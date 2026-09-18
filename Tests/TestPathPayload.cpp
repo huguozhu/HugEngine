@@ -22,8 +22,8 @@ using namespace he;
 using namespace he::render;
 
 TEST_CASE("PathPayload：大小与逐字段偏移与 Slang 侧一致") {
-    CHECK(sizeof(PathPayload) == 96);
-    CHECK(kPathPayloadSize == 96);
+    CHECK(sizeof(PathPayload) == 112);
+    CHECK(kPathPayloadSize == 112);
 
     // 6 × float4，无隐式填充
     CHECK(offsetof(PathPayload, albedoMetallic) == 0);
@@ -32,6 +32,7 @@ TEST_CASE("PathPayload：大小与逐字段偏移与 Slang 侧一致") {
     CHECK(offsetof(PathPayload, disneyA)        == 48);
     CHECK(offsetof(PathPayload, disneyB)        == 64);
     CHECK(offsetof(PathPayload, surfaceParams)  == 80);
+    CHECK(offsetof(PathPayload, volumeParams)   == 96);
 
     CHECK(std::is_trivially_copyable_v<PathPayload>);
     CHECK(std::is_standard_layout_v<PathPayload>);
@@ -64,6 +65,12 @@ TEST_CASE("PathPayload：默认值与「无 Disney 扩展」等价") {
     CHECK(p.surfaceParams.y == doctest::Approx(0.04f));
     CHECK(p.surfaceParams.z == 1.5f);
     CHECK(p.surfaceParams.w == 0.0f);
+
+    // 介质参数默认不吸收（σ_t = 0）
+    CHECK(p.volumeParams.x == 0.0f);
+    CHECK(p.volumeParams.y == 0.0f);
+    CHECK(p.volumeParams.z == 0.0f);
+    CHECK(p.volumeParams.w == 0.0f);
 }
 
 TEST_CASE("PathPayload：按字节往返后逐字段不变") {
@@ -74,6 +81,7 @@ TEST_CASE("PathPayload：按字节往返后逐字段不变") {
     src.disneyA        = float4(0.1f, 0.2f, 0.3f, 0.4f);
     src.disneyB        = float4(0.5f, 0.6f, 0.7f, 0.8f);
     src.surfaceParams  = float4(0.9f, 0.04f, 1.45f, 0.33f);
+    src.volumeParams   = float4(0.1f, 0.2f, 0.3f, 0.0f);
 
     // 模拟「rchit 写入 → 载荷按字节交给 rgen 读取」
     unsigned char bytes[sizeof(PathPayload)];
@@ -91,4 +99,5 @@ TEST_CASE("PathPayload：按字节往返后逐字段不变") {
     CHECK(sameVec(dst.disneyA,        src.disneyA));
     CHECK(sameVec(dst.disneyB,        src.disneyB));
     CHECK(sameVec(dst.surfaceParams,  src.surfaceParams));
+    CHECK(sameVec(dst.volumeParams,   src.volumeParams));
 }

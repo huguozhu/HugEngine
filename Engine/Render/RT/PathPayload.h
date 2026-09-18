@@ -21,7 +21,7 @@ namespace he::render {
 // 这里把大小与逐字段偏移全部钉死，与 Slang 侧的 static_assert 对称；
 // 改动任一字段都必须同时改另一侧，否则编译期就会拦下。
 //
-// 96B = 6 × float4（float4 在 Slang/C++ 均为 16B 对齐，无隐式填充）
+// 112B = 7 × float4（float4 在 Slang/C++ 均为 16B 对齐，无隐式填充）
 // ============================================================
 struct PathPayload {
     float4 albedoMetallic = float4(0.0f);                     // 0  rgb=albedo, a=metallic
@@ -31,16 +31,18 @@ struct PathPayload {
     float4 disneyA        = float4(0.0f, 0.0f, 0.5f, 0.0f);   // 48 x=anisotropic, y=subsurface, z=specular, w=sheen
     float4 disneyB        = float4(0.0f, 1.0f, 1.0f, 1.0f);   // 64 x=clearcoat, y=clearcoatGloss, z=specularTint.r, w=specularTint.g
     float4 surfaceParams  = float4(1.0f, 0.04f, 1.5f, 0.0f);  // 80 x=disneyC, y=dielectricF0, z=ior, w=transmission
+    float4 volumeParams   = float4(0.0f);                     // 96 x/y/z=σ_t（Beer-Lambert 吸收系数）, w=预留
 };
 
-static_assert(sizeof(PathPayload) == 96,
-              "PathPayload must be 96 bytes（与 PT_Common.slang 的 struct 一致）");
+static_assert(sizeof(PathPayload) == 112,
+              "PathPayload must be 112 bytes（与 PT_Common.slang 的 struct 一致）");
 static_assert(offsetof(PathPayload, albedoMetallic) == 0,  "albedoMetallic 偏移必须为 0");
 static_assert(offsetof(PathPayload, normalRough)    == 16, "normalRough 偏移必须为 16");
 static_assert(offsetof(PathPayload, emissiveT)      == 32, "emissiveT 偏移必须为 32");
 static_assert(offsetof(PathPayload, disneyA)        == 48, "disneyA 偏移必须为 48");
 static_assert(offsetof(PathPayload, disneyB)        == 64, "disneyB 偏移必须为 64");
 static_assert(offsetof(PathPayload, surfaceParams)  == 80, "surfaceParams 偏移必须为 80");
+static_assert(offsetof(PathPayload, volumeParams)   == 96, "volumeParams 偏移必须为 96");
 static_assert(std::is_trivially_copyable_v<PathPayload>,
               "PathPayload 必须是可平凡复制的 POD（作为 RT 载荷按字节传递）");
 static_assert(std::is_standard_layout_v<PathPayload>,

@@ -19,11 +19,11 @@
 
 // ============================================================
 // PathPayload — 路径追踪载荷（rchit/rmiss 必须逐字节一致）
-// 96B = 6 × float4：基础命中信息 3 个 + Disney 材质参数 3 个
+// 112B = 7 × float4：基础命中信息 3 个 + Disney 材质参数 3 个 + 介质参数 1 个
 //
 // 字段顺序/偏移与 C++ 侧镜像结构 he::render::PathPayload
 // （Engine/Render/RT/PathPayload.h）逐一对应：C++ 侧用
-// static_assert(sizeof == 96) + 逐字段 offsetof 钉住；Slang 编译器不支持
+// static_assert(sizeof == 112) + 逐字段 offsetof 钉住；Slang 编译器不支持
 // `sizeof` 形式的静态断言（实测 static_assert(sizeof(X) == N) 报 E20001），
 // 故两端一致性由 Tools/check_path_payload.py 解析两份源码交叉校验
 // （字段名、顺序、逐字段偏移），改动任一侧而不同步会被该脚本拦下。
@@ -36,6 +36,7 @@ struct PathPayload {
     float4 disneyA;         // 48 x=anisotropic, y=subsurface, z=specular, w=sheen
     float4 disneyB;         // 64 x=clearcoat, y=clearcoatGloss, z=specularTint.r, w=specularTint.g
     float4 surfaceParams;   // 80 x=disneyC(specularTint.b), y=dielectricF0, z=ior, w=transmission
+    float4 volumeParams;    // 96 x/y/z=σ_t（Beer-Lambert 吸收系数）, w 预留（材质纹理 row7）
 };
 
 
@@ -205,11 +206,89 @@ float BSDFPdf(PTBSDFParams m, float3 N, float3 V, float3 L) {
 }
 
 // ============================================================
-// 混合 BSDF 采样（漫反射余弦 + 各向异性 GGX + 清漆 GGX）
-// 返回采样方向 wi 与**混合分布的完整 pdf**（供 f/pdf 估计与 MIS 复用）
+// 电介质界面 / 参与介质（PT 任务 4：glTF transmission + volume）
+// ============================================================
+
+// 电介质菲涅尔反射率（Schlick 近似，f0 为垂直入射反射率）
+float FresnelDielectric(float cosTheta, float f0) {
+    float c = saturate(cosTheta);
+    return f0 + (1.0 - f0) * pow(1.0 - c, 5.0);
+}
+
+// Snell 折射：I 为入射方向（指向表面，已归一化），N 为朝向入射侧的法线，
+// eta = n1/n2（空气→介质时 = 1/ior）。返回 false = 全内反射（TIR）。
+bool RefractDirection(float3 I, float3 N, float eta, out float3 T) {
+    float cosI = dot(N, I);
+    float sin2T = eta * eta * (1.0 - cosI * cosI);
+    if (sin2T > 1.0) { T = float3(0, 0, 0); return false; }   // 全内反射
+    float cosT = sqrt(max(0.0, 1.0 - sin2T));
+    T = normalize(eta * I - (eta * cosI + cosT) * N);
+    return true;
+}
+
+// 均匀介质的自由程采样（指数分布，§9.1「随机弹射距离采样」）
+// 生存概率 P(d > D) = exp(-σ_t·D)，与 BeerTransmittance 的解析解一致
+float SampleDistanceInMedium(float u, float sigmaT) {
+    return -log(max(1.0 - u, 1e-6)) / max(sigmaT, 1e-6);
+}
+
+// Beer-Lambert 透射率（解析解）：T = exp(-σ_t · d)
+float3 BeerTransmittance(float3 sigmaT, float d) {
+    return exp(-sigmaT * max(d, 0.0));
+}
+
+// ============================================================
+// 混合 BSDF 采样（漫反射余弦 + 各向异性 GGX + 清漆 GGX + 透射/界面）
+//
+// 分支概率按**能量份额**分配（这是本实现无偏的关键）：
+//   pRefl = t·F      pRefr = t·(1-F)      pBsdf = 1-t      （t = transmission）
+// 与之配对：delta 分支的 f 就是同一份额，故分支权重恒为 1（反射）或 albedo（折射）；
+// 连续 BSDF 分支则照常用 f/pdf（总 pdf 里的 (1-t) 与 f 里的 (1-t) 相互抵消）。
+//
+// 出参：
+//   pdf        —— 连续 BSDF 分支的条件 pdf（delta 分支不使用）
+//   deltaWeight—— delta 分支（反射/折射）的权重乘子
+//   isDelta    —— 本次采样是否为 delta 瓣（rgen 据此跳过 f/pdf 计算）
 // ============================================================
 float3 SampleBSDF(PTBSDFParams m, float3 N, float3 V,
-                  float2 uLobe, float2 uDir, out float pdf) {
+                  float2 uLobe, float2 uDir, out float pdf,
+                  out float3 deltaWeight, out bool isDelta) {
+    pdf         = 0.0;
+    deltaWeight = float3(0, 0, 0);
+    isDelta     = false;
+
+    // ── 透射界面（delta 瓣）──
+    const float t = saturate(m.surface.w);
+    if (t > 0.0) {
+        float NdotV = max(dot(N, V), 1e-4);
+        float F = FresnelDielectric(NdotV, m.surface.y);
+        float pRefl = t * F;
+        float pRefr = t * (1.0 - F);
+        if (uLobe.x < pRefl) {
+            // 菲涅尔反射：分支权重 = 1（份额 t·F 已作为概率）
+            isDelta = true;
+            deltaWeight = float3(1.0);
+            pdf = pRefl;
+            return normalize(reflect(-V, N));
+        }
+        if (uLobe.x < pRefl + pRefr) {
+            // 折射（空气→介质，eta = 1/ior）；全内反射则退化为反射
+            float3 T;
+            float eta = 1.0 / max(m.surface.z, 1.0);
+            if (RefractDirection(-V, N, eta, T)) {
+                isDelta = true;
+                deltaWeight = m.albedo;       // 透射色 = baseColor（glTF transmission 语义）
+                pdf = pRefr;
+                return T;
+            }
+            isDelta = true;
+            deltaWeight = float3(1.0);        // TIR：全部反射
+            pdf = pRefr;
+            return normalize(reflect(-V, N));
+        }
+    }
+
+    // ── 连续 BSDF 分支（漫反射 / 镜面 / 清漆）──
     float pDiff, pSpec, pCc;
     BSDFLobeProbabilities(m, pDiff, pSpec, pCc);
 
@@ -219,11 +298,14 @@ float3 SampleBSDF(PTBSDFParams m, float3 N, float3 V,
     float3 T, B;
     BSDFTangentBasis(N, T, B);
 
+    // 界面分支已占用 [0, t) 的 u 区间，这里把它映射回 [0,1)
+    float u = (t > 0.0) ? saturate((uLobe.x - t) / max(1.0 - t, 1e-6)) : uLobe.x;
+
     float3 wi;
-    if (uLobe.x < pDiff) {
+    if (u < pDiff) {
         // 漫反射：余弦半球（sheen 的边缘项叠加在漫反射上，同属该瓣）
         wi = CosineSampleHemisphere(N, uDir);
-    } else if (uLobe.x < pDiff + pSpec) {
+    } else if (u < pDiff + pSpec) {
         // 基础镜面：GGX 半向量 → 反射方向
         float NdotH;
         float3 H = (m.disneyA.x > 0.0)
