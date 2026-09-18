@@ -554,6 +554,8 @@ int main() {
         if (auto* ddgi = deferredPipeline.GetDDGI()) {
             ddgi->blendAlpha = GetFloat(cfgData, "ddgi_blend", 0.9f);
             ddgi->debugScale = GetFloat(cfgData, "ddgi_scale", 1.0f);
+            // 时间维分摊（任务 12）：每 N 帧更新一轮探针；1 = 每帧全量（默认）
+            ddgi->updateStride = (u32)std::max(1, GetInt(cfgData, "ddgi_update_stride", 1));
             auto s = ddgi->GetSettings();
             s.intensity = GetFloat(cfgData, "ddgi_intensity", 1.0f);
             ddgi->SetSettings(s);
@@ -1564,6 +1566,7 @@ int main() {
             out["ddgi_blend"]     = std::to_string(ddgi->blendAlpha);
             out["ddgi_scale"]     = std::to_string(ddgi->debugScale);
             out["ddgi_intensity"] = std::to_string(ddgi->GetSettings().intensity);
+            out["ddgi_update_stride"] = std::to_string(ddgi->updateStride);
         }
         if (auto* ssr = deferredPipeline.GetSSR()) {
             out["ssr_max_steps"] = std::to_string(ssr->maxSteps);

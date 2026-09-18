@@ -221,7 +221,13 @@ void GI_DDGI::Render(rhi::IRHICommandList* cmd) {
                                  s_FirstFrame ? 0.0f : 1.0f);  // w=historyValid
     uniforms.viewProj   = m_ViewProj;
     uniforms.rsmLightViewProj = m_RSMLightViewProj;   // B 路径：RSM 光源 VP
-    uniforms.flags = float4((m_RSMPositionMap && m_RSMFluxMap) ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);  // x=useRSM
+    // x=useRSM；y/z=时间维分摊的步长与相位（任务 12）：每帧只更新 probeIndex % stride == phase
+    // 的那一批探针，未轮到的探针原样继承上一次结果（见 DDGI.comp.slang 的早退分支）。
+    const u32 stride = std::max(1u, updateStride);
+    const u32 phase  = updatePhase % stride;
+    uniforms.flags = float4((m_RSMPositionMap && m_RSMFluxMap) ? 1.0f : 0.0f,
+                            float(stride), float(phase), 0.0f);
+    ++updatePhase;
 
     void* mapped = m_GridUniform->Map();
     if (mapped) {

@@ -69,6 +69,15 @@ public:
     float  cellSize     = 3.0f;
     float  blendAlpha   = 0.85f;   // 时间混合：历史保留比例（0=无历史, 1=完全历史）
     float  debugScale   = 0.5f;    // 调试：DDGI 贡献缩放
+    /// 时间维分摊：每 N 帧更新一轮探针（任务 12 · AMORTIZE）。
+    /// 1 = 每帧全量更新（既有行为，默认）；N &gt; 1 时每帧只更新 `probeIndex % N == phase`
+    /// 的那一批（phase 逐帧轮转），未轮到的探针**原样继承上一次的结果**。
+    /// 与 `blendAlpha` 天然配合：探针本来就是"每帧新估计与历史做 lerp"，
+    /// 把更新频率降到 1/N 只是让同一个时间常数以 N 倍帧数走完。
+    /// 代价：每帧的样本量降为 1/N；代价的另一面是收敛所需帧数变为 N 倍。
+    u32 updateStride = 1;
+    /// 当前轮转相位（每帧自增，渲染时对 updateStride 取模）
+    u32 updatePhase  = 0;
 
 private:
     // 每探针存储的 float4 数量（9 SH + 7 保留）
@@ -83,7 +92,10 @@ private:
         float4   params;        // x=intensity, y=numSamples, z=blendAlpha, w=historyValid
         float4x4 viewProj;      // 相机 View→Proj（世界→裁剪，用于探针→屏幕投影）
         float4x4 rsmLightViewProj;  // RSM 光源 VP（世界→RSM 光源空间投影）
-        float4   flags;         // x=useRSM（1=RSM 世界辐射度，0=屏幕 HDR 回退）
+        // x=useRSM（1=RSM 世界辐射度，0=屏幕 HDR 回退）
+        // y=updateStride（时间维分摊：每 N 帧更新一轮探针，1=每帧全量）
+        // z=updatePhase（本帧轮到的相位，shader 判 probeIndex % stride == phase）
+        float4   flags;
     };
 
     rhi::IRHIDevice* m_Device = nullptr;

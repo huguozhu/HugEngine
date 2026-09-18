@@ -39,7 +39,7 @@
     float4   u_Params;       // x=intensity, y=numSamples, z=blendAlpha, w=historyValid
     float4x4 u_ViewProj;     // 相机 View→Proj（世界→裁剪空间）
     float4x4 u_RSMLightViewProj;  // RSM 光源 VP（世界→RSM 光源空间投影）
-    float4   u_Flags;        // x=useRSM（1=RSM 世界辐射度，0=屏幕 HDR 回退）
+    float4   u_Flags;        // x=useRSM；y=updateStride（时间维分摊步长）；z=updatePhase
 };
 
 // 每探针 float4 数量（与 C++ kFloats4PerProbe 保持一致）
@@ -109,6 +109,22 @@ void main(uint3 id : SV_DispatchThreadID) {
     uint probeCount = gridX * gridY * gridZ;
     int  numSamples = int(u_Params.y);
     if (probeIndex >= probeCount || numSamples <= 0) return;
+
+    // ── 时间维分摊（任务 12 · AMORTIZE）──
+    // stride > 1 时每帧只更新一批探针（probeIndex % stride == phase），其余探针**原样继承
+    // 上一次的结果**。这里必须显式把历史拷到当前缓冲：两个探针缓冲是逐帧 ping-pong 的，
+    // 本帧的"当前"缓冲里装的是**两帧前**的值，而"历史"缓冲才是最近一次的结果（见
+    // GI_DDGI::Render 末尾的 swap）。不拷贝就会让未轮到的探针每帧倒退一代。
+    // 探针本来就是"每帧新估计与历史做 lerp"，所以降频只是把同一个时间常数拉长为 N 倍帧数。
+    uint updateStride = uint(u_Flags.y + 0.5);
+    uint updatePhase  = uint(u_Flags.z + 0.5);
+    if (updateStride > 1u && (probeIndex % updateStride) != updatePhase) {
+        uint carryBase = probeIndex * kStride;
+        for (uint i = 0u; i < kStride; i++) {
+            u_Probes[carryBase + i] = u_ProbeHistory[carryBase + i];
+        }
+        return;
+    }
 
     // 计算探针世界空间位置
     uint gx = probeIndex % gridX;
