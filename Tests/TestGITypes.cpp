@@ -489,7 +489,8 @@ TEST_CASE("GIRegistry::IsAvailable：管线能力 ∧ 设备能力") {
     CHECK(GIRegistry::IsAvailable(GISourceId::RTGI, PipelineCaps::Deferred, true));
 
     // None 与 **刻意未实现**的 Lightmap 恒不可用（任务 18：把「文档说可用、实际不可用」
-    // 这处配置说谎改成明确的声明；原因与前置条件见 ToPipelineCap 的注释与文档任务 31）
+    // 这处配置说谎改成明确的声明；原因见 ToPipelineCap 的注释与文档 §10.2 任务 18
+    //（承接它的任务 31 已取消，但"未实现的源不给能力位"这条声明与下面的断言继续有效）
     CHECK_FALSE(GIRegistry::IsAvailable(GISourceId::None, PipelineCaps::Deferred, true));
     CHECK_FALSE(GIRegistry::IsAvailable(GISourceId::Lightmap, PipelineCaps::Deferred, true));
 }

@@ -87,7 +87,8 @@ GPU_CONST(GPU_UINT kGPUBinding_SSR           = 21);  // SSR
 GPU_CONST(GPU_UINT kGPUBinding_DDGIProbes    = 22);  // DDGI 探针
 GPU_CONST(GPU_UINT kGPUBinding_DDGIGridParams = 6);  // DDGI 探针网格参数 UBO（Lighting 采样 DDGI 用，binding 6 在 Deferred Lighting set 中空闲）
 GPU_CONST(GPU_UINT kGPUBinding_RSMIndirect    = 5);  // RSM 间接光 E（半分辨率，任务 16；binding 5 在 Deferred Lighting set 中空闲）
-// 光照图（任务 31）。两个号在 Deferred Lighting set 中空闲（Forward 的 per-frame set 用 4 放
+// 光照图（原任务 31，该任务**已取消**；通道与常量作为已落地基础设施保留）。
+// 两个号在 Deferred Lighting set 中空闲（Forward 的 per-frame set 用 4 放
 // CSM 级联 0，两套 set 互不影响，与 RSMIndirect 的 5 同一种做法）：
 //   4 = 光照图键（GBuffer MRT7 的拷贝视图：uv0.xy + objectIndex）
 //   7 = 烘焙光照图本身（2D 纹理数组，一页一个物体；数组层的可采样性由 RHI 保证）
@@ -271,7 +272,7 @@ GPU_STRUCT GPUObjectData {
     float4   disneyA;               // [128]     x=anisotropic, y=subsurface, z=specular, w=sheen
     float4   disneyB;               // [144]     x=clearcoat, y=clearcoatGloss, z=specularTint.r, w=specularTint.g
     float    disneyC;               // [160]     specularTint.b
-    // 物体**世界空间** AABB（任务 31）：光照图的程序化展开需要它。
+    // 物体**世界空间** AABB（原任务 31，该任务已取消；字段保留）：光照图的程序化展开需要它。
     // 【为什么放在这里而不是顶点里】展开要的是"这个物体有多大"，是**每物体**的量：放进
     // 对象缓冲后，GBuffer 就能直接用（世界位置 + 世界法线 + 本物体 AABB）算出光照图键
     // （页 = objectIndex、tile = 主导轴、tile 内 = 归一化投影），不需要给网格加 UV1 通道，
