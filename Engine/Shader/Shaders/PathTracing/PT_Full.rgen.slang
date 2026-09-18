@@ -6,7 +6,7 @@
 //      - NEE（Next Event Estimation）：全光源循环 + 阴影射线 + MIS 幂次启发
 //      - ReSTIR DI（flags bit0）：反弹 0 从蓄水池采样 1 条阴影射线替代 NEE
 //      - 俄罗斯轮盘赌终止（flags bit2）
-//      - BSDF 采样（漫反射余弦 + GGX 镜面混合）→ 下一根光线
+//      - BSDF 采样（漫反射余弦 + 各向异性 GGX + 清漆 GGX，三瓣混合、统一 pdf）→ 下一根光线
 //   3. 输出 5 个 UAV：HDR 颜色 / 线性视图深度 / 世界法线+粗糙度 / 屏幕速度 / albedoMetallic
 //
 // 输出 GBuffer 供：RTDenoiser 时域累积（depth/normal/velocity）+
@@ -131,6 +131,8 @@ void main() {
             float4 disneyA       = payload.disneyA;
             float4 disneyB       = payload.disneyB;
             float4 surfaceParams = payload.surfaceParams;   // (disneyC, dielectricF0, ior, transmission)
+            // BSDF 参数打包：求值（PT_EvalBRDF）、采样（SampleBSDF）、pdf（BSDFPdf）共用这一份
+            PTBSDFParams mat = MakeBSDFParams(albedo, metallic, rough, disneyA, disneyB, surfaceParams);
 
             if (bounce == 0) {
                 primaryHit   = true;
@@ -158,9 +160,7 @@ void main() {
                     if (SampleLight(g_Lights[res.lightIndex], P, lightPos2, L, Li, lightPdf)
                         && dot(N, L) > 0.0) {
                         // 共享 Disney BRDF 求值（与光栅化 PBR.frag / DeferredLighting.frag 同一函数、同一组参数）
-                        float3 brdf = PBR_BRDF(albedo, metallic, rough, N, V, L,
-                                               surfaceParams.y, float2(0.0, 1.0),
-                                               disneyA, disneyB, surfaceParams.x);
+                        float3 brdf = PT_EvalBRDF(mat, N, V, L);
                         float vis = TraceShadowRay(P, N, L, length(lightPos2 - P));
                         // RTXDI 无偏估计：f(y)·W·M / weightSum
                         // （W 为选中样本目标函数，时空复用 Pass 已对当前像素重评估）
@@ -178,20 +178,11 @@ void main() {
                     float ndl = dot(N, L);
                     if (ndl <= 0.0) continue;
 
-                    float3 brdf = PBR_BRDF(albedo, metallic, rough, N, V, L,
-                                           surfaceParams.y, float2(0.0, 1.0),
-                                           disneyA, disneyB, surfaceParams.x);
+                    float3 brdf = PT_EvalBRDF(mat, N, V, L);
 
-                    // BRDF 采样 pdf（与 SampleBSDF 相同的混合分布，MIS 用）
-                    // 已知限制：这里只覆盖「余弦漫反射 + 各向同性 GGX」两瓣；
-                    // 材质带 clearcoat / sheen / anisotropy 时该 pdf 与 PBR_BRDF 的
-                    // 真实 lobe 不完全匹配（PT 任务 3 统一采样端后修正）。
-                    float3 H = normalize(V + L);
-                    float NdotV = max(dot(N, V), 1e-4);
-                    float NdotH = max(dot(N, H), 0.0);
-                    float pSpec = lerp(0.35, 0.95, metallic);
-                    float brdfPdf = (1.0 - pSpec) * (ndl / 3.14159265)
-                                  + pSpec * (D_GGX(NdotH, rough) * NdotH / (4.0 * NdotV));
+                    // BRDF 采样 pdf：直接调用采样端的同一函数（三瓣混合分布），
+                    // MIS 权重引用的密度因此与 SampleBSDF 实际使用的策略严格一致
+                    float brdfPdf = BSDFPdf(mat, N, V, L);
 
                     float weight = 1.0;
                     if ((g_PC.flags & PT_FLAG_MIS) != 0u)
@@ -235,12 +226,10 @@ void main() {
             float2 uDir  = float2(Rand(idx, g_PC.frameIndex, s * 23 + bounce * 11 + 3),
                                   Rand(idx, g_PC.frameIndex, s * 23 + bounce * 11 + 4));
             float pdf;
-            float3 wi = SampleBSDF(N, V, metallic, rough, uLobe, uDir, pdf);
+            float3 wi = SampleBSDF(mat, N, V, uLobe, uDir, pdf);
             if (pdf <= 0.0 || dot(N, wi) <= 0.0) break;
 
-            float3 f = PBR_BRDF(albedo, metallic, rough, N, V, wi,
-                                surfaceParams.y, float2(0.0, 1.0),
-                                disneyA, disneyB, surfaceParams.x);
+            float3 f = PT_EvalBRDF(mat, N, V, wi);
             throughput *= f * max(dot(N, wi), 0.0) / pdf;
 
             ray.Origin    = P + N * 0.001;

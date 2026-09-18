@@ -106,38 +106,151 @@ float3 SampleGGXHalf(float3 N, float roughness, float2 u, out float NdotH) {
 }
 
 // ============================================================
-// 混合 BSDF 采样（漫反射余弦 + GGX 镜面，单样本模型）
-// 返回采样方向 wi 与完整混合 pdf（两瓣 pdf 之和，保证无偏）
+// BSDF 参数 — 与 pbr_common.PBR_BRDF 的参数一一对应
+// （打包成结构体是为了让「求值 / 采样 / pdf」三处共用同一组参数，
+//  避免长参数列表在调用点写错顺序导致求值与采样不一致）
 // ============================================================
-float3 SampleBSDF(float3 N, float3 V, float metallic, float roughness,
+struct PTBSDFParams {
+    float3 albedo;
+    float  metallic;
+    float  roughness;
+    float4 disneyA;   // anisotropic, subsurface, specular, sheen
+    float4 disneyB;   // clearcoat, clearcoatGloss, specularTint.rg
+    float4 surface;   // disneyC(specularTint.b), dielectricF0, ior, transmission
+};
+
+PTBSDFParams MakeBSDFParams(float3 albedo, float metallic, float roughness,
+                            float4 disneyA, float4 disneyB, float4 surface) {
+    PTBSDFParams m;
+    m.albedo    = albedo;
+    m.metallic  = metallic;
+    m.roughness = roughness;
+    m.disneyA   = disneyA;
+    m.disneyB   = disneyB;
+    m.surface   = surface;
+    return m;
+}
+
+// 各向异性切线基：与 pbr_common.PBR_BRDF 内的构造逐行一致。
+// 采样端与求值端必须用同一组 T/B，否则各向异性方向对不上。
+void BSDFTangentBasis(float3 N, out float3 T, out float3 B) {
+    if (abs(N.y) < 0.999)
+        T = normalize(cross(float3(0, 1, 0), N));
+    else
+        T = normalize(cross(float3(1, 0, 0), N));
+    B = normalize(cross(N, T));
+}
+
+// ============================================================
+// 各瓣采样概率 — 与 PBR_BRDF 的三个 lobe 对应
+//   漫反射瓣（含 subsurface 与 sheen 的边缘项，sheen 叠加在漫反射上）
+//   基础镜面瓣（GGX，各向异性时按 aniso 拉伸）
+//   清漆瓣（KHR_materials_clearcoat，GGX 第二层）
+//
+// 概率只影响方差、不影响无偏性；关键是 pdf 求值（BSDFPdf）必须用**同一组
+// 概率**，这样 MIS 权重引用的密度就是实际使用的采样策略密度。
+// 默认材质（clearcoat=0）时 pClearcoat=0、pSpec/pDiff 与旧两瓣实现完全相同。
+// ============================================================
+void BSDFLobeProbabilities(PTBSDFParams m, out float pDiff, out float pSpec, out float pClearcoat) {
+    float cc   = saturate(m.disneyB.x);                    // 清漆层强度
+    float base = 1.0 - cc;                                 // 基础层（漫反射 + 镜面）
+    float ps   = lerp(0.35, 0.95, saturate(m.metallic));   // 基础层内镜面占比（沿用旧实现）
+    pSpec      = base * ps;
+    pDiff      = base * (1.0 - ps);
+    pClearcoat = cc;
+}
+
+// 各向异性 GGX 半向量采样（NDF 采样，参数为各向异性 alpha）。
+// 用「方向相关 alpha」把各向同性公式推广到椭圆分布：
+//   a²(φ) = ax²cos²φ + ay²sin²φ
+// 与之配对的 pdf 由 BSDFPdf 用同一组 (ax, ay) 经 D_GGX_aniso 计算。
+// aniso=0（默认材质）时走 SampleGGXHalf，采样、pdf 与旧实现逐位一致。
+float3 SampleGGXHalfAniso(float3 N, float3 T, float3 B,
+                          float ax, float ay, float2 u, out float NdotH) {
+    float phi    = 6.2831853 * u.x;
+    float cosPhi = cos(phi), sinPhi = sin(phi);
+    float a2     = ax * ax * cosPhi * cosPhi + ay * ay * sinPhi * sinPhi;
+    float cosTheta = sqrt((1.0 - u.y) / max(1.0 + (a2 - 1.0) * u.y, 1e-6));
+    float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
+    NdotH = cosTheta;
+    return normalize(sinTheta * cosPhi * T + sinTheta * sinPhi * B + cosTheta * N);
+}
+
+// 混合 pdf（三瓣之和）— 采样与 MIS 共用同一函数，保证权重与采样策略一致
+float BSDFPdf(PTBSDFParams m, float3 N, float3 V, float3 L) {
+    float pDiff, pSpec, pCc;
+    BSDFLobeProbabilities(m, pDiff, pSpec, pCc);
+
+    float NdotL = dot(N, L);
+    if (NdotL <= 0.0) return 0.0;
+    float NdotV = max(dot(N, V), 1e-4);
+    float3 H = normalize(V + L);
+    float NdotH = max(dot(N, H), 0.0);
+
+    float alpha  = max(m.roughness * m.roughness, 1e-4);
+    float aspect = sqrt(1.0 - 0.9 * saturate(m.disneyA.x));
+    float ax = alpha / aspect, ay = alpha * aspect;
+    float3 T, B;
+    BSDFTangentBasis(N, T, B);
+
+    float Ds = (m.disneyA.x > 0.0)
+             ? D_GGX_aniso(NdotH, dot(H, T), dot(H, B), ax, ay)
+             : D_GGX(NdotH, m.roughness);
+    float pdfSpec = Ds * NdotH / (4.0 * NdotV);
+    float pdfDiff = NdotL / 3.14159265;
+    float Dc      = D_GGX(NdotH, m.disneyB.y);
+    float pdfCc   = Dc * NdotH / (4.0 * NdotV);
+
+    return pDiff * pdfDiff + pSpec * pdfSpec + pCc * pdfCc;
+}
+
+// ============================================================
+// 混合 BSDF 采样（漫反射余弦 + 各向异性 GGX + 清漆 GGX）
+// 返回采样方向 wi 与**混合分布的完整 pdf**（供 f/pdf 估计与 MIS 复用）
+// ============================================================
+float3 SampleBSDF(PTBSDFParams m, float3 N, float3 V,
                   float2 uLobe, float2 uDir, out float pdf) {
-    // 镜面采样概率：金属 >90% 镜面，介质保留 35% 镜面（F0=0.04 不可忽略）
-    float pSpec = lerp(0.35, 0.95, metallic);
-    float pDiff = 1.0 - pSpec;
+    float pDiff, pSpec, pCc;
+    BSDFLobeProbabilities(m, pDiff, pSpec, pCc);
+
+    float alpha  = max(m.roughness * m.roughness, 1e-4);
+    float aspect = sqrt(1.0 - 0.9 * saturate(m.disneyA.x));
+    float ax = alpha / aspect, ay = alpha * aspect;
+    float3 T, B;
+    BSDFTangentBasis(N, T, B);
 
     float3 wi;
     if (uLobe.x < pDiff) {
-        // 漫反射：余弦半球
+        // 漫反射：余弦半球（sheen 的边缘项叠加在漫反射上，同属该瓣）
         wi = CosineSampleHemisphere(N, uDir);
-        float pdfCos = max(dot(N, wi), 0.0) / 3.14159265;
-        // 镜面瓣在同一方向的 pdf（半向量法）
-        float NdotV = max(dot(N, V), 1e-4);
-        float3 H = normalize(V + wi);
-        float NdotH = max(dot(N, H), 0.0);
-        float pdfGgx = D_GGX(NdotH, roughness) * NdotH / (4.0 * NdotV);
-        pdf = pDiff * pdfCos + pSpec * pdfGgx;
-    } else {
-        // 镜面：GGX 半向量采样 → 反射方向
+    } else if (uLobe.x < pDiff + pSpec) {
+        // 基础镜面：GGX 半向量 → 反射方向
         float NdotH;
-        float3 H = SampleGGXHalf(N, roughness, uDir, NdotH);
+        float3 H = (m.disneyA.x > 0.0)
+                 ? SampleGGXHalfAniso(N, T, B, ax, ay, uDir, NdotH)
+                 : SampleGGXHalf(N, m.roughness, uDir, NdotH);
         wi = normalize(reflect(-V, H));
-        if (dot(N, wi) <= 0.0) { pdf = 0.0; return float3(0, 0, 1); }
-        float NdotV = max(dot(N, V), 1e-4);
-        float pdfGgx = D_GGX(NdotH, roughness) * NdotH / (4.0 * NdotV);
-        float pdfCos = max(dot(N, wi), 0.0) / 3.14159265;
-        pdf = pDiff * pdfCos + pSpec * pdfGgx;
+    } else {
+        // 清漆层：GGX 半向量（粗糙度由 clearcoatGloss 给出，与求值的 D_GGX 同参）
+        float NdotH;
+        float3 H = SampleGGXHalf(N, m.disneyB.y, uDir, NdotH);
+        wi = normalize(reflect(-V, H));
     }
+
+    if (dot(N, wi) <= 0.0) { pdf = 0.0; return float3(0, 0, 1); }
+    pdf = BSDFPdf(m, N, V, wi);
     return wi;
+}
+
+// ============================================================
+// 共享 BRDF 求值（统一入口）
+// 与光栅化 PBR.frag / DeferredLighting.frag 调用的是同一个 pbr_common.PBR_BRDF，
+// 参数也来自同一份打包（RT/PTMaterialParams.h）→ 两侧对同一材质必然一致
+// ============================================================
+float3 PT_EvalBRDF(PTBSDFParams m, float3 N, float3 V, float3 L) {
+    return PBR_BRDF(m.albedo, m.metallic, m.roughness, N, V, L,
+                    m.surface.y, float2(0.0, 1.0),
+                    m.disneyA, m.disneyB, m.surface.x);
 }
 
 // ============================================================
