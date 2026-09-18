@@ -24,6 +24,14 @@ bool RTEffectPass::Initialize(rhi::IRHIDevice* device,
     m_Device   = device;
     m_Width    = width;
     m_Height   = height;
+    // 【push constant 的 stage 掩码必须覆盖 RHI 推送时用的那几级】
+    // `VulkanCommandList::SetPushConstants` 在 RT 绑定点上固定用「RayGen|Miss|ClosestHit|
+    // AnyHit|Callable」推送，而调用方（各效果 Pass）通常只声明 RayGen|ClosestHit
+    // ⇒ 每一帧每级未被声明的 stage 都触发
+    // `VUID-vkCmdPushConstants-offset-01795`（实测：任何开 RT 源的配置每次运行 10 条，
+    // 见 §11.3 的校验计数说明）。这里统一把范围补全，调用方不必各自记住这件事。
+    pcRange.stageMask |= rhi::kStageMaskRayGen | rhi::kStageMaskMiss | rhi::kStageMaskClosestHit
+                       | rhi::kStageMaskAnyHit | rhi::kStageMaskCallable;
     m_PCRange  = pcRange;
     m_DebugName = String(debugName);
 
