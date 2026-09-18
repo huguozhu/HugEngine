@@ -880,8 +880,11 @@ bool RTPass::CreateBindlessDescriptorSet(rhi::IRHIDevice* device, u32 maxTexture
     // set=2: 纹理数组(CombinedImageSampler) + 独立采样器
     rhi::DescriptorSetLayoutDesc desc;
     desc.bindings = {
+        // 【校验修复】stageMask 原为字面量 0x40 = VK_SHADER_STAGE_TASK_BIT_EXT（Task 阶段），
+        // 而这一组是给 ClosestHit 采材质纹理用的（0x400）——阶段掩码写错会让校验层
+        // 报 VUID-VkRayTracingPipelineCreateInfoKHR-layout-07988。改用命名常量。
         { 0, rhi::DescriptorType::CombinedImageSampler,
-          maxTextures, 0x40, true },  // bindless=true, ClosestHit
+          maxTextures, rhi::kStageMaskClosestHit, true },  // bindless=true, ClosestHit
     };
     m_DescLayout2 = device->CreateDescriptorSetLayout(desc);
     if (m_DescLayout2 == rhi::kInvalidLayout) {

@@ -448,8 +448,11 @@ int main() {
 
         rhi::DescriptorSetLayoutDesc rtSet1Desc;
         rtSet1Desc.bindings = {
-            { 0, rhi::DescriptorType::SampledImage,  1, 0x40 },  // 材质纹理 (3×N)
-            { 1, rhi::DescriptorType::UniformBuffer, 1, 0x40 },  // 光源 UB
+            // 【校验修复】原本写 0x40，而 0x40 是 VK_SHADER_STAGE_TASK_BIT_EXT（Task 阶段），
+            // ClosestHit 是 0x400 ⇒ 校验层报 VUID-VkRayTracingPipelineCreateInfoKHR-layout-07988
+            // （"closest-hit 用了该描述符，但 stageFlags 声明的是 TASK"）。用命名常量避免再手抄错位。
+            { 0, rhi::DescriptorType::SampledImage,  1, rhi::kStageMaskClosestHit },  // 材质纹理 (3×N)
+            { 1, rhi::DescriptorType::UniformBuffer, 1, rhi::kStageMaskClosestHit },  // 光源 UB
         };
         rtLayout1 = device->CreateDescriptorSetLayout(rtSet1Desc);
 
