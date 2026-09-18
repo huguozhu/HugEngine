@@ -101,6 +101,12 @@ struct PipelineStateDesc {
     // Subpass index（默认 0，用于 Deferred 渲染的多 Subpass）
     u32                 subpassIndex    = 0;
 
+    // DGC（VK_EXT_device_generated_commands）：以本管线作为执行集的 initialPipeline 时
+    // 必须带 VK_PIPELINE_CREATE_2_INDIRECT_BINDABLE_BIT_EXT，否则校验层报
+    // VUID-VkIndirectExecutionSetPipelineInfoEXT-initialPipeline-11153。
+    // 该位只能经 VkPipelineCreateFlags2CreateInfo 传入，故这里不能走 GPL link 路径。
+    bool                indirectBindable = false;
+
     // Debug
     String              debugName;
 };

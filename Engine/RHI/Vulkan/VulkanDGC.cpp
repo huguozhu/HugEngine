@@ -41,11 +41,24 @@ bool VulkanDGC::Initialize(VkDevice device, VkPhysicalDevice physical,
     m_MaxSequences = maxSequences;
     m_MaxDraws     = maxDraws;
 
-    // 1. 创建 IndirectCommandsLayout（单 DRAW_INDEXED 令牌）
-    VkIndirectCommandsLayoutTokenEXT token{};
-    token.sType = VK_STRUCTURE_TYPE_INDIRECT_COMMANDS_LAYOUT_TOKEN_EXT;
-    token.type  = VK_INDIRECT_COMMANDS_TOKEN_TYPE_DRAW_INDEXED_EXT;
-    token.offset = 0;
+    // 1. 创建 IndirectCommandsLayout（EXECUTION_SET + DRAW_INDEXED 两个令牌）
+    // 【§0.6.2 校验修复】此前只有 DRAW_INDEXED 一个令牌，而本类在查询预处理缓冲大小与执行时
+    // 都会传入 indirectExecutionSet —— 布局里没有 EXECUTION_SET 令牌时校验层报
+    // VUID-VkGeneratedCommandsMemoryRequirementsInfoEXT-indirectCommandsLayout-11011。
+    // 令牌顺序由规范强制：EXECUTION_SET 必须首位（-pTokens-11139），动作令牌必须末位（-11100）；
+    // EXECUTION_SET 不消费序列数据，故 DRAW_INDEXED 的 offset 仍是 0。
+    VkIndirectCommandsExecutionSetTokenEXT execSetToken{};
+    execSetToken.type         = VK_INDIRECT_EXECUTION_SET_INFO_TYPE_PIPELINES_EXT;
+    execSetToken.shaderStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    VkIndirectCommandsLayoutTokenEXT tokens[2]{};
+    tokens[0].sType = VK_STRUCTURE_TYPE_INDIRECT_COMMANDS_LAYOUT_TOKEN_EXT;
+    tokens[0].type  = VK_INDIRECT_COMMANDS_TOKEN_TYPE_EXECUTION_SET_EXT;
+    tokens[0].data.pExecutionSet = &execSetToken;
+
+    tokens[1].sType  = VK_STRUCTURE_TYPE_INDIRECT_COMMANDS_LAYOUT_TOKEN_EXT;
+    tokens[1].type   = VK_INDIRECT_COMMANDS_TOKEN_TYPE_DRAW_INDEXED_EXT;
+    tokens[1].offset = 0;
 
     VkIndirectCommandsLayoutCreateInfoEXT layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_INDIRECT_COMMANDS_LAYOUT_CREATE_INFO_EXT;
@@ -55,9 +68,10 @@ bool VulkanDGC::Initialize(VkDevice device, VkPhysicalDevice physical,
                                 | VK_SHADER_STAGE_FRAGMENT_BIT;
     // 每条序列步长 = VkDrawIndexedIndirectCommand（5×u32 = 20 字节）
     layoutInfo.indirectStride = kDGCDrawIndexedIndirectStride;  // VkDrawIndexedIndirectCommand
+    // 令牌序列里带 EXECUTION_SET ⇒ 管线布局由执行集提供，此处留空
     layoutInfo.pipelineLayout = VK_NULL_HANDLE;
-    layoutInfo.tokenCount     = 1;
-    layoutInfo.pTokens        = &token;
+    layoutInfo.tokenCount     = 2;
+    layoutInfo.pTokens        = tokens;
 
     VkResult result = funcs.vkCreateIndirectCommandsLayoutEXT(
         device, &layoutInfo, nullptr, &m_Layout);

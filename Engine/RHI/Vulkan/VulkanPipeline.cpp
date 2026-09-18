@@ -109,6 +109,8 @@ static uint64_t HashPipelineStateDesc(const PipelineStateDesc& desc) {
     h = hashU32(h, static_cast<u32>(desc.depthLoadOp));
     h = hashU32(h, desc.sampleCount);
     h = hashU32(h, desc.subpassIndex);
+    // DGC：创建标志不同（是否 INDIRECT_BINDABLE）不能共用同一条缓存
+    h = hashU32(h, desc.indirectBindable ? 1u : 0u);
 
     // 混合状态（per-MRT，索引对应 colorFormats）
     // 缺失会导致仅 blend 状态不同的变体 PSO 错误地共享同一缓存条目（GPL 变体演示依赖此维度）
@@ -720,7 +722,9 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     }
 
     // ── GPL fast-link 分支（支持 GPL 时优先；任一段创建或 link 失败则回退单片路径）──
-    if (vulkanDevice && vulkanDevice->SupportsGraphicsPipelineLibrary()) {
+    // INDIRECT_BINDABLE（DGC 执行集的 initialPipeline）不走 GPL：该标志只能经
+    // VkPipelineCreateFlags2CreateInfo 传给 vkCreateGraphicsPipelines，而 GPL link 路径不接受它。
+    if (!desc.indirectBindable && vulkanDevice && vulkanDevice->SupportsGraphicsPipelineLibrary()) {
         u64 hVI = HashPipelinePart(desc, PipelinePartKind::VertexInput);
         u64 hPR = HashPipelinePart(desc, PipelinePartKind::PreRaster);
         u64 hFS = HashPipelinePart(desc, PipelinePartKind::FragmentShader);
@@ -764,8 +768,15 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
 
     // 组装完整单片 pipeline
     VkPipelineShaderStageCreateInfo stages[2] = { parts.vsStage, parts.fsStage };
+    // DGC：INDIRECT_BINDABLE 只能通过 VkPipelineCreateFlags2CreateInfo 传入（flags2 机制）
+    VkPipelineCreateFlags2CreateInfoKHR flags2{};
+    if (desc.indirectBindable) {
+        flags2.sType = VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO_KHR;
+        flags2.flags = VK_PIPELINE_CREATE_2_INDIRECT_BINDABLE_BIT_EXT;
+    }
     VkGraphicsPipelineCreateInfo pipeInfo{};
     pipeInfo.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipeInfo.pNext               = desc.indirectBindable ? &flags2 : nullptr;
     pipeInfo.stageCount          = 2;
     pipeInfo.pStages             = stages;
     pipeInfo.pVertexInputState   = &parts.vertexInput;
