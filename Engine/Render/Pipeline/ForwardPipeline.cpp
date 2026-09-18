@@ -59,8 +59,11 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
     if (width  > 0) m_HDRWidth  = width;
     if (height > 0) m_HDRHeight = height;
 
-    // GI 通道配置：按本管线能力（Forward：Raster 阴影 + SSAO + SSR + IBL/RSM）初始化，
-    // 不可用通道（如 SSGI/DDGI/RT 系列）自动降级
+    // GI 通道配置：Forward 的能力位里**没有任何 GI 源**（只有光栅阴影），因此降级后三个
+    // GI 通道都是空的。这不是遗漏，而是如实反映现状：本管线的 IBL 与 RSM 由**管线级开关**
+    // （`iblIntensity` / `rsmIndirect`）加内部硬编码路径驱动，既不读层栈，PBR 着色器里也没有
+    // `GIBlendParams` 归一化合成（§9.2-H）。此前声明 IBL/RSM 可用，实际只是把源放进一个
+    // 没人消费的层栈里。要让它真正走层栈归一化是独立的改造项（文档任务 26）。
     m_GIConfig = GIRegistry::Degrade(GIConfigFromPreset(GIQualityPreset::Medium), PipelineCaps::Forward,
                                      device->GetCaps().supportsRayTracing);
 

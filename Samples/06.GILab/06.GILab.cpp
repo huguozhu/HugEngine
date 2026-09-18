@@ -1079,6 +1079,18 @@ int main() {
             const ImVec4 colOk  = ImVec4(0.4f, 1.0f, 0.4f, 1.0f);
             const ImVec4 colBad = ImVec4(1.0f, 0.55f, 0.2f, 1.0f);
 
+            // 本管线的能力位里一个 GI 源都没有（当前只有 Forward 是这样）：它的 IBL/RSM 由
+            // 管线级开关驱动、不读层栈，因此下面整段层栈 UI 对它是**死开关**。与其把死开关
+            // 摆出来，不如直说（§9.2-H）。阴影通道独立于层栈，仍然有效。
+            const bool anyGISource = (giCaps & render::PipelineCaps::AllSources) != 0u;
+            if (!anyGISource) {
+                ImGui::TextColored(colBad,
+                    "本管线的 GI 不由层栈驱动（IBL/RSM 是管线级开关），层栈内容对它没有影响");
+                // 层栈 UI 全部置灰但不隐藏：内容仍可查看（便于对照诊断），但不可编辑，
+                // 免得用户以为改了这里就能改变 Forward 的画面。
+                ImGui::BeginDisabled();
+            }
+
             // ── 通道 UI 辅助：显示该通道的「源层栈」（源 / 频段 / 权重 / 让位距离）──
             // 勾选 = 该源参与合成（weight>0）；多个源同时勾选即为「融合」
             auto channelUI = [&](const char* label, render::GIChannelStack& st,
@@ -1133,6 +1145,9 @@ int main() {
                 std::vector<render::GISourceId> diffuseSources;
                 if (dp) {
                     for (auto id : kAllDiffuse) {
+                        // 只列出「本管线能力位允许」的源：能力位就是层栈模型下管线能承载的范围，
+                        // 列出一个它根本不消费的源，等于让面板把一个假开关摆给用户（§9.2-H）。
+                        if (!render::GIRegistry::IsAvailable(id, giCaps, rtOk)) continue;
                         for (auto& p : dp->GetGIProviders()) {
                             if (p->Handles(id)) { diffuseSources.push_back(id); break; }
                         }
@@ -1245,6 +1260,9 @@ int main() {
                 }
                 ImGui::Unindent(12.0f);
             }
+
+            // 结束「层栈 UI 置灰」（见上：本管线没有层栈 GI 源时）
+            if (!anyGISource) ImGui::EndDisabled();
 
             // ---- Shadow（阴影）----
             // 阴影是「可见性（乘法项）」而非「能量（加法项）」——不适用层栈的
