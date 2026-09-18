@@ -8,6 +8,8 @@
 # Configurations (diffuse stack unless noted; direct light on, no auto exposure):
 #   ssgi     : diffuse = {SSGI}                     -> the only four-figure item
 #   rtgi     : diffuse = {RTGI}                     -> RT dispatch + AS_Build
+#   ddgi     : diffuse = {DDGI}                     -> probe-grid cost (task 14 fit the grid to the
+#                                                     scene AABB, so the probe count is no longer 256)
 #   rtfull   : diffuse = {DDGI,RTGI} + specular {RT reflection} + RT shadow
 #
 # NOTE: ASCII-only on purpose -- Windows PowerShell 5.1 reads .ps1 as ANSI.
@@ -66,12 +68,13 @@ function Run-Case([string]$tag, [hashtable]$ov) {
 
 Run-Case 'ssgi'   @{ 'gi_blend_diffuse_w2' = '1.000000' }
 Run-Case 'rtgi'   @{ 'gi_blend_diffuse_w3' = '1.000000' }
+Run-Case 'ddgi'   @{ 'gi_blend_diffuse_w1' = '1.000000' }
 Run-Case 'rtfull' @{ 'gi_blend_diffuse_w1' = '1.000000'; 'gi_blend_diffuse_w3' = '1.000000'
                      'gi_blend_specular_w2' = '1.000000'; 'gi_shadow' = '2' }
 
 Write-Output ""
 Write-Output "=== GI GPU cost (ms, rolling average of the last ~10 rounds) ==="
-foreach ($tag in 'ssgi', 'rtgi', 'rtfull') {
+foreach ($tag in 'ssgi', 'rtgi', 'ddgi', 'rtfull') {
     $log = Join-Path $outDir "cost_$tag.log"
     $last = (Select-String -Path $log -Pattern '\[GI ' | Select-Object -Last 1).Line
     Write-Output ("{0,-8} {1}" -f $tag, ($last -replace '^.*\[GI [^\]]*\]', '').Trim())
