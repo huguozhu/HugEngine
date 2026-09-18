@@ -1087,19 +1087,37 @@ void ForwardPipeline::RenderScene(
     // ============================================================
     world.ForEach<he::InstancedMeshComponent>([&](he::Entity, he::InstancedMeshComponent& im) {
         u32 count = im.GetInstanceCount();
+        // 任务 23：帧边界推进退役队列（有界释放；先推进本帧再入队本帧退役的资源）
+        im.AdvanceRetireQueue();
         if (count == 0 || im.GetIndexCount() == 0) return;
 
-        // 实例变换上传（脏标记触发；首次创建）
+        // 实例变换上传（脏标记触发）：容量够就 Map 原地复用，只在扩容时重建缓冲。
+        // 【为什么】bindless 堆槽位回收后，"每次更新都新建缓冲 + 旧缓冲保活"已无必要，
+        // 原地更新还能省掉描述符重写与 SSBO 句柄变更。
         if (im.bTransformsDirty || !im.instanceBuffer) {
-            rhi::BufferDesc desc;
-            desc.size        = sizeof(float4x4) * count;
-            desc.usage       = rhi::BufferUsage::Storage;
-            desc.initialData = im.instanceTransforms.data();
-            desc.cpuAccess   = true;
-            // 旧缓冲退役保活（bindless 堆 append-only，销毁会悬垂）
-            if (im.instanceBuffer) im.retiredBuffers.push_back(std::move(im.instanceBuffer));
-            im.instanceBuffer = m_Device->CreateBuffer(desc);
-            im.instanceSSBOHandle = m_Device->GetBindlessHeap()->RegisterBuffer(im.instanceBuffer.get());
+            const bool needGrow = (!im.instanceBuffer || im.instanceBufferCapacity < count);
+            if (needGrow) {
+                rhi::BufferDesc desc;
+                desc.size        = sizeof(float4x4) * count;
+                desc.usage       = rhi::BufferUsage::Storage;
+                desc.initialData = im.instanceTransforms.data();
+                desc.cpuAccess   = true;
+                // 旧缓冲退役（N 帧延迟释放）+ 释放旧 bindless 槽位
+                if (im.instanceBuffer) {
+                    m_Device->GetBindlessHeap()->ReleaseBuffer(im.instanceSSBOHandle);
+                    im.RetireInstanceBuffer();
+                }
+                im.instanceBuffer = m_Device->CreateBuffer(desc);
+                im.instanceBufferCapacity = count;
+                im.instanceSSBOHandle = m_Device->GetBindlessHeap()->RegisterBuffer(im.instanceBuffer.get());
+            } else {
+                // 复用缓冲：Map 原地写入最新变换（容量可能大于实例数，只写前 count 个）
+                void* mapped = im.instanceBuffer->Map();
+                if (mapped) {
+                    std::memcpy(mapped, im.instanceTransforms.data(), sizeof(float4x4) * count);
+                    im.instanceBuffer->Unmap();
+                }
+            }
             im.bTransformsDirty = false;
         }
 
@@ -1131,25 +1149,32 @@ void ForwardPipeline::RenderScene(
     // MVP 限制：Forward 非 GPU-Culling 路径；Deferred/间接路径后续扩展。
     // ============================================================
     world.ForEach<he::SkeletalMeshComponent>([&](he::Entity, he::SkeletalMeshComponent& sm) {
+        // 任务 23：帧边界推进退役队列（有界释放）
+        sm.AdvanceRetireQueue();
         if (!sm.skeleton || sm.GetIndexCount() == 0 || sm.boneMatrices.empty()) return;
 
-        // 骨骼矩阵上传：缓冲只创建/注册一次；每帧脏标记 → Map 复用更新内容
-        //（禁止每帧重建缓冲：bindless SSBO 数组容量 4096，重建会导致句柄无限增长）
+        // 骨骼矩阵上传：容量够 → Map 原地更新（句柄不变）；容量不够 → 扩建 + 旧缓冲延迟释放
+        //（禁止每帧重建缓冲：SSBO 数组容量有限，重建会不断消耗 bindless 槽位）
+        const u32 needCount = (u32)sm.boneMatrices.size();
         if (sm.bBonesDirty || !sm.boneBuffer) {
-            if (!sm.boneBuffer) {
+            if (!sm.boneBuffer || sm.boneBufferCapacity < needCount) {
                 rhi::BufferDesc desc;
-                desc.size        = sizeof(float4x4) * sm.boneMatrices.size();
+                desc.size        = sizeof(float4x4) * needCount;
                 desc.usage       = rhi::BufferUsage::Storage;
                 desc.initialData = sm.boneMatrices.data();
                 desc.cpuAccess   = true;
+                if (sm.boneBuffer) {
+                    m_Device->GetBindlessHeap()->ReleaseBuffer(sm.boneSSBOHandle);
+                    sm.RetireBoneBuffer();
+                }
                 sm.boneBuffer = m_Device->CreateBuffer(desc);
+                sm.boneBufferCapacity = needCount;
                 sm.boneSSBOHandle = m_Device->GetBindlessHeap()->RegisterBuffer(sm.boneBuffer.get());
             } else {
                 // 复用缓冲：重映射写入最新骨骼矩阵（与 GPUScene::Upload 同一模式）
                 void* mapped = sm.boneBuffer->Map();
                 if (mapped) {
-                    std::memcpy(mapped, sm.boneMatrices.data(),
-                                sizeof(float4x4) * sm.boneMatrices.size());
+                    std::memcpy(mapped, sm.boneMatrices.data(), sizeof(float4x4) * needCount);
                     sm.boneBuffer->Unmap();
                 }
             }

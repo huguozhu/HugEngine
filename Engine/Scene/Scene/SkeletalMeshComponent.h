@@ -2,6 +2,7 @@
 
 #include "Scene/MeshComponent.h"
 #include "Scene/SkeletonAsset.h"
+#include "RHI/FrameRetireQueue.h"
 
 #include <memory>
 
@@ -84,10 +85,20 @@ public:
 
     // --- GPU 侧状态（ForwardPipeline 管理，勿手动改）---
     bool  bBonesDirty = false;              // 骨骼矩阵已更新，待上传
-    u32   boneSSBOHandle = 0;               // bindless SSBO 句柄
+    u32   boneSSBOHandle = 0;               // bindless SSBO 句柄（容量不变则句柄不变）
+    u32   boneBufferCapacity = 0;           // 已分配缓冲可容纳的矩阵数
     std::unique_ptr<rhi::IRHIBuffer> boneBuffer;   // 骨骼矩阵缓冲（随组件存活）
-    // 退役缓冲（bindless 堆 append-only：旧缓冲不销毁避免悬垂指针）
-    std::vector<std::unique_ptr<rhi::IRHIBuffer>> retiredBoneBuffers;
+    // 退役缓冲（任务 23：**有界** N 帧延迟释放，替代原来的无界 vector 保活）
+    rhi::FrameRetireQueue<std::unique_ptr<rhi::IRHIBuffer>> retiredBoneBuffers;
+
+    /// 帧边界推进退役队列（ForwardPipeline 每帧调用一次）
+    void AdvanceRetireQueue() { retiredBoneBuffers.Advance(); }
+
+    /// 退役当前骨骼缓冲（扩容重建时调用；旧缓冲 N 帧后释放）
+    void RetireBoneBuffer() {
+        if (!boneBuffer) return;
+        retiredBoneBuffers.Retire(std::move(boneBuffer));
+    }
 
     // --- 关节矩阵缓存（SkeletalMeshSystem 计算）---
     std::vector<float4x4> jointWorldMatrices;   // 世界矩阵（调试/层级用）

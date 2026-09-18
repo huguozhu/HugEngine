@@ -2,6 +2,7 @@
 
 #include "Scene/BillboardComponent.h"
 #include "RHI/RHI.h"
+#include "RHI/FrameRetireQueue.h"
 
 #include <memory>
 #include <vector>
@@ -14,6 +15,9 @@
 //   2. CPU 栅格化文字 → RGBA 位图（stb_truetype；系统字体兜底）
 //   3. 重建 RHI 纹理 → 注册 bindless → 赋 materialID
 //   4. 按位图宽高比更新广告牌 size（每 100 像素 = 1 米）
+//
+// 任务 23：bindless 槽位环形化 —— 文字变化时**复用同一个槽位**（ReleaseTexture →
+// 过保护期后复用），旧纹理进 N 帧延迟释放队列（有界，不再无界保活）。
 //
 // 用法：
 //   auto* tr = world.AddComponent<TextRenderComponent>(e);
@@ -38,25 +42,42 @@ public:
     }
     void ClearDirty() { m_LastText = text; m_LastFontPath = fontPath; m_LastFontSize = fontSize; }
 
-    /// 追加持有运行时文字纹理与采样器。
-    /// 注意：bindless 堆为 append-only（当前 Heap 设计），内容变化时追加新槽
-    /// （上限 4096），旧纹理随组件存活直至析构 —— 高频动态更新需 Heap 环形化改造
-    /// （见开发计划 Phase B 前的数据驱动化重构建议）。
-    void AddRuntimeTexture(std::unique_ptr<rhi::IRHITexture> tex,
-                           std::unique_ptr<rhi::IRHISampler> samp) {
-        m_Textures.push_back(std::move(tex));
-        m_Samplers.push_back(std::move(samp));
+    /// 已退役的运行时纹理/采样器（N 帧延迟释放：等引用它的帧完成才真正销毁）
+    struct RetiredTexture {
+        std::unique_ptr<rhi::IRHITexture> texture;
+        std::unique_ptr<rhi::IRHISampler> sampler;
+    };
+
+    /// 当前正在使用的运行时纹理/采样器（版本变化时被替换）
+    std::unique_ptr<rhi::IRHITexture> runtimeTexture;
+    std::unique_ptr<rhi::IRHISampler> runtimeSampler;
+
+    /// 退役队列（任务 23：**有界**的 N 帧延迟释放，替代原来的无界 vector 保活）
+    rhi::FrameRetireQueue<RetiredTexture> retiredTextures;
+
+    /// 帧边界推进：释放保护期已过的旧纹理（TextRenderSystem::Update 每帧调用一次）
+    void AdvanceRetireQueue() { retiredTextures.Advance(); }
+
+    /// 退役当前运行时纹理（新纹理就位时调用；旧资源在 N 帧后释放）
+    void RetireRuntimeTexture() {
+        if (!runtimeTexture && !runtimeSampler) return;
+        retiredTextures.Retire(RetiredTexture{ std::move(runtimeTexture),
+                                               std::move(runtimeSampler) });
     }
+
+    /// 待释放纹理数（调试/判据：验证"有界"，不会随重建次数增长）
+    u32 GetRetiredTextureCount() const { return retiredTextures.GetPendingCount(); }
+
+    /// 运行时纹理重建次数（调试/判据：用来对比"重建次数 ↑ 而 bindless 槽位不增"）
+    u32 GetRebuildCount() const { return m_RebuildCount; }
+    void MarkRebuilt() { ++m_RebuildCount; }
 
 private:
     // 脏标记缓存（与 IsDirty/ClearDirty 配合）
     String m_LastText;
     String m_LastFontPath;
     float  m_LastFontSize = 0.0f;
-
-    // 历史纹理/采样器（保持存活，避免 bindless 堆持有悬垂指针）
-    std::vector<std::unique_ptr<rhi::IRHITexture>> m_Textures;
-    std::vector<std::unique_ptr<rhi::IRHISampler>> m_Samplers;
+    u32    m_RebuildCount = 0;
 };
 
 } // namespace he

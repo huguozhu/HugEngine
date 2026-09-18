@@ -242,6 +242,9 @@ bool TextRenderSystem::RasterizeText(const String& text, const String& fontPath,
 
 void TextRenderSystem::Update(World& world, rhi::IRHIDevice* device) {
     world.ForEach<TextRenderComponent>([&](Entity, TextRenderComponent& t) {
+        // 任务 23：帧边界推进退役队列（有界延迟释放；先推进本帧、再入队本帧新退役的资源）
+        t.AdvanceRetireQueue();
+
         // 文字颜色 → 材质色（每帧同步，无需重栅格化）
         t.baseColorFactor = t.textColor;
         if (!t.IsDirty()) return;
@@ -271,12 +274,34 @@ void TextRenderSystem::Update(World& world, rhi::IRHIDevice* device) {
             sd.addressU = sd.addressV = rhi::AddressMode::ClampToEdge;
             auto samp = device->CreateSampler(sd);
 
-            u32 handle = device->GetBindlessHeap()->RegisterTexture(tex.get(), samp.get());
-            t.materialID = handle;
+            // 任务 23：环形化 —— 内容变化时**先释放旧槽位**（保护期过后可被复用），
+            // 旧纹理/采样器进 N 帧延迟释放队列（有界，不再无界保活）。
+            auto* heap = device->GetBindlessHeap();
+            if (t.runtimeTexture && heap) heap->ReleaseTexture(t.materialID);
+            t.RetireRuntimeTexture();
+
+            t.runtimeTexture = std::move(tex);
+            t.runtimeSampler = std::move(samp);
+            t.materialID = heap ? heap->RegisterTexture(t.runtimeTexture.get(),
+                                                        t.runtimeSampler.get())
+                                : 0;
+            t.MarkRebuilt();
             // 标记 baseColor 槽有纹理（textureMask bit0），shader 只采样该槽
             t.baseColorTexture = "__text_runtime__";
-            // 追加持有（bindless 堆 append-only，旧纹理不销毁避免悬垂指针）
-            t.AddRuntimeTexture(std::move(tex), std::move(samp));
+
+            // 冒烟证据：重建次数持续上升，而 bindless 纹理槽位总数保持不增（复用生效）。
+            // 日志节流：首次 + 每 20 次 + 槽位总数增长时打印（高频更新不刷屏）
+            const u32 slotTotal = heap ? heap->GetTextureSlotCount() : 0;
+            static u32 s_LastTextureSlotTotal = 0;
+            if (t.GetRebuildCount() == 1 || (t.GetRebuildCount() % 20) == 0 ||
+                slotTotal > s_LastTextureSlotTotal) {
+                HE_CORE_INFO("[任务 23] 文字纹理重建 #{}: {}x{} → bindless 槽 {}"
+                             "（槽位总数 {}，空闲 {}，待释放 {}）",
+                             t.GetRebuildCount(), w, h, t.materialID, slotTotal,
+                             heap ? heap->GetFreeTextureSlotCount() : 0,
+                             t.GetRetiredTextureCount());
+                s_LastTextureSlotTotal = slotTotal;
+            }
         }
         t.ClearDirty();
     });
