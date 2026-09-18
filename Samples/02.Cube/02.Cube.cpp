@@ -409,8 +409,10 @@ int main() {
             }
         }
         im->SetInstanceTransforms(instancedTransformsBackup);
+        // 任务 25：逐实例 GPU 视锥剔除（默认开启；面板可关，用于 A/B 对比帧率与绘制实例数）
+        im->enableFrustumCull = true;
         sceneGraph.SetParent(instancedEntity, Entity{kInvalidEntity});
-        HE_CORE_INFO("实例化网格: {} 实例（单次 DrawIndexed）", im->GetInstanceCount());
+        HE_CORE_INFO("实例化网格: {} 实例（单次 DrawIndexed；逐实例 GPU 剔除默认开启）", im->GetInstanceCount());
     }
 
     // --- 骨骼网格（C1c：Fox 模型加载 + GPU 蒙皮动画播放演示）---
@@ -1118,6 +1120,59 @@ int main() {
             }
         }
 
+        // 任务 25 冒烟证据：每 300 帧打印一次逐实例剔除统计（剔除前 → 剔除后可见数），
+        // 并用**同一套平面测试**在 CPU 上复算一遍做交叉校验（GPU 值滞后一帧，相机静止时两者应一致）。
+        {
+            static u32 s_FrameCounter = 0;
+            static u32 s_LastLogged   = 0;
+            if (++s_FrameCounter - s_LastLogged >= 300) {
+                s_LastLogged = s_FrameCounter;
+                // 统计直接从组件读（Forward 与 Deferred 两条路径共用同一套逐实例剔除机制）
+                u32 meshCount = 0, total = 0, visible = 0;
+                world.ForEach<he::InstancedMeshComponent>([&](he::Entity, he::InstancedMeshComponent& im) {
+                    if (im.GetInstanceCount() == 0 || !im.enableFrustumCull) return;
+                    ++meshCount;
+                    total   += im.GetInstanceCount();
+                    visible += im.visibleInstanceCount;
+                });
+                if (total > 0) {
+                    // CPU 参考：同一视锥平面、同一"局部盒 8 角变换求世界 AABB"逻辑
+                    u32 cpuVisible = 0;
+                    if (auto* im = world.GetComponent<InstancedMeshComponent>(instancedEntity)) {
+                        const he::Frustum fr = he::Frustum::FromViewProj(
+                            frameCamera.GetViewProjMatrix());
+                        const he::AABB lb = im->GetBounds();
+                        for (const auto& m : im->instanceTransforms) {
+                            float3 mn(1e30f), mx(-1e30f);
+                            for (int c = 0; c < 8; ++c) {
+                                const float3 corner((c & 1) ? lb.max.x : lb.min.x,
+                                                    (c & 2) ? lb.max.y : lb.min.y,
+                                                    (c & 4) ? lb.max.z : lb.min.z);
+                                const float3 wp = float3(m * float4(corner, 1.0f));
+                                mn = glm::min(mn, wp);
+                                mx = glm::max(mx, wp);
+                            }
+                            bool outside = false;
+                            for (int p = 0; p < 6 && !outside; ++p) {
+                                const float4 pl = fr.planes[p];
+                                const float3 n = float3(pl);
+                                const float3 s((n.x >= 0) ? mx.x : mn.x,
+                                               (n.y >= 0) ? mx.y : mn.y,
+                                               (n.z >= 0) ? mx.z : mn.z);
+                                outside = (glm::dot(n, s) + pl.w) < -0.01f;
+                            }
+                            if (!outside) ++cpuVisible;
+                        }
+                    }
+                    HE_CORE_INFO("[任务 25] 逐实例剔除：{} 个实例网格，可见实例 {} / {}（剔除 {:.1f}%）；"
+                                 "CPU 参考复算 {}（GPU 读回滞后一帧，相机静止时两者应一致）",
+                                 meshCount, visible, total,
+                                 total > 0 ? 100.0f * (float)(total - visible) / (float)total : 0.0f,
+                                 cpuVisible);
+                }
+            }
+        }
+
         // 每 0.25 秒刷新 FPS 文字。任务 23 之前这里是 2 秒 —— 因为 bindless 堆是
         // append-only，每次更新都追加纹理槽位（旧纹理只能保活）。槽位环形化之后，
         // 高频更新复用同一个槽位，刷新频率可以提上来（日志会打印槽位总数不增）。
@@ -1248,6 +1303,11 @@ int main() {
             ImGui::SameLine();
             ImGui::TextDisabled("句柄 %u / 容量 %u / 退役 %u", im->instanceSSBOHandle,
                                 im->GetInstanceBufferCapacity(), im->GetRetiredBufferCount());
+
+            // 任务 25：逐实例 GPU 视锥剔除开关与统计（可见实例数来自间接命令，滞后一帧）
+            ImGui::Checkbox("逐实例 GPU 剔除 (任务 25)", &im->enableFrustumCull);
+            ImGui::SameLine();
+            ImGui::TextDisabled("可见 %u / %u 实例", im->visibleInstanceCount, im->GetInstanceCount());
         }
 
         // 骨骼网格演示状态（C1c）
