@@ -369,6 +369,19 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     m_ProfilerPanel.SetProfiler(&m_Profiler);  // 绑定 ImGui 面板到 Profiler 数据源
     // Lighting PSO + 描述符集已在 LightingPass::Initialize() 中创建
 
+    // ── 全屏拷贝 PSO 共用的 set0 布局 ──
+    // FullscreenCopy.frag 在 set0/binding0 声明了 u_InputTex 与 u_InputSampler，
+    // 管线布局必须声明对应的绑定。此前 TransientTest 与 GPL 变体演示两个 PSO 完全没给
+    // 描述符集布局 ⇒ 校验层每帧报 VUID-VkGraphicsPipelineCreateInfo-layout-07988。
+    rhi::DescriptorSetLayoutHandle fullscreenCopyLayout = rhi::kInvalidLayout;
+    {
+        rhi::DescriptorSetLayoutDesc l;
+        l.bindings = {
+            { 0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment },
+        };
+        fullscreenCopyLayout = device->CreateDescriptorSetLayout(l);
+    }
+
     // 瞬态资源路径验证 PSO（全屏三角形 + 纹理拷贝，用于验证 Transient Allocator 端到端路径）
     {
         rhi::ShaderBytecode tVS, tFS;
@@ -386,6 +399,8 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
         tDesc.depthWrite = false;
         tDesc.colorAttachmentCount = 1;
         tDesc.colorFormats[0] = rhi::Format::RGBA16_FLOAT;  // 匹配瞬态纹理格式
+        if (fullscreenCopyLayout != rhi::kInvalidLayout)
+            tDesc.descriptorSetLayouts = { fullscreenCopyLayout };
         tDesc.debugName = "TransientTest";
         m_TransientTestPSO = device->CreatePipelineState(tDesc);
     }
@@ -419,6 +434,9 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
         base.depthTest        = false;
         base.depthWrite       = false;
         base.sampleCount      = 1;
+        // 与 TransientTest 共用同一份 set0 布局（同为 FullscreenCopy 着色器）
+        if (fullscreenCopyLayout != rhi::kInvalidLayout)
+            base.descriptorSetLayouts = { fullscreenCopyLayout };
 
         for (int32_t i = 0; i < cvGPLVariantCount; ++i) {
             // 变体维度：仅 blend 状态不同（改变 fragment-output 段，其余 3 段共享）
