@@ -122,15 +122,19 @@ GPU_STRUCT GISourceSlot {
     GPU_UINT id;                 // GISourceId（决定 SampleSource 走哪条分支）
     float    weight;             // 相对权重（0 = 不参与合成）
     float    falloffDistance;    // 「距离让位」（0 = 不启用）
-    GPU_UINT _pad;               // 对齐到 16B
+    GPU_UINT confidence;         // GISourceConfidence 位掩码（逐像素可信度判据，见下）
 };
+
+// ── 逐像素置信度判据位（与 C++ GISourceConfidence 逐位一致，由 UBO 逐槽传入）──
+// 放在 UBO 里而不是在着色器里按 id 判断：否则 C++ 与着色器各有一份 id 列表，必然漂移。
+GPU_CONST(GPU_UINT GICONF_CAMERA_COVERAGE = 1);  // 相机屏幕覆盖：视口外/边缘淡出 ⇒ 置信度 0
 
 GPU_STRUCT GIChannelBlendParams {
     GISourceSlot sources[kGIMaxSourcesPerChannel];   // 参与合成的源（低频 → 高频）
     GPU_UINT     count;                              // 实际源数
     GPU_UINT     mode;                               // 0=相加（对照）, 1=归一化加权
     GPU_UINT     furnaceMode;                        // 白炉数值测试（见 frag）
-    GPU_UINT     _pad;
+    float        edgeFade;                           // 屏幕覆盖置信度的边缘淡出带宽（占短边比例）
 };
 
 GPU_STRUCT GIBlendParams {

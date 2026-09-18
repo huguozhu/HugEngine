@@ -751,10 +751,13 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             // 距离让位取对应源的 falloffDistance（0=不启用）
             {
                 // Wave 1：层栈直传为「源数组」——每通道的源（IBL/DDGI/SSGI/RSM/RTGI…）
-                // 逐项写入 UBO 槽位，shader 按 id 分派采样；新增算法无需改动此处
-                auto fillSlots = [](GIChannelBlendData& b, const GIChannelStack& st) {
+                // 逐项写入 UBO 槽位，shader 按 id 分派采样；新增算法无需改动此处。
+                // 置信度掩码（confidence）由 GIChannelBlendData::Add 统一推导，此处不填。
+                const float edgeFade = m_GIConfig.edgeFade;   // 屏幕覆盖置信度的边缘带宽（§3.2）
+                auto fillSlots = [edgeFade](GIChannelBlendData& b, const GIChannelStack& st) {
                     b.count = 0;
                     b.mode  = (u32)st.mode;
+                    b.edgeFade = edgeFade;
                     for (u32 i = 0; i < st.count; i++) {
                         const GISourceDesc& s = st.sources[i];
                         b.Add((u32)s.id, s.weight, s.falloffDistance);

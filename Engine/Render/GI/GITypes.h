@@ -104,6 +104,48 @@ inline bool IsRayTracingSource(GISourceId id) {
         || id == GISourceId::RTAO;
 }
 
+/// 「受相机视口限制」的源：SSGI · SSR · SSAO · GTAO · RTGI · RT 反射 · RTAO
+///
+/// 这些源的估计只覆盖**相机能看到的那部分屏幕**：视口外根本没有数据，靠近屏幕边缘时
+/// 估计也会退化（屏幕空间 march 走出视口、反射打到没有着色过的区域）。
+/// 因此它们的权重必须乘一个「屏幕覆盖置信度」，在视口外/边缘降为 0（§3.2）。
+///
+/// 【为什么与 `IsScreenSpaceSource` 不是同一个谓词】
+///   · `IsScreenSpaceSource` 表达的是「像素级屏幕空间估计」这一**分类**，含 RSM；
+///     但 RSM 的产物是**光源视锥**下的 VPL 图，着色器按世界空间求和，与相机视口无关，
+///     给它乘屏幕覆盖置信度是错的（会让屏外的 RSM 间接光被误判为不可信）。
+///   · 反过来，光追三源不在 `IsScreenSpaceSource` 里（它们是「光追」类），但它们的入射
+///     方向由**本像素**出发，同样受屏幕覆盖限制，故必须在这里。
+/// 两个谓词各有各的用途，不要合并。
+inline bool IsCameraViewLimitedSource(GISourceId id) {
+    return id == GISourceId::SSGI || id == GISourceId::SSR || id == GISourceId::SSAO
+        || id == GISourceId::GTAO || id == GISourceId::RTGI
+        || id == GISourceId::RTReflection || id == GISourceId::RTAO;
+}
+
+/// 逐像素置信度判据的位掩码（每个源在合成时声明自己适用哪些判据）
+///
+/// 【为什么要放进 UBO 而不是在着色器里按 id 判断】此前 `DeferredLighting.frag.slang`
+/// 里硬编码了一份 id 列表，而 C++ 侧另有一份 —— 两份真值必然漂移（GTAO 就曾被漏掉）。
+/// 现在判据由 C++ 逐槽写进 UBO，着色器只负责按掩码计算，新增源不必改着色器。
+enum GISourceConfidence : u32 {
+    kGIConfNone           = 0,
+    /// 屏幕覆盖：视口外与边缘淡出区 ⇒ 置信度 0（`IsCameraViewLimitedSource`）
+    kGIConfCameraCoverage = 1u << 0,
+    // 预留（尚未实现，因此不赋给任何源 —— 登记出来是为了让「设计稿里的置信度表」有落点）：
+    //   · 探针网格覆盖（DDGI 探针网格外 ⇒ 0）：与任务 14 的网格覆盖/让位一起做，
+    //     因为当前网格参数（原点 (-10,-2,-10)、8×4×8、cell 3 ⇒ 约 21×9×21 世界单位）
+    //     远小于场景（RSM 取 sceneRadius=60 覆盖全场景），现在就打开会让 DDGI 在大部分
+    //     屏幕上归零，属行为级变更（§9.2-K）。
+    //   · 光源视锥覆盖（RSM）：着色器内已按 RSM 的投影 UV 直接判无效，无需再声明。
+    //   · 光追收敛度 / SPP：当前没有逐像素收敛信息可用，不声明。
+};
+
+/// 源 → 置信度判据掩码（单一真值：槽位填 UBO 时统一从这里取）
+inline u32 ToConfidenceMask(GISourceId id) {
+    return IsCameraViewLimitedSource(id) ? kGIConfCameraCoverage : kGIConfNone;
+}
+
 /// 源名称（日志 / 面板显示）
 inline const char* GISourceName(GISourceId id) {
     switch (id) {
@@ -225,7 +267,7 @@ struct GISourceSlotData {
     u32   id              = 0;        // GISourceId（决定 shader 走哪条采样分支）
     float weight          = 0.0f;     // 相对权重（0 = 不参与）
     float falloffDistance = 0.0f;     // 「距离让位」（0 = 不启用）
-    u32   _pad            = 0;
+    u32   confidence      = 0;        // GISourceConfidence 位掩码（逐像素可信度判据）
 };
 static_assert(sizeof(GISourceSlotData) == 16, "GISourceSlotData must be 16 bytes（与 shader GISourceSlot 对齐）");
 
@@ -238,16 +280,18 @@ struct GIChannelBlendData {
     static constexpr u32 kMaxSources = 4;
     GISourceSlotData sources[kMaxSources];
     u32 count       = 0;
-    u32 mode        = 1;   // GIBlendMode（0=相加对照, 1=归一化加权）
-    u32 furnaceMode = 0;   // 白炉数值测试
-    u32 _pad        = 0;
+    u32 mode        = 1;      // GIBlendMode（0=相加对照, 1=归一化加权）
+    u32 furnaceMode = 0;      // 白炉数值测试
+    float edgeFade  = 0.05f;  // 屏幕覆盖置信度的边缘淡出带宽（占短边的比例，§3.2）
 
     /// 追加一个源（weight<=0 忽略；超出容量忽略）
+    /// 置信度掩码在此统一推导：调用方不必（也不应）自己填，避免又出现"两份真值"。
     void Add(u32 sourceId, float w, float falloff = 0.0f) {
         if (w <= 0.0f || count >= kMaxSources) return;
         sources[count].id              = sourceId;
         sources[count].weight          = w;
         sources[count].falloffDistance = falloff;
+        sources[count].confidence      = ToConfidenceMask((GISourceId)sourceId);
         count++;
     }
 };
@@ -371,6 +415,9 @@ struct GIConfig {
     // ── 强度与全局开关 ──
     float giIntensity = 1.0f;   // 间接漫反射 GI 总强度（与 push constant 对齐）
     float aoIntensity = 1.0f;   // AO 强度
+    /// 屏幕覆盖置信度的边缘淡出带宽（占屏幕短边的比例）。屏幕空间/光追源在此带宽内线性降权，
+    /// 视口外为 0（§3.2）。默认 5%：只覆盖真正贴着边框的那一条，正常画面不受影响。
+    float edgeFade    = 0.05f;
     bool  rsmIndirect = true;   // RSM 间接光（Forward 管线的间接漫反射来源）
     bool  halfRes     = false;  // 半分辨率计算（性能优先）
     // 白炉数值测试：把白炉条件（全白环境 + albedo=1 + 关直接光）下的源真值

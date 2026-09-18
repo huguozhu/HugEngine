@@ -98,15 +98,25 @@ struct LightGridCell { uint offset; uint count; };
 // 无需改动 UBO 结构、帧图映射或合成循环。
 // ============================================================
 
+/// 屏幕覆盖置信度：视口外为 0，靠近边缘 `edgeFade` 带宽内线性升到 1
+///
+/// 「屏幕外无数据」不是一个近似，而是硬事实：屏幕空间 march 走出视口就没有采样点，
+/// 光追源的入射方向也是从本像素出发的。带宽由 UBO 的 `edgeFade` 给出（默认 5%），
+/// 不再是着色器常量。注意它**不改变归一化总量**：置信度只决定「这个像素信不信这个源」，
+/// 不信就把权重让给同通道的其他源（全部不信时该通道为 0）。
+float CameraCoverageConfidence(float2 uv, float edgeFade) {
+    float2 edge = min(uv, 1.0 - uv);
+    return saturate(min(edge.x, edge.y) / max(edgeFade, 1e-5));
+}
+
 /// 源权重 = 用户权重 × 置信度 × 可选「距离让位」
-/// 屏幕空间源（SSGI/SSR/SSAO/RTGI/RT 反射/RTAO）在屏幕边缘降权（屏幕外无数据）；
-/// 世界空间源（IBL/DDGI/RSM）不依赖屏幕覆盖，不受 confEdge 影响。
-float SourceWeight(GISourceSlot s, float confEdge, float camDist) {
-    const bool screenSpace =
-        (s.id == GISOURCE_SSGI || s.id == GISOURCE_SSR || s.id == GISOURCE_SSAO ||
-         s.id == GISOURCE_RTGI || s.id == GISOURCE_RT_REFLECTION || s.id == GISOURCE_RTAO);
+///
+/// 置信度是**逐像素**的，判据由 UBO 的 `confidence` 掩码按位给出（见 ShaderTypes.slang
+/// 的 GICONF_*）——着色器里不再硬编码任何源 id 列表，新增源无需改这里。
+/// 世界空间源（IBL/DDGI/RSM）不依赖相机屏幕覆盖，其掩码里没有 CAMERA_COVERAGE 位。
+float SourceWeight(GISourceSlot s, float camCoverage, float camDist) {
     float w = s.weight;
-    if (screenSpace) w *= confEdge;
+    if ((s.confidence & GICONF_CAMERA_COVERAGE) != 0u) w *= camCoverage;
     if (s.falloffDistance > 0.0) w *= saturate(1.0 - camDist / s.falloffDistance);
     return w;
 }
@@ -392,9 +402,8 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
         kD = float3(1.0, 1.0, 1.0);
     }
 
-    // 屏幕内可见性置信度（屏幕外无数据 → 靠近边缘 5% 内线性降权）
-    float2 edge     = min(uv, 1.0 - uv);
-    float  confEdge = saturate(min(edge.x, edge.y) / 0.05);
+    // 相机距离（供「距离让位」用）。屏幕覆盖置信度**逐通道**计算：每个通道的边缘淡出
+    // 带宽来自自己的 UBO 字段（`edgeFade`），不再是一个全局硬编码的 5%（§3.2）。
     float  camDist  = length(cameraPosition.xyz - worldPos);
 
     // ═══════════════════════════════════════════════════════════════
@@ -416,12 +425,13 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
     float3 indirectDiffuse = float3(0.0);
     {
         GIChannelBlendParams bl = u_GIBlendParams.diffuse;
+        const float camCoverage = CameraCoverageConfidence(uv, bl.edgeFade);
         float3 num = float3(0.0);
         float  den = 0.0;
         for (uint i = 0u; i < bl.count; ++i) {
             GISourceSlot s = bl.sources[i];
             if (s.weight <= 0.0) continue;
-            float w = SourceWeight(s, confEdge, camDist);
+            float w = SourceWeight(s, camCoverage, camDist);
             num += SampleDiffuseSource(s.id, worldPos, N, uv, albedo, kD, furnace) * w;
             den += w;
         }
@@ -447,6 +457,10 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
         GIChannelBlendParams ba = u_GIBlendParams.ao;
         float aoNum = 0.0;
         float aoDen = 0.0;
+        // 同样走 SourceWeight：AO 源也是「逐屏幕像素」的估计（SSAO/GTAO/RTAO 都是
+        // CAMERA_COVERAGE 源），屏幕边缘处其数据同样不可信 —— 与 diffuse/specular 同源处理。
+        // 边缘处所有权重都归零时 aoVal 取 1（不遮蔽），正是「该处只剩世界空间源」的语义。
+        const float camCoverageAO = CameraCoverageConfidence(uv, ba.edgeFade);
         for (uint i = 0u; i < ba.count; ++i) {
             GISourceSlot s = ba.sources[i];
             if (s.weight <= 0.0) continue;
@@ -454,8 +468,9 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
             float v = (s.id == GISOURCE_RTAO)
                     ? u_RT_AO.Sample(u_GBufferSampler, uv).r
                     : u_SSAO.Sample(u_GBufferSampler, uv).r;
-            aoNum += v * s.weight;
-            aoDen += s.weight;
+            float w = SourceWeight(s, camCoverageAO, camDist);
+            aoNum += v * w;
+            aoDen += w;
         }
         float aoVal = (aoDen > 0.0) ? (aoNum / aoDen) : 1.0;   // 无 AO 源 → 不遮蔽
         aoFactor = lerp(1.0, ao * aoVal, aoIntensity);   // aoIntensity 控制 AO 强度（0=无 AO）
@@ -467,6 +482,7 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
     float3 indirectSpecular = float3(0.0);
     {
         GIChannelBlendParams bs = u_GIBlendParams.specular;
+        const float camCoverageSpec = CameraCoverageConfidence(uv, bs.edgeFade);
         float3 specNum = float3(0.0);
         float  specDen = 0.0;
         for (uint i = 0u; i < bs.count; ++i) {
@@ -477,7 +493,7 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
             } else if (s.id == GISOURCE_RT_REFLECTION) {
                 if (u_RT_Reflection.Sample(u_GBufferSampler, uv).a < 0.0) continue;
             }
-            float w = SourceWeight(s, confEdge, camDist);
+            float w = SourceWeight(s, camCoverageSpec, camDist);
             specNum += SampleSpecularSource(s.id, uv, R, roughness, F, envBRDF) * w;
             specDen += w;
         }
