@@ -603,6 +603,12 @@ int main() {
                       (int)render::GISourceId::RTReflection, (int)-1);
             loadStack(gc.ao, "gi_blend_ao",
                       (int)render::GISourceId::SSAO, (int)render::GISourceId::RTAO, (int)-1, (int)-1);
+            // RSM 不在上面三个通道的 4 个固定槽位里（槽位是「低频 → 高频」的固定顺序），
+            // 但它有**独立门控**（§9.2-F：RSM 与 DDGI 各自判定），面板也能勾选它，
+            // 因此单列一个键，保证「配置 → 层栈」这条路上 RSM 不丢（否则配置往返有损，
+            // RSM 只能靠面板手工勾选，回归检查无从复现）。
+            gc.diffuse.Set(render::GISourceId::RSM,
+                           GetFloat(cfgData, "gi_blend_diffuse_rsm", gc.diffuse.WeightOf(render::GISourceId::RSM)));
             // 阴影通道独立于层栈（可见性乘法项，非能量源）→ 用枚举恢复
             gc.shadow = (render::ShadowChannel)GetInt(cfgData, "gi_shadow", (int)gc.shadow);
 
@@ -1563,6 +1569,9 @@ int main() {
                       (int)render::GISourceId::RTReflection, (int)-1);
             saveStack(gc.ao, "gi_blend_ao",
                       (int)render::GISourceId::SSAO, (int)render::GISourceId::RTAO, (int)-1, (int)-1);
+            // RSM 权重单独序列化（与上面的加载对应；它不在 4 个固定槽位里）
+            out["gi_blend_diffuse_rsm"] =
+                std::to_string(gc.diffuse.WeightOf(render::GISourceId::RSM));
             // 阴影通道独立于层栈 → 按枚举序列化
             out["gi_shadow"] = std::to_string((int)gc.shadow);
         }
