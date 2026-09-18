@@ -40,6 +40,7 @@ add_executable(HugEngineTests
     TestRSMFrustum.cpp
     TestPathPayload.cpp
     TestPTMaterialParams.cpp
+    TestPTVolumeMath.cpp
 )
 
 target_include_directories(HugEngineTests PRIVATE
