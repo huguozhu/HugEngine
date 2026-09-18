@@ -82,10 +82,20 @@ DescriptorSetLayoutHandle VulkanDevice::CreateDescriptorSetLayout(const Descript
     // 找到 binding 号最大的 bindless 绑定（Vulkan 要求 VARIABLE_COUNT
     // 只能设在 binding 号最大的绑定上，而非「vector 里最后一个 bindless」）
     i32 varCountIdx = -1;
+    i32 maxBindingNum = -1;
     for (i32 i = 0; i < (i32)desc.bindings.size(); ++i) {
+        maxBindingNum = std::max(maxBindingNum, (i32)desc.bindings[i].binding);
         if (!desc.bindings[i].bindless) continue;
         if (varCountIdx < 0 || desc.bindings[i].binding > desc.bindings[varCountIdx].binding)
             varCountIdx = i;
+    }
+    // 【§0.6.2 校验修复】只有该 bindless 绑定**就是** binding 号最大的那个时才能设 VARIABLE_COUNT；
+    // 否则校验层报 VUID-VkDescriptorSetLayoutBindingFlagsCreateInfo-pBindingFlags-03004
+    //（Forward 的 per-frame set 里 bindless SSBO 是 30，而 GIBlendParams 是 31，正是这种情况）。
+    // 不满足时退回「按声明数量满额分配」——本引擎的分配本来就传满 descriptorCount
+    //（见 AllocateDescriptorSet），VARIABLE_COUNT 只是为将来按需缩容留的口子。
+    if (varCountIdx >= 0 && (i32)desc.bindings[varCountIdx].binding != maxBindingNum) {
+        varCountIdx = -1;
     }
 
     for (i32 i = 0; i < (i32)desc.bindings.size(); ++i) {
@@ -148,20 +158,23 @@ DescriptorSetHandle VulkanDevice::AllocateDescriptorSet(DescriptorSetLayoutHandl
     allocInfo.descriptorSetCount = 1;
     allocInfo.pSetLayouts        = &layout;
 
-    // 处理 bindless 可变描述符数量
+    // 处理 bindless 可变描述符数量：
+    // 只有布局里**真的**带了 VARIABLE_COUNT 的绑定才允许传
+    // VkDescriptorSetVariableDescriptorCountAllocateInfo（规范保证至多一个这样的绑定）。
     VkDescriptorSetVariableDescriptorCountAllocateInfo varCountInfo{};
-    u32 maxVarCount = 0;
-    bool hasBindless = false;
-    for (usize i = 0; i < info.bindings.size(); ++i) {
-        if (info.bindings[i].bindless) {
-            maxVarCount = std::max(maxVarCount, info.bindings[i].count);
-            hasBindless = true;
+    u32  varCount         = 0;
+    bool hasVariableCount = false;
+    for (usize i = 0; i < info.bindingFlags.size(); ++i) {
+        if (info.bindingFlags[i] & VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT) {
+            varCount         = info.bindings[i].count;
+            hasVariableCount = true;
+            break;
         }
     }
-    if (hasBindless) {
+    if (hasVariableCount) {
         varCountInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO;
         varCountInfo.descriptorSetCount = 1;
-        varCountInfo.pDescriptorCounts = &maxVarCount;
+        varCountInfo.pDescriptorCounts = &varCount;
         allocInfo.pNext = &varCountInfo;
     }
 
