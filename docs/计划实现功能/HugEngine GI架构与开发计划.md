@@ -161,17 +161,25 @@ struct GIConfig {
 ### 3.1 归一化加权（已实现，当前唯一的生产合成模式）
 
 ```hlsl
-// DeferredLighting.frag.slang —— 每个通道同构
-float3 num = 0; float den = 0;
-for (uint i = 0; i < bl.count; ++i) {
+// DeferredLighting.frag.slang —— 每个通道同构（任务 21 起与代码逐字对齐）
+float3 num = float3(0.0); float den = 0.0;
+for (uint i = 0u; i < bl.count; ++i) {
     GISourceSlot s = bl.sources[i];
     if (s.weight <= 0.0) continue;
-    float w = SourceWeight(s, confEdge, camDist);
+    float w = SourceWeight(s, camCoverage, gridCoverage, camDist);
     num += SampleDiffuseSource(s.id, worldPos, N, uv, albedo, kD, furnace) * w;
     den += w;
 }
-float3 indirect = (bl.mode != 0u) ? (num / max(den, 1e-4)) : num;
+indirectDiffuse = (bl.mode != 0u)
+                ? ((den > 0.0) ? (num / den) : float3(0.0))   // 归一化：无双重计数
+                : num;                                        // 相加（对照）
 ```
+
+> **口径**：写的是 `(den > 0) ? num/den : 0` 而**不是** `num / max(den, 1e-4)`。二者在
+> `den > 0` 时相同，但**通道里一个源都没有**（或全部被置信度判为不可信）时前者返回 0、
+> 后者返回 `num/1e-4`（= 放大一万倍）。这是文档与着色器长期不一致的一处（任务 21 修正），
+> 也是"空通道不该编数据"这条语义的落点。AO 通道同理，但中性值是 1（不遮蔽）：
+> `aoVal = (aoDen > 0) ? aoNum/aoDen : 1.0`。
 
 - `mode != 0`（`Normalized`）→ 除以权重和，**权重和 = 1 → 无双重计数**
 - `mode == 0`（`Additive`）→ 直接相加，**仅作 A/B 对照保留**
@@ -766,11 +774,15 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 
 1. **层栈与子系统开关同源**——层栈说参与，子系统就必须真的启用。
    *（曾因两者不一致导致画面发黑，且在同一处复发过一次）*
-2. **权重归一化**是物理正确性的来源；距离让位只是性能/艺术控制，默认关闭。
+2. **权重归一化**是物理正确性的来源；距离让位只是**艺术/合成控制**（默认关闭）。
+   *（校正：它**不具备性能意义**——不改任何 pass 是否执行，只缩放合成权重，见 §3.2 的纠正）*
 3. **多开一个源不会变亮**；单源时行为与「二选一」时代完全一致。
 4. **光追是「GI 源」而非「管线类型」**——管线能力位（架构）× 设备能力（`rtSupported`）两层判断。
 5. **阴影是「可见性（乘法项）」而非「能量（加法项）」**——不进层栈。
-6. **所有参与合成的源必须返回同一物理量**（当前**未满足**，见 §3.4 / §9.2-A）。
+6. **所有参与合成的源必须返回同一物理量**（`L_o = albedo × E/π`）—— ✅ **已满足**（P1·A 统一了
+   四处量纲，§3.4）。*（校正：此处曾写「当前未满足」；后续又发现 RSM/RTGI 沿用的
+   `EvaluateHitRadiance` 返回的是 `albedo × E`、比辐射度大 π 倍，属**同一类**问题的残留实例，
+   记在 §9.2-AA 与任务 30。也就是说这条不变量现在是"设计上成立、实现上还有一处待清"。）*
 
 ---
 
@@ -867,7 +879,7 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 | 8 | §4.2「帧图 0 行」 | 新增一种源，帧图 0 行 | **只在"落在已有 pass 类别内"时成立**。帧图实有 **7 条按 source id 定制的循环**（§4.3.1），引入新类别需新增循环。已在 §4.2 就地加限定条件 |
 | 9 | `IGIProvider::GetPassKind()` | §4.1 把它列为「调度」：决定帧图如何注册本源 pass | **实际是死接口**：`IGIProvider.h:63` 声明（默认 `Offscreen`）、`DDGIProvider.h:34` 覆写为 `Compute`，**全仓无任何读取点**——帧图实际按 source id 硬编码选择 pass 形状（§4.3.2） |
 
-### 9.2 代码复核发现的缺陷（A/B/C/L 已实测修复，其余待验证）
+### 9.2 代码复核发现的缺陷（A…Z、AA；逐行标注已修 / 待修）
 
 > 以下由代码实读得出，与 §9.1 的「文档漂移」性质不同——这些是**实现本身的问题**。
 > 标 ✅ 的项已按「最小复现 → 修改 → 实测对照 → 回归」闭环；其余各项仍需先用 06.GILab
@@ -1215,7 +1227,7 @@ Vulkan 校验 46 条与改前一致。
 
 | # | 任务 | 规模/风险 | 理由 / 依赖 |
 |:---:|---|---|---|
-| **21** | **文档一致性修正**（可随时做） | 小 / 低 | §3.1 的合成片段与 shader 不符（`max(den,1e-4)` vs `(den>0)?num/den:0`）；§11.3 的采样目标列表缺 `radiance`；§6 不变量 2 与 6 已过期；§9.2 标题漏 M/N/O/P；§11.4 两条随 P5 退场的失效风险；§11.3 的运行示例自相矛盾 |
+| **21** | ~~**文档一致性修正**~~ —— ✅ **已完成** | 小 / 低 | 逐条核过并改掉：① §3.1 的合成片段与着色器不符（文档写的 `num/max(den,1e-4)`，实际是 `(den>0)?num/den:0` —— 通道里没有源时前者会放大一万倍）；② §11.3 的采样目标清单缺 `radiance`/`ibl_irr`，补成与 `addTarget` 逐项一致；③ §6 不变量 2（"距离让位是性能控制"→ 更正为纯艺术控制）与不变量 6（"量纲未统一"已过期 → 已满足，并注明 `EvaluateHitRadiance` 的 π 残留见任务 30）；④ §9.2 标题漏 M/N/O/P → 改为按行标注的口径；⑤ §11.4 两条随 P5 退场的风险（`LowPass` 选型、P5 抽象过度）标为已失效；⑥ §11.3 的运行示例自相矛盾（写"运行目录必须是 `Build\bin\Debug`"，而所有工具都以仓库根目录启动 Release 版且正常工作——Content 路径是编译期绝对路径）→ 改成实际用法；⑦ 顺带把"逐 pass 耗时不可当判据"补成 §11.3.1 方法论第 7 条 |
 | **25** | **§9.2-W · SSR 的 Hi-Z march 恒 miss** | 中 / 中 | SSR 现在**一个命中都没有**（全屏 alpha=−1、RGB=0），镜面层栈里有没有它完全等价。已定位到 Hi-Z 分支（强制走线性 march 立刻有 34.66% 命中）；根因是深度约定反了（min 金字塔 + reverse-Z 判断 vs 引擎的 zero-to-one）。修法：按真实约定改判据（并复核线性分支的命中/遮挡方向），判据：同一配置下 SSR 有效像素占比从 0 变为与线性路径同量级，且反射在**平面镜像**处与解析解一致；回归：镜面层栈三种配置的读数与 §3.3 不变 |
 | **26** | **让 Forward 真正走「层栈 + 归一化合成」**（§9.2-H 的另一半） | 中 / 中 | 任务 8 把**声明**改对了，但 Forward 的 IBL/RSM 仍是管线级开关。要补齐需要：PBR 着色器补混合参数 UBO（push constant 已满，必须新开 binding）、把硬编码的 IBL 漫反射/镜面与 RSM 改成按层栈槽位归一化合成、帧图/管线每帧填充 UBO。**影响面大**：`PBR.frag` 被 02.Cube / 03.Sponza / 05.AISamples / Editor 共用，需逐个回归。判据：`pipeline_mode=0` 下把 `diffuse` 层栈从 `{IBL}` 改成 `{IBL,RSM}` 时读数符合归一化预期（多开一个源不变亮、单源与改前一致） |
 | **27** | **§9.2-X · 镜面层栈为空时出现 463 量级亮点** | 中 / 低 | 复现：同一场景相机，`specular` 层栈空 ⇒ `mean 0.2022 / max 463.32`；放 `{IBL}` ⇒ `0.0695 / 42.20`；只放 `{SSAO}`（specular 仍空）⇒ 回到 `0.2022 / 463.32`。⇒ 亮点由"镜面通道没有任何源"触发。排查方向：空通道分支（`specNum/max(specDen,1e-4)`、以及空通道时对镜面纹理/占位纹理的采样是否被守卫）—— 与 §9.2-T 的"效果未产出时描述符仍绑定真实纹理"同类，但这次是**空层栈**这一更极端的情形。判据：三种配置的 `max` 都应落在 42 量级 |
@@ -1915,9 +1927,17 @@ Vulkan 校验 46 条与改前一致。
 # 关键：把 anaconda 加进 PATH，否则 Slang 之后的 SPV→头文件 步骤会以 MSB8066/9009 失败
 $env:PATH = "C:\anaconda3;C:\anaconda3\Scripts;C:\anaconda3\Library\bin;$env:PATH"
 cmake --preset default
-cmake --build Build --config Debug --target 06.GILab -j 8
-& Build\bin\Debug\06.GILab.exe          # 运行目录即 Build\bin\Debug（热重载的相对路径依赖它）
+# 自动化实验一律用 Release（Tools/gi/*.ps1 默认 -Config Release，可执行文件在 Build\bin\Release）
+cmake --build Build --config Release --target 06.GILab -j 8
+& Build\bin\Release\06.GILab.exe
 ```
+
+> **运行目录不影响资源定位**（此处曾写「运行目录即 `Build\bin\Debug`，热重载的相对路径依赖它」，
+> 与工具的实际用法矛盾 —— 任务 21 修正）：`06.GILab` 的 Content 路径是编译期注入的**绝对路径**
+> （日志里能直接看到 `D:/Source/HugEngine/Content/gltf/...`），`HE_GILAB_CONFIG` 也是绝对路径，
+> 因此 `Tools/gi/*.ps1` 一律以**仓库根目录**为工作目录启动它都能正常加载。
+> `cmake --build Build --config Debug` 依然可用（`HugEngineTests` 就是 Debug），只是 GI 采样脚本
+> 统一按 Release 找可执行文件。
 
 | 开关 | 用途 |
 |---|---|
@@ -1926,7 +1946,7 @@ cmake --build Build --config Debug --target 06.GILab -j 8
 | `HE_TRACE_PASSES=1` | 打印每个 pass 开始，把 pass 名与校验层报错在时间上对齐 |
 | `HE_CRASH_TEST=1` | 主动崩溃，自检崩溃处理器 |
 | `HE_FURNACE_PROBE=1` 单用 | 只开探针不开白炉 |
-| `HE_DUMP_GI=<标签>`（+ `HE_DUMP_GI_FRAME=<帧号>`，默认 60） | **GI 纹理级采样**：在指定帧整幅落盘 HDR / GBuffer albedo / **各有效 Provider 的原始与降噪后输出**到 `Build/verify/gi_<标签>_*.f16`（RGBA16F 原始像素、无文件头、行紧密排布），并写 `_meta.txt` 记录逐目标尺寸；落盘后**自动关窗退出**，便于脚本化。逐 Provider 的目标按通道分：`raw`/`final`（漫反射）、`spec_raw`/`spec_final`（镜面）、`ao_raw`/`ao_final`（AO），无该通道输出时自动跳过。**多落盘几张纹理会增加校验层中与拷贝/屏障相关的条数，因此校验计数只在同一采样设置下可比**。注意：当前采样设施引用的是 `deferredPipeline` 的 HDR 目标与 Provider 列表，因此 `pipeline_mode=0`（Forward）下这些目标并不是 Forward 的产物——Forward 的冒烟验证只能看"正常跑完不崩"与日志 |
+| `HE_DUMP_GI=<标签>`（+ `HE_DUMP_GI_FRAME=<帧号>`，默认 60） | **GI 纹理级采样**：在指定帧整幅落盘到 `Build/verify/gi_<标签>_*.f16`（RGBA16F 原始像素、无文件头、行紧密排布），并写 `_meta.txt` 记录逐目标尺寸；落盘后**自动关窗退出**，便于脚本化。**完整目标清单**（`06.GILab.cpp` 的 `addTarget`，纹理为空则跳过）：`hdr`（Lighting 的 HDR 目标）、`albedo`（GBuffer MRT0）、**`radiance`（共享的前帧 HDR 辐射度 —— DDGI 探针与 SSGI 入射辐射度的共同输入，出问题时第一个要看的中间量）**、`ibl_irr`（IBL 辐照度，DDGI 探针更新的唯一辐射度回退来源），以及**逐 Provider** 的 `provN_raw`/`provN_final`（漫反射）、`provN_spec_raw`/`provN_spec_final`（镜面）、`provN_ao_raw`/`provN_ao_final`（AO）。**多落盘几张纹理会增加校验层中与拷贝/屏障相关的条数，因此校验计数只在同一采样设置下可比**。注意：当前采样设施引用的是 `deferredPipeline` 的 HDR 目标与 Provider 列表，因此 `pipeline_mode=0`（Forward）下这些目标并不是 Forward 的产物——Forward 的冒烟验证只能看"正常跑完不崩"与日志 |
 | `HE_GILAB_CONFIG=<路径>` | 覆盖示例程序的配置读写路径（读写同一路径），使自动化实验**完全不触碰**仓库内的 `Content/Config/06_GILab.cfg`——否则每次实验都会被示例程序退出时回写覆盖 |
 | `HE_GI_TIMING=1` | 每 120 帧打一行 `[GI 耗时] NAME=x.xxxms`（各源主 pass 的 GPU 耗时滚动平均），作为**面板之外**的脚本可读出口；面板上那四行读数本身就是同一份数据（§9.2-Z 修好后不再是恒 0） |
 | `HE_PASS_TIMING=1` | 每 120 帧打一行 `[Pass 耗时] NAME=x.xxxms …`：**逐 pass** 的 GPU 耗时（含 `Lighting` / `GB_Clear` / `Shadow` / 非 GI 源自有的 pass），末尾附帧合计。与 `HE_GI_TIMING` 的分工：后者只覆盖"注册为 GI 源的 pass"，判断"把某一项搬出 Lighting 到底省了多少"必须看 Lighting 自己（任务 16 的判据就是靠它）。两者都走 `ProfilerManager` 已有的时间戳数据，**不是**新增测量机制 |
@@ -2049,7 +2069,7 @@ cmake --build Build --config Debug --target 06.GILab -j 8
 
 回归：单元测试 159/159、3952/3952；白炉 **1.0000**；Vulkan 校验 **46 条与基线一致**。
 
-##### 方法论收获（六条，都写进约定）
+##### 方法论收获（七条，都写进约定）
 
 1. **GI 源「吃进去」的中间量必须和「吐出来」的一样纳入纹理级对照。** 本次是靠 dump
    `ibl_irr` 一步定性的——只看 DDGI 的输出只会看到「一个暗色常数」，看不出原因。
@@ -2079,6 +2099,12 @@ cmake --build Build --config Debug --target 06.GILab -j 8
    变为 **56/56/56**（去重把差值也截掉了）。所以「与改前一致」这条判据的正确做法是
    **同一份采样设施下跑两个二进制**：本次任务 7 即用改前/改后两个可执行文件（同一份
    示例代码）对照，得到 **104/104/110 对 104/104/110，逐类相同**。
+7. **逐 pass 的 GPU 耗时不能当"通过/不通过"的判据，只能当同一次会话内的前后对照。**
+   任务 17 期间踩到：同一份二进制连跑两次，`Lighting(rsm)` 读到 **0.774 与 1.105 ms**；
+   而不受任何改动影响的 `GB_Clear` 在 **1.44 / 1.79 / 2.08 ms** 之间变化。**约定**：① 性能结论
+   必须带一个**改动碰不到的对照 pass**（本次用 `GB_Clear`）；② 自动检查里不要写绝对阈值或
+   相对阈值判定，能写"结构"就写结构（例如"那个专用 pass 存在且非零"），把数字留在文档里；
+   ③ 引用数字时连同"同一次会话"一起引用（§3.5 的逐项成本即按此口径标注）。
 
 > **给 S 的告警定基线**：它在 06.GILab 上曾固定报 4 条，已由任务 23 清零（§9.2-T）；
 > **此后新增的任何一条都要当场查清** —— 基线为空，告警才真正具备信噪比。
@@ -2099,8 +2125,8 @@ cmake --build Build --config Debug --target 06.GILab -j 8
 | **消费者门控写漏 → 未初始化纹理被采样** | **静默的物理错误 + 读数跨构建不可复现**（本次 §9.2-Q/R 正是如此被放大的） | 已落地 RHI「已写入」登记 + 一次性告警（§9.2-S）：任何被采样却从未写入的纹理都会报出 set/binding/尺寸/格式；告警基线已由任务 23 清零（§9.2-T）。且 GI 源**吃进去**的中间量也要纳入纹理级对照（§11.3.1） |
 | **帧图 pass lambda 读失效栈帧**（§9.2-U 的一个已修实例） | **把已销毁的纹理指针交给描述符更新**：实测每次运行约 186 条「是野指针」 | 已随任务 23 修掉（Lighting lambda 改按值捕获）；帧图其余 pass lambda 逐个审过，捕获列表干净 |
 | **崩溃/超时的运行留下旧转储**（§9.2-U，已修） | **把上一次的数字当成本次读数**：本次即因此虚构出一个"绝对读数依赖二进制布局"的缺陷追查了很久 | 采样脚本改为运行前删除产物、运行后校验转储新鲜度、失败则以非零码退出（`Tools/gi/dump_gi.ps1`）；**任何读数差异先确认"这个数字是本次跑出来的"** |
-| 校验层重复消息去重掩盖计数 | 误把「报告数」当真实次数（历史上两次误判） | 设置文件**已入库**：`Tools/gi/vk_layer_settings.txt` + `VK_LAYER_SETTINGS_PATH=Tools/gi` 关闭 `duplicate_message_limit`。**计数还对采样目标集敏感**（当前：关去重 104/104/110，开去重 56/56/56），因此判据是「同一份采样设施下与改前二进制逐类相同」，或用 `HE_TRACE_FB` 交叉验证（§11.3.1 方法论第 6 条） |
-| P5 抽象/改造过度 | 大范围回归 | 分步提交（3.1→3.4），每步实测；保留 Additive/Normalized 作对照 |
+| 校验层重复消息去重掩盖计数 | 误把「报告数」当真实次数（历史上两次误判） | 设置文件**已入库**：`Tools/gi/vk_layer_settings.txt` + `VK_LAYER_SETTINGS_PATH=Tools/gi` 关闭 `duplicate_message_limit`。**计数还对采样目标集敏感**，且任务 17 之后 DDGI 配置会多出 AS 相关的几条 ⇒ 当前基线以 §11.3 该行为准（不设设置文件时 `dump_gi` 四变体 60/71/60/71）。判据是「同一份采样设施下与改前二进制逐类相同」，或用 `HE_TRACE_FB` 交叉验证（§11.3.1 方法论第 6 条） |
+| ~~P5 抽象/改造过度~~ | ~~大范围回归~~ | **已随 P5 退场失效**（§3.3 判定"不需要频率分离"，整波不再实施）。当年为它准备的对策（分步提交、保留 Additive 对照、同环境背靠背单源采样）已沉淀成通用做法，见 §11.3.1 |
 | **帧图从「按通道」改为「按 Provider」执行** | 核心路径回归 | 逐类迁移 + 每步判据：**先只合并 specular 与 diffuse 两条循环**（形状相同、且正是 Lumen 需要共享的一对），AO 因存在旁路暂不动，`Compute`(DDGI) 与 `Custom`(IBL) 暂留；判据是**同一环境下背靠背的单源采样逐项一致**（§11.3.1 已修复，绝对量级现在也可复现） |
 | 文档与代码持续漂移 | 后续照文档实现出错 | 完成每个波次时同步回写本文 §2/§5 与状态表 |
 
