@@ -124,9 +124,13 @@ public:
     }
 
     void PreBindAux(rhi::IRHICommandList* cmd, u32 i) override {
-        // RTDenoiser 的 Render 内部自行处理管线状态（无 PreBind）；
-        // 空间滤波（Denoiser）需要显式 PreBind
-        if (!IsTemporalIndex(i) && m_Spatial) m_Spatial->PreBind(cmd);
+        // 【两者都必须在这里绑管线】帧图的附属 pass 会紧接着调 BeginOffscreenPass，而它是用
+        // 「当前绑定的 PSO」去取 RenderPass 建 Framebuffer 的。若此刻还绑着上一 Pass 的 PSO
+        // （例如 RTGI 的光线追踪管线、或带深度附件的图形 PSO），Framebuffer 附件数就会与
+        // RenderPass 不匹配：校验层报 VUID-VkFramebufferCreateInfo-attachmentCount-00876，
+        // 实测更严重 —— 设备直接挂住，进程再也不会推进（启用 RTGI 时稳定复现）。
+        if (IsTemporalIndex(i)) { if (m_Temporal) m_Temporal->PreBind(cmd); }
+        else if (m_Spatial)     { m_Spatial->PreBind(cmd); }
     }
     void RenderAux(rhi::IRHICommandList* cmd, u32 i, const GIProviderContext& /*ctx*/) override {
         if (IsTemporalIndex(i)) {

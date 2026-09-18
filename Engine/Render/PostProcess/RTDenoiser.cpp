@@ -156,7 +156,23 @@ void RTDenoiser::SetInputs(rhi::IRHITexture* noisyColor, rhi::IRHITexture* depth
 }
 
 // ============================================================
-// Render — 执行时域累积降噪（内部管理离屏 Pass + 历史角色交换）
+// PreBind — 绑定管线与动态状态（必须早于调用方的 BeginOffscreenPass）
+//
+// BeginOffscreenPass 用「当前绑定的 PSO」取 RenderPass 建 Framebuffer；此刻若绑着的是别的
+// PSO（上一 Pass 的 RT 管线或带深度附件的图形 PSO），附件数就会不匹配：
+// 实测报 VUID-VkFramebufferCreateInfo-attachmentCount-00876（1 个附件的 Framebuffer 对上
+// 2 个附件的 RenderPass），随后设备挂住、整个进程再也不会推进（启用 RTGI 时稳定复现）。
+// ============================================================
+void RTDenoiser::PreBind(rhi::IRHICommandList* cmd) {
+    if (!m_Ready || !cmd) return;
+    cmd->SetPipeline(m_PSO.get());
+    cmd->SetViewport({0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1});
+    cmd->SetScissor({0, 0, m_Width, m_Height});
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
+}
+
+// ============================================================
+// Render — 执行时域累积降噪（调用方已 BeginOffscreenPass）+ 历史角色交换
 // ============================================================
 void RTDenoiser::Render(rhi::IRHICommandList* cmd) {
     if (!m_Ready) return;
@@ -168,11 +184,6 @@ void RTDenoiser::Render(rhi::IRHICommandList* cmd) {
 
     // 首帧无历史数据 → shader 直接输出当前帧（初始化历史）
     const u32 isFirstFrame = (m_FrameIndex <= 1) ? 1u : 0u;
-
-    cmd->SetPipeline(m_PSO.get());
-    cmd->SetViewport({0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1});
-    cmd->SetScissor({0, 0, m_Width, m_Height});
-    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
 
     // Push constant：texelSize + blend/thresholds + firstFrame + motionBlend（32B）
     struct {
@@ -193,11 +204,9 @@ void RTDenoiser::Render(rhi::IRHICommandList* cmd) {
     pc.pad1           = 0.0f;
     cmd->SetPushConstants(0, sizeof(pc), &pc);
 
-    // 时域累积写入当前帧输出（m_Output），完成后与历史交换角色
-    cmd->BeginOffscreenPass(m_Output->GetNativeHandle(),
-                            nullptr, m_Width, m_Height, nullptr, false);
+    // 离屏 Pass 由调用方（帧图的附属 pass 包装）负责 Begin/End：这里只负责画。
+    // 管线在 PreBind 里绑定 —— 它必须早于 BeginOffscreenPass（见该函数的说明）。
     cmd->Draw(3);
-    cmd->EndOffscreenPass();
 
     // 刚写入的输出成为下帧历史；原历史纹理成为下帧写入目标
     m_History.swap(m_Output);

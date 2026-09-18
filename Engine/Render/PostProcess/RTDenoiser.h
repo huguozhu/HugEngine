@@ -52,7 +52,15 @@ public:
     // 相机运动自适应混合权重（0=关闭，静止时沿用 temporalBlend；运动时抬升以缩短历史拖影）
     void SetMotionBlend(float blend) { m_MotionBlend = blend < 0.0f ? 0.0f : (blend > 1.0f ? 1.0f : blend); }
 
-    // 执行时域累积降噪。内部管理离屏 Pass + 历史角色交换。
+    // 【必须在 BeginOffscreenPass 之前调用】绑定本 Pass 的管线。
+    // 原因：BeginOffscreenPass 是拿「当前已绑定的 PSO」去取 RenderPass 来建 Framebuffer 的，
+    // 若此刻绑着的是别的 PSO（例如上一 Pass 的 RTGI 光线追踪管线，或带深度附件的图形 PSO），
+    // 建出来的 Framebuffer 附件数与 RenderPass 不匹配 → 校验层报
+    // VUID-VkFramebufferCreateInfo-attachmentCount-00876，且实测会让设备挂住。
+    // 帧图会先调 PreBind、再 BeginOffscreenPass，故管线状态由此函数负责。
+    void PreBind(rhi::IRHICommandList* cmd);
+
+    // 执行时域累积降噪（在调用方已 BeginOffscreenPass 之后调用）+ 历史角色交换。
     void Render(rhi::IRHICommandList* cmd);
 
     // ── 访问器 ──
