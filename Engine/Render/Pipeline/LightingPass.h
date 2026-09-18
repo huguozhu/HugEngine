@@ -56,6 +56,10 @@ struct LightingInputs {
     // RSM 间接光（可选，非空时 shader 采样 RSM 间接漫反射——Forward/Deferred 共用）
     rhi::IRHITexture* rsmPositionMap = nullptr;
     rhi::IRHITexture* rsmFluxMap     = nullptr;
+    /// RSM 间接光**辐照度 E**（半分辨率，任务 16）：由 GI/RSM_Indirect.frag.slang 产出。
+    /// 为空 = 本帧没有产出（RSM 不在层栈 / 没有活动阴影）⇒ 必须显式回绑黑色占位，
+    /// 否则会接着采样上一帧的绑定（§9.2-T）。采样用线性 clamp 以便升采样。
+    rhi::IRHITexture* rsmIndirectTex = nullptr;
     // RT 效果输出（可选，非空才替换占位）
     rhi::IRHITexture* rtShadowMask = nullptr;
     rhi::IRHITexture* rtReflection = nullptr;

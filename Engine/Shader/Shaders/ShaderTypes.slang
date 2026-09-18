@@ -82,6 +82,7 @@ GPU_CONST(GPU_UINT kGPUBinding_SSAO_DL       = 20);  // SSAO
 GPU_CONST(GPU_UINT kGPUBinding_SSR           = 21);  // SSR
 GPU_CONST(GPU_UINT kGPUBinding_DDGIProbes    = 22);  // DDGI 探针
 GPU_CONST(GPU_UINT kGPUBinding_DDGIGridParams = 6);  // DDGI 探针网格参数 UBO（Lighting 采样 DDGI 用，binding 6 在 Deferred Lighting set 中空闲）
+GPU_CONST(GPU_UINT kGPUBinding_RSMIndirect    = 5);  // RSM 间接光 E（半分辨率，任务 16；binding 5 在 Deferred Lighting set 中空闲）
 
 // --- Hybrid RT 管线 Binding 索引（Lighting 采样 RT 效果输出纹理）---
 GPU_CONST(GPU_UINT kGPUBinding_RT_ShadowMask = 24);  // RT 阴影遮罩（R16_FLOAT）

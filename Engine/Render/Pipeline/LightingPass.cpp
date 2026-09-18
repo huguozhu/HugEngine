@@ -119,6 +119,8 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
     // ── 绑定 RSM 间接光（Forward/Deferred 共用；未提供时回落到黑色占位 = 无间接光）──
     bindTex(kGPUBinding_RSMPosition, in.rsmPositionMap, m_HDRSampler.get(), black);
     bindTex(kGPUBinding_RSMFlux, in.rsmFluxMap,     m_HDRSampler.get(), black);
+    // RSM 间接光 E（半分辨率）：线性采样以便升采样到全分辨率；未产出时黑色占位（无间接光）
+    bindTex(kGPUBinding_RSMIndirect, in.rsmIndirectTex, m_HDRSampler.get(), black);
 
     // ── 绑定 Hybrid RT 效果输出纹理（未提供时回落到中性占位）──
     // 阴影/AO 遮罩用线性采样上采样到全分辨率；反射/GI HDR 结果用线性采样
@@ -259,6 +261,7 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
         {kGPUBinding_BRDF_LUT, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // BRDF LUT
         {kGPUBinding_RSMPosition, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RSM Pos
         {kGPUBinding_RSMFlux, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RSM Flux
+        {kGPUBinding_RSMIndirect, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RSM 间接光 E（半分辨率）
         {kGPUBinding_Lights_DL, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment},         // Lights SSBO
         {kGPUBinding_ShadowData_DL, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment},         // ShadowData SSBO
         {kGPUBinding_SSGI, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // SSGI
@@ -364,6 +367,8 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
             // 产出不一致，回落就从一个安全值变成一个偏亮的错误值。黑色才是"无间接光"的中性值。
             updateAllTex(kGPUBinding_RSMPosition, m_PlaceholderBlack.get());
             updateAllTex(kGPUBinding_RSMFlux, m_PlaceholderBlack.get());
+            // RSM 间接光 E（binding 5）→ 黑色（无间接光），理由同上
+            updateAllTex(kGPUBinding_RSMIndirect, m_PlaceholderBlack.get());
         }
 
         // 绑定 12=Irradiance, 13=Prefilter 需要 Cubemap（Shader 声明为 TextureCube）

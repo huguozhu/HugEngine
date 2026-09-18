@@ -50,6 +50,13 @@ public:
     // DEPRECATED: RSM 现在使用独立深度缓冲，不再复用 CSM ShadowMap
     void SetShadowDepthView(void* depthView) { m_ExternalDepthView = depthView; }
 
+    /// 设置本帧的 GPULight SSBO（RSM_Generate.frag 的 u_Lights@binding 1）。
+    /// 【为什么必须单独给】`RenderRSMPass` 此前把**对象缓冲**同时绑到了 binding 1 与 2，
+    /// 于是着色器里的 `u_Lights[0]` 实际读到的是 `GPUObjectData[0]`（世界矩阵被当成光源颜色
+    /// 与强度解释）⇒ 通量是人造值/garbage，RSM 间接光因此常年恒为 0（实测 S_rsm = 0 到 1e-7，
+    /// 而 Lighting 里那段 VPL 求和的成本照样在付）。见文档 §9.2-AA。
+    void SetLightBuffer(rhi::IRHIBuffer* lightBuffer) { m_ExternalLightBuf = lightBuffer; }
+
     // 从光源 POV 渲染几何体到 RSM 纹理（使用独立深度缓冲）
     void RenderRSMPass(rhi::IRHICommandList* cmd, he::World& world, he::SceneGraph& sg);
 
@@ -72,6 +79,7 @@ private:
     float4x4 m_LightVP;
     u32      m_RSMResolution = kDefaultRSMResolution;
     rhi::IRHIBuffer*        m_ExternalObjBuf = nullptr;
+    rhi::IRHIBuffer*        m_ExternalLightBuf = nullptr;   // GPULight SSBO（见 SetLightBuffer）
     rhi::DescriptorSetHandle m_ExternalDescSet = rhi::kInvalidSet;
 
     bool m_Ready = false;

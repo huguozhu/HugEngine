@@ -4,6 +4,7 @@
 #include "Pipeline/Material.h"
 #include "GI/GlobalIllumination.h"
 #include "GI/GI_RSM.h"
+#include "GI/RSMIndirect.h"   // RSM 间接光的半分辨率求值 pass（任务 16）
 #include "RHI/RHI.h"
 #include "RenderGraph.h"
 
@@ -205,6 +206,10 @@ private:
     /// 在**该飞行帧槽位下一次被复用时**读回并写进源自己的 GIDebugData。
     GITimer m_GITimer;
 
+    /// 诊断日志的统一节流计数（每帧 Render 自增一次）。
+    /// **不要用 `m_FrameCounter` 代替**：它只在启用异步计算时才自增，普通路径恒为 0。
+    u32 m_DiagFrameCounter = 0;
+
     // ── 场景包围盒（DDGI 网格自动拟合用，任务 14）──
     /// 包围盒重算倒计时：遍历带变换的网格包围盒不是零成本，而场景几何很少变。
     /// **不能用 `m_FrameCounter` 代替**：它只在启用异步计算时才自增（普通路径恒为 0）。
@@ -230,6 +235,10 @@ private:
     Denoiser m_DenoiseSSGI;
     Denoiser m_DenoiseSSR;
     SSAO    m_SSAO;
+    /// RSM 间接光（16 点 Poisson VPL 求和）的半分辨率求值 pass（任务 16 / B3）。
+    /// 它不是 GI 源（没有通道输出、不参与归一化），只是 Lighting 采样 GISOURCE_RSM 的
+    /// **求值前置**，故与 SSAO 同类由管线持有，不注册进 IGIProvider 表。
+    RSMIndirect m_RSMIndirect;
     ProfilerManager m_Profiler;  // GPU 时间戳 Profiler
     ProfilerPanel   m_ProfilerPanel; // ImGui 可视化面板
     std::unique_ptr<rhi::IRHIPipelineState> m_TransientTestPSO;  // 瞬态资源路径验证 PSO

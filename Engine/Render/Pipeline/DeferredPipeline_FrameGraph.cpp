@@ -304,6 +304,16 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     }
 
     // ============================================================
+    // 光源数据收集（CPU → GPULight SSBO + push constant 结构）
+    //   【为什么提到这里】RSM 的生成着色器要从 u_Lights 读方向光的颜色与强度来算通量，
+    //   而光源缓冲原本是在 Lighting 的 pass 里才填的 —— RSM 排在它前面，只能读到上一帧的
+    //   内容（或首帧的未初始化显存）。现在提前到所有消费者之前收集一次，Lighting 侧
+    //   按值捕获同一份结果，不再自己再收一遍。
+    // ============================================================
+    PushConstantData fpc{};
+    CollectLights(fpc, world, sg, camera);
+
+    // ============================================================
     // RSM 渲染（两个独立消费方，见下方 rsmNeeded）
     //   - Lighting 的漫反射间接光：层栈含 RSM 时作为单次反弹 VPL
     //   - DDGI 探针的世界辐射度来源（B 路径，视角无关）
@@ -314,6 +324,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     // 喂 DDGI（下方）与绑给 Lighting（LightingInputs）都读它，避免"pass 没跑但描述符
     // 仍绑着真实纹理"——那样采样到的是未初始化显存（§9.2-T）。
     bool rsmPassRegistered = false;
+    bool rsmDirLightValid  = false;   // 存在「启用且投影」的方向光（RSM 间接光的适用前提，见下）
     float4x4 rsmLightViewProj(1.0f);   // 光源 VP：喂给 DDGI 时与 RSM pass 同源
     // 【独立门控】RSM 有两个消费方，任一需要就要渲染（§9.2-F）：
     //   1) Lighting 的漫反射间接光——由 ShouldRunRSM()（层栈含 RSM ∧ rsmIndirect）表达，
@@ -332,6 +343,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& l) {
             if (l.enabled && l.castShadow) {
                 ldir = glm::normalize(l.direction);
+                rsmDirLightValid = true;           // RSM 间接光只在有方向光投影时才有意义
             }
         });
         const float3 sceneCenter = float3(0.0f, 3.0f, 0.0f);   // 场景中心（Sponza）
@@ -347,6 +359,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                                 m_ObjectBuffers[m_CurrentFrameSlot].get(),
                                 m_ShadowSystem->GetShadowSampler(),
                                 rhi::kInvalidSet);
+        // 通量计算要读方向光的颜色/强度：本帧的光源缓冲（上面已收集，见 §9.2-AA）
+        m_RSM->SetLightBuffer(m_LightBuffers[m_CurrentFrameSlot].get());
         // ── RSM pass：遍历 Provider 注册（Wave 2 推广）──
         // Provider 自报「是否需要本帧的 pass」（层栈含 RSM ∧ 源有效），
         // 帧图只负责按注册顺序建 pass 并注入执行上下文。
@@ -361,6 +375,44 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 });
             rsmPassRegistered = true;
         }
+    }
+
+    // ============================================================
+    // RSM 间接光：半分辨率 VPL 求和（任务 16 / B3）
+    //   搬出 Lighting 的理由与读数见 GI/RSMIndirect.h 与 RSM_Indirect.frag.slang 的文件头：
+    //   16 VPL × 2 张贴图 = 32 次采样，实测在 Lighting 里独占约 0.45 ms（0.882 → 0.433）。
+    //   【光源 VP 必须与 RSM pass 用同一个】此前 Lighting 侧用的是
+    //   `u_ShadowData[0].lightViewProj[0]`，而那是 **CSM 第 0 级**的 VP（拟合相机视锥），
+    //   RSM 贴图却是用上面那个**固定的、覆盖场景的** VP 渲染的 —— 查表 UV 与写入 UV 不同源。
+    //   现在把同一个 rsmLightViewProj 交给本 pass，两边天然一致（本轮修复项之一）。
+    //   【门控与 rsmPassRegistered 同源】没有 RSM 产出时不能让 Lighting 采样上一帧的绑定，
+    //   必须回绑黑色占位（§9.2-T）；没有方向光投影时 RSM 间接光恒为 0，故连 pass 都不注册。
+    //   执行顺序：RSM pass 声明的是空输出（贴图由 GI_RSM 自己持有，不在帧图资源表里），
+    //   因此对齐只能靠**同队列的注册顺序**——本 pass 必须注册在 RSM 之后、Lighting 之前。
+    // ============================================================
+    rhi::IRHITexture* rsmIndirectTex = nullptr;
+    if (rsmPassRegistered && rsmDirLightValid && m_RSMIndirect.IsReady()) {
+        m_RSMIndirect.SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetWorldPos(), m_GBuffer->GetNormal());
+        // 光源类型恒为方向光、阴影强度恒有效：不满足这两条的情形已被上面的门控排除
+        // （等价于旧着色器里 `shadowParams.w >= 0.5` / `shadowParams.z <= 0` 两条提前返回）
+        m_RSMIndirect.SetRSM(m_RSM->GetRSMPositionMap(), m_RSM->GetRSMFluxMap(),
+                             rsmLightViewProj, /*shadowType=*/0.0f, /*shadowStrength=*/1.0f,
+                             /*lightCount=*/1u);
+        auto rsmIndirectH = rg.ImportTexture("RSM_Indirect", m_RSMIndirect.GetOutput());
+        const u32 riW = m_RSMIndirect.GetOutputWidth();
+        const u32 riH = m_RSMIndirect.GetOutputHeight();
+        rg.AddPass("RSM_Indirect",
+            {{gbWorldPos, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbDepth, ResourceAccess::Read}},
+            {{rsmIndirectH, ResourceAccess::Write}},
+            [&, riW, riH](rhi::IRHICommandList* c) {
+                m_RSMIndirect.PreBind(c);   // 必须先绑管线：BeginOffscreenPass 靠它推导 RenderPass
+                rhi::ClearValue clr{};
+                c->BeginOffscreenPass(m_RSMIndirect.GetOutput()->GetNativeHandle(), nullptr, riW, riH, &clr, false);
+                m_RSMIndirect.Render(c);
+                c->EndOffscreenPass();
+            },
+            RGPassQueue::Graphics);   // 同队列 ⇒ 排在 RSM 之后、Lighting 之前执行
+        rsmIndirectTex = m_RSMIndirect.GetOutput();
     }
     // 喂 DDGI：探针改用 RSM 世界辐射度
     // 【必须与上面的 pass 注册条件一致】RSM 未渲染时把 position/flux 图交给 DDGI，探针会采到
@@ -707,8 +759,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         // 指向已销毁纹理的野指针（实测每条运行约 190 条此类报错）。w/h 早已按值捕获，
         // 这里把光照输入的解析结果一并按值捕获。
         [&, w, h,
-         ssgiProduced, ssgiFinalTex, ssrProduced, ssrFinalTex, rsmPassRegistered,
-         rtGITex, rtShadowTex, rtAOTex, rtReflectionTex](rhi::IRHICommandList* c) {
+         ssgiProduced, ssgiFinalTex, ssrProduced, ssrFinalTex, rsmPassRegistered, rsmIndirectTex,
+         rtGITex, rtShadowTex, rtAOTex, rtReflectionTex, fpc](rhi::IRHICommandList* c) {
             // IBL 生成（天空盒 → Irradiance/Prefilter/BRDF LUT，脏时才重建）+ 绑定到 Lighting 描述符集
             auto* giIBL = dynamic_cast<GI_IBL*>(m_GI.get());
             if (giIBL) {
@@ -726,8 +778,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 rhi::ResourceState::DepthStencilRead, rhi::ResourceState::DepthStencilRead,
                 m_GBuffer->GetDepth());
 
-            // 收集光源数据
-            PushConstantData fpc{}; CollectLights(fpc, world, sg, camera);
+            // 光源数据已在帧图开头收集（RSM 的通量计算也要读，见 §9.2-AA），此处按值捕获复用
             float iblIntensity = m_GI ? m_GI->GetSettings().intensity : 1.0f;
 
             // 聚集着色：GPU 光源数据 → CPU 缓存
@@ -786,6 +837,9 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             // 必须传 nullptr 回落到占位纹理；否则描述符指向从未写入的图（§9.2-T）。
             in.rsmPositionMap = rsmPassRegistered ? m_RSM->GetRSMPositionMap() : nullptr;
             in.rsmFluxMap     = rsmPassRegistered ? m_RSM->GetRSMFluxMap()     : nullptr;
+            // RSM 间接光 E（半分辨率，任务 16）。与上面两个 RSM 输入用**同一份**门控结论：
+            // 本帧没产出就必须传 nullptr 让 LightingPass 回绑黑色占位（§9.2-T）。
+            in.rsmIndirectTex = rsmPassRegistered ? rsmIndirectTex : nullptr;
             // overlay 与 Pass 门控同源（避免 pass 跳过但 shader 仍采样陈旧探针）
             in.clusteredShading     = &m_ClusteredShading;
             in.lightGridBuffer      = m_LightGridBuffer.get();

@@ -143,6 +143,8 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     m_DenoiseSSR.SetDepthSigma(kSpatialDepthSigma);
     m_DenoiseSSR.SetNormalSigma(kSpatialNormalSigma);
     m_SSAO.Initialize(device, m_Width, m_Height);
+    // RSM 间接光的半分辨率求值 pass（任务 16）：与 SSAO 同类，由管线持有
+    m_RSMIndirect.Initialize(device, m_Width, m_Height);
 
     // 按 GIConfig 层栈启用对应子系统（两者必须一致：层栈说"参与"就必须真的跑）
     m_SSGI.SetEnabled(m_GIConfig.ShouldRunSSGI());
@@ -465,6 +467,7 @@ void DeferredPipeline::Shutdown() {
     m_DenoiseSSGI.Shutdown();
     m_DenoiseSSR.Shutdown();
     m_SSAO.Shutdown();
+    m_RSMIndirect.Shutdown();
     m_Device = nullptr;
     m_Ready = false;
     HE_CORE_INFO("DeferredPipeline shutdown");
@@ -541,6 +544,7 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
     m_PostProcess.OnResize(m_Device, w, h);
     // GBufferContext 纹理指针已在 GBufferRenderer::OnResize() 中更新
     m_SSAO.OnResize(w, h);
+    m_RSMIndirect.OnResize(w, h);
     m_SSGI.OnResize(w, h);
     m_SSR.OnResize(w, h);
     m_DDGI.OnResize(w, h);
@@ -582,9 +586,11 @@ void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
                 timed->SetRenderTimeMs(m_GITimer.AvgMs(idx));
             }
         }
-        // 诊断输出：HE_GI_TIMING=1 时每 60 帧打一行，便于脚本读取（面板之外也要能拿到数）
+        // 诊断输出：HE_GI_TIMING=1 时每 120 帧打一行，便于脚本读取（面板之外也要能拿到数）
+        // 【节流必须用自增计数，不能用 m_FrameCounter】它只在启用异步计算时才自增
+        // （见下方 SetTimelineBase 那一段），普通路径上恒为 0 ⇒ 取模判据恒真、每帧打一行。
         static bool s_LogTiming = (std::getenv("HE_GI_TIMING") != nullptr);
-        if (s_LogTiming && (m_FrameCounter % 120u) == 0u) {
+        if (s_LogTiming && (m_DiagFrameCounter % 120u) == 0u) {
             std::string line = "[GI 耗时]";
             for (size_t i = 0; i < m_GIProviders.size(); ++i) {
                 char buf[96];
@@ -602,6 +608,25 @@ void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
             HE_CORE_INFO("{}", line);
         }
     }
+
+    // ── 逐 pass GPU 耗时（ProfilerManager）：HE_PASS_TIMING=1 时每 120 帧打一行 ──
+    // 存在的理由与 HE_GI_TIMING 相同：面板上的数字脚本读不到。GI 源之外的 pass
+    // （尤其是 Lighting）此前没有任何可脚本化的读数，而"把某一项从 Lighting 里搬出去
+    // 到底省了多少"这类判断必须看 Lighting 自己，不能只看搬出去的那一项。
+    {
+        static bool s_LogPassTiming = (std::getenv("HE_PASS_TIMING") != nullptr);
+        if (s_LogPassTiming && (m_DiagFrameCounter % 120u) == 0u) {
+            std::string line = "[Pass 耗时]";
+            for (const auto& sc : m_Profiler.GetLastFrameScopes()) {
+                if (sc.depth != 0u) continue;   // 只打 pass 级，跳过嵌套 scope
+                char buf[96];
+                snprintf(buf, sizeof(buf), " %s=%.3fms", sc.name.c_str(), sc.gpuMs);
+                line += buf;
+            }
+            HE_CORE_INFO("{} 帧合计={:.3f}ms", line, m_Profiler.GetTotalFrameMs());
+        }
+    }
+    ++m_DiagFrameCounter;   // 诊断日志的统一节流计数（只在 Render 里自增）
 
     // ── 粒子模拟 (Compute，在 RenderGraph 之前) ──
     float4x4 viewProj = camera.GetViewProjMatrix();

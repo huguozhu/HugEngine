@@ -140,8 +140,13 @@ void GI_RSM::Render(rhi::IRHICommandList* cmd) {
 void GI_RSM::RenderRSMPass(rhi::IRHICommandList* cmd, he::World& world, he::SceneGraph& sg) {
     if (!m_Ready || !m_ExternalObjBuf || !m_RSMDepth) return;
 
-    m_Device->UpdateDescriptorSet(m_RSMSet, kRSMBindLights,
-        rhi::DescriptorType::StorageBuffer, m_ExternalObjBuf);
+    // binding 1 = GPULight[]：**必须是光源缓冲**。此前这里绑的是对象缓冲
+    // （与下一行的 binding 2 同一个），于是着色器读到的"光源"其实是 GPUObjectData[0]，
+    // 通量恒为垃圾值——RSM 间接光因此长期恒为 0。见 §9.2-AA 与 SetLightBuffer 的注释。
+    if (m_ExternalLightBuf) {
+        m_Device->UpdateDescriptorSet(m_RSMSet, kRSMBindLights,
+            rhi::DescriptorType::StorageBuffer, m_ExternalLightBuf);
+    }
     m_Device->UpdateDescriptorSet(m_RSMSet, kRSMBindObjects,
         rhi::DescriptorType::StorageBuffer, m_ExternalObjBuf);
 

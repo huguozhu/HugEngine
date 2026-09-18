@@ -37,6 +37,8 @@ struct VSOutput {
 [[vk::binding(kGPUBinding_BRDF_LUT, kGPUDescSet_PerFrame)]] Texture2D<float2>   u_BRDF_LUT;
 [[vk::binding(kGPUBinding_RSMPosition, kGPUDescSet_PerFrame)]] Texture2D<float4>   u_RSMPositionMap;
 [[vk::binding(kGPUBinding_RSMFlux, kGPUDescSet_PerFrame)]] Texture2D<float4>   u_RSMFluxMap;
+// RSM 间接光辐照度 E（半分辨率，由 GI/RSM_Indirect.frag.slang 产出；任务 16）
+[[vk::binding(kGPUBinding_RSMIndirect, kGPUDescSet_PerFrame)]] Texture2D<float4> u_RSMIndirect;
 
 // GPULight / GPUShadowData 定义来自 ShaderTypes.slang（C++/Slang 共享）
 
@@ -140,56 +142,14 @@ float SourceWeight(GISourceSlot s, float camCoverage, float gridCoverage, float 
 
 /// RSM 间接光（反射阴影贴图，单次反弹 VPL 求和）
 ///
-/// 仅当存在方向光阴影时才采样：shadowParams.w 为光源类型（0=方向光/1=点光/2=聚光，
-/// w<0.5 判定方向光），shadowParams.z 为阴影强度 >0 才有效——避免无方向阴影时
-/// u_ShadowData[0] 全零（w==0 恰好匹配方向光编码）导致零矩阵投影注入 NaN。
+/// 【任务 16 起这里是**采样**而不是求值】16 点 Poisson 盘 VPL 求和（16×2 = 32 次纹理采样）
+/// 已搬到 `GI/RSM_Indirect.frag.slang` 的**半分辨率**独立 pass：
+///   实测（HE_PASS_TIMING=1）Lighting 在漫反射层栈含 RSM 时 0.882 ms、不含时 0.433 ms，
+///   这一项独占约 0.45 ms，是全部 GI 里最大的一笔。搬走后 Lighting 侧只做一次线性采样
+///   （半分辨率 → 全分辨率的升采样），而该项本身是低频量（见该 shader 的文件头）。
+/// 【门控】未产出时由 LightingPass 回绑黑色占位（= 无间接光），与 SSGI/SSR 同一约定。
 ///
-/// VPL 采样点数与能量归一（M4.4）：
-///   原先用 5×5 规则网格（25 点）——规则网格会在斜面上产生条纹状伪影；
-///   改为 16 点 Poisson 盘（径向分布更均匀），采样数省 36%，伪影更少。
-///   离散化能量归一常数与 VPL 数量成反比：E ≈ (1/N)·Σ VPL_i，
-///   故系数由 25 点的 0.03 调整为 16 点的 0.03 × 25/16 ≈ 0.0469（保持总能量不变）。
-#define RSM_VPL_COUNT   16
-#define RSM_VPL_ENERGY  0.046875   // 0.03 × 25/16：按 VPL 数量反比归一
-
-// 16 点 Poisson 盘（单位半径内近似均匀分布）
-static const float2 kRSMPoisson16[RSM_VPL_COUNT] = {
-    float2(-0.94201624, -0.39906216), float2( 0.94558609, -0.76890725),
-    float2(-0.09418410, -0.92938870), float2( 0.34495938,  0.29387760),
-    float2(-0.91588581,  0.45771432), float2(-0.81544232, -0.87912464),
-    float2(-0.38277543,  0.27676845), float2( 0.97484398,  0.75648379),
-    float2( 0.44323325, -0.97511554), float2( 0.53742981, -0.47373420),
-    float2(-0.26496911, -0.41893023), float2( 0.79197514,  0.19090188),
-    float2(-0.24188840,  0.99706507), float2(-0.81409955,  0.91437590),
-    float2( 0.19984126,  0.78641367), float2( 0.14383161, -0.14100790),
-};
-
-float3 SampleRSMIndirect(float3 worldPos, float3 N, uint lightCount) {
-    // 注：此处**不**乘 iblIntensity、也**不**由它门控。
-    // RSM 与 IBL 是两个相互独立的源，用「IBL 强度」当 RSM 的开关会让
-    // 「把 IBL 调暗/关掉」连带把 RSM 一起关掉（此前的耦合缺陷）。
-    // 用户强度统一由层栈权重（GIChannelStack）表达。
-    if (lightCount == 0u) return float3(0.0);
-    if (u_ShadowData[0].shadowParams.w >= 0.5f) return float3(0.0);
-    if (u_ShadowData[0].shadowParams.z <= 0.0) return float3(0.0);
-
-    float4 lsp = mul(u_ShadowData[0].lightViewProj[0], float4(worldPos, 1.0));
-    float2 rsmUV = saturate(lsp.xy / lsp.w * 0.5 + 0.5);
-    float3 rsmIndirect = float3(0.0);
-    for (int i = 0; i < RSM_VPL_COUNT; i++) {
-        float2 suv = saturate(rsmUV + kRSMPoisson16[i] * 0.0125);   // 半径按 Poisson 盘归一后放大
-        float4 ps = u_RSMPositionMap.Sample(u_IBLSampler, suv);
-        float4 fs = u_RSMFluxMap.Sample(u_IBLSampler, suv);
-        float3 sN  = normalize(fs.rgb * 2.0 - 1.0);
-        float3 dir = ps.xyz - worldPos;
-        float  d2  = max(dot(dir, dir), 0.01);
-        rsmIndirect += fs.a * max(dot(N, normalize(dir)), 0.0)
-                     * max(dot(sN, -normalize(dir)), 0.0) / d2;
-    }
-    // VPL 离散化能量归一（E ≈ (1/N)·Σ VPL），返回量纲为**辐照度 E**
-    // （1/π 已并入该经验常数）→ 调用方需再乘接收面 albedo，见 SampleDiffuseSource
-    return rsmIndirect * RSM_VPL_ENERGY;
-}
+/// 描述符索引 5 是本 set 里最后一个空位（见 ShaderTypes.slang 的 kGPUBinding_RSMIndirect）。
 
 /// 漫反射源采样（按 GISourceId 分派）
 ///
@@ -218,8 +178,8 @@ float3 SampleDiffuseSource(uint id, float3 worldPos, float3 N, float2 uv,
         return SampleDDGI(worldPos, N) * albedo * (1.0 / HE_PI);
     case GISOURCE_SSGI:  // 中频：屏幕空间（SSGI.frag 输出已含接收面 albedo）
         return u_SSGI.Sample(u_GBufferSampler, uv).rgb;
-    case GISOURCE_RSM:   // 中频：反射阴影贴图（返回 E，经验常数已含 1/π）→ 补 albedo
-        return SampleRSMIndirect(worldPos, N, lightCount) * albedo;
+    case GISOURCE_RSM:   // 中频：反射阴影贴图（半分辨率 VPL 求和的结果，返回 E，经验常数已含 1/π）→ 补 albedo
+        return u_RSMIndirect.Sample(u_IBLSampler, uv).rgb * albedo;
     case GISOURCE_RTGI:  // 高频：硬件光追（rgen 的余弦加权平均 ≈ E/π）→ 补接收面 albedo
         return u_RT_GI.Sample(u_GBufferSampler, uv).rgb * albedo;
     default:

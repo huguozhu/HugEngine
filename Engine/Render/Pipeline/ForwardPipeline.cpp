@@ -744,6 +744,8 @@ void ForwardPipeline::PrepareGI(rhi::IRHICommandList* cmd, he::World& world, he:
                                     m_ObjectBuffers[m_CurrentFrameSlot].get(),
                                     m_ShadowSystem->GetShadowSampler(),
                                     m_DescSets[m_CurrentFrameSlot]);
+            // 通量计算要读方向光的颜色/强度（§9.2-AA：不绑光源缓冲就会读到对象缓冲）
+            m_RSM->SetLightBuffer(GetCurrentLightBuffer());
             // 从光源 POV 渲染几何体 → RSM 纹理（使用 RSM 自有的独立深度缓冲）
             m_RSM->RenderRSMPass(cmd, world, sg);
             UpdateRSMBindings();

@@ -82,6 +82,7 @@ if(SLANGC)
         "${SHADER_DIR}/GI/GTAO.frag.slang"
         "${SHADER_DIR}/GI/SSGI.frag.slang"
         "${SHADER_DIR}/GI/SSR.frag.slang"
+        "${SHADER_DIR}/GI/RSM_Indirect.frag.slang"
         # AntiAliasing
         "${SHADER_DIR}/AntiAliasing/TAA_Resolve.frag.slang"
         "${SHADER_DIR}/AntiAliasing/FXAA.frag.slang"

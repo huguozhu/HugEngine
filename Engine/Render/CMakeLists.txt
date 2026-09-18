@@ -92,6 +92,9 @@ set(RENDER_SOURCES
     GI/GI_SSR.cpp
     GI/GI_DDGI.h
     GI/GI_DDGI.cpp
+    # RSM 间接光的半分辨率求值 pass（任务 16 / B3）
+    GI/RSMIndirect.h
+    GI/RSMIndirect.cpp
     # GI — 数据模型（RHI-free，可被 Tests 直接包含）
     GI/GITypes.h
     # GI — 探针网格拟合规则（RHI-free，可被 Tests 直接包含）
