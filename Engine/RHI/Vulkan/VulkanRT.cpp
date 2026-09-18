@@ -423,7 +423,11 @@ VulkanDevice::CreateRTPipelineState(const RTPipelineStateDesc& desc) {
     std::vector<VkPushConstantRange> vkPushRanges;
     for (auto& pc : desc.pushConstantRanges) {
         VkPushConstantRange range{};
-        range.stageFlags = pc.stageMask;
+        // 与图形/计算路径同理：把阶段掩码拓宽到 RT 的全体阶段，
+        // 保证 RHI 的 SetPushConstants（RT 绑定点）给出的掩码是布局的子集
+        range.stageFlags = pc.stageMask | VK_SHADER_STAGE_RAYGEN_BIT_KHR
+                         | VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR
+                         | VK_SHADER_STAGE_ANY_HIT_BIT_KHR | VK_SHADER_STAGE_CALLABLE_BIT_KHR;
         range.offset     = pc.offset;
         range.size       = pc.size;
         vkPushRanges.push_back(range);

@@ -336,10 +336,14 @@ static bool BuildGraphicsPipelineParts(VkDevice device, const PipelineStateDesc&
     out.dynState.dynamicStateCount = 2;
     out.dynState.pDynamicStates    = dyn;
 
-    // 构建 push constant ranges（直接使用 stageMask 位掩码）
+    // 构建 push constant ranges。
+    // stageFlags 一律**拓宽**到该管线种类可能写入 push constant 的全体阶段：
+    // RHI 的 SetPushConstants 按绑定类型给出一组阶段掩码（图形=VS|FS，计算=CS，
+    // RT=RGEN|MISS|CHIT|AHIT|CALL），若布局声明的阶段更窄，vkCmdPushConstants 会报
+    // VUID-vkCmdPushConstants-offset-01795。宽一点只是"允许"，不影响任何行为。
     for (auto& pcRange : desc.pushConstantRanges) {
         VkPushConstantRange vkRange{};
-        vkRange.stageFlags = pcRange.stageMask;  // 直接使用 Vulkan 兼容的位掩码
+        vkRange.stageFlags = pcRange.stageMask | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;  // 直接使用 Vulkan 兼容的位掩码
         vkRange.offset     = pcRange.offset;
         vkRange.size       = pcRange.size;
         out.pushRanges.push_back(vkRange);
@@ -428,7 +432,7 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
         std::vector<VkPushConstantRange> vkPushRanges;
         for (auto& pcRange : desc.pushConstantRanges) {
             VkPushConstantRange vkRange{};
-            vkRange.stageFlags = pcRange.stageMask;
+            vkRange.stageFlags = pcRange.stageMask | VK_SHADER_STAGE_COMPUTE_BIT;
             vkRange.offset     = pcRange.offset;
             vkRange.size       = pcRange.size;
             vkPushRanges.push_back(vkRange);
@@ -622,7 +626,7 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
         std::vector<VkPushConstantRange> vkPushRanges;
         for (auto& pcRange : desc.pushConstantRanges) {
             VkPushConstantRange vkRange{};
-            vkRange.stageFlags = pcRange.stageMask;
+            vkRange.stageFlags = pcRange.stageMask | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT;
             vkRange.offset     = pcRange.offset;
             vkRange.size       = pcRange.size;
             vkPushRanges.push_back(vkRange);

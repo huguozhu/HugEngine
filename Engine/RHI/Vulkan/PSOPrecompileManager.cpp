@@ -176,7 +176,7 @@ void PSOPrecompileManager::WorkerThreadFunc() {
             std::vector<VkPushConstantRange> pcr;
             for (auto& r : desc.pushConstantRanges) {
                 VkPushConstantRange range{};
-                range.stageFlags = r.stageMask;
+                range.stageFlags = r.stageMask | VK_SHADER_STAGE_COMPUTE_BIT;
                 range.offset     = r.offset;
                 range.size       = r.size;
                 pcr.push_back(range);
@@ -287,7 +287,7 @@ void PSOPrecompileManager::WorkerThreadFunc() {
             std::vector<VkPushConstantRange> pcr;
             for (auto& r : desc.pushConstantRanges) {
                 VkPushConstantRange range{};
-                range.stageFlags = r.stageMask;
+                range.stageFlags = r.stageMask | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
                 range.offset     = r.offset;
                 range.size       = r.size;
                 pcr.push_back(range);
