@@ -5,6 +5,7 @@
 >   - 2026-09-04：对齐代码基线（`404de09`），新增 **Phase S0（已有组件补齐 AI 一等公民）**
 >   - 2026-09-06：S0~P3 全部落地（提交 `8813211` → `56696ea` 共 9 个），doctest 85 用例 / 509 断言通过；
 >     剩余仅 Phase C 大工程（依赖路线图 P6/P3）
+>   - 2026-09-18：任务 24（Decal GBuffer 投影 Pass）落地（见 §十七）
 >   - 2026-09-18：任务 23（bindless 堆环形化）落地（RHI 基础件 + 消费方接入，见 §十六）
 >   - 2026-09-18：任务 22（动画重定向）落地（提交 `98b94d4` + 演示 `6c3f33e`），见 §十五
 >   - 2026-09-18：任务 21（骨骼剪辑混合）落地（提交 `af86387` + 演示 `2b07df7`），见 §十四
@@ -35,7 +36,7 @@
 | ProjectileMovementComponent | UProjectileMovementComponent | ✅（P1 A7，`ProjectileSystem`） | ✅ 5 属性 | ✅ | ❌（实体引用无法表达） |
 | HealthComponent | UHealthComponent | ✅（P1 A8，`DamageSystem`） | ✅ 3 属性 | ✅ | ✅ Health |
 | SpringArmComponent | USpringArmComponent | ✅（P1 A6，`SpringArmSystem`） | ✅ 4 属性 | ✅ | ❌（实体引用无法表达） |
-| DecalComponent | UDecalComponent | ✅（P2 A3，MVP 半透明投射片） | ✅ 5 属性 | ✅ | ✅ Decal |
+| DecalComponent | UDecalComponent | ✅（P2 A3 投射片 MVP；任务 24 追加 Deferred **GBuffer 投影**，见 §十七） | ✅ 6 属性 | ✅ | ✅ Decal |
 | BillboardComponent | UBillboardComponent | ✅（P2 A4，billboard 矩阵对齐相机） | ✅ 3 属性 | ✅ | — |
 | TextRenderComponent | UTextRenderComponent | ✅（P2 A5，stb_truetype + 系统字体兜底） | ✅ 4 属性 | ✅ | — |
 | CollisionComponent | UCapsuleComponent/UBoxComponent | ✅（P3 B5，`CollisionSystem`） | ✅ 5 属性 | ✅ | — |
@@ -63,7 +64,7 @@
 | **A（低成本）** | Camera(系统接入) / Decal / Billboard / TextRender / SpringArm / ProjectileMovement / Health | 2~3 天/个 | ✅ 已完成（2026-09-06）：A3~A8 落地（**现编号 7~12**）；A1/A2 并入 S0（**现编号 5~6**） |
 | **B（中成本）** | InstancedMesh / Spline / CharacterMovement / Ability(简化 GAS) / Collision | 1~2 周/个 | ✅ 已完成（2026-09-06）：B1~B5 落地（**现编号 13~17**）；前置重构经评估非必要（见 §六注记） |
 | **C（大工程）** | SkeletalMesh / Physics / NavMesh | 数周~数月 | ✅ 均已落地（**现编号 18~20**；SkeletalMesh `4d94460` / Physics Jolt C2 / NavMesh `97aaa00`）；Audio（原 C3）已移除 |
-| **后续（待办）** | SkeletalMesh 扩展 / MVP 技术债 / 架构触发项 | 见总表 | ⏳ **现编号 21~28**（21~23 已于 2026-09-18 完成；24~28 待办），见下表与 §十二 |
+| **后续（待办）** | SkeletalMesh 扩展 / MVP 技术债 / 架构触发项 | 见总表 | ⏳ **现编号 21~28**（21~24 已于 2026-09-18 完成；25~28 待办），见下表与 §十二 |
 
 ### 任务总表（从 1 重新计数）
 
@@ -98,20 +99,20 @@
 | **20** | C4 | NavMesh 寻路（NavMesh + A* + NavAgent） | ✅ 2026-09-07 | §七 |
 
 **B. 待办（21~28）** —— 来源：§十一 已知 MVP 限制/技术债 + §十二 "仍待办" + §十二 架构触发项
-（**21~23 已于 2026-09-18 完成**，保留在表里以便追溯）
+（**21~24 已于 2026-09-18 完成**，保留在表里以便追溯）
 
 | 新编号 | 任务 | 类型 | 依赖 / 触发条件 | 详见 |
 |:---:|---|---|---|---|
 | **21** | ~~SkeletalMesh **剪辑混合**（多动画片段混合 / Blend Space）~~ —— ✅ **已完成**（2026-09-18，`af86387` + 演示 `2b07df7`） | 功能扩展 | 无（独立） | §十四 |
 | **22** | ~~SkeletalMesh **动画重定向**（不同骨架共用动画）~~ —— ✅ **已完成**（2026-09-18，`98b94d4` + 演示 `6c3f33e`） | 功能扩展 | 无（独立） | §十五 |
 | **23** | ~~**bindless 堆环形化**（TextRender / InstancedMesh 高频更新不再靠"旧资源保活"）~~ —— ✅ **已完成**（2026-09-18，见 §十六） | 技术债 | 无（独立，涉 RHI 堆管理） | §十六 |
-| **24** | **Decal GBuffer 投影 Pass**（替代半透明投射片 MVP） | 技术债 → 功能 | 无（独立，需 GBuffer 可写 Pass） | §十一 ②/§十二 |
+| **24** | ~~**Decal GBuffer 投影 Pass**（替代半透明投射片 MVP）~~ —— ✅ **已完成**（2026-09-18，见 §十七；Forward 仍为投射片） | 技术债 → 功能 | 无（独立，需 GBuffer 可写 Pass） | §十七 |
 | **25** | **InstancedMesh 接 GPU-Culling + 逐实例剔除**（现在仅 Forward 非 GPU-Culling 路径） | 技术债 | 无（独立） | §十一 ②/§十二 |
 | **26** | **Collision 调试线框**（可视化 AABB/球/胶囊） | 技术债 | 无（独立，可复用 Billboard/线框） | §十一 ④/§十二 |
 | **27** | **渲染类型注册表化**（替换"派生渲染组件显式列举"） | 架构 | **触发**：出现下一个渲染组件（InstancedMesh 是第 7 个） | §十二 |
 | **28** | **CollectLights 数据驱动抽取**（现在 4 份复制） | 架构 | **触发**：出现下一个光源类型 | §十二 |
 
-> **怎么用这张表**：`24~26` 无外部依赖、可随时开工（建议顺序：26 → 25 → 24，
+> **怎么用这张表**：`25~26` 无外部依赖、可随时开工（建议顺序：26 → 25，
 > 由"改动面小 → 大"排列）；`27/28` 是**触发式**任务，条件未到之前不动（提前做属于"没有消费方的
 > 泛化"，与 GI 那边的取舍一致）。每完成一项：把状态改成 ✅ 并补提交号，**不要改动已有编号**。
 
@@ -196,9 +197,9 @@
 
 - **对应 UE5**：UDecalComponent
 - **用途**：贴花（弹孔/污渍/路面标线），绘制到场景表面
-- **属性**：`decalTexture(String 路径) / size / rotation / opacity / blendMode`
-- **系统接入**：Deferred 管线贴花 Pass（GBuffer 修改）或前向投影盒绘制；MVP 可用简化版（半透明立方投射）
-- **SceneBuilder 词表**：`"Decal": {"fields": ["decalTexture", "size", "opacity"]}`
+- **属性**：`decalTexture(String 路径) / size / rotation / opacity / projectionDepth(任务 24 追加) / blendMode`
+- **系统接入**：Deferred 管线投影贴花 Pass（GBuffer 修改，任务 24 ✅ 见 §十七）；Forward 为投射片卡片
+- **SceneBuilder 词表**：`"Decal": {"fields": ["decalTexture", "size", "opacity", "projectionDepth"]}`
 - **验证**：贴花可见性 + 大小/透明度参数生效
 
 ### 8. BillboardComponent（原 A4；✅ 已完成 2026-09-06）
@@ -348,7 +349,7 @@ P2（表现）  : 7 Decal(原A3) / 8 Billboard(原A4) / 9 TextRender(原A5) —�
 P3（中成本）: 17 Collision(原B5) → 15 CharacterMovement(原B3) → 16 Ability(原B4)
               → 14 Spline(原B2) → 13 InstancedMesh(原B1) —— ✅ 已完成
 P4（大工程）: 18 SkeletalMesh(原C1) / 19 Physics(原C2) / 20 NavMesh(原C4) —— ✅ 已完成
-待办        : 21 ✅ / 22 ✅ / 23 ✅ 已完成；24~26（无依赖，建议 26 → 25 → 24）
+待办        : 21 ✅ / 22 ✅ / 23 ✅ / 24 ✅ 已完成；25~26（无依赖，建议 26 → 25）
               27/28（触发式：出现下一个渲染组件 / 下一个光源类型时再做）
 ```
 
@@ -362,7 +363,7 @@ P4（大工程）: 18 SkeletalMesh(原C1) / 19 Physics(原C2) / 20 NavMesh(原C4
 - **交互验证**：02.Cube（广告牌/文字/贴花/碰撞变色/角色移动/万级实例）、05.AISamples（真实 LLM 场景生成、主相机、火球技能、样条巡逻）
 - **已知 MVP 限制（技术债清单，均已成任务，见 §三 任务总表 21~26）**：
   1. ~~bindless 堆 append-only：TextRender/InstancedMesh 动态更新以「旧资源保活」换安全，高频更新需 Heap 环形化改造~~ ✅ **已落地（任务 23，见 §十六）**
-  2. Decal 为投射片 MVP（无 GBuffer 投影 Pass，**任务 24**）；InstancedMesh 仅支持 Forward 非 GPU-Culling 路径，逐实例剔除未接（**任务 25**）
+  2. ~~Decal 为投射片 MVP（无 GBuffer 投影 Pass）~~ ✅ **Deferred 已落地 GBuffer 投影（任务 24，见 §十七）**；Forward 无 GBuffer 可投影 ⇒ 仍为投射片（已知边界）；InstancedMesh 仅支持 Forward 非 GPU-Culling 路径，逐实例剔除未接（**任务 25**）
   3. 实体引用类属性（homingTarget/targetEntity/cameraEntity 等）不进反射/词表（u64 无法快照序列化）——**这是策略而非待办**
   4. Collision 调试线框（**任务 26**）、SplineMesh 沿条生成 ✅ 已落地（`28ae06b` 坡度过滤、`bc14c57` 碰撞缩臂亦已落地）
 - **遗留**：任务 18~20（原 Phase C）全部落地（Physics C2 ✅ `7eb1a66`~`2b0ae5c`；NavMesh C4 ✅ `97aaa00`；SkeletalMesh ✅ `4d94460`）；Audio（C3）已从本计划移除。SkeletalMesh 后续扩展（剪辑混合、动画重定向）；**既有组件 Particle/Memory/Goal 的反射/AI 补齐 ✅ 已完成**（Animation `98c4080`；Particle emitRate 深补 `fa1410c`；Memory/Goal 类型注册——内部结构按文档不暴露）
@@ -388,7 +389,7 @@ P4（大工程）: 18 SkeletalMesh(原C1) / 19 Physics(原C2) / 20 NavMesh(原C4
 - ✅ **21** SkeletalMesh 剪辑混合（多片段混合 / Blend Space）—— 已完成（2026-09-18，`af86387` + 演示 `2b07df7`，见 §十四）
 - ✅ **22** SkeletalMesh 动画重定向（不同骨架共用动画）—— 已完成（2026-09-18，`98b94d4` + 演示 `6c3f33e`，见 §十五）
 - ✅ **23** bindless 堆环形化（TextRender/InstancedMesh 高频更新）—— 已完成（2026-09-18，见 §十六）
-- **24** Decal GBuffer 投影 Pass（替代投射片 MVP）
+- ✅ **24** Decal GBuffer 投影 Pass（替代投射片 MVP）—— 已完成（2026-09-18，见 §十七）
 - **25** InstancedMesh 接 GPU-Culling + 逐实例剔除
 - **26** Collision 调试线框
 - **27** 渲染类型注册表化（**触发**：下一个渲染组件；InstancedMesh 是第 7 个）
@@ -622,4 +623,82 @@ P4（大工程）: 18 SkeletalMesh(原C1) / 19 Physics(原C2) / 20 NavMesh(原C4
   查询）。这是与延迟销毁队列一致的取舍：多等 1~2 帧，换实现简单且安全。
 - 独立注册的 `RegisterSampler`（不与纹理配对）仍走追加：它的下标空间与纹理槽位语义不同，混用会
   互相踩踏；引擎内目前没有调用点。
+
+---
+
+## 十七、任务 24 落地：Decal GBuffer 投影 Pass（Deferred 路径）
+
+承接 §十一 技术债②。**问题**：原来的贴花是一张**半透明四边形**（`DecalComponent::OnCreate`
+生成的卡片），靠 Transform 摆放去"贴"表面 —— 平面凑合，曲面、台阶、斜坡上会穿模/悬空/被
+深度裁掉；而且它在 Deferred 里是作为普通网格进 GBuffer 的，会把地面 albedo 直接覆盖成
+"卡片自己的平面 + 卡片自己的世界坐标"，从光照角度看根本不是投影。
+
+**做法：把贴花当成投影体积投到 GBuffer 上（新 `DecalPass`）**
+
+| 步骤 | 内容 |
+|---|---|
+| ① 几何 | 逐贴花画一个**盒子**（单位立方体 × 贴花尺寸/厚度），只覆盖"可能被影响"的屏幕区域 |
+| ② 取真实表面 | 片段着色器采样 GBuffer **MRT4（世界坐标）** 拿到该像素上的真实表面点；采样**深度**做天空判定（`depth >= 1` ⇒ 无几何体，discard） |
+| ③ 体积裁剪 | 把世界点变换到贴花局部空间，`abs(local) > halfExtents` ⇒ discard —— 这一步就是"投影"与"投射片"的本质差别 |
+| ④ 采样与混合 | 盒内点按局部 `xy` 反算 UV 采样贴花纹理（bindless 句柄走 push constant），颜色/法线/粗糙度按 `alpha` **硬件混合**写回 MRT0/MRT1 |
+
+**通道与状态设计（每条都有原因）**
+
+1. **与 GBuffer 共用 8 个 MRT，但只写 MRT0/1**：PSO 的 `colorBlend[2..7].writeMask = None`，
+   emissive/velocity/worldPos/disney/lightmapKey 原样保留（贴花不改变几何、光照参数以外的量）。
+2. **`colorLoadOp = Load`**：这四个字符是关键 —— Clear 会把整个 GBuffer 清掉。
+3. **无深度附件（`depthFormat = Unknown`）**：本 Pass 要把深度当**纹理采样**（天空判定）；
+   同一图像既做附件又做采样 = feedback loop，校验层会直接报错。遮挡关系由②③的世界坐标裁剪保证。
+4. **不做"读 MRT0/MRT1 再写回"**：那同样是附件读写冲突。最终颜色交给混合方程
+   `dst = src·srcAlpha + dst·(1−srcAlpha)`；法线在 GBuffer 里是 `N*0.5+0.5` 的**仿射**编码，
+   逐分量线性混合与解码后混合等价，所以直接混编码值是正确且省事的选择。
+5. **逐贴花一次 `DrawIndexed(36)`，参数走 push constant**（240 字节）：贴花数量通常在几十量级，
+   不值得为它引入实例化/对象缓冲。`DecalPushConstants` 的**逐字段偏移**由 doctest 静态断言钉死，
+   防止 C++ 结构与 Slang cbuffer 悄悄错位。
+6. **Deferred 必须排除贴花卡片**：否则卡片会作为不透明网格写进 GBuffer（重复且错误）。
+   排除必须**三处口径一致** —— `SceneRenderer::Prepare` / `MeshBatcher::Build` / `GPUScene::Collect`，
+   否则三者的 objectIndex 会错位（`FillGPUScene` 按顺序对齐）。GPUScene 的口径在
+   **首次 Collect 之前**设定（它首次全量收集后走增量分支，中途改口径会让缓存列表错位）。
+7. **开关 `r.Decal.Project`（默认 1）**：只门控投影 Pass。关掉后 Deferred 不再画贴花
+   （卡片已排除），想对比"投射片 vs 投影"切 Forward 路径即可（Forward 用卡片）。
+
+**新增/改动**
+
+| 位置 | 内容 |
+|---|---|
+| `Shader/Shaders/Decal/DecalProject.{vert,frag}.slang` | 盒体顶点着色器 + 投影/裁剪/混合片段着色器 |
+| `Render/Pipeline/DecalPass.{h,cpp}` | 立方体几何、PSO（8 附件 + Load + 无深度附件 + per-MRT writeMask）、描述符集（bindless 纹理/采样器 + MRT4/深度采样）、逐贴花绘制 |
+| `Render/Pipeline/DeferredPipeline.*` | 持有 `m_DecalPass`；Init/Shutdown/OnResize；GBuffer 排除贴花卡片 |
+| `Render/Pipeline/DeferredPipeline_FrameGraph.cpp` | 新 pass `Decal_Project`：读 `gbWorldPos`+`gbDepth`，写 `gbA`+`gbB`，位置在 GBuffer 之后、GI/Lighting 之前 |
+| `DecalComponent` | 新参数 `projectionDepth`（投影体积厚度，默认 0.5m）+ 反射注册 + AI 注解 + 词表（`TypeSchema`） |
+| 收集口径 | `SceneRenderer::Prepare(..., excludeDecals)`、`MeshBatcher::Build(world, excludeDecals)`、`GPUScene::SetExcludeDecals` |
+
+**判据**
+
+- **doctest**：`Tests/TestDecal.cpp` 追加 2 例（全量 **194 例 / 5426 断言**全过）：
+  · `projectionDepth` 默认 0.5、反射已登记（偏移与 `offsetof` 一致、`AiWritable`/`AiVisible` 注解齐全）、
+    词表含 `projectionDepth`；
+  · `DecalPushConstants`：`sizeof == 256 ≤ kMaxPushConstantSize`，且 13 个字段的 `offsetof`
+    逐个对齐 Slang cbuffer 布局（这是最容易静默出错的地方）。
+- **示例冒烟**（02.Cube，Release，两种路径对照，各 0 error / 0 VUID）：
+  · Deferred（`render.pipelineMode=1`）：
+    `[任务 24] 贴花 #0：中心 (0.00, 0.12, 0.00)，半尺寸 (3.00, 3.00, 0.25)，投影法线 (0.00, 1.00, 0.00)，不透明度 0.60，纹理槽 4（有贴花纹理）`
+    —— 与场景设定（6×6 平放地面、抬高 0.12m、地面顶面 y=0.1）逐项吻合：盒子沿法线 ±0.25m **确实包住地面**；
+    随后 `[任务 24] GBuffer 投影贴花：本帧 1 个贴花（累计 2700 帧…）` 证明 pass 持续执行；
+  · Forward（`render.pipelineMode=0`）：**0 条** `[任务 24]` 日志（投影 Pass 不参与）、贴花卡片照常创建，
+    说明两条路径隔离正确；面板新增"贴花: 投射片卡片（Forward）/ GBuffer 投影（Deferred）+ 已跑帧数/贴花数"。
+- **校验层**：Deferred 下 20 秒 0 条校验告警 —— 说明 Load 通道、per-MRT writeMask、
+  无深度附件 + 深度采样（无 feedback loop）、以及 RenderGraph 的屏障/layout 全部正确。
+
+**已知边界**
+
+- **Forward 仍是投射片卡片**：Forward 没有 GBuffer 可投影（它的 albedo 是即时着色，不存在"可写的
+  中间表面"）。要做 Forward 贴花得走"深度重建世界坐标 + 在 PBR 着色里叠加"的路线，属于另一个设计。
+- **只写 MRT0/1**：贴花不改变自发光/AO/迪士尼参数/运动矢量（运动矢量保持不变意味着 TAA 下贴花
+  区域仍按地面自身的速度重投影，这恰好是想要的）。
+- ****未做逐像素 A/B 对照**：本轮判据止于"参数几何一致 + pass 持续执行 + 校验层零告警 + 布局断言"，
+  没有把 GBuffer albedo 读回做像素级比对（该示例没有纹理读回设施，新增读回与同步的成本高于本任务
+  的收益）。若后续要自动化像素判据，可复用 GI 那边的纹理落盘设施。
+- 投影盒厚度需要调用方保证"包住要贴的表面"（`projectionDepth` 默认 0.5m）；贴花盒没包到的部分
+  会被正确裁剪掉 —— 表现为"贴花缺一块"，而不是错误地投到别处。
 
