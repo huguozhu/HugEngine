@@ -23,7 +23,8 @@ void GBufferRenderer_GPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
                                   const CameraData& camera) {
     // MeshBatcher::Build + FillGPUScene 已在 BuildFrameGraph 中完成（Upload 之前）
     // 上传 ObjectBuffer 并获取 DrawItem 列表（GPU 路径用不到但 CPU 回退需要）
-    auto drawItems = ctx.sceneRenderer->Prepare(world, sg, camera, ctx.objectBuffer);
+    // 任务 24：Deferred 排除贴花卡片（与 MeshBatcher/GPUScene 口径一致）
+    auto drawItems = ctx.sceneRenderer->Prepare(world, sg, camera, ctx.objectBuffer, ctx.excludeDecals);
 
     u32 w = ctx.width, h = ctx.height;
 

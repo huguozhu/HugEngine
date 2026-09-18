@@ -75,7 +75,9 @@ void GPUScene::Collect(World& world, SceneGraph& sg, const CameraData& camera) {
         };
         world.ForEach<BillboardComponent>([&](Entity e, BillboardComponent& bb){ collectBillboard(e, bb); });
         world.ForEach<TextRenderComponent>([&](Entity e, TextRenderComponent& tr){ collectBillboard(e, tr); });
-        world.ForEach<DecalComponent>([&](Entity e, DecalComponent& dc){ collect(e, dc, sg.GetWorldMatrix(e), dc.materialID); });
+        // 任务 24：贴花由 DecalPass 投影到 GBuffer，不进场景物体列表（与 Prepare/MeshBatcher 口径一致）
+        if (!m_ExcludeDecals)
+            world.ForEach<DecalComponent>([&](Entity e, DecalComponent& dc){ collect(e, dc, sg.GetWorldMatrix(e), dc.materialID); });
         world.ForEach<InstancedMeshComponent>([&](Entity e, InstancedMeshComponent& im){ collect(e, im, sg.GetWorldMatrix(e), im.materialID); });
         world.ForEach<SkeletalMeshComponent>([&](Entity e, SkeletalMeshComponent& sm){ collect(e, sm, sg.GetWorldMatrix(e), sm.materialID); });
     } else {
@@ -101,7 +103,9 @@ void GPUScene::Collect(World& world, SceneGraph& sg, const CameraData& camera) {
         };
         world.ForEach<BillboardComponent>([&](Entity e, BillboardComponent& bb){ updateBillboard(e, bb); });
         world.ForEach<TextRenderComponent>([&](Entity e, TextRenderComponent& tr){ updateBillboard(e, tr); });
-        world.ForEach<DecalComponent>([&](Entity e, DecalComponent& dc){ update(e, dc, sg.GetWorldMatrix(e)); });
+        // 排除口径必须与首次全量收集一致（否则 idx 错位）
+        if (!m_ExcludeDecals)
+            world.ForEach<DecalComponent>([&](Entity e, DecalComponent& dc){ update(e, dc, sg.GetWorldMatrix(e)); });
         world.ForEach<InstancedMeshComponent>([&](Entity e, InstancedMeshComponent& im){ update(e, im, sg.GetWorldMatrix(e)); });
         world.ForEach<SkeletalMeshComponent>([&](Entity e, SkeletalMeshComponent& sm){ update(e, sm, sg.GetWorldMatrix(e)); });
     }

@@ -30,9 +30,14 @@ public:
     bool enableFrustumCull = true;  // CPU 视锥剔除开关（默认开启）
 
     /// 收集可见实体 → 剔除 → 上传 GPUObjectData → 返回 DrawList
+    /// @param excludeDecals 跳过贴花卡片（任务 24：Deferred 用 DecalPass 投影贴花；
+    ///        卡片若也进 GBuffer 会把地面 albedo 覆盖成"贴花自己的平面"，既重复又错误）
+    /// 【为什么要显式传】贴花必须与 MeshBatcher / GPUScene 的收集口径**一致**地排除，
+    /// 否则三者枚举出的 objectIndex 会错位（`FillGPUScene` 按顺序对齐）。
     std::vector<DrawItem> Prepare(he::World& world, he::SceneGraph& sg,
                                    const CameraData& camera,
-                                   rhi::IRHIBuffer* objectBuffer);
+                                   rhi::IRHIBuffer* objectBuffer,
+                                   bool excludeDecals = false);
 };
 
 } // namespace he::render

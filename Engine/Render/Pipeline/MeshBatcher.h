@@ -39,7 +39,9 @@ struct alignas(16) DGCDrawToken {
 
 class MeshBatcher {
 public:
-    bool Build(class World& world);
+    /// @param excludeDecals 跳过贴花卡片（任务 24：Deferred 用 DecalPass 投影贴花）。
+    ///        必须与 SceneRenderer::Prepare / GPUScene::Collect 的口径一致，否则 objectIndex 错位。
+    bool Build(class World& world, bool excludeDecals = false);
 
     // 合并后的 GPU 缓冲
     rhi::IRHIBuffer* GetVertexBuffer() const { return m_MergedVB.get(); }

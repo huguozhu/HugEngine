@@ -58,8 +58,8 @@ void GBufferRenderer_CPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
     cmd->SetViewport({0, (float)h, (float)w, -(float)h, 0, 1});
     cmd->SetScissor({0, 0, w, h});
 
-    // SceneRenderer 准备所有绘制项
-    auto drawItems = ctx.sceneRenderer->Prepare(world, sg, camera, ctx.objectBuffer);
+    // SceneRenderer 准备所有绘制项（任务 24：Deferred 排除贴花卡片，改由 DecalPass 投影）
+    auto drawItems = ctx.sceneRenderer->Prepare(world, sg, camera, ctx.objectBuffer, ctx.excludeDecals);
 
     // GPU 剔除过滤（Readback 上帧结果 → 过滤可见物体）
     // 仅 GPU Culling 启用且 visIndices 非空时才过滤，避免使用脏数据

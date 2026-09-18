@@ -50,6 +50,12 @@ public:
     /// @param camera 当前帧相机（广告牌矩阵对齐相机用）
     void Collect(class World& world, class SceneGraph& sg, const CameraData& camera);
 
+    /// 任务 24：是否把贴花卡片排除在场景物体之外（Deferred 用 DecalPass 投影贴花）。
+    /// **必须在首次 Collect 之前设置**：Collect 首次全量收集后走增量分支，
+    /// 中途改变口径会让缓存列表与新口径错位。
+    void SetExcludeDecals(bool v) { m_ExcludeDecals = v; }
+    bool GetExcludeDecals() const { return m_ExcludeDecals; }
+
     /// 上传到 GPU（仅 Dirty 部分增量写入 SSBO）
     void Upload(rhi::IRHIDevice* device);
 
@@ -66,6 +72,7 @@ private:
     std::unique_ptr<rhi::IRHIBuffer> m_ObjectSSBO;
     u32 m_ObjectCount = 0;
     bool m_Initialized = false;
+    bool m_ExcludeDecals = false;   // 任务 24：贴花由 DecalPass 投影，不进场景物体列表
 };
 
 } // namespace he::render

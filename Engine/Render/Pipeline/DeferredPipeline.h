@@ -20,6 +20,7 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "Pipeline/MeshBatcher.h"
 
 #include "Pipeline/GBufferRenderer.h"
+#include "Pipeline/DecalPass.h"   // 任务 24：GBuffer 投影贴花
 #include "Pipeline/LightingPass.h"
 #include "Pipeline/ParticleRenderer.h"
 #include "GI/GI_SSGI.h"
@@ -110,6 +111,8 @@ public:
     LightingPass&       GetLighting()      { return m_Lighting; }
     /// GBuffer 通道（暴露 albedo/normal 等 MRT，供结果校验类功能读取，如离线频谱采样）
     GBufferRenderer*    GetGBuffer()       { return m_GBuffer.get(); }
+    /// GBuffer 投影贴花 Pass（任务 24；暴露统计供调试/判据读取）
+    DecalPass&          GetDecalPass()     { return m_DecalPass; }
     /// 已注册的 GI Provider（帧图按注册表遍历构建 pass，而非手写门控）
     std::vector<std::unique_ptr<IGIProvider>>& GetGIProviders() { return m_GIProviders; }
     /// RSM 子系统与它的半分辨率求值 pass（供离线采样设施逐级查看 RSM 链路：
@@ -161,6 +164,11 @@ private:
     bool m_ComputePendingSubmit = false;  // 是否有待提交的 Compute 工作
     // GBuffer 渲染（纹理所有权 + PSO + 描述符集，共享组件）
     std::unique_ptr<GBufferRenderer> m_GBuffer;
+
+    // GBuffer 投影贴花（任务 24）：贴花体积盒 → 读 GBuffer 世界坐标裁剪 → 混合写回 albedo/法线
+    DecalPass m_DecalPass;
+    /// 贴花卡片是否从 GBuffer 绘制中排除（Deferred 恒为 true：由投影 Pass 接管）
+    bool m_ExcludeDecalCards = false;
 
     // 光照 Pass（HDR 目标 + PSO + 描述符集，共享组件）
     LightingPass m_Lighting;

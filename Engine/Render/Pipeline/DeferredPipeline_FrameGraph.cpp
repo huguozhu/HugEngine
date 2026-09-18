@@ -14,6 +14,7 @@
 #include "Scene/SkyboxComponent.h"
 #include "Scene/PhysicalSkyComponent.h"
 #include "Core/Log.h"
+#include "Core/CVar.h"   // 任务 24：投影贴花 CVar（r.Decal.Project）
 #include "Core/Assert.h"
 #include <cmath>
 #include <cstring>
@@ -28,6 +29,12 @@ static int32_t cvDGC_Enable = 0;
 // CVar: 瞬态资源路径验证开关（与 DeferredPipeline.cpp 中同步）
 static int32_t cvTransientTest = 0;  // 瞬态资源路径验证开关（1=启用测试 Pass）
 static const char* kCVar_DGC_Enable_Name = "r.DGC.Enable";
+
+// CVar: GBuffer 投影贴花开关（任务 24，默认开启）。
+// 关闭后 Deferred 路径不再绘制贴花（贴花卡片已从 GBuffer 排除，见 DeferredPipeline::Initialize），
+// 想要对比"投射片 vs 投影"可以切到 Forward 路径（Forward 用卡片）。
+static he::CVar<int> cvDecalProject("r.Decal.Project", 1,
+    "GBuffer 投影贴花（任务 24）：0=关闭，1=开启（Deferred 路径）");
 
 
 // 从 DeferredPipeline.cpp 提取 — BuildFrameGraph 渲染图定义
@@ -81,7 +88,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     // GPUScene 收集 → [GPU 模式: 填充 IndirectDraw 参数] → 上传
     m_GPUScene.Collect(world, sg, camera);
     if (m_GBuffer->GetMode() == GBufferRenderer::Mode::GPU) {
-        if (!m_BatchBuilt) { m_MeshBatcher.Build(world); m_BatchBuilt = true; }
+        if (!m_BatchBuilt) { m_MeshBatcher.Build(world, m_ExcludeDecalCards); m_BatchBuilt = true; }
         m_MeshBatcher.FillGPUScene(m_GPUScene);  // 在 Upload 前写入 draw 参数
     }
     m_GPUScene.Upload(m_Device);
@@ -236,6 +243,20 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
 
             m_GBuffer->Render(c, world, sg, camera);
         });
+
+    // ── GBuffer 投影贴花（任务 24）──
+    // 位置：GBuffer 之后、所有"读 albedo/法线"的消费者（GI / Lighting）之前。
+    // 依赖：读 gbWorldPos（该像素真实表面点）+ gbDepth（天空判定），写 gbA/gbB（albedo+metallic / normal+roughness）。
+    // 说明：写入用的是 **Load** 渲染通道 + per-MRT writeMask（只写 MRT0/1），
+    //       所以 GBuffer 其余 6 个通道（emissive/velocity/worldPos/disney/lightmapKey）原样保留。
+    if (cvDecalProject.Get() != 0) {
+        rg.AddPass("Decal_Project",
+            {{gbWorldPos, ResourceAccess::Read}, {gbDepth, ResourceAccess::Read}},
+            {{gbA, ResourceAccess::Write}, {gbB, ResourceAccess::Write}},
+            [&](rhi::IRHICommandList* c) {
+                m_DecalPass.Render(c, world, sg, camera, *m_GBuffer);
+            });
+    }
 
     // ── 两阶段剔除 Phase 2 + SSR Hi-Z（GBuffer 后，读取当前帧深度）──
     // Hi-Z 金字塔同时服务 GPUCulling 精筛与 SSR 层次追踪

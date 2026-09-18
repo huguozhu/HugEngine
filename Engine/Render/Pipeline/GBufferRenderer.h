@@ -59,6 +59,9 @@ struct GBufferContext {
     // CPU 可见索引（GPU 剔除 Readback 结果）
     const std::vector<u32>* gpuVisibleIndices = nullptr;
 
+    // 任务 24：Deferred 路径排除贴花卡片（改由 DecalPass 投影到 GBuffer）
+    bool excludeDecals = false;
+
     // 上一帧 ViewProj（velocity 计算用）
     float4x4 prevViewProj = float4x4(1.0f);
 
@@ -144,6 +147,9 @@ public:
     void SetGPUScene(GPUScene* gs)                 { m_Ctx.gpuScene = gs; }
     void SetVisibleIndices(const std::vector<u32>* vi) { m_Ctx.gpuVisibleIndices = vi; }
     void SetMeshBatcher(MeshBatcher* mb)           { m_Ctx.meshBatcher = mb; }
+    /// 任务 24：贴花改由 DecalPass 投影 → GBuffer 绘制时排除贴花卡片
+    void SetExcludeDecals(bool v)                  { m_Ctx.excludeDecals = v; }
+    bool GetExcludeDecals() const                  { return m_Ctx.excludeDecals; }
     void SetDGCContext(const GBufferContext::DGCContext& dgc) { m_Ctx.dgc = dgc; }
     void ClearDGCContext()                         { m_Ctx.dgc = {}; }
 

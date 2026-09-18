@@ -14,7 +14,7 @@
 
 namespace he::render {
 
-bool MeshBatcher::Build(World& world) {
+bool MeshBatcher::Build(World& world, bool excludeDecals) {
     m_MergedVertices.clear();
     m_MergedIndices.clear();
     m_Commands.clear();
@@ -78,7 +78,9 @@ bool MeshBatcher::Build(World& world) {
     // 广告牌/3D 文字/贴花：追加在最后（与 GPUScene::Collect 的枚举顺序一致，保证 objectIndex 对齐）
     world.ForEach<BillboardComponent>([&](Entity, BillboardComponent& bb) { collect(bb); });
     world.ForEach<TextRenderComponent>([&](Entity, TextRenderComponent& tr) { collect(tr); });
-    world.ForEach<DecalComponent>([&](Entity, DecalComponent& dc) { collect(dc); });
+    // 任务 24：Deferred 排除贴花卡片（改由 DecalPass 投影），与 Prepare/GPUScene 口径一致
+    if (!excludeDecals)
+        world.ForEach<DecalComponent>([&](Entity, DecalComponent& dc) { collect(dc); });
     world.ForEach<InstancedMeshComponent>([&](Entity, InstancedMeshComponent& im) { collect(im); });
     // 骨骼网格：顶点布局不同（SkinnedVertex），不适合合批——跳过（蒙皮 Pass 单独绘制）
     world.ForEach<SkeletalMeshComponent>([&](Entity, SkeletalMeshComponent&) { /* 不并入合批 */ });

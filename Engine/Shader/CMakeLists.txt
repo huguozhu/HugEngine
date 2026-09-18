@@ -45,6 +45,8 @@ if(SLANGC)
         "${SHADER_DIR}/Lighting/Skybox.vert.slang"
         # GBuffer
         "${SHADER_DIR}/GBuffer/GBuffer.vert.slang"
+        # Decal（任务 24：GBuffer 投影贴花）
+        "${SHADER_DIR}/Decal/DecalProject.vert.slang"
         # GI
         "${SHADER_DIR}/GI/IBL_BRDF_LUT.vert.slang"
         "${SHADER_DIR}/GI/IBL_Irradiance.vert.slang"
@@ -72,6 +74,8 @@ if(SLANGC)
         "${SHADER_DIR}/Lighting/PhysicalSky.frag.slang"
         # GBuffer
         "${SHADER_DIR}/GBuffer/GBuffer.frag.slang"
+        # Decal（任务 24：GBuffer 投影贴花）
+        "${SHADER_DIR}/Decal/DecalProject.frag.slang"
         # GI
         "${SHADER_DIR}/GI/IBL_BRDF_LUT.frag.slang"
         "${SHADER_DIR}/GI/IBL_Irradiance.frag.slang"

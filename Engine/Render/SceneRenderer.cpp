@@ -17,8 +17,9 @@
 namespace he::render {
 
 std::vector<DrawItem> SceneRenderer::Prepare(he::World& world, he::SceneGraph& sg,
-                                               const CameraData& camera,
-                                               rhi::IRHIBuffer* objectBuffer)
+                                             const CameraData& camera,
+                                             rhi::IRHIBuffer* objectBuffer,
+                                             bool excludeDecals)
 {
     std::vector<DrawItem> result;
     if (!objectBuffer) return result;
@@ -48,7 +49,10 @@ std::vector<DrawItem> SceneRenderer::Prepare(he::World& world, he::SceneGraph& s
     // 3D 文字（继承 Billboard，同样对齐相机）
     world.ForEach<he::TextRenderComponent>([&](he::Entity e, he::TextRenderComponent& t) { gatherBillboard(e, t); });
     // 贴花：固定朝向（Transform 摆放），走普通 mesh 路径
-    world.ForEach<he::DecalComponent>([&](he::Entity e, he::DecalComponent& d) { gather(e, d); });
+    // 任务 24：Deferred 路径下由 DecalPass 做 GBuffer 投影，卡片在此排除
+    //（Force 路径仍走卡片：Forward 没有 GBuffer 可投影）
+    if (!excludeDecals)
+        world.ForEach<he::DecalComponent>([&](he::Entity e, he::DecalComponent& d) { gather(e, d); });
     // 样条网格（B2 遗留）：沿样条生成的条带，走普通 mesh 路径
     world.ForEach<he::SplineMeshComponent>([&](he::Entity e, he::SplineMeshComponent& sm) { gather(e, sm); });
     // 实例化网格（B1）：登记一个对象条目（材质数据用），实例由专用 Pass 绘制

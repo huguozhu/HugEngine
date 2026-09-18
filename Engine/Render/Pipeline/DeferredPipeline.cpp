@@ -105,6 +105,10 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
         m_GPUCulling.InitializePTG(device);
     }
     m_GPUScene.Initialize(device);
+    // 任务 24：贴花改由 DecalPass 投影到 GBuffer ⇒ 三处收集口径（Prepare/MeshBatcher/GPUScene）
+    // 一律排除贴花卡片。**必须在首次 Collect 之前设置**（GPUScene 首次全量收集后走增量分支）。
+    m_GPUScene.SetExcludeDecals(true);
+    m_ExcludeDecalCards = true;
 
     // 将子系统指针注入 GBufferRenderer（在它们全部初始化之后）
     m_GBuffer->SetSceneRenderer(m_SceneRenderer.get());
@@ -112,6 +116,10 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     m_GBuffer->SetGPUScene(&m_GPUScene);
     m_GBuffer->SetVisibleIndices(&m_GPUVisibleIndices);
     m_GBuffer->SetMeshBatcher(&m_MeshBatcher);
+    m_GBuffer->SetExcludeDecals(m_ExcludeDecalCards);
+
+    // GBuffer 投影贴花 Pass（任务 24）：盒子几何 + PSO + 描述符集（读 worldPos/depth 采样）
+    m_DecalPass.Initialize(device, m_Width, m_Height);
 
     // 前帧 HDR 辐射度：GI 源共享的一份（DDGI 探针、SSGI 的入射辐射度都用它）。
     // 必须在各 GI 源 Initialize 之前建好并注入，使它们在 Initialize 阶段即可绑到有效纹理。
@@ -446,6 +454,7 @@ void DeferredPipeline::Shutdown() {
 
     if (m_ShadowSystem) m_ShadowSystem->Shutdown();
     m_PostProcess.Shutdown();
+    m_DecalPass.Shutdown();   // 任务 24：投影贴花（盒子几何 + PSO + 描述符集）
     if (m_GBuffer) m_GBuffer->Shutdown();
     m_Lighting.Shutdown();
     m_TransientTestPSO.reset();
@@ -548,6 +557,7 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
     m_Height = h;
     // 重建 GBuffer 纹理（委托给 GBufferRenderer）
     if (m_GBuffer) m_GBuffer->OnResize(w, h);
+    m_DecalPass.OnResize(w, h);   // 贴花 Pass 只需更新屏幕尺寸（逐帧写入 push constant）
     // 重建 HDR 目标（通过 LightingPass）
     m_Lighting.OnResize(m_Device, w, h);
     m_ParticleRenderer.SetSceneDepth(m_Lighting.GetHDRDepth(), m_Lighting.GetPointSampler());  // 软粒子深度纹理更新
