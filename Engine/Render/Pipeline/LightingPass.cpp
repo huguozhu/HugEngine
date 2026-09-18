@@ -128,6 +128,10 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
     bindTex(kGPUBinding_RT_Reflection, in.rtReflection, m_HDRSampler.get(), black);   // RT 反射
     bindTex(kGPUBinding_RT_AO, in.rtAO,         m_HDRSampler.get(), m_PlaceholderWhite.get());   // RT AO
     bindTex(kGPUBinding_RT_GI, in.rtGI,         m_HDRSampler.get(), black);   // RT GI
+    // 光照图键（任务 31）：GBuffer MRT7 的拷贝（uv0.xy + objectIndex）。用点采样：
+    // 键是**索引**而不是可插值的颜色，任何过滤都会把页号/UV 混合成无意义的中间值。
+    // 未提供时绑黑色占位（页号 0、uv 0 —— 光照图分支据此判无效键）。
+    bindTex(kGPUBinding_LightmapKey, in.gbLightmapKey, m_PointSampler.get(), black);
 
     // ── 聚集着色（可选）──
     u32 useClustered = 0;
@@ -273,6 +277,7 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
         {kGPUBinding_RT_Reflection, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RT 反射
         {kGPUBinding_RT_AO, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RT AO
         {kGPUBinding_RT_GI, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RT GI
+        {kGPUBinding_LightmapKey, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // 光照图键（任务 31）
         {kGPUBinding_GIBlendParams, rhi::DescriptorType::UniformBuffer, 1, rhi::kStageMaskFragment},  // GI 分层合成参数 UBO
     };
     m_Layout = device->CreateDescriptorSetLayout(ll);
@@ -352,6 +357,8 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
             updateAllTex(kGPUBinding_RT_AO, m_PlaceholderWhite.get());
             updateAllTex(kGPUBinding_RT_Reflection, m_PlaceholderBlack.get());
             updateAllTex(kGPUBinding_RT_GI, m_PlaceholderBlack.get());
+            // 光照图键（任务 31）：占位用黑 → 键的页号分量为 0、uv 为 0，光照图分支判为无效键
+            updateAllTex(kGPUBinding_LightmapKey, m_PlaceholderBlack.get());
 
             // SSGI/SSAO/SSR 占位（19/20/21）：
             // HybridRT 不计算屏幕空间效果，对应 RT 效果关闭时 shader 回退采样这些纹理。

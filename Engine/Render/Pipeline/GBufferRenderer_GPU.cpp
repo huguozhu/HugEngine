@@ -36,8 +36,8 @@ void GBufferRenderer_GPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
     cmd->SetPipeline(ctx.pso);
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, ctx.descSet);
 
-    // 清除 + 开始 MRT（7 颜色 + 深度）
-    rhi::ClearValue clears[8]{};
+    // 清除 + 开始 MRT（8 颜色 + 深度）
+    rhi::ClearValue clears[9]{};
     clears[0].color[3] = 1.0f;
     clears[1].color[3] = 1.0f;
     clears[2].color[3] = 1.0f;
@@ -50,12 +50,14 @@ void GBufferRenderer_GPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
     clears[6].color[2] = 1.0f;
     // disneyB: clearcoatGloss=1, specularTint.r=1;
     clears[6].color[3] = 1.0f;                              // disneyB: specularTint.g=1
-    clears[7].depth = 1.0f;
-    void* cv[7] = { ctx.gbA->GetNativeHandle(), ctx.gbB->GetNativeHandle(),
+    // 光照图键（MRT7）：清除值 = (0,0,0,0)，天空像素的 z 分量 0 表示"页号无效"
+    clears[7].color[3] = 0.0f;
+    clears[8].depth = 1.0f;
+    void* cv[8] = { ctx.gbA->GetNativeHandle(), ctx.gbB->GetNativeHandle(),
                     ctx.gbC->GetNativeHandle(), ctx.gbVel->GetNativeHandle(),
                     ctx.gbWorldPos->GetNativeHandle(), ctx.gbDisneyA->GetNativeHandle(),
-                    ctx.gbDisneyB->GetNativeHandle() };
-    cmd->BeginOffscreenPassMRT(cv, 7, ctx.gbDepth->GetNativeHandle(), w, h, clears, false);
+                    ctx.gbDisneyB->GetNativeHandle(), ctx.gbLightmapKey->GetNativeHandle() };
+    cmd->BeginOffscreenPassMRT(cv, 8, ctx.gbDepth->GetNativeHandle(), w, h, clears, false);
     cmd->SetViewport({0, (float)h, (float)w, -(float)h, 0, 1});
     cmd->SetScissor({0, 0, w, h});
 

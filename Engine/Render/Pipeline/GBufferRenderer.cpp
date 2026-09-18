@@ -41,6 +41,7 @@ bool GBufferRenderer::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
     m_Ctx.gbWorldPos = m_E.get();
     m_Ctx.gbDisneyA = m_F.get();
     m_Ctx.gbDisneyB = m_G.get();
+    m_Ctx.gbLightmapKey = m_H.get();
     m_Ctx.pso       = m_PSO.get();
     m_Ctx.descSet   = m_Set;
 
@@ -71,6 +72,7 @@ void GBufferRenderer::Shutdown() {
     // 销毁 PSO + 纹理
     m_PSO.reset();
     m_Depth.reset();
+    m_H.reset();
     m_G.reset();
     m_F.reset();
     m_E.reset();
@@ -102,6 +104,7 @@ void GBufferRenderer::OnResize(u32 width, u32 height) {
     m_Ctx.gbWorldPos = m_E.get();
     m_Ctx.gbDisneyA = m_F.get();
     m_Ctx.gbDisneyB = m_G.get();
+    m_Ctx.gbLightmapKey = m_H.get();
 }
 
 GBufferRenderer::Handles GBufferRenderer::ImportToRenderGraph(RenderGraph& rg) {
@@ -113,6 +116,7 @@ GBufferRenderer::Handles GBufferRenderer::ImportToRenderGraph(RenderGraph& rg) {
     h.worldPos = rg.ImportTexture("GB_WorldPos", m_E.get());
     h.disneyA  = rg.ImportTexture("GB_DisneyA",  m_F.get());
     h.disneyB  = rg.ImportTexture("GB_DisneyB",  m_G.get());
+    h.lightmapKey = rg.ImportTexture("GB_LightmapKey", m_H.get());
     h.depth    = rg.ImportTexture("GB_Depth",    m_Depth.get());
     return h;
 }
@@ -159,6 +163,7 @@ void GBufferRenderer::CreateTextures(rhi::IRHIDevice* device) {
     m_E = createRGBA16F();  // WorldPos.xyz
     m_F = createRGBA16F();  // DisneyA（anisotropic/subsurface/specular/sheen）
     m_G = createRGBA16F();  // DisneyB（clearcoat/clearcoatGloss/specularTint.rg）
+    m_H = createRGBA16F();  // 光照图键（uv0.xy + objectIndex，任务 31）
 
     // GBuffer D: velocity（RG16_FLOAT，屏幕空间运动矢量）
     {
@@ -231,6 +236,7 @@ void GBufferRenderer::CreatePSO(rhi::IRHIDevice* device) {
     gbDesc.colorFormats[4] = rhi::Format::RGBA16_FLOAT;  // WorldPos
     gbDesc.colorFormats[5] = rhi::Format::RGBA16_FLOAT;  // DisneyA（anisotropic/subsurface/specular/sheen）
     gbDesc.colorFormats[6] = rhi::Format::RGBA16_FLOAT;  // DisneyB（clearcoat/clearcoatGloss/specularTint.rg）
+    gbDesc.colorFormats[7] = rhi::Format::RGBA16_FLOAT;  // 光照图键（uv0.xy + objectIndex）
     gbDesc.pushConstantRanges = {pc};
     gbDesc.descriptorSetLayouts = {m_Layout};
     gbDesc.debugName = "GBuffer";

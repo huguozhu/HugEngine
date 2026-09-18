@@ -87,6 +87,12 @@ GPU_CONST(GPU_UINT kGPUBinding_SSR           = 21);  // SSR
 GPU_CONST(GPU_UINT kGPUBinding_DDGIProbes    = 22);  // DDGI 探针
 GPU_CONST(GPU_UINT kGPUBinding_DDGIGridParams = 6);  // DDGI 探针网格参数 UBO（Lighting 采样 DDGI 用，binding 6 在 Deferred Lighting set 中空闲）
 GPU_CONST(GPU_UINT kGPUBinding_RSMIndirect    = 5);  // RSM 间接光 E（半分辨率，任务 16；binding 5 在 Deferred Lighting set 中空闲）
+// 光照图（任务 31）。两个号在 Deferred Lighting set 中空闲（Forward 的 per-frame set 用 4 放
+// CSM 级联 0，两套 set 互不影响，与 RSMIndirect 的 5 同一种做法）：
+//   4 = 光照图键（GBuffer MRT7 的拷贝视图：uv0.xy + objectIndex）
+//   7 = 烘焙光照图本身（2D 纹理数组，一页一个物体；数组层的可采样性由 RHI 保证）
+GPU_CONST(GPU_UINT kGPUBinding_LightmapKey    = 4);  // GBuffer 光照图键（uv0.xy + objectIndex）
+GPU_CONST(GPU_UINT kGPUBinding_Lightmap       = 7);  // 烘焙光照图（Texture2DArray，页=物体）
 
 // --- Hybrid RT 管线 Binding 索引（Lighting 采样 RT 效果输出纹理）---
 GPU_CONST(GPU_UINT kGPUBinding_RT_ShadowMask = 24);  // RT 阴影遮罩（R16_FLOAT）

@@ -24,6 +24,10 @@ struct VSOutput {
 [[vk::binding(kGPUBinding_GBufferE, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferE;  // worldPos.xyz（GBuffer MRT4 直接读取）
 [[vk::binding(kGPUBinding_GBufferF, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferF;  // disneyA：anisotropic, subsurface, specular, sheen（MRT5）
 [[vk::binding(kGPUBinding_GBufferG, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferG;  // disneyB：clearcoat, clearcoatGloss, specularTint.r, specularTint.g（MRT6）
+// 光照图键（任务 31）：GBuffer MRT7 = (uv0.x, uv0.y, objectIndex, 0)。
+// 【为什么用点采样】键是**索引**：线性过滤会把相邻像素的页号与 UV 混成无意义的中间值
+// （页号 3 与 4 之间插值出 3.5 = 另一个物体）。查表必须是无过滤的最近邻。
+[[vk::binding(kGPUBinding_LightmapKey, kGPUDescSet_PerFrame)]] Texture2D<float4> u_LightmapKey;
 
 // Shadow + IBL + RSM (复用 Forward PBR 绑定)
 [[vk::binding(kGPUBinding_ShadowMap0, kGPUDescSet_PerFrame)]] Texture2D<float>  u_ShadowMap0;

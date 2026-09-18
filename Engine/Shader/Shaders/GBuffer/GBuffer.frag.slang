@@ -1,4 +1,4 @@
-// GBuffer.frag — 延迟渲染 GBuffer 片段着色器（4 MRT + velocity）
+// GBuffer.frag — 延迟渲染 GBuffer 片段着色器（8 MRT + velocity）
 // MRT 0: RGBA16  albedo.rgb + metallic
 // MRT 1: RGBA16  worldNormal.xyz * 0.5 + 0.5 + roughness
 // MRT 2: RGBA16  emissive.rgb + ao
@@ -6,6 +6,12 @@
 // MRT 4: RGBA16  worldPos.xyz + dielectricF0.a
 // MRT 5: RGBA16  disneyA（anisotropic/subsurface/specular/sheen）
 // MRT 6: RGBA16  disneyB（clearcoat/clearcoatGloss/specularTint.rg）
+// MRT 7: RGBA16  **光照图键**（任务 31）：uv0.xy + objectIndex + 0
+//
+// 【为什么光照图键必须有独立通道】烘焙光照图是**逐纹素**的数据（每个 (物体, UV0) 对应
+// 一个 texel），光照 pass 必须能从每个像素反查"我该读哪一页的哪一个 texel"。GBuffer 里
+// 已有的 worldPos 做不到这件事（同一个世界位置可能对应多个 UV），而 UV0 与 objectIndex
+// 合起来就是键：页号 = objectIndex，页内坐标 = uv0。这就是任务 18 记下的前置条件 ①。
 
 #include "common.slang"
 
@@ -40,6 +46,8 @@ struct FSOutput {
     [[vk::location(4)]] float4 worldPos         : SV_Target4;  // 世界坐标（Lighting pass 直接读取）
     [[vk::location(5)]] float4 disneyA          : SV_Target5;  // 迪士尼参数A：anisotropic, subsurface, specular, sheen
     [[vk::location(6)]] float4 disneyB          : SV_Target6;  // 迪士尼参数B：clearcoat, clearcoatGloss, specularTint.r, specularTint.g
+    // 光照图键（任务 31）：xy=UV0，z=objectIndex（页号）。光照图按物体分页，页内坐标就是 UV0
+    [[vk::location(7)]] float4 lightmapKey      : SV_Target7;
 };
 
 FSOutput fragmentMain(VSOutput input) {
@@ -89,5 +97,8 @@ FSOutput fragmentMain(VSOutput input) {
     output.worldPos        = float4(input.worldPos, obj.dielectricF0);  // 世界坐标存入 GBuffer（a 携带电介质 F0，延迟光照用）
     output.disneyA         = obj.disneyA;  // 迪士尼参数A透传到 Deferred 光照（MRT5）
     output.disneyB         = obj.disneyB;  // 迪士尼参数B透传到 Deferred 光照（MRT6）
+    // 光照图键（任务 31）：页号用 objectIndex 的原值（float 可精确表示 < 2^24 的整数，
+    // 物体数上限 kGPUMaxObjects=1024 ⇒ 无精度问题）；UV0 直接原样写入，不做任何包装
+    output.lightmapKey     = float4(input.uv, float(objectIndex), 0.0);
     return output;
 }

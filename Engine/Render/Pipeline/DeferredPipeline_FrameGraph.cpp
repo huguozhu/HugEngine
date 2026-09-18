@@ -55,6 +55,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     auto gbWorldPos = gb.worldPos;
     auto gbDisneyA = gb.disneyA;
     auto gbDisneyB = gb.disneyB;
+    auto gbLightmapKey = gb.lightmapKey;   // 光照图键（任务 31）：uv0.xy + objectIndex
     // Disney BSDF 参数通道;
     auto hdrC = rg.ImportTexture("HDR_C", m_Lighting.GetHDRTarget());
     auto backBuf = rg.ImportBackBuffer();
@@ -202,10 +203,11 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             });
     }
 
-    // GBuffer 4×MRT + 绘制（委托给 IGBufferRenderer，支持 CPU/GPU 双模式）
+    // GBuffer 8×MRT + 绘制（委托给 IGBufferRenderer，支持 CPU/GPU 双模式）
     rg.AddPass("GB_Clear", {}, {{gbA, ResourceAccess::Write}, {gbB, ResourceAccess::Write},
         {gbC, ResourceAccess::Write}, {gbVel, ResourceAccess::Write}, {gbWorldPos, ResourceAccess::Write},
         {gbDisneyA, ResourceAccess::Write}, {gbDisneyB, ResourceAccess::Write},
+        {gbLightmapKey, ResourceAccess::Write},
         {gbDepth, ResourceAccess::Write}},
         [&](rhi::IRHICommandList* c) {
             // 更新每帧动态参数
@@ -816,6 +818,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         {gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbC, ResourceAccess::Read},
         {gbWorldPos, ResourceAccess::Read},
         {gbDisneyA, ResourceAccess::Read}, {gbDisneyB, ResourceAccess::Read},
+        // 光照图键（任务 31）：Lighting 用它查烘焙光照图，故必须声明读依赖
+        {gbLightmapKey, ResourceAccess::Read},
     };
     // 屏幕空间源本帧是否真的产出了内容（= 其 pass 是否注册）。这是**唯一**判据：
     // 它同时决定「声明读取依赖」与「绑给 Lighting 的纹理」，避免两处判断不一致。
@@ -884,6 +888,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             in.gbE        = m_GBuffer->GetWorldPos();
             in.gbDisneyA  = m_GBuffer->GetDisneyA();
             in.gbDisneyB  = m_GBuffer->GetDisneyB();
+            in.gbLightmapKey = m_GBuffer->GetLightmapKey();   // 光照图键（任务 31）
             // ── 阴影贴图：本帧**没被写入**的图必须传 nullptr，回落到 LightingPass 预绑的
             // 1×1 占位纹理。传真实纹理会让描述符指向未初始化显存（§9.2-T）：这类采样是
             // 静默的（不报错、画面只是偏暗），读数还随显存布局变化。占位为白色（采样深度 1.0

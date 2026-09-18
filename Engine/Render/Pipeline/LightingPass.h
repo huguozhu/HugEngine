@@ -70,6 +70,9 @@ struct LightingInputs {
     rhi::IRHITexture* rtReflection = nullptr;
     rhi::IRHITexture* rtAO = nullptr;
     rhi::IRHITexture* rtGI = nullptr;
+    // 光照图键（任务 31）：GBuffer MRT7 的拷贝（uv0.xy + objectIndex）。Lighting 用它查
+    // 烘焙光照图 —— 页号 = objectIndex、页内坐标 = uv0。非空才绑定，否则绑黑色占位。
+    rhi::IRHITexture* gbLightmapKey = nullptr;
     // 聚集着色（可选）
     ClusteredShading* clusteredShading = nullptr;
     rhi::IRHIBuffer* lightGridBuffer = nullptr;

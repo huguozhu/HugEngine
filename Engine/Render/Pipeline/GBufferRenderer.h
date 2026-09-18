@@ -13,7 +13,7 @@
 namespace he::render {
 
 // GBuffer 附件布局常量
-constexpr u32 kGBufferAttachmentCount = 7;
+constexpr u32 kGBufferAttachmentCount = 8;
 constexpr u32 kGBufferSlotAlbedo      = 0;  // Albedo.rgb + Metallic.a（RGBA16_FLOAT）
 constexpr u32 kGBufferSlotNormal      = 1;  // Normal.xyz + Roughness.a（RGBA16_FLOAT）
 constexpr u32 kGBufferSlotEmissive    = 2;  // Emissive.rgb + AO.a（RGBA16_FLOAT）
@@ -21,6 +21,9 @@ constexpr u32 kGBufferSlotVelocity    = 3;  // Velocity.xy（RG16_FLOAT）
 constexpr u32 kGBufferSlotWorldPos    = 4;  // WorldPos.xyz（RGBA16_FLOAT）
 constexpr u32 kGBufferSlotDisneyA     = 5;  // Disney A：anisotropic/subsurface/specular/sheen（RGBA16_FLOAT）
 constexpr u32 kGBufferSlotDisneyB     = 6;  // Disney B：clearcoat/clearcoatGloss/specularTint.rg（RGBA16_FLOAT）
+// 光照图键（任务 31）：uv0.xy + objectIndex + 0。这是任务 18 记下的前置条件 ① —
+// lightmap 的每个 texel 对应一个 (物体, UV0)，光照 pass 必须能逐像素反查页号与页内坐标。
+constexpr u32 kGBufferSlotLightmapKey = 7;  // LightmapKey：uv0.xy + objectIndex（RGBA16_FLOAT）
 
 // ============================================================
 // GBuffer 渲染上下文（CPU/GPU 模式共用，内部实现细节）
@@ -39,6 +42,7 @@ struct GBufferContext {
     rhi::IRHITexture* gbWorldPos = nullptr;  // MRT4: worldPos.xyz（RGBA16_FLOAT）
     rhi::IRHITexture* gbDisneyA  = nullptr;  // MRT5: disneyA（anisotropic/subsurface/specular/sheen）
     rhi::IRHITexture* gbDisneyB  = nullptr;  // MRT6: disneyB（clearcoat/clearcoatGloss/specularTint.rg）
+    rhi::IRHITexture* gbLightmapKey = nullptr;  // MRT7: 光照图键（uv0.xy + objectIndex，任务 31）
 
     // PSO + DescriptorSet（由 GBufferRenderer 管理）
     rhi::IRHIPipelineState* pso     = nullptr;
@@ -122,6 +126,7 @@ public:
         ResourceHandle worldPos;  // RGBA16_FLOAT  (worldPos.xyz)
         ResourceHandle disneyA;   // RGBA16_FLOAT  (disneyA: anisotropic/subsurface/specular/sheen)
         ResourceHandle disneyB;   // RGBA16_FLOAT  (disneyB: clearcoat/clearcoatGloss/specularTint.rg)
+        ResourceHandle lightmapKey;  // RGBA16_FLOAT (uv0.xy + objectIndex，光照图键，任务 31)
         ResourceHandle depth;     // D32_FLOAT
     };
     Handles ImportToRenderGraph(RenderGraph& rg);
@@ -155,6 +160,8 @@ public:
     rhi::IRHITexture* GetWorldPos() const { return m_E.get(); }
     rhi::IRHITexture* GetDisneyA()  const { return m_F.get(); }
     rhi::IRHITexture* GetDisneyB()  const { return m_G.get(); }
+    /// 光照图键（任务 31）：uv0.xy + objectIndex。Deferred Lighting 用它查烘焙光照图
+    rhi::IRHITexture* GetLightmapKey() const { return m_H.get(); }
     rhi::IRHITexture* GetDepth()    const { return m_Depth.get(); }
 
     // ── 描述符集访问器 ──
@@ -175,6 +182,7 @@ private:
     std::unique_ptr<rhi::IRHITexture> m_E;       // GBufferE: worldPos.xyz
     std::unique_ptr<rhi::IRHITexture> m_F;       // GBufferF: disneyA（anisotropic/subsurface/specular/sheen）
     std::unique_ptr<rhi::IRHITexture> m_G;       // GBufferG: disneyB（clearcoat/clearcoatGloss/specularTint.rg）
+    std::unique_ptr<rhi::IRHITexture> m_H;       // GBufferH: 光照图键（uv0.xy + objectIndex，任务 31）
     std::unique_ptr<rhi::IRHITexture> m_Depth;   // 深度缓冲 (D32_FLOAT)
 
     // ── PSO + 描述符集 ──

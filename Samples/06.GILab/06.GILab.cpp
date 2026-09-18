@@ -1551,6 +1551,9 @@ int main() {
                 // 的公式在 CPU 上原样重算一遍做逐像素对照（任务 30 就是这么定位 RSM 链路的）。
                 addTarget("gb_worldpos", gb->GetWorldPos());
                 addTarget("gb_normal",   gb->GetNormal());
+                // 光照图键（任务 31）：MRT7 = (uv0.x, uv0.y, objectIndex, 0)。烘焙光照图的
+                // 前置条件就是"逐像素能反查页号与页内坐标"，这个转储是那条性质的唯一直接证据。
+                addTarget("gb_lightmapkey", gb->GetLightmapKey());
             }
             // 共享的前帧 HDR 辐射度（DDGI 探针 / SSGI 入射辐射度的共同输入）：
             // 它是 GI 源吃进去的东西，出问题时第一个要看的中间量
