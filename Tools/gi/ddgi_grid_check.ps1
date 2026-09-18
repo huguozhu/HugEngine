@@ -1,7 +1,7 @@
 # ============================================================
-# DDGI probe-grid check (docs section 9.2-K / task 14)
+# DDGI probe-grid check (docs section 9.2-K / task 14 + section 10.2 task 17)
 #
-# Evidence for the two halves of task 14 and for the premise of task 17:
+# Evidence for the two halves of task 14 and for the ray-march fix of task 17:
 #
 #   A) fixed   : auto-fit OFF -> the old fixed grid (8x4x8, cell 3) covers only
 #                21x9x21 world units while the scene AABB is 3720.9x1555.9x2288.2.
@@ -11,12 +11,12 @@
 #                border probe when the query is far outside the grid).
 #   B) fit16   : auto-fit ON, 16 cells along the longest axis -> the grid must really
 #                cover the scene, and DDGI's contribution must come back.
-#   C) fit32   : same, 32 cells (8960 probes, cell 120). If the probe field carried
-#                spatial information, the screen contribution would change. It does
-#                not: in the current default path (RSM not in the diffuse stack) the
-#                IBL fallback in DDGI.comp.slang samples u_IBLIrradiance by `dir` only
-#                and never uses `samplePos`, so every probe gets the same SH.
-#                => this case documents the premise of task 17 (DDGI ray march).
+#   C) fit8/fit16/fit32 : fitted grids of three different resolutions. Their screen
+#                contributions must DIFFER widely: the probe field has to depend on the
+#                probe positions. Before task 17 they agreed to 0.0015% because the probe
+#                update never used `samplePos` (the field was uniform -- see the note in
+#                ddgi_grid_check.py); task 17 traces the probe rays with hardware RT, so
+#                the check now asserts the fixed behaviour.
 #
 # Each case needs its own `none` baseline, so everything runs through a PRIVATE cfg
 # copy (the sample rewrites HE_GILAB_CONFIG on exit) -- see docs 11.3.

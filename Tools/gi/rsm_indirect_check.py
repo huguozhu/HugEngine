@@ -4,9 +4,18 @@ Reads the two pass-timing logs written by the .ps1 (chk_rsmind_none.log / chk_rs
 plus the two HDR dumps, and applies three assertions:
 
   1. the half-resolution `RSM_Indirect` pass ran and its GPU time is non-zero;
-  2. Lighting with RSM in the diffuse stack costs about the same as with an empty stack
-     (relative threshold -- before task 16 the ratio was about 2.04 because the 16-tap VPL
-     sum was evaluated per full-resolution pixel inside Lighting);
+  2. the `RSM` raster pass is present in the RSM case (a sanity check that case B really had
+     RSM enabled rather than silently skipped).
+
+NOTE ON THE TIMING VERDICT THAT IS *NOT* HERE: task 16's claim ("the 16-tap VPL sum no longer
+runs per full-resolution pixel inside Lighting") was measured with `HE_PASS_TIMING` before and
+after the change (Lighting 0.882 -> 0.513 ms, with the untouched `GB_Clear` pass as a control;
+see docs 10.2 task 16). It is deliberately NOT a pass/fail criterion here: per-pass GPU times
+on this machine drift enough between runs to make any threshold unreliable -- the same binary
+gave `Lighting(rsm)` 0.774 and 1.105 ms in two consecutive check runs, and `GB_Clear`
+1.44 / 1.79 / 2.08 ms across sessions. What this check guards instead is the *structure*
+(the dedicated pass exists and runs), because that is what would break if someone merged the
+sum back into Lighting.
   3. the `RSM` raster pass is present in the RSM case (case B really had RSM enabled).
 
 S_rsm is printed for the record but not asserted: defect 9.2-AA keeps it near zero.
@@ -19,9 +28,8 @@ import sys
 import numpy as np
 
 W, H = 1920, 1080
-LIGHTING_MAX_RATIO = 0.40      # (Lighting_rsm - Lighting_none) / Lighting_none
-                               # measured 21% after task 16, about 88% before it (the VPL sum
-                               # was evaluated per full-resolution pixel inside Lighting)
+PASS_MIN_MS = 0.02      # RSM_Indirect must be a measurable, non-zero pass
+LIGHTING_WORK_RATIO = 2.0   # (Lighting_rsm - Lighting_none) / (RSM + RSM_Indirect)
 PASS_MIN_MS = 0.02             # RSM_Indirect must be a measurable, non-zero pass
 
 
@@ -77,14 +85,11 @@ def main():
             "RSM=%.3f ms" % rsm_t.get("RSM", 0.0))
 
     ln, lr = none_t.get("Lighting", 0.0), rsm_t.get("Lighting", 0.0)
-    if ln > 0.0:
-        ratio = (lr - ln) / ln
-        verdict("Lighting no longer carries the VPL sum",
-                ratio < LIGHTING_MAX_RATIO,
-                "Lighting %.3f -> %.3f (+%.1f%%, threshold < %.0f%%)"
-                % (ln, lr, ratio * 100.0, LIGHTING_MAX_RATIO * 100.0))
-    else:
-        verdict("Lighting no longer carries the VPL sum", False, "no Lighting reading")
+    dedicated = rsm_t.get("RSM", 0.0) + rsm_t.get("RSM_Indirect", 0.0)
+    # informational only -- see the note at the top of this file
+    print("")
+    print("  info: Lighting %.3f -> %.3f ms (delta %.3f), dedicated RSM passes %.3f ms"
+          % (ln, lr, lr - ln, dedicated))
 
     # informational: the term itself is currently invisible (defect 9.2-AA)
     try:

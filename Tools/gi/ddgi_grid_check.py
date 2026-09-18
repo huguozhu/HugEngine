@@ -7,8 +7,16 @@ verdicts:
   fixed : the fixed 8x4x8 / cell-3 grid cannot cover the scene, so with the probe-grid
           confidence bit active the contribution must collapse to ~0.
   fit*  : after fitting the grid to the scene AABB the contribution must come back, and
-          all fitted resolutions must agree with each other -- the probe field carries no
-          spatial information in the current IBL-fallback path (premise of task 17).
+          the different fitted resolutions must NOT agree: the probe field has to depend
+          on the probe positions (task 17's evidence -- see the note below).
+
+NOTE ON DIRECTION (this check asserted the opposite before task 17): task 14's measurement
+found that the three fitted resolutions agreed to 0.0015% because the probe update never
+used `samplePos` -- the probe field was uniform, i.e. the source was just "the IBL
+irradiance as a function of direction". That finding is what task 17 fixed by tracing the
+probe rays with hardware RT. The check therefore now asserts the fixed behaviour: the
+resolutions must differ by a wide margin. The pre-fix numbers (spread 0.0015%) are kept in
+the docs as the baseline of the defect.
 
 Exit code 0 = all verdicts pass.
 """
@@ -20,7 +28,7 @@ import numpy as np
 W, H = 1920, 1080
 ZERO_MAX = 1e-4        # "contribution collapsed" threshold (dLum mean)
 BACK_MIN = 1e-2        # "contribution restored" threshold
-SAME_REL = 0.01        # fit32 vs fit16 tolerance (1%)
+SPREAD_MIN = 0.05      # fitted resolutions must differ by at least 5% (probe positions matter)
 
 
 def load(directory, tag):
@@ -72,11 +80,11 @@ def main():
                 "dLum=%.6e (> %.0e)" % (diff[c], BACK_MIN))
     if len(fits) >= 2:
         values = [diff[c] for c in fits]
-        rel = (max(values) - min(values)) / max(abs(sum(values) / len(values)), 1e-9)
-        verdict("probe resolution does not change the picture",
-                rel < SAME_REL,
-                "spread over %s = %.4f%% (< %.1f%%) => uniform probe field"
-                % ("/".join(fits), rel * 100.0, SAME_REL * 100.0))
+        spread = (max(values) - min(values)) / max(abs(sum(values) / len(values)), 1e-9)
+        verdict("probe positions participate (resolutions differ)",
+                spread >= SPREAD_MIN,
+                "spread over %s = %.2f%% (>= %.0f%%) => the probe field depends on the grid"
+                % ("/".join(fits), spread * 100.0, SPREAD_MIN * 100.0))
 
     if failures:
         print("")
