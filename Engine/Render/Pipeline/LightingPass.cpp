@@ -53,6 +53,11 @@ void LightingPass::OnResize(rhi::IRHIDevice* device, u32 width, u32 height) {
 // Render — 执行完整延迟光照 Pass
 // ============================================================
 void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
+    // 【每飞行帧一份描述符集】本帧只更新/绑定本槽位自己的集合：逐帧轮换的资源（光源、阴影、
+    // 探针 SSBO 与合成参数 UBO）绑进各自槽位后，重绑不再跨帧（§9.2-J）。
+    const u32 slot = in.frameSlot % rhi::kMaxFramesInFlight;
+    rhi::DescriptorSetHandle set = m_Sets[slot];
+
     // 绑纹理。
     // fallback == nullptr：输入为 null 时**不更新**该绑定（与原先一致）——用于那些"每帧必有"
     //   的输入（GBuffer / 深度 / SSAO / IBL），它们的 null 只意味着"暂时取不到"，此时保留
@@ -65,12 +70,12 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
                        rhi::IRHITexture* fallback = nullptr) {
         if (!m_Device) return;
         if (tex && sampler) {
-            m_Device->UpdateDescriptorSet(m_Set, binding,
+            m_Device->UpdateDescriptorSet(set, binding,
                 rhi::DescriptorType::CombinedImageSampler, tex, sampler);
             return;
         }
         if (!fallback || !m_PlaceholderSampler) return;
-        m_Device->UpdateDescriptorSet(m_Set, binding,
+        m_Device->UpdateDescriptorSet(set, binding,
             rhi::DescriptorType::CombinedImageSampler, fallback, m_PlaceholderSampler.get());
     };
 
@@ -95,9 +100,9 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
 
     // ── 绑定光源/阴影数据 SSBO ──
     if (in.lightBuffer && m_Device)
-        m_Device->UpdateDescriptorSet(m_Set, kGPUBinding_Lights_DL, rhi::DescriptorType::StorageBuffer, in.lightBuffer);
+        m_Device->UpdateDescriptorSet(set, kGPUBinding_Lights_DL, rhi::DescriptorType::StorageBuffer, in.lightBuffer);
     if (in.shadowBuffer && m_Device)
-        m_Device->UpdateDescriptorSet(m_Set, kGPUBinding_ShadowData_DL, rhi::DescriptorType::StorageBuffer, in.shadowBuffer);
+        m_Device->UpdateDescriptorSet(set, kGPUBinding_ShadowData_DL, rhi::DescriptorType::StorageBuffer, in.shadowBuffer);
 
     // ── 绑定屏幕空间效果（门控：SSGI/SSR 未注册 pass 时回绑黑色占位 = 无贡献）──
     bindTex(kGPUBinding_SSGI, in.ssgiTex, in.ssgiSampler, black);
@@ -106,10 +111,10 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
 
     // ── 绑定 DDGI 探针 ──
     if (in.ddgiProbeBuffer && m_Device)
-        m_Device->UpdateDescriptorSet(m_Set, kGPUBinding_DDGIProbes, rhi::DescriptorType::StorageBuffer, in.ddgiProbeBuffer);
+        m_Device->UpdateDescriptorSet(set, kGPUBinding_DDGIProbes, rhi::DescriptorType::StorageBuffer, in.ddgiProbeBuffer);
     // ── 绑定 DDGI 网格参数 UBO（SampleDDGI 三线性插值用）──
     if (in.ddgiGridUniform && m_Device)
-        m_Device->UpdateDescriptorSet(m_Set, kGPUBinding_DDGIGridParams, rhi::DescriptorType::UniformBuffer, in.ddgiGridUniform);
+        m_Device->UpdateDescriptorSet(set, kGPUBinding_DDGIGridParams, rhi::DescriptorType::UniformBuffer, in.ddgiGridUniform);
 
     // ── 绑定 RSM 间接光（Forward/Deferred 共用；未提供时回落到黑色占位 = 无间接光）──
     bindTex(kGPUBinding_RSMPosition, in.rsmPositionMap, m_HDRSampler.get(), black);
@@ -134,8 +139,8 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
         in.clusteredShading->CullLights(in.cachedLights->data(), (u32)in.cachedLights->size());
 
         // 上传 LightGrid + LightIndexList
-        m_Device->UpdateDescriptorSet(m_Set, kGPUBinding_LightGrid, rhi::DescriptorType::StorageBuffer, in.lightGridBuffer);
-        m_Device->UpdateDescriptorSet(m_Set, kGPUBinding_LightIndexList, rhi::DescriptorType::StorageBuffer, in.lightIndexListBuffer);
+        m_Device->UpdateDescriptorSet(set, kGPUBinding_LightGrid, rhi::DescriptorType::StorageBuffer, in.lightGridBuffer);
+        m_Device->UpdateDescriptorSet(set, kGPUBinding_LightIndexList, rhi::DescriptorType::StorageBuffer, in.lightIndexListBuffer);
 
         clusterTilesX = in.clusteredShading->GetTileCountX();
         clusterTilesY = in.clusteredShading->GetTileCountY();
@@ -144,7 +149,7 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
 
     // ── 执行全屏三角形绘制 ──
     cmd->SetPipeline(m_PSO.get());
-    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, set);
 
     rhi::ClearValue clr{};
     cmd->BeginOffscreenPass(m_HDRTarget->GetNativeHandle(), m_HDRDepth->GetNativeHandle(),
@@ -176,14 +181,14 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
                       "GISourceSlotData 必须与 shader 的 GISourceSlot 布局一致");
         static_assert(sizeof(GIChannelBlendData) == sizeof(GIChannelBlendParams),
                       "GIChannelBlendData 必须与 shader 的 GIChannelBlendParams 布局一致");
-        if (m_BlendUBO) {
-            void* mapped = m_BlendUBO->Map();
+        if (m_BlendUBO[slot]) {
+            void* mapped = m_BlendUBO[slot]->Map();
             if (mapped) {
                 auto* bp = static_cast<GIBlendParams*>(mapped);
                 std::memcpy(&bp->diffuse,  &in.diffuseBlend,  sizeof(GIChannelBlendData));
                 std::memcpy(&bp->specular, &in.specularBlend, sizeof(GIChannelBlendData));
                 std::memcpy(&bp->ao,       &in.aoBlend,       sizeof(GIChannelBlendData));
-                m_BlendUBO->Unmap();
+                m_BlendUBO[slot]->Unmap();
             }
         }
     }
@@ -268,17 +273,22 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
         {kGPUBinding_GIBlendParams, rhi::DescriptorType::UniformBuffer, 1, rhi::kStageMaskFragment},  // GI 分层合成参数 UBO
     };
     m_Layout = device->CreateDescriptorSetLayout(ll);
-    m_Set    = device->AllocateDescriptorSet(m_Layout);
+    // 每飞行帧一份：逐帧轮换的资源各自绑进自己槽位的集合（§9.2-J）
+    for (u32 i = 0; i < rhi::kMaxFramesInFlight; ++i) {
+        m_Sets[i] = device->AllocateDescriptorSet(m_Layout);
+    }
+    const rhi::DescriptorSetHandle set0 = m_Sets[0];
 
-    // ── GI 分层合成参数 UBO（3 通道 × 32B）──
-    {
+    // ── GI 分层合成参数 UBO（3 通道 × 32B）：每飞行帧一份 ──
+    // 单份时，本帧写入会覆盖仍在飞行的上一帧所读的参数（此前靠"值变化小"掩盖）。
+    for (u32 i = 0; i < rhi::kMaxFramesInFlight; ++i) {
         rhi::BufferDesc bd;
         bd.size      = sizeof(GIBlendParams);
         bd.usage     = rhi::BufferUsage::Uniform;
         bd.cpuAccess = true;
-        m_BlendUBO   = device->CreateBuffer(bd);
-        device->UpdateDescriptorSet(m_Set, kGPUBinding_GIBlendParams,
-            rhi::DescriptorType::UniformBuffer, m_BlendUBO.get());
+        m_BlendUBO[i] = device->CreateBuffer(bd);
+        device->UpdateDescriptorSet(m_Sets[i], kGPUBinding_GIBlendParams,
+            rhi::DescriptorType::UniformBuffer, m_BlendUBO[i].get());
     }
 
     // ── 预填充所有 binding 占位纹理（避免未绑定 → Intel GPU 白屏）──
@@ -305,8 +315,20 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
         // 这些通道的语义都是"1.0 = 无效果"，故白色即为中性值：
         //   阴影图采样出深度 1.0 = 无遮挡；AO/RT 阴影遮罩 = 无遮蔽
         for (u32 b : {0u,1u,2u,3u,4u,9u,10u,11u,14u,23u,28u,29u})
-            device->UpdateDescriptorSet(m_Set, b, rhi::DescriptorType::CombinedImageSampler,
-                                        m_PlaceholderWhite.get(), m_PlaceholderSampler.get());
+            for (u32 i = 0; i < rhi::kMaxFramesInFlight; ++i)
+                device->UpdateDescriptorSet(m_Sets[i], b, rhi::DescriptorType::CombinedImageSampler,
+                                            m_PlaceholderWhite.get(), m_PlaceholderSampler.get());
+
+        // 占位绑定辅助：每一份集合都要写（它们各自独立，不能只写第一份）
+        auto updateAllTex = [&](u32 binding, rhi::IRHITexture* tex) {
+            for (u32 i = 0; i < rhi::kMaxFramesInFlight; ++i)
+                device->UpdateDescriptorSet(m_Sets[i], binding, rhi::DescriptorType::CombinedImageSampler,
+                                            tex, m_PlaceholderSampler.get());
+        };
+        auto updateAllBuf = [&](u32 binding, rhi::IRHIBuffer* buf) {
+            for (u32 i = 0; i < rhi::kMaxFramesInFlight; ++i)
+                device->UpdateDescriptorSet(m_Sets[i], binding, rhi::DescriptorType::StorageBuffer, buf);
+        };
 
         // RT 效果占位纹理：
         //   24/26（RT 阴影/AO）→ 白色（无阴影/无遮蔽，语义上=1.0）
@@ -323,25 +345,25 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
             btd.initialData = bk;
             m_PlaceholderBlack = device->CreateTexture(btd);
 
-            device->UpdateDescriptorSet(m_Set, kGPUBinding_RT_ShadowMask, rhi::DescriptorType::CombinedImageSampler, m_PlaceholderWhite.get(), m_PlaceholderSampler.get());
-            device->UpdateDescriptorSet(m_Set, kGPUBinding_RT_AO, rhi::DescriptorType::CombinedImageSampler, m_PlaceholderWhite.get(), m_PlaceholderSampler.get());
-            device->UpdateDescriptorSet(m_Set, kGPUBinding_RT_Reflection, rhi::DescriptorType::CombinedImageSampler, m_PlaceholderBlack.get(), m_PlaceholderSampler.get());
-            device->UpdateDescriptorSet(m_Set, kGPUBinding_RT_GI, rhi::DescriptorType::CombinedImageSampler, m_PlaceholderBlack.get(), m_PlaceholderSampler.get());
+            updateAllTex(kGPUBinding_RT_ShadowMask, m_PlaceholderWhite.get());
+            updateAllTex(kGPUBinding_RT_AO, m_PlaceholderWhite.get());
+            updateAllTex(kGPUBinding_RT_Reflection, m_PlaceholderBlack.get());
+            updateAllTex(kGPUBinding_RT_GI, m_PlaceholderBlack.get());
 
             // SSGI/SSAO/SSR 占位（19/20/21）：
             // HybridRT 不计算屏幕空间效果，对应 RT 效果关闭时 shader 回退采样这些纹理。
             // 必须绑定中性占位，避免采样未初始化描述符 → 黑屏。
             //   SSGI → 黑（无间接漫反射），SSAO → 白（无遮蔽），SSR → 黑（无镜面反射）
-            device->UpdateDescriptorSet(m_Set, kGPUBinding_SSGI, rhi::DescriptorType::CombinedImageSampler, m_PlaceholderBlack.get(), m_PlaceholderSampler.get());
-            device->UpdateDescriptorSet(m_Set, kGPUBinding_SSAO_DL, rhi::DescriptorType::CombinedImageSampler, m_PlaceholderWhite.get(), m_PlaceholderSampler.get());
-            device->UpdateDescriptorSet(m_Set, kGPUBinding_SSR, rhi::DescriptorType::CombinedImageSampler, m_PlaceholderBlack.get(), m_PlaceholderSampler.get());
+            updateAllTex(kGPUBinding_SSGI, m_PlaceholderBlack.get());
+            updateAllTex(kGPUBinding_SSAO_DL, m_PlaceholderWhite.get());
+            updateAllTex(kGPUBinding_SSR, m_PlaceholderBlack.get());
 
             // RSM 位置/通量图（15/16）→ 黑色：
             // 这两张**不能**用白色占位。对 u_RSMPositionMap，白色是 worldPos≈(1,1,1)；
             // 对 u_RSMFluxMap，白色是 flux=1.0，即一个"全亮 VPL"——一旦门控与 RSM pass 的真实
             // 产出不一致，回落就从一个安全值变成一个偏亮的错误值。黑色才是"无间接光"的中性值。
-            device->UpdateDescriptorSet(m_Set, kGPUBinding_RSMPosition, rhi::DescriptorType::CombinedImageSampler, m_PlaceholderBlack.get(), m_PlaceholderSampler.get());
-            device->UpdateDescriptorSet(m_Set, kGPUBinding_RSMFlux, rhi::DescriptorType::CombinedImageSampler, m_PlaceholderBlack.get(), m_PlaceholderSampler.get());
+            updateAllTex(kGPUBinding_RSMPosition, m_PlaceholderBlack.get());
+            updateAllTex(kGPUBinding_RSMFlux, m_PlaceholderBlack.get());
         }
 
         // 绑定 12=Irradiance, 13=Prefilter 需要 Cubemap（Shader 声明为 TextureCube）
@@ -359,8 +381,8 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
             ctd.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::Cubemap;
             ctd.initialData = w4cube;
             m_PlaceholderCube = device->CreateTexture(ctd);
-            device->UpdateDescriptorSet(m_Set, kGPUBinding_IrradianceMap, rhi::DescriptorType::CombinedImageSampler, m_PlaceholderCube.get(), m_PlaceholderSampler.get());
-            device->UpdateDescriptorSet(m_Set, kGPUBinding_PrefilterMap, rhi::DescriptorType::CombinedImageSampler, m_PlaceholderCube.get(), m_PlaceholderSampler.get());
+            updateAllTex(kGPUBinding_IrradianceMap, m_PlaceholderCube.get());
+            updateAllTex(kGPUBinding_PrefilterMap, m_PlaceholderCube.get());
         }
 
         // Cluster SSBO 占位（binding 7/8）
@@ -368,11 +390,11 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
         gd.size = 16;
         gd.usage = rhi::BufferUsage::Storage;
         auto gb = device->CreateBuffer(gd);
-        device->UpdateDescriptorSet(m_Set, kGPUBinding_LightGrid, rhi::DescriptorType::StorageBuffer, gb.get());
-        device->UpdateDescriptorSet(m_Set, kGPUBinding_LightIndexList, rhi::DescriptorType::StorageBuffer, gb.get());
+        updateAllBuf(kGPUBinding_LightGrid, gb.get());
+        updateAllBuf(kGPUBinding_LightIndexList, gb.get());
 
         // DDGI 探针 SSBO 占位（binding 22）
-        device->UpdateDescriptorSet(m_Set, kGPUBinding_DDGIProbes, rhi::DescriptorType::StorageBuffer, gb.get());
+        updateAllBuf(kGPUBinding_DDGIProbes, gb.get());
     }
 
     // ── 创建 PSO ──
@@ -406,14 +428,17 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
 
 void LightingPass::SetIBLTextures(rhi::IRHITexture* irradiance, rhi::IRHITexture* prefilter,
                                   rhi::IRHITexture* brdfLut, rhi::IRHISampler* sampler) {
-    if (!m_Device || m_Set == rhi::kInvalidSet) return;
+    if (!m_Device || m_Sets[0] == rhi::kInvalidSet) return;
     // 绑定 IBL 贴图到 Lighting 描述符集（12=Irradiance, 13=Prefilter, 14=BRDF LUT）
     // 【这里不做占位回落】与上面"门控"通道不同：IBL 的产物由 GI_IBL 在启动时一次性创建，
     // 传 null 只意味着"暂时取不到"，而不是"本帧没产出"。此时保留上一次的有效绑定才接近正确值；
     // 若改用占位（BRDF LUT 会变成 1×1 白 = envBRDF 恒为 1），反而会把镜面环境项算大。
-    m_Device->UpdateDescriptorSet(m_Set, kGPUBinding_IrradianceMap, rhi::DescriptorType::CombinedImageSampler, irradiance, sampler);
-    m_Device->UpdateDescriptorSet(m_Set, kGPUBinding_PrefilterMap, rhi::DescriptorType::CombinedImageSampler, prefilter, sampler);
-    m_Device->UpdateDescriptorSet(m_Set, kGPUBinding_BRDF_LUT, rhi::DescriptorType::CombinedImageSampler, brdfLut, sampler);
+    // 三份集合都要写：它们各自独立（IBL 贴图是稳定的，写三遍不会跨帧串味）。
+    for (u32 i = 0; i < rhi::kMaxFramesInFlight; ++i) {
+        m_Device->UpdateDescriptorSet(m_Sets[i], kGPUBinding_IrradianceMap, rhi::DescriptorType::CombinedImageSampler, irradiance, sampler);
+        m_Device->UpdateDescriptorSet(m_Sets[i], kGPUBinding_PrefilterMap, rhi::DescriptorType::CombinedImageSampler, prefilter, sampler);
+        m_Device->UpdateDescriptorSet(m_Sets[i], kGPUBinding_BRDF_LUT, rhi::DescriptorType::CombinedImageSampler, brdfLut, sampler);
+    }
 }
 
 void LightingPass::SetAtmosphere(float3 sunDir, float turbidity) {

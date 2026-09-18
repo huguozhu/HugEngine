@@ -71,6 +71,12 @@ struct LightingInputs {
     float  iblIntensity = 1.0f;
     u32    lightCount = 0;
     u32    width = 0, height = 0;
+    /// 本帧使用的飞行帧槽位（0..MAX_FRAMES_IN_FLIGHT-1）。
+    /// Lighting 有一批**逐帧轮换的资源**（光源/阴影/探针 SSBO、合成参数 UBO…）与**一份**
+    /// 描述符集：若每帧都往同一份集合里重绑当前槽位的缓冲，GPU 执行上一帧时可能已经读到
+    /// 本帧刚写进去的绑定 —— 这正是 §9.2-J 描述的那类隐患（此前靠"值变化小"掩盖）。
+    /// 传入槽位后，本 pass 会绑定该槽位**自己的**描述符集，重绑不再跨帧。
+    u32    frameSlot = 0;
     // GI 通道参数（M1：强度由 push constant 驱动，替代 shader 魔法系数）
     float giIntensity = 1.0f;    // 间接漫反射 GI 总强度（ambient 系数）
     float aoIntensity = 1.0f;    // AO 强度
@@ -112,7 +118,10 @@ public:
     rhi::IRHISampler*   GetHDRSampler() const { return m_HDRSampler.get(); }
     rhi::IRHISampler*   GetPointSampler() const { return m_PointSampler.get(); }
     rhi::IRHIPipelineState* GetPSO()     const { return m_PSO.get(); }
-    rhi::DescriptorSetHandle GetDescriptorSet() const { return m_Set; }
+    /// 取某飞行帧槽位的描述符集（默认第 0 份，供不需要区分的调用方/调试用）
+    rhi::DescriptorSetHandle GetDescriptorSet(u32 slot = 0) const {
+        return m_Sets[slot % rhi::kMaxFramesInFlight];
+    }
 
     // 设置 IBL 贴图（Irradiance/Prefilter/BRDF LUT），供天空盒喂 IBL 间接光
     void SetIBLTextures(rhi::IRHITexture* irradiance, rhi::IRHITexture* prefilter,
@@ -131,11 +140,15 @@ private:
 
     rhi::IRHIDevice* m_Device = nullptr;
 
-    // ── Lighting PSO + 描述符集 ──
+    // ── Lighting PSO + 描述符集（每飞行帧一份）──
     std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
     rhi::DescriptorSetLayoutHandle m_Layout = rhi::kInvalidLayout;
-    std::unique_ptr<rhi::IRHIBuffer> m_BlendUBO;   // GI 分层合成参数 UBO（3 通道混合参数）
-    rhi::DescriptorSetHandle       m_Set    = rhi::kInvalidSet;
+    /// 合成参数 UBO：**每飞行帧一份**（§9.2-J）。单份时本帧写入会覆盖仍在飞行的上一帧
+    /// 所读的参数——此前靠"值变化小"掩盖。
+    std::unique_ptr<rhi::IRHIBuffer> m_BlendUBO[rhi::kMaxFramesInFlight];
+    /// 每飞行帧一份描述符集：逐帧轮换的资源（光源/阴影/探针 SSBO 与上面的 UBO）各自绑进
+    /// 自己槽位的集合，重绑不再跨帧。渲染时按 `LightingInputs::frameSlot` 取。
+    rhi::DescriptorSetHandle       m_Sets[rhi::kMaxFramesInFlight] = {};
 
     // ── 中性占位纹理（1×1）──
     // 输入为 null 时**必须显式回绑**其中一张，不能只是"跳过更新"：描述符集是持久的，

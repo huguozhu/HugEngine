@@ -791,6 +791,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             if (rtAOTex)        in.rtAO         = rtAOTex;
             if (rtReflectionTex) in.rtReflection = rtReflectionTex;
             in.lightCount   = fpc.lightCount;
+            in.frameSlot = m_CurrentFrameSlot;   // 每飞行帧一份描述符集/UBO（§9.2-J）
             in.width = w;
             in.height = h;
             m_Lighting.Render(c, in);
