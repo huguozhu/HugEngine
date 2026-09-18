@@ -186,6 +186,28 @@ void VulkanDevice::QueryRTCapabilities() {
             m_SupportsMaintenance7 = true;
     }
 
+    // 记录 VK_EXT_vertex_attribute_robustness（顶点属性健壮性）：
+    // PBR.vert.slang 在 location 3/4 声明了蒙皮属性（inJoints/inWeights），而静态顶点布局
+    // 只描述 0/1/2 —— 未启用该特性（或 maintenance9）时校验层报
+    // VUID-VkGraphicsPipelineCreateInfo-Input-07904：着色器有该 Location 的输入，但
+    // pVertexAttributeDescriptions 里没有对应描述。着色器注释本就写明"静态布局缺失时为 0"，
+    // 正是该特性的语义（缺失属性读默认值），故按能力启用而不是给静态管线硬塞蒙皮属性。
+    for (auto& ext : extensions) {
+        if (strcmp(ext.extensionName, VK_EXT_VERTEX_ATTRIBUTE_ROBUSTNESS_EXTENSION_NAME) == 0)
+            m_SupportsVertexAttributeRobustness = true;
+    }
+    if (m_SupportsVertexAttributeRobustness) {
+        VkPhysicalDeviceVertexAttributeRobustnessFeaturesEXT varFeat{};
+        varFeat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_ROBUSTNESS_FEATURES_EXT;
+        VkPhysicalDeviceFeatures2 feat2{};
+        feat2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        feat2.pNext = &varFeat;
+        vkGetPhysicalDeviceFeatures2(m_Physical, &feat2);
+        m_SupportsVertexAttributeRobustness = (varFeat.vertexAttributeRobustness == VK_TRUE);
+        HE_CORE_INFO("顶点属性健壮性 (VK_EXT_vertex_attribute_robustness) = {}",
+                     m_SupportsVertexAttributeRobustness);
+    }
+
     m_SupportsRT = hasAS && hasRTP;
     if (!m_SupportsRT) {
         HE_CORE_INFO("Ray Tracing: 不支持（缺少 VK_KHR_acceleration_structure 或 VK_KHR_ray_tracing_pipeline）");

@@ -481,6 +481,19 @@ void VulkanDevice::CreateLogicalDevice() {
         HE_CORE_INFO("VK_KHR_maintenance7 已启用（嵌套命令缓冲）");
     }
 
+    // 条件启用 VK_EXT_vertex_attribute_robustness：PBR.vert 在 location 3/4 声明了蒙皮属性，
+    // 静态顶点布局只有 0/1/2；未启用该特性时校验层报
+    // VUID-VkGraphicsPipelineCreateInfo-Input-07904（03/06 各 2 条）。
+    // 该特性把"缺失顶点属性"从"未定义"变成"读默认值（0,0,0,1）"，正是着色器注释所依赖的语义。
+    VkPhysicalDeviceVertexAttributeRobustnessFeaturesEXT vertexAttrRobustnessFeature{};
+    vertexAttrRobustnessFeature.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_ROBUSTNESS_FEATURES_EXT;
+    vertexAttrRobustnessFeature.vertexAttributeRobustness = VK_TRUE;
+    if (m_SupportsVertexAttributeRobustness) {
+        deviceExtensions.push_back(VK_EXT_VERTEX_ATTRIBUTE_ROBUSTNESS_EXTENSION_NAME);
+        HE_CORE_INFO("VK_EXT_vertex_attribute_robustness 已启用（缺失顶点属性读默认值）");
+    }
+
     // 条件启用 DGC 扩展
     VkPhysicalDeviceDeviceGeneratedCommandsFeaturesEXT dgcFeature{};
     dgcFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_GENERATED_COMMANDS_FEATURES_EXT;
@@ -597,6 +610,9 @@ void VulkanDevice::CreateLogicalDevice() {
     }
     if (m_SupportsMaintenance7) {
         *ppNext = &maint7Feature; ppNext = &maint7Feature.pNext;
+    }
+    if (m_SupportsVertexAttributeRobustness) {
+        *ppNext = &vertexAttrRobustnessFeature; ppNext = &vertexAttrRobustnessFeature.pNext;
     }
     *ppNext = &shaderInt8Feature; ppNext = &shaderInt8Feature.pNext;
     if (m_SupportsGPL) {
