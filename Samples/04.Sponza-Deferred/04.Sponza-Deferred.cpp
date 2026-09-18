@@ -1,7 +1,7 @@
 // ============================================================
-// 04.Deferred — Sponza 场景 + 延迟渲染管线
+// 04.Sponza-Deferred — Sponza 场景 + 延迟渲染管线
 //
-// 与 03.Sponza 相同的 Sponza 场景（glTF 加载 + 纹理 + Skybox），
+// 与 03.Sponza-Forward 相同的 Sponza 场景（glTF 加载 + 纹理 + Skybox），
 // 但使用 DeferredPipeline（GBuffer + 全屏 Lighting Pass）替代前向管线。
 // ============================================================
 
@@ -44,7 +44,7 @@ using namespace he;
 // ============================================================
 // 配置读写（简易 key=value 格式）
 // ============================================================
-static String g_ConfigPath = String(HUGE_CONTENT_DIR) + "Config/04_Deferred.cfg";
+static String g_ConfigPath = String(HUGE_CONTENT_DIR) + "Config/04_Sponza-Deferred.cfg";
 
 static std::unordered_map<String, String> LoadConfigFile(const String& path) {
     std::unordered_map<String, String> map;
@@ -91,7 +91,7 @@ int main() {
     // 1. 引擎启动
     // ============================================================
     EngineConfig config;
-    config.appName      = "HugEngine — 04.Deferred (Sponza)";
+    config.appName      = "HugEngine — 04.Sponza-Deferred";
     config.windowWidth  = 960;
     config.windowHeight = 540;
     config.enableVSync  = true;
@@ -616,7 +616,7 @@ int main() {
     // ============================================================
     // 11. 主渲染循环
     // ============================================================
-    HE_CORE_INFO("04.Deferred (Sponza) 启动 — WASD=移动, 右键拖拽=旋转, Shift=加速, E/Q=升降");
+    HE_CORE_INFO("04.Sponza-Deferred 启动 — WASD=移动, 右键拖拽=旋转, Shift=加速, E/Q=升降");
     u64 frameIndex = 0;
     f64 lastTime   = glfwGetTime();
 
@@ -695,7 +695,7 @@ int main() {
         imgui.BeginFrame();
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
         ImGui::SetNextWindowBgAlpha(0.55f);
-        ImGui::Begin("04.Deferred (Sponza)");
+        ImGui::Begin("04.Sponza-Deferred");
         {
             float fps = 1.0f / (deltaTime > 0.001f ? deltaTime : 0.016f);
             ImGui::TextColored({0.3f, 1.0f, 0.3f, 1.0f}, "FPS: %.0f", fps);
@@ -1292,6 +1292,6 @@ int main() {
         HE_CORE_INFO("配置已保存: {}", g_ConfigPath);
     }
 
-    HE_CORE_INFO("04.Deferred 退出 ({} 帧)", frameIndex);
+    HE_CORE_INFO("06.GILab 退出 ({} 帧)", frameIndex);
     return 0;
 }

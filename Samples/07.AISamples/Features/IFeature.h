@@ -4,7 +4,7 @@
 #include "Math/Math.h"
 
 // ============================================================
-// IFeature — 05.AISamples 功能模块统一接口
+// IFeature — 07.AISamples 功能模块统一接口
 //
 // 每个原 Sample（05~10）迁移为一个 Feature：
 // 主程序持有共享的引擎/RHI/AI 设备/渲染管线/相机，

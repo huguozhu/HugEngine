@@ -895,7 +895,7 @@ int main() {
         // --- Forward 的阴影系统必须由**调用方**驱动（任务 34 / §9.2-AD）---
         // `ShadowSystem` 不像 GI 子系统那样自己从帧图拿数据：它要靠调用方先
         // `SetRenderResources`（对象/阴影缓冲 + 描述符集）再 `Update`（收集投影光源、拟合 CSM），
-        // 之后 `HasActiveShadows()` 才为真。02.Cube / 03.Sponza / AISamples 都这么做，
+        // 之后 `HasActiveShadows()` 才为真。02.Cube / 03.Sponza-Forward / AISamples 都这么做，
         // **06.GILab 此前漏了** ⇒ Forward 模式下 `Shadow` 与 `RSM_Generate` 两个 pass 都不注册：
         // 画面**没有阴影**，RSM 源恒为 0（而"层栈改变画面 / 多源不变亮 / 双源等于加权平均"
         // 三条判据在"某个源恒为 0"时全部成立，看不出这件事）。
@@ -1799,6 +1799,6 @@ int main() {
         HE_CORE_INFO("配置已保存: {}", g_ConfigPath);
     }
 
-    HE_CORE_INFO("04.Deferred 退出 ({} 帧)", frameIndex);
+    HE_CORE_INFO("06.GILab 退出 ({} 帧)", frameIndex);
     return 0;
 }

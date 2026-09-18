@@ -122,7 +122,7 @@ HE_END_REGISTER()
 | 5 | `he::TextRenderSystem::Update(world, device)` | 文字栅格化 → bindless 纹理（脏检测 + 槽位复用） |
 | 6 | `he::SkeletalMeshSystem::Update(world, dt)` | 骨骼采样/混合/重定向 → 蒙皮矩阵 |
 | 7 | `he::CollisionDebugSystem::Update(world, enabled)` | 碰撞体线框（形状变化才重建） |
-| — | `he::AgentSystem::Update(world, sg, ...)` | AI Agent（策略推理 → 动作；05.AISamples 使用） |
+| — | `he::AgentSystem::Update(world, sg, ...)` | AI Agent（策略推理 → 动作；07.AISamples 使用） |
 | — | `he::DamageSystem` / `AbilitySystem` / `ProjectileSystem` / `SpringArmSystem` / `SplineSystem` | 按示例需要调用 |
 
 > **顺序为什么重要**：物理回写 Transform 之后再采样动画/文字，画面才不会落后一帧；

@@ -282,7 +282,7 @@ m_PrevViewProj = m_CurrViewProj;
 
 | 测试 | 方法 | 通过标准 |
 |------|------|---------|
-| 基础渲染 | Sponza 场景运行 04.Deferred | 画面无崩溃、无黑屏 |
+| 基础渲染 | Sponza 场景运行 04.Sponza-Deferred | 画面无崩溃、无黑屏 |
 | 抗锯齿效果 | 静止相机对比 TAA on/off | 几何边缘明显平滑 |
 | Ghosting | 快速旋转/平移相机后停止 | 静止后无拖影残留 |
 | 邻域裁剪 | 相机快速移动时观察高对比度边缘 | 无明显 ghost 色彩 |

@@ -73,7 +73,7 @@
 1. **一个组件 = 四件事**：`Component` 类定义（`Engine/Scene/Scene/` 或 `Engine/AI/`）+ 反射注册（`SceneReflect.cpp` / `AgentReflect.cpp`）+ AI 注解（`HE_ATTR_AI_VISIBLE/WRITABLE/DESCRIPTION`）+ 系统接入（渲染/更新）。
 2. **AI 可读写**：数值类属性全部打 `HE_ATTR_AI_*` 注解，并同步进 `SceneBuilder` 的 `TypeSchema` 词表——LLM 生成场景即刻可用（协议速查表 §六扩展规则）。
 3. **反射自动生效**：注册后编辑器 Details 面板、WorldModel 快照、AI 动作（SetProperty）自动支持，无需额外代码。
-4. **验证标配**：doctest 用例（组件属性读写/容错）+ 在 `05.AISamples`（已合并原 05~10）增加对应 Feature 或扩展现有场景。
+4. **验证标配**：doctest 用例（组件属性读写/容错）+ 在 `07.AISamples`（已合并原 05~10）增加对应 Feature 或扩展现有场景。
 5. **新组件必须追溯旧债**：每新增一个组件，先检查既有同名组件是否满足上述四件事（参照 Phase S0 补齐清单），避免"代码有、AI 看不见"的断链。
 
 ## 三、阶段规划
@@ -172,13 +172,13 @@
   "RectLight": {"fields": ["normal","color","intensity","width","height","range","softness","castShadow"]},
   "Camera":    {"fields": ["fov","nearPlane","farPlane","isMain"]}
   ```
-- **验证**：doctest（LLM 场景 JSON 含"一盏路灯"→ 生成 SpotLight 组件断言方向/锥角）；05.AISamples 冒烟（prompt「一个路灯照着的街角」）。
+- **验证**：doctest（LLM 场景 JSON 含"一盏路灯"→ 生成 SpotLight 组件断言方向/锥角）；07.AISamples 冒烟（prompt「一个路灯照着的街角」）。
 
 ### 4. 主相机系统接入（原 S0.4，= 任务 5 的系统接入部分；✅ 已完成 2026-09-06）
 
 - **改动**：`Engine/Scene/Scene/World.h/.cpp` 新增 `GetPrimaryCamera()`（遍历 CameraComponent，返回首个 `isMain`）；各渲染管线帧入口优先取主相机组装 ViewMatrix，无相机实体时回退现有 `CameraController`。
 - **现状**：`render::MakeCameraData(CameraComponent, Transform)`（`Pipeline/Camera.h:72`）已存在，缺的是"从 World 选主相机"这层。
-- **验证**：02.Cube 或 05.AISamples 添加带 CameraComponent 的实体后视角生效；移除后回退 CameraController。
+- **验证**：02.Cube 或 07.AISamples 添加带 CameraComponent 的实体后视角生效；移除后回退 CameraController。
 
 ---
 
@@ -200,7 +200,7 @@
   | isMain | bool | AI_VISIBLE |
 - **系统接入**（= S0.4）：`Render` 管线读 `World::GetPrimaryCamera()`（首个 isMain 相机）组装 ViewMatrix；无相机实体时回退 CameraController
 - **SceneBuilder 词表**（= S0.3）：`"Camera": {"fields": ["fov", "nearPlane", "farPlane"]}`
-- **验证**：doctest（创建相机实体 → 取主相机）+ 05.AISamples 场景生成"带相机"的关卡
+- **验证**：doctest（创建相机实体 → 取主相机）+ 07.AISamples 场景生成"带相机"的关卡
 
 ### 6. SpotLightComponent（原 A2；✅ 已完成 2026-09-06，本体 `86856de` + 任务 1 注册 + 任务 3 词表）
 （原 A2）
@@ -345,7 +345,7 @@
 4. [ ] 渲染相关的：接入 Forward/Deferred 管线（灯光收集/绘制/材质）
 5. [ ] `SceneBuilder`：`TypeSchema` 词表加类型与字段 + `BuildScene` 加 `else if (type == "<Name>")` 分支（安全降级）
 6. [ ] `Tests/`：doctest 用例（组件创建/属性读写/容错）
-7. [ ] `05.AISamples`：LLM 生成含该组件的场景用例验证（或独立 Feature）
+7. [ ] `07.AISamples`：LLM 生成含该组件的场景用例验证（或独立 Feature）
 8. [ ] 中文注释齐备
 
 > 追溯清单（任务 1~4 的做法复用）：对"已存在但未注册"的组件执行 2/5/7 三步即可补齐。
@@ -382,7 +382,7 @@ P4（大工程）: 18 SkeletalMesh(原C1) / 19 Physics(原C2) / 20 NavMesh(原C4
 - **组件总数**：新增 11 个组件（A 组 6：Decal/Billboard/TextRender/SpringArm/ProjectileMovement/Health；B 组 5：Collision/CharacterMovement/Ability/Spline/InstancedMesh）+ S0 补齐 3 个既有组件（SpotLight/RectLight/Camera）的反射/词表 + 主相机接入（GetPrimaryCamera/ResolveFrameCamera）；doctest **85 用例 / 509 断言**全部通过（2026-09-06 基线；C1 SkeletalMesh 见 §十二）
 - **词表**：LLM 组件词表 5 → 10（SpotLight/RectLight/Camera/Health/Decal 新增，截至 2026-09-06），后 Animation 补齐（`98c4080`）→ **11 种**，RigidBody 补齐（`1d4de6e`，Jolt C2）→ **12 种**，NavMesh/NavAgent 补齐（`97aaa00`，C4）→ **14 种**；SceneBuilder 全部带安全降级解析
 - **提交序列**：`8813211`（S0）→ `7683686`（P1）→ `3eb963a`（P2）→ `8299254`/`11e4f14`/`1ae6637`/`3c0f571`/`56696ea`（P3 五件）
-- **交互验证**：02.Cube（广告牌/文字/贴花/碰撞变色/角色移动/万级实例）、05.AISamples（真实 LLM 场景生成、主相机、火球技能、样条巡逻）
+- **交互验证**：02.Cube（广告牌/文字/贴花/碰撞变色/角色移动/万级实例）、07.AISamples（真实 LLM 场景生成、主相机、火球技能、样条巡逻）
 - **已知 MVP 限制（技术债清单，均已成任务，见 §三 任务总表 21~26）**：
   1. ~~bindless 堆 append-only：TextRender/InstancedMesh 动态更新以「旧资源保活」换安全，高频更新需 Heap 环形化改造~~ ✅ **已落地（任务 23，见 §十六）**
   2. ~~Decal 为投射片 MVP（无 GBuffer 投影 Pass）~~ ✅ **Deferred 已落地 GBuffer 投影（任务 24，见 §十七）**；Forward 无 GBuffer 可投影 ⇒ 仍为投射片（已知边界）；~~InstancedMesh 仅支持 Forward 非 GPU-Culling 路径，逐实例剔除未接~~ ✅ **已落地（任务 25，见 §十八）：Forward/Deferred 双路径 + 逐实例 GPU 剔除 + 间接绘制**

@@ -9,7 +9,7 @@
 
 **Goal**：接入 Jolt Physics，落地 `Engine/Physics` 模块 + `RigidBodyComponent`，打通"刚体下落 → 碰撞 → 变换回写 TransformComponent → 渲染可见"最小闭环，作为文档 §七 C2 的 MVP（对齐 Entity Component 计划的 8 步检查清单）。
 
-**范围内**：球/盒/胶囊刚体、静态碰撞体（地面/障碍）、固定步长、组件生命周期同步、doctest + 02.Cube/05.AISamples 演示。
+**范围内**：球/盒/胶囊刚体、静态碰撞体（地面/障碍）、固定步长、组件生命周期同步、doctest + 02.Cube/07.AISamples 演示。
 
 **范围外（明确不做）**：关节/车辆/布料/破碎、双精度大世界、Taskflow 对接 Jolt JobSystem、DebugRenderer 线框（列入后续，与 Collision 线框技术债合并）、CharacterMovement 物理化（仅文档化策略）。
 
@@ -56,7 +56,7 @@ Engine/Physics/                     ← 新增模块（依赖 Scene，单向；S
 | 修改 | `Engine/External/CMakeLists.txt`（`add_subdirectory(JoltPhysics)`，选项 `JPH_ENABLE_INSTALL=OFF`、`JPH_ENABLE_OBJECT_LAYER_PROPERTIES=OFF`、Debug 开 `JPH_ENABLE_ASSERTS` 等） |
 | 修改 | `Engine/CMakeLists.txt`、`Tests/CMakeLists.txt`、根 `CMakeLists.txt`（folder 分组加 HugEnginePhysics） |
 | 修改 | `Engine/AI/TypeSchema.cpp` + `Engine/AI/SceneBuilder.cpp`（词表加 `"RigidBody"` 与 `else if` 分支，安全降级） |
-| 修改 | `Samples/02.Cube`（PhysicsDemo 区）或 `05.AISamples` 新 Feature |
+| 修改 | `Samples/02.Cube`（PhysicsDemo 区）或 `07.AISamples` 新 Feature |
 
 ## 五、接口约定（跨任务契约，按此签名实现）
 
@@ -154,7 +154,7 @@ public:
 ## 八、验证汇总
 
 - 每个任务：编译通过（`cmake --build build --config Debug`）+ 对应 doctest 全绿
-- 端到端：`02.Cube.exe` PhysicsDemo 场景或 `05.AISamples` 对应 Feature
+- 端到端：`02.Cube.exe` PhysicsDemo 场景或 `07.AISamples` 对应 Feature
 - 总门槛：doctest 新增用例 ≥ 5（转换 / 重力 / 碰撞 / 生命周期 / 词表），全部通过
 
 ## 九、后续集成策略（T8 落文档，不在本计划实现）

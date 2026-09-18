@@ -48,7 +48,7 @@ AI 一等公民（L2.5 AI 运行时层）：反射注解 + 世界模型 + 推理
 - **VMA 集成**: Vulkan Memory Allocator 替换裸 vkAllocateMemory ✅
 - **Animation**: Transform 关键帧动画组件 (Translation/Rotation/Scale) ✅
 - **GPU Particle System**: ParticleComponent + Compute Shader 模拟 (Init/Emit/Simulate) + Billboard 渲染 + ColorOverLife 渐变 + 视锥剔除 ✅
-- **Samples**: 02.Cube (Forward/Deferred/RT 三模式切换), 03.Sponza (Forward), 04.Deferred (Sponza+延迟) ✅
+- **Samples**: 02.Cube (Forward/Deferred/RT 三模式切换), 03.Sponza-Forward (Forward), 04.Sponza-Deferred (Sponza+延迟) ✅
 - **AI Phase 1 最小竖切**: HugEngineAI 模块 (SceneBuilder/TypeSchema/DeepSeekClient/PromptToScene) + doctest 测试脚手架 + 05.LLMScene（一句话生成场景）✅
 - **A1 底座**: HE_ATTR_AI_* 反射注解 + WorldModel（反射化快照/词表）+ IAIDevice/IAIBackend/RemoteBackend + InferenceScheduler（优先级车道/流式投递）✅
 - **G1 AIGC 闭环**: GenerateSceneCommand（可撤销）+ GenerativeAssetFactory + CloudAIGCProvider + AIPipeline（去重/取消/重试）+ HugEditor 提示词/生成队列面板 ✅

@@ -1100,8 +1100,8 @@ else
 - [ ] **Step 4: 全量编译 + 运行验证**
 
 ```bash
-cmake --build build --target 04.Deferred --config Debug
-./build/bin/Debug/04.Deferred.exe
+cmake --build build --target 04.Sponza-Deferred --config Debug
+./build/bin/Debug/04.Sponza-Deferred.exe
 ```
 
 预期: Nanite 模式下的 Sponza 渲染与标准 GBuffer 渲染画面一致。

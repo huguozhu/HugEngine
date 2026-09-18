@@ -461,7 +461,7 @@ Lighting 侧线性升采样。**已知边界**：半分辨率下 SSGI/SSR 的附
 | Lightmap 源 | **未实现**（`ToPipelineCap` 刻意不给能力位）。原任务已取消；已落地的基础设施（GBuffer 第 8 MRT 的光照图键、程序化箱式投影、检查脚本）保留 |
 | 统一降噪框架 / Provider 执行单位收敛 / P6 | **未做**，任务在 `Lumen与Nanite完整设计规范` §5.1 / §5.2 |
 | IBL / DDGI / RSM 的逐源白炉真值校验 | 未做（RTGI 与 SSGI 已补齐） |
-| 其它示例（02.Cube / 03.Sponza / AISamples）的 Forward 观感 | 未逐个跑图（工作区只构建 06.GILab）；IBL 修好、RSM 换固定光锥后画面变亮/变阴影是修复 |
+| 其它示例（02.Cube / 03.Sponza-Forward / AISamples）的 Forward 观感 | 未逐个跑图（工作区只构建 06.GILab）；IBL 修好、RSM 换固定光锥后画面变亮/变阴影是修复 |
 | 半分辨率下不降噪 | 同上（需 `needsUpscale` 信号属性） |
 
 ---

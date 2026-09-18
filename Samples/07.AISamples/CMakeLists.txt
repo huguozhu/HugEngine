@@ -1,5 +1,5 @@
-# 05.AISamples — AI 综合示例（原 05~10 六个 AI Sample 合并）
-add_executable(05.AISamples
+# 07.AISamples — AI 综合示例（原 05~10 六个 AI Sample 合并）
+add_executable(07.AISamples
     AISamples.cpp
     Features/IFeature.h
     Features/FeatureLLMScene.cpp
@@ -16,13 +16,13 @@ add_executable(05.AISamples
     Features/FeatureMeshAnimGen.h
 )
 
-target_include_directories(05.AISamples PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(07.AISamples PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
-target_compile_definitions(05.AISamples PRIVATE
+target_compile_definitions(07.AISamples PRIVATE
     HUGE_CONTENT_DIR="${CMAKE_SOURCE_DIR}/Content/"
 )
 
-target_link_libraries(05.AISamples PRIVATE
+target_link_libraries(07.AISamples PRIVATE
     HugEngineCore
     HugEngineRHI
     HugEngineShader
@@ -34,4 +34,4 @@ target_link_libraries(05.AISamples PRIVATE
 )
 
 # 依赖 CompileShaders 确保 EmbeddedShaders.h 已生成
-add_dependencies(05.AISamples CompileShaders)
+add_dependencies(07.AISamples CompileShaders)

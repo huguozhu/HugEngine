@@ -91,6 +91,6 @@ float  ao        = u_Textures[texBase + 3].Sample(u_Samplers[0], uv).r;
 
 ## 7. 测试
 
-- 03.Sponza (Forward) + 04.Deferred 正常渲染
+- 03.Sponza-Forward (Forward) + 04.Sponza-Deferred 正常渲染
 - RenderDoc 验证：Draw 之间无 descriptor set 切换
 - 无 Vulkan 验证层告警

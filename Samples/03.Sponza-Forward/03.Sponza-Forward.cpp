@@ -1,5 +1,5 @@
 // ============================================================
-// 03.Sponza — 加载 Sponza glTF 场景，自由相机漫游
+// 03.Sponza-Forward — 加载 Sponza glTF 场景，自由相机漫游
 //
 // 使用 glTFLoader (cgltf) 加载完整的 Sponza 场景，
 // PBR 前向管线渲染，支持：
@@ -51,7 +51,7 @@ using namespace he;
 // ============================================================
 // 配置读写（简易 key=value 格式）
 // ============================================================
-static String g_ConfigPath = String(HUGE_CONTENT_DIR) + "Config/03_Sponza.cfg";
+static String g_ConfigPath = String(HUGE_CONTENT_DIR) + "Config/03_Sponza-Forward.cfg";
 
 static std::unordered_map<String, String> LoadConfigFile(const String& path) {
     std::unordered_map<String, String> map;
@@ -101,7 +101,7 @@ int main() {
     // 1. 引擎启动
     // ============================================================
     EngineConfig config;
-    config.appName      = "HugEngine — 03.Sponza";
+    config.appName      = "HugEngine — 03.Sponza-Forward";
     config.windowWidth  = 960;
     config.windowHeight = 540;
     config.enableVSync  = true;
@@ -590,7 +590,7 @@ int main() {
     // ============================================================
     // 10. 主渲染循环
     // ============================================================
-    HE_CORE_INFO("03.Sponza 启动 — WASD=移动, 右键拖拽=旋转, Shift=加速, E/Q=升降");
+    HE_CORE_INFO("03.Sponza-Forward 启动 — WASD=移动, 右键拖拽=旋转, Shift=加速, E/Q=升降");
     u64 frameIndex = 0;
     f64 lastTime   = glfwGetTime();
 
@@ -769,7 +769,7 @@ int main() {
         imgui.BeginFrame();
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
         ImGui::SetNextWindowBgAlpha(0.55f);
-        ImGui::Begin("03.Sponza 控制面板");
+        ImGui::Begin("03.Sponza-Forward 控制面板");
         {
             // ============================================================
             // 性能监控
@@ -1045,6 +1045,6 @@ int main() {
         HE_CORE_INFO("配置已保存: {}", g_ConfigPath);
     }
 
-    HE_CORE_INFO("03.Sponza 退出 ({} 帧)", frameIndex);
+    HE_CORE_INFO("03.Sponza-Forward 退出 ({} 帧)", frameIndex);
     return 0;
 }

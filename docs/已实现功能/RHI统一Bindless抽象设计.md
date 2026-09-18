@@ -155,7 +155,7 @@ struct BindlessHeapDesc {
    - `Engine/Asset/Private/glTFLoader.cpp`（纹理加载注册）
    - `Engine/Render/Pipeline/ForwardPipeline.cpp`（默认占位 + 注册 set + FlushPending）
    - `Engine/Render/Pipeline/GBufferRenderer.cpp` / `GBufferRenderer_CPU.cpp` / `GBufferRenderer_GPU.cpp`
-3. `Samples/03.Sponza/03.Sponza.cpp`（占位纹理注册）。
+3. `Samples/03.Sponza-Forward/03.Sponza-Forward.cpp`（占位纹理注册）。
 
 ---
 

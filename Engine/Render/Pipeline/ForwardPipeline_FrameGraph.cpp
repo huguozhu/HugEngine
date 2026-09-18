@@ -127,7 +127,7 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     // GIConfig 门控：rsmIndirect=false 时不注册（Forward 的间接漫反射来源）
     // 【任务 34 / §9.2-AD 已修】此前本分支在 06.GILab 的 Forward 模式下恒不注册，三层原因：
     //   ① Forward 管线的阴影系统要由**调用方**先 SetRenderResources + Update（02.Cube /
-    //      03.Sponza / AISamples 都这么做，06.GILab 没有）⇒ `HasActiveShadows()` 恒为 false。
+    //      03.Sponza-Forward / AISamples 都这么做，06.GILab 没有）⇒ `HasActiveShadows()` 恒为 false。
     //      已修：示例在 Forward 分支里照 02.Cube 驱动阴影系统（顺带让 Forward 画面第一次有阴影）。
     //   ② 本 pass 用的是 **CSM 级联 0** 的 VP，而它由 Shadow pass 的 `RenderCascade` 才写进
     //      `m_LightVPs`；帧图里两个 pass 声明的是**互不相干的纹理**（阴影图 vs RSM 三张图），

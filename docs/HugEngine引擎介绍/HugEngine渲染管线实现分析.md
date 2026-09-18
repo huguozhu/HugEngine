@@ -31,7 +31,7 @@
 | CPU 并行 | MTCR：≤8 Secondary CB 并行录制 | AsyncCompute（帧首连续 Compute 前缀） | 同 Deferred | 同 Deferred |
 | GPU 驱动 | GPUCulling + ExecuteIndirect | GPUCulling（单阶段/两阶段/PTG）+ DGC 可选 | 同 Deferred | 无（全 RT） |
 | Shader 热重载 | ✅ PBR.vert/frag | ❌ | ❌ | ❌ |
-| 使用方 | 02.Cube mode0 / Editor / 03.Sponza | 02.Cube mode1 / 04.Deferred | 02.Cube mode2 | 02.Cube mode3 |
+| 使用方 | 02.Cube mode0 / Editor / 03.Sponza-Forward | 02.Cube mode1 / 04.Sponza-Deferred | 02.Cube mode2 | 02.Cube mode3 |
 
 ```mermaid
 flowchart LR
@@ -389,7 +389,7 @@ GPUScene Collect→(MeshBatcher)→Upload → GPU 剔除 Readback（禁用时 cl
 - **实际只有帧首的 GPU_Cull 真正走 Compute 队列**：DDGI_Update/AutoExposure 虽标记 Compute，
   但按"连续 Compute 前缀"规则（前面隔了 GB_Clear 等非 Compute Pass）落在主队列；
 - computeCmd 每帧临时创建 + `BeginLightweight()`（不推进帧计数避免延迟销毁提前触发）；
-- `FlushComputeWork()` 为空壳（兼容 04.Deferred 调用）。
+- `FlushComputeWork()` 为空壳（兼容 04.Sponza-Deferred 调用）。
 
 ### 5.6 GBufferRenderer（CPU/GPU 双策略）
 

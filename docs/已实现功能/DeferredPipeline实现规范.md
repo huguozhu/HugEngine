@@ -16,7 +16,7 @@
 | `Engine/Shader/Shaders/GBuffer/GBuffer.frag.slang` | GBuffer 片段着色器（3 MRT） |
 | `Engine/Shader/Shaders/Lighting/DeferredLighting.vert.slang` | 全屏三角形 |
 | `Engine/Shader/Shaders/Lighting/DeferredLighting.frag.slang` | PBR 光照 + IBL + RSM + Shadow |
-| `Samples/04.Deferred/main.cpp` | 测试 Sample |
+| `Samples/04.Sponza-Deferred/main.cpp` | 测试 Sample |
 
 ## 3. 类声明
 
@@ -285,9 +285,9 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, ...) {
 |:---:|------|------|
 | 1 | GBuffer.vert/frag + DeferredLighting.vert/frag | slangc 编译通过 |
 | 2 | DeferredPipeline.h + Initialize() | 编译 + 资源创建日志 |
-| 3 | DeferredPipeline::BuildFrameGraph (仅 GBuffer→Lighting→ToneMap) | 04.Deferred 黑屏→有画面 |
+| 3 | DeferredPipeline::BuildFrameGraph (仅 GBuffer→Lighting→ToneMap) | 04.Sponza-Deferred 黑屏→有画面 |
 | 4 | 添加 Shadow 复用 | 阴影可见 |
 | 5 | 添加 IBL 复用 | 环境光照可见 |
 | 6 | 添加 RSM 复用 | RSM 间接光 |
 | 7 | 添加 Skybox | 天空盒 |
-| 8 | 集成到 CMake + Sample | 04.Deferred 完整运行 |
+| 8 | 集成到 CMake + Sample | 04.Sponza-Deferred 完整运行 |

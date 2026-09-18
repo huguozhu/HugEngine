@@ -32,7 +32,7 @@
            → vkCreate*Pipelines 驱动跳过 SPIR-V→ISA 编译 → ~2ms vs 首次 ~50ms
 ```
 
-**测试结果（2026-07-22）：** 04.Deferred 示例运行正常，`pipeline_cache.bin` 已生成（366,964 bytes），二次启动日志确认缓存命中。
+**测试结果（2026-07-22）：** 04.Sponza-Deferred 示例运行正常，`pipeline_cache.bin` 已生成（366,964 bytes），二次启动日志确认缓存命中。
 
 ---
 
@@ -73,7 +73,7 @@ Frame N+1:
 ```
 
 **测试结果（2026-07-22）：**
-- ✅ 编译通过（RHI + Render + 04.Deferred 全模块零错误）
+- ✅ 编译通过（RHI + Render + 04.Sponza-Deferred 全模块零错误）
 - ✅ TransientAllocator 初始化日志确认：`2 Heap × 128MB = 256MB`
 - ✅ 帧切换正常：`Frame 1→Heap1→Frame 2→Heap0→...`
 - ⚠️ 当前 DeferredPipeline 所有 RenderTarget 均为 Import 纹理（GBuffer/ShadowMap/SSAO 等预先创建），RenderGraph 内无 `rg.CreateTexture()` 动态资源，瞬态路径未被触发（架构特征，非 bug）

@@ -2,7 +2,7 @@
 // Tests/TestPrimaryCamera.cpp — World::GetPrimaryCamera 单元测试（S0.4）
 //
 // 覆盖：无相机实体 / 单主相机 / 多相机取首个 isMain / 全非主相机。
-// 渲染侧 ResolveFrameCamera（Render 模块）依赖本函数，见 05.AISamples 冒烟。
+// 渲染侧 ResolveFrameCamera（Render 模块）依赖本函数，见 07.AISamples 冒烟。
 // ============================================================
 
 #include "doctest.h"

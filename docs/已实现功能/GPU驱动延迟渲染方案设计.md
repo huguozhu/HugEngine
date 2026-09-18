@@ -261,7 +261,7 @@ Work Graph 概念（Cull → Draw → PostProcess）：
 
 | 里程碑 | 验证项 | 方法 |
 |--------|--------|------|
-| M1 | Vulkan 校验层干净 | `--validate` 运行 04.Deferred，零警告 |
+| M1 | Vulkan 校验层干净 | `--validate` 运行 04.Sponza-Deferred，零警告 |
 | M1 | AsyncCompute 开启 | GPU Profiler 面板确认 Async 队列有活动 |
 | M2 | Two-Phase 剔除精度 | Debug View 对比单/双阶段剔除结果 |
 | M2 | PTG 帧率提升 | Sponza 场景 before/after Dispatch 次数对比 |

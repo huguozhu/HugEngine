@@ -60,6 +60,6 @@ VulkanDevice
 
 ## 7. 测试
 
-- 04.Deferred Sponza 场景正常运行
+- 04.Sponza-Deferred Sponza 场景正常运行
 - Vulkan 验证层无内存泄漏
 - 所有 Buffer/Texture/Sampler 正确创建和销毁

@@ -675,7 +675,7 @@ void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
 
 void DeferredPipeline::FlushComputeWork() {
     // 多阶段提交已在 RenderGraph::ExecuteWithAsyncCompute 内部自动完成
-    // 保留此方法以兼容外部调用（Samples/04.Deferred.cpp line 1022）
+    // 保留此方法以兼容外部调用（Samples/04.Sponza-Deferred.cpp line 1022）
 }
 
 // BuildFrameGraph 实现位于 DeferredPipeline_FrameGraph.cpp
