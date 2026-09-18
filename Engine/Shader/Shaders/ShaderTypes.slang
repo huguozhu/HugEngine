@@ -155,7 +155,27 @@ GPU_STRUCT GIBlendParams {
     // 无法使用共享的半分辨率 `RSM_Indirect` pass。Deferred 的 RSM 源走那个 pass，
     // 其缩放由该 pass 自己的参数 UBO 传入，故 Deferred 侧这里填 0（**不要**误认为它生效）。
     float        rsmVplScale;
-    float        _padBlend[3];           // 对齐到 16 字节边界，保持 std140 布局
+    // 【填充必须用 float4，不能用 float[3]】共享结构体是 C++/Slang **两端各自**按自己的规则
+    // 布局的：Slang 的 cbuffer（std140）里**数组元素步长固定 16 字节**，而 C++ 侧 `float[3]`
+    // 只占 12 字节 ⇒ 数组之后的所有成员在两端的偏移都不一致。实测（`slangc -reflection-json`）：
+    // 写成 `float _padBlend[3]` 时 Slang 把 `rsmLightViewProj` 放在 304、`rsmValid` 放在 368、
+    // 块大小 432，而 C++ 分别是 256 / 320 / 336 —— 于是 PBR 读到的 `rsmValid` 恒为 0
+    // （落在 C++ 未写入的区间），RSM 源静默不产出。改用 float4 后两端逐字段一致（见 §9.2-AF）。
+    float4       _padBlend;
+    // RSM 查找用的光源 VP（任务 34 / §9.2-AD）：**必须与 RSM_Generate pass 用的那个是同一个**
+    // ——即按场景包围盒拟合的固定光锥（`GI/RSMFrustum.h`），不是 CSM 级联 0 的 VP。
+    // 【为什么不能用 CSM 的】① CSM 的 VP 拟合**相机视锥** ⇒ RSM 内容随视角变化，而它是被当作
+    // 世界空间源使用的；② 那个 VP 由 Shadow pass 在**执行时**才写进阴影系统，而帧图里
+    // Shadow 与 RSM_Generate 声明的是互不相干的纹理、没有依赖边 ⇒ 顺序不受保证（实测：
+    // 执行顺序一变 RSM 三张图就只剩清除值）。
+    // 【谁读它】只有 `PBR.frag`（Forward）的内联 5×5 求和；Deferred 的 RSM 源走共享的
+    // `RSM_Indirect` pass，那个 pass 有自己的一套参数，故 Deferred 侧这里填单位矩阵。
+    float4x4     rsmLightViewProj;
+    // 本帧「RSM 内联查找可用」：RSM 在层栈 ∧ 有投影方向光 ∧ RSM pass 本帧真的注册了
+    // （三个条件都在 C++ 侧判定，见 `ForwardPipeline::RefreshRSMFrustum`）。
+    // 不用层栈里有没有 RSM 当判据：那样在 pass 没跑时会采到上一帧/未初始化的纹理（§9.2-T）。
+    float        rsmValid;
+    float4       _padRsm;                // 同 _padBlend：填充一律用 float4
 };
 
 // --- 渲染管线限制 ---

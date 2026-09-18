@@ -27,6 +27,7 @@ namespace he::render { class SceneRenderer; }
 #include "Scene/LightComponent.h"
 #include "Scene/Transform.h"
 #include "Core/Types.h"
+#include "Math/Geometry.h"   // he::AABB（RSM 固定光锥的场景包围盒，任务 34）
 
 #include <memory>
 #include <vector>
@@ -124,6 +125,13 @@ private:
     /// 与 Deferred 走同一套语义：着色器按源数组 + 权重归一化，Forward 的 IBL/RSM 不再是
     /// 管线级开关。每帧在 Render 开头填一次（RG 路径与非 RG 路径都要用）。
     void FillGIBlendUBO();
+    /// 刷新 RSM 的**固定**光源视锥（任务 34 / §9.2-AD）：按场景包围盒拟合、每 30 帧重算包围盒。
+    /// 【为什么必须有】Forward 此前用 CSM 级联 0 的 VP 渲染并查找 RSM：那个 VP 拟合**相机视锥**
+    /// （视角一变 RSM 内容就变，世界空间源的前提被破坏），而且由 Shadow pass 在执行时才写入
+    /// `m_LightVPs`，帧图里 Shadow 与 RSM_Generate 没有依赖边 ⇒ 顺序不受保证。现在两份消费者
+    /// （RSM pass 与 PBR 的内联查找）读**同一份**这个视锥 —— 写入 UV 与查找 UV 同源。
+    /// 每帧在 Render 开头（填 UBO 之前）调用一次，结果同时喂 frame graph 与 UBO。
+    void RefreshRSMFrustum(he::World& world, const CameraData& camera);
     rhi::IRHIDevice* m_Device = nullptr;
     std::unique_ptr<rhi::IRHIPipelineState> m_PBR_PSO;
     // 蒙皮网格 PSO（C1b）：扩展顶点布局（location 3/4 = JOINTS/WEIGHTS），同着色器
@@ -169,6 +177,16 @@ private:
     std::unique_ptr<GI_RSM>              m_RSM;
     GIConfig                             m_GIConfig;   // 该管线的 GI 通道配置（可用子集见 PipelineCaps::Forward）
     std::unique_ptr<IShadowSystem>       m_ShadowSystem;
+    // ── RSM 固定光源视锥（任务 34 / §9.2-AD）──
+    // 与 Deferred 侧同一套做法：包围盒每 30 帧重算（遍历带变换的网格包围盒不是零成本），
+    // 视锥由纯几何函数 `FitRSMFrustumToBounds` 拟合，结果缓存给 frame graph 与 UBO 两处消费者。
+    static constexpr u32 kSceneBoundsRefreshFrames = 30;
+    he::AABB  m_SceneBounds;
+    u32       m_SceneBoundsCountdown = 0;
+    float4x4  m_RSMLightViewProj = float4x4(1.0f);  // 本帧 RSM pass 与 PBR 内联查找共用的 VP
+    float     m_RSMVplScale      = 0.0f;            // 由该视锥的正交半宽推出的采样面积缩放
+    bool      m_RSMFrustumValid  = false;           // 本帧 RSM pass 是否注册（写入与查找的共同前提）
+    bool      m_RSMDirLightValid = false;           // 存在启用且投影的方向光（无则 RSM 无意义）
     std::unique_ptr<IAntiAliasing>       m_AntiAliasing;
     rhi::IRHISwapChain* m_SwapChain = nullptr;
     std::unique_ptr<ToneMapPass>         m_ToneMap;

@@ -58,6 +58,18 @@ static_assert(sizeof(PTPushConstant) == 176, "PTPushConstant must be 176 bytes")
 static_assert(sizeof(PTReservoir) == 32, "PTReservoir must be 32 bytes");
 static_assert(sizeof(ReSTIRPushConstant) == 128, "ReSTIRPushConstant must be 128 bytes");
 
+// ── GIBlendParams（任务 34 / §9.2-AF）──
+// 共享结构体是 C++ 与 Slang **各自**按自己的规则布局的，最容易出错的是**非 float4 的数组**：
+// Slang 的 cbuffer（std140）里数组元素步长固定 16 字节，而 C++ 侧 `float[3]` 只占 12 字节
+// ⇒ 数组**之后**的所有成员两端偏移都不一致。实测踩到：`float _padBlend[3]` 让 Slang 把
+// `rsmLightViewProj`/`rsmValid` 放到 304/368（块大小 432），C++ 是 256/320（336）——shader
+// 读到的 `rsmValid` 恒为 0，RSM 源静默不产出。填充一律用 float4，并在下面**逐个钉住偏移**，
+// 任何人改动这个结构都会在这里被拦下（偏移真值由 `slangc -reflection-json` 复核，见 §11.3）。
+static_assert(sizeof(GIBlendParams) == 368, "GIBlendParams must be 368 bytes（与 Slang cbuffer 一致）");
+static_assert(offsetof(GIBlendParams, rsmVplScale)      == 240, "rsmVplScale 偏移必须与 Slang 反射一致");
+static_assert(offsetof(GIBlendParams, rsmLightViewProj) == 272, "rsmLightViewProj 偏移必须与 Slang 反射一致");
+static_assert(offsetof(GIBlendParams, rsmValid)         == 336, "rsmValid 偏移必须与 Slang 反射一致");
+
 // ============================================================
 // glTF 2.0 PBR 材质（CPU 端资产数据）
 // ============================================================

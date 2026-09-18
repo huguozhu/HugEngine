@@ -125,36 +125,36 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
 
     // --- Pass 2: RSM 生成（Reflective Shadow Maps）---
     // GIConfig 门控：rsmIndirect=false 时不注册（Forward 的间接漫反射来源）
-    // 【§9.2-AD / 任务 34：本分支在 06.GILab 的 Forward 模式下目前恒不注册】
-    //   ① Forward 管线的阴影系统要由**调用方**先 SetRenderResources + Update
-    //      （02.Cube / 03.Sponza / AISamples 都这么做，06.GILab 没有）⇒ `HasActiveShadows()`
-    //      恒为 false、`GetLightViewProj(0)` 行列式为 0。
-    //   ② 即使补上那一步（实测），RSM 仍不产出：本 pass 用的是 **CSM 级联 0** 的 VP，而它由
-    //      Shadow pass 的 `RenderCascade` 才写进 `m_LightVPs`；帧图里两个 pass 声明的是**互不
-    //      相干的纹理**（阴影图 vs RSM 三张图），**没有依赖边** ⇒ 执行顺序不受保证。
-    //   ③ 更根本的是：CSM 的 VP 拟合**相机视锥**，于是 RSM 内容随视角变化（探针/世界空间使用
-    //      它的前提被破坏）。Deferred 侧已改成**按场景包围盒拟合的固定光锥**（任务 30）。
-    //   任务 34 的方向：Forward 也用同一份固定光锥，并把那个 VP 交给 PBR 的内联查表。
-    if (m_GIConfig.ShouldRunRSM() && m_RSM && m_ShadowSystem && m_ShadowSystem->HasActiveShadows()) {
-        float4x4 lightVP = m_ShadowSystem->GetLightViewProj(0);
-        if (glm::determinant(lightVP) != 0.0f) {
-            auto rsmPos  = rg.ImportTexture("RSM_Position",  m_RSM->GetRSMPositionMap());
-            auto rsmNrm  = rg.ImportTexture("RSM_Normal",    m_RSM->GetRSMFluxMap());
-            auto rsmRad  = rg.ImportTexture("RSM_Radiance",  m_RSM->GetRSMRadianceMap());
-            rg.AddPass("RSM_Generate", {},
-                {{rsmPos, ResourceAccess::Write}, {rsmNrm, ResourceAccess::Write},
-                 {rsmRad, ResourceAccess::Write}},
-                [this, &world, &sg](rhi::IRHICommandList* c) {
-                    m_RSM->SetLightViewProj(m_ShadowSystem->GetLightViewProj(0),
-                        m_RSM->GetRSMPositionMap()->GetWidth(),
-                        m_ShadowSystem->GetShadowSampler(),
-                        m_DescSets[m_CurrentFrameSlot]);
-                    // 通量要读方向光的颜色/强度：不绑光源缓冲就会读到对象缓冲（§9.2-AA ①）。
-                    // 这条此前只加在 PrepareGI（非 RG 路径）里，RG 路径漏了 —— 同一个坑两处。
-                    m_RSM->SetLightBuffer(GetCurrentLightBuffer());
-                    m_RSM->RenderRSMPass(c, world, sg);
-                });
-        }
+    // 【任务 34 / §9.2-AD 已修】此前本分支在 06.GILab 的 Forward 模式下恒不注册，三层原因：
+    //   ① Forward 管线的阴影系统要由**调用方**先 SetRenderResources + Update（02.Cube /
+    //      03.Sponza / AISamples 都这么做，06.GILab 没有）⇒ `HasActiveShadows()` 恒为 false。
+    //      已修：示例在 Forward 分支里照 02.Cube 驱动阴影系统（顺带让 Forward 画面第一次有阴影）。
+    //   ② 本 pass 用的是 **CSM 级联 0** 的 VP，而它由 Shadow pass 的 `RenderCascade` 才写进
+    //      `m_LightVPs`；帧图里两个 pass 声明的是**互不相干的纹理**（阴影图 vs RSM 三张图），
+    //      **没有依赖边** ⇒ 执行顺序不受保证。已修：改用下面这份**自己算的**固定光锥，
+    //      与 Shadow pass 再无隐式顺序要求。
+    //   ③ CSM 的 VP 拟合**相机视锥** ⇒ RSM 内容随视角变化（探针/世界空间使用它的前提被破坏）。
+    //      已修：`ForwardPipeline::RefreshRSMFrustum` 按场景包围盒拟合（与 Deferred 同一份
+    //      `FitRSMFrustumToBounds`），并且**同一个** VP 经 `GIBlendParams` 交给 PBR 的内联查表
+    //      —— 写入 UV 与查找 UV 同源。
+    if (m_RSMFrustumValid && m_RSM) {
+        const float4x4 lightVP = m_RSMLightViewProj;   // 按值捕获：帧图 lambda 不得读失效栈帧
+        auto rsmPos  = rg.ImportTexture("RSM_Position",  m_RSM->GetRSMPositionMap());
+        auto rsmNrm  = rg.ImportTexture("RSM_Normal",    m_RSM->GetRSMFluxMap());
+        auto rsmRad  = rg.ImportTexture("RSM_Radiance",  m_RSM->GetRSMRadianceMap());
+        rg.AddPass("RSM_Generate", {},
+            {{rsmPos, ResourceAccess::Write}, {rsmNrm, ResourceAccess::Write},
+             {rsmRad, ResourceAccess::Write}},
+            [this, &world, &sg, lightVP](rhi::IRHICommandList* c) {
+                m_RSM->SetLightViewProj(lightVP,
+                    m_RSM->GetRSMPositionMap()->GetWidth(),
+                    m_ShadowSystem->GetShadowSampler(),
+                    m_DescSets[m_CurrentFrameSlot]);
+                // 通量要读方向光的颜色/强度：不绑光源缓冲就会读到对象缓冲（§9.2-AA ①）。
+                // 这条此前只加在 PrepareGI（非 RG 路径）里，RG 路径漏了 —— 同一个坑两处。
+                m_RSM->SetLightBuffer(GetCurrentLightBuffer());
+                m_RSM->RenderRSMPass(c, world, sg);
+            });
     }
 
     // --- Pass 2.5: Forward+ 光源剔除（Compute Pass，仅在开启时）---

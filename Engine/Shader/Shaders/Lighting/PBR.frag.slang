@@ -206,20 +206,23 @@ float3 ShadeWithLight(GPULight light, float3 worldPos, float3 N, float3 V,
 ///
 /// 【与改前的差别】不再由 `iblIntensity` 门控：RSM 与 IBL 是两个独立的源，"把 IBL 调暗会
 /// 连带关掉 RSM" 是 §9.2-A 修过的耦合，Forward 侧这里是它的残留，一并去掉。
-/// 【保留的有效性判据】必须是有阴影的方向光：点光/聚光场景的 `u_ShadowData[0]` 没有
-/// `lightViewProj`（零矩阵），照做会得到垃圾坐标 → 阴影区出现"钱币"伪影。
-/// 【量级归一 / 任务 30】与共享的 `RSM_Indirect` pass 同一个约定与同一套推导：
-///   `E/π = scale · Σ L_v · cosθ_s · cosθ_r / d²`
-/// 其中 scale 由**本管线自己的**光源视锥尺度推出（C++ 侧 `RSMVplScale`/`RSMSquareArea`，
-/// 经 `u_GIBlendParams.rsmVplScale` 传入）。此前这里是硬编码的 0.03（25 点归一），
-/// 那个常数把结果钉在一个隐含的场景尺度上 —— 与 Deferred 侧被修掉的是同一个缺陷（§9.2-AA ①）。
+/// 【光源 VP 的来源 / 任务 34】改用 `u_GIBlendParams.rsmLightViewProj` —— 即 C++ 侧
+/// `ForwardPipeline::RefreshRSMFrustum` 按**场景包围盒**拟合的固定光锥，与 RSM_Generate pass
+/// 用的是**同一个**矩阵（写入 UV 与查找 UV 同源）。此前读 `u_ShadowData[0].lightViewProj[0]`：
+/// 那是 CSM 级联 0 的 VP，拟合**相机视锥**（视角一变 RSM 内容就变），而且由 Shadow pass 在
+/// **执行时**才写入阴影缓冲，帧图里 Shadow 与 RSM_Generate 之间没有依赖边 ⇒ 执行顺序一变
+/// RSM 三张图就只剩清除值（实测：三张图全零、`{RSM}` 与空层栈逐位相同）。
+/// 【有效性判据 / 任务 34】改为读 `rsmValid`：它由 C++ 侧统一判定（层栈含 RSM ∧ 有投影方向光
+/// ∧ 本帧 RSM pass 真的注册了）。此前读 `u_ShadowData[0].shadowParams`（CSM 的状态）——
+/// 在 CSM 关掉但 RSM 仍注册、或反之的配置下会给出错误结论；更要紧的是 pass 没跑时它会照样
+/// 采样未初始化的 RSM 纹理（§9.2-T）。
 float3 FwdSampleRSMIndirect(float3 worldPos, float3 N) {
-    if (u_ShadowData[0].shadowParams.z <= 0.0 || u_ShadowData[0].shadowParams.w >= 0.5) {
+    if (u_GIBlendParams.rsmValid < 0.5) {
         return float3(0.0);
     }
     // 5×5 采样步长与跨度必须与 C++ 侧 `kRSMInlineStepUV` / `kRSMInlineSampleCount` 一致
     // （scale 是按这个图案覆盖的世界面积算的；改这里必须同时改常量）
-    float4 lightSpacePos = mul(u_ShadowData[0].lightViewProj[0], float4(worldPos, 1.0));
+    float4 lightSpacePos = mul(u_GIBlendParams.rsmLightViewProj, float4(worldPos, 1.0));
     float2 rsmCoord = lightSpacePos.xy / lightSpacePos.w * 0.5 + 0.5;
     float3 rsmIndirect = float3(0.0);
     const float rsmRadius = 0.005;

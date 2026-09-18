@@ -757,19 +757,18 @@ void ForwardPipeline::PrepareGI(rhi::IRHICommandList* cmd, he::World& world, he:
         }
     });
 
-    // RSM 渲染（使用独立深度缓冲，不再复用 CSM ShadowMap 避免布局冲突）
-    if (m_RSM && m_ShadowSystem && m_ShadowSystem->HasActiveShadows()) {
-        float4x4 lightVP = m_ShadowSystem->GetLightViewProj(0);
-        if (glm::determinant(lightVP) != 0.0f) {  // 有效光源 VP
-            m_RSM->SetLightViewProj(lightVP, m_RSM->GetRSMPositionMap()->GetWidth(),
-                                    m_ShadowSystem->GetShadowSampler(),
-                                    m_DescSets[m_CurrentFrameSlot]);
-            // 通量计算要读方向光的颜色/强度（§9.2-AA：不绑光源缓冲就会读到对象缓冲）
-            m_RSM->SetLightBuffer(GetCurrentLightBuffer());
-            // 从光源 POV 渲染几何体 → RSM 纹理（使用 RSM 自有的独立深度缓冲）
-            m_RSM->RenderRSMPass(cmd, world, sg);
-            UpdateRSMBindings();
-        }
+    // RSM 渲染（非 RG 路径）：与 RG 路径读**同一份**按场景包围盒拟合的固定光锥（本帧 Render
+    // 开头的 RefreshRSMFrustum 已算好）。此前这里读 CSM 级联 0 的 VP —— 它拟合相机视锥，
+    // 且由 Shadow pass 在执行时才写入 ⇒ 帧图里没有依赖边、顺序不受保证（§9.2-AD）。
+    if (m_RSMFrustumValid && m_RSM) {
+        m_RSM->SetLightViewProj(m_RSMLightViewProj, m_RSM->GetRSMPositionMap()->GetWidth(),
+                                m_ShadowSystem->GetShadowSampler(),
+                                m_DescSets[m_CurrentFrameSlot]);
+        // 通量计算要读方向光的颜色/强度（§9.2-AA：不绑光源缓冲就会读到对象缓冲）
+        m_RSM->SetLightBuffer(GetCurrentLightBuffer());
+        // 从光源 POV 渲染几何体 → RSM 纹理（使用 RSM 自有的独立深度缓冲）
+        m_RSM->RenderRSMPass(cmd, world, sg);
+        UpdateRSMBindings();
     }
 }
 
@@ -845,6 +844,65 @@ void ForwardPipeline::ResizeHDRTarget(u32 width, u32 height) {
 
 // ---- IRenderPipeline 包装方法 ----
 
+void ForwardPipeline::RefreshRSMFrustum(he::World& world, const CameraData& camera) {
+    // 场景包围盒：与 Deferred 侧同一条做法（网格包围盒 × 世界变换），每 30 帧重算一次。
+    // 【不要用帧计数器当这个计时器】它未必每帧自增，用取模判据会退化成"每帧都重算"。
+    if (m_SceneBoundsCountdown == 0u) {
+        he::AABB sceneBounds;
+        world.ForEach<he::MeshComponent>([&](he::Entity e, he::MeshComponent& mesh) {
+            if (auto* tf = world.GetComponent<TransformComponent>(e)) {
+                sceneBounds.Expand(mesh.GetBounds().Transform(tf->GetLocalMatrix()));
+            }
+        });
+        if (sceneBounds.IsValid()) m_SceneBounds = sceneBounds;
+        m_SceneBoundsCountdown = kSceneBoundsRefreshFrames;
+    }
+    --m_SceneBoundsCountdown;
+
+    // 先按"本帧没有 RSM"复位：下面任一条件不成立时，UBO 里的 rsmValid 就是 0，
+    // PBR 侧据此直接返回 0，不去采可能没写过的 RSM 纹理（§9.2-T 的约定）。
+    m_RSMFrustumValid  = false;
+    m_RSMDirLightValid = false;
+    m_RSMVplScale      = 0.0f;
+    m_RSMLightViewProj = float4x4(1.0f);
+
+    // 注册条件必须与 BuildFrameGraph 里那段**同源**，否则会出现"UBO 说有效但 pass 没跑"。
+    if (!m_GIConfig.ShouldRunRSM() || !m_RSM || !m_ShadowSystem
+        || !m_ShadowSystem->HasActiveShadows()) {
+        return;
+    }
+
+    // 光源方向与"是否存在投影方向光"：无方向光时 RSM 的通量为 0（也就没有间接光可言），
+    // 但 pass 仍会注册 —— 与 Deferred 侧一致；这个布尔只用于决定 PBR 要不要做内联查找。
+    float3 ldir = float3(0.3f, -1.0f, 0.4f);   // 与 Deferred 同一个默认方向
+    world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& l) {
+        if (l.enabled && l.castShadow) {
+            ldir = glm::normalize(l.direction);
+            m_RSMDirLightValid = true;
+        }
+    });
+
+    // 【固定视锥】RSM 是被当作**世界空间**源使用的（接收点与探针都在世界空间查表），
+    // 所以光锥不能拟合相机视锥；覆盖范围由场景包围盒推出（纯几何在 GI/RSMFrustum.h，有单测）。
+    // 包围盒还没算出来时（首帧 / 空场景）退回覆盖相机附近的保守视锥，保证"有产出"。
+    const float3 fitMin = m_SceneBounds.IsValid() ? m_SceneBounds.min : (camera.position - float3(50.0f));
+    const float3 fitMax = m_SceneBounds.IsValid() ? m_SceneBounds.max : (camera.position + float3(50.0f));
+    const auto   fit    = FitRSMFrustumToBounds(fitMin, fitMax, ldir);
+    if (!fit) return;   // 包围盒退化/方向为零向量 ⇒ 本帧不注册 RSM
+
+    m_RSMLightViewProj = fit->viewProj;
+    m_RSMFrustumValid  = true;
+    // VPL 采样缩放：5×5 网格的采样图案覆盖 ±2 步，步长 kRSMInlineStepUV（与着色器常量同源）
+    m_RSMVplScale = RSMVplScaleFromArea(
+        RSMSquareArea(fit->halfExtent, fit->halfExtent, 2.0f * kRSMInlineStepUV),
+        kRSMInlineSampleCount);
+    // 把 RSM 三张图绑进 per-frame 描述符集（任务 34 的第二半）：**RG 路径此前从不调用它**
+    // ——只有非 RG 的 PrepareGI 调。于是 RG 路径下 PBR 采样的是 Initialize 时绑的
+    // **bindless 占位纹理**，RSM 项恒为 0（实测：pass 在跑、三张图有 53% 覆盖，`{RSM}` 的 HDR
+    // 仍与空层栈逐位相同）。绑定必须发生在 pass 注册/执行之前，故放在这里（每帧开头一次）。
+    UpdateRSMBindings();
+}
+
 void ForwardPipeline::FillGIBlendUBO() {
     if (!m_GIBuffers[m_CurrentFrameSlot]) return;
     // 与 Deferred 帧图里那段 fillSlots **同构**：逐通道把层栈的源写进 UBO 槽位，
@@ -870,19 +928,15 @@ void ForwardPipeline::FillGIBlendUBO() {
     std::memcpy(&bp.specular, &sp, sizeof(GIChannelBlendData));
     std::memcpy(&bp.ao,       &ao, sizeof(GIChannelBlendData));
 
-    // RSM 内联求和的 VPL 采样缩放（任务 30 / §9.2-AA ①）：Forward 用 CSM 第 0 级的
-    // 光源 VP 渲染并查找 RSM，所以它的尺度必须由**那个**正交盒推出（不是全局常数）。
-    // 采样图案是 5×5 网格、步长 `kRSMInlineStepUV` ⇒ 覆盖 ±2 步的方框。
-    bp.rsmVplScale = 0.0f;
-    if (m_ShadowSystem && m_GIConfig.ShouldRunRSM()) {
-        float halfX = 0.0f, halfY = 0.0f;
-        const float4x4 lightVP = m_ShadowSystem->GetLightViewProj(0);
-        if (glm::determinant(lightVP) != 0.0f
-            && RSMHalfExtentsOfProjection(lightVP, halfX, halfY)) {
-            bp.rsmVplScale = RSMVplScaleFromArea(
-                RSMSquareArea(halfX, halfY, 2.0f * kRSMInlineStepUV), kRSMInlineSampleCount);
-        }
-    }
+    // RSM 内联求和的两个参数（任务 30 / 任务 34）：采样缩放与光源 VP 都由**同一个**按场景
+    // 包围盒拟合的固定光锥推出 —— 与 RSM_Generate pass 用的是同一份（RefreshRSMFrustum）。
+    // 此前这里的缩放由 CSM 级联 0 的 VP 反推、而着色器的查找也用那个 CSM VP：两者虽然自洽，
+    // 但那个 VP 拟合相机视锥（视角一变 RSM 内容就变）且依赖 Shadow pass 的执行顺序。
+    bp.rsmVplScale      = m_RSMVplScale;
+    bp.rsmLightViewProj = m_RSMLightViewProj;
+    // rsmValid 只在 pass 本帧真的注册（且有投影方向光）时为 1：否则着色器会去采上一帧/
+    // 未初始化的 RSM 纹理 —— 那是静默的（画面只是偏暗）且随显存布局不可复现（§9.2-T）。
+    bp.rsmValid = (m_RSMFrustumValid && m_RSMDirLightValid) ? 1.0f : 0.0f;
 
     void* mapped = m_GIBuffers[m_CurrentFrameSlot]->Map();
     if (mapped) {
@@ -895,6 +949,9 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
                               he::SceneGraph& sg, const CameraData& camera,
                               float deltaTime)
 {
+    // RSM 固定光锥必须**先**刷新（任务 34）：UBO（FillGIBlendUBO）与 frame graph 的
+    // RSM pass 注册/参数两处消费者都读它，且两者都在下面几步之内。
+    RefreshRSMFrustum(world, camera);
     // GI 分层合成参数：RG 路径与非 RG 路径都要用，故在分支之前填（每帧一次的小 UBO 写入）
     FillGIBlendUBO();
     if (m_UseRenderGraph) {
