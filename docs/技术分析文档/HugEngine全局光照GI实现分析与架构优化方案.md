@@ -712,7 +712,7 @@ color *= ao * aoVal * g_PC.aoIntensity;
 > **后续演进（P0/D2）**：GI 数据模型已下沉到 `Engine/Render/GI/GITypes.h`（RHI-free，只依赖
 > `Core/Types.h`）；`GIConfig.cpp` 已删除（`GIConfigFromPreset` 转为 `inline`），
 > `GIConfig.h` 与 `GIRegistry.h` 两个转发头也已移除。当前状态见
-> 《HugEngine GI架构与开发计划.md》。
+> 《HugEngine GI架构与开发计划.md》（已归档到 `docs/已实现功能/` —— 该计划内的任务已全部完成）。
 
 ### 4.1 定义 `GIConfig`
 

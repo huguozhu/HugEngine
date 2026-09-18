@@ -1,5 +1,5 @@
 # ============================================================
-# GI sampling harness for 06.GILab  (see docs: "HugEngine GI架构与开发计划" §11.3)
+# GI sampling harness for 06.GILab  (see docs/已实现功能/"HugEngine GI架构与开发计划" §11.3)
 #
 # Runs the sample once per diffuse-channel-stack variant. Everything else is identical
 # between runs, so differencing two runs isolates the stack difference exactly:
