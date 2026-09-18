@@ -20,6 +20,15 @@ static constexpr u32 kSSRBindHiZ    = 4;   // Hi-Z 深度金字塔
 struct SSRMatrices {
     float4x4 invProj;   // clip → view：重建 view-space 位置
     float4x4 proj;      // view → clip：把射线采样点投影到屏幕（此前缺失，用逆矩阵顶替）
+    /// world → view：把 GBuffer 的**世界空间**法线转到 view 空间（任务 32 / §9.2-W 的解析对照项）
+    ///
+    /// 【为什么必须补这一项】本 pass 整条 march 都在 **view 空间**：`viewPos` 由 invProj 重建、
+    /// `V`/`R` 都是 view 空间向量，深度比较也用 view-space z。而 GBuffer 的法线是**世界空间**
+    /// （见 GBuffer.frag 的输出 `worldNormal`）—— `reflect(-V, N)` 把 view 空间的入射方向与
+    /// 世界空间的法线混在一起，反射方向只在"相机恰好与世界轴对齐"时才正确。历史上 Sponza 的
+    /// SSR 检查只量"有效率/两条 march 是否同量级"，那类判据**看不见**方向错；平面镜的解析
+    /// 对照一上来就暴露了它（实测：地面镜上预测像素附近有效率 0.1%，反射去哪了完全随机）。
+    float4x4 view;
 };
 
 bool GI_SSR::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
@@ -166,10 +175,12 @@ void GI_SSR::Render(rhi::IRHICommandList* cmd) {
         SSRMatrices mats;
         if (m_Camera) {
             mats.proj = m_Camera->GetProjMatrix();
+            mats.view = m_Camera->GetViewMatrix();
         } else {
             const float aspect = float(m_Width) / float(m_Height);
             mats.proj = glm::perspectiveRH_ZO(glm::radians(kDefaultFOV), aspect,
                                               kDefaultNearPlane, kDefaultFarPlane);
+            mats.view = float4x4(1.0f);
         }
         mats.invProj = glm::inverse(mats.proj);
         void* mapped = m_UniformBuffer->Map();

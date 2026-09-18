@@ -36,6 +36,11 @@ struct VSOutput { float4 p:SV_Position; [[vk::location(0)]] float2 uv; };
 [[vk::binding(3,0)]] cbuffer SSRMatrices {
     float4x4 u_InvProj;    // clip → view：重建 view-space 位置
     float4x4 u_Proj;       // view → clip：把射线采样点投影到屏幕
+    // world → view（任务 32）：GBuffer 法线是**世界空间**（见 GBuffer.frag 的 worldNormal），
+    // 而本 pass 的 V/R 与深度比较都在 **view 空间**。此前 `reflect(-V, N)` 混用了两个空间 ——
+    // 反射方向只在"相机与世界轴对齐"时才正确。平面镜解析对照一上来就暴露了它（预测像素附近
+    // 有效率 0.1%，反射去了别处），而"有效率 / 两条 march 同量级"那类判据看不见方向错。
+    float4x4 u_View;
 };
 
 // 与 GI_SSR::Render 的 SetPushConstants 结构严格对应（仅标量，32B）
@@ -47,23 +52,46 @@ struct VSOutput { float4 p:SV_Position; [[vk::location(0)]] float2 uv; };
 
 static const int kHiZMaxLevel = 5;   // 最多 5 级（32 像素大步）
 
+// ============================================================
+// UV ↔ NDC 的 y 方向约定（任务 32 / §9.2-W 的解析对照项）
+//
+// 【本引擎的约定】GBuffer 用**负高度视口**渲染（`SetViewport({0,h,w,-h,0,1})`），于是 NDC 的
+// +y 对应图像**上边**、UV 的 v 向下增长 ⇒ `ndc.y = 1 - 2v`（要翻转）。本 pass 同时做两件
+// 与 y 方向有关的事：从深度**重建** view 空间位置、把采样点**投影**回屏幕。两处必须用同一个
+// 约定 —— 此前两处都漏了这次翻转，于是"重建—投影"自洽、看起来能跑（有效率 48%~66%），
+// 但重建出来的位置在 y 上是**镜像**的：实测镜面像素上 shader 重建出的 viewPos.y = +70.3，
+// 而真实值是 −70.7（x、z 都对）。位置镜像 + 法线不镜像 ⇒ **反射方向错**，反射去了别处。
+// 这一点"有效率/两条 march 是否同量级"那类判据看不见，平面镜的解析对照一上来就暴露了它：
+// 有镜像时预测像素附近有效率 0%，改正后射线 2 步就命中目标立方体。
+// ============================================================
+float2 UvToNdc(float2 uv) { return float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0); }
+float2 NdcToUv(float2 ndc) { return float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5); }
+
 float4 fragmentMain(VSOutput input):SV_Target0{
     float2 uv=input.uv;
     float depth=u_Depth.Sample(u_PointSampler,uv).r;
     if(depth>=1.0)return float4(0,0,0,-1);   // 天空像素：无反射数据 → 无效（负数 alpha）
-    float3 N=normalize(u_Normal.Sample(u_PointSampler,uv).rgb*2.0-1.0);
+    float3 N=normalize(u_Normal.Sample(u_PointSampler,uv).rgb*2.0-1.0);   // 世界空间法线
     float3 albedo=u_Albedo.Sample(u_PointSampler,uv).rgb;
 
     // 重建 view-space 位置和视线方向（clip → view：用**逆**投影）
-    float4 cp=float4(uv*2.0-1.0,depth,1.0);
+    float4 cp=float4(UvToNdc(uv),depth,1.0);
     float4 vp4=mul(u_InvProj,cp);
     float3 viewPos=vp4.xyz/vp4.w;
     float3 V=normalize(-viewPos);
-    float3 R=reflect(-V,N);
+    // 【空间必须一致】N 是世界空间，V/R 是 view 空间 ⇒ 先把法线转到 view 空间再反射。
+    // 少了这一步，反射方向只在相机与世界轴对齐时才对（§9.2-W 的解析对照项）。
+    float3 Nview=normalize(mul((float3x3)u_View,N));
+    float3 R=reflect(-V,Nview);
 
     float maxSteps=u_Params.x, stepSz=u_Params.y, maxDist=u_Params.z, thickness=u_Params.w;
 
-    float3 rayStart=viewPos+R*0.1;   // 起点偏移避免自交
+    // 【起点偏移必须大于命中容差】（任务 32 实测）此前是固定的 `0.1`（世界单位，给"1 单位≈1 米"
+    // 的世界写的）。而命中容差 `thickness` 现在按场景尺度取（Sponza 下约 11.6 单位）⇒ 第一个
+    // 采样点就落在**自身表面**的容差带里，于是每条射线都"立刻命中自己"：实测地面镜上 62% 的
+    // 像素"有效"，输出的却是镜面自己的 albedo（白），一个物体颜色都没有。
+    // 现在偏移按容差取值：偏移 > 容差 ⇒ 射线从自身容差带外出发。
+    float3 rayStart=viewPos+R*max(0.1, thickness*2.0);
     float2 hitUV=uv;
     float  hit=0.0;
 
@@ -75,14 +103,14 @@ float4 fragmentMain(VSOutput input):SV_Target0{
             // 起点在相机后方（不该出现：rayStart 由深度重建）→ 当作 miss
             return float4(0,0,0,-1);
         }
-        float2 s0=(c0.xy/c0.w)*0.5+0.5;
+        float2 s0=NdcToUv(c0.xy/c0.w);
         // 终点可能落到相机后方（w<=0，投影无效）→ 反复缩短，最多四次
         float2 s1=s0;
         float  worldLen=0.0;
         for(int k=0;k<4;++k){
             float tEnd=exp2(-float(k));
             float4 c1=mul(u_Proj,float4(rayStart+R*(maxDist*tEnd),1.0));
-            if(c1.w>0.0001){ s1=(c1.xy/c1.w)*0.5+0.5; worldLen=maxDist*tEnd; break; }
+            if(c1.w>0.0001){ s1=NdcToUv(c1.xy/c1.w); worldLen=maxDist*tEnd; break; }
         }
         if(worldLen<=0.0){
             return float4(0,0,0,-1);   // 整条射线都在相机后方：无屏幕空间信息
@@ -123,12 +151,19 @@ float4 fragmentMain(VSOutput input):SV_Target0{
                     // 此前这里拿 NDC 深度差去比 `thickness*0.1`（世界单位），量纲不对，
                     // 即使方向修对了也会因为阈值没有物理含义而判不出命中。
                     float geomDepth=u_Depth.Sample(u_PointSampler,rpUV).r;
-                    float4 gVP=mul(u_InvProj,float4(rpUV*2.0-1.0,geomDepth,1.0));
+                    float4 gVP=mul(u_InvProj,float4(UvToNdc(rpUV),geomDepth,1.0));
                     float  gZ=gVP.z/gVP.w;
-                    if(abs(rayPos.z-gZ)<thickness){ hit=1.0; hitUV=rpUV; }
-                    break;
+                    if(abs(rayPos.z-gZ)<thickness){ hit=1.0; hitUV=rpUV; break; }
+                    // 【level 0 未过厚度判据时不能直接 break】（任务 32 实测）射线在该像素上
+                    // "位于几何之后"并不等于它已经越过目标：粗层的 min 深度可能属于射线路径
+                    // **旁边**的物体（地面镜上实测：目标立方体的反射被这一 break 整片丢掉，
+                    // 预测像素附近有效率仅 0.1%）。改用与线性 march **同一条**早退判据：
+                    // 只有"沿行进方向已经穿过该处几何"才可能再也命中不了，否则原地（保持
+                    // level 0）继续走一个像素。
+                    if((rayPos.z-gZ)*R.z>0.0) break;
+                }else{
+                    level--;   // 被遮挡 → 回退到更细的层（不前进）
                 }
-                level--;   // 被遮挡 → 回退到更细的层（不前进）
             }
         }
     } else {
@@ -141,12 +176,12 @@ float4 fragmentMain(VSOutput input):SV_Target0{
 
             float4 rpClip=mul(u_Proj,float4(rayPos,1.0));
             float3 rpNDC=rpClip.xyz/rpClip.w;
-            float2 rpUV=rpNDC.xy*0.5+0.5;
+            float2 rpUV=NdcToUv(rpNDC.xy);
             if(rpUV.x<0||rpUV.x>1||rpUV.y<0||rpUV.y>1)break;
 
             float rpDepth=u_Depth.Sample(u_PointSampler,rpUV).r;
             // 采样点深度由 clip → view：用**逆**投影（此处此前误用同一矩阵做两个方向）
-            float4 rpVP=mul(u_InvProj,float4(rpUV*2.0-1.0,rpDepth,1.0));
+            float4 rpVP=mul(u_InvProj,float4(UvToNdc(rpUV),rpDepth,1.0));
             float rpZ=rpVP.z/rpVP.w;
 
             // 命中：射线点与该处几何的 view 深度差在厚度内（世界空间厚度，量纲一致）

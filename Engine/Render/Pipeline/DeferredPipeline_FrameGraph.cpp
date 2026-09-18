@@ -298,6 +298,22 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     if (m_DDGI.autoFitGrid && m_SceneBounds.IsValid()) {
         m_DDGI.FitGridToBounds(m_SceneBounds.min, m_SceneBounds.max);
     }
+    // SSR 的 march 参数按同一份场景尺度推导（任务 32）：默认值（maxDistance=50、thickness=0.1）
+    // 是给"1 单位 ≈ 1 米"的世界写的，在 3720 单位宽的 Sponza 上射线走 50 单位就停、命中容差
+    // 只有 0.1 单位（600 单位距离处一个像素足迹 ≈0.4 单位）⇒ 几乎不可能命中。与任务 30 的
+    // RSM 光锥同一类缺陷：场景尺度假设被写成了常数。
+    if (m_SSR.autoScaleMarch && m_SceneBounds.IsValid()) {
+        const float diag = glm::length(m_SceneBounds.Size());
+        if (diag > 1.0f) {
+            m_SSR.maxDistance = diag;                       // 覆盖整个场景对角线
+            m_SSR.thickness   = diag * 0.0025f;             // ≈1080p / fov60 下 2~3 个像素足迹
+            // 线性回退路径的步长必须**不超过命中容差**，否则射线会直接穿过薄几何
+            // （步长 72 单位、容差 11.6 单位时实测：目标立方的反射整片丢失）。
+            // 代价是线性回退的射程 = maxSteps × stepSize（Sponza 下约 740 单位）——
+            // 默认路径是 Hi-Z 层次 march，它不受这个限制。
+            m_SSR.stepSize    = m_SSR.thickness;
+        }
+    }
 
     //   - IBL 辐照度：RSM 不可用时的回退（世界空间、视角无关）
     //   - RSM：有方向阴影时优先（单次反弹 VPL，视角无关）
