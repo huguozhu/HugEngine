@@ -22,6 +22,51 @@
 
 namespace he::rhi {
 
+// 纹理创建日志用的可读名称。
+// 此前只区分 RGBA8 与 "other"，定位「哪张纹理布局不对」这类问题时完全看不出格式，
+// 只能靠尺寸和创建顺序猜；补齐常见格式（尤其是深度/浮点）后日志本身即可区分。
+static const char* FormatDebugName(Format f) {
+    switch (f) {
+        case Format::Unknown:       return "Unknown";
+        case Format::R8_UNORM:      return "R8";
+        case Format::RG8_UNORM:     return "RG8";
+        case Format::RGBA8_UNORM:   return "RGBA8";
+        case Format::RGBA8_SRGB:    return "RGBA8_SRGB";
+        case Format::BGRA8_UNORM:   return "BGRA8";
+        case Format::BGRA8_SRGB:    return "BGRA8_SRGB";
+        case Format::R16_FLOAT:     return "R16F";
+        case Format::RG16_FLOAT:    return "RG16F";
+        case Format::RGBA16_FLOAT:  return "RGBA16F";
+        case Format::R32_FLOAT:     return "R32F";
+        case Format::RG32_FLOAT:    return "RG32F";
+        case Format::RGB32_FLOAT:   return "RGB32F";
+        case Format::RGBA32_FLOAT:  return "RGBA32F";
+        case Format::R32_UINT:      return "R32U";
+        case Format::R11G11B10_FLOAT: return "R11G11B10F";
+        case Format::D16_UNORM:     return "D16";
+        case Format::D32_FLOAT:     return "D32";
+        case Format::D24_UNORM_S8_UINT: return "D24S8";
+        case Format::D32_FLOAT_S8_UINT: return "D32S8";
+        case Format::BC1_UNORM:     return "BC1";
+        case Format::BC3_UNORM:     return "BC3";
+        case Format::BC4_UNORM:     return "BC4";
+        case Format::BC5_UNORM:     return "BC5";
+        case Format::BC7_UNORM:     return "BC7";
+        default:                    return "other";
+    }
+}
+
+// 纹理创建日志用的用途摘要（RT/UAV/SRV/DS 组合）
+static const char* TextureUsageDebugName(TextureUsage u) {
+    const u32 v = u32(u);
+    if (v & u32(TextureUsage::DepthStencil))
+        return (v & u32(TextureUsage::ShaderResource)) ? "depth+srv" : "depth";
+    if (v & u32(TextureUsage::RenderTarget))
+        return (v & u32(TextureUsage::ShaderResource)) ? "rt+srv" : "rt";
+    if (v & u32(TextureUsage::UnorderedAccess)) return "uav";
+    return "srv";
+}
+
 // BufferUsage 位掩码 → VkBufferUsageFlags 映射
 static VkBufferUsageFlags ToVkBufferUsage(BufferUsage usage) {
     VkBufferUsageFlags flags = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -376,8 +421,15 @@ VulkanTexture::VulkanTexture(VmaAllocator allocator, VkCommandPool cmdPool, VkQu
         MarkViewWritten(reinterpret_cast<void*>(m_ImageView));
     }
 
-    HE_CORE_INFO("Vulkan texture created: {}x{} [{}]{} image={}", m_Width, m_Height,
-                 m_Format == Format::RGBA8_UNORM ? "RGBA8" : "other",
+    // 带初始数据的纹理：UploadInitialData 结束时把图留在 SHADER_READ_ONLY（见该函数），
+    // 这里补记真实布局。此前不记账的后果：追踪器以为"从未转换过"（真实布局 UNDEFINED），
+    // RenderGraph 首次以"读"使用时补发的 UNDEFINED→READ_ONLY 转换会**丢弃**已上传的内容。
+    if (desc.initialData) {
+        TrackTextureLayout(reinterpret_cast<void*>(m_ImageView), ResourceState::ShaderResource);
+    }
+
+    HE_CORE_INFO("Vulkan texture created: {}x{} [{}|{}]{} image={}", m_Width, m_Height,
+                 FormatDebugName(m_Format), TextureUsageDebugName(desc.usage),
                  isCubemap ? " cubemap" : "",
                  reinterpret_cast<const void*>(m_Image));
 }
