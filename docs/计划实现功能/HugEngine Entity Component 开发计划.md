@@ -5,6 +5,7 @@
 >   - 2026-09-04：对齐代码基线（`404de09`），新增 **Phase S0（已有组件补齐 AI 一等公民）**
 >   - 2026-09-06：S0~P3 全部落地（提交 `8813211` → `56696ea` 共 9 个），doctest 85 用例 / 509 断言通过；
 >     剩余仅 Phase C 大工程（依赖路线图 P6/P3）
+>   - 2026-09-18：任务 22（动画重定向）落地（提交 `98b94d4` + 演示 `6c3f33e`），见 §十五
 >   - 2026-09-18：任务 21（骨骼剪辑混合）落地（提交 `af86387` + 演示 `2b07df7`），见 §十四
 >   - 2026-09-18：**任务统一编号（从 1 开始）** —— 原先用阶段前缀编号（S0.1 / A7 / B3 / C2），
 >     跨阶段无法一眼看出"总共有多少任务、下一个做哪个"。现在全部任务从 1 连续编号（**1~20 已落地，
@@ -41,9 +42,9 @@
 | AbilityComponent | UAbilitySystemComponent | ✅（P3 B4，`AbilitySystem` + Action op CastAbility） | ✅ 2 属性 | ✅ | — |
 | SplineComponent | USplineComponent | ✅（P3 B2，Hermite+自动切线，弧长求值/闭环回绕） | ✅ 2 属性 | ✅ | — |
 | InstancedMeshComponent | UInstancedStaticMeshComponent | ✅（P3 B1，单次 DrawIndexed 万级实例） | ✅ 2 属性 | ✅ | — |
-| SkeletalMesh / Physics / NavMesh | UE5 对应组件 | ✅ 均已落地（SkeletalMesh `4d94460` / Physics Jolt C2 / NavMesh `97aaa00`）；SkeletalMesh 于 2026-09-18 追加**剪辑混合**（任务 21，`af86387`，见 §十四） | — | — | — |
+| SkeletalMesh / Physics / NavMesh | UE5 对应组件 | ✅ 均已落地（SkeletalMesh `4d94460` / Physics Jolt C2 / NavMesh `97aaa00`）；SkeletalMesh 于 2026-09-18 追加**剪辑混合**（任务 21，`af86387`，§十四）与**动画重定向**（任务 22，`98b94d4`，§十五） | — | — | — |
 
-**结论**：计划内组件全部落地。LLM 词表 5 → 10 组件（新增 SpotLight/RectLight/Camera/Health/Decal）；所有新组件按「一个组件 = 四件事」补齐类定义/反射/AI 注解/系统接入。Phase C 仅剩后续扩展（SkeletalMesh 剪辑混合/动画重定向）；Audio（C3）已从本计划移除。既有组件 Animation/Particle/Memory/Goal 的反射与 AI 注解 ✅ 已补齐。
+**结论**：计划内组件全部落地。LLM 词表 5 → 10 组件（新增 SpotLight/RectLight/Camera/Health/Decal）；所有新组件按「一个组件 = 四件事」补齐类定义/反射/AI 注解/系统接入。Phase C 的后续扩展（SkeletalMesh 剪辑混合/动画重定向）已于 2026-09-18 补齐（任务 21/22）；Audio（C3）已从本计划移除。既有组件 Animation/Particle/Memory/Goal 的反射与 AI 注解 ✅ 已补齐。
 
 ## 二、总体原则
 
@@ -61,7 +62,7 @@
 | **A（低成本）** | Camera(系统接入) / Decal / Billboard / TextRender / SpringArm / ProjectileMovement / Health | 2~3 天/个 | ✅ 已完成（2026-09-06）：A3~A8 落地（**现编号 7~12**）；A1/A2 并入 S0（**现编号 5~6**） |
 | **B（中成本）** | InstancedMesh / Spline / CharacterMovement / Ability(简化 GAS) / Collision | 1~2 周/个 | ✅ 已完成（2026-09-06）：B1~B5 落地（**现编号 13~17**）；前置重构经评估非必要（见 §六注记） |
 | **C（大工程）** | SkeletalMesh / Physics / NavMesh | 数周~数月 | ✅ 均已落地（**现编号 18~20**；SkeletalMesh `4d94460` / Physics Jolt C2 / NavMesh `97aaa00`）；Audio（原 C3）已移除 |
-| **后续（待办）** | SkeletalMesh 扩展 / MVP 技术债 / 架构触发项 | 见总表 | ⏳ **现编号 21~28**（21 已于 2026-09-18 完成；22~28 待办），见下表与 §十二 |
+| **后续（待办）** | SkeletalMesh 扩展 / MVP 技术债 / 架构触发项 | 见总表 | ⏳ **现编号 21~28**（21、22 已于 2026-09-18 完成；23~28 待办），见下表与 §十二 |
 
 ### 任务总表（从 1 重新计数）
 
@@ -96,12 +97,12 @@
 | **20** | C4 | NavMesh 寻路（NavMesh + A* + NavAgent） | ✅ 2026-09-07 | §七 |
 
 **B. 待办（21~28）** —— 来源：§十一 已知 MVP 限制/技术债 + §十二 "仍待办" + §十二 架构触发项
-（**21 已于 2026-09-18 完成**，保留在表里以便追溯）
+（**21、22 已于 2026-09-18 完成**，保留在表里以便追溯）
 
 | 新编号 | 任务 | 类型 | 依赖 / 触发条件 | 详见 |
 |:---:|---|---|---|---|
 | **21** | ~~SkeletalMesh **剪辑混合**（多动画片段混合 / Blend Space）~~ —— ✅ **已完成**（2026-09-18，`af86387` + 演示 `2b07df7`） | 功能扩展 | 无（独立） | §十四 |
-| **22** | SkeletalMesh **动画重定向**（不同骨架共用动画） | 功能扩展 | 无（独立） | §十二 |
+| **22** | ~~SkeletalMesh **动画重定向**（不同骨架共用动画）~~ —— ✅ **已完成**（2026-09-18，`98b94d4` + 演示 `6c3f33e`） | 功能扩展 | 无（独立） | §十五 |
 | **23** | **bindless 堆环形化**（TextRender / InstancedMesh 高频更新不再靠"旧资源保活"） | 技术债 | 无（独立，涉 RHI 堆管理） | §十一 ①②/§十二 |
 | **24** | **Decal GBuffer 投影 Pass**（替代半透明投射片 MVP） | 技术债 → 功能 | 无（独立，需 GBuffer 可写 Pass） | §十一 ②/§十二 |
 | **25** | **InstancedMesh 接 GPU-Culling + 逐实例剔除**（现在仅 Forward 非 GPU-Culling 路径） | 技术债 | 无（独立） | §十一 ②/§十二 |
@@ -109,7 +110,7 @@
 | **27** | **渲染类型注册表化**（替换"派生渲染组件显式列举"） | 架构 | **触发**：出现下一个渲染组件（InstancedMesh 是第 7 个） | §十二 |
 | **28** | **CollectLights 数据驱动抽取**（现在 4 份复制） | 架构 | **触发**：出现下一个光源类型 | §十二 |
 
-> **怎么用这张表**：`22~26` 无外部依赖、可随时开工（建议顺序：26 → 25 → 24 → 23 → 22，
+> **怎么用这张表**：`23~26` 无外部依赖、可随时开工（建议顺序：26 → 25 → 24 → 23，
 > 由"改动面小 → 大"排列）；`27/28` 是**触发式**任务，条件未到之前不动（提前做属于"没有消费方的
 > 泛化"，与 GI 那边的取舍一致）。每完成一项：把状态改成 ✅ 并补提交号，**不要改动已有编号**。
 
@@ -346,7 +347,7 @@ P2（表现）  : 7 Decal(原A3) / 8 Billboard(原A4) / 9 TextRender(原A5) —�
 P3（中成本）: 17 Collision(原B5) → 15 CharacterMovement(原B3) → 16 Ability(原B4)
               → 14 Spline(原B2) → 13 InstancedMesh(原B1) —— ✅ 已完成
 P4（大工程）: 18 SkeletalMesh(原C1) / 19 Physics(原C2) / 20 NavMesh(原C4) —— ✅ 已完成
-待办        : 21 ✅ 已完成；22~26（无依赖，建议 26 → 25 → 24 → 23 → 22）
+待办        : 21 ✅ / 22 ✅ 已完成；23~26（无依赖，建议 26 → 25 → 24 → 23）
               27/28（触发式：出现下一个渲染组件 / 下一个光源类型时再做）
 ```
 
@@ -384,7 +385,7 @@ P4（大工程）: 18 SkeletalMesh(原C1) / 19 Physics(原C2) / 20 NavMesh(原C4
 **仍待办（已编号，见 §三 任务总表 21~28）**：
 - ✅ 任务 18~20 已全部落地（SkeletalMesh / Physics C2 / NavMesh C4）；Audio（原 C3）已从本计划移除
 - ✅ **21** SkeletalMesh 剪辑混合（多片段混合 / Blend Space）—— 已完成（2026-09-18，`af86387` + 演示 `2b07df7`，见 §十四）
-- **22** SkeletalMesh 动画重定向（不同骨架共用动画）
+- ✅ **22** SkeletalMesh 动画重定向（不同骨架共用动画）—— 已完成（2026-09-18，`98b94d4` + 演示 `6c3f33e`，见 §十五）
 - **23** bindless 堆环形化（TextRender/InstancedMesh 高频更新）
 - **24** Decal GBuffer 投影 Pass（替代投射片 MVP）
 - **25** InstancedMesh 接 GPU-Culling + 逐实例剔除
@@ -475,4 +476,89 @@ P4（大工程）: 18 SkeletalMesh(原C1) / 19 Physics(原C2) / 20 NavMesh(原C4
   上升。真实项目里会在烘焙/压缩后的轨道上做，这里保持与既有单剪辑路径同一套采样器。
 - 没有 Blend Space **资产**（1D/2D 混合空间定义、阈值表）——调用方自己算权重（示例里是
   滑块或速度），引擎只提供"多层 + 权重"这一原语。
+
+---
+
+## 十五、任务 22 落地：动画重定向（不同骨架共用同一套剪辑）
+
+承接 §十二 待办中的"SkeletalMesh 后续扩展：动画重定向"，本次完成。
+
+**问题**：上一版（含任务 21）里"剪辑"和"骨架"是绑死的 —— 剪辑的下标/关键帧通道直接按
+**自身关节下标**采样。于是想给"另一副骨架"（不同绑定姿势、不同骨骼长度、不同关节朝向）
+用同一套 Walk/Run，只能硬搬源骨架的 TRS，结果是把目标骨架拉成源骨架的形状（关节翻转、
+四肢错位）。这在实际项目里等价于"每个模型都要重做一套动画"。
+
+**核心思路：只借"相对绑定姿势的偏移"**
+
+```
+目标关节旋转 = 目标绑定旋转 × (源绑定旋转⁻¹ × 源动画旋转)
+目标关节平移 = 目标绑定平移 + (源动画平移 − 源绑定平移) × k
+目标关节缩放 = 目标绑定缩放 × (源动画缩放 / 源绑定缩放)
+```
+
+- 旋转那一行是重定向的全部要点：`(源绑定⁻¹ × 源动画)` 是**源相对它自己的偏移量**，
+  叠加到目标自己的绑定旋转上 ⇒ 目标骨架保留自己的朝向/体型，动画的"动作"照搬。
+  源关节没有旋转通道时偏移是单位四元数 ⇒ 结果就是目标绑定姿势（不会把源绑定姿势搬过来）。
+- 平移默认 **不重定向**：平移编码的是"骨骼长度/体型"，直接搬会把不同体型的骨架拉变形。
+  打开后按各关节**绑定长度比** `k = |目标绑定平移| / |源绑定平移|` 自动缩放（`autoProportion`），
+  适合"同比例放大/缩小的骨架"；还有 `translationScale` 做全局微调。
+- 缩放同理（默认关，多数骨架没有缩放通道），逐分量取倍率，源绑定缩放为 0 时退化为 1（不除零）。
+
+**关节对应关系：按名字匹配**
+
+`BuildRetargetProfile(target, source)` 按 `SkeletonJoint::name` 逐一对应（glTF/UE 的关节名
+是稳定的，索引在不同骨架之间**没有**任何对应关系）。名字对不上或无名关节 → `targetToSource = -1`
+⇒ 该关节保持目标绑定姿势。也支持调用方传自制映射（只映射一部分、故意让某些关节不动）。
+
+**新增能力**
+
+| 位置 | 内容 |
+|---|---|
+| `Scene/SkeletonAsset.h` | `RetargetProfile`：`targetToSource` 映射表 + 逐分量开关（`retargetTranslation` / `retargetScale` / `autoProportion` / `translationScale`）+ `MappedJointCount()` |
+| `Scene/SkeletalMeshSystem.h/.cpp` | `BuildRetargetProfile` / `SampleJointTRSRetargeted` / `ComputeSkinMatricesRetargeted`，以及**重定向 × 多层混合**的 `SampleJointTRSBlendedRetargeted` / `ComputeSkinMatricesBlendedRetargeted`；另补 `RebuildInverseBindMatrices`（改过绑定姿势后重算逆绑定矩阵） |
+| `Scene/SkeletalMeshComponent.h/.cpp` | `SetAnimationSource(source, profile=nullptr)` / `ClearAnimationSource()` / `AnimationSource()`；`skeleton`（网格 + 绑定姿势 + 逆绑定）与 `sourceSkeleton`（动画剪辑）分离 |
+| 共用实现 | `ComposeSkinMatrices` / `BlendLayerSamples` 两个模板：单剪辑 / 混合 / 重定向三条路径共用同一套层级合成与混合规则，避免"权重=1 的混合 ≠ 单剪辑"这类分叉 |
+
+**语义要点（易踩的坑）**
+
+1. **层级合成与 `inverseBind` 始终用目标骨架**：蒙皮矩阵必须落在目标骨架上
+   （`world_target × invBind_target`），重定向只影响"每帧的本地 TRS 从哪里来"。
+2. **设置动画来源后，剪辑下标一律指源骨架的剪辑表**：`PlayClip` / `SetBlendLayer` /
+   `CrossFadeTo` 的越界校验、`Update` 的时长回绕都走 `AnimationSource()`。
+   同时支持"目标骨架自己一个剪辑都没有"（示例里的高个骨架就是这样）。
+3. **重定向与多层混合是可组合的**：每层先做重定向采样，再按任务 21 的规则（权重归一化、
+   四元数半球对齐、全不参与⇒目标绑定姿势）混合；基准值取**目标关节的静态 TRS**。
+4. **程序化改绑定姿势后必须 `RebuildInverseBindMatrices`**：否则 `world × invBind ≠ 单位`，
+   连绑定姿势都会变形/炸开。示例里把 Fox 骨架所有关节绑定平移 ×1.5 造出"高个骨架"，
+   就是先重算逆绑定矩阵再挂动画。
+
+**判据**
+
+- **doctest**：`Tests/TestSkeletalMesh.cpp` 新增 6 例（全量 **182 例 / 5350 断言**全过）：
+  · 名字匹配（命中 / 对不上 / 无名关节 / 目标关节比源多）；
+  · 源处于**自己的绑定姿势**时，目标保持**自己的绑定姿势**（偏移为单位四元数）；
+  · t=1 时目标旋转 == `目标绑定 × (源绑定⁻¹ × 源动画)`（绑定姿势差值，而不是源姿态直搬）；
+  · 未映射关节 / 越界关节 → 目标绑定姿势 / 单位值，不崩溃；
+  · **同骨架时重定向结果与单剪辑采样逐项相等**（全开关打开）——保证没引入行为分叉；
+  · 平移/缩放开关：`k = |目标绑定|/|源绑定|`、`autoProportion=false`、`translationScale`、
+    源缩放为 0 不退化成 NaN；
+  · 重定向 × 混合：权重 1:3 得到加权平均 5，全零权重退回**目标**绑定姿势；
+  · 改绑定姿势 → 重算逆绑定矩阵后绑定姿势蒙皮矩阵回到单位阵（不重算则不是）；
+  · 组件：`SetAnimationSource` 自动建映射（2/2）、目标骨架无剪辑也能 `PlayClip(0)`、
+    重定向结果与直接调用一致且**不是**源姿态、越界剪辑与 `ClearAnimationSource` 安全降级。
+- **示例冒烟**（02.Cube，Release，跑 20 秒）：日志出现
+  `[重定向] 动画来源: Skin_0 → Skin_0_Tall（映射 24/24 关节，仅旋转）`、
+  `[任务 22] 动画重定向：… 播放源骨架的 Walk 剪辑`，1 秒后出现
+  `[任务 22] 重定向生效：同一套 Walk 剪辑下，源尾尖世界位置 (…)、目标 (…)`；
+  校验层 error/VUID 计数 **0**、无崩溃。面板新增"动画重定向"一节（源→目标与映射数、
+  平移重定向开关 + 自动比例开关、当前时间）。
+
+**已知边界**
+
+- 只做**逐关节 TRS 重定向**：没有 IK 修正（脚底滑动/穿地不会自动纠正）、没有
+  "手/脚对齐"这类姿态偏移、没有骨骼长度归一化以外的比例映射（UE 的 Retarget Pose 资产）。
+- 映射靠**关节名字**：同一套模型换命名规则（"Bip01_L_Hand" vs "mixamorig:LeftHand"）
+  需要调用方自己给映射表，引擎不做名字模糊匹配/别名表。
+- 重定向后仍走 CPU 逐关节采样（与任务 21 同一套采样器），没有烘焙成目标骨架自己的剪辑
+  （真实项目里会在导入期烘焙离线剪辑以避免每帧重定向成本）。
 
