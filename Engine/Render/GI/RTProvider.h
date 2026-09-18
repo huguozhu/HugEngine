@@ -293,6 +293,7 @@ inline void RTEffectProvider::Render(rhi::IRHICommandList* cmd, const GIProvider
     rc.ddgiProbeBuffer = m_DDGIProbe;   // GI 的 miss 回退：DDGI 探针（仅当 DDGI 不是层栈源时使用）
     rc.ddgiGridUniform = m_DDGIGrid;
     rc.ddgiIsStackSource = m_DDGIInStack;   // 为真 ⇒ rgen 的 miss 不回退 DDGI（避免双重计数）
+    rc.furnace           = ctx.furnace;     // 白炉：命中/未命中都返回理想值（§9.2-AC / 任务 33）
 
     rhi::IRHIAccelerationStructure* tlas = ctx.tlas ? ctx.tlas : m_AS->GetTLAS();
     switch (m_Effect) {

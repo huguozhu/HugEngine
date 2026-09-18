@@ -163,7 +163,9 @@ void RTReflectionPass::Execute(rhi::IRHICommandList* cmd,
     pc.maxDistance  = std::max(cvRTReflectionMaxDist.Get(), 0.01f);  // 反射最大追踪距离（CVar 热更新）
     pc.sampleCount  = std::clamp(cvRTReflectionSPP.Get(), 1, 16);    // 每像素采样数
     pc.maxRoughness = std::max(cvRTReflectionMaxRoughness.Get(), 0.01f);  // 反射最大粗糙度（超过用 IBL）
-    pc.flags        = m_HalfRes ? 1u : 0u;  // bit0=半分辨率
+    pc.flags        = (m_HalfRes ? 1u : 0u)   // bit0=半分辨率
+                    // bit2=白炉（任务 33）：命中点按全白环境返回理想辐射度（与 RTGI 同一套约定）
+                    | (ctx.furnace ? 4u : 0u);
     pc.lightCount   = ctx.lightCount;
     // ── 先绑 RT 管线（设置正确 push constant 布局），再推常量，最后发射光线 ──
     //（若先推常量，会应用到上一 Pass 的布局——降噪等图形 Pass 范围不匹配 → 写入失败）

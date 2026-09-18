@@ -31,7 +31,7 @@ void main(inout ReflectionPayload payload, in BuiltInTriangleIntersectionAttribu
     LoadHitMaterial(instanceID, albedo, metallic, roughness, emissive);
 
     // ── 命中点出射辐射度（反射 = 命中表面被照亮的颜色）──
-    float3 radiance = EvaluateHitRadiance(P, N, albedo, g_PC.lightCount);
+    float3 radiance = EvaluateHitRadiance(P, N, albedo, g_PC.lightCount, (g_PC.flags & 4u) != 0u);
 
     payload.colorT = float4(radiance, RayTCurrent());
 }

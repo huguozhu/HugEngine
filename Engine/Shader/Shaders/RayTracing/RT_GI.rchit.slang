@@ -29,7 +29,7 @@ void main(inout GIPayload payload, in BuiltInTriangleIntersectionAttributes attr
     LoadHitMaterial(instanceID, albedo, metallic, roughness, emissive);
 
     // ── 命中点出射辐射度（作为间接漫反射来源）──
-    float3 radiance = EvaluateHitRadiance(P, N, albedo, g_PC.lightCount);
+    float3 radiance = EvaluateHitRadiance(P, N, albedo, g_PC.lightCount, (g_PC.flags & 4u) != 0u);
 
     payload.radianceT = float4(radiance, RayTCurrent());
 }

@@ -96,14 +96,12 @@ void main() {
     } else {
         // 命中：ClosestHit 给出的命中点出射辐射度（与 RTGI 同一套评估）。
         //
-        // 【为什么这里要除以 π】RT_HitCommon.slang 的 `EvaluateHitRadiance` 返回的是
-        // `albedo × (环境 + Σ 光源强度·N·L)`，即 **albedo × 辐照度 E**；而漫反射出射
-        // 辐射度是 `L_o = albedo × E/π`。探针的 SH 累积必须与"未命中"那条路径同量纲
-        // （那里给的是 L），否则**同一个探针里命中样本比未命中样本亮 π 倍**，
-        // SH 就是两个尺度的混合 —— 这正是本次改造最容易静默搞错的地方。
-        // （RTGI 侧沿用同一函数且不除 π，属既有约定问题，§9.2-AA 的相邻项；本任务只保证
-        //   探针内部两条路径一致。）
-        radiance = payload.radianceT.rgb * (1.0 / 3.14159265);
+        // 【任务 33 起这里不再除 π】`EvaluateHitRadiance` 现在自己返回**辐射度**
+        // （`albedo/π · 辐照度`），与"未命中"那条路径（IBL 辐照度图存的就是 E/π = L）
+        // 天然同量纲。此前该函数返回 `albedo × 辐照度`，本 pass 只能自己除 π 来对齐，
+        // 而 RTGI / RT 反射两处没有除 —— 那是 §9.2-AC 的 π 残留；现在换算只发生一次、
+        // 在函数内部完成，三处调用点一律不再做任何量纲换算。
+        radiance = payload.radianceT.rgb;
     }
     g_RadianceOut[rayIndex] = float4(radiance, 1.0);
 }

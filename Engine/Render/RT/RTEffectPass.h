@@ -30,6 +30,10 @@ struct RTExecuteContext {
     // DDGI 是否自己也是漫反射层栈里的一个源。为真时 GI 的 miss 分支**不得**回退 DDGI：
     // 否则 DDGI 信息会以两个槽位的总权重进入归一化合成，加权平均失去无偏性（§9.2-I）。
     bool              ddgiIsStackSource = false;
+    /// 白炉模式（§9.2-AC / 任务 33）：RT 的命中与未命中两条路径都按「全白环境、辐射度 1」
+    /// 返回理想值，于是白炉读数恒等于 1 —— 一条能看见绝对量级的判据。由 Provider 从
+    /// `GIConfig::furnaceMode` 传入（与 SSGIProvider 的做法一致）。
+    bool              furnace = false;
 };
 
 // ============================================================

@@ -174,7 +174,10 @@ void RTGIPass::Execute(rhi::IRHICommandList* cmd,
     pc.maxDistance  = std::max(cvRTGIMaxDist.Get(), 0.01f);  // GI 追踪范围（m，CVar 热更新）
     pc.sampleCount  = std::clamp(cvRTGISPP.Get(), 1, 16);    // SPP（时域累积提升质量）
     pc.flags        = (m_QuarterRes ? 1u : 0u)
-                    | (ctx.ddgiIsStackSource ? 2u : 0u);  // bit0=四分之一分辨率, bit1=DDGI 是层栈源
+                    | (ctx.ddgiIsStackSource ? 2u : 0u)  // bit0=四分之一分辨率, bit1=DDGI 是层栈源
+                    // bit2=白炉（任务 33）：命中与未命中两条路径都返回"全白环境"的理想值，
+                    // 于是白炉读数恒等于 1，成为一条能看见绝对量级的判据（§9.2-AC）。
+                    | (ctx.furnace ? 4u : 0u);
     pc.lightCount   = ctx.lightCount;
     // ── 先绑 RT 管线（设置正确 push constant 布局），再推常量，最后发射光线 ──
     //（若先推常量，会应用到上一 Pass 的布局——降噪等图形 Pass 范围不匹配 → 写入失败）

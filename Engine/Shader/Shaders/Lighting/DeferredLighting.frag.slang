@@ -171,7 +171,12 @@ float3 SampleDiffuseSource(uint id, float3 worldPos, float3 N, float2 uv,
     // （E/π = 1），所以白炉下让它走**真实路径** —— 这样白炉同时校验它的标度，而不是像
     // 以前那样被短路掩盖（§11.4 的「白炉只验归一化、不验量纲」正是这一项）。
     // SSGI 的 pass 自己也带白炉标志：把接收面 albedo 取 1 后，其输出即「估计的 E/π」。
-    if (furnace && id != GISOURCE_SSGI) return float3(1.0, 1.0, 1.0);
+    // 白炉：各源真值 = 1（只验合成数学，不验量纲）。
+    // **例外是 SSGI 与 RTGI**：它们自己带白炉路径（把入射辐射度取真实的白炉条件），
+    // 所以白炉下让它们走**真实路径** —— 这样白炉同时校验它们的标度与量纲，而不是被短路掩盖
+    // （SSGI 是任务 10 做的，RTGI 是任务 33 做的：它此前经 `EvaluateHitRadiance` 返回
+    //   `albedo × 辐照度`，比辐射度大 π 倍，而短路让它一直读不出这个错）。
+    if (furnace && id != GISOURCE_SSGI && id != GISOURCE_RTGI) return float3(1.0, 1.0, 1.0);
     switch (id) {
     case GISOURCE_IBL:   // 基准：辐照度图存 E/π，已含 kD 与接收面 albedo
         return kD * u_IrradianceMap.Sample(u_IBLSampler, N).rgb * albedo * iblIntensity;

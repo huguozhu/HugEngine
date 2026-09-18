@@ -78,12 +78,34 @@ float3 LoadHitNormal(uint instanceID, uint primId, float2 bary) {
 }
 
 // ============================================================
-// EvaluateHitRadiance — 评估命中点直接光照（diffuse 近似 + 环境光）
-// 用于反射/ GI 的第一次反弹：命中表面的出射辐射度
+// EvaluateHitRadiance — 命中点**出射辐射度** L_o（环境项 + 直接光的一次反弹）
+// 用于反射 / GI 的第一次反弹。
+//
+// 【量纲：必须是辐射度，不是辐照度】（§9.2-AC / 任务 33）
+//   朗伯面的出射辐射度是 `albedo/π · E`（E 为入射辐照度）。此前本函数把环境项与直接光
+//   直接相加后乘 albedo 就返回，即返回的是 `albedo · E` —— **比辐射度大 π 倍**。
+//   三处调用点里只有 `DDGI_Trace.rgen` 在调用后除了 π（任务 17 修探针过亮时加的），
+//   `RT_GI.rchit` 与 `RT_Reflection.rchit` 没有 ⇒ RTGI 与 RT 反射的绝对量级各大约 3.14 倍。
+//   现在函数自己返回辐射度，调用点一律不再做换算。
+//
+// 【白炉（furnace）分支】白炉条件 = 全白环境（辐射度 1）+ albedo 1 + 关直接光，其解析真值
+//   是"每个方向的入射辐射度都是 1" ⇒ E = π ⇒ L_o = albedo/π · π = albedo。
+//   故白炉下环境项取 E = π（而不是那个艺术常数），直接光跳过 —— 这样**命中与未命中两条路径
+//   都返回理想值**，白炉读数与场景几何无关，成为一条能看见绝对量级的判据
+//   （改前经此路径会读到 albedo·π）。
 // ============================================================
-float3 EvaluateHitRadiance(float3 P, float3 N, float3 albedo, uint lightCount) {
-    // 简单环境光（与 RT_PBR.rchit 一致的半球近似）
-    float3 total = float3(0.22, 0.23, 0.26) * albedo;
+// 本文件不包含 common.slang（RT 各阶段对包含顺序敏感），故 π 用局部常量
+static const float kRT_PI = 3.14159265359;
+
+float3 EvaluateHitRadiance(float3 P, float3 N, float3 albedo, uint lightCount, bool furnace) {
+    if (furnace) {
+        // 全白环境：E_ambient = π（辐射度 1 的均匀环境），无直接光
+        return albedo * (1.0 / kRT_PI) * kRT_PI;   // = albedo（写出换算过程，避免"魔法 1"）
+    }
+
+    // 简单环境光（与 RT_PBR.rchit 一致的半球近似）。**量纲是辐照度 E**（历史常数，
+    // 只保证"看起来对"，没有物理标定），故下面统一乘 1/π 转成辐射度。
+    float3 totalE = float3(0.22, 0.23, 0.26);
 
     for (uint i = 0; i < min(lightCount, 16u); i++) {
         RTHitLight l = g_HitLights[i];
@@ -107,7 +129,8 @@ float3 EvaluateHitRadiance(float3 P, float3 N, float3 albedo, uint lightCount) {
         }
 
         float ndl = max(dot(N, L), 0.0);
-        total += l.colorIntensity.rgb * l.colorIntensity.w * ndl * atten;
+        totalE += l.colorIntensity.rgb * l.colorIntensity.w * ndl * atten;
     }
-    return total;
+    // 辐照度 → 朗伯面出射辐射度
+    return albedo * (1.0 / kRT_PI) * totalE;
 }
