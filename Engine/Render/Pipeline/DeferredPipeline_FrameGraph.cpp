@@ -519,8 +519,14 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         CollectLights(rtfpc, world, sg, camera);
 
         // 加速结构（TLAS）构建：每帧一次，由所有 RT 效果共享
+        // 【计入耗时】它不属于任何"源"，但在开了任一 RT 源的配置里是**每帧**成本，
+        // 且很可能比单个 RT 效果本身还大 —— 用约定的下标 kGITimerASBuildIdx 单独计时。
         rg.AddPass("AS_Build", {}, {},
-            [this, &world, &sg](rhi::IRHICommandList* c) { m_RTPass->BuildAS(c, world, sg); });
+            [this, &world, &sg](rhi::IRHICommandList* c) {
+                m_GITimer.Begin(c, GITimer::kCommonItemIdx);
+                m_RTPass->BuildAS(c, world, sg);
+                m_GITimer.End(c, GITimer::kCommonItemIdx);
+            });
 
         // 场景材质纹理（ClosestHit 材质查询）：首帧延迟构建一次（CPU 侧）
         if (!m_SceneMaterialBuilt) {
@@ -564,10 +570,15 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             const u32 pw = mainTex->GetWidth();
             const u32 ph = mainTex->GetHeight();
             const auto mainH = rg.ImportTexture(prov->GetName(), mainTex);
+            const u32 giIdx = (u32)(&prov - m_GIProviders.data());   // 计时下标（任务 29）
             rg.AddPass(prov->GetName(),
                 {{gbDepth, ResourceAccess::Read}, {gbB, ResourceAccess::Read}},
                 {{mainH, ResourceAccess::UAV}},
-                [p = prov.get(), rtCtx](rhi::IRHICommandList* c) { p->Render(c, rtCtx); });
+                [&, p = prov.get(), rtCtx, giIdx](rhi::IRHICommandList* c) {
+                    m_GITimer.Begin(c, giIdx);
+                    p->Render(c, rtCtx);
+                    m_GITimer.End(c, giIdx);
+                });
 
             // 附属 pass（时域累积 → 空间滤波）
             render::ResourceHandle lastOut = mainH;

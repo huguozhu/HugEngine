@@ -32,6 +32,8 @@ class GITimer {
 public:
     /// 支持的最大源数（与帧图的 Provider 数同量级即可）
     static constexpr u32 kMaxSources = 32;
+    /// 非"源"的公共项（当前只有 TLAS 构建）使用这个保留下标
+    static constexpr u32 kCommonItemIdx = kMaxSources - 1;
     /// 每源一对时间戳（起 / 止）
     static constexpr u32 kStampsPerSource = 2;
     /// 环形池个数：足够让"写入 → 隔几帧读回"错开，又不至于占太多查询

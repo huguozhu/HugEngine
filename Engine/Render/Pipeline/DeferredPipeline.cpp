@@ -587,10 +587,16 @@ void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
         if (s_LogTiming && (m_FrameCounter % 120u) == 0u) {
             std::string line = "[GI 耗时]";
             for (size_t i = 0; i < m_GIProviders.size(); ++i) {
-                if (!m_GIProviders[i]->GetTimedPass()) continue;
                 char buf[96];
                 snprintf(buf, sizeof(buf), " %s=%.3fms", m_GIProviders[i]->GetName(),
                          m_GITimer.AvgMs((u32)i));
+                line += buf;
+            }
+            // 公共项（不属于任何"源"）：TLAS 构建——开了任一 RT 源时每帧都跑
+            {
+                char buf[64];
+                snprintf(buf, sizeof(buf), " AS_Build=%.3fms",
+                         m_GITimer.AvgMs(GITimer::kCommonItemIdx));
                 line += buf;
             }
             HE_CORE_INFO("{}", line);
