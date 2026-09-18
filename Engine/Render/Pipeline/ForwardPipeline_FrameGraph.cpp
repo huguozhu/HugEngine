@@ -96,7 +96,22 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     }
 
     // --- Pass 1: IBL 生成（仅在天空盒脏时执行）---
+    // 【任务 26 补的一处】必须先**把场景的天空盒交给 GI_IBL**，再判脏、再烘焙。
+    // 此前这里直接 `giIBL->IsDirty()` 就烘焙：Forward 走 RenderGraph 时没有任何地方调
+    // `SetIBLSkybox`（只有不走 RG 的 `PrepareGI` 里有），于是烘焙的是"未设置的天空盒"——
+    // 辐照度/预滤波图接近全黑，PBR 里的 IBL 漫反射与镜面**恒为 0**，而层栈、能力位、面板
+    // 全都显示正常。这与 §9.2-Q（IBL 从未烘焙、消费者照采）是同一类失效，只是发生在 Forward。
+    // 实测指纹：`pipeline_mode=0` 下把 diffuse 层栈从 {IBL} 改成 {IBL,RSM} 甚至只放 {RSM}，
+    // HDR 读数**逐位相同**（0.1836214），而把 UBO 的 count 直接画到颜色上又能看到 1/2 之差
+    // ——证明配置与 UBO 都是通的，是这两个源的贡献本身为 0。
     auto* giIBL = dynamic_cast<GI_IBL*>(m_GI.get());
+    if (giIBL && giIBL->IsEnabled()) {
+        world.ForEach<he::SkyboxComponent>([&](he::Entity, he::SkyboxComponent& sc) {
+            if (sc.enabled && sc.GetCubemap()) {
+                giIBL->SetIBLSkybox(sc.GetCubemap(), sc.GetCubemapSampler());
+            }
+        });
+    }
     bool iblNeedsUpdate = false;
     if (giIBL && giIBL->IsDirty()) {
         auto iblIrr  = rg.ImportTexture("IBL_Irradiance", giIBL->GetIrradianceMap());
@@ -123,6 +138,9 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                         m_ObjectBuffers[m_CurrentFrameSlot].get(),
                         m_ShadowSystem->GetShadowSampler(),
                         m_DescSets[m_CurrentFrameSlot]);
+                    // 通量要读方向光的颜色/强度：不绑光源缓冲就会读到对象缓冲（§9.2-AA ①）。
+                    // 这条此前只加在 PrepareGI（非 RG 路径）里，RG 路径漏了 —— 同一个坑两处。
+                    m_RSM->SetLightBuffer(GetCurrentLightBuffer());
                     m_RSM->RenderRSMPass(c, world, sg);
                 });
         }
