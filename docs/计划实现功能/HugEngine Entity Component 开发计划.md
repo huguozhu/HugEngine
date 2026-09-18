@@ -5,6 +5,7 @@
 >   - 2026-09-04：对齐代码基线（`404de09`），新增 **Phase S0（已有组件补齐 AI 一等公民）**
 >   - 2026-09-06：S0~P3 全部落地（提交 `8813211` → `56696ea` 共 9 个），doctest 85 用例 / 509 断言通过；
 >     剩余仅 Phase C 大工程（依赖路线图 P6/P3）
+>   - 2026-09-18：任务 25（InstancedMesh 逐实例 GPU 剔除 + 接入间接绘制）落地（见 §十八）
 >   - 2026-09-18：任务 24（Decal GBuffer 投影 Pass）落地（见 §十七）
 >   - 2026-09-18：任务 23（bindless 堆环形化）落地（RHI 基础件 + 消费方接入，见 §十六）
 >   - 2026-09-18：任务 22（动画重定向）落地（提交 `98b94d4` + 演示 `6c3f33e`），见 §十五
@@ -43,7 +44,7 @@
 | CharacterMovementComponent | UCharacterMovementComponent | ✅（P3 B3，`MovementSystem`，地面射线检测） | ✅ 5 属性 | ✅ | — |
 | AbilityComponent | UAbilitySystemComponent | ✅（P3 B4，`AbilitySystem` + Action op CastAbility） | ✅ 2 属性 | ✅ | — |
 | SplineComponent | USplineComponent | ✅（P3 B2，Hermite+自动切线，弧长求值/闭环回绕） | ✅ 2 属性 | ✅ | — |
-| InstancedMeshComponent | UInstancedStaticMeshComponent | ✅（P3 B1，单次 DrawIndexed 万级实例） | ✅ 2 属性 | ✅ | — |
+| InstancedMeshComponent | UInstancedStaticMeshComponent | ✅（P3 B1 单次 DrawIndexed 万级实例；任务 25 追加**逐实例 GPU 剔除 + 间接绘制**，Forward/Deferred 双路径，见 §十八） | ✅ 2 属性 | ✅ | — |
 | SkeletalMesh / Physics / NavMesh | UE5 对应组件 | ✅ 均已落地（SkeletalMesh `4d94460` / Physics Jolt C2 / NavMesh `97aaa00`）；SkeletalMesh 于 2026-09-18 追加**剪辑混合**（任务 21，`af86387`，§十四）与**动画重定向**（任务 22，`98b94d4`，§十五） | — | — | — |
 
 **结论**：计划内组件全部落地。LLM 词表 5 → 10 组件（新增 SpotLight/RectLight/Camera/Health/Decal）；所有新组件按「一个组件 = 四件事」补齐类定义/反射/AI 注解/系统接入。Phase C 的后续扩展（SkeletalMesh 剪辑混合/动画重定向）已于 2026-09-18 补齐（任务 21/22）；Audio（C3）已从本计划移除。既有组件 Animation/Particle/Memory/Goal 的反射与 AI 注解 ✅ 已补齐。
@@ -64,7 +65,7 @@
 | **A（低成本）** | Camera(系统接入) / Decal / Billboard / TextRender / SpringArm / ProjectileMovement / Health | 2~3 天/个 | ✅ 已完成（2026-09-06）：A3~A8 落地（**现编号 7~12**）；A1/A2 并入 S0（**现编号 5~6**） |
 | **B（中成本）** | InstancedMesh / Spline / CharacterMovement / Ability(简化 GAS) / Collision | 1~2 周/个 | ✅ 已完成（2026-09-06）：B1~B5 落地（**现编号 13~17**）；前置重构经评估非必要（见 §六注记） |
 | **C（大工程）** | SkeletalMesh / Physics / NavMesh | 数周~数月 | ✅ 均已落地（**现编号 18~20**；SkeletalMesh `4d94460` / Physics Jolt C2 / NavMesh `97aaa00`）；Audio（原 C3）已移除 |
-| **后续（待办）** | SkeletalMesh 扩展 / MVP 技术债 / 架构触发项 | 见总表 | ⏳ **现编号 21~28**（21~24 已于 2026-09-18 完成；25~28 待办），见下表与 §十二 |
+| **后续（待办）** | SkeletalMesh 扩展 / MVP 技术债 / 架构触发项 | 见总表 | ⏳ **现编号 21~28**（21~25 已于 2026-09-18 完成；26~28 待办），见下表与 §十二 |
 
 ### 任务总表（从 1 重新计数）
 
@@ -99,7 +100,7 @@
 | **20** | C4 | NavMesh 寻路（NavMesh + A* + NavAgent） | ✅ 2026-09-07 | §七 |
 
 **B. 待办（21~28）** —— 来源：§十一 已知 MVP 限制/技术债 + §十二 "仍待办" + §十二 架构触发项
-（**21~24 已于 2026-09-18 完成**，保留在表里以便追溯）
+（**21~25 已于 2026-09-18 完成**，保留在表里以便追溯）
 
 | 新编号 | 任务 | 类型 | 依赖 / 触发条件 | 详见 |
 |:---:|---|---|---|---|
@@ -107,12 +108,12 @@
 | **22** | ~~SkeletalMesh **动画重定向**（不同骨架共用动画）~~ —— ✅ **已完成**（2026-09-18，`98b94d4` + 演示 `6c3f33e`） | 功能扩展 | 无（独立） | §十五 |
 | **23** | ~~**bindless 堆环形化**（TextRender / InstancedMesh 高频更新不再靠"旧资源保活"）~~ —— ✅ **已完成**（2026-09-18，见 §十六） | 技术债 | 无（独立，涉 RHI 堆管理） | §十六 |
 | **24** | ~~**Decal GBuffer 投影 Pass**（替代半透明投射片 MVP）~~ —— ✅ **已完成**（2026-09-18，见 §十七；Forward 仍为投射片） | 技术债 → 功能 | 无（独立，需 GBuffer 可写 Pass） | §十七 |
-| **25** | **InstancedMesh 接 GPU-Culling + 逐实例剔除**（现在仅 Forward 非 GPU-Culling 路径） | 技术债 | 无（独立） | §十一 ②/§十二 |
+| **25** | ~~**InstancedMesh 接 GPU-Culling + 逐实例剔除**（现在仅 Forward 非 GPU-Culling 路径）~~ —— ✅ **已完成**（2026-09-18，见 §十八） | 技术债 | 无（独立） | §十八 |
 | **26** | **Collision 调试线框**（可视化 AABB/球/胶囊） | 技术债 | 无（独立，可复用 Billboard/线框） | §十一 ④/§十二 |
 | **27** | **渲染类型注册表化**（替换"派生渲染组件显式列举"） | 架构 | **触发**：出现下一个渲染组件（InstancedMesh 是第 7 个） | §十二 |
 | **28** | **CollectLights 数据驱动抽取**（现在 4 份复制） | 架构 | **触发**：出现下一个光源类型 | §十二 |
 
-> **怎么用这张表**：`25~26` 无外部依赖、可随时开工（建议顺序：26 → 25，
+> **怎么用这张表**：`26` 无外部依赖、可随时开工（任务 26 = Collision 调试线框），
 > 由"改动面小 → 大"排列）；`27/28` 是**触发式**任务，条件未到之前不动（提前做属于"没有消费方的
 > 泛化"，与 GI 那边的取舍一致）。每完成一项：把状态改成 ✅ 并补提交号，**不要改动已有编号**。
 
@@ -349,7 +350,7 @@ P2（表现）  : 7 Decal(原A3) / 8 Billboard(原A4) / 9 TextRender(原A5) —�
 P3（中成本）: 17 Collision(原B5) → 15 CharacterMovement(原B3) → 16 Ability(原B4)
               → 14 Spline(原B2) → 13 InstancedMesh(原B1) —— ✅ 已完成
 P4（大工程）: 18 SkeletalMesh(原C1) / 19 Physics(原C2) / 20 NavMesh(原C4) —— ✅ 已完成
-待办        : 21 ✅ / 22 ✅ / 23 ✅ / 24 ✅ 已完成；25~26（无依赖，建议 26 → 25）
+待办        : 21 ✅ / 22 ✅ / 23 ✅ / 24 ✅ / 25 ✅ 已完成；26（Collision 调试线框）
               27/28（触发式：出现下一个渲染组件 / 下一个光源类型时再做）
 ```
 
@@ -363,7 +364,7 @@ P4（大工程）: 18 SkeletalMesh(原C1) / 19 Physics(原C2) / 20 NavMesh(原C4
 - **交互验证**：02.Cube（广告牌/文字/贴花/碰撞变色/角色移动/万级实例）、05.AISamples（真实 LLM 场景生成、主相机、火球技能、样条巡逻）
 - **已知 MVP 限制（技术债清单，均已成任务，见 §三 任务总表 21~26）**：
   1. ~~bindless 堆 append-only：TextRender/InstancedMesh 动态更新以「旧资源保活」换安全，高频更新需 Heap 环形化改造~~ ✅ **已落地（任务 23，见 §十六）**
-  2. ~~Decal 为投射片 MVP（无 GBuffer 投影 Pass）~~ ✅ **Deferred 已落地 GBuffer 投影（任务 24，见 §十七）**；Forward 无 GBuffer 可投影 ⇒ 仍为投射片（已知边界）；InstancedMesh 仅支持 Forward 非 GPU-Culling 路径，逐实例剔除未接（**任务 25**）
+  2. ~~Decal 为投射片 MVP（无 GBuffer 投影 Pass）~~ ✅ **Deferred 已落地 GBuffer 投影（任务 24，见 §十七）**；Forward 无 GBuffer 可投影 ⇒ 仍为投射片（已知边界）；~~InstancedMesh 仅支持 Forward 非 GPU-Culling 路径，逐实例剔除未接~~ ✅ **已落地（任务 25，见 §十八）：Forward/Deferred 双路径 + 逐实例 GPU 剔除 + 间接绘制**
   3. 实体引用类属性（homingTarget/targetEntity/cameraEntity 等）不进反射/词表（u64 无法快照序列化）——**这是策略而非待办**
   4. Collision 调试线框（**任务 26**）、SplineMesh 沿条生成 ✅ 已落地（`28ae06b` 坡度过滤、`bc14c57` 碰撞缩臂亦已落地）
 - **遗留**：任务 18~20（原 Phase C）全部落地（Physics C2 ✅ `7eb1a66`~`2b0ae5c`；NavMesh C4 ✅ `97aaa00`；SkeletalMesh ✅ `4d94460`）；Audio（C3）已从本计划移除。SkeletalMesh 后续扩展（剪辑混合、动画重定向）；**既有组件 Particle/Memory/Goal 的反射/AI 补齐 ✅ 已完成**（Animation `98c4080`；Particle emitRate 深补 `fa1410c`；Memory/Goal 类型注册——内部结构按文档不暴露）
@@ -390,7 +391,7 @@ P4（大工程）: 18 SkeletalMesh(原C1) / 19 Physics(原C2) / 20 NavMesh(原C4
 - ✅ **22** SkeletalMesh 动画重定向（不同骨架共用动画）—— 已完成（2026-09-18，`98b94d4` + 演示 `6c3f33e`，见 §十五）
 - ✅ **23** bindless 堆环形化（TextRender/InstancedMesh 高频更新）—— 已完成（2026-09-18，见 §十六）
 - ✅ **24** Decal GBuffer 投影 Pass（替代投射片 MVP）—— 已完成（2026-09-18，见 §十七）
-- **25** InstancedMesh 接 GPU-Culling + 逐实例剔除
+- ✅ **25** InstancedMesh 接 GPU-Culling + 逐实例剔除 —— 已完成（2026-09-18，见 §十八）
 - **26** Collision 调试线框
 - **27** 渲染类型注册表化（**触发**：下一个渲染组件；InstancedMesh 是第 7 个）
 - **28** CollectLights 数据驱动抽取（**触发**：下一个光源类型）
@@ -701,4 +702,69 @@ P4（大工程）: 18 SkeletalMesh(原C1) / 19 Physics(原C2) / 20 NavMesh(原C4
   的收益）。若后续要自动化像素判据，可复用 GI 那边的纹理落盘设施。
 - 投影盒厚度需要调用方保证"包住要贴的表面"（`projectionDepth` 默认 0.5m）；贴花盒没包到的部分
   会被正确裁剪掉 —— 表现为"贴花缺一块"，而不是错误地投到别处。
+
+---
+
+## 十八、任务 25 落地：InstancedMesh 逐实例 GPU 剔除 + 间接绘制
+
+承接 §十一 技术债②的后半句。**问题**：实例化网格是"一个组件 = 上万个实例"，而原路径是
+`DrawIndexed(indexCount, instanceCount)` —— 粒度是**整个组件**：只要组件（甚至不经任何测试）
+在场景里，10000 个实例就全部被顶点着色器处理，背对相机、画面外、视锥外的部分纯属浪费；
+而且这条路只在 Forward 非 GPU-Culling 分支里有（Deferred 的 GBuffer 里实例网格只被当普通网格
+画一次，等于没画实例）。
+
+**做法：把剔除粒度下推到实例，并让绘制走间接命令**
+
+| 步骤 | 内容 |
+|---|---|
+| ① 上传 | `InstanceCuller::UploadInstanceTransforms`：容量够就 Map 原地复用实例变换 SSBO（任务 23 的"环形化"），需要扩容才重建并把旧缓冲放进有界退役队列 |
+| ② 剔除 | 新 compute `InstancedCull.comp.slang`：每实例把局部包围盒 8 角变换求世界 AABB → **六平面支持点测试** → 通过者 `InterlockedAdd` 拿位置、压缩写入**可见索引列表**，同时原子累加命令里的 `instanceCount` |
+| ③ 绘制 | 全局屏障后 `DrawIndexedIndirect(cmd, 0, 1, 20)`；顶点着色器 `SV_InstanceID` 先查可见列表（`可见列表[i]`）再取实例变换 —— 只有通过的实例被处理 |
+| ④ 双路径 | Forward 与 Deferred 的 GBuffer 都接同一套（上传/剔除/绘制三处共用一份实现） |
+
+**设计要点（每条都有原因）**
+
+1. **用 bindless SSBO 句柄寻址，而不是每组件更新描述符集**：Vulkan 描述符是**执行时**读取的，
+   同一个命令缓冲里"改描述符 → dispatch A → 改描述符 → dispatch B"会让 A 用到 B 的缓冲。
+   传句柄（`u_Instances[handle]`）彻底绕开这个问题，也是引擎里实例/骨骼数据一贯的做法。
+2. **可见列表与命令缓冲都按飞行帧分槽**：单份会让"本帧 cull 写列表/清命令"与"上帧 GPU 仍在
+   读列表/读命令做间接绘制"打架（表现为实例闪烁或整批消失）。命令缓冲由组件持有 3 份，
+   可见列表由 `InstanceCuller` 持有 3 份。
+3. **屏障**：cull 是 compute 写、draw 是 `DrawIndirect`+顶点着色器读，中间必须有
+   `ComputeShader → (DrawIndirect|VertexShader)` 的 `UnorderedAccess → ShaderResource` 全局屏障。
+4. **读回顺序**：命令里的 `instanceCount` 由 GPU 原子写、CPU 每帧清零 —— 必须**先读回上一帧的值
+   再清零**。反过来（先清零后读）读到的永远是 0：这正是本轮第一次冒烟看到"可见实例恒 0"的原因，
+   与剔除逻辑无关。
+5. **保守余量**：平面测试取支撑点并留 1cm 余量（与 `GPUCull.comp.slang` 同参数），
+   跨视锥边界的实例判为**可见**——宁可多画，不许误剔。
+6. **单一真值来源**：实例变换上传逻辑抽成 `InstanceCuller::UploadInstanceTransforms`，
+   Forward/Deferred 共用；否则两条路径的缓冲生命周期会各写一份、各自出错（本轮实测：
+   Deferred 忘了建实例 SSBO 时句柄为 0，剔除 shader 读到空句柄 → 全部被剔，画面里一个实例都不剩）。
+
+**判据**
+
+- **doctest**：`Tests/TestInstancedMesh.cpp` 追加 3 例（全量 **197 例 / 5448 断言**全过）：
+  · 组件状态（`enableFrustumCull` 默认关、命令缓冲按飞行帧分槽、可见计数初值 0、容量常量）；
+  · **布局对齐**：`InstanceIndirectCommand` 20 字节且 5 个字段偏移 = VkDrawIndexedIndirectCommand；
+    `InstancedCullParams` 144 字节且 7 个字段偏移与 `InstancedCull.comp.slang` 的 cbuffer 一致；
+  · **剔除数学**：正前方可见 / 相机背后剔除 / 超远平面剔除 / 侧面很远剔除 / 跨近平面保守可见。
+- **示例冒烟**（02.Cube，Release，Forward 与 Deferred 各 20 秒，均 0 error / 0 VUID）：
+  · Forward：`[任务 25] 逐实例剔除：1 个实例网格，可见实例 3081 / 10000（剔除 69.2%）；CPU 参考复算 3081`
+  · Deferred：`[任务 25] Deferred 实例化绘制首帧：实例 10000（对象 #22），剔除槽 1，实例 SSBO 句柄 6，命令句柄 7，可见列表句柄 4`
+    → `[任务 25] 逐实例剔除：可见实例 3085 / 10000（剔除 69.2%）；CPU 参考复算 3086`
+  · **GPU 与 CPU 参考复算逐帧一致**（示例用同一套平面测试在 CPU 上复算，只差"读回滞后一帧"的 0~1 个），
+    这比"数值看起来合理"强得多：它证明 GPU 侧的实例矩阵变换、AABB 求取、平面判定与压缩写入都对；
+  · 面板新增"逐实例 GPU 剔除 (任务 25)"开关与"可见 N / M 实例"读数，可现场 A/B。
+- 校验层 0 告警：说明间接绘制屏障、描述符句柄、飞行帧分槽都正确。
+
+**已知边界**
+
+- **剔除只做视锥（六平面）**：没有 Hi-Z 遮挡剔除（逐物体那套 `GPUCull` 有，实例粒度上没有做）；
+  视野内被墙挡住的实例仍会被画。要做需要按实例深度建/查 Hi-Z，成本与收益要另评估。
+- **可见列表容量 100000 实例/组件**：超出部分不画（不是崩溃），超大批量需要分块或扩大容量。
+- **命令缓冲的 CPU 复位依赖帧同步**：与 `GPUCulling` 的 DrawCount 同级做法（每飞行帧一份命令缓冲
+  + `vkWaitForFences` 同槽位等待）。若要更严格，应改为"GPU 自己清零"或时间线信号量。
+- **Deferred 的 GPU-Driven（间接批次）路径不含实例化**：实例化在 Deferred 走的是 GBuffer 渲染器的
+  逐组件绘制段（CPU 模式与 GPU 模式的回退分支都接了）；批处理（MeshBatcher + ExecuteIndirect）
+  那条路仍未把实例并入，属后续工作。
 
