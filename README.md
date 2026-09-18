@@ -17,8 +17,8 @@ HugEngine/
 ```bash
 # 初始化第三方依赖 (git submodule) + 配置 (需要 CMake 3.28+ / Vulkan SDK)
 git submodule update --init --recursive
-cmake -B build -S . --preset=default
-cmake --build build
+cmake --preset=default      # VS 2026 / Vulkan / 示例与编辑器 ON（见 CMakePresets.json）
+cmake --build Build         # 需要 Release：cmake --build Build --config Release
 ```
 
 ## 示例
