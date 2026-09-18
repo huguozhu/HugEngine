@@ -5,6 +5,7 @@
 //   关节 TRS 采样（静态/插值/slerp）、层级世界矩阵与蒙皮矩阵、
 //   播放时间推进/循环/播完停止、组件网格上传与剪辑边界。
 //   任务 21 追加：多层混合采样（权重归一化/四元数半球对齐）与交叉淡入状态机。
+//   任务 22 追加：动画重定向（名字匹配/绑定姿势差值/联合平移缩放开关/与混合组合/组件接入）。
 // ============================================================
 
 #include "doctest.h"
@@ -14,6 +15,8 @@
 #include "Scene/SkeletonAsset.h"
 #include "Scene/SkeletalMeshComponent.h"
 #include "Scene/SkeletalMeshSystem.h"
+
+#include <cmath>
 
 using namespace he;
 
@@ -83,6 +86,64 @@ std::shared_ptr<asset::SkeletonAsset> MakeSkinned() {
     }
     skel->indices = { 0, 1, 2 };
     return skel;
+}
+
+// ── 任务 22：重定向用的两副骨架（同名关节，**绑定姿势不同**）─────────────────
+
+/// 源骨架："root"/"child"，child 绑定平移 (1,0,0)、绑定旋转绕 Y 30°、缩放 1；
+/// 剪辑 t=0 恰好等于自己的绑定姿势（所以 delta 从单位四元数开始），t=1 时：
+/// 平移 (3,0,0)、旋转再绕 Z 180°、缩放 (3,3,3)
+std::shared_ptr<asset::SkeletonAsset> MakeRetargetSource() {
+    auto skel = std::make_shared<asset::SkeletonAsset>();
+    skel->name = "Source";
+    asset::SkeletonJoint j0;
+    j0.name = "root";
+    j0.parent = -1;
+    j0.inverseBind = float4x4(1.0f);
+    asset::SkeletonJoint j1;
+    j1.name = "child";
+    j1.parent = 0;
+    j1.translation = float3(1, 0, 0);
+    j1.rotation    = glm::angleAxis(glm::radians(30.0f), float3(0, 1, 0));
+    j1.scale       = float3(1.0f);
+    j1.inverseBind = float4x4(1.0f);
+    skel->joints = { j0, j1 };
+
+    asset::AnimationClip clip;
+    clip.name     = "Walk";
+    clip.duration = 1.0f;
+    asset::JointAnimationChannel ch;
+    ch.jointIndex   = 1;
+    ch.times        = { 0.0f, 1.0f };
+    ch.translations = { float3(1, 0, 0), float3(3, 0, 0) };
+    ch.rotations    = { j1.rotation, j1.rotation * glm::angleAxis(glm::pi<float>(), float3(0, 0, 1)) };
+    ch.scales       = { float3(1.0f), float3(3.0f) };
+    clip.channels.push_back(ch);
+    skel->clips.push_back(clip);
+    return skel;
+}
+
+/// 目标骨架：同名关节，但 child 绑定平移 (2,0,0)、绑定旋转绕 X 90°、缩放 2；自己**没有剪辑**
+std::shared_ptr<asset::SkeletonAsset> MakeRetargetTarget() {
+    auto skel = std::make_shared<asset::SkeletonAsset>();
+    skel->name = "Target";
+    asset::SkeletonJoint j0;
+    j0.name = "root";
+    j0.parent = -1;
+    j0.inverseBind = float4x4(1.0f);
+    asset::SkeletonJoint j1;
+    j1.name = "child";
+    j1.parent = 0;
+    j1.translation = float3(2, 0, 0);
+    j1.rotation    = glm::angleAxis(glm::half_pi<float>(), float3(1, 0, 0));
+    j1.scale       = float3(2.0f);
+    j1.inverseBind = float4x4(1.0f);
+    skel->joints = { j0, j1 };
+    return skel;
+}
+/// 用矩阵把一个方向变换过去（归一化 ⇒ 忽略缩放/平移），用于比较“旋转是否一致”
+float3 RotateDir(const float4x4& m, const float3& v) {
+    return glm::normalize(float3(m * float4(v, 0.0f)));
 }
 } // namespace
 
@@ -336,4 +397,252 @@ TEST_CASE("剪辑混合：组件 API 与交叉淡入状态机") {
     CHECK(sm->blendLayerCount == 0);
     SkeletalMeshSystem::Update(world, 0.25f);
     CHECK(sm->clipTime == doctest::Approx(0.25f).epsilon(0.001));
+}
+
+// ============================================================
+// 任务 22：动画重定向（不同骨架共用同一套剪辑）
+// ============================================================
+
+TEST_CASE("动画重定向：按关节名字构建映射（对不上的保持绑定姿势）") {
+    auto target = MakeRetargetTarget();
+    auto source = MakeRetargetSource();
+
+    auto profile = SkeletalMeshSystem::BuildRetargetProfile(*target, *source);
+    REQUIRE(profile.targetToSource.size() == 2);
+    CHECK(profile.targetToSource[0] == 0);            // "root" → "root"
+    CHECK(profile.targetToSource[1] == 1);            // "child" → "child"
+    CHECK(profile.MappedJointCount() == 2);
+    CHECK(profile.retargetTranslation == false);      // 默认只借旋转
+    CHECK(profile.retargetScale == false);
+
+    // 名字对不上 / 无名关节 → -1（保持目标自己的绑定姿势）
+    auto other = MakeRetargetTarget();
+    other->joints[1].name = "tail";
+    other->joints[0].name.clear();
+    auto p2 = SkeletalMeshSystem::BuildRetargetProfile(*other, *source);
+    CHECK(p2.targetToSource[0] == -1);
+    CHECK(p2.targetToSource[1] == -1);
+    CHECK(p2.MappedJointCount() == 0);
+
+    // 目标关节比源多/少都不越界：源里没有同名 → 未映射
+    auto p3 = SkeletalMeshSystem::BuildRetargetProfile(*source, *other);
+    CHECK(p3.targetToSource[1] == -1);
+}
+
+TEST_CASE("动画重定向：借的是相对绑定姿势的偏移，不是源的绝对姿态") {
+    auto target = MakeRetargetTarget();
+    auto source = MakeRetargetSource();
+    auto profile = SkeletalMeshSystem::BuildRetargetProfile(*target, *source);
+
+    const quat srcBind  = source->joints[1].rotation;
+    const quat dstBind  = target->joints[1].rotation;
+    const quat q180z    = glm::angleAxis(glm::pi<float>(), float3(0, 0, 1));
+
+    float3 t;
+    quat r;
+    float3 s;
+
+    // ① 源处于**它自己的绑定姿势**（t=0）⇒ 偏移 = 单位四元数 ⇒ 目标保持自己的绑定姿势
+    SkeletalMeshSystem::SampleJointTRSRetargeted(*target, *source, profile, 0, 0.0f, 1, t, r, s);
+    CHECK(glm::dot(r, dstBind) == doctest::Approx(1.0f).epsilon(0.0001));
+    CHECK(glm::dot(r, srcBind) != doctest::Approx(1.0f));    // 绝不是源的绑定/姿态（两者不同）
+
+    // ② t=1：目标 = 目标绑定旋转 × (源绑定⁻¹ × 源动画旋转) = dstBind × q180z
+    SkeletalMeshSystem::SampleJointTRSRetargeted(*target, *source, profile, 0, 1.0f, 1, t, r, s);
+    const quat expected = glm::normalize(dstBind * q180z);
+    CHECK(std::abs(glm::dot(r, expected)) == doctest::Approx(1.0f).epsilon(0.0001));
+
+    // ③ 平移/缩放默认**不重定向**：即使源有平移/缩放动画，目标仍是自己的绑定值
+    CHECK(t.x == doctest::Approx(2.0f));
+    CHECK(s.x == doctest::Approx(2.0f));
+
+    // ④ 未映射关节 / 越界关节 → 目标静态 TRS / 单位值（不崩溃）
+    profile.targetToSource[1] = -1;
+    SkeletalMeshSystem::SampleJointTRSRetargeted(*target, *source, profile, 0, 1.0f, 1, t, r, s);
+    CHECK(t.x == doctest::Approx(2.0f));
+    CHECK(glm::dot(r, dstBind) == doctest::Approx(1.0f).epsilon(0.0001));
+    SkeletalMeshSystem::SampleJointTRSRetargeted(*target, *source, profile, 0, 1.0f, 42, t, r, s);
+    CHECK(t.x == doctest::Approx(0.0f));
+    CHECK(s.x == doctest::Approx(1.0f));
+}
+
+TEST_CASE("动画重定向：同骨架时等价于直接采样；开关打开后平移/缩放按比例") {
+    auto source = MakeRetargetSource();
+    // 目标骨架 = 源骨架的副本（同名同绑定）→ 打开全部开关后必须与单剪辑采样逐项相等
+    auto target = std::make_shared<asset::SkeletonAsset>(*source);
+    auto profile = SkeletalMeshSystem::BuildRetargetProfile(*target, *source);
+    profile.retargetTranslation = true;
+    profile.retargetScale       = true;
+
+    for (float time : { 0.0f, 0.25f, 0.5f, 1.0f }) {
+        float3 t1, s1, t2, s2;
+        quat r1, r2;
+        SkeletalMeshSystem::SampleJointTRSRetargeted(*target, *source, profile, 0, time, 1, t1, r1, s1);
+        SkeletalMeshSystem::SampleJointTRS(*source, 0, time, 1, t2, r2, s2);
+        CHECK(t1.x == doctest::Approx(t2.x).epsilon(0.0001));
+        CHECK(s1.x == doctest::Approx(s2.x).epsilon(0.0001));
+        CHECK(std::abs(glm::dot(r1, r2)) == doctest::Approx(1.0f).epsilon(0.0001));
+    }
+
+    // 不同绑定姿势 + 平移开关：按各关节绑定长度比缩放
+    //   源绑定 |t| = 1、目标绑定 |t| = 2 ⇒ k = 2；t=0.5 时源平移 2、源绑定 1 ⇒ delta=1 ⇒ 目标 = 2 + 1*2 = 4
+    auto target2 = MakeRetargetTarget();
+    auto profile2 = SkeletalMeshSystem::BuildRetargetProfile(*target2, *source);
+    float3 t;
+    quat r;
+    float3 s;
+    profile2.retargetTranslation = true;
+    SkeletalMeshSystem::SampleJointTRSRetargeted(*target2, *source, profile2, 0, 0.5f, 1, t, r, s);
+    CHECK(t.x == doctest::Approx(4.0f).epsilon(0.001));
+
+    // 关掉自动比例 → k = 1 ⇒ 2 + 1 = 3；再乘全局 0.5 ⇒ 2.5
+    profile2.autoProportion = false;
+    SkeletalMeshSystem::SampleJointTRSRetargeted(*target2, *source, profile2, 0, 0.5f, 1, t, r, s);
+    CHECK(t.x == doctest::Approx(3.0f).epsilon(0.001));
+    profile2.translationScale = 0.5f;
+    SkeletalMeshSystem::SampleJointTRSRetargeted(*target2, *source, profile2, 0, 0.5f, 1, t, r, s);
+    CHECK(t.x == doctest::Approx(2.5f).epsilon(0.001));
+
+    // 缩放开关：源 t=1 缩放 3 / 源绑定 1 = 倍率 3 ⇒ 目标 2*3 = 6
+    profile2.retargetScale = true;
+    SkeletalMeshSystem::SampleJointTRSRetargeted(*target2, *source, profile2, 0, 1.0f, 1, t, r, s);
+    CHECK(s.x == doctest::Approx(6.0f).epsilon(0.001));
+
+    // 源绑定缩放为 0 的退化情况：倍率取 1（不除零、不出 NaN）
+    source->joints[1].scale = float3(0.0f);
+    SkeletalMeshSystem::SampleJointTRSRetargeted(*target2, *source, profile2, 0, 1.0f, 1, t, r, s);
+    CHECK(s.x == doctest::Approx(2.0f).epsilon(0.001));
+    CHECK(std::isfinite(s.x));
+}
+
+TEST_CASE("动画重定向：与多层混合组合（先重定向、再按任务 21 规则混合）") {
+    auto source = MakeTwoClips();      // clip0 平移 1→3、clip1 平移 5→7（同名 root/child）
+    auto target = MakeChain();         // child 绑定平移 (1,0,0)
+    auto profile = SkeletalMeshSystem::BuildRetargetProfile(*target, *source);
+    profile.retargetTranslation = true;
+    profile.autoProportion      = false;   // k=1 ⇒ 重定向后的平移就是源的平移
+
+    asset::AnimationBlendLayer two[2];
+    two[0].clipIndex = 0; two[0].weight = 1.0f; two[0].time = 0.5f;   // 源 → x=2
+    two[1].clipIndex = 1; two[1].weight = 3.0f; two[1].time = 0.5f;   // 源 → x=6
+
+    float3 t;
+    quat r;
+    float3 s;
+    SkeletalMeshSystem::SampleJointTRSBlendedRetargeted(*target, *source, profile, two, 2, 1, t, r, s);
+    CHECK(t.x == doctest::Approx(5.0f).epsilon(0.001));   // (1*2 + 3*6)/4
+
+    // 全部层不参与 / 层为空 ⇒ 目标自己的绑定姿势
+    target->joints[1].translation = float3(2, 0, 0);
+    auto profile2 = SkeletalMeshSystem::BuildRetargetProfile(*target, *source);
+    profile2.retargetTranslation = true;
+    profile2.autoProportion      = false;                 // k=1 ⇒ 重定向后的平移 = 目标绑定 + 源平移增量
+    asset::AnimationBlendLayer zero[1];
+    zero[0].clipIndex = 0; zero[0].weight = 0.0f; zero[0].time = 0.5f;
+    SkeletalMeshSystem::SampleJointTRSBlendedRetargeted(*target, *source, profile2, zero, 1, 1, t, r, s);
+    CHECK(t.x == doctest::Approx(2.0f));                  // 目标绑定姿势
+    SkeletalMeshSystem::SampleJointTRSBlendedRetargeted(*target, *source, profile2, nullptr, 0, 1, t, r, s);
+    CHECK(t.x == doctest::Approx(2.0f));
+    SkeletalMeshSystem::SampleJointTRSBlendedRetargeted(*target, *source, profile2, zero, 1, 42, t, r, s);
+    CHECK(t.x == doctest::Approx(0.0f));                  // 越界关节：单位值
+
+    // 组合路径的蒙皮矩阵：层级与 inverseBind 用**目标骨架**（target 有 2 关节）
+    std::vector<float4x4> skin, world;
+    SkeletalMeshSystem::ComputeSkinMatricesBlendedRetargeted(*target, *source, profile2, two, 2, skin, &world);
+    REQUIRE(skin.size() == 2);
+    CHECK(world[1][3].x == doctest::Approx(2.0f + 5.0f - 1.0f).epsilon(0.001));   // 目标绑定 2 + (混合后 5 − 源绑定 1)
+}
+
+TEST_CASE("动画重定向：改过绑定姿势后重算逆绑定矩阵，绑定姿势仍是单位蒙皮") {
+    auto skel = MakeChain();
+    // 改绑定姿势（child 骨骼拉长 1.5 倍）但不重算 → 绑定姿势的蒙皮矩阵不再是单位矩阵
+    skel->joints[1].translation *= 1.5f;
+    std::vector<float4x4> skin;
+    SkeletalMeshSystem::ComputeSkinMatrices(*skel, -1, 0.0f, skin);
+    CHECK(skin[1][3].x != doctest::Approx(0.0f));
+
+    // 重算逆绑定矩阵后：绑定姿势的蒙皮矩阵回到单位阵（这就是"重算"的目的）
+    SkeletalMeshSystem::RebuildInverseBindMatrices(*skel);
+    SkeletalMeshSystem::ComputeSkinMatrices(*skel, -1, 0.0f, skin);
+    for (const auto& m : skin) {
+        CHECK(m[0][0] == doctest::Approx(1.0f).epsilon(0.0001));
+        CHECK(m[1][1] == doctest::Approx(1.0f).epsilon(0.0001));
+        CHECK(m[2][2] == doctest::Approx(1.0f).epsilon(0.0001));
+        CHECK(m[3][0] == doctest::Approx(0.0f).epsilon(0.0001));
+        CHECK(m[3][1] == doctest::Approx(0.0f).epsilon(0.0001));
+        CHECK(m[3][2] == doctest::Approx(0.0f).epsilon(0.0001));
+    }
+
+    // 空骨架安全
+    asset::SkeletonAsset empty;
+    SkeletalMeshSystem::RebuildInverseBindMatrices(empty);
+    CHECK(empty.joints.empty());
+}
+
+TEST_CASE("动画重定向：组件设置动画来源后使用源骨架的剪辑表") {
+    World world;
+    Entity e = world.CreateEntity("Retargeted");
+    world.AddComponent<TransformComponent>(e);
+    auto* sm = world.AddComponent<SkeletalMeshComponent>(e);
+
+    auto target = MakeRetargetTarget();
+    auto source = MakeRetargetSource();
+    sm->SetSkeleton(target);
+    CHECK(sm->AnimationSource() != nullptr);             // 默认用自身剪辑表
+    CHECK(sm->AnimationSource()->name == target->name);
+    CHECK(!sm->sourceSkeleton);
+
+    // 设置来源：按名字自动构建映射（2/2），剪辑表切到源骨架
+    sm->SetAnimationSource(source);
+    const bool sameSource = (sm->sourceSkeleton.get() == source.get());
+    REQUIRE(sameSource);
+    const bool hasProfile = (sm->retargetProfile != nullptr);
+    REQUIRE(hasProfile);
+    CHECK(sm->retargetProfile->MappedJointCount() == 2);
+    CHECK(sm->AnimationSource()->name == source->name);
+
+    // 目标骨架自己没有剪辑，但 PlayClip(0) 现在有效（剪辑取自源骨架）
+    CHECK(target->clips.empty());
+    sm->PlayClip(0, true);
+    CHECK(sm->currentClip == 0);
+
+    // 推进半秒：蒙皮矩阵由**重定向**结果驱动。注意目标 child 绑定缩放是 2（矩阵非正交），
+    // 所以比较"旋转是否一致"用**方向变换**而不是直接从矩阵取四元数。
+    SkeletalMeshSystem::Update(world, 0.5f);
+    CHECK(sm->clipTime == doctest::Approx(0.5f).epsilon(0.001));
+    REQUIRE(sm->boneMatrices.size() == 2);
+    float3 tExp;
+    quat rExp;
+    float3 sExp;
+    SkeletalMeshSystem::SampleJointTRSRetargeted(*target, *source, *sm->retargetProfile,
+                                                0, 0.5f, 1, tExp, rExp, sExp);
+    const float3 probe(0.3f, 0.5f, 0.81f);
+    const float3 worldDir = RotateDir(sm->jointWorldMatrices[1], probe);
+    CHECK(glm::dot(worldDir, glm::normalize(rExp * probe)) == doctest::Approx(1.0f).epsilon(0.001));
+    // 且**不是**直接套用源骨架的姿态（两者绑定姿势不同）
+    float3 sT;
+    quat sR;
+    float3 sS;
+    SkeletalMeshSystem::SampleJointTRS(*source, 0, 0.5f, 1, sT, sR, sS);
+    CHECK(glm::dot(worldDir, glm::normalize(sR * probe)) < 0.999f);
+    // 平移未重定向 ⇒ child 仍在目标绑定位置 x=2
+    CHECK(sm->jointWorldMatrices[1][3].x == doctest::Approx(2.0f).epsilon(0.001));
+
+    // 越界剪辑 / 清空来源：安全降级
+    sm->PlayClip(99);
+    CHECK(sm->currentClip == -1);
+    sm->ClearAnimationSource();
+    CHECK(!sm->sourceSkeleton);
+    CHECK(sm->AnimationSource()->name == target->name);
+    sm->PlayClip(0);                                     // 目标骨架没有剪辑 ⇒ 绑定姿势
+    CHECK(sm->currentClip == -1);
+
+    // 传入自定义映射（只映射 root）：child 保持目标绑定姿势
+    auto custom = std::make_shared<asset::RetargetProfile>();
+    custom->targetToSource = { 0, -1 };
+    sm->SetAnimationSource(source, custom);
+    CHECK(sm->retargetProfile->MappedJointCount() == 1);
+    sm->PlayClip(0, true);
+    SkeletalMeshSystem::Update(world, 0.25f);
+    CHECK(sm->jointWorldMatrices[1][3].x == doctest::Approx(2.0f).epsilon(0.001));
 }

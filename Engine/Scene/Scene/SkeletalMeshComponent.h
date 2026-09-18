@@ -48,7 +48,24 @@ public:
     /// 取归一化后的各层权重（调试/判据用；capacity 之外不写）
     void GetBlendWeights(float* out, u32 capacity) const;
 
+    // ── 动画重定向（任务 22：不同骨架共用同一套剪辑）────────────────────
+    /// 设置动画来源骨架：本组件的**网格/绑定姿势**仍来自 SetSkeleton 的骨架，
+    /// 而动画剪辑全部取自 source（即 source 的剪辑播放、按名字映射到本骨架的关节上）。
+    /// @param profile 关节映射；传 nullptr = 按关节名字自动构建（默认）
+    /// 【语义变更】设置来源后 `currentClip/clipTime/blendLayers[].clipIndex` 一律指**源骨架**的剪辑表。
+    void SetAnimationSource(std::shared_ptr<asset::SkeletonAsset> source,
+                            std::shared_ptr<asset::RetargetProfile> profile = nullptr);
+    /// 清除动画来源 → 回到“用自身骨架的剪辑”的原有路径
+    void ClearAnimationSource();
+    /// 当前动画剪辑表所属的骨架（有来源时是源骨架，否则是自身；两者皆无 ⇒ nullptr）
+    const asset::SkeletonAsset* AnimationSource() const {
+        return sourceSkeleton ? sourceSkeleton.get() : skeleton.get();
+    }
+
     std::shared_ptr<asset::SkeletonAsset> skeleton;   // 骨架资产（关节/剪辑/蒙皮网格）
+    // --- 动画重定向状态（任务 22）---
+    std::shared_ptr<asset::SkeletonAsset>   sourceSkeleton;    // 动画来源骨架（空 = 用自身剪辑）
+    std::shared_ptr<asset::RetargetProfile> retargetProfile;   // 关节映射（与 sourceSkeleton 同时有效）
 
     // --- 播放状态 ---
     i32   currentClip = -1;     // 当前剪辑（-1 = 绑定姿势）；混合时仅作显示

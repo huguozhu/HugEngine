@@ -3,6 +3,7 @@
 // ============================================================
 
 #include "Scene/SkeletalMeshComponent.h"
+#include "Scene/SkeletalMeshSystem.h"
 #include "RHI/RHI.h"
 #include "Core/Log.h"
 
@@ -52,7 +53,8 @@ void SkeletalMeshComponent::SetSkeleton(std::shared_ptr<asset::SkeletonAsset> sk
 }
 
 void SkeletalMeshComponent::PlayClip(i32 clipIndex, bool loop) {
-    if (!skeleton || clipIndex < 0 || clipIndex >= static_cast<i32>(skeleton->clips.size())) {
+    const asset::SkeletonAsset* anim = AnimationSource();
+    if (!anim || clipIndex < 0 || clipIndex >= static_cast<i32>(anim->clips.size())) {
         currentClip = -1;   // 越界/无剪辑 → 绑定姿势
         return;
     }
@@ -61,6 +63,34 @@ void SkeletalMeshComponent::PlayClip(i32 clipIndex, bool loop) {
     looping     = loop;
     playing     = true;
     ClearBlendLayers();     // 单剪辑路径与混合路径互斥：显式播放剪辑即退出混合
+}
+
+// ── 动画重定向（任务 22）────────────────────────────────────────────────────
+
+void SkeletalMeshComponent::SetAnimationSource(std::shared_ptr<asset::SkeletonAsset> source,
+                                               std::shared_ptr<asset::RetargetProfile> profile) {
+    sourceSkeleton = std::move(source);
+    if (!sourceSkeleton || !skeleton) {
+        sourceSkeleton.reset();
+        retargetProfile.reset();
+        return;
+    }
+    if (profile) {
+        retargetProfile = std::move(profile);
+    } else {
+        // 默认按关节名字匹配（名字对不上的关节保持本骨架的绑定姿势）
+        retargetProfile = std::make_shared<asset::RetargetProfile>(
+            SkeletalMeshSystem::BuildRetargetProfile(*skeleton, *sourceSkeleton));
+    }
+    HE_CORE_INFO("[重定向] 动画来源: {} → {}（映射 {}/{} 关节，{}）",
+        sourceSkeleton->name, skeleton->name,
+        retargetProfile->MappedJointCount(), skeleton->joints.size(),
+        retargetProfile->retargetTranslation ? "含平移" : "仅旋转");
+}
+
+void SkeletalMeshComponent::ClearAnimationSource() {
+    sourceSkeleton.reset();
+    retargetProfile.reset();
 }
 
 // ── 剪辑混合（任务 21）──────────────────────────────────────────────────────
@@ -84,7 +114,8 @@ void SkeletalMeshComponent::SetBlendLayers(const asset::AnimationBlendLayer* lay
 bool SkeletalMeshComponent::SetBlendLayer(u32 index, i32 clipIndex, float weight, float time,
                                           float speed, bool loop) {
     if (index >= kMaxBlendLayers) return false;                       // 超上限：拒绝
-    if (!skeleton || clipIndex < 0 || clipIndex >= static_cast<i32>(skeleton->clips.size()))
+    const asset::SkeletonAsset* anim = AnimationSource();
+    if (!anim || clipIndex < 0 || clipIndex >= static_cast<i32>(anim->clips.size()))
         return false;                                                 // 剪辑越界：拒绝且不改状态
     blendLayers[index].clipIndex = clipIndex;
     blendLayers[index].weight    = weight;
@@ -108,7 +139,8 @@ void SkeletalMeshComponent::ClearBlendLayers() {
 }
 
 void SkeletalMeshComponent::CrossFadeTo(i32 toClip, float duration, bool loop) {
-    if (!skeleton || toClip < 0 || toClip >= static_cast<i32>(skeleton->clips.size())) return;
+    const asset::SkeletonAsset* anim = AnimationSource();
+    if (!anim || toClip < 0 || toClip >= static_cast<i32>(anim->clips.size())) return;
 
     // 出层 = 当前播放状态：已有混合层时取第 0 层，否则用单剪辑状态合成一层
     asset::AnimationBlendLayer out{};

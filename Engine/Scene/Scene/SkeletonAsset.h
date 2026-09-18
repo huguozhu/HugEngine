@@ -69,6 +69,40 @@ struct AnimationBlendLayer {
     bool  looping   = true;    // 该层是否循环
 };
 
+/// 动画重定向配置（任务 22：让**不同骨架**共用同一套动画剪辑）
+///
+/// 重定向 = 把"源骨架关节的动画"映射到"目标骨架关节"上。核心是**绑定姿势差值**：
+///   目标旋转 = 目标绑定旋转 × (源绑定旋转⁻¹ × 源动画旋转)
+/// 即只借用源动画**相对它自己绑定姿势的偏移量**，再叠加到目标自己的绑定姿势上。
+/// 【为什么不能直接用源 TRS】两个骨架的绑定姿势不同（骨骼朝向/长度/体型），
+/// 直接套用会把目标骨架拉成源骨架的形状（关节翻转、四肢错位）。
+///
+/// 关节对应关系由 `targetToSource` 给出：**按名字匹配**是默认构建方式
+/// （见 SkeletalMeshSystem::BuildRetargetProfile），名字对不上的关节保持目标绑定姿势。
+struct RetargetProfile {
+    String name;                       // 配置名（调试/日志用）
+    /// 目标关节下标 → 源关节下标（长度 = 目标关节数；-1 = 未映射，保持目标绑定姿势）
+    std::vector<i32> targetToSource;
+
+    // --- 逐分量的重定向开关（默认只重定向旋转）---
+    /// 平移：默认关。平移是"骨骼长度/体型"信息，直接搬会把不同体型的骨架拉变形；
+    /// 打开时按各关节绑定长度比自动缩放（见 autoProportion），适合"同比例放大/缩小的骨架"。
+    bool  retargetTranslation = false;
+    /// 缩放：默认关（同上，缩放通道多数骨架压根没有）
+    bool  retargetScale = false;
+    /// 平移自动按比例：k = |目标绑定平移| / |源绑定平移|（源为 0 或退化时取 1）
+    bool  autoProportion = true;
+    /// 额外全局平移缩放（叠加在自动比例之上）
+    float translationScale = 1.0f;
+
+    /// 命中的关节数（未映射的不计）
+    i32 MappedJointCount() const {
+        i32 n = 0;
+        for (i32 s : targetToSource) if (s >= 0) ++n;
+        return n;
+    }
+};
+
 /// 骨架资产（一个 glTF skin = 一份资产；多个 primitive 可共享）
 struct SkeletonAsset {
     String name;
