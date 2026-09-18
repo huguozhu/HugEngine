@@ -101,37 +101,32 @@ endif()
 # ============================================================
 # VS 解决方案目录 — 覆盖所有子模块的 FOLDER 设置
 # ============================================================
+# 注意：这里必须**列全**所有第三方 / 引擎 / 示例目标 —— 漏掉的目标会直接散落在
+# 解决方案根目录（实测踩到：Jolt、06.GILab、HugEditor、HugEngineTests）。
 # External 第三方库（覆盖 GLFW 自带的 "GLFW3" 等）
-foreach(_ext glfw glm spdlog Taskflow stb meshoptimizer update_mappings imgui)
+foreach(_ext glfw glm spdlog Taskflow stb meshoptimizer update_mappings imgui Jolt)
     if(TARGET ${_ext})
         set_target_properties(${_ext} PROPERTIES FOLDER "External")
     endif()
 endforeach()
 
-# Engine 模块
+# Engine 模块（含 Engine/Physics 编译出的 HugEnginePhysics）
 foreach(_eng HugEngineCore HugEngineRHI HugEngineReflect HugEngineShader HugEngineSerialize
-            HugEngineScene HugEngineRender HugEngineAsset HugEngineEditor HugEngineAI CompileShaders)
+            HugEngineScene HugEngineRender HugEngineAsset HugEngineEditor HugEngineAI
+            HugEnginePhysics CompileShaders)
     if(TARGET ${_eng})
         set_target_properties(${_eng} PROPERTIES FOLDER "Engine")
     endif()
 endforeach()
 
-# Samples
-if(TARGET 01.Triangle)
-    set_target_properties(01.Triangle PROPERTIES FOLDER "Samples")
-endif()
-if(TARGET 02.Cube)
-    set_target_properties(02.Cube PROPERTIES FOLDER "Samples")
-endif()
-if(TARGET 03.Sponza)
-    set_target_properties(03.Sponza PROPERTIES FOLDER "Samples")
-endif()
-if(TARGET 04.Deferred)
-    set_target_properties(04.Deferred PROPERTIES FOLDER "Samples")
-endif()
-if(TARGET 05.AISamples)
-    set_target_properties(05.AISamples PROPERTIES FOLDER "Samples")
-endif()
-if(TARGET Editor)
-    set_target_properties(Editor PROPERTIES FOLDER "Samples")
+# Samples（含 06.GILab 与编辑器；编辑器目标名是 HugEditor）
+foreach(_sample 01.Triangle 02.Cube 03.Sponza 04.Deferred 05.AISamples 06.GILab HugEditor)
+    if(TARGET ${_sample})
+        set_target_properties(${_sample} PROPERTIES FOLDER "Samples")
+    endif()
+endforeach()
+
+# 测试
+if(TARGET HugEngineTests)
+    set_target_properties(HugEngineTests PROPERTIES FOLDER "Tests")
 endif()

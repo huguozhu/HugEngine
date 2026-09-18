@@ -21,7 +21,7 @@ add_library(HugEnginePhysics STATIC
 )
 
 set_target_properties(HugEnginePhysics PROPERTIES
-    FOLDER "HugEngine/Physics"
+    FOLDER "Engine"   # 与其它 Engine 模块同一个解决方案文件夹（根 CMakeLists 也会统一设置）
 )
 
 target_include_directories(HugEnginePhysics
