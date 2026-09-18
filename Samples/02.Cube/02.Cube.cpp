@@ -1333,6 +1333,16 @@ int main() {
         int mode = cvPipelineMode.Get();
         ImGui::SeparatorText("渲染模式");
 
+        // 贴花渲染路径（任务 24）：Deferred 走 GBuffer 投影 Pass，Forward 走投射片卡片
+        {
+            auto& dp = deferredPipeline.GetDecalPass();
+            ImGui::Text("贴花: %s", cvPipelineMode.Get() == 0 ? "投射片卡片（Forward）"
+                                                              : "GBuffer 投影（Deferred）");
+            ImGui::SameLine();
+            ImGui::TextDisabled("| 投影 Pass 已跑 %llu 帧，上帧贴花 %u 个",
+                                (unsigned long long)dp.GetFrameCount(), dp.GetLastDecalCount());
+        }
+
         // 下拉项：索引与模式值一一对应（0/1/2/3 连续）
         const char* modeNames[] = {
             "Forward 前向渲染",
