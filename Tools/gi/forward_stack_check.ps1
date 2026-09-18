@@ -13,10 +13,12 @@
 #      "adding a source does not brighten the picture" quantitative instead of hand-wavy.
 #
 # WHAT THESE CRITERIA CANNOT SEE (defect 9.2-AD): all three hold even when one source
-# contributes EXACTLY zero -- measured: `fwd_rsm` (0.0865436) is byte-identical to the EMPTY
-# stack, i.e. Forward's RSM currently has no producer at all (task 34). The empty-stack run
-# and the reported differential in the .py exist to make that visible; the differential is
-# reported, not asserted, because asserting it would freeze an open defect into the suite.
+# contributes EXACTLY zero -- measured before task 34: `fwd_rsm` was byte-identical to the EMPTY
+# stack, i.e. Forward's RSM had no producer at all. That is why the empty-stack run exists.
+# Task 34 gave the source a producer (sample drives the shadow system, the RSM pass uses a
+# scene-fitted fixed frustum, and the PBR inline lookup reads the same VP via GIBlendParams), so
+# the .py now ASSERTS S_rsm > 1e-6 and additionally checks the three RSM maps for real coverage.
+# Before the fix both of those fail by construction -- they are the criteria that can see 9.2-AD.
 #
 # The numbers come from `gi_<tag>_hdr.f16`, which the sample only started writing for the
 # Forward pipeline in task 26 (before that it always dumped the *Deferred* HDR target, so the
@@ -47,14 +49,19 @@ foreach ($l in [System.IO.File]::ReadAllLines($baseCfg)) {
 }
 
 # diffuse stacks: w0=IBL, w1=DDGI, w2=SSGI, w3=RTGI; RSM has its own key.
-# `fwd_none` is the EMPTY diffuse stack: without it the three criteria below cannot tell
-# "RSM contributes a dim picture" from "RSM contributes nothing at all" (see the .py header
-# and defect 9.2-AD -- the {RSM} reading measured here is byte-identical to the empty stack).
+# `fwd_none` is the EMPTY diffuse stack: without it the criteria cannot tell "RSM contributes a
+# dim picture" from "RSM contributes nothing at all" (see the .py header -- S_rsm = mean({RSM})
+# - mean(empty) is ASSERTED against it, and before task 34 that difference was exactly 0).
 $cases = @(
     @{ tag = 'fwd_none';    ibl = '0.000000'; rsm = '0.000000' },
     @{ tag = 'fwd_ibl';     ibl = '1.000000'; rsm = '0.000000' },
     @{ tag = 'fwd_rsm';     ibl = '0.000000'; rsm = '1.000000' },
-    @{ tag = 'fwd_ibl_rsm'; ibl = '1.000000'; rsm = '1.000000' }
+    @{ tag = 'fwd_ibl_rsm'; ibl = '1.000000'; rsm = '1.000000' },
+    # View independence (task 34): same config as fwd_rsm, camera moved 300 along x.
+    # RSM is a WORLD-SPACE source and its fixed frustum is fitted to the scene bounds + light
+    # direction only (no camera), so the three RSM maps must come out byte-identical. With the
+    # old CSM-cascade-0 VP (fitted to the camera frustum) this criterion cannot hold.
+    @{ tag = 'fwd_rsm_view'; ibl = '0.000000'; rsm = '1.000000'; camx = '300.000000' }
 )
 
 $failed = 0
@@ -76,6 +83,7 @@ foreach ($c in $cases) {
     $m['gi_shadow']  = '1'
     $m['gi_solo']    = '0'
     $m['ae_enabled'] = '0'
+    if ($c.ContainsKey('camx')) { $m['cam_pos_x'] = $c.camx }
     $name = $c.tag
     $cfg  = Join-Path $outDir "chk_$name.cfg"
     [System.IO.File]::WriteAllLines($cfg, @(foreach ($k in $m.Keys) { "$k=$($m[$k])" }))
