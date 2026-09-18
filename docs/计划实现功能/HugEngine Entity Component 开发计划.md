@@ -5,6 +5,7 @@
 >   - 2026-09-04：对齐代码基线（`404de09`），新增 **Phase S0（已有组件补齐 AI 一等公民）**
 >   - 2026-09-06：S0~P3 全部落地（提交 `8813211` → `56696ea` 共 9 个），doctest 85 用例 / 509 断言通过；
 >     剩余仅 Phase C 大工程（依赖路线图 P6/P3）
+>   - 2026-09-18：任务 21（骨骼剪辑混合）落地（提交 `af86387` + 演示 `2b07df7`），见 §十四
 >   - 2026-09-18：**任务统一编号（从 1 开始）** —— 原先用阶段前缀编号（S0.1 / A7 / B3 / C2），
 >     跨阶段无法一眼看出"总共有多少任务、下一个做哪个"。现在全部任务从 1 连续编号（**1~20 已落地，
 >     21~28 待办**），**原编号一律保留在括号里**作为别名（代码注释里引用的是原编号，靠 §三 的任务
@@ -40,7 +41,7 @@
 | AbilityComponent | UAbilitySystemComponent | ✅（P3 B4，`AbilitySystem` + Action op CastAbility） | ✅ 2 属性 | ✅ | — |
 | SplineComponent | USplineComponent | ✅（P3 B2，Hermite+自动切线，弧长求值/闭环回绕） | ✅ 2 属性 | ✅ | — |
 | InstancedMeshComponent | UInstancedStaticMeshComponent | ✅（P3 B1，单次 DrawIndexed 万级实例） | ✅ 2 属性 | ✅ | — |
-| SkeletalMesh / Physics / NavMesh | UE5 对应组件 | ✅ 均已落地（SkeletalMesh `4d94460` / Physics Jolt C2 / NavMesh `97aaa00`） | — | — | — |
+| SkeletalMesh / Physics / NavMesh | UE5 对应组件 | ✅ 均已落地（SkeletalMesh `4d94460` / Physics Jolt C2 / NavMesh `97aaa00`）；SkeletalMesh 于 2026-09-18 追加**剪辑混合**（任务 21，`af86387`，见 §十四） | — | — | — |
 
 **结论**：计划内组件全部落地。LLM 词表 5 → 10 组件（新增 SpotLight/RectLight/Camera/Health/Decal）；所有新组件按「一个组件 = 四件事」补齐类定义/反射/AI 注解/系统接入。Phase C 仅剩后续扩展（SkeletalMesh 剪辑混合/动画重定向）；Audio（C3）已从本计划移除。既有组件 Animation/Particle/Memory/Goal 的反射与 AI 注解 ✅ 已补齐。
 
@@ -60,7 +61,7 @@
 | **A（低成本）** | Camera(系统接入) / Decal / Billboard / TextRender / SpringArm / ProjectileMovement / Health | 2~3 天/个 | ✅ 已完成（2026-09-06）：A3~A8 落地（**现编号 7~12**）；A1/A2 并入 S0（**现编号 5~6**） |
 | **B（中成本）** | InstancedMesh / Spline / CharacterMovement / Ability(简化 GAS) / Collision | 1~2 周/个 | ✅ 已完成（2026-09-06）：B1~B5 落地（**现编号 13~17**）；前置重构经评估非必要（见 §六注记） |
 | **C（大工程）** | SkeletalMesh / Physics / NavMesh | 数周~数月 | ✅ 均已落地（**现编号 18~20**；SkeletalMesh `4d94460` / Physics Jolt C2 / NavMesh `97aaa00`）；Audio（原 C3）已移除 |
-| **后续（待办）** | SkeletalMesh 扩展 / MVP 技术债 / 架构触发项 | 见总表 | ⏳ **现编号 21~28**，见下表与 §十二 |
+| **后续（待办）** | SkeletalMesh 扩展 / MVP 技术债 / 架构触发项 | 见总表 | ⏳ **现编号 21~28**（21 已于 2026-09-18 完成；22~28 待办），见下表与 §十二 |
 
 ### 任务总表（从 1 重新计数）
 
@@ -95,10 +96,11 @@
 | **20** | C4 | NavMesh 寻路（NavMesh + A* + NavAgent） | ✅ 2026-09-07 | §七 |
 
 **B. 待办（21~28）** —— 来源：§十一 已知 MVP 限制/技术债 + §十二 "仍待办" + §十二 架构触发项
+（**21 已于 2026-09-18 完成**，保留在表里以便追溯）
 
 | 新编号 | 任务 | 类型 | 依赖 / 触发条件 | 详见 |
 |:---:|---|---|---|---|
-| **21** | SkeletalMesh **剪辑混合**（多动画片段混合 / Blend Space） | 功能扩展 | 无（独立） | §十二 |
+| **21** | ~~SkeletalMesh **剪辑混合**（多动画片段混合 / Blend Space）~~ —— ✅ **已完成**（2026-09-18，`af86387` + 演示 `2b07df7`） | 功能扩展 | 无（独立） | §十四 |
 | **22** | SkeletalMesh **动画重定向**（不同骨架共用动画） | 功能扩展 | 无（独立） | §十二 |
 | **23** | **bindless 堆环形化**（TextRender / InstancedMesh 高频更新不再靠"旧资源保活"） | 技术债 | 无（独立，涉 RHI 堆管理） | §十一 ①②/§十二 |
 | **24** | **Decal GBuffer 投影 Pass**（替代半透明投射片 MVP） | 技术债 → 功能 | 无（独立，需 GBuffer 可写 Pass） | §十一 ②/§十二 |
@@ -107,7 +109,7 @@
 | **27** | **渲染类型注册表化**（替换"派生渲染组件显式列举"） | 架构 | **触发**：出现下一个渲染组件（InstancedMesh 是第 7 个） | §十二 |
 | **28** | **CollectLights 数据驱动抽取**（现在 4 份复制） | 架构 | **触发**：出现下一个光源类型 | §十二 |
 
-> **怎么用这张表**：`21~26` 无外部依赖、可随时开工（建议顺序：26 → 25 → 24 → 23 → 21 → 22，
+> **怎么用这张表**：`22~26` 无外部依赖、可随时开工（建议顺序：26 → 25 → 24 → 23 → 22，
 > 由"改动面小 → 大"排列）；`27/28` 是**触发式**任务，条件未到之前不动（提前做属于"没有消费方的
 > 泛化"，与 GI 那边的取舍一致）。每完成一项：把状态改成 ✅ 并补提交号，**不要改动已有编号**。
 
@@ -344,7 +346,7 @@ P2（表现）  : 7 Decal(原A3) / 8 Billboard(原A4) / 9 TextRender(原A5) —�
 P3（中成本）: 17 Collision(原B5) → 15 CharacterMovement(原B3) → 16 Ability(原B4)
               → 14 Spline(原B2) → 13 InstancedMesh(原B1) —— ✅ 已完成
 P4（大工程）: 18 SkeletalMesh(原C1) / 19 Physics(原C2) / 20 NavMesh(原C4) —— ✅ 已完成
-待办        : 21~26（无依赖，建议 26 → 25 → 24 → 23 → 21 → 22）
+待办        : 21 ✅ 已完成；22~26（无依赖，建议 26 → 25 → 24 → 23 → 22）
               27/28（触发式：出现下一个渲染组件 / 下一个光源类型时再做）
 ```
 
@@ -381,7 +383,7 @@ P4（大工程）: 18 SkeletalMesh(原C1) / 19 Physics(原C2) / 20 NavMesh(原C4
 
 **仍待办（已编号，见 §三 任务总表 21~28）**：
 - ✅ 任务 18~20 已全部落地（SkeletalMesh / Physics C2 / NavMesh C4）；Audio（原 C3）已从本计划移除
-- **21** SkeletalMesh 剪辑混合（多片段混合 / Blend Space）
+- ✅ **21** SkeletalMesh 剪辑混合（多片段混合 / Blend Space）—— 已完成（2026-09-18，`af86387` + 演示 `2b07df7`，见 §十四）
 - **22** SkeletalMesh 动画重定向（不同骨架共用动画）
 - **23** bindless 堆环形化（TextRender/InstancedMesh 高频更新）
 - **24** Decal GBuffer 投影 Pass（替代投射片 MVP）
@@ -413,3 +415,64 @@ P4（大工程）: 18 SkeletalMesh(原C1) / 19 Physics(原C2) / 20 NavMesh(原C4
 - 02.Cube 运行冒烟：`样条网格（B2）: 沿 6 控制点样条生成 48 段条带` → 运行期 `MeshComponent: 98 vertices, 288 indices`（=(48+1)×2 / 48×6）、包围盒覆盖样条范围、场景渲染 24 draws 正常、退出无崩溃
 
 **说明**：条带为单面几何，默认 `doubleSided = true`（便于从下方观察）；实体引用类依赖（`splineEntity`）保持不可由 LLM 生成，与 `homingTarget` 等同一策略。
+
+---
+
+## 十四、任务 21 落地：骨骼剪辑混合（Blend Space / 交叉淡入）
+
+承接 §十二 待办中的"SkeletalMesh 后续扩展：剪辑混合"，本次完成。
+
+**问题**：原实现是**单剪辑播放** —— `SkeletalMeshComponent` 只有 `currentClip / clipTime`，
+`SkeletalMeshSystem` 每帧采样这一个剪辑。于是"走路切跑步"只能硬切（姿态跳变），
+也无法表达 Blend Space（按速度混合两个剪辑）。
+
+**新增能力（引擎侧）**
+
+| 位置 | 内容 |
+|---|---|
+| `Scene/SkeletonAsset.h` | `AnimationBlendLayer`：剪辑下标 + **自己的**时间/速度/循环 + 权重（纯数据，无 RHI 依赖，单测可只对着数学写） |
+| `Scene/SkeletalMeshSystem.h/.cpp` | `SampleJointTRSBlended` / `ComputeSkinMatricesBlended`；层级合成与蒙皮公式抽成共用的 `ComposeSkinMatrices`（两条路径必须逐字一致，否则"权重=1 的混合"将不等于单剪辑） |
+| `Scene/SkeletalMeshComponent.h/.cpp` | `blendLayers[kMaxBlendLayers=4]` + `SetBlendLayers` / `SetBlendLayer` / `ClearBlendLayers` / `CrossFadeTo` / `GetBlendWeights` |
+
+**混合规则（每条都有理由）**
+
+1. **权重按 Σw 归一化**：平移/缩放线性加权，旋转"符号对齐到首个参与层 → 加权求和 →
+   归一化"（加权 nlerp）。
+   · 为什么要符号对齐：`q` 与 `-q` 是**同一个旋转**，直接相加会互相抵消（典型现象是混合到
+   中途姿态抽搐或塌陷到单位四元数）；对齐到同一半球后加权和才有意义。
+2. **`clipIndex < 0`、权重 ≤ 0 的层不参与**；**全部层都不参与时退回关节静态 TRS**
+   （即绑定姿势）——与单剪辑路径 `clipIndex = -1` 的语义完全一致。
+3. **每层推进自己的时间**：速度/循环逐层独立；**权重为 0 的层也推进**（否则淡入的那一层
+   会永远停在起点，淡入完成时姿态从第一帧开始跳）。两层 Blend Space 的"时间同步"由调用方
+   负责（示例里把两层的 `time` 设成同一个值）。
+4. **交叉淡入会收敛成单层**：`CrossFadeTo` 布下出/入两层，`Update` 每帧把出层权重 1→0、
+   入层 0→1，淡完只留入层（`blendLayerCount = 1`）。不收敛的话会**长期付两倍的采样成本**，
+   而权重 0 的层对结果没有任何贡献。
+5. **单剪辑与混合两条路径互斥**：`blendLayerCount == 0` 时走原来的单剪辑路径（既有行为
+   逐字不变），`PlayClip` 会显式清空混合层，避免"面板选了剪辑但混合层还在"的状态含糊。
+
+**判据**
+
+- **doctest**：`Tests/TestSkeletalMesh.cpp` 新增 4 例（全量 **176 例 / 5273 断言**全过）：
+  · 单层权重 1 的混合 == `SampleJointTRS` 的单剪辑采样（等价性，保证没有引入行为变化）；
+  · 权重 1:3 的平移混合 == `(1·x0 + 3·x1)/4`（加权平均而不是求和）；
+  · 全零权重 / 越界剪辑层 / 空层 都退回绑定姿势；非法关节下标给单位值不崩溃；
+  · 四元数半球对齐（同一旋转写两遍，结果仍是该旋转，`|dot| = 1`）；
+  · 组件 API 与交叉淡入状态机：越界剪辑与超上限被拒绝、权重读数归一化、每层按自己的速度
+    推进、淡入一半时权重 (0.5, 0.5)、淡完收敛成 1 层且旧字段同步、`duration = 0` 一帧内切换、
+    越界目标忽略、`PlayClip` 退出混合。
+- **示例冒烟**（02.Cube，Release，跑 20 秒）：日志出现
+  `[任务 21] 骨骼剪辑混合：Walk → Run 交叉淡入 1.5s（最多 4 层…）`，1.5 秒后出现
+  `[任务 21] 交叉淡入完成：收敛为单层剪辑 #2（权重 1.00）`（证明混合路径真的执行并收敛）；
+  校验层 error/VUID 计数 **0**、无崩溃。面板新增"剪辑混合"一节（Blend Space 滑块 +
+  两个交叉淡入按钮 + 实时层数/权重显示）。
+
+**已知边界**
+
+- 只做**逐关节 TRS 混合**（nlerp），没有动画曲线、没有 Additive 层、没有骨骼遮罩（上半身/
+  下半身分离）——那属于"动画系统"层的内容，本任务只补"多剪辑混合"这一层。
+- 混合**在 CPU 采样后做**（每层采样全部关节再混合），层数上限 4；层数越多每帧采样次数线性
+  上升。真实项目里会在烘焙/压缩后的轨道上做，这里保持与既有单剪辑路径同一套采样器。
+- 没有 Blend Space **资产**（1D/2D 混合空间定义、阈值表）——调用方自己算权重（示例里是
+  滑块或速度），引擎只提供"多层 + 权重"这一原语。
+
