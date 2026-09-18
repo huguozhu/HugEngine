@@ -304,6 +304,11 @@ ASBuildSizes VulkanDevice::GetTLASBuildSizes(u32 maxInstanceCount) {
     VkAccelerationStructureGeometryKHR tlasGeo{};
     tlasGeo.sType        = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
     tlasGeo.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+    // 查尺寸这条路径也要把 instances 的 sType/arrayOfPointers 填好（BuildTLAS 里填了，
+    // 这里曾漏掉 → vkGetAccelerationStructureBuildSizesKHR 报
+    // VUID-VkAccelerationStructureGeometryInstancesDataKHR-sType-sType）
+    tlasGeo.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+    tlasGeo.geometry.instances.arrayOfPointers = VK_FALSE;
 
     VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
     buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
