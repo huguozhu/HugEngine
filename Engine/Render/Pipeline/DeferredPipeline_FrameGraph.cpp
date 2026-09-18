@@ -760,18 +760,19 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     // ── 低频环境源（IBL）烘焙：遍历 Provider ──
     // IBL 无独立 offscreen pass，其辐照度/预滤波贴图由天空盒烘焙而来（脏时重建）；
     // 产物由 Lighting 直接采样，故本 pass 必须排在 Lighting 之前。
+    //
+    // 【任务 27 / §9.2-X：这里**不再按消费者门控**】原先的条件是「漫反射栈要它 ∨ 镜面栈要它
+    // ∨ DDGI 要它」—— 漏掉了第四个消费者：**BRDF LUT 是 PBR 逐像素无条件采样的**
+    // （`DeferredLighting.frag.slang` 里 `u_BRDF_LUT.Sample(...)` 在直接光路径上，与任何层栈
+    // 都无关）。于是「IBL 不在任何层栈里」时烘焙不注册 ⇒ 那张 LUT **从未被写入** ⇒ 直接光的
+    // BRDF 读到未初始化显存 ⇒ 画面上出现 **463 量级**的亮点（实测：三通道全空时
+    // `mean 0.2022 / max 463.32`，位置固定在 (416,996)；一旦有任何镜面源触发烘焙就回到
+    // `0.0694 / 42.20`）。这与 §9.2-Q 是同一族缺陷的**第三个实例**：把"谁需要这张图"写成
+    // 一份手工清单，就一定会漏掉下一个消费者。
+    // 现在恒注册：pass 内部仍按 `IsDirty()` 早退，不脏时它什么也不做（耗时读数恒为 0）。
     for (auto& prov : m_GIProviders) {
         if (!prov->Handles(GISourceId::IBL)) continue;
         prov->SyncToStack(m_GIConfig.diffuse);
-        // IBL 的产物被三处共用：diffuse 通道（辐照度）、specular 通道（预滤波），
-        // 以及 DDGI 探针更新的辐射度回退（GI_DDGI::SetIBL，无条件注入）。
-        // 故门控不能只看 diffuse——否则「IBL 只在镜面栈」或「漫反射栈只放 DDGI」时
-        // 辐照度图永不烘焙，DDGI 会静默退化为 DDGI.comp.slang 里的硬编码兜底常数
-        // （sh[0] = 0.02/0.03/0.08），即 DDGI 实际不做任何 GI。
-        const bool neededByDiffuse  = prov->NeedsPass(m_GIConfig.diffuse);
-        const bool neededBySpecular = prov->NeedsPass(m_GIConfig.specular);
-        const bool neededByDDGI     = m_DDGI.IsEnabled();   // 探针更新要采辐照度
-        if (!neededByDiffuse && !neededBySpecular && !neededByDDGI) continue;
         const u32 giIdx = (u32)(&prov - m_GIProviders.data());   // 计时下标（任务 29）
         rg.AddPass("IBL_Bake", {}, {},
             [&, p = prov.get(), giIdx](rhi::IRHICommandList* c) {
