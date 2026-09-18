@@ -120,6 +120,8 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
 
     // GBuffer 投影贴花 Pass（任务 24）：盒子几何 + PSO + 描述符集（读 worldPos/depth 采样）
     m_DecalPass.Initialize(device, m_Width, m_Height);
+    // 逐实例剔除（任务 25）：可见列表 + compute PSO（实例化网格在 GBuffer 里也要走剔除）
+    m_InstanceCuller.Initialize(device);
 
     // 前帧 HDR 辐射度：GI 源共享的一份（DDGI 探针、SSGI 的入射辐射度都用它）。
     // 必须在各 GI 源 Initialize 之前建好并注入，使它们在 Initialize 阶段即可绑到有效纹理。
@@ -455,6 +457,7 @@ void DeferredPipeline::Shutdown() {
     if (m_ShadowSystem) m_ShadowSystem->Shutdown();
     m_PostProcess.Shutdown();
     m_DecalPass.Shutdown();   // 任务 24：投影贴花（盒子几何 + PSO + 描述符集）
+    m_InstanceCuller.Shutdown();   // 任务 25：逐实例剔除
     if (m_GBuffer) m_GBuffer->Shutdown();
     m_Lighting.Shutdown();
     m_TransientTestPSO.reset();

@@ -62,6 +62,11 @@ struct GBufferContext {
     // 任务 24：Deferred 路径排除贴花卡片（改由 DecalPass 投影到 GBuffer）
     bool excludeDecals = false;
 
+    // 任务 25：逐实例剔除器（实例化网格的可见列表 + 间接命令）。为空 = 不做逐实例剔除
+    class InstanceCuller* instanceCuller = nullptr;
+    /// 当前飞行帧槽位（逐实例剔除的可见列表/命令按槽位分开）
+    u32 frameSlot = 0;
+
     // 上一帧 ViewProj（velocity 计算用）
     float4x4 prevViewProj = float4x4(1.0f);
 
@@ -150,6 +155,11 @@ public:
     /// 任务 24：贴花改由 DecalPass 投影 → GBuffer 绘制时排除贴花卡片
     void SetExcludeDecals(bool v)                  { m_Ctx.excludeDecals = v; }
     bool GetExcludeDecals() const                  { return m_Ctx.excludeDecals; }
+    /// 任务 25：逐实例剔除器与当前飞行帧槽位（实例化网格的可见列表/间接命令）
+    void SetInstanceCuller(InstanceCuller* c, u32 frameSlot) {
+        m_Ctx.instanceCuller = c;
+        m_Ctx.frameSlot      = frameSlot;
+    }
     void SetDGCContext(const GBufferContext::DGCContext& dgc) { m_Ctx.dgc = dgc; }
     void ClearDGCContext()                         { m_Ctx.dgc = {}; }
 

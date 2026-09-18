@@ -21,6 +21,7 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 
 #include "Pipeline/GBufferRenderer.h"
 #include "Pipeline/DecalPass.h"   // 任务 24：GBuffer 投影贴花
+#include "Pipeline/InstanceCuller.h"   // 任务 25：逐实例 GPU 视锥剔除
 #include "Pipeline/LightingPass.h"
 #include "Pipeline/ParticleRenderer.h"
 #include "GI/GI_SSGI.h"
@@ -169,6 +170,9 @@ private:
     DecalPass m_DecalPass;
     /// 贴花卡片是否从 GBuffer 绘制中排除（Deferred 恒为 true：由投影 Pass 接管）
     bool m_ExcludeDecalCards = false;
+
+    // 逐实例 GPU 视锥剔除（任务 25）：实例化网格的可见列表 + 间接命令
+    InstanceCuller m_InstanceCuller;
 
     // 光照 Pass（HDR 目标 + PSO + 描述符集，共享组件）
     LightingPass m_Lighting;

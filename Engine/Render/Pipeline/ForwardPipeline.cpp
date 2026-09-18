@@ -377,6 +377,7 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
     // --- GPU Culling ---
     m_GPUCulling.Initialize(device);
     m_GPUScene.Initialize(device);
+    m_InstanceCuller.Initialize(device);   // 任务 25：逐实例剔除（可见列表 + 间接命令）
     m_Profiler.Initialize(device, rhi::kMaxProfilerPasses, MAX_FRAMES_IN_FLIGHT);  // GPU Profiler
 
     // --- SceneRenderer ---
@@ -481,6 +482,7 @@ int ForwardPipeline::ReloadShader(StringView shaderName,
 }
 
 void ForwardPipeline::Shutdown() {
+    m_InstanceCuller.Shutdown();   // 任务 25：逐实例剔除（须在设备有效时释放 bindless 槽位）
     if (m_Device) {
         m_Device->DestroyDescriptorSetLayout(m_PerFrameLayout);
     }
@@ -1014,6 +1016,11 @@ void ForwardPipeline::RenderScene(
     float4x4 viewProj = camera.GetViewProjMatrix();
     u32 drawCount = 0;
 
+    // 任务 25：逐实例剔除统计（面板/日志用）
+    u32 culledInstanceMeshes = 0;   // 走逐实例剔除的实例化网格数
+    u32 culledInstances      = 0;   // 剔除后可见实例数
+    u32 totalInstances       = 0;   // 剔除前实例总数
+
     // 帧级 push constant
     PushConstantData framePC{};
     framePC.viewProjMatrix = viewProj;
@@ -1086,40 +1093,11 @@ void ForwardPipeline::RenderScene(
     // MVP 限制：Forward 非 GPU-Culling 路径；Deferred/间接路径后续扩展。
     // ============================================================
     world.ForEach<he::InstancedMeshComponent>([&](he::Entity, he::InstancedMeshComponent& im) {
-        u32 count = im.GetInstanceCount();
-        // 任务 23：帧边界推进退役队列（有界释放；先推进本帧再入队本帧退役的资源）
-        im.AdvanceRetireQueue();
-        if (count == 0 || im.GetIndexCount() == 0) return;
-
-        // 实例变换上传（脏标记触发）：容量够就 Map 原地复用，只在扩容时重建缓冲。
-        // 【为什么】bindless 堆槽位回收后，"每次更新都新建缓冲 + 旧缓冲保活"已无必要，
-        // 原地更新还能省掉描述符重写与 SSBO 句柄变更。
-        if (im.bTransformsDirty || !im.instanceBuffer) {
-            const bool needGrow = (!im.instanceBuffer || im.instanceBufferCapacity < count);
-            if (needGrow) {
-                rhi::BufferDesc desc;
-                desc.size        = sizeof(float4x4) * count;
-                desc.usage       = rhi::BufferUsage::Storage;
-                desc.initialData = im.instanceTransforms.data();
-                desc.cpuAccess   = true;
-                // 旧缓冲退役（N 帧延迟释放）+ 释放旧 bindless 槽位
-                if (im.instanceBuffer) {
-                    m_Device->GetBindlessHeap()->ReleaseBuffer(im.instanceSSBOHandle);
-                    im.RetireInstanceBuffer();
-                }
-                im.instanceBuffer = m_Device->CreateBuffer(desc);
-                im.instanceBufferCapacity = count;
-                im.instanceSSBOHandle = m_Device->GetBindlessHeap()->RegisterBuffer(im.instanceBuffer.get());
-            } else {
-                // 复用缓冲：Map 原地写入最新变换（容量可能大于实例数，只写前 count 个）
-                void* mapped = im.instanceBuffer->Map();
-                if (mapped) {
-                    std::memcpy(mapped, im.instanceTransforms.data(), sizeof(float4x4) * count);
-                    im.instanceBuffer->Unmap();
-                }
-            }
-            im.bTransformsDirty = false;
-        }
+        const u32 count = im.GetInstanceCount();
+        // 任务 23/25：实例变换上传（容量够就原地复用；退役队列有界延迟释放）
+        // —— 与 Deferred 的 GBuffer 路径共用同一份逻辑（InstanceCuller::UploadInstanceTransforms）
+        const u32 instHandle = m_InstanceCuller.UploadInstanceTransforms(m_Device, im);
+        if (count == 0 || im.GetIndexCount() == 0 || instHandle == 0) return;
 
         // 定位该组件的对象条目（objectIndex → 材质数据）
         u32 objIndex = 0;
@@ -1134,6 +1112,55 @@ void ForwardPipeline::RenderScene(
         pc.objectIndex       = objIndex;
         pc.useInstanceID     = 2;
         pc.instanceSSBOHandle = im.instanceSSBOHandle;
+
+        // ── 任务 25：逐实例 GPU 视锥剔除 ──
+        // 开了 enableFrustumCull 就先把"每个实例的世界 AABB"过一遍六平面测试：
+        // 通过者压缩进可见列表，命令里的 instanceCount 由 GPU 原子累加；
+        // 绘制改成 DrawIndexedIndirect，顶点着色器按可见列表取实例变换。
+        // 关掉时保持原路径（整批实例一次 DrawIndexed），便于 A/B 对比。
+        bool useCull = im.enableFrustumCull && m_InstanceCuller.GetPSO() != nullptr;
+        const u32 frameSlot = m_CurrentFrameSlot % rhi::kMaxFramesInFlight;
+        if (useCull) {
+            if (!im.instanceCullCmd[frameSlot]) {   // 命令缓冲按飞行帧存活（每帧都要一份）
+                im.instanceCullCmd[frameSlot] = m_InstanceCuller.CreateCommandBuffer(
+                    im.GetIndexCount(), 0, 0);
+                if (im.instanceCullCmd[frameSlot]) {
+                    im.instanceCullCmdHandle[frameSlot] =
+                        m_Device->GetBindlessHeap()->RegisterBuffer(im.instanceCullCmd[frameSlot].get());
+                }
+            }
+            if (!im.instanceCullCmd[frameSlot] || im.instanceCullCmdHandle[frameSlot] == 0) {
+                useCull = false;   // 命令缓冲创建失败：安全回退整批绘制
+            }
+        }
+
+        if (useCull) {
+            // 实例网格的局部包围盒（内置立方体 = ±0.5；glTF 资产走组件包围盒）
+            const AABB lb = im.GetBounds();
+            const u32 prevVisible = m_InstanceCuller.Cull(
+                cmd, im.instanceBuffer.get(), im.instanceSSBOHandle,
+                im.instanceCullCmd[frameSlot].get(), im.instanceCullCmdHandle[frameSlot],
+                count, frameSlot, lb.min, lb.max, framePC.viewProjMatrix);
+
+            pc.instanceVisibleHandle = m_InstanceCuller.GetVisibleIndicesHandle(frameSlot);
+            cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[m_CurrentFrameSlot]);
+            cmd->SetDrawDebugLabel("Forward InstancedMesh (逐实例剔除)");
+            cmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
+            cmd->SetVertexBuffer(im.GetVertexBuffer().get(), 0);
+            cmd->SetIndexBuffer(im.GetIndexBuffer().get());
+            // 一条命令、stride 20（VkDrawIndexedIndirectCommand）：instanceCount 由 cull 写入
+            cmd->DrawIndexedIndirect(im.instanceCullCmd[frameSlot].get(), 0, 1,
+                                     sizeof(InstanceIndirectCommand));
+            // 读回统计（上一帧 GPU 写入的值；仅用于面板/日志）
+            im.visibleInstanceCount = prevVisible;
+            drawCount += prevVisible;
+            ++culledInstanceMeshes;
+            culledInstances += prevVisible;
+            totalInstances += count;
+            return;
+        }
+
+        pc.instanceVisibleHandle = 0;
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[m_CurrentFrameSlot]);
         cmd->SetDrawDebugLabel("Forward InstancedMesh");
         cmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
@@ -1296,6 +1323,13 @@ void ForwardPipeline::RenderScene(
     // 三角形计数（粗略估算：每个 draw 平均 indexCount/3）
     for (auto& di : filteredItems)
         m_LastTriCount += di.mesh->GetIndexCount() / 3;
+
+    // 任务 25：逐实例剔除统计（0 个走剔除时不覆盖，保留最后一次有效值）
+    if (culledInstanceMeshes > 0) {
+        m_LastCulledInstanceMeshes = culledInstanceMeshes;
+        m_LastVisibleInstances     = culledInstances;
+        m_LastTotalInstances       = totalInstances;
+    }
 
     static bool s_FirstFrame = true;
     if (s_FirstFrame) {

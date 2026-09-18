@@ -10,6 +10,7 @@
 #include "Pipeline/GPUCulling.h"
 #include "Pipeline/GPUScene.h"
 #include "Pipeline/MeshBatcher.h"
+#include "Pipeline/InstanceCuller.h"   // 任务 25：逐实例 GPU 视锥剔除
 #include "AntiAliasing/AntiAliasing.h"
 #include "Profiler/ProfilerManager.h"
 
@@ -111,6 +112,14 @@ public:
     u32 GetLastDrawCount() const { return m_LastDrawCount; }
     u32 GetLastTriCount()  const { return m_LastTriCount; }
 
+    // ── 任务 25：逐实例剔除统计（面板/判据用）──
+    /// 逐实例剔除的实例化网格数 / 剔除后可见实例数 / 剔除前实例总数
+    u32 GetCulledInstanceMeshCount() const { return m_LastCulledInstanceMeshes; }
+    u32 GetVisibleInstanceCount()    const { return m_LastVisibleInstances; }
+    u32 GetTotalInstanceCount()      const { return m_LastTotalInstances; }
+    /// 逐实例剔除器（暴露给示例做开关与统计）
+    InstanceCuller& GetInstanceCuller() { return m_InstanceCuller; }
+
 private:
     void CollectLights(PushConstantData& pc, he::World& world, he::SceneGraph& sg, const CameraData& camera);
     void UploadMaterialBindless(he::World& world);  // 去重收集场景材质 → 写入 bindless 材质 SSBO 并注册（须在 heap->Flush() 前调用）
@@ -202,6 +211,12 @@ private:
     ProfilerManager m_Profiler;  // GPU 时间戳 Profiler
     u32 m_LastDrawCount = 0;
     u32 m_LastTriCount  = 0;
+
+    // 任务 25：逐实例 GPU 视锥剔除（实例化网格的可见列表 + 间接命令）
+    InstanceCuller m_InstanceCuller;
+    u32 m_LastCulledInstanceMeshes = 0;   // 走逐实例剔除的实例化网格数
+    u32 m_LastVisibleInstances     = 0;   // 剔除后可见实例数（读回，滞后一帧）
+    u32 m_LastTotalInstances       = 0;   // 剔除前实例总数
 
     // Forward+（Cluster 光源剔除）
     bool                           m_UseForwardPlus = true;  // 默认开启 Forward+

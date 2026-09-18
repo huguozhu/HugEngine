@@ -220,6 +220,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             // 更新每帧动态参数
             m_GBuffer->SetObjectBuffer(m_ObjectBuffers[m_CurrentFrameSlot].get());
             m_GBuffer->SetPrevViewProj(m_PrevViewProj);
+            // 任务 25：逐实例剔除器 + 当前飞行帧槽位（可见列表/间接命令按槽位分开）
+            m_GBuffer->SetInstanceCuller(&m_InstanceCuller, m_CurrentFrameSlot);
 
             // ── DGC 模式上下文注入（通过 RHI 统一接口）──
             m_DGCEnabled = (cvDGC_Enable != 0)

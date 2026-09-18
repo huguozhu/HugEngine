@@ -3,6 +3,8 @@
 // MeshBatcher::Build + FillGPUScene 在 DeferredPipeline::BuildFrameGraph 中完成
 #include "Pipeline/GBufferRenderer_GPU.h"
 #include "Pipeline/MeshBatcher.h"
+#include "Pipeline/InstanceCuller.h"   // 任务 25：逐实例剔除
+#include "Scene/InstancedMeshComponent.h"
 #include "Scene/MeshComponent.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
@@ -122,11 +124,15 @@ void GBufferRenderer_GPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
         if (dbgCount <= 3) HE_CORE_INFO("GBuffer_GPU: fallback CPU path, {} drawItems", drawItems.size());
         float4x4 jvp = camera.GetViewProjMatrix();
         for (auto& di : drawItems) {
-            struct { float4x4 vp; float4x4 pvp; u32 oi; u32 uid; u32 _pad[14]; } pc;
+            // 任务 25：实例化网格由下面专门段落绘制
+            if (di.bInstanced) continue;
+            struct { float4x4 vp; float4x4 pvp; u32 oi; u32 uid; u32 inst; u32 vis; u32 _pad[12]; } pc;
             pc.vp = jvp;
             pc.pvp = ctx.prevViewProj;
             pc.oi = di.objectIndex;
             pc.uid = 0;
+            pc.inst = 0;
+            pc.vis = 0;
             // DrawCall 调试 marker：标记当前绘制的物体（RenderDoc 定位用）
             char label[64];
             snprintf(label, sizeof(label), "GBuffer Obj#%u", di.objectIndex);
@@ -136,6 +142,66 @@ void GBufferRenderer_GPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
             cmd->SetIndexBuffer(di.mesh->GetIndexBuffer().get());
             cmd->DrawIndexed(di.mesh->GetIndexCount());
         }
+
+        // ── 实例化网格（任务 25，与 CPU 模式/Forward 同一套机制）──
+        world.ForEach<he::InstancedMeshComponent>([&](he::Entity, he::InstancedMeshComponent& im) {
+            if (im.GetInstanceCount() == 0 || im.GetIndexCount() == 0) return;
+            u32 objIndex = 0;
+            bool found = false;
+            for (auto& di : drawItems) {
+                if (di.mesh == static_cast<he::MeshComponent*>(&im)) { objIndex = di.objectIndex; found = true; break; }
+            }
+            if (!found) return;
+
+            const u32 count = im.GetInstanceCount();
+            const u32 slot  = ctx.frameSlot % rhi::kMaxFramesInFlight;
+            // 实例变换上传（与 Forward/CPU 模式共用同一份逻辑）
+            const u32 instHandle = ctx.instanceCuller
+                                 ? ctx.instanceCuller->UploadInstanceTransforms(ctx.device, im)
+                                 : 0;
+            if (instHandle == 0) return;
+            struct { float4x4 vp; float4x4 pvp; u32 oi; u32 uid; u32 inst; u32 vis; u32 _pad[12]; } pc;
+            pc.vp   = jvp;
+            pc.pvp  = ctx.prevViewProj;
+            pc.oi   = objIndex;
+            pc.uid  = 2;
+            pc.inst = im.instanceSSBOHandle;
+            pc.vis  = 0;
+
+            bool useCull = im.enableFrustumCull && ctx.instanceCuller && ctx.instanceCuller->GetPSO();
+            if (useCull) {
+                if (!im.instanceCullCmd[slot]) {
+                    im.instanceCullCmd[slot] = ctx.instanceCuller->CreateCommandBuffer(im.GetIndexCount(), 0, 0);
+                    if (im.instanceCullCmd[slot]) {
+                        im.instanceCullCmdHandle[slot] =
+                            ctx.device->GetBindlessHeap()->RegisterBuffer(im.instanceCullCmd[slot].get());
+                    }
+                }
+                if (!im.instanceCullCmd[slot] || im.instanceCullCmdHandle[slot] == 0) useCull = false;
+            }
+            if (useCull) {
+                const AABB lb = im.GetBounds();
+                const u32 prevVisible = ctx.instanceCuller->Cull(
+                    cmd, im.instanceBuffer.get(), im.instanceSSBOHandle,
+                    im.instanceCullCmd[slot].get(), im.instanceCullCmdHandle[slot],
+                    count, slot, lb.min, lb.max, jvp);
+                pc.vis = ctx.instanceCuller->GetVisibleIndicesHandle(slot);
+                cmd->SetDrawDebugLabel("GBuffer InstancedMesh (逐实例剔除)");
+                cmd->SetPushConstants(0, sizeof(pc), &pc);
+                cmd->SetVertexBuffer(im.GetVertexBuffer().get(), 0);
+                cmd->SetIndexBuffer(im.GetIndexBuffer().get());
+                cmd->DrawIndexedIndirect(im.instanceCullCmd[slot].get(), 0, 1,
+                                         sizeof(InstanceIndirectCommand));
+                im.visibleInstanceCount = prevVisible;
+                return;
+            }
+
+            cmd->SetDrawDebugLabel("GBuffer InstancedMesh");
+            cmd->SetPushConstants(0, sizeof(pc), &pc);
+            cmd->SetVertexBuffer(im.GetVertexBuffer().get(), 0);
+            cmd->SetIndexBuffer(im.GetIndexBuffer().get());
+            cmd->DrawIndexed(im.GetIndexCount(), count);
+        });
     }
 
     cmd->EndOffscreenPass();
