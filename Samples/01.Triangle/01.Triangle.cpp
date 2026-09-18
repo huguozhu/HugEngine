@@ -112,25 +112,35 @@ int main() {
         rtPSO = device->CreateRTPipelineState(rtpDesc);
         HE_ASSERT(rtPSO, "RT PSO 创建失败");
 
-        // SBT
+        // SBT —— 三条硬性要求（与引擎 RTPass::BuildSBT 的写法保持一致）：
+        //   1) 承载缓冲必须带 SHADER_BINDING_TABLE 用途，否则 deviceAddress 找不到有效缓冲
+        //      （VUID-vkCmdTraceRaysKHR-pRayGenShaderBindingTable-03681 / -pMissShaderBindingTable-03684）；
+        //   2) 每个区域的起始地址必须按 shaderGroupBaseAlignment 对齐（本机 64B），
+        //      否则报 VUID-...-pMissShaderBindingTable-03685；
+        //   3) 组与组之间的步长同样要按该对齐向上取整，不能直接用 handleSize（本机 32B）。
         u32 groupCount = rtPSO->GetShaderGroupCount();
         u32 handleSize = rtPSO->GetShaderGroupHandleSize();
         auto handles   = rtPSO->GetShaderGroupHandles();
-        u32 sbtSize    = groupCount * handleSize;
+        const u32 align  = device->GetCaps().shaderGroupBaseAlignment
+                         ? device->GetCaps().shaderGroupBaseAlignment : 1u;
+        const u32 stride = (handleSize + align - 1u) & ~(align - 1u);
+        const u32 sbtSize = stride * groupCount;
 
         rtSBTBuf = device->CreateBuffer({
-            .size = sbtSize, .usage = rhi::BufferUsage::Storage | rhi::BufferUsage::Uniform,
+            .size = sbtSize,
+            .usage = rhi::BufferUsage::Storage | rhi::BufferUsage::Uniform
+                   | rhi::BufferUsage::ShaderBindingTable,
         });
         u8* mapped = static_cast<u8*>(rtSBTBuf->Map());
         for (u32 g = 0; g < groupCount; ++g)
-            std::memcpy(mapped + g * handleSize, handles.data() + g * handleSize, handleSize);
+            std::memcpy(mapped + g * stride, handles.data() + g * handleSize, handleSize);
         rtSBTBuf->Unmap();
 
         sbt.buffer = rtSBTBuf.get();
         sbt.rayGen.handleOffset = 0;
-        sbt.rayGen.stride = handleSize;
-        sbt.miss.handleOffset   = handleSize;
-        sbt.miss.stride   = handleSize;
+        sbt.rayGen.stride = stride;
+        sbt.miss.handleOffset   = stride;
+        sbt.miss.stride   = stride;
 
         HE_CORE_INFO("RT 管线就绪: {} groups, {}B SBT (直接渲染到 BackBuffer)", groupCount, sbtSize);
     }
