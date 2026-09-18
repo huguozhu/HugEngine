@@ -16,7 +16,7 @@
 | DDGI (探针 GI) | ✅ | 升级为 Radiance Cache |
 | GBuffer DeferredPipeline | ✅ | Nanite Phase 1 写入目标 |
 | ClusteredShading LightGrid | ✅ | Lumen 命中点直接光照 |
-| Denoiser (5×5 双边) | ✅ | Screen Probe Gather 空间滤波 |
+| Denoiser (5×5 双边) | ✅ | Screen Probe Gather 空间滤波；**统一降噪框架**见 §5.1 |
 | meshoptimizer | ✅ | Nanite 预处理 Cluster/LOD |
 | VMA | ✅ | GPU 内存管理 |
 
@@ -276,7 +276,59 @@ Engine/Shader/Shaders/
 
 ## 5. 分阶段里程碑
 
-### Lumen
+### 5.1 统一降噪框架（自《HugEngine GI 架构与开发计划》迁入）
+
+> 这项工作原本挂在 GI 计划的任务 11（统一降噪框架）下，但它**真正的消费方是本项目的
+> Lumen**（多信号共存：Screen Probe Gather / Radiance Cache / 反射 / 阴影 / 探针）。
+> 因此任务与它的状态一并迁到这里，GI 计划只保留设计与现状对照（该文档 §4.4）作为背景。
+> **本节的判据与证据原样保留**，不要因为换了文档就把它当成"未做过的事"。
+
+**为什么必须做（现状）**：每个 Provider 自带降噪 —— `Denoiser`（空间 5×5 双边）×4 与
+`RTDenoiser`（时域累积）×5 = **9 个实例、9 套 PSO、14 张纹理**；两个类的输入签名与参数机制
+互不相同，**降噪器之间不组合**，链条形状由调用方的 `if (IsTemporalIndex(i))` 位置约定表达。
+接 Lumen 时会立刻撞上两件事：① 多信号共存时没有统一的信号分类与历史分配；② 有效性
+（`alpha < 0`）协议在四处断裂（GI 计划 §9.2-C 就是它断出来的缺陷）。
+
+**三步走（每步独立可提交、独立可回退）**：
+
+| 步骤 | 内容 | 状态 |
+|---|---|---|
+| **11.1 去重 + 参数可配** | `SSGIProvider` / `SSRProvider` 里逐行同构的附属 pass 合并为一份实现（`GI/SpatialDenoiseAux.h`）；`Denoiser` 的 `depthSigma` / `normalSigma` 从"着色器里的固定常量"变成可配，并集中在管线的一处按信号赋值 | ✅ **已完成** |
+| **11.2 链条数据化** | `RTProvider` 用 `std::vector<Stage>` 取代 `m_Temporal` + `m_Spatial` 两个指针与"索引 0 是时域、1 是空间"的位置约定；pass 链的枚举/输入输出/PreBind/Render 全部改为遍历该向量 | ✅ **已完成** |
+| **11.3 按信号类型分派** | 引入 `DenoiseSignal`；统一分配历史纹理与采样器；支持把多个信号批量 dispatch；把"有效性（`alpha < 0`）"提升为**框架级契约** | ⏳ **待做（需要本项目的消费方）** |
+
+**11.1 的判据与实测**（背靠背单源采样逐项一致）：用改前/改后两个可执行文件、每次运行一份
+**私有 cfg 副本**（示例程序退出时会回写 cfg，复用同一文件会把配置差异误读成代码差异 ——
+本轮第一次 A/B 就因此得到 −2% 的假差异）对照：`ssgi` 变体 **−0.0009%**、`both` 变体
+**+0.0002%**，都在实测抖动内；白炉 1.0000、单测全绿。
+**参数取值仍是默认 10 / 8 是实测结论、不是漏改**：把 SSGI 放宽到 2 / 2 后高频代理 `mean|Δx|`
+只从 0.000984 降到 0.000935（−5%），整体 `std/mean` 反而不变，HDR 偏移 −1.5% ⇒ **瓶颈是
+5×5 的核本身与缺少时域累积**，这直接指导 11.3 往"更大的核 / 时域"走，而不是调权重。
+
+**11.2 的判据与实测**：三种 RT 效果的 pass 链与改造前**逐个同名同序**（RTGI →
+`RT_GI_Temporal` → `RT_GI_Denoise`；RT 反射 → `RT_Reflection_Temporal` →
+`RT_Reflection_Denoise`；RT 阴影 → `RT_Shadow_Denoise`）；`rtgi_coupling_check` 0.000% PASS；
+三变体读数与白炉不变；**"加一级只需 push"当场演示** —— 临时给 RTGI 多 push 一个 stage，
+pass 列表立刻多出 `RT_GI_Denoise_Third`，框架代码一行未改（演示后已还原）。
+
+**11.3 的验收判据（待做，供实现时照抄）**：
+- 抽象选型只有在**真实的多信号共存场景**下才能验收（Lumen 的 Screen Probe / Radiance Cache
+  与既有 GI/反射/阴影信号同帧）——没有消费方的泛化不算验收；
+- 框架级有效性契约：任何信号的降噪输出必须统一表达"本条无效"（`alpha < 0`），且合成端
+  只需读这一个约定；
+- **半分辨率也要降噪**：现在 `SSGIProvider::AuxActive()` 在 `halfRes` 时返回 false，半分辨率
+  输出被直接采样；根治需要 `needsUpscale`（重建升采样）这一信号属性；
+- 与 L6 里程碑的关系：L6 = 时间混合 + 空间滤波 + 异步 Compute，**统一降噪框架是它的前置**，
+  否则 L6 会退化成"再挂一套 Lumen 专用降噪器"。
+
+> **设计细节与现状逐项对照**见《HugEngine GI 架构与开发计划》的 **§4.4**（那一节保留在 GI
+> 文档里：它对比的是 GI 各 Provider 现有降噪器的接口/参数/链条，是这份计划的输入）。
+
+---
+
+### 5.2 里程碑总表
+
+#### Lumen
 
 | 里程碑 | 内容 | 验证标准 |
 |--------|------|----------|
@@ -285,9 +337,9 @@ Engine/Shader/Shaders/
 | **L3: Screen Probe** | 探针放置 + SDF 追踪 + SH 投影 | 半球追踪产生漫反射 GI |
 | **L4: HW RT 远场** | 远场切换 HW RT + 混合追踪 | SDF 近 + RT 远正确混合 |
 | **L5: Radiance Cache** | 升级 DDGI → 二阶 SH + 自适应密度 | 室内/室外稳定 GI |
-| **L6: 降噪+优化** | 时间混合 + 空间滤波 + 异步 Compute | 60fps @ 1080p |
+| **L6: 降噪+优化** | 时间混合 + 空间滤波 + 异步 Compute（**前置：§5.1 的统一降噪框架**） | 60fps @ 1080p |
 
-### Nanite
+#### Nanite
 
 | 里程碑 | 内容 | 验证标准 |
 |--------|------|----------|
@@ -298,12 +350,12 @@ Engine/Shader/Shaders/
 | **N5: LOD 流式** | 运行时 LOD 选择 + 反馈 | 帧率稳定，无 pop |
 | **N6: 材质批次** | Material Bin + Bindless | 多材质场景无 Draw 爆炸 |
 
-### 建议推进顺序
+#### 建议推进顺序
 
 ```
 N1(预处理) → N2(剔除) → N3(软光栅 GBuffer) → L1(SDF) → L2(SurfaceCache)
 → L3(ScreenProbe) → N4(硬光栅) → L4(HW RT远场) → L5(RadianceCache)
-→ L6+N5+N6(优化)
+→ §5.1 统一降噪框架（11.3） → L6+N5+N6(优化)
 ```
 
 先跑通 Nanite 基本渲染（N1-N3），因为它产出 GBuffer 写入能力。然后基于 Nanite 的 GBuffer 上 Lumen（L1-L3）。
