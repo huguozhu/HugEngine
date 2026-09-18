@@ -52,6 +52,17 @@ public:
     bool   unlit             = false;            // 无光照模式
     bool   castShadow        = true;             // 是否投射阴影（false 的网格不进入阴影贴图，如光源可视化球）
     u8     alphaMode         = 0;                // AlphaMode: 0=Opaque, 1=Mask, 2=Blend
+    // --- RT/PT 用的「有效材质」（贴图均值 × 因子）---
+    // 光栅化路径是逐像素采样贴图的；而 RT/PT 的 ClosestHit 只能按实例查因子
+    // （在 RT 里声明采样器会破坏描述符集，实测材质会读到 0），于是"靠贴图调制"的
+    // 材质会被判错：Sponza 的 metallicFactor 缺省为 1.0、实际靠 metallicRoughness
+    // 贴图调制成石头，只取因子会让整个场景变成纯金属 —— 漫反射项被 (1-metallic)
+    // 抹掉，只剩天空镜面反射，画面发暗且没有细节。
+    // 因此由解码贴图的一方（示例/加载器，手上有像素）算出均值填在这里，RTPass 优先使用。
+    float3 baseColorAvg   = float3(0.0f);   // 基础色贴图 RGB 均值 × baseColorFactor.rgb
+    float  metallicAvg    = 0.0f;           // metallicRoughness 贴图 B 均值 × metallicFactor
+    float  roughnessAvg   = 0.0f;           // metallicRoughness 贴图 G 均值 × roughnessFactor
+    bool   hasMaterialAvg = false;          // 上面三项是否有效
     u32    materialID        = 0;                // Bindless 纹理数组基索引
 
     // --- Disney principled BSDF / 折射扩展参数 ---

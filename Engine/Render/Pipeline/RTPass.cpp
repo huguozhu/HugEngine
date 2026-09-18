@@ -563,13 +563,18 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world
         u32 triCount = m.GetIndexCount() / 3;
 
         // 材质纹理四行
+        // RT/PT 的 ClosestHit 没有贴图采样能力，因此**优先使用「有效材质」**
+        // （贴图均值 × 因子，由解码贴图的一方填进 MeshComponent.hasMaterialAvg）；
+        // 没有均值时退回因子（与光栅化的因子语义一致）。
+        // 不这么做的话，像 Sponza 这种 metallicFactor 缺省 1.0、实际靠
+        // metallicRoughness 贴图调制成石头的场景会被整体判成纯金属，漫反射全灭。
         float* row0 = &matData[i * 4];
-        row0[0] = m.baseColorFactor.r;
-        row0[1] = m.baseColorFactor.g;
-        row0[2] = m.baseColorFactor.b;
-        row0[3] = m.metallicFactor;
+        row0[0] = m.hasMaterialAvg ? m.baseColorAvg.r : m.baseColorFactor.r;
+        row0[1] = m.hasMaterialAvg ? m.baseColorAvg.g : m.baseColorFactor.g;
+        row0[2] = m.hasMaterialAvg ? m.baseColorAvg.b : m.baseColorFactor.b;
+        row0[3] = m.hasMaterialAvg ? m.metallicAvg  : m.metallicFactor;
         float* row1 = &matData[n * 4 + i * 4];
-        row1[0] = m.roughnessFactor;
+        row1[0] = m.hasMaterialAvg ? m.roughnessAvg : m.roughnessFactor;
         row1[1] = m.aoFactor;
         row1[2] = 0.0f;
         row1[3] = 0.0f;

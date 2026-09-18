@@ -380,21 +380,41 @@ int main() {
     // ============================================================
     // 5. 加载 glTF 纹理 → RHI Texture → MeshComponent
     // ============================================================
-    std::unordered_map<String,
-        std::pair<std::unique_ptr<rhi::IRHITexture>,
-                  std::unique_ptr<rhi::IRHISampler>>> g_TexCache;
+    // 贴图缓存：GPU 纹理 + 采样器 + **贴图均值**
+    // 均值供 RT/PT 的「有效材质」使用（见 MeshComponent 的 baseColorAvg 注释）：
+    // PT 的 ClosestHit 只能按实例查因子，而 Sponza 的 metallicFactor 缺省 1.0、
+    // 实际靠 metallicRoughness 贴图调制成石头，不取均值会让整场景变成纯金属。
+    struct TexEntry {
+        std::unique_ptr<rhi::IRHITexture> tex;
+        std::unique_ptr<rhi::IRHISampler> sampler;
+        float3 avgColor = float3(0.0f);   // RGB 均值（基础色）
+        float  avgG     = 0.0f;           // G 通道均值（metallicRoughness：粗糙度）
+        float  avgB     = 0.0f;           // B 通道均值（metallicRoughness：金属度）
+    };
+    std::unordered_map<String, TexEntry> g_TexCache;
 
-    auto loadTexture = [&](const String& uri) -> std::pair<rhi::IRHITexture*, rhi::IRHISampler*> {
-        if (uri.empty()) return {nullptr, nullptr};
+    auto loadTexture = [&](const String& uri) -> TexEntry* {
+        if (uri.empty()) return nullptr;
         String texPath = (std::filesystem::path(sponzaPath).parent_path() / uri).string();
         auto it = g_TexCache.find(texPath);
         if (it == g_TexCache.end()) {
             int w, h, ch;
             u8* pixels = stbi_load(texPath.c_str(), &w, &h, &ch, 4);
-            if (!pixels) { HE_CORE_WARN("纹理加载失败: {}", texPath); return {nullptr, nullptr}; }
+            if (!pixels) { HE_CORE_WARN("纹理加载失败: {}", texPath); return nullptr; }
             u32 maxDim = static_cast<u32>(std::max(w, h));
             u32 mipLevels = 1;
             while (maxDim > 1) { maxDim >>= 1; ++mipLevels; }
+
+            // 贴图均值（每通道，归一化到 [0,1]）：RT/PT 只能按实例查材质因子，
+            // 用均值近似"贴图调制后的有效材质"
+            double sr = 0.0, sg = 0.0, sb = 0.0;
+            const i64 pixelCount = (i64)w * (i64)h;
+            for (i64 p = 0; p < pixelCount; ++p) {
+                sr += pixels[p * 4 + 0];
+                sg += pixels[p * 4 + 1];
+                sb += pixels[p * 4 + 2];
+            }
+            const double inv = 1.0 / (255.0 * (double)std::max<i64>(1, pixelCount));
 
             rhi::TextureDesc td;
             td.format=rhi::Format::RGBA8_UNORM;
@@ -414,10 +434,18 @@ int main() {
             sd.addressU=sd.addressV=rhi::AddressMode::Repeat;
             auto s = device->CreateSampler(sd);
             stbi_image_free(pixels);
-            it = g_TexCache.emplace(texPath, std::make_pair(std::move(t), std::move(s))).first;
-            HE_CORE_INFO("GPU 纹理: {} ({}×{})", texPath, w, h);
+            TexEntry e;
+            e.avgColor = float3((float)(sr * inv), (float)(sg * inv), (float)(sb * inv));
+            e.avgG     = (float)(sg * inv);
+            e.avgB     = (float)(sb * inv);
+            e.tex      = std::move(t);
+            e.sampler  = std::move(s);
+            it = g_TexCache.emplace(texPath, std::move(e)).first;
+            HE_CORE_INFO("GPU 纹理: {} ({}×{})  均值 RGB=({:.3f},{:.3f},{:.3f})",
+                         texPath, w, h,
+                         it->second.avgColor.r, it->second.avgColor.g, it->second.avgColor.b);
         }
-        return {it->second.first.get(), it->second.second.get()};
+        return &it->second;
     };
 
     {
@@ -437,24 +465,40 @@ int main() {
         auto defaultSamp = device->CreateSampler(sd);
         device->GetBindlessHeap()->SetDefaultTexture(
             defaultTex.get(), defaultSamp.get());
-        g_TexCache["__default__"] = {std::move(defaultTex), std::move(defaultSamp)};
+        TexEntry defEntry;
+        defEntry.tex     = std::move(defaultTex);
+        defEntry.sampler = std::move(defaultSamp);
+        g_TexCache["__default__"] = std::move(defEntry);
     }
 
     {
         u32 texCount = 0;
         world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent& mesh) {
-            auto [bcTex, bcSamp] = loadTexture(mesh.baseColorTexture);
-            auto [nTex, nSamp] = loadTexture(mesh.normalTexture);
-            auto [mrTex, mrSamp] = loadTexture(mesh.metallicRoughnessTexture);
-            auto [aoTex, aoSamp] = loadTexture(mesh.occlusionTexture);
+            TexEntry* bc = loadTexture(mesh.baseColorTexture);
+            TexEntry* nn = loadTexture(mesh.normalTexture);
+            TexEntry* mr = loadTexture(mesh.metallicRoughnessTexture);
+            TexEntry* ao = loadTexture(mesh.occlusionTexture);
             // 材质 = 4 个连续 bindless 纹理槽（BaseColor/Normal/MetallicRoughness/Occlusion），
             // 首调用返回值即 materialID（基索引），shader 用 texBase+0/1/2/3 采样
             auto* heap = device->GetBindlessHeap();
-            u32 matID = heap->RegisterTexture(bcTex, bcSamp);
-            heap->RegisterTexture(nTex, nSamp);
-            heap->RegisterTexture(mrTex, mrSamp);
-            heap->RegisterTexture(aoTex, aoSamp);
+            u32 matID = heap->RegisterTexture(bc ? bc->tex.get() : nullptr,
+                                              bc ? bc->sampler.get() : nullptr);
+            heap->RegisterTexture(nn ? nn->tex.get() : nullptr, nn ? nn->sampler.get() : nullptr);
+            heap->RegisterTexture(mr ? mr->tex.get() : nullptr, mr ? mr->sampler.get() : nullptr);
+            heap->RegisterTexture(ao ? ao->tex.get() : nullptr, ao ? ao->sampler.get() : nullptr);
             mesh.materialID = matID;
+
+            // RT/PT 的「有效材质」= 贴图均值 × 因子（PT 的 ClosestHit 无贴图采样能力；
+            // 不给均值的话，metallicFactor 缺省 1.0 的 Sponza 会整场变纯金属）
+            if (bc || mr) {
+                mesh.baseColorAvg = float3(mesh.baseColorFactor.r,
+                                           mesh.baseColorFactor.g,
+                                           mesh.baseColorFactor.b);
+                if (bc) mesh.baseColorAvg = mesh.baseColorAvg * bc->avgColor;
+                mesh.metallicAvg  = mesh.metallicFactor  * (mr ? mr->avgB : 1.0f);
+                mesh.roughnessAvg = mesh.roughnessFactor * (mr ? mr->avgG : 1.0f);
+                mesh.hasMaterialAvg = true;
+            }
             texCount++;
         });
         HE_CORE_INFO("纹理加载 + bindless 注册完成: {} primitive, {} 张独立纹理", texCount, g_TexCache.size());
@@ -642,7 +686,8 @@ int main() {
         rhi::IRHITexture*                tex = nullptr;
         std::unique_ptr<rhi::IRHIBuffer> buf;
         u32                              w = 0, h = 0;
-        u32                              bytesPerPixel = 8;   // RGBA16F=8，R32F=4
+        u32                              bytesPerPixel = 8;   // RGBA16F=8，R32F/BGRA8=4
+        const char*                      fmt = "RGBA16F";    // 落盘元数据里的格式名
     };
     std::vector<DumpTarget> g_DumpTargets;
     if (g_DumpPT)
@@ -732,7 +777,8 @@ int main() {
         // ── PT 参考图落盘：整幅 CopyTextureToBuffer 到 host 可见缓冲（仅对照路径）──
         // 必须在 render pass 之外录制；缓冲在采样帧才创建，尺寸取自纹理本身。
         if (g_DumpPT && !g_DumpDone && frameIndex >= g_DumpFrame) {
-            auto addTarget = [&](const String& name, rhi::IRHITexture* tex, u32 bytesPerPixel) {
+            auto addTarget = [&](const String& name, rhi::IRHITexture* tex, u32 bytesPerPixel,
+                                 const char* fmt) {
                 if (!tex) return;
                 DumpTarget t;
                 t.name = name;
@@ -740,6 +786,7 @@ int main() {
                 t.w    = tex->GetWidth();
                 t.h    = tex->GetHeight();
                 t.bytesPerPixel = bytesPerPixel;
+                t.fmt  = fmt;
                 rhi::BufferDesc dd;
                 dd.size      = (usize)t.w * t.h * bytesPerPixel;
                 dd.usage     = rhi::BufferUsage::Storage;   // 该路径恒定带 TRANSFER_DST，可作拷贝目标
@@ -755,16 +802,20 @@ int main() {
             };
             if (g_UseDeferred) {
                 // 对照模式：落盘延迟管线的 HDR（ToneMap 前的线性光照结果）+ GBuffer 的关键输入
-                addTarget("hdr", deferredPipeline.GetLighting().GetHDRTarget(), 8);
+                addTarget("hdr", deferredPipeline.GetLighting().GetHDRTarget(), 8, "RGBA16F");
                 if (auto* gb = deferredPipeline.GetGBuffer()) {
-                    addTarget("albedo", gb->GetAlbedo(), 8);
-                    addTarget("normal", gb->GetNormal(), 8);
+                    addTarget("albedo", gb->GetAlbedo(), 8, "RGBA16F");
+                    addTarget("normal", gb->GetNormal(), 8, "RGBA16F");
                 }
             } else if (auto* pt = pathTracingPipeline.GetPT()) {
-                addTarget("hdr",    pt->GetHDR(),            8);   // RGBA16F 最终辐射度
-                addTarget("depth",  pt->GetDepth(),          4);   // R32F 线性视图深度
-                addTarget("normal", pt->GetNormal(),         8);   // RGBA16F 世界法线 + roughness
-                addTarget("albedo", pt->GetAlbedoMetallic(), 8);   // RGBA16F albedo + metallic
+                addTarget("hdr",    pt->GetHDR(),            8, "RGBA16F");   // 最终辐射度
+                addTarget("depth",  pt->GetDepth(),          4, "R32F");      // 线性视图深度
+                addTarget("normal", pt->GetNormal(),         8, "RGBA16F");   // 世界法线 + roughness
+                addTarget("albedo", pt->GetAlbedoMetallic(), 8, "RGBA16F");   // albedo + metallic
+                // ToneMap 之后、FXAA 之前的 LDR：用来确认"屏幕上看到的"与 HDR 一致
+                // （排查"渲染一片黑"时，先分清是渲染还是显示链路）
+                if (auto* pp = pathTracingPipeline.GetPostProcess())
+                    addTarget("ldr", pp->GetLDRTarget(), 4, "BGRA8");
             }
             if (!g_DumpTargets.empty()) {
                 g_DumpDone = true;   // 已录制；实际读取放在 Submit 之后
@@ -956,8 +1007,7 @@ int main() {
                     std::ofstream f(base + "_" + t.name + ".f16", std::ios::binary);
                     f.write(static_cast<const char*>(p), (std::streamsize)bytes);
                     t.buf->Unmap();
-                    meta << t.name << " " << t.w << " " << t.h << " "
-                         << (t.bytesPerPixel == 4 ? "R32F" : "RGBA16F") << "\n";
+                    meta << t.name << " " << t.w << " " << t.h << " " << t.fmt << "\n";
                     HE_CORE_INFO("[PT采样] {}_{}.f16  {}x{}  {} B", base, t.name, t.w, t.h, bytes);
                 } else {
                     HE_CORE_ERROR("[PT采样] 映射失败: {}_{}", base, t.name);
