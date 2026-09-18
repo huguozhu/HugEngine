@@ -39,6 +39,7 @@ add_executable(HugEngineTests
     TestGIProbeGrid.cpp
     TestRSMFrustum.cpp
     TestPathPayload.cpp
+    TestPTMaterialParams.cpp
 )
 
 target_include_directories(HugEngineTests PRIVATE
