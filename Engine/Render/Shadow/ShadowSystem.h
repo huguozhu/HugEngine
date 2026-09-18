@@ -51,6 +51,7 @@ public:
     rhi::IRHISampler* GetRectShadowSampler()const;
     i32 GetShadowIndex(Entity light)const override;
     bool HasActiveShadows()const override{return m_ActiveCount>0;}
+    bool WasShadowMapWritten(u32 index)const override;
     float4x4 GetLightViewProj(u32 cascade)const override;
 
 private:

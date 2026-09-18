@@ -68,6 +68,14 @@ public:
 
     virtual bool HasActiveShadows() const = 0;
 
+    /// 第 index 张阴影贴图本帧是否**真的被写入过**（index 语义同 GetShadowMap）。
+    ///
+    /// 返回值是「绑定方该不该用这张图」的唯一真值：false 表示本帧没有产生它
+    /// （无该类光源 / 阴影被关闭），此时消费方必须绑占位纹理。否则会采到未初始化显存
+    /// —— 这类故障是静默的（不报错、画面只是偏暗），且读数随显存布局变化而不可复现
+    /// （§9.2-T）。默认 false：未实现该查询的实现方一律按「本帧未产出」处理。
+    virtual bool WasShadowMapWritten(u32 index) const { (void)index; return false; }
+
     /// 获取 cascade i 的光源 VP 矩阵（默认返回 identity，CSM override）
     virtual float4x4 GetLightViewProj(u32 cascade) const { (void)cascade; return float4x4(1.0f); }
 };

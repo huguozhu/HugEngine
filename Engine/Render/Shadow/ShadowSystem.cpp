@@ -122,6 +122,22 @@ rhi::IRHITexture* ShadowSystem::GetShadowMap(u32 i)const{
     return nullptr;
 }
 
+// 本帧该阴影图是否真的被写入过。
+// 每个 Technique 的 Render 只遍历「自己 CollectLights 收集到的那一段」，
+// 因此「该技术本帧收集到光源数 > 0」就是「它的图本帧被写过」的充要条件。
+bool ShadowSystem::WasShadowMapWritten(u32 index)const{
+    // 关闭或未就绪时 Update 直接返回、不会重填计数，此时不能拿上一帧的计数当作本次已产出
+    if(!m_Ready||!m_Enabled)return false;
+    u32 off=0;
+    for(usize i=0;i<m_Techniques.size();++i){
+        u32 n=m_Techniques[i]->GetShadowMapCount();
+        if(index<off+n)
+            return i<m_PerTechniqueCounts.size()&&m_PerTechniqueCounts[i]>0;
+        off+=n;
+    }
+    return false;
+}
+
 rhi::IRHISampler* ShadowSystem::GetShadowSampler()const{
     for(auto& t:m_Techniques)if(auto*s=t->GetShadowSampler())return s;
     return nullptr;
