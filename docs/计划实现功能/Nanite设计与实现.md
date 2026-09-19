@@ -4,6 +4,8 @@
 > 状态: 设计规范已定稿；**实现方案已按"独立模块 + 独立开关"重新定形**（§14），
 > 任务从 1 重新编号（§14.8，共 27 项，覆盖 N0 前置 + N1–N6 + 横切）；旧 §12 Task 1-10 的
 > 详细字段与判据仍有效，对应关系见 §14.9
+>
+> **另起会话实施 Nanite 时：先读 §14.12「接手须知」**（分支、配置漂移、验收基线、构建纪律、第一条任务）。
 
 ## 0. 本文件怎么读
 
@@ -49,6 +51,7 @@
 | §12 | 任务清单（Task 1 … Task 10） | 实现计划 |
 | §13 | 完成标准 | 实现计划 |
 | §14 | **独立模块化架构 + 重编号任务清单（27 项，从 1 开始）** | 实现计划（本次评审新增，以 §14.8 编号为准） |
+| §14.12 | **接手须知（新会话从这里开始）**：分支/配置漂移/验收基线/构建纪律/第一条任务 | 实现计划（**另起会话时先读这一节**） |
 
 ### 0.2 源文档不一致清单（保留双方说法，不裁决）
 
@@ -2226,3 +2229,54 @@ if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
 （本次更新后新增判据 ⑥ = 任务 2 的开关不变式）。
 
 **核验时间**：本节所有代码引用为 **2026-09-19（本次评审）** 逐条核对，行号与当时工作树一致。
+
+### 14.12 接手须知（新会话从这里开始）
+
+> 本节专为"清空对话上下文、另起一个新会话来实施 Nanite"而写：**凡是只存在于上一轮对话里、
+> 重启就会丢的环境状态都记在这里**。开始前请按 ①②③ 逐条过一遍。
+
+**① 分支与起点**
+- 当前 `main` 已合并 Lumen 全部工作（最新提交 `baeacd9`），工作树干净。
+- 建议：`git checkout -b nanite main`，沿用 lumen 的做法（**按逻辑拆分中文提交**，不自动 push）。
+- `lumen` 分支仍在（可删可留，删除前确认已合并）。
+
+**② 配置状态：`Content/Config/06_GILab.cfg` 已被改动（**必须处理**）**
+- 该文件**不被 git 跟踪**（`git ls-files Content/Config` 为空），所以这种漂移**不会**在 `git status` 里报警。
+- 2026-09-20 01:23 的一次**未设 `HE_GILAB_CONFIG`** 的运行把它回写成了 **Lumen solo**：
+  | 键 | 验收基线值 | 当前值 |
+  |---|---|---|
+  | `gi_solo` | 0 | **1** |
+  | `gi_blend_diffuse_w0`（IBL） | 1.0 | **0.0** |
+  | `gi_blend_diffuse_lumen` | 0.0 | **1.0** |
+- **影响**：`build/verify/acceptance_sweep.ps1` 的判据④是"默认预设回归"；用当前基础 cfg 跑，
+  它比较的是 Lumen solo，**口径失效**。
+- **做法**：开跑前把上表三键改回"验收基线值"（或另存一份干净的基础 cfg）；并且**永远用
+  `HE_GILAB_CONFIG=<私有副本>` 跑 exe** —— `build/verify/lumen_smoke.ps1` 已经这么做，
+  但**直接运行 exe 会回写基础文件**（这正是本次漂移的来源）。
+- `Content/Config/06_GILab_imgui.ini` 同时被回写（面板布局，无害）；若希望新 Nanite 面板出现在
+  默认位置，删掉它即可。
+
+**③ 验收与基线**
+- 一条命令：`powershell -NoProfile -ExecutionPolicy Bypass -File build\verify\acceptance_sweep.ps1`
+  → 期望 `ACCEPTANCE SWEEP: PASS`（判据 ①白炉 ②背靠背 ③关 Lumen ④默认预设 ⑤单测）。任务 2 会新增判据 ⑥（开关不变式）。
+- `-Baseline` 默认 `s37fin2`，其转储在 `build/verify/gi_s37fin2_*` —— **不要删**，删了判据④会"跳过"而不是判定。
+- 抖动族（**允许不同**）：`prov0_ao_*`（SSAO）、`hdr`、`radiance`；判据是"抖动族之外 ≤2 个 f16 ULP"。
+- 磁盘：`build/verify` 曾达 **92.5 GB / 16668 文件**（其中 `gi_*` 转储 88.95 GB）；清理时保留
+  `s37fin2` 那组；`chk_*.cfg` 可整批删（脚本每次重建）。
+
+**④ 构建与缓存的纪律（不需要清缓存）**
+- CMake 缓存、`build/Engine/Shader/Shaders/*.spv(.h)`、MSBuild/IFC 缓存都会随 `CMakeLists.txt`
+  变更自动重跑/重建；新增 `Engine/Render/Nanite/` 只需把文件加进 **`Engine/Render/CMakeLists.txt`
+  的显式列表**。
+- **新 shader 必须登记进 `Engine/Shader/CMakeLists.txt` 的 `COMP_SLANG`**（仓库用显式列表、
+  不能用 glob）——否则"看起来编了、其实没编"（本仓库已有过同类教训）。
+- 重建命令：`cmake --build build --config Release --target 06.GILab`；单测：`--target HugEngineTests`
+  然后 `build\bin\Release\HugEngineTests.exe`。
+
+**⑤ 第一条任务**
+- 从 **§14.8 任务 1**（模块骨架 + 独立开关，N0）开始：建 `Engine/Render/Nanite/` 六个文件 +
+  `NaniteSettings`（开关默认 **0**）+ 帧图 GBuffer 段的 `if/else`（开启时只注册 `Nanite_Noop`），
+  验收 = **开关关闭 ⇒ pass 集合与转储逐位一致；开启 ⇒ pass 列表多一项、画面不变**。
+- 紧接任务 2 把这条不变式固化成 `acceptance_sweep.ps1` 的判据⑥ —— 之后的每一步都靠它保证"不回归"。
+- **纪律**：先测量再改（§14.1 的每一项都是可复核的代码事实）；**不要**先动 cluster/软光栅，
+  阶段 0 是硬前置（否则 N2/N3 的产物没有消费者）。
