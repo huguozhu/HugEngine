@@ -124,7 +124,26 @@ private:
     static constexpr u32 kAtlasPageRes  = 64;    // 每页 64×64 texel
     static constexpr u32 kAtlasGridDim  = 8;     // atlas = 8×8 页 = 512×512
     static constexpr u32 kAtlasSize     = kAtlasPageRes * kAtlasGridDim;
-    static constexpr u32 kMaxCapturesPerFrame = 8;   // 步骤 17 的预算之一（先在这里落地）
+    // ── 步骤 17：三个显式预算（《Lumen设计与实现》§4）──
+    // 捕获 = 本帧最多写几张卡；分配 = 本帧最多分配几个物理页；反馈 = 本帧最多采纳多少条请求。
+    // 三者分开是为了让"卡顿尖峰"没有来源：任何一帧的工作量都被这三个数夹住，
+    // 没做完的请求留在 Requested，下一帧继续（不回退、不丢弃）。
+    u32 m_BudgetCaptures     = 8;
+    u32 m_BudgetAllocations  = 8;
+    u32 m_BudgetFeedbackPages = 256;
+    // 【验收实验】把下面三行改成 4/4/128 即可复现"预算减半 ⇒ 收敛变慢但不出现尖峰"（见 §附二十四）
+    static constexpr u32 kMaxCapturesPerFrame = 8;   // 兼容旧名字（= 预算上限的默认值）
+    [[nodiscard]] u32 GetBudgetCaptures() const { return m_BudgetCaptures; }
+    [[nodiscard]] u32 GetBudgetAllocations() const { return m_BudgetAllocations; }
+    [[nodiscard]] u32 GetBudgetFeedbackPages() const { return m_BudgetFeedbackPages; }
+    /// 调整预算（验收用：预算减半 ⇒ 收敛变慢但不出现尖峰）
+    void SetBudgets(u32 captures, u32 allocations, u32 feedbackPages) {
+        m_BudgetCaptures      = std::max(1u, captures);
+        m_BudgetAllocations   = std::max(1u, allocations);
+        m_BudgetFeedbackPages = std::max(1u, feedbackPages);
+    }
+    [[nodiscard]] u32 GetPagesCapturedTotal() const { return m_PagesCapturedTotal; }
+    [[nodiscard]] u32 GetMaxCapturesInAFrame() const { return m_MaxCapturesInAFrame; }
     std::unique_ptr<rhi::IRHITexture> m_AtlasAlbedo, m_AtlasNormal, m_AtlasEmissive;
     std::unique_ptr<rhi::IRHIBuffer>  m_CaptureStats;
     void* m_CaptureStatsMapped = nullptr;
@@ -135,6 +154,8 @@ private:
     std::unique_ptr<rhi::IRHIPipelineState> m_CapturePSO;
     bool m_CaptureBound = false;
     u32  m_CardCaptureHits = 0, m_CardCaptureMisses = 0;
+    u32  m_PagesCapturedTotal = 0;      // 累计捕获页数（收敛曲线）
+    u32  m_MaxCapturesInAFrame = 0;     // 单帧最多捕获了几页（应当 ≤ 预算 ⇒ 无尖峰）
     // ── Feedback（步骤 16）──
     static constexpr u32 kMaxFeedbackTiles = 16384;  // 槽位数上限（= 512×512 屏幕的 16×16 块数；1080p 只需 8160）
     std::unique_ptr<rhi::IRHIBuffer>  m_CardBuf, m_ReqCountBuf, m_ReqBuf;

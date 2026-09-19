@@ -243,9 +243,22 @@ void LumenScene::RunCardCapture(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbA
     m_Device->UpdateDescriptorSet(m_CaptureSet, 4, rhi::DescriptorType::CombinedImageSampler,
                                   gbDepth, m_SDF.GetLinearSampler());
 
+    // 步骤 17：先按"分配预算"把 Requested 推进到 Allocating（分配物理页），
+    // 再按"捕获预算"把 Allocating 推进到 Capturing 并真正捕获。没做完的留在原状态，下一帧继续。
+    u32 allocated = 0;
+    for (u32 page = 0; page < m_PageTable.Size() && allocated < m_BudgetAllocations; ++page) {
+        if (m_PageTable.Get(page).state != kSCPageState_Requested) continue;
+        if (m_PageTable.Allocate(page, page)) ++allocated;   // Requested → Allocating
+    }
+    u32 promoted = 0;
+    for (u32 page = 0; page < m_PageTable.Size() && promoted < m_BudgetCaptures; ++page) {
+        if (m_PageTable.Get(page).state != kSCPageState_Allocating) continue;
+        if (m_PageTable.BeginCapture(page)) ++promoted;      // Allocating → Capturing
+    }
+
     const auto& cards = m_SDF.GetCards();
     u32 captured = 0;
-    for (u32 page = 0; page < m_PageTable.Size() && captured < kMaxCapturesPerFrame; ++page) {
+    for (u32 page = 0; page < m_PageTable.Size() && captured < m_BudgetCaptures; ++page) {
         if (m_PageTable.Get(page).state != kSCPageState_Capturing) continue;   // 只处理 Capturing 的页
         const u32 cardIndex = m_PageTable.Get(page).cardIndex;
         if (cardIndex >= cards.size()) continue;
@@ -342,8 +355,14 @@ void LumenScene::RunCardCapture(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbA
         }
         ++captured;
         ++m_CapturePages;
+        ++m_PagesCapturedTotal;
     }
+    m_MaxCapturesInAFrame = std::max(m_MaxCapturesInAFrame, captured);   // 尖峰检查：应恒 ≤ 预算
 
+    if (m_FeedbackFrame <= 12u) {   // 前 12 帧逐帧打：单帧捕获量应当恒 ≤ 预算（"无尖峰"的直接证据）
+        HE_CORE_INFO("LumenScene 捕获预算（步骤 17）: 本帧捕获 {} 页（预算 {}），累计 {} 页；分配阶段已推进 {} 页",
+                     captured, m_BudgetCaptures, m_PagesCapturedTotal, allocated);
+    }
     if (captured > 0) m_CaptureStatsPending = true;   // 统计要等 GPU 写完（下一帧再读）
     if (m_CaptureStatsPending && m_CaptureStatsMapped && !m_CaptureStatsLogged) {
         u32 st[8] = {0, 0, 0, 0, 0, 0, 0, 0};
@@ -471,7 +490,7 @@ void LumenScene::RunFeedback(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbWorl
             return (a.y != b.y) ? (a.y > b.y) : (a.x < b.x);   // 权重降序；权重相同按页号定序 ⇒ **确定性**
         });
 
-        const u32 topN = std::min(count, kMaxCapturesPerFrame * 4u);
+        const u32 topN = std::min(count, m_BudgetFeedbackPages);   // 步骤 17：本帧最多采纳这么多条请求
         std::vector<u32> top;
         top.reserve(topN);
         for (u32 i = 0; i < topN; ++i) {
@@ -482,16 +501,7 @@ void LumenScene::RunFeedback(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbWorl
             if (m_PageTable.Get(page).state == kSCPageState_Invalid)
                 m_PageTable.Request(page, page, m_FeedbackFrame);
         }
-        // 本帧把前 kMaxCapturesPerFrame 个"已请求"页推进到 Capturing（分配 + 开始捕获），
-        // 步骤 15 的捕获 pass 下一帧就会把它们写进 atlas —— 这就是 L2 的"请求 → 捕获 → 可用"闭环。
-        u32 promoted = 0;
-        for (u32 page : top) {
-            if (promoted >= kMaxCapturesPerFrame) break;
-            if (m_PageTable.Get(page).state != kSCPageState_Requested) continue;
-            if (!m_PageTable.Allocate(page, page)) continue;
-            m_PageTable.BeginCapture(page);
-            ++promoted;
-        }
+        // 分配与捕获分别由 RunCardCapture 里的两个预算阶段推进（步骤 17 的三段摊销）
         if (!m_LastTopPages.empty()) {   // 稳定性指标：与上一帧 top-N 的交集
             u32 inter = 0;
             for (u32 a : top) for (u32 b : m_LastTopPages) if (a == b) { ++inter; break; }
@@ -507,11 +517,16 @@ void LumenScene::RunFeedback(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbWorl
                 m_PageTableBuf->Unmap();
             }
         }
-        if ((m_FeedbackFrame % 20u) == 0u) {
-            HE_CORE_INFO("LumenScene Feedback（步骤 16）: 本帧请求 {} 条（16×16 分块，权重 = 覆盖×重要性×距离衰减）；"
-                         "top-{} 与上一帧重叠 {} 条；页表 Requested {} / Capturing {}",
+        if (m_FeedbackFrame <= 12u || (m_FeedbackFrame % 20u) == 0u) {   // 前 12 帧逐帧打，便于看"收敛曲线 vs 预算"
+            HE_CORE_INFO("LumenScene Feedback/预算（步骤 16/17）: 请求 {} 条，采纳 top-{}（与上帧重叠 {}）；"
+                         "预算(捕获 {}/分配 {}/反馈 {})；页状态 Invalid {} / Requested {} / Allocating {} / "
+                         "Capturing {} / Captured {} / Dirty {}；累计捕获 {} 页，单帧最多 {} 页",
                          count, m_FeedbackTopCount, m_FeedbackTopOverlap,
-                         m_PageTable.Count(kSCPageState_Requested), m_PageTable.Count(kSCPageState_Capturing));
+                         m_BudgetCaptures, m_BudgetAllocations, m_BudgetFeedbackPages,
+                         m_PageTable.Count(kSCPageState_Invalid), m_PageTable.Count(kSCPageState_Requested),
+                         m_PageTable.Count(kSCPageState_Allocating), m_PageTable.Count(kSCPageState_Capturing),
+                         m_PageTable.Count(kSCPageState_Captured), m_PageTable.Count(kSCPageState_Dirty),
+                         m_PagesCapturedTotal, m_MaxCapturesInAFrame);
         }
     }
 

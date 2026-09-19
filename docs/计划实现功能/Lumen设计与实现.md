@@ -1448,7 +1448,8 @@ python Tools\pt\analyze_pt.py --compare <pt_tag> <deferred_tag> --target hdr
 | 14 页表 + 页状态机 | ✅ 已完成 | `Lumen/SurfaceCache.slang`（C++/Slang **共享布局**）+ `Lumen/SurfaceCacheTypes.{h,cpp}`（六态 + 迁移真值表 + 页状态机 + 布局 static_assert）+ `Tests/TestSurfaceCache.cpp`（5 例 / 73 断言：真值表、完整生命周期、非法迁移被拒绝且不改状态、校验和对字段敏感）+ `LumenScene_SurfaceCache.cpp`（用步骤 13 的 228 张卡片建 64 页演示表：Allocating 9 / Capturing 5 / Captured 41 / Dirty 9，六态齐全；GPU 镜像缓冲 + `SurfaceCache_PageCheck.comp.slang` 校验和比对 **PASS** 0x545eb5ad）。**验收**：非法迁移 `HE_ASSERT` + 单测覆盖；GPU/C++ 镜像一致（校验和相同） |
 | 15 Card Capture（软件光栅化写 atlas） | 🟡 可用（真因已修：push constant 超 128 B 被截断） | 已落地：3 张 RGBA16F atlas（512² = 8×8 页 × 64²；`lumen_sc_atlas_albedo` 可转储）、`SurfaceCache_Capture.comp`（一卡一组、页状态门控只捕 `Capturing`、`kMaxCapturesPerFrame=8` 预算、卡分辨率自适应降采样进 64² 页、命中点投影到屏幕取 GBuffer albedo/normal）、命中/未命中/march 命中三个诊断计数。**实测：5 页 20480 个 texel 全部未命中、march 命中 0**。已排除：push constant 字段错位（旧版 shader 多一个 camPosW，已修）、eps/步长过小（已把 eps 提到 1 个近层体素=14.2、步长 eps/2）。下一步：把 march 单独拿出来，用一张已知卡对照 CPU 真值逐步定位 |
 | 16 Feedback（缺失页检测） | ✅ 已完成 | `SurfaceCache_Feedback.comp.slang`：屏幕按 **16×16 分块**，每块取中心像素的 GBuffer 世界坐标 → 找"包含它的最小 AABB"的那张卡 → 写 `(pageIndex, weight)`，`weight = 256 像素 × 卡重要性(填充率×√边长) × 距离衰减`；**每块写自己的槽位**（不用计数器 ⇒ 完整且确定）。C++ 侧读槽位→过滤权重 0→按(权重降序, 页号升序)排序→取前 `kMaxCapturesPerFrame×4`→把 `Invalid` 的页置 `Requested`，再把前 `kMaxCapturesPerFrame` 个 `Requested` 推进到 `Capturing`（**闭环**：下一帧步骤 15 就捕获它们），并同步 GPU 镜像。**验收**：静态相机下 7730 条请求（94.7% 的块有几何）、**top-32 与上一帧重叠 32/32** ⇒ 无整屏抖动；排序含页号定序 ⇒ 完全确定 |
-| 17–41 | ⬜ 未开始 | 17 预算摊销（把上面的"最小推进逻辑"做成显式预算 + 不卡顿验收）、18 LRU 淘汰与碎片整理、19 L2 退出判据，随后 20–25 Screen Probe |
+| 17 预算与跨帧摊销 | ✅ 已完成 | 三个显式预算：`maxCapturesPerFrame = 8` / `maxAllocationsPerFrame = 8` / `maxFeedbackPages = 256`（`LumenScene::SetBudgets` 可调）。三段摊销：Feedback 采纳 top-`maxFeedbackPages` → 分配阶段把 `Requested` 推进到 `Allocating`（≤ 分配预算）→ 捕获阶段把 `Allocating` 推进到 `Capturing` 并真正捕获（≤ 捕获预算）；**没做完的留在原状态，不回退不丢弃**。统计每 20 帧输出（预算/六态计数/累计捕获/单帧最多）。**验收**：预算 8 时收敛用 2 帧（8+6 页）、预算减半到 4 时用 4 帧（4+4+4+2 页）⇒ **收敛变慢但单帧捕获量恒 ≤ 预算（无尖峰）**，逐帧日志可复现 |
+| 18–41 | ⬜ 未开始 | 18 LRU 淘汰与碎片整理、19 L2 退出判据，随后 20–25 Screen Probe |
 
 ### 阶段 A：框架前置（不产出画面，但后补等于重构）
 
@@ -2623,3 +2624,28 @@ Feedback（步骤 16）: 本帧请求 7730 条（16×16 分块，权重 = 覆盖
    ⇒ top-N 逐帧在 6/28 之间抖动，稳定性无从谈起。最终改成**每块固定槽位**（完整、确定、可复现），
    才拿到 32/32 的稳定读数。
    （另：读回必须在**清零之前**——第一版先清零再读，读到的一定是 0。）
+### 附二十四：步骤 17「预算与跨帧摊销」——预算减半时收敛变慢、但单帧量不超预算
+
+**实现**（三个预算 + 三段摊销）：
+
+- `LumenScene`：`m_BudgetCaptures = 8` / `m_BudgetAllocations = 8` / `m_BudgetFeedbackPages = 256`
+  （`SetBudgets()` 可调，验收就用它减半）；
+- **三段**：Feedback 只采纳 top-`maxFeedbackPages` → **分配阶段**把 `Requested` 推进到 `Allocating`
+  （每帧 ≤ 分配预算）→ **捕获阶段**把 `Allocating` 推进到 `Capturing` 并真正捕获（每帧 ≤ 捕获预算）；
+- **没做完的留在原状态**（`Requested` 不回退、不丢弃），下一帧继续；
+- 统计每 20 帧输出：预算 / 六态计数 / 累计捕获 / **单帧最多捕获**；前 12 帧逐帧输出便于看收敛曲线。
+
+**验收实验（同一段场景，只改预算）**：
+
+```
+预算 8/8/256：本帧捕获 8 页（预算 8），累计 8 页
+              本帧捕获 6 页（预算 8），累计 14 页   ← 2 帧收敛
+预算 4/4/128：本帧捕获 4 页（预算 4），累计 4 页
+              本帧捕获 4 页（预算 4），累计 8 页
+              本帧捕获 4 页（预算 4），累计 12 页
+              本帧捕获 2 页（预算 4），累计 14 页   ← 4 帧收敛
+```
+
+⇒ **预算减半：收敛帧数 2 → 4（变慢），而任何一帧的捕获量都 ≤ 预算（无尖峰）** ——
+正是步骤 17 的验收口径。页表六态在这两个配置下最终都排空（Invalid/Requested/Allocating/Capturing 归 0，
+Captured 55 / Dirty 9），说明"请求 → 分配 → 捕获 → 可用"的回路是自洽的。
