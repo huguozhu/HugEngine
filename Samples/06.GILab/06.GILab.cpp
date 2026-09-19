@@ -688,6 +688,12 @@ int main() {
             // RSM 只能靠面板手工勾选，回归检查无从复现）。
             gc.diffuse.Set(render::GISourceId::RSM,
                            GetFloat(cfgData, "gi_blend_diffuse_rsm", gc.diffuse.WeightOf(render::GISourceId::RSM)));
+            // Lumen 与 RSM 同理：它同时属于漫反射与镜面两个通道，塞进 4 个固定槽位会改变
+            // 其它源的槽位语义（旧 cfg 的 _w2 会被重新解释成别的源）→ 单列键，配置往返无损。
+            gc.diffuse.Set(render::GISourceId::Lumen,
+                           GetFloat(cfgData, "gi_blend_diffuse_lumen", gc.diffuse.WeightOf(render::GISourceId::Lumen)));
+            gc.specular.Set(render::GISourceId::Lumen,
+                            GetFloat(cfgData, "gi_blend_specular_lumen", gc.specular.WeightOf(render::GISourceId::Lumen)));
             // 阴影通道独立于层栈（可见性乘法项，非能量源）→ 用枚举恢复
             gc.shadow = (render::ShadowChannel)GetInt(cfgData, "gi_shadow", (int)gc.shadow);
 
@@ -1254,7 +1260,8 @@ int main() {
                 // 频段顺序用于面板可读性；未接入 Provider 的源（如预留的 Lightmap）不出现。
                 static const render::GISourceId kAllDiffuse[] = {
                     render::GISourceId::IBL, render::GISourceId::Lightmap, render::GISourceId::DDGI,
-                    render::GISourceId::SSGI, render::GISourceId::RSM, render::GISourceId::RTGI };
+                    render::GISourceId::SSGI, render::GISourceId::RSM, render::GISourceId::RTGI,
+                    render::GISourceId::Lumen };
                 std::vector<render::GISourceId> diffuseSources;
                 if (dp) {
                     for (auto id : kAllDiffuse) {
@@ -1314,7 +1321,7 @@ int main() {
                 // P4：候选源从已注册的 Provider 派生
                 static const render::GISourceId kAllSpecular[] = {
                     render::GISourceId::IBL, render::GISourceId::SSR,
-                    render::GISourceId::RTReflection };
+                    render::GISourceId::RTReflection, render::GISourceId::Lumen };
                 std::vector<render::GISourceId> specSources;
                 if (dp) {
                     for (auto id : kAllSpecular) {
@@ -1784,6 +1791,11 @@ int main() {
             // RSM 权重单独序列化（与上面的加载对应；它不在 4 个固定槽位里）
             out["gi_blend_diffuse_rsm"] =
                 std::to_string(gc.diffuse.WeightOf(render::GISourceId::RSM));
+            // Lumen 同理（同时服务漫反射与镜面，故两个通道各一个键）
+            out["gi_blend_diffuse_lumen"] =
+                std::to_string(gc.diffuse.WeightOf(render::GISourceId::Lumen));
+            out["gi_blend_specular_lumen"] =
+                std::to_string(gc.specular.WeightOf(render::GISourceId::Lumen));
             // 阴影通道独立于层栈 → 按枚举序列化
             out["gi_shadow"] = std::to_string((int)gc.shadow);
         }
