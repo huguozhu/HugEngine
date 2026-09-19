@@ -14,7 +14,7 @@
 |---|---|
 | 技术上能不能做？ | **能**，且缺口比预期小：PT 的随机数是**无状态确定性**的（`Rand(idx, frame, s)`），随机重放式 shift 只需存 `(源像素, 源帧)` 两个 uint，不需要逐顶点 RNG 状态 |
 | 主要工作量在哪？ | 引擎**完全没有 shift / 雅可比 / 重连机件**（全库检索 0 命中）。这不是"多算几个 bounce"，而是**新增一套路径复用的数学与数据结构** |
-| 主要门槛是什么？ | **显存**（完整路径蓄水池在 1080p 推算 1.2~2.8 GB，本机 8 GB 笔记本 GPU 上不可行；GRIS-lite ≈ 0.12~0.5 GB）+ **shift 写错即引入偏差** |
+| 主要门槛是什么？ | **显存**（完整路径蓄水池 1080p 推算 1.2~2.8 GB；实测 PT 全链路在 1080p 已占 3528 MiB、桌面基线 1897 MiB ⇒ 叠加后 4.7~6.3 GB/8 GB，**没有余量**；GRIS-lite ≈ 0.5 GB 则余量充足）+ **shift 写错即引入偏差** |
 | 时间增量 | 复用 pass 本身很便宜（实测 ReSTIR DI 三个 compute 只 +0.35~0.60 ms @960×540）；成本几乎全在光线（1 个额外路径样本 ≈ 2.1 ms @b=1 / 9.4 ms @b=4） |
 | 在"参考渲染器"定位下值得做吗？ | **现在不值得**。同样质量可用多 SPP 换（本文件给了换算表），而"标准答案"最怕的是**偏差**：写错 shift 的 GRIS 比慢的 PT 更糟 |
 | 触发后怎么做？ | 三步：**M1 = ReSTIR GI（1 顶点重连）** → **M2 = 完整 GRIS（随机重放 + 时域/空间复用）** → **M3 = 与 DI/P6 统一**；无偏性判据用**现有迭代式 PT 当 oracle** 对照（本项目独有的便利） |
@@ -125,6 +125,15 @@ AS_Build → PT_Indirect_Init（新，1 条间接光线/像素 → 首顶点样�
 | 6 × 7 | **61.1** | 16.4 | 与一次 25 s 冒烟实测的 16.5 FPS 完全吻合 |
 
 - **边际成本**（1 spp 下）：bounce 1→4 每多一个 bounce ≈ **+2.4 ms**；4 bounces 下每多一个 spp ≈ **+9.2 ms**；即"每 spp ≈ 一条 b=4 的路径链"。
+- **分辨率维**（1 spp × 1 bounce，外部 `MoveWindow` 改窗口后按日志里的纹理尺寸确认分辨率）：
+
+  | 分辨率 | ms/帧 | FPS | 峰值显存（`nvidia-smi`，含桌面 1897 MiB 基线） |
+  |---|---:|---:|---:|
+  | 960×540 | **2.05** | 488 | 2916 MiB（Δ1019） |
+  | 1920×1080 | **5.75** | 174 | 3528 MiB（Δ1631） |
+
+  像素 ×4 而帧时只 ×2.8 ⇒ 存在与分辨率无关的每帧固定开销；显存增量含 VMA 池缓存与交换链/驱动开销，
+  **不要**把它当逐像素预算用（逐像素预算仍以 §4.3 的设计公式为准）。
 - 简单线性模型：`ms ≈ spp × (2.1 + 2.4 × (b−1))`，在 4×4 上误差 <3%；`6×7` 上高估（轮盘赌在深弹射处截断）——**报读数时必须同时声明 spp/bounces**。
 - 测量口径（重要，避免复现歧义）：`Content/Config/05_Sponza-PathTracing.cfg` 会被示例**回写**（实测该文件在 2026-09-19 10:59 被写过一次，内容从 `6 spp / 7 bounce` 变成 `1 spp / 1 bounce`）；因此
   **测量必须走 `HE_CFG` 私有副本**（`Tools/pt/set_cfg.py` 覆盖），脚本见 `build/verify/measure_pt_cost.ps1` / `recheck_pt_fps.ps1`。
@@ -160,13 +169,20 @@ AS_Build → PT_Indirect_Init（新，1 条间接光线/像素 → 首顶点样�
 | A：GRIS-lite | 80 B | 240 B | **≈ 124 MB** | ≈ 500 MB |
 | B：完整 GRIS（R=4~7，48~64 B/顶点） | 192~448 B | 576~1344 B | **≈ 0.30~0.70 GB** | **≈ 1.2~2.8 GB** |
 
-⇒ **形态 B 在 1080p 上超出 8 GB 笔记本 GPU 的可行区**（还要与 HDR/GBuffer/降噪历史共存）；形态 A 是唯一现实起点。压缩手段（fp16 位置/法线、`radiance` 用 RGB9E5、路径顶点按需存）能把 B 压到约一半，但**压缩本身又是一个独立的正确性风险源**（要在无偏性判据下验证）。
+⇒ **实测锚点（本机 8 GB）**：960×540 全链路峰值 **2916 MiB**、1920×1080 **3528 MiB**（桌面基线 1897 MiB）。据此叠加：形态 A（1080p ≈ 0.5 GB）余量充足；形态 B（1080p 推算 1.2~2.8 GB）叠加后约 **4.7~6.3 GB / 8 GB**——不是"绝对不可行"，而是**没有余量**（驱动/桌面/其它应用都在这块卡上）。因此形态 A 仍是唯一现实的起点。压缩手段（fp16 位置/法线、`radiance` 用 RGB9E5、路径顶点按需存）能把 B 压到约一半，但**压缩本身又是一个独立的正确性风险源**（要在无偏性判据下验证）。
 
 ### 4.4 管线数量与编译时间（实测，含与文档数字的差异）
 
 - 现有 RT 管线：`05` 只建 **1 条**（FullPT）；`04` 建 **5 条**（RTShadow/RTAO/RTReflection/RTGI/DDGITrace）。
 - 实测创建耗时（**磁盘 PSO 缓存热**）：`05` 的 FullPT `27.405 → 27.406` ≈ **1 ms**；`04` 的每个效果管线 ≈ **2 ms**。
-- ⚠ `全路径追踪管线规划.md` §11 记的"**本机 Intel Arc 上 RT 管线编译约 20 s/个**"指的是另一台机器。B7 若在**冷缓存**首次运行要多编译 1 条 RT + 2~3 条 compute，**本机冷编译时间未测**（列为未知项，触发时要补测；`build/Samples/05.Sponza-PathTracing/pipeline_cache.bin` 638 KB 是热缓存证据）。
+- **冷缓存实测（已补测）**：删掉 `build/Samples/05.Sponza-PathTracing/pipeline_cache.bin` 后重跑 ——
+  `CreateRTPipelineState → CreateEffectPipeline 完成` 仍在**同一毫秒内**（≈ **1 ms**），PSO 插入次数 17 与热缓存一致，
+  启动到首帧 **4.82 s（冷）vs 5.00 s（热）**，稳态帧率 482 FPS 与热缓存相同。⇒ **本机（RTX 4060 Laptop）不存在
+  "RT 管线编译 20 s"的问题**，启动耗时由 Sponza 加载/解码主导。
+- ⚠ 两点保留：① `全路径追踪管线规划.md` §11 记的"本机 Intel Arc 上 RT 管线编译约 20 s/个"是**另一台机器**的数字，
+  在按多 PSO 规划 B7 时要按目标机器复核；② 上述"冷"是**引擎级冷缓存**（删的是引擎自己的 `pipeline_cache.bin`），
+  **驱动级冷缓存未测**（NVIDIA 另有自己的着色器缓存，清理它属于机器特性、会影响其它应用，故不做）。
+- 脚本：`build\verify\measure_b7_unknowns.ps1`（三段：960×540 基线 / 外部 resize 到 1920×1080 / 删缓存冷启动，测完自动恢复缓存）。
 
 ### 4.5 工程面清单（形态 A 的最小集合）
 
@@ -186,7 +202,7 @@ AS_Build → PT_Indirect_Init（新，1 条间接光线/像素 → 首顶点样�
 2. **两套估计器的语义分裂**：`ReSTIR GI` 的落点已在 §12 C16 归到 `Lumen…` P6。若 PT 侧另起一套，会出现"bounce0 的直接光由 DI 负责、间接光由 PT 版 GI 负责、Lumen 侧还有 P6"的三方重叠。**触发前先定落点**。
 3. **显存**：形态 B 在 1080p ≈ 1.2~2.8 GB（推算）——本机 8 GB 上大概率不可行；即使形态 A 也要与 5 个 PT UAV + 降噪历史 + 场景纹理争用。
 4. **RT 着色器发散**：GRIS 让相邻像素走不同深度的路径，发散更严重；本机**未启用 SER**（B8 未做），这部分收益拿不到，实时化路线存在连带依赖。
-5. **未知**：冷缓存的 RT 管线编译时间（本机）、1080p/1440p 的实测显存与帧时（本文件只有 960×540 实测）、`Rand` 在"跨帧重放"时的相关性（源帧与当前帧同层会否出现时空相关，需要一次专门的相关性检查）。
+5. **仍未知**：① 驱动级冷缓存的 RT 管线编译时间（引擎级已测 ≈1 ms，见 §4.4）；② 1440p 的实测（1080p 已测：5.75 ms / 3528 MiB）；③ `Rand` 在"跨帧重放"时的相关性（源帧与当前帧同层会否产生时空相关，需要一次专门的相关性检查——这是随机重放 shift 的正确性前提）。
 6. **收益边界**：GRIS 的价值在**实时**预算下最大。作为离线/交互式参考渲染器，现有 1 spp×b=4 只需 9.4 ms，配合时域累积 30 帧即收敛（§12 任务 6：p50 在帧 30 变化 0.000%），**已经够用**。
 
 ---
@@ -210,6 +226,73 @@ AS_Build → PT_Indirect_Init（新，1 条间接光线/像素 → 首顶点样�
 - 不实现任何 B7 代码；
 - 不让 §12 B 组的触发条件"被默认满足"（B7 状态保持未做）；
 - 不动 §12 的编号与既有 ✅ 记录（只在 B7 行加一条指向本文件的指针）。
+- 测量脚本留在 `build/verify/`（不纳入仓库）：`measure_pt_cost.ps1`、`recheck_pt_fps.ps1`、`measure_restir_cost.ps1`、`measure_b7_unknowns.ps1`。
+
+---
+
+---
+
+## 8. 与 Lumen / P6 的通用性分析（ReSTIR GI/GRIS 能不能两边共用）
+
+> 这是"落点定在 PT 还是 P6"的判断依据。**结论：估计器内核可共用，四层适配不可共用；
+> 建议实现放 P6/Lumen 侧一份，PT 侧只写适配** —— 但前提是先把 11.3 与 P6 的框架做了。
+
+### 8.1 可共用（consumer-agnostic 的内核）
+
+reservoir 结构与 WRS/MIS 记账、shift 映射（重连 / 随机重放 + 雅可比）、时域重投影与历史校验、
+空间复用、final shade、以及"给定 albedo/metallic/roughness/normal + 光源缓冲"的目标函数。
+它的输入抽象只需要：**像素级表面数据（depth / normal / albedo+metallic / velocity）+ 光源缓冲 + TLAS + 材质查询**。
+
+### 8.2 已经在共用的现成证据（不是设想）
+
+| 资产 | 现状 | 出处 |
+|---|---|---|
+| `RTDenoiser`（时域累积） | PT 用 `m_PTDenoiser`；Deferred 用 4 个（shadow/AO/reflection/GI）——**跨管线复用已有先例** | `PathTracingPipeline.h` / `DeferredPipeline.h` |
+| `PBR_BRDF`（`pbr_common.slang`） | 光栅化 / RT / PT **求值端**共用（PT 采样端是按它逐行对齐的独立实现） | `PT_Common.slang` L18、§12 任务 2/3 |
+| `GPULight[]` SSBO、STBN 蓝噪声、TLAS | 共用 | `CollectLights` / `STBNTexture` / `RTPass` |
+| **bindless 材质槽位约定** | §0.6 缺陷 3 之后 PT 与光栅化用同一套 `materialID + kGPUMaterialTexSlot_*` + heap 注册（**这条以前不成立，刚打通**） | `RTPass::BuildSceneMaterialTexture`、`PT_Full.rchit.slang` |
+| GI 侧统一输入接缝 | Deferred 帧图对 SSGI/SSR/RT/RSM 全部调用同一个 `SetInputs(depth, normal, albedo)` | `DeferredPipeline_FrameGraph.cpp` L574/607/625/675/747 |
+| Provider 输出契约 | `IGIProvider`（`Handles/GetPassKind/GetDiffuse|Specular|AOOutput/GetFinalXOutput/aux pass`）+ `GIProviderContext`（world/camera/frameIndex/furnace/lightBuffer/tlas） | `Engine/Render/GI/IGIProvider.h` |
+| 合成与有效性 | `GIChannelStack` + `GIBlendParams`（UBO，按槽位与源数组归一化） | `GITypes.h` L193/271/284 |
+
+### 8.3 必须各写一套适配的四层
+
+| 维度 | PT 侧 | Lumen / P6 侧 |
+|---|---|---|
+| 主表面来源 | PT 自己的 AOV：depth 为 **R32F 线性视图深度**（带 `-hitT` 号约定、miss=-1000）、normal/albedoMetallic UAV | 光栅 GBuffer（A/B/C + D32 深度 + velocity）；GI 常跑**半/四分之一分辨率** |
+| 输出语义 | bounce0 的间接光估计，**必须无偏** | 一个 **GI 源槽位**：喂 `GIChannelStack`，受归一化 + `alpha<0` 有效性契约约束（11.3） |
+| 降噪/历史 | `RTDenoiser`(motion blend) + `PTAtrousPass`(SVGF) | 每效果 `RTDenoiser` + `Denoiser`(spatial) + `SpatialDenoiseAux` |
+| 可见性查询 | PT 在 RayGen 里自己 trace shadow ray（自有 payload/SBT） | 走 `RTEffectProvider` / 共享 `RTPass` |
+
+两个必须写进设计的工程约束：
+
+1. **分辨率不匹配是实质问题**：光栅侧 GI 半分辨率是常态、PT 全分辨率。共享内核必须参数化
+   「被着色的像素网格 + 重投影映射」，否则时域/空间复用的邻域语义直接错。
+2. **质量策略是反向的**：PT 作为 oracle **不能继承实时侧偏差**（钳制、半分辨率、有偏时域复用）。
+   共享内核必须带 policy 开关：`reference`（无偏、全分辨率、可只做空间复用）vs `realtime`（钳制、半分辨率、时域复用）。
+
+### 8.4 落点建议
+
+- 实现**一份**在共享位置：`Engine/Render/GI/` 下的 `RestirGiPass`，实现 `IGIProvider`，输出 radiance + validity 纹理；
+- PT 侧只加**薄适配**：RayGen 采样该纹理作为 bounce0 间接光（现在读 DI 的蓄水池 SSBO，改成读纹理反而更可移植）；
+- Lumen 侧走 Provider + 槽位机制；
+- **不要**在 `PathTracingPipeline` 与 Lumen 各写一套 —— 那正是 §12 C16 / P6 警告的"两套估计器"。
+
+### 8.5 前置条件（= §12 C15/C16 存在的理由）
+
+1. **11.3 统一降噪框架**（`DenoiseSignal` 分派 + 把 `alpha < 0` 有效性提升为框架级契约）——
+   否则共享估计器的输出没有统一的有效性/历史约定；
+2. **P6 的纹理绑定数组化 + PROVIDER-EXEC**（执行单位从「Provider × 通道」改回「Provider」）——
+   否则每接一个消费者就加一条定制循环 + 一套具名绑定；
+3. 一个统一的「光源采样 + 可见性」入口（现在 PT 与 GI 侧各有一套）。
+
+### 8.6 与"是否转实时主路径"的组合结论
+
+| 定位 | ReSTIR GI/GRIS 该不该做 | 怎么做 |
+|---|---|---|
+| PT 继续当参考渲染器（现状） | **不做** —— 多 SPP 已够用（§4.1：1spp×4bounce 9.4 ms，帧 30 时 p50 已收敛） | — |
+| 做 Lumen / P6 | 做，但**先做框架**（11.3 + PROVIDER-EXEC + 数组化） | 一份内核在 `Engine/Render/GI/`，PT 侧适配；先跑 `reference` policy 验证无偏 |
+| PT 转实时主路径 | 做，且必须**同时**保留一个无偏基准 | 同上共享内核；另需把"离线高 SPP 的迭代式 PT"保留为校验模式，否则失去 oracle |
 
 ---
 
@@ -220,6 +303,7 @@ AS_Build → PT_Indirect_Init（新，1 条间接光线/像素 → 首顶点样�
 powershell -File build\verify\measure_pt_cost.ps1
 powershell -File build\verify\recheck_pt_fps.ps1     # 基础 cfg vs 私有副本的一致性复核
 powershell -File build\verify\measure_restir_cost.ps1 # ReSTIR DI 复用开销
+powershell -File build\verify\measure_b7_unknowns.ps1  # 1080p 帧时/显存 + 引擎级冷缓存编译
 
 # 2) 机件缺口检索（全引擎，排除 External/；预期全为 0）
 #    Jacobian / shiftMapping / ShiftMapping / reconnection / Reconnection / GRIS / PathReservoir
