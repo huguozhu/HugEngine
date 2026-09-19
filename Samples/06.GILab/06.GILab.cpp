@@ -14,6 +14,7 @@
 #include "Pipeline/ForwardPipeline.h"
 #include "Pipeline/IRenderPipeline.h"
 #include "GI/GITypes.h"   // GI 数据模型 + GIRegistry（RHI-free）
+#include "GI/LumenProvider.h"   // 步骤 12：取 SDF 追踪可视化纹理做转储
 #include "Pipeline/CameraController.h"
 #include "Pipeline/PhysicalCamera.h"
 #include "Scene/World.h"
@@ -1583,6 +1584,10 @@ int main() {
                 addTarget(pre + "spec_final", p->GetFinalSpecularOutput());
                 addTarget(pre + "ao_raw",     p->GetAOOutput());
                 addTarget(pre + "ao_final",   p->GetFinalAOOutput());
+                // 步骤 12（L1 退出判据）：逐像素 SDF 追踪可视化。名字**稳定**（不依赖注册顺序），
+                // 因为它是后面所有阶段（Screen Probe / Surface Cache）的公共"几何是否靠谱"凭据。
+                if (auto* lp = dynamic_cast<render::LumenProvider*>(p))
+                    addTarget("lumen_sdf_trace", lp->GetSDFDebugTexture());
             }
             }   // if (!forwardMode)
             // RSM 链路的逐级中间量（任务 30）：位置 / 编码法线 / VPL 辐射度 / 间接光输出。
