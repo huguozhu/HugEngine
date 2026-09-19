@@ -35,6 +35,11 @@
 >     总表对照）。总表见 **§三 · 任务总表**，各处小节标题同步改为新编号。
 > 目标：补齐 UE5 Actor 组件体系在 HugEngine 的对应实现；**每个组件（含已有组件）都是 AI 可读写的一等公民**（`HE_ATTR_AI_*` 注解 + SceneBuilder 词表同步），并自动获得编辑器 Details 面板的反射编辑能力。
 
+> **归档补注（2026-09-19 复核）**：计划内任务（1~26）的实现文件已逐个核对**全部存在**（`Scene/SplineComponent`、`Scene/SplineMeshComponent`、`Scene/SplineMeshSystem`、
+> `Scene/SkeletalMeshComponent`、`Scene/SkeletalMeshSystem`、`Scene/InstancedMeshComponent`、`Scene/CharacterMovementComponent`、`Scene/AbilityComponent`、
+> `Scene/NavMeshComponent`，以及 `Tests/TestSplineMesh.cpp`、`Tests/TestSkeletalMesh.cpp`），文档的 ✅ 记录成立。**唯一未落地的子项**是 §九 提到的编辑器 `AgentInspector`（代码 0 处命中，已就地标注）。
+> 另有一处**记录在案的验证余额**（不是未实现，属判据强度）：§十七 的贴花投影"未做逐像素 A/B 对照"。
+
 ---
 
 ## 一、现状盘点（2026-09-04 代码基线修订版）
@@ -357,6 +362,7 @@
 - **LLM 生成**：词表 10 组件同步完成；已实测（真实 DeepSeek）：「一个路灯照着的街角」生成路灯几何 + 光源 + Camera 实体并驱动主相机；SpotLight/Decal/Health 等组件可被 LLM 生成
 - **智能体动作**：`CastAbility` op 已落地（Action→Command 可撤销，doctest 覆盖执行/撤销）；SetProperty/SpawnEntity/SetTransform 原有 op 保持不变
 - **编辑器**：所有新组件反射注册后自动获得 Details 面板编辑能力；`AgentInspector` 可显示 AI 可读字段
+  > ⚠ **未落地（2026-09-19 核对）**：`AgentInspector` 在整个代码库检索 **0 处命中**（`Engine/`、`Samples/`，排除 `External/`）——本句里"Details 面板编辑能力"由反射自动获得（成立），但 `AgentInspector` 这个面板尚未实现。若要补，按文首规则**新开编号（29 起）**，不复用旧编号。
 - **观察面板**：WorldModel 快照自动包含所有带 AI_VISIBLE 注解的新组件（Health 血量、CharacterMovement 参数等 LLM 大脑可见）
 
 ---

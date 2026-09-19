@@ -22,6 +22,11 @@
 > **本次更新依据**：对当前 HEAD 的代码实读复核（而非沿用文档声明）。凡文档与代码不一致处，
 > 一律以代码为准并在 §9 集中列出。
 
+> **补注（2026-09-19 复核）**：本文档的"未完成/已迁出/已取消"标注体系已完整（Lightmap 源标 **未实现**、频率分离 ❌ 已判定不需要、
+> 原任务 11（含 11.3）/19/20 ➡️ 已迁至《Lumen与Nanite完整设计规范》、原任务 31 ❌ 已取消、§11.4 两项验证余额），无需另加标注。
+> 唯一需要提醒的是：§4.3 等"与 UE 对照"章节里出现的 `FScreenSpaceDenoiser` / `CommonSettings` / `ESignalProcessing` / `DiffuseSphericalHarmonic` /
+> `ELumenIndirectLightingSteps` / `Reblur`·`ReLAX`·`SIGMA` 等**都是 UE5 / NRD 侧的构念，用于对照说明"我们没有什么"**；本引擎**没有**集成 NRD 或 UE 的降噪/信号框架，不要把它们读成本引擎的实现。
+
 ---
 
 # 第一部 · 架构设计
