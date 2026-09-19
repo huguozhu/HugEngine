@@ -355,6 +355,8 @@ private:
     float m_FarFieldOverlap   = 0.2f;     // 步骤 27：重叠带半宽（占阈值比例）；0 = 退化成硬切换
     u32   m_FadeSdfOnly = 0, m_FadeRtOnly = 0, m_FadeBlend = 0, m_FadeBlendedRays = 0;
     u32   m_FadeBandRays = 0, m_FadeNoAltRays = 0, m_FadePositiveW = 0;
+    u32   m_FadeInvariantViolations = 0;   // 步骤 29：切换分类不变量违例（应恒为 0）
+    u32   m_FadeInvNearViol = 0, m_FadeInvFarViol = 0, m_FadeInvBranchViol = 0;
     u32   m_ShadeUnimplementedRays = 0;   // 步骤 28：着色源未实现（返回中性值）的命中光线数
     float m_FadeMaxW = 0.0f;
     u32   m_FadeAltNoCard = 0, m_FadeAltNoPage = 0;
@@ -393,6 +395,8 @@ private:
     void CreateIrradianceCopyPipeline();
     void CreateIrradianceTexture();
     void CreateFarFieldCompareGPUObjects();
+    /// 步骤 29：把 Lumen 自持的显存占用逐条打出来（对照 §15.3 的预算表）
+    void LogMemoryUsage() const;
     u32  m_CapturePages = 0;          // 累计捕获页数
     u32  m_CardCaptureMarchHits = 0;  // 诊断：SDF march 命中数
     bool m_CaptureStatsPending = false;

@@ -209,6 +209,52 @@ void LumenScene::DrawIrradiance(rhi::IRHICommandList* cmd, float gain) {
 // ============================================================
 // 步骤 26：远场硬件光追 —— 与 SDF 追踪逐光线对照
 // ============================================================
+// ============================================================
+// 步骤 29（L4 退出判据）：显存增量清单
+//
+// 【为什么要一行行报出来】§15.3 是"按设计量级做预算"的测算表，而实现里每一块的真实尺寸只能从
+// 代码里读到（缓冲区按容量分配、atlas 按物理页数、SDF 按 mesh 数与分辨率）。把"实测占用"
+// 逐条打出来，才能和预算表对照，也才能在加功能时立刻看见"这一版又多了多少 MB"。
+// ============================================================
+void LumenScene::LogMemoryUsage() const {
+    struct Item { const char* name; double mb; };
+    std::vector<Item> items;
+    const auto addBuf = [&](const char* name, const rhi::IRHIBuffer* b) {
+        if (b) items.push_back({name, (double)b->GetSize() / (1024.0 * 1024.0)});
+    };
+
+    // 世界空间（与视口无关）
+    items.push_back({"Mesh SDF（逐 mesh 128³ R16F）", m_SDF.GetMeshFieldBytes() / (1024.0 * 1024.0)});
+    // 全局 clipmap 每层是 R32U + R32F 两张 128³（引擎初始化日志里的"16.00 MB/层"就是它们）
+    items.push_back({"Global SDF clipmap（2 层 × (R32U + R32F) 128³）",
+                     2.0 * (double)m_SDF.GetGlobalResolution() * m_SDF.GetGlobalResolution() *
+                     m_SDF.GetGlobalResolution() * 4.0 * 2.0 / (1024.0 * 1024.0)});
+    items.push_back({"Surface Cache atlas（3 × 512² RGBA16F）", 3.0 * 512.0 * 512.0 * 8.0 / (1024.0 * 1024.0)});
+
+    // 屏幕尺寸（与视口相关）
+    const double px = (double)m_Width * (double)m_Height;
+    items.push_back({"Lumen 输出 + 辐照度（2 × 屏幕 RGBA16F）", 2.0 * px * 8.0 / (1024.0 * 1024.0)});
+    addBuf("卡片清单 / 页表镜像", m_ShadeCardsBuf.get());
+    addBuf("页表镜像", m_PageTableBuf.get());
+    addBuf("命中点缓冲", m_RayHitPosBuf.get());
+    addBuf("光线结果缓冲", m_RayResultBuf.get());
+    addBuf("着色输出（atlas / GBuffer / 最优候选）", m_ShadeOutBuf.get());
+    addBuf("着色输出（GBuffer 对照）", m_ShadeOutGbBuf.get());
+    addBuf("着色输出（最优候选）", m_ShadeOutBestBuf.get());
+    addBuf("远场光追结果（2 × 光线）", m_FarField ? m_FarField->GetResultBuffer() : nullptr);
+    addBuf("远场切换 fade（2 × 光线）", m_RayFadeBuf.get());
+    addBuf("探针缓冲（65536 × 96 B）", m_ProbeBuf.get());
+    addBuf("单元 → 探针映射", m_CellProbeBuf.get());
+    addBuf("SH 重建/参考辐照度（2 × 探针）", m_IrradShBuf.get());
+
+    double total = 0.0;
+    for (const auto& it : items) total += it.mb;
+    HE_CORE_INFO("Lumen 显存清单（步骤 29 / 对照 §15.3 的预算表）—— 视口 {}×{}", m_Width, m_Height);
+    for (const auto& it : items) {
+        if (it.mb > 0.0) HE_CORE_INFO("   {:<44} {:8.2f} MB", it.name, it.mb);
+    }
+    HE_CORE_INFO("   {:<44} {:8.2f} MB", "合计（Lumen 自持资源）", total);
+}
 void LumenScene::CreateFarFieldCompareGPUObjects() {
     if (m_FarCmpPSO && m_FarMergePSO) return;
 
@@ -323,6 +369,10 @@ void LumenScene::RunFarFieldRT(rhi::IRHICommandList* cmd) {
     // ⇒ 用它当门会永远提前返回（第一次就是这么写的，表现是"初始化成功但一条光线都没发"）。
     if (!m_FarField || !m_FarCmpPSO) return;
 
+    // 步骤 29：资源都建齐之后报一次显存清单（对照 §15.3 的预算表）。
+    // 【注意】m_FarFieldFrame 在函数尾部才自增 ⇒ 这里读到的是"上一帧"的计数，== 20 即第 21 帧。
+    if (m_FarFieldFrame == 60u) LogMemoryUsage();   // 等卡片/mesh 场都建齐再报
+
     // ── ① 先读**上一帧**的对照统计（同"先读后清"；本帧紧接着会把统计清零再派发）──
     if (m_FarFieldFrame >= 1u && m_FarCmpStatsMapped) {
         u32 st[24] = {0};
@@ -379,6 +429,8 @@ void LumenScene::RunFarFieldRT(rhi::IRHICommandList* cmd) {
                          "副点失败拆分: 不在任何卡内 {} / 卡内但页无内容 {}",
                          m_FadeBandRays, m_FadeBlendedRays, m_FadeNoAltRays,
                          m_FadeAltNoCard, m_FadeAltNoPage);
+            HE_CORE_INFO("   分类不变量自检（步骤 29，应恒为 0）: 违例 {}（近场越界 {} / 远场未到上界 {} / 该分支 SDF 却命中 {}）",
+                         m_FadeInvariantViolations, m_FadeInvNearViol, m_FadeInvFarViol, m_FadeInvBranchViol);
             HE_CORE_INFO("   按距离分桶的平均材质亮度（桶宽 5 单位，覆盖 20..100；阈值 50 = 第 6 桶）: "
                          "20-25 {} | 25-30 {} | 30-35 {} | 35-40 {} | 40-45 {} | 45-50 {} | 50-55 {} | 55-60 {} | "
                          "60-65 {} | 65-70 {} | 70-75 {} | 75-80 {} | 80-85 {} | 85-90 {} | 90-95 {} | 95-100 {}",
@@ -393,6 +445,8 @@ void LumenScene::RunFarFieldRT(rhi::IRHICommandList* cmd) {
         u32 ms[8] = {0};
         std::memcpy(ms, m_FarMergeStatsMapped, sizeof(ms));
         m_FadeSdfOnly = ms[0]; m_FadeRtOnly = ms[1]; m_FadeBlend = ms[2];
+        m_FadeInvNearViol = ms[3]; m_FadeInvFarViol = ms[4]; m_FadeInvBranchViol = ms[5];
+        m_FadeInvariantViolations = ms[3] + ms[4] + ms[5];
     }
     if (m_DistBinMapped) {
         u32 bins[32] = {0};

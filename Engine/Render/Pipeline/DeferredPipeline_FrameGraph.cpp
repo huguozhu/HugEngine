@@ -41,6 +41,15 @@ static he::CVar<int> cvDecalProject("r.Decal.Project", 1,
 
 namespace he::render {
 
+// 步骤 29：Lumen 远场光追的独立计时下标。GITimer 有 32 个源位（第 31 个是"公共项 TLAS"），
+// Provider 只用到 0..10，故取 30 作为"Lumen 远场"专用位，能在同一套查询池里单独读数。
+static constexpr he::u32 kLumenFarFieldTimerIdx = 30u;   // Lumen 远场光追（在计算 pass 内）
+static constexpr he::u32 kLumenComputeTimerIdx  = 29u;   // Lumen 计算 pass 整体（SDF 构建 → 辐照度）
+static constexpr he::u32 kLumenSdfTimerIdx      = 25u;   // 其中：SDF 构建（mesh 场 + clipmap 注入/洪泛）
+static constexpr he::u32 kLumenCacheTimerIdx    = 26u;   // 其中：页表推进 + Card 捕获 + 反馈
+static constexpr he::u32 kLumenProbeTimerIdx    = 27u;   // 其中：探针布置/追踪/着色/SH/逐像素辐照度
+static constexpr he::u32 kLumenDebugTimerIdx    = 28u;   // 其中：SDF 逐像素追踪可视化（调试视图）
+
 void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                                         he::SceneGraph& sg, const CameraData& camera) {
     he::SyncPhysicalSkyToSun(world);  // 物理天空太阳→方向光同步（阴影/光照收集前）
@@ -770,38 +779,72 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             // 必须**在 offscreen render pass 之外**：Vulkan 不允许在 render pass 内 dispatch
             // compute（实测把 dispatch 放进主 pass 会直接访问违例崩溃）。本 pass 不声明资源
             // 依赖（自持资源 + 自管 barrier），writes 为空故不会被 CullDeadPasses 裁掉。
+            const u32 lumenGiIdx = (u32)(&prov - m_GIProviders.data());   // 计时下标（步骤 29 读耗时用）
             rg.AddPass("Lumen_SDF_Build", {}, {},
                 // GBuffer 的三张纹理按值捕获（lambda 没有默认捕获，用 this 会编译失败）
                 [p = prov.get(), cam = &camera, furnaceMode = m_GIConfig.furnaceMode,
                  gbN = m_GBuffer->GetNormal(), gbAl = m_GBuffer->GetAlbedo(),
-                 gbWP = m_GBuffer->GetWorldPos()](rhi::IRHICommandList* c) {
+                 gbWP = m_GBuffer->GetWorldPos(), giIdx = lumenGiIdx, timer = &m_GITimer](rhi::IRHICommandList* c) {
                     if (auto* lp = dynamic_cast<LumenProvider*>(p)) {
+                        // 步骤 29：整个计算 pass 的 GPU 耗时（SDF 构建 → 页表 → 捕获 → 反馈 → 探针
+                        // → 追踪 → 着色 → SH → 辐照度 → 远场光追都在这一个 pass 里）
+                        timer->Begin(c, kLumenComputeTimerIdx);
+                        timer->Begin(c, kLumenSdfTimerIdx);
                         lp->StepSDF(c, *cam);   // 近层跟随相机（相机位置在第一次 Step 之前给出）
+                        timer->End(c, kLumenSdfTimerIdx);
+                        timer->Begin(c, kLumenCacheTimerIdx);
                         lp->StepSurfaceCache(c);   // 步骤 14：页表 + 页状态机（GPU 镜像校验）
                         lp->RunCardCapture(c, *cam);   // 步骤 15：Card 捕获（写 atlas）
                         lp->RunFeedback(c, *cam);      // 步骤 16：Feedback（缺失页检测 + 请求写回页表）
+                        timer->End(c, kLumenCacheTimerIdx);
+                        timer->Begin(c, kLumenProbeTimerIdx);
                         lp->RunProbePlacement(c);      // 步骤 20：Screen Probe 布置与自适应合并
                         lp->RunProbeTrace(c);          // 步骤 21：探针半球追踪（半球采样 + SDF march）
                         // 步骤 26：远场硬件光追 + 与 SDF 逐光线对照 + **合并**（远场命中写回命中点）。
                         // 必须夹在"追踪"与"着色"之间：合并写回的命中点就是步骤 22 的输入，
                         // 放到着色之后再跑等于白跑（写回的值会在下一帧被追踪覆盖）。
+                        // 步骤 29：远场光追单独计时（用 32 个源里靠后的一个保留下标，不影响 Provider 读数）
+                        timer->Begin(c, kLumenFarFieldTimerIdx);
                         lp->RunFarFieldRT(c);
+                        timer->End(c, kLumenFarFieldTimerIdx);
                         lp->RunSurfaceCacheShading(c, *cam);   // 步骤 22：命中点着色（材质取自 atlas）
                         // 步骤 23：SH 投影（白炉下 l0 必须等于 √π —— 用同一面白炉开关驱动）
                         lp->RunScreenProbeSHProject(c, furnaceMode);
                         // 步骤 24：由探针 SH 采样出逐像素辐照度（供 Provider 输出 pass 贴图）
                         lp->RunProbeIrradiance(c, gbN, gbAl, gbWP);
+                        timer->End(c, kLumenProbeTimerIdx);
                         // 步骤 12（L1 退出判据）：SDF 构建完之后，同一 compute pass 里跑一次
                         // 逐像素 sphere tracing 可视化（相机主射线）。放在这里而不是 Lighting
                         // 之后，是因为它只依赖 SDF 本身，与 GBuffer / 合成无关。
+                        timer->Begin(c, kLumenDebugTimerIdx);
                         lp->RunSDFDebug(c, *cam);
+                        timer->End(c, kLumenDebugTimerIdx);
+                        timer->End(c, kLumenComputeTimerIdx);
+                        // 步骤 29：Lumen 的 GPU 耗时（滚动平均/峰值）。四段之和 ≈ 计算 pass 整体；
+                        // 输出贴图 pass 是光照合成里那次全屏采样（giIdx 计时套的就是它）。
+                        static u32 s_timingFrames = 0;
+                        if (++s_timingFrames % 120u == 0u) {
+                            HE_CORE_INFO("Lumen GPU 耗时（步骤 29）: 计算 pass 平均 {:.3f} ms / 峰值 {:.3f} ms；"
+                                         "输出贴图 pass 平均 {:.3f} ms",
+                                         (double)timer->AvgMs(kLumenComputeTimerIdx),
+                                         (double)timer->PeakMs(kLumenComputeTimerIdx),
+                                         (double)timer->AvgMs(giIdx));
+                            HE_CORE_INFO("   拆分: SDF 构建 {:.3f} ms / 页表+捕获+反馈 {:.3f} ms / "
+                                         "探针+追踪+着色+SH+辐照度 {:.3f} ms（其中远场光追 {:.3f} ms，每帧 {} 条射线）/ "
+                                         "SDF 调试视图 {:.3f} ms",
+                                         (double)timer->AvgMs(kLumenSdfTimerIdx),
+                                         (double)timer->AvgMs(kLumenCacheTimerIdx),
+                                         (double)timer->AvgMs(kLumenProbeTimerIdx),
+                                         (double)timer->AvgMs(kLumenFarFieldTimerIdx), lp->GetFarFieldRays(),
+                                         (double)timer->AvgMs(kLumenDebugTimerIdx));
+                        }
                     }
                 });
 
             const u32 pw = out->GetWidth();
             const u32 ph = out->GetHeight();
             lumenHandle = rg.ImportTexture(prov->GetName(), out);
-            const u32 giIdx = (u32)(&prov - m_GIProviders.data());   // 计时下标（任务 29）
+            const u32 giIdx = lumenGiIdx;   // 计时下标（与步骤 29 的耗时日志同源）
             const GIProviderContext lumenCtx{ &world, &sg, &camera, m_CurrentFrameSlot,
                                               m_GIConfig.furnaceMode };
             rg.AddPass(prov->GetName(),
@@ -880,7 +923,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             const u32 pw = mainTex->GetWidth();
             const u32 ph = mainTex->GetHeight();
             const auto mainH = rg.ImportTexture(prov->GetName(), mainTex);
-            const u32 giIdx = (u32)(&prov - m_GIProviders.data());   // 计时下标（任务 29）
+            const u32 giIdx = (u32)(&prov - m_GIProviders.data());   // 计时下标（RT 效果源）
             rg.AddPass(prov->GetName(),
                 {{gbDepth, ResourceAccess::Read}, {gbB, ResourceAccess::Read}},
                 {{mainH, ResourceAccess::UAV}},

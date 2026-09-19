@@ -33,7 +33,9 @@
 // 第二个条目是给"按距离分桶"的连续性读数用的：分桶必须按**稳定量**（SDF 距离），
 // 否则切换前后分桶依据本身会跳变（SDF 命中距离几十、光追命中距离几百），曲线反而失真。
 [[vk::binding(3, 0)]] RWStructuredBuffer<float4> u_Fade;
-[[vk::binding(4, 0)]] RWStructuredBuffer<uint>   u_Stats;       // 0=纯 SDF 1=纯光追 2=重叠带混合
+// 0=纯 SDF 1=纯光追 2=重叠带混合 3=分类不变量违例（近场保留了越界的 SDF 命中）
+// 4=分类不变量违例（两侧都命中却按光追判成"纯光追"但 SDF 距离没到上界）5=不变量违例（SDF 未命中却走了光追以外）
+[[vk::binding(4, 0)]] RWStructuredBuffer<uint>   u_Stats;
 
 [[vk::push_constant]] cbuffer MergePC {
     uint4 dims;   // x = 光线数, y = 重叠带下界 t0, z = 上界 t1, w = 未用
@@ -62,6 +64,11 @@ void main(uint3 tid : SV_DispatchThreadID) {
         if (w <= 0.0)      InterlockedAdd(u_Stats[0], 1u);
         else if (w >= 1.0) InterlockedAdd(u_Stats[1], 1u);
         else               InterlockedAdd(u_Stats[2], 1u);
+        // 【分类不变量自检（步骤 29 的"正确混合"判据之一）】三类各自的判定条件必须成立，
+        // 违例计数应当恒为 0：纯 SDF ⇒ 距离在下界内；纯光追（两侧都命中）⇒ 距离到了上界。
+        // 这不是"再算一遍"，而是把"混合是否按定义执行"变成可断言的读数。
+        if (w <= 0.0 && !(sdf.x < t0))  InterlockedAdd(u_Stats[3], 1u);
+        if (w >= 1.0 && !(t1 <= t0 || sdf.x >= t1)) InterlockedAdd(u_Stats[4], 1u);
         if (w >= 1.0) {                            // 权重到 1 ⇒ 主命中点也换成光追的
             u_SdfResult[tid.x] = float4(rt.x, 1.0, sdf.z, 0.0);
             u_RayHitPos[tid.x] = float4(rtPos.xyz, 1.0);
@@ -74,4 +81,5 @@ void main(uint3 tid : SV_DispatchThreadID) {
     u_RayHitPos[tid.x] = float4(rtPos.xyz, 1.0);
     u_Fade[tid.x * 2u + 1u] = float4(0.0, 0.0, rt.x, 1.0);
     InterlockedAdd(u_Stats[1], 1u);
+    if (sdf.y > 0.5) InterlockedAdd(u_Stats[5], 1u);   // 该分支只应处理"SDF 未命中"的光线
 }

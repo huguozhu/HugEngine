@@ -184,6 +184,15 @@ public:
     [[nodiscard]] const std::vector<CardInfo>& GetCards() const { return m_Cards; }
 
     [[nodiscard]] const CardCoverage& GetCardCoverage() const { return m_CardCoverage; }
+    /// 步骤 29（显存清单）：已建好的 mesh 距离场个数与总字节数（每个 128³ R16F）
+    [[nodiscard]] u32 GetMeshFieldCount() const {
+        u32 n = 0;
+        for (const auto& e : m_Entries) if (e.field) ++n;   // 只数真正建出来的场
+        return n;
+    }
+    [[nodiscard]] double GetMeshFieldBytes() const {
+        return (double)GetMeshFieldCount() * 128.0 * 128.0 * 128.0 * 2.0;
+    }
     /// 覆盖率可视化（RGBA8）：上半是最大网格的 6 个投影面（白=有表面，红=有表面但未被卡片覆盖），
     /// 下半是逐 mesh 的覆盖条（绿=已覆盖长度）。
     [[nodiscard]] rhi::IRHITexture* GetCardCoverageTexture() const { return m_CardCoverageTex.get(); }
