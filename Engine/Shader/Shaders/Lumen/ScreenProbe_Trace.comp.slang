@@ -1,12 +1,14 @@
 // ScreenProbe_Trace.comp.slang — 探针半球追踪（步骤 21）
 //
-// 【做什么】每个探针按 `traceRep` 条 **GGX 重要性采样**方向发射光线，用步骤 11 的同一套 sphere tracing
+// 【做什么】每个探针按 `traceRep` 条**重要性采样**方向发射光线，用步骤 11 的同一套 sphere tracing
 // 语义（两层全局场取 min、`max(d*0.25, eps*0.02)` 安全步长、`advanced && d < eps` 命中）求交，
 // 把 (命中距离 t, 是否命中, dot(dir, n)) 写进结果缓冲。着色留给步骤 22（消费 L2 的 atlas）。
 //
-// 【为什么 V 取探针法线】探针没有"视线"概念，用 `V = N` 做 GGX 半向量采样得到的分布天然以法线为中心，
-// 正是"漫反射探针 + 粗糙度"该有的形态；步骤 22/23 会把它按 cos/BRDF 权重投影成 SH。
+// 【采样模式】步骤 21 用的是 GGX 半向量采样（mode 0）；步骤 23 起默认切到**均匀半球采样**（mode 1,
+// 见 `ScreenProbeSampling.slang` 的解释：均匀 pdf 让白炉下 SH 的 0 阶项有解析值 √π，验收可钉死）。
+// 方向与随机数由共享头提供 ⇒ 追踪与投影**必然**用同一组方向（否则投影积的是另一组方向，最难查）。
 #include "Lumen/ScreenProbe.slang"
+#include "Lumen/ScreenProbeSampling.slang"
 
 [[vk::binding(0, 0)]] Texture3D<float> u_Field;        // 近层
 [[vk::binding(0, 0)]] SamplerState     u_FieldSampler;
@@ -18,7 +20,7 @@
 [[vk::binding(4, 0)]] RWStructuredBuffer<float4>    u_RayHitPos;   // xyz = 命中点（步骤 22 的着色输入）, w = 是否命中
 
 [[vk::push_constant]] cbuffer TracePC {
-    uint4  dims;          // x = 探针数, y = 每探针光线数, z = 随机种子, w = 未用
+    uint4  dims;          // x = 探针数, y = 每探针光线数, z = 随机种子（帧号）, w = 采样模式（0=GGX, 1=均匀半球）
     float4 originVoxel0;  // 近层：xyz = 原点, w = 体素
     uint4  grid0;         // 近层分辨率
     float4 originVoxel1;  // 远层
@@ -40,26 +42,6 @@ float FieldValue(float3 p, out bool insideAny) {
     return min(a.y > 0.5 ? a.x : 1e30, b.y > 0.5 ? b.x : 1e30);
 }
 
-// 确定性的低差异随机（PCG 变体）：同一 (探针, 光线, 帧) 恒得同一方向 ⇒ 可复现（背靠背读数一致的前提）
-uint Pcg(uint v) {
-    v = v * 747796405u + 2891336453u;
-    const uint w = ((v >> ((v >> 28u) + 4u)) ^ v) * 277803737u;
-    return (w >> 22u) ^ w;
-}
-float U01(uint seed) { return (float)(Pcg(seed) & 0x00FFFFFFu) / 16777216.0; }
-
-// 以 n 为 Z 轴的 GGX 半向量采样，再镜面反射得到出射方向（V = n）
-float3 SampleGgxDirection(float3 n, float roughness, float2 u) {
-    const float a = max(0.002, roughness * roughness);
-    const float phi = 6.28318530718 * u.x;
-    const float cosTheta = sqrt((1.0 - u.y) / max(1e-6, 1.0 + (a * a - 1.0) * u.y));
-    const float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
-    const float3 t = normalize(abs(n.z) < 0.999 ? cross(float3(0.0, 0.0, 1.0), n) : cross(float3(1.0, 0.0, 0.0), n));
-    const float3 b = cross(n, t);
-    const float3 h = t * (sinTheta * cos(phi)) + b * (sinTheta * sin(phi)) + n * cosTheta;
-    return normalize(reflect(-n, h));
-}
-
 [numthreads(64, 1, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {
     const uint total = dims.x * dims.y;      // 探针数 × 光线数
@@ -75,9 +57,10 @@ void main(uint3 tid : SV_DispatchThreadID) {
     const float  roughness = clamp(probe.normal.w, 0.05, 1.0);   // w 里放粗糙度（步骤 20 先填了 0 ⇒ 用下限）
 
     // 每帧换种子（dims.z = 帧号）：时序累积才有意义；同一帧内完全可复现
-    const float2 u = float2(U01(tid.x * 3u + dims.z * 7919u + 1u),
-                            U01(tid.x * 7u + dims.z * 6271u + 5u));
-    const float3 rd = SampleGgxDirection(n, roughness, u);
+    const float2 u = ProbeRayRandom(tid.x, dims.z);
+    // 采样模式：w = 0 → GGX（步骤 21 原样）；w = 1 → 均匀半球（步骤 23 起的默认，SH 0 阶项有解析值）
+    const float3 rd = (dims.w == 0u) ? SampleGgxDirection(n, roughness, u)
+                                     : SampleUniformHemisphere(n, u);
     const float  nd = dot(rd, n);
 
     const uint maxSteps = (uint)marchParams.x;
@@ -101,6 +84,6 @@ void main(uint3 tid : SV_DispatchThreadID) {
     u_RayResult[tid.x] = float4(t, hit ? 1.0 : 0.0, nd, 0.0);
     u_RayHitPos[tid.x] = float4(ro + rd * t, hit ? 1.0 : 0.0);   // 命中点位置（未命中时无意义）
     InterlockedAdd(u_Stats[2], 1u);
-    if (nd > 0.0) InterlockedAdd(u_Stats[3], 1u);   // 半球性检查：GGX 采样必须全部落在法线半球内
+    if (nd > 0.0) InterlockedAdd(u_Stats[3], 1u);   // 半球性检查：采样必须全部落在法线半球内
     if (hit) InterlockedAdd(u_Stats[0], 1u); else InterlockedAdd(u_Stats[1], 1u);
 }

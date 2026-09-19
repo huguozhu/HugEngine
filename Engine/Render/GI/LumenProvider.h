@@ -115,6 +115,15 @@ public:
     void RunSurfaceCacheShading(rhi::IRHICommandList* cmd, const CameraData& cam) {
         if (m_Scene) m_Scene->RunSurfaceCacheShading(cmd, m_Albedo, m_WorldPos, cam.GetViewProjMatrix());
     }
+    /// 步骤 23：把每条光线结果投成二阶 SH（4 系数 RGB）写回探针；白炉下 l0 必须等于 √π
+    void RunScreenProbeSHProject(rhi::IRHICommandList* cmd, bool furnace) {
+        if (m_Scene) m_Scene->RunScreenProbeSHProject(cmd, furnace);
+    }
+    [[nodiscard]] float GetSHMeanL0() const { return m_Scene ? m_Scene->GetSHMeanL0() : 0.0f; }
+    [[nodiscard]] float GetSHFurnaceL0Deviation() const { return m_Scene ? m_Scene->GetSHFurnaceL0Deviation() : 0.0f; }
+    [[nodiscard]] float GetSHIrradianceMeanDiff() const { return m_Scene ? m_Scene->GetSHIrradianceMeanDiff() : 0.0f; }
+    [[nodiscard]] u32 GetSHProbes() const { return m_Scene ? m_Scene->GetSHProbes() : 0u; }
+    [[nodiscard]] u32 GetSHRays() const { return m_Scene ? m_Scene->GetSHRays() : 0u; }
     [[nodiscard]] u32 GetShadedHits() const { return m_Scene ? m_Scene->GetShadedHits() : 0u; }
     [[nodiscard]] u32 GetShadedMissingPages() const { return m_Scene ? m_Scene->GetShadedMissingPages() : 0u; }
     [[nodiscard]] float GetShadedAlbedoMeanDiff() const {

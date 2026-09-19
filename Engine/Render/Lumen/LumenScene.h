@@ -32,6 +32,12 @@
 namespace he::render {
 
 /// Lumen 持久资源宿主（不参与每帧 orchestration —— 那是 `LumenProvider` 的事）
+/// 探针半球采样模式（与 `ScreenProbeSampling.slang` 的约定一致，追踪与投影必须同值）
+enum LumenProbeSampleMode : u32 {
+    kSampleModeGgx               = 0u,   // 步骤 21 原样：GGX 半向量采样
+    kSampleModeUniformHemisphere = 1u,   // 步骤 23 起默认：均匀半球（pdf = 1/(2π)，白炉 SH 的 l0 有解析值）
+};
+
 class LumenScene {
 public:
     bool Initialize(rhi::IRHIDevice* device, u32 width, u32 height);
@@ -87,6 +93,14 @@ public:
     void RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbAlbedo,
                                 rhi::IRHITexture* gbWorldPos, const float4x4& viewProj);
     [[nodiscard]] u32 GetShadedHits() const { return m_ShadedHits; }
+    /// 步骤 23：把每条光线结果投成二阶 SH（4 系数 RGB），写回探针的 shR/shG/shB；
+    /// `furnace = true` 时强制辐射度 L ≡ 1（白炉），此时 l0 必须等于 √π（解析值，可断言）。
+    void RunScreenProbeSHProject(rhi::IRHICommandList* cmd, bool furnace);
+    [[nodiscard]] float GetSHMeanL0() const { return m_SHMeanL0; }
+    [[nodiscard]] float GetSHFurnaceL0Deviation() const { return m_SHFurnaceL0Dev; }
+    [[nodiscard]] float GetSHIrradianceMeanDiff() const { return m_SHIrradianceDiff; }
+    [[nodiscard]] u32 GetSHProbes() const { return m_SHProbes; }
+    [[nodiscard]] u32 GetSHRays() const { return m_SHRays; }
     [[nodiscard]] u32 GetShadedMissingPages() const { return m_ShadedMissingPages; }
     [[nodiscard]] float GetShadedAlbedoMeanDiff() const { return m_ShadedAlbedoMeanDiff; }
     [[nodiscard]] u32 GetShadedAlbedoSamples() const { return m_ShadedAlbedoSamples; }
@@ -241,12 +255,25 @@ private:
     float m_ShadedAlbedoMeanDiffMulti = 0.0f; // 多卡覆盖样本的平均 |Δalbedo|（选卡可能选错）
     float m_ShadedAlbedoBestDiff = 0.0f;      // 多卡覆盖下"最贴合 GBuffer 的候选"的平均 |Δalbedo|（归因下界）
     u32   m_ShadedAlbedoBestSamples = 0;
+    // ── SH 投影（步骤 23）──
+    std::unique_ptr<rhi::IRHIBuffer> m_IrradShBuf, m_IrradRefBuf, m_SHStatsBuf;
+    void* m_SHStatsMapped = nullptr;
+    rhi::DescriptorSetLayoutHandle m_SHLayout = 0;
+    rhi::DescriptorSetHandle       m_SHSet    = 0;
+    std::unique_ptr<rhi::IRHIPipelineState> m_SHPSO;
+    bool m_SHBound = false;
+    u32  m_SHFrame = 0;
+    u32  m_SHProbes = 0, m_SHRays = 0, m_SHIrradianceSamples = 0;
+    float m_SHMeanL0 = 0.0f;            // 所有探针 l0 的均值（白炉下应为 √π ≈ 1.7725）
+    float m_SHFurnaceL0Dev = 0.0f;      // 白炉下 l0 相对 √π 的**平均绝对偏差**（验收口径"误差为 0"）
+    float m_SHIrradianceDiff = 0.0f;    // SH 重建辐照度 vs 逐光线求和参考的平均相对差
 
     std::vector<u32> m_LastTopPages;
     void CreateFeedbackGPUObjects();
     void CreateProbeGPUObjects();
     void CreateProbeTraceGPUObjects();
     void CreateShadeGPUObjects();
+    void CreateSHGPUObjects();
     u32  m_CapturePages = 0;          // 累计捕获页数
     u32  m_CardCaptureMarchHits = 0;  // 诊断：SDF march 命中数
     bool m_CaptureStatsPending = false;

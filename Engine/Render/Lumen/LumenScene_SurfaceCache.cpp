@@ -9,10 +9,12 @@
 
 #include "Core/Log.h"
 #include "Lumen/ScreenProbe.slang"
+#include "Lumen/LumenSH.h"             // SH 常数/重建（与 shader 的 ScreenProbeSampling.slang 同源）
 #include "Lumen/SurfaceCache.slang"     // 共享布局（与 C++ 镜像同源）
 #include "SurfaceCache_Capture.comp.spv.h"
 #include "ScreenProbe_Gather.comp.spv.h"
 #include "Lumen_SurfaceCacheSample.comp.spv.h"
+#include "Lumen_ScreenProbe_SHProject.comp.spv.h"
 #include "ScreenProbe_Trace.comp.spv.h"
 #include "SurfaceCache_Feedback.comp.spv.h"
 #include "SurfaceCache_PageCheck.comp.spv.h"
@@ -730,7 +732,7 @@ void LumenScene::RunProbeTrace(rhi::IRHICommandList* cmd) {
         m_ProbeRaysTotal     = st[2];
         m_ProbeRayHemisphere = st[3];
         if ((m_TraceFrame % 40u) == 0u) {
-            HE_CORE_INFO("LumenScene 探针追踪（步骤 21）: 探针 {} × {} 条 GGX 光线 = {} 条；命中 {}（{:.1f}%）；"
+            HE_CORE_INFO("LumenScene 探针追踪（步骤 21）: 探针 {} × {} 条半球光线 = {} 条；命中 {}（{:.1f}%）；"
                          "半球内 {}（{:.1f}%，须为 100%）；配置 {} × {}（traceRep {} / shadeRep {}）",
                          m_ProbeCount, m_TraceConfig.traceRep, m_ProbeRaysTotal,
                          m_ProbeRayHits, m_ProbeRaysTotal ? 100.0 * (double)m_ProbeRayHits / (double)m_ProbeRaysTotal : 0.0,
@@ -751,7 +753,10 @@ void LumenScene::RunProbeTrace(rhi::IRHICommandList* cmd) {
         float4 origin1; uint4 grid1;
         float4 march;
     } pc{};
-    pc.x = m_ProbeCount; pc.y = m_TraceConfig.traceRep; pc.z = m_TraceFrame; pc.w = 0;
+    pc.x = m_ProbeCount; pc.y = m_TraceConfig.traceRep; pc.z = m_TraceFrame;
+    // w = 采样模式：步骤 23 起用**均匀半球**（pdf = 1/(2π)），白炉下 SH 的 0 阶项有解析值 √π。
+    // 直接写在 push constant 里 ⇒ 投影 pass 不传同一个值就会"积到另一组方向"，这里保持单一来源。
+    pc.w = kSampleModeUniformHemisphere;
     pc.origin0 = float4(m_SDF.GetGlobalOrigin(0), m_SDF.GetGlobalVoxelSize(0));
     const u32 gr = m_SDF.GetGlobalResolution();
     pc.grid0 = uint4(gr, gr, gr, 0u);
@@ -1077,4 +1082,139 @@ void LumenScene::RunFeedback(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbWorl
     ++m_FeedbackFrame;
 }
 
+// ============================================================
+// 步骤 23：探针 SH 投影（4 系数 × RGB 写回 ScreenProbe）
+// ============================================================
+void LumenScene::CreateSHGPUObjects() {
+    if (m_SHPSO) return;
+
+    rhi::DescriptorSetLayoutDesc layout;
+    layout.bindings = {
+        {0, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},   // 探针（读写 SH 字段）
+        {1, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},   // 每光线辐射度（步骤 22 输出）
+        {2, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},   // SH 重建的辐照度
+        {3, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},   // 逐光线求和参考辐照度
+        {4, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},   // 统计
+        {5, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},   // 光线结果（y = 是否命中几何）
+    };
+    m_SHLayout = m_Device->CreateDescriptorSetLayout(layout);
+    m_SHSet    = m_Device->AllocateDescriptorSet(m_SHLayout);
+
+    rhi::PushConstantRange pcr;
+    pcr.stageMask = rhi::kStageMaskCompute;
+    pcr.offset    = 0;
+    pcr.size      = 8u * 16u;   // uint4 dims + uint4 mode
+
+    rhi::ShaderBytecode cs;
+    cs.stage      = rhi::ShaderStage::Compute;
+    cs.spirv      = k_Lumen_ScreenProbe_SHProject_comp_spv;
+    cs.entryPoint = "main";
+
+    rhi::PipelineStateDesc pso;
+    pso.bindPoint            = rhi::PipelineBindPoint::Compute;
+    pso.computeShader        = &cs;
+    pso.descriptorSetLayouts = {m_SHLayout};
+    pso.pushConstantRanges   = {pcr};
+    pso.debugName            = "Lumen_ScreenProbe_SHProject";
+    m_SHPSO = m_Device->CreatePipelineState(pso);
+    if (!m_SHPSO) HE_CORE_ERROR("LumenScene: 探针 SH 投影 PSO 创建失败");
+}
+
+void LumenScene::RunScreenProbeSHProject(rhi::IRHICommandList* cmd, bool furnace) {
+    if (!m_Device || !cmd || !m_ProbeBuf || !m_ShadeOutBuf) return;
+
+    if (!m_SHBound) {
+        CreateSHGPUObjects();
+        if (!m_SHPSO) return;
+        rhi::BufferDesc ib;
+        ib.size  = (usize)kMaxScreenProbes * sizeof(float4);
+        ib.usage = rhi::BufferUsage::Storage; ib.cpuAccess = true;
+        m_IrradShBuf  = m_Device->CreateBuffer(ib);
+        m_IrradRefBuf = m_Device->CreateBuffer(ib);
+
+        rhi::BufferDesc sb;
+        sb.size = sizeof(u32) * 4u; sb.usage = rhi::BufferUsage::Storage; sb.cpuAccess = true;
+        m_SHStatsBuf = m_Device->CreateBuffer(sb);
+        m_SHStatsMapped = m_SHStatsBuf->Map();
+
+        m_Device->UpdateDescriptorSet(m_SHSet, 0, rhi::DescriptorType::StorageBuffer, m_ProbeBuf.get());
+        m_Device->UpdateDescriptorSet(m_SHSet, 1, rhi::DescriptorType::StorageBuffer, m_ShadeOutBuf.get());
+        m_Device->UpdateDescriptorSet(m_SHSet, 2, rhi::DescriptorType::StorageBuffer, m_IrradShBuf.get());
+        m_Device->UpdateDescriptorSet(m_SHSet, 3, rhi::DescriptorType::StorageBuffer, m_IrradRefBuf.get());
+        m_Device->UpdateDescriptorSet(m_SHSet, 4, rhi::DescriptorType::StorageBuffer, m_SHStatsBuf.get());
+        m_Device->UpdateDescriptorSet(m_SHSet, 5, rhi::DescriptorType::StorageBuffer, m_RayResultBuf.get());
+        m_SHBound = true;
+        return;   // 本帧只建资源；下一帧开始派发（"新建资源当帧使用"的教训见 §附二十）
+    }
+
+    // ① 先读上一帧的结果（同"先读后清"）
+    if (m_SHFrame >= 2 && m_SHStatsMapped) {
+        u32 st[4] = {0, 0, 0, 0};
+        std::memcpy(st, m_SHStatsMapped, sizeof(st));
+        m_SHProbes = st[0];
+        m_SHRays   = st[1];
+        if (st[0]) {
+            m_SHMeanL0 = (float)((double)st[2] / 4096.0 / (double)st[0]);
+            // 白炉：l0 必须等于 √π（均匀半球采样下与方向、采样数无关）⇒ 偏差定点值之和 / 65536 / 探针数
+            m_SHFurnaceL0Dev = (float)((double)st[3] / 65536.0 / (double)st[0]);
+        }
+        // 辐照度对照：SH 重建 vs 逐光线求和（同一方向 n，故两者都是"沿探针法线的辐照度"）
+        double sumRel = 0.0; u32 n = 0;
+        void* ps = ((m_SHFrame % 40u) == 0u) ? m_IrradShBuf->Map() : nullptr;
+        if (ps) {
+            const float4* a = static_cast<const float4*>(ps);
+            if (void* pr = m_IrradRefBuf->Map()) {
+                const float4* b = static_cast<const float4*>(pr);
+                for (u32 i = 0; i < m_ProbeCount; ++i) {
+                    if (a[i].w < 0.5f || b[i].w < 0.5f) continue;
+                    const double ref = (double)glm::length(glm::vec3(b[i]));
+                    const double dif = (double)glm::length(glm::vec3(a[i]) - glm::vec3(b[i]));
+                    if (ref < 1e-4) continue;
+                    sumRel += dif / ref; ++n;
+                }
+                m_IrradRefBuf->Unmap();
+            }
+            m_IrradShBuf->Unmap();
+        }
+        m_SHIrradianceDiff = n ? (float)(sumRel / n) : 0.0f;
+        m_SHIrradianceSamples = n;
+
+        if ((m_SHFrame % 40u) == 0u) {
+            // 白炉下 l0 必须等于 √π（均匀半球采样下与方向、采样数无关）⇒ 把"相对 √π 的平均绝对偏差"
+            // 打出来就是步骤 23 的验收读数；非白炉下这一项没有解析值，不打印（避免误读）。
+            if (furnace) {
+                // 定点统计（1/65536）在 1e-5 以下会量化为 0，所以同时把"均值 vs √π"的相对偏差打出来
+                const double relDev = (double)m_SHMeanL0 > 0.0
+                    ? std::abs((double)m_SHMeanL0 - kSHWhiteFurnaceL0) / kSHWhiteFurnaceL0 : 0.0;
+                HE_CORE_INFO("LumenScene 探针 SH 投影（步骤 23，白炉）: 有效探针 {}，有效光线 {}（{:.1f}%）；"
+                             "l0 均值 {:.7f}（解析值 √π = {:.7f}）；l0 平均绝对偏差 {:.3e}（定点量化下限 {:.1e}）；"
+                             "均值相对偏差 {:.2e}；SH 重建辐照度 vs 逐光线求和 平均相对差 {:.4f}（{} 个探针）",
+                             m_SHProbes, m_SHRays,
+                             m_ProbeCount ? 100.0 * (double)m_SHRays / (double)(m_ProbeCount * m_TraceConfig.traceRep) : 0.0,
+                             (double)m_SHMeanL0, kSHWhiteFurnaceL0, (double)m_SHFurnaceL0Dev,
+                             1.0 / 65536.0, relDev,
+                             (double)m_SHIrradianceDiff, m_SHIrradianceSamples);
+            } else {
+                HE_CORE_INFO("LumenScene 探针 SH 投影（步骤 23）: 有效探针 {}，有效光线 {}（{:.1f}%）；"
+                             "l0 均值 {:.6f}（辐照度量级，无解析值）；"
+                             "SH 重建辐照度 vs 逐光线求和 平均相对差 {:.4f}（{} 个探针）",
+                             m_SHProbes, m_SHRays,
+                             m_ProbeCount ? 100.0 * (double)m_SHRays / (double)(m_ProbeCount * m_TraceConfig.traceRep) : 0.0,
+                             (double)m_SHMeanL0, (double)m_SHIrradianceDiff, m_SHIrradianceSamples);
+            }
+        }
+    }
+
+    // ② 清零统计并派发
+    if (m_SHStatsMapped) { u32 zero[4] = {0, 0, 0, 0}; std::memcpy(m_SHStatsMapped, zero, sizeof(zero)); }
+    struct { u32 x, y, z, w; u32 mx, my, mz, mw; } pc{};
+    pc.x = m_ProbeCount; pc.y = m_TraceConfig.traceRep; pc.z = m_SHFrame;
+    pc.w = furnace ? 1u : 0u;
+    pc.mx = kSampleModeUniformHemisphere;
+    cmd->SetPipeline(m_SHPSO.get());
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_SHSet);
+    cmd->SetPushConstants(0, sizeof(pc), &pc);
+    cmd->Dispatch((m_ProbeCount + 63u) / 64u, 1, 1);
+    ++m_SHFrame;
+}
 } // namespace he::render
