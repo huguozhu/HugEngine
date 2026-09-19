@@ -23,6 +23,7 @@
 // ============================================================
 
 #include "RHI/RHI.h"
+#include "Lumen/LumenFarFieldPass.h"
 #include "Lumen/LumenSDF.h"
 #include "Lumen/LumenTraceConfig.h"
 #include "Lumen/SurfaceCacheTypes.h"
@@ -111,6 +112,30 @@ public:
     [[nodiscard]] u32   GetIrradianceCoveredPixels() const { return m_IrradianceCovered; }
     /// 步骤 24：把辐照度纹理贴到 Provider 输出（帧图在 offscreen pass 里调它）
     void DrawIrradiance(rhi::IRHICommandList* cmd, float gain);
+
+    // ── 步骤 26：远场硬件光追 ──
+    /// 每帧由帧图注入 RT 侧输入（TLAS 与场景材质纹理来自 RTPass；光源来自本帧的光源缓冲）
+    void SetRTInputs(rhi::IRHIAccelerationStructure* tlas, rhi::IRHITexture* materialTex,
+                     rhi::IRHITexture* triangleNormals, rhi::IRHIBuffer* lightBuffer, u32 lightCount) {
+        m_TLAS = tlas; m_RTMaterialTex = materialTex; m_RTTriangleNormals = triangleNormals;
+        m_RTLightBuffer = lightBuffer; m_RTLightCount = lightCount;
+    }
+    /// 用与步骤 21 **完全相同**的探针光线发一次硬件光追（远场），并与 SDF 结果逐光线比较
+    void RunFarFieldRT(rhi::IRHICommandList* cmd);
+    [[nodiscard]] bool  IsFarFieldReady() const { return m_FarField != nullptr; }
+    [[nodiscard]] u32   GetFarFieldRays() const { return m_FarFieldRays; }
+    [[nodiscard]] u32   GetFarFieldBothHit() const { return m_FarFieldBothHit; }
+    [[nodiscard]] float GetFarFieldMeanRelDiff() const { return m_FarFieldMeanRel; }
+    [[nodiscard]] float GetFarFieldMaxRelDiff() const { return m_FarFieldMaxRel; }
+    [[nodiscard]] float GetFarFieldAgree5Pct() const { return m_FarFieldAgree5; }
+    [[nodiscard]] float GetFarFieldAgree20Pct() const { return m_FarFieldAgree20; }
+    [[nodiscard]] u32   GetFarFieldSdfOnly() const { return m_FarFieldSdfOnly; }
+    [[nodiscard]] u32   GetFarFieldRtOnly() const { return m_FarFieldRtOnly; }
+    [[nodiscard]] const std::vector<u32>& GetFarFieldRelHist() const { return m_FarFieldHist; }
+    [[nodiscard]] float GetFarFieldNearAgree20() const { return m_FarFieldNear20; }
+    [[nodiscard]] float GetFarFieldFarAgree20() const { return m_FarFieldFar20; }
+    [[nodiscard]] float GetFarFieldNearMeanRel() const { return m_FarFieldNearMeanRel; }
+    [[nodiscard]] float GetFarFieldFarMeanRel() const { return m_FarFieldFarMeanRel; }
     [[nodiscard]] u32 GetShadedMissingPages() const { return m_ShadedMissingPages; }
     [[nodiscard]] float GetShadedAlbedoMeanDiff() const { return m_ShadedAlbedoMeanDiff; }
     [[nodiscard]] u32 GetShadedAlbedoSamples() const { return m_ShadedAlbedoSamples; }
@@ -295,6 +320,34 @@ private:
     float m_IrradianceMean = 0.0f;
     float m_IrradianceMax = 0.0f;
     u32   m_IrradianceCovered = 0;
+    // ── 步骤 26：远场硬件光追 + SDF/三角形对照 ──
+    std::unique_ptr<LumenFarFieldPass> m_FarField;
+    rhi::IRHIAccelerationStructure* m_TLAS = nullptr;
+    rhi::IRHITexture* m_RTMaterialTex = nullptr;
+    rhi::IRHITexture* m_RTTriangleNormals = nullptr;
+    rhi::IRHIBuffer*  m_RTLightBuffer = nullptr;
+    u32               m_RTLightCount = 0;
+    rhi::DescriptorSetLayoutHandle m_FarCmpLayout = 0;
+    rhi::DescriptorSetHandle       m_FarCmpSet    = 0;
+    std::unique_ptr<rhi::IRHIPipelineState> m_FarCmpPSO;
+    rhi::DescriptorSetLayoutHandle m_FarMergeLayout = 0;
+    rhi::DescriptorSetHandle       m_FarMergeSet    = 0;
+    std::unique_ptr<rhi::IRHIPipelineState> m_FarMergePSO;
+    std::unique_ptr<rhi::IRHIBuffer> m_FarCmpStatsBuf, m_FarCmpHistBuf;
+    void* m_FarCmpStatsMapped = nullptr;
+    void* m_FarCmpHistMapped  = nullptr;
+    float m_FarFieldThreshold = 50.0f;    // 计划的远场阈值；步骤 26 只用于统计分组
+    float m_FarFieldNearBand  = 50.0f;    // 近带/远带分界（近带里 SDF 是准的 ⇒ 可作 HW RT 的对照）
+    float m_FarFieldNear20 = 0.0f, m_FarFieldFar20 = 0.0f;
+    u32   m_FarFieldSelfHits = 0;      // SDF 命中里 t < 1 的条数（自交诊断）
+    float m_FarFieldSdfMeanT = 0.0f;   // SDF 命中距离均值
+    float m_FarFieldNearMeanRel = 0.0f, m_FarFieldFarMeanRel = 0.0f;
+    float m_FarFieldTMax      = 500.0f;   // 光追最大距离（比 SDF 的 marchMaxDist 远，才能看"只有三角形命中"）
+    u32   m_FarFieldFrame = 0;
+    u32   m_FarFieldRays = 0, m_FarFieldBothHit = 0, m_FarFieldSdfOnly = 0, m_FarFieldRtOnly = 0;
+    float m_FarFieldMeanRel = 0.0f, m_FarFieldMaxRel = 0.0f;
+    float m_FarFieldAgree5 = 0.0f, m_FarFieldAgree20 = 0.0f;
+    std::vector<u32> m_FarFieldHist;
     // 输出 pass（把辐照度纹理贴到 Provider 输出）
     rhi::DescriptorSetLayoutHandle m_IrrCopyLayout = 0;
     rhi::DescriptorSetHandle       m_IrrCopySet    = 0;
@@ -306,12 +359,16 @@ private:
     void CreateProbeTraceGPUObjects();
     void CreateShadeGPUObjects();
     void CreateSHGPUObjects();
+    /// 探针光线 march 的 eps（近层体素倍数）：0.1 ⇒ 约 2.1 世界单位。见 RunProbeTrace 的说明。
+    static constexpr float kProbeMarchEpsVoxels = 0.1f;
+
     /// 确定性验收模式（环境变量 HE_LUMEN_DETERMINISTIC=1）：每帧末把 GPU 等干净，
     /// 使"回读 GPU 计数 → 决定下一帧行为"的时机固定下来，从而让背靠背转储逐位一致。
     bool m_Deterministic = false;
     void CreateIrradianceGPUObjects();
     void CreateIrradianceCopyPipeline();
     void CreateIrradianceTexture();
+    void CreateFarFieldCompareGPUObjects();
     u32  m_CapturePages = 0;          // 累计捕获页数
     u32  m_CardCaptureMarchHits = 0;  // 诊断：SDF march 命中数
     bool m_CaptureStatsPending = false;

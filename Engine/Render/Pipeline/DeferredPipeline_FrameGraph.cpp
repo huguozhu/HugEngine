@@ -513,7 +513,12 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     {
         const bool ddgiTraceWanted = m_RTEnabled && m_RTPass && m_GIConfig.ShouldRunDDGI();
         const bool anyRT = m_RTEnabled && m_RTPass && m_GIConfig.AnyRTSource();
-        if (anyRT || ddgiTraceWanted) {
+        // 【步骤 26】Lumen 的**远场硬件光追**也是加速结构的消费者：它不属于 `AnyRTSource()`
+        //（Lumen 不是 RT 效果源），也不是 DDGI。若不加这一项，只开 Lumen 时 AS_Build 根本不会注册
+        // ⇒ TLAS 是空的 ⇒ 远场光线一条都命中不了（实测 RT 命中率 0.0%，而 SDF 命中率 93.8%）。
+        const bool lumenFarWanted = m_RTEnabled && m_RTPass
+                                  && m_GIConfig.diffuse.Has(GISourceId::Lumen);
+        if (anyRT || ddgiTraceWanted || lumenFarWanted) {
             // 加速结构（TLAS）：每帧一次，被所有 RT 消费者共享（含本帧的 DDGI march）
             rg.AddPass("AS_Build", {}, {},
                 [this, &world, &sg](rhi::IRHICommandList* c) {
@@ -747,6 +752,16 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             if (!prov->NeedsPass(lumenStack)) continue;
             prov->SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetAlbedo());
             if (auto* lp0 = dynamic_cast<LumenProvider*>(prov.get())) lp0->SetWorldPosInput(m_GBuffer->GetWorldPos());
+            // 步骤 26：远场硬件光追的输入。TLAS / 场景材质纹理 / 三角形法线都来自共享的 RTPass
+            //（TLAS 已在 DDGI 段之前构建；此处只传句柄，不重复构建）。
+            if (auto* lp0 = dynamic_cast<LumenProvider*>(prov.get())) {
+                PushConstantData ffpc{};
+                CollectLights(ffpc, world, sg, camera);
+                lp0->SetRTInputs(m_RTPass ? m_RTPass->GetTLAS() : nullptr,
+                                 m_RTPass ? m_RTPass->GetSceneMaterialTexture() : nullptr,
+                                 m_RTPass ? m_RTPass->GetSceneTriangleNormals() : nullptr,
+                                 m_LightBuffers[m_CurrentFrameSlot].get(), ffpc.lightCount);
+            }
 
             rhi::IRHITexture* out = prov->GetDiffuseOutput();
             if (!out) continue;
@@ -766,7 +781,11 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                         lp->RunCardCapture(c, *cam);   // 步骤 15：Card 捕获（写 atlas）
                         lp->RunFeedback(c, *cam);      // 步骤 16：Feedback（缺失页检测 + 请求写回页表）
                         lp->RunProbePlacement(c);      // 步骤 20：Screen Probe 布置与自适应合并
-                        lp->RunProbeTrace(c);          // 步骤 21：探针半球追踪（GGX 采样 + SDF march）
+                        lp->RunProbeTrace(c);          // 步骤 21：探针半球追踪（半球采样 + SDF march）
+                        // 步骤 26：远场硬件光追 + 与 SDF 逐光线对照 + **合并**（远场命中写回命中点）。
+                        // 必须夹在"追踪"与"着色"之间：合并写回的命中点就是步骤 22 的输入，
+                        // 放到着色之后再跑等于白跑（写回的值会在下一帧被追踪覆盖）。
+                        lp->RunFarFieldRT(c);
                         lp->RunSurfaceCacheShading(c, *cam);   // 步骤 22：命中点着色（材质取自 atlas）
                         // 步骤 23：SH 投影（白炉下 l0 必须等于 √π —— 用同一面白炉开关驱动）
                         lp->RunScreenProbeSHProject(c, furnaceMode);

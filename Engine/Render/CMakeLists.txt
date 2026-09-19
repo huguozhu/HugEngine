@@ -188,6 +188,8 @@ set(RENDER_SOURCES
     Lumen/LumenTraceConfig.cpp
     Lumen/LumenScene_SurfaceCache.cpp
     Lumen/LumenScene_Irradiance.cpp
+    Lumen/LumenFarFieldPass.cpp
+    Lumen/LumenFarFieldPass.h
     Lumen/LumenSH.h
     GI/LumenProvider.h
 )

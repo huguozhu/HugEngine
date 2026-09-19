@@ -121,6 +121,28 @@ public:
     void RunSurfaceCacheShading(rhi::IRHICommandList* cmd, const CameraData& cam) {
         if (m_Scene) m_Scene->RunSurfaceCacheShading(cmd, m_Albedo, m_WorldPos, cam.GetViewProjMatrix());
     }
+    /// 步骤 26：注入 RT 侧输入（TLAS 与场景材质纹理来自 RTPass；光源来自本帧光源缓冲）
+    void SetRTInputs(rhi::IRHIAccelerationStructure* tlas, rhi::IRHITexture* materialTex,
+                     rhi::IRHITexture* triangleNormals, rhi::IRHIBuffer* lightBuffer, u32 lightCount) {
+        if (m_Scene) m_Scene->SetRTInputs(tlas, materialTex, triangleNormals, lightBuffer, lightCount);
+    }
+    /// 步骤 26：同一条探针光线的远场硬件光追 + 与 SDF 结果的逐光线对照
+    void RunFarFieldRT(rhi::IRHICommandList* cmd) {
+        if (m_Scene) m_Scene->RunFarFieldRT(cmd);
+    }
+    [[nodiscard]] bool  IsFarFieldReady() const { return m_Scene && m_Scene->IsFarFieldReady(); }
+    [[nodiscard]] u32   GetFarFieldRays() const { return m_Scene ? m_Scene->GetFarFieldRays() : 0u; }
+    [[nodiscard]] u32   GetFarFieldBothHit() const { return m_Scene ? m_Scene->GetFarFieldBothHit() : 0u; }
+    [[nodiscard]] float GetFarFieldMeanRelDiff() const { return m_Scene ? m_Scene->GetFarFieldMeanRelDiff() : 0.0f; }
+    [[nodiscard]] float GetFarFieldMaxRelDiff() const { return m_Scene ? m_Scene->GetFarFieldMaxRelDiff() : 0.0f; }
+    [[nodiscard]] float GetFarFieldAgree5Pct() const { return m_Scene ? m_Scene->GetFarFieldAgree5Pct() : 0.0f; }
+    [[nodiscard]] float GetFarFieldAgree20Pct() const { return m_Scene ? m_Scene->GetFarFieldAgree20Pct() : 0.0f; }
+    [[nodiscard]] u32   GetFarFieldSdfOnly() const { return m_Scene ? m_Scene->GetFarFieldSdfOnly() : 0u; }
+    [[nodiscard]] u32   GetFarFieldRtOnly() const { return m_Scene ? m_Scene->GetFarFieldRtOnly() : 0u; }
+    [[nodiscard]] const std::vector<u32>& GetFarFieldRelHist() const {
+        static const std::vector<u32> kEmpty;
+        return m_Scene ? m_Scene->GetFarFieldRelHist() : kEmpty;
+    }
     /// 步骤 24：由探针 SH 采样出逐像素入射辐照度（写进屏幕尺寸的辐照度纹理）
     void RunProbeIrradiance(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbNormal,
                             rhi::IRHITexture* gbAlbedo, rhi::IRHITexture* gbWorldPos) {

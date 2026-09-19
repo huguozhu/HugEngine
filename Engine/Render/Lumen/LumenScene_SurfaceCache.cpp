@@ -771,7 +771,11 @@ void LumenScene::RunProbeTrace(rhi::IRHICommandList* cmd) {
     pc.grid0 = uint4(gr, gr, gr, 0u);
     pc.origin1 = float4(m_SDF.GetGlobalOrigin(1), m_SDF.GetGlobalVoxelSize(1));
     pc.grid1 = pc.grid0;
-    pc.march = float4((float)m_SDF.GetMarchMaxSteps(), 1.0f * m_SDF.GetGlobalVoxelSize(0),
+    // 【eps 必须是"几何容差"而不是"体素尺度"】此前取 1 个近层体素（21.3 世界单位），
+    // 于是 march 在离真实表面最多一个体素处就判"命中"，算出来的 t 根本不是几何距离：
+    // 实测 SDF 命中距离均值只有 16.4 单位，而硬件光追打到的真实表面在几十到几百单位外
+    //（两者相对差 ≥ 0.94 的占 42%）。取 0.1 个体素（≈2.1 单位）后才是"贴着表面"的命中。
+    pc.march = float4((float)m_SDF.GetMarchMaxSteps(), kProbeMarchEpsVoxels * m_SDF.GetGlobalVoxelSize(0),
                       (float)m_SDF.GetMarchMaxDist(), 0.0f);
     ComputeBarrier(cmd);   // 等"布置 pass 写探针"落地
     cmd->SetPipeline(m_TracePSO.get());

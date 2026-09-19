@@ -18,6 +18,8 @@
 #include "Core/Log.h"
 #include "Lumen_ScreenProbe_SHProject.comp.spv.h"
 #include "Lumen_ProbeIrradiance.comp.spv.h"
+#include "Lumen_FarFieldCompare.comp.spv.h"
+#include "Lumen_FarFieldMerge.comp.spv.h"
 #include "Lumen_Irradiance.frag.spv.h"
 #include "SSAO.vert.spv.h"
 
@@ -204,4 +206,208 @@ void LumenScene::DrawIrradiance(rhi::IRHICommandList* cmd, float gain) {
     cmd->Draw(3);
 }
 
+// ============================================================
+// 步骤 26：远场硬件光追 —— 与 SDF 追踪逐光线对照
+// ============================================================
+void LumenScene::CreateFarFieldCompareGPUObjects() {
+    if (m_FarCmpPSO && m_FarMergePSO) return;
+
+    rhi::DescriptorSetLayoutDesc layout;
+    layout.bindings = {
+        {0, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},   // SDF 光线结果
+        {1, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},   // 光追光线结果
+        {2, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},   // 分类统计
+        {3, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},   // 相对误差直方图
+    };
+    m_FarCmpLayout = m_Device->CreateDescriptorSetLayout(layout);
+    m_FarCmpSet    = m_Device->AllocateDescriptorSet(m_FarCmpLayout);
+
+    rhi::PushConstantRange pcr;
+    pcr.stageMask = rhi::kStageMaskCompute;
+    pcr.offset    = 0;
+    pcr.size      = 16u;
+
+    rhi::ShaderBytecode cs;
+    cs.stage      = rhi::ShaderStage::Compute;
+    cs.spirv      = k_Lumen_FarFieldCompare_comp_spv;
+    cs.entryPoint = "main";
+
+    rhi::PipelineStateDesc pso;
+    pso.bindPoint            = rhi::PipelineBindPoint::Compute;
+    pso.computeShader        = &cs;
+    pso.descriptorSetLayouts = {m_FarCmpLayout};
+    pso.pushConstantRanges   = {pcr};
+    pso.debugName            = "Lumen_FarFieldCompare";
+    m_FarCmpPSO = m_Device->CreatePipelineState(pso);
+
+    rhi::BufferDesc sb;
+    sb.size = sizeof(u32) * 24u; sb.usage = rhi::BufferUsage::Storage; sb.cpuAccess = true;
+    m_FarCmpStatsBuf = m_Device->CreateBuffer(sb);
+    m_FarCmpStatsMapped = m_FarCmpStatsBuf->Map();
+    rhi::BufferDesc hb;
+    hb.size = sizeof(u32) * 16u; hb.usage = rhi::BufferUsage::Storage; hb.cpuAccess = true;
+    m_FarCmpHistBuf = m_Device->CreateBuffer(hb);
+    m_FarCmpHistMapped = m_FarCmpHistBuf->Map();
+    m_FarFieldHist.assign(16u, 0u);
+
+    m_Device->UpdateDescriptorSet(m_FarCmpSet, 0, rhi::DescriptorType::StorageBuffer, m_RayResultBuf.get());
+    m_Device->UpdateDescriptorSet(m_FarCmpSet, 2, rhi::DescriptorType::StorageBuffer, m_FarCmpStatsBuf.get());
+    m_Device->UpdateDescriptorSet(m_FarCmpSet, 3, rhi::DescriptorType::StorageBuffer, m_FarCmpHistBuf.get());
+    if (!m_FarCmpPSO) HE_CORE_ERROR("LumenScene: 远场对照 PSO 创建失败");
+
+    // ── 合并 pass：把远场光追的命中并进探针光线结果（见 shader 头的理由）──
+    rhi::DescriptorSetLayoutDesc ml;
+    ml.bindings = {
+        {0, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},   // SDF 结果（就地改写）
+        {1, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},   // 光追结果
+        {2, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},   // 命中点
+    };
+    m_FarMergeLayout = m_Device->CreateDescriptorSetLayout(ml);
+    m_FarMergeSet    = m_Device->AllocateDescriptorSet(m_FarMergeLayout);
+    rhi::PushConstantRange mpc;
+    mpc.stageMask = rhi::kStageMaskCompute; mpc.offset = 0; mpc.size = 16u;
+    rhi::ShaderBytecode mcs;
+    mcs.stage = rhi::ShaderStage::Compute;
+    mcs.spirv = k_Lumen_FarFieldMerge_comp_spv;
+    mcs.entryPoint = "main";
+    rhi::PipelineStateDesc mpso;
+    mpso.bindPoint            = rhi::PipelineBindPoint::Compute;
+    mpso.computeShader        = &mcs;
+    mpso.descriptorSetLayouts = {m_FarMergeLayout};
+    mpso.pushConstantRanges   = {mpc};
+    mpso.debugName            = "Lumen_FarFieldMerge";
+    m_FarMergePSO = m_Device->CreatePipelineState(mpso);
+    m_Device->UpdateDescriptorSet(m_FarMergeSet, 0, rhi::DescriptorType::StorageBuffer, m_RayResultBuf.get());
+    m_Device->UpdateDescriptorSet(m_FarMergeSet, 2, rhi::DescriptorType::StorageBuffer, m_RayHitPosBuf.get());
+    // 绑定 1（光追结果）此时还不存在（它由第一次 Trace 创建）⇒ 在派发合并之前才绑。
+    // 这是本轮第三次踩同一个坑："把结果缓冲当前置条件"在任何一条路径上都会变成死锁或空指针。
+}
+
+void LumenScene::RunFarFieldRT(rhi::IRHICommandList* cmd) {
+    // 【一次性诊断】步骤 26 首次落地时，任何一个前置为空的静默返回都会让"远场根本没跑"变成
+    // 一条不打印任何东西的日志 —— 这里显式报一次原因，避免又走一遍"猜为什么没输出"的老路。
+    static bool s_farLogged = false;
+    if (!s_farLogged) {
+        s_farLogged = true;
+        HE_CORE_INFO("LumenScene 远场光追前置检查: device={} cmd={} probe={} tlas={} rayResult={} traceFrame={}",
+                     (void*)m_Device, (void*)cmd, (void*)m_ProbeBuf.get(), (void*)m_TLAS,
+                     (void*)m_RayResultBuf.get(), m_TraceFrame);
+    }
+    if (!m_Device || !cmd || !m_ProbeBuf || !m_TLAS || !m_RayResultBuf) return;
+    if (m_TraceFrame == 0u) return;   // 还没追踪过 ⇒ 没有可比的光线
+
+    if (!m_FarField) {
+        m_FarField = std::make_unique<LumenFarFieldPass>();
+        if (!m_FarField->Initialize(m_Device)) { m_FarField.reset(); return; }
+        CreateFarFieldCompareGPUObjects();
+        // 【不能在这里绑结果缓冲】它要到第一次 Trace（EnsureCapacity）才存在；绑 nullptr 会崩
+        //（第一次就是这么崩的）。绑定改在 Trace 之后按需重绑。
+        return;
+    }
+    // 【别用 IsValid() 当这里的门】它包含 `结果缓冲非空`，而结果缓冲正是**这次 Trace** 才建的
+    // ⇒ 用它当门会永远提前返回（第一次就是这么写的，表现是"初始化成功但一条光线都没发"）。
+    if (!m_FarField || !m_FarCmpPSO) return;
+
+    // ── ① 先读**上一帧**的对照统计（同"先读后清"；本帧紧接着会把统计清零再派发）──
+    if (m_FarFieldFrame >= 1u && m_FarCmpStatsMapped) {
+        u32 st[24] = {0};
+        std::memcpy(st, m_FarCmpStatsMapped, sizeof(st));
+        const u32 rays = m_FarFieldRays;   // 上一次派发的光线数（与本批统计同批）
+        m_FarFieldBothHit = st[0];
+        m_FarFieldSdfOnly = st[1];
+        m_FarFieldRtOnly  = st[2];
+        const u32 both = st[0];
+        // 累加倍数是 1024（不是 1e6）：4.5 万 × 0.5 × 1e6 会超过 u32 上限并把读数冲掉
+        m_FarFieldMeanRel = both ? (float)((double)st[4] / 1024.0 / (double)both) : 0.0f;
+        m_FarFieldMaxRel  = (float)((double)st[5] / 1048576.0);
+        m_FarFieldAgree5  = both ? (float)((double)st[6] / (double)both) : 0.0f;
+        m_FarFieldAgree20 = both ? (float)((double)st[7] / (double)both) : 0.0f;
+        const u32 sdfHits = st[12];
+        m_FarFieldSelfHits = st[22];
+        m_FarFieldSdfMeanT = sdfHits ? (float)((double)st[23] / 16.0 / (double)sdfHits) : 0.0f;
+        const u32 nearHit = st[14], farHit = st[17];
+        m_FarFieldNear20 = nearHit ? (float)((double)st[15] / (double)nearHit) : 0.0f;
+        m_FarFieldNearMeanRel = nearHit ? (float)((double)st[20] / 1024.0 / (double)nearHit) : 0.0f;
+        m_FarFieldFar20 = farHit ? (float)((double)st[18] / (double)farHit) : 0.0f;
+        m_FarFieldFarMeanRel = farHit ? (float)((double)st[21] / 1024.0 / (double)farHit) : 0.0f;
+        if (m_FarCmpHistMapped) std::memcpy(m_FarFieldHist.data(), m_FarCmpHistMapped, 16u * sizeof(u32));
+        if ((m_FarFieldFrame % 40u) == 0u) {
+            HE_CORE_INFO("LumenScene 远场光追（步骤 26）: 光线 {}；两侧都命中 {}（SDF 命中率 {:.1f}%、RT 命中率 {:.1f}%）；"
+                         "只有 SDF 命中 {} / 只有三角形命中 {}；两者都未命中 {}；全部命中光线 相对差 均值 {:.4f} 最大 {:.4f}，"
+                         "≤5% 占 {:.1f}%、≤20% 占 {:.1f}%",
+                         rays, both,
+                         rays ? 100.0 * (double)st[12] / (double)rays : 0.0,
+                         rays ? 100.0 * (double)st[11] / (double)rays : 0.0,
+                         st[1], st[2], st[3],
+                         (double)m_FarFieldMeanRel, (double)m_FarFieldMaxRel,
+                         100.0 * (double)m_FarFieldAgree5, 100.0 * (double)m_FarFieldAgree20);
+            HE_CORE_INFO("   分带对照（分界 {:.0f} 单位）: 近带 {} 条 —— 相对差 均值 {:.4f}、≤20% 占 {:.1f}%；"
+                         "远带 {} 条 —— 相对差 均值 {:.4f}、≤20% 占 {:.1f}%；相对差直方图(0..1 分 16 桶) {} {} {} {} "
+                         "{} {} {} {} {} {} {} {} {} {} {} {}",
+                         (double)m_FarFieldNearBand, nearHit, (double)m_FarFieldNearMeanRel, 100.0 * (double)m_FarFieldNear20,
+                         farHit, (double)m_FarFieldFarMeanRel, 100.0 * (double)m_FarFieldFar20,
+                         m_FarFieldHist[0], m_FarFieldHist[1], m_FarFieldHist[2], m_FarFieldHist[3],
+                         m_FarFieldHist[4], m_FarFieldHist[5], m_FarFieldHist[6], m_FarFieldHist[7],
+                         m_FarFieldHist[8], m_FarFieldHist[9], m_FarFieldHist[10], m_FarFieldHist[11],
+                         m_FarFieldHist[12], m_FarFieldHist[13], m_FarFieldHist[14], m_FarFieldHist[15]);
+            HE_CORE_INFO("   SDF 命中距离: 均值 {:.2f}（定点 1/16）；其中 t < 1 的**自交命中** {} 条（占 SDF 命中 {:.1f}%）",
+                         (double)m_FarFieldSdfMeanT, m_FarFieldSelfHits,
+                         sdfHits ? 100.0 * (double)m_FarFieldSelfHits / (double)sdfHits : 0.0);
+        }
+    }
+
+    // ── ② 本帧：先光追，再与 SDF 结果逐光线比较 ──
+    ComputeBarrier(cmd);   // 等"追踪 pass 写 SDF 光线结果"落地
+
+    LumenFarFieldPass::FrameParams fp;
+    fp.probeBuffer   = m_ProbeBuf.get();
+    fp.probeCount    = m_ProbeCount;
+    fp.traceRep      = m_TraceConfig.traceRep;
+    // 种子必须与 SDF 追踪那一帧一致（追踪 pass 用自己的帧计数当种子再自增）
+    fp.seed          = m_TraceFrame - 1u;
+    fp.sampleMode    = kSampleModeUniformHemisphere;
+    fp.tMin          = 0.0f;
+    fp.tMax          = m_FarFieldTMax;
+    fp.farThreshold  = m_FarFieldThreshold;
+    fp.materialTex   = m_RTMaterialTex;
+    fp.triangleNorms = m_RTTriangleNormals;
+    fp.lightBuffer   = m_RTLightBuffer;
+    fp.lightCount    = m_RTLightCount;
+    const u32 rays = m_FarField->Trace(cmd, m_TLAS, fp);
+    if (rays == 0u) return;
+    m_FarFieldRays = rays;
+    ++m_FarFieldFrame;
+
+    // 【必须在 RT 缓冲被下一帧覆盖之前比较】两个缓冲本帧都写完了 ⇒ 紧接着比
+    ComputeBarrier(cmd);
+    if (m_FarCmpSet == rhi::kInvalidSet) return;
+    // RT 结果缓冲可能在扩容时被重建 ⇒ 这里每次重绑（一帧一次，代价可忽略）
+    m_Device->UpdateDescriptorSet(m_FarCmpSet, 1, rhi::DescriptorType::StorageBuffer,
+                                  m_FarField->GetResultBuffer());
+    struct { u32 rays, thr, nearBand, pad; } pc{};
+    pc.rays     = rays;
+    pc.thr      = (u32)m_FarFieldThreshold;
+    pc.nearBand = (u32)m_FarFieldNearBand;   // 近带/远带的分界（近带里 SDF 是准的，可作对照）
+    if (m_FarCmpStatsMapped) { u32 zero[24] = {0}; std::memcpy(m_FarCmpStatsMapped, zero, sizeof(zero)); }
+    if (m_FarCmpHistMapped)  { u32 zero[16] = {0}; std::memcpy(m_FarCmpHistMapped, zero, sizeof(zero)); }
+    cmd->SetPipeline(m_FarCmpPSO.get());
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_FarCmpSet);
+    cmd->SetPushConstants(0, sizeof(pc), &pc);
+    cmd->Dispatch((rays + 63u) / 64u, 1, 1);
+
+    // ── ③ 合并：远场（SDF 未命中或超出阈值）改用光追命中点，供步骤 22/23 消费 ──
+    if (m_FarMergePSO && m_FarField->GetResultBuffer()) {
+        ComputeBarrier(cmd);
+        // 光追结果缓冲可能在扩容时被重建 ⇒ 每次重绑
+        m_Device->UpdateDescriptorSet(m_FarMergeSet, 1, rhi::DescriptorType::StorageBuffer,
+                                      m_FarField->GetResultBuffer());
+        struct { u32 rays, thr, pad0, pad1; } mpc2{};
+        mpc2.rays = rays;
+        mpc2.thr  = (u32)m_FarFieldThreshold;   // SDF 命中距离 < 阈值的射线保留 SDF 结果
+        cmd->SetPipeline(m_FarMergePSO.get());
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_FarMergeSet);
+        cmd->SetPushConstants(0, sizeof(mpc2), &mpc2);
+        cmd->Dispatch((rays + 63u) / 64u, 1, 1);
+    }
+}
 } // namespace he::render
