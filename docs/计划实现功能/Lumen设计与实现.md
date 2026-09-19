@@ -215,6 +215,31 @@ dump 工具读到，否则"某块墙一直发黑"无法归因（这是 §16 里"
 4. **内部复杂的单 mesh**（UE 官方明确要求"墙/地/天花板拆成独立 mesh"）：同样的分辨率约束；
 5. **动态/蒙皮几何与 WPO**：本版基于 `MeshBatcher` 的静态合并快照，动态网格不参与。
 
+**Global SDF 首版与实测（步骤 10，2026-09-19）**
+
+实现：`Engine/Shader/Shaders/Lumen/SDF_GlobalBuild.comp.slang`（一个 shader 三种模式：清空 /
+注入 / 转换）+ `LumenSDF::BuildGlobalField`。单层 128³、R32_UINT 原子最小 + R32_FLOAT 输出。
+
+**注入语义（两处刻意的近似，都是"下界"）**：
+
+- 体素在某个 mesh 的 AABB **内** → 取该 mesh 距离场的值（精确到体素中心）；
+- 在 AABB **外** → 取"到该 AABB 的距离"。因为表面一定在 AABB 内，这是到该 mesh 真实表面的
+  **下界**；全网格处处有定义，且**永不高估**（高估会让 sphere tracing 穿漏）。
+
+**实测（06.GILab，51 个 mesh）**：
+
+| 指标 | 实测 |
+|------|------|
+| Global SDF 分辨率 / 体素边长 / 显存 | 128³ / **24.66** 世界单位 / **16.00 MB**（u32 临时 + R32F 输出各 8 MB） |
+| 自检（64 探针，CPU 参考 = 对全部三角形取精确最小） | 最大高估 **-5.44**（负 = 未高估）⇒ **安全判据 PASS** |
+| 下界质量 | 仅 **23.4%** 探针在 2 体素内，**平均低估 621.5** 世界单位 ⇒ **不足以直接用于步进** |
+
+**结论（下一步的输入）**：安全方向成立，但下界质量太差，根因是"逐 mesh AABB 的 min 合并"在一张
+**跨度极大的 mesh**（本场景最大场边长 2800+ 单位）上失效：该 AABB 覆盖了大半个场景，其内部只有
+32³ 的粗分辨率；再加上单层 128³ 的 24.66 单位体素。修复方向已明确：① clipmap 分层（近处细、
+远处粗）；② 逐 mesh 场提到 128³（需要 §5 里记的 scatter 版本）；③ 大跨度网格不要与细碎网格共
+用一个 min 合并，而应参与细节层。三条都记进 §12 的实现前置。
+
 ### 6. Screen Probe Gather
 
 | 配置项 | 值 |
@@ -1138,7 +1163,8 @@ python Tools\pt\analyze_pt.py --compare <pt_tag> <deferred_tag> --target hdr
 | 7 面板与配置 | ✅ 已完成 | `gi_blend_diffuse_lumen` / `gi_blend_specular_lumen` 独立键 + 面板候选（`0a884da`） |
 | 8 Mesh SDF 生成 | ✅ 已完成（首版 gather/32³/R32F） | `LumenSDF` + `SDF_MeshBuild.comp.slang`；06.GILab 建 51 个 mesh、6.38 MB、自检 PASS |
 | 9 SDF 质量边界 | ✅ 已完成 | §5 的"首版实现与质量边界"：体素边长 0.45~87.6、28/79 mesh 超三角形上限、5 条不适用清单 |
-| 10–41 | ⬜ 未开始 | — |
+| 10 Global SDF 注入 | 🟡 首版完成（安全但下界质量不足） | `SDF_GlobalBuild.comp.slang` + `LumenSDF::BuildGlobalField`：单层 128³、16 MB，自检最大高估 −5.44 ⇒ 安全判据 PASS；但平均低估 621.5、仅 23.4% 探针在 2 体素内 ⇒ 需 clipmap + 128³ 逐 mesh 场（§5 已记根因与三条修复方向） |
+| 11–41 | ⬜ 未开始 | — |
 
 ### 阶段 A：框架前置（不产出画面，但后补等于重构）
 
