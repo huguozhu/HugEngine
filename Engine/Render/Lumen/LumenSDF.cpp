@@ -1199,7 +1199,10 @@ void LumenSDF::SetupMarchRays() {
             const float3 surf = A + (B - A) * w0 + (C - A) * w1;
             float3 nrm = glm::cross(B - A, C - A);
             nrm = (glm::dot(nrm, nrm) > 1e-12f) ? glm::normalize(nrm) : float3(0.0f, 1.0f, 0.0f);
-            p = surf + nrm * 4.0f;
+            // 起点外移 **1.5 倍命中容差**（= 1.5 个近层体素，约 21 单位）：外移量必须大于 eps，否则'"起点自己那张表面"
+            // 在第一步就被判成命中（eps 从 1.778 涨到 14.22 后，原来的 4 单位外移已经小于 eps，
+            // 于是大量射线以 t≈0.3 的"假命中"收场 —— 这正是"仅 GPU 93"的来源）。
+            p = surf + nrm * (1.5f * GetGlobalVoxelSize(0));
             float3 dd(NextRand(seed) * 2.0f - 1.0f, NextRand(seed) * 2.0f - 1.0f, NextRand(seed) * 2.0f - 1.0f);
             d = (glm::dot(dd, dd) < 1e-6f) ? float3(0.0f, -1.0f, 0.0f) : glm::normalize(dd);
             if (inNear(p)) break;
