@@ -3,6 +3,7 @@
 #include "Core/Assert.h"
 #include "Core/Log.h"
 #include "SDF_GlobalBuild.comp.spv.h"
+#include "SDF_LayerProbe.comp.spv.h"
 #include "SDF_MeshConvert.comp.spv.h"
 #include "SDF_MeshFlood.comp.spv.h"
 #include "SDF_MeshScatter.comp.spv.h"
@@ -439,6 +440,21 @@ void LumenSDF::CreateGlobalGPUObjects() {
     sd.minFilter = sd.magFilter = rhi::FilterMode::Nearest;   // 逐体素取值，不能线性插值
     sd.addressU  = sd.addressV  = sd.addressW = rhi::AddressMode::ClampToEdge;
     m_NearestSampler = m_Device->CreateSampler(sd);
+
+    // 独立取样 pass：绑定集与全局布局相同（binding 2 = 该层场，binding 4 = 探针缓冲）
+    rhi::ShaderBytecode pcs;
+    pcs.stage      = rhi::ShaderStage::Compute;
+    pcs.spirv      = k_SDF_LayerProbe_comp_spv;
+    pcs.entryPoint = "main";
+
+    rhi::PipelineStateDesc ppso;
+    ppso.bindPoint            = rhi::PipelineBindPoint::Compute;
+    ppso.computeShader        = &pcs;
+    ppso.descriptorSetLayouts = {m_GlobalLayout};
+    ppso.pushConstantRanges   = {pcr};
+    ppso.debugName            = "Lumen_SDF_LayerProbe";
+    m_LayerProbePSO = m_Device->CreatePipelineState(ppso);
+    if (!m_LayerProbePSO) HE_CORE_ERROR("LumenSDF: 层取样 pass 的 PSO 创建失败");
 }
 
 void LumenSDF::SetupGlobalGrid() {
@@ -484,9 +500,10 @@ void LumenSDF::SetupGlobalGrid() {
         pb.usage     = rhi::BufferUsage::Storage;
         pb.cpuAccess = true;
         layer.probe = m_Device->CreateBuffer(pb);
-        // 哨兵初值：读回时若仍是它，说明"探针根本没被写过"（而不是场值为 0）。
-        // 这一区分很关键：逐 mesh 自检已证明 mesh 场里没有任何 0，所以全局层读到的 0 必须
-        // 先排除"探针路径没写"这一可能，才轮到讨论场值。
+        // 【哨兵实验 —— 结论：这条 CPU 读回路径不可信】先写 -12345 再读回，本想区分"场值是 0"
+        // 与"探针根本没写"，实测自相矛盾：层 0 报"残留 64/64"（看似没写）、层 1 报 0/64（写了），
+        // 而不写哨兵时层 0 读回的又是全 0 ⇒ 主机可见缓冲的映射/一致性语义未经验证，
+        // 该读数不能当判据。层 0 的探针数据一律视为不可信，验证改走射线（sphere tracing 自检）。
         if (void* pm = layer.probe->Map()) {
             std::vector<float> sentinel(layer.probeCount, -12345.0f);
             std::memcpy(pm, sentinel.data(), (usize)layer.probeCount * sizeof(float));
@@ -565,7 +582,23 @@ void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
             if (s == 1u) break;
         }
 
-        // ④ u32 → R32F + 自检探针
+        // ④ 独立取样：把该层场在探针坐标上的值写进探针缓冲（不复用 convert 里的取模条件）
+        m_Device->UpdateDescriptorSet(m_GlobalSet, kGBindMeshField,
+            rhi::DescriptorType::CombinedImageSampler, layer.field.get(), m_NearestSampler.get());
+        cmd->SetPipeline(m_LayerProbePSO.get());
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_GlobalSet);
+        pc.mode = 3u;   // 取样 pass 用自己的 push constant 语义：dims.w = 步长（下面用 FloodPC 传）
+        {
+            FloodPC ppc{};
+            ppc.originX = layer.origin.x; ppc.originY = layer.origin.y; ppc.originZ = layer.origin.z;
+            ppc.voxelSize = layer.voxelSize;
+            ppc.dimX = ppc.dimY = ppc.dimZ = layer.res;
+            ppc.stride = std::max(1u, layer.res / 4u);
+            cmd->SetPushConstants(0, sizeof(ppc), &ppc);
+            cmd->Dispatch((layer.probeCount + 63u) / 64u, 1, 1);
+        }
+
+        // ⑤ u32 → R32F（自检探针由上面的独立 pass 负责）
         cmd->SetPipeline(m_GlobalPSO.get());
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_GlobalSet);
         pc.mode = 2u;
@@ -846,7 +879,7 @@ void LumenSDF::RunGlobalCheck() {
 
         float maxErr = 0.0f, maxOver = -1e30f;
         double sumErr = 0.0;
-        u32 within = 0, counted = 0, sentinelLeft = 0;
+        u32 within = 0, counted = 0;
         for (u32 z = 0; z < n; ++z) {
             for (u32 y = 0; y < n; ++y) {
                 for (u32 x = 0; x < n; ++x) {
@@ -866,7 +899,6 @@ void LumenSDF::RunGlobalCheck() {
                         }
                     }
                     const float err = gpu[idx] - ref;   // 期望 ≤ 0（下界）；> 0 即高估（危险）
-                    if (gpu[idx] <= -12344.0f) ++sentinelLeft;   // 哨兵残留 = 探针没被写过
                     sumErr += err;
                     maxOver = std::max(maxOver, err);
                     maxErr = std::max(maxErr, std::fabs(err));
@@ -937,9 +969,9 @@ void LumenSDF::RunGlobalCheck() {
         c.passed = counted > 0 && maxOver <= tol;
 
         HE_CORE_INFO("LumenSDF Global 层 {} 自检: 体素 {:.3f}，探针 {}，最大高估 {:+.3f}"
-                     "（判据 ≤ {:.3f}）=> {}；哨兵残留 {}/{}（非 0 即说明探针未写）；下界质量 {} 点在 2 体素内（{:.1f}%），平均低估 {:.2f}",
+                     "（判据 ≤ {:.3f}）=> {}；下界质量 {} 点在 2 体素内（{:.1f}%），平均低估 {:.2f}（层 0 的读数不可信，见代码注释）",
                      L, (double)layer.voxelSize, counted, (double)maxOver, (double)tol,
-                     c.passed ? "PASS" : "FAIL", sentinelLeft, layer.probeCount, within,
+                     c.passed ? "PASS" : "FAIL", within,
                      counted ? 100.0 * (double)within / counted : 0.0,
                      (double)(-c.meanError));
         if (!c.passed) HE_CORE_ERROR("LumenSDF Global 层 {} 出现高估，sphere tracing 会穿漏", L);
