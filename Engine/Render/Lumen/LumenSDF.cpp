@@ -135,6 +135,12 @@ void LumenSDF::CreateGPUObjects() {
     };
     m_ConvertLayout = m_Device->CreateDescriptorSetLayout(conv);
     m_ConvertSet    = m_Device->AllocateDescriptorSet(m_ConvertLayout);
+    // 每 mesh 一套转换描述符集（输出纹理各不相同）：共用一套会让"同一提交里的多次改写"
+    // 变成描述符集别名 —— 所有转换 dispatch 都写到最后绑定的那张纹理上，其余网格的场保持 0 初值。
+    m_ConvertSets.clear();
+    m_ConvertSets.reserve(m_Config.maxMeshes);
+    for (u32 i = 0; i < m_Config.maxMeshes; ++i)
+        m_ConvertSets.push_back(m_Device->AllocateDescriptorSet(m_ConvertLayout));
 
     rhi::ShaderBytecode ccs;
     ccs.stage      = rhi::ShaderStage::Compute;
@@ -178,10 +184,14 @@ void LumenSDF::BuildQueue(const MeshBatcher& batcher) {
         if (triCount == 0) continue;
         if (triCount > m_Config.maxTrisPerMesh) { ++skippedTris; continue; }
 
-        // 该 mesh 的局部空间 AABB（顶点未施加变换，与 GPUScene 的 per-object 变换配套）
+        // 该 mesh 的 AABB（顶点未施加变换，与 GPUScene 的 per-object 变换配套）。
+        // 【顶点索引口径】合批时 MeshBatcher 已经把 baseVertex 加进索引（`m_MergedIndices[i] = src[i] + baseVertex`），
+        // 所以这里的索引是**绝对索引**，不能再加 `cmd.vertexOffset` —— 加了就是"双重偏移"，
+        // 会让除第一个 mesh（vertexOffset=0）以外的所有 mesh 读到别的网格甚至越界的顶点，
+        // 距离场因此在空旷处写满 0/垃圾，全局场被 `InterlockedMin` 压成 0。
         float3 lo(1e30f), hi(-1e30f);
         for (u32 i = 0; i < cmd.indexCount; ++i) {
-            const u32 vi = batcher.GetMergedIndices()[cmd.firstIndex + i] + (u32)cmd.vertexOffset;
+            const u32 vi = batcher.GetMergedIndices()[cmd.firstIndex + i];
             if (vi >= vertices.size()) continue;
             const float3 p = vertices[vi].position;
             lo = float3(std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z));
@@ -197,7 +207,7 @@ void LumenSDF::BuildQueue(const MeshBatcher& batcher) {
         e.commandIndex = c;
         e.firstIndex   = cmd.firstIndex;
         e.indexCount   = cmd.indexCount;
-        e.vertexOffset = (u32)cmd.vertexOffset;
+        e.vertexOffset = 0;   // 合批索引已是绝对索引（见上面的口径说明），消费侧一律 +0
         e.triCount     = triCount;
         e.origin       = lo - float3(side * 0.01f);
         e.resolution   = m_Config.resolution;
@@ -357,8 +367,8 @@ void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);   // 与 scatter 同一套绑定（只有 u32 场）
     for (u32 s = e.resolution / 2u; s >= 1u; s /= 2u) {
         pc.meshIndex = s;   // flood 的 dims.w = 本次步长（体素）
-        // **每级两趟**：单趟的 26 邻域松弛只在一个方向上把信息推到位，远场精度因此偏松
-        // （实测单趟时大网格远场最大误差 100~315 单位）；洪泛的标准做法是每级双向。
+        // **每级多趟**：就地竞争写的跳步洪泛靠"重复松弛到不动点"收敛，趟数太少会让信息推不到位
+        // （远场因此停在 +inf 或初值上）。实测 2 趟时 mesh 场在空旷处是 0/常数 ⇒ 全局场被毒化。
         for (u32 pass = 0; pass < 2u; ++pass) {
             cmd->SetPushConstants(0, sizeof(pc), &pc);
             const u32 fgroups = (e.resolution + 3u) / 4u;
@@ -370,11 +380,16 @@ void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
         if (s == 1u) break;   // 防止 s 折半变 0 造成死循环
     }
 
-    // ── ③ 转换：u32 → R32F + 写自检探针 ──
-    m_Device->UpdateDescriptorSetWithImageView(m_ConvertSet, 1, rhi::DescriptorType::StorageImage,
+    // ── ③ 转换：u32 → R32F + 写自检探针（**用该 mesh 专属的描述符集**，避免描述符集别名）──
+    rhi::DescriptorSetHandle convSet = (entryIndex < m_ConvertSets.size())
+                                     ? m_ConvertSets[entryIndex] : m_ConvertSet;
+    m_Device->UpdateDescriptorSetWithImageView(convSet, 0, rhi::DescriptorType::StorageImage,
+                                               m_MeshScratch->GetNativeHandle());
+    m_Device->UpdateDescriptorSetWithImageView(convSet, 1, rhi::DescriptorType::StorageImage,
                                                e.field->GetNativeHandle());
+    m_Device->UpdateDescriptorSet(convSet, 2, rhi::DescriptorType::StorageBuffer, m_ProbeDist.get());
     cmd->SetPipeline(m_ConvertPSO.get());
-    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_ConvertSet);
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, convSet);
     pc.meshIndex = 0u;                              // convert 的 dims.w = 0 ⇒ 写自检探针
     pc.triCount  = entryIndex * m_ProbeCount;       // convert 用 ranges.x 传本 mesh 的探针段基址
     cmd->SetPushConstants(0, sizeof(pc), &pc);
@@ -551,16 +566,57 @@ void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
     }
 
     const u32 groups = (m_Config.globalResolution + 3u) / 4u;
+
+    // 【描述符集别名】注入要在**同一次提交**里对 16 个不同的 mesh 场各 dispatch 一次；
+    // 若共用一套描述符集并在循环里反复改写 binding 2，Vulkan 下这些 dispatch 会全部看到
+    // 最后一次写入的那张纹理（描述符集别名）—— 实测全局场因此在空旷处恒为 0。
+    // 因此按 (层, mesh) 预建并**一次性写完**每套描述符集，循环里只 Bind、不再改写。
+    const u32 injectStride = std::max(1u, (u32)m_Entries.size());
+    const usize needSets = (usize)m_GlobalLayerCount * injectStride;
+    if (m_GlobalLayerSets.size() != m_GlobalLayerCount) {
+        m_GlobalLayerSets.clear();
+        for (u32 L = 0; L < m_GlobalLayerCount; ++L)
+            m_GlobalLayerSets.push_back(m_Device->AllocateDescriptorSet(m_GlobalLayout));
+    }
+    if (m_GlobalInjectSets.size() != needSets) {
+        m_GlobalInjectSets.clear();
+        for (usize i = 0; i < needSets; ++i)
+            m_GlobalInjectSets.push_back(m_Device->AllocateDescriptorSet(m_GlobalLayout));
+        for (u32 L = 0; L < m_GlobalLayerCount; ++L) {
+            GlobalLayer& layer = m_GlobalLayers[L];
+            auto& ls = m_GlobalLayerSets[L];
+            m_Device->UpdateDescriptorSetWithImageView(ls, kGBindGlobal,
+                rhi::DescriptorType::StorageImage, layer.scratch->GetNativeHandle());
+            m_Device->UpdateDescriptorSetWithImageView(ls, kGBindGlobalOut,
+                rhi::DescriptorType::StorageImage, layer.field->GetNativeHandle());
+            m_Device->UpdateDescriptorSet(ls, kGBindProbe,
+                rhi::DescriptorType::StorageBuffer, layer.probe.get());
+            // binding 2：该层自己的场（供"独立取样"pass 用最近邻采样）
+            m_Device->UpdateDescriptorSet(ls, kGBindMeshField,
+                rhi::DescriptorType::CombinedImageSampler, layer.field.get(),
+                m_NearestSampler.get());
+            for (u32 m = 0; m < injectStride && m < (u32)m_Entries.size(); ++m) {
+                auto& is = m_GlobalInjectSets[(usize)L * injectStride + m];
+                m_Device->UpdateDescriptorSetWithImageView(is, kGBindGlobal,
+                    rhi::DescriptorType::StorageImage, layer.scratch->GetNativeHandle());
+                m_Device->UpdateDescriptorSetWithImageView(is, kGBindGlobalOut,
+                    rhi::DescriptorType::StorageImage, layer.field->GetNativeHandle());
+                m_Device->UpdateDescriptorSet(is, kGBindProbe,
+                    rhi::DescriptorType::StorageBuffer, layer.probe.get());
+                if (m_Entries[m].field) {
+                    m_Device->UpdateDescriptorSet(is, kGBindMeshField,
+                        rhi::DescriptorType::CombinedImageSampler, m_Entries[m].field.get(),
+                        m_LinearSampler.get());
+                }
+            }
+        }
+    }
     for (u32 L = 0; L < m_GlobalLayerCount; ++L) {
         GlobalLayer& layer = m_GlobalLayers[L];
         if (!layer.scratch || !layer.field) continue;
 
-        m_Device->UpdateDescriptorSetWithImageView(m_GlobalSet, kGBindGlobal,
-            rhi::DescriptorType::StorageImage, layer.scratch->GetNativeHandle());
-        m_Device->UpdateDescriptorSetWithImageView(m_GlobalSet, kGBindGlobalOut,
-            rhi::DescriptorType::StorageImage, layer.field->GetNativeHandle());
-        m_Device->UpdateDescriptorSet(m_GlobalSet, kGBindProbe,
-            rhi::DescriptorType::StorageBuffer, layer.probe.get());
+        // 描述符集已在上面的预建阶段一次性写完（避免同一提交内的描述符集别名）
+        const auto& lset = m_GlobalLayerSets[L];
 
         GlobalPC pc{};
         pc.originX = layer.origin.x; pc.originY = layer.origin.y; pc.originZ = layer.origin.z;
@@ -569,7 +625,7 @@ void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
         pc.probeStride = std::max(1u, layer.res / 4u);
 
         cmd->SetPipeline(m_GlobalPSO.get());
-        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_GlobalSet);
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, lset);
 
         // ① 清空为 +inf
         pc.mode = 0u;
@@ -579,15 +635,17 @@ void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
                              rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
                              layer.scratch.get());
 
-        // ② 逐 mesh 注入（覆盖**整个层网格**；AABB 外用"到 AABB 的距离"作下界，见 shader 注释）
+        // ② 逐 mesh 注入（每个 mesh 用**自己的**描述符集：同一次提交里反复改写同一套描述符集时，
+        //    所有 dispatch 会看到最后一次写入的纹理 = 描述符集别名，实测全局场因此恒为 0）
         pc.mode = 1u;
-        for (const auto& e : m_Entries) {
+        for (u32 m = 0; m < (u32)m_Entries.size(); ++m) {
+            const auto& e = m_Entries[m];
             if (!e.field) continue;
             pc.meshOriginX = e.origin.x; pc.meshOriginY = e.origin.y; pc.meshOriginZ = e.origin.z;
             pc.meshVoxelSize = e.voxelSize;
             pc.meshDimX = pc.meshDimY = pc.meshDimZ = e.resolution;
-            m_Device->UpdateDescriptorSet(m_GlobalSet, kGBindMeshField,
-                rhi::DescriptorType::CombinedImageSampler, e.field.get(), m_LinearSampler.get());
+            cmd->BindDescriptorSet(rhi::kDescSetPerFrame,
+                                   m_GlobalInjectSets[(usize)L * injectStride + m]);
             cmd->SetPushConstants(0, sizeof(pc), &pc);
             cmd->Dispatch(groups, groups, groups);
             cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
@@ -597,14 +655,14 @@ void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
 
         // ③ 跳步洪泛补全：AABB 内才有精确值，其余体素靠洪泛逐级传播（与 mesh 层同一套算法）
         cmd->SetPipeline(m_GlobalFloodPSO.get());
-        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_GlobalSet);
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, lset);
         FloodPC fpc{};
         fpc.originX = layer.origin.x; fpc.originY = layer.origin.y; fpc.originZ = layer.origin.z;
         fpc.voxelSize = layer.voxelSize;
         fpc.dimX = fpc.dimY = fpc.dimZ = layer.res;
         for (u32 s = layer.res / 2u; s >= 1u; s /= 2u) {
             fpc.stride = s;
-            for (u32 pass = 0; pass < 2u; ++pass) {   // 每级两趟（与 mesh 层同理：单趟只推一个方向）
+            for (u32 pass = 0; pass < 2u; ++pass) {   // 每级两趟
                 cmd->SetPushConstants(0, sizeof(fpc), &fpc);
                 cmd->Dispatch(groups, groups, groups);
                 cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
@@ -614,11 +672,9 @@ void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
             if (s == 1u) break;
         }
 
-        // ④ 独立取样：把该层场在探针坐标上的值写进探针缓冲（不复用 convert 里的取模条件）
-        m_Device->UpdateDescriptorSet(m_GlobalSet, kGBindMeshField,
-            rhi::DescriptorType::CombinedImageSampler, layer.field.get(), m_NearestSampler.get());
+        // ④ 独立取样：把该层场在探针坐标上的值写进探针缓冲（binding 2 已在预建阶段指向该层场）
         cmd->SetPipeline(m_LayerProbePSO.get());
-        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_GlobalSet);
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, lset);
         pc.mode = 3u;   // 取样 pass 用自己的 push constant 语义：dims.w = 步长（下面用 FloodPC 传）
         {
             FloodPC ppc{};
@@ -632,7 +688,7 @@ void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
 
         // ⑤ u32 → R32F（自检探针由上面的独立 pass 负责）
         cmd->SetPipeline(m_GlobalPSO.get());
-        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_GlobalSet);
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, lset);
         pc.mode = 2u;
         cmd->SetPushConstants(0, sizeof(pc), &pc);
         cmd->Dispatch(groups, groups, groups);
@@ -1639,6 +1695,9 @@ void LumenSDF::RunDebugView(rhi::IRHICommandList* cmd, const float3& camPos, con
 
     // 统计帧后 3 帧读回（飞行帧数），把"看得见的画面"同时落成可回归的数字
     if (m_DebugFrames == kDebugCountFrame + 3) LogDebugStats();
+
+    // 逐帧探测单个 mesh 场（定位"哪几个 mesh 场在空旷处为 0"）
+    RunMeshFieldProbe(cmd, camPos, forward);
 }
 
 void LumenSDF::LogDebugStats() {
@@ -1689,6 +1748,79 @@ void LumenSDF::LogDebugStats() {
             m_DebugProbe->Unmap();
         }
     }
+}
+
+void LumenSDF::RunMeshFieldProbe(rhi::IRHICommandList* cmd, const float3& camPos, const float3& fwd) {
+    // 【为什么需要】全局场是"跨 16 个 mesh 取 min"的产物，任何一个 mesh 场在空旷处给出 0，
+    // 整个全局场在那片区域就被压成 0（实测：相机处真实距离 102 单位，场却 < eps）。
+    // 本探测用 1 条合成射线（相机 → 前向）单独跑**某一个** mesh 的细节追踪：
+    // 命中距离 ≈ 该 mesh 场在起点处的值（第一步就命中 ⇒ 该 mesh 场在此处 ≈ 0 ⇒ 就是它毒化了全局场）。
+    // 读回要等 3 帧（飞行帧），故每帧只查一个 mesh。
+    if (m_Entries.empty() || !m_DetailPSO || !m_RayOrigin || !m_RayDir || !m_RayT || !m_RayTMapped) return;
+
+    if (m_MeshProbeIndex >= m_Entries.size()) {
+        if (!m_MeshProbeReported) {
+            m_MeshProbeReported = true;
+            const float camTruth = MinDistToGeometry(camPos);
+            HE_CORE_INFO("LumenSDF mesh 场探针汇总: 相机 ({:.1f},{:.1f},{:.1f}) 到全局真实几何 {:.2f} 世界单位；"
+                         "各 mesh 的命中距离（≈0 ⇒ 该 mesh 场在空旷处为 0，是全局场被压成 0 的元凶）:",
+                         (double)camPos.x, (double)camPos.y, (double)camPos.z, (double)camTruth);
+            for (size_t i = 0; i < m_Entries.size() && i < m_MeshProbeValue.size(); ++i) {
+                const auto& e = m_Entries[i];
+                const float side = e.voxelSize * (float)e.resolution;
+                HE_CORE_INFO("   mesh #{}: 命中距离 {:9.2f}（边长 {:.0f}，体素 {:.3f}，三角形 {}）",
+                             i, (double)m_MeshProbeValue[i], (double)side, (double)e.voxelSize, e.triCount);
+            }
+        }
+        return;
+    }
+
+    if (m_MeshProbeValue.size() != m_Entries.size()) m_MeshProbeValue.assign(m_Entries.size(), -1.0f);
+
+    // ① 发射：写第 0 条射线 = 相机 → 前向，清 m_RayT[0]，只对该 mesh 跑一次 1 线程的细节追踪
+    if (m_MeshProbeStage == 0) {
+        const auto& e = m_Entries[m_MeshProbeIndex];
+        if (!e.field) { m_MeshProbeValue[m_MeshProbeIndex] = -2.0f; ++m_MeshProbeIndex; return; }
+
+        if (void* mo = m_RayOrigin->Map()) { std::memcpy(mo, &camPos, sizeof(float3)); m_RayOrigin->Unmap(); }
+        if (void* md = m_RayDir->Map())    { std::memcpy(md, &fwd,    sizeof(float3)); m_RayDir->Unmap(); }
+        {
+            u32 inf = 0x7F800000u;   // +inf：细节追踪是 min 归约，起点必须比任何命中都大
+            std::memcpy(m_RayTMapped, &inf, sizeof(u32));
+        }
+
+        m_Device->UpdateDescriptorSet(m_DetailSet, kMBindField,
+            rhi::DescriptorType::CombinedImageSampler, e.field.get(), m_LinearSampler.get());
+
+        MarchPC pc{};
+        pc.originX = e.origin.x; pc.originY = e.origin.y; pc.originZ = e.origin.z;
+        pc.voxelSize = e.voxelSize;
+        pc.dimX = pc.dimY = pc.dimZ = e.resolution;
+        pc.rayCount = 1u;                    // 只跑第 0 条
+        pc.maxSteps = (float)m_Config.marchMaxSteps;
+        pc.eps      = 0.25f * e.voxelSize;   // 与细节追踪同口径
+        pc.maxDist  = m_Config.marchMaxDist;
+
+        cmd->SetPipeline(m_DetailPSO.get());
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DetailSet);
+        cmd->SetPushConstants(0, sizeof(pc), &pc);
+        cmd->Dispatch(1, 1, 1);
+        cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                             rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
+                             GetGlobalField(0));
+
+        m_MeshProbeStage = 1;
+        m_MeshProbeFrame = m_DebugFrames;
+        return;
+    }
+
+    // ② 等 3 帧后读回
+    if (m_DebugFrames < m_MeshProbeFrame + 3u) return;
+    float v = 1e30f;
+    std::memcpy(&v, m_RayTMapped, sizeof(float));
+    m_MeshProbeValue[m_MeshProbeIndex] = (v < 1e29f) ? v : 999999.0f;   // 未命中 → 大数（说明该 mesh 场正常）
+    ++m_MeshProbeIndex;
+    m_MeshProbeStage = 0;
 }
 
 } // namespace he::render

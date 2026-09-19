@@ -167,6 +167,8 @@ private:
     // ── SDF 追踪可视化（步骤 12）──
     void CreateDebugGPUObjects();
     void LogDebugStats();
+    /// 逐帧探测单个 mesh 场在相机处的值（定位"哪个 mesh 场在空旷处为 0"）
+    void RunMeshFieldProbe(rhi::IRHICommandList* cmd, const float3& camPos, const float3& fwd);
     static float PointTriangleDistance(const float3& p, const float3& a,
                                        const float3& b, const float3& c);
     /// 点 p 到全部几何的精确距离（逐 mesh AABB 粗筛）：自检与调试视图共用的"真值"查询
@@ -185,6 +187,8 @@ private:
     std::unique_ptr<rhi::IRHIPipelineState>   m_FloodPSO;     // 跳步洪泛（补全 scatter 的空洞）
     rhi::DescriptorSetLayoutHandle            m_ConvertLayout;
     rhi::DescriptorSetHandle                  m_ConvertSet;
+    // 同上：转换 pass 的输出是**每 mesh 一张**纹理，共用一套描述符集会让写入落到同一张上
+    std::vector<rhi::DescriptorSetHandle>     m_ConvertSets;
     std::unique_ptr<rhi::IRHITexture>         m_MeshScratch;  // 共享的 u32 距离场（原子最小目标）
     std::unique_ptr<rhi::IRHIBuffer>          m_Positions;   // float4（w 未用）
     std::unique_ptr<rhi::IRHIBuffer>          m_Indices;
@@ -226,6 +230,10 @@ private:
     static constexpr u32 kMaxGlobalLayers = 2;
     rhi::DescriptorSetLayoutHandle m_GlobalLayout;
     rhi::DescriptorSetHandle       m_GlobalSet;
+    // 【为什么每层/每 mesh 各一套描述符集】同一套描述符集在一次提交里被反复改写会出现
+    // "所有 dispatch 都看到最后一次写入"（描述符集别名）——实测注入因此全部采到同一张（0 值）纹理。
+    std::vector<rhi::DescriptorSetHandle> m_GlobalLayerSets;    // 每层一套（clear/flood/convert/probe）
+    std::vector<rhi::DescriptorSetHandle> m_GlobalInjectSets;   // 每 层×mesh 一套（注入）
     std::unique_ptr<rhi::IRHIPipelineState> m_GlobalPSO;
     std::unique_ptr<rhi::IRHIPipelineState> m_GlobalFloodPSO;   // 全局网格上的跳步洪泛
     std::unique_ptr<rhi::IRHIPipelineState> m_LayerProbePSO;    // 独立取样（把层场写进探针缓冲）
@@ -267,6 +275,12 @@ private:
     float3 m_DebugCamFwd = float3(0.0f, 0.0f, -1.0f);   // 最近一次的前向（剖面点用）
     u32   m_DebugFrames = 0;                                 // 已累计统计的帧数
     u32   m_DebugStatsLast[4] = {0, 0, 0, 0};
+    // mesh 场探针（每帧查一个 mesh，读回等 3 帧）
+    u32   m_MeshProbeIndex = 0;
+    u32   m_MeshProbeStage = 0;      // 0 = 发射，1 = 等读回
+    u32   m_MeshProbeFrame = 0;
+    bool  m_MeshProbeReported = false;
+    std::vector<float> m_MeshProbeValue;   // 每个 mesh 的命中距离（≈0 ⇒ 该 mesh 场在此处为 0）
 };
 
 } // namespace he::render
