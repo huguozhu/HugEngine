@@ -38,6 +38,8 @@ struct LumenSDFConfig {
     u32 meshesPerFrame = 2;      // 每帧构建预算（128³ 的 scatter + convert 更重）
     u32 probeStride    = 0;      // 自检采样步长（0 = 自动取 resolution/4）
     u32 globalResolution = 128;  // Global SDF 单层分辨率（clipmap 分层留待后续步骤）
+    u32 globalLayers     = 2;    // clipmap 层数（1 = 旧行为：单层覆盖全场；2 = 近层 + 远层）
+    float nearFraction   = 0.25f;// 近层边长 = 场景最长轴 × 该比例（近层体素 ≈ 远层 / 比例）
     // ── sphere tracing 验证（步骤 11）──
     u32   marchRays     = 256;   // 验证用射线数
     u32   marchMaxSteps = 192;   // 最大步数（设计写 64；下界质量不足时步数会更费，见 §5）
@@ -84,11 +86,18 @@ public:
     };
     [[nodiscard]] const SelfCheck& GetSelfCheck() const { return m_SelfCheck; }
 
-    // ── Global SDF（步骤 10）──
-    /// 单层全局距离场（世界/局部空间，覆盖全部已建 mesh 的并集 AABB）
-    [[nodiscard]] rhi::IRHITexture* GetGlobalField() const { return m_GlobalField.get(); }
-    [[nodiscard]] float GetGlobalVoxelSize() const { return m_GlobalVoxelSize; }
-    [[nodiscard]] float3 GetGlobalOrigin() const { return m_GlobalOrigin; }
+    // ── Global SDF（步骤 10 / clipmap 分层）──
+    /// 指定层的可采样全局场（0 = 最细的近层，kGlobalLayerCount-1 = 覆盖全场的远层）
+    [[nodiscard]] rhi::IRHITexture* GetGlobalField(u32 layer = kMaxGlobalLayers - 1u) const {
+        return (layer < m_GlobalLayerCount) ? m_GlobalLayers[layer].field.get() : nullptr;
+    }
+    [[nodiscard]] u32    GetGlobalLayerCount() const { return m_GlobalLayerCount; }
+    [[nodiscard]] float  GetGlobalVoxelSize(u32 layer = kMaxGlobalLayers - 1u) const {
+        return (layer < m_GlobalLayerCount) ? m_GlobalLayers[layer].voxelSize : 0.0f;
+    }
+    [[nodiscard]] float3 GetGlobalOrigin(u32 layer = kMaxGlobalLayers - 1u) const {
+        return (layer < m_GlobalLayerCount) ? m_GlobalLayers[layer].origin : float3(0.0f);
+    }
     /// Global SDF 的自检结论（未跑完时 valid=false）
     struct GlobalCheck {
         bool  valid     = false;
@@ -99,7 +108,10 @@ public:
         float meanError = 0.0f;
         float tolerance = 0.0f;   // = 2 × 全局体素边长
     };
-    [[nodiscard]] const GlobalCheck& GetGlobalCheck() const { return m_GlobalCheck; }
+    /// 远层（覆盖全场那层）的自检结论（逐层结果见日志）
+    [[nodiscard]] const GlobalCheck& GetGlobalCheck() const {
+        return m_GlobalLayers[kMaxGlobalLayers - 1u].check;
+    }
 
     // ── sphere tracing（步骤 11）──
     /// sphere tracing 的自检结论：GPU 命中距离 vs CPU 精确射线-三角形求交
@@ -174,19 +186,25 @@ private:
     std::vector<u32>    m_IndicesCPU;
 
     // ── Global SDF（步骤 10）──
+    // ── Global SDF（步骤 10 / clipmap 分层）──
+    /// 一层 clipmap：u32 原子目标 + R32F 可采样输出 + 自检探针
+    struct GlobalLayer {
+        std::unique_ptr<rhi::IRHITexture> scratch;
+        std::unique_ptr<rhi::IRHITexture> field;
+        std::unique_ptr<rhi::IRHIBuffer>  probe;
+        float3 origin    = float3(0.0f);
+        float  voxelSize = 0.0f;
+        u32    res = 0, probeCount = 0;
+        GlobalCheck check;   // 每层单独自检（近层紧度是本步的关键指标）
+    };
+    static constexpr u32 kMaxGlobalLayers = 2;
     rhi::DescriptorSetLayoutHandle m_GlobalLayout;
     rhi::DescriptorSetHandle       m_GlobalSet;
     std::unique_ptr<rhi::IRHIPipelineState> m_GlobalPSO;
-    std::unique_ptr<rhi::IRHITexture>       m_GlobalScratch;   // R32_UINT（原子最小目标）
-    std::unique_ptr<rhi::IRHITexture>       m_GlobalField;     // R32_FLOAT（可采样）
-    std::unique_ptr<rhi::IRHIBuffer>        m_GlobalProbe;     // CPU 可读（自检）
-    std::unique_ptr<rhi::IRHISampler>       m_NearestSampler;  // 采样各 mesh 的距离场
-    float3 m_GlobalOrigin    = float3(0.0f);
-    float  m_GlobalVoxelSize = 0.0f;
-    u32    m_GlobalRes       = 0;
-    u32    m_GlobalProbeCount = 0;
-    u32    m_WaitGlobalFrames = 0;
-    GlobalCheck m_GlobalCheck;
+    std::unique_ptr<rhi::IRHISampler>       m_NearestSampler;
+    GlobalLayer m_GlobalLayers[kMaxGlobalLayers];
+    u32 m_GlobalLayerCount = 0;
+    u32 m_WaitGlobalFrames = 0;
 
     // ── sphere tracing（步骤 11）──
     rhi::DescriptorSetLayoutHandle m_MarchLayout;

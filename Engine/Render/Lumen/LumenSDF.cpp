@@ -390,7 +390,7 @@ void LumenSDF::CreateGlobalGPUObjects() {
 }
 
 void LumenSDF::SetupGlobalGrid() {
-    // 全局场覆盖全部已建 mesh 的并集 AABB（立方体，取最长轴）+ 余量
+    // 场景并集 AABB（全部已建 mesh）→ 决定 clipmap 层
     float3 lo(1e30f), hi(-1e30f);
     for (const auto& e : m_Entries) {
         const float side = e.voxelSize * (float)e.resolution;
@@ -398,110 +398,106 @@ void LumenSDF::SetupGlobalGrid() {
         hi = float3(std::max(hi.x, e.origin.x + side), std::max(hi.y, e.origin.y + side),
                     std::max(hi.z, e.origin.z + side));
     }
-    const float3 ext  = hi - lo;
-    const float  side = std::max(std::max(ext.x, ext.y), ext.z) * 1.05f + 1e-3f;
-    m_GlobalRes       = m_Config.globalResolution;
-    m_GlobalOrigin    = lo - float3(side * 0.025f);
-    m_GlobalVoxelSize = side / (float)m_GlobalRes;
+    const float3 ext      = hi - lo;
+    const float  sceneSide = std::max(std::max(ext.x, ext.y), ext.z) * 1.05f + 1e-3f;
+    const float3 sceneCtr  = (lo + hi) * 0.5f;
 
-    const u32 stride = std::max(1u, m_GlobalRes / 4u);   // 4³ = 64 个自检探针（CPU 参考要遍历全部三角形）
-    m_GlobalProbeCount = (m_GlobalRes / stride) * (m_GlobalRes / stride) * (m_GlobalRes / stride);
+    const u32 res = m_Config.globalResolution;
+    m_GlobalLayerCount = std::clamp(m_Config.globalLayers, 1u, kMaxGlobalLayers);
 
-    // 全局场两张 3D 纹理：u32 原子目标 + R32F 可采样输出
-    rhi::TextureDesc td;
-    td.width = td.height = td.depth = m_GlobalRes;
-    td.format = rhi::Format::R32_UINT;
-    td.usage  = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource;
-    m_GlobalScratch = m_Device->CreateTexture(td);
-    td.format = rhi::Format::R32_FLOAT;
-    m_GlobalField = m_Device->CreateTexture(td);
+    for (u32 L = 0; L < m_GlobalLayerCount; ++L) {
+        GlobalLayer& layer = m_GlobalLayers[L];
+        // L = kMaxGlobalLayers-1 是远层（覆盖全场）；更小的 L 是更细的近层，居中于场景中心。
+        // 近层边长 = 场景最长轴 × nearFraction^(层数-1-L)，故得名"cl_ipmap"的最小可用形态：
+        // 每往里一层体素小一个比例，而覆盖范围也小同样的比例。
+        const u32   stepsFromFar = (kMaxGlobalLayers - 1u) - L;
+        const float layerSide    = sceneSide * std::pow(m_Config.nearFraction, (float)stepsFromFar);
+        layer.res       = res;
+        layer.origin    = sceneCtr - float3(layerSide * 0.5f);
+        layer.voxelSize = layerSide / (float)res;
 
-    rhi::BufferDesc pb;
-    pb.size      = (usize)m_GlobalProbeCount * sizeof(float);
-    pb.usage     = rhi::BufferUsage::Storage;
-    pb.cpuAccess = true;
-    m_GlobalProbe = m_Device->CreateBuffer(pb);
+        const u32 stride = std::max(1u, res / 4u);
+        layer.probeCount = (res / stride) * (res / stride) * (res / stride);
 
-    m_Device->UpdateDescriptorSetWithImageView(m_GlobalSet, kGBindGlobal,
-        rhi::DescriptorType::StorageImage, m_GlobalScratch->GetNativeHandle());
-    m_Device->UpdateDescriptorSetWithImageView(m_GlobalSet, kGBindGlobalOut,
-        rhi::DescriptorType::StorageImage, m_GlobalField->GetNativeHandle());
-    m_Device->UpdateDescriptorSet(m_GlobalSet, kGBindProbe,
-        rhi::DescriptorType::StorageBuffer, m_GlobalProbe.get());
+        rhi::TextureDesc td;
+        td.width = td.height = td.depth = res;
+        td.format = rhi::Format::R32_UINT;
+        td.usage  = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource;
+        layer.scratch = m_Device->CreateTexture(td);
+        td.format = rhi::Format::R32_FLOAT;
+        layer.field = m_Device->CreateTexture(td);
 
-    HE_CORE_INFO("LumenSDF: Global SDF 单层 {}³（体素边长 {:.4f}，原点 ({:.2f},{:.2f},{:.2f})，"
-                 "显存 {:.2f} MB，自检探针 {}）",
-                 m_GlobalRes, (double)m_GlobalVoxelSize, (double)m_GlobalOrigin.x,
-                 (double)m_GlobalOrigin.y, (double)m_GlobalOrigin.z,
-                 (double)(2.0 * (u64)m_GlobalRes * m_GlobalRes * m_GlobalRes * 4ull) / (1024.0 * 1024.0),
-                 m_GlobalProbeCount);
+        rhi::BufferDesc pb;
+        pb.size      = (usize)layer.probeCount * sizeof(float);
+        pb.usage     = rhi::BufferUsage::Storage;
+        pb.cpuAccess = true;
+        layer.probe = m_Device->CreateBuffer(pb);
+
+        HE_CORE_INFO("LumenSDF: Global SDF 层 {} {}³（体素边长 {:.4f}，边长 {:.1f}，原点 "
+                     "({:.1f},{:.1f},{:.1f})，显存 {:.2f} MB/层）",
+                     L, res, (double)layer.voxelSize, (double)layerSide,
+                     (double)layer.origin.x, (double)layer.origin.y, (double)layer.origin.z,
+                     (double)(2.0 * (u64)res * res * res * 4ull) / (1024.0 * 1024.0));
+    }
 }
-
 void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
     if (!m_GlobalPSO || m_Entries.empty()) return;
 
-    const u32 groups = (m_GlobalRes + 3u) / 4u;
-    GlobalPC pc{};
-    pc.originX = m_GlobalOrigin.x; pc.originY = m_GlobalOrigin.y; pc.originZ = m_GlobalOrigin.z;
-    pc.voxelSize = m_GlobalVoxelSize;
-    pc.dimX = pc.dimY = pc.dimZ = m_GlobalRes;
-    pc.probeStride = std::max(1u, m_GlobalRes / 4u);
+    const u32 groups = (m_Config.globalResolution + 3u) / 4u;
+    for (u32 L = 0; L < m_GlobalLayerCount; ++L) {
+        GlobalLayer& layer = m_GlobalLayers[L];
+        if (!layer.scratch || !layer.field) continue;
 
-    cmd->SetPipeline(m_GlobalPSO.get());
-    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_GlobalSet);
+        m_Device->UpdateDescriptorSetWithImageView(m_GlobalSet, kGBindGlobal,
+            rhi::DescriptorType::StorageImage, layer.scratch->GetNativeHandle());
+        m_Device->UpdateDescriptorSetWithImageView(m_GlobalSet, kGBindGlobalOut,
+            rhi::DescriptorType::StorageImage, layer.field->GetNativeHandle());
+        m_Device->UpdateDescriptorSet(m_GlobalSet, kGBindProbe,
+            rhi::DescriptorType::StorageBuffer, layer.probe.get());
 
-    // ── mode 0：清空为 +inf ──
-    pc.mode = 0u;
-    cmd->SetPushConstants(0, sizeof(pc), &pc);
-    cmd->Dispatch(groups, groups, groups);
-    cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
-                         rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
-                         m_GlobalScratch.get());
+        GlobalPC pc{};
+        pc.originX = layer.origin.x; pc.originY = layer.origin.y; pc.originZ = layer.origin.z;
+        pc.voxelSize = layer.voxelSize;
+        pc.dimX = pc.dimY = pc.dimZ = layer.res;
+        pc.probeStride = std::max(1u, layer.res / 4u);
 
-    // ── mode 1：逐 mesh 注入（每个 mesh 绑一次它的距离场作为采样 3D 纹理）──
-    pc.mode = 1u;
-    for (const auto& e : m_Entries) {
-        if (!e.field) continue;
-        // 该 mesh 的 AABB 映射到全局体素范围
-        const float side = e.voxelSize * (float)e.resolution;
-        const u32 lo[3] = {
-            (u32)std::max(0.0f, std::floor((e.origin.x - m_GlobalOrigin.x) / m_GlobalVoxelSize)),
-            (u32)std::max(0.0f, std::floor((e.origin.y - m_GlobalOrigin.y) / m_GlobalVoxelSize)),
-            (u32)std::max(0.0f, std::floor((e.origin.z - m_GlobalOrigin.z) / m_GlobalVoxelSize)),
-        };
-        const u32 hi[3] = {
-            (u32)std::min((float)(m_GlobalRes - 1), std::floor((e.origin.x + side - m_GlobalOrigin.x) / m_GlobalVoxelSize)),
-            (u32)std::min((float)(m_GlobalRes - 1), std::floor((e.origin.y + side - m_GlobalOrigin.y) / m_GlobalVoxelSize)),
-            (u32)std::min((float)(m_GlobalRes - 1), std::floor((e.origin.z + side - m_GlobalOrigin.z) / m_GlobalVoxelSize)),
-        };
-        if (lo[0] > hi[0] || lo[1] > hi[1] || lo[2] > hi[2]) continue;
+        cmd->SetPipeline(m_GlobalPSO.get());
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_GlobalSet);
 
-        pc.rangeLoX = lo[0]; pc.rangeLoY = lo[1]; pc.rangeLoZ = lo[2];
-        pc.rangeHiX = hi[0]; pc.rangeHiY = hi[1]; pc.rangeHiZ = hi[2];
-        pc.meshOriginX = e.origin.x; pc.meshOriginY = e.origin.y; pc.meshOriginZ = e.origin.z;
-        pc.meshVoxelSize = e.voxelSize;
-        pc.meshDimX = pc.meshDimY = pc.meshDimZ = e.resolution;
-
-        m_Device->UpdateDescriptorSet(m_GlobalSet, kGBindMeshField,
-            rhi::DescriptorType::CombinedImageSampler, e.field.get(), m_NearestSampler.get());
-
-        // 注入覆盖**整个全局网格**（AABB 外用"到 AABB 的距离"作为到该 mesh 表面的下界）：
-        // 若只注入 AABB 内的体素，网格大部分会留成 +inf，而 +inf 是一个"高估"的步长，
-        // sphere tracing 会直接跳过邻近网格（实测自检 64 点里 61 点是 +inf ⇒ FAIL）。
+        // ① 清空为 +inf
+        pc.mode = 0u;
         cmd->SetPushConstants(0, sizeof(pc), &pc);
         cmd->Dispatch(groups, groups, groups);
         cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
                              rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
-                             m_GlobalScratch.get());
-    }
+                             layer.scratch.get());
 
-    // ── mode 2：u32 → R32F + 自检探针 ──
-    pc.mode = 2u;
-    cmd->SetPushConstants(0, sizeof(pc), &pc);
-    cmd->Dispatch(groups, groups, groups);
-    cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
-                         rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource,
-                         m_GlobalField.get());
+        // ② 逐 mesh 注入（覆盖**整个层网格**；AABB 外用"到 AABB 的距离"作下界，见 shader 注释）
+        pc.mode = 1u;
+        for (const auto& e : m_Entries) {
+            if (!e.field) continue;
+            pc.meshOriginX = e.origin.x; pc.meshOriginY = e.origin.y; pc.meshOriginZ = e.origin.z;
+            pc.meshVoxelSize = e.voxelSize;
+            pc.meshDimX = pc.meshDimY = pc.meshDimZ = e.resolution;
+            m_Device->UpdateDescriptorSet(m_GlobalSet, kGBindMeshField,
+                rhi::DescriptorType::CombinedImageSampler, e.field.get(), m_NearestSampler.get());
+            cmd->SetPushConstants(0, sizeof(pc), &pc);
+            cmd->Dispatch(groups, groups, groups);
+            cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                                 rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
+                                 layer.scratch.get());
+        }
+
+        // ③ u32 → R32F + 自检探针
+        pc.mode = 2u;
+        cmd->SetPushConstants(0, sizeof(pc), &pc);
+        cmd->Dispatch(groups, groups, groups);
+        cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                             rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource,
+                             layer.field.get());
+    }
+    HE_CORE_INFO("LumenSDF: Global SDF 注入完成（{} 层 × {} 个 mesh，第 {} 帧）",
+                 m_GlobalLayerCount, m_Entries.size(), m_Frame);
 }
 
 void LumenSDF::Step(rhi::IRHICommandList* cmd, const MeshBatcher& batcher) {
@@ -736,83 +732,75 @@ void LumenSDF::RunSelfCheck() {
     }
 }
 
-void LumenSDF::RunGlobalCheck() {    if (!m_GlobalProbe || m_GlobalProbeCount == 0) return;
+void LumenSDF::RunGlobalCheck() {
+    const u32 strideBase = 4u;   // 每层 4³ = 64 个探针（CPU 参考要遍历全部三角形）
+    for (u32 L = 0; L < m_GlobalLayerCount; ++L) {
+        GlobalLayer& layer = m_GlobalLayers[L];
+        if (!layer.probe || layer.probeCount == 0) continue;
 
-    void* mapped = m_GlobalProbe->Map();
-    if (!mapped) {
-        HE_CORE_WARN("LumenSDF: Global SDF 探针缓冲不可映射，跳过自检");
-        return;
-    }
-    const float* gpu = static_cast<const float*>(mapped);
+        void* mapped = layer.probe->Map();
+        if (!mapped) {
+            HE_CORE_WARN("LumenSDF: Global 层 {} 的探针缓冲不可映射，跳过自检", L);
+            continue;
+        }
+        const float* gpu = static_cast<const float*>(mapped);
 
-    const u32 stride = std::max(1u, m_GlobalRes / 4u);
-    const u32 n = m_GlobalRes / stride;   // 每轴探针数（4）
-    const float tol = 2.0f * m_GlobalVoxelSize;
+        const u32 stride = std::max(1u, layer.res / strideBase);
+        const u32 n = layer.res / stride;
+        const float tol = 2.0f * layer.voxelSize;
 
-    float maxErr = 0.0f;    // |误差| 上界
-    float maxOver = -1e30f; // 最大高估（> 容差即视为危险：会让射线穿漏）
-    double sumErr = 0.0;
-    u32 within = 0, counted = 0;
-    for (u32 z = 0; z < n; ++z) {
-        for (u32 y = 0; y < n; ++y) {
-            for (u32 x = 0; x < n; ++x) {
-                const u32 idx = z * n * n + y * n + x;
-                if (idx >= m_GlobalProbeCount) continue;
-                const float3 p = m_GlobalOrigin +
-                    float3((float)(x * stride) + 0.5f, (float)(y * stride) + 0.5f,
-                           (float)(z * stride) + 0.5f) * m_GlobalVoxelSize;
-
-                // CPU 参考：对**全部** mesh 的全部三角形取最小距离（精确值）。
-                // GPU 侧是"各 mesh 场的最小值"，只在 mesh AABB 内有效 ⇒ 只可能偏大；
-                // 两者的差就是这一步近似（min 合并）的幅度，正是要被量化出来的东西。
-                float ref = 1e30f;
-                for (const auto& e : m_Entries) {
-                    for (u32 t = 0; t < e.triCount; ++t) {
-                        const u32* tri = &m_IndicesCPU[e.firstIndex + t * 3];
-                        const float3 a = m_PositionsCPU[tri[0] + e.vertexOffset];
-                        const float3 b = m_PositionsCPU[tri[1] + e.vertexOffset];
-                        const float3 c = m_PositionsCPU[tri[2] + e.vertexOffset];
-                        ref = std::min(ref, PointTriangleDistance(p, a, b, c));
+        float maxErr = 0.0f, maxOver = -1e30f;
+        double sumErr = 0.0;
+        u32 within = 0, counted = 0;
+        for (u32 z = 0; z < n; ++z) {
+            for (u32 y = 0; y < n; ++y) {
+                for (u32 x = 0; x < n; ++x) {
+                    const u32 idx = z * n * n + y * n + x;
+                    if (idx >= layer.probeCount) continue;
+                    const float3 p = layer.origin +
+                        float3((float)(x * stride) + 0.5f, (float)(y * stride) + 0.5f,
+                               (float)(z * stride) + 0.5f) * layer.voxelSize;
+                    float ref = 1e30f;
+                    for (const auto& e : m_Entries) {
+                        for (u32 t = 0; t < e.triCount; ++t) {
+                            const u32* tri = &m_IndicesCPU[e.firstIndex + t * 3];
+                            const float3 a = m_PositionsCPU[tri[0] + e.vertexOffset];
+                            const float3 b = m_PositionsCPU[tri[1] + e.vertexOffset];
+                            const float3 c = m_PositionsCPU[tri[2] + e.vertexOffset];
+                            ref = std::min(ref, PointTriangleDistance(p, a, b, c));
+                        }
                     }
+                    const float err = gpu[idx] - ref;   // 期望 ≤ 0（下界）；> 0 即高估（危险）
+                    sumErr += err;
+                    maxOver = std::max(maxOver, err);
+                    maxErr = std::max(maxErr, std::fabs(err));
+                    if (std::fabs(err) <= tol) ++within;
+                    ++counted;
                 }
-                const float err = gpu[idx] - ref;   // 全局场是下界 ⇒ 期望 ≤ 0；> 0 表示高估（危险）
-                sumErr += err;
-                maxOver = std::max(maxOver, err);
-                maxErr = std::max(maxErr, std::fabs(err));
-                if (std::fabs(err) <= tol) ++within;
-                ++counted;
             }
         }
-    }
-    m_GlobalProbe->Unmap();
+        layer.probe->Unmap();
 
-    m_GlobalCheck.valid     = true;
-    m_GlobalCheck.probes    = counted;
-    m_GlobalCheck.withinTol = within;
-    m_GlobalCheck.maxError  = maxErr;
-    m_GlobalCheck.meanError = counted ? (float)(sumErr / counted) : 0.0f;
-    m_GlobalCheck.tolerance = tol;
-    // 判据：近似只影响"最近面不在自己 AABB 内"的体素，故允许少量超差；映射/偏移错位会让
-    // **全部**探针同时错，所以用 95% 落界作为门槛（比单点最大误差更能区分这两类问题）。
-    // 判据只说**安全方向**：全局场必须是到最近表面的下界（不得高估），否则 sphere tracing 会
-    // 穿漏。下界质量（低估多少）决定步进效率，本版不足（见日志与 §5 的质量边界），不当作
-    // pass/fail 门槛 —— 把它量出来、写进文档，比让它静默地"看起来通过"更有用。
-    m_GlobalCheck.passed = counted > 0 && maxOver <= tol;
+        GlobalCheck& c = layer.check;
+        c.valid = true;
+        c.probes = counted;
+        c.withinTol = within;
+        c.maxError = maxErr;
+        c.meanError = counted ? (float)(sumErr / counted) : 0.0f;
+        c.tolerance = tol;
+        // 判据只看安全方向：不得高估（否则 sphere tracing 穿漏）。下界质量只记录：
+        // 它是 clipmap 分层这一步的关键指标（近层体素小 ⇒ 低估应显著变小）。
+        c.passed = counted > 0 && maxOver <= tol;
 
-    HE_CORE_INFO("LumenSDF Global 自检: 探针 {} 点，最大误差 {:.6f}，最大高估 {:+.6f}"
-                 "（安全判据：≤ {:.6f}）=> {}；下界质量：{} 点在 2 体素内（{:.1f}%），平均低估 {:.2f}",
-                 counted, (double)maxErr, (double)maxOver, (double)tol,
-                 m_GlobalCheck.passed ? "PASS" : "FAIL",
-                 within, counted ? 100.0 * (double)within / counted : 0.0,
-                 (double)(-m_GlobalCheck.meanError));
-    if (!m_GlobalCheck.passed) {
-        HE_CORE_ERROR("LumenSDF Global 自检失败：全局场出现了高估，sphere tracing 会穿漏");
-    }
-    if (!m_GlobalCheck.passed) {
-        HE_CORE_ERROR("LumenSDF Global 自检失败：全局场与 CPU 参考大面积不一致，检查网格映射/注入范围");
+        HE_CORE_INFO("LumenSDF Global 层 {} 自检: 体素 {:.3f}，探针 {}，最大高估 {:+.3f}"
+                     "（判据 ≤ {:.3f}）=> {}；下界质量 {} 点在 2 体素内（{:.1f}%），平均低估 {:.2f}",
+                     L, (double)layer.voxelSize, counted, (double)maxOver, (double)tol,
+                     c.passed ? "PASS" : "FAIL", within,
+                     counted ? 100.0 * (double)within / counted : 0.0,
+                     (double)(-c.meanError));
+        if (!c.passed) HE_CORE_ERROR("LumenSDF Global 层 {} 出现高估，sphere tracing 会穿漏", L);
     }
 }
-
 // ── sphere tracing（步骤 11）──
 namespace {
 constexpr u32 kMBindField  = 0;
@@ -821,14 +809,17 @@ constexpr u32 kMBindOrigin = 2;
 constexpr u32 kMBindDir    = 3;
 constexpr u32 kMBindHit    = 4;
 constexpr u32 kMBindNormal = 5;
+constexpr u32 kMBindField1 = 6;   // clipmap 远层的场（与近层同采样器语义）
 
-// 与 SDF_RayMarch.comp.slang 的 MarchPC 一致：3 × 16B = 48B
+// 与 SDF_RayMarch.comp.slang 的 MarchPC 一致：5 × 16B = 80B（层 0 参数 + 层 1 参数）
 struct MarchPC {
-    float originX, originY, originZ, voxelSize;
-    u32   dimX, dimY, dimZ, rayCount;
+    float originX, originY, originZ, voxelSize;      // 层 0（近层）
+    u32   dimX, dimY, dimZ, rayCount;                // 层 0 分辨率 + 射线数
     float maxSteps, eps, maxDist, pad;
+    float origin1X, origin1Y, origin1Z, voxelSize1;  // 层 1（远层）
+    u32   dim1X, dim1Y, dim1Z, pad1;
 };
-static_assert(sizeof(MarchPC) == 48, "MarchPC 必须与 shader 的 3×16B 布局一致");
+static_assert(sizeof(MarchPC) == 80, "MarchPC 必须与 shader 的 5×16B 布局一致");
 
 // 确定性伪随机（自检要可复现；不用 std::random 以免平台差异）
 inline float NextRand(u32& s) {
@@ -843,6 +834,7 @@ void LumenSDF::CreateMarchGPUObjects() {
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = {
         {kMBindField,  rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
+        {kMBindField1, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
         {kMBindOrigin, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
         {kMBindDir,    rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
         {kMBindHit,    rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
@@ -944,22 +936,27 @@ void LumenSDF::SetupMarchRays() {
     m_Device->UpdateDescriptorSet(m_DetailSet, kMBindHit,    rhi::DescriptorType::StorageBuffer, m_RayT.get());
     m_Device->UpdateDescriptorSet(m_DetailSet, kMBindNormal, rhi::DescriptorType::StorageBuffer, m_RayT.get());
     HE_CORE_INFO("LumenSDF: sphere tracing 验证射线已生成（{} 条，最大步数 {}，收敛阈值 {:.4f}，最大距离 {:.1f}）",
-                 n, m_Config.marchMaxSteps, (double)(0.25f * m_GlobalVoxelSize), (double)m_Config.marchMaxDist);
+                 n, m_Config.marchMaxSteps, (double)(0.25f * GetGlobalVoxelSize(0)), (double)m_Config.marchMaxDist);
 }
 
 void LumenSDF::RunMarch(rhi::IRHICommandList* cmd) {
-    if (!m_MarchPSO || !m_GlobalField || m_RayOriginCPU.empty()) return;
+    if (!m_MarchPSO || !GetGlobalField(0) || m_RayOriginCPU.empty()) return;
 
     m_Device->UpdateDescriptorSet(m_MarchSet, kMBindField,
-        rhi::DescriptorType::CombinedImageSampler, m_GlobalField.get(), m_LinearSampler.get());
+        rhi::DescriptorType::CombinedImageSampler, GetGlobalField(0), m_LinearSampler.get());
+    m_Device->UpdateDescriptorSet(m_MarchSet, kMBindField1,
+        rhi::DescriptorType::CombinedImageSampler, GetGlobalField(1), m_LinearSampler.get());
 
     MarchPC pc{};
-    pc.originX = m_GlobalOrigin.x; pc.originY = m_GlobalOrigin.y; pc.originZ = m_GlobalOrigin.z;
-    pc.voxelSize = m_GlobalVoxelSize;
-    pc.dimX = pc.dimY = pc.dimZ = m_GlobalRes;
+    pc.originX = GetGlobalOrigin(0).x; pc.originY = GetGlobalOrigin(0).y; pc.originZ = GetGlobalOrigin(0).z;
+    pc.voxelSize = GetGlobalVoxelSize(0);
+    pc.dimX = pc.dimY = pc.dimZ = m_GlobalLayers[0].res;
+    pc.origin1X = GetGlobalOrigin(1).x; pc.origin1Y = GetGlobalOrigin(1).y; pc.origin1Z = GetGlobalOrigin(1).z;
+    pc.voxelSize1 = GetGlobalVoxelSize(1);
+    pc.dim1X = pc.dim1Y = pc.dim1Z = m_GlobalLayers[1].res;
     pc.rayCount  = (u32)m_RayOriginCPU.size();
     pc.maxSteps  = (float)m_Config.marchMaxSteps;
-    pc.eps       = 0.25f * m_GlobalVoxelSize;
+    pc.eps       = 0.25f * GetGlobalVoxelSize(0);
     pc.maxDist   = m_Config.marchMaxDist;
 
     cmd->SetPipeline(m_MarchPSO.get());
@@ -999,12 +996,12 @@ void LumenSDF::RunMarchDetail(rhi::IRHICommandList* cmd) {
         cmd->Dispatch((n + 63u) / 64u, 1, 1);
         cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
                              rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
-                             m_GlobalField.get());
+                             GetGlobalField(0));
     }
 }
 
 void LumenSDF::RunMarchCheck() {
-    if (!m_RayHit || !m_RayNormal || !m_GlobalField) return;
+    if (!m_RayHit || !m_RayNormal || !GetGlobalField(0)) return;
     void* hitMapped = m_RayHit->Map();
     void* nrmMapped = m_RayNormal->Map();
     if (!hitMapped || !nrmMapped) {
@@ -1097,7 +1094,7 @@ void LumenSDF::RunMarchCheck() {
 
         if (mergedHit && cpuHit) {
             ++bothHit;
-            const float errVox = std::fabs(tGpuMerged - tRef) / m_GlobalVoxelSize;
+            const float errVox = std::fabs(tGpuMerged - tRef) / GetGlobalVoxelSize(0);
             sumErr += errVox;
             maxErr = std::max(maxErr, errVox);
             if (errVox <= 1.0f) ++within;
@@ -1105,7 +1102,7 @@ void LumenSDF::RunMarchCheck() {
 
             // 诊断：把"全局单独"与"合并后"的误差分开记，才能判断细节追踪到底有没有帮忙
             if (gpuHit) {
-                const float errG = std::fabs(hits[i].x - tRef) / m_GlobalVoxelSize;
+                const float errG = std::fabs(hits[i].x - tRef) / GetGlobalVoxelSize(0);
                 sumErrGlobal += errG;
                 if (errG <= 1.0f) ++withinGlobal;
             }
