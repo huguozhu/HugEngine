@@ -156,6 +156,8 @@ if(SLANGC)
         "${SHADER_DIR}/Lumen/Lumen_SurfaceCacheSample.comp.slang"
         "${SHADER_DIR}/Lumen/Lumen_ScreenProbe_SHProject.comp.slang"
         "${SHADER_DIR}/Lumen/Lumen_ProbeIrradiance.comp.slang"
+        "${SHADER_DIR}/Lumen/Lumen_FarFieldCompare.comp.slang"
+        "${SHADER_DIR}/Lumen/Lumen_FarFieldMerge.comp.slang"
         # Utility
         "${SHADER_DIR}/Utility/WorkGraph_Entry.comp.slang"
         "${SHADER_DIR}/Utility/TestClear.comp.slang"
@@ -189,6 +191,7 @@ if(SLANGC)
         "${SHADER_DIR}/RayTracing/RT_Reflection.rchit.slang"
         "${SHADER_DIR}/RayTracing/RT_Reflection.rmiss.slang"
         "${SHADER_DIR}/RayTracing/RT_GI.rgen.slang"
+        "${SHADER_DIR}/Lumen/Lumen_FarField.rgen.slang"
         "${SHADER_DIR}/RayTracing/RT_GI.rchit.slang"
         "${SHADER_DIR}/RayTracing/RT_GI.rmiss.slang"
         # DDGI 探针射线的光追 march（任务 17 / B4；复用 RT_GI 的 rchit/rmiss）
