@@ -32,11 +32,11 @@ namespace he::render {
 
 /// 构建参数（默认值 = 首版默认项；每一步都可配，便于按机器调）
 struct LumenSDFConfig {
-    u32 resolution     = 32;     // 每 mesh 立方体素边长（32³ = 32768 体素）
-    u32 maxMeshes      = 64;     // 显存上限（R32F：64 × 32³ × 4B = 8 MB；128³ 时是 537 MB）
-    u32 maxTrisPerMesh = 4096;   // 超过则不建（gather 的代价随三角形数线性放大）
-    u32 meshesPerFrame = 4;      // 每帧构建预算（避免一次卡顿）
-    u32 probeStride    = 4;      // 自检采样步长（体素）
+    u32 resolution     = 128;    // 每 mesh 立方体素边长（scatter 版：代价 O(表面 × 分辨率²)）
+    u32 maxMeshes      = 16;     // 显存上限（R32F：16 × 128³ × 4B = 134 MB；32³ 时同样 16 个只要 2 MB）
+    u32 maxTrisPerMesh = 20000;  // scatter 与三角形数线性，上限可远高于 gather 版
+    u32 meshesPerFrame = 2;      // 每帧构建预算（128³ 的 scatter + convert 更重）
+    u32 probeStride    = 0;      // 自检采样步长（0 = 自动取 resolution/4）
     u32 globalResolution = 128;  // Global SDF 单层分辨率（clipmap 分层留待后续步骤）
     // ── sphere tracing 验证（步骤 11）──
     u32   marchRays     = 256;   // 验证用射线数
@@ -143,9 +143,14 @@ private:
     LumenSDFConfig   m_Config;
 
     // GPU 对象
-    std::unique_ptr<rhi::IRHIPipelineState>   m_PSO;
+    std::unique_ptr<rhi::IRHIPipelineState>   m_PSO;          // scatter 版：清空/scatter
     rhi::DescriptorSetLayoutHandle            m_Layout;
     rhi::DescriptorSetHandle                  m_Set;
+    std::unique_ptr<rhi::IRHIPipelineState>   m_ConvertPSO;   // u32 → R32F + 探针
+    std::unique_ptr<rhi::IRHIPipelineState>   m_FloodPSO;     // 跳步洪泛（补全 scatter 的空洞）
+    rhi::DescriptorSetLayoutHandle            m_ConvertLayout;
+    rhi::DescriptorSetHandle                  m_ConvertSet;
+    std::unique_ptr<rhi::IRHITexture>         m_MeshScratch;  // 共享的 u32 距离场（原子最小目标）
     std::unique_ptr<rhi::IRHIBuffer>          m_Positions;   // float4（w 未用）
     std::unique_ptr<rhi::IRHIBuffer>          m_Indices;
     std::unique_ptr<rhi::IRHIBuffer>          m_ProbeDist;   // CPU 可读（自检）

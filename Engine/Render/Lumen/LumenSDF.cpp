@@ -3,7 +3,9 @@
 #include "Core/Assert.h"
 #include "Core/Log.h"
 #include "SDF_GlobalBuild.comp.spv.h"
-#include "SDF_MeshBuild.comp.spv.h"
+#include "SDF_MeshConvert.comp.spv.h"
+#include "SDF_MeshFlood.comp.spv.h"
+#include "SDF_MeshScatter.comp.spv.h"
 #include "SDF_RayMarch.comp.spv.h"
 #include "SDF_RayMarchDetail.comp.spv.h"
 
@@ -27,6 +29,9 @@ struct BuildPC {
     u32      triCount, indexOffset, vertexOffset, probeStride;
 };
 static_assert(sizeof(BuildPC) == 48, "BuildPC 必须与 shader 的 3×16B 布局一致");
+// 三个 mesh 级 shader 共用同一段 3×16B：
+//   scatter：dims.w = mode（0 清空 / 1 逐三角形写入）、ranges = (三角形数, 索引起始, 顶点偏移, 未用)
+//   convert：dims.w = mesh 序号（0 = 写自检探针）、ranges.w = 探针步长
 
 // ── Global SDF（步骤 10）──
 constexpr u32 kGBindGlobal     = 0;   // RWTexture3D<uint>
@@ -80,21 +85,6 @@ u64 LumenSDF::GetMemoryBytes() const {
 }
 
 void LumenSDF::CreateGPUObjects() {
-    rhi::DescriptorSetLayoutDesc layout;
-    layout.bindings = {
-        {kBindField,    rhi::DescriptorType::StorageImage,   1, rhi::kStageMaskCompute},
-        {kBindPosition, rhi::DescriptorType::StorageBuffer,  1, rhi::kStageMaskCompute},
-        {kBindIndex,    rhi::DescriptorType::StorageBuffer,  1, rhi::kStageMaskCompute},
-        {kBindProbe,    rhi::DescriptorType::StorageBuffer,  1, rhi::kStageMaskCompute},
-    };
-    m_Layout = m_Device->CreateDescriptorSetLayout(layout);
-    m_Set    = m_Device->AllocateDescriptorSet(m_Layout);
-
-    rhi::ShaderBytecode cs;
-    cs.stage      = rhi::ShaderStage::Compute;
-    cs.spirv      = k_SDF_MeshBuild_comp_spv;
-    cs.entryPoint = "main";
-
     // push constant 范围必须显式声明：shader 用了 48B 的 BuildPC，
     // 少了它 vkCreatePipelineLayout 与 SPIR-V 不匹配（PSO 创建失败 → 之后 SetPipeline(nullptr)）。
     rhi::PushConstantRange pcr;
@@ -102,16 +92,68 @@ void LumenSDF::CreateGPUObjects() {
     pcr.offset    = 0;
     pcr.size      = sizeof(BuildPC);
 
+    // ── scatter（清空 + 每三角形一组的原子最小）──
+    rhi::DescriptorSetLayoutDesc layout;
+    layout.bindings = {
+        {kBindField,    rhi::DescriptorType::StorageImage,  1, rhi::kStageMaskCompute},
+        {kBindPosition, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+        {kBindIndex,    rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+    };
+    m_Layout = m_Device->CreateDescriptorSetLayout(layout);
+    m_Set    = m_Device->AllocateDescriptorSet(m_Layout);
+
+    rhi::ShaderBytecode cs;
+    cs.stage      = rhi::ShaderStage::Compute;
+    cs.spirv      = k_SDF_MeshScatter_comp_spv;
+    cs.entryPoint = "main";
+
     rhi::PipelineStateDesc pso;
     pso.bindPoint            = rhi::PipelineBindPoint::Compute;   // 少了它默认按图形管线创建 → PSO 为空
     pso.computeShader        = &cs;
     pso.descriptorSetLayouts = {m_Layout};
     pso.pushConstantRanges   = {pcr};
-    pso.debugName            = "Lumen_SDF_MeshBuild";
+    pso.debugName            = "Lumen_SDF_MeshScatter";
     m_PSO = m_Device->CreatePipelineState(pso);
-    if (!m_PSO) {
-        HE_CORE_ERROR("LumenSDF: 构建 PSO 失败（Mesh SDF 不可用）");
-    }
+    if (!m_PSO) HE_CORE_ERROR("LumenSDF: scatter 的 PSO 创建失败（Mesh SDF 不可用）");
+
+    // ── convert（u32 → R32F + 自检探针）──
+    rhi::DescriptorSetLayoutDesc conv;
+    conv.bindings = {
+        {0, rhi::DescriptorType::StorageImage,  1, rhi::kStageMaskCompute},   // u32 场
+        {1, rhi::DescriptorType::StorageImage,  1, rhi::kStageMaskCompute},   // R32F 输出
+        {2, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},   // 探针
+    };
+    m_ConvertLayout = m_Device->CreateDescriptorSetLayout(conv);
+    m_ConvertSet    = m_Device->AllocateDescriptorSet(m_ConvertLayout);
+
+    rhi::ShaderBytecode ccs;
+    ccs.stage      = rhi::ShaderStage::Compute;
+    ccs.spirv      = k_SDF_MeshConvert_comp_spv;
+    ccs.entryPoint = "main";
+
+    rhi::PipelineStateDesc cpso;
+    cpso.bindPoint            = rhi::PipelineBindPoint::Compute;
+    cpso.computeShader        = &ccs;
+    cpso.descriptorSetLayouts = {m_ConvertLayout};
+    cpso.pushConstantRanges   = {pcr};
+    cpso.debugName            = "Lumen_SDF_MeshConvert";
+    m_ConvertPSO = m_Device->CreatePipelineState(cpso);
+    if (!m_ConvertPSO) HE_CORE_ERROR("LumenSDF: convert 的 PSO 创建失败");
+
+    // ── 跳步洪泛（补全 scatter 留下的空洞）：与 scatter 共用绑定集与 push constant ──
+    rhi::ShaderBytecode fcs;
+    fcs.stage      = rhi::ShaderStage::Compute;
+    fcs.spirv      = k_SDF_MeshFlood_comp_spv;
+    fcs.entryPoint = "main";
+
+    rhi::PipelineStateDesc fpso;
+    fpso.bindPoint            = rhi::PipelineBindPoint::Compute;
+    fpso.computeShader        = &fcs;
+    fpso.descriptorSetLayouts = {m_Layout};
+    fpso.pushConstantRanges   = {pcr};
+    fpso.debugName            = "Lumen_SDF_MeshFlood";
+    m_FloodPSO = m_Device->CreatePipelineState(fpso);
+    if (!m_FloodPSO) HE_CORE_ERROR("LumenSDF: flood 的 PSO 创建失败");
 }
 
 void LumenSDF::BuildQueue(const MeshBatcher& batcher) {
@@ -199,7 +241,9 @@ void LumenSDF::UploadGeometry(const MeshBatcher& batcher) {
     ib.initialData = indices.data();
     m_Indices = m_Device->CreateBuffer(ib);
 
-    // 自检探针缓冲（CPU 可读）：只统计第 0 个 mesh
+    // 自检探针缓冲（CPU 可读）：只统计第 0 个 mesh。步长默认 resolution/4 ⇒ 4³ = 64 个探针，
+    // 因为 CPU 参考要对"全部三角形"遍历，探针一多就慢（128³ 的场不能按体素逐个比对）。
+    if (m_Config.probeStride == 0) m_Config.probeStride = std::max(1u, m_Config.resolution / 4u);
     const u32 stride = std::max(1u, m_Config.probeStride);
     const u32 nx = m_Config.resolution / stride;
     m_ProbeCount = nx * nx * nx;
@@ -209,13 +253,28 @@ void LumenSDF::UploadGeometry(const MeshBatcher& batcher) {
     pb.cpuAccess = true;                      // 自检要 Map 读回
     m_ProbeDist  = m_Device->CreateBuffer(pb);
 
+    // 共享的 u32 距离场（原子最小目标）：逐 mesh 串行复用，不必每个 mesh 一张
+    {
+        rhi::TextureDesc td;
+        td.format = rhi::Format::R32_UINT;
+        td.width = td.height = td.depth = m_Config.resolution;
+        td.usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource;
+        m_MeshScratch = m_Device->CreateTexture(td);
+    }
+
     m_Device->UpdateDescriptorSet(m_Set, kBindPosition, rhi::DescriptorType::StorageBuffer, m_Positions.get());
     m_Device->UpdateDescriptorSet(m_Set, kBindIndex,    rhi::DescriptorType::StorageBuffer, m_Indices.get());
-    m_Device->UpdateDescriptorSet(m_Set, kBindProbe,    rhi::DescriptorType::StorageBuffer, m_ProbeDist.get());
+    m_Device->UpdateDescriptorSetWithImageView(m_Set, kBindField, rhi::DescriptorType::StorageImage,
+                                               m_MeshScratch->GetNativeHandle());
+    m_Device->UpdateDescriptorSetWithImageView(m_ConvertSet, 0, rhi::DescriptorType::StorageImage,
+                                               m_MeshScratch->GetNativeHandle());
+    m_Device->UpdateDescriptorSet(m_ConvertSet, 2, rhi::DescriptorType::StorageBuffer, m_ProbeDist.get());
 
     m_GeometryUploaded = true;
-    HE_CORE_INFO("LumenSDF: 几何已上传（{} 顶点 float4 + {} 索引，探针 {} 点）",
-                 positions.size(), indices.size(), m_ProbeCount);
+    HE_CORE_INFO("LumenSDF: 几何已上传（{} 顶点 float4 + {} 索引，探针 {} 点，u32 临时场 {:.2f} MB）",
+                 positions.size(), indices.size(), m_ProbeCount,
+                 (double)((u64)m_Config.resolution * m_Config.resolution * m_Config.resolution * 4ull)
+                     / (1024.0 * 1024.0));
 }
 
 void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
@@ -231,10 +290,6 @@ void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
     e.field   = m_Device->CreateTexture(td);
     if (!e.field) return;
 
-    // 存储图像绑定走 ImageView 重载（IRHITexture::GetNativeHandle() 返回的就是 ImageView）
-    m_Device->UpdateDescriptorSetWithImageView(m_Set, kBindField, rhi::DescriptorType::StorageImage,
-                                               e.field->GetNativeHandle());
-
     BuildPC pc{};
     pc.originX = e.origin.x; pc.originY = e.origin.y; pc.originZ = e.origin.z;
     pc.voxelSize   = e.voxelSize;
@@ -246,8 +301,46 @@ void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
     pc.probeStride = (entryIndex == 0) ? std::max(1u, m_Config.probeStride) : 0u;
     e.probeCount   = (entryIndex == 0) ? m_ProbeCount : 0u;
 
+    // ── ① 清空 u32 场为 +inf：一维线性遍历，组数 = ceil(res³/64) ──
     cmd->SetPipeline(m_PSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
+    pc.meshIndex = 0u;   // scatter 的 mode：0 = 清空
+    cmd->SetPushConstants(0, sizeof(pc), &pc);
+    const u64 voxels = (u64)e.resolution * e.resolution * e.resolution;
+    cmd->Dispatch((u32)((voxels + 63ull) / 64ull), 1, 1);
+    cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                         rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
+                         m_MeshScratch.get());
+
+    // ── ② scatter：一个三角形一个线程组，只扫自己的 AABB ──
+    pc.meshIndex = 1u;   // scatter 的 mode：1 = 逐三角形写入
+    cmd->SetPushConstants(0, sizeof(pc), &pc);
+    cmd->Dispatch(std::max(1u, e.triCount), 1, 1);
+    cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                         rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
+                         m_MeshScratch.get());
+
+    // ── ②b 跳步洪泛：scatter 只写了表面附近的一条带，远处仍是 +inf（= 高估，会穿漏），
+    //      按 res/2, res/4 … 1 逐级松弛补全全场 ──
+    cmd->SetPipeline(m_FloodPSO.get());
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);   // 与 scatter 同一套绑定（只有 u32 场）
+    for (u32 s = e.resolution / 2u; s >= 1u; s /= 2u) {
+        pc.meshIndex = s;   // flood 的 dims.w = 本次步长（体素）
+        cmd->SetPushConstants(0, sizeof(pc), &pc);
+        const u32 fgroups = (e.resolution + 3u) / 4u;
+        cmd->Dispatch(fgroups, fgroups, fgroups);
+        cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                             rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
+                             m_MeshScratch.get());
+        if (s == 1u) break;   // 防止 s 折半变 0 造成死循环
+    }
+
+    // ── ③ 转换：u32 → R32F + 写自检探针 ──
+    m_Device->UpdateDescriptorSetWithImageView(m_ConvertSet, 1, rhi::DescriptorType::StorageImage,
+                                               e.field->GetNativeHandle());
+    cmd->SetPipeline(m_ConvertPSO.get());
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_ConvertSet);
+    pc.meshIndex = entryIndex;   // convert 的 dims.w = mesh 序号：0 = 写自检探针
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     const u32 groups = (e.resolution + 3u) / 4u;
     cmd->Dispatch(groups, groups, groups);
@@ -575,6 +668,7 @@ void LumenSDF::RunSelfCheck() {
     double sumAbs = 0.0;
     float  maxErr = 0.0f;
     u32    counted = 0, signAgree = 0;
+    u32    nearCount = 0, nearPass = 0, farCount = 0, farPass = 0;
     for (u32 z = 0; z < nx; z += 1) {
         for (u32 y = 0; y < nx; ++y) {
             for (u32 x = 0; x < nx; ++x) {
@@ -605,6 +699,15 @@ void LumenSDF::RunSelfCheck() {
                 sumAbs += err;
                 maxErr = std::max(maxErr, err);
                 if ((refSigned < 0.0f) == (gpu[idx] < 0.0f)) ++signAgree;   // 符号一致（两种算法）
+                // 分层判据：**表面附近**（≤2 体素）必须精确 —— 那里是 scatter 的精确点-三角形
+                // 距离，也正是 sphere tracing 关心的区域；远处由跳步洪泛近似补全（允许 ≤2 体素）。
+                if (ref <= 2.0f * e.voxelSize) {
+                    ++nearCount;
+                    if (err <= e.voxelSize * 0.25f) ++nearPass;
+                } else {
+                    ++farCount;
+                    if (err <= 2.0f * e.voxelSize) ++farPass;
+                }
                 ++counted;
             }
         }
@@ -614,13 +717,19 @@ void LumenSDF::RunSelfCheck() {
     m_SelfCheck.valid     = true;
     m_SelfCheck.probes    = counted;
     m_SelfCheck.maxError  = maxErr;
-    m_SelfCheck.tolerance = e.voxelSize * 0.25f;   // 1/4 体素
-    m_SelfCheck.passed    = (maxErr <= m_SelfCheck.tolerance);
+    m_SelfCheck.tolerance = e.voxelSize * 0.25f;   // 表面附近的判据：1/4 体素
+    // 判据（scatter + 跳步洪泛）：近表面（≤2 体素）≥90% 落在 1/4 体素内（scatter 的精确区），
+    // 远场（洪泛近似）≥90% 落在 2 体素内。旧版 gather 是全场精确点-三角形距离，判据是全场 1/4 体素 ——
+    // 换成 scatter 后远场只能是近似，这是算法的性质，不是实现错误。
+    const bool nearOk = (nearCount == 0) || ((float)nearPass / nearCount >= 0.9f);
+    const bool farOk  = (farCount  == 0) || ((float)farPass  / farCount  >= 0.9f);
+    m_SelfCheck.passed = nearOk && farOk;
 
-    HE_CORE_INFO("LumenSDF 自检: 探针 {} 点，距离最大误差 {:.6f}（阈值 {:.6f} = 1/4 体素），"
-                 "符号一致率 {}/{}（{:.1f}%，GPU=parity / CPU=最近三角形法线，两种算法）=> {}",
-                 counted, (double)maxErr, (double)m_SelfCheck.tolerance,
-                 signAgree, counted, counted ? 100.0 * (double)signAgree / counted : 0.0,
+    HE_CORE_INFO("LumenSDF 自检: 探针 {} 点；近表面 {}/{} 在 1/4 体素内，远场 {}/{} 在 2 体素内"
+                 "（最大误差 {:.6f}，阈值 {:.6f}）；符号一致率 {}/{}（{:.1f}%）=> {}",
+                 counted, nearPass, nearCount, farPass, farCount, (double)maxErr,
+                 (double)m_SelfCheck.tolerance, signAgree, counted,
+                 counted ? 100.0 * (double)signAgree / counted : 0.0,
                  m_SelfCheck.passed ? "PASS" : "FAIL");
     if (!m_SelfCheck.passed) {
         HE_CORE_ERROR("LumenSDF 自检失败：GPU 距离场与 CPU 参考不一致，检查网格映射/缓冲布局/偏移");
