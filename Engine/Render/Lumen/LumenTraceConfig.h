@@ -42,6 +42,26 @@ struct LumenTraceConfig {
     [[nodiscard]] std::string Validate() const;
 };
 
+/// 组合的**实现状态**（步骤 28：把 §6 的组合约束写进代码路径，为第二版留入口）
+///
+/// 【为什么要把"合法但未实现"单列一档】§6 的组合表里，`HWRT × HitLighting` 与
+/// `Screen × 任意`（作为优先层）都是**合法**组合，只是首版不实现。若让它们静默走到
+/// SurfaceCache 分支，使用者会以为"Hit Lighting 打开了"，实际看到的却是卡片材质 ——
+/// 这类"静默回落"是最难查的一类（画面看起来正常）。所以单列一档：运行期**明确报"未实现"**
+/// 并按文档取中性值，而不是假装成功。
+enum class LumenCombinationStatus : u32 {
+    Implemented           = 0,   // 首版已实现
+    LegalNotImplemented   = 1,   // 合法但首版未实现（必须显式报"未实现"，不得静默回落）
+    Illegal               = 2,   // 语义不成立（Validate 会在配置加载期拒掉）
+};
+
+/// 按 §6 的组合表判定 (trace, shade, screenTrace) 的状态
+[[nodiscard]] LumenCombinationStatus LumenClassifyCombination(LumenTraceSource trace,
+                                                              LumenShadeSource shade,
+                                                              bool screenTrace);
+/// 组合状态的中文名（日志用）
+[[nodiscard]] const char* LumenCombinationStatusName(LumenCombinationStatus s);
+
 [[nodiscard]] const char* LumenTraceSourceName(LumenTraceSource s);
 [[nodiscard]] const char* LumenShadeSourceName(LumenShadeSource s);
 

@@ -508,6 +508,32 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
                                         rhi::IRHITexture* gbWorldPos, const float4x4& viewProj) {
     if (!m_Device || !cmd || !m_ProbeCount || !m_RayHitPosBuf || !m_AtlasAlbedo || !gbAlbedo || !gbWorldPos) return;
     if (!m_PageTableBuf) return;
+
+    // 步骤 28：把 §6 的组合状态在运行期说清楚（只报一次）。非法组合在 `Validate()` 里已经被拒；
+    // 这里处理的是**合法但首版未实现**的那些（HitLighting / screenTrace）—— 它们必须可见。
+    {
+        static bool s_comboLogged = false;
+        if (!s_comboLogged) {
+            s_comboLogged = true;
+            const auto st = LumenClassifyCombination(m_TraceConfig.trace, m_TraceConfig.shade,
+                                                     m_TraceConfig.screenTrace);
+            if (st == LumenCombinationStatus::LegalNotImplemented) {
+                HE_CORE_ERROR("Lumen 组合约束（步骤 28）: {} × {}（screenTrace={}）⇒ **{}** —— "
+                              "按文档返回中性值/继续用已实现的路径，不做静默回落；"
+                              "Hit Lighting 与 Screen Trace 属第二版，接口与配置位已按要求留好",
+                              LumenTraceSourceName(m_TraceConfig.trace),
+                              LumenShadeSourceName(m_TraceConfig.shade),
+                              m_TraceConfig.screenTrace ? "true" : "false",
+                              LumenCombinationStatusName(st));
+            } else {
+                HE_CORE_INFO("Lumen 组合约束（步骤 28）: {} × {}（screenTrace={}）⇒ {}",
+                             LumenTraceSourceName(m_TraceConfig.trace),
+                             LumenShadeSourceName(m_TraceConfig.shade),
+                             m_TraceConfig.screenTrace ? "true" : "false",
+                             LumenCombinationStatusName(st));
+            }
+        }
+    }
     if (!m_ShadeBound) {
         CreateShadeGPUObjects();
         if (!m_ShadePSO) return;
@@ -535,7 +561,8 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
 
         // 统计槽：0=页命中 1=不在任何卡内 2=卡在但页无内容 3=总计 4=越界夹取（其余保留）
         // 统计槽：0..6 见 shader；7/8/9 = 重叠带内 / 真正混合 / 副点无材质
-        rhi::BufferDesc sb; sb.size = sizeof(u32) * 20u; sb.usage = rhi::BufferUsage::Storage; sb.cpuAccess = true;
+        // 统计槽：0..13 见 shader；14 = 命中但着色源未实现（步骤 28）
+        rhi::BufferDesc sb; sb.size = sizeof(u32) * 24u; sb.usage = rhi::BufferUsage::Storage; sb.cpuAccess = true;
         m_ShadeStatsBuf = m_Device->CreateBuffer(sb);
         m_ShadeStatsMapped = m_ShadeStatsBuf->Map();
 
@@ -583,7 +610,7 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
 
     // ① 先读上一帧的统计与对照（同"先读后清"）
     if (m_ShadeFrame >= 2 && m_ShadeStatsMapped) {
-        u32 st[20] = {0};
+        u32 st[24] = {0};
         std::memcpy(st, m_ShadeStatsMapped, sizeof(st));
         m_ShadedHits          = st[0];
         m_ShadedNoCard        = st[1];
@@ -630,6 +657,7 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
         m_FadePositiveW   = st[11];                              // 诊断：w > 0 的条数
         m_FadeAltNoCard   = st[12];                              // 诊断：副点不在任何卡内
         m_FadeAltNoPage   = st[13];                              // 诊断：副点在卡内但页无内容
+        m_ShadeUnimplementedRays = st[14];                       // 步骤 28：着色源未实现而返回中性值的命中光线数
         m_ShadedAlbedoSamples = totalSamples;
         m_ShadedAlbedoMeanDiff = samples ? (float)(sumDiff / samples) : 0.0f;
         m_ShadedAlbedoMeanDiffMulti = samplesMulti ? (float)(sumDiffMulti / samplesMulti) : 0.0f;
@@ -662,7 +690,7 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
     }
 
     // ② 清零统计并派发
-    if (m_ShadeStatsMapped) { u32 zero[20] = {0}; std::memcpy(m_ShadeStatsMapped, zero, sizeof(zero)); }
+    if (m_ShadeStatsMapped) { u32 zero[24] = {0}; std::memcpy(m_ShadeStatsMapped, zero, sizeof(zero)); }
     struct {
         u32 x, y, z, w;
         float4 vp0, vp1, vp2, vp3;
@@ -673,7 +701,10 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
     pc.vp1 = float4(viewProj[0][1], viewProj[1][1], viewProj[2][1], viewProj[3][1]);
     pc.vp2 = float4(viewProj[0][2], viewProj[1][2], viewProj[2][2], viewProj[3][2]);
     pc.vp3 = float4(viewProj[0][3], viewProj[1][3], viewProj[2][3], viewProj[3][3]);
-    pc.atlas = float4((float)kAtlasPageRes, (float)kAtlasSize, 0.18f, 0.0f);
+    // atlasParams.w = 1 ⇒ 着色源是 HitLighting（合法但首版未实现），着色 shader 会**显式**返回
+    // 中性值并单独计数（步骤 28：不许静默回落到 SurfaceCache）。
+    const bool shadeUnimplemented = (m_TraceConfig.shade == LumenShadeSource::HitLighting);
+    pc.atlas = float4((float)kAtlasPageRes, (float)kAtlasSize, 0.18f, shadeUnimplemented ? 1.0f : 0.0f);
     ComputeBarrier(cmd);   // 等"追踪 pass 写命中点"落地
     cmd->SetPipeline(m_ShadePSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_ShadeSet);
@@ -739,6 +770,21 @@ void LumenScene::RunProbeTrace(rhi::IRHICommandList* cmd) {
         return;
     }
 
+    // 步骤 28：追踪源本身也要显式报状态。首版的主追踪**只有 SDF**（远场另走硬件光追），
+    // 所以 `trace = HardwareRT`（主追踪全用光追）是**合法但未实现**的组合 —— 必须报出来，
+    // 而不是让使用者以为"已经全用硬件光追了"。
+    {
+        static bool s_traceComboLogged = false;
+        if (!s_traceComboLogged) {
+            s_traceComboLogged = true;
+            if (m_TraceConfig.trace != LumenTraceSource::SDF) {
+                HE_CORE_ERROR("Lumen 追踪源（步骤 28）: trace = {} ⇒ **合法但首版未实现**；"
+                              "首版主追踪固定为 SDF，硬件光追只承担远场（hwFarField）。"
+                              "配置位与接口已按要求留好，第二版在这里加分支即可",
+                              LumenTraceSourceName(m_TraceConfig.trace));
+            }
+        }
+    }
     if (!m_TraceBound) {
         CreateProbeTraceGPUObjects();
         if (!m_TracePSO) return;

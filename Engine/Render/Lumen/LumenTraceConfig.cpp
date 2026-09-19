@@ -49,4 +49,42 @@ std::string LumenTraceConfig::Validate() const {
     return {};
 }
 
+// ============================================================
+// 步骤 28：§6 的组合表写成**代码**（而不是只写在文档里）
+//
+// §6 的表格逐行对应：
+//   SDF × SurfaceCache      ✅ 首版默认            → Implemented
+//   HW(RT) × SurfaceCache   ✅                    → Implemented（步骤 26 起远场就是这条）
+//   HW(RT) × HitLighting    ✅（第二版）           → LegalNotImplemented（必须显式报"未实现"）
+//   SDF × HitLighting       ❌ 语义不成立          → Illegal
+//   Screen × 任意           ✅（作为**优先层**）    → LegalNotImplemented（screenTrace 首版关闭）
+// 另外 `Neutral` 是调试/降级用的着色源，任何追踪源都合法且已实现（就是写中性值）。
+// ============================================================
+LumenCombinationStatus LumenClassifyCombination(LumenTraceSource trace, LumenShadeSource shade,
+                                                bool screenTrace) {
+    // 非法：SDF 拿不到命中点的三角形信息，做不了命中点光照
+    if (trace == LumenTraceSource::SDF && shade == LumenShadeSource::HitLighting) {
+        return LumenCombinationStatus::Illegal;
+    }
+    // 屏幕空间追踪是"优先层"：首版没有实现，显式报未实现（不许静默退化成 SDF 追踪）
+    if (trace == LumenTraceSource::Screen || screenTrace) {
+        return LumenCombinationStatus::LegalNotImplemented;
+    }
+    // 命中点光照是第二版的内容（需要材质求值 + NEE 直接光）
+    if (shade == LumenShadeSource::HitLighting) {
+        return LumenCombinationStatus::LegalNotImplemented;
+    }
+    // 其余（SDF/HWRT × SurfaceCache/Neutral）都是首版已实现的路径
+    return LumenCombinationStatus::Implemented;
+}
+
+const char* LumenCombinationStatusName(LumenCombinationStatus s) {
+    switch (s) {
+        case LumenCombinationStatus::Implemented:         return "已实现";
+        case LumenCombinationStatus::LegalNotImplemented: return "合法但首版未实现";
+        case LumenCombinationStatus::Illegal:             return "非法组合";
+        default:                                          return "未知";
+    }
+}
+
 } // namespace he::render

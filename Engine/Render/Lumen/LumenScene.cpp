@@ -2,7 +2,8 @@
 
 #include "Core/Log.h"
 #include "Core/Assert.h"              // HE_ASSERT（PSO 创建失败要立刻可见）
-#include <cstdlib>                    // std::getenv（确定性验收模式的开关）
+#include <cstdlib>
+#include <string>                    // std::getenv（确定性验收模式的开关）
 
 #include "SSAO.vert.spv.h"            // 全屏三角顶点着色（与 SSGI/AO 等 pass 共用）
 #include "Lumen_Skeleton.frag.spv.h"  // 骨架阶段的常量输出
@@ -25,6 +26,26 @@ bool LumenScene::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     if (const char* ov = std::getenv("HE_LUMEN_FARFIELD_OVERLAP")) {
         m_FarFieldOverlap = std::max(0.0f, (float)std::atof(ov));
         HE_CORE_INFO("LumenScene: 远场重叠带半宽 = {:.3f}（0 = 硬切换）", (double)m_FarFieldOverlap);
+    }
+    // 步骤 28：追踪/着色源的运行期开关（用于演示"合法但未实现"的组合会被**显式**报出来，
+    // 而不是静默回落到 SurfaceCache）。cfg 里没有这两个键，故用环境变量。
+    if (const char* sd = std::getenv("HE_LUMEN_SHADE")) {
+        const std::string v(sd);
+        if (v == "hitlighting") m_TraceConfig.shade = LumenShadeSource::HitLighting;
+        else if (v == "neutral") m_TraceConfig.shade = LumenShadeSource::Neutral;
+        else                     m_TraceConfig.shade = LumenShadeSource::SurfaceCache;
+        HE_CORE_INFO("LumenScene: 着色源 = {}", LumenShadeSourceName(m_TraceConfig.shade));
+    }
+    if (const char* tr = std::getenv("HE_LUMEN_TRACE")) {
+        const std::string v(tr);
+        if (v == "hwrt")        m_TraceConfig.trace = LumenTraceSource::HardwareRT;
+        else if (v == "screen") m_TraceConfig.trace = LumenTraceSource::Screen;
+        else                    m_TraceConfig.trace = LumenTraceSource::SDF;
+        HE_CORE_INFO("LumenScene: 追踪源 = {}", LumenTraceSourceName(m_TraceConfig.trace));
+    }
+    if (std::getenv("HE_LUMEN_SCREEN_TRACE")) {
+        m_TraceConfig.screenTrace = true;
+        HE_CORE_INFO("LumenScene: screenTrace = true");
     }
     if (const char* th = std::getenv("HE_LUMEN_FARFIELD_THRESHOLD")) {
         m_FarFieldThreshold = std::max(1.0f, (float)std::atof(th));

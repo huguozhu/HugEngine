@@ -355,6 +355,7 @@ private:
     float m_FarFieldOverlap   = 0.2f;     // 步骤 27：重叠带半宽（占阈值比例）；0 = 退化成硬切换
     u32   m_FadeSdfOnly = 0, m_FadeRtOnly = 0, m_FadeBlend = 0, m_FadeBlendedRays = 0;
     u32   m_FadeBandRays = 0, m_FadeNoAltRays = 0, m_FadePositiveW = 0;
+    u32   m_ShadeUnimplementedRays = 0;   // 步骤 28：着色源未实现（返回中性值）的命中光线数
     float m_FadeMaxW = 0.0f;
     u32   m_FadeAltNoCard = 0, m_FadeAltNoPage = 0;
     u32   m_FadeCpuPositive = 0;

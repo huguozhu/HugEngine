@@ -120,6 +120,17 @@ void main(uint3 tid : SV_DispatchThreadID) {
     const float3 p = hp.xyz;
     const float  neutral = atlasParams.z;
 
+    // ── 步骤 28：着色源的组合约束 ──
+    // `atlasParams.w = 1` 表示配置要求的是 **HitLighting**（命中点材质求值 + NEE 直接光）——
+    // §6 里那是**合法**组合（第二版），首版未实现。这里**显式**返回中性值并单独计数，
+    // 而不是静默走 SurfaceCache 分支：静默回落会让使用者以为"Hit Lighting 开了"，
+    // 实际看到的却是卡片材质 —— 那是最难查的一类（画面看起来正常）。
+    if (atlasParams.w > 0.5) {
+        u_Out[tid.x] = float4(neutral, neutral, neutral, 0.0);
+        InterlockedAdd(u_Stats[14], 1u);   // 14 = 命中但着色源未实现（返回中性值）
+        return;
+    }
+
     // ── ① 对照基准：同像素的 GBuffer albedo —— 只有命中点确实就是该像素的**前景表面**时才有意义 ──
     // 探针光线打的是**二次命中**，重投影到的屏幕像素上通常是另一个（更近的）物体，直接比较会把
     // "几何不同"算成"材质不同"（实测 12362 个样本平均差 0.34，全是这种噪声）。故用 GBuffer 世界坐标
