@@ -484,6 +484,14 @@ void LumenSDF::SetupGlobalGrid() {
         pb.usage     = rhi::BufferUsage::Storage;
         pb.cpuAccess = true;
         layer.probe = m_Device->CreateBuffer(pb);
+        // 哨兵初值：读回时若仍是它，说明"探针根本没被写过"（而不是场值为 0）。
+        // 这一区分很关键：逐 mesh 自检已证明 mesh 场里没有任何 0，所以全局层读到的 0 必须
+        // 先排除"探针路径没写"这一可能，才轮到讨论场值。
+        if (void* pm = layer.probe->Map()) {
+            std::vector<float> sentinel(layer.probeCount, -12345.0f);
+            std::memcpy(pm, sentinel.data(), (usize)layer.probeCount * sizeof(float));
+            layer.probe->Unmap();
+        }
 
         HE_CORE_INFO("LumenSDF: Global SDF 层 {} {}³（体素边长 {:.4f}，边长 {:.1f}，原点 "
                      "({:.1f},{:.1f},{:.1f})，显存 {:.2f} MB/层）",
@@ -838,7 +846,7 @@ void LumenSDF::RunGlobalCheck() {
 
         float maxErr = 0.0f, maxOver = -1e30f;
         double sumErr = 0.0;
-        u32 within = 0, counted = 0;
+        u32 within = 0, counted = 0, sentinelLeft = 0;
         for (u32 z = 0; z < n; ++z) {
             for (u32 y = 0; y < n; ++y) {
                 for (u32 x = 0; x < n; ++x) {
@@ -858,6 +866,7 @@ void LumenSDF::RunGlobalCheck() {
                         }
                     }
                     const float err = gpu[idx] - ref;   // 期望 ≤ 0（下界）；> 0 即高估（危险）
+                    if (gpu[idx] <= -12344.0f) ++sentinelLeft;   // 哨兵残留 = 探针没被写过
                     sumErr += err;
                     maxOver = std::max(maxOver, err);
                     maxErr = std::max(maxErr, std::fabs(err));
@@ -928,9 +937,9 @@ void LumenSDF::RunGlobalCheck() {
         c.passed = counted > 0 && maxOver <= tol;
 
         HE_CORE_INFO("LumenSDF Global 层 {} 自检: 体素 {:.3f}，探针 {}，最大高估 {:+.3f}"
-                     "（判据 ≤ {:.3f}）=> {}；下界质量 {} 点在 2 体素内（{:.1f}%），平均低估 {:.2f}",
+                     "（判据 ≤ {:.3f}）=> {}；哨兵残留 {}/{}（非 0 即说明探针未写）；下界质量 {} 点在 2 体素内（{:.1f}%），平均低估 {:.2f}",
                      L, (double)layer.voxelSize, counted, (double)maxOver, (double)tol,
-                     c.passed ? "PASS" : "FAIL", within,
+                     c.passed ? "PASS" : "FAIL", sentinelLeft, layer.probeCount, within,
                      counted ? 100.0 * (double)within / counted : 0.0,
                      (double)(-c.meanError));
         if (!c.passed) HE_CORE_ERROR("LumenSDF Global 层 {} 出现高估，sphere tracing 会穿漏", L);
