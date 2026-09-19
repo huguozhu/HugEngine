@@ -58,6 +58,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     uint  steps = 0;
     float minD  = 1e30;   // 沿途场值最小值（诊断穿漏：场在路径上是否高估）
     float tMinD = 0.0;    // 取到 minD 时的 t
+    float lastD = 0.0;    // 判定命中那一刻的场值（用于把落点补回表面）
     for (uint s = 0; s < maxSteps; ++s) {
         steps = s + 1;
         const float3 p = ro + rd * t;
@@ -66,6 +67,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
         if (a.y < 0.5 && b.y < 0.5) break;               // 出所有层：本版按未命中处理
         const float d = min(a.y > 0.5 ? a.x : 1e30, b.y > 0.5 ? b.x : 1e30);
         if (d < minD) { minD = d; tMinD = t; }   // 诊断用：记录沿途最小场值
+        lastD = d;
         if (advanced && d < eps) { hit = true; break; }
         // 安全步长系数 0.5：场是**近似**的（洪泛松弛可能给出偏大的值），
         // 全量步进会让射线越过真实表面（实测出现 3 条穿漏）。半量步进是近似场的标准做法：
@@ -81,6 +83,9 @@ void main(uint3 tid : SV_DispatchThreadID) {
     float3 N = float3(0.0);
     float  nd = 0.0;
     if (hit) {
+        // 终点修正：命中判据用的是**较大的容差**（1 个近层体素，压制"掠过表面"时的穿漏），
+        // 落点再用判定那一刻的场值往前补一步 —— 场是下界 ⇒ `t += d` 不会越过表面。
+        t += lastD;
         const float3 p = ro + rd * t;
         const float h  = originVoxel.w;             // 一个体素的差分步长（取近层）
         // 梯度也用两层取最小（与步进同源，避免法线与命中面不一致）

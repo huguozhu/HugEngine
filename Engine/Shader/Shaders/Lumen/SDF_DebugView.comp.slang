@@ -73,6 +73,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     bool  advanced = false;
     uint  steps = 0;
     float hitLayer = 0.0;
+    float lastD = 0.0;   // 判定命中那一刻的场值（落点修正用）
 
     for (uint s = 0; s < maxSteps; ++s) {
         steps = s + 1;
@@ -81,12 +82,14 @@ void main(uint3 tid : SV_DispatchThreadID) {
         const float2 b = SampleLayer(u_Field1, u_FieldSampler1, originVoxel1, grid1.xyz, p);
         if (a.y < 0.5 && b.y < 0.5) break;                      // 出所有层：按未命中处理
         const float d = min(a.y > 0.5 ? a.x : 1e30, b.y > 0.5 ? b.x : 1e30);
+        lastD = d;
         if (advanced && d < eps) { hit = true; hitLayer = (a.y > 0.5 && a.x <= d) ? 0.0 : 0.5; break; }
         t += max(d * 0.25, eps * 0.02);
         advanced = true;
         if (t > maxDist) break;
     }
 
+    if (hit) t += lastD;   // 终点修正：容差较大，落点用最后场值补回（场是下界 ⇒ 不越过表面）
     u_Out[tid.xy] = hit
         ? float4(hitLayer, saturate(t / max(1e-6, maxDist)), (float)steps / max(1.0, marchParams.x), 1.0)
         : float4(1.0, 0.0, 0.0, 0.0);

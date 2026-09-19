@@ -1262,7 +1262,7 @@ void LumenSDF::RunMarch(rhi::IRHICommandList* cmd) {
     pc.dim1X = pc.dim1Y = pc.dim1Z = m_GlobalLayers[1].res;
     pc.rayCount  = (u32)m_RayOriginCPU.size();
     pc.maxSteps  = (float)m_Config.marchMaxSteps;
-    pc.eps       = 0.25f * GetGlobalVoxelSize(0);   // 实测放宽到 0.5 体素对 14 条穿漏毫无影响，故保持 0.25（精度优先）
+    pc.eps       = 1.0f * GetGlobalVoxelSize(0);   // 命中容差 = **1 个近层体素**：见下方"穿漏逐条"的结论
     pc.maxDist   = m_Config.marchMaxDist;
     // 审计：把实际下发的两层参数打出来（射线自检对任何改动都不动，先证明这条通道是活的）
     HE_CORE_INFO("LumenSDF march 参数: 层0 原点({:.1f},{:.1f},{:.1f}) 体素 {:.3f} res {} | 层1 原点({:.1f},{:.1f},{:.1f}) 体素 {:.3f} res {} | 射线 {} 步数 {:.0f} eps {:.3f}",
@@ -1695,7 +1695,7 @@ void LumenSDF::RunDebugView(rhi::IRHICommandList* cmd, const float3& camPos, con
                              hasLayer1 ? m_GlobalLayers[1].res : 0u, m_ViewportH);
     pc.originVoxel1  = hasLayer1 ? float4(m_GlobalLayers[1].origin, m_GlobalLayers[1].voxelSize)
                                  : float4(0.0f, 0.0f, 0.0f, -1.0f);
-    pc.marchParams   = float4((float)m_Config.marchMaxSteps, 0.25f * GetGlobalVoxelSize(0),
+    pc.marchParams   = float4((float)m_Config.marchMaxSteps, 1.0f * GetGlobalVoxelSize(0),
                               (float)m_Config.marchMaxDist, countFrame ? 1.0f : 0.0f);
 
     m_Device->UpdateDescriptorSet(m_DebugSet, kDBindField,
@@ -1741,9 +1741,9 @@ void LumenSDF::LogDebugStats() {
     // 就说明**场在相机附近把距离低估到了 eps 以下**（近处报"贴着表面"），
     // 从任意视点出发的追踪会立刻假命中 —— 这正是"下界质量"问题的可视形态。
     const float  camTruth = MinDistToGeometry(m_DebugCamPos);
-    const float  eps      = 0.25f * GetGlobalVoxelSize(0);
+    const float  eps      = 1.0f * GetGlobalVoxelSize(0);   // 与自检同口径：1 个近层体素
     HE_CORE_INFO("LumenSDF 调试视图统计（第 {} 帧，逐像素主射线 {} 条）: 命中 {:.1f}%（近层 {} / 远层 {}），"
-                 "未命中 {}（{:.1f}%），平均步数 {:.1f}/{:.0f}；eps {:.3f} 世界单位（0.25 体素）",
+                 "未命中 {}（{:.1f}%），平均步数 {:.1f}/{:.0f}；eps {:.3f} 世界单位（1 个近层体素）",
                  kDebugCountFrame, (u32)total,
                  total > 0.0 ? 100.0 * hit / total : 0.0, c[0], c[1], c[2],
                  total > 0.0 ? 100.0 * (double)c[2] / total : 0.0,
