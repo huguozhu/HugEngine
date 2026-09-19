@@ -25,6 +25,12 @@ struct ShadeCard {          // 与 C++ 的 ShadeCard 逐字段一致（32 B）
 [[vk::binding(7, 0)]] RWStructuredBuffer<uint>                 u_Stats;       // 0=页命中 1=不在任何卡内 2=卡在但页无内容 3=总计 4=越界夹取 5=多重覆盖命中 6=其中页命中
 [[vk::binding(8, 0)]] Texture2D<float4>                        u_GBufferWorldPos;  // 用于判定"命中点是否就是该像素的前景表面"
 [[vk::binding(9, 0)]] RWStructuredBuffer<float4>               u_OutBest;     // xyz = 多卡覆盖下最贴合 GBuffer 的候选 albedo, w = 有效（归因实验用）
+// 步骤 27：xyz = 远场（光追）命中点, w = 光追权重（<0 = 该光线没有副点）
+[[vk::binding(10, 0)]] StructuredBuffer<float4>                 u_Fade;
+// 步骤 27 的连续性证据：按"命中距离"分桶累计辐射度（每桶 2 个 u32：条数 + 亮度定点累加）
+// 布局：桶 i 的计数在 [i*2]，亮度在 [i*2+1]（亮度 × 4096 定点，桶内条数远小于溢出下限）
+[[vk::binding(11, 0)]] RWStructuredBuffer<uint>                 u_DistBins;
+[[vk::binding(12, 0)]] StructuredBuffer<float4>                 u_RayResult;   // x = 合并后的命中距离
 
 [[vk::push_constant]] cbuffer ShadePC {
     uint4  dims;         // x = 总光线数, y = 卡数, z = 屏宽, w = 屏高
@@ -82,6 +88,25 @@ float4 SampleCardAlbedo(ShadeCard card, float3 p, inout uint clampCount) {
     const float4 albedo = u_AtlasAlbedo.Load(int3((int2)(pageOrigin + uint2(texel)), 0));
     // atlas 的 alpha 是捕获时写的"该 texel 有内容"标志（见 SurfaceCache_Capture.comp.slang）
     return float4(albedo.rgb, albedo.a > 0.5 ? 1.0 : 0.0);
+}
+
+// 副命中点的材质：与主点同一套"最小包含 AABB → 逻辑页 → 物理页"路径，但不做归因统计。
+// 【为什么不做归因统计】那套统计是给主点验"选卡歧义"用的；副点只参与阈值附近的混合，
+// 把它也计入会把两个来源的统计混在一起而失去意义。
+float4 ShadeSecondaryPoint(float3 p, inout uint clampCount) {
+    uint  bestCard = 0xFFFFFFFFu;
+    float bestSide = 1e30;
+    for (uint i = 0; i < dims.y; ++i) {
+        const float3 lo = u_Cards[i].aabbLo.xyz;
+        const float3 hi = lo + u_Cards[i].aabbLo.w;
+        if (any(p < lo) || any(p > hi)) continue;
+        if (u_Cards[i].aabbLo.w < bestSide) { bestSide = u_Cards[i].aabbLo.w; bestCard = i; }
+    }
+    // 诊断拆分：12 = 没有任何卡包含该点；13 = 有卡但页无内容
+    if (bestCard == 0xFFFFFFFFu) { InterlockedAdd(u_Stats[12], 1u); return float4(0.0, 0.0, 0.0, 0.0); }
+    const float4 r = SampleCardAlbedo(u_Cards[bestCard], p, clampCount);
+    if (r.w <= 0.5) InterlockedAdd(u_Stats[13], 1u);
+    return r;
 }
 
 [numthreads(64, 1, 1)]
@@ -162,11 +187,57 @@ void main(uint3 tid : SV_DispatchThreadID) {
     else                            { InterlockedAdd(u_Stats[0], 1u); if (cover > 1u) InterlockedAdd(u_Stats[6], 1u); }
     if (clampCount) InterlockedAdd(u_Stats[4], clampCount);
 
-    // ── ③ 输出 ──
+    // ── ③ 步骤 27：阈值附近的材质混合（SDF ↔ 光追）──
+    // 权重 0 = 纯 SDF、1 = 纯光追；两侧都取一次材质再插值 ⇒ 阈值处辐照度连续（无阶跃）。
+    float3 finalAlbedo = chosenAlbedo;
+    bool   finalHasContent = chosenHasContent;
+    const float4 fade  = u_Fade[tid.x * 2u];        // xyz = 光追命中点, w = 权重
+    const float4 fadeD = u_Fade[tid.x * 2u + 1u];   // (SDF 距离, SDF 命中, 光追距离, 光追命中)
+    // 诊断：fade 缓冲到底读到了什么（10 = 最大权重定点，11 = w>0 的条数）
+    InterlockedMax(u_Stats[10], (uint)max(0.0, fade.w * 65536.0));
+    if (fade.w > 0.0) InterlockedAdd(u_Stats[11], 1u);
+    if (fade.w > 0.0 && fade.w < 1.0) {
+        InterlockedAdd(u_Stats[7], 1u);       // 7 = 落在重叠带内的光线数
+        const float4 alt = ShadeSecondaryPoint(fade.xyz, clampCount);
+        // 【必须朝"远场结果本身"混合，而不是只朝它的材质混合】远场命中点的页同样可能没有内容，
+        // 此时远场路径的取值就是**缺页中性值**。若在缺页时保留主点材质（第一版就是这么写的），
+        // 那么权重到 1 之后主点被整体换成远场点，材质会**跳变**到中性值 —— 阶跃只是被推迟到
+        // 带的上界，并没有消失。朝"远场会给出的值"（含中性值兜底）混合，两端才都连续。
+        const float3 altValue = (alt.w > 0.5) ? alt.rgb : float3(neutral, neutral, neutral);
+        // 【两侧都要用"该路径实际输出的值"】主点缺页时它的输出是中性值，而不是材质 (0,0,0)；
+        // 第一版用 `lerp(chosenAlbedo, altValue, w)`，于是主点缺页的射线在带内被拉向 0（变暗），
+        // 曲线在 t0 处反而出现一个更深的台阶（实测 0.2020 → 0.1417）。
+        const float3 primaryValue = chosenHasContent ? chosenAlbedo : float3(neutral, neutral, neutral);
+        finalAlbedo = lerp(primaryValue, altValue, fade.w);
+        finalHasContent = true;
+        if (alt.w > 0.5) InterlockedAdd(u_Stats[8], 1u);   // 8 = 副点材质可取
+        else             InterlockedAdd(u_Stats[9], 1u);   // 9 = 副点缺页（朝中性值混合）
+    }
+
+    // ── ④ 输出 ──
     // u_Out.w：0 = 缺页（返回中性值，不能返回黑，否则画面上留黑斑）；1 = 页命中且单卡覆盖；2 = 页命中但多卡覆盖
-    u_Out[tid.x] = chosenHasContent
-        ? float4(chosenAlbedo, cover > 1u ? 2.0 : 1.0)
+    u_Out[tid.x] = finalHasContent
+        ? float4(finalAlbedo, cover > 1u ? 2.0 : 1.0)
         : float4(neutral, neutral, neutral, 0.0);
     // u_OutBest：多卡覆盖下"最贴合 GBuffer 材质"的候选（仅用于归因实验）
     if (gbValid && bestFitCard != 0xFFFFFFFFu) u_OutBest[tid.x] = float4(bestFitAlbedo, 1.0);
+
+    // ── ⑤ 步骤 27 的验收读数：按"命中距离"分桶累计最终材质亮度 ──
+    // 沿射线方向扫过阈值时，桶内的平均亮度若出现阶跃，就是"切换不连续"。用**最终材质**
+    // （混合之后）而不是原始 albedo，因为判据是"探针辐照度连续"。
+    {
+        // 【分桶必须按稳定量】用 SDF 距离（有 SDF 命中时）或光追距离；不能用"最终命中距离"，
+        // 因为切换后它从"SDF 的几十"跳到"光追的几百"，分桶依据自身就断了。
+        const float dist = (fadeD.y > 0.5) ? fadeD.x : fadeD.z;
+        // 【必须统计"这条光线实际交给 SH 的值"】之前统计的是 finalAlbedo（材质本身），
+        // 缺页光线的材质是 (0,0,0) 而它实际输出的是中性值 0.18 —— 两者不一致会让曲线在
+        // "缺页比例变化"的地方出现假阶跃（实测就是这样：过渡带看起来比硬切换还陡）。
+        const float3 outValue = finalHasContent ? finalAlbedo : float3(neutral, neutral, neutral);
+        const float lum  = dot(outValue, float3(0.2126, 0.7152, 0.0722));
+        // 【5 世界单位一桶、覆盖 20..100】阈值 50 落在第 6 桶、重叠带 [40,60] 横跨第 4–7 桶。
+        // 用细桶"贴着阈值"看，才能分辨"阶跃"与"过渡"；粗桶会把过渡抹平成看起来像阶跃。
+        const uint  bin  = (uint)clamp((int)((dist - 20.0) / 5.0), 0, 15);
+        InterlockedAdd(u_DistBins[bin * 2u], 1u);
+        InterlockedAdd(u_DistBins[bin * 2u + 1u], (uint)(lum * 4096.0 + 0.5));
+    }
 }
