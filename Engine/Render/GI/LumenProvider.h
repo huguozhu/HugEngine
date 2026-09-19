@@ -91,9 +91,10 @@ public:
         m_Scene->DrawSkeleton(cmd, ctx.furnace ? 1.0f : 0.0f, ctx.furnace ? 1.0f : -1.0f);
     }
 
-    /// 步骤 8：逐 mesh 距离场构建（由帧图的独立 compute pass 调用，见 FrameGraph 的 Lumen 段）
-    void StepSDF(rhi::IRHICommandList* cmd) {
-        if (m_Scene && m_Batcher) m_Scene->StepSDF(cmd, *m_Batcher);
+    /// 步骤 8：逐 mesh 距离场构建（由帧图的独立 compute pass 调用，见 FrameGraph 的 Lumen 段）。
+    /// 相机位置用于让 clipmap 近层跟随相机（第一次调用之前必须给出）。
+    void StepSDF(rhi::IRHICommandList* cmd, const CameraData& cam) {
+        if (m_Scene && m_Batcher) m_Scene->StepSDF(cmd, *m_Batcher, cam.position);
     }
 
     /// 步骤 12：逐像素 SDF 追踪可视化（同一 compute pass 内、SDF 构建之后）。

@@ -55,7 +55,11 @@ public:
     void DrawSkeleton(rhi::IRHICommandList* cmd, float value, float alpha);
 
     /// 每帧推进 SDF 构建（步骤 8）：建档 → 逐帧构建 → 自检。由 LumenProvider::Render 调用。
-    void StepSDF(rhi::IRHICommandList* cmd, const MeshBatcher& batcher) { m_SDF.Step(cmd, batcher); }
+    /// camPos：clipmap 近层跟随相机（必须在第一次调用之前给出，见 SetupGlobalGrid）。
+    void StepSDF(rhi::IRHICommandList* cmd, const MeshBatcher& batcher, const float3& camPos) {
+        m_SDF.SetCameraPos(camPos);
+        m_SDF.Step(cmd, batcher);
+    }
     [[nodiscard]] LumenSDF&       GetSDF()       { return m_SDF; }
     [[nodiscard]] const LumenSDF& GetSDF() const { return m_SDF; }
 

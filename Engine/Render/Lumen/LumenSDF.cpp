@@ -518,8 +518,19 @@ void LumenSDF::SetupGlobalGrid() {
         const u32   stepsFromFar = (m_GlobalLayerCount - 1u) - L;
         const float layerSide    = sceneSide * std::pow(m_Config.nearFraction, (float)stepsFromFar);
         layer.res       = res;
-        layer.origin    = sceneCtr - float3(layerSide * 0.5f);
         layer.voxelSize = layerSide / (float)res;
+        // 【近层跟随相机】UE 的 clipmap 近层是以相机为心的；以场景中心为心时（本场景 16 个 mesh 的
+        // AABB 边长 57~2789、几何散布全场 3154），910 单位的盒子几乎覆盖不到任何几何 ——
+        // 实测 256/256 条自检射线都在盒外、全部追踪只能落到 28.44 体素的远层上（§附六）。
+        // 中心取整到体素格：相机微动时层内容不抖动（体素与场一一对应，取整即可）。
+        float3 center = sceneCtr;
+        if (stepsFromFar > 0u && m_CameraPosSet) {
+            const float vs = layer.voxelSize;
+            center = float3(std::floor(m_CameraPos.x / vs) * vs,
+                            std::floor(m_CameraPos.y / vs) * vs,
+                            std::floor(m_CameraPos.z / vs) * vs);
+        }
+        layer.origin    = center - float3(layerSide * 0.5f);
 
         const u32 stride = std::max(1u, res / 4u);
         layer.probeCount = (res / stride) * (res / stride) * (res / stride);

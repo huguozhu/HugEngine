@@ -132,6 +132,9 @@ public:
     [[nodiscard]] const MarchCheck& GetMarchCheck() const { return m_MarchCheck; }
 
     // ── SDF 追踪可视化（步骤 12，L1 退出判据）──
+    /// 相机位置：clipmap 的**近层跟随相机**（UE 的做法）。必须在第一次 Step 之前设置，
+    /// 否则近层会退化成"以场景中心为心的盒子"——实测那块盒子里几乎没有几何（§附六）。
+    void SetCameraPos(const float3& p) { m_CameraPos = p; m_CameraPosSet = true; }
     /// 视口尺寸：调试视图按屏幕分辨率逐像素发射主射线（由 LumenScene 在 Initialize/OnResize 时同步）
     void SetViewport(u32 width, u32 height) {
         if (width == m_ViewportW && height == m_ViewportH) return;
@@ -240,6 +243,8 @@ private:
     std::unique_ptr<rhi::IRHISampler>       m_NearestSampler;
     GlobalLayer m_GlobalLayers[kMaxGlobalLayers];
     u32 m_GlobalLayerCount = 0;
+    float3 m_CameraPos = float3(0.0f);   // clipmap 近层的中心（跟随相机）
+    bool   m_CameraPosSet = false;
     u32 m_WaitGlobalFrames = 0;
 
     // ── sphere tracing（步骤 11）──
