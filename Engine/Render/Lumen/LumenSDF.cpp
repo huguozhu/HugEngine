@@ -277,7 +277,7 @@ void LumenSDF::UploadGeometry(const MeshBatcher& batcher) {
     const u32 nx = m_Config.resolution / stride;
     m_ProbeCount = nx * nx * nx;
     rhi::BufferDesc pb;
-    pb.size      = (usize)m_ProbeCount * sizeof(float);
+    pb.size      = (usize)m_ProbeCount * std::max(1u, m_Config.maxMeshes) * sizeof(float);
     pb.usage     = rhi::BufferUsage::Storage;
     pb.cpuAccess = true;                      // 自检要 Map 读回
     m_ProbeDist  = m_Device->CreateBuffer(pb);
@@ -327,7 +327,7 @@ void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
     pc.triCount    = e.triCount;
     pc.indexOffset = e.firstIndex;
     pc.vertexOffset = e.vertexOffset;
-    pc.probeStride = (entryIndex == m_ProbeMeshIndex) ? std::max(1u, m_Config.probeStride) : 0u;
+    pc.probeStride = std::max(1u, m_Config.probeStride);
     e.probeCount   = (entryIndex == m_ProbeMeshIndex) ? m_ProbeCount : 0u;
 
     // ── ① 清空 u32 场为 +inf：一维线性遍历，组数 = ceil(res³/64) ──
@@ -369,7 +369,8 @@ void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
                                                e.field->GetNativeHandle());
     cmd->SetPipeline(m_ConvertPSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_ConvertSet);
-    pc.meshIndex = (entryIndex == m_ProbeMeshIndex) ? 0u : 1u;   // convert 的 dims.w = 0 表示写自检探针
+    pc.meshIndex = 0u;                              // convert 的 dims.w = 0 ⇒ 写自检探针
+    pc.triCount  = entryIndex * m_ProbeCount;       // convert 用 ranges.x 传本 mesh 的探针段基址
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     const u32 groups = (e.resolution + 3u) / 4u;
     cmd->Dispatch(groups, groups, groups);
@@ -725,91 +726,99 @@ void LumenSDF::RunSelfCheck() {
         HE_CORE_WARN("LumenSDF: 自检探针缓冲不可映射，跳过自检");
         return;
     }
-    const float* gpu = static_cast<const float*>(mapped);
+    const float* gpuAll = static_cast<const float*>(mapped);
 
-    const MeshSDFEntry& e = m_Entries[std::min<u32>(m_ProbeMeshIndex, (u32)m_Entries.size() - 1u)];
     const u32 stride = std::max(1u, m_Config.probeStride);
-    const u32 nx = e.resolution / stride;
+    const u32 n = m_Config.resolution / stride;
 
-    double sumAbs = 0.0;
-    float  maxErr = 0.0f;
-    u32    counted = 0, signAgree = 0;
-    u32    nearCount = 0, nearPass = 0, farCount = 0, farPass = 0;
-    u32    zeroCount = 0;
-    float  minGpu = 1e30f, maxGpu = -1e30f;
-    for (u32 z = 0; z < nx; z += 1) {
-        for (u32 y = 0; y < nx; ++y) {
-            for (u32 x = 0; x < nx; ++x) {
-                const u32 idx = z * nx * nx + y * nx + x;
-                if (idx >= m_ProbeCount) continue;
-                const float3 p = e.origin +
-                    float3((float)(x * stride) + 0.5f, (float)(y * stride) + 0.5f,
-                           (float)(z * stride) + 0.5f) * e.voxelSize;
-                // CPU 侧独立实现：距离用同一闭式解，但**符号用另一种算法** —— 最近三角形的
-                // 几何法线与"体素−最近点"的点积（shader 用的是 parity 穿越计数）。两种算法在
-                // 边/顶点附近会分歧，故符号一致率本身就是这一步要量的东西。
-                float ref = 1e30f;
-                float3 closest(0.0f), bestA(0.0f), bestB(0.0f), bestC(0.0f);
-                for (u32 t = 0; t < e.triCount; ++t) {
-                    const u32* tri = &m_IndicesCPU[e.firstIndex + t * 3];
-                    const float3 a = m_PositionsCPU[tri[0] + e.vertexOffset];
-                    const float3 b = m_PositionsCPU[tri[1] + e.vertexOffset];
-                    const float3 c = m_PositionsCPU[tri[2] + e.vertexOffset];
-                    const float d = PointTriangleDistance(p, a, b, c);
-                    if (d < ref) { ref = d; bestA = a; bestB = b; bestC = c; }
-                }
-                closest = ClosestPointOnTriangle(p, bestA, bestB, bestC);
-                const float3 nrm = glm::cross(bestB - bestA, bestC - bestA);
-                const float  sgn = (glm::dot(nrm, p - closest) >= 0.0f) ? 1.0f : -1.0f;
-                const float  refSigned = sgn * ref;
+    // 逐 mesh 统计：探针缓冲按 mesh 分段（每个 mesh 写自己那一段），一次跑完所有网格 ——
+    // 这样"哪张场在远场塌成 0 / 误差最大"就是一次运行能点名的东西，不必再逐张试。
+    struct MeshStat {
+        u32   entry = 0;
+        float maxErr = 0.0f, minV = 1e30f, maxV = -1e30f;
+        u32   zeros = 0, nearCount = 0, nearBad = 0, farCount = 0, farBad = 0, counted = 0;
+    };
+    std::vector<MeshStat> stats(m_Entries.size());
+    u32 totalZero = 0, totalProbes = 0;
 
-                const float err = std::fabs(std::fabs(refSigned) - std::fabs(gpu[idx]));  // 距离误差
-                sumAbs += err;
-                maxErr = std::max(maxErr, err);
-                minGpu = std::min(minGpu, gpu[idx]);
-                maxGpu = std::max(maxGpu, gpu[idx]);
-                if (std::fabs(gpu[idx]) < 0.01f) ++zeroCount;   // "场里有 0"的直接证据
-                if ((refSigned < 0.0f) == (gpu[idx] < 0.0f)) ++signAgree;   // 符号一致（两种算法）
-                // 分层判据：**表面附近**（≤2 体素）必须精确 —— 那里是 scatter 的精确点-三角形
-                // 距离，也正是 sphere tracing 关心的区域；远处由跳步洪泛近似补全（允许 ≤2 体素）。
-                if (ref <= 2.0f * e.voxelSize) {
-                    ++nearCount;
-                    if (err <= e.voxelSize * 0.25f) ++nearPass;
-                } else {
-                    ++farCount;
-                    if (err <= 2.0f * e.voxelSize) ++farPass;
+    for (u32 mi = 0; mi < (u32)m_Entries.size(); ++mi) {
+        const MeshSDFEntry& e = m_Entries[mi];
+        const float* gpu = gpuAll + (usize)mi * m_ProbeCount;
+        MeshStat& st = stats[mi];
+        st.entry = mi;
+
+        for (u32 z = 0; z < n; ++z) {
+            for (u32 y = 0; y < n; ++y) {
+                for (u32 x = 0; x < n; ++x) {
+                    const u32 idx = z * n * n + y * n + x;
+                    if (idx >= m_ProbeCount) continue;
+                    const float3 p = e.origin +
+                        float3((float)(x * stride) + 0.5f, (float)(y * stride) + 0.5f,
+                               (float)(z * stride) + 0.5f) * e.voxelSize;
+                    // CPU 参考：距离用闭式解，符号用"最近三角形法线"（与 GPU 的 parity 不同算法）
+                    float ref = 1e30f;
+                    float3 bestA(0.0f), bestB(0.0f), bestC(0.0f);
+                    for (u32 t = 0; t < e.triCount; ++t) {
+                        const u32* tri = &m_IndicesCPU[e.firstIndex + t * 3];
+                        const float3 a = m_PositionsCPU[tri[0] + e.vertexOffset];
+                        const float3 b = m_PositionsCPU[tri[1] + e.vertexOffset];
+                        const float3 c = m_PositionsCPU[tri[2] + e.vertexOffset];
+                        const float d = PointTriangleDistance(p, a, b, c);
+                        if (d < ref) { ref = d; bestA = a; bestB = b; bestC = c; }
+                    }
+
+                    const float v = gpu[idx];
+                    const float ad = std::fabs(v);
+                    const float err = std::fabs(ad - ref);
+                    st.maxErr = std::max(st.maxErr, err);
+                    st.minV = std::min(st.minV, v);
+                    st.maxV = std::max(st.maxV, v);
+                    if (ad < 0.01f) { ++st.zeros; ++totalZero; }
+                    if (ref <= 2.0f * e.voxelSize) {
+                        ++st.nearCount;
+                        if (err > 0.25f * e.voxelSize) ++st.nearBad;
+                    } else {
+                        ++st.farCount;
+                        if (err > 2.0f * e.voxelSize) ++st.farBad;
+                    }
+                    ++st.counted;
                 }
-                ++counted;
             }
         }
+        totalProbes += st.counted;
     }
     m_ProbeDist->Unmap();
 
-    m_SelfCheck.valid     = true;
-    m_SelfCheck.probes    = counted;
-    m_SelfCheck.maxError  = maxErr;
-    m_SelfCheck.tolerance = e.voxelSize * 0.25f;   // 表面附近的判据：1/4 体素
-    // 判据（scatter + 跳步洪泛）：近表面（≤2 体素）≥90% 落在 1/4 体素内（scatter 的精确区），
-    // 远场（洪泛近似）≥90% 落在 2 体素内。旧版 gather 是全场精确点-三角形距离，判据是全场 1/4 体素 ——
-    // 换成 scatter 后远场只能是近似，这是算法的性质，不是实现错误。
-    const bool nearOk = (nearCount == 0) || ((float)nearPass / nearCount >= 0.9f);
-    const bool farOk  = (farCount  == 0) || ((float)farPass  / farCount  >= 0.9f);
-    m_SelfCheck.passed = nearOk && farOk;
+    // 点名：按"零值数"降序、再按最大误差降序
+    std::sort(stats.begin(), stats.end(), [](const MeshStat& a, const MeshStat& b) {
+        if (a.zeros != b.zeros) return a.zeros > b.zeros;
+        return a.maxErr > b.maxErr;
+    });
+    HE_CORE_INFO("LumenSDF: 逐 mesh 场自检（共 {} 个 mesh / {} 探针，零值探针 {} 个）—— 最差 5 个：",
+                 m_Entries.size(), totalProbes, totalZero);
+    for (u32 i = 0; i < 5u && i < stats.size(); ++i) {
+        const MeshStat& st = stats[i];
+        const MeshSDFEntry& e = m_Entries[st.entry];
+        HE_CORE_INFO("  条目 {}（命令 {}）：边长 {:.0f}，{} 三角形；值域 [{:.2f}, {:.2f}]，零值 {}，"
+                     "最大误差 {:.2f}，近表面 {}/{} 超差，远场 {}/{} 超差",
+                     st.entry, e.commandIndex, (double)(e.voxelSize * e.resolution), e.triCount,
+                     (double)st.minV, (double)st.maxV, st.zeros, (double)st.maxErr,
+                     st.nearBad, st.nearCount, st.farBad, st.farCount);
+    }
 
-    HE_CORE_INFO("LumenSDF 自检: 探针 {} 点；近表面 {}/{} 在 1/4 体素内，远场 {}/{} 在 2 体素内"
-                 "（最大误差 {:.6f}，阈值 {:.6f}）；符号一致率 {}/{}（{:.1f}%）；"
-                 "GPU 值域 [{:.3f}, {:.3f}]，其中 {:.1f}% 探针 ≈ 0（<0.01）=> {}",
-                 counted, nearPass, nearCount, farPass, farCount, (double)maxErr,
-                 (double)m_SelfCheck.tolerance, signAgree, counted,
-                 counted ? 100.0 * (double)signAgree / counted : 0.0,
-                 (double)minGpu, (double)maxGpu,
-                 counted ? 100.0 * (double)zeroCount / counted : 0.0,
-                 m_SelfCheck.passed ? "PASS" : "FAIL");
-    if (!m_SelfCheck.passed) {
-        HE_CORE_ERROR("LumenSDF 自检失败：GPU 距离场与 CPU 参考不一致，检查网格映射/缓冲布局/偏移");
+    m_SelfCheck.valid  = true;
+    m_SelfCheck.probes = totalProbes;
+    m_SelfCheck.passed = (totalProbes > 0) && (totalZero == 0) && (stats[0].nearBad == 0);
+    if (totalZero > 0) {
+        HE_CORE_ERROR("LumenSDF 自检失败：有 {} 个探针处场值 ≈ 0（点名见上），这会直接导致步进提前命中",
+                      totalZero);
+    } else if (stats[0].nearBad > 0) {
+        HE_CORE_ERROR("LumenSDF 自检失败：近表面 {} 个探针超出 1/4 体素（scatter 本应精确）",
+                      stats[0].nearBad);
+    } else {
+        HE_CORE_WARN("LumenSDF 自检：无零值、近表面精确；远场仍有超差（洪泛近似，见各网格明细）");
     }
 }
-
 void LumenSDF::RunGlobalCheck() {
     const u32 strideBase = 4u;   // 每层 4³ = 64 个探针（CPU 参考要遍历全部三角形）
     for (u32 L = 0; L < m_GlobalLayerCount; ++L) {

@@ -24,7 +24,8 @@ void main(uint3 id : SV_DispatchThreadID) {
         if ((id.x % stride) == 0u && (id.y % stride) == 0u && (id.z % stride) == 0u) {
             const uint nx = dims.x / stride, ny = dims.y / stride, nz = dims.z / stride;
             const uint idx = (id.z / stride) * nx * ny + (id.y / stride) * nx + (id.x / stride);
-            if (idx < nx * ny * nz) u_ProbeDist[idx] = d;
+            // ranges.x = 本 mesh 探针在共享缓冲里的基址（每个 mesh 一段，便于一次跑完所有网格）
+            if (idx < nx * ny * nz) u_ProbeDist[ranges.x + idx] = d;
         }
     }
 }
