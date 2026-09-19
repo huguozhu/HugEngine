@@ -1370,6 +1370,7 @@ void LumenSDF::RunMarchCheck() {
     std::vector<float> errVoxAll, errNear, errFar, errNearHit, errFarHit;   // 误差分布 + 按"起点是否贴近几何"分组
     u32 withinGlobal = 0, detailBetter = 0;
     u32 nearMiss = 0;   // 全局场单方面命中、细场未确认 = 近似错失（near-miss）
+    u32 detailMiss = 0; // CPU 命中了、细场却没确认（逐条归因用）
     double sumErrGlobal = 0.0;
 
     // 诊断用：点 p 到全部几何的精确距离（逐 mesh AABB 粗筛 + 逐三角形最近点）
@@ -1397,6 +1398,7 @@ void LumenSDF::RunMarchCheck() {
 
         // CPU 参考：Möller–Trumbore 对全部三角形取最近正交点（带逐 mesh AABB 粗筛）
         float tRef = 1e30f;
+        u32   hitEntry = 0xFFFFFFFFu;   // CPU 参考命中的是哪个 mesh 条目（细场未确认时用来归因）
         for (const auto& e : m_Entries) {
             const float side = e.voxelSize * (float)e.resolution;
             // slab 粗筛
@@ -1431,7 +1433,7 @@ void LumenSDF::RunMarchCheck() {
                 const float v = glm::dot(rd, qv) * inv;
                 if (v < 0.0f || u + v > 1.0f) continue;
                 const float tt = glm::dot(e2, qv) * inv;
-                if (tt > 1e-4f && tt < tRef) tRef = tt;
+                if (tt > 1e-4f && tt < tRef) { tRef = tt; hitEntry = (u32)(&e - m_Entries.data()); }
             }
         }
 
@@ -1444,6 +1446,15 @@ void LumenSDF::RunMarchCheck() {
             float v;
             std::memcpy(&v, &detailT[i], sizeof(float));   // 位模式 → float
             tDetail = v;
+        }
+        // 逐条归因：CPU 命中了、细场却没确认（把"细场能力不足"变成可读的清单）
+        if (cpuHit && tDetail >= 1e29f) {
+            ++detailMiss;
+            if (detailMiss <= 6) {
+                HE_CORE_INFO("LumenSDF 细场未确认 #{}: tRef={:.2f} 粗场 t={:.2f} d0={:.2f} 命中 mesh=#{} 起点在近层内={}",
+                             detailMiss, (double)tRef, gpuHit ? (double)hits[i].x : -1.0, (double)d0,
+                             hitEntry, insideL0 ? "是" : "否");
+            }
         }
         // 合并策略：取 min（两条追踪都是下界 ⇒ 合并后仍不高估，安全性质保持）。
         // 实测 detail-first 语义（有细节命中就以它为准）更差：75/195 vs 76/195 —— 因为**无符号**
