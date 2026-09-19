@@ -216,11 +216,26 @@ void LumenSDF::BuildQueue(const MeshBatcher& batcher) {
                      (double)minVoxel, (double)maxVoxel, (double)(2.0f * minVoxel), (double)(2.0f * maxVoxel));
     }
 
-    // 自检探针挑 AABB 最大的 mesh（见头文件说明）
+    // 自检探针挑 AABB 最大的 mesh（分辨率相同 ⇒ 体素数最多者）：三方对照里"存 0"的探针落在
+    // 体量最大的网格里，先查它最有信息量。同时把前 5 大的网格打出来，便于把对照表的 meshIdx 对上号。
     m_ProbeMeshIndex = 0;
     for (u32 i = 1; i < (u32)m_Entries.size(); ++i) {
-        // 按**体素数**（= AABB 边长³，分辨率相同）挑最大者：三方对照显示"存 0"的探针落在体量最大的网格里
         if (m_Entries[i].voxelSize > m_Entries[m_ProbeMeshIndex].voxelSize) m_ProbeMeshIndex = i;
+    }
+    if (!m_Entries.empty()) {
+        std::vector<u32> order(m_Entries.size());
+        for (u32 i = 0; i < (u32)order.size(); ++i) order[i] = i;
+        std::sort(order.begin(), order.end(), [this](u32 a, u32 b) {
+            return m_Entries[a].voxelSize > m_Entries[b].voxelSize;
+        });
+        std::string s;
+        for (u32 i = 0; i < 5u && i < (u32)order.size(); ++i) {
+            const MeshSDFEntry& e = m_Entries[order[i]];
+            s += " [条目 " + std::to_string(order[i]) + " → 命令 " + std::to_string(e.commandIndex) +
+                 ": 边长 " + std::to_string((int)(e.voxelSize * e.resolution)) + ", " +
+                 std::to_string(e.triCount) + " 三角形]";
+        }
+        HE_CORE_INFO("LumenSDF: AABB 最大的 5 个 mesh（探针选中条目 {}）:{}", m_ProbeMeshIndex, s);
     }
     if (skippedTris || skippedCap) {
         HE_CORE_WARN("LumenSDF: 跳过 {} 个 mesh（三角形数 > {}）与 {} 个 mesh（超出 mesh 上限 {}）",
@@ -720,6 +735,8 @@ void LumenSDF::RunSelfCheck() {
     float  maxErr = 0.0f;
     u32    counted = 0, signAgree = 0;
     u32    nearCount = 0, nearPass = 0, farCount = 0, farPass = 0;
+    u32    zeroCount = 0;
+    float  minGpu = 1e30f, maxGpu = -1e30f;
     for (u32 z = 0; z < nx; z += 1) {
         for (u32 y = 0; y < nx; ++y) {
             for (u32 x = 0; x < nx; ++x) {
@@ -749,6 +766,9 @@ void LumenSDF::RunSelfCheck() {
                 const float err = std::fabs(std::fabs(refSigned) - std::fabs(gpu[idx]));  // 距离误差
                 sumAbs += err;
                 maxErr = std::max(maxErr, err);
+                minGpu = std::min(minGpu, gpu[idx]);
+                maxGpu = std::max(maxGpu, gpu[idx]);
+                if (std::fabs(gpu[idx]) < 0.01f) ++zeroCount;   // "场里有 0"的直接证据
                 if ((refSigned < 0.0f) == (gpu[idx] < 0.0f)) ++signAgree;   // 符号一致（两种算法）
                 // 分层判据：**表面附近**（≤2 体素）必须精确 —— 那里是 scatter 的精确点-三角形
                 // 距离，也正是 sphere tracing 关心的区域；远处由跳步洪泛近似补全（允许 ≤2 体素）。
@@ -777,10 +797,13 @@ void LumenSDF::RunSelfCheck() {
     m_SelfCheck.passed = nearOk && farOk;
 
     HE_CORE_INFO("LumenSDF 自检: 探针 {} 点；近表面 {}/{} 在 1/4 体素内，远场 {}/{} 在 2 体素内"
-                 "（最大误差 {:.6f}，阈值 {:.6f}）；符号一致率 {}/{}（{:.1f}%）=> {}",
+                 "（最大误差 {:.6f}，阈值 {:.6f}）；符号一致率 {}/{}（{:.1f}%）；"
+                 "GPU 值域 [{:.3f}, {:.3f}]，其中 {:.1f}% 探针 ≈ 0（<0.01）=> {}",
                  counted, nearPass, nearCount, farPass, farCount, (double)maxErr,
                  (double)m_SelfCheck.tolerance, signAgree, counted,
                  counted ? 100.0 * (double)signAgree / counted : 0.0,
+                 (double)minGpu, (double)maxGpu,
+                 counted ? 100.0 * (double)zeroCount / counted : 0.0,
                  m_SelfCheck.passed ? "PASS" : "FAIL");
     if (!m_SelfCheck.passed) {
         HE_CORE_ERROR("LumenSDF 自检失败：GPU 距离场与 CPU 参考不一致，检查网格映射/缓冲布局/偏移");
