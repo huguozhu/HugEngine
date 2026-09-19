@@ -2098,11 +2098,14 @@ if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
 - **GBuffer 契约**：模块**自己**建 PSO/附件布局，直接写既有 GBuffer 纹理句柄。
   这样**不需要**给 `GBufferRenderer` 加 `Mode::Nanite`（比"改渲染器"更独立），
   代价是模块内要复刻 `BeginOffscreenPassMRT(cv,8,...)` 的用法（`GBufferRenderer_CPU.cpp:60`）。
-- **软光栅与深度**：compute 写 GBuffer 需要纹理带 `UnorderedAccess`。默认走
-  **(A1)**：给 GBuffer 纹理加 UAV，软光栅用 `RWTexture2D` 写颜色目标 + 手动写深度，
-  深度排序改由模块显式声明；备选 **(A2)** 模块内自建 VisBuffer（`triangleID+depth`）+
-  材质解析 pass。A2 是设计里标"后续"的路线（§1），但代码现实（无 UAV、深度独占语义、
-  8 个 float 附件带宽）可能让它更省事 —— 该裁决放在任务 4，**结果写回本节**。
+- **软光栅与深度**：compute 写 GBuffer 需要纹理带 `UnorderedAccess`。**已裁决（任务 4，2026-09-20）走 (A1)**：
+  GBuffer 的 8 张颜色目标已加 UAV（`usage` 只增；既有路径转储逐位不变，已实测），软光栅用
+  `RWTexture2D` 写颜色目标；模块 pass 声明与 `GB_Clear` 同组的深度 WAW 以维持排序。
+  **深度不改成"存储图像写入"**：实测本机 NVIDIA RTX 4060 上 `D32_SFLOAT` 支持
+  `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT`，但**同机 AMD 核显不支持**（`D32_SFLOAT_S8_UINT` 在 NVIDIA 上也不支持）
+  ⇒ compute 写深度无法跨厂商；深度继续走既有附件路径（或片元 `SV_Depth`）。只有将来确需跨厂商解耦
+  材质/深度时才升级到备选 **(A2)**（模块内自建 VisBuffer `triangleID+depth` + 材质解析 pass）。
+  实现与证据见 §14.14。
 - **objectIndex 分区**：模块实例占**独立 index 空间**（自持 `NaniteInstance` 缓冲；
   实例内沿用 208B 的材质部分）。既有的三处枚举一致性契约
   （`SceneRenderer.cpp:102-142`、`MeshBatcher.cpp:75-86`、`GPUScene.cpp:66-82`）**不受影响** ——
@@ -2375,3 +2378,31 @@ if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
 
 **⑥ 风险**：设备不支持 `drawIndirectCount` 或 `fragmentStoresAndAtomics` 时，只打印中文告警并跳过绘制端，
 该档会失去"已光栅化簇数"计数（不崩溃、不影响既有画面）；本机已确认两项均已启用。
+
+### 14.14 任务 4 实施记录：GBuffer UAV（A1）与同帧读到（2026-09-20）
+
+**① A1 落地**：`GBufferRenderer.cpp` 的 8 张颜色目标各**只增** `UnorderedAccess`（实际是 7×RGBA16F + 1×RG16F velocity）。
+**深度不加 UAV**：实测本机 NVIDIA RTX 4060 的 `D32_SFLOAT` 支持 `STORAGE_IMAGE_BIT`，但同机 AMD 核显不支持
+（`D32_SFLOAT_S8_UINT` 在 NVIDIA 上也不支持）⇒ "compute 写深度"不可跨厂商。裁决：颜色走 A1，深度继续走附件路径；
+A1/A2 的完整裁决已写回 §14.5（A2 = 自建 VisBuffer，仅在确需跨厂商解耦材质/深度时升级）。
+
+**② 同帧读到怎么证的**：新增 `Nanite_TestWrite.comp.slang`（8×8 棋盘写 GBuffer albedo，深格 0.25/浅格 0.75,0.50,0.25），
+由 cfg 键 `nanite_test_write`（默认 **0**）+ 面板勾选框控制；帧图新增**同一开关**守卫的第二处注册点
+`m_Nanite.AddPostGBufferPasses(rg, naniteGB)`，位置在 `GB_Clear` **之后**、所有 GBuffer 消费者之前
+（将来也是任务 26 调试可视化的落点；关闭档一个 pass 都不注册——已实测"只开 `nanite_test_write`、主开关关"时指纹仍是冻结值）。
+
+**③ 证据（本人复跑）**
+- 关闭档：12 pass、指纹 `1C15AB72E688B530…`（冻结值）、`vuid_lines=41`。
+- 开启档（测试写关）：14 pass，与关闭档逐位比较 `same=17`、`must_same_diff=0`（仅 3 个抖动族文件不同）。
+- 测试写档：15 pass，`Nanite_TestWrite` 位于索引 5（`GB_Clear` 之后、`Decal_Project/SSAO/Lighting` 之前）；
+  `gi_nanite_tw_albedo.f16` 统计 `min=0.0000 mean=0.2812 max=0.7500 rgb_mean=(0.5000,0.3750,0.2500)` —— 与写入图案逐位吻合。
+- **Lighting 同帧读到了**：`cmp_dumps.py nanite_on nanite_tw` 的 `hdr` 为
+  `diff_px=6218585 maxAbs=1.66 meanAbs=0.0317`，而 `nanite_off` vs `nanite_on` 的运行间抖动只有
+  `hdr meanAbs=1.32e-06`（相差约 **24000 倍**）。若 Lighting 读的是写入前的内容，差异必然落回抖动量级。
+- 单测 237/5792 全绿；全量六条判据 `ACCEPTANCE SWEEP: PASS`。
+
+**④ 判据②也扩了 probe-6 有界容差（同一族、同一签名）**：任务 4 期间判据② 从 `0 ULP` 变成
+`6 ULP / 5 个文件`，而这 5 个文件正是 §14.11 记录过的 `lumen_irradiance` + `prov6_*`
+（`maxULP=6 maxAbs=1.5e-4 meanAbs=2.6e-8`，0.5% 像素）⇒ 该族在**运行间非确定**（同一轮内先 0 后 6），并非 Nanite 引入。
+处理与判据④ 一致：仅对该族给出硬上界容差（`maxULP <= 8` 且 `meanAbs <= 1e-6`）并**显式打印命中项数**，
+其余转储仍严格 `<= 2 ULP`。**若该族幅度超过上界，一律按回归处理。**
