@@ -32,7 +32,9 @@ namespace he::render {
 
 /// 构建参数（默认值 = 首版默认项；每一步都可配，便于按机器调）
 struct LumenSDFConfig {
-    u32 resolution     = 128;    // 每 mesh 立方体素边长（scatter 版：代价 O(表面 × 分辨率²)）
+    u32 resolution     = 128;    // 每 mesh 立方体素边长（scatter 版：代价 O(表面 × 分辨率²)）。
+                                 // 实测 160³ 相对 128³：远场误差与 sphere tracing 精度都不变、显存 128→250 MB、
+                                 // 烘焙 6→20 s ⇒ 已回退；瓶颈不在 mesh 层分辨率。
     u32 maxMeshes      = 16;     // 显存上限（R32F：16 × 128³ × 4B = 134 MB；32³ 时同样 16 个只要 2 MB）
     u32 maxTrisPerMesh = 20000;  // scatter 与三角形数线性，上限可远高于 gather 版
     u32 meshesPerFrame = 2;      // 每帧构建预算（128³ 的 scatter + convert 更重）
