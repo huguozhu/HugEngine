@@ -356,12 +356,16 @@ void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);   // 与 scatter 同一套绑定（只有 u32 场）
     for (u32 s = e.resolution / 2u; s >= 1u; s /= 2u) {
         pc.meshIndex = s;   // flood 的 dims.w = 本次步长（体素）
-        cmd->SetPushConstants(0, sizeof(pc), &pc);
-        const u32 fgroups = (e.resolution + 3u) / 4u;
-        cmd->Dispatch(fgroups, fgroups, fgroups);
-        cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
-                             rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
-                             m_MeshScratch.get());
+        // **每级两趟**：单趟的 26 邻域松弛只在一个方向上把信息推到位，远场精度因此偏松
+        // （实测单趟时大网格远场最大误差 100~315 单位）；洪泛的标准做法是每级双向。
+        for (u32 pass = 0; pass < 2u; ++pass) {
+            cmd->SetPushConstants(0, sizeof(pc), &pc);
+            const u32 fgroups = (e.resolution + 3u) / 4u;
+            cmd->Dispatch(fgroups, fgroups, fgroups);
+            cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                                 rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
+                                 m_MeshScratch.get());
+        }
         if (s == 1u) break;   // 防止 s 折半变 0 造成死循环
     }
 
@@ -574,11 +578,13 @@ void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
         fpc.dimX = fpc.dimY = fpc.dimZ = layer.res;
         for (u32 s = layer.res / 2u; s >= 1u; s /= 2u) {
             fpc.stride = s;
-            cmd->SetPushConstants(0, sizeof(fpc), &fpc);
-            cmd->Dispatch(groups, groups, groups);
-            cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
-                                 rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
-                                 layer.scratch.get());
+            for (u32 pass = 0; pass < 2u; ++pass) {   // 每级两趟（与 mesh 层同理：单趟只推一个方向）
+                cmd->SetPushConstants(0, sizeof(fpc), &fpc);
+                cmd->Dispatch(groups, groups, groups);
+                cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                                     rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
+                                     layer.scratch.get());
+            }
             if (s == 1u) break;
         }
 
