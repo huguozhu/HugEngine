@@ -186,6 +186,35 @@ dump 工具读到，否则"某块墙一直发黑"无法归因（这是 §16 里"
 - 法线从 SDF 梯度估算 (3 次采样)
 - 跨层切换：当前层步数用完未命中 → 下一层继续
 
+**首版实现与质量边界（步骤 8/9 实测，2026-09-19）**
+
+实现落在 `Engine/Render/Lumen/LumenSDF.{h,cpp}` + `Engine/Shader/Shaders/Lumen/SDF_MeshBuild.comp.slang`：
+
+| 项 | 首版做法 | 与上表的差异 |
+|----|---------|-------------|
+| 构建方式 | **gather**：每个体素遍历该 mesh 的全部三角形（精确点-三角形距离，Ericson 闭式解） | 上表写的是"每三角形写入体素"（scatter + 原子最小）。首版用 gather 省掉 u32 临时场 / InterlockedMin / 转换三趟，代价是 O(体素 × 三角形) |
+| 分辨率 | 默认 **32³**（可配） | 上表 128³。gather 下 128³ × 数千三角形代价不可接受 ⇒ 128³ 需要 scatter 版本（记为 §12 的实现前置） |
+| 数据结构 | 每 mesh 一张 **R32F** 3D 纹理（可写 + 可采样） | 上表 R16F（需 16bit storage 支持）；R32F 是 2 倍显存 |
+| 符号 | **无符号**距离（内外不区分） | 上表要求带符号。符号与 sphere tracing 的步进一起在步骤 11 落地 |
+
+**实测质量边界（06.GILab，2026-09-19，51 个 mesh）**：
+
+- 体素边长 **0.4495 ~ 87.5741** 世界单位 ⇒ 可分辨特征 ≳ **0.90 ~ 175.1**（约 2 倍体素）。
+  **结论：固定 32³ 对大网格（跨度数百至数千单位）基本无用** —— 这正是步骤 10 的 Global SDF
+  必须按场景包围盒 + clipmap 分层来做、而不是把所有网格塞进同一个分辨率的原因。
+- 三角形上限 4096 时 **28 / 79 个 mesh 被跳过**（不建这张场），这些网格只能由 Global SDF 覆盖。
+- 显存：51 × 32³ × 4B = **6.38 MB**（R16F + 128³ 时同数量 mesh 是 51 × 4.2 MB ≈ 214 MB）。
+- 自检（512 个探针点，GPU 读回 vs CPU 独立实现）：最大误差 **0.000075**、平均 **0.000008** ⇒ PASS。
+  它验证的是数据链路（缓冲布局 / 网格映射 / 偏移 / 描述符 / push constant），不是算法近似。
+
+**已知不适用（写进实现前置，与 §17.6 的 UE 限制清单对照）**：
+
+1. **大跨度网格**：单张立方体场的体素边长随 AABB 最长轴增长，跨度 > 数百单位时精度崩塌；
+2. **薄于约 2 个体素的特征**：步进会穿漏（本版无符号，也无法靠符号纠正）；
+3. **三角形数 > 上限的网格**：本版直接不建（gather 的代价约束），需 scatter 版本或 LOD 化输入；
+4. **内部复杂的单 mesh**（UE 官方明确要求"墙/地/天花板拆成独立 mesh"）：同样的分辨率约束；
+5. **动态/蒙皮几何与 WPO**：本版基于 `MeshBatcher` 的静态合并快照，动态网格不参与。
+
 ### 6. Screen Probe Gather
 
 | 配置项 | 值 |
@@ -1095,6 +1124,21 @@ python Tools\pt\analyze_pt.py --compare <pt_tag> <deferred_tag> --target hdr
 | F Radiance Cache | 30–33 | L5 | §7 |
 | G 降噪与优化 | 34–37 | L6 | §10、§6 |
 | H 工具与验收 | 38–41 | 横切（每阶段退出前） | §9.1、§14、§16 |
+
+#### 进展记录（每轮实现后追加，编号不变）
+
+| 步骤 | 状态 | 落地 / 证据 |
+|------|------|------------|
+| 1 Provider 生命周期遍历 | ✅ 已完成 | `DeferredPipeline::OnResize/Shutdown` 遍历 `m_GIProviders`（提交 `a2f4ae3`） |
+| 2 帧图顺序契约 | ✅ 已完成 | Lumen 的两个 pass 显式声明 reads/writes；`DeriveBarriers` 顺序里 Lumen 早于 Lighting（`40075b3`） |
+| 3 Lumen 资源宿主 | ✅ 已完成 | `Engine/Render/Lumen/LumenScene.{h,cpp}`（`b099a6c`，步骤 8 起承载 SDF） |
+| 4 GI 源数据层 | ✅ 已完成 | `GISourceId::Lumen = 12` + 能力位 + shader 双侧真值（`b099a6c`） |
+| 5 合成端接入 | ✅ 已完成 | `kGPUBinding_Lumen = 32` + 两个 `case` + `alpha < 0` 有效性契约（`6a3415b`） |
+| 6 Provider 骨架 + 第 8 条循环 | ✅ 已完成 | `LumenProvider` + 帧图按 Provider 的循环（`40075b3`）；白炉 1.0 / 常态无效标记 |
+| 7 面板与配置 | ✅ 已完成 | `gi_blend_diffuse_lumen` / `gi_blend_specular_lumen` 独立键 + 面板候选（`0a884da`） |
+| 8 Mesh SDF 生成 | ✅ 已完成（首版 gather/32³/R32F） | `LumenSDF` + `SDF_MeshBuild.comp.slang`；06.GILab 建 51 个 mesh、6.38 MB、自检 PASS |
+| 9 SDF 质量边界 | ✅ 已完成 | §5 的"首版实现与质量边界"：体素边长 0.45~87.6、28/79 mesh 超三角形上限、5 条不适用清单 |
+| 10–41 | ⬜ 未开始 | — |
 
 ### 阶段 A：框架前置（不产出画面，但后补等于重构）
 
