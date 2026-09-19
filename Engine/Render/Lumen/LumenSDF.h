@@ -167,6 +167,9 @@ private:
     std::unique_ptr<rhi::IRHIBuffer>          m_Indices;
     std::unique_ptr<rhi::IRHIBuffer>          m_ProbeDist;   // CPU 可读（自检）
     u32 m_ProbeCount = 0;
+    /// 自检探针针对哪个 mesh：取 **AABB 最大**的那个 —— 大网格是当前"注入值偏小"的头号怀疑对象，
+    /// 只查 mesh 0（小网格）会把问题漏掉（实测：全局层在探针处为 0，而该点真实距离 894）
+    u32 m_ProbeMeshIndex = 0;
 
     // 状态机
     enum class Phase { Idle, Baking, WaitSelfCheck, GlobalBuild, WaitGlobalCheck, March, WaitMarchCheck, Done };

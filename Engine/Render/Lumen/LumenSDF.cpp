@@ -216,6 +216,11 @@ void LumenSDF::BuildQueue(const MeshBatcher& batcher) {
                      (double)minVoxel, (double)maxVoxel, (double)(2.0f * minVoxel), (double)(2.0f * maxVoxel));
     }
 
+    // 自检探针挑 AABB 最大的 mesh（见头文件说明）
+    m_ProbeMeshIndex = 0;
+    for (u32 i = 1; i < (u32)m_Entries.size(); ++i) {
+        if (m_Entries[i].voxelSize > m_Entries[m_ProbeMeshIndex].voxelSize) m_ProbeMeshIndex = i;
+    }
     if (skippedTris || skippedCap) {
         HE_CORE_WARN("LumenSDF: 跳过 {} 个 mesh（三角形数 > {}）与 {} 个 mesh（超出 mesh 上限 {}）",
                      skippedTris, m_Config.maxTrisPerMesh, skippedCap, m_Config.maxMeshes);
@@ -279,8 +284,8 @@ void LumenSDF::UploadGeometry(const MeshBatcher& batcher) {
     m_Device->UpdateDescriptorSet(m_ConvertSet, 2, rhi::DescriptorType::StorageBuffer, m_ProbeDist.get());
 
     m_GeometryUploaded = true;
-    HE_CORE_INFO("LumenSDF: 几何已上传（{} 顶点 float4 + {} 索引，探针 {} 点，u32 临时场 {:.2f} MB）",
-                 positions.size(), indices.size(), m_ProbeCount,
+    HE_CORE_INFO("LumenSDF: 几何已上传（{} 顶点 float4 + {} 索引，探针 {} 点（针对 mesh {}，AABB 最大者），u32 临时场 {:.2f} MB）",
+                 positions.size(), indices.size(), m_ProbeCount, m_ProbeMeshIndex,
                  (double)((u64)m_Config.resolution * m_Config.resolution * m_Config.resolution * 4ull)
                      / (1024.0 * 1024.0));
 }
@@ -306,8 +311,8 @@ void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
     pc.triCount    = e.triCount;
     pc.indexOffset = e.firstIndex;
     pc.vertexOffset = e.vertexOffset;
-    pc.probeStride = (entryIndex == 0) ? std::max(1u, m_Config.probeStride) : 0u;
-    e.probeCount   = (entryIndex == 0) ? m_ProbeCount : 0u;
+    pc.probeStride = (entryIndex == m_ProbeMeshIndex) ? std::max(1u, m_Config.probeStride) : 0u;
+    e.probeCount   = (entryIndex == m_ProbeMeshIndex) ? m_ProbeCount : 0u;
 
     // ── ① 清空 u32 场为 +inf：一维线性遍历，组数 = ceil(res³/64) ──
     cmd->SetPipeline(m_PSO.get());
@@ -348,7 +353,7 @@ void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
                                                e.field->GetNativeHandle());
     cmd->SetPipeline(m_ConvertPSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_ConvertSet);
-    pc.meshIndex = entryIndex;   // convert 的 dims.w = mesh 序号：0 = 写自检探针
+    pc.meshIndex = (entryIndex == m_ProbeMeshIndex) ? 0u : 1u;   // convert 的 dims.w = 0 表示写自检探针
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     const u32 groups = (e.resolution + 3u) / 4u;
     cmd->Dispatch(groups, groups, groups);
@@ -706,7 +711,7 @@ void LumenSDF::RunSelfCheck() {
     }
     const float* gpu = static_cast<const float*>(mapped);
 
-    const MeshSDFEntry& e = m_Entries[0];
+    const MeshSDFEntry& e = m_Entries[std::min<u32>(m_ProbeMeshIndex, (u32)m_Entries.size() - 1u)];
     const u32 stride = std::max(1u, m_Config.probeStride);
     const u32 nx = e.resolution / stride;
 
@@ -829,6 +834,54 @@ void LumenSDF::RunGlobalCheck() {
             }
         }
         layer.probe->Unmap();
+
+        // ── 三方对照诊断（只对最细的近层做，避免刷屏）──
+        // 对"低估最严重"的几个探针，把三个数并排打出来，回答"是谁把小值带进来的"：
+        //   gpu   = 全局层在该点的值（注入 + 洪泛的结果）
+        //   exact = CPU 对**全部**三角形的精确最小距离（真值）
+        //   meshD = 包含该点的 mesh 中**精确距离最小**者的距离（= 注入本该写进去的值）
+        // gpu ≈ meshD ⇒ 注入忠实，松的是 mesh 场/AABB 语义；gpu << meshD ⇒ 注入或采样有错。
+        if (L == 0) {
+            struct Row { float gpu, exact, meshD; int mesh; };
+            std::vector<Row> rows;
+            for (u32 z = 0; z < n; ++z) for (u32 y = 0; y < n; ++y) for (u32 x = 0; x < n; ++x) {
+                const u32 idx = z * n * n + y * n + x;
+                if (idx >= layer.probeCount) continue;
+                const float3 p = layer.origin +
+                    float3((float)(x * stride) + 0.5f, (float)(y * stride) + 0.5f,
+                           (float)(z * stride) + 0.5f) * layer.voxelSize;
+                float exact = 1e30f, meshD = 1e30f;
+                int bestMesh = -1;
+                for (u32 mi = 0; mi < (u32)m_Entries.size(); ++mi) {
+                    const MeshSDFEntry& e = m_Entries[mi];
+                    const float side = e.voxelSize * (float)e.resolution;
+                    const bool inside = (p.x >= e.origin.x && p.x <= e.origin.x + side &&
+                                         p.y >= e.origin.y && p.y <= e.origin.y + side &&
+                                         p.z >= e.origin.z && p.z <= e.origin.z + side);
+                    float dMesh = 1e30f;
+                    for (u32 t = 0; t < e.triCount; ++t) {
+                        const u32* tri = &m_IndicesCPU[e.firstIndex + t * 3];
+                        const float3 a = m_PositionsCPU[tri[0] + e.vertexOffset];
+                        const float3 b = m_PositionsCPU[tri[1] + e.vertexOffset];
+                        const float3 c = m_PositionsCPU[tri[2] + e.vertexOffset];
+                        const float dd = PointTriangleDistance(p, a, b, c);
+                        dMesh = std::min(dMesh, dd);
+                        exact = std::min(exact, dd);
+                    }
+                    if (inside && dMesh < meshD) { meshD = dMesh; bestMesh = (int)mi; }
+                }
+                rows.push_back({ gpu[idx], exact, meshD, bestMesh });
+            }
+            std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) {
+                return (a.exact - a.gpu) > (b.exact - b.gpu);   // 低估最严重的排前面
+            });
+            HE_CORE_INFO("LumenSDF 三方对照（层 0，低估最严重的前 5 个探针）: gpu / exact / meshD / meshIdx");
+            for (u32 i = 0; i < 5u && i < rows.size(); ++i) {
+                HE_CORE_INFO("  [{:.2f} / {:.2f} / {:.2f} / {}]  (exact-gpu={:.2f})",
+                             (double)rows[i].gpu, (double)rows[i].exact, (double)rows[i].meshD,
+                             rows[i].mesh, (double)(rows[i].exact - rows[i].gpu));
+            }
+        }
 
         GlobalCheck& c = layer.check;
         c.valid = true;
