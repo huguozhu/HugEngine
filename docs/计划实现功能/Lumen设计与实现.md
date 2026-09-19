@@ -30,8 +30,7 @@
   （`SpatialDenoiseAux`）**已落地**；Lumen 本体的 Surface Cache / SDF / Screen Probe /
   Radiance Cache 已按步骤 1–33 落地并走完 L1–L5（**见 §四 的进度表**，逐行记读数）；
   统一降噪框架的第三步（11.3，§10）**已落地（步骤 34）**；剩下的是 Provider 执行单位
-  收敛 / 绑定数组化（§11）与 L6（步骤 37–41）。
-- **附录 A 是 ReSTIR PT / GRIS 预研**：它是 Lumen GI 的落点方案与代价评估（含全部实测数字、
+  收敛 / 绑定数组化（§11）与 L6（步骤 37–41）。- **附录 A 是 ReSTIR PT / GRIS 预研**：它是 Lumen GI 的落点方案与代价评估（含全部实测数字、
   成本表、显存推算、里程碑 M0–M3、非目标、通用性分析与复现命令）。它是**决策依据与执行
   留档**，不是已排期的实现任务。
 - **第十五 ~ 十七章是"与 UE5 Lumen 的架构对照"**（§15–§17，2026-09-19 补充）：§15 是能力与
@@ -1527,7 +1526,8 @@ python Tools\pt\analyze_pt.py --compare <pt_tag> <deferred_tag> --target hdr
 | 34 统一降噪框架（11.3） | ✅ 已完成 | 三件事落在一个文件加两处接线里。**① 信号层**：`PostProcess/DenoiseSignal.{h,cpp}` —— `DenoiseSignal`（名字/输入/输出/引导/速度/**`needsUpscale`**/信号与消费端分辨率/引导参数）、`DenoiseHistoryPool`（**统一分配**历史纹理，同名同尺寸同格式只建一次；`RTDenoiser` 从"自建历史"改为"向池取"，池为空时保持旧行为）、`DenoiseSignalRegistry`（每帧由各 Provider 通过 `IGIProvider::DescribeSignals()` 登记，`LogSummary()` 只在**信号名集合变化**时打印）。**② 框架级有效性契约**：合成端着色器从"逐源 `if (id==…)` 硬编码"收敛为唯一入口 `SourceIsValid(id, uv)`（`alpha ≥ 0` 有效；`alpha < 0` = 本条无数据、**值不计入分子且权重不计入分母**），C++ 侧对应 `denoise::IsValid/kInvalidAlpha/ValidityContractName`，并加 `Tests/TestDenoiseSignal.cpp`（4 例 24 断言，含"契约文本必须写明分母"这一条）。**③ 半分辨率也要降噪**：新增升采样级 `PostProcess/DenoiseUpscale.{h,cpp}` + `Denoise_Upscale.frag.slang`（3×3 源邻域 × 深度/法线双边 × 目标空间高斯，保住 `alpha<0` 语义），`SpatialDenoiseAux` 变成两级自适应链 `[Denoise@信号分辨率] →（半分辨率时）[Upscale→消费端]`，尺寸每帧按**纹理实况**核对（`SyncSizes`，只在真的不同时才重建）。**实测**：6 条异构信号同帧登记（SSGI/SSR/RT Shadow/RTAO/RT 反射/RTGI）且只打印一条契约；`gi_half_res=1` 时 `prov3_final`/`prov4_spec_final` 由 960×540 → **1920×1080**，pass 链出现 `SSGI_Denoise→SSGI_Upscale`、`SSR_Denoise→SSR_Upscale`；**跨构建 A/B**（把本步改动 `git stash` 重建 = 上一提交的构建，跑同一份配置）除 `prov0_ao*`/`hdr`/`radiance` 外**全部逐位一致**，而这三项是跨轮次既有的 SSAO 抖动（附四十一有 22→34 轮的逐轮证据）。**顺带修两个真 bug**：①`RTEffectProvider::DescribeSignals` 原先只看 `IsValid()`（四种 RT 效果的 pass 对象一创建就恒真）⇒ 默认配置下把**根本没跑**的 4 个 RT 效果登记成信号（"多信号共存"读数是假的）；现在由 `SyncToStack` 按层栈写入"本帧是否产出"，无 RT 源时帧图显式清零。②样例里 `gi_half_res` 只写进 `GIConfig::halfRes`，而 SSGI/SSR 读各自 `GISettings::halfRes`，**启动路径上没有任何一处连通**（只有 ImGui 档位切换会同步）⇒ 半分辨率这一档从配置文件根本到不了渲染，而 cfg 写回又会把它存下来（配置往返有损）。**记录一条新事实**：登记的 4 条 RT 信号分别是 960×540×3 与 **480×270**（RTGI = 1/4 分辨率），即"RT 效果全是亚分辨率 + 合成端直接采样"——这是步骤 36 的对象。**验收**：白炉 `prov6_final` **1.0000**、`lumen_passes=0`、单测 **235 例 / 5781 断言**全绿、VUID 46（部分配置 42） |
 | 35 Lumen 信号接入框架 | ✅ 已完成 | 新 `Lumen/ScreenProbe_Filter.comp.slang` + `LumenScene_ProbeFilter.cpp`：**空间级**以单元（16×16 像素）为步长取 3×3 邻域（经单元→探针映射，合并探针按覆盖的 4 个单元被重复取到 = 面积加权），在 **YCoCg** 里对每个 SH 系数算 μ/σ、构造 AABB = [μ−γσ, μ+γσ]、把邻居**截断**后平均；**时域级**把探针世界位置用**上一帧** viewProj 投回上一帧屏幕 → 上一帧单元 → 上一帧探针，位置差 ≤ 容差（按视图深度缩放）且法线 dot ≥ 0.9 才采纳历史，历史也截断到同一个 AABB 后做 EMA。结果写进**独立**的 `m_ProbeFilteredBuf`，下游（逐像素辐照度、DDGI 的 Screen-Probe 输入）只读这一份；历史（两份探针镜像 + 两份单元映射）走**步骤 34 的统一池**（`DenoiseHistoryPool::AcquireBuffer`，池从 4 纹理 → **4 纹理 + 4 缓冲**，日志一次报全）。读写分离 + 历史乒乓是为了消除"3×3 重叠邻域就地读写"与"同块缓冲既读又写"两类竞态。**实测（同一构建、三档模式 A/B，帧 80）**：探针 l0 亮度的噪声 `std/mean` **0.3592 → 0.2332（仅空间 −35.1%）→ 0.2177（空间+时域 −39.4%）**；同一数据的**画面级**高频代理（Lumen 输出 `mean|Δx|`）**−19.5% → −21.6%**，逐像素标准差 −18.4% → −22.0%；负的辐照度离群从 **min −0.0270 收到 −0.0009**；HDR 合成均值 −0.06%（Lumen 输出均值 −4.6%，见附四十二的归因）。**白炉仍精确**：滤波前后探针 l0 均值都是 **1.77246**（相对 √π 偏差 4.00e-06，与步骤 23 同值 —— σ≈0 时 AABB 退化成一个点，截断与 EMA 都是恒等），`prov6_final` min = mean = max = **1.0000**。**踩到并记下两条真事实**：①`DenoiseSignal` 此前只能描述纹理信号，探针 SH 是缓冲 ⇒ 给信号层加了**缓冲载体**（`inputBuffer/outputBuffer` + `note`），否则"注册为框架内信号"只能靠塞假纹理指针；②`IGIProvider::IsValid()` 的语义是"pass 对象在"（Lumen/RTAO 恒真），转储与信号登记必须改用新的 **`ProducedThisFrame()`**（按层栈判定）——改后默认配置的 `prov6/8/9/10` 不再落盘"上一帧/未使用"的纹理（转储集合的变化本身就是证据）。**验收**：白炉 1.0000、背靠背逐项一致（Lumen 输出 1330 像素差 **1 个 f16 ULP**，与步骤 27/28 同源的 RT 末位抖动）、`lumen_passes=0`（关 Lumen）、默认预设画面逐位不变（除既有的 SSAO/HDR 抖动）、单测 **237 例 / 5792 断言**全绿、VUID 46（默认配置 41） |
 | 36 半分辨率升采样与有效性 | ✅ 已完成 | **复用**步骤 34 的 `PostProcess/DenoiseUpscale`（不新写）：`RTEffectProvider` 的降噪链尾追加一级"重建升采样"，是否启用由**实测尺寸**判定（主输出 < 深度图 ⇒ 亚分辨率），走的是同一套 `GetAuxPassCount/PreBindAux/RenderAux` 数据驱动链 —— 于是四种光追效果各自多出一个 `RT_*_Upscale` pass，`FinalOutput()` 自动变成全分辨率，合成端与转储都不用改。**实测（同一构建，`HE_RT_UPSCALE=0/1` 背靠背）**：pass 列表出现 `RT_Shadow_Upscale` / `RT_AO_Upscale` / `RT_Reflection_Upscale` / `RT_GI_Upscale`；转储 `prov9_spec_final` **960×540 → 1920×1080**、`prov10_final` **480×270 → 1920×1080**（RTGI 是 1/4 分辨率）；信号登记里 4 条 RT 信号的 `需升采样` 与目标分辨率随开关同步变化。**有效性掩码的语义被修正**（本步最硬的一条）：旧路（半分辨率纹理 + 合成端线性采样）读到的 alpha 是**插值值**，实测有 **3.84%** 的屏幕像素 alpha 既不是 +1 也不是 −1（即"有效性判定是滤波的副产物"）；新路逐像素输出精确 ±1（模糊有效性 **0.0000%**），RT 反射的 `alpha<0` 占比由 **85.61% → 81.86%**（找回 3.75 个百分点的边界像素，它们是"3 个邻居有数据、1 个没有"的插值伪影）。**画面无跳变**：关掉 AO 通道后 HDR 亮度均值 **0.11353 → 0.11567（+1.88%）**，差值在边缘/平坦上的 RMS 比只有 1.21 ⇒ 这点变化主体是"有效性覆盖被修正"而不是"边缘变锐"。**验收**：白炉 `prov6_final` **1.0000**、`lumen_passes=0`（关 Lumen）、**背靠背全部转储逐位一致（0 像素差）**、默认预设画面不变（除既有的 SSAO/HDR 抖动）、单测 237/5792 全绿、VUID 42/43 ≤ 46 |
-| 37–41 | ⬜ 未开始 | 阶段 G / L6：37 性能与异步（L6 退出判据；**注意**：现在的 `GITimer` 不覆盖降噪/升采样辅助 pass，帧时账会少算，见附四十三）、38–41 横切工具（白炉真值覆盖、背靠背对照、调试可视化、单测与预设回归） |
+| 37 性能与异步（L6 退出判据） | ⚠️ **未达成**（测量与归因已完成，见附四十四） | **做了测量基础设施**：逐 pass **CPU 录制**计时（`HE_CPU_PASSES=1`，`RenderGraph` 内）、管线 CPU 三段分解（重建帧图/编译/执行）、附属 pass 的 GPU 计时（`GITimer` 扩到 64 格，主/附属各一格）、**稳态口径**（mesh 场建完时把滚动平均清零，峰值保留）、整帧预算行（各 pass 合计 ⇒ fps 上限 + 最重的 pass + 附属 pass）、样例侧真实帧率与 CPU 侧耗时（`HE_NO_VSYNC=1`）、以及 `lumen_irradiance` 转储。**实测（1080p）**：GPU 各 pass 合计 **10.4~14.3 ms ⇒ 70~96 fps**，其中 Lumen 计算 pass **稳态 3.3 ms**（步骤 29 报的 27 ms 是**启动期平均**：首帧建 101 个 mesh 场峰值 2.0 s；稳态 SDF 构建 0.000 ms）；但**整帧是 CPU 受限**：关 Lumen 34.6 ms（28.9 fps）/ 开 Lumen 51.5 ms（19.4 fps），CPU 侧 100% 落在管线 `Render` 里，其中 `rg.Execute`（录制）30~48 ms、重建帧图仅 0.19 ms。逐 pass CPU 录制：**Shadow 28~33 ms**（既有，与 Lumen 无关）+ **Lumen_SDF_Build 16.4 ms**，后者 79% 是 `RunFeedback` 的槽位回读（8160 槽逐元素读未缓存主机内存，实测 12.95 ms）。**⇒ L6 的 60fps 未达成，但瓶颈在 CPU 侧录制（尤其阴影 pass），不在 GPU 也不在 Lumen 本体**；Lumen 的 CPU 成本已定位到具体一行（附四十四）。尝试过的修法（整块 memcpy）把 Lumen 计算 pass CPU 从 16.4 → 4.5 ms、整帧 51.5 → 35.3 ms，但**改变了请求集合**并随后观测到辐照度纹理变黑（CPU 统计仍正常）⇒ **已回退**，改为下一轮用"GPU→CPU 拷贝 + 栅栏"的确定性回读重做。**验收**：白炉 1.0000、关 Lumen ⇒ `lumen_passes=0`、单测 237/5792 全绿、VUID 46、Lumen 输出与步骤 35/36 的基线差 **1286 像素 1 个 f16 ULP**（同族末位抖动） |
+| 38–41 | ⬜ 未开始 | 阶段 H：38 白炉真值覆盖、39 背靠背单源采样对照、40 调试与可视化工具、41 单测与预设回归 |
 
 ### 阶段 A：框架前置（不产出画面，但后补等于重构）
 
@@ -1743,6 +1743,13 @@ python Tools\pt\analyze_pt.py --compare <pt_tag> <deferred_tag> --target hdr
 - **目标**：60 fps @ 1080p（§12 的 L6 判据）。
 - **改动点**：`RenderGraph::ExecuteWithAsyncCompute`（`RenderGraph.cpp:447,500`）接入 Lumen 的 compute 段；摊销预算（步骤 17）调优；必要时分级画质。
 - **验收**：目标机上 1080p 达到 60 fps；GPU 计时（`GITimer`）给出各 pass 分解；无 hitch（1% low 帧时可控）。
+- **实测（本轮）**：**未达成**。GPU 各 pass 合计 10.4~14.3 ms（⇒ 70~96 fps）、Lumen 稳态 3.3 ms，
+  但整帧是 **CPU 受限**：34.6 ms（关 Lumen）/ 51.5 ms（开 Lumen），CPU 侧 100% 在管线 `Render`
+  的 `rg.Execute`（录制）里；逐 pass CPU 录制最重的是 **Shadow 28~33 ms**（既有）与
+  **Lumen_SDF_Build 16.4 ms**（其中 `RunFeedback` 的槽位回读 12.95 ms）。见附四十四。
+  **async compute 一段未做**：现有实现只把"**前缀**里的 Compute pass"移到计算队列
+  （`crossedCompute` 一遇到非 Compute 就停止收窄），而 Lumen 的 compute 段在帧中段，
+  要真正异步必须支持"中段 Compute 段 + 显式跨队列 signal/wait"，属独立改造。
 
 ### 阶段 H：横切工具与验收（每个阶段退出前都要过）
 
@@ -3861,3 +3868,75 @@ RG pass: RTGI             → RT_GI_Temporal       → RT_GI_Denoise         →
 VUID **42**（升采样开）/ **43**（关）/ 46（白炉配置）= 基线。
 
 **下一轮**：步骤 37 —— 性能与异步（L6 退出判据）：先补上辅助 pass 的计时（见 ⑥），再谈 1080p/60fps。
+
+### 附四十四：步骤 37「性能与异步」——先把帧时账做对：GPU 侧达标（10.4~14.3 ms）、**CPU 侧是瓶颈**（19~29 fps）；Lumen 的 13 ms 定位到一行，但其朴素修法被证伪并回退
+
+**① 先补测量，否则一切优化都是猜的。** 本步新增（全部只影响读数，不影响画面）：
+
+| 读数 | 开关 / 落点 | 回答的问题 |
+| --- | --- | --- |
+| 逐 pass **CPU 录制**耗时 | `HE_CPU_PASSES=1`（`RenderGraph` 录制循环内计时） | 34~48 ms 的"执行"到底花在哪个 pass 上 |
+| Lumen 计算 pass 的 CPU 分解（12 步） | 同上（帧图 Lumen 段） | 16.4 ms 花在哪一步 |
+| 管线 CPU 三段分解 | 无条件（重建帧图 / 编译 / 执行） | CPU 受限时该修图构建还是修录制 |
+| 附属 pass 的 GPU 耗时 | `GITimer` 扩到 **64 格**（`kAuxItemBase + 源下标`）+ 帧图辅助循环 | 步骤 36 加的 4 个全屏升采样 pass 的代价 |
+| **稳态口径** | mesh 场建完时 `ResetAverages()`（峰值保留） | 把"启动期"与"稳态"分开 |
+| 整帧预算 | `LogFrameBudget()`（各 pass 合计 ⇒ fps 上限 + 最重 pass + 附属 pass） | 离 60fps 差多少、差在谁身上 |
+| 真实帧率 + CPU 侧耗时 | 样例 `HE_NO_VSYNC=1`（vsync 会把帧率锁成刷新率，读数会骗人） | CPU 受限还是 GPU 受限 |
+| `lumen_irradiance` 转储 | 06.GILab 的 GI 采样路径 | "统计正常但输出为黑"时，能直接看中间层纹理 |
+
+**② 实测（1080p，静态相机，帧 400）**：
+
+| 指标 | 关 Lumen | 开 Lumen |
+| --- | --- | --- |
+| 墙钟帧时 / 帧率 | **34.6 ms / 28.9 fps** | **51.5 ms / 19.4 fps** |
+| CPU 侧 / 占比 | 34.4 ms（100%） | 51.5 ms（100%） |
+| 其中管线 `Render` | 33.7 ms | 50.8 ms |
+| 其中重建帧图 / 编译 / 执行(录制+提交) | 0.15 / 0.03 / 33.7 ms | 0.19 / 0.03 / **50.8 ms** |
+| GPU 各 pass 合计 ⇒ 上限 | — | **10.4~14.3 ms ⇒ 70~96 fps** |
+| Lumen 计算 pass（GPU，稳态） | — | **3.3 ms**（输出 pass 0.12 ms） |
+| 逐 pass CPU 录制最重 | **Shadow 28~33 ms** | Shadow 28~33 ms + **Lumen_SDF_Build 16.4 ms** |
+
+**结论一：L6 的 60fps 未达成，但卡在 CPU 而不是 GPU。** GPU 侧 10.4~14.3 ms 已经在 16.7 ms 预算内
+（且 Lumen 本体的稳态成本只有 3.3 ms）；而 CPU 侧每帧 34~51 ms 全在 `rg.Execute`（命令录制 + 提交）
+里，重建帧图只要 0.19 ms。
+
+**结论二（纠错）：步骤 29 报的"Lumen 计算 pass 27.110 ms / SDF 构建 23.956 ms"是启动期平均。**
+首帧要建 101 个逐 mesh 距离场（实测峰值 **1996~2107 ms**），它把滚动平均吊了几十帧。按新的"稳态口径"
+（场建完时清零平均、保留峰值）：**稳态计算 pass 3.3 ms、稳态 SDF 构建 0.000 ms**。
+⇒ L4 的帧时结论要按这个口径重读；SDF 构建**不是**稳态瓶颈。
+
+**结论三：Lumen 自己那 16.4 ms 定位到一行。** 12 步分解（每帧，合计 16.42 ms）：
+`StepSDF 0.002 / 页表 0.001 / 捕获 0.011 / **反馈 13.239** / 布置 0.258 / 追踪 0.022 / 远场 0.140 /
+着色 1.779 / SH 0.916 / 滤波 0.029 / 辐照度 0.021 / 调试 0.002`。再拆 `RunFeedback`：
+**读槽位 12.954** / 排序 0.285 / top-N 0.010 / 上传 0.010 ms。也就是那行
+`for (i) if (slots[i].y > 0) req.push_back(slots[i]);` —— **8160 个槽位逐个标量读主机可见
+（未缓存）显存**，1.6 万次不可缓存读，单次约 0.8 µs。页表上传的 `Map/Unmap`（invalidate/flush）
+只要 0.008 ms，**不是**它。
+
+**③ 修法尝试与证伪（重要）**。把那一行改成"整块 `memcpy` 到本机内存再过滤"后实测：
+读槽位 **12.95 → 1.38 ms**、Lumen 计算 pass CPU **16.4 → 4.5 ms**、整帧 **51.5 → 35.3 ms（19.4 → 28.3 fps）**，
+Lumen 的净 CPU 成本从 +17 ms 降到 **+0.7 ms**（与关 Lumen 的 34.6 ms 基本持平）。**但**：
+① 同一配置下的请求数从 8103 变成 8115、`lumen_sc_atlas_albedo` 有 2637 像素不同
+⇒ 请求集合变了；② 之后观测到 **`lumen_irradiance` 转储整幅变黑而 CPU 侧统计一切正常**
+（覆盖 100%、入射辐照度均值 0.414），输出 pass 也确实走的是"辐照度贴图"分支（新加的
+`HE_LUMEN_TRACE_OUT` 诊断证明）——即**着色器算了、统计写了，但图像写入没落地**。
+把这行改回去（逐元素读）后 `prov6_final` 立刻恢复到与步骤 35 基线**同值**（rgb 0.0338/0.0355/0.0303，
+逐像素仅 1286 个 1 ULP 差）。**⇒ 这条回读路径没有明确的 GPU→CPU 同步**：读到的内容取决于
+GPU 当时写到哪，"换个读法"就会换一个快照；在把回读改成确定性实现（GPU 拷进 staging 缓冲 + 栅栏，
+或带栅栏的双缓冲）之前，**这个 13 ms 不能靠"改读法"拿下**。已回退，并留下 `lumen_irradiance`
+转储作为下次的判据（这次正是它把"没画"与"画了但采样到空"分开的）。
+
+**④ 本步未做的部分（如实列出）**：async compute 接入 Lumen 的 compute 段**未做** ——
+现有 `ExecuteWithAsyncCompute` 只把"**前缀**中的 Compute pass"移到计算队列（遇到第一个非 Compute
+pass 就停止收窄），而 Lumen 的 compute 段在帧中段；要真正异步，必须支持"中段 Compute 段 +
+显式跨队列 signal/wait"（现结构只有一次 `computeCmd → mainCmd` 的 timeline 等待），这是一项独立改造。
+摊销预算与分级画质也未动：在 CPU 受限的前提下，先修 CPU 才是有意义的顺序（且最重的一项是
+**阴影 pass 的 CPU 录制 28~33 ms**，与 Lumen 无关）。
+
+**⑤ 验收证据**：白炉 `prov6_final` min = mean = max = **1.0000**；`gi_blend_diffuse_lumen=0` ⇒
+`lumen_passes=0`；默认预设（无 Lumen、无 RT）除既有的 `prov0_ao_*`（SSAO）与 `hdr`/`radiance`
+抖动外逐位不变；单测 **237 例 / 5792 断言**全绿；VUID 46（默认配置 41）；Lumen 输出与步骤 35/36
+基线逐像素仅 **1286 个 1 个 f16 ULP**（同族末位抖动）。
+
+**下一轮**：仍为步骤 37 —— 把 `RunFeedback` 的回读改成确定性实现（staging 拷贝 + 栅栏）以拿下
+那 12 ms，并给阴影 pass 的 CPU 录制做同样的分解（它现在是整帧最大的一项，28~33 ms）。
