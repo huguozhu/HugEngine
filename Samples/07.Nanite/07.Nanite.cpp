@@ -17,6 +17,7 @@
 #include "Pipeline/ForwardPipeline.h"
 #include "Pipeline/IRenderPipeline.h"
 #include "GI/GITypes.h"   // GI 数据模型 + GIRegistry（RHI-free）
+#include "Nanite/NaniteSettings.h"   // Nanite 开关/档位（§14.4 真值；RHI-free）
 #include "GI/LumenProvider.h"   // 步骤 12：取 SDF 追踪可视化纹理做转储
 #include "Pipeline/CameraController.h"
 #include "Pipeline/PhysicalCamera.h"
@@ -577,6 +578,20 @@ int main() {
         deferredPipeline.GetClusteredShading().enabled = GetInt(cfgData, "clustered", 1) != 0;
         deferredPipeline.GetGPUCulling().enabled       = GetInt(cfgData, "gpu_cull", 1) != 0;
         deferredPipeline.SetGBufferMode((render::GBufferRenderer::Mode)GetInt(cfgData, "gbuffer_mode", 0));
+
+        // ── Nanite（§14.8 任务 1 / N0）：独立开关的"配置"层 ──
+        // 真值只有一处：`NaniteSettings::enabled`（由 NaniteRenderer 持有），
+        // 这里只做 cfg → 真值的单向恢复，与 `gi_half_res` 的往返写法同构。
+        // 【键缺失时保留当前值】当前值 = NaniteRenderer::Initialize 从 CVar
+        // `r.Nanite.Enable` 读到的启动默认；若这里硬写默认 0，那份"控制台默认"就会被
+        // 一份没有该键的 cfg 静默覆盖（这正是 gi_half_res 曾经踩过的连通性缺口）。
+        {
+            auto naniteSettings = deferredPipeline.GetNaniteSettings();
+            naniteSettings.enabled = GetInt(cfgData, "nanite_enable",
+                                            naniteSettings.enabled ? 1 : 0) != 0;
+            deferredPipeline.SetNaniteSettings(naniteSettings);
+            HE_CORE_INFO("[Nanite] 配置恢复: nanite_enable={}", naniteSettings.enabled ? 1 : 0);
+        }
 
         auto& ae = deferredPipeline.GetAutoExposure();
         ae.SetEnabled(GetInt(cfgData, "ae_enabled", 0) != 0);
@@ -1236,6 +1251,30 @@ int main() {
             auto* giSSR  = dp ? dp->GetSSR()  : nullptr;
             auto* giDDGI = dp ? dp->GetDDGI() : nullptr;
 
+            // ── Nanite 模块（§14.8 任务 1 / N0）：独立开关 + 光栅档位 ──
+            // 面板是 §14.4 三层的第三层：改动即写回 `NaniteSettings`（唯一真值），
+            // 下一帧的帧图门控就会读到新值。任务 1 下开启的唯一可见效果是帧图里多一个
+            // `Nanite_Noop`（不改任何纹理内容 ⇒ 画面不变）；真正的几何路径在任务 3/4 之后。
+            if (dp) {
+                ImGui::SeparatorText("Nanite（虚拟几何）");
+                auto naniteSettings = dp->GetNaniteSettings();
+                bool naniteOn = naniteSettings.enabled;
+                if (ImGui::Checkbox("启用 Nanite##nanite", &naniteOn)) {
+                    naniteSettings.enabled = naniteOn;
+                    dp->SetNaniteSettings(naniteSettings);
+                    HE_CORE_INFO("[Nanite] 面板开关: enabled={}", naniteSettings.enabled ? 1 : 0);
+                }
+                static const char* naniteRasterNames[] = {"软光栅", "混合光栅"};
+                int naniteRasterMode = (int)naniteSettings.rasterMode;
+                if (ImGui::Combo("光栅档位##nanite", &naniteRasterMode, naniteRasterNames, 2)) {
+                    naniteSettings.rasterMode = (render::NaniteRasterMode)naniteRasterMode;
+                    dp->SetNaniteSettings(naniteSettings);
+                    HE_CORE_INFO("[Nanite] 面板档位: rasterMode={}", naniteRasterMode);
+                }
+                ImGui::TextDisabled("模块骨架就绪=%s（任务 1：只注册 Nanite_Noop，画面不变）",
+                                    dp->GetNanite().IsReady() ? "是" : "否");
+            }
+
             // ── GI 通道：Diffuse / Specular / AO / Shadow ──
             ImGui::SeparatorText("GI 通道");
             const ImVec4 colOk  = ImVec4(0.4f, 1.0f, 0.4f, 1.0f);
@@ -1819,6 +1858,10 @@ int main() {
         out["clustered"]    = std::to_string(deferredPipeline.GetClusteredShading().enabled ? 1 : 0);
         out["gpu_cull"]     = std::to_string(deferredPipeline.GetGPUCulling().enabled ? 1 : 0);
         out["gbuffer_mode"] = std::to_string((int)deferredPipeline.GetGBufferMode());
+        // ── Nanite（§14.8 任务 1 / N0）：独立开关的 cfg 回写（与 gi_half_res 同写法）──
+        // 【为什么 Shutdown() 之后还能读】NaniteRenderer::Shutdown() 只释放资源、
+        // 不重置开关真值（本段代码确实在 deferredPipeline.Shutdown() 之后执行）。
+        out["nanite_enable"] = std::to_string(deferredPipeline.GetNaniteSettings().enabled ? 1 : 0);
 
         // ── AutoExposure ──
         auto& ae = deferredPipeline.GetAutoExposure();
