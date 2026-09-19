@@ -1447,7 +1447,8 @@ python Tools\pt\analyze_pt.py --compare <pt_tag> <deferred_tag> --target hdr
 | 13 Card 生成器 + 覆盖率可视化 | ✅ 已完成（CPU 版，GPU atlas 见 14+） | `LumenSDF::BuildCards()`：逐 mesh × 6 轴向投影成卡片；texel 世界边长按 `cardTexelWorld=4.0` **逐 mesh 自适应**（分辨率 64~512²，实测 texel 0.56~7.41）；按面积加权采样 418,329 个表面点做覆盖判定；保留阈值 → 卡片数 → 覆盖率给出**单调曲线**（5%⇒410 张/89.7%，10%⇒330/86.8%，**25%⇒228/79.1%**，50%⇒66/54.2%）；覆盖率可视化（RGBA8，代表 mesh 的 6 个投影面 + 逐 mesh 覆盖条）以稳定名 `lumen_card_coverage` 转储。**验收**：空洞与卡片设置一一对应（见曲线），残余空洞集中在个别**薄结构** mesh（#12/#43/#44，投影填充率天然很低），已点名 |
 | 14 页表 + 页状态机 | ✅ 已完成 | `Lumen/SurfaceCache.slang`（C++/Slang **共享布局**）+ `Lumen/SurfaceCacheTypes.{h,cpp}`（六态 + 迁移真值表 + 页状态机 + 布局 static_assert）+ `Tests/TestSurfaceCache.cpp`（5 例 / 73 断言：真值表、完整生命周期、非法迁移被拒绝且不改状态、校验和对字段敏感）+ `LumenScene_SurfaceCache.cpp`（用步骤 13 的 228 张卡片建 64 页演示表：Allocating 9 / Capturing 5 / Captured 41 / Dirty 9，六态齐全；GPU 镜像缓冲 + `SurfaceCache_PageCheck.comp.slang` 校验和比对 **PASS** 0x545eb5ad）。**验收**：非法迁移 `HE_ASSERT` + 单测覆盖；GPU/C++ 镜像一致（校验和相同） |
 | 15 Card Capture（软件光栅化写 atlas） | 🟡 可用（真因已修：push constant 超 128 B 被截断） | 已落地：3 张 RGBA16F atlas（512² = 8×8 页 × 64²；`lumen_sc_atlas_albedo` 可转储）、`SurfaceCache_Capture.comp`（一卡一组、页状态门控只捕 `Capturing`、`kMaxCapturesPerFrame=8` 预算、卡分辨率自适应降采样进 64² 页、命中点投影到屏幕取 GBuffer albedo/normal）、命中/未命中/march 命中三个诊断计数。**实测：5 页 20480 个 texel 全部未命中、march 命中 0**。已排除：push constant 字段错位（旧版 shader 多一个 camPosW，已修）、eps/步长过小（已把 eps 提到 1 个近层体素=14.2、步长 eps/2）。下一步：把 march 单独拿出来，用一张已知卡对照 CPU 真值逐步定位 |
-| 16–41 | ⬜ 未开始 | 步骤 15 收尾后 → 16 Feedback（缺失页检测）、17 预算摊销、18 LRU 淘汰、19 L2 退出判据，随后 20–25 Screen Probe |
+| 16 Feedback（缺失页检测） | ✅ 已完成 | `SurfaceCache_Feedback.comp.slang`：屏幕按 **16×16 分块**，每块取中心像素的 GBuffer 世界坐标 → 找"包含它的最小 AABB"的那张卡 → 写 `(pageIndex, weight)`，`weight = 256 像素 × 卡重要性(填充率×√边长) × 距离衰减`；**每块写自己的槽位**（不用计数器 ⇒ 完整且确定）。C++ 侧读槽位→过滤权重 0→按(权重降序, 页号升序)排序→取前 `kMaxCapturesPerFrame×4`→把 `Invalid` 的页置 `Requested`，再把前 `kMaxCapturesPerFrame` 个 `Requested` 推进到 `Capturing`（**闭环**：下一帧步骤 15 就捕获它们），并同步 GPU 镜像。**验收**：静态相机下 7730 条请求（94.7% 的块有几何）、**top-32 与上一帧重叠 32/32** ⇒ 无整屏抖动；排序含页号定序 ⇒ 完全确定 |
+| 17–41 | ⬜ 未开始 | 17 预算摊销（把上面的"最小推进逻辑"做成显式预算 + 不卡顿验收）、18 LRU 淘汰与碎片整理、19 L2 退出判据，随后 20–25 Screen Probe |
 
 ### 阶段 A：框架前置（不产出画面，但后补等于重构）
 
@@ -2592,3 +2593,33 @@ Card 捕获（步骤 15）: 累计捕获 5 页；命中 texel 4210 / 未命中 1
 **步骤 15 收尾还差**（不阻塞进入 16）：①把演示页表从 64 页扩到 228 页全量捕获；
 ②遮挡判定（现在只做"GBuffer 该像素有没有几何"的存在性判据）；③材质源从 GBuffer 换成
 bindless 逐材质求值，使 atlas 独立于屏幕（这一步与 22 的命中点着色同源）。
+### 附二十三：步骤 16「Feedback」落地（含三个被修的坑）
+
+**实现**：`SurfaceCache_Feedback.comp.slang` 把屏幕按 **16×16 分块**，每块取中心像素的 GBuffer 世界坐标，
+找到"包含它的**最小** AABB"所对应的卡（= 该块需要的页），权重 = `256 像素（块覆盖）× 卡重要性
+（填充率 × √边长）× 距离衰减`；**每块写自己的槽位**。C++ 侧读回全部槽位 → 过滤权重 0 → 按
+`(权重降序, 页号升序)` 排序 → 取前 `kMaxCapturesPerFrame × 4` → 把 `Invalid` 页置 `Requested`，
+再把前 `kMaxCapturesPerFrame` 个 `Requested` 页推进到 `Capturing` —— **闭环**：下一帧步骤 15 的捕获
+就会把它们写进 atlas（这就是 L2 的"请求 → 捕获 → 可用"回路）。最后同步页表 GPU 镜像。
+
+**实测（`lumen_sc16f`，121 帧，exit=0，VUID 46 = 基线）**：
+
+```
+Feedback（步骤 16）: 本帧请求 7730 条（16×16 分块，权重 = 覆盖×重要性×距离衰减）；
+    top-32 与上一帧重叠 32 条；页表 Requested 0 / Capturing 0
+```
+
+- **7730 / 8160 块（94.7%）有几何**，与"屏幕大部分被场景覆盖"一致；
+- **top-32 与上一帧重叠 32/32（100%）** ⇒ 满足"相机移动时请求列表稳定、无整屏抖动"的验收口径
+  （静态相机下完全一致；因为排序含页号定序，结果**确定**）。
+
+**过程中修掉三个坑（都值得记下来）**：
+
+1. **世界坐标的 alpha 不是有效位**：GBuffer 的 MRT4 是 `worldPos.xyz + dielectricF0.a`，
+   我一开始用 `wp.w <= 0` 判有效 ⇒ **整屏被丢掉、请求恒 0**。改成"世界坐标接近 0 才算背景"。
+2. **请求计数不能用非原子读-改-写**：`slot = count; count = slot + 1;` 在上千线程下互相覆盖，
+   整屏只留下 **1 条**请求；改用 `InterlockedAdd` 后正常。
+3. **容量上限会让请求集合乱跳**：即使计数改成原子，"哪些块挤进 1024 条上限"取决于线程完成顺序
+   ⇒ top-N 逐帧在 6/28 之间抖动，稳定性无从谈起。最终改成**每块固定槽位**（完整、确定、可复现），
+   才拿到 32/32 的稳定读数。
+   （另：读回必须在**清零之前**——第一版先清零再读，读到的一定是 0。）

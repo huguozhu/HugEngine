@@ -78,6 +78,11 @@ public:
     /// 步骤 15：Card 捕获 —— 逐卡（本帧预算内、状态为 Capturing 的页）软件光栅化写 atlas
     void RunCardCapture(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbAlbedo, rhi::IRHITexture* gbNormal,
                         rhi::IRHITexture* gbDepth, const float4x4& viewProj);
+    /// 步骤 16：Feedback —— 16×16 分块产出"需要哪些页"的请求，C++ 侧排序后写回页表状态
+    void RunFeedback(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbWorldPos, const float3& camPos);
+    [[nodiscard]] u32  GetFeedbackRequests() const { return m_FeedbackRequests; }
+    [[nodiscard]] u32  GetFeedbackTopOverlap() const { return m_FeedbackTopOverlap; }
+    [[nodiscard]] u32  GetFeedbackTopCount() const { return m_FeedbackTopCount; }
     [[nodiscard]] rhi::IRHITexture* GetCardAtlasAlbedo()  const { return m_AtlasAlbedo.get(); }
     [[nodiscard]] rhi::IRHITexture* GetCardAtlasNormal()  const { return m_AtlasNormal.get(); }
     [[nodiscard]] u32 GetCardCaptureHits() const { return m_CardCaptureHits; }
@@ -130,6 +135,19 @@ private:
     std::unique_ptr<rhi::IRHIPipelineState> m_CapturePSO;
     bool m_CaptureBound = false;
     u32  m_CardCaptureHits = 0, m_CardCaptureMisses = 0;
+    // ── Feedback（步骤 16）──
+    static constexpr u32 kMaxFeedbackTiles = 16384;  // 槽位数上限（= 512×512 屏幕的 16×16 块数；1080p 只需 8160）
+    std::unique_ptr<rhi::IRHIBuffer>  m_CardBuf, m_ReqCountBuf, m_ReqBuf;
+    void* m_ReqCountMapped = nullptr;
+    void* m_ReqMapped = nullptr;
+    rhi::DescriptorSetLayoutHandle m_FeedbackLayout = 0;
+    rhi::DescriptorSetHandle       m_FeedbackSet    = 0;
+    std::unique_ptr<rhi::IRHIPipelineState> m_FeedbackPSO;
+    bool m_FeedbackBound = false;
+    u32  m_FeedbackFrame = 0;
+    u32  m_FeedbackRequests = 0, m_FeedbackTopOverlap = 0, m_FeedbackTopCount = 0;
+    std::vector<u32> m_LastTopPages;
+    void CreateFeedbackGPUObjects();
     u32  m_CapturePages = 0;          // 累计捕获页数
     u32  m_CardCaptureMarchHits = 0;  // 诊断：SDF march 命中数
     bool m_CaptureStatsPending = false;

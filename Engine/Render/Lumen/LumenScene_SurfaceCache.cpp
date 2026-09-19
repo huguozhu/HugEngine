@@ -10,8 +10,10 @@
 #include "Core/Log.h"
 #include "Lumen/SurfaceCache.slang"     // 共享布局（与 C++ 镜像同源）
 #include "SurfaceCache_Capture.comp.spv.h"
+#include "SurfaceCache_Feedback.comp.spv.h"
 #include "SurfaceCache_PageCheck.comp.spv.h"
 
+#include <algorithm>
 #include <cstring>
 
 namespace he::render {
@@ -366,4 +368,168 @@ void LumenScene::RunCardCapture(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbA
                      m_CardCaptureMarchHits, kAtlasSize);
     }
 }
+// ============================================================
+// 步骤 16：Feedback（缺失页检测）—— 16×16 分块 → 请求列表 → CPU 排序 → 写回页表
+// ============================================================
+void LumenScene::CreateFeedbackGPUObjects() {
+    if (m_FeedbackPSO) return;
+
+    rhi::DescriptorSetLayoutDesc layout;
+    layout.bindings = {
+        {0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // GBuffer worldpos
+        {1, rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},   // 卡片清单
+        {2, rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},   // 请求计数
+        {3, rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},   // 请求表
+    };
+    m_FeedbackLayout = m_Device->CreateDescriptorSetLayout(layout);
+    m_FeedbackSet    = m_Device->AllocateDescriptorSet(m_FeedbackLayout);
+
+    rhi::PushConstantRange pcr;
+    pcr.stageMask = rhi::kStageMaskCompute;
+    pcr.offset    = 0;
+    pcr.size      = 3u * 16u;   // uint4 dims + uint4 pages + float4 camPosDist
+
+    rhi::ShaderBytecode cs;
+    cs.stage      = rhi::ShaderStage::Compute;
+    cs.spirv      = k_SurfaceCache_Feedback_comp_spv;
+    cs.entryPoint = "main";
+
+    rhi::PipelineStateDesc pso;
+    pso.bindPoint            = rhi::PipelineBindPoint::Compute;
+    pso.computeShader        = &cs;
+    pso.descriptorSetLayouts = {m_FeedbackLayout};
+    pso.pushConstantRanges   = {pcr};
+    pso.debugName            = "Lumen_SurfaceCache_Feedback";
+    m_FeedbackPSO = m_Device->CreatePipelineState(pso);
+    if (!m_FeedbackPSO) HE_CORE_ERROR("LumenScene: Feedback PSO 创建失败");
+}
+
+void LumenScene::RunFeedback(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbWorldPos, const float3& camPos) {
+    if (!m_Device || !cmd || !gbWorldPos) return;
+    BuildPageTable();
+    if (m_PageTable.Size() == 0) return;
+
+    CreateFeedbackGPUObjects();
+    if (!m_FeedbackPSO) return;
+
+    if (!m_FeedbackBound) {
+        // 卡片清单（与 shader 的 FeedbackCard 同布局：aabbLo(w=边长) + axisDirPage(重要性)）
+        const auto& cards = m_SDF.GetCards();
+        struct FeedbackCard { float4 aabbLo; float4 axisDirPage; };
+        std::vector<FeedbackCard> gpuCards(cards.size());
+        for (size_t i = 0; i < cards.size(); ++i) {
+            const auto& c = cards[i];
+            // 重要性：卡覆盖的表面积越大越重要（用填充率 × 边长近似），下限 0.01 防止全 0
+            const float fill = (c.res > 0) ? (float)c.filled / (float)(c.res * c.res) : 0.0f;
+            const float importance = std::max(0.01f, fill * std::sqrt(std::max(1.0f, c.side)));
+            gpuCards[i].aabbLo      = float4(c.aabbLo, c.side);
+            gpuCards[i].axisDirPage = float4((float)c.axis, (float)c.dir, (float)i, importance);
+        }
+        rhi::BufferDesc cb;
+        cb.size        = gpuCards.size() * sizeof(FeedbackCard);
+        cb.usage       = rhi::BufferUsage::Storage;
+        cb.initialData = gpuCards.data();
+        m_CardBuf = m_Device->CreateBuffer(cb);
+
+        rhi::BufferDesc rcb;
+        rcb.size = sizeof(u32); rcb.usage = rhi::BufferUsage::Storage; rcb.cpuAccess = true;
+        m_ReqCountBuf = m_Device->CreateBuffer(rcb);
+        m_ReqCountMapped = m_ReqCountBuf->Map();
+
+        rhi::BufferDesc rb;
+        rb.size = (usize)kMaxFeedbackTiles * sizeof(u32) * 2u;
+        rb.usage = rhi::BufferUsage::Storage; rb.cpuAccess = true;
+        m_ReqBuf = m_Device->CreateBuffer(rb);
+        m_ReqMapped = m_ReqBuf->Map();
+
+        m_Device->UpdateDescriptorSet(m_FeedbackSet, 0, rhi::DescriptorType::CombinedImageSampler,
+                                      gbWorldPos, m_SDF.GetLinearSampler());
+        m_Device->UpdateDescriptorSet(m_FeedbackSet, 1, rhi::DescriptorType::StorageBuffer, m_CardBuf.get());
+        m_Device->UpdateDescriptorSet(m_FeedbackSet, 2, rhi::DescriptorType::StorageBuffer, m_ReqCountBuf.get());
+        m_Device->UpdateDescriptorSet(m_FeedbackSet, 3, rhi::DescriptorType::StorageBuffer, m_ReqBuf.get());
+        m_FeedbackBound = true;
+        return;   // 本帧只建资源；下一帧开始派发（"新建资源当帧使用"的教训见 §附二十）
+    }
+
+    // ── ① 先处理**上一帧**的结果（每块一个槽位：完整且确定）──
+    // 【为什么必须在清零之前读】计数由 GPU 原子加写入；若本帧先清零再读，读到的一定是 0
+    // （第一版就是这样：请求恒 0 条）。按"引擎在录 N+1 帧时 N 帧已执行完"的节拍，先读后清是对的。
+    if (m_FeedbackFrame >= 1) {
+        const u32 tilesX = (m_Width + 15u) / 16u;
+        const u32 tilesY = (m_Height + 15u) / 16u;
+        const u32 tileCount = std::min(kMaxFeedbackTiles, tilesX * tilesY);
+        std::vector<uint2> req;
+        req.reserve(tileCount);
+        if (m_ReqMapped) {
+            const uint2* slots = static_cast<const uint2*>(m_ReqMapped);
+            for (u32 i = 0; i < tileCount; ++i)
+                if (slots[i].y > 0u) req.push_back(slots[i]);   // 权重 0 = 该块没几何
+        }
+        const u32 count = (u32)req.size();
+        m_FeedbackRequests = count;
+        std::sort(req.begin(), req.end(), [](const uint2& a, const uint2& b) {
+            return (a.y != b.y) ? (a.y > b.y) : (a.x < b.x);   // 权重降序；权重相同按页号定序 ⇒ **确定性**
+        });
+
+        const u32 topN = std::min(count, kMaxCapturesPerFrame * 4u);
+        std::vector<u32> top;
+        top.reserve(topN);
+        for (u32 i = 0; i < topN; ++i) {
+            const u32 page = req[i].x;
+            if (page >= m_PageTable.Size()) continue;
+            top.push_back(page);
+            // 需要但还没有的页 ⇒ 置为 Requested（未完成请求留在 Requested，不回退不丢弃 —— 步骤 17 的口径）
+            if (m_PageTable.Get(page).state == kSCPageState_Invalid)
+                m_PageTable.Request(page, page, m_FeedbackFrame);
+        }
+        // 本帧把前 kMaxCapturesPerFrame 个"已请求"页推进到 Capturing（分配 + 开始捕获），
+        // 步骤 15 的捕获 pass 下一帧就会把它们写进 atlas —— 这就是 L2 的"请求 → 捕获 → 可用"闭环。
+        u32 promoted = 0;
+        for (u32 page : top) {
+            if (promoted >= kMaxCapturesPerFrame) break;
+            if (m_PageTable.Get(page).state != kSCPageState_Requested) continue;
+            if (!m_PageTable.Allocate(page, page)) continue;
+            m_PageTable.BeginCapture(page);
+            ++promoted;
+        }
+        if (!m_LastTopPages.empty()) {   // 稳定性指标：与上一帧 top-N 的交集
+            u32 inter = 0;
+            for (u32 a : top) for (u32 b : m_LastTopPages) if (a == b) { ++inter; break; }
+            m_FeedbackTopOverlap = inter;
+        }
+        m_FeedbackTopCount = (u32)top.size();
+        m_LastTopPages = top;
+
+        if (m_PageTableBuf) {   // 状态变了 ⇒ 同步 GPU 镜像
+            if (void* p = m_PageTableBuf->Map()) {
+                std::memcpy(p, m_PageTable.Entries().data(),
+                            m_PageTable.Size() * sizeof(SurfaceCachePageEntry));
+                m_PageTableBuf->Unmap();
+            }
+        }
+        if ((m_FeedbackFrame % 20u) == 0u) {
+            HE_CORE_INFO("LumenScene Feedback（步骤 16）: 本帧请求 {} 条（16×16 分块，权重 = 覆盖×重要性×距离衰减）；"
+                         "top-{} 与上一帧重叠 {} 条；页表 Requested {} / Capturing {}",
+                         count, m_FeedbackTopCount, m_FeedbackTopOverlap,
+                         m_PageTable.Count(kSCPageState_Requested), m_PageTable.Count(kSCPageState_Capturing));
+        }
+    }
+
+    // ── ② 派发本帧的 Feedback（每块写自己的槽位，无需清零计数）──
+    struct { u32 x, y, z, w; u32 p; u32 pad0, pad1, pad2; float4 cam; } pc{};
+    pc.x = m_Width; pc.y = m_Height;
+    pc.z = (u32)m_SDF.GetCards().size();
+    pc.w = kMaxFeedbackTiles;
+    pc.p = m_PageTable.Size();
+    pc.cam = float4(camPos, 512.0f);
+
+    const u32 tilesX = (m_Width + 15u) / 16u;
+    const u32 tilesY = (m_Height + 15u) / 16u;
+    cmd->SetPipeline(m_FeedbackPSO.get());
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_FeedbackSet);
+    cmd->SetPushConstants(0, sizeof(pc), &pc);
+    cmd->Dispatch((tilesX + 7u) / 8u, (tilesY + 7u) / 8u, 1);
+    ++m_FeedbackFrame;
+}
+
 } // namespace he::render

@@ -102,6 +102,12 @@ public:
         if (m_Scene) m_Scene->StepSurfaceCache(cmd);
     }
 
+    /// 步骤 16：Feedback 需要 GBuffer 的世界坐标（由帧图注入）
+    void SetWorldPosInput(rhi::IRHITexture* worldPos) { m_WorldPos = worldPos; }
+    /// 步骤 16：Feedback —— 16×16 分块产出请求列表并写回页表状态
+    void RunFeedback(rhi::IRHICommandList* cmd, const CameraData& cam) {
+        if (m_Scene) m_Scene->RunFeedback(cmd, m_WorldPos, cam.position);
+    }
     /// 步骤 15：Card 捕获（用 GBuffer 当材质源；页状态门控 + 每帧预算）
     void RunCardCapture(rhi::IRHICommandList* cmd, const CameraData& cam) {
         if (!m_Scene) return;
@@ -154,6 +160,7 @@ private:
     rhi::IRHITexture* m_Depth  = nullptr;
     rhi::IRHITexture* m_Normal = nullptr;
     rhi::IRHITexture* m_Albedo = nullptr;
+    rhi::IRHITexture* m_WorldPos = nullptr;   // 步骤 16：Feedback 的世界坐标输入
 };
 
 } // namespace he::render
