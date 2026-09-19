@@ -209,6 +209,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
         if (m_LumenScene.Initialize(device, m_Width, m_Height)) {
             auto lumenProvider = std::make_unique<LumenProvider>();
             lumenProvider->SetScene(&m_LumenScene);
+            lumenProvider->SetMeshBatcher(&m_MeshBatcher);   // SDF 构建的几何来源（首帧已 Build）
             lumenProvider->Initialize(device, m_Width, m_Height);
             m_GIProviders.push_back(std::move(lumenProvider));
             HE_CORE_INFO("DeferredPipeline: Lumen Provider 已注册（骨架阶段：占位输出）");
