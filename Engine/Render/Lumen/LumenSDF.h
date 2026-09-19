@@ -35,9 +35,12 @@ struct LumenSDFConfig {
     u32 resolution     = 128;    // 每 mesh 立方体素边长（scatter 版：代价 O(表面 × 分辨率²)）。
                                  // 实测 160³ 相对 128³：远场误差与 sphere tracing 精度都不变、显存 128→250 MB、
                                  // 烘焙 6→20 s ⇒ 已回退；瓶颈不在 mesh 层分辨率。
-    u32 maxMeshes      = 16;     // 显存上限（R32F：16 × 128³ × 4B = 134 MB；32³ 时同样 16 个只要 2 MB）
+    // 显存上限：改用 R16F 后每个 128³ mesh 只要 4.2 MB（与《Lumen设计与实现》§步骤 8 的测算一致），
+    // 于是同样的预算能把覆盖从 16 个 mesh 提到 32 个（场景共 103 个 mesh；覆盖不足是"仅 GPU 假命中"的来源之一）。
+    // 覆盖整场景（本场景 103 个 mesh）：R16F × 128³ ≈ 4.2 MB/mesh ⇒ 全建约 412 MB，与《设计与实现》步骤 8 的测算一致。
+    u32 maxMeshes      = 128;
     u32 maxTrisPerMesh = 20000;  // scatter 与三角形数线性，上限可远高于 gather 版
-    u32 meshesPerFrame = 2;      // 每帧构建预算（128³ 的 scatter + convert 更重）
+    u32 meshesPerFrame = 4;      // 每帧构建预算（128³ 的 scatter + convert 更重）
     u32 probeStride    = 0;      // 自检采样步长（0 = 自动取 resolution/4）
     u32 globalResolution = 128;  // Global SDF 单层分辨率（clipmap 分层留待后续步骤）
     u32 globalLayers     = 2;    // clipmap 层数（1 = 旧行为：单层覆盖全场；2 = 近层 + 远层）

@@ -90,7 +90,7 @@ void LumenSDF::Shutdown() {
 u64 LumenSDF::GetMemoryBytes() const {
     u64 bytes = 0;
     for (const auto& e : m_Entries) {
-        bytes += (u64)e.resolution * e.resolution * e.resolution * 4ull;   // R32F
+        bytes += (u64)e.resolution * e.resolution * e.resolution * 2ull;   // R16F（步骤 8 的测算口径）
     }
     return bytes;
 }
@@ -350,9 +350,10 @@ void LumenSDF::UploadGeometry(const MeshBatcher& batcher) {
 void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
     MeshSDFEntry& e = m_Entries[entryIndex];
 
-    // 每 mesh 一张 3D 距离场（R32F，可写 + 可采样）
+    // 每 mesh 一张 3D 距离场（**R16F**，可写 + 可采样）：与《Lumen设计与实现》步骤 8 的"≈4.2 MB/mesh"一致，
+    // 比 R32F 省一半显存（近表面值在 fp16 下仍有 ~0.01 单位的分辨率，追踪关心的正是这一段）。
     rhi::TextureDesc td;
-    td.format = rhi::Format::R32_FLOAT;
+    td.format = rhi::Format::R16_FLOAT;
     td.width  = e.resolution;
     td.height = e.resolution;
     td.depth  = e.resolution;
