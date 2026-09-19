@@ -58,6 +58,10 @@ public:
                      i32 vertexOffset, u32 firstInstance) override;
     void DrawIndexedIndirect(IRHIBuffer* buffer, u64 offset,
                              u32 drawCount, u32 stride) override;
+    // 带 GPU 侧计数的间接绘制（vkCmdDrawIndexedIndirectCount；需要 drawIndirectCount 特性）
+    void DrawIndexedIndirectCount(IRHIBuffer* buffer, u64 offset,
+                                  IRHIBuffer* countBuffer, u64 countOffset,
+                                  u32 maxDrawCount, u32 stride) override;
     void ExecuteGeneratedCommands(const DGCExecuteDesc& desc) override;
     void DrawMeshTasks(u32 groupCountX, u32 groupCountY, u32 groupCountZ) override;
     void DrawMeshTasksIndirect(IRHIBuffer* buffer, u64 offset,

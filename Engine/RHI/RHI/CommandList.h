@@ -104,6 +104,22 @@ public:
     virtual void DrawIndexedIndirect(IRHIBuffer* buffer, u64 offset,
                                      u32 drawCount, u32 stride) = 0;
 
+    // 带 GPU 侧计数的间接绘制（Vulkan: `vkCmdDrawIndexedIndirectCount`）
+    //
+    // 与 `DrawIndexedIndirect` 的唯一区别：**实际绘制条数由 GPU 写出的 countBuffer 决定**，
+    // 而不是 CPU 传入的 `drawCount`。`maxDrawCount` 是间接命令缓冲的容量上限（同时也是
+    // 驱动读取命令的上界），`countBuffer` 里的值必须 ≤ maxDrawCount，否则是未定义行为。
+    //
+    // 【为什么需要它】Nanite 的「计数 → 间接绘制」链（§14.8 任务 3）：compute 逐簇压缩写
+    // 间接命令并把「写了多少条」原子累加进计数缓冲，绘制端一次调用即可按真实条数绘制，
+    // CPU 全程不需要读回计数（`DrawIndexedIndirect` 只能由 CPU 给出固定条数，读回会强制同步）。
+    //
+    // 【设备要求】需要 `VkPhysicalDeviceVulkan12Features::drawIndirectCount`；未启用时
+    // Vulkan 后端会打印中文告警并跳过本次绘制（不崩溃），设备创建处见 `VulkanDevice.cpp`。
+    virtual void DrawIndexedIndirectCount(IRHIBuffer* buffer, u64 offset,
+                                          IRHIBuffer* countBuffer, u64 countOffset,
+                                          u32 maxDrawCount, u32 stride) = 0;
+
     // ============================================================
     // Device Generated Commands (DGC) — VK_EXT_device_generated_commands
     // GPU 生成实际 vkCmdDraw* 命令，CPU 仅调用一次 ExecuteGeneratedCommands。

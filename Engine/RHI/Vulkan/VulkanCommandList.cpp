@@ -391,6 +391,43 @@ void VulkanCommandList::DrawIndexedIndirect(rhi::IRHIBuffer* buffer, u64 offset,
                               (VkDeviceSize)offset, drawCount, stride);
 }
 
+// 带 GPU 侧计数的间接绘制（§14.8 任务 3 的绘制端）
+//
+// 与 DrawIndexedIndirect 的差异只有一处：绘制条数由 countBuffer 的 u32 值决定，
+// maxDrawCount 退化为「命令缓冲容量上限」。两个缓冲都必须带 INDIRECT_BUFFER usage。
+void VulkanCommandList::DrawIndexedIndirectCount(rhi::IRHIBuffer* buffer, u64 offset,
+                                                  rhi::IRHIBuffer* countBuffer, u64 countOffset,
+                                                  u32 maxDrawCount, u32 stride) {
+    EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）
+
+    // 设备未启用 drawIndirectCount 时直接跳过：此时调用 vkCmdDrawIndexedIndirectCount
+    // 属于「使用了未启用的特性」，校验层会报错、驱动行为未定义 —— 宁可少画也不崩。
+    if (m_VulkanDevice && !m_VulkanDevice->SupportsDrawIndirectCount()) {
+        HE_CORE_WARN("DrawIndexedIndirectCount: 设备未启用 drawIndirectCount 特性，本次绘制已跳过");
+        return;
+    }
+    if (!buffer || !countBuffer) {
+        HE_CORE_WARN("DrawIndexedIndirectCount: 间接命令缓冲或计数缓冲为空，本次绘制已跳过");
+        return;
+    }
+
+    auto* vkBuf   = static_cast<VulkanBuffer*>(buffer);
+    auto* vkCount = static_cast<VulkanBuffer*>(countBuffer);
+
+    // 索引/顶点缓冲绑定：与 DrawIndexed 一致。间接命令里的 firstIndex/vertexOffset 仍会
+    // 去索引当前绑定的缓冲，因此不能像 DrawIndexedIndirect 那样依赖调用方"碰巧绑过"。
+    if (m_CurrentIB)
+        vkCmdBindIndexBuffer(m_CmdBuffers[m_FrameIndex], m_CurrentIB, m_IBOffset, m_CurrentIndexType);
+    if (m_CurrentVB) {
+        VkDeviceSize vbOffset = 0;
+        vkCmdBindVertexBuffers(m_CmdBuffers[m_FrameIndex], m_VBBinding, 1, &m_CurrentVB, &vbOffset);
+    }
+
+    vkCmdDrawIndexedIndirectCount(m_CmdBuffers[m_FrameIndex], vkBuf->GetHandle(),
+                                   (VkDeviceSize)offset, vkCount->GetHandle(),
+                                   (VkDeviceSize)countOffset, maxDrawCount, stride);
+}
+
 // ============================================================
 // ExecuteGeneratedCommands — DGC 执行入口
 // ============================================================

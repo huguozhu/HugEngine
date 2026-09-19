@@ -465,10 +465,9 @@ void VulkanDevice::CreateLogicalDevice() {
     }
 
     // 着色器用了 SPIR-V Int8 能力（校验层报 VUID-vkCreateShaderModule-pCode-08740），
-    // 需要启用 shaderInt8
-    VkPhysicalDeviceShaderFloat16Int8Features shaderInt8Feature{};
-    shaderInt8Feature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES;
-    shaderInt8Feature.shaderInt8 = VK_TRUE;
+    // 需要启用 shaderInt8。该特性没有独立结构体可用——它已被并入 VkPhysicalDeviceVulkan12Features
+    // （见下面的特性合并块）：把 VkPhysicalDeviceShaderFloat16Int8Features 与 VkPhysicalDeviceVulkan12Features
+    // 同时放进 pNext 会触发 VUID-VkDeviceCreateInfo-pNext-02830。
 
     // 条件启用 VK_KHR_maintenance7：render pass 内混录 inline + secondary（嵌套命令缓冲）需要它，
     // 否则 vkCmdBeginRenderPass 用 VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_KHR 时
@@ -531,36 +530,69 @@ void VulkanDevice::CreateLogicalDevice() {
         feat2.pNext = &supDescIdx;
         vkGetPhysicalDeviceFeatures2(m_Physical, &feat2);
     }
-    VkPhysicalDeviceDescriptorIndexingFeatures descIndexing{};
-    descIndexing.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
-    descIndexing.shaderSampledImageArrayNonUniformIndexing = supDescIdx.shaderSampledImageArrayNonUniformIndexing;
-    descIndexing.runtimeDescriptorArray = supDescIdx.runtimeDescriptorArray;
-    descIndexing.descriptorBindingVariableDescriptorCount = supDescIdx.descriptorBindingVariableDescriptorCount;
-    descIndexing.descriptorBindingPartiallyBound = supDescIdx.descriptorBindingPartiallyBound;
-    descIndexing.descriptorBindingStorageBufferUpdateAfterBind = supDescIdx.descriptorBindingStorageBufferUpdateAfterBind;
-    descIndexing.descriptorBindingSampledImageUpdateAfterBind = supDescIdx.descriptorBindingSampledImageUpdateAfterBind;
-    descIndexing.descriptorBindingStorageImageUpdateAfterBind = supDescIdx.descriptorBindingStorageImageUpdateAfterBind;    // StorageImage bindless
-    descIndexing.descriptorBindingUniformBufferUpdateAfterBind = supDescIdx.descriptorBindingUniformBufferUpdateAfterBind;   // UniformBuffer bindless
-    descIndexing.descriptorBindingStorageTexelBufferUpdateAfterBind = supDescIdx.descriptorBindingStorageTexelBufferUpdateAfterBind; // TexelBuffer bindless
-    descIndexing.shaderUniformBufferArrayNonUniformIndexing = supDescIdx.shaderUniformBufferArrayNonUniformIndexing;
-    descIndexing.shaderStorageBufferArrayNonUniformIndexing = supDescIdx.shaderStorageBufferArrayNonUniformIndexing;
+    // ── Vulkan 1.2 特性集合 ──
+    // 【为什么合并】校验规则 VUID-VkDeviceCreateInfo-pNext-02830 明确禁止 pNext 链里同时出现
+    //   `VkPhysicalDeviceVulkan12Features` 与它的任一"别名结构体"（DescriptorIndexing /
+    //   BufferDeviceAddress / TimelineSemaphore / ShaderFloat16Int8 …）。任务 3 要启用的
+    //   `drawIndirectCount` **只能**经 `VkPhysicalDeviceVulkan12Features` 启用（它没有独立的
+    //   特性结构体），因此这里把原先分散的四个别名结构体**合并**进同一个 Vulkan12 结构，
+    //   逐字段沿用同一份查询结果 ⇒ 启用集合与合并前完全一致。
+    VkPhysicalDeviceVulkan12Features vulkan12Features{};
+    vulkan12Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+
+    // ① descriptorIndexing（bindless）：主开关必须为 TRUE（启用 VK_EXT_descriptor_indexing
+    //    且链含 Vulkan12Features 时，见 VUID-VkDeviceCreateInfo-ppEnabledExtensionNames-02833）
+    vulkan12Features.descriptorIndexing = VK_TRUE;
+    vulkan12Features.shaderSampledImageArrayNonUniformIndexing = supDescIdx.shaderSampledImageArrayNonUniformIndexing;
+    vulkan12Features.runtimeDescriptorArray = supDescIdx.runtimeDescriptorArray;
+    vulkan12Features.descriptorBindingVariableDescriptorCount = supDescIdx.descriptorBindingVariableDescriptorCount;
+    vulkan12Features.descriptorBindingPartiallyBound = supDescIdx.descriptorBindingPartiallyBound;
+    vulkan12Features.descriptorBindingStorageBufferUpdateAfterBind = supDescIdx.descriptorBindingStorageBufferUpdateAfterBind;
+    vulkan12Features.descriptorBindingSampledImageUpdateAfterBind = supDescIdx.descriptorBindingSampledImageUpdateAfterBind;
+    vulkan12Features.descriptorBindingStorageImageUpdateAfterBind = supDescIdx.descriptorBindingStorageImageUpdateAfterBind;    // StorageImage bindless
+    vulkan12Features.descriptorBindingUniformBufferUpdateAfterBind = supDescIdx.descriptorBindingUniformBufferUpdateAfterBind;   // UniformBuffer bindless
+    vulkan12Features.descriptorBindingStorageTexelBufferUpdateAfterBind = supDescIdx.descriptorBindingStorageTexelBufferUpdateAfterBind; // TexelBuffer bindless
+    vulkan12Features.shaderUniformBufferArrayNonUniformIndexing = supDescIdx.shaderUniformBufferArrayNonUniformIndexing;
+    vulkan12Features.shaderStorageBufferArrayNonUniformIndexing = supDescIdx.shaderStorageBufferArrayNonUniformIndexing;
     if (!supDescIdx.descriptorBindingUniformBufferUpdateAfterBind)
         HE_CORE_WARN("设备不支持 descriptorBindingUniformBufferUpdateAfterBind，已跳过（bindless UBO update-after-bind 停用）");
+
+    // ② bufferDeviceAddress（GPU 地址：DGC / 光追 SBT）
+    vulkan12Features.bufferDeviceAddress = VK_TRUE;
+
+    // ③ timelineSemaphore（跨队列同步）
+    vulkan12Features.timelineSemaphore = VK_TRUE;
+
+    // ④ shaderInt8（SPIR-V Int8 能力，见上面的说明）
+    vulkan12Features.shaderInt8 = VK_TRUE;
+
+    // ⑤ drawIndirectCount（`vkCmdDrawIndexedIndirectCount` 的前置特性）
+    //
+    // 【用途】§14.8 任务 3 的「计数 → 间接绘制」链：GPU 写出的计数缓冲决定实际绘制条数。
+    // 【为什么先查询】该特性在 Vulkan 1.2 里是**可选**的：不查询就直接 VK_TRUE 会让
+    //   vkCreateDevice 直接失败（整个引擎起不来）；查询到不支持时只告警，设备照常创建，
+    //   绘制端（VulkanCommandList::DrawIndexedIndirectCount）会自行跳过并打印告警。
+    {
+        VkPhysicalDeviceVulkan12Features supVulkan12{};
+        supVulkan12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+        VkPhysicalDeviceFeatures2 feat2{};
+        feat2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        feat2.pNext = &supVulkan12;
+        vkGetPhysicalDeviceFeatures2(m_Physical, &feat2);
+        m_SupportsDrawIndirectCount = (supVulkan12.drawIndirectCount == VK_TRUE);
+    }
+    if (m_SupportsDrawIndirectCount) {
+        vulkan12Features.drawIndirectCount = VK_TRUE;
+        HE_CORE_INFO("VkPhysicalDeviceVulkan12Features::drawIndirectCount 已启用（Nanite 计数→间接绘制链可用）");
+    } else {
+        HE_CORE_WARN("设备不支持 VkPhysicalDeviceVulkan12Features::drawIndirectCount —— "
+                     "Nanite 的 DrawIndexedIndirectCount 链路将不可用（绘制端会跳过并告警，不会崩溃）");
+    }
 
     // Vulkan 1.1: shaderDrawParameters（SPIR-V gl_DrawID 需要）
     VkPhysicalDeviceVulkan11Features vulkan11Features{};
     vulkan11Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
     vulkan11Features.shaderDrawParameters = VK_TRUE;
-
-    // bufferDeviceAddress
-    VkPhysicalDeviceBufferDeviceAddressFeatures addrFeature{};
-    addrFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
-    addrFeature.bufferDeviceAddress = VK_TRUE;
-
-    // Timeline Semaphore
-    VkPhysicalDeviceTimelineSemaphoreFeatures timelineFeature{};
-    timelineFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
-    timelineFeature.timelineSemaphore = VK_TRUE;
 
     // Vulkan 1.3: dynamicRendering（GPL 库段在 renderPass=NULL 下创建需要该特性；
     // 仅启用特性，实际渲染仍走传统 render pass）
@@ -568,11 +600,10 @@ void VulkanDevice::CreateLogicalDevice() {
     vulkan13Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
     vulkan13Features.dynamicRendering = VK_TRUE;
 
-    // pNext 链: descIndexing → vulkan11 → addrFeature → timelineFeature → vulkan13 → [RT] → [Mesh] → [DGC]
-    void** ppNext = &descIndexing.pNext;
-    *ppNext = &vulkan11Features; ppNext = &vulkan11Features.pNext;
-    *ppNext = &addrFeature; ppNext = &addrFeature.pNext;
-    *ppNext = &timelineFeature; ppNext = &timelineFeature.pNext;
+    // pNext 链: vulkan11 → vulkan12 → vulkan13 → [RT] → [Mesh] → [DGC] → [maint7] → [GPL] → [derivatives]
+    // （Vulkan12 的别名结构体已合并进 vulkan12Features，不能再出现在链里）
+    void** ppNext = &vulkan11Features.pNext;
+    *ppNext = &vulkan12Features; ppNext = &vulkan12Features.pNext;
     *ppNext = &vulkan13Features; ppNext = &vulkan13Features.pNext;
     if (m_SupportsRT) {
         *ppNext = &asFeature; ppNext = &asFeature.pNext;
@@ -614,7 +645,6 @@ void VulkanDevice::CreateLogicalDevice() {
     if (m_SupportsVertexAttributeRobustness) {
         *ppNext = &vertexAttrRobustnessFeature; ppNext = &vertexAttrRobustnessFeature.pNext;
     }
-    *ppNext = &shaderInt8Feature; ppNext = &shaderInt8Feature.pNext;
     if (m_SupportsGPL) {
         *ppNext = &gplFeature; ppNext = &gplFeature.pNext;
     }
@@ -630,9 +660,21 @@ void VulkanDevice::CreateLogicalDevice() {
     // VUID-VkPipelineColorBlendStateCreateInfo-pAttachments-00605（04/06 各 2 条）
     features.independentBlend = VK_TRUE;  // GPU Driven 需要多绘制间接
 
+    // fragmentStoresAndAtomics（§14.8 任务 3）：
+    //   Nanite 绘制端的片元着色器对 SSBO 做原子加。未启用该特性时校验层报
+    //   VUID-RuntimeSpirv-NonWritable-06340（片元级的 storage buffer 必须声明 NonWritable），
+    //   而"每光栅化一个簇加一"恰恰需要可写。先查询支持情况，不支持时只告警不阻断启动。
+    {
+        VkPhysicalDeviceFeatures supportedCore{};
+        vkGetPhysicalDeviceFeatures(m_Physical, &supportedCore);
+        features.fragmentStoresAndAtomics = supportedCore.fragmentStoresAndAtomics;
+        if (!supportedCore.fragmentStoresAndAtomics)
+            HE_CORE_WARN("设备不支持 fragmentStoresAndAtomics —— Nanite 绘制端的片元原子计数不可用");
+    }
+
     VkDeviceCreateInfo deviceInfo{};
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    deviceInfo.pNext = &descIndexing;
+    deviceInfo.pNext = &vulkan11Features;
     deviceInfo.queueCreateInfoCount = static_cast<u32>(queueInfos.size());
     deviceInfo.pQueueCreateInfos = queueInfos.data();
     deviceInfo.enabledExtensionCount = static_cast<u32>(deviceExtensions.size());
