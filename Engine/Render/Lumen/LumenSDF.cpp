@@ -1364,6 +1364,11 @@ void LumenSDF::RunMarchCheck() {
                      errFar.size(), errFar.empty() ? 0.0 : (double)errFar[errFar.size()/2]);
         if (!errNearHit.empty()) std::sort(errNearHit.begin(), errNearHit.end());
         if (!errFarHit.empty())  std::sort(errFarHit.begin(), errFarHit.end());
+        HE_CORE_INFO("LumenSDF 按命中距离分组: 近命中(tRef<50) n={} p50={:.3f} / 远命中 n={} p50={:.3f} 体素",
+                     errNearHit.size(), errNearHit.empty() ? 0.0 : (double)errNearHit[errNearHit.size()/2],
+                     errFarHit.size(),  errFarHit.empty()  ? 0.0 : (double)errFarHit[errFarHit.size()/2]);
+        if (!errNearHit.empty()) std::sort(errNearHit.begin(), errNearHit.end());
+        if (!errFarHit.empty())  std::sort(errFarHit.begin(), errFarHit.end());
         HE_CORE_INFO("LumenSDF 按**命中距离**分组: 近命中(tRef<50) n={} p50={:.3f} / 远命中 n={} p50={:.3f} 体素（这才是近场精度的判据）",
                      errNearHit.size(), errNearHit.empty() ? 0.0 : (double)errNearHit[errNearHit.size()/2],
                      errFarHit.size(),  errFarHit.empty()  ? 0.0 : (double)errFarHit[errFarHit.size()/2]);
