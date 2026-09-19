@@ -759,6 +759,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                     if (auto* lp = dynamic_cast<LumenProvider*>(p)) {
                         lp->StepSDF(c, *cam);   // 近层跟随相机（相机位置在第一次 Step 之前给出）
                         lp->StepSurfaceCache(c);   // 步骤 14：页表 + 页状态机（GPU 镜像校验）
+                        lp->RunCardCapture(c, *cam);   // 步骤 15：Card 捕获（写 atlas）
                         // 步骤 12（L1 退出判据）：SDF 构建完之后，同一 compute pass 里跑一次
                         // 逐像素 sphere tracing 可视化（相机主射线）。放在这里而不是 Lighting
                         // 之后，是因为它只依赖 SDF 本身，与 GBuffer / 合成无关。

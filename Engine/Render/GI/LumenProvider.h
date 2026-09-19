@@ -102,6 +102,16 @@ public:
         if (m_Scene) m_Scene->StepSurfaceCache(cmd);
     }
 
+    /// 步骤 15：Card 捕获（用 GBuffer 当材质源；页状态门控 + 每帧预算）
+    void RunCardCapture(rhi::IRHICommandList* cmd, const CameraData& cam) {
+        if (!m_Scene) return;
+        m_Scene->RunCardCapture(cmd, m_Albedo, m_Normal, m_Depth, cam.GetViewProjMatrix());
+    }
+    /// 步骤 15 的 atlas（供 GI 转储做可视化验收）
+    [[nodiscard]] rhi::IRHITexture* GetCardAtlasAlbedo() const {
+        return m_Scene ? m_Scene->GetCardAtlasAlbedo() : nullptr;
+    }
+
     /// 步骤 12：逐像素 SDF 追踪可视化（同一 compute pass 内、SDF 构建之后）。
     /// 相机基向量由这里从 `CameraData` 推出，与 `CameraData::GetViewMatrix()` 用同一套约定
     /// （s = normalize(cross(f, up))、u = cross(s, f)），避免"调试视图左右镜像"这类静默错误。
