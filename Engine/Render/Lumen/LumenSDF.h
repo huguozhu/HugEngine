@@ -37,6 +37,7 @@ struct LumenSDFConfig {
     u32 maxTrisPerMesh = 4096;   // 超过则不建（gather 的代价随三角形数线性放大）
     u32 meshesPerFrame = 4;      // 每帧构建预算（避免一次卡顿）
     u32 probeStride    = 4;      // 自检采样步长（体素）
+    u32 globalResolution = 128;  // Global SDF 单层分辨率（clipmap 分层留待后续步骤）
 };
 
 /// 一个 mesh 的距离场条目
@@ -79,12 +80,34 @@ public:
     };
     [[nodiscard]] const SelfCheck& GetSelfCheck() const { return m_SelfCheck; }
 
+    // ── Global SDF（步骤 10）──
+    /// 单层全局距离场（世界/局部空间，覆盖全部已建 mesh 的并集 AABB）
+    [[nodiscard]] rhi::IRHITexture* GetGlobalField() const { return m_GlobalField.get(); }
+    [[nodiscard]] float GetGlobalVoxelSize() const { return m_GlobalVoxelSize; }
+    [[nodiscard]] float3 GetGlobalOrigin() const { return m_GlobalOrigin; }
+    /// Global SDF 的自检结论（未跑完时 valid=false）
+    struct GlobalCheck {
+        bool  valid     = false;
+        bool  passed    = false;
+        u32   probes    = 0;
+        u32   withinTol = 0;      // 落在容差内的探针数
+        float maxError  = 0.0f;   // max(GPU - CPU)（本版近似只可能偏大）
+        float meanError = 0.0f;
+        float tolerance = 0.0f;   // = 2 × 全局体素边长
+    };
+    [[nodiscard]] const GlobalCheck& GetGlobalCheck() const { return m_GlobalCheck; }
+
 private:
     void BuildQueue(const MeshBatcher& batcher);
     void UploadGeometry(const MeshBatcher& batcher);
     void CreateGPUObjects();
     void BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex);
     void RunSelfCheck();
+    // ── Global SDF（步骤 10）──
+    void CreateGlobalGPUObjects();
+    void SetupGlobalGrid();
+    void BuildGlobalField(rhi::IRHICommandList* cmd);
+    void RunGlobalCheck();
     static float PointTriangleDistance(const float3& p, const float3& a,
                                        const float3& b, const float3& c);
 
@@ -101,7 +124,7 @@ private:
     u32 m_ProbeCount = 0;
 
     // 状态机
-    enum class Phase { Idle, Baking, WaitSelfCheck, Done };
+    enum class Phase { Idle, Baking, WaitSelfCheck, GlobalBuild, WaitGlobalCheck, Done };
     Phase m_Phase = Phase::Idle;
     u32   m_Frame = 0;        // Step 调用计数（自增，与飞行帧槽位无关）
     u32   m_NextEntry = 0;    // 下一个待构建的条目
@@ -116,6 +139,21 @@ private:
     // CPU 侧几何副本（自检用：与 GPU 走完全不同的数据路径，才能验证映射/偏移正确）
     std::vector<float3> m_PositionsCPU;
     std::vector<u32>    m_IndicesCPU;
+
+    // ── Global SDF（步骤 10）──
+    rhi::DescriptorSetLayoutHandle m_GlobalLayout;
+    rhi::DescriptorSetHandle       m_GlobalSet;
+    std::unique_ptr<rhi::IRHIPipelineState> m_GlobalPSO;
+    std::unique_ptr<rhi::IRHITexture>       m_GlobalScratch;   // R32_UINT（原子最小目标）
+    std::unique_ptr<rhi::IRHITexture>       m_GlobalField;     // R32_FLOAT（可采样）
+    std::unique_ptr<rhi::IRHIBuffer>        m_GlobalProbe;     // CPU 可读（自检）
+    std::unique_ptr<rhi::IRHISampler>       m_NearestSampler;  // 采样各 mesh 的距离场
+    float3 m_GlobalOrigin    = float3(0.0f);
+    float  m_GlobalVoxelSize = 0.0f;
+    u32    m_GlobalRes       = 0;
+    u32    m_GlobalProbeCount = 0;
+    u32    m_WaitGlobalFrames = 0;
+    GlobalCheck m_GlobalCheck;
 };
 
 } // namespace he::render

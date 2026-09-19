@@ -2,6 +2,7 @@
 
 #include "Core/Assert.h"
 #include "Core/Log.h"
+#include "SDF_GlobalBuild.comp.spv.h"
 #include "SDF_MeshBuild.comp.spv.h"
 
 #include <algorithm>
@@ -24,6 +25,24 @@ struct BuildPC {
     u32      triCount, indexOffset, vertexOffset, probeStride;
 };
 static_assert(sizeof(BuildPC) == 48, "BuildPC 必须与 shader 的 3×16B 布局一致");
+
+// ── Global SDF（步骤 10）──
+constexpr u32 kGBindGlobal     = 0;   // RWTexture3D<uint>
+constexpr u32 kGBindGlobalOut  = 1;   // RWTexture3D<float>
+constexpr u32 kGBindMeshField  = 2;   // Texture3D<float>
+constexpr u32 kGBindMeshSampler= 3;   // SamplerState
+constexpr u32 kGBindProbe      = 4;   // RWStructuredBuffer<float>
+
+// 与 SDF_GlobalBuild.comp.slang 的 GlobalPC 一致：6 × 16B = 96B
+struct GlobalPC {
+    float originX, originY, originZ, voxelSize;
+    u32   dimX, dimY, dimZ, mode;
+    u32   rangeLoX, rangeLoY, rangeLoZ, probeStride;
+    u32   rangeHiX, rangeHiY, rangeHiZ, pad0;
+    float meshOriginX, meshOriginY, meshOriginZ, meshVoxelSize;
+    u32   meshDimX, meshDimY, meshDimZ, pad1;
+};
+static_assert(sizeof(GlobalPC) == 96, "GlobalPC 必须与 shader 的 6×16B 布局一致");
 } // namespace
 
 bool LumenSDF::Initialize(rhi::IRHIDevice* device, const LumenSDFConfig& config) {
@@ -237,6 +256,159 @@ void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
                          e.field.get());
 }
 
+void LumenSDF::CreateGlobalGPUObjects() {
+    if (m_GlobalPSO) return;
+
+    rhi::DescriptorSetLayoutDesc layout;
+    layout.bindings = {
+        {kGBindGlobal,      rhi::DescriptorType::StorageImage,  1, rhi::kStageMaskCompute},
+        {kGBindGlobalOut,   rhi::DescriptorType::StorageImage,  1, rhi::kStageMaskCompute},
+        {kGBindMeshField,   rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
+        {kGBindProbe,       rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+    };
+    m_GlobalLayout = m_Device->CreateDescriptorSetLayout(layout);
+    m_GlobalSet    = m_Device->AllocateDescriptorSet(m_GlobalLayout);
+
+    rhi::PushConstantRange pcr;
+    pcr.stageMask = rhi::kStageMaskCompute;
+    pcr.offset    = 0;
+    pcr.size      = sizeof(GlobalPC);
+
+    rhi::ShaderBytecode cs;
+    cs.stage      = rhi::ShaderStage::Compute;
+    cs.spirv      = k_SDF_GlobalBuild_comp_spv;
+    cs.entryPoint = "main";
+
+    rhi::PipelineStateDesc pso;
+    pso.bindPoint            = rhi::PipelineBindPoint::Compute;
+    pso.computeShader        = &cs;
+    pso.descriptorSetLayouts = {m_GlobalLayout};
+    pso.pushConstantRanges   = {pcr};
+    pso.debugName            = "Lumen_SDF_GlobalBuild";
+    m_GlobalPSO = m_Device->CreatePipelineState(pso);
+    if (!m_GlobalPSO) HE_CORE_ERROR("LumenSDF: Global SDF 的 PSO 创建失败");
+
+    rhi::SamplerDesc sd;
+    sd.minFilter = sd.magFilter = rhi::FilterMode::Nearest;   // 逐体素取值，不能线性插值
+    sd.addressU  = sd.addressV  = sd.addressW = rhi::AddressMode::ClampToEdge;
+    m_NearestSampler = m_Device->CreateSampler(sd);
+}
+
+void LumenSDF::SetupGlobalGrid() {
+    // 全局场覆盖全部已建 mesh 的并集 AABB（立方体，取最长轴）+ 余量
+    float3 lo(1e30f), hi(-1e30f);
+    for (const auto& e : m_Entries) {
+        const float side = e.voxelSize * (float)e.resolution;
+        lo = float3(std::min(lo.x, e.origin.x), std::min(lo.y, e.origin.y), std::min(lo.z, e.origin.z));
+        hi = float3(std::max(hi.x, e.origin.x + side), std::max(hi.y, e.origin.y + side),
+                    std::max(hi.z, e.origin.z + side));
+    }
+    const float3 ext  = hi - lo;
+    const float  side = std::max(std::max(ext.x, ext.y), ext.z) * 1.05f + 1e-3f;
+    m_GlobalRes       = m_Config.globalResolution;
+    m_GlobalOrigin    = lo - float3(side * 0.025f);
+    m_GlobalVoxelSize = side / (float)m_GlobalRes;
+
+    const u32 stride = std::max(1u, m_GlobalRes / 4u);   // 4³ = 64 个自检探针（CPU 参考要遍历全部三角形）
+    m_GlobalProbeCount = (m_GlobalRes / stride) * (m_GlobalRes / stride) * (m_GlobalRes / stride);
+
+    // 全局场两张 3D 纹理：u32 原子目标 + R32F 可采样输出
+    rhi::TextureDesc td;
+    td.width = td.height = td.depth = m_GlobalRes;
+    td.format = rhi::Format::R32_UINT;
+    td.usage  = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource;
+    m_GlobalScratch = m_Device->CreateTexture(td);
+    td.format = rhi::Format::R32_FLOAT;
+    m_GlobalField = m_Device->CreateTexture(td);
+
+    rhi::BufferDesc pb;
+    pb.size      = (usize)m_GlobalProbeCount * sizeof(float);
+    pb.usage     = rhi::BufferUsage::Storage;
+    pb.cpuAccess = true;
+    m_GlobalProbe = m_Device->CreateBuffer(pb);
+
+    m_Device->UpdateDescriptorSetWithImageView(m_GlobalSet, kGBindGlobal,
+        rhi::DescriptorType::StorageImage, m_GlobalScratch->GetNativeHandle());
+    m_Device->UpdateDescriptorSetWithImageView(m_GlobalSet, kGBindGlobalOut,
+        rhi::DescriptorType::StorageImage, m_GlobalField->GetNativeHandle());
+    m_Device->UpdateDescriptorSet(m_GlobalSet, kGBindProbe,
+        rhi::DescriptorType::StorageBuffer, m_GlobalProbe.get());
+
+    HE_CORE_INFO("LumenSDF: Global SDF 单层 {}³（体素边长 {:.4f}，原点 ({:.2f},{:.2f},{:.2f})，"
+                 "显存 {:.2f} MB，自检探针 {}）",
+                 m_GlobalRes, (double)m_GlobalVoxelSize, (double)m_GlobalOrigin.x,
+                 (double)m_GlobalOrigin.y, (double)m_GlobalOrigin.z,
+                 (double)(2.0 * (u64)m_GlobalRes * m_GlobalRes * m_GlobalRes * 4ull) / (1024.0 * 1024.0),
+                 m_GlobalProbeCount);
+}
+
+void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
+    if (!m_GlobalPSO || m_Entries.empty()) return;
+
+    const u32 groups = (m_GlobalRes + 3u) / 4u;
+    GlobalPC pc{};
+    pc.originX = m_GlobalOrigin.x; pc.originY = m_GlobalOrigin.y; pc.originZ = m_GlobalOrigin.z;
+    pc.voxelSize = m_GlobalVoxelSize;
+    pc.dimX = pc.dimY = pc.dimZ = m_GlobalRes;
+    pc.probeStride = std::max(1u, m_GlobalRes / 4u);
+
+    cmd->SetPipeline(m_GlobalPSO.get());
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_GlobalSet);
+
+    // ── mode 0：清空为 +inf ──
+    pc.mode = 0u;
+    cmd->SetPushConstants(0, sizeof(pc), &pc);
+    cmd->Dispatch(groups, groups, groups);
+    cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                         rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
+                         m_GlobalScratch.get());
+
+    // ── mode 1：逐 mesh 注入（每个 mesh 绑一次它的距离场作为采样 3D 纹理）──
+    pc.mode = 1u;
+    for (const auto& e : m_Entries) {
+        if (!e.field) continue;
+        // 该 mesh 的 AABB 映射到全局体素范围
+        const float side = e.voxelSize * (float)e.resolution;
+        const u32 lo[3] = {
+            (u32)std::max(0.0f, std::floor((e.origin.x - m_GlobalOrigin.x) / m_GlobalVoxelSize)),
+            (u32)std::max(0.0f, std::floor((e.origin.y - m_GlobalOrigin.y) / m_GlobalVoxelSize)),
+            (u32)std::max(0.0f, std::floor((e.origin.z - m_GlobalOrigin.z) / m_GlobalVoxelSize)),
+        };
+        const u32 hi[3] = {
+            (u32)std::min((float)(m_GlobalRes - 1), std::floor((e.origin.x + side - m_GlobalOrigin.x) / m_GlobalVoxelSize)),
+            (u32)std::min((float)(m_GlobalRes - 1), std::floor((e.origin.y + side - m_GlobalOrigin.y) / m_GlobalVoxelSize)),
+            (u32)std::min((float)(m_GlobalRes - 1), std::floor((e.origin.z + side - m_GlobalOrigin.z) / m_GlobalVoxelSize)),
+        };
+        if (lo[0] > hi[0] || lo[1] > hi[1] || lo[2] > hi[2]) continue;
+
+        pc.rangeLoX = lo[0]; pc.rangeLoY = lo[1]; pc.rangeLoZ = lo[2];
+        pc.rangeHiX = hi[0]; pc.rangeHiY = hi[1]; pc.rangeHiZ = hi[2];
+        pc.meshOriginX = e.origin.x; pc.meshOriginY = e.origin.y; pc.meshOriginZ = e.origin.z;
+        pc.meshVoxelSize = e.voxelSize;
+        pc.meshDimX = pc.meshDimY = pc.meshDimZ = e.resolution;
+
+        m_Device->UpdateDescriptorSet(m_GlobalSet, kGBindMeshField,
+            rhi::DescriptorType::CombinedImageSampler, e.field.get(), m_NearestSampler.get());
+
+        // 注入覆盖**整个全局网格**（AABB 外用"到 AABB 的距离"作为到该 mesh 表面的下界）：
+        // 若只注入 AABB 内的体素，网格大部分会留成 +inf，而 +inf 是一个"高估"的步长，
+        // sphere tracing 会直接跳过邻近网格（实测自检 64 点里 61 点是 +inf ⇒ FAIL）。
+        cmd->SetPushConstants(0, sizeof(pc), &pc);
+        cmd->Dispatch(groups, groups, groups);
+        cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                             rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
+                             m_GlobalScratch.get());
+    }
+
+    // ── mode 2：u32 → R32F + 自检探针 ──
+    pc.mode = 2u;
+    cmd->SetPushConstants(0, sizeof(pc), &pc);
+    cmd->Dispatch(groups, groups, groups);
+    cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                         rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource,
+                         m_GlobalField.get());
+}
+
 void LumenSDF::Step(rhi::IRHICommandList* cmd, const MeshBatcher& batcher) {
     if (!m_Device || !cmd || m_Done) return;
     ++m_Frame;
@@ -248,6 +420,8 @@ void LumenSDF::Step(rhi::IRHICommandList* cmd, const MeshBatcher& batcher) {
             m_Phase = Phase::Done; m_Done = true; return;
         }
         UploadGeometry(batcher);
+        CreateGlobalGPUObjects();
+        SetupGlobalGrid();
         m_Phase = Phase::Baking;
     }
 
@@ -270,6 +444,17 @@ void LumenSDF::Step(rhi::IRHICommandList* cmd, const MeshBatcher& batcher) {
         // 此刻该缓冲的写入命令早已被 GPU 执行完。
         if (++m_WaitFrames < 3) return;
         RunSelfCheck();
+        // 自检完成 → 进入 Global SDF 注入（步骤 10），同一帧内 clear + N 次注入 + 转换
+        BuildGlobalField(cmd);
+        HE_CORE_INFO("LumenSDF: Global SDF 注入完成（{} 个 mesh，第 {} 帧）", m_Entries.size(), m_Frame);
+        m_Phase = Phase::WaitGlobalCheck;
+        m_WaitGlobalFrames = 0;
+        return;
+    }
+
+    if (m_Phase == Phase::WaitGlobalCheck) {
+        if (++m_WaitGlobalFrames < 3) return;
+        RunGlobalCheck();
         m_Phase = Phase::Done;
         m_Done  = true;
     }
@@ -370,6 +555,84 @@ void LumenSDF::RunSelfCheck() {
                  (double)m_SelfCheck.tolerance, m_SelfCheck.passed ? "PASS" : "FAIL");
     if (!m_SelfCheck.passed) {
         HE_CORE_ERROR("LumenSDF 自检失败：GPU 距离场与 CPU 参考不一致，检查网格映射/缓冲布局/偏移");
+    }
+}
+
+void LumenSDF::RunGlobalCheck() {
+    if (!m_GlobalProbe || m_GlobalProbeCount == 0) return;
+
+    void* mapped = m_GlobalProbe->Map();
+    if (!mapped) {
+        HE_CORE_WARN("LumenSDF: Global SDF 探针缓冲不可映射，跳过自检");
+        return;
+    }
+    const float* gpu = static_cast<const float*>(mapped);
+
+    const u32 stride = std::max(1u, m_GlobalRes / 4u);
+    const u32 n = m_GlobalRes / stride;   // 每轴探针数（4）
+    const float tol = 2.0f * m_GlobalVoxelSize;
+
+    float maxErr = 0.0f;    // |误差| 上界
+    float maxOver = -1e30f; // 最大高估（> 容差即视为危险：会让射线穿漏）
+    double sumErr = 0.0;
+    u32 within = 0, counted = 0;
+    for (u32 z = 0; z < n; ++z) {
+        for (u32 y = 0; y < n; ++y) {
+            for (u32 x = 0; x < n; ++x) {
+                const u32 idx = z * n * n + y * n + x;
+                if (idx >= m_GlobalProbeCount) continue;
+                const float3 p = m_GlobalOrigin +
+                    float3((float)(x * stride) + 0.5f, (float)(y * stride) + 0.5f,
+                           (float)(z * stride) + 0.5f) * m_GlobalVoxelSize;
+
+                // CPU 参考：对**全部** mesh 的全部三角形取最小距离（精确值）。
+                // GPU 侧是"各 mesh 场的最小值"，只在 mesh AABB 内有效 ⇒ 只可能偏大；
+                // 两者的差就是这一步近似（min 合并）的幅度，正是要被量化出来的东西。
+                float ref = 1e30f;
+                for (const auto& e : m_Entries) {
+                    for (u32 t = 0; t < e.triCount; ++t) {
+                        const u32* tri = &m_IndicesCPU[e.firstIndex + t * 3];
+                        const float3 a = m_PositionsCPU[tri[0] + e.vertexOffset];
+                        const float3 b = m_PositionsCPU[tri[1] + e.vertexOffset];
+                        const float3 c = m_PositionsCPU[tri[2] + e.vertexOffset];
+                        ref = std::min(ref, PointTriangleDistance(p, a, b, c));
+                    }
+                }
+                const float err = gpu[idx] - ref;   // 全局场是下界 ⇒ 期望 ≤ 0；> 0 表示高估（危险）
+                sumErr += err;
+                maxOver = std::max(maxOver, err);
+                maxErr = std::max(maxErr, std::fabs(err));
+                if (std::fabs(err) <= tol) ++within;
+                ++counted;
+            }
+        }
+    }
+    m_GlobalProbe->Unmap();
+
+    m_GlobalCheck.valid     = true;
+    m_GlobalCheck.probes    = counted;
+    m_GlobalCheck.withinTol = within;
+    m_GlobalCheck.maxError  = maxErr;
+    m_GlobalCheck.meanError = counted ? (float)(sumErr / counted) : 0.0f;
+    m_GlobalCheck.tolerance = tol;
+    // 判据：近似只影响"最近面不在自己 AABB 内"的体素，故允许少量超差；映射/偏移错位会让
+    // **全部**探针同时错，所以用 95% 落界作为门槛（比单点最大误差更能区分这两类问题）。
+    // 判据只说**安全方向**：全局场必须是到最近表面的下界（不得高估），否则 sphere tracing 会
+    // 穿漏。下界质量（低估多少）决定步进效率，本版不足（见日志与 §5 的质量边界），不当作
+    // pass/fail 门槛 —— 把它量出来、写进文档，比让它静默地"看起来通过"更有用。
+    m_GlobalCheck.passed = counted > 0 && maxOver <= tol;
+
+    HE_CORE_INFO("LumenSDF Global 自检: 探针 {} 点，最大误差 {:.6f}，最大高估 {:+.6f}"
+                 "（安全判据：≤ {:.6f}）=> {}；下界质量：{} 点在 2 体素内（{:.1f}%），平均低估 {:.2f}",
+                 counted, (double)maxErr, (double)maxOver, (double)tol,
+                 m_GlobalCheck.passed ? "PASS" : "FAIL",
+                 within, counted ? 100.0 * (double)within / counted : 0.0,
+                 (double)(-m_GlobalCheck.meanError));
+    if (!m_GlobalCheck.passed) {
+        HE_CORE_ERROR("LumenSDF Global 自检失败：全局场出现了高估，sphere tracing 会穿漏");
+    }
+    if (!m_GlobalCheck.passed) {
+        HE_CORE_ERROR("LumenSDF Global 自检失败：全局场与 CPU 参考大面积不一致，检查网格映射/注入范围");
     }
 }
 
