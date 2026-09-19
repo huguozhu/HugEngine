@@ -63,7 +63,10 @@ void main(uint3 tid : SV_DispatchThreadID) {
         if (a.y < 0.5 && b.y < 0.5) break;               // 出所有层：本版按未命中处理
         const float d = min(a.y > 0.5 ? a.x : 1e30, b.y > 0.5 ? b.x : 1e30);
         if (d < eps) { hit = true; break; }
-        t += max(d, eps);
+        // 安全步长系数 0.5：场是**近似**的（洪泛松弛可能给出偏大的值），
+        // 全量步进会让射线越过真实表面（实测出现 3 条穿漏）。半量步进是近似场的标准做法：
+        // 步数变多，但**不会穿漏** —— 安全判据优先于效率。
+        t += max(d * 0.5, eps);
         if (t > maxDist) break;
     }
 

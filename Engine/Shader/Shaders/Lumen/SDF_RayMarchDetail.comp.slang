@@ -60,7 +60,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
             InterlockedMin(u_RayT[i], asuint(t));
             return;
         }
-        t += max(ad, eps);
+        // 安全步长系数 0.5（理由同全局版：近似场全量步进会穿漏）
+        t += max(ad * 0.5, eps);
         if (t > maxDist) return;
     }
 }
