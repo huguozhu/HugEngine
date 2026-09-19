@@ -50,6 +50,11 @@ struct LightingInputs {
     rhi::IRHISampler* ssgiSampler = nullptr;
     rhi::IRHITexture* ssrTex = nullptr;
     rhi::IRHISampler* ssrSampler = nullptr;
+    /// Lumen 输出（虚拟化几何 GI）。骨架阶段漫反射与镜面**共用同一张**输出纹理；
+    /// 未产出时必须传 nullptr —— LightingPass 会回绑黑色占位，否则会继续采样上一帧的绑定。
+    /// 采样语义与 SSGI 一致：纹理里已是「已含接收面 albedo」的 L_o（albedo·E/π）。
+    rhi::IRHITexture* lumenTex = nullptr;
+    rhi::IRHISampler* lumenSampler = nullptr;
     // DDGI 探针
     rhi::IRHIBuffer* ddgiProbeBuffer = nullptr;
     rhi::IRHIBuffer* ddgiGridUniform = nullptr;

@@ -104,7 +104,9 @@ GPU_CONST(GPU_UINT kGPUBinding_RT_Reflection = 25);  // RT 反射（RGBA16_FLOAT
 GPU_CONST(GPU_UINT kGPUBinding_RT_AO         = 26);  // RT 环境光遮蔽（R8_UNORM）
 GPU_CONST(GPU_UINT kGPUBinding_RT_GI         = 27);  // RT 间接漫反射（RGBA16_FLOAT）
 GPU_CONST(GPU_UINT kGPUBinding_GIBlendParams = 31);  // GI 各通道分层合成参数 UBO（3 通道 × 源数组）
-
+// Lumen 输出（间接漫反射/镜面共用一张，骨架阶段）。0~31 在 Deferred Lighting set 里已全部占满，
+// 故取 32 —— 需要同步在 LightingPass 的描述符集布局里加同号绑定，否则采样读到未绑定描述符。
+GPU_CONST(GPU_UINT kGPUBinding_Lumen         = 32);  // Lumen 输出（RGBA16_FLOAT）
 // ============================================================
 // GI 分层合成参数（UBO）——通道通用，按「源数组」表达（Wave 1）
 //

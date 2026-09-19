@@ -55,6 +55,7 @@ struct VSOutput {
 [[vk::binding(kGPUBinding_SSGI, kGPUDescSet_PerFrame)]] Texture2D<float4> u_SSGI;  // SSGI 间接光照
 [[vk::binding(kGPUBinding_SSAO_DL, kGPUDescSet_PerFrame)]] Texture2D<float4> u_SSAO;  // SSAO 环境光遮蔽
 [[vk::binding(kGPUBinding_SSR, kGPUDescSet_PerFrame)]] Texture2D<float4> u_SSR;   // SSR 屏幕空间反射
+[[vk::binding(kGPUBinding_Lumen, kGPUDescSet_PerFrame)]] Texture2D<float4> u_Lumen;  // Lumen 输出（间接漫反射/镜面共用）
 [[vk::binding(kGPUBinding_DDGIProbes, kGPUDescSet_PerFrame)]] StructuredBuffer<float4> u_DDGIProbes;  // DDGI 探针数据（每探针 16 float4）
 
 // Hybrid RT 效果输出纹理（由 HybridRTPipeline 通过 LightingPass 绑定）
@@ -191,6 +192,8 @@ float3 SampleDiffuseSource(uint id, float3 worldPos, float3 N, float2 uv,
         return SampleDDGI(worldPos, N) * albedo * (1.0 / HE_PI);
     case GISOURCE_SSGI:  // 中频：屏幕空间（SSGI.frag 输出已含接收面 albedo）
         return u_SSGI.Sample(u_GBufferSampler, uv).rgb;
+    case GISOURCE_LUMEN: // 虚拟化几何 GI：输出约定与 SSGI 相同（已含接收面 albedo 的 L_o = albedo·E/π）
+        return u_Lumen.Sample(u_GBufferSampler, uv).rgb;
     case GISOURCE_RSM:   // 中频：反射阴影贴图（半分辨率 VPL 求和的结果，返回 E，经验常数已含 1/π）→ 补 albedo
         return u_RSMIndirect.Sample(u_IBLSampler, uv).rgb * albedo;
     case GISOURCE_RTGI:  // 高频：硬件光追（rgen 的余弦加权平均 ≈ E/π）→ 补接收面 albedo
@@ -210,6 +213,7 @@ float3 SampleSpecularSource(uint id, float2 uv, float3 R, float roughness,
              * (F * envBRDF.r + envBRDF.g) * iblIntensity;
     case GISOURCE_SSR:           return u_SSR.Sample(u_GBufferSampler, uv).rgb;
     case GISOURCE_RT_REFLECTION: return u_RT_Reflection.Sample(u_GBufferSampler, uv).rgb;
+    case GISOURCE_LUMEN:         return u_Lumen.Sample(u_GBufferSampler, uv).rgb;   // Lumen 镜面（与漫反射共用一张输出）
     default:                     return float3(0.0);
     }
 }
@@ -428,6 +432,10 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
         for (uint i = 0u; i < bl.count; ++i) {
             GISourceSlot s = bl.sources[i];
             if (s.weight <= 0.0) continue;
+            // 有效性契约（Lumen 骨架阶段的最小形态）：`alpha < 0` = 本条无数据，跳过而不计入
+            // 权重。归一化的分母 den 若把它算进去，同通道其它源会被无端稀释（画面变暗且无法
+            // 归因）。把这条契约推广到**所有**信号是《Lumen设计与实现》§10 的 11.3 的工作。
+            if (s.id == GISOURCE_LUMEN && u_Lumen.Sample(u_GBufferSampler, uv).a < 0.0) continue;
             float w = SourceWeight(s, camCoverage, gridCoverage, camDist);
             num += SampleDiffuseSource(s.id, worldPos, N, uv, albedo, kD, furnace) * w;
             den += w;
@@ -489,6 +497,8 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
                 if (u_SSR.Sample(u_GBufferSampler, uv).a < 0.0) continue;              // 本条无效
             } else if (s.id == GISOURCE_RT_REFLECTION) {
                 if (u_RT_Reflection.Sample(u_GBufferSampler, uv).a < 0.0) continue;
+            } else if (s.id == GISOURCE_LUMEN) {
+                if (u_Lumen.Sample(u_GBufferSampler, uv).a < 0.0) continue;   // 骨架阶段无数据
             }
             float w = SourceWeight(s, camCoverageSpec, gridCoverage, camDist);
             specNum += SampleSpecularSource(s.id, uv, R, roughness, F, envBRDF) * w;

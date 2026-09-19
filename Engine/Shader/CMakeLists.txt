@@ -87,6 +87,8 @@ if(SLANGC)
         "${SHADER_DIR}/GI/SSGI.frag.slang"
         "${SHADER_DIR}/GI/SSR.frag.slang"
         "${SHADER_DIR}/GI/RSM_Indirect.frag.slang"
+        # Lumen（虚拟化几何 GI）——骨架阶段的占位输出，步骤 20 起被 ScreenProbeGather 替换
+        "${SHADER_DIR}/Lumen/Lumen_Skeleton.frag.slang"
         # AntiAliasing
         "${SHADER_DIR}/AntiAliasing/TAA_Resolve.frag.slang"
         "${SHADER_DIR}/AntiAliasing/FXAA.frag.slang"
