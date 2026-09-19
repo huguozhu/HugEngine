@@ -54,6 +54,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
 
     float t = 0.0;
     bool  hit = false;
+    bool  advanced = false;   // 命中判据要求"沿射线真正走过一步"，t=0 处的近表面不算命中
     uint  steps = 0;
     for (uint s = 0; s < maxSteps; ++s) {
         steps = s + 1;
@@ -62,7 +63,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
         const float2 b = SampleLayer(u_Field1, u_FieldSampler1, originVoxel1, grid1.xyz, p);
         if (a.y < 0.5 && b.y < 0.5) break;               // 出所有层：本版按未命中处理
         const float d = min(a.y > 0.5 ? a.x : 1e30, b.y > 0.5 ? b.x : 1e30);
-        if (d < eps) { hit = true; break; }
+        if (advanced && d < eps) { hit = true; break; }
         // 安全步长系数 0.5：场是**近似**的（洪泛松弛可能给出偏大的值），
         // 全量步进会让射线越过真实表面（实测出现 3 条穿漏）。半量步进是近似场的标准做法：
         // 步数变多，但**不会穿漏** —— 安全判据优先于效率。
@@ -70,6 +71,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
         // 原来下限就等于 eps，射线起点离表面仅 1 单位时第一步就可能跨过表面（实测 19 条穿漏）。
         // 步长系数试降为 0.25：全局层的洪泛会**高估**，系数越小越不容易一步跨过表面（穿漏）。
         t += max(d * 0.25, eps * 0.02);
+        advanced = true;
         if (t > maxDist) break;
     }
 

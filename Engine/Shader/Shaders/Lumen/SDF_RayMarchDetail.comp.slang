@@ -55,7 +55,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
         // 带符号场的步进用 |d|（到表面的距离），命中判定也用 |d|：这样"起点在几何内部"的射线会
         // 一路走到最近的表面，而不是在 t=0 就自认为命中（那正是无符号场时的假命中来源）。
         const float ad = abs(d);
-        if (ad < eps) {
+        if (advanced && ad < eps) {
             // 命中：以 min 归约写入（t ≥ 0，浮点位模式与无符号整数同序）
             InterlockedMin(u_RayT[i], asuint(t));
             return;
@@ -63,6 +63,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
         // 安全步长系数 0.5（理由同全局版：近似场全量步进会穿漏）
         // 步长下限与命中判据分开（理由同全局版）
         t += max(ad * 0.5, eps * 0.02);
+        advanced = true;
         if (t > maxDist) return;
     }
 }
