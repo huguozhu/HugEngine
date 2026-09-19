@@ -48,6 +48,14 @@ public:
     void OnResize(u32 width, u32 height);
 
     [[nodiscard]] bool IsReady() const { return m_Device != nullptr; }
+    /// 【步骤 37】首帧把 Lumen 自持的**存储图像**统一转换到 GENERAL（UnorderedAccess）。
+    ///
+    /// 【为什么必须有这一步】Lumen 的内部 pass 只用"全局内存屏障"（`ComputeBarrier`），它不管布局；
+    /// 而这些纹理是自持的（帧图不会替它们转换）⇒ 它们从未进入 GENERAL，校验层提交时报
+    /// "expects VK_IMAGE_LAYOUT_GENERAL — instead … UNDEFINED"（基线里 10 行），而按规范此时的
+    /// 存储写是未定义行为（本步实测到过"统计正常、图像整幅黑"的形态）。在**首个** Lumen 计算
+    /// pass 里转换一次即可（`Undefined → GENERAL` 会丢弃内容，而首帧的内容本来就是垃圾）。
+    void TransitionStorageImagesOnce(rhi::IRHICommandList* cmd);
     /// 【步骤 37】逐 mesh 距离场的每帧构建预算是否已跑完（区分启动期与稳态帧时）
     [[nodiscard]] bool IsMeshBuildComplete() const { return m_SDF.IsMeshBuildComplete(); }
     [[nodiscard]] u32  GetWidth()  const { return m_Width; }
@@ -362,6 +370,7 @@ private:
     float m_SHIrradianceDiff = 0.0f;    // SH 重建辐照度 vs 逐光线求和参考的平均相对差
     // ── 步骤 35：探针滤波（空间 3×3 单元 YCoCg AABB + 时域重投影 EMA）──
     DenoiseHistoryPool* m_HistoryPool = nullptr;   // 非拥有：时域历史由统一池分配
+    bool m_StorageImagesTransitioned = false;       // 步骤 37：存储图像的布局是否已转换过
     rhi::DescriptorSetLayoutHandle m_ProbeFilterLayout = 0;
     rhi::DescriptorSetHandle       m_ProbeFilterSet    = 0;
     std::unique_ptr<rhi::IRHIPipelineState> m_ProbeFilterPSO;

@@ -350,6 +350,17 @@ void LumenSDF::UploadGeometry(const MeshBatcher& batcher) {
 void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
     MeshSDFEntry& e = m_Entries[entryIndex];
 
+    // 【步骤 37】共享的 scatter/JFA 中间纹理（m_MeshScratch / m_MeshSeed）在 CreateGPUObjects 里
+    // 建好时没有命令列表可用，故在**第一次真正使用**它们的地方（本函数）补一次布局转换 ——
+    // 必须早于本帧的任何存储写。
+    if (!m_MeshScratchTransitioned) {
+        m_MeshScratchTransitioned = true;
+        for (rhi::IRHITexture* t : { m_MeshScratch.get(), m_MeshSeed.get() }) {
+            if (t) cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                                        rhi::ResourceState::Undefined, rhi::ResourceState::UnorderedAccess, t);
+        }
+    }
+
     // 每 mesh 一张 3D 距离场（**R16F**，可写 + 可采样）：与《Lumen设计与实现》步骤 8 的"≈4.2 MB/mesh"一致，
     // 比 R32F 省一半显存（近表面值在 fp16 下仍有 ~0.01 单位的分辨率，追踪关心的正是这一段）。
     rhi::TextureDesc td;
@@ -360,6 +371,15 @@ void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
     td.usage  = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource;
     e.field   = m_Device->CreateTexture(td);
     if (!e.field) return;
+
+    // 【步骤 37：布局转换必须在**首次写入之前**】这张场纹理是自持存储图像，而 Lumen 的 pass 之间
+    // 只用"全局内存屏障"（不做布局转换）⇒ 它停在 UNDEFINED 上，校验层会报
+    // "expects VK_IMAGE_LAYOUT_GENERAL — instead … UNDEFINED"，按规范此时的存储写是未定义行为。
+    // 必须在**建纹理的这一刻**转换：晚一帧再转（用 Undefined→GENERAL）会把已经写好的场内容
+    // 一起丢掉 —— 这正是"统一在首帧转一次"行不通的原因（mesh 场是逐帧建出来的）。
+    cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                         rhi::ResourceState::Undefined, rhi::ResourceState::UnorderedAccess,
+                         e.field.get());
 
     BuildPC pc{};
     pc.originX = e.origin.x; pc.originY = e.origin.y; pc.originZ = e.origin.z;

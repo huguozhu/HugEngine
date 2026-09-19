@@ -851,6 +851,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                         // → 追踪 → 着色 → SH → 辐照度 → 远场光追都在这一个 pass 里）
                         timer->Begin(c, kLumenComputeTimerIdx);
                         timer->Begin(c, kLumenSdfTimerIdx);
+                        lp->TransitionStorageImagesOnce(c);   // 步骤 37：首帧转换自持存储图像的布局
                         lp->StepSDF(c, *cam);   // 近层跟随相机（相机位置在第一次 Step 之前给出）
                         timer->End(c, kLumenSdfTimerIdx);
                         mark(0);   // StepSDF

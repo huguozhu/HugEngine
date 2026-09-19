@@ -116,6 +116,10 @@ public:
 
     /// 步骤 8：逐 mesh 距离场构建（由帧图的独立 compute pass 调用，见 FrameGraph 的 Lumen 段）。
     /// 相机位置用于让 clipmap 近层跟随相机（第一次调用之前必须给出）。
+    /// 【步骤 37】顺带在首帧做一次自持存储图像的布局转换（必须在任何 Lumen 写之前）。
+    void TransitionStorageImagesOnce(rhi::IRHICommandList* cmd) {
+        if (m_Scene) m_Scene->TransitionStorageImagesOnce(cmd);
+    }
     void StepSDF(rhi::IRHICommandList* cmd, const CameraData& cam) {
         if (m_Scene && m_Batcher) m_Scene->StepSDF(cmd, *m_Batcher, cam.position);
     }

@@ -34,6 +34,34 @@ void LumenScene::ComputeBarrier(rhi::IRHICommandList* cmd) {
                          rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess);
 }
 
+// ============================================================
+// 步骤 37：自持存储图像的布局转换（首帧一次）
+//
+// 【这条为什么重要】校验层基线里的 10 行 "expects VK_IMAGE_LAYOUT_GENERAL … UNDEFINED" 就是它。
+// 只加"全局内存屏障"不会转换布局；而按规范，在 UNDEFINED 布局上做存储写是**未定义行为**
+// （本步实测到过"着色器算了、统计写了、图像整幅为黑"的形态，正是这类未定义行为的一种表现）。
+// 转换清单来自各持有者的 `CollectStorageImages`：mesh 场、clipmap 各层、atlas、调试视图、
+// 覆盖率图、辐照度图。
+// ============================================================
+void LumenScene::TransitionStorageImagesOnce(rhi::IRHICommandList* cmd) {
+    if (!cmd || m_StorageImagesTransitioned) return;
+    m_StorageImagesTransitioned = true;
+
+    std::vector<rhi::IRHITexture*> images;
+    m_SDF.CollectStorageImages(images);
+    if (m_IrradianceTex)   images.push_back(m_IrradianceTex.get());
+    if (m_AtlasAlbedo)     images.push_back(m_AtlasAlbedo.get());
+    if (m_AtlasNormal)     images.push_back(m_AtlasNormal.get());
+    if (m_AtlasEmissive)   images.push_back(m_AtlasEmissive.get());
+
+    for (rhi::IRHITexture* t : images) {
+        if (!t) continue;
+        cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                             rhi::ResourceState::Undefined, rhi::ResourceState::UnorderedAccess, t);
+    }
+    HE_CORE_INFO("LumenScene: 自持存储图像布局转换 Undefined → GENERAL（{} 张；步骤 37）", (u32)images.size());
+}
+
 void LumenScene::BuildPageTable() {
     if (m_PageTableBuilt || !m_Device) return;
     // 卡片还没生成（步骤 13 在自检之后才跑）⇒ 等下一帧再建，否则页数会退化成 1

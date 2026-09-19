@@ -163,8 +163,29 @@ public:
     /// 调试视图输出（RGBA16F，屏幕尺寸）：R=命中层, G=t/最大距离, B=步数比, A=是否命中
     [[nodiscard]] rhi::IRHITexture* GetDebugTexture() const { return m_DebugTex.get(); }
 
-    // ── L2 Surface Cache：步骤 13 的 Card 生成器 + 覆盖率（CPU 版；GPU atlas 见步骤 14+）──
-    /// 覆盖率结论：卡片数、按面积加权采样数、被任一卡片覆盖的采样数
+    /// 【步骤 37】收集本类自持的**存储图像**（被 compute 当 RWTexture 写的那些）。
+    ///
+    /// 【为什么需要它】Lumen 的内部 pass 之间用的是"全局内存屏障"（`ComputeBarrier`），
+    /// 它**不做布局转换**；而这些纹理是自持的（不经过帧图的瞬态资源管理，帧图因此也不会替它们转换）。
+    /// 结果：它们从未被 transition 到 GENERAL，校验层在提交时报
+    /// "expects VK_IMAGE_LAYOUT_GENERAL — instead, current layout is UNDEFINED"（实测 10 行），
+    /// 而按规范此时的存储写是**未定义行为**（本步实测过一次"统计正常但图像整幅为黑"）。
+    /// 这里把清单交出去，由 `LumenScene` 在首帧统一转换一次。
+    void CollectStorageImages(std::vector<rhi::IRHITexture*>& out) const {
+        if (m_MeshScratch) out.push_back(m_MeshScratch.get());
+        if (m_MeshSeed)    out.push_back(m_MeshSeed.get());
+        for (const auto& e : m_Entries) if (e.field) out.push_back(e.field.get());
+        for (u32 i = 0; i < m_GlobalLayerCount; ++i) {
+            const GlobalLayer& L = m_GlobalLayers[i];
+            if (L.scratch) out.push_back(L.scratch.get());
+            if (L.field)   out.push_back(L.field.get());
+            if (L.seed)    out.push_back(L.seed.get());
+        }
+        if (m_DebugTex)        out.push_back(m_DebugTex.get());
+        if (m_CardCoverageTex) out.push_back(m_CardCoverageTex.get());
+    }
+
+    // ── L2 Surface Cache：步骤 13 的 Card 生成器 + 覆盖率（CPU 版；GPU atlas 见步骤 14+）──    /// 覆盖率结论：卡片数、按面积加权采样数、被任一卡片覆盖的采样数
     struct CardCoverage {
         u32 meshes = 0, cards = 0, samples = 0, covered = 0;
         u32 cardRes = 0;
@@ -248,6 +269,7 @@ private:
     // 同上：转换 pass 的输出是**每 mesh 一张**纹理，共用一套描述符集会让写入落到同一张上
     std::vector<rhi::DescriptorSetHandle>     m_ConvertSets;
     std::unique_ptr<rhi::IRHITexture>         m_MeshScratch;  // 共享的 u32 距离场（原子最小目标）
+    bool m_MeshScratchTransitioned = false;   // 步骤 37：共享中间纹理的布局已转换（首次使用时做）
     // 带种子坐标的 JFA（真欧氏距离，见 SDF_MeshFloodSeeds.comp.slang）：种子坐标共享一张纹理，
     // 逐 mesh 串行复用（+8 MB），把"26 连通图最短路径"的 ~8% 高估换成 ~1 体素的精确欧氏距离。
     std::unique_ptr<rhi::IRHITexture>         m_MeshSeed;
