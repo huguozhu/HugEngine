@@ -155,6 +155,11 @@ public:
     [[nodiscard]] u32 GetProbeRaysTotal() const { return m_ProbeRaysTotal; }
     [[nodiscard]] const LumenTraceConfig& GetTraceConfig() const { return m_TraceConfig; }
     [[nodiscard]] u32 GetProbeCount() const { return m_ProbeCount; }
+    /// 步骤 31：把 Screen Probe 的结果交给 DDGI（Radiance Cache）当作输入
+    [[nodiscard]] rhi::IRHIBuffer* GetProbeBuffer() const { return m_ProbeBuf.get(); }
+    [[nodiscard]] rhi::IRHIBuffer* GetCellProbeBuffer() const { return m_CellProbeBuf.get(); }
+    [[nodiscard]] u32 GetScreenCellsX() const { return (m_Width + 15u) / 16u; }
+    [[nodiscard]] u32 GetScreenCellsY() const { return (m_Height + 15u) / 16u; }
     [[nodiscard]] u32 GetProbeTilesFlat() const { return m_ProbeTilesFlat; }        // 偏差缓冲里"够平坦"的 tile 数
     [[nodiscard]] u32 GetProbeTilesTotal() const { return m_ProbeTilesTotal; }      // 有几何的 tile 数
     [[nodiscard]] float GetProbeMergeThreshold() const { return m_MergeNormalCos; }

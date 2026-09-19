@@ -798,6 +798,13 @@ int main() {
         }
         camAnim->FinalizeClip();
         camAnim->playing = false;  // 默认关闭启动动画
+        // 【为什么留一个环境变量开关】步骤 31（L5 Radiance Cache）的验收有一条是"相机移动时
+        // 无拖影累积"—— 静态相机测不出来。`HE_CAMERA_ORBIT=1` 让这条圆形路径直接跑起来。
+        // 注意它按**墙钟** deltaTime 推进 ⇒ 该模式下的画面不保证逐位可复现（静态模式不受影响）。
+        if (std::getenv("HE_CAMERA_ORBIT")) {
+            camAnim->playing = true;
+            HE_CORE_INFO("相机动画已启用（HE_CAMERA_ORBIT=1）：用于验证时间混合无拖影累积");
+        }
     }
     sceneGraph.SetParent(camAnimEntity, Entity{kInvalidEntity});
     HE_CORE_INFO("相机动画已创建: {} 秒圆形路径", 6.0f);

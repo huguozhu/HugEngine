@@ -6,6 +6,7 @@
 //   [9..15] 保留
 
 #include "ShaderTypes.slang"  // GPU 常量 (kGPU*) + 结构体
+#include "Lumen/ScreenProbe.slang"   // 步骤 31：Screen Probe 的共享布局（与 Lumen 侧逐字段一致）
 
 // GBuffer 输入（只读，CombinedImageSampler）
 [[vk::binding(kGPUBinding_GBufferA, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferA;
@@ -34,6 +35,11 @@
 // 光追 march 的探针射线辐射度（任务 17 / B4，由 DDGI_Trace pass 每帧写入）
 // 布局：每探针 numSamples 条，[probeIndex * numSamples + i]；不可用时 u_Flags.w=0
 [[vk::binding(10, 0)]] StructuredBuffer<float4> u_TracedRadiance;
+// ── 步骤 31（L5）：输入改为 Screen Probe ──
+// b11 = Lumen 的探针（世界位置/法线 + 辐射度 SH），b12 = 16×16 单元 → 探针下标，b13 = 收敛统计
+[[vk::binding(11, 0)]] StructuredBuffer<ScreenProbe> u_ScreenProbes;
+[[vk::binding(12, 0)]] StructuredBuffer<uint>         u_ScreenCellProbe;
+[[vk::binding(13, 0)]] RWStructuredBuffer<uint>       u_Stats;   // 0=采纳 1=更新 2=继承历史 3=Σ相对变化(定点)
 
 // 探针网格 + 相机参数
 [[vk::binding(4, 0)]] cbuffer DDGIParams {
@@ -44,6 +50,8 @@
     float4x4 u_ViewProj;     // 相机 View→Proj（世界→裁剪空间）
     float4x4 u_RSMLightViewProj;  // RSM 光源 VP（世界→RSM 光源空间投影）
     float4   u_Flags;        // x=useRSM；y=updateStride；z=updatePhase；w=光追 march 可用
+    float4   u_ScreenProbeDims;   // 步骤 31：x=cellsX, y=cellsY, z=屏宽, w=屏高
+    float4   u_ScreenProbeFlags;  // 步骤 31：x=启用, y=距离门限, z=单侧→整球外推系数, w=未用
 };
 
 // 每探针 float4 数量（与 C++ kFloats4PerProbe 保持一致）
@@ -82,6 +90,58 @@ void WriteSH(uint probeIndex, float4 sh[4]) {
     }
 }
 
+// ── 步骤 31：把 DDGI 探针的位置投到屏幕，取那个 16×16 单元归属的 Screen Probe ──
+// 返回值：可用的屏幕探针下标；0xFFFFFFFF = 不可用（未启用 / 投到屏外 / 距离门限不过）。
+// 【为什么要距离门限】屏幕探针是"某像素的表面"上的，把 DDGI 探针投过去可能落在完全不同的物体上
+//（相机一转，单元归属就换）。不加门限会把远处表面的辐射度灌进这个探针 —— 那正是"拖影"的来源。
+// 返回该探针可用的 Screen Probe 下标；0xFFFFFFFF = 不可用。
+uint FetchScreenProbe(float3 probePos) {
+    if (u_ScreenProbeFlags.x < 0.5) return 0xFFFFFFFFu;
+    if (u_ScreenProbeDims.x < 1.0 || u_ScreenProbeDims.y < 1.0) return 0xFFFFFFFFu;
+    InterlockedAdd(u_Stats[4], 1u);   // 4 = 进入了抓取（诊断）
+
+    const float4 clip = mul(u_ViewProj, float4(probePos, 1.0));
+    if (clip.w <= 1e-4) return 0xFFFFFFFFu;
+    const float2 ndc = clip.xy / clip.w;
+    const float2 uv  = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);   // Vulkan NDC：y 向下翻转
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 0xFFFFFFFFu;
+    InterlockedAdd(u_Stats[5], 1u);   // 5 = 投到屏幕内
+
+    const uint cx = min(uint(uv.x * u_ScreenProbeDims.z / 16.0), uint(u_ScreenProbeDims.x) - 1u);
+    const uint cy = min(uint(uv.y * u_ScreenProbeDims.w / 16.0), uint(u_ScreenProbeDims.y) - 1u);
+    const uint cell = cy * uint(u_ScreenProbeDims.x) + cx;
+    const uint idx  = u_ScreenCellProbe[cell];
+    if (idx == 0xFFFFFFFFu) return 0xFFFFFFFFu;
+    InterlockedAdd(u_Stats[6], 1u);   // 6 = 该单元有探针
+
+    const ScreenProbe sp = u_ScreenProbes[idx];
+    if (sp.position.w < 0.5) return 0xFFFFFFFFu;
+    // 【深度一致性门限（这才是"重投影"该有的判据）】屏幕上看到的表面与 DDGI 探针必须在**同一条
+    // 相机射线上的相近深度**上。第一版用的是"屏幕探针与探针的世界距离 < 1 个格距"—— 对粗网格
+    //（本场景格距 248 单位）几乎全部被拒：网格点常常离任何可见表面都有几百单位。
+    // 改成比较"到相机的距离"：两者同深度 ⇒ 大致是同一表面；差得远 ⇒ 那是另一个物体，不采纳。
+    {
+        const float dProbe = distance(u_CameraPos.xyz, probePos);
+        const float dSample = distance(u_CameraPos.xyz, sp.position.xyz);
+        const float tol = u_ScreenProbeFlags.y + 0.2 * dProbe;   // 绝对门限 + 20% 相对松弛
+        if (abs(dProbe - dSample) > tol) return 0xFFFFFFFFu;
+    }
+    InterlockedAdd(u_Stats[7], 1u);   // 7 = 通过深度门限
+    return idx;
+}
+
+// 用 Screen Probe 的 4 系数**辐射度** SH 在方向 dir 上求值（L(d) = Σ l_i Y_i(d)），
+// 再乘"单侧→整球"的对称外推系数。负值截断：SH 带限表示会有振铃，负辐射度没有物理意义。
+float3 EvalScreenProbeRadiance(uint idx, float3 dir) {
+    const ScreenProbe sp = u_ScreenProbes[idx];
+    float3 l0 = float3(sp.shR.x, sp.shG.x, sp.shB.x);
+    float3 l1 = float3(sp.shR.y, sp.shG.y, sp.shB.y);
+    float3 l2 = float3(sp.shR.z, sp.shG.z, sp.shB.z);
+    float3 l3 = float3(sp.shR.w, sp.shG.w, sp.shB.w);
+    const float A0 = 0.2820947918, A1 = 0.4886025119;
+    float3 r = l0 * A0 + (l1 * dir.y + l2 * dir.z + l3 * dir.x) * A1;
+    return max(r, 0.0) * u_ScreenProbeFlags.z;
+}
 [numthreads(64, 1, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
     uint probeIndex = id.x;
@@ -123,6 +183,12 @@ void main(uint3 id : SV_DispatchThreadID) {
     for (int j = 0; j < 4; j++) sh[j] = float4(0, 0, 0, 0);
     float validSamples = 0.0;
 
+    // ── 步骤 31：先确定本探针归属哪个 Screen Probe（与采样方向无关，故循环外取一次）──
+    // 0xFFFFFFFF = 没有可用屏幕探针（未启用 / 投到屏外 / 距离门限不过）。
+    uint spIndex = 0xFFFFFFFFu;
+    if (u_ScreenProbeFlags.x >= 0.5) spIndex = FetchScreenProbe(probePos);
+    uint screenAccepted = 0u;
+
     // 球面采样 → GBuffer → SH 投影
     for (int i = 0; i < numSamples; i++) {
         // Fibonacci 球面方向
@@ -134,12 +200,20 @@ void main(uint3 id : SV_DispatchThreadID) {
         float3 radiance = float3(0.0);
         bool   valid    = false;
 
-        if (u_Flags.w > 0.5) {
+        if (spIndex != 0xFFFFFFFFu) {
+            // ── 步骤 31 的主路径：输入来自 **Screen Probe** ──
+            // 用它的 4 系数辐射度 SH 沿本探针的采样方向求值，再按"单侧→整球"的对称近似补齐立体角。
+            // 【投影流程一行没动】只是把"逐样本辐射度从哪来"换掉了 —— 这正是把两边收敛到同一表示
+            //（步骤 30 的 2 阶 4 系数）之后的收益。
+            radiance = EvalScreenProbeRadiance(spIndex, dir);
+            valid    = dot(radiance, radiance) > 0.0001;
+            if (valid) screenAccepted += 1u;
+        } else if (u_Flags.w > 0.5) {
             // ── A 路径（任务 17 / B4）：光追 march 给出的真实辐射度 ──
             // 每条探针射线由 DDGI_Trace pass 用硬件光追求解：命中 → 命中点出射辐射度，
             // 未命中 → 该方向的 IBL 辐照度。缓冲布局 = [probeIndex * numSamples + i]。
-            // 【为什么优先于 RSM 路径】它也满足"世界空间、视角无关"，而且带真实可见性；
-            // RSM 路径保留给不支持光追的设备（u_Flags.w 为 0 时走下面两条回退）。
+            // 【为什么保留】Screen Probe 没覆盖到的探针（屏外/距离门限不过）用它兜底；
+            // 它同样满足"世界空间、视角无关"。
             float4 traced = u_TracedRadiance[probeIndex * uint(numSamples) + uint(i)];
             radiance = traced.rgb;
             valid    = dot(radiance, radiance) > 0.0001;
@@ -204,6 +278,39 @@ void main(uint3 id : SV_DispatchThreadID) {
         for (int j = 0; j < 4; j++) {
             float4 hist = u_ProbeHistory[base + j];
             sh[j].rgb = lerp(sh[j].rgb, hist.rgb, blendAlpha);
+        }
+    }
+
+    // ── 步骤 31：统计 + "世界空间重投影" ──
+    // 【重投影在**世界空间**缓存里的含义】DDGI 的探针是钉在世界空间的，相机移动时它不需要
+    // 屏幕空间那种重投影；真正需要防的是：Screen Probe 是屏幕空间的，相机一转，某个探针可能
+    // 投到完全不同的表面上。距离门限（FetchScreenProbe 里）+ 下面的"没有可用屏幕探针就**整条
+    // 继承历史**"合起来就是这件事的答案 —— 与其吸收一个不相干的表面，不如保持自己的旧值。
+    {
+        const uint base = probeIndex * kStride;
+        if (spIndex != 0xFFFFFFFFu) {
+            InterlockedAdd(u_Stats[0], 1u);
+            if (screenAccepted == 0u && historyValid) {
+                // 采纳了屏幕探针，但它的估计在我们所有采样方向上都是 0（例如法线朝墙内）⇒
+                // 与其写入一个"接近零"的值，不如继承历史，避免探针被清空。
+                for (int j = 0; j < 4; j++) u_Probes[base + j] = u_ProbeHistory[base + j];
+                InterlockedAdd(u_Stats[2], 1u);
+                return;
+            }
+        }
+        InterlockedAdd(u_Stats[1], 1u);
+        // 相对变化（定点 ×65536）：Σ|new − hist| / Σ|new|，供 CPU 侧判"是否收敛"
+        if (historyValid) {
+            float sumNew = 0.0, sumDiff = 0.0;
+            for (int j = 0; j < 4; j++) {
+                const float3 n = sh[j].rgb;
+                const float3 h = u_ProbeHistory[base + j].rgb;
+                sumNew  += dot(abs(n), float3(1, 1, 1));
+                sumDiff += dot(abs(n - h), float3(1, 1, 1));
+            }
+            if (sumNew > 1e-6) {
+                InterlockedAdd(u_Stats[3], (uint)(clamp(sumDiff / sumNew, 0.0, 1.0) * 65536.0 + 0.5));
+            }
         }
     }
 

@@ -44,6 +44,26 @@ public:
     // pos/radiance 为空时回退 IBL 辐照度
     void SetRSM(rhi::IRHITexture* pos, rhi::IRHITexture* radiance, const float4x4& lightViewProj);
 
+    // ── 步骤 31（L5）：把"当前估计"的来源从**自追踪**改为 **Screen Probe 的结果** ──
+    // 每个 DDGI 探针把自己的世界位置投到屏幕，落在哪个 16×16 单元就取那个单元归属的 Screen Probe，
+    // 用它的**辐射度 SH** 沿本探针的球面采样方向求值，作为逐样本辐射度进入原来的 SH 投影 ——
+    // 也就是"投影流程一点不动，只换输入来源"。
+    struct ScreenProbeInput {
+        rhi::IRHIBuffer*  probeBuffer  = nullptr;   // StructuredBuffer<ScreenProbe>（Lumen 的探针）
+        rhi::IRHIBuffer*  cellProbeMap = nullptr;   // 16×16 单元 → 探针下标（0xFFFFFFFF = 无）
+        float4x4          viewProj     = float4x4(1.0f);   // 当帧相机 VP
+        u32   cellsX = 0, cellsY = 0, width = 0, height = 0;
+        float maxMatchDistance = 0.0f;   // 屏幕探针与 DDGI 探针的最大距离；超出不采纳（防串面）
+    };
+    void SetScreenProbeInput(const ScreenProbeInput& in);
+    /// 关闭 Screen Probe 输入（回到自追踪/RSM/IBL 路径）
+    void ClearScreenProbeInput();
+    [[nodiscard]] bool UsingScreenProbeInput() const { return m_ScreenProbeEnabled; }
+    /// 收敛读数（步骤 31 的验收）：上一帧"探针 SH 相对变化"的均值与"从历史继承"的探针数
+    [[nodiscard]] float GetProbeRelChange() const { return m_ProbeRelChange; }
+    [[nodiscard]] u32   GetProbesCarried() const { return m_ProbesCarried; }
+    [[nodiscard]] u32   GetProbesScreenSampled() const { return m_ProbesScreenSampled; }
+
     // 清除 RSM 输入，回退到 IBL 辐照度（useRSM 归零）。
     // 【为什么需要显式清除】SetRSM 只有一个"置位"方向，而 useRSM 是由
     // m_RSMPositionMap/m_RSMRadianceMap 是否为空**推导**出来的：帧图若只是"本帧不再调用 SetRSM"，
@@ -66,6 +86,12 @@ public:
     /// 必须与 DDGI_Trace pass 的采样数一致：光追 march 的射线结果按
     /// `[probeIndex * kSamplesPerProbe + i]` 索引，二者不一致就会读错。
     static constexpr u32 kSamplesPerProbe = 32;
+
+    /// 步骤 31：把 Screen Probe 的"单侧（半球）辐射度 SH"外推成 DDGI 需要的"整球辐射度 SH"。
+    /// Lumen 的探针只在**法线半球**内采样（∫ 域是 2π），而 DDGI 的投影在整球（4π）上做；
+    /// 直接代入会只剩一半能量。乘 2 等价于"看不见的那半边与看得见的这半边相同"这一标准近似 ——
+    /// 方向性仍来自 Screen Probe（这是本步的目的），只补回丢失的那一半立体角。
+    static constexpr float kScreenProbeSymmetricScale = 2.0f;
 
     /// 注入本帧光追 march 的探针射线辐射度（任务 17 / B4）。
     /// 传 nullptr 或缺省采样数即回退到 RSM/IBL 路径（不支持光追的设备）。
@@ -131,6 +157,12 @@ private:
         // y=updateStride（时间维分摊：每 N 帧更新一轮探针，1=每帧全量）
         // z=updatePhase（本帧轮到的相位，shader 判 probeIndex % stride == phase）
         float4   flags;
+        // ── 步骤 31（L5）：输入改为 Screen Probe ──
+        // x = cellsX, y = cellsY, z = 屏幕宽, w = 屏幕高（把探针投到屏幕后定位 16×16 单元）
+        float4   screenProbeDims;
+        // x = 是否启用（1=用 Screen Probe 的结果做输入）, y = 距离门限（世界单位，超出则不采纳）,
+        // z = 单侧→整球的对称外推系数（见 DDGI.comp 的说明）, w = 未用
+        float4   screenProbeFlags;
     };
 
     rhi::IRHIDevice* m_Device = nullptr;
@@ -146,6 +178,18 @@ private:
     std::unique_ptr<rhi::IRHIBuffer> m_ProbeBuffer;
     // 上一帧探针历史（SSBO，时间混合源）
     std::unique_ptr<rhi::IRHIBuffer> m_ProbeHistory;
+    // 步骤 31：Screen Probe 输入的绑定与逐帧统计
+    bool  m_ScreenProbeEnabled = false;
+    rhi::IRHIBuffer* m_ScreenProbeBuffer = nullptr;   // 非拥有（Lumen 持有）
+    rhi::IRHIBuffer* m_ScreenCellProbeMap = nullptr;
+    float4x4 m_ScreenViewProj = float4x4(1.0f);
+    u32   m_ScreenCellsX = 0, m_ScreenCellsY = 0, m_ScreenW = 0, m_ScreenH = 0;
+    float m_ScreenMaxMatchDistance = 0.0f;
+    std::unique_ptr<rhi::IRHIBuffer> m_StatsBuffer;
+    void* m_StatsMapped = nullptr;
+    u32   m_StatsFrame = 0;
+    float m_ProbeRelChange = 0.0f;
+    u32   m_ProbesCarried = 0, m_ProbesScreenSampled = 0;
     /// 当前探针缓冲的探针数（网格拟合改变探针数时据此重建）
     u32 m_ProbeBufferCount = 0;
     /// 历史探针缓冲中是否有**已写入**的数据（着色器 `historyValid`）。

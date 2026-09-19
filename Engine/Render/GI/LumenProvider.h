@@ -162,6 +162,15 @@ public:
     [[nodiscard]] float GetSHIrradianceMeanDiff() const { return m_Scene ? m_Scene->GetSHIrradianceMeanDiff() : 0.0f; }
     [[nodiscard]] u32 GetSHProbes() const { return m_Scene ? m_Scene->GetSHProbes() : 0u; }
     [[nodiscard]] u32 GetSHRays() const { return m_Scene ? m_Scene->GetSHRays() : 0u; }
+    // ── 步骤 31（L5）：DDGI（Radiance Cache）要把输入换成我们的 Screen Probe 结果 ──
+    [[nodiscard]] rhi::IRHIBuffer* GetProbeBuffer() const {
+        return m_Scene ? m_Scene->GetProbeBuffer() : nullptr;
+    }
+    [[nodiscard]] rhi::IRHIBuffer* GetCellProbeBuffer() const {
+        return m_Scene ? m_Scene->GetCellProbeBuffer() : nullptr;
+    }
+    [[nodiscard]] u32 GetScreenCellsX() const { return m_Scene ? m_Scene->GetScreenCellsX() : 0u; }
+    [[nodiscard]] u32 GetScreenCellsY() const { return m_Scene ? m_Scene->GetScreenCellsY() : 0u; }
     [[nodiscard]] u32 GetShadedHits() const { return m_Scene ? m_Scene->GetShadedHits() : 0u; }
     [[nodiscard]] u32 GetShadedMissingPages() const { return m_Scene ? m_Scene->GetShadedMissingPages() : 0u; }
     [[nodiscard]] float GetShadedAlbedoMeanDiff() const {

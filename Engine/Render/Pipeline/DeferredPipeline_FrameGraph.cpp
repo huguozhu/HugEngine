@@ -582,6 +582,37 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         } else {
             m_DDGI.SetTracedRadiance(nullptr, 0);   // 无光追：DDGI 走 RSM/IBL 路径
         }
+
+        // ── 步骤 31（L5）：把 DDGI 的输入改为 **Screen Probe 的结果** ──
+        // 【一帧延迟】DDGI 段在 Lumen 段**之前**注册，所以这里读到的是上一帧的探针缓冲 —— 这既
+        // 避开了循环依赖，也是"用上一帧屏幕信息"的标准做法（与其它 GI 源一致）。
+        // `HE_DDGI_INPUT=traced` 可切回自追踪路径，用于 A/B。
+        {
+            static const bool s_useScreenProbe = []() {
+                const char* v = std::getenv("HE_DDGI_INPUT");
+                return !(v && std::string(v) == "traced");   // 默认：Screen Probe（计划要求的输入源）
+            }();
+            LumenProvider* lp = nullptr;
+            for (auto& p : m_GIProviders) {
+                if (!p->Handles(GISourceId::Lumen)) continue;
+                if (auto* l = dynamic_cast<LumenProvider*>(p.get())) { lp = l; break; }
+            }
+            if (s_useScreenProbe && lp && lp->GetProbeBuffer() && lp->GetCellProbeBuffer()) {
+                GI_DDGI::ScreenProbeInput in;
+                in.probeBuffer  = lp->GetProbeBuffer();
+                in.cellProbeMap = lp->GetCellProbeBuffer();
+                in.viewProj     = camera.GetViewProjMatrix();
+                in.cellsX       = lp->GetScreenCellsX();
+                in.cellsY       = lp->GetScreenCellsY();
+                in.width        = w;
+                in.height       = h;
+                // 距离门限 = 1 个 DDGI 格距：只接受"与本探针落在同一处表面附近"的屏幕探针
+                in.maxMatchDistance = m_DDGI.cellSize;
+                m_DDGI.SetScreenProbeInput(in);
+            } else {
+                m_DDGI.ClearScreenProbeInput();
+            }
+        }
     }
 
     // ============================================================
