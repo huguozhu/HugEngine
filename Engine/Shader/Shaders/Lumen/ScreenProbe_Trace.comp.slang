@@ -15,6 +15,7 @@
 [[vk::binding(1, 0)]] StructuredBuffer<ScreenProbe> u_Probes;
 [[vk::binding(2, 0)]] RWStructuredBuffer<float4>    u_RayResult;   // 每 (探针, 光线) 一条：x=t, y=命中, z=dot(dir,n), w=未用
 [[vk::binding(3, 0)]] RWStructuredBuffer<uint>      u_Stats;       // 0=命中, 1=未命中, 2=总光线, 3=半球内(点积>0)光线
+[[vk::binding(4, 0)]] RWStructuredBuffer<float4>    u_RayHitPos;   // xyz = 命中点（步骤 22 的着色输入）, w = 是否命中
 
 [[vk::push_constant]] cbuffer TracePC {
     uint4  dims;          // x = 探针数, y = 每探针光线数, z = 随机种子, w = 未用
@@ -98,6 +99,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     }
 
     u_RayResult[tid.x] = float4(t, hit ? 1.0 : 0.0, nd, 0.0);
+    u_RayHitPos[tid.x] = float4(ro + rd * t, hit ? 1.0 : 0.0);   // 命中点位置（未命中时无意义）
     InterlockedAdd(u_Stats[2], 1u);
     if (nd > 0.0) InterlockedAdd(u_Stats[3], 1u);   // 半球性检查：GGX 采样必须全部落在法线半球内
     if (hit) InterlockedAdd(u_Stats[0], 1u); else InterlockedAdd(u_Stats[1], 1u);
