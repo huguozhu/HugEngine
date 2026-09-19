@@ -24,15 +24,22 @@ void LumenScene::BuildPageTable() {
     if (m_SDF.GetCardCoverage().cards == 0) return;
     m_PageTableBuilt = true;
 
-    // 页 = 卡片（步骤 13 的清单）：一张卡一页。这里只演示前 N 页（真实分配策略在步骤 15~19）。
+    // 页 = 卡片（步骤 13 的清单）：一张卡一页。
+    // 【步骤 18】逻辑页覆盖全部卡片（上限 1024，对应 §4 的"1024 页"），而物理页只有 atlas 的 64 块：
+    // 逻辑页 ≫ 物理页，LRU 淘汰才真正被用到（此前 1:1 恒等映射，永远碰不到淘汰路径）。
     const u32 cardCount = std::max(1u, m_SDF.GetCardCoverage().cards);
-    const u32 pageCount = std::min(cardCount, 64u);
+    const u32 pageCount = std::min(cardCount, 1024u);
     m_PageTable.Resize(pageCount);
+    m_PhysicalPages = kAtlasGridDim * kAtlasGridDim;
+    // 验收实验可临时打开下一行（合成漫游），见 §附二十五
+    m_PhysOwner.assign(m_PhysicalPages, 0xFFFFFFFFu);
+    m_FreePhysical.clear();
+    for (u32 i = m_PhysicalPages; i > 0u; --i) m_FreePhysical.push_back(i - 1u);
 
     // 走一遍六态：前面的页走完整生命周期，后面的停在中间态（覆盖率越高，状态越丰富）
     for (u32 i = 0; i < pageCount; ++i) {
         m_PageTable.Request(i, /*card*/ i, /*frame*/ 0);
-        m_PageTable.Allocate(i, /*physical*/ i);
+        AllocatePhysicalPage(i, /*frame*/ 0);
         if (i % 7u == 3u) continue;                     // 停在 Allocating
         m_PageTable.BeginCapture(i);
         if (i % 11u == 5u) continue;                    // 停在 Capturing
@@ -56,6 +63,51 @@ void LumenScene::BuildPageTable() {
                  m_PageTable.Count(kSCPageState_Captured), m_PageTable.Count(kSCPageState_Dirty));
 }
 
+// ============================================================
+// 步骤 18：物理页池 + LRU 淘汰
+//
+// 【为什么需要】步骤 14 的页表是"逻辑页 i → 物理页 i"的恒等映射：逻辑页最多 64 个，永远够用，
+// 于是"淘汰/碎片"两条路径从来没被走到过。真实 Lumen 是"逻辑页 ≫ 物理页"（§4：1024 页上限，
+// atlas 只有若干块），必须靠 LRU 淘汰最久未用的页来回收物理页。
+//
+// 【为什么固定池下没有碎片】池大小固定、页大小固定（64×64 texel），任意时刻每个物理页只可能
+// "属于某个逻辑页"或"空闲"。分配不到就淘汰 LRU ⇒ 分配成功率恒 100%，不存在"有空间但拼不出连续块"
+// 的碎片问题。真正的 defrag（把 atlas 里的页块搬移以腾出连续区域）在没有"变长页"之前没有收益，
+// 列为后续项（见 §附二十五）。
+bool LumenScene::AllocatePhysicalPage(u32 logicalPage, u32 frame) {
+    if (logicalPage >= m_PageTable.Size() || m_PhysOwner.empty()) return false;
+
+    // 池空 ⇒ 淘汰"最久未用且内容有效"的逻辑页（只淘汰 Captured/Dirty，绝不动正在流水线里的页）
+    if (m_FreePhysical.empty()) {
+        u32 victim = 0xFFFFFFFFu;
+        u32 oldest = 0xFFFFFFFFu;
+        for (u32 p = 0; p < m_PageTable.Size(); ++p) {
+            const auto& e = m_PageTable.Get(p);
+            if (e.state != kSCPageState_Captured && e.state != kSCPageState_Dirty) continue;
+            if (e.pageIndex == kSCInvalidPage) continue;
+            if (e.lastUsedFrame < oldest) { oldest = e.lastUsedFrame; victim = p; }
+        }
+        if (victim == 0xFFFFFFFFu) { ++m_AllocFailures; return false; }   // 没有可淘汰的页 ⇒ 记账（不应发生）
+        const u32 freedPhys = m_PageTable.Get(victim).pageIndex;
+        m_PageTable.Evict(victim);
+        if (freedPhys < m_PhysOwner.size()) {
+            m_PhysOwner[freedPhys] = 0xFFFFFFFFu;
+            m_FreePhysical.push_back(freedPhys);
+        }
+        ++m_Evictions;
+    }
+
+    const u32 phys = m_FreePhysical.back();
+    m_FreePhysical.pop_back();
+    if (!m_PageTable.Allocate(logicalPage, phys)) {   // Requested → Allocating
+        m_FreePhysical.push_back(phys);
+        return false;
+    }
+    m_PhysOwner[phys] = logicalPage;
+    ++m_AllocSuccess;
+    (void)frame;
+    return true;
+}
 void LumenScene::CreatePageCheckGPUObjects() {
     if (m_PageCheckPSO) return;
 
@@ -248,7 +300,7 @@ void LumenScene::RunCardCapture(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbA
     u32 allocated = 0;
     for (u32 page = 0; page < m_PageTable.Size() && allocated < m_BudgetAllocations; ++page) {
         if (m_PageTable.Get(page).state != kSCPageState_Requested) continue;
-        if (m_PageTable.Allocate(page, page)) ++allocated;   // Requested → Allocating
+        if (AllocatePhysicalPage(page, m_FeedbackFrame)) ++allocated;   // Requested → Allocating（走 LRU 页池）
     }
     u32 promoted = 0;
     for (u32 page = 0; page < m_PageTable.Size() && promoted < m_BudgetCaptures; ++page) {
@@ -331,8 +383,9 @@ void LumenScene::RunCardCapture(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbA
             cf.grid1 = cf.grid0;
             std::memcpy(m_CaptureFrameMapped, &cf, sizeof(cf));
         }
-        pc.pageOriginRes = float4((float)((page % kAtlasGridDim) * kAtlasPageRes),
-                                  (float)((page / kAtlasGridDim) * kAtlasPageRes),
+        const u32 phys = m_PageTable.Get(page).pageIndex;   // atlas 块号 = **物理页**
+        pc.pageOriginRes = float4((float)((phys % kAtlasGridDim) * kAtlasPageRes),
+                                  (float)((phys / kAtlasGridDim) * kAtlasPageRes),
                                   (float)kAtlasPageRes, card.texelWorld);
         pc.planeOrigin = float4(planeOrigin, 0.0f);
         pc.planeStepU  = float4(stepU, 0.0f);
@@ -470,6 +523,18 @@ void LumenScene::RunFeedback(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbWorl
         return;   // 本帧只建资源；下一帧开始派发（"新建资源当帧使用"的教训见 §附二十）
     }
 
+    // 【验收用】合成漫游：静态相机下把"需要的页"人为轮换，用来把 LRU 淘汰路径压出来。
+    // 真实漫游时这一步由相机的移动自然完成（feedback 的 top-N 会跟着画面走）。
+    if (m_SyntheticRoaming && m_FeedbackFrame > 20u) {
+        const u32 span = std::min<u32>(64u, m_PageTable.Size());
+        for (u32 k = 0; k < span; ++k) {
+            const u32 page = (m_FeedbackFrame * 3u + k) % m_PageTable.Size();
+            m_PageTable.Touch(page, m_FeedbackFrame);
+            if (m_PageTable.Get(page).state == kSCPageState_Invalid)
+                m_PageTable.Request(page, page, m_FeedbackFrame);
+        }
+    }
+
     // ── ① 先处理**上一帧**的结果（每块一个槽位：完整且确定）──
     // 【为什么必须在清零之前读】计数由 GPU 原子加写入；若本帧先清零再读，读到的一定是 0
     // （第一版就是这样：请求恒 0 条）。按"引擎在录 N+1 帧时 N 帧已执行完"的节拍，先读后清是对的。
@@ -490,6 +555,7 @@ void LumenScene::RunFeedback(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbWorl
             return (a.y != b.y) ? (a.y > b.y) : (a.x < b.x);   // 权重降序；权重相同按页号定序 ⇒ **确定性**
         });
 
+        // 步骤 18：被采纳 top-N 的页就是"本帧用到"的页 ⇒ 更新 LRU 时间戳
         const u32 topN = std::min(count, m_BudgetFeedbackPages);   // 步骤 17：本帧最多采纳这么多条请求
         std::vector<u32> top;
         top.reserve(topN);
@@ -498,6 +564,7 @@ void LumenScene::RunFeedback(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbWorl
             if (page >= m_PageTable.Size()) continue;
             top.push_back(page);
             // 需要但还没有的页 ⇒ 置为 Requested（未完成请求留在 Requested，不回退不丢弃 —— 步骤 17 的口径）
+            m_PageTable.Touch(page, m_FeedbackFrame);   // LRU：本帧用到
             if (m_PageTable.Get(page).state == kSCPageState_Invalid)
                 m_PageTable.Request(page, page, m_FeedbackFrame);
         }
@@ -527,6 +594,8 @@ void LumenScene::RunFeedback(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbWorl
                          m_PageTable.Count(kSCPageState_Allocating), m_PageTable.Count(kSCPageState_Capturing),
                          m_PageTable.Count(kSCPageState_Captured), m_PageTable.Count(kSCPageState_Dirty),
                          m_PagesCapturedTotal, m_MaxCapturesInAFrame);
+            HE_CORE_INFO("  页池/LRU（步骤 18）: 物理页 {}/{} 空闲；分配成功 {} / 失败 {} / 淘汰 {} 次",
+                         FreePhysicalPages(), m_PhysicalPages, m_AllocSuccess, m_AllocFailures, m_Evictions);
         }
     }
 

@@ -1449,7 +1449,8 @@ python Tools\pt\analyze_pt.py --compare <pt_tag> <deferred_tag> --target hdr
 | 15 Card Capture（软件光栅化写 atlas） | 🟡 可用（真因已修：push constant 超 128 B 被截断） | 已落地：3 张 RGBA16F atlas（512² = 8×8 页 × 64²；`lumen_sc_atlas_albedo` 可转储）、`SurfaceCache_Capture.comp`（一卡一组、页状态门控只捕 `Capturing`、`kMaxCapturesPerFrame=8` 预算、卡分辨率自适应降采样进 64² 页、命中点投影到屏幕取 GBuffer albedo/normal）、命中/未命中/march 命中三个诊断计数。**实测：5 页 20480 个 texel 全部未命中、march 命中 0**。已排除：push constant 字段错位（旧版 shader 多一个 camPosW，已修）、eps/步长过小（已把 eps 提到 1 个近层体素=14.2、步长 eps/2）。下一步：把 march 单独拿出来，用一张已知卡对照 CPU 真值逐步定位 |
 | 16 Feedback（缺失页检测） | ✅ 已完成 | `SurfaceCache_Feedback.comp.slang`：屏幕按 **16×16 分块**，每块取中心像素的 GBuffer 世界坐标 → 找"包含它的最小 AABB"的那张卡 → 写 `(pageIndex, weight)`，`weight = 256 像素 × 卡重要性(填充率×√边长) × 距离衰减`；**每块写自己的槽位**（不用计数器 ⇒ 完整且确定）。C++ 侧读槽位→过滤权重 0→按(权重降序, 页号升序)排序→取前 `kMaxCapturesPerFrame×4`→把 `Invalid` 的页置 `Requested`，再把前 `kMaxCapturesPerFrame` 个 `Requested` 推进到 `Capturing`（**闭环**：下一帧步骤 15 就捕获它们），并同步 GPU 镜像。**验收**：静态相机下 7730 条请求（94.7% 的块有几何）、**top-32 与上一帧重叠 32/32** ⇒ 无整屏抖动；排序含页号定序 ⇒ 完全确定 |
 | 17 预算与跨帧摊销 | ✅ 已完成 | 三个显式预算：`maxCapturesPerFrame = 8` / `maxAllocationsPerFrame = 8` / `maxFeedbackPages = 256`（`LumenScene::SetBudgets` 可调）。三段摊销：Feedback 采纳 top-`maxFeedbackPages` → 分配阶段把 `Requested` 推进到 `Allocating`（≤ 分配预算）→ 捕获阶段把 `Allocating` 推进到 `Capturing` 并真正捕获（≤ 捕获预算）；**没做完的留在原状态，不回退不丢弃**。统计每 20 帧输出（预算/六态计数/累计捕获/单帧最多）。**验收**：预算 8 时收敛用 2 帧（8+6 页）、预算减半到 4 时用 4 帧（4+4+4+2 页）⇒ **收敛变慢但单帧捕获量恒 ≤ 预算（无尖峰）**，逐帧日志可复现 |
-| 18–41 | ⬜ 未开始 | 18 LRU 淘汰与碎片整理、19 L2 退出判据，随后 20–25 Screen Probe |
+| 18 LRU 淘汰与碎片整理 | ✅ 已完成（LRU；defrag 见说明） | 逻辑页 = min(卡片数, **1024**)（§4 的页上限），**物理页 = atlas 的 64 块**，两者相差一个量级 ⇒ 淘汰路径真正被走到。`AllocatePhysicalPage`：池空则淘汰"最久未用且内容有效（Captured/Dirty）"的逻辑页（`lastUsedFrame` 最小者），释放其物理页后复用；**绝不动正在流水线里的页**（Requested/Allocating/Capturing）。Feedback 的 top-N 每帧 `Touch`（LRU 的"用"）。统计：`页池/LRU: 物理页 x/64 空闲；分配成功 A / 失败 B / 淘汰 C 次`。**验收（合成漫游，静态相机下人为轮换需要页）**：累计捕获 166 → 247 → 309 页（吞吐持续）、**单帧最多恒 8 页（= 预算，不下降）**、**分配失败恒 0（成功率 100%）**、淘汰 279 → 360 → 422 次。**defrag 说明**：页大小固定、池大小固定 ⇒ 不存在"有空间但拼不出连续块"的碎片，分配不到一律由 LRU 回收；变长页/atlas 搬移式 defrag 列为后续项（§附二十五） |
+| 19–41 | ⬜ 未开始 | 19 L2 退出判据（atlas 材质可视化 + 覆盖率 + 白炉 + 背靠背读数），随后 20–25 Screen Probe |
 
 ### 阶段 A：框架前置（不产出画面，但后补等于重构）
 
@@ -2649,3 +2650,29 @@ Feedback（步骤 16）: 本帧请求 7730 条（16×16 分块，权重 = 覆盖
 ⇒ **预算减半：收敛帧数 2 → 4（变慢），而任何一帧的捕获量都 ≤ 预算（无尖峰）** ——
 正是步骤 17 的验收口径。页表六态在这两个配置下最终都排空（Invalid/Requested/Allocating/Capturing 归 0，
 Captured 55 / Dirty 9），说明"请求 → 分配 → 捕获 → 可用"的回路是自洽的。
+### 附二十五：步骤 18「LRU 淘汰」——逻辑页 1024 / 物理页 64 下的 100% 分配成功率
+
+**此前为什么碰不到淘汰**：步骤 14 的页表是"逻辑页 i → 物理页 i"的**恒等映射**，逻辑页最多 64 个 ⇒
+永远够用，"淘汰/碎片"两条路径从来没被执行过。本轮把它改成真实结构：
+
+- **逻辑页 = min(卡片数, 1024)**（§4 的"1024 页上限"）；**物理页 = atlas 的 8×8 = 64 块**；
+- `AllocatePhysicalPage()`：池空则**淘汰最久未用**（`lastUsedFrame` 最小）且**内容有效**（Captured/Dirty）
+  的逻辑页 → 释放其物理页 → 复用；**绝不动正在流水线里的页**（Requested/Allocating/Capturing）；
+- Feedback 的 top-N 每帧 `Touch`（LRU 的"用"），于是"画面用到的页"自然留在池里；
+- 捕获写 atlas 时用**物理页号**（此前是逻辑页号，恒等映射下恰好一致，现在必须分开）。
+
+**验收（合成漫游：静态相机下人为轮换"需要的页"，把淘汰路径压出来）**：
+
+```
+页状态: Invalid 161 / Requested 3 / Allocating 0 / Capturing 0 / Captured 64 / Dirty 0
+累计捕获 166 → 247 → 309 页，单帧最多恒 8 页
+页池/LRU: 物理页 0/64 空闲；分配成功 343 → 424 → 486；失败 0；淘汰 279 → 360 → 422 次
+```
+
+⇒ **捕获吞吐不下降（单帧恒 = 预算 8）**、**分配成功率 100%（失败恒 0）**，LRU 持续回收（淘汰数单调增）——
+正是步骤 18 的验收口径。
+
+**defrag 的说明（诚实记录）**：页大小固定（64×64 texel）、池大小固定 ⇒ 任意时刻每个物理页要么属于某个
+逻辑页、要么空闲，**不存在"有空间但拼不出连续块"的碎片**；分配不到一律由 LRU 回收解决。
+真正需要 defrag 的是"变长页 / 需要连续多块"的场景（例如把同 mesh 的多张卡排到连续区域），
+届时要做的是 atlas 内的页块搬移（一条 compute 拷贝 + 页表重写），列为后续项。

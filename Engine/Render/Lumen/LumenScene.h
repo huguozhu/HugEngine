@@ -144,6 +144,10 @@ private:
     }
     [[nodiscard]] u32 GetPagesCapturedTotal() const { return m_PagesCapturedTotal; }
     [[nodiscard]] u32 GetMaxCapturesInAFrame() const { return m_MaxCapturesInAFrame; }
+    /// 验收用：打开"合成漫游"（静态相机下人为轮换需要的页，逼出 LRU 淘汰）
+    void SetSyntheticRoaming(bool on) { m_SyntheticRoaming = on; }
+    [[nodiscard]] u32 GetEvictions() const { return m_Evictions; }
+    [[nodiscard]] u32 GetAllocFailures() const { return m_AllocFailures; }
     std::unique_ptr<rhi::IRHITexture> m_AtlasAlbedo, m_AtlasNormal, m_AtlasEmissive;
     std::unique_ptr<rhi::IRHIBuffer>  m_CaptureStats;
     void* m_CaptureStatsMapped = nullptr;
@@ -155,6 +159,17 @@ private:
     bool m_CaptureBound = false;
     u32  m_CardCaptureHits = 0, m_CardCaptureMisses = 0;
     u32  m_PagesCapturedTotal = 0;      // 累计捕获页数（收敛曲线）
+    // ── 步骤 18：物理页池 + LRU 淘汰（逻辑页可以远多于物理页）──
+    // 逻辑页数 = min(卡片数, 1024)（§4 的"1024 页上限"），物理页 = atlas 的 8×8 = 64 块。
+    // 固定池 + LRU 下不存在"碎片"：分配不到就淘汰最久未用的（Captured/Dirty）页，分配成功率恒 100%。
+    std::vector<u32> m_FreePhysical;    // 空闲物理页栈
+    std::vector<u32> m_PhysOwner;       // 物理页 -> 逻辑页（0xFFFFFFFF = 空闲）
+    u32  m_PhysicalPages = 0;
+    u32  m_AllocSuccess = 0, m_AllocFailures = 0, m_Evictions = 0;
+    bool m_SyntheticRoaming = false;    // 验收用：合成"漫游"（静态相机下人为轮换需要页，逼出淘汰路径）
+    /// 物理页池 + LRU：为逻辑页分配一个物理页（必要时淘汰最久未用者）
+    bool AllocatePhysicalPage(u32 logicalPage,u32 frame);
+    u32  FreePhysicalPages() const { return (u32)m_FreePhysical.size(); }
     u32  m_MaxCapturesInAFrame = 0;     // 单帧最多捕获了几页（应当 ≤ 预算 ⇒ 无尖峰）
     // ── Feedback（步骤 16）──
     static constexpr u32 kMaxFeedbackTiles = 16384;  // 槽位数上限（= 512×512 屏幕的 16×16 块数；1080p 只需 8160）
