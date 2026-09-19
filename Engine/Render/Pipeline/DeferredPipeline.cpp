@@ -273,6 +273,11 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
             // 【步骤 34（11.3）】所有降噪器的**历史纹理统一由池分配**：同名同尺寸同格式只建一次，
             // 于是"当帧有多少条降噪信号、各占多少显存"变成一个能一次打印出来的事实。
             m_DenoiseHistoryPool.Initialize(device);
+            // 【步骤 35】Lumen 的 Screen Probe 时域历史也从这个池里取（两份探针镜像 + 两份单元映射）。
+            // 位置必须在池拿到 device **之后**：早于这一行时池还没有设备，`AcquireBuffer` 只会返回
+            // nullptr，Lumen 就会退回"自建一套"——那正是这一步要消灭的形态。设置本身只存指针，
+            // 真正的取用发生在首帧的滤波 pass 之前。
+            m_LumenScene.SetHistoryPool(&m_DenoiseHistoryPool);
             if (m_RTShadow && m_RTShadow->IsValid()) {
                 RTDenoiser::Config cfg;
                 cfg.format          = rhi::Format::R16_FLOAT;

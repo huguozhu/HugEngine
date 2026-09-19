@@ -83,6 +83,25 @@ void LumenScene::OnResize(u32 width, u32 height) {
     // **世界空间**尺寸，与视口无关，不在此重建。
     CreateOutput();
     m_SDF.SetViewport(width, height);   // 调试视图纹理随之按新尺寸重建（步骤 12）
+
+    // 【步骤 35】探针滤波的状态一律作废：单元网格（cellsX/cellsY）变了 ⇒ 单元映射缓冲与
+    // 其历史都要按新尺寸重建，历史内容也失去意义（探针布局变了，重投影对不上）。
+    // 这里把"池里借来的指针"与"自建缓冲"一起清掉，下一帧的 `!m_ProbeFilterBound` 分支重新取；
+    // 历史标记与上一帧 viewProj 也复位，避免拿旧尺寸的历史去混合（那会得到错位的拖影）。
+    m_ProbeHistFromPool[0] = m_ProbeHistFromPool[1] = nullptr;
+    m_CellHistFromPool[0]  = m_CellHistFromPool[1]  = nullptr;
+    for (u32 k = 0; k < 2u; ++k) {
+        m_ProbeFilterHistBuf[k].reset();
+        m_CellProbeHistBuf[k].reset();
+    }
+    m_ProbeFilteredBuf.reset();
+    m_ProbeFilterStatsBuf.reset();
+    m_ProbeFilterStatsMapped = nullptr;
+    m_ProbeFilterBound = false;
+    m_ProbeFilterHistoryReady = false;
+    m_ProbeFilterHistIdx = 0;
+    m_ProbePrevViewProj = float4x4(1.0f);
+    m_IrrBound = false;   // 辐照度 pass 绑的是过滤后探针缓冲 ⇒ 必须重绑
 }
 
 void LumenScene::CreateSkeletonPipeline() {

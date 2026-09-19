@@ -848,6 +848,11 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                         lp->RunSurfaceCacheShading(c, *cam);   // 步骤 22：命中点着色（材质取自 atlas）
                         // 步骤 23：SH 投影（白炉下 l0 必须等于 √π —— 用同一面白炉开关驱动）
                         lp->RunScreenProbeSHProject(c, furnaceMode);
+                        // 步骤 35：探针滤波（3×3 单元 YCoCg AABB + 时域重投影 EMA）。
+                        // 必须夹在 SH 投影与逐像素辐照度之间：后者读的是过滤后的探针缓冲，
+                        // 而 DDGI 段（注册在本段之前）读的也是它 —— 按步骤 31 定的"一帧延迟"语义，
+                        // DDGI 拿到的是上一帧的过滤结果，正是降噪后的输入。
+                        lp->RunProbeFilter(c, *cam);
                         // 步骤 24：由探针 SH 采样出逐像素辐照度（供 Provider 输出 pass 贴图）
                         lp->RunProbeIrradiance(c, gbN, gbAl, gbWP);
                         timer->End(c, kLumenProbeTimerIdx);

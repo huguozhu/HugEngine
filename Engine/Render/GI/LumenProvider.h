@@ -41,12 +41,18 @@ public:
         return m_Scene != nullptr && m_Scene->GetOutput() != nullptr;
     }
     [[nodiscard]] const char* GetName() const override { return "Lumen"; }
+    /// 【步骤 35】本帧是否真的产出：由 `SyncToStack` 按层栈写入。
+    /// 不能再用 `IsValid()`（它只说明输出纹理在，Lumen 不进任何层栈时也恒真）——
+    /// 否则转储会落到 `prov6_*` 这些"上一帧/未使用"的纹理上，信号登记也会报一条没跑的源。
+    [[nodiscard]] bool ProducedThisFrame() const override { return m_InStack; }
 
     // ── 调度 ──
     /// 层栈是唯一真值：Lumen 自己不需要"enabled"开关（与 DDGI 的 SetEnabled 不同，
-    /// 它的 pass 门控完全由 NeedsPass(层栈) 决定）
-    void SyncToStack(const GIChannelStack& /*stack*/) override {}
-
+    /// 它的 pass 门控完全由 NeedsPass(层栈) 决定）。但"本帧是否产出"必须记下来 ——
+    /// 它同时决定转储是否有效（见 `ProducedThisFrame`）与信号是否登记。
+    void SyncToStack(const GIChannelStack& stack) override {
+        m_InStack = stack.Has(GISourceId::Lumen);
+    }
     /// 待落地：Screen Probe 的入射辐射度可以用共享的"前帧 HDR 辐射度"（§6 的探针 miss 回退）。
     /// 骨架阶段不消费，故保持 false —— 声明为真会让 `CaptureRadiance` 白捕获一次。
     [[nodiscard]] bool NeedsRadianceHistory() const override { return false; }
@@ -162,8 +168,25 @@ public:
     [[nodiscard]] float GetSHIrradianceMeanDiff() const { return m_Scene ? m_Scene->GetSHIrradianceMeanDiff() : 0.0f; }
     [[nodiscard]] u32 GetSHProbes() const { return m_Scene ? m_Scene->GetSHProbes() : 0u; }
     [[nodiscard]] u32 GetSHRays() const { return m_Scene ? m_Scene->GetSHRays() : 0u; }
+    // ── 步骤 35：探针滤波（空间 3×3 单元 YCoCg AABB + 时域重投影 EMA）──
+    /// 必须在 SH 投影之后、逐像素辐照度之前调用（下游读的是过滤后的探针缓冲）
+    void RunProbeFilter(rhi::IRHICommandList* cmd, const CameraData& cam) {
+        if (m_Scene) m_Scene->RunScreenProbeFilter(cmd, cam.GetViewProjMatrix());
+    }
+    [[nodiscard]] float GetProbeNoiseIn()  const { return m_Scene ? m_Scene->GetProbeNoiseIn()  : 0.0f; }
+    [[nodiscard]] float GetProbeNoiseOut() const { return m_Scene ? m_Scene->GetProbeNoiseOut() : 0.0f; }
+    [[nodiscard]] float GetProbeFrameChange() const { return m_Scene ? m_Scene->GetProbeFrameChange() : 0.0f; }
+    [[nodiscard]] u32 GetProbeFilterMode() const { return m_Scene ? m_Scene->GetProbeFilterMode() : 0u; }
     // ── 步骤 31（L5）：DDGI（Radiance Cache）要把输入换成我们的 Screen Probe 结果 ──
+    /// 【步骤 35 起返回**过滤后**的那一份】DDGI 段注册在 Lumen 段之前 ⇒ 它读到的是上一帧的
+    /// 过滤结果（步骤 31 已定的"一帧延迟"语义），正是降噪后的输入。
     [[nodiscard]] rhi::IRHIBuffer* GetProbeBuffer() const {
+        if (!m_Scene) return nullptr;
+        rhi::IRHIBuffer* filtered = m_Scene->GetProbeFilteredBuffer();
+        return filtered ? filtered : m_Scene->GetProbeBuffer();
+    }
+    /// 未过滤的探针缓冲（诊断对照用）
+    [[nodiscard]] rhi::IRHIBuffer* GetRawProbeBuffer() const {
         return m_Scene ? m_Scene->GetProbeBuffer() : nullptr;
     }
     [[nodiscard]] rhi::IRHIBuffer* GetCellProbeBuffer() const {
@@ -226,6 +249,34 @@ public:
     [[nodiscard]] rhi::IRHITexture* GetDebugNormal() const { return m_Normal; }
     [[nodiscard]] rhi::IRHITexture* GetDebugAlbedo() const { return m_Albedo; }
 
+    /// 【步骤 35（§10 的 11.3）】把 Lumen 自己的降噪信号登记进统一框架。
+    ///
+    /// 它是一条**缓冲类**信号：载体不是一张图，而是探针 SH 缓冲（8 万探针量级）。
+    /// 登记的判据是 `ProducedThisFrame()`（层栈）而不是 `IsValid()` —— 后者在 Lumen 没进任何
+    /// 层栈时也恒真，会把没跑的源报成"待降噪信号"（这正是步骤 34 在 RT 上抓到的那个假读数）。
+    /// 核不是双边上双边滤波，故引导参数位改用 `note` 说明，避免 LogSummary 打出两个假的 sigma。
+    void DescribeSignals(DenoiseSignalRegistry& registry, rhi::IRHITexture* depth,
+                         rhi::IRHITexture* normal, rhi::IRHITexture* /*velocity*/) override {
+        if (!ProducedThisFrame() || !m_Scene) return;
+        rhi::IRHIBuffer* in  = m_Scene->GetProbeBuffer();
+        rhi::IRHIBuffer* out = m_Scene->GetProbeFilteredBuffer();
+        if (!in || !out) return;
+        const u32 probes = m_Scene->GetProbeCount();
+        DenoiseSignal s;
+        s.name         = "Lumen_ScreenProbe";
+        s.inputBuffer  = in;
+        s.outputBuffer = out;
+        s.depth        = depth;    // 引导：重投影要用 GBuffer 的法线/深度做一致性校验
+        s.normal       = normal;
+        s.width        = probes;   // 缓冲信号：分辨率 = 元素数 × 1
+        s.height       = 1u;
+        s.targetWidth  = probes;
+        s.targetHeight = 1u;
+        s.needsUpscale = false;    // 探针是"每 16×16 像素一个"的稀疏载体，由逐像素辐照度级重建
+        s.note         = m_Scene->GetProbeFilterNote();
+        registry.Register(s);
+    }
+
 private:
     [[nodiscard]] rhi::IRHITexture* Output() const {
         return m_Scene ? m_Scene->GetOutput() : nullptr;
@@ -233,6 +284,7 @@ private:
 
     LumenScene* m_Scene = nullptr;   // 非拥有：由 DeferredPipeline 持有
     const MeshBatcher* m_Batcher = nullptr;   // 非拥有：合并几何（SDF 构建输入）
+    bool m_InStack = false;          // 本帧层栈是否要求了 Lumen（由 SyncToStack 写入）
     // GBuffer 输入（非拥有，帧图每帧注入）
     rhi::IRHITexture* m_Depth  = nullptr;
     rhi::IRHITexture* m_Normal = nullptr;

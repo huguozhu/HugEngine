@@ -92,7 +92,10 @@ void LumenScene::RunProbeIrradiance(rhi::IRHICommandList* cmd, rhi::IRHITexture*
     if (!m_IrrBound) {
         CreateIrradianceGPUObjects();
         if (!m_IrrPSO) return;
-        m_Device->UpdateDescriptorSet(m_IrrSet, 0, rhi::DescriptorType::StorageBuffer, m_ProbeBuf.get());
+        // 【步骤 35】绑定**过滤后**的探针缓冲：辐照度是探针 SH 的逐像素重建，
+        // 读未过滤的一份就等于把刚做的滤波丢掉（滤波 pass 每帧都会写出这一份）。
+        m_Device->UpdateDescriptorSet(m_IrrSet, 0, rhi::DescriptorType::StorageBuffer,
+                                      m_ProbeFilteredBuf ? m_ProbeFilteredBuf.get() : m_ProbeBuf.get());
         m_Device->UpdateDescriptorSet(m_IrrSet, 1, rhi::DescriptorType::StorageBuffer, m_CellProbeBuf.get());
         m_Device->UpdateDescriptorSetWithImageView(m_IrrSet, 5,
             rhi::DescriptorType::StorageImage, m_IrradianceTex->GetNativeHandle());

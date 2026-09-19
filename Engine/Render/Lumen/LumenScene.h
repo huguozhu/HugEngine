@@ -27,6 +27,7 @@
 #include "Lumen/LumenSDF.h"
 #include "Lumen/LumenTraceConfig.h"
 #include "Lumen/SurfaceCacheTypes.h"
+#include "PostProcess/DenoiseSignal.h"   // 步骤 35：时域历史走统一池（DenoiseHistoryPool）
 
 #include <memory>
 
@@ -49,6 +50,10 @@ public:
     [[nodiscard]] bool IsReady() const { return m_Device != nullptr; }
     [[nodiscard]] u32  GetWidth()  const { return m_Width; }
     [[nodiscard]] u32  GetHeight() const { return m_Height; }
+
+    /// 【步骤 35】把"降噪历史"的统一分配池交给本类（非拥有；须在 Initialize 之前或之后、首帧之前设置）。
+    /// 探针的时域历史（两份探针镜像 + 两份单元映射）从这里取，与其他 GI 源的历史资源同账。
+    void SetHistoryPool(DenoiseHistoryPool* pool) { m_HistoryPool = pool; }
 
     /// 屏幕空间的 Lumen 输出纹理（RGBA16F，可被 Lighting 采样）。
     /// 【骨架阶段】漫反射与镜面**共用这一张**；步骤 20~29 里漫反射来自 Screen Probe、
@@ -102,6 +107,24 @@ public:
     [[nodiscard]] float GetSHIrradianceMeanDiff() const { return m_SHIrradianceDiff; }
     [[nodiscard]] u32 GetSHProbes() const { return m_SHProbes; }
     [[nodiscard]] u32 GetSHRays() const { return m_SHRays; }
+    // ── 步骤 35：Screen Probe 的空间 + 时域滤波（§10 统一降噪框架的 Lumen 信号）──
+    /// 3×3 单元（YCoCg AABB）+ 时域重投影 EMA。必须在 SH 投影之后、逐像素辐照度之前调用：
+    /// 下游（辐照度 / DDGI 输入）读的是**过滤后**的探针缓冲。
+    void RunScreenProbeFilter(rhi::IRHICommandList* cmd, const float4x4& viewProj);
+    /// 过滤后的探针缓冲（下游唯一该读的那一份）
+    [[nodiscard]] rhi::IRHIBuffer* GetProbeFilteredBuffer() const { return m_ProbeFilteredBuf.get(); }
+    /// 滤波模式：0 = 直通（= 没有这一步），1 = 仅空间，2 = 空间 + 时域（默认）
+    [[nodiscard]] u32 GetProbeFilterMode() const { return m_ProbeFilterMode; }
+    /// 噪声读数：l0 亮度的 std/mean（输入 = 未过滤；输出 = 过滤后），同一次运行内自成对照
+    [[nodiscard]] float GetProbeNoiseIn() const  { return m_ProbeNoiseIn; }
+    [[nodiscard]] float GetProbeNoiseOut() const { return m_ProbeNoiseOut; }
+    [[nodiscard]] float GetProbeL0MeanIn() const  { return m_ProbeL0MeanIn; }
+    [[nodiscard]] float GetProbeL0MeanOut() const { return m_ProbeL0MeanOut; }
+    /// 有历史的探针里，"本帧输出 vs 上一帧历史"的平均相对变化（时域稳定性读数）
+    [[nodiscard]] float GetProbeFrameChange() const { return m_ProbeFrameChange; }
+    [[nodiscard]] u32 GetProbeHistoryUsed() const { return m_ProbeHistoryUsed; }
+    /// 探针身份声明（供信号登记打印一条可核对的说明）
+    [[nodiscard]] const char* GetProbeFilterNote() const;
     /// 步骤 24：由探针 SH 采样出逐像素入射辐照度（写进屏幕尺寸的辐照度纹理）
     void RunProbeIrradiance(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbNormal,
                             rhi::IRHITexture* gbAlbedo, rhi::IRHITexture* gbWorldPos);
@@ -322,6 +345,32 @@ private:
     float m_SHMeanL0 = 0.0f;            // 所有探针 l0 的均值（白炉下应为 √π ≈ 1.7725）
     float m_SHFurnaceL0Dev = 0.0f;      // 白炉下 l0 相对 √π 的**平均绝对偏差**（验收口径"误差为 0"）
     float m_SHIrradianceDiff = 0.0f;    // SH 重建辐照度 vs 逐光线求和参考的平均相对差
+    // ── 步骤 35：探针滤波（空间 3×3 单元 YCoCg AABB + 时域重投影 EMA）──
+    DenoiseHistoryPool* m_HistoryPool = nullptr;   // 非拥有：时域历史由统一池分配
+    rhi::DescriptorSetLayoutHandle m_ProbeFilterLayout = 0;
+    rhi::DescriptorSetHandle       m_ProbeFilterSet    = 0;
+    std::unique_ptr<rhi::IRHIPipelineState> m_ProbeFilterPSO;
+    std::unique_ptr<rhi::IRHIBuffer> m_ProbeFilteredBuf;             // 过滤结果（96 B/探针，下游读它）
+    std::unique_ptr<rhi::IRHIBuffer> m_ProbeFilterHistBuf[2];        // 历史探针镜像（80 B/探针，乒乓）
+    std::unique_ptr<rhi::IRHIBuffer> m_CellProbeHistBuf[2];          // 历史单元映射（乒乓）
+    /// 历史资源来自统一池时用这两个（池持有，本类只借；为空表示池没给，退回自建）
+    rhi::IRHIBuffer* m_ProbeHistFromPool[2] = {nullptr, nullptr};
+    rhi::IRHIBuffer* m_CellHistFromPool[2]  = {nullptr, nullptr};
+    std::unique_ptr<rhi::IRHIBuffer> m_ProbeFilterStatsBuf;          // 11 项统计（CPU 可读）
+    void* m_ProbeFilterStatsMapped = nullptr;
+    bool  m_ProbeFilterBound = false;
+    u32   m_ProbeFilterFrame = 0;
+    u32   m_ProbeFilterHistIdx = 0;         // 当前作为"历史"的那一份（另一份写）
+    bool  m_ProbeFilterHistoryReady = false;
+    float4x4 m_ProbePrevViewProj = float4x4(1.0f);   // 上一帧的 viewProj（重投影用）
+    u32   m_ProbeFilterMode = 2u;           // 0 直通 / 1 仅空间 / 2 空间+时域（默认；环境变量可覆盖）
+    float m_ProbeFilterGamma = 1.0f;        // AABB 的 γ
+    float m_ProbeFilterAlpha = 0.9f;        // 时域历史权重 α
+    float m_ProbeFilterDistTol = 0.02f;     // 重投影位置容差（占视图深度比例）
+    float m_ProbeNoiseIn = 0.0f, m_ProbeNoiseOut = 0.0f;    // l0 亮度的 std/mean（输入/输出）
+    float m_ProbeL0MeanIn = 0.0f, m_ProbeL0MeanOut = 0.0f;
+    float m_ProbeFrameChange = 0.0f;        // 有历史的探针：|out − hist| / mean
+    u32   m_ProbeHistoryUsed = 0;
     // ── 由 SH 采样出逐像素辐照度（步骤 24）──
     rhi::DescriptorSetLayoutHandle m_IrrLayout = 0;
     rhi::DescriptorSetHandle       m_IrrSet    = 0;
@@ -390,6 +439,7 @@ private:
     void CreateProbeTraceGPUObjects();
     void CreateShadeGPUObjects();
     void CreateSHGPUObjects();
+    void CreateProbeFilterGPUObjects();   // 步骤 35：探针滤波
     /// 探针光线 march 的 eps（近层体素倍数）：0.1 ⇒ 约 2.1 世界单位。见 RunProbeTrace 的说明。
     static constexpr float kProbeMarchEpsVoxels = 0.1f;
 

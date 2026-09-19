@@ -156,6 +156,7 @@ if(SLANGC)
         "${SHADER_DIR}/Lumen/ScreenProbe_Trace.comp.slang"
         "${SHADER_DIR}/Lumen/Lumen_SurfaceCacheSample.comp.slang"
         "${SHADER_DIR}/Lumen/Lumen_ScreenProbe_SHProject.comp.slang"
+        "${SHADER_DIR}/Lumen/ScreenProbe_Filter.comp.slang"
         "${SHADER_DIR}/Lumen/Lumen_ProbeIrradiance.comp.slang"
         "${SHADER_DIR}/Lumen/Lumen_FarFieldCompare.comp.slang"
         "${SHADER_DIR}/Lumen/Lumen_FarFieldMerge.comp.slang"
