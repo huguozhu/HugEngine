@@ -136,6 +136,8 @@ private:
     void RunMarchCheck();
     static float PointTriangleDistance(const float3& p, const float3& a,
                                        const float3& b, const float3& c);
+    static float3 ClosestPointOnTriangle(const float3& p, const float3& a,
+                                         const float3& b, const float3& c);
 
     rhi::IRHIDevice* m_Device = nullptr;
     LumenSDFConfig   m_Config;

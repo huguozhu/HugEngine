@@ -75,6 +75,7 @@ void main(uint3 id : SV_DispatchThreadID) {
 
     const float3 p = originVoxel.xyz + (float3(id) + 0.5) * originVoxel.w;
     float best = 1e30;
+    uint  crossings = 0;      // 沿 +X 的穿越计数（奇 = 在几何内部）
     const uint triCount = ranges.x;
     for (uint t = 0; t < triCount; ++t) {
         const uint base = ranges.y + t * 3u;
@@ -82,8 +83,26 @@ void main(uint3 id : SV_DispatchThreadID) {
         const float3 b = u_Positions[u_Indices[base + 1u] + ranges.z].xyz;
         const float3 c = u_Positions[u_Indices[base + 2u] + ranges.z].xyz;
         best = min(best, PointTriangleDistance(p, a, b, c));
+
+        // ── 符号：parity（沿 +X 射线与三角形求交，奇数个交点 = 内部）──
+        // 在 YZ 平面做二维重心坐标，再解出交点的 X：比完整 Möller–Trumbore 少一半运算，
+        // 且是本循环里顺手能算的。退化（投影面积≈0）跳过；边界/顶点上的抖动由 CPU 侧的
+        // "最近三角形法线" 符号做交叉验证（两种算法，见 LumenSDF::RunSelfCheck）。
+        const float2 pa = a.yz, pb = b.yz, pc = c.yz;
+        const float2 pq = p.yz;
+        const float  d2 = (pb.y - pc.y) * (pa.x - pc.x) + (pc.x - pb.x) * (pa.y - pc.y);
+        if (abs(d2) > 1e-12) {
+            const float l0 = ((pb.y - pc.y) * (pq.x - pc.x) + (pc.x - pb.x) * (pq.y - pc.y)) / d2;
+            const float l1 = ((pc.y - pa.y) * (pq.x - pc.x) + (pa.x - pc.x) * (pq.y - pc.y)) / d2;
+            const float l2 = 1.0 - l0 - l1;
+            if (l0 >= 0.0 && l1 >= 0.0 && l2 >= 0.0) {
+                const float xHit = l0 * a.x + l1 * b.x + l2 * c.x;
+                if (xHit > p.x) crossings++;
+            }
+        }
     }
-    u_Field[id] = best;
+    const float signedDist = (crossings & 1u) ? -best : best;
+    u_Field[id] = signedDist;
 
     // 自检探针（仅 mesh 0）
     const uint stride = ranges.w;
@@ -91,7 +110,7 @@ void main(uint3 id : SV_DispatchThreadID) {
         if ((id.x % stride) == 0u && (id.y % stride) == 0u && (id.z % stride) == 0u) {
             const uint nx = dims.x / stride, ny = dims.y / stride, nz = dims.z / stride;
             const uint idx = (id.z / stride) * nx * ny + (id.y / stride) * nx + (id.x / stride);
-            if (idx < nx * ny * nz) u_ProbeDist[idx] = best;
+            if (idx < nx * ny * nz) u_ProbeDist[idx] = signedDist;
         }
     }
 }

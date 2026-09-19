@@ -518,6 +518,46 @@ float LumenSDF::PointTriangleDistance(const float3& p, const float3& a,
     return glm::length(p - (a + ab * v + ac * w));
 }
 
+float3 LumenSDF::ClosestPointOnTriangle(const float3& p, const float3& a,
+                                        const float3& b, const float3& c) {
+    // Ericson 5.1.5 的区域判定版：与 PointTriangleDistance 同一套分支，但返回**最近点**
+    // （自检要用它算"最近三角形法线"符号，作为 parity 符号的独立交叉验证）
+    const float3 ab = b - a, ac = c - a, ap = p - a;
+    const float d1 = glm::dot(ab, ap), d2 = glm::dot(ac, ap);
+    if (d1 <= 0.0f && d2 <= 0.0f) return a;
+
+    const float3 bp = p - b;
+    const float d3 = glm::dot(ab, bp), d4 = glm::dot(ac, bp);
+    if (d3 >= 0.0f && d4 <= d3) return b;
+
+    const float vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) {
+        const float v = d1 / (d1 - d3);
+        return a + ab * v;
+    }
+
+    const float3 cp = p - c;
+    const float d5 = glm::dot(ab, cp), d6 = glm::dot(ac, cp);
+    if (d6 >= 0.0f && d5 <= d6) return c;
+
+    const float vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) {
+        const float w = d2 / (d2 - d6);
+        return a + ac * w;
+    }
+
+    const float va = d3 * d6 - d5 * d4;
+    if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f) {
+        const float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return b + (c - b) * w;
+    }
+
+    const float denom = va + vb + vc;
+    if (std::fabs(denom) < 1e-12f) return a;
+    const float v = vb / denom, w = vc / denom;
+    return a + ab * v + ac * w;
+}
+
 void LumenSDF::RunSelfCheck() {
     if (!m_ProbeDist || m_Entries.empty() || m_ProbeCount == 0) return;
 
@@ -534,7 +574,7 @@ void LumenSDF::RunSelfCheck() {
 
     double sumAbs = 0.0;
     float  maxErr = 0.0f;
-    u32    counted = 0;
+    u32    counted = 0, signAgree = 0;
     for (u32 z = 0; z < nx; z += 1) {
         for (u32 y = 0; y < nx; ++y) {
             for (u32 x = 0; x < nx; ++x) {
@@ -543,18 +583,28 @@ void LumenSDF::RunSelfCheck() {
                 const float3 p = e.origin +
                     float3((float)(x * stride) + 0.5f, (float)(y * stride) + 0.5f,
                            (float)(z * stride) + 0.5f) * e.voxelSize;
-                // CPU 侧独立实现（同一公式，但走完全不同的数据路径：CPU 顶点数组 + 线性遍历）
+                // CPU 侧独立实现：距离用同一闭式解，但**符号用另一种算法** —— 最近三角形的
+                // 几何法线与"体素−最近点"的点积（shader 用的是 parity 穿越计数）。两种算法在
+                // 边/顶点附近会分歧，故符号一致率本身就是这一步要量的东西。
                 float ref = 1e30f;
+                float3 closest(0.0f), bestA(0.0f), bestB(0.0f), bestC(0.0f);
                 for (u32 t = 0; t < e.triCount; ++t) {
                     const u32* tri = &m_IndicesCPU[e.firstIndex + t * 3];
                     const float3 a = m_PositionsCPU[tri[0] + e.vertexOffset];
                     const float3 b = m_PositionsCPU[tri[1] + e.vertexOffset];
                     const float3 c = m_PositionsCPU[tri[2] + e.vertexOffset];
-                    ref = std::min(ref, PointTriangleDistance(p, a, b, c));
+                    const float d = PointTriangleDistance(p, a, b, c);
+                    if (d < ref) { ref = d; bestA = a; bestB = b; bestC = c; }
                 }
-                const float err = std::fabs(ref - gpu[idx]);
+                closest = ClosestPointOnTriangle(p, bestA, bestB, bestC);
+                const float3 nrm = glm::cross(bestB - bestA, bestC - bestA);
+                const float  sgn = (glm::dot(nrm, p - closest) >= 0.0f) ? 1.0f : -1.0f;
+                const float  refSigned = sgn * ref;
+
+                const float err = std::fabs(std::fabs(refSigned) - std::fabs(gpu[idx]));  // 距离误差
                 sumAbs += err;
                 maxErr = std::max(maxErr, err);
+                if ((refSigned < 0.0f) == (gpu[idx] < 0.0f)) ++signAgree;   // 符号一致（两种算法）
                 ++counted;
             }
         }
@@ -567,9 +617,11 @@ void LumenSDF::RunSelfCheck() {
     m_SelfCheck.tolerance = e.voxelSize * 0.25f;   // 1/4 体素
     m_SelfCheck.passed    = (maxErr <= m_SelfCheck.tolerance);
 
-    HE_CORE_INFO("LumenSDF 自检: 探针 {} 点，最大误差 {:.6f}，平均 {:.6f}，阈值 {:.6f}（1/4 体素）=> {}",
-                 counted, (double)maxErr, counted ? sumAbs / counted : 0.0,
-                 (double)m_SelfCheck.tolerance, m_SelfCheck.passed ? "PASS" : "FAIL");
+    HE_CORE_INFO("LumenSDF 自检: 探针 {} 点，距离最大误差 {:.6f}（阈值 {:.6f} = 1/4 体素），"
+                 "符号一致率 {}/{}（{:.1f}%，GPU=parity / CPU=最近三角形法线，两种算法）=> {}",
+                 counted, (double)maxErr, (double)m_SelfCheck.tolerance,
+                 signAgree, counted, counted ? 100.0 * (double)signAgree / counted : 0.0,
+                 m_SelfCheck.passed ? "PASS" : "FAIL");
     if (!m_SelfCheck.passed) {
         HE_CORE_ERROR("LumenSDF 自检失败：GPU 距离场与 CPU 参考不一致，检查网格映射/缓冲布局/偏移");
     }

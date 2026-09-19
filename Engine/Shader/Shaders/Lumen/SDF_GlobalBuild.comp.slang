@@ -54,7 +54,10 @@ void main(uint3 id : SV_DispatchThreadID) {
             // 表面的**下界** —— 全网格处处有定义，且不会高估（高估会让 sphere tracing 穿漏）。
             d = length(pWorld - clamp(pWorld, aabbLo, aabbHi));
         }
-        InterlockedMin(u_Global[v], asuint(d));
+        // 全局场保持**无符号**（是到最近表面的下界）：逐 mesh 场现在带符号，负值直接 asuint
+        // 会变成很大的无符号数而被 InterlockedMin 忽略（静默劣化），故这里取 abs。
+        // 符号属于逐 mesh 细节层（步骤 11.5 落）。全局层的 unsigned 语义在 march 里配 |d| 使用。
+        InterlockedMin(u_Global[v], asuint(abs(d)));
         return;
     }
 

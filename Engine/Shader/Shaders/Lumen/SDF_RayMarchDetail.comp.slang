@@ -51,13 +51,16 @@ void main(uint3 tid : SV_DispatchThreadID) {
     for (uint s = 0; s < maxSteps; ++s) {
         const float3 p = ro + rd * t;
         if (!InsideField(p)) return;            // 出该 mesh 的 AABB：本 mesh 不再有贡献
-        const float d = SampleField(p);
-        if (d < eps) {
+        const float d = SampleField(p);         // **带符号**：内部为负
+        // 带符号场的步进用 |d|（到表面的距离），命中判定也用 |d|：这样"起点在几何内部"的射线会
+        // 一路走到最近的表面，而不是在 t=0 就自认为命中（那正是无符号场时的假命中来源）。
+        const float ad = abs(d);
+        if (ad < eps) {
             // 命中：以 min 归约写入（t ≥ 0，浮点位模式与无符号整数同序）
             InterlockedMin(u_RayT[i], asuint(t));
             return;
         }
-        t += max(d, eps);
+        t += max(ad, eps);
         if (t > maxDist) return;
     }
 }
