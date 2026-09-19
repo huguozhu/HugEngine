@@ -1216,6 +1216,7 @@ void LumenSDF::RunMarchCheck() {
     float maxErr = 0.0f;
     double sumErr = 0.0;
     u32 bothHit = 0, gpuOnly = 0, cpuOnly = 0, within = 0, normalOk = 0;
+    std::vector<float> errVoxAll;   // 误差分布（p50/p90）：计数与均值太粗，见本轮说明
     u32 withinGlobal = 0, detailBetter = 0;
     double sumErrGlobal = 0.0;
 
@@ -1285,6 +1286,7 @@ void LumenSDF::RunMarchCheck() {
             sumErr += errVox;
             maxErr = std::max(maxErr, errVox);
             if (errVox <= 1.0f) ++within;
+            errVoxAll.push_back(errVox);
             if (hits[i].w < 0.0f) ++normalOk;   // 法线朝向与射线相反 = 正面命中
 
             // 诊断：把"全局单独"与"合并后"的误差分开记，才能判断细节追踪到底有没有帮忙
@@ -1332,7 +1334,13 @@ void LumenSDF::RunMarchCheck() {
                      "需 clipmap 分层 + 细层收敛阈值（§5 的下界质量结论）", 
                      bothHit ? 100.0 * (double)within / bothHit : 0.0);
     }
-    HE_CORE_INFO("LumenSDF sphere tracing 误差分解: 仅全局场 {}/{} 在 1 体素内（平均 {:.3f}），"
+    if (!errVoxAll.empty()) {
+        std::sort(errVoxAll.begin(), errVoxAll.end());
+        const float p50 = errVoxAll[errVoxAll.size() / 2];
+        const float p90 = errVoxAll[(size_t)(errVoxAll.size() * 9 / 10)];
+        HE_CORE_INFO("LumenSDF sphere tracing 误差分布: n={} p50={:.3f} p90={:.3f} 体素（计数/均值太粗，改动不可测）",
+                     errVoxAll.size(), (double)p50, (double)p90);
+    }    HE_CORE_INFO("LumenSDF sphere tracing 误差分解: 仅全局场 {}/{} 在 1 体素内（平均 {:.3f}），"
                  "合并细节追踪后 {}/{}（平均 {:.3f}）；细节追踪更近的射线 {} 条",
                  withinGlobal, bothHit, bothHit ? sumErrGlobal / bothHit : 0.0,
                  within, bothHit, bothHit ? sumErr / bothHit : 0.0, detailBetter);
