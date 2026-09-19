@@ -268,6 +268,8 @@ private:
     // 细节追踪（逐 mesh）：min 归约的命中距离缓冲（u32 位模式，+inf = 未命中）
     rhi::DescriptorSetLayoutHandle m_DetailLayout;
     rhi::DescriptorSetHandle       m_DetailSet;
+    // 每 mesh 一套细节追踪描述符集：**同一套集在一次提交里反复改写会变成别名**（所有 dispatch 都读最后一张场）
+    std::vector<rhi::DescriptorSetHandle> m_DetailSets;
     std::unique_ptr<rhi::IRHIPipelineState> m_DetailPSO;
     std::unique_ptr<rhi::IRHIBuffer> m_RayT;
     void* m_RayTMapped = nullptr;

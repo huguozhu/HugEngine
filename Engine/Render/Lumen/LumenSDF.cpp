@@ -1364,8 +1364,25 @@ void LumenSDF::RunMarchDetail(rhi::IRHICommandList* cmd) {
         std::memcpy(m_RayTMapped, inf.data(), (usize)n * sizeof(u32));   // 持久映射：直接写
     }
 
+    // 【描述符集别名】此前每 mesh 用同一套 m_DetailSet 改写 binding 0 ⇒ 所有 dispatch 实际都在追
+    // **同一张（最后一次绑定的）mesh 场**，细场因此既漏真命中又乱报 —— 步数预算改了也"逐位不变"就是这个原因。
+    // 这里改成每 mesh 一套集，且只在使用前绑定一次（此后不再改写）。
+    if (m_DetailSets.empty()) {
+        for (size_t m = 0; m < m_Entries.size(); ++m) {
+            auto ds = m_Device->AllocateDescriptorSet(m_DetailLayout);
+            m_Device->UpdateDescriptorSet(ds, kMBindOrigin, rhi::DescriptorType::StorageBuffer, m_RayOrigin.get());
+            m_Device->UpdateDescriptorSet(ds, kMBindDir,    rhi::DescriptorType::StorageBuffer, m_RayDir.get());
+            m_Device->UpdateDescriptorSet(ds, kMBindHit,    rhi::DescriptorType::StorageBuffer, m_RayT.get());
+            m_Device->UpdateDescriptorSet(ds, kMBindNormal, rhi::DescriptorType::StorageBuffer, m_RayT.get());
+            if (m_Entries[m].field) {
+                m_Device->UpdateDescriptorSet(ds, kMBindField, rhi::DescriptorType::CombinedImageSampler,
+                                              m_Entries[m].field.get(), m_LinearSampler.get());
+            }
+            m_DetailSets.push_back(ds);
+        }
+    }
+
     cmd->SetPipeline(m_DetailPSO.get());
-    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DetailSet);
 
     MarchPC pc{};
     pc.dimX = pc.dimY = pc.dimZ = 0;   // 每个 mesh 覆盖
@@ -1373,10 +1390,10 @@ void LumenSDF::RunMarchDetail(rhi::IRHICommandList* cmd) {
     pc.maxSteps = (float)m_Config.marchMaxSteps;
     pc.maxDist  = m_Config.marchMaxDist;
 
-    for (const auto& e : m_Entries) {
-        if (!e.field) continue;
-        m_Device->UpdateDescriptorSet(m_DetailSet, kMBindField,
-            rhi::DescriptorType::CombinedImageSampler, e.field.get(), m_LinearSampler.get());
+    for (size_t mi = 0; mi < m_Entries.size(); ++mi) {
+        const auto& e = m_Entries[mi];
+        if (!e.field || mi >= m_DetailSets.size()) continue;
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DetailSets[mi]);   // 该 mesh 专属的集，循环里不再改写
         pc.originX = e.origin.x; pc.originY = e.origin.y; pc.originZ = e.origin.z;
         pc.voxelSize = e.voxelSize;
         pc.dimX = pc.dimY = pc.dimZ = e.resolution;
@@ -1538,9 +1555,13 @@ void LumenSDF::RunMarchCheck() {
         // 【命中复核】只用**细场（逐 mesh 距离场，eps = 0.25 x 该 mesh 体素）**确认过的命中才算命中；
         // 全局场（eps = 1 个近层体素 = 14.22）的单方面命中计入 near-miss —— 命中判据是"场值 < eps"，
         // 任何从表面 eps 距离内掠过而未相交的射线都会误判（这正是"仅 GPU"那批）。
+        // 【命中策略】仍是"粗场 ∪ 细场取 min"（两条都是下界 ⇒ 合并后不高估，安全判据优先）；
+        // 细场未确认的粗命中计入 near-miss —— 它是"容差型近似错失"的可回归数字。
+        // 细场本身已大改（每 mesh 一套描述符集 + 允许"先域外后进入"），其精度已可作参考
+        // （近命中 p50 0.553 体素、远命中 2.331），但仍有 33 条真命中未确认 ⇒ 暂不作门控。
         const float tGpuMerged = std::min(gpuHit ? hits[i].x : 1e30f, tDetail);
         const bool  mergedHit  = tGpuMerged < 1e29f;
-        if (gpuHit && tDetail >= 1e29f) ++nearMiss;   // 有粗命中、细场不认 ⇒ 近似错失（只记数，不作门控）
+        if (gpuHit && tDetail >= 1e29f) ++nearMiss;
 
         if (mergedHit && cpuHit) {
             ++bothHit;

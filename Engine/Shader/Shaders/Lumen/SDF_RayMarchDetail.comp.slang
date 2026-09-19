@@ -49,9 +49,20 @@ void main(uint3 tid : SV_DispatchThreadID) {
 
     float t = 0.0;
     bool  advanced = false;   // 命中判据要求"沿射线真正走过一步"
+    bool  entered  = false;   // 是否已经进入过该 mesh 的场域
     for (uint s = 0; s < maxSteps; ++s) {
         const float3 p = ro + rd * t;
-        if (!InsideField(p)) return;            // 出该 mesh 的 AABB：本 mesh 不再有贡献
+        if (!InsideField(p)) {
+            // 【曾经进过、现在离开】⇒ 本 mesh 不再有贡献，收工。
+            // 【还没进过】不能直接 return！射线的起点通常在**别的** mesh 上，而命中可能在几百单位外
+            // 的这个 mesh 上；此前这里直接 return，等于把"起点在该 mesh 场域之外"的射线**全部丢掉** ——
+            // 实测细场因此只确认 219 条粗命中里的 96 条（换成每 mesh 一套描述符集后仍漏 44 条）。
+            if (entered) return;
+            t += max(eps, 8.0);              // 域外大步跳过（那里谈"到本 mesh 的距离"没有意义）
+            if (t > maxDist) return;
+            continue;
+        }
+        entered = true;
         const float d = SampleField(p);         // **带符号**：内部为负
         // 带符号场的步进用 |d|（到表面的距离），命中判定也用 |d|：这样"起点在几何内部"的射线会
         // 一路走到最近的表面，而不是在 t=0 就自认为命中（那正是无符号场时的假命中来源）。
