@@ -811,11 +811,18 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             // compute（实测把 dispatch 放进主 pass 会直接访问违例崩溃）。本 pass 不声明资源
             // 依赖（自持资源 + 自管 barrier），writes 为空故不会被 CullDeadPasses 裁掉。
             const u32 lumenGiIdx = (u32)(&prov - m_GIProviders.data());   // 计时下标（步骤 29 读耗时用）
+            // 步骤 32：DDGI 的下标与探针数也在这里取好（lambda 没有默认捕获，不能在里面用 this）
+            u32 ddgiGiIdx = 0xFFFFFFFFu, ddgiProbes = 0u;
+            for (size_t pi = 0; pi < m_GIProviders.size(); ++pi) {
+                if (m_GIProviders[pi]->Handles(GISourceId::DDGI)) { ddgiGiIdx = (u32)pi; break; }
+            }
+            ddgiProbes = m_DDGI.gridX * m_DDGI.gridY * m_DDGI.gridZ;
             rg.AddPass("Lumen_SDF_Build", {}, {},
                 // GBuffer 的三张纹理按值捕获（lambda 没有默认捕获，用 this 会编译失败）
                 [p = prov.get(), cam = &camera, furnaceMode = m_GIConfig.furnaceMode,
                  gbN = m_GBuffer->GetNormal(), gbAl = m_GBuffer->GetAlbedo(),
-                 gbWP = m_GBuffer->GetWorldPos(), giIdx = lumenGiIdx, timer = &m_GITimer](rhi::IRHICommandList* c) {
+                 gbWP = m_GBuffer->GetWorldPos(), giIdx = lumenGiIdx, timer = &m_GITimer,
+                 ddgiIdx = ddgiGiIdx, probeCount = ddgiProbes](rhi::IRHICommandList* c) {
                     if (auto* lp = dynamic_cast<LumenProvider*>(p)) {
                         // 步骤 29：整个计算 pass 的 GPU 耗时（SDF 构建 → 页表 → 捕获 → 反馈 → 探针
                         // → 追踪 → 着色 → SH → 辐照度 → 远场光追都在这一个 pass 里）
@@ -860,6 +867,11 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                                          (double)timer->AvgMs(kLumenComputeTimerIdx),
                                          (double)timer->PeakMs(kLumenComputeTimerIdx),
                                          (double)timer->AvgMs(giIdx));
+                            // 步骤 32：DDGI（Radiance Cache）的耗时也一并记录 —— 提高网格分辨率是拿它的
+                            // 计算量换伪影幅度，必须两边都能看见。
+                            HE_CORE_INFO("   DDGI（Radiance Cache）pass 平均 {:.3f} ms（{} 个探针）",
+                                         (ddgiIdx == 0xFFFFFFFFu) ? 0.0 : (double)timer->AvgMs(ddgiIdx),
+                                         probeCount);
                             HE_CORE_INFO("   拆分: SDF 构建 {:.3f} ms / 页表+捕获+反馈 {:.3f} ms / "
                                          "探针+追踪+着色+SH+辐照度 {:.3f} ms（其中远场光追 {:.3f} ms，每帧 {} 条射线）/ "
                                          "SDF 调试视图 {:.3f} ms",

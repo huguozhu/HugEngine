@@ -54,6 +54,16 @@ float3 SampleDDGI(float3 worldPos, float3 normal) {
     float3 result      = float3(0.0, 0.0, 0.0);
     float  totalWeight = 0.0;
 
+    // ── 步骤 32：插值权重的两种可选方案都**实测证伪**，这里保留纯三线性（见 §附三十九）──
+    // ① 距离权重 `w = 三线性 / (dist² + bias)`（DDGI 论文里为"探针埋在几何里"准备的）：
+    //    本场景实测把网格对齐调制从 35.67% **推高到 57.12%** —— 它把权重压向最近的那颗探针，
+    //    结果更像最近邻插值，而最近邻正是格子感的来源。
+    // ② smoothstep 替换线性 tent（想让跨格处一阶连续）：幅度调制 36.09%、"缝"强度 19.61%，
+    //    与线性的 35.67% / 19.54% 没有区别 —— 两个指标都测不出改善。
+    // 真正的结论在拟合参数上：把最长轴格数从 16 提到 24 / 32，调制降到 22.42% / 20.11%
+    //（即格子感是**分辨率**造成的，不是权重造成的）。故本步只把复核结论写进文档，
+    // 代码保持三线性不动 —— 不留"改不动指标"的改动。
+
     // 遍历包围世界坐标的 8 个最近探针
     for (int dz = 0; dz <= 1; dz++) {
         for (int dy = 0; dy <= 1; dy++) {
@@ -68,6 +78,7 @@ float3 SampleDDGI(float3 worldPos, float3 normal) {
                 float weight = (1.0 - abs(float(dx) - frac.x))
                              * (1.0 - abs(float(dy) - frac.y))
                              * (1.0 - abs(float(dz) - frac.z));
+                if (weight <= 0.0) continue;
 
                 // 读取探针 SH 系数（步骤 30：每探针 4 × float4，全是 SH）
                 uint   baseIdx = coord.z * uint(u_DDGIGridSize.x) * uint(u_DDGIGridSize.y)

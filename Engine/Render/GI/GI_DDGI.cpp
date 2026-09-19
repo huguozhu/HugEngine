@@ -394,9 +394,17 @@ void GI_DDGI::FitGridToBounds(const float3& mn, const float3& mx) {
     cellSize   = fit->cellSize;
     gridOrigin = fit->origin;
 
-    HE_CORE_INFO("DDGI 网格已按场景拟合：场景 {}x{}x{} -> 探针 {}x{}x{} 格距 {:.2f}（共 {} 个）",
+    // 步骤 32：把**原点**也打出来 —— 网格对齐伪影的分析（`build/verify/grid_artifact.py`）需要它，
+    // 而"拟合参数复核"也需要肉眼能对：最后一颗探针 = 原点 + (count-1)×格距 应当覆盖到包围盒的 max。
+    HE_CORE_INFO("DDGI 网格已按场景拟合：场景 {}x{}x{} -> 探针 {}x{}x{} 格距 {:.2f}（共 {} 个）；"
+                 "原点 ({:.2f}, {:.2f}, {:.2f})，末探针 ({:.2f}, {:.2f}, {:.2f}) vs 包围盒 max ({:.2f}, {:.2f}, {:.2f})",
                  mx.x - mn.x, mx.y - mn.y, mx.z - mn.z,
-                 gridX, gridY, gridZ, cellSize, gridX * gridY * gridZ);
+                 gridX, gridY, gridZ, cellSize, gridX * gridY * gridZ,
+                 gridOrigin.x, gridOrigin.y, gridOrigin.z,
+                 gridOrigin.x + float(gridX - 1) * cellSize,
+                 gridOrigin.y + float(gridY - 1) * cellSize,
+                 gridOrigin.z + float(gridZ - 1) * cellSize,
+                 mx.x, mx.y, mx.z);
 }
 
 void GI_DDGI::SetIBL(rhi::IRHITexture* irradiance, rhi::IRHISampler* sampler) {
