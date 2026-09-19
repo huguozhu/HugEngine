@@ -89,6 +89,7 @@ if(SLANGC)
         "${SHADER_DIR}/GI/RSM_Indirect.frag.slang"
         # Lumen（虚拟化几何 GI）——骨架阶段的占位输出，步骤 20 起被 ScreenProbeGather 替换
         "${SHADER_DIR}/Lumen/Lumen_Skeleton.frag.slang"
+        "${SHADER_DIR}/Lumen/Lumen_Irradiance.frag.slang"
         # AntiAliasing
         "${SHADER_DIR}/AntiAliasing/TAA_Resolve.frag.slang"
         "${SHADER_DIR}/AntiAliasing/FXAA.frag.slang"
@@ -154,6 +155,7 @@ if(SLANGC)
         "${SHADER_DIR}/Lumen/ScreenProbe_Trace.comp.slang"
         "${SHADER_DIR}/Lumen/Lumen_SurfaceCacheSample.comp.slang"
         "${SHADER_DIR}/Lumen/Lumen_ScreenProbe_SHProject.comp.slang"
+        "${SHADER_DIR}/Lumen/Lumen_ProbeIrradiance.comp.slang"
         # Utility
         "${SHADER_DIR}/Utility/WorkGraph_Entry.comp.slang"
         "${SHADER_DIR}/Utility/TestClear.comp.slang"

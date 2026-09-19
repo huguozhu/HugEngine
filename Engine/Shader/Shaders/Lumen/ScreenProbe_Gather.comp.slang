@@ -14,9 +14,12 @@
 [[vk::binding(2, 0)]] RWStructuredBuffer<ScreenProbe> u_Probes;
 [[vk::binding(3, 0)]] RWStructuredBuffer<uint>        u_ProbeCount;   // [0] = 已写探针数
 [[vk::binding(4, 0)]] RWStructuredBuffer<float>       u_TileDev;      // 每个 32×32 tile 的最大法线偏差（cos 值）
+// 步骤 24：每个 16×16 单元的"归属探针"下标（0xFFFFFFFF = 无）。合成端要按像素查探针，
+// 若在片元里遍历上万探针找最近，代价无法接受；这里顺手把映射写出来，查询变成一次数组读。
+[[vk::binding(5, 0)]] RWStructuredBuffer<uint>        u_CellProbe;
 
 [[vk::push_constant]] cbuffer ProbePC {
-    uint4  dims;        // xy = 屏幕尺寸, z = 探针容量, w = tile 数
+    uint4  dims;        // xy = 屏幕尺寸, z = 探针容量, w = **单元**数（cellsX*cellsY）
     float4 mergeParams; // x = 法线一致阈值（cos，越小越宽松）, y = 单元边长, z/w 保留
 };
 
@@ -49,6 +52,14 @@ void main(uint3 tid : SV_DispatchThreadID) {
 
     const uint2 tileOrigin = uint2(tid.x * 32u, tid.y * 32u);
     const uint  tileIndex  = tid.y * tilesX + tid.x;
+    const uint  cellsX     = (dims.x + 15u) / 16u;
+    // 4 个单元在"单元网格"里的线性下标
+    const uint cellIndex[4] = {
+        (tid.y * 2u)     * cellsX + tid.x * 2u,
+        (tid.y * 2u)     * cellsX + tid.x * 2u + 1u,
+        (tid.y * 2u + 1u) * cellsX + tid.x * 2u,
+        (tid.y * 2u + 1u) * cellsX + tid.x * 2u + 1u,
+    };
 
     // 4 个 16×16 单元
     float3 n[4];
@@ -62,6 +73,10 @@ void main(uint3 tid : SV_DispatchThreadID) {
         SampleCell(origins[i], n[i], p[i], valid);
         v[i] = valid;
         if (valid > 0.5) { meanN += n[i]; validCells += 1.0; }
+    }
+    // 先整体标成"无探针"；下面每写一个探针就把它覆盖的单元填上
+    for (uint i = 0; i < 4u; ++i) {
+        if (cellIndex[i] < dims.w) u_CellProbe[cellIndex[i]] = 0xFFFFFFFFu;
     }
     if (validCells < 0.5) { u_TileDev[tileIndex] = -1.0; return; }   // 整块没几何
     meanN = normalize(meanN);
@@ -86,6 +101,9 @@ void main(uint3 tid : SV_DispatchThreadID) {
             probe.shR = float4(0.0); probe.shG = float4(0.0); probe.shB = float4(0.0);
             probe.meta = uint4(4u, tileIndex, (uint)(worstCos * 65535.0), 0u);
             u_Probes[slot] = probe;
+            // 合并探针覆盖它的 4 个单元
+            for (uint i = 0; i < 4u; ++i)
+                if (cellIndex[i] < dims.w) u_CellProbe[cellIndex[i]] = slot;
         }
     } else {
         for (uint i = 0; i < 4u; ++i) {
@@ -100,6 +118,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
                 probe.shR = float4(0.0); probe.shG = float4(0.0); probe.shB = float4(0.0);
                 probe.meta = uint4(1u, tileIndex, (uint)(worstCos * 65535.0), i);
                 u_Probes[slot] = probe;
+                if (cellIndex[i] < dims.w) u_CellProbe[cellIndex[i]] = slot;
             }
         }
     }
