@@ -56,6 +56,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
     bool  hit = false;
     bool  advanced = false;   // 命中判据要求"沿射线真正走过一步"，t=0 处的近表面不算命中
     uint  steps = 0;
+    float minD  = 1e30;   // 沿途场值最小值（诊断穿漏：场在路径上是否高估）
+    float tMinD = 0.0;    // 取到 minD 时的 t
     for (uint s = 0; s < maxSteps; ++s) {
         steps = s + 1;
         const float3 p = ro + rd * t;
@@ -63,6 +65,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
         const float2 b = SampleLayer(u_Field1, u_FieldSampler1, originVoxel1, grid1.xyz, p);
         if (a.y < 0.5 && b.y < 0.5) break;               // 出所有层：本版按未命中处理
         const float d = min(a.y > 0.5 ? a.x : 1e30, b.y > 0.5 ? b.x : 1e30);
+        if (d < minD) { minD = d; tMinD = t; }   // 诊断用：记录沿途最小场值
         if (advanced && d < eps) { hit = true; break; }
         // 安全步长系数 0.5：场是**近似**的（洪泛松弛可能给出偏大的值），
         // 全量步进会让射线越过真实表面（实测出现 3 条穿漏）。半量步进是近似场的标准做法：
@@ -94,6 +97,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
         nd = dot(N, rd);
     }
 
-    u_RayHit[i]    = float4(t, hit ? 1.0 : 0.0, (float)steps, nd);
-    u_RayNormal[i] = float4(N, 0.0);
+    // w：命中时是 dot(N,rd)；未命中时存 -tMinD（负号标记"这是诊断量"），配合 u_RayNormal.w 的 minD
+    u_RayHit[i]    = float4(t, hit ? 1.0 : 0.0, (float)steps, hit ? nd : -tMinD);
+    u_RayNormal[i] = float4(N, minD);
 }

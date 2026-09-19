@@ -479,7 +479,7 @@ void LumenSDF::SetupGlobalGrid() {
 
     for (u32 L = 0; L < m_GlobalLayerCount; ++L) {
         GlobalLayer& layer = m_GlobalLayers[L];
-        // L = kMaxGlobalLayers-1 是远层（覆盖全场）；更小的 L 是更细的近层，居中于场景中心。
+        // L = 实际最外层（m_GlobalLayerCount-1）覆盖全场；更小的 L 是更细的近层，居中于场景中心。
         // 近层边长 = 场景最长轴 × nearFraction^(层数-1-L)，故得名"cl_ipmap"的最小可用形态：
         // 每往里一层体素小一个比例，而覆盖范围也小同样的比例。
         const u32   stepsFromFar = (kMaxGlobalLayers - 1u) - L;
@@ -1233,12 +1233,51 @@ void LumenSDF::RunMarchCheck() {
     double sumErr = 0.0;
     u32 bothHit = 0, gpuOnly = 0, cpuOnly = 0, within = 0, normalOk = 0;
     u32 cpuOnlyNear = 0, cpuOnlyFar = 0;   // 穿漏按命中距离分（近场穿漏才是真问题）
+    u32 outsideLayer0 = 0, tunnelOutside = 0;   // 起点在近层覆盖之外 / 其中属于"穿漏"的条数
     std::vector<float> errVoxAll, errNear, errFar, errNearHit, errFarHit;   // 误差分布 + 按"起点是否贴近几何"分组
     u32 withinGlobal = 0, detailBetter = 0;
     double sumErrGlobal = 0.0;
 
+    // 诊断用：点 p 到全部几何的精确距离（逐 mesh AABB 粗筛 + 逐三角形最近点）
+    // 用途：穿漏射线的"场最小处"若离真实几何很远，说明**场在路径上高估**（洪泛壳）；
+    // 若几乎相等，说明场是紧的，只是容差/分辨率不够。
+    auto minDistToGeometry = [this](const float3& p) {
+        float best = 1e30f;
+        for (const auto& e : m_Entries) {
+            const float side = e.voxelSize * (float)e.resolution;
+            float dAabb = 0.0f;
+            for (int a = 0; a < 3; ++a) {
+                const float lo = (&e.origin.x)[a], hi = lo + side, val = (&p.x)[a];
+                const float dd = std::max(std::max(lo - val, val - hi), 0.0f);
+                dAabb += dd * dd;
+            }
+            if (std::sqrt(dAabb) >= best) continue;   // 该 mesh 的 AABB 已比当前最优远，整块跳过
+            for (u32 t = 0; t < e.triCount; ++t) {
+                const u32* tri = &m_IndicesCPU[e.firstIndex + t * 3];
+                best = std::min(best, PointTriangleDistance(
+                    p, m_PositionsCPU[tri[0] + e.vertexOffset],
+                       m_PositionsCPU[tri[1] + e.vertexOffset],
+                       m_PositionsCPU[tri[2] + e.vertexOffset]));
+            }
+        }
+        return best;
+    };
+
+    // 诊断用：点 p 是否落在指定 clipmap 层的覆盖盒内（穿漏到底是不是"覆盖不到"问题）
+    const u32 layerCount = GetGlobalLayerCount();
+    auto insideLayer = [this](const float3& p, u32 layer) {
+        const float vs = GetGlobalVoxelSize(layer);
+        if (vs <= 0.0f) return false;
+        const float3 o = GetGlobalOrigin(layer);
+        const float3 l = (p - o) / vs;
+        const float  n = (float)m_Config.globalResolution;
+        return l.x >= 0.0f && l.y >= 0.0f && l.z >= 0.0f && l.x <= n && l.y <= n && l.z <= n;
+    };
+
     for (u32 i = 0; i < n; ++i) {
         const float3 ro = m_RayOriginCPU[i];
+        const bool   insideL0 = insideLayer(ro, 0);   // 射线起点是否在近层覆盖内
+        if (!insideL0) ++outsideLayer0;
         float d0 = 1e30f;   // 起点到几何的精确距离（诊断"上游"：射线集是否退化）
         const float3 rd = m_RayDirCPU[i];
 
@@ -1308,7 +1347,7 @@ void LumenSDF::RunMarchCheck() {
             errVoxAll.push_back(errVox);
             ((d0 < 5.0f) ? errNear : errFar).push_back(errVox);
             ((tRef < 50.0f) ? errNearHit : errFarHit).push_back(errVox);
-            if (hits[i].w < 0.0f) ++normalOk;   // 法线朝向与射线相反 = 正面命中
+            if (gpuHit && hits[i].w < 0.0f) ++normalOk;   // 法线朝向与射线相反 = 正面命中（仅全局命中时该字段才是 dot(N,rd)）
 
             // 诊断：把"全局单独"与"合并后"的误差分开记，才能判断细节追踪到底有没有帮忙
             if (gpuHit) {
@@ -1322,6 +1361,19 @@ void LumenSDF::RunMarchCheck() {
         } else if (cpuHit) {
             ++cpuOnly;
             ((tRef < 50.0f) ? cpuOnlyNear : cpuOnlyFar)++;
+            // 逐条诊断（只打前 16 条）：场在路径上的最小值 / 该点的真实距几何距离
+            if (cpuOnly <= 16) {
+                const float minD  = nrms[i].w;
+                const float tMinD = -hits[i].w;
+                const float3 pMin = ro + rd * tMinD;
+                const float  dGeo = minDistToGeometry(pMin);
+                HE_CORE_INFO("LumenSDF 穿漏逐条 #{}: tRef={:.2f} d0={:.2f} | 场最小={:.2f}(t={:.2f}) 该点真实距几何={:.2f} "
+                             "| 起点在近层内={} 体素=({:.2f},{:.2f})",
+                             cpuOnly, (double)tRef, (double)d0, (double)minD, (double)tMinD, (double)dGeo,
+                             insideL0 ? "是" : "否",
+                             (double)GetGlobalVoxelSize(0), (double)GetGlobalVoxelSize(1));
+                if (!insideL0) ++tunnelOutside;
+            }
         }
     }
     m_RayHit->Unmap();
@@ -1372,6 +1424,10 @@ void LumenSDF::RunMarchCheck() {
         if (!errNearHit.empty()) std::sort(errNearHit.begin(), errNearHit.end());
         if (!errFarHit.empty())  std::sort(errFarHit.begin(), errFarHit.end());
         HE_CORE_INFO("LumenSDF 穿漏按命中距离: 近命中(tRef<50) {} 条 / 远命中 {} 条（近场穿漏才是真问题）", cpuOnlyNear, cpuOnlyFar);
+        HE_CORE_INFO("LumenSDF 场覆盖: clipmap 层数 {}，近层体素 {:.2f}，远层体素 {:.2f}；射线起点在近层覆盖外 {} 条"
+                     "（其中判为穿漏 {} 条 ⇒ 覆盖外的射线本就在场外，属**覆盖**问题而非**精度**问题）",
+                     layerCount, (double)GetGlobalVoxelSize(0), (double)GetGlobalVoxelSize(1),
+                     outsideLayer0, tunnelOutside);
 
 
     }    HE_CORE_INFO("LumenSDF sphere tracing 误差分解: 仅全局场 {}/{} 在 1 体素内（平均 {:.3f}），"
