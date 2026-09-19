@@ -1160,34 +1160,45 @@ void LumenSDF::SetupMarchRays() {
     m_RayOriginCPU.resize(n);
     m_RayDirCPU.resize(n);
 
+    // 近层覆盖盒（步骤 10.5 的 clipmap 近层）：自检射线必须落在**近层能覆盖的地方**才有意义 ——
+    // 近层细（体素 7.11）才是 sphere tracing 真正依赖的那一层。此前 256 条射线**全部**落在近层盒外，
+    // 于是"安全/精度"其实只在 28.44 体素的远层上测，近层的问题与收益都被掩盖（这也解释了穿漏为何居高不下）。
+    const float3 nlOrig = GetGlobalOrigin(0);
+    const float  nlSide = GetGlobalVoxelSize(0) * (float)m_Config.globalResolution;
+    auto inNear = [&](const float3& q) {
+        return q.x >= nlOrig.x && q.y >= nlOrig.y && q.z >= nlOrig.z &&
+               q.x <= nlOrig.x + nlSide && q.y <= nlOrig.y + nlSide && q.z <= nlOrig.z + nlSide;
+    };
+
     u32 seed = 20260919u;   // 固定种子：自检可复现
+    u32 outsideDrawn = 0;
     for (u32 i = 0; i < n; ++i) {
-        // 起点落在**某个 mesh 的 AABB 内**：那里全局场取自该 mesh 的精确距离场，
-        // 最能检验步进本身；起点落在几何内部也无妨（本版是无符号场，会在表面附近命中）。
-        const MeshSDFEntry& e = m_Entries[(u32)(NextRand(seed) * (float)m_Entries.size()) % m_Entries.size()];
-        const float side = e.voxelSize * (float)e.resolution;
-        // 起点改为"贴着几何表面"：随机取该 mesh 的一个三角形、面内取随机重心点，再沿法线外移 1 个单位。
-        // 理由：随机撒在 AABB 内的点大多远离几何，实测那类射线误差 p50 = 59.75 体素、把指标完全带偏
-        // （近表面射线其实只有 0.159 体素）。探针射线在真实使用中就是从表面出发的，测试集必须与用法一致。
-        const u32 triIdx = (u32)(NextRand(seed) * (float)std::max(1u, e.triCount)) % std::max(1u, e.triCount);
-        const u32* tri = &m_IndicesCPU[e.firstIndex + triIdx * 3];
-        const float3 A = m_PositionsCPU[tri[0] + e.vertexOffset];
-        const float3 B = m_PositionsCPU[tri[1] + e.vertexOffset];
-        const float3 C = m_PositionsCPU[tri[2] + e.vertexOffset];
-        float w0 = NextRand(seed), w1 = NextRand(seed);
-        if (w0 + w1 > 1.0f) { w0 = 1.0f - w0; w1 = 1.0f - w1; }
-        const float3 surf = A + (B - A) * w0 + (C - A) * w1;
-        float3 nrm = glm::cross(B - A, C - A);
-        nrm = (glm::dot(nrm, nrm) > 1e-12f) ? glm::normalize(nrm) : float3(0.0f, 1.0f, 0.0f);
-        // 起点外移 **4 个单位**（原来 1 个）：收敛阈值 eps = 0.25 × 近层体素 = 1.54，起点离表面 1 个单位时
-        // d(origin) 就已经小于 eps，射线在 t=0 处"命中" —— 于是无论怎么改步进都不会动指标（实测把步长
-        // 系数从 0.5 降到 0.25 后逐位不变，正是这个原因）。外移到 4 个单位（> 2.6×eps）才真正考验步进。
-        const float3 p = surf + nrm * 4.0f;
-        float3 d(NextRand(seed) * 2.0f - 1.0f, NextRand(seed) * 2.0f - 1.0f, NextRand(seed) * 2.0f - 1.0f);
-        if (glm::dot(d, d) < 1e-6f) d = float3(0.0f, -1.0f, 0.0f);
+        float3 p(0.0f), d(0.0f, -1.0f, 0.0f);
+        // 最多重抽 8 次，尽量让起点落在近层盒内：起点贴着某个 mesh 的三角形、沿法线外移 4 单位
+        // （外移 4 而不是 1：eps = 0.25 × 近层体素，起点离表面太近时 t=0 处就"命中"，指标对步进不敏感）。
+        for (u32 attempt = 0; attempt < 8u; ++attempt) {
+            const MeshSDFEntry& e = m_Entries[(u32)(NextRand(seed) * (float)m_Entries.size()) % m_Entries.size()];
+            const u32 triIdx = (u32)(NextRand(seed) * (float)std::max(1u, e.triCount)) % std::max(1u, e.triCount);
+            const u32* tri = &m_IndicesCPU[e.firstIndex + triIdx * 3];
+            const float3 A = m_PositionsCPU[tri[0] + e.vertexOffset];
+            const float3 B = m_PositionsCPU[tri[1] + e.vertexOffset];
+            const float3 C = m_PositionsCPU[tri[2] + e.vertexOffset];
+            float w0 = NextRand(seed), w1 = NextRand(seed);
+            if (w0 + w1 > 1.0f) { w0 = 1.0f - w0; w1 = 1.0f - w1; }
+            const float3 surf = A + (B - A) * w0 + (C - A) * w1;
+            float3 nrm = glm::cross(B - A, C - A);
+            nrm = (glm::dot(nrm, nrm) > 1e-12f) ? glm::normalize(nrm) : float3(0.0f, 1.0f, 0.0f);
+            p = surf + nrm * 4.0f;
+            float3 dd(NextRand(seed) * 2.0f - 1.0f, NextRand(seed) * 2.0f - 1.0f, NextRand(seed) * 2.0f - 1.0f);
+            d = (glm::dot(dd, dd) < 1e-6f) ? float3(0.0f, -1.0f, 0.0f) : glm::normalize(dd);
+            if (inNear(p)) break;
+        }
+        if (!inNear(p)) ++outsideDrawn;
         m_RayOriginCPU[i] = p;
-        m_RayDirCPU[i]    = glm::normalize(d);
+        m_RayDirCPU[i]    = d;
     }
+    HE_CORE_INFO("LumenSDF: 自检射线生成完毕：{} 条中 {} 条重抽 8 次仍落在近层盒外（近层边长 {:.1f}，原点 ({:.1f},{:.1f},{:.1f})）",
+                 n, outsideDrawn, (double)nlSide, (double)nlOrig.x, (double)nlOrig.y, (double)nlOrig.z);
 
     std::vector<float4> origins(n), dirs(n);
     for (u32 i = 0; i < n; ++i) {
