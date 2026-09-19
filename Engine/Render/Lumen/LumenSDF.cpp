@@ -1093,7 +1093,10 @@ void LumenSDF::SetupMarchRays() {
         const float3 surf = A + (B - A) * w0 + (C - A) * w1;
         float3 nrm = glm::cross(B - A, C - A);
         nrm = (glm::dot(nrm, nrm) > 1e-12f) ? glm::normalize(nrm) : float3(0.0f, 1.0f, 0.0f);
-        const float3 p = surf + nrm;   // 表面外 1 个单位
+        // 起点外移 **4 个单位**（原来 1 个）：收敛阈值 eps = 0.25 × 近层体素 = 1.54，起点离表面 1 个单位时
+        // d(origin) 就已经小于 eps，射线在 t=0 处"命中" —— 于是无论怎么改步进都不会动指标（实测把步长
+        // 系数从 0.5 降到 0.25 后逐位不变，正是这个原因）。外移到 4 个单位（> 2.6×eps）才真正考验步进。
+        const float3 p = surf + nrm * 4.0f;
         float3 d(NextRand(seed) * 2.0f - 1.0f, NextRand(seed) * 2.0f - 1.0f, NextRand(seed) * 2.0f - 1.0f);
         if (glm::dot(d, d) < 1e-6f) d = float3(0.0f, -1.0f, 0.0f);
         m_RayOriginCPU[i] = p;
