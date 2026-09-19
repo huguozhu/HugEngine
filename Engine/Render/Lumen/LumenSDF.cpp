@@ -1397,7 +1397,7 @@ void LumenSDF::RunMarchDetail(rhi::IRHICommandList* cmd) {
         pc.originX = e.origin.x; pc.originY = e.origin.y; pc.originZ = e.origin.z;
         pc.voxelSize = e.voxelSize;
         pc.dimX = pc.dimY = pc.dimZ = e.resolution;
-        pc.eps   = 0.25f * e.voxelSize;    // eps 挂**该 mesh** 的体素（细节追踪的意义所在）
+        pc.eps   = 1.0f * e.voxelSize;     // 【实验】eps 从 0.25 体素放大到 1 体素：判别"漏确认"是容差问题还是几何问题
         cmd->SetPushConstants(0, sizeof(pc), &pc);
         cmd->Dispatch((n + 63u) / 64u, 1, 1);
         cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
@@ -1559,9 +1559,9 @@ void LumenSDF::RunMarchCheck() {
         // 细场未确认的粗命中计入 near-miss —— 它是"容差型近似错失"的可回归数字。
         // 细场本身已大改（每 mesh 一套描述符集 + 允许"先域外后进入"），其精度已可作参考
         // （近命中 p50 0.553 体素、远命中 2.331），但仍有 33 条真命中未确认 ⇒ 暂不作门控。
-        const float tGpuMerged = std::min(gpuHit ? hits[i].x : 1e30f, tDetail);
-        const bool  mergedHit  = tGpuMerged < 1e29f;
-        if (gpuHit && tDetail >= 1e29f) ++nearMiss;
+        const float tGpuMerged = tDetail;   // 【实验】门控：只认细场确认的命中
+        const bool  mergedHit  = tDetail < 1e29f;
+        if (gpuHit && !mergedHit) ++nearMiss;
 
         if (mergedHit && cpuHit) {
             ++bothHit;
