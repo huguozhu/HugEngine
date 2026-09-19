@@ -2324,3 +2324,54 @@ if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
 - **纪律**：先测量再改（§14.1 的每一项都是可复核的代码事实）；**不要**先动 cluster/软光栅，
   阶段 0 是硬前置（否则 N2/N3 的产物没有消费者）；每一轮结束前跑一次
   `acceptance_sweep.ps1`（至少 `-OnlyNanite`）确认没有回归。
+
+### 14.13 任务 3 实施记录与一处计划修正（2026-09-20）
+
+**① 计划盲点（§14.1 应补一行）**：§14.5 与任务 3 都要求"模块自持 `DrawIndexedIndirectCount` 链"，
+但 2026-09-20 实测：**RHI 层没有这个入口**（`Engine/RHI/RHI/CommandList.h:104` 只有
+`DrawIndexedIndirect(buffer, offset, drawCount, stride)`，`Engine/RHI/Vulkan/VulkanCommandList.cpp` 里
+也只有 `vkCmdDrawIndexedIndirect`），且**设备创建未启用** `VkPhysicalDeviceVulkan12Features::drawIndirectCount`
+（全仓库零引用 `VkPhysicalDeviceVulkan12Features`）。结论：**这条链不是"接线"就能通的，必须先扩展 RHI**。
+
+**② 授权后的最小 RHI 扩展（已落地，§14.6 接触面因此 +3 文件）**
+- `Engine/RHI/RHI/CommandList.h`：新增纯虚
+  `DrawIndexedIndirectCount(buffer, offset, countBuffer, countOffset, maxDrawCount, stride)`。
+- `Engine/RHI/Vulkan/VulkanCommandList.{h,cpp}`：实现 `vkCmdDrawIndexedIndirectCount`；特性缺失或缓冲为空时
+  打印中文告警并跳过（不崩）。
+- `Engine/RHI/Vulkan/VulkanDevice.{h,cpp}`：查询并启用 `drawIndirectCount`，新增 `SupportsDrawIndirectCount()`。
+- **踩到的两个 Vulkan 规则（后来者别再踩）**：① `VkPhysicalDeviceDescriptorIndexingFeatures` /
+  `BufferDeviceAddressFeatures` / `TimelineSemaphoreFeatures` / `ShaderFloat16Int8Features` 与
+  `VkPhysicalDeviceVulkan12Features` 是**别名结构体**，同时入 pNext 链触发 `VUID-VkDeviceCreateInfo-pNext-02830`；
+  启用 `VK_EXT_descriptor_indexing` 时还必须 `descriptorIndexing=VK_TRUE`（`-02833`）。做法：把这 4 个结构体
+  **合并进一个 `Vulkan12` 结构**，逐字段沿用同一份查询结果（启用集合不变）。② 片元着色器写 SSBO 需要
+  `fragmentStoresAndAtomics`（否则 `VUID-RuntimeSpirv-NonWritable-06340`）。修完 `vuid_lines` 回到基线 41。
+- `IRHICommandList` 的实现者只有 `he::rhi::VulkanCommandList`（Tests 里没有 mock 后端），所以接口扩展只需补一处。
+
+**③ 任务 3 交付（模块自持的「计数 → 间接绘制」链）**
+- 新增 `Engine/Shader/Shaders/Nanite/{Nanite_Cull.comp, Nanite_Raster.vert, Nanite_Raster.frag}.slang`，
+  三个都**显式登记**进 `Engine/Shader/CMakeLists.txt`（`COMP_SLANG`/`VERT_SLANG`/`FRAG_SLANG`），
+  `build/Engine/Shader/Shaders/Nanite/*.spv.h` 已生成。
+- `NaniteTypes.h` 加与 Slang 共享的 POD：`NaniteIndirectCommand`（20B，与 `VkDrawIndexedIndirectCommand`
+  二进制兼容）、`NaniteFakeCluster`（16B），`static_assert` 钉住尺寸/偏移。
+- `NaniteCull` 自持四个缓冲（假簇 / 间接命令 / 计数 / 已光栅化计数）+ compute PSO + 每帧重置；
+  `NaniteRaster` 自建 1×1 R8 目标（**不碰可见画面**）+ 图形 PSO + `DrawIndexedIndirectCount`；
+  `NaniteRenderer` 注册 `Nanite_Cull` 与 `Nanite_Raster`，**移除占位的 `Nanite_Noop`**。
+- 配置：`NaniteSettings::fakeClusters`（默认 6）+ cfg 键 `nanite_fake_clusters`；`r.Nanite.FakeClusters` 只作启动默认。
+
+**④ 验收证据（2026-09-20，本人复跑）**
+- 关闭档：`passes_per_frame=12`、`nanite_passes=0`、`vuid_lines=41`、
+  指纹 `1C15AB72E688B5302332AEC391C41A5FE2B4D9512258CCDCD5D3E9D7E8F5390D`（**与冻结值一致**）。
+- 开启档：`passes_per_frame=14` = 既有 12 个（相对顺序不变）+ `Nanite_Cull` + `Nanite_Raster`；
+  去掉 `^Nanite` 行后与关闭档逐行相同（判据 ⑥b `preexisting_set_changed=False`）。
+- **核心验收"计数为 k ⇒ 恰好画 k 次"**（真实 GPU 读回，一行日志）：
+  `fake_clusters=0/3/17 → count_buffer=0/3/17、indirect_cmds=0/3/17、rasterized_clusters=0/3/17`（**X=Y=Z=N**，含 k=0 边界）。
+- 画面不变：开启/关闭档转储逐位比较 `same=17`、`must_same_diff=0`（仅 3 个抖动族文件不同）。
+- `vuid_lines=41`（= 基线，无新增）；`HugEngineTests` 237/5792 全绿；
+  全量六条判据 `ACCEPTANCE SWEEP: PASS`（①白炉 1.0000 ②`max ULP=0` ③`lumen_passes=0` ④严格差异 0、缓存留族 5 ⑤SUCCESS ⑥PASS）。
+
+**⑤ 判据修正**：判据 ⑥b 原先把"开启档去掉 `^Nanite_Noop`"与关闭档比较，任务 3 新增了更多 `Nanite_*` pass
+后该写法会误报，已泛化为"去掉所有 `^Nanite` 开头的 pass 行后比较"，并要求开启档至少 1 个 `Nanite` pass。
+（脚本仍在被 gitignore 的 `build/verify/` 下，**权威记录是本节与 §14.11**；指纹或判据变化时先改文档再改脚本。）
+
+**⑥ 风险**：设备不支持 `drawIndirectCount` 或 `fragmentStoresAndAtomics` 时，只打印中文告警并跳过绘制端，
+该档会失去"已光栅化簇数"计数（不崩溃、不影响既有画面）；本机已确认两项均已启用。
