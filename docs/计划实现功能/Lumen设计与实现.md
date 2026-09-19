@@ -7,6 +7,13 @@
 部分，Nanite 部分归 `Nanite设计与实现.md`）与《ReSTIR PT / GRIS 预研》（全文并入附录 A）。
 合并只做重排与连接，源文档中的表格、实测数字、决策记录、里程碑与任务编号均逐条保留。
 
+> **2026-09-19 补充（架构对照后的修正）**：与 UE5 Lumen 做了一次架构对照（见 §15–§17），
+> 结论是两处差异属于"架构分叉"而非"规模简化"，**本轮就补进设计**：
+> · §4 新增 **Surface Cache 页状态机 + 每帧预算**；
+> · §6 把原文一维的"距离分支"改为 **追踪表示 × 着色表示二维解耦**（为 Hit Lighting 留出入口）；
+> · §12 增列与之配套的两项实现前置（Provider 生命周期遍历、RG 显式依赖边）；
+> · §17 记录**明确不抄**的清单与"已知降级"，避免后续对齐 UE 时范围失控。
+
 ---
 
 ## 0. 本文件怎么读
@@ -26,6 +33,10 @@
 - **附录 A 是 ReSTIR PT / GRIS 预研**：它是 Lumen GI 的落点方案与代价评估（含全部实测数字、
   成本表、显存推算、里程碑 M0–M3、非目标、通用性分析与复现命令）。它是**决策依据与执行
   留档**，不是已排期的实现任务。
+- **第十五 ~ 十七章是"与 UE5 Lumen 的架构对照"**（§15–§17，2026-09-19 补充）：§15 是能力与
+  显存对照（含本设计自己的显存测算），§16 是架构判断（哪些地方本设计更好、哪四处处属于
+  "架构分叉"），§17 是决策记录与"明确不抄"清单。它不是设计规范，但**实现前应当读**：
+  §16 的四处分叉里有两条已经落回 §4 / §6 的设计，另两条是"已知降级"，写清了代价。
 - **Nanite 相关的内容不在本文件**：源文档中与 Nanite 同时出现的表述（共享基础设施、帧图
   插入点、推进顺序）予以保留，但**逐处注明"属 Nanite"**，其设计与里程碑见
   `Nanite设计与实现.md`。
@@ -115,6 +126,51 @@ GBuffer (Albedo/Normal/Emissive/Depth)
 | 更新触发 | Feedback Pass 检测缺失页 → Request → Allocate → Capture |
 | 失效 | 物体移动/材质变更时标记脏页 |
 
+**页状态机（2026-09-19 补充，原设计缺）**
+
+原设计只写了"LRU 淘汰 + dirty 标记"，缺了**跨帧请求队列**这一层。而捕获不可能一帧做完：
+atlas 4096² ≈ 402 MB（8192² ≈ 1.61 GB，见 §15.3），一页 128² × 3 通道 RGBA16F ≈ 393 KB，
+软件光栅一页还要遍历该页覆盖的卡片几何。所以页的生命周期必须显式建模：
+
+| 状态 | 含义 | 迁移 |
+|------|------|------|
+| `Invalid` | 无数据（从未捕获，或已被淘汰） | Feedback 命中 → `Requested` |
+| `Requested` | 已排队，等待本帧预算 | 拿到预算 → `Allocating` |
+| `Allocating` | 页表已分配物理位置，等待捕获 | 发出 Capture → `Capturing` |
+| `Capturing` | 本帧正在被 Card Capture 写入 | pass 结束 → `Captured` |
+| `Captured` | 数据有效 | 几何/材质变更 → `Dirty`；LRU 命中 → `Invalid` |
+| `Dirty` | 数据过期 | 重新排队 → `Requested` |
+
+两个要点：① **排队与捕获分离** —— Feedback 只是"申请"，不保证本帧完成；② 状态要能被面板 /
+dump 工具读到，否则"某块墙一直发黑"无法归因（这是 §16 里"卡片覆盖率可视化"那条工具欠账的
+另一半）。
+
+**每帧预算（2026-09-19 补充，原设计缺）**
+
+| 预算项 | 首版建议值（可配） | 依据 |
+|--------|------------------|------|
+| `maxCapturesPerFrame` | 8 ~ 16 页 | 一页 ≈ 393 KB 写入 + 卡片软件光栅；8 页 ≈ 3 MB/帧写入，留足余量 |
+| `maxAllocationsPerFrame` | ≤ `maxCapturesPerFrame` | 分配要改页表，必须与捕获同批提交 |
+| `maxFeedbackPages` | 反馈按 16×16 像素降采样 | Feedback pass 的读回不能变成新的瓶颈 |
+| 未完成的请求 | 留在 `Requested` 跨帧排队 | 不允许"一帧补完" —— 这正是 UE 那套 **amortized over multiple frames** 的含义 |
+
+捕获顺序按"本帧贡献"排序（屏幕覆盖面积 × 屏幕空间重要性 × 距离），**不是** LRU 或随机：
+排序在 C++ 侧做小规模前缀和即可，Feedback pass 只需输出 `(pageID, weight)` 列表。
+
+**与帧图 / 生命周期的接口约束（代码实证，2026-09-19 补充）**
+
+- Capture / Inject 这类中间 pass **必须显式声明 RG 读写边**：`RenderGraph::TopologicalSort` 是
+  LIFO 栈（`Engine/Render/RenderGraph.cpp:181-186`），无依赖边的 pass 之间"注册顺序 ≠ 执行
+  顺序"；且 `CullDeadPasses`（`:302-324`）会删掉"写了但无人读"的 pass。
+- atlas（以及 §5 的 SDF clipmap）这类**跨帧持久资源必须自建自持**：`rg.CreateTexture` 建出来的
+  纹理 pass 拿不到 `IRHITexture*`（`Engine/Render/RenderGraph.h:106-119` 没有取指针的接口，
+  `PassExecuteFunc` 只收 `IRHICommandList*`，`RenderGraph.cpp:415-416` 的 `textures[]` 是局部量），
+  只能 `device->CreateTexture` + `rg.ImportTexture`。
+- resize 与销毁路径：`DeferredPipeline::OnResize`
+  （`Engine/Render/Pipeline/DeferredPipeline.cpp:575-594`）与 `Shutdown`（`:459-514`）
+  **目前都不遍历 `m_GIProviders`**（Provider 的 `Initialize/Shutdown/OnResize` 全仓只有 AO 的
+  `Initialize` 被调用过）—— L1 必须补这段遍历，否则 resize 后会读到旧尺寸的页表/历史。
+
 ### 5. SDF 体系
 
 | 组件 | 分辨率 | 格式 | 生成方式 |
@@ -144,14 +200,45 @@ GBuffer (Albedo/Normal/Emissive/Depth)
 | 时间滤波 | EMA (α=0.2) 混合历史帧 |
 | SH 输出 | 二阶球谐 (4 coeffs RGB) = 12 floats/probe |
 
-**两个追踪路径切换**：
+**追踪表示 × 着色表示（2026-09-19 修正：原文把两者压成了一维距离分支）**
 
+原文用"`rayDistance < MaxSDFTraceDistance`（50 m）走 SDF，否则走 HW RT"这一条分支，同时决定了
+**在哪求交**与**命中点怎么着色**。但这两件事是正交的 —— UE5 的 Lumen 就是分开选的
+（`trace ∈ {Screen, SDF, HW}` × `shade ∈ {Surface Cache, Hit Lighting}`，见
+[Lumen Technical Details](https://dev.epicgames.com/documentation/en-us/unreal-engine/lumen-technical-details-in-unreal-engine?application_version=5.6)）。
+压成一维的代价是 **Hit Lighting 被架构性排除**，而"高质量镜面反射只能靠 Hit Lighting"（官方文档
+原话）—— 以后要加就得动整条数据流。因此本设计改为二维显式建模：
+
+```cpp
+enum class LumenTraceRep : u8 { Screen, SDF, HardwareRT };      // 在哪求交
+enum class LumenShadeRep : u8 { SurfaceCache, HitLighting };     // 命中点怎么着色
+
+struct LumenTraceConfig {
+    LumenTraceRep traceRep       = LumenTraceRep::SDF;   // 首版：SDF（近场）+ HW（远场）混合
+    LumenShadeRep shadeRep       = LumenShadeRep::SurfaceCache;
+    bool          screenTrace    = false;    // 屏幕轨迹优先（弥合"两套表示"的偏差，见 §16）
+    bool          farFieldHW     = true;     // 近场 SDF / 远场 HW 的混合开关
+    float         maxSDFDistance = 50.0f;    // 原 MaxSDFTraceDistance
+};
 ```
-if (rayDistance < MaxSDFTraceDistance)    // 50m 内
-    Compute Shader SDF Trace (spawn from screen probe CS)
-else
-    Indirect TraceRay (HW RT, secondary rays from screen probe CS)
-```
+
+**组合约束（必须写进实现，不是可选建议）**：
+
+| 组合 | 是否允许 | 原因 |
+|------|---------|------|
+| `SDF × SurfaceCache` | ✅ 首版默认 | SDF 命中没有真实三角形，只能读卡片 |
+| `HW(RT) × SurfaceCache` | ✅ | 命中三角形但按卡片着色（省算力） |
+| `HW(RT) × HitLighting` | ✅（第二版） | 命中点跑材质求值 + NEE 直接光 —— 镜面质量的来源 |
+| `SDF × HitLighting` | ❌ | 没有三角形/材质可求值，语义不成立 |
+| `Screen × 任意` | ✅（作为**优先层**） | 屏幕命中直接复用 GBuffer 着色，未命中再回落 `traceRep` |
+
+**首版范围**：只实现 `SDF（+ HW 远场混合） × SurfaceCache`，`screenTrace = false`、不做
+Hit Lighting；但**接口与配置按上表写全**。这样第二版加 Hit Lighting / Screen Trace 是"加一条
+分支"，而不是重构数据流与 pass 结构。
+
+> 副作用（正面）：§14 里"SDF ↔ HW 切换 discontinuity"这条风险随之收敛 —— overlap fade 落在
+> `traceRep` 的切换逻辑内，与 `shadeRep` 无关，不会再出现"两种表示 × 两种着色"的四种组合各自
+> 需要一套过渡策略。
 
 ### 7. Radiance Cache（升级 DDGI）
 
@@ -164,6 +251,12 @@ else
 | 插值 | 三线性探针插值 | 三线性 + 距离权重 |
 
 > DDGI 的现役实现位置见 §9.1（`GI_DDGI` / `DDGIProvider` / `DDGITracePass` / `GIProbeGrid`）。
+
+> **已知降级（2026-09-19 标注，不修正）**：上表里"SH 三波段 9 系数 → 二阶 4 系数"与"均匀 3D
+> 网格 → 自适应密度（未实现）"是**表示能力上的降级**，不是实现细节：复用 DDGI 省掉了整套
+> GPU 探针分配 / 失效 / 压实系统（这是划算的），代价是 Radiance Cache 会更糊、有网格伪影、
+> 屏外与大范围 GI 受限。这条降级写在这里是为了**避免后来者把它当 bug 修**：要真正解决必须
+> 换成显式分配的探针缓存，属于 §17 里"明确不抄"的范畴（本轮不做）。
 
 ### 8. 与现有管线集成（DeferredPipeline 扩展、新增 Shader 文件）
 
@@ -410,6 +503,20 @@ Lumen（L1-L3）。
 > （N1 预处理 / N2 上传+剔除 / N3 软光栅 / N4 硬光栅 / N5 LOD 流式 / N6 材质批次）同样归
 > `Nanite设计与实现.md`，本文件不重复。
 
+#### 架构前置（2026-09-19 补充，不新增 L 编号）
+
+下面四项**不改变 L1–L6 的内容**，但必须随对应的 L 一起落地 —— 它们的共同特征是"后补等于重构"：
+
+| 前置项 | 随哪个 L 落地 | 内容 | 依据 |
+|--------|--------------|------|------|
+| **追踪 / 着色二维解耦** | L1 定数据结构 → L4 加 Hit Lighting 分支 | §6 的 `LumenTraceRep × LumenShadeRep` 配置与组合约束（`SDF × HitLighting` 非法） | §16 架构分叉 #2 |
+| **页状态机 + 每帧预算** | L2（Surface Cache） | §4 的六态状态机、`maxCapturesPerFrame` / `maxAllocationsPerFrame` / `maxFeedbackPages`，请求跨帧排队 | §16 架构分叉 #4 |
+| **Provider 生命周期遍历** | L1 之前（一次性补框架） | `DeferredPipeline::OnResize` / `Shutdown` 遍历 `m_GIProviders`；atlas / clipmap 自建 + `ImportTexture` | §4 末的接口约束（`DeferredPipeline.cpp:575-594`、`:459-514` 现状不遍历） |
+| **RG 显式依赖边** | L1 起，每个内部 pass | 中间 pass 显式声明 reads / writes，不依赖 `AddPass` 先后 | `RenderGraph.cpp:181-186`（LIFO 排序）、`:302-324`（dead-pass 裁剪） |
+
+> 这四项同时也是 §15.2 差异表里"性能工程：UE 有摊销与节流、本设计没有"那一行的**最小修补**：
+> 完整的摊销（预算调度、异步 compute、分级画质）仍在 L6 / §17，但状态机与预算入口从这里开始。
+
 ### 13. 关键数据结构（Lumen 相关）
 
 #### Surface Cache Page
@@ -424,6 +531,30 @@ struct SurfaceCachePage {
     bool   dirty;             // 需要重新 capture
 };
 ```
+
+> **补充（2026-09-19）**：上面的 `dirty` 是二值标记，撑不起 §4 的页状态机。GPU 侧的页表项与
+> 请求队列建议扩展为：
+>
+> ```cpp
+> enum class PageState : u8 { Invalid, Requested, Allocating, Capturing, Captured, Dirty };
+>
+> struct SurfaceCachePageEntry {   // 页表项（GPU 侧，紧凑）
+>     u32 physicalPage;    // 物理页号（0xFFFFFFFF = 未分配）
+>     u32 lastTouchFrame;  // LRU 依据
+>     u8  state;           // PageState
+>     u8  mipLevel;        // 预留：多分辨率页（首版恒 0）
+>     u16 _pad;
+> };
+>
+> struct SurfaceCacheRequest {     // Feedback 输出，逐帧消费
+>     u32 pageID;
+>     f32 weight;          // 屏幕覆盖面积 × 屏幕空间重要性 × 距离
+> };
+> ```
+>
+> 每帧流程：Feedback 写 `SurfaceCacheRequest[]` → C++ 侧按 `weight` 排序取前
+> `maxCapturesPerFrame` 个 → 置 `Allocating/Capturing` → Capture pass 写 atlas → 置 `Captured`。
+> 未进入本帧预算的请求保持 `Requested`，不回退、不丢弃。
 
 #### Screen Probe
 
@@ -451,6 +582,159 @@ struct ScreenProbe {
 
 > 源文档第 7 节另有两条纯 Nanite 风险（"软件光栅化效率"、"`.nanite` 格式版本兼容"），
 > 归 `Nanite设计与实现.md`。
+
+> **2026-09-19 补充**：第 3 行"SDF ↔ HW 切换 discontinuity"已随 §6 的追踪 / 着色二维解耦收敛
+> （过渡逻辑只挂在 `traceRep` 上）。另新增两条风险记录，均来自 §16 的架构对照：
+>
+> | 新增风险 | 缓解措施 |
+> |----------|---------|
+> | **两套表示的偏差不可见**：本设计没有 UE 的 Screen Trace 那一层，SDF / 卡片与三角形场景不一致时（薄面、WPO、蒙皮、过期卡片）会直接表现为可见错误 | ① §6 预留 `screenTrace` 开关（首版关闭）；② 补齐"卡片覆盖率"可视化（§17 对齐清单第 1、2 项）；③ 把 UE 那套几何 / 材质限制逐条写进实现前置 |
+> | **首版镜面质量受限**：`shadeRep = SurfaceCache` 下反射只能读卡片，无法做命中点材质求值 | 明确写进验收口径（首版只承诺漫反射为主的近中场景）；§6 的组合约束保证第二版加 Hit Lighting 不改数据流 |
+
+---
+
+## 三、与 UE5 Lumen 的架构对照（2026-09-19 补充）
+
+> 这一章不是设计规范，而是**架构判断与决策记录**：它回答"这份设计相对 UE5 Lumen 好在哪、
+> 差在哪、哪些差异现在就要补、哪些明确不抄"。
+>
+> 写作依据：Epic 官方文档
+> [Lumen Technical Details](https://dev.epicgames.com/documentation/en-us/unreal-engine/lumen-technical-details-in-unreal-engine?application_version=5.6)
+> 与本仓库代码实证（§9.1）。UE 内部实现细节（探针间距、光线数、atlas 尺寸等）随版本变化，
+> 官方文档未公开到该粒度，故本文**不做 UE 侧的数字承诺**，只在能引用处给出链接。
+
+### 15. 能力对照
+
+#### 15.1 骨架相同（这不是巧合 —— 本设计是对着 UE 抄的）
+
+| 环节 | UE5 Lumen | 本设计 | 出处 |
+|------|-----------|--------|------|
+| 射线命中点着色 | Surface Cache（离线 Card 捕获材质） | Surface Cache（`SurfaceCache_Capture.comp`） | §4 |
+| 软件追踪 | Mesh DF + Global DF 合并 | Mesh SDF + Global SDF | §5 |
+| 屏幕级估计 | Screen Probe（SH、空间 + 时域滤波） | Screen Probe 16×16 px、二阶 SH | §6 |
+| 世界空间缓存 | Radiance Cache | Radiance Cache（**升级现有 DDGI**） | §7 |
+| 命中点直接光 | Lumen Scene 光照 | ClusteredShading LightGrid | §6 |
+
+#### 15.2 关键差异
+
+| 维度 | UE5 Lumen | 本设计 | 性质 |
+|------|-----------|--------|------|
+| 归属与边界 | Lumen Scene 是与三角形场景**平行**的表示；不兼容 Forward Shading / lightmap 静态光照 / VR | 延迟管线里的**一个 GI 源**（`IGIProvider`），与 SSGI/SSR/RTGI/DDGI 同层栈加权合成 | 架构不同，各有取舍 |
+| Card 来源 | **资产构建产物**（默认 12 张/mesh，可调），Nanite 多视图光栅化加速；有粉色覆盖率视图 | 运行时 compute 软件光栅化；**卡片怎么生成、覆盖率怎么查均未写** | 工具缺失 |
+| Surface Cache 组织 | 多张 atlas + 页表 + 按距离流送；**多帧摊销 + 节流** | 1024 页 × 128²、3D Clipmap 对齐 + LRU；**原文无状态机、无预算**（§4 已补） | 已补一半 |
+| SDF | 资产构建产物、按距离流送；Detail Tracing（前 2 m 走 mesh DF）/ Global Tracing 可切 | 运行时生成 128³/mesh（暴力写体素）、512³ 单层 → 4×256³ clipmap | 质量与时机差异 |
+| 追踪模式 | 软件 / 硬件**两套完整 tracer**，可运行时切换；硬件另有 **Hit Lighting** 与 **Far Field**（HLOD，约 1 km） | 近场 SDF + 远场 HW 的**单一混合路径**，命中统一读 Surface Cache | 已改为二维建模（§6），Hit Lighting / Far Field 仍未实现 |
+| Screen Trace | **优先层**，专门弥合 Lumen Scene 与三角形场景的偏差 | 原文**没有**这个概念 | 概念缺失（§17 概念声明） |
+| Screen Probe | 数十条光线/探针量级 + 自适应采样合并；多级滤波（空间→时域→空间，带 BRDF 重投影） | 8–16 条；单级 3×3 YCoCg + EMA α=0.2（**无重投影**） | 质量差异 |
+| Radiance Cache | 显式分配 / 失效 / 压实的探针缓存 | 均匀 DDGI 网格；SH 由 9 系数降为 4 系数 | **已知降级**（§7 标注） |
+| 合成模型 | 全局选一种 GI 方法 + Screen Trace 兜底，互斥为主 | 每通道层栈多源加权归一化 + 置信度掩码 + 降级规则 | **本设计更强** |
+| 性能工程 | 多帧摊销、异步 compute、几十个 cvar、画质分级、大世界流送、多视图 | 全在主 command list；无预算 / 无流送（`AsyncCompute` 基础设施在但 GI 未用） | 规模差异 |
+| 约束声明 | 官方文档有专门一节列几何 / 材质 / 工作流限制（薄墙 ≥10 cm、闭合几何、WPO 不支持等） | **原文没有这一节** | 工具缺失（§17 对齐清单第 3 项） |
+
+#### 15.3 本设计自己的显存测算（按这个量级做预算）
+
+| 资源 | 尺寸 | 占用 |
+|------|------|------|
+| Surface Cache atlas | 4096² × 3 通道 RGBA16F | ≈ **402 MB** |
+| 同上，扩到设计上限 | 8192² × 3 通道 | ≈ **1.61 GB** |
+| Mesh SDF | 128³ × R16F / mesh | ≈ 4.2 MB/mesh（100 个 mesh ≈ 420 MB） |
+| Global SDF 单层 | 512³ × R16F | ≈ 268 MB |
+| Global SDF clipmap | 4 × 256³ × R16F | ≈ 134 MB |
+| Screen Probe SH | 8K 探针 × 12 floats | ≈ 0.4 MB（可忽略） |
+
+参考基线（本机实测，见附录 A 的成本表）：桌面空闲 1893~1897 MiB；05.Sponza-PathTracing 1080p
+跑到 3528 MiB。⇒ §4 里"Atalas 可扩展到 8192²"应标注为**受显存预算限制、默认不启用**，
+首版按 4096²（402 MB）走；Mesh SDF 的 128³/mesh 也必须带"网格数量上限"或按需流送，
+否则一百个 mesh 就把显存吃光。
+
+### 16. 架构判断（结论）
+
+#### 16.1 两句话结论
+
+- **比能力上限：UE 的架构明显更好，且是量级差别。** 它多出两条本设计**根本缺失的概念** ——
+  ①"两套表示 + Screen Trace 弥合"；②"持久化 + 多帧摊销"。这不是工程量问题。
+- **比本项目适配：这份设计更适合。** 一个人、单 GPU、已有成套 GI 基座、要求每步可验收 ——
+  在这组约束下，它的组合模型与分解方式确实比 UE 那套更合用。
+
+#### 16.2 本设计**确实比 UE 好**的四处
+
+1. **GI 源的组合模型**：每通道一条加权层栈（`GITypes.h:193` `GIChannelStack`），多个估计器
+   同帧共存、按权重归一化合成，还有置信度掩码（`kGIConfCameraCoverage` / `kGIConfProbeGrid`）
+   与降级规则（`GIRegistry::Degrade` `:643`）。UE 侧是"全局选一种方法 + Screen Trace 兜底"，
+   没有等价的公开机制。表达力与可测试性都更强。
+2. **可验收性是一等公民**：白炉真值 `1.0000`、单源背靠背逐像素对照、`needsPass/IsValid`
+   把"本帧产出了吗"变成显式契约（`DeferredPipeline_FrameGraph.cpp:944-949` 的门控注释就是
+   这类事故的产物）。UE 不需要写这些（有画面评审与出货压力），但自研引擎**最值钱**。
+3. **增量可回退**：§11 明写"逃生口"—— 随时可以像 IBL / RSM / RT 一样加第 8 条定制循环，
+   不被框架阻塞；L1–L6 每步都能单独提交、单独回退、单独出画面。UE 的 Lumen 是必须整体
+   成形的系统（Lumen Scene / Radiance Cache / Reflections / Translucency 相互咬合）。
+4. **复用而不是重建**：Radiance Cache 升级 `GI_DDGI`、降噪链抄 `std::vector<Stage>`、
+   追踪走现有 `RTPass` 的 AS / SBT / bindless。这些在 UE 里都是独立子系统。
+
+#### 16.3 四处"架构分叉"（**不是**规模简化，是概念缺失或表示降级）
+
+| # | 分叉 | 为什么这不是"简化" | 处置 |
+|---|------|------------------|------|
+| 1 | **没有"两套表示 + Screen Trace 弥合"** | UE 把 Lumen Scene 当作独立于三角形场景的表示，再用 Screen Trace 掩盖两者不一致（官方文档原话）。本设计只在命中点读卡片，**没有"不一致"这个概念** —— 薄面、WPO、蒙皮、过期卡片都会直接变成可见错误，且无兜底 | **概念声明进文档**（§6 的 `screenTrace` 开关 + §14 新增风险行），实现留待第二版 |
+| 2 | **追踪表示与着色表示没有正交分解** | 原文用一条距离分支同时决定"在哪求交"和"怎么着色"，**架构性排除 Hit Lighting**（高质量镜面反射的唯一来源） | **本轮补**：§6 二维建模 + 组合约束表 |
+| 3 | **世界空间缓存退化为均匀 DDGI 网格** | 省掉 GPU 探针分配 / 压实很划算，但 SH 9 → 4 系数、均匀网格是**表示能力降级**（更糊、网格伪影、屏外与大范围受限） | **标注为已知降级**（§7），不修正 |
+| 4 | **没有多帧摊销与预算** | 摊销决定数据结构（页状态、脏标记、请求队列），**后补比设计进去贵得多** | **本轮补**：§4 六态状态机 + 每帧预算 + §13 页表项扩展 |
+
+#### 16.4 属于"规模差异 / 工具缺失"，不必强行对齐
+
+Cards 与 Mesh DF 的**构建期**产物与覆盖率可视化（工具缺失，见 §17 对齐清单）、大世界流送、
+Far Field（HLOD）、多视图 / view family、平台分级、TSR 耦合、Lumen×Nanite×VSM 三方耦合。
+这些在本项目的场景里收益接近 0，成本却是数量级。
+
+### 17. 决策记录
+
+#### 17.1 本轮补进设计的两处（已改）
+
+| 项 | 落点 | 内容 |
+|----|------|------|
+| 追踪 / 着色二维解耦 | §6 | `LumenTraceRep × LumenShadeRep`、组合约束（`SDF × HitLighting` 非法）、首版范围与 `screenTrace` 预留开关 |
+| Surface Cache 页状态机 + 每帧预算 | §4（结构在 §13） | 六态状态机、三项预算、按 `weight` 的捕获顺序、RG 依赖边与持久资源自建的接口约束 |
+
+#### 17.2 随 L1/L2 一起落地的实现前置（§12）
+
+Provider 生命周期遍历（`OnResize` / `Shutdown` 现在不遍历 `m_GIProviders`）、每个内部 pass
+显式声明 RG 读写边（`RenderGraph` 的 LIFO 排序与 dead-pass 裁剪）。
+
+#### 17.3 概念声明（首版不实现，但结构里留位置）
+
+**"两套表示 + Screen Trace"**：本设计承认 Surface Cache / SDF 表示与三角形场景会不一致，
+`screenTrace` 作为独立的优先层保留在配置里（首版 `false`）；一旦出现"画面发黑 / 漏光但
+说不清原因"的案例，第一条排查路径就是打开它对比。对应地，"卡片覆盖率可视化"从"可选工具"
+升级为**验收前置**。
+
+#### 17.4 已知降级（写清代价，不修正）
+
+- Radiance Cache = DDGI 升级 ⇒ SH 4 系数、均匀网格（§7 标注）；
+- 首版镜面质量受限于 `SurfaceCache` 着色（§14 新增风险行）；
+- SDF 由运行时暴力生成，质量低于构建期 DF 构建器（§15.2）——这条在 L1 就要用
+  "薄墙 / 窄缝自遮挡"的测试场景量化，而不是等画面出问题。
+
+#### 17.5 明确不抄（防止"对齐 UE"变成无底洞）
+
+| 不抄的东西 | 理由 |
+|------------|------|
+| GPU 探针分配 / 失效 / 压实（显式 Radiance Cache） | 省下的是本设计最大的一块工程量；代价已按"已知降级"记账 |
+| Far Field + HLOD（1 km） | 依赖世界分区 / HLOD 构建管线，本项目的场景尺度不需要 |
+| 世界空间流送（Mesh DF / atlas 按距离进出） | 同上 |
+| 多视图 / view family / 平台画质分级 | 单视图、本机 60 fps 目标，没有消费方 |
+| TSR 依赖、Lumen×Nanite×VSM 三方耦合 | 会把复杂度引到与本功能无关的系统上 |
+
+#### 17.6 若要对齐 UE，性价比最高的三件事（按顺序）
+
+1. **卡片生成器 + Surface Cache 覆盖率可视化** —— 先有"能看见问题"的工具，再谈质量；
+   没有它，覆盖率不足只会表现为"画面莫名发黑"。
+2. **Screen Trace 优先** —— 复用现有 GBuffer / SSR 几乎零成本，专门用于弥合两套表示的偏差；
+   这也是 §17.3 概念声明的落地形式。
+3. **Global SDF 改为加载期 / clipmap 分层构建，并把几何约束写进实现前置**（薄墙 ≥10 cm、
+   需闭合几何、WPO 不支持、超大单 mesh 表示差）—— 对照 UE 官方文档的"限制"一节逐条抄。
+
+> 余下（Hit Lighting、Far Field、异步摊销）属于第二阶段：Hit Lighting 的入口已由 §6 的二维
+> 建模留好，届时是"加一条分支"。
 
 ---
 
