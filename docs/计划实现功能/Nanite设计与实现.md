@@ -2135,6 +2135,9 @@ if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
 ### 14.8 任务清单（从 1 开始；每项：目标 / 改动点 / 验收）
 
 > 依赖关系：阶段 0 是**硬前置**（没有它，N2/N3 产出的可见簇与间接参数没有消费者）。
+>
+> **进度（2026-09-20）**：**任务 1、2 已完成**并通过验收（证据见 §14.11 判据 ⑥ 与 §14.12 ⑤）；
+> 下一步从**任务 3**（模块自持的"计数 → 间接绘制"链）开始。
 
 **阶段 0：模块化前置（独立开关先落地）**
 
@@ -2224,11 +2227,44 @@ if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
 
 每一步都要过：白炉 `prov6_final` **1.0000**；背靠背同配置两次运行在既有抖动族
 （`prov0_ao_*`/`hdr`/`radiance`）之外 **≤2 个 f16 ULP**；关 Lumen 时 `lumen_passes=0`；
-默认预设抖动族之外 **0 项差异**；`HugEngineTests` 全绿。一条命令：
+默认预设抖动族之外 **0 项差异**；`HugEngineTests` 全绿；**判据 ⑥ 开关不变式**。
+一条命令：
 `powershell -NoProfile -ExecutionPolicy Bypass -File build\verify\acceptance_sweep.ps1`
-（本次更新后新增判据 ⑥ = 任务 2 的开关不变式）。
+（`-OnlyNanite` 只跑判据 ⑥，用于迭代开关不变式与做负向验证）。
 
-**核验时间**：本节所有代码引用为 **2026-09-19（本次评审）** 逐条核对，行号与当时工作树一致。
+**判据 ⑥ = 开关不变式（§14.8 任务 2，2026-09-20 落地）**
+- ⑥a（关闭档）：`07.Nanite` 的 pass 集合必须**不含任何 Nanite pass**；连续两次关闭档必须给出
+  **同一个指纹**；且该指纹必须等于冻结值
+  `1C15AB72E688B5302332AEC391C41A5FE2B4D9512258CCDCD5D3E9D7E8F5390D`
+  （12 个 pass：GPU_Cull, Shadow, GB_Clear, Decal_Project, SSAO, IBL_Bake, Lighting, Skybox,
+  CaptureRadiance, AutoExposure, TAA_Resolve, ToneMap）。
+- ⑥b（开启档）：pass 集合必须**恰好**多出 `Nanite_Noop`，其余 pass 与顺序一字不变。
+- ⑥c（转储）：开启档与关闭档在抖动族之外**逐位一致**；并以"关闭档 vs 关闭档"作对照，
+  证明差异集合确实是基线自带抖动。
+- **负向验证（必须能 FAIL）**：2026-09-20 实测——把 07.Nanite 的开关真值强制为 `true`
+  （cfg 写 `nanite_enable=0` 也不生效）后，判据输出 `ACCEPTANCE SWEEP: FAIL` 并给出三条理由
+  （关闭档泄漏 1 个 Nanite pass、关闭档指纹漂移、开启档相对既有集合发生变化）；还原后立即恢复
+  `PASS`。**同时发现**：只破坏帧图外层门控而不动真值时**不会**泄漏，因为
+  `NaniteRenderer.cpp` 的 `AddPasses` 自带第二层守卫 `if (!enabled || !m_Ready) return;`
+  —— 这是刻意的纵深防御，不要为了"单点门控"把它删掉。
+- 脚本位置：`build\verify\nanite_smoke.ps1`（单次冒烟，含 pass 集合归约）+ `acceptance_sweep.ps1`
+  的判据 ⑥ 段。两者都在被 gitignore 的 `build/` 下（与 Lumen 的验收脚本同处），
+  仓库内的**权威记录是本节的判据定义与冻结指纹**；指纹变化时先改这里再改脚本。
+
+**判据 ④ 的一处既有漂移裁决（2026-09-20，与 Nanite 无关）**
+- 现状：`aq_def` 与基线 `s37fin2` 相比，**17 项转储逐位一致**，只有
+  `lumen_irradiance` 与下游 `prov6_*` 共 5 项不同（`maxULP=6`、`maxAbs=1.5e-4`、
+  `meanAbs=2.8e-8`、0.5% 像素）。
+- 判定依据：① 判据 ② 显示**同构建背靠背 0 项差异** ⇒ 不是运行噪声；② 开关关闭档 pass 集合与
+  指纹冻结、且关闭/开启转储逐位一致 ⇒ Nanite 模块不注册任何 pass，不可能改动这 5 项；
+  ③ 本次工作**未触碰任何 Lumen 文件**。结论：这是 s37fin2 时代构建与当前构建之间，Lumen 屏幕探针 6
+  辐照度路径的**既有数值残差**（很可能是该路径的未初始化/时序相关读回，另立项追）。
+- 处理：判据 ④ 对**且仅对** `lumen_irradiance`/`prov6_*` 这一族给出硬上界容差
+  （`maxULP ≤ 8` 且 `meanAbs ≤ 1e-6`）；其余转储仍要求**逐位一致**，所以真正的几何/光照回归
+  一定会 FAIL。④ 的输出会显式打印"容差族里有几项"，不允许静默放过。
+
+**核验时间**：§14.1 的代码引用为 **2026-09-19（本次评审）** 逐条核对；§14.11 的判据 ⑥ 与
+④ 漂移裁决为 **2026-09-20（任务 1–2 实施时）** 实测。
 
 ### 14.12 接手须知（新会话从这里开始）
 
@@ -2236,29 +2272,31 @@ if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
 > 重启就会丢的环境状态都记在这里**。开始前请按 ①②③ 逐条过一遍。
 
 **① 分支与起点**
-- 当前 `main` 已合并 Lumen 全部工作（最新提交 `baeacd9`），工作树干净。
-- 建议：`git checkout -b nanite main`，沿用 lumen 的做法（**按逻辑拆分中文提交**，不自动 push）。
-- `lumen` 分支仍在（可删可留，删除前确认已合并）。
+- `nanite` 分支已存在，起点 `main`（`f839bc6`）。提交历史（按时间）：
+  `a453d50` 新增 07.Nanite 示例（自 06.GILab 拷贝基线）→ `b0c6fe9` Nanite 模块骨架 →
+  `19d088d` 延迟管线门控与独立开关 → `8a6ec0c` 07.Nanite 样例面板与 cfg 往返。
+- 沿用 lumen 的做法：**按逻辑拆分中文提交**，不自动 push。
 
-**② 配置状态：`Content/Config/06_GILab.cfg` 已被改动（**必须处理**）**
+**② 配置状态：`Content/Config/06_GILab.cfg` 会漂移（**必须处理**）**
 - 该文件**不被 git 跟踪**（`git ls-files Content/Config` 为空），所以这种漂移**不会**在 `git status` 里报警。
-- 2026-09-20 01:23 的一次**未设 `HE_GILAB_CONFIG`** 的运行把它回写成了 **Lumen solo**：
-  | 键 | 验收基线值 | 当前值 |
-  |---|---|---|
-  | `gi_solo` | 0 | **1** |
-  | `gi_blend_diffuse_w0`（IBL） | 1.0 | **0.0** |
-  | `gi_blend_diffuse_lumen` | 0.0 | **1.0** |
-- **影响**：`build/verify/acceptance_sweep.ps1` 的判据④是"默认预设回归"；用当前基础 cfg 跑，
-  它比较的是 Lumen solo，**口径失效**。
-- **做法**：开跑前把上表三键改回"验收基线值"（或另存一份干净的基础 cfg）；并且**永远用
-  `HE_GILAB_CONFIG=<私有副本>` 跑 exe** —— `build/verify/lumen_smoke.ps1` 已经这么做，
-  但**直接运行 exe 会回写基础文件**（这正是本次漂移的来源）。
+- 成因：任何一次**未设 `HE_GILAB_CONFIG`** 的直接运行，退出时都会把相机位姿与 GI 权重回写进去。
+  2026-09-20 01:23 的一次这样的运行把它改成了 **Lumen solo 且相机移位**。
+- **修复办法（2026-09-20 已执行）**：`build/verify/chk_s37fin2.cfg` 就是产出基线转储的那份 cfg，
+  直接覆盖回基础 cfg 即可（`Copy-Item` 一条命令）。当时实际不同的只有 5 个键：
+  `ae_enabled`、`cam_pitch`、`cam_yaw`、`gi_blend_diffuse_w0`、`gi_blend_diffuse_lumen`。
+- **注意**：早期版本的本节表格曾把验收基线写成 `gi_blend_diffuse_lumen=0.0`，**那是错的** ——
+  基线 `s37fin2` 实际用的是 `lumen=1.000000`（`chk_s37fin2.cfg` 为准）。另外**相机位姿也是口径的一部分**：
+  相机不一致时判据 ④ 会报 11 项差异（几何全错位），必须用上面的办法复原，不要靠"改权重"猜。
+- **纪律**：永远用 `HE_GILAB_CONFIG` / `HE_NANITE_CONFIG` 指向私有副本跑 exe
+  （`build/verify/lumen_smoke.ps1`、`nanite_smoke.ps1` 已经这么做）；直接运行 exe 会回写基础文件。
 - `Content/Config/06_GILab_imgui.ini` 同时被回写（面板布局，无害）；若希望新 Nanite 面板出现在
   默认位置，删掉它即可。
 
+
 **③ 验收与基线**
 - 一条命令：`powershell -NoProfile -ExecutionPolicy Bypass -File build\verify\acceptance_sweep.ps1`
-  → 期望 `ACCEPTANCE SWEEP: PASS`（判据 ①白炉 ②背靠背 ③关 Lumen ④默认预设 ⑤单测）。任务 2 会新增判据 ⑥（开关不变式）。
+  → 期望 `ACCEPTANCE SWEEP: PASS`（判据 ①白炉 ②背靠背 ③关 Lumen ④默认预设 ⑤单测 **⑥开关不变式**；
+  `-OnlyNanite` 只跑 ⑥）。判据 ⑥ 已于任务 2 落地，定义与冻结指纹见 §14.11。
 - `-Baseline` 默认 `s37fin2`，其转储在 `build/verify/gi_s37fin2_*` —— **不要删**，删了判据④会"跳过"而不是判定。
 - 抖动族（**允许不同**）：`prov0_ao_*`（SSAO）、`hdr`、`radiance`；判据是"抖动族之外 ≤2 个 f16 ULP"。
 - 磁盘：`build/verify` 曾达 **92.5 GB / 16668 文件**（其中 `gi_*` 转储 88.95 GB）；清理时保留
@@ -2273,10 +2311,16 @@ if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
 - 重建命令：`cmake --build build --config Release --target 06.GILab`；单测：`--target HugEngineTests`
   然后 `build\bin\Release\HugEngineTests.exe`。
 
-**⑤ 第一条任务**
-- 从 **§14.8 任务 1**（模块骨架 + 独立开关，N0）开始：建 `Engine/Render/Nanite/` 六个文件 +
-  `NaniteSettings`（开关默认 **0**）+ 帧图 GBuffer 段的 `if/else`（开启时只注册 `Nanite_Noop`），
-  验收 = **开关关闭 ⇒ pass 集合与转储逐位一致；开启 ⇒ pass 列表多一项、画面不变**。
-- 紧接任务 2 把这条不变式固化成 `acceptance_sweep.ps1` 的判据⑥ —— 之后的每一步都靠它保证"不回归"。
+**⑤ 已完成的任务与下一步**
+- **任务 1（模块骨架 + 独立开关，N0）已完成**：`Engine/Render/Nanite/` 12 个文件；开关三层
+  （CVar `r.Nanite.Enable` 默认 0 → cfg 键 `nanite_enable` → `NaniteSettings::enabled` 真值）；
+  帧图 GBuffer 段的唯一门控开启时只注册 `Nanite_Noop`。验收实测：关闭档 pass 集合与指纹不变，
+  开启档只多一项、画面逐位不变。
+- **任务 2（开关不变式守卫）已完成**：判据 ⑥ 进 `acceptance_sweep.ps1`，并做过负向验证
+  （破坏开关 ⇒ FAIL，还原 ⇒ PASS）。
+- **下一步 = 任务 3**（模块自持的"计数 → 间接绘制"链）：在 `NaniteCull` 内写计数缓冲 +
+  `IndirectCmdBuf`，绘制端用 `DrawIndexedIndirectCount`，**不改** `GPUCulling`；
+  验收 = 假数据下"计数为 k ⇒ 恰好画 k 次"且读回计数与绘制一致。
 - **纪律**：先测量再改（§14.1 的每一项都是可复核的代码事实）；**不要**先动 cluster/软光栅，
-  阶段 0 是硬前置（否则 N2/N3 的产物没有消费者）。
+  阶段 0 是硬前置（否则 N2/N3 的产物没有消费者）；每一轮结束前跑一次
+  `acceptance_sweep.ps1`（至少 `-OnlyNanite`）确认没有回归。
