@@ -457,6 +457,14 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
 }
 
 void DeferredPipeline::Shutdown() {
+    // GI Provider 生命周期遍历（§12 架构前置）：Provider 自持的资源（如 Lumen 的
+    // Surface Cache atlas / SDF clipmap）必须在这里释放。**必须早于底层 pass 的 Shutdown**
+    // —— Provider 只持有它们的引用，反过来会拿到已析构的对象。
+    for (auto& prov : m_GIProviders) {
+        if (prov) prov->Shutdown();
+    }
+    m_GIProviders.clear();
+
     // RT 基础设施释放（P3：Deferred 可按层栈启用光追源）
     m_GIDenoiser.reset();
     m_ReflectionDenoiser.reset();
@@ -591,6 +599,11 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
     m_DDGI.OnResize(w, h);
     m_DenoiseSSGI.OnResize(w, h);
     m_DenoiseSSR.OnResize(w, h);
+    // GI Provider 生命周期遍历（§12 架构前置）：放在底层 pass 之后，让自持资源的 Provider
+    // （如 Lumen）按新尺寸重建；Provider 不再需要各自「等下次 OnResize」的隐式约定。
+    for (auto& prov : m_GIProviders) {
+        if (prov) prov->OnResize(w, h);
+    }
 }
 
 void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
