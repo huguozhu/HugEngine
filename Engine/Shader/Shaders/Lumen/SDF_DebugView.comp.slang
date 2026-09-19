@@ -101,11 +101,13 @@ void main(uint3 tid : SV_DispatchThreadID) {
         InterlockedAdd(u_Stats[3], steps);
     }
 
-    // 剖面探针：只由 (0,0) 线程写，沿它自己的射线均匀取 64 点
+    // 剖面探针：只由 (0,0) 线程写。**必须用图像中心方向**（而不是该线程自己的角落方向），
+    // 否则 CPU 侧按"相机前向"算出的真值与这里的采样点不是同一个点（曾因此误判"场低估 20 倍"）。
     if (tid.x == 0u && tid.y == 0u) {
+        const float3 rdp = normalize(camForward.xyz);
         for (uint i = 0u; i < 64u; ++i) {
             const float ts = maxDist * (float)i / 64.0;
-            const float3 pp = ro + rd * ts;
+            const float3 pp = ro + rdp * ts;
             const float2 a2 = SampleLayer(u_Field,  u_FieldSampler,  originVoxel0, grid0.xyz, pp);
             const float2 b2 = SampleLayer(u_Field1, u_FieldSampler1, originVoxel1, grid1.xyz, pp);
             u_Probe[i] = float4(ts, a2.y > 0.5 ? a2.x : -1.0, b2.y > 0.5 ? b2.x : -1.0, 0.0);
