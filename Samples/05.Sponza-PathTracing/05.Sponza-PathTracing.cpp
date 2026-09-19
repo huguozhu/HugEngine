@@ -532,6 +532,7 @@ int main() {
         pathTracingPipeline.SetPTReSTIR(GetInt(cfgData, "pt_restir", 1) != 0);
         pathTracingPipeline.SetPTMIS(GetInt(cfgData, "pt_mis", 1) != 0);
         pathTracingPipeline.SetPTRoulette(GetInt(cfgData, "pt_roulette", 1) != 0);
+        pathTracingPipeline.SetPTTextures(GetInt(cfgData, "pt_textures", 1) != 0);
 
         render::cvPTSkyIntensity.Set(
             GetFloat(cfgData, "pt_sky_intensity", render::cvPTSkyIntensity.Get()));
@@ -1130,6 +1131,7 @@ int main() {
         out["pt_restir"]     = std::to_string(pathTracingPipeline.IsPTReSTIR() ? 1 : 0);
         out["pt_mis"]        = std::to_string(pathTracingPipeline.IsPTMIS() ? 1 : 0);
         out["pt_roulette"]   = std::to_string(pathTracingPipeline.IsPTRoulette() ? 1 : 0);
+        out["pt_textures"]   = std::to_string(pathTracingPipeline.IsPTTextures() ? 1 : 0);
         out["pt_sky_intensity"] = std::to_string(render::cvPTSkyIntensity.Get());
         out["pt_denoise_blend"] = std::to_string(render::cvPTDenoiseBlend.Get());
 
