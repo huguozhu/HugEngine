@@ -24,6 +24,8 @@
 
 #include "RHI/RHI.h"
 
+#include <memory>
+
 namespace he::render {
 
 /// Lumen 持久资源宿主（不参与每帧 orchestration —— 那是 `LumenProvider` 的事）
@@ -38,10 +40,31 @@ public:
     [[nodiscard]] u32  GetWidth()  const { return m_Width; }
     [[nodiscard]] u32  GetHeight() const { return m_Height; }
 
+    /// 屏幕空间的 Lumen 输出纹理（RGBA16F，可被 Lighting 采样）。
+    /// 【骨架阶段】漫反射与镜面**共用这一张**；步骤 20~29 里漫反射来自 Screen Probe、
+    /// 镜面来自反射路径，届时再拆成两张（并相应增加一个 binding）。
+    [[nodiscard]] rhi::IRHITexture* GetOutput() const { return m_Output.get(); }
+    [[nodiscard]] rhi::IRHISampler* GetOutputSampler() const { return m_OutputSampler.get(); }
+
+    // ── 骨架阶段的全屏占位 pass（步骤 6）──
+    // 帧图在 `BeginOffscreenPass` 之前调用它，使 RenderPass 与输出纹理的附件数一致；
+    // 随后 `DrawSkeleton` 画一个全屏三角，颜色由 push constant 给定。
+    void PreBind(rhi::IRHICommandList* cmd);
+    /// value = 输出值；alpha < 0 表示"本条无数据"（合成端 skip），见 shader 里的说明
+    void DrawSkeleton(rhi::IRHICommandList* cmd, float value, float alpha);
+
 private:
+    void CreateOutput();
+    void CreateSkeletonPipeline();
+    void DestroySkeletonPipeline();
+
     rhi::IRHIDevice* m_Device = nullptr;
     u32 m_Width  = 0;
     u32 m_Height = 0;
+    std::unique_ptr<rhi::IRHITexture> m_Output;   // 屏幕空间输出（与视口同尺寸）
+    std::unique_ptr<rhi::IRHISampler> m_OutputSampler;
+    // 占位 pass 的管线状态（单颜色附件 RGBA16F、无深度）。不随视口尺寸变化，只建一次。
+    std::unique_ptr<rhi::IRHIPipelineState> m_SkeletonPSO;
 };
 
 } // namespace he::render

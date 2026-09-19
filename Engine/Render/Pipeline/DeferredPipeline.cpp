@@ -202,6 +202,20 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
         ddgiProvider->SetPass(&m_DDGI);
         m_GIProviders.push_back(std::move(ddgiProvider));
 
+        // Lumen（虚拟化几何 GI）。骨架阶段只创建持久资源宿主与占位输出；
+        // Surface Cache / SDF / Screen Probe 由步骤 8~25 依次填进 LumenProvider::Render。
+        // 放在 RT Provider 之前注册：它暂时不依赖 RTPass（远场 HW RT 是步骤 26），
+        // 但**顺序即计时下标**，越早注册读数越稳定（GITimer 按注册下标归属）。
+        if (m_LumenScene.Initialize(device, m_Width, m_Height)) {
+            auto lumenProvider = std::make_unique<LumenProvider>();
+            lumenProvider->SetScene(&m_LumenScene);
+            lumenProvider->Initialize(device, m_Width, m_Height);
+            m_GIProviders.push_back(std::move(lumenProvider));
+            HE_CORE_INFO("DeferredPipeline: Lumen Provider 已注册（骨架阶段：占位输出）");
+        } else {
+            HE_CORE_WARN("DeferredPipeline: LumenScene 初始化失败，Lumen 源不可用");
+        }
+
         // 光追效果（RT 阴影 / RTAO / RT 反射 / RTGI）在 RT 基础设施初始化之后注册
         //（见下方 RT 基础设施段落末尾）——此处 m_RTPass 等尚未创建。
 

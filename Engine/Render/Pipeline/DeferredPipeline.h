@@ -39,6 +39,8 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "GI/SSGIProvider.h" // 屏幕空间 GI Provider（含降噪附属 pass）
 #include "GI/SSRProvider.h"  // 屏幕空间反射 Provider
 #include "GI/DDGIProvider.h" // 动态漫反射探针 Provider（compute、无纹理输出）
+#include "GI/LumenProvider.h" // Lumen（虚拟化几何 GI）Provider
+#include "Lumen/LumenScene.h" // Lumen 持久资源宿主（atlas / SDF clipmap / 探针）
 #include "GI/RTProvider.h"   // 光追效果 Provider（四种效果共用实现）
 #include "PostProcess/Denoiser.h"
 // RT 效果（P3 统一后 Deferred 亦可按层栈启用光追源）
@@ -216,6 +218,10 @@ private:
     GI_SSGI m_SSGI;
     GI_SSR  m_SSR;
     GI_DDGI m_DDGI;
+    /// Lumen 的持久资源宿主（Surface Cache atlas / Global SDF clipmap / 探针缓冲 / 屏幕输出）。
+    /// 生命周期由 `LumenProvider` 转调（Provider 的 `OnResize/Shutdown` → 本对象），
+    /// 即步骤 1 补上的 Provider 生命周期遍历那条路径。
+    LumenScene m_LumenScene;
     /// 前帧 HDR 辐射度（GI 源共享；DDGI 探针与 SSGI 的入射辐射度都取自它）
     GIRadianceHistory m_RadianceHistory;
     GIConfig m_GIConfig;   // GI 配置（M2 档位/通道/强度 → P3 源层栈单一数据源）

@@ -715,6 +715,65 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     }
 
     // ============================================================
+    // Lumen 段（虚拟化几何 GI）：**第 8 条按 Provider 的循环**
+    //
+    // 与上面 7 条不同，这里按 **Provider** 遍历而不是按 source id：Lumen 的
+    // `ToPipelineCap` 同时返回漫反射与镜面两位（一份估计量喂两个通道，与 IBL 同形），
+    // 若按 id 分派会被两条循环各跑一遍（双跑）。这正是《Lumen设计与实现》§11 的"逃生口"：
+    // 在 PROVIDER-EXEC（任务 19）落地之前，新增源用自己的循环接入，pass 仍只注册一次。
+    //
+    // 【骨架阶段（步骤 6）】Provider::Render 不绘制任何东西，输出由 clear 决定：
+    // 白炉模式清成 1.0（供白炉标度判据），其余清成 0.0（中性，不影响画面）。
+    // ============================================================
+    bool                lumenProduced = false;
+    rhi::IRHITexture*   lumenTex      = nullptr;
+    rhi::IRHISampler*   lumenSampler  = nullptr;
+    render::ResourceHandle lumenHandle = kInvalidHandle;
+    {
+        // 通道取"实际要求了 Lumen 的那一个"：同时要求时以漫反射为准（面板同一份输出）
+        const GIChannelStack& lumenStack = m_GIConfig.diffuse.Has(GISourceId::Lumen)
+                                         ? m_GIConfig.diffuse : m_GIConfig.specular;
+        for (auto& prov : m_GIProviders) {
+            if (!prov->Handles(GISourceId::Lumen)) continue;
+            prov->SyncToStack(lumenStack);
+            if (!prov->NeedsPass(lumenStack)) continue;
+            prov->SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetAlbedo());
+
+            rhi::IRHITexture* out = prov->GetDiffuseOutput();
+            if (!out) continue;
+            const u32 pw = out->GetWidth();
+            const u32 ph = out->GetHeight();
+            lumenHandle = rg.ImportTexture(prov->GetName(), out);
+            const u32 giIdx = (u32)(&prov - m_GIProviders.data());   // 计时下标（任务 29）
+            const GIProviderContext lumenCtx{ &world, &sg, &camera, m_CurrentFrameSlot,
+                                              m_GIConfig.furnaceMode };
+            rg.AddPass(prov->GetName(),
+                {{gbDepth, ResourceAccess::Read}, {gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read}},
+                {{lumenHandle, ResourceAccess::Write}},
+                [&, p = prov.get(), lumenCtx, pw, ph, giIdx](rhi::IRHICommandList* c) {
+                    rhi::ClearValue clr{};
+                    // 白炉：输出 1.0，使「源自身的标度」可被直接读出；否则输出 0（中性占位）
+                    const float v = lumenCtx.furnace ? 1.0f : 0.0f;
+                    clr.color[0] = clr.color[1] = clr.color[2] = v;
+                    clr.color[3] = 1.0f;
+                    p->PreBind(c);
+                    c->BeginOffscreenPass(p->GetDiffuseOutput()->GetNativeHandle(), nullptr,
+                                          pw, ph, &clr, false);
+                    m_GITimer.Begin(c, giIdx);
+                    p->Render(c, lumenCtx);
+                    m_GITimer.End(c, giIdx);
+                    c->EndOffscreenPass();
+                });
+
+            lumenProduced = true;
+            lumenTex      = prov->GetFinalDiffuseOutput();
+            if (auto* lumenProv = dynamic_cast<LumenProvider*>(prov.get())) {
+                lumenSampler = lumenProv->GetOutputSampler();
+            }
+        }
+    }
+
+    // ============================================================
     // RT 效果段（Wave 2 阶段 5：四种 RT 效果共用 Provider，按层栈/阴影枚举启用）
     //   AS_Build（共享前置，不是"源"）→ 各效果主 pass + 时域/空间降噪附属 pass
     //   新增 RT 效果只需注册一个 RTEffectProvider 实例，帧图无需改动
@@ -866,6 +925,10 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     if (ssrProduced) {
         lightingReads.push_back({ssrDenoised, ResourceAccess::Read});
     }
+    // Lumen 输出：本帧产出才声明读依赖（与 SSGI/SSR 同一判据：pass 注册了才算产出）
+    if (lumenProduced && lumenHandle != kInvalidHandle) {
+        lightingReads.push_back({lumenHandle, ResourceAccess::Read});
+    }
     // RT GI 纹理（层栈启用 RTGI 时）需声明读取依赖，保证屏障正确
     ResourceHandle rtGILightingHandle = kInvalidHandle;
     if (rtGITex) {
@@ -882,7 +945,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         // 这里把光照输入的解析结果一并按值捕获。
         [&, w, h,
          ssgiProduced, ssgiFinalTex, ssrProduced, ssrFinalTex, rsmPassRegistered, rsmIndirectTex,
-         rtGITex, rtShadowTex, rtAOTex, rtReflectionTex, fpc](rhi::IRHICommandList* c) {
+         rtGITex, rtShadowTex, rtAOTex, rtReflectionTex,
+         lumenProduced, lumenTex, lumenSampler, fpc](rhi::IRHICommandList* c) {
             // IBL 生成（天空盒 → Irradiance/Prefilter/BRDF LUT，脏时才重建）+ 绑定到 Lighting 描述符集
             auto* giIBL = dynamic_cast<GI_IBL*>(m_GI.get());
             if (giIBL) {
@@ -953,6 +1017,10 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                              ? (ssrFinalTex ? ssrFinalTex : m_SSR.GetIndirectSpecularTexture())
                              : nullptr;
             in.ssrSampler  = ssrProduced ? m_SSR.GetOutputSampler() : nullptr;
+            // Lumen（binding 32）：本帧没产出就传 nullptr —— LightingPass 会回绑黑色占位
+            // （= 无间接光）。传一张没写过的纹理会让描述符"看起来合法"，故障静默（§9.2-T）。
+            in.lumenTex     = lumenProduced ? lumenTex : nullptr;
+            in.lumenSampler = lumenProduced ? lumenSampler : nullptr;
             in.ddgiProbeBuffer = m_DDGI.GetProbeBuffer();
             in.ddgiGridUniform = m_DDGI.GetGridUniform();
             // RSM 间接光（有 RSM 渲染时喂给 Lighting——shader 内 rsmIndirect 分支）
