@@ -219,6 +219,7 @@ void LumenSDF::BuildQueue(const MeshBatcher& batcher) {
     // 自检探针挑 AABB 最大的 mesh（见头文件说明）
     m_ProbeMeshIndex = 0;
     for (u32 i = 1; i < (u32)m_Entries.size(); ++i) {
+        // 按**体素数**（= AABB 边长³，分辨率相同）挑最大者：三方对照显示"存 0"的探针落在体量最大的网格里
         if (m_Entries[i].voxelSize > m_Entries[m_ProbeMeshIndex].voxelSize) m_ProbeMeshIndex = i;
     }
     if (skippedTris || skippedCap) {
