@@ -482,7 +482,10 @@ void LumenSDF::SetupGlobalGrid() {
         // L = 实际最外层（m_GlobalLayerCount-1）覆盖全场；更小的 L 是更细的近层，居中于场景中心。
         // 近层边长 = 场景最长轴 × nearFraction^(层数-1-L)，故得名"cl_ipmap"的最小可用形态：
         // 每往里一层体素小一个比例，而覆盖范围也小同样的比例。
-        const u32   stepsFromFar = (kMaxGlobalLayers - 1u) - L;
+        // 【必须是 m_GlobalLayerCount 而不是 kMaxGlobalLayers】用常量会让"只开 1 层"时
+        // 唯一那层退化成近层（只覆盖场景中心 1/4 边长），几何大多落在场外 —— 实测 256/256
+        // 条验证射线的起点都在场外，全局追踪一条都没命中，14 条"穿漏"全由此产生。
+        const u32   stepsFromFar = (m_GlobalLayerCount - 1u) - L;
         const float layerSide    = sceneSide * std::pow(m_Config.nearFraction, (float)stepsFromFar);
         layer.res       = res;
         layer.origin    = sceneCtr - float3(layerSide * 0.5f);
