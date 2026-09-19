@@ -14,9 +14,9 @@ namespace he::render {
 // 3D 探针网格 → Compute Shader 每帧采样 GBuffer 更新 SH
 // → Lighting shader 三线性插值采样间接漫反射。
 //
-// 探针数据布局（StructuredBuffer，每探针 16 float4）：
-//   [0..8]  SH 系数 (band 0/1/2, 9×float4)
-//   [9..15] 保留（深度/可见性/偏移等，暂未使用）
+// 探针数据布局（StructuredBuffer，每探针 **4** float4 —— 步骤 30 的 L5 升级）：
+//   [0..3]  SH 系数 band 0/1（4×float4，RGB 存在 .rgb）
+// 三阶 9 系数 → 二阶 4 系数：与 Screen Probe 的 shR/shG/shB 同构，每探针 256 B → 64 B。
 // ============================================================
 class GI_DDGI : public IGlobalIllumination {
 public:
@@ -113,8 +113,10 @@ public:
     void FitGridToBounds(const float3& mn, const float3& mx);
 
 private:
-    // 每探针存储的 float4 数量（9 SH + 7 保留）
-    static constexpr u32 kFloats4PerProbe = 16;
+    // 每探针存储的 float4 数量（步骤 30：二阶 4 系数，各占一个 float4 的 .rgb）
+    // 【必须与 shader 侧同时改】`DDGI.comp.slang` 的 kStride 与 `RT_DDGI.slang` 的 kDDGI_Stride
+    // 是同一个不变量；只改一处会让探针缓冲的索引整体错位。
+    static constexpr u32 kFloats4PerProbe = 4;
 
     // 探针网格参数 uniform 结构（与 shader 中 ProbeGridParams 保持一致）
     // 需满足 std140 对齐：float4=16B, float4x4=64B
@@ -140,7 +142,7 @@ private:
     rhi::DescriptorSetLayoutHandle m_Layout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_Set    = rhi::kInvalidSet;
 
-    // 探针数据（SSBO：每探针 16×float4，当前帧 blend 结果）
+    // 探针数据（SSBO：每探针 4×float4 的 SH，当前帧 blend 结果）
     std::unique_ptr<rhi::IRHIBuffer> m_ProbeBuffer;
     // 上一帧探针历史（SSBO，时间混合源）
     std::unique_ptr<rhi::IRHIBuffer> m_ProbeHistory;

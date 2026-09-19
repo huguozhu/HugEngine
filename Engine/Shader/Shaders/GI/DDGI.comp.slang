@@ -47,7 +47,7 @@
 };
 
 // 每探针 float4 数量（与 C++ kFloats4PerProbe 保持一致）
-static const uint kStride = 16;
+static const uint kStride = 4;   // 步骤 30：每探针 4 个 SH 系数（16 → 4）
 
 // ---- SH 基函数常量 ----
 static const float kSH_Y00 = 0.28209479177387814;  // l=0: sqrt(1/(4π))
@@ -57,27 +57,14 @@ float3 SH_Band1(float3 dir) {
     return dir * 0.4886025119029199;  // sqrt(3/(4π))
 }
 
-// Band 2 (l=2): 5 个系数
-void SH_Band2(float3 dir, out float sh[5]) {
-    float xx = dir.x * dir.x, yy = dir.y * dir.y, zz = dir.z * dir.z;
-    float xy = dir.x * dir.y, yz = dir.y * dir.z, xz = dir.x * dir.z;
-    sh[0] = 1.0925484305920792 * xy;                   // l=2,m=-2: sqrt(15/(4π))*xy
-    sh[1] = 1.0925484305920792 * yz;                   // l=2,m=-1: sqrt(15/(4π))*yz
-    sh[2] = 0.31539156525252005 * (3.0 * zz - 1.0);    // l=2,m=0:  sqrt(5/(16π))*(3z²-1)
-    sh[3] = 1.0925484305920792 * xz;                   // l=2,m=1:  sqrt(15/(4π))*xz
-    sh[4] = 0.5462742152960396 * (xx - yy);             // l=2,m=2:  sqrt(15/(16π))*(x²-y²)
-}
+// Band 2 (l=2) 在步骤 30 被移除：二阶 4 系数即可（§7 Radiance Cache 的表示）。
+// 保留说明是为了让"为什么少了一档"这件事在代码里可见，而不是看起来像漏写。
 
-// 将方向 dir 投影为 9 个 SH 系数（bands 0/1/2）
-void SHBasis(float3 dir, out float sh[9]) {
+// 将方向 dir 投影为 **4** 个 SH 系数（bands 0/1）
+void SHBasis(float3 dir, out float sh[4]) {
     sh[0] = kSH_Y00;                                    // l=0,m=0
     float3 b1 = SH_Band1(dir);
     sh[1] = b1.y; sh[2] = b1.z; sh[3] = b1.x;          // l=1: m=-1,0,1
-    // l=2: 5 个系数
-    float s2[5];
-    SH_Band2(dir, s2);
-    sh[4] = s2[0]; sh[5] = s2[1]; sh[6] = s2[2];
-    sh[7] = s2[3]; sh[8] = s2[4];
 }
 
 // Fibonacci 球面：均匀分布在单位球面上的第 i 个方向（共 n 个）
@@ -87,20 +74,11 @@ float3 FibonacciSphere(int i, int n) {
     return float3(sin(phi) * cos(theta), cos(phi), sin(phi) * sin(theta));
 }
 
-// 写入 SH 系数到探针缓冲
-void WriteSH(uint probeIndex, float4 sh[9]) {
-    uint base = probeIndex * kStride;
-    u_Probes[base + 0] = sh[0];
-    u_Probes[base + 1] = sh[1];
-    u_Probes[base + 2] = sh[2];
-    u_Probes[base + 3] = sh[3];
-    u_Probes[base + 4] = sh[4];
-    u_Probes[base + 5] = sh[5];
-    u_Probes[base + 6] = sh[6];
-    u_Probes[base + 7] = sh[7];
-    u_Probes[base + 8] = sh[8];
-    for (uint i = 9; i < kStride; i++) {
-        u_Probes[base + i] = float4(0, 0, 0, 0);
+// 写入 SH 系数到探针缓冲（4 个系数，各占一个 float4 的 .rgb；其余槽位清零）
+void WriteSH(uint probeIndex, float4 sh[4]) {
+    const uint base = probeIndex * kStride;
+    for (uint i = 0u; i < kStride; i++) {
+        u_Probes[base + i] = (i < 4u) ? sh[i] : float4(0, 0, 0, 0);
     }
 }
 
@@ -141,8 +119,8 @@ void main(uint3 id : SV_DispatchThreadID) {
     float stepDist = cellSize * 0.4;
 
     // 初始化 SH 累积
-    float4 sh[9];
-    for (int j = 0; j < 9; j++) sh[j] = float4(0, 0, 0, 0);
+    float4 sh[4];
+    for (int j = 0; j < 4; j++) sh[j] = float4(0, 0, 0, 0);
     float validSamples = 0.0;
 
     // 球面采样 → GBuffer → SH 投影
@@ -199,9 +177,9 @@ void main(uint3 id : SV_DispatchThreadID) {
         }
 
         // SH 投影
-        float basis[9];
+        float basis[4];
         SHBasis(dir, basis);
-        for (int j = 0; j < 9; j++) {
+        for (int j = 0; j < 4; j++) {
             sh[j].rgb += radiance * basis[j];
         }
         validSamples += 1.0;
@@ -210,7 +188,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     // 归一化：蒙特卡洛积分缩放因子 4π/N × 强度（u_Params.x）
     if (validSamples > 0.0) {
         float scale = (4.0 * 3.14159265359) / validSamples * u_Params.x;
-        for (int j = 0; j < 9; j++) {
+        for (int j = 0; j < 4; j++) {
             sh[j].rgb *= scale;
         }
     } else {
@@ -223,7 +201,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     bool  historyValid = u_Params.w > 0.5;
     if (historyValid && blendAlpha > 0.0) {
         uint base = probeIndex * kStride;
-        for (int j = 0; j < 9; j++) {
+        for (int j = 0; j < 4; j++) {
             float4 hist = u_ProbeHistory[base + j];
             sh[j].rgb = lerp(sh[j].rgb, hist.rgb, blendAlpha);
         }

@@ -56,7 +56,7 @@ struct VSOutput {
 [[vk::binding(kGPUBinding_SSAO_DL, kGPUDescSet_PerFrame)]] Texture2D<float4> u_SSAO;  // SSAO 环境光遮蔽
 [[vk::binding(kGPUBinding_SSR, kGPUDescSet_PerFrame)]] Texture2D<float4> u_SSR;   // SSR 屏幕空间反射
 [[vk::binding(kGPUBinding_Lumen, kGPUDescSet_PerFrame)]] Texture2D<float4> u_Lumen;  // Lumen 输出（间接漫反射/镜面共用）
-[[vk::binding(kGPUBinding_DDGIProbes, kGPUDescSet_PerFrame)]] StructuredBuffer<float4> u_DDGIProbes;  // DDGI 探针数据（每探针 16 float4）
+[[vk::binding(kGPUBinding_DDGIProbes, kGPUDescSet_PerFrame)]] StructuredBuffer<float4> u_DDGIProbes;  // DDGI 探针数据（步骤 30：每探针 4 float4 的 SH）
 
 // Hybrid RT 效果输出纹理（由 HybridRTPipeline 通过 LightingPass 绑定）
 // 通过 push constant 的 rt*Source 字段在 shader 内选择 RT 或屏幕空间源
