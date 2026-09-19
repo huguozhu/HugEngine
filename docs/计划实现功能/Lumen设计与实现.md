@@ -28,8 +28,9 @@
 - **哪些已落地、哪些待落地**，以 §9 为准。要点：GI Provider 统一抽象（`IGIProvider`）、DDGI
   探针 GI、RT GI（`RTGIPass`）、RT 降噪链数据化（`std::vector<Stage>`）、降噪去重
   （`SpatialDenoiseAux`）**已落地**；Lumen 本体的 Surface Cache / SDF / Screen Probe /
-  Radiance Cache **全部未落地**（设计在 §4–§7，里程碑 L1–L5）；统一降噪框架的第三步
-  （11.3，§10）与 Provider 执行单位收敛 / 绑定数组化（§11）**待落地**。
+  Radiance Cache 已按步骤 1–33 落地并走完 L1–L5（**见 §四 的进度表**，逐行记读数）；
+  统一降噪框架的第三步（11.3，§10）**已落地（步骤 34）**；剩下的是 Provider 执行单位
+  收敛 / 绑定数组化（§11）与 L6（步骤 35–41）。
 - **附录 A 是 ReSTIR PT / GRIS 预研**：它是 Lumen GI 的落点方案与代价评估（含全部实测数字、
   成本表、显存推算、里程碑 M0–M3、非目标、通用性分析与复现命令）。它是**决策依据与执行
   留档**，不是已排期的实现任务。
@@ -90,8 +91,8 @@
 | VMA | ✅ | GPU 内存管理 | 共享 |
 
 > 注：表中 `Denoiser` 一行声明它"可用于 Screen Probe Gather 的空间滤波"，这是**设计意图**；
-> 降噪器类本身已落地（§9），但 Lumen 尚未接入，且其多信号共存的框架（§10 的 11.3）仍待做。
-> 两者不矛盾：能力在，消费方与框架未到。
+> 降噪器类本身已落地（§9），多信号共存的框架（§10 的 11.3）也已落地（步骤 34）；
+> Lumen 自己的信号接入是步骤 35。
 
 ### 3. 数据流
 
@@ -680,6 +681,13 @@ WorkGraph 模拟、meshoptimizer 等）本轮**未逐项核验**，按源文档�
 | `DenoiseSignal`（11.3 的信号分派） | `Engine/` | **0 命中** ⇒ §10 的 11.3 未落地 |
 | `needsUpscale`（11.3 的"半分辨率也要降噪"） | `Engine/` | **0 命中** ⇒ 同上 |
 
+> **本表是开工前的调研快照（保留原文，不作回填）**。截至**步骤 34** 的现状：
+> 上表 7 行里前 4 行已不成立 —— `Engine/Shader/Shaders/Lumen/` 已有 20+ 个 shader、
+> `ScreenProbe` / `SurfaceCache` / `SDF_RayMarch` 均在 `Engine/Render/Lumen/` 与
+> `Engine/Shader/Shaders/Lumen/` 里落地（步骤 1–28）；最后两行的 `DenoiseSignal` /
+> `needsUpscale` 也已在步骤 34 落地（`Engine/Render/PostProcess/DenoiseSignal.h`、
+> `SpatialDenoiseAux::NeedsUpscale`）。逐行读数见 §四 的进度表。
+
 **结论**：Lumen 的 **Surface Cache（§4）、SDF 体系（§5）、Screen Probe Gather（§6）、
 Radiance Cache（§7）四块本体全部未落地**，§8 列出的 `Lumen/` shader 文件也一个都不存在。
 仓库里现有的是**可复用的 GI / RT / 降噪基座**（§9.1）。
@@ -719,7 +727,7 @@ Radiance Cache（§7）四块本体全部未落地**，§8 列出的 `Lumen/` sh
 |---|---|---|
 | **11.1 去重 + 参数可配** | `SSGIProvider` / `SSRProvider` 里逐行同构的附属 pass 合并为一份实现（`GI/SpatialDenoiseAux.h`）；`Denoiser` 的 `depthSigma` / `normalSigma` 从"着色器里的固定常量"变成可配，并集中在管线的一处按信号赋值 | ✅ **已完成** |
 | **11.2 链条数据化** | `RTProvider` 用 `std::vector<Stage>` 取代 `m_Temporal` + `m_Spatial` 两个指针与"索引 0 是时域、1 是空间"的位置约定；pass 链的枚举/输入输出/PreBind/Render 全部改为遍历该向量 | ✅ **已完成** |
-| **11.3 按信号类型分派** | 引入 `DenoiseSignal`；统一分配历史纹理与采样器；支持把多个信号批量 dispatch；把"有效性（`alpha < 0`）"提升为**框架级契约** | ⏳ **待做（需要本项目的消费方）** |
+| **11.3 按信号类型分派** | 引入 `DenoiseSignal`；统一分配历史纹理与采样器；支持把多个信号批量 dispatch；把"有效性（`alpha < 0`）"提升为**框架级契约** | ✅ **已完成（步骤 34）** |
 
 **11.1 的判据与实测**（背靠背单源采样逐项一致）：用改前/改后两个可执行文件、每次运行一份
 **私有 cfg 副本**（示例程序退出时会回写 cfg，复用同一文件会把配置差异误读成代码差异 ——
@@ -735,7 +743,7 @@ Radiance Cache（§7）四块本体全部未落地**，§8 列出的 `Lumen/` sh
 三变体读数与白炉不变；**"加一级只需 push"当场演示** —— 临时给 RTGI 多 push 一个 stage，
 pass 列表立刻多出 `RT_GI_Denoise_Third`，框架代码一行未改（演示后已还原）。
 
-**11.3 的验收判据（待做，供实现时照抄）**：
+**11.3 的验收判据（原文保留，实现时照抄）**：
 
 - 抽象选型只有在**真实的多信号共存场景**下才能验收（Lumen 的 Screen Probe / Radiance Cache
   与既有 GI/反射/阴影信号同帧）——没有消费方的泛化不算验收；
@@ -745,6 +753,30 @@ pass 列表立刻多出 `RT_GI_Denoise_Third`，框架代码一行未改（演�
   输出被直接采样；根治需要 `needsUpscale`（重建升采样）这一信号属性；
 - 与 L6 里程碑的关系：L6 = 时间混合 + 空间滤波 + 异步 Compute，**统一降噪框架是它的前置**，
   否则 L6 会退化成"再挂一套 Lumen 专用降噪器"。
+
+**11.3 的实测（步骤 34，逐条对上面的判据）**：
+
+- **真实多信号共存**：一帧内同时登记 **6 条**信号并打印出唯一的契约行 ——
+  `SSGI` / `SSR` / `RT Shadow` / `RTAO` / `RT Reflection` / `RTGI`
+  （配置 `gi_shadow=2;gi_blend_ao_w1=1;gi_blend_diffuse_w2=1;gi_blend_diffuse_w3=1;
+  gi_blend_specular_w1=1;gi_blend_specular_w2=1;gi_half_res=1`，
+  RG pass 列表里 6 个主 pass + 各自的降噪/升采样 pass 与登记一致；VUID **42** ≤ 基线 46）。
+  Lumen 自己的信号是步骤 35（`LumenProvider` 尚未实现 `DescribeSignals`）——
+  这条判据要等步骤 35 才算完全闭合，但"框架能同时容纳 6 条异构信号"已被证。
+- **框架级契约**：合成端着色器只剩一个 `SourceIsValid(id, uv)`（`alpha ≥ 0`），
+  逐源硬编码的 `if (id == ...)` 分支被删；C++ 侧同一约定收敛到 `denoise::IsValid` /
+  `denoise::kInvalidAlpha`，并有单测把"值无效 **且** 权重不计入分母"这半句钉住。
+- **半分辨率也要降噪**：新增 `needsUpscale` 的两级链（`Denoise@信号分辨率 → Upscale→消费端`，
+  新 shader `PostProcess/Denoise_Upscale.frag.slang`）。实测 `gi_half_res=1` 时
+  `prov3_final`(SSGI) / `prov4_spec_final`(SSR) 由 **960×540 变为 1920×1080**，
+  RG pass 列表出现 `SSGI_Denoise → SSGI_Upscale` / `SSR_Denoise → SSR_Upscale`，
+  登记行为"960x540 → 1920x1080 需升采样"。
+- **既有读数不变**：把步骤 34 的全部改动 `git stash` 后重建（= 上一提交 `5823183` 的构建）
+  与改后构建跑**同一份配置**（`timing_ssgi16.cfg` 的私有副本）逐文件对照：
+  `prov3_raw/final`(SSGI)、`prov6*`(Lumen)、`prov8_ao*`/`prov9_spec*`/`prov10*`(RT)、
+  `ssr`、`rsm_*`、`ibl_irr`、GBuffer 全部**逐位一致**；只有 `prov0_ao*`(SSAO)、`hdr`、
+  `radiance` 三项有差 —— 这三项是**跨轮次既有的 SSAO 抖动**（见附四十一的证据），与本次改动无关。
+- 白炉 `prov6_final` min = mean = max = **1.0000**；单测 **235 例 / 5781 断言**全绿。
 
 > **设计细节与现状逐项对照**见《HugEngine GI 架构与开发计划》的 **§4.4**（那一节保留在 GI
 > 文档里：它对比的是 GI 各 Provider 现有降噪器的接口/参数/链条，是这份计划的输入）。
@@ -1492,7 +1524,8 @@ python Tools\pt\analyze_pt.py --compare <pt_tag> <deferred_tag> --target hdr
 | 31 输入改为 Screen Probe + 时间混合 | ✅ 已完成 | `GI_DDGI::SetScreenProbeInput()` 把 Lumen 的探针缓冲 + 16×16 单元映射 + 当帧 VP 交给 DDGI；`DDGI.comp.slang` 里每个 DDGI 探针把世界位置投到屏幕 → 取该单元的 Screen Probe → **沿自己的 Fibonacci 采样方向求值其 4 系数辐射度 SH** 作为逐样本辐射度（投影流程一行没动，因为步骤 30 已让两边同表示）。一帧延迟（DDGI 段先于 Lumen 段注册）。**重投影在世界空间缓存里的含义**：①深度一致性门限（比较"相机到探针/到屏幕探针"的距离，第一版用世界距离实测采纳恒 0 被证伪）；②没有可用屏幕探针就整条继承历史。单侧→整球乘 2 补立体角。**实测**：抓取分步 进入 1408 / 屏内 382 / 单元有探针 382 / **过深度门限 87**；**静态 21 帧收敛到 1%**（0.507→0.097→0.0079）；**轨道相机 120 帧读数有界 0.005–0.011 不累积**、末帧无拖影（`s31_orbit_hdr.png`）；换输入 A/B 均值 +6.07%、**相关系数 0.99762**；DDGI 单独仍 +0.01975（与步骤 30 逐位相同，无 Lumen 时自动回落自追踪）。**验收**：白炉 1.0000、`lumen_passes=0`、单测 231/5757、VUID 46 |
 | 32 插值与距离权重 | ✅ 已完成（复核 + 两次证伪） | 先建度量再改动：新增 `build/verify/grid_artifact.py`（**幅度**：按网格相位分箱的箱均值调制）与 `crease_metric.py`（**缝**：DDGI 贡献图的二阶差分按相位分箱），都用"DDGI 单独 − 无 GI 基线"的差值图（本场景有重复拱廊，画面自身在格周期上就有 64.6% 的能量）。**两次证伪**：①距离权重 `w=三线性/(dist²+bias)` 把调制从 35.67% **推高到 57.12%**（权重压向最近探针 ⇒ 更像最近邻）⇒ 回退；②smoothstep 替换线性 tent：幅度 36.09% / 缝 19.61%，对照线性 35.67% / 19.54%，**两指标都测不出改善** ⇒ 不留改不动的改动。**根因实测**：格子感是**分辨率**的函数 —— 最长轴 16 格 35.67% / 24 格 22.42%（−37%）/ 32 格 20.11%（−44%）；代价 探针 1408→4224→9408、DDGI pass 0.036→0.039→0.052 ms、trace 射线 45056→135168→301056（按步骤 26 实测估 +0.4 ms）⇒ **建议 24 格但默认保持 16**（不改既有预设）。**拟合复核**：日志现打印原点与末探针，最长轴正好覆盖、Y/Z 多出不到一格（符合 `ceil(size/cell)+1`）。**网格外淡出在本场景是空验证**（2073600 个有效像素**无一**在网格外；机制是 `kGIConfProbeGrid` 覆盖掩码）。**验收**：白炉 1.0000、`lumen_passes=0`、回退后与步骤 31 的 DDGI 画面平均差 2e-6、单测 231/5757、VUID 46 |
 | 33 L5 退出判据 | ✅ 已完成（L5 闭环） | 无新增渲染功能，只做两种场景的稳定性与对照归因。"室外"用样例已有的相机键把相机放到建筑上方外侧（`(0,3200,0)`、pitch −1.30），无需改代码。**① 稳定**：室内覆盖 100%、辐照度 0.43958(f40) → **0.44022(f80)**（漂移 **0.15%/40 帧**）；室外覆盖 **33.6%**（天空像素无几何 ⇒ 无探针 ⇒ `alpha<0` 被合成端 skip，属正确行为）、辐照度 0.42841(f40) → **0.42935(f120)**（漂移 **0.2%/80 帧**）；两种场景 Lumen 输出**无 NaN、无负值**，DDGI 探针 SH 相对变化收敛到 0.00000。**② 对照可解释**（同相机同帧号只切漫反射栈）：室内 基线 0.07143 / Lumen **+0.01605** / DDGI **+0.01975**（Lumen 低 19%）；室外 基线 0.13380 / Lumen **+0.00486** / DDGI **+0.00516**（只低 6%）。归因：室内差来自**命中点材质可得性**（探针只覆盖可见表面：1408 个探针里 87 个拿到屏幕探针；Surface Cache 页命中率 ~15% ⇒ 多数命中返回中性值 0.18），而 DDGI 的 32 条光追射线直接取命中点辐射度；室外 GI 由**天空主导**、两条路径都取自 IBL/天空 ⇒ 该差异自然消失。⇒ 差值随"命中点材质在总能量里的占比"变化，量级与场景间接光占比同阶。**验收**：白炉 1.0000、`lumen_passes=0`、单测 231/5757、VUID 46（室外相机同样复核） |
-| 34–41 | ⬜ 未开始 | 阶段 G / L6：34 统一降噪框架（§10 的 11.3 判据）、35 Lumen 信号接入、36 半分辨率升采样、37–41 横切工具 |
+| 34 统一降噪框架（11.3） | ✅ 已完成 | 三件事落在一个文件加两处接线里。**① 信号层**：`PostProcess/DenoiseSignal.{h,cpp}` —— `DenoiseSignal`（名字/输入/输出/引导/速度/**`needsUpscale`**/信号与消费端分辨率/引导参数）、`DenoiseHistoryPool`（**统一分配**历史纹理，同名同尺寸同格式只建一次；`RTDenoiser` 从"自建历史"改为"向池取"，池为空时保持旧行为）、`DenoiseSignalRegistry`（每帧由各 Provider 通过 `IGIProvider::DescribeSignals()` 登记，`LogSummary()` 只在**信号名集合变化**时打印）。**② 框架级有效性契约**：合成端着色器从"逐源 `if (id==…)` 硬编码"收敛为唯一入口 `SourceIsValid(id, uv)`（`alpha ≥ 0` 有效；`alpha < 0` = 本条无数据、**值不计入分子且权重不计入分母**），C++ 侧对应 `denoise::IsValid/kInvalidAlpha/ValidityContractName`，并加 `Tests/TestDenoiseSignal.cpp`（4 例 24 断言，含"契约文本必须写明分母"这一条）。**③ 半分辨率也要降噪**：新增升采样级 `PostProcess/DenoiseUpscale.{h,cpp}` + `Denoise_Upscale.frag.slang`（3×3 源邻域 × 深度/法线双边 × 目标空间高斯，保住 `alpha<0` 语义），`SpatialDenoiseAux` 变成两级自适应链 `[Denoise@信号分辨率] →（半分辨率时）[Upscale→消费端]`，尺寸每帧按**纹理实况**核对（`SyncSizes`，只在真的不同时才重建）。**实测**：6 条异构信号同帧登记（SSGI/SSR/RT Shadow/RTAO/RT 反射/RTGI）且只打印一条契约；`gi_half_res=1` 时 `prov3_final`/`prov4_spec_final` 由 960×540 → **1920×1080**，pass 链出现 `SSGI_Denoise→SSGI_Upscale`、`SSR_Denoise→SSR_Upscale`；**跨构建 A/B**（把本步改动 `git stash` 重建 = 上一提交的构建，跑同一份配置）除 `prov0_ao*`/`hdr`/`radiance` 外**全部逐位一致**，而这三项是跨轮次既有的 SSAO 抖动（附四十一有 22→34 轮的逐轮证据）。**顺带修两个真 bug**：①`RTEffectProvider::DescribeSignals` 原先只看 `IsValid()`（四种 RT 效果的 pass 对象一创建就恒真）⇒ 默认配置下把**根本没跑**的 4 个 RT 效果登记成信号（"多信号共存"读数是假的）；现在由 `SyncToStack` 按层栈写入"本帧是否产出"，无 RT 源时帧图显式清零。②样例里 `gi_half_res` 只写进 `GIConfig::halfRes`，而 SSGI/SSR 读各自 `GISettings::halfRes`，**启动路径上没有任何一处连通**（只有 ImGui 档位切换会同步）⇒ 半分辨率这一档从配置文件根本到不了渲染，而 cfg 写回又会把它存下来（配置往返有损）。**记录一条新事实**：登记的 4 条 RT 信号分别是 960×540×3 与 **480×270**（RTGI = 1/4 分辨率），即"RT 效果全是亚分辨率 + 合成端直接采样"——这是步骤 36 的对象。**验收**：白炉 `prov6_final` **1.0000**、`lumen_passes=0`、单测 **235 例 / 5781 断言**全绿、VUID 46（部分配置 42） |
+| 35–41 | ⬜ 未开始 | 阶段 G / L6：35 Lumen 信号接入（Screen Probe 3×3 YCoCg AABB 空间滤波 + 时域 EMA）、36 半分辨率升采样与有效性（升采样 pass 复用于探针/RT 亚分辨率信号）、37–41 横切工具 |
 
 ### 阶段 A：框架前置（不产出画面，但后补等于重构）
 
@@ -1671,15 +1704,29 @@ python Tools\pt\analyze_pt.py --compare <pt_tag> <deferred_tag> --target hdr
 - **目标**：`DenoiseSignal` 抽象 + 统一历史纹理/采样器分配 + 批量 dispatch + 框架级"`alpha < 0` 即无效"契约。
 - **改动点**：`Engine/Render/PostProcess/` 的 `Denoiser` / `RTDenoiser` 之上加信号层；`SpatialDenoiseAux` 与 `RTProvider` 的 `std::vector<Stage>` 成为其两个消费者；`needsUpscale` 信号属性（半分辨率也要降噪）。
 - **验收**：§10 的 11.3 判据——真实多信号共存（Lumen 探针 + 反射 + 阴影同帧）下合成端只读一个有效性约定；既有 RT/SSGI 背靠背读数不变。
+- **实测**：见 §10 的"11.3 的实测"与附四十一。6 条信号同帧、跨构建 A/B 逐位一致（仅既有的 SSAO/HDR 抖动）、
+  `needsUpscale` 两级链在 `gi_half_res=1` 下把 SSGI/SSR 输出从 960×540 变到 1920×1080；
+  白炉 1.0000、单测 235/5781、VUID ≤46。**Lumen 自己的信号仍待步骤 35**（`LumenProvider` 尚未实现
+  `DescribeSignals`），故这条判据的"Lumen 探针"一项在步骤 35 后才会完全闭合。
 
 #### 35. Lumen 信号接入框架
 - **目标**：ScreenProbe 的 3×3 YCoCg AABB 空间滤波 + 时域（EMA/重投影）注册为框架内信号。
 - **改动点**：`Lumen/ScreenProbe_Filter.comp`；时域历史走框架统一分配（不再各写一套）。
+  **步骤 34 顺手发现的两处前提**：①`LumenProvider::IsValid()` 现在恒为真（只判 `m_Scene` 是否
+  存在），所以即使 Lumen 没进任何层栈，转储里仍会出现 `prov6_raw/final/spec_*`（内容是上一帧
+  或未使用的纹理）—— 登记信号时必须像 RT 那样按**层栈**判定当帧是否产出（`SyncToStack`），
+  否则又会得到一份"看起来有、其实没跑"的读数；②同一个原因，样例的投递清单把 `prov6_*`
+  当成有效目标，`addTarget` 的"有效"判据也要跟着收紧。
 - **验收**：探针噪声下降可量化（`std/mean`）；无新增降噪器实例被"另挂一套"。
 
 #### 36. 半分辨率升采样与有效性
 - **目标**：探针半分辨率/低分辨率输出经 `needsUpscale` 重建后再参与合成。
 - **改动点**：升采样 pass + 合成端按有效性掩码降权。
+  **注意（步骤 34 已交付一半）**：`PostProcess/DenoiseUpscale` + `Denoise_Upscale.frag.slang` 已经是
+  "引导重建升采样"的现役实现（步骤 34 用来把半分辨率 SSGI/SSR 还原到消费端分辨率），
+  本步应当**复用它**而不是再写一个；同时步骤 34 登记出的一条新事实是本步的现成对象 ——
+  4 条 RT 信号全是亚分辨率（RT Shadow / RTAO / RT 反射 = 960×540，**RTGI = 480×270 = 1/4**），
+  它们今天由合成端的双线性采样"顺带"放大。
 - **验收**：半分辨率与全分辨率切换时画面无跳变。
 
 #### 37. 性能与异步（L6 退出判据）
@@ -3541,3 +3588,100 @@ VUID 46 = 基线（室外相机同样复核过）。
 可得性 + 场景能量分布"，**阶段 F / L5 闭环**。
 
 **下一轮**：进入阶段 G / L6 —— 步骤 34 统一降噪框架（§10 的 11.3 判据）。
+
+### 附四十一：步骤 34「统一降噪框架 11.3」——6 条信号同帧登记；挖出两个真 bug；半分辨率链首次真正生效
+
+**① 为什么要做（判据）**：11.3 的三条判据要求"抽象必须在**真实的多信号共存**下验收"、"合成端
+只读一个有效性约定"、"半分辨率**也要**降噪"。前两条此前完全没有落点：`DenoiseSignal` /
+`needsUpscale` 在整个 `Engine/` 里 **0 命中**（§9.2 的调研表就是这么记的），有效性判定散落在
+合成端着色器的逐源 `if` 分支里，而 `SSGIProvider::AuxActive()` 在 `halfRes` 时直接返回 false。
+
+**② 落了什么**（细节见 §10 的"11.3 的实测"与 §四 进度表第 34 行）：
+
+| 组件 | 文件 | 关键点 |
+| --- | --- | --- |
+| 信号描述 | `PostProcess/DenoiseSignal.h` | `DenoiseSignal`（含 `needsUpscale`、信号/消费端分辨率、引导参数）+ 契约 `denoise::IsValid/kInvalidAlpha/ValidityContractName`（**inline**，单测无需链接渲染模块） |
+| 历史统一分配 | `PostProcess/DenoiseSignal.cpp` | `DenoiseHistoryPool`：同名同尺寸同格式只建一次；`RTDenoiser::Initialize` 增加可选池参数（为零时保持"自建"旧行为） |
+| 登记处 | `PostProcess/DenoiseSignal.h` | `DenoiseSignalRegistry` + `LogSummary`（**只在信号名集合变化时打印**，否则每帧刷屏） |
+| 生产端接口 | `GI/IGIProvider.h` | `virtual DescribeSignals(...)`，SSGI / SSR / RT 四种效果各实现 |
+| 半分辨率升采样 | `PostProcess/DenoiseUpscale.{h,cpp}` + `Shader/Shaders/PostProcess/Denoise_Upscale.frag.slang` | 3×3 源邻域 × 深度/法线双边 × 目标空间高斯；保住 `alpha<0`（源无效不参与、邻域全无效则输出无效） |
+| 两级链 | `GI/SpatialDenoiseAux.h` | `SyncSizes` 每帧按**纹理实况**核对尺寸；`needsUpscale` 决定链是 1 级还是 2 级；`HE_DENOISE_HALFRES=off/denoise/full` 供同构建 A/B |
+
+**③ 实测：6 条异构信号同帧登记**（`gi_shadow=2;gi_blend_ao_w1=1;gi_blend_diffuse_w2=1;
+gi_blend_diffuse_w3=1;gi_blend_specular_w1=1;gi_blend_specular_w2=1;gi_half_res=1`）：
+
+```
+统一降噪框架[GI]（§10 的 11.3）: 当帧信号 6 个 —— 有屏幕空间引导 6、需重建升采样 6、有时域速度 6
+   SSGI            960x540 → 1920x1080  空间引导 时域 需升采样  参数 depthSigma 10.0 / normalSigma 8.0
+   SSR             960x540 → 1920x1080  空间引导 时域 需升采样  参数 depthSigma 10.0 / normalSigma 8.0
+   RT Shadow       960x540 → 1920x1080  空间引导 时域 需升采样  参数 depthSigma 10.0 / normalSigma 8.0
+   RTAO            960x540 → 1920x1080  空间引导 时域 需升采样  参数 depthSigma 10.0 / normalSigma 8.0
+   RT Reflection   960x540 → 1920x1080  空间引导 时域 需升采样  参数 depthSigma 10.0 / normalSigma 8.0
+   RTGI            480x270 → 1920x1080  空间引导 时域 需升采样  参数 depthSigma 10.0 / normalSigma 8.0
+   有效性契约：alpha >= 0 表示本条有数据；alpha < 0 表示本条无数据，合成端必须跳过该源（值不计入分子，权重也不计入分母）
+降噪历史池[HistoryPool]（统一分配，4 张，共 10125 KB）
+```
+
+这一屏同时说明了三件事：**框架真的看见了 6 条信号**（不是"我加了接口"）；**契约只有一行**；
+以及一条**此前没人看见的新事实** —— 4 条 RT 信号全是亚分辨率，**RTGI 只有 1/4 分辨率**
+（480×270），它们今天全靠合成端的双线性采样"顺带"放大 ⇒ 直接交给步骤 36。
+
+**④ 实测：半分辨率链首次真正生效**。`gi_half_res=1` 时（SSGI + SSR 入栈）：
+
+| 形态（`HE_DENOISE_HALFRES`） | pass 链 | SSGI/SSR 最终输出 | prov4_spec_final 有效像素占比 |
+| --- | --- | --- | --- |
+| `off`（= 步骤 34 之前） | 主 pass | 960×540（直接被合成端采样） | 25.682% |
+| `denoise` | 主 pass → `*_Denoise` | 960×540（降噪后被直接采样） | 43.674% |
+| `full`（默认） | 主 pass → `*_Denoise` → `*_Upscale` | **1920×1080** | 50.707% |
+
+`off → denoise` 说明"半分辨率确实被降噪了"（5×5 双边把邻域内的有效样本带了进来，
+有效像素占比按契约**只增不减**：25.682% → 43.674%；"只增不减"是可证的 —— 降噪后某像素有效的
+充要条件是它的 5×5 邻域里有有效样本，故原有效集必被包含）；`full` 再让输出恢复到消费端分辨率
+（`prov3_final` / `prov4_spec_final` 的尺寸由 960×540 变 **1920×1080**，RG pass 列表出现
+`SSGI_Denoise → SSGI_Upscale`、`SSR_Denoise → SSR_Upscale`）。
+
+**诚实边界**：本场景下 **SSGI 与 SSR 的颜色恒为 0**（`prov3_raw` rgb 全 0、`prov4_spec_raw`
+的有效像素 rgb 也全 0），因此**无法**用"颜色噪声下降"来证明降噪收益 —— 证据只能落在
+结构与有效性统计上。这不是本步引入的：步骤 25（L3 退出判据）已经记过同一条
+（"`prov3_raw/final` 逐像素全 0 ⇒ 仓库既有 SSGI 链路问题，非本步引入"），本步又用
+`git stash` 对照复核了一次（见下）。
+
+**⑤ 挖出并修掉的两个真 bug**（都属于"读数是假的"这一类）：
+
+1. **RT 信号登记不看层栈**：`RTEffectProvider::DescribeSignals` 原先只判 `IsValid()`，
+   而四种效果的 pass 对象**一创建就恒真** —— 默认配置（SSGI/SSR/RT 全关）下日志照样报
+   "4 条信号"，而 RG pass 列表里一个 RT pass 都没有。修法：新增 `SyncToStack()` 按层栈写入
+   `m_Wanted`，帧图在 RT 段里**先 Sync 再 NeedsPass**（与屏幕空间两条循环同一约定），
+   并且在"本帧没有任何 RT 源"的分支里显式清零（否则残留上一帧的真值）。
+   **这个 bug 的意义大于它本身**：多信号共存的读数一旦可以是假的，这条判据就白写了。
+2. **`gi_half_res` 到不了渲染**：样例启动路径只写 `GIConfig::halfRes`，而 SSGI/SSR 读各自的
+   `GISettings::halfRes`，两处**没有任何一处连通**（只有 ImGui 的档位切换会同步）。
+   后果：半分辨率这一档从配置文件根本到不了渲染，而 cfg 写回（`out["gi_half_res"]`）又会把它
+   存下来 ⇒ **配置往返有损**、半分辨率路径无法回归。修法：在 `applyGIConfig` 之后把
+   `GIConfig::halfRes` 同步进 SSGI/SSR 的设置（SSAO 有自己的 `ssao_half_res` 键，不在其列）。
+   **也正因为它此前不通**，`SSGIProvider::AuxActive()` 里那个 `!halfRes` 分支从未被任何
+   cfg 驱动的运行走到 —— 半分辨率不降噪这件事**从来没被验证过**，是这次才第一次真正跑起来。
+
+**⑥ 跨构建 A/B：本步对既有画面零影响**。把步骤 34 的全部改动 `git stash`（含未跟踪文件）
+后重建 = 上一提交 `5823183` 的构建，与改后构建跑**同一份配置**（`timing_ssgi16.cfg` 的私有
+副本，避免程序退出时回写配置把"配置差异"误读成"代码差异"）逐文件对照：
+
+| 转储 | 结果 |
+| --- | --- |
+| `prov3_raw/final`(SSGI)、`prov6*`(Lumen)、`prov8_ao*`/`prov9_spec*`/`prov10*`(RT)、`ssr`、`rsm_*`、`ibl_irr`、GBuffer 五项 | **逐位一致** |
+| `prov0_ao_raw/final`(SSAO)、`hdr`、`radiance` | 有差（22657 / 57637 / 5324 像素） |
+
+后三项**不是本步引入**：把历史上所有"配置内容完全相同"的 `chk_*.cfg` 分组后逐组对照
+（`build/verify/cross_round_det.py`），第 22 轮到第 33 轮的每一对同配置运行**都有**这个量级的
+SSAO/HDR 差（例如 s22off 42079 / s24off 19358 / s30off 18214 / **s33off 19859**，
+maxAbs ≈ 0.059）—— 这是仓库既有的 **SSAO pass 运行间抖动**（量级 20k 像素、单像素最高
+0.06），与本次改动无关。⇒ **背靠背判据的写法应明确排除 `prov0_ao_*` 与 `hdr`/`radiance`**，
+其余转储按"逐位一致"要求。
+
+**⑦ 验收证据**：白炉 `prov6_final` min = mean = max = **1.0000**（`lumen_passes=242`）；
+`gi_blend_diffuse_lumen=0` ⇒ `lumen_passes=0`；6 信号共存配置 VUID **42**、其余 **46**（= 基线）；
+单测 **235 例 / 5781 断言**全绿（步骤 34 新增 `Tests/TestDenoiseSignal.cpp` 4 例 24 断言：
+契约两半、空间引导判定、三类计数与 Clear、默认参数 = 改造前行为）。
+
+**下一轮**：步骤 35 —— Lumen 信号接入框架（ScreenProbe 的 3×3 YCoCg AABB 空间滤波 + 时域
+EMA，历史纹理走步骤 34 的统一池）。
