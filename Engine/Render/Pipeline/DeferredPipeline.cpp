@@ -428,6 +428,14 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
 
     // GPU Profiler
     m_Profiler.Initialize(device, rhi::kMaxProfilerPasses, MAX_FRAMES_IN_FLIGHT);
+    // 【步骤 37 的测量开关】`HE_NO_PROFILER=1` 关掉逐 pass 计时。
+    // 为什么需要它：`ProfilerManager::BeginFrame` 用**阻塞式** `GetQueryResults` 读回两帧前的时间戳
+    // （`GITiming.h` 里记过这条 API 会 WAIT）。于是"整帧 CPU 侧 30~50 ms"这个读数里混进了
+    // **等 GPU** 的时间 —— 关掉它才能把"真 CPU 忙"和"被阻塞"分开。
+    if (std::getenv("HE_NO_PROFILER")) {
+        m_Profiler.SetEnabled(false);
+        HE_CORE_INFO("DeferredPipeline: GPU Profiler 已关闭（HE_NO_PROFILER=1）");
+    }
     m_ProfilerPanel.SetProfiler(&m_Profiler);  // 绑定 ImGui 面板到 Profiler 数据源
     // Lighting PSO + 描述符集已在 LightingPass::Initialize() 中创建
 
@@ -764,11 +772,22 @@ void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
         rg.SetTimelineBase(m_FrameCounter);
         m_FrameCounter += 2;  // 每帧消耗 2 个时间线值
     }
+    // 【步骤 37】把 CPU 侧拆成"重建帧图 / 编译 / 执行（录制 + 提交）"三段。
+    // 实测 1080p 下整帧 CPU 侧 34~51 ms 全在管线里，而 GPU 各 pass 合计只有 14 ms ——
+    // 不拆开就不知道该修图构建还是修执行，只能靠猜。
+    const auto tGraph0 = std::chrono::steady_clock::now();
     BuildFrameGraph(rg, world, sg, camera);
+    const auto tGraph1 = std::chrono::steady_clock::now();
     rg.Compile();
+    const auto tCompile1 = std::chrono::steady_clock::now();
 
     // 统一入口：RenderGraph 根据 useAsyncCompute 自动分支
     rg.Execute(cmd, m_Device);
+    const auto tExec1 = std::chrono::steady_clock::now();
+
+    m_CpuBuildMs   = std::chrono::duration<double, std::milli>(tGraph1 - tGraph0).count();
+    m_CpuCompileMs = std::chrono::duration<double, std::milli>(tCompile1 - tGraph1).count();
+    m_CpuExecMs    = std::chrono::duration<double, std::milli>(tExec1 - tCompile1).count();
 }
 
 void DeferredPipeline::FlushComputeWork() {

@@ -88,6 +88,17 @@ public:
     // 内部使用 Timeline Semaphore 确保跨队列同步顺序
     void FlushComputeWork();
 
+    /// 【步骤 37 / L6 帧时判据】把整帧预算打出来：各 pass 的 GPU 耗时合计折算成 fps 上限、
+    /// 最重的若干 pass、以及各源的附属 pass（降噪/升采样）耗时。由帧图每 120 帧调用一次。
+    void LogFrameBudget();
+
+    /// 【步骤 37】上一帧 CPU 侧的三段耗时（重建帧图 / 编译 / 执行=录制+提交），毫秒。
+    /// 判定"CPU 受限还是 GPU 受限"以及"CPU 花在哪一段"要靠它：实测 1080p 下整帧 34~51 ms
+    /// 全在 CPU 侧，而 GPU 各 pass 合计只有 14 ms。
+    [[nodiscard]] double GetCpuBuildMs()   const { return m_CpuBuildMs; }
+    [[nodiscard]] double GetCpuCompileMs() const { return m_CpuCompileMs; }
+    [[nodiscard]] double GetCpuExecMs()    const { return m_CpuExecMs; }
+
     IShadowSystem*       GetShadowSystem() override { return m_ShadowSystem.get(); }
     IGlobalIllumination* GetGI()           override { return m_GI.get(); }
     ToneMapPass*         GetToneMap()            { return m_PostProcess.GetToneMap(); }
@@ -269,6 +280,8 @@ private:
     Denoiser m_ReflectionSpatial;
     Denoiser m_GISpatial;
     bool m_RTEnabled = false;   // 设备支持光追且 RTPass 初始化成功
+    // 步骤 37：上一帧 CPU 侧三段耗时（毫秒）——重建帧图 / 编译 / 执行（录制 + 提交）
+    double m_CpuBuildMs = 0.0, m_CpuCompileMs = 0.0, m_CpuExecMs = 0.0;
     bool m_SceneMaterialBuilt = false;   // 场景材质纹理是否已构建（延迟到首帧）
     Denoiser m_DenoiseSSGI;
     Denoiser m_DenoiseSSR;

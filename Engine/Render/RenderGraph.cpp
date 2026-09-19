@@ -3,7 +3,12 @@
 #include "Core/Log.h"
 #include "RHI/TextureLayoutTracker.h"   // 查询导入纹理的真实布局（跨帧持久资源）
 
-#include <cstdlib>   // std::getenv（HE_TRACE_PASSES 诊断开关）
+#include <cstdlib>   // std::getenv（HE_TRACE_PASSES / HE_CPU_PASSES 诊断开关）
+#include <chrono>    // 步骤 37：逐 pass CPU 录制耗时
+#include <cstdio>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include <algorithm>
 #include <unordered_set>
@@ -592,6 +597,14 @@ void RenderGraph::ExecuteWithAsyncCompute(rhi::IRHICommandList* mainCmd,
     // ============================================================
     if (m_Profiler) m_Profiler->BeginFrame(mainCmd);
 
+    // 【步骤 37】逐 pass 的 **CPU 录制耗时**（与 GPU 耗时无关）：1080p 实测"执行(录制+提交)"一帧要
+    // 34~48 ms，而 GPU 各 pass 合计只有 14 ms ⇒ 瓶颈在 CPU 录制这一侧，而"整帧 CPU 时长"定位不到
+    // 具体是哪个 pass。故在录制循环里逐 pass 计时，由 `HE_CPU_PASSES=1` 打开、每 120 帧打最重的几个。
+    static const bool s_logCpuPasses = (std::getenv("HE_CPU_PASSES") != nullptr);
+    static u32  s_cpuFrame = 0;
+    static std::vector<std::pair<std::string, double>> s_cpuAcc;
+    static double s_cpuTotal = 0.0;
+
     for (auto* pass : mainPasses) {
         mainCmd->BeginDebugLabel(pass->name.c_str());
         for (auto& br : pass->preBarriers) {
@@ -603,10 +616,37 @@ void RenderGraph::ExecuteWithAsyncCompute(rhi::IRHICommandList* mainCmd,
         if (m_Profiler) m_Profiler->BeginPass(mainCmd, passIdx, pass->name);
         // 【诊断】HE_TRACE_PASSES=1：打印 pass 开始，用于与校验层报错对齐定位（见 §1.3.4）
         if (std::getenv("HE_TRACE_PASSES")) HE_CORE_WARN("[PASS] {}", pass->name);
+        const auto cpuT0 = std::chrono::steady_clock::now();
         if (pass->execute) pass->execute(mainCmd);
+        if (s_logCpuPasses) {
+            const double ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - cpuT0).count();
+            s_cpuTotal += ms;
+            bool found = false;
+            for (auto& e : s_cpuAcc) if (e.first == pass->name) { e.second += ms; found = true; break; }
+            if (!found) s_cpuAcc.emplace_back(pass->name, ms);
+        }
         if (m_Profiler) m_Profiler->EndPass(mainCmd, passIdx);
         mainCmd->EndDebugLabel();
         passIdx++;
+    }
+
+    if (s_logCpuPasses && (++s_cpuFrame % 120u) == 0u) {
+        std::sort(s_cpuAcc.begin(), s_cpuAcc.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        std::string top;
+        char buf[128];
+        const u32 kTop = std::min<u32>(6u, (u32)s_cpuAcc.size());
+        for (u32 i = 0; i < kTop; ++i) {
+            std::snprintf(buf, sizeof(buf), "%s %.2f", s_cpuAcc[i].first.c_str(),
+                          s_cpuAcc[i].second / 120.0);
+            if (!top.empty()) top += " / ";
+            top += buf;
+        }
+        HE_CORE_INFO("CPU 录制耗时（步骤 37）: 主命令列表每帧合计 {:.3f} ms；最重的 {} 个: {}",
+                     s_cpuTotal / 120.0, kTop, top);
+        s_cpuAcc.clear();
+        s_cpuTotal = 0.0;
     }
 
     if (m_Profiler) m_Profiler->EndFrame(device);

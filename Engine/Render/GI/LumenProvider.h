@@ -91,6 +91,17 @@ public:
     /// 步骤 8 起这里改为按 stage 顺序录制 SurfaceCache_Capture → SDF_Inject → ScreenProbeGather。
     void Render(rhi::IRHICommandList* cmd, const GIProviderContext& ctx) override {
         if (!m_Scene) return;
+        // 【步骤 37 诊断】HE_LUMEN_TRACE_OUT=1：每 60 帧打印一次输出 pass 走了哪条分支。
+        // 用来区分"辐照度贴图路径"（alpha=+1）与"占位骨架路径"（alpha=-1）——转储里
+        // alpha=+1 却 RGB=0 时，只可能是前者采样到了空纹理。
+        if (std::getenv("HE_LUMEN_TRACE_OUT")) {
+            static u32 s_outFrames = 0;
+            if ((++s_outFrames % 60u) == 0u) {
+                HE_CORE_INFO("LumenProvider 输出 pass: furnace={} irradianceTex={} → {}",
+                             ctx.furnace, (void*)m_Scene->GetIrradianceTexture(),
+                             (!ctx.furnace && m_Scene->GetIrradianceTexture()) ? "辐照度贴图" : "占位骨架");
+            }
+        }
         // 【步骤 24】非白炉：把本帧算出的逐像素辐照度贴到输出上（Provider 输出仍是"本帧真实内容"，
         // Lighting 侧完全不改）。白炉：仍走常量骨架 pass（输出 1.0），把白炉读数与辐照度内容解耦。
         if (!ctx.furnace && m_Scene->GetIrradianceTexture()) {
@@ -155,6 +166,10 @@ public:
         if (m_Scene) m_Scene->RunProbeIrradiance(cmd, gbNormal, gbAlbedo, gbWorldPos);
     }
     [[nodiscard]] float GetIrradianceMean() const { return m_Scene ? m_Scene->GetIrradianceMean() : 0.0f; }
+    /// 步骤 37：逐像素入射辐照度纹理（转储用：它是 Lumen 输出 pass 的**输入**）
+    [[nodiscard]] rhi::IRHITexture* GetIrradianceTexture() const {
+        return m_Scene ? m_Scene->GetIrradianceTexture() : nullptr;
+    }
     [[nodiscard]] float GetIrradianceMax() const { return m_Scene ? m_Scene->GetIrradianceMax() : 0.0f; }
     [[nodiscard]] u32 GetIrradianceCoveredPixels() const {
         return m_Scene ? m_Scene->GetIrradianceCoveredPixels() : 0u;
@@ -168,6 +183,10 @@ public:
     [[nodiscard]] float GetSHIrradianceMeanDiff() const { return m_Scene ? m_Scene->GetSHIrradianceMeanDiff() : 0.0f; }
     [[nodiscard]] u32 GetSHProbes() const { return m_Scene ? m_Scene->GetSHProbes() : 0u; }
     [[nodiscard]] u32 GetSHRays() const { return m_Scene ? m_Scene->GetSHRays() : 0u; }
+    /// 【步骤 37】mesh 距离场的构建预算是否跑完（帧时读数要分开启动期与稳态）
+    [[nodiscard]] bool IsMeshBuildComplete() const {
+        return m_Scene && m_Scene->IsMeshBuildComplete();
+    }
     // ── 步骤 35：探针滤波（空间 3×3 单元 YCoCg AABB + 时域重投影 EMA）──
     /// 必须在 SH 投影之后、逐像素辐照度之前调用（下游读的是过滤后的探针缓冲）
     void RunProbeFilter(rhi::IRHICommandList* cmd, const CameraData& cam) {

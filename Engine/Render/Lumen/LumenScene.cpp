@@ -21,6 +21,13 @@ bool LumenScene::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     // 确定性验收模式（见 RunProbeIrradiance 末尾的说明）：默认关，只在需要"背靠背逐位一致"时开
     m_Deterministic = (std::getenv("HE_LUMEN_DETERMINISTIC") != nullptr);
     if (m_Deterministic) HE_CORE_INFO("LumenScene: 确定性模式已开启（每帧末等待 GPU）");
+    // 【步骤 37】SDF 调试可视化：**默认保持开启**（与步骤 12 以来的行为一致，转储口径依赖它），
+    // 用 `HE_LUMEN_SDF_DISABLE_DEBUG=1` 关掉可以省下稳态 1.67 ms（占 Lumen 计算 pass 的 34%）。
+    // 为什么不改成默认关：转储 `lumen_sdf_trace` 是 L1/步骤 12 的验收凭据，默认关会让既有
+    // 验收脚本静默少一项；改成"显式关"则两边都不受影响，性能收益留给 L6 决定。
+    m_SdfDebugView = (std::getenv("HE_LUMEN_SDF_DISABLE_DEBUG") == nullptr);
+    HE_CORE_INFO("LumenScene: SDF 调试可视化 {}（稳态 {:.2f} ms；HE_LUMEN_SDF_DISABLE_DEBUG=1 可关）",
+                 m_SdfDebugView ? "开启" : "关闭", 1.67);
     // 步骤 27 的 A/B 开关：远场阈值与重叠带半宽（比例）。用环境变量而不是 cfg 键，是为了让
     // "沿阈值扫一遍看有没有阶跃"的对照实验不必改配置文件（HE_LUMEN_FARFIELD_OVERLAP=0 即硬切换）。
     if (const char* ov = std::getenv("HE_LUMEN_FARFIELD_OVERLAP")) {

@@ -8,6 +8,7 @@
 
 #include "Core/Core.h"
 #include "Core/Engine.h"
+#include <chrono>   // 步骤 37：CPU 侧帧时（判定 CPU 受限还是 GPU 受限）
 #include "Platform/Window.h"
 #include "RHI/RHI.h"
 #include "Pipeline/DeferredPipeline.h"
@@ -166,7 +167,10 @@ int main() {
     config.appName      = "HugEngine — 06.GILab (Cornell Box GI 对比)";
     config.windowWidth  = 1920;   // 窗口宽（960×2）
     config.windowHeight = 1080;   // 窗口高（540×2）
-    config.enableVSync  = true;
+    // 【步骤 37 / L6 帧时判据】vsync 打开时墙钟帧率被锁在刷新率（60Hz），"有没有 60fps"
+    // 这件事就没法从帧率上判定。`HE_NO_VSYNC=1` 关掉垂直同步，让墙钟帧率反映真实 GPU 吞吐。
+    const bool noVsync = (std::getenv("HE_NO_VSYNC") != nullptr);
+    config.enableVSync  = !noVsync;
     config.logLevel     = LogLevel::Info;
 
     Engine engine(config);
@@ -191,7 +195,7 @@ int main() {
         .windowHandle = engine.GetWindow()->GetNativeHandleRaw(),
         .width  = engine.GetWindow()->GetWidth(),
         .height = engine.GetWindow()->GetHeight(),
-        .vsync  = true,
+        .vsync  = !noVsync,   // 与 EngineConfig 同源（HE_NO_VSYNC=1 时同时关掉，否则帧率仍被锁 60）
     });
 
     // ============================================================
@@ -854,6 +858,9 @@ int main() {
         f64 now       = glfwGetTime();
         f32 deltaTime = static_cast<f32>(now - lastTime);
         lastTime      = now;
+        // 【步骤 37】CPU 侧耗时：从帧首到 Present 之前。与墙钟帧时一起看才能判定"CPU 受限还是
+        // GPU 受限"—— 只看墙钟帧率会把"CPU 在重建帧图"误读成"GPU 太慢"，从而去优化错的对象。
+        const auto cpuT0 = std::chrono::steady_clock::now();
 
         engine.GetWindow()->PollEvents();
 
@@ -957,7 +964,15 @@ int main() {
             }
             g_PendingHalfResApply = false;
         }
-        curPipeline->Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
+        // 【步骤 37】管线 CPU 侧耗时（重建帧图 + 录制 + 提交）与"其余 CPU"分开计：
+        // 整帧 CPU 受限时，先要知道这 50 ms 是花在管线里还是花在样例/ImGui 里，否则优化对象会选错。
+        static double s_accPipelineMs = 0.0;
+        {
+            const auto t0 = std::chrono::steady_clock::now();
+            curPipeline->Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
+            s_accPipelineMs += std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t0).count();
+        }
 
         // --- 崩溃处理器自检（Wave 0.8）---
         // 设置环境变量 HE_CRASH_TEST=1 启动，会在第 3 帧主动解引用空指针，
@@ -1616,6 +1631,10 @@ int main() {
                 // 因为它是后面所有阶段（Screen Probe / Surface Cache）的公共"几何是否靠谱"凭据。
                 if (auto* lp = dynamic_cast<render::LumenProvider*>(p)) {
                     addTarget("lumen_sdf_trace", lp->GetSDFDebugTexture());
+                    // 步骤 37：把"逐像素入射辐照度"也落盘。它是 Lumen 的中间层，此前只有 CPU 侧
+                    // 统计（均值/覆盖）可看；当"统计正常但输出为黑"时，必须能直接看到这张纹理本身
+                    // 到底有没有内容，否则只能在"没画"和"画了但采样到空"之间猜。
+                    addTarget("lumen_irradiance", lp->GetIrradianceTexture());
                     // 步骤 13（L2 的输入）：卡片覆盖率可视化（上半 = 代表 mesh 的 6 个投影面，下半 = 逐 mesh 覆盖条）
                     addTarget("lumen_card_coverage", lp->GetCardCoverageTexture());
                     addTarget("lumen_sc_atlas_albedo", lp->GetCardAtlasAlbedo());   // 步骤 15：Card 捕获的 albedo atlas
@@ -1727,8 +1746,44 @@ int main() {
             glfwSetWindowShouldClose(engine.GetWindow()->GetNativeHandle(), GLFW_TRUE);
         }
 
-        swapchain->Present(true);
+        // 垂直同步必须与创建时一致：只改 SwapChainDesc 而这里仍传 true，帧率照样被锁在刷新率
+        // （步骤 37 第一次测就是这么被误导的：pass 合计 14 ms 却只有 19 fps）。
+        swapchain->Present(!noVsync);
         frameIndex++;
+
+        // 【步骤 37 / L6 帧时判据】周期性打印**真实墙钟帧率**与 CPU 侧耗时。
+        // 只在 `HE_NO_VSYNC=1` 时帧率才有判据意义（vsync 打开时它恒等于刷新率，会被误读成"达标"）。
+        {
+            const double cpuMs = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - cpuT0).count();
+            static double s_accMs = 0.0;
+            static double s_accCpuMs = 0.0;
+            static u32    s_n = 0;
+            s_accMs += (double)deltaTime * 1000.0;
+            s_accCpuMs += cpuMs;
+            ++s_n;
+            if (g_DumpGI && s_n >= 120u) {
+                const double wallMs = s_accMs / (double)s_n;
+                const double cm     = s_accCpuMs / (double)s_n;
+                const double pm     = s_accPipelineMs / (double)s_n;
+                // 步骤 37：管线 CPU 侧的三段分解（重建帧图 / 编译 / 执行）——判断该修哪一段
+                double bMs = 0.0, cMs = 0.0, eMs = 0.0;
+                if (auto* dp = dynamic_cast<render::DeferredPipeline*>(curPipeline)) {
+                    bMs = dp->GetCpuBuildMs(); cMs = dp->GetCpuCompileMs(); eMs = dp->GetCpuExecMs();
+                }
+                HE_CORE_INFO("帧率读数（步骤 37）: 最近 {} 帧 墙钟 {:.3f} ms ⇒ {:.1f} fps；CPU 侧 {:.3f} ms"
+                             "（{:.0f}% 的帧时，其中管线 Render {:.3f} ms / 其余 {:.3f} ms）⇒ 受限方 = {}"
+                             "（vsync {}；pass 合计见【帧预算】行）",
+                             s_n, wallMs, wallMs > 0.0 ? 1000.0 / wallMs : 0.0, cm,
+                             wallMs > 0.0 ? 100.0 * cm / wallMs : 0.0, pm, cm - pm,
+                             cm > wallMs * 0.8 ? "CPU" : "GPU/呈现",
+                             noVsync ? "关" : "开（帧率被锁刷新率，不作判据）");
+                HE_CORE_INFO("   管线 CPU 分解（上一帧）: 重建帧图 {:.3f} ms / 编译 {:.3f} ms / 执行(录制+提交) {:.3f} ms",
+                             bMs, cMs, eMs);
+                s_accMs = 0.0; s_accCpuMs = 0.0; s_accPipelineMs = 0.0;
+                s_n = 0;
+            }
+        }
     }
 
     // 清理

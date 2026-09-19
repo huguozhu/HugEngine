@@ -18,8 +18,10 @@
 //     已经执行完，于是"复位一个仍在飞行中的查询"这件事从结构上不可能发生。
 //   · 池子用**环形**分配（不是按飞行帧索引），因为多命令列表下没有单一可信的帧索引。
 //
-// 覆盖范围：**只计各源的主 pass**（本体开销的大头）。附属降噪 pass 暂不计入，
-// 以免把读数当成"整个源的全部成本"。
+// 覆盖范围：**主 pass 与附属 pass 分别计**（步骤 37 扩展）。
+// 此前只计各源的主 pass，于是 L6 的帧时账里"降噪 + 升采样"这一整块是隐形的 ——
+// 步骤 36 给四种光追效果各加了一个全屏升采样 pass，代价却一个数都读不到。
+// 现在每个源占两格：`idx`（主 pass）与 `kAuxItemBase + idx`（该源的全部附属 pass 之和）。
 // ============================================================
 
 #include "RHI/RHI.h"
@@ -30,9 +32,11 @@ namespace he::render {
 
 class GITimer {
 public:
-    /// 支持的最大源数（与帧图的 Provider 数同量级即可）
-    static constexpr u32 kMaxSources = 32;
-    /// 非"源"的公共项（当前只有 TLAS 构建）使用这个保留下标
+    /// 支持的最大"格"数（主 pass 与附属 pass 各占一格 ⇒ 源的上限是一半）
+    static constexpr u32 kMaxSources = 64;
+    /// 附属 pass（降噪 / 升采样）的起始下标：`kAuxItemBase + 源下标`
+    static constexpr u32 kAuxItemBase = kMaxSources / 2;
+    /// 非"源"的公共项（TLAS 构建等）使用这个保留下标
     static constexpr u32 kCommonItemIdx = kMaxSources - 1;
     /// 每源一对时间戳（起 / 止）
     static constexpr u32 kStampsPerSource = 2;
@@ -56,6 +60,12 @@ public:
     [[nodiscard]] float AvgMs(u32 idx) const  { return idx < m_AvgMs.size()  ? m_AvgMs[idx]  : 0.0f; }
     [[nodiscard]] float PeakMs(u32 idx) const { return idx < m_PeakMs.size() ? m_PeakMs[idx] : 0.0f; }
     [[nodiscard]] float LastMs(u32 idx) const { return idx < m_LastMs.size() ? m_LastMs[idx] : 0.0f; }
+
+    /// 【步骤 37】把**滚动平均**清零（峰值保留）。
+    /// 用途：Lumen 的启动期（逐 mesh 距离场构建）单帧可达秒级，跑多久都会把平均值吊高；
+    /// 而 L1/L6 的帧时判据要的是**稳态**每帧成本。在"场建完"的那一刻调用它，
+    /// 之后 `AvgMs` 就是稳态 EMA，`PeakMs` 仍是全程峰值（两个数各管一件事，不会互相污染）。
+    void ResetAverages() { std::fill(m_AvgMs.begin(), m_AvgMs.end(), 0.0f); }
 
 private:
     /// 一个环形槽：一个查询池 + 它当前这一轮的写入进度

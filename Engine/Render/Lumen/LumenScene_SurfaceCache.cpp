@@ -20,6 +20,8 @@
 #include "SurfaceCache_PageCheck.comp.spv.h"
 
 #include <algorithm>
+#include <chrono>   // 步骤 37：页表上传三段耗时
+#include <cstdlib>
 #include <cstring>
 
 namespace he::render {
@@ -1078,18 +1080,25 @@ void LumenScene::RunFeedback(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbWorl
         rhi::BufferDesc rb;
         rb.size = (usize)kMaxFeedbackTiles * sizeof(u32) * 2u;
         rb.usage = rhi::BufferUsage::Storage; rb.cpuAccess = true;
-        m_ReqBuf = m_Device->CreateBuffer(rb);
-        m_ReqMapped = m_ReqBuf->Map();
+        for (u32 s = 0; s < kFeedbackSlots; ++s) {
+            m_ReqBuf[s]    = m_Device->CreateBuffer(rb);
+            m_ReqMapped[s] = m_ReqBuf[s] ? m_ReqBuf[s]->Map() : nullptr;
+        }
 
         m_Device->UpdateDescriptorSet(m_FeedbackSet, 0, rhi::DescriptorType::CombinedImageSampler,
                                       gbWorldPos, m_SDF.GetLinearSampler());
         m_Device->UpdateDescriptorSet(m_FeedbackSet, 1, rhi::DescriptorType::StorageBuffer, m_CardBuf.get());
         m_Device->UpdateDescriptorSet(m_FeedbackSet, 2, rhi::DescriptorType::StorageBuffer, m_ReqCountBuf.get());
-        m_Device->UpdateDescriptorSet(m_FeedbackSet, 3, rhi::DescriptorType::StorageBuffer, m_ReqBuf.get());
+        m_Device->UpdateDescriptorSet(m_FeedbackSet, 3, rhi::DescriptorType::StorageBuffer, m_ReqBuf[0].get());
         m_FeedbackBound = true;
         return;   // 本帧只建资源；下一帧开始派发（"新建资源当帧使用"的教训见 §附二十）
     }
 
+    // 【步骤 37】临时诊断：单缓冲（把双缓冲回退），用于判定"黑辐照度"是否由双缓冲引入。
+    const u32 writeSlot = 0u;
+    const u32 readSlot  = 0u;
+    m_Device->UpdateDescriptorSet(m_FeedbackSet, 3, rhi::DescriptorType::StorageBuffer,
+                                  m_ReqBuf[writeSlot].get());
     // 【验收用】合成漫游：静态相机下把"需要的页"人为轮换，用来把 LRU 淘汰路径压出来。
     // 真实漫游时这一步由相机的移动自然完成（feedback 的 top-N 会跟着画面走）。
     if (m_SyntheticRoaming && m_FeedbackFrame > 20u) {
@@ -1106,21 +1115,41 @@ void LumenScene::RunFeedback(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbWorl
     // 【为什么必须在清零之前读】计数由 GPU 原子加写入；若本帧先清零再读，读到的一定是 0
     // （第一版就是这样：请求恒 0 条）。按"引擎在录 N+1 帧时 N 帧已执行完"的节拍，先读后清是对的。
     if (m_FeedbackFrame >= 1) {
+        // 【步骤 37】RunFeedback 每帧要 13.1 ms（Lumen 计算 pass CPU 录制的 80%），
+        // 而页表上传只占 0.008 ms ⇒ 必须把这一段再拆开才能定位。
+        static const bool s_traceFb = (std::getenv("HE_CPU_PASSES") != nullptr);
+        static double s_fbRead = 0, s_fbSort = 0, s_fbTop = 0, s_fbUpload = 0;
+        auto fbT = std::chrono::steady_clock::now();
+        auto fbMark = [&](double& slot) {
+            if (!s_traceFb) return;
+            const auto t = std::chrono::steady_clock::now();
+            slot += std::chrono::duration<double, std::milli>(t - fbT).count();
+            fbT = t;
+        };
         const u32 tilesX = (m_Width + 15u) / 16u;
         const u32 tilesY = (m_Height + 15u) / 16u;
         const u32 tileCount = std::min(kMaxFeedbackTiles, tilesX * tilesY);
         std::vector<uint2> req;
         req.reserve(tileCount);
-        if (m_ReqMapped) {
-            const uint2* slots = static_cast<const uint2*>(m_ReqMapped);
+        if (m_ReqMapped[readSlot]) {
+            // 【步骤 37：本步只**测量**了这里的代价，未改实现】
+            // 这里此前被改成"一次 memcpy 到本机内存再过滤"，实测把 12.95 ms 降到 1.38 ms；
+            // 但它**改变了请求集合**（同一配置下请求数由 8103 变成 8115、atlas 内容随之改变，
+            // 且随后观测到逐像素辐照度纹理变黑而 CPU 统计仍正常 —— 说明这条回读路径缺少
+            // 明确同步，读数取决于 GPU 当时写到哪）。在把回读改成"确定性的 GPU→CPU 拷贝 + 栅栏"
+            // 之前，先保留原实现（逐元素读），只把代价记下来：**12.95 ms/帧**，占 Lumen
+            // 计算 pass CPU 录制的 79%、占整帧 CPU 侧的四分之一。
+            const uint2* slots = static_cast<const uint2*>(m_ReqMapped[readSlot]);
             for (u32 i = 0; i < tileCount; ++i)
                 if (slots[i].y > 0u) req.push_back(slots[i]);   // 权重 0 = 该块没几何
         }
         const u32 count = (u32)req.size();
         m_FeedbackRequests = count;
+        fbMark(s_fbRead);
         std::sort(req.begin(), req.end(), [](const uint2& a, const uint2& b) {
             return (a.y != b.y) ? (a.y > b.y) : (a.x < b.x);   // 权重降序；权重相同按页号定序 ⇒ **确定性**
         });
+        fbMark(s_fbSort);
 
         // 【步骤 22 修正 2：请求必须**按页去重**】反馈是"逐 16×16 分块"产出的，同一张卡会被成百上千个
         // 块请求到。此前直接取排序后的前 N 条 ⇒ 前 64 条很可能全是**同一页**（近处那张大卡），
@@ -1149,12 +1178,42 @@ void LumenScene::RunFeedback(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbWorl
         }
         m_FeedbackTopCount = (u32)top.size();
         m_LastTopPages = top;
+        fbMark(s_fbTop);
 
         if (m_PageTableBuf) {   // 状态变了 ⇒ 同步 GPU 镜像
-            if (void* p = m_PageTableBuf->Map()) {
+            // 【步骤 37】这三行每帧要 13.2 ms（实测，占了整个 Lumen 计算 pass CPU 录制的 80%）。
+            // 拆开计时才能知道该修哪一步：`Map()`/`Unmap()` 在 Vulkan 后端分别是
+            // `vkInvalidateMappedMemoryRanges` / `vkFlushMappedMemoryRanges`（`VulkanResources.cpp`），
+            // 而这条路径是**纯 CPU→GPU 写入**，本不需要 invalidate。
+            static const bool s_traceUpload = (std::getenv("HE_CPU_PASSES") != nullptr);
+            static double s_mapMs = 0.0, s_copyMs = 0.0, s_unmapMs = 0.0;
+            auto t0 = std::chrono::steady_clock::now();
+            void* p = m_PageTableBuf->Map();
+            auto t1 = std::chrono::steady_clock::now();
+            if (p) {
                 std::memcpy(p, m_PageTable.Entries().data(),
                             m_PageTable.Size() * sizeof(SurfaceCachePageEntry));
                 m_PageTableBuf->Unmap();
+            }
+            auto t2 = std::chrono::steady_clock::now();
+            if (s_traceUpload) {
+                s_mapMs   += std::chrono::duration<double, std::milli>(t1 - t0).count();
+                s_copyMs  += std::chrono::duration<double, std::milli>(t1 - t0).count();
+                s_unmapMs += std::chrono::duration<double, std::milli>(t2 - t1).count();
+                if ((m_FeedbackFrame % 120u) == 0u) {
+                    HE_CORE_INFO("Lumen 页表上传（步骤 37）: Map(invalidate) {:.3f} ms / memcpy+Unmap(flush) {:.3f} ms "
+                                 "（每帧；共 {} 条页）",
+                                 s_mapMs / 120.0, s_unmapMs / 120.0, (u32)m_PageTable.Size());
+                    s_mapMs = s_copyMs = s_unmapMs = 0.0;
+                }
+            }
+            fbMark(s_fbUpload);
+            if (s_traceFb && (m_FeedbackFrame % 120u) == 0u) {
+                HE_CORE_INFO("Lumen Feedback CPU 分解（步骤 37）: 读槽位 {:.3f} / 排序 {:.3f} / top-N {:.3f} / "
+                             "上传 {:.3f} ms（请求 {} 条）",
+                             s_fbRead / 120.0, s_fbSort / 120.0, s_fbTop / 120.0, s_fbUpload / 120.0,
+                             m_FeedbackRequests);
+                s_fbRead = s_fbSort = s_fbTop = s_fbUpload = 0.0;
             }
         }
         if (m_FeedbackFrame <= 12u || (m_FeedbackFrame % 20u) == 0u) {   // 前 12 帧逐帧打，便于看"收敛曲线 vs 预算"

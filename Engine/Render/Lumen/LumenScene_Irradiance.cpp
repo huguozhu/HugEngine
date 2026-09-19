@@ -29,6 +29,12 @@ namespace he::render {
 
 void LumenScene::CreateIrradianceTexture() {
     if (!m_Device || m_Width == 0 || m_Height == 0) return;
+    // 【步骤 37 诊断】这张纹理每重建一次，存储图像描述符就要重绑一次；重建次数不应该是"每帧"。
+    static u32 s_irrTexCreateCount = 0;
+    ++s_irrTexCreateCount;
+    if (std::getenv("HE_LUMEN_TRACE_OUT")) {
+        HE_CORE_INFO("CreateIrradianceTexture: 第 {} 次创建（{}x{}）", s_irrTexCreateCount, m_Width, m_Height);
+    }
     rhi::TextureDesc td;
     td.width  = m_Width;
     td.height = m_Height;

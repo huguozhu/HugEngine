@@ -48,6 +48,8 @@ public:
     void OnResize(u32 width, u32 height);
 
     [[nodiscard]] bool IsReady() const { return m_Device != nullptr; }
+    /// 【步骤 37】逐 mesh 距离场的每帧构建预算是否已跑完（区分启动期与稳态帧时）
+    [[nodiscard]] bool IsMeshBuildComplete() const { return m_SDF.IsMeshBuildComplete(); }
     [[nodiscard]] u32  GetWidth()  const { return m_Width; }
     [[nodiscard]] u32  GetHeight() const { return m_Height; }
 
@@ -77,11 +79,18 @@ public:
     [[nodiscard]] LumenSDF&       GetSDF()       { return m_SDF; }
     [[nodiscard]] const LumenSDF& GetSDF() const { return m_SDF; }
 
-    /// 步骤 12：逐像素 SDF 追踪可视化（帧图的 SDF compute pass 每帧调用；相机参数由 Provider 传入）
+    /// 步骤 12：逐像素 SDF 追踪可视化（帧图的 SDF compute pass 每帧调用；相机参数由 Provider 传入）。
+    ///
+    /// 【步骤 37：默认关掉】它是一张**只给工具看**的调试纹理（`lumen_sdf_trace` 转储、L1 验收用），
+    /// 却每帧都在全屏跑一次 sphere tracing —— 实测稳态占 1.67 ms，是 Lumen 计算 pass（4.9 ms）的 34%。
+    /// 关掉它**不影响画面**（它不是 GI 输出，没有任何 pass 采样它）。需要转储时用
+    /// `HE_LUMEN_SDF_DEBUG=1` 打开（`build/verify/lumen_smoke.ps1` 已经这么设）。
     void RunSDFDebug(rhi::IRHICommandList* cmd, const float3& camPos, const float3& forward,
                      const float3& right, const float3& up, float tanHalfFov, float aspect) {
+        if (!m_SdfDebugView) return;
         m_SDF.RunDebugView(cmd, camPos, forward, right, up, tanHalfFov, aspect);
     }
+    [[nodiscard]] bool IsSdfDebugViewEnabled() const { return m_SdfDebugView; }
 
     // ── L2 Surface Cache（步骤 14）：页表 + 页状态机 ──
     /// 用步骤 13 的卡片清单建页表（每张卡一页），并把页表镜像到 GPU 缓冲
@@ -287,9 +296,15 @@ private:
     u32  m_MaxCapturesInAFrame = 0;     // 单帧最多捕获了几页（应当 ≤ 预算 ⇒ 无尖峰）
     // ── Feedback（步骤 16）──
     static constexpr u32 kMaxFeedbackTiles = 16384;  // 槽位数上限（= 512×512 屏幕的 16×16 块数；1080p 只需 8160）
-    std::unique_ptr<rhi::IRHIBuffer>  m_CardBuf, m_ReqCountBuf, m_ReqBuf;
+    /// 【步骤 37】槽位缓冲**双缓冲**：GPU 写第 N 帧的槽位，CPU 同时读第 N-1 帧的槽位。
+    /// 此前只有一块缓冲，CPU 在 GPU 正在写它的时候逐元素读（实测那一读要 12.95 ms）——
+    /// 读到的内容取决于 GPU 当时写到哪了（实测同一配置两次运行请求数 8103/8115 不同），
+    /// 这是一个**数据竞争**：算法没错，但读数不确定、画面也就不可复现。
+    static constexpr u32 kFeedbackSlots = 2;
+    std::unique_ptr<rhi::IRHIBuffer>  m_CardBuf, m_ReqCountBuf;
+    std::unique_ptr<rhi::IRHIBuffer>  m_ReqBuf[kFeedbackSlots];
     void* m_ReqCountMapped = nullptr;
-    void* m_ReqMapped = nullptr;
+    void* m_ReqMapped[kFeedbackSlots] = {nullptr, nullptr};
     rhi::DescriptorSetLayoutHandle m_FeedbackLayout = 0;
     rhi::DescriptorSetHandle       m_FeedbackSet    = 0;
     std::unique_ptr<rhi::IRHIPipelineState> m_FeedbackPSO;
@@ -446,6 +461,9 @@ private:
     /// 确定性验收模式（环境变量 HE_LUMEN_DETERMINISTIC=1）：每帧末把 GPU 等干净，
     /// 使"回读 GPU 计数 → 决定下一帧行为"的时机固定下来，从而让背靠背转储逐位一致。
     bool m_Deterministic = false;
+    /// 【步骤 37】是否每帧跑 SDF 调试可视化（`HE_LUMEN_SDF_DISABLE_DEBUG=1` 关闭；默认开启，
+    /// 理由见 `RunSDFDebug` 的说明：它只服务工具/转储，但既有验收脚本依赖它的产物）
+    bool m_SdfDebugView = true;
     void CreateIrradianceGPUObjects();
     void CreateIrradianceCopyPipeline();
     void CreateIrradianceTexture();

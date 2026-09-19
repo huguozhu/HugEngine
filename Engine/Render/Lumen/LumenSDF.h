@@ -193,6 +193,12 @@ public:
     [[nodiscard]] double GetMeshFieldBytes() const {
         return (double)GetMeshFieldCount() * 128.0 * 128.0 * 128.0 * 2.0;
     }
+    /// 【步骤 37】每帧构建预算（`meshesPerFrame`）是否已经把全部 mesh 场建完。
+    /// 帧时读数必须区分"启动期"（每帧多花几倍去建场）与"稳态"：把两者平均起来会得到
+    /// 一个既不是启动期、也不是稳态的数（步骤 29 报的 27 ms 就是这么来的）。
+    [[nodiscard]] bool IsMeshBuildComplete() const {
+        return !m_Entries.empty() && m_NextEntry >= (u32)m_Entries.size();
+    }
     /// 覆盖率可视化（RGBA8）：上半是最大网格的 6 个投影面（白=有表面，红=有表面但未被卡片覆盖），
     /// 下半是逐 mesh 的覆盖条（绿=已覆盖长度）。
     [[nodiscard]] rhi::IRHITexture* GetCardCoverageTexture() const { return m_CardCoverageTex.get(); }
