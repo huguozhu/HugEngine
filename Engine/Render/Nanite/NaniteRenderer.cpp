@@ -4,6 +4,8 @@
 //   §14.8 任务 3：占位 pass 换成「计数 → 间接绘制」链的 `Nanite_Cull` + `Nanite_Raster`
 //
 // 【开启档的 pass 集合】既有 12 个 pass（相对顺序不变）+ `Nanite_Cull` + `Nanite_Raster`。
+//   任务 4 追加一个**可选**的第三个 pass `Nanite_TestWrite`（仅在 `NaniteSettings::testWrite`
+//   为真时注册；它写既有 GBuffer albedo 的 UAV，必须在 GBuffer 之后注册才能被 Lighting 同帧读到）。
 //   两个 pass 的 `reads/writes` 复刻 `GB_Clear` 对 `gbDepth/gbWorldPos` 的那组 WAW 声明：
 //   `Shadow` 用 `RG_WRITE(gbDepth)/RG_WRITE(gbWorldPos)` 这条**假 WAW 依赖**
 //   把自己定序在 GBuffer 写入者之前（DeferredPipeline_FrameGraph.cpp:213-215）。
@@ -119,6 +121,36 @@ void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb) 
                                       m_Cull.GetIndirectCmdBuffer(),
                                       m_Cull.GetCountBuffer(),
                                       m_Cull.GetMaxFakeClusters());
+        });
+}
+
+void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHandles& gb) {
+    // 门控在调用方（DeferredPipeline_FrameGraph.cpp）已经判过一次；这里再判一次是兜底，
+    // 保证"关闭 ⇒ 本模块一个 pass 都不注册"这条不变式不依赖调用方的正确性。
+    // 【与 AddPasses 是同一个真值】不是新门控：`enabled`（独立开关）+ `IsReady()`（模块就绪）。
+    if (!m_Settings.enabled || !m_Ready) return;
+
+    // 任务 4 的 UAV 自证通道：默认关闭（`nanite_test_write=0`）⇒ 这里什么都不注册。
+    if (!m_Settings.testWrite) return;
+
+    // 需要 albedo 的帧图句柄（排序 + 读写状态）与纹理对象（UAV 绑定 + 分辨率）两者都在。
+    if (gb.albedo == kInvalidHandle || !gb.albedoTexture) return;
+
+    rhi::IRHITexture* albedo = gb.albedoTexture;   // 按值捕获：帧图执行发生在 BuildFrameGraph 返回之后
+
+    // ── Nanite_TestWrite：compute 用 RWTexture2D 直接写既有 GBuffer albedo ──
+    // 【writes 用 UAV 而不是 Write】`ResourceAccess::Write` 映射到 `RenderTarget`（颜色附件布局），
+    // 而本 pass 是**存储图像写入**，必须映射到 `UnorderedAccess`（VK_IMAGE_LAYOUT_GENERAL）——
+    // 见 RenderGraph::AccessToState。这样帧图会插入 `颜色附件 → GENERAL`（本 pass 前）与
+    // `GENERAL → ShaderResource`（Lighting 读 albedo 前）两条转换，这正是"同帧被 Lighting 读到"
+    // 所依赖的排序；pass 内部还会补两条 ComputeShader 阶段的显式屏障（见 NaniteRaster）。
+    // 【顺序约束】与 `GB_Clear` 同为 gbAlbedo 的写入者 ⇒ 帧图的 WAW 依赖天然把本 pass 排在
+    // `GB_Clear` 之后（也正是"模块的写入不会被 GB_Clear 覆盖"的保证）。
+    rg.AddPass("Nanite_TestWrite",
+        {},
+        {{gb.albedo, ResourceAccess::UAV}},
+        [this, albedo](rhi::IRHICommandList* cmd) {
+            m_Raster.RecordTestWritePass(cmd, albedo);
         });
 }
 

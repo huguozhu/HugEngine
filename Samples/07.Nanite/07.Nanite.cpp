@@ -593,9 +593,14 @@ int main() {
             naniteSettings.fakeClusters = (u32)std::max(0, std::min(
                 GetInt(cfgData, "nanite_fake_clusters", (int)naniteSettings.fakeClusters),
                 (int)1024));
+            // 任务 4 的 UAV 自证开关（默认 0）：cfg → 真值，写法与上面两个键完全同构。
+            // 它只决定模块是否在 GBuffer 之后追加 `Nanite_TestWrite`（往 albedo 写棋盘图案）。
+            naniteSettings.testWrite = GetInt(cfgData, "nanite_test_write",
+                                              naniteSettings.testWrite ? 1 : 0) != 0;
             deferredPipeline.SetNaniteSettings(naniteSettings);
-            HE_CORE_INFO("[Nanite] 配置恢复: nanite_enable={} nanite_fake_clusters={}",
-                         naniteSettings.enabled ? 1 : 0, naniteSettings.fakeClusters);
+            HE_CORE_INFO("[Nanite] 配置恢复: nanite_enable={} nanite_fake_clusters={} nanite_test_write={}",
+                         naniteSettings.enabled ? 1 : 0, naniteSettings.fakeClusters,
+                         naniteSettings.testWrite ? 1 : 0);
         }
 
         auto& ae = deferredPipeline.GetAutoExposure();
@@ -1280,6 +1285,20 @@ int main() {
                 // `nanite_fake_clusters`（或 CVar `r.Nanite.FakeClusters`）设置。
                 ImGui::TextDisabled("任务 3 假簇数 N=%u（每帧恰好应画 N 次）",
                                     naniteSettings.fakeClusters);
+                // 任务 4 的 UAV 自证开关（默认关）：勾上后模块在 GBuffer 之后追加
+                // `Nanite_TestWrite`，用 compute 往 albedo 写 8×8 棋盘 —— 这是 A1 路线
+                // （"模块直接写既有 GBuffer"）的自证通道，会**改变画面**，故默认关闭。
+                bool naniteTestWrite = naniteSettings.testWrite;
+                if (ImGui::Checkbox("UAV 自证：往 GBuffer albedo 写棋盘（任务 4）##nanite_tw",
+                                    &naniteTestWrite)) {
+                    naniteSettings.testWrite = naniteTestWrite;
+                    dp->SetNaniteSettings(naniteSettings);
+                    HE_CORE_INFO("[Nanite] 面板 UAV 自证开关: test_write={}",
+                                 naniteSettings.testWrite ? 1 : 0);
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("任务 4：compute 直接写既有 GBuffer albedo 的 UAV；\n"
+                                      "默认关（会改变画面，仅供 A1 裁决取证）");
                 ImGui::TextDisabled("模块就绪=%s（任务 3：Nanite_Cull + Nanite_Raster，画面不变）",
                                     dp->GetNanite().IsReady() ? "是" : "否");
             }
@@ -1879,6 +1898,8 @@ int main() {
         // 不重置开关真值（本段代码确实在 deferredPipeline.Shutdown() 之后执行）。
         out["nanite_enable"]        = std::to_string(deferredPipeline.GetNaniteSettings().enabled ? 1 : 0);
         out["nanite_fake_clusters"] = std::to_string(deferredPipeline.GetNaniteSettings().fakeClusters);
+        // 任务 4：UAV 自证开关（默认 0）——同样在 Shutdown() 之后回写，故真值必须保留
+        out["nanite_test_write"]    = std::to_string(deferredPipeline.GetNaniteSettings().testWrite ? 1 : 0);
 
         // ── AutoExposure ──
         auto& ae = deferredPipeline.GetAutoExposure();

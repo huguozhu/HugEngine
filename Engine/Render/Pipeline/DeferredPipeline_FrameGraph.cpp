@@ -246,17 +246,22 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     //   的验收「开启 ⇒ 画面不变 / 转储逐位一致」。故当前的接入点写成"模块**追加**注册"，
     //   既有 GBuffer 段在两种档位下都原样执行（下面这段既有代码一行未动）。
     // ════════════════════════════════════════════════════════════════════
+    // 【任务 4】两处挂钩共用同一组句柄：这里先只做**赋值**（不注册任何 pass），
+    //   GBuffer 几何段结束之后还有第二处注册点（`AddPostGBufferPasses`）需要同一组句柄。
+    NaniteGBufferHandles naniteGB;
+    naniteGB.albedo      = gbA;
+    naniteGB.normal      = gbB;
+    naniteGB.emissive    = gbC;
+    naniteGB.velocity    = gbVel;
+    naniteGB.worldPos    = gbWorldPos;
+    naniteGB.disneyA     = gbDisneyA;
+    naniteGB.disneyB     = gbDisneyB;
+    naniteGB.lightmapKey = gbLightmapKey;
+    naniteGB.depth       = gbDepth;
+    // 任务 4：albedo 的纹理对象本身（UAV 自证通道要绑存储图像 + 取真实分辨率；句柄只够排序）
+    naniteGB.albedoTexture = m_GBuffer ? m_GBuffer->GetAlbedo() : nullptr;
+
     if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
-        NaniteGBufferHandles naniteGB;
-        naniteGB.albedo      = gbA;
-        naniteGB.normal      = gbB;
-        naniteGB.emissive    = gbC;
-        naniteGB.velocity    = gbVel;
-        naniteGB.worldPos    = gbWorldPos;
-        naniteGB.disneyA     = gbDisneyA;
-        naniteGB.disneyB     = gbDisneyB;
-        naniteGB.lightmapKey = gbLightmapKey;
-        naniteGB.depth       = gbDepth;
         m_Nanite.AddPasses(rg, naniteGB);
     } else {
         // 关闭档（或模块未就绪）：一个 pass 都不注册 —— 这就是"开关关闭 ⇒ 逐位一致"的实现。
@@ -298,6 +303,23 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
 
             m_GBuffer->Render(c, world, sg, camera);
         });
+
+    // ════════════════════════════════════════════════════════════════════
+    // 【§14.8 任务 4：GBuffer 之后的后置挂钩】
+    //
+    // 位置：GBuffer **几何段结束之后**（上面 `GB_Clear` 已注册）、且在**任何读取 GBuffer 的
+    //       pass（Decal_Project / HiZ_Build / GI / SSAO / Lighting …）之前**。
+    // 为什么需要它：上面那处挂钩（`AddPasses`）在 `GB_Clear` **之前**，模块对 GBuffer 的写入
+    //       会被 `GB_Clear` 覆盖，**无法被同一帧的 Lighting 读到**；任务 4 的验收
+    //       （"compute 写一张测试 GBuffer 并在同一帧被 Lighting 正确读到"）只能靠这一处成立。
+    // 门控：**同一个真值**（`NaniteSettings::enabled` + 模块就绪），不是新门控；关闭档/未就绪时
+    //       这一处一个 pass 都不注册（`AddPostGBufferPasses` 内部还有 `testWrite` 与兜底判断）。
+    // 将来：任务 26 的调试可视化（簇/BVH/LOD/软硬光栅占比）也落在这一处。
+    // 既有 pass 的注册顺序与声明**完全不变**：这里只是在 `GB_Clear` 之后**追加**一次注册调用。
+    // ════════════════════════════════════════════════════════════════════
+    if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
+        m_Nanite.AddPostGBufferPasses(rg, naniteGB);
+    }
 
     // ── GBuffer 投影贴花（任务 24）──
     // 位置：GBuffer 之后、所有"读 albedo/法线"的消费者（GI / Lighting）之前。

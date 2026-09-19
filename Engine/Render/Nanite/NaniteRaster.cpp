@@ -17,6 +17,7 @@
 
 #include "Nanite_Raster.vert.spv.h"   // k_Nanite_Raster_vert_spv
 #include "Nanite_Raster.frag.spv.h"   // k_Nanite_Raster_frag_spv
+#include "Nanite_TestWrite.comp.spv.h"   // k_Nanite_TestWrite_comp_spv（§14.8 任务 4 的 UAV 自证通道）
 
 #include <cstring>   // std::memcpy（占位顶点/索引缓冲的初值）
 
@@ -115,6 +116,13 @@ void NaniteRaster::Shutdown() {
     if (m_Device && m_Layout != rhi::kInvalidLayout)
         m_Device->DestroyDescriptorSetLayout(m_Layout);
 
+    // 【§14.8 任务 4】UAV 自证通道的懒建资源（从未开启时它们是空的，这里自然是空操作）
+    m_TestWritePSO.reset();
+    if (m_Device && m_TestWriteLayout != rhi::kInvalidLayout)
+        m_Device->DestroyDescriptorSetLayout(m_TestWriteLayout);
+    m_TestWriteLayout = rhi::kInvalidLayout;
+    m_TestWriteSet    = rhi::kInvalidSet;
+
     m_Target.reset();
     m_DummyVB.reset();
     m_DummyIB.reset();
@@ -166,6 +174,89 @@ void NaniteRaster::RecordRasterPass(rhi::IRHICommandList* cmd,
                                   maxDrawCount, (u32)sizeof(NaniteIndirectCommand));
 
     cmd->EndOffscreenPass();
+}
+
+// ============================================================
+// §14.8 任务 4：UAV 自证通道（往既有 GBuffer albedo 写可识别图案）
+// ============================================================
+
+bool NaniteRaster::EnsureTestWriteResources() {
+    if (m_TestWritePSO) return true;
+    if (!m_Device) return false;
+
+    // ── 描述符集布局：唯一的绑定是 GBuffer albedo 的存储图像（set=0 / binding=0）──
+    // 用 StorageImage 而不是 CombinedImageSampler：RWTexture2D 是"可写图像"，与采样器无关。
+    rhi::DescriptorSetLayoutDesc layout;
+    layout.bindings = {
+        { 0, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskCompute, false },
+    };
+    m_TestWriteLayout = m_Device->CreateDescriptorSetLayout(layout);
+    if (m_TestWriteLayout == rhi::kInvalidLayout) {
+        HE_CORE_ERROR("NaniteRaster: Nanite_TestWrite 描述符集布局创建失败");
+        return false;
+    }
+    m_TestWriteSet = m_Device->AllocateDescriptorSet(m_TestWriteLayout);
+
+    // ── compute PSO（无 push constant：分辨率由着色器 GetDimensions 从纹理自身取）──
+    m_TestWriteCS.stage      = rhi::ShaderStage::Compute;
+    m_TestWriteCS.spirv      = k_Nanite_TestWrite_comp_spv;
+    m_TestWriteCS.entryPoint = "main";
+
+    rhi::PipelineStateDesc desc;
+    desc.bindPoint            = rhi::PipelineBindPoint::Compute;
+    desc.computeShader        = &m_TestWriteCS;
+    desc.descriptorSetLayouts = { m_TestWriteLayout };
+    desc.debugName            = "NaniteTestWrite";
+    m_TestWritePSO = m_Device->CreatePipelineState(desc);
+    if (!m_TestWritePSO) {
+        HE_CORE_ERROR("NaniteRaster: Nanite_TestWrite compute PSO 创建失败");
+        return false;
+    }
+
+    HE_CORE_INFO("NaniteRaster: 任务 4 UAV 自证通道就绪（Nanite_TestWrite → GBuffer albedo）");
+    return true;
+}
+
+void NaniteRaster::RecordTestWritePass(rhi::IRHICommandList* cmd, rhi::IRHITexture* albedo) {
+    if (!cmd || !albedo) return;
+    if (!EnsureTestWriteResources()) return;
+
+    // 描述符指向**本帧的**那张 albedo：GBuffer 纹理在视口变化时会重建，故每次录制都更新绑定。
+    // 用 ImageView 直接绑定（与 LumenSDF / RT 各 pass 的存储图像写法同构）。
+    m_Device->UpdateDescriptorSetWithImageView(m_TestWriteSet, 0,
+        rhi::DescriptorType::StorageImage, albedo->GetNativeHandle());
+
+    const u32 w = albedo->GetWidth();
+    const u32 h = albedo->GetHeight();
+    if (w == 0 || h == 0) return;
+
+    cmd->SetPipeline(m_TestWritePSO.get());
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_TestWriteSet);
+
+    // ── 屏障①：GBuffer 写入 → 本 compute 的 UAV 写入 ──
+    // 帧图已经为这条 pass 推导过一次 `RenderTarget → UnorderedAccess`（见 RenderGraph::DeriveBarriers），
+    // 但那条 barrier 的 dstStage 取自 RHI 的保守映射（UAV ⇒ RayTracingShader），**不含 ComputeShader**，
+    // 对 compute 派发并不构成执行依赖。这里补一条显式的 `ColorAttachmentOutput → ComputeShader`
+    // 屏障，把布局转换与内存可见性都明确地定序到本次派发之前（RHI 会用追踪到的真实布局纠正
+    // oldLayout，因此这条 barrier 与帧图那条不会冲突）。
+    cmd->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput,
+                         rhi::PipelineStage::ComputeShader,
+                         rhi::ResourceState::RenderTarget,
+                         rhi::ResourceState::UnorderedAccess,
+                         albedo);
+
+    cmd->SetDrawDebugLabel("Nanite_TestWrite (GBuffer albedo UAV)");
+    cmd->Dispatch((w + 7u) / 8u, (h + 7u) / 8u, 1);
+
+    // ── 屏障②：本 compute 的 UAV 写入 → 之后所有采样 albedo 的 pass（Lighting / GI）──
+    // 帧图同样会在 Lighting 前推导一条 `UnorderedAccess → ShaderResource`，但它的 srcStage 同样是
+    // 保守映射（RayTracingShader）。这条显式的 `ComputeShader → FragmentShader` 才是
+    // "compute 写的内容对同帧 Lighting 可见" 的直接依据 —— 也就是任务 4 验收的同步基础。
+    cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader,
+                         rhi::PipelineStage::FragmentShader,
+                         rhi::ResourceState::UnorderedAccess,
+                         rhi::ResourceState::ShaderResource,
+                         albedo);
 }
 
 } // namespace he::render

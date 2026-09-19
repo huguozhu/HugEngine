@@ -3,7 +3,7 @@
 // ============================================================
 // Nanite/NaniteSettings.h — Nanite 的开关与档位（§14.4 三层里的"真值"层）
 //
-// 【本文件由 §14.8 任务 1 建立骨架；当前只有开关与档位两个字段】
+// 【本文件由 §14.8 任务 1 建立骨架；任务 3 加了假簇数量，任务 4 加了 UAV 自证开关】
 //
 // 【唯一真值】§14.4：`NaniteSettings::enabled` 是**唯一真值**，由 `NaniteRenderer` 持有。
 //   另外两层只是配置载体，不得各自缓存一份状态：
@@ -36,6 +36,15 @@ struct NaniteSettings {
     /// 模块把它交给 `NaniteCull`（超上限时钳制到 `kNaniteMaxFakeClusters`）。
     /// 它只在任务 3 的验证链路上有意义，任务 8 起被真实簇划分取代。
     u32 fakeClusters = 6;
+
+    /// 【§14.8 任务 4】UAV 自证开关（默认 **false**）。
+    /// 开启后模块在 GBuffer 几何段**之后**追加一个 `Nanite_TestWrite` compute pass：
+    /// 用 `RWTexture2D<float4>` 往既有 GBuffer albedo 写 8×8 棋盘（A1 路线的证据），
+    /// 供"compute 写 GBuffer 且同帧被 Lighting 读到"这条验收使用。
+    /// 配置层 = cfg 键 `nanite_test_write`（默认 0），样例负责解析/序列化 + 面板勾选框。
+    /// 【默认 false 的理由】§14.2 不变式 1：关闭时模块一个 pass 都不注册，画面与今天逐位相同；
+    /// 它只改 albedo 的**内容**（不改任何既有 pass 的声明与顺序），是纯粹的自证开关。
+    bool testWrite = false;
 };
 
 } // namespace he::render

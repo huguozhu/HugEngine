@@ -50,7 +50,23 @@ public:
                           rhi::IRHIBuffer* countBuffer,
                           u32 maxDrawCount);
 
+    /// 【§14.8 任务 4：UAV 自证通道】录制 `Nanite_TestWrite` pass。
+    /// 用 `RWTexture2D<float4>`（`Nanite_TestWrite.comp.slang`）往**既有 GBuffer albedo**
+    /// 写 8×8 棋盘，证明 "compute 写既有 GBuffer（A1）且同帧被 Lighting 读到"。
+    ///
+    /// 【懒初始化】PSO 与描述符集在**首次真正录制时**才建（`EnsureTestWriteResources`）：
+    ///   `testWrite` 默认关闭，关闭档下这些资源一个都不会创建（§14.2 不变式 1：
+    ///   关闭时不产生新的每帧 CPU 开销，也不多建任何 GPU 资源）。
+    ///
+    /// 【资源只借用不持有】`albedo` 是 `GBufferRenderer` 的纹理，本类只把它绑成存储图像，
+    ///   不参与其生命周期；分辨率也从纹理自身取（`GetWidth/GetHeight`）。
+    void RecordTestWritePass(rhi::IRHICommandList* cmd, rhi::IRHITexture* albedo);
+
 private:
+    /// 懒建 `Nanite_TestWrite` 的 PSO + 描述符集布局（首次录制时调用一次）。
+    /// 返回 false 表示创建失败（调用方跳过本次录制，不影响其它 pass）。
+    bool EnsureTestWriteResources();
+
     rhi::IRHIDevice* m_Device = nullptr;
     u32 m_Width  = 0;
     u32 m_Height = 0;
@@ -70,6 +86,12 @@ private:
 
     /// 最近一次 pass 传入的 maxDrawCount（诊断用）
     u32 m_LastMaxDrawCount = 0;
+
+    // ── §14.8 任务 4：UAV 自证通道（懒建；testWrite 关闭时全部为空）──
+    rhi::ShaderBytecode            m_TestWriteCS;                                  // Nanite_TestWrite.comp.spv
+    rhi::DescriptorSetLayoutHandle m_TestWriteLayout = rhi::kInvalidLayout;
+    rhi::DescriptorSetHandle       m_TestWriteSet    = rhi::kInvalidSet;
+    std::unique_ptr<rhi::IRHIPipelineState> m_TestWritePSO;
 };
 
 } // namespace he::render

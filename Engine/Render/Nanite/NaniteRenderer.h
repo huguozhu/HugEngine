@@ -46,6 +46,13 @@ struct NaniteGBufferHandles {
     ResourceHandle disneyB     = kInvalidHandle;
     ResourceHandle lightmapKey = kInvalidHandle;
     ResourceHandle depth       = kInvalidHandle;
+
+    /// 【任务 4 新增】albedo 的**纹理对象**本身（不只是帧图句柄）。
+    /// 任务 4 的 `Nanite_TestWrite` 要把它绑成存储图像（UAV）并从它取真实分辨率，
+    /// 这两件事都只有 `IRHITexture*` 能做；句柄只够帧图排序。
+    /// 【生命周期】纹理归 `GBufferRenderer` 所有；模块只在一个 pass 内借用（不持有）。
+    /// 前一处挂钩（`AddPasses`）不用它，故默认 nullptr。
+    rhi::IRHITexture* albedoTexture = nullptr;
 };
 
 /// Nanite 模块门面：资源生命周期 + 帧图接入 + 耗时读数/诊断（后两者是后续任务）
@@ -82,6 +89,20 @@ public:
     /// `if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady())`。
     /// 开启时注册两个 pass：`Nanite_Cull` + `Nanite_Raster`（原序 12 个 pass 一个不动）。
     void AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb);
+
+    /// 【§14.8 任务 4：GBuffer 之后的后置挂钩】在 **GBuffer 几何段结束之后、任何读取 GBuffer
+    /// 的 pass（SSAO/Lighting 等）之前**调用第二处注册点：
+    ///   · 为什么必须有这一处：`AddPasses` 的位置在既有 `GB_Clear` **之前**，模块的写入会被
+    ///     `GB_Clear` 覆盖，无法被同帧的 Lighting 读到；任务 4 的验收（"compute 写 GBuffer 且
+    ///     同帧被 Lighting 读到"）只能在 GBuffer 之后注册才能成立。
+    ///   · 开关守卫与 `AddPasses` 是**同一个真值**（`NaniteSettings::enabled` + `IsReady()`），
+    ///     不是新门控；`nanite_test_write` 只是模块内部的第二个条件。
+    ///   · 关闭档 / 未就绪 / `testWrite=false` ⇒ 一个 pass 都不注册（§14.2 不变式 1）。
+    ///   · 注意：这里写的是 `gbAlbedo` 的 UAV，因此**不能**声明 `gbDepth/gbWorldPos` 的那组
+    ///     WAW —— `GB_Clear` 已经在前面写过它们，再声明只会多出一条无意义的依赖。
+    ///
+    /// 【将来】任务 26 的调试可视化落点也在这里（GBuffer 之后的可视化叠加）。
+    void AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHandles& gb);
 
     /// dump 帧（`HE_DUMP_GI_FRAME`）打印**恰好一行**真实 GPU 读回：
     ///   `[Nanite] fake_clusters=<N> count_buffer=<X> indirect_cmds=<Y> rasterized_clusters=<Z>`

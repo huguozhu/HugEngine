@@ -148,13 +148,20 @@ void GBufferRenderer::SetMode(Mode mode) {
 // ============================================================
 
 void GBufferRenderer::CreateTextures(rhi::IRHIDevice* device) {
-    // GBuffer A/B/C/E: RGBA16_FLOAT（RenderTarget + ShaderResource）
+    // GBuffer A/B/C/E/F/G/H: RGBA16_FLOAT（RenderTarget + ShaderResource + UnorderedAccess）
+    // 【§14.8 任务 4（A1 落地）】这里只**增加** `UnorderedAccess`（UAV）标志：
+    //   模块的 compute 通道要直接写既有 GBuffer（A1 路线），而 RHI 的纹理在创建时就固定了
+    //   `VK_IMAGE_USAGE_STORAGE_BIT`；宽高 / 格式 / 其它 usage 一律不改 —— 任务的硬验收是
+    //   "既有路径画面逐位不变"，只增标志不改变任何既有渲染语义（渲染目标用法与布局转换都不变）。
+    //   本机存储图像格式支持实测见 §14.8 任务 4 的 A1 裁决依据（R16G16B16A16_SFLOAT 的
+    //   optimalTiling 含 VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT）。
     auto createRGBA16F = [&]() {
         rhi::TextureDesc d;
         d.format = rhi::Format::RGBA16_FLOAT;
         d.width  = m_Width;
         d.height = m_Height;
-        d.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
+        d.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource
+                 | rhi::TextureUsage::UnorderedAccess;
         return device->CreateTexture(d);
     };
     m_A = createRGBA16F();  // Albedo.rgb + Metallic.a
@@ -165,17 +172,21 @@ void GBufferRenderer::CreateTextures(rhi::IRHIDevice* device) {
     m_G = createRGBA16F();  // DisneyB（clearcoat/clearcoatGloss/specularTint.rg）
     m_H = createRGBA16F();  // 光照图键（uv0.xy + objectIndex，任务 31）
 
-    // GBuffer D: velocity（RG16_FLOAT，屏幕空间运动矢量）
+    // GBuffer D: velocity（RG16_FLOAT，屏幕空间运动矢量；同样只增 UAV 标志）
     {
         rhi::TextureDesc d;
         d.format = rhi::Format::RG16_FLOAT;
         d.width  = m_Width;
         d.height = m_Height;
-        d.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
+        d.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource
+                 | rhi::TextureUsage::UnorderedAccess;
         m_D = device->CreateTexture(d);
     }
 
     // GBuffer Depth: D32_FLOAT（DepthStencil + ShaderResource）
+    // 【§14.8 任务 4 的明确决定】**不给深度加 UAV**。深度是否可做存储图像是 A1 深度方案的
+    //   裁决输入：本机 NVIDIA RTX 4060 的 D32_SFLOAT 支持 STORAGE_IMAGE，但同机 AMD 核显
+    //   不支持（详见任务 4 答复与 §14.5 的裁决记录），故深度写入方案必须先裁决再接。
     {
         rhi::TextureDesc d;
         d.format = rhi::Format::D32_FLOAT;

@@ -175,6 +175,8 @@ if(SLANGC)
         "${SHADER_DIR}/Particles/ParticleSort.comp.slang"
         # Nanite（虚拟几何模块）——§14.8 任务 3：「假簇 → 间接命令 + 计数」的 compute
         "${SHADER_DIR}/Nanite/Nanite_Cull.comp.slang"
+        # Nanite（虚拟几何模块）——§14.8 任务 4：往既有 GBuffer albedo 写可识别图案的 UAV 自证 compute
+        "${SHADER_DIR}/Nanite/Nanite_TestWrite.comp.slang"
     )
     # Ray Tracing 着色器（.rgen / .rmiss / .rchit / .rahit / .rcall）
     # 命名约定: EffectName.rgen.slang (RayGen), EffectName.rmiss.slang (Miss),
