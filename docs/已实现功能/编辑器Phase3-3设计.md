@@ -1,6 +1,14 @@
 # HugEngine Phase 3-3 编辑器设计
 
-> 日期: 2026-06-26 | 状态: 待实施
+> 日期: 2026-06-26 | 状态: ✅ 已实现（三个面板全部落地）
+>
+> **实现落点**（2026-09-19 核对）：
+> - 光照编辑器完善 → `Samples/Editor/Panels/DetailsPanel.cpp`（按 DirectionalLight → PointLight →
+>   SpotLight 子类优先级分支）+ `SceneSerializer` 的光源组件重建；
+> - Material Editor → `Samples/Editor/Panels/MaterialEditor.cpp`（材质参数编辑；
+>   `DetailsPanel` 内另有 `AlphaMode` 等 PBR 参数编辑）；
+> - Project Settings → `Samples/Editor/Panels/ProjectSettingsPanel.cpp`（CVar 浏览/编辑；
+>   另有 `ConsolePanel` 支持 `set <name> <value>` 命令行改 CVar）。
 
 ## 概述
 

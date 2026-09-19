@@ -1,6 +1,11 @@
 # HugEngine Phase 3 编辑器设计
 
-> 日期: 2026-06-25 | 状态: 待实施
+> 日期: 2026-06-25 | 状态: ✅ 已实现（编辑器应用）
+>
+> **实现落点**：独立编辑器应用在 `Samples/Editor/`（`EditorApp.cpp` 主循环 + `Panels/` 各面板），
+> 编辑器基础设施在 `Engine/Editor/`（`EditorContext` 状态机、`Command` Undo/Redo、`SceneSerializer`、选中/拾取）。
+> 本文的三个子任务：3-1（Viewport + Outliner + Details）随应用落地；3-2 / 3-3 见同目录另两份文档
+> （同样已实现，各自的落点写在各自文首）。
 
 ## 概述
 
