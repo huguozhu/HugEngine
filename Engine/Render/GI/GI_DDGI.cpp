@@ -36,7 +36,7 @@ bool GI_DDGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Settings.mode      = GIMode::DDGI;
 
     u32 probeCount = gridX * gridY * gridZ;
-    u64 bufferSize = probeCount * kFloats4PerProbe * sizeof(float4);  // 每探针 256 字节
+    u64 bufferSize = probeCount * kFloats4PerProbe * sizeof(float4);  // 每探针 4×16 B（步骤 30：原 256 B）
 
     // ---- 探针数据存储（两帧：当前 + 历史，每帧交换） ----
     rhi::BufferDesc probeDesc;
