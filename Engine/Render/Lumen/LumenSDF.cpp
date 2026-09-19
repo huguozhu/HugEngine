@@ -1140,6 +1140,11 @@ void LumenSDF::RunMarch(rhi::IRHICommandList* cmd) {
     pc.maxSteps  = (float)m_Config.marchMaxSteps;
     pc.eps       = 0.25f * GetGlobalVoxelSize(0);
     pc.maxDist   = m_Config.marchMaxDist;
+    // 审计：把实际下发的两层参数打出来（射线自检对任何改动都不动，先证明这条通道是活的）
+    HE_CORE_INFO("LumenSDF march 参数: 层0 原点({:.1f},{:.1f},{:.1f}) 体素 {:.3f} res {} | 层1 原点({:.1f},{:.1f},{:.1f}) 体素 {:.3f} res {} | 射线 {} 步数 {:.0f} eps {:.3f}",
+                 (double)pc.originX, (double)pc.originY, (double)pc.originZ, (double)pc.voxelSize, pc.dimX,
+                 (double)pc.origin1X, (double)pc.origin1Y, (double)pc.origin1Z, (double)pc.voxelSize1, pc.dim1X,
+                 pc.rayCount, (double)pc.maxSteps, (double)pc.eps);
 
     cmd->SetPipeline(m_MarchPSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_MarchSet);
