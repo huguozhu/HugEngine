@@ -1070,3 +1070,243 @@ python Tools\pt\analyze_pt.py --compare <pt_tag> <deferred_tag> --target hdr
 
 - 若 P6 先落地 → 本附录的 M1/M2 应作为 P6 的 PT 侧适配（复用其估计器与绑定数组），而不是另写一套；
 - 若决定 PT 侧先做 → 需要在 `全路径追踪管线规划.md` §0.3 增补一条"落点从 P6 移回 PT"的修订记录（本轮不做该修订）。
+
+---
+
+## 四、实现步骤（可执行清单，从 1 起编号）
+
+> 本章把 §1–§17 里"要做成什么样"翻译成"按什么顺序动手"。放在文档最后是刻意的：**设计（一）、
+> 实现现状（二）、架构对照（三）三章的编号已经稳定**，本章只追加、不改写前面的结论。
+>
+> 编号规则：**从 1 开始、只增不改**（已完成/作废的步骤保留编号并标注状态，不重排）。
+> 每个步骤给出三行：**目标** / **改动点** / **验收**。验收判据沿用本仓库既有口径 ——
+> 白炉真值 `1.0000`、背靠背单源采样逐项一致（pass 集合与顺序 + `provN_raw/final` 数值）、
+> `HugEngineTests` 全绿、`06.GILab` 既有预设画面不回归。
+>
+> 阶段与里程碑的对应：**A = 前置（§12"架构前置"）**、**B–G = L1–L6**、**H = 横切工具与验收**。
+
+| 阶段 | 步骤 | 里程碑 | 文档出处 |
+|------|------|--------|---------|
+| A 框架前置 | 1–7 | 前置（不新增 L 编号） | §4 末、§11、§12"架构前置" |
+| B SDF | 8–12 | L1 | §5 |
+| C Surface Cache | 13–19 | L2 | §4、§13 |
+| D Screen Probe | 20–25 | L3 | §6 |
+| E 远场 HW RT | 26–29 | L4 | §6、§15.2 |
+| F Radiance Cache | 30–33 | L5 | §7 |
+| G 降噪与优化 | 34–37 | L6 | §10、§6 |
+| H 工具与验收 | 38–41 | 横切（每阶段退出前） | §9.1、§14、§16 |
+
+### 阶段 A：框架前置（不产出画面，但后补等于重构）
+
+#### 1. Provider 生命周期遍历
+- **目标**：让 Provider 自持的持久资源（atlas / clipmap / probe buffer）在 resize 与销毁时被正确重建与释放。
+- **改动点**：`Engine/Render/Pipeline/DeferredPipeline.cpp` 的 `OnResize`（`:575-594`）与 `Shutdown`（`:459-514`）增加对 `m_GIProviders` 的遍历；或让 Lumen 走底层 pass 的 `OnResize/Shutdown` 转调（二选一，写进实现注释）。
+- **验收**：改变窗口尺寸后反复 resize 无验证层告警、无旧尺寸纹理读取；退出时验证层无泄漏报告。
+
+#### 2. 帧图顺序契约
+- **目标**：Lumen 内部 pass 的执行顺序不依赖 `AddPass` 的注册先后。
+- **改动点**：约定每个内部 pass 显式声明 RG `reads/writes`（必要时用 dummy WAW，参考 `DeferredPipeline_FrameGraph.cpp:192-194` 对 Shadow 的写法）；对照 `Engine/Render/RenderGraph.cpp:181-186`（LIFO 拓扑序）与 `:302-324`（`CullDeadPasses` 裁掉"写了无人读"的 pass）。
+- **验收**：打开 `HE_TRACE_PASSES=1`，Lumen 各 pass 的 `[PASS]` 顺序与设计一致，且重复运行时稳定。
+
+#### 3. Lumen 资源归属与容器
+- **目标**：确定 atlas / Global SDF / probe buffer 的持有者与重建路径。
+- **改动点**：新增 `Engine/Render/Lumen/LumenScene.{h,cpp}`（或复用 `Engine/Render/GI/` 目录约定）持有持久 GPU 资源；`device->CreateTexture/CreateBuffer` 自建 + `rg.ImportTexture`（不要用 `rg.CreateTexture`：`RenderGraph.h:106-119` 没有由句柄取 `IRHITexture*` 的接口）；`Engine/Render/CMakeLists.txt` 登记源文件。
+- **验收**：资源在 `Shutdown` 后全部释放；`r.TransientTest` 之外的路径不新建瞬态纹理。
+
+#### 4. GI 源数据层接入
+- **目标**：把 Lumen 变成层栈里的合法源（面板可见、可降级、可序列化）。
+- **改动点**：`Engine/Render/GI/GITypes.h` 加 `GISourceId::Lumen = 12`（`:49-65`）、分类谓词（`:87-90` 或 `:94-98`）、`IsCameraViewLimitedSource`（`:120-124`，**按 §15 的判断不加**）、`ToConfidenceMask`（`:147-152`）、`GISourceName`（`:155-170`）、`ToPipelineCap`（`:327-358`，返回 diffuse + specular 两位）、`PipelineCaps::AllSources`（`:404-408`）、预设（`:482-528`，可选）；`Engine/Shader/Shaders/ShaderTypes.slang:123-134` 加 `GISOURCE_LUMEN = 12`（数值必须与 C++ 一致）；`Tests/TestGITypes.cpp` 的全源表与类别计数断言同步。
+- **验收**：`HugEngineTests` 全绿；`GIRegistry::IsAvailable(Lumen)` 在 Deferred 管线位下为真；面板能选到且能关闭。
+
+#### 5. 合成端接入
+- **目标**：Lumen 的输出能被 Lighting 采样并与其它源加权合成。
+- **改动点**：`Engine/Render/Pipeline/LightingPass.h` 的 `LightingInputs` 加字段 → `DeferredPipeline_FrameGraph.cpp:918-1007` 填字段（注意 AO/RSM/DDGI 的旁路写法）→ `LightingPass::Render` 绑定 → `ShaderTypes.slang` 加 `kGPUBinding_*` → `Lighting/DeferredLighting.frag.slang` 的 `SampleDiffuseSource`（`:184-200`）与 `SampleSpecularSource`（`:206-214`）加 `case`（量纲约定 `:164-170`：返回已乘接收面 albedo 的 `albedo·E/π`）；`Engine/RHI/Vulkan/VulkanDevice_Descriptors.cpp` 的描述符池容量按新增绑定复核。
+- **验收**：白炉模式下 Lumen 槽位输出为 `1.0000`；关掉 Lumen 时画面与改造前逐像素一致。
+
+#### 6. Provider 骨架 + 空 pass
+- **目标**：跑通"注册 → pass → 合成 → 面板 → 计时"整条链，内部先输出常量。
+- **改动点**：新增 `Engine/Render/GI/LumenProvider.{h,cpp}`（照 `SSGIProvider.h` / `DDGIProvider.h` 模板，覆写 `GetSourceId/Handles/IsValid/NeedsPass/SyncToStack/GetDiffuse|SpecularOutput/GetFinal*Output/GetAuxPass*/Render/GetTimedPass`）；在 `DeferredPipeline.cpp:168-209` 注册；帧图加**第 8 条 provider 级循环**（按 Provider 遍历、不按 id，避免 `Handles` 两个 id 时被两条循环各跑一次）—— 这是 §11 明写的"逃生口"，**不被任务 19 阻塞**。
+- **验收**：pass 在 `HE_TRACE_PASSES=1` 下只出现一次；`GITimer` 有读数；白炉 `1.0000`。
+
+#### 7. 配置、面板与验收基线
+- **目标**：建立后续所有阶段的对照基线（没有基线就没法判"没回归"）。
+- **改动点**：`Samples/06.GILab/06.GILab.cpp` 的 `kAllDiffuse`（`:1255-1257`）/`kAllSpecular`（`:1315-1317`）/AO 列表（`:1348-1358`）；cfg 往返（加载 `:677-690`、保存 `:1776-1786`，注意每通道只有 4 个槽位）；`Tools/gi/` 下按源扩展 `dump_gi.ps1` / `repeatability_check.ps1`。
+- **验收**：Lumen 开/关两次运行的对照报告可复现；既有 SSGI/DDGI/RT 预设读数不变。
+
+### 阶段 B：L1 — SDF（近场追踪几何，§5）
+
+#### 8. Mesh SDF 生成
+- **目标**：每个 mesh 生成 128³ R16F 距离场（≈ 4.2 MB/mesh）。
+- **改动点**：新增 `Engine/Shader/Shaders/Lumen/SDF_MeshBuild.comp`（暴力"每三角形写入体素"）+ C++ 侧调度与缓存；带 **mesh 数量上限 / 按需生成 / 释放**（§15.3 的显存测算：100 个 mesh ≈ 420 MB）。
+- **验收**：可视化 Mesh SDF 与几何一致；显存增量与测算吻合（±10%）。
+
+#### 9. SDF 质量测试场景
+- **目标**：在写更多代码前先把"暴力生成的质量缺陷"量化。
+- **改动点**：新增薄墙 / 窄缝 / 单面几何的测试场景（可放 `Content/`，或直接用 Sponza 的薄几何局部）；记录漏光与自遮挡的可见条件。
+- **验收**：给出"哪些几何不适用"的清单（对照 §17.6 第 3 项的 UE 限制清单），写进实现前置。
+
+#### 10. Global SDF 注入与 clipmap
+- **目标**：把 Mesh SDF 合并成可追踪的全局距离场（512³ 单层 → 4×256³ clipmap）。
+- **改动点**：`Lumen/SDF_GlobalInject.comp`（mesh → global 注入 + 增量更新）；clipmap 层切换的坐标映射；自建纹理 + `ImportTexture`；`OnResize` 重建。
+- **验收**：Global SDF 可视化正确；注入耗时进入 `GITimer` 可读；层切换处无断裂。
+
+#### 11. SDF Ray Marching
+- **目标**：sphere tracing（最大 64 步、收敛阈值 0.1 体素、梯度法线、跨层继续）。
+- **改动点**：`Lumen/SDF_RayMarch.comp`；供 Screen Probe 与调试视图共用同一份 march 函数（`Lumen/LumenShared.slang` 之类的共享头）。
+- **验收**：与解析几何（球/盒）的命中距离误差在 1 个体素内。
+
+#### 12. SDF 帧图接入与调试视图（L1 退出判据）
+- **目标**：`SDF_Update` 作为独立 pass 进帧图，并提供可视化。
+- **改动点**：帧图新增 pass 并声明依赖（步骤 2 的契约）；调试视图走现有 r.\* 调试开关约定。
+- **验收**：**可视化 SDF 追踪结果**（§12 的 L1 判据）；关掉 Lumen 时无任何性能与画面影响。
+
+### 阶段 C：L2 — Surface Cache（射线命中点着色，§4）
+
+#### 13. Card 生成器 + 覆盖率可视化
+- **目标**：为 mesh 生成卡片（多角度投影 + 覆盖检查），并让"覆盖不到"可见。
+- **改动点**：卡片生成工具（加载期或离线，落点与格式需先定）；覆盖率可视化视图（对齐 §17.6 第 1 项）。
+- **验收**：Sponza 上卡片覆盖率可视化无不可解释的空洞；空洞能与卡片数量设置对应起来。
+
+#### 14. 页表 + 页状态机
+- **目标**：落 §13 的 `SurfaceCachePageEntry`（六态）与 `SurfaceCacheRequest`，GPU 侧 + C++ 侧镜像一致。
+- **改动点**：`Lumen/SurfaceCacheTypes.h`（或 slang 侧结构 + C++ 镜像，注意 std430 对齐）；页表纹理/buffer 自建。
+- **验收**：单测覆盖状态迁移合法性（`Invalid→Requested→Allocating→Capturing→Captured→Dirty`）；非法迁移可断言。
+
+#### 15. Card Capture（软件光栅化写 atlas）
+- **目标**：逐 Card 一个线程组，把 Albedo / Normal / Emissive 写进 3 张 RGBA16F atlas。
+- **改动点**：`Lumen/SurfaceCache_Capture.comp`；只处理本帧预算内、状态为 `Capturing` 的页。
+- **验收**：atlas 可视化与场景材质一致（§12 的 L2 判据）。
+
+#### 16. Feedback（缺失页检测）
+- **目标**：产出"本帧需要哪些页"的请求列表 `(pageID, weight)`。
+- **改动点**：`Lumen/SurfaceCache_Feedback.comp`（16×16 像素降采样，weight = 屏幕覆盖面积 × 重要性 × 距离）；C++ 侧小规模排序 + 取前 `maxCapturesPerFrame`。
+- **验收**：相机移动时请求列表稳定（无整屏抖动）；权重排序与屏幕重要性一致。
+
+#### 17. 预算与跨帧摊销
+- **目标**：落地 §4 的 `maxCapturesPerFrame` / `maxAllocationsPerFrame` / `maxFeedbackPages`。
+- **改动点**：C++ 侧预算调度（未完成请求留在 `Requested`，不回退不丢弃）；页状态写回与统计输出。
+- **验收**：预算减半时画面收敛变慢但**不出现卡顿尖峰**；帧时曲线平滑。
+
+#### 18. LRU 淘汰与碎片整理
+- **目标**：在 1024 页上限内稳定运行，长期无碎片恶化。
+- **改动点**：LRU（`lastTouchFrame`）+ defrag pass + 脏页标记（几何/材质变更）。
+- **验收**：长时间漫游后捕获吞吐不下降；atlas 分配成功率保持 100%。
+
+#### 19. L2 退出判据
+- **目标**：Surface Cache 可被后续阶段当作"命中点材质源"使用。
+- **改动点**：无新增；整理 dump 与对照报告。
+- **验收**：atlas 正确显示材质；覆盖率可视化无不可解释区域；白炉 `1.0000`；背靠背读数一致。
+
+### 阶段 D：L3 — Screen Probe Gather（§6）
+
+#### 20. 探针放置与自适应合并
+- **目标**：16×16 像素一个探针（1080p ≈ 8K 探针），平坦区合并到 32×32。
+- **改动点**：`Lumen/ScreenProbeGather.comp` 的探针布置与合并判据（法线方差阈值）；`ScreenProbe` 结构（§13）。
+- **验收**：探针数量与设计量级一致；合并阈值变化时数量单调变化。
+
+#### 21. 半球追踪（二维配置落地）
+- **目标**：按 §6 的 `traceRep × shadeRep` 发射 8–16 条 GGX 重要性采样光线。
+- **改动点**：`LumenTraceConfig`（首版 `SDF(+HW 远场) × SurfaceCache`、`screenTrace=false`）；命中求交复用步骤 11 的 march；组合约束（`SDF × HitLighting` 必须显式拒绝并断言）。
+- **验收**：单探针光线方向分布正确；非法组合在配置加载期即报错。
+
+#### 22. 命中点着色
+- **目标**：命中点采样 Surface Cache atlas 材质 + 查 ClusteredShading LightGrid 直接光。
+- **改动点**：`LumenShared.slang` 的命中着色函数；atlas 采样需处理页边界与缺页（缺页返回中性值 + 标记）。
+- **验收**：命中点 albedo 与 GBuffer 的 albedo 在同一几何上一致（无几何时视为通过）。
+
+#### 23. SH 投影
+- **目标**：把探针结果投成二阶球谐（4 系数 RGB = 12 floats/probe）。
+- **改动点**：`Lumen/ScreenProbe_SHProject.comp`；probe SH buffer 自建。
+- **验收**：SH 重建的辐照度与逐光线求和的误差在白炉下为 0（数值可断言）。
+
+#### 24. 合成到 Lighting
+- **目标**：探针 SH 能作为 Lumen 源的输出参与合成。
+- **改动点**：从 SH 采样出 per-pixel 入射辐照度（首版可直接全屏采样最近探针，后续再插值）；接到步骤 5 的 `LightingInputs`。
+- **验收**：关闭其它源、只开 Lumen 时，屏幕上出现与场景一致的间接漫反射。
+
+#### 25. L3 退出判据
+- **验收**：**半球追踪产生漫反射 GI**（§12 的 L3 判据）；与 SSGI/DDGI 的背靠背对照可解释差异（不要求一致，要求"差异可归因"）。
+
+### 阶段 E：L4 — 远场 HW RT 与混合（§6、§15.2）
+
+#### 26. 远场 TraceRay
+- **目标**：`rayDistance ≥ maxSDFDistance`（50 m）时改走 HW RT 二级光线。
+- **改动点**：复用 `Engine/Render/Pipeline/RTPass` 的 TLAS / 场景材质纹理（参考 `RTProvider.h:280-305` 的 `RTExecuteContext` 组装方式）；`Lumen/ScreenProbeTrace.rgen`（或等价 rgen）+ SBT 注册。
+- **验收**：远场命中与三角形场景一致（用 RTGI/PT 作为参考对照）。
+
+#### 27. traceRep 切换与 overlap fade
+- **目标**：SDF ↔ HW 切换处无 discontinuity。
+- **改动点**：切换逻辑只挂在 `traceRep` 上（§6 的副作用说明）；切换带 N 步 overlap fade。
+- **验收**：沿射线方向扫过 50 m 阈值时，探针辐照度连续（无阶跃）。
+
+#### 28. 组合约束与 Hit Lighting 空壳
+- **目标**：把 §6 的组合约束写进代码路径，为第二版留入口。
+- **改动点**：`shadeRep == HitLighting` 的分支显式保留（首版返回"未实现"并记一条日志/断言，而不是静默回落）。
+- **验收**：打开未实现组合时**报错可见**，不产生错误画面。
+
+#### 29. L4 退出判据
+- **验收**：**SDF 近 + RT 远正确混合**（§12 的 L4 判据）；帧时与显存增量有记录（进 §15.3 的表）。
+
+### 阶段 F：L5 — Radiance Cache（§7）
+
+#### 30. 探针表示升级
+- **目标**：DDGI 三阶 9 系数 → 二阶 4 系数（RGB 独立）。
+- **改动点**：`Engine/Render/GI/GI_DDGI.{h,cpp}` 的探针缓冲布局与采样端（`DeferredLighting.frag.slang` 的 `u_DDGIProbes`）；保持与 `kGIConfProbeGrid` 置信度掩码一致。
+- **验收**：SH 布局变更后白炉仍为 `1.0000`；DDGI 单独使用的画面不回归。
+
+#### 31. 输入改为 Screen Probe + 时间混合
+- **目标**：`SetTracedRadiance` 一类接口改为接收 Screen Probe 的结果；history 重投影 + 时间混合。
+- **改动点**：仿 `DeferredPipeline_FrameGraph.cpp:505-563` 的探针射线注入方式；探针网格外仍按置信度归零。
+- **验收**：室内静态场景在 30 帧内收敛；相机移动时无拖影累积。
+
+#### 32. 插值与距离权重
+- **目标**：三线性 + 距离权重插值，网格边界平滑。
+- **改动点**：采样端插值函数；`GIProbeGrid::FitProbeGridToBounds` 的网格拟合参数复核。
+- **验收**：网格内无可见格子状伪影；网格外淡出正确。
+
+#### 33. L5 退出判据
+- **验收**：**室内/室外稳定 GI**（§12 的 L5 判据）；与"关闭 Lumen、仅 DDGI"的对照可解释。
+
+### 阶段 G：L6 — 降噪与优化（前置 §10）
+
+#### 34. 统一降噪框架 11.3
+- **目标**：`DenoiseSignal` 抽象 + 统一历史纹理/采样器分配 + 批量 dispatch + 框架级"`alpha < 0` 即无效"契约。
+- **改动点**：`Engine/Render/PostProcess/` 的 `Denoiser` / `RTDenoiser` 之上加信号层；`SpatialDenoiseAux` 与 `RTProvider` 的 `std::vector<Stage>` 成为其两个消费者；`needsUpscale` 信号属性（半分辨率也要降噪）。
+- **验收**：§10 的 11.3 判据——真实多信号共存（Lumen 探针 + 反射 + 阴影同帧）下合成端只读一个有效性约定；既有 RT/SSGI 背靠背读数不变。
+
+#### 35. Lumen 信号接入框架
+- **目标**：ScreenProbe 的 3×3 YCoCg AABB 空间滤波 + 时域（EMA/重投影）注册为框架内信号。
+- **改动点**：`Lumen/ScreenProbe_Filter.comp`；时域历史走框架统一分配（不再各写一套）。
+- **验收**：探针噪声下降可量化（`std/mean`）；无新增降噪器实例被"另挂一套"。
+
+#### 36. 半分辨率升采样与有效性
+- **目标**：探针半分辨率/低分辨率输出经 `needsUpscale` 重建后再参与合成。
+- **改动点**：升采样 pass + 合成端按有效性掩码降权。
+- **验收**：半分辨率与全分辨率切换时画面无跳变。
+
+#### 37. 性能与异步（L6 退出判据）
+- **目标**：60 fps @ 1080p（§12 的 L6 判据）。
+- **改动点**：`RenderGraph::ExecuteWithAsyncCompute`（`RenderGraph.cpp:447,500`）接入 Lumen 的 compute 段；摊销预算（步骤 17）调优；必要时分级画质。
+- **验收**：目标机上 1080p 达到 60 fps；GPU 计时（`GITimer`）给出各 pass 分解；无 hitch（1% low 帧时可控）。
+
+### 阶段 H：横切工具与验收（每个阶段退出前都要过）
+
+#### 38. 白炉真值覆盖
+- **目标**：Lumen 的每个新信号都能在 `furnaceMode` 下自证标度。
+- **改动点**：Provider 的 `Render` 消费 `ctx.furnace`（注意 RSM 的 ctx 目前只填了前 4 个字段、furnace=false 的坑）。
+- **验收**：只开 Lumen 时白炉读数 `1.0000`。
+
+#### 39. 背靠背单源采样对照
+- **目标**：每次改动都能证明"没动的源没变"。
+- **改动点**：按 `Tools/gi/repeatability_check.ps1` 的既有方式扩展 Lumen 源；对照项 = pass 集合与顺序 + `provN_raw/final` 数值。
+- **验收**：改动前后的对照在实测抖动内（参考 11.1 的 ±0.001% 口径）。
+
+#### 40. 调试与可视化工具
+- **目标**：让"发黑/漏光/闪"可归因，而不是靠猜。
+- **改动点**：页状态 dump、SDF 可视化（步骤 12）、探针可视化、**卡片覆盖率可视化**（步骤 13）、各 pass 耗时。
+- **验收**：每个已知故障模式都能被至少一个工具直接观察到。
+
+#### 41. 单测与预设回归
+- **目标**：数据层与配置层的正确性不靠画面。
+- **改动点**：`Tests/TestGITypes.cpp`（全源表、通道表、类别计数、`ToConfidenceMask`、能力位）；`GIConfigFromPreset`；`06.GILab` 既有预设。
+- **验收**：`HugEngineTests` 全绿；预设往返（保存→加载）稳定；既有预设画面不回归。
