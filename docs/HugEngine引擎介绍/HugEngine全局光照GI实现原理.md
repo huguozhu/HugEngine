@@ -514,4 +514,4 @@ payload.radianceT = float4(radiance, RayTCurrent());
 - **VXGI（体素锥追踪）**：3D Clipmap → Cone Tracing，`GIMode::VXGI` 仅占位；
 - **ReSTIR GI**：`GIMode::ReSTIR` 仅占位；当前 `ReSTIRPass` 实现的是直接光照（DI）重采样。
 
-> 相关规划见 `docs/未实现功能/全路径追踪管线规划.md`、`docs/未实现功能/全流程RayTracing渲染实施规划.md`。
+> 相关规划见 `docs/已实现功能/全路径追踪管线规划.md`、`docs/未实现功能/全流程RayTracing渲染实施规划.md`。
