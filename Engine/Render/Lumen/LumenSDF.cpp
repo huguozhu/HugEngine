@@ -561,7 +561,7 @@ void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
             pc.meshVoxelSize = e.voxelSize;
             pc.meshDimX = pc.meshDimY = pc.meshDimZ = e.resolution;
             m_Device->UpdateDescriptorSet(m_GlobalSet, kGBindMeshField,
-                rhi::DescriptorType::CombinedImageSampler, e.field.get(), m_NearestSampler.get());
+                rhi::DescriptorType::CombinedImageSampler, e.field.get(), m_LinearSampler.get());
             cmd->SetPushConstants(0, sizeof(pc), &pc);
             cmd->Dispatch(groups, groups, groups);
             cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
