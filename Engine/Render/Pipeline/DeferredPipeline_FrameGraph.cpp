@@ -87,9 +87,17 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
 
     // GPUScene 收集 → [GPU 模式: 填充 IndirectDraw 参数] → 上传
     m_GPUScene.Collect(world, sg, camera);
+    // MeshBatcher 的构建条件有两条：① GPU 模式要靠它填 IndirectDraw 参数；
+    // ② **Lumen 的 Mesh SDF 构建需要这份 CPU 侧几何**（步骤 8）——CPU GBuffer 模式下
+    //    绘制不走它，但 SDF 仍然要有几何输入，否则距离场队列为空（实测就是这么发现的）。
+    const bool lumenNeedsGeometry = m_GIConfig.diffuse.Has(GISourceId::Lumen)
+                                 || m_GIConfig.specular.Has(GISourceId::Lumen);
     if (m_GBuffer->GetMode() == GBufferRenderer::Mode::GPU) {
         if (!m_BatchBuilt) { m_MeshBatcher.Build(world, m_ExcludeDecalCards); m_BatchBuilt = true; }
         m_MeshBatcher.FillGPUScene(m_GPUScene);  // 在 Upload 前写入 draw 参数
+    } else if (lumenNeedsGeometry && !m_BatchBuilt) {
+        m_MeshBatcher.Build(world, m_ExcludeDecalCards);   // 仅供 Lumen 的 SDF 使用
+        m_BatchBuilt = true;
     }
     m_GPUScene.Upload(m_Device);
 
@@ -741,6 +749,16 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
 
             rhi::IRHITexture* out = prov->GetDiffuseOutput();
             if (!out) continue;
+
+            // ── 步骤 8：Mesh SDF 构建（独立 compute pass）──
+            // 必须**在 offscreen render pass 之外**：Vulkan 不允许在 render pass 内 dispatch
+            // compute（实测把 dispatch 放进主 pass 会直接访问违例崩溃）。本 pass 不声明资源
+            // 依赖（自持资源 + 自管 barrier），writes 为空故不会被 CullDeadPasses 裁掉。
+            rg.AddPass("Lumen_SDF_Build", {}, {},
+                [p = prov.get()](rhi::IRHICommandList* c) {
+                    if (auto* lp = dynamic_cast<LumenProvider*>(p)) lp->StepSDF(c);
+                });
+
             const u32 pw = out->GetWidth();
             const u32 ph = out->GetHeight();
             lumenHandle = rg.ImportTexture(prov->GetName(), out);

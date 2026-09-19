@@ -25,6 +25,8 @@ namespace he::render {
 class LumenProvider final : public IGIProvider {
 public:
     void SetScene(LumenScene* scene) { m_Scene = scene; }
+    /// 合并几何来源（MeshBatcher 由 DeferredPipeline 持有；SDF 构建在首帧用到它）
+    void SetMeshBatcher(const MeshBatcher* batcher) { m_Batcher = batcher; }
 
     // ── 身份 ──
     [[nodiscard]] GISourceId GetSourceId() const override { return GISourceId::Lumen; }
@@ -75,12 +77,20 @@ public:
     /// 每帧主 pass。**骨架阶段**只画一个常量色全屏三角（白炉 1.0 / 常态 0.0）：
     /// 目的是让"pass 是否注册、输出是否被合成、白炉读数是否 1.0"三件事可独立验证。
     /// 步骤 8 起这里改为按 stage 顺序录制 SurfaceCache_Capture → SDF_Inject → ScreenProbeGather。
+    /// 每帧主 pass。**骨架阶段**只画一个常量色全屏三角（白炉 1.0 / 常态 0.0）：
+    /// 目的是让"pass 是否注册、输出是否被合成、白炉读数是否 1.0"三件事可独立验证。
+    /// 步骤 8 起这里改为按 stage 顺序录制 SurfaceCache_Capture → SDF_Inject → ScreenProbeGather。
     void Render(rhi::IRHICommandList* cmd, const GIProviderContext& ctx) override {
         if (!m_Scene) return;
-        // 白炉：输出 1 且标为"有效"，使源自身的标度可被直接读出（判据 = 1）。
-        // 常态：输出 0 且标为"无数据"（alpha = -1）—— 骨架阶段没有真实内容，
-        //       以无效标记载荷参与会让同通道其它源被无端稀释，开/关 Lumen 的画面就不一致了。
+        // 注意：SDF 构建**不在这里**做 —— 本函数在 offscreen render pass 内执行，
+        // 而 Vulkan 不允许在 render pass 内 dispatch compute（实测直接访问违例崩溃）。
+        // 帧图为它单独注册了一个 compute pass（"Lumen_SDF_Build"），见 StepSDF。
         m_Scene->DrawSkeleton(cmd, ctx.furnace ? 1.0f : 0.0f, ctx.furnace ? 1.0f : -1.0f);
+    }
+
+    /// 步骤 8：逐 mesh 距离场构建（由帧图的独立 compute pass 调用，见 FrameGraph 的 Lumen 段）
+    void StepSDF(rhi::IRHICommandList* cmd) {
+        if (m_Scene && m_Batcher) m_Scene->StepSDF(cmd, *m_Batcher);
     }
 
     /// 帧图在 BeginOffscreenPass 之前调用：必须绑定**单颜色附件**的管线，
@@ -100,6 +110,7 @@ private:
     }
 
     LumenScene* m_Scene = nullptr;   // 非拥有：由 DeferredPipeline 持有
+    const MeshBatcher* m_Batcher = nullptr;   // 非拥有：合并几何（SDF 构建输入）
     // GBuffer 输入（非拥有，帧图每帧注入）
     rhi::IRHITexture* m_Depth  = nullptr;
     rhi::IRHITexture* m_Normal = nullptr;
