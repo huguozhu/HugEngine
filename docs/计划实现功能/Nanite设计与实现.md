@@ -2110,6 +2110,13 @@ if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
   实例内沿用 208B 的材质部分）。既有的三处枚举一致性契约
   （`SceneRenderer.cpp:102-142`、`MeshBatcher.cpp:75-86`、`GPUScene.cpp:66-82`）**不受影响** ——
   这正是独立编号空间的价值。
+  **定稿（任务 5，2026-09-20）**：普通段 `[0,1024)`（= `MAX_OBJECTS`，与 `GPUObjectData` 缓冲容量一致）、
+  Nanite 段 `[1024,2048)`（容量 **1024**）、哨兵 `0xFFFFFFFF`。容量上限不是随便定的：
+  `gb_lightmapkey` 是 **RGBA16_FLOAT**，binary16 的精确整数上限是 **2^11 = 2048**，页号 2049 会被量化成 2048
+  —— 任务 1 注释里写的"2^24"是 float32 的上限，**单位错了**。实测编码 = `float4(页内uv.xy, objectIndex, 0)`
+  （`GBuffer.frag.slang:134`）；今天**没有任何着色器**解码页号（`DeferredLighting.frag.slang:30` 只声明绑定、从未采样），
+  唯一解码点是离线工具 `Tools/gi/lightmap_key_check.py`（硬编码 `page < 1024`）⇒ 当天不存在显存越界路径。
+  该工具与"混排场景运行时校验"一起，随任务 18（软光栅真正写 GBuffer）按段分类修。详见 §14.15。
 - **不用死代码**：不用 WorkGraph（死代码）、不用 DGC（默认关且在不可达分支）、
   不依赖 `GPUCulling` 的可见计数（`:427` 被清零）。模块自持 `DrawIndexedIndirectCount` 链。
 
@@ -2406,3 +2413,40 @@ A1/A2 的完整裁决已写回 §14.5（A2 = 自建 VisBuffer，仅在确需跨�
 （`maxULP=6 maxAbs=1.5e-4 meanAbs=2.6e-8`，0.5% 像素）⇒ 该族在**运行间非确定**（同一轮内先 0 后 6），并非 Nanite 引入。
 处理与判据④ 一致：仅对该族给出硬上界容差（`maxULP <= 8` 且 `meanAbs <= 1e-6`）并**显式打印命中项数**，
 其余转储仍严格 `<= 2 ULP`。**若该族幅度超过上界，一律按回归处理。**
+
+### 14.15 任务 5 实施记录：objectIndex 分区契约（2026-09-20）
+
+**① 测量结论（`gb_lightmapkey` 到底编码了什么）**
+- 目标：MRT7 `kGBufferSlotLightmapKey`（RGBA16_FLOAT）。唯一写入点 `Engine/Shader/Shaders/GBuffer/GBuffer.frag.slang:134`，
+  编码 = `float4(页内uv.xy, objectIndex, 0)`（`.z` 就是 objectIndex，来自 push constant）。
+- **全部解码点**：① `Tools/gi/lightmap_key_check.py:64/82-92`（唯一真正解析页号者，硬编码 `page < 1024`）；
+  ② `Engine/Shader/Shaders/Lighting/DeferredLighting.frag.slang:30` 只声明 `u_LightmapKey` 绑定、**从未采样**；
+  其余（`DecalPass`、`GBufferRenderer_CPU/GPU`、帧图）只是搬运附件，不解码。
+- **越界风险**：按普通段容量索引 `u_Objects[...]` 的着色器有 7 处，但索引全部来自 push constant / `SV_InstanceID`，
+  **没有一处来自 `gb_lightmapkey`** ⇒ 今天不存在显存越界路径。真正的风险点是离线检查工具 ①：任务 18 一旦出现
+  Nanite 页，它会直接 FAIL —— 最小修法（按段分类：`page<1024` 普通段 / `[1024,2048)` 取 Nanite 局部索引 / 其余 FAIL）
+  已写进注释，留给任务 18 与混排运行时校验一起做。
+
+**② 分区契约定稿**（`NaniteTypes.h`，含 `static_assert`）
+
+| 段 | 起止 | 容量 | 依据 |
+|---|---|---|---|
+| 普通段 | `[0, 1024)` | 1024 | `= kGPUMaxObjects = MAX_OBJECTS`，与 `GPUObjectData` 缓冲一致 |
+| Nanite 段 | `[1024, 2048)` | **1024**（任务 1 预置的 16384 已修正） | binary16 精确整数上限 2^11 = 2048 |
+| 哨兵 | `0xFFFFFFFF` | — | 超出两段、段判定 Invalid、binary16 为 NaN，三重不冲突 |
+
+**③ 一处契约修正（必须记住）**：Nanite 段容量 `16384 → 1024`。理由：`gb_lightmapkey` 是 RGBA16_FLOAT，
+页号 2049 会被量化成 2048，若不收窄则 Nanite 段 94% 的槽位无法作为合法页号。要突破 2048 必须换 MRT7 格式
+（RGBA32F 或拆通道），那属于 GBuffer 的任务。回退只需改这一个常量（单测按常量自适应）。
+
+**④ 验收证据（本人复跑）**
+- `Tests/TestNaniteTypes.cpp` 新建并登记进 `Tests/CMakeLists.txt`；单测 **237 → 246 例**（断言 5792 → 22289），全绿。
+  覆盖：段边界逐点（0/1023/1024/2047/2048/0xFFFFFFFF）、局部↔全局往返、哨兵不冲突、分配器容量与回收复用、
+  共享 POD 尺寸偏移、以及"Nanite 段索引不被普通段解码接受"的硬约束。
+- 关闭档 12 pass、指纹 `1C15AB72E688B530…` 不变；开启档 14 pass；两档 `gb_lightmapkey` 转储
+  **sha256 完全相同**（`E74ED2A042E54E089811B8C3DE524C588D01927D012DDC3FE6B1AAF007CA1C6B`），非抖动族 `must_same_diff=0`。
+- 启动日志新增一行中文分区说明；`vuid_lines=41`；全量六条判据 `ACCEPTANCE SWEEP: PASS`。
+
+**⑤ 未完成部分（明确留到任务 18）**：真正的"混排场景运行时校验"（Nanite 真的往 MRT7 写页号后逐位核对）
+与 `Tools/gi/lightmap_key_check.py` 的按段分类修改。本任务只保证契约、边界函数与分配器行为可测，
+以及既有解码路径逐位不变。
