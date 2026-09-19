@@ -73,9 +73,12 @@ void main(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID) {
 
     const float3 lo = min(min(a, b), c);
     const float3 hi = max(max(a, b), c);
-    const int3 vlo = clamp(int3(floor((lo - originVoxel.xyz) / originVoxel.w)) - 1,
+    // 精确带外扩 4 个体素（原来只外扩 1 个）：射线起点常在表面外 1 单位，若那一带是洪泛填的，
+    // 洪泛的高估会让射线一步跨过表面（实测 19 条穿漏）。把精确带加宽，表面附近若干体素都由
+    // scatter 的精确点-三角形距离写入，洪泛只负责更远处。
+    const int3 vlo = clamp(int3(floor((lo - originVoxel.xyz) / originVoxel.w)) - 4,
                            int3(0), int3(dims.xyz) - 1);
-    const int3 vhi = clamp(int3(ceil((hi - originVoxel.xyz) / originVoxel.w)) + 1,
+    const int3 vhi = clamp(int3(ceil((hi - originVoxel.xyz) / originVoxel.w)) + 4,
                            int3(0), int3(dims.xyz) - 1);
     const int3 span = vhi - vlo + 1;
     if (any(span <= 0)) return;
