@@ -45,6 +45,7 @@ add_executable(HugEngineTests
     TestPathPayload.cpp
     TestPTMaterialParams.cpp
     TestPTVolumeMath.cpp
+    TestNaniteTypes.cpp
 )
 
 target_include_directories(HugEngineTests PRIVATE

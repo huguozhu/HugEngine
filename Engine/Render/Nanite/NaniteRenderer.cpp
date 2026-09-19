@@ -65,6 +65,14 @@ bool NaniteRenderer::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) 
                  "任务 3 注册 Nanite_Cull + Nanite_Raster（计数→间接绘制链）",
                  m_Ready, m_Settings.enabled ? 1 : 0, m_Settings.fakeClusters,
                  m_Settings.rasterMode == NaniteRasterMode::Hybrid ? "混合光栅" : "软光栅");
+
+    // ── 任务 5：一次性启动日志 —— 打印 objectIndex 分区表与本次容量，便于人工核对 ──
+    // 只打一行、只在启动时打（不是每帧），因此关闭档的每帧开销与日志都与基线一致。
+    HE_CORE_INFO("NaniteRenderer: objectIndex 分区 = 普通段[{}, {}) 容量 {} | Nanite 段[{}, {}) 容量 {} | "
+                 "哨兵 {} | MRT7(gb_lightmapkey) 页号 float16 精确上限 {}",
+                 kNormalObjectIndexBegin, kNaniteObjectIndexBegin, kNormalObjectIndexCapacity,
+                 kNaniteObjectIndexBegin, kObjectIndexTotalCapacity, kNaniteObjectIndexCapacity,
+                 kInvalidObjectIndex, kLightmapKeyExactObjectIndexLimit);
     return m_Ready;
 }
 

@@ -16,6 +16,7 @@
 //   本类尤其不得反向依赖任何 GI/Lumen 类型：它是"数据放在哪"的答案，不是"GI 怎么算"。
 // ============================================================
 
+#include "Nanite/NaniteTypes.h"   // 实例槽分配器 + objectIndex 分区契约（RHI-free）
 #include "RHI/RHI.h"
 
 namespace he::render {
@@ -39,10 +40,31 @@ public:
 
     [[nodiscard]] bool IsReady() const { return m_Device != nullptr; }
 
+    // ── §14.8 任务 5：Nanite 段实例槽分配器 ──
+    // 【为什么在 NaniteScene】实例表的宿主在这里；"槽位"就是 Nanite 段的一个 objectIndex
+    //   （全局值 = kNaniteObjectIndexBegin + 本地下标，见 NaniteTypes.h 的分区表）。
+
+    /// 分配一个实例槽：返回**全局** objectIndex；容量耗尽返回 kInvalidObjectIndex。
+    /// 耗尽时打印**一次**中文告警（`m_SlotExhaustedWarned` 保证不刷屏）—— 不静默越界、不崩。
+    u32 AllocateInstanceSlot();
+
+    /// 回收一个实例槽：只接受 Nanite 段里当前确实被占用的索引（普通段/哨兵/重复回收返回 false）
+    bool FreeInstanceSlot(u32 objectIndex);
+
+    [[nodiscard]] u32 AllocatedInstanceSlotCount() const { return m_Slots.AllocatedCount(); }
+    [[nodiscard]] static constexpr u32 InstanceSlotCapacity() {
+        return NaniteInstanceSlotAllocator::kCapacity;
+    }
+
 private:
     rhi::IRHIDevice* m_Device = nullptr;
     u32 m_Width  = 0;
     u32 m_Height = 0;
+
+    /// Nanite 段的实例槽位图（RHI-free，逻辑全部在 NaniteTypes.h，便于单测）
+    NaniteInstanceSlotAllocator m_Slots;
+    /// 耗尽告警只打一次（与"每个实例一行日志"相比，避免每帧刷屏）
+    bool m_SlotExhaustedWarned = false;
 };
 
 } // namespace he::render
