@@ -41,10 +41,10 @@ struct LumenSDFConfig {
     u32 probeStride    = 0;      // 自检采样步长（0 = 自动取 resolution/4）
     u32 globalResolution = 128;  // Global SDF 单层分辨率（clipmap 分层留待后续步骤）
     u32 globalLayers     = 2;    // clipmap 层数（1 = 旧行为：单层覆盖全场；2 = 近层 + 远层）
-    float nearFraction   = 0.25f;// 近层边长 = 场景最长轴 × 该比例（近层体素 ≈ 远层 / 比例）
+    float nearFraction   = 0.50f;// 近层边长 = 场景最长轴 × 该比例（近层体素 ≈ 远层 / 比例）
     // ── sphere tracing 验证（步骤 11）──
     u32   marchRays     = 256;   // 验证用射线数
-    u32   marchMaxSteps = 192;   // 最大步数（设计写 64；下界质量不足时步数会更费，见 §5）
+    u32   marchMaxSteps = 384;   // 最大步数（设计写 64；下界质量不足时步数会更费，见 §5）
     float marchMaxDist  = 400.0f;// 最大追踪距离（世界单位）
 };
 

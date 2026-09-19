@@ -1519,6 +1519,11 @@ void LumenSDF::RunMarchCheck() {
                      bothHit ? 100.0 * (double)within / bothHit : 0.0);
     }
     if (!errVoxAll.empty()) {
+        // 分组中位数必须**先排序**：此前 errNear/errFar 未排序就取中间元素，打出的"近(d0<5) p50"是假数
+        std::sort(errNear.begin(), errNear.end());
+        std::sort(errFar.begin(), errFar.end());
+        std::sort(errNearHit.begin(), errNearHit.end());
+        std::sort(errFarHit.begin(), errFarHit.end());
         std::sort(errVoxAll.begin(), errVoxAll.end());
         const float p50 = errVoxAll[errVoxAll.size() / 2];
         const float p90 = errVoxAll[(size_t)(errVoxAll.size() * 9 / 10)];
