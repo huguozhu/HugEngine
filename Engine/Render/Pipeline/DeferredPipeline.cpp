@@ -239,23 +239,34 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
         if (m_RTPass->Initialize(device, {}, {})) {   // AS-only 模式：只构建 BLAS/TLAS + 场景资源
             HE_CORE_INFO("DeferredPipeline: RTPass 初始化完成 (AS-only)");
 
+            // 【步骤 36 的验收开关】`HE_RT_FULLRES=1` 把四种效果切到**全分辨率**产出：
+            // 它不是画质选项（全分辨率 RT 的代价高得多），而是"重建升采样"这一步的**参照物** ——
+            // 有了它就能在同一次对照里摆三档：全分辨率（参照）/ 半分辨率旧行为（直接采样）/
+            // 半分辨率 + 重建升采样（本步）。升采样级见主输出等于消费端分辨率时会自动关闭。
+            const bool rtFullRes = []() {
+                const char* v = std::getenv("HE_RT_FULLRES");
+                return v && std::string(v) == "1";
+            }();
+            const bool rtHalfRes = !rtFullRes;
+            if (rtFullRes) HE_CORE_INFO("DeferredPipeline: RT 效果切到全分辨率产出（步骤 36 的参照档）");
+
             m_RTShadow = std::make_unique<RTShadowPass>();
-            if (!m_RTShadow->Initialize(device, m_Width, m_Height, true)) {
+            if (!m_RTShadow->Initialize(device, m_Width, m_Height, rtHalfRes)) {
                 HE_CORE_WARN("DeferredPipeline: RTShadowPass 初始化失败，RT 阴影禁用");
                 m_RTShadow.reset();
             }
             m_RTAO = std::make_unique<RTAOPass>();
-            if (!m_RTAO->Initialize(device, m_Width, m_Height, true)) {
+            if (!m_RTAO->Initialize(device, m_Width, m_Height, rtHalfRes)) {
                 HE_CORE_WARN("DeferredPipeline: RTAOPass 初始化失败，RT AO 禁用");
                 m_RTAO.reset();
             }
             m_RTReflection = std::make_unique<RTReflectionPass>();
-            if (!m_RTReflection->Initialize(device, m_Width, m_Height, true)) {
+            if (!m_RTReflection->Initialize(device, m_Width, m_Height, rtHalfRes)) {
                 HE_CORE_WARN("DeferredPipeline: RTReflectionPass 初始化失败，RT 反射禁用");
                 m_RTReflection.reset();
             }
             m_RTGI = std::make_unique<RTGIPass>();
-            if (!m_RTGI->Initialize(device, m_Width, m_Height, true)) {
+            if (!m_RTGI->Initialize(device, m_Width, m_Height, rtHalfRes)) {
                 HE_CORE_WARN("DeferredPipeline: RTGIPass 初始化失败，RT GI 禁用");
                 m_RTGI.reset();
             }
@@ -334,6 +345,25 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
                     HE_CORE_WARN("DeferredPipeline: RTGISpatial 初始化失败");
                 }
             }
+
+            // ── 步骤 36：四种效果的链尾升采样级（全分辨率输出）──
+            // 【为什么默认开、且用环境变量而不是 cfg】升采样是"链的出口形状"，不是画质档位：
+            // 亚分辨率产出本来就该重建到消费端分辨率。留一个开关只是为了让"开/关"能在**同一构建内**
+            // 背靠背对照（否则改一次要重编一次，"差异"里混进了构建差异）。置 0 = 回到旧行为
+            // （链尾停在亚分辨率，由合成端的双线性采样顺带放大）。
+            {
+                const char* v = std::getenv("HE_RT_UPSCALE");
+                const bool want = !(v && std::string(v) == "0");
+                if (want) {
+                    m_ShadowUpscale.Initialize(device, m_Width, m_Height);
+                    m_AOUpscale.Initialize(device, m_Width, m_Height);
+                    m_ReflectionUpscale.Initialize(device, m_Width, m_Height);
+                    m_GIUpscale.Initialize(device, m_Width, m_Height);
+                    HE_CORE_INFO("DeferredPipeline: RT 亚分辨率信号的重建升采样已启用（步骤 36）");
+                } else {
+                    HE_CORE_INFO("DeferredPipeline: RT 升采样被 HE_RT_UPSCALE=0 关闭（旧行为：亚分辨率直接采样）");
+                }
+            }
         } else {
             m_RTEnabled = false;
             m_RTPass.reset();
@@ -349,14 +379,18 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
             p->SetAS(m_RTPass.get());
             switch (eff) {
             case RTEffectProvider::Effect::Shadow:
-                p->SetShadowPass(m_RTShadow.get(), m_ShadowDenoiser.get()); break;
+                p->SetShadowPass(m_RTShadow.get(), m_ShadowDenoiser.get(),
+                                 m_ShadowUpscale.IsReady() ? &m_ShadowUpscale : nullptr); break;
             case RTEffectProvider::Effect::AO:
-                p->SetAOPass(m_RTAO.get(), m_AODenoiser.get()); break;
+                p->SetAOPass(m_RTAO.get(), m_AODenoiser.get(),
+                             m_AOUpscale.IsReady() ? &m_AOUpscale : nullptr); break;
             case RTEffectProvider::Effect::Reflection:
                 p->SetReflectionPass(m_RTReflection.get(), m_ReflectionDenoiser.get(),
-                                     &m_ReflectionSpatial); break;
+                                     &m_ReflectionSpatial,
+                                     m_ReflectionUpscale.IsReady() ? &m_ReflectionUpscale : nullptr); break;
             default:
-                p->SetGIPass(m_RTGI.get(), m_GIDenoiser.get(), &m_GISpatial);
+                p->SetGIPass(m_RTGI.get(), m_GIDenoiser.get(), &m_GISpatial,
+                             m_GIUpscale.IsReady() ? &m_GIUpscale : nullptr);
                 p->SetDDGIFallback(m_DDGI.GetProbeBuffer(), m_DDGI.GetGridUniform());
                 break;
             }
@@ -627,6 +661,11 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
     m_DDGI.OnResize(w, h);
     m_DenoiseSSGI.OnResize(w, h);
     m_DenoiseSSR.OnResize(w, h);
+    // 步骤 36：四种光追效果的升采样目标随视口重建（内容与旧尺寸无关）
+    if (m_ShadowUpscale.IsReady())     m_ShadowUpscale.OnResize(w, h);
+    if (m_AOUpscale.IsReady())         m_AOUpscale.OnResize(w, h);
+    if (m_ReflectionUpscale.IsReady()) m_ReflectionUpscale.OnResize(w, h);
+    if (m_GIUpscale.IsReady())         m_GIUpscale.OnResize(w, h);
     // GI Provider 生命周期遍历（§12 架构前置）：放在底层 pass 之后，让自持资源的 Provider
     // （如 Lumen）按新尺寸重建；Provider 不再需要各自「等下次 OnResize」的隐式约定。
     for (auto& prov : m_GIProviders) {

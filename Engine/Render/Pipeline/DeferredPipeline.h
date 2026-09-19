@@ -259,6 +259,13 @@ private:
     // ── 统一降噪框架（§10 的 11.3，步骤 34）──
     DenoiseHistoryPool     m_DenoiseHistoryPool;   // 统一的历史纹理分配
     DenoiseSignalRegistry  m_DenoiseSignals;       // 当帧信号登记处（多信号共存的唯一视角）
+    // 【步骤 36】四种光追效果的**链尾重建升采样**级：它们的产出是亚分辨率的
+    //（RT 阴影/RTAO/RT 反射 = 1/2、RTGI = 1/4），此前由合成端的双线性采样顺带放大。
+    // 与 SSGI/SSR 的升采样共用同一份实现（`PostProcess/DenoiseUpscale`）。
+    DenoiseUpscale m_ShadowUpscale;
+    DenoiseUpscale m_AOUpscale;
+    DenoiseUpscale m_ReflectionUpscale;
+    DenoiseUpscale m_GIUpscale;
     Denoiser m_ReflectionSpatial;
     Denoiser m_GISpatial;
     bool m_RTEnabled = false;   // 设备支持光追且 RTPass 初始化成功
