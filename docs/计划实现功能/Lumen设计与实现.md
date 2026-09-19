@@ -1445,7 +1445,8 @@ python Tools\pt\analyze_pt.py --compare <pt_tag> <deferred_tag> --target hdr
 | 10.5 Global SDF clipmap 分层 | 🟡 已实现两层、安全 PASS，但**未解决紧度** | `globalLayers=2`（近层 6.16 体素 / 788 单位，远层 24.64 / 3154），march 同时采样两层取最小。两层安全判据均 PASS（未高估），但下界质量仍差（近层 0.0% 在 2 体素内、平均低估 454.6）⇒ 根因钉死为"**AABB 外取到 AABB 的距离**"这一注入语义；下一步换成 scatter（只在 AABB 内注入）+ 洪泛补全（`SDF_MeshFlood` 可复用） |
 | 12 SDF 帧图接入与调试 | ✅ 已完成（含 L1 退出判据的可视化） | 帧图有独立的 `Lumen_SDF_Build` compute pass（不声明资源依赖、自管 barrier；`writes` 为空故不被 `CullDeadPasses` 裁掉），SDF 构建与渲染解耦；"关掉 Lumen 无任何影响"已实证：Lumen off 时 `lumen_passes=0`、既有源 dump 与接入前**字节级一致**。可视化已落地：`SDF_DebugView.comp.slang` 逐像素主射线 sphere tracing → 稳定命名转储 `lumen_sdf_trace`（1920×1080 RGBA16F）+ 原子计数统计。**它随即暴露了一个自检看不到的真问题**（见 §附三：全局场在空旷处把距离塌缩到 ≈0） |
 | 13 Card 生成器 + 覆盖率可视化 | ✅ 已完成（CPU 版，GPU atlas 见 14+） | `LumenSDF::BuildCards()`：逐 mesh × 6 轴向投影成卡片；texel 世界边长按 `cardTexelWorld=4.0` **逐 mesh 自适应**（分辨率 64~512²，实测 texel 0.56~7.41）；按面积加权采样 418,329 个表面点做覆盖判定；保留阈值 → 卡片数 → 覆盖率给出**单调曲线**（5%⇒410 张/89.7%，10%⇒330/86.8%，**25%⇒228/79.1%**，50%⇒66/54.2%）；覆盖率可视化（RGBA8，代表 mesh 的 6 个投影面 + 逐 mesh 覆盖条）以稳定名 `lumen_card_coverage` 转储。**验收**：空洞与卡片设置一一对应（见曲线），残余空洞集中在个别**薄结构** mesh（#12/#43/#44，投影填充率天然很低），已点名 |
-| 14–41 | ⬜ 未开始 | 下一步：步骤 14「页表 + 页状态机」消费本步的卡片清单（六态 + 非法迁移断言），随后 15~19 做捕获与反馈 |
+| 14 页表 + 页状态机 | ✅ 已完成 | `Lumen/SurfaceCache.slang`（C++/Slang **共享布局**）+ `Lumen/SurfaceCacheTypes.{h,cpp}`（六态 + 迁移真值表 + 页状态机 + 布局 static_assert）+ `Tests/TestSurfaceCache.cpp`（5 例 / 73 断言：真值表、完整生命周期、非法迁移被拒绝且不改状态、校验和对字段敏感）+ `LumenScene_SurfaceCache.cpp`（用步骤 13 的 228 张卡片建 64 页演示表：Allocating 9 / Capturing 5 / Captured 41 / Dirty 9，六态齐全；GPU 镜像缓冲 + `SurfaceCache_PageCheck.comp.slang` 校验和比对 **PASS** 0x545eb5ad）。**验收**：非法迁移 `HE_ASSERT` + 单测覆盖；GPU/C++ 镜像一致（校验和相同） |
+| 15–41 | ⬜ 未开始 | 下一步：步骤 15 起做页面**捕获**（按页状态门控）、反馈与分配/淘汰策略，随后 20–25 Screen Probe |
 
 ### 阶段 A：框架前置（不产出画面，但后补等于重构）
 
@@ -2480,3 +2481,39 @@ mesh 场的最大误差从 **201.18 → 1.33 世界单位**（该 mesh 体素 21
 
 **下一轮**：步骤 14「页表 + 页状态机」——落 `SurfaceCachePageEntry` 的六态与非法迁移断言，
 把本步的卡片清单映射成页（GPU 侧 + C++ 侧镜像一致）。
+## 附二十：L2 步骤 14「页表 + 页状态机」（含两处平台坑）
+
+**落地的四件事**：
+
+1. **共享布局**：`Engine/Shader/Shaders/Lumen/SurfaceCache.slang` —— 六态常量 + `SurfaceCachePageEntry`(32 B)
+   + `SurfaceCacheRequest`(16 B)，用与 `ShaderTypes.slang` 相同的手法让 **C++ 与 Slang 编译同一份定义**；
+   C++ 侧再加 `static_assert`（大小 + 6 个字段偏移）把布局钉死。
+2. **页状态机**：`SurfaceCacheTypes.{h,cpp}` —— 迁移真值表 `IsLegalPageTransition`（Invalid→Requested→
+   Allocating→Capturing→Captured→Dirty，且**任何态→Invalid** 都是合法兜底）+ `SurfaceCachePageTable`
+   （Request/Allocate/BeginCapture/EndCapture/MarkDirty/Evict/Touch/Count/Checksum）。非法迁移走
+   `HE_CORE_ERROR` + `HE_ASSERT`，Release 下**拒绝且不改状态**（表永远不会进非法态）。
+3. **单测**：`Tests/TestSurfaceCache.cpp`（5 例 / 73 断言）覆盖真值表（每条合法边 + 若干非法边）、
+   完整生命周期（含"捕获失败→Invalid"与幂等 Evict）、非法迁移被拒后状态不变、以及
+   **校验和对任一字段敏感**（改帧号/卡片号/页数都会变）。测试总数 211 → **216**，断言 5605 → **5678**。
+4. **GPU 侧镜像与一致性校验**：`LumenScene_SurfaceCache.cpp` 用步骤 13 的 **228 张卡片**建 64 页演示表
+   （六态齐全：Allocating 9 / Capturing 5 / Captured 41 / Dirty 9），上传为 `StructuredBuffer`，
+   再用 `SurfaceCache_PageCheck.comp.slang` 按**与 C++ 逐字一致**的 32 位 FNV-1a 算校验和回读比对：
+
+```
+LumenScene 页表（步骤 14）: 卡片 228 张 ⇒ 页 64 个（1 张卡 = 1 页，演示前 64 页）；
+    Invalid 0 / Requested 0 / Allocating 9 / Capturing 5 / Captured 41 / Dirty 9
+LumenScene 页表镜像校验（步骤 14）: GPU 与 C++ 侧校验和一致 = 0x545eb5ad（64 页，32 位 FNV-1a）
+```
+
+**两处平台坑（都已记录在代码注释里）**：
+
+1. **Slang 没有 `ulong`**（报 E30015: undefined identifier）→ 要写 `uint64_t`；但 64 位整数需要
+   SPIR-V 的 `Int64` 能力，而它要求 `VkPhysicalDeviceFeatures::shaderInt64` —— 本引擎没开：
+   实测拿到 `SPIR-V Capability Int64 was declared, but ... shaderInt64` 告警、管线无效、**回读恒 0**。
+   改用 **32 位 FNV-1a**（字段位置也参与混合）后一次通过。
+2. **描述符集必须在 `Initialize` 时分配**：帧中途 `AllocateDescriptorSet` 拿到的集合**写不进**
+   （回读一直停在创建时 CPU 写的标记 0xdeadbeef）。把它挪到 `LumenScene::Initialize` 后，
+   同一段 dispatch 代码立刻给出正确校验和 —— 这条与"资源创建延迟到帧边界"是同一类问题，
+   凡"新建资源 + 当帧使用"的路径都应按这个节拍写（等待 3 帧再 dispatch、再 3 帧读回）。
+
+**下一轮**：步骤 15 起做**页面捕获**（按页状态门控 GPU 写入）、反馈与分配/淘汰策略；随后 20–25 Screen Probe。

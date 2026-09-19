@@ -97,6 +97,11 @@ public:
         if (m_Scene && m_Batcher) m_Scene->StepSDF(cmd, *m_Batcher, cam.position);
     }
 
+    /// 步骤 14：页表推进（含 GPU 镜像一致性校验），与 SDF 同一个 compute pass
+    void StepSurfaceCache(rhi::IRHICommandList* cmd) {
+        if (m_Scene) m_Scene->StepSurfaceCache(cmd);
+    }
+
     /// 步骤 12：逐像素 SDF 追踪可视化（同一 compute pass 内、SDF 构建之后）。
     /// 相机基向量由这里从 `CameraData` 推出，与 `CameraData::GetViewMatrix()` 用同一套约定
     /// （s = normalize(cross(f, up))、u = cross(s, f)），避免"调试视图左右镜像"这类静默错误。

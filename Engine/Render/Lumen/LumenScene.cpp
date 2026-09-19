@@ -16,6 +16,7 @@ bool LumenScene::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Width  = width;
     m_Height = height;
     CreateSkeletonPipeline();
+    CreatePageCheckGPUObjects();   // 步骤 14：描述符集/PSO 提前建好（帧中途分配实测拿不到有效集合）
     CreateOutput();
     m_SDF.Initialize(device);   // 步骤 8：逐 mesh 距离场（构建由 StepSDF 逐帧推进）
     m_SDF.SetViewport(width, height);   // 步骤 12：调试视图按视口分辨率逐像素发射主射线

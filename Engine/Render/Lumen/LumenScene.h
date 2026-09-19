@@ -24,6 +24,7 @@
 
 #include "RHI/RHI.h"
 #include "Lumen/LumenSDF.h"
+#include "Lumen/SurfaceCacheTypes.h"
 
 #include <memory>
 
@@ -69,10 +70,20 @@ public:
         m_SDF.RunDebugView(cmd, camPos, forward, right, up, tanHalfFov, aspect);
     }
 
+    // ── L2 Surface Cache（步骤 14）：页表 + 页状态机 ──
+    /// 用步骤 13 的卡片清单建页表（每张卡一页），并把页表镜像到 GPU 缓冲
+    void BuildPageTable();
+    /// 每帧推进：一次 GPU 一致性校验（读回镜像的校验和，与 CPU 侧比对）
+    void StepSurfaceCache(rhi::IRHICommandList* cmd);
+    [[nodiscard]] const SurfaceCachePageTable& GetPageTable() const { return m_PageTable; }
+    [[nodiscard]] bool  IsPageTableCheckDone() const { return m_PageCheckDone; }
+    [[nodiscard]] bool  IsPageTableCheckPassed() const { return m_PageCheckPassed; }
+
 private:
     void CreateOutput();
     void CreateSkeletonPipeline();
     void DestroySkeletonPipeline();
+    void CreatePageCheckGPUObjects();
 
     rhi::IRHIDevice* m_Device = nullptr;
     u32 m_Width  = 0;
@@ -83,6 +94,19 @@ private:
     std::unique_ptr<rhi::IRHIPipelineState> m_SkeletonPSO;
     // 逐 mesh 距离场（步骤 8）
     LumenSDF m_SDF;
+    // ── Surface Cache 页表（步骤 14）──
+    SurfaceCachePageTable m_PageTable;
+    bool m_PageTableBuilt = false;
+    std::unique_ptr<rhi::IRHIBuffer>  m_PageTableBuf;    // GPU 侧镜像（StructuredBuffer）
+    std::unique_ptr<rhi::IRHIBuffer>  m_PageCheckOut;    // GPU 校验和（CPU 可读）
+    void* m_PageCheckOutMapped = nullptr;                // 持久映射（与 SDF 探针缓冲同做法）
+    rhi::DescriptorSetLayoutHandle    m_PageCheckLayout = 0;
+    rhi::DescriptorSetHandle          m_PageCheckSet    = 0;
+    std::unique_ptr<rhi::IRHIPipelineState> m_PageCheckPSO;
+    bool m_PageCheckBound = false;
+    u32  m_PageCheckFrame = 0;
+    bool m_PageCheckDone = false;
+    bool m_PageCheckPassed = false;
 };
 
 } // namespace he::render
