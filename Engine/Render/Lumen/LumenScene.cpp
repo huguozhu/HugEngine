@@ -20,6 +20,16 @@ bool LumenScene::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     // 确定性验收模式（见 RunProbeIrradiance 末尾的说明）：默认关，只在需要"背靠背逐位一致"时开
     m_Deterministic = (std::getenv("HE_LUMEN_DETERMINISTIC") != nullptr);
     if (m_Deterministic) HE_CORE_INFO("LumenScene: 确定性模式已开启（每帧末等待 GPU）");
+    // 步骤 27 的 A/B 开关：远场阈值与重叠带半宽（比例）。用环境变量而不是 cfg 键，是为了让
+    // "沿阈值扫一遍看有没有阶跃"的对照实验不必改配置文件（HE_LUMEN_FARFIELD_OVERLAP=0 即硬切换）。
+    if (const char* ov = std::getenv("HE_LUMEN_FARFIELD_OVERLAP")) {
+        m_FarFieldOverlap = std::max(0.0f, (float)std::atof(ov));
+        HE_CORE_INFO("LumenScene: 远场重叠带半宽 = {:.3f}（0 = 硬切换）", (double)m_FarFieldOverlap);
+    }
+    if (const char* th = std::getenv("HE_LUMEN_FARFIELD_THRESHOLD")) {
+        m_FarFieldThreshold = std::max(1.0f, (float)std::atof(th));
+        HE_CORE_INFO("LumenScene: 远场阈值 = {:.1f} 世界单位", (double)m_FarFieldThreshold);
+    }
     CreateSkeletonPipeline();
     CreatePageCheckGPUObjects();   // 步骤 14：描述符集/PSO 提前建好（帧中途分配实测拿不到有效集合）
     CreateOutput();

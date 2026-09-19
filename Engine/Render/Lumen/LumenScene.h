@@ -136,6 +136,16 @@ public:
     [[nodiscard]] float GetFarFieldFarAgree20() const { return m_FarFieldFar20; }
     [[nodiscard]] float GetFarFieldNearMeanRel() const { return m_FarFieldNearMeanRel; }
     [[nodiscard]] float GetFarFieldFarMeanRel() const { return m_FarFieldFarMeanRel; }
+    [[nodiscard]] float GetFarFieldOverlap() const { return m_FarFieldOverlap; }
+    void SetFarFieldOverlap(float v) { m_FarFieldOverlap = v; }
+    [[nodiscard]] u32 GetFadeSdfOnly() const { return m_FadeSdfOnly; }
+    [[nodiscard]] u32 GetFadeRtOnly() const { return m_FadeRtOnly; }
+    [[nodiscard]] u32 GetFadeBlend() const { return m_FadeBlend; }
+    [[nodiscard]] u32 GetFadeBlendedRays() const { return m_FadeBlendedRays; }
+    [[nodiscard]] u32 GetFadeBandRays() const { return m_FadeBandRays; }
+    [[nodiscard]] u32 GetFadeNoAltRays() const { return m_FadeNoAltRays; }
+    [[nodiscard]] const std::vector<u32>& GetDistBinCount() const { return m_DistBinCount; }
+    [[nodiscard]] const std::vector<u32>& GetDistBinLum() const { return m_DistBinLum; }
     [[nodiscard]] u32 GetShadedMissingPages() const { return m_ShadedMissingPages; }
     [[nodiscard]] float GetShadedAlbedoMeanDiff() const { return m_ShadedAlbedoMeanDiff; }
     [[nodiscard]] u32 GetShadedAlbedoSamples() const { return m_ShadedAlbedoSamples; }
@@ -333,10 +343,23 @@ private:
     rhi::DescriptorSetLayoutHandle m_FarMergeLayout = 0;
     rhi::DescriptorSetHandle       m_FarMergeSet    = 0;
     std::unique_ptr<rhi::IRHIPipelineState> m_FarMergePSO;
+    std::unique_ptr<rhi::IRHIBuffer> m_RayFadeBuf;      // 步骤 27：每光线的副命中点 + 混合权重
+    void* m_RayFadeMapped = nullptr;                    // 诊断：CPU 侧读 fade 缓冲
+    std::unique_ptr<rhi::IRHIBuffer> m_FarMergeStatsBuf, m_DistBinBuf;
+    void* m_FarMergeStatsMapped = nullptr;
+    void* m_DistBinMapped = nullptr;
     std::unique_ptr<rhi::IRHIBuffer> m_FarCmpStatsBuf, m_FarCmpHistBuf;
     void* m_FarCmpStatsMapped = nullptr;
     void* m_FarCmpHistMapped  = nullptr;
-    float m_FarFieldThreshold = 50.0f;    // 计划的远场阈值；步骤 26 只用于统计分组
+    float m_FarFieldThreshold = 50.0f;    // 远场阈值（重叠带的中心）
+    float m_FarFieldOverlap   = 0.2f;     // 步骤 27：重叠带半宽（占阈值比例）；0 = 退化成硬切换
+    u32   m_FadeSdfOnly = 0, m_FadeRtOnly = 0, m_FadeBlend = 0, m_FadeBlendedRays = 0;
+    u32   m_FadeBandRays = 0, m_FadeNoAltRays = 0, m_FadePositiveW = 0;
+    float m_FadeMaxW = 0.0f;
+    u32   m_FadeAltNoCard = 0, m_FadeAltNoPage = 0;
+    u32   m_FadeCpuPositive = 0;
+    float m_FadeCpuMaxW = -2.0f;
+    std::vector<u32> m_DistBinCount, m_DistBinLum;
     float m_FarFieldNearBand  = 50.0f;    // 近带/远带分界（近带里 SDF 是准的 ⇒ 可作 HW RT 的对照）
     float m_FarFieldNear20 = 0.0f, m_FarFieldFar20 = 0.0f;
     u32   m_FarFieldSelfHits = 0;      // SDF 命中里 t < 1 的条数（自交诊断）

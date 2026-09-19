@@ -477,6 +477,9 @@ void LumenScene::CreateShadeGPUObjects() {
         {7, rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},   // 统计
         {8, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // GBuffer 世界坐标（对照判定）
         {9, rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},   // 最优候选（归因实验）
+        {10, rhi::DescriptorType::StorageBuffer,       1, rhi::kStageMaskCompute},   // 步骤 27：副命中点 + 权重
+        {11, rhi::DescriptorType::StorageBuffer,       1, rhi::kStageMaskCompute},   // 步骤 27：距离分桶统计
+        {12, rhi::DescriptorType::StorageBuffer,       1, rhi::kStageMaskCompute},   // 合并后的光线结果（距离）
     };
     m_ShadeLayout = m_Device->CreateDescriptorSetLayout(layout);
     m_ShadeSet    = m_Device->AllocateDescriptorSet(m_ShadeLayout);
@@ -531,9 +534,23 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
         m_ShadeOutBestBuf = m_Device->CreateBuffer(ob);
 
         // 统计槽：0=页命中 1=不在任何卡内 2=卡在但页无内容 3=总计 4=越界夹取（其余保留）
-        rhi::BufferDesc sb; sb.size = sizeof(u32) * 8u; sb.usage = rhi::BufferUsage::Storage; sb.cpuAccess = true;
+        // 统计槽：0..6 见 shader；7/8/9 = 重叠带内 / 真正混合 / 副点无材质
+        rhi::BufferDesc sb; sb.size = sizeof(u32) * 20u; sb.usage = rhi::BufferUsage::Storage; sb.cpuAccess = true;
         m_ShadeStatsBuf = m_Device->CreateBuffer(sb);
         m_ShadeStatsMapped = m_ShadeStatsBuf->Map();
+
+        // 步骤 27：副命中点缓冲（远场合并写、着色读）在这里一并建好，避免"描述符声明了但还没绑"
+        // 的窗口期（第一帧远场 pass 还没跑时着色已经在派发）。距离分桶同理。
+        rhi::BufferDesc fb;
+        fb.size  = (usize)kMaxScreenProbes * 16u * 2u * sizeof(float4);   // 每光线两个 float4
+        fb.usage = rhi::BufferUsage::Storage;
+        m_RayFadeBuf = m_Device->CreateBuffer(fb);
+        rhi::BufferDesc dbb;
+        dbb.size = sizeof(u32) * 32u; dbb.usage = rhi::BufferUsage::Storage; dbb.cpuAccess = true;
+        m_DistBinBuf = m_Device->CreateBuffer(dbb);
+        m_DistBinMapped = m_DistBinBuf->Map();
+        m_DistBinCount.assign(16u, 0u);
+        m_DistBinLum.assign(16u, 0u);
 
         m_Device->UpdateDescriptorSet(m_ShadeSet, 0, rhi::DescriptorType::CombinedImageSampler,
                                       m_AtlasAlbedo.get(), m_SDF.GetLinearSampler());
@@ -544,6 +561,8 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
         m_Device->UpdateDescriptorSet(m_ShadeSet, 6, rhi::DescriptorType::StorageBuffer, m_ShadeOutGbBuf.get());
         m_Device->UpdateDescriptorSet(m_ShadeSet, 7, rhi::DescriptorType::StorageBuffer, m_ShadeStatsBuf.get());
         m_Device->UpdateDescriptorSet(m_ShadeSet, 9, rhi::DescriptorType::StorageBuffer, m_ShadeOutBestBuf.get());
+        m_Device->UpdateDescriptorSet(m_ShadeSet, 10, rhi::DescriptorType::StorageBuffer, m_RayFadeBuf.get());
+        m_Device->UpdateDescriptorSet(m_ShadeSet, 11, rhi::DescriptorType::StorageBuffer, m_DistBinBuf.get());
         m_ShadeBound = true;
         return;
     }
@@ -551,12 +570,20 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
                                   gbAlbedo, m_SDF.GetLinearSampler());
     m_Device->UpdateDescriptorSet(m_ShadeSet, 8, rhi::DescriptorType::CombinedImageSampler,
                                   gbWorldPos, m_SDF.GetLinearSampler());
+    // 步骤 27：副命中点（由远场合并 pass 写）与距离分桶统计。fade 缓冲要到第一次远场合并
+    // 才创建 ⇒ 这里按需绑定（绑 nullptr 会崩，这是本轮踩过三次的坑）。
+    if (m_RayFadeBuf)
+        m_Device->UpdateDescriptorSet(m_ShadeSet, 10, rhi::DescriptorType::StorageBuffer, m_RayFadeBuf.get());
+    if (m_DistBinBuf)
+        m_Device->UpdateDescriptorSet(m_ShadeSet, 11, rhi::DescriptorType::StorageBuffer, m_DistBinBuf.get());
+    if (m_RayResultBuf)
+        m_Device->UpdateDescriptorSet(m_ShadeSet, 12, rhi::DescriptorType::StorageBuffer, m_RayResultBuf.get());
 
     const u32 total = m_ProbeCount * m_TraceConfig.traceRep;
 
     // ① 先读上一帧的统计与对照（同"先读后清"）
     if (m_ShadeFrame >= 2 && m_ShadeStatsMapped) {
-        u32 st[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        u32 st[20] = {0};
         std::memcpy(st, m_ShadeStatsMapped, sizeof(st));
         m_ShadedHits          = st[0];
         m_ShadedNoCard        = st[1];
@@ -596,6 +623,13 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
             m_ShadeOutBuf->Unmap();
         }
         const u32 totalSamples = samples + samplesMulti;
+        m_FadeBlendedRays = st[8];       // 步骤 27：真正发生了材质混合的射线数
+        m_FadeBandRays    = st[7];       // 落在重叠带内的射线数
+        m_FadeNoAltRays   = st[9];       // 副点没有材质的射线数
+        m_FadeMaxW        = (float)((double)st[10] / 65536.0);   // 诊断：读到的最大权重
+        m_FadePositiveW   = st[11];                              // 诊断：w > 0 的条数
+        m_FadeAltNoCard   = st[12];                              // 诊断：副点不在任何卡内
+        m_FadeAltNoPage   = st[13];                              // 诊断：副点在卡内但页无内容
         m_ShadedAlbedoSamples = totalSamples;
         m_ShadedAlbedoMeanDiff = samples ? (float)(sumDiff / samples) : 0.0f;
         m_ShadedAlbedoMeanDiffMulti = samplesMulti ? (float)(sumDiffMulti / samplesMulti) : 0.0f;
@@ -628,7 +662,7 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
     }
 
     // ② 清零统计并派发
-    if (m_ShadeStatsMapped) { u32 zero[8] = {0, 0, 0, 0, 0, 0, 0, 0}; std::memcpy(m_ShadeStatsMapped, zero, sizeof(zero)); }
+    if (m_ShadeStatsMapped) { u32 zero[20] = {0}; std::memcpy(m_ShadeStatsMapped, zero, sizeof(zero)); }
     struct {
         u32 x, y, z, w;
         float4 vp0, vp1, vp2, vp3;

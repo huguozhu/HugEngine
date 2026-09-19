@@ -243,6 +243,11 @@ void LumenScene::CreateFarFieldCompareGPUObjects() {
     rhi::BufferDesc sb;
     sb.size = sizeof(u32) * 24u; sb.usage = rhi::BufferUsage::Storage; sb.cpuAccess = true;
     m_FarCmpStatsBuf = m_Device->CreateBuffer(sb);
+    rhi::BufferDesc msb;
+    msb.size = sizeof(u32) * 8u; msb.usage = rhi::BufferUsage::Storage; msb.cpuAccess = true;
+    m_FarMergeStatsBuf = m_Device->CreateBuffer(msb);
+    m_FarMergeStatsMapped = m_FarMergeStatsBuf->Map();
+    // 距离分桶缓冲在 CreateShadeGPUObjects 里已建（着色 pass 的绑定 11）
     m_FarCmpStatsMapped = m_FarCmpStatsBuf->Map();
     rhi::BufferDesc hb;
     hb.size = sizeof(u32) * 16u; hb.usage = rhi::BufferUsage::Storage; hb.cpuAccess = true;
@@ -261,6 +266,8 @@ void LumenScene::CreateFarFieldCompareGPUObjects() {
         {0, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},   // SDF 结果（就地改写）
         {1, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},   // 光追结果
         {2, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},   // 命中点
+        {3, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},   // 步骤 27：副命中点 + 混合权重
+        {4, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},   // 合并分类统计
     };
     m_FarMergeLayout = m_Device->CreateDescriptorSetLayout(ml);
     m_FarMergeSet    = m_Device->AllocateDescriptorSet(m_FarMergeLayout);
@@ -279,11 +286,19 @@ void LumenScene::CreateFarFieldCompareGPUObjects() {
     m_FarMergePSO = m_Device->CreatePipelineState(mpso);
     m_Device->UpdateDescriptorSet(m_FarMergeSet, 0, rhi::DescriptorType::StorageBuffer, m_RayResultBuf.get());
     m_Device->UpdateDescriptorSet(m_FarMergeSet, 2, rhi::DescriptorType::StorageBuffer, m_RayHitPosBuf.get());
+    m_Device->UpdateDescriptorSet(m_FarMergeSet, 4, rhi::DescriptorType::StorageBuffer, m_FarMergeStatsBuf.get());
+    if (m_RayFadeBuf)   // 在着色 pass 的资源创建里已经建好（见 CreateShadeGPUObjects）
+        m_Device->UpdateDescriptorSet(m_FarMergeSet, 3, rhi::DescriptorType::StorageBuffer, m_RayFadeBuf.get());
     // 绑定 1（光追结果）此时还不存在（它由第一次 Trace 创建）⇒ 在派发合并之前才绑。
     // 这是本轮第三次踩同一个坑："把结果缓冲当前置条件"在任何一条路径上都会变成死锁或空指针。
 }
 
 void LumenScene::RunFarFieldRT(rhi::IRHICommandList* cmd) {
+    // 桶均值：亮度以 ×4096 定点累加（桶内条数有限，不会溢出 u32）
+    auto BinMean = [this](u32 i) {
+        return (m_DistBinCount[i] && i < m_DistBinLum.size())
+             ? (double)m_DistBinLum[i] / 4096.0 / (double)m_DistBinCount[i] : 0.0;
+    };
     // 【一次性诊断】步骤 26 首次落地时，任何一个前置为空的静默返回都会让"远场根本没跑"变成
     // 一条不打印任何东西的日志 —— 这里显式报一次原因，避免又走一遍"猜为什么没输出"的老路。
     static bool s_farLogged = false;
@@ -353,10 +368,42 @@ void LumenScene::RunFarFieldRT(rhi::IRHICommandList* cmd) {
             HE_CORE_INFO("   SDF 命中距离: 均值 {:.2f}（定点 1/16）；其中 t < 1 的**自交命中** {} 条（占 SDF 命中 {:.1f}%）",
                          (double)m_FarFieldSdfMeanT, m_FarFieldSelfHits,
                          sdfHits ? 100.0 * (double)m_FarFieldSelfHits / (double)sdfHits : 0.0);
+            // 步骤 27：切换分类 + 按命中距离分桶的最终材质亮度（10 单位/桶，阈值 50 在第 5 桶）
+            HE_CORE_INFO("   步骤 27 切换: 纯 SDF {} / 纯光追 {} / **重叠带混合 {}**（重叠带 [{:.0f},{:.0f}]，半宽比例 {:.2f}）；"
+                         "带内实际混合的光线 {}",
+                         m_FadeSdfOnly, m_FadeRtOnly, m_FadeBlend,
+                         (double)(m_FarFieldThreshold * (1.0f - m_FarFieldOverlap)),
+                         (double)(m_FarFieldThreshold * (1.0f + m_FarFieldOverlap)),
+                         (double)m_FarFieldOverlap, m_FadeBlendedRays);
+            HE_CORE_INFO("   带内细分: 进入混合分支 {} / 副点材质可取 {} / 副点缺页（朝远场兜底值混合）{}；"
+                         "副点失败拆分: 不在任何卡内 {} / 卡内但页无内容 {}",
+                         m_FadeBandRays, m_FadeBlendedRays, m_FadeNoAltRays,
+                         m_FadeAltNoCard, m_FadeAltNoPage);
+            HE_CORE_INFO("   按距离分桶的平均材质亮度（桶宽 5 单位，覆盖 20..100；阈值 50 = 第 6 桶）: "
+                         "20-25 {} | 25-30 {} | 30-35 {} | 35-40 {} | 40-45 {} | 45-50 {} | 50-55 {} | 55-60 {} | "
+                         "60-65 {} | 65-70 {} | 70-75 {} | 75-80 {} | 80-85 {} | 85-90 {} | 90-95 {} | 95-100 {}",
+                         BinMean(0), BinMean(1), BinMean(2), BinMean(3), BinMean(4), BinMean(5),
+                         BinMean(6), BinMean(7), BinMean(8), BinMean(9), BinMean(10), BinMean(11),
+                         BinMean(12), BinMean(13), BinMean(14), BinMean(15));
         }
     }
 
-    // ── ② 本帧：先光追，再与 SDF 结果逐光线比较 ──
+    // ── ② 步骤 27 的读数：合并分类 + "按距离分桶的最终材质亮度"曲线 ──
+    if (m_FarMergeStatsMapped) {
+        u32 ms[8] = {0};
+        std::memcpy(ms, m_FarMergeStatsMapped, sizeof(ms));
+        m_FadeSdfOnly = ms[0]; m_FadeRtOnly = ms[1]; m_FadeBlend = ms[2];
+    }
+    if (m_DistBinMapped) {
+        u32 bins[32] = {0};
+        std::memcpy(bins, m_DistBinMapped, sizeof(bins));
+        for (u32 i = 0; i < 16u; ++i) {
+            m_DistBinCount[i] = bins[i * 2u];
+            m_DistBinLum[i]   = bins[i * 2u + 1u];
+        }
+    }
+
+    // ── ③ 本帧：先光追，再与 SDF 结果逐光线比较 ──
     ComputeBarrier(cmd);   // 等"追踪 pass 写 SDF 光线结果"落地
 
     LumenFarFieldPass::FrameParams fp;
@@ -395,15 +442,27 @@ void LumenScene::RunFarFieldRT(rhi::IRHICommandList* cmd) {
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     cmd->Dispatch((rays + 63u) / 64u, 1, 1);
 
-    // ── ③ 合并：远场（SDF 未命中或超出阈值）改用光追命中点，供步骤 22/23 消费 ──
+    // ── ③ 合并：近场留 SDF、远场用光追、重叠带两侧材质混合（步骤 26/27）──
     if (m_FarMergePSO && m_FarField->GetResultBuffer()) {
         ComputeBarrier(cmd);
         // 光追结果缓冲可能在扩容时被重建 ⇒ 每次重绑
         m_Device->UpdateDescriptorSet(m_FarMergeSet, 1, rhi::DescriptorType::StorageBuffer,
                                       m_FarField->GetResultBuffer());
-        struct { u32 rays, thr, pad0, pad1; } mpc2{};
+        // 【绑定 3 必须每帧绑】它指向着色 pass 建的 fade 缓冲，而远场 pass 的 set 是在**更早的一帧**
+        // 创建的 —— 那一帧着色还没跑过，`if (m_RayFadeBuf)` 直接跳过 ⇒ 描述符一直是空的，
+        // 合并 pass 的写入落进"未绑定描述符"（表现为"合并统计说 445 条在带内，着色侧一条也读不到"）。
+        if (m_RayFadeBuf)
+            m_Device->UpdateDescriptorSet(m_FarMergeSet, 3, rhi::DescriptorType::StorageBuffer, m_RayFadeBuf.get());
+        // 重叠带 [t0, t1]：t1 == t0 时退化成硬切换（步骤 27 的 A/B 对照就靠它）
+        const float halfBand = m_FarFieldThreshold * std::max(0.0f, m_FarFieldOverlap);
+        const u32 t0 = (u32)std::max(0.0f, m_FarFieldThreshold - halfBand);
+        const u32 t1 = (u32)(m_FarFieldThreshold + halfBand);
+        if (m_FarMergeStatsMapped) { u32 zero[8] = {0}; std::memcpy(m_FarMergeStatsMapped, zero, sizeof(zero)); }
+        if (m_DistBinMapped)       { u32 zero[32] = {0}; std::memcpy(m_DistBinMapped, zero, sizeof(zero)); }
+        struct { u32 rays, t0, t1, pad0; } mpc2{};
         mpc2.rays = rays;
-        mpc2.thr  = (u32)m_FarFieldThreshold;   // SDF 命中距离 < 阈值的射线保留 SDF 结果
+        mpc2.t0   = t0;
+        mpc2.t1   = t1;
         cmd->SetPipeline(m_FarMergePSO.get());
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_FarMergeSet);
         cmd->SetPushConstants(0, sizeof(mpc2), &mpc2);
