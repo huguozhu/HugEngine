@@ -41,6 +41,7 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "GI/DDGIProvider.h" // 动态漫反射探针 Provider（compute、无纹理输出）
 #include "GI/LumenProvider.h" // Lumen（虚拟化几何 GI）Provider
 #include "Lumen/LumenScene.h" // Lumen 持久资源宿主（atlas / SDF clipmap / 探针）
+#include "Nanite/NaniteRenderer.h" // Nanite 模块门面（任务 1 / §14.8：骨架 + 独立开关）
 #include "GI/RTProvider.h"   // 光追效果 Provider（四种效果共用实现）
 #include "PostProcess/Denoiser.h"
 // RT 效果（P3 统一后 Deferred 亦可按层栈启用光追源）
@@ -127,6 +128,12 @@ public:
     GBufferRenderer*    GetGBuffer()       { return m_GBuffer.get(); }
     /// GBuffer 投影贴花 Pass（任务 24；暴露统计供调试/判据读取）
     DecalPass&          GetDecalPass()     { return m_DecalPass; }
+    /// Nanite 模块（§14.8 任务 1 / N0）：生命周期由本管线转发，帧图接入点见
+    /// `DeferredPipeline_FrameGraph.cpp` 的 GBuffer 段（**唯一**的逻辑改动处）。
+    NaniteRenderer&     GetNanite()        { return m_Nanite; }
+    /// 开关与档位的唯一真值（外部只经这两个函数读写；§14.4 的三层都落在这里）
+    void                SetNaniteSettings(const NaniteSettings& s) { m_Nanite.SetSettings(s); }
+    [[nodiscard]] const NaniteSettings& GetNaniteSettings() const  { return m_Nanite.GetSettings(); }
     /// 已注册的 GI Provider（帧图按注册表遍历构建 pass，而非手写门控）
     std::vector<std::unique_ptr<IGIProvider>>& GetGIProviders() { return m_GIProviders; }
     /// RSM 子系统与它的半分辨率求值 pass（供离线采样设施逐级查看 RSM 链路：
@@ -233,6 +240,11 @@ private:
     /// 生命周期由 `LumenProvider` 转调（Provider 的 `OnResize/Shutdown` → 本对象），
     /// 即步骤 1 补上的 Provider 生命周期遍历那条路径。
     LumenScene m_LumenScene;
+    /// Nanite 虚拟几何模块（§14.8 任务 1 / N0）。持有方式与 LumenScene 同构：
+    /// 本管线负责 Initialize/Shutdown/Resize 转发，模块自己管自己的资源与 pass 注册。
+    /// 【为什么不是 IGIProvider】Nanite 不是 GI 源（不产生通道输出、不参与层栈归一化），
+    /// 它是 GBuffer 段的**几何写入者**（§14.2 不变式 3），故与 GBufferRenderer 同类由管线直接持有。
+    NaniteRenderer m_Nanite;
     /// 前帧 HDR 辐射度（GI 源共享；DDGI 探针与 SSGI 的入射辐射度都取自它）
     GIRadianceHistory m_RadianceHistory;
     GIConfig m_GIConfig;   // GI 配置（M2 档位/通道/强度 → P3 源层栈单一数据源）

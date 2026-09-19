@@ -521,6 +521,14 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
                      cvGPLVariantCount);
     }
 
+    // ── Nanite 模块（§14.8 任务 1 / N0）──
+    // 放在 m_Ready 之前：模块不依赖任何 GI/Lumen/GBuffer 的运行时状态（§14.3 依赖禁令），
+    // 只在自己内部建立"骨架就绪"的判据并读入配置层默认值（CVar r.Nanite.Enable）。
+    // 开关真值默认 false ⇒ 关闭档一个 pass 都不注册，帧图与今天逐位相同。
+    if (!m_Nanite.Initialize(device, m_Width, m_Height)) {
+        HE_CORE_WARN("DeferredPipeline: NaniteRenderer 骨架初始化失败，Nanite 不可用");
+    }
+
     m_Ready = true;
     HE_CORE_INFO("DeferredPipeline initialized");
     return true;
@@ -553,6 +561,7 @@ void DeferredPipeline::Shutdown() {
     if (m_ShadowSystem) m_ShadowSystem->Shutdown();
     m_PostProcess.Shutdown();
     m_DecalPass.Shutdown();   // 任务 24：投影贴花（盒子几何 + PSO + 描述符集）
+    m_Nanite.Shutdown();      // 任务 1：Nanite 模块（骨架，无 GPU 资源；**保留开关真值**供 cfg 回写）
     m_InstanceCuller.Shutdown();   // 任务 25：逐实例剔除
     if (m_GBuffer) m_GBuffer->Shutdown();
     m_Lighting.Shutdown();
@@ -657,6 +666,7 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
     // 重建 GBuffer 纹理（委托给 GBufferRenderer）
     if (m_GBuffer) m_GBuffer->OnResize(w, h);
     m_DecalPass.OnResize(w, h);   // 贴花 Pass 只需更新屏幕尺寸（逐帧写入 push constant）
+    m_Nanite.Resize(w, h);        // 任务 1：Nanite 模块（骨架只记尺寸；任务 3 起据此重建剔除/光栅目标）
     // 重建 HDR 目标（通过 LightingPass）
     m_Lighting.OnResize(m_Device, w, h);
     m_ParticleRenderer.SetSceneDepth(m_Lighting.GetHDRDepth(), m_Lighting.GetPointSampler());  // 软粒子深度纹理更新

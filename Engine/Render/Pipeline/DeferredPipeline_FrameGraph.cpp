@@ -231,6 +231,38 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             });
     }
 
+    // ════════════════════════════════════════════════════════════════════
+    // Nanite 模块接入点（§14.4「门控点只有一个」；§14.8 任务 1 = N0）
+    //
+    // 独立开关的**唯一**门控在这里：关闭 ⇒ 本模块一个 pass 都不注册，帧图与转储与今天
+    // 逐位相同（§14.2 不变式 1，也不产生新的每帧 CPU 开销）；开启且模块就绪 ⇒ 模块自注册
+    // 它的 pass（任务 1 只有 `Nanite_Noop`：不分配资源、不改任何纹理内容）。
+    //
+    // 【为什么 else 分支不接管既有 GBuffer 写入（与 §14.4 伪码的唯一差异）】
+    //   §14.4 的伪码把既有 `GPU_Cull / GB_Clear / ...` 放进 else，那是**任务 4 起**的形态：
+    //   等模块的软光栅真的写 GBuffer（不变式 3：几何写入者唯一）时，既有写入路径才该让位。
+    //   任务 1 的模块**不写** GBuffer，若此刻就让既有 `GB_Clear` 停摆，开启档的 GBuffer 将
+    //   整帧无人写（GBuffer 纹理内容未定义）⇒ 画面与转储必然与关闭档不同，直接违反任务 1
+    //   的验收「开启 ⇒ 画面不变 / 转储逐位一致」。故任务 1 的接入点写成"模块**追加**注册"，
+    //   既有 GBuffer 段在两种档位下都原样执行（下面这段既有代码一行未动）。
+    // ════════════════════════════════════════════════════════════════════
+    if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
+        NaniteGBufferHandles naniteGB;
+        naniteGB.albedo      = gbA;
+        naniteGB.normal      = gbB;
+        naniteGB.emissive    = gbC;
+        naniteGB.velocity    = gbVel;
+        naniteGB.worldPos    = gbWorldPos;
+        naniteGB.disneyA     = gbDisneyA;
+        naniteGB.disneyB     = gbDisneyB;
+        naniteGB.lightmapKey = gbLightmapKey;
+        naniteGB.depth       = gbDepth;
+        m_Nanite.AddPasses(rg, naniteGB);
+    } else {
+        // 关闭档（或模块未就绪）：一个 pass 都不注册 —— 这就是"开关关闭 ⇒ 逐位一致"的实现。
+        // 既有 GBuffer 写入路径在**两种档位下都照常执行**，理由见上面的说明。
+    }
+
     // GBuffer 8×MRT + 绘制（委托给 IGBufferRenderer，支持 CPU/GPU 双模式）
     rg.AddPass("GB_Clear", {}, {{gbA, ResourceAccess::Write}, {gbB, ResourceAccess::Write},
         {gbC, ResourceAccess::Write}, {gbVel, ResourceAccess::Write}, {gbWorldPos, ResourceAccess::Write},
