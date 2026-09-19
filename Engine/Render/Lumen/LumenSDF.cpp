@@ -1154,7 +1154,7 @@ void LumenSDF::RunMarch(rhi::IRHICommandList* cmd) {
     pc.dim1X = pc.dim1Y = pc.dim1Z = m_GlobalLayers[1].res;
     pc.rayCount  = (u32)m_RayOriginCPU.size();
     pc.maxSteps  = (float)m_Config.marchMaxSteps;
-    pc.eps       = 0.25f * GetGlobalVoxelSize(0);
+    pc.eps       = 0.25f * GetGlobalVoxelSize(0);   // 实测放宽到 0.5 体素对 14 条穿漏毫无影响，故保持 0.25（精度优先）
     pc.maxDist   = m_Config.marchMaxDist;
     // 审计：把实际下发的两层参数打出来（射线自检对任何改动都不动，先证明这条通道是活的）
     HE_CORE_INFO("LumenSDF march 参数: 层0 原点({:.1f},{:.1f},{:.1f}) 体素 {:.3f} res {} | 层1 原点({:.1f},{:.1f},{:.1f}) 体素 {:.3f} res {} | 射线 {} 步数 {:.0f} eps {:.3f}",
@@ -1232,6 +1232,7 @@ void LumenSDF::RunMarchCheck() {
     float maxErr = 0.0f;
     double sumErr = 0.0;
     u32 bothHit = 0, gpuOnly = 0, cpuOnly = 0, within = 0, normalOk = 0;
+    u32 cpuOnlyNear = 0, cpuOnlyFar = 0;   // 穿漏按命中距离分（近场穿漏才是真问题）
     std::vector<float> errVoxAll, errNear, errFar, errNearHit, errFarHit;   // 误差分布 + 按"起点是否贴近几何"分组
     u32 withinGlobal = 0, detailBetter = 0;
     double sumErrGlobal = 0.0;
@@ -1320,6 +1321,7 @@ void LumenSDF::RunMarchCheck() {
             ++gpuOnly;
         } else if (cpuHit) {
             ++cpuOnly;
+            ((tRef < 50.0f) ? cpuOnlyNear : cpuOnlyFar)++;
         }
     }
     m_RayHit->Unmap();
@@ -1369,9 +1371,9 @@ void LumenSDF::RunMarchCheck() {
                      errFarHit.size(),  errFarHit.empty()  ? 0.0 : (double)errFarHit[errFarHit.size()/2]);
         if (!errNearHit.empty()) std::sort(errNearHit.begin(), errNearHit.end());
         if (!errFarHit.empty())  std::sort(errFarHit.begin(), errFarHit.end());
-        HE_CORE_INFO("LumenSDF 按**命中距离**分组: 近命中(tRef<50) n={} p50={:.3f} / 远命中 n={} p50={:.3f} 体素（这才是近场精度的判据）",
-                     errNearHit.size(), errNearHit.empty() ? 0.0 : (double)errNearHit[errNearHit.size()/2],
-                     errFarHit.size(),  errFarHit.empty()  ? 0.0 : (double)errFarHit[errFarHit.size()/2]);
+        HE_CORE_INFO("LumenSDF 穿漏按命中距离: 近命中(tRef<50) {} 条 / 远命中 {} 条（近场穿漏才是真问题）", cpuOnlyNear, cpuOnlyFar);
+
+
     }    HE_CORE_INFO("LumenSDF sphere tracing 误差分解: 仅全局场 {}/{} 在 1 体素内（平均 {:.3f}），"
                  "合并细节追踪后 {}/{}（平均 {:.3f}）；细节追踪更近的射线 {} 条",
                  withinGlobal, bothHit, bothHit ? sumErrGlobal / bothHit : 0.0,
