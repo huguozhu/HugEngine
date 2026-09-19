@@ -88,6 +88,16 @@ public:
     }
     /// 由帧图每帧告知「阴影枚举当前是否选择 RT 阴影」
     void SetRTShadowWanted(bool wanted) { m_RTShadowWanted = wanted; }
+    /// 同步到层栈：本效果**本帧会不会真的产出**。
+    /// 【为什么需要它】`IsValid()` 只说明"pass 对象在"（四种效果一创建就恒为真），
+    /// 它不代表本帧的层栈要求了这个源。步骤 34 的信号登记如果只看 `IsValid()`，
+    /// 就会把"配置里存在、当帧根本不跑"的效果也登记成待降噪信号 —— 那样
+    /// `LogSummary()` 报出的"多信号共存"是假的（默认配置下 4 个 RT 信号全被登记，
+    /// 而 RG pass 列表里一个 RT pass 都没有）。当帧事实只能由层栈决定。
+    void SyncToStack(const GIChannelStack& stack) override {
+        m_Wanted = IsValid() &&
+            (m_Effect == Effect::Shadow ? m_RTShadowWanted : stack.Has(GetSourceId()));
+    }
     /// 由帧图每帧告知「DDGI 是否自己也是漫反射层栈的源」。
     /// 为真时 GI 的 miss 分支不得回退 DDGI，否则 DDGI 信息被用两次、归一化失去无偏性（§9.2-I）。
     void SetDDGIInStack(bool inStack) { m_DDGIInStack = inStack; }
@@ -177,6 +187,45 @@ public:
     }
     void SetVelocity(rhi::IRHITexture* velocity) { m_Velocity = velocity; }
 
+    /// 【步骤 34（11.3）】把本 RT 效果的降噪信号登记进统一框架。
+    /// 四种效果共用一份实现：信号名取 `GetName()`，输出取链尾输出（时域/空间滤波之后）——
+    /// 降噪链**本身就是**这个信号的时域部分，框架只需知道「谁是谁」才能做
+    /// 历史池预算统计、半分辨率检测和统一的数值判据。
+    /// `needsUpscale` 不靠配置猜：直接比尺寸（主输出比深度图小 ⇒ 半分辨率 ⇒ 需要升采样）。
+    void DescribeSignals(DenoiseSignalRegistry& registry, rhi::IRHITexture* depth,
+                         rhi::IRHITexture* normal, rhi::IRHITexture* velocity) override {
+        if (!m_Wanted) return;   // 本帧层栈没要这个源 ⇒ 它不是当帧事实（见 SyncToStack）
+        rhi::IRHITexture* main = MainOutput();
+        if (!main) return;
+        DenoiseSignal s;
+        s.name       = GetName();
+        s.input      = main;
+        s.output     = FinalOutput();
+        s.depth      = depth;
+        s.normal     = normal;
+        s.velocity   = velocity;
+        s.width      = main->GetWidth();
+        s.height     = main->GetHeight();
+        s.targetWidth  = s.width;
+        s.targetHeight = s.height;
+        // 半分辨率判别按实测尺寸，不按设置项：输出比深度图小就是需要升采样
+        if (depth && depth->GetWidth() > s.width && depth->GetHeight() > s.height) {
+            s.needsUpscale = true;
+            s.targetWidth  = depth->GetWidth();
+            s.targetHeight = depth->GetHeight();
+        }
+        // 引导参数取自空间滤波级（时域级的 depthThreshold/normalThreshold 语义不同，
+        // 不是这里的 depthSigma/normalSigma）；纯时域链就用默认值。
+        for (const Stage& st : m_Stages) {
+            if (st.kind == Stage::Kind::Spatial && st.spatial) {
+                s.depthSigma  = st.spatial->GetDepthSigma();
+                s.normalSigma = st.spatial->GetNormalSigma();
+                break;
+            }
+        }
+        registry.Register(s);
+    }
+
     /// 主 pass：向 GBuffer 有效像素发射射线
     void Render(rhi::IRHICommandList* cmd, const GIProviderContext& ctx) override;
 
@@ -257,6 +306,7 @@ private:
 
     Effect m_Effect;
     bool   m_RTShadowWanted = false;
+    bool   m_Wanted = false;   // 本帧层栈是否要求本效果（由 SyncToStack 每帧写入）
 
     RTPass*           m_AS         = nullptr;
     RTShadowPass*     m_Shadow     = nullptr;

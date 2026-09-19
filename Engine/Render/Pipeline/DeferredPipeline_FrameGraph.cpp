@@ -954,6 +954,9 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 : (rtp->GetSourceId() == GISourceId::RTAO)         ? m_GIConfig.ao
                 : (rtp->GetSourceId() == GISourceId::RTReflection) ? m_GIConfig.specular
                                                                    : m_GIConfig.diffuse;
+            // 与屏幕空间两条循环同一约定：先 SyncToStack 再 NeedsPass —— 这样
+            // 「本帧是否真的产出」有唯一落点（步骤 34 的信号登记读的就是它）
+            rtp->SyncToStack(stack);
             if (!rtp->NeedsPass(stack)) continue;
 
             rhi::IRHITexture* mainTex =
@@ -1005,7 +1008,49 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             else if (rtp->GetSourceId() == GISourceId::RTReflection) rtReflectionTex = rtp->GetFinalSpecularOutput();
             else                                                     rtGITex         = rtp->GetFinalDiffuseOutput();
         }
+    } else {
+        // 本帧没有任何 RT 源在层栈里：把「本帧是否产出」显式清零。
+        // 否则步骤 34 的信号登记会残留上一帧的真值 —— RT 关闭后日志仍然报"有 4 条信号"，
+        // 而 RG pass 列表里一个 RT pass 都没有（多信号共存的读数就变成假的）。
+        for (auto& prov : m_GIProviders) {
+            auto* rtp = dynamic_cast<RTEffectProvider*>(prov.get());
+            if (!rtp) continue;
+            rtp->SetRTShadowWanted(false);
+            rtp->SyncToStack(GIChannelStack{});   // 空层栈 ⇒ Has() 恒假 ⇒ 不登记
+        }
     }
+    // ============================================================
+    // 【步骤 34（11.3）】统一降噪信号登记：本帧所有 GI 源在此自报"待降噪信号"
+    //
+    // 放在这里是因为**所有主 pass / 附属 pass 都已在上面注册完毕**、各家 `SyncToStack`
+    // 也已把这个源与层栈对齐 —— 此时 `IsValid()` 的答案才是"本帧真的会产出"，
+    // 而不是"配置里写着要"。登记结果用于三件事：
+    //   · 多信号共存的一次性视图（`LogSummary`：名字/分辨率/是否需升采样/引导参数）；
+    //   · 历史纹理的统一分配账（`DenoiseHistoryPool::LogSummary` 逐条报出占用）；
+    //   · 半分辨率信号必须"降噪后再升采样"这一条（`needsUpscale`）。
+    // 每帧先 Clear：信号集合是**当帧事实**，不该残留上一帧已关闭的源。
+    // ============================================================
+    {
+        m_DenoiseSignals.Clear();
+        rhi::IRHITexture* dnDepth    = m_GBuffer->GetDepth();
+        rhi::IRHITexture* dnNormal   = m_GBuffer->GetNormal();
+        rhi::IRHITexture* dnVelocity = m_GBuffer->GetVelocity();
+        for (auto& prov : m_GIProviders) {
+            prov->DescribeSignals(m_DenoiseSignals, dnDepth, dnNormal, dnVelocity);
+        }
+        m_DenoiseSignals.LogSummary("GI");
+
+        // 历史纹理池的占用账：只在**条数变化**时打印（初始化/尺寸变化各一次），
+        // 否则每帧刷屏。池里的纹理是 Acquire 时才建的，故必须等到有人真的取过历史
+        // 之后来看，才不会漏报 —— 这正是"信号登记"这一刻。
+        static u32 s_LastPoolCount = 0xFFFFFFFFu;
+        const u32 poolCount = m_DenoiseHistoryPool.Count();
+        if (poolCount != s_LastPoolCount) {
+            s_LastPoolCount = poolCount;
+            m_DenoiseHistoryPool.LogSummary("HistoryPool");
+        }
+    }
+
     {
         auto* giIBL = dynamic_cast<GI_IBL*>(m_GI.get());
         if (giIBL) {
