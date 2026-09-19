@@ -33,6 +33,7 @@ static constexpr u32 kPTFlag_ReSTIR   = 1u << 0;
 static constexpr u32 kPTFlag_MIS      = 1u << 1;
 static constexpr u32 kPTFlag_Roulette = 1u << 2;
 static constexpr u32 kPTFlag_NEE      = 1u << 3;
+static constexpr u32 kPTFlag_Textures = 1u << 4;   // 材质贴图采样（r.PT.Textures）
 
 // 相机运动 → 时域降噪混合权重缩放：约 0.33m 平移或 0.33rad(~19°) 旋转 → 混合抬到 1.0
 static constexpr float kMotionBlendScale = 3.0f;
@@ -229,6 +230,8 @@ void PathTracingPipeline::SetPTMIS(bool e)     { cvPTMIS.Set(e); }
 bool PathTracingPipeline::IsPTMIS() const      { return cvPTMIS.Get(); }
 void PathTracingPipeline::SetPTRoulette(bool e){ cvPTRoulette.Set(e); }
 bool PathTracingPipeline::IsPTRoulette() const { return cvPTRoulette.Get(); }
+void PathTracingPipeline::SetPTTextures(bool e){ cvPTTextures.Set(e); }
+bool PathTracingPipeline::IsPTTextures() const { return cvPTTextures.Get(); }
 void PathTracingPipeline::SetPTSampleCount(i32 v) { cvPTSampleCount.Set(v); }
 i32  PathTracingPipeline::GetPTSampleCount() const { return cvPTSampleCount.Get(); }
 void PathTracingPipeline::SetPTMaxBounces(i32 v) { cvPTMaxBounces.Set(v); }
@@ -377,7 +380,7 @@ void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 GetRTPass()->BuildAS(c, world, sg);
             });
 
-        // 场景材质纹理（4×N，PT ClosestHit 用）：首帧延迟构建一次
+        // 场景材质纹理（11×N + 法线/UV 纹理，PT ClosestHit 用）：首帧延迟构建一次
         if (!m_SceneMaterialBuilt) {
             if (GetRTPass()->BuildSceneMaterialTexture(m_Device, world)) {
                 m_SceneMaterialBuilt = true;
@@ -385,6 +388,10 @@ void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 HE_CORE_WARN("PathTracingPipeline: 场景材质纹理构建失败，PT 材质查询不可用");
             }
         }
+        // 只跑 PT 的示例没有光栅管线，没人会替绑定堆 Flush（堆的数组更新靠 Flush 落到 set）。
+        // 放在这里（执行前、CPU 侧）正好在 PT_Render 之前把已注册的材质贴图写进 PT set0 的
+        // bindless 数组；无 pending 时是空操作。
+        if (auto* heap = m_Device->GetBindlessHeap()) heap->Flush();
     }
 
     // ── 收集光源（PT 与 ReSTIR 共用当前帧槽位数据）──
@@ -405,6 +412,7 @@ void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     if (cvPTMIS.Get())   ptFlags |= kPTFlag_MIS;
     if (cvPTRoulette.Get()) ptFlags |= kPTFlag_Roulette;
     ptFlags |= kPTFlag_NEE;   // NEE 恒开（ReSTIR 关闭时的直接光照基础）
+    if (cvPTTextures.Get()) ptFlags |= kPTFlag_Textures;
 
     rhi::IRHITexture* ptHDR    = m_PT ? m_PT->GetHDR() : nullptr;
     rhi::IRHITexture* ptDepth  = m_PT ? m_PT->GetDepth() : nullptr;
@@ -443,6 +451,7 @@ void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 ctx.finalReservoir = useReSTIR && m_ReSTIR ? m_ReSTIR->GetFinalReservoir() : nullptr;
                 ctx.sceneMaterialTex = GetRTPass()->GetSceneMaterialTexture();
                 ctx.sceneTriangleNormals = GetRTPass()->GetSceneTriangleNormals();
+                ctx.sceneTriangleUVs = GetRTPass()->GetSceneTriangleUVs();
                 ctx.blueNoise = m_STBN ? m_STBN->GetTexture() : nullptr;
                 m_PT->Execute(c, GetRTPass()->GetTLAS(), ctx);
             });

@@ -18,6 +18,7 @@ extern CVar<bool>  cvPTDenoise;        // r.PT.Denoise       PT 时域降噪开�
 extern CVar<bool>  cvPTReSTIR;         // r.PT.ReSTIR        ReSTIR DI 开关
 extern CVar<bool>  cvPTMIS;            // r.PT.MIS            NEE MIS 开关
 extern CVar<bool>  cvPTRoulette;       // r.PT.Roulette      俄罗斯轮盘赌开关
+extern CVar<bool>  cvPTTextures;       // r.PT.Textures      材质贴图采样开关（关闭 = 只用贴图均值/因子）
 // 降噪参数
 extern CVar<float> cvPTDenoiseBlend;   // r.PT.Denoise.Blend 时域混合因子
 // A-Trous 空间滤波

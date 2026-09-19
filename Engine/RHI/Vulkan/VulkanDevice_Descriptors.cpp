@@ -46,9 +46,11 @@ VkDescriptorType VulkanDevice::ToVkDescType(DescriptorType type) const {
 static constexpr u32 kDescPoolSize_UniformBuffer         = 64;     // 逐帧 UBO 数量
 static constexpr u32 kDescPoolSize_StorageBuffer         = 16384;  // SSBO（Object/Light/Meshlet + bindless SSBO 数组 × 三缓冲）
 static constexpr u32 kDescPoolSize_CombinedImageSampler  = 8192;   // 组合图像采样器（阴影贴图/IBL 等，非 bindless）
-static constexpr u32 kDescPoolSize_SampledImage          = 16384;  // bindless 纹理数组（SampledImage × 三缓冲）
+// bindless 数组每个 set 占 4096 个额度：光栅管线（GBuffer / Forward per-frame / 粒子 / 贴花…）
+// 之外，PT 的 set0 也有 bindless 纹理与采样器数组（b12/b13），因此留出余量。
+static constexpr u32 kDescPoolSize_SampledImage          = 32768;  // bindless 纹理数组（SampledImage × 多 set）
 static constexpr u32 kDescPoolSize_StorageImage          = 256;    // StorageImage（RT BackBuffer 等）
-static constexpr u32 kDescPoolSize_Sampler               = 16384;  // bindless 采样器数组（Sampler × 三缓冲）
+static constexpr u32 kDescPoolSize_Sampler               = 32768;  // bindless 采样器数组（Sampler × 多 set）
 static constexpr u32 kDescPoolSize_AccelStruct           = 64;    // RT TLAS 绑定
 static constexpr u32 kDescPoolMaxSets                    = 1024;  // 最大描述符集总数
 
