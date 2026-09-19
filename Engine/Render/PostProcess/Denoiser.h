@@ -34,6 +34,10 @@ public:
     void Render(rhi::IRHICommandList* cmd);
 
     rhi::IRHITexture* GetOutput() const { return m_Denoised.get(); }
+    /// 当前工作尺寸。统一降噪框架（11.3）靠它判断"该级是否已经在信号分辨率上运行"——
+    /// 半分辨率开关是运行时的，缓存一份尺寸副本必然会与纹理漂移，故直接问纹理。
+    u32 GetWidth()  const { return m_Width; }
+    u32 GetHeight() const { return m_Height; }
     bool IsReady() const { return m_Ready; }
     void PreBind(rhi::IRHICommandList* cmd) const { if(m_Ready) cmd->SetPipeline(m_PSO.get()); }
 

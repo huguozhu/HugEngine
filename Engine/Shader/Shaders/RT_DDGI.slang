@@ -8,7 +8,7 @@
 // 网格参数（gridX/gridY/gridZ/cellSize/origin）为运行时字段，由 includer 声明为 cbuffer
 // （u_DDGIGridOrigin / u_DDGIGridSize），与 GI_DDGI 的 ProbeGridUniform 前两个 float4 一致，
 // 避免 C++ 侧改网格后 shader 硬编码常量不同步。
-static const uint   kDDGI_Stride   = 16;  // 每探针 16 float4（布局不变量，与 C++ kFloats4PerProbe 一致）
+static const uint   kDDGI_Stride   = 4;   // 每探针 **4** float4（步骤 30：二阶 4 系数；与 C++ kFloats4PerProbe 一致）
 
 // ── SH 基函数常量 ──
 static const float kDDGI_SH_Y00 = 0.28209479177387814;       // l=0: sqrt(1/(4π))
@@ -24,27 +24,16 @@ static const float kDDGI_SH_B1  = 0.4886025119029199;        // l=1: sqrt(3/(4π
 // 下方常量即 A_l 与各 Y_lm 归一化常数的乘积：
 static const float kDDGI_SH_A0 = 0.8862269254527580;   // A_0·Y00 = π·sqrt(1/4π)
 static const float kDDGI_SH_A1 = 1.0233267079464886;   // A_1·B1  = (2π/3)·sqrt(3/4π)
-static const float kDDGI_SH_A2a = 0.8580855308097856;  // A_2·sqrt(15/(4π))
-static const float kDDGI_SH_A2b = 0.2477080863724551;  // A_2·sqrt(5/(16π))
-static const float kDDGI_SH_A2c = 0.4290427654048928;  // A_2·sqrt(15/(16π))
+// 【步骤 30】band2 的 A_2 常数与 5 个 l=2 项一并移除：Radiance Cache 的表示统一为二阶 4 系数
+//（§7）。投影端（`DDGI.comp.slang`）必须**同时**改 —— 只改一边会让"少的那一档"变成静默偏移。
 
-// 在方向 dir 处评估 9 系数 SH 的辐照度（bands 0/1/2 完整版，含 Lambert 卷积）
-float3 EvalDDGI_SH(float4 sh[9], float3 dir) {
+// 在方向 dir 处评估 **4** 系数 SH 的辐照度（bands 0/1，含 Lambert 卷积）
+float3 EvalDDGI_SH(float4 sh[4], float3 dir) {
     float3 result = sh[0].rgb * kDDGI_SH_A0;                 // l=0, m=0
     result += sh[1].rgb * dir.y * kDDGI_SH_A1;               // l=1, m=-1
     result += sh[2].rgb * dir.z * kDDGI_SH_A1;               // l=1, m=0
     result += sh[3].rgb * dir.x * kDDGI_SH_A1;               // l=1, m=1
-    // l=2, m=-2: sqrt(15/(4π)) * x*y
-    result += sh[4].rgb * kDDGI_SH_A2a * dir.x * dir.y;
-    // l=2, m=-1: sqrt(15/(4π)) * y*z
-    result += sh[5].rgb * kDDGI_SH_A2a * dir.y * dir.z;
-    // l=2, m=0:  sqrt(5/(16π)) * (3z²-1)
-    result += sh[6].rgb * kDDGI_SH_A2b * (3.0 * dir.z * dir.z - 1.0);
-    // l=2, m=1:  sqrt(15/(4π)) * x*z
-    result += sh[7].rgb * kDDGI_SH_A2a * dir.x * dir.z;
-    // l=2, m=2:  sqrt(15/(16π)) * (x²-y²)
-    result += sh[8].rgb * kDDGI_SH_A2c * (dir.x * dir.x - dir.y * dir.y);
-    // 负值截断：辐照度物理上非负；SH 用 9 系数（l≤2）表示余弦波瓣时会有轻微振铃，
+    // 负值截断：辐照度物理上非负；SH 表示余弦波瓣时仍可能有轻微振铃（二阶更明显），
     // 截断避免负辐照度进入画面。若后续振铃明显，可改为 SH 窗口化（如 Hanning）平滑抑制。
     return max(result, 0.0);
 }
@@ -65,6 +54,16 @@ float3 SampleDDGI(float3 worldPos, float3 normal) {
     float3 result      = float3(0.0, 0.0, 0.0);
     float  totalWeight = 0.0;
 
+    // ── 步骤 32：插值权重的两种可选方案都**实测证伪**，这里保留纯三线性（见 §附三十九）──
+    // ① 距离权重 `w = 三线性 / (dist² + bias)`（DDGI 论文里为"探针埋在几何里"准备的）：
+    //    本场景实测把网格对齐调制从 35.67% **推高到 57.12%** —— 它把权重压向最近的那颗探针，
+    //    结果更像最近邻插值，而最近邻正是格子感的来源。
+    // ② smoothstep 替换线性 tent（想让跨格处一阶连续）：幅度调制 36.09%、"缝"强度 19.61%，
+    //    与线性的 35.67% / 19.54% 没有区别 —— 两个指标都测不出改善。
+    // 真正的结论在拟合参数上：把最长轴格数从 16 提到 24 / 32，调制降到 22.42% / 20.11%
+    //（即格子感是**分辨率**造成的，不是权重造成的）。故本步只把复核结论写进文档，
+    // 代码保持三线性不动 —— 不留"改不动指标"的改动。
+
     // 遍历包围世界坐标的 8 个最近探针
     for (int dz = 0; dz <= 1; dz++) {
         for (int dy = 0; dy <= 1; dy++) {
@@ -79,13 +78,14 @@ float3 SampleDDGI(float3 worldPos, float3 normal) {
                 float weight = (1.0 - abs(float(dx) - frac.x))
                              * (1.0 - abs(float(dy) - frac.y))
                              * (1.0 - abs(float(dz) - frac.z));
+                if (weight <= 0.0) continue;
 
-                // 读取探针 SH 系数（每探针 16 × float4，前 9 个是 SH）
+                // 读取探针 SH 系数（步骤 30：每探针 4 × float4，全是 SH）
                 uint   baseIdx = coord.z * uint(u_DDGIGridSize.x) * uint(u_DDGIGridSize.y)
                                + coord.y * uint(u_DDGIGridSize.x) + coord.x;
                 uint   bufBase = baseIdx * kDDGI_Stride;
-                float4 sh[9];
-                for (int i = 0; i < 9; i++) {
+                float4 sh[4];
+                for (int i = 0; i < 4; i++) {
                     sh[i] = u_DDGIProbes[bufBase + i];
                 }
 

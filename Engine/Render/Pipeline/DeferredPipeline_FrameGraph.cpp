@@ -17,7 +17,11 @@
 #include "Core/CVar.h"   // 任务 24：投影贴花 CVar（r.Decal.Project）
 #include "Core/Assert.h"
 #include <cmath>
+#include <cstdio>
+#include <chrono>   // 步骤 37：Lumen 计算 pass 的 CPU 录制分解
 #include <cstring>
+#include <algorithm>
+#include <string>
 #include <unordered_set>
 #include "DeferredLighting.vert.spv.h"
 #include "DeferredLighting.frag.spv.h"
@@ -40,6 +44,15 @@ static he::CVar<int> cvDecalProject("r.Decal.Project", 1,
 // 从 DeferredPipeline.cpp 提取 — BuildFrameGraph 渲染图定义
 
 namespace he::render {
+
+// 步骤 29：Lumen 远场光追的独立计时下标。GITimer 有 32 个源位（第 31 个是"公共项 TLAS"），
+// Provider 只用到 0..10，故取 30 作为"Lumen 远场"专用位，能在同一套查询池里单独读数。
+static constexpr he::u32 kLumenFarFieldTimerIdx = 30u;   // Lumen 远场光追（在计算 pass 内）
+static constexpr he::u32 kLumenComputeTimerIdx  = 29u;   // Lumen 计算 pass 整体（SDF 构建 → 辐照度）
+static constexpr he::u32 kLumenSdfTimerIdx      = 25u;   // 其中：SDF 构建（mesh 场 + clipmap 注入/洪泛）
+static constexpr he::u32 kLumenCacheTimerIdx    = 26u;   // 其中：页表推进 + Card 捕获 + 反馈
+static constexpr he::u32 kLumenProbeTimerIdx    = 27u;   // 其中：探针布置/追踪/着色/SH/逐像素辐照度
+static constexpr he::u32 kLumenDebugTimerIdx    = 28u;   // 其中：SDF 逐像素追踪可视化（调试视图）
 
 void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                                         he::SceneGraph& sg, const CameraData& camera) {
@@ -87,9 +100,17 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
 
     // GPUScene 收集 → [GPU 模式: 填充 IndirectDraw 参数] → 上传
     m_GPUScene.Collect(world, sg, camera);
+    // MeshBatcher 的构建条件有两条：① GPU 模式要靠它填 IndirectDraw 参数；
+    // ② **Lumen 的 Mesh SDF 构建需要这份 CPU 侧几何**（步骤 8）——CPU GBuffer 模式下
+    //    绘制不走它，但 SDF 仍然要有几何输入，否则距离场队列为空（实测就是这么发现的）。
+    const bool lumenNeedsGeometry = m_GIConfig.diffuse.Has(GISourceId::Lumen)
+                                 || m_GIConfig.specular.Has(GISourceId::Lumen);
     if (m_GBuffer->GetMode() == GBufferRenderer::Mode::GPU) {
         if (!m_BatchBuilt) { m_MeshBatcher.Build(world, m_ExcludeDecalCards); m_BatchBuilt = true; }
         m_MeshBatcher.FillGPUScene(m_GPUScene);  // 在 Upload 前写入 draw 参数
+    } else if (lumenNeedsGeometry && !m_BatchBuilt) {
+        m_MeshBatcher.Build(world, m_ExcludeDecalCards);   // 仅供 Lumen 的 SDF 使用
+        m_BatchBuilt = true;
     }
     m_GPUScene.Upload(m_Device);
 
@@ -505,7 +526,12 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     {
         const bool ddgiTraceWanted = m_RTEnabled && m_RTPass && m_GIConfig.ShouldRunDDGI();
         const bool anyRT = m_RTEnabled && m_RTPass && m_GIConfig.AnyRTSource();
-        if (anyRT || ddgiTraceWanted) {
+        // 【步骤 26】Lumen 的**远场硬件光追**也是加速结构的消费者：它不属于 `AnyRTSource()`
+        //（Lumen 不是 RT 效果源），也不是 DDGI。若不加这一项，只开 Lumen 时 AS_Build 根本不会注册
+        // ⇒ TLAS 是空的 ⇒ 远场光线一条都命中不了（实测 RT 命中率 0.0%，而 SDF 命中率 93.8%）。
+        const bool lumenFarWanted = m_RTEnabled && m_RTPass
+                                  && m_GIConfig.diffuse.Has(GISourceId::Lumen);
+        if (anyRT || ddgiTraceWanted || lumenFarWanted) {
             // 加速结构（TLAS）：每帧一次，被所有 RT 消费者共享（含本帧的 DDGI march）
             rg.AddPass("AS_Build", {}, {},
                 [this, &world, &sg](rhi::IRHICommandList* c) {
@@ -559,6 +585,37 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             }
         } else {
             m_DDGI.SetTracedRadiance(nullptr, 0);   // 无光追：DDGI 走 RSM/IBL 路径
+        }
+
+        // ── 步骤 31（L5）：把 DDGI 的输入改为 **Screen Probe 的结果** ──
+        // 【一帧延迟】DDGI 段在 Lumen 段**之前**注册，所以这里读到的是上一帧的探针缓冲 —— 这既
+        // 避开了循环依赖，也是"用上一帧屏幕信息"的标准做法（与其它 GI 源一致）。
+        // `HE_DDGI_INPUT=traced` 可切回自追踪路径，用于 A/B。
+        {
+            static const bool s_useScreenProbe = []() {
+                const char* v = std::getenv("HE_DDGI_INPUT");
+                return !(v && std::string(v) == "traced");   // 默认：Screen Probe（计划要求的输入源）
+            }();
+            LumenProvider* lp = nullptr;
+            for (auto& p : m_GIProviders) {
+                if (!p->Handles(GISourceId::Lumen)) continue;
+                if (auto* l = dynamic_cast<LumenProvider*>(p.get())) { lp = l; break; }
+            }
+            if (s_useScreenProbe && lp && lp->GetProbeBuffer() && lp->GetCellProbeBuffer()) {
+                GI_DDGI::ScreenProbeInput in;
+                in.probeBuffer  = lp->GetProbeBuffer();
+                in.cellProbeMap = lp->GetCellProbeBuffer();
+                in.viewProj     = camera.GetViewProjMatrix();
+                in.cellsX       = lp->GetScreenCellsX();
+                in.cellsY       = lp->GetScreenCellsY();
+                in.width        = w;
+                in.height       = h;
+                // 距离门限 = 1 个 DDGI 格距：只接受"与本探针落在同一处表面附近"的屏幕探针
+                in.maxMatchDistance = m_DDGI.cellSize;
+                m_DDGI.SetScreenProbeInput(in);
+            } else {
+                m_DDGI.ClearScreenProbeInput();
+            }
         }
     }
 
@@ -650,11 +707,14 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             const u32 ah = auxTex->GetHeight();
             rg.AddPass(prov->GetAuxPassName(i),
                 {{lastOut, ResourceAccess::Read}}, {{auxH, ResourceAccess::Write}},
-                [&, p = prov.get(), i, aw, ah](rhi::IRHICommandList* c) {
+                [&, p = prov.get(), i, aw, ah, giIdx](rhi::IRHICommandList* c) {
                     p->PreBindAux(c, i);
                     rhi::ClearValue clr{};
                     c->BeginOffscreenPass(p->GetAuxPassOutput(i)->GetNativeHandle(), nullptr, aw, ah, &clr, false);
+                    // 步骤 37：附属 pass（降噪/升采样）单独计时 —— 它们此前完全不在读数里
+                    m_GITimer.Begin(c, GITimer::kAuxItemBase + giIdx);
                     p->RenderAux(c, i, GIProviderContext{});
+                    m_GITimer.End(c, GITimer::kAuxItemBase + giIdx);
                     c->EndOffscreenPass();
                 });
             lastOut = auxH;
@@ -701,17 +761,240 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             const u32 ah = auxTex->GetHeight();
             rg.AddPass(prov->GetAuxPassName(i),
                 {{lastOut, ResourceAccess::Read}}, {{auxH, ResourceAccess::Write}},
-                [&, p = prov.get(), i, aw, ah](rhi::IRHICommandList* c) {
+                [&, p = prov.get(), i, aw, ah, giIdx](rhi::IRHICommandList* c) {
                     p->PreBindAux(c, i);
                     rhi::ClearValue clr{};
                     c->BeginOffscreenPass(p->GetAuxPassOutput(i)->GetNativeHandle(), nullptr, aw, ah, &clr, false);
+                    // 步骤 37：附属 pass（降噪/升采样）单独计时 —— 它们此前完全不在读数里
+                    m_GITimer.Begin(c, GITimer::kAuxItemBase + giIdx);
                     p->RenderAux(c, i, GIProviderContext{});
+                    m_GITimer.End(c, GITimer::kAuxItemBase + giIdx);
                     c->EndOffscreenPass();
                 });
             lastOut = auxH;
         }
         ssgiDenoised = lastOut;
         ssgiFinalTex = prov->GetFinalDiffuseOutput();
+    }
+
+    // ============================================================
+    // Lumen 段（虚拟化几何 GI）：**第 8 条按 Provider 的循环**
+    //
+    // 与上面 7 条不同，这里按 **Provider** 遍历而不是按 source id：Lumen 的
+    // `ToPipelineCap` 同时返回漫反射与镜面两位（一份估计量喂两个通道，与 IBL 同形），
+    // 若按 id 分派会被两条循环各跑一遍（双跑）。这正是《Lumen设计与实现》§11 的"逃生口"：
+    // 在 PROVIDER-EXEC（任务 19）落地之前，新增源用自己的循环接入，pass 仍只注册一次。
+    //
+    // 【骨架阶段（步骤 6）】Provider::Render 不绘制任何东西，输出由 clear 决定：
+    // 白炉模式清成 1.0（供白炉标度判据），其余清成 0.0（中性，不影响画面）。
+    // ============================================================
+    bool                lumenProduced = false;
+    rhi::IRHITexture*   lumenTex      = nullptr;
+    rhi::IRHISampler*   lumenSampler  = nullptr;
+    render::ResourceHandle lumenHandle = kInvalidHandle;
+    {
+        // 通道取"实际要求了 Lumen 的那一个"：同时要求时以漫反射为准（面板同一份输出）
+        const GIChannelStack& lumenStack = m_GIConfig.diffuse.Has(GISourceId::Lumen)
+                                         ? m_GIConfig.diffuse : m_GIConfig.specular;
+        for (auto& prov : m_GIProviders) {
+            if (!prov->Handles(GISourceId::Lumen)) continue;
+            prov->SyncToStack(lumenStack);
+            if (!prov->NeedsPass(lumenStack)) continue;
+            prov->SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetAlbedo());
+            if (auto* lp0 = dynamic_cast<LumenProvider*>(prov.get())) lp0->SetWorldPosInput(m_GBuffer->GetWorldPos());
+            // 步骤 26：远场硬件光追的输入。TLAS / 场景材质纹理 / 三角形法线都来自共享的 RTPass
+            //（TLAS 已在 DDGI 段之前构建；此处只传句柄，不重复构建）。
+            if (auto* lp0 = dynamic_cast<LumenProvider*>(prov.get())) {
+                PushConstantData ffpc{};
+                CollectLights(ffpc, world, sg, camera);
+                lp0->SetRTInputs(m_RTPass ? m_RTPass->GetTLAS() : nullptr,
+                                 m_RTPass ? m_RTPass->GetSceneMaterialTexture() : nullptr,
+                                 m_RTPass ? m_RTPass->GetSceneTriangleNormals() : nullptr,
+                                 m_LightBuffers[m_CurrentFrameSlot].get(), ffpc.lightCount);
+            }
+
+            rhi::IRHITexture* out = prov->GetDiffuseOutput();
+            if (!out) continue;
+
+            // ── 步骤 8：Mesh SDF 构建（独立 compute pass）──
+            // 必须**在 offscreen render pass 之外**：Vulkan 不允许在 render pass 内 dispatch
+            // compute（实测把 dispatch 放进主 pass 会直接访问违例崩溃）。本 pass 不声明资源
+            // 依赖（自持资源 + 自管 barrier），writes 为空故不会被 CullDeadPasses 裁掉。
+            const u32 lumenGiIdx = (u32)(&prov - m_GIProviders.data());   // 计时下标（步骤 29 读耗时用）
+            // 步骤 32：DDGI 的下标与探针数也在这里取好（lambda 没有默认捕获，不能在里面用 this）
+            u32 ddgiGiIdx = 0xFFFFFFFFu, ddgiProbes = 0u;
+            for (size_t pi = 0; pi < m_GIProviders.size(); ++pi) {
+                if (m_GIProviders[pi]->Handles(GISourceId::DDGI)) { ddgiGiIdx = (u32)pi; break; }
+            }
+            ddgiProbes = m_DDGI.gridX * m_DDGI.gridY * m_DDGI.gridZ;
+            rg.AddPass("Lumen_SDF_Build", {}, {},
+                // GBuffer 的三张纹理按值捕获（lambda 没有默认捕获，用 this 会编译失败）
+                [p = prov.get(), cam = &camera, furnaceMode = m_GIConfig.furnaceMode,
+                 gbN = m_GBuffer->GetNormal(), gbAl = m_GBuffer->GetAlbedo(),
+                 gbWP = m_GBuffer->GetWorldPos(), giIdx = lumenGiIdx, timer = &m_GITimer,
+                 ddgiIdx = ddgiGiIdx, probeCount = ddgiProbes, self = this](rhi::IRHICommandList* c) {
+                    if (auto* lp = dynamic_cast<LumenProvider*>(p)) {
+                        // 【步骤 37】把 Lumen 计算 pass 的 **CPU 录制耗时**按步骤拆开。
+                        // 实测这个 pass 的 CPU 录制要 16.4 ms（GPU 只有 3.4 ms），不拆开就只能猜；
+                        // 只在 HE_CPU_PASSES=1 时累计与打印。
+                        static const bool s_cpuSteps = (std::getenv("HE_CPU_PASSES") != nullptr);
+                        static double s_cpuStep[12] = {0};
+                        auto stepT0 = std::chrono::steady_clock::now();
+                        auto mark = [&](u32 i) {
+                            if (!s_cpuSteps) return;
+                            const auto t = std::chrono::steady_clock::now();
+                            s_cpuStep[i] += std::chrono::duration<double, std::milli>(t - stepT0).count();
+                            stepT0 = t;
+                        };
+
+                        // 步骤 29：整个计算 pass 的 GPU 耗时（SDF 构建 → 页表 → 捕获 → 反馈 → 探针
+                        // → 追踪 → 着色 → SH → 辐照度 → 远场光追都在这一个 pass 里）
+                        timer->Begin(c, kLumenComputeTimerIdx);
+                        timer->Begin(c, kLumenSdfTimerIdx);
+                        lp->TransitionStorageImagesOnce(c);   // 步骤 37：首帧转换自持存储图像的布局
+                        lp->StepSDF(c, *cam);   // 近层跟随相机（相机位置在第一次 Step 之前给出）
+                        timer->End(c, kLumenSdfTimerIdx);
+                        mark(0);   // StepSDF
+                        timer->Begin(c, kLumenCacheTimerIdx);
+                        lp->StepSurfaceCache(c);   // 步骤 14：页表 + 页状态机（GPU 镜像校验）
+                        mark(1);   // StepSurfaceCache
+                        lp->RunCardCapture(c, *cam);   // 步骤 15：Card 捕获（写 atlas）
+                        mark(2);   // RunCardCapture
+                        lp->RunFeedback(c, *cam);      // 步骤 16：Feedback（缺失页检测 + 请求写回页表）
+                        timer->End(c, kLumenCacheTimerIdx);
+                        mark(3);   // RunFeedback
+                        timer->Begin(c, kLumenProbeTimerIdx);
+                        lp->RunProbePlacement(c);      // 步骤 20：Screen Probe 布置与自适应合并
+                        mark(4);   // RunProbePlacement
+                        lp->RunProbeTrace(c);          // 步骤 21：探针半球追踪（半球采样 + SDF march）
+                        mark(5);   // RunProbeTrace
+                        // 步骤 26：远场硬件光追 + 与 SDF 逐光线对照 + **合并**（远场命中写回命中点）。
+                        // 必须夹在"追踪"与"着色"之间：合并写回的命中点就是步骤 22 的输入，
+                        // 放到着色之后再跑等于白跑（写回的值会在下一帧被追踪覆盖）。
+                        // 步骤 29：远场光追单独计时（用 32 个源里靠后的一个保留下标，不影响 Provider 读数）
+                        timer->Begin(c, kLumenFarFieldTimerIdx);
+                        lp->RunFarFieldRT(c);
+                        timer->End(c, kLumenFarFieldTimerIdx);
+                        mark(6);   // RunFarFieldRT
+                        lp->RunSurfaceCacheShading(c, *cam);   // 步骤 22：命中点着色（材质取自 atlas）
+                        mark(7);   // RunSurfaceCacheShading
+                        // 步骤 23：SH 投影（白炉下 l0 必须等于 √π —— 用同一面白炉开关驱动）
+                        lp->RunScreenProbeSHProject(c, furnaceMode);
+                        mark(8);   // SH 投影
+                        // 步骤 35：探针滤波（3×3 单元 YCoCg AABB + 时域重投影 EMA）。
+                        // 必须夹在 SH 投影与逐像素辐照度之间：后者读的是过滤后的探针缓冲，
+                        // 而 DDGI 段（注册在本段之前）读的也是它 —— 按步骤 31 定的"一帧延迟"语义，
+                        // DDGI 拿到的是上一帧的过滤结果，正是降噪后的输入。
+                        lp->RunProbeFilter(c, *cam);
+                        mark(9);   // 探针滤波
+                        // 步骤 24：由探针 SH 采样出逐像素辐照度（供 Provider 输出 pass 贴图）
+                        lp->RunProbeIrradiance(c, gbN, gbAl, gbWP);
+                        timer->End(c, kLumenProbeTimerIdx);
+                        mark(10);  // 逐像素辐照度
+                        // 步骤 12（L1 退出判据）：SDF 构建完之后，同一 compute pass 里跑一次
+                        // 逐像素 sphere tracing 可视化（相机主射线）。放在这里而不是 Lighting
+                        // 之后，是因为它只依赖 SDF 本身，与 GBuffer / 合成无关。
+                        timer->Begin(c, kLumenDebugTimerIdx);
+                        lp->RunSDFDebug(c, *cam);
+                        timer->End(c, kLumenDebugTimerIdx);
+                        timer->End(c, kLumenComputeTimerIdx);
+                        mark(11);  // SDF 调试视图
+                        // 步骤 29：Lumen 的 GPU 耗时（滚动平均/峰值）。四段之和 ≈ 计算 pass 整体；
+                        // 输出贴图 pass 是光照合成里那次全屏采样（giIdx 计时套的就是它）。
+                        //
+                        // 【步骤 37：把"启动期"和"稳态"分开】滚动平均是 EMA，跑得越久越接近稳态，
+                        // 但 Lumen 的首帧要建 101 个 mesh 场（实测峰值 1996 ms），前几十帧的读数会把
+                        // 平均值吊得很高 —— 步骤 29 报的 "计算 pass 27.110 ms" 就是这么来的，
+                        // 它**不是**稳态每帧成本。做法：mesh 场建完的那一刻把**平均值**清零
+                        // （峰值保留），此后 `AvgMs` 就是稳态 EMA、`PeakMs` 是全程峰值。
+                        static u32 s_timingFrames = 0;
+                        static bool s_avgReset = false;
+                        if (!s_avgReset && lp->IsMeshBuildComplete()) {
+                            const float startupPeak = timer->PeakMs(kLumenComputeTimerIdx);
+                            timer->ResetAverages();
+                            s_avgReset = true;
+                            HE_CORE_INFO("Lumen 帧时读数：mesh 场已建完，滚动平均从零重新计（稳态口径）；"
+                                         "启动期峰值 {:.3f} ms", (double)startupPeak);
+                        }
+                        if (++s_timingFrames % 120u == 0u) {
+                            HE_CORE_INFO("Lumen GPU 耗时（步骤 29/37）: 计算 pass 平均 {:.3f} ms（稳态口径）"
+                                         "/ 峰值 {:.3f} ms（含启动期）；输出贴图 pass 平均 {:.3f} ms",
+                                         (double)timer->AvgMs(kLumenComputeTimerIdx),
+                                         (double)timer->PeakMs(kLumenComputeTimerIdx),
+                                         (double)timer->AvgMs(giIdx));
+                            // 步骤 32：DDGI（Radiance Cache）的耗时也一并记录 —— 提高网格分辨率是拿它的
+                            // 计算量换伪影幅度，必须两边都能看见。
+                            HE_CORE_INFO("   DDGI（Radiance Cache）pass 平均 {:.3f} ms（{} 个探针）",
+                                         (ddgiIdx == 0xFFFFFFFFu) ? 0.0 : (double)timer->AvgMs(ddgiIdx),
+                                         probeCount);
+                            HE_CORE_INFO("   拆分: SDF 构建 {:.3f} ms / 页表+捕获+反馈 {:.3f} ms / "
+                                         "探针+追踪+着色+SH+辐照度 {:.3f} ms（其中远场光追 {:.3f} ms，每帧 {} 条射线）/ "
+                                         "SDF 调试视图 {:.3f} ms",
+                                         (double)timer->AvgMs(kLumenSdfTimerIdx),
+                                         (double)timer->AvgMs(kLumenCacheTimerIdx),
+                                         (double)timer->AvgMs(kLumenProbeTimerIdx),
+                                         (double)timer->AvgMs(kLumenFarFieldTimerIdx), lp->GetFarFieldRays(),
+                                         (double)timer->AvgMs(kLumenDebugTimerIdx));
+                            // 步骤 37：稳态（mesh 场建完之后）的每帧成本 —— 这才是 L6 帧时该看的数
+                            HE_CORE_INFO("   【稳态】SDF 构建 {:.3f} ms（场建完后它只是每帧的注入/更新）；"
+                                         "启动期峰值 {:.3f} ms",
+                                         (double)timer->AvgMs(kLumenSdfTimerIdx),
+                                         (double)timer->PeakMs(kLumenComputeTimerIdx));
+                            self->LogFrameBudget();   // 步骤 37：整帧预算（各 pass 合计 + 附属 pass 分解）
+                            if (s_cpuSteps) {
+                                static const char* kStepNames[12] = {
+                                    "StepSDF", "StepSurfaceCache", "CardCapture", "Feedback",
+                                    "ProbePlacement", "ProbeTrace", "FarFieldRT", "CacheShading",
+                                    "SHProject", "ProbeFilter", "ProbeIrradiance", "SDFDebug"
+                                };
+                                double sum = 0.0;
+                                for (u32 i = 0; i < 12u; ++i) sum += s_cpuStep[i];
+                                HE_CORE_INFO("   Lumen 计算 pass 的 CPU 录制分解（每帧，合计 {:.3f} ms）: "
+                                             "StepSDF {:.3f} / 页表 {:.3f} / 捕获 {:.3f} / 反馈 {:.3f} / "
+                                             "布置 {:.3f} / 追踪 {:.3f} / 远场 {:.3f} / 着色 {:.3f} / "
+                                             "SH {:.3f} / 滤波 {:.3f} / 辐照度 {:.3f} / 调试 {:.3f}",
+                                             sum / 120.0,
+                                             s_cpuStep[0] / 120.0, s_cpuStep[1] / 120.0, s_cpuStep[2] / 120.0,
+                                             s_cpuStep[3] / 120.0, s_cpuStep[4] / 120.0, s_cpuStep[5] / 120.0,
+                                             s_cpuStep[6] / 120.0, s_cpuStep[7] / 120.0, s_cpuStep[8] / 120.0,
+                                             s_cpuStep[9] / 120.0, s_cpuStep[10] / 120.0, s_cpuStep[11] / 120.0);
+                                (void)kStepNames;
+                                for (u32 i = 0; i < 12u; ++i) s_cpuStep[i] = 0.0;
+                            }
+                        }
+                    }
+                });
+
+            const u32 pw = out->GetWidth();
+            const u32 ph = out->GetHeight();
+            lumenHandle = rg.ImportTexture(prov->GetName(), out);
+            const u32 giIdx = lumenGiIdx;   // 计时下标（与步骤 29 的耗时日志同源）
+            const GIProviderContext lumenCtx{ &world, &sg, &camera, m_CurrentFrameSlot,
+                                              m_GIConfig.furnaceMode };
+            rg.AddPass(prov->GetName(),
+                {{gbDepth, ResourceAccess::Read}, {gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read}},
+                {{lumenHandle, ResourceAccess::Write}},
+                [&, p = prov.get(), lumenCtx, pw, ph, giIdx](rhi::IRHICommandList* c) {
+                    rhi::ClearValue clr{};
+                    // 白炉：输出 1.0，使「源自身的标度」可被直接读出；否则输出 0（中性占位）
+                    const float v = lumenCtx.furnace ? 1.0f : 0.0f;
+                    clr.color[0] = clr.color[1] = clr.color[2] = v;
+                    clr.color[3] = 1.0f;
+                    p->PreBind(c);
+                    c->BeginOffscreenPass(p->GetDiffuseOutput()->GetNativeHandle(), nullptr,
+                                          pw, ph, &clr, false);
+                    m_GITimer.Begin(c, giIdx);
+                    p->Render(c, lumenCtx);
+                    m_GITimer.End(c, giIdx);
+                    c->EndOffscreenPass();
+                });
+
+            lumenProduced = true;
+            lumenTex      = prov->GetFinalDiffuseOutput();
+            if (auto* lumenProv = dynamic_cast<LumenProvider*>(prov.get())) {
+                lumenSampler = lumenProv->GetOutputSampler();
+            }
+        }
     }
 
     // ============================================================
@@ -752,6 +1035,9 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 : (rtp->GetSourceId() == GISourceId::RTAO)         ? m_GIConfig.ao
                 : (rtp->GetSourceId() == GISourceId::RTReflection) ? m_GIConfig.specular
                                                                    : m_GIConfig.diffuse;
+            // 与屏幕空间两条循环同一约定：先 SyncToStack 再 NeedsPass —— 这样
+            // 「本帧是否真的产出」有唯一落点（步骤 34 的信号登记读的就是它）
+            rtp->SyncToStack(stack);
             if (!rtp->NeedsPass(stack)) continue;
 
             rhi::IRHITexture* mainTex =
@@ -764,7 +1050,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             const u32 pw = mainTex->GetWidth();
             const u32 ph = mainTex->GetHeight();
             const auto mainH = rg.ImportTexture(prov->GetName(), mainTex);
-            const u32 giIdx = (u32)(&prov - m_GIProviders.data());   // 计时下标（任务 29）
+            const u32 giIdx = (u32)(&prov - m_GIProviders.data());   // 计时下标（RT 效果源）
             rg.AddPass(prov->GetName(),
                 {{gbDepth, ResourceAccess::Read}, {gbB, ResourceAccess::Read}},
                 {{mainH, ResourceAccess::UAV}},
@@ -786,12 +1072,15 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                     {{lastOut, ResourceAccess::Read}, {gbDepth, ResourceAccess::Read},
                      {gbB, ResourceAccess::Read}, {gbVel, ResourceAccess::Read}},
                     {{auxH, ResourceAccess::Write}},
-                    [p = prov.get(), i, aw, ah](rhi::IRHICommandList* c) {
+                    [p = prov.get(), i, aw, ah, giIdx, timer = &m_GITimer](rhi::IRHICommandList* c) {
                         p->PreBindAux(c, i);
                         rhi::ClearValue clr{};
                         c->BeginOffscreenPass(p->GetAuxPassOutput(i)->GetNativeHandle(),
                             nullptr, aw, ah, &clr, false);
+                        // 步骤 37：附属 pass 单独计时（时域/空间降噪 + 重建升采样）
+                        timer->Begin(c, GITimer::kAuxItemBase + giIdx);
                         p->RenderAux(c, i, GIProviderContext{});
+                        timer->End(c, GITimer::kAuxItemBase + giIdx);
                         c->EndOffscreenPass();
                     });
                 lastOut = auxH;
@@ -803,7 +1092,49 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             else if (rtp->GetSourceId() == GISourceId::RTReflection) rtReflectionTex = rtp->GetFinalSpecularOutput();
             else                                                     rtGITex         = rtp->GetFinalDiffuseOutput();
         }
+    } else {
+        // 本帧没有任何 RT 源在层栈里：把「本帧是否产出」显式清零。
+        // 否则步骤 34 的信号登记会残留上一帧的真值 —— RT 关闭后日志仍然报"有 4 条信号"，
+        // 而 RG pass 列表里一个 RT pass 都没有（多信号共存的读数就变成假的）。
+        for (auto& prov : m_GIProviders) {
+            auto* rtp = dynamic_cast<RTEffectProvider*>(prov.get());
+            if (!rtp) continue;
+            rtp->SetRTShadowWanted(false);
+            rtp->SyncToStack(GIChannelStack{});   // 空层栈 ⇒ Has() 恒假 ⇒ 不登记
+        }
     }
+    // ============================================================
+    // 【步骤 34（11.3）】统一降噪信号登记：本帧所有 GI 源在此自报"待降噪信号"
+    //
+    // 放在这里是因为**所有主 pass / 附属 pass 都已在上面注册完毕**、各家 `SyncToStack`
+    // 也已把这个源与层栈对齐 —— 此时 `IsValid()` 的答案才是"本帧真的会产出"，
+    // 而不是"配置里写着要"。登记结果用于三件事：
+    //   · 多信号共存的一次性视图（`LogSummary`：名字/分辨率/是否需升采样/引导参数）；
+    //   · 历史纹理的统一分配账（`DenoiseHistoryPool::LogSummary` 逐条报出占用）；
+    //   · 半分辨率信号必须"降噪后再升采样"这一条（`needsUpscale`）。
+    // 每帧先 Clear：信号集合是**当帧事实**，不该残留上一帧已关闭的源。
+    // ============================================================
+    {
+        m_DenoiseSignals.Clear();
+        rhi::IRHITexture* dnDepth    = m_GBuffer->GetDepth();
+        rhi::IRHITexture* dnNormal   = m_GBuffer->GetNormal();
+        rhi::IRHITexture* dnVelocity = m_GBuffer->GetVelocity();
+        for (auto& prov : m_GIProviders) {
+            prov->DescribeSignals(m_DenoiseSignals, dnDepth, dnNormal, dnVelocity);
+        }
+        m_DenoiseSignals.LogSummary("GI");
+
+        // 历史纹理池的占用账：只在**条数变化**时打印（初始化/尺寸变化各一次），
+        // 否则每帧刷屏。池里的纹理是 Acquire 时才建的，故必须等到有人真的取过历史
+        // 之后来看，才不会漏报 —— 这正是"信号登记"这一刻。
+        static u32 s_LastPoolCount = 0xFFFFFFFFu;
+        const u32 poolCount = m_DenoiseHistoryPool.Count();
+        if (poolCount != s_LastPoolCount) {
+            s_LastPoolCount = poolCount;
+            m_DenoiseHistoryPool.LogSummary("HistoryPool");
+        }
+    }
+
     {
         auto* giIBL = dynamic_cast<GI_IBL*>(m_GI.get());
         if (giIBL) {
@@ -866,6 +1197,10 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     if (ssrProduced) {
         lightingReads.push_back({ssrDenoised, ResourceAccess::Read});
     }
+    // Lumen 输出：本帧产出才声明读依赖（与 SSGI/SSR 同一判据：pass 注册了才算产出）
+    if (lumenProduced && lumenHandle != kInvalidHandle) {
+        lightingReads.push_back({lumenHandle, ResourceAccess::Read});
+    }
     // RT GI 纹理（层栈启用 RTGI 时）需声明读取依赖，保证屏障正确
     ResourceHandle rtGILightingHandle = kInvalidHandle;
     if (rtGITex) {
@@ -882,7 +1217,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         // 这里把光照输入的解析结果一并按值捕获。
         [&, w, h,
          ssgiProduced, ssgiFinalTex, ssrProduced, ssrFinalTex, rsmPassRegistered, rsmIndirectTex,
-         rtGITex, rtShadowTex, rtAOTex, rtReflectionTex, fpc](rhi::IRHICommandList* c) {
+         rtGITex, rtShadowTex, rtAOTex, rtReflectionTex,
+         lumenProduced, lumenTex, lumenSampler, fpc](rhi::IRHICommandList* c) {
             // IBL 生成（天空盒 → Irradiance/Prefilter/BRDF LUT，脏时才重建）+ 绑定到 Lighting 描述符集
             auto* giIBL = dynamic_cast<GI_IBL*>(m_GI.get());
             if (giIBL) {
@@ -953,6 +1289,10 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                              ? (ssrFinalTex ? ssrFinalTex : m_SSR.GetIndirectSpecularTexture())
                              : nullptr;
             in.ssrSampler  = ssrProduced ? m_SSR.GetOutputSampler() : nullptr;
+            // Lumen（binding 32）：本帧没产出就传 nullptr —— LightingPass 会回绑黑色占位
+            // （= 无间接光）。传一张没写过的纹理会让描述符"看起来合法"，故障静默（§9.2-T）。
+            in.lumenTex     = lumenProduced ? lumenTex : nullptr;
+            in.lumenSampler = lumenProduced ? lumenSampler : nullptr;
             in.ddgiProbeBuffer = m_DDGI.GetProbeBuffer();
             in.ddgiGridUniform = m_DDGI.GetGridUniform();
             // RSM 间接光（有 RSM 渲染时喂给 Lighting——shader 内 rsmIndirect 分支）
@@ -1332,6 +1672,52 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
 
     // ── 帧末：保存当前帧 VP 供下一帧使用 ──
     m_PrevViewProj = m_CurrViewProj;
+}
+
+// ============================================================
+// 步骤 37：整帧预算的读数（L6 帧时判据）
+//
+// 为什么需要它：`GITimer` 只给"每个源"的耗时，而 L6 的判据是**整帧**（1080p / 60fps）。
+// 两者之间隔着两大块此前完全没有读数：图形侧的各 pass（Shadow / GBuffer / Lighting / 后处理），
+// 以及各源的**附属 pass**（降噪 / 重建升采样 —— 步骤 36 又给四种光追效果各加了 4 个全屏 pass）。
+// 这里把 `ProfilerManager` 的逐 pass 时间加起来当整帧 GPU 时间，并把附属 pass 单列，
+// 于是"离 60fps 还差多少、差在谁身上"可以直接读出来，而不是靠估。
+// ============================================================
+void DeferredPipeline::LogFrameBudget() {
+    const auto& pdata = m_Profiler.GetLastFrameData();
+    if (pdata.empty()) return;
+
+    float total = 0.0f;
+    std::vector<const ProfilerManager::PassProfile*> sorted;
+    sorted.reserve(pdata.size());
+    for (const auto& p : pdata) {
+        if (p.gpuMs < 0.0f) continue;   // 未使用的 pass
+        total += p.gpuMs;
+        sorted.push_back(&p);
+    }
+    if (sorted.empty()) return;
+    std::sort(sorted.begin(), sorted.end(),
+              [](const auto* a, const auto* b) { return a->gpuMs > b->gpuMs; });
+
+    HE_CORE_INFO("帧预算（步骤 37，1080p）: 各 pass 合计 {:.3f} ms ⇒ 上限 {:.1f} fps；共 {} 个 pass",
+                 (double)total, total > 0.0f ? 1000.0 / (double)total : 0.0, (u32)sorted.size());
+    const u32 kTop = std::min<u32>(8u, (u32)sorted.size());
+    std::string top;
+    char buf[96];
+    for (u32 i = 0; i < kTop; ++i) {
+        std::snprintf(buf, sizeof(buf), "%s %.2f", sorted[i]->name.c_str(), (double)sorted[i]->gpuMs);
+        if (!top.empty()) top += " / ";
+        top += buf;
+    }
+    HE_CORE_INFO("   最重的 {} 个: {}", kTop, top);
+
+    // 各源的"附属 pass"（降噪 / 升采样）—— 步骤 37 起才进入读数
+    for (size_t i = 0; i < m_GIProviders.size(); ++i) {
+        const float aux = m_GITimer.AvgMs(GITimer::kAuxItemBase + (u32)i);
+        if (aux > 0.02f) {
+            HE_CORE_INFO("   附属 pass（{}）: {:.3f} ms", m_GIProviders[i]->GetName(), (double)aux);
+        }
+    }
 }
 
 } // namespace he::render

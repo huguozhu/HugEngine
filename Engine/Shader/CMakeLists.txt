@@ -87,6 +87,9 @@ if(SLANGC)
         "${SHADER_DIR}/GI/SSGI.frag.slang"
         "${SHADER_DIR}/GI/SSR.frag.slang"
         "${SHADER_DIR}/GI/RSM_Indirect.frag.slang"
+        # Lumen（虚拟化几何 GI）——骨架阶段的占位输出，步骤 20 起被 ScreenProbeGather 替换
+        "${SHADER_DIR}/Lumen/Lumen_Skeleton.frag.slang"
+        "${SHADER_DIR}/Lumen/Lumen_Irradiance.frag.slang"
         # AntiAliasing
         "${SHADER_DIR}/AntiAliasing/TAA_Resolve.frag.slang"
         "${SHADER_DIR}/AntiAliasing/FXAA.frag.slang"
@@ -96,6 +99,7 @@ if(SLANGC)
         # PostProcess
         "${SHADER_DIR}/PostProcess/ToneMap.frag.slang"
         "${SHADER_DIR}/PostProcess/Denoise.frag.slang"
+        "${SHADER_DIR}/PostProcess/Denoise_Upscale.frag.slang"
         "${SHADER_DIR}/PostProcess/RT_DenoiseTemporal.frag.slang"
         "${SHADER_DIR}/PostProcess/GaussianBlur.frag.slang"
         "${SHADER_DIR}/PostProcess/BrightPass.frag.slang"
@@ -135,6 +139,27 @@ if(SLANGC)
         "${SHADER_DIR}/AI/AITensorAdd.comp.slang"
         "${SHADER_DIR}/AI/AITextureSample.comp.slang"
         "${SHADER_DIR}/AI/AITextureGen.comp.slang"
+        # Lumen（虚拟化几何 GI）——步骤 8：逐 mesh 距离场（scatter/convert）；步骤 10：Global SDF；步骤 11：sphere tracing
+        "${SHADER_DIR}/Lumen/SDF_MeshScatter.comp.slang"
+        "${SHADER_DIR}/Lumen/SDF_MeshFlood.comp.slang"
+        "${SHADER_DIR}/Lumen/SDF_MeshFloodSeeds.comp.slang"
+        "${SHADER_DIR}/Lumen/SDF_MeshConvert.comp.slang"
+        "${SHADER_DIR}/Lumen/SDF_GlobalBuild.comp.slang"
+        "${SHADER_DIR}/Lumen/SDF_LayerProbe.comp.slang"
+        "${SHADER_DIR}/Lumen/SDF_RayMarch.comp.slang"
+        "${SHADER_DIR}/Lumen/SDF_RayMarchDetail.comp.slang"
+        "${SHADER_DIR}/Lumen/SDF_DebugView.comp.slang"
+        "${SHADER_DIR}/Lumen/SurfaceCache_PageCheck.comp.slang"
+        "${SHADER_DIR}/Lumen/SurfaceCache_Capture.comp.slang"
+        "${SHADER_DIR}/Lumen/SurfaceCache_Feedback.comp.slang"
+        "${SHADER_DIR}/Lumen/ScreenProbe_Gather.comp.slang"
+        "${SHADER_DIR}/Lumen/ScreenProbe_Trace.comp.slang"
+        "${SHADER_DIR}/Lumen/Lumen_SurfaceCacheSample.comp.slang"
+        "${SHADER_DIR}/Lumen/Lumen_ScreenProbe_SHProject.comp.slang"
+        "${SHADER_DIR}/Lumen/ScreenProbe_Filter.comp.slang"
+        "${SHADER_DIR}/Lumen/Lumen_ProbeIrradiance.comp.slang"
+        "${SHADER_DIR}/Lumen/Lumen_FarFieldCompare.comp.slang"
+        "${SHADER_DIR}/Lumen/Lumen_FarFieldMerge.comp.slang"
         # Utility
         "${SHADER_DIR}/Utility/WorkGraph_Entry.comp.slang"
         "${SHADER_DIR}/Utility/TestClear.comp.slang"
@@ -168,6 +193,7 @@ if(SLANGC)
         "${SHADER_DIR}/RayTracing/RT_Reflection.rchit.slang"
         "${SHADER_DIR}/RayTracing/RT_Reflection.rmiss.slang"
         "${SHADER_DIR}/RayTracing/RT_GI.rgen.slang"
+        "${SHADER_DIR}/Lumen/Lumen_FarField.rgen.slang"
         "${SHADER_DIR}/RayTracing/RT_GI.rchit.slang"
         "${SHADER_DIR}/RayTracing/RT_GI.rmiss.slang"
         # DDGI 探针射线的光追 march（任务 17 / B4；复用 RT_GI 的 rchit/rmiss）
@@ -195,6 +221,8 @@ if(SLANGC)
         "${SHADER_DIR}/RT_DDGI.slang"
         "${SHADER_DIR}/RT_HitCommon.slang"
         "${SHADER_DIR}/Particles/ParticleTypes.slang"
+        "${SHADER_DIR}/Lumen/SurfaceCache.slang"
+        "${SHADER_DIR}/Lumen/ScreenProbe.slang"
     )
 
     set(COMPILE_SOURCES ${VERT_SLANG} ${FRAG_SLANG} ${COMP_SLANG} ${RT_SLANG} ${MESH_SLANG})

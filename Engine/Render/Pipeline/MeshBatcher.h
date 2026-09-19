@@ -53,6 +53,13 @@ public:
     const std::vector<IndirectDrawCommand>& GetDrawCommands() const { return m_Commands; }
     u32 GetCommandCount() const { return (u32)m_Commands.size(); }
 
+    // ── Lumen Mesh SDF 构建（步骤 8）需要的 CPU 侧几何 ──
+    // 合并缓冲本身是 Vertex/Index usage，不能当 Storage 读，故 SDF 构建要用这两份 CPU 数据
+    // 另建自己的只读缓冲。几何**未施加任何变换**（与 GPUScene 的 per-object 变换配套），
+    // 因此 SDF 建在**网格局部空间**，与 @ref GetDrawCommands 的 (firstIndex, vertexOffset) 配套。
+    const std::vector<StaticVertex>& GetMergedVertices() const { return m_MergedVertices; }
+    const std::vector<u32>&          GetMergedIndices()  const { return m_MergedIndices; }
+
     /// 将 draw 参数写入 GPUScene 对象（按 Build 顺序，objectIndex 匹配）
     void FillGPUScene(class GPUScene& scene) const;
 

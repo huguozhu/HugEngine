@@ -20,6 +20,7 @@
 #include "RT/RTEffectPass.h"
 #include "PostProcess/RTDenoiser.h"
 #include "PostProcess/Denoiser.h"
+#include "PostProcess/DenoiseUpscale.h"   // 步骤 36：链尾的重建升采样级
 #include "Pipeline/RTPass.h"
 #include <vector>
 
@@ -39,27 +40,37 @@ public:
     // 隐式约定：加第三级就必须改 `GetAuxPassInput` / `RenderAux` 里那串 if/else。
     // 现在加一级只需 push 一个 stage（§4.4.2 的第 2 条不统一）。
     void SetAS(RTPass* as) { m_AS = as; }
-    void SetShadowPass(RTShadowPass* pass, RTDenoiser* temporal) {
+    // 【步骤 36】链尾追加"重建升采样"级：光追四种效果都是**亚分辨率**产出
+    //（RT 阴影/RTAO/RT 反射 = 1/2、RTGI = 1/4），此前由合成端的双线性采样"顺带"放大。
+    // 升采样级不走 `m_Stages`：它不是"又一级滤波"，而是**链的出口形状** ——
+    // 是否启用取决于"主输出是否低于消费端分辨率"（运行时可知），放进 m_Stages 就得每帧增删。
+    void SetShadowPass(RTShadowPass* pass, RTDenoiser* temporal, DenoiseUpscale* upscale = nullptr) {
         m_Shadow = pass;
         m_Stages.clear();
         if (temporal) m_Stages.push_back(Stage::Temporal(temporal, "RT_Shadow_Denoise"));
+        SetUpscale(upscale, "RT_Shadow_Upscale");
     }
-    void SetAOPass(RTAOPass* pass, RTDenoiser* temporal) {
+    void SetAOPass(RTAOPass* pass, RTDenoiser* temporal, DenoiseUpscale* upscale = nullptr) {
         m_AO = pass;
         m_Stages.clear();
         if (temporal) m_Stages.push_back(Stage::Temporal(temporal, "RT_AO_Denoise"));
+        SetUpscale(upscale, "RT_AO_Upscale");
     }
-    void SetReflectionPass(RTReflectionPass* pass, RTDenoiser* temporal, Denoiser* spatial) {
+    void SetReflectionPass(RTReflectionPass* pass, RTDenoiser* temporal, Denoiser* spatial,
+                           DenoiseUpscale* upscale = nullptr) {
         m_Reflection = pass;
         m_Stages.clear();
         if (temporal) m_Stages.push_back(Stage::Temporal(temporal, "RT_Reflection_Temporal"));
         if (spatial)  m_Stages.push_back(Stage::SpatialPass(spatial, "RT_Reflection_Denoise"));
+        SetUpscale(upscale, "RT_Reflection_Upscale");
     }
-    void SetGIPass(RTGIPass* pass, RTDenoiser* temporal, Denoiser* spatial) {
+    void SetGIPass(RTGIPass* pass, RTDenoiser* temporal, Denoiser* spatial,
+                   DenoiseUpscale* upscale = nullptr) {
         m_GI = pass;
         m_Stages.clear();
         if (temporal) m_Stages.push_back(Stage::Temporal(temporal, "RT_GI_Temporal"));
         if (spatial)  m_Stages.push_back(Stage::SpatialPass(spatial, "RT_GI_Denoise"));
+        SetUpscale(upscale, "RT_GI_Upscale");
     }
     /// RTGI 的 miss 回退需要 DDGI 探针（由帧图注入）
     void SetDDGIFallback(rhi::IRHIBuffer* probeBuffer, rhi::IRHIBuffer* gridUniform) {
@@ -88,6 +99,18 @@ public:
     }
     /// 由帧图每帧告知「阴影枚举当前是否选择 RT 阴影」
     void SetRTShadowWanted(bool wanted) { m_RTShadowWanted = wanted; }
+    /// 同步到层栈：本效果**本帧会不会真的产出**。
+    /// 【为什么需要它】`IsValid()` 只说明"pass 对象在"（四种效果一创建就恒为真），
+    /// 它不代表本帧的层栈要求了这个源。步骤 34 的信号登记如果只看 `IsValid()`，
+    /// 就会把"配置里存在、当帧根本不跑"的效果也登记成待降噪信号 —— 那样
+    /// `LogSummary()` 报出的"多信号共存"是假的（默认配置下 4 个 RT 信号全被登记，
+    /// 而 RG pass 列表里一个 RT pass 都没有）。当帧事实只能由层栈决定。
+    void SyncToStack(const GIChannelStack& stack) override {
+        m_Wanted = IsValid() &&
+            (m_Effect == Effect::Shadow ? m_RTShadowWanted : stack.Has(GetSourceId()));
+    }
+    /// 本帧是否真的产出（见 `IGIProvider::ProducedThisFrame` 的说明）：转储与信号登记都按它判定
+    [[nodiscard]] bool ProducedThisFrame() const override { return m_Wanted; }
     /// 由帧图每帧告知「DDGI 是否自己也是漫反射层栈的源」。
     /// 为真时 GI 的 miss 分支不得回退 DDGI，否则 DDGI 信息被用两次、归一化失去无偏性（§9.2-I）。
     void SetDDGIInStack(bool inStack) { m_DDGIInStack = inStack; }
@@ -118,11 +141,25 @@ public:
         return m_Effect == Effect::AO ? m_AO->GetOutput() : nullptr;
     }
 
-    // ── 附属 pass：降噪链（时域累积 →（反射/GI）空间滤波）──
+    // ── 附属 pass：降噪链（时域累积 →（反射/GI）空间滤波 →（亚分辨率时）重建升采样）──
     // 索引在**已就绪的** stage 上紧凑编号（与改造前一致：时域未就绪时空间滤波前移为 0），
-    // 输入取自链上前一级的输出，第一级取主 pass 输出。
-    [[nodiscard]] u32 GetAuxPassCount() const override { return ActiveStageCount(); }
+    // 输入取自链上前一级的输出，第一级取主 pass 输出。升采样级**总在最后**（见 IsUpscaleStage）。
+    [[nodiscard]] u32 GetAuxPassCount() const override {
+        return ActiveStageCount() + (UpscaleActive() ? 1u : 0u);
+    }
+    /// 第 i 级是否是链尾的升采样级（只有它能改变输出的分辨率）
+    [[nodiscard]] bool IsUpscaleStage(u32 i) const {
+        return UpscaleActive() && i == ActiveStageCount();
+    }
+    /// 链尾升采样是否生效：主输出低于消费端（= 深度图）分辨率，且升采样级就绪
+    [[nodiscard]] bool UpscaleActive() const {
+        if (!m_Upscale || !m_Upscale->IsReady()) return false;
+        rhi::IRHITexture* main = MainOutput();
+        if (!main || !m_Depth) return false;
+        return m_Depth->GetWidth() > main->GetWidth() || m_Depth->GetHeight() > main->GetHeight();
+    }
     [[nodiscard]] const char* GetAuxPassName(u32 i) const override {
+        if (IsUpscaleStage(i)) return m_UpscaleName;
         const Stage* st = ActiveStageAt(i);
         return st ? st->name : "";
     }
@@ -130,6 +167,7 @@ public:
         return StageInput(i);
     }
     [[nodiscard]] rhi::IRHITexture* GetAuxPassOutput(u32 i) const override {
+        if (IsUpscaleStage(i)) return m_Upscale ? m_Upscale->GetOutput() : nullptr;
         const Stage* st = ActiveStageAt(i);
         return st ? StageOutput(*st) : nullptr;
     }
@@ -149,15 +187,23 @@ public:
         // （例如 RTGI 的光线追踪管线、或带深度附件的图形 PSO），Framebuffer 附件数就会与
         // RenderPass 不匹配：校验层报 VUID-VkFramebufferCreateInfo-attachmentCount-00876，
         // 实测更严重 —— 设备直接挂住，进程再也不会推进（启用 RTGI 时稳定复现，见 §9.2-V）。
+        if (IsUpscaleStage(i)) { if (m_Upscale) m_Upscale->PreBind(cmd); return; }
         const Stage* st = ActiveStageAt(i);
         if (!st) return;
         if (st->kind == Stage::Kind::Temporal) st->temporal->PreBind(cmd);
         else                                   st->spatial->PreBind(cmd);
     }
     void RenderAux(rhi::IRHICommandList* cmd, u32 i, const GIProviderContext& /*ctx*/) override {
+        rhi::IRHITexture* input = StageInput(i);
+        if (IsUpscaleStage(i)) {
+            if (!m_Upscale) return;
+            // 引导用**全分辨率**的深度/法线（升采样的意义就在这里：低分辨率信号 + 全分辨率引导）
+            m_Upscale->SetInputs(input, m_Depth, m_Normal);
+            m_Upscale->Render(cmd);
+            return;
+        }
         const Stage* st = ActiveStageAt(i);
         if (!st) return;
-        rhi::IRHITexture* input = StageInput(i);
         if (st->kind == Stage::Kind::Temporal) {
             st->temporal->SetInputs(input, m_Depth, m_Normal, m_Velocity);
             st->temporal->Render(cmd);
@@ -176,6 +222,47 @@ public:
         m_Depth = depth; m_Normal = normal; m_Albedo = albedo;
     }
     void SetVelocity(rhi::IRHITexture* velocity) { m_Velocity = velocity; }
+
+    /// 【步骤 34（11.3）】把本 RT 效果的降噪信号登记进统一框架。
+    /// 四种效果共用一份实现：信号名取 `GetName()`，输出取链尾输出（时域/空间滤波之后）——
+    /// 降噪链**本身就是**这个信号的时域部分，框架只需知道「谁是谁」才能做
+    /// 历史池预算统计、半分辨率检测和统一的数值判据。
+    /// `needsUpscale` 不靠配置猜：直接比尺寸（主输出比深度图小 ⇒ 半分辨率 ⇒ 需要升采样）。
+    void DescribeSignals(DenoiseSignalRegistry& registry, rhi::IRHITexture* depth,
+                         rhi::IRHITexture* normal, rhi::IRHITexture* velocity) override {
+        if (!ProducedThisFrame()) return;   // 本帧层栈没要这个源 ⇒ 它不是当帧事实（见 SyncToStack）
+        rhi::IRHITexture* main = MainOutput();
+        if (!main) return;
+        DenoiseSignal s;
+        s.name       = GetName();
+        s.input      = main;
+        s.output     = FinalOutput();
+        s.depth      = depth;
+        s.normal     = normal;
+        s.velocity   = velocity;
+        s.width      = main->GetWidth();
+        s.height     = main->GetHeight();
+        s.targetWidth  = s.width;
+        s.targetHeight = s.height;
+        // 半分辨率判别按实测尺寸，不按设置项：输出比深度图小就是亚分辨率。
+        // 【步骤 36】此时链尾的升采样级**已经在跑**（`UpscaleActive()` 就是按尺寸判的），
+        // 于是 `output` 是全分辨率的重建结果、`needsUpscale` 表示"本条信号经过了重建"。
+        if (depth && (depth->GetWidth() > s.width || depth->GetHeight() > s.height)) {
+            s.needsUpscale = UpscaleActive();
+            s.targetWidth  = depth->GetWidth();
+            s.targetHeight = depth->GetHeight();
+        }
+        // 引导参数取自空间滤波级（时域级的 depthThreshold/normalThreshold 语义不同，
+        // 不是这里的 depthSigma/normalSigma）；纯时域链就用默认值。
+        for (const Stage& st : m_Stages) {
+            if (st.kind == Stage::Kind::Spatial && st.spatial) {
+                s.depthSigma  = st.spatial->GetDepthSigma();
+                s.normalSigma = st.spatial->GetNormalSigma();
+                break;
+            }
+        }
+        registry.Register(s);
+    }
 
     /// 主 pass：向 GBuffer 有效像素发射射线
     void Render(rhi::IRHICommandList* cmd, const GIProviderContext& ctx) override;
@@ -197,6 +284,12 @@ private:
             return Stage{ Kind::Spatial, nullptr, d, n };
         }
     };
+
+    /// 【步骤 36】链尾升采样级的注入（四处的 SetXP 都调它，名字随效果）
+    void SetUpscale(DenoiseUpscale* upscale, const char* name) {
+        m_Upscale = upscale;
+        m_UpscaleName = name;
+    }
 
     /// 该级是否可用（滤波器就绪才注册它的 pass）
     [[nodiscard]] static bool StageReady(const Stage& s) {
@@ -245,9 +338,13 @@ private:
         default:                 return m_GI->GetOutput();
         }
     }
-    /// 最终输出：链上最后一级的输出 → 主输出
+    /// 最终输出：链尾升采样级 → 链上最后一级 → 主输出
     /// （顺序由 `m_Stages` 决定，不再由"空间优先于时域"这种硬编码规则决定）
     [[nodiscard]] rhi::IRHITexture* FinalOutput() const {
+        if (UpscaleActive()) {
+            rhi::IRHITexture* up = m_Upscale->GetOutput();
+            if (up) return up;
+        }
         const u32 n = ActiveStageCount();
         if (n == 0u) return MainOutput();
         const Stage* last = ActiveStageAt(n - 1u);
@@ -257,12 +354,15 @@ private:
 
     Effect m_Effect;
     bool   m_RTShadowWanted = false;
+    bool   m_Wanted = false;   // 本帧层栈是否要求本效果（由 SyncToStack 每帧写入）
 
     RTPass*           m_AS         = nullptr;
     RTShadowPass*     m_Shadow     = nullptr;
     RTAOPass*         m_AO         = nullptr;
     RTReflectionPass* m_Reflection = nullptr;
     RTGIPass*         m_GI         = nullptr;
+    DenoiseUpscale*   m_Upscale    = nullptr;   // 链尾升采样级（非拥有，管线持有）
+    const char*       m_UpscaleName = "RT_Upscale";
     std::vector<Stage> m_Stages;   // 降噪链（顺序即执行顺序）
 
     rhi::IRHITexture* m_Depth    = nullptr;

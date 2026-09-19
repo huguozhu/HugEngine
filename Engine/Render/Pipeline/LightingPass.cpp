@@ -108,6 +108,8 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
     bindTex(kGPUBinding_SSGI, in.ssgiTex, in.ssgiSampler, black);
     bindTex(kGPUBinding_SSAO_DL, in.ssaoTex, m_HDRSampler.get());
     bindTex(kGPUBinding_SSR, in.ssrTex, in.ssrSampler, black);
+    // Lumen 输出（binding 32）。与 SSGI/SSR 同一约定：本帧没产出就回绑黑色占位（无间接光）
+    bindTex(kGPUBinding_Lumen, in.lumenTex, in.lumenSampler, black);
 
     // ── 绑定 DDGI 探针 ──
     if (in.ddgiProbeBuffer && m_Device)
@@ -279,6 +281,8 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
         {kGPUBinding_RT_GI, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // RT GI
         {kGPUBinding_LightmapKey, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // 光照图键（任务 31）
         {kGPUBinding_GIBlendParams, rhi::DescriptorType::UniformBuffer, 1, rhi::kStageMaskFragment},  // GI 分层合成参数 UBO
+        // Lumen 输出（0~31 已占满，取 32）。必须在布局里出现，否则 shader 采样到未绑定描述符
+        {kGPUBinding_Lumen, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment},  // Lumen 输出
     };
     m_Layout = device->CreateDescriptorSetLayout(ll);
     // 每飞行帧一份：逐帧轮换的资源各自绑进自己槽位的集合（§9.2-J）
@@ -367,6 +371,8 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
             updateAllTex(kGPUBinding_SSGI, m_PlaceholderBlack.get());
             updateAllTex(kGPUBinding_SSAO_DL, m_PlaceholderWhite.get());
             updateAllTex(kGPUBinding_SSR, m_PlaceholderBlack.get());
+            // Lumen 输出（binding 32）→ 黑色（无间接光）。与 SSGI/SSR 同理：未产出时必须是中性值
+            updateAllTex(kGPUBinding_Lumen, m_PlaceholderBlack.get());
 
             // RSM 位置/通量图（15/16）→ 黑色：
             // 这两张**不能**用白色占位。对 u_RSMPositionMap，白色是 worldPos≈(1,1,1)；

@@ -1,0 +1,2267 @@
+#include "Lumen/LumenSDF.h"
+
+#include "Core/Assert.h"
+#include "Core/Log.h"
+#include "SDF_DebugView.comp.spv.h"
+#include "SDF_GlobalBuild.comp.spv.h"
+#include "SDF_LayerProbe.comp.spv.h"
+#include "SDF_MeshConvert.comp.spv.h"
+#include "SDF_MeshFlood.comp.spv.h"
+#include "SDF_MeshFloodSeeds.comp.spv.h"
+#include "SDF_MeshScatter.comp.spv.h"
+#include "SDF_RayMarch.comp.spv.h"
+#include "SDF_RayMarchDetail.comp.spv.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+
+namespace he::render {
+
+namespace {
+// 描述符集绑定（与 SDF_MeshBuild.comp.slang 一致）
+constexpr u32 kBindField    = 0;   // RWTexture3D<float>
+constexpr u32 kBindPosition = 1;   // StructuredBuffer<float4>
+constexpr u32 kBindIndex    = 2;   // StructuredBuffer<uint>
+constexpr u32 kBindProbe    = 3;   // RWStructuredBuffer<float>
+
+// push constant（与 shader 的 BuildPC 一致：3 × 16B = 48B）
+struct BuildPC {
+    float    originX, originY, originZ, voxelSize;
+    u32      dimX, dimY, dimZ, meshIndex;
+    u32      triCount, indexOffset, vertexOffset, probeStride;
+};
+static_assert(sizeof(BuildPC) == 48, "BuildPC 必须与 shader 的 3×16B 布局一致");
+// 三个 mesh 级 shader 共用同一段 3×16B：
+//   scatter：dims.w = mode（0 清空 / 1 逐三角形写入）、ranges = (三角形数, 索引起始, 顶点偏移, 未用)
+//   convert：dims.w = mesh 序号（0 = 写自检探针）、ranges.w = 探针步长
+
+// ── Global SDF（步骤 10）──
+constexpr u32 kGBindGlobal     = 0;   // RWTexture3D<uint>
+constexpr u32 kGBindGlobalOut  = 1;   // RWTexture3D<float>
+constexpr u32 kGBindMeshField  = 2;   // Texture3D<float>
+constexpr u32 kGBindMeshSampler= 3;   // SamplerState
+constexpr u32 kGBindProbe      = 4;   // RWStructuredBuffer<float>
+
+// 与 SDF_GlobalBuild.comp.slang 的 GlobalPC 一致：6 × 16B = 96B
+struct GlobalPC {
+    float originX, originY, originZ, voxelSize;
+    u32   dimX, dimY, dimZ, mode;
+    u32   rangeLoX, rangeLoY, rangeLoZ, probeStride;
+    u32   rangeHiX, rangeHiY, rangeHiZ, pad0;
+    float meshOriginX, meshOriginY, meshOriginZ, meshVoxelSize;
+    u32   meshDimX, meshDimY, meshDimZ, pad1;
+};
+static_assert(sizeof(GlobalPC) == 96, "GlobalPC 必须与 shader 的 6×16B 布局一致");
+
+// 与 SDF_MeshFlood.comp.slang 的 FloodPC 一致：3 × 16B = 48B（dims.w = 本次洪泛步长）
+struct FloodPC {
+    float originX, originY, originZ, voxelSize;
+    u32   dimX, dimY, dimZ, stride;
+    u32   pad0, pad1, pad2, pad3;
+};
+static_assert(sizeof(FloodPC) == 48, "FloodPC 必须与 shader 的 3×16B 布局一致");
+} // namespace
+
+bool LumenSDF::Initialize(rhi::IRHIDevice* device, const LumenSDFConfig& config) {
+    if (!device) return false;
+    m_Device = device;
+    m_Config = config;
+    // 分辨率取 2 的幂且至少 8：网格映射与自检采样都按整除处理
+    if (m_Config.resolution < 8) m_Config.resolution = 8;
+    CreateGPUObjects();
+    HE_CORE_INFO("LumenSDF: 初始化（分辨率 {}³，mesh 上限 {}，每 mesh 三角形上限 {}，每帧预算 {}）",
+                 m_Config.resolution, m_Config.maxMeshes, m_Config.maxTrisPerMesh, m_Config.meshesPerFrame);
+    return m_PSO != nullptr;
+}
+
+void LumenSDF::Shutdown() {
+    m_Entries.clear();
+    m_ProbeDist.reset();
+    m_Indices.reset();
+    m_Positions.reset();
+    m_PSO.reset();
+    m_Device = nullptr;
+    m_Phase = Phase::Idle;
+    m_Done = false;
+    m_SelfCheck = SelfCheck{};
+}
+
+u64 LumenSDF::GetMemoryBytes() const {
+    u64 bytes = 0;
+    for (const auto& e : m_Entries) {
+        bytes += (u64)e.resolution * e.resolution * e.resolution * 2ull;   // R16F（步骤 8 的测算口径）
+    }
+    return bytes;
+}
+
+void LumenSDF::CreateGPUObjects() {
+    // push constant 范围必须显式声明：shader 用了 48B 的 BuildPC，
+    // 少了它 vkCreatePipelineLayout 与 SPIR-V 不匹配（PSO 创建失败 → 之后 SetPipeline(nullptr)）。
+    rhi::PushConstantRange pcr;
+    pcr.stageMask = rhi::kStageMaskCompute;
+    pcr.offset    = 0;
+    pcr.size      = sizeof(BuildPC);
+
+    // ── scatter（清空 + 每三角形一组的原子最小）──
+    rhi::DescriptorSetLayoutDesc layout;
+    layout.bindings = {
+        {kBindField,    rhi::DescriptorType::StorageImage,  1, rhi::kStageMaskCompute},
+        {kBindPosition, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+        {kBindIndex,    rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+    };
+    m_Layout = m_Device->CreateDescriptorSetLayout(layout);
+    m_Set    = m_Device->AllocateDescriptorSet(m_Layout);
+
+    rhi::ShaderBytecode cs;
+    cs.stage      = rhi::ShaderStage::Compute;
+    cs.spirv      = k_SDF_MeshScatter_comp_spv;
+    cs.entryPoint = "main";
+
+    rhi::PipelineStateDesc pso;
+    pso.bindPoint            = rhi::PipelineBindPoint::Compute;   // 少了它默认按图形管线创建 → PSO 为空
+    pso.computeShader        = &cs;
+    pso.descriptorSetLayouts = {m_Layout};
+    pso.pushConstantRanges   = {pcr};
+    pso.debugName            = "Lumen_SDF_MeshScatter";
+    m_PSO = m_Device->CreatePipelineState(pso);
+    if (!m_PSO) HE_CORE_ERROR("LumenSDF: scatter 的 PSO 创建失败（Mesh SDF 不可用）");
+
+    // ── convert（u32 → R32F + 自检探针）──
+    rhi::DescriptorSetLayoutDesc conv;
+    conv.bindings = {
+        {0, rhi::DescriptorType::StorageImage,  1, rhi::kStageMaskCompute},   // u32 场
+        {1, rhi::DescriptorType::StorageImage,  1, rhi::kStageMaskCompute},   // R32F 输出
+        {2, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},   // 探针
+    };
+    m_ConvertLayout = m_Device->CreateDescriptorSetLayout(conv);
+    m_ConvertSet    = m_Device->AllocateDescriptorSet(m_ConvertLayout);
+    // 每 mesh 一套转换描述符集（输出纹理各不相同）：共用一套会让"同一提交里的多次改写"
+    // 变成描述符集别名 —— 所有转换 dispatch 都写到最后绑定的那张纹理上，其余网格的场保持 0 初值。
+    m_ConvertSets.clear();
+    m_ConvertSets.reserve(m_Config.maxMeshes);
+    for (u32 i = 0; i < m_Config.maxMeshes; ++i)
+        m_ConvertSets.push_back(m_Device->AllocateDescriptorSet(m_ConvertLayout));
+
+    rhi::ShaderBytecode ccs;
+    ccs.stage      = rhi::ShaderStage::Compute;
+    ccs.spirv      = k_SDF_MeshConvert_comp_spv;
+    ccs.entryPoint = "main";
+
+    rhi::PipelineStateDesc cpso;
+    cpso.bindPoint            = rhi::PipelineBindPoint::Compute;
+    cpso.computeShader        = &ccs;
+    cpso.descriptorSetLayouts = {m_ConvertLayout};
+    cpso.pushConstantRanges   = {pcr};
+    cpso.debugName            = "Lumen_SDF_MeshConvert";
+    m_ConvertPSO = m_Device->CreatePipelineState(cpso);
+    if (!m_ConvertPSO) HE_CORE_ERROR("LumenSDF: convert 的 PSO 创建失败");
+
+    // ── 跳步洪泛（补全 scatter 留下的空洞）：与 scatter 共用绑定集与 push constant ──
+    rhi::ShaderBytecode fcs;
+    fcs.stage      = rhi::ShaderStage::Compute;
+    fcs.spirv      = k_SDF_MeshFlood_comp_spv;
+    fcs.entryPoint = "main";
+
+    rhi::PipelineStateDesc fpso;
+    fpso.bindPoint            = rhi::PipelineBindPoint::Compute;
+    fpso.computeShader        = &fcs;
+    fpso.descriptorSetLayouts = {m_Layout};
+    fpso.pushConstantRanges   = {pcr};
+    fpso.debugName            = "Lumen_SDF_MeshFlood";
+    m_FloodPSO = m_Device->CreatePipelineState(fpso);
+    if (!m_FloodPSO) HE_CORE_ERROR("LumenSDF: flood 的 PSO 创建失败");
+
+    // ── 带种子坐标的 JFA（真欧氏距离）：自己一套布局/集合（binding 0 = 距离、1 = 种子坐标）──
+    rhi::DescriptorSetLayoutDesc seedLayout;
+    seedLayout.bindings = {
+        {0, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskCompute},
+        {1, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskCompute},
+    };
+    m_SeedFloodLayout = m_Device->CreateDescriptorSetLayout(seedLayout);
+    m_SeedFloodSet    = m_Device->AllocateDescriptorSet(m_SeedFloodLayout);
+    rhi::ShaderBytecode scs;
+    scs.stage      = rhi::ShaderStage::Compute;
+    scs.spirv      = k_SDF_MeshFloodSeeds_comp_spv;
+    scs.entryPoint = "main";
+    rhi::PipelineStateDesc spso;
+    spso.bindPoint            = rhi::PipelineBindPoint::Compute;
+    spso.computeShader        = &scs;
+    spso.descriptorSetLayouts = {m_SeedFloodLayout};
+    spso.pushConstantRanges   = {pcr};
+    spso.debugName            = "Lumen_SDF_MeshFloodSeeds";
+    m_SeedFloodPSO = m_Device->CreatePipelineState(spso);
+    if (!m_SeedFloodPSO) HE_CORE_ERROR("LumenSDF: 带种子的 JFA PSO 创建失败");
+    if (!m_FloodPSO) HE_CORE_ERROR("LumenSDF: flood 的 PSO 创建失败");
+}
+
+void LumenSDF::BuildQueue(const MeshBatcher& batcher) {
+    const auto& vertices = batcher.GetMergedVertices();
+    const auto& commands = batcher.GetDrawCommands();
+
+    u32 skippedTris = 0, skippedCap = 0;
+    for (u32 c = 0; c < (u32)commands.size(); ++c) {
+        if (m_Entries.size() >= m_Config.maxMeshes) { skippedCap = (u32)commands.size() - c; break; }
+        const auto& cmd = commands[c];
+        const u32 triCount = cmd.indexCount / 3u;
+        if (triCount == 0) continue;
+        if (triCount > m_Config.maxTrisPerMesh) { ++skippedTris; continue; }
+
+        // 该 mesh 的 AABB（顶点未施加变换，与 GPUScene 的 per-object 变换配套）。
+        // 【顶点索引口径】合批时 MeshBatcher 已经把 baseVertex 加进索引（`m_MergedIndices[i] = src[i] + baseVertex`），
+        // 所以这里的索引是**绝对索引**，不能再加 `cmd.vertexOffset` —— 加了就是"双重偏移"，
+        // 会让除第一个 mesh（vertexOffset=0）以外的所有 mesh 读到别的网格甚至越界的顶点，
+        // 距离场因此在空旷处写满 0/垃圾，全局场被 `InterlockedMin` 压成 0。
+        float3 lo(1e30f), hi(-1e30f);
+        for (u32 i = 0; i < cmd.indexCount; ++i) {
+            const u32 vi = batcher.GetMergedIndices()[cmd.firstIndex + i];
+            if (vi >= vertices.size()) continue;
+            const float3 p = vertices[vi].position;
+            lo = float3(std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z));
+            hi = float3(std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z));
+        }
+        if (hi.x < lo.x) continue;   // 没有有效顶点
+
+        // 立方体网格：边长取最长轴，稍加余量，保证最远角也在场内
+        const float3 ext = hi - lo;
+        const float  side = std::max(std::max(ext.x, ext.y), ext.z) * 1.02f + 1e-4f;
+
+        MeshSDFEntry e;
+        e.commandIndex = c;
+        e.firstIndex   = cmd.firstIndex;
+        e.indexCount   = cmd.indexCount;
+        e.vertexOffset = 0;   // 合批索引已是绝对索引（见上面的口径说明），消费侧一律 +0
+        e.triCount     = triCount;
+        e.origin       = lo - float3(side * 0.01f);
+        e.resolution   = m_Config.resolution;
+        e.voxelSize    = side / (float)m_Config.resolution;
+        m_Entries.push_back(std::move(e));
+    }
+
+    // 分辨率/体素边长的量化统计（步骤 9 的"质量边界"）：体素边长直接决定 marching 能分辨的
+    // 最小特征 —— 薄于约 2 个体素的特征在射线步进里不可靠（这是分辨率型精度限制，与几何无关）。
+    if (!m_Entries.empty()) {
+        float minVoxel = 1e30f, maxVoxel = 0.0f;
+        for (const auto& e : m_Entries) {
+            minVoxel = std::min(minVoxel, e.voxelSize);
+            maxVoxel = std::max(maxVoxel, e.voxelSize);
+        }
+        HE_CORE_INFO("LumenSDF 质量边界: 体素边长 {:.4f} ~ {:.4f}（可分辨特征 ≳ {:.4f} ~ {:.4f} 世界单位）；"
+                     "本版为**无符号**距离场（内外符号随步骤 11 的 sphere tracing 一起落）",
+                     (double)minVoxel, (double)maxVoxel, (double)(2.0f * minVoxel), (double)(2.0f * maxVoxel));
+    }
+
+    // 自检探针挑 AABB 最大的 mesh（分辨率相同 ⇒ 体素数最多者）：三方对照里"存 0"的探针落在
+    // 体量最大的网格里，先查它最有信息量。同时把前 5 大的网格打出来，便于把对照表的 meshIdx 对上号。
+    m_ProbeMeshIndex = 0;
+    for (u32 i = 1; i < (u32)m_Entries.size(); ++i) {
+        if (m_Entries[i].voxelSize > m_Entries[m_ProbeMeshIndex].voxelSize) m_ProbeMeshIndex = i;
+    }
+    if (!m_Entries.empty()) {
+        std::vector<u32> order(m_Entries.size());
+        for (u32 i = 0; i < (u32)order.size(); ++i) order[i] = i;
+        std::sort(order.begin(), order.end(), [this](u32 a, u32 b) {
+            return m_Entries[a].voxelSize > m_Entries[b].voxelSize;
+        });
+        std::string s;
+        for (u32 i = 0; i < 5u && i < (u32)order.size(); ++i) {
+            const MeshSDFEntry& e = m_Entries[order[i]];
+            s += " [条目 " + std::to_string(order[i]) + " → 命令 " + std::to_string(e.commandIndex) +
+                 ": 边长 " + std::to_string((int)(e.voxelSize * e.resolution)) + ", " +
+                 std::to_string(e.triCount) + " 三角形]";
+        }
+        HE_CORE_INFO("LumenSDF: AABB 最大的 5 个 mesh（探针选中条目 {}）:{}", m_ProbeMeshIndex, s);
+    }
+    if (skippedTris || skippedCap) {
+        HE_CORE_WARN("LumenSDF: 跳过 {} 个 mesh（三角形数 > {}）与 {} 个 mesh（超出 mesh 上限 {}）",
+                     skippedTris, m_Config.maxTrisPerMesh, skippedCap, m_Config.maxMeshes);
+    }
+    HE_CORE_INFO("LumenSDF: 待构建 {} 个 mesh 距离场（分辨率 {}³，预计显存 {:.2f} MB）",
+                 m_Entries.size(), m_Config.resolution, (double)GetMemoryBytes() / (1024.0 * 1024.0));
+}
+
+void LumenSDF::UploadGeometry(const MeshBatcher& batcher) {
+    const auto& vertices = batcher.GetMergedVertices();
+    const auto& indices  = batcher.GetMergedIndices();
+
+    // 位置：转成 float4（std430 下 StructuredBuffer<float4> 布局确定，避免 float3 的 16B 对齐差异）
+    std::vector<float4> positions(vertices.size());
+    m_PositionsCPU.resize(vertices.size());
+    m_IndicesCPU = indices;   // 自检用的 CPU 副本（与 GPU 走不同数据路径）
+    for (size_t i = 0; i < vertices.size(); ++i) {
+        positions[i] = float4(vertices[i].position, 0.0f);
+        m_PositionsCPU[i] = vertices[i].position;
+    }
+
+    rhi::BufferDesc vb;
+    vb.size        = positions.size() * sizeof(float4);
+    vb.usage       = rhi::BufferUsage::Storage;
+    vb.initialData = positions.data();
+    m_Positions = m_Device->CreateBuffer(vb);
+
+    rhi::BufferDesc ib;
+    ib.size        = indices.size() * sizeof(u32);
+    ib.usage       = rhi::BufferUsage::Storage;
+    ib.initialData = indices.data();
+    m_Indices = m_Device->CreateBuffer(ib);
+
+    // 自检探针缓冲（CPU 可读）：只统计第 0 个 mesh。步长默认 resolution/4 ⇒ 4³ = 64 个探针，
+    // 因为 CPU 参考要对"全部三角形"遍历，探针一多就慢（128³ 的场不能按体素逐个比对）。
+    if (m_Config.probeStride == 0) m_Config.probeStride = std::max(1u, m_Config.resolution / 4u);
+    const u32 stride = std::max(1u, m_Config.probeStride);
+    const u32 nx = m_Config.resolution / stride;
+    m_ProbeCount = nx * nx * nx;
+    rhi::BufferDesc pb;
+    pb.size      = (usize)m_ProbeCount * std::max(1u, m_Config.maxMeshes) * sizeof(float);
+    pb.usage     = rhi::BufferUsage::Storage;
+    pb.cpuAccess = true;                      // 自检要 Map 读回
+    m_ProbeDist  = m_Device->CreateBuffer(pb);
+
+    // 共享的 u32 距离场（原子最小目标）：逐 mesh 串行复用，不必每个 mesh 一张
+    {
+        rhi::TextureDesc td;
+        td.format = rhi::Format::R32_UINT;
+        td.width = td.height = td.depth = m_Config.resolution;
+        td.usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource;
+        m_MeshScratch = m_Device->CreateTexture(td);
+        // 种子坐标纹理（同样共享、逐 mesh 复用）；8 位/轴的打包要求分辨率 <= 256
+        if (m_Config.resolution > 256u) HE_CORE_WARN("LumenSDF: 分辨率 {} > 256，JFA 的种子坐标打包会溢出", m_Config.resolution);
+        m_MeshSeed = m_Device->CreateTexture(td);
+        // 描述符绑定放在 BakeOne 里首次使用时做：UploadGeometry 跑在 CreateGPUObjects **之前**，
+        // 那时 m_SeedFloodSet 还没分配（写进去是 no-op ⇒ 采样/写入描符未绑定，只涨 VUID 不出效果）。
+
+    }
+
+    m_Device->UpdateDescriptorSet(m_Set, kBindPosition, rhi::DescriptorType::StorageBuffer, m_Positions.get());
+    m_Device->UpdateDescriptorSet(m_Set, kBindIndex,    rhi::DescriptorType::StorageBuffer, m_Indices.get());
+    m_Device->UpdateDescriptorSetWithImageView(m_Set, kBindField, rhi::DescriptorType::StorageImage,
+                                               m_MeshScratch->GetNativeHandle());
+    m_Device->UpdateDescriptorSetWithImageView(m_ConvertSet, 0, rhi::DescriptorType::StorageImage,
+                                               m_MeshScratch->GetNativeHandle());
+    m_Device->UpdateDescriptorSet(m_ConvertSet, 2, rhi::DescriptorType::StorageBuffer, m_ProbeDist.get());
+
+    m_GeometryUploaded = true;
+    HE_CORE_INFO("LumenSDF: 几何已上传（{} 顶点 float4 + {} 索引，探针 {} 点（针对 mesh {}，AABB 最大者），u32 临时场 {:.2f} MB）",
+                 positions.size(), indices.size(), m_ProbeCount, m_ProbeMeshIndex,
+                 (double)((u64)m_Config.resolution * m_Config.resolution * m_Config.resolution * 4ull)
+                     / (1024.0 * 1024.0));
+}
+
+void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
+    MeshSDFEntry& e = m_Entries[entryIndex];
+
+    // 【步骤 37】共享的 scatter/JFA 中间纹理（m_MeshScratch / m_MeshSeed）在 CreateGPUObjects 里
+    // 建好时没有命令列表可用，故在**第一次真正使用**它们的地方（本函数）补一次布局转换 ——
+    // 必须早于本帧的任何存储写。
+    if (!m_MeshScratchTransitioned) {
+        m_MeshScratchTransitioned = true;
+        for (rhi::IRHITexture* t : { m_MeshScratch.get(), m_MeshSeed.get() }) {
+            if (t) cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                                        rhi::ResourceState::Undefined, rhi::ResourceState::UnorderedAccess, t);
+        }
+    }
+
+    // 每 mesh 一张 3D 距离场（**R16F**，可写 + 可采样）：与《Lumen设计与实现》步骤 8 的"≈4.2 MB/mesh"一致，
+    // 比 R32F 省一半显存（近表面值在 fp16 下仍有 ~0.01 单位的分辨率，追踪关心的正是这一段）。
+    rhi::TextureDesc td;
+    td.format = rhi::Format::R16_FLOAT;
+    td.width  = e.resolution;
+    td.height = e.resolution;
+    td.depth  = e.resolution;
+    td.usage  = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource;
+    e.field   = m_Device->CreateTexture(td);
+    if (!e.field) return;
+
+    // 【步骤 37：布局转换必须在**首次写入之前**】这张场纹理是自持存储图像，而 Lumen 的 pass 之间
+    // 只用"全局内存屏障"（不做布局转换）⇒ 它停在 UNDEFINED 上，校验层会报
+    // "expects VK_IMAGE_LAYOUT_GENERAL — instead … UNDEFINED"，按规范此时的存储写是未定义行为。
+    // 必须在**建纹理的这一刻**转换：晚一帧再转（用 Undefined→GENERAL）会把已经写好的场内容
+    // 一起丢掉 —— 这正是"统一在首帧转一次"行不通的原因（mesh 场是逐帧建出来的）。
+    cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                         rhi::ResourceState::Undefined, rhi::ResourceState::UnorderedAccess,
+                         e.field.get());
+
+    BuildPC pc{};
+    pc.originX = e.origin.x; pc.originY = e.origin.y; pc.originZ = e.origin.z;
+    pc.voxelSize   = e.voxelSize;
+    pc.dimX = pc.dimY = pc.dimZ = e.resolution;
+    pc.meshIndex   = entryIndex;
+    pc.triCount    = e.triCount;
+    pc.indexOffset = e.firstIndex;
+    pc.vertexOffset = e.vertexOffset;
+    pc.probeStride = std::max(1u, m_Config.probeStride);
+    e.probeCount   = (entryIndex == m_ProbeMeshIndex) ? m_ProbeCount : 0u;
+
+    // ── ① 清空 u32 场为 +inf：一维线性遍历，组数 = ceil(res³/64) ──
+    cmd->SetPipeline(m_PSO.get());
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
+    pc.meshIndex = 0u;   // scatter 的 mode：0 = 清空
+    cmd->SetPushConstants(0, sizeof(pc), &pc);
+    const u64 voxels = (u64)e.resolution * e.resolution * e.resolution;
+    cmd->Dispatch((u32)((voxels + 63ull) / 64ull), 1, 1);
+    cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                         rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
+                         m_MeshScratch.get());
+
+    // ── ② scatter：一个三角形一个线程组，只扫自己的 AABB ──
+    pc.meshIndex = 1u;   // scatter 的 mode：1 = 逐三角形写入
+    cmd->SetPushConstants(0, sizeof(pc), &pc);
+    cmd->Dispatch(std::max(1u, e.triCount), 1, 1);
+    cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                         rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
+                         m_MeshScratch.get());
+
+    // ── ②b 跳步洪泛：scatter 只写了表面附近的一条带，远处仍是 +inf（= 高估，会穿漏），
+    //      按 res/2, res/4 … 1 逐级松弛补全全场 ──
+    cmd->SetPipeline(m_SeedFloodPSO.get());
+    // 首次使用时一次性写好"距离 + 种子"两张纹理的描述符（此后不再改写，避免在飞行帧里改描述符集）
+    if (!m_SeedSetBound) {
+        m_Device->UpdateDescriptorSetWithImageView(m_SeedFloodSet, 0, rhi::DescriptorType::StorageImage,
+                                                   m_MeshScratch->GetNativeHandle());
+        m_Device->UpdateDescriptorSetWithImageView(m_SeedFloodSet, 1, rhi::DescriptorType::StorageImage,
+                                                   m_MeshSeed->GetNativeHandle());
+        m_SeedSetBound = true;
+    }
+    // 改用带**种子坐标**的 JFA（真欧氏距离）：绑定换成"距离 + 种子"那一套，先立种子
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_SeedFloodSet);
+    {
+        pc.meshIndex = 0u;   // dims.w = 0 ⇒ 种子初始化（带内体素以自己为最近种子）
+        cmd->SetPushConstants(0, sizeof(pc), &pc);
+        const u32 fg = (e.resolution + 3u) / 4u;
+        cmd->Dispatch(fg, fg, fg);
+        cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                             rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
+                             m_MeshSeed.get());
+    }
+    for (u32 s = e.resolution / 2u; s >= 1u; s /= 2u) {
+        pc.meshIndex = s;   // flood 的 dims.w = 本次步长（体素）
+        // **每级多趟**：就地竞争写的跳步洪泛靠"重复松弛到不动点"收敛，趟数太少会让信息推不到位
+        // （远场因此停在 +inf 或初值上）。实测 2 趟时 mesh 场在空旷处是 0/常数 ⇒ 全局场被毒化。
+        for (u32 pass = 0; pass < 2u; ++pass) {
+            cmd->SetPushConstants(0, sizeof(pc), &pc);
+            const u32 fgroups = (e.resolution + 3u) / 4u;
+            cmd->Dispatch(fgroups, fgroups, fgroups);
+            cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                                 rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
+                                 m_MeshSeed.get());
+            cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                                 rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
+                                 m_MeshScratch.get());
+        }
+        if (s == 1u) break;   // 防止 s 折半变 0 造成死循环
+    }
+
+    // ── ③ 转换：u32 → R32F + 写自检探针（**用该 mesh 专属的描述符集**，避免描述符集别名）──
+    rhi::DescriptorSetHandle convSet = (entryIndex < m_ConvertSets.size())
+                                     ? m_ConvertSets[entryIndex] : m_ConvertSet;
+    m_Device->UpdateDescriptorSetWithImageView(convSet, 0, rhi::DescriptorType::StorageImage,
+                                               m_MeshScratch->GetNativeHandle());
+    m_Device->UpdateDescriptorSetWithImageView(convSet, 1, rhi::DescriptorType::StorageImage,
+                                               e.field->GetNativeHandle());
+    m_Device->UpdateDescriptorSet(convSet, 2, rhi::DescriptorType::StorageBuffer, m_ProbeDist.get());
+    cmd->SetPipeline(m_ConvertPSO.get());
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, convSet);
+    pc.meshIndex = 0u;                              // convert 的 dims.w = 0 ⇒ 写自检探针
+    pc.triCount  = entryIndex * m_ProbeCount;       // convert 用 ranges.x 传本 mesh 的探针段基址
+    cmd->SetPushConstants(0, sizeof(pc), &pc);
+    const u32 groups = (e.resolution + 3u) / 4u;
+    cmd->Dispatch(groups, groups, groups);
+
+    // 构建结束转入"可采样"状态：后续步骤（10 注入 / 11 sphere tracing）会读它
+    cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                         rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource,
+                         e.field.get());
+}
+
+void LumenSDF::CreateGlobalGPUObjects() {
+    if (m_GlobalPSO) return;
+
+    rhi::DescriptorSetLayoutDesc layout;
+    layout.bindings = {
+        {kGBindGlobal,      rhi::DescriptorType::StorageImage,  1, rhi::kStageMaskCompute},
+        {kGBindGlobalOut,   rhi::DescriptorType::StorageImage,  1, rhi::kStageMaskCompute},
+        {kGBindMeshField,   rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
+        {kGBindProbe,       rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+    };
+    m_GlobalLayout = m_Device->CreateDescriptorSetLayout(layout);
+    m_GlobalSet    = m_Device->AllocateDescriptorSet(m_GlobalLayout);
+
+    rhi::PushConstantRange pcr;
+    pcr.stageMask = rhi::kStageMaskCompute;
+    pcr.offset    = 0;
+    pcr.size      = sizeof(GlobalPC);
+
+    rhi::ShaderBytecode cs;
+    cs.stage      = rhi::ShaderStage::Compute;
+    cs.spirv      = k_SDF_GlobalBuild_comp_spv;
+    cs.entryPoint = "main";
+
+    rhi::PipelineStateDesc pso;
+    pso.bindPoint            = rhi::PipelineBindPoint::Compute;
+    pso.computeShader        = &cs;
+    pso.descriptorSetLayouts = {m_GlobalLayout};
+    pso.pushConstantRanges   = {pcr};
+    pso.debugName            = "Lumen_SDF_GlobalBuild";
+    m_GlobalPSO = m_Device->CreatePipelineState(pso);
+    if (!m_GlobalPSO) HE_CORE_ERROR("LumenSDF: Global SDF 的 PSO 创建失败");
+
+    // 全局网格上的跳步洪泛：复用 SDF_MeshFlood 这个 shader（它本来就是"任意网格 + 步长"的参数化），
+    // 但**管线布局必须用全局描述符集布局** —— 绑定的描述符集与 pipeline layout 不匹配会直接崩。
+    // 它只声明 binding 0（u32 场），而全局布局的 binding 0 正是层 scratch。
+    rhi::PushConstantRange pcrFlood;
+    pcrFlood.stageMask = rhi::kStageMaskCompute;
+    pcrFlood.offset    = 0;
+    pcrFlood.size      = sizeof(FloodPC);
+
+    rhi::ShaderBytecode fcs;
+    fcs.stage      = rhi::ShaderStage::Compute;
+    fcs.spirv      = k_SDF_MeshFlood_comp_spv;
+    fcs.entryPoint = "main";
+
+    rhi::PipelineStateDesc fpso;
+    fpso.bindPoint            = rhi::PipelineBindPoint::Compute;
+    fpso.computeShader        = &fcs;
+    fpso.descriptorSetLayouts = {m_GlobalLayout};
+    fpso.pushConstantRanges   = {pcrFlood};
+    fpso.debugName            = "Lumen_SDF_GlobalFlood";
+    m_GlobalFloodPSO = m_Device->CreatePipelineState(fpso);
+    if (!m_GlobalFloodPSO) HE_CORE_ERROR("LumenSDF: Global 洪泛的 PSO 创建失败");
+
+    rhi::SamplerDesc sd;
+    sd.minFilter = sd.magFilter = rhi::FilterMode::Nearest;   // 逐体素取值，不能线性插值
+    sd.addressU  = sd.addressV  = sd.addressW = rhi::AddressMode::ClampToEdge;
+    m_NearestSampler = m_Device->CreateSampler(sd);
+
+    // 线性采样器：全局注入（把 mesh 场采到全局网格）与 sphere tracing 都要用，
+    // **必须在注入之前就存在**。此前它只在 CreateMarchGPUObjects 里创建，而那个函数在
+    // WaitGlobalCheck 阶段才跑 —— 也就是在 BuildGlobalField 之后。后果：注入时
+    // `CombinedImageSampler` 没有采样器，引擎报 "缺采样器" 并**跳过整条描述符更新**，
+    // 于是 16 个 mesh 的场一个都没被真正采样，注入的尽是 0（`abs(0)=0` 被 InterlockedMin
+    // 写进每个 AABB 内的体素）⇒ 全局场在空旷处塌缩到 ≈0、任意视点追踪立刻假命中。
+    // 这正是步骤 12 的可视化抓到的那条（§附三）。
+    if (!m_LinearSampler) {
+        rhi::SamplerDesc ls;
+        ls.minFilter = ls.magFilter = rhi::FilterMode::Linear;
+        ls.addressU  = ls.addressV  = ls.addressW = rhi::AddressMode::ClampToEdge;
+        m_LinearSampler = m_Device->CreateSampler(ls);
+    }
+
+    // 独立取样 pass：绑定集与全局布局相同（binding 2 = 该层场，binding 4 = 探针缓冲）
+    rhi::ShaderBytecode pcs;
+    pcs.stage      = rhi::ShaderStage::Compute;
+    pcs.spirv      = k_SDF_LayerProbe_comp_spv;
+    pcs.entryPoint = "main";
+
+    rhi::PipelineStateDesc ppso;
+    ppso.bindPoint            = rhi::PipelineBindPoint::Compute;
+    ppso.computeShader        = &pcs;
+    ppso.descriptorSetLayouts = {m_GlobalLayout};
+    ppso.pushConstantRanges   = {pcr};
+    ppso.debugName            = "Lumen_SDF_LayerProbe";
+    m_LayerProbePSO = m_Device->CreatePipelineState(ppso);
+    if (!m_LayerProbePSO) HE_CORE_ERROR("LumenSDF: 层取样 pass 的 PSO 创建失败");
+}
+
+void LumenSDF::SetupGlobalGrid() {
+    // 场景并集 AABB（全部已建 mesh）→ 决定 clipmap 层
+    float3 lo(1e30f), hi(-1e30f);
+    for (const auto& e : m_Entries) {
+        const float side = e.voxelSize * (float)e.resolution;
+        lo = float3(std::min(lo.x, e.origin.x), std::min(lo.y, e.origin.y), std::min(lo.z, e.origin.z));
+        hi = float3(std::max(hi.x, e.origin.x + side), std::max(hi.y, e.origin.y + side),
+                    std::max(hi.z, e.origin.z + side));
+    }
+    const float3 ext      = hi - lo;
+    const float  sceneSide = std::max(std::max(ext.x, ext.y), ext.z) * 1.05f + 1e-3f;
+    const float3 sceneCtr  = (lo + hi) * 0.5f;
+
+    const u32 res = m_Config.globalResolution;
+    m_GlobalLayerCount = std::clamp(m_Config.globalLayers, 1u, kMaxGlobalLayers);
+
+    for (u32 L = 0; L < m_GlobalLayerCount; ++L) {
+        GlobalLayer& layer = m_GlobalLayers[L];
+        // L = 实际最外层（m_GlobalLayerCount-1）覆盖全场；更小的 L 是更细的近层，居中于场景中心。
+        // 近层边长 = 场景最长轴 × nearFraction^(层数-1-L)，故得名"cl_ipmap"的最小可用形态：
+        // 每往里一层体素小一个比例，而覆盖范围也小同样的比例。
+        // 【必须是 m_GlobalLayerCount 而不是 kMaxGlobalLayers】用常量会让"只开 1 层"时
+        // 唯一那层退化成近层（只覆盖场景中心 1/4 边长），几何大多落在场外 —— 实测 256/256
+        // 条验证射线的起点都在场外，全局追踪一条都没命中，14 条"穿漏"全由此产生。
+        const u32   stepsFromFar = (m_GlobalLayerCount - 1u) - L;
+        const float layerSide    = sceneSide * std::pow(m_Config.nearFraction, (float)stepsFromFar);
+        layer.res       = res;
+        layer.voxelSize = layerSide / (float)res;
+        // 【近层跟随相机】UE 的 clipmap 近层是以相机为心的；以场景中心为心时（本场景 16 个 mesh 的
+        // AABB 边长 57~2789、几何散布全场 3154），910 单位的盒子几乎覆盖不到任何几何 ——
+        // 实测 256/256 条自检射线都在盒外、全部追踪只能落到 28.44 体素的远层上（§附六）。
+        // 中心取整到体素格：相机微动时层内容不抖动（体素与场一一对应，取整即可）。
+        float3 center = sceneCtr;
+        if (stepsFromFar > 0u && m_CameraPosSet) {
+            const float vs = layer.voxelSize;
+            center = float3(std::floor(m_CameraPos.x / vs) * vs,
+                            std::floor(m_CameraPos.y / vs) * vs,
+                            std::floor(m_CameraPos.z / vs) * vs);
+        }
+        layer.origin    = center - float3(layerSide * 0.5f);
+
+        const u32 stride = std::max(1u, res / 4u);
+        layer.probeCount = (res / stride) * (res / stride) * (res / stride);
+
+        rhi::TextureDesc td;
+        td.width = td.height = td.depth = res;
+        td.format = rhi::Format::R32_UINT;
+        td.usage  = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource;
+        layer.scratch = m_Device->CreateTexture(td);
+        td.format = rhi::Format::R32_FLOAT;
+        layer.field = m_Device->CreateTexture(td);
+        td.format = rhi::Format::R32_UINT;
+        layer.seed = m_Device->CreateTexture(td);   // 向量距离变换的种子坐标（§附十四 同一套算法）
+
+        rhi::BufferDesc pb;
+        pb.size      = (usize)layer.probeCount * sizeof(float);
+        pb.usage     = rhi::BufferUsage::Storage;
+        pb.cpuAccess = true;
+        layer.probe = m_Device->CreateBuffer(pb);
+        // 【哨兵实验 —— 结论：这条 CPU 读回路径不可信】先写 -12345 再读回，本想区分"场值是 0"
+        // 与"探针根本没写"，实测自相矛盾：层 0 报"残留 64/64"（看似没写）、层 1 报 0/64（写了），
+        // 而不写哨兵时层 0 读回的又是全 0 ⇒ 主机可见缓冲的映射/一致性语义未经验证，
+        // 该读数不能当判据。层 0 的探针数据一律视为不可信，验证改走射线（sphere tracing 自检）。
+        if (void* pm = layer.probe->Map()) {
+            std::vector<float> sentinel(layer.probeCount, -12345.0f);
+            std::memcpy(pm, sentinel.data(), (usize)layer.probeCount * sizeof(float));
+            layer.probe->Unmap();
+        }
+
+        HE_CORE_INFO("LumenSDF: Global SDF 层 {} {}³（体素边长 {:.4f}，边长 {:.1f}，原点 "
+                     "({:.1f},{:.1f},{:.1f})，显存 {:.2f} MB/层）",
+                     L, res, (double)layer.voxelSize, (double)layerSide,
+                     (double)layer.origin.x, (double)layer.origin.y, (double)layer.origin.z,
+                     (double)(2.0 * (u64)res * res * res * 4ull) / (1024.0 * 1024.0));
+    }
+}
+void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
+    // 【步骤 37】clipmap 各层的自持存储图像（scratch/field/seed）在这里**第一次被写入**，
+    // 而它们的创建点（CreateGlobalGPUObjects）没有命令列表可用 ⇒ 在此处、任何写之前转换一次。
+    // （晚一帧再转会把已注入的场内容丢掉；详见 BakeOne 里的同一处说明。）
+    if (!m_GlobalImagesTransitioned) {
+        m_GlobalImagesTransitioned = true;
+        for (u32 i = 0; i < m_GlobalLayerCount; ++i) {
+            GlobalLayer& L = m_GlobalLayers[i];
+            for (rhi::IRHITexture* t : { L.scratch.get(), L.field.get(), L.seed.get() }) {
+                if (t) cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                                            rhi::ResourceState::Undefined, rhi::ResourceState::UnorderedAccess, t);
+            }
+        }
+    }
+
+    if (!m_GlobalPSO || m_Entries.empty()) return;
+    // 注入必须能真正采到 mesh 场：缺采样器时引擎会跳过整条描述符更新，而注入仍然照跑，
+    // 于是 InterlockedMin 会把 0 写满每个 mesh 的 AABB（全局场在空旷处塌缩到 ≈0）。
+    // 这类"跑得很正常、结果全错"的失败必须在入口拦下来。
+    if (!m_LinearSampler) {
+        HE_CORE_ERROR("LumenSDF: 注入缺少线性采样器（CreateGlobalGPUObjects 未跑？）——"
+                      "全局场会退化成 0，拒绝构建");
+        return;
+    }
+
+    const u32 groups = (m_Config.globalResolution + 3u) / 4u;
+
+    // 【描述符集别名】注入要在**同一次提交**里对 16 个不同的 mesh 场各 dispatch 一次；
+    // 若共用一套描述符集并在循环里反复改写 binding 2，Vulkan 下这些 dispatch 会全部看到
+    // 最后一次写入的那张纹理（描述符集别名）—— 实测全局场因此在空旷处恒为 0。
+    // 因此按 (层, mesh) 预建并**一次性写完**每套描述符集，循环里只 Bind、不再改写。
+    const u32 injectStride = std::max(1u, (u32)m_Entries.size());
+    const usize needSets = (usize)m_GlobalLayerCount * injectStride;
+    if (m_GlobalLayerSets.size() != m_GlobalLayerCount) {
+        m_GlobalLayerSets.clear();
+        for (u32 L = 0; L < m_GlobalLayerCount; ++L)
+            m_GlobalLayerSets.push_back(m_Device->AllocateDescriptorSet(m_GlobalLayout));
+    }
+    // 每层一套"向量距离变换"的描述符集（binding 0 = scratch 距离、1 = 种子坐标）。
+    // 集合必须在**纹理创建之后**写（描述符集在 UploadGeometry 阶段写是 no-op 的教训见 §附十四）。
+    if (m_GlobalSeedSets.size() != m_GlobalLayerCount) {
+        m_GlobalSeedSets.clear();
+        for (u32 L = 0; L < m_GlobalLayerCount; ++L) {
+            const auto s = m_Device->AllocateDescriptorSet(m_SeedFloodLayout);
+            m_Device->UpdateDescriptorSetWithImageView(s, 0, rhi::DescriptorType::StorageImage,
+                m_GlobalLayers[L].scratch->GetNativeHandle());
+            m_Device->UpdateDescriptorSetWithImageView(s, 1, rhi::DescriptorType::StorageImage,
+                m_GlobalLayers[L].seed->GetNativeHandle());
+            m_GlobalSeedSets.push_back(s);
+        }
+    }
+    if (m_GlobalInjectSets.size() != needSets) {
+        m_GlobalInjectSets.clear();
+        for (usize i = 0; i < needSets; ++i)
+            m_GlobalInjectSets.push_back(m_Device->AllocateDescriptorSet(m_GlobalLayout));
+        for (u32 L = 0; L < m_GlobalLayerCount; ++L) {
+            GlobalLayer& layer = m_GlobalLayers[L];
+            auto& ls = m_GlobalLayerSets[L];
+            m_Device->UpdateDescriptorSetWithImageView(ls, kGBindGlobal,
+                rhi::DescriptorType::StorageImage, layer.scratch->GetNativeHandle());
+            m_Device->UpdateDescriptorSetWithImageView(ls, kGBindGlobalOut,
+                rhi::DescriptorType::StorageImage, layer.field->GetNativeHandle());
+            m_Device->UpdateDescriptorSet(ls, kGBindProbe,
+                rhi::DescriptorType::StorageBuffer, layer.probe.get());
+            // binding 2：该层自己的场（供"独立取样"pass 用最近邻采样）
+            m_Device->UpdateDescriptorSet(ls, kGBindMeshField,
+                rhi::DescriptorType::CombinedImageSampler, layer.field.get(),
+                m_NearestSampler.get());
+            for (u32 m = 0; m < injectStride && m < (u32)m_Entries.size(); ++m) {
+                auto& is = m_GlobalInjectSets[(usize)L * injectStride + m];
+                m_Device->UpdateDescriptorSetWithImageView(is, kGBindGlobal,
+                    rhi::DescriptorType::StorageImage, layer.scratch->GetNativeHandle());
+                m_Device->UpdateDescriptorSetWithImageView(is, kGBindGlobalOut,
+                    rhi::DescriptorType::StorageImage, layer.field->GetNativeHandle());
+                m_Device->UpdateDescriptorSet(is, kGBindProbe,
+                    rhi::DescriptorType::StorageBuffer, layer.probe.get());
+                if (m_Entries[m].field) {
+                    m_Device->UpdateDescriptorSet(is, kGBindMeshField,
+                        rhi::DescriptorType::CombinedImageSampler, m_Entries[m].field.get(),
+                        m_LinearSampler.get());
+                }
+            }
+        }
+    }
+    for (u32 L = 0; L < m_GlobalLayerCount; ++L) {
+        GlobalLayer& layer = m_GlobalLayers[L];
+        if (!layer.scratch || !layer.field) continue;
+
+        // 描述符集已在上面的预建阶段一次性写完（避免同一提交内的描述符集别名）
+        const auto& lset = m_GlobalLayerSets[L];
+
+        GlobalPC pc{};
+        pc.originX = layer.origin.x; pc.originY = layer.origin.y; pc.originZ = layer.origin.z;
+        pc.voxelSize = layer.voxelSize;
+        pc.dimX = pc.dimY = pc.dimZ = layer.res;
+        pc.probeStride = std::max(1u, layer.res / 4u);
+
+        cmd->SetPipeline(m_GlobalPSO.get());
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, lset);
+
+        // ① 清空为 +inf
+        pc.mode = 0u;
+        cmd->SetPushConstants(0, sizeof(pc), &pc);
+        cmd->Dispatch(groups, groups, groups);
+        cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                             rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
+                             layer.scratch.get());
+
+        // ② 逐 mesh 注入（每个 mesh 用**自己的**描述符集：同一次提交里反复改写同一套描述符集时，
+        //    所有 dispatch 会看到最后一次写入的纹理 = 描述符集别名，实测全局场因此恒为 0）
+        pc.mode = 1u;
+        for (u32 m = 0; m < (u32)m_Entries.size(); ++m) {
+            const auto& e = m_Entries[m];
+            if (!e.field) continue;
+            pc.meshOriginX = e.origin.x; pc.meshOriginY = e.origin.y; pc.meshOriginZ = e.origin.z;
+            pc.meshVoxelSize = e.voxelSize;
+            pc.meshDimX = pc.meshDimY = pc.meshDimZ = e.resolution;
+            cmd->BindDescriptorSet(rhi::kDescSetPerFrame,
+                                   m_GlobalInjectSets[(usize)L * injectStride + m]);
+            cmd->SetPushConstants(0, sizeof(pc), &pc);
+            cmd->Dispatch(groups, groups, groups);
+            cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                                 rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
+                                 layer.scratch.get());
+        }
+
+        // ③ 向量距离变换（与 mesh 层同一套算法，§附十四）：先立种子（注入过的体素以自己为最近种子），
+        //    再按 res/2 … 1 逐级传播"种子坐标 + 种子自己的距离"。旧的"每跳加步长"版 fixpoint 是
+        //    26 连通图的最短路径，恒高估约 8%（对 3000 单位就是 +200 以上）。
+        cmd->SetPipeline(m_SeedFloodPSO.get());
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_GlobalSeedSets[L]);
+        FloodPC fpc{};
+        fpc.originX = layer.origin.x; fpc.originY = layer.origin.y; fpc.originZ = layer.origin.z;
+        fpc.voxelSize = layer.voxelSize;
+        fpc.dimX = fpc.dimY = fpc.dimZ = layer.res;
+        {
+            fpc.stride = 0u;   // 0 = 种子初始化
+            cmd->SetPushConstants(0, sizeof(fpc), &fpc);
+            cmd->Dispatch(groups, groups, groups);
+            cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                                 rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
+                                 layer.seed.get());
+        }
+        for (u32 s = layer.res / 2u; s >= 1u; s /= 2u) {
+            fpc.stride = s;
+            for (u32 pass = 0; pass < 2u; ++pass) {   // 每级两趟
+                cmd->SetPushConstants(0, sizeof(fpc), &fpc);
+                cmd->Dispatch(groups, groups, groups);
+                cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                                     rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
+                                     layer.seed.get());
+            }
+            if (s == 1u) break;
+        }
+
+        // ④ 独立取样：把该层场在探针坐标上的值写进探针缓冲（binding 2 已在预建阶段指向该层场）
+        cmd->SetPipeline(m_LayerProbePSO.get());
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, lset);
+        pc.mode = 3u;   // 取样 pass 用自己的 push constant 语义：dims.w = 步长（下面用 FloodPC 传）
+        {
+            FloodPC ppc{};
+            ppc.originX = layer.origin.x; ppc.originY = layer.origin.y; ppc.originZ = layer.origin.z;
+            ppc.voxelSize = layer.voxelSize;
+            ppc.dimX = ppc.dimY = ppc.dimZ = layer.res;
+            ppc.stride = std::max(1u, layer.res / 4u);
+            cmd->SetPushConstants(0, sizeof(ppc), &ppc);
+            cmd->Dispatch((layer.probeCount + 63u) / 64u, 1, 1);
+        }
+
+        // ⑤ u32 → R32F（自检探针由上面的独立 pass 负责）
+        cmd->SetPipeline(m_GlobalPSO.get());
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, lset);
+        pc.mode = 2u;
+        cmd->SetPushConstants(0, sizeof(pc), &pc);
+        cmd->Dispatch(groups, groups, groups);
+        cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                             rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource,
+                             layer.field.get());
+    }
+    HE_CORE_INFO("LumenSDF: Global SDF 注入完成（{} 层 × {} 个 mesh，第 {} 帧）",
+                 m_GlobalLayerCount, m_Entries.size(), m_Frame);
+}
+
+void LumenSDF::Step(rhi::IRHICommandList* cmd, const MeshBatcher& batcher) {
+    if (!m_Device || !cmd || m_Done) return;
+    ++m_Frame;
+
+    if (m_Phase == Phase::Idle) {
+        BuildQueue(batcher);
+        if (m_Entries.empty()) {
+            HE_CORE_WARN("LumenSDF: 没有可构建的 mesh 距离场（几何为空或全部超限），步骤 10 的 Global SDF 将没有输入");
+            m_Phase = Phase::Done; m_Done = true; return;
+        }
+        UploadGeometry(batcher);
+        CreateGlobalGPUObjects();
+        SetupGlobalGrid();
+        m_Phase = Phase::Baking;
+    }
+
+    if (m_Phase == Phase::Baking) {
+        const u32 budget = std::max(1u, m_Config.meshesPerFrame);
+        for (u32 n = 0; n < budget && m_NextEntry < (u32)m_Entries.size(); ++n, ++m_NextEntry) {
+            BakeOne(cmd, m_NextEntry);
+        }
+        if (m_NextEntry >= (u32)m_Entries.size()) {
+            HE_CORE_INFO("LumenSDF: {} 个 mesh 距离场构建完成（第 {} 帧，显存 {:.2f} MB）",
+                         m_Entries.size(), m_Frame, (double)GetMemoryBytes() / (1024.0 * 1024.0));
+            m_Phase = Phase::WaitSelfCheck;
+            m_WaitFrames = 0;
+        }
+        return;
+    }
+
+    if (m_Phase == Phase::WaitSelfCheck) {
+        // 等 3 帧（飞行帧数）再读回：探针缓冲是 CPU 可见的持久映射内存，
+        // 此刻该缓冲的写入命令早已被 GPU 执行完。
+        if (++m_WaitFrames < 3) return;
+        RunSelfCheck();
+        BuildCards();   // 步骤 13（L2 的输入）：卡片生成 + 覆盖率可视化，只做一次
+        // 自检完成 → 进入 Global SDF 注入（步骤 10），同一帧内 clear + N 次注入 + 转换
+        BuildGlobalField(cmd);
+        HE_CORE_INFO("LumenSDF: Global SDF 注入完成（{} 个 mesh，第 {} 帧）", m_Entries.size(), m_Frame);
+        m_Phase = Phase::WaitGlobalCheck;
+        m_WaitGlobalFrames = 0;
+        return;
+    }
+
+    if (m_Phase == Phase::WaitGlobalCheck) {
+        if (++m_WaitGlobalFrames < 3) return;
+        RunGlobalCheck();
+        // 全局场就绪 → 同一帧准备并跑 sphere tracing 验证（步骤 11）
+        CreateMarchGPUObjects();
+        SetupMarchRays();
+        RunMarch(cmd);          // 全局场追踪（远场）
+        RunMarchDetail(cmd);    // 逐 mesh 细节追踪（近场，min 归约）
+        HE_CORE_INFO("LumenSDF: sphere tracing 已发射（全局 + {} 个 mesh 的细节追踪，第 {} 帧）",
+                     m_Entries.size(), m_Frame);
+        m_Phase = Phase::WaitMarchCheck;
+        m_WaitMarchFrames = 0;
+        return;
+    }
+
+    if (m_Phase == Phase::WaitMarchCheck) {
+        if (++m_WaitMarchFrames < 3) return;
+        RunMarchCheck();
+        m_Phase = Phase::Done;
+        m_Done  = true;
+    }
+}
+
+float LumenSDF::PointTriangleDistance(const float3& p, const float3& a,
+                                      const float3& b, const float3& c) {
+    const float3 ab = b - a, ac = c - a, ap = p - a;
+    const float d1 = ab.x * ap.x + ab.y * ap.y + ab.z * ap.z;
+    const float d2 = ac.x * ap.x + ac.y * ap.y + ac.z * ap.z;
+    if (d1 <= 0.0f && d2 <= 0.0f) return glm::length(p - a);
+
+    const float3 bp = p - b;
+    const float d3 = ab.x * bp.x + ab.y * bp.y + ab.z * bp.z;
+    const float d4 = ac.x * bp.x + ac.y * bp.y + ac.z * bp.z;
+    if (d3 >= 0.0f && d4 <= d3) return glm::length(p - b);
+
+    const float vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) {
+        const float v = d1 / (d1 - d3);
+        return glm::length(p - (a + ab * v));
+    }
+
+    const float3 cp = p - c;
+    const float d5 = ab.x * cp.x + ab.y * cp.y + ab.z * cp.z;
+    const float d6 = ac.x * cp.x + ac.y * cp.y + ac.z * cp.z;
+    if (d6 >= 0.0f && d5 <= d6) return glm::length(p - c);
+
+    const float vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) {
+        const float w = d2 / (d2 - d6);
+        return glm::length(p - (a + ac * w));
+    }
+
+    const float va = d3 * d6 - d5 * d4;
+    if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f) {
+        const float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return glm::length(p - (b + (c - b) * w));
+    }
+
+    const float denom = va + vb + vc;
+    if (std::fabs(denom) < 1e-12f) return glm::length(p - a);
+    const float v = vb / denom, w = vc / denom;
+    return glm::length(p - (a + ab * v + ac * w));
+}
+
+float3 LumenSDF::ClosestPointOnTriangle(const float3& p, const float3& a,
+                                        const float3& b, const float3& c) {
+    // Ericson 5.1.5 的区域判定版：与 PointTriangleDistance 同一套分支，但返回**最近点**
+    // （自检要用它算"最近三角形法线"符号，作为 parity 符号的独立交叉验证）
+    const float3 ab = b - a, ac = c - a, ap = p - a;
+    const float d1 = glm::dot(ab, ap), d2 = glm::dot(ac, ap);
+    if (d1 <= 0.0f && d2 <= 0.0f) return a;
+
+    const float3 bp = p - b;
+    const float d3 = glm::dot(ab, bp), d4 = glm::dot(ac, bp);
+    if (d3 >= 0.0f && d4 <= d3) return b;
+
+    const float vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) {
+        const float v = d1 / (d1 - d3);
+        return a + ab * v;
+    }
+
+    const float3 cp = p - c;
+    const float d5 = glm::dot(ab, cp), d6 = glm::dot(ac, cp);
+    if (d6 >= 0.0f && d5 <= d6) return c;
+
+    const float vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) {
+        const float w = d2 / (d2 - d6);
+        return a + ac * w;
+    }
+
+    const float va = d3 * d6 - d5 * d4;
+    if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f) {
+        const float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return b + (c - b) * w;
+    }
+
+    const float denom = va + vb + vc;
+    if (std::fabs(denom) < 1e-12f) return a;
+    const float v = vb / denom, w = vc / denom;
+    return a + ab * v + ac * w;
+}
+
+void LumenSDF::RunSelfCheck() {
+    if (!m_ProbeDist || m_Entries.empty() || m_ProbeCount == 0) return;
+
+    void* mapped = m_ProbeDist->Map();
+    if (!mapped) {
+        HE_CORE_WARN("LumenSDF: 自检探针缓冲不可映射，跳过自检");
+        return;
+    }
+    const float* gpuAll = static_cast<const float*>(mapped);
+
+    const u32 stride = std::max(1u, m_Config.probeStride);
+    const u32 n = m_Config.resolution / stride;
+
+    // 逐 mesh 统计：探针缓冲按 mesh 分段（每个 mesh 写自己那一段），一次跑完所有网格 ——
+    // 这样"哪张场在远场塌成 0 / 误差最大"就是一次运行能点名的东西，不必再逐张试。
+    struct MeshStat {
+        u32   entry = 0;
+        float maxErr = 0.0f, minV = 1e30f, maxV = -1e30f;
+        u32   zeros = 0, nearCount = 0, nearBad = 0, farCount = 0, farBad = 0, counted = 0;
+    };
+    std::vector<MeshStat> stats(m_Entries.size());
+    u32 totalZero = 0, totalProbes = 0;
+
+    for (u32 mi = 0; mi < (u32)m_Entries.size(); ++mi) {
+        const MeshSDFEntry& e = m_Entries[mi];
+        const float* gpu = gpuAll + (usize)mi * m_ProbeCount;
+        MeshStat& st = stats[mi];
+        st.entry = mi;
+
+        for (u32 z = 0; z < n; ++z) {
+            for (u32 y = 0; y < n; ++y) {
+                for (u32 x = 0; x < n; ++x) {
+                    const u32 idx = z * n * n + y * n + x;
+                    if (idx >= m_ProbeCount) continue;
+                    const float3 p = e.origin +
+                        float3((float)(x * stride) + 0.5f, (float)(y * stride) + 0.5f,
+                               (float)(z * stride) + 0.5f) * e.voxelSize;
+                    // CPU 参考：距离用闭式解，符号用"最近三角形法线"（与 GPU 的 parity 不同算法）
+                    float ref = 1e30f;
+                    float3 bestA(0.0f), bestB(0.0f), bestC(0.0f);
+                    for (u32 t = 0; t < e.triCount; ++t) {
+                        const u32* tri = &m_IndicesCPU[e.firstIndex + t * 3];
+                        const float3 a = m_PositionsCPU[tri[0] + e.vertexOffset];
+                        const float3 b = m_PositionsCPU[tri[1] + e.vertexOffset];
+                        const float3 c = m_PositionsCPU[tri[2] + e.vertexOffset];
+                        const float d = PointTriangleDistance(p, a, b, c);
+                        if (d < ref) { ref = d; bestA = a; bestB = b; bestC = c; }
+                    }
+
+                    const float v = gpu[idx];
+                    const float ad = std::fabs(v);
+                    const float err = std::fabs(ad - ref);
+                    st.maxErr = std::max(st.maxErr, err);
+                    st.minV = std::min(st.minV, v);
+                    st.maxV = std::max(st.maxV, v);
+                    if (ad < 0.01f) { ++st.zeros; ++totalZero; }
+                    if (ref <= 2.0f * e.voxelSize) {
+                        ++st.nearCount;
+                        if (err > 0.25f * e.voxelSize) ++st.nearBad;
+                    } else {
+                        ++st.farCount;
+                        if (err > 2.0f * e.voxelSize) ++st.farBad;
+                    }
+                    ++st.counted;
+                }
+            }
+        }
+        totalProbes += st.counted;
+    }
+    m_ProbeDist->Unmap();
+
+    // 点名：按"零值数"降序、再按最大误差降序
+    std::sort(stats.begin(), stats.end(), [](const MeshStat& a, const MeshStat& b) {
+        if (a.zeros != b.zeros) return a.zeros > b.zeros;
+        return a.maxErr > b.maxErr;
+    });
+    HE_CORE_INFO("LumenSDF: 逐 mesh 场自检（共 {} 个 mesh / {} 探针，零值探针 {} 个）—— 最差 5 个：",
+                 m_Entries.size(), totalProbes, totalZero);
+    for (u32 i = 0; i < 5u && i < stats.size(); ++i) {
+        const MeshStat& st = stats[i];
+        const MeshSDFEntry& e = m_Entries[st.entry];
+        HE_CORE_INFO("  条目 {}（命令 {}）：边长 {:.0f}，{} 三角形；值域 [{:.2f}, {:.2f}]，零值 {}，"
+                     "最大误差 {:.2f}，近表面 {}/{} 超差，远场 {}/{} 超差",
+                     st.entry, e.commandIndex, (double)(e.voxelSize * e.resolution), e.triCount,
+                     (double)st.minV, (double)st.maxV, st.zeros, (double)st.maxErr,
+                     st.nearBad, st.nearCount, st.farBad, st.farCount);
+    }
+
+    m_SelfCheck.valid  = true;
+    m_SelfCheck.probes = totalProbes;
+    m_SelfCheck.passed = (totalProbes > 0) && (totalZero == 0) && (stats[0].nearBad == 0);
+    if (totalZero > 0) {
+        HE_CORE_ERROR("LumenSDF 自检失败：有 {} 个探针处场值 ≈ 0（点名见上），这会直接导致步进提前命中",
+                      totalZero);
+    } else if (stats[0].nearBad > 0) {
+        HE_CORE_ERROR("LumenSDF 自检失败：近表面 {} 个探针超出 1/4 体素（scatter 本应精确）",
+                      stats[0].nearBad);
+    } else {
+        HE_CORE_WARN("LumenSDF 自检：无零值、近表面精确；远场仍有超差（洪泛近似，见各网格明细）");
+    }
+}
+void LumenSDF::RunGlobalCheck() {
+    const u32 strideBase = 4u;   // 每层 4³ = 64 个探针（CPU 参考要遍历全部三角形）
+    for (u32 L = 0; L < m_GlobalLayerCount; ++L) {
+        GlobalLayer& layer = m_GlobalLayers[L];
+        if (!layer.probe || layer.probeCount == 0) continue;
+
+        void* mapped = layer.probe->Map();
+        if (!mapped) {
+            HE_CORE_WARN("LumenSDF: Global 层 {} 的探针缓冲不可映射，跳过自检", L);
+            continue;
+        }
+        const float* gpu = static_cast<const float*>(mapped);
+
+        const u32 stride = std::max(1u, layer.res / strideBase);
+        const u32 n = layer.res / stride;
+        const float tol = 2.0f * layer.voxelSize;
+
+        float maxErr = 0.0f, maxOver = -1e30f;
+        double sumErr = 0.0;
+        u32 within = 0, counted = 0;
+        for (u32 z = 0; z < n; ++z) {
+            for (u32 y = 0; y < n; ++y) {
+                for (u32 x = 0; x < n; ++x) {
+                    const u32 idx = z * n * n + y * n + x;
+                    if (idx >= layer.probeCount) continue;
+                    const float3 p = layer.origin +
+                        float3((float)(x * stride) + 0.5f, (float)(y * stride) + 0.5f,
+                               (float)(z * stride) + 0.5f) * layer.voxelSize;
+                    float ref = 1e30f;
+                    for (const auto& e : m_Entries) {
+                        for (u32 t = 0; t < e.triCount; ++t) {
+                            const u32* tri = &m_IndicesCPU[e.firstIndex + t * 3];
+                            const float3 a = m_PositionsCPU[tri[0] + e.vertexOffset];
+                            const float3 b = m_PositionsCPU[tri[1] + e.vertexOffset];
+                            const float3 c = m_PositionsCPU[tri[2] + e.vertexOffset];
+                            ref = std::min(ref, PointTriangleDistance(p, a, b, c));
+                        }
+                    }
+                    const float err = gpu[idx] - ref;   // 期望 ≤ 0（下界）；> 0 即高估（危险）
+                    sumErr += err;
+                    maxOver = std::max(maxOver, err);
+                    maxErr = std::max(maxErr, std::fabs(err));
+                    if (std::fabs(err) <= tol) ++within;
+                    ++counted;
+                }
+            }
+        }
+        layer.probe->Unmap();
+
+        // ── 三方对照诊断（只对最细的近层做，避免刷屏）──
+        // 对"低估最严重"的几个探针，把三个数并排打出来，回答"是谁把小值带进来的"：
+        //   gpu   = 全局层在该点的值（注入 + 洪泛的结果）
+        //   exact = CPU 对**全部**三角形的精确最小距离（真值）
+        //   meshD = 包含该点的 mesh 中**精确距离最小**者的距离（= 注入本该写进去的值）
+        // gpu ≈ meshD ⇒ 注入忠实，松的是 mesh 场/AABB 语义；gpu << meshD ⇒ 注入或采样有错。
+        if (L == 0) {
+            struct Row { float gpu, exact, meshD; int mesh; };
+            std::vector<Row> rows;
+            for (u32 z = 0; z < n; ++z) for (u32 y = 0; y < n; ++y) for (u32 x = 0; x < n; ++x) {
+                const u32 idx = z * n * n + y * n + x;
+                if (idx >= layer.probeCount) continue;
+                const float3 p = layer.origin +
+                    float3((float)(x * stride) + 0.5f, (float)(y * stride) + 0.5f,
+                           (float)(z * stride) + 0.5f) * layer.voxelSize;
+                float exact = 1e30f, meshD = 1e30f;
+                int bestMesh = -1;
+                for (u32 mi = 0; mi < (u32)m_Entries.size(); ++mi) {
+                    const MeshSDFEntry& e = m_Entries[mi];
+                    const float side = e.voxelSize * (float)e.resolution;
+                    const bool inside = (p.x >= e.origin.x && p.x <= e.origin.x + side &&
+                                         p.y >= e.origin.y && p.y <= e.origin.y + side &&
+                                         p.z >= e.origin.z && p.z <= e.origin.z + side);
+                    float dMesh = 1e30f;
+                    for (u32 t = 0; t < e.triCount; ++t) {
+                        const u32* tri = &m_IndicesCPU[e.firstIndex + t * 3];
+                        const float3 a = m_PositionsCPU[tri[0] + e.vertexOffset];
+                        const float3 b = m_PositionsCPU[tri[1] + e.vertexOffset];
+                        const float3 c = m_PositionsCPU[tri[2] + e.vertexOffset];
+                        const float dd = PointTriangleDistance(p, a, b, c);
+                        dMesh = std::min(dMesh, dd);
+                        exact = std::min(exact, dd);
+                    }
+                    if (inside && dMesh < meshD) { meshD = dMesh; bestMesh = (int)mi; }
+                }
+                rows.push_back({ gpu[idx], exact, meshD, bestMesh });
+            }
+            std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) {
+                return (a.exact - a.gpu) > (b.exact - b.gpu);   // 低估最严重的排前面
+            });
+            HE_CORE_INFO("LumenSDF 三方对照（层 0，低估最严重的前 5 个探针）: gpu / exact / meshD / meshIdx");
+            for (u32 i = 0; i < 5u && i < rows.size(); ++i) {
+                HE_CORE_INFO("  [{:.2f} / {:.2f} / {:.2f} / {}]  (exact-gpu={:.2f})",
+                             (double)rows[i].gpu, (double)rows[i].exact, (double)rows[i].meshD,
+                             rows[i].mesh, (double)(rows[i].exact - rows[i].gpu));
+            }
+        }
+
+        GlobalCheck& c = layer.check;
+        c.valid = true;
+        c.probes = counted;
+        c.withinTol = within;
+        c.maxError = maxErr;
+        c.meanError = counted ? (float)(sumErr / counted) : 0.0f;
+        c.tolerance = tol;
+        // 判据只看安全方向：不得高估（否则 sphere tracing 穿漏）。下界质量只记录：
+        // 它是 clipmap 分层这一步的关键指标（近层体素小 ⇒ 低估应显著变小）。
+        c.passed = counted > 0 && maxOver <= tol;
+
+        HE_CORE_INFO("LumenSDF Global 层 {} 自检: 体素 {:.3f}，探针 {}，最大高估 {:+.3f}"
+                     "（判据 ≤ {:.3f}）=> {}；下界质量 {} 点在 2 体素内（{:.1f}%），平均低估 {:.2f}（层 0 的读数不可信，见代码注释）",
+                     L, (double)layer.voxelSize, counted, (double)maxOver, (double)tol,
+                     c.passed ? "PASS" : "FAIL", within,
+                     counted ? 100.0 * (double)within / counted : 0.0,
+                     (double)(-c.meanError));
+        if (!c.passed) HE_CORE_ERROR("LumenSDF Global 层 {} 出现高估，sphere tracing 会穿漏", L);
+    }
+}
+// ── sphere tracing（步骤 11）──
+namespace {
+constexpr u32 kMBindField  = 0;
+constexpr u32 kMBindSample = 1;
+constexpr u32 kMBindOrigin = 2;
+constexpr u32 kMBindDir    = 3;
+constexpr u32 kMBindHit    = 4;
+constexpr u32 kMBindNormal = 5;
+constexpr u32 kMBindField1 = 6;   // clipmap 远层的场（与近层同采样器语义）
+
+// 与 SDF_RayMarch.comp.slang 的 MarchPC 一致：5 × 16B = 80B（层 0 参数 + 层 1 参数）
+struct MarchPC {
+    float originX, originY, originZ, voxelSize;      // 层 0（近层）
+    u32   dimX, dimY, dimZ, rayCount;                // 层 0 分辨率 + 射线数
+    float maxSteps, eps, maxDist, pad;
+    float origin1X, origin1Y, origin1Z, voxelSize1;  // 层 1（远层）
+    u32   dim1X, dim1Y, dim1Z, pad1;
+};
+static_assert(sizeof(MarchPC) == 80, "MarchPC 必须与 shader 的 5×16B 布局一致");
+
+// 确定性伪随机（自检要可复现；不用 std::random 以免平台差异）
+inline float NextRand(u32& s) {
+    s = s * 1664525u + 1013904223u;
+    return (float)((s >> 8) & 0xFFFFFFu) / (float)0x1000000u;
+}
+} // namespace
+
+void LumenSDF::CreateMarchGPUObjects() {
+    if (m_MarchPSO) return;
+
+    rhi::DescriptorSetLayoutDesc layout;
+    layout.bindings = {
+        {kMBindField,  rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
+        {kMBindField1, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
+        {kMBindOrigin, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+        {kMBindDir,    rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+        {kMBindHit,    rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+        {kMBindNormal, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+    };
+    m_MarchLayout = m_Device->CreateDescriptorSetLayout(layout);
+    m_MarchSet    = m_Device->AllocateDescriptorSet(m_MarchLayout);
+
+    rhi::PushConstantRange pcr;
+    pcr.stageMask = rhi::kStageMaskCompute;
+    pcr.offset    = 0;
+    pcr.size      = sizeof(MarchPC);
+
+    rhi::ShaderBytecode cs;
+    cs.stage      = rhi::ShaderStage::Compute;
+    cs.spirv      = k_SDF_RayMarch_comp_spv;
+    cs.entryPoint = "main";
+
+    rhi::PipelineStateDesc pso;
+    pso.bindPoint            = rhi::PipelineBindPoint::Compute;
+    pso.computeShader        = &cs;
+    pso.descriptorSetLayouts = {m_MarchLayout};
+    pso.pushConstantRanges   = {pcr};
+    pso.debugName            = "Lumen_SDF_RayMarch";
+    m_MarchPSO = m_Device->CreatePipelineState(pso);
+    if (!m_MarchPSO) HE_CORE_ERROR("LumenSDF: sphere tracing 的 PSO 创建失败");
+
+    // 线性 clamp 采样器：三线性插值由采样器完成（步进需要连续场，不能最近邻）。
+    // 【注意】正常路径下它已在 CreateGlobalGPUObjects 里建好（注入必须先有它）；
+    // 这里只是兜底，避免"依赖调用顺序"再次变成静默的场损坏。
+    if (!m_LinearSampler) {
+        rhi::SamplerDesc sd;
+        sd.minFilter = sd.magFilter = rhi::FilterMode::Linear;
+        sd.addressU  = sd.addressV  = sd.addressW = rhi::AddressMode::ClampToEdge;
+        m_LinearSampler = m_Device->CreateSampler(sd);
+    }
+
+    // ── 细节追踪（逐 mesh 的 min 归约）──
+    m_DetailLayout = m_Device->CreateDescriptorSetLayout(layout);   // 绑定集与全局版相同
+    m_DetailSet    = m_Device->AllocateDescriptorSet(m_DetailLayout);
+
+    rhi::ShaderBytecode dcs;
+    dcs.stage      = rhi::ShaderStage::Compute;
+    dcs.spirv      = k_SDF_RayMarchDetail_comp_spv;
+    dcs.entryPoint = "main";
+
+    rhi::PipelineStateDesc dpso;
+    dpso.bindPoint            = rhi::PipelineBindPoint::Compute;
+    dpso.computeShader        = &dcs;
+    dpso.descriptorSetLayouts = {m_DetailLayout};
+    dpso.pushConstantRanges   = {pcr};
+    dpso.debugName            = "Lumen_SDF_RayMarchDetail";
+    m_DetailPSO = m_Device->CreatePipelineState(dpso);
+    if (!m_DetailPSO) HE_CORE_ERROR("LumenSDF: 细节追踪的 PSO 创建失败");
+}
+
+void LumenSDF::SetupMarchRays() {
+    const u32 n = std::max(1u, m_Config.marchRays);
+    m_RayOriginCPU.resize(n);
+    m_RayDirCPU.resize(n);
+
+    // 近层覆盖盒（步骤 10.5 的 clipmap 近层）：自检射线必须落在**近层能覆盖的地方**才有意义 ——
+    // 近层细（体素 7.11）才是 sphere tracing 真正依赖的那一层。此前 256 条射线**全部**落在近层盒外，
+    // 于是"安全/精度"其实只在 28.44 体素的远层上测，近层的问题与收益都被掩盖（这也解释了穿漏为何居高不下）。
+    const float3 nlOrig = GetGlobalOrigin(0);
+    const float  nlSide = GetGlobalVoxelSize(0) * (float)m_Config.globalResolution;
+    auto inNear = [&](const float3& q) {
+        return q.x >= nlOrig.x && q.y >= nlOrig.y && q.z >= nlOrig.z &&
+               q.x <= nlOrig.x + nlSide && q.y <= nlOrig.y + nlSide && q.z <= nlOrig.z + nlSide;
+    };
+
+    u32 seed = 20260919u;   // 固定种子：自检可复现
+    u32 outsideDrawn = 0;
+    for (u32 i = 0; i < n; ++i) {
+        float3 p(0.0f), d(0.0f, -1.0f, 0.0f);
+        // 最多重抽 8 次，尽量让起点落在近层盒内：起点贴着某个 mesh 的三角形、沿法线外移 4 单位
+        // （外移 4 而不是 1：eps = 0.25 × 近层体素，起点离表面太近时 t=0 处就"命中"，指标对步进不敏感）。
+        for (u32 attempt = 0; attempt < 8u; ++attempt) {
+            const MeshSDFEntry& e = m_Entries[(u32)(NextRand(seed) * (float)m_Entries.size()) % m_Entries.size()];
+            const u32 triIdx = (u32)(NextRand(seed) * (float)std::max(1u, e.triCount)) % std::max(1u, e.triCount);
+            const u32* tri = &m_IndicesCPU[e.firstIndex + triIdx * 3];
+            const float3 A = m_PositionsCPU[tri[0] + e.vertexOffset];
+            const float3 B = m_PositionsCPU[tri[1] + e.vertexOffset];
+            const float3 C = m_PositionsCPU[tri[2] + e.vertexOffset];
+            float w0 = NextRand(seed), w1 = NextRand(seed);
+            if (w0 + w1 > 1.0f) { w0 = 1.0f - w0; w1 = 1.0f - w1; }
+            const float3 surf = A + (B - A) * w0 + (C - A) * w1;
+            float3 nrm = glm::cross(B - A, C - A);
+            nrm = (glm::dot(nrm, nrm) > 1e-12f) ? glm::normalize(nrm) : float3(0.0f, 1.0f, 0.0f);
+            // 起点外移 **1.5 倍命中容差**（= 1.5 个近层体素，约 21 单位）：外移量必须大于 eps，否则'"起点自己那张表面"
+            // 在第一步就被判成命中（eps 从 1.778 涨到 14.22 后，原来的 4 单位外移已经小于 eps，
+            // 于是大量射线以 t≈0.3 的"假命中"收场 —— 这正是"仅 GPU 93"的来源）。
+            p = surf + nrm * (1.5f * GetGlobalVoxelSize(0));
+            float3 dd(NextRand(seed) * 2.0f - 1.0f, NextRand(seed) * 2.0f - 1.0f, NextRand(seed) * 2.0f - 1.0f);
+            d = (glm::dot(dd, dd) < 1e-6f) ? float3(0.0f, -1.0f, 0.0f) : glm::normalize(dd);
+            if (inNear(p)) break;
+        }
+        if (!inNear(p)) ++outsideDrawn;
+        m_RayOriginCPU[i] = p;
+        m_RayDirCPU[i]    = d;
+    }
+    HE_CORE_INFO("LumenSDF: 自检射线生成完毕：{} 条中 {} 条重抽 8 次仍落在近层盒外（近层边长 {:.1f}，原点 ({:.1f},{:.1f},{:.1f})）",
+                 n, outsideDrawn, (double)nlSide, (double)nlOrig.x, (double)nlOrig.y, (double)nlOrig.z);
+
+    std::vector<float4> origins(n), dirs(n);
+    for (u32 i = 0; i < n; ++i) {
+        origins[i] = float4(m_RayOriginCPU[i], 0.0f);
+        dirs[i]    = float4(m_RayDirCPU[i], 0.0f);
+    }
+    rhi::BufferDesc bd;
+    bd.usage = rhi::BufferUsage::Storage;
+    bd.size = origins.size() * sizeof(float4); bd.initialData = origins.data();
+    m_RayOrigin = m_Device->CreateBuffer(bd);
+    bd.size = dirs.size() * sizeof(float4); bd.initialData = dirs.data();
+    m_RayDir = m_Device->CreateBuffer(bd);
+
+    bd.initialData = nullptr;
+    bd.cpuAccess = true;                     // 自检要读回
+    bd.size = (usize)n * sizeof(float4);
+    m_RayHit    = m_Device->CreateBuffer(bd);
+    m_RayNormal = m_Device->CreateBuffer(bd);
+    bd.size = (usize)n * sizeof(u32);
+    m_RayT  = m_Device->CreateBuffer(bd);
+    m_RayTMapped = m_RayT ? m_RayT->Map() : nullptr;
+
+    m_Device->UpdateDescriptorSet(m_MarchSet, kMBindOrigin, rhi::DescriptorType::StorageBuffer, m_RayOrigin.get());
+    m_Device->UpdateDescriptorSet(m_MarchSet, kMBindDir,    rhi::DescriptorType::StorageBuffer, m_RayDir.get());
+    m_Device->UpdateDescriptorSet(m_MarchSet, kMBindHit,    rhi::DescriptorType::StorageBuffer, m_RayHit.get());
+    m_Device->UpdateDescriptorSet(m_MarchSet, kMBindNormal, rhi::DescriptorType::StorageBuffer, m_RayNormal.get());
+    // 细节追踪用同一个绑定号布局：field/sampler/origin/dir/minTarget
+    m_Device->UpdateDescriptorSet(m_DetailSet, kMBindOrigin, rhi::DescriptorType::StorageBuffer, m_RayOrigin.get());
+    m_Device->UpdateDescriptorSet(m_DetailSet, kMBindDir,    rhi::DescriptorType::StorageBuffer, m_RayDir.get());
+    m_Device->UpdateDescriptorSet(m_DetailSet, kMBindHit,    rhi::DescriptorType::StorageBuffer, m_RayT.get());
+    m_Device->UpdateDescriptorSet(m_DetailSet, kMBindNormal, rhi::DescriptorType::StorageBuffer, m_RayT.get());
+    HE_CORE_INFO("LumenSDF: sphere tracing 验证射线已生成（{} 条，最大步数 {}，收敛阈值 {:.4f}，最大距离 {:.1f}）",
+                 n, m_Config.marchMaxSteps, (double)(0.25f * GetGlobalVoxelSize(0)), (double)m_Config.marchMaxDist);
+}
+
+void LumenSDF::RunMarch(rhi::IRHICommandList* cmd) {
+    if (!m_MarchPSO || !GetGlobalField(0) || m_RayOriginCPU.empty()) return;
+
+    m_Device->UpdateDescriptorSet(m_MarchSet, kMBindField,
+        rhi::DescriptorType::CombinedImageSampler, GetGlobalField(0), m_LinearSampler.get());
+    m_Device->UpdateDescriptorSet(m_MarchSet, kMBindField1,
+        rhi::DescriptorType::CombinedImageSampler, GetGlobalField(1), m_LinearSampler.get());
+
+    MarchPC pc{};
+    pc.originX = GetGlobalOrigin(0).x; pc.originY = GetGlobalOrigin(0).y; pc.originZ = GetGlobalOrigin(0).z;
+    pc.voxelSize = GetGlobalVoxelSize(0);
+    pc.dimX = pc.dimY = pc.dimZ = m_GlobalLayers[0].res;
+    pc.origin1X = GetGlobalOrigin(1).x; pc.origin1Y = GetGlobalOrigin(1).y; pc.origin1Z = GetGlobalOrigin(1).z;
+    pc.voxelSize1 = GetGlobalVoxelSize(1);
+    pc.dim1X = pc.dim1Y = pc.dim1Z = m_GlobalLayers[1].res;
+    pc.rayCount  = (u32)m_RayOriginCPU.size();
+    pc.maxSteps  = (float)m_Config.marchMaxSteps;
+    pc.eps       = 1.0f * GetGlobalVoxelSize(0);   // 命中容差 = 1 个近层体素：场误差 ~0.5 体素，留 2 倍余量才能不穿漏（实测 0.25/0.5 体素都会重新穿漏）
+    pc.maxDist   = m_Config.marchMaxDist;
+    // 审计：把实际下发的两层参数打出来（射线自检对任何改动都不动，先证明这条通道是活的）
+    HE_CORE_INFO("LumenSDF march 参数: 层0 原点({:.1f},{:.1f},{:.1f}) 体素 {:.3f} res {} | 层1 原点({:.1f},{:.1f},{:.1f}) 体素 {:.3f} res {} | 射线 {} 步数 {:.0f} eps {:.3f}",
+                 (double)pc.originX, (double)pc.originY, (double)pc.originZ, (double)pc.voxelSize, pc.dimX,
+                 (double)pc.origin1X, (double)pc.origin1Y, (double)pc.origin1Z, (double)pc.voxelSize1, pc.dim1X,
+                 pc.rayCount, (double)pc.maxSteps, (double)pc.eps);
+
+    cmd->SetPipeline(m_MarchPSO.get());
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_MarchSet);
+    cmd->SetPushConstants(0, sizeof(pc), &pc);
+    cmd->Dispatch((pc.rayCount + 63u) / 64u, 1, 1);
+}
+
+void LumenSDF::RunMarchDetail(rhi::IRHICommandList* cmd) {
+    if (!m_DetailPSO || m_Entries.empty() || m_RayOriginCPU.empty()) return;
+
+    // 每帧先把细节命中缓冲重置为 +inf（位模式），再做逐 mesh 的 min 归约
+    const u32 n = (u32)m_RayOriginCPU.size();
+    if (m_RayTMapped) {
+        std::vector<u32> inf(n, 0x7F800000u);
+        std::memcpy(m_RayTMapped, inf.data(), (usize)n * sizeof(u32));   // 持久映射：直接写
+    }
+
+    // 【描述符集别名】此前每 mesh 用同一套 m_DetailSet 改写 binding 0 ⇒ 所有 dispatch 实际都在追
+    // **同一张（最后一次绑定的）mesh 场**，细场因此既漏真命中又乱报 —— 步数预算改了也"逐位不变"就是这个原因。
+    // 这里改成每 mesh 一套集，且只在使用前绑定一次（此后不再改写）。
+    if (m_DetailSets.empty()) {
+        for (size_t m = 0; m < m_Entries.size(); ++m) {
+            auto ds = m_Device->AllocateDescriptorSet(m_DetailLayout);
+            m_Device->UpdateDescriptorSet(ds, kMBindOrigin, rhi::DescriptorType::StorageBuffer, m_RayOrigin.get());
+            m_Device->UpdateDescriptorSet(ds, kMBindDir,    rhi::DescriptorType::StorageBuffer, m_RayDir.get());
+            m_Device->UpdateDescriptorSet(ds, kMBindHit,    rhi::DescriptorType::StorageBuffer, m_RayT.get());
+            m_Device->UpdateDescriptorSet(ds, kMBindNormal, rhi::DescriptorType::StorageBuffer, m_RayT.get());
+            if (m_Entries[m].field) {
+                m_Device->UpdateDescriptorSet(ds, kMBindField, rhi::DescriptorType::CombinedImageSampler,
+                                              m_Entries[m].field.get(), m_LinearSampler.get());
+            }
+            m_DetailSets.push_back(ds);
+        }
+    }
+
+    cmd->SetPipeline(m_DetailPSO.get());
+
+    MarchPC pc{};
+    pc.dimX = pc.dimY = pc.dimZ = 0;   // 每个 mesh 覆盖
+    pc.rayCount = n;
+    pc.maxSteps = (float)m_Config.marchMaxSteps;
+    pc.maxDist  = m_Config.marchMaxDist;
+
+    for (size_t mi = 0; mi < m_Entries.size(); ++mi) {
+        const auto& e = m_Entries[mi];
+        if (!e.field || mi >= m_DetailSets.size()) continue;
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DetailSets[mi]);   // 该 mesh 专属的集，循环里不再改写
+        pc.originX = e.origin.x; pc.originY = e.origin.y; pc.originZ = e.origin.z;
+        pc.voxelSize = e.voxelSize;
+        pc.dimX = pc.dimY = pc.dimZ = e.resolution;
+        pc.eps   = 1.0f * e.voxelSize;     // 【实验】eps 从 0.25 体素放大到 1 体素：判别"漏确认"是容差问题还是几何问题
+        cmd->SetPushConstants(0, sizeof(pc), &pc);
+        cmd->Dispatch((n + 63u) / 64u, 1, 1);
+        cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                             rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
+                             GetGlobalField(0));
+    }
+}
+
+float LumenSDF::MinDistToGeometry(const float3& p) const {
+    float best = 1e30f;
+    for (const auto& e : m_Entries) {
+        const float side = e.voxelSize * (float)e.resolution;
+        float dAabb = 0.0f;
+        for (int a = 0; a < 3; ++a) {
+            const float lo = (&e.origin.x)[a], hi = lo + side, val = (&p.x)[a];
+            const float dd = std::max(std::max(lo - val, val - hi), 0.0f);
+            dAabb += dd * dd;
+        }
+        if (std::sqrt(dAabb) >= best) continue;   // 该 mesh 的 AABB 已比当前最优远，整块跳过
+        for (u32 t = 0; t < e.triCount; ++t) {
+            const u32* tri = &m_IndicesCPU[e.firstIndex + t * 3];
+            best = std::min(best, PointTriangleDistance(
+                p, m_PositionsCPU[tri[0] + e.vertexOffset],
+                   m_PositionsCPU[tri[1] + e.vertexOffset],
+                   m_PositionsCPU[tri[2] + e.vertexOffset]));
+        }
+    }
+    return best;
+}
+
+void LumenSDF::RunMarchCheck() {
+    if (!m_RayHit || !m_RayNormal || !GetGlobalField(0)) return;
+    void* hitMapped = m_RayHit->Map();
+    void* nrmMapped = m_RayNormal->Map();
+    if (!hitMapped || !nrmMapped) {
+        HE_CORE_WARN("LumenSDF: sphere tracing 结果缓冲不可映射，跳过自检");
+        return;
+    }
+    const float4* hits = static_cast<const float4*>(hitMapped);
+    const float4* nrms = static_cast<const float4*>(nrmMapped);
+    const u32*    detailT = m_RayTMapped ? static_cast<const u32*>(m_RayTMapped) : nullptr;
+    {
+        u32 detailHits = 0;
+        float detailMin = 1e30f;
+        if (detailT) {
+            for (u32 i = 0; i < (u32)m_RayOriginCPU.size(); ++i) {
+                float v; std::memcpy(&v, &detailT[i], sizeof(float));
+                if (v < 1e29f) { ++detailHits; detailMin = std::min(detailMin, v); }
+            }
+        }
+        HE_CORE_INFO("LumenSDF 细节追踪统计: 缓冲可映射={}, 命中 {} 条，最小 t={:.3f}",
+                     (m_RayTMapped != nullptr), detailHits,
+                     detailHits ? (double)detailMin : 0.0);
+    }
+
+    const u32 n = (u32)m_RayOriginCPU.size();
+    float maxErr = 0.0f;
+    double sumErr = 0.0;
+    u32 bothHit = 0, gpuOnly = 0, cpuOnly = 0, within = 0, normalOk = 0;
+    u32 cpuOnlyNear = 0, cpuOnlyFar = 0;   // 穿漏按命中距离分（近场穿漏才是真问题）
+    u32 outsideLayer0 = 0, tunnelOutside = 0;   // 起点在近层覆盖之外 / 其中属于"穿漏"的条数
+    std::vector<float> errVoxAll, errNear, errFar, errNearHit, errFarHit;   // 误差分布 + 按"起点是否贴近几何"分组
+    u32 withinGlobal = 0, detailBetter = 0;
+    u32 nearMiss = 0;   // 全局场单方面命中、细场未确认 = 近似错失（near-miss）
+    u32 detailMiss = 0; // CPU 命中了、细场却没确认（逐条归因用）
+    double sumErrGlobal = 0.0;
+
+    // 诊断用：点 p 到全部几何的精确距离（逐 mesh AABB 粗筛 + 逐三角形最近点）
+    // 用途：穿漏射线的"场最小处"若离真实几何很远，说明**场在路径上高估**（洪泛壳）；
+    // 若几乎相等，说明场是紧的，只是容差/分辨率不够。调试视图的统计复用同一个查询。
+    auto minDistToGeometry = [this](const float3& p) { return MinDistToGeometry(p); };
+
+    // 诊断用：点 p 是否落在指定 clipmap 层的覆盖盒内（穿漏到底是不是"覆盖不到"问题）
+    const u32 layerCount = GetGlobalLayerCount();
+    auto insideLayer = [this](const float3& p, u32 layer) {
+        const float vs = GetGlobalVoxelSize(layer);
+        if (vs <= 0.0f) return false;
+        const float3 o = GetGlobalOrigin(layer);
+        const float3 l = (p - o) / vs;
+        const float  n = (float)m_Config.globalResolution;
+        return l.x >= 0.0f && l.y >= 0.0f && l.z >= 0.0f && l.x <= n && l.y <= n && l.z <= n;
+    };
+
+    for (u32 i = 0; i < n; ++i) {
+        const float3 ro = m_RayOriginCPU[i];
+        const bool   insideL0 = insideLayer(ro, 0);   // 射线起点是否在近层覆盖内
+        if (!insideL0) ++outsideLayer0;
+        float d0 = 1e30f;   // 起点到几何的精确距离（诊断"上游"：射线集是否退化）
+        const float3 rd = m_RayDirCPU[i];
+
+        // CPU 参考：Möller–Trumbore 对全部三角形取最近正交点（带逐 mesh AABB 粗筛）
+        float tRef = 1e30f;
+        u32   hitEntry = 0xFFFFFFFFu;   // CPU 参考命中的是哪个 mesh 条目（细场未确认时用来归因）
+        for (const auto& e : m_Entries) {
+            const float side = e.voxelSize * (float)e.resolution;
+            // slab 粗筛
+            float t0 = 0.0f, t1 = 1e30f;
+            bool miss = false;
+            for (int a = 0; a < 3; ++a) {
+                const float o = (&ro.x)[a], d = (&rd.x)[a];
+                const float lo = (&e.origin.x)[a], hi = lo + side;
+                if (std::fabs(d) < 1e-9f) { if (o < lo || o > hi) { miss = true; break; } continue; }
+                float ta = (lo - o) / d, tb = (hi - o) / d;
+                if (ta > tb) std::swap(ta, tb);
+                t0 = std::max(t0, ta); t1 = std::min(t1, tb);
+                if (t0 > t1) { miss = true; break; }
+            }
+            if (miss || t0 > tRef) continue;
+
+            for (u32 t = 0; t < e.triCount; ++t) {
+                const u32* tri = &m_IndicesCPU[e.firstIndex + t * 3];
+                const float3 v0 = m_PositionsCPU[tri[0] + e.vertexOffset];
+                const float3 v1 = m_PositionsCPU[tri[1] + e.vertexOffset];
+                const float3 v2 = m_PositionsCPU[tri[2] + e.vertexOffset];
+                const float3 e1 = v1 - v0, e2 = v2 - v0;
+                const float3 pv = glm::cross(rd, e2);
+                d0 = std::min(d0, PointTriangleDistance(ro, v0, v1, v2));
+                const float det = glm::dot(e1, pv);
+                if (std::fabs(det) < 1e-12f) continue;
+                const float inv = 1.0f / det;
+                const float3 tv = ro - v0;
+                const float u = glm::dot(tv, pv) * inv;
+                if (u < 0.0f || u > 1.0f) continue;
+                const float3 qv = glm::cross(tv, e1);
+                const float v = glm::dot(rd, qv) * inv;
+                if (v < 0.0f || u + v > 1.0f) continue;
+                const float tt = glm::dot(e2, qv) * inv;
+                if (tt > 1e-4f && tt < tRef) { tRef = tt; hitEntry = (u32)(&e - m_Entries.data()); }
+            }
+        }
+
+        const bool gpuHit = hits[i].y > 0.5f;
+        const bool cpuHit = (tRef < 1e29f) && (tRef <= m_Config.marchMaxDist);
+
+        // 细节追踪的结果与全局追踪取 min（两者都是下界 ⇒ 合并后仍不高估）：最近命中
+        float tDetail = 1e30f;
+        if (detailT) {
+            float v;
+            std::memcpy(&v, &detailT[i], sizeof(float));   // 位模式 → float
+            tDetail = v;
+        }
+        // 逐条归因：CPU 命中了、细场却没确认（把"细场能力不足"变成可读的清单）
+        if (cpuHit && tDetail >= 1e29f) {
+            ++detailMiss;
+            if (detailMiss <= 6) {
+                HE_CORE_INFO("LumenSDF 细场未确认 #{}: tRef={:.2f} 粗场 t={:.2f} d0={:.2f} 命中 mesh=#{} 起点在近层内={}",
+                             detailMiss, (double)tRef, gpuHit ? (double)hits[i].x : -1.0, (double)d0,
+                             hitEntry, insideL0 ? "是" : "否");
+            }
+        }
+        // 合并策略：取 min（两条追踪都是下界 ⇒ 合并后仍不高估，安全性质保持）。
+        // 实测 detail-first 语义（有细节命中就以它为准）更差：75/195 vs 76/195 —— 因为**无符号**
+        // 场让"起点在几何内部"的射线在细节追踪里立刻命中（t≈0），而全局场又因严重低估而提前命中。
+        // 两条都指向同一个根因（缺符号 + 场不紧），见 §5 的结论。
+        // 【命中复核】只用**细场（逐 mesh 距离场，eps = 0.25 x 该 mesh 体素）**确认过的命中才算命中；
+        // 全局场（eps = 1 个近层体素 = 14.22）的单方面命中计入 near-miss —— 命中判据是"场值 < eps"，
+        // 任何从表面 eps 距离内掠过而未相交的射线都会误判（这正是"仅 GPU"那批）。
+        // 【命中策略】仍是"粗场 ∪ 细场取 min"（两条都是下界 ⇒ 合并后不高估，安全判据优先）；
+        // 细场未确认的粗命中计入 near-miss —— 它是"容差型近似错失"的可回归数字。
+        // 细场本身已大改（每 mesh 一套描述符集 + 允许"先域外后进入"），其精度已可作参考
+        // （近命中 p50 0.553 体素、远命中 2.331），但仍有 33 条真命中未确认 ⇒ 暂不作门控。
+        const float tGpuMerged = tDetail;   // 【实验】门控：只认细场确认的命中
+        const bool  mergedHit  = tDetail < 1e29f;
+        if (gpuHit && !mergedHit) ++nearMiss;
+
+        if (mergedHit && cpuHit) {
+            ++bothHit;
+            const float errVox = std::fabs(tGpuMerged - tRef) / GetGlobalVoxelSize(0);
+            sumErr += errVox;
+            maxErr = std::max(maxErr, errVox);
+            if (errVox <= 1.0f) ++within;
+            errVoxAll.push_back(errVox);
+            ((d0 < 5.0f) ? errNear : errFar).push_back(errVox);
+            ((tRef < 50.0f) ? errNearHit : errFarHit).push_back(errVox);
+            if (gpuHit && hits[i].w < 0.0f) ++normalOk;   // 法线朝向与射线相反 = 正面命中（仅全局命中时该字段才是 dot(N,rd)）
+
+            // 诊断：把"全局单独"与"合并后"的误差分开记，才能判断细节追踪到底有没有帮忙
+            if (gpuHit) {
+                const float errG = std::fabs(hits[i].x - tRef) / GetGlobalVoxelSize(0);
+                sumErrGlobal += errG;
+                if (errG <= 1.0f) ++withinGlobal;
+            }
+            if (tDetail < 1e29f && (!gpuHit || tDetail < hits[i].x)) ++detailBetter;
+        } else if (mergedHit) {
+            ++gpuOnly;
+        } else if (cpuHit) {
+            ++cpuOnly;
+            ((tRef < 50.0f) ? cpuOnlyNear : cpuOnlyFar)++;
+            // 逐条诊断（只打前 16 条）：场在路径上的最小值 / 该点的真实距几何距离
+            if (cpuOnly <= 16) {
+                const float minD  = nrms[i].w;
+                const float tMinD = -hits[i].w;
+                const float3 pMin = ro + rd * tMinD;
+                const float  dGeo = minDistToGeometry(pMin);
+                HE_CORE_INFO("LumenSDF 穿漏逐条 #{}: tRef={:.2f} d0={:.2f} | 场最小={:.2f}(t={:.2f}) 该点真实距几何={:.2f} "
+                             "| 起点在近层内={} 体素=({:.2f},{:.2f})",
+                             cpuOnly, (double)tRef, (double)d0, (double)minD, (double)tMinD, (double)dGeo,
+                             insideL0 ? "是" : "否",
+                             (double)GetGlobalVoxelSize(0), (double)GetGlobalVoxelSize(1));
+                if (!insideL0) ++tunnelOutside;
+            }
+        }
+    }
+    m_RayHit->Unmap();
+    m_RayNormal->Unmap();
+
+    m_MarchCheck.valid      = true;
+    m_MarchCheck.rays       = n;
+    m_MarchCheck.bothHit    = bothHit;
+    m_MarchCheck.gpuOnly    = gpuOnly;
+    m_MarchCheck.cpuOnly    = cpuOnly;
+    m_MarchCheck.withinTol  = within;
+    m_MarchCheck.normalOk   = normalOk;
+    m_MarchCheck.maxErrVox  = maxErr;
+    m_MarchCheck.meanErrVox = bothHit ? (float)(sumErr / bothHit) : 0.0f;
+    // 判据分两层（与步骤 10 的自检同一思路：把"安全"与"精度"分开量）：
+    //   · 安全（pass/fail 门槛）：不得出现"CPU 命中了而 GPU 没命中"——那就是穿漏；
+    //   · 精度（只记录）：命中距离误差 ≤1 体素的比例。当前全局场是粗层（24.66 单位体素），
+    //     精度达不到 1 体素是**已知**的（§5 的下界质量），要等 clipmap 分层 + 细层 eps 才能达标。
+    //   · `gpuOnly` 的假命中来自**无符号**场：射线起点落在几何内部时 d 立刻小于阈值。
+    m_MarchCheck.passed = (bothHit > 0) && (cpuOnly == 0);
+    if (nearMiss) HE_CORE_INFO("LumenSDF 命中复核: 全局场单方面命中 {} 条被判为近似错失（细场未确认）", nearMiss);
+
+    HE_CORE_INFO("LumenSDF sphere tracing 自检: 射线 {}，两者都命中 {}，仅 GPU {}（无符号场在几何内部的假命中），"
+                 "仅 CPU {}（穿漏，须为 0）=> 安全 {}；精度：误差 ≤1 体素 {}/{}（{:.1f}%），"
+                 "最大 {:.3f} 体素，平均 {:.3f}；法线朝向正确 {}",
+                 n, bothHit, gpuOnly, cpuOnly, m_MarchCheck.passed ? "PASS" : "FAIL",
+                 within, bothHit, bothHit ? 100.0 * (double)within / bothHit : 0.0,
+                 (double)maxErr, (double)m_MarchCheck.meanErrVox, normalOk);
+    if (!m_MarchCheck.passed) {
+        HE_CORE_ERROR("LumenSDF sphere tracing 出现穿漏（仅 CPU 命中 {} 条），检查场的下界性质与 eps", cpuOnly);
+    } else if ((float)within / (float)std::max(1u, bothHit) < 0.9f) {
+        HE_CORE_WARN("LumenSDF sphere tracing 精度未达标（{:.1f}% ≤1 体素）：当前为 Global SDF 单层粗分辨率，"
+                     "需 clipmap 分层 + 细层收敛阈值（§5 的下界质量结论）", 
+                     bothHit ? 100.0 * (double)within / bothHit : 0.0);
+    }
+    if (!errVoxAll.empty()) {
+        // 分组中位数必须**先排序**：此前 errNear/errFar 未排序就取中间元素，打出的"近(d0<5) p50"是假数
+        std::sort(errNear.begin(), errNear.end());
+        std::sort(errFar.begin(), errFar.end());
+        std::sort(errNearHit.begin(), errNearHit.end());
+        std::sort(errFarHit.begin(), errFarHit.end());
+        std::sort(errVoxAll.begin(), errVoxAll.end());
+        const float p50 = errVoxAll[errVoxAll.size() / 2];
+        const float p90 = errVoxAll[(size_t)(errVoxAll.size() * 9 / 10)];
+        HE_CORE_INFO("LumenSDF sphere tracing 误差分布: n={} p50={:.3f} p90={:.3f} 体素；按起点到几何距离分组: 近(d0<5) n={} p50={:.3f} / 远 n={} p50={:.3f}",
+                     errVoxAll.size(), (double)p50, (double)p90,
+                     errNear.size(), errNear.empty() ? 0.0 : (double)errNear[errNear.size()/2],
+                     errFar.size(), errFar.empty() ? 0.0 : (double)errFar[errFar.size()/2]);
+        if (!errNearHit.empty()) std::sort(errNearHit.begin(), errNearHit.end());
+        if (!errFarHit.empty())  std::sort(errFarHit.begin(), errFarHit.end());
+        HE_CORE_INFO("LumenSDF 按命中距离分组: 近命中(tRef<50) n={} p50={:.3f} / 远命中 n={} p50={:.3f} 体素",
+                     errNearHit.size(), errNearHit.empty() ? 0.0 : (double)errNearHit[errNearHit.size()/2],
+                     errFarHit.size(),  errFarHit.empty()  ? 0.0 : (double)errFarHit[errFarHit.size()/2]);
+        if (!errNearHit.empty()) std::sort(errNearHit.begin(), errNearHit.end());
+        if (!errFarHit.empty())  std::sort(errFarHit.begin(), errFarHit.end());
+        HE_CORE_INFO("LumenSDF 穿漏按命中距离: 近命中(tRef<50) {} 条 / 远命中 {} 条（近场穿漏才是真问题）", cpuOnlyNear, cpuOnlyFar);
+        HE_CORE_INFO("LumenSDF 场覆盖: clipmap 层数 {}，近层体素 {:.2f}，远层体素 {:.2f}；射线起点在近层覆盖外 {} 条"
+                     "（其中判为穿漏 {} 条 ⇒ 覆盖外的射线本就在场外，属**覆盖**问题而非**精度**问题）",
+                     layerCount, (double)GetGlobalVoxelSize(0), (double)GetGlobalVoxelSize(1),
+                     outsideLayer0, tunnelOutside);
+
+
+    }    HE_CORE_INFO("LumenSDF sphere tracing 误差分解: 仅全局场 {}/{} 在 1 体素内（平均 {:.3f}），"
+                 "合并细节追踪后 {}/{}（平均 {:.3f}）；细节追踪更近的射线 {} 条",
+                 withinGlobal, bothHit, bothHit ? sumErrGlobal / bothHit : 0.0,
+                 within, bothHit, bothHit ? sumErr / bothHit : 0.0, detailBetter);
+}
+
+// ============================================================
+// 步骤 12：SDF 追踪结果可视化（L1 退出判据）
+//
+// 【为什么必须是一个独立可看的产物】步骤 11 的自检只能说明"这 256 条测试射线对不对"；
+// L1 的退出判据要求"可视化 SDF 追踪结果" —— 即从**相机**逐像素发射主射线，把整个视野的
+// 追踪结果画出来：一眼能看出"哪些像素没命中"、"命中面是近层还是远层"、"步数是否爆掉"。
+// 它同时是后续所有阶段的底气：Screen Probe / Surface Cache 的射线都要走同一套步进语义。
+//
+// 【与自检共用步进语义】命中判据与步长公式与 `SDF_RayMarch.comp.slang` 逐字一致，
+// 唯一差别是射线来自相机（而不是随机三角形上的测试射线）。
+// ============================================================
+namespace {
+// push constant 布局：必须与 SDF_DebugView.comp.slang 的 cbuffer 一一对应（9 个 16B 字段）
+struct DebugPC {
+    float4 camPos;        // xyz = 相机世界坐标, w = tan(垂直半视场角)
+    float4 camForward;    // xyz = 前向, w = 宽高比
+    float4 camRight;      // xyz = 右向, w 未用
+    float4 camUp;         // xyz = 上向, w 未用
+    uint4  grid0;         // xyz = 层0 分辨率, w = 输出宽
+    float4 originVoxel0;  // xyz = 层0 原点, w = 体素边长
+    uint4  grid1;         // xyz = 层1 分辨率, w = 输出高
+    float4 originVoxel1;  // xyz = 层1 原点, w = 体素边长
+    float4 marchParams;   // x = 最大步数, y = eps, z = 最大距离, w = 本帧是否统计
+};
+static_assert(sizeof(DebugPC) == 9 * 16, "DebugPC 必须与 shader 的 cbuffer 等大（9 个 16B 字段 = 144B）");
+
+constexpr u32 kDBindField  = 0;   // 与 SDF_RayMarch 一致：层0 在 0、层1 在 6
+constexpr u32 kDBindField1 = 6;
+constexpr u32 kDBindOut    = 7;
+constexpr u32 kDBindStats  = 8;
+constexpr u32 kDBindProbe  = 9;
+/// 剖面探针的采样点数（与 shader 里的 64 对齐）
+constexpr u32 kProbeSamples = 64;
+/// 统计帧：只在第 60 帧开统计（避免累计计数溢出），再过 3 帧读回（等 GPU 写完）
+constexpr u32 kDebugCountFrame = 60;
+}   // namespace
+
+void LumenSDF::CreateDebugGPUObjects() {
+    if (m_ViewportW == 0 || m_ViewportH == 0) return;
+
+    if (!m_DebugPSO) {
+        rhi::DescriptorSetLayoutDesc layout;
+        layout.bindings = {
+            {kDBindField,  rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
+            {kDBindField1, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
+            {kDBindOut,    rhi::DescriptorType::StorageImage,         1, rhi::kStageMaskCompute},
+            {kDBindStats,  rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},
+            {kDBindProbe,  rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},
+        };
+        m_DebugLayout = m_Device->CreateDescriptorSetLayout(layout);
+        m_DebugSet    = m_Device->AllocateDescriptorSet(m_DebugLayout);
+
+        rhi::PushConstantRange pcr;
+        pcr.stageMask = rhi::kStageMaskCompute;
+        pcr.offset    = 0;
+        pcr.size      = sizeof(DebugPC);
+
+        rhi::ShaderBytecode cs;
+        cs.stage      = rhi::ShaderStage::Compute;
+        cs.spirv      = k_SDF_DebugView_comp_spv;
+        cs.entryPoint = "main";
+
+        rhi::PipelineStateDesc pso;
+        pso.bindPoint            = rhi::PipelineBindPoint::Compute;   // 漏掉会让 PSO 静默为 null
+        pso.computeShader        = &cs;
+        pso.descriptorSetLayouts = {m_DebugLayout};
+        pso.pushConstantRanges   = {pcr};
+        pso.debugName            = "Lumen_SDF_DebugView";
+        m_DebugPSO = m_Device->CreatePipelineState(pso);
+        if (!m_DebugPSO) {
+            HE_CORE_ERROR("LumenSDF: SDF 调试视图的 PSO 创建失败（步骤 12 的可视化不可用）");
+            return;
+        }
+    }
+
+    // 输出纹理：compute 写（UAV）+ 采样（SRV）+ 拷贝转储（TRANSFER_SRC）。
+    // resize 时由 SetViewport 置空本指针 ⇒ 这里按新尺寸重建并重新写描述符。
+    if (!m_DebugTex) {
+        rhi::TextureDesc td;
+        td.width  = m_ViewportW;
+        td.height = m_ViewportH;
+        td.depth  = 1;
+        td.format = rhi::Format::RGBA16_FLOAT;
+        td.usage  = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource |
+                    rhi::TextureUsage::TransferSrc;
+        m_DebugTex = m_Device->CreateTexture(td);
+        // 存储图像的描述符必须走 imageView 重载（本引擎没有"独立存储图像"以外的写法）
+        m_Device->UpdateDescriptorSetWithImageView(m_DebugSet, kDBindOut,
+            rhi::DescriptorType::StorageImage, m_DebugTex->GetNativeHandle());
+    }
+
+    // 统计缓冲（CPU 可读）：创建时清零一次，之后只靠 shader 的原子加
+    if (!m_DebugStats) {
+        rhi::BufferDesc bd;
+        bd.size      = 4 * sizeof(u32);
+        bd.usage     = rhi::BufferUsage::Storage;
+        bd.cpuAccess = true;
+        m_DebugStats = m_Device->CreateBuffer(bd);
+        if (void* p = m_DebugStats->Map()) {
+            u32 zero[4] = {0, 0, 0, 0};
+            std::memcpy(p, zero, sizeof(zero));
+            m_DebugStats->Unmap();
+        }
+        m_Device->UpdateDescriptorSet(m_DebugSet, kDBindStats, rhi::DescriptorType::StorageBuffer,
+                                      m_DebugStats.get());
+        HE_CORE_INFO("LumenSDF: SDF 调试视图就绪（{}x{}，RGBA16F，逐像素 sphere tracing）",
+                     m_ViewportW, m_ViewportH);
+    }
+
+    // 剖面探针缓冲（CPU 可读，随调试视图一起建）
+    if (!m_DebugProbe) {
+        rhi::BufferDesc pd;
+        pd.size      = (usize)kProbeSamples * sizeof(float4);
+        pd.usage     = rhi::BufferUsage::Storage;
+        pd.cpuAccess = true;
+        m_DebugProbe = m_Device->CreateBuffer(pd);
+        m_Device->UpdateDescriptorSet(m_DebugSet, kDBindProbe, rhi::DescriptorType::StorageBuffer,
+                                      m_DebugProbe.get());
+    }
+}
+
+void LumenSDF::RunDebugView(rhi::IRHICommandList* cmd, const float3& camPos, const float3& forward,
+                            const float3& right, const float3& up, float tanHalfFov, float aspect) {
+    // 只在 SDF 构建完成后跑；没建完时视图没有意义（场还没注入）
+    if (m_Phase != Phase::Done || !GetGlobalField(0)) return;
+    CreateDebugGPUObjects();
+    if (!m_DebugPSO || !m_DebugTex || !m_DebugStats) return;
+    if (!m_LinearSampler) return;
+
+    const bool countFrame = (++m_DebugFrames == kDebugCountFrame);
+    m_DebugCamPos = camPos;
+    m_DebugCamFwd = forward;
+
+    DebugPC pc{};
+    pc.camPos        = float4(camPos, tanHalfFov);
+    pc.camForward    = float4(forward, aspect);
+    pc.camRight      = float4(right, 0.0f);
+    pc.camUp         = float4(up, 0.0f);
+    pc.grid0         = uint4(m_GlobalLayers[0].res, m_GlobalLayers[0].res, m_GlobalLayers[0].res,
+                             m_ViewportW);
+    pc.originVoxel0  = float4(m_GlobalLayers[0].origin, m_GlobalLayers[0].voxelSize);
+    // 层1 可能不存在（只开一层）：此时把体素给 -1，shader 侧据此判"不在域内"，
+    // 但绑定仍必须是**有效纹理**（描述符指向空纹理会触发验证层报错）。
+    const bool hasLayer1 = (m_GlobalLayerCount > 1) && m_GlobalLayers[1].field;
+    pc.grid1         = uint4(hasLayer1 ? m_GlobalLayers[1].res : 0u,
+                             hasLayer1 ? m_GlobalLayers[1].res : 0u,
+                             hasLayer1 ? m_GlobalLayers[1].res : 0u, m_ViewportH);
+    pc.originVoxel1  = hasLayer1 ? float4(m_GlobalLayers[1].origin, m_GlobalLayers[1].voxelSize)
+                                 : float4(0.0f, 0.0f, 0.0f, -1.0f);
+    pc.marchParams   = float4((float)m_Config.marchMaxSteps, 1.0f * GetGlobalVoxelSize(0),
+                              (float)m_Config.marchMaxDist, countFrame ? 1.0f : 0.0f);
+
+    m_Device->UpdateDescriptorSet(m_DebugSet, kDBindField,
+        rhi::DescriptorType::CombinedImageSampler, m_GlobalLayers[0].field.get(),
+        m_LinearSampler.get());
+    m_Device->UpdateDescriptorSet(m_DebugSet, kDBindField1,
+        rhi::DescriptorType::CombinedImageSampler,
+        hasLayer1 ? m_GlobalLayers[1].field.get() : m_GlobalLayers[0].field.get(),
+        m_LinearSampler.get());
+
+    cmd->SetPipeline(m_DebugPSO.get());
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DebugSet);
+    cmd->SetPushConstants(0, sizeof(pc), &pc);
+    cmd->Dispatch((m_ViewportW + 7u) / 8u, (m_ViewportH + 7u) / 8u, 1);
+    // UAV → 拷贝源：转储（06.GILab 的 GI 采样路径）在本 pass 之后整幅拷走
+    cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::Transfer,
+                         rhi::ResourceState::UnorderedAccess, rhi::ResourceState::CopySrc,
+                         m_DebugTex.get());
+
+    // 统计帧后 3 帧读回（飞行帧数），把"看得见的画面"同时落成可回归的数字
+    if (m_DebugFrames == kDebugCountFrame + 3) LogDebugStats();
+
+    // 逐帧探测单个 mesh 场（定位"哪几个 mesh 场在空旷处为 0"）
+    RunMeshFieldProbe(cmd, camPos, forward);
+}
+
+void LumenSDF::LogDebugStats() {
+    if (!m_DebugStats) return;
+    void* mapped = m_DebugStats->Map();
+    if (!mapped) {
+        HE_CORE_WARN("LumenSDF: 调试视图统计缓冲不可映射（步骤 12 的可视化数字缺失）");
+        return;
+    }
+    u32 c[4];
+    std::memcpy(c, mapped, sizeof(c));
+    m_DebugStats->Unmap();
+    m_DebugStatsLast[0] = c[0]; m_DebugStatsLast[1] = c[1];
+    m_DebugStatsLast[2] = c[2]; m_DebugStatsLast[3] = c[3];
+
+    const double total = (double)c[0] + (double)c[1] + (double)c[2];
+    const double hit   = (double)c[0] + (double)c[1];
+    // 关键归因量：相机到真实几何的距离。若它远大于 eps，而命中率却是 100%、平均步数≈2，
+    // 就说明**场在相机附近把距离低估到了 eps 以下**（近处报"贴着表面"），
+    // 从任意视点出发的追踪会立刻假命中 —— 这正是"下界质量"问题的可视形态。
+    const float  camTruth = MinDistToGeometry(m_DebugCamPos);
+    const float  eps      = 1.0f * GetGlobalVoxelSize(0);   // 与自检同口径：1 个近层体素
+    HE_CORE_INFO("LumenSDF 调试视图统计（第 {} 帧，逐像素主射线 {} 条）: 命中 {:.1f}%（近层 {} / 远层 {}），"
+                 "未命中 {}（{:.1f}%），平均步数 {:.1f}/{:.0f}；eps {:.3f} 世界单位（1 个近层体素）",
+                 kDebugCountFrame, (u32)total,
+                 total > 0.0 ? 100.0 * hit / total : 0.0, c[0], c[1], c[2],
+                 total > 0.0 ? 100.0 * (double)c[2] / total : 0.0,
+                 hit > 0.0 ? (double)c[3] / hit : 0.0, (double)m_Config.marchMaxSteps,
+                 (double)eps);
+    HE_CORE_INFO("LumenSDF 调试视图归因: 相机 ({:.1f},{:.1f},{:.1f}) 到真实几何 {:.2f} 世界单位（{:.3f} 倍 eps）；"
+                 "若命中率 100% 且平均步数≈2，则场在相机处把距离低估到 eps 以下（下界质量缺陷，"
+                 "从任意视点出发会立刻假命中）",
+                 (double)m_DebugCamPos.x, (double)m_DebugCamPos.y, (double)m_DebugCamPos.z,
+                 (double)camTruth, (double)(camTruth / std::max(1e-6f, eps)));
+
+    // 剖面：沿图像中心那条射线，把"场值 vs 真实距离"并排打出来（-1 = 该层不在域内）
+    if (m_DebugProbe) {
+        if (void* pm = m_DebugProbe->Map()) {
+            const float4* pr = static_cast<const float4*>(pm);
+            HE_CORE_INFO("LumenSDF 场剖面（沿中心射线，t / 层0 值 / 层1 值 / 该点真实距几何）:");
+            for (u32 i = 0; i < kProbeSamples; i += 8) {
+                // 中心像素的方向与 shader 一致（ndc = (0, 0) ⇒ 就是 camera forward）
+                const float3 p = m_DebugCamPos + m_DebugCamFwd * pr[i].x;
+                const float truth = MinDistToGeometry(p);
+                HE_CORE_INFO("   t={:7.2f}  层0={:9.2f}  层1={:9.2f}  真值={:9.2f}", (double)pr[i].x,
+                             (double)pr[i].y, (double)pr[i].z, (double)truth);
+            }
+            m_DebugProbe->Unmap();
+        }
+    }
+}
+
+void LumenSDF::RunMeshFieldProbe(rhi::IRHICommandList* cmd, const float3& camPos, const float3& fwd) {
+    // 【为什么需要】全局场是"跨 16 个 mesh 取 min"的产物，任何一个 mesh 场在空旷处给出 0，
+    // 整个全局场在那片区域就被压成 0（实测：相机处真实距离 102 单位，场却 < eps）。
+    // 本探测用 1 条合成射线（相机 → 前向）单独跑**某一个** mesh 的细节追踪：
+    // 命中距离 ≈ 该 mesh 场在起点处的值（第一步就命中 ⇒ 该 mesh 场在此处 ≈ 0 ⇒ 就是它毒化了全局场）。
+    // 读回要等 3 帧（飞行帧），故每帧只查一个 mesh。
+    if (m_Entries.empty() || !m_DetailPSO || !m_RayOrigin || !m_RayDir || !m_RayT || !m_RayTMapped) return;
+
+    if (m_MeshProbeIndex >= m_Entries.size()) {
+        if (!m_MeshProbeReported) {
+            m_MeshProbeReported = true;
+            const float camTruth = MinDistToGeometry(camPos);
+            HE_CORE_INFO("LumenSDF mesh 场探针汇总: 相机 ({:.1f},{:.1f},{:.1f}) 到全局真实几何 {:.2f} 世界单位；"
+                         "各 mesh 的命中距离（≈0 ⇒ 该 mesh 场在空旷处为 0，是全局场被压成 0 的元凶）:",
+                         (double)camPos.x, (double)camPos.y, (double)camPos.z, (double)camTruth);
+            for (size_t i = 0; i < m_Entries.size() && i < m_MeshProbeValue.size(); ++i) {
+                const auto& e = m_Entries[i];
+                const float side = e.voxelSize * (float)e.resolution;
+                HE_CORE_INFO("   mesh #{}: 命中距离 {:9.2f}（边长 {:.0f}，体素 {:.3f}，三角形 {}）",
+                             i, (double)m_MeshProbeValue[i], (double)side, (double)e.voxelSize, e.triCount);
+            }
+        }
+        return;
+    }
+
+    if (m_MeshProbeValue.size() != m_Entries.size()) m_MeshProbeValue.assign(m_Entries.size(), -1.0f);
+
+    // ① 发射：写第 0 条射线 = 相机 → 前向，清 m_RayT[0]，只对该 mesh 跑一次 1 线程的细节追踪
+    if (m_MeshProbeStage == 0) {
+        const auto& e = m_Entries[m_MeshProbeIndex];
+        if (!e.field) { m_MeshProbeValue[m_MeshProbeIndex] = -2.0f; ++m_MeshProbeIndex; return; }
+
+        if (void* mo = m_RayOrigin->Map()) { std::memcpy(mo, &camPos, sizeof(float3)); m_RayOrigin->Unmap(); }
+        if (void* md = m_RayDir->Map())    { std::memcpy(md, &fwd,    sizeof(float3)); m_RayDir->Unmap(); }
+        {
+            u32 inf = 0x7F800000u;   // +inf：细节追踪是 min 归约，起点必须比任何命中都大
+            std::memcpy(m_RayTMapped, &inf, sizeof(u32));
+        }
+
+        m_Device->UpdateDescriptorSet(m_DetailSet, kMBindField,
+            rhi::DescriptorType::CombinedImageSampler, e.field.get(), m_LinearSampler.get());
+
+        MarchPC pc{};
+        pc.originX = e.origin.x; pc.originY = e.origin.y; pc.originZ = e.origin.z;
+        pc.voxelSize = e.voxelSize;
+        pc.dimX = pc.dimY = pc.dimZ = e.resolution;
+        pc.rayCount = 1u;                    // 只跑第 0 条
+        pc.maxSteps = (float)m_Config.marchMaxSteps;
+        pc.eps      = 0.25f * e.voxelSize;   // 与细节追踪同口径
+        pc.maxDist  = m_Config.marchMaxDist;
+
+        cmd->SetPipeline(m_DetailPSO.get());
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DetailSet);
+        cmd->SetPushConstants(0, sizeof(pc), &pc);
+        cmd->Dispatch(1, 1, 1);
+        cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                             rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
+                             GetGlobalField(0));
+
+        m_MeshProbeStage = 1;
+        m_MeshProbeFrame = m_DebugFrames;
+        return;
+    }
+
+    // ② 等 3 帧后读回
+    if (m_DebugFrames < m_MeshProbeFrame + 3u) return;
+    float v = 1e30f;
+    std::memcpy(&v, m_RayTMapped, sizeof(float));
+    m_MeshProbeValue[m_MeshProbeIndex] = (v < 1e29f) ? v : 999999.0f;   // 未命中 → 大数（说明该 mesh 场正常）
+    ++m_MeshProbeIndex;
+    m_MeshProbeStage = 0;
+}
+
+// ============================================================
+// 步骤 13：Card 生成器 + 覆盖率可视化（L2 Surface Cache 的输入）
+//
+// 【为什么先有卡片】Surface Cache 按"表面上的小方块"（card）缓存材质与光照。UE 的做法是沿 6 个轴向
+// 把 mesh 表面投影成卡片，再按覆盖率挑掉没有表面的方向。本步骤先把这个几何过程做出来，并让
+// "覆盖不到的地方"可见：一张卡是否保留只看"它的 texel 里有多少落在表面上"，于是
+// "卡片密度设置 ↔ 空洞"这条因果关系可验证。
+//
+// 【texel 世界尺寸必须固定，否则大网格全是"空洞"】固定 64² 时，2789 单位的网格每 texel 43.6 单位，
+// 薄结构几乎不占 texel ⇒ 覆盖率为 0（实测 mesh #12/#60/#93 就是这样，它们是"假空洞"）。
+// 这里改成按 `cardTexelWorld`（目标 texel 世界边长）**逐 mesh 自适应**分辨率，并夹在 [64, 512]：
+// 大网格用 512²（texel ≈ side/512），小网格用 64²。于是"空洞"只剩真正细到分辨不出的结构。
+//
+// 【CPU 版 vs GPU 版】这里是 CPU 版：复用自检已经准备好的 m_PositionsCPU / m_IndicesCPU，
+// 不引入新 GPU 资源；步骤 14 的页表/页状态机与捕获 pass 会消费这份卡片清单。
+// ============================================================
+void LumenSDF::BuildCards() {
+    if (m_CardsBuilt || m_Entries.empty()) return;
+    m_CardsBuilt = true;
+
+    struct Face { u8 axis; i8 dir; };
+    static const Face kFaces[6] = {{0, 1}, {0, -1}, {1, 1}, {1, -1}, {2, 1}, {2, -1}};
+
+    struct Card {
+        u32 mesh = 0; u8 axis = 0; i8 dir = 1; u32 res = 0;
+        float texelWorld = 0.0f, loB = 0.0f, loC = 0.0f;
+        u32 filled = 0;
+        std::vector<u8> tex;
+    };
+    std::vector<Card> cards;
+    std::vector<std::vector<u32>> cardsOfMesh(m_Entries.size());
+
+    u32 minRes = 0xFFFFFFFFu, maxRes = 0;
+    float minTexel = 1e30f, maxTexel = 0.0f;
+
+    // ① 逐 mesh × 6 个方向：把三角形投影到该方向的 2D 网格，标记"有表面"的 texel
+    for (u32 mi = 0; mi < (u32)m_Entries.size(); ++mi) {
+        const MeshSDFEntry& e = m_Entries[mi];
+        const float side = e.voxelSize * (float)e.resolution;
+
+        for (u32 fi = 0; fi < 6u; ++fi) {
+            const u8 a = kFaces[fi].axis;
+            const u8 b = (u8)((a + 1u) % 3u);
+            const u8 c = (u8)((a + 2u) % 3u);
+            const float loB = (&e.origin.x)[b], loC = (&e.origin.x)[c];
+
+            // texel 世界边长目标 ⇒ 该方向的分辨率（夹在 [64, 512]，保证显存与耗时可控）
+            const u32 R = (u32)std::clamp(std::lround(side / std::max(0.25f, m_Config.cardTexelWorld)),
+                                          64l, 512l);
+            const float du = side / (float)R;
+            minRes = std::min(minRes, R); maxRes = std::max(maxRes, R);
+            minTexel = std::min(minTexel, du); maxTexel = std::max(maxTexel, du);
+
+            Card card;
+            card.mesh = mi; card.axis = a; card.dir = kFaces[fi].dir; card.res = R;
+            card.texelWorld = du; card.loB = loB; card.loC = loC;
+            card.tex.assign((usize)R * (usize)R, 0);
+
+            for (u32 t = 0; t < e.triCount; ++t) {
+                const u32* tri = &m_IndicesCPU[e.firstIndex + t * 3];
+                const float3 v0 = m_PositionsCPU[tri[0] + e.vertexOffset];
+                const float3 v1 = m_PositionsCPU[tri[1] + e.vertexOffset];
+                const float3 v2 = m_PositionsCPU[tri[2] + e.vertexOffset];
+                const float b0 = (&v0.x)[b], b1 = (&v1.x)[b], b2 = (&v2.x)[b];
+                const float c0 = (&v0.x)[c], c1 = (&v1.x)[c], c2 = (&v2.x)[c];
+
+                // 该方向上的投影面积过小（三角形几乎侧对）⇒ 这个方向看不到它
+                const float den = (b1 - b0) * (c2 - c0) - (b2 - b0) * (c1 - c0);
+                if (std::fabs(den) < 1e-6f) continue;
+
+                const int i0 = std::max(0, (int)std::floor((std::min(std::min(b0, b1), b2) - loB) / du));
+                const int i1 = std::min((int)R - 1, (int)std::ceil((std::max(std::max(b0, b1), b2) - loB) / du));
+                const int j0 = std::max(0, (int)std::floor((std::min(std::min(c0, c1), c2) - loC) / du));
+                const int j1 = std::min((int)R - 1, (int)std::ceil((std::max(std::max(c0, c1), c2) - loC) / du));
+                for (int j = j0; j <= j1; ++j) {
+                    for (int i = i0; i <= i1; ++i) {
+                        // texel 中心 -> 2D 重心坐标，判断是否落在投影三角形内
+                        const float pb = loB + ((float)i + 0.5f) * du;
+                        const float pc = loC + ((float)j + 0.5f) * du;
+                        const float w1 = ((pb - b0) * (c2 - c0) - (pc - c0) * (b2 - b0)) / den;
+                        const float w2 = ((b1 - b0) * (pc - c0) - (c1 - c0) * (pb - b0)) / den;
+                        if (w1 < -1e-4f || w2 < -1e-4f || w1 + w2 > 1.0f + 1e-4f) continue;
+                        card.tex[(usize)j * R + (usize)i] = 1;
+                    }
+                }
+            }
+            for (u8 v : card.tex) card.filled += v ? 1u : 0u;
+            cardsOfMesh[mi].push_back((u32)cards.size());
+            // 记录给步骤 15 的捕获 pass（卡片的轴向、面内原点、texel 世界边长、mesh AABB）
+            {
+                CardInfo ci;
+                ci.mesh = mi; ci.axis = a; ci.dir = kFaces[fi].dir; ci.res = R;
+                ci.texelWorld = du; ci.aabbLo = e.origin; ci.side = side; ci.filled = card.filled;
+                m_Cards.push_back(ci);
+            }
+            cards.push_back(std::move(card));   // 先全部留下，是否"保留"由阈值在统计阶段决定
+        }
+    }
+
+    // ② 覆盖率：按面积加权采样表面点，记录"哪些方向的卡覆盖了它"（6 位掩码），
+    //    这样换一个保留阈值不必重新采样（"卡片密度 ↔ 覆盖率"的曲线是同一批采样上算出来的）
+    u32 samples = 0;
+    std::vector<u8> maskOfSample;
+    std::vector<u32> meshOfSample;
+    maskOfSample.reserve(1 << 20);
+    meshOfSample.reserve(1 << 20);
+
+    for (u32 mi = 0; mi < (u32)m_Entries.size(); ++mi) {
+        const MeshSDFEntry& e = m_Entries[mi];
+        const float side = e.voxelSize * (float)e.resolution;
+        for (u32 t = 0; t < e.triCount; ++t) {
+            const u32* tri = &m_IndicesCPU[e.firstIndex + t * 3];
+            const float3 v0 = m_PositionsCPU[tri[0] + e.vertexOffset];
+            const float3 v1 = m_PositionsCPU[tri[1] + e.vertexOffset];
+            const float3 v2 = m_PositionsCPU[tri[2] + e.vertexOffset];
+            const float area = 0.5f * glm::length(glm::cross(v1 - v0, v2 - v0));
+            const u32 k = (u32)std::clamp(area / std::max(1e-3f, side * side / 4096.0f), 1.0f, 16.0f);
+            for (u32 s = 0; s < k; ++s) {
+                // 固定低差异序列（可复现），重心坐标均匀采样
+                const float u1 = (float)(((t * 7u + s * 13u) % 97u) + 1u) / 98.0f;
+                const float u2 = (float)(((t * 11u + s * 5u) % 89u) + 1u) / 90.0f;
+                const float su = std::sqrt(u1);
+                const float w0 = 1.0f - su, w1 = su * (1.0f - u2), w2 = su * u2;
+                const float3 p = v0 * w0 + v1 * w1 + v2 * w2;
+                ++samples;
+
+                u8 mask = 0;
+                const auto& my = cardsOfMesh[mi];
+                for (u32 k2 = 0; k2 < (u32)my.size() && k2 < 6u; ++k2) {
+                    const Card& card = cards[my[k2]];
+                    const u8 a = card.axis;
+                    const u8 bb = (u8)((a + 1u) % 3u);
+                    const u8 cc = (u8)((a + 2u) % 3u);
+                    const int i = (int)std::floor(((&p.x)[bb] - card.loB) / card.texelWorld);
+                    const int j = (int)std::floor(((&p.x)[cc] - card.loC) / card.texelWorld);
+                    if (i < 0 || j < 0 || i >= (int)card.res || j >= (int)card.res) continue;
+                    if (card.tex[(usize)j * card.res + (usize)i]) mask |= (u8)(1u << k2);
+                }
+                maskOfSample.push_back(mask);
+                meshOfSample.push_back(mi);
+            }
+        }
+    }
+
+    // ③ 保留阈值 → 卡片数 → 覆盖率（同一批采样求值，曲线才有可比性）
+    auto coverageAt = [&](float minFill, u32* keptCards) {
+        std::vector<u8> keep(cards.size(), 0);
+        u32 kept = 0;
+        for (size_t ci = 0; ci < cards.size(); ++ci) {
+            const Card& card = cards[ci];
+            if ((float)card.filled >= minFill * (float)(card.res * card.res)) { keep[ci] = 1; ++kept; }
+        }
+        u32 covered = 0;
+        for (u32 si = 0; si < samples; ++si) {
+            const u8 mask = maskOfSample[si];
+            if (!mask) continue;
+            const auto& my = cardsOfMesh[meshOfSample[si]];
+            for (u32 k2 = 0; k2 < (u32)my.size() && k2 < 6u; ++k2) {
+                if ((mask & (u8)(1u << k2)) && keep[my[k2]]) { ++covered; break; }
+            }
+        }
+        if (keptCards) *keptCards = kept;
+        return samples ? (float)covered / (float)samples : 0.0f;
+    };
+
+    u32 keptAtCfg = 0;
+    const float covCfg = coverageAt(m_Config.cardMinFill, &keptAtCfg);
+    m_CardCoverage.meshes      = (u32)m_Entries.size();
+    m_CardCoverage.cards       = keptAtCfg;
+    m_CardCoverage.samples     = samples;
+    m_CardCoverage.covered     = (u32)(covCfg * (float)samples);
+    m_CardCoverage.cardRes     = maxRes;
+    m_CardCoverage.minCardFill = m_Config.cardMinFill;
+
+    HE_CORE_INFO("LumenSDF 卡片生成（步骤 13）: {} 个 mesh；卡片分辨率 {}~{}²（texel {:.2f}~{:.2f} 世界单位，"
+                 "目标 {:.2f}）；表面采样 {} 点",
+                 m_CardCoverage.meshes, minRes, maxRes, (double)minTexel, (double)maxTexel,
+                 (double)m_Config.cardTexelWorld, samples);
+    for (float thr : {0.05f, 0.10f, 0.25f, 0.50f}) {
+        u32 kept = 0;
+        const float cov = coverageAt(thr, &kept);
+        HE_CORE_INFO("  保留阈值 {:>3.0f}% 的 texel 有表面 ⇒ 卡片 {} 张，覆盖率 {:.1f}%",
+                     (double)(thr * 100.0f), kept, 100.0 * (double)cov);
+    }
+
+    // ④ 覆盖率可视化（RGBA8）：上半 = 代表 mesh 的 6 个投影面；下半 = 逐 mesh 覆盖条
+    const u32 panel = 64;                 // 展示分辨率（大卡片按最近邻降采样）
+    const u32 barH  = 64;
+    const u32 imgW  = panel * 6u;
+    const u32 imgH  = panel + barH;
+    std::vector<u8> img((usize)imgW * imgH * 4u, 0);
+    auto put = [&](u32 x, u32 y, u8 r, u8 g, u8 b) {
+        if (x >= imgW || y >= imgH) return;
+        u8* px = &img[((usize)y * imgW + x) * 4u];
+        px[0] = r; px[1] = g; px[2] = b; px[3] = 255;
+    };
+    // 代表 mesh：留卡"有洞"最多者优先（这样图里一定能看到问题所在）
+    std::vector<float> meshCovered(m_Entries.size(), 0.0f);
+    std::vector<u32>   meshSamples(m_Entries.size(), 0);
+    for (u32 si = 0; si < samples; ++si) {
+        const u32 mi = meshOfSample[si];
+        ++meshSamples[mi];
+        const u8 mask = maskOfSample[si];
+        if (!mask) continue;
+        const auto& my = cardsOfMesh[mi];
+        for (u32 k2 = 0; k2 < (u32)my.size() && k2 < 6u; ++k2) {
+            if (mask & (u8)(1u << k2)) {
+                const Card& card = cards[my[k2]];
+                if ((float)card.filled >= m_Config.cardMinFill * (float)(card.res * card.res)) {
+                    meshCovered[mi] += 1.0f; break;
+                }
+            }
+        }
+    }
+    u32 rep = 0;
+    for (u32 mi = 1; mi < (u32)m_Entries.size(); ++mi) {
+        const float c0 = meshSamples[rep] ? meshCovered[rep] / (float)meshSamples[rep] : 1.0f;
+        const float c1 = meshSamples[mi] ? meshCovered[mi] / (float)meshSamples[mi] : 1.0f;
+        if (c1 < c0) rep = mi;
+    }
+    for (u32 fi = 0; fi < 6u; ++fi) {
+        const u32 ci = rep * 6u + fi;
+        if (ci >= cards.size()) continue;
+        const Card& card = cards[ci];
+        const u32 step = std::max(1u, card.res / panel);
+        for (u32 y = 0; y < panel; ++y) {
+            for (u32 x = 0; x < panel; ++x) {
+                const u32 sx = std::min(card.res - 1u, x * step);
+                const u32 sy = std::min(card.res - 1u, y * step);
+                if (card.tex[(usize)sy * card.res + sx]) put(fi * panel + x, y, 230, 230, 230);
+            }
+        }
+    }
+    for (u32 mi = 0; mi < (u32)m_Entries.size() && mi < barH; ++mi) {
+        const float cov = meshSamples[mi] ? meshCovered[mi] / (float)meshSamples[mi] : 1.0f;
+        const u32 len = (u32)(cov * (float)imgW);
+        for (u32 x = 0; x < imgW; ++x)
+            put(x, panel + mi, x < len ? (u8)80 : (u8)200, x < len ? (u8)220 : (u8)40, 60);
+    }
+
+    rhi::TextureDesc td;
+    td.width = imgW; td.height = imgH; td.depth = 1;
+    td.format = rhi::Format::RGBA8_UNORM;
+    td.usage  = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::TransferSrc;
+    td.initialData = img.data();
+    m_CardCoverageTex = m_Device->CreateTexture(td);
+
+    // 覆盖最差的 3 个 mesh 点名（"空洞 ↔ 卡片设置"的可回归证据）
+    std::vector<u32> order;
+    for (u32 mi = 0; mi < (u32)m_Entries.size(); ++mi) if (meshSamples[mi] > 0) order.push_back(mi);
+    std::sort(order.begin(), order.end(), [&](u32 x, u32 y) {
+        return meshCovered[x] / (float)std::max(1u, meshSamples[x]) <
+               meshCovered[y] / (float)std::max(1u, meshSamples[y]);
+    });
+    for (u32 i = 0; i < (u32)order.size() && i < 3u; ++i) {
+        const u32 mi = order[i];
+        HE_CORE_INFO("  覆盖最差 #{}: mesh #{} 覆盖 {:.1f}%（采样 {}，三角形 {}）",
+                     i + 1, mi, 100.0 * (double)(meshCovered[mi] / (float)std::max(1u, meshSamples[mi])),
+                     meshSamples[mi], m_Entries[mi].triCount);
+    }
+}
+
+} // namespace he::render

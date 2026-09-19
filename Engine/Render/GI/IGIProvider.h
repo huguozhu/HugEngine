@@ -17,6 +17,7 @@
 
 #include "Pipeline/LightingPass.h"
 #include "GI/GITypes.h"
+#include "PostProcess/DenoiseSignal.h"   // 步骤 34（11.3）：DenoiseSignal / 统一历史池 / 有效性契约
 #include "RHI/RHI.h"
 
 namespace he::render {
@@ -81,6 +82,15 @@ public:
     /// 在层栈「要求了但模式不同」时的同步钩子（如层栈选 GTAO → 切换 pass 模式）
     virtual void SyncToStack(const GIChannelStack& /*stack*/) {}
 
+    /// 【步骤 34/35】本帧**是否真的产出了内容**（由 `SyncToStack` 按层栈写入）。
+    ///
+    /// 与 `IsValid()` 分开是必须的：`IsValid()` 的语义是"这个 pass 对象在"（RT 四种效果一创建就
+    /// 恒真、Lumen 只要有输出纹理就恒真），**它不代表本帧的层栈要了这个源**。把两者混用会得到
+    /// 两类假读数：①信号登记把"当帧根本没跑"的源报成待降噪信号；②转储把上一帧/未使用的纹理
+    /// 当成"本帧产出"（实测：默认配置下 4 条 RT 信号全被登记，而 RG pass 列表里一个 RT pass 都没有）。
+    /// 默认返回 `IsValid()`：对没有"按层栈门控"语义的源保持原行为。
+    [[nodiscard]] virtual bool ProducedThisFrame() const { return IsValid(); }
+
     /// 该 Provider 是否需要「前帧 HDR 辐射度」这一共享输入（`GIRadianceHistory`）。    /// 声明为真即表示：它会在 pass 里采样**上一帧的 Lighting 结果**当作入射辐射度
     /// （DDGI 的探针辐射度回退、SSGI 的 L_in）。
     ///
@@ -108,6 +118,13 @@ public:
     // ── 附属 pass（降噪/累积等；帧图在主线之后依次注册）──
     // 让 Provider 自报「我还需要哪些后续 pass」，使降噪链也纳入注册表驱动，
     // 而不必在帧图里为每种源手写。
+    /// 【步骤 34 / §10 的 11.3】把本 Provider 当帧产出的**降噪信号**登记到统一框架里。
+    /// 默认不登记（下游自己决定）；有降噪链的源（SSGI / SSR / RT 各效果）实现它。
+    /// 登记之后，"当帧有哪几条信号、各需不需要升采样、参数是多少"就只有一个视角。
+    virtual void DescribeSignals(DenoiseSignalRegistry& /*registry*/,
+                                 rhi::IRHITexture* /*depth*/, rhi::IRHITexture* /*normal*/,
+                                 rhi::IRHITexture* /*velocity*/) {}
+
     [[nodiscard]] virtual u32 GetAuxPassCount() const { return 0; }
     [[nodiscard]] virtual const char* GetAuxPassName(u32 /*i*/) const { return ""; }
     /// 附属 pass 的输出纹理（供后续 pass / 帧图声明依赖）

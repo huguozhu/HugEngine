@@ -21,6 +21,9 @@ static constexpr u32 kDDGIBindRSMPosition = 7;   // RSM 位置图
 static constexpr u32 kDDGIBindRSMRadiance     = 8;   // RSM 辐射度图（任务 30）
 static constexpr u32 kDDGIBindIBL         = 9;   // IBL 辐照度（Cubemap）
 static constexpr u32 kDDGIBindTracedRadiance = 10;  // 光追 march 的探针射线辐射度（任务 17）
+static constexpr u32 kDDGIBindScreenProbes = 11;   // 步骤 31：Lumen 的 Screen Probe（StructuredBuffer<ScreenProbe>）
+static constexpr u32 kDDGIBindScreenCells  = 12;   // 步骤 31：16×16 单元 → 探针下标
+static constexpr u32 kDDGIBindStats        = 13;   // 步骤 31：收敛读数（整数定点）
 
 // 计算调度所需的 Dispatch 组数（每线程处理一个探针，64 线程/组）
 static u32 DispatchGroupCount(u32 probeCount) {
@@ -36,7 +39,7 @@ bool GI_DDGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Settings.mode      = GIMode::DDGI;
 
     u32 probeCount = gridX * gridY * gridZ;
-    u64 bufferSize = probeCount * kFloats4PerProbe * sizeof(float4);  // 每探针 256 字节
+    u64 bufferSize = probeCount * kFloats4PerProbe * sizeof(float4);  // 每探针 4×16 B（步骤 30：原 256 B）
 
     // ---- 探针数据存储（两帧：当前 + 历史，每帧交换） ----
     rhi::BufferDesc probeDesc;
@@ -101,9 +104,26 @@ bool GI_DDGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         {kDDGIBindIBL,         rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // IBL Irradiance (Cubemap)
         // 光追 march 的探针射线辐射度（任务 17）：A 路径的输入，未启用时 u_Flags.w=0 不采样
         {kDDGIBindTracedRadiance, rhi::DescriptorType::StorageBuffer,     1, rhi::kStageMaskCompute},
+        // 步骤 31：Screen Probe 输入（Lumen 的探针缓冲 + 单元映射）。两者都由 Lumen 持有，
+        // 本 pass 只借句柄；未启用时 u_ScreenProbeFlags.x=0，着色器不采样它们。
+        {kDDGIBindScreenProbes, rhi::DescriptorType::StorageBuffer,       1, rhi::kStageMaskCompute},
+        {kDDGIBindScreenCells,  rhi::DescriptorType::StorageBuffer,       1, rhi::kStageMaskCompute},
+        {kDDGIBindStats,        rhi::DescriptorType::StorageBuffer,       1, rhi::kStageMaskCompute},
     };
     m_Layout = device->CreateDescriptorSetLayout(layout);
     m_Set    = device->AllocateDescriptorSet(m_Layout);
+
+    // 步骤 31：收敛读数缓冲（CPU 可映射；每帧由 compute 累加，CPU 侧"先读后清"）
+    {
+        rhi::BufferDesc sbd;
+        sbd.size = sizeof(u32) * 8u; sbd.usage = rhi::BufferUsage::Storage; sbd.cpuAccess = true;
+        m_StatsBuffer = device->CreateBuffer(sbd);
+        m_StatsMapped = m_StatsBuffer ? m_StatsBuffer->Map() : nullptr;
+        if (m_StatsBuffer) {
+            device->UpdateDescriptorSet(m_Set, kDDGIBindStats, rhi::DescriptorType::StorageBuffer,
+                                        m_StatsBuffer.get());
+        }
+    }
 
     // 预绑定前帧 HDR：纹理由共享组件持有，可能因 resize 被重建，故按代次判断是否重绑
     BindRadianceHistory();
@@ -219,6 +239,25 @@ void GI_DDGI::Render(rhi::IRHICommandList* cmd) {
         HE_CORE_INFO("DDGI 探针缓冲已按新网格重建：{} 个探针", probeCount);
     }
 
+    // 步骤 31：先读**上一帧**的收敛统计（同"先读后清"；本帧紧接着清零再派发）
+    if (m_StatsFrame >= 1u && m_StatsMapped) {
+        u32 st[8] = {0};
+        memcpy(st, m_StatsMapped, sizeof(st));
+        m_ProbesScreenSampled = st[0];
+        m_ProbesCarried       = st[2];
+        const u32 updated = st[1];
+        m_ProbeRelChange = updated ? (float)((double)st[3] / 65536.0 / (double)updated) : 0.0f;
+        // 前 40 帧逐帧打（"30 帧内收敛"的读数），之后每 60 帧打一次
+        if (m_StatsFrame <= 40u || (m_StatsFrame % 60u) == 0u) {
+            HE_CORE_INFO("DDGI 收敛（步骤 31）: 帧 {} —— Screen Probe 采纳 {} / 继承历史 {} / 更新 {}；"
+                         "探针 SH 相对变化均值 {:.5f}；抓取分步: 进入 {} / 屏内 {} / 单元有探针 {} / 过深度门限 {}",
+                         m_StatsFrame, m_ProbesScreenSampled, m_ProbesCarried, updated,
+                         (double)m_ProbeRelChange, st[4], st[5], st[6], st[7]);
+        }
+    }
+    ++m_StatsFrame;
+    if (m_StatsMapped) { u32 zero[8] = {0}; memcpy(m_StatsMapped, zero, sizeof(zero)); }
+
     // 球面采样数
     static const u32 kNumSamples = kSamplesPerProbe;
 
@@ -253,6 +292,13 @@ void GI_DDGI::Render(rhi::IRHICommandList* cmd) {
     const bool tracedReady = (m_TracedRadiance != nullptr && m_TracedSamples == kNumSamples);
     uniforms.flags = float4((m_RSMPositionMap && m_RSMRadianceMap) ? 1.0f : 0.0f,
                             float(stride), float(phase), tracedReady ? 1.0f : 0.0f);
+    // 步骤 31：Screen Probe 输入（把 DDGI 探针投到屏幕 → 16×16 单元 → 探针）。
+    // `kScreenProbeSymmetricScale` 把"单侧（半球）估计"外推成"整球估计"（见 DDGI.comp 的说明）。
+    uniforms.screenProbeDims  = float4(float(m_ScreenCellsX), float(m_ScreenCellsY),
+                                       float(m_ScreenW), float(m_ScreenH));
+    uniforms.screenProbeFlags = float4(m_ScreenProbeEnabled ? 1.0f : 0.0f,
+                                       m_ScreenMaxMatchDistance,
+                                       kScreenProbeSymmetricScale, 0.0f);
     ++updatePhase;
 
     void* mapped = m_GridUniform->Map();
@@ -282,6 +328,43 @@ void GI_DDGI::Render(rhi::IRHICommandList* cmd) {
         rhi::ResourceState::ShaderResource);
 }
 
+// ============================================================
+// 步骤 31（L5）：把"当前估计"的来源从自追踪改为 Screen Probe 的结果
+//
+// 【为什么可行】DDGI 探针与 Lumen 的 Screen Probe 现在都是"二阶 4 系数、RGB 独立"的辐射度 SH
+//（步骤 30 刚把两边收敛到同一个表示），所以"换输入"只是换一个求值来源，投影流程一行不用动。
+//
+// 【一帧延迟】帧图里 DDGI 段在 Lumen 段**之前**注册，所以本 pass 读到的是**上一帧**的探针缓冲 ——
+// 这既避开了循环依赖，也是标准的"上一帧屏幕信息"用法（与本仓库其它 GI 源一致）。
+// ============================================================
+void GI_DDGI::SetScreenProbeInput(const ScreenProbeInput& in) {
+    m_ScreenProbeEnabled = (in.probeBuffer != nullptr && in.cellProbeMap != nullptr &&
+                            in.cellsX > 0 && in.cellsY > 0);
+    m_ScreenProbeBuffer   = in.probeBuffer;
+    m_ScreenCellProbeMap  = in.cellProbeMap;
+    m_ScreenViewProj      = in.viewProj;
+    m_ScreenCellsX        = in.cellsX;
+    m_ScreenCellsY        = in.cellsY;
+    m_ScreenW             = in.width;
+    m_ScreenH             = in.height;
+    m_ScreenMaxMatchDistance = in.maxMatchDistance;
+    if (m_Device && m_ScreenProbeEnabled) {
+        m_Device->UpdateDescriptorSet(m_Set, kDDGIBindScreenProbes, rhi::DescriptorType::StorageBuffer,
+                                      m_ScreenProbeBuffer);
+        m_Device->UpdateDescriptorSet(m_Set, kDDGIBindScreenCells, rhi::DescriptorType::StorageBuffer,
+                                      m_ScreenCellProbeMap);
+    }
+}
+
+void GI_DDGI::ClearScreenProbeInput() {
+    // 只清成员（是否启用由它们推导）：描述符留着不重绑 —— 着色器在 screenProbeFlags.x=0 时
+    // 根本不采样这两个绑定（与 ClearRSM 同一约定）。
+    m_ScreenProbeEnabled  = false;
+    m_ScreenProbeBuffer   = nullptr;
+    m_ScreenCellProbeMap  = nullptr;
+    m_ScreenCellsX = m_ScreenCellsY = m_ScreenW = m_ScreenH = 0;
+    m_ScreenMaxMatchDistance = 0.0f;
+}
 void GI_DDGI::SetRSM(rhi::IRHITexture* pos, rhi::IRHITexture* radiance, const float4x4& lightViewProj) {
     m_RSMPositionMap   = pos;
     m_RSMRadianceMap   = radiance;
@@ -311,9 +394,17 @@ void GI_DDGI::FitGridToBounds(const float3& mn, const float3& mx) {
     cellSize   = fit->cellSize;
     gridOrigin = fit->origin;
 
-    HE_CORE_INFO("DDGI 网格已按场景拟合：场景 {}x{}x{} -> 探针 {}x{}x{} 格距 {:.2f}（共 {} 个）",
+    // 步骤 32：把**原点**也打出来 —— 网格对齐伪影的分析（`build/verify/grid_artifact.py`）需要它，
+    // 而"拟合参数复核"也需要肉眼能对：最后一颗探针 = 原点 + (count-1)×格距 应当覆盖到包围盒的 max。
+    HE_CORE_INFO("DDGI 网格已按场景拟合：场景 {}x{}x{} -> 探针 {}x{}x{} 格距 {:.2f}（共 {} 个）；"
+                 "原点 ({:.2f}, {:.2f}, {:.2f})，末探针 ({:.2f}, {:.2f}, {:.2f}) vs 包围盒 max ({:.2f}, {:.2f}, {:.2f})",
                  mx.x - mn.x, mx.y - mn.y, mx.z - mn.z,
-                 gridX, gridY, gridZ, cellSize, gridX * gridY * gridZ);
+                 gridX, gridY, gridZ, cellSize, gridX * gridY * gridZ,
+                 gridOrigin.x, gridOrigin.y, gridOrigin.z,
+                 gridOrigin.x + float(gridX - 1) * cellSize,
+                 gridOrigin.y + float(gridY - 1) * cellSize,
+                 gridOrigin.z + float(gridZ - 1) * cellSize,
+                 mx.x, mx.y, mx.z);
 }
 
 void GI_DDGI::SetIBL(rhi::IRHITexture* irradiance, rhi::IRHISampler* sampler) {

@@ -189,18 +189,38 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
         auto ssgiProvider = std::make_unique<SSGIProvider>();
         ssgiProvider->SetPass(&m_SSGI);
         ssgiProvider->SetDenoiser(&m_DenoiseSSGI);
+        // 【步骤 34（11.3）】附属链的第二级（重建升采样）需要设备自建纹理/管线。
+        // 此前 Provider::Initialize 在 SSGI/SSR 上**从未被调用**（帧图只对各 pass 调 Initialize），
+        // 于是升采样级永远是"未就绪"，半分辨率路径会静默退回"直接采样降噪结果"。
+        ssgiProvider->Initialize(device, m_Width, m_Height);
         m_GIProviders.push_back(std::move(ssgiProvider));
 
         // SSR（屏幕空间反射；主 pass + 降噪附属 pass，与 SSGI 同构）
         auto ssrProvider = std::make_unique<SSRProvider>();
         ssrProvider->SetPass(&m_SSR);
         ssrProvider->SetDenoiser(&m_DenoiseSSR);
+        ssrProvider->Initialize(device, m_Width, m_Height);
         m_GIProviders.push_back(std::move(ssrProvider));
 
         // DDGI（动态漫反射探针；compute pass，无通道纹理输出）
         auto ddgiProvider = std::make_unique<DDGIProvider>();
         ddgiProvider->SetPass(&m_DDGI);
         m_GIProviders.push_back(std::move(ddgiProvider));
+
+        // Lumen（虚拟化几何 GI）。骨架阶段只创建持久资源宿主与占位输出；
+        // Surface Cache / SDF / Screen Probe 由步骤 8~25 依次填进 LumenProvider::Render。
+        // 放在 RT Provider 之前注册：它暂时不依赖 RTPass（远场 HW RT 是步骤 26），
+        // 但**顺序即计时下标**，越早注册读数越稳定（GITimer 按注册下标归属）。
+        if (m_LumenScene.Initialize(device, m_Width, m_Height)) {
+            auto lumenProvider = std::make_unique<LumenProvider>();
+            lumenProvider->SetScene(&m_LumenScene);
+            lumenProvider->SetMeshBatcher(&m_MeshBatcher);   // SDF 构建的几何来源（首帧已 Build）
+            lumenProvider->Initialize(device, m_Width, m_Height);
+            m_GIProviders.push_back(std::move(lumenProvider));
+            HE_CORE_INFO("DeferredPipeline: Lumen Provider 已注册（骨架阶段：占位输出）");
+        } else {
+            HE_CORE_WARN("DeferredPipeline: LumenScene 初始化失败，Lumen 源不可用");
+        }
 
         // 光追效果（RT 阴影 / RTAO / RT 反射 / RTGI）在 RT 基础设施初始化之后注册
         //（见下方 RT 基础设施段落末尾）——此处 m_RTPass 等尚未创建。
@@ -219,23 +239,34 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
         if (m_RTPass->Initialize(device, {}, {})) {   // AS-only 模式：只构建 BLAS/TLAS + 场景资源
             HE_CORE_INFO("DeferredPipeline: RTPass 初始化完成 (AS-only)");
 
+            // 【步骤 36 的验收开关】`HE_RT_FULLRES=1` 把四种效果切到**全分辨率**产出：
+            // 它不是画质选项（全分辨率 RT 的代价高得多），而是"重建升采样"这一步的**参照物** ——
+            // 有了它就能在同一次对照里摆三档：全分辨率（参照）/ 半分辨率旧行为（直接采样）/
+            // 半分辨率 + 重建升采样（本步）。升采样级见主输出等于消费端分辨率时会自动关闭。
+            const bool rtFullRes = []() {
+                const char* v = std::getenv("HE_RT_FULLRES");
+                return v && std::string(v) == "1";
+            }();
+            const bool rtHalfRes = !rtFullRes;
+            if (rtFullRes) HE_CORE_INFO("DeferredPipeline: RT 效果切到全分辨率产出（步骤 36 的参照档）");
+
             m_RTShadow = std::make_unique<RTShadowPass>();
-            if (!m_RTShadow->Initialize(device, m_Width, m_Height, true)) {
+            if (!m_RTShadow->Initialize(device, m_Width, m_Height, rtHalfRes)) {
                 HE_CORE_WARN("DeferredPipeline: RTShadowPass 初始化失败，RT 阴影禁用");
                 m_RTShadow.reset();
             }
             m_RTAO = std::make_unique<RTAOPass>();
-            if (!m_RTAO->Initialize(device, m_Width, m_Height, true)) {
+            if (!m_RTAO->Initialize(device, m_Width, m_Height, rtHalfRes)) {
                 HE_CORE_WARN("DeferredPipeline: RTAOPass 初始化失败，RT AO 禁用");
                 m_RTAO.reset();
             }
             m_RTReflection = std::make_unique<RTReflectionPass>();
-            if (!m_RTReflection->Initialize(device, m_Width, m_Height, true)) {
+            if (!m_RTReflection->Initialize(device, m_Width, m_Height, rtHalfRes)) {
                 HE_CORE_WARN("DeferredPipeline: RTReflectionPass 初始化失败，RT 反射禁用");
                 m_RTReflection.reset();
             }
             m_RTGI = std::make_unique<RTGIPass>();
-            if (!m_RTGI->Initialize(device, m_Width, m_Height, true)) {
+            if (!m_RTGI->Initialize(device, m_Width, m_Height, rtHalfRes)) {
                 HE_CORE_WARN("DeferredPipeline: RTGIPass 初始化失败，RT GI 禁用");
                 m_RTGI.reset();
             }
@@ -250,6 +281,14 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
             }
 
             // ── RT 降噪器（时域累积；反射/GI 追加 5×5 空间滤波）──
+            // 【步骤 34（11.3）】所有降噪器的**历史纹理统一由池分配**：同名同尺寸同格式只建一次，
+            // 于是"当帧有多少条降噪信号、各占多少显存"变成一个能一次打印出来的事实。
+            m_DenoiseHistoryPool.Initialize(device);
+            // 【步骤 35】Lumen 的 Screen Probe 时域历史也从这个池里取（两份探针镜像 + 两份单元映射）。
+            // 位置必须在池拿到 device **之后**：早于这一行时池还没有设备，`AcquireBuffer` 只会返回
+            // nullptr，Lumen 就会退回"自建一套"——那正是这一步要消灭的形态。设置本身只存指针，
+            // 真正的取用发生在首帧的滤波 pass 之前。
+            m_LumenScene.SetHistoryPool(&m_DenoiseHistoryPool);
             if (m_RTShadow && m_RTShadow->IsValid()) {
                 RTDenoiser::Config cfg;
                 cfg.format          = rhi::Format::R16_FLOAT;
@@ -260,7 +299,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
                 cfg.normalThreshold = 0.85f;
                 cfg.debugName       = "RTShadowDenoiser";
                 m_ShadowDenoiser = std::make_unique<RTDenoiser>();
-                if (!m_ShadowDenoiser->Initialize(device, cfg)) m_ShadowDenoiser.reset();
+                if (!m_ShadowDenoiser->Initialize(device, cfg, &m_DenoiseHistoryPool)) m_ShadowDenoiser.reset();
             }
             if (m_RTAO && m_RTAO->IsValid()) {
                 RTDenoiser::Config cfg;
@@ -272,7 +311,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
                 cfg.normalThreshold = 0.85f;
                 cfg.debugName       = "RTAODenoiser";
                 m_AODenoiser = std::make_unique<RTDenoiser>();
-                if (!m_AODenoiser->Initialize(device, cfg)) m_AODenoiser.reset();
+                if (!m_AODenoiser->Initialize(device, cfg, &m_DenoiseHistoryPool)) m_AODenoiser.reset();
             }
             if (m_RTReflection && m_RTReflection->IsValid()) {
                 RTDenoiser::Config cfg;
@@ -284,7 +323,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
                 cfg.normalThreshold = 0.80f;
                 cfg.debugName       = "RTReflectionDenoiser";
                 m_ReflectionDenoiser = std::make_unique<RTDenoiser>();
-                if (!m_ReflectionDenoiser->Initialize(device, cfg)) m_ReflectionDenoiser.reset();
+                if (!m_ReflectionDenoiser->Initialize(device, cfg, &m_DenoiseHistoryPool)) m_ReflectionDenoiser.reset();
                 if (!m_ReflectionSpatial.Initialize(device,
                         m_RTReflection->GetWidth(), m_RTReflection->GetHeight())) {
                     HE_CORE_WARN("DeferredPipeline: RTReflectionSpatial 初始化失败");
@@ -300,10 +339,29 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
                 cfg.normalThreshold = 0.80f;
                 cfg.debugName       = "RTGIDenoiser";
                 m_GIDenoiser = std::make_unique<RTDenoiser>();
-                if (!m_GIDenoiser->Initialize(device, cfg)) m_GIDenoiser.reset();
+                if (!m_GIDenoiser->Initialize(device, cfg, &m_DenoiseHistoryPool)) m_GIDenoiser.reset();
                 if (!m_GISpatial.Initialize(device,
                         m_RTGI->GetWidth(), m_RTGI->GetHeight())) {
                     HE_CORE_WARN("DeferredPipeline: RTGISpatial 初始化失败");
+                }
+            }
+
+            // ── 步骤 36：四种效果的链尾升采样级（全分辨率输出）──
+            // 【为什么默认开、且用环境变量而不是 cfg】升采样是"链的出口形状"，不是画质档位：
+            // 亚分辨率产出本来就该重建到消费端分辨率。留一个开关只是为了让"开/关"能在**同一构建内**
+            // 背靠背对照（否则改一次要重编一次，"差异"里混进了构建差异）。置 0 = 回到旧行为
+            // （链尾停在亚分辨率，由合成端的双线性采样顺带放大）。
+            {
+                const char* v = std::getenv("HE_RT_UPSCALE");
+                const bool want = !(v && std::string(v) == "0");
+                if (want) {
+                    m_ShadowUpscale.Initialize(device, m_Width, m_Height);
+                    m_AOUpscale.Initialize(device, m_Width, m_Height);
+                    m_ReflectionUpscale.Initialize(device, m_Width, m_Height);
+                    m_GIUpscale.Initialize(device, m_Width, m_Height);
+                    HE_CORE_INFO("DeferredPipeline: RT 亚分辨率信号的重建升采样已启用（步骤 36）");
+                } else {
+                    HE_CORE_INFO("DeferredPipeline: RT 升采样被 HE_RT_UPSCALE=0 关闭（旧行为：亚分辨率直接采样）");
                 }
             }
         } else {
@@ -321,14 +379,18 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
             p->SetAS(m_RTPass.get());
             switch (eff) {
             case RTEffectProvider::Effect::Shadow:
-                p->SetShadowPass(m_RTShadow.get(), m_ShadowDenoiser.get()); break;
+                p->SetShadowPass(m_RTShadow.get(), m_ShadowDenoiser.get(),
+                                 m_ShadowUpscale.IsReady() ? &m_ShadowUpscale : nullptr); break;
             case RTEffectProvider::Effect::AO:
-                p->SetAOPass(m_RTAO.get(), m_AODenoiser.get()); break;
+                p->SetAOPass(m_RTAO.get(), m_AODenoiser.get(),
+                             m_AOUpscale.IsReady() ? &m_AOUpscale : nullptr); break;
             case RTEffectProvider::Effect::Reflection:
                 p->SetReflectionPass(m_RTReflection.get(), m_ReflectionDenoiser.get(),
-                                     &m_ReflectionSpatial); break;
+                                     &m_ReflectionSpatial,
+                                     m_ReflectionUpscale.IsReady() ? &m_ReflectionUpscale : nullptr); break;
             default:
-                p->SetGIPass(m_RTGI.get(), m_GIDenoiser.get(), &m_GISpatial);
+                p->SetGIPass(m_RTGI.get(), m_GIDenoiser.get(), &m_GISpatial,
+                             m_GIUpscale.IsReady() ? &m_GIUpscale : nullptr);
                 p->SetDDGIFallback(m_DDGI.GetProbeBuffer(), m_DDGI.GetGridUniform());
                 break;
             }
@@ -366,6 +428,14 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
 
     // GPU Profiler
     m_Profiler.Initialize(device, rhi::kMaxProfilerPasses, MAX_FRAMES_IN_FLIGHT);
+    // 【步骤 37 的测量开关】`HE_NO_PROFILER=1` 关掉逐 pass 计时。
+    // 为什么需要它：`ProfilerManager::BeginFrame` 用**阻塞式** `GetQueryResults` 读回两帧前的时间戳
+    // （`GITiming.h` 里记过这条 API 会 WAIT）。于是"整帧 CPU 侧 30~50 ms"这个读数里混进了
+    // **等 GPU** 的时间 —— 关掉它才能把"真 CPU 忙"和"被阻塞"分开。
+    if (std::getenv("HE_NO_PROFILER")) {
+        m_Profiler.SetEnabled(false);
+        HE_CORE_INFO("DeferredPipeline: GPU Profiler 已关闭（HE_NO_PROFILER=1）");
+    }
     m_ProfilerPanel.SetProfiler(&m_Profiler);  // 绑定 ImGui 面板到 Profiler 数据源
     // Lighting PSO + 描述符集已在 LightingPass::Initialize() 中创建
 
@@ -457,6 +527,14 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
 }
 
 void DeferredPipeline::Shutdown() {
+    // GI Provider 生命周期遍历（§12 架构前置）：Provider 自持的资源（如 Lumen 的
+    // Surface Cache atlas / SDF clipmap）必须在这里释放。**必须早于底层 pass 的 Shutdown**
+    // —— Provider 只持有它们的引用，反过来会拿到已析构的对象。
+    for (auto& prov : m_GIProviders) {
+        if (prov) prov->Shutdown();
+    }
+    m_GIProviders.clear();
+
     // RT 基础设施释放（P3：Deferred 可按层栈启用光追源）
     m_GIDenoiser.reset();
     m_ReflectionDenoiser.reset();
@@ -591,6 +669,16 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
     m_DDGI.OnResize(w, h);
     m_DenoiseSSGI.OnResize(w, h);
     m_DenoiseSSR.OnResize(w, h);
+    // 步骤 36：四种光追效果的升采样目标随视口重建（内容与旧尺寸无关）
+    if (m_ShadowUpscale.IsReady())     m_ShadowUpscale.OnResize(w, h);
+    if (m_AOUpscale.IsReady())         m_AOUpscale.OnResize(w, h);
+    if (m_ReflectionUpscale.IsReady()) m_ReflectionUpscale.OnResize(w, h);
+    if (m_GIUpscale.IsReady())         m_GIUpscale.OnResize(w, h);
+    // GI Provider 生命周期遍历（§12 架构前置）：放在底层 pass 之后，让自持资源的 Provider
+    // （如 Lumen）按新尺寸重建；Provider 不再需要各自「等下次 OnResize」的隐式约定。
+    for (auto& prov : m_GIProviders) {
+        if (prov) prov->OnResize(w, h);
+    }
 }
 
 void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
@@ -684,11 +772,22 @@ void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
         rg.SetTimelineBase(m_FrameCounter);
         m_FrameCounter += 2;  // 每帧消耗 2 个时间线值
     }
+    // 【步骤 37】把 CPU 侧拆成"重建帧图 / 编译 / 执行（录制 + 提交）"三段。
+    // 实测 1080p 下整帧 CPU 侧 34~51 ms 全在管线里，而 GPU 各 pass 合计只有 14 ms ——
+    // 不拆开就不知道该修图构建还是修执行，只能靠猜。
+    const auto tGraph0 = std::chrono::steady_clock::now();
     BuildFrameGraph(rg, world, sg, camera);
+    const auto tGraph1 = std::chrono::steady_clock::now();
     rg.Compile();
+    const auto tCompile1 = std::chrono::steady_clock::now();
 
     // 统一入口：RenderGraph 根据 useAsyncCompute 自动分支
     rg.Execute(cmd, m_Device);
+    const auto tExec1 = std::chrono::steady_clock::now();
+
+    m_CpuBuildMs   = std::chrono::duration<double, std::milli>(tGraph1 - tGraph0).count();
+    m_CpuCompileMs = std::chrono::duration<double, std::milli>(tCompile1 - tGraph1).count();
+    m_CpuExecMs    = std::chrono::duration<double, std::milli>(tExec1 - tCompile1).count();
 }
 
 void DeferredPipeline::FlushComputeWork() {

@@ -72,7 +72,7 @@
 | 原引用 | 改写为 |
 |---|---|
 | 计划文档开头 `**Spec:**` 指向旧《Lumen + Nanite 完整设计规范》 | `**Spec:** docs/计划实现功能/Nanite设计与实现.md`（本文件） |
-| 设计 §5.3 推进顺序中的 `§5.1 统一降噪框架（11.3）` | "统一降噪框架（Lumen / GI 框架相关，见 `docs/计划实现功能/Lumen设计与实现.md`）" |
+| 设计 §5.3 推进顺序中的 `§5.1 统一降噪框架（11.3）` | "统一降噪框架（Lumen / GI 框架相关，见 `docs/已实现功能/Lumen设计与实现.md`）" |
 | 设计 §5.3 推进顺序中的 `§5.2 框架前置（Provider 执行单位 / 绑定数组化）+ P6 统一估计器（长期）` | "框架前置（Provider 执行单位 / 绑定数组化）+ P6 统一估计器（长期；均为 Lumen 相关，见 `Lumen设计与实现.md`）" |
 | 设计 §1 表格 Denoiser 行的 `**统一降噪框架**见 §5.1` | "统一降噪框架属 Lumen，见 `Lumen设计与实现.md`" |
 | 设计 §5.1/§5.2 内的《HugEngine GI 架构与开发计划》§4.4 与《ReSTIR PT / GRIS 预研》引用 | 随 §5.1/§5.2 一并归入 Lumen 文档，本文件不展开（相关判据按 §0.2 的口径只做归属说明） |
@@ -707,7 +707,7 @@ Lumen 的里程碑（L1-L6）不属本文件，见 `Lumen设计与实现.md`。
 ```
 N1(预处理) → N2(剔除) → N3(软光栅 GBuffer) → L1(SDF) → L2(SurfaceCache)
 → L3(ScreenProbe) → N4(硬光栅) → L4(HW RT远场) → L5(RadianceCache)
-→ 统一降噪框架（Lumen / GI 框架相关，见 docs/计划实现功能/Lumen设计与实现.md）
+→ 统一降噪框架（Lumen / GI 框架相关，见 docs/已实现功能/Lumen设计与实现.md）
 → L6+N5+N6(优化)
 → 框架前置（Provider 执行单位 / 绑定数组化）+ P6 统一估计器（长期；均为 Lumen 相关，见 Lumen设计与实现.md）
 ```

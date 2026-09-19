@@ -62,6 +62,12 @@ enum class GISourceId : u8 {
     RTReflection  = 9,   // 硬件光追反射
     RTAO          = 10,  // 硬件光追环境光遮蔽
     GTAO          = 11,  // 地平线切片 AO（Ground Truth AO，SSAO 的高质量替代）
+    // 虚拟化几何 GI（Lumen）：Surface Cache + SDF + Screen Probe + Radiance Cache。
+    // 与 IBL 一样是"一份估计量同时喂两个通道"的源，故 `ToPipelineCap` 返回漫反射 + 镜面两位；
+    // 分类上属**世界空间源**（产物与命中都在世界空间，屏外仍可命中）。
+    // 刻意**不**声明相机屏幕覆盖判据 —— 它逐像素发射真实世界空间光线，屏幕边缘不退化，
+    // 与 SSGI / 光追三源的"屏幕覆盖"问题不同（依据见《Lumen设计与实现》§15.2）。
+    Lumen         = 12,
 };
 
 // ============================================================
@@ -78,15 +84,15 @@ enum class GISourceId : u8 {
 // 直接后果：`GIBandOf(SSGI)=Mid` 而 `GIBandOf(RTGI)=High`，尽管二者估的是
 // **同一个物理量**（间接漫反射）。这也使该枚举无法充当 P5 的频率边界。
 //
-// 现在改为三个**互斥且完备**的谓词（对 11 个源构成一个无歧义的划分），
+// 现在改为三个**互斥且完备**的谓词（对 12 个源构成一个无歧义的划分），
 // 面板标签由它们推导（见 GISourceClassName）。
 // ============================================================
 
-/// 世界空间 / 预计算环境类源：IBL · Lightmap · DDGI
+/// 世界空间 / 预计算环境类源：IBL · Lightmap · DDGI · Lumen
 /// （不依赖屏幕覆盖，屏外依然有效）
 inline bool IsWorldSpaceSource(GISourceId id) {
     return id == GISourceId::IBL || id == GISourceId::Lightmap
-        || id == GISourceId::DDGI;
+        || id == GISourceId::DDGI || id == GISourceId::Lumen;
 }
 
 /// 屏幕空间（或单次反弹光栅）类源：SSGI · SSR · SSAO · RSM · GTAO
@@ -148,6 +154,9 @@ inline u32 ToConfidenceMask(GISourceId id) {
     u32 mask = IsCameraViewLimitedSource(id) ? kGIConfCameraCoverage : kGIConfNone;
     // DDGI 是唯一的探针网格源：网格外没有数据（§9.2-K）
     if (id == GISourceId::DDGI) mask |= kGIConfProbeGrid;
+    // Lumen **刻意不在此处加任何位**：它逐像素发射真实世界空间光线（近场 SDF / 远场 HW），
+    // 屏幕边缘不退化，因此既不受相机屏幕覆盖限制、也不是探针网格源。
+    // 这正是它不必进 `IsCameraViewLimitedSource` 的原因（依据见《Lumen设计与实现》§15.2）。
     return mask;
 }
 
@@ -165,6 +174,7 @@ inline const char* GISourceName(GISourceId id) {
     case GISourceId::RTGI:         return "RTGI";
     case GISourceId::RTReflection: return "RT Reflection";
     case GISourceId::RTAO:         return "RTAO";
+    case GISourceId::Lumen:        return "Lumen";
     default:                       return "None";
     }
 }
@@ -321,6 +331,8 @@ enum PipelineGICap : u32 {
     kPipelineGIDiffRTGI     = 1u << 9,   // 硬件光追 GI
     kPipelineGIDiffIBL      = 1u << 10,  // IBL 环境辐照度
     kPipelineGIDiffRSM      = 1u << 11,  // RSM 间接光
+    kPipelineGIDiffLumen    = 1u << 12,  // Lumen 虚拟化几何 GI（漫反射通道）
+    kPipelineGISpecLumen    = 1u << 13,  // Lumen 的镜面通道（与漫反射共用一份估计量）
 };
 
 /// GI 源 → 管线能力位
@@ -336,6 +348,8 @@ inline u32 ToPipelineCap(GISourceId id) {
     case GISourceId::RTGI:          return kPipelineGIDiffRTGI;
     case GISourceId::IBL:           return kPipelineGIDiffIBL | kPipelineGISpecIBL;
     case GISourceId::RSM:           return kPipelineGIDiffRSM;
+    // Lumen：一份估计量同时服务漫反射与镜面（与 IBL 的先例相同），故返回两个位
+    case GISourceId::Lumen:         return kPipelineGIDiffLumen | kPipelineGISpecLumen;
     // Lightmap：**刻意不给能力位**（任务 18 的结论，见文档 §10.2）
     //
     // 这一条此前靠 `default` 兜到 kPipelineGINone，行为正确但看不出来是"没想到"还是"故意的"，
@@ -370,7 +384,7 @@ inline u32 ToPipelineCap(ShadowChannel s) {
 /// 是否为「需要硬件光追」的源（分类三谓词之一；另两个见文件上方）
 ///
 /// 定义在此处会晚于 `GISourceClassName` 的使用，故实际定义已上移至
-/// 源分类一节（那里的三个谓词共同构成对 11 个源的划分）。
+/// 源分类一节（那里的三个谓词共同构成对 12 个源的划分）。
 /// 此处仅保留注释作为交叉索引，避免后来者重复定义。
 
 /// 各管线能力预设
@@ -405,7 +419,8 @@ namespace PipelineCaps {
                              | kPipelineGIAOSSAO | kPipelineGISpecSSR
                              | kPipelineGIDiffSSGI | kPipelineGIDiffDDGI
                              | kPipelineGISpecRT  | kPipelineGIAORTAO
-                             | kPipelineGIDiffRTGI;
+                             | kPipelineGIDiffRTGI
+                             | kPipelineGIDiffLumen | kPipelineGISpecLumen;
 
     // Deferred：全部 GI 源 + 全部阴影（含光追）
     constexpr u32 Deferred = Forward | AllSources | kPipelineGIShadowRT;

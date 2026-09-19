@@ -39,6 +39,8 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "GI/SSGIProvider.h" // 屏幕空间 GI Provider（含降噪附属 pass）
 #include "GI/SSRProvider.h"  // 屏幕空间反射 Provider
 #include "GI/DDGIProvider.h" // 动态漫反射探针 Provider（compute、无纹理输出）
+#include "GI/LumenProvider.h" // Lumen（虚拟化几何 GI）Provider
+#include "Lumen/LumenScene.h" // Lumen 持久资源宿主（atlas / SDF clipmap / 探针）
 #include "GI/RTProvider.h"   // 光追效果 Provider（四种效果共用实现）
 #include "PostProcess/Denoiser.h"
 // RT 效果（P3 统一后 Deferred 亦可按层栈启用光追源）
@@ -85,6 +87,17 @@ public:
     // AsyncCompute: 在 Graphics Submit 之后调用，提交 Compute 工作
     // 内部使用 Timeline Semaphore 确保跨队列同步顺序
     void FlushComputeWork();
+
+    /// 【步骤 37 / L6 帧时判据】把整帧预算打出来：各 pass 的 GPU 耗时合计折算成 fps 上限、
+    /// 最重的若干 pass、以及各源的附属 pass（降噪/升采样）耗时。由帧图每 120 帧调用一次。
+    void LogFrameBudget();
+
+    /// 【步骤 37】上一帧 CPU 侧的三段耗时（重建帧图 / 编译 / 执行=录制+提交），毫秒。
+    /// 判定"CPU 受限还是 GPU 受限"以及"CPU 花在哪一段"要靠它：实测 1080p 下整帧 34~51 ms
+    /// 全在 CPU 侧，而 GPU 各 pass 合计只有 14 ms。
+    [[nodiscard]] double GetCpuBuildMs()   const { return m_CpuBuildMs; }
+    [[nodiscard]] double GetCpuCompileMs() const { return m_CpuCompileMs; }
+    [[nodiscard]] double GetCpuExecMs()    const { return m_CpuExecMs; }
 
     IShadowSystem*       GetShadowSystem() override { return m_ShadowSystem.get(); }
     IGlobalIllumination* GetGI()           override { return m_GI.get(); }
@@ -216,6 +229,10 @@ private:
     GI_SSGI m_SSGI;
     GI_SSR  m_SSR;
     GI_DDGI m_DDGI;
+    /// Lumen 的持久资源宿主（Surface Cache atlas / Global SDF clipmap / 探针缓冲 / 屏幕输出）。
+    /// 生命周期由 `LumenProvider` 转调（Provider 的 `OnResize/Shutdown` → 本对象），
+    /// 即步骤 1 补上的 Provider 生命周期遍历那条路径。
+    LumenScene m_LumenScene;
     /// 前帧 HDR 辐射度（GI 源共享；DDGI 探针与 SSGI 的入射辐射度都取自它）
     GIRadianceHistory m_RadianceHistory;
     GIConfig m_GIConfig;   // GI 配置（M2 档位/通道/强度 → P3 源层栈单一数据源）
@@ -250,9 +267,21 @@ private:
     std::unique_ptr<RTDenoiser> m_AODenoiser;
     std::unique_ptr<RTDenoiser> m_ReflectionDenoiser;
     std::unique_ptr<RTDenoiser> m_GIDenoiser;
+    // ── 统一降噪框架（§10 的 11.3，步骤 34）──
+    DenoiseHistoryPool     m_DenoiseHistoryPool;   // 统一的历史纹理分配
+    DenoiseSignalRegistry  m_DenoiseSignals;       // 当帧信号登记处（多信号共存的唯一视角）
+    // 【步骤 36】四种光追效果的**链尾重建升采样**级：它们的产出是亚分辨率的
+    //（RT 阴影/RTAO/RT 反射 = 1/2、RTGI = 1/4），此前由合成端的双线性采样顺带放大。
+    // 与 SSGI/SSR 的升采样共用同一份实现（`PostProcess/DenoiseUpscale`）。
+    DenoiseUpscale m_ShadowUpscale;
+    DenoiseUpscale m_AOUpscale;
+    DenoiseUpscale m_ReflectionUpscale;
+    DenoiseUpscale m_GIUpscale;
     Denoiser m_ReflectionSpatial;
     Denoiser m_GISpatial;
     bool m_RTEnabled = false;   // 设备支持光追且 RTPass 初始化成功
+    // 步骤 37：上一帧 CPU 侧三段耗时（毫秒）——重建帧图 / 编译 / 执行（录制 + 提交）
+    double m_CpuBuildMs = 0.0, m_CpuCompileMs = 0.0, m_CpuExecMs = 0.0;
     bool m_SceneMaterialBuilt = false;   // 场景材质纹理是否已构建（延迟到首帧）
     Denoiser m_DenoiseSSGI;
     Denoiser m_DenoiseSSR;

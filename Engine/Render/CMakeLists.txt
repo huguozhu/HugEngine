@@ -143,6 +143,10 @@ set(RENDER_SOURCES
     PostProcess/Denoiser.cpp
     PostProcess/RTDenoiser.h
     PostProcess/RTDenoiser.cpp
+    PostProcess/DenoiseSignal.h
+    PostProcess/DenoiseSignal.cpp
+    PostProcess/DenoiseUpscale.h
+    PostProcess/DenoiseUpscale.cpp
     PostProcess/PTAtrousPass.h
     PostProcess/PTAtrousPass.cpp
     PostProcess/GaussianBlurPass.h
@@ -179,6 +183,20 @@ set(RENDER_SOURCES
     # ShaderHotReload
     ShaderHotReload.h
     ShaderHotReload.cpp
+    # Lumen（虚拟化几何 GI）：持久资源宿主 + Provider，后续步骤在其上追加 atlas / SDF / 探针
+    Lumen/LumenScene.h
+    Lumen/LumenScene.cpp
+    Lumen/LumenSDF.h
+    Lumen/LumenSDF.cpp
+    Lumen/SurfaceCacheTypes.cpp
+    Lumen/LumenTraceConfig.cpp
+    Lumen/LumenScene_SurfaceCache.cpp
+    Lumen/LumenScene_Irradiance.cpp
+    Lumen/LumenScene_ProbeFilter.cpp
+    Lumen/LumenFarFieldPass.cpp
+    Lumen/LumenFarFieldPass.h
+    Lumen/LumenSH.h
+    GI/LumenProvider.h
 )
 
 target_sources(HugEngineRender PRIVATE ${RENDER_SOURCES})

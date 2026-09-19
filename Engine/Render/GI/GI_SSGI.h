@@ -35,6 +35,11 @@ public:
     GIMode GetMode() const override { return GIMode::SSGI; }
     rhi::IRHITexture* GetIndirectDiffuseTexture() const override { return m_Output.get(); }
 
+    /// 【步骤 34（11.3）】消费端（全分辨率）尺寸：半分辨率信号的升采样级以它为重建目标。
+    /// 输出纹理尺寸是**信号**分辨率（halfRes 时降半），两者不能混用。
+    u32 GetFullWidth()  const { return m_Width; }
+    u32 GetFullHeight() const { return m_Height; }
+
     // SSGI 特有
     void SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal, rhi::IRHITexture* albedo);
     /// 让输出纹理尺寸与当前设置一致（`halfRes` 是运行时开关）。
