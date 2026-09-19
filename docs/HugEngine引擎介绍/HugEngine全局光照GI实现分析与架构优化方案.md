@@ -45,7 +45,7 @@
 - **SSR**：64 步线性 march、`stepSize=0.5`、全分辨率、无 Hi-Z、无时域重投影。
 - **RSM**：512² 光源 POV 双 MRT，消费端每像素 5×5=25 个 VPL 采样，硬编码 `*0.03`。
 - **DDGI**：8×4×8=256 探针、32 Fibonacci 球面采样、SH band 0/1/2、`blendAlpha=0.85`、前帧 HDR 反馈；三线性插值消费。
-- **RTGI**：**每轴 /4（= 总 1/16 像素）**分辨率、SPP 默认 **1**（shader 端 clamp 1–8、cpp 端 clamp 1–16，`RTGIPass.cpp:154`/`RT_GI.rgen.slang:88`）、miss 回退 DDGI 探针、CVar 热更新。仅在 `HybridRTPipeline` 路径激活（`DeferredPipeline` 里 RT 纹理指针恒 `nullptr`）。
+- **RTGI**：**每轴 /4（= 总 1/16 像素）**分辨率、SPP 默认 **1**（shader 端 clamp 1–8、cpp 端 clamp 1–16，`RTGIPass.cpp:154`/`RT_GI.rgen.slang:88`）、miss 回退 DDGI 探针、CVar 热更新。仅在 原 `HybridRTPipeline`（该类已于 2026-09 删除；RT 现作为 GI 源由 Deferred 层栈消费） 路径激活（`DeferredPipeline` 里 RT 纹理指针恒 `nullptr`）。
 - **SSAO**：64 采样核 + 4² 噪声旋转 + blur。
 
 ---
@@ -128,7 +128,7 @@ SSGI 的采样核在 CPU 每帧 `Map/Unmap` 重传（`GI_SSGI.cpp:88-95`），�
 
 `RT_GI.rgen.slang:108` miss 时每条射线回退 `SampleDDGI`，而 `DeferredLighting.frag.slang:275` 又无条件 `color += ddgi * 0.5`。当 RTGI 作为漫反射源时 DDGI 被算了两次。
 
-⚠️ **注意触发条件**：此缺陷目前**尚未在运行路径激活**——`DeferredPipeline_FrameGraph.cpp:418` 传给 Lighting 的 4 个 RT 指针恒为 `nullptr`（注释"RT 纹理暂未使用"），`rtDiffuseSource` 恒为 0，RTGI 分支不生效。它只在 **`HybridRTPipeline` 路径**（RT 纹理真正接线）下暴露。修复方向不变：在启用 RTGI 时用 push constant 关掉 DDGI 的直接叠加，或把 miss 回退改为纯天空色。
+⚠️ **注意触发条件**：此缺陷目前**尚未在运行路径激活**——`DeferredPipeline_FrameGraph.cpp:418` 传给 Lighting 的 4 个 RT 指针恒为 `nullptr`（注释"RT 纹理暂未使用"），`rtDiffuseSource` 恒为 0，RTGI 分支不生效。它只在 **原 `HybridRTPipeline`（该类已于 2026-09 删除；RT 现作为 GI 源由 Deferred 层栈消费） 路径**（RT 纹理真正接线）下暴露。修复方向不变：在启用 RTGI 时用 push constant 关掉 DDGI 的直接叠加，或把 miss 回退改为纯天空色。
 
 **13. DDGI 探针"屏幕空间采样"导致屏幕外探针永不更新**
 
@@ -415,7 +415,7 @@ flowchart TD
   end
   Sel --> PROV
 
-  subgraph ASM["AssembleIndirect() — 单一装配点（Deferred / HybridRT / PT 三管线复用）"]
+  subgraph ASM["AssembleIndirect() — 单一装配点（Deferred / PT 两管线复用；原 HybridRT 已删除）"]
     direction TB
     A1["out = direct × shadow"]
     A2["indDiffuse&nbsp;&nbsp;= PickDiffuse() × diffuseIntensity<br/>indSpecular = PickSpecular() × specularIntensity<br/>（主 provider + 可选低频补光，内部完成，不双重计入）"]
@@ -460,7 +460,8 @@ outColor += emissive;
 ```
 - **结构性消灭双重计入**：RTGI 在 miss 时回退 DDGI 属 `PickDiffuse()` 内部实现细节，装配端只拿到"一份 diffuse"，不可能再加第二次。
 - **消灭魔法系数**：`*0.03`/`*0.5` 全变成 provider 归一化输出 + 通道 intensity。
-- **三条管线（Deferred / HybridRT / PT）共用同一装配函数**，不再各写一遍——这是原方案未提及、但真正解耦的关键。
+- **两条管线（Deferred / PT）共用同一装配函数**，不再各写一遍——这是原方案未提及、但真正解耦的关键。
+  （原第三条 HybridRT 已于 2026-09 删除。）
 
 **④ 用 `CompositePolicy` 表达空间混合，取代单一 `fallback` 枚举**
 
@@ -513,7 +514,7 @@ for (auto* p : enabledProviders) p->Build(rg, giResources); // 新增技术完�
 | F1 | **`LightingSource` 枚举 + `LightingInputSources` 结构体已定义但未接线**——`Render` 仍用 33 个位置参数（含 cmd）+ 裸指针推断 | `LightingPass.h:19-45`、`LightingPass.cpp:55-76`（签名）、`167-170`（推断） |
 | F2 | **GI 是分散成员**：`m_GI`(IBL, `unique_ptr<IGlobalIllumination>`) + `m_RSM` + `m_SSGI`/`m_SSR`/`m_DDGI`(值成员)，`GetGI()` 只返回 IBL，无统一注册表 | `DeferredPipeline.h:141-167` |
 | F3 | **帧图硬编码顺序**：DDGI → SSAO → SSR → DenoiseSSR → SSGI → DenoiseSSGI → IBL → Lighting → DDGI_CaptureHDR，无选型分支 | `DeferredPipeline_FrameGraph.cpp:262-446` |
-| F4 | **shader 端魔法系数叠加**：IBL + RSM(`*0.03`) + SSGI/RTGI + DDGI(`*0.5`) + SSR 全部累加；DDGI 双重计入为**潜在缺陷**（当前 `DeferredPipeline` 里 RT 指针恒 `nullptr`、`rtDiffuseSource` 恒 0，仅 `HybridRTPipeline` 接线后触发） | `DeferredLighting.frag.slang:235-281`、`DeferredPipeline_FrameGraph.cpp:418` |
+| F4 | **shader 端魔法系数叠加**：IBL + RSM(`*0.03`) + SSGI/RTGI + DDGI(`*0.5`) + SSR 全部累加；DDGI 双重计入为**潜在缺陷**（当前 `DeferredPipeline` 里 RT 指针恒 `nullptr`、`rtDiffuseSource` 恒 0，仅 原 `HybridRTPipeline`（该类已于 2026-09 删除；RT 现作为 GI 源由 Deferred 层栈消费） 接线后触发） | `DeferredLighting.frag.slang:235-281`、`DeferredPipeline_FrameGraph.cpp:418` |
 
 结论：**骨架已经存在（F1），问题在"接线"**。本方案基于现有骨架增量改造，不重写管线。
 
@@ -641,7 +642,8 @@ lpc.rtDiffuseSource  = (src.diffuse  == LightingSource::Diffuse_RTGI)? 1u : 0u;
 
 ### 验收标准
 - [ ] `LightingPass::Render` 参数从 33 个降到 6 个（`in`/`src` 两结构 + 标量）。
-- [ ] `DeferredPipeline_FrameGraph.cpp` 与 `HybridRTPipeline.cpp` 调用点编译通过，行为不变（仅重构）。
+- [ ] `DeferredPipeline_FrameGraph.cpp` 调用点编译通过，行为不变（仅重构）。
+  （历史：原 `HybridRTPipeline.cpp` 已删除，无需再改。）
 
 ---
 
@@ -767,7 +769,8 @@ GIConfig GIConfig::FromQuality(GIQuality q) { return kGIPresets[(int)q]; }
 
 ### 4.3 管线持有 `GIConfig` 而非零散 bool
 
-`DeferredPipeline` / `HybridRTPipeline` 各持有一个 `GIConfig m_GIConfig`，每帧从 `m_GIConfig.ToInputSources()` 得到选型，再据选型 enable/disable 各 GI 子系统。
+`DeferredPipeline` 持有一个 `GIConfig m_GIConfig`，每帧从 `m_GIConfig.ToInputSources()` 得到选型，再据选型 enable/disable 各 GI 子系统。
+（原文还列了 `HybridRTPipeline`；该类已于 2026-09 删除。）
 
 ### 4.4 ImGui 面板
 

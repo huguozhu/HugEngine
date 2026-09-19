@@ -184,6 +184,10 @@ private:
 
     bool          m_IsRecording = false;
 
+    // ── 当前 Pass 调试标签（诊断用：HE_TRACE_BARRIERS 日志里标出屏障是谁发的）──
+    static constexpr u32 kPassLabelMaxLen = 96;
+    char m_CurrentPassLabel[kPassLabelMaxLen] = {};
+
     // ── DrawCall 级调试 marker 状态（一次性语义）──
     static constexpr u32 kDrawLabelMaxLen = 96;              // 标签缓冲上限
     bool  m_DrawLabelSet    = false;                          // 是否存在待插入标签

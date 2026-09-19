@@ -66,6 +66,13 @@ public:
     void BeginFrame(rhi::IRHICommandList* cmd, u32 width, u32 height);
     void RenderScene(rhi::IRHICommandList* cmd, he::World& world,
                      he::SceneGraph& sg, const CameraData& camera);
+    /// GPU 视锥剔除：收集场景对象 → 上传 GPUScene SSBO → 读回上帧可见性 → Dispatch Compute。
+    /// **必须在任何 render pass 之外调用**：vkCmdDispatch 不允许出现在 render pass 内部
+    /// （VUID-vkCmdDispatch-None-10672），且它会采样 HDR 深度 —— 那正是本帧 Scene pass 的
+    /// 深度附件，在 pass 内采样构成非法反馈。RG 路径由独立的 "GPU_Cull" compute pass 调用，
+    /// 非 RG 路径在 BeginHDRPass 之前调用。
+    void RunGPUCulling(rhi::IRHICommandList* cmd, he::World& world,
+                       he::SceneGraph& sg, const CameraData& camera);
     void EndFrame(rhi::IRHICommandList* cmd);
 
     // RenderGraph 模式（声明式 Pass 编排，自动 Barrier）

@@ -11,6 +11,7 @@
 #include "VulkanCommandList.h"
 #include "VulkanDevice.h"
 #include "RHI/TextureLayoutTracker.h"   // 布局追踪 + 视图→图像登记（render pass 边界维护）
+#include "VulkanConverters.h"          // UsesPresentSrcFinalLayout（finalLayout 的唯一判定规则）
 
 #include <cstdlib>
 
@@ -58,6 +59,31 @@ static VkImageLayout ToDepthLayout(u32 state) {
     if (state & u32(RS::DepthStencilRead))  return VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
     if (state & u32(RS::ShaderResource))    return VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
     return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+}
+
+// ============================================================
+// TrackColorAttachmentsAfterPass — 把颜色附件「pass 结束后的真实布局」写回追踪器
+//
+// 动机（TextureLayoutTracker.h 里写明的既有缺口：render pass 自身的 initial/final 布局转变
+// 此前不记账）：RHI 建 RenderPass 时按 UsesPresentSrcFinalLayout(格式) 决定颜色附件的
+// finalLayout（BGRA8/HDR10 ⇒ PRESENT_SRC，其余 ⇒ COLOR_ATTACHMENT）。若不在 pass 边界同步，
+// 下一帧对同一张图发 barrier 时 oldLayout 会与实际不符 —— 实测：SDR 下 ToneMap 写的是 BGRA8
+// 的 LDR 中间纹理（不是交换链），pass 结束后它停在 PRESENT_SRC，而追踪器还记着 RenderTarget，
+// 于是 FXAA 的读 barrier 报 VUID-VkImageMemoryBarrier-oldLayout-01197（每帧 1 条）。
+// ============================================================
+static void TrackColorAttachmentsAfterPass(void* const* colorViews, u32 count) {
+    if (!colorViews) return;
+    for (u32 i = 0; i < count; ++i) {
+        void* view = colorViews[i];
+        if (!view) continue;
+        rhi::ResourceState state = rhi::ResourceState::Present;   // 未登记视图 = 交换链图像视图
+        u32 fmt = 0;
+        if (rhi::QueryViewFormat(view, fmt) &&
+            !rhi::UsesPresentSrcFinalLayout(static_cast<rhi::Format>(fmt))) {
+            state = rhi::ResourceState::RenderTarget;
+        }
+        rhi::TrackTextureLayout(view, state);
+    }
 }
 
 void VulkanCommandList::EnsureDepthAttachmentLayout(void* depthImageView) {
@@ -241,7 +267,59 @@ void VulkanCommandList::BeginRenderPass(u32 colorCount, Format, Format depthForm
     rpBegin.clearValueCount   = 2;
     rpBegin.pClearValues      = vkClearValues;
 
+    // ── LOAD 版 RenderPass 的附件布局确保 ──
+    // 这个 RenderPass **固定**声明 颜色 initialLayout=PRESENT_SRC_KHR、深度 initialLayout=DEPTH_STENCIL_READ_ONLY_OPTIMAL
+    // （它是为"保留 BackBuffer 内容 + 与 ToneMap PSO 的 RP 兼容"而定制的）。Vulkan 要求进入时附件**确实**处于
+    // 声明的 initialLayout，而引擎此前没有做这件事：首帧两张图都还是 UNDEFINED；RT 直写 BackBuffer 的路径
+    // （01.Triangle）会把它留在 COLOR_ATTACHMENT_OPTIMAL。校验层因此报
+    //   "expects VkImage … to be in layout VK_IMAGE_LAYOUT_PRESENT_SRC_KHR … instead, current layout is …"
+    // 这里按追踪器里的真实布局补一次转换（追踪器没有记录 = 首次使用，从 UNDEFINED 转换永远合法）。
+    if (loadOp == LoadOp::Load && m_pSwapChain) {
+        auto ensureLayout = [&](void* view, VkImage image, VkImageLayout wanted,
+                                VkImageAspectFlags aspect, rhi::ResourceState wantedState) {
+            if (!image || wanted == VK_IMAGE_LAYOUT_UNDEFINED) return;
+            VkImageLayout old = VK_IMAGE_LAYOUT_UNDEFINED;
+            rhi::ResourceState tracked;
+            if (view && rhi::QueryTrackedTextureLayout(view, tracked)) {
+                const u32 s = u32(tracked);
+                if (aspect == VK_IMAGE_ASPECT_DEPTH_BIT)             old = ToDepthLayout(s);
+                else if (s & u32(rhi::ResourceState::Present))       old = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+                else if (s & u32(rhi::ResourceState::RenderTarget))  old = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                else                                                 old = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            }
+            if (old == wanted) return;
+            VkImageMemoryBarrier b{};
+            b.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            b.srcAccessMask       = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+            b.dstAccessMask       = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+            b.oldLayout           = old;
+            b.newLayout           = wanted;
+            b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.image               = image;
+            b.subresourceRange    = { aspect, 0, 1, 0, 1 };
+            vkCmdPipelineBarrier(m_CmdBuffers[m_FrameIndex],
+                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                0, 0, nullptr, 0, nullptr, 1, &b);
+            if (view) rhi::TrackTextureLayout(view, wantedState);
+        };
+        const u32 idx = m_CurrentImageIndex;
+        ensureLayout(idx < m_SwapchainViews.size() ? m_SwapchainViews[idx] : nullptr,
+                     m_pSwapChain->GetImage(idx), VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                     VK_IMAGE_ASPECT_COLOR_BIT, rhi::ResourceState::Present);
+        ensureLayout(m_pSwapChain->GetDepthImageView(), m_pSwapChain->GetDepthImage(),
+                     VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                     VK_IMAGE_ASPECT_DEPTH_BIT, rhi::ResourceState::DepthStencilRead);
+    }
+
     vkCmdBeginRenderPass(m_CmdBuffers[m_FrameIndex], &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
+
+    // 交换链图像 pass 结束后停在 PRESENT_SRC（其 RenderPass 的 finalLayout）
+    {
+        void* bbView = (m_CurrentImageIndex < m_SwapchainViews.size())
+                     ? m_SwapchainViews[m_CurrentImageIndex] : nullptr;
+        TrackColorAttachmentsAfterPass(&bbView, 1);
+    }
 
     // 绑定管线 — 仅当最后绑定的管线是图形管线时才绑定
     // （RT/Compute 管线的 m_CurrentBindPoint 不匹配 GRAPHICS，
@@ -324,11 +402,21 @@ void VulkanCommandList::BeginOffscreenPass(
     // 开始 pass 前：把深度附件的真实布局修正到本 pass 期望的 ATTACHMENT
     EnsureDepthAttachmentLayout(depthImageView);
 
-    VkSubpassContents contents = allowSecondary
+    // VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_KHR 要求设备启用
+    // VK_KHR_maintenance7（nestedCommandBuffer）或 VK_EXT_nested_command_buffer；
+    // 未启用时退回 INLINE，避免 VUID-vkCmdBeginRenderPass-contents-parameter / -09640。
+    VkSubpassContents contents = (allowSecondary && m_VulkanDevice
+                                  && m_VulkanDevice->SupportsMaintenance7())
         ? VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_KHR
         : VK_SUBPASS_CONTENTS_INLINE;
     vkCmdBeginRenderPass(m_CmdBuffers[m_FrameIndex], &rpBegin, contents);
     m_InOffscreenPass = true;
+
+    // 颜色附件：按 RenderPass 的 finalLayout 记下「pass 结束后」的真实布局
+    {
+        void* cv = colorImageView;
+        TrackColorAttachmentsAfterPass(&cv, 1);
+    }
 
     // pass 期间深度是附件：同步追踪器，并记住深度视图供 EndOffscreenPass 收尾
     m_CurrentOffscreenDepthView = depthImageView;
@@ -413,11 +501,18 @@ void VulkanCommandList::BeginOffscreenPassMRT(
     // 开始 pass 前：把深度附件的真实布局修正到本 pass 期望的 ATTACHMENT
     EnsureDepthAttachmentLayout(depthImageView);
 
-    VkSubpassContents contents = allowSecondary
+    // VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_KHR 要求设备启用
+    // VK_KHR_maintenance7（nestedCommandBuffer）或 VK_EXT_nested_command_buffer；
+    // 未启用时退回 INLINE，避免 VUID-vkCmdBeginRenderPass-contents-parameter / -09640。
+    VkSubpassContents contents = (allowSecondary && m_VulkanDevice
+                                  && m_VulkanDevice->SupportsMaintenance7())
         ? VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_KHR
         : VK_SUBPASS_CONTENTS_INLINE;
     vkCmdBeginRenderPass(m_CmdBuffers[m_FrameIndex], &rpBegin, contents);
     m_InOffscreenPass = true;
+
+    // 颜色附件：按 RenderPass 的 finalLayout 记下「pass 结束后」的真实布局
+    TrackColorAttachmentsAfterPass(colorImageViews, colorCount);
 
     // pass 期间深度是附件：同步追踪器，并记住深度视图供 EndOffscreenPass 收尾
     m_CurrentOffscreenDepthView = depthImageView;

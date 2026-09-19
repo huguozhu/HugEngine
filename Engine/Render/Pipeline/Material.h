@@ -3,6 +3,7 @@
 #include "Core/Types.h"
 #include "Math/Math.h"
 #include "RHI/Types.h"   // kMaxFramesInFlight
+#include "RT/PTMaterialParams.h"   // Disney 参数打包（与 PT 载荷 / RT 材质纹理同源）
 
 // ============================================================
 // Material.h — glTF 2.0 PBR 材质 + GPU 共享结构体引用
@@ -141,10 +142,16 @@ inline void FillObjectData(GPUObjectData& obj, const PBRMaterial& mat) {
     if (mat.unlit)        flags |= MF_Unlit;
     obj.materialFlags = flags;
     obj.textureMask = ComputeMaterialTextureMask(mat);   // 纹理存在位掩码（无纹理槽 shader 不采样）
-    // Disney 参数打包（与 ShaderTypes.slang GPUObjectData 布局一致）
-    obj.disneyA = float4(mat.anisotropic, mat.subsurface, mat.specular, mat.sheen);
-    obj.disneyB = float4(mat.clearcoat, mat.clearcoatGloss, mat.specularTint.x, mat.specularTint.y);
-    obj.disneyC = mat.specularTint.z;
+    // Disney 参数打包（与 ShaderTypes.slang GPUObjectData 布局一致；
+    // 打包规则统一在 RT/PTMaterialParams.h，PT 侧用同一份 → 两侧 BRDF 参数必然相同）
+    const PTMaterialParams disney = PackDisneyParams(
+        mat.anisotropic, mat.subsurface, mat.specular, mat.sheen,
+        mat.clearcoat, mat.clearcoatGloss,
+        mat.specularTint.x, mat.specularTint.y, mat.specularTint.z,
+        mat.ior, 0.0f);   // transmission 暂无 CPU 字段（PT 任务 4 启用）
+    obj.disneyA = disney.disneyA;
+    obj.disneyB = disney.disneyB;
+    obj.disneyC = disney.surfaceParams.x;
 }
 
 // 填充 GPUMaterialData（bindless 材质 SSBO 元素，去重后的 per-material 数据）
@@ -163,9 +170,15 @@ inline void FillMaterialData(GPUMaterialData& m, const PBRMaterial& mat) {
     if (mat.unlit)        flags |= MF_Unlit;
     m.materialFlags = flags;
     m.textureMask = ComputeMaterialTextureMask(mat);   // 纹理存在位掩码（无纹理槽 shader 不采样）
-    m.disneyA = float4(mat.anisotropic, mat.subsurface, mat.specular, mat.sheen);
-    m.disneyB = float4(mat.clearcoat, mat.clearcoatGloss, mat.specularTint.x, mat.specularTint.y);
-    m.disneyC = mat.specularTint.z;
+    // Disney 参数打包（与 PT 载荷 / RT 材质纹理走同一份规则）
+    const PTMaterialParams disney = PackDisneyParams(
+        mat.anisotropic, mat.subsurface, mat.specular, mat.sheen,
+        mat.clearcoat, mat.clearcoatGloss,
+        mat.specularTint.x, mat.specularTint.y, mat.specularTint.z,
+        mat.ior, 0.0f);   // transmission 暂无 CPU 字段（PT 任务 4 启用）
+    m.disneyA = disney.disneyA;
+    m.disneyB = disney.disneyB;
+    m.disneyC = disney.surfaceParams.x;
     m._pad = 0;
 }
 

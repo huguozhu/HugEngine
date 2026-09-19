@@ -38,6 +38,7 @@ public:
     u32            GetBackendFormat()         const override { return static_cast<u32>(m_Format); }
     VkImageView    GetImageView(u32 i)        const { return m_ImageViews[i]; }
     VkImageView    GetDepthImageView()        const { return m_DepthImageView; }
+    VkImage        GetDepthImage()            const { return m_DepthImage; }   // render pass 布局确保要用 VkImage
     void* GetCurrentBackBufferView() const override { return reinterpret_cast<void*>(m_ImageViews[m_CurrentImage]); }
     void* GetDepthBufferView()       const override { return reinterpret_cast<void*>(m_DepthImageView); }
     VkExtent2D     GetExtent()                const { return {m_Width, m_Height}; }

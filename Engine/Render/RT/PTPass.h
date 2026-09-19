@@ -3,6 +3,7 @@
 #include "RHI/RHI.h"
 #include "Pipeline/RTPass.h"
 #include "Pipeline/Camera.h"
+#include "RT/PathPayload.h"   // PathPayload 的 C++ 镜像（载荷大小传给 RT 管线）
 #include "Math/Math.h"
 #include <memory>
 
@@ -24,8 +25,9 @@ struct PTRenderContext {
     rhi::IRHIBuffer* lightBuffer   = nullptr; // GPULight[] SSBO（当前帧槽位）
     u32              lightCount    = 0;       // 有效光源数
     rhi::IRHIBuffer* finalReservoir = nullptr; // ReSTIR FinalReservoir SSBO（上帧数据，可为空）
-    rhi::IRHITexture* sceneMaterialTex = nullptr;   // 场景材质纹理（4×N，ClosestHit 用）
+    rhi::IRHITexture* sceneMaterialTex = nullptr;   // 场景材质纹理（11×N，ClosestHit 用）
     rhi::IRHITexture* sceneTriangleNormals = nullptr; // 三角形顶点法线纹理（ClosestHit 用）
+    rhi::IRHITexture* sceneTriangleUVs = nullptr;     // 三角形顶点 UV 纹理（ClosestHit 采样贴图用）
     rhi::IRHITexture* blueNoise = nullptr;          // STBN 3D 纹理（RayGen Load 采样）
 };
 

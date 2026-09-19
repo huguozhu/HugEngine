@@ -79,6 +79,8 @@ public:
     bool IsPTMIS() const;
     void SetPTRoulette(bool e);
     bool IsPTRoulette() const;
+    void SetPTTextures(bool e);        // 材质贴图采样（r.PT.Textures）
+    bool IsPTTextures() const;
     void SetPTSampleCount(i32 v);
     i32  GetPTSampleCount() const;
     void SetPTMaxBounces(i32 v);

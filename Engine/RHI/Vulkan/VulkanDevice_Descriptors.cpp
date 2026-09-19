@@ -46,9 +46,11 @@ VkDescriptorType VulkanDevice::ToVkDescType(DescriptorType type) const {
 static constexpr u32 kDescPoolSize_UniformBuffer         = 64;     // 逐帧 UBO 数量
 static constexpr u32 kDescPoolSize_StorageBuffer         = 16384;  // SSBO（Object/Light/Meshlet + bindless SSBO 数组 × 三缓冲）
 static constexpr u32 kDescPoolSize_CombinedImageSampler  = 8192;   // 组合图像采样器（阴影贴图/IBL 等，非 bindless）
-static constexpr u32 kDescPoolSize_SampledImage          = 16384;  // bindless 纹理数组（SampledImage × 三缓冲）
+// bindless 数组每个 set 占 4096 个额度：光栅管线（GBuffer / Forward per-frame / 粒子 / 贴花…）
+// 之外，PT 的 set0 也有 bindless 纹理与采样器数组（b12/b13），因此留出余量。
+static constexpr u32 kDescPoolSize_SampledImage          = 32768;  // bindless 纹理数组（SampledImage × 多 set）
 static constexpr u32 kDescPoolSize_StorageImage          = 256;    // StorageImage（RT BackBuffer 等）
-static constexpr u32 kDescPoolSize_Sampler               = 16384;  // bindless 采样器数组（Sampler × 三缓冲）
+static constexpr u32 kDescPoolSize_Sampler               = 32768;  // bindless 采样器数组（Sampler × 多 set）
 static constexpr u32 kDescPoolSize_AccelStruct           = 64;    // RT TLAS 绑定
 static constexpr u32 kDescPoolMaxSets                    = 1024;  // 最大描述符集总数
 
@@ -82,10 +84,20 @@ DescriptorSetLayoutHandle VulkanDevice::CreateDescriptorSetLayout(const Descript
     // 找到 binding 号最大的 bindless 绑定（Vulkan 要求 VARIABLE_COUNT
     // 只能设在 binding 号最大的绑定上，而非「vector 里最后一个 bindless」）
     i32 varCountIdx = -1;
+    i32 maxBindingNum = -1;
     for (i32 i = 0; i < (i32)desc.bindings.size(); ++i) {
+        maxBindingNum = std::max(maxBindingNum, (i32)desc.bindings[i].binding);
         if (!desc.bindings[i].bindless) continue;
         if (varCountIdx < 0 || desc.bindings[i].binding > desc.bindings[varCountIdx].binding)
             varCountIdx = i;
+    }
+    // 【§0.6.2 校验修复】只有该 bindless 绑定**就是** binding 号最大的那个时才能设 VARIABLE_COUNT；
+    // 否则校验层报 VUID-VkDescriptorSetLayoutBindingFlagsCreateInfo-pBindingFlags-03004
+    //（Forward 的 per-frame set 里 bindless SSBO 是 30，而 GIBlendParams 是 31，正是这种情况）。
+    // 不满足时退回「按声明数量满额分配」——本引擎的分配本来就传满 descriptorCount
+    //（见 AllocateDescriptorSet），VARIABLE_COUNT 只是为将来按需缩容留的口子。
+    if (varCountIdx >= 0 && (i32)desc.bindings[varCountIdx].binding != maxBindingNum) {
+        varCountIdx = -1;
     }
 
     for (i32 i = 0; i < (i32)desc.bindings.size(); ++i) {
@@ -99,8 +111,14 @@ DescriptorSetLayoutHandle VulkanDevice::CreateDescriptorSetLayout(const Descript
 
         info.bindings.push_back(b);
 
-        VkDescriptorBindingFlags flags = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT
-                                       | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+        // 加速结构绑定只有在设备启用了 descriptorBindingAccelerationStructureUpdateAfterBind
+        // 时才允许带 UPDATE_AFTER_BIND（否则校验层报 VUID-...-03570）；
+        // 其余绑定类型照旧一律带该位。
+        VkDescriptorBindingFlags flags = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+        const bool isAccelStruct = (ToVkDescType(b.type) == VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR);
+        if (!isAccelStruct || m_SupportsASUpdateAfterBind) {
+            flags |= VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
+        }
         if (i == varCountIdx) {
             // 只有 binding 号最大的 bindless binding 允许设置 VARIABLE_COUNT
             flags |= VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT;
@@ -142,20 +160,23 @@ DescriptorSetHandle VulkanDevice::AllocateDescriptorSet(DescriptorSetLayoutHandl
     allocInfo.descriptorSetCount = 1;
     allocInfo.pSetLayouts        = &layout;
 
-    // 处理 bindless 可变描述符数量
+    // 处理 bindless 可变描述符数量：
+    // 只有布局里**真的**带了 VARIABLE_COUNT 的绑定才允许传
+    // VkDescriptorSetVariableDescriptorCountAllocateInfo（规范保证至多一个这样的绑定）。
     VkDescriptorSetVariableDescriptorCountAllocateInfo varCountInfo{};
-    u32 maxVarCount = 0;
-    bool hasBindless = false;
-    for (usize i = 0; i < info.bindings.size(); ++i) {
-        if (info.bindings[i].bindless) {
-            maxVarCount = std::max(maxVarCount, info.bindings[i].count);
-            hasBindless = true;
+    u32  varCount         = 0;
+    bool hasVariableCount = false;
+    for (usize i = 0; i < info.bindingFlags.size(); ++i) {
+        if (info.bindingFlags[i] & VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT) {
+            varCount         = info.bindings[i].count;
+            hasVariableCount = true;
+            break;
         }
     }
-    if (hasBindless) {
+    if (hasVariableCount) {
         varCountInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO;
         varCountInfo.descriptorSetCount = 1;
-        varCountInfo.pDescriptorCounts = &maxVarCount;
+        varCountInfo.pDescriptorCounts = &varCount;
         allocInfo.pNext = &varCountInfo;
     }
 
@@ -460,7 +481,7 @@ static void* CreateMipViewInternal(VkDevice device, VulkanTexture* vkTex,
     // 临时视图同样要登记「视图 → 底层图像」：它会被当作 render pass 附件写入
     //（如 IBL 预滤波图的逐 mip 逐面视图），不登记则按该视图反查不到底层图像
     TrackViewImage(reinterpret_cast<void*>(view), reinterpret_cast<void*>(vkTex->GetImage()),
-                   1, 1);
+                   1, 1, u32(vkTex->GetFormat()));
     return reinterpret_cast<void*>(view);
 }
 

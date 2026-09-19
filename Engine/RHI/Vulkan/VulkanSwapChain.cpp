@@ -3,6 +3,7 @@
 // 负责 SwapChain 创建/销毁、窗口缩放、图像获取与呈现
 // ============================================================
 #include "VulkanSwapChain.h"
+#include "RHI/TextureLayoutTracker.h"   // 呈现后记录 PRESENT_SRC 布局（见 Present）
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include <algorithm>
@@ -185,7 +186,12 @@ void VulkanSwapChain::CreateSwapchain() {
 }
 
 void VulkanSwapChain::DestroySwapchain() {
-    for (auto& view : m_ImageViews) vkDestroyImageView(m_Device, view, nullptr);
+    for (auto& view : m_ImageViews) {
+        // 布局追踪器按视图句柄记录真实布局；视图销毁必须清掉记录，
+        // 否则句柄被复用后会把「上一条命令流的布局」误当成新图的当前布局
+        ForgetTrackedTextureLayout(reinterpret_cast<void*>(view));
+        vkDestroyImageView(m_Device, view, nullptr);
+    }
     m_ImageViews.clear();
     if (m_DepthImageView)   { vkDestroyImageView(m_Device, m_DepthImageView, nullptr); m_DepthImageView = VK_NULL_HANDLE; }
     if (m_DepthImage)       { vkDestroyImage(m_Device, m_DepthImage, nullptr); m_DepthImage = VK_NULL_HANDLE; }
@@ -264,7 +270,17 @@ void VulkanSwapChain::Present(bool /*vsync*/) {
     presentInfo.waitSemaphoreCount = waitSem ? 1u : 0u;
     presentInfo.pWaitSemaphores    = waitSem ? &waitSem : nullptr;
 
-    vkQueuePresentKHR(m_PresentQueue, &presentInfo);
+    VkResult presentResult = vkQueuePresentKHR(m_PresentQueue, &presentInfo);
+
+    // 呈现后交换链图像的真实布局是 PRESENT_SRC_KHR，必须记进布局追踪器：
+    // 否则下一帧 RenderGraph 对导入的后备缓冲会沿用上一帧记录的"颜色附件"状态
+    // 去发 barrier，而图像实际停在 PRESENT_SRC —— 校验层每帧报一次
+    // VUID-VkImageMemoryBarrier-oldLayout-01197。
+    if ((presentResult == VK_SUCCESS || presentResult == VK_SUBOPTIMAL_KHR)
+        && m_CurrentImage < m_ImageViews.size()) {
+        TrackTextureLayout(reinterpret_cast<void*>(m_ImageViews[m_CurrentImage]),
+                           ResourceState::Present);
+    }
 }
 
 } // namespace he::rhi

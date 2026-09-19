@@ -114,7 +114,7 @@ Core (L0 平台/工具)
 ### P2：Render 层细节债
 
 - `LightingPass::Render` **20+ 裸指针参数**（LightingPass.h:69-97）——"新效果→新参数"扩散点
-- 三缓冲 SSBO 在 4 条管线各声明一份（ForwardPipeline.h:125 / DeferredPipeline.h:134 / HybridRTPipeline.h:164 / PathTracingPipeline.h:91），创建代码同构复制；SSBO 完全绕过 RenderGraph（依赖单一队列提交序，ReSTIRPass.h:43 自认）
+- 三缓冲 SSBO 在 3 条管线各声明一份（ForwardPipeline.h:125 / DeferredPipeline.h:134 / PathTracingPipeline.h:91；原第 4 处 HybridRTPipeline.h:164 已随该类于 2026-09 删除），创建代码同构复制；SSBO 完全绕过 RenderGraph（依赖单一队列提交序，ReSTIRPass.h:43 自认）
 - 魔数：阴影索引硬编码 `GetShadowMap(4)`（DeferredPipeline_FrameGraph.cpp:157）、物理模式用 `positionRange.w < 0` hack、`static bool firstFrame` 函数级静态变量（DeferredPipeline_FrameGraph.cpp:50）
 - 两个裸 `static int32_t` 未走 CVar（DeferredPipeline_FrameGraph.cpp:24-27）；RT 着色器（.rgen/.rchit）不触发热重载（ShaderHotReload.cpp:67-80 只认 vert/frag/comp）
 

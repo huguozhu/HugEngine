@@ -109,6 +109,8 @@ static uint64_t HashPipelineStateDesc(const PipelineStateDesc& desc) {
     h = hashU32(h, static_cast<u32>(desc.depthLoadOp));
     h = hashU32(h, desc.sampleCount);
     h = hashU32(h, desc.subpassIndex);
+    // DGC：创建标志不同（是否 INDIRECT_BINDABLE）不能共用同一条缓存
+    h = hashU32(h, desc.indirectBindable ? 1u : 0u);
 
     // 混合状态（per-MRT，索引对应 colorFormats）
     // 缺失会导致仅 blend 状态不同的变体 PSO 错误地共享同一缓存条目（GPL 变体演示依赖此维度）
@@ -180,9 +182,7 @@ static bool BuildGraphicsPipelineParts(VkDevice device, const PipelineStateDesc&
         out.attachments[c].initialLayout = (desc.colorLoadOp == LoadOp::Load)
             ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
             : VK_IMAGE_LAYOUT_UNDEFINED;
-        out.attachments[c].finalLayout   = (desc.colorFormats[c] == Format::BGRA8_UNORM ||
-                                             desc.colorFormats[c] == Format::BGRA8_SRGB  ||
-                                             desc.colorFormats[c] == Format::A2B10G10R10_UNORM_PACK32)
+        out.attachments[c].finalLayout   = UsesPresentSrcFinalLayout(desc.colorFormats[c])
                                             ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
                                             : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         out.colorRefs[c].attachment = c;
@@ -336,10 +336,14 @@ static bool BuildGraphicsPipelineParts(VkDevice device, const PipelineStateDesc&
     out.dynState.dynamicStateCount = 2;
     out.dynState.pDynamicStates    = dyn;
 
-    // 构建 push constant ranges（直接使用 stageMask 位掩码）
+    // 构建 push constant ranges。
+    // stageFlags 一律**拓宽**到该管线种类可能写入 push constant 的全体阶段：
+    // RHI 的 SetPushConstants 按绑定类型给出一组阶段掩码（图形=VS|FS，计算=CS，
+    // RT=RGEN|MISS|CHIT|AHIT|CALL），若布局声明的阶段更窄，vkCmdPushConstants 会报
+    // VUID-vkCmdPushConstants-offset-01795。宽一点只是"允许"，不影响任何行为。
     for (auto& pcRange : desc.pushConstantRanges) {
         VkPushConstantRange vkRange{};
-        vkRange.stageFlags = pcRange.stageMask;  // 直接使用 Vulkan 兼容的位掩码
+        vkRange.stageFlags = pcRange.stageMask | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;  // 直接使用 Vulkan 兼容的位掩码
         vkRange.offset     = pcRange.offset;
         vkRange.size       = pcRange.size;
         out.pushRanges.push_back(vkRange);
@@ -428,7 +432,7 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
         std::vector<VkPushConstantRange> vkPushRanges;
         for (auto& pcRange : desc.pushConstantRanges) {
             VkPushConstantRange vkRange{};
-            vkRange.stageFlags = pcRange.stageMask;
+            vkRange.stageFlags = pcRange.stageMask | VK_SHADER_STAGE_COMPUTE_BIT;
             vkRange.offset     = pcRange.offset;
             vkRange.size       = pcRange.size;
             vkPushRanges.push_back(vkRange);
@@ -501,9 +505,7 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
             colorAttachments[c].initialLayout = (desc.colorLoadOp == LoadOp::Load)
                 ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
                 : VK_IMAGE_LAYOUT_UNDEFINED;
-            colorAttachments[c].finalLayout   = (desc.colorFormats[c] == Format::BGRA8_UNORM ||
-                                                 desc.colorFormats[c] == Format::BGRA8_SRGB  ||
-                                                 desc.colorFormats[c] == Format::A2B10G10R10_UNORM_PACK32)
+            colorAttachments[c].finalLayout   = UsesPresentSrcFinalLayout(desc.colorFormats[c])
                                                 ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
                                                 : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             colorRefs[c].attachment = c;
@@ -622,7 +624,7 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
         std::vector<VkPushConstantRange> vkPushRanges;
         for (auto& pcRange : desc.pushConstantRanges) {
             VkPushConstantRange vkRange{};
-            vkRange.stageFlags = pcRange.stageMask;
+            vkRange.stageFlags = pcRange.stageMask | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT;
             vkRange.offset     = pcRange.offset;
             vkRange.size       = pcRange.size;
             vkPushRanges.push_back(vkRange);
@@ -720,7 +722,9 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     }
 
     // ── GPL fast-link 分支（支持 GPL 时优先；任一段创建或 link 失败则回退单片路径）──
-    if (vulkanDevice && vulkanDevice->SupportsGraphicsPipelineLibrary()) {
+    // INDIRECT_BINDABLE（DGC 执行集的 initialPipeline）不走 GPL：该标志只能经
+    // VkPipelineCreateFlags2CreateInfo 传给 vkCreateGraphicsPipelines，而 GPL link 路径不接受它。
+    if (!desc.indirectBindable && vulkanDevice && vulkanDevice->SupportsGraphicsPipelineLibrary()) {
         u64 hVI = HashPipelinePart(desc, PipelinePartKind::VertexInput);
         u64 hPR = HashPipelinePart(desc, PipelinePartKind::PreRaster);
         u64 hFS = HashPipelinePart(desc, PipelinePartKind::FragmentShader);
@@ -764,8 +768,15 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
 
     // 组装完整单片 pipeline
     VkPipelineShaderStageCreateInfo stages[2] = { parts.vsStage, parts.fsStage };
+    // DGC：INDIRECT_BINDABLE 只能通过 VkPipelineCreateFlags2CreateInfo 传入（flags2 机制）
+    VkPipelineCreateFlags2CreateInfoKHR flags2{};
+    if (desc.indirectBindable) {
+        flags2.sType = VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO_KHR;
+        flags2.flags = VK_PIPELINE_CREATE_2_INDIRECT_BINDABLE_BIT_EXT;
+    }
     VkGraphicsPipelineCreateInfo pipeInfo{};
     pipeInfo.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipeInfo.pNext               = desc.indirectBindable ? &flags2 : nullptr;
     pipeInfo.stageCount          = 2;
     pipeInfo.pStages             = stages;
     pipeInfo.pVertexInputState   = &parts.vertexInput;

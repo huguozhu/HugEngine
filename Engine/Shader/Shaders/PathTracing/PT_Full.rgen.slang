@@ -6,7 +6,7 @@
 //      - NEE（Next Event Estimation）：全光源循环 + 阴影射线 + MIS 幂次启发
 //      - ReSTIR DI（flags bit0）：反弹 0 从蓄水池采样 1 条阴影射线替代 NEE
 //      - 俄罗斯轮盘赌终止（flags bit2）
-//      - BSDF 采样（漫反射余弦 + GGX 镜面混合）→ 下一根光线
+//      - BSDF 采样（漫反射余弦 + 各向异性 GGX + 清漆 GGX，三瓣混合、统一 pdf）→ 下一根光线
 //   3. 输出 5 个 UAV：HDR 颜色 / 线性视图深度 / 世界法线+粗糙度 / 屏幕速度 / albedoMetallic
 //
 // 输出 GBuffer 供：RTDenoiser 时域累积（depth/normal/velocity）+
@@ -105,6 +105,7 @@ void main() {
         ray.TMax      = 10000.0;
 
         float3 throughput = float3(1, 1, 1);
+        float3 mediumSigma = float3(0.0);   // >0 = 上一段在介质中传播（PT 任务 4）
 
         for (uint bounce = 0; bounce < maxBounces; bounce++) {
             PathPayload payload;
@@ -112,6 +113,15 @@ void main() {
             payload.normalRough    = float4(0, 0, 0, 1);
             payload.emissiveT      = float4(0, 0, 0, -2);
             TraceRay(g_TLAS, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
+
+            // 介质衰减（Beer-Lambert 解析解）：上一段若是介质内的透射段，
+            // 按该段长度衰减 exp(-σ_t · d)——这正是随机自由程采样的期望（§9.1），
+            // 用期望值代替指数分布采样可显著降方差且保持无偏。
+            if (any(mediumSigma > 0.0)) {
+                float segLen = (payload.emissiveT.a >= 0.0) ? payload.emissiveT.a : 10000.0;
+                throughput *= BeerTransmittance(mediumSigma, segLen);
+                mediumSigma = float3(0.0);
+            }
 
             if (payload.emissiveT.a < 0.0) {
                 // Miss：采样天空 → 终止路径
@@ -125,6 +135,15 @@ void main() {
             float  rough = payload.normalRough.w;
             float3 albedo = payload.albedoMetallic.rgb;
             float  metallic = payload.albedoMetallic.a;
+            // Disney 材质参数（PT 任务 1 由 rchit 带回；任务 2 起求值端显式传入
+            // 共享的 PBR_BRDF，不再吃函数的默认实参——两者在「材质无 Disney 扩展」
+            // 时数值完全等价，有扩展时才体现差异）
+            float4 disneyA       = payload.disneyA;
+            float4 disneyB       = payload.disneyB;
+            float4 surfaceParams = payload.surfaceParams;   // (disneyC, dielectricF0, ior, transmission)
+            // BSDF 参数打包：求值（PT_EvalBRDF）、采样（SampleBSDF）、pdf（BSDFPdf）共用这一份
+            PTBSDFParams mat = MakeBSDFParams(albedo, metallic, rough, disneyA, disneyB, surfaceParams);
+            const float transmission = saturate(surfaceParams.w);   // glTF transmission（0=不透明）
 
             if (bounce == 0) {
                 primaryHit   = true;
@@ -151,7 +170,8 @@ void main() {
                     float3 lightPos2, L; float3 Li; float lightPdf;
                     if (SampleLight(g_Lights[res.lightIndex], P, lightPos2, L, Li, lightPdf)
                         && dot(N, L) > 0.0) {
-                        float3 brdf = PBR_BRDF(albedo, metallic, rough, N, V, L);
+                        // 共享 Disney BRDF 求值（与光栅化 PBR.frag / DeferredLighting.frag 同一函数、同一组参数）
+                        float3 brdf = PT_EvalBRDF(mat, N, V, L);
                         float vis = TraceShadowRay(P, N, L, length(lightPos2 - P));
                         // RTXDI 无偏估计：f(y)·W·M / weightSum
                         // （W 为选中样本目标函数，时空复用 Pass 已对当前像素重评估）
@@ -169,15 +189,13 @@ void main() {
                     float ndl = dot(N, L);
                     if (ndl <= 0.0) continue;
 
-                    float3 brdf = PBR_BRDF(albedo, metallic, rough, N, V, L);
+                    float3 brdf = PT_EvalBRDF(mat, N, V, L);
 
-                    // BRDF 采样 pdf（与 SampleBSDF 相同的混合分布，MIS 用）
-                    float3 H = normalize(V + L);
-                    float NdotV = max(dot(N, V), 1e-4);
-                    float NdotH = max(dot(N, H), 0.0);
-                    float pSpec = lerp(0.35, 0.95, metallic);
-                    float brdfPdf = (1.0 - pSpec) * (ndl / 3.14159265)
-                                  + pSpec * (D_GGX(NdotH, rough) * NdotH / (4.0 * NdotV));
+                    // BRDF 采样 pdf：直接调用采样端的同一函数（三瓣混合分布），
+                    // MIS 权重引用的密度因此与 SampleBSDF 实际使用的策略严格一致
+                    // 界面分支（delta 瓣）占用了 transmission 的采样预算，
+                    // 连续 BSDF 分支的条件 pdf 需按 (1-t) 折算才是策略的完整密度
+                    float brdfPdf = (1.0 - transmission) * BSDFPdf(mat, N, V, L);
 
                     float weight = 1.0;
                     if ((g_PC.flags & PT_FLAG_MIS) != 0u)
@@ -202,7 +220,9 @@ void main() {
                 // 镜面 IBL：按反射方向采样环境（金属/光滑表面获得环境反射，避免全黑）
                 float3 R = reflect(-V, N);
                 float3 envSpec = SampleSky(R, g_PC.skyIntensity);
-                float3 F0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
+                // 电介质 F0 用材质的 dielectricF0（由 IOR 推导，默认 1.5 → 0.04，
+                // 与原先的硬编码常量在默认材质下等价）
+                float3 F0 = lerp(float3(surfaceParams.y, surfaceParams.y, surfaceParams.y), albedo, metallic);
                 radiance += throughput * envSpec * F0;
             }
 
@@ -219,13 +239,23 @@ void main() {
             float2 uDir  = float2(Rand(idx, g_PC.frameIndex, s * 23 + bounce * 11 + 3),
                                   Rand(idx, g_PC.frameIndex, s * 23 + bounce * 11 + 4));
             float pdf;
-            float3 wi = SampleBSDF(N, V, metallic, rough, uLobe, uDir, pdf);
-            if (pdf <= 0.0 || dot(N, wi) <= 0.0) break;
+            float3 deltaWeight = float3(0.0);
+            bool   isDelta     = false;
+            float3 wi = SampleBSDF(mat, N, V, uLobe, uDir, pdf, deltaWeight, isDelta);
 
-            float3 f = PBR_BRDF(albedo, metallic, rough, N, V, wi);
-            throughput *= f * max(dot(N, wi), 0.0) / pdf;
-
-            ray.Origin    = P + N * 0.001;
+            if (isDelta) {
+                // delta 瓣（菲涅尔反射 / 折射 / 全内反射）：权重由采样端按能量份额给出
+                throughput *= deltaWeight;
+                // 折射（进入介质）：后续那段光线要按 Beer-Lambert 衰减
+                if (transmission > 0.0 && dot(N, wi) < 0.0)
+                    mediumSigma = payload.volumeParams.rgb;
+                ray.Origin = P + wi * 0.001;   // 从界面的另一侧出发，避免自交
+            } else {
+                if (pdf <= 0.0 || dot(N, wi) <= 0.0) break;
+                float3 f = PT_EvalBRDF(mat, N, V, wi);
+                throughput *= f * max(dot(N, wi), 0.0) / pdf;
+                ray.Origin = P + N * 0.001;
+            }
             ray.Direction = wi;
             ray.TMin      = 0.01;
             ray.TMax      = 10000.0;

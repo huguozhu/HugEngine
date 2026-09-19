@@ -48,6 +48,63 @@ Render (FrameGraph):
 | - | **UI 参数面板** | ImGui 实时调节粒子参数 |
 | - | ~~P7 Mesh 粒子~~ | Mesh Shader instanced — 2026-07-17 尝试后因 Slang 编译器 bug（`mul()` 在 mesh shader 中失效）放弃 |
 
+## 设计规范要点（自《GPU 粒子系统设计规范》并入，2026-09-19）
+
+> 并入原则：只保留**与当前实现一致**的内容。原文里已不存在的部分（独立的 `ParticleTickBegin.comp`
+> 已被撤掉、per-pass 伪代码）以当前实现为准，不再保留。
+
+### 数据流与缓冲
+
+- **CPU 端**：`ParticleComponent`（`ParticleSystemParam`）——duration / particlesPerSec / 生命与初始速度区间 /
+  发射形状（Sphere|Box）与方向模式（Directional|BiDirectional|Uniform2D|Uniform3D）/ texRowsCols /
+  texFramesPerSec / texTimeSampling / gravity / minSize~maxSize / startColor~endColor /
+  SizeOverLife / ColorOverLife / bindless 粒子纹理句柄。
+- **GPU 端缓冲**（`ParticleRenderer`）：`deadList`、`alivePre`、`alivePost`、`counters`（原子计数）、
+  `randomFloats`、`sortIndices`、`drawIndirectArgs` / `emitIndirectArgs` / `simIndirectArgs`、`billboardVB`。
+- **每帧顺序**：Init（仅一次）→ Emit → Simulate（遍历整个粒子池）→ Culling → Sort
+  →（帧图）ParticleRender → 写入 HDR 目标。
+
+### 关键 GPU 结构（`Engine/Shader/Shaders/Particles/ParticleTypes.slang`，与 C++ 共享）
+
+| 结构 | 内容 |
+|---|---|
+| `Particle`（32 B） | `life_time`(当前/总/纹理时间) + `tex_index` + `velocity`(xyz + 阻尼) + `position`(xyz + 当前大小) |
+| `ParticleCounters` | `dead_count` / `alive_count[2]`（pre/post sim）/ `emit_count` / `simulate_count` / `render_count` |
+| `SortInfo`（8 B） | `particle_index` + `particle_depth` |
+| 常量 | `PARTICLE_CS_X_SIZE=32`、`BITONIC_BLOCK_SIZE=512`、`TRANSPOSE_BLOCK_SIZE=16`、`RANDOM_FLOAT_NUM=512` |
+
+### Pass 职责（当前实现）
+
+| Pass | 职责 |
+|---|---|
+| `ParticleInit.comp` | DeadList[i]=i、计数器复位（仅一次） |
+| `ParticleEmit.comp` | 从 DeadList 原子取槽 → 随机位置/方向/速度/生命 → 写粒子与 alivePre |
+| `ParticleSimulate.comp` | 全池遍历：Euler 积分（速度 + 重力 + 阻尼）、生命递减、纹理帧推进；死亡粒子归还 DeadList |
+| `ParticleCulling.comp` | 视锥 / 距离剔除 → 填 SortIndices + 写 DrawIndirectArgs |
+| `ParticleSort.comp` | Bitonic（块 512）+ 转置（>512），按深度排序 |
+| `ParticleRender.vert.slang` / `.frag.slang` | 6 顶点 Billboard（View Space 构建）→ 片元做软粒子（采样场景深度）+ 参数化颜色 |
+
+### 与 SeekEngine 的差异（设计选型，仍成立）
+
+| 方面 | SeekEngine | HugEngine |
+|---|---|---|
+| 排序 | PreSort + Bitonic + Transpose（3 kernel） | 合并为单个 BitonicSort |
+| 软粒子 | 不支持 | 读场景深度，近几何体时淡出 |
+| 描述符 | 手动 SetParam | bindless 纹理数组 |
+| Mesh 粒子 | 不支持 | 曾尝试 MeshShader instanced（P7）→ 因 Slang 编译 bug 放弃（见踩坑 9） |
+
+### 里程碑与验证标准（P1~P7）
+
+| # | 内容 | 验证标准 | 结果 |
+|:---:|---|---|:---:|
+| P1 | ParticleComponent + Init/Emit/Simulate | GPU 计数器正确、Debug 输出可读 | ✅ |
+| P2 | Billboard 渲染 | 屏幕可见运动粒子 | ✅ |
+| P3 | 参数化颜色/大小 | 粒子有颜色/大小变化 | ✅（纹理序列帧仍待实现） |
+| P4 | Bitonic 深度排序 | 半透明粒子排序正确 | ✅ |
+| P5 | 软粒子（GBuffer 深度混合） | 与几何体边缘平滑过渡 | ✅ |
+| P6 | DeferredPipeline 集成 | 火焰/烟雾/雨雪效果 | ✅ |
+| P7 | Mesh 粒子（MeshShader instanced） | 碎片/弹壳 | ❌ 放弃 |
+
 ## 关键踩坑
 
 ### 1. LoadOp 导致黑屏

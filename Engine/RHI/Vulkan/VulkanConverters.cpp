@@ -30,8 +30,14 @@ VkFormat ToVkFormat(Format fmt) {
         // 32-bit 浮点
         case Format::R32_FLOAT:      return VK_FORMAT_R32_SFLOAT;
         case Format::RG32_FLOAT:     return VK_FORMAT_R32G32_SFLOAT;
+        // 三分量浮点：RT 几何（BLAS 的 triangles.vertexFormat）用的就是它。
+        // 【踩过】此前漏了这一项 → 回落到 VK_FORMAT_UNDEFINED，
+        // BLAS 构建报 VUID-VkAccelerationStructureGeometryTrianglesDataKHR-vertexFormat-03797。
+        // 枚举里的每一项都必须在这里有映射：缺一项是静默回落，不会编译报错。
+        case Format::RGB32_FLOAT:    return VK_FORMAT_R32G32B32_SFLOAT;
         case Format::RGBA32_FLOAT:   return VK_FORMAT_R32G32B32A32_SFLOAT;
         // 特殊
+        case Format::R32_UINT:       return VK_FORMAT_R32_UINT;
         case Format::R11G11B10_FLOAT: return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
         case Format::A2B10G10R10_UNORM_PACK32: return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
         // 深度/模板

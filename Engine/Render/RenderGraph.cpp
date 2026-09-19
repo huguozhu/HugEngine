@@ -236,9 +236,18 @@ void RenderGraph::DeriveBarriers() {
                     }
                 }
                 if (cur.layout == rhi::ResourceState::Undefined) {
-                    // 真正首次使用：从 Undefined 过渡，不需要显式 Barrier
-                    cur.layout = needed;
-                    return;
+                    // 真正首次使用（新建纹理 / 从未被转换过）。
+                    // 【§0.6.2 校验修复】读用途**必须**补一次 Undefined→needed 的转换：
+                    // 导入纹理在窗口尺寸变化后是全新创建的，真实布局就是 UNDEFINED，而此前
+                    // "追踪器没记录 ⇒ 假设已在目标布局 ⇒ 跳过 barrier"的优化会让采样它的
+                    // draw 报 VUID-vkCmdDraw-None-09600（实测：04/06 换尺寸后的第一帧，
+                    // 新建的 GBuffer 深度被 SSGI/Decal/Lighting 采样，各 1 条）。
+                    // 写用途仍交给 render pass / UAV 自己初始化（语义上也不需要保留旧内容）。
+                    if (access != ResourceAccess::Read) {
+                        cur.layout = needed;
+                        return;
+                    }
+                    // 读用途：落到下面统一补 barrier（srcState=Undefined，从 UNDEFINED 转换永远合法）
                 }
             }
             if (cur.layout != needed) {

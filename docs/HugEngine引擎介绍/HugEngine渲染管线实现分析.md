@@ -1,6 +1,9 @@
 # HugEngine 渲染管线实现分析
 
 > 基于 `Engine/Render/Pipeline` 四个管线全部源码的逐行分析（2026-08-19），
+> **补注（2026-09-19）**：`HybridRTPipeline` 已删除（RT 效果并入 Deferred 层栈），现役管线为
+> Forward / Deferred / PathTracing 三条；本文第 6 节保留为**历史记录**，其余章节里涉及该类的
+> 表述已就地标注。
 > 覆盖公共基础设施（RenderGraph / GPU Scene / ShaderTypes / 粒子 / Profiler / PSO 预热 / 热重载）。
 > 架构总览见 [HugEngine架构UML文档.md](HugEngine架构UML文档.md)。
 
@@ -8,20 +11,20 @@
 
 ## 目录
 
-1. [四个管线速览](#1-四个管线速览)
+1. [管线速览](#1-管线速览三条现役--一条已删除的历史管线)
 2. [管线切换与生命周期](#2-管线切换与生命周期)
 3. [公共基础设施](#3-公共基础设施)
 4. [ForwardPipeline](#4-forwardpipeline前向--forward)
 5. [DeferredPipeline](#5-deferredpipeline延迟--gpu-driven)
-6. [HybridRTPipeline](#6-hybridrtpipeline光栅--硬件rt)
+6. [HybridRTPipeline（已删除）](#6-hybridrtpipeline已删除)
 7. [PathTracingPipeline](#7-pathtracingpipeline全路径追踪--restir)
 8. [跨管线已知问题汇总](#8-跨管线已知问题汇总)
 
 ---
 
-## 1. 四个管线速览
+## 1. 管线速览（三条现役 + 一条已删除的历史管线）
 
-| 维度 | ForwardPipeline | DeferredPipeline | HybridRTPipeline | PathTracingPipeline |
+| 维度 | ForwardPipeline | DeferredPipeline | ~~HybridRTPipeline~~（已删除） | PathTracingPipeline |
 |---|---|---|---|---|
 | 源码规模 | .cpp 1009 行 + FG 226 行 | .cpp 444 行 + FG 737 行 | .cpp 952 行 | .cpp 595 行 |
 | 定位 | 前向 PBR + Forward+ 聚集着色 | GBuffer + Lighting 主管线，GPU Driven | 光栅 GBuffer + 硬件 RT 替代屏幕空间效果 | 全路径追踪（阶段 A）+ ReSTIR DI（阶段 B） |
@@ -31,17 +34,22 @@
 | CPU 并行 | MTCR：≤8 Secondary CB 并行录制 | AsyncCompute（帧首连续 Compute 前缀） | 同 Deferred | 同 Deferred |
 | GPU 驱动 | GPUCulling + ExecuteIndirect | GPUCulling（单阶段/两阶段/PTG）+ DGC 可选 | 同 Deferred | 无（全 RT） |
 | Shader 热重载 | ✅ PBR.vert/frag | ❌ | ❌ | ❌ |
-| 使用方 | 02.Cube mode0 / Editor / 03.Sponza-Forward | 02.Cube mode1 / 04.Sponza-Deferred | 02.Cube mode2 | 02.Cube mode3 |
+| 使用方 | 02.Cube mode0 / Editor / 03.Sponza-Forward | 02.Cube mode1 / 04.Sponza-Deferred | **已删除**：mode2 现为 Deferred(RT sources) | 02.Cube mode3 / 05.Sponza-PathTracing |
+
+> ⚠ **HybridRTPipeline 已于 2026-09 删除**（GI 的 S2/S3 收敛：移除 −1245 行，提交 `06c8580`/`0f8aca8`），
+> 它原来的职责是「光栅 GBuffer + 硬件 RT 效果替代屏幕空间效果」；**RT 基础设施（RTPass / RTEffectPass /
+> 四个 RT 效果 Pass / RTDenoiser / RT CVar）本身仍然有效**，现在挂在 `DeferredPipeline` 的帧图与
+> GI 层栈上（作为 GI 源）。上表该列与下面的图仅作历史对照。
 
 ```mermaid
 flowchart LR
-    cv["CVar r.Pipeline.Mode<br/>0=Forward 1=Deferred<br/>2=HybridRT 3=PathTrace"] --> m0[ForwardPipeline]
+    cv["CVar r.Pipeline.Mode<br/>0=Forward 1=Deferred<br/>2=Deferred(RT) 3=PathTrace"] --> m0[ForwardPipeline]
     cv --> m1[DeferredPipeline]
-    cv --> m2[HybridRTPipeline]
+    cv --> m2["HybridRTPipeline（已删除）"]
     cv --> m3[PathTracingPipeline]
-    m1 -.共享 GBuffer/Lighting/PostProcess.-> m2
+    m1 -.原共享（该类已删除）.-> m2
     m1 -.共享 GBuffer/Lighting/PostProcess.-> m0
-    m2 -.RTPass/STBN/RTDenoiser.-> m3
+    m1 -.RTPass/STBN/RTDenoiser.-> m3
 ```
 
 ---
@@ -50,7 +58,8 @@ flowchart LR
 
 切换机制在 `Samples/02.Cube/02.Cube.cpp`：
 
-1. **四个管线启动时一次性全部 `Initialize`**（02.Cube.cpp:306-327），常驻整个应用生命周期，**不是每帧 switch 重建、也不是惰性重建**；退出时统一 `Shutdown()`（02.Cube.cpp:774-777）。
+1. **三条管线（Forward / Deferred / PathTracing）启动时一次性全部 `Initialize`**，常驻整个应用生命周期，**不是每帧 switch 重建、也不是惰性重建**；退出时统一 `Shutdown()`。
+   （原第四条 HybridRT 管线已删除；`mode 2` 走 Deferred 并把 RT 作为 GI 源。）
 2. **主循环四分支**（02.Cube.cpp:481-523）：
    - mode 0（Forward）：`NextFrame()` → `shadowSys->SetRenderResources(shadowObjBuf, shadowBuf, descSet)` → `SyncPhysicalSkyToSun` → `shadowSys->Update` → `Render()` → **宿主再开交换链 RenderPass 并调 `RenderToneMapPass()`**（非 RG 路径 ToneMap 在管线外）。
    - mode 1/2/3：`NextFrame()` → `Render()` → 开交换链 RP（LoadOp::Load）供 ImGui 叠加。
@@ -158,7 +167,7 @@ localToWorld + boundsMin/Max + meshIndex/materialIndex/objectID + IndirectDraw �
 | 0 | 19/20/21 | SSGI/SSAO_DL/SSR | 屏幕空间效果 |
 | 0 | 22 | DDGIProbes | DDGI 探针 |
 | 0 | 23 | GBufferE | worldPos MRT4 |
-| 0 | 24-27 | RT_ShadowMask/RT_Reflection/RT_AO/RT_GI | HybridRT 效果纹理 |
+| 0 | 24-27 | RT_ShadowMask/RT_Reflection/RT_AO/RT_GI | RT 效果纹理（现由 Deferred 承载） |
 | 0 | 28/29 | GBufferF/G | disneyA/B MRT5/6 |
 | 0 | 30 | u_SSBO[] / u_Materials[] | bindless SSBO（最高 binding 承载 VARIABLE_COUNT） |
 | 2 | — | kGPUDescSet_Bindless | TLAS 等无绑定资源 |
@@ -212,7 +221,7 @@ Culling（CPU 提取 6 平面）→ Sort（Bitonic，单 workgroup 512 线程 sh
   igc-default64.dll 预编译 worker 线程约 50% 概率 SIGSEGV；
 - 帧内限流 `EnqueuePSOCreate` 仅 DeferredPipeline.cpp:188 的 GPL 变体演示使用，`NextFrame` 每帧
   `ProcessPSOCreateQueue(3)`；
-- Forward/HybridRT/PathTrace 无任何预热调用。
+- Forward/PathTrace 无任何预热调用（原 HybridRT 已删除）。
 
 ### 3.9 Shader 热重载（ShaderHotReload）
 
@@ -422,7 +431,7 @@ GPUScene Collect→(MeshBatcher)→Upload → GPU 剔除 Readback（禁用时 cl
 - 聚集着色触发条件 `clusteredShading->enabled && lightGridBuffer && lightIndexListBuffer && cachedLights 非空`
   ——**Deferred 下 grid/index 缓冲为 nullptr 恒不触发**，shader 走线性回退
   `min(lightCount, 8)` 前 8 光源；
-- RT 纹理 4 参数恒传 nullptr（RT 效果归 HybridRT 管线）。
+- RT 纹理 4 参数恒传 nullptr（RT 效果现由 Deferred 的 RT 源承载）。
 
 ### 5.8 CollectLights（DeferredPipeline.cpp:364-434）
 
@@ -454,12 +463,22 @@ GPUScene Collect→(MeshBatcher)→Upload → GPU 剔除 Readback（禁用时 cl
 
 ---
 
-## 6. HybridRTPipeline（光栅 + 硬件 RT）
+## 6. HybridRTPipeline（已删除）
 
-### 6.1 定位
+> **该类已不存在**：`Engine/Render/Pipeline/HybridRTPipeline.{h,cpp}` 于 2026-09 随 GI 的管线维度收敛
+> 一并移除（GI 文档 S2/S3：−1245 行，提交 `06c8580`/`0f8aca8`）；`r.Pipeline.Mode=2` 现在是
+> **Deferred(RT sources)**。
+>
+> **本节怎么读**：下面各小节里**仍然有效**的是 RT 基础设施本身 —— `RTPass`（TLAS/BLAS/SBT）、
+> `RTEffectPass` 基类、四个 RT 效果 Pass（RTShadow/RTAO/RTReflection/RTGI）、`RTDenoiser`、
+> `r.RT.*` CVar 与那一串踩坑记录；它们现在由 **DeferredPipeline** 驱动（RT 作为 GI 层栈里的源）。
+> 凡是"作为独立管线类存在/与 Deferred 平行/在 `HybridRTPipeline.cpp` 里初始化"的表述都属于历史，
+> 落点已改为 Deferred 侧。
 
-与 DeferredPipeline **平行**，共享 GBufferRenderer / LightingPass / PostProcessChain 三大组件 +
-GPU Driven 全家桶 + 三缓冲 SSBO。RT 效果替换屏幕空间效果：
+### 6.1 定位（历史）
+
+**原定位**：与 DeferredPipeline 平行，共享 GBufferRenderer / LightingPass / PostProcessChain 三大组件 +
+GPU Driven 全家桶 + 三缓冲 SSBO。RT 效果替换屏幕空间效果（**现由 Deferred 的 RT 源承担**）：
 
 | RT 效果 | 替代 | 输出 |
 |---|---|---|
@@ -471,7 +490,7 @@ GPU Driven 全家桶 + 三缓冲 SSBO。RT 效果替换屏幕空间效果：
 Lighting 参数路径：`LightingPass::Render` 末尾 4 个 RT 纹理非空 → push constant 4 个 rt*Source=1 →
 binding 24-27 替代。
 
-### 6.2 初始化（HybridRTPipeline.cpp:28-205）与降级链
+### 6.2 初始化与降级链（原 `HybridRTPipeline.cpp:28-205`；现同在 `DeferredPipeline::Initialize`）
 
 GBuffer → Lighting → PostProcess（**FXAA 强制启用**）→ GPU Driven 组件 → 三缓冲 → RT 子系统：
 
@@ -563,7 +582,7 @@ normalThreshold → historyWeight=0）→ `effectiveBlend = max(temporalBlend, m
 | 3 | 输出纹理屏障只能由 RG 做一次（双屏障 oldLayout 不匹配 VUID） |
 | 4 | Lighting 必须声明 RT 纹理读依赖（RG LIFO 排序坑） |
 | 5 | SBT buffer 需 ShaderBindingTable usage |
-| 6 | **HybridRT 效果管线无热重载路径**（RTPass 是 AS-only 模式，RTEffectPass 私有管线无 ReloadShader） |
+| 6 | **RT 效果管线无热重载路径**（RTPass 是 AS-only 模式，RTEffectPass 私有管线无 ReloadShader；原 HybridRT 管线，现由 Deferred 承载） |
 | 7 | **半分辨率采样偏差**：半/四分之一分辨率 RT Pass 直接 Load(int3(idx)) 全分辨率 GBuffer
      深度/法线（未做坐标缩放）——数据取自屏幕左上象限，世界坐标按全屏网格重建 |
 | 8 | kRTMaxPayloadSize=16 与 RTPass.h:137 注释矛盾（注释说 Reflection/GI 需要 32B，实际全 16B） |
@@ -705,14 +724,15 @@ rchit：sceneMaterialTex 4 行查询（row0/1/3 材质、row2 定位法线纹理
 | 功能死路径 | `m_ReservoirReady` 未赋值 → IsReservoirReady() 恒 false | PT | 低（实际用局部变量） |
 | 功能死路径 | `m_ComputeCmdList` / `m_ComputePendingSubmit` 声明未使用 | Deferred | 低 |
 | 渲染偏差 | Phase2 Hi-Z 绑定被覆盖成全分辨率深度（金字塔白建） | Deferred | 中 |
-| 渲染偏差 | 半分辨率 RT Pass 深度/法线采样未做坐标缩放（左上象限偏差） | HybridRT | 中 |
-| 时序风险 | GPU 剔除 Readback 一帧错位（可见数减少时多绘脏 command） | Deferred/HybridRT/Forward | 中 |
+| 渲染偏差 | 半分辨率 RT Pass 深度/法线采样未做坐标缩放（左上象限偏差） | Deferred(RT) | 中 |
+| 时序风险 | GPU 剔除 Readback 一帧错位（可见数减少时多绘脏 command） | Deferred/Forward | 中 |
 | 驱动兼容 | Intel Arc B370 igc-default64.dll 预编译 SIGSEGV ~50% → 预热禁用 | 全部 | 高（已规避） |
 | 配置失效 | 4 个 static CVar 未注册控制台（r.DGC.Enable 等注释宣称可改实际不行） | Deferred | 低 |
-| 热重载缺口 | 仅 Forward 支持；RT/PT shader（.rgen/.rchit）监听器也不触发 | Deferred/HybridRT/PT | 低 |
+| 热重载缺口 | 仅 Forward 支持；RT/PT shader（.rgen/.rchit）监听器也不触发 | Deferred/PT | 低 |
 | 文档漂移 | m_UseRenderGraph 默认值与注释矛盾；RenderGraph 头注释顺序与实际不符；"5×MRT" 实际 7 张；payload 注释 32B 实际 16B | 全部 | 低 |
 | 性能 | CollectLights 逐光源 Map/Unmap；多处 CPU-GPU 同步点 | Forward/Deferred | 低 |
 
 ---
 
-*本文档由 5 个并行分析代理通读四个管线全部源码生成，含 60+ 条带文件:行号引用的实现细节与坑位记录。*
+*本文档由 5 个并行分析代理通读当时的四个管线全部源码生成，含 60+ 条带文件:行号引用的实现细节与坑位记录。*
+*（2026-09-19 补注：HybridRTPipeline 已删除，现役三条管线；第 6 节为历史记录。）*

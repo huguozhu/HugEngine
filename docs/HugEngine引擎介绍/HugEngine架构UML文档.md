@@ -31,11 +31,12 @@
 
 ```mermaid
 flowchart TD
-    subgraph samples["Samples 应用层（27 文件，各自独立 main，无共享基类）"]
+    subgraph samples["Samples 应用层（各自独立 main，无共享基类）"]
         s01["01.Triangle<br/>裸 RHI 演示"]
         s02["02.Cube<br/>四管线全功能演示"]
         s03["03.Sponza-Forward<br/>glTF + Forward"]
         s04["04.Sponza-Deferred<br/>GBuffer + Lighting"]
+        s05["05.Sponza-PathTracing<br/>glTF + 全路径追踪"]
         sedit["HugEditor<br/>EditorApp 编辑器"]
     end
 
@@ -47,7 +48,7 @@ flowchart TD
             e4["SceneSerializer<br/>.hescene"]
         end
         subgraph L4["Render（136 文件）"]
-            r1["IRenderPipeline x4<br/>Forward/Deferred/HybridRT/PathTrace"]
+            r1["IRenderPipeline x3<br/>Forward/Deferred/PathTrace<br/>（HybridRT 已删除）"]
             r2["RenderGraph<br/>帧编排"]
             r3["SceneRenderer / GPUScene<br/>GPU 场景"]
             r4["阴影 / GI / 后处理 / AA"]
@@ -619,7 +620,8 @@ class `he::rhi::VulkanDGCFuncs`
 ## 5. Render 框架与 GPU 场景
 
 无中枢单例、无独立渲染线程。4 个平行管线继承 `IRenderPipeline`，应用层按
-CVar `r.Pipeline.Mode`（0=Forward 1=Deferred 2=HybridRT 3=PathTrace）实例化。
+CVar `r.Pipeline.Mode`（0=Forward 1=Deferred 2=Deferred(RT sources) 3=PathTrace）实例化。
+（原 `HybridRTPipeline` 已于 2026-09 删除，RT 效果并入 Deferred 层栈。）
 帧编排 = 每帧新建 RenderGraph + 手写注册序 + 自动拓扑/Barrier/别名/裁剪。
 
 ```mermaid
@@ -659,13 +661,14 @@ class `he::render::DeferredPipeline` {
     +BuildFrameGraph(rg) void
     +CollectLights() void
 }
-class `he::render::HybridRTPipeline` {
-    -RTEffectPass* m_RTShadow
-    -RTEffectPass* m_RTAO
-    -RTEffectPass* m_RTReflection
-    -RTEffectPass* m_RTGI
-    -RTPass m_RTPass
-}
+%% 已删除（2026-09）：RT 效果并入 Deferred 层栈，类与文件都不存在；以下保留为历史结构记录
+%% class `he::render::HybridRTPipeline` {
+%%     -RTEffectPass* m_RTShadow
+%%     -RTEffectPass* m_RTAO
+%%     -RTEffectPass* m_RTReflection
+%%     -RTEffectPass* m_RTGI
+%%     -RTPass m_RTPass
+%% }
 class `he::render::PathTracingPipeline` {
     -unique_ptr<RTPass> m_RTPass
     -unique_ptr<PTPass> m_PT
@@ -750,7 +753,7 @@ class `he::render::CameraData` {
 
 `he::render::IRenderPipeline` <|-- `he::render::ForwardPipeline`
 `he::render::IRenderPipeline` <|-- `he::render::DeferredPipeline`
-`he::render::IRenderPipeline` <|-- `he::render::HybridRTPipeline`
+%% `he::render::IRenderPipeline` <|-- `he::render::HybridRTPipeline`   （已删除，2026-09）
 `he::render::IRenderPipeline` <|-- `he::render::PathTracingPipeline`
 
 `he::render::DeferredPipeline` *-- "1" `he::render::GBufferRenderer`
@@ -1423,7 +1426,7 @@ sequenceDiagram
 1. **无独立渲染线程**：渲染提交全在主线程；并行来自四处局部点 —— JobSystem 视锥剔除、
    Forward 多线程命令录制（≤8 Secondary CB）、RenderGraph AsyncCompute（GPU 侧）、
    PSO 预热 worker 线程 + Shader 热重载监听线程。
-2. **无 god-class Renderer**：4 个平行管线类（Forward/Deferred/HybridRT/PathTracing）继承
+2. **无 god-class Renderer**：3 个平行管线类（Forward/Deferred/PathTracing；原 HybridRT 已于 2026-09 删除）继承
    `IRenderPipeline`，由 CVar `r.Pipeline.Mode` 切换；Deferred 为最完整主管线（~20 Pass）。
 3. **帧编排 = 每帧新建 RenderGraph**：手写注册序 + 自动拓扑排序/Barrier 推导/死 Pass 裁剪/
    别名分析（瞬态内存池）/异步调度；首个 Compute 段走独立队列 + Timeline Semaphore 同步。

@@ -510,6 +510,12 @@ void VulkanCommandList::EndQuery(IRHIQueryPool* pool, u32 queryIndex) {
 
 // ── Debug Label（VK_EXT_debug_utils 调试标签）──
 void VulkanCommandList::BeginDebugLabel(const char* name, const float color[4]) {
+    // 记录当前 Pass 标签（即使设备没有 debug-utils 扩展也记录，供 HE_TRACE_BARRIERS 用）
+    if (name) {
+        std::snprintf(m_CurrentPassLabel, kPassLabelMaxLen, "%s", name);
+    } else {
+        m_CurrentPassLabel[0] = '\0';
+    }
     if (!m_VulkanDevice) return;
     auto fn = m_VulkanDevice->GetCmdBeginDebugLabelFn();
     if (!fn) return;
@@ -858,6 +864,20 @@ void VulkanCommandList::PipelineBarrier(
         0, vkTex->GetMipLevels(),
         0, vkTex->GetArrayLayers()
     };
+
+    // 屏障诊断（HE_TRACE_BARRIERS=1）：打印"哪个 Pass 对哪张图做了什么转换"。
+    // 用于定位 VUID-VkImageMemoryBarrier-oldLayout-* 这类"声明布局与实际不符"的问题。
+    {
+        static const bool s_traceBarriers = (std::getenv("HE_TRACE_BARRIERS") != nullptr);
+        if (s_traceBarriers) {
+            HE_CORE_WARN("[barrier] pass=\"{}\" image={} old={} new={} srcState=0x{:x} dstState=0x{:x}",
+                         m_CurrentPassLabel[0] ? m_CurrentPassLabel : "<none>",
+                         static_cast<const void*>(vkTex->GetImage()),
+                         static_cast<int>(imageBarrier.oldLayout),
+                         static_cast<int>(imageBarrier.newLayout),
+                         static_cast<u32>(srcState), static_cast<u32>(dstState));
+        }
+    }
 
     // 记录该图转换后的真实布局：RenderGraph 对导入纹理（跨帧持久资源）在每帧开始时
     // 需要知道真实布局，否则会假设 Undefined 而漏发 barrier（详见 TextureLayoutTracker.h）

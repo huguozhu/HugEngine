@@ -22,6 +22,51 @@
 
 namespace he::rhi {
 
+// 纹理创建日志用的可读名称。
+// 此前只区分 RGBA8 与 "other"，定位「哪张纹理布局不对」这类问题时完全看不出格式，
+// 只能靠尺寸和创建顺序猜；补齐常见格式（尤其是深度/浮点）后日志本身即可区分。
+static const char* FormatDebugName(Format f) {
+    switch (f) {
+        case Format::Unknown:       return "Unknown";
+        case Format::R8_UNORM:      return "R8";
+        case Format::RG8_UNORM:     return "RG8";
+        case Format::RGBA8_UNORM:   return "RGBA8";
+        case Format::RGBA8_SRGB:    return "RGBA8_SRGB";
+        case Format::BGRA8_UNORM:   return "BGRA8";
+        case Format::BGRA8_SRGB:    return "BGRA8_SRGB";
+        case Format::R16_FLOAT:     return "R16F";
+        case Format::RG16_FLOAT:    return "RG16F";
+        case Format::RGBA16_FLOAT:  return "RGBA16F";
+        case Format::R32_FLOAT:     return "R32F";
+        case Format::RG32_FLOAT:    return "RG32F";
+        case Format::RGB32_FLOAT:   return "RGB32F";
+        case Format::RGBA32_FLOAT:  return "RGBA32F";
+        case Format::R32_UINT:      return "R32U";
+        case Format::R11G11B10_FLOAT: return "R11G11B10F";
+        case Format::D16_UNORM:     return "D16";
+        case Format::D32_FLOAT:     return "D32";
+        case Format::D24_UNORM_S8_UINT: return "D24S8";
+        case Format::D32_FLOAT_S8_UINT: return "D32S8";
+        case Format::BC1_UNORM:     return "BC1";
+        case Format::BC3_UNORM:     return "BC3";
+        case Format::BC4_UNORM:     return "BC4";
+        case Format::BC5_UNORM:     return "BC5";
+        case Format::BC7_UNORM:     return "BC7";
+        default:                    return "other";
+    }
+}
+
+// 纹理创建日志用的用途摘要（RT/UAV/SRV/DS 组合）
+static const char* TextureUsageDebugName(TextureUsage u) {
+    const u32 v = u32(u);
+    if (v & u32(TextureUsage::DepthStencil))
+        return (v & u32(TextureUsage::ShaderResource)) ? "depth+srv" : "depth";
+    if (v & u32(TextureUsage::RenderTarget))
+        return (v & u32(TextureUsage::ShaderResource)) ? "rt+srv" : "rt";
+    if (v & u32(TextureUsage::UnorderedAccess)) return "uav";
+    return "srv";
+}
+
 // BufferUsage 位掩码 → VkBufferUsageFlags 映射
 static VkBufferUsageFlags ToVkBufferUsage(BufferUsage usage) {
     VkBufferUsageFlags flags = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -36,6 +81,30 @@ static VkBufferUsageFlags ToVkBufferUsage(BufferUsage usage) {
         flags |= VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR;
     return flags;
 }
+
+// ============================================================
+// MakeAtomAlignedMappedRange — 构造符合 nonCoherentAtomSize 约束的映射范围
+//
+// 为什么必须对齐：Vulkan 要求 VkMappedMemoryRange.offset 是
+// VkPhysicalDeviceLimits::nonCoherentAtomSize 的整数倍（VUID-VkMappedMemoryRange-offset-00687），
+// 而 VMA 给的分配偏移是任意值（实测 12435872，不是 64 的倍数）。
+// 做法：offset 向下取整到该对齐，size 用 VK_WHOLE_SIZE（多刷一点无害）。
+// ============================================================
+static VkMappedMemoryRange MakeAtomAlignedMappedRange(VmaAllocator allocator,
+                                                      VkDeviceMemory memory,
+                                                      VkDeviceSize offset) {
+    const VkPhysicalDeviceProperties* props = nullptr;
+    vmaGetPhysicalDeviceProperties(allocator, &props);
+    VkDeviceSize atom = (props && props->limits.nonCoherentAtomSize)
+                      ? props->limits.nonCoherentAtomSize : 1;
+    VkMappedMemoryRange range{};
+    range.sType  = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+    range.memory = memory;
+    range.offset = offset & ~(atom - 1);
+    range.size   = VK_WHOLE_SIZE;
+    return range;
+}
+
 
 // ============================================================
 // VulkanBuffer 实现
@@ -87,11 +156,8 @@ VulkanBuffer::VulkanBuffer(VmaAllocator allocator, const BufferDesc& desc)
     if (desc.initialData && m_MappedPtr) {
         std::memcpy(m_MappedPtr, desc.initialData, desc.size);
         if (!m_IsCoherent) {
-            VkMappedMemoryRange range{};
-            range.sType  = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
-            range.memory = allocInfo.deviceMemory;
-            range.offset = allocInfo.offset;
-            range.size   = desc.size;
+            VkMappedMemoryRange range = MakeAtomAlignedMappedRange(
+                m_Allocator, allocInfo.deviceMemory, allocInfo.offset);
             vkFlushMappedMemoryRanges(m_Device, 1, &range);
         }
     }
@@ -108,11 +174,8 @@ void* VulkanBuffer::Map() {
     if (m_IsMapped) {
         VmaAllocationInfo allocInfo;
         vmaGetAllocationInfo(m_Allocator, m_Allocation, &allocInfo);
-        VkMappedMemoryRange range{};
-        range.sType  = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
-        range.memory = allocInfo.deviceMemory;
-        range.offset = allocInfo.offset;
-        range.size   = VK_WHOLE_SIZE;
+        VkMappedMemoryRange range = MakeAtomAlignedMappedRange(
+            m_Allocator, allocInfo.deviceMemory, allocInfo.offset);
         vkInvalidateMappedMemoryRanges(m_Device, 1, &range);
     }
     return m_MappedPtr;
@@ -123,11 +186,8 @@ void VulkanBuffer::Unmap() {
     if (m_IsMapped) {
         VmaAllocationInfo allocInfo;
         vmaGetAllocationInfo(m_Allocator, m_Allocation, &allocInfo);
-        VkMappedMemoryRange range{};
-        range.sType  = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
-        range.memory = allocInfo.deviceMemory;
-        range.offset = allocInfo.offset;
-        range.size   = VK_WHOLE_SIZE;
+        VkMappedMemoryRange range = MakeAtomAlignedMappedRange(
+            m_Allocator, allocInfo.deviceMemory, allocInfo.offset);
         vkFlushMappedMemoryRanges(m_Device, 1, &range);
     }
 }
@@ -343,14 +403,14 @@ VulkanTexture::VulkanTexture(VmaAllocator allocator, VkCommandPool cmdPool, VkQu
     // 同时登记「视图 → 底层图像」：render pass 附件以视图形式传入，而 image barrier 只能
     // 作用于 VkImage，需要靠这份登记在开始 render pass 前补布局转换（见 TextureLayoutTracker.h）
     TrackViewImage(reinterpret_cast<void*>(m_ImageView), reinterpret_cast<void*>(m_Image),
-                   m_MipLevels, m_ArrayLayers);
+                   m_MipLevels, m_ArrayLayers, u32(m_Format));
     // 逐面视图也必须登记：立方体贴图是**逐面**渲染的（BeginOffscreenPass 传的是面视图），
     // 而按面视图反查底层图像此前会失败——布局修正与纹理级判定都需要这份登记。
     // 注意：非 cubemap 时 m_FaceViews 是空容器，故按 size() 遍历而不是按 kCubemapFaceCount 下标。
     for (usize i = 0; i < m_FaceViews.size(); ++i) {
         if (m_FaceViews[i] == VK_NULL_HANDLE) continue;
         TrackViewImage(reinterpret_cast<void*>(m_FaceViews[i]), reinterpret_cast<void*>(m_Image),
-                       m_MipLevels, 1);
+                       m_MipLevels, 1, u32(m_Format));
     }
 
     // 「已写入」登记（供「采样了从未被写入的纹理」检测使用，见 TextureLayoutTracker.h）：
@@ -361,8 +421,15 @@ VulkanTexture::VulkanTexture(VmaAllocator allocator, VkCommandPool cmdPool, VkQu
         MarkViewWritten(reinterpret_cast<void*>(m_ImageView));
     }
 
-    HE_CORE_INFO("Vulkan texture created: {}x{} [{}]{} image={}", m_Width, m_Height,
-                 m_Format == Format::RGBA8_UNORM ? "RGBA8" : "other",
+    // 带初始数据的纹理：UploadInitialData 结束时把图留在 SHADER_READ_ONLY（见该函数），
+    // 这里补记真实布局。此前不记账的后果：追踪器以为"从未转换过"（真实布局 UNDEFINED），
+    // RenderGraph 首次以"读"使用时补发的 UNDEFINED→READ_ONLY 转换会**丢弃**已上传的内容。
+    if (desc.initialData) {
+        TrackTextureLayout(reinterpret_cast<void*>(m_ImageView), ResourceState::ShaderResource);
+    }
+
+    HE_CORE_INFO("Vulkan texture created: {}x{} [{}|{}]{} image={}", m_Width, m_Height,
+                 FormatDebugName(m_Format), TextureUsageDebugName(desc.usage),
                  isCubemap ? " cubemap" : "",
                  reinterpret_cast<const void*>(m_Image));
 }

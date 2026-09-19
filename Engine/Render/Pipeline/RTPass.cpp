@@ -11,8 +11,10 @@
 #include "Scene/SphereComponent.h"
 #include "Core/Log.h"
 #include "Core/Assert.h"
+#include "RT/PTMaterialParams.h"   // Disney 参数打包（与光栅化 CPU 侧、PT 载荷同源）
 
 #include <glm/gtc/matrix_transform.hpp>
+#include <cmath>   // std::log（介质吸收系数 σ_t 推导）
 #include <cstring>
 
 namespace he::render {
@@ -250,6 +252,7 @@ void RTPass::Shutdown() {
     m_MaterialTex.reset();
     m_SceneMaterialTex.reset();
     m_SceneTriangleNormals.reset();
+    m_SceneTriangleUVs.reset();
     m_LightUB.reset();
     m_BindlessSampler.reset();
     m_BindlessTextures.clear();
@@ -505,14 +508,21 @@ bool RTPass::CreateMaterialTexture(rhi::IRHIDevice* device, u32 maxInstances,
 }
 
 // ============================================================
-// BuildSceneMaterialTexture — 场景材质纹理（4×N）+ 三角形法线纹理
+// BuildSceneMaterialTexture — 场景材质纹理（7×N）+ 三角形法线纹理
 // 供 RT 反射/GI/PT 的 ClosestHit 用 InstanceID() 查询材质、
 // PrimitiveIndex() 查询三角形顶点法线（重心插值 → 平滑法线）。
 // 列索引与 BuildAS 的 TLAS 实例顺序一致（Mesh → Cube → Sphere）。
 // 用纹理而非 SSBO：ClosestHitKHR 中访问 StructuredBuffer 已知 GPU fault；
 // 不依赖 position_fetch：GTX 1070 等设备不支持 VK_KHR_ray_tracing_position_fetch。
-// 行布局：row0=albedo.rgb+metallic, row1=roughness+ao,
-//   row2=(法线线性起始=tri*3, 三角形数, 法线纹理宽度, 0), row3=emissive.rgb+0
+// 行布局（每实例一列）：row0=albedo.rgb+metallic, row1=roughness+ao,
+//   row2=(法线线性起始=tri*3, 三角形数, 法线纹理宽度, 0), row3=emissive.rgb+0,
+//   row4=disneyA(aniso, subsurface, specular, sheen),
+//   row5=disneyB(clearcoat, clearcoatGloss, specularTint.rg),
+//   row6=(disneyC=specularTint.b, dielectricF0, ior, transmission),
+//   row7=(σ_t.rgb, 0) —— 参与介质的 Beer-Lambert 吸收系数（由 attenuationColor /
+//        attenuationDistance 推导；不吸收时为 0）
+// 行 4~7 与 Material.h 的 disneyA/disneyB/disneyC 打包逐字段一致，
+// 供路径追踪的 PathPayload（PT 任务 1 / 4）带上完整 Disney 参数与介质参数。
 // ============================================================
 bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world) {
     if (!device) return false;
@@ -529,36 +539,50 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world
     u64 totalTris = 0;
     for (auto& [e, m] : meshList) totalTris += m->GetIndexCount() / 3;
 
-    // ── 材质纹理数据（4 行 × N 列）──
+    // ── 材质纹理数据（11 行 × N 列）──
     // row0=albedo.rgb+metallic, row1=roughness+ao,
-    // row2=(法线线性起始=tri*3, 三角形数, 法线纹理宽度, 0), row3=emissive.rgb+0
-    std::vector<float> matData(n * 4 * 4, 0.0f);
+    // row2=(法线线性起始=tri*3, 三角形数, 法线纹理宽度, 0), row3=emissive.rgb+0,
+    // row4=disneyA, row5=disneyB, row6=(disneyC, dielectricF0, ior, transmission),
+    // row7=(σ_t.rgb, 0) 介质吸收系数，
+    // row8=(materialID, textureMask, 0, 0) —— bindless 贴图基索引 + 纹理存在位掩码，
+    // row9=(baseColorFactor.rgb, metallicFactor), row10=(roughnessFactor, 0, 0, 0)
+    //   row9/row10 是「因子」：采样到真实贴图时要用 factor × texture（row0/row1 存的是
+    //   贴图均值 × 因子，只在没有贴图时作为回落，直接乘贴图会把贴图算两遍）。
+    std::vector<float> matData(n * 11 * 4, 0.0f);
 
-    // ── 三角形顶点法线扁平数组（每三角形 3 条，跨所有实例）──
+    // ── 三角形顶点属性扁平数组（每三角形 3 条，跨所有实例）──
     // 2D 纹理布局：width=W, height=kNormTexHeight；线性索引 lin → (row=lin/W, col=lin%W)
     constexpr u32 kNormTexHeight = 1024;
     u64 entries = totalTris * 3;
     u32 normTexWidth = (u32)((entries + kNormTexHeight - 1) / kNormTexHeight);
     if (normTexWidth == 0) normTexWidth = 1;
     std::vector<float> normalData((u64)normTexWidth * kNormTexHeight * 4, 0.0f);
+    // UV 与法线同布局（RG32F：xy = uv，zw 未用）——PT 的 ClosestHit 靠它插值命中点 UV
+    std::vector<float> uvData((u64)normTexWidth * kNormTexHeight * 2, 0.0f);
 
     // ── 顶点缓冲布局（用 offsetof 适配 32B/48B 两种 GLM 布局）──
     constexpr size_t kStride  = sizeof(he::StaticVertex);
     constexpr size_t kNormOff = offsetof(he::StaticVertex, normal);
+    constexpr size_t kUVOff   = offsetof(he::StaticVertex, uv);
 
     u64 triFlat = 0;  // 跨实例的扁平三角形索引
     for (u32 i = 0; i < n; ++i) {
         he::MeshComponent& m = *meshList[i].second;
         u32 triCount = m.GetIndexCount() / 3;
 
-        // 材质纹理四行
+        // 材质纹理：4 行基础 PBR + Disney/介质 4 行 + 贴图索引/因子 3 行
+        // 没有均值时退回因子（与光栅化的因子语义一致）。
+        // 不这么做的话，像 Sponza 这种 metallicFactor 缺省 1.0、实际靠
+        // metallicRoughness 贴图调制成石头的场景会被整体判成纯金属，漫反射全灭。
+        // （PT 任务 5 起 PT 会真正采样贴图，此时用 row9/row10 的因子；row0/row1 的均值
+        //   只在没有贴图/贴图未注册时作为回落。）
         float* row0 = &matData[i * 4];
-        row0[0] = m.baseColorFactor.r;
-        row0[1] = m.baseColorFactor.g;
-        row0[2] = m.baseColorFactor.b;
-        row0[3] = m.metallicFactor;
+        row0[0] = m.hasMaterialAvg ? m.baseColorAvg.r : m.baseColorFactor.r;
+        row0[1] = m.hasMaterialAvg ? m.baseColorAvg.g : m.baseColorFactor.g;
+        row0[2] = m.hasMaterialAvg ? m.baseColorAvg.b : m.baseColorFactor.b;
+        row0[3] = m.hasMaterialAvg ? m.metallicAvg  : m.metallicFactor;
         float* row1 = &matData[n * 4 + i * 4];
-        row1[0] = m.roughnessFactor;
+        row1[0] = m.hasMaterialAvg ? m.roughnessAvg : m.roughnessFactor;
         row1[1] = m.aoFactor;
         row1[2] = 0.0f;
         row1[3] = 0.0f;
@@ -572,8 +596,64 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world
         row3[1] = m.emissiveFactor.g;
         row3[2] = m.emissiveFactor.b;
         row3[3] = 0.0f;
+        // Disney 参数（统一走 RT/PTMaterialParams.h 的打包规则：
+        // 与 Material.h 的 disneyA/disneyB/disneyC、PT 载荷逐字段同源）
+        const PTMaterialParams disney = PackDisneyParams(
+            m.anisotropic, m.subsurface, m.specular, m.sheen,
+            m.clearcoat, m.clearcoatGloss,
+            m.specularTint.r, m.specularTint.g, m.specularTint.b,
+            m.ior, m.transmission);
+        float* row4 = &matData[n * 16 + i * 4];
+        row4[0] = disney.disneyA.x;
+        row4[1] = disney.disneyA.y;
+        row4[2] = disney.disneyA.z;
+        row4[3] = disney.disneyA.w;
+        float* row5 = &matData[n * 20 + i * 4];
+        row5[0] = disney.disneyB.x;
+        row5[1] = disney.disneyB.y;
+        row5[2] = disney.disneyB.z;
+        row5[3] = disney.disneyB.w;
+        float* row6 = &matData[n * 24 + i * 4];
+        row6[0] = disney.surfaceParams.x;   // disneyC = specularTint.b
+        row6[1] = disney.surfaceParams.y;   // dielectricF0（由 IOR 推导）
+        row6[2] = disney.surfaceParams.z;   // ior
+        row6[3] = m.transmission;           // 透射（>0 时 PT 走折射/介质分支）
+        // 介质吸收系数 σ_t：Beer-Lambert 透射率 = exp(-σ_t · d)
+        //   σ_t = -ln(attenuationColor) / attenuationDistance（逐通道）
+        // attenuationDistance<=0（glTF 的 +inf）或颜色为 1（不吸收）时为 0 = 不衰减
+        float* row7 = &matData[n * 28 + i * 4];
+        row7[0] = row7[1] = row7[2] = row7[3] = 0.0f;
+        if (m.attenuationDistance > 0.0f) {
+            const float inv = 1.0f / m.attenuationDistance;
+            row7[0] = -std::log(std::max(m.attenuationColor.r, 1e-6f)) * inv;
+            row7[1] = -std::log(std::max(m.attenuationColor.g, 1e-6f)) * inv;
+            row7[2] = -std::log(std::max(m.attenuationColor.b, 1e-6f)) * inv;
+        }
+        // row8：bindless 贴图基索引 + 纹理存在位掩码（与光栅化路径同一套规则：
+        //   Material.h::ComputeMaterialTextureMask / kGPUMaterialTexMask_*）
+        //   textureMask 的位序必须与 kGPUMaterialTexSlot_* 一致（BaseColor=0, Normal=1,
+        //   MetallicRough=2, Occlusion=3），采样时用 texBase + 槽号。
+        u32 texMask = 0;
+        if (!m.baseColorTexture.empty())         texMask |= (1u << 0);
+        if (!m.normalTexture.empty())            texMask |= (1u << 1);
+        if (!m.metallicRoughnessTexture.empty()) texMask |= (1u << 2);
+        if (!m.occlusionTexture.empty())         texMask |= (1u << 3);
+        float* row8 = &matData[n * 32 + i * 4];
+        row8[0] = static_cast<float>(m.materialID);   // 整数按 float 存（< 2^24 无精度损失）
+        row8[1] = static_cast<float>(texMask);
+        row8[2] = 0.0f;
+        row8[3] = 0.0f;
+        // row9 / row10：材质因子（采样到真实贴图时用 factor × texture）
+        float* row9 = &matData[n * 36 + i * 4];
+        row9[0] = m.baseColorFactor.r;
+        row9[1] = m.baseColorFactor.g;
+        row9[2] = m.baseColorFactor.b;
+        row9[3] = m.metallicFactor;
+        float* row10 = &matData[n * 40 + i * 4];
+        row10[0] = m.roughnessFactor;
+        row10[1] = row10[2] = row10[3] = 0.0f;
 
-        // 读取顶点/索引缓冲 → 每三角形 3 条顶点法线
+        // 读取顶点/索引缓冲 → 每三角形 3 条顶点法线 + 3 条 UV
         auto* vb = m.GetVertexBuffer().get();
         auto* ib = m.GetIndexBuffer().get();
         if (!vb || !ib || triCount == 0) { triFlat += triCount; continue; }
@@ -589,12 +669,17 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world
             for (u32 v = 0; v < 3; ++v) {
                 u32 vidx = idata[t * 3 + v];
                 const float* vn = reinterpret_cast<const float*>(vdata + vidx * kStride + kNormOff);
-                u64 lin = (triFlat + t) * 3 + v;   // 法线线性索引
+                u64 lin = (triFlat + t) * 3 + v;   // 顶点属性线性索引
                 float* dst = &normalData[lin * 4];
                 dst[0] = vn[0];
                 dst[1] = vn[1];
                 dst[2] = vn[2];
                 dst[3] = 0.0f;
+
+                const float* vuv = reinterpret_cast<const float*>(vdata + vidx * kStride + kUVOff);
+                float* udst = &uvData[lin * 2];
+                udst[0] = vuv[0];
+                udst[1] = vuv[1];
             }
         }
         vb->Unmap();
@@ -602,12 +687,12 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world
         triFlat += triCount;
     }
 
-    // ── 创建材质纹理（4×N RGBA32F）──
+    // ── 创建材质纹理（11×N RGBA32F）──
     {
         rhi::TextureDesc desc;
         desc.format      = rhi::Format::RGBA32_FLOAT;
         desc.width       = n;
-        desc.height      = 4;
+        desc.height      = 11;
         desc.mipLevels   = 1;
         desc.usage       = rhi::TextureUsage::ShaderResource;
         desc.initialData = matData.data();
@@ -634,7 +719,23 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world
         }
     }
 
-    HE_CORE_INFO("RTPass: 场景材质纹理(4×{}) + 法线纹理({}×{} RGBA32F)创建, {} 实例 {} 三角形",
+    // ── 创建三角形 UV 纹理（width×1024 RG32F，布局与法线纹理一致）──
+    {
+        rhi::TextureDesc desc;
+        desc.format      = rhi::Format::RG32_FLOAT;
+        desc.width       = normTexWidth;
+        desc.height      = kNormTexHeight;
+        desc.mipLevels   = 1;
+        desc.usage       = rhi::TextureUsage::ShaderResource;
+        desc.initialData = uvData.data();
+        m_SceneTriangleUVs = device->CreateTexture(desc);
+        if (!m_SceneTriangleUVs) {
+            HE_CORE_ERROR("RTPass: 三角形 UV 纹理创建失败");
+            return false;
+        }
+    }
+
+    HE_CORE_INFO("RTPass: 场景材质纹理(11×{}) + 法线/UV 纹理({}×{} RGBA32F/RG32F)创建, {} 实例 {} 三角形",
                  n, normTexWidth, kNormTexHeight, n, totalTris);
     return true;
 }
@@ -831,8 +932,11 @@ bool RTPass::CreateBindlessDescriptorSet(rhi::IRHIDevice* device, u32 maxTexture
     // set=2: 纹理数组(CombinedImageSampler) + 独立采样器
     rhi::DescriptorSetLayoutDesc desc;
     desc.bindings = {
+        // 【校验修复】stageMask 原为字面量 0x40 = VK_SHADER_STAGE_TASK_BIT_EXT（Task 阶段），
+        // 而这一组是给 ClosestHit 采材质纹理用的（0x400）——阶段掩码写错会让校验层
+        // 报 VUID-VkRayTracingPipelineCreateInfoKHR-layout-07988。改用命名常量。
         { 0, rhi::DescriptorType::CombinedImageSampler,
-          maxTextures, 0x40, true },  // bindless=true, ClosestHit
+          maxTextures, rhi::kStageMaskClosestHit, true },  // bindless=true, ClosestHit
     };
     m_DescLayout2 = device->CreateDescriptorSetLayout(desc);
     if (m_DescLayout2 == rhi::kInvalidLayout) {

@@ -31,6 +31,11 @@ static constexpr u32 kPTBindNormalTex = 7;
 static constexpr u32 kPTBindReservoir = 8;
 static constexpr u32 kPTBindAlbedoMetallic = 9;
 static constexpr u32 kPTBindSTBN = 10;
+// PT 贴图落地：UV 纹理 + bindless 纹理/采样器数组
+static constexpr u32 kPTBindUVTex = 11;
+static constexpr u32 kPTBindBindlessTextures = 12;
+static constexpr u32 kPTBindBindlessSamplers = 13;
+static constexpr u32 kPTBindlessArrayCount = 4096;   // 与 kGPUBinding_BindlessTextures 的容量一致
 
 // ============================================================
 // Initialize — 创建 set0 + 效果管线 + 5 张输出纹理
@@ -40,10 +45,13 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Width  = width;
     m_Height = height;
 
-    // ── set0 资源绑定（11 项）──
+    // ── set0 资源绑定（14 项）──
     // b0=TLAS(RG), b1..b4=四输出 UAV(RG), b5=光源 SSBO(RG),
     // b6=材质纹理(CH), b7=三角形法线(CH), b8=FinalReservoir SSBO(RG), b9=albedoMetallic UAV(RG),
-    // b10=STBN 3D 纹理(RG, 无采样器 Load 采样)
+    // b10=STBN 3D 纹理(RG, 无采样器 Load 采样),
+    // b11=三角形 UV 纹理(CH), b12=bindless 纹理数组(CH), b13=bindless 采样器数组(CH)
+    //   —— b12/b13 由绑定堆（VulkanBindlessHeap）按物料的连续槽位填充，ClosestHit 用
+    //      texBase = row8.x（materialID）、按 row8.y（textureMask）决定采样哪些槽
     std::vector<rhi::DescriptorSetLayoutBinding> bindings = {
         {kPTBindTLAS, rhi::DescriptorType::AccelerationStructure, 1, rhi::kStageMaskRayGen},
         {kPTBindOutput1, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskRayGen},
@@ -56,6 +64,12 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         {kPTBindReservoir, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskRayGen},      // FinalReservoir
         {kPTBindAlbedoMetallic, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskRayGen},       // 第 5 输出 UAV: albedoMetallic
         {kPTBindSTBN, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskRayGen},      // STBN 3D 蓝噪声（Load 采样）
+        {kPTBindUVTex, rhi::DescriptorType::SampledImage, 1, rhi::kStageMaskClosestHit},   // 三角形 UV 纹理
+        // bindless=true：PARTIALLY_BOUND + UPDATE_AFTER_BIND（绑定堆只写"已注册的那部分"）
+        {kPTBindBindlessTextures, rhi::DescriptorType::SampledImage, kPTBindlessArrayCount,
+         rhi::kStageMaskClosestHit, true},
+        {kPTBindBindlessSamplers, rhi::DescriptorType::Sampler, kPTBindlessArrayCount,
+         rhi::kStageMaskClosestHit, true},
     };
 
     // ── push constant 范围（RayGen + ClosestHit + Miss 共用，176B）──
@@ -76,6 +90,12 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     if (m_Set == rhi::kInvalidSet) {
         HE_CORE_ERROR("PTPass: set0 描述符集分配失败");
         return false;
+    }
+    // 把本 set 登记到绑定堆：堆在 Flush() 时把已注册的材质贴图数组写进 b12/b13。
+    // 只跑 PT 的示例（如 05）没有光栅管线，不会有人替它 Flush，
+    // 因此由 PathTracingPipeline 每帧调用 heap->Flush()（无 pending 时是空操作）。
+    if (auto* heap = device->GetBindlessHeap()) {
+        heap->RegisterDescriptorSet(m_Set, kPTBindBindlessTextures, kPTBindBindlessSamplers, 0);
     }
     m_PCRange = pc;
 
@@ -128,21 +148,26 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         groups.push_back(mg);
     }
 
-    // ── 创建独立 RT 管线 + SBT（48B payload，深度 2 够用——循环在 RayGen 内）──
+    // ── 创建独立 RT 管线 + SBT（96B payload：命中信息 + Disney 材质参数，
+    //    深度 2 够用——循环在 RayGen 内）。大小取自 C++ 镜像结构，
+    //    避免字面量与 shader 侧 struct 漂移（PT 任务 1）──
     m_Pipeline = std::make_unique<RTPass::RTEffectPipeline>(
         RTPass::CreateEffectPipeline(device, shaders, groups, {m_Layout}, m_PCRange,
-                                     48, rhi::kRTMaxRecursionDepth, "FullPT"));
+                                     kPathPayloadSize, rhi::kRTMaxRecursionDepth, "FullPT"));
     if (!m_Pipeline->pipeline) {
-        HE_CORE_ERROR("PTPass: 全路径追踪管线创建失败（设备 maxPayloadSize 可能 < 48B）");
+        HE_CORE_ERROR("PTPass: 全路径追踪管线创建失败（设备 maxPayloadSize 可能 < {}B）",
+                      kPathPayloadSize);
         return false;
     }
 
     // ── 5 张输出纹理（RT 写 UAV，降噪/ReSTIR 读 SRV）──
+    // TransferSrc：供对照流程把结果整幅拷回 host 落盘（Tools/pt/dump_pt.ps1，PT 任务 5）
     rhi::TextureDesc d;
     d.width = m_Width;
     d.height = m_Height;
     d.mipLevels = 1;
-    d.usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource;
+    d.usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource
+            | rhi::TextureUsage::TransferSrc;
     d.format = rhi::Format::RGBA16_FLOAT;
     m_HDR = device->CreateTexture(d);
     d.format = rhi::Format::R32_FLOAT;
@@ -158,7 +183,7 @@ bool PTPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         return false;
     }
 
-    HE_CORE_INFO("PTPass: 初始化完成 ({}x{}, payload=48B)", m_Width, m_Height);
+    HE_CORE_INFO("PTPass: 初始化完成 ({}x{}, payload={}B)", m_Width, m_Height, kPathPayloadSize);
     return true;
 }
 
@@ -233,6 +258,9 @@ void PTPass::Execute(rhi::IRHICommandList* cmd, rhi::IRHIAccelerationStructure* 
     if (ctx.sceneTriangleNormals)
         m_Device->UpdateDescriptorSet(m_Set, kPTBindNormalTex,
             rhi::DescriptorType::SampledImage, ctx.sceneTriangleNormals, nullptr);
+    if (ctx.sceneTriangleUVs)
+        m_Device->UpdateDescriptorSet(m_Set, kPTBindUVTex,
+            rhi::DescriptorType::SampledImage, ctx.sceneTriangleUVs, nullptr);
     if (ctx.finalReservoir)
         m_Device->UpdateDescriptorSet(m_Set, kPTBindReservoir,
             rhi::DescriptorType::StorageBuffer, ctx.finalReservoir);

@@ -1,6 +1,14 @@
 # HugEngine Phase 3-2 编辑器设计
 
-> 日期: 2026-06-25 | 状态: 待实施
+> 日期: 2026-06-25 | 状态: ✅ 已实现（三个子系统全部落地）
+>
+> **实现落点**（2026-09-19 核对）：
+> - 场景保存/加载 → `Engine/Editor/Editor/SceneSerializer.{h,cpp}`：`Save` / `Load`，
+>   反射驱动（`typeHash` + `SerializeObject`），文件头 `kMagic = 0x43534548`（"HESC"）+ 版本号；
+> - Content Browser → `Samples/Editor/Panels/ContentBrowserPanel.cpp`（目录遍历 + 文件列表，
+>   识别 `.glb/.gltf/.png/.jpg/.hescene`）；
+> - Play/Stop 模式 → `Engine/Editor/Editor/EditorContext.h`（`EditorState::Edit/Play/Paused`、
+>   `IsPlaying()`/`IsPaused()`）+ `EditorApp.cpp` 的运行态分支。
 
 ## 概述
 

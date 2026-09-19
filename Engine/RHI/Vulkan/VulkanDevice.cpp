@@ -431,6 +431,11 @@ void VulkanDevice::CreateLogicalDevice() {
     VkPhysicalDeviceAccelerationStructureFeaturesKHR asFeature{};
     asFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
     asFeature.accelerationStructure = VK_TRUE;
+    // 加速结构描述符是否允许在绑定后更新（rhi 的绑定默认带 UPDATE_AFTER_BIND）。
+    // 必须按设备是否支持来启用，否则描述符集布局会报
+    // VUID-VkDescriptorSetLayoutBindingFlagsCreateInfo-descriptorBindingAccelerationStructureUpdateAfterBind-03570。
+    asFeature.descriptorBindingAccelerationStructureUpdateAfterBind =
+        m_SupportsASUpdateAfterBind ? VK_TRUE : VK_FALSE;
 
     VkPhysicalDeviceRayTracingPositionFetchFeaturesKHR posFetchFeature{};
     posFetchFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_POSITION_FETCH_FEATURES_KHR;
@@ -459,14 +464,48 @@ void VulkanDevice::CreateLogicalDevice() {
         HE_CORE_INFO("Mesh Shader 扩展已启用: VK_EXT_mesh_shader");
     }
 
+    // 着色器用了 SPIR-V Int8 能力（校验层报 VUID-vkCreateShaderModule-pCode-08740），
+    // 需要启用 shaderInt8
+    VkPhysicalDeviceShaderFloat16Int8Features shaderInt8Feature{};
+    shaderInt8Feature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES;
+    shaderInt8Feature.shaderInt8 = VK_TRUE;
+
+    // 条件启用 VK_KHR_maintenance7：render pass 内混录 inline + secondary（嵌套命令缓冲）需要它，
+    // 否则 vkCmdBeginRenderPass 用 VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_KHR 时
+    // 校验层报 VUID-vkCmdBeginRenderPass-contents-parameter / -contents-09640。
+    VkPhysicalDeviceMaintenance7FeaturesKHR maint7Feature{};
+    maint7Feature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_7_FEATURES_KHR;
+    maint7Feature.maintenance7 = VK_TRUE;
+    if (m_SupportsMaintenance7) {
+        deviceExtensions.push_back(VK_KHR_MAINTENANCE_7_EXTENSION_NAME);
+        HE_CORE_INFO("VK_KHR_maintenance7 已启用（嵌套命令缓冲）");
+    }
+
+    // 条件启用 VK_EXT_vertex_attribute_robustness：PBR.vert 在 location 3/4 声明了蒙皮属性，
+    // 静态顶点布局只有 0/1/2；未启用该特性时校验层报
+    // VUID-VkGraphicsPipelineCreateInfo-Input-07904（03/06 各 2 条）。
+    // 该特性把"缺失顶点属性"从"未定义"变成"读默认值（0,0,0,1）"，正是着色器注释所依赖的语义。
+    VkPhysicalDeviceVertexAttributeRobustnessFeaturesEXT vertexAttrRobustnessFeature{};
+    vertexAttrRobustnessFeature.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_ROBUSTNESS_FEATURES_EXT;
+    vertexAttrRobustnessFeature.vertexAttributeRobustness = VK_TRUE;
+    if (m_SupportsVertexAttributeRobustness) {
+        deviceExtensions.push_back(VK_EXT_VERTEX_ATTRIBUTE_ROBUSTNESS_EXTENSION_NAME);
+        HE_CORE_INFO("VK_EXT_vertex_attribute_robustness 已启用（缺失顶点属性读默认值）");
+    }
+
     // 条件启用 DGC 扩展
     VkPhysicalDeviceDeviceGeneratedCommandsFeaturesEXT dgcFeature{};
     dgcFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_GENERATED_COMMANDS_FEATURES_EXT;
     dgcFeature.deviceGeneratedCommands = VK_TRUE;
 
     if (m_SupportsDGC) {
+        // VK_EXT_device_generated_commands **要求**同时启用 VK_KHR_maintenance5
+        // （此前只推了自己 → vkCreateDevice 报
+        //   VUID-vkCreateDevice-ppEnabledExtensionNames-01387：缺少依赖扩展）
+        deviceExtensions.push_back(VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
         deviceExtensions.push_back(VK_EXT_DEVICE_GENERATED_COMMANDS_EXTENSION_NAME);
-        HE_CORE_INFO("DGC 扩展已启用: VK_EXT_device_generated_commands");
+        HE_CORE_INFO("DGC 扩展已启用: VK_EXT_device_generated_commands (+ VK_KHR_maintenance5)");
     }
 
     // 条件启用 Graphics Pipeline Library 扩展（fast-link 依赖 VK_KHR_pipeline_library）
@@ -569,6 +608,13 @@ void VulkanDevice::CreateLogicalDevice() {
     if (m_SupportsDGC) {
         *ppNext = &dgcFeature; ppNext = &dgcFeature.pNext;
     }
+    if (m_SupportsMaintenance7) {
+        *ppNext = &maint7Feature; ppNext = &maint7Feature.pNext;
+    }
+    if (m_SupportsVertexAttributeRobustness) {
+        *ppNext = &vertexAttrRobustnessFeature; ppNext = &vertexAttrRobustnessFeature.pNext;
+    }
+    *ppNext = &shaderInt8Feature; ppNext = &shaderInt8Feature.pNext;
     if (m_SupportsGPL) {
         *ppNext = &gplFeature; ppNext = &gplFeature.pNext;
     }
@@ -578,7 +624,11 @@ void VulkanDevice::CreateLogicalDevice() {
     *ppNext = nullptr;
 
     VkPhysicalDeviceFeatures features{};
-    features.multiDrawIndirect = VK_TRUE;  // GPU Driven 需要多绘制间接
+    features.multiDrawIndirect = VK_TRUE;
+    // GBuffer 等 MRT 管线各附件的混合状态不同，必须启用 independentBlend，
+    // 否则 vkCreateGraphicsPipelines 报
+    // VUID-VkPipelineColorBlendStateCreateInfo-pAttachments-00605（04/06 各 2 条）
+    features.independentBlend = VK_TRUE;  // GPU Driven 需要多绘制间接
 
     VkDeviceCreateInfo deviceInfo{};
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;

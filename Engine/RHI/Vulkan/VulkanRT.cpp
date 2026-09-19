@@ -164,6 +164,50 @@ void VulkanDevice::QueryRTCapabilities() {
     }
     m_SupportsRTPositionFetch = hasPosFetch;
 
+    // 加速结构描述符的「绑定后更新」特性：绑定默认带 UPDATE_AFTER_BIND，
+    // 只有设备支持时才能启用该特性（见 VulkanDevice.cpp 的 asFeature）
+    {
+        VkPhysicalDeviceAccelerationStructureFeaturesKHR asFeat{};
+        asFeat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+        VkPhysicalDeviceFeatures2 feat2{};
+        feat2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        feat2.pNext = &asFeat;
+        vkGetPhysicalDeviceFeatures2(m_Physical, &feat2);
+        m_SupportsASUpdateAfterBind =
+            (asFeat.descriptorBindingAccelerationStructureUpdateAfterBind == VK_TRUE);
+        HE_CORE_INFO("RT: descriptorBindingAccelerationStructureUpdateAfterBind = {}",
+                     m_SupportsASUpdateAfterBind);
+    }
+
+    // 记录 VK_KHR_maintenance7（嵌套命令缓冲）：BeginOffscreenPass 的
+    // VK_SUBPASS_CONTENTS_INLINE_AND_SECONDARY_COMMAND_BUFFERS_KHR 需要它
+    for (auto& ext : extensions) {
+        if (strcmp(ext.extensionName, VK_KHR_MAINTENANCE_7_EXTENSION_NAME) == 0)
+            m_SupportsMaintenance7 = true;
+    }
+
+    // 记录 VK_EXT_vertex_attribute_robustness（顶点属性健壮性）：
+    // PBR.vert.slang 在 location 3/4 声明了蒙皮属性（inJoints/inWeights），而静态顶点布局
+    // 只描述 0/1/2 —— 未启用该特性（或 maintenance9）时校验层报
+    // VUID-VkGraphicsPipelineCreateInfo-Input-07904：着色器有该 Location 的输入，但
+    // pVertexAttributeDescriptions 里没有对应描述。着色器注释本就写明"静态布局缺失时为 0"，
+    // 正是该特性的语义（缺失属性读默认值），故按能力启用而不是给静态管线硬塞蒙皮属性。
+    for (auto& ext : extensions) {
+        if (strcmp(ext.extensionName, VK_EXT_VERTEX_ATTRIBUTE_ROBUSTNESS_EXTENSION_NAME) == 0)
+            m_SupportsVertexAttributeRobustness = true;
+    }
+    if (m_SupportsVertexAttributeRobustness) {
+        VkPhysicalDeviceVertexAttributeRobustnessFeaturesEXT varFeat{};
+        varFeat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_ROBUSTNESS_FEATURES_EXT;
+        VkPhysicalDeviceFeatures2 feat2{};
+        feat2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        feat2.pNext = &varFeat;
+        vkGetPhysicalDeviceFeatures2(m_Physical, &feat2);
+        m_SupportsVertexAttributeRobustness = (varFeat.vertexAttributeRobustness == VK_TRUE);
+        HE_CORE_INFO("顶点属性健壮性 (VK_EXT_vertex_attribute_robustness) = {}",
+                     m_SupportsVertexAttributeRobustness);
+    }
+
     m_SupportsRT = hasAS && hasRTP;
     if (!m_SupportsRT) {
         HE_CORE_INFO("Ray Tracing: 不支持（缺少 VK_KHR_acceleration_structure 或 VK_KHR_ray_tracing_pipeline）");
@@ -304,6 +348,11 @@ ASBuildSizes VulkanDevice::GetTLASBuildSizes(u32 maxInstanceCount) {
     VkAccelerationStructureGeometryKHR tlasGeo{};
     tlasGeo.sType        = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
     tlasGeo.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+    // 查尺寸这条路径也要把 instances 的 sType/arrayOfPointers 填好（BuildTLAS 里填了，
+    // 这里曾漏掉 → vkGetAccelerationStructureBuildSizesKHR 报
+    // VUID-VkAccelerationStructureGeometryInstancesDataKHR-sType-sType）
+    tlasGeo.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+    tlasGeo.geometry.instances.arrayOfPointers = VK_FALSE;
 
     VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
     buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
@@ -423,7 +472,11 @@ VulkanDevice::CreateRTPipelineState(const RTPipelineStateDesc& desc) {
     std::vector<VkPushConstantRange> vkPushRanges;
     for (auto& pc : desc.pushConstantRanges) {
         VkPushConstantRange range{};
-        range.stageFlags = pc.stageMask;
+        // 与图形/计算路径同理：把阶段掩码拓宽到 RT 的全体阶段，
+        // 保证 RHI 的 SetPushConstants（RT 绑定点）给出的掩码是布局的子集
+        range.stageFlags = pc.stageMask | VK_SHADER_STAGE_RAYGEN_BIT_KHR
+                         | VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR
+                         | VK_SHADER_STAGE_ANY_HIT_BIT_KHR | VK_SHADER_STAGE_CALLABLE_BIT_KHR;
         range.offset     = pc.offset;
         range.size       = pc.size;
         vkPushRanges.push_back(range);

@@ -222,6 +222,11 @@ void GBufferRenderer::CreatePSO(rhi::IRHIDevice* device) {
 
     // PSO 描述
     rhi::PipelineStateDesc gbDesc;
+    // DGC 会把本管线当作执行集的 initialPipeline，那种用法要求管线创建时带
+    // VK_PIPELINE_CREATE_2_INDIRECT_BINDABLE_BIT_EXT（否则
+    // VUID-VkIndirectExecutionSetPipelineInfoEXT-initialPipeline-11153）。
+    // 该位只是"允许被执行集引用"，不影响普通 vkCmdDraw*，故设备支持 DGC 时直接带上。
+    gbDesc.indirectBindable = device->GetCaps().supportsDGC;
     gbDesc.vertexShader = &gbVS;
     gbDesc.pixelShader = &gbFS;
     gbDesc.vertexLayout = vl;

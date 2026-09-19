@@ -11,6 +11,8 @@ CVar<bool>  cvPTDenoise("r.PT.Denoise", false, "PT 时域降噪开关");
 CVar<bool>  cvPTReSTIR("r.PT.ReSTIR", false, "ReSTIR DI 开关");
 CVar<bool>  cvPTMIS("r.PT.MIS", true, "NEE MIS 开关");
 CVar<bool>  cvPTRoulette("r.PT.Roulette", true, "俄罗斯轮盘赌开关");
+// 贴图采样：关掉后退回「贴图均值 × 因子」的平色着色，便于对照贴图是否生效
+CVar<bool>  cvPTTextures("r.PT.Textures", true, "PT 材质贴图采样开关");
 // 降噪参数
 CVar<float> cvPTDenoiseBlend("r.PT.Denoise.Blend", 0.30f, "PT 时域混合因子（历史损坏时仍有 30% 当前帧保底，避免全黑）");
 // A-Trous 空间滤波

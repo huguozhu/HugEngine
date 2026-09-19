@@ -20,6 +20,16 @@ namespace he::rhi {
 // --- 格式转换 ---
 VkFormat    ToVkFormat(Format fmt);
 
+// 颜色格式是否属于"终端输出"（交换链/HDR10）——决定 RenderPass 颜色附件的 finalLayout：
+//   true  → VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+//   false → VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+// 这是 RHI 里**唯一**的判定规则：VulkanPipeline 建 RenderPass 时用它，
+// VulkanCommandList 在 render pass 边界回写布局追踪器时也用它（见 TextureLayoutTracker.h）。
+inline bool UsesPresentSrcFinalLayout(Format fmt) {
+    return fmt == Format::BGRA8_UNORM || fmt == Format::BGRA8_SRGB
+        || fmt == Format::A2B10G10R10_UNORM_PACK32;
+}
+
 // --- 纹理使用标志转换 ---
 VkImageUsageFlags ToVkImageUsage(TextureUsage usage);
 

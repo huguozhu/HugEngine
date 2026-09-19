@@ -169,6 +169,57 @@ void ApplyMaterial(const cgltf_material* material, MeshComponent* meshComp) {
 
     // --- 无光照（KHR_materials_unlit）---
     meshComp->unlit = material->unlit ? true : false;
+
+    // --- Disney principled BSDF / 折射扩展（KHR_materials_*）---
+    // 这些字段供光栅化的 disneyA/disneyB/disneyC 打包与路径追踪的 PathPayload 使用；
+    // 未带扩展的材质保持 MeshComponent 的默认值（等价于「无扩展」，读数不变）。
+
+    // 折射率（F0 由 IOR 推导，默认 1.5 → F0=0.04）
+    if (material->has_ior) {
+        meshComp->ior = material->ior.ior;
+    }
+
+    // 清漆层：glTF 给的是 clearcoatRoughness，引擎侧用「光泽度」= 1 - 粗糙度
+    if (material->has_clearcoat) {
+        meshComp->clearcoat      = material->clearcoat.clearcoat_factor;
+        meshComp->clearcoatGloss = 1.0f - material->clearcoat.clearcoat_roughness_factor;
+    }
+
+    // 镜面：specularFactor 缩放 F0（默认 1.0 ↔ Disney specular 0.5），
+    // specularColorFactor 即镜面色调
+    if (material->has_specular) {
+        meshComp->specular     = 0.5f * material->specular.specular_factor;
+        meshComp->specularTint = float3(
+            material->specular.specular_color_factor[0],
+            material->specular.specular_color_factor[1],
+            material->specular.specular_color_factor[2]);
+    }
+
+    // 光泽（天鹅绒边缘）：取 sheenColorFactor 的亮度作为标量强度
+    if (material->has_sheen) {
+        meshComp->sheen = (material->sheen.sheen_color_factor[0]
+                         + material->sheen.sheen_color_factor[1]
+                         + material->sheen.sheen_color_factor[2]) / 3.0f;
+    }
+
+    // 各向异性强度
+    if (material->has_anisotropy) {
+        meshComp->anisotropic = material->anisotropy.anisotropy_strength;
+    }
+
+    // 透射与参与介质（PT 任务 4：折射 + Beer-Lambert 吸收）
+    if (material->has_transmission) {
+        meshComp->transmission = material->transmission.transmission_factor;
+    }
+    if (material->has_volume) {
+        meshComp->attenuationColor = float3(
+            material->volume.attenuation_color[0],
+            material->volume.attenuation_color[1],
+            material->volume.attenuation_color[2]);
+        // glTF 未写 attenuationDistance 时是 +inf（无衰减）→ 引擎侧用 0 表示"不衰减"
+        const float dist = material->volume.attenuation_distance;
+        meshComp->attenuationDistance = (dist > 0.0f && dist < 1e30f) ? dist : 0.0f;
+    }
 }
 
 /// 检查 accessor 属性是否存在且数据可用
