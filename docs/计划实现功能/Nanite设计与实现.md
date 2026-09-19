@@ -1,7 +1,9 @@
 # Nanite 设计与实现
 
-> 最后更新: 2026-09-19
-> 状态: 设计规范已定稿；N1-N3 实现计划待执行（预处理 + 剔除 + 软光栅 GBuffer）
+> 最后更新: 2026-09-19（含 §14 独立模块化架构与重编号任务清单）
+> 状态: 设计规范已定稿；**实现方案已按"独立模块 + 独立开关"重新定形**（§14），
+> 任务从 1 重新编号（§14.8，共 27 项，覆盖 N0 前置 + N1–N6 + 横切）；旧 §12 Task 1-10 的
+> 详细字段与判据仍有效，对应关系见 §14.9
 
 ## 0. 本文件怎么读
 
@@ -9,6 +11,10 @@
   运行时的形状、运行时 GPU 资源、与现有管线的集成点、关键数据结构、里程碑与已知风险。
 - **第十章起是 N1-N3 实现计划**：回答"怎么按任务落地" —— 全局约束、文件结构、Task 1-10 的
   逐个步骤（含代码骨架与验收标准）、完成标准。Task 里的 `- [ ]` 复选框原样保留，用于逐任务跟踪。
+- **§14 是本次评审新增**（放在文件末尾）：把 Nanite 定形为**独立模块 + 独立开关**
+  （模块边界、开关三层、帧图接入契约、与现有代码的接触面），并给出**从 1 重新编号的完整任务清单**
+  （§14.8，27 项）。**新任务按 §14.8 的编号引用**；旧 §12 的 Task 1-10 保留其字段/格式细节，
+  编号对应关系见 §14.9。§14.1 还给出了设计章"可复用设施"的**代码实况校正**（哪些假设已不成立）。
 - **合并来源**：本文件由两份旧文档合并重写 ——
   ① 旧《Lumen + Nanite 完整设计规范》中与 **Nanite / 虚拟化几何**有关的全部内容（原 §1 现有
   基础设施中与几何/网格处理相关者、原 §3 全部小节、原 §4 的 Nanite 部分、原 §5.3 的 Nanite
@@ -42,6 +48,7 @@
 | §11 | 文件结构（File Structure） | 实现计划 |
 | §12 | 任务清单（Task 1 … Task 10） | 实现计划 |
 | §13 | 完成标准 | 实现计划 |
+| §14 | **独立模块化架构 + 重编号任务清单（27 项，从 1 开始）** | 实现计划（本次评审新增，以 §14.8 编号为准） |
 
 ### 0.2 源文档不一致清单（保留双方说法，不裁决）
 
@@ -1992,3 +1999,230 @@ python Tools/NanitePreprocess/NanitePreprocess.py --input Content/gltf/Sponza/gl
 
 **注：源文档此处不一致（#15）**：设计 §9.1 的 Nanite 里程碑到 N6（硬光栅 / LOD 流式 /
 材质批次），本完成标准只覆盖 N1-N3。N4-N6 目前没有任务分解与验收标准。
+
+---
+
+## 14. 独立模块化架构与任务清单（本次更新；任务从 1 重新编号）
+
+> **本节是本次评审后的新增内容**，回答两件事：① 把 Nanite 做成**一个相对独立的功能**
+> —— 有一个独立的开关（永远可以开启/关闭），架构流程全部收在一个**独立模块**里；
+> ② 给出**从 1 开始的完整任务清单**（覆盖 N0 前置 + N1–N6 + 横切，不再只覆盖 N1-N3）。
+>
+> 第 1–13 章（设计 + 旧 N1-N3 计划）**原样保留**：其中的字段布局、格式细节、验收判据仍然有效，
+> 任务重编号与旧编号的对应关系见 **§14.9**，不要按旧编号去找新任务。
+
+### 14.0 结论先行
+
+1. **落点只有两段代码**：剔除段与 GBuffer 段 —— Lighting 及之后完全不动（设计 §5.3 的定位：
+   Nanite 只改"几何提交方式"，不是另起一条管线）。
+2. **但设计文档假设可复用的「GPU 驱动绘制链」在当前代码里是断的/死的**（证据见 §14.1）
+   ⇒ 独立模块的第一件事不是做 cluster，而是**在模块内自建一条真的能跑的 `计数 → 间接绘制` 链**，
+   并且**不去修改**既有那条链（保证"关闭即逐位不变"）。
+3. **开关关闭时，模块不注册任何 pass、不改任何既有 pass 的读写声明、不产生每帧 CPU 开销**
+   ⇒ "既有预设画面不回归"这条验收口径自动成立（§14.2 不变式 1）。
+
+### 14.1 代码实况校正（设计章的"可复用设施"逐条核对，核验时间见文末）
+
+| 设计文档假设可复用 | 代码实况（证据） | 对模块设计的影响 |
+|---|---|---|
+| GPU 驱动"剔除 → 间接绘制"链（§2.1） | `GPUCulling::Dispatch` 末尾把可见计数**清零**（`GPUCulling.cpp:427`；`SignalPTG` 同 `:738`）；`GBufferRenderer_GPU` 的间接分支要求 `visCount>0`（`:78`）⇒ CPU/GPU **两种模式都退化为逐物体 `DrawIndexed`**，且回退分支不做可见性过滤；唯一真在跑的 GPU 驱动绘制是实例化网格（`InstanceCuller.cpp:200-206`） | 模块**自建**计数/间接链（任务 3），不依赖既有链 |
+| GPU WorkGraph 承载剔除→绘制（§2.1） | **死代码**：`GPUWorkGraph` 只出现在自身 .h/.cpp，无任何管线成员或调用点 | 模块**不用** WorkGraph（任务 3 用普通 compute + `DrawIndexedIndirectCount`） |
+| mesh shader 处理大 cluster（§2.1） | **桩**：`GBuffer.mesh.slang:30-31` 直接 `SetMeshOutputCounts(0,0)`；`PipelineStateDesc::meshShader` 在 Vulkan 后端存在（`VulkanPipeline.cpp:485-486`）但**从未创建 mesh PSO** | N4 之前必须先真正接入（任务 6） |
+| GPUScene（128B/对象）作实例剔除输入（§2.2） | 有，但与渲染用的 `GPUObjectData`（**208B**，断言 `Material.h:52`，上限 1024）是**两套不同步的对象缓冲**（`GPUScene.h:40`，上限 2048） | 实例剔除沿用 `GPUSceneObject` 契约（任务 13），材质字段沿用 208B（任务 19） |
+| DGC 间接绘制生成（§2.1） | 有，但门控默认关（`cvDGC_Enable=0`）且位于上述**不可达分支**内 | 暂不用 DGC（任务 3 用传统间接 count） |
+| Hi-Z 金字塔（§2.2） | `BuildHiZPyramid` 已实现（`GPUCulling.cpp:478-543`） | **复用**（任务 15） |
+| GBuffer 8×MRT 可复用（§2.2/§5.3） | 8 颜色附件 + `D32_FLOAT`（`GBufferRenderer.h:16-26`），usage **只有 `RenderTarget\|ShaderResource`，无 `UnorderedAccess`**（`GBufferRenderer.cpp:150-186`） | 软光栅写 GBuffer 必须先加 UAV（任务 4） |
+| 现有逐物体提交成本 | 阴影 pass 逐 cascade × 逐 mesh `snprintf`+`SetDrawDebugLabel`+`DrawIndexed`（`CSMTechnique.cpp:170-196`），实测 **28–33 ms/帧**；GBuffer 逐物体循环同构（`GBufferRenderer_CPU.cpp:100-126`）；整帧 CPU 受限 19–29 fps（`docs/已实现功能/Lumen设计与实现.md` 附四十四） | 这是"GPU 驱动几何"的**动机证据**，但属另一条线（任务 3 只服务 Nanite） |
+| 文档行号可用 | 设计 §7.1 引用的 `DeferredPipeline_FrameGraph.cpp:214/875` 与当前实际（`:235`、`:1210`）**已漂移** | 照抄前先核对；本节的引用均为**本次核对**后的行号 |
+
+### 14.2 三条不变式（其余设计由它们推出）
+
+1. **开关关闭 ⇒ 与今天逐位相同**：模块 pass 只在该开关开启时注册；不修改任何既有 pass 的
+   `reads/writes`；关闭时不产生新的每帧 CPU 开销。
+2. **模块只依赖"已存在的契约"，不要求既有代码为它让路**：对象/材质契约（`GPUObjectData` 208B +
+   bindless `materialID`）、GBuffer 输出格式（8×RGBA16F + D32）、Hi-Z 金字塔。
+3. **开关打开时，GBuffer 段的"几何写入者"唯一**：要么既有逐物体路径写、要么模块写，
+   **二者互斥**（不是同一 pass 里各写一半），避免深度/排序契约被拆成两处维护。
+
+### 14.3 模块边界
+
+```
+Engine/Render/Nanite/                 # 新目录，与 Engine/Render/Lumen/ 同构
+  NaniteTypes.h                       # 纯 POD（与 Slang 共享；RHI-free，可被 Scene 侧 include）
+  NaniteSettings.h                    # 开关与档位（真值）
+  NaniteScene.{h,cpp}                 # 数据宿主：实例表、cluster 表、几何/量化缓冲、LOD 错误
+  NaniteUpload.{h,cpp}                # .nanite 资产 + MeshBatcher 合并几何 → GPU 缓冲
+  NaniteCull.{h,cpp}                  # 实例剔除 + cluster BVH 剔除 + Hi-Z 遮挡
+  NaniteRaster.{h,cpp}                # 软光栅（后加硬光栅分支）
+  NaniteRenderer.{h,cpp}              # 模块门面：帧图接入、资源生命周期、耗时读数、诊断
+Engine/Shader/Shaders/Nanite/         # shader 独立子目录（须登记进 COMP_SLANG 显式列表）
+Tests/TestNaniteTypes.cpp             # 数据格式/边界单测（RHI-free）
+```
+
+**公共面只有三个**：`NaniteRenderer`（生命周期 + 帧图接入）、`NaniteSettings`（开关/档位）、
+`NaniteTypes.h` 的 POD。**依赖禁令**（写进模块文件头，作为架构约定）：模块内不得出现
+`GI_*` / `Lumen*` / `GPUCulling` 的**内部结构**（可借其 Hi-Z 纹理句柄与描述符写法）；
+不得引用 `MeshBatcher` 的运行时状态（只当**一次性输入**）。
+
+### 14.4 独立开关（三层）
+
+| 层 | 载体 | 说明 |
+|---|---|---|
+| 真值 | `NaniteSettings::enabled` | 模块自持，唯一真值 |
+| 配置 | CVar `r.Nanite.Enable` + cfg 键 `nanite_enable`（**默认 0**） | 与既有 `r.Decal.Project` / `gi_*` 同风格；样例退出时回写 cfg（沿用 `gi_half_res` 的往返写法） |
+| 面板 | 样例 ImGui 勾选框 + 档位下拉（软光栅 / 混合光栅） | 改动即写回 `NaniteSettings` |
+
+**门控点只有一个**：`DeferredPipeline_FrameGraph.cpp` 的 GBuffer 段选择
+（现状 `GB_Clear` 是唯一 GBuffer 写入者，`:235-268`）：
+
+```cpp
+if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
+    m_Nanite.AddPasses(rg, gbHandles..., m_GITimer);   // 模块自注册：InstanceCull → ClusterCull → Raster
+} else {
+    /* 既有 GPU_Cull / GB_Clear / ... 原样，一行不动 */
+}
+```
+
+**开关粒度**：全局开关 × **每网格参与位**。每网格参与性由**资产是否存在**决定 ——
+`MeshComponent` 上只加一个"Nanite 资产路径 + 不透明 `u64` 句柄"（**不含 Render 类型**），
+有资产且全局开启 ⇒ 该网格由模块绘制，否则走既有路径。
+
+### 14.5 帧图接入契约（模块化最容易出错的地方）
+
+- **深度与排序**：`GB_Clear` 独占写深度，并被 `gbDepth/gbWorldPos` 的 **WAW 假依赖**用来给
+  Shadow 定序（`:213-215`）。模块的 `Nanite_Raster` 必须声明**同一组** reads/writes（含这条 WAW），
+  否则 Shadow/Lighting 排序会静默变化 —— 这是"独立模块"与"不回归"之间唯一的硬约束。
+- **GBuffer 契约**：模块**自己**建 PSO/附件布局，直接写既有 GBuffer 纹理句柄。
+  这样**不需要**给 `GBufferRenderer` 加 `Mode::Nanite`（比"改渲染器"更独立），
+  代价是模块内要复刻 `BeginOffscreenPassMRT(cv,8,...)` 的用法（`GBufferRenderer_CPU.cpp:60`）。
+- **软光栅与深度**：compute 写 GBuffer 需要纹理带 `UnorderedAccess`。默认走
+  **(A1)**：给 GBuffer 纹理加 UAV，软光栅用 `RWTexture2D` 写颜色目标 + 手动写深度，
+  深度排序改由模块显式声明；备选 **(A2)** 模块内自建 VisBuffer（`triangleID+depth`）+
+  材质解析 pass。A2 是设计里标"后续"的路线（§1），但代码现实（无 UAV、深度独占语义、
+  8 个 float 附件带宽）可能让它更省事 —— 该裁决放在任务 4，**结果写回本节**。
+- **objectIndex 分区**：模块实例占**独立 index 空间**（自持 `NaniteInstance` 缓冲；
+  实例内沿用 208B 的材质部分）。既有的三处枚举一致性契约
+  （`SceneRenderer.cpp:102-142`、`MeshBatcher.cpp:75-86`、`GPUScene.cpp:66-82`）**不受影响** ——
+  这正是独立编号空间的价值。
+- **不用死代码**：不用 WorkGraph（死代码）、不用 DGC（默认关且在不可达分支）、
+  不依赖 `GPUCulling` 的可见计数（`:427` 被清零）。模块自持 `DrawIndexedIndirectCount` 链。
+
+### 14.6 与现有代码的接触面（越少越好，逐条可回退）
+
+| 文件 | 改动 | 规模 |
+|---|---|---|
+| `Engine/Render/CMakeLists.txt` | 登记 `Nanite/*` 源文件 | 小 |
+| `Engine/Shader/CMakeLists.txt` | 把 `Nanite_*.slang` 列进 `COMP_SLANG`（**显式列表，不能靠 glob**） | 小 |
+| `Engine/Render/Pipeline/DeferredPipeline.{h,cpp}` | 持有 `NaniteRenderer`、生命周期转发、`Set/GetSettings` | 小 |
+| `Engine/Render/Pipeline/DeferredPipeline_FrameGraph.cpp` | GBuffer 段的 `if/else`（**唯一逻辑改动**） | 小 |
+| `Engine/Scene/Scene/MeshComponent.h` | 加 `std::string naniteAsset; u64 naniteHandle`（**只放字符串/handle**） | 1 处 |
+| `Samples/06.GILab/06.GILab.cpp` | 面板开关 + cfg 读写 | 小 |
+| `Tests/CMakeLists.txt` | 登记 `TestNaniteTypes.cpp` | 1 行 |
+
+**明确不改**：`GBufferRenderer.*`、`LightingPass`、`GPUCulling.*`、`InstanceCuller`、
+四个 Shadow 技术、`RTPass`（虚拟化几何如何进 BLAS 单独裁决，见任务 25 之后）。
+
+### 14.7 场景侧接口（绕开设计 §12 Task5 点名的反向依赖）
+
+旧计划 Task5 L1446-1450 指出 `NaniteComponent.h`（Scene）include `NaniteRenderer.h`（Render）
+会形成 **Scene → Render 反向依赖**。**解法**：`MeshComponent` 只存资产路径 + 不透明 handle；
+`NaniteTypes.h` 只放 POD（不含 RHI 类型）并可被 Scene include；"路径 → 资产 → GPU 缓冲"的解析
+全部发生在 Render 侧模块内。`HugEngineScene` 不需要知道 Render 的任何类型。
+
+### 14.8 任务清单（从 1 开始；每项：目标 / 改动点 / 验收）
+
+> 依赖关系：阶段 0 是**硬前置**（没有它，N2/N3 产出的可见簇与间接参数没有消费者）。
+
+**阶段 0：模块化前置（独立开关先落地）**
+
+| # | 目标 | 改动点 | 验收 |
+|---|---|---|---|
+| 1 | 模块骨架 + 独立开关（N0） | 建 `Nanite/` 目录与 6 个文件；`NaniteSettings`；`DeferredPipeline` 持有时机与生命周期；帧图 `if/else`（开启时只注册一个 `Nanite_Noop` pass） | 开关关闭 ⇒ 转储逐位一致；开启 ⇒ pass 列表出现 `Nanite_Noop`、画面不变 |
+| 2 | 开关不变式守卫 | 把"关闭 ⇒ pass 集合与转储逐位一致"写进 `build/verify/acceptance_sweep.ps1`（新增判据 ⑥） | 一条命令输出该判据 PASS；人为破坏开关门控时能 FAIL |
+| 3 | 模块自持的「计数 → 间接绘制」链 | `NaniteCull` 内写计数缓冲 + `IndirectCmdBuf`；绘制端用 `DrawIndexedIndirectCount`（**不改** `GPUCulling`） | 用假数据（1 个实例、N 个簇）验证"计数为 k ⇒ 恰好画 k 次"，且读回计数与绘制一致 |
+| 4 | GBuffer UAV 变体（A1）落地 | GBuffer 纹理加 `UnorderedAccess`；确认既有渲染通道路径不受影响（usage 只增不改语义） | 既有路径画面逐位不变；compute 能写一张测试 GBuffer 并在同一帧被 Lighting 正确读到 |
+| 5 | objectIndex 分区契约 | 定 `objectIndex` 分区表（Nanite 段 vs 普通段），写进 `NaniteTypes.h` 注释与单测 | 混排场景（Nanite + 普通网格）下 `gb_lightmapkey` 解析正确、无越界 |
+| 6 | mesh shader 真正接入 PSO | 按 `PipelineStateDesc::meshShader`（`VulkanPipeline.cpp:485-486`）建一个最小 mesh PSO 并渲染一帧 | 校验层无新增 VUID；能输出非空画面（为任务 22 铺路） |
+
+**阶段 1：N1 预处理（离线管线）**
+
+| # | 目标 | 变动点 | 验收 |
+|---|---|---|---|
+| 7 | `.nanite` 数据格式定稿 | 裁决设计 §8 的四处不一致：文件头 96B vs 128B、顶点 16B vs 12B（含量化偏置）、索引 3×u16 vs u32、`coneData` vs `coneAxisAngle`；裁决结果写回 §8 并同步 C++/Slang | 单测覆盖头部字段与尺寸；`static_assert` 钉住布局 |
+| 8 | 离线 cluster 切分 | `meshopt_buildMeshlets`（§4.1 L246-247）；≤64 tri / ≤128 vert | 每网格簇数、每簇三角形上限、无退化簇 |
+| 9 | LOD 与 DAG | 边折叠逐级减半 + 哈希去重（§4.1 L248） | LOD 层级 > 0；DAG 去重率 > 10%（旧 Task3 判据） |
+| 10 | 量化与打包 | 顶点/法线/UV 量化、索引编码、材质（8B） | 量化往返误差在阈值内（单测）；pack/upload/shader 三处一致 |
+| 11 | `NaniteTypes` 单测 | `Tests/TestNaniteTypes.cpp`（RHI-free） | 尺寸/偏移/量化往返/边界全绿 |
+| 12 | 资产加载与 GPU 上传 | `NaniteUpload` + `NaniteScene` 资源宿主；只从 `MeshBatcher` 合并几何**读**一次 | 上传后 GPU 缓冲字节数与 CPU 侧一致（读回校验） |
+
+**阶段 2：N2 剔除**
+
+| # | 目标 | 改动点 | 验收 |
+|---|---|---|---|
+| 13 | 实例剔除 | 沿用 `GPUSceneObject`（128B）契约（§5.1 Phase 1） | 与 CPU 实例剔除逐项一致 |
+| 14 | per-instance cluster BVH | 构建 + 深度优先遍历（§5.1 Phase 2） | BVH 节点数与遍历访问数可复现 |
+| 15 | 三阶段簇剔除 + Hi-Z | Phase1 视锥 → Phase2 持久化 BVH + Hi-Z 遮挡 → Phase3 LOD 选择（§5.1）；复用 `BuildHiZPyramid` | 与 CPU 参考剔除**逐簇一致**；Hi-Z 打开/关闭差异可解释 |
+| 16 | 可见簇列表 + 间接参数接线 | `u_VisibleClusters` 真正接到光栅端（旧计划 Task8 的缺口） | 绘制次数 = 可见簇数；无空转 |
+| 17 | CPU 参考对照工具 | 一个可复现脚本/命令，输出"可见簇集合差异" | 与任务 15 的验收判据同源、可回归 |
+
+**阶段 3：N3 软光栅**
+
+| # | 目标 | 改动点 | 验收 |
+|---|---|---|---|
+| 18 | 软光栅写 GBuffer | compute（≤16 tri/簇）+ interlock 写 GBuffer（§5.2） | 与既有路径**同场景同相机**对照（均值/相关系数）+ 白炉 1.0000 |
+| 19 | 真实材质接入 | 去掉旧计划 Task8 的 placeholder 与固定 roughness（L1881-1891） | 材质字段与既有 GBuffer 路径逐项可比 |
+| 20 | 深度与排序契约 | 复刻 `GB_Clear` 的 WAW 声明（`:213-215`） | Shadow/Lighting 排序不变（pass 顺序与转储一致） |
+| 21 | 画面级对照验收 | 开关 ON/OFF 两档对照 | 差异可解释（几何覆盖/材质），且关闭档与基线逐位一致 |
+
+**阶段 4–6：N4 / N5 / N6（设计文档只有里程碑名，需先补设计）**
+
+| # | 目标 | 备注 | 验收 |
+|---|---|---|---|
+| 22 | mesh shader 硬光栅 + 分流 | 复用任务 6 的管线；`triCount > 16` 走硬光栅（§5.2 L322-334） | 混合光栅画面一致、软硬占比可读 |
+| 23 | 混合光栅分配策略 + 性能读数 | 阈值/簇大小分布对帧时的影响（接入 `HE_CPU_PASSES` 与 `LogFrameBudget`） | 帧时读数可复现；无回归 |
+| 24 | LOD 流式（反馈 + 页池） | **文档空白**（无 cluster page / page pool / 流式设计），需先补设计再实现 | 先补设计评审，再定验收 |
+| 25 | Material Bin | 按材质分组 + bindless 材质数组（§5.4） | 多材质场景无 draw 爆炸；描述符切换次数可读 |
+
+**阶段 7：横切**
+
+| # | 目标 | 验收 |
+|---|---|---|
+| 26 | 调试与可视化 | 簇/BVH/LOD/软硬光栅占比/可见簇数可视化；每个已知故障模式都能被至少一个工具观察到（沿用 Lumen 的 40 号任务口径） |
+| 27 | 单测与预设回归收口 | `HugEngineTests` 全绿；默认预设抖动族之外 0 项差异；开关不变式（任务 2）常跑 |
+
+### 14.9 与旧 §12 任务编号的映射（避免按旧编号找新任务）
+
+| 旧编号（§12） | 新编号 |
+|---|---|
+| Task 1 数据格式 | → 7（+ 11 单测） |
+| Task 2 簇划分 | → 8 |
+| Task 3 LOD+DAG+量化 | → 9、10 |
+| Task 4 打包 | → 10 |
+| Task 5 组件+上传 | → 12（+ 场景侧接口见 §14.7） |
+| Task 6 实例剔除 | → 13 |
+| Task 7 簇剔除+BVH | → 14、15 |
+| Task 8 软光栅 GBuffer | → 18、19 |
+| Task 9 帧图集成 | → 1、5、16、20 |
+| Task 10 集成测试回归 | → 17、21、27 |
+| （旧计划无对应） | → 2、3、4、6、22–26 |
+
+### 14.10 文档空白与风险（实现前必须补）
+
+1. **页面/流式**：全文无 cluster page / page pool / 分页设计（只有里程碑名 N5）⇒ 任务 24 必须先补设计。
+2. **位移（displacement）**：全文无 ⇒ 明确不做，或单独立项。
+3. **非 Nanite 网格 fallback**：全文无逐网格 fallback（只有 `if (m_UseNanite)` 整体二选一）⇒
+   本引擎场景**必然混排**（动态/实例化/阴影几何），任务 5 的分区契约就是它的落点。
+4. **`m_BatchBuilt` 只建一次**（`DeferredPipeline.h:219`）：场景增删网格既不重建也不重排 ⇒
+   模块自己必须支持**增量重建**，不能沿用这个假设。
+5. **虚拟化几何 → 光追 BLAS**：`RTPass::BuildAS` 每帧遍历全部 mesh（`RTPass.cpp:323-407`）⇒
+   与 Nanite 的关系需单独裁决（另一条线）。
+
+### 14.11 验收口径（沿用仓库既有）
+
+每一步都要过：白炉 `prov6_final` **1.0000**；背靠背同配置两次运行在既有抖动族
+（`prov0_ao_*`/`hdr`/`radiance`）之外 **≤2 个 f16 ULP**；关 Lumen 时 `lumen_passes=0`；
+默认预设抖动族之外 **0 项差异**；`HugEngineTests` 全绿。一条命令：
+`powershell -NoProfile -ExecutionPolicy Bypass -File build\verify\acceptance_sweep.ps1`
+（本次更新后新增判据 ⑥ = 任务 2 的开关不变式）。
+
+**核验时间**：本节所有代码引用为 **2026-09-19（本次评审）** 逐条核对，行号与当时工作树一致。
