@@ -37,27 +37,21 @@ void main(uint3 id : SV_DispatchThreadID) {
     }
 
     if (mode == 1u) {                       // ── inject ──
-        const uint3 v = id;                 // 全网格注入（不再限于 AABB 内）
+        const uint3 v = id;
         if (any(v >= dims.xyz)) return;
 
         const float3 pWorld = originVoxel.xyz + (float3(v) + 0.5) * originVoxel.w;
         const float3 aabbLo = meshOriginVoxel.xyz;
         const float3 aabbHi = meshOriginVoxel.xyz + float3(meshDims.xyz) * meshOriginVoxel.w;
 
-        float d;
-        if (all(pWorld >= aabbLo) && all(pWorld <= aabbHi)) {
-            // AABB 内：直接取该 mesh 距离场（精确到体素中心）
-            const float3 uv = ((pWorld - aabbLo) / meshOriginVoxel.w + 0.5) / float3(meshDims.xyz);
-            d = u_MeshField.SampleLevel(u_MeshFieldSampler, uv, 0);
-        } else {
-            // AABB 外：取"到该 mesh AABB 的距离"。表面一定在 AABB 内，故这是到该 mesh 真实
-            // 表面的**下界** —— 全网格处处有定义，且不会高估（高估会让 sphere tracing 穿漏）。
-            d = length(pWorld - clamp(pWorld, aabbLo, aabbHi));
-        }
-        // 全局场保持**无符号**（是到最近表面的下界）：逐 mesh 场现在带符号，负值直接 asuint
-        // 会变成很大的无符号数而被 InterlockedMin 忽略（静默劣化），故这里取 abs。
-        // 符号属于逐 mesh 细节层（步骤 11.5 落）。全局层的 unsigned 语义在 march 里配 |d| 使用。
-        InterlockedMin(u_Global[v], asuint(abs(d)));
+        // **只在该 mesh 的 AABB 内注入精确的场值**，其余交给跳步洪泛补全（C++ 侧在本 mode 之后跑）。
+        // 之前的版本在 AABB 外用"到 AABB 的距离"兜底，实测那是致命的：本场景 mesh 的 AABB 极大
+        // （最大边长 3154 单位），min 合并后网格内几乎所有体素都拿到一个极小的值（平均低估
+        // 454~569 单位），步进因此在远离表面处就低于阈值 = **提前判命中**，细节层再准也没机会。
+        if (any(pWorld < aabbLo) || any(pWorld > aabbHi)) return;
+
+        const float3 uv = ((pWorld - aabbLo) / meshOriginVoxel.w + 0.5) / float3(meshDims.xyz);
+        InterlockedMin(u_Global[v], asuint(abs(u_MeshField.SampleLevel(u_MeshFieldSampler, uv, 0))));
         return;
     }
 

@@ -50,6 +50,14 @@ struct GlobalPC {
     u32   meshDimX, meshDimY, meshDimZ, pad1;
 };
 static_assert(sizeof(GlobalPC) == 96, "GlobalPC 必须与 shader 的 6×16B 布局一致");
+
+// 与 SDF_MeshFlood.comp.slang 的 FloodPC 一致：3 × 16B = 48B（dims.w = 本次洪泛步长）
+struct FloodPC {
+    float originX, originY, originZ, voxelSize;
+    u32   dimX, dimY, dimZ, stride;
+    u32   pad0, pad1, pad2, pad3;
+};
+static_assert(sizeof(FloodPC) == 48, "FloodPC 必须与 shader 的 3×16B 布局一致");
 } // namespace
 
 bool LumenSDF::Initialize(rhi::IRHIDevice* device, const LumenSDFConfig& config) {
@@ -383,6 +391,28 @@ void LumenSDF::CreateGlobalGPUObjects() {
     m_GlobalPSO = m_Device->CreatePipelineState(pso);
     if (!m_GlobalPSO) HE_CORE_ERROR("LumenSDF: Global SDF 的 PSO 创建失败");
 
+    // 全局网格上的跳步洪泛：复用 SDF_MeshFlood 这个 shader（它本来就是"任意网格 + 步长"的参数化），
+    // 但**管线布局必须用全局描述符集布局** —— 绑定的描述符集与 pipeline layout 不匹配会直接崩。
+    // 它只声明 binding 0（u32 场），而全局布局的 binding 0 正是层 scratch。
+    rhi::PushConstantRange pcrFlood;
+    pcrFlood.stageMask = rhi::kStageMaskCompute;
+    pcrFlood.offset    = 0;
+    pcrFlood.size      = sizeof(FloodPC);
+
+    rhi::ShaderBytecode fcs;
+    fcs.stage      = rhi::ShaderStage::Compute;
+    fcs.spirv      = k_SDF_MeshFlood_comp_spv;
+    fcs.entryPoint = "main";
+
+    rhi::PipelineStateDesc fpso;
+    fpso.bindPoint            = rhi::PipelineBindPoint::Compute;
+    fpso.computeShader        = &fcs;
+    fpso.descriptorSetLayouts = {m_GlobalLayout};
+    fpso.pushConstantRanges   = {pcrFlood};
+    fpso.debugName            = "Lumen_SDF_GlobalFlood";
+    m_GlobalFloodPSO = m_Device->CreatePipelineState(fpso);
+    if (!m_GlobalFloodPSO) HE_CORE_ERROR("LumenSDF: Global 洪泛的 PSO 创建失败");
+
     rhi::SamplerDesc sd;
     sd.minFilter = sd.magFilter = rhi::FilterMode::Nearest;   // 逐体素取值，不能线性插值
     sd.addressU  = sd.addressV  = sd.addressW = rhi::AddressMode::ClampToEdge;
@@ -488,7 +518,26 @@ void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
                                  layer.scratch.get());
         }
 
-        // ③ u32 → R32F + 自检探针
+        // ③ 跳步洪泛补全：AABB 内才有精确值，其余体素靠洪泛逐级传播（与 mesh 层同一套算法）
+        cmd->SetPipeline(m_GlobalFloodPSO.get());
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_GlobalSet);
+        FloodPC fpc{};
+        fpc.originX = layer.origin.x; fpc.originY = layer.origin.y; fpc.originZ = layer.origin.z;
+        fpc.voxelSize = layer.voxelSize;
+        fpc.dimX = fpc.dimY = fpc.dimZ = layer.res;
+        for (u32 s = layer.res / 2u; s >= 1u; s /= 2u) {
+            fpc.stride = s;
+            cmd->SetPushConstants(0, sizeof(fpc), &fpc);
+            cmd->Dispatch(groups, groups, groups);
+            cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                                 rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
+                                 layer.scratch.get());
+            if (s == 1u) break;
+        }
+
+        // ④ u32 → R32F + 自检探针
+        cmd->SetPipeline(m_GlobalPSO.get());
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_GlobalSet);
         pc.mode = 2u;
         cmd->SetPushConstants(0, sizeof(pc), &pc);
         cmd->Dispatch(groups, groups, groups);

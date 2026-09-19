@@ -201,6 +201,7 @@ private:
     rhi::DescriptorSetLayoutHandle m_GlobalLayout;
     rhi::DescriptorSetHandle       m_GlobalSet;
     std::unique_ptr<rhi::IRHIPipelineState> m_GlobalPSO;
+    std::unique_ptr<rhi::IRHIPipelineState> m_GlobalFloodPSO;   // 全局网格上的跳步洪泛
     std::unique_ptr<rhi::IRHISampler>       m_NearestSampler;
     GlobalLayer m_GlobalLayers[kMaxGlobalLayers];
     u32 m_GlobalLayerCount = 0;
