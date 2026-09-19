@@ -1232,7 +1232,7 @@ void LumenSDF::RunMarchCheck() {
     float maxErr = 0.0f;
     double sumErr = 0.0;
     u32 bothHit = 0, gpuOnly = 0, cpuOnly = 0, within = 0, normalOk = 0;
-    std::vector<float> errVoxAll, errNear, errFar;   // 误差分布 + 按"起点是否贴近几何"分组
+    std::vector<float> errVoxAll, errNear, errFar, errNearHit, errFarHit;   // 误差分布 + 按"起点是否贴近几何"分组
     u32 withinGlobal = 0, detailBetter = 0;
     double sumErrGlobal = 0.0;
 
@@ -1306,6 +1306,7 @@ void LumenSDF::RunMarchCheck() {
             if (errVox <= 1.0f) ++within;
             errVoxAll.push_back(errVox);
             ((d0 < 5.0f) ? errNear : errFar).push_back(errVox);
+            ((tRef < 50.0f) ? errNearHit : errFarHit).push_back(errVox);
             if (hits[i].w < 0.0f) ++normalOk;   // 法线朝向与射线相反 = 正面命中
 
             // 诊断：把"全局单独"与"合并后"的误差分开记，才能判断细节追踪到底有没有帮忙
@@ -1361,6 +1362,11 @@ void LumenSDF::RunMarchCheck() {
                      errVoxAll.size(), (double)p50, (double)p90,
                      errNear.size(), errNear.empty() ? 0.0 : (double)errNear[errNear.size()/2],
                      errFar.size(), errFar.empty() ? 0.0 : (double)errFar[errFar.size()/2]);
+        if (!errNearHit.empty()) std::sort(errNearHit.begin(), errNearHit.end());
+        if (!errFarHit.empty())  std::sort(errFarHit.begin(), errFarHit.end());
+        HE_CORE_INFO("LumenSDF 按**命中距离**分组: 近命中(tRef<50) n={} p50={:.3f} / 远命中 n={} p50={:.3f} 体素（这才是近场精度的判据）",
+                     errNearHit.size(), errNearHit.empty() ? 0.0 : (double)errNearHit[errNearHit.size()/2],
+                     errFarHit.size(),  errFarHit.empty()  ? 0.0 : (double)errFarHit[errFarHit.size()/2]);
     }    HE_CORE_INFO("LumenSDF sphere tracing 误差分解: 仅全局场 {}/{} 在 1 体素内（平均 {:.3f}），"
                  "合并细节追踪后 {}/{}（平均 {:.3f}）；细节追踪更近的射线 {} 条",
                  withinGlobal, bothHit, bothHit ? sumErrGlobal / bothHit : 0.0,
