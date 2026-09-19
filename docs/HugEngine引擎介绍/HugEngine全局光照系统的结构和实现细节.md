@@ -7,7 +7,7 @@
 > · 计划、判据、缺陷史与实测数据在 `docs/已实现功能/HugEngine GI架构与开发计划.md`（**已归档**，
 >   该计划内任务全部完成）；
 > · 后续框架类工作（统一降噪框架、Provider 执行单位收敛、P6）在
->   `docs/计划实现功能/Lumen与Nanite完整设计规范.md` §5.1 / §5.2；
+>   `docs/计划实现功能/Lumen设计与实现.md` §10 / §11；
 > · 本文只讲**现在是怎么实现的**，并把"实现细节背后的理由"与"已知边界"写清 —— 因为这些理由
 >   大多是踩坑换来的，删掉它们就会重踩。
 >
@@ -404,7 +404,7 @@ Lighting 侧线性升采样。**已知边界**：半分辨率下 SSGI/SSR 的附
 |---|---|
 | 屏幕空间源 | `Denoiser`（空间 5×5 双边；σ 可配 `SetDepthSigma/SetNormalSigma`，SSGI/SSR 共用 `SpatialDenoiseAux.h`） |
 | 光追效果 | `RTDenoiser`（时域累积 + 空间滤波），链路是 `std::vector<Stage>`（顺序即执行顺序，加一级只需 push） |
-| 统一框架 | **未做**（`DenoiseSignal` + 统一历史分配 + 批量 dispatch + 框架级有效性契约）。任务已迁到 `Lumen与Nanite完整设计规范` §5.1，因为它的验收对象是 Lumen 的多信号共存 |
+| 统一框架 | **未做**（`DenoiseSignal` + 统一历史分配 + 批量 dispatch + 框架级有效性契约）。任务已迁到 `Lumen设计与实现` §10，因为它的验收对象是 Lumen 的多信号共存 |
 
 ### 9.4 读数与告警
 
@@ -459,7 +459,7 @@ Lighting 侧线性升采样。**已知边界**：半分辨率下 SSGI/SSR 的附
 | SSR 只能反射相机可见面；单 pass ~4.3 ms | 固有性质 + 已知成本，半分辨率/降噪是后续方向 |
 | SSR Hi-Z 在"射线脚下的地面永远比射线近"的几何里层级长期停在 0 | 时间收益远小于步数收益（实测 ~1.06×）；优化（只在穿越时降级）已记为重开条件 |
 | Lightmap 源 | **未实现**（`ToPipelineCap` 刻意不给能力位）。原任务已取消；已落地的基础设施（GBuffer 第 8 MRT 的光照图键、程序化箱式投影、检查脚本）保留 |
-| 统一降噪框架 / Provider 执行单位收敛 / P6 | **未做**，任务在 `Lumen与Nanite完整设计规范` §5.1 / §5.2 |
+| 统一降噪框架 / Provider 执行单位收敛 / P6 | **未做**，任务在 `Lumen设计与实现` §10 / §11 |
 | IBL / DDGI / RSM 的逐源白炉真值校验 | 未做（RTGI 与 SSGI 已补齐） |
 | 其它示例（02.Cube / 03.Sponza-Forward / AISamples）的 Forward 观感 | 未逐个跑图（工作区只构建 06.GILab）；IBL 修好、RSM 换固定光锥后画面变亮/变阴影是修复 |
 | 半分辨率下不降噪 | 同上（需 `needsUpscale` 信号属性） |
