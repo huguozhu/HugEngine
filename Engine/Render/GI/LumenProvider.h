@@ -110,6 +110,19 @@ public:
     void RunProbeTrace(rhi::IRHICommandList* cmd) {
         if (m_Scene) m_Scene->RunProbeTrace(cmd);
     }
+    /// 步骤 22：命中点着色 —— 用命中点从 Surface Cache atlas 取材质（不再依赖屏幕 GBuffer），
+    /// 并顺带做一次 GBuffer 对照，供 CPU 侧验收"同一几何上材质一致"。
+    void RunSurfaceCacheShading(rhi::IRHICommandList* cmd, const CameraData& cam) {
+        if (m_Scene) m_Scene->RunSurfaceCacheShading(cmd, m_Albedo, m_WorldPos, cam.GetViewProjMatrix());
+    }
+    [[nodiscard]] u32 GetShadedHits() const { return m_Scene ? m_Scene->GetShadedHits() : 0u; }
+    [[nodiscard]] u32 GetShadedMissingPages() const { return m_Scene ? m_Scene->GetShadedMissingPages() : 0u; }
+    [[nodiscard]] float GetShadedAlbedoMeanDiff() const {
+        return m_Scene ? m_Scene->GetShadedAlbedoMeanDiff() : 0.0f;
+    }
+    [[nodiscard]] u32 GetShadedAlbedoSamples() const {
+        return m_Scene ? m_Scene->GetShadedAlbedoSamples() : 0u;
+    }
     /// 步骤 16：Feedback 需要 GBuffer 的世界坐标（由帧图注入）
     void SetWorldPosInput(rhi::IRHITexture* worldPos) { m_WorldPos = worldPos; }
     /// 步骤 16：Feedback —— 16×16 分块产出请求列表并写回页表状态

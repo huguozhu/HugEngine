@@ -83,6 +83,13 @@ public:
     void RunProbePlacement(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbNormal, rhi::IRHITexture* gbWorldPos);
     /// 步骤 21：探针半球追踪（GGX 重要性采样 + SDF march），命中结果供步骤 22 着色
     void RunProbeTrace(rhi::IRHICommandList* cmd);
+    /// 步骤 22：命中点着色（从 L2 的 atlas 取材质；缺页返回中性值并记数）
+    void RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbAlbedo,
+                                rhi::IRHITexture* gbWorldPos, const float4x4& viewProj);
+    [[nodiscard]] u32 GetShadedHits() const { return m_ShadedHits; }
+    [[nodiscard]] u32 GetShadedMissingPages() const { return m_ShadedMissingPages; }
+    [[nodiscard]] float GetShadedAlbedoMeanDiff() const { return m_ShadedAlbedoMeanDiff; }
+    [[nodiscard]] u32 GetShadedAlbedoSamples() const { return m_ShadedAlbedoSamples; }
     [[nodiscard]] u32 GetProbeRayHits() const { return m_ProbeRayHits; }
     [[nodiscard]] u32 GetProbeRayMisses() const { return m_ProbeRayMisses; }
     [[nodiscard]] u32 GetProbeRayHemisphere() const { return m_ProbeRayHemisphere; }   // 点积 > 0 的光线数
@@ -220,11 +227,26 @@ private:
     bool m_TraceBound = false;
     u32  m_TraceFrame = 0;
     u32  m_ProbeRayHits = 0, m_ProbeRayMisses = 0, m_ProbeRaysTotal = 0, m_ProbeRayHemisphere = 0;
+    // ── 命中点着色（步骤 22）──
+    std::unique_ptr<rhi::IRHIBuffer> m_RayHitPosBuf, m_ShadeCardsBuf, m_ShadeOutBuf, m_ShadeOutGbBuf, m_ShadeOutBestBuf, m_ShadeStatsBuf;
+    void* m_ShadeStatsMapped = nullptr;
+    rhi::DescriptorSetLayoutHandle m_ShadeLayout = 0;
+    rhi::DescriptorSetHandle       m_ShadeSet    = 0;
+    std::unique_ptr<rhi::IRHIPipelineState> m_ShadePSO;
+    bool m_ShadeBound = false;
+    u32  m_ShadeFrame = 0;
+    u32  m_ShadedHits = 0, m_ShadedMissingPages = 0, m_ShadedAlbedoSamples = 0;
+    u32  m_ShadedNoCard = 0;   // 命中点不落在任何卡片 AABB 内（步骤 22 的缺页归因）
+    float m_ShadedAlbedoMeanDiff = 0.0f;      // 单卡覆盖样本的平均 |Δalbedo|
+    float m_ShadedAlbedoMeanDiffMulti = 0.0f; // 多卡覆盖样本的平均 |Δalbedo|（选卡可能选错）
+    float m_ShadedAlbedoBestDiff = 0.0f;      // 多卡覆盖下"最贴合 GBuffer 的候选"的平均 |Δalbedo|（归因下界）
+    u32   m_ShadedAlbedoBestSamples = 0;
 
     std::vector<u32> m_LastTopPages;
     void CreateFeedbackGPUObjects();
     void CreateProbeGPUObjects();
     void CreateProbeTraceGPUObjects();
+    void CreateShadeGPUObjects();
     u32  m_CapturePages = 0;          // 累计捕获页数
     u32  m_CardCaptureMarchHits = 0;  // 诊断：SDF march 命中数
     bool m_CaptureStatsPending = false;

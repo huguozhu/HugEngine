@@ -12,6 +12,7 @@
 #include "Lumen/SurfaceCache.slang"     // 共享布局（与 C++ 镜像同源）
 #include "SurfaceCache_Capture.comp.spv.h"
 #include "ScreenProbe_Gather.comp.spv.h"
+#include "Lumen_SurfaceCacheSample.comp.spv.h"
 #include "ScreenProbe_Trace.comp.spv.h"
 #include "SurfaceCache_Feedback.comp.spv.h"
 #include "SurfaceCache_PageCheck.comp.spv.h"
@@ -34,13 +35,18 @@ void LumenScene::BuildPageTable() {
     const u32 pageCount = std::min(cardCount, 1024u);
     m_PageTable.Resize(pageCount);
     m_PhysicalPages = kAtlasGridDim * kAtlasGridDim;
-    // 验收实验可临时打开下一行（合成漫游），见 §附二十五
     m_PhysOwner.assign(m_PhysicalPages, 0xFFFFFFFFu);
     m_FreePhysical.clear();
     for (u32 i = m_PhysicalPages; i > 0u; --i) m_FreePhysical.push_back(i - 1u);
 
-    // 走一遍六态：前面的页走完整生命周期，后面的停在中间态（覆盖率越高，状态越丰富）
-    for (u32 i = 0; i < pageCount; ++i) {
+    // 【步骤 22 修正】只有**前 kDemoPages 页**走一遍六态演示（保证步骤 14 的"六态齐全 + GPU 镜像
+    // 校验"仍有样本），其余页一律留 Invalid，交给真实的"反馈请求 → 分配 → 捕获 → LRU 淘汰"回路驱动。
+    // 修正前是**所有**页都走演示生命周期，于是没有任何页处于 Invalid：
+    // `Request()` 只能从 Invalid 迁移，实际回路彻底失效 —— 全场景只有 53 页被捕获（且落在与相机
+    // 无关的任意卡片上），步骤 22 的"页命中率"只有 0.6%。这是一个必须记下来的反例。
+    constexpr u32 kDemoPages = 24u;
+    const u32 demoPages = std::min(pageCount, kDemoPages);
+    for (u32 i = 0; i < demoPages; ++i) {
         m_PageTable.Request(i, /*card*/ i, /*frame*/ 0);
         AllocatePhysicalPage(i, /*frame*/ 0);
         if (i % 7u == 3u) continue;                     // 停在 Allocating
@@ -58,9 +64,9 @@ void LumenScene::BuildPageTable() {
     bd.initialData = m_PageTable.Entries().data();
     m_PageTableBuf = m_Device->CreateBuffer(bd);
 
-    HE_CORE_INFO("LumenScene 页表（步骤 14）: 卡片 {} 张 ⇒ 页 {} 个（{} 张卡/页 1:1，演示前 64 页）；"
+    HE_CORE_INFO("LumenScene 页表（步骤 14）: 卡片 {} 张 ⇒ 页 {} 个（1 卡 1 页；前 {} 页走六态演示，其余留给真实回路）；"
                  "Invalid {} / Requested {} / Allocating {} / Capturing {} / Captured {} / Dirty {}",
-                 cardCount, pageCount, m_PageTable.Size(),
+                 cardCount, pageCount, demoPages,
                  m_PageTable.Count(kSCPageState_Invalid), m_PageTable.Count(kSCPageState_Requested),
                  m_PageTable.Count(kSCPageState_Allocating), m_PageTable.Count(kSCPageState_Capturing),
                  m_PageTable.Count(kSCPageState_Captured), m_PageTable.Count(kSCPageState_Dirty));
@@ -444,6 +450,193 @@ void LumenScene::RunCardCapture(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbA
     }
 }
 // ============================================================
+// 步骤 22：命中点着色（从 L2 的 atlas 取材质）
+// ============================================================
+void LumenScene::CreateShadeGPUObjects() {
+    if (m_ShadePSO) return;
+
+    rhi::DescriptorSetLayoutDesc layout;
+    layout.bindings = {
+        {0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // atlas albedo
+        {1, rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},   // 卡片清单
+        {2, rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},   // 页表
+        {3, rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},   // 命中点
+        {4, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // GBuffer albedo
+        {5, rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},   // 输出（atlas）
+        {6, rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},   // 输出（GBuffer 对照）
+        {7, rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},   // 统计
+        {8, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // GBuffer 世界坐标（对照判定）
+        {9, rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},   // 最优候选（归因实验）
+    };
+    m_ShadeLayout = m_Device->CreateDescriptorSetLayout(layout);
+    m_ShadeSet    = m_Device->AllocateDescriptorSet(m_ShadeLayout);
+
+    rhi::PushConstantRange pcr;
+    pcr.stageMask = rhi::kStageMaskCompute;
+    pcr.offset    = 0;
+    pcr.size      = 7u * 16u;   // uint4 dims + 4 行 VP + float4 atlasParams
+
+    rhi::ShaderBytecode cs;
+    cs.stage      = rhi::ShaderStage::Compute;
+    cs.spirv      = k_Lumen_SurfaceCacheSample_comp_spv;
+    cs.entryPoint = "main";
+
+    rhi::PipelineStateDesc pso;
+    pso.bindPoint            = rhi::PipelineBindPoint::Compute;
+    pso.computeShader        = &cs;
+    pso.descriptorSetLayouts = {m_ShadeLayout};
+    pso.pushConstantRanges   = {pcr};
+    pso.debugName            = "Lumen_SurfaceCacheSample";
+    m_ShadePSO = m_Device->CreatePipelineState(pso);
+    if (!m_ShadePSO) HE_CORE_ERROR("LumenScene: 命中点着色 PSO 创建失败");
+}
+
+void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbAlbedo,
+                                        rhi::IRHITexture* gbWorldPos, const float4x4& viewProj) {
+    if (!m_Device || !cmd || !m_ProbeCount || !m_RayHitPosBuf || !m_AtlasAlbedo || !gbAlbedo || !gbWorldPos) return;
+    if (!m_PageTableBuf) return;
+    if (!m_ShadeBound) {
+        CreateShadeGPUObjects();
+        if (!m_ShadePSO) return;
+        const auto& cards = m_SDF.GetCards();
+        struct ShadeCard { float4 aabbLo; uint4 axisDirPageCard; };
+        std::vector<ShadeCard> gpu(cards.size());
+        // 逻辑页与卡片当前是 1:1（见 BuildPageTable），但页数被上限截断；超出的卡标成"无页"。
+        const u32 pageCount = m_PageTable.Size();
+        for (size_t i = 0; i < cards.size(); ++i) {
+            const u32 page = (i < pageCount) ? (u32)i : 0xFFFFFFFFu;
+            gpu[i].aabbLo = float4(cards[i].aabbLo, cards[i].side);
+            gpu[i].axisDirPageCard = uint4(cards[i].axis, (u32)(cards[i].dir > 0 ? 1u : 0u), page, (u32)i);
+        }
+        rhi::BufferDesc cb;
+        cb.size = gpu.size() * sizeof(ShadeCard);
+        cb.usage = rhi::BufferUsage::Storage;
+        cb.initialData = gpu.data();
+        m_ShadeCardsBuf = m_Device->CreateBuffer(cb);
+
+        const u32 maxRays = kMaxScreenProbes * 16u;
+        rhi::BufferDesc ob; ob.size = (usize)maxRays * sizeof(float4); ob.usage = rhi::BufferUsage::Storage; ob.cpuAccess = true;
+        m_ShadeOutBuf = m_Device->CreateBuffer(ob);
+        m_ShadeOutGbBuf = m_Device->CreateBuffer(ob);
+        m_ShadeOutBestBuf = m_Device->CreateBuffer(ob);
+
+        // 统计槽：0=页命中 1=不在任何卡内 2=卡在但页无内容 3=总计 4=越界夹取（其余保留）
+        rhi::BufferDesc sb; sb.size = sizeof(u32) * 8u; sb.usage = rhi::BufferUsage::Storage; sb.cpuAccess = true;
+        m_ShadeStatsBuf = m_Device->CreateBuffer(sb);
+        m_ShadeStatsMapped = m_ShadeStatsBuf->Map();
+
+        m_Device->UpdateDescriptorSet(m_ShadeSet, 0, rhi::DescriptorType::CombinedImageSampler,
+                                      m_AtlasAlbedo.get(), m_SDF.GetLinearSampler());
+        m_Device->UpdateDescriptorSet(m_ShadeSet, 1, rhi::DescriptorType::StorageBuffer, m_ShadeCardsBuf.get());
+        m_Device->UpdateDescriptorSet(m_ShadeSet, 2, rhi::DescriptorType::StorageBuffer, m_PageTableBuf.get());
+        m_Device->UpdateDescriptorSet(m_ShadeSet, 3, rhi::DescriptorType::StorageBuffer, m_RayHitPosBuf.get());
+        m_Device->UpdateDescriptorSet(m_ShadeSet, 5, rhi::DescriptorType::StorageBuffer, m_ShadeOutBuf.get());
+        m_Device->UpdateDescriptorSet(m_ShadeSet, 6, rhi::DescriptorType::StorageBuffer, m_ShadeOutGbBuf.get());
+        m_Device->UpdateDescriptorSet(m_ShadeSet, 7, rhi::DescriptorType::StorageBuffer, m_ShadeStatsBuf.get());
+        m_Device->UpdateDescriptorSet(m_ShadeSet, 9, rhi::DescriptorType::StorageBuffer, m_ShadeOutBestBuf.get());
+        m_ShadeBound = true;
+        return;
+    }
+    m_Device->UpdateDescriptorSet(m_ShadeSet, 4, rhi::DescriptorType::CombinedImageSampler,
+                                  gbAlbedo, m_SDF.GetLinearSampler());
+    m_Device->UpdateDescriptorSet(m_ShadeSet, 8, rhi::DescriptorType::CombinedImageSampler,
+                                  gbWorldPos, m_SDF.GetLinearSampler());
+
+    const u32 total = m_ProbeCount * m_TraceConfig.traceRep;
+
+    // ① 先读上一帧的统计与对照（同"先读后清"）
+    if (m_ShadeFrame >= 2 && m_ShadeStatsMapped) {
+        u32 st[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        std::memcpy(st, m_ShadeStatsMapped, sizeof(st));
+        m_ShadedHits          = st[0];
+        m_ShadedNoCard        = st[1];
+        m_ShadedMissingPages  = st[2];
+        const u32 considered  = st[3];
+        const u32 clamped     = st[4];
+
+        // 对照统计：atlas albedo vs 同像素 GBuffer albedo（"同一几何上材质一致"）
+        // 按覆盖重数分桶：u_Out.w = 1 只被一张卡覆盖（选卡必定正确），= 2 被多张卡覆盖（可能选错卡）。
+        // 【只在要打印的那一帧做回读】逐条扫 4 万条 × 3 个 16 MB 缓冲是纯诊断开销，
+        // 每帧都做会白烧 CPU（每 40 帧一次足够支撑验收数值）。
+        u32 samples = 0, samplesMulti = 0, bestSamples = 0;
+        double sumDiff = 0.0, sumDiffMulti = 0.0, sumAtlas = 0.0, sumGb = 0.0, sumBest = 0.0;
+        void* pm = ((m_ShadeFrame % 40u) == 0u) ? m_ShadeOutBuf->Map() : nullptr;
+        if (pm) {
+            const float4* a = static_cast<const float4*>(pm);
+            if (void* pg = m_ShadeOutGbBuf->Map()) {
+                const float4* g = static_cast<const float4*>(pg);
+                if (void* pb = m_ShadeOutBestBuf->Map()) {
+                    const float4* b = static_cast<const float4*>(pb);
+                    for (u32 i = 0; i < total; ++i) {
+                        if (a[i].w < 0.5f || g[i].w < 0.5f) continue;
+                        const float3 av = glm::vec3(a[i]);
+                        const float3 gv = glm::vec3(g[i]);
+                        const double d = (double)glm::length(av - gv);
+                        sumAtlas += (double)glm::length(av);
+                        sumGb    += (double)glm::length(gv);
+                        if (a[i].w > 1.5f) { sumDiffMulti += d; ++samplesMulti; }
+                        else { sumDiff += d; ++samples; }
+                        // 最优候选（多卡覆盖时"最贴合 GBuffer 的那张卡"）：选卡误差的下界
+                        if (b[i].w > 0.5f) { sumBest += (double)glm::length(glm::vec3(b[i]) - gv); ++bestSamples; }
+                    }
+                    m_ShadeOutBestBuf->Unmap();
+                }
+                m_ShadeOutGbBuf->Unmap();
+            }
+            m_ShadeOutBuf->Unmap();
+        }
+        const u32 totalSamples = samples + samplesMulti;
+        m_ShadedAlbedoSamples = totalSamples;
+        m_ShadedAlbedoMeanDiff = samples ? (float)(sumDiff / samples) : 0.0f;
+        m_ShadedAlbedoMeanDiffMulti = samplesMulti ? (float)(sumDiffMulti / samplesMulti) : 0.0f;
+        // 诊断量：atlas 侧与 GBuffer 侧的平均亮度。若 atlas 亮度 ≈ 0 而 GBuffer 正常，
+        // 说明"页状态说 Captured 但 atlas 里其实没内容"（演示页表假 Captured 就是这个症状）。
+        const double meanAtlas = totalSamples ? sumAtlas / totalSamples : 0.0;
+        const double meanGb    = totalSamples ? sumGb / totalSamples : 0.0;
+        m_ShadedAlbedoBestDiff = bestSamples ? (float)(sumBest / bestSamples) : 0.0f;
+        m_ShadedAlbedoBestSamples = bestSamples;
+
+        if ((m_ShadeFrame % 40u) == 0u) {
+            HE_CORE_INFO("LumenScene 命中点着色（步骤 22）: 命中光线 {} 条；页命中 {}（{:.1f}%）；缺页 {}（{:.1f}%，"
+                         "返回中性值 {:.2f}，其中不在任何卡 AABB 内 {} / 卡在但页无内容 {}）；越界夹取 {}；"
+                         "atlas vs GBuffer albedo 同一表面平均差 {:.4f}（{} 个样本，其中单卡覆盖 {} 样本 {:.4f}、"
+                         "多卡覆盖 {} 样本 {:.4f}）；多重覆盖命中 {}；平均亮度 atlas {:.4f} / GBuffer {:.4f}",
+                         considered, m_ShadedHits,
+                         considered ? 100.0 * (double)m_ShadedHits / (double)considered : 0.0,
+                         m_ShadedNoCard + m_ShadedMissingPages,
+                         considered ? 100.0 * (double)(m_ShadedNoCard + m_ShadedMissingPages) / (double)considered : 0.0,
+                         0.18, m_ShadedNoCard, m_ShadedMissingPages, clamped,
+                         (double)m_ShadedAlbedoMeanDiff, totalSamples, samples,
+                         (double)m_ShadedAlbedoMeanDiff, samplesMulti, (double)m_ShadedAlbedoMeanDiffMulti, st[5],
+                         meanAtlas, meanGb);
+            if (m_ShadedAlbedoBestSamples)
+                HE_CORE_INFO("   步骤 22 归因: 多卡覆盖 {} 条命中；选卡（最小 AABB）与 GBuffer 平均差 {:.4f}，"
+                             "同一批样本里**最贴合**的候选平均差 {:.4f}（{} 个样本）",
+                             st[6], (double)m_ShadedAlbedoMeanDiffMulti,
+                             (double)m_ShadedAlbedoBestDiff, m_ShadedAlbedoBestSamples);
+        }
+    }
+
+    // ② 清零统计并派发
+    if (m_ShadeStatsMapped) { u32 zero[8] = {0, 0, 0, 0, 0, 0, 0, 0}; std::memcpy(m_ShadeStatsMapped, zero, sizeof(zero)); }
+    struct {
+        u32 x, y, z, w;
+        float4 vp0, vp1, vp2, vp3;
+        float4 atlas;
+    } pc{};
+    pc.x = total; pc.y = (u32)m_SDF.GetCards().size(); pc.z = m_Width; pc.w = m_Height;
+    pc.vp0 = float4(viewProj[0][0], viewProj[1][0], viewProj[2][0], viewProj[3][0]);
+    pc.vp1 = float4(viewProj[0][1], viewProj[1][1], viewProj[2][1], viewProj[3][1]);
+    pc.vp2 = float4(viewProj[0][2], viewProj[1][2], viewProj[2][2], viewProj[3][2]);
+    pc.vp3 = float4(viewProj[0][3], viewProj[1][3], viewProj[2][3], viewProj[3][3]);
+    pc.atlas = float4((float)kAtlasPageRes, (float)kAtlasSize, 0.18f, 0.0f);
+    cmd->SetPipeline(m_ShadePSO.get());
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_ShadeSet);
+    cmd->SetPushConstants(0, sizeof(pc), &pc);
+    cmd->Dispatch((total + 63u) / 64u, 1, 1);
+    ++m_ShadeFrame;
+}
+// ============================================================
 // 步骤 21：探针半球追踪（GGX 重要性采样 + SDF march）
 //
 // 【配置校验】每次派发前走一次 `LumenTraceConfig::Validate()`：非法组合（如 SDF × HitLighting）
@@ -459,6 +652,7 @@ void LumenScene::CreateProbeTraceGPUObjects() {
         {1, rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},   // 探针
         {2, rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},   // 光线结果
         {3, rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},   // 统计
+        {4, rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},   // 命中点（步骤 22 的输入）
     };
     m_TraceLayout = m_Device->CreateDescriptorSetLayout(layout);
     m_TraceSet    = m_Device->AllocateDescriptorSet(m_TraceLayout);
@@ -507,6 +701,7 @@ void LumenScene::RunProbeTrace(rhi::IRHICommandList* cmd) {
         rb.size  = (usize)kMaxScreenProbes * 16u * sizeof(float4);   // 最多 16 条光线/探针
         rb.usage = rhi::BufferUsage::Storage;
         m_RayResultBuf = m_Device->CreateBuffer(rb);
+        m_RayHitPosBuf = m_Device->CreateBuffer(rb);
 
         rhi::BufferDesc sb;
         sb.size = sizeof(u32) * 4u; sb.usage = rhi::BufferUsage::Storage; sb.cpuAccess = true;
@@ -520,6 +715,7 @@ void LumenScene::RunProbeTrace(rhi::IRHICommandList* cmd) {
         m_Device->UpdateDescriptorSet(m_TraceSet, 1, rhi::DescriptorType::StorageBuffer, m_ProbeBuf.get());
         m_Device->UpdateDescriptorSet(m_TraceSet, 2, rhi::DescriptorType::StorageBuffer, m_RayResultBuf.get());
         m_Device->UpdateDescriptorSet(m_TraceSet, 3, rhi::DescriptorType::StorageBuffer, m_RayStatsBuf.get());
+        m_Device->UpdateDescriptorSet(m_TraceSet, 4, rhi::DescriptorType::StorageBuffer, m_RayHitPosBuf.get());
         m_TraceBound = true;
         return;   // 新建资源当帧不用
     }
@@ -814,13 +1010,19 @@ void LumenScene::RunFeedback(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbWorl
             return (a.y != b.y) ? (a.y > b.y) : (a.x < b.x);   // 权重降序；权重相同按页号定序 ⇒ **确定性**
         });
 
-        // 步骤 18：被采纳 top-N 的页就是"本帧用到"的页 ⇒ 更新 LRU 时间戳
-        const u32 topN = std::min(count, m_BudgetFeedbackPages);   // 步骤 17：本帧最多采纳这么多条请求
+        // 【步骤 22 修正 2：请求必须**按页去重**】反馈是"逐 16×16 分块"产出的，同一张卡会被成百上千个
+        // 块请求到。此前直接取排序后的前 N 条 ⇒ 前 64 条很可能全是**同一页**（近处那张大卡），
+        // 于是"采纳 top-64"实际只请求到 1 页（实测：分配成功 25 = 24 个演示页 + 1 页）。
+        // 正确做法是取"权重最高的前 N 个**不同页**"——这才是 Lumen 的页级预算语义。
+        const u32 residentCap = m_PhysicalPages ? m_PhysicalPages : m_PageTable.Size();
+        const u32 topN = std::min(count, std::min(m_BudgetFeedbackPages, residentCap));
         std::vector<u32> top;
         top.reserve(topN);
-        for (u32 i = 0; i < topN; ++i) {
+        std::vector<u8> seen(m_PageTable.Size(), 0u);
+        for (u32 i = 0; i < count && top.size() < topN; ++i) {
             const u32 page = req[i].x;
-            if (page >= m_PageTable.Size()) continue;
+            if (page >= m_PageTable.Size() || seen[page]) continue;
+            seen[page] = 1u;
             top.push_back(page);
             // 需要但还没有的页 ⇒ 置为 Requested（未完成请求留在 Requested，不回退不丢弃 —— 步骤 17 的口径）
             m_PageTable.Touch(page, m_FeedbackFrame);   // LRU：本帧用到
