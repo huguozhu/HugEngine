@@ -98,6 +98,8 @@ public:
         m_Wanted = IsValid() &&
             (m_Effect == Effect::Shadow ? m_RTShadowWanted : stack.Has(GetSourceId()));
     }
+    /// 本帧是否真的产出（见 `IGIProvider::ProducedThisFrame` 的说明）：转储与信号登记都按它判定
+    [[nodiscard]] bool ProducedThisFrame() const override { return m_Wanted; }
     /// 由帧图每帧告知「DDGI 是否自己也是漫反射层栈的源」。
     /// 为真时 GI 的 miss 分支不得回退 DDGI，否则 DDGI 信息被用两次、归一化失去无偏性（§9.2-I）。
     void SetDDGIInStack(bool inStack) { m_DDGIInStack = inStack; }
@@ -194,7 +196,7 @@ public:
     /// `needsUpscale` 不靠配置猜：直接比尺寸（主输出比深度图小 ⇒ 半分辨率 ⇒ 需要升采样）。
     void DescribeSignals(DenoiseSignalRegistry& registry, rhi::IRHITexture* depth,
                          rhi::IRHITexture* normal, rhi::IRHITexture* velocity) override {
-        if (!m_Wanted) return;   // 本帧层栈没要这个源 ⇒ 它不是当帧事实（见 SyncToStack）
+        if (!ProducedThisFrame()) return;   // 本帧层栈没要这个源 ⇒ 它不是当帧事实（见 SyncToStack）
         rhi::IRHITexture* main = MainOutput();
         if (!main) return;
         DenoiseSignal s;

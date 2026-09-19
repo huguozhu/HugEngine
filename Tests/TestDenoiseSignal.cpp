@@ -88,3 +88,35 @@ TEST_CASE("DenoiseSignal: 默认值即改造前的行为（引导参数 10 / 8�
     CHECK(s.width == 0u);
     CHECK(s.height == 0u);
 }
+
+// 【步骤 35】缓冲类信号：Lumen 的探针 SH 不是"一张图"，但它同样是待降噪信号。
+// 这里钉住两件事：①载体类型可判定；②没有说明文本时 LogSummary 才会去打双边参数。
+TEST_CASE("DenoiseSignal: 缓冲类信号与纹理类信号可区分") {
+    DenoiseSignal tex;
+    tex.name = "SSGI";
+    tex.input = reinterpret_cast<rhi::IRHITexture*>(0x1);   // 仅用于类型判定，不解引用
+    tex.output = reinterpret_cast<rhi::IRHITexture*>(0x2);
+    CHECK_FALSE(tex.IsBufferSignal());
+    CHECK(tex.note.empty());
+
+    DenoiseSignal buf;
+    buf.name = "Lumen_ScreenProbe";
+    buf.inputBuffer = reinterpret_cast<rhi::IRHIBuffer*>(0x1);
+    buf.outputBuffer = reinterpret_cast<rhi::IRHIBuffer*>(0x2);
+    buf.note = "核 3x3 单元 YCoCg AABB + 时域重投影 EMA";
+    CHECK(buf.IsBufferSignal());
+    CHECK_FALSE(buf.note.empty());
+}
+
+// 【步骤 35】历史池在拿到设备之前必须"什么都不建"（否则会拿着空设备去 CreateBuffer）。
+// 这条是"历史走统一池"这条路的前置条件：Provider 在 Initialize 阶段就会去取缓冲。
+TEST_CASE("DenoiseHistoryPool: 未初始化设备时不分配任何历史") {
+    DenoiseHistoryPool pool;
+    CHECK(pool.Count() == 0u);
+    CHECK(pool.AcquireBuffer("Lumen_ProbeHistory0", 4096u) == nullptr);
+    CHECK(pool.Acquire("X", 8u, 8u, rhi::Format::RGBA16_FLOAT) == nullptr);
+    CHECK(pool.Count() == 0u);
+    CHECK(pool.BufferCount() == 0u);
+    CHECK(pool.TextureCount() == 0u);
+    CHECK(pool.TotalBytes() == 0u);
+}

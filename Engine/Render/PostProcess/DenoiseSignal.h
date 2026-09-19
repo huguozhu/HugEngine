@@ -69,24 +69,37 @@ struct DenoiseSignal {
     rhi::IRHITexture* depth   = nullptr;    // 引导（可空 ⇒ 该信号不做屏幕空间降噪）
     rhi::IRHITexture* normal  = nullptr;
     rhi::IRHITexture* velocity = nullptr;   // 时域重投影用（可空 ⇒ 无时域）
+    /// 【步骤 35】缓冲类信号（探针 SH 这类"不是一张图"的信号）。
+    /// 与 input/output 二选一：纹理信号用上面两个字段，缓冲信号用下面两个。
+    /// 信号层的职责是"让框架看得见当帧有哪些待降噪信号、各自要什么"，与载体是纹理还是缓冲无关。
+    rhi::IRHIBuffer*  inputBuffer  = nullptr;
+    rhi::IRHIBuffer*  outputBuffer = nullptr;
     /// 【11.3 新属性】信号分辨率低于消费端时置真：降噪之后必须**重建升采样**再交给合成端。
     /// 半分辨率直接采样（旧行为）会把降噪整个跳过 —— 半分辨率恰恰最需要降噪。
     bool  needsUpscale = false;
-    u32   width = 0, height = 0;            // 信号自身分辨率
+    u32   width = 0, height = 0;            // 信号自身分辨率（缓冲信号 = 元素数 × 1）
     u32   targetWidth = 0, targetHeight = 0;  // 消费端（全分辨率）
     /// 参数按信号赋值（11.1 的集中点：不再散落在各 Provider 里）
     float depthSigma = 10.0f;
     float normalSigma = 8.0f;
+    /// 缓冲类信号/特殊核的说明（给日志用）。非空时 `LogSummary` 打印它而不是上面的双边参数 ——
+    /// 把"3×3 YCoCg AABB 的 γ 与 EMA 的 α"塞进 depthSigma/normalSigma 只会让读数变成假的。
+    std::string note;
 
+    [[nodiscard]] bool IsBufferSignal() const { return outputBuffer != nullptr; }
     [[nodiscard]] bool HasSpatialGuide() const { return depth != nullptr && normal != nullptr; }
 };
 
 // ============================================================
-// DenoiseHistoryPool —— 统一的历史纹理分配
+// DenoiseHistoryPool —— 统一的历史资源分配（纹理与缓冲）
 //
 // 【为什么集中分配】每个降噪器各建各的历史，会带来三件麻烦：显存账算不清（谁建的多大只有各自
 // 知道）、resize 时容易漏掉某一个、以及"同名信号被建了两张"（例如 SSGI 与 SSR 都用默认名）。
-// 集中到一处之后：同名同尺寸同格式**只建一次**，`LogSummary()` 能一次报出全部历史纹理。
+// 集中到一处之后：同名同尺寸同格式**只建一次**，`LogSummary()` 能一次报出全部历史资源。
+//
+// 【步骤 35 起也管缓冲】Lumen 的 Screen Probe 时域历史是**结构化缓冲**（8 万探针量级），
+// 与纹理历史是同一件事（"上一帧的估计量"）。只支持纹理的话，Lumen 就只能自己再建一套 ——
+// 那正是这一步要消灭的"各写一套"。
 // ============================================================
 class DenoiseHistoryPool {
 public:
@@ -97,10 +110,15 @@ public:
     /// 返回的纹理**由池持有**，调用方只借指针（生命周期到 Shutdown/OnResize）。
     rhi::IRHITexture* Acquire(const char* name, u32 w, u32 h, rhi::Format fmt);
 
+    /// 取（或创建）某信号的历史缓冲。name 相同、字节数一致时复用同一块。
+    rhi::IRHIBuffer* AcquireBuffer(const char* name, u64 bytes);
+
     /// 尺寸变化：释放全部历史（下一帧按新尺寸重建，`RTDenoiser` 会重置首帧标记）
     void OnResize(u32 /*w*/, u32 /*h*/);
 
     [[nodiscard]] u32 Count() const { return (u32)m_Entries.size(); }
+    [[nodiscard]] u32 TextureCount() const;
+    [[nodiscard]] u32 BufferCount() const;
     [[nodiscard]] u64 TotalBytes() const;
     /// 逐条打印（名字/尺寸/格式/占用），用于"统一分配"这件事的可核对性
     void LogSummary(const char* tag) const;
@@ -108,9 +126,12 @@ public:
 private:
     struct Entry {
         std::string name;
-        u32 width = 0, height = 0;
+        u32 width = 0, height = 0;        // 纹理用
+        u64 bytes = 0;                     // 两种都记（纹理在建时算好，便于统一报账）
         rhi::Format format = rhi::Format::Unknown;
+        bool isBuffer = false;
         std::unique_ptr<rhi::IRHITexture> tex;
+        std::unique_ptr<rhi::IRHIBuffer>  buf;
     };
     rhi::IRHIDevice* m_Device = nullptr;
     std::vector<Entry> m_Entries;

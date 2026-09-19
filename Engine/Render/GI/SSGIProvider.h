@@ -50,7 +50,9 @@ public:
     /// 半分辨率信号此后**也要降噪**，降噪之后再由升采样级重建到消费端分辨率。
     void SyncToStack(const GIChannelStack& stack) override {
         if (!m_SSGI) return;
-        m_SSGI->SetEnabled(stack.Has(GISourceId::SSGI));
+        const bool wanted = stack.Has(GISourceId::SSGI);
+        m_InStack = wanted;                       // 本帧是否真的产出（转储/信号登记都按它判定）
+        m_SSGI->SetEnabled(wanted);
         m_SSGI->SyncOutputSize();
         rhi::IRHITexture* out = m_SSGI->GetIndirectDiffuseTexture();
         if (out) {
@@ -58,6 +60,8 @@ public:
                             m_SSGI->GetFullWidth(), m_SSGI->GetFullHeight());
         }
     }
+    /// 本帧是否真的产出（见 `IGIProvider::ProducedThisFrame` 的说明）
+    [[nodiscard]] bool ProducedThisFrame() const override { return IsValid() && m_InStack; }
 
     [[nodiscard]] rhi::IRHITexture* GetDiffuseOutput() const override {
         return m_SSGI ? m_SSGI->GetIndirectDiffuseTexture() : nullptr;
@@ -153,6 +157,7 @@ private:
 
     GI_SSGI*          m_SSGI = nullptr;   // 非拥有
     SpatialDenoiseAux m_Aux;              // 降噪附属 pass（与 SSRProvider 共用实现）
+    bool              m_InStack = false;  // 本帧层栈是否要求了 SSGI（由 SyncToStack 写入）
     rhi::IRHITexture* m_Depth  = nullptr;
     rhi::IRHITexture* m_Normal = nullptr;
     rhi::IRHITexture* m_Albedo = nullptr;

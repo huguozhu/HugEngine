@@ -82,6 +82,15 @@ public:
     /// 在层栈「要求了但模式不同」时的同步钩子（如层栈选 GTAO → 切换 pass 模式）
     virtual void SyncToStack(const GIChannelStack& /*stack*/) {}
 
+    /// 【步骤 34/35】本帧**是否真的产出了内容**（由 `SyncToStack` 按层栈写入）。
+    ///
+    /// 与 `IsValid()` 分开是必须的：`IsValid()` 的语义是"这个 pass 对象在"（RT 四种效果一创建就
+    /// 恒真、Lumen 只要有输出纹理就恒真），**它不代表本帧的层栈要了这个源**。把两者混用会得到
+    /// 两类假读数：①信号登记把"当帧根本没跑"的源报成待降噪信号；②转储把上一帧/未使用的纹理
+    /// 当成"本帧产出"（实测：默认配置下 4 条 RT 信号全被登记，而 RG pass 列表里一个 RT pass 都没有）。
+    /// 默认返回 `IsValid()`：对没有"按层栈门控"语义的源保持原行为。
+    [[nodiscard]] virtual bool ProducedThisFrame() const { return IsValid(); }
+
     /// 该 Provider 是否需要「前帧 HDR 辐射度」这一共享输入（`GIRadianceHistory`）。    /// 声明为真即表示：它会在 pass 里采样**上一帧的 Lighting 结果**当作入射辐射度
     /// （DDGI 的探针辐射度回退、SSGI 的 L_in）。
     ///

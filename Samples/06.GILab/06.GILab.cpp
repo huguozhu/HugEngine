@@ -1598,7 +1598,10 @@ int main() {
             const auto& providers = deferredPipeline.GetGIProviders();
             for (size_t i = 0; i < providers.size(); ++i) {
                 auto* p = providers[i].get();
-                if (!p || !p->IsValid()) continue;
+                // 【步骤 35】判据从 `IsValid()`（"pass 对象在"）换成 `ProducedThisFrame()`（"本帧真的跑了"）：
+                // Lumen/RTAO 这些源即使没进任何层栈，`IsValid()` 也为真，于是 `provN_*` 会落到
+                // 上一帧或从未使用的纹理上 —— 转储看起来"有内容"，实际是假读数。
+                if (!p || !p->ProducedThisFrame()) continue;
                 const String pre = "prov" + std::to_string(i) + "_";
                 addTarget(pre + "raw",   p->GetDiffuseOutput());
                 addTarget(pre + "final", p->GetFinalDiffuseOutput());

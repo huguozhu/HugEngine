@@ -31,7 +31,9 @@ public:
     /// 同时让 halfRes 当场生效（尺寸等下次 OnResize 才变会让本帧句柄指向旧纹理）。
     void SyncToStack(const GIChannelStack& stack) override {
         if (!m_SSR) return;
-        m_SSR->SetEnabled(stack.Has(GISourceId::SSR));
+        const bool wanted = stack.Has(GISourceId::SSR);
+        m_InStack = wanted;                       // 本帧是否真的产出（转储/信号登记都按它判定）
+        m_SSR->SetEnabled(wanted);
         m_SSR->SyncOutputSize();
         // 【步骤 34（11.3）】两级降噪链的尺寸对齐（信号分辨率 / 消费端分辨率）
         rhi::IRHITexture* out = GetSpecularOutput();
@@ -40,6 +42,8 @@ public:
                             m_SSR->GetFullWidth(), m_SSR->GetFullHeight());
         }
     }
+    /// 本帧是否真的产出（见 `IGIProvider::ProducedThisFrame` 的说明）
+    [[nodiscard]] bool ProducedThisFrame() const override { return IsValid() && m_InStack; }
 
     [[nodiscard]] rhi::IRHITexture* GetSpecularOutput() const override {
         return m_SSR ? m_SSR->GetIndirectSpecularTexture() : nullptr;
@@ -126,6 +130,7 @@ private:
 
     GI_SSR*           m_SSR = nullptr;   // 非拥有
     SpatialDenoiseAux m_Aux;             // 降噪附属 pass（与 SSGIProvider 共用实现）
+    bool              m_InStack = false; // 本帧层栈是否要求了 SSR（由 SyncToStack 写入）
     rhi::IRHITexture* m_Depth  = nullptr;
     rhi::IRHITexture* m_Normal = nullptr;
     rhi::IRHITexture* m_Albedo = nullptr;
