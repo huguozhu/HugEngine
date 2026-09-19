@@ -131,6 +131,22 @@ public:
     };
     [[nodiscard]] const MarchCheck& GetMarchCheck() const { return m_MarchCheck; }
 
+    // ── SDF 追踪可视化（步骤 12，L1 退出判据）──
+    /// 视口尺寸：调试视图按屏幕分辨率逐像素发射主射线（由 LumenScene 在 Initialize/OnResize 时同步）
+    void SetViewport(u32 width, u32 height) {
+        if (width == m_ViewportW && height == m_ViewportH) return;
+        m_ViewportW = width;
+        m_ViewportH = height;
+        m_DebugTex.reset();   // 尺寸变了：输出纹理必须重建（PSO / 布局与尺寸无关，不重建）
+    }
+    /// 每帧执行一次逐像素 sphere tracing，把结果写进调试纹理（由帧图的 SDF compute pass 调用）。
+    /// 相机参数逐帧变化，故不缓存；矩阵类转置风险用基向量绕开（见 shader 注释）。
+    void RunDebugView(rhi::IRHICommandList* cmd,
+                      const float3& camPos, const float3& forward, const float3& right, const float3& up,
+                      float tanHalfFov, float aspect);
+    /// 调试视图输出（RGBA16F，屏幕尺寸）：R=命中层, G=t/最大距离, B=步数比, A=是否命中
+    [[nodiscard]] rhi::IRHITexture* GetDebugTexture() const { return m_DebugTex.get(); }
+
 private:
     void BuildQueue(const MeshBatcher& batcher);
     void UploadGeometry(const MeshBatcher& batcher);
@@ -148,8 +164,13 @@ private:
     void RunMarch(rhi::IRHICommandList* cmd);
     void RunMarchDetail(rhi::IRHICommandList* cmd);   // 逐 mesh 细节追踪（min 归约到 u_RayT）
     void RunMarchCheck();
+    // ── SDF 追踪可视化（步骤 12）──
+    void CreateDebugGPUObjects();
+    void LogDebugStats();
     static float PointTriangleDistance(const float3& p, const float3& a,
                                        const float3& b, const float3& c);
+    /// 点 p 到全部几何的精确距离（逐 mesh AABB 粗筛）：自检与调试视图共用的"真值"查询
+    [[nodiscard]] float MinDistToGeometry(const float3& p) const;
     static float3 ClosestPointOnTriangle(const float3& p, const float3& a,
                                          const float3& b, const float3& c);
 
@@ -232,6 +253,18 @@ private:
     std::vector<float3> m_RayDirCPU;
     u32 m_WaitMarchFrames = 0;
     MarchCheck m_MarchCheck;
+
+    // ── SDF 追踪可视化（步骤 12）──
+    rhi::DescriptorSetLayoutHandle m_DebugLayout;
+    rhi::DescriptorSetHandle       m_DebugSet;
+    std::unique_ptr<rhi::IRHIPipelineState> m_DebugPSO;
+    std::unique_ptr<rhi::IRHITexture>       m_DebugTex;      // RGBA16F，屏幕尺寸
+    std::unique_ptr<rhi::IRHIBuffer>        m_DebugStats;    // CPU 可读（原子计数）
+    void* m_DebugStatsMapped = nullptr;
+    u32   m_ViewportW = 0, m_ViewportH = 0;
+    float3 m_DebugCamPos = float3(0.0f);   // 最近一次调试视图的相机位置（诊断用）
+    u32   m_DebugFrames = 0;                                 // 已累计统计的帧数
+    u32   m_DebugStatsLast[4] = {0, 0, 0, 0};
 };
 
 } // namespace he::render

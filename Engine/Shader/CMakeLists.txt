@@ -145,6 +145,7 @@ if(SLANGC)
         "${SHADER_DIR}/Lumen/SDF_LayerProbe.comp.slang"
         "${SHADER_DIR}/Lumen/SDF_RayMarch.comp.slang"
         "${SHADER_DIR}/Lumen/SDF_RayMarchDetail.comp.slang"
+        "${SHADER_DIR}/Lumen/SDF_DebugView.comp.slang"
         # Utility
         "${SHADER_DIR}/Utility/WorkGraph_Entry.comp.slang"
         "${SHADER_DIR}/Utility/TestClear.comp.slang"

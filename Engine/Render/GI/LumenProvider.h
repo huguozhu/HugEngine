@@ -19,6 +19,9 @@
 
 #include "GI/IGIProvider.h"
 #include "Lumen/LumenScene.h"
+#include "Pipeline/Camera.h"   // 步骤 12：调试视图要用相机基向量与视场角
+
+#include <cmath>
 
 namespace he::render {
 
@@ -91,6 +94,22 @@ public:
     /// 步骤 8：逐 mesh 距离场构建（由帧图的独立 compute pass 调用，见 FrameGraph 的 Lumen 段）
     void StepSDF(rhi::IRHICommandList* cmd) {
         if (m_Scene && m_Batcher) m_Scene->StepSDF(cmd, *m_Batcher);
+    }
+
+    /// 步骤 12：逐像素 SDF 追踪可视化（同一 compute pass 内、SDF 构建之后）。
+    /// 相机基向量由这里从 `CameraData` 推出，与 `CameraData::GetViewMatrix()` 用同一套约定
+    /// （s = normalize(cross(f, up))、u = cross(s, f)），避免"调试视图左右镜像"这类静默错误。
+    void RunSDFDebug(rhi::IRHICommandList* cmd, const CameraData& cam) {
+        if (!m_Scene) return;
+        const float3 f = glm::normalize(cam.forward);
+        const float3 r = glm::normalize(glm::cross(f, cam.up));
+        const float3 u = glm::cross(r, f);
+        const float  tanHalf = std::tan(glm::radians(cam.fov) * 0.5f);
+        m_Scene->RunSDFDebug(cmd, cam.position, f, r, u, tanHalf, cam.aspectRatio);
+    }
+    /// 步骤 12 的可视化产物（供 06.GILab 的 GI 采样路径整幅转储）
+    [[nodiscard]] rhi::IRHITexture* GetSDFDebugTexture() const {
+        return m_Scene ? m_Scene->GetSDF().GetDebugTexture() : nullptr;
     }
 
     /// 帧图在 BeginOffscreenPass 之前调用：必须绑定**单颜色附件**的管线，

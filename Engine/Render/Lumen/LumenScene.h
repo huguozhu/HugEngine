@@ -59,6 +59,12 @@ public:
     [[nodiscard]] LumenSDF&       GetSDF()       { return m_SDF; }
     [[nodiscard]] const LumenSDF& GetSDF() const { return m_SDF; }
 
+    /// 步骤 12：逐像素 SDF 追踪可视化（帧图的 SDF compute pass 每帧调用；相机参数由 Provider 传入）
+    void RunSDFDebug(rhi::IRHICommandList* cmd, const float3& camPos, const float3& forward,
+                     const float3& right, const float3& up, float tanHalfFov, float aspect) {
+        m_SDF.RunDebugView(cmd, camPos, forward, right, up, tanHalfFov, aspect);
+    }
+
 private:
     void CreateOutput();
     void CreateSkeletonPipeline();

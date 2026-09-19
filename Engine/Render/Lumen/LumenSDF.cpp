@@ -2,6 +2,7 @@
 
 #include "Core/Assert.h"
 #include "Core/Log.h"
+#include "SDF_DebugView.comp.spv.h"
 #include "SDF_GlobalBuild.comp.spv.h"
 #include "SDF_LayerProbe.comp.spv.h"
 #include "SDF_MeshConvert.comp.spv.h"
@@ -1206,6 +1207,28 @@ void LumenSDF::RunMarchDetail(rhi::IRHICommandList* cmd) {
     }
 }
 
+float LumenSDF::MinDistToGeometry(const float3& p) const {
+    float best = 1e30f;
+    for (const auto& e : m_Entries) {
+        const float side = e.voxelSize * (float)e.resolution;
+        float dAabb = 0.0f;
+        for (int a = 0; a < 3; ++a) {
+            const float lo = (&e.origin.x)[a], hi = lo + side, val = (&p.x)[a];
+            const float dd = std::max(std::max(lo - val, val - hi), 0.0f);
+            dAabb += dd * dd;
+        }
+        if (std::sqrt(dAabb) >= best) continue;   // 该 mesh 的 AABB 已比当前最优远，整块跳过
+        for (u32 t = 0; t < e.triCount; ++t) {
+            const u32* tri = &m_IndicesCPU[e.firstIndex + t * 3];
+            best = std::min(best, PointTriangleDistance(
+                p, m_PositionsCPU[tri[0] + e.vertexOffset],
+                   m_PositionsCPU[tri[1] + e.vertexOffset],
+                   m_PositionsCPU[tri[2] + e.vertexOffset]));
+        }
+    }
+    return best;
+}
+
 void LumenSDF::RunMarchCheck() {
     if (!m_RayHit || !m_RayNormal || !GetGlobalField(0)) return;
     void* hitMapped = m_RayHit->Map();
@@ -1243,28 +1266,8 @@ void LumenSDF::RunMarchCheck() {
 
     // 诊断用：点 p 到全部几何的精确距离（逐 mesh AABB 粗筛 + 逐三角形最近点）
     // 用途：穿漏射线的"场最小处"若离真实几何很远，说明**场在路径上高估**（洪泛壳）；
-    // 若几乎相等，说明场是紧的，只是容差/分辨率不够。
-    auto minDistToGeometry = [this](const float3& p) {
-        float best = 1e30f;
-        for (const auto& e : m_Entries) {
-            const float side = e.voxelSize * (float)e.resolution;
-            float dAabb = 0.0f;
-            for (int a = 0; a < 3; ++a) {
-                const float lo = (&e.origin.x)[a], hi = lo + side, val = (&p.x)[a];
-                const float dd = std::max(std::max(lo - val, val - hi), 0.0f);
-                dAabb += dd * dd;
-            }
-            if (std::sqrt(dAabb) >= best) continue;   // 该 mesh 的 AABB 已比当前最优远，整块跳过
-            for (u32 t = 0; t < e.triCount; ++t) {
-                const u32* tri = &m_IndicesCPU[e.firstIndex + t * 3];
-                best = std::min(best, PointTriangleDistance(
-                    p, m_PositionsCPU[tri[0] + e.vertexOffset],
-                       m_PositionsCPU[tri[1] + e.vertexOffset],
-                       m_PositionsCPU[tri[2] + e.vertexOffset]));
-            }
-        }
-        return best;
-    };
+    // 若几乎相等，说明场是紧的，只是容差/分辨率不够。调试视图的统计复用同一个查询。
+    auto minDistToGeometry = [this](const float3& p) { return MinDistToGeometry(p); };
 
     // 诊断用：点 p 是否落在指定 clipmap 层的覆盖盒内（穿漏到底是不是"覆盖不到"问题）
     const u32 layerCount = GetGlobalLayerCount();
@@ -1437,6 +1440,197 @@ void LumenSDF::RunMarchCheck() {
                  "合并细节追踪后 {}/{}（平均 {:.3f}）；细节追踪更近的射线 {} 条",
                  withinGlobal, bothHit, bothHit ? sumErrGlobal / bothHit : 0.0,
                  within, bothHit, bothHit ? sumErr / bothHit : 0.0, detailBetter);
+}
+
+// ============================================================
+// 步骤 12：SDF 追踪结果可视化（L1 退出判据）
+//
+// 【为什么必须是一个独立可看的产物】步骤 11 的自检只能说明"这 256 条测试射线对不对"；
+// L1 的退出判据要求"可视化 SDF 追踪结果" —— 即从**相机**逐像素发射主射线，把整个视野的
+// 追踪结果画出来：一眼能看出"哪些像素没命中"、"命中面是近层还是远层"、"步数是否爆掉"。
+// 它同时是后续所有阶段的底气：Screen Probe / Surface Cache 的射线都要走同一套步进语义。
+//
+// 【与自检共用步进语义】命中判据与步长公式与 `SDF_RayMarch.comp.slang` 逐字一致，
+// 唯一差别是射线来自相机（而不是随机三角形上的测试射线）。
+// ============================================================
+namespace {
+// push constant 布局：必须与 SDF_DebugView.comp.slang 的 cbuffer 一一对应（9 个 16B 字段）
+struct DebugPC {
+    float4 camPos;        // xyz = 相机世界坐标, w = tan(垂直半视场角)
+    float4 camForward;    // xyz = 前向, w = 宽高比
+    float4 camRight;      // xyz = 右向, w 未用
+    float4 camUp;         // xyz = 上向, w 未用
+    uint4  grid0;         // xyz = 层0 分辨率, w = 输出宽
+    float4 originVoxel0;  // xyz = 层0 原点, w = 体素边长
+    uint4  grid1;         // xyz = 层1 分辨率, w = 输出高
+    float4 originVoxel1;  // xyz = 层1 原点, w = 体素边长
+    float4 marchParams;   // x = 最大步数, y = eps, z = 最大距离, w = 本帧是否统计
+};
+static_assert(sizeof(DebugPC) == 9 * 16, "DebugPC 必须与 shader 的 cbuffer 等大（9 个 16B 字段 = 144B）");
+
+constexpr u32 kDBindField  = 0;   // 与 SDF_RayMarch 一致：层0 在 0、层1 在 6
+constexpr u32 kDBindField1 = 6;
+constexpr u32 kDBindOut    = 7;
+constexpr u32 kDBindStats  = 8;
+/// 统计帧：只在第 60 帧开统计（避免累计计数溢出），再过 3 帧读回（等 GPU 写完）
+constexpr u32 kDebugCountFrame = 60;
+}   // namespace
+
+void LumenSDF::CreateDebugGPUObjects() {
+    if (m_ViewportW == 0 || m_ViewportH == 0) return;
+
+    if (!m_DebugPSO) {
+        rhi::DescriptorSetLayoutDesc layout;
+        layout.bindings = {
+            {kDBindField,  rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
+            {kDBindField1, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
+            {kDBindOut,    rhi::DescriptorType::StorageImage,         1, rhi::kStageMaskCompute},
+            {kDBindStats,  rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},
+        };
+        m_DebugLayout = m_Device->CreateDescriptorSetLayout(layout);
+        m_DebugSet    = m_Device->AllocateDescriptorSet(m_DebugLayout);
+
+        rhi::PushConstantRange pcr;
+        pcr.stageMask = rhi::kStageMaskCompute;
+        pcr.offset    = 0;
+        pcr.size      = sizeof(DebugPC);
+
+        rhi::ShaderBytecode cs;
+        cs.stage      = rhi::ShaderStage::Compute;
+        cs.spirv      = k_SDF_DebugView_comp_spv;
+        cs.entryPoint = "main";
+
+        rhi::PipelineStateDesc pso;
+        pso.bindPoint            = rhi::PipelineBindPoint::Compute;   // 漏掉会让 PSO 静默为 null
+        pso.computeShader        = &cs;
+        pso.descriptorSetLayouts = {m_DebugLayout};
+        pso.pushConstantRanges   = {pcr};
+        pso.debugName            = "Lumen_SDF_DebugView";
+        m_DebugPSO = m_Device->CreatePipelineState(pso);
+        if (!m_DebugPSO) {
+            HE_CORE_ERROR("LumenSDF: SDF 调试视图的 PSO 创建失败（步骤 12 的可视化不可用）");
+            return;
+        }
+    }
+
+    // 输出纹理：compute 写（UAV）+ 采样（SRV）+ 拷贝转储（TRANSFER_SRC）。
+    // resize 时由 SetViewport 置空本指针 ⇒ 这里按新尺寸重建并重新写描述符。
+    if (!m_DebugTex) {
+        rhi::TextureDesc td;
+        td.width  = m_ViewportW;
+        td.height = m_ViewportH;
+        td.depth  = 1;
+        td.format = rhi::Format::RGBA16_FLOAT;
+        td.usage  = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource |
+                    rhi::TextureUsage::TransferSrc;
+        m_DebugTex = m_Device->CreateTexture(td);
+        // 存储图像的描述符必须走 imageView 重载（本引擎没有"独立存储图像"以外的写法）
+        m_Device->UpdateDescriptorSetWithImageView(m_DebugSet, kDBindOut,
+            rhi::DescriptorType::StorageImage, m_DebugTex->GetNativeHandle());
+    }
+
+    // 统计缓冲（CPU 可读）：创建时清零一次，之后只靠 shader 的原子加
+    if (!m_DebugStats) {
+        rhi::BufferDesc bd;
+        bd.size      = 4 * sizeof(u32);
+        bd.usage     = rhi::BufferUsage::Storage;
+        bd.cpuAccess = true;
+        m_DebugStats = m_Device->CreateBuffer(bd);
+        if (void* p = m_DebugStats->Map()) {
+            u32 zero[4] = {0, 0, 0, 0};
+            std::memcpy(p, zero, sizeof(zero));
+            m_DebugStats->Unmap();
+        }
+        m_Device->UpdateDescriptorSet(m_DebugSet, kDBindStats, rhi::DescriptorType::StorageBuffer,
+                                      m_DebugStats.get());
+        HE_CORE_INFO("LumenSDF: SDF 调试视图就绪（{}x{}，RGBA16F，逐像素 sphere tracing）",
+                     m_ViewportW, m_ViewportH);
+    }
+}
+
+void LumenSDF::RunDebugView(rhi::IRHICommandList* cmd, const float3& camPos, const float3& forward,
+                            const float3& right, const float3& up, float tanHalfFov, float aspect) {
+    // 只在 SDF 构建完成后跑；没建完时视图没有意义（场还没注入）
+    if (m_Phase != Phase::Done || !GetGlobalField(0)) return;
+    CreateDebugGPUObjects();
+    if (!m_DebugPSO || !m_DebugTex || !m_DebugStats) return;
+    if (!m_LinearSampler) return;
+
+    const bool countFrame = (++m_DebugFrames == kDebugCountFrame);
+    m_DebugCamPos = camPos;
+
+    DebugPC pc{};
+    pc.camPos        = float4(camPos, tanHalfFov);
+    pc.camForward    = float4(forward, aspect);
+    pc.camRight      = float4(right, 0.0f);
+    pc.camUp         = float4(up, 0.0f);
+    pc.grid0         = uint4(m_GlobalLayers[0].res, m_GlobalLayers[0].res, m_GlobalLayers[0].res,
+                             m_ViewportW);
+    pc.originVoxel0  = float4(m_GlobalLayers[0].origin, m_GlobalLayers[0].voxelSize);
+    // 层1 可能不存在（只开一层）：此时把体素给 -1，shader 侧据此判"不在域内"，
+    // 但绑定仍必须是**有效纹理**（描述符指向空纹理会触发验证层报错）。
+    const bool hasLayer1 = (m_GlobalLayerCount > 1) && m_GlobalLayers[1].field;
+    pc.grid1         = uint4(hasLayer1 ? m_GlobalLayers[1].res : 0u,
+                             hasLayer1 ? m_GlobalLayers[1].res : 0u,
+                             hasLayer1 ? m_GlobalLayers[1].res : 0u, m_ViewportH);
+    pc.originVoxel1  = hasLayer1 ? float4(m_GlobalLayers[1].origin, m_GlobalLayers[1].voxelSize)
+                                 : float4(0.0f, 0.0f, 0.0f, -1.0f);
+    pc.marchParams   = float4((float)m_Config.marchMaxSteps, 0.25f * GetGlobalVoxelSize(0),
+                              (float)m_Config.marchMaxDist, countFrame ? 1.0f : 0.0f);
+
+    m_Device->UpdateDescriptorSet(m_DebugSet, kDBindField,
+        rhi::DescriptorType::CombinedImageSampler, m_GlobalLayers[0].field.get(),
+        m_LinearSampler.get());
+    m_Device->UpdateDescriptorSet(m_DebugSet, kDBindField1,
+        rhi::DescriptorType::CombinedImageSampler,
+        hasLayer1 ? m_GlobalLayers[1].field.get() : m_GlobalLayers[0].field.get(),
+        m_LinearSampler.get());
+
+    cmd->SetPipeline(m_DebugPSO.get());
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DebugSet);
+    cmd->SetPushConstants(0, sizeof(pc), &pc);
+    cmd->Dispatch((m_ViewportW + 7u) / 8u, (m_ViewportH + 7u) / 8u, 1);
+    // UAV → 拷贝源：转储（06.GILab 的 GI 采样路径）在本 pass 之后整幅拷走
+    cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::Transfer,
+                         rhi::ResourceState::UnorderedAccess, rhi::ResourceState::CopySrc,
+                         m_DebugTex.get());
+
+    // 统计帧后 3 帧读回（飞行帧数），把"看得见的画面"同时落成可回归的数字
+    if (m_DebugFrames == kDebugCountFrame + 3) LogDebugStats();
+}
+
+void LumenSDF::LogDebugStats() {
+    if (!m_DebugStats) return;
+    void* mapped = m_DebugStats->Map();
+    if (!mapped) {
+        HE_CORE_WARN("LumenSDF: 调试视图统计缓冲不可映射（步骤 12 的可视化数字缺失）");
+        return;
+    }
+    u32 c[4];
+    std::memcpy(c, mapped, sizeof(c));
+    m_DebugStats->Unmap();
+    m_DebugStatsLast[0] = c[0]; m_DebugStatsLast[1] = c[1];
+    m_DebugStatsLast[2] = c[2]; m_DebugStatsLast[3] = c[3];
+
+    const double total = (double)c[0] + (double)c[1] + (double)c[2];
+    const double hit   = (double)c[0] + (double)c[1];
+    // 关键归因量：相机到真实几何的距离。若它远大于 eps，而命中率却是 100%、平均步数≈2，
+    // 就说明**场在相机附近把距离低估到了 eps 以下**（近处报"贴着表面"），
+    // 从任意视点出发的追踪会立刻假命中 —— 这正是"下界质量"问题的可视形态。
+    const float  camTruth = MinDistToGeometry(m_DebugCamPos);
+    const float  eps      = 0.25f * GetGlobalVoxelSize(0);
+    HE_CORE_INFO("LumenSDF 调试视图统计（第 {} 帧，逐像素主射线 {} 条）: 命中 {:.1f}%（近层 {} / 远层 {}），"
+                 "未命中 {}（{:.1f}%），平均步数 {:.1f}/{:.0f}；eps {:.3f} 世界单位（0.25 体素）",
+                 kDebugCountFrame, (u32)total,
+                 total > 0.0 ? 100.0 * hit / total : 0.0, c[0], c[1], c[2],
+                 total > 0.0 ? 100.0 * (double)c[2] / total : 0.0,
+                 hit > 0.0 ? (double)c[3] / hit : 0.0, (double)m_Config.marchMaxSteps,
+                 (double)eps);
+    HE_CORE_INFO("LumenSDF 调试视图归因: 相机 ({:.1f},{:.1f},{:.1f}) 到真实几何 {:.2f} 世界单位（{:.3f} 倍 eps）；"
+                 "若命中率 100% 且平均步数≈2，则场在相机处把距离低估到 eps 以下（下界质量缺陷，"
+                 "从任意视点出发会立刻假命中）",
+                 (double)m_DebugCamPos.x, (double)m_DebugCamPos.y, (double)m_DebugCamPos.z,
+                 (double)camTruth, (double)(camTruth / std::max(1e-6f, eps)));
 }
 
 } // namespace he::render

@@ -18,6 +18,7 @@ bool LumenScene::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     CreateSkeletonPipeline();
     CreateOutput();
     m_SDF.Initialize(device);   // 步骤 8：逐 mesh 距离场（构建由 StepSDF 逐帧推进）
+    m_SDF.SetViewport(width, height);   // 步骤 12：调试视图按视口分辨率逐像素发射主射线
     HE_CORE_INFO("LumenScene: 初始化持久资源宿主（视口 {}x{}）", width, height);
     return true;
 }
@@ -44,6 +45,7 @@ void LumenScene::OnResize(u32 width, u32 height) {
     // 屏幕尺寸相关的资源按新尺寸重建；Surface Cache atlas 与 Global SDF clipmap 是
     // **世界空间**尺寸，与视口无关，不在此重建。
     CreateOutput();
+    m_SDF.SetViewport(width, height);   // 调试视图纹理随之按新尺寸重建（步骤 12）
 }
 
 void LumenScene::CreateSkeletonPipeline() {

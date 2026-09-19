@@ -755,8 +755,14 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             // compute（实测把 dispatch 放进主 pass 会直接访问违例崩溃）。本 pass 不声明资源
             // 依赖（自持资源 + 自管 barrier），writes 为空故不会被 CullDeadPasses 裁掉。
             rg.AddPass("Lumen_SDF_Build", {}, {},
-                [p = prov.get()](rhi::IRHICommandList* c) {
-                    if (auto* lp = dynamic_cast<LumenProvider*>(p)) lp->StepSDF(c);
+                [p = prov.get(), cam = &camera](rhi::IRHICommandList* c) {
+                    if (auto* lp = dynamic_cast<LumenProvider*>(p)) {
+                        lp->StepSDF(c);
+                        // 步骤 12（L1 退出判据）：SDF 构建完之后，同一 compute pass 里跑一次
+                        // 逐像素 sphere tracing 可视化（相机主射线）。放在这里而不是 Lighting
+                        // 之后，是因为它只依赖 SDF 本身，与 GBuffer / 合成无关。
+                        lp->RunSDFDebug(c, *cam);
+                    }
                 });
 
             const u32 pw = out->GetWidth();
