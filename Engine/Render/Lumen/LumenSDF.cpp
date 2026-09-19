@@ -1369,6 +1369,7 @@ void LumenSDF::RunMarchCheck() {
     u32 outsideLayer0 = 0, tunnelOutside = 0;   // 起点在近层覆盖之外 / 其中属于"穿漏"的条数
     std::vector<float> errVoxAll, errNear, errFar, errNearHit, errFarHit;   // 误差分布 + 按"起点是否贴近几何"分组
     u32 withinGlobal = 0, detailBetter = 0;
+    u32 nearMiss = 0;   // 全局场单方面命中、细场未确认 = 近似错失（near-miss）
     double sumErrGlobal = 0.0;
 
     // 诊断用：点 p 到全部几何的精确距离（逐 mesh AABB 粗筛 + 逐三角形最近点）
@@ -1448,8 +1449,12 @@ void LumenSDF::RunMarchCheck() {
         // 实测 detail-first 语义（有细节命中就以它为准）更差：75/195 vs 76/195 —— 因为**无符号**
         // 场让"起点在几何内部"的射线在细节追踪里立刻命中（t≈0），而全局场又因严重低估而提前命中。
         // 两条都指向同一个根因（缺符号 + 场不紧），见 §5 的结论。
+        // 【命中复核】只用**细场（逐 mesh 距离场，eps = 0.25 x 该 mesh 体素）**确认过的命中才算命中；
+        // 全局场（eps = 1 个近层体素 = 14.22）的单方面命中计入 near-miss —— 命中判据是"场值 < eps"，
+        // 任何从表面 eps 距离内掠过而未相交的射线都会误判（这正是"仅 GPU"那批）。
         const float tGpuMerged = std::min(gpuHit ? hits[i].x : 1e30f, tDetail);
         const bool  mergedHit  = tGpuMerged < 1e29f;
+        if (gpuHit && tDetail >= 1e29f) ++nearMiss;   // 有粗命中、细场不认 ⇒ 近似错失（只记数，不作门控）
 
         if (mergedHit && cpuHit) {
             ++bothHit;
@@ -1507,6 +1512,7 @@ void LumenSDF::RunMarchCheck() {
     //     精度达不到 1 体素是**已知**的（§5 的下界质量），要等 clipmap 分层 + 细层 eps 才能达标。
     //   · `gpuOnly` 的假命中来自**无符号**场：射线起点落在几何内部时 d 立刻小于阈值。
     m_MarchCheck.passed = (bothHit > 0) && (cpuOnly == 0);
+    if (nearMiss) HE_CORE_INFO("LumenSDF 命中复核: 全局场单方面命中 {} 条被判为近似错失（细场未确认）", nearMiss);
 
     HE_CORE_INFO("LumenSDF sphere tracing 自检: 射线 {}，两者都命中 {}，仅 GPU {}（无符号场在几何内部的假命中），"
                  "仅 CPU {}（穿漏，须为 0）=> 安全 {}；精度：误差 ≤1 体素 {}/{}（{:.1f}%），"
