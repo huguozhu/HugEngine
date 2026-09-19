@@ -10,7 +10,7 @@
 // 【法线】用前向差分：N = normalize(vec3(f(p+dx)-f(p), f(p+dy)-f(p), f(p+dz)-f(p)))，3 次采样。
 
 [[vk::binding(0, 0)]] Texture3D<float>          u_Field;
-[[vk::binding(1, 0)]] SamplerState              u_FieldSampler;
+[[vk::binding(0, 0)]] SamplerState              u_FieldSampler;
 [[vk::binding(2, 0)]] StructuredBuffer<float4>  u_RayOrigin;
 [[vk::binding(3, 0)]] StructuredBuffer<float4>  u_RayDir;
 [[vk::binding(4, 0)]] RWStructuredBuffer<float4> u_RayHit;     // x=t, y=有效, z=步数, w=dot(N,dir)

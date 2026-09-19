@@ -5,6 +5,7 @@
 #include "SDF_GlobalBuild.comp.spv.h"
 #include "SDF_MeshBuild.comp.spv.h"
 #include "SDF_RayMarch.comp.spv.h"
+#include "SDF_RayMarchDetail.comp.spv.h"
 
 #include <algorithm>
 #include <cmath>
@@ -459,8 +460,10 @@ void LumenSDF::Step(rhi::IRHICommandList* cmd, const MeshBatcher& batcher) {
         // 全局场就绪 → 同一帧准备并跑 sphere tracing 验证（步骤 11）
         CreateMarchGPUObjects();
         SetupMarchRays();
-        RunMarch(cmd);
-        HE_CORE_INFO("LumenSDF: sphere tracing 已发射（第 {} 帧）", m_Frame);
+        RunMarch(cmd);          // 全局场追踪（远场）
+        RunMarchDetail(cmd);    // 逐 mesh 细节追踪（近场，min 归约）
+        HE_CORE_INFO("LumenSDF: sphere tracing 已发射（全局 + {} 个 mesh 的细节追踪，第 {} 帧）",
+                     m_Entries.size(), m_Frame);
         m_Phase = Phase::WaitMarchCheck;
         m_WaitMarchFrames = 0;
         return;
@@ -711,6 +714,24 @@ void LumenSDF::CreateMarchGPUObjects() {
     sd.minFilter = sd.magFilter = rhi::FilterMode::Linear;
     sd.addressU  = sd.addressV  = sd.addressW = rhi::AddressMode::ClampToEdge;
     m_LinearSampler = m_Device->CreateSampler(sd);
+
+    // ── 细节追踪（逐 mesh 的 min 归约）──
+    m_DetailLayout = m_Device->CreateDescriptorSetLayout(layout);   // 绑定集与全局版相同
+    m_DetailSet    = m_Device->AllocateDescriptorSet(m_DetailLayout);
+
+    rhi::ShaderBytecode dcs;
+    dcs.stage      = rhi::ShaderStage::Compute;
+    dcs.spirv      = k_SDF_RayMarchDetail_comp_spv;
+    dcs.entryPoint = "main";
+
+    rhi::PipelineStateDesc dpso;
+    dpso.bindPoint            = rhi::PipelineBindPoint::Compute;
+    dpso.computeShader        = &dcs;
+    dpso.descriptorSetLayouts = {m_DetailLayout};
+    dpso.pushConstantRanges   = {pcr};
+    dpso.debugName            = "Lumen_SDF_RayMarchDetail";
+    m_DetailPSO = m_Device->CreatePipelineState(dpso);
+    if (!m_DetailPSO) HE_CORE_ERROR("LumenSDF: 细节追踪的 PSO 创建失败");
 }
 
 void LumenSDF::SetupMarchRays() {
@@ -748,11 +769,19 @@ void LumenSDF::SetupMarchRays() {
     bd.size = (usize)n * sizeof(float4);
     m_RayHit    = m_Device->CreateBuffer(bd);
     m_RayNormal = m_Device->CreateBuffer(bd);
+    bd.size = (usize)n * sizeof(u32);
+    m_RayT  = m_Device->CreateBuffer(bd);
+    m_RayTMapped = m_RayT ? m_RayT->Map() : nullptr;
 
     m_Device->UpdateDescriptorSet(m_MarchSet, kMBindOrigin, rhi::DescriptorType::StorageBuffer, m_RayOrigin.get());
     m_Device->UpdateDescriptorSet(m_MarchSet, kMBindDir,    rhi::DescriptorType::StorageBuffer, m_RayDir.get());
     m_Device->UpdateDescriptorSet(m_MarchSet, kMBindHit,    rhi::DescriptorType::StorageBuffer, m_RayHit.get());
     m_Device->UpdateDescriptorSet(m_MarchSet, kMBindNormal, rhi::DescriptorType::StorageBuffer, m_RayNormal.get());
+    // 细节追踪用同一个绑定号布局：field/sampler/origin/dir/minTarget
+    m_Device->UpdateDescriptorSet(m_DetailSet, kMBindOrigin, rhi::DescriptorType::StorageBuffer, m_RayOrigin.get());
+    m_Device->UpdateDescriptorSet(m_DetailSet, kMBindDir,    rhi::DescriptorType::StorageBuffer, m_RayDir.get());
+    m_Device->UpdateDescriptorSet(m_DetailSet, kMBindHit,    rhi::DescriptorType::StorageBuffer, m_RayT.get());
+    m_Device->UpdateDescriptorSet(m_DetailSet, kMBindNormal, rhi::DescriptorType::StorageBuffer, m_RayT.get());
     HE_CORE_INFO("LumenSDF: sphere tracing 验证射线已生成（{} 条，最大步数 {}，收敛阈值 {:.4f}，最大距离 {:.1f}）",
                  n, m_Config.marchMaxSteps, (double)(0.25f * m_GlobalVoxelSize), (double)m_Config.marchMaxDist);
 }
@@ -778,6 +807,41 @@ void LumenSDF::RunMarch(rhi::IRHICommandList* cmd) {
     cmd->Dispatch((pc.rayCount + 63u) / 64u, 1, 1);
 }
 
+void LumenSDF::RunMarchDetail(rhi::IRHICommandList* cmd) {
+    if (!m_DetailPSO || m_Entries.empty() || m_RayOriginCPU.empty()) return;
+
+    // 每帧先把细节命中缓冲重置为 +inf（位模式），再做逐 mesh 的 min 归约
+    const u32 n = (u32)m_RayOriginCPU.size();
+    if (m_RayTMapped) {
+        std::vector<u32> inf(n, 0x7F800000u);
+        std::memcpy(m_RayTMapped, inf.data(), (usize)n * sizeof(u32));   // 持久映射：直接写
+    }
+
+    cmd->SetPipeline(m_DetailPSO.get());
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DetailSet);
+
+    MarchPC pc{};
+    pc.dimX = pc.dimY = pc.dimZ = 0;   // 每个 mesh 覆盖
+    pc.rayCount = n;
+    pc.maxSteps = (float)m_Config.marchMaxSteps;
+    pc.maxDist  = m_Config.marchMaxDist;
+
+    for (const auto& e : m_Entries) {
+        if (!e.field) continue;
+        m_Device->UpdateDescriptorSet(m_DetailSet, kMBindField,
+            rhi::DescriptorType::CombinedImageSampler, e.field.get(), m_LinearSampler.get());
+        pc.originX = e.origin.x; pc.originY = e.origin.y; pc.originZ = e.origin.z;
+        pc.voxelSize = e.voxelSize;
+        pc.dimX = pc.dimY = pc.dimZ = e.resolution;
+        pc.eps   = 0.25f * e.voxelSize;    // eps 挂**该 mesh** 的体素（细节追踪的意义所在）
+        cmd->SetPushConstants(0, sizeof(pc), &pc);
+        cmd->Dispatch((n + 63u) / 64u, 1, 1);
+        cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                             rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
+                             m_GlobalField.get());
+    }
+}
+
 void LumenSDF::RunMarchCheck() {
     if (!m_RayHit || !m_RayNormal || !m_GlobalField) return;
     void* hitMapped = m_RayHit->Map();
@@ -788,11 +852,27 @@ void LumenSDF::RunMarchCheck() {
     }
     const float4* hits = static_cast<const float4*>(hitMapped);
     const float4* nrms = static_cast<const float4*>(nrmMapped);
+    const u32*    detailT = m_RayTMapped ? static_cast<const u32*>(m_RayTMapped) : nullptr;
+    {
+        u32 detailHits = 0;
+        float detailMin = 1e30f;
+        if (detailT) {
+            for (u32 i = 0; i < (u32)m_RayOriginCPU.size(); ++i) {
+                float v; std::memcpy(&v, &detailT[i], sizeof(float));
+                if (v < 1e29f) { ++detailHits; detailMin = std::min(detailMin, v); }
+            }
+        }
+        HE_CORE_INFO("LumenSDF 细节追踪统计: 缓冲可映射={}, 命中 {} 条，最小 t={:.3f}",
+                     (m_RayTMapped != nullptr), detailHits,
+                     detailHits ? (double)detailMin : 0.0);
+    }
 
     const u32 n = (u32)m_RayOriginCPU.size();
     float maxErr = 0.0f;
     double sumErr = 0.0;
     u32 bothHit = 0, gpuOnly = 0, cpuOnly = 0, within = 0, normalOk = 0;
+    u32 withinGlobal = 0, detailBetter = 0;
+    double sumErrGlobal = 0.0;
 
     for (u32 i = 0; i < n; ++i) {
         const float3 ro = m_RayOriginCPU[i];
@@ -839,14 +919,37 @@ void LumenSDF::RunMarchCheck() {
 
         const bool gpuHit = hits[i].y > 0.5f;
         const bool cpuHit = (tRef < 1e29f) && (tRef <= m_Config.marchMaxDist);
-        if (gpuHit && cpuHit) {
+
+        // 细节追踪的结果与全局追踪取 min（两者都是下界 ⇒ 合并后仍不高估）：最近命中
+        float tDetail = 1e30f;
+        if (detailT) {
+            float v;
+            std::memcpy(&v, &detailT[i], sizeof(float));   // 位模式 → float
+            tDetail = v;
+        }
+        // 合并策略：取 min（两条追踪都是下界 ⇒ 合并后仍不高估，安全性质保持）。
+        // 实测 detail-first 语义（有细节命中就以它为准）更差：75/195 vs 76/195 —— 因为**无符号**
+        // 场让"起点在几何内部"的射线在细节追踪里立刻命中（t≈0），而全局场又因严重低估而提前命中。
+        // 两条都指向同一个根因（缺符号 + 场不紧），见 §5 的结论。
+        const float tGpuMerged = std::min(gpuHit ? hits[i].x : 1e30f, tDetail);
+        const bool  mergedHit  = tGpuMerged < 1e29f;
+
+        if (mergedHit && cpuHit) {
             ++bothHit;
-            const float errVox = std::fabs(hits[i].x - tRef) / m_GlobalVoxelSize;
+            const float errVox = std::fabs(tGpuMerged - tRef) / m_GlobalVoxelSize;
             sumErr += errVox;
             maxErr = std::max(maxErr, errVox);
             if (errVox <= 1.0f) ++within;
             if (hits[i].w < 0.0f) ++normalOk;   // 法线朝向与射线相反 = 正面命中
-        } else if (gpuHit) {
+
+            // 诊断：把"全局单独"与"合并后"的误差分开记，才能判断细节追踪到底有没有帮忙
+            if (gpuHit) {
+                const float errG = std::fabs(hits[i].x - tRef) / m_GlobalVoxelSize;
+                sumErrGlobal += errG;
+                if (errG <= 1.0f) ++withinGlobal;
+            }
+            if (tDetail < 1e29f && (!gpuHit || tDetail < hits[i].x)) ++detailBetter;
+        } else if (mergedHit) {
             ++gpuOnly;
         } else if (cpuHit) {
             ++cpuOnly;
@@ -884,6 +987,10 @@ void LumenSDF::RunMarchCheck() {
                      "需 clipmap 分层 + 细层收敛阈值（§5 的下界质量结论）", 
                      bothHit ? 100.0 * (double)within / bothHit : 0.0);
     }
+    HE_CORE_INFO("LumenSDF sphere tracing 误差分解: 仅全局场 {}/{} 在 1 体素内（平均 {:.3f}），"
+                 "合并细节追踪后 {}/{}（平均 {:.3f}）；细节追踪更近的射线 {} 条",
+                 withinGlobal, bothHit, bothHit ? sumErrGlobal / bothHit : 0.0,
+                 within, bothHit, bothHit ? sumErr / bothHit : 0.0, detailBetter);
 }
 
 } // namespace he::render

@@ -132,6 +132,7 @@ private:
     void CreateMarchGPUObjects();
     void SetupMarchRays();
     void RunMarch(rhi::IRHICommandList* cmd);
+    void RunMarchDetail(rhi::IRHICommandList* cmd);   // 逐 mesh 细节追踪（min 归约到 u_RayT）
     void RunMarchCheck();
     static float PointTriangleDistance(const float3& p, const float3& a,
                                        const float3& b, const float3& c);
@@ -188,6 +189,12 @@ private:
     std::unique_ptr<rhi::IRHIBuffer> m_RayDir;
     std::unique_ptr<rhi::IRHIBuffer> m_RayHit;      // CPU 可读
     std::unique_ptr<rhi::IRHIBuffer> m_RayNormal;   // CPU 可读
+    // 细节追踪（逐 mesh）：min 归约的命中距离缓冲（u32 位模式，+inf = 未命中）
+    rhi::DescriptorSetLayoutHandle m_DetailLayout;
+    rhi::DescriptorSetHandle       m_DetailSet;
+    std::unique_ptr<rhi::IRHIPipelineState> m_DetailPSO;
+    std::unique_ptr<rhi::IRHIBuffer> m_RayT;
+    void* m_RayTMapped = nullptr;
     std::unique_ptr<rhi::IRHISampler> m_LinearSampler;
     std::vector<float3> m_RayOriginCPU;
     std::vector<float3> m_RayDirCPU;
