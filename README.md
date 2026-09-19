@@ -57,7 +57,7 @@ cmake --build Build         # 需要 Release：cmake --build Build --config Rele
 
 - [已实现功能](docs/已实现功能/)（RHI / 渲染管线 / GI / 物理 / 编辑器等落地设计与判据）
 - [技术分析文档](docs/技术分析文档/)（**通用图形技术资料**：Vulkan/D3D11/D3D12/Metal 名称对照、Vulkan 渲染流程、物理相机与光源原理与数学）
-- [计划实现功能](docs/计划实现功能/)（Lumen/Nanite、全路径追踪、RHI 光追与 Mesh Shader 规划）
+- [计划实现功能](docs/计划实现功能/)（Nanite、全路径追踪、RHI 光追与 Mesh Shader 规划）
 - [面试题集](docs/面试题集/)（C++ 多线程 30 题 / 高级图形开发 30 题）
 
 ## 技术栈
