@@ -1450,7 +1450,8 @@ python Tools\pt\analyze_pt.py --compare <pt_tag> <deferred_tag> --target hdr
 | 16 Feedback（缺失页检测） | ✅ 已完成 | `SurfaceCache_Feedback.comp.slang`：屏幕按 **16×16 分块**，每块取中心像素的 GBuffer 世界坐标 → 找"包含它的最小 AABB"的那张卡 → 写 `(pageIndex, weight)`，`weight = 256 像素 × 卡重要性(填充率×√边长) × 距离衰减`；**每块写自己的槽位**（不用计数器 ⇒ 完整且确定）。C++ 侧读槽位→过滤权重 0→按(权重降序, 页号升序)排序→取前 `kMaxCapturesPerFrame×4`→把 `Invalid` 的页置 `Requested`，再把前 `kMaxCapturesPerFrame` 个 `Requested` 推进到 `Capturing`（**闭环**：下一帧步骤 15 就捕获它们），并同步 GPU 镜像。**验收**：静态相机下 7730 条请求（94.7% 的块有几何）、**top-32 与上一帧重叠 32/32** ⇒ 无整屏抖动；排序含页号定序 ⇒ 完全确定 |
 | 17 预算与跨帧摊销 | ✅ 已完成 | 三个显式预算：`maxCapturesPerFrame = 8` / `maxAllocationsPerFrame = 8` / `maxFeedbackPages = 256`（`LumenScene::SetBudgets` 可调）。三段摊销：Feedback 采纳 top-`maxFeedbackPages` → 分配阶段把 `Requested` 推进到 `Allocating`（≤ 分配预算）→ 捕获阶段把 `Allocating` 推进到 `Capturing` 并真正捕获（≤ 捕获预算）；**没做完的留在原状态，不回退不丢弃**。统计每 20 帧输出（预算/六态计数/累计捕获/单帧最多）。**验收**：预算 8 时收敛用 2 帧（8+6 页）、预算减半到 4 时用 4 帧（4+4+4+2 页）⇒ **收敛变慢但单帧捕获量恒 ≤ 预算（无尖峰）**，逐帧日志可复现 |
 | 18 LRU 淘汰与碎片整理 | ✅ 已完成（LRU；defrag 见说明） | 逻辑页 = min(卡片数, **1024**)（§4 的页上限），**物理页 = atlas 的 64 块**，两者相差一个量级 ⇒ 淘汰路径真正被走到。`AllocatePhysicalPage`：池空则淘汰"最久未用且内容有效（Captured/Dirty）"的逻辑页（`lastUsedFrame` 最小者），释放其物理页后复用；**绝不动正在流水线里的页**（Requested/Allocating/Capturing）。Feedback 的 top-N 每帧 `Touch`（LRU 的"用"）。统计：`页池/LRU: 物理页 x/64 空闲；分配成功 A / 失败 B / 淘汰 C 次`。**验收（合成漫游，静态相机下人为轮换需要页）**：累计捕获 166 → 247 → 309 页（吞吐持续）、**单帧最多恒 8 页（= 预算，不下降）**、**分配失败恒 0（成功率 100%）**、淘汰 279 → 360 → 422 次。**defrag 说明**：页大小固定、池大小固定 ⇒ 不存在"有空间但拼不出连续块"的碎片，分配不到一律由 LRU 回收；变长页/atlas 搬移式 defrag 列为后续项（§附二十五） |
-| 19–41 | ⬜ 未开始 | 19 L2 退出判据（atlas 材质可视化 + 覆盖率 + 白炉 + 背靠背读数），随后 20–25 Screen Probe |
+| 19 L2 退出判据 | ✅ 已完成（L2 闭环） | 无新增代码，只做验证与对照：①**atlas 显示的是场景真实材质**——atlas albedo 与同帧 GBuffer albedo 的亮度统计对照（中位亮度比 **1.11**，p5/p50/p95 = 0.000/0.286/0.404 vs 0.084/0.258/0.396）；②**覆盖率可视化无不可解释区域**——`lumen_card_coverage` 的阈值曲线（5%→89.7% / 25%→79.1%）+ 残余空洞逐条点名（薄结构 mesh）；③**白炉 1.0000**；④**背靠背读数逐位一致**——同配置跑两次，`lumen_sc_atlas_albedo` / `lumen_card_coverage` / `lumen_sdf_trace` **SHA-256 相同**（HDR 因 TAA/自动曝光的时域累积而略有差异，属预期）。工具：`build/verify/l2_report.py` |
+| 20–41 | ⬜ 未开始 | 阶段 D：20 Screen Probe 布置与自适应合并、21 半球追踪、22 命中点着色（消费本步的 atlas）、23 SH 投影、24 合成到 Lighting、25 L3 判据；随后 26–33 HW RT/Radiance Cache、34–41 去噪与横切工具 |
 
 ### 阶段 A：框架前置（不产出画面，但后补等于重构）
 
@@ -2676,3 +2677,39 @@ Captured 55 / Dirty 9），说明"请求 → 分配 → 捕获 → 可用"的回
 逻辑页、要么空闲，**不存在"有空间但拼不出连续块"的碎片**；分配不到一律由 LRU 回收解决。
 真正需要 defrag 的是"变长页 / 需要连续多块"的场景（例如把同 mesh 的多张卡排到连续区域），
 届时要做的是 atlas 内的页块搬移（一条 compute 拷贝 + 页表重写），列为后续项。
+### 附二十六：L2 退出判据（步骤 19）—— 四条验收全部拿到证据，L2 闭环
+
+本步按计划"无新增代码，只整理 dump 与对照报告"，四条验收的证据如下：
+
+**① atlas 正确显示材质**（对照同帧 GBuffer 的真实材质）：
+
+```
+atlas albedo   : 有效 texel 23764/262144（9.1%）  亮度 p5/p50/p95 = 0.000 / 0.286 / 0.404
+GBuffer albedo : texel 2073600                    亮度 p5/p50/p95 = 0.084 / 0.258 / 0.396
+中位亮度之比（atlas / GBuffer）= 1.11  ⇒ 同量级（材质来自场景，不是占位色）
+```
+
+（分位差异来自 p5：atlas 里有一部分"命中但材质为暗"的 texel，以及 9.1% 的低填充率 —— 只有本帧屏幕
+可见的表面能取到 GBuffer 材质，这条边界在 §附二十二 已记录。）
+
+**② 覆盖率可视化没有"不可解释"的区域**：`lumen_card_coverage`（RGBA8，上半 = 代表 mesh 的 6 个投影面、
+下半 = 逐 mesh 覆盖条）+ 阈值曲线（5% → 89.7%、10% → 86.8%、25% → 79.1%、50% → 54.2%），
+残余 0% 的三个 mesh 都是**薄结构**（投影填充率天然很低），已逐条点名。
+
+**③ 白炉 1.0000**：`gi_lumen_furnace_prov6_final.f16` 的 min = mean = max = 1.0000。
+
+**④ 背靠背读数一致**：同配置连续跑两次，L2 相关的三张转储 **SHA-256 完全相同**：
+
+```
+lumen_sc_atlas_albedo    逐位一致
+lumen_card_coverage      逐位一致
+lumen_sdf_trace          逐位一致
+hdr                      不同（TAA/自动曝光的时域累积，属预期）
+```
+
+⇒ **L2（Surface Cache）可以交付给阶段 D 当作"命中点材质源"**：它有稳定的页表/状态机、可验证的
+捕获内容、可复现的 dump、以及确定的 LRU 分配。已知边界（不阻塞阶段 D）：材质源暂时取自 GBuffer
+（屏幕可见性限制）、捕获只覆盖演示页表、遮挡判定仍是"存在性"、defrag 未做（固定页大小下无碎片）。
+
+**工具**：`build/verify/l2_report.py`（atlas vs GBuffer 对照）、`build/verify/f16_rgba_png.py`（看图）、
+`build/verify/f16_sdfdbg.py`（SDF 剖面/统计）、`build/verify/lumen_smoke.ps1`（一键跑 + 转储）。
