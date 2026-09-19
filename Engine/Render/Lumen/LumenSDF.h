@@ -38,6 +38,10 @@ struct LumenSDFConfig {
     u32 meshesPerFrame = 4;      // 每帧构建预算（避免一次卡顿）
     u32 probeStride    = 4;      // 自检采样步长（体素）
     u32 globalResolution = 128;  // Global SDF 单层分辨率（clipmap 分层留待后续步骤）
+    // ── sphere tracing 验证（步骤 11）──
+    u32   marchRays     = 256;   // 验证用射线数
+    u32   marchMaxSteps = 192;   // 最大步数（设计写 64；下界质量不足时步数会更费，见 §5）
+    float marchMaxDist  = 400.0f;// 最大追踪距离（世界单位）
 };
 
 /// 一个 mesh 的距离场条目
@@ -97,6 +101,22 @@ public:
     };
     [[nodiscard]] const GlobalCheck& GetGlobalCheck() const { return m_GlobalCheck; }
 
+    // ── sphere tracing（步骤 11）──
+    /// sphere tracing 的自检结论：GPU 命中距离 vs CPU 精确射线-三角形求交
+    struct MarchCheck {
+        bool  valid      = false;
+        bool  passed     = false;
+        u32   rays       = 0;
+        u32   bothHit    = 0;
+        u32   gpuOnly    = 0;      // GPU 命中而 CPU 未命中（不该发生）
+        u32   cpuOnly    = 0;      // CPU 命中而 GPU 未命中（步数/下界质量不足）
+        u32   withinTol  = 0;      // 两者都命中且 |Δt| ≤ 1 体素
+        u32   normalOk   = 0;      // 法线朝向与射线方向相反（dot < 0）
+        float maxErrVox  = 0.0f;   // 最大误差（体素）
+        float meanErrVox = 0.0f;
+    };
+    [[nodiscard]] const MarchCheck& GetMarchCheck() const { return m_MarchCheck; }
+
 private:
     void BuildQueue(const MeshBatcher& batcher);
     void UploadGeometry(const MeshBatcher& batcher);
@@ -108,6 +128,11 @@ private:
     void SetupGlobalGrid();
     void BuildGlobalField(rhi::IRHICommandList* cmd);
     void RunGlobalCheck();
+    // ── sphere tracing（步骤 11）──
+    void CreateMarchGPUObjects();
+    void SetupMarchRays();
+    void RunMarch(rhi::IRHICommandList* cmd);
+    void RunMarchCheck();
     static float PointTriangleDistance(const float3& p, const float3& a,
                                        const float3& b, const float3& c);
 
@@ -124,7 +149,7 @@ private:
     u32 m_ProbeCount = 0;
 
     // 状态机
-    enum class Phase { Idle, Baking, WaitSelfCheck, GlobalBuild, WaitGlobalCheck, Done };
+    enum class Phase { Idle, Baking, WaitSelfCheck, GlobalBuild, WaitGlobalCheck, March, WaitMarchCheck, Done };
     Phase m_Phase = Phase::Idle;
     u32   m_Frame = 0;        // Step 调用计数（自增，与飞行帧槽位无关）
     u32   m_NextEntry = 0;    // 下一个待构建的条目
@@ -154,6 +179,20 @@ private:
     u32    m_GlobalProbeCount = 0;
     u32    m_WaitGlobalFrames = 0;
     GlobalCheck m_GlobalCheck;
+
+    // ── sphere tracing（步骤 11）──
+    rhi::DescriptorSetLayoutHandle m_MarchLayout;
+    rhi::DescriptorSetHandle       m_MarchSet;
+    std::unique_ptr<rhi::IRHIPipelineState> m_MarchPSO;
+    std::unique_ptr<rhi::IRHIBuffer> m_RayOrigin;
+    std::unique_ptr<rhi::IRHIBuffer> m_RayDir;
+    std::unique_ptr<rhi::IRHIBuffer> m_RayHit;      // CPU 可读
+    std::unique_ptr<rhi::IRHIBuffer> m_RayNormal;   // CPU 可读
+    std::unique_ptr<rhi::IRHISampler> m_LinearSampler;
+    std::vector<float3> m_RayOriginCPU;
+    std::vector<float3> m_RayDirCPU;
+    u32 m_WaitMarchFrames = 0;
+    MarchCheck m_MarchCheck;
 };
 
 } // namespace he::render

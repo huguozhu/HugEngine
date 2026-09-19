@@ -4,6 +4,7 @@
 #include "Core/Log.h"
 #include "SDF_GlobalBuild.comp.spv.h"
 #include "SDF_MeshBuild.comp.spv.h"
+#include "SDF_RayMarch.comp.spv.h"
 
 #include <algorithm>
 #include <cmath>
@@ -455,6 +456,19 @@ void LumenSDF::Step(rhi::IRHICommandList* cmd, const MeshBatcher& batcher) {
     if (m_Phase == Phase::WaitGlobalCheck) {
         if (++m_WaitGlobalFrames < 3) return;
         RunGlobalCheck();
+        // 全局场就绪 → 同一帧准备并跑 sphere tracing 验证（步骤 11）
+        CreateMarchGPUObjects();
+        SetupMarchRays();
+        RunMarch(cmd);
+        HE_CORE_INFO("LumenSDF: sphere tracing 已发射（第 {} 帧）", m_Frame);
+        m_Phase = Phase::WaitMarchCheck;
+        m_WaitMarchFrames = 0;
+        return;
+    }
+
+    if (m_Phase == Phase::WaitMarchCheck) {
+        if (++m_WaitMarchFrames < 3) return;
+        RunMarchCheck();
         m_Phase = Phase::Done;
         m_Done  = true;
     }
@@ -558,8 +572,7 @@ void LumenSDF::RunSelfCheck() {
     }
 }
 
-void LumenSDF::RunGlobalCheck() {
-    if (!m_GlobalProbe || m_GlobalProbeCount == 0) return;
+void LumenSDF::RunGlobalCheck() {    if (!m_GlobalProbe || m_GlobalProbeCount == 0) return;
 
     void* mapped = m_GlobalProbe->Map();
     if (!mapped) {
@@ -633,6 +646,243 @@ void LumenSDF::RunGlobalCheck() {
     }
     if (!m_GlobalCheck.passed) {
         HE_CORE_ERROR("LumenSDF Global 自检失败：全局场与 CPU 参考大面积不一致，检查网格映射/注入范围");
+    }
+}
+
+// ── sphere tracing（步骤 11）──
+namespace {
+constexpr u32 kMBindField  = 0;
+constexpr u32 kMBindSample = 1;
+constexpr u32 kMBindOrigin = 2;
+constexpr u32 kMBindDir    = 3;
+constexpr u32 kMBindHit    = 4;
+constexpr u32 kMBindNormal = 5;
+
+// 与 SDF_RayMarch.comp.slang 的 MarchPC 一致：3 × 16B = 48B
+struct MarchPC {
+    float originX, originY, originZ, voxelSize;
+    u32   dimX, dimY, dimZ, rayCount;
+    float maxSteps, eps, maxDist, pad;
+};
+static_assert(sizeof(MarchPC) == 48, "MarchPC 必须与 shader 的 3×16B 布局一致");
+
+// 确定性伪随机（自检要可复现；不用 std::random 以免平台差异）
+inline float NextRand(u32& s) {
+    s = s * 1664525u + 1013904223u;
+    return (float)((s >> 8) & 0xFFFFFFu) / (float)0x1000000u;
+}
+} // namespace
+
+void LumenSDF::CreateMarchGPUObjects() {
+    if (m_MarchPSO) return;
+
+    rhi::DescriptorSetLayoutDesc layout;
+    layout.bindings = {
+        {kMBindField,  rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
+        {kMBindOrigin, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+        {kMBindDir,    rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+        {kMBindHit,    rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+        {kMBindNormal, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute},
+    };
+    m_MarchLayout = m_Device->CreateDescriptorSetLayout(layout);
+    m_MarchSet    = m_Device->AllocateDescriptorSet(m_MarchLayout);
+
+    rhi::PushConstantRange pcr;
+    pcr.stageMask = rhi::kStageMaskCompute;
+    pcr.offset    = 0;
+    pcr.size      = sizeof(MarchPC);
+
+    rhi::ShaderBytecode cs;
+    cs.stage      = rhi::ShaderStage::Compute;
+    cs.spirv      = k_SDF_RayMarch_comp_spv;
+    cs.entryPoint = "main";
+
+    rhi::PipelineStateDesc pso;
+    pso.bindPoint            = rhi::PipelineBindPoint::Compute;
+    pso.computeShader        = &cs;
+    pso.descriptorSetLayouts = {m_MarchLayout};
+    pso.pushConstantRanges   = {pcr};
+    pso.debugName            = "Lumen_SDF_RayMarch";
+    m_MarchPSO = m_Device->CreatePipelineState(pso);
+    if (!m_MarchPSO) HE_CORE_ERROR("LumenSDF: sphere tracing 的 PSO 创建失败");
+
+    // 线性 clamp 采样器：三线性插值由采样器完成（步进需要连续场，不能最近邻）
+    rhi::SamplerDesc sd;
+    sd.minFilter = sd.magFilter = rhi::FilterMode::Linear;
+    sd.addressU  = sd.addressV  = sd.addressW = rhi::AddressMode::ClampToEdge;
+    m_LinearSampler = m_Device->CreateSampler(sd);
+}
+
+void LumenSDF::SetupMarchRays() {
+    const u32 n = std::max(1u, m_Config.marchRays);
+    m_RayOriginCPU.resize(n);
+    m_RayDirCPU.resize(n);
+
+    u32 seed = 20260919u;   // 固定种子：自检可复现
+    for (u32 i = 0; i < n; ++i) {
+        // 起点落在**某个 mesh 的 AABB 内**：那里全局场取自该 mesh 的精确距离场，
+        // 最能检验步进本身；起点落在几何内部也无妨（本版是无符号场，会在表面附近命中）。
+        const MeshSDFEntry& e = m_Entries[(u32)(NextRand(seed) * (float)m_Entries.size()) % m_Entries.size()];
+        const float side = e.voxelSize * (float)e.resolution;
+        const float3 p = e.origin + float3(NextRand(seed), NextRand(seed), NextRand(seed)) * side;
+        float3 d(NextRand(seed) * 2.0f - 1.0f, NextRand(seed) * 2.0f - 1.0f, NextRand(seed) * 2.0f - 1.0f);
+        if (glm::dot(d, d) < 1e-6f) d = float3(0.0f, -1.0f, 0.0f);
+        m_RayOriginCPU[i] = p;
+        m_RayDirCPU[i]    = glm::normalize(d);
+    }
+
+    std::vector<float4> origins(n), dirs(n);
+    for (u32 i = 0; i < n; ++i) {
+        origins[i] = float4(m_RayOriginCPU[i], 0.0f);
+        dirs[i]    = float4(m_RayDirCPU[i], 0.0f);
+    }
+    rhi::BufferDesc bd;
+    bd.usage = rhi::BufferUsage::Storage;
+    bd.size = origins.size() * sizeof(float4); bd.initialData = origins.data();
+    m_RayOrigin = m_Device->CreateBuffer(bd);
+    bd.size = dirs.size() * sizeof(float4); bd.initialData = dirs.data();
+    m_RayDir = m_Device->CreateBuffer(bd);
+
+    bd.initialData = nullptr;
+    bd.cpuAccess = true;                     // 自检要读回
+    bd.size = (usize)n * sizeof(float4);
+    m_RayHit    = m_Device->CreateBuffer(bd);
+    m_RayNormal = m_Device->CreateBuffer(bd);
+
+    m_Device->UpdateDescriptorSet(m_MarchSet, kMBindOrigin, rhi::DescriptorType::StorageBuffer, m_RayOrigin.get());
+    m_Device->UpdateDescriptorSet(m_MarchSet, kMBindDir,    rhi::DescriptorType::StorageBuffer, m_RayDir.get());
+    m_Device->UpdateDescriptorSet(m_MarchSet, kMBindHit,    rhi::DescriptorType::StorageBuffer, m_RayHit.get());
+    m_Device->UpdateDescriptorSet(m_MarchSet, kMBindNormal, rhi::DescriptorType::StorageBuffer, m_RayNormal.get());
+    HE_CORE_INFO("LumenSDF: sphere tracing 验证射线已生成（{} 条，最大步数 {}，收敛阈值 {:.4f}，最大距离 {:.1f}）",
+                 n, m_Config.marchMaxSteps, (double)(0.25f * m_GlobalVoxelSize), (double)m_Config.marchMaxDist);
+}
+
+void LumenSDF::RunMarch(rhi::IRHICommandList* cmd) {
+    if (!m_MarchPSO || !m_GlobalField || m_RayOriginCPU.empty()) return;
+
+    m_Device->UpdateDescriptorSet(m_MarchSet, kMBindField,
+        rhi::DescriptorType::CombinedImageSampler, m_GlobalField.get(), m_LinearSampler.get());
+
+    MarchPC pc{};
+    pc.originX = m_GlobalOrigin.x; pc.originY = m_GlobalOrigin.y; pc.originZ = m_GlobalOrigin.z;
+    pc.voxelSize = m_GlobalVoxelSize;
+    pc.dimX = pc.dimY = pc.dimZ = m_GlobalRes;
+    pc.rayCount  = (u32)m_RayOriginCPU.size();
+    pc.maxSteps  = (float)m_Config.marchMaxSteps;
+    pc.eps       = 0.25f * m_GlobalVoxelSize;
+    pc.maxDist   = m_Config.marchMaxDist;
+
+    cmd->SetPipeline(m_MarchPSO.get());
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_MarchSet);
+    cmd->SetPushConstants(0, sizeof(pc), &pc);
+    cmd->Dispatch((pc.rayCount + 63u) / 64u, 1, 1);
+}
+
+void LumenSDF::RunMarchCheck() {
+    if (!m_RayHit || !m_RayNormal || !m_GlobalField) return;
+    void* hitMapped = m_RayHit->Map();
+    void* nrmMapped = m_RayNormal->Map();
+    if (!hitMapped || !nrmMapped) {
+        HE_CORE_WARN("LumenSDF: sphere tracing 结果缓冲不可映射，跳过自检");
+        return;
+    }
+    const float4* hits = static_cast<const float4*>(hitMapped);
+    const float4* nrms = static_cast<const float4*>(nrmMapped);
+
+    const u32 n = (u32)m_RayOriginCPU.size();
+    float maxErr = 0.0f;
+    double sumErr = 0.0;
+    u32 bothHit = 0, gpuOnly = 0, cpuOnly = 0, within = 0, normalOk = 0;
+
+    for (u32 i = 0; i < n; ++i) {
+        const float3 ro = m_RayOriginCPU[i];
+        const float3 rd = m_RayDirCPU[i];
+
+        // CPU 参考：Möller–Trumbore 对全部三角形取最近正交点（带逐 mesh AABB 粗筛）
+        float tRef = 1e30f;
+        for (const auto& e : m_Entries) {
+            const float side = e.voxelSize * (float)e.resolution;
+            // slab 粗筛
+            float t0 = 0.0f, t1 = 1e30f;
+            bool miss = false;
+            for (int a = 0; a < 3; ++a) {
+                const float o = (&ro.x)[a], d = (&rd.x)[a];
+                const float lo = (&e.origin.x)[a], hi = lo + side;
+                if (std::fabs(d) < 1e-9f) { if (o < lo || o > hi) { miss = true; break; } continue; }
+                float ta = (lo - o) / d, tb = (hi - o) / d;
+                if (ta > tb) std::swap(ta, tb);
+                t0 = std::max(t0, ta); t1 = std::min(t1, tb);
+                if (t0 > t1) { miss = true; break; }
+            }
+            if (miss || t0 > tRef) continue;
+
+            for (u32 t = 0; t < e.triCount; ++t) {
+                const u32* tri = &m_IndicesCPU[e.firstIndex + t * 3];
+                const float3 v0 = m_PositionsCPU[tri[0] + e.vertexOffset];
+                const float3 v1 = m_PositionsCPU[tri[1] + e.vertexOffset];
+                const float3 v2 = m_PositionsCPU[tri[2] + e.vertexOffset];
+                const float3 e1 = v1 - v0, e2 = v2 - v0;
+                const float3 pv = glm::cross(rd, e2);
+                const float det = glm::dot(e1, pv);
+                if (std::fabs(det) < 1e-12f) continue;
+                const float inv = 1.0f / det;
+                const float3 tv = ro - v0;
+                const float u = glm::dot(tv, pv) * inv;
+                if (u < 0.0f || u > 1.0f) continue;
+                const float3 qv = glm::cross(tv, e1);
+                const float v = glm::dot(rd, qv) * inv;
+                if (v < 0.0f || u + v > 1.0f) continue;
+                const float tt = glm::dot(e2, qv) * inv;
+                if (tt > 1e-4f && tt < tRef) tRef = tt;
+            }
+        }
+
+        const bool gpuHit = hits[i].y > 0.5f;
+        const bool cpuHit = (tRef < 1e29f) && (tRef <= m_Config.marchMaxDist);
+        if (gpuHit && cpuHit) {
+            ++bothHit;
+            const float errVox = std::fabs(hits[i].x - tRef) / m_GlobalVoxelSize;
+            sumErr += errVox;
+            maxErr = std::max(maxErr, errVox);
+            if (errVox <= 1.0f) ++within;
+            if (hits[i].w < 0.0f) ++normalOk;   // 法线朝向与射线相反 = 正面命中
+        } else if (gpuHit) {
+            ++gpuOnly;
+        } else if (cpuHit) {
+            ++cpuOnly;
+        }
+    }
+    m_RayHit->Unmap();
+    m_RayNormal->Unmap();
+
+    m_MarchCheck.valid      = true;
+    m_MarchCheck.rays       = n;
+    m_MarchCheck.bothHit    = bothHit;
+    m_MarchCheck.gpuOnly    = gpuOnly;
+    m_MarchCheck.cpuOnly    = cpuOnly;
+    m_MarchCheck.withinTol  = within;
+    m_MarchCheck.normalOk   = normalOk;
+    m_MarchCheck.maxErrVox  = maxErr;
+    m_MarchCheck.meanErrVox = bothHit ? (float)(sumErr / bothHit) : 0.0f;
+    // 判据分两层（与步骤 10 的自检同一思路：把"安全"与"精度"分开量）：
+    //   · 安全（pass/fail 门槛）：不得出现"CPU 命中了而 GPU 没命中"——那就是穿漏；
+    //   · 精度（只记录）：命中距离误差 ≤1 体素的比例。当前全局场是粗层（24.66 单位体素），
+    //     精度达不到 1 体素是**已知**的（§5 的下界质量），要等 clipmap 分层 + 细层 eps 才能达标。
+    //   · `gpuOnly` 的假命中来自**无符号**场：射线起点落在几何内部时 d 立刻小于阈值。
+    m_MarchCheck.passed = (bothHit > 0) && (cpuOnly == 0);
+
+    HE_CORE_INFO("LumenSDF sphere tracing 自检: 射线 {}，两者都命中 {}，仅 GPU {}（无符号场在几何内部的假命中），"
+                 "仅 CPU {}（穿漏，须为 0）=> 安全 {}；精度：误差 ≤1 体素 {}/{}（{:.1f}%），"
+                 "最大 {:.3f} 体素，平均 {:.3f}；法线朝向正确 {}",
+                 n, bothHit, gpuOnly, cpuOnly, m_MarchCheck.passed ? "PASS" : "FAIL",
+                 within, bothHit, bothHit ? 100.0 * (double)within / bothHit : 0.0,
+                 (double)maxErr, (double)m_MarchCheck.meanErrVox, normalOk);
+    if (!m_MarchCheck.passed) {
+        HE_CORE_ERROR("LumenSDF sphere tracing 出现穿漏（仅 CPU 命中 {} 条），检查场的下界性质与 eps", cpuOnly);
+    } else if ((float)within / (float)std::max(1u, bothHit) < 0.9f) {
+        HE_CORE_WARN("LumenSDF sphere tracing 精度未达标（{:.1f}% ≤1 体素）：当前为 Global SDF 单层粗分辨率，"
+                     "需 clipmap 分层 + 细层收敛阈值（§5 的下界质量结论）", 
+                     bothHit ? 100.0 * (double)within / bothHit : 0.0);
     }
 }
 

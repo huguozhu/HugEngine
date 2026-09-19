@@ -1,0 +1,77 @@
+// SDF_RayMarch.comp.slang — sphere tracing 求交（步骤 11）
+//
+// 输入：一批世界（网格局部）空间的射线（origin / dir）+ Global SDF（R32F 3D 纹理）。
+// 输出：命中距离 t、有效性、步数、命中点法线（SDF 梯度，前向差分 3 次采样）。
+//
+// 【为什么步进用 max(d, eps)】场是"到最近表面的下界"（§5 的注入语义保证不高估），所以
+// t += d 是安全的；但下界可能极小（远处粗层尤其明显），纯 t += d 会停滞在极小的步长上，
+// 故给一个下限 eps（= 0.25 体素）。上限步长不存在 —— 那正是高估，会穿漏。
+//
+// 【法线】用前向差分：N = normalize(vec3(f(p+dx)-f(p), f(p+dy)-f(p), f(p+dz)-f(p)))，3 次采样。
+
+[[vk::binding(0, 0)]] Texture3D<float>          u_Field;
+[[vk::binding(1, 0)]] SamplerState              u_FieldSampler;
+[[vk::binding(2, 0)]] StructuredBuffer<float4>  u_RayOrigin;
+[[vk::binding(3, 0)]] StructuredBuffer<float4>  u_RayDir;
+[[vk::binding(4, 0)]] RWStructuredBuffer<float4> u_RayHit;     // x=t, y=有效, z=步数, w=dot(N,dir)
+[[vk::binding(5, 0)]] RWStructuredBuffer<float4> u_RayNormal;  // xyz=命中点法线
+
+[[vk::push_constant]] cbuffer MarchPC {
+    float4 originVoxel;   // xyz = 场原点, w = 体素边长
+    uint4  grid;          // xyz = 分辨率, w = 射线数
+    float4 marchParams;   // x = 最大步数, y = 收敛阈值（世界单位）, z = 最大距离, w = 未用
+};
+
+float SampleField(float3 p) {
+    const float3 local = (p - originVoxel.xyz) / originVoxel.w;
+    const float3 uv    = (local + 0.5) / float3(grid.xyz);
+    return u_Field.SampleLevel(u_FieldSampler, uv, 0);
+}
+
+bool InsideField(float3 p) {
+    const float3 local = (p - originVoxel.xyz) / originVoxel.w;
+    return all(local >= 0.0) && all(local <= float3(grid.xyz));
+}
+
+[numthreads(64, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID) {
+    const uint i = tid.x;
+    if (i >= grid.w) return;
+
+    const float3 ro = u_RayOrigin[i].xyz;
+    const float3 rd = normalize(u_RayDir[i].xyz);
+
+    const uint  maxSteps = (uint)marchParams.x;
+    const float eps      = marchParams.y;
+    const float maxDist  = marchParams.z;
+
+    float t = 0.0;
+    bool  hit = false;
+    uint  steps = 0;
+    for (uint s = 0; s < maxSteps; ++s) {
+        steps = s + 1;
+        const float3 p = ro + rd * t;
+        if (!InsideField(p)) break;                 // 出界：本版按未命中处理（clipmap 分层后再说）
+        const float d = SampleField(p);
+        if (d < eps) { hit = true; break; }
+        t += max(d, eps);
+        if (t > maxDist) break;
+    }
+
+    float3 N = float3(0.0);
+    float  nd = 0.0;
+    if (hit) {
+        const float3 p = ro + rd * t;
+        const float h  = originVoxel.w;             // 一个体素的差分步长
+        const float f0 = SampleField(p);
+        N = float3(SampleField(p + float3(h, 0, 0)) - f0,
+                   SampleField(p + float3(0, h, 0)) - f0,
+                   SampleField(p + float3(0, 0, h)) - f0);
+        const float len = length(N);
+        N = (len > 1e-6) ? (N / len) : float3(0.0, 1.0, 0.0);
+        nd = dot(N, rd);
+    }
+
+    u_RayHit[i]    = float4(t, hit ? 1.0 : 0.0, (float)steps, nd);
+    u_RayNormal[i] = float4(N, 0.0);
+}
