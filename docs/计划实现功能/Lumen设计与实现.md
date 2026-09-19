@@ -186,9 +186,33 @@ dump 工具读到，否则"某块墙一直发黑"无法归因（这是 §16 里"
 - 法线从 SDF 梯度估算 (3 次采样)
 - 跨层切换：当前层步数用完未命中 → 下一层继续
 
-**首版实现与质量边界（步骤 8/9 实测，2026-09-19）**
+**scatter 版与实测（2026-09-19，替代上面的 gather 首版）**
 
-实现落在 `Engine/Render/Lumen/LumenSDF.{h,cpp}` + `Engine/Shader/Shaders/Lumen/SDF_MeshBuild.comp.slang`：
+gather（每体素遍历全部三角形）的代价是 O(体素 × 三角形)，128³ 下不可接受；scatter 反过来
+（每三角形一个线程组、只扫自己的 AABB，`InterlockedMin(asuint(d))`），代价与体素数无关。
+scatter 只写"表面附近的一条带"，故必须补一步 **跳步洪泛**（`res/2 … 1` 逐级 26 邻域松弛），
+否则远处留 `+inf` —— 那在 sphere tracing 里是**高估**（会直接跳过几何）。
+
+| 指标 | gather 首版（32³） | scatter 版（128³） |
+|------|------------------|------------------|
+| mesh 数 / 分辨率 / 体素边长 | 51 / 32³ / 0.45~87.6 | **16** / 128³ / **0.296~21.9** |
+| 显存 | 6.38 MB | **128 MB**（16 × 8.4 MB） |
+| 三角形上限 | 4096（超限 28/79 个 mesh 被跳过） | **20000**（0 个被跳过；代价与三角形数线性） |
+| 自检判据与结果 | 全场 1/4 体素（gather 是精确点-三角形距离） | **分层**：近表面（≤2 体素）1/4 体素、远场（洪泛近似）2 体素 ⇒ 远场 61/64 PASS |
+
+两处诚实的保留：① 探针网格（步长 = res/4）**没有采到近表面那一条带**（实测 `近表面 0/0`），
+所以"近表面精度"目前只有 scatter 的算法保证、没有实测覆盖 —— 补法是让探针沿网格顶点附近采样；
+② 洪泛用的是标准的单趟逐级松弛，远场最大误差实测 **2.93 单位 ≈ 9.9 个体素**（0.296 体素下），
+比"1 体素内"的理论预期差，说明每级只做一趟不够（需要前向/后向两趟），记为后续优化项。
+
+**结论（下一轮的输入）**：mesh 层现在够细（0.296 体素）但**只覆盖 16 个 mesh**，而全局层仍是
+128³/24.66 体素且严重低估 —— sphere tracing 的指标因此**没有改善**（两者都命中 110、≤1 体素
+37.3%，明细见下）。下一步只有两条路：① 把 mesh 层覆盖回 50+ 个（降分辨率到 64³ 或按需流式），
+② 让全局层不再是命中的主要来源（把细节层提到主命中，或用 clipmap 让全局层的紧度足够）。
+
+**gather 首版与质量边界（步骤 8/9 实测，已被下面的 scatter 版取代，保留作为演进记录）**
+
+实现落在 `Engine/Render/Lumen/LumenSDF.{h,cpp}` + `Engine/Shader/Shaders/Lumen/SDF_MeshBuild.comp.slang`（该 shader 已被 scatter 版删除）：
 
 | 项 | 首版做法 | 与上表的差异 |
 |----|---------|-------------|
@@ -1236,7 +1260,7 @@ python Tools\pt\analyze_pt.py --compare <pt_tag> <deferred_tag> --target hdr
 | 5 合成端接入 | ✅ 已完成 | `kGPUBinding_Lumen = 32` + 两个 `case` + `alpha < 0` 有效性契约（`6a3415b`） |
 | 6 Provider 骨架 + 第 8 条循环 | ✅ 已完成 | `LumenProvider` + 帧图按 Provider 的循环（`40075b3`）；白炉 1.0 / 常态无效标记 |
 | 7 面板与配置 | ✅ 已完成 | `gi_blend_diffuse_lumen` / `gi_blend_specular_lumen` 独立键 + 面板候选（`0a884da`） |
-| 8 Mesh SDF 生成 | ✅ 已完成（首版 gather/32³/R32F） | `LumenSDF` + `SDF_MeshBuild.comp.slang`；06.GILab 建 51 个 mesh、6.38 MB、自检 PASS |
+| 8 Mesh SDF 生成 | ✅ 已完成（scatter + 跳步洪泛，128³） | 三个 shader：`SDF_MeshScatter.comp.slang`（清空 + 每三角形一组的 `InterlockedMin`）、`SDF_MeshFlood.comp.slang`（res/2…1 逐级松弛补全 scatter 留下的空洞）、`SDF_MeshConvert.comp.slang`（u32 → R32F + 探针）。16 个 mesh × 128³ = **128 MB**，体素 0.296~21.9（比 gather 版细 4 倍）；自检：远场 61/64 在 2 体素内 ⇒ PASS（判据按算法分层，见 §5） |
 | 9 SDF 质量边界 | ✅ 已完成 | §5 的"首版实现与质量边界"：体素边长 0.45~87.6、28/79 mesh 超三角形上限、5 条不适用清单 |
 | 10 Global SDF 注入 | 🟡 首版完成（安全但下界质量不足） | `SDF_GlobalBuild.comp.slang` + `LumenSDF::BuildGlobalField`：单层 128³、16 MB，自检最大高估 −5.44 ⇒ 安全判据 PASS；但平均低估 621.5、仅 23.4% 探针在 2 体素内 ⇒ 需 clipmap + 128³ 逐 mesh 场（§5 已记根因与三条修复方向） |
 | 11 sphere tracing | 🟡 内核完成（安全达标、精度未达标） | `SDF_RayMarch.comp.slang` + 自检：256 射线，**穿漏 0 ⇒ 安全 PASS**；精度 39.0% ≤1 体素（平均 3.15、最大 14.78）⇒ 需符号判定 + clipmap 细层 eps + 近场细节追踪（§5 已记归因与达标路径） |
