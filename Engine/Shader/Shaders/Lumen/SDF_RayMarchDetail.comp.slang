@@ -48,6 +48,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     const float  maxDist  = marchParams.z;
 
     float t = 0.0;
+    bool  advanced = false;   // 命中判据要求"沿射线真正走过一步"
     for (uint s = 0; s < maxSteps; ++s) {
         const float3 p = ro + rd * t;
         if (!InsideField(p)) return;            // 出该 mesh 的 AABB：本 mesh 不再有贡献
