@@ -8,8 +8,10 @@
 #include "Lumen/LumenScene.h"
 
 #include "Core/Log.h"
+#include "Lumen/ScreenProbe.slang"
 #include "Lumen/SurfaceCache.slang"     // 共享布局（与 C++ 镜像同源）
 #include "SurfaceCache_Capture.comp.spv.h"
+#include "ScreenProbe_Gather.comp.spv.h"
 #include "SurfaceCache_Feedback.comp.spv.h"
 #include "SurfaceCache_PageCheck.comp.spv.h"
 
@@ -439,6 +441,136 @@ void LumenScene::RunCardCapture(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbA
                          ? 100.0 * (double)m_CardCaptureHits / (double)(m_CardCaptureHits + m_CardCaptureMisses) : 0.0,
                      m_CardCaptureMarchHits, kAtlasSize);
     }
+}
+// ============================================================
+// 步骤 20：Screen Probe 布置与自适应合并
+//
+// 屏幕按 16×16 像素为"单元"；每 2×2 单元（32×32）看 4 个单元的法线一致性：够平坦就合并成 1 个探针，
+// 否则保留 4 个。探针本身只填位置/法线/uv（入射辐射度在步骤 21 追踪、23 投影成 SH）。
+// 同时把每个 32×32 tile 的"最大法线偏差"写进偏差缓冲，CPU 侧据此**一次运行**算出整条
+// "阈值 → 探针数"曲线（证明单调性，不必反复重跑）。
+// ============================================================
+void LumenScene::CreateProbeGPUObjects() {
+    if (m_ProbePSO) return;
+
+    rhi::DescriptorSetLayoutDesc layout;
+    layout.bindings = {
+        {0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // GBuffer normal
+        {1, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // GBuffer worldpos
+        {2, rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},   // 探针数组
+        {3, rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},   // 探针计数
+        {4, rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},   // tile 偏差
+    };
+    m_ProbeLayout = m_Device->CreateDescriptorSetLayout(layout);
+    m_ProbeSet    = m_Device->AllocateDescriptorSet(m_ProbeLayout);
+
+    rhi::PushConstantRange pcr;
+    pcr.stageMask = rhi::kStageMaskCompute;
+    pcr.offset    = 0;
+    pcr.size      = 2u * 16u;   // uint4 dims + float4 mergeParams
+
+    rhi::ShaderBytecode cs;
+    cs.stage      = rhi::ShaderStage::Compute;
+    cs.spirv      = k_ScreenProbe_Gather_comp_spv;
+    cs.entryPoint = "main";
+
+    rhi::PipelineStateDesc pso;
+    pso.bindPoint            = rhi::PipelineBindPoint::Compute;
+    pso.computeShader        = &cs;
+    pso.descriptorSetLayouts = {m_ProbeLayout};
+    pso.pushConstantRanges   = {pcr};
+    pso.debugName            = "Lumen_ScreenProbe_Gather";
+    m_ProbePSO = m_Device->CreatePipelineState(pso);
+    if (!m_ProbePSO) HE_CORE_ERROR("LumenScene: Screen Probe 布置 PSO 创建失败");
+}
+
+void LumenScene::RunProbePlacement(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbNormal,
+                                   rhi::IRHITexture* gbWorldPos) {
+    if (!m_Device || !cmd || !gbNormal || !gbWorldPos) return;
+
+    if (!m_ProbeBound) {
+        CreateProbeGPUObjects();
+        if (!m_ProbePSO) return;
+        rhi::BufferDesc pb;
+        pb.size = (usize)kMaxScreenProbes * sizeof(ScreenProbe);
+        pb.usage = rhi::BufferUsage::Storage;
+        m_ProbeBuf = m_Device->CreateBuffer(pb);
+
+        rhi::BufferDesc cb;
+        cb.size = sizeof(u32); cb.usage = rhi::BufferUsage::Storage; cb.cpuAccess = true;
+        m_ProbeCountBuf = m_Device->CreateBuffer(cb);
+        m_ProbeCountMapped = m_ProbeCountBuf->Map();
+
+        const u32 tiles = 256u * 256u;   // 偏差缓冲按 8K 屏幕上限（256×256 个 32×32 tile）
+        rhi::BufferDesc db;
+        db.size = (usize)tiles * sizeof(float);
+        db.usage = rhi::BufferUsage::Storage; db.cpuAccess = true;
+        m_TileDevBuf = m_Device->CreateBuffer(db);
+        m_TileDevMapped = m_TileDevBuf->Map();
+        m_ProbeTileDev.assign(tiles, -1.0f);
+
+        m_Device->UpdateDescriptorSet(m_ProbeSet, 0, rhi::DescriptorType::CombinedImageSampler,
+                                      gbNormal, m_SDF.GetLinearSampler());
+        m_Device->UpdateDescriptorSet(m_ProbeSet, 1, rhi::DescriptorType::CombinedImageSampler,
+                                      gbWorldPos, m_SDF.GetLinearSampler());
+        m_Device->UpdateDescriptorSet(m_ProbeSet, 2, rhi::DescriptorType::StorageBuffer, m_ProbeBuf.get());
+        m_Device->UpdateDescriptorSet(m_ProbeSet, 3, rhi::DescriptorType::StorageBuffer, m_ProbeCountBuf.get());
+        m_Device->UpdateDescriptorSet(m_ProbeSet, 4, rhi::DescriptorType::StorageBuffer, m_TileDevBuf.get());
+        m_ProbeBound = true;
+        return;   // 新建资源当帧不用（§附二十、§附二十五 的教训）
+    }
+
+    const u32 tilesX = (m_Width + 31u) / 32u;
+    const u32 tilesY = (m_Height + 31u) / 32u;
+    const u32 tileCount = tilesX * tilesY;
+
+    // ① 先读上一帧的偏差缓冲（本帧清零计数之后再派发）
+    if (m_ProbeFrame >= 1 && m_TileDevMapped) {
+        std::memcpy(m_ProbeTileDev.data(), m_TileDevMapped, (usize)tileCount * sizeof(float));
+        if (m_ProbeCountMapped) {   // 【先读后清】计数由 GPU 原子加写入；先清零再读只会读到 0
+            u32 c = 0;
+            std::memcpy(&c, m_ProbeCountMapped, sizeof(c));
+            m_ProbeCount = c;
+        }
+        // 曲线：阈值（cos）越大越严格 ⇒ 探针数单调不减（8.000 = 每 tile 4 个）
+        auto probesAt = [&](float cosThr) {
+            u32 n = 0;
+            for (u32 i = 0; i < tileCount; ++i) {
+                const float dev = m_ProbeTileDev[i];
+                if (dev < -0.5f) continue;                    // 无几何
+                if (dev >= cosThr) ++n;                       // 合并成 1 个
+                else n += 4u;                                 // 保留 4 个
+            }
+            return n;
+        };
+        m_ProbeTilesTotal = 0;
+        for (u32 i = 0; i < tileCount; ++i) if (m_ProbeTileDev[i] >= -0.5f) ++m_ProbeTilesTotal;
+        m_ProbeTilesFlat = 0;
+        for (u32 i = 0; i < tileCount; ++i) if (m_ProbeTileDev[i] >= m_MergeNormalCos) ++m_ProbeTilesFlat;
+
+        if ((m_ProbeFrame % 40u) == 0u) {
+            HE_CORE_INFO("LumenScene Screen Probe（步骤 20）: 单元 16×16、tile 32×32 ⇒ tile 总数 {}（有几何 {}）；"
+                         "当前阈值 cos={:.3f} ⇒ 探针 {}（平坦 tile 占 {:.1f}%）",
+                         tileCount, m_ProbeTilesTotal, (double)m_MergeNormalCos, m_ProbeCount,
+                         m_ProbeTilesTotal ? 100.0 * (double)m_ProbeTilesFlat / (double)m_ProbeTilesTotal : 0.0);
+            HE_CORE_INFO("  阈值 → 探针数曲线（同一次运行的偏差缓冲算出）: cos 0.999 → {} / 0.995 → {} / 0.99 → {} / "
+                         "0.98 → {} / 0.95 → {} / 0.90 → {}（单调不增）",
+                         probesAt(0.999f), probesAt(0.995f), probesAt(0.99f),
+                         probesAt(0.98f), probesAt(0.95f), probesAt(0.90f));
+        }
+    }
+
+    // ② 派发本帧
+    if (m_ProbeCountMapped) { u32 zero = 0; std::memcpy(m_ProbeCountMapped, &zero, sizeof(zero)); }
+    struct { u32 x, y, z, w; float4 merge; } pc{};
+    pc.x = m_Width; pc.y = m_Height; pc.z = kMaxScreenProbes; pc.w = tileCount;
+    pc.merge = float4(m_MergeNormalCos, 16.0f, 0.0f, 0.0f);
+    cmd->SetPipeline(m_ProbePSO.get());
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_ProbeSet);
+    cmd->SetPushConstants(0, sizeof(pc), &pc);
+    cmd->Dispatch((tilesX + 7u) / 8u, (tilesY + 7u) / 8u, 1);
+    ++m_ProbeFrame;
+
 }
 // ============================================================
 // 步骤 16：Feedback（缺失页检测）—— 16×16 分块 → 请求列表 → CPU 排序 → 写回页表

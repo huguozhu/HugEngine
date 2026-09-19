@@ -78,6 +78,13 @@ public:
     /// 步骤 15：Card 捕获 —— 逐卡（本帧预算内、状态为 Capturing 的页）软件光栅化写 atlas
     void RunCardCapture(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbAlbedo, rhi::IRHITexture* gbNormal,
                         rhi::IRHITexture* gbDepth, const float4x4& viewProj);
+    /// 步骤 20：Screen Probe 布置与自适应合并（16×16 单元；2×2 平坦单元合并成一个探针）
+    void RunProbePlacement(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbNormal, rhi::IRHITexture* gbWorldPos);
+    [[nodiscard]] u32 GetProbeCount() const { return m_ProbeCount; }
+    [[nodiscard]] u32 GetProbeTilesFlat() const { return m_ProbeTilesFlat; }        // 偏差缓冲里"够平坦"的 tile 数
+    [[nodiscard]] u32 GetProbeTilesTotal() const { return m_ProbeTilesTotal; }      // 有几何的 tile 数
+    [[nodiscard]] float GetProbeMergeThreshold() const { return m_MergeNormalCos; }
+    [[nodiscard]] const std::vector<float>& GetProbeTileDev() const { return m_ProbeTileDev; }
     /// 步骤 16：Feedback —— 16×16 分块产出"需要哪些页"的请求，C++ 侧排序后写回页表状态
     void RunFeedback(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbWorldPos, const float3& camPos);
     [[nodiscard]] u32  GetFeedbackRequests() const { return m_FeedbackRequests; }
@@ -182,8 +189,22 @@ private:
     bool m_FeedbackBound = false;
     u32  m_FeedbackFrame = 0;
     u32  m_FeedbackRequests = 0, m_FeedbackTopOverlap = 0, m_FeedbackTopCount = 0;
+    // ── Screen Probe（步骤 20）──
+    static constexpr u32 kMaxScreenProbes = 65536;    // 8K 探针量级（1080p 96×54 tile × 4）
+    float m_MergeNormalCos = 0.995f;                  // 法线一致阈值（cos；越大越严格 ⇒ 探针越多）
+    std::unique_ptr<rhi::IRHIBuffer> m_ProbeBuf, m_ProbeCountBuf, m_TileDevBuf;
+    void* m_ProbeCountMapped = nullptr;
+    void* m_TileDevMapped = nullptr;
+    rhi::DescriptorSetLayoutHandle m_ProbeLayout = 0;
+    rhi::DescriptorSetHandle       m_ProbeSet    = 0;
+    std::unique_ptr<rhi::IRHIPipelineState> m_ProbePSO;
+    bool m_ProbeBound = false;
+    u32  m_ProbeFrame = 0;
+    u32  m_ProbeCount = 0, m_ProbeTilesFlat = 0, m_ProbeTilesTotal = 0;
+    std::vector<float> m_ProbeTileDev;
     std::vector<u32> m_LastTopPages;
     void CreateFeedbackGPUObjects();
+    void CreateProbeGPUObjects();
     u32  m_CapturePages = 0;          // 累计捕获页数
     u32  m_CardCaptureMarchHits = 0;  // 诊断：SDF march 命中数
     bool m_CaptureStatsPending = false;

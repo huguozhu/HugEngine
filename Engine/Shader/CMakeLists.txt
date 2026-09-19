@@ -150,6 +150,7 @@ if(SLANGC)
         "${SHADER_DIR}/Lumen/SurfaceCache_PageCheck.comp.slang"
         "${SHADER_DIR}/Lumen/SurfaceCache_Capture.comp.slang"
         "${SHADER_DIR}/Lumen/SurfaceCache_Feedback.comp.slang"
+        "${SHADER_DIR}/Lumen/ScreenProbe_Gather.comp.slang"
         # Utility
         "${SHADER_DIR}/Utility/WorkGraph_Entry.comp.slang"
         "${SHADER_DIR}/Utility/TestClear.comp.slang"
@@ -211,6 +212,7 @@ if(SLANGC)
         "${SHADER_DIR}/RT_HitCommon.slang"
         "${SHADER_DIR}/Particles/ParticleTypes.slang"
         "${SHADER_DIR}/Lumen/SurfaceCache.slang"
+        "${SHADER_DIR}/Lumen/ScreenProbe.slang"
     )
 
     set(COMPILE_SOURCES ${VERT_SLANG} ${FRAG_SLANG} ${COMP_SLANG} ${RT_SLANG} ${MESH_SLANG})
