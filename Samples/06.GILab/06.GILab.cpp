@@ -418,7 +418,7 @@ int main() {
     };
 
     {
-        // 创建 bindless 默认占位纹理（必须在 RegisterMaterial 之前设置）
+        // 创建 bindless 默认占位纹理（必须在注册材质纹理之前设置）
         u8 white[4]={255,255,255,255};
         rhi::TextureDesc td;
         td.format=rhi::Format::RGBA8_UNORM;

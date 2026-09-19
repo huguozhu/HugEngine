@@ -375,7 +375,7 @@ int main() {
         return {it->second.first.get(), it->second.second.get()};
     };
 
-    // 创建 bindless 默认占位纹理（必须在 RegisterMaterial 之前）
+    // 创建 bindless 默认占位纹理（必须在注册材质纹理之前）
     {
         u8 white[4]={255,255,255,255};
         rhi::TextureDesc td;
