@@ -14,7 +14,11 @@
 [[vk::binding(0, 0)]] RWTexture3D<uint>         u_Global;       // 全局距离（u32 位模式）
 [[vk::binding(1, 0)]] RWTexture3D<float>        u_GlobalOut;    // 转换输出（R32F）
 [[vk::binding(2, 0)]] Texture3D<float>          u_MeshField;    // 当前注入的 mesh 距离场
-[[vk::binding(3, 0)]] SamplerState              u_MeshFieldSampler;
+// 【必须与纹理同 binding】本引擎的 RHI 只有**组合图像采样器**（一个描述符同时含纹理与采样器，
+// 见 DeferredLighting.frag 的写法），没有"独立采样器"描述符。此前这里写成 binding 3，
+// 而描述符集布局里根本没有 3 —— 采样器未绑定，采样结果恒为 0，于是注入进全局层的全是 0
+// （实测：真实距离 894 的点上全局层存的是 0，步进因此在 t≈0 判命中）。
+[[vk::binding(2, 0)]] SamplerState              u_MeshFieldSampler;
 [[vk::binding(4, 0)]] RWStructuredBuffer<float> u_ProbeDist;
 
 [[vk::push_constant]] cbuffer GlobalPC {
