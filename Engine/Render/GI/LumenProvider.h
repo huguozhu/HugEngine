@@ -85,6 +85,12 @@ public:
     /// 步骤 8 起这里改为按 stage 顺序录制 SurfaceCache_Capture → SDF_Inject → ScreenProbeGather。
     void Render(rhi::IRHICommandList* cmd, const GIProviderContext& ctx) override {
         if (!m_Scene) return;
+        // 【步骤 24】非白炉：把本帧算出的逐像素辐照度贴到输出上（Provider 输出仍是"本帧真实内容"，
+        // Lighting 侧完全不改）。白炉：仍走常量骨架 pass（输出 1.0），把白炉读数与辐照度内容解耦。
+        if (!ctx.furnace && m_Scene->GetIrradianceTexture()) {
+            m_Scene->DrawIrradiance(cmd, 1.0f);
+            return;
+        }
         // 注意：SDF 构建**不在这里**做 —— 本函数在 offscreen render pass 内执行，
         // 而 Vulkan 不允许在 render pass 内 dispatch compute（实测直接访问违例崩溃）。
         // 帧图为它单独注册了一个 compute pass（"Lumen_SDF_Build"），见 StepSDF。
@@ -114,6 +120,16 @@ public:
     /// 并顺带做一次 GBuffer 对照，供 CPU 侧验收"同一几何上材质一致"。
     void RunSurfaceCacheShading(rhi::IRHICommandList* cmd, const CameraData& cam) {
         if (m_Scene) m_Scene->RunSurfaceCacheShading(cmd, m_Albedo, m_WorldPos, cam.GetViewProjMatrix());
+    }
+    /// 步骤 24：由探针 SH 采样出逐像素入射辐照度（写进屏幕尺寸的辐照度纹理）
+    void RunProbeIrradiance(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbNormal,
+                            rhi::IRHITexture* gbAlbedo, rhi::IRHITexture* gbWorldPos) {
+        if (m_Scene) m_Scene->RunProbeIrradiance(cmd, gbNormal, gbAlbedo, gbWorldPos);
+    }
+    [[nodiscard]] float GetIrradianceMean() const { return m_Scene ? m_Scene->GetIrradianceMean() : 0.0f; }
+    [[nodiscard]] float GetIrradianceMax() const { return m_Scene ? m_Scene->GetIrradianceMax() : 0.0f; }
+    [[nodiscard]] u32 GetIrradianceCoveredPixels() const {
+        return m_Scene ? m_Scene->GetIrradianceCoveredPixels() : 0u;
     }
     /// 步骤 23：把每条光线结果投成二阶 SH（4 系数 RGB）写回探针；白炉下 l0 必须等于 √π
     void RunScreenProbeSHProject(rhi::IRHICommandList* cmd, bool furnace) {

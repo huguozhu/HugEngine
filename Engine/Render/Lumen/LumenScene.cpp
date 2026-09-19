@@ -2,6 +2,8 @@
 
 #include "Core/Log.h"
 #include "Core/Assert.h"              // HE_ASSERT（PSO 创建失败要立刻可见）
+#include <cstdlib>                    // std::getenv（确定性验收模式的开关）
+
 #include "SSAO.vert.spv.h"            // 全屏三角顶点着色（与 SSGI/AO 等 pass 共用）
 #include "Lumen_Skeleton.frag.spv.h"  // 骨架阶段的常量输出
 
@@ -15,6 +17,9 @@ bool LumenScene::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Device = device;
     m_Width  = width;
     m_Height = height;
+    // 确定性验收模式（见 RunProbeIrradiance 末尾的说明）：默认关，只在需要"背靠背逐位一致"时开
+    m_Deterministic = (std::getenv("HE_LUMEN_DETERMINISTIC") != nullptr);
+    if (m_Deterministic) HE_CORE_INFO("LumenScene: 确定性模式已开启（每帧末等待 GPU）");
     CreateSkeletonPipeline();
     CreatePageCheckGPUObjects();   // 步骤 14：描述符集/PSO 提前建好（帧中途分配实测拿不到有效集合）
     CreateOutput();
@@ -105,6 +110,9 @@ void LumenScene::CreateOutput() {
     // RenderTarget：帧图把它当作 offscreen 颜色附件清写；ShaderResource：Lighting 采样它
     td.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
     m_Output  = m_Device->CreateTexture(td);
+
+    // 步骤 24：屏幕尺寸的辐照度中间纹理（compute 写、全屏 pass 采样）
+    CreateIrradianceTexture();
 
     // 线性 + Clamp：Lumen 输出是低频间接光，采样器与 SSGI/SSR 的输出采样器同规格
     if (!m_OutputSampler) {

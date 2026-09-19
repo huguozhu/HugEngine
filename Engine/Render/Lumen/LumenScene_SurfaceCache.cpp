@@ -24,6 +24,14 @@
 
 namespace he::render {
 
+// 计算 pass → 计算 pass 的显式屏障（见头文件里的说明）。用**全局**屏障形式：Lumen 的中间缓冲
+// 都是自持资源，逐资源写屏障会漏（漏一个就是一次竞态）。
+void LumenScene::ComputeBarrier(rhi::IRHICommandList* cmd) {
+    if (!cmd) return;
+    cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                         rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess);
+}
+
 void LumenScene::BuildPageTable() {
     if (m_PageTableBuilt || !m_Device) return;
     // 卡片还没生成（步骤 13 在自检之后才跑）⇒ 等下一帧再建，否则页数会退化成 1
@@ -632,6 +640,7 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
     pc.vp2 = float4(viewProj[0][2], viewProj[1][2], viewProj[2][2], viewProj[3][2]);
     pc.vp3 = float4(viewProj[0][3], viewProj[1][3], viewProj[2][3], viewProj[3][3]);
     pc.atlas = float4((float)kAtlasPageRes, (float)kAtlasSize, 0.18f, 0.0f);
+    ComputeBarrier(cmd);   // 等"追踪 pass 写命中点"落地
     cmd->SetPipeline(m_ShadePSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_ShadeSet);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
@@ -764,6 +773,7 @@ void LumenScene::RunProbeTrace(rhi::IRHICommandList* cmd) {
     pc.grid1 = pc.grid0;
     pc.march = float4((float)m_SDF.GetMarchMaxSteps(), 1.0f * m_SDF.GetGlobalVoxelSize(0),
                       (float)m_SDF.GetMarchMaxDist(), 0.0f);
+    ComputeBarrier(cmd);   // 等"布置 pass 写探针"落地
     cmd->SetPipeline(m_TracePSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_TraceSet);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
@@ -788,6 +798,7 @@ void LumenScene::CreateProbeGPUObjects() {
         {2, rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},   // 探针数组
         {3, rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},   // 探针计数
         {4, rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},   // tile 偏差
+        {5, rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},   // 16×16 单元 → 探针（步骤 24 用）
     };
     m_ProbeLayout = m_Device->CreateDescriptorSetLayout(layout);
     m_ProbeSet    = m_Device->AllocateDescriptorSet(m_ProbeLayout);
@@ -837,6 +848,14 @@ void LumenScene::RunProbePlacement(rhi::IRHICommandList* cmd, rhi::IRHITexture* 
         m_TileDevMapped = m_TileDevBuf->Map();
         m_ProbeTileDev.assign(tiles, -1.0f);
 
+        // 步骤 24：16×16 单元 → 探针的映射（合成端按像素查探针，见 Lumen_ProbeIrradiance）
+        const u32 cellsX = (m_Width + 15u) / 16u;
+        const u32 cellsY = (m_Height + 15u) / 16u;
+        rhi::BufferDesc cpb;
+        cpb.size = (usize)cellsX * cellsY * sizeof(u32);
+        cpb.usage = rhi::BufferUsage::Storage;
+        m_CellProbeBuf = m_Device->CreateBuffer(cpb);
+
         m_Device->UpdateDescriptorSet(m_ProbeSet, 0, rhi::DescriptorType::CombinedImageSampler,
                                       gbNormal, m_SDF.GetLinearSampler());
         m_Device->UpdateDescriptorSet(m_ProbeSet, 1, rhi::DescriptorType::CombinedImageSampler,
@@ -844,6 +863,7 @@ void LumenScene::RunProbePlacement(rhi::IRHICommandList* cmd, rhi::IRHITexture* 
         m_Device->UpdateDescriptorSet(m_ProbeSet, 2, rhi::DescriptorType::StorageBuffer, m_ProbeBuf.get());
         m_Device->UpdateDescriptorSet(m_ProbeSet, 3, rhi::DescriptorType::StorageBuffer, m_ProbeCountBuf.get());
         m_Device->UpdateDescriptorSet(m_ProbeSet, 4, rhi::DescriptorType::StorageBuffer, m_TileDevBuf.get());
+        m_Device->UpdateDescriptorSet(m_ProbeSet, 5, rhi::DescriptorType::StorageBuffer, m_CellProbeBuf.get());
         m_ProbeBound = true;
         return;   // 新建资源当帧不用（§附二十、§附二十五 的教训）
     }
@@ -891,7 +911,10 @@ void LumenScene::RunProbePlacement(rhi::IRHICommandList* cmd, rhi::IRHITexture* 
     // ② 派发本帧
     if (m_ProbeCountMapped) { u32 zero = 0; std::memcpy(m_ProbeCountMapped, &zero, sizeof(zero)); }
     struct { u32 x, y, z, w; float4 merge; } pc{};
-    pc.x = m_Width; pc.y = m_Height; pc.z = kMaxScreenProbes; pc.w = tileCount;
+    // dims.w = **单元**总数（16×16 单元 → 探针映射的容量），步骤 24 的合成端按它做边界判断
+    const u32 cellsX = (m_Width + 15u) / 16u;
+    const u32 cellsY = (m_Height + 15u) / 16u;
+    pc.x = m_Width; pc.y = m_Height; pc.z = kMaxScreenProbes; pc.w = cellsX * cellsY;
     pc.merge = float4(m_MergeNormalCos, 16.0f, 0.0f, 0.0f);
     cmd->SetPipeline(m_ProbePSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_ProbeSet);
@@ -1208,9 +1231,16 @@ void LumenScene::RunScreenProbeSHProject(rhi::IRHICommandList* cmd, bool furnace
     // ② 清零统计并派发
     if (m_SHStatsMapped) { u32 zero[4] = {0, 0, 0, 0}; std::memcpy(m_SHStatsMapped, zero, sizeof(zero)); }
     struct { u32 x, y, z, w; u32 mx, my, mz, mw; } pc{};
-    pc.x = m_ProbeCount; pc.y = m_TraceConfig.traceRep; pc.z = m_SHFrame;
+    pc.x = m_ProbeCount; pc.y = m_TraceConfig.traceRep;
+    // 【随机种子必须与"当前躺在光线缓冲里的那批光线"一致】
+    // 追踪 pass 每个"真正派发"的帧用自己的帧计数当种子，然后才 +1；投影 pass 每帧都会派发，
+    // 两者的帧计数会越差越多（实测 trace 82 / sh 57 ⇒ 差 25 帧！），于是投影积的是**另一组方向**。
+    // 正确做法：投影用"追踪上一次实际派发时用的种子" = 追踪帧计数 - 1（追踪没派发时计数不变，
+    // 光线缓冲里的数据仍是同一个种子）。
+    pc.z = (m_TraceFrame > 0u) ? (m_TraceFrame - 1u) : 0u;
     pc.w = furnace ? 1u : 0u;
     pc.mx = kSampleModeUniformHemisphere;
+    ComputeBarrier(cmd);   // 等"着色 pass 写每光线辐射度"落地
     cmd->SetPipeline(m_SHPSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_SHSet);
     cmd->SetPushConstants(0, sizeof(pc), &pc);

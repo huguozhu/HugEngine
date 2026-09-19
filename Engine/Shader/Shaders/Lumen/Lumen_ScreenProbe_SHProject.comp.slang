@@ -54,9 +54,11 @@ void main(uint3 tid : SV_DispatchThreadID) {
     float3 l2 = float3(0.0, 0.0, 0.0), l3 = float3(0.0, 0.0, 0.0), eRef = float3(0.0, 0.0, 0.0);
     uint   validRays = 0;
 
+    // 与追踪 pass 完全相同地由**探针身份**导出随机流（不能跟槽位走，见 ScreenProbe_Trace 的说明）
+    const uint probeKey = probe.meta.y * 4u + probe.meta.w;
     for (uint r = 0u; r < N; ++r) {
         const uint flat = tid.x * N + r;
-        const float2 u = ProbeRayRandom(flat, dims.z);
+        const float2 u = ProbeRayRandom(probeKey * N + r, dims.z);
         const float3 d = (mode.x == 0u) ? SampleGgxDirection(n, roughness, u)
                                         : SampleUniformHemisphere(n, u);
         // 白炉：辐射度恒为 1（不看 atlas）⇒ l0 必须等于 √π，与方向/采样数无关

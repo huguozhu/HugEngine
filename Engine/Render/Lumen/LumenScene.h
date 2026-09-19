@@ -101,6 +101,16 @@ public:
     [[nodiscard]] float GetSHIrradianceMeanDiff() const { return m_SHIrradianceDiff; }
     [[nodiscard]] u32 GetSHProbes() const { return m_SHProbes; }
     [[nodiscard]] u32 GetSHRays() const { return m_SHRays; }
+    /// 步骤 24：由探针 SH 采样出逐像素入射辐照度（写进屏幕尺寸的辐照度纹理）
+    void RunProbeIrradiance(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbNormal,
+                            rhi::IRHITexture* gbAlbedo, rhi::IRHITexture* gbWorldPos);
+    /// 步骤 24 的辐照度纹理（Provider 的输出 pass 采样它写进 GI 输出）
+    [[nodiscard]] rhi::IRHITexture* GetIrradianceTexture() const { return m_IrradianceTex.get(); }
+    [[nodiscard]] float GetIrradianceMean() const { return m_IrradianceMean; }
+    [[nodiscard]] float GetIrradianceMax() const { return m_IrradianceMax; }
+    [[nodiscard]] u32   GetIrradianceCoveredPixels() const { return m_IrradianceCovered; }
+    /// 步骤 24：把辐照度纹理贴到 Provider 输出（帧图在 offscreen pass 里调它）
+    void DrawIrradiance(rhi::IRHICommandList* cmd, float gain);
     [[nodiscard]] u32 GetShadedMissingPages() const { return m_ShadedMissingPages; }
     [[nodiscard]] float GetShadedAlbedoMeanDiff() const { return m_ShadedAlbedoMeanDiff; }
     [[nodiscard]] u32 GetShadedAlbedoSamples() const { return m_ShadedAlbedoSamples; }
@@ -129,6 +139,11 @@ public:
 
 private:
     void CreateOutput();
+    /// 计算 pass 之间的显式屏障：Lumen 的每个内部 pass 都读"上一个 pass 刚写的缓冲/纹理"，
+    /// 而它们**在同一个 pass 内连续 Dispatch**、不对帧图声明依赖 ⇒ 缺少屏障。
+    /// 【实测后果】探针缓冲"布置写 → 追踪读 → SH 写"存在写后读/读后写竞态：背靠背两次运行
+    /// 的 hit 数完全一致，但探针 SH 的 l0 均值不同（0.3274 vs 0.3249），逐像素辐照度 98.6% 不同。
+    void ComputeBarrier(rhi::IRHICommandList* cmd);
     void CreateSkeletonPipeline();
     void DestroySkeletonPipeline();
     void CreatePageCheckGPUObjects();
@@ -267,6 +282,23 @@ private:
     float m_SHMeanL0 = 0.0f;            // 所有探针 l0 的均值（白炉下应为 √π ≈ 1.7725）
     float m_SHFurnaceL0Dev = 0.0f;      // 白炉下 l0 相对 √π 的**平均绝对偏差**（验收口径"误差为 0"）
     float m_SHIrradianceDiff = 0.0f;    // SH 重建辐照度 vs 逐光线求和参考的平均相对差
+    // ── 由 SH 采样出逐像素辐照度（步骤 24）──
+    rhi::DescriptorSetLayoutHandle m_IrrLayout = 0;
+    rhi::DescriptorSetHandle       m_IrrSet    = 0;
+    std::unique_ptr<rhi::IRHIPipelineState> m_IrrPSO;
+    std::unique_ptr<rhi::IRHIBuffer>        m_CellProbeBuf;
+    std::unique_ptr<rhi::IRHITexture>       m_IrradianceTex;
+    std::unique_ptr<rhi::IRHIBuffer>        m_IrradianceStatsBuf;   // 0=覆盖像素 1=亮度定点累加 2=亮度定点最大
+    void* m_IrrStatsMapped = nullptr;
+    bool m_IrrBound = false;
+    u32  m_IrrFrame = 0;
+    float m_IrradianceMean = 0.0f;
+    float m_IrradianceMax = 0.0f;
+    u32   m_IrradianceCovered = 0;
+    // 输出 pass（把辐照度纹理贴到 Provider 输出）
+    rhi::DescriptorSetLayoutHandle m_IrrCopyLayout = 0;
+    rhi::DescriptorSetHandle       m_IrrCopySet    = 0;
+    std::unique_ptr<rhi::IRHIPipelineState> m_IrrCopyPSO;
 
     std::vector<u32> m_LastTopPages;
     void CreateFeedbackGPUObjects();
@@ -274,6 +306,12 @@ private:
     void CreateProbeTraceGPUObjects();
     void CreateShadeGPUObjects();
     void CreateSHGPUObjects();
+    /// 确定性验收模式（环境变量 HE_LUMEN_DETERMINISTIC=1）：每帧末把 GPU 等干净，
+    /// 使"回读 GPU 计数 → 决定下一帧行为"的时机固定下来，从而让背靠背转储逐位一致。
+    bool m_Deterministic = false;
+    void CreateIrradianceGPUObjects();
+    void CreateIrradianceCopyPipeline();
+    void CreateIrradianceTexture();
     u32  m_CapturePages = 0;          // 累计捕获页数
     u32  m_CardCaptureMarchHits = 0;  // 诊断：SDF march 命中数
     bool m_CaptureStatsPending = false;

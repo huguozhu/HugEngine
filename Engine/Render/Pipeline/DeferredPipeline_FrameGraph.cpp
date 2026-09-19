@@ -756,7 +756,10 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             // compute（实测把 dispatch 放进主 pass 会直接访问违例崩溃）。本 pass 不声明资源
             // 依赖（自持资源 + 自管 barrier），writes 为空故不会被 CullDeadPasses 裁掉。
             rg.AddPass("Lumen_SDF_Build", {}, {},
-                [p = prov.get(), cam = &camera, furnaceMode = m_GIConfig.furnaceMode](rhi::IRHICommandList* c) {
+                // GBuffer 的三张纹理按值捕获（lambda 没有默认捕获，用 this 会编译失败）
+                [p = prov.get(), cam = &camera, furnaceMode = m_GIConfig.furnaceMode,
+                 gbN = m_GBuffer->GetNormal(), gbAl = m_GBuffer->GetAlbedo(),
+                 gbWP = m_GBuffer->GetWorldPos()](rhi::IRHICommandList* c) {
                     if (auto* lp = dynamic_cast<LumenProvider*>(p)) {
                         lp->StepSDF(c, *cam);   // 近层跟随相机（相机位置在第一次 Step 之前给出）
                         lp->StepSurfaceCache(c);   // 步骤 14：页表 + 页状态机（GPU 镜像校验）
@@ -767,6 +770,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                         lp->RunSurfaceCacheShading(c, *cam);   // 步骤 22：命中点着色（材质取自 atlas）
                         // 步骤 23：SH 投影（白炉下 l0 必须等于 √π —— 用同一面白炉开关驱动）
                         lp->RunScreenProbeSHProject(c, furnaceMode);
+                        // 步骤 24：由探针 SH 采样出逐像素辐照度（供 Provider 输出 pass 贴图）
+                        lp->RunProbeIrradiance(c, gbN, gbAl, gbWP);
                         // 步骤 12（L1 退出判据）：SDF 构建完之后，同一 compute pass 里跑一次
                         // 逐像素 sphere tracing 可视化（相机主射线）。放在这里而不是 Lighting
                         // 之后，是因为它只依赖 SDF 本身，与 GBuffer / 合成无关。

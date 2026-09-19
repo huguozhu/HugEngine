@@ -56,8 +56,13 @@ void main(uint3 tid : SV_DispatchThreadID) {
     const float3 n  = normalize(probe.normal.xyz);
     const float  roughness = clamp(probe.normal.w, 0.05, 1.0);   // w 里放粗糙度（步骤 20 先填了 0 ⇒ 用下限）
 
-    // 每帧换种子（dims.z = 帧号）：时序累积才有意义；同一帧内完全可复现
-    const float2 u = ProbeRayRandom(tid.x, dims.z);
+    // 每帧换种子（dims.z = 帧号）：时序累积才有意义；同一帧内完全可复现。
+    // 【随机流的编号必须用"探针身份"而不是"槽位下标"】布置 pass 用 `InterlockedAdd` 分配槽位，
+    // 线程完成顺序不同 ⇒ 同一个探针两次运行可能落在不同 slot。若随机流跟着 slot 走，那么
+    // "位置 ↔ 方向"的配对每次运行都会变，命中数/辐照度随之逐位不同（实测背靠背 98.6% 像素不同）。
+    // 用探针身份（tileIndex×4 + 单元号）编号后，随机流与槽位解耦 ⇒ 结果可复现。
+    const uint  probeKey = probe.meta.y * 4u + probe.meta.w;
+    const float2 u = ProbeRayRandom(probeKey * dims.y + rayIndex, dims.z);
     // 采样模式：w = 0 → GGX（步骤 21 原样）；w = 1 → 均匀半球（步骤 23 起的默认，SH 0 阶项有解析值）
     const float3 rd = (dims.w == 0u) ? SampleGgxDirection(n, roughness, u)
                                      : SampleUniformHemisphere(n, u);
