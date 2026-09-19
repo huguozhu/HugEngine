@@ -1443,7 +1443,8 @@ python Tools\pt\analyze_pt.py --compare <pt_tag> <deferred_tag> --target hdr
 | 11.5 逐 mesh 细节追踪（精度补齐的首版尝试） | 🟡 已实现、当前无收益（根因已证伪并收敛） | `SDF_RayMarchDetail.comp.slang`（逐 mesh dispatch + InterlockedMin 归约，eps 取该 mesh 体素）：78/256 命中，但"更近命中 0 条"、合并后精度不变（39.0%），detail-first 语义更差（38.5%）已回退。结论：**先补符号判定**，否则"哪里算表面"这一步就是错的（§5） |
 | 11.6 符号（内外）判定 | 🟡 已具备（parity），但对命中精度无改善 | `SDF_MeshBuild.comp.slang` 同循环内 parity 定号并输出带符号距离；细节追踪改为 `\|d\|` 步进/判定；全局注入取 `abs(d)`。距离精度 7.5e-5 不变；**符号一致率仅 76.2%**（parity ↔ 最近三角形法线）—— 根因是场景多为**开放曲面**，"内外"本身无定义（§17.6 第 3 项的同一件事）。sphere tracing 指标逐位不变 ⇒ 下一步改为**细节层主命中 + scatter 提分辨率** |
 | 10.5 Global SDF clipmap 分层 | 🟡 已实现两层、安全 PASS，但**未解决紧度** | `globalLayers=2`（近层 6.16 体素 / 788 单位，远层 24.64 / 3154），march 同时采样两层取最小。两层安全判据均 PASS（未高估），但下界质量仍差（近层 0.0% 在 2 体素内、平均低估 454.6）⇒ 根因钉死为"**AABB 外取到 AABB 的距离**"这一注入语义；下一步换成 scatter（只在 AABB 内注入）+ 洪泛补全（`SDF_MeshFlood` 可复用） |
-| 12–41 | ⬜ 未开始 | — |
+| 12 SDF 帧图接入与调试 | ✅ 已完成 | 帧图有独立的 `Lumen_SDF_Build` compute pass（不声明资源依赖、自管 barrier；`writes` 为空故不被 `CullDeadPasses` 裁掉），SDF 构建与渲染解耦；"关掉 Lumen 无任何影响"已实证：Lumen off 时 `lumen_passes=0`、既有源 dump 与接入前**字节级一致**（第 1~2 轮）。调试视图按 §12 的实现前置待接（复用射线通道做分层归因） |
+| 13–41 | ⬜ 未开始 | 下一步入口：分层归因（射线结果缓冲写回"命中所在层 + 层内场值"），随后进入 Surface Cache（13–19） |
 
 ### 阶段 A：框架前置（不产出画面，但后补等于重构）
 
