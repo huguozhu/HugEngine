@@ -1,0 +1,788 @@
+# Lumen 设计与实现
+
+> 最后更新: 2026-09-19
+> 状态: 设计规范已定稿；实现分阶段推进（部分基础设施已落地）
+
+本文件由两份源文档合并重写而成：《Lumen 与 Nanite 完整设计规范》（只取其 Lumen / 全局光照
+部分，Nanite 部分归 `Nanite设计与实现.md`）与《ReSTIR PT / GRIS 预研》（全文并入附录 A）。
+合并只做重排与连接，源文档中的表格、实测数字、决策记录、里程碑与任务编号均逐条保留。
+
+---
+
+## 0. 本文件怎么读
+
+- **第一 ~ 八章是"设计"**（§1–§8）：Lumen 的目标与定位、可复用的现有基础设施、数据流、
+  Surface Cache、SDF 体系、Screen Probe Gather、Radiance Cache、以及与现有管线的集成方式。
+  这部分是**规范性描述**：它说明"要做成什么样"，不代表已经做完。
+- **第九 ~ 十四章是"实现"**（§9–§14）：§9 是**基于代码实证**的已落地现状（每一项都给
+  `文件:行号` 或符号名，未落地的给出检索关键词与 0 命中说明）；§10、§11 是两项**待落地**的
+  框架前置工作；§12 是 Lumen 里程碑总表（含与 Nanite 的推进顺序关系）；§13 是 Lumen 相关的
+  关键数据结构；§14 是 Lumen 相关的已知风险。
+- **哪些已落地、哪些待落地**，以 §9 为准。要点：GI Provider 统一抽象（`IGIProvider`）、DDGI
+  探针 GI、RT GI（`RTGIPass`）、RT 降噪链数据化（`std::vector<Stage>`）、降噪去重
+  （`SpatialDenoiseAux`）**已落地**；Lumen 本体的 Surface Cache / SDF / Screen Probe /
+  Radiance Cache **全部未落地**（设计在 §4–§7，里程碑 L1–L5）；统一降噪框架的第三步
+  （11.3，§10）与 Provider 执行单位收敛 / 绑定数组化（§11）**待落地**。
+- **附录 A 是 ReSTIR PT / GRIS 预研**：它是 Lumen GI 的落点方案与代价评估（含全部实测数字、
+  成本表、显存推算、里程碑 M0–M3、非目标、通用性分析与复现命令）。它是**决策依据与执行
+  留档**，不是已排期的实现任务。
+- **Nanite 相关的内容不在本文件**：源文档中与 Nanite 同时出现的表述（共享基础设施、帧图
+  插入点、推进顺序）予以保留，但**逐处注明"属 Nanite"**，其设计与里程碑见
+  `Nanite设计与实现.md`。
+
+---
+
+## 一、设计
+
+### 1. 目标与定位
+
+在 HugEngine 的**延迟渲染管线**上集成**动态全局光照（Lumen）**，目标形态为：
+
+- 近场用 **Mesh SDF + Global SDF Clipmap 的软件光线步进（SDF Ray Marching）**做追踪；
+- 远场切换到 **硬件光线追踪（HW RT，VK 1.3 的 AS + RT PSO + SBT）**；
+- 命中点材质通过 **Surface Cache**（Card Capture + Page Table）提供，避免为每条光线重建材质；
+- 屏幕空间以 **Screen Probe Gather** 组织半球追踪，输出二阶球谐（SH）供 Lighting 采样；
+- 低频 GI 由 **Radiance Cache**（在现有 DDGI 基础上升级）承担，做跨帧稳定；
+- 命中点的**直接光照**复用现有 **ClusteredShading LightGrid**。
+
+定位上的三点约束（来自源设计的验证标准）：
+
+1. Lumen 是**延迟管线的一个源**，而不是另起一条管线：产物最终由 Lighting Pass 采样
+   （见 §8 的帧图插入点）。
+2. Lumen 是**多信号共存**的消费方（Screen Probe Gather / Radiance Cache / 反射 / 阴影 / 探针
+   同帧），因此它同时是"统一降噪框架"（§10）与"Provider 执行单位收敛 + 绑定数组化"（§11）
+   这两项框架工作的**真正验收对象**。
+3. 最终性能目标是 **L6 的 60fps @ 1080p**（见 §12 里程碑总表）。
+
+> Nanite 是 Lumen 的 GBuffer 产出来源之一（Nanite Phase 1 直接写现有 5×MRT GBuffer），但
+> Nanite 的设计与实现由 `Nanite设计与实现.md` 负责，本文件不展开。
+
+### 2. 现有基础设施（可复用部分）
+
+下表取自源文档第 1 节。"属 Nanite"一列标注该能力的**主要**服务对象；标注为 Nanite 的行
+仍是 Lumen 可复用的共享基础设施，但它的设计与实现归 `Nanite设计与实现.md`。
+
+| 能力 | 状态 | 用途 | 归属 |
+|------|:---:|------|------|
+| VK 1.3 + RT (AS + RT PSO + SBT) | ✅ | Lumen 远场 HW RT 追踪、Nanite BVH 遍历 | Lumen + 属 Nanite |
+| VK_EXT_mesh_shader | ✅ | Nanite Cluster 硬光栅 | 属 Nanite |
+| GPU Culling (Hi-Z + Two-Phase + PTG) | ✅ | Nanite Instance/Cluster 剔除 | 属 Nanite |
+| VK_EXT_device_generated_commands | ✅ | Nanite 间接绘制生成 | 属 Nanite |
+| GPU WorkGraph (软件模拟) | ✅ | Nanite 剔除链 → Draw 链 | 属 Nanite |
+| Bindless Textures | ✅ | Surface Cache Atalas、Nanite 材质 | Lumen + 属 Nanite |
+| AsyncCompute | ✅ | SDF 更新、Surface Cache 更新 | Lumen |
+| DDGI (探针 GI) | ✅ | 升级为 Radiance Cache | Lumen |
+| GBuffer DeferredPipeline | ✅ | Nanite Phase 1 写入目标 | Lumen + 属 Nanite |
+| ClusteredShading LightGrid | ✅ | Lumen 命中点直接光照 | Lumen |
+| Denoiser (5×5 双边) | ✅ | Screen Probe Gather 空间滤波；**统一降噪框架**见 §10 | Lumen |
+| meshoptimizer | ✅ | Nanite 预处理 Cluster/LOD | 属 Nanite |
+| VMA | ✅ | GPU 内存管理 | 共享 |
+
+> 注：表中 `Denoiser` 一行声明它"可用于 Screen Probe Gather 的空间滤波"，这是**设计意图**；
+> 降噪器类本身已落地（§9），但 Lumen 尚未接入，且其多信号共存的框架（§10 的 11.3）仍待做。
+> 两者不矛盾：能力在，消费方与框架未到。
+
+### 3. 数据流
+
+```
+GBuffer (Albedo/Normal/Emissive/Depth)
+    │
+    ├──→ Surface Cache ──→ Atalas (Albedo|Normal|Emissive)
+    │         │
+    ├──→ SDF Tracing ←── Mesh SDF + Global SDF Clipmap
+    │         │
+    └──→ Screen Probe Gather
+              │
+              ├── 近场 (dist < MaxSDF): SDF Ray Marching → Surface Cache 读材质
+              ├── 远场 (dist >= MaxSDF): HW RT TraceRay → ClosestHit 读材质
+              │
+              ├── Spatial Filter (3×3 YCoCg AABB 裁剪)
+              ├── Temporal Filter (混合 Radiance Cache 历史)
+              └── SH Project (二阶 4 系数) → Radiance Cache
+```
+
+### 4. Surface Cache
+
+| 配置项 | 值 |
+|--------|----|
+| 页面大小 | 128×128 texels |
+| Atalas 总页数 | 1024 (初始，可扩展到 4096) |
+| 虚拟分辨率 | 128² × 1024 = 4096² (→ 8192²) |
+| 每页通道 | RGBA16F × 3 (Albedo|Normal|Emissive) |
+| 页面组织 | 3D Clipmap (世界空间对齐) |
+| 管理方式 | Page Table (虚拟→物理映射) + LRU 淘汰 |
+| Card Capture | Compute Shader 软件光栅化，逐 Card 一个线程组 |
+| 更新触发 | Feedback Pass 检测缺失页 → Request → Allocate → Capture |
+| 失效 | 物体移动/材质变更时标记脏页 |
+
+### 5. SDF 体系
+
+| 组件 | 分辨率 | 格式 | 生成方式 |
+|------|--------|------|---------|
+| Mesh SDF | 128³ per mesh | R16F | Compute Shader (Brute-force 每三角形写入体素) |
+| Global SDF | 512³ 单层 (→ 4 层 Clipmap) | R16F | Compute Shader (Mesh SDF 注入 + 增量更新) |
+| Clipmap 层 | 4 层 × 256³ | R16F | 后续扩展：每层覆盖范围 ×2 |
+
+**SDF Ray Marching**：
+
+- Sphere tracing 步进算法
+- 自适应步长 (最大步数 64, 收敛阈值 0.1 体素)
+- 法线从 SDF 梯度估算 (3 次采样)
+- 跨层切换：当前层步数用完未命中 → 下一层继续
+
+### 6. Screen Probe Gather
+
+| 配置项 | 值 |
+|--------|----|
+| 探针网格间距 | 16×16 pixels (1920×1080 → ~8K 探针) |
+| 自适应合并 | 平坦区域 (法线方差 < 阈值) 合并为 32×32 |
+| 光线/探针 | 8-16 (GGX 重要性采样, 半球分布) |
+| 半球追踪 | 近场 SDF + 远场 HW RT (MaxSDFTrace = 50m) |
+| 命中点材质 | 采样 Surface Cache Atalas |
+| 直接光照 | 命中点查询 ClusteredShading LightGrid |
+| 空间滤波 | 3×3 YCoCg AABB 裁剪 |
+| 时间滤波 | EMA (α=0.2) 混合历史帧 |
+| SH 输出 | 二阶球谐 (4 coeffs RGB) = 12 floats/probe |
+
+**两个追踪路径切换**：
+
+```
+if (rayDistance < MaxSDFTraceDistance)    // 50m 内
+    Compute Shader SDF Trace (spawn from screen probe CS)
+else
+    Indirect TraceRay (HW RT, secondary rays from screen probe CS)
+```
+
+### 7. Radiance Cache（升级 DDGI）
+
+| 变更 | DDGI (当前) | Radiance Cache (目标) |
+|------|------------|----------------------|
+| 探针表示 | SH 三波段 (9 coeffs) | SH 二阶 (4 coeffs)，RGB 独立 |
+| 探针分布 | 均匀 3D 网格 | 自适应密度 (基于几何复杂度) |
+| 追踪方式 | Fibonacci 球面采样 GBuffer | Screen Probe Gather 输入 |
+| 时间混合 | 指数移动平均 | History 重投影 + 时间混合 |
+| 插值 | 三线性探针插值 | 三线性 + 距离权重 |
+
+> DDGI 的现役实现位置见 §9.1（`GI_DDGI` / `DDGIProvider` / `DDGITracePass` / `GIProbeGrid`）。
+
+### 8. 与现有管线集成（DeferredPipeline 扩展、新增 Shader 文件）
+
+**DeferredPipeline 扩展** —— `BuildFrameGraph` 新增 Pass：
+
+```
+BuildFrameGraph 新增 Pass:
+    [Lumen]
+    GPU_Cull → Shadow → SurfaceCache_Update → SDF_Update →
+    GBuffer → ScreenProbeGather → SpatialFilter → TemporalFilter →
+    RadianceCache_Update → Lighting (读 RadianceCache + SurfaceCache)
+    
+    [Nanite (Phase 1)]  ← 属 Nanite，见 Nanite设计与实现.md
+    GPU_Cull → Nanite_ClusterCull → Nanite_LODSelect →
+    Nanite_Rasterize(GBuffer) → Lighting → 后处理链
+```
+
+**新 Shader 文件**：
+
+```
+Engine/Shader/Shaders/
+    Lumen/
+        SurfaceCache_Capture.comp        Card 软件光栅到 Atalas
+        SurfaceCache_Feedback.comp       检测缺失页面
+        SDF_MeshBuild.comp              从三角形构建 Mesh SDF
+        SDF_GlobalInject.comp           Mesh SDF 注入 Global SDF
+        SDF_RayMarch.comp               SDF Ray Marching
+        ScreenProbeGather.comp          屏幕探针半球追踪
+        ScreenProbe_Filter.comp         空间 + 时间滤波
+        ScreenProbe_SHProject.comp      SH 投影
+
+    Nanite/                             ← 属 Nanite，见 Nanite设计与实现.md
+        Nanite_Preprocess.py            Python 预处理工具
+        Nanite_InstanceCull.comp        实例视锥 + Hi-Z 剔除
+        Nanite_ClusterCull.comp         两阶段 Cluster 剔除
+        Nanite_LODSelect.comp           LOD 选择
+        Nanite_SoftRasterize.comp       Compute Shader 软光栅
+        Nanite.mesh                     Mesh Shader 硬光栅
+```
+
+> `Engine/Shader/Shaders/Lumen/` 目录当前**不存在**（§9.2 的核验结果）。
+
+---
+
+## 二、实现
+
+### 9. 已落地现状与落地位置
+
+本章每一项都在仓库中实际检索过。**已落地**给 `文件:行号` 或符号名；**未落地**给检索关键词与
+0 命中说明。检索范围默认为 `Engine/`（含 RHI-free 与 shader 源）。
+
+#### 9.1 已落地（Lumen 将复用的 GI / RT / 降噪基座）
+
+| 能力 | 载体（实证） | 关键符号 / 说明 |
+|------|-------------|----------------|
+| GI 源统一抽象 | `Engine/Render/GI/IGIProvider.h:47` | `class IGIProvider`；`GIProviderContext` 在 `:29`；`GIPassKind{Offscreen,Compute,Custom}` 在 `:50`；`Handles()` `:65`、`NeedsPass()` `:78`、`NeedsRadianceHistory()` `:92`、`GetAuxPassCount()/GetAuxPassName()/GetAuxPassOutput()/GetAuxPassInput()/RenderAux()` `:111`–`:118` |
+| 通道路径栈与合成契约 | `Engine/Render/GI/GITypes.h:193` | `struct GIChannelStack` |
+| DDGI 探针 pass | `Engine/Render/GI/GI_DDGI.h:21` | `class GI_DDGI : public IGlobalIllumination`（实现 `GI_DDGI.cpp`）；**不存在**名为 `DDGIPass` 的文件 |
+| DDGI Provider | `Engine/Render/GI/DDGIProvider.h:21` | `class DDGIProvider final : public IGIProvider`；`GetPassKind()==GIPassKind::Compute`（`:41`）、`HasTextureOutput()==false`（`:48`，产物是探针缓冲，由 shader 的 `SampleDDGI()` 直接读） |
+| DDGI 探针网格拟合 | `Engine/Render/GI/GIProbeGrid.h:50` | `FitProbeGridToBounds(...)`（RHI-free、纯几何、有单测） |
+| DDGI 的 HW RT 追踪 | `Engine/Render/GI/DDGITracePass.h:25` | `class DDGITracePass : public RTEffectPass`（实现 `DDGITracePass.cpp`）；**不存在**名为 `DDGIProbe` 的符号 |
+| DDGI shader | `Engine/Shader/Shaders/RT_DDGI.slang`、`GI/DDGI.comp.slang`、`RayTracing/DDGI_Trace.rgen.slang`；采样端 `Lighting/DeferredLighting.frag.slang`（`u_DDGIProbes`，`kGPUBinding_DDGIProbes=22`，见 `ShaderTypes.slang:87`） | — |
+| RT GI pass | `Engine/Render/RT/RTGIPass.h:18` | `class RTGIPass : public RTEffectPass`（实现 `RT/RTGIPass.cpp`）；shader `RayTracing/RT_GI.rgen.slang`（`:25` 有 DDGI 探针 miss 回退）、`RT_GI.rchit.slang`、`RT_GI.rmiss.slang` |
+| RT 效果 Provider（含降噪链数据化） | `Engine/Render/GI/RTProvider.h:31`、`:266` | `class RTEffectProvider`；`std::vector<Stage> m_Stages;   // 降噪链（顺序即执行顺序）` |
+| 空间降噪器（5×5 双边） | `Engine/Render/PostProcess/Denoiser.h:17` | `class Denoiser`；`kDefaultDepthSigma=10.0f` `:20`、`kDefaultNormalSigma=8.0f` `:21`；参数已可配 `m_DepthSigma/m_NormalSigma` `:49`/`:50` |
+| 时域降噪器（时域累积） | `Engine/Render/PostProcess/RTDenoiser.h:22` | `class RTDenoiser` |
+| 降噪附属 pass 去重实现 | `Engine/Render/GI/SpatialDenoiseAux.h:23` | `class SpatialDenoiseAux`（"主输出 → 空间降噪"附属 pass 的共享实现，`Count(bool)` `:29`） |
+| 降噪器实例计数 = 源文档的 "9 个实例" | `Engine/Render/Pipeline/DeferredPipeline.h:249`–`:258` + `Engine/Render/Pipeline/PathTracingPipeline.h:113` | `RTDenoiser` ×4（`m_ShadowDenoiser`/`m_AODenoiser`/`m_ReflectionDenoiser`/`m_GIDenoiser`，赋值在 `DeferredPipeline.cpp:262/274/286/302`）+ `Denoiser` ×4（`m_ReflectionSpatial`/`m_GISpatial`/`m_DenoiseSSGI`/`m_DenoiseSSR`）；PT 侧 `m_PTDenoiser`（`RTDenoiser`，`PathTracingPipeline.cpp:130`）⇒ `RTDenoiser` 共 **5** 个、`Denoiser` 共 **4** 个 |
+| 降噪参数集中按信号赋值（11.1 的"参数可配"） | `Engine/Render/Pipeline/DeferredPipeline.cpp:139`–`:154` | 注释明确"此前 4 个 Denoiser 实例的参数完全相同（着色器里的固定常量 10 / 8）……现在参数可配，并且**集中在这一处**按信号赋值"；当前仍取默认 `kSpatialDepthSigma/kSpatialNormalSigma` |
+| RT 降噪链名与序（11.2 的判据） | `Engine/Render/GI/RTProvider.h:42`–`:63` | `Stage::Temporal(pass,"RT_Shadow_Denoise")` `:45`；`"RT_Reflection_Temporal"` `:55` → `"RT_Reflection_Denoise"` `:56`；`"RT_GI_Temporal"` `:61` → `"RT_GI_Denoise"` `:62` |
+| GI Provider 注册表 | `Engine/Render/Pipeline/DeferredPipeline.cpp:168`–`:208` | AO `:171`、IBL `:177`、RSM `:183`、SSGI `:189`（`SetDenoiser(&m_DenoiseSSGI)`）、SSR `:195`、DDGI `:201` |
+| RT 效果 Provider 注册 | `Engine/Render/Pipeline/DeferredPipeline.cpp:316`–`:342` | 四种效果（Shadow/AO/Reflection/GI）共用一个参数化 Provider 实现 `RTEffectProvider` |
+| 帧图按 source id 的定制循环（**7 条**） | `Engine/Render/Pipeline/DeferredPipeline_FrameGraph.cpp` | RSM `:426`、DDGI `:570`、AO `:593`（`SSAO`/`GTAO`）、SSR `:621`、SSGI `:671`、RT `:739`（含 `dynamic_cast<RTEffectProvider*>` 与 AS/SBT 选择）、IBL `:839` ⇒ 正好 7 条，与 §11 "现状"一致 |
+| ReSTIR DI（附录 A 的复用对象） | `Engine/Render/RT/ReSTIRPass.h:41`、`Engine/Render/RT/ReSTIRPass.cpp:164` | 三份 SSBO 蓄水池（`Initial` / `Temporal` 双缓冲 / `Final`）；`PathTracingPipeline.cpp:451` 接 `ctx.finalReservoir` |
+| 蓄水池 GPU 结构 | `Engine/Shader/Shaders/ShaderTypes.slang:425` | `GPU_STRUCT PTReservoir`（32 B；`lightIndex` / `weightSum` / `M` / `W` / `lightPos(float4)`）；`Engine/Render/Pipeline/Material.h:59` 有 `static_assert(sizeof(PTReservoir)==32)` |
+| 场景材质/法线纹理 | `Engine/Render/Pipeline/RTPass.h:82`、`RTPass.cpp:527` | `RTPass::BuildSceneMaterialTexture`；材质纹理 **11 行 × N 列**（`RTPass.cpp:542`–`:548` 逐行列出 row0–row10） |
+| PT 无状态确定性随机数 | `Engine/Shader/Shaders/PT_Common.slang:57` `Rand(uint2 idx, uint frame, uint s)`、`:69` `StratifiedJitter(...)` | 附录 A §A.4.2 第 2 条的依据 |
+
+其余源文档 §2 列出的基础设施（`VK_EXT_mesh_shader`、GPU Culling、device-generated commands、
+WorkGraph 模拟、meshoptimizer 等）本轮**未逐项核验**，按源文档表格原样保留；其中标注"属 Nanite"
+的能力归 `Nanite设计与实现.md`。
+
+#### 9.2 未落地（Lumen 本体）
+
+| 检索关键词 | 检索范围 | 结果 |
+|-----------|---------|------|
+| `ScreenProbe` | `Engine/` | **0 命中** |
+| `SurfaceCache` / `Surface_Cache` / `SurfaceCachePage` | `Engine/` | **0 命中** |
+| `MaxSDF` / `RayMarching` / `RayMarch`（覆盖 `SDF_RayMarch.comp`、`MaxSDFTrace`） | `Engine/` | **0 命中** |
+| `Engine/Shader/Shaders/Lumen/` 目录 | `Engine/Shader/Shaders/` | **不存在**（112 个 shader 路径中无 Lumen 子目录） |
+| `Lumen` | `Engine/` | 仅 **1 处注释**：`Engine/Render/GI/SpatialDenoiseAux.h:14`（该注释指向《Lumen设计与实现》§10，即本文档；随本次目录整理同步改指）；除该注释外无任何实现符号 |
+| `DenoiseSignal`（11.3 的信号分派） | `Engine/` | **0 命中** ⇒ §10 的 11.3 未落地 |
+| `needsUpscale`（11.3 的"半分辨率也要降噪"） | `Engine/` | **0 命中** ⇒ 同上 |
+
+**结论**：Lumen 的 **Surface Cache（§4）、SDF 体系（§5）、Screen Probe Gather（§6）、
+Radiance Cache（§7）四块本体全部未落地**，§8 列出的 `Lumen/` shader 文件也一个都不存在。
+仓库里现有的是**可复用的 GI / RT / 降噪基座**（§9.1）。
+
+> 检索口径说明：单独检索 `SDF` 会得到大量命中，但它们全部是噪音 —— 一类是 `BSDF` 的**子串**
+> 命中（`PT_Common.slang`、`DeferredLighting.frag.slang` 等），另一类是第三方库
+> `Engine/External/stb`、`Engine/External/JoltPhysics/.../stb_truetype.h` 的字体 SDF
+> （`stbtt_GetGlyphSDF`），与全局光照无关。因此本表使用 `MaxSDF` / `RayMarch` 这类**不会被
+> `BSDF` 命中**的关键词。
+>
+> 另注（代码注释滞后，不是设计问题）：`Engine/Render/Pipeline/RTPass.cpp:511` 的函数头注释写
+> "场景材质纹理（7×N）"，而同函数 `:542` 与 `Engine/Shader/Shaders/PathTracing/PT_Full.rchit.slang:17`
+> 都写 **11 行**。以实现为准（11 行），附录 A §A.3 表中的"材质纹理 11 行"与此一致。
+
+### 10. 待落地：统一降噪框架
+
+> 本节内容原为《Lumen 与 Nanite 完整设计规范》§5.1，自《HugEngine GI 架构与开发计划》迁入。
+>
+> 这项工作原本挂在 GI 计划的任务 11（统一降噪框架）下，但它**真正的消费方是本项目的
+> Lumen**（多信号共存：Screen Probe Gather / Radiance Cache / 反射 / 阴影 / 探针）。
+> 因此任务与它的状态一并迁到这里，GI 计划只保留设计与现状对照（该文档 §4.4）作为背景。
+> **本节的判据与证据原样保留**，不要因为换了文档就把它当成"未做过的事"。
+>
+> 本节的实现现状由 §9.1 的代码实证佐证（`Denoiser` ×4 / `RTDenoiser` ×5、
+> `SpatialDenoiseAux.h:23`、`RTProvider.h:266` 的 `std::vector<Stage>`、
+> `DeferredPipeline.cpp:139`–`:154` 的集中赋值）。
+
+**为什么必须做（现状）**：每个 Provider 自带降噪 —— `Denoiser`（空间 5×5 双边）×4 与
+`RTDenoiser`（时域累积）×5 = **9 个实例、9 套 PSO、14 张纹理**；两个类的输入签名与参数机制
+互不相同，**降噪器之间不组合**，链条形状由调用方的 `if (IsTemporalIndex(i))` 位置约定表达。
+接 Lumen 时会立刻撞上两件事：① 多信号共存时没有统一的信号分类与历史分配；② 有效性
+（`alpha < 0`）协议在四处断裂（GI 计划 §9.2-C 就是它断出来的缺陷）。
+
+**三步走（每步独立可提交、独立可回退）**：
+
+| 步骤 | 内容 | 状态 |
+|---|---|---|
+| **11.1 去重 + 参数可配** | `SSGIProvider` / `SSRProvider` 里逐行同构的附属 pass 合并为一份实现（`GI/SpatialDenoiseAux.h`）；`Denoiser` 的 `depthSigma` / `normalSigma` 从"着色器里的固定常量"变成可配，并集中在管线的一处按信号赋值 | ✅ **已完成** |
+| **11.2 链条数据化** | `RTProvider` 用 `std::vector<Stage>` 取代 `m_Temporal` + `m_Spatial` 两个指针与"索引 0 是时域、1 是空间"的位置约定；pass 链的枚举/输入输出/PreBind/Render 全部改为遍历该向量 | ✅ **已完成** |
+| **11.3 按信号类型分派** | 引入 `DenoiseSignal`；统一分配历史纹理与采样器；支持把多个信号批量 dispatch；把"有效性（`alpha < 0`）"提升为**框架级契约** | ⏳ **待做（需要本项目的消费方）** |
+
+**11.1 的判据与实测**（背靠背单源采样逐项一致）：用改前/改后两个可执行文件、每次运行一份
+**私有 cfg 副本**（示例程序退出时会回写 cfg，复用同一文件会把配置差异误读成代码差异 ——
+本轮第一次 A/B 就因此得到 −2% 的假差异）对照：`ssgi` 变体 **−0.0009%**、`both` 变体
+**+0.0002%**，都在实测抖动内；白炉 1.0000、单测全绿。
+**参数取值仍是默认 10 / 8 是实测结论、不是漏改**：把 SSGI 放宽到 2 / 2 后高频代理 `mean|Δx|`
+只从 0.000984 降到 0.000935（−5%），整体 `std/mean` 反而不变，HDR 偏移 −1.5% ⇒ **瓶颈是
+5×5 的核本身与缺少时域累积**，这直接指导 11.3 往"更大的核 / 时域"走，而不是调权重。
+
+**11.2 的判据与实测**：三种 RT 效果的 pass 链与改造前**逐个同名同序**（RTGI →
+`RT_GI_Temporal` → `RT_GI_Denoise`；RT 反射 → `RT_Reflection_Temporal` →
+`RT_Reflection_Denoise`；RT 阴影 → `RT_Shadow_Denoise`）；`rtgi_coupling_check` 0.000% PASS；
+三变体读数与白炉不变；**"加一级只需 push"当场演示** —— 临时给 RTGI 多 push 一个 stage，
+pass 列表立刻多出 `RT_GI_Denoise_Third`，框架代码一行未改（演示后已还原）。
+
+**11.3 的验收判据（待做，供实现时照抄）**：
+
+- 抽象选型只有在**真实的多信号共存场景**下才能验收（Lumen 的 Screen Probe / Radiance Cache
+  与既有 GI/反射/阴影信号同帧）——没有消费方的泛化不算验收；
+- 框架级有效性契约：任何信号的降噪输出必须统一表达"本条无效"（`alpha < 0`），且合成端
+  只需读这一个约定；
+- **半分辨率也要降噪**：现在 `SSGIProvider::AuxActive()` 在 `halfRes` 时返回 false，半分辨率
+  输出被直接采样；根治需要 `needsUpscale`（重建升采样）这一信号属性；
+- 与 L6 里程碑的关系：L6 = 时间混合 + 空间滤波 + 异步 Compute，**统一降噪框架是它的前置**，
+  否则 L6 会退化成"再挂一套 Lumen 专用降噪器"。
+
+> **设计细节与现状逐项对照**见《HugEngine GI 架构与开发计划》的 **§4.4**（那一节保留在 GI
+> 文档里：它对比的是 GI 各 Provider 现有降噪器的接口/参数/链条，是这份计划的输入）。
+
+### 11. 待落地：Provider 执行单位收敛与绑定数组化（P6，Lumen 框架前置）
+
+> 本节内容原为《Lumen 与 Nanite 完整设计规范》§5.2，自 GI 计划迁入。
+>
+> 这两项原本挂在 GI 计划的任务 19 / 20 下。它们的验收对象**只有 P6 与 Lumen** ——
+> 没有消费方的泛化无法验收（GI 计划 §4.3.5 的"三层改造"是它们的设计背景，那节留在
+> GI 文档里）。因此任务与状态一并迁到这里：**GI 计划只保留设计，不再列任务**。
+
+**19 · PROVIDER-EXEC：执行单位从「Provider × 通道」改为「Provider」**
+
+- 目标：帧图的执行单位变成"一个 Provider 每帧只注册一次 pass"，即使它的源 id 同时出现在
+  多个通道的层栈里 —— **这正是 Lumen 的天然形状**（一份估计量同时喂漫反射与镜面）。
+- 现状：GI 计划的帧图有 7 条按 source id 定制的循环；一个 Provider 若同时 `Handles(SSGI)`
+  与 `Handles(SSR)`，会被两条循环各跑一遍。
+  （§9.1 的实证：`DeferredPipeline_FrameGraph.cpp` 的 7 条循环 —— RSM `:426`、DDGI `:570`、
+  AO `:593`、SSR `:621`、SSGI `:671`、RT `:739`、IBL `:839`。）
+- 做法：循环体按**已被声明却零消费的 `GetPassKind()`** 选择 pass 形状
+  （`Offscreen` / `Compute` / `Custom`），输出按 `GetDiffuse/Specular/AOOutput()` 落到对应
+  通道。**无需新增接口方法** —— `Handles()` 已支持"一个 Provider 属于多个 id"（SSAO/GTAO 是先例）。
+- **迁移策略（逐类，每步可独立验证）**：
+  1. **先只合并 specular 与 diffuse 两条循环** —— 形状几乎完全相同（都读 depth+normal+
+     albedo、都有附属降噪链、都以 `GetFinalXOutput()` 收尾），而且**恰好就是 Lumen 需要
+     共享的那一对通道**；改动最小、可独立回退；
+  2. **AO 循环暂不动**：它形状不同（不读 albedo、半分辨率尺寸处理不同），且存在"输出绕过
+     Provider 直接进 Lighting"的旁路（GI 计划 §4.3.2 的实例），要先归位旁路；
+  3. `Compute`（DDGI）与 `Custom`（IBL）暂留原样，最后收；
+  4. RT 循环因涉及 `dynamic_cast<RTEffectProvider*>` 与 AS/SBT，**留到最后或不动**。
+- **验收判据**：同一环境下**背靠背**的单源采样逐项一致（pass 集合与顺序、各 `provN_raw/final`
+  纹理数值）+ 白炉 1.0000 + 单元测试全绿（GI 计划 §11.3.1 的测量异常已修复，绝对量级也可复现）。
+- **逃生口（重要）**：本项**不是**解锁 Lumen 的必要条件 —— 随时可以像 IBL/RSM/RT 那样给
+  Lumen 加**第 8 条定制循环**，它的 pass 照样只注册一次、不存在双跑。故本项是**可维护性投资**；
+  若优先级不足，可推迟到真正接 Lumen 或 P6 之前。
+- 风险：中 —— 帧图是核心路径；对策是逐类迁移 + 每步背靠背判据（GI 计划 §11.4）。
+
+**20 · P6 · ReSTIR GI 统一估计器 + 纹理绑定数组化 / 跨通道共享**
+
+- 内容：① **P6**：把 GI 的估计器统一成 ReSTIR 形式（GI 计划 §4.3.5 第三层要的"统一估计器"）；
+  ② **纹理绑定数组化**：`LightingInputs` 的具名字段 + shader 的 per-id `case` 换成"每通道
+  一组源纹理、按槽位索引取样"（UBO + 描述符 + shader + 合成循环一起改）。
+- 为什么两者必须同时做：第三层的泛化**需要 P6 或 Lumen 作为验收对象** —— 只做数组化而没有
+  第二个真实估计器，就是把"猜出来的槽位数量"当成设计；只做 P6 而不数组化，Lumen 与 P6 就会
+  各自以特例形式落地（每个都加一条定制循环 + 一套具名绑定）。
+- 验收判据（实现时照抄）：① 至少两个真实估计器（例如 P6 与 DDGI/SSGI）以**同一套槽位机制**
+  共存并各自可单独关闭；② 合成端不再认识任何源 id（只认槽位）；③ 背靠背单源采样逐项一致 +
+  白炉 1.0000 + 单测全绿。
+- 状态：**长期项**，未开始；它的位置在 Lumen（L1–L5）之后与 P6 一起，见 §12 的推进顺序。
+- **落点确认（2026-09-19）**：`全路径追踪管线规划.md` §12 B7（ReSTIR PT / GRIS）的落点**确定归本项的 P6**（PT 侧不实现，只保留"薄适配"接口：PT 的 RayGen 采样共享内核输出的 radiance + validity 纹理）。该决策的依据、代价评估（实测成本表 / 显存 / 冷缓存编译）与执行里程碑（M1 GRIS-lite → M2 完整 GRIS → M3 与 DI/P6 统一）见**本文附录 A**（含 §A.8 通用性分析：哪些层可共用、哪些必须各写一套）。
+
+> **与"统一降噪框架"（§10）的关系**：两者都是"多信号共存"的框架前置 —— §10 管降噪的
+> 信号分类与历史分配，本节管**执行单位与绑定**。Lumen 接入时会同时撞上这两件，故建议
+> 一起设计、分步提交。
+
+### 12. 里程碑总表
+
+#### Lumen
+
+| 里程碑 | 内容 | 验证标准 |
+|--------|------|----------|
+| **L1: SDF** | Mesh SDF 生成 + Global SDF + SDF Ray Marching | 可视化 SDF 追踪结果 |
+| **L2: Surface Cache** | Card Capture + Page Table + Feedback | Atalas 正确显示材质 |
+| **L3: Screen Probe** | 探针放置 + SDF 追踪 + SH 投影 | 半球追踪产生漫反射 GI |
+| **L4: HW RT 远场** | 远场切换 HW RT + 混合追踪 | SDF 近 + RT 远正确混合 |
+| **L5: Radiance Cache** | 升级 DDGI → 二阶 SH + 自适应密度 | 室内/室外稳定 GI |
+| **L6: 降噪+优化** | 时间混合 + 空间滤波 + 异步 Compute（**前置：§10 的统一降噪框架**） | 60fps @ 1080p |
+
+#### 建议推进顺序
+
+```
+N1(预处理) → N2(剔除) → N3(软光栅 GBuffer) → L1(SDF) → L2(SurfaceCache)
+→ L3(ScreenProbe) → N4(硬光栅) → L4(HW RT远场) → L5(RadianceCache)
+→ §10 统一降噪框架（11.3） → L6+N5+N6(优化)
+→ §11 框架前置（Provider 执行单位 / 绑定数组化）+ P6 统一估计器（长期）
+```
+
+先跑通 Nanite 基本渲染（N1-N3），因为它产出 GBuffer 写入能力。然后基于 Nanite 的 GBuffer 上
+Lumen（L1-L3）。
+
+> **归属说明**：本推进顺序中带 `N` 前缀的项（`N1`–`N6`）与"N1(预处理) → N2(剔除) →
+> N3(软光栅 GBuffer)"、"N4(硬光栅)"、"N5+N6"均为 **Nanite 里程碑，属
+> `Nanite设计与实现.md`**，此处保留是为了给出 Lumen 的插入位置；Nanite 的里程碑明细表
+> （N1 预处理 / N2 上传+剔除 / N3 软光栅 / N4 硬光栅 / N5 LOD 流式 / N6 材质批次）同样归
+> `Nanite设计与实现.md`，本文件不重复。
+
+### 13. 关键数据结构（Lumen 相关）
+
+#### Surface Cache Page
+
+```cpp
+struct SurfaceCachePage {
+    uint3  worldCoord;        // 3D Clipmap 世界坐标
+    float4 albedo[128*128];   // RGBA16F Atalas
+    float4 normal[128*128];   // RGBA16F
+    float4 emissive[128*128]; // RGBA16F
+    uint   lastAccessFrame;   // LRU 淘汰时间戳
+    bool   dirty;             // 需要重新 capture
+};
+```
+
+#### Screen Probe
+
+```cpp
+struct ScreenProbe {
+    float3 worldPosition;
+    float3 worldNormal;
+    float  viewDepth;
+    float4 SH_R;              // SH 二阶 R 通道 (4 coeffs)
+    float4 SH_G;              // G 通道
+    float4 SH_B;              // B 通道
+};
+```
+
+> 源文档第 6 节另有 `NaniteCluster`（GPU）结构，属 Nanite，见 `Nanite设计与实现.md`。
+> 本节结构**均未落地**（§9.2）。
+
+### 14. 已知风险（Lumen 相关）
+
+| 风险 | 缓解措施 |
+|------|---------|
+| SDF 生成性能 | 预处理阶段完成 Mesh SDF，运行时只更新 Global SDF 注入 |
+| Surface Cache Atalas 碎片化 | LRU + 定期整理 (defrag pass) |
+| 两台追踪路径切换 discontinuity | SDF 最大距离结束前 N 步做 overlap fade |
+
+> 源文档第 7 节另有两条纯 Nanite 风险（"软件光栅化效率"、"`.nanite` 格式版本兼容"），
+> 归 `Nanite设计与实现.md`。
+
+---
+
+## 附录 A：ReSTIR PT / GRIS 预研（Lumen GI 的落点方案与代价评估）
+
+> **本附录的边界（2026-09-19）**：只做 **设计细化 + 代价评估**，供"是否把 PT 转为实时主路径"这个决策用。
+> 它**不改变** `全路径追踪管线规划.md` §0.1 的定位（PT = 参考渲染器），**不动** §10/§11，
+> 也**不改变** §12 B 组的触发条件。本附录不含任何代码改动。
+>
+> **决策已下（2026-09-19）**：① ReSTIR GI/GRIS 的落点 = **P6 / Lumen 侧**（本文的 M0~M3 归那边执行，PT 侧只保留"薄适配"这一条接口要求）；② **PT 不转实时主路径** ⇒ B7 保持未做。本附录自此转为该决策的**依据与执行留档**（若将来重新评估，先看 §A.4.1 的成本表与 §A.8.6 的组合结论）。
+>
+> 所有数字都标了来源（代码位置 / 实测命令 / 日志），可复现；推算部分明确写"推算"。
+
+### A.1 结论摘要
+
+| 问题 | 结论 |
+|---|---|
+| 技术上能不能做？ | **能**，且缺口比预期小：PT 的随机数是**无状态确定性**的（`Rand(idx, frame, s)`），随机重放式 shift 只需存 `(源像素, 源帧)` 两个 uint，不需要逐顶点 RNG 状态 |
+| 主要工作量在哪？ | 引擎**完全没有 shift / 雅可比 / 重连机件**（全库检索 0 命中）。这不是"多算几个 bounce"，而是**新增一套路径复用的数学与数据结构** |
+| 主要门槛是什么？ | **显存**（完整路径蓄水池 1080p 推算 1.2~2.8 GB；实测 PT 全链路在 1080p 已占 3528 MiB、桌面基线 1897 MiB ⇒ 叠加后 4.7~6.3 GB/8 GB，**没有余量**；GRIS-lite ≈ 0.5 GB 则余量充足）+ **shift 写错即引入偏差** |
+| 时间增量 | 复用 pass 本身很便宜（实测 ReSTIR DI 三个 compute 只 +0.35~0.60 ms @960×540）；成本几乎全在光线（1 个额外路径样本 ≈ 2.1 ms @b=1 / 9.4 ms @b=4） |
+| 在"参考渲染器"定位下值得做吗？ | **现在不值得**。同样质量可用多 SPP 换（本附录给了换算表；实测 1440p 下 1spp×1bounce 只要 10.3 ms、1spp×4bounce 28.9 ms），而"标准答案"最怕的是**偏差**：写错 shift 的 GRIS 比慢的 PT 更糟 |
+| 触发后怎么做？ | 三步：**M1 = ReSTIR GI（1 顶点重连）** → **M2 = 完整 GRIS（随机重放 + 时域/空间复用）** → **M3 = 与 DI/P6 统一**；无偏性判据用**现有迭代式 PT 当 oracle** 对照（本项目独有的便利） |
+| 落点与触发（**已决，2026-09-19**） | 落点 = **P6 / Lumen 侧**（实现一份内核，PT 侧只做薄适配）；**PT 不转实时主路径** ⇒ B7 保持未做。前置条件见 §A.8.5（11.3 统一降噪框架 + P6 数组化/PROVIDER-EXEC）。 |
+
+### A.2 现状盘点：B7 能复用什么、缺什么
+
+| 项 | 现状 | 出处 |
+|---|---|---|
+| ReSTIR DI | ✅ 三个 compute（Init/Temporal/Spatial）单 RG Pass 顺序执行；蓄水池双缓冲 + 历史 depth/normal 双缓冲 | `Engine/Render/RT/ReSTIRPass.{h,cpp}`、`PathTracingPipeline.cpp` 的 `ReSTIR_DI` pass |
+| 蓄水池结构 | `PTReservoir` **32 B**：`lightIndex / weightSum / M / W / lightPos(float4)` —— 只存**一个光源样本** | `ShaderTypes.slang` 的 `GPU_STRUCT PTReservoir` |
+| 目标函数 | 复用 PT 第 5 UAV 的真实 albedo/metallic，`PBR_BRDF(albedo, metallic, roughness, N, V, L)·Li` | `ReSTIR_Init.comp.slang` |
+| PT 路径结构 | **单 RayGen 迭代循环**（NEE + MIS + 轮盘赌 + 天空），命中信息经 112B `PathPayload` 回传；**没有逐 bounce 的 shader 分离** | `PT_Full.rgen.slang` / `PT_Full.rchit.slang` / `RT/PathPayload.h` |
+| 随机数 | **无状态确定性**：`Rand(idx, frame, s)` / `RandInt(...)` / `StratifiedJitter(sampleIdx, sampleCount, frame)`，全部由 `(像素, 帧, 维度槽 s)` 决定 | `PT_Common.slang` L43~76 |
+| 材质/贴图数据 | 材质纹理 **11 行**（含 `materialID`/`textureMask`/因子）、三角形法线 + UV 纹理、`PBR_BRDF` 求值端共用 | `RTPass::BuildSceneMaterialTexture`、`全路径追踪管线规划.md` §0.6 缺陷 3 |
+| 对照/验证设施 | `HE_DUMP_PT` 落盘、`Tools/pt/dump_pt.ps1`、`analyze_pt.py`（`--diff/--compare/--converge`）、`HE_DUMP_MODE=deferred` | `全路径追踪管线规划.md` §12 任务 5/6 完成记录 |
+| **shift / 雅可比 / 重连** | ❌ **0 命中**：`Jacobian` / `shiftMapping` / `ShiftMapping` / `reconnection` / `Reconnection` / `GRIS` / `PathReservoir` 全库（排除 `External/`）均 0 | 见 §A.9 的检索命令 |
+| **路径蓄水池** | ❌ 不存在（现有蓄水池只够 DI：光源索引 + 位置 + W） | 同上 |
+| **重放/重连的 RayGen 入口** | ❌ 不存在（PT 只有 `FullPT` 一条 RT 管线） | `PTPass`/`RTPass::CreateEffectPipeline` |
+
+**一句话**：DI 那套"蓄水池 + 时域/空间复用 + 帧图接线"可以照搬；缺的是 **shift 映射（含雅可比与可见性校验）**、**路径数据的存储与压缩**、**一个能"按给定路径重放/重连"的 RayGen**。
+
+### A.3 目标形态（一个具体设计）
+
+#### A.3.1 两种候选形态
+
+| | 形态 A：GRIS-lite（= ReSTIR GI 的一般化） | 形态 B：完整 GRIS（路径重采样） |
+|---|---|---|
+| 复用什么 | 把 bounce0 的**间接光**换成一个"首个间接顶点"样本：`(x1 位置, x0→x1 的吞吐, x1 处的 NEE 辐射度)`，复用时要**重连**（重算 x0→y1 边 + 可见性） | 复用**整条后缀路径** `[x1..xR]`；首边重连 + 更深的段用**随机重放**（同随机数重放）或存路径顶点 |
+| 需要的 shift | 重连 shift（闭式雅可比） | 重连 + 重放 shift（重放需 `(源像素, 源帧)`） |
+| 显存/像素 | ≈ 80 B × 3 槽（推算） | ≈ 200~450 B × 3 槽（推算，见 A.4.3） |
+| 能治的病 | 间接漫反射噪声（含大光源/环境光） | 焦散、多次弹射的间接光、难采样路径 |
+| 实现风险 | 中（= 现有 DI 的 1 次泛化） | 高（路径存储 + 两种 shift + 雅可比 + 可见性 + MIS 权重） |
+| **建议** | **M1 做这个** | M2 再做 |
+
+> 形态 A 与 `全路径追踪管线规划.md` §6.1「ReSTIR GI」是同一件事。**先做 A 再谈 B**：A 能把 shift 机件、数据布局、无偏性判据全部跑通，且是 B 的子集。
+
+#### A.3.2 数据结构（形态 A，逐字段）
+
+```
+// 每像素一份（累积到 FinalReservoir，供下帧 PT 使用）
+struct PTIndirectReservoir {   // 推算 80 B（可压到 48 B：位置/方向用 fp16、W 用 fp32）
+    uint   valid;              // 0 = 无效（天空/无命中/被拒）
+    uint   M;                  // 累计候选数
+    float  W;                  // 选中样本的（重连后）目标函数值
+    uint2  srcPixel;           // 样本来源像素（随机重放 shift 用）
+    uint   srcFrame;           // 样本来源帧（随机重放 shift 用）
+    uint   rngSlot;            // 该样本对应的维度槽编号（重放的维度对齐）
+    float3 posX1;              // 首个间接顶点位置（重连用）
+    float3 throughput;         // x0→x1 的吞吐（含 BSDF/pdf/几何项，按来源像素的 BSDF 算好？否——见下）
+    float  pdfX1;              // 采样 pdf（重连需换算）
+    float3 radiance;           // x1 处的入射辐射度（NEE 或 1 条 shadow ray 的结果）
+    float3 normalX1;           // x1 法线（重连的几何项 + 目标函数判据）
+};
+```
+
+**关键实现要点（决定 reservoir 能不能只存这些）**：
+
+1. **吞吐不能预先乘来源像素的 BSDF**：shift 后的一阶边属于*当前*像素，`f(y0)·G(y0,x1)/pdf_shift` 必须在**目标像素**重算。因此 reservoir 只存"材质量（`normalX1`、`posX1`、`radiance`）"，与"来源像素的 BSDF 无关"。
+2. **重放式的随机数**：因为 `Rand` 是 `(idx, frame, s)` 的纯函数，深段重放只需 `(srcPixel, srcFrame, rngSlot)`；`rngSlot` 用现有维度槽编号约定即可，**无需逐顶点存 RNG**（这是本引擎独有的便利，见 §A.2）。
+3. **重连的可见性**：`x0→x1` 一条 shadow ray；失败即丢弃该候选（GRIS 的标准做法）。
+4. **雅可比**：重连 shift 的 `|∂T/∂x|` 用闭式解（GRIS 论文给出；实现时写成 `Tools/check_*` 式的可单测函数，配 doctest）。
+
+#### A.3.3 Pass 划分与帧图插入点
+
+现有链（`PathTracingPipeline::BuildFrameGraph`）：
+
+```
+AS_Build → PT_Render(PT_Full: RayGen 迭代) → [ParticleRender] → ReSTIR_DI → PT_Denoise → PT_Atrous → ToneMap → FXAA
+```
+
+B7 之后的链（形态 A）：
+
+```
+AS_Build → PT_Indirect_Init（新，1 条间接光线/像素 → 首顶点样本 → PTIndirectReservoir）
+        → PT_Render（bounce0 的间接光改为读 FinalReservoir；直接光仍走 NEE）
+        → ReSTIR_DI（不变，负责直接光）
+        → PT_Indirect_Temporal（新：速度重投影 + 历史合并 + 重连）
+        → PT_Indirect_Spatial（新：邻域复用 + 重连）
+        → PT_Denoise → PT_Atrous → ToneMap → FXAA
+```
+
+- **新增 1 条 RT 管线**（`PT_Indirect_Init` 的 RayGen，或复用 `PT_Full` 加 flag 分支）+ **2 个 compute**（Temporal/Spatial，可复用现有 DI 的 PSO 骨架）。
+- `PT_Indirect_Init` 与 `PT_Render` 都需要"从像素发射间接光线并求交"的能力，现有 `PT_Full.rgen` 已有全部代码，**加一个 flag 走不同出口即可**（避免多一条 RT 管线的编译与 SBT 维护成本）。
+- 帧图资源：`PTIndirectReservoir` 双缓冲（跨帧，SSBO，不进 RG，与现有 `FinalReservoir` 同款约定）。
+
+> 注：源文档此处不一致 —— 本文 §11 的"落点确认（2026-09-19）"写明"PT 侧不实现，只保留薄适配
+> 接口"，而本小节是按 **PT 帧图（`PathTracingPipeline::BuildFrameGraph`）**给出新增 pass 插入点
+> 的形态设计。两者保留，不在此裁决：前者是**落点决策**，后者是**形态与代价的设计载体**
+> （落点改到 P6 后，这套 pass 划分即成为 P6/Lumen 侧的形状参照）。
+
+#### A.3.4 无偏性要点（写给实现者）
+
+- 复用必须满足：`W_shifted = p̂(y0)·... / (M · p_shift(x))`，其中 `p_shift` 是**shift 后的 pdf**（含雅可比）；漏掉雅可比 ⇒ 系统性偏差，且在"参考渲染器"定位下是**致命**的（比慢更糟）。
+- MIS/权重：时域与空间合并用 pairwise MIS（与现有 DI 的加权和保持同一套写法，避免两套约定）。
+- 可见性拒绝是一种**合法的零贡献**（不引入偏差），但要在 `M` 的记账上保持一致（与 DI 的 `weightSum/M` 同样处理）。
+- 目标函数必须用**当前像素**的 albedo/metallic（现有 `albedoMetallic` UAV 已经在做这件事，直接沿用）。
+
+### A.4 代价评估（实测优先）
+
+#### A.4.1 现有 PT 成本曲线（实机实测）
+
+环境：`Samples/05.Sponza-PathTracing`，**960×540**（示例内置 `config.windowWidth/Height`），NVIDIA **RTX 4060 Laptop 8 GB**，驱动 595.79，
+时域降噪 + A-Trous 开、ReSTIR DI 关，Sponza（105 实例）。
+
+| `pt_spp` × `pt_bounces` | ms/帧 | FPS | 说明 |
+|---:|---:|---:|---|
+| 1 × 1 | **2.1** | 468~477 | 当前 `Content/Config/05_...cfg` 的取值 |
+| 1 × 4 | **9.4** | 107~108 | |
+| 4 × 4 | **38.4** | 26.0 | |
+| 6 × 7 | **61.1** | 16.4 | 与一次 25 s 冒烟实测的 16.5 FPS 完全吻合 |
+
+- **边际成本**（1 spp 下）：bounce 1→4 每多一个 bounce ≈ **+2.4 ms**；4 bounces 下每多一个 spp ≈ **+9.2 ms**；即"每 spp ≈ 一条 b=4 的路径链"。
+- **分辨率维**（外部 `MoveWindow` 改窗口，按日志里的纹理尺寸确认实际分辨率；本机桌面为 5120×1440，故 1440p 可测）：
+
+  | 分辨率 | ms/帧 | FPS | 峰值显存（`nvidia-smi`，含桌面 1897 MiB 基线） |
+  |---|---:|---:|---:|
+  | 960×540 | **2.05** | 488 | 2916 MiB（Δ1019） |
+  | 1920×1080 | **5.75** | 174 | 3528 MiB（Δ1631） |
+  | 2560×1421 | **10.32** | 97 | 3826 MiB（Δ1933） |
+  | 2560×1421（1 spp × 4 bounce） | **28.89** | 35 | — |
+
+  像素 ×4 而帧时只 ×2.8 ⇒ 存在与分辨率无关的每帧固定开销；显存增量含 VMA 池缓存与交换链/驱动开销，
+  **不要**把它当逐像素预算用（逐像素预算仍以 §A.4.3 的设计公式为准）。
+- ⚠ **不要把上面这组数外推成跨分辨率的公式**。曾写过 `ms ≈ spp × (2.1 + 2.4 × (b−1))`，它只在 960×540 拟合：
+  · 在 960×540 的 4×4 上误差 <3%，`6×7` 上高估（轮盘赌截断深弹射）；
+  · **跨分辨率不成立**：像素 ×7（0.52 → 3.64 MP）时 1×1 只 ×5.0、1×4 只 ×3.1（见上表）；
+  · 低分辨率读数还可能被**每帧 CPU/日志开销**钳制（960×540 下 1×1 已达 488 FPS ≈ 2.05 ms/帧，而引擎每帧约 20 行日志 + 帧图重建）。
+  ⇒ 结论：**报成本一律给实测表（分辨率 × spp × bounce）**，需要新档位就实测一格，不要套公式。
+- 测量口径（重要，避免复现歧义）：`Content/Config/05_Sponza-PathTracing.cfg` 会被示例**回写**（实测该文件在 2026-09-19 10:59 被写过一次，内容从 `6 spp / 7 bounce` 变成 `1 spp / 1 bounce`）；因此
+  **测量必须走 `HE_CFG` 私有副本**（`Tools/pt/set_cfg.py` 覆盖），脚本见 `build/verify/measure_pt_cost.ps1` / `recheck_pt_fps.ps1`。
+  表里 `6×7 = 16.4 FPS` 与那次 25 s 冒烟实测的 16.5 FPS 吻合，说明**冒烟当时**的基础 cfg 是 6×7，而不是现在的 1×1。
+
+#### A.4.2 复用 pass 的开销（实测，GRIS 复用成本的下界代理）
+
+| 配置 | 无 ReSTIR | 有 ReSTIR DI | 增量 |
+|---|---:|---:|---:|
+| 1 spp × 1 bounce | 2.14 ms | 2.49 ms | **+0.35 ms** |
+| 1 spp × 4 bounces | 9.37 ms | 9.97 ms | **+0.60 ms** |
+
+⇒ **3 个 compute dispatch（含 M=16 候选的 shadow ray 与 5 邻居空间复用）在 0.52 MP 上只要 0.35~0.60 ms**。结论：**复用的调度与邻域开销可忽略，成本全在光线数量上**。GRIS 的增量因此主要看"每帧多打几条路径光线"：
+
+- 形态 A：bounce0 的间接光从"NEE 1 条 shadow ray"变成"1 条间接光线 + 复用时的 1 条重连 ray/候选" ⇒ 粗估 **+2~5 ms @0.52 MP**（≈ +1 个 spp 当量的一部分）。
+- 形态 B：每帧多一整个路径链 + 复用候选的重放 ⇒ 粗估 **+10~25 ms @0.52 MP**（把 468 FPS 基线压到 ~30~60 FPS），且随 bounce 数线性增长。
+
+#### A.4.3 显存（推算，公式给出便于复算）
+
+**现状 @960×540（518,400 px）**：
+
+| 项 | 计算 | 大小 |
+|---|---|---:|
+| ReSTIR DI 蓄水池 ×4 | `4 × W·H × 32 B` | **66.4 MB** |
+| ReSTIR 历史 depth/normal ×2 | `2 × W·H × (4+8) B` | 12.4 MB |
+| PT 5 个 UAV | `W·H × 32 B`（8+4+8+4+8） | 16.6 MB |
+| 材质/法线/UV 纹理（Sponza） | `n×11×16 B` + `3·tris×(16+8) B` | ≈ 12 MB |
+| 小计（PT 链路） | | **≈ 107 MB** |
+
+**B7 新增（推算）**：
+
+| 形态 | 每像素每槽 | ×3 槽 | @0.52 MP | @1080p（4× 像素） |
+|---|---:|---:|---:|---:|
+| A：GRIS-lite | 80 B | 240 B | **≈ 124 MB** | ≈ 500 MB |
+| B：完整 GRIS（R=4~7，48~64 B/顶点） | 192~448 B | 576~1344 B | **≈ 0.30~0.70 GB** | **≈ 1.2~2.8 GB** |
+
+⇒ **实测锚点（本机 8 GB）**：960×540 全链路峰值 **2916 MiB**、1920×1080 **3528 MiB**（桌面基线 1897 MiB）。据此叠加：形态 A（1080p ≈ 0.5 GB）余量充足；形态 B（1080p 推算 1.2~2.8 GB）叠加后约 **4.7~6.3 GB / 8 GB**——不是"绝对不可行"，而是**没有余量**（驱动/桌面/其它应用都在这块卡上）。因此形态 A 仍是唯一现实的起点。压缩手段（fp16 位置/法线、`radiance` 用 RGB9E5、路径顶点按需存）能把 B 压到约一半，但**压缩本身又是一个独立的正确性风险源**（要在无偏性判据下验证）。
+
+> 注：源文档此处不一致（同一份预研内部）—— §A.6 的 **M2 验收判据**要求"显存 ≤ 1 GB @1080p"，
+> 而本节的推算给出形态 B @1080p 为 **1.2~2.8 GB**（压缩后约减半）。两者保留，不在此裁决：
+> 前者是**验收门槛**，后者是**当前推算**，其差值正是 M2 需要靠压缩与实测去弥合的部分。
+
+#### A.4.4 管线数量与编译时间（实测，含与文档数字的差异）
+
+- 现有 RT 管线：`05` 只建 **1 条**（FullPT）；`04` 建 **5 条**（RTShadow/RTAO/RTReflection/RTGI/DDGITrace）。
+- 实测创建耗时（**磁盘 PSO 缓存热**）：`05` 的 FullPT `27.405 → 27.406` ≈ **1 ms**；`04` 的每个效果管线 ≈ **2 ms**。
+- **冷缓存实测（已补测）**：删掉 `build/Samples/05.Sponza-PathTracing/pipeline_cache.bin` 后重跑 ——
+  `CreateRTPipelineState → CreateEffectPipeline 完成` 仍在**同一毫秒内**（≈ **1 ms**），PSO 插入次数 17 与热缓存一致，
+  启动到首帧 **4.82 s（冷）vs 5.00 s（热）**，稳态帧率 482 FPS 与热缓存相同。⇒ **本机（RTX 4060 Laptop）不存在
+  "RT 管线编译 20 s"的问题**，启动耗时由 Sponza 加载/解码主导。
+- ⚠ 两点保留：① `全路径追踪管线规划.md` §11 记的"本机 Intel Arc 上 RT 管线编译约 20 s/个"是**另一台机器**的数字，
+  在按多 PSO 规划 B7 时要按目标机器复核；② 上述"冷"是**引擎级冷缓存**（删的是引擎自己的 `pipeline_cache.bin`），
+  **驱动级冷缓存未测**（NVIDIA 另有自己的着色器缓存，清理它属于机器特性、会影响其它应用，故不做）。
+- 脚本：`build\verify\measure_b7_unknowns.ps1`（三段：960×540 基线 / 外部 resize 到 1920×1080 / 删缓存冷启动，测完自动恢复缓存）。
+
+#### A.4.5 工程面清单（形态 A 的最小集合）
+
+| 类别 | 内容 | 规模（估算） |
+|---|---|---|
+| Slang | 新 `PT_Indirect_Init`（可复用 `PT_Full.rgen` 加 flag 分支）+ `PT_Indirect_Temporal/Spatial.comp` + `PTIndirectReservoir` 结构 + 重连/雅可比函数 | 3~4 个文件，~600 行 |
+| C++ | 新 `ReSTIRIndirectPass`（照 `ReSTIRPass` 骨架：布局/PSO/SSBO/历史纹理/`Execute`）+ 帧图 3 个 pass + CVar 6~8 个 + `PT_Render` 读蓄水池的分支 | ~700 行 |
+| RHI | **无需新能力**：只用现有 SSBO + UAV + compute + RT 管线（`descriptorBindingStorageBufferUpdateAfterBind` 等已启用）；**不需要 SER**（那是 B8） | 0 |
+| 工具/文档 | 无偏性对照脚本（复用 `analyze_pt.py --compare/--diff`）、收敛判据沿用任务 6 | 小 |
+| 单测 | 雅可比闭式解、shift 的可见性/退化处理、reservoir 记账（`M`/`W`） | 3~5 个 doctest |
+
+### A.5 风险与未知
+
+1. **偏差（最高风险）**：漏雅可比、shift 后未重算几何项、可见性条件写错，都会让"标准答案"悄悄变偏。**必须**把"GRIS vs 迭代式 PT 的逐像素对照"作为准入门槛，而不是事后检查。
+2. **两套估计器的语义分裂**：`ReSTIR GI` 的落点已在 `全路径追踪管线规划.md` §12 C16 归到 P6（本文 §11 任务 20）。若 PT 侧另起一套，会出现"bounce0 的直接光由 DI 负责、间接光由 PT 版 GI 负责、Lumen 侧还有 P6"的三方重叠。**触发前先定落点**。
+3. **显存**：形态 B 在 1080p ≈ 1.2~2.8 GB（推算）——本机 8 GB 上大概率不可行；即使形态 A 也要与 5 个 PT UAV + 降噪历史 + 场景纹理争用。
+4. **RT 着色器发散**：GRIS 让相邻像素走不同深度的路径，发散更严重；本机**未启用 SER**（B8 未做），这部分收益拿不到，实时化路线存在连带依赖。
+5. **仍未知**：① 驱动级冷缓存的 RT 管线编译时间（引擎级已测 ≈1 ms，见 §A.4.4）；② `Rand` 在「跨帧重放」时的相关性（源帧与当前帧同层会否产生时空相关，需要一次专门的相关性检查——这是随机重放 shift 的正确性前提）；③ 目标机器（非本机）的 RT 编译与显存行为。
+6. **收益边界**：GRIS 的价值在**实时**预算下最大。作为离线/交互式参考渲染器，现有 1 spp×b=4 只需 9.4 ms，配合时域累积 30 帧即收敛（`全路径追踪管线规划.md` §12 任务 6：p50 在帧 30 变化 0.000%），**已经够用**。
+
+### A.6 里程碑与验收判据（触发"PT 转实时主路径"之后再执行）
+
+| 里程碑 | 内容 | 验收判据（可执行） |
+|---|---|---|
+| **M0 落点决策** | 定 ReSTIR GI/GRIS 归 PT 侧还是 P6（`全路径追踪管线规划.md` §12 C16）；若归 P6，本预研的 M1/M2 转为其子任务 | 决策记录进 `全路径追踪管线规划.md` §0.1/§0.3 与本文 §11 |
+| **M1 GRIS-lite（形态 A）** | shift 机件 + 1 顶点重连 + 时域/空间复用；`PT_Render` 读新蓄水池 | ① 与迭代式 PT 逐像素对照（`analyze_pt.py --compare`）：SPP 递增时偏差收敛到噪声内（无系统性偏移）；② p50 达收敛所需帧数 ≤ 现有方案；③ 帧时增量 ≤ +5 ms @0.52 MP |
+| **M2 完整 GRIS（形态 B）** | 随机重放 shift + 路径存储（含压缩）+ 两种 shift 的 MIS | ① 同上无偏性判据；② 显存 ≤ 1 GB @1080p；③ 焦散/多弹射场景的噪声方差显著优于 M1（给出对照读数） |
+| **M3 与 DI / P6 统一** | 明确 bounce0 直接光/间接光的责任划分；必要时并入 P6 的估计器 | 两套估计器只留一套交接语义；文档更新 |
+
+**M1 的最小可跑集合**（若只想验证可行性）：跑通"1 像素 1 间接光线 + 时域复用 + 重连可见性"，**不做**空间复用与压缩；用 `HE_DUMP_PT` 的 hdr/albedo 两个目标做逐像素对照即可判定无偏性。
+
+> 注：源文档此处不一致（同一份预研内部）—— 本节的标题写"触发'PT 转实时主路径'之后再执行"，
+> 且 M0 仍以"定落点归 PT 侧还是 P6"的待决语气书写；而本附录开头的**决策已下（2026-09-19）**
+> 与 §A.1 的"落点与触发（已决）"写明：**PT 不转实时主路径**，M0~M3 **归 P6 / Lumen 侧执行**。
+> 两者保留，不在此裁决；实现时以"决策已下"为准，本节标题的触发条件视为历史表述。
+
+### A.7 本轮明确不做（非目标）
+
+- 不改 `全路径追踪管线规划.md` §0.1 的定位、§10/§11 的目标；
+- 不实现任何 B7 代码；
+- 不让 §12 B 组的触发条件"被默认满足"（B7 状态保持未做）；
+- 不动 §12 的编号与既有 ✅ 记录（只在 B7 行加一条指向本附录的指针）。
+- 测量脚本留在 `build/verify/`（不纳入仓库）：`measure_pt_cost.ps1`、`recheck_pt_fps.ps1`、`measure_restir_cost.ps1`、`measure_b7_unknowns.ps1`。
+
+### A.8 与 Lumen / P6 的通用性分析（ReSTIR GI/GRIS 能不能两边共用）
+
+> 这是"落点定在 PT 还是 P6"的判断依据。**结论：估计器内核可共用，四层适配不可共用；
+> 建议实现放 P6/Lumen 侧一份，PT 侧只写适配** —— 但前提是先把 11.3 与 P6 的框架做了。
+
+#### A.8.1 可共用（consumer-agnostic 的内核）
+
+reservoir 结构与 WRS/MIS 记账、shift 映射（重连 / 随机重放 + 雅可比）、时域重投影与历史校验、
+空间复用、final shade、以及"给定 albedo/metallic/roughness/normal + 光源缓冲"的目标函数。
+它的输入抽象只需要：**像素级表面数据（depth / normal / albedo+metallic / velocity）+ 光源缓冲 + TLAS + 材质查询**。
+
+#### A.8.2 已经在共用的现成证据（不是设想）
+
+| 资产 | 现状 | 出处 |
+|---|---|---|
+| `RTDenoiser`（时域累积） | PT 用 `m_PTDenoiser`；Deferred 用 4 个（shadow/AO/reflection/GI）——**跨管线复用已有先例** | `PathTracingPipeline.h` / `DeferredPipeline.h` |
+| `PBR_BRDF`（`pbr_common.slang`） | 光栅化 / RT / PT **求值端**共用（PT 采样端是按它逐行对齐的独立实现） | `PT_Common.slang` L18、`全路径追踪管线规划.md` §12 任务 2/3 |
+| `GPULight[]` SSBO、STBN 蓝噪声、TLAS | 共用 | `CollectLights` / `STBNTexture` / `RTPass` |
+| **bindless 材质槽位约定** | `全路径追踪管线规划.md` §0.6 缺陷 3 之后 PT 与光栅化用同一套 `materialID + kGPUMaterialTexSlot_*` + heap 注册（**这条以前不成立，刚打通**） | `RTPass::BuildSceneMaterialTexture`、`PT_Full.rchit.slang` |
+| GI 侧统一输入接缝 | Deferred 帧图对 SSGI/SSR/RT/RSM 全部调用同一个 `SetInputs(depth, normal, albedo)` | `DeferredPipeline_FrameGraph.cpp` L574/607/625/675/747 |
+| Provider 输出契约 | `IGIProvider`（`Handles` / `GetPassKind` / `GetDiffuse\|Specular\|AOOutput` / `GetFinalXOutput` / `aux pass`）+ `GIProviderContext`（world/camera/frameIndex/furnace/lightBuffer/tlas） | `Engine/Render/GI/IGIProvider.h` |
+| 合成与有效性 | `GIChannelStack` + `GIBlendParams`（UBO，按槽位与源数组归一化） | `GITypes.h` L193/271/284 |
+
+> 上表的 `DeferredPipeline_FrameGraph.cpp` 行号 L574/607/625/675/747 取自源文档；本轮已逐行核验，
+> `SetInputs(depth, normal, albedo)` 的调用确实位于 `:574`（DDGI）/`:607`（AO）/`:625`（SSR）/
+> `:675`（SSGI）/`:747`（RT Provider），与源文档记载完全一致。
+
+#### A.8.3 必须各写一套适配的四层
+
+| 维度 | PT 侧 | Lumen / P6 侧 |
+|---|---|---|
+| 主表面来源 | PT 自己的 AOV：depth 为 **R32F 线性视图深度**（带 `-hitT` 号约定、miss=-1000）、normal/albedoMetallic UAV | 光栅 GBuffer（A/B/C + D32 深度 + velocity）；GI 常跑**半/四分之一分辨率** |
+| 输出语义 | bounce0 的间接光估计，**必须无偏** | 一个 **GI 源槽位**：喂 `GIChannelStack`，受归一化 + `alpha<0` 有效性契约约束（11.3） |
+| 降噪/历史 | `RTDenoiser`(motion blend) + `PTAtrousPass`(SVGF) | 每效果 `RTDenoiser` + `Denoiser`(spatial) + `SpatialDenoiseAux` |
+| 可见性查询 | PT 在 RayGen 里自己 trace shadow ray（自有 payload/SBT） | 走 `RTEffectProvider` / 共享 `RTPass` |
+
+两个必须写进设计的工程约束：
+
+1. **分辨率不匹配是实质问题**：光栅侧 GI 半分辨率是常态、PT 全分辨率。共享内核必须参数化
+   「被着色的像素网格 + 重投影映射」，否则时域/空间复用的邻域语义直接错。
+2. **质量策略是反向的**：PT 作为 oracle **不能继承实时侧偏差**（钳制、半分辨率、有偏时域复用）。
+   共享内核必须带 policy 开关：`reference`（无偏、全分辨率、可只做空间复用）vs `realtime`（钳制、半分辨率、时域复用）。
+
+#### A.8.4 落点建议
+
+- 实现**一份**在共享位置：`Engine/Render/GI/` 下的 `RestirGiPass`，实现 `IGIProvider`，输出 radiance + validity 纹理；
+- PT 侧只加**薄适配**：RayGen 采样该纹理作为 bounce0 间接光（现在读 DI 的蓄水池 SSBO，改成读纹理反而更可移植）；
+- Lumen 侧走 Provider + 槽位机制；
+- **不要**在 `PathTracingPipeline` 与 Lumen 各写一套 —— 那正是 `全路径追踪管线规划.md` §12 C16 / P6 警告的"两套估计器"。
+
+#### A.8.5 前置条件（= `全路径追踪管线规划.md` §12 C15/C16 存在的理由）
+
+1. **11.3 统一降噪框架**（`DenoiseSignal` 分派 + 把 `alpha < 0` 有效性提升为框架级契约）——
+   否则共享估计器的输出没有统一的有效性/历史约定（见本文 §10）；
+2. **P6 的纹理绑定数组化 + PROVIDER-EXEC**（执行单位从「Provider × 通道」改回「Provider」）——
+   否则每接一个消费者就加一条定制循环 + 一套具名绑定（见本文 §11）；
+3. 一个统一的「光源采样 + 可见性」入口（现在 PT 与 GI 侧各有一套）。
+
+#### A.8.6 与"是否转实时主路径"的组合结论
+
+| 定位 | ReSTIR GI/GRIS 该不该做 | 怎么做 |
+|---|---|---|
+| PT 继续当参考渲染器（现状） | **不做** —— 多 SPP 已够用（§A.4.1：1spp×4bounce 9.4 ms，帧 30 时 p50 已收敛） | — |
+| 做 Lumen / P6 | 做，但**先做框架**（11.3 + PROVIDER-EXEC + 数组化） | 一份内核在 `Engine/Render/GI/`，PT 侧适配；先跑 `reference` policy 验证无偏 |
+| ~~PT 转实时主路径~~ | **2026-09-19 已决定不转** ⇒ 本行不适用 | — |
+
+### A.9 数据来源与复现命令
+
+```powershell
+# 1) 成本曲线（每档 18~22 s，数 "RG pass: PT_Render" 行算 FPS；HE_CFG 私有副本避免写回基础 cfg）
+powershell -File build\verify\measure_pt_cost.ps1
+powershell -File build\verify\recheck_pt_fps.ps1     # 基础 cfg vs 私有副本的一致性复核
+powershell -File build\verify\measure_restir_cost.ps1 # ReSTIR DI 复用开销
+powershell -File build\verify\measure_b7_unknowns.ps1  # 1080p 帧时/显存 + 引擎级冷缓存编译
+
+# 2) 机件缺口检索（全引擎，排除 External/；预期全为 0）
+#    Jacobian / shiftMapping / ShiftMapping / reconnection / Reconnection / GRIS / PathReservoir
+# 3) RT 管线创建耗时（磁盘 PSO 缓存热）：05 日志里 CreateRTPipelineState → CreateEffectPipeline 的时间差
+# 4) 收敛与对照（标准答案的现状）
+python Tools\pt\analyze_pt.py --converge <tag30> <tag60> <tag120> <tag240> --conv-tol 0.01
+python Tools\pt\analyze_pt.py --compare <pt_tag> <deferred_tag> --target hdr
+```
+
+### A.10 与 `全路径追踪管线规划.md` §12 C16 / P6 的关系
+
+`ReSTIR GI` 的实现在本预研里被当作 GRIS 的 M1（形态 A），而它在 `全路径追踪管线规划.md` §6.1 的落点已归**本文 §11 任务 20**（P6：ReSTIR GI 统一估计器 + 纹理绑定数组化）。因此：
+
+- 若 P6 先落地 → 本附录的 M1/M2 应作为 P6 的 PT 侧适配（复用其估计器与绑定数组），而不是另写一套；
+- 若决定 PT 侧先做 → 需要在 `全路径追踪管线规划.md` §0.3 增补一条"落点从 P6 移回 PT"的修订记录（本轮不做该修订）。
