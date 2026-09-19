@@ -763,6 +763,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                         lp->RunCardCapture(c, *cam);   // 步骤 15：Card 捕获（写 atlas）
                         lp->RunFeedback(c, *cam);      // 步骤 16：Feedback（缺失页检测 + 请求写回页表）
                         lp->RunProbePlacement(c);      // 步骤 20：Screen Probe 布置与自适应合并
+                        lp->RunProbeTrace(c);          // 步骤 21：探针半球追踪（GGX 采样 + SDF march）
                         // 步骤 12（L1 退出判据）：SDF 构建完之后，同一 compute pass 里跑一次
                         // 逐像素 sphere tracing 可视化（相机主射线）。放在这里而不是 Lighting
                         // 之后，是因为它只依赖 SDF 本身，与 GBuffer / 合成无关。

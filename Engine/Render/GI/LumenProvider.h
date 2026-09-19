@@ -106,6 +106,10 @@ public:
     void RunProbePlacement(rhi::IRHICommandList* cmd) {
         if (m_Scene) m_Scene->RunProbePlacement(cmd, m_Normal, m_WorldPos);
     }
+    /// 步骤 21：探针半球追踪（在布置之后、同一 compute pass 内）
+    void RunProbeTrace(rhi::IRHICommandList* cmd) {
+        if (m_Scene) m_Scene->RunProbeTrace(cmd);
+    }
     /// 步骤 16：Feedback 需要 GBuffer 的世界坐标（由帧图注入）
     void SetWorldPosInput(rhi::IRHITexture* worldPos) { m_WorldPos = worldPos; }
     /// 步骤 16：Feedback —— 16×16 分块产出请求列表并写回页表状态

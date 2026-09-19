@@ -151,6 +151,7 @@ if(SLANGC)
         "${SHADER_DIR}/Lumen/SurfaceCache_Capture.comp.slang"
         "${SHADER_DIR}/Lumen/SurfaceCache_Feedback.comp.slang"
         "${SHADER_DIR}/Lumen/ScreenProbe_Gather.comp.slang"
+        "${SHADER_DIR}/Lumen/ScreenProbe_Trace.comp.slang"
         # Utility
         "${SHADER_DIR}/Utility/WorkGraph_Entry.comp.slang"
         "${SHADER_DIR}/Utility/TestClear.comp.slang"

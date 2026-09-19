@@ -1452,7 +1452,8 @@ python Tools\pt\analyze_pt.py --compare <pt_tag> <deferred_tag> --target hdr
 | 18 LRU 淘汰与碎片整理 | ✅ 已完成（LRU；defrag 见说明） | 逻辑页 = min(卡片数, **1024**)（§4 的页上限），**物理页 = atlas 的 64 块**，两者相差一个量级 ⇒ 淘汰路径真正被走到。`AllocatePhysicalPage`：池空则淘汰"最久未用且内容有效（Captured/Dirty）"的逻辑页（`lastUsedFrame` 最小者），释放其物理页后复用；**绝不动正在流水线里的页**（Requested/Allocating/Capturing）。Feedback 的 top-N 每帧 `Touch`（LRU 的"用"）。统计：`页池/LRU: 物理页 x/64 空闲；分配成功 A / 失败 B / 淘汰 C 次`。**验收（合成漫游，静态相机下人为轮换需要页）**：累计捕获 166 → 247 → 309 页（吞吐持续）、**单帧最多恒 8 页（= 预算，不下降）**、**分配失败恒 0（成功率 100%）**、淘汰 279 → 360 → 422 次。**defrag 说明**：页大小固定、池大小固定 ⇒ 不存在"有空间但拼不出连续块"的碎片，分配不到一律由 LRU 回收；变长页/atlas 搬移式 defrag 列为后续项（§附二十五） |
 | 19 L2 退出判据 | ✅ 已完成（L2 闭环） | 无新增代码，只做验证与对照：①**atlas 显示的是场景真实材质**——atlas albedo 与同帧 GBuffer albedo 的亮度统计对照（中位亮度比 **1.11**，p5/p50/p95 = 0.000/0.286/0.404 vs 0.084/0.258/0.396）；②**覆盖率可视化无不可解释区域**——`lumen_card_coverage` 的阈值曲线（5%→89.7% / 25%→79.1%）+ 残余空洞逐条点名（薄结构 mesh）；③**白炉 1.0000**；④**背靠背读数逐位一致**——同配置跑两次，`lumen_sc_atlas_albedo` / `lumen_card_coverage` / `lumen_sdf_trace` **SHA-256 相同**（HDR 因 TAA/自动曝光的时域累积而略有差异，属预期）。工具：`build/verify/l2_report.py` |
 | 20 探针布置与自适应合并 | ✅ 已完成 | `ScreenProbe.slang`（C++/Slang 共享布局，96 B，含步骤 23 的 SH 字段）+ `ScreenProbe_Gather.comp.slang`：屏幕按 **16×16 像素为一个单元**，每 **2×2 单元（32×32）** 比较法线一致性，够平坦就合并成 1 个探针、否则保留 4 个；同时把每个 tile 的**最大法线偏差**写进缓冲，CPU 侧据此**一次运行**算出整条"阈值 → 探针数"曲线。**实测（1080p）**：tile 2040（60×34，全部有几何）、单元 8160；`cos=0.995 ⇒ 探针 5649`（GPU 计数与 CPU 曲线同值，互为交叉验证）；曲线 `0.999→6534 / 0.995→5649 / 0.99→5169 / 0.98→4548 / 0.95→3690 / 0.90→3144` **单调不增**。**验收**：数量与设计量级（≈8K）一致 ✅；阈值变化时数量单调 ✅ |
-| 21–41 | ⬜ 未开始 | 21 半球追踪（`traceRep×shadeRep`、非法组合断言）、22 命中点着色（消费 L2 的 atlas）、23 SH 投影、24 合成到 Lighting、25 L3 判据；随后 26–33 HW RT/Radiance Cache、34–41 去噪与横切工具 |
+| 21 半球追踪（二维配置落地） | ✅ 已完成 | `LumenTraceConfig.{h,cpp}`：追踪源（SDF/HWRT/Screen）× 着色源（SurfaceCache/HitLighting/Neutral）+ `traceRep`/`shadeRep`/`screenTrace`/`hwFarField`，`Validate()` 在**配置加载期**拒绝非法组合（**SDF × HitLighting** 明确报错：SDF 只给命中距离、拿不到重心坐标/材质；另拦 `traceRep∉[8,16]`、`shadeRep=0`、`Screen` 与 `screenTrace=false` 自相矛盾）。`ScreenProbe_Trace.comp.slang`：每探针 **GGX 重要性采样** 8 条光线（V 取探针法线 ⇒ 分布以法线为中心），求交复用步骤 11 的 march 语义；方向用 (探针, 光线, 帧号) 的 PCG 哈希 ⇒ **可复现**。**实测**：探针 5649 × 8 = **45192 条光线**、命中 **40836（90.4%）**、**半球内 100.0%**（点积>0 全部满足）；配置打印 `SDF × SurfaceCache（traceRep 8 / shadeRep 1）`。单测 216 → **221**（+5 例 / +29 断言，覆盖合法与全部非法组合） |
+| 22–41 | ⬜ 未开始 | 22 命中点着色（消费 L2 的 atlas）、23 SH 投影、24 合成到 Lighting、25 L3 判据；随后 26–33 HW RT/Radiance Cache、34–41 去噪与横切工具 |
 
 ### 阶段 A：框架前置（不产出画面，但后补等于重构）
 
@@ -2748,3 +2749,34 @@ Screen Probe（步骤 20）: 单元 16×16、tile 32×32 ⇒ tile 总数 2040（
    （`C3646: "position": 未知重写说明符`）；C++ 分支改用 `glm::vec4/glm::uvec4` 全限定名。
    另：**计数器回读必须在清零之前**（与 §附二十三 的 Feedback 同一个坑，第二次踩到——凡是
    "原子计数 + 每帧清零"的路径都要按这个顺序写）。
+### 附二十八：步骤 21「半球追踪（二维配置落地）」——非法组合在配置期被拒、光线分布 100% 在半球内
+
+**配置（`LumenTraceConfig`）**：追踪源（SDF / HardwareRT / Screen）× 着色源（SurfaceCache / HitLighting /
+Neutral）+ `traceRep`（8–16）+ `shadeRep` + `screenTrace` + `hwFarField`，首版取
+**`SDF × SurfaceCache`（`screenTrace = false`）**。`Validate()` 在**配置加载期**返回中文原因并拒派发：
+
+- **`SDF × HitLighting` 必须拒绝**（计划点名的非法组合）：SDF 的 march 只给"命中距离"，
+  拿不到命中点的三角形/重心坐标/材质 UV，要做命中点光照必须用 HardwareRT；
+- `traceRep ∉ [8,16]`、`shadeRep = 0`、`trace = Screen` 却 `screenTrace = false`（自相矛盾）也都拒绝。
+
+**追踪（`ScreenProbe_Trace.comp.slang`）**：每探针按 **GGX 重要性采样**发 `traceRep` 条光线
+（半向量采样后以探针法线镜面反射；探针没有视线概念，用 `V = N` 得到的分布天然以法线为中心），
+求交复用步骤 11 的 march 语义（两层场取 min、`max(d*0.25, eps*0.02)`、`advanced && d < eps`）；
+方向随机数用 `(探针, 光线, 帧号)` 的 PCG 哈希 ⇒ **同帧完全可复现**（背靠背读数一致的前提），跨帧更换种子
+（时序累积才有意义）。
+
+**实测（`lumen_sp21`，1080p，exit=0，VUID 46 = 基线）**：
+
+```
+Screen Probe（步骤 20）: tile 2040（有几何 2040）；阈值 cos=0.995 ⇒ 探针 5649
+探针追踪（步骤 21）: 探针 5649 × 8 条 GGX 光线 = 45192 条；命中 40836（90.4%）；
+    半球内 45192（100.0%，须为 100%）；配置 SDF × SurfaceCache（traceRep 8 / shadeRep 1）
+```
+
+- **单探针光线方向分布正确** ✅：全部 45192 条光线的 `dot(dir, normal) > 0`（**100% 落在法线半球内**），
+  这是 GGX 重要性采样正确的必要条件；命中率 90.4% 说明方向确实指向场景（而不是随机穿空）；
+- **非法组合在配置加载期即报错** ✅：5 个单测用例逐条钉住（含"SDF × HitLighting 拒绝、换成 HWRT 就合法"），
+  运行期另有一道守卫（校验不过则报错并拒绝派发）。单测总数 216 → **221**，断言 5678 → **5707**。
+
+**下一轮**：步骤 22 命中点着色（消费 L2 的 atlas：页边界处理 + 缺页中性值），随后 23 SH 投影
+（白炉下误差可断言为 0）、24 合成到 Lighting、25 L3 判据。

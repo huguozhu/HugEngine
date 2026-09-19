@@ -12,6 +12,7 @@
 #include "Lumen/SurfaceCache.slang"     // 共享布局（与 C++ 镜像同源）
 #include "SurfaceCache_Capture.comp.spv.h"
 #include "ScreenProbe_Gather.comp.spv.h"
+#include "ScreenProbe_Trace.comp.spv.h"
 #include "SurfaceCache_Feedback.comp.spv.h"
 #include "SurfaceCache_PageCheck.comp.spv.h"
 
@@ -441,6 +442,132 @@ void LumenScene::RunCardCapture(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbA
                          ? 100.0 * (double)m_CardCaptureHits / (double)(m_CardCaptureHits + m_CardCaptureMisses) : 0.0,
                      m_CardCaptureMarchHits, kAtlasSize);
     }
+}
+// ============================================================
+// 步骤 21：探针半球追踪（GGX 重要性采样 + SDF march）
+//
+// 【配置校验】每次派发前走一次 `LumenTraceConfig::Validate()`：非法组合（如 SDF × HitLighting）
+// 在**加载/配置期**就报错并拒绝派发，而不是渲染出一片黑再回头查。
+// ============================================================
+void LumenScene::CreateProbeTraceGPUObjects() {
+    if (m_TracePSO) return;
+
+    rhi::DescriptorSetLayoutDesc layout;
+    layout.bindings = {
+        {0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // 近层
+        {6, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // 远层
+        {1, rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},   // 探针
+        {2, rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},   // 光线结果
+        {3, rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},   // 统计
+    };
+    m_TraceLayout = m_Device->CreateDescriptorSetLayout(layout);
+    m_TraceSet    = m_Device->AllocateDescriptorSet(m_TraceLayout);
+
+    rhi::PushConstantRange pcr;
+    pcr.stageMask = rhi::kStageMaskCompute;
+    pcr.offset    = 0;
+    pcr.size      = 6u * 16u;   // uint4 dims + 近层(原点/分辨率) + 远层(原点/分辨率) + marchParams
+
+    rhi::ShaderBytecode cs;
+    cs.stage      = rhi::ShaderStage::Compute;
+    cs.spirv      = k_ScreenProbe_Trace_comp_spv;
+    cs.entryPoint = "main";
+
+    rhi::PipelineStateDesc pso;
+    pso.bindPoint            = rhi::PipelineBindPoint::Compute;
+    pso.computeShader        = &cs;
+    pso.descriptorSetLayouts = {m_TraceLayout};
+    pso.pushConstantRanges   = {pcr};
+    pso.debugName            = "Lumen_ScreenProbe_Trace";
+    m_TracePSO = m_Device->CreatePipelineState(pso);
+    if (!m_TracePSO) HE_CORE_ERROR("LumenScene: 探针追踪 PSO 创建失败");
+}
+
+void LumenScene::RunProbeTrace(rhi::IRHICommandList* cmd) {
+    if (!m_Device || !cmd || !m_ProbeBuf) return;
+
+    // 配置校验：非法组合在**这里**（配置加载/派发前）就报错并拒绝
+    const std::string cfgErr = m_TraceConfig.Validate();
+    if (!cfgErr.empty()) {
+        static bool logged = false;
+        if (!logged) {
+            HE_CORE_ERROR("Lumen 追踪配置非法，已拒绝派发探针追踪：{}（trace={} shade={} traceRep={} shadeRep={}）",
+                          cfgErr, LumenTraceSourceName(m_TraceConfig.trace),
+                          LumenShadeSourceName(m_TraceConfig.shade),
+                          m_TraceConfig.traceRep, m_TraceConfig.shadeRep);
+            logged = true;
+        }
+        return;
+    }
+
+    if (!m_TraceBound) {
+        CreateProbeTraceGPUObjects();
+        if (!m_TracePSO) return;
+        rhi::BufferDesc rb;
+        rb.size  = (usize)kMaxScreenProbes * 16u * sizeof(float4);   // 最多 16 条光线/探针
+        rb.usage = rhi::BufferUsage::Storage;
+        m_RayResultBuf = m_Device->CreateBuffer(rb);
+
+        rhi::BufferDesc sb;
+        sb.size = sizeof(u32) * 4u; sb.usage = rhi::BufferUsage::Storage; sb.cpuAccess = true;
+        m_RayStatsBuf = m_Device->CreateBuffer(sb);
+        m_RayStatsMapped = m_RayStatsBuf->Map();
+
+        m_Device->UpdateDescriptorSet(m_TraceSet, 0, rhi::DescriptorType::CombinedImageSampler,
+                                      m_SDF.GetGlobalField(0), m_SDF.GetLinearSampler());
+        m_Device->UpdateDescriptorSet(m_TraceSet, 6, rhi::DescriptorType::CombinedImageSampler,
+                                      m_SDF.GetGlobalField(1), m_SDF.GetLinearSampler());
+        m_Device->UpdateDescriptorSet(m_TraceSet, 1, rhi::DescriptorType::StorageBuffer, m_ProbeBuf.get());
+        m_Device->UpdateDescriptorSet(m_TraceSet, 2, rhi::DescriptorType::StorageBuffer, m_RayResultBuf.get());
+        m_Device->UpdateDescriptorSet(m_TraceSet, 3, rhi::DescriptorType::StorageBuffer, m_RayStatsBuf.get());
+        m_TraceBound = true;
+        return;   // 新建资源当帧不用
+    }
+    if (m_ProbeCount == 0u) return;
+
+    // ① 先读上一帧的统计（同样"先读后清"）
+    if (m_TraceFrame >= 1 && m_RayStatsMapped) {
+        u32 st[4] = {0, 0, 0, 0};
+        std::memcpy(st, m_RayStatsMapped, sizeof(st));
+        m_ProbeRayHits       = st[0];
+        m_ProbeRayMisses     = st[1];
+        m_ProbeRaysTotal     = st[2];
+        m_ProbeRayHemisphere = st[3];
+        if ((m_TraceFrame % 40u) == 0u) {
+            HE_CORE_INFO("LumenScene 探针追踪（步骤 21）: 探针 {} × {} 条 GGX 光线 = {} 条；命中 {}（{:.1f}%）；"
+                         "半球内 {}（{:.1f}%，须为 100%）；配置 {} × {}（traceRep {} / shadeRep {}）",
+                         m_ProbeCount, m_TraceConfig.traceRep, m_ProbeRaysTotal,
+                         m_ProbeRayHits, m_ProbeRaysTotal ? 100.0 * (double)m_ProbeRayHits / (double)m_ProbeRaysTotal : 0.0,
+                         m_ProbeRayHemisphere,
+                         m_ProbeRaysTotal ? 100.0 * (double)m_ProbeRayHemisphere / (double)m_ProbeRaysTotal : 0.0,
+                         LumenTraceSourceName(m_TraceConfig.trace), LumenShadeSourceName(m_TraceConfig.shade),
+                         m_TraceConfig.traceRep, m_TraceConfig.shadeRep);
+        }
+    }
+
+    // ② 清零统计并派发
+    if (m_RayStatsMapped) { u32 zero[4] = {0, 0, 0, 0}; std::memcpy(m_RayStatsMapped, zero, sizeof(zero)); }
+
+    const u32 total = m_ProbeCount * m_TraceConfig.traceRep;
+    struct {
+        u32 x, y, z, w;
+        float4 origin0; uint4 grid0;
+        float4 origin1; uint4 grid1;
+        float4 march;
+    } pc{};
+    pc.x = m_ProbeCount; pc.y = m_TraceConfig.traceRep; pc.z = m_TraceFrame; pc.w = 0;
+    pc.origin0 = float4(m_SDF.GetGlobalOrigin(0), m_SDF.GetGlobalVoxelSize(0));
+    const u32 gr = m_SDF.GetGlobalResolution();
+    pc.grid0 = uint4(gr, gr, gr, 0u);
+    pc.origin1 = float4(m_SDF.GetGlobalOrigin(1), m_SDF.GetGlobalVoxelSize(1));
+    pc.grid1 = pc.grid0;
+    pc.march = float4((float)m_SDF.GetMarchMaxSteps(), 1.0f * m_SDF.GetGlobalVoxelSize(0),
+                      (float)m_SDF.GetMarchMaxDist(), 0.0f);
+    cmd->SetPipeline(m_TracePSO.get());
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_TraceSet);
+    cmd->SetPushConstants(0, sizeof(pc), &pc);
+    cmd->Dispatch((total + 63u) / 64u, 1, 1);
+    ++m_TraceFrame;
 }
 // ============================================================
 // 步骤 20：Screen Probe 布置与自适应合并

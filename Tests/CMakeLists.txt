@@ -37,6 +37,7 @@ add_executable(HugEngineTests
     TestAgentBrain.cpp
     TestGITypes.cpp
     TestSurfaceCache.cpp
+    TestLumenTraceConfig.cpp
     TestGIProbeGrid.cpp
     TestRSMFrustum.cpp
     TestPathPayload.cpp

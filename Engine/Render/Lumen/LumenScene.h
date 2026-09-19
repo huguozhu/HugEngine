@@ -24,6 +24,7 @@
 
 #include "RHI/RHI.h"
 #include "Lumen/LumenSDF.h"
+#include "Lumen/LumenTraceConfig.h"
 #include "Lumen/SurfaceCacheTypes.h"
 
 #include <memory>
@@ -80,6 +81,13 @@ public:
                         rhi::IRHITexture* gbDepth, const float4x4& viewProj);
     /// 步骤 20：Screen Probe 布置与自适应合并（16×16 单元；2×2 平坦单元合并成一个探针）
     void RunProbePlacement(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbNormal, rhi::IRHITexture* gbWorldPos);
+    /// 步骤 21：探针半球追踪（GGX 重要性采样 + SDF march），命中结果供步骤 22 着色
+    void RunProbeTrace(rhi::IRHICommandList* cmd);
+    [[nodiscard]] u32 GetProbeRayHits() const { return m_ProbeRayHits; }
+    [[nodiscard]] u32 GetProbeRayMisses() const { return m_ProbeRayMisses; }
+    [[nodiscard]] u32 GetProbeRayHemisphere() const { return m_ProbeRayHemisphere; }   // 点积 > 0 的光线数
+    [[nodiscard]] u32 GetProbeRaysTotal() const { return m_ProbeRaysTotal; }
+    [[nodiscard]] const LumenTraceConfig& GetTraceConfig() const { return m_TraceConfig; }
     [[nodiscard]] u32 GetProbeCount() const { return m_ProbeCount; }
     [[nodiscard]] u32 GetProbeTilesFlat() const { return m_ProbeTilesFlat; }        // 偏差缓冲里"够平坦"的 tile 数
     [[nodiscard]] u32 GetProbeTilesTotal() const { return m_ProbeTilesTotal; }      // 有几何的 tile 数
@@ -202,9 +210,21 @@ private:
     u32  m_ProbeFrame = 0;
     u32  m_ProbeCount = 0, m_ProbeTilesFlat = 0, m_ProbeTilesTotal = 0;
     std::vector<float> m_ProbeTileDev;
+    // ── 探针半球追踪（步骤 21）──
+    LumenTraceConfig m_TraceConfig;
+    std::unique_ptr<rhi::IRHIBuffer> m_RayResultBuf, m_RayStatsBuf;
+    void* m_RayStatsMapped = nullptr;
+    rhi::DescriptorSetLayoutHandle m_TraceLayout = 0;
+    rhi::DescriptorSetHandle       m_TraceSet    = 0;
+    std::unique_ptr<rhi::IRHIPipelineState> m_TracePSO;
+    bool m_TraceBound = false;
+    u32  m_TraceFrame = 0;
+    u32  m_ProbeRayHits = 0, m_ProbeRayMisses = 0, m_ProbeRaysTotal = 0, m_ProbeRayHemisphere = 0;
+
     std::vector<u32> m_LastTopPages;
     void CreateFeedbackGPUObjects();
     void CreateProbeGPUObjects();
+    void CreateProbeTraceGPUObjects();
     u32  m_CapturePages = 0;          // 累计捕获页数
     u32  m_CardCaptureMarchHits = 0;  // 诊断：SDF march 命中数
     bool m_CaptureStatsPending = false;

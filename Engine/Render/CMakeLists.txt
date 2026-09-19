@@ -185,6 +185,7 @@ set(RENDER_SOURCES
     Lumen/LumenSDF.h
     Lumen/LumenSDF.cpp
     Lumen/SurfaceCacheTypes.cpp
+    Lumen/LumenTraceConfig.cpp
     Lumen/LumenScene_SurfaceCache.cpp
     GI/LumenProvider.h
 )

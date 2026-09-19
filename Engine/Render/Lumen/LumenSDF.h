@@ -106,6 +106,8 @@ public:
     /// 诊断用：点到全部几何的精确距离（= 场应当逼近的真值）
     [[nodiscard]] float QueryTrueDistance(const float3& p) const { return MinDistToGeometry(p); }
     [[nodiscard]] u32 GetGlobalResolution() const { return m_Config.globalResolution; }
+    [[nodiscard]] u32 GetMarchMaxSteps() const { return m_Config.marchMaxSteps; }   // 步骤 21 的探针追踪复用同一套 march 参数
+    [[nodiscard]] float GetMarchMaxDist() const { return m_Config.marchMaxDist; }
     [[nodiscard]] float  GetGlobalVoxelSize(u32 layer = kMaxGlobalLayers - 1u) const {
         return (layer < m_GlobalLayerCount) ? m_GlobalLayers[layer].voxelSize : 0.0f;
     }
