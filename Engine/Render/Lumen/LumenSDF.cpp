@@ -446,6 +446,20 @@ void LumenSDF::CreateGlobalGPUObjects() {
     sd.addressU  = sd.addressV  = sd.addressW = rhi::AddressMode::ClampToEdge;
     m_NearestSampler = m_Device->CreateSampler(sd);
 
+    // 线性采样器：全局注入（把 mesh 场采到全局网格）与 sphere tracing 都要用，
+    // **必须在注入之前就存在**。此前它只在 CreateMarchGPUObjects 里创建，而那个函数在
+    // WaitGlobalCheck 阶段才跑 —— 也就是在 BuildGlobalField 之后。后果：注入时
+    // `CombinedImageSampler` 没有采样器，引擎报 "缺采样器" 并**跳过整条描述符更新**，
+    // 于是 16 个 mesh 的场一个都没被真正采样，注入的尽是 0（`abs(0)=0` 被 InterlockedMin
+    // 写进每个 AABB 内的体素）⇒ 全局场在空旷处塌缩到 ≈0、任意视点追踪立刻假命中。
+    // 这正是步骤 12 的可视化抓到的那条（§附三）。
+    if (!m_LinearSampler) {
+        rhi::SamplerDesc ls;
+        ls.minFilter = ls.magFilter = rhi::FilterMode::Linear;
+        ls.addressU  = ls.addressV  = ls.addressW = rhi::AddressMode::ClampToEdge;
+        m_LinearSampler = m_Device->CreateSampler(ls);
+    }
+
     // 独立取样 pass：绑定集与全局布局相同（binding 2 = 该层场，binding 4 = 探针缓冲）
     rhi::ShaderBytecode pcs;
     pcs.stage      = rhi::ShaderStage::Compute;
@@ -527,6 +541,14 @@ void LumenSDF::SetupGlobalGrid() {
 }
 void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
     if (!m_GlobalPSO || m_Entries.empty()) return;
+    // 注入必须能真正采到 mesh 场：缺采样器时引擎会跳过整条描述符更新，而注入仍然照跑，
+    // 于是 InterlockedMin 会把 0 写满每个 mesh 的 AABB（全局场在空旷处塌缩到 ≈0）。
+    // 这类"跑得很正常、结果全错"的失败必须在入口拦下来。
+    if (!m_LinearSampler) {
+        HE_CORE_ERROR("LumenSDF: 注入缺少线性采样器（CreateGlobalGPUObjects 未跑？）——"
+                      "全局场会退化成 0，拒绝构建");
+        return;
+    }
 
     const u32 groups = (m_Config.globalResolution + 3u) / 4u;
     for (u32 L = 0; L < m_GlobalLayerCount; ++L) {
@@ -1048,11 +1070,15 @@ void LumenSDF::CreateMarchGPUObjects() {
     m_MarchPSO = m_Device->CreatePipelineState(pso);
     if (!m_MarchPSO) HE_CORE_ERROR("LumenSDF: sphere tracing 的 PSO 创建失败");
 
-    // 线性 clamp 采样器：三线性插值由采样器完成（步进需要连续场，不能最近邻）
-    rhi::SamplerDesc sd;
-    sd.minFilter = sd.magFilter = rhi::FilterMode::Linear;
-    sd.addressU  = sd.addressV  = sd.addressW = rhi::AddressMode::ClampToEdge;
-    m_LinearSampler = m_Device->CreateSampler(sd);
+    // 线性 clamp 采样器：三线性插值由采样器完成（步进需要连续场，不能最近邻）。
+    // 【注意】正常路径下它已在 CreateGlobalGPUObjects 里建好（注入必须先有它）；
+    // 这里只是兜底，避免"依赖调用顺序"再次变成静默的场损坏。
+    if (!m_LinearSampler) {
+        rhi::SamplerDesc sd;
+        sd.minFilter = sd.magFilter = rhi::FilterMode::Linear;
+        sd.addressU  = sd.addressV  = sd.addressW = rhi::AddressMode::ClampToEdge;
+        m_LinearSampler = m_Device->CreateSampler(sd);
+    }
 
     // ── 细节追踪（逐 mesh 的 min 归约）──
     m_DetailLayout = m_Device->CreateDescriptorSetLayout(layout);   // 绑定集与全局版相同
@@ -1472,6 +1498,9 @@ constexpr u32 kDBindField  = 0;   // 与 SDF_RayMarch 一致：层0 在 0、层1
 constexpr u32 kDBindField1 = 6;
 constexpr u32 kDBindOut    = 7;
 constexpr u32 kDBindStats  = 8;
+constexpr u32 kDBindProbe  = 9;
+/// 剖面探针的采样点数（与 shader 里的 64 对齐）
+constexpr u32 kProbeSamples = 64;
 /// 统计帧：只在第 60 帧开统计（避免累计计数溢出），再过 3 帧读回（等 GPU 写完）
 constexpr u32 kDebugCountFrame = 60;
 }   // namespace
@@ -1486,6 +1515,7 @@ void LumenSDF::CreateDebugGPUObjects() {
             {kDBindField1, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
             {kDBindOut,    rhi::DescriptorType::StorageImage,         1, rhi::kStageMaskCompute},
             {kDBindStats,  rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},
+            {kDBindProbe,  rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},
         };
         m_DebugLayout = m_Device->CreateDescriptorSetLayout(layout);
         m_DebugSet    = m_Device->AllocateDescriptorSet(m_DebugLayout);
@@ -1546,6 +1576,17 @@ void LumenSDF::CreateDebugGPUObjects() {
         HE_CORE_INFO("LumenSDF: SDF 调试视图就绪（{}x{}，RGBA16F，逐像素 sphere tracing）",
                      m_ViewportW, m_ViewportH);
     }
+
+    // 剖面探针缓冲（CPU 可读，随调试视图一起建）
+    if (!m_DebugProbe) {
+        rhi::BufferDesc pd;
+        pd.size      = (usize)kProbeSamples * sizeof(float4);
+        pd.usage     = rhi::BufferUsage::Storage;
+        pd.cpuAccess = true;
+        m_DebugProbe = m_Device->CreateBuffer(pd);
+        m_Device->UpdateDescriptorSet(m_DebugSet, kDBindProbe, rhi::DescriptorType::StorageBuffer,
+                                      m_DebugProbe.get());
+    }
 }
 
 void LumenSDF::RunDebugView(rhi::IRHICommandList* cmd, const float3& camPos, const float3& forward,
@@ -1558,6 +1599,7 @@ void LumenSDF::RunDebugView(rhi::IRHICommandList* cmd, const float3& camPos, con
 
     const bool countFrame = (++m_DebugFrames == kDebugCountFrame);
     m_DebugCamPos = camPos;
+    m_DebugCamFwd = forward;
 
     DebugPC pc{};
     pc.camPos        = float4(camPos, tanHalfFov);
@@ -1631,6 +1673,22 @@ void LumenSDF::LogDebugStats() {
                  "从任意视点出发会立刻假命中）",
                  (double)m_DebugCamPos.x, (double)m_DebugCamPos.y, (double)m_DebugCamPos.z,
                  (double)camTruth, (double)(camTruth / std::max(1e-6f, eps)));
+
+    // 剖面：沿图像中心那条射线，把"场值 vs 真实距离"并排打出来（-1 = 该层不在域内）
+    if (m_DebugProbe) {
+        if (void* pm = m_DebugProbe->Map()) {
+            const float4* pr = static_cast<const float4*>(pm);
+            HE_CORE_INFO("LumenSDF 场剖面（沿中心射线，t / 层0 值 / 层1 值 / 该点真实距几何）:");
+            for (u32 i = 0; i < kProbeSamples; i += 8) {
+                // 中心像素的方向与 shader 一致（ndc = (0, 0) ⇒ 就是 camera forward）
+                const float3 p = m_DebugCamPos + m_DebugCamFwd * pr[i].x;
+                const float truth = MinDistToGeometry(p);
+                HE_CORE_INFO("   t={:7.2f}  层0={:9.2f}  层1={:9.2f}  真值={:9.2f}", (double)pr[i].x,
+                             (double)pr[i].y, (double)pr[i].z, (double)truth);
+            }
+            m_DebugProbe->Unmap();
+        }
+    }
 }
 
 } // namespace he::render

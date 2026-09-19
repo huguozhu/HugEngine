@@ -260,9 +260,11 @@ private:
     std::unique_ptr<rhi::IRHIPipelineState> m_DebugPSO;
     std::unique_ptr<rhi::IRHITexture>       m_DebugTex;      // RGBA16F，屏幕尺寸
     std::unique_ptr<rhi::IRHIBuffer>        m_DebugStats;    // CPU 可读（原子计数）
+    std::unique_ptr<rhi::IRHIBuffer>        m_DebugProbe;    // CPU 可读（沿中心射线的场剖面）
     void* m_DebugStatsMapped = nullptr;
     u32   m_ViewportW = 0, m_ViewportH = 0;
     float3 m_DebugCamPos = float3(0.0f);   // 最近一次调试视图的相机位置（诊断用）
+    float3 m_DebugCamFwd = float3(0.0f, 0.0f, -1.0f);   // 最近一次的前向（剖面点用）
     u32   m_DebugFrames = 0;                                 // 已累计统计的帧数
     u32   m_DebugStatsLast[4] = {0, 0, 0, 0};
 };

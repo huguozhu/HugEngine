@@ -23,6 +23,9 @@
 [[vk::binding(6, 0)]] SamplerState          u_FieldSampler1;
 [[vk::binding(7, 0)]] RWTexture2D<float4>   u_Out;
 [[vk::binding(8, 0)]] RWStructuredBuffer<uint> u_Stats;   // 0=近层命中 1=远层命中 2=未命中 3=总步数
+// 剖面探针：线程 (0,0) 沿"图像中心"那条射线采样 64 个点，写 (t, 层0 值, 层1 值, 层内标志)。
+// 用途：把"场沿一条线长什么样"落成 CPU 可读的数，直接判断"场在空旷处塌缩"这类问题。
+[[vk::binding(9, 0)]] RWStructuredBuffer<float4> u_Probe;
 
 [[vk::push_constant]] cbuffer DebugPC {
     float4 camPos;        // xyz = 相机世界坐标, w = tan(垂直半视场角)
@@ -89,10 +92,23 @@ void main(uint3 tid : SV_DispatchThreadID) {
         : float4(1.0, 0.0, 0.0, 0.0);
 
     // 原子统计：让"看得见的画面"同时给出可回归的数字
-    if (hit) {
-        InterlockedAdd(u_Stats[hitLayer < 0.25 ? 0u : 1u], 1u);
-    } else {
-        InterlockedAdd(u_Stats[2], 1u);
+    if (marchParams.w > 0.5) {
+        if (hit) {
+            InterlockedAdd(u_Stats[hitLayer < 0.25 ? 0u : 1u], 1u);
+        } else {
+            InterlockedAdd(u_Stats[2], 1u);
+        }
+        InterlockedAdd(u_Stats[3], steps);
     }
-    InterlockedAdd(u_Stats[3], steps);
+
+    // 剖面探针：只由 (0,0) 线程写，沿它自己的射线均匀取 64 点
+    if (tid.x == 0u && tid.y == 0u) {
+        for (uint i = 0u; i < 64u; ++i) {
+            const float ts = maxDist * (float)i / 64.0;
+            const float3 pp = ro + rd * ts;
+            const float2 a2 = SampleLayer(u_Field,  u_FieldSampler,  originVoxel0, grid0.xyz, pp);
+            const float2 b2 = SampleLayer(u_Field1, u_FieldSampler1, originVoxel1, grid1.xyz, pp);
+            u_Probe[i] = float4(ts, a2.y > 0.5 ? a2.x : -1.0, b2.y > 0.5 ? b2.x : -1.0, 0.0);
+        }
+    }
 }
