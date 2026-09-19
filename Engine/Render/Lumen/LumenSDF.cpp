@@ -822,6 +822,7 @@ void LumenSDF::Step(rhi::IRHICommandList* cmd, const MeshBatcher& batcher) {
         // 此刻该缓冲的写入命令早已被 GPU 执行完。
         if (++m_WaitFrames < 3) return;
         RunSelfCheck();
+        BuildCards();   // 步骤 13（L2 的输入）：卡片生成 + 覆盖率可视化，只做一次
         // 自检完成 → 进入 Global SDF 注入（步骤 10），同一帧内 clear + N 次注入 + 转换
         BuildGlobalField(cmd);
         HE_CORE_INFO("LumenSDF: Global SDF 注入完成（{} 个 mesh，第 {} 帧）", m_Entries.size(), m_Frame);
@@ -1965,6 +1966,261 @@ void LumenSDF::RunMeshFieldProbe(rhi::IRHICommandList* cmd, const float3& camPos
     m_MeshProbeValue[m_MeshProbeIndex] = (v < 1e29f) ? v : 999999.0f;   // 未命中 → 大数（说明该 mesh 场正常）
     ++m_MeshProbeIndex;
     m_MeshProbeStage = 0;
+}
+
+// ============================================================
+// 步骤 13：Card 生成器 + 覆盖率可视化（L2 Surface Cache 的输入）
+//
+// 【为什么先有卡片】Surface Cache 按"表面上的小方块"（card）缓存材质与光照。UE 的做法是沿 6 个轴向
+// 把 mesh 表面投影成卡片，再按覆盖率挑掉没有表面的方向。本步骤先把这个几何过程做出来，并让
+// "覆盖不到的地方"可见：一张卡是否保留只看"它的 texel 里有多少落在表面上"，于是
+// "卡片密度设置 ↔ 空洞"这条因果关系可验证。
+//
+// 【texel 世界尺寸必须固定，否则大网格全是"空洞"】固定 64² 时，2789 单位的网格每 texel 43.6 单位，
+// 薄结构几乎不占 texel ⇒ 覆盖率为 0（实测 mesh #12/#60/#93 就是这样，它们是"假空洞"）。
+// 这里改成按 `cardTexelWorld`（目标 texel 世界边长）**逐 mesh 自适应**分辨率，并夹在 [64, 512]：
+// 大网格用 512²（texel ≈ side/512），小网格用 64²。于是"空洞"只剩真正细到分辨不出的结构。
+//
+// 【CPU 版 vs GPU 版】这里是 CPU 版：复用自检已经准备好的 m_PositionsCPU / m_IndicesCPU，
+// 不引入新 GPU 资源；步骤 14 的页表/页状态机与捕获 pass 会消费这份卡片清单。
+// ============================================================
+void LumenSDF::BuildCards() {
+    if (m_CardsBuilt || m_Entries.empty()) return;
+    m_CardsBuilt = true;
+
+    struct Face { u8 axis; i8 dir; };
+    static const Face kFaces[6] = {{0, 1}, {0, -1}, {1, 1}, {1, -1}, {2, 1}, {2, -1}};
+
+    struct Card {
+        u32 mesh = 0; u8 axis = 0; i8 dir = 1; u32 res = 0;
+        float texelWorld = 0.0f, loB = 0.0f, loC = 0.0f;
+        u32 filled = 0;
+        std::vector<u8> tex;
+    };
+    std::vector<Card> cards;
+    std::vector<std::vector<u32>> cardsOfMesh(m_Entries.size());
+
+    u32 minRes = 0xFFFFFFFFu, maxRes = 0;
+    float minTexel = 1e30f, maxTexel = 0.0f;
+
+    // ① 逐 mesh × 6 个方向：把三角形投影到该方向的 2D 网格，标记"有表面"的 texel
+    for (u32 mi = 0; mi < (u32)m_Entries.size(); ++mi) {
+        const MeshSDFEntry& e = m_Entries[mi];
+        const float side = e.voxelSize * (float)e.resolution;
+
+        for (u32 fi = 0; fi < 6u; ++fi) {
+            const u8 a = kFaces[fi].axis;
+            const u8 b = (u8)((a + 1u) % 3u);
+            const u8 c = (u8)((a + 2u) % 3u);
+            const float loB = (&e.origin.x)[b], loC = (&e.origin.x)[c];
+
+            // texel 世界边长目标 ⇒ 该方向的分辨率（夹在 [64, 512]，保证显存与耗时可控）
+            const u32 R = (u32)std::clamp(std::lround(side / std::max(0.25f, m_Config.cardTexelWorld)),
+                                          64l, 512l);
+            const float du = side / (float)R;
+            minRes = std::min(minRes, R); maxRes = std::max(maxRes, R);
+            minTexel = std::min(minTexel, du); maxTexel = std::max(maxTexel, du);
+
+            Card card;
+            card.mesh = mi; card.axis = a; card.dir = kFaces[fi].dir; card.res = R;
+            card.texelWorld = du; card.loB = loB; card.loC = loC;
+            card.tex.assign((usize)R * (usize)R, 0);
+
+            for (u32 t = 0; t < e.triCount; ++t) {
+                const u32* tri = &m_IndicesCPU[e.firstIndex + t * 3];
+                const float3 v0 = m_PositionsCPU[tri[0] + e.vertexOffset];
+                const float3 v1 = m_PositionsCPU[tri[1] + e.vertexOffset];
+                const float3 v2 = m_PositionsCPU[tri[2] + e.vertexOffset];
+                const float b0 = (&v0.x)[b], b1 = (&v1.x)[b], b2 = (&v2.x)[b];
+                const float c0 = (&v0.x)[c], c1 = (&v1.x)[c], c2 = (&v2.x)[c];
+
+                // 该方向上的投影面积过小（三角形几乎侧对）⇒ 这个方向看不到它
+                const float den = (b1 - b0) * (c2 - c0) - (b2 - b0) * (c1 - c0);
+                if (std::fabs(den) < 1e-6f) continue;
+
+                const int i0 = std::max(0, (int)std::floor((std::min(std::min(b0, b1), b2) - loB) / du));
+                const int i1 = std::min((int)R - 1, (int)std::ceil((std::max(std::max(b0, b1), b2) - loB) / du));
+                const int j0 = std::max(0, (int)std::floor((std::min(std::min(c0, c1), c2) - loC) / du));
+                const int j1 = std::min((int)R - 1, (int)std::ceil((std::max(std::max(c0, c1), c2) - loC) / du));
+                for (int j = j0; j <= j1; ++j) {
+                    for (int i = i0; i <= i1; ++i) {
+                        // texel 中心 -> 2D 重心坐标，判断是否落在投影三角形内
+                        const float pb = loB + ((float)i + 0.5f) * du;
+                        const float pc = loC + ((float)j + 0.5f) * du;
+                        const float w1 = ((pb - b0) * (c2 - c0) - (pc - c0) * (b2 - b0)) / den;
+                        const float w2 = ((b1 - b0) * (pc - c0) - (c1 - c0) * (pb - b0)) / den;
+                        if (w1 < -1e-4f || w2 < -1e-4f || w1 + w2 > 1.0f + 1e-4f) continue;
+                        card.tex[(usize)j * R + (usize)i] = 1;
+                    }
+                }
+            }
+            for (u8 v : card.tex) card.filled += v ? 1u : 0u;
+            cardsOfMesh[mi].push_back((u32)cards.size());
+            cards.push_back(std::move(card));   // 先全部留下，是否"保留"由阈值在统计阶段决定
+        }
+    }
+
+    // ② 覆盖率：按面积加权采样表面点，记录"哪些方向的卡覆盖了它"（6 位掩码），
+    //    这样换一个保留阈值不必重新采样（"卡片密度 ↔ 覆盖率"的曲线是同一批采样上算出来的）
+    u32 samples = 0;
+    std::vector<u8> maskOfSample;
+    std::vector<u32> meshOfSample;
+    maskOfSample.reserve(1 << 20);
+    meshOfSample.reserve(1 << 20);
+
+    for (u32 mi = 0; mi < (u32)m_Entries.size(); ++mi) {
+        const MeshSDFEntry& e = m_Entries[mi];
+        const float side = e.voxelSize * (float)e.resolution;
+        for (u32 t = 0; t < e.triCount; ++t) {
+            const u32* tri = &m_IndicesCPU[e.firstIndex + t * 3];
+            const float3 v0 = m_PositionsCPU[tri[0] + e.vertexOffset];
+            const float3 v1 = m_PositionsCPU[tri[1] + e.vertexOffset];
+            const float3 v2 = m_PositionsCPU[tri[2] + e.vertexOffset];
+            const float area = 0.5f * glm::length(glm::cross(v1 - v0, v2 - v0));
+            const u32 k = (u32)std::clamp(area / std::max(1e-3f, side * side / 4096.0f), 1.0f, 16.0f);
+            for (u32 s = 0; s < k; ++s) {
+                // 固定低差异序列（可复现），重心坐标均匀采样
+                const float u1 = (float)(((t * 7u + s * 13u) % 97u) + 1u) / 98.0f;
+                const float u2 = (float)(((t * 11u + s * 5u) % 89u) + 1u) / 90.0f;
+                const float su = std::sqrt(u1);
+                const float w0 = 1.0f - su, w1 = su * (1.0f - u2), w2 = su * u2;
+                const float3 p = v0 * w0 + v1 * w1 + v2 * w2;
+                ++samples;
+
+                u8 mask = 0;
+                const auto& my = cardsOfMesh[mi];
+                for (u32 k2 = 0; k2 < (u32)my.size() && k2 < 6u; ++k2) {
+                    const Card& card = cards[my[k2]];
+                    const u8 a = card.axis;
+                    const u8 bb = (u8)((a + 1u) % 3u);
+                    const u8 cc = (u8)((a + 2u) % 3u);
+                    const int i = (int)std::floor(((&p.x)[bb] - card.loB) / card.texelWorld);
+                    const int j = (int)std::floor(((&p.x)[cc] - card.loC) / card.texelWorld);
+                    if (i < 0 || j < 0 || i >= (int)card.res || j >= (int)card.res) continue;
+                    if (card.tex[(usize)j * card.res + (usize)i]) mask |= (u8)(1u << k2);
+                }
+                maskOfSample.push_back(mask);
+                meshOfSample.push_back(mi);
+            }
+        }
+    }
+
+    // ③ 保留阈值 → 卡片数 → 覆盖率（同一批采样求值，曲线才有可比性）
+    auto coverageAt = [&](float minFill, u32* keptCards) {
+        std::vector<u8> keep(cards.size(), 0);
+        u32 kept = 0;
+        for (size_t ci = 0; ci < cards.size(); ++ci) {
+            const Card& card = cards[ci];
+            if ((float)card.filled >= minFill * (float)(card.res * card.res)) { keep[ci] = 1; ++kept; }
+        }
+        u32 covered = 0;
+        for (u32 si = 0; si < samples; ++si) {
+            const u8 mask = maskOfSample[si];
+            if (!mask) continue;
+            const auto& my = cardsOfMesh[meshOfSample[si]];
+            for (u32 k2 = 0; k2 < (u32)my.size() && k2 < 6u; ++k2) {
+                if ((mask & (u8)(1u << k2)) && keep[my[k2]]) { ++covered; break; }
+            }
+        }
+        if (keptCards) *keptCards = kept;
+        return samples ? (float)covered / (float)samples : 0.0f;
+    };
+
+    u32 keptAtCfg = 0;
+    const float covCfg = coverageAt(m_Config.cardMinFill, &keptAtCfg);
+    m_CardCoverage.meshes      = (u32)m_Entries.size();
+    m_CardCoverage.cards       = keptAtCfg;
+    m_CardCoverage.samples     = samples;
+    m_CardCoverage.covered     = (u32)(covCfg * (float)samples);
+    m_CardCoverage.cardRes     = maxRes;
+    m_CardCoverage.minCardFill = m_Config.cardMinFill;
+
+    HE_CORE_INFO("LumenSDF 卡片生成（步骤 13）: {} 个 mesh；卡片分辨率 {}~{}²（texel {:.2f}~{:.2f} 世界单位，"
+                 "目标 {:.2f}）；表面采样 {} 点",
+                 m_CardCoverage.meshes, minRes, maxRes, (double)minTexel, (double)maxTexel,
+                 (double)m_Config.cardTexelWorld, samples);
+    for (float thr : {0.05f, 0.10f, 0.25f, 0.50f}) {
+        u32 kept = 0;
+        const float cov = coverageAt(thr, &kept);
+        HE_CORE_INFO("  保留阈值 {:>3.0f}% 的 texel 有表面 ⇒ 卡片 {} 张，覆盖率 {:.1f}%",
+                     (double)(thr * 100.0f), kept, 100.0 * (double)cov);
+    }
+
+    // ④ 覆盖率可视化（RGBA8）：上半 = 代表 mesh 的 6 个投影面；下半 = 逐 mesh 覆盖条
+    const u32 panel = 64;                 // 展示分辨率（大卡片按最近邻降采样）
+    const u32 barH  = 64;
+    const u32 imgW  = panel * 6u;
+    const u32 imgH  = panel + barH;
+    std::vector<u8> img((usize)imgW * imgH * 4u, 0);
+    auto put = [&](u32 x, u32 y, u8 r, u8 g, u8 b) {
+        if (x >= imgW || y >= imgH) return;
+        u8* px = &img[((usize)y * imgW + x) * 4u];
+        px[0] = r; px[1] = g; px[2] = b; px[3] = 255;
+    };
+    // 代表 mesh：留卡"有洞"最多者优先（这样图里一定能看到问题所在）
+    std::vector<float> meshCovered(m_Entries.size(), 0.0f);
+    std::vector<u32>   meshSamples(m_Entries.size(), 0);
+    for (u32 si = 0; si < samples; ++si) {
+        const u32 mi = meshOfSample[si];
+        ++meshSamples[mi];
+        const u8 mask = maskOfSample[si];
+        if (!mask) continue;
+        const auto& my = cardsOfMesh[mi];
+        for (u32 k2 = 0; k2 < (u32)my.size() && k2 < 6u; ++k2) {
+            if (mask & (u8)(1u << k2)) {
+                const Card& card = cards[my[k2]];
+                if ((float)card.filled >= m_Config.cardMinFill * (float)(card.res * card.res)) {
+                    meshCovered[mi] += 1.0f; break;
+                }
+            }
+        }
+    }
+    u32 rep = 0;
+    for (u32 mi = 1; mi < (u32)m_Entries.size(); ++mi) {
+        const float c0 = meshSamples[rep] ? meshCovered[rep] / (float)meshSamples[rep] : 1.0f;
+        const float c1 = meshSamples[mi] ? meshCovered[mi] / (float)meshSamples[mi] : 1.0f;
+        if (c1 < c0) rep = mi;
+    }
+    for (u32 fi = 0; fi < 6u; ++fi) {
+        const u32 ci = rep * 6u + fi;
+        if (ci >= cards.size()) continue;
+        const Card& card = cards[ci];
+        const u32 step = std::max(1u, card.res / panel);
+        for (u32 y = 0; y < panel; ++y) {
+            for (u32 x = 0; x < panel; ++x) {
+                const u32 sx = std::min(card.res - 1u, x * step);
+                const u32 sy = std::min(card.res - 1u, y * step);
+                if (card.tex[(usize)sy * card.res + sx]) put(fi * panel + x, y, 230, 230, 230);
+            }
+        }
+    }
+    for (u32 mi = 0; mi < (u32)m_Entries.size() && mi < barH; ++mi) {
+        const float cov = meshSamples[mi] ? meshCovered[mi] / (float)meshSamples[mi] : 1.0f;
+        const u32 len = (u32)(cov * (float)imgW);
+        for (u32 x = 0; x < imgW; ++x)
+            put(x, panel + mi, x < len ? (u8)80 : (u8)200, x < len ? (u8)220 : (u8)40, 60);
+    }
+
+    rhi::TextureDesc td;
+    td.width = imgW; td.height = imgH; td.depth = 1;
+    td.format = rhi::Format::RGBA8_UNORM;
+    td.usage  = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::TransferSrc;
+    td.initialData = img.data();
+    m_CardCoverageTex = m_Device->CreateTexture(td);
+
+    // 覆盖最差的 3 个 mesh 点名（"空洞 ↔ 卡片设置"的可回归证据）
+    std::vector<u32> order;
+    for (u32 mi = 0; mi < (u32)m_Entries.size(); ++mi) if (meshSamples[mi] > 0) order.push_back(mi);
+    std::sort(order.begin(), order.end(), [&](u32 x, u32 y) {
+        return meshCovered[x] / (float)std::max(1u, meshSamples[x]) <
+               meshCovered[y] / (float)std::max(1u, meshSamples[y]);
+    });
+    for (u32 i = 0; i < (u32)order.size() && i < 3u; ++i) {
+        const u32 mi = order[i];
+        HE_CORE_INFO("  覆盖最差 #{}: mesh #{} 覆盖 {:.1f}%（采样 {}，三角形 {}）",
+                     i + 1, mi, 100.0 * (double)(meshCovered[mi] / (float)std::max(1u, meshSamples[mi])),
+                     meshSamples[mi], m_Entries[mi].triCount);
+    }
 }
 
 } // namespace he::render

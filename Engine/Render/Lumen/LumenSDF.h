@@ -44,6 +44,10 @@ struct LumenSDFConfig {
     u32 probeStride    = 0;      // 自检采样步长（0 = 自动取 resolution/4）
     u32 globalResolution = 128;  // Global SDF 单层分辨率（clipmap 分层留待后续步骤）
     u32 globalLayers     = 2;    // clipmap 层数（1 = 旧行为：单层覆盖全场；2 = 近层 + 远层）
+    // ── 步骤 13：卡片生成（L2 Surface Cache 的输入）──
+    u32   cardRes        = 64;     // 卡片展示分辨率（生成分辨率按 cardTexelWorld 自适应，夹在 [64,512]）
+    float cardTexelWorld = 4.0f;   // 目标 texel 世界边长（大网格自适应提高生成分辨率，避免"假空洞"）
+    float cardMinFill    = 0.25f;  // 一张卡至少要有这么多比例的 texel 落在表面上才保留
     float nearFraction   = 0.50f;// 近层边长 = 场景最长轴 × 该比例（近层体素 ≈ 远层 / 比例）
     // ── sphere tracing 验证（步骤 11）──
     u32   marchRays     = 256;   // 验证用射线数
@@ -134,8 +138,7 @@ public:
     };
     [[nodiscard]] const MarchCheck& GetMarchCheck() const { return m_MarchCheck; }
 
-    // ── SDF 追踪可视化（步骤 12，L1 退出判据）──
-    /// 相机位置：clipmap 的**近层跟随相机**（UE 的做法）。必须在第一次 Step 之前设置，
+    // ── SDF 追踪可视化（步骤 12，L1 退出判据）──    /// 相机位置：clipmap 的**近层跟随相机**（UE 的做法）。必须在第一次 Step 之前设置，
     /// 否则近层会退化成"以场景中心为心的盒子"——实测那块盒子里几乎没有几何（§附六）。
     void SetCameraPos(const float3& p) { m_CameraPos = p; m_CameraPosSet = true; }
     /// 视口尺寸：调试视图按屏幕分辨率逐像素发射主射线（由 LumenScene 在 Initialize/OnResize 时同步）
@@ -153,10 +156,24 @@ public:
     /// 调试视图输出（RGBA16F，屏幕尺寸）：R=命中层, G=t/最大距离, B=步数比, A=是否命中
     [[nodiscard]] rhi::IRHITexture* GetDebugTexture() const { return m_DebugTex.get(); }
 
+    // ── L2 Surface Cache：步骤 13 的 Card 生成器 + 覆盖率（CPU 版；GPU atlas 见步骤 14+）──
+    /// 覆盖率结论：卡片数、按面积加权采样数、被任一卡片覆盖的采样数
+    struct CardCoverage {
+        u32 meshes = 0, cards = 0, samples = 0, covered = 0;
+        u32 cardRes = 0;
+        float minCardFill = 0.0f;
+    };
+    [[nodiscard]] const CardCoverage& GetCardCoverage() const { return m_CardCoverage; }
+    /// 覆盖率可视化（RGBA8）：上半是最大网格的 6 个投影面（白=有表面，红=有表面但未被卡片覆盖），
+    /// 下半是逐 mesh 的覆盖条（绿=已覆盖长度）。
+    [[nodiscard]] rhi::IRHITexture* GetCardCoverageTexture() const { return m_CardCoverageTex.get(); }
+
 private:
     void BuildQueue(const MeshBatcher& batcher);
     void UploadGeometry(const MeshBatcher& batcher);
     void CreateGPUObjects();
+    /// 步骤 13：为每个 mesh 生成卡片（6 个轴向投影 + 覆盖率检查）并做覆盖率统计/可视化
+    void BuildCards();
     void BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex);
     void RunSelfCheck();
     // ── Global SDF（步骤 10）──
@@ -295,6 +312,10 @@ private:
     float3 m_DebugCamFwd = float3(0.0f, 0.0f, -1.0f);   // 最近一次的前向（剖面点用）
     u32   m_DebugFrames = 0;                                 // 已累计统计的帧数
     u32   m_DebugStatsLast[4] = {0, 0, 0, 0};
+    // ── L2 Surface Cache（步骤 13）──
+    CardCoverage m_CardCoverage;
+    std::unique_ptr<rhi::IRHITexture> m_CardCoverageTex;
+    bool m_CardsBuilt = false;
     // mesh 场探针（每帧查一个 mesh，读回等 3 帧）
     u32   m_MeshProbeIndex = 0;
     u32   m_MeshProbeStage = 0;      // 0 = 发射，1 = 等读回

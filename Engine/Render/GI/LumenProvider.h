@@ -108,6 +108,10 @@ public:
         const float  tanHalf = std::tan(glm::radians(cam.fov) * 0.5f);
         m_Scene->RunSDFDebug(cmd, cam.position, f, r, u, tanHalf, cam.aspectRatio);
     }
+    /// 步骤 13 的卡片覆盖率可视化（L2 Surface Cache 的输入），供 GI 采样路径转储
+    [[nodiscard]] rhi::IRHITexture* GetCardCoverageTexture() const {
+        return m_Scene ? m_Scene->GetSDF().GetCardCoverageTexture() : nullptr;
+    }
     /// 步骤 12 的可视化产物（供 06.GILab 的 GI 采样路径整幅转储）
     [[nodiscard]] rhi::IRHITexture* GetSDFDebugTexture() const {
         return m_Scene ? m_Scene->GetSDF().GetDebugTexture() : nullptr;
