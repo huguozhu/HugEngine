@@ -99,6 +99,7 @@ if(SLANGC)
         # PostProcess
         "${SHADER_DIR}/PostProcess/ToneMap.frag.slang"
         "${SHADER_DIR}/PostProcess/Denoise.frag.slang"
+        "${SHADER_DIR}/PostProcess/Denoise_Upscale.frag.slang"
         "${SHADER_DIR}/PostProcess/RT_DenoiseTemporal.frag.slang"
         "${SHADER_DIR}/PostProcess/GaussianBlur.frag.slang"
         "${SHADER_DIR}/PostProcess/BrightPass.frag.slang"

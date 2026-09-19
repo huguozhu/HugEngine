@@ -704,6 +704,24 @@ int main() {
             // 就必然会有下一个忘记同步的调用方（§9.2-G）。
             };
             applyGIConfig(*deferredPipeline.GetGIConfig());
+
+            // 【步骤 34 发现的连通性缺口：`gi_half_res` 到不了渲染】
+            // 上面只写了 `GIConfig::halfRes`，而 SSGI/SSR 读的是**各自的** `GISettings::halfRes`；
+            // 启动路径上没有任何一处把两者连起来（只有 ImGui 的档位切换会同步它们），于是
+            // 「半分辨率」这一档**从配置文件根本到不了 SSGI/SSR** —— 而 cfg 写回里却有
+            // `gi_half_res`（配置往返有损，半分辨率路径也无法用 cfg 回归）。
+            // 这里补上同步：输出纹理的重建由帧图的 `Provider::SyncToStack → SyncOutputSize`
+            // 每帧核对完成，故只需要写设置。（SSAO 有自己的 `ssao_half_res` 键，不在此列。）
+            if (auto* gi = deferredPipeline.GetSSGI()) {
+                auto s = gi->GetSettings();   // GetSettings 返回 const& → 取副本再 SetSettings
+                s.halfRes = deferredPipeline.GetGIConfig()->halfRes;
+                gi->SetSettings(s);
+            }
+            if (auto* gi = deferredPipeline.GetSSR()) {
+                auto s = gi->GetSettings();
+                s.halfRes = deferredPipeline.GetGIConfig()->halfRes;
+                gi->SetSettings(s);
+            }
             // Forward：从**它自己的预设基线**出发套同一份键，再按 Forward 的能力位降级 ——
             // 不降级的话 Forward 会带着它跑不了的源（SSGI/DDGI/光追）进层栈，
             // 正是 §9.2-G 那个"归一化里计权重、却没人产出"的失效形态。

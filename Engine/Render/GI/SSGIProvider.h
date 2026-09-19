@@ -3,9 +3,9 @@
 // ============================================================
 // GI/SSGIProvider.h — 屏幕空间间接漫反射 Provider（Wave 2 阶段 2）
 //
-// SSGI 是「主 pass + 附属 pass（降噪）」的典型形态，用于验证附属 pass 机制：
+// SSGI 是「主 pass + 附属 pass（降噪链）」的典型形态，用于验证附属 pass 机制：
 //   · 主 pass：屏幕空间射线步进 → 间接漫反射（半分辨率可选）
-//   · 附属 pass：时域/空间降噪（halfRes 时跳过——半分辨率输出直接采样）
+//   · 附属 pass：空间降噪；（半分辨率时）降噪之后重建升采样
 // 帧图只需遍历 GetAuxPassCount()，不再为每种源手写降噪链。
 // ============================================================
 
@@ -46,36 +46,52 @@ public:
     /// 同步到层栈：层栈是唯一真值（不变量 1）。
     /// 调用点由帧图在**构图之前**调用，因此这里也是让 halfRes 当场生效的正确时机 ——
     /// 输出纹理尺寸若等到下次 OnResize 才变，本帧导入渲染图的句柄就会指向旧尺寸纹理。
+    /// 【步骤 34（11.3）】同时把两级降噪链的尺寸对齐到"信号分辨率 / 消费端分辨率"：
+    /// 半分辨率信号此后**也要降噪**，降噪之后再由升采样级重建到消费端分辨率。
     void SyncToStack(const GIChannelStack& stack) override {
         if (!m_SSGI) return;
         m_SSGI->SetEnabled(stack.Has(GISourceId::SSGI));
         m_SSGI->SyncOutputSize();
+        rhi::IRHITexture* out = m_SSGI->GetIndirectDiffuseTexture();
+        if (out) {
+            m_Aux.SyncSizes(out->GetWidth(), out->GetHeight(),
+                            m_SSGI->GetFullWidth(), m_SSGI->GetFullHeight());
+        }
     }
 
     [[nodiscard]] rhi::IRHITexture* GetDiffuseOutput() const override {
         return m_SSGI ? m_SSGI->GetIndirectDiffuseTexture() : nullptr;
     }
-    /// 最终输出：有降噪则取降噪结果，否则取主输出
+    /// 最终输出：走完整条链（降噪 →（半分辨率时）升采样），链未启用时退回主输出
     [[nodiscard]] rhi::IRHITexture* GetFinalDiffuseOutput() const override {
         if (AuxActive()) return m_Aux.Output();
         return GetDiffuseOutput();
     }
 
-    // ── 附属 pass：降噪（halfRes 时跳过）──
+    // ── 附属 pass：降噪链（半分辨率时降噪 + 重建升采样）──
     // 实现全部委托给 SpatialDenoiseAux：与 SSRProvider 共用同一条链，避免两处逐行同构
     // 的代码各自漂移（任务 11.1）。
     [[nodiscard]] u32 GetAuxPassCount() const override { return m_Aux.Count(AuxActive()); }
-    [[nodiscard]] const char* GetAuxPassName(u32 /*i*/) const override { return "SSGI_Denoise"; }
-    [[nodiscard]] rhi::IRHITexture* GetAuxPassInput(u32 /*i*/) const override { return GetDiffuseOutput(); }
-    [[nodiscard]] rhi::IRHITexture* GetAuxPassOutput(u32 /*i*/) const override { return m_Aux.Output(); }
-    void PreBindAux(rhi::IRHICommandList* cmd, u32 /*i*/) override { m_Aux.PreBind(cmd); }
-    void RenderAux(rhi::IRHICommandList* cmd, u32 /*i*/, const GIProviderContext& /*ctx*/) override {
-        m_Aux.Render(cmd, GetDiffuseOutput(), m_Depth, m_Normal);
+    [[nodiscard]] const char* GetAuxPassName(u32 i) const override {
+        return SpatialDenoiseAux::PassName(i, "SSGI_Denoise", "SSGI_Upscale");
+    }
+    [[nodiscard]] rhi::IRHITexture* GetAuxPassInput(u32 i) const override {
+        return m_Aux.PassInput(i, GetDiffuseOutput());
+    }
+    [[nodiscard]] rhi::IRHITexture* GetAuxPassOutput(u32 i) const override { return m_Aux.PassOutput(i); }
+    void PreBindAux(rhi::IRHICommandList* cmd, u32 i) override { m_Aux.PreBind(cmd, i); }
+    void RenderAux(rhi::IRHICommandList* cmd, u32 i, const GIProviderContext& /*ctx*/) override {
+        m_Aux.Render(cmd, i, GetDiffuseOutput(), m_Depth, m_Normal);
     }
 
-    bool Initialize(rhi::IRHIDevice*, u32, u32) override { return m_SSGI != nullptr; }
-    void Shutdown() override {}
-    void OnResize(u32, u32) override {}
+    /// 【步骤 34（11.3）】升采样级需要设备（自有纹理/管线）
+    bool Initialize(rhi::IRHIDevice* device, u32 w, u32 h) override {
+        if (!m_SSGI) return false;
+        m_Aux.Initialize(device, w, h);
+        return true;
+    }
+    void Shutdown() override { m_Aux.Shutdown(); }
+    void OnResize(u32 w, u32 h) override { m_Aux.OnResize(w, h); }
     void PreBind(rhi::IRHICommandList* cmd) override { if (m_SSGI) m_SSGI->PreBind(cmd); }
     void Render(rhi::IRHICommandList* cmd, const GIProviderContext& ctx) override {
         if (m_SSGI) {
@@ -102,10 +118,37 @@ public:
     /// 计时读数落点（任务 29 / §9.2-Z）：帧图的 GPU 计时器把测得的耗时写回它
     [[nodiscard]] IGlobalIllumination* GetTimedPass() const override { return m_SSGI; }
 
+    /// 【步骤 34（11.3）】把 SSGI 的降噪信号登记进统一框架。
+    /// `needsUpscale` = halfRes：半分辨率输出**也要降噪**，降噪之后再由升采样恢复到全分辨率
+    /// —— 旧行为是 halfRes 时**直接跳过降噪**，而半分辨率恰恰最需要降噪。
+    void DescribeSignals(DenoiseSignalRegistry& registry, rhi::IRHITexture* depth,
+                         rhi::IRHITexture* normal, rhi::IRHITexture* velocity) override {
+        if (!m_SSGI || !m_SSGI->IsEnabled()) return;
+        rhi::IRHITexture* main = m_SSGI->GetIndirectDiffuseTexture();
+        if (!main) return;
+        const bool halfRes = m_SSGI->GetSettings().halfRes;
+        DenoiseSignal s;
+        s.name         = "SSGI";
+        s.input        = main;
+        s.output       = AuxActive() ? m_Aux.Output() : main;
+        s.depth        = depth;
+        s.normal       = normal;
+        s.velocity     = velocity;
+        s.width        = main->GetWidth();
+        s.height       = main->GetHeight();
+        s.targetWidth  = halfRes ? m_SSGI->GetFullWidth()  : s.width;
+        s.targetHeight = halfRes ? m_SSGI->GetFullHeight() : s.height;
+        s.needsUpscale = AuxActive() && m_Aux.NeedsUpscale();
+        s.depthSigma   = m_Aux.GetDepthSigma();
+        s.normalSigma  = m_Aux.GetNormalSigma();
+        registry.Register(s);
+    }
+
 private:
-    /// 降噪是否启用：halfRes 时半分辨率输出直接采样，省去 Denoise 开销
+    /// 降噪链是否启用：只看降噪器是否就绪 —— **半分辨率也照跑**（步骤 34 / 11.3）：
+    /// 此前这里带 `!halfRes`，半分辨率输出被直接采样，等于把最需要降噪的那一档跳过。
     [[nodiscard]] bool AuxActive() const {
-        return m_SSGI && m_Aux.GetPass() && !m_SSGI->GetSettings().halfRes;
+        return m_SSGI && m_Aux.Active();
     }
 
     GI_SSGI*          m_SSGI = nullptr;   // 非拥有
