@@ -137,6 +137,8 @@ if(SLANGC)
         "${SHADER_DIR}/AI/AITensorAdd.comp.slang"
         "${SHADER_DIR}/AI/AITextureSample.comp.slang"
         "${SHADER_DIR}/AI/AITextureGen.comp.slang"
+        # Lumen（虚拟化几何 GI）——步骤 8：逐 mesh 距离场构建
+        "${SHADER_DIR}/Lumen/SDF_MeshBuild.comp.slang"
         # Utility
         "${SHADER_DIR}/Utility/WorkGraph_Entry.comp.slang"
         "${SHADER_DIR}/Utility/TestClear.comp.slang"

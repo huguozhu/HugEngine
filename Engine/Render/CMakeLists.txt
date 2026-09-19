@@ -182,6 +182,8 @@ set(RENDER_SOURCES
     # Lumen（虚拟化几何 GI）：持久资源宿主 + Provider，后续步骤在其上追加 atlas / SDF / 探针
     Lumen/LumenScene.h
     Lumen/LumenScene.cpp
+    Lumen/LumenSDF.h
+    Lumen/LumenSDF.cpp
     GI/LumenProvider.h
 )
 

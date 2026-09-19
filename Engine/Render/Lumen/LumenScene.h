@@ -23,6 +23,7 @@
 // ============================================================
 
 #include "RHI/RHI.h"
+#include "Lumen/LumenSDF.h"
 
 #include <memory>
 
@@ -53,6 +54,11 @@ public:
     /// value = 输出值；alpha < 0 表示"本条无数据"（合成端 skip），见 shader 里的说明
     void DrawSkeleton(rhi::IRHICommandList* cmd, float value, float alpha);
 
+    /// 每帧推进 SDF 构建（步骤 8）：建档 → 逐帧构建 → 自检。由 LumenProvider::Render 调用。
+    void StepSDF(rhi::IRHICommandList* cmd, const MeshBatcher& batcher) { m_SDF.Step(cmd, batcher); }
+    [[nodiscard]] LumenSDF&       GetSDF()       { return m_SDF; }
+    [[nodiscard]] const LumenSDF& GetSDF() const { return m_SDF; }
+
 private:
     void CreateOutput();
     void CreateSkeletonPipeline();
@@ -65,6 +71,8 @@ private:
     std::unique_ptr<rhi::IRHISampler> m_OutputSampler;
     // 占位 pass 的管线状态（单颜色附件 RGBA16F、无深度）。不随视口尺寸变化，只建一次。
     std::unique_ptr<rhi::IRHIPipelineState> m_SkeletonPSO;
+    // 逐 mesh 距离场（步骤 8）
+    LumenSDF m_SDF;
 };
 
 } // namespace he::render

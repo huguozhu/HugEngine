@@ -17,12 +17,14 @@ bool LumenScene::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Height = height;
     CreateSkeletonPipeline();
     CreateOutput();
+    m_SDF.Initialize(device);   // 步骤 8：逐 mesh 距离场（构建由 StepSDF 逐帧推进）
     HE_CORE_INFO("LumenScene: 初始化持久资源宿主（视口 {}x{}）", width, height);
     return true;
 }
 
 void LumenScene::Shutdown() {
     // 步骤 8/10/14/23 在这里释放 Mesh SDF 缓存、Global SDF clipmap、页表与探针缓冲。
+    m_SDF.Shutdown();
     DestroySkeletonPipeline();
     m_OutputSampler.reset();
     m_Output.reset();
