@@ -61,7 +61,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
             return;
         }
         // 安全步长系数 0.5（理由同全局版：近似场全量步进会穿漏）
-        t += max(ad * 0.5, eps);
+        // 步长下限与命中判据分开（理由同全局版）
+        t += max(ad * 0.5, eps * 0.02);
         if (t > maxDist) return;
     }
 }
