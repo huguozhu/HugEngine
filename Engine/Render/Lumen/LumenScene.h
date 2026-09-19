@@ -123,6 +123,8 @@ private:
     std::unique_ptr<rhi::IRHITexture> m_AtlasAlbedo, m_AtlasNormal, m_AtlasEmissive;
     std::unique_ptr<rhi::IRHIBuffer>  m_CaptureStats;
     void* m_CaptureStatsMapped = nullptr;
+    std::unique_ptr<rhi::IRHIBuffer>  m_CaptureFrameBuf;      // 每帧常量（push constant 只有 128B 上限）
+    void* m_CaptureFrameMapped = nullptr;
     rhi::DescriptorSetLayoutHandle m_CaptureLayout = 0;
     rhi::DescriptorSetHandle       m_CaptureSet    = 0;
     std::unique_ptr<rhi::IRHIPipelineState> m_CapturePSO;

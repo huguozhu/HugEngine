@@ -1446,7 +1446,7 @@ python Tools\pt\analyze_pt.py --compare <pt_tag> <deferred_tag> --target hdr
 | 12 SDF 帧图接入与调试 | ✅ 已完成（含 L1 退出判据的可视化） | 帧图有独立的 `Lumen_SDF_Build` compute pass（不声明资源依赖、自管 barrier；`writes` 为空故不被 `CullDeadPasses` 裁掉），SDF 构建与渲染解耦；"关掉 Lumen 无任何影响"已实证：Lumen off 时 `lumen_passes=0`、既有源 dump 与接入前**字节级一致**。可视化已落地：`SDF_DebugView.comp.slang` 逐像素主射线 sphere tracing → 稳定命名转储 `lumen_sdf_trace`（1920×1080 RGBA16F）+ 原子计数统计。**它随即暴露了一个自检看不到的真问题**（见 §附三：全局场在空旷处把距离塌缩到 ≈0） |
 | 13 Card 生成器 + 覆盖率可视化 | ✅ 已完成（CPU 版，GPU atlas 见 14+） | `LumenSDF::BuildCards()`：逐 mesh × 6 轴向投影成卡片；texel 世界边长按 `cardTexelWorld=4.0` **逐 mesh 自适应**（分辨率 64~512²，实测 texel 0.56~7.41）；按面积加权采样 418,329 个表面点做覆盖判定；保留阈值 → 卡片数 → 覆盖率给出**单调曲线**（5%⇒410 张/89.7%，10%⇒330/86.8%，**25%⇒228/79.1%**，50%⇒66/54.2%）；覆盖率可视化（RGBA8，代表 mesh 的 6 个投影面 + 逐 mesh 覆盖条）以稳定名 `lumen_card_coverage` 转储。**验收**：空洞与卡片设置一一对应（见曲线），残余空洞集中在个别**薄结构** mesh（#12/#43/#44，投影填充率天然很低），已点名 |
 | 14 页表 + 页状态机 | ✅ 已完成 | `Lumen/SurfaceCache.slang`（C++/Slang **共享布局**）+ `Lumen/SurfaceCacheTypes.{h,cpp}`（六态 + 迁移真值表 + 页状态机 + 布局 static_assert）+ `Tests/TestSurfaceCache.cpp`（5 例 / 73 断言：真值表、完整生命周期、非法迁移被拒绝且不改状态、校验和对字段敏感）+ `LumenScene_SurfaceCache.cpp`（用步骤 13 的 228 张卡片建 64 页演示表：Allocating 9 / Capturing 5 / Captured 41 / Dirty 9，六态齐全；GPU 镜像缓冲 + `SurfaceCache_PageCheck.comp.slang` 校验和比对 **PASS** 0x545eb5ad）。**验收**：非法迁移 `HE_ASSERT` + 单测覆盖；GPU/C++ 镜像一致（校验和相同） |
-| 15 Card Capture（软件光栅化写 atlas） | 🟡 进行中（骨架就位，**命中 0 待查**） | 已落地：3 张 RGBA16F atlas（512² = 8×8 页 × 64²；`lumen_sc_atlas_albedo` 可转储）、`SurfaceCache_Capture.comp`（一卡一组、页状态门控只捕 `Capturing`、`kMaxCapturesPerFrame=8` 预算、卡分辨率自适应降采样进 64² 页、命中点投影到屏幕取 GBuffer albedo/normal）、命中/未命中/march 命中三个诊断计数。**实测：5 页 20480 个 texel 全部未命中、march 命中 0**。已排除：push constant 字段错位（旧版 shader 多一个 camPosW，已修）、eps/步长过小（已把 eps 提到 1 个近层体素=14.2、步长 eps/2）。下一步：把 march 单独拿出来，用一张已知卡对照 CPU 真值逐步定位 |
+| 15 Card Capture（软件光栅化写 atlas） | 🟡 可用（真因已修：push constant 超 128 B 被截断） | 已落地：3 张 RGBA16F atlas（512² = 8×8 页 × 64²；`lumen_sc_atlas_albedo` 可转储）、`SurfaceCache_Capture.comp`（一卡一组、页状态门控只捕 `Capturing`、`kMaxCapturesPerFrame=8` 预算、卡分辨率自适应降采样进 64² 页、命中点投影到屏幕取 GBuffer albedo/normal）、命中/未命中/march 命中三个诊断计数。**实测：5 页 20480 个 texel 全部未命中、march 命中 0**。已排除：push constant 字段错位（旧版 shader 多一个 camPosW，已修）、eps/步长过小（已把 eps 提到 1 个近层体素=14.2、步长 eps/2）。下一步：把 march 单独拿出来，用一张已知卡对照 CPU 真值逐步定位 |
 | 16–41 | ⬜ 未开始 | 步骤 15 收尾后 → 16 Feedback（缺失页检测）、17 预算摊销、18 LRU 淘汰、19 L2 退出判据，随后 20–25 Screen Probe |
 
 ### 阶段 A：框架前置（不产出画面，但后补等于重构）
@@ -2551,3 +2551,44 @@ LumenScene 页表镜像校验（步骤 14）: GPU 与 C++ 侧校验和一致 = 0
    命中率应当≈卡的填充率）。
 3. 若平面基就错了：对照步骤 13 的 `(axis, b=(axis+1)%3, c=(axis+2)%3)` 约定逐项核对（本轮已按该约定写，
    但尚未用数值验证过）。
+### 附二十二：步骤 15 的"命中 0"真因 —— **push constant 超过 128 B 被截断**
+
+§附二十一 留下的谜团（20480 个 texel 一个都不命中）本轮定位并修掉了，真因与卡平面基、eps、SDF 都无关：
+
+> **Vulkan 的 `maxPushConstantsSize` 典型值是 128 B。** 原来我把"每卡参数 + 每帧常量"共 **15 个 float4（240 B）**
+> 全塞在一个 push constant 里 —— 超出部分被截断：shader 收到的 `originVoxel0.x` 是 **NaN**、`voxel` 是 **0**，
+> 于是 `SampleLayer` 的 `inside` 恒为 false、march 直接返回 1e30，一个 texel 都不命中。
+
+**怎么抓到的**：让 shader 把 push constant 实际收到的值写进统计缓冲回读，与 CPU 侧并排比较：
+
+```
+Card 捕获 push constant 回报: originVoxel0.x=-nan（CPU -1066.64） voxel=0.00（CPU 21.33）
+```
+
+**修法**：
+
+- **每卡参数**留在 push constant（`pageOriginRes / planeOrigin / planeStepU / planeStepV / axis / marchParams`
+  = **96 B**，低于上限）；
+- **每帧常量**（VP 矩阵 4 行、屏幕、两层原点与分辨率）改走 **StructuredBuffer**（binding 10，
+  `CaptureFrame` 结构，持久映射，每帧 memcpy）；
+- 加了一条**永久护栏**：shader 回读 origin/voxel，与 CPU 侧不一致就报 `Card 捕获常量错位` 错误。
+
+**实测（`lumen_sc15i`，121 帧，exit=0，VUID 46 = 基线）**：
+
+```
+Card 捕获（步骤 15）: 累计捕获 5 页；命中 texel 4210 / 未命中 16270（20.6% 命中）；SDF march 命中 12213（诊断）
+页表镜像校验（步骤 14）: GPU 与 C++ 侧校验和一致
+```
+
+- `SDF march 命中 12213 / 20480 = 59.6%`：与"卡的填充率 50.2%"同量级 ⇒ **march 的确在找表面**（该卡的
+  CPU 真值沿轴 57.6 → 14.3 → 31.1，中途确实贴近几何）；
+- `写入 4210 = 20.6%`：比 march 命中少，是因为**只有本帧在屏幕上可见的表面**才能从 GBuffer 取到材质
+  （这 5 张卡大多不在视野内）—— 这正是步骤 15 的已知边界（材质源暂用 GBuffer）。
+
+**可视化验收**：把 `lumen_sc_atlas_albedo` 转成 PNG 后**能看到场景真实材质**（石材/植被等）落在已捕获的
+页里，未捕获的页是暗红（alpha=0）——"atlas 可视化与场景材质一致"这一条对**已捕获的页**成立
+（工具：`build/verify/f16_rgba_png.py`）。
+
+**步骤 15 收尾还差**（不阻塞进入 16）：①把演示页表从 64 页扩到 228 页全量捕获；
+②遮挡判定（现在只做"GBuffer 该像素有没有几何"的存在性判据）；③材质源从 GBuffer 换成
+bindless 逐材质求值，使 atlas 独立于屏幕（这一步与 22 的命中点着色同源）。

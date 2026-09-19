@@ -103,6 +103,8 @@ public:
     [[nodiscard]] u32    GetGlobalLayerCount() const { return m_GlobalLayerCount; }
     /// 步骤 15 的捕获 pass 需要线性采样器（与全局注入同源）与全局分辨率
     [[nodiscard]] rhi::IRHISampler* GetLinearSampler() const { return m_LinearSampler.get(); }
+    /// 诊断用：点到全部几何的精确距离（= 场应当逼近的真值）
+    [[nodiscard]] float QueryTrueDistance(const float3& p) const { return MinDistToGeometry(p); }
     [[nodiscard]] u32 GetGlobalResolution() const { return m_Config.globalResolution; }
     [[nodiscard]] float  GetGlobalVoxelSize(u32 layer = kMaxGlobalLayers - 1u) const {
         return (layer < m_GlobalLayerCount) ? m_GlobalLayers[layer].voxelSize : 0.0f;

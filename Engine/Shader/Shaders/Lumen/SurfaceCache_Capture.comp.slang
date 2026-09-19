@@ -24,7 +24,16 @@
 [[vk::binding(1, 0)]] RWTexture2D<float4>     u_AtlasAlbedo;
 [[vk::binding(7, 0)]] RWTexture2D<float4>     u_AtlasNormal;
 [[vk::binding(8, 0)]] RWTexture2D<float4>     u_AtlasEmissive;
-[[vk::binding(9, 0)]] RWStructuredBuffer<uint> u_Stats;     // 0 = 命中并写入, 1 = 未命中/无效
+struct CaptureFrame {       // 每帧常量（与 C++ 的 CaptureFrame 逐字段一致）
+    float4 vp0, vp1, vp2, vp3;
+    uint4  screen;
+    float4 originVoxel0;
+    float4 originVoxel1;
+    uint4  grid0;
+    uint4  grid1;
+};
+[[vk::binding(10, 0)]] StructuredBuffer<CaptureFrame> u_Frame;
+[[vk::binding(9, 0)]] RWStructuredBuffer<uint> u_Stats;     // 0=命中写入 1=未命中 2=march 命中 3=未用 4..7=push constant 回报（诊断）
 
 [[vk::push_constant]] cbuffer CapturePC {
     float4 pageOriginRes;   // xy = 该页在 atlas 的像素原点, z = 页边长(texel), w = texel 世界边长
@@ -33,15 +42,6 @@
     float4 planeStepV;      // xyz = 沿 v 每前进 1 texel 的世界位移
     float4 axis;            // xyz = march 方向（单位向量）, w = march 起点距离
     float4 marchParams;     // x = 步数, y = eps（世界单位）, z = 步长, w = 未用
-    float4 vpRow0;          // 视图投影矩阵的 4 行（显式传，避免 mat4 约定/对齐问题）
-    float4 vpRow1;
-    float4 vpRow2;
-    float4 vpRow3;
-    uint4  screen;          // xy = 屏幕尺寸, z/w 未用
-    float4 originVoxel0;    // 近层：xyz = 原点, w = 体素
-    float4 originVoxel1;    // 远层
-    uint4  grid0;           // 近层分辨率
-    uint4  grid1;           // 远层分辨率
 };
 
 float2 SampleLayer(Texture3D<float> tex, SamplerState smp, float4 ov, uint3 res, float3 p) {
@@ -52,21 +52,28 @@ float2 SampleLayer(Texture3D<float> tex, SamplerState smp, float4 ov, uint3 res,
 }
 
 float FieldValue(float3 p, out bool insideAny) {
-    const float2 a = SampleLayer(u_Field,  u_FieldSampler,  originVoxel0, grid0.xyz, p);
-    const float2 b = SampleLayer(u_Field1, u_FieldSampler1, originVoxel1, grid1.xyz, p);
+    const float2 a = SampleLayer(u_Field,  u_FieldSampler,  u_Frame[0].originVoxel0, u_Frame[0].grid0.xyz, p);
+    const float2 b = SampleLayer(u_Field1, u_FieldSampler1, u_Frame[0].originVoxel1, u_Frame[0].grid1.xyz, p);
     insideAny = (a.y > 0.5) || (b.y > 0.5);
     return min(a.y > 0.5 ? a.x : 1e30, b.y > 0.5 ? b.x : 1e30);
 }
 
 float4 WorldToClip(float3 p) {
-    return float4(dot(vpRow0.xyz, p) + vpRow0.w,
-                  dot(vpRow1.xyz, p) + vpRow1.w,
-                  dot(vpRow2.xyz, p) + vpRow2.w,
-                  dot(vpRow3.xyz, p) + vpRow3.w);
+    return float4(dot(u_Frame[0].vp0.xyz, p) + u_Frame[0].vp0.w,
+                  dot(u_Frame[0].vp1.xyz, p) + u_Frame[0].vp1.w,
+                  dot(u_Frame[0].vp2.xyz, p) + u_Frame[0].vp2.w,
+                  dot(u_Frame[0].vp3.xyz, p) + u_Frame[0].vp3.w);
 }
 
 [numthreads(16, 16, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {
+    // 【诊断】把 push constant 实际收到的值回报给 CPU（4..7 号槽）：验证"常量是否到达"
+    if (tid.x == 0u && tid.y == 0u) {
+        u_Stats[4] = asuint(planeOrigin.x);
+        u_Stats[5] = asuint(u_Frame[0].originVoxel0.x);
+        u_Stats[6] = asuint(u_Frame[0].originVoxel0.w);
+        u_Stats[7] = asuint(planeStepU.x);
+    }
     const int   pageRes = (int)pageOriginRes.z;
     const int   tiles   = (pageRes + 15) / 16;
     const uint  steps   = (uint)marchParams.x;
@@ -100,8 +107,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
                     const float2 ndc = clip.xy / clip.w;
                     const float2 uv  = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
                     if (uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0) {
-                        const uint2 px = uint2((uint)clamp(uv.x * (float)screen.x, 0.0, (float)screen.x - 1.0),
-                                               (uint)clamp(uv.y * (float)screen.y, 0.0, (float)screen.y - 1.0));
+                        const uint2 px = uint2((uint)clamp(uv.x * (float)u_Frame[0].screen.x, 0.0, (float)u_Frame[0].screen.x - 1.0),
+                                               (uint)clamp(uv.y * (float)u_Frame[0].screen.y, 0.0, (float)u_Frame[0].screen.y - 1.0));
                         const float gbDepth = u_GBufferDepth.Load(int3((int2)px, 0));
                         // 存在性判据：GBuffer 在该像素上确实有几何（深度落在 (0,1) 内）
                         if (gbDepth > 0.0 && gbDepth < 1.0) {
