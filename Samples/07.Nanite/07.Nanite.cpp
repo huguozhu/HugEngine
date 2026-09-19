@@ -579,18 +579,23 @@ int main() {
         deferredPipeline.GetGPUCulling().enabled       = GetInt(cfgData, "gpu_cull", 1) != 0;
         deferredPipeline.SetGBufferMode((render::GBufferRenderer::Mode)GetInt(cfgData, "gbuffer_mode", 0));
 
-        // ── Nanite（§14.8 任务 1 / N0）：独立开关的"配置"层 ──
-        // 真值只有一处：`NaniteSettings::enabled`（由 NaniteRenderer 持有），
+        // ── Nanite（§14.8 任务 1 / N0 开关；任务 3 假簇数量）：独立开关的"配置"层 ──
+        // 真值只有一处：`NaniteSettings`（由 NaniteRenderer 持有），
         // 这里只做 cfg → 真值的单向恢复，与 `gi_half_res` 的往返写法同构。
         // 【键缺失时保留当前值】当前值 = NaniteRenderer::Initialize 从 CVar
-        // `r.Nanite.Enable` 读到的启动默认；若这里硬写默认 0，那份"控制台默认"就会被
-        // 一份没有该键的 cfg 静默覆盖（这正是 gi_half_res 曾经踩过的连通性缺口）。
+        // `r.Nanite.Enable` / `r.Nanite.FakeClusters` 读到的启动默认；若这里硬写默认值，
+        // 那份"控制台默认"就会被一份没有该键的 cfg 静默覆盖。
         {
             auto naniteSettings = deferredPipeline.GetNaniteSettings();
             naniteSettings.enabled = GetInt(cfgData, "nanite_enable",
                                             naniteSettings.enabled ? 1 : 0) != 0;
+            // 假簇数量：钳制到 [0, kNaniteMaxFakeClusters]，与模块内的钳制口径一致
+            naniteSettings.fakeClusters = (u32)std::max(0, std::min(
+                GetInt(cfgData, "nanite_fake_clusters", (int)naniteSettings.fakeClusters),
+                (int)1024));
             deferredPipeline.SetNaniteSettings(naniteSettings);
-            HE_CORE_INFO("[Nanite] 配置恢复: nanite_enable={}", naniteSettings.enabled ? 1 : 0);
+            HE_CORE_INFO("[Nanite] 配置恢复: nanite_enable={} nanite_fake_clusters={}",
+                         naniteSettings.enabled ? 1 : 0, naniteSettings.fakeClusters);
         }
 
         auto& ae = deferredPipeline.GetAutoExposure();
@@ -1251,10 +1256,10 @@ int main() {
             auto* giSSR  = dp ? dp->GetSSR()  : nullptr;
             auto* giDDGI = dp ? dp->GetDDGI() : nullptr;
 
-            // ── Nanite 模块（§14.8 任务 1 / N0）：独立开关 + 光栅档位 ──
+            // ── Nanite 模块（§14.8 任务 1 开关 / 任务 3 假簇链）：独立开关 + 光栅档位 ──
             // 面板是 §14.4 三层的第三层：改动即写回 `NaniteSettings`（唯一真值），
-            // 下一帧的帧图门控就会读到新值。任务 1 下开启的唯一可见效果是帧图里多一个
-            // `Nanite_Noop`（不改任何纹理内容 ⇒ 画面不变）；真正的几何路径在任务 3/4 之后。
+            // 下一帧的帧图门控就会读到新值。任务 3 下开启的效果是帧图里多 `Nanite_Cull`
+            // 与 `Nanite_Raster` 两个 pass（渲染到模块自建的 1×1 目标 ⇒ 可见画面不变）。
             if (dp) {
                 ImGui::SeparatorText("Nanite（虚拟几何）");
                 auto naniteSettings = dp->GetNaniteSettings();
@@ -1271,7 +1276,11 @@ int main() {
                     dp->SetNaniteSettings(naniteSettings);
                     HE_CORE_INFO("[Nanite] 面板档位: rasterMode={}", naniteRasterMode);
                 }
-                ImGui::TextDisabled("模块骨架就绪=%s（任务 1：只注册 Nanite_Noop，画面不变）",
+                // 假簇数量（任务 3 的验收输入）：面板只读显示，自动化用 cfg 键
+                // `nanite_fake_clusters`（或 CVar `r.Nanite.FakeClusters`）设置。
+                ImGui::TextDisabled("任务 3 假簇数 N=%u（每帧恰好应画 N 次）",
+                                    naniteSettings.fakeClusters);
+                ImGui::TextDisabled("模块就绪=%s（任务 3：Nanite_Cull + Nanite_Raster，画面不变）",
                                     dp->GetNanite().IsReady() ? "是" : "否");
             }
 
@@ -1738,6 +1747,13 @@ int main() {
         // ── GI 频谱采样：等 GPU 完成后原样落盘（RGBA16F 原始像素、无文件头、行紧密排布）──
         if (g_DumpDone && !g_DumpWritten) {
             device->WaitIdle();   // 测试用途，允许停顿
+
+            // ── Nanite（§14.8 任务 3）：dump 帧打印**恰好一行**真实 GPU 读回 ──
+            // 同步已在上一行的 `WaitIdle()` 完成（与白炉探针/落盘同一套做法，不新造同步机制）；
+            // 关闭档下模块自身会直接返回（不打印），保证关闭档日志与基线一致。
+            if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
+                dpNanite->GetNanite().LogFakePipelineReadback();
+
             const String dir  = "build/verify/";
             const String base = dir + "gi_" + g_DumpTag;
             std::filesystem::create_directories(dir);
@@ -1858,10 +1874,11 @@ int main() {
         out["clustered"]    = std::to_string(deferredPipeline.GetClusteredShading().enabled ? 1 : 0);
         out["gpu_cull"]     = std::to_string(deferredPipeline.GetGPUCulling().enabled ? 1 : 0);
         out["gbuffer_mode"] = std::to_string((int)deferredPipeline.GetGBufferMode());
-        // ── Nanite（§14.8 任务 1 / N0）：独立开关的 cfg 回写（与 gi_half_res 同写法）──
+        // ── Nanite（§14.8 任务 1 开关 / 任务 3 假簇数）：cfg 回写（与 gi_half_res 同写法）──
         // 【为什么 Shutdown() 之后还能读】NaniteRenderer::Shutdown() 只释放资源、
         // 不重置开关真值（本段代码确实在 deferredPipeline.Shutdown() 之后执行）。
-        out["nanite_enable"] = std::to_string(deferredPipeline.GetNaniteSettings().enabled ? 1 : 0);
+        out["nanite_enable"]        = std::to_string(deferredPipeline.GetNaniteSettings().enabled ? 1 : 0);
+        out["nanite_fake_clusters"] = std::to_string(deferredPipeline.GetNaniteSettings().fakeClusters);
 
         // ── AutoExposure ──
         auto& ae = deferredPipeline.GetAutoExposure();

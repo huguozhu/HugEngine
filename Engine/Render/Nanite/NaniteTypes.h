@@ -22,6 +22,8 @@
 
 #include "Core/Types.h"
 
+#include <cstddef>   // offsetof（钉住 POD 的字段偏移）
+
 namespace he::render {
 
 // ============================================================
@@ -76,5 +78,64 @@ inline constexpr u32 kObjectIndexTotalCapacity  = kNaniteObjectIndexBegin + kNan
 [[nodiscard]] constexpr bool IsValidObjectIndex(u32 objectIndex) {
     return objectIndex < kObjectIndexTotalCapacity;
 }
+
+// ============================================================
+// 任务 3（§14.8）：「计数 → 间接绘制」链的共享 POD
+//
+// 【为什么放在本文件】它是 Nanite 模块与 Slang 通道之间的**二进制契约**：
+//   C++ 侧（NaniteCull/NaniteRaster）与 GPU 侧（Nanite_Cull.comp.slang /
+//   Nanite_Raster.frag.slang）必须对同一段内存给出完全一致的解释。契约只由
+//   `static_assert` 钉住，**不引入任何 RHI 类型**，因此本文件仍是 RHI-free 的。
+//
+// 【与任务 7 的关系】任务 7 定稿的是"真实 .nanite 资产"的头部/顶点/索引格式；
+//   这里只是任务 3 用假数据验证"计数 → 间接绘制"链所需的最小 POD，不含量化与 cone。
+// ============================================================
+
+/// 间接绘制命令：必须与 `VkDrawIndexedIndirectCommand` **二进制兼容**
+/// （GLSL/Slang 侧见 `Nanite_Cull.comp.slang` 的 `IndirectCmd`）。
+struct alignas(4) NaniteIndirectCommand {
+    u32 indexCount    = 0;   // 偏移 0
+    u32 instanceCount = 0;   // 偏移 4
+    u32 firstIndex    = 0;   // 偏移 8
+    i32 vertexOffset  = 0;   // 偏移 12（注意是**有符号**，与 Vulkan 一致）
+    u32 firstInstance = 0;   // 偏移 16
+};
+static_assert(sizeof(NaniteIndirectCommand) == 20,
+              "间接命令必须是 20 字节（VkDrawIndexedIndirectCommand / DGC 步长）");
+static_assert(offsetof(NaniteIndirectCommand, indexCount)    == 0,  "indexCount 必须在偏移 0");
+static_assert(offsetof(NaniteIndirectCommand, instanceCount) == 4,  "instanceCount 必须在偏移 4");
+static_assert(offsetof(NaniteIndirectCommand, firstIndex)    == 8,  "firstIndex 必须在偏移 8");
+static_assert(offsetof(NaniteIndirectCommand, vertexOffset)  == 12, "vertexOffset 必须在偏移 12");
+static_assert(offsetof(NaniteIndirectCommand, firstInstance) == 16, "firstInstance 必须在偏移 16");
+
+/// 假簇条目（任务 3 的输入；与 `Nanite_Cull.comp.slang` 的 `FakeCluster` 一致）
+struct alignas(4) NaniteFakeCluster {
+    u32 clusterId     = 0;   // 簇编号（假数据 = 顺序编号）
+    u32 instanceId    = 0;   // 所属实例（任务 3 固定 0：1 个实例）
+    u32 triangleCount = 1;   // 该簇三角形数（假数据固定 1）
+    u32 _pad          = 0;   // 填充到 16 B
+};
+static_assert(sizeof(NaniteFakeCluster) == 16, "假簇条目必须 16 字节（4×u32，便于对齐读回）");
+
+// ── 计数缓冲布局 ──
+// 计数缓冲是**单个 u32**：GPU compute 用 InterlockedAdd 累加"实际写入的间接命令条数"，
+// 绘制端把这个值直接交给 `DrawIndexedIndirectCount`（由它替代 CPU 决定绘制条数）。
+inline constexpr u32 kNaniteCountBufferU32 = 1u;
+inline constexpr u32 kNaniteCountBufferSize = sizeof(u32) * kNaniteCountBufferU32;
+
+// ── 假簇链路的容量上限 ──
+// 间接命令缓冲 / 计数缓冲 / 光栅化计数缓冲都按它分配；`nanite_fake_clusters` 会被
+// 钳制到该上限（超出部分不绘制，而不是越界）。
+inline constexpr u32 kNaniteMaxFakeClusters = 1024u;
+
+/// 每条间接命令的 indexCount（假数据：1 个三角形 = 3 个索引）。
+/// 读回时用它判定"这个槽位确实被 GPU 写过"（未写过的槽位会被 CPU 预填成哨兵值）。
+inline constexpr u32 kNaniteFakeClusterIndexCount = 3u;
+
+// ── 绘制端自建的小目标尺寸 ──
+// 【为什么是 1×1】绘制端只用它来"数次数"：1×1 目标 + 1×1 视口 ⇒ 每条间接命令恰好
+// 产生 1 个片元 ⇒ 片元里的原子加就等于被光栅化的簇数。它**不是** GBuffer 的任何附件，
+// 因此这个 pass 对可见画面零影响（§14.2 不变式 1、§14.8 任务 3 的验收）。
+inline constexpr u32 kNaniteRasterTargetSize = 1u;
 
 } // namespace he::render

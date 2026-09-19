@@ -3,13 +3,16 @@
 // ============================================================
 // Nanite/NaniteRaster.h — 软光栅（后续追加硬光栅分支）
 //
-// 【本文件由 §14.8 任务 1 建立骨架，内容由任务 4 起填充】
-//   任务 1 只有生命周期桩：Initialize / Shutdown / OnResize / IsReady，
-//   **不建 PSO、不写任何 GBuffer 纹理**。
-//   任务 4 起在这里做：按 §14.5 的裁决（A1：给 GBuffer 纹理加 UAV，软光栅用
-//   `RWTexture2D` 写颜色 + 手动写深度；A2：模块自建 VisBuffer + 材质解析 pass）
-//   建模块**自己**的 PSO/附件布局，直接写既有 GBuffer 纹理句柄 ——
-//   因此不需要给 `GBufferRenderer` 加 `Mode::Nanite`。
+// 【§14.8 任务 3：绘制端（消费计数）】
+//   任务 1 只有生命周期桩；任务 3 起本类做出一条**极小**的绘制通道：
+//     · 用新的 RHI 接口 `IRHICommandList::DrawIndexedIndirectCount` 消费
+//       `NaniteCull` 写出的「计数缓冲 + 间接命令缓冲」——绘制条数由 GPU 决定；
+//     · 渲染目标是**模块自建的 1×1 R8 小目标**（不是 GBuffer 的任何附件），
+//       片元着色器每被光栅化一个簇就把"已光栅化簇数"原子加一。
+//   因此本 pass 对可见画面零影响（§14.2 不变式 1）。
+//
+// 【任务 4 起】这里才会出现真正写 GBuffer 的软光栅；按 §14.5 的裁决（A1/A2）
+//   建模块自己的 PSO/附件布局，直接写既有 GBuffer 纹理句柄。
 //
 // 【§14.3 依赖禁令】模块内不得引用 `GI_*` / `Lumen*` / `GPUCulling` 的内部结构
 //   （可借其 Hi-Z 纹理句柄与描述符写法）；不得依赖 `MeshBatcher` 的运行时状态
@@ -17,6 +20,8 @@
 // ============================================================
 
 #include "RHI/RHI.h"
+
+#include <memory>
 
 namespace he::render {
 
@@ -28,18 +33,43 @@ public:
     NaniteRaster(const NaniteRaster&) = delete;
     NaniteRaster& operator=(const NaniteRaster&) = delete;
 
-    /// 骨架就绪：只记住设备与视口尺寸。任务 4 起在这里建软光栅 PSO 与描述符集
-    bool Initialize(rhi::IRHIDevice* device, u32 width, u32 height);
+    /// 建立绘制端自持资源：1×1 R8 目标 + 图形 PSO + 片元描述符集。
+    /// @param rasterCountBuffer `NaniteCull` 自持的"已光栅化簇计数缓冲"（本类只引用，不持有）
+    bool Initialize(rhi::IRHIDevice* device, u32 width, u32 height,
+                    rhi::IRHIBuffer* rasterCountBuffer);
 
     void Shutdown();
     void OnResize(u32 width, u32 height);
 
-    [[nodiscard]] bool IsReady() const { return m_Device != nullptr; }
+    [[nodiscard]] bool IsReady() const { return m_Device != nullptr && m_PSO != nullptr; }
+
+    /// 录制 `Nanite_Raster` pass：
+    ///   `DrawIndexedIndirectCount(indirectCmdBuffer, 0, countBuffer, 0, maxDrawCount, 20)`
+    void RecordRasterPass(rhi::IRHICommandList* cmd,
+                          rhi::IRHIBuffer* indirectCmdBuffer,
+                          rhi::IRHIBuffer* countBuffer,
+                          u32 maxDrawCount);
 
 private:
     rhi::IRHIDevice* m_Device = nullptr;
     u32 m_Width  = 0;
     u32 m_Height = 0;
+
+    /// 模块自建的小目标（R8，1×1）。它**不在** GBuffer 里，写它不会改变可见画面。
+    std::unique_ptr<rhi::IRHITexture> m_Target;
+    /// 绘制端不读顶点属性，但 `DrawIndexedIndirectCount` 仍要求绑定索引/顶点缓冲
+    std::unique_ptr<rhi::IRHIBuffer>  m_DummyVB;
+    std::unique_ptr<rhi::IRHIBuffer>  m_DummyIB;
+
+    rhi::ShaderBytecode m_VS;   // Nanite_Raster.vert.spv
+    rhi::ShaderBytecode m_FS;   // Nanite_Raster.frag.spv
+
+    rhi::DescriptorSetLayoutHandle m_Layout = rhi::kInvalidLayout;
+    rhi::DescriptorSetHandle       m_Set    = rhi::kInvalidSet;
+    std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
+
+    /// 最近一次 pass 传入的 maxDrawCount（诊断用）
+    u32 m_LastMaxDrawCount = 0;
 };
 
 } // namespace he::render

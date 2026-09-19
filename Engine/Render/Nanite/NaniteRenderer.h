@@ -4,12 +4,11 @@
 // Nanite/NaniteRenderer.h — Nanite 模块的唯一门面（生命周期 + 帧图接入）
 //
 // 【本文件由 §14.8 任务 1 建立骨架，内容由任务 3/4/6 依次填充】
-//   任务 1 的职责只有三件，且**不做任何渲染**：
-//     ① 持有 `NaniteSettings`（开关/档位的唯一真值，§14.4 的"真值"层，默认 false）；
-//     ② 生命周期：`Initialize / Shutdown / Resize`，由 `DeferredPipeline` 转发
-//        （照抄 Lumen 的持有与生命周期写法）；
-//     ③ 帧图接入点 `AddPasses`：开启且就绪时注册**一个** `Nanite_Noop`
-//        （不分配资源、不改任何纹理内容 ⇒ 开启档画面与关闭档逐位相同）。
+//   任务 1：骨架 + 独立开关（唯一注册的 pass 是 `Nanite_Noop`）。
+//   任务 3：把占位 pass 换成「计数 → 间接绘制」链的两个 pass：
+//     · `Nanite_Cull`   —— compute 写间接命令 + 计数（`NaniteCull`）
+//     · `Nanite_Raster` —— `DrawIndexedIndirectCount` 消费计数，写模块自建的 1×1 R8 目标
+//   `Nanite_Noop` 同时被移除（它的历史作用只是验证门控）。
 //
 // 【§14.3 依赖禁令】模块内不得引用 `GI_*` / `Lumen*` / `GPUCulling` 的内部结构
 //   （可借其 Hi-Z 纹理句柄与描述符写法）；不得依赖 `MeshBatcher` 的运行时状态
@@ -34,7 +33,7 @@ namespace he::render {
 
 /// 帧图接入所需的 GBuffer 句柄组（与 `GBufferRenderer::Handles` 同构）
 ///
-/// 任务 1 只用到 `depth` / `worldPos`（复刻 `GB_Clear` 的那组 WAW 声明）；
+/// 任务 3 只用到 `depth` / `worldPos`（复刻 `GB_Clear` 的那组 WAW 声明，§14.5 第一条硬约束）；
 /// 其余字段为任务 4/5 的光栅与材质解析预留 —— 届时模块**自己**建 PSO/附件布局、
 /// 直接写这些既有句柄，从而不需要给 `GBufferRenderer` 加 `Mode::Nanite`（§14.5）。
 struct NaniteGBufferHandles {
@@ -81,7 +80,20 @@ public:
     /// 帧图接入点（在 `DeferredPipeline_FrameGraph.cpp` 的 GBuffer 段被调用）。
     /// 【门控只有一处】`DeferredPipeline_FrameGraph.cpp` 里的
     /// `if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady())`。
+    /// 开启时注册两个 pass：`Nanite_Cull` + `Nanite_Raster`（原序 12 个 pass 一个不动）。
     void AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb);
+
+    /// dump 帧（`HE_DUMP_GI_FRAME`）打印**恰好一行**真实 GPU 读回：
+    ///   `[Nanite] fake_clusters=<N> count_buffer=<X> indirect_cmds=<Y> rasterized_clusters=<Z>`
+    ///
+    /// X = 计数缓冲的值（GPU 原子累加的命令条数）；Y = 间接命令缓冲里**实际被写过**的
+    /// 命令条数（读回时按"非哨兵且字段合法"统计）；Z = 绘制端片元原子计数的值。
+    /// 任务 3 的验收就是 X == Y == Z == N。
+    ///
+    /// 【同步约定】本函数**只做 Map 读回，不做任何等待** —— 调用方必须在 GPU 完成后调用
+    /// （样例的 dump 路径已经有 `device->WaitIdle()`，照抄既有白炉探针/落盘的读数方式）。
+    /// 关闭档下直接返回（不打印），保证关闭档日志与基线一致。
+    void LogFakePipelineReadback();
 
     // ── 模块内部各段（任务 1 只有生命周期桩；外部不得越过本类直接驱动它们）──
     [[nodiscard]] NaniteScene&  GetScene()  { return m_Scene; }

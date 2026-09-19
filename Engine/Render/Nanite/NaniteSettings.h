@@ -30,6 +30,12 @@ struct NaniteSettings {
     /// 光栅档位（§14.4 面板下拉）。任务 1 只是枚举占位，没有消费者：
     /// 软光栅/混合光栅的实现分别在任务 4 与任务 6/22。
     NaniteRasterMode rasterMode = NaniteRasterMode::Soft;
+
+    /// 任务 3 的假簇数量（§14.8 任务 3 的验收输入：1 个实例、N 个簇）。
+    /// 配置层 = cfg 键 `nanite_fake_clusters`（默认 6），样例负责解析/序列化；
+    /// 模块把它交给 `NaniteCull`（超上限时钳制到 `kNaniteMaxFakeClusters`）。
+    /// 它只在任务 3 的验证链路上有意义，任务 8 起被真实簇划分取代。
+    u32 fakeClusters = 6;
 };
 
 } // namespace he::render

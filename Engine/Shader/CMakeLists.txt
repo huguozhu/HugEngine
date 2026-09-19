@@ -64,6 +64,8 @@ if(SLANGC)
         "${SHADER_DIR}/Utility/Triangle.vert.slang"
         # Particles
         "${SHADER_DIR}/Particles/ParticleRender.vert.slang"
+        # Nanite（虚拟几何模块）——§14.8 任务 3 的绘制端最小顶点着色器（1×1 目标全屏三角）
+        "${SHADER_DIR}/Nanite/Nanite_Raster.vert.slang"
     )
     set(FRAG_SLANG
         # Lighting
@@ -115,6 +117,8 @@ if(SLANGC)
         "${SHADER_DIR}/Utility/TriangleMesh.frag.slang"
         # Particles
         "${SHADER_DIR}/Particles/ParticleRender.frag.slang"
+        # Nanite（虚拟几何模块）——§14.8 任务 3 的绘制端：每光栅化一个簇把计数原子加一
+        "${SHADER_DIR}/Nanite/Nanite_Raster.frag.slang"
     )
     set(COMP_SLANG
         # GI
@@ -169,6 +173,8 @@ if(SLANGC)
         "${SHADER_DIR}/Particles/ParticleSimulate.comp.slang"
         "${SHADER_DIR}/Particles/ParticleCulling.comp.slang"
         "${SHADER_DIR}/Particles/ParticleSort.comp.slang"
+        # Nanite（虚拟几何模块）——§14.8 任务 3：「假簇 → 间接命令 + 计数」的 compute
+        "${SHADER_DIR}/Nanite/Nanite_Cull.comp.slang"
     )
     # Ray Tracing 着色器（.rgen / .rmiss / .rchit / .rahit / .rcall）
     # 命名约定: EffectName.rgen.slang (RayGen), EffectName.rmiss.slang (Miss),
