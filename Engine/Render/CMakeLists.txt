@@ -197,6 +197,20 @@ set(RENDER_SOURCES
     Lumen/LumenFarFieldPass.h
     Lumen/LumenSH.h
     GI/LumenProvider.h
+    # Nanite（虚拟几何模块；§14.8 任务 1：骨架 + 独立开关 + Nanite_Noop）。
+    # 登记风格与上面的 Lumen 一致：显式列表，本仓库不用 glob。
+    Nanite/NaniteTypes.h        # RHI-free POD + objectIndex 分区契约
+    Nanite/NaniteSettings.h     # 开关与档位（唯一真值的类型）
+    Nanite/NaniteScene.h
+    Nanite/NaniteScene.cpp
+    Nanite/NaniteUpload.h
+    Nanite/NaniteUpload.cpp
+    Nanite/NaniteCull.h
+    Nanite/NaniteCull.cpp
+    Nanite/NaniteRaster.h
+    Nanite/NaniteRaster.cpp
+    Nanite/NaniteRenderer.h
+    Nanite/NaniteRenderer.cpp
 )
 
 target_sources(HugEngineRender PRIVATE ${RENDER_SOURCES})

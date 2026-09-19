@@ -1,0 +1,35 @@
+#pragma once
+
+// ============================================================
+// Nanite/NaniteSettings.h — Nanite 的开关与档位（§14.4 三层里的"真值"层）
+//
+// 【本文件由 §14.8 任务 1 建立骨架；当前只有开关与档位两个字段】
+//
+// 【唯一真值】§14.4：`NaniteSettings::enabled` 是**唯一真值**，由 `NaniteRenderer` 持有。
+//   另外两层只是配置载体，不得各自缓存一份状态：
+//     · 配置层：CVar `r.Nanite.Enable`（默认 0）+ cfg 键 `nanite_enable`（默认 0）；
+//     · 面板层：样例 07.Nanite 的 ImGui 勾选框 + 档位下拉（改动即写回本结构）。
+//   三层之间的优先级（任务 1 的默认选择）：CVar = 启动默认 → cfg = 启动覆盖 →
+//   面板 = 运行期真值。**默认 false** 是 §14.2 不变式 1 的前提：
+//   关闭 ⇒ 帧图与转储逐位相同、且不产生任何新的每帧 CPU 开销。
+//
+// 【§14.3 依赖禁令】模块内不得引用 `GI_*` / `Lumen*` / `GPUCulling` 的内部结构
+//   （可借其 Hi-Z 纹理句柄与描述符写法）；不得依赖 `MeshBatcher` 的运行时状态
+//   —— 它只当**一次性输入**。本头文件同样 RHI-free，可被样例/Scene 侧 include。
+// ============================================================
+
+#include "Nanite/NaniteTypes.h"
+
+namespace he::render {
+
+/// Nanite 的开关与档位（唯一真值由 `NaniteRenderer` 持有，外部只拿 const 引用读）
+struct NaniteSettings {
+    /// 独立开关。默认 false：关闭时模块一个 pass 都不注册，帧图与今天逐位相同。
+    bool enabled = false;
+
+    /// 光栅档位（§14.4 面板下拉）。任务 1 只是枚举占位，没有消费者：
+    /// 软光栅/混合光栅的实现分别在任务 4 与任务 6/22。
+    NaniteRasterMode rasterMode = NaniteRasterMode::Soft;
+};
+
+} // namespace he::render
