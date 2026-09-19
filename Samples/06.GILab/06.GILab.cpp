@@ -1590,6 +1590,7 @@ int main() {
                     addTarget("lumen_sdf_trace", lp->GetSDFDebugTexture());
                     // 步骤 13（L2 的输入）：卡片覆盖率可视化（上半 = 代表 mesh 的 6 个投影面，下半 = 逐 mesh 覆盖条）
                     addTarget("lumen_card_coverage", lp->GetCardCoverageTexture());
+                    addTarget("lumen_sc_atlas_albedo", lp->GetCardAtlasAlbedo());   // 步骤 15：Card 捕获的 albedo atlas
                 }
             }
             }   // if (!forwardMode)

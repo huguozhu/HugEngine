@@ -1446,7 +1446,8 @@ python Tools\pt\analyze_pt.py --compare <pt_tag> <deferred_tag> --target hdr
 | 12 SDF 帧图接入与调试 | ✅ 已完成（含 L1 退出判据的可视化） | 帧图有独立的 `Lumen_SDF_Build` compute pass（不声明资源依赖、自管 barrier；`writes` 为空故不被 `CullDeadPasses` 裁掉），SDF 构建与渲染解耦；"关掉 Lumen 无任何影响"已实证：Lumen off 时 `lumen_passes=0`、既有源 dump 与接入前**字节级一致**。可视化已落地：`SDF_DebugView.comp.slang` 逐像素主射线 sphere tracing → 稳定命名转储 `lumen_sdf_trace`（1920×1080 RGBA16F）+ 原子计数统计。**它随即暴露了一个自检看不到的真问题**（见 §附三：全局场在空旷处把距离塌缩到 ≈0） |
 | 13 Card 生成器 + 覆盖率可视化 | ✅ 已完成（CPU 版，GPU atlas 见 14+） | `LumenSDF::BuildCards()`：逐 mesh × 6 轴向投影成卡片；texel 世界边长按 `cardTexelWorld=4.0` **逐 mesh 自适应**（分辨率 64~512²，实测 texel 0.56~7.41）；按面积加权采样 418,329 个表面点做覆盖判定；保留阈值 → 卡片数 → 覆盖率给出**单调曲线**（5%⇒410 张/89.7%，10%⇒330/86.8%，**25%⇒228/79.1%**，50%⇒66/54.2%）；覆盖率可视化（RGBA8，代表 mesh 的 6 个投影面 + 逐 mesh 覆盖条）以稳定名 `lumen_card_coverage` 转储。**验收**：空洞与卡片设置一一对应（见曲线），残余空洞集中在个别**薄结构** mesh（#12/#43/#44，投影填充率天然很低），已点名 |
 | 14 页表 + 页状态机 | ✅ 已完成 | `Lumen/SurfaceCache.slang`（C++/Slang **共享布局**）+ `Lumen/SurfaceCacheTypes.{h,cpp}`（六态 + 迁移真值表 + 页状态机 + 布局 static_assert）+ `Tests/TestSurfaceCache.cpp`（5 例 / 73 断言：真值表、完整生命周期、非法迁移被拒绝且不改状态、校验和对字段敏感）+ `LumenScene_SurfaceCache.cpp`（用步骤 13 的 228 张卡片建 64 页演示表：Allocating 9 / Capturing 5 / Captured 41 / Dirty 9，六态齐全；GPU 镜像缓冲 + `SurfaceCache_PageCheck.comp.slang` 校验和比对 **PASS** 0x545eb5ad）。**验收**：非法迁移 `HE_ASSERT` + 单测覆盖；GPU/C++ 镜像一致（校验和相同） |
-| 15–41 | ⬜ 未开始 | 下一步：步骤 15 起做页面**捕获**（按页状态门控）、反馈与分配/淘汰策略，随后 20–25 Screen Probe |
+| 15 Card Capture（软件光栅化写 atlas） | 🟡 进行中（骨架就位，**命中 0 待查**） | 已落地：3 张 RGBA16F atlas（512² = 8×8 页 × 64²；`lumen_sc_atlas_albedo` 可转储）、`SurfaceCache_Capture.comp`（一卡一组、页状态门控只捕 `Capturing`、`kMaxCapturesPerFrame=8` 预算、卡分辨率自适应降采样进 64² 页、命中点投影到屏幕取 GBuffer albedo/normal）、命中/未命中/march 命中三个诊断计数。**实测：5 页 20480 个 texel 全部未命中、march 命中 0**。已排除：push constant 字段错位（旧版 shader 多一个 camPosW，已修）、eps/步长过小（已把 eps 提到 1 个近层体素=14.2、步长 eps/2）。下一步：把 march 单独拿出来，用一张已知卡对照 CPU 真值逐步定位 |
+| 16–41 | ⬜ 未开始 | 步骤 15 收尾后 → 16 Feedback（缺失页检测）、17 预算摊销、18 LRU 淘汰、19 L2 退出判据，随后 20–25 Screen Probe |
 
 ### 阶段 A：框架前置（不产出画面，但后补等于重构）
 
@@ -2517,3 +2518,36 @@ LumenScene 页表镜像校验（步骤 14）: GPU 与 C++ 侧校验和一致 = 0
    凡"新建资源 + 当帧使用"的路径都应按这个节拍写（等待 3 帧再 dispatch、再 3 帧读回）。
 
 **下一轮**：步骤 15 起做**页面捕获**（按页状态门控 GPU 写入）、反馈与分配/淘汰策略；随后 20–25 Screen Probe。
+## 附二十一：步骤 15「Card Capture」骨架就位，但 march 命中 0（未完成，留给下一轮）
+
+**已落地**（都跑起来了，见 `lumen_sc15f/g`）：
+
+- **3 张 atlas**：RGBA16F，512×512 = 8×8 页 × 64×64 texel（albedo / normal / emissive）；
+  albedo atlas 以稳定名 `lumen_sc_atlas_albedo` 进 GI 转储（实测 512×512 落盘）。
+- **`SurfaceCache_Capture.comp.slang`**：一次 dispatch 捕获一张卡（参数走 push constant），
+  组内 256 线程遍历 64² 个页 texel —— 卡平面 → 沿卡法向轴定步长 march 全局 SDF → 命中点投影到屏幕 →
+  采 GBuffer 的 albedo/normal 写进 atlas；未命中/相机后方/GBuffer 无几何一律写 alpha=0。
+- **页状态门控 + 预算**：只处理 `state == Capturing` 的页，每帧最多 `kMaxCapturesPerFrame = 8`；
+  捕获完 `Capturing → Captured`（CPU 状态机 + 镜像缓冲同步）。
+- **卡分辨率自适应**：步骤 13 的卡是自适应分辨率（常见 512²），按整数 stride 降采样进 64² 页。
+- **诊断计数**：命中写入 / 未命中 / **march 命中**（区分"SDF 没找到表面"与"GBuffer 无效"）。
+
+**实测：5 页 × 4096 = 20480 个 texel 全部未命中，`SDF march 命中 0`。**
+
+**已排除的两条**：
+
+1. **push constant 错位**：旧版 shader 的 cbuffer 里多了一个 `camPosW`，C++ 侧没有 ⇒ `origin/grid`
+   全部偏移 16 字节 ⇒ `inside` 恒 false。已删掉该字段并把两侧对齐（注释里写明"字段顺序必须逐字段一致"）。
+2. **eps/步长过小**：原来 `eps = 0.25 × 卡 texel`（≈10.9）、步长 21.6 —— 步长大于 eps 且小于场的高估
+   （远层 28.4 体素 ⇒ 局部可高估 ~14）⇒ 理论上就会漏掉穿越。已改成 `eps = 1 个近层体素(14.2)`、
+   `step = eps/2`。**改完仍是 0**，所以根因不在这两处。
+
+**下一轮入口（唯一剩下的可疑点，按顺序查）**：
+
+1. **卡平面基是否正确**：把某张卡的 `planeOrigin / stepU / stepV / axis` 与 CPU 侧算出的世界坐标并排打印
+   （或让 shader 直接把第一个采样点和其 SDF 值写进统计数据缓冲回读），确认采样点确实落在 mesh AABB 内、
+   且该点的 SDF 不是 1e30（`inside` 为真）。
+2. 若 `inside` 为真而值很大：检查是否采到了"卡覆盖但轴向确实没有表面"的 texel（用卡自身的 fill 掩码对照，
+   命中率应当≈卡的填充率）。
+3. 若平面基就错了：对照步骤 13 的 `(axis, b=(axis+1)%3, c=(axis+2)%3)` 约定逐项核对（本轮已按该约定写，
+   但尚未用数值验证过）。

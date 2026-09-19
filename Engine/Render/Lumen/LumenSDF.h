@@ -101,6 +101,9 @@ public:
         return (layer < m_GlobalLayerCount) ? m_GlobalLayers[layer].field.get() : nullptr;
     }
     [[nodiscard]] u32    GetGlobalLayerCount() const { return m_GlobalLayerCount; }
+    /// 步骤 15 的捕获 pass 需要线性采样器（与全局注入同源）与全局分辨率
+    [[nodiscard]] rhi::IRHISampler* GetLinearSampler() const { return m_LinearSampler.get(); }
+    [[nodiscard]] u32 GetGlobalResolution() const { return m_Config.globalResolution; }
     [[nodiscard]] float  GetGlobalVoxelSize(u32 layer = kMaxGlobalLayers - 1u) const {
         return (layer < m_GlobalLayerCount) ? m_GlobalLayers[layer].voxelSize : 0.0f;
     }
@@ -163,6 +166,19 @@ public:
         u32 cardRes = 0;
         float minCardFill = 0.0f;
     };
+    /// 步骤 13 生成的卡片清单（步骤 15 的捕获 pass 按它逐卡光栅化）
+    struct CardInfo {
+        u32   mesh = 0;
+        u8    axis = 0;          // 0 = X, 1 = Y, 2 = Z（投影/行进轴）
+        i8    dir  = 1;          // +1 / -1
+        u32   res  = 0;          // 该卡的 texel 分辨率
+        float texelWorld = 0.0f; // texel 的世界边长
+        float3 aabbLo = float3(0.0f);
+        float side = 0.0f;       // mesh AABB 的立方边长
+        u32   filled = 0;
+    };
+    [[nodiscard]] const std::vector<CardInfo>& GetCards() const { return m_Cards; }
+
     [[nodiscard]] const CardCoverage& GetCardCoverage() const { return m_CardCoverage; }
     /// 覆盖率可视化（RGBA8）：上半是最大网格的 6 个投影面（白=有表面，红=有表面但未被卡片覆盖），
     /// 下半是逐 mesh 的覆盖条（绿=已覆盖长度）。
@@ -314,6 +330,7 @@ private:
     u32   m_DebugStatsLast[4] = {0, 0, 0, 0};
     // ── L2 Surface Cache（步骤 13）──
     CardCoverage m_CardCoverage;
+    std::vector<CardInfo> m_Cards;
     std::unique_ptr<rhi::IRHITexture> m_CardCoverageTex;
     bool m_CardsBuilt = false;
     // mesh 场探针（每帧查一个 mesh，读回等 3 帧）

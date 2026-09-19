@@ -2056,6 +2056,13 @@ void LumenSDF::BuildCards() {
             }
             for (u8 v : card.tex) card.filled += v ? 1u : 0u;
             cardsOfMesh[mi].push_back((u32)cards.size());
+            // 记录给步骤 15 的捕获 pass（卡片的轴向、面内原点、texel 世界边长、mesh AABB）
+            {
+                CardInfo ci;
+                ci.mesh = mi; ci.axis = a; ci.dir = kFaces[fi].dir; ci.res = R;
+                ci.texelWorld = du; ci.aabbLo = e.origin; ci.side = side; ci.filled = card.filled;
+                m_Cards.push_back(ci);
+            }
             cards.push_back(std::move(card));   // 先全部留下，是否"保留"由阈值在统计阶段决定
         }
     }

@@ -148,6 +148,7 @@ if(SLANGC)
         "${SHADER_DIR}/Lumen/SDF_RayMarchDetail.comp.slang"
         "${SHADER_DIR}/Lumen/SDF_DebugView.comp.slang"
         "${SHADER_DIR}/Lumen/SurfaceCache_PageCheck.comp.slang"
+        "${SHADER_DIR}/Lumen/SurfaceCache_Capture.comp.slang"
         # Utility
         "${SHADER_DIR}/Utility/WorkGraph_Entry.comp.slang"
         "${SHADER_DIR}/Utility/TestClear.comp.slang"

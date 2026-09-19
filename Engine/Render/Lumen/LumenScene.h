@@ -75,6 +75,13 @@ public:
     void BuildPageTable();
     /// 每帧推进：一次 GPU 一致性校验（读回镜像的校验和，与 CPU 侧比对）
     void StepSurfaceCache(rhi::IRHICommandList* cmd);
+    /// 步骤 15：Card 捕获 —— 逐卡（本帧预算内、状态为 Capturing 的页）软件光栅化写 atlas
+    void RunCardCapture(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbAlbedo, rhi::IRHITexture* gbNormal,
+                        rhi::IRHITexture* gbDepth, const float4x4& viewProj);
+    [[nodiscard]] rhi::IRHITexture* GetCardAtlasAlbedo()  const { return m_AtlasAlbedo.get(); }
+    [[nodiscard]] rhi::IRHITexture* GetCardAtlasNormal()  const { return m_AtlasNormal.get(); }
+    [[nodiscard]] u32 GetCardCaptureHits() const { return m_CardCaptureHits; }
+    [[nodiscard]] u32 GetCardCaptureMisses() const { return m_CardCaptureMisses; }
     [[nodiscard]] const SurfaceCachePageTable& GetPageTable() const { return m_PageTable; }
     [[nodiscard]] bool  IsPageTableCheckDone() const { return m_PageCheckDone; }
     [[nodiscard]] bool  IsPageTableCheckPassed() const { return m_PageCheckPassed; }
@@ -84,6 +91,7 @@ private:
     void CreateSkeletonPipeline();
     void DestroySkeletonPipeline();
     void CreatePageCheckGPUObjects();
+    void CreateCaptureGPUObjects();
 
     rhi::IRHIDevice* m_Device = nullptr;
     u32 m_Width  = 0;
@@ -107,6 +115,23 @@ private:
     u32  m_PageCheckFrame = 0;
     bool m_PageCheckDone = false;
     bool m_PageCheckPassed = false;
+    // ── Card 捕获（步骤 15）──
+    static constexpr u32 kAtlasPageRes  = 64;    // 每页 64×64 texel
+    static constexpr u32 kAtlasGridDim  = 8;     // atlas = 8×8 页 = 512×512
+    static constexpr u32 kAtlasSize     = kAtlasPageRes * kAtlasGridDim;
+    static constexpr u32 kMaxCapturesPerFrame = 8;   // 步骤 17 的预算之一（先在这里落地）
+    std::unique_ptr<rhi::IRHITexture> m_AtlasAlbedo, m_AtlasNormal, m_AtlasEmissive;
+    std::unique_ptr<rhi::IRHIBuffer>  m_CaptureStats;
+    void* m_CaptureStatsMapped = nullptr;
+    rhi::DescriptorSetLayoutHandle m_CaptureLayout = 0;
+    rhi::DescriptorSetHandle       m_CaptureSet    = 0;
+    std::unique_ptr<rhi::IRHIPipelineState> m_CapturePSO;
+    bool m_CaptureBound = false;
+    u32  m_CardCaptureHits = 0, m_CardCaptureMisses = 0;
+    u32  m_CapturePages = 0;          // 累计捕获页数
+    u32  m_CardCaptureMarchHits = 0;  // 诊断：SDF march 命中数
+    bool m_CaptureStatsPending = false;
+    bool m_CaptureStatsLogged  = false;
 };
 
 } // namespace he::render

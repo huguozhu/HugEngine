@@ -9,6 +9,7 @@
 
 #include "Core/Log.h"
 #include "Lumen/SurfaceCache.slang"     // 共享布局（与 C++ 镜像同源）
+#include "SurfaceCache_Capture.comp.spv.h"
 #include "SurfaceCache_PageCheck.comp.spv.h"
 
 #include <cstring>
@@ -136,4 +137,190 @@ void LumenScene::StepSurfaceCache(rhi::IRHICommandList* cmd) {
     }
 }
 
+// ============================================================
+// 步骤 15：Card 捕获（atlas = 8×8 页 × 64×64 texel = 512×512，共 3 张）
+// ============================================================
+void LumenScene::CreateCaptureGPUObjects() {
+    if (m_CapturePSO) return;
+
+    rhi::DescriptorSetLayoutDesc layout;
+    layout.bindings = {
+        {0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // 近层场
+        {6, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // 远层场
+        {1, rhi::DescriptorType::StorageImage,         1, rhi::kStageMaskCompute},   // atlas albedo
+        {7, rhi::DescriptorType::StorageImage,         1, rhi::kStageMaskCompute},   // atlas normal
+        {8, rhi::DescriptorType::StorageImage,         1, rhi::kStageMaskCompute},   // atlas emissive
+        {2, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // GBuffer albedo
+        {3, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // GBuffer normal
+        {4, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},   // GBuffer depth
+        {9, rhi::DescriptorType::StorageBuffer,        1, rhi::kStageMaskCompute},   // 统计
+    };
+    m_CaptureLayout = m_Device->CreateDescriptorSetLayout(layout);
+    m_CaptureSet    = m_Device->AllocateDescriptorSet(m_CaptureLayout);
+
+    rhi::PushConstantRange pcr;
+    pcr.stageMask = rhi::kStageMaskCompute;
+    pcr.offset    = 0;
+    pcr.size      = 15u * 16u;   // CapturePC：15 个 16B 字段（**必须与 shader 的 cbuffer 逐字段对齐**，
+                                 // 少一个字段就会让后面的 origin/grid 全部错位 ⇒ inside=false ⇒ march 永不命中）
+
+    rhi::ShaderBytecode cs;
+    cs.stage      = rhi::ShaderStage::Compute;
+    cs.spirv      = k_SurfaceCache_Capture_comp_spv;
+    cs.entryPoint = "main";
+
+    rhi::PipelineStateDesc pso;
+    pso.bindPoint            = rhi::PipelineBindPoint::Compute;
+    pso.computeShader        = &cs;
+    pso.descriptorSetLayouts = {m_CaptureLayout};
+    pso.pushConstantRanges   = {pcr};
+    pso.debugName            = "Lumen_SurfaceCache_Capture";
+    m_CapturePSO = m_Device->CreatePipelineState(pso);
+    if (!m_CapturePSO) HE_CORE_ERROR("LumenScene: Card 捕获 PSO 创建失败");
+
+    const auto makeAtlas = [&]() {
+        rhi::TextureDesc td;
+        td.width  = kAtlasSize; td.height = kAtlasSize; td.depth = 1;
+        td.format = rhi::Format::RGBA16_FLOAT;
+        td.usage  = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource |
+                    rhi::TextureUsage::TransferSrc;
+        return m_Device->CreateTexture(td);
+    };
+    m_AtlasAlbedo   = makeAtlas();
+    m_AtlasNormal   = makeAtlas();
+    m_AtlasEmissive = makeAtlas();
+
+    rhi::BufferDesc sb;
+    sb.size      = sizeof(u32) * 4u;   // 0=命中写入 1=未命中 2=march 命中(诊断) 3=未用
+    sb.usage     = rhi::BufferUsage::Storage;
+    sb.cpuAccess = true;
+    m_CaptureStats = m_Device->CreateBuffer(sb);
+    m_CaptureStatsMapped = m_CaptureStats->Map();
+}
+
+void LumenScene::RunCardCapture(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbAlbedo,
+                                rhi::IRHITexture* gbNormal, rhi::IRHITexture* gbDepth,
+                                const float4x4& viewProj) {
+    if (!m_Device || !cmd || !m_SDF.GetGlobalField(0)) return;
+    BuildPageTable();
+    if (m_PageTable.Size() == 0 || !gbAlbedo || !gbNormal || !gbDepth) return;
+    if (!m_CaptureBound) {
+        CreateCaptureGPUObjects();
+        if (!m_CapturePSO || !m_AtlasAlbedo) return;
+        m_Device->UpdateDescriptorSet(m_CaptureSet, 0, rhi::DescriptorType::CombinedImageSampler,
+                                      m_SDF.GetGlobalField(0), m_SDF.GetLinearSampler());
+        m_Device->UpdateDescriptorSet(m_CaptureSet, 6, rhi::DescriptorType::CombinedImageSampler,
+                                      m_SDF.GetGlobalField(1), m_SDF.GetLinearSampler());
+        m_Device->UpdateDescriptorSetWithImageView(m_CaptureSet, 1,
+            rhi::DescriptorType::StorageImage, m_AtlasAlbedo->GetNativeHandle());
+        m_Device->UpdateDescriptorSetWithImageView(m_CaptureSet, 7,
+            rhi::DescriptorType::StorageImage, m_AtlasNormal->GetNativeHandle());
+        m_Device->UpdateDescriptorSetWithImageView(m_CaptureSet, 8,
+            rhi::DescriptorType::StorageImage, m_AtlasEmissive->GetNativeHandle());
+        m_Device->UpdateDescriptorSet(m_CaptureSet, 9, rhi::DescriptorType::StorageBuffer,
+                                      m_CaptureStats.get());
+        m_CaptureBound = true;
+    }
+    // GBuffer 可能随 resize 换纹理 ⇒ 这三张每帧重绑
+    m_Device->UpdateDescriptorSet(m_CaptureSet, 2, rhi::DescriptorType::CombinedImageSampler,
+                                  gbAlbedo, m_SDF.GetLinearSampler());
+    m_Device->UpdateDescriptorSet(m_CaptureSet, 3, rhi::DescriptorType::CombinedImageSampler,
+                                  gbNormal, m_SDF.GetLinearSampler());
+    m_Device->UpdateDescriptorSet(m_CaptureSet, 4, rhi::DescriptorType::CombinedImageSampler,
+                                  gbDepth, m_SDF.GetLinearSampler());
+
+    const auto& cards = m_SDF.GetCards();
+    u32 captured = 0;
+    for (u32 page = 0; page < m_PageTable.Size() && captured < kMaxCapturesPerFrame; ++page) {
+        if (m_PageTable.Get(page).state != kSCPageState_Capturing) continue;   // 只处理 Capturing 的页
+        const u32 cardIndex = m_PageTable.Get(page).cardIndex;
+        if (cardIndex >= cards.size()) continue;
+        const auto& card = cards[cardIndex];
+        // 卡是自适应分辨率（常见 512²），页固定 64² ⇒ 按整数 stride 降采样（每个页 texel 采一个卡 texel）
+        const u32 stride = std::max(1u, card.res / kAtlasPageRes);
+
+        const u8 a = card.axis;
+        const u8 b = (u8)((a + 1u) % 3u);
+        const u8 c = (u8)((a + 2u) % 3u);
+        const float loB = (&card.aabbLo.x)[b];
+        const float loC = (&card.aabbLo.x)[c];
+        const float loA = (&card.aabbLo.x)[a];
+        const float hiA = loA + card.side;
+        const float start   = (card.dir > 0) ? (loA - 1.0f) : (hiA + 1.0f);   // 从 AABB 外侧起步
+        const float dirSign = (card.dir > 0) ? 1.0f : -1.0f;
+
+        float3 planeOrigin(0.0f), stepU(0.0f), stepV(0.0f), axis(0.0f);
+        (&planeOrigin.x)[b] = loB;
+        (&planeOrigin.x)[c] = loC;
+        (&planeOrigin.x)[a] = start;
+        (&stepU.x)[b] = card.texelWorld * (float)stride;
+        (&stepV.x)[c] = card.texelWorld * (float)stride;
+        (&axis.x)[a]  = dirSign;
+
+        // 【eps 必须大于"场的误差"】全局场是 28.4 体素的远层 + 14.2 体素的近层，局部高估可达半个远层体素
+        // （≈14 单位）。取 eps = 1 个近层体素（14.2），步长取 eps/2 ⇒ 任何一次穿越都至少有一个采样落进 eps 内。
+        // （此前步长 21.6 > eps 10.9 且 eps 只按卡 texel 算，导致 20480 个 texel 一个都没命中。）
+        const float eps   = std::max(1.0f * m_SDF.GetGlobalVoxelSize(0), 0.5f * card.texelWorld * (float)stride);
+        const float step  = std::max(0.5f * eps, 1.0f);
+        const float steps = std::ceil((card.side + 2.0f) / step);
+
+        // 【字段顺序必须与 shader 的 CapturePC 完全一致】曾经 shader 里多了一个 camPosW 而这里没有，
+        // 导致后面的 origin/grid 全部错位、inside 恒为 false、march 一个都不命中（实测命中 0/20480）。
+        struct CapturePC {
+            float4 pageOriginRes, planeOrigin, planeStepU, planeStepV, axis, marchParams;
+            float4 vp0, vp1, vp2, vp3;
+            uint4  screen, origin0, origin1, grid0, grid1;
+        } pc{};
+        pc.pageOriginRes = float4((float)((page % kAtlasGridDim) * kAtlasPageRes),
+                                  (float)((page / kAtlasGridDim) * kAtlasPageRes),
+                                  (float)kAtlasPageRes, card.texelWorld);
+        pc.planeOrigin = float4(planeOrigin, 0.0f);
+        pc.planeStepU  = float4(stepU, 0.0f);
+        pc.planeStepV  = float4(stepV, 0.0f);
+        pc.axis        = float4(axis, 0.0f);
+        pc.marchParams = float4(steps, eps, step, 0.0f);
+        pc.vp0 = float4(viewProj[0][0], viewProj[1][0], viewProj[2][0], viewProj[3][0]);
+        pc.vp1 = float4(viewProj[0][1], viewProj[1][1], viewProj[2][1], viewProj[3][1]);
+        pc.vp2 = float4(viewProj[0][2], viewProj[1][2], viewProj[2][2], viewProj[3][2]);
+        pc.vp3 = float4(viewProj[0][3], viewProj[1][3], viewProj[2][3], viewProj[3][3]);
+        pc.screen  = uint4(m_Width, m_Height, 0u, 0u);
+        pc.origin0 = float4(m_SDF.GetGlobalOrigin(0), m_SDF.GetGlobalVoxelSize(0));
+        pc.origin1 = float4(m_SDF.GetGlobalOrigin(1), m_SDF.GetGlobalVoxelSize(1));
+        const u32 gr = m_SDF.GetGlobalResolution();
+        pc.grid0 = uint4(gr, gr, gr, 0u);
+        pc.grid1 = pc.grid0;
+
+        cmd->SetPipeline(m_CapturePSO.get());
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_CaptureSet);
+        cmd->SetPushConstants(0, sizeof(pc), &pc);
+        cmd->Dispatch(1, 1, 1);
+
+        m_PageTable.EndCapture(page, true);      // Capturing → Captured
+        if (m_PageTableBuf) {
+            if (void* p = m_PageTableBuf->Map()) {
+                std::memcpy(p, m_PageTable.Entries().data(),
+                            m_PageTable.Size() * sizeof(SurfaceCachePageEntry));
+                m_PageTableBuf->Unmap();
+            }
+        }
+        ++captured;
+        ++m_CapturePages;
+    }
+
+    if (captured > 0) m_CaptureStatsPending = true;   // 统计要等 GPU 写完（下一帧再读）
+    if (m_CaptureStatsPending && m_CaptureStatsMapped && !m_CaptureStatsLogged) {
+        u32 st[4] = {0, 0, 0, 0};
+        std::memcpy(st, m_CaptureStatsMapped, sizeof(st));
+        m_CardCaptureHits   = st[0];
+        m_CardCaptureMisses = st[1];
+        m_CardCaptureMarchHits = st[2];
+        if (m_CardCaptureHits + m_CardCaptureMisses + m_CardCaptureMarchHits == 0) return;   // 还没读到有效读数
+        m_CaptureStatsLogged = true;
+        HE_CORE_INFO("LumenScene Card 捕获（步骤 15）: 累计捕获 {} 页；命中 texel {} / 未命中 {}（{:.1f}% 命中）；SDF march 命中 {}（诊断）；atlas {}² × 3",
+                     m_CapturePages, m_CardCaptureHits, m_CardCaptureMisses,
+                     (m_CardCaptureHits + m_CardCaptureMisses)
+                         ? 100.0 * (double)m_CardCaptureHits / (double)(m_CardCaptureHits + m_CardCaptureMisses) : 0.0,
+                     m_CardCaptureMarchHits, kAtlasSize);
+    }
+}
 } // namespace he::render
