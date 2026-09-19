@@ -193,6 +193,13 @@ private:
     // 同上：转换 pass 的输出是**每 mesh 一张**纹理，共用一套描述符集会让写入落到同一张上
     std::vector<rhi::DescriptorSetHandle>     m_ConvertSets;
     std::unique_ptr<rhi::IRHITexture>         m_MeshScratch;  // 共享的 u32 距离场（原子最小目标）
+    // 带种子坐标的 JFA（真欧氏距离，见 SDF_MeshFloodSeeds.comp.slang）：种子坐标共享一张纹理，
+    // 逐 mesh 串行复用（+8 MB），把"26 连通图最短路径"的 ~8% 高估换成 ~1 体素的精确欧氏距离。
+    std::unique_ptr<rhi::IRHITexture>         m_MeshSeed;
+    rhi::DescriptorSetLayoutHandle            m_SeedFloodLayout;
+    rhi::DescriptorSetHandle                  m_SeedFloodSet;
+    std::unique_ptr<rhi::IRHIPipelineState>   m_SeedFloodPSO;
+    bool                                      m_SeedSetBound = false;
     std::unique_ptr<rhi::IRHIBuffer>          m_Positions;   // float4（w 未用）
     std::unique_ptr<rhi::IRHIBuffer>          m_Indices;
     std::unique_ptr<rhi::IRHIBuffer>          m_ProbeDist;   // CPU 可读（自检）

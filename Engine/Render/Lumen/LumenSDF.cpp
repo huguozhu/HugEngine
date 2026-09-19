@@ -7,6 +7,7 @@
 #include "SDF_LayerProbe.comp.spv.h"
 #include "SDF_MeshConvert.comp.spv.h"
 #include "SDF_MeshFlood.comp.spv.h"
+#include "SDF_MeshFloodSeeds.comp.spv.h"
 #include "SDF_MeshScatter.comp.spv.h"
 #include "SDF_RayMarch.comp.spv.h"
 #include "SDF_RayMarchDetail.comp.spv.h"
@@ -170,6 +171,28 @@ void LumenSDF::CreateGPUObjects() {
     fpso.debugName            = "Lumen_SDF_MeshFlood";
     m_FloodPSO = m_Device->CreatePipelineState(fpso);
     if (!m_FloodPSO) HE_CORE_ERROR("LumenSDF: flood 的 PSO 创建失败");
+
+    // ── 带种子坐标的 JFA（真欧氏距离）：自己一套布局/集合（binding 0 = 距离、1 = 种子坐标）──
+    rhi::DescriptorSetLayoutDesc seedLayout;
+    seedLayout.bindings = {
+        {0, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskCompute},
+        {1, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskCompute},
+    };
+    m_SeedFloodLayout = m_Device->CreateDescriptorSetLayout(seedLayout);
+    m_SeedFloodSet    = m_Device->AllocateDescriptorSet(m_SeedFloodLayout);
+    rhi::ShaderBytecode scs;
+    scs.stage      = rhi::ShaderStage::Compute;
+    scs.spirv      = k_SDF_MeshFloodSeeds_comp_spv;
+    scs.entryPoint = "main";
+    rhi::PipelineStateDesc spso;
+    spso.bindPoint            = rhi::PipelineBindPoint::Compute;
+    spso.computeShader        = &scs;
+    spso.descriptorSetLayouts = {m_SeedFloodLayout};
+    spso.pushConstantRanges   = {pcr};
+    spso.debugName            = "Lumen_SDF_MeshFloodSeeds";
+    m_SeedFloodPSO = m_Device->CreatePipelineState(spso);
+    if (!m_SeedFloodPSO) HE_CORE_ERROR("LumenSDF: 带种子的 JFA PSO 创建失败");
+    if (!m_FloodPSO) HE_CORE_ERROR("LumenSDF: flood 的 PSO 创建失败");
 }
 
 void LumenSDF::BuildQueue(const MeshBatcher& batcher) {
@@ -301,6 +324,12 @@ void LumenSDF::UploadGeometry(const MeshBatcher& batcher) {
         td.width = td.height = td.depth = m_Config.resolution;
         td.usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource;
         m_MeshScratch = m_Device->CreateTexture(td);
+        // 种子坐标纹理（同样共享、逐 mesh 复用）；8 位/轴的打包要求分辨率 <= 256
+        if (m_Config.resolution > 256u) HE_CORE_WARN("LumenSDF: 分辨率 {} > 256，JFA 的种子坐标打包会溢出", m_Config.resolution);
+        m_MeshSeed = m_Device->CreateTexture(td);
+        // 描述符绑定放在 BakeOne 里首次使用时做：UploadGeometry 跑在 CreateGPUObjects **之前**，
+        // 那时 m_SeedFloodSet 还没分配（写进去是 no-op ⇒ 采样/写入描符未绑定，只涨 VUID 不出效果）。
+
     }
 
     m_Device->UpdateDescriptorSet(m_Set, kBindPosition, rhi::DescriptorType::StorageBuffer, m_Positions.get());
@@ -363,8 +392,26 @@ void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
 
     // ── ②b 跳步洪泛：scatter 只写了表面附近的一条带，远处仍是 +inf（= 高估，会穿漏），
     //      按 res/2, res/4 … 1 逐级松弛补全全场 ──
-    cmd->SetPipeline(m_FloodPSO.get());
-    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);   // 与 scatter 同一套绑定（只有 u32 场）
+    cmd->SetPipeline(m_SeedFloodPSO.get());
+    // 首次使用时一次性写好"距离 + 种子"两张纹理的描述符（此后不再改写，避免在飞行帧里改描述符集）
+    if (!m_SeedSetBound) {
+        m_Device->UpdateDescriptorSetWithImageView(m_SeedFloodSet, 0, rhi::DescriptorType::StorageImage,
+                                                   m_MeshScratch->GetNativeHandle());
+        m_Device->UpdateDescriptorSetWithImageView(m_SeedFloodSet, 1, rhi::DescriptorType::StorageImage,
+                                                   m_MeshSeed->GetNativeHandle());
+        m_SeedSetBound = true;
+    }
+    // 改用带**种子坐标**的 JFA（真欧氏距离）：绑定换成"距离 + 种子"那一套，先立种子
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_SeedFloodSet);
+    {
+        pc.meshIndex = 0u;   // dims.w = 0 ⇒ 种子初始化（带内体素以自己为最近种子）
+        cmd->SetPushConstants(0, sizeof(pc), &pc);
+        const u32 fg = (e.resolution + 3u) / 4u;
+        cmd->Dispatch(fg, fg, fg);
+        cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                             rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
+                             m_MeshSeed.get());
+    }
     for (u32 s = e.resolution / 2u; s >= 1u; s /= 2u) {
         pc.meshIndex = s;   // flood 的 dims.w = 本次步长（体素）
         // **每级多趟**：就地竞争写的跳步洪泛靠"重复松弛到不动点"收敛，趟数太少会让信息推不到位
@@ -373,6 +420,9 @@ void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
             cmd->SetPushConstants(0, sizeof(pc), &pc);
             const u32 fgroups = (e.resolution + 3u) / 4u;
             cmd->Dispatch(fgroups, fgroups, fgroups);
+            cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                                 rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
+                                 m_MeshSeed.get());
             cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
                                  rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
                                  m_MeshScratch.get());

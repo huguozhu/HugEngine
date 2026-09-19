@@ -140,6 +140,7 @@ if(SLANGC)
         # Lumen（虚拟化几何 GI）——步骤 8：逐 mesh 距离场（scatter/convert）；步骤 10：Global SDF；步骤 11：sphere tracing
         "${SHADER_DIR}/Lumen/SDF_MeshScatter.comp.slang"
         "${SHADER_DIR}/Lumen/SDF_MeshFlood.comp.slang"
+        "${SHADER_DIR}/Lumen/SDF_MeshFloodSeeds.comp.slang"
         "${SHADER_DIR}/Lumen/SDF_MeshConvert.comp.slang"
         "${SHADER_DIR}/Lumen/SDF_GlobalBuild.comp.slang"
         "${SHADER_DIR}/Lumen/SDF_LayerProbe.comp.slang"
