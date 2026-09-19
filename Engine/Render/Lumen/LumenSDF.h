@@ -232,6 +232,8 @@ private:
         std::unique_ptr<rhi::IRHITexture> scratch;
         std::unique_ptr<rhi::IRHITexture> field;
         std::unique_ptr<rhi::IRHIBuffer>  probe;
+        // 向量距离变换的种子坐标（R32_UINT，同分辨率）：把"每跳加步长"的图测地偏差换掉
+        std::unique_ptr<rhi::IRHITexture> seed;
         float3 origin    = float3(0.0f);
         float  voxelSize = 0.0f;
         u32    res = 0, probeCount = 0;
@@ -244,6 +246,7 @@ private:
     // "所有 dispatch 都看到最后一次写入"（描述符集别名）——实测注入因此全部采到同一张（0 值）纹理。
     std::vector<rhi::DescriptorSetHandle> m_GlobalLayerSets;    // 每层一套（clear/flood/convert/probe）
     std::vector<rhi::DescriptorSetHandle> m_GlobalInjectSets;   // 每 层×mesh 一套（注入）
+    std::vector<rhi::DescriptorSetHandle> m_GlobalSeedSets;     // 每层一套（向量距离变换：距离 + 种子）
     std::unique_ptr<rhi::IRHIPipelineState> m_GlobalPSO;
     std::unique_ptr<rhi::IRHIPipelineState> m_GlobalFloodPSO;   // 全局网格上的跳步洪泛
     std::unique_ptr<rhi::IRHIPipelineState> m_LayerProbePSO;    // 独立取样（把层场写进探针缓冲）

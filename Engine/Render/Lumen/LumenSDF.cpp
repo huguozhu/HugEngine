@@ -592,6 +592,8 @@ void LumenSDF::SetupGlobalGrid() {
         layer.scratch = m_Device->CreateTexture(td);
         td.format = rhi::Format::R32_FLOAT;
         layer.field = m_Device->CreateTexture(td);
+        td.format = rhi::Format::R32_UINT;
+        layer.seed = m_Device->CreateTexture(td);   // 向量距离变换的种子坐标（§附十四 同一套算法）
 
         rhi::BufferDesc pb;
         pb.size      = (usize)layer.probeCount * sizeof(float);
@@ -638,6 +640,19 @@ void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
         m_GlobalLayerSets.clear();
         for (u32 L = 0; L < m_GlobalLayerCount; ++L)
             m_GlobalLayerSets.push_back(m_Device->AllocateDescriptorSet(m_GlobalLayout));
+    }
+    // 每层一套"向量距离变换"的描述符集（binding 0 = scratch 距离、1 = 种子坐标）。
+    // 集合必须在**纹理创建之后**写（描述符集在 UploadGeometry 阶段写是 no-op 的教训见 §附十四）。
+    if (m_GlobalSeedSets.size() != m_GlobalLayerCount) {
+        m_GlobalSeedSets.clear();
+        for (u32 L = 0; L < m_GlobalLayerCount; ++L) {
+            const auto s = m_Device->AllocateDescriptorSet(m_SeedFloodLayout);
+            m_Device->UpdateDescriptorSetWithImageView(s, 0, rhi::DescriptorType::StorageImage,
+                m_GlobalLayers[L].scratch->GetNativeHandle());
+            m_Device->UpdateDescriptorSetWithImageView(s, 1, rhi::DescriptorType::StorageImage,
+                m_GlobalLayers[L].seed->GetNativeHandle());
+            m_GlobalSeedSets.push_back(s);
+        }
     }
     if (m_GlobalInjectSets.size() != needSets) {
         m_GlobalInjectSets.clear();
@@ -714,13 +729,23 @@ void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
                                  layer.scratch.get());
         }
 
-        // ③ 跳步洪泛补全：AABB 内才有精确值，其余体素靠洪泛逐级传播（与 mesh 层同一套算法）
-        cmd->SetPipeline(m_GlobalFloodPSO.get());
-        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, lset);
+        // ③ 向量距离变换（与 mesh 层同一套算法，§附十四）：先立种子（注入过的体素以自己为最近种子），
+        //    再按 res/2 … 1 逐级传播"种子坐标 + 种子自己的距离"。旧的"每跳加步长"版 fixpoint 是
+        //    26 连通图的最短路径，恒高估约 8%（对 3000 单位就是 +200 以上）。
+        cmd->SetPipeline(m_SeedFloodPSO.get());
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_GlobalSeedSets[L]);
         FloodPC fpc{};
         fpc.originX = layer.origin.x; fpc.originY = layer.origin.y; fpc.originZ = layer.origin.z;
         fpc.voxelSize = layer.voxelSize;
         fpc.dimX = fpc.dimY = fpc.dimZ = layer.res;
+        {
+            fpc.stride = 0u;   // 0 = 种子初始化
+            cmd->SetPushConstants(0, sizeof(fpc), &fpc);
+            cmd->Dispatch(groups, groups, groups);
+            cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                                 rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
+                                 layer.seed.get());
+        }
         for (u32 s = layer.res / 2u; s >= 1u; s /= 2u) {
             fpc.stride = s;
             for (u32 pass = 0; pass < 2u; ++pass) {   // 每级两趟
@@ -728,7 +753,7 @@ void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
                 cmd->Dispatch(groups, groups, groups);
                 cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
                                      rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess,
-                                     layer.scratch.get());
+                                     layer.seed.get());
             }
             if (s == 1u) break;
         }
@@ -1315,7 +1340,7 @@ void LumenSDF::RunMarch(rhi::IRHICommandList* cmd) {
     pc.dim1X = pc.dim1Y = pc.dim1Z = m_GlobalLayers[1].res;
     pc.rayCount  = (u32)m_RayOriginCPU.size();
     pc.maxSteps  = (float)m_Config.marchMaxSteps;
-    pc.eps       = 1.0f * GetGlobalVoxelSize(0);   // 命中容差 = **1 个近层体素**：见下方"穿漏逐条"的结论
+    pc.eps       = 1.0f * GetGlobalVoxelSize(0);   // 命中容差 = 1 个近层体素：场误差 ~0.5 体素，留 2 倍余量才能不穿漏（实测 0.25/0.5 体素都会重新穿漏）
     pc.maxDist   = m_Config.marchMaxDist;
     // 审计：把实际下发的两层参数打出来（射线自检对任何改动都不动，先证明这条通道是活的）
     HE_CORE_INFO("LumenSDF march 参数: 层0 原点({:.1f},{:.1f},{:.1f}) 体素 {:.3f} res {} | 层1 原点({:.1f},{:.1f},{:.1f}) 体素 {:.3f} res {} | 射线 {} 步数 {:.0f} eps {:.3f}",
