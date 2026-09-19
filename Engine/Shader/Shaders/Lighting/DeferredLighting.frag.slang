@@ -169,6 +169,30 @@ float SourceWeight(GISourceSlot s, float camCoverage, float gridCoverage, float 
 ///
 /// 为什么必须统一：归一化加权平均 `Σ(c·w)/Σw` 的前提是各源在估**同一个量**。
 /// 量纲不一致会让结果随 albedo 偏移（§9.2-A），而白炉测试因源真值被短路而抓不到。
+// ============================================================
+// 【框架级有效性契约】（《Lumen设计与实现》§10 的 11.3）
+//
+// 任何 GI 源的输出统一用 **alpha 通道**表达"本条有没有数据"：
+//     alpha >= 0 ⇒ 有效；alpha < 0 ⇒ **本条无数据**，合成端必须**跳过该源**
+//（值不计入分子，**权重也不计入分母** —— 把无数据的源按 0 计入分母会无谓稀释同通道其它源，
+//  表现为画面变暗且无法归因，GI 计划 §9.2-C 就是这么断出来的）。
+//
+// 【为什么收敛成一个函数】此前是逐源硬编码：diffuse 循环里只查了 Lumen，specular 循环里
+// 查 SSR / RT_Reflection / Lumen —— 新增一个源就得记得再加一处分支，漏掉的那处就是"协议断裂"。
+// 现在合成端**只读这一个约定**：三处循环都调 `SourceIsValid()`，新增源只需在这里加一行
+// （或按约定返回 true），而不是在三处循环里各加一次。
+// ============================================================
+bool SourceIsValid(uint id, float2 uv) {
+    switch (id) {
+        case GISOURCE_LUMEN:         return u_Lumen.Sample(u_GBufferSampler, uv).a >= 0.0;
+        case GISOURCE_SSR:           return u_SSR.Sample(u_GBufferSampler, uv).a >= 0.0;
+        case GISOURCE_RT_REFLECTION: return u_RT_Reflection.Sample(u_GBufferSampler, uv).a >= 0.0;
+        // 其余源（IBL / DDGI / RSM / SSGI / RTGI / AO）在整屏上恒有效：
+        // 它们是"处处给估计"的源，没有逐像素无效的概念（网格/屏幕覆盖由置信度掩码表达）。
+        default:                     return true;
+    }
+}
+
 float3 SampleDiffuseSource(uint id, float3 worldPos, float3 N, float2 uv,
                            float3 albedo, float3 kD, bool furnace) {
     // 白炉：各源真值 = 1（只验合成数学，不验量纲）。

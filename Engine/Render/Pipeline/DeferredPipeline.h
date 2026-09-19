@@ -256,6 +256,9 @@ private:
     std::unique_ptr<RTDenoiser> m_AODenoiser;
     std::unique_ptr<RTDenoiser> m_ReflectionDenoiser;
     std::unique_ptr<RTDenoiser> m_GIDenoiser;
+    // ── 统一降噪框架（§10 的 11.3，步骤 34）──
+    DenoiseHistoryPool     m_DenoiseHistoryPool;   // 统一的历史纹理分配
+    DenoiseSignalRegistry  m_DenoiseSignals;       // 当帧信号登记处（多信号共存的唯一视角）
     Denoiser m_ReflectionSpatial;
     Denoiser m_GISpatial;
     bool m_RTEnabled = false;   // 设备支持光追且 RTPass 初始化成功

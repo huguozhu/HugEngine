@@ -39,6 +39,7 @@ add_executable(HugEngineTests
     TestSurfaceCache.cpp
     TestLumenTraceConfig.cpp
     TestLumenSH.cpp
+    TestDenoiseSignal.cpp
     TestGIProbeGrid.cpp
     TestRSMFrustum.cpp
     TestPathPayload.cpp

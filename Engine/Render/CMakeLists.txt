@@ -143,6 +143,10 @@ set(RENDER_SOURCES
     PostProcess/Denoiser.cpp
     PostProcess/RTDenoiser.h
     PostProcess/RTDenoiser.cpp
+    PostProcess/DenoiseSignal.h
+    PostProcess/DenoiseSignal.cpp
+    PostProcess/DenoiseUpscale.h
+    PostProcess/DenoiseUpscale.cpp
     PostProcess/PTAtrousPass.h
     PostProcess/PTAtrousPass.cpp
     PostProcess/GaussianBlurPass.h

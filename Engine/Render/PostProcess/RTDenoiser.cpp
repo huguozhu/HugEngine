@@ -17,7 +17,8 @@ static constexpr u32 kRTDenoiseBindVelocity = 4;
 // ============================================================
 // Initialize — 创建历史/输出纹理 + PSO + 描述符集
 // ============================================================
-bool RTDenoiser::Initialize(rhi::IRHIDevice* device, const Config& cfg) {
+bool RTDenoiser::Initialize(rhi::IRHIDevice* device, const Config& cfg,
+                              DenoiseHistoryPool* historyPool) {
     m_Device = device;
     m_Cfg    = cfg;
     m_Width  = cfg.width;
@@ -43,6 +44,7 @@ bool RTDenoiser::Initialize(rhi::IRHIDevice* device, const Config& cfg) {
     m_PointSampler = device->CreateSampler(sd);
 
     // ── 历史 + 输出纹理（格式与 RT Pass 输出一致）──
+    m_HistoryPool = historyPool;   // 步骤 34：非空 ⇒ 历史从统一池里取
     CreateTextures(m_Width, m_Height);
 
     // ── PSO ──
@@ -66,8 +68,16 @@ void RTDenoiser::CreateTextures(u32 w, u32 h) {
     d.mipLevels  = 1;
     // RenderTarget：累积 Pass 写入；ShaderResource：下帧作为历史被采样
     d.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
-    m_History = m_Device->CreateTexture(d);
-    m_Output  = m_Device->CreateTexture(d);
+    m_OwnedOutput = m_Device->CreateTexture(d);
+    m_Output      = m_OwnedOutput.get();
+    if (m_HistoryPool) {
+        // 步骤 34（11.3）：历史由**统一池**分配 —— 同名同尺寸同格式只建一次，
+        // 池自己持有所有权，本类只用裸指针（swap 角色时不动所有权）。
+        m_History = m_HistoryPool->Acquire(m_Cfg.debugName, w, h, m_Cfg.format);
+    } else {
+        m_OwnedHistory = m_Device->CreateTexture(d);
+        m_History      = m_OwnedHistory.get();
+    }
 }
 
 // ============================================================
@@ -113,8 +123,10 @@ void RTDenoiser::Shutdown() {
         m_Layout = rhi::kInvalidLayout;
     }
     m_PSO.reset();
-    m_History.reset();
-    m_Output.reset();
+    m_OwnedHistory.reset();
+    m_OwnedOutput.reset();
+    m_History = nullptr;   // 池中的纹理由池持有，这里只断开引用
+    m_Output  = nullptr;
     m_PointSampler.reset();
     m_Device = nullptr;
     m_Ready  = false;
@@ -128,8 +140,10 @@ void RTDenoiser::OnResize(u32 w, u32 h) {
     if (w == m_Width && h == m_Height) return;
     m_Width  = w;
     m_Height = h;
-    m_History.reset();
-    m_Output.reset();
+    m_OwnedHistory.reset();
+    m_OwnedOutput.reset();
+    m_History = nullptr;
+    m_Output  = nullptr;
     CreateTextures(w, h);
     m_FrameIndex = 0;  // 重置历史：首帧使用当前帧初始化
 }
@@ -180,7 +194,7 @@ void RTDenoiser::Render(rhi::IRHICommandList* cmd) {
     // 历史绑定：上一帧累积结果作为当前帧采样输入
     m_Device->UpdateDescriptorSet(m_Set, kRTDenoiseBindHistory,
         rhi::DescriptorType::CombinedImageSampler,
-        m_History.get(), m_PointSampler.get());
+        m_History, m_PointSampler.get());
 
     // 首帧无历史数据 → shader 直接输出当前帧（初始化历史）
     const u32 isFirstFrame = (m_FrameIndex <= 1) ? 1u : 0u;
@@ -209,7 +223,7 @@ void RTDenoiser::Render(rhi::IRHICommandList* cmd) {
     cmd->Draw(3);
 
     // 刚写入的输出成为下帧历史；原历史纹理成为下帧写入目标
-    m_History.swap(m_Output);
+    std::swap(m_History, m_Output);   // 裸指针交换（历史可能来自统一池，不可 swap 所有权）
     ++m_FrameIndex;
 }
 

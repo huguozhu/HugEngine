@@ -2,6 +2,7 @@
 
 #include "RHI/RHI.h"
 #include "Math/Math.h"
+#include "PostProcess/DenoiseSignal.h"   // 步骤 34（11.3）：统一历史分配 + 框架级有效性契约
 #include <memory>
 
 namespace he::render {
@@ -38,7 +39,11 @@ public:
     ~RTDenoiser() = default;
 
     // 初始化：创建历史 + 输出纹理 + PSO + 描述符集 + 采样器
-    bool Initialize(rhi::IRHIDevice* device, const Config& cfg);
+    // 初始化：创建输出纹理 + PSO + 描述符集 + 采样器。
+    // `historyPool` 非空时，**历史纹理从池里取**（统一分配，同名同尺寸同格式只建一次）；
+    // 为空时保持旧行为（自己建一张）。
+    bool Initialize(rhi::IRHIDevice* device, const Config& cfg,
+                    DenoiseHistoryPool* historyPool = nullptr);
     void Shutdown();
     void OnResize(u32 w, u32 h);
 
@@ -65,13 +70,14 @@ public:
 
     // ── 访问器 ──
     // 返回当前帧写入目标（Render 前导入 RG；Render 后即最新累积结果）
-    rhi::IRHITexture* GetOutput() const { return m_Output.get(); }
+    rhi::IRHITexture* GetOutput() const { return m_Output; }
     u32 GetWidth()  const { return m_Width; }
     u32 GetHeight() const { return m_Height; }
     bool IsReady()  const { return m_Ready; }
 
 private:
     void CreateTextures(u32 w, u32 h);
+    DenoiseHistoryPool* m_HistoryPool = nullptr;   // 非拥有；为空则自建历史
     void CreatePSO();
 
     Config m_Cfg;
@@ -80,9 +86,12 @@ private:
     bool m_Ready = false;
 
     // 历史（上一帧累积结果，只读）+ 输出（当前帧累积结果，只写）
-    // Render 末尾 swap 角色：m_Output → 下帧 m_History
-    std::unique_ptr<rhi::IRHITexture> m_History;
-    std::unique_ptr<rhi::IRHITexture> m_Output;
+    // Render 末尾 swap 角色：m_Output → 下帧 m_History。
+    // 【步骤 34】历史可能来自 `DenoiseHistoryPool`（**非拥有**）⇒ 两者都用裸指针 + 各自的自有槽位。
+    std::unique_ptr<rhi::IRHITexture> m_OwnedHistory;   // 无池时自建的历史
+    std::unique_ptr<rhi::IRHITexture> m_OwnedOutput;    // 本类自己的输出（始终自有）
+    rhi::IRHITexture* m_History = nullptr;   // 指向 m_OwnedHistory 或池中的纹理
+    rhi::IRHITexture* m_Output  = nullptr;   // 指向 m_OwnedOutput 或池中的纹理（swap 后可能互换）
 
     // 采样器（点采样：深度/法线/速度/噪声/历史均用最近邻，避免插值模糊信号）
     std::unique_ptr<rhi::IRHISampler> m_PointSampler;

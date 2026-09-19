@@ -189,12 +189,17 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
         auto ssgiProvider = std::make_unique<SSGIProvider>();
         ssgiProvider->SetPass(&m_SSGI);
         ssgiProvider->SetDenoiser(&m_DenoiseSSGI);
+        // 【步骤 34（11.3）】附属链的第二级（重建升采样）需要设备自建纹理/管线。
+        // 此前 Provider::Initialize 在 SSGI/SSR 上**从未被调用**（帧图只对各 pass 调 Initialize），
+        // 于是升采样级永远是"未就绪"，半分辨率路径会静默退回"直接采样降噪结果"。
+        ssgiProvider->Initialize(device, m_Width, m_Height);
         m_GIProviders.push_back(std::move(ssgiProvider));
 
         // SSR（屏幕空间反射；主 pass + 降噪附属 pass，与 SSGI 同构）
         auto ssrProvider = std::make_unique<SSRProvider>();
         ssrProvider->SetPass(&m_SSR);
         ssrProvider->SetDenoiser(&m_DenoiseSSR);
+        ssrProvider->Initialize(device, m_Width, m_Height);
         m_GIProviders.push_back(std::move(ssrProvider));
 
         // DDGI（动态漫反射探针；compute pass，无通道纹理输出）
@@ -265,6 +270,9 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
             }
 
             // ── RT 降噪器（时域累积；反射/GI 追加 5×5 空间滤波）──
+            // 【步骤 34（11.3）】所有降噪器的**历史纹理统一由池分配**：同名同尺寸同格式只建一次，
+            // 于是"当帧有多少条降噪信号、各占多少显存"变成一个能一次打印出来的事实。
+            m_DenoiseHistoryPool.Initialize(device);
             if (m_RTShadow && m_RTShadow->IsValid()) {
                 RTDenoiser::Config cfg;
                 cfg.format          = rhi::Format::R16_FLOAT;
@@ -275,7 +283,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
                 cfg.normalThreshold = 0.85f;
                 cfg.debugName       = "RTShadowDenoiser";
                 m_ShadowDenoiser = std::make_unique<RTDenoiser>();
-                if (!m_ShadowDenoiser->Initialize(device, cfg)) m_ShadowDenoiser.reset();
+                if (!m_ShadowDenoiser->Initialize(device, cfg, &m_DenoiseHistoryPool)) m_ShadowDenoiser.reset();
             }
             if (m_RTAO && m_RTAO->IsValid()) {
                 RTDenoiser::Config cfg;
@@ -287,7 +295,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
                 cfg.normalThreshold = 0.85f;
                 cfg.debugName       = "RTAODenoiser";
                 m_AODenoiser = std::make_unique<RTDenoiser>();
-                if (!m_AODenoiser->Initialize(device, cfg)) m_AODenoiser.reset();
+                if (!m_AODenoiser->Initialize(device, cfg, &m_DenoiseHistoryPool)) m_AODenoiser.reset();
             }
             if (m_RTReflection && m_RTReflection->IsValid()) {
                 RTDenoiser::Config cfg;
@@ -299,7 +307,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
                 cfg.normalThreshold = 0.80f;
                 cfg.debugName       = "RTReflectionDenoiser";
                 m_ReflectionDenoiser = std::make_unique<RTDenoiser>();
-                if (!m_ReflectionDenoiser->Initialize(device, cfg)) m_ReflectionDenoiser.reset();
+                if (!m_ReflectionDenoiser->Initialize(device, cfg, &m_DenoiseHistoryPool)) m_ReflectionDenoiser.reset();
                 if (!m_ReflectionSpatial.Initialize(device,
                         m_RTReflection->GetWidth(), m_RTReflection->GetHeight())) {
                     HE_CORE_WARN("DeferredPipeline: RTReflectionSpatial 初始化失败");
@@ -315,7 +323,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
                 cfg.normalThreshold = 0.80f;
                 cfg.debugName       = "RTGIDenoiser";
                 m_GIDenoiser = std::make_unique<RTDenoiser>();
-                if (!m_GIDenoiser->Initialize(device, cfg)) m_GIDenoiser.reset();
+                if (!m_GIDenoiser->Initialize(device, cfg, &m_DenoiseHistoryPool)) m_GIDenoiser.reset();
                 if (!m_GISpatial.Initialize(device,
                         m_RTGI->GetWidth(), m_RTGI->GetHeight())) {
                     HE_CORE_WARN("DeferredPipeline: RTGISpatial 初始化失败");

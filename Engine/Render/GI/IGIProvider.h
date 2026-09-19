@@ -17,6 +17,7 @@
 
 #include "Pipeline/LightingPass.h"
 #include "GI/GITypes.h"
+#include "PostProcess/DenoiseSignal.h"   // 步骤 34（11.3）：DenoiseSignal / 统一历史池 / 有效性契约
 #include "RHI/RHI.h"
 
 namespace he::render {
@@ -108,6 +109,13 @@ public:
     // ── 附属 pass（降噪/累积等；帧图在主线之后依次注册）──
     // 让 Provider 自报「我还需要哪些后续 pass」，使降噪链也纳入注册表驱动，
     // 而不必在帧图里为每种源手写。
+    /// 【步骤 34 / §10 的 11.3】把本 Provider 当帧产出的**降噪信号**登记到统一框架里。
+    /// 默认不登记（下游自己决定）；有降噪链的源（SSGI / SSR / RT 各效果）实现它。
+    /// 登记之后，"当帧有哪几条信号、各需不需要升采样、参数是多少"就只有一个视角。
+    virtual void DescribeSignals(DenoiseSignalRegistry& /*registry*/,
+                                 rhi::IRHITexture* /*depth*/, rhi::IRHITexture* /*normal*/,
+                                 rhi::IRHITexture* /*velocity*/) {}
+
     [[nodiscard]] virtual u32 GetAuxPassCount() const { return 0; }
     [[nodiscard]] virtual const char* GetAuxPassName(u32 /*i*/) const { return ""; }
     /// 附属 pass 的输出纹理（供后续 pass / 帧图声明依赖）
