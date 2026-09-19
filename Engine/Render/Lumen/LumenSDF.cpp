@@ -639,6 +639,20 @@ void LumenSDF::SetupGlobalGrid() {
     }
 }
 void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
+    // 【步骤 37】clipmap 各层的自持存储图像（scratch/field/seed）在这里**第一次被写入**，
+    // 而它们的创建点（CreateGlobalGPUObjects）没有命令列表可用 ⇒ 在此处、任何写之前转换一次。
+    // （晚一帧再转会把已注入的场内容丢掉；详见 BakeOne 里的同一处说明。）
+    if (!m_GlobalImagesTransitioned) {
+        m_GlobalImagesTransitioned = true;
+        for (u32 i = 0; i < m_GlobalLayerCount; ++i) {
+            GlobalLayer& L = m_GlobalLayers[i];
+            for (rhi::IRHITexture* t : { L.scratch.get(), L.field.get(), L.seed.get() }) {
+                if (t) cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                                            rhi::ResourceState::Undefined, rhi::ResourceState::UnorderedAccess, t);
+            }
+        }
+    }
+
     if (!m_GlobalPSO || m_Entries.empty()) return;
     // 注入必须能真正采到 mesh 场：缺采样器时引擎会跳过整条描述符更新，而注入仍然照跑，
     // 于是 InterlockedMin 会把 0 写满每个 mesh 的 AABB（全局场在空旷处塌缩到 ≈0）。

@@ -371,6 +371,8 @@ private:
     // ── 步骤 35：探针滤波（空间 3×3 单元 YCoCg AABB + 时域重投影 EMA）──
     DenoiseHistoryPool* m_HistoryPool = nullptr;   // 非拥有：时域历史由统一池分配
     bool m_StorageImagesTransitioned = false;       // 步骤 37：存储图像的布局是否已转换过
+    bool m_AtlasImagesTransitioned = false;         // 步骤 37：atlas 三张的布局是否已转换过
+    bool m_IrradianceTransitioned = false;          // 步骤 37：辐照度纹理的布局是否已转换过
     rhi::DescriptorSetLayoutHandle m_ProbeFilterLayout = 0;
     rhi::DescriptorSetHandle       m_ProbeFilterSet    = 0;
     std::unique_ptr<rhi::IRHIPipelineState> m_ProbeFilterPSO;

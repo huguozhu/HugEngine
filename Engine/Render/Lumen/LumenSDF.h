@@ -270,6 +270,7 @@ private:
     std::vector<rhi::DescriptorSetHandle>     m_ConvertSets;
     std::unique_ptr<rhi::IRHITexture>         m_MeshScratch;  // 共享的 u32 距离场（原子最小目标）
     bool m_MeshScratchTransitioned = false;   // 步骤 37：共享中间纹理的布局已转换（首次使用时做）
+    bool m_GlobalImagesTransitioned = false;  // 步骤 37：clipmap 各层图像的布局已转换（首次注入前做）
     // 带种子坐标的 JFA（真欧氏距离，见 SDF_MeshFloodSeeds.comp.slang）：种子坐标共享一张纹理，
     // 逐 mesh 串行复用（+8 MB），把"26 连通图最短路径"的 ~8% 高估换成 ~1 体素的精确欧氏距离。
     std::unique_ptr<rhi::IRHITexture>         m_MeshSeed;

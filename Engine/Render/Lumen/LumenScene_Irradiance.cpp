@@ -117,6 +117,15 @@ void LumenScene::RunProbeIrradiance(rhi::IRHICommandList* cmd, rhi::IRHITexture*
     m_Device->UpdateDescriptorSet(m_IrrSet, 4, rhi::DescriptorType::CombinedImageSampler,
                                   gbWorldPos, m_SDF.GetLinearSampler());
 
+    // 【步骤 37】辐照度纹理是自持存储图像（compute 以 RWTexture2D 写），创建点没有命令列表，
+    // 故在首次写入之前转换一次（理由见 LumenSDF::BakeOne 的同一处说明）。
+    if (!m_IrradianceTransitioned && m_IrradianceTex) {
+        m_IrradianceTransitioned = true;
+        cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                             rhi::ResourceState::Undefined, rhi::ResourceState::UnorderedAccess,
+                             m_IrradianceTex.get());
+    }
+
     // ① 先读上一帧的统计（同"先读后清"）
     if (m_IrrFrame >= 1 && m_IrrStatsMapped) {
         u32 st[4] = {0, 0, 0, 0};

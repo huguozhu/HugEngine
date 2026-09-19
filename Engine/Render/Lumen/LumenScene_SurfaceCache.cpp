@@ -322,6 +322,15 @@ void LumenScene::RunCardCapture(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbA
     if (!m_CaptureBound) {
         CreateCaptureGPUObjects();
         if (!m_CapturePSO || !m_AtlasAlbedo) return;
+        // 【步骤 37】atlas 三张（albedo/normal/emissive）是自持存储图像，创建点没有命令列表，
+        // 故在首次捕获（第一次写入）之前转换一次（理由见 LumenSDF::BakeOne 的同一处说明）。
+        if (!m_AtlasImagesTransitioned) {
+            m_AtlasImagesTransitioned = true;
+            for (rhi::IRHITexture* t : { m_AtlasAlbedo.get(), m_AtlasNormal.get(), m_AtlasEmissive.get() }) {
+                if (t) cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                                            rhi::ResourceState::Undefined, rhi::ResourceState::UnorderedAccess, t);
+            }
+        }
         m_Device->UpdateDescriptorSet(m_CaptureSet, 0, rhi::DescriptorType::CombinedImageSampler,
                                       m_SDF.GetGlobalField(0), m_SDF.GetLinearSampler());
         m_Device->UpdateDescriptorSet(m_CaptureSet, 6, rhi::DescriptorType::CombinedImageSampler,
