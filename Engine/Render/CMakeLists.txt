@@ -179,6 +179,9 @@ set(RENDER_SOURCES
     # ShaderHotReload
     ShaderHotReload.h
     ShaderHotReload.cpp
+    # Lumen（虚拟化几何 GI）：持久资源宿主，后续步骤在其上追加 atlas / SDF / 探针
+    Lumen/LumenScene.h
+    Lumen/LumenScene.cpp
 )
 
 target_sources(HugEngineRender PRIVATE ${RENDER_SOURCES})

@@ -132,6 +132,7 @@ GPU_CONST(GPU_UINT GISOURCE_RTGI          = 8);   // 高频：光追间接漫反
 GPU_CONST(GPU_UINT GISOURCE_RT_REFLECTION = 9);   // 高频：光追反射
 GPU_CONST(GPU_UINT GISOURCE_RTAO          = 10);  // 高频：光追环境光遮蔽
 GPU_CONST(GPU_UINT GISOURCE_GTAO          = 11);  // 中频：地平线切片 AO（SSAO 的高质量替代）
+GPU_CONST(GPU_UINT GISOURCE_LUMEN         = 12);  // 虚拟化几何 GI（Surface Cache + SDF + 屏幕探针 + Radiance Cache）
 
 GPU_STRUCT GISourceSlot {
     GPU_UINT id;                 // GISourceId（决定 SampleSource 走哪条分支）

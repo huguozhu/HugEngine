@@ -52,7 +52,7 @@ constexpr GISourceId kAllSources[] = {
     GISourceId::IBL,   GISourceId::Lightmap, GISourceId::DDGI,
     GISourceId::SSGI,  GISourceId::SSR,      GISourceId::SSAO,
     GISourceId::RSM,   GISourceId::RTGI,     GISourceId::RTReflection,
-    GISourceId::RTAO,  GISourceId::GTAO,
+    GISourceId::RTAO,  GISourceId::GTAO,     GISourceId::Lumen,
 };
 
 /// 该源所在的层栈通道（1=diffuse 2=specular 3=ao）
@@ -63,7 +63,8 @@ int ChannelOf(GISourceId id) {
     case GISourceId::RSM:
     case GISourceId::RTGI:
     case GISourceId::IBL:
-    case GISourceId::Lightmap:      return 1;
+    case GISourceId::Lightmap:
+    case GISourceId::Lumen:         return 1;   // Lumen 同时服务镜面，测试里按主通道（漫反射）归类
     case GISourceId::SSR:
     case GISourceId::RTReflection:  return 2;
     case GISourceId::SSAO:
@@ -85,7 +86,7 @@ int ChannelOf(GISourceId id) {
 // 结果是 `SSGI=Mid` 而 `RTGI=High`——同一物理量的两面被标成不同"频段"。
 // 故该枚举已删除，改由三个**互斥且完备**的谓词表达。
 // ============================================================
-TEST_CASE("源分类谓词：三个类别互斥且完备（对 11 个源构成划分）") {
+TEST_CASE("源分类谓词：三个类别互斥且完备（对 12 个源构成划分）") {
     u32 nWorld = 0, nScreen = 0, nRT = 0;
     for (GISourceId id : kAllSources) {
         const int hits = (IsWorldSpaceSource(id)  ? 1 : 0)
@@ -96,10 +97,10 @@ TEST_CASE("源分类谓词：三个类别互斥且完备（对 11 个源构成�
         if (IsScreenSpaceSource(id)) nScreen++;
         if (IsRayTracingSource(id))  nRT++;
     }
-    CHECK(nWorld  == 3u);                    // IBL / Lightmap / DDGI
+    CHECK(nWorld  == 4u);                    // IBL / Lightmap / DDGI / Lumen
     CHECK(nScreen == 5u);                    // SSGI / SSR / SSAO / RSM / GTAO
     CHECK(nRT     == 3u);                    // RTGI / RTReflection / RTAO
-    CHECK(nWorld + nScreen + nRT == 11u);    // 覆盖全部（无遗漏、无重叠）
+    CHECK(nWorld + nScreen + nRT == 12u);    // 覆盖全部（无遗漏、无重叠）
 }
 
 TEST_CASE("源分类谓词：各类别成员正确，None 不属于任何类别") {
@@ -107,6 +108,7 @@ TEST_CASE("源分类谓词：各类别成员正确，None 不属于任何类别"
     CHECK(IsWorldSpaceSource(GISourceId::IBL));
     CHECK(IsWorldSpaceSource(GISourceId::Lightmap));
     CHECK(IsWorldSpaceSource(GISourceId::DDGI));
+    CHECK(IsWorldSpaceSource(GISourceId::Lumen));   // 产物与命中都在世界空间
     // 屏幕空间 / 单次反弹光栅
     CHECK(IsScreenSpaceSource(GISourceId::SSGI));
     CHECK(IsScreenSpaceSource(GISourceId::SSR));
@@ -728,11 +730,17 @@ TEST_CASE("ToConfidenceMask：屏幕空间源带 CAMERA_COVERAGE 位，DDGI 带 
         CHECK(ToConfidenceMask(id) == kGIConfCameraCoverage);
     }
     // 世界空间源不受相机屏幕覆盖限制
-    const GISourceId world[] = { GISourceId::IBL, GISourceId::Lightmap };
+    const GISourceId world[] = { GISourceId::IBL, GISourceId::Lightmap, GISourceId::Lumen };
     for (GISourceId id : world) {
         CHECK_FALSE(IsCameraViewLimitedSource(id));
         CHECK(ToConfidenceMask(id) == kGIConfNone);
     }
+    // Lumen 刻意不声明任何置信度判据：它逐像素发射真实世界空间光线，屏幕边缘不退化，
+    // 也不是探针网格源（依据见《Lumen设计与实现》§15.2）
+    CHECK(ToConfidenceMask(GISourceId::Lumen) == kGIConfNone);
+    // Lumen 同时服务两个通道（与 IBL 同形），能力位必须两位都在
+    CHECK((ToPipelineCap(GISourceId::Lumen) & kPipelineGIDiffLumen) != 0u);
+    CHECK((ToPipelineCap(GISourceId::Lumen) & kPipelineGISpecLumen) != 0u);
     // DDGI 也是世界空间源，但它另有一条**探针网格覆盖**判据（任务 14 / §9.2-K）：
     // 网格 AABB 之外 SampleDDGI 只能贴边常数外推 ⇒ 该处必须判为不可信。
     CHECK_FALSE(IsCameraViewLimitedSource(GISourceId::DDGI));
