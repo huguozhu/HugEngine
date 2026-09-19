@@ -1459,7 +1459,8 @@ python Tools\pt\analyze_pt.py --compare <pt_tag> <deferred_tag> --target hdr
 | 25 L3 退出判据 | ✅ 已完成（L3 闭环） | 无新增代码，只做对照与归因。**① 半球追踪产生漫反射 GI**：Lumen 漫反射输出亮度非零像素 **99.7%**、均值 **0.04507**（≈`albedo/π·E`），且与同帧 GBuffer albedo 亮度相关系数 **0.6468**（R/G/B 0.744/0.631/0.785）⇒ 间接光跟着表面颜色走（`s24_lumen.png` 可见拱顶/立柱/三色旗帜的间接光）。**② 与 SSGI/DDGI 对照（同场景同相机同帧号 120，只切漫反射层栈）**：基线 HDR 亮度均值 0.07143；**只开 Lumen +0.01917（+26.8%）**、只开 SSGI **+0.00000**、只开 DDGI **+0.01986（+27.8%）**。**归因**：Lumen 与 DDGI 增量同级（差 3.6%）—— 两种完全不同的算法（世界空间 SDF 半球追踪 vs 探针网格）给出同量级间接漫反射，不一致的是**分布**不是**标度**；SSGI 增量为 0 且**不是没输入**（其输入 `radiance` 100% 非零、均值 0.0714），但 `prov3_raw/final` 逐像素全 0 ⇒ 仓库既有 SSGI 链路问题（同键位配置与历史 `ssgical_cal_ssgi.cfg` 逐键一致，非本步引入）；DDGI 无通道纹理输出（设计如此，compute pass）故只做 HDR 级对照。另记录一处合成侧偏差：`prov6` 与 HDR 逐像素增量的相关系数 0.4882、整体比值 ≈0.43 ⇒ 合成/归一化环节的缩放不是逐像素常数，属 §10 的任务。**验收**：白炉 1.0000、`lumen_passes=0`、背靠背逐位一致、单测 228/5741、VUID 46 |
 | 26 远场 TraceRay | ✅ 已完成 | `Lumen_FarField.rgen.slang`（对步骤 21 的**同一条**探针光线再发光追，方向由共享采样头给出）+ 复用 `RT_GI.rchit/rmiss`（与 RTGI 同源同量纲）+ `LumenFarFieldPass`（继承 `RTEffectPass`，与 `DDGITracePass` 同一取舍）+ `Lumen_FarFieldCompare.comp.slang`（逐光线比较 SDF/三角形命中距离，近带/远带 + 16 桶直方图）+ `Lumen_FarFieldMerge.comp.slang`（按阈值把光追命中点写回步骤 22 的输入）。**实测**：光追 45192 条，**RT 命中率 71.2%**、SDF 命中率 17.9%；合并后步骤 22 的命中光线由 8079 升到 **34553（76.4%）**、页命中率 8.1% → 15.5%。**本步最大的结论**：探针 march 原先的 `eps = 1 个体素 = 21.3 单位` 让"命中率 94%"全是**假命中**（命中距离均值仅 16.4 单位，真实表面在几十到几百单位外，相对差直方图 42% 落在 `[0.94,1]`）；改成几何量级 `0.1 体素 ≈ 2.1 单位` 后 SDF 命中率降到 17.9%、命中距离均值升到 55.97 ⇒ **远场必须由 HW RT 承担**（步骤 26/27 的位置由此被数据钉住）。**踩坑**：①"结果缓冲非空"当前置条件会死锁/空指针（本轮踩三次）；②`AS_Build` 的注册条件漏了 Lumen（RT 命中率 0.0% → 加 `diffuse.Has(Lumen)` 后 71.4%）；③rgen 写两个 float4/光线而 C++ 只按一个分配（越界写，"稳定但错误"的读数）；④改布局后对照 shader 的索引没 ×2；⑤一次字符串替换静默未生效导致合并跑在着色之后（白跑）。**验收**：白炉 1.0000、背靠背逐位一致、`lumen_passes=0`、单测 228/5741 全绿、VUID 46 = 基线 |
 | 27 traceRep 切换与 overlap fade | ✅ 已完成 | 切换逻辑只挂在 `traceRep` 上（§6 的副作用说明）。`Lumen_FarFieldMerge` 只交出"两个命中点 + 权重"（权重 `w = smoothstep(t0,t1,t_sdf)`，默认带 `[40,60]`；半宽 0 退化成硬切换，环境变量 `HE_LUMEN_FARFIELD_OVERLAP/THRESHOLD` 可 A/B），由 `Lumen_SurfaceCacheSample` **各取一次材质再按权重插值**（插值的是"看到什么"而不是"在哪"）。**实测 A/B（同场景同相机同帧号）**：含阈值的那一桶（50–55）相对上一桶的台阶 **硬切换 +5.8% → 重叠带 +3.3%**，变化摊到 `[40,60]` 整段，band 之外逐位不变；切换分类 纯 SDF 3503 / 纯光追 28248 / 重叠带 445（带内 44 条远场页有内容、401 条朝远场兜底值插值）。**踩三个坑**：①fade 描述符从未绑上（由更晚创建的 pass 拥有，须每帧重绑）；②插值用了"材质"而不是"该路径实际输出的值"，主点缺页时在 t0 处反而出现 −30% 的更深台阶；③分桶用了"最终命中距离"（切换后自己会跳），改用稳定量。**验收**：含阈值桶台阶 5.8%→3.3%、白炉 1.0000、`lumen_passes=0`、单测 228/5741、VUID 46。**新边界**：`prov6_final` 背靠背有 **4 个像素差 1 个 f16 ULP**（同一探针，统计完全一致）——引入硬件光追后 TLAS 重建/遍历由驱动决定，属固有限制，已在文档里写明判据应放宽为"除 RT 最后一位抖动外逐项一致" ⚠️ |
-| 28–41 | ⬜ 未开始 | 28 组合约束与 Hit Lighting 空壳；随后 29–33 HW RT 混合与 Radiance Cache、34–41 去噪与横切工具 |
+| 28 组合约束与 Hit Lighting 空壳 | ✅ 已完成 | §6 的组合表写成**可执行判定**：`LumenCombinationStatus { Implemented, LegalNotImplemented, Illegal }` + `LumenClassifyCombination()` 逐行对应 §6（`SDF×SurfaceCache`/`HWRT×SurfaceCache`/`Any×Neutral` ⇒ 已实现；`HWRT×HitLighting`/`Screen×任意` ⇒ 合法但未实现；`SDF×HitLighting` ⇒ 非法）。**为什么单列"合法但未实现"**：静默回落到 SurfaceCache 会让使用者以为"Hit Lighting 开了"，是最难查的一类。运行期**显式**报错并按文档取中性值（着色 shader 收到 `atlasParams.w=1` 直接返回中性值并计入 `u_Stats[14]`）。**实测三条路径**：默认打印"⇒ 已实现"；只把 shade 设成 HitLighting（trace 仍 SDF）⇒ 被 `Validate()` 在配置期拒掉、追踪帧计数 0（非法组合就该如此）；`hwrt × hitlighting` ⇒ 两条例外级日志（追踪源未实现 + 组合未实现）后按文档继续，输出与 SurfaceCache 路径**明显不同**（rgb 均值 0.0308 对 0.0355、辐照度 0.394 对 0.440）⇒ 无静默回落。**验收**：白炉 1.0000、`lumen_passes=0`、其余转储逐位一致、单测 **231 例 / 5757 断言**全绿、VUID 46（`prov6_final` 仍有 19 像素 1 ULP 差，与步骤 27 同源） |
+| 29–41 | ⬜ 未开始 | 29 L4 退出判据（SDF 近 + RT 远正确混合 + 帧时/显存记录）；阶段 F / L5：30–33 Radiance Cache；34–41 去噪与横切工具 |
 
 ### 阶段 A：框架前置（不产出画面，但后补等于重构）
 
@@ -3210,3 +3211,54 @@ RT 之后应表述为"除 RT 相关的最后一位抖动外逐项一致"。若�
 
 **下一轮**：步骤 28 —— 组合约束与 Hit Lighting 空壳（`shadeRep == HitLighting` 的分支显式保留、
 返回"未实现"并记一条日志/断言，而不是静默回落）。
+### 附三十五：步骤 28「组合约束与 Hit Lighting 空壳」——§6 的组合表写进代码，未实现必须**可见**
+
+**实现（把 §6 的表格变成可执行判定，而不是只写在文档里）**：
+
+- `LumenTraceConfig.h/.cpp` 新增 `LumenCombinationStatus { Implemented, LegalNotImplemented, Illegal }`
+  与 `LumenClassifyCombination(trace, shade, screenTrace)`，逐行对应 §6 的表：
+
+  | 组合 | §6 | 判定 |
+  | --- | --- | --- |
+  | `SDF × SurfaceCache` | ✅ 首版默认 | **Implemented** |
+  | `HW(RT) × SurfaceCache` | ✅ | **Implemented**（步骤 26 起远场就是这条） |
+  | `HW(RT) × HitLighting` | ✅ 第二版 | **LegalNotImplemented** |
+  | `SDF × HitLighting` | ❌ 语义不成立 | **Illegal**（`Validate()` 在配置加载期拒掉） |
+  | `Screen × 任意` | ✅ 作为**优先层** | **LegalNotImplemented** |
+  | 任意 × `Neutral` | 调试/降级 | **Implemented**（就是写中性值） |
+
+- **为什么把"合法但未实现"单列一档**：让 `HitLighting` 静默走到 SurfaceCache 分支，使用者会以为
+  "命中点光照开了"，实际看到的却是卡片材质 —— 这类"静默回落"最难查（画面看起来正常）。
+  所以运行期**显式报"未实现"**并按文档取值：着色 pass 收到 `atlasParams.w = 1` 时**直接返回中性值**
+  并单独计数（`u_Stats[14]`），不再假装成功。
+- **运行期开关**（演示/对照用，cfg 里没有这两个键）：`HE_LUMEN_SHADE=hitlighting|neutral|surfacecache`、
+  `HE_LUMEN_TRACE=sdf|hwrt|screen`、`HE_LUMEN_SCREEN_TRACE=1`。
+
+**实测（三条路径各一次）**：
+
+```
+默认            : Lumen 组合约束（步骤 28）: SDF × SurfaceCache（screenTrace=false）⇒ 已实现
+HE_LUMEN_SHADE=hitlighting（trace 仍是 SDF）:
+                  [error] Lumen 追踪配置非法，已拒绝派发探针追踪：非法组合：SDF 追踪 × HitLighting …
+                  ⇒ 追踪帧计数 0、整链无输出（**非法组合就该是这个结果**，不是黑屏 bug）
+HE_LUMEN_TRACE=hwrt + HE_LUMEN_SHADE=hitlighting:
+                  [error] Lumen 追踪源（步骤 28）: trace = HardwareRT ⇒ **合法但首版未实现**；首版主追踪
+                          固定为 SDF，硬件光追只承担远场…
+                  [error] Lumen 组合约束（步骤 28）: HardwareRT × HitLighting（screenTrace=false）⇒
+                          **合法但首版未实现** —— 按文档返回中性值/继续用已实现的路径，不做静默回落…
+                  ⇒ 管线继续（trace 42 / sh 17），着色返回中性值：辐照度均值 0.394（默认路径 0.440）、
+                    `prov6_final` rgb 均值 (0.0308,0.0330,0.0292)（默认 (0.0355,0.0372,0.0318)）
+```
+
+关键点：**"未实现"的输出与 SurfaceCache 路径明显不同**（0.031 vs 0.036、辐照度 0.394 vs 0.440）
+且有两条例外级日志 ⇒ 不存在静默回落。
+
+**验收证据**：白炉 `prov6_final` min = mean = max = **1.0000**；`gi_blend_diffuse_lumen=0` ⇒
+`lumen_passes=0`；`lumen_sc_atlas_albedo` / `lumen_sdf_trace` / `albedo` **逐位一致**；单测
+**231 例 / 5757 断言**全绿（新增 3 例 16 断言，覆盖组合表逐行判定、"非法 ≠ 未实现"、中文名）；
+VUID 46 = 基线。`prov6_final` 背靠背仍有 **19 个像素差 1 个 f16 ULP**（涉及 2 个探针单元），
+与步骤 27 记录的同源（硬件光追最后一位抖动）。
+
+**下一轮**：步骤 29 —— L4 退出判据（"SDF 近 + RT 远正确混合"，§12 的 L4 判据），并记录帧时与
+显存增量（进 §15.3 的表）；随后进入阶段 F / L5（步骤 30 起：探针表示升级为二阶 4 系数 → Radiance
+Cache）。
