@@ -1216,12 +1216,13 @@ void LumenSDF::RunMarchCheck() {
     float maxErr = 0.0f;
     double sumErr = 0.0;
     u32 bothHit = 0, gpuOnly = 0, cpuOnly = 0, within = 0, normalOk = 0;
-    std::vector<float> errVoxAll;   // 误差分布（p50/p90）：计数与均值太粗，见本轮说明
+    std::vector<float> errVoxAll, errNear, errFar;   // 误差分布 + 按"起点是否贴近几何"分组
     u32 withinGlobal = 0, detailBetter = 0;
     double sumErrGlobal = 0.0;
 
     for (u32 i = 0; i < n; ++i) {
         const float3 ro = m_RayOriginCPU[i];
+        float d0 = 1e30f;   // 起点到几何的精确距离（诊断"上游"：射线集是否退化）
         const float3 rd = m_RayDirCPU[i];
 
         // CPU 参考：Möller–Trumbore 对全部三角形取最近正交点（带逐 mesh AABB 粗筛）
@@ -1249,6 +1250,7 @@ void LumenSDF::RunMarchCheck() {
                 const float3 v2 = m_PositionsCPU[tri[2] + e.vertexOffset];
                 const float3 e1 = v1 - v0, e2 = v2 - v0;
                 const float3 pv = glm::cross(rd, e2);
+                d0 = std::min(d0, PointTriangleDistance(ro, v0, v1, v2));
                 const float det = glm::dot(e1, pv);
                 if (std::fabs(det) < 1e-12f) continue;
                 const float inv = 1.0f / det;
@@ -1287,6 +1289,7 @@ void LumenSDF::RunMarchCheck() {
             maxErr = std::max(maxErr, errVox);
             if (errVox <= 1.0f) ++within;
             errVoxAll.push_back(errVox);
+            ((d0 < 5.0f) ? errNear : errFar).push_back(errVox);
             if (hits[i].w < 0.0f) ++normalOk;   // 法线朝向与射线相反 = 正面命中
 
             // 诊断：把"全局单独"与"合并后"的误差分开记，才能判断细节追踪到底有没有帮忙
@@ -1338,8 +1341,10 @@ void LumenSDF::RunMarchCheck() {
         std::sort(errVoxAll.begin(), errVoxAll.end());
         const float p50 = errVoxAll[errVoxAll.size() / 2];
         const float p90 = errVoxAll[(size_t)(errVoxAll.size() * 9 / 10)];
-        HE_CORE_INFO("LumenSDF sphere tracing 误差分布: n={} p50={:.3f} p90={:.3f} 体素（计数/均值太粗，改动不可测）",
-                     errVoxAll.size(), (double)p50, (double)p90);
+        HE_CORE_INFO("LumenSDF sphere tracing 误差分布: n={} p50={:.3f} p90={:.3f} 体素；按起点到几何距离分组: 近(d0<5) n={} p50={:.3f} / 远 n={} p50={:.3f}",
+                     errVoxAll.size(), (double)p50, (double)p90,
+                     errNear.size(), errNear.empty() ? 0.0 : (double)errNear[errNear.size()/2],
+                     errFar.size(), errFar.empty() ? 0.0 : (double)errFar[errFar.size()/2]);
     }    HE_CORE_INFO("LumenSDF sphere tracing 误差分解: 仅全局场 {}/{} 在 1 体素内（平均 {:.3f}），"
                  "合并细节追踪后 {}/{}（平均 {:.3f}）；细节追踪更近的射线 {} 条",
                  withinGlobal, bothHit, bothHit ? sumErrGlobal / bothHit : 0.0,
