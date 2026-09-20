@@ -2146,8 +2146,10 @@ if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
 
 > 依赖关系：阶段 0 是**硬前置**（没有它，N2/N3 产出的可见簇与间接参数没有消费者）。
 >
-> **进度（2026-09-20）**：**任务 1、2 已完成**并通过验收（证据见 §14.11 判据 ⑥ 与 §14.12 ⑤）；
-> 下一步从**任务 3**（模块自持的"计数 → 间接绘制"链）开始。
+> **进度（2026-09-20）**：**阶段 0（任务 1–6）已全部完成**并通过验收：模块骨架与独立开关、
+> 开关不变式判据 ⑥、模块自持的「计数 → 间接绘制」链（含最小 RHI 扩展）、GBuffer UAV（A1 裁决）、
+> objectIndex 分区契约与单测、mesh PSO 真正接入。**下一步从任务 7（`.nanite` 数据格式定稿）开始**；
+> 每一步的证据分别见 §14.11、§14.13–§14.16，且都有对应的中文提交。
 
 **阶段 0：模块化前置（独立开关先落地）**
 
@@ -2450,3 +2452,35 @@ A1/A2 的完整裁决已写回 §14.5（A2 = 自建 VisBuffer，仅在确需跨�
 **⑤ 未完成部分（明确留到任务 18）**：真正的"混排场景运行时校验"（Nanite 真的往 MRT7 写页号后逐位核对）
 与 `Tools/gi/lightmap_key_check.py` 的按段分类修改。本任务只保证契约、边界函数与分配器行为可测，
 以及既有解码路径逐位不变。
+### 14.16 任务 6 实施记录：mesh PSO 真正接入（阶段 0 收口，2026-09-20）
+
+**① 前置核实（任务 6 的硬前置：mesh 特性确实启用）**：`VulkanDevice_MeshShader.cpp:24-45` 判扩展、
+`:48-70` 查 `maxMeshOutputVertices/Primitives=256、maxMeshWorkGroupInvocations=128`、`:77-87` 加载
+`vkCmdDrawMeshTasksEXT`；`VulkanDevice.cpp:457-465` 构造 `VkPhysicalDeviceMeshShaderFeaturesEXT{taskShader,meshShader}`
+并在支持时 push 扩展、`:615-616` 链入 pNext、`:155` 写入 `caps.supportsMeshShaders`；
+`VulkanPipeline.cpp:485-486` 即 `PipelineStateDesc::meshShader` 分支；`VulkanCommandList.cpp:932-940` `DrawMeshTasks`。
+运行期日志：`Mesh Shader 扩展已启用: VK_EXT_mesh_shader` / `Mesh Shader 扩展函数加载成功`。
+
+**② 交付**：新增 `Nanite_MeshTest.mesh.slang`（`[numthreads(4,1,1)]`、`[outputtopology("triangle")]`，
+**真调 `SetMeshOutputCounts(4,2)`**，覆盖 NDC 的四边形两个三角形，不是 §14.1 里那个 `0,0` 桩）+
+`Nanite_MeshTest.frag.slang`（原子计数并写 1.0）；`.mesh.slang` 走 **`MESH_SLANG` 显式列表**（`Engine/Shader/CMakeLists.txt:218-224`）。
+模块内建**最小 mesh PSO**（`NaniteRaster::EnsureMeshTestResources`，写模块自己的 1×1 R8 目标，**从不碰 GBuffer**）；
+新 pass `Nanite_MeshTest` 由 cfg 键 `nanite_mesh_test`（默认 **0**）控制，注册在 `AddPasses`（GBuffer 段前）。
+
+**③ 途中修掉的一处新增 VUID（值得记住）**：原实现 mesh 档 `vuid_lines=52`，多出 10 条
+`VUID-VkImageMemoryBarrier-oldLayout-01211` —— 原因是 `CopyTextureToBuffer` 拷完会**无条件**把真实布局还原成
+`SHADER_READ_ONLY_OPTIMAL`（`VulkanCommandList.cpp:756-766`），而模块的小目标缺 `SAMPLED` 位。
+修法：给该私有目标 usage **只增**一个 `ShaderResource` 位（目标从不被采样、与可见画面无关）⇒ 回到 41 行、`01211` 计数 0。
+
+**④ 验收证据（本人复跑）**
+- 关闭档：12 pass、指纹 `1C15AB72E688B530…`（冻结值）、`vuid_lines=41`。
+- mesh 自证档（`nanite_enable=1;nanite_mesh_test=1`）：15 pass，`Nanite_MeshTest` 在 `Nanite_Raster` 之后、
+  `GB_Clear` 之前，既有 12 pass 相对顺序不变；日志恰好一行
+  `[Nanite] mesh_pso=ok meshlet_outputs=2 target_max=255`（两个独立读数都 > 0 ⇒ **非空**，分别来自片元原子计数与
+  1×1 目标的真实 GPU 读回）；`01211` 计数 0、`vuid_lines=41`。
+- off vs mesh 转储逐位比较：`same=17`、`must_same_diff=0`（仅 3 个抖动族文件不同）。
+- 单测 246/22289 全绿；全量六条判据 `ACCEPTANCE SWEEP: PASS`。
+
+**⑤ 阶段 0 收口**：任务 1–6 全部完成。这意味着后续 N1/N2/N3（任务 7 起）要用的四件基础设施都已就位：
+独立开关与不变式判据、模块自持的计数→间接绘制链、GBuffer UAV（A1）、objectIndex 分区契约、
+以及 mesh 光栅的 PSO 通路（任务 22 直接复用）。
