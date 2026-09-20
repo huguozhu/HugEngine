@@ -2211,7 +2211,7 @@ if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
 > **进度（2026-09-20）**：**阶段 0（任务 1–6）与阶段 1 前两项（任务 7 数据格式定稿、任务 8 离线簇切分）已完成**并通过验收：模块骨架与独立开关、
 > 开关不变式判据 ⑥、模块自持的「计数 → 间接绘制」链（含最小 RHI 扩展）、GBuffer UAV（A1 裁决）、
 > objectIndex 分区契约与单测、mesh PSO 真正接入。**任务 7（`.nanite` 数据格式定稿）也已完成**
-> （§8 的四处不一致已裁决并写回 §8，见 §14.17）；**下一步从任务 11（NaniteTypes 单测收口）与任务 12（资产加载与 GPU 上传）开始**；
+> （§8 的四处不一致已裁决并写回 §8，见 §14.17）；**下一步从任务 13（实例剔除）开始**；
 > 每一步的证据分别见 §14.11、§14.13–§14.17，且都有对应的中文提交。
 
 **阶段 0：模块化前置（独立开关先落地）**
@@ -2710,3 +2710,43 @@ UV 取 **unorm16**（实测最大误差 7.689e-06 < 1/65535；half 在 (0.5,1) �
 属性冲突计数 1，下标一一对应最大误差 7.00587，而**点集匹配最大误差仅 0.0298**（≤ √3×半步长）。
 彻底修法二选一：① 把法线/UV 词混进规范键流（更严格，但会降低去重率）；② 按位置而非下标关联属性。
 **必须在任务 19（真实材质接入）与任务 21（画面级对照验收）之前修掉**，否则属性保真度无法通过验收。
+### 14.21 任务 11/12 实施记录：单测收口与资产 GPU 上传读回校验（2026-09-20）
+
+**① 任务 11（单测收口）**：逐条核对 §14.8 任务 11 的验收（尺寸/偏移/量化往返/边界），此前已被任务 7/10 的具名用例覆盖；
+**只发现一个真缺口** —— 段对齐原语 `NaniteAlignUpFile` 与 LOD 段步长 `kNaniteLodOffsetBytes` 从未被直接钉过边界（只被段表用例间接使用），
+补 1 个用例（`Tests/TestNaniteTypes.cpp:980`，417 断言：0/1/15/16/17/31/32/33 的最小对齐值、无截断、`0xFFFFFFFF×64` 不溢出、
+LOD 级数 0/1/2/4/5/8 的段长取整）。**没有为凑数加用例**；完整"验收项 → 用例名"对照表见本轮提交说明与测试文件。
+
+**② 任务 12（资产加载与 GPU 上传）**
+- **几何来源（只读一次，未改 `MeshBatcher`）**：`MeshBatcher.h:60-61` **已存在** `GetMergedVertices()/GetMergedIndices()`
+  （LumenSDF 早已当一次性输入用），故**无需新增 getter**。读取点唯一：`NaniteRenderer::EnsureAssetUploaded` 的一次性门闩内；
+  之后只碰这份快照，模块不持有 `MeshBatcher*`。**索引口径**：合批时 `baseVertex` 已加进索引 ⇒ 它们是绝对合并顶点下标，
+  消费侧**不得**再加 `vertexOffset`（LumenSDF 的同类教训）。`MeshBatcher.cpp:75-86` 的三处一致性契约未动。
+- **GPU 资源划分**：按任务 10 的镜像切成 **1 个头 + 5 段 = 6 个 `StorageBuffer`**（头/簇/顶点/索引/材质/LOD），
+  usage = `Storage | TransferSrc`，空段不建（Vulkan 不接受 0 长度）。6 片无缝覆盖整份镜像 ⇒ 读回校验可覆盖全部字节。
+- **上传与读回（本任务验收）**：一次性命令表（用 `BeginLightweight()` 而非 `Begin()`，避免在帧内推进全局帧计数），
+  6 条 `CopyBuffer` 拷进一张覆盖整份镜像的 host 可见读回缓冲，`Submit` + `WaitIdle`，然后与 `asset.bytes` **逐字节比较**。
+  实测一行（三次运行数值逐位相同）：
+  `[Nanite] upload_bytes=13382544 readback_match=1 mismatch_bytes=0 clusters=8287 vertices=541404 materials=0 lod_levels=6`
+  派生核对：索引 4,189,584/8 = 523,698 三角形；输入合并几何 192,496 顶点/786,801 索引（262,267 三角形），LOD0 + 逐级减半去重后约 52 万 ✓。
+- **关闭档零开销**：`EnsureAssetUploaded` 立刻返回，**一个资源都不建**（实测关闭档日志 `upload_bytes` 出现 0 行）。
+- **触发点**：几何的唯一持有者是 `DeferredPipeline`，样例拿不到 ⇒ 触发点放在 `DeferredPipeline_FrameGraph.cpp:110/114/127`
+  （`if (enabled && ready) m_Nanite.EnsureAssetUploaded(m_MeshBatcher);`），**样例零改动**，且不注册任何 pass（开启档 pass 集合仍是 12+2）。
+- **最小 RHI 扩展（1 行，必须记录）**：`Engine/RHI/Vulkan/VulkanResources.cpp:88` 增加 `TransferSrc` 位映射 ——
+  过去只硬编码了 `TRANSFER_DST`，没有它 `vkCmdCopyBuffer` 的源缓冲会报 `VUID-srcBuffer-00119`。该位**只增**且此前无任何调用方请求，
+  既有缓冲的 `VkBufferUsageFlags` 一位不变（关闭档指纹与转储不动即为证据）。性质同任务 3 的 `DrawIndexedIndirectCount`。
+
+**③ 验收证据（本人复跑）**：单测 **279 → 281 例**（断言 62400）全绿；关闭档 12 pass、指纹冻结 `1C15AB72E688B530…`、
+`nanite_passes=0`、`vuid_lines=41`；开启档 14 pass、`vuid_lines=41`、`on vs off` 逐位比较 `must_same_diff=0`；
+全量六条判据 `ACCEPTANCE SWEEP: PASS`。
+
+**④ 如实记录的偏差与债务**
+1. **首帧一次性卡顿 ≈ 11.4 s**（开启档）：成本是任务 9/10 的 DAG+打包在**整份合并几何**上跑一遍（`MeshBatcher: 103 meshes → 192496 verts` 到上传行之间）。
+   不影响判据（转储在帧 120），但体感明显；优化（按网格分资产、或优化任务 9/10）会改到任务 9/10 的代码，留作性能债务（任务 23 的性能读数一并处理）。
+2. **`materials=0` 是事实**：合并几何不携带材质 ID，`MeshBatcher` 的 draw command 也没有逐簇来源映射，
+   强行反查会引入 §14.3 禁止的依赖 ⇒ 传空 span，逐簇 `materialID` 仍写 0（归属任务 19）。
+3. **资产语义是"整份合并几何 = 一个 `.nanite`"**（不做逐网格拆分、不施加逐物体变换），一个簇可能横跨两个网格；
+   §14.4 的"每网格资产路径 ⇒ 该网格由模块绘制"要等后续任务。
+4. **任务 10 的共享内容属性错配缺陷未修未掩盖**（本任务只比字节，故自洽通过）——仍需在任务 19/21 之前修。
+5. **`NaniteUnpackR10G10B10A2(packed, channel)` 在 `channel ≥ 4` 时是 UB**（`packed >> 40`，C++ 与 Slang 镜像同病）；
+   现有调用方只用 0..3，属越出前置条件的输入；修它要三处同步，留给后续任务决定。
