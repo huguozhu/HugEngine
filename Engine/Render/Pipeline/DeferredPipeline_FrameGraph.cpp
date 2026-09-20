@@ -275,7 +275,9 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     naniteGB.albedoTexture = m_GBuffer ? m_GBuffer->GetAlbedo() : nullptr;
 
     if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
-        m_Nanite.AddPasses(rg, naniteGB);
+        // 【任务 13】相机随帧图构建期传入：实例剔除要由 view-proj 提取世界空间视锥、
+        // 并以相机位置为基准生成合成实例网格（模块不自造相机，也没有别的持有者）。
+        m_Nanite.AddPasses(rg, naniteGB, camera);
     } else {
         // 关闭档（或模块未就绪）：一个 pass 都不注册 —— 这就是"开关关闭 ⇒ 逐位一致"的实现。
         // 既有 GBuffer 写入路径在**两种档位下都照常执行**，理由见上面的说明。

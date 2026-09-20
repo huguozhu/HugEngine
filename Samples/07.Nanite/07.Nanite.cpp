@@ -601,11 +601,17 @@ int main() {
             // 它只决定模块是否追加 `Nanite_MeshTest`（最小 mesh PSO，只画模块自建的 1×1 小目标）。
             naniteSettings.meshTest = GetInt(cfgData, "nanite_mesh_test",
                                              naniteSettings.meshTest ? 1 : 0) != 0;
+            // 任务 13 的合成实例网格条数（默认 64）：钳制到 [0, kNaniteMaxTestInstances]，
+            // 与模块内的钳制口径一致。它是实例剔除验收（GPU vs CPU 逐项对照）的样本规模。
+            naniteSettings.instanceTestCount = (u32)std::max(0, std::min(
+                GetInt(cfgData, "nanite_instance_test_count", (int)naniteSettings.instanceTestCount),
+                (int)render::kNaniteMaxTestInstances));
             deferredPipeline.SetNaniteSettings(naniteSettings);
             HE_CORE_INFO("[Nanite] 配置恢复: nanite_enable={} nanite_fake_clusters={} "
-                         "nanite_test_write={} nanite_mesh_test={}",
+                         "nanite_test_write={} nanite_mesh_test={} nanite_instance_test_count={}",
                          naniteSettings.enabled ? 1 : 0, naniteSettings.fakeClusters,
-                         naniteSettings.testWrite ? 1 : 0, naniteSettings.meshTest ? 1 : 0);
+                         naniteSettings.testWrite ? 1 : 0, naniteSettings.meshTest ? 1 : 0,
+                         naniteSettings.instanceTestCount);
         }
 
         auto& ae = deferredPipeline.GetAutoExposure();
@@ -1791,6 +1797,10 @@ int main() {
             // 关闭档下模块自身会直接返回（不打印），保证关闭档日志与基线一致。
             if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
                 dpNanite->GetNanite().LogFakePipelineReadback();
+            // ── Nanite（§14.8 任务 13）：dump 帧打印**恰好一行**实例剔除的 GPU/CPU 逐项对照 ──
+            // 同步同样依赖上一行的 `WaitIdle()`；关闭档下模块内部直接返回、不打印。
+            if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
+                dpNanite->GetNanite().LogInstanceCullReadback();
             // ── Nanite（§14.8 任务 6）：mesh PSO 通道的**恰好一行**真实 GPU 读回 ──
             // 同步同样已在上一行的 `WaitIdle()` 完成；`nanite_mesh_test=0`（默认）时模块内部
             // 直接返回、不打印，因此不改变任何既有档位的日志。
@@ -1926,6 +1936,9 @@ int main() {
         out["nanite_test_write"]    = std::to_string(deferredPipeline.GetNaniteSettings().testWrite ? 1 : 0);
         // 任务 6：mesh PSO 自证开关（默认 0）——同写法、同在 Shutdown() 之后回写
         out["nanite_mesh_test"]     = std::to_string(deferredPipeline.GetNaniteSettings().meshTest ? 1 : 0);
+        // 任务 13：合成实例网格条数（默认 64）——同写法、同在 Shutdown() 之后回写
+        out["nanite_instance_test_count"] =
+            std::to_string(deferredPipeline.GetNaniteSettings().instanceTestCount);
 
         // ── AutoExposure ──
         auto& ae = deferredPipeline.GetAutoExposure();

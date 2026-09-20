@@ -1089,4 +1089,229 @@ enum class NaniteFileError : u32 {
     return ValidateNaniteFile(data, size, nullptr) == NaniteFileError::None;
 }
 
+// ============================================================
+// §14.8 任务 13：实例剔除（Instance Culling，设计 §5.1 Phase 1）
+//
+// 【本节的定位与「为什么放这里」】
+//   实例剔除的**唯一输入契约**是 `GPUSceneObject`（128B）。那个结构体定义在
+//   `Engine/Render/Pipeline/GPUScene.h:26-40`，但那个头会牵入 `RHI/RHI.h` 与
+//   `Pipeline/Material.h`，**不能**被 RHI-free 的 `NaniteTypes.h` include（§14.7：
+//   Scene 侧要 include 本文件；`Tests/CMakeLists.txt` 也只在 RHI-free 前提上编译本文件）。
+//   所以本节放一份**逐字段同布局的 RHI-free 镜像** `NaniteInstanceGpuObject`，
+//   并在 `NaniteCull.cpp`（Render 目标，能 include 真身）用 `sizeof` + 逐字段 `offsetof`
+//   的 `static_assert` 把它钉死在真身上 —— 契约一旦漂移就编译不过。
+//
+// 【坐标系与口径（全节统一）】
+//   · 实例的 `boundsMin/boundsMax`、包围球球心与视锥平面**全部是世界空间**；
+//   · 视锥平面约定与 `Math/Geometry.h` 的 `he::Frustum` **完全一致**：
+//     `planes[i] = (n.xyz, d)`，`dot(n, p) + d >= 0` 表示**在内侧**；
+//     平面顺序 `[左, 右, 下, 上, 近, 远]`；法线已归一化。
+//   · 球与平面的相交判据与 `he::Frustum::Intersects(Sphere)`（`Geometry.cpp:78-87`）
+//     逐字一致：`dot(n, c) + d < -radius` ⇒ 该平面外侧 ⇒ 不可见（**不加 epsilon**，
+//     与 GPU 侧同一判据，保证 CPU/GPU 逐项一致）。
+//
+// 【与 §5.1 的关系】本节只做 **Phase 1（Instance Culling）的视锥粗筛**；
+//   Hi-Z 遮挡剔除（Phase 1 的第二半）与 Phase 2/3 的簇 BVH/LOD 属任务 14/15，
+//   不在本节也不在本任务。
+// ============================================================
+
+/// 合成实例网格的容量上限（任务 13 的验收输入规模；`nanite_instance_test_count` 会被钳到它）
+inline constexpr u32 kNaniteMaxTestInstances = 256u;
+
+/// 合成实例网格的**默认条数**（cfg 键 `nanite_instance_test_count` 的默认值）
+inline constexpr u32 kNaniteDefaultTestInstances = 64u;
+
+/// 合成实例的 AABB 半轴长相对"实例到相机距离"的比例（见 NaniteCull.cpp 的网格生成）。
+/// 放在这里是为了让"球从 128B 契约的 bounds 字段推导"这条口径有**唯一常量来源**，
+/// 而不是散落在生成代码里的魔法数。
+inline constexpr float kNaniteTestInstanceRadiusScale = 0.06f;
+
+// ── GPUSceneObject 的 RHI-free 布局镜像（128B）──
+//
+/// 【硬契约】与 `Engine/Render/Pipeline/GPUScene.h:26-40` 的 `GPUSceneObject` 逐字段同布局：
+///   `localToWorld[0..64)`、`boundsMin[64..80)`、`boundsMax[80..96)`、
+///   然后 8 个 u32 依次 `meshIndex/materialIndex/objectID/visibilityFlags/indexCount/`
+///   `firstIndex/vertexOffset/_pad`（`[96..128)`）。
+/// 【`alignas(16)` 是必需的】`GPUSceneObject` 的首成员是 glm 的 `float4x4`（`GLM_FORCE_DEFAULT_ALIGNED_GENTYPES`
+///   ⇒ 16B 对齐），镜像用 `float[16]` 时只有把整个结构体也对齐到 16 才能复现 `64/80` 这两个偏移。
+/// 【字段语义】本任务只消费 `boundsMin/boundsMax`（推包围球）与 `indexCount`（空实例跳过）；
+///   其余字段原样保留，供任务 14+ 的簇剔除与 GBuffer 材质解析使用。
+struct alignas(16) NaniteInstanceGpuObject {
+    float localToWorld[16];   // 偏移 0：世界变换（列主序，与 glm 的 mat4 同）
+    float boundsMin[4];       // 偏移 64：世界空间 AABB 下界（w 不用）
+    float boundsMax[4];       // 偏移 80：世界空间 AABB 上界（w 不用）
+    u32   meshIndex;          // 偏移 96
+    u32   materialIndex;      // 偏移 100
+    u32   objectID;           // 偏移 104
+    u32   visibilityFlags;    // 偏移 108
+    u32   indexCount;         // 偏移 112：IndirectDraw 的索引数（0 ⇒ 无几何可画，跳过）
+    u32   firstIndex;         // 偏移 116
+    i32   vertexOffset;       // 偏移 120
+    u32   _pad;               // 偏移 124：对齐填充
+};
+
+static_assert(sizeof(NaniteInstanceGpuObject) == 128,
+              "实例表条目必须 128B（= GPUSceneObject 的 std430 布局）");
+static_assert(alignof(NaniteInstanceGpuObject) == 16, "实例表条目必须 16B 对齐（复现 64/80 偏移）");
+static_assert(offsetof(NaniteInstanceGpuObject, localToWorld)  == 0,   "localToWorld 必须在偏移 0");
+static_assert(offsetof(NaniteInstanceGpuObject, boundsMin)     == 64,  "boundsMin 必须在偏移 64");
+static_assert(offsetof(NaniteInstanceGpuObject, boundsMax)     == 80,  "boundsMax 必须在偏移 80");
+static_assert(offsetof(NaniteInstanceGpuObject, meshIndex)     == 96,  "meshIndex 必须在偏移 96");
+static_assert(offsetof(NaniteInstanceGpuObject, materialIndex) == 100, "materialIndex 必须在偏移 100");
+static_assert(offsetof(NaniteInstanceGpuObject, objectID)      == 104, "objectID 必须在偏移 104");
+static_assert(offsetof(NaniteInstanceGpuObject, visibilityFlags) == 108, "visibilityFlags 必须在偏移 108");
+static_assert(offsetof(NaniteInstanceGpuObject, indexCount)    == 112, "indexCount 必须在偏移 112");
+static_assert(offsetof(NaniteInstanceGpuObject, firstIndex)    == 116, "firstIndex 必须在偏移 116");
+static_assert(offsetof(NaniteInstanceGpuObject, vertexOffset)  == 120, "vertexOffset 必须在偏移 120");
+static_assert(offsetof(NaniteInstanceGpuObject, _pad)          == 124, "_pad 必须在偏移 124");
+
+// ── 每实例包围球（16B）──
+//
+/// 【为什么单独一张表而不是在 shader 里现推】`center+radius` 由 CPU 侧从 128B 契约的
+///   `boundsMin/boundsMax` 推一次（`NaniteSphereFromInstanceBounds`），CPU 参考剔除与 GPU
+///   通道**读同一份比特**。若让 GPU 在 shader 里现推（`sqrt` + FMA 收缩），浮点末位差异会在
+///   "球正好切在平面上"的实例上翻转可见性，破坏"逐项一致"这条验收 —— 这正是本任务把球显式
+///   落成一张表的原因。
+struct alignas(16) NaniteInstanceSphere {
+    float center[3];   // 偏移 0：世界空间球心
+    float radius;      // 偏移 12：半径（≥ 0）
+};
+
+static_assert(sizeof(NaniteInstanceSphere) == 16, "包围球必须 16B（StructuredBuffer 步长）");
+static_assert(offsetof(NaniteInstanceSphere, center) == 0,  "球心必须在偏移 0");
+static_assert(offsetof(NaniteInstanceSphere, radius) == 12, "半径必须在偏移 12");
+
+/// 从 128B 实例条目的 `boundsMin/boundsMax` 推包围球（center = 盒心、radius = 半对角线长）
+///
+/// 【退化输入】`max < min`（非法 AABB）时对应半轴长取 0（不产生负半径/NaN），
+///   与"退化半径"单测的口径一致：半径 0 = 退化成点，仍参与逐平面点测试。
+[[nodiscard]] inline NaniteInstanceSphere NaniteSphereFromInstanceBounds(
+        const NaniteInstanceGpuObject& instance) {
+    NaniteInstanceSphere sphere{};
+    float radiusSquared = 0.0f;
+    for (u32 axis = 0; axis < 3u; ++axis) {
+        const float lo = instance.boundsMin[axis];
+        const float hi = instance.boundsMax[axis];
+        sphere.center[axis] = (lo + hi) * 0.5f;
+        const float halfExtent = (hi > lo) ? (hi - lo) * 0.5f : 0.0f;
+        radiusSquared += halfExtent * halfExtent;
+    }
+    sphere.radius = std::sqrt(radiusSquared);
+    return sphere;
+}
+
+// ── 视锥六平面（24 个 float，96B）──
+//
+/// 与 `Math/Geometry.h` 的 `he::Frustum` **同约定、同顺序**的 POD：
+///   `planes[i] = (n.xyz, d)`，`dot(n, p) + d >= 0` 在内侧；
+///   顺序 `[左, 右, 下, 上, 近, 远]`；法线已归一化（本结构不强制，但提取函数会归一化）。
+struct alignas(16) NaniteFrustumPlanes {
+    float planes[6][4];
+};
+
+static_assert(sizeof(NaniteFrustumPlanes) == 96, "视锥必须 6×float4 = 96B");
+static_assert(offsetof(NaniteFrustumPlanes, planes) == 0, "planes 必须在偏移 0");
+
+/// 从**列主序** view-proj（16 个 float，即 glm `mat4` 的 `&m[0][0]` 布局）提取 6 个视锥平面
+///
+/// 【算法】Gribb/Hartmann 行组合，与 `Engine/Core/Math/Geometry.cpp:12-45` 的
+///   `he::Frustum::FromViewProj` **逐字同源**（含 Vulkan `[0,1]` 深度的近平面取 row2、
+///   以及"不取反、只按 xyz 长度归一化"）。单测用同一个 view-proj 与 `he::Frustum::FromViewProj`
+///   逐平面比对，保证两处不会各说各话。
+/// 【列主序索引】元素 `(row r, col c) = viewProjColumnMajor[c * 4 + r]`。
+[[nodiscard]] inline NaniteFrustumPlanes NaniteExtractFrustumPlanes(
+        const float viewProjColumnMajor[16]) {
+    NaniteFrustumPlanes frustum{};
+    if (viewProjColumnMajor == nullptr) return frustum;
+
+    const float* m = viewProjColumnMajor;
+    // 取 row3 ± rowN 的四个系数（Gribb/Hartmann 行组合法）
+    const auto makePlane = [m](u32 row, bool add, float* outPlane) {
+        const float sign = add ? 1.0f : -1.0f;
+        for (u32 col = 0; col < 4u; ++col) {
+            outPlane[col] = m[col * 4u + 3u] + sign * m[col * 4u + row];
+        }
+    };
+
+    makePlane(0u, true,  frustum.planes[0]);   // 左：  row3 + row0
+    makePlane(0u, false, frustum.planes[1]);   // 右：  row3 - row0
+    makePlane(1u, true,  frustum.planes[2]);   // 下：  row3 + row1
+    makePlane(1u, false, frustum.planes[3]);   // 上：  row3 - row1
+    for (u32 col = 0; col < 4u; ++col) {
+        frustum.planes[4][col] = m[col * 4u + 2u];   // 近：  row2（Vulkan [0,1]：z >= 0）
+    }
+    makePlane(2u, false, frustum.planes[5]);   // 远：  row3 - row2
+
+    // 归一化：球-平面距离判据要求法线是单位向量（不取反，保留 Gribb/Hartmann 原始朝向）
+    for (u32 i = 0; i < 6u; ++i) {
+        const float nx = frustum.planes[i][0];
+        const float ny = frustum.planes[i][1];
+        const float nz = frustum.planes[i][2];
+        const float length = std::sqrt(nx * nx + ny * ny + nz * nz);
+        if (length > 1.0e-4f) {
+            const float invLength = 1.0f / length;
+            for (u32 col = 0; col < 4u; ++col) frustum.planes[i][col] *= invLength;
+        }
+    }
+    return frustum;
+}
+
+/// 包围球是否与视锥相交（= 是否可见）：任一面满足 `dot(n, c) + d < -radius` 就不可见
+///
+/// 【判据】与 `he::Frustum::Intersects(Sphere)`（`Geometry.cpp:78-87`）以及
+///   `Nanite_InstanceCull.comp.slang` 的 GPU 实现**完全一致**（同样的比较符、无 epsilon）。
+/// 【NaN/退化】`radius` 为负时按 0 处理（退化成点测试）；NaN 半径会走"可见"分支，
+///   但生成侧保证不产生 NaN（`NaniteSphereFromInstanceBounds` 用 sqrt 于非负和）。
+[[nodiscard]] inline bool NaniteSphereVisibleInFrustum(const NaniteFrustumPlanes& frustum,
+                                                       const float center[3],
+                                                       float radius) {
+    if (!(radius > 0.0f)) radius = 0.0f;
+    for (u32 i = 0; i < 6u; ++i) {
+        const float distance = frustum.planes[i][0] * center[0]
+                             + frustum.planes[i][1] * center[1]
+                             + frustum.planes[i][2] * center[2]
+                             + frustum.planes[i][3];
+        if (distance < -radius) return false;
+    }
+    return true;
+}
+
+/// **CPU 参考实例剔除**（§14.8 任务 13 的验收基准；RHI-free、可单测）
+///
+/// 输入（全部世界空间）：
+///   · `frustum`   —— 由 `NaniteExtractFrustumPlanes(viewProj)` 得到（或直接构造 6 平面）；
+///   · `instances` —— 128B `GPUSceneObject` 布局的实例表（只读 `indexCount` 与本函数无关的字段）；
+///   · `spheres`   —— 每实例包围球（与实例表同序、同个数）；
+///   · `instanceCount` / `outVisibleIndices` / `outCapacity`。
+/// 输出：可见实例的**升序**下标写入 `outVisibleIndices`，返回值 = 写入个数。
+///
+/// 【与 GPU 通道同规则（逐条对应 `Nanite_InstanceCull.comp.slang`）】
+///   ① `spheres == nullptr || instances == nullptr` ⇒ 返回 0；
+///   ② `instances[i].indexCount == 0` ⇒ 跳过（"空实例无可画几何"，GPU 同规则）；
+///   ③ `NaniteSphereVisibleInFrustum` 为假 ⇒ 跳过；
+///   ④ 输出容量满（`written == outCapacity`）⇒ 立刻停止（GPU 侧对应"可见列表容量上限"；
+///      本任务的验收容量 ≥ 实例数，故正常运行不会截断）。
+///
+/// 【顺序】可见下标按 `i` 升序紧凑写入 —— GPU 侧用原子槽位压缩，**顺序不定**，
+///   所以 `LogInstanceCullReadback` 比较前会把 GPU 列表排序（见 `NaniteRenderer.cpp`）。
+[[nodiscard]] inline u32 NaniteCullInstancesCPU(const NaniteFrustumPlanes& frustum,
+                                                const NaniteInstanceGpuObject* instances,
+                                                const NaniteInstanceSphere* spheres,
+                                                u32 instanceCount,
+                                                u32* outVisibleIndices,
+                                                u32 outCapacity) {
+    if (instances == nullptr || spheres == nullptr || outVisibleIndices == nullptr) return 0u;
+    if (outCapacity == 0u) return 0u;
+
+    u32 written = 0u;
+    for (u32 i = 0; i < instanceCount && written < outCapacity; ++i) {
+        if (instances[i].indexCount == 0u) continue;   // ② 空实例不参与（与 GPU 同规则）
+        if (!NaniteSphereVisibleInFrustum(frustum, spheres[i].center, spheres[i].radius)) {
+            continue;                                  // ③ 视锥外
+        }
+        outVisibleIndices[written++] = i;              // ④ 升序紧凑写入
+    }
+    return written;
+}
+
 } // namespace he::render

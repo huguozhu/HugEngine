@@ -34,6 +34,9 @@ namespace he::render {
 class MeshBatcher;   // 【任务 12】只作**一次性输入**的类型：头文件不 include，避免把它的
                      // 依赖（Scene/GPUScene/RHI）带进模块门面；`.cpp` 里才 include 它的头。
 
+struct CameraData;   // 【任务 13】渲染相机（`Pipeline/Camera.h`）。`AddPasses` 只用它的 const 引用
+                     // 取 view-proj 与相机位置，故头文件里前置声明即可，不牵入该头的实现。
+
 /// 帧图接入所需的 GBuffer 句柄组（与 `GBufferRenderer::Handles` 同构）
 ///
 /// 任务 3 只用到 `depth` / `worldPos`（复刻 `GB_Clear` 的那组 WAW 声明，§14.5 第一条硬约束）；
@@ -90,9 +93,15 @@ public:
     /// 帧图接入点（在 `DeferredPipeline_FrameGraph.cpp` 的 GBuffer 段被调用）。
     /// 【门控只有一处】`DeferredPipeline_FrameGraph.cpp` 里的
     /// `if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady())`。
-    /// 开启时注册两个 pass：`Nanite_Cull` + `Nanite_Raster`（原序 12 个 pass 一个不动）；
+    /// 开启时注册三个 pass：`Nanite_InstanceCull` + `Nanite_Cull` + `Nanite_Raster`
+    /// （原序 12 个 pass 一个不动）；
     /// 【§14.8 任务 6】`meshTest` 为真时**再追加**一个 `Nanite_MeshTest`（mesh PSO 通道）。
-    void AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb);
+    ///
+    /// 【§14.8 任务 13 的 camera 参数】实例剔除需要世界空间视锥与相机位置：
+    ///   `NaniteCull::SetInstanceCullFrame` 由 view-proj 提取 6 平面、并以相机位置为基准生成
+    ///   合成实例网格（来源/坐标系见 `NaniteCull.h` 的 `SetInstanceCullFrame` 注释）。
+    ///   【为什么从调用方传入】相机的唯一持有者是 `DeferredPipeline`；模块不自造也没有别处可取。
+    void AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb, const CameraData& camera);
 
     /// 【§14.8 任务 4：GBuffer 之后的后置挂钩】在 **GBuffer 几何段结束之后、任何读取 GBuffer
     /// 的 pass（SSAO/Lighting 等）之前**调用第二处注册点：
@@ -143,6 +152,22 @@ public:
     /// （样例的 dump 路径已经有 `device->WaitIdle()`，照抄既有白炉探针/落盘的读数方式）。
     /// 关闭档下直接返回（不打印），保证关闭档日志与基线一致。
     void LogFakePipelineReadback();
+
+    /// 【§14.8 任务 13】dump 帧打印**恰好一行**实例剔除的 GPU/CPU 逐项对照：
+    ///   `[Nanite] instance_cull gpu=<k> cpu=<m> mismatch=0 first=<i0,i1,...>`
+    ///
+    /// · `gpu` = GPU 读回的可见实例计数（`Nanite_InstanceCull` 的计数缓冲）；
+    /// · `cpu` = CPU 参考剔除（`NaniteCullInstancesCPU`）的可见数；
+    /// · `mismatch` = 两个可见**集合**的逐项差异数（含条数差）；
+    /// · `first` = 排序后的 GPU 可见列表前若干个下标（可核对的样本；空列表打 `-`）。
+    ///
+    /// 【为什么比较前要排序】GPU 用"原子取槽位"做压缩，槽位分配顺序与线程调度相关，
+    ///   同一个可见集合可能有不同的列表顺序；CPU 参考是升序紧凑的。故比较口径是
+    ///   **排序后的逐项相等**（集合等价），顺序本身不是语义（任务 14+ 也不依赖顺序）。
+    ///
+    /// 【同步约定】与 `LogFakePipelineReadback` 相同：只做 Map 读回、不做等待；调用方必须已
+    /// `WaitIdle()`。关闭档 / 未就绪时直接返回、不打印 —— 保证关闭档日志与基线一致。
+    void LogInstanceCullReadback();
 
     /// 【§14.8 任务 6】dump 帧打印**恰好一行** mesh 通道的真实 GPU 读回：
     ///   `[Nanite] mesh_pso=<ok|fail> meshlet_outputs=<n> target_max=<v>`

@@ -3,7 +3,8 @@
 //   §14.8 任务 1：骨架 + 独立开关 + `Nanite_Noop` 占位 pass
 //   §14.8 任务 3：占位 pass 换成「计数 → 间接绘制」链的 `Nanite_Cull` + `Nanite_Raster`
 //
-// 【开启档的 pass 集合】既有 12 个 pass（相对顺序不变）+ `Nanite_Cull` + `Nanite_Raster`。
+// 【开启档的 pass 集合】既有 12 个 pass（相对顺序不变）+ `Nanite_InstanceCull`（任务 13）
+//   + `Nanite_Cull` + `Nanite_Raster`（任务 3）= 15 个。
 //   任务 4 追加一个**可选**的第三个 pass `Nanite_TestWrite`（仅在 `NaniteSettings::testWrite`
 //   为真时注册；它写既有 GBuffer albedo 的 UAV，必须在 GBuffer 之后注册才能被 Lighting 同帧读到）。
 //   任务 6 追加另一个**可选**的第四个 pass `Nanite_MeshTest`（仅在 `NaniteSettings::meshTest`
@@ -38,7 +39,12 @@
 // 不持有指针、不在每帧回读它的内部表（与 `LumenSDF::Step(cmd, batcher)` 同款口径）。
 #include "Pipeline/MeshBatcher.h"
 
-#include <vector>   // 任务 12：SoA 转换的临时数组（positions / normals / uvs）
+// 【§14.8 任务 13】相机的真实定义（view-proj / 世界坐标）。头文件里只有前置声明。
+#include "Pipeline/Camera.h"
+
+#include <algorithm>   // std::sort（实例剔除读回：GPU 原子压缩列表的顺序不定，比较前排序）
+#include <cstdio>      // std::snprintf（实例剔除读回的 first= 样本串）
+#include <vector>      // 任务 12：SoA 转换的临时数组（positions / normals / uvs）
 
 // CVar: Nanite 独立开关（§14.4 的"配置"层，默认 0）。
 // 与 `r.Decal.Project` 同风格（DeferredPipeline_FrameGraph.cpp:40）。它只是**配置载体**：
@@ -50,6 +56,12 @@ static he::CVar<int> cvNaniteEnable("r.Nanite.Enable", 0,
 // 只作为**启动默认**；运行期真值在 `NaniteSettings::fakeClusters`。
 static he::CVar<int> cvNaniteFakeClusters("r.Nanite.FakeClusters", 6,
     "Nanite 任务 3 假簇数量（1 个实例、N 个簇；验证'计数为 k ⇒ 恰好画 k 次'）");
+
+// CVar: 任务 13 的合成实例网格条数（默认 64，= kNaniteDefaultTestInstances）。与 cfg 键
+// `nanite_instance_test_count` 同含义，只作为**启动默认**；运行期真值在 `NaniteSettings::instanceTestCount`。
+static he::CVar<int> cvNaniteInstanceTestCount("r.Nanite.InstanceTestCount",
+    (int)he::render::kNaniteDefaultTestInstances,
+    "Nanite 任务 13 合成实例网格条数（视锥剔除的 GPU vs CPU 逐项对照样本）");
 
 namespace he::render {
 
@@ -65,6 +77,9 @@ bool NaniteRenderer::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) 
     m_Settings.enabled = (cvNaniteEnable.Get() != 0);
     if (cvNaniteFakeClusters.Get() > 0)
         m_Settings.fakeClusters = (u32)cvNaniteFakeClusters.Get();
+    // 【任务 13】合成实例网格条数：允许 0（0 = 不生成样本，该 pass 仍注册但派发 0 线程）
+    if (cvNaniteInstanceTestCount.Get() >= 0)
+        m_Settings.instanceTestCount = (u32)cvNaniteInstanceTestCount.Get();
 
     // 各段生命周期。`NaniteCull` 必须先建（它持有"已光栅化簇计数缓冲"，绘制端要引用它）。
     const bool sceneOk  = m_Scene.Initialize(device, width, height);
@@ -78,9 +93,11 @@ bool NaniteRenderer::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) 
     m_Ready = (m_Device != nullptr) && sceneOk && uploadOk
               && m_Cull.IsReady() && m_Raster.IsReady();
 
-    HE_CORE_INFO("NaniteRenderer: 初始化完成（ready={}，开关默认={}，假簇数={}，档位={}）—— "
-                 "任务 3 注册 Nanite_Cull + Nanite_Raster（计数→间接绘制链）",
+    HE_CORE_INFO("NaniteRenderer: 初始化完成（ready={}，开关默认={}，假簇数={}，合成实例数={}，档位={}）—— "
+                 "任务 3 注册 Nanite_Cull + Nanite_Raster（计数→间接绘制链）；"
+                 "任务 13 追加 Nanite_InstanceCull（视锥→可见实例列表+计数）",
                  m_Ready, m_Settings.enabled ? 1 : 0, m_Settings.fakeClusters,
+                 m_Settings.instanceTestCount,
                  m_Settings.rasterMode == NaniteRasterMode::Hybrid ? "混合光栅" : "软光栅");
 
     // ── 任务 5：一次性启动日志 —— 打印 objectIndex 分区表与本次容量，便于人工核对 ──
@@ -118,13 +135,32 @@ void NaniteRenderer::Resize(u32 width, u32 height) {
     m_Raster.OnResize(width, height);
 }
 
-void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb) {
+void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb,
+                               const CameraData& camera) {
     // 门控在调用方（DeferredPipeline_FrameGraph.cpp）已经判过一次；这里再判一次是兜底，
     // 保证"关闭 ⇒ 本模块一个 pass 都不注册"这条不变式不依赖调用方的正确性。
     if (!m_Settings.enabled || !m_Ready) return;
 
     // 唯一真值 → 模块内部：把本帧的假簇数量交给剔除段（cfg/面板只写 NaniteSettings）
     m_Cull.SetFakeClusterCount(m_Settings.fakeClusters);
+
+    // ── 【任务 13】Nanite_InstanceCull：视锥 → 可见实例列表 + 计数 ──
+    // 【输入】本帧的 view-proj 与相机世界坐标（`camera`）。模块据此提取 6 平面并生成
+    //   **合成实例网格**（来源与坐标系见 `NaniteCull::SetInstanceCullFrame` 的注释：
+    //   在 NDC 摆网格再反投影到世界空间 —— 它们**不是**场景实例，本任务还没有"场景 → 模块
+    //   实例表"的接入点，这里只验证"GPU 与 CPU 参考逐项一致"这条可判定的等价性）。
+    // 【reads/writes 为空】与 `Nanite_MeshTest` 同理：它只读写模块自持缓冲，不碰任何帧图资源。
+    //   `RenderGraph::CullDeadPasses` 不裁剪 `writes.empty()` 的 pass，`TopologicalSort` 把它放在
+    //   inDegree=0 的队列里 —— 因此既不会被裁掉，也不改变任何既有 pass 之间的相对顺序。
+    // 【注册在 Nanite_Cull 之前】三条模块 pass 集中在同一注册点；顺序对既有 12 个 pass 无影响。
+    m_Cull.SetInstanceCullFrame(camera.GetViewProjMatrix(), camera.position,
+                                m_Settings.instanceTestCount);
+    rg.AddPass("Nanite_InstanceCull",
+        {},
+        {},
+        [this](rhi::IRHICommandList* cmd) {
+            m_Cull.RecordInstanceCullPass(cmd);
+        });
 
     // ── Nanite_Cull：compute 逐簇写间接命令 + 原子累加计数 ──
     // writes = {gbDepth, gbWorldPos} 是复刻 `GB_Clear` 的 WAW 声明（§14.5），
@@ -300,6 +336,60 @@ void NaniteRenderer::LogFakePipelineReadback() {
     // 【恰好一行】任务 3 的验收出口：X == Y == Z == N
     HE_CORE_INFO("[Nanite] fake_clusters={} count_buffer={} indirect_cmds={} rasterized_clusters={}",
                  m_Settings.fakeClusters, x, y, z);
+}
+
+void NaniteRenderer::LogInstanceCullReadback() {
+    // 关闭档 / 未就绪：不打印（关闭档的日志必须与基线逐位一致）。
+    if (!m_Settings.enabled || !m_Ready) return;
+
+    // ── GPU 读数①：可见实例计数（GPU 原子累加）──
+    u32 gpuCount = 0;
+    if (auto* b = m_Cull.GetVisibleInstanceCountBuffer()) {
+        if (void* p = b->Map()) { gpuCount = *static_cast<const u32*>(p); b->Unmap(); }
+    }
+
+    // ── GPU 读数②：可见实例列表的 [0, gpuCount) —— 只取本帧实例数以内的条目（防御脏计数）──
+    const std::vector<u32>& cpuVisible = m_Cull.GetCpuVisibleInstances();
+    const u32 cpuCount   = (u32)cpuVisible.size();
+    const u32 testCount  = m_Cull.GetTestInstanceCount();
+    std::vector<u32> gpuVisible;
+    gpuVisible.reserve(gpuCount < testCount ? gpuCount : testCount);
+    if (auto* b = m_Cull.GetVisibleInstanceBuffer()) {
+        if (void* p = b->Map()) {
+            const auto* list = static_cast<const u32*>(p);
+            const u32 readable = (gpuCount < testCount) ? gpuCount : testCount;
+            for (u32 i = 0; i < readable; ++i) gpuVisible.push_back(list[i]);
+            b->Unmap();
+        }
+    }
+
+    // 【比较口径】GPU 用原子槽位压缩 ⇒ 顺序不定；CPU 参考是升序。排序后再逐项比较（集合等价）。
+    std::sort(gpuVisible.begin(), gpuVisible.end());
+
+    // mismatch = 条数差 + 逐项不同的个数（两个列表都按升序时，这就是可见集合的对称差大小）
+    u32 mismatch = (gpuCount > cpuCount) ? (gpuCount - cpuCount) : (cpuCount - gpuCount);
+    const u32 common = std::min<u32>((u32)gpuVisible.size(), cpuCount);
+    for (u32 i = 0; i < common; ++i) {
+        if (gpuVisible[i] != cpuVisible[i]) ++mismatch;
+    }
+
+    // ── first=<前若干个可见实例下标>：可核对的样本（排序后 ⇒ 跨运行可比）──
+    char first[128];
+    const u32 sample = std::min<u32>((u32)gpuVisible.size(), 8u);
+    if (sample == 0u) {
+        std::snprintf(first, sizeof(first), "-");
+    } else {
+        int written = 0;
+        for (u32 i = 0; i < sample && written >= 0 && (usize)written < sizeof(first); ++i) {
+            written += std::snprintf(first + written, sizeof(first) - (usize)written,
+                                     (i == 0u) ? "%u" : ",%u", gpuVisible[i]);
+        }
+        first[sizeof(first) - 1u] = '\0';
+    }
+
+    // 【恰好一行】任务 13 的验收出口：gpu == cpu 且 mismatch == 0 ⇒ 与 CPU 参考逐项一致
+    HE_CORE_INFO("[Nanite] instance_cull gpu={} cpu={} mismatch={} first={}",
+                 gpuCount, cpuCount, mismatch, first);
 }
 
 void NaniteRenderer::LogMeshTestReadback() {

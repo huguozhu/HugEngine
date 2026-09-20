@@ -55,6 +55,14 @@ struct NaniteSettings {
     /// 开启档 / 关闭档的 pass 集合与转储逐位不变；它写的是模块私有目标与私有缓冲，
     /// 即使打开也不会改动可见画面（这正是任务 6 与任务 22 的边界：任务 22 才接硬光栅分流）。
     bool meshTest = false;
+
+    /// 【§14.8 任务 13】合成实例网格的条数（默认 `kNaniteDefaultTestInstances` = 64）。
+    /// 实例剔除的验收要求"与 CPU 参考逐项一致"，而真实场景的实例表要到任务 14+ 才接得上，
+    /// 所以本任务用一张**合成实例网格**做可比对的实例集（来源与坐标系见 `NaniteCull.cpp`）。
+    /// 配置层 = cfg 键 `nanite_instance_test_count`（默认 64），样例负责解析/序列化。
+    /// 模块把它钳制到 `kNaniteMaxTestInstances`（256）。
+    /// 【0 的含义】不生成任何合成实例 ⇒ 该 pass 派发 0 个线程、可见数恒 0（仍照常注册）。
+    u32 instanceTestCount = kNaniteDefaultTestInstances;
 };
 
 } // namespace he::render

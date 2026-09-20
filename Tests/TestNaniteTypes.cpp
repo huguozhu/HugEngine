@@ -37,10 +37,16 @@
 
 #include "Nanite/NaniteTypes.h"   // 分区契约 + 实例槽分配器 + 任务 3/4 的 POD（RHI-free）
 
+// 【任务 13】视锥提取的对照物：引擎既有的 he::Frustum / he::Sphere（RHI-free，只依赖 Core/Math）。
+// 用它做交叉验证，保证 NaniteTypes.h 的提取与判据同引擎口径，而不是自成一套。
+#include "Math/Geometry.h"
+
 #include <algorithm> // std::max（任务 10：法线八面体的稠密采样）
 #include <cmath>     // std::fabs / std::acos（cone 解码与量化误差）
 #include <cstddef>   // offsetof
 #include <cstring>   // memcpy（把头部写进测试缓冲）
+#include <ostream>   // 【任务 13】doctest 的 MESSAGE 需要完整的 std::ostream
+#include <string>    // 【任务 13】CPU 参考剔除用例的 MESSAGE 拼串
 #include <vector>
 
 using namespace he;
@@ -1125,4 +1131,216 @@ TEST_CASE("NaniteTypes: .nanite 校验函数的正例与反例") {
     CHECK(std::strcmp(NaniteFileErrorName(NaniteFileError::BadIndexCount), "BadIndexCount") == 0);
     CHECK(std::strcmp(NaniteFileErrorName(NaniteFileError::Misaligned), "Misaligned") == 0);
     CHECK(std::strcmp(NaniteFileErrorName(NaniteFileError::OutOfBounds), "OutOfBounds") == 0);
+}
+
+// ============================================================
+// 17. 任务 13：实例表 128B 镜像（GPUSceneObject 契约）+ 包围球 16B
+// ============================================================
+TEST_CASE("NaniteTypes: 实例表 128B 镜像（GPUSceneObject 契约）与包围球 16B") {
+    // 逐字段偏移必须与 Pipeline/GPUScene.h:26-40 的 GPUSceneObject 一致
+    // （跨翻译单元的交叉 static_assert 在 NaniteCull.cpp；这里是同一契约的单测钉子）
+    CHECK(sizeof(NaniteInstanceGpuObject) == 128u);
+    CHECK(alignof(NaniteInstanceGpuObject) == 16u);   // float4x4 的对齐要求 ⇒ 复现 64/80 偏移
+    CHECK(offsetof(NaniteInstanceGpuObject, localToWorld)   == 0u);
+    CHECK(offsetof(NaniteInstanceGpuObject, boundsMin)      == 64u);
+    CHECK(offsetof(NaniteInstanceGpuObject, boundsMax)      == 80u);
+    CHECK(offsetof(NaniteInstanceGpuObject, meshIndex)      == 96u);
+    CHECK(offsetof(NaniteInstanceGpuObject, materialIndex)  == 100u);
+    CHECK(offsetof(NaniteInstanceGpuObject, objectID)       == 104u);
+    CHECK(offsetof(NaniteInstanceGpuObject, visibilityFlags)== 108u);
+    CHECK(offsetof(NaniteInstanceGpuObject, indexCount)     == 112u);
+    CHECK(offsetof(NaniteInstanceGpuObject, firstIndex)     == 116u);
+    CHECK(offsetof(NaniteInstanceGpuObject, vertexOffset)   == 120u);
+    CHECK(offsetof(NaniteInstanceGpuObject, _pad)           == 124u);
+
+    // 包围球：16B（StructuredBuffer 步长）；球心 0..2、半径在 12
+    CHECK(sizeof(NaniteInstanceSphere) == 16u);
+    CHECK(offsetof(NaniteInstanceSphere, center) == 0u);
+    CHECK(offsetof(NaniteInstanceSphere, radius) == 12u);
+
+    // 合成实例网格的容量与默认值：默认必须落在容量内（生成侧据此 resize）
+    CHECK(kNaniteMaxTestInstances == 256u);
+    CHECK(kNaniteDefaultTestInstances > 0u);
+    CHECK(kNaniteDefaultTestInstances <= kNaniteMaxTestInstances);
+}
+
+// ============================================================
+// 18. 任务 13：包围球由 128B 的 boundsMin/boundsMax 推导（含退化 AABB）
+// ============================================================
+TEST_CASE("NaniteTypes: 包围球由 128B 的 boundsMin/boundsMax 推导") {
+    NaniteInstanceGpuObject instance{};
+    instance.boundsMin[0] = -1.0f; instance.boundsMin[1] = -2.0f; instance.boundsMin[2] = -2.0f;
+    instance.boundsMax[0] =  3.0f; instance.boundsMax[1] =  2.0f; instance.boundsMax[2] =  2.0f;
+
+    const NaniteInstanceSphere sphere = NaniteSphereFromInstanceBounds(instance);
+    CHECK(sphere.center[0] == doctest::Approx(1.0f));
+    CHECK(sphere.center[1] == doctest::Approx(0.0f));
+    CHECK(sphere.center[2] == doctest::Approx(0.0f));
+    // 半轴长 (2,2,2) ⇒ 半对角线长 = sqrt(12)
+    CHECK(sphere.radius == doctest::Approx(std::sqrt(12.0f)));
+
+    // 退化 AABB（max < min）：半轴长按 0 处理 ⇒ 半径 0（不产生负半径/NaN），球心仍取盒心
+    NaniteInstanceGpuObject degenerate{};
+    degenerate.boundsMin[0] = 5.0f; degenerate.boundsMax[0] = 1.0f;   // 反向
+    degenerate.boundsMin[1] = 2.0f; degenerate.boundsMax[1] = 2.0f;   // 零尺寸
+    degenerate.boundsMin[2] = -2.0f; degenerate.boundsMax[2] = -2.0f; // 零尺寸
+    const NaniteInstanceSphere degenerateSphere = NaniteSphereFromInstanceBounds(degenerate);
+    CHECK(degenerateSphere.radius == doctest::Approx(0.0f));
+    CHECK(degenerateSphere.center[0] == doctest::Approx(3.0f));   // (5+1)/2
+}
+
+// ============================================================
+// 19. 任务 13：视锥六平面提取与 he::Frustum::FromViewProj 逐平面一致
+// ============================================================
+TEST_CASE("NaniteTypes: 视锥提取（列主序 viewProj）与 he::Frustum 同值") {
+    // 一套真实形状的 view-proj：Vulkan [0,1] 深度 + 右手 lookAt（与 CameraData 同构造）
+    const float4x4 proj = glm::perspectiveRH_ZO(glm::radians(60.0f), 16.0f / 9.0f, 0.1f, 100.0f);
+    const float4x4 view = glm::lookAtRH(float3(3.0f, 4.0f, 5.0f),
+                                        float3(0.0f, 0.0f, 0.0f),
+                                        float3(0.0f, 1.0f, 0.0f));
+    const float4x4 viewProj = proj * view;
+
+    const NaniteFrustumPlanes extracted = NaniteExtractFrustumPlanes(&viewProj[0][0]);
+    const he::Frustum reference = he::Frustum::FromViewProj(viewProj);
+
+    for (u32 i = 0; i < 6u; ++i) {
+        for (u32 c = 0; c < 4u; ++c) {
+            CHECK(extracted.planes[i][c] == doctest::Approx(reference.planes[i][c]).epsilon(1e-6));
+        }
+    }
+
+    // 可见性判据也必须同口径：取一批明显不在边界上的球逐个比对
+    const NaniteInstanceSphere samples[] = {
+        { {  0.0f,  0.0f,   0.0f }, 0.5f },   // 视锥内
+        { {  0.0f,  0.0f,  -3.0f }, 0.5f },   // 视锥内（相机看向原点）
+        { { 50.0f,  0.0f,   0.0f }, 0.5f },   // 远在右侧外
+        { {  0.0f, 50.0f,   0.0f }, 0.5f },   // 远在上方外
+        { {  0.0f,  0.0f,  60.0f }, 0.5f },   // 相机背后
+        { {  0.0f,  0.0f,   0.0f }, 0.0f },   // 退化成点（仍在内部）
+    };
+    for (const NaniteInstanceSphere& s : samples) {
+        const bool naniteVisible = NaniteSphereVisibleInFrustum(extracted, s.center, s.radius);
+        const bool referenceVisible = reference.Intersects(he::Sphere(
+            float3(s.center[0], s.center[1], s.center[2]), s.radius));
+        CHECK(naniteVisible == referenceVisible);
+    }
+}
+
+// ============================================================
+// 20. 任务 13：CPU 参考实例剔除的已知进/出用例
+//
+// 用一个**盒状视锥**（[-1,1]^3，平面法线朝内）把判据钉死，不引入矩阵/相机的间接性。
+// ============================================================
+TEST_CASE("NaniteTypes: CPU 参考实例剔除的已知进/出用例") {
+    // 盒 [-1,1]^3：inside 判据 dot(n,p)+d >= 0
+    const auto makeBoxFrustum = [] {
+        NaniteFrustumPlanes f{};
+        const float planes[6][4] = {
+            {  1.0f,  0.0f,  0.0f, 1.0f },   // 左：  x >= -1
+            { -1.0f,  0.0f,  0.0f, 1.0f },   // 右：  x <=  1
+            {  0.0f,  1.0f,  0.0f, 1.0f },   // 下：  y >= -1
+            {  0.0f, -1.0f,  0.0f, 1.0f },   // 上：  y <=  1
+            {  0.0f,  0.0f,  1.0f, 1.0f },   // 近：  z >= -1
+            {  0.0f,  0.0f, -1.0f, 1.0f },   // 远：  z <=  1
+        };
+        std::memcpy(f.planes, planes, sizeof(planes));
+        return f;
+    };
+    const NaniteFrustumPlanes frustum = makeBoxFrustum();
+
+    // 8 个样本：0/1/2 可见（含跨平面），3/4 不可见，5 空实例，6 退化半径在外，7 退化半径在面上
+    struct Case { const char* name; float center[3]; float radius; u32 indexCount; bool visible; };
+    const Case cases[] = {
+        { "完全在内部",       {  0.0f, 0.0f, 0.0f }, 0.25f, 36u, true  },
+        { "完全在内部（near）",{  0.9f,-0.9f, 0.9f }, 0.05f, 36u, true  },
+        { "跨越右平面（可见）",{  1.05f,0.0f, 0.0f }, 0.10f, 36u, true  },
+        { "完全在右平面外",   {  1.20f,0.0f, 0.0f }, 0.10f, 36u, false },
+        { "完全在上方外",     {  0.0f, 5.0f, 0.0f }, 0.50f, 36u, false },
+        { "空实例（indexCount=0）", { 0.0f, 0.0f, 0.0f }, 0.25f, 0u, false },
+        { "退化半径在外",     {  1.50f,0.0f, 0.0f }, 0.00f, 36u, false },
+        { "退化半径在面上",   {  1.00f,0.0f, 0.0f }, 0.00f, 36u, true  },   // dist == 0，判据是 < -r
+    };
+    const u32 caseCount = (u32)(sizeof(cases) / sizeof(cases[0]));
+
+    std::vector<NaniteInstanceGpuObject> instances(caseCount);
+    std::vector<NaniteInstanceSphere>    spheres(caseCount);
+    std::vector<u32>                     expected;
+    for (u32 i = 0; i < caseCount; ++i) {
+        instances[i] = NaniteInstanceGpuObject{};
+        instances[i].indexCount = cases[i].indexCount;
+        spheres[i].center[0] = cases[i].center[0];
+        spheres[i].center[1] = cases[i].center[1];
+        spheres[i].center[2] = cases[i].center[2];
+        spheres[i].radius    = cases[i].radius;
+        if (cases[i].visible) expected.push_back(i);
+    }
+
+    std::vector<u32> visible(caseCount, 0xFFFFFFFFu);
+    const u32 count = NaniteCullInstancesCPU(frustum, instances.data(), spheres.data(),
+                                             caseCount, visible.data(), (u32)visible.size());
+    REQUIRE(count == (u32)expected.size());
+    for (u32 i = 0; i < count; ++i) {
+        CHECK(visible[i] == expected[i]);   // 升序紧凑
+    }
+
+    // 把"哪些样本进、哪些出"打成 MESSAGE：验收要的是一眼可核对的读数，而不是只看绿灯
+    {
+        std::string list;
+        for (u32 i = 0; i < count; ++i) {
+            if (!list.empty()) list += ",";
+            list += std::to_string(visible[i]);
+        }
+        const std::string msg =
+            "CPU 参考实例剔除（盒 [-1,1]^3）：8 样本 → 可见 " + std::to_string(count)
+            + " 个，升序下标 [" + list + "]；进=0/1/2/7（2 跨右平面、7 退化半径恰在面上），"
+            "出=3/4/6、空实例 5 因 indexCount=0 跳过";
+        MESSAGE(msg);
+    }
+
+    // 逐条再验一次判据本身（失败时能直接指出是哪一类样本）
+    for (u32 i = 0; i < caseCount; ++i) {
+        const bool got = NaniteSphereVisibleInFrustum(frustum, spheres[i].center, spheres[i].radius);
+        if (cases[i].indexCount == 0u) continue;   // 空实例不参与判据（由 CPU 剔除的跳过规则处理）
+        CHECK(got == cases[i].visible);
+    }
+}
+
+// ============================================================
+// 21. 任务 13：CPU 参考剔除的边界（空表 / 空指针 / 容量截断 / 平面数完整）
+// ============================================================
+TEST_CASE("NaniteTypes: CPU 参考实例剔除的空表与容量截断") {
+    NaniteFrustumPlanes frustum{};
+    // 恒可见的退化视锥（6 个平面法线为 0、d = 0 ⇒ dot+d = 0 >= -r 恒真）
+    std::vector<NaniteInstanceGpuObject> instances(4);
+    std::vector<NaniteInstanceSphere>    spheres(4, NaniteInstanceSphere{ { 0.0f, 0.0f, 0.0f }, 0.0f });
+    std::vector<u32>                     out(4, 0xFFFFFFFFu);
+
+    // 空表：0 条 ⇒ 0 个可见
+    CHECK(NaniteCullInstancesCPU(frustum, instances.data(), spheres.data(), 0u, out.data(), 4u) == 0u);
+
+    // 空指针：任一输入为 null ⇒ 0（不崩）
+    CHECK(NaniteCullInstancesCPU(frustum, nullptr, spheres.data(), 4u, out.data(), 4u) == 0u);
+    CHECK(NaniteCullInstancesCPU(frustum, instances.data(), nullptr, 4u, out.data(), 4u) == 0u);
+    CHECK(NaniteCullInstancesCPU(frustum, instances.data(), spheres.data(), 4u, nullptr, 4u) == 0u);
+    CHECK(NaniteCullInstancesCPU(frustum, instances.data(), spheres.data(), 4u, out.data(), 0u) == 0u);
+
+    // 容量截断：4 条全可见、容量 2 ⇒ 返回 2，且是升序的前两条
+    for (u32 i = 0; i < 4u; ++i) instances[i].indexCount = 36u;
+    CHECK(NaniteCullInstancesCPU(frustum, instances.data(), spheres.data(), 4u, out.data(), 2u) == 2u);
+    CHECK(out[0] == 0u);
+    CHECK(out[1] == 1u);
+
+    // 容量恰好等于可见数：4 条 ⇒ 4；全部可见且升序
+    const u32 all = NaniteCullInstancesCPU(frustum, instances.data(), spheres.data(), 4u, out.data(), 4u);
+    REQUIRE(all == 4u);
+    for (u32 i = 0; i < 4u; ++i) CHECK(out[i] == i);
+
+    // 6 个平面缺一不可：只把"右平面"改成把整个盒推到外侧，样本立刻不可见
+    // （防止实现只检查前 5 个平面之类的复制粘贴缺陷）
+    NaniteFrustumPlanes clipped = frustum;
+    clipped.planes[1][0] = -1.0f;   // 右：-x + 1 >= 0 ⇒ x <= 1
+    clipped.planes[1][1] = 0.0f;
+    clipped.planes[1][2] = 0.0f;
+    clipped.planes[1][3] = -100.0f; // x <= -100 ⇒ 原点在右侧外
+    CHECK_FALSE(NaniteSphereVisibleInFrustum(clipped, spheres[0].center, spheres[0].radius));
 }

@@ -19,16 +19,48 @@
 
 #include "Core/Log.h"
 
-#include "Nanite_Cull.comp.spv.h"   // 由 Shader 编译管线生成（slangc → SPIR-V → spv_to_header.py）
+#include "Nanite_Cull.comp.spv.h"             // 由 Shader 编译管线生成（slangc → SPIR-V → spv_to_header.py）
+#include "Nanite_InstanceCull.comp.spv.h"     // 【任务 13】同上
+
+// 【任务 13 的契约交叉验证】`NaniteInstanceGpuObject` 是 `GPUSceneObject` 的 RHI-free 镜像。
+// 只有本 .cpp（Render 目标）能 include 真身，因此把"逐字段同布局"这条硬契约钉在这里：
+// 任何一边改字段/顺序/对齐都会在编译期炸掉，而不是在运行期悄悄错位。
+#include "Pipeline/GPUScene.h"
 
 #include <algorithm>
+#include <cmath>      // std::ceil / std::sqrt（合成实例网格）
+#include <cstddef>    // offsetof
 #include <cstring>
+
+// ── GPUSceneObject（128B）契约的编译期钉子（真身见 Pipeline/GPUScene.h:26-40）──
+static_assert(sizeof(he::render::NaniteInstanceGpuObject) == sizeof(he::render::GPUSceneObject),
+              "实例表镜像必须与 GPUSceneObject 同尺寸（128B）");
+#define HE_NANITE_ASSERT_FIELD_OFFSET(field)                                                   \
+    static_assert(offsetof(he::render::NaniteInstanceGpuObject, field)                          \
+                      == offsetof(he::render::GPUSceneObject, field),                           \
+                  "NaniteInstanceGpuObject::" #field " 的偏移必须与 GPUSceneObject 一致")
+HE_NANITE_ASSERT_FIELD_OFFSET(localToWorld);
+HE_NANITE_ASSERT_FIELD_OFFSET(boundsMin);
+HE_NANITE_ASSERT_FIELD_OFFSET(boundsMax);
+HE_NANITE_ASSERT_FIELD_OFFSET(meshIndex);
+HE_NANITE_ASSERT_FIELD_OFFSET(materialIndex);
+HE_NANITE_ASSERT_FIELD_OFFSET(objectID);
+HE_NANITE_ASSERT_FIELD_OFFSET(visibilityFlags);
+HE_NANITE_ASSERT_FIELD_OFFSET(indexCount);
+HE_NANITE_ASSERT_FIELD_OFFSET(firstIndex);
+HE_NANITE_ASSERT_FIELD_OFFSET(vertexOffset);
+HE_NANITE_ASSERT_FIELD_OFFSET(_pad);
+#undef HE_NANITE_ASSERT_FIELD_OFFSET
 
 namespace he::render {
 
 // 未写入槽位的哨兵值：读回时用它区分"GPU 真写过"与"还留着上一帧或初始值"。
 // 取 0xFFFFFFFF 是因为合法的 indexCount/instanceCount 不可能同时为该值。
 static constexpr u32 kNaniteCmdSentinel = 0xFFFFFFFFu;
+
+// 【任务 13】可见实例列表未写槽位的哨兵 = 0xFFFFFFFF（合法的实例下标不可能是它）。
+// 只在 `ResetInstanceCullBuffers`（启动初值）里用来填充；每帧不再重置列表，理由见该函数。
+static constexpr u32 kNaniteVisibleSentinel = 0xFFFFFFFFu;
 
 bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Device = device;
@@ -72,6 +104,51 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         if (!m_RasterCountBuf) { HE_CORE_ERROR("NaniteCull: 光栅化簇计数缓冲创建失败"); return false; }
     }
 
+    // ── 1b. 【任务 13】实例剔除的四个自持缓冲（与任务 3 的四条完全独立）──
+    {
+        rhi::BufferDesc d;
+        d.size      = sizeof(NaniteInstanceGpuObject) * kNaniteMaxTestInstances;
+        d.usage     = rhi::BufferUsage::Storage;
+        d.cpuAccess = true;   // CPU 每帧上传合成实例表
+        m_InstanceBuf = m_Device->CreateBuffer(d);
+        if (!m_InstanceBuf) { HE_CORE_ERROR("NaniteCull: 实例表缓冲创建失败"); return false; }
+    }
+    {
+        rhi::BufferDesc d;
+        d.size      = sizeof(NaniteInstanceSphere) * kNaniteMaxTestInstances;
+        d.usage     = rhi::BufferUsage::Storage;
+        d.cpuAccess = true;   // CPU 每帧上传包围球
+        m_InstanceSphereBuf = m_Device->CreateBuffer(d);
+        if (!m_InstanceSphereBuf) { HE_CORE_ERROR("NaniteCull: 包围球缓冲创建失败"); return false; }
+    }
+    {
+        rhi::BufferDesc d;
+        d.size      = sizeof(u32) * kNaniteMaxTestInstances;
+        d.usage     = rhi::BufferUsage::Storage;
+        d.cpuAccess = true;   // 启动时填哨兵 + dump 帧读回可见列表（每帧不再重置，见 ResetInstanceCullBuffers）
+        m_VisibleInstanceBuf = m_Device->CreateBuffer(d);
+        if (!m_VisibleInstanceBuf) { HE_CORE_ERROR("NaniteCull: 可见实例列表创建失败"); return false; }
+    }
+    {
+        rhi::BufferDesc d;
+        d.size      = sizeof(u32);
+        // TransferDst：每帧开头的"计数清零"是命令缓冲里的 4B 拷贝（见 RecordInstanceCullPass）。
+        // 说明：`ToVkBufferUsage` 对**所有**缓冲都硬编码了 TRANSFER_DST，这里显式写出只为表达意图。
+        d.usage     = rhi::BufferUsage::Storage | rhi::BufferUsage::TransferDst;
+        d.cpuAccess = true;   // 启动时写 0 + dump 帧读回可见计数
+        m_VisibleInstanceCountBuf = m_Device->CreateBuffer(d);
+        if (!m_VisibleInstanceCountBuf) { HE_CORE_ERROR("NaniteCull: 可见实例计数缓冲创建失败"); return false; }
+    }
+    {
+        rhi::BufferDesc d;
+        d.size      = sizeof(u32) * 4u;   // 只用前 4B；多留 12B 对齐余量，避免与相邻字段共享尾块
+        // 清零拷贝的**源**：常驻 0，只被 GPU 当 TRANSFER_SRC 读
+        d.usage     = rhi::BufferUsage::TransferSrc;
+        d.cpuAccess = true;   // 只在 Initialize 写一次 0
+        m_VisibleCountClearBuf = m_Device->CreateBuffer(d);
+        if (!m_VisibleCountClearBuf) { HE_CORE_ERROR("NaniteCull: 计数清零源缓冲创建失败"); return false; }
+    }
+
     // ── 2. 描述符集：显式绑定三个 SSBO（不走 bindless，避免与 GBuffer 的 Flush 时序耦合）──
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = {
@@ -103,27 +180,81 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_PSO = m_Device->CreatePipelineState(desc);
     if (!m_PSO) { HE_CORE_ERROR("NaniteCull: compute PSO 创建失败"); return false; }
 
+    // ── 3b. 【任务 13】实例剔除：4 个显式 SSBO 绑定 + compute PSO ──
+    // 与任务 3 同样**不走 bindless**：模块私有缓冲、生命周期清晰，显式绑定最简单也最稳。
+    {
+        rhi::DescriptorSetLayoutDesc cullLayout;
+        cullLayout.bindings = {
+            { 0, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 实例表（只读）
+            { 1, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 包围球（只读）
+            { 2, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 可见列表（读写）
+            { 3, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 可见计数（读写）
+        };
+        m_InstanceCullLayout = m_Device->CreateDescriptorSetLayout(cullLayout);
+        m_InstanceCullSet    = m_Device->AllocateDescriptorSet(m_InstanceCullLayout);
+        m_Device->UpdateDescriptorSet(m_InstanceCullSet, 0, rhi::DescriptorType::StorageBuffer, m_InstanceBuf.get());
+        m_Device->UpdateDescriptorSet(m_InstanceCullSet, 1, rhi::DescriptorType::StorageBuffer, m_InstanceSphereBuf.get());
+        m_Device->UpdateDescriptorSet(m_InstanceCullSet, 2, rhi::DescriptorType::StorageBuffer, m_VisibleInstanceBuf.get());
+        m_Device->UpdateDescriptorSet(m_InstanceCullSet, 3, rhi::DescriptorType::StorageBuffer, m_VisibleInstanceCountBuf.get());
+
+        m_InstanceCullCS.stage      = rhi::ShaderStage::Compute;
+        m_InstanceCullCS.spirv      = k_Nanite_InstanceCull_comp_spv;
+        m_InstanceCullCS.entryPoint = "main";
+
+        rhi::PushConstantRange cullPc;
+        cullPc.stageMask = rhi::kStageMaskCompute;
+        cullPc.size      = sizeof(NaniteInstanceCullParams);   // 112B（6×float4 + 4×u32）
+
+        rhi::PipelineStateDesc cullDesc;
+        cullDesc.computeShader        = &m_InstanceCullCS;
+        cullDesc.bindPoint            = rhi::PipelineBindPoint::Compute;
+        cullDesc.pushConstantRanges   = { cullPc };
+        cullDesc.descriptorSetLayouts = { m_InstanceCullLayout };
+        cullDesc.debugName            = "NaniteInstanceCull";
+        m_InstanceCullPSO = m_Device->CreatePipelineState(cullDesc);
+        if (!m_InstanceCullPSO) { HE_CORE_ERROR("NaniteCull: 实例剔除 compute PSO 创建失败"); return false; }
+    }
+
     // 初始清零：避免第一帧读到未初始化的显存
     ResetFrameBuffers();
     UploadFakeClusters();
+    ResetInstanceCullBuffers();
 
     HE_CORE_INFO("NaniteCull: 初始化完成（计数→间接绘制链；容量 {} 簇，当前 {} 簇）",
                  kNaniteMaxFakeClusters, m_FakeClusterCount);
+    HE_CORE_INFO("NaniteCull: 实例剔除通道就绪（视锥 → 可见实例列表；容量 {} 实例）",
+                 kNaniteMaxTestInstances);
     return true;
 }
 
 void NaniteCull::Shutdown() {
     m_PSO.reset();
+    m_InstanceCullPSO.reset();
     if (m_Device && m_Layout != rhi::kInvalidLayout)
         m_Device->DestroyDescriptorSetLayout(m_Layout);
+    if (m_Device && m_InstanceCullLayout != rhi::kInvalidLayout)
+        m_Device->DestroyDescriptorSetLayout(m_InstanceCullLayout);
 
     m_FakeClusterBuf.reset();
     m_IndirectCmdBuf.reset();
     m_CountBuf.reset();
     m_RasterCountBuf.reset();
 
+    // 【任务 13】实例剔除资源一并释放
+    m_InstanceBuf.reset();
+    m_InstanceSphereBuf.reset();
+    m_VisibleInstanceBuf.reset();
+    m_VisibleInstanceCountBuf.reset();
+    m_VisibleCountClearBuf.reset();
+    m_TestInstances.clear();
+    m_TestSpheres.clear();
+    m_CpuVisibleInstances.clear();
+    m_TestInstanceCount = 0u;
+
     m_Layout = rhi::kInvalidLayout;
     m_Set    = rhi::kInvalidSet;
+    m_InstanceCullLayout = rhi::kInvalidLayout;
+    m_InstanceCullSet    = rhi::kInvalidSet;
     m_Device = nullptr;
     m_Width  = 0;
     m_Height = 0;
@@ -203,6 +334,212 @@ void NaniteCull::RecordCullPass(rhi::IRHICommandList* cmd) {
                          rhi::PipelineStage::DrawIndirect,
                          rhi::ResourceState::UnorderedAccess,
                          rhi::ResourceState::IndirectArgument);
+}
+
+// ============================================================
+// §14.8 任务 13：实例剔除（视锥 → 可见实例列表 + 计数）
+//
+// 数据流：`SetInstanceCullFrame`（每帧，帧图构建期）
+//           → 提取 6 平面 + 生成合成实例表/包围球（世界空间）
+//         `RecordInstanceCullPass`（每帧，pass 执行期）
+//           → 重置计数/列表 → 上传实例与球 → CPU 参考剔除 → Dispatch → 屏障
+//         `NaniteRenderer::LogInstanceCullReadback`（dump 帧）
+//           → GPU 读回计数/列表 vs CPU 参考结果
+// ============================================================
+
+void NaniteCull::SetInstanceCullFrame(const float4x4& viewProj, const float3& cameraPosition,
+                                      u32 testInstanceCount) {
+    m_TestInstanceCount = std::min(testInstanceCount, kNaniteMaxTestInstances);
+    m_FrameViewProj     = viewProj;
+    m_FrameCameraPos    = cameraPosition;
+    // `&viewProj[0][0]` 就是 glm::mat4 的列主序首地址（16 个 float）
+    m_FrameFrustum      = NaniteExtractFrustumPlanes(&viewProj[0][0]);
+    BuildTestInstances();
+}
+
+void NaniteCull::BuildTestInstances() {
+    m_TestInstances.clear();
+    m_TestSpheres.clear();
+    if (m_TestInstanceCount == 0u) return;
+
+    m_TestInstances.resize(m_TestInstanceCount);
+    m_TestSpheres.resize(m_TestInstanceCount);
+
+    // 反投影：NDC（view-projection 空间）→ 世界空间。
+    // 用逆矩阵而不是硬编码世界坐标：相机移动时样本集合依然覆盖"里/外/跨越"三类。
+    const glm::mat4 invViewProj = glm::inverse(m_FrameViewProj);
+    const auto unproject = [&invViewProj](float ndcX, float ndcY, float ndcZ) -> float3 {
+        const float4 clip(ndcX, ndcY, ndcZ, 1.0f);
+        const float4 world = invViewProj * clip;
+        float3 point(world);
+        if (std::fabs(world.w) > 1.0e-6f) point /= world.w;
+        return point;
+    };
+
+    // 网格分辨率：尽量接近方阵（64 → 8×8）
+    const u32 gridX = (u32)std::ceil(std::sqrt((float)m_TestInstanceCount));
+    const u32 gridY = (m_TestInstanceCount + gridX - 1u) / gridX;
+
+    for (u32 i = 0; i < m_TestInstanceCount; ++i) {
+        const u32 ix = i % gridX;
+        const u32 iy = i / gridX;
+        float ndcX = (gridX > 1u) ? (2.0f * (float)ix / (float)(gridX - 1u) - 1.0f) : 0.0f;
+        float ndcY = (gridY > 1u) ? (2.0f * (float)iy / (float)(gridY - 1u) - 1.0f) : 0.0f;
+        // 整体外扩 1.25：边缘行/列必然落到视锥外（样本集合因此天然含"外"这一类）
+        ndcX *= 1.25f;
+        ndcY *= 1.25f;
+        // 5 层深度，落在开区间 (0,1) 内 ⇒ 不贴近平/远平面（避免边界浮点判定的争议）
+        const float ndcZ = 0.2f + 0.6f * (float)(i % 5u) / 4.0f;
+
+        float3 center      = unproject(ndcX, ndcY, ndcZ);
+        float radiusScale  = kNaniteTestInstanceRadiusScale;
+
+        // 三个"故意样本"：方向/大小都远离数值边界，保证 CPU 与 GPU 的判据不会因末位差异翻转。
+        //   0 号：远在视锥外（NDC 2.5）+ 极小半径 ⇒ 不可见
+        //   1 号：球心恰在右平面（NDC x = 1.0）+ 较大半径 ⇒ **跨越平面** ⇒ 可见
+        //   2 号：视锥外（NDC -1.6）+ 极小半径 ⇒ 不可见
+        if (i == 0u)      { center = unproject(2.5f, 2.5f, ndcZ);  radiusScale = 0.02f; }
+        else if (i == 1u) { center = unproject(1.0f, 0.0f, ndcZ);  radiusScale = 0.25f; }
+        else if (i == 2u) { center = unproject(-1.6f, 0.0f, ndcZ); radiusScale = 0.02f; }
+
+        const float distance = glm::length(center - m_FrameCameraPos);
+        const float radius   = radiusScale * distance + 0.01f;
+
+        NaniteInstanceGpuObject& instance = m_TestInstances[i];
+        instance = NaniteInstanceGpuObject{};   // 未用字段保持确定（全 0），避免未初始化读
+        const glm::mat4 translation = glm::translate(glm::mat4(1.0f), center);
+        std::memcpy(instance.localToWorld, &translation[0][0], sizeof(instance.localToWorld));
+        for (u32 axis = 0; axis < 3u; ++axis) {
+            instance.boundsMin[axis] = center[axis] - radius;
+            instance.boundsMax[axis] = center[axis] + radius;
+        }
+        instance.boundsMin[3]   = 0.0f;   // w 分量不用（与 GPUSceneObject 一致）
+        instance.boundsMax[3]   = 0.0f;
+        instance.meshIndex      = i;
+        instance.materialIndex  = 0u;
+        instance.objectID       = i;
+        instance.visibilityFlags = 1u;
+        // 3 号是"空实例"（indexCount = 0）：CPU 参考与 GPU 必须**同时**跳过它
+        instance.indexCount     = (i == 3u) ? 0u : 36u;
+        instance.firstIndex     = 0u;
+        instance.vertexOffset   = 0;
+        instance._pad           = 0u;
+
+        // 球从 128B 契约的 boundsMin/boundsMax 推出 ⇒ "包围球来自 GPUSceneObject 契约"
+        m_TestSpheres[i] = NaniteSphereFromInstanceBounds(instance);
+    }
+}
+
+void NaniteCull::ResetInstanceCullBuffers() {
+    // 【只在 `Initialize` 调一次：这是**启动时的初值**，不是每帧的清零】
+    // 每帧的清零必须走命令缓冲（见 `RecordInstanceCullPass` 里的 4B 拷贝），原因见那里的注释。
+    // 可见计数清零：GPU 的 InterlockedAdd 从 0 开始，最终值 = 实际写入的可见实例数
+    if (void* p = m_VisibleInstanceCountBuf ? m_VisibleInstanceCountBuf->Map() : nullptr) {
+        *static_cast<u32*>(p) = 0u;
+        m_VisibleInstanceCountBuf->Unmap();
+    }
+    // 可见列表填哨兵：让"未写过的槽位"在调试时一眼可辨。
+    // 【注意】每帧**不再**重置列表：读回只取 `[0, 计数)`，而这些槽位必定由**同一次派发**写入
+    //   （计数与列表写在同一个着色器里），因此列表不需要逐帧清 —— 这同时消掉了"主机 memset
+    //   与 GPU 派发竞争"的隐患（清早了/清晚了都会让读回读到被抹掉的槽位）。
+    if (void* p = m_VisibleInstanceBuf ? m_VisibleInstanceBuf->Map() : nullptr) {
+        std::memset(p, 0xFF, sizeof(u32) * kNaniteMaxTestInstances);
+        m_VisibleInstanceBuf->Unmap();
+    }
+    // 清零拷贝的**源**缓冲恒为 0（只在这里写一次，之后只被 GPU 读）
+    if (void* p = m_VisibleCountClearBuf ? m_VisibleCountClearBuf->Map() : nullptr) {
+        *static_cast<u32*>(p) = 0u;
+        m_VisibleCountClearBuf->Unmap();
+    }
+}
+
+void NaniteCull::UploadInstanceCullInputs() {
+    if (m_TestInstanceCount > 0u) {
+        if (void* p = m_InstanceBuf ? m_InstanceBuf->Map() : nullptr) {
+            std::memcpy(p, m_TestInstances.data(),
+                        sizeof(NaniteInstanceGpuObject) * m_TestInstanceCount);
+            m_InstanceBuf->Unmap();
+        }
+        if (void* p = m_InstanceSphereBuf ? m_InstanceSphereBuf->Map() : nullptr) {
+            std::memcpy(p, m_TestSpheres.data(),
+                        sizeof(NaniteInstanceSphere) * m_TestInstanceCount);
+            m_InstanceSphereBuf->Unmap();
+        }
+    }
+}
+
+void NaniteCull::RecordInstanceCullPass(rhi::IRHICommandList* cmd) {
+    // ── 每帧上传合成实例表与包围球 ──
+    // 【口径与任务 3 的假簇上传一致】主机可见缓冲 + `Map/memcpy/Unmap`。
+    // 【如实记录的残留风险】这份上传是**主机写**，引擎允许 2 帧在飞（CPU 领先 GPU），
+    //   因此理论上可能出现"GPU 还在读第 N 帧的实例表、CPU 已经写入第 N+1 帧"的交错。
+    //   本任务的验收读回在同一帧内比较（dump 帧：CPU 参考 = 第 N 帧，GPU 结果 = 第 N 帧派发），
+    //   且合成实例表在相机静止时逐位相同，故实测逐项一致；真正干净的修法是把上传也做进
+    //   随帧轮转的暂存环（属引擎 TransientAllocator 的范畴），不在本任务改动面内。
+    UploadInstanceCullInputs();
+
+    // ── CPU 参考剔除：与 GPU **同一份输入**（同样的平面、同样的实例表与球、同样的跳过规则）──
+    m_CpuVisibleInstances.resize(m_TestInstanceCount);
+    const u32 cpuVisible = NaniteCullInstancesCPU(
+        m_FrameFrustum,
+        m_TestInstances.empty() ? nullptr : m_TestInstances.data(),
+        m_TestSpheres.empty()   ? nullptr : m_TestSpheres.data(),
+        m_TestInstanceCount,
+        m_CpuVisibleInstances.empty() ? nullptr : m_CpuVisibleInstances.data(),
+        (u32)m_CpuVisibleInstances.size());
+    m_CpuVisibleInstances.resize(cpuVisible);   // 紧凑到真实可见数（升序）
+
+    if (!cmd || !m_InstanceCullPSO) return;
+
+    // ── 【本任务最关键的一处同步】可见计数的"每帧清零"必须**在命令缓冲内**完成（GPU 有序）──
+    //
+    // 【负向验证（实测，2026-09-20）】最初照任务 3 假簇链的写法在录制期用 `Map/Unmap` 主机写 0，
+    //   读回**恰好是 CPU 参考的 2 倍**：`nanite_instance_test_count=8` → gpu=10/cpu=5；
+    //   `=64` → gpu=122/cpu=61；且可见列表里同一批下标连续出现两次（`1,4,5,6,7,1,4,5,6,7`）。
+    //   【根因（已用两次对照实验钉死）】主机写与派发之间没有排序，而引擎允许若干帧在飞、
+    //   CPU 领先 GPU ⇒ 第 N+1 帧录制期写下的 0 会落在**第 N 帧派发执行之前**，于是第 N、N+1
+    //   两次派发的原子累加叠加到同一个计数上。
+    //     · 对照 A：把 `Map/Unmap` 主机写换成同一位置的一次设备 `WaitIdle()` 后再写 ⇒ 立刻恢复
+    //       `gpu=5/cpu=5/mismatch=0`，证明竞争确实出在"主机写 vs 派发"的排序上。
+    //     · 对照 B：把清零改成命令缓冲里的 4B 拷贝（本实现）⇒ 同样 `gpu==cpu`，且不引入停顿。
+    //   【为什么不能靠"任务 3 已经这么写"】同一批运行里假簇链的 `count_buffer=6` 是对的 ——
+    //   但那是**这台机器上 CPU/GPU 相位恰好错开**的结果，不是排序保证：本 pass 在第 4 个 pass、
+    //   假簇链在第 7 个 pass，两者的主机写相对 GPU 的时间点不同。所以本 pass 不依赖相位，直接
+    //   把清零放进命令缓冲；假簇链是否同样存在这一潜在竞争**不在本任务改动面内**（如实记录）。
+    // 【为什么用拷贝而不是 `vkCmdFillBuffer`】RHI 目前只暴露 `CopyBuffer`（任务 12 已用它做上传），
+    //   不为本任务扩 RHI 面；4B 拷贝的源缓冲常驻 0，语义与 fill 等价。
+    cmd->CopyBuffer(m_VisibleCountClearBuf.get(), m_VisibleInstanceCountBuf.get(), sizeof(u32));
+    // 拷贝写发生在 Transfer 阶段：到计算着色器读之间补一次**真实内存屏障**
+    //（`PipelineBarrier` 无资源重载发的是 `VkMemoryBarrier`，不是仅执行依赖）
+    cmd->PipelineBarrier(rhi::PipelineStage::Transfer,
+                         rhi::PipelineStage::ComputeShader,
+                         rhi::ResourceState::CopyDst,
+                         rhi::ResourceState::UnorderedAccess | rhi::ResourceState::ShaderResource);
+
+    if (m_TestInstanceCount == 0u) return;   // 0 实例 ⇒ 不派发；上面已把计数清 0，读回 0 与 CPU 参考 0 一致
+
+    // push constant：6 个平面（由本帧 viewProj 提取）+ 实例数
+    m_InstanceCullParams = NaniteInstanceCullParams{};
+    std::memcpy(m_InstanceCullParams.planes, m_FrameFrustum.planes, sizeof(m_FrameFrustum.planes));
+    m_InstanceCullParams.instanceCount = m_TestInstanceCount;
+
+    cmd->SetPipeline(m_InstanceCullPSO.get());
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_InstanceCullSet);
+    cmd->SetPushConstants(0, sizeof(m_InstanceCullParams), &m_InstanceCullParams);
+
+    char label[64];
+    snprintf(label, sizeof(label), "Nanite_InstanceCull (%u instances)", m_TestInstanceCount);
+    cmd->SetDrawDebugLabel(label);
+    cmd->Dispatch((m_TestInstanceCount + 63u) / 64u, 1, 1);
+
+    // 屏障：compute 写的可见列表/计数 → 后续 compute 读（任务 14 的按实例簇剔除会消费它）。
+    // 本任务还没有同帧消费者，但先把同步面写对，避免任务 14 接入时出现难查的顺序依赖。
+    // 【dstStage 多带一个 Transfer】同时为**下一帧开头那次清零拷贝**消掉 WAR：
+    //   计数会被下一帧的 `vkCmdCopyBuffer` 覆盖，必须让本帧派发的读/写在拷贝前可见。
+    cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader,
+                         rhi::PipelineStage::ComputeShader | rhi::PipelineStage::Transfer,
+                         rhi::ResourceState::UnorderedAccess,
+                         rhi::ResourceState::ShaderResource | rhi::ResourceState::CopyDst);
 }
 
 } // namespace he::render
