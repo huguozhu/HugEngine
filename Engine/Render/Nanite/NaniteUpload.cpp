@@ -151,16 +151,36 @@ inline constexpr u64 kFnv1aPrime       = 1099511628211ull;
     return extent;
 }
 
-/// 把一个簇的局部几何/拓扑规范化成"顺序无关"的键流（用于哈希与命中后的精确比对）
+/// 【任务 18 / P0 修复】规范键流里"属性词段"的分隔标记
 ///
-/// 【键流布局】`[顶点数 N][排序后的 N 个位置词][三角形数 T][排序后的 T 个三角形键（各 3 个位置词）]`
+/// 取值是 ASCII 的 `'NAAT'`（Nanite Attribute Tag），与位置词（R10G10B10A2）和三角形键
+/// （u16 三连）的值域完全不搭界 —— 它的作用只是让键流**自描述**：读到这个标记就知道
+/// 后面是"顶点数 + 按局部下标顺序的法线词/UV 词"，人工排查时不必靠数偏移。
+inline constexpr u32 kClusterCanonicalAttributeTag = 0x4E414154u;
+
+/// 把一个簇的局部几何/拓扑/属性规范化成"顺序无关"的键流（用于哈希与命中后的精确比对）
+///
+/// 【键流布局】
+/// ```text
+/// [顶点数 N][排序后的 N 个位置词][三角形数 T][排序后的 T 个三角形键（各 3 个位置词）]
+/// [属性标记 'NAAT'][顶点数 N][局部下标 0..N-1 的法线词、UV 词（各 1 个 u32）]
+/// ```
 /// 位置词 = 任务 7 的量化位置打包（R10G10B10A2），量化原点 = `record` 的簇 AABB 中心、
 /// 尺度 = 整网格最大范围（口径说明见头文件"为什么是簇内局部"）。
 /// 【三角形键】三种**循环旋转**里取字典序最小（保绕序，不做反转），再对全部键排序。
+/// 【前两段顺序无关、第三段按下标有序（任务 18 的 P0 修复）】
+///   · 位置词与三角形键按规范（排序/旋转归一）比较 ⇒ 顶点/三角形顺序无关，平移副本仍然命中；
+///   · 属性词段**按局部下标逐位**写出 —— 这是刻意的：共享内容的顶点段只有**一份**、且按
+///     "首次出现的局部下标顺序"存放，所以"共享"必须保证**每个局部下标上的属性都逐位相同**，
+///     否则另一个顺序不同的出现会按同一份共享顶点读到**别的顶点的法线/UV**（§14.20⑥ 的缺陷）。
+///   纳入属性词段的直接后果：只有"位置/拓扑同构 **且** 逐下标属性逐位相同"的簇才共享内容
+///   （代价是去重率会下降，实测值见 §14.27；这是"改动最小、语义最直白"的修法）。
 /// 【输出】`outWords` 是**原始顺序**的位置词（共享内容按原始顺序存放）；
 ///         `outKeys` 是规范键流（哈希与比对都用它）。
 /// 【失败】局部下标越出本簇顶点数（防御性；正常不可达）⇒ 返回 false。
 [[nodiscard]] bool BuildClusterCanonicalKeys(std::span<const float>     positions,
+                                             std::span<const float>     normals,
+                                             std::span<const float>     uvs,
                                              const NaniteClusterRecord& record,
                                              const u32*                 clusterVertexIndices,
                                              const NanitePackedTriangle* clusterTriangles,
@@ -232,6 +252,40 @@ inline constexpr u64 kFnv1aPrime       = 1099511628211ull;
             outKeys.push_back(key[1]);
             outKeys.push_back(key[2]);
         }
+    }
+
+    // ④ 【任务 18 / P0 修复】属性词段（法线词 + UV 词，按**局部下标顺序**逐位写出）
+    //    【为什么顺序敏感】共享顶点段只有一份、按首次出现的局部下标顺序存放；着色器按
+    //      `cluster.vertexOffset + 局部下标` 取属性。若两个"位置/拓扑同构"的簇的局部下标顺序
+    //      不同却共享内容，就会出现"第 v 个局部下标读到别的顶点的法线/UV"——正是 §14.20⑥
+    //      记录的缺陷。把属性词按局部下标写进键流 ⇒ 共享的前提变成"逐下标属性逐位相同"，
+    //      缺陷结构上不可能再出现（打包器的 `attributeConflictCount` 因此必须恒为 0）。
+    //    【口径与打包器逐字一致】法线 = `NanitePackNormal`（八面体 10+10 位）、
+    //      UV = `NanitePackUV(NaniteQuantizeUV(...), ...)`（unorm16）——与 `PackNaniteClusters`
+    //      的第 ④⑤ 步用的是同一组函数；`normals`/`uvs` 为空时用与打包器相同的默认值
+    //      （法线 +Z、UV (0,0)），因此"不带属性"的调用方与今天的去重率**逐位不变**。
+    outKeys.push_back(kClusterCanonicalAttributeTag);
+    outKeys.push_back(localVertexCount);
+    for (u32 v = 0; v < localVertexCount; ++v) {
+        const u32 meshVertex = clusterVertexIndices[v];
+        float nx = 0.0f;
+        float ny = 0.0f;
+        float nz = 1.0f;
+        if (!normals.empty()) {
+            const float* normal = normals.data() + (usize)meshVertex * 3u;
+            nx = normal[0];
+            ny = normal[1];
+            nz = normal[2];
+        }
+        float u = 0.0f;
+        float vv = 0.0f;
+        if (!uvs.empty()) {
+            const float* uv = uvs.data() + (usize)meshVertex * 2u;
+            u  = uv[0];
+            vv = uv[1];
+        }
+        outKeys.push_back(NanitePackNormal(nx, ny, nz));
+        outKeys.push_back(NanitePackUV(NaniteQuantizeUV(u), NaniteQuantizeUV(vv)));
     }
 
     return true;
@@ -388,6 +442,8 @@ bool BuildNaniteClusters(std::span<const float> positions,
 // 这里只留与代码逐句对应的短注释。
 // ============================================================
 bool BuildNaniteClusterDAG(std::span<const float> positions,
+                           std::span<const float> normals,
+                           std::span<const float> uvs,
                            std::span<const u32>   indices,
                            NaniteClusterDAG&      outResult) {
     // ── 输入校验：与任务 8 同口径；失败一律返回 false 且**不改写出参** ──
@@ -395,6 +451,10 @@ bool BuildNaniteClusterDAG(std::span<const float> positions,
     if ((positions.size() % 3u) != 0u)                return false;
 
     const usize vertexCount = positions.size() / 3u;
+    // 【任务 18 / P0】属性必须是"每网格顶点"的完整记录（与 `PackNaniteClusters` 同一口径）；
+    //   长度不对就拒绝，绝不按截断/越界读 —— 属性词段拿它算键流，错读会静默改变去重语义。
+    if (!normals.empty() && normals.size() != vertexCount * 3u) return false;
+    if (!uvs.empty()     && uvs.size()     != vertexCount * 2u) return false;
     for (const u32 index : indices) {
         if ((usize)index >= vertexCount) return false;
     }
@@ -480,9 +540,9 @@ bool BuildNaniteClusterDAG(std::span<const float> positions,
             record.childClusterOffset = 0u;
             record.childCount         = 0u;
 
-            if (!BuildClusterCanonicalKeys(positions, record, clusterVertexIndices, clusterTriangles,
-                                           localVertexCount, localTriangleCount, meshExtent,
-                                           words, keys)) {
+            if (!BuildClusterCanonicalKeys(positions, normals, uvs, record, clusterVertexIndices,
+                                           clusterTriangles, localVertexCount, localTriangleCount,
+                                           meshExtent, words, keys)) {
                 return false;
             }
 
@@ -689,8 +749,27 @@ bool BuildNaniteClusterDAG(std::span<const float> positions,
     return true;
 }
 
+/// 【兼容重载】不带属性的 DAG 构建（等价于 `normals`/`uvs` 都为空）
+///
+/// 【为什么保留】任务 9/10 的既有调用方与单测只关心"位置 + 拓扑"的去重；空属性 ⇒ 属性词段
+///   是一段常量（法线 +Z、UV (0,0)）⇒ 去重语义与任务 9 当时**逐位相同**（键流长度变了、
+///   哈希值变了，但等价关系不变）。这样旧调用方的去重率读数不受本次修复影响，
+///   "属性一致性"只在真的传了属性的路径上生效（`BuildNaniteAssetFromGeometry` 恒传）。
+bool BuildNaniteClusterDAG(std::span<const float> positions,
+                           std::span<const u32>   indices,
+                           NaniteClusterDAG&      outResult) {
+    return BuildNaniteClusterDAG(positions, std::span<const float>{}, std::span<const float>{},
+                                 indices, outResult);
+}
+
 // ============================================================
 // §14.8 任务 10：量化与打包（最终 GPU 侧字节布局）
+//
+// 口径、边界、失败条件都写在 `NaniteUpload.h` 的同名小节里；这里只留与代码逐句对应的短注释。
+// 一句话概括三段职责：① 位置**复用** DAG 的词并核验口径；② 法线/UV 由属性 span 现编；
+// ③ 段表/字节镜像交给任务 7 的 `TryBuildNaniteFileLayout` + `ValidateNaniteFile` 兜底。
+// ============================================================
+
 //
 // 口径、边界、失败条件都写在 `NaniteUpload.h` 的同名小节里；这里只留与代码逐句对应的短注释。
 // 一句话概括三段职责：① 位置**复用** DAG 的词并核验口径；② 法线/UV 由属性 span 现编；
@@ -887,8 +966,10 @@ bool PackNaniteClusters(std::span<const float>                positions,
     }
 
     // ── ⑤ 属性一致性检查：同一共享内容的**其它出现**是否给出同样的法线/UV 词 ──
-    //     任务 9 的内容哈希只覆盖"位置 + 拓扑"（不含法线/UV），所以这里必须如实统计冲突，
-    //     而不是假设"共享的一定一致"。数据本身取首次出现那一份（见头文件的已知限制）。
+    //     【任务 18 / P0 起这条检查是"硬门"而不是"如实报告"】属性词（法线 + UV，按局部下标）
+    //     已经进了 DAG 的内容键流 ⇒ 共享的前提就是"逐局部下标的属性词逐位相同"，
+    //     因此这里的冲突计数**必须为 0**；非 0 说明调用方绕过五参数重载手工拼了一份 DAG
+    //     （只在单测/分析代码里可能），此时**拒绝产出**而不是静默写出一份属性错配的资产。
     std::vector<u8> uniqueConflict(uniqueCount, 0u);
     for (u32 c = 0; c < (u32)occurrenceCount; ++c) {
         const u32 unique    = dag.clusterUnique[c];
@@ -923,6 +1004,11 @@ bool PackNaniteClusters(std::span<const float>                positions,
                 }
             }
         }
+    }
+    if (stats.attributeConflictCount != 0u) {
+        // 非 0 = "共享内容的不同出现给出不同属性" ⇒ 写进段里的属性必然对某些出现是错的。
+        // 返回 false（调用方拿到的是"没有资产"，而不是一份静默错配的资产）。
+        return false;
     }
 
     // ── ⑥ 索引段：直接复用共享三角形表，并逐条核验"簇内局部下标"的合法区间 ──
@@ -1056,8 +1142,10 @@ bool BuildNaniteAssetFromGeometry(std::span<const float>                position
                                   std::span<const NaniteMaterialRecord> materials,
                                   NanitePackedAsset&                    outResult) {
     // ① LOD 链 + DAG 去重（任务 9）。失败时不改写出参，直接返回 false。
+    //    【任务 18 / P0 修复】法线/UV 一并交给 DAG：内容哈希现在包含"按局部下标逐位的属性词"
+    //    ⇒ 只有**全部属性逐位相同**的簇才会共享顶点/索引段，"共享内容属性错配"结构上不可能再出现。
     NaniteClusterDAG dag;
-    if (!BuildNaniteClusterDAG(positions, indices, dag)) return false;
+    if (!BuildNaniteClusterDAG(positions, normals, uvs, indices, dag)) return false;
 
     // ② 量化 + 打包 + 段表自校验（任务 10）。同样"先本地构建、成功才交出"。
     return PackNaniteClusters(positions, normals, uvs, materials, dag, outResult);

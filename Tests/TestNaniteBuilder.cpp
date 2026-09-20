@@ -33,7 +33,8 @@
 //  17. 量化误差实测：位置（≤ meshMaxExtent/2044，实测最大值见 MESSAGE）、法线（≤ 0.5°，实测）、
 //      UV（≤ 1/65535，实测）；**无 clamp**（`positionClampCount == 0`）与"与 DAG 位置词一致"
 //  18. 与 DAG 的衔接：平铺网格（有共享内容）下逐簇解码回输入几何、同一 `vertexOffset` 被多次引用
-//  19. 共享内容的属性冲突：任务 9 的哈希不含法线/UV ⇒ **如实报告**冲突计数（不静默）
+//  19. 【任务 18 / P0】共享簇必须属性逐位一致：属性词进内容键流 ⇒ `attributeConflictCount == 0`、
+//      逐"出现 × 局部下标"重算属性词逐位相同；每片 UV 平移的网格不再共享、逐片真副本仍 > 10% 去重
 //  20. 可复现性 + 失败路径（空 DAG / 位置或属性长度非法 / DAG 内部不一致 / 属性 span 可空）
 //
 // §14.8 任务 12（资产加载的 CPU 侧入口）追加的用例：
@@ -1222,6 +1223,37 @@ TiledMeshWithAttributes MakeTiledPatchesWithAttributes(u32 tilesX, u32 tilesY,
     return result;
 }
 
+/// 平铺网格 + **逐片完全相同**的属性（UV / 法线只依赖**片内局部坐标**）
+///
+/// 【为什么要它】任务 18 / P0 之后内容键流包含"按局部下标的属性词"：只有**逐下标属性逐位相同**
+///   的簇才共享内容。让属性只依赖片内局部坐标 ⇒ 各片是**真正的完全副本**（几何 + 属性都相同），
+///   去重照常命中；它与 `MakeTiledPatchesWithAttributes`（每片 UV 平移 = 属性不同）形成正反对照，
+///   一起证明"属性进了键流"这件事既有约束力、又没有把该命中的去重掐死。
+MeshAttributes MakeTileLocalAttributes(const TiledMesh& tiled, u32 quadsX, u32 quadsY) {
+    const u32 side      = quadsX + 1u;
+    const u32 rows      = quadsY + 1u;
+    const u32 perTile   = side * rows;
+    const u32 vertexCount = (u32)(tiled.mesh.positions.size() / 3u);
+    MeshAttributes attributes;
+    attributes.normals.resize((usize)vertexCount * 3u);
+    attributes.uvs.resize((usize)vertexCount * 2u);
+    for (u32 v = 0u; v < vertexCount; ++v) {
+        const u32 local  = (perTile > 0u) ? (v % perTile) : 0u;
+        const u32 localY = (side > 0u) ? (local / side) : 0u;
+        const u32 localX = (side > 0u) ? (local % side) : 0u;
+        const float localU = (quadsX > 0u) ? (float)localX / (float)quadsX : 0.0f;
+        const float localV = (quadsY > 0u) ? (float)localY / (float)quadsY : 0.0f;
+        attributes.uvs[(usize)v * 2u + 0u] = localU;
+        attributes.uvs[(usize)v * 2u + 1u] = localV;
+        const float theta = localU * 2.0f * kTask10Pi;
+        const float phi   = localV * kTask10Pi;
+        attributes.normals[(usize)v * 3u + 0u] = std::sin(phi) * std::cos(theta);
+        attributes.normals[(usize)v * 3u + 1u] = std::cos(phi);
+        attributes.normals[(usize)v * 3u + 2u] = std::sin(phi) * std::sin(theta);
+    }
+    return attributes;
+}
+
 /// 段对齐（与 `NaniteAlignUpFile` 同口径，测试里独立写一遍以免"用被测代码验证被测代码"）
 [[nodiscard]] u64 AlignUp16(u64 value) { return (value + 15ull) & ~15ull; }
 
@@ -1448,11 +1480,14 @@ TEST_CASE("NanitePack: 量化误差实测（位置/法线/UV）与无 clamp") {
 // ============================================================
 TEST_CASE("NanitePack: DAG 衔接（共享内容 + 各自簇心解码回几何）") {
     const TiledMesh tiled = MakeTiledPatches(3, 3, 8, 4, 20.0f);   // 9 片 × 64 tri
-    const MeshAttributes attributes = MakeSphereAttributes(tiled.mesh);
+    // 【任务 18 / P0】属性也交给 DAG（五参数重载）：本用例要走**真实的资产路径**
+    //   （`BuildNaniteAssetFromGeometry` 恒带属性），属性是"逐片相同"的真副本 ⇒ 共享照常命中。
+    const MeshAttributes attributes = MakeTileLocalAttributes(tiled, 8, 4);
     const std::vector<NaniteMaterialRecord> materials = { NanitePackMaterial(7u, 9u) };
 
     NaniteClusterDAG dag;
-    REQUIRE(BuildNaniteClusterDAG(tiled.mesh.positions, tiled.mesh.indices, dag));
+    REQUIRE(BuildNaniteClusterDAG(tiled.mesh.positions, attributes.normals, attributes.uvs,
+                                  tiled.mesh.indices, dag));
     REQUIRE(dag.stats.dedupRate > 0.0f);                    // 有共享内容才有"衔接"可测
     REQUIRE(dag.stats.levelCount > 0u);
 
@@ -1460,6 +1495,7 @@ TEST_CASE("NanitePack: DAG 衔接（共享内容 + 各自簇心解码回几何�
     REQUIRE(PackNaniteClusters(tiled.mesh.positions, attributes.normals, attributes.uvs,
                                materials, dag, asset));
     MESSAGE(PackStatsLine("平铺网格 3x3（9×64 tri，含共享内容）:", asset).c_str());
+    CHECK(asset.stats.attributeConflictCount == 0u);   // 属性进键流 ⇒ 共享簇必然逐位一致
 
     const float bound = asset.stats.positionErrorBound;
     const u32   fullCheckClusters = 4u;    // 前 4 个簇逐顶点全查，其余每簇查前 8 个（验收口径）
@@ -1485,14 +1521,15 @@ TEST_CASE("NanitePack: DAG 衔接（共享内容 + 各自簇心解码回几何�
 
     // ── ① 每个出现簇：顶点段/索引段的偏移必须落在段内；顶点段解码出的**点集**必须回到该簇几何 ──
     //
-    // 【为什么"下标一一对应"不是判据】任务 9 的内容哈希是**顺序无关**的（位置词排序 + 三角形键
-    //   排序），而任务 8 的 `meshopt_optimizeMeshlet` 会按拓扑就地重排每个簇的顶点。于是两个
-    //   "内容相同"的簇可以有不同的**簇内顶点顺序**：共享的 `uniqueVertexWords`/`uniqueTriangles`
-    //   是首份出现的那一套一致配对（几何因此完全正确），但"第 v 个局部顶点"在两次出现里未必
-    //   指向同一个网格顶点。故验收判据是"解码点集 == 输入点集"（rasterizer 消费的正是点集 +
-    //   三角形），而"下标一一对应"只在首份出现上必须精确成立 —— 这条差异同时是任务 12/18 的
-    //   风险提示（顶点属性按首份配对 ⇒ 顺序不同的出现可能取到别的顶点的法线/UV，见
-    //   `attributeConflictCount`）。
+    // 【为什么"下标一一对应"不是判据】本用例刻意用**不带属性**的三参数重载：内容键流只覆盖
+    //   "位置 + 拓扑"（任务 9 口径），而任务 8 的 `meshopt_optimizeMeshlet` 会按拓扑就地重排
+    //   每个簇的顶点。于是两个"内容相同"的簇可以有不同的**簇内顶点顺序**：共享的
+    //   `uniqueVertexWords`/`uniqueTriangles` 是首份出现的那一套一致配对（几何因此完全正确），
+    //   但"第 v 个局部顶点"在两次出现里未必指向同一个网格顶点。故验收判据是"解码点集 == 输入
+    //   点集"（rasterizer 消费的正是点集 + 三角形），而"下标一一对应"只在首份出现上必须精确成立。
+    //   **属性一致性不由本用例承担**：任务 18 / P0 起，属性词进了内容键流，凡是按局部下标取
+    //   法线/UV 的路径都必须用**五参数**重载（`BuildNaniteAssetFromGeometry` 恒用它），
+    //   那条不变式由用例 19「共享簇必须属性逐位一致」断言。
     for (usize c = 0; c < asset.clusters.size(); ++c) {
         const NaniteClusterRecord& record = asset.clusters[c];
         const u32 localVertices  = dag.clusterVertexCount[c];
@@ -1586,59 +1623,132 @@ TEST_CASE("NanitePack: DAG 衔接（共享内容 + 各自簇心解码回几何�
 
     // ── ③ 打包不改动 DAG（"输入只读"的契约）──
     NaniteClusterDAG rebuilt;
-    REQUIRE(BuildNaniteClusterDAG(tiled.mesh.positions, tiled.mesh.indices, rebuilt));
+    REQUIRE(BuildNaniteClusterDAG(tiled.mesh.positions, attributes.normals, attributes.uvs,
+                                  tiled.mesh.indices, rebuilt));
     CHECK(SameDAG(dag, rebuilt));
 }
 
 // ============================================================
-// 19. 共享内容的属性冲突：如实报告（任务 9 的内容哈希不含法线/UV）
+// 19. 【任务 18 / P0】共享簇必须属性逐位一致（修掉 §14.20⑥ 的"属性错配"）
+//
+// 修复前（任务 9/10 的口径）：内容哈希只覆盖"位置 + 拓扑"，而 `meshopt_optimizeMeshlet` 会按
+//   拓扑就地重排簇内顶点 ⇒ 位置/拓扑相同但**局部顶点顺序**不同的簇会共享顶点段，
+//   按局部下标取法线/UV 就会读到别的顶点 —— 实测 3×3 平铺 19 个出现里 8 个顺序不同、
+//   `attributeConflictCount = 1`（当时的用例断言的就是"> 0 如实报告"）。
+// 修复后（本用例的断言）：属性词（法线词 + UV 词）按局部下标写进规范键流 ⇒
+//   ① `attributeConflictCount` **恒为 0**（从"如实报告"变成硬断言）；
+//   ② 逐唯一内容 × 逐局部下标，全部出现重算出的属性词与写进顶点段的那一份**逐位相同**；
+//   ③ 每片 UV 平移的网格（属性真的不同）**不再共享**（去重率显著低于无属性键流）；
+//   ④ 逐片完全相同的副本（属性也相同）**仍然显著去重**（> 10%），证明约束没有过度收紧。
 // ============================================================
-TEST_CASE("NanitePack: 共享内容的属性冲突如实报告（哈希不含法线/UV 的已知限制）") {
-    // 平铺网格 + 每片 UV 平移 ⇒ 位置/拓扑完全相同（去重命中）但 UV 不同
+TEST_CASE("NaniteDAG: 共享簇必须属性逐位一致（任务 18 / P0 修复）") {
+    // 平铺网格 + 每片 UV 平移 ⇒ 位置/拓扑完全相同（旧键流会去重命中）但 UV 不同
     TiledMeshWithAttributes tiled = MakeTiledPatchesWithAttributes(4, 4, 8, 4, 20.0f);
     REQUIRE(tiled.mesh.indices.size() == 16u * 64u * 3u);
 
-    NaniteClusterDAG dag;
-    REQUIRE(BuildNaniteClusterDAG(tiled.mesh.positions, tiled.mesh.indices, dag));
-    REQUIRE(dag.stats.dedupRate > 0.10f);   // 任务 9 的去重确实命中了
+    // ── ① 属性进键流 ⇒ 这些簇不再共享（对照组：同一网格不带属性的旧口径仍显著去重）──
+    NaniteClusterDAG dagNoAttrs;
+    REQUIRE(BuildNaniteClusterDAG(tiled.mesh.positions, tiled.mesh.indices, dagNoAttrs));
+    MESSAGE(DAGStatsLine("(对照) 平铺网格 16×64 tri（属性**不进**键流，任务 9 口径）:", dagNoAttrs).c_str());
+    CHECK(dagNoAttrs.stats.dedupRate > 0.10f);
 
+    NaniteClusterDAG dagWithAttrs;
+    REQUIRE(BuildNaniteClusterDAG(tiled.mesh.positions, tiled.attributes.normals,
+                                  tiled.attributes.uvs, tiled.mesh.indices, dagWithAttrs));
+    MESSAGE(DAGStatsLine("(修复后) 平铺网格（每片 UV 平移 ⇒ 属性不同，不再共享）:", dagWithAttrs).c_str());
+    // 属性不同 ⇒ 共享被键流挡掉：去重率必须**严格下降**（多数情况下直接到 0）
+    CHECK(dagWithAttrs.stats.dedupRate < dagNoAttrs.stats.dedupRate);
+
+    // ── ② 硬断言：共享簇（= 同一 uniqueIndex 的全部出现）逐局部下标的属性词逐位一致 ──
     NanitePackedAsset asset;
     REQUIRE(PackNaniteClusters(tiled.mesh.positions, tiled.attributes.normals,
-                               tiled.attributes.uvs, {}, dag, asset));
-    MESSAGE(PackStatsLine("平铺网格（每片 UV 平移）:", asset).c_str());
+                               tiled.attributes.uvs, {}, dagWithAttrs, asset));
+    MESSAGE(PackStatsLine("平铺网格（每片 UV 平移，属性进键流）:", asset).c_str());
+    CHECK(asset.stats.attributeConflictCount == 0u);
 
-    // 如实报告：同一唯一内容的不同出现给出**不同 UV** ⇒ 冲突计数 > 0，且数据取首次出现那一份。
-    // 这不是打包器的 bug，而是任务 9 的内容哈希只看"位置 + 拓扑"的**已知限制**（见头文件）。
-    CHECK(asset.stats.attributeConflictCount > 0u);
-    CHECK(asset.stats.attributeConflictCount <= (u32)dag.uniqueVertexCount.size());
-    // 数据一致性：同一唯一内容的所有出现共享同一份 UV（= 首次出现那份），故"按出现读到的 UV
-    // 未必等于该出现自己的 UV" —— 这正是上面那条读数的含义。
-    for (usize u = 0; u < dag.uniqueVertexCount.size(); ++u) {
-        const u32 base = dag.uniqueVertexOffset[u];
-        for (u32 v = 0u; v < dag.uniqueVertexCount[u]; ++v) {
-            const u32 firstCluster = [&]() {
-                for (u32 c = 0u; c < (u32)dag.clusters.size(); ++c) {
-                    if (dag.clusterUnique[c] == (u32)u) return c;
-                }
-                return 0u;
-            }();
-            const u32 meshVertex = dag.clusterVertexIndices[dag.clusterVertexIndexOffset[firstCluster] + v];
-            const u32 expectedU = NaniteQuantizeUV(tiled.attributes.uvs[(usize)meshVertex * 2u + 0u]);
-            const u32 expectedV = NaniteQuantizeUV(tiled.attributes.uvs[(usize)meshVertex * 2u + 1u]);
-            CHECK(NaniteUnpackUVU(asset.vertices[base + v].packedUV) == expectedU);
-            CHECK(NaniteUnpackUVV(asset.vertices[base + v].packedUV) == expectedV);
+    u32 comparedVertices = 0u;
+    u32 conflictVertices = 0u;
+    for (usize c = 0u; c < dagWithAttrs.clusters.size(); ++c) {
+        const NaniteClusterRecord& record = dagWithAttrs.clusters[c];
+        const u32 localVertices = dagWithAttrs.clusterVertexCount[c];
+        const u32 indexBase     = dagWithAttrs.clusterVertexIndexOffset[c];
+        for (u32 v = 0u; v < localVertices; ++v) {
+            const u32 meshVertex = dagWithAttrs.clusterVertexIndices[indexBase + v];
+            const float* normal  = tiled.attributes.normals.data() + (usize)meshVertex * 3u;
+            const float* uv      = tiled.attributes.uvs.data() + (usize)meshVertex * 2u;
+            const u32 normalWord = NanitePackNormal(normal[0], normal[1], normal[2]);
+            const u32 uvWord     = NanitePackUV(NaniteQuantizeUV(uv[0]), NaniteQuantizeUV(uv[1]));
+            const NaniteVertex& written = asset.vertices[(usize)record.vertexOffset + v];
+            if (written.packedNormal != normalWord || written.packedUV != uvWord) ++conflictVertices;
+            ++comparedVertices;
         }
     }
+    CHECK(comparedVertices > 0u);
+    CHECK(conflictVertices == 0u);
+    MESSAGE("属性逐位核对：检查 " << comparedVertices << " 个'出现 × 局部下标'，"
+            << "不一致 " << conflictVertices << " 个（必须 0）");
 
-    // 反面对照：属性是位置的函数时（同 MakeSphereAttributes 按自身 AABB 归一化）不会有冲突
-    const MeshAttributes uniform = MakeSphereAttributes(tiled.mesh);
-    NanitePackedAsset uniformAsset;
-    REQUIRE(PackNaniteClusters(tiled.mesh.positions, uniform.normals, uniform.uvs, {}, dag, uniformAsset));
-    // （这里仍有冲突：按 AABB 归一化的 UV 会随顶点位置变化，而平铺副本的顶点位置不同 ⇒
-    //  同一共享内容的出现之间 UV 依然不同。如实报告该读数，不做"应为 0"的假设。）
-    MESSAGE("同一 DAG + 随位置变化的 UV 属性：属性冲突="
-            << uniformAsset.stats.attributeConflictCount);
-    CHECK(uniformAsset.stats.attributeConflictCount <= (u32)dag.uniqueVertexCount.size());
+    // ── ③ 正面照：逐片完全相同的副本（属性也逐位相同）仍然显著去重（> 10%）──
+    {
+        const TiledMesh plain = MakeTiledPatches(4, 4, 8, 4, 20.0f);
+        const MeshAttributes tileLocal = MakeTileLocalAttributes(plain, 8, 4);
+        NaniteClusterDAG dagCopies;
+        REQUIRE(BuildNaniteClusterDAG(plain.mesh.positions, tileLocal.normals, tileLocal.uvs,
+                                      plain.mesh.indices, dagCopies));
+        MESSAGE(DAGStatsLine("(正面照) 平铺网格（逐片属性完全相同的真副本）:", dagCopies).c_str());
+        CHECK(dagCopies.stats.dedupRate > 0.10f);   // 任务 9 的"平铺 > 10%"判据必须继续成立
+
+        NanitePackedAsset copyAsset;
+        REQUIRE(PackNaniteClusters(plain.mesh.positions, tileLocal.normals, tileLocal.uvs, {},
+                                   dagCopies, copyAsset));
+        CHECK(copyAsset.stats.attributeConflictCount == 0u);
+    }
+
+    // ── ④ 属性是顶点位置的函数时（`MakeSphereAttributes` 按整网格 AABB 归一化）同样恒为 0 ──
+    {
+        const MeshAttributes uniform = MakeSphereAttributes(tiled.mesh);
+        NaniteClusterDAG dagUniform;
+        REQUIRE(BuildNaniteClusterDAG(tiled.mesh.positions, uniform.normals, uniform.uvs,
+                                      tiled.mesh.indices, dagUniform));
+        NanitePackedAsset uniformAsset;
+        REQUIRE(PackNaniteClusters(tiled.mesh.positions, uniform.normals, uniform.uvs, {},
+                                   dagUniform, uniformAsset));
+        MESSAGE("随位置变化的 UV 属性（属性进键流）：去重率="
+                << dagUniform.stats.dedupRate << " 属性冲突="
+                << uniformAsset.stats.attributeConflictCount);
+        CHECK(uniformAsset.stats.attributeConflictCount == 0u);
+    }
+}
+
+// ============================================================
+// 19b. 【任务 18 / P0 的负向回归】绕过属性键流（三参数 DAG）+ 带属性打包 ⇒ **拒绝产出**
+//
+// 用例 19 证明"按五参数重载走的路"属性必然一致；这一条证明**另一条路走不通**：
+//   手工用三参数重载拼一份"只按位置/拓扑去重"的 DAG，再拿带属性的几何去打包 ⇒
+//   必然出现"同一共享内容的不同出现给出不同法线/UV" ⇒ 打包器**返回 false**（不改写出参），
+//   而不是静默写出一份属性错配的资产。这正是 §14.20⑥ 缺陷不再可能复现的守卫。
+// ============================================================
+TEST_CASE("NanitePack: 属性错配的资产被拒绝（P0 修复的负向回归）") {
+    TiledMeshWithAttributes tiled = MakeTiledPatchesWithAttributes(4, 4, 8, 4, 20.0f);
+    REQUIRE(tiled.mesh.indices.size() == 16u * 64u * 3u);
+
+    // 三参数重载：键流只覆盖"位置 + 拓扑"（任务 9 口径）⇒ 每片 UV 平移的簇仍会被共享
+    NaniteClusterDAG legacyDag;
+    REQUIRE(BuildNaniteClusterDAG(tiled.mesh.positions, tiled.mesh.indices, legacyDag));
+    REQUIRE(legacyDag.stats.dedupRate > 0.10f);
+
+    NanitePackedAsset poisoned;
+    poisoned.stats.clusterCount = 12345u;                 // 先污染，失败路径必须整体不改写
+    CHECK_FALSE(PackNaniteClusters(tiled.mesh.positions, tiled.attributes.normals,
+                                   tiled.attributes.uvs, {}, legacyDag, poisoned));
+    CHECK(poisoned.stats.clusterCount == 12345u);         // 出参未被改写
+    CHECK(poisoned.bytes.empty());
+
+    // 对照：同一份 DAG、**不带属性**打包 ⇒ 合法（属性段退化为默认值，与任务 9 的口径一致）
+    NanitePackedAsset geometryOnly;
+    REQUIRE(PackNaniteClusters(tiled.mesh.positions, {}, {}, {}, legacyDag, geometryOnly));
+    CHECK(geometryOnly.stats.attributeConflictCount == 0u);
+    CHECK(geometryOnly.header.clusterCount == legacyDag.stats.totalClusterCount);
 }
 
 // ============================================================
@@ -1789,7 +1899,8 @@ TEST_CASE("NaniteUpload: 合并几何快照 → .nanite 资产（任务 12 的 C
     REQUIRE(BuildNaniteAssetFromGeometry(mesh.positions, attributes.normals, attributes.uvs,
                                          mesh.indices, {}, viaEntry));
     NaniteClusterDAG dag;
-    REQUIRE(BuildNaniteClusterDAG(mesh.positions, mesh.indices, dag));
+    REQUIRE(BuildNaniteClusterDAG(mesh.positions, attributes.normals, attributes.uvs,
+                                  mesh.indices, dag));
     NanitePackedAsset viaCalls;
     REQUIRE(PackNaniteClusters(mesh.positions, attributes.normals, attributes.uvs, {}, dag, viaCalls));
     CHECK(viaEntry.bytes == viaCalls.bytes);
