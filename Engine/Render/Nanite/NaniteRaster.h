@@ -1,7 +1,7 @@
 #pragma once
 
 // ============================================================
-// Nanite/NaniteRaster.h — 软光栅（后续追加硬光栅分支）
+// Nanite/NaniteRaster.h — 光栅端（消费计数 → 间接绘制链；任务 16 起消费**可见簇列表**）
 //
 // 【§14.8 任务 3：绘制端（消费计数）】
 //   任务 1 只有生命周期桩；任务 3 起本类做出一条**极小**的绘制通道：
@@ -10,6 +10,18 @@
 //     · 渲染目标是**模块自建的 1×1 R8 小目标**（不是 GBuffer 的任何附件），
 //       片元着色器每被光栅化一个簇就把"已光栅化簇数"原子加一。
 //   因此本 pass 对可见画面零影响（§14.2 不变式 1）。
+//
+// 【§14.8 任务 16：改吃"可见簇列表"写出的命令（默认路径）】
+//   过去绘制的输入是任务 3 的**假簇链**（N 条固定命令）；任务 16 起默认改成
+//   `Nanite_ClusterBVH.comp.slang` 在选出可见簇时**同一个原子槽位**写出的真实命令：
+//     · 间接命令缓冲 = `NaniteCull::GetIndirectDrawBuffer()`（20B/条，与可见簇引用同槽位）
+//     · 计数缓冲     = `NaniteCull::GetDrawCountBuffer()`（只在"真的写了命令"时 +1）
+//     · maxDrawCount = `NaniteCull::GetMaxIndirectDraws()`（容量上界）
+//   【无空转】命令与计数由**同一次派发**写出、绘制只覆盖 `[0, count)`、计数每帧在命令缓冲内
+//   清 0（不用主机写 —— 主机写会与派发竞争，任务 13 实测错读成两倍）；三件事合起来保证
+//   "画了 k 条命令 ⇔ k 个可见簇"，既不画没写的槽位，也不残留上一帧的命令。
+//   【假簇链】仍完整保留（任务 3 的自证通道 + 可见链不可用时的退化路径），由
+//   `NaniteSettings::fakeChain` 决定**谁来画**；两条路都复用本类的同一段录制代码。
 //
 // 【任务 4 起】这里才会出现真正写 GBuffer 的软光栅；按 §14.5 的裁决（A1/A2）
 //   建模块自己的 PSO/附件布局，直接写既有 GBuffer 纹理句柄。
@@ -43,12 +55,39 @@ public:
 
     [[nodiscard]] bool IsReady() const { return m_Device != nullptr && m_PSO != nullptr; }
 
-    /// 录制 `Nanite_Raster` pass：
+    /// 录制绘制：
     ///   `DrawIndexedIndirectCount(indirectCmdBuffer, 0, countBuffer, 0, maxDrawCount, 20)`
+    ///
+    /// 【录在哪个帧图 pass 内】调用方（`NaniteRenderer`）把它录在**产出命令的那个 pass 体内**
+    ///   （可见链 = `Nanite_CullChain3`；假簇链 = `Nanite_Cull`），紧跟在使用端之后：
+    ///   帧图对"两个零资源 pass"的排序**不可依赖**（`TopologicalSort` 对 inDegree=0 的 pass
+    ///   按 LIFO 处理），把绘制录进同一个 pass 体、用命令缓冲里的屏障定序，是唯一稳的写法
+    ///   （任务 15 的教训与做法同源）。
     void RecordRasterPass(rhi::IRHICommandList* cmd,
                           rhi::IRHIBuffer* indirectCmdBuffer,
                           rhi::IRHIBuffer* countBuffer,
                           u32 maxDrawCount);
+
+    /// 【§14.8 任务 16】告诉绘制端"占位索引缓冲必须覆盖的索引位置上界"（= 资产的索引总数）
+    ///
+    /// 【为什么需要占位索引缓冲】本通道仍是"数次数"的占位光栅（真实软光栅是任务 18），但
+    ///   `DrawIndexedIndirectCount` 会拿命令里的 `firstIndex/indexCount` 去**绑定索引缓冲**取
+    ///   索引 ⇒ 缓冲必须覆盖整个索引段的位置空间，否则是越界读（本设备**未**启用
+    ///   `robustBufferAccess`，越界不是定义行为）。上界取"资产的索引总数"：
+    ///   每个簇是索引段里的一个连续三角形区间 ⇒ `firstIndex + indexCount ≤ 索引总数`。
+    /// 【调用时机与安全性】只在 `NaniteRenderer::EnsureAssetUploaded` 的一次性路径上调用
+    ///   （那一刻 `NaniteScene::UploadPackedAsset` 已经 `WaitIdle` ⇒ 没有任何在飞的命令缓冲
+    ///   引用旧缓冲，替换是安全的）；之后的帧直接复用，不再重建。
+    /// 【钳制】`max(3, min(indexCount, kNanitePlaceholderIndexCountMax))` —— 至少放下假簇链的
+    ///   一条命令，至多不超过"簇数上限 × 每簇三角形上限 × 3"这个可证上界。
+    void SetPlaceholderIndexCapacity(u32 indexCount);
+
+    /// 【§14.8 任务 16】读回"被光栅化的**绘制条数**"（真实 GPU 读回；每个绘制恰好 +1）。
+    /// 【同步约定】调用方必须保证 GPU 已完成（样例 dump 路径已有 `WaitIdle()`）。
+    [[nodiscard]] u32 ReadbackRasterCount();
+
+    /// 占位索引缓冲当前覆盖的索引位置个数（dump/日志用）
+    [[nodiscard]] u32 GetPlaceholderIndexCount() const { return m_PlaceholderIndexCount; }
 
     /// 【§14.8 任务 4：UAV 自证通道】录制 `Nanite_TestWrite` pass。
     /// 用 `RWTexture2D<float4>`（`Nanite_TestWrite.comp.slang`）往**既有 GBuffer albedo**
@@ -99,6 +138,14 @@ private:
     /// 返回 false 表示创建失败（调用方跳过本次录制，不影响其它 pass）。
     bool EnsureTestWriteResources();
 
+    /// 【任务 16】懒建/重建占位索引缓冲（首次录制或容量变大时调用）。
+    /// 返回 false 表示创建失败（调用方跳过本次绘制，不崩）。
+    bool EnsurePlaceholderIndexBuffer();
+
+    /// 【任务 16】创建占位索引缓冲并填入 `0,1,2,0,1,2,…` 的周期模式
+    /// （为什么是这个模式：见 `Nanite_Raster.vert.slang` 的"任务 16 的改动"一节）
+    bool CreatePlaceholderIndexBuffer(u32 indexCount);
+
     /// 懒建 `Nanite_MeshTest` 的目标/缓冲/描述符集/mesh PSO（首次录制时调用一次）。
     /// 返回 false 表示创建失败或设备不支持 mesh shader。
     bool EnsureMeshTestResources();
@@ -109,9 +156,17 @@ private:
 
     /// 模块自建的小目标（R8，1×1）。它**不在** GBuffer 里，写它不会改变可见画面。
     std::unique_ptr<rhi::IRHITexture> m_Target;
-    /// 绘制端不读顶点属性，但 `DrawIndexedIndirectCount` 仍要求绑定索引/顶点缓冲
+    /// 绘制端不读顶点属性，但 `DrawIndexedIndirectCount` 仍会绑定顶点缓冲
     std::unique_ptr<rhi::IRHIBuffer>  m_DummyVB;
-    std::unique_ptr<rhi::IRHIBuffer>  m_DummyIB;
+    /// 【任务 16】占位**索引**缓冲：覆盖资产的整个索引位置空间，内容 = `0,1,2` 周期模式。
+    /// 懒建（首次录制时按 `m_PlaceholderIndexCount` 建，资产上传后由
+    /// `SetPlaceholderIndexCapacity` 放大一次）。
+    std::unique_ptr<rhi::IRHIBuffer>  m_PlaceholderIB;
+    /// 占位索引缓冲覆盖的索引位置个数（u32 元素数）
+    u32 m_PlaceholderIndexCount = 0u;
+    /// 【任务 16】"绘制计数"缓冲的**非持有**引用（由 `NaniteCull` 创建并持有；`Initialize` 传入）。
+    /// 本类只在 dump 帧读回它（清零在 `NaniteCull::RecordCullPass` 里，那个 pass 一定先执行）。
+    rhi::IRHIBuffer* m_RasterCountRef = nullptr;
 
     rhi::ShaderBytecode m_VS;   // Nanite_Raster.vert.spv
     rhi::ShaderBytecode m_FS;   // Nanite_Raster.frag.spv

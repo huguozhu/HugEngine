@@ -79,6 +79,30 @@ struct NaniteSettings {
     ///   （`cull3` 行里的 `hiz=off` + `hiz_req=1 hiz_mips=0` 就是这个情形）。
     /// 配置层 = cfg 键 `nanite_hiz`（默认 0），样例负责解析/序列化。
     bool hiz = false;
+
+    /// 【§14.8 任务 16】绘制来源：**假簇链自证 / 退化通道**（默认 **false** = 走可见簇列表）。
+    ///
+    /// 【语义】false（默认）⇒ 光栅端消费 `Nanite_ClusterBVH.comp.slang` 从**可见簇列表**写出的
+    ///   真实间接命令（每条命令对应一个可见簇：真实 indexCount/firstIndex/vertexOffset/簇号）；
+    ///   true ⇒ 消费任务 3 的**假簇链**（`nanite_fake_clusters` 条固定命令），可见链只算不画。
+    /// 【为什么默认走可见簇列表】任务 16 的验收就是"绘制次数 = 可见簇数"，默认档必须是它。
+    /// 【为什么保留假簇链】① 它是任务 3 验收口径（`count_buffer == indirect_cmds ==
+    ///   rasterized_clusters == N`）的唯一载体，保留即可回归；② 可见链不可用时（BVH 未入库 /
+    ///   实例域为 0 / 资产为空）它就是**退化路径** —— 此时若强行走可见链，绘制条数恒 0，
+    ///   "模块确实画了东西"这条自证会消失。两条路复用同一段录制代码，切换只在一个判据上。
+    /// 配置层 = cfg 键 `nanite_fake_chain`（默认 0），样例负责解析/序列化。
+    bool fakeChain = false;
+
+    /// 【§14.8 任务 16】间接绘制容量（默认 **0 = 用容量上界**）。
+    ///
+    /// 【语义】它是"可见簇 → 间接命令"这一步的截断门：只有槽位 < 本值的簇才写命令并计入
+    ///   绘制计数（`visible` 读数保持**真值**不变）。0 或超过上界 ⇒ 用容量上界
+    ///   （`kNaniteMaxIndirectDraws`），即正常路径**不截断**。
+    /// 【为什么要有这个键】它是截断路径在**真实 GPU** 上的可复现自证开关：设小之后
+    ///   `visible` 保持真值、`draws` 被钳住、截断计数非 0，而绘制恒不超过 `maxDrawCount`
+    ///   （`vkCmdDrawIndexedIndirectCount` 的硬约束），可以逐位观察"截断而**不越界**"。
+    /// 配置层 = cfg 键 `nanite_draw_capacity`（默认 0），样例负责解析/序列化。
+    u32 drawCapacity = 0u;
 };
 
 } // namespace he::render

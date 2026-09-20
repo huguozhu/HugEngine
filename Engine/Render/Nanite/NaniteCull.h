@@ -66,6 +66,20 @@
 //   【金字塔的三条约定（核实自既有实现，见 `NaniteTypes.h` 的任务 15 小节）】
 //     ① 格式 `R32_FLOAT`、最多 8 层；② 层 L 存 2^L×2^L 足迹的**最小深度**（近 = 小）；
 //     ③ **mip0 从未被写入** ⇒ 采样层下限钳到 1（`kNaniteHiZMinMip`）。
+//
+// 【§14.8 任务 16：可见簇列表 → 间接绘制参数（把 `u_VisibleClusters` 真正接到光栅端）】
+//   任务 14/15 把可见簇算出来了却没有消费者（光栅端当时消费的是任务 3 的假簇链）——本任务补上：
+//     · 每簇绘制参数表 —— `NaniteClusterDrawRange`（16B/条；`SetClusterBVH` 一次性上传），
+//       由 `NaniteMakeClusterDrawRange` 从 `.nanite` 簇记录逐位搬运；
+//     · 间接命令缓冲   —— `NaniteIndirectCommand`（20B/条 = `VkDrawIndexedIndirectCommand`），
+//       与可见簇引用**同一个原子槽位**写入（容量也刻意相同 ⇒ 槽位一一对应）；
+//     · 绘制计数       —— 单个 u32，只在"真的写了命令"时 +1 ⇒ 恒 ≤ 容量 ⇒ 恒 ≤ maxDrawCount。
+//   光栅端（`NaniteRaster::RecordRasterPass`）用 `DrawIndexedIndirectCount` 消费它们。
+//   【无空转的三重保证】① 计数与命令同一次派发写出；② 只画 `[0, count)`；③ 计数每帧在命令缓冲内
+//   清 0（常驻 0 源 + 4B 拷贝；主机写清零会与派发竞争，任务 13 实测错读成两倍）。
+//   【绘制计数为什么不复用可见簇计数】后者是任务 14/15 的验收读数，必须**不截断**；而绘制计数
+//   必须满足"≤ 间接缓冲容量"这条硬约束。两者分开后，容量足够时相等，容量不足时可见计数保真、
+//   绘制计数被钳住并把截断条数记进 `kNaniteCullStatDrawTruncated`。
 // ============================================================
 
 #include "Nanite/NaniteTypes.h"
@@ -74,7 +88,11 @@
 #include "Math/Math.h"   // 【任务 13】float3 / float4x4（相机视锥与合成实例网格的输入类型）
 
 #include <functional>   // 【任务 15】`NaniteRenderer` 的 Hi-Z 源回调（纹理/深度）经这里传递
-#include <memory>#include <vector>
+// 【顺手修掉的一处既有笔误】本行过去是 `#include <memory>#include <vector>`（两条指令挤在同一
+//   行 ⇒ MSVC 只处理第一条并给出 C4067，`<vector>` 从未真正被包含，一直靠传递包含碰巧编过）。
+//   本任务起本头文件新增的成员里仍有 `std::vector`，故把它拆成两行（零行为变化）。
+#include <memory>
+#include <vector>
 #include <span>   // 【任务 14】SetClusterBVH 的簇记录视图
 
 namespace he::render {
@@ -161,7 +179,8 @@ static_assert(offsetof(NaniteCullChainParams, lodEnabled)  == 100, "lodEnabled �
 /// [1]  被 Hi-Z 判为遮挡的簇引用数（Phase 2 后半）
 /// [2..9] "选中级别分布"直方图：lodHistogram[L] = 被选中的 L 级簇引用数（L = 0..7）
 /// [10] 访问过的 BVH 节点数（全部实例求和）
-/// [11..15] 保留（写 0；缓冲按 16 个 u32 分配，便于一次对齐的拷贝清零）
+/// [11] 【任务 16】因**绘制容量**不足而未写间接命令的簇数（截断计数）
+/// [12..15] 保留（写 0；缓冲按 16 个 u32 分配，便于一次对齐的拷贝清零）
 /// ```
 ///
 /// 【为什么平坦 u32 而不是结构体】std430 下"结构体里的 u32 数组"步长细节依赖编译器，
@@ -170,7 +189,9 @@ inline constexpr u32 kNaniteCullStatFrustumPass = 0u;
 inline constexpr u32 kNaniteCullStatOccluded    = 1u;
 inline constexpr u32 kNaniteCullStatLodBase     = 2u;   ///< 直方图起点（8 个槽）
 inline constexpr u32 kNaniteCullStatVisited     = 10u;  ///< 访问节点数
-inline constexpr u32 kNaniteCullStatsU32        = 11u;  ///< 实际使用的槽数
+/// 【任务 16】因绘制容量不足被截断的簇数（与 shader 的 `kStatDrawTruncated` 逐条对应）
+inline constexpr u32 kNaniteCullStatDrawTruncated = 11u;
+inline constexpr u32 kNaniteCullStatsU32        = 12u;  ///< 实际使用的槽数
 inline constexpr u32 kNaniteCullStatsCapacity   = 16u;  ///< 缓冲容量（16B 对齐，一次拷贝清零）
 inline constexpr u64 kNaniteCullStatsBytes      = sizeof(u32) * kNaniteCullStatsCapacity;
 static_assert(kNaniteCullStatsU32 <= kNaniteCullStatsCapacity, "读数槽位不得超出缓冲容量");
@@ -342,6 +363,28 @@ public:
     [[nodiscard]] rhi::IRHIBuffer* GetVisibleMaskBuffer()         const { return m_VisibleMaskBuf.get(); }
     /// 【任务 15】每簇 LOD 元数据（CPU 侧镜像；数量 == 参与剔除的簇数）
     [[nodiscard]] const std::vector<NaniteClusterLODInfo>& GetClusterLODInfo() const { return m_LODInfo; }
+
+    // ── 【§14.8 任务 16】可见簇 → 间接绘制参数的读回访问（`NaniteRenderer` 与光栅端使用）──
+    /// 间接绘制命令缓冲（20B/条；与可见簇引用同槽位、同容量）
+    [[nodiscard]] rhi::IRHIBuffer* GetIndirectDrawBuffer()  const { return m_IndirectDrawBuf.get(); }
+    /// 绘制计数缓冲（单个 u32；`DrawIndexedIndirectCount` 的 countBuffer）
+    [[nodiscard]] rhi::IRHIBuffer* GetDrawCountBuffer()     const { return m_DrawCountBuf.get(); }
+    /// 间接命令缓冲的容量上界（= `maxDrawCount`）
+    [[nodiscard]] u32 GetMaxIndirectDraws() const { return kNaniteMaxIndirectDraws; }
+    /// 每簇绘制参数表（CPU 侧镜像；CPU 参考打包与 GPU 读的是**同一份比特**）
+    [[nodiscard]] const std::vector<NaniteClusterDrawRange>& GetClusterDrawRanges() const {
+        return m_ClusterDrawRanges;
+    }
+    /// 【任务 16】设置本帧的绘制容量（cfg 键 `nanite_draw_capacity`；0 = 用容量上界）
+    ///
+    /// 钳制口径与 GPU 完全一致：`min(入参, kNaniteMaxIndirectDraws)`，0 视为上界。
+    /// 它是"截断路径"的**可复现自证开关**：把它设小，就能在真实 GPU 上看到
+    /// `visible` 保持真值、`draws` 被钳住、截断计数非 0，且不越界（`maxDrawCount` 之下）。
+    void SetDrawCapacity(u32 capacity) {
+        m_FrameDrawCapacity = (capacity == 0u || capacity > kNaniteMaxIndirectDraws)
+                            ? kNaniteMaxIndirectDraws : capacity;
+    }
+    [[nodiscard]] u32 GetFrameDrawCapacity() const { return m_FrameDrawCapacity; }
     /// 【§14.8 任务 15】把"CPU 参考可见、GPU 未见"的簇做一次**选层分布**统计 —— 这是"Hi-Z 打开档
     /// 与关闭档差异"的量化解释：被剔除的簇各自会落在金字塔的哪一层上。
     ///
@@ -486,6 +529,13 @@ private:
     /// 【任务 15】CPU 侧 LOD 元数据镜像（与 `m_BVHData.clusterSpheres` 同序、同长度）
     std::vector<NaniteClusterLODInfo> m_LODInfo;
 
+    /// 【任务 16】CPU 侧绘制参数镜像（与簇记录同序、同长度）——GPU 侧的只读表由它上传，
+    ///   CPU 参考打包与 GPU 打包因此读的是**同一份比特**
+    std::vector<NaniteClusterDrawRange> m_ClusterDrawRanges;
+
+    /// 【任务 16】本帧的绘制容量（`SetDrawCapacity` 的钳制结果；默认 = 容量上界）
+    u32 m_FrameDrawCapacity = kNaniteMaxIndirectDraws;
+
     /// 本帧实例域 = `min(合成实例数, kNaniteMaxBVHInstances)`（CPU 参考与 GPU 同口径）
     u32 m_BVHInstanceDomain = 0u;
 
@@ -495,18 +545,27 @@ private:
     std::unique_ptr<rhi::IRHIBuffer> m_BVHSphereBuf;   // 簇球（16B/条，容量 kNaniteMaxBVHClusters）
     /// 【任务 15】LOD 元数据（16B/条，容量 kNaniteMaxBVHClusters）
     std::unique_ptr<rhi::IRHIBuffer> m_LODInfoBuf;
+    /// 【任务 16】每簇绘制参数（16B/条，容量 kNaniteMaxBVHClusters；`SetClusterBVH` 一次性上传）
+    std::unique_ptr<rhi::IRHIBuffer> m_ClusterDrawRangeBuf;
     // ── 每帧由 GPU 写的可写缓冲 ──
     std::unique_ptr<rhi::IRHIBuffer> m_VisibleClusterBuf;       // 可见簇引用（8B/条，容量 kNaniteMaxVisibleClusterRefs）
     std::unique_ptr<rhi::IRHIBuffer> m_VisibleClusterCountBuf;  // 可见簇计数（u32；Phase 3 的最终计数）
+    /// 【任务 16】间接绘制命令（20B/条，容量 `kNaniteMaxIndirectDraws`）。**必须带 `Indirect`
+    ///   usage**：`vkCmdDrawIndexedIndirectCount` 会把整块当命令缓冲读。
+    std::unique_ptr<rhi::IRHIBuffer> m_IndirectDrawBuf;
+    /// 【任务 16】绘制计数（u32）。**必须带 `Indirect` usage**（它是 `DrawIndexedIndirectCount`
+    ///   的 countBuffer）；`TransferDst` 是每帧"命令缓冲内清零"拷贝的目标。
+    std::unique_ptr<rhi::IRHIBuffer> m_DrawCountBuf;
     /// 【任务 15】可见实例掩码（u32/实例；Phase 1 每线程写 0/1，**不需要清零**）
     std::unique_ptr<rhi::IRHIBuffer> m_VisibleMaskBuf;
     /// 【任务 15】三阶段读数（扁平 u32，容量 `kNaniteCullStatsCapacity`）
     std::unique_ptr<rhi::IRHIBuffer> m_CullStatsBuf;
     /// 【任务 15】三阶段参数（112B；CPU 每帧上传）
     std::unique_ptr<rhi::IRHIBuffer> m_ChainParamBuf;
-    /// 【任务 15】两个计数的清零源（48B 常驻 0，TransferSrc）：
-    ///   【0,4) 可见簇计数；【4,8) 已访问节点数 → 与任务 13 同款；【8,48) 三阶段读数（40B）
-    ///   = 通过视锥(4) + 遮挡(4) + 级直方图(32)。**每帧的清零都在命令缓冲内**（不用主机写）。
+    /// 【任务 15】各计数的清零源（96B 常驻 0，TransferSrc）：
+    ///   【0,4) 可见实例计数；【4,8) 任务 3 的命令条数；【8,12) 任务 3 的光栅化簇计数；
+    ///   【12,16) 可见簇计数；【16,80) 三阶段读数（64B）；【80,84) 任务 16 的绘制计数。
+    ///   **每帧的清零都在命令缓冲内**（不用主机写）。
     std::unique_ptr<rhi::IRHIBuffer> m_ClearZeroBuf;
     /// 【任务 15】Hi-Z 占位纹理（1×1 R32_FLOAT）+ 采样器：当本帧没有外部 Hi-Z 纹理时占位，
     ///   保证 binding 10 永远是**合法描述符**（Vulkan 不接受"未绑定/空纹理"的采样器绑定）。

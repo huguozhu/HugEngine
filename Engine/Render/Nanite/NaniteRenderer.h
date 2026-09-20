@@ -142,12 +142,14 @@ public:
     ///   · 注意：`Nanite_TestWrite` 写的是 `gbAlbedo` 的 UAV，因此**不能**声明 `gbDepth/gbWorldPos`
     ///     的那组 WAW —— `GB_Clear` 已经在前面写过它们，再声明只会多出一条无意义的依赖。
     ///
-    /// 【§14.8 任务 15 新增的 `Nanite_CullChain3`】三阶段簇剔除链（Phase 1 实例剔除 + 掩码 →
+    /// 【§14.8 任务 15/16】`Nanite_CullChain3`：三阶段簇剔除链（Phase 1 实例剔除 + 掩码 →
     ///   Phase 2 构建 Hi-Z 并做视锥/遮挡剔除 → Phase 3 LOD 选择）在这里注册：
     ///   · 声明 `reads = {gbDepth}`：这是**真的**在读（Hi-Z 金字塔由本帧深度下采样而来），
     ///     它同时给帧图一条把本 pass 定序在 `GB_Clear` 之后的 RAW 依赖；
     ///   · 内部三段的相对顺序**不靠帧图**，而是靠同一 pass 体内命令缓冲的屏障（见 `NaniteCull`）。
     ///   · `hiz` 为空（默认）⇒ 该 pass 照常注册，但 Hi-Z 遮挡测试关闭（退化为"不遮挡"）。
+    ///   · 【任务 16】当可见链是**绘制来源**时，本 pass 在算完之后**紧接着录制间接绘制**
+    ///     （`NaniteRaster::RecordRasterPass`）—— 见下方"绘制录在哪个 pass 内"的说明。
     /// 【将来】任务 26 的调试可视化落点也在这里（GBuffer 之后的可视化叠加）。
     void AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHandles& gb,
                               const NaniteHiZSource& hiz = NaniteHiZSource{});
@@ -180,13 +182,35 @@ public:
     ///   `[Nanite] fake_clusters=<N> count_buffer=<X> indirect_cmds=<Y> rasterized_clusters=<Z>`
     ///
     /// X = 计数缓冲的值（GPU 原子累加的命令条数）；Y = 间接命令缓冲里**实际被写过**的
-    /// 命令条数（读回时按"非哨兵且字段合法"统计）；Z = 绘制端片元原子计数的值。
-    /// 任务 3 的验收就是 X == Y == Z == N。
+    /// 命令条数（读回时按"非哨兵且字段合法"统计）；Z = 绘制端"每个绘制恰好一次"的原子计数。
     ///
-    /// 【同步约定】本函数**只做 Map 读回，不做任何等待** —— 调用方必须在 GPU 完成后调用
-    /// （样例的 dump 路径已经有 `device->WaitIdle()`，照抄既有白炉探针/落盘的读数方式）。
-    /// 关闭档下直接返回（不打印），保证关闭档日志与基线一致。
+    /// 【§14.8 任务 16 的门控改动】这一行只在**假簇链是绘制来源**时打印（`nanite_fake_chain=1`，
+    ///   或可见链尚未就绪的退化帧）。默认档（走可见簇列表）由 `LogVisibleWiringReadback()`
+    ///   打印那一行 —— 否则同一帧会有两条互相矛盾的"画了多少"读数。
     void LogFakePipelineReadback();
+
+    /// 【§14.8 任务 16】dump 帧打印**恰好一行**"可见簇 → 间接绘制"的接线读数：
+    ///   `[Nanite] visible_wiring visible=<V> indirect_count=<C> draws=<D> rasterized=<R>
+    ///    empty_draws=<E> mismatch=<M> src=<visible|fake> truncated=<T> max_draws=<X>
+    ///    cpu_cmds=<P> placeholder_indices=<Q>`
+    ///
+    /// 四个核心数**全部来自真实 GPU 读回**，且来源彼此独立：
+    /// · `visible`       = 可见簇计数缓冲（剔除端 Phase 3 的原子计数）—— "应该画多少条"；
+    /// · `indirect_count`= 间接命令缓冲 `[0, V)` 里**字段合法且与 CPU 参考逐字段一致**的条数
+    ///                     （CPU 逐字节读回 GPU 内存后核验）—— "命令缓冲里真的有这么多条"；
+    /// · `draws`         = 绘制计数缓冲（= 喂给 `DrawIndexedIndirectCount` 的 count；剔除端只在
+    ///                     "真的写了命令"时 +1）—— "间接参数条数"；
+    /// · `rasterized`    = 绘制端片元的原子计数（`SV_PrimitiveID == 0`，每个绘制恰好一次）
+    ///                     —— "GPU 真的执行了这么多次绘制"。
+    /// 【验收判据】正常档 `V == C == D == R`、`empty_draws = 0`、`mismatch = 0`。
+    ///   `empty_draws` = V 里"画了但没产生任何片元"的条数（命令有效但几何被丢弃）；
+    ///   `mismatch` = 逐条字段不一致数 + |V−C| + |V−D| + |D−R|（任一非 0 都说明接线有问题）。
+    ///   `truncated` = 因绘制容量不足而未写命令的簇数（`nanite_draw_capacity` 的截断自证）；
+    ///   `cpu_cmds` = CPU 参考打包出的命令条数（与 `indirect_count` 同口径，供交叉核对）。
+    ///
+    /// 【同步约定】与 `LogFakePipelineReadback` 相同：只做 Map 读回、不做等待；调用方必须已
+    /// `WaitIdle()`。关闭档 / 未就绪时直接返回、不打印 —— 保证关闭档日志与基线一致。
+    void LogVisibleWiringReadback();
 
     /// 【§14.8 任务 15】dump 帧打印**恰好一行**三阶段剔除的 GPU/CPU 逐项对照：
     ///   `[Nanite] cull3 phase1=<a> phase2=<b> phase3=<c> hiz=<on|off> gpu_clusters=<C>
@@ -239,6 +263,17 @@ private:
     /// 【§14.8 任务 12】资产"只上传一次"的门闩（`Initialize` 时复位 ⇒ 重建后可再来一次）。
     /// 它的存在保证 `EnsureAssetUploaded` 即使在帧循环里被反复调用，也只做一次 GPU 上传 + 读回。
     bool m_AssetUploaded = false;
+
+    /// 【§14.8 任务 16】本帧的**绘制来源**是否退化到假簇链（`AddPasses` 每帧算一次）。
+    ///
+    /// 【为什么需要这个标志】两条链都要"谁来画"唯一：可见链的绘制录在 `Nanite_CullChain3`
+    ///   体内、假簇链的绘制录在 `Nanite_Cull` 体内（都紧跟在自己的 compute 之后，顺序由命令
+    ///   缓冲的屏障给出）；若两条都画就会把同一批读数加两遍，若都不画则一个簇都不画。
+    /// 【退化条件】`nanite_fake_chain=1`（显式自证）**或** 可见链尚不可用
+    ///   （资产/BVH 还没入库 —— 那时 Phase 2/3 根本不派发，可见链一条命令都产不出来）。
+    ///   注意"实例数为 0"**不算**退化：那正是"零可见簇 ⇒ 零绘制"这条边界，必须走可见链
+    ///   （走假簇链会画出 6 条，把边界验收掩盖掉）。
+    bool m_DrawFromFakeChain = false;
 
     /// 开关与档位的唯一真值（默认 `enabled = false` ⇒ §14.2 不变式 1）
     NaniteSettings m_Settings;

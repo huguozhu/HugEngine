@@ -82,9 +82,12 @@ static constexpr u64 kNaniteZeroSlotFakeCount        = 4u;    ///< 4B：任务 3
 static constexpr u64 kNaniteZeroSlotFakeRaster       = 8u;    ///< 4B：任务 3 的光栅化簇计数
 static constexpr u64 kNaniteZeroSlotClusterCount     = 12u;   ///< 4B：任务 14/15 的最终可见簇计数
 static constexpr u64 kNaniteZeroSlotStats            = 16u;   ///< 64B：任务 15 的三阶段读数（整块）
-static constexpr u64 kNaniteZeroSourceBytes          = 80u;   ///< 清零源总大小（16B 对齐）
+static constexpr u64 kNaniteZeroSlotDrawCount        = 80u;   ///< 4B：【任务 16】绘制计数
+static constexpr u64 kNaniteZeroSourceBytes          = 96u;   ///< 清零源总大小（16B 对齐）
 static_assert(kNaniteZeroSlotStats + kNaniteCullStatsBytes <= kNaniteZeroSourceBytes,
               "读数零块必须落在清零源缓冲内");
+static_assert(kNaniteZeroSlotDrawCount + sizeof(u32) <= kNaniteZeroSourceBytes,
+              "绘制计数的零块必须落在清零源缓冲内");
 
 bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_Device = device;
@@ -288,6 +291,39 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         if (!m_LODInfoBuf) { HE_CORE_ERROR("NaniteCull: LOD 元数据缓冲创建失败"); return false; }
     }
     {
+        // 【任务 16】每簇绘制参数（16B/条；`SetClusterBVH` 一次性上传）
+        rhi::BufferDesc d;
+        d.size      = sizeof(NaniteClusterDrawRange) * kNaniteMaxBVHClusters;
+        d.usage     = rhi::BufferUsage::Storage;
+        d.cpuAccess = true;
+        m_ClusterDrawRangeBuf = m_Device->CreateBuffer(d);
+        if (!m_ClusterDrawRangeBuf) { HE_CORE_ERROR("NaniteCull: 绘制参数缓冲创建失败"); return false; }
+    }
+    {
+        // 【任务 16】间接绘制命令（20B/条）。**Indirect** usage 是硬要求：
+        //   `vkCmdDrawIndexedIndirectCount` 把这块内存当 `VkDrawIndexedIndirectCommand` 数组读
+        //   （缺 VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT 会报 VUID-vkCmdDrawIndexedIndirectCount-
+        //   buffer-00547）。cpuAccess 仅供 dump 帧逐条读回比对。
+        rhi::BufferDesc d;
+        d.size      = sizeof(NaniteIndirectCommand) * kNaniteMaxIndirectDraws;
+        d.usage     = rhi::BufferUsage::Storage | rhi::BufferUsage::Indirect;
+        d.cpuAccess = true;
+        m_IndirectDrawBuf = m_Device->CreateBuffer(d);
+        if (!m_IndirectDrawBuf) { HE_CORE_ERROR("NaniteCull: 间接绘制命令缓冲创建失败"); return false; }
+    }
+    {
+        // 【任务 16】绘制计数（单个 u32）：GPU 只在"真的写了命令"时原子 +1 ⇒ 它的值恰好是
+        //   命令缓冲里 [0, count) 的有效条数。Indirect 是 countBuffer 的要求，
+        //   TransferDst 是每帧"命令缓冲内清零"拷贝的目标。
+        rhi::BufferDesc d;
+        d.size      = sizeof(u32);
+        d.usage     = rhi::BufferUsage::Storage | rhi::BufferUsage::Indirect
+                    | rhi::BufferUsage::TransferDst;
+        d.cpuAccess = true;
+        m_DrawCountBuf = m_Device->CreateBuffer(d);
+        if (!m_DrawCountBuf) { HE_CORE_ERROR("NaniteCull: 绘制计数缓冲创建失败"); return false; }
+    }
+    {
         rhi::BufferDesc d;
         d.size      = sizeof(NaniteVisibleClusterRef) * kNaniteMaxVisibleClusterRefs;
         d.usage     = rhi::BufferUsage::Storage;
@@ -323,7 +359,7 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         if (!m_ChainParamBuf) { HE_CORE_ERROR("NaniteCull: 三阶段参数缓冲创建失败"); return false; }
     }
 
-    // ── 3c. 【任务 14/15】cluster BVH 三阶段遍历：11 个绑定 + compute PSO ──
+    // ── 3c. 【任务 14/15/16】cluster BVH 三阶段遍历：14 个绑定 + compute PSO ──
     // 绑定顺序与 `Nanite_ClusterBVH.comp.slang` 的 [[vk::binding]] 逐条对应。
     {
         rhi::DescriptorSetLayoutDesc bvhLayout;
@@ -339,6 +375,9 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
             { 8, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 【任务 15】三阶段参数（只读）
             { 9, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 【任务 15】三阶段读数（读写）
             {10, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute, false },  // 【任务 15】Hi-Z 金字塔
+            {11, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 【任务 16】绘制参数（只读）
+            {12, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 【任务 16】间接命令（读写）
+            {13, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 【任务 16】绘制计数（读写）
         };
         m_BVHLayout = m_Device->CreateDescriptorSetLayout(bvhLayout);
         m_BVHSet    = m_Device->AllocateDescriptorSet(m_BVHLayout);
@@ -352,6 +391,13 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         m_Device->UpdateDescriptorSet(m_BVHSet, 7, rhi::DescriptorType::StorageBuffer, m_LODInfoBuf.get());
         m_Device->UpdateDescriptorSet(m_BVHSet, 8, rhi::DescriptorType::StorageBuffer, m_ChainParamBuf.get());
         m_Device->UpdateDescriptorSet(m_BVHSet, 9, rhi::DescriptorType::StorageBuffer, m_CullStatsBuf.get());
+        // 【任务 16】可见簇 → 间接绘制参数的三条绑定
+        m_Device->UpdateDescriptorSet(m_BVHSet, 11, rhi::DescriptorType::StorageBuffer,
+                                      m_ClusterDrawRangeBuf.get());
+        m_Device->UpdateDescriptorSet(m_BVHSet, 12, rhi::DescriptorType::StorageBuffer,
+                                      m_IndirectDrawBuf.get());
+        m_Device->UpdateDescriptorSet(m_BVHSet, 13, rhi::DescriptorType::StorageBuffer,
+                                      m_DrawCountBuf.get());
 
         // 【任务 15】Hi-Z 采样器（本类自建；口径与既有 Hi-Z 采样器一致：点采样 + ClampToEdge
         //   + mip 0..8）。**为什么不借用 GPUCulling 的采样器**：§14.3 禁止模块 include
@@ -467,6 +513,11 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     HE_CORE_INFO("NaniteCull: 三阶段剔除就绪（Phase 1 掩码 → Phase 2 视锥+Hi-Z → Phase 3 LOD 选择；"
                  "Hi-Z 层数上限 {}，可采样层下限 {}，LOD 阈值 {} 像素，直方图 {} 级）",
                  kNaniteMaxHiZMips, kNaniteHiZMinMip, kNaniteLODThresholdPixels, kNaniteLODHistogramLevels);
+    // 【任务 16】可见簇 → 间接绘制参数的容量（命令缓冲与可见簇引用**同容量** ⇒ 槽位一一对应）
+    HE_CORE_INFO("NaniteCull: 可见簇 → 间接绘制参数就绪（每簇 {}B 参数表 + {} 条命令（{}B/条）"
+                 "+ 绘制计数；命令与可见簇引用同槽位、同容量）",
+                 (u32)sizeof(NaniteClusterDrawRange), kNaniteMaxIndirectDraws,
+                 (u32)sizeof(NaniteIndirectCommand));
     return true;
 }
 
@@ -505,6 +556,9 @@ void NaniteCull::Shutdown() {
     m_BVHLeafBuf.reset();
     m_BVHSphereBuf.reset();
     m_LODInfoBuf.reset();
+    m_ClusterDrawRangeBuf.reset();     // 【任务 16】每簇绘制参数
+    m_IndirectDrawBuf.reset();         // 【任务 16】间接绘制命令
+    m_DrawCountBuf.reset();            // 【任务 16】绘制计数
     m_VisibleClusterBuf.reset();
     m_VisibleClusterCountBuf.reset();
     m_CullStatsBuf.reset();
@@ -525,6 +579,8 @@ void NaniteCull::Shutdown() {
     m_HiZSampler.reset();
     m_BVHData = NaniteClusterBVH{};
     m_LODInfo.clear();
+    m_ClusterDrawRanges.clear();       // 【任务 16】绘制参数的 CPU 镜像
+    m_FrameDrawCapacity = kNaniteMaxIndirectDraws;
     m_BVHReady = false;
     m_BVHInstanceDomain = 0u;
     m_FrameHiZRequested = false;
@@ -971,8 +1027,24 @@ bool NaniteCull::SetClusterBVH(std::span<const NaniteClusterRecord> clusters,
         }
     }
 
+    // ── ③b.【任务 16】每簇绘制参数（`triangleOffset/triangleCount/vertexOffset` → 间接命令字段）
+    // 【为什么在 CPU 侧建表】与簇球表/ LOD 元数据同一个理由：GPU 只需三个 u32，紧凑表让访存
+    //   步长小 4 倍；而且表由纯函数 `NaniteMakeClusterDrawRange` 从簇记录**逐位搬运** ⇒
+    //   CPU 参考打包与 GPU 打包读的是**同一份比特**（不一致就一定是 bug，不是舍入差异）。
+    std::vector<NaniteClusterDrawRange> drawRanges(clusterCount);
+    for (u32 i = 0u; i < clusterCount; ++i) {
+        drawRanges[i] = NaniteMakeClusterDrawRange(clusters[i]);
+    }
+    if (!drawRanges.empty()) {
+        if (void* p = m_ClusterDrawRangeBuf->Map()) {
+            std::memcpy(p, drawRanges.data(), sizeof(NaniteClusterDrawRange) * drawRanges.size());
+            m_ClusterDrawRangeBuf->Unmap();
+        }
+    }
+
     m_BVHData   = std::move(built);
     m_LODInfo   = std::move(lodInfo);
+    m_ClusterDrawRanges = std::move(drawRanges);
     m_BVHReady  = !m_BVHData.Empty();
     m_BVHInstanceDomain = 0u;   // 每帧在 RecordCullChainPass 里按本帧实例数重算
 
@@ -994,6 +1066,21 @@ bool NaniteCull::SetClusterBVH(std::span<const NaniteClusterRecord> clusters,
                  levelCounts[0], levelCounts[1], levelCounts[2], levelCounts[3],
                  levelCounts[4], levelCounts[5], levelCounts[6], levelCounts[7],
                  (u32)lodOffsets.size());
+    // 【任务 16】绘制参数的规模读数：`indexEnd` = 全部簇里最大的 `firstIndex + indexCount`
+    //   ⇒ 光栅端的占位索引缓冲必须覆盖它（否则 IA 会越界读索引）。
+    {
+        u64 indexEnd = 0u;
+        u64 maxIndexCount = 0u;
+        for (const NaniteClusterDrawRange& r : m_ClusterDrawRanges) {
+            const u64 end = (u64)r.firstIndex + (u64)r.indexCount;
+            if (end > indexEnd) indexEnd = end;
+            if (r.indexCount > maxIndexCount) maxIndexCount = r.indexCount;
+        }
+        HE_CORE_INFO("NaniteCull: 每簇绘制参数入库完成（{} 条 × {}B；最大 indexCount={}，"
+                     "索引位置上界={}；光栅端占位索引缓冲必须覆盖该上界）",
+                     (u32)m_ClusterDrawRanges.size(), (u32)sizeof(NaniteClusterDrawRange),
+                     maxIndexCount, indexEnd);
+    }
     return true;
 }
 
@@ -1237,11 +1324,16 @@ void NaniteCull::RecordCullChainPass(rhi::IRHICommandList* cmd,
 
     // ── 【与任务 13 同一处修法】计数器的"每帧清零"必须在命令缓冲内完成（GPU 有序）──
     // 录制期的主机写会与派发竞争（CPU 领先 GPU ⇒ 两帧原子累加叠加，任务 13 实测恰为 2 倍）。
-    // 本次：可见簇计数（4B）+ 三阶段读数整块（64B），都从同一个常驻 0 源缓冲拷贝。
+    // 本次：可见簇计数（4B）+ 三阶段读数整块（64B）+【任务 16】绘制计数（4B），
+    // 都从同一个常驻 0 源缓冲拷贝。
     cmd->CopyBuffer(m_ClearZeroBuf.get(), m_VisibleClusterCountBuf.get(),
                     sizeof(u32), kNaniteZeroSlotClusterCount, 0u);
     cmd->CopyBuffer(m_ClearZeroBuf.get(), m_CullStatsBuf.get(),
                     kNaniteCullStatsBytes, kNaniteZeroSlotStats, 0u);
+    // 【任务 16】绘制计数清零：它同时是"绘制端本帧要画的条数"与"命令条数"的载体，
+    //   必须在本帧派发**之前**为 0（否则会残留上一帧的条数 ⇒ 空转/越界画旧命令）。
+    cmd->CopyBuffer(m_ClearZeroBuf.get(), m_DrawCountBuf.get(),
+                    sizeof(u32), kNaniteZeroSlotDrawCount, 0u);
     cmd->PipelineBarrier(rhi::PipelineStage::Transfer,
                          rhi::PipelineStage::ComputeShader,
                          rhi::ResourceState::CopyDst,
@@ -1259,6 +1351,8 @@ void NaniteCull::RecordCullChainPass(rhi::IRHICommandList* cmd,
     m_ChainParams.screenH      = (float)m_FrameScreenH;
     m_ChainParams.hizMipCount  = m_FrameHiZMipCount;
     m_ChainParams.lodEnabled   = (m_FrameFocalPixels > 0.0f) ? 1u : 0u;
+    // 【任务 16】绘制容量（`misc.z`）：间接命令与绘制计数都按它设门 ⇒ 计数恒 ≤ 容量。
+    m_ChainParams._pad1        = m_FrameDrawCapacity;
     if (void* p = m_ChainParamBuf ? m_ChainParamBuf->Map() : nullptr) {
         std::memcpy(p, &m_ChainParams, sizeof(m_ChainParams));
         m_ChainParamBuf->Unmap();

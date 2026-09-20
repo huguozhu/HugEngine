@@ -95,8 +95,8 @@ bool NaniteRenderer::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) 
               && m_Cull.IsReady() && m_Raster.IsReady();
 
     HE_CORE_INFO("NaniteRenderer: 初始化完成（ready={}，开关默认={}，假簇数={}，合成实例数={}，档位={}）—— "
-                 "任务 3 注册 Nanite_Cull + Nanite_Raster（计数→间接绘制链）；"
-                 "任务 13 追加 Nanite_InstanceCull（视锥→可见实例列表+计数）",
+                 "模块自持「计数 → 间接绘制」链（任务 3 的假簇链 + 任务 16 的可见簇链，"
+                 "默认由可见簇列表驱动绘制）",
                  m_Ready, m_Settings.enabled ? 1 : 0, m_Settings.fakeClusters,
                  m_Settings.instanceTestCount,
                  m_Settings.rasterMode == NaniteRasterMode::Hybrid ? "混合光栅" : "软光栅");
@@ -144,6 +144,15 @@ void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb,
 
     // 唯一真值 → 模块内部：把本帧的假簇数量交给剔除段（cfg/面板只写 NaniteSettings）
     m_Cull.SetFakeClusterCount(m_Settings.fakeClusters);
+    // 【任务 16】绘制容量（cfg `nanite_draw_capacity`；0 ⇒ 容量上界）。它同时决定
+    //   "间接命令写多少条"与"`DrawIndexedIndirectCount` 的 maxDrawCount"，两处同一个数。
+    m_Cull.SetDrawCapacity(m_Settings.drawCapacity);
+
+    // ── 【任务 16】定"谁来画"（每帧一次，两条链互斥）──
+    // 可见链可用 ⇔ 资产 + BVH 已入库（那时 Phase 2/3 才会派发、才会写出命令）。
+    // 【为什么"实例数为 0"不算退化】0 实例正是"零可见簇 ⇒ 零绘制"的边界场景，必须走可见链
+    //   （走假簇链会画出 6 条，边界验收就失去意义 —— 见 §14.8 任务 16 的验收③）。
+    m_DrawFromFakeChain = m_Settings.fakeChain || !m_Cull.IsClusterBVHReady();
 
     // ── 【任务 13/15】三阶段剔除的每帧输入：视锥 / 合成实例表 / 像素焦距 / 屏幕尺寸 ──
     // 【输入】本帧的 view-proj 与相机（`camera`）。模块据此提取 6 平面、生成**合成实例网格**
@@ -156,28 +165,34 @@ void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb,
                              m_Width, m_Height, camera.fov,
                              m_Settings.instanceTestCount);
 
-    // ── Nanite_Cull：compute 逐簇写间接命令 + 原子累加计数 ──
+    // ── Nanite_Cull：compute 逐簇写间接命令 + 原子累加计数（任务 3 的**假簇链**）──
     // writes = {gbDepth, gbWorldPos} 是复刻 `GB_Clear` 的 WAW 声明（§14.5），
     // 本 pass 并不真的写它们；它真正的输出是模块自持的命令/计数缓冲（不走帧图资源）。
     // 【任务 15】本 pass 的三个每帧重置（命令计数 / 光栅化簇计数 / 哨兵填充）已全部改成命令缓冲内
     //   的拷贝（源是常驻 0 与常驻 0xFF 的 TransferSrc 缓冲）⇒ 不再有"主机写 vs 派发"的竞态。
+    // 【任务 16 的改动：`Nanite_Raster` **不再是一个独立 pass**】
+    //   绘制必须"紧跟产出命令的那次派发"，而帧图对两个零资源 pass 的排序**不可依赖**
+    //   （`RenderGraph::TopologicalSort` 对 inDegree=0 的 pass 按 LIFO 处理 ⇒ 注册顺序 ≠ 执行
+    //   顺序；任务 15 已经为 Phase 1→Phase 2 踩过这条）。因此把绘制录在**同一个 pass 体**内，
+    //   顺序由 `NaniteRaster::RecordRasterPass` 开头的 `Compute → DrawIndirect` 屏障显式给出：
+    //     · 假簇链是绘制来源 ⇒ 本 pass 里 `RecordCullPass` 之后紧接着录制绘制；
+    //     · 可见链是绘制来源 ⇒ 本 pass 只算不画（绘制录在 `Nanite_CullChain3` 体内）。
+    //   代价（如实）：开启档 pass 数 15 → **14**（少一个 `Nanite_Raster`）；判据 ⑥b 只要求
+    //   "既有 12 个 pass 的集合与顺序一字不变"，模块自己的 pass 组合不在此约束内（任务 15
+    //   也做过同类合并：16 → 15）。
+    const bool drawFromFakeChain = m_DrawFromFakeChain;   // 按值捕获：帧图执行在注册之后
     rg.AddPass("Nanite_Cull",
         {},
         {RG_WRITE(gb.depth), RG_WRITE(gb.worldPos)},
-        [this](rhi::IRHICommandList* cmd) {
+        [this, drawFromFakeChain](rhi::IRHICommandList* cmd) {
             m_Cull.RecordCullPass(cmd);
-        });
-
-    // ── Nanite_Raster：DrawIndexedIndirectCount 消费计数，写模块自建的 1×1 R8 目标 ──
-    // 与 Nanite_Cull 的 WAW（同一组句柄）保证它排在 Cull 之后执行。
-    rg.AddPass("Nanite_Raster",
-        {},
-        {RG_WRITE(gb.depth), RG_WRITE(gb.worldPos)},
-        [this](rhi::IRHICommandList* cmd) {
-            m_Raster.RecordRasterPass(cmd,
-                                      m_Cull.GetIndirectCmdBuffer(),
-                                      m_Cull.GetCountBuffer(),
-                                      m_Cull.GetMaxFakeClusters());
+            if (drawFromFakeChain) {
+                // 假簇链的绘制端点：消费 `Nanite_Cull` 刚写出的命令 + 计数
+                m_Raster.RecordRasterPass(cmd,
+                                          m_Cull.GetIndirectCmdBuffer(),
+                                          m_Cull.GetCountBuffer(),
+                                          m_Cull.GetMaxFakeClusters());
+            }
         });
 
     // ── §14.8 任务 6：Nanite_MeshTest（最小 mesh PSO 通道）──    // 【为什么注册在**这一处**（GBuffer 之前的第一处挂钩），而不是 GBuffer 之后那一处】
@@ -220,13 +235,24 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
     //   也在同一张纹理上做无声明的存储写入，让帧图只跟踪其中一条会与另一条的真实布局打架。
     // 【三段顺序】不靠帧图，靠同一 pass 体内命令缓冲的屏障（见 `NaniteCull::RecordCullChainPass`）。
     // 【回调】**执行期**才取纹理与构建函数：第 1 帧构建期纹理还不存在，且尺寸变化会重建它。
+    const bool drawFromVisibleChain = !m_DrawFromFakeChain;   // 按值捕获（见 `Nanite_Cull` 的说明）
     rg.AddPass("Nanite_CullChain3",
         {{gb.depth, ResourceAccess::Read}},
         {},
-        [this, hiz](rhi::IRHICommandList* cmd) {
+        [this, hiz, drawFromVisibleChain](rhi::IRHICommandList* cmd) {
             rhi::IRHITexture* hizTexture = hiz.texture ? hiz.texture() : nullptr;
             rhi::IRHITexture* depthTex   = hiz.depth ? hiz.depth() : nullptr;
             m_Cull.RecordCullChainPass(cmd, hizTexture, depthTex, m_Settings.hiz);
+            // 【任务 16】可见链是绘制来源 ⇒ 在**同一个 pass 体**内紧接着录制间接绘制：
+            //   命令与绘制计数刚由上面的派发写出，`RecordRasterPass` 开头的
+            //   `Compute → DrawIndirect` 屏障把可见性定序到绘制之前。
+            //   `maxDrawCount` = 间接命令缓冲容量（CPU 侧把绘制容量钳到它以内 ⇒ 恒不越界）。
+            if (drawFromVisibleChain) {
+                m_Raster.RecordRasterPass(cmd,
+                                          m_Cull.GetIndirectDrawBuffer(),
+                                          m_Cull.GetDrawCountBuffer(),
+                                          m_Cull.GetMaxIndirectDraws());
+            }
         });
 
     // 任务 4 的 UAV 自证通道：默认关闭（`nanite_test_write=0`）⇒ 这里什么都不注册。
@@ -325,11 +351,22 @@ void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
         HE_CORE_ERROR("NaniteRenderer: cluster BVH / LOD 元数据构建上传失败（簇 {}）—— "
                       "Nanite_CullChain3 的 Phase 2/3 本帧起跳过派发", (u32)asset.clusters.size());
     }
+
+    // ── ⑥ 【任务 16】把"占位索引缓冲必须覆盖的索引位置上界"交给绘制端 ──
+    // 【为什么用资产的索引总数】每个簇是索引段里的一个连续三角形区间 ⇒ 任意可见簇的
+    //   `firstIndex + indexCount ≤ 索引总数`；绘制端按这个上界建占位索引缓冲，间接命令里的
+    //   真实 firstIndex 就不会越界读索引（本设备未启用 `robustBufferAccess`）。
+    // 【为什么在这里调用是安全的】上面 `UploadPackedAsset` 内部已经 `WaitIdle()` ⇒ 没有任何在飞
+    //   的命令缓冲引用旧缓冲，替换/扩容不会造成 use-after-free；之后各帧只读新缓冲。
+    m_Raster.SetPlaceholderIndexCapacity(asset.header.indexCount);
 }
 
 void NaniteRenderer::LogFakePipelineReadback() {
     // 关闭档（或未就绪）不打印：关闭档的日志与转储必须与基线逐位一致。
     if (!m_Settings.enabled || !m_Ready) return;
+    // 【任务 16】只在**假簇链是绘制来源**时打印：默认档走可见簇链，那一行由
+    //   `LogVisibleWiringReadback` 给出；两条都打印会让同一帧出现两个互相矛盾的"画了多少"。
+    if (!m_DrawFromFakeChain) return;
 
     // X = 计数缓冲的值（GPU 原子累加"实际写入的命令条数"）
     u32 x = 0;
@@ -353,15 +390,97 @@ void NaniteRenderer::LogFakePipelineReadback() {
         }
     }
 
-    // Z = 绘制端片元原子计数（1×1 目标 ⇒ 每被光栅化一个簇恰好加一）
-    u32 z = 0;
-    if (auto* b = m_Cull.GetRasterCountBuffer()) {
-        if (void* p = b->Map()) { z = *static_cast<const u32*>(p); b->Unmap(); }
-    }
+    // Z = 绘制端"每个绘制恰好一次"的原子计数（`SV_PrimitiveID == 0`）
+    const u32 z = m_Raster.ReadbackRasterCount();
 
     // 【恰好一行】任务 3 的验收出口：X == Y == Z == N
     HE_CORE_INFO("[Nanite] fake_clusters={} count_buffer={} indirect_cmds={} rasterized_clusters={}",
                  m_Settings.fakeClusters, x, y, z);
+}
+
+void NaniteRenderer::LogVisibleWiringReadback() {
+    // 关闭档 / 未就绪：不打印（关闭档的日志必须与基线逐字一致）。
+    if (!m_Settings.enabled || !m_Ready) return;
+
+    // ── ① V：可见簇计数（剔除端 Phase 3 的原子计数；GPU 读回）──
+    u32 visible = 0u;
+    if (auto* b = m_Cull.GetVisibleClusterCountBuffer()) {
+        if (void* p = b->Map()) { visible = *static_cast<const u32*>(p); b->Unmap(); }
+    }
+
+    // ── ② D：绘制计数（= `DrawIndexedIndirectCount` 用的 count；GPU 读回）──
+    u32 drawCount = 0u;
+    if (auto* b = m_Cull.GetDrawCountBuffer()) {
+        if (void* p = b->Map()) { drawCount = *static_cast<const u32*>(p); b->Unmap(); }
+    }
+    // ── ③ T：因绘制容量不足而未写命令的簇数（截断自证；GPU 读回）──
+    u32 stats[kNaniteCullStatsCapacity] = { 0u };
+    if (auto* b = m_Cull.GetCullStatsBuffer()) {
+        if (void* p = b->Map()) { std::memcpy(stats, p, sizeof(stats)); b->Unmap(); }
+    }
+    const u32 truncated = stats[kNaniteCullStatDrawTruncated];
+
+    // ── ④ R：绘制端"每个绘制恰好一次"的原子计数（GPU 读回）──
+    const u32 rasterized = m_Raster.ReadbackRasterCount();
+
+    // ── ⑤ C：逐条核验间接命令缓冲（合法 + 与 CPU 参考逐字段一致）──
+    // 【为什么读的是 [0, visible)】命令与可见簇引用同槽位写入（容量也相同）⇒ 有效条数就是
+    //   可见簇计数；`visible` 超过缓冲容量时按容量截断（防御脏计数，绝不越界读）。
+    const auto& drawRanges = m_Cull.GetClusterDrawRanges();
+    const u32 clusterCount = m_Cull.GetBVHClusterCount();
+    const u32 readable = (visible < kNaniteMaxIndirectDraws) ? visible : kNaniteMaxIndirectDraws;
+    u32 indirectOk = 0u;
+    u32 fieldMismatch = 0u;
+    if (auto* b = m_Cull.GetIndirectDrawBuffer()) {
+        if (void* p = b->Map()) {
+            const auto* cmds = static_cast<const NaniteIndirectCommand*>(p);
+            for (u32 i = 0u; i < readable; ++i) {
+                const NaniteIndirectCommand& cmd = cmds[i];
+                if (!NaniteIsIndirectCommandLegal(cmd, clusterCount)) continue;   // 坏命令/未写槽位
+                const u32 cluster = cmd.firstInstance;
+                if (cluster >= (u32)drawRanges.size()) { ++fieldMismatch; continue; }
+                if (!NaniteIndirectCommandMatchesRange(cmd, drawRanges[cluster], cluster)) {
+                    ++fieldMismatch;
+                    continue;
+                }
+                ++indirectOk;
+            }
+            b->Unmap();
+        }
+    }
+
+    // ── ⑥ CPU 参考：同一份输入（同一个视锥/实例表/BVH/LOD 元数据/焦距），同一条打包约定 ──
+    // 【为什么再算一遍】它给出"应有"的可见簇集合与命令，是 ⑤ 的比对基准；这里与 `LogCull3Readback`
+    //   的口径完全一致（同一帧、同一份比特）。dump 帧只跑一次，成本可忽略。
+    std::vector<NaniteVisibleClusterRef> cpuVisible;
+    (void)m_Cull.RunCullChainCPUReference(cpuVisible);
+    u32 cpuTruncated = 0u;
+    std::vector<NaniteIndirectCommand> cpuCommands(cpuVisible.size());
+    const u32 cpuWritten = NanitePackVisibleIndirectCommands(
+        cpuVisible.empty() ? nullptr : cpuVisible.data(), (u32)cpuVisible.size(),
+        drawRanges.empty() ? nullptr : drawRanges.data(), (u32)drawRanges.size(),
+        cpuCommands.empty() ? nullptr : cpuCommands.data(), (u32)cpuCommands.size(),
+        &cpuTruncated);
+    cpuCommands.resize(cpuWritten);
+
+    // ── ⑦ 汇总判据 ──
+    // `empty_draws` = 命令条数里"没产生任何片元"的条数（命令有效但几何被丢弃 ⇒ 空转）。
+    const u32 emptyDraws = (visible > rasterized) ? (visible - rasterized) : 0u;
+    // `mismatch` = 逐条字段不一致数 + 四个核心数的两两偏差（任一非 0 都说明接线有问题）。
+    u32 mismatch = fieldMismatch;
+    const auto absDiff = [](u32 a, u32 b) -> u32 { return (a > b) ? (a - b) : (b - a); };
+    mismatch += absDiff(visible, indirectOk);
+    mismatch += absDiff(visible, drawCount);
+    mismatch += absDiff(drawCount, rasterized);
+
+    // 【恰好一行】任务 16 的验收出口：正常档 V == C == D == R、E == 0、M == 0。
+    HE_CORE_INFO("[Nanite] visible_wiring visible={} indirect_count={} draws={} rasterized={} "
+                 "empty_draws={} mismatch={} src={} truncated={} max_draws={} cpu_cmds={} "
+                 "placeholder_indices={}",
+                 visible, indirectOk, drawCount, rasterized, emptyDraws, mismatch,
+                 m_DrawFromFakeChain ? "fake" : "visible",
+                 truncated, m_Cull.GetMaxIndirectDraws(), cpuWritten,
+                 m_Raster.GetPlaceholderIndexCount());
 }
 
 void NaniteRenderer::LogCull3Readback() {

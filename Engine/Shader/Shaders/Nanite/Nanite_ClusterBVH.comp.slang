@@ -19,6 +19,24 @@
 //   ③ Phase 3：DAG 割（`lodSelected`，用 `u_LodInfo` 的 own/parent 误差 + 相机距离 + 像素焦距）。
 //   另加三组读数（`u_Stats`）：通过视锥的簇数、被遮挡的簇数、**选中级别分布**直方图 + 访问节点数。
 //
+// 【任务 16 的改动（本文件现在也产出"光栅端要用的东西"）】Phase 3 接受一个簇时，在**同一个原子
+//   槽位**上除可见簇引用外再写一条 `IndirectCmd`（= `VkDrawIndexedIndirectCommand`）：
+//     indexCount    = 簇内索引个数（`triangleCount × 3`）
+//     firstIndex    = 簇在索引段里的首个索引位置（`triangleOffset × 3`）
+//     vertexOffset  = 簇的顶点段起始记录下标
+//     instanceCount = 1
+//     firstInstance = **簇号**（光栅端用 `SV_InstanceID` 收它）
+//   并把"已接受的绘制条数"原子累加进 `u_DrawCount`（= 绘制端 `DrawIndexedIndirectCount` 的计数）。
+//   【为什么用**第二个**计数器而不是复用 `u_VisibleClusterCount`】后者是任务 14/15 的验收读数
+//   （"可见簇总数"），必须**不截断**；而绘制计数必须满足"≤ 间接缓冲容量"这条硬约束
+//   （`vkCmdDrawIndexedIndirectCount` 的 count 超过 maxDrawCount 不是定义行为）。两者分开后：
+//   容量足够时它们相等（正常路径），容量不足时可见计数保持真值、绘制计数被钳住 + 截断计数入
+//   `u_Stats[kStatDrawTruncated]`。
+//   【无空转】计数与命令由**同一次派发**写出，绘制端只画 `[0, count)` ⇒ 不存在"没写就画"。
+//   【顺序】绘制端由 `NaniteRenderer` 录在**同一个帧图 pass** 内（本 pass 之后一个屏障），
+//   不依赖帧图对两个零资源 pass 的排序（帧图对 inDegree=0 的 pass 按 LIFO 处理，注册顺序 ≠
+//   执行顺序 —— 任务 15 的教训）。
+//
 // 【与 C++ 侧的布局契约】本文件的每个结构体都必须与
 //   `Engine/Render/Nanite/NaniteTypes.h` 的 "§14.8 任务 14/15" 小节逐字段一致（那边用
 //   sizeof + offsetof 的 static_assert 钉住）：
@@ -26,9 +44,12 @@
 //     · `ClusterSphere`  —— 16B：float4(xyz = 网格空间球心，w = 半径)
 //     · `ClusterRef`     —— 8B：(instance, cluster)
 //     · `LODInfo`        —— 16B：ownError / parentError / lodLevel / flags(bit0 = 根)
+//     · `ClusterDrawRange`—— 16B：【任务 16】每簇的绘制参数（firstIndex/indexCount/vertexOffset）
+//     · `IndirectCmd`    —— 20B：【任务 16】= VkDrawIndexedIndirectCommand（5×u32）
 //     · `InstanceObject` —— GPUSceneObject（128B）契约的镜像（只用 `ltw3.xyz` 与 `indexCount`）
 //     · `CullChainParams`—— 112B：4 个 vp 行 + cameraPos + lodParams + misc
-//     · `u_Stats`        —— 扁平 u32：0=通过视锥、1=遮挡、2..9=级直方图、10=访问节点数
+//     · `u_Stats`        —— 扁平 u32：0=通过视锥、1=遮挡、2..9=级直方图、10=访问节点数、
+//                           11=【任务 16】因绘制容量不足被截断的簇数
 //     · push constant    —— 6 个世界空间视锥平面 + 4 个 u32（112B，与任务 14 完全一致）
 //
 // 【为什么把 localToWorld 拆成 4 个 float4】Slang 的矩阵布局约定（行/列主序）与"内存里的
@@ -60,6 +81,9 @@
 //   8 = 【任务 15】三阶段参数（只读；vp 的 4 行 + 相机 + LOD/Hi-Z 参数）
 //   9 = 【任务 15】三阶段读数（读写；每帧由命令缓冲内的拷贝清 0）
 //  10 = 【任务 15】Hi-Z 金字塔（R32_FLOAT，采样器点采样 + 层间线性；见下面的选层说明）
+//  11 = 【任务 16】每簇绘制参数（只读；firstIndex / indexCount / vertexOffset）
+//  12 = 【任务 16】间接绘制命令（读写；与可见簇列表**同一个槽位**）
+//  13 = 【任务 16】绘制计数（读写；单个 uint，每帧由命令缓冲内的拷贝清 0）
 
 // BVH 节点（32B）：与 NaniteBVHNode 逐字段一致
 //   link.x = 内部节点左孩子下标 / 叶子簇表首下标
@@ -91,6 +115,27 @@ struct LODInfo {
     float parentError;
     uint  lodLevel;
     uint  flags;
+};
+
+// 【任务 16】每簇的绘制参数（16B；与 `NaniteClusterDrawRange` 逐字段一致）
+//   firstIndex   = 簇在索引段里的首个**索引位置**（= triangleOffset × 3）
+//   indexCount   = 簇内索引个数（= triangleCount × 3；3 的倍数）
+//   vertexOffset = 簇的顶点段起始**记录下标**（原样搬运进命令）
+struct ClusterDrawRange {
+    uint firstIndex;
+    uint indexCount;
+    int  vertexOffset;
+    uint _pad;
+};
+
+// 【任务 16】间接绘制命令（20B；必须与 VkDrawIndexedIndirectCommand 二进制兼容：
+//   5×u32 = 20B，顺序 indexCount/instanceCount/firstIndex/vertexOffset/firstInstance）
+struct IndirectCmd {
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int  vertexOffset;
+    uint firstInstance;
 };
 
 // GPUSceneObject（128B）的 Slang 镜像：字段顺序/类型必须与 NaniteInstanceGpuObject 一致。
@@ -125,7 +170,7 @@ struct CullChainParams {
     float4 vpRow3;
     float4 cameraPos;
     float4 lodParams;
-    uint4  misc;
+    uint4  misc;          // (hizMipCount, lodEnabled, drawCapacity, 保留)
 };
 
 [[vk::binding(0, 0)]] StructuredBuffer<BVHNode>       u_Nodes;
@@ -140,6 +185,9 @@ struct CullChainParams {
 [[vk::binding(9, 0)]] RWStructuredBuffer<uint>        u_Stats;
 [[vk::binding(10, 0)]] Texture2D<float>               u_HiZ;
 [[vk::binding(10, 0)]] SamplerState                   u_HiZSampler;
+[[vk::binding(11, 0)]] StructuredBuffer<ClusterDrawRange> u_ClusterDrawRanges;  // 【任务 16】只读
+[[vk::binding(12, 0)]] RWStructuredBuffer<IndirectCmd> u_IndirectCommands;      // 【任务 16】读写
+[[vk::binding(13, 0)]] RWStructuredBuffer<uint>        u_DrawCount;             // 【任务 16】读写
 
 [[vk::push_constant]] cbuffer NaniteClusterBVHParams {
     float4 planes[6];         // 偏移 0 ：世界空间视锥六平面（[左,右,下,上,近,远]，n 已归一化）
@@ -148,6 +196,8 @@ struct CullChainParams {
     uint   nodeCount;         // 偏移 104：BVH 节点数
     uint   visibleCapacity;   // 偏移 108：可见簇列表容量（超出容量的槽位不写；计数照常累加，
                               //             读回时按容量截断 —— 与 CPU 参考的写入口径一致）
+                              //             【任务 16】间接命令同槽位写入，但按 params.misc.z
+                              //             的绘制容量单独设门（≤ 本容量）
 };
 
 // 显式栈容量：必须与 C++ 侧 kNaniteBVHMaxStackDepth（= 32）一致。
@@ -158,6 +208,7 @@ static const uint kStatFrustumPass = 0u;    // Phase 2 前半：通过簇球视�
 static const uint kStatOccluded    = 1u;    // Phase 2 后半：被 Hi-Z 判为遮挡的引用数
 static const uint kStatLodBase     = 2u;    // Phase 3：直方图起点（8 个槽：级 0..7）
 static const uint kStatVisited     = 10u;   // 本 pass 访问过的 BVH 节点数（全部实例求和）
+static const uint kStatDrawTruncated = 11u; // 【任务 16】因绘制容量不足而未写间接命令的簇数
 
 // Hi-Z 的最小可采样层：**1**（金字塔贴图的 mip0 从未被写入 —— `BuildHiZPyramid` 从深度输入
 //   直接下采样进 mip1；既有 `GPUCull_TwoPhase.comp.slang:34` 把下限钳到 0 是一处既有缺陷）。
@@ -256,6 +307,9 @@ void main(uint3 id : SV_DispatchThreadID) {
     float focalPixels     = params.lodParams.x;
     float thresholdPixels = params.lodParams.y;
     bool  lodEnabled      = (params.misc.y != 0u) && (focalPixels > 0.0f);
+    // 【任务 16】间接命令缓冲的容量上界（CPU 侧的 cfg 键 `nanite_draw_capacity`，已钳到
+    //   可见簇引用表容量与缓冲容量；0/缺省时 = 容量上界）。绘制计数恒 ≤ 它 ⇒ 恒 ≤ maxDrawCount。
+    uint  drawCapacity    = params.misc.z;
 
     // ③ 实例变换的平移列（列主序的第 4 列）；本任务的合成实例是纯平移，半径不变
     float3 origin = instance.ltw3.xyz;
@@ -313,6 +367,27 @@ void main(uint3 id : SV_DispatchThreadID) {
                     ref.instance = id.x;
                     ref.cluster  = cluster;
                     u_VisibleClusters[slot] = ref;
+                }
+
+                // ── 【任务 16】把这条可见簇直接翻译成光栅端要用的间接绘制命令 ──
+                // 【同槽位】命令写在与引用**完全相同的槽位**上 ⇒ 槽位 k 的引用与命令永远是同一条簇，
+                //   读回逐条比对不需要任何映射（容量也刻意取成同一个数）。
+                // 【容量截断】超过 drawCapacity（≤ 缓冲容量，CPU 侧钳过）的槽位不写命令、只记数
+                //   ⇒ 绘制计数恒 ≤ maxDrawCount（`vkCmdDrawIndexedIndirectCount` 的硬约束）。
+                // 【绘制计数】只在**真的写了命令**时 +1 ⇒ count 恰好 = 命令缓冲里 [0, count) 的有效条数，
+                //   绘制端按 [0, count) 画 ⇒ 一条空转都不会有。
+                if (slot < drawCapacity) {
+                    ClusterDrawRange range = u_ClusterDrawRanges[cluster];
+                    IndirectCmd cmd;
+                    cmd.indexCount    = range.indexCount;      // 簇内索引个数（triangleCount × 3）
+                    cmd.instanceCount = 1u;                    // 一个簇 = 一次绘制
+                    cmd.firstIndex    = range.firstIndex;       // 簇在索引段里的首个索引位置
+                    cmd.vertexOffset  = range.vertexOffset;     // 簇的顶点段起始记录下标
+                    cmd.firstInstance = cluster;                // 簇号（光栅端用 SV_InstanceID 收）
+                    u_IndirectCommands[slot] = cmd;
+                    InterlockedAdd(u_DrawCount[0], 1u);
+                } else {
+                    InterlockedAdd(u_Stats[kStatDrawTruncated], 1u);
                 }
             }
         } else {

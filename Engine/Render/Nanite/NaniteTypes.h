@@ -363,6 +363,7 @@ inline constexpr u32 kNaniteFakeClusterIndexCount = 3u;
 // 因此这个 pass 对可见画面零影响（§14.2 不变式 1、§14.8 任务 3 的验收）。
 inline constexpr u32 kNaniteRasterTargetSize = 1u;
 
+
 // ── §14.8 任务 6：mesh 通道自建的小目标尺寸 ──
 // 【为什么又是 1×1】与上面那条同理：mesh shader 输出一个覆盖整个 NDC 的四边形（2 个三角形），
 // 1×1 目标 ⇒ 每个三角形恰好 1 个片元 ⇒ 片元的原子加就等于**被光栅化的 mesh 图元数**，
@@ -1947,6 +1948,177 @@ struct NaniteClusterBVHTraversalStats {
             continue;                                  // ③ 视锥外
         }
         outVisibleIndices[written++] = i;              // ④ 升序紧凑写入
+    }
+    return written;
+}
+
+// ============================================================
+// §14.8 任务 16：可见簇列表 → 间接绘制参数（把 `u_VisibleClusters` 接到光栅端）
+//
+// 【任务 16 要补的缺口】任务 14/15 把可见簇引用（`NaniteVisibleClusterRef`）算出来了，但**没有
+//   消费者**：光栅端（`Nanite_Raster`）当时消费的是任务 3 那条"假簇链"（6 条固定命令）。
+//   本节的三个纯函数就是那段缺失的映射 —— 每条可见簇引用 → 一条
+//   `VkDrawIndexedIndirectCommand`：
+//
+//     indexCount    = 簇内**索引个数** = `triangleCount × 3`
+//     firstIndex    = 簇在打包索引段里的**首个索引位置** = `triangleOffset × 3`
+//     vertexOffset  = 簇的**顶点段起始记录下标** = `vertexOffset`（原样搬运）
+//     instanceCount = 1（一个簇一次绘制）
+//     firstInstance = **簇号**（`.nanite` 簇表里的下标）—— 光栅端用 `SV_InstanceID` 收它，
+//                     用于"这条命令归属哪个簇"的调试观察与逐条比对
+//
+// 【为什么 firstIndex 是 `triangleOffset × 3`（索引位置）而不是字节偏移】
+//   打包索引段是 **3×u16 进 u32[2] = 8B/三角形**（任务 7 的裁决 #6）：每条三角形占 3 个 u16
+//   **索引位置**（第 4 个 u16 是填充）。因此"簇的首个索引位置"= `triangleOffset × 3`，与索引
+//   宽度无关；`indexCount = triangleCount × 3` 与之同量纲。CPU 与 GPU 两侧都用这一个定义。
+//
+// 【"无空转"的口径（本任务的核心）】
+//   ① 计数与命令由**同一次派发**写出：`Nanite_ClusterBVH.comp.slang` 在同一个原子槽位
+//      `slot` 上同时写可见簇引用与间接命令，并只在**接受**该簇时把绘制计数 +1；
+//   ② 绘制只覆盖 `[0, count)`（`DrawIndexedIndirectCount`），count 由同一次派发写出 ⇒
+//      不存在"命令没写就画"或"命令写了却没画"；
+//   ③ 每帧的绘制计数**在命令缓冲内**清零（常驻 0 源 + 4B 拷贝，任务 13/15 的修法），
+//      因此不存在"残留上一帧命令"的窗口（主机写清零会与派发竞争，任务 13 实测错读成两倍）。
+//
+// 【与 Slang 侧的布局契约】下面的两个结构体必须与
+//   `Engine/Shader/Shaders/Nanite/Nanite_ClusterBVH.comp.slang` 的 `ClusterDrawRange` /
+//   `IndirectCmd` 逐字段一致（那边用 `std430` 步长，这边用 static_assert 钉住）。
+// ============================================================
+
+/// 每簇的间接绘制参数（16B；`SetClusterBVH` 一次性上传的只读表）
+///
+/// 【为什么单独一张表而不是让 shader 读 64B 的簇记录】与任务 14 的簇球表同一个理由：遍历只需要
+///   这三个 u32，紧凑表让访存步长小 4 倍；而且这张表由 CPU 从 `NaniteClusterRecord` **逐位搬运**
+///   （同一个纯函数 `NaniteMakeClusterDrawRange`），CPU 参考打包与 GPU 打包读的是**同一份比特**。
+struct alignas(16) NaniteClusterDrawRange {
+    u32 firstIndex   = 0u;    ///< 偏移 0 ：簇在索引段里的首个**索引位置**（= triangleOffset × 3）
+    u32 indexCount   = 0u;    ///< 偏移 4 ：簇内索引个数（= triangleCount × 3；3 的倍数）
+    i32 vertexOffset = 0;     ///< 偏移 8 ：簇的顶点段起始**记录下标**（原样搬运给命令）
+    u32 _pad         = 0u;    ///< 偏移 12：填充到 16B（std430 下与 uint4 步长一致）
+};
+
+static_assert(sizeof(NaniteClusterDrawRange) == 16,
+              "绘制参数必须 16B（StructuredBuffer 步长）");
+static_assert(offsetof(NaniteClusterDrawRange, firstIndex)   == 0,  "firstIndex 必须在偏移 0");
+static_assert(offsetof(NaniteClusterDrawRange, indexCount)   == 4,  "indexCount 必须在偏移 4");
+static_assert(offsetof(NaniteClusterDrawRange, vertexOffset) == 8,  "vertexOffset 必须在偏移 8");
+static_assert(offsetof(NaniteClusterDrawRange, _pad)         == 12, "_pad 必须在偏移 12");
+
+/// 间接命令缓冲的容量（= 可见簇引用表容量）
+///
+/// 【为什么两者同容量】命令与引用按**同一个原子槽位** `slot` 写入 ⇒ 槽位 k 的引用与槽位 k 的
+///   命令永远是同一条簇的记录，读回比对不需要任何映射；容量不同会引入"引用有、命令没有"的
+///   中间态，让"逐条比对"失去意义。
+inline constexpr u32 kNaniteMaxIndirectDraws = kNaniteMaxVisibleClusterRefs;
+
+/// 占位索引缓冲的**容量上界**（`NaniteRaster` 的占位索引缓冲按它钳制）
+///
+/// 【为什么需要占位索引缓冲】本任务的绘制端仍是"数次数"的占位通道（真实软光栅是任务 18）：
+///   `DrawIndexedIndirectCount` 会按命令里的 `firstIndex/indexCount` 去 **绑定索引缓冲**取索引
+///   ⇒ 绑定缓冲必须覆盖整个索引段的位置空间，否则是越界读取（本设备**未**启用
+///   `robustBufferAccess`，越界不是定义行为）。
+/// 【上界怎么来的】簇是索引段的一个连续三角形区间 ⇒ 任意簇的
+///   `firstIndex + indexCount ≤ 索引段总索引数 ≤ 簇数上限 × 每簇三角形上限 × 3`。
+inline constexpr u32 kNanitePlaceholderIndexCountMax =
+    kNaniteMaxBVHClusters * kNaniteMaxClusterTriangles * kNaniteIndicesPerTriangle;
+static_assert(kNanitePlaceholderIndexCountMax == 16384u * 64u * 3u,
+              "占位索引缓冲的上界必须是 簇数上限 × 每簇三角形上限 × 3");
+
+/// 由簇记录推出该簇的绘制参数（CPU 打包与 GPU **同一份**定义的唯一产地）
+///
+/// 【越界防御】`triangleOffset × 3` 与 `triangleCount × 3` 都用 64 位中间量算，避免
+///   损坏的资产（极大 `triangleOffset`）在 32 位乘法里回绕成一个小值而"看起来合法"。
+[[nodiscard]] inline NaniteClusterDrawRange NaniteMakeClusterDrawRange(
+        const NaniteClusterRecord& cluster) {
+    const u64 firstIndex = (u64)cluster.triangleOffset * (u64)kNaniteIndicesPerTriangle;
+    const u64 indexCount = (u64)cluster.triangleCount * (u64)kNaniteIndicesPerTriangle;
+    NaniteClusterDrawRange range;
+    // 超过 u32 的输入按 u32 上限钳（后续的 `IsIndirectCommandLegal` 会因此判不合法 ⇒ 不画。
+    // 正常资产恒不会触发；这里只保证"不产生回绕后的合法假值"）。
+    range.firstIndex   = (firstIndex > 0xFFFFFFFFull) ? 0xFFFFFFFFu : (u32)firstIndex;
+    range.indexCount   = (indexCount > 0xFFFFFFFFull) ? 0xFFFFFFFFu : (u32)indexCount;
+    range.vertexOffset = cluster.vertexOffset;
+    range._pad         = 0u;
+    return range;
+}
+
+/// 一条可见簇引用 → 一条间接绘制命令（约定见本节头注释）
+///
+/// 【`firstInstance` = 簇号】它是光栅端从命令里**唯一**能拿到的簇标识（`SV_InstanceID`）：
+///   用于"这条命令归属哪个簇"的读回比对（`NaniteIndirectCommandMatchesRange`）。
+///   【注意：不能拿它当"绘制唯一键"】可见簇引用是 (实例, 簇) 二元组 ⇒ 同一个簇会被多个实例
+///   各引用一次、产生多条**完全相同**的命令；绘制端的"每个绘制恰好一次"计数因此用的是
+///   `SV_PrimitiveID`（逐次执行的量），而不是按簇号去重。
+[[nodiscard]] inline NaniteIndirectCommand NaniteMakeIndirectCommand(
+        const NaniteClusterDrawRange& range, u32 clusterIndex) {
+    NaniteIndirectCommand cmd;
+    cmd.indexCount    = range.indexCount;
+    cmd.instanceCount = 1u;                 // 一个簇 = 一次绘制（不是"一个实例一次画多簇"）
+    cmd.firstIndex    = range.firstIndex;
+    cmd.vertexOffset  = range.vertexOffset;
+    cmd.firstInstance = clusterIndex;       // 簇号约定（与 `firstInstance` 的 Vulkan 语义一致）
+    return cmd;
+}
+
+/// 一条间接命令是否**自洽合法**（读回时的判据；也是"空转/坏命令"的检查）
+///
+/// 判据：`instanceCount == 1`、`indexCount` 是 3 的倍数且在 `[3, 每簇上限×3]` 内、
+///   `firstInstance`（簇号）落在 `[0, clusterCount)`。哨兵（0xFFFFFFFF）与未写过的槽位必然
+///   有一条不满足 ⇒ 未写槽位不会被误判为"有效命令"。
+[[nodiscard]] inline bool NaniteIsIndirectCommandLegal(const NaniteIndirectCommand& cmd,
+                                                       u32 clusterCount) {
+    if (cmd.instanceCount != 1u) return false;
+    if (cmd.indexCount < kNaniteIndicesPerTriangle) return false;
+    if (cmd.indexCount % kNaniteIndicesPerTriangle != 0u) return false;
+    const u32 maxIndexCount = kNaniteMaxClusterTriangles * kNaniteIndicesPerTriangle;
+    if (cmd.indexCount > maxIndexCount) return false;
+    if (cmd.firstInstance >= clusterCount) return false;
+    return true;
+}
+
+/// 一条命令是否与"该簇应有的绘制参数"**逐项一致**（dump 帧 CPU/GPU 对照的判据）
+[[nodiscard]] inline bool NaniteIndirectCommandMatchesRange(
+        const NaniteIndirectCommand& cmd, const NaniteClusterDrawRange& range,
+        u32 clusterIndex) {
+    return cmd.indexCount    == range.indexCount
+        && cmd.instanceCount == 1u
+        && cmd.firstIndex    == range.firstIndex
+        && cmd.vertexOffset  == range.vertexOffset
+        && cmd.firstInstance == clusterIndex;
+}
+
+/// **CPU 参考的间接命令打包**（§14.8 任务 16 的验收基准；与 GPU 的写入口径逐条同构）
+///
+/// 输入：
+///   · `refs` / `refCount` —— 可见簇引用（`NaniteVisibleClusterRef`；顺序任意，
+///     与 GPU 的原子槽位顺序无关 —— GPU 侧的槽位顺序不定，故比较口径是"按 `firstInstance`
+///     索引后再逐字段比"，不是按槽位下标逐项比）；
+///   · `ranges` / `rangeCount` —— 每簇绘制参数表（`NaniteMakeClusterDrawRange` 的产物）；
+///   · `out` / `outCapacity` —— 输出命令（只写容量内）；
+///   · `outTruncated`（可空）—— 因容量不足而**未写**的命令条数。
+/// 输出：返回值 = 实际写入的命令条数（≤ `outCapacity`）。
+///
+/// 【与 GPU 侧逐条对应（`Nanite_ClusterBVH.comp.slang` 的接受分支）】
+///   ① `ref.cluster >= rangeCount` ⇒ 跳过（GPU 侧对应的防御是 `cluster >= clusterCount`）；
+///   ② 只写 `slot < 容量` 的槽位，**计数照常累加**（GPU 的原子计数不受容量影响）；
+///   ③ 越界/空指针/0 容量一律返回 0（不崩、不越界写）。
+[[nodiscard]] inline u32 NanitePackVisibleIndirectCommands(
+        const NaniteVisibleClusterRef* refs, u32 refCount,
+        const NaniteClusterDrawRange* ranges, u32 rangeCount,
+        NaniteIndirectCommand* out, u32 outCapacity, u32* outTruncated) {
+    if (outTruncated != nullptr) *outTruncated = 0u;
+    if (refs == nullptr || ranges == nullptr || out == nullptr || outCapacity == 0u) return 0u;
+
+    u32 written = 0u;
+    for (u32 i = 0u; i < refCount; ++i) {
+        const u32 cluster = refs[i].cluster;
+        if (cluster >= rangeCount) continue;                 // ① 越界簇下标防御
+        if (written >= outCapacity) {                        // ② 容量截断（计数照常）
+            if (outTruncated != nullptr) ++(*outTruncated);
+            continue;
+        }
+        out[written] = NaniteMakeIndirectCommand(ranges[cluster], cluster);
+        ++written;
     }
     return written;
 }

@@ -2178,3 +2178,311 @@ TEST_CASE("NaniteCull3: 参数与元数据的布局契约") {
     CHECK(std::is_trivially_copyable<NaniteCullChainDesc>::value);
 }
 
+// ============================================================
+// 26. 任务 16：可见簇 → 间接绘制参数（打包 / 截断 / 零可见簇 / 可复现 / 布局）
+//
+// 【本节验证什么】任务 16 的缺口是"可见簇列表没有消费者"。这里逐条钉住那段映射：
+//   · 字段映射：`indexCount = triangleCount × 3`、`firstIndex = triangleOffset × 3`、
+//     `vertexOffset` 原样搬运、`instanceCount = 1`、`firstInstance = 簇号`；
+//   · 容量截断：容量不满时只写容量内、**计数照常**（与 GPU 的原子计数同义），并给出截断条数；
+//   · 零可见簇：输入为空 ⇒ 写 0 条（绘制端据此画 0 次，不崩、不残留）；
+//   · 可复现：同一输入两次打包逐位相同（GPU 侧的槽位顺序不定，故比较口径是"按簇号索引后
+//     逐字段比"，本用例直接比字节是因为 CPU 参考的顺序确定）；
+//   · 与 CPU 参考遍历串起来：遍历给出的可见簇集合 → 打包命令 → 每条命令都能与簇记录对上。
+// ============================================================
+
+namespace {
+
+/// 造一条簇记录：只需 `triangleOffset/triangleCount/vertexOffset` 三个字段参与打包
+NaniteClusterRecord MakeDrawRangeCluster(u32 triangleOffset, u32 triangleCount, u32 vertexOffset) {
+    NaniteClusterRecord record{};
+    record.triangleOffset = triangleOffset;
+    record.triangleCount  = triangleCount;
+    record.vertexOffset   = vertexOffset;
+    return record;
+}
+
+} // namespace
+
+// ── 26a. 字段映射（含首/末簇与簇内索引范围）──
+TEST_CASE("NaniteWiring: 每簇间接绘制参数的字段映射（首/末簇、簇内索引范围、firstInstance=簇号）") {
+    // 三个簇：首簇（第 0 条三角形、1 个三角形）、中间簇、末簇（64 个三角形 = 每簇上限）
+    const NaniteClusterRecord clusters[3] = {
+        MakeDrawRangeCluster(0u, 1u, 0u),        // 首簇
+        MakeDrawRangeCluster(7u, 4u, 33u),       // 中间簇：三角形 [7, 11)、顶点从 33 起
+        MakeDrawRangeCluster(1000u, 64u, 541404u),  // 末簇：吃满每簇上限
+    };
+
+    // ① 绘制参数：`firstIndex = triangleOffset × 3`、`indexCount = triangleCount × 3`
+    const NaniteClusterDrawRange r0 = NaniteMakeClusterDrawRange(clusters[0]);
+    CHECK(r0.firstIndex == 0u);
+    CHECK(r0.indexCount == 3u);
+    CHECK(r0.vertexOffset == 0);
+    CHECK(r0._pad == 0u);
+
+    const NaniteClusterDrawRange r1 = NaniteMakeClusterDrawRange(clusters[1]);
+    CHECK(r1.firstIndex == 21u);          // 7 × 3
+    CHECK(r1.indexCount == 12u);          // 4 × 3
+    CHECK(r1.vertexOffset == 33);
+
+    const NaniteClusterDrawRange r2 = NaniteMakeClusterDrawRange(clusters[2]);
+    CHECK(r2.firstIndex == 3000u);        // 1000 × 3
+    CHECK(r2.indexCount == 192u);         // 64 × 3 = 每簇上限
+    CHECK(r2.vertexOffset == 541404);
+
+    // ② 间接命令：五个字段逐项对照（含 firstInstance = 簇号约定）
+    const NaniteIndirectCommand c0 = NaniteMakeIndirectCommand(r0, 0u);
+    CHECK(c0.indexCount == 3u);
+    CHECK(c0.instanceCount == 1u);
+    CHECK(c0.firstIndex == 0u);
+    CHECK(c0.vertexOffset == 0);
+    CHECK(c0.firstInstance == 0u);        // 首簇的簇号 = 0
+
+    const NaniteIndirectCommand c1 = NaniteMakeIndirectCommand(r1, 1u);
+    CHECK(c1.indexCount == 12u);
+    CHECK(c1.instanceCount == 1u);
+    CHECK(c1.firstIndex == 21u);
+    CHECK(c1.vertexOffset == 33);
+    CHECK(c1.firstInstance == 1u);        // = 簇号，而不是槽位以外的任何东西
+
+    const NaniteIndirectCommand c2 = NaniteMakeIndirectCommand(r2, 2u);
+    CHECK(c2.indexCount == 192u);
+    CHECK(c2.firstIndex == 3000u);
+    CHECK(c2.vertexOffset == 541404);
+    CHECK(c2.firstInstance == 2u);        // 末簇
+
+    // ③ 合法性判据：三条都合法；哨兵（未写过的槽位）必然非法
+    CHECK(NaniteIsIndirectCommandLegal(c0, 3u));
+    CHECK(NaniteIsIndirectCommandLegal(c1, 3u));
+    CHECK(NaniteIsIndirectCommandLegal(c2, 3u));
+    const NaniteIndirectCommand sentinel = [] {
+        NaniteIndirectCommand cmd;
+        std::memset(&cmd, 0xFF, sizeof(cmd));   // 与 `NaniteCull` 的哨兵填充同值
+        return cmd;
+    }();
+    CHECK_FALSE(NaniteIsIndirectCommandLegal(sentinel, 3u));
+
+    // ④ 反例逐条：instanceCount ≠ 1 / indexCount 非 3 的倍数 / 超每簇上限 / 簇号越界
+    NaniteIndirectCommand bad = c1;
+    bad.instanceCount = 2u;
+    CHECK_FALSE(NaniteIsIndirectCommandLegal(bad, 3u));
+    bad = c1;
+    bad.indexCount = 4u;                    // 不是 3 的倍数（画不出整数个三角形）
+    CHECK_FALSE(NaniteIsIndirectCommandLegal(bad, 3u));
+    bad = c1;
+    bad.indexCount = 195u;                  // 65 个三角形 > 每簇上限 64
+    CHECK_FALSE(NaniteIsIndirectCommandLegal(bad, 3u));
+    bad = c1;
+    bad.firstInstance = 3u;                 // 簇号 == clusterCount ⇒ 越界
+    CHECK_FALSE(NaniteIsIndirectCommandLegal(bad, 3u));
+    CHECK_FALSE(NaniteIsIndirectCommandLegal(c1, 1u));   // 簇号 1 ≥ clusterCount 1
+
+    // ⑤ 逐字段比对函数：一致为真，改任意一个字段即为假
+    CHECK(NaniteIndirectCommandMatchesRange(c1, r1, 1u));
+    NaniteIndirectCommand tweaked = c1;
+    tweaked.firstIndex += 3u;
+    CHECK_FALSE(NaniteIndirectCommandMatchesRange(tweaked, r1, 1u));
+    tweaked = c1;
+    tweaked.vertexOffset += 1;
+    CHECK_FALSE(NaniteIndirectCommandMatchesRange(tweaked, r1, 1u));
+    CHECK_FALSE(NaniteIndirectCommandMatchesRange(c1, r1, 2u));   // 簇号不一致
+}
+
+// ── 26b. 容量截断 / 零可见簇 / 越界与空指针防御 ──
+TEST_CASE("NaniteWiring: 可见簇 → 间接命令的容量截断、零可见簇与空指针防御") {
+    const NaniteClusterRecord clusters[4] = {
+        MakeDrawRangeCluster(0u, 2u, 0u),
+        MakeDrawRangeCluster(2u, 3u, 8u),
+        MakeDrawRangeCluster(5u, 1u, 16u),
+        MakeDrawRangeCluster(6u, 6u, 24u),
+    };
+    NaniteClusterDrawRange ranges[4] = {};
+    for (u32 i = 0u; i < 4u; ++i) ranges[i] = NaniteMakeClusterDrawRange(clusters[i]);
+
+    // 可见引用（顺序任意；这里故意不按簇号升序，证明打包只依赖 refs 的内容）
+    const NaniteVisibleClusterRef refs[4] = {
+        { 0u, 2u }, { 1u, 0u }, { 0u, 3u }, { 1u, 1u },
+    };
+
+    // ① 容量足够：4 条全写，顺序与 refs 一致，字段由簇记录决定（同一个簇在两个实例下字段相同）
+    {
+        NaniteIndirectCommand out[4] = {};
+        u32 truncated = 99u;
+        const u32 written = NanitePackVisibleIndirectCommands(refs, 4u, ranges, 4u, out, 4u, &truncated);
+        CHECK(written == 4u);
+        CHECK(truncated == 0u);
+        CHECK(out[0].firstInstance == 2u);
+        CHECK(out[1].firstInstance == 0u);
+        CHECK(out[2].firstInstance == 3u);
+        CHECK(out[3].firstInstance == 1u);
+        CHECK(out[0].indexCount == 3u);       // 簇 2：1 个三角形
+        CHECK(out[0].firstIndex == 15u);      // 5 × 3
+        CHECK(out[1].indexCount == 6u);       // 簇 0：2 个三角形
+        CHECK(out[3].vertexOffset == 8);      // 簇 1 的 vertexOffset
+    }
+
+    // ② 容量截断：只写容量内 2 条，**计数照常**（截断条数 = 剩下的 2 条），不越界写
+    {
+        NaniteIndirectCommand out[2] = {};
+        u32 truncated = 0u;
+        const u32 written = NanitePackVisibleIndirectCommands(refs, 4u, ranges, 4u, out, 2u, &truncated);
+        CHECK(written == 2u);
+        CHECK(truncated == 2u);               // 4 条可见、只写了 2 条 ⇒ 截断 2 条（GPU 的原子计数不受容量影响）
+        CHECK(out[0].firstInstance == 2u);
+        CHECK(out[1].firstInstance == 0u);
+    }
+
+    // ③ 容量 0 / 空输入 / 零可见簇：一律 0 条命令（绘制端据此画 0 次）
+    {
+        NaniteIndirectCommand out[1] = {};
+        u32 truncated = 7u;
+        CHECK(NanitePackVisibleIndirectCommands(refs, 4u, ranges, 4u, out, 0u, &truncated) == 0u);
+        CHECK(truncated == 0u);               // 容量 0 ⇒ 提前返回，不统计（调用方也不该用这个读数）
+        truncated = 0u;
+        CHECK(NanitePackVisibleIndirectCommands(nullptr, 0u, ranges, 4u, out, 1u, &truncated) == 0u);
+        CHECK(truncated == 0u);
+        truncated = 0u;
+        CHECK(NanitePackVisibleIndirectCommands(refs, 0u, ranges, 4u, out, 1u, &truncated) == 0u);
+        CHECK(truncated == 0u);               // 零可见簇 ⇒ 零命令、零截断
+    }
+
+    // ④ 空指针防御（簇表/引用/输出任一为空 ⇒ 0，且不写越界）
+    {
+        NaniteIndirectCommand out[1] = {};
+        CHECK(NanitePackVisibleIndirectCommands(refs, 4u, nullptr, 4u, out, 1u, nullptr) == 0u);
+        CHECK(NanitePackVisibleIndirectCommands(nullptr, 4u, ranges, 4u, out, 1u, nullptr) == 0u);
+        CHECK(NanitePackVisibleIndirectCommands(refs, 4u, ranges, 4u, nullptr, 1u, nullptr) == 0u);
+    }
+
+    // ⑤ 越界簇下标：该条跳过（不读越界簇表），其余照常写
+    {
+        const NaniteVisibleClusterRef badRefs[2] = { { 0u, 0u }, { 0u, 99u } };
+        NaniteIndirectCommand out[2] = {};
+        u32 truncated = 0u;
+        const u32 written = NanitePackVisibleIndirectCommands(badRefs, 2u, ranges, 4u, out, 2u, &truncated);
+        CHECK(written == 1u);
+        CHECK(truncated == 0u);               // 越界是"跳过"，不是"截断"（与 GPU 的 `continue` 同义）
+        CHECK(out[0].firstInstance == 0u);
+    }
+}
+
+// ── 26c. 与 CPU 参考遍历串起来：可见簇集合 → 命令，逐条对得上；两次运行逐位可复现 ──
+TEST_CASE("NaniteWiring: CPU 参考遍历 → 命令打包逐条一致且两次运行逐位可复现") {
+    // 手搭 1 节点 / 4 簇的最小 BVH（复用任务 14 的用例夹具），簇记录给出真实的索引范围
+    const NaniteClusterRecord clusters[4] = {
+        MakeDrawRangeCluster(0u, 4u, 0u),
+        MakeDrawRangeCluster(4u, 2u, 40u),
+        MakeDrawRangeCluster(6u, 8u, 80u),
+        MakeDrawRangeCluster(14u, 1u, 120u),
+    };
+    NaniteClusterDrawRange ranges[4] = {};
+    for (u32 i = 0u; i < 4u; ++i) ranges[i] = NaniteMakeClusterDrawRange(clusters[i]);
+
+    const NaniteBVHNode       nodes[1]   = { MakeLeafNode(0.0f, 0.0f, 0.0f, 1.0f, 0u, 4u) };
+    const u32                 leaves[4]  = { 0u, 1u, 2u, 3u };
+    const NaniteClusterSphere spheres[4] = {
+        { { 0.0f, 0.0f, 0.0f }, 1.0f }, { { 1.0f, 0.0f, 0.0f }, 1.0f },
+        { { 2.0f, 0.0f, 0.0f }, 1.0f }, { { 3.0f, 0.0f, 0.0f }, 1.0f },
+    };
+    NaniteClusterBVHView view;
+    view.nodes              = nodes;
+    view.nodeCount          = 1u;
+    view.leafClusterIndices = leaves;
+    view.clusterSpheres     = spheres;
+    view.clusterCount       = 4u;
+
+    // 两个实例（第二个平移 1.5），都在盒 [-4,4]^3 内 ⇒ 8 条可见引用
+    const NaniteInstanceGpuObject instances[2] = {
+        MakeBVHTranslatedInstance(0.0f, 0.0f, 0.0f, 36u),
+        MakeBVHTranslatedInstance(1.5f, 0.0f, 0.0f, 36u),
+    };
+
+    std::vector<NaniteVisibleClusterRef> visible(8u);
+    const u32 written = NaniteTraverseClusterBVHCPU(MakeBVHBoxFrustum(4.0f), view, instances, 2u, 4u,
+                                                   visible.data(), (u32)visible.size(), nullptr);
+    visible.resize(written);
+    CHECK(written == 8u);   // 2 实例 × 4 簇
+
+    std::vector<NaniteIndirectCommand> commands(visible.size());
+    u32 truncated = 0u;
+    const u32 packed = NanitePackVisibleIndirectCommands(
+        visible.data(), (u32)visible.size(), ranges, 4u,
+        commands.data(), (u32)commands.size(), &truncated);
+    CHECK(packed == written);
+    CHECK(truncated == 0u);
+    commands.resize(packed);
+
+    // ① 每条命令都能与"该簇应有"的参数逐字段对上（首/末簇、簇内索引范围、簇号约定）
+    for (u32 i = 0u; i < packed; ++i) {
+        const u32 cluster = commands[i].firstInstance;
+        REQUIRE(cluster < 4u);
+        CHECK(NaniteIsIndirectCommandLegal(commands[i], 4u));
+        CHECK(NaniteIndirectCommandMatchesRange(commands[i], ranges[cluster], cluster));
+    }
+    // ② 首条/末条命令的具体值（可人工核对）
+    CHECK(commands.front().firstInstance == visible.front().cluster);
+    CHECK(commands.back().firstInstance == visible.back().cluster);
+    CHECK(commands.front().indexCount == ranges[visible.front().cluster].indexCount);
+    CHECK(commands.back().indexCount == ranges[visible.back().cluster].indexCount);
+
+    // ③ 可复现：同一输入两次打包逐位相同（CPU 侧顺序确定 ⇒ 直接比字节）
+    std::vector<NaniteIndirectCommand> again(visible.size());
+    u32 truncatedAgain = 0u;
+    const u32 packedAgain = NanitePackVisibleIndirectCommands(
+        visible.data(), (u32)visible.size(), ranges, 4u,
+        again.data(), (u32)again.size(), &truncatedAgain);
+    CHECK(packedAgain == packed);
+    CHECK(truncatedAgain == 0u);
+    again.resize(packedAgain);
+    CHECK(std::memcmp(commands.data(), again.data(),
+                      sizeof(NaniteIndirectCommand) * packed) == 0);
+
+    // ④ 零可见簇（相机全部背对 ⇒ 撕裂输入为 0）：零命令、零截断
+    std::vector<NaniteIndirectCommand> none(1u);
+    u32 truncatedZero = 0u;
+    CHECK(NanitePackVisibleIndirectCommands(visible.data(), 0u, ranges, 4u,
+                                            none.data(), 1u, &truncatedZero) == 0u);
+    CHECK(truncatedZero == 0u);
+
+    // 关键读数（人工可核对的一行）：可见簇 8 → 命令 8（截断 0）；首条命令的五个字段
+    MESSAGE("可见簇=", written, " → 命令=", packed, " 截断=", truncated,
+            "；首条 indexCount=", commands.front().indexCount,
+            " firstIndex=", commands.front().firstIndex,
+            " vertexOffset=", commands.front().vertexOffset,
+            " firstInstance(簇号)=", commands.front().firstInstance,
+            "；两次打包逐位一致");
+}
+
+// ── 26d. 布局契约与占位索引缓冲的上界（改一个数字就编译失败）──
+TEST_CASE("NaniteWiring: 绘制参数/命令的布局契约与占位索引上界") {
+    CHECK(sizeof(NaniteClusterDrawRange) == 16u);
+    CHECK(offsetof(NaniteClusterDrawRange, firstIndex) == 0u);
+    CHECK(offsetof(NaniteClusterDrawRange, indexCount) == 4u);
+    CHECK(offsetof(NaniteClusterDrawRange, vertexOffset) == 8u);
+    CHECK(offsetof(NaniteClusterDrawRange, _pad) == 12u);
+    CHECK(std::is_trivially_copyable<NaniteClusterDrawRange>::value);
+
+    // 命令仍是任务 3 定稿的 20B（= VkDrawIndexedIndirectCommand）
+    CHECK(sizeof(NaniteIndirectCommand) == 20u);
+    CHECK(offsetof(NaniteIndirectCommand, indexCount) == 0u);
+    CHECK(offsetof(NaniteIndirectCommand, instanceCount) == 4u);
+    CHECK(offsetof(NaniteIndirectCommand, firstIndex) == 8u);
+    CHECK(offsetof(NaniteIndirectCommand, vertexOffset) == 12u);
+    CHECK(offsetof(NaniteIndirectCommand, firstInstance) == 16u);
+
+    // 命令缓冲与可见簇引用表**同容量**（槽位一一对应 ⇒ 读回比对不需要映射）
+    CHECK(kNaniteMaxIndirectDraws == kNaniteMaxVisibleClusterRefs);
+    CHECK(kNaniteMaxIndirectDraws == kNaniteMaxBVHInstances * kNaniteMaxBVHClusters);
+
+    // 占位索引缓冲的上界必须覆盖"最坏簇"的索引范围：
+    //   firstIndex + indexCount ≤ 簇数上限 × 每簇三角形上限 × 3（簇是索引段里的连续三角形区间）
+    CHECK(kNanitePlaceholderIndexCountMax == 16384u * 64u * 3u);
+    const u32 worstFirstIndex   = (kNaniteMaxBVHClusters - 1u) * kNaniteMaxClusterTriangles
+                                * kNaniteIndicesPerTriangle;
+    const u32 worstIndexCount   = kNaniteMaxClusterTriangles * kNaniteIndicesPerTriangle;
+    CHECK(worstFirstIndex + worstIndexCount <= kNanitePlaceholderIndexCountMax);
+
+    // 假簇链的最小容量也必须落在占位缓冲内（退化路径的第一帧：资产还没上传）
+    CHECK(kNaniteFakeClusterIndexCount <= kNanitePlaceholderIndexCountMax);
+}
+

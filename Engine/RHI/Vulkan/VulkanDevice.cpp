@@ -670,6 +670,20 @@ void VulkanDevice::CreateLogicalDevice() {
         features.fragmentStoresAndAtomics = supportedCore.fragmentStoresAndAtomics;
         if (!supportedCore.fragmentStoresAndAtomics)
             HE_CORE_WARN("设备不支持 fragmentStoresAndAtomics —— Nanite 绘制端的片元原子计数不可用");
+
+        // geometryShader（§14.8 任务 16）：
+        //   Nanite 绘制端的片元用 `SV_PrimitiveID` 判定"本条间接命令的第一个三角形"，从而做到
+        //   "每个绘制恰好计一次"（任务 16 起一条命令会光栅化出多个片元，不能再按片元计数）。
+        //   Slang 对 HLSL 拼写的 `SV_PrimitiveID` 会在 SPIR-V 里声明 `OpCapability Geometry`
+        //   （实测确认），而 Vulkan 的 SPIR-V 环境规定"Geometry ⇒ 必须启用
+        //   `VkPhysicalDeviceFeatures::geometryShader`"（规范附录《Vulkan Environment for SPIR-V》
+        //   的能力表），否则报 VUID-VkShaderModuleCreateInfo-pCode-08740。
+        //   **本引擎不建任何几何着色器管线**，开启该特性只为满足这条 SPIR-V 能力要求，
+        //   对任何既有渲染结果零影响（特性只在被使用时才改变行为）。
+        features.geometryShader = supportedCore.geometryShader;
+        if (!supportedCore.geometryShader)
+            HE_CORE_WARN("设备不支持 geometryShader —— Nanite 绘制端的 SV_PrimitiveID 计数不可用"
+                         "（该特性是 Vulkan 1.0 可选特性，桌面 GPU 均支持）");
     }
 
     VkDeviceCreateInfo deviceInfo{};

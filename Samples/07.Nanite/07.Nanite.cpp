@@ -610,13 +610,24 @@ int main() {
             // 它只决定 Phase 2 的簇球是否与既有 Hi-Z 金字塔做遮挡测试（关闭 ⇒ 退化为"不遮挡"）。
             naniteSettings.hiz = GetInt(cfgData, "nanite_hiz",
                                         naniteSettings.hiz ? 1 : 0) != 0;
+            // 任务 16 的**绘制来源**开关（默认 0 = 走可见簇列表）：cfg → 真值，同写法。
+            // 1 ⇒ 退回任务 3 的假簇链（自证 / 可见链不可用时的退化路径），此时那一行读数变成
+            // `fake_clusters=…`；默认 0 ⇒ 绘制由可见簇列表驱动（任务 16 的验收档）。
+            naniteSettings.fakeChain = GetInt(cfgData, "nanite_fake_chain",
+                                              naniteSettings.fakeChain ? 1 : 0) != 0;
+            // 任务 16 的**绘制容量**（默认 0 = 容量上界）：钳到 [0, 间接命令缓冲容量]，
+            // 与模块内的钳制口径一致。它是"截断而不越界"这条边界的自证开关（设小即触发截断）。
+            naniteSettings.drawCapacity = (u32)std::max(0, std::min(
+                GetInt(cfgData, "nanite_draw_capacity", (int)naniteSettings.drawCapacity),
+                (int)render::kNaniteMaxIndirectDraws));
             deferredPipeline.SetNaniteSettings(naniteSettings);
             HE_CORE_INFO("[Nanite] 配置恢复: nanite_enable={} nanite_fake_clusters={} "
                          "nanite_test_write={} nanite_mesh_test={} nanite_instance_test_count={} "
-                         "nanite_hiz={}",
+                         "nanite_hiz={} nanite_fake_chain={} nanite_draw_capacity={}",
                          naniteSettings.enabled ? 1 : 0, naniteSettings.fakeClusters,
                          naniteSettings.testWrite ? 1 : 0, naniteSettings.meshTest ? 1 : 0,
-                         naniteSettings.instanceTestCount, naniteSettings.hiz ? 1 : 0);
+                         naniteSettings.instanceTestCount, naniteSettings.hiz ? 1 : 0,
+                         naniteSettings.fakeChain ? 1 : 0, naniteSettings.drawCapacity);
         }
 
         auto& ae = deferredPipeline.GetAutoExposure();
@@ -1279,8 +1290,9 @@ int main() {
 
             // ── Nanite 模块（§14.8 任务 1 开关 / 任务 3 假簇链）：独立开关 + 光栅档位 ──
             // 面板是 §14.4 三层的第三层：改动即写回 `NaniteSettings`（唯一真值），
-            // 下一帧的帧图门控就会读到新值。任务 3 下开启的效果是帧图里多 `Nanite_Cull`
-            // 与 `Nanite_Raster` 两个 pass（渲染到模块自建的 1×1 目标 ⇒ 可见画面不变）。
+            // 下一帧的帧图门控就会读到新值。任务 16 起默认档的绘制由**可见簇列表**驱动
+            // （`Nanite_Cull` + `Nanite_CullChain3` 两个 pass，绘制录在后者体内，
+            // 渲染到模块自建的 1×1 目标 ⇒ 可见画面不变）。
             if (dp) {
                 ImGui::SeparatorText("Nanite（虚拟几何）");
                 auto naniteSettings = dp->GetNaniteSettings();
@@ -1315,8 +1327,22 @@ int main() {
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("任务 4：compute 直接写既有 GBuffer albedo 的 UAV；\n"
                                       "默认关（会改变画面，仅供 A1 裁决取证）");
-                ImGui::TextDisabled("模块就绪=%s（任务 3：Nanite_Cull + Nanite_Raster，画面不变）",
+                ImGui::TextDisabled("模块就绪=%s（任务 16：绘制由可见簇列表驱动，画面不变）",
                                     dp->GetNanite().IsReady() ? "是" : "否");
+                // ── 任务 16 的绘制来源开关（默认关 = 走可见簇列表）──
+                // 勾上后退回任务 3 的假簇链自证通道（可见链只算不画）；自动化用 cfg 键
+                // `nanite_fake_chain` / `nanite_draw_capacity`（后者是截断自证开关）。
+                bool naniteFakeChain = naniteSettings.fakeChain;
+                if (ImGui::Checkbox("假簇链自证：任务 3 的固定命令通道##nanite_fc", &naniteFakeChain)) {
+                    naniteSettings.fakeChain = naniteFakeChain;
+                    dp->SetNaniteSettings(naniteSettings);
+                    HE_CORE_INFO("[Nanite] 面板绘制来源: fake_chain={}",
+                                 naniteSettings.fakeChain ? 1 : 0);
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("默认关：绘制由可见簇列表写出的真实间接命令驱动（任务 16）。\n"
+                                      "勾上退回任务 3 的假簇链（%u 条固定命令），可见链只算不画。",
+                                      naniteSettings.fakeClusters);
                 // ── 任务 6 的 mesh PSO 自证开关（默认关）──
                 // 勾上后模块追加 `Nanite_MeshTest`：用 `PipelineStateDesc::meshShader` 建一条
                 // 最小 mesh 管线（真正输出 4 顶点 / 2 图元），只画模块自建的 1×1 R8 小目标
@@ -1808,6 +1834,12 @@ int main() {
             // 同步同样依赖上面的 `WaitIdle()`；关闭档下模块内部直接返回、不打印。
             if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
                 dpNanite->GetNanite().LogCull3Readback();
+            // ── Nanite（§14.8 任务 16）：dump 帧打印**恰好一行**"可见簇 → 间接绘制"的接线读数
+            //    （`visible/indirect_count/draws/rasterized` 四个独立来源的真实 GPU 读回；
+            //    默认档要求 V==C==D==R、empty_draws=0、mismatch=0）──
+            // 同步同样依赖上面的 `WaitIdle()`；关闭档下模块内部直接返回、不打印。
+            if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
+                dpNanite->GetNanite().LogVisibleWiringReadback();
             // ── Nanite（§14.8 任务 6）：mesh PSO 通道的**恰好一行**真实 GPU 读回 ──
             // 同步同样已在上一行的 `WaitIdle()` 完成；`nanite_mesh_test=0`（默认）时模块内部
             // 直接返回、不打印，因此不改变任何既有档位的日志。
@@ -1948,6 +1980,11 @@ int main() {
             std::to_string(deferredPipeline.GetNaniteSettings().instanceTestCount);
         // 任务 15：Hi-Z 遮挡剔除开关（默认 0 = 关闭，理由见 NaniteSettings.h）——同写法回写
         out["nanite_hiz"] = std::to_string(deferredPipeline.GetNaniteSettings().hiz ? 1 : 0);
+        // 任务 16：绘制来源开关（默认 0 = 可见簇列表）与绘制容量（默认 0 = 容量上界）——同写法回写
+        out["nanite_fake_chain"] =
+            std::to_string(deferredPipeline.GetNaniteSettings().fakeChain ? 1 : 0);
+        out["nanite_draw_capacity"] =
+            std::to_string(deferredPipeline.GetNaniteSettings().drawCapacity);
 
         // ── AutoExposure ──
         auto& ae = deferredPipeline.GetAutoExposure();

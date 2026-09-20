@@ -1,10 +1,23 @@
 // ============================================================
 // Nanite/NaniteRaster.cpp — 绘制端：消费「计数 → 间接绘制」链（§14.8 任务 3）
+//   + 任务 16：默认消费**可见簇列表**写出的间接命令（假簇链保留为自证/退化路径）
 //
 // 【本文件由 §14.8 任务 1 建立骨架，任务 3 填充 "绘制端"】
 //   绘制 = `IRHICommandList::DrawIndexedIndirectCount`（Vulkan: vkCmdDrawIndexedIndirectCount），
 //   实际条数由 `NaniteCull` 的计数缓冲决定 —— CPU 不读回、不参与条数决定。
-//   目标 = 模块自建的 1×1 R8 小目标；片元每光栅化一个簇把计数原子加一。
+//   目标 = 模块自建的 1×1 R8 小目标；片元把"被光栅化的**绘制条数**"原子加一
+//   （`SV_PrimitiveID == 0` ⇒ 每个绘制恰好一次，与簇号/实例无关）。
+//
+// 【§14.8 任务 16 的三处改动（逐条）】
+//   ① 占位索引缓冲必须覆盖**整个索引位置空间**：命令里的 `firstIndex/indexCount` 是簇的真实值，
+//      光栅器会去绑定的索引缓冲里取这些索引 ⇒ 缓冲不够大就是越界读（本设备未启用
+//      `robustBufferAccess`）。缓冲内容 = `0,1,2` 周期模式，使任意簇区间都能凑出非退化三角形
+//      （退化三角形不产生片元 ⇒ 计数会失真）。容量由 `SetPlaceholderIndexCapacity` 按资产给。
+//   ② 计数语义改为"每个**绘制**恰好 +1"：`indexCount` 现在是簇的真实三角形索引数（最多 192），
+//      一条命令会光栅化出多个片元 ⇒ 用绘制内的图元序号 `SV_PrimitiveID == 0` 判定"本条命令的
+//      第一个三角形"，因此计数恒等于"产生了片元的绘制条数"（见 `Nanite_Raster.frag.slang`）。
+//   ③ 绘制计数缓冲的清零仍由 `NaniteCull` 在命令缓冲内完成（4B 拷贝，绝不用主机写）；本文件只
+//      在 dump 帧**读回**它。
 //
 // 【§14.3 依赖禁令】模块内不得引用 `GI_*` / `Lumen*` / `GPUCulling` 的内部结构
 //   （可借其 Hi-Z 纹理句柄与描述符写法）；不得依赖 `MeshBatcher` 的运行时状态。
@@ -35,6 +48,8 @@ bool NaniteRaster::Initialize(rhi::IRHIDevice* device, u32 width, u32 height,
         HE_CORE_ERROR("NaniteRaster: 光栅化簇计数缓冲为空（NaniteCull 未就绪？）");
         return false;
     }
+    // 【任务 16】只记录引用（不持有）：dump 帧读回"绘制条数"要用它
+    m_RasterCountRef = rasterCountBuffer;
 
     // ── 0. 设备能力：mesh shader 是否可用（§14.8 任务 6）──
     // 【为什么先判、且不做替代方案】任务 6 的验收是"mesh PSO 真的建出来并画出一帧"。
@@ -60,9 +75,11 @@ bool NaniteRaster::Initialize(rhi::IRHIDevice* device, u32 width, u32 height,
         if (!m_Target) { HE_CORE_ERROR("NaniteRaster: 1×1 R8 目标创建失败"); return false; }
     }
 
-    // ── 2. 占位顶点/索引缓冲 ──
+    // ── 2. 占位顶点缓冲 ──
     // 顶点着色器只吃 SV_VertexID/SV_InstanceID，不读任何属性；但 Vulkan 的
-    // DrawIndexedIndirectCount 仍要求绑定索引/顶点缓冲（命令里的 firstIndex 会去索引它）。
+    // DrawIndexedIndirectCount 仍会绑定顶点缓冲（命令里的 vertexOffset 属于"顶点取址"的一部分）。
+    // 【为什么只有顶点缓冲在这里建、索引缓冲懒建】索引缓冲的容量取决于**资产**（见
+    //   `SetPlaceholderIndexCapacity`），而 `Initialize` 时资产还没上传 ⇒ 懒建 + 一次性放大。
     {
         rhi::BufferDesc vd;
         vd.size        = sizeof(float) * 3;   // 一个不参与取值的顶点
@@ -73,19 +90,12 @@ bool NaniteRaster::Initialize(rhi::IRHIDevice* device, u32 width, u32 height,
         if (!m_DummyVB) { HE_CORE_ERROR("NaniteRaster: 占位顶点缓冲创建失败"); return false; }
         float zeros[3] = { 0.0f, 0.0f, 0.0f };
         if (void* p = m_DummyVB->Map()) { std::memcpy(p, zeros, sizeof(zeros)); m_DummyVB->Unmap(); }
-
-        rhi::BufferDesc id;
-        // 3 个 u32 索引（12 B ≥ 4 ⇒ SetIndexBuffer 选 UINT32，与命令里的 indexCount=3 匹配）
-        id.size        = sizeof(u32) * kNaniteFakeClusterIndexCount;
-        id.usage       = rhi::BufferUsage::Index;
-        id.cpuAccess   = true;
-        m_DummyIB = m_Device->CreateBuffer(id);
-        if (!m_DummyIB) { HE_CORE_ERROR("NaniteRaster: 占位索引缓冲创建失败"); return false; }
-        u32 idx[3] = { 0u, 1u, 2u };
-        if (void* p = m_DummyIB->Map()) { std::memcpy(p, idx, sizeof(idx)); m_DummyIB->Unmap(); }
     }
 
-    // ── 3. 片元描述符集：显式绑定"已光栅化簇计数"SSBO（binding 0）──
+    // ── 3. 片元描述符集：显式绑定"已光栅化的绘制条数"SSBO（binding 0）──
+    // 【只有一个绑定】片元用 `SV_PrimitiveID` 判定"本条命令的第一个三角形" ⇒ 每个绘制恰好
+    //   加一，不需要任何按簇号去重的辅助结构（可见簇引用是 (实例, 簇) 二元组，同一个簇会被
+    //   多个实例各引用一次，按簇号去重会把它们错误地折叠 —— 见 Nanite_Raster.frag.slang）。
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = {
         { 0, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment, false },
@@ -148,7 +158,9 @@ void NaniteRaster::Shutdown() {
 
     m_Target.reset();
     m_DummyVB.reset();
-    m_DummyIB.reset();
+    m_PlaceholderIB.reset();
+    m_PlaceholderIndexCount = 0u;
+    m_RasterCountRef = nullptr;
 
     m_Layout = rhi::kInvalidLayout;
     m_Set    = rhi::kInvalidSet;
@@ -169,8 +181,22 @@ void NaniteRaster::RecordRasterPass(rhi::IRHICommandList* cmd,
                                     rhi::IRHIBuffer* countBuffer,
                                     u32 maxDrawCount) {
     if (!cmd || !m_PSO || !m_Target || !indirectCmdBuffer || !countBuffer) return;
+    // 【任务 16】占位索引缓冲懒建：它的容量按资产给（见 SetPlaceholderIndexCapacity），
+    //   而 Initialize 时资产还没上传 ⇒ 首次录制时才建。
+    if (!EnsurePlaceholderIndexBuffer()) return;
 
     m_LastMaxDrawCount = maxDrawCount;
+
+    // ── ① 命令与计数由 compute 写出 → 本绘制（DrawIndirect）──
+    // 【为什么必须有这条屏障】命令缓冲与绘制计数是**compute** 写的（可见链写在本 pass 体的前
+    //   一段、假簇链写在 `Nanite_Cull` pass 里），而绘制端要在 `DrawIndirect` 阶段读它们；
+    //   帧图不会为模块自持缓冲插入依赖（它们不是帧图资源）⇒ 同步必须在这里显式给出。
+    //   【为什么用内存屏障】`PipelineBarrier` 无资源重载发的是 `VkMemoryBarrier`（全局），
+    //   覆盖两个缓冲，不必逐资源写。
+    cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader,
+                         rhi::PipelineStage::DrawIndirect,
+                         rhi::ResourceState::UnorderedAccess,
+                         rhi::ResourceState::IndirectArgument);
 
     cmd->SetPipeline(m_PSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
@@ -183,20 +209,94 @@ void NaniteRaster::RecordRasterPass(rhi::IRHICommandList* cmd,
     clear.color[3] = 1.0f;
     cmd->BeginOffscreenPass(m_Target->GetNativeHandle(), nullptr,
                             kNaniteRasterTargetSize, kNaniteRasterTargetSize, &clear, false);
-    // 1×1 视口 + 剪裁：全屏三角形 ⇒ 每条间接命令恰好 1 个片元（= 一个被光栅化的簇）
+    // 1×1 视口 + 剪裁：全屏三角形 ⇒ 每条间接命令的第一个三角形恰好产生 1 个片元，
+    // 片元里用 `SV_PrimitiveID == 0` 判定"本条命令的第一个三角形" ⇒ 每个绘制恰好计一次。
     cmd->SetViewport({ 0.0f, (float)kNaniteRasterTargetSize,
                        (float)kNaniteRasterTargetSize, -(float)kNaniteRasterTargetSize, 0.0f, 1.0f });
     cmd->SetScissor({ 0, 0, kNaniteRasterTargetSize, kNaniteRasterTargetSize });
 
     // 绘制端点：`DrawIndexedIndirectCount`。maxDrawCount 只是命令缓冲容量上限，
-    // 真正画几条由 countBuffer 的值决定 —— 这正是任务 3 要验证的"计数驱动绘制"。
+    // 真正画几条由 countBuffer 的值决定 —— 这正是"可见簇数驱动绘制条数"的实现。
     cmd->SetVertexBuffer(m_DummyVB.get(), 0);
-    cmd->SetIndexBuffer(m_DummyIB.get(), 0);
+    cmd->SetIndexBuffer(m_PlaceholderIB.get(), 0);
     cmd->SetDrawDebugLabel("Nanite_Raster (indirect count)");
     cmd->DrawIndexedIndirectCount(indirectCmdBuffer, 0, countBuffer, 0,
                                   maxDrawCount, (u32)sizeof(NaniteIndirectCommand));
 
     cmd->EndOffscreenPass();
+}
+
+// ============================================================
+// §14.8 任务 16：占位索引缓冲（覆盖资产的整个索引位置空间；内容 = 0,1,2 周期模式）
+// ============================================================
+
+void NaniteRaster::SetPlaceholderIndexCapacity(u32 indexCount) {
+    if (!m_Device) return;
+    // 至少放下假簇链的一条命令（indexCount = 3）；至多不超过可证上界（防止损坏资产撑爆显存）。
+    u32 want = (indexCount < kNaniteFakeClusterIndexCount) ? kNaniteFakeClusterIndexCount : indexCount;
+    if (want > kNanitePlaceholderIndexCountMax) {
+        HE_CORE_WARN("NaniteRaster: 占位索引缓冲的请求容量 {} 超过可证上界 {} ⇒ 按其钳制"
+                     "（资产索引数不该超过它；超过说明簇记录异常）",
+                     want, kNanitePlaceholderIndexCountMax);
+        want = kNanitePlaceholderIndexCountMax;
+    }
+    if (m_PlaceholderIB && want <= m_PlaceholderIndexCount) return;   // 现有缓冲已经够大
+
+    // 【替换的安全性】本函数只在 `EnsureAssetUploaded` 的一次性路径上被调用，而那条路径里的
+    //   `NaniteScene::UploadPackedAsset` 已经 `WaitIdle()` ⇒ 没有任何在飞的命令缓冲还引用旧缓冲。
+    //   之后的帧只读新缓冲，不再重建。
+    if (!CreatePlaceholderIndexBuffer(want)) {
+        HE_CORE_ERROR("NaniteRaster: 占位索引缓冲扩容失败（请求 {} 个索引位置）", want);
+        return;
+    }
+    HE_CORE_INFO("NaniteRaster: 占位索引缓冲就绪（{} 个索引位置 = {} B；内容为 0,1,2 周期模式，"
+                 "覆盖资产的整个索引位置空间）",
+                 m_PlaceholderIndexCount,
+                 (unsigned long long)m_PlaceholderIndexCount * sizeof(u32));
+}
+
+bool NaniteRaster::EnsurePlaceholderIndexBuffer() {
+    if (m_PlaceholderIB) return true;
+    // 还没被告知资产规模（例如资产为空/上传失败）⇒ 建一条命令的最小容量，够假簇链用。
+    return CreatePlaceholderIndexBuffer(kNaniteFakeClusterIndexCount);
+}
+
+bool NaniteRaster::CreatePlaceholderIndexBuffer(u32 indexCount) {
+    if (!m_Device || indexCount == 0u) return false;
+
+    rhi::BufferDesc d;
+    d.size      = sizeof(u32) * indexCount;
+    // Index：`SetIndexBuffer` 会按这个 usage 建索引缓冲视图（缓冲 ≥ 4B ⇒ 索引类型为 UINT32）。
+    d.usage     = rhi::BufferUsage::Index;
+    d.cpuAccess = true;   // 创建时写入周期模式（内容每帧不变 ⇒ 之后只被 GPU 读）
+    auto buffer = m_Device->CreateBuffer(d);
+    if (!buffer) return false;
+
+    // 内容 = 0,1,2,0,1,2,…：让任意 `[firstIndex, firstIndex+indexCount)`（firstIndex 是 3 的倍数、
+    // indexCount 是 3 的倍数）都读出 `{0,1,2}` 的周期序列 ⇒ 每个三角形的三个 `SV_VertexID`
+    // 取模 3 后是 `{0,1,2}` 的一个排列 ⇒ 顶点着色器画出的全屏三角形**非退化** ⇒ 每个三角形
+    // 都产生片元（否则退化三角形会被光栅器整块丢弃，"绘制条数"读数就不可信）。
+    if (void* p = buffer->Map()) {
+        auto* words = static_cast<u32*>(p);
+        for (u32 i = 0; i < indexCount; ++i) words[i] = i % kNaniteIndicesPerTriangle;
+        buffer->Unmap();
+    } else {
+        HE_CORE_ERROR("NaniteRaster: 占位索引缓冲映射失败（{} 个索引位置）", indexCount);
+        return false;
+    }
+
+    m_PlaceholderIB = std::move(buffer);
+    m_PlaceholderIndexCount = indexCount;
+    return true;
+}
+
+u32 NaniteRaster::ReadbackRasterCount() {
+    // 真实 GPU 读回：片元里"每个绘制恰好 +1"的原子计数（= 绘制端实际画出的条数）
+    u32 n = 0;
+    if (auto* b = m_RasterCountRef) {
+        if (void* p = b->Map()) { n = *static_cast<const u32*>(p); b->Unmap(); }
+    }
+    return n;
 }
 
 // ============================================================
