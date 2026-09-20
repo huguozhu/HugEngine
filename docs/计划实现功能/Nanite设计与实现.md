@@ -2211,7 +2211,7 @@ if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
 > **进度（2026-09-20）**：**阶段 0（任务 1–6）与阶段 1 前两项（任务 7 数据格式定稿、任务 8 离线簇切分）已完成**并通过验收：模块骨架与独立开关、
 > 开关不变式判据 ⑥、模块自持的「计数 → 间接绘制」链（含最小 RHI 扩展）、GBuffer UAV（A1 裁决）、
 > objectIndex 分区契约与单测、mesh PSO 真正接入。**任务 7（`.nanite` 数据格式定稿）也已完成**
-> （§8 的四处不一致已裁决并写回 §8，见 §14.17）；**下一步从任务 13（实例剔除）开始**；
+> （§8 的四处不一致已裁决并写回 §8，见 §14.17）；**下一步从任务 14（per-instance cluster BVH）开始**；
 > 每一步的证据分别见 §14.11、§14.13–§14.17，且都有对应的中文提交。
 
 **阶段 0：模块化前置（独立开关先落地）**
@@ -2750,3 +2750,42 @@ LOD 级数 0/1/2/4/5/8 的段长取整）。**没有为凑数加用例**；完�
 4. **任务 10 的共享内容属性错配缺陷未修未掩盖**（本任务只比字节，故自洽通过）——仍需在任务 19/21 之前修。
 5. **`NaniteUnpackR10G10B10A2(packed, channel)` 在 `channel ≥ 4` 时是 UB**（`packed >> 40`，C++ 与 Slang 镜像同病）；
    现有调用方只用 0..3，属越出前置条件的输入；修它要三处同步，留给后续任务决定。
+### 14.22 任务 13 实施记录：实例剔除（GPU 与 CPU 参考逐项一致，2026-09-20）
+
+**① 契约核实**：`Engine/Render/Pipeline/GPUScene.h:26-40` 定义 `GPUSceneObject`（`localToWorld` 64B + `boundsMin/boundsMax` 各 16B + 8×u32 + pad，`static_assert(sizeof==128)` 在同文件 `:40`）。
+`NaniteTypes.h` 放 RHI-free 同布局镜像 `NaniteInstanceGpuObject`（`alignas(16)` + 12 条 `offsetof` 断言）；**跨契约钉子在 `NaniteCull.cpp`**（include 真身头，`sizeof` 与逐字段 `offsetof` 双重 `static_assert`）——任一边漂移即编译失败。
+
+**② 口径**：视锥平面与 `Math/Geometry.h` 的 `he::Frustum` **逐字同源**（`dot(n,p)+d>=0` 在内侧、顺序左右下上近远、Gribb/Hartmann + 归一化、Vulkan `[0,1]` 深度取 row2）；
+球判据 `dot(n,c)+d < -radius ⇒ 不可见`（无 epsilon，与 `Frustum::Intersects(Sphere)` 一致）；包围球由 128B 契约的 `boundsMin/Max` 推出，
+**CPU 与 GPU 读同一张 16B 球表的同一份比特**（避免 GPU 现推 sqrt/FMA 的末位差异翻转"恰切平面"的可见性）。
+
+**③ 实例来源（如实）**：cfg 键 `nanite_instance_test_count`（默认 64，钳 [0,256]）生成的**合成实例网格**（NDC 网格经 `inverse(viewProj)` 反投影到世界空间、
+深度 5 层，另含 i=0/i=2 视锥外、i=1 恰跨右平面、i=3 空实例）——**不是场景实例**；验收的是"GPU 与 CPU 参考的可判定等价性"。
+新 pass `Nanite_InstanceCull`（开启档 pass 变为 15 个 = 既有 12 + 3），读回打印恰好一行。
+
+**④ 发现并修掉一个真 bug（值得全仓借鉴）**：最初照任务 3 假簇链在**录制期主机写 0** 清计数 ⇒ 读回恰为 CPU 参考的 **2 倍**、列表同批下标连续出现两次
+（`n=8: gpu=10 cpu=5 mismatch=9 first=1,1,4,4,5,5,6,7`；`n=64: gpu=122 cpu=61`）。对照实验钉死根因：**主机写与派发之间没有排序**，
+引擎允许多帧在飞、CPU 领先 GPU ⇒ 第 N+1 帧写的 0 落到第 N 帧派发**之前**，两帧原子累加叠加。
+- 对照 A（临时）：同位置先 `WaitIdle()` 再写 ⇒ 立刻 `gpu=5 cpu=5 mismatch=0`（已撤，只留注释）；
+- **对照 B（最终实现）**：清零改为**命令缓冲内的 4B 拷贝**（常驻 0 的 `TransferSrc` 源 + `Transfer→Compute` 屏障，末尾屏障补 `Transfer/CopyDst` 消 WAR）⇒ 零停顿且逐项一致。
+可见列表**不再逐帧 memset**（读回只取 `[0,count)`，这些槽位必由同一次派发写入）。
+**同一潜在竞争在任务 3 的假簇链里依然存在**（本次未在改动面内，已写入注释）——**列为必须在任务 16/21 之前修掉的债务**。
+
+**⑤ 验收证据（本人复跑）**：单测 **281 → 286 例**（断言 62481）全绿（新增 5 例：128B 镜像与 16B 球偏移、球由 bounds 推导含退化 AABB、
+视锥提取与 `he::Frustum` 同值、CPU 参考已知进/出、空表/空指针/容量截断/6 平面缺一不可）；
+关闭档 12 pass、指纹冻结 `1C15AB72E688B530…`、`vuid_lines=41`；开启档 15 pass、`vuid_lines=41`；
+`[Nanite] instance_cull gpu=61 cpu=61 mismatch=0 first=1,4,5,6,7,8,9,10`（`n=8 → 5/5`、`n=256 → 253/253`、`n=0 → 0/0`，均 mismatch=0）；
+on vs off 转储逐位 `must_same_diff=0`。
+
+**⑥ 验收脚手架的三处修正（都是本次踩出来的，必须记住）**
+1. **样例偶发卡在启动**：`06.GILab` 当天两次卡死（日志 0 字节、CPU 近 0）。两个冒烟脚本已改为 `Start-Process + WaitForExit(300s)`，
+   超时即杀并报 `TIMEOUT`（该档视为失败），避免一条验收被无限拖住。
+2. **`-File` 传 `-Extra` 在本环境被子进程拒绝**（与脚本 param 块无关，直接命令行调用却正常）⇒ 冒烟脚本额外接受 **`HE_SMOKE_EXTRA`/`HE_SMOKE_FURNACE`** 环境变量，验收脚本改用环境变量 + **进程内调用**。
+3. **`.ps1` 必须 ASCII-only 这条纪律再次被踩**：我在无 BOM 的 `.ps1` 里写中文注释，PS 5.1 按 ANSI 解码后**中文末字节吃掉了换行**，
+   使下一行 `if ($env:HE_SMOKE_EXTRA)` 被并进注释 ⇒ 环境变量静默失效（表现为"Extra 不生效"）。已把三个脚本清成纯 ASCII（非 ASCII 行已删除）。
+   附带发现并修掉一个**空转判据**：判据 ③ 原先从样例日志里找 `lumen_passes=`，而该字样只在冒烟脚本自己的输出里 ⇒ 恒为 0、永远"通过"；
+   现在解析冒烟输出、解析失败返回 -1 即判失败，并显式用 `gi_blend_diffuse_lumen=0` 真正关灯。
+
+**⑦ 未完成的脚手架问题（下一轮第一件事）**：修完上述三处后，判据 ①（白炉）报 `gi_aq_furnace_prov6_final.f16 MISSING` ——
+即**白炉档这次没有产出转储**（日志 212 KB、正常退出）。判据 ②③④⑤⑥ 均 PASS，且同一配置的直接探针能产出白炉转储，
+故判定为脚手架/环境问题而非产品回归；**必须先把判据 ① 恢复成能真正产出并校验白炉转储，再继续后续任务**。
