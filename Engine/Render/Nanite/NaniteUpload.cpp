@@ -21,7 +21,8 @@
 
 #include <algorithm>       // std::max / std::sort / std::equal
 #include <array>           // std::array（三角形规范键）
-#include <cmath>           // std::sqrt
+#include <cmath>           // std::sqrt / std::acos（量化误差实测）
+#include <cstring>         // std::memcpy（任务 10：把各段铺进字节镜像）
 #include <unordered_map>   // 任务 9 的去重桶（只查不改产物顺序，见头文件的确定性说明）
 
 namespace he::render {
@@ -106,6 +107,44 @@ inline constexpr u64 kFnv1aPrime       = 1099511628211ull;
     const float dy = a.boundsCenterRadius[1] - b.boundsCenterRadius[1];
     const float dz = a.boundsCenterRadius[2] - b.boundsCenterRadius[2];
     return dx * dx + dy * dy + dz * dz;
+}
+
+/// 网格 AABB + **位置量化尺度**（任务 9 的 DAG 哈希与任务 10 的打包**共用这一个函数**）
+///
+/// 【为什么抽成共用函数】位置量化必须逐位可复现："DAG 的 `uniqueVertexWords`"与"打包出来的
+///   `packedPosition`"是同一批数（打包器直接复用词），而它们的前提是**同一个量化尺度**。
+///   把 AABB/尺度的算法放在一处，就不必靠人工同步两份内联代码（任务 9 原来内联在
+///   `BuildNaniteClusterDAG` 里，任务 10 把它提出来）。
+/// 【口径】`meshExtent = max(每轴范围)`（与 `meshopt_simplifyScale` 同口径，见头文件）；
+///   退化网格（0 顶点 / 单点 / 全重合）⇒ 返回 **1.0f** 兜底，避免除以 0 的退化量化。
+/// 【出参】`outMin` / `outMax` 各 3 个 float（**可空**：只关心尺度时传 nullptr）；空网格写 0。
+[[nodiscard]] float ComputeMeshBounds(std::span<const float> positions,
+                                      const usize            vertexCount,
+                                      float* const           outMin,
+                                      float* const           outMax) {
+    float minValue[3] = { 0.0f, 0.0f, 0.0f };
+    float maxValue[3] = { 0.0f, 0.0f, 0.0f };
+    if (vertexCount > 0u) {
+        minValue[0] = positions[0];
+        minValue[1] = positions[1];
+        minValue[2] = positions[2];
+        maxValue[0] = minValue[0];
+        maxValue[1] = minValue[1];
+        maxValue[2] = minValue[2];
+        for (usize v = 1; v < vertexCount; ++v) {
+            for (u32 axis = 0; axis < 3u; ++axis) {
+                const float value = positions[v * 3u + axis];
+                if (value < minValue[axis]) minValue[axis] = value;
+                if (value > maxValue[axis]) maxValue[axis] = value;
+            }
+        }
+    }
+    float extent = std::max(maxValue[0] - minValue[0],
+                            std::max(maxValue[1] - minValue[1], maxValue[2] - minValue[2]));
+    if (!(extent > 0.0f)) extent = 1.0f;   // 退化：给量化一个非退化尺度（与任务 9 的兜底一致）
+    if (outMin != nullptr) { outMin[0] = minValue[0]; outMin[1] = minValue[1]; outMin[2] = minValue[2]; }
+    if (outMax != nullptr) { outMax[0] = maxValue[0]; outMax[1] = maxValue[1]; outMax[2] = maxValue[2]; }
+    return extent;
 }
 
 /// 把一个簇的局部几何/拓扑规范化成"顺序无关"的键流（用于哈希与命中后的精确比对）
@@ -365,18 +404,8 @@ bool BuildNaniteClusterDAG(std::span<const float> positions,
     }
 
     // ── 网格量化尺度：整网格包围盒的最大轴长（与 meshopt_simplifyScale 同口径）──
-    float bboxMin[3] = { positions[0], positions[1], positions[2] };
-    float bboxMax[3] = { bboxMin[0], bboxMin[1], bboxMin[2] };
-    for (usize v = 1; v < vertexCount; ++v) {
-        for (u32 axis = 0; axis < 3u; ++axis) {
-            const float value = positions[v * 3u + axis];
-            if (value < bboxMin[axis]) bboxMin[axis] = value;
-            if (value > bboxMax[axis]) bboxMax[axis] = value;
-        }
-    }
-    float meshExtent = std::max(bboxMax[0] - bboxMin[0],
-                                std::max(bboxMax[1] - bboxMin[1], bboxMax[2] - bboxMin[2]));
-    if (!(meshExtent > 0.0f)) meshExtent = 1.0f;   // 单点/全重合网格：给量化一个非退化尺度
+    //    算法与任务 10 的打包器**共用** `ComputeMeshBounds`（口径只此一处，见其注释）
+    const float meshExtent = ComputeMeshBounds(positions, vertexCount, nullptr, nullptr);
 
     // ── 去重表（哈希 → 候选唯一内容下标；命中后还要做规范键流全量比对）──
     std::unordered_map<u64, std::vector<u32>> dedupBuckets;
@@ -651,6 +680,358 @@ bool BuildNaniteClusterDAG(std::span<const float> positions,
         : 0.0f;
     result.stats.leafClusterCount = levelCount > 0u ? result.levelClusterCount.front() : 0u;
     result.stats.rootClusterCount = levelCount > 0u ? result.levelClusterCount.back()  : 0u;
+
+    outResult = std::move(result);   // 只有走到这里才动调用方的对象
+    return true;
+}
+
+// ============================================================
+// §14.8 任务 10：量化与打包（最终 GPU 侧字节布局）
+//
+// 口径、边界、失败条件都写在 `NaniteUpload.h` 的同名小节里；这里只留与代码逐句对应的短注释。
+// 一句话概括三段职责：① 位置**复用** DAG 的词并核验口径；② 法线/UV 由属性 span 现编；
+// ③ 段表/字节镜像交给任务 7 的 `TryBuildNaniteFileLayout` + `ValidateNaniteFile` 兜底。
+// ============================================================
+bool PackNaniteClusters(std::span<const float>                positions,
+                        std::span<const float>                normals,
+                        std::span<const float>                uvs,
+                        std::span<const NaniteMaterialRecord> materials,
+                        const NaniteClusterDAG&               dag,
+                        NanitePackedAsset&                    outResult) {
+    // ── 输入校验：失败一律返回 false 且**不改写出参**（与任务 7/8/9 同口径）──
+    if ((positions.size() % 3u) != 0u) return false;                 // 位置必须是完整的 xyz
+    const usize meshVertexCount = positions.size() / 3u;
+    if (!normals.empty() && normals.size() != meshVertexCount * 3u) return false;
+    if (!uvs.empty()     && uvs.size()     != meshVertexCount * 2u) return false;
+
+    const usize uniqueCount     = dag.uniqueVertexCount.size();
+    const usize occurrenceCount = dag.clusters.size();
+
+    // DAG 自身的平行数组必须一一对应（防御性；正常由 `BuildNaniteClusterDAG` 保证）
+    if (dag.uniqueVertexOffset.size()   != uniqueCount)     return false;
+    if (dag.uniqueTriangleOffset.size() != uniqueCount)     return false;
+    if (dag.uniqueTriangleCount.size()  != uniqueCount)     return false;
+    if (occurrenceCount != dag.clusterVertexCount.size())        return false;
+    if (occurrenceCount != dag.clusterVertexIndexOffset.size())  return false;
+    if (occurrenceCount != dag.clusterUnique.size())             return false;
+    // `levelClusterOffset` 比 `levelClusterCount` 多一个收尾元素（区间右端）；空 DAG 两者都为空
+    if (occurrenceCount > 0u && dag.levelClusterOffset.size() != dag.levelClusterCount.size() + 1u) {
+        return false;
+    }
+
+    // 共享内容表：每个唯一内容的顶点/三角形区间必须落在各自表内
+    for (usize u = 0; u < uniqueCount; ++u) {
+        if ((usize)dag.uniqueVertexOffset[u] + (usize)dag.uniqueVertexCount[u] >
+            dag.uniqueVertexWords.size()) return false;
+        if ((usize)dag.uniqueTriangleOffset[u] + (usize)dag.uniqueTriangleCount[u] >
+            dag.uniqueTriangles.size()) return false;
+    }
+
+    // 出现记录：偏移/计数落在共享表内、局部顶点数在 (0,128]、网格顶点下标合法。
+    // 这一段校验是"绝不越界读"的前提（下面所有循环都建立在它之上）。
+    for (usize c = 0; c < occurrenceCount; ++c) {
+        const u32 localVertices  = dag.clusterVertexCount[c];
+        const u32 localTriangles = dag.clusters[c].triangleCount;
+        if (localVertices == 0u || localVertices > kNaniteMaxClusterVertices) return false;
+        if (localTriangles > kNaniteMaxClusterTriangles) return false;
+        if ((usize)dag.clusterVertexIndexOffset[c] + (usize)localVertices >
+            dag.clusterVertexIndices.size()) return false;
+        if ((usize)dag.clusters[c].vertexOffset + (usize)localVertices >
+            dag.uniqueVertexWords.size()) return false;
+        if ((usize)dag.clusters[c].triangleOffset + (usize)localTriangles >
+            dag.uniqueTriangles.size()) return false;
+        const u32 unique = dag.clusterUnique[c];
+        if ((usize)unique >= uniqueCount) return false;
+        // 出现记录与它指向的共享内容必须同形（"共享内容"口径的守卫）
+        if (localVertices  != dag.uniqueVertexCount[unique])   return false;
+        if (localTriangles != dag.uniqueTriangleCount[unique]) return false;
+        for (u32 v = 0; v < localVertices; ++v) {
+            if ((usize)dag.clusterVertexIndices[dag.clusterVertexIndexOffset[c] + v] >=
+                meshVertexCount) return false;
+        }
+    }
+
+    NanitePackedAsset result;
+    NanitePackStats&  stats = result.stats;
+
+    // ── ① 网格量化范围（与任务 9 共用 `ComputeMeshBounds` ⇒ 位置词口径逐位一致）──
+    stats.meshMaxExtent = ComputeMeshBounds(positions, meshVertexCount,
+                                            stats.meshMin, stats.meshMax);
+    // 位置误差上界 = 半个量化步 = (meshMaxExtent / 1022) / 2
+    stats.positionErrorBound = stats.meshMaxExtent / (2.0f * (float)kNaniteVertexQuantFullScale);
+    stats.normalAngleErrorBoundDegrees = kNaniteNormalAngleErrorBoundDegrees;
+    stats.uvErrorBound = 1.0f / (float)kNaniteUVQuantMax;
+
+    // ── ② 每个唯一内容的"**首次出现**"（内容哈希保证同形；取最小出现下标 ⇒ 确定）──
+    //     量化原点与该份的属性来源都取首次出现：
+    //     原点 = 该出现的簇心（`boundsCenterRadius.xyz`，任务 9 的哈希用的就是它）；
+    //     属性 = 该出现的"局部顶点 → 网格顶点"映射。
+    std::vector<u32> uniqueFirstCluster(uniqueCount, kNaniteNoParentCluster);
+    for (u32 c = 0; c < (u32)occurrenceCount; ++c) {
+        const u32 unique = dag.clusterUnique[c];
+        if (uniqueFirstCluster[unique] == kNaniteNoParentCluster) uniqueFirstCluster[unique] = c;
+    }
+    for (usize u = 0; u < uniqueCount; ++u) {
+        if (uniqueFirstCluster[u] == kNaniteNoParentCluster) return false;   // 无人引用的唯一内容
+    }
+
+    // ── ③ 簇段：拷贝出现记录；`materialID` 本任务统一写 0（归属任务 12/19 的材质解析）──
+    //     `vertexOffset` / `triangleOffset` **原样保留**：它们与共享内容表的下标同位，
+    //     在最终文件里就是"顶点段记录下标 / 索引段三角形下标"，不需要重映射。
+    result.clusters = dag.clusters;
+    for (NaniteClusterRecord& record : result.clusters) {
+        record.materialID = 0u;   // 逐簇材质解析属任务 12/19；此处不伪造 ID
+    }
+
+    // ── ④ 顶点段：位置词**直接复用** DAG 的共享词（共享内容必须逐位相同），
+    //      法线/UV 按首次出现的网格顶点现编；顺带核验口径与实测误差 ──
+    result.vertices.resize(dag.uniqueVertexWords.size());
+    for (usize u = 0; u < uniqueCount; ++u) {
+        const u32 firstCluster  = uniqueFirstCluster[u];
+        const NaniteClusterRecord& first = result.clusters[firstCluster];
+        const float originX = first.boundsCenterRadius[0];
+        const float originY = first.boundsCenterRadius[1];
+        const float originZ = first.boundsCenterRadius[2];
+        const u32   wordBase  = dag.uniqueVertexOffset[u];
+        const u32   count     = dag.uniqueVertexCount[u];
+        const u32   indexBase = dag.clusterVertexIndexOffset[firstCluster];
+
+        for (u32 v = 0; v < count; ++v) {
+            const u32    meshVertex = dag.clusterVertexIndices[indexBase + v];
+            const float* position   = positions.data() + (usize)meshVertex * 3u;
+
+            NaniteVertex vertex;
+            vertex.packedPosition = dag.uniqueVertexWords[wordBase + v];   // 共享词（逐位一致）
+            vertex.quantBias      = kNaniteVertexQuantBias;                // §8.4 定稿的 +512
+
+            // 位置核验：用**本任务的口径**重算一遍，必须与 DAG 的词逐位相同
+            const u32 rawX = NaniteQuantizePositionAxis(position[0], originX, stats.meshMaxExtent);
+            const u32 rawY = NaniteQuantizePositionAxis(position[1], originY, stats.meshMaxExtent);
+            const u32 rawZ = NaniteQuantizePositionAxis(position[2], originZ, stats.meshMaxExtent);
+            if (NanitePackPosition(rawX, rawY, rawZ) != vertex.packedPosition) {
+                ++stats.positionMismatchCount;   // 必须 0：否则说明两处量化口径已经漂了
+            }
+            // "无 clamp"的可测读数（按分量计）：簇心 + 网格最大范围口径下恒为 0
+            if (NanitePositionQuantizeClamps(position[0], originX, stats.meshMaxExtent)) ++stats.positionClampCount;
+            if (NanitePositionQuantizeClamps(position[1], originY, stats.meshMaxExtent)) ++stats.positionClampCount;
+            if (NanitePositionQuantizeClamps(position[2], originZ, stats.meshMaxExtent)) ++stats.positionClampCount;
+
+            // 位置往返误差实测：**从落盘的词解码**（GPU 侧将来读到的就是这个词）
+            const float back[3] = {
+                NaniteDequantizePositionAxis(NaniteUnpackR10G10B10A2(vertex.packedPosition, 0u),
+                                             originX, stats.meshMaxExtent),
+                NaniteDequantizePositionAxis(NaniteUnpackR10G10B10A2(vertex.packedPosition, 1u),
+                                             originY, stats.meshMaxExtent),
+                NaniteDequantizePositionAxis(NaniteUnpackR10G10B10A2(vertex.packedPosition, 2u),
+                                             originZ, stats.meshMaxExtent),
+            };
+            for (u32 axis = 0; axis < 3u; ++axis) {
+                const float error = std::fabs(back[axis] - position[axis]);
+                if (error > stats.maxPositionError) stats.maxPositionError = error;
+            }
+
+            // 法线：八面体 10+10 位（`normals` 为空 ⇒ 默认 +Z，仍参与误差统计）
+            float inputNx = 0.0f;
+            float inputNy = 0.0f;
+            float inputNz = 1.0f;
+            if (!normals.empty()) {
+                const float* normal = normals.data() + (usize)meshVertex * 3u;
+                inputNx = normal[0];
+                inputNy = normal[1];
+                inputNz = normal[2];
+            }
+            vertex.packedNormal = NanitePackNormal(inputNx, inputNy, inputNz);
+
+            // 法线角度误差实测：输入先归一化（解码结果已是单位向量），再取 acos(dot)
+            const float normalLengthSquared = inputNx * inputNx + inputNy * inputNy + inputNz * inputNz;
+            if (normalLengthSquared > 0.0f) {
+                const float invLength = 1.0f / std::sqrt(normalLengthSquared);
+                float decodedX = 0.0f;
+                float decodedY = 0.0f;
+                float decodedZ = 1.0f;
+                NaniteUnpackNormal(vertex.packedNormal, decodedX, decodedY, decodedZ);
+                const float radians = NaniteNormalAngleErrorRadians(inputNx * invLength,
+                                                                   inputNy * invLength,
+                                                                   inputNz * invLength,
+                                                                   decodedX, decodedY, decodedZ);
+                const float degrees = radians * (180.0f / 3.14159265358979323846f);
+                if (degrees > stats.maxNormalAngleErrorDegrees) stats.maxNormalAngleErrorDegrees = degrees;
+            }
+
+            // UV：unorm16（`uvs` 为空 ⇒ 默认 (0,0)）；越界分量如实计数
+            float inputU = 0.0f;
+            float inputV = 0.0f;
+            if (!uvs.empty()) {
+                const float* uv = uvs.data() + (usize)meshVertex * 2u;
+                inputU = uv[0];
+                inputV = uv[1];
+            }
+            if (NaniteUVNeedsClamp(inputU)) ++stats.uvClampCount;
+            if (NaniteUVNeedsClamp(inputV)) ++stats.uvClampCount;
+            vertex.packedUV = NanitePackUV(NaniteQuantizeUV(inputU), NaniteQuantizeUV(inputV));
+
+            // UV 误差实测：参考值取"clamp 到 [0,1] 后的输入"（在域内时它就是输入本身）
+            const float referenceU = inputU < 0.0f ? 0.0f : (inputU > 1.0f ? 1.0f : inputU);
+            const float referenceV = inputV < 0.0f ? 0.0f : (inputV > 1.0f ? 1.0f : inputV);
+            const float uvErrorU = std::fabs(NaniteDequantizeUV(NaniteUnpackUVU(vertex.packedUV)) - referenceU);
+            const float uvErrorV = std::fabs(NaniteDequantizeUV(NaniteUnpackUVV(vertex.packedUV)) - referenceV);
+            if (uvErrorU > stats.maxUVError) stats.maxUVError = uvErrorU;
+            if (uvErrorV > stats.maxUVError) stats.maxUVError = uvErrorV;
+
+            result.vertices[wordBase + v] = vertex;
+        }
+    }
+
+    // ── ⑤ 属性一致性检查：同一共享内容的**其它出现**是否给出同样的法线/UV 词 ──
+    //     任务 9 的内容哈希只覆盖"位置 + 拓扑"（不含法线/UV），所以这里必须如实统计冲突，
+    //     而不是假设"共享的一定一致"。数据本身取首次出现那一份（见头文件的已知限制）。
+    std::vector<u8> uniqueConflict(uniqueCount, 0u);
+    for (u32 c = 0; c < (u32)occurrenceCount; ++c) {
+        const u32 unique    = dag.clusterUnique[c];
+        const u32 count     = dag.clusterVertexCount[c];
+        const u32 indexBase = dag.clusterVertexIndexOffset[c];
+        const u32 wordBase  = dag.uniqueVertexOffset[unique];
+        for (u32 v = 0; v < count; ++v) {
+            const u32 meshVertex = dag.clusterVertexIndices[indexBase + v];
+            float nx = 0.0f;
+            float ny = 0.0f;
+            float nz = 1.0f;
+            if (!normals.empty()) {
+                const float* normal = normals.data() + (usize)meshVertex * 3u;
+                nx = normal[0];
+                ny = normal[1];
+                nz = normal[2];
+            }
+            float u = 0.0f;
+            float vv = 0.0f;
+            if (!uvs.empty()) {
+                const float* uv = uvs.data() + (usize)meshVertex * 2u;
+                u  = uv[0];
+                vv = uv[1];
+            }
+            const u32 normalWord = NanitePackNormal(nx, ny, nz);
+            const u32 uvWord     = NanitePackUV(NaniteQuantizeUV(u), NaniteQuantizeUV(vv));
+            const NaniteVertex& written = result.vertices[wordBase + v];
+            if (written.packedNormal != normalWord || written.packedUV != uvWord) {
+                if (uniqueConflict[unique] == 0u) {
+                    uniqueConflict[unique] = 1u;
+                    ++stats.attributeConflictCount;   // 每个唯一内容只计一次
+                }
+            }
+        }
+    }
+
+    // ── ⑥ 索引段：直接复用共享三角形表，并逐条核验"簇内局部下标"的合法区间 ──
+    //     合法前提是 `[0, min(127, 本唯一内容顶点数-1)]`：≥128 就不是 u16 打包语义下的
+    //     合法簇内下标（任务 7 的 `IsValidClusterLocalVertexIndex`），越出本簇顶点数更是坏数据。
+    result.triangles = dag.uniqueTriangles;
+    for (usize u = 0; u < uniqueCount; ++u) {
+        const u32 localVertexCount = dag.uniqueVertexCount[u];
+        for (u32 t = 0; t < dag.uniqueTriangleCount[u]; ++t) {
+            const NanitePackedTriangle& triangle =
+                result.triangles[dag.uniqueTriangleOffset[u] + t];
+            const u32 i0 = NaniteTriangleIndex0(triangle);
+            const u32 i1 = NaniteTriangleIndex1(triangle);
+            const u32 i2 = NaniteTriangleIndex2(triangle);
+            if (!IsValidClusterLocalVertexIndex(i0) || !IsValidClusterLocalVertexIndex(i1) ||
+                !IsValidClusterLocalVertexIndex(i2)) return false;
+            if (i0 >= localVertexCount || i1 >= localVertexCount || i2 >= localVertexCount) return false;
+        }
+    }
+
+    // ── ⑦ 材质段：原样搬运（不解析 ID、不做逐簇分配）──
+    result.materials.assign(materials.begin(), materials.end());
+
+    // ── ⑧ LOD 段：每级一个 u32 = **该级第一个出现簇的下标**（`levelClusterOffset[L]`）──
+    //     任务 7 只定了"每个 LOD 一个 u32 偏移"的步长与条数，语义由任务 10 定为
+    //     "该级出现簇区间的左端"：右端 = 下一条（末级用 `header.clusterCount`）⇒ 不需要哨兵元素。
+    //     任务 15 的 LOD 选择可按它把"级"映射回簇下标区间。
+    result.lodOffsets.reserve(dag.levelClusterCount.size());
+    for (usize level = 0; level < dag.levelClusterCount.size(); ++level) {
+        result.lodOffsets.push_back(dag.levelClusterOffset[level]);
+    }
+
+    // ── ⑨ 头部（计数/范围/误差/flags 全部有真值来源）──
+    NaniteFileHeader header{};   // magic / version 已是任务 7 的定稿值
+    header.clusterCount  = (u32)result.clusters.size();
+    header.vertexCount   = (u32)result.vertices.size();
+    header.indexCount    = (u32)result.triangles.size() * kNaniteIndicesPerTriangle;
+    header.materialCount = (u32)result.materials.size();
+    header.lodLevelCount = (u32)result.lodOffsets.size();
+    header.flags         = kNaniteFileFlagHasDAG;   // 打包器只吃 DAG 产物 ⇒ 恒带簇图
+    for (u32 axis = 0; axis < 3u; ++axis) {
+        header.bboxMin[axis] = stats.meshMin[axis];
+        header.bboxMax[axis] = stats.meshMax[axis];
+    }
+    header.maxLODError   = dag.stats.maxLODError;   // 任务 9 的绝对误差（保守上界）
+
+    // ── ⑩ 段表：任务 7 的推导函数（起点 16B 对齐、长度向上取整到 16B）──
+    NaniteFileLayout layout{};
+    if (TryBuildNaniteFileLayout(header, layout) != NaniteFileError::None) return false;
+
+    // 段字节读数 + "记录数 × 记录大小"的显式对账（公式写出来，任何一处步长改动都会在这里炸）
+    const u64 rawClusterBytes  = (u64)result.clusters.size()  * (u64)kNaniteClusterRecordBytes;
+    const u64 rawVertexBytes   = (u64)result.vertices.size()  * (u64)kNaniteVertexRecordBytes;
+    const u64 rawIndexBytes    = (u64)result.triangles.size() * (u64)kNaniteIndexBytesPerTriangle;
+    const u64 rawMaterialBytes = (u64)result.materials.size() * (u64)kNaniteMaterialRecordBytes;
+    const u64 rawLodBytes      = (u64)result.lodOffsets.size() * (u64)kNaniteLodOffsetBytes;
+    const u64 expectedTotal    = (u64)kNaniteFileHeaderBytes
+                               + NaniteAlignUpFile(rawClusterBytes)
+                               + NaniteAlignUpFile(rawVertexBytes)
+                               + NaniteAlignUpFile(rawIndexBytes)
+                               + NaniteAlignUpFile(rawMaterialBytes)
+                               + NaniteAlignUpFile(rawLodBytes);
+    if ((u64)layout.totalBytes != expectedTotal) return false;
+
+    stats.clusterCount  = header.clusterCount;
+    stats.vertexCount   = header.vertexCount;
+    stats.triangleCount = (u32)result.triangles.size();
+    stats.materialCount = header.materialCount;
+    stats.lodLevelCount = header.lodLevelCount;
+    stats.headerBytes   = layout.headerBytes;
+    stats.clusterBytes  = layout.clusterBytes;
+    stats.vertexBytes   = layout.vertexBytes;
+    stats.indexBytes    = layout.indexBytes;
+    stats.materialBytes = layout.materialBytes;
+    stats.lodBytes      = layout.lodBytes;
+    stats.rawBytes      = (usize)(rawClusterBytes + rawVertexBytes + rawIndexBytes +
+                                  rawMaterialBytes + rawLodBytes);
+    stats.totalBytes    = layout.totalBytes;
+
+    // ── ⑪ 字节镜像（GPU 上传用的连续缓冲）+ 自校验 ──
+    //     `std::vector<u8>` 的分配在本平台按 `__STDCPP_DEFAULT_NEW_ALIGNMENT__`（x64 = 16B）对齐，
+    //     而各段偏移都是 16B 的整数倍 ⇒ 段内记录的对齐与"整块上传到 GPU"的要求一致。
+    std::vector<u8> bytes(layout.totalBytes, 0u);
+    std::memcpy(bytes.data(), &header, sizeof(header));
+    if (!result.clusters.empty()) {
+        std::memcpy(bytes.data() + layout.clusterOffset, result.clusters.data(),
+                    result.clusters.size() * sizeof(NaniteClusterRecord));
+    }
+    if (!result.vertices.empty()) {
+        std::memcpy(bytes.data() + layout.vertexOffset, result.vertices.data(),
+                    result.vertices.size() * sizeof(NaniteVertex));
+    }
+    if (!result.triangles.empty()) {
+        std::memcpy(bytes.data() + layout.indexOffset, result.triangles.data(),
+                    result.triangles.size() * sizeof(NanitePackedTriangle));
+    }
+    if (!result.materials.empty()) {
+        std::memcpy(bytes.data() + layout.materialOffset, result.materials.data(),
+                    result.materials.size() * sizeof(NaniteMaterialRecord));
+    }
+    if (!result.lodOffsets.empty()) {
+        std::memcpy(bytes.data() + layout.lodOffset, result.lodOffsets.data(),
+                    result.lodOffsets.size() * sizeof(u32));
+    }
+
+    // 自校验：镜像必须是一份**合法且完整**的 `.nanite`（魔数/版本/3 的倍数/段对齐/不越界）
+    NaniteFileLayout checked{};
+    if (ValidateNaniteFile(bytes.data(), bytes.size(), &checked) != NaniteFileError::None) return false;
+    if (checked.totalBytes != layout.totalBytes) return false;
+
+    result.header = header;
+    result.layout = layout;
+    result.bytes  = std::move(bytes);
 
     outResult = std::move(result);   // 只有走到这里才动调用方的对象
     return true;

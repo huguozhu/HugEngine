@@ -22,12 +22,21 @@
 //  14. 任务 7：cone 数据解码（单位轴 / cos 半角 / 无锥哨兵）
 //  15. 任务 7：段表推导（计数 → 各段 offset/size、16B 对齐、总长）
 //  16. 任务 7：校验函数的正例与反例（空指针/截断/魔数错/版本错/索引数错/越界/尾部多余）
+//
+// §14.8 任务 10（量化编解码的验收，全部在本文件；打包/段布局在 TestNaniteBuilder.cpp）：
+//  12. 位置量化往返：**任务 10 的基准裁决**（盒心 origin + 乘数 1022 ⇒ 吃满 10 位），
+//      中点/端点/四分点/误差上界 range/2044/越界 clamp/退化轴/NaN
+//  12b. 位置量化**无 clamp** 的口径证明（簇心 + 网格最大范围；极端簇 + 多组中心/半轴扫描）
+//  12c. 法线八面体编码 10+10 位：轴/对角/符号边界、Fibonacci 球 20000 方向的**最坏角误差**
+//  12d. UV unorm16：4097 点往返误差、越界 clamp 的如实口径、10 位 UNORM 辅助
+//  12e. 材质 8B 打包/解包（含字节序与越界 word）
 // ============================================================
 
 #include "doctest.h"
 
 #include "Nanite/NaniteTypes.h"   // 分区契约 + 实例槽分配器 + 任务 3/4 的 POD（RHI-free）
 
+#include <algorithm> // std::max（任务 10：法线八面体的稠密采样）
 #include <cmath>     // std::fabs / std::acos（cone 解码与量化误差）
 #include <cstddef>   // offsetof
 #include <cstring>   // memcpy（把头部写进测试缓冲）
@@ -469,67 +478,310 @@ TEST_CASE("NaniteTypes: 顶点记录尺寸与量化偏置落点（任务 7 定�
 }
 
 // ============================================================
-// 12. 任务 7：量化偏置往返（裁决 #9：编码端补 +512，与 §8.4 的解码互逆）
+// 12. 量化往返（裁决 #9 的偏置 + **任务 10 的基准裁决**：盒心 + 吃满 10 位）
+//
+// 【任务 10 改了什么】任务 7 的原口径（§8.4）以 `bboxMin` 为原点、把 `[bboxMin, bboxMin+range]`
+//   映射到有符号 [0,511] ⇒ 盒内只用到上半段（raw ∈ [512,1023]），等效 ~9 位精度。
+//   任务 10 改为"以盒**中心**为原点、把 `[origin-range/2, origin+range/2]` 映射到 [-512,511]"
+//   （乘数 **1022**）⇒ **吃满 10 位**，往返误差上界从 range/1022 收到 range/2044。
+//   本用例把新口径的中点/端点/全量程/误差上界/无 clamp 逐点钉住 —— 旧断言（raw ∈ [bias,
+//   bias+511]、误差 ≤ range/1022）按新口径更新，这正是 §8.4 "留给任务 10 按量化误差验收决定"
+//   的那条已知取舍的落点。
 // ============================================================
-TEST_CASE("NaniteTypes: 量化偏置往返（裁决 #9：编码端补 +512）") {
-    const float bboxMin   = -1.0f;
-    const float maxExtent = 4.0f;               // 量化盒 = [-1, 3]
-    const float bboxMax   = bboxMin + maxExtent;
+TEST_CASE("NaniteTypes: 位置量化往返（任务 10 基准：盒心 + 吃满 10 位）") {
+    const float origin = -1.0f;   // 盒**中心**（= 簇 AABB 中心的口径）
+    const float range  = 4.0f;    // 量化范围 ⇒ 可表示区间 = [origin-range/2, origin+range/2] = [-3, 3]
+    const float low    = origin - range * 0.5f;
+    const float high   = origin + range * 0.5f;
 
-    // 两端：v = bboxMin ⇒ 有符号量 0 ⇒ raw = bias；v = bboxMax ⇒ 511 ⇒ raw = bias + 511
-    const u32 rawMin = NaniteQuantizePositionAxis(bboxMin, bboxMin, maxExtent);
-    const u32 rawMax = NaniteQuantizePositionAxis(bboxMax, bboxMin, maxExtent);
-    CHECK(rawMin == (u32)kNaniteVertexQuantBias);
-    CHECK(rawMax == (u32)(kNaniteVertexQuantBias + kNaniteVertexQuantMax));
-    CHECK(rawMax == 1023u);
-    CHECK(NaniteDequantizePositionAxis(rawMin, bboxMin, maxExtent) ==
-          doctest::Approx(bboxMin).epsilon(1e-6));
-    CHECK(NaniteDequantizePositionAxis(rawMax, bboxMin, maxExtent) ==
-          doctest::Approx(bboxMax).epsilon(1e-6));
+    // 中点（signed = 0 ⇒ raw = bias）与两端（signed = ∓511 ⇒ raw = 1 / 1023）
+    const u32 rawCenter = NaniteQuantizePositionAxis(origin, origin, range);
+    const u32 rawLow    = NaniteQuantizePositionAxis(low, origin, range);
+    const u32 rawHigh   = NaniteQuantizePositionAxis(high, origin, range);
+    CHECK(rawCenter == (u32)kNaniteVertexQuantBias);      // 512
+    CHECK(rawLow == 1u);                                  // -511 + 512
+    CHECK(rawHigh == 1023u);                              // +511 + 512
+    CHECK(rawLow < (u32)kNaniteVertexQuantBias);          // 负半段**真的被用到**（旧口径用不到）
+    CHECK(rawHigh > (u32)kNaniteVertexQuantBias);
+    CHECK(kNaniteVertexQuantFullScale == 1022);
+    CHECK(kNaniteVertexQuantMin == -512);
+    CHECK(kNaniteVertexQuantMax == 511);
 
-    // 中点：0.5 × 511 = 255.5 ⇒ lround = 256 ⇒ raw = 768
-    const float mid = (bboxMin + bboxMax) * 0.5f;
-    const u32 rawMid = NaniteQuantizePositionAxis(mid, bboxMin, maxExtent);
-    CHECK(rawMid == (u32)(kNaniteVertexQuantBias + 256));
-    CHECK(NaniteDequantizePositionAxis(rawMid, bboxMin, maxExtent) ==
-          doctest::Approx(mid).epsilon(0.01));
+    // 端点解码（对称性）
+    CHECK(NaniteDequantizePositionAxis(rawCenter, origin, range) ==
+          doctest::Approx(origin).epsilon(1e-6));
+    CHECK(NaniteDequantizePositionAxis(rawLow, origin, range) ==
+          doctest::Approx(low).epsilon(1e-6));
+    CHECK(NaniteDequantizePositionAxis(rawHigh, origin, range) ==
+          doctest::Approx(high).epsilon(1e-6));
 
-    // 盒内逐点：① raw 始终落在 [bias, bias+511]（偏置确实加上了 —— 这正是旧无符号编码
-    //              0…511 会解码到盒下方的原因）；② 往返误差 ≤ maxExtent/1022（半步）
-    const float halfStep = maxExtent / 1022.0f;
-    for (u32 i = 0; i <= 64u; ++i) {
-        const float v = bboxMin + maxExtent * (float)i / 64.0f;
-        const u32 raw = NaniteQuantizePositionAxis(v, bboxMin, maxExtent);
-        CHECK(raw >= (u32)kNaniteVertexQuantBias);
-        CHECK(raw <= (u32)(kNaniteVertexQuantBias + kNaniteVertexQuantMax));
-        const float back = NaniteDequantizePositionAxis(raw, bboxMin, maxExtent);
-        CHECK(std::fabs(back - v) <= halfStep + 1.0e-5f);
+    // 盒内逐点：① raw 覆盖 [1, 1023]（两端都用上 ⇒ 10 位吃满）；
+    //            ② 往返误差 ≤ range/2044（**半个量化步**，比任务 7 的 range/1022 再小一半）；
+    //            ③ 盒内一律不 clamp
+    const float halfStep = range / (2.0f * (float)kNaniteVertexQuantFullScale);
+    float maxError = 0.0f;
+    for (u32 i = 0; i <= 256u; ++i) {
+        const float v   = low + range * (float)i / 256.0f;
+        const u32   raw = NaniteQuantizePositionAxis(v, origin, range);
+        CHECK(raw >= 1u);
+        CHECK(raw <= 1023u);
+        CHECK_FALSE(NanitePositionQuantizeClamps(v, origin, range));
+        const float error = std::fabs(NaniteDequantizePositionAxis(raw, origin, range) - v);
+        if (error > maxError) maxError = error;
+        CHECK(error <= halfStep + 1.0e-6f);
     }
+    MESSAGE("位置量化：range=4 实测最大往返误差=" << maxError
+            << "  上界 range/2044=" << halfStep);
 
-    // 偏置的对称性：raw < bias 时解码为**负**的（= 盒下方一个量化步；旧编码 0 就落在这里）
-    const float expectedNegative = bboxMin + (-512.0f / 511.0f) * maxExtent;
-    CHECK(NaniteDequantizePositionAxis(0u, bboxMin, maxExtent) ==
-          doctest::Approx(expectedNegative).epsilon(1e-5));
-    CHECK(expectedNegative < bboxMin);
-    CHECK(NaniteDequantizePositionAxis((u32)kNaniteVertexQuantBias, bboxMin, maxExtent) ==
-          doctest::Approx(bboxMin).epsilon(1e-6));
+    // 四分之一点（v = origin + range/4 = 0）：signed = 255.5 ⇒ lround = 256 ⇒ raw = 768
+    CHECK(NaniteQuantizePositionAxis(origin + range * 0.25f, origin, range) ==
+          (u32)(kNaniteVertexQuantBias + 256));
 
-    // 自定义偏置（= 记录里的 quantBias）：编解码用的是同一个值 ⇒ 自包含
-    const u32 rawNoBias = NaniteQuantizePositionAxis(bboxMin, bboxMin, maxExtent, 0);
-    CHECK(rawNoBias == 0u);
-    CHECK(NaniteDequantizePositionAxis(rawNoBias, bboxMin, maxExtent, 0) ==
-          doctest::Approx(bboxMin).epsilon(1e-6));
-
-    // 退化轴（maxExtent = 0）：取 bias、解码回 bboxMin，且不产生除零
-    CHECK(NaniteQuantizePositionAxis(123.0f, bboxMin, 0.0f) == (u32)kNaniteVertexQuantBias);
-    CHECK(NaniteDequantizePositionAxis((u32)kNaniteVertexQuantBias, bboxMin, 0.0f) == bboxMin);
-
-    // 越界值被夹到 10 位范围内（编码端绝不写出 > 1023 或负的 raw）
-    CHECK(NaniteQuantizePositionAxis(1.0e9f, bboxMin, maxExtent) == 1023u);
-    CHECK(NaniteQuantizePositionAxis(-1.0e9f, bboxMin, maxExtent) == 0u);
+    // 越出可表示区间：signed 被夹到边界（编码端绝不写出 >1023 / <0 的 raw），且诊断函数能识别
+    CHECK(NaniteQuantizePositionAxis(origin + range, origin, range) == 1023u);
+    CHECK(NaniteQuantizePositionAxis(origin - range, origin, range) == 0u);
+    CHECK(NanitePositionQuantizeClamps(origin + range, origin, range));
+    CHECK(NanitePositionQuantizeClamps(origin - range, origin, range));
+    CHECK_FALSE(NanitePositionQuantizeClamps(high, origin, range));   // 恰好端点：不算 clamp
+    CHECK_FALSE(NanitePositionQuantizeClamps(low, origin, range));
     CHECK(NaniteClampRaw10(-1) == 0u);
     CHECK(NaniteClampRaw10(1024) == 1023u);
     CHECK(NaniteClampRaw10(768) == 768u);
+
+    // raw = 0（signed = -512）解码到区间**下方**一个量化步：负半段是真实有意义的码点
+    const float belowLow = NaniteDequantizePositionAxis(0u, origin, range);
+    CHECK(belowLow < low);
+    CHECK(belowLow == doctest::Approx(origin + (-512.0f / 1022.0f) * range).epsilon(1e-5));
+
+    // 自定义偏置（= 记录里的 quantBias 字段）：编解码用同一个值 ⇒ 自包含
+    CHECK(NaniteQuantizePositionAxis(origin, origin, range, 0) == 0u);
+    CHECK(NaniteDequantizePositionAxis(0u, origin, range, 0) ==
+          doctest::Approx(origin).epsilon(1e-6));
+
+    // 退化轴（range = 0）：取 bias、解码回 origin；不产生除零，也不算 clamp
+    CHECK(NaniteQuantizePositionAxis(123.0f, origin, 0.0f) == (u32)kNaniteVertexQuantBias);
+    CHECK(NaniteDequantizePositionAxis((u32)kNaniteVertexQuantBias, origin, 0.0f) == origin);
+    CHECK_FALSE(NanitePositionQuantizeClamps(123.0f, origin, 0.0f));
+
+    // NaN 输入：编码端给 bias（不产生未定义行为），且不算 clamp
+    const float nan = std::nanf("");
+    CHECK(NaniteQuantizePositionAxis(nan, origin, range) == (u32)kNaniteVertexQuantBias);
+    CHECK_FALSE(NanitePositionQuantizeClamps(nan, origin, range));
+}
+
+// ============================================================
+// 12b. 任务 10：位置量化的**无 clamp** 口径证明（簇 AABB 中心 + 网格最大范围）
+//
+// 证明（也是打包器里 positionClampCount 恒为 0 的依据）：簇是网格的子集 ⇒
+//   每轴 |v - 簇心_轴| ≤ 簇局部半轴长 ≤ 该轴网格范围/2 ≤ meshExtent/2 = range/2
+//   ⇒ |signed| ≤ 511 ≤ [−512, 511] ⇒ 恒不 clamp。
+// 下面用"极端簇"（AABB 恰好铺满网格最大轴，半轴长 = range/2）+ 多组中心/尺度扫描把它变成读数。
+// ============================================================
+TEST_CASE("NaniteTypes: 位置量化无 clamp（簇心 + 网格最大范围口径）") {
+    const float range = 8.0f;   // meshExtent
+
+    // ① 极端簇：AABB 沿 x 铺满整个网格最大范围 ⇒ 半轴长恰好 = range/2
+    const float originX = 4.0f;
+    u32 minRaw = 1023u;
+    u32 maxRaw = 0u;
+    for (u32 i = 0; i <= 64u; ++i) {
+        const float x   = range * (float)i / 64.0f;   // [0, 8]
+        const u32   raw = NaniteQuantizePositionAxis(x, originX, range);
+        CHECK_FALSE(NanitePositionQuantizeClamps(x, originX, range));
+        if (raw < minRaw) minRaw = raw;
+        if (raw > maxRaw) maxRaw = raw;
+    }
+    CHECK(minRaw == 1u);      // x = 0 ⇒ signed = -511（负半段用满）
+    CHECK(maxRaw == 1023u);   // x = 8 ⇒ signed = +511（正半段用满）
+    MESSAGE("位置量化无 clamp：极端簇实测 raw 区间=[" << minRaw << "," << maxRaw
+            << "] range=" << range);
+
+    // ② 多组 (中心, 半轴长) 扫描：只要半轴长 ≤ range/2 就不 clamp；超过就必然 clamp（诊断可见）
+    const float centers[5] = { 0.0f, -3.5f, 1.25f, 100.0f, -1000.0f };
+    const float halves[4]  = { 0.0f, range * 0.25f, range * 0.49f, range * 0.5f };
+    for (const float center : centers) {
+        for (const float half : halves) {
+            for (u32 i = 0; i <= 32u; ++i) {
+                const float offset = -half + 2.0f * half * (float)i / 32.0f;   // [-half, +half]
+                const float v      = center + offset;
+                CHECK_FALSE(NanitePositionQuantizeClamps(v, center, range));
+                const u32 raw = NaniteQuantizePositionAxis(v, center, range);
+                CHECK(raw >= 1u);
+                CHECK(raw <= 1023u);
+            }
+        }
+    }
+
+    // ③ 反例（防御性）：半轴长超过 range/2 时诊断函数必须能识别出 clamp
+    CHECK(NanitePositionQuantizeClamps(8.0f, 0.0f, range));      // |v-origin| = range > range/2
+    CHECK(NanitePositionQuantizeClamps(-4.1f, 0.0f, range));
+    CHECK_FALSE(NanitePositionQuantizeClamps(4.0f, 0.0f, range)); // 恰好 range/2：不 clamp
+}
+
+// ============================================================
+// 12c. 任务 10：法线八面体编码（10+10 位进 packedNormal 的 x/y 域）
+// ============================================================
+TEST_CASE("NaniteTypes: 法线八面体编码往返（10+10 位，角误差 ≤ 0.5°）") {
+    const float kPi    = std::acos(-1.0f);
+    const float toDeg  = 180.0f / kPi;
+    CHECK(kNaniteNormalOctahedralBits == 10u);
+    CHECK(kNaniteNormalAngleErrorBoundDegrees == 0.5f);
+
+    /// 局部 lambda：编码 → 解包 → 角误差（度）
+    const auto angleErrorDegrees = [](float nx, float ny, float nz, const NaniteVertex& vertex) {
+        const float length = std::sqrt(nx * nx + ny * ny + nz * nz);
+        if (!(length > 0.0f)) return 0.0f;
+        float dx = 0.0f, dy = 0.0f, dz = 0.0f;
+        NaniteUnpackNormal(vertex.packedNormal, dx, dy, dz);
+        return NaniteNormalAngleErrorRadians(nx / length, ny / length, nz / length, dx, dy, dz) *
+               (180.0f / std::acos(-1.0f));
+    };
+
+    // ① 六个轴向 + 八个对角：位域（z/w 保留 0）+ 角误差
+    const float axes[][3] = {
+        {  1.0f,  0.0f,  0.0f }, { -1.0f,  0.0f,  0.0f },
+        {  0.0f,  1.0f,  0.0f }, {  0.0f, -1.0f,  0.0f },
+        {  0.0f,  0.0f,  1.0f }, {  0.0f,  0.0f, -1.0f },
+        {  1.0f,  1.0f,  1.0f }, { -1.0f,  1.0f, -1.0f },
+        {  1.0f, -1.0f,  1.0f }, { -1.0f, -1.0f,  1.0f },
+        {  0.0f,  0.0f, -1.0f }, {  0.0f, -1.0f,  0.0f },   // 折叠路径里 x/y 恰为 0 的符号边界
+    };
+    for (const auto& axis : axes) {
+        NaniteVertex vertex;
+        vertex.packedNormal = NanitePackNormal(axis[0], axis[1], axis[2]);
+        // 八面体只占 x/y 两个 10 位域：z 与 w 必须保留 0（§8.4 的位域契约）
+        CHECK(NaniteUnpackR10G10B10A2(vertex.packedNormal, 2u) == 0u);
+        CHECK(NaniteUnpackR10G10B10A2(vertex.packedNormal, 3u) == 0u);
+        const float error = angleErrorDegrees(axis[0], axis[1], axis[2], vertex);
+        CHECK(error <= kNaniteNormalAngleErrorBoundDegrees);
+    }
+
+    // ② 稠密采样（Fibonacci 球，确定性、无随机数）：把最坏角误差变成读数
+    const u32   sampleCount   = 20000u;
+    const float goldenAngle   = kPi * (3.0f - std::sqrt(5.0f));
+    float       maxError      = 0.0f;
+    float       maxErrorAt[3] = { 0.0f, 0.0f, 1.0f };
+    for (u32 i = 0; i < sampleCount; ++i) {
+        const float z     = 1.0f - 2.0f * ((float)i + 0.5f) / (float)sampleCount;
+        const float radius = std::sqrt(std::max(0.0f, 1.0f - z * z));
+        const float phi    = goldenAngle * (float)i;
+        const float nx = radius * std::cos(phi);
+        const float ny = radius * std::sin(phi);
+        NaniteVertex vertex;
+        vertex.packedNormal = NanitePackNormal(nx, ny, z);
+        const float error = angleErrorDegrees(nx, ny, z, vertex);
+        if (error > maxError) {
+            maxError = error;
+            maxErrorAt[0] = nx; maxErrorAt[1] = ny; maxErrorAt[2] = z;
+        }
+    }
+    MESSAGE("法线八面体 10+10 位：" << sampleCount << " 个方向实测最大角误差=" << maxError
+            << "°（出现在 " << maxErrorAt[0] << "," << maxErrorAt[1] << "," << maxErrorAt[2]
+            << "）阈值=" << kNaniteNormalAngleErrorBoundDegrees << "°");
+    CHECK(maxError <= kNaniteNormalAngleErrorBoundDegrees);
+    CHECK(maxError > 0.0f);   // 确实发生了量化（不是恒等映射）
+
+    // ③ 解码结果必须是单位向量（八面体解码自带归一化）
+    float dx = 0.0f, dy = 0.0f, dz = 0.0f;
+    NaniteUnpackNormal(NanitePackNormal(0.3f, -0.5f, 0.81f), dx, dy, dz);
+    CHECK(std::sqrt(dx * dx + dy * dy + dz * dz) == doctest::Approx(1.0f).epsilon(1e-5f));
+
+    // ④ 退化输入：零向量 / NaN ⇒ 定点 +Z（编解码自洽，不产生 NaN）
+    for (const float bad : { 0.0f, std::nanf("") }) {
+        NaniteVertex vertex;
+        vertex.packedNormal = NanitePackNormal(bad, bad, bad);
+        NaniteUnpackNormal(vertex.packedNormal, dx, dy, dz);
+        CHECK(dx == doctest::Approx(0.0f).epsilon(0.01f));
+        CHECK(dy == doctest::Approx(0.0f).epsilon(0.01f));
+        CHECK(dz == doctest::Approx(1.0f).epsilon(1e-5f));
+    }
+    // 零向量的八面体坐标恒为 (0,0)（两位域都落在中点 512 附近，不是 0 —— 见 UV/UNORM 口径）
+    CHECK(NaniteUnpackR10G10B10A2(NanitePackNormal(0.0f, 0.0f, 0.0f), 0u) == 512u);
+    CHECK(NaniteUnpackR10G10B10A2(NanitePackNormal(0.0f, 0.0f, 0.0f), 1u) == 512u);
+}
+
+// ============================================================
+// 12d. 任务 10：UV unorm16 量化（含越界 clamp 的如实口径）
+// ============================================================
+TEST_CASE("NaniteTypes: UV unorm16 量化往返（≤ 1/65535）与越界 clamp") {
+    CHECK(kNaniteUVQuantMax == 0xFFFFu);
+
+    // 端点与 clamp（unorm16 表示不了越界 UV，按 §8.4 的口径夹到 [0,1]）
+    CHECK(NaniteQuantizeUV(0.0f) == 0u);
+    CHECK(NaniteQuantizeUV(1.0f) == 0xFFFFu);
+    CHECK(NaniteQuantizeUV(0.5f) == 32768u);      // round(0.5 × 65535) = round(32767.5) = 32768
+    CHECK(NaniteQuantizeUV(-0.5f) == 0u);
+    CHECK(NaniteQuantizeUV(2.0f) == 0xFFFFu);
+    CHECK(NaniteQuantizeUV(std::nanf("")) == 0u);
+    CHECK(NaniteUVNeedsClamp(-0.001f));
+    CHECK(NaniteUVNeedsClamp(1.001f));
+    CHECK(NaniteUVNeedsClamp(std::nanf("")));
+    CHECK_FALSE(NaniteUVNeedsClamp(0.0f));
+    CHECK_FALSE(NaniteUVNeedsClamp(0.5f));
+    CHECK_FALSE(NaniteUVNeedsClamp(1.0f));
+
+    // 往返误差 ≤ 1/65535（**一个量化步**；半个步是 1/131070）
+    const float bound    = 1.0f / (float)kNaniteUVQuantMax;
+    const float halfStep = 0.5f * bound;
+    float maxError = 0.0f;
+    for (u32 i = 0; i <= 4096u; ++i) {
+        const float v   = (float)i / 4096.0f;
+        const u32   raw = NaniteQuantizeUV(v);
+        const float back = NaniteDequantizeUV(raw);
+        const float error = std::fabs(back - v);
+        if (error > maxError) maxError = error;
+        CHECK(error <= halfStep + 1.0e-7f);
+    }
+    MESSAGE("UV unorm16：4097 点实测最大往返误差=" << maxError
+            << "  半个量化步=1/131070=" << halfStep << "  阈值 1/65535=" << bound);
+    CHECK(maxError <= bound);
+
+    // 位序：R16G16_UNORM（u 低 16 位、v 高 16 位），u/v 不互相污染
+    const u32 packed = NanitePackUV(NaniteQuantizeUV(0.25f), NaniteQuantizeUV(0.75f));
+    CHECK(NaniteUnpackUVU(packed) == NaniteQuantizeUV(0.25f));
+    CHECK(NaniteUnpackUVV(packed) == NaniteQuantizeUV(0.75f));
+    CHECK(NaniteUnpackUVU(NanitePackUV(0xFFFFu, 0u)) == 0xFFFFu);
+    CHECK(NaniteUnpackUVV(NanitePackUV(0u, 0xFFFFu)) == 0xFFFFu);
+
+    // 10 位 UNORM 辅助（法线八面体用）：[-1,1] ↔ [0,1023] 的端点与中点
+    CHECK(NaniteQuantizeUNorm10(-1.0f) == 0u);
+    CHECK(NaniteQuantizeUNorm10(1.0f) == 1023u);
+    CHECK(NaniteDequantizeUNorm10(0u) == doctest::Approx(-1.0f).epsilon(1e-6));
+    CHECK(NaniteDequantizeUNorm10(1023u) == doctest::Approx(1.0f).epsilon(1e-6));
+    CHECK(NaniteQuantizeUNorm10(-5.0f) == 0u);       // 越界 clamp
+    CHECK(NaniteQuantizeUNorm10(5.0f) == 1023u);
+    CHECK(NaniteQuantizeUNorm10(std::nanf("")) == 0u);
+}
+
+// ============================================================
+// 12e. 任务 10：材质记录 8B 打包/解包（字段按 §8 定稿，只有两个 bindless 纹理 ID）
+// ============================================================
+TEST_CASE("NaniteTypes: 材质记录 8B 打包/解包（任务 10）") {
+    static_assert(sizeof(NaniteMaterialRecord) == 8, "材质记录必须 8B");
+    CHECK(kNaniteMaterialRecordBytes == 8u);
+    CHECK(offsetof(NaniteMaterialRecord, albedoTexture) == 0u);
+    CHECK(offsetof(NaniteMaterialRecord, normalTexture) == 4u);
+
+    const NaniteMaterialRecord material = NanitePackMaterial(0xDEADBEEFu, 0x12345678u);
+    CHECK(material.albedoTexture == 0xDEADBEEFu);
+    CHECK(material.normalTexture == 0x12345678u);
+    CHECK(NaniteUnpackMaterial(material, 0u) == 0xDEADBEEFu);
+    CHECK(NaniteUnpackMaterial(material, 1u) == 0x12345678u);
+    CHECK(NaniteUnpackMaterial(material, 2u) == 0u);    // 越界 word
+    CHECK(NaniteUnpackMaterial(material, 0xFFFFFFFFu) == 0u);
+
+    // 字节序：word0 = albedo、word1 = normal（与 Slang 侧的 `uint2` 视角逐位一致）
+    const u32 words[2] = { 0xA1B2C3D4u, 0x01020304u };
+    NaniteMaterialRecord fromWords{};
+    std::memcpy(&fromWords, words, sizeof(fromWords));
+    CHECK(fromWords.albedoTexture == 0xA1B2C3D4u);
+    CHECK(fromWords.normalTexture == 0x01020304u);
+    CHECK(NaniteUnpackMaterial(fromWords, 0u) == 0xA1B2C3D4u);
+
+    // 默认记录（0 ⇒ 该槽未绑定；具体语义属任务 12/19 的材质解析）
+    const NaniteMaterialRecord empty{};
+    CHECK(empty.albedoTexture == 0u);
+    CHECK(empty.normalTexture == 0u);
 }
 
 // ============================================================
@@ -579,6 +831,25 @@ TEST_CASE("NaniteTypes: 三角形索引编码边界（裁决 #6：3×u16 进 u32
 
     // 一簇的最大索引块 = 64 三角形 × 8B = 512B，天然 16B 对齐（裁决 #6 的取舍依据）
     CHECK((kNaniteMaxClusterTriangles * kNaniteIndexBytesPerTriangle) % kNaniteFileAlignment == 0u);
+
+    // 任务 10：索引**必须 3 个一组**（3×u16 打包的结构性前提；`indexCount` 是索引总数）
+    CHECK(IsNaniteTriangleIndexCount(0u));
+    CHECK(IsNaniteTriangleIndexCount(3u));
+    CHECK(IsNaniteTriangleIndexCount(30u));
+    CHECK_FALSE(IsNaniteTriangleIndexCount(1u));
+    CHECK_FALSE(IsNaniteTriangleIndexCount(2u));
+    CHECK_FALSE(IsNaniteTriangleIndexCount(4u));
+    CHECK_FALSE(IsNaniteTriangleIndexCount(31u));
+
+    // 3×u16 打包的边界：簇内局部下标的实际上限 127 与 u16 上限 255/0xFFFF 的区分
+    const NanitePackedTriangle boundary = NanitePackTriangle(0u, 127u, 255u);
+    CHECK(NaniteTriangleIndex0(boundary) == 0u);
+    CHECK(NaniteTriangleIndex1(boundary) == 127u);
+    CHECK(NaniteTriangleIndex2(boundary) == 255u);
+    CHECK(IsValidClusterLocalVertexIndex(0u));
+    CHECK(IsValidClusterLocalVertexIndex(127u));
+    CHECK_FALSE(IsValidClusterLocalVertexIndex(128u));
+    CHECK_FALSE(IsValidClusterLocalVertexIndex(255u));   // u16 表示得下，但**语义**非法（>127）
 }
 
 // ============================================================

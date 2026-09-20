@@ -11,6 +11,9 @@
 //   任务 7 定稿了 `.nanite` 文件格式（设计 §8 的四处不一致已裁决并写回 §8），见**文件末节**
 //   "§14.8 任务 7：`.nanite` 文件格式定稿"：文件头 / 簇记录 / 顶点记录（含量化偏置）/
 //   索引编码 / cone 轴角字段 / 段表与校验函数。
+//   任务 10 补齐了**量化与打包的编解码**（见"任务 10"小节与各函数注释）：位置基准裁决
+//   （簇 AABB 中心 + 吃满 10 位）、法线八面体 10+10 位、UV unorm16、索引 3×u16、
+//   材质 8B 打包/解包；并把 `NaniteTypes.slang`（Slang 镜像）真正建了起来。
 //
 // 【为什么必须 RHI-free】§14.7：Scene 侧的 `MeshComponent` 只存"资产路径 + 不透明 u64 句柄"，
 //   它需要 include 本头文件取常量与 POD，却**不能**因此牵入 Render 的类型（否则形成
@@ -381,8 +384,10 @@ inline constexpr u32 kNaniteMeshTestTargetSize = 1u;
 //     对齐，也没有偏置的落点。
 //   · #9 量化偏置：编码端**补上 +512**。§8.4 的解码是 `int(raw & 0x3FF) - 512`（有符号
 //     SNORM），而旧 `quantize_vertices` 产出的是无符号 0…511 ⇒ 两边差一个 512 偏置。
-//     定稿：单轴编码 `raw = clamp(round((v-bboxMin)/maxExtent*511)) + quantBias`，与解码
+//     定稿：单轴编码 `raw = clamp(round((v-origin)/range*FULL_SCALE)) + quantBias`，与解码
 //     严格互逆；偏置量本身落进顶点记录的 `quantBias` 字段。
+//     **任务 10 的二次裁决**：`origin` 由"网格 `bboxMin`"改为"**簇 AABB 中心**"、
+//     `FULL_SCALE` 由 511 改为 **1022**（吃满 10 位），见 `NaniteQuantizePositionAxis`。
 //   · #1 cone 字段：**`coneAxisAngle`**（xyz = 单位轴，w = cos(锥半角)）。`coneData` 语义不明
 //     （光有名字写不出解码器）；两者同为 float4 / 16B，规则②③都不偏向谁，取"能唯一确定
 //     解码、无需外部约定"的那个（正是规则②"自包含"的意图）。
@@ -400,10 +405,13 @@ inline constexpr u32 kNaniteMeshTestTargetSize = 1u;
 //   [..]                   u32[]                   lodLevelCount × 4B
 //   每个段的"起点 16B 对齐、长度向上取整到 16B"。文件尾允许有额外字节（不参与校验）。
 //
-// 【与 Slang 共享】本节的每个结构体都是 C++ 与（任务 10/12 将建立的）
-//   `Engine/Shader/Shaders/Nanite/NaniteTypes.slang` 之间的**二进制契约**：字段顺序/类型/
-//   偏移必须逐位一致（std430 / StructuredBuffer 视角）。**改这里的布局必须同步三处**：
-//   ① 本文件；② 设计 §8；③ Slang 镜像。下面的 `static_assert` 是这条纪律的编译期钉子。
+// 【与 Slang 共享】本节的每个结构体都是 C++ 与
+//   `Engine/Shader/Shaders/Nanite/NaniteTypes.slang`（**任务 10 建立**，仅供 include、不是
+//   shader 入口）之间的**二进制契约**：字段顺序/类型/偏移必须逐位一致（std430 /
+//   StructuredBuffer 视角），量化/解码公式也必须逐字一致。**改这里的布局或公式必须同步三处**：
+//   ① 本文件；② 设计 §8；③ Slang 镜像。下面的 `static_assert` 是布局这条纪律的编译期钉子；
+//   公式这条纪律由两侧互写的指针注释 + 单测钉住（真正的端到端一致要到任务 12 上传读回 /
+//   任务 18 shader 解码才能验证，见 `NaniteUpload.h` 的说明）。
 // ============================================================
 
 // ── 文件级常量（魔数 / 版本 / 各段步长与对齐）──
@@ -540,6 +548,21 @@ static_assert(offsetof(NaniteClusterRecord, childClusterOffset) == 52, "childClu
 static_assert(offsetof(NaniteClusterRecord, childCount)         == 56, "childCount 在偏移 56");
 static_assert(offsetof(NaniteClusterRecord, _pad)               == 60, "_pad 在偏移 60");
 
+// ============================================================
+// §14.8 任务 10：量化与打包的**编解码函数**（本节的落点一览）
+//
+// 布局（结构体尺寸/偏移）是任务 7 定的，本任务只补"量化函数"（§8.4 尾注 #13 明确留给任务 10）：
+//   · 位置：`NaniteQuantizePositionAxis` / `NaniteDequantizePositionAxis` —— 簇 AABB 中心 +
+//     网格最大范围、**吃满 10 位**（任务 10 的基准裁决，替代 §8.4 的 `bboxMin` 口径）；
+//   · 法线：`NanitePackNormal` / `NaniteUnpackNormal` —— 八面体 **10+10 位**（x/y 域）；
+//   · UV：`NaniteQuantizeUV` / `NaniteDequantizeUV` —— **unorm16**（不用 half）；
+//   · 索引：`NanitePackTriangle` / `NaniteTriangleIndex0/1/2`（任务 7 已定稿，本任务只加
+//     `IsNaniteTriangleIndexCount` 把"3 个一组"的结构前提显式化）；
+//   · 材质：`NanitePackMaterial` / `NaniteUnpackMaterial`（8B，两个 bindless 纹理 ID）。
+// 每个函数上方都写了"为什么这么选 + 与 Slang 镜像的同步纪律"；端到端的
+// "pack → upload → shader" 一致性要到任务 12（上传读回）与任务 18（shader 解码）才能验证。
+// ============================================================
+
 // ── 量化顶点记录（16B；裁决 #7 与 #9）──
 //
 /// 10 位字段的位宽/掩码与**有符号量化偏置**（§8.4 的解码是 `raw - 512`）
@@ -549,15 +572,23 @@ inline constexpr i32 kNaniteVertexQuantBias = 512;
 /// 有符号量化值的范围（`raw - bias`）：raw = 0 ⇒ −512，raw = 1023 ⇒ +511
 inline constexpr i32 kNaniteVertexQuantMin = -512;
 inline constexpr i32 kNaniteVertexQuantMax = 511;
+/// 位置量化的**全量程乘数**（任务 10 定稿）：把 `range` 映射到有符号 `[-512, 511]` 用的比例
+/// = `max - min - 1` = **1022**（= 2 × 511）。见 `NaniteQuantizePositionAxis` 的基准裁决说明。
+inline constexpr i32 kNaniteVertexQuantFullScale = 2 * kNaniteVertexQuantMax;
+static_assert(kNaniteVertexQuantFullScale == 1022,
+              "全量程必须是 1022（有符号 [-512,511] 的步数），否则位置编解码不再互逆");
 
 /// 量化顶点（`vertexCount × 16B`）
 ///
+/// 【“每簇局部 + 簇心基准”口径（任务 10，§14.19 硬约束①）】`packedPosition` 存的是**相对本簇
+///   `boundsCenterRadius.xyz`** 的局部偏移（尺度 = 网格最大范围），不是世界坐标 —— 共享内容
+///   （DAG 去重后同一份 `vertexOffset`）因此能被不同位置的簇正确还原。
 /// 【为什么有 `quantBias` 而不是 `_pad`】裁决 #7/#9：把量化偏置放进记录内 ⇒ 解码
 /// `raw - vertex.quantBias` 不需要任何外部常量表（规则②"自包含"）；代价是每顶点 +4B，
 /// 换来的是 16B 对齐 + 编码/解码有唯一落点。
 struct alignas(16) NaniteVertex {
-    u32 packedPosition = 0;   // 偏移 0：R10G10B10A2_SNORM：x[9:0] y[19:10] z[29:20] w[31:30]=1
-    u32 packedNormal   = 0;   // 偏移 4：R10G10B10A2_SNORM（xyz；w 保留 0）
+    u32 packedPosition = 0;   // 偏移 0：R10G10B10A2：x/y/z 各 10 位有符号（+bias）+ w[31:30]=1
+    u32 packedNormal   = 0;   // 偏移 4：八面体 10+10 位（任务 10）落在 x/y 域，z/w 保留写 0
     u32 packedUV       = 0;   // 偏移 8：R16G16_UNORM：u[15:0] v[31:16]
     i32 quantBias      = kNaniteVertexQuantBias;  // 偏移 12：量化偏置（默认 +512）
 };
@@ -606,15 +637,45 @@ static_assert(offsetof(NaniteVertex, quantBias)      == 12, "quantBias 在偏移
     return (u32)raw;
 }
 
-/// 单轴位置编码：`raw = clamp(round((v - bboxMin)/maxExtent × 511)) + bias`
-/// 【裁决 #9 的落点】旧 `quantize_vertices` 少加了 `+ bias`（产出无符号 0…511），
-/// 与解码 `int(raw) - 512` 差一个偏置；此处补上，故与 `NaniteDequantizePositionAxis` 互逆。
-/// `maxExtent <= 0`（退化轴）或 NaN ⇒ 返回 `bias`（等价于该轴取 `bboxMin`）。
-[[nodiscard]] inline u32 NaniteQuantizePositionAxis(float v, float bboxMin, float maxExtent,
+/// 单轴位置编码（**任务 10 定稿：盒中心基准 + 吃满 10 位**）
+///
+/// ```text
+/// signed = clamp(round((v - origin) / range × 1022), -512, 511)
+/// raw    = clamp10(signed + bias)        // bias = kNaniteVertexQuantBias = 512
+/// ```
+/// 与 `NaniteDequantizePositionAxis` 严格互逆（`v' = origin + signed / 1022 × range`）。
+///
+/// 【为什么改基准：任务 10 的裁决，替代任务 7 §8.4 的 `bboxMin` 口径】
+///   任务 7 的已知取舍（§8.4 尾注、§14.17）：以 `bboxMin` 为原点、把
+///   `[bboxMin, bboxMin+maxExtent]` 映射到有符号 `[0, 511]` ⇒ 盒内顶点只用到 10 位的**上半段**
+///   （`raw ∈ [512, 1023]`），负半段 512 个码点永远用不到：等效精度只有 ~9 位
+///   （步长 = range/511、往返误差 ≤ range/1022）。
+///   任务 10 改为"以盒**中心**为原点、把 `[origin - range/2, origin + range/2]` 映射到有符号
+///   `[-512, 511]`（乘数 **1022**）"：同样一个 `range` 下步长从 `range/511` **减半**到
+///   `range/1022`，**1024 个码点全部可用**，往返误差上界从 `range/1022` 收到 `range/2044`。
+///   这与 §8.4 建议的 "center = (bboxMin+bboxMax)/2、halfExtent = maxExtent/2" 完全等价
+///   （`signed/511 × halfExtent == signed/1022 × range`），只是把除法写成一次乘 1022。
+///
+/// 【会不会 clamp：不会，且可证】
+///   调用口径（§14.19 硬约束①）固定为 `origin` = **簇 AABB 中心**（`boundsCenterRadius.xyz`）、
+///   `range` = **网格最大范围**（`max(bboxMax-bboxMin)`）。簇是网格的子集 ⇒
+///   `|v - origin| ≤ 簇局部半轴长 ≤ meshExtent/2 = range/2` ⇒ `|signed| ≤ 511`，恒落在
+///   `[-512, 511]` 内 ⇒ **任何一个顶点都不会被 clamp**。
+///   注意 `range` 的**一半**恰好是"任何簇可能达到的最大半轴长"，所以这个基准既吃满满量程、
+///   又天然留出 0 的溢出风险 —— 这正是选它而不是"每簇各自半轴长"的理由（后者会引入每簇
+///   尺度字段、并破坏 §14.19 的共享内容口径）。
+///   函数内仍保留夹取（防御 NaN / 调用方传错口径）；`NanitePositionQuantizeClamps()` 供
+///   `PackNaniteClusters()` 统计实际 clamp 次数（测试网格实测 0，见单测 MESSAGE）。
+///
+/// 【与 Slang 镜像的关系】本函数的公式必须与 `NaniteTypes.slang` 的
+///   `naniteQuantizePositionAxis` / `naniteDecodePositionAxis` **逐字一致**
+///   （改这里必须同步那边 + 设计 §8）。
+/// 【退化轴】`range <= 0`（退化）或 NaN ⇒ 返回 `bias`（等价于该轴取 `origin`）。
+[[nodiscard]] inline u32 NaniteQuantizePositionAxis(float v, float origin, float range,
                                                     i32 bias = kNaniteVertexQuantBias) {
-    if (!(maxExtent > 0.0f)) return NaniteClampRaw10(bias);
-    const float normalized = (v - bboxMin) / maxExtent;                 // [0,1] 表示落在盒内
-    const float scaled     = normalized * (float)kNaniteVertexQuantMax; // [0,511]
+    if (!(range > 0.0f)) return NaniteClampRaw10(bias);
+    const float normalized = (v - origin) / range;                      // [-0.5,0.5] 表示落在盒内
+    const float scaled     = normalized * (float)kNaniteVertexQuantFullScale;   // ×1022 ⇒ [-511,511]
     if (!(scaled == scaled)) return NaniteClampRaw10(bias);             // NaN 兜底
     const float clamped = scaled < (float)kNaniteVertexQuantMin ? (float)kNaniteVertexQuantMin
                         : (scaled > (float)kNaniteVertexQuantMax ? (float)kNaniteVertexQuantMax
@@ -622,12 +683,184 @@ static_assert(offsetof(NaniteVertex, quantBias)      == 12, "quantBias 在偏移
     return NaniteClampRaw10((i32)std::lround(clamped) + bias);
 }
 
-/// 单轴位置解码：与 `NaniteQuantizePositionAxis` 严格互逆（误差 ≤ maxExtent/1022）
-[[nodiscard]] inline float NaniteDequantizePositionAxis(u32 raw, float bboxMin, float maxExtent,
+/// 单轴位置解码：与 `NaniteQuantizePositionAxis` 严格互逆（误差 ≤ range/2044 = 半个量化步）
+///
+/// 【口径】`v = origin + (raw - bias) / 1022 × range`；`origin` / `range` 必须与编码端**同一个**
+///   簇的 `boundsCenterRadius.xyz` 与**同一个**网格最大范围（§14.19 硬约束①：共享的
+///   `vertexOffset` 让不同位置的簇读到同一份局部坐标，必须靠各自的簇心还原世界位置）。
+/// 【退化轴】`range <= 0` ⇒ 返回 `origin`（与编码端的退化分支对称）。
+[[nodiscard]] inline float NaniteDequantizePositionAxis(u32 raw, float origin, float range,
                                                         i32 bias = kNaniteVertexQuantBias) {
     const i32 signedValue = (i32)(raw & kNaniteVertexQuantMask) - bias;   // 有符号 SNORM 量化值
-    if (!(maxExtent > 0.0f)) return bboxMin;
-    return bboxMin + (float)signedValue / (float)kNaniteVertexQuantMax * maxExtent;
+    if (!(range > 0.0f)) return origin;
+    return origin + (float)signedValue / (float)kNaniteVertexQuantFullScale * range;
+}
+
+/// 该顶点在该轴上**会不会被 10 位范围夹住**（诊断用，`PackNaniteClusters` 用它统计 clamp 数）
+///
+/// 判据与编码端逐个字节对齐：先算未夹取的 `scaled`，再看四舍五入后是否越过
+/// `[kNaniteVertexQuantMin, kNaniteVertexQuantMax]`。按任务 10 的调用口径（簇心 + 网格最大范围）
+/// 它恒为 false（证明见 `NaniteQuantizePositionAxis`）；这里保留独立实现，是为了让
+/// "无 clamp" 这条验收有**可测的读数**而不是只靠推导。
+[[nodiscard]] inline bool NanitePositionQuantizeClamps(float v, float origin, float range,
+                                                       i32 bias = kNaniteVertexQuantBias) {
+    (void)bias;   // 偏置只做平移，不影响是否越界；保留参数以强调与编码端同一套口径
+    if (!(range > 0.0f)) return false;
+    const float scaled = (v - origin) / range * (float)kNaniteVertexQuantFullScale;
+    if (!(scaled == scaled)) return false;   // NaN 走编码端的兜底分支，不算 clamp
+    // 先做量级护栏再比较，避免 lround 在极端浮点上越界（scaled 超过 ±512.5 时必然 clamp）
+    return scaled < (float)kNaniteVertexQuantMin - 0.5f ||
+           scaled > (float)kNaniteVertexQuantMax + 0.5f;
+}
+
+// ── 法线：八面体（octahedral）编码（§14.8 任务 10 定稿；§8.4 尾注 #13 留给任务 10 的量）──
+//
+// 【位宽选择：每分量 **10 位**，落在 `packedNormal` 的 R10G10B10A2 位域 x/y 上；z、w 恒写 0】
+//   · 依据：§8.4 已把 `packedNormal` 的**位域**定稿为 R10G10B10A2（x[9:0] y[19:10] z[29:20]
+//     w[31:30]），任务 7 明确"只把量化函数留给任务 10"（§8.4 尾注 #13）。八面体只需要 2 个
+//     分量，因此落在 x/y 两个 10 位域上；z（10 位）与 w（2 位）**保留写 0**，不改 §8.4 的契约。
+//   · 为什么不用"把整个 u32 重解释成 R16G16_SNORM（16+16 位）"：那会改掉 §8.4 的位域表，
+//     shader 侧解码也得换一套位运算 —— 三处一致（C++ / Slang / §8）的收益大于 10 位的角
+//     精度需求：10 位/轴的最坏角误差实测 < 0.2°（单测 MESSAGE 有实测值），对法线着色
+//     （含法线贴图与 TAA）足够。将来若要更高精度，落点是把该字段整体改解释为 R16G16，
+//     并同步 C++ / Slang / §8.4 三处（属格式改动，不在本任务）。
+//   · 位值口径：10 位按 **UNORM**（0…1023）解释，不用 Vulkan 的 R10G10B10A2_SNORM 采样语义
+//     —— 我们走的是手写位域而不是纹理格式，编解码两端用同一套位运算即可（三处一致）。
+//   · 角度误差的解析上界（供单测设阈值）：八面体把单位球双射到 [-1,1]²，每轴 10 位 ⇒
+//     格距 2/1023；在球面"面心"处角误差 ≈ 半格 ≈ 0.056°，在八面体的棱/角附近放大约 2~4 倍，
+//     实测最坏 < 0.2°。单测阈值取 **0.5°**（留 2.5 倍余量）。
+inline constexpr u32 kNaniteNormalOctahedralBits = 10u;   ///< 每分量 10 位（= R10G10B10A2 的域宽）
+/// 法线八面体编码的**角误差验收阈值**（度）：单测的阈值，也是打包器写进
+/// `NanitePackStats::normalAngleErrorBoundDegrees` 的那个数字。10 位/轴的实测最坏 < 0.2°，
+/// 故取 0.5°（2.5 倍余量）。
+inline constexpr float kNaniteNormalAngleErrorBoundDegrees = 0.5f;
+
+/// `[-1, 1] → 10 位 UNORM`（0…1023）：`round((v+1)/2 × 1023)`；NaN/越界夹到边界
+[[nodiscard]] inline u32 NaniteQuantizeUNorm10(float value) {
+    if (!(value == value)) return 0u;                                  // NaN：按 -1 处理（只影响非法输入）
+    const float scaled = (value + 1.0f) * 0.5f * (float)kNaniteVertexQuantMask;
+    const float clamped = scaled < 0.0f ? 0.0f
+                        : (scaled > (float)kNaniteVertexQuantMask ? (float)kNaniteVertexQuantMask
+                                                                  : scaled);
+    return NaniteClampRaw10((i32)std::lround(clamped));
+}
+
+/// `10 位 UNORM → [-1, 1]`（与 `NaniteQuantizeUNorm10` 互逆）
+[[nodiscard]] inline float NaniteDequantizeUNorm10(u32 raw) {
+    return (float)(raw & kNaniteVertexQuantMask) / (float)kNaniteVertexQuantMask * 2.0f - 1.0f;
+}
+
+/// 单位法线 → 八面体 2D 坐标（每分量落在 `[-1, 1]`）
+///
+/// 【公式】先归一化，再取 L1 归一化投影到八面体，z < 0 的半球按标准折叠（"展开"下半球）。
+/// 【符号约定】折叠时用 `x >= 0 ? +1 : -1`（**不是** `sign(x)`）：`x == 0` 必须稳定取 +1，
+///   否则编解码两端在 0 附近会取到不同的符号（Slang 侧的 `sign(0) = 0` 更会直接把坐标清零）。
+/// 【退化】零向量 / NaN ⇒ 输出 `(0, 0)`，解码回来是 `+Z`（往返自洽，见 `NaniteDecodeOctahedral`）。
+inline void NaniteEncodeOctahedral(float nx, float ny, float nz, float& outX, float& outY) {
+    const float lengthSquared = nx * nx + ny * ny + nz * nz;
+    if (!(lengthSquared > 0.0f)) { outX = 0.0f; outY = 0.0f; return; }   // 零向量/NaN ⇒ +Z
+    const float invLength = 1.0f / std::sqrt(lengthSquared);
+    float x = nx * invLength;
+    float y = ny * invLength;
+    float z = nz * invLength;
+
+    const float l1 = std::fabs(x) + std::fabs(y) + std::fabs(z);
+    x /= l1;
+    y /= l1;
+
+    if (z < 0.0f) {
+        // 下半球折叠：`n.xy = (1 - |n.yx|) * signNotZero(n.xy)`（注意 abs 的分量是**交换**的）
+        const float signX = (x >= 0.0f) ? 1.0f : -1.0f;
+        const float signY = (y >= 0.0f) ? 1.0f : -1.0f;
+        const float foldedX = (1.0f - std::fabs(y)) * signX;
+        const float foldedY = (1.0f - std::fabs(x)) * signY;
+        x = foldedX;
+        y = foldedY;
+    }
+    outX = x;
+    outY = y;
+}
+
+/// 八面体 2D 坐标 → 单位法线（与 `NaniteEncodeOctahedral` 互逆；含反向折叠 + 归一化）
+inline void NaniteDecodeOctahedral(float ex, float ey, float& outX, float& outY, float& outZ) {
+    float x = ex;
+    float y = ey;
+    float z = 1.0f - std::fabs(x) - std::fabs(y);
+    if (z < 0.0f) {
+        const float signX = (x >= 0.0f) ? 1.0f : -1.0f;
+        const float signY = (y >= 0.0f) ? 1.0f : -1.0f;
+        const float unfoldedX = (1.0f - std::fabs(y)) * signX;
+        const float unfoldedY = (1.0f - std::fabs(x)) * signY;
+        x = unfoldedX;
+        y = unfoldedY;
+    }
+    const float lengthSquared = x * x + y * y + z * z;
+    if (!(lengthSquared > 0.0f)) { outX = 0.0f; outY = 0.0f; outZ = 1.0f; return; }
+    const float invLength = 1.0f / std::sqrt(lengthSquared);
+    outX = x * invLength;
+    outY = y * invLength;
+    outZ = z * invLength;
+}
+
+/// 法线 → `packedNormal`（八面体 10+10 位进 x/y 域；z、w 恒 0；w 不做 §8.4 的 "=1" 约定）
+[[nodiscard]] inline u32 NanitePackNormal(float nx, float ny, float nz) {
+    float ex = 0.0f;
+    float ey = 0.0f;
+    NaniteEncodeOctahedral(nx, ny, nz, ex, ey);
+    return NanitePackR10G10B10A2(NaniteQuantizeUNorm10(ex), NaniteQuantizeUNorm10(ey), 0u, 0u);
+}
+
+/// `packedNormal` → 单位法线（与 `NanitePackNormal` 互逆）
+inline void NaniteUnpackNormal(u32 packed, float& outX, float& outY, float& outZ) {
+    NaniteDecodeOctahedral(NaniteDequantizeUNorm10(NaniteUnpackR10G10B10A2(packed, 0u)),
+                           NaniteDequantizeUNorm10(NaniteUnpackR10G10B10A2(packed, 1u)),
+                           outX, outY, outZ);
+}
+
+/// 法线往返的**角度误差**（弧度，调用方传单位向量；解码结果已是单位向量）
+///
+/// 用 `acos(dot)` 而不是 1-cos 近似：角度阈值（0.5°）下点积已在 0.99996 附近，
+/// 用 `1-cos` 会丢有效位。`acos` 的入参夹到 [-1,1] 以免浮点越界产生 NaN。
+[[nodiscard]] inline float NaniteNormalAngleErrorRadians(float ax, float ay, float az,
+                                                         float bx, float by, float bz) {
+    const float dot = ax * bx + ay * by + az * bz;
+    const float clamped = dot < -1.0f ? -1.0f : (dot > 1.0f ? 1.0f : dot);
+    return std::acos(clamped);
+}
+
+// ── UV：unorm16 量化（§14.8 任务 10 定稿；§8.4 尾注 #13 留给任务 10 的量）──
+//
+// 【为什么是 unorm16 而不是 binary16（half）】
+//   · §8.4 已把 `packedUV` 定稿为 **R16G16_UNORM**（u[15:0]、v[31:16]）⇒ 位宽不是自由选择，
+//     任务 10 要定的是"同一批 16 位按 UNORM 还是按 half 解释"。
+//   · 取 UNORM：① 在 `[0,1]` 上**均匀**，步长恒为 1/65535、往返误差 ≤ 1/131070 ≈ 7.6e-6；
+//     binary16 在 `(0.5, 1)` 上的间距是 2^-11 ≈ 4.9e-4（是 unorm16 的 **32 倍**），在 1.0 附近
+//     还要浪费一大段尾数；② 与 GPU 的 R16G16_UNORM 采样语义一致（任务 18 软光栅可直接按
+//     UNORM 读，不必再转 half）；③ UV 的常规取值域就是 `[0,1]`。
+//   · 代价（如实记录）：UNORM 表示不了越界 UV（`>1` 的平铺 / `<0`）。本实现按 §8.4 的口径
+//     **clamp 到 [0,1]**，并在 `NanitePackStats::uvClampCount` 里如实报告越界分量数
+//     （测试网格实测 0）。若将来要支持平铺 UV，落点是把字段改解释为 R16G16_SNORM / 或把
+//     小数/整数部分拆开，属跨 C++/Slang/§8.4 的格式改动，本任务不动。
+/// unorm16 的满值（`packedUV` 每分量 16 位）
+inline constexpr u32 kNaniteUVQuantMax = 0xFFFFu;
+
+/// `[0,1] → unorm16`：`round(v × 65535)`；NaN 取 0、越界 clamp 到 `[0, 65535]`
+[[nodiscard]] inline u32 NaniteQuantizeUV(float value) {
+    if (!(value == value)) return 0u;                                  // NaN 兜底
+    const float scaled = value * (float)kNaniteUVQuantMax;
+    const float clamped = scaled < 0.0f ? 0.0f
+                        : (scaled > (float)kNaniteUVQuantMax ? (float)kNaniteUVQuantMax : scaled);
+    return (u32)std::lround(clamped) & kNaniteUVQuantMax;
+}
+
+/// `unorm16 → [0,1]`（与 `NaniteQuantizeUV` 互逆，误差 ≤ 1/131070 = 半个量化步）
+[[nodiscard]] inline float NaniteDequantizeUV(u32 raw) {
+    return (float)(raw & kNaniteUVQuantMax) / (float)kNaniteUVQuantMax;
+}
+
+/// 该 UV 分量是否**越出 `[0,1]`**（打包时据此统计 clamp 数；NaN 也算越界）
+[[nodiscard]] inline bool NaniteUVNeedsClamp(float value) {
+    return !(value >= 0.0f && value <= 1.0f);
 }
 
 // ── 三角形索引编码（8B/三角形）──
@@ -679,7 +912,23 @@ static_assert(offsetof(NanitePackedTriangle, hi) == 4, "hi 必须在偏移 4");
     return localIndex < kNaniteMaxClusterVertices;
 }
 
+/// 索引总数是否满足"**必须 3 个一组**"的编码前提（= 一个完整的三角形列表）
+///
+/// 这是 `NanitePackedTriangle`（3×u16 进 `u32[2]`）的结构性前提：落盘时"三角形数 =
+/// indexCount / 3"，余数一旦非 0 就无法表示。`TryBuildNaniteFileLayout` 用
+/// `NaniteFileError::BadIndexCount` 挡住它，打包器与单测共用本判据。
+[[nodiscard]] constexpr bool IsNaniteTriangleIndexCount(usize indexCount) {
+    return (indexCount % (usize)kNaniteIndicesPerTriangle) == 0u;
+}
+
 // ── 材质记录（8B；字段语义由任务 10/12 细化，步长已定稿）──
+//
+// 【§14.8 任务 10 的裁决：字段按 §8.1/§12 Task 4 的"bindless 纹理 ID 对"落盘，不新增字段】
+//   · `albedoTexture` / `normalTexture` 是 bindless 堆里的**纹理 ID**（0 = 该槽未绑定；
+//     具体语义——0 是否等于"默认白纹理"、要不要再加 roughness/metallic 打包——属任务 12/19
+//     的材质解析议题：本任务的打包器只**原样搬运**调用方给出的记录，不解释 ID）。
+//   · 8B 步长与"两个 u32"的字段划分都是任务 7 定稿的，本任务只补打包/解包函数（位序显式化），
+//     让 C++ 侧与 Slang 侧的 `uint2` 视角有一处**逐字对应**的落点。
 /// 材质记录：bindless 纹理 ID 对（§12 Task 4 的 `<2I>`）
 struct alignas(4) NaniteMaterialRecord {
     u32 albedoTexture = 0;   // 偏移 0：albedo 纹理的 bindless ID
@@ -690,6 +939,20 @@ static_assert(sizeof(NaniteMaterialRecord) == kNaniteMaterialRecordBytes,
               "材质记录必须 8B（§12 Task 4 的 materialCount × 8B）");
 static_assert(offsetof(NaniteMaterialRecord, albedoTexture) == 0, "albedoTexture 在偏移 0");
 static_assert(offsetof(NaniteMaterialRecord, normalTexture) == 4, "normalTexture 在偏移 4");
+
+/// 材质打包：两个 bindless 纹理 ID → 8B 记录（与 Slang 侧的 `uint2` 逐位一致）
+[[nodiscard]] constexpr NaniteMaterialRecord NanitePackMaterial(u32 albedoTexture,
+                                                                u32 normalTexture) {
+    NaniteMaterialRecord record;
+    record.albedoTexture = albedoTexture;
+    record.normalTexture = normalTexture;
+    return record;
+}
+
+/// 材质解包：`word` 0 = albedo、1 = normal（越界 word 返回 0；与 `NanitePackMaterial` 互逆）
+[[nodiscard]] constexpr u32 NaniteUnpackMaterial(const NaniteMaterialRecord& record, u32 word) {
+    return (word == 0u) ? record.albedoTexture : ((word == 1u) ? record.normalTexture : 0u);
+}
 
 // ── 段表与校验（RHI-free、可单测）──
 
