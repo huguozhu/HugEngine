@@ -2259,8 +2259,8 @@ if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
 
 | # | 目标 | 改动点 | 验收 |
 |---|---|---|---|
-| 18 | 软光栅写 GBuffer | compute（≤16 tri/簇）+ interlock 写 GBuffer（§5.2） | 与既有路径**同场景同相机**对照（均值/相关系数）+ 白炉 1.0000 |
-| 19 | 真实材质接入 | 去掉旧计划 Task8 的 placeholder 与固定 roughness（L1881-1891） | 材质字段与既有 GBuffer 路径逐项可比 |
+| 18 | 软光栅写 GBuffer | compute（≤16 tri/簇）+ interlock 写 GBuffer（§5.2） | 与既有路径**同场景同相机**对照（均值/相关系数）+ 白炉 1.0000 —— **已完成（§14.27，2026-09-20）** |
+| 19 | 真实材质接入 | 去掉旧计划 Task8 的 placeholder 与固定 roughness（L1881-1891） | 材质字段与既有 GBuffer 路径逐项可比 —— **已完成（§14.29，2026-09-21）**；另附带修掉任务 15 的 P0（Hi-Z UV 镜像，§14.28） |
 | 20 | 深度与排序契约 | 复刻 `GB_Clear` 的 WAW 声明（`:213-215`） | Shadow/Lighting 排序不变（pass 顺序与转储一致） |
 | 21 | 画面级对照验收 | 开关 ON/OFF 两档对照 | 差异可解释（几何覆盖/材质），且关闭档与基线逐位一致 |
 
@@ -3286,3 +3286,133 @@ CULL DIFF: PASS
    软光栅因此用 `row = (0.5 − 0.5*ndc.y)*H`（已按真实行约定写，并在注释里写明）。
    任务 15 的 Hi-Z 遮挡判据疑似受同一问题影响（深度以 0.99 背景为主时不易暴露），
    **本次不改**（会改动任务 15 的已验收读数），列为后续项。
+   → **已在 §14.28（P0）核实并修掉**（结论：确实镜像）。
+
+### 14.28 任务 15 的 P0 修复：Hi-Z 采样 UV 的 y 镜像（2026-09-21）
+
+**① 结论**：`Nanite_ClusterBVH.comp.slang` 的 `hizOccluded` 用 `s = ndc.xy*0.5+0.5` 采样 Hi-Z 纹理，
+其中 `s.y` 当纹理 V 用。本引擎的离屏通道用**负高度视口**（`GBufferRenderer_CPU.cpp:61`
+`SetViewport({0,h,w,-h,0,1})`；`GBufferRenderer_GPU.cpp:64`、`LightingPass.cpp:165` 同款）
+⇒ NDC y=+1 落在帧缓冲**第 0 行**、纹理 V 向下增长 ⇒ **确实镜像**，正确写法是
+`s = float2(ndc.x*0.5+0.5, 0.5-0.5*ndc.y)`。
+
+**② 只读证据**（三条独立来源）：
+   · 同引擎内**已被实测验证**的同一条约定：`GI/SSR.frag.slang:55-68` 的 `NdcToUv` 就是翻转版，
+     注释记录了那次真实镜像 bug 的实测（重建 viewPos.y=+70.3 vs 真值 −70.7，改正后射线 2 步命中）；
+   · 同模块软光栅自己用的行约定 `Nanite_SoftRasterCommon.slang:126-134`（`row=(0.5-0.5*ndc.y)*H`）；
+   · 既有 GPU 剔除 `GPUCull_TwoPhase.comp.slang:32` 有**同一个错**，但 `useTwoPhase` 恒 false
+     ⇒ 该 pass 从不注册（§14.24①），不能当"正确写法"的对照。
+
+**③ 改法**：`hizOccluded` 按 `CullChainParams.misc.w`（`hiz_flip`）选择 v 方向，**默认 1 = 翻转（已修）**；
+`NaniteSettings::hizFlip` + cfg 键 `nanite_hiz_flip`（默认 1）保留 0 档，专供"镜像是否真的存在"的
+可复现 A/B 对照。新增读数：`hiz_flip=<0|1>`、`occl_uv=[上半屏,下半屏]`（分类用**投影包围盒中心的
+原始 ndc.y**，与采样 UV 约定无关，避免"用错的约定自证对的结论"）、
+`hiz_half=[上半屏均值,下半屏均值]`（Hi-Z mip1 的 32×32 采样均值 ×1e6，用来证明"遮挡物只在一侧"）。
+CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径 Hi-Z 恒关，行为不变）。
+
+**④ 实测（07.Nanite，只切换 `nanite_hiz_flip`，其余逐位相同）**
+   · 单侧遮挡物构造（`cam_near=20; cam_pos_y=60; cam_pitch=-0.3` ⇒ 下半屏近、上半屏远）：
+     `hiz_half=[0.956015,0.825267]`（Δ=0.131，单侧成立）；
+     `flip=1`：`occluded=18904 occl_uv=[18894,10] occl_mip=[0,0,0,0,0,26,1177,3373] mismatch=4576`；
+     `flip=0`：`occluded=63560(+236%) occl_uv=[63552,8] occl_mip=[0,0,0,0,3,140,2668,15834] mismatch=18645`
+     ⇒ 多出的 44656 个"被遮挡"正是"zNear 落在 (0.825,0.956]"的簇（远半屏），只有在采样深度从
+     自己那半被换成**镜像那半**时才可能出现；这些簇所在屏幕位置没有近遮挡物 ⇒ **误剔除**。
+   · 其他相机复跑（同一 A/B）：`cam_pos_z=±400 pitch=0`：94032→65565、95164→70905；
+     `pitch=+1.2 & near=20`：36005→49251（上半屏占比 25%→35%）。
+   · 默认相机（`nanite_soft_raster=0`）：32031→56346，且 `flip=0` **逐位复现 §14.24 的冻结读数**
+     （`phase2=64215 phase3=18888 occluded=56346 occl_mip=[0,0,0,0,0,244,3000,9516]`）
+     ⇒ 开关切换的正是历史约定本身。
+   · 对照：`nanite_hiz=0` 时 flip=0/1 的 cull3 行**逐字相同**（`mismatch=0`）⇒ 开关只影响 Hi-Z 采样。
+
+**⑤ 自证**：两 target 构建 EXIT=0；单测 308/308；关闭档 12 pass / `vuid_lines=41` / 指纹
+`1C15AB72E688B530…`（冻结）；开启档默认 14 pass / `vuid_lines=46`（= 任务 18 现状，无新增）/
+`passlist_sha=750CC247BF8B9C3D…` / `cull3 … mismatch=0 … hiz_flip=1`。
+
+**⑥ 偏差与风险（不掩盖）**
+   1. 本引擎 `near=0.1 / far=2000` 的 ZO 投影把整场景压到深度 0.999x ⇒ 遮挡判定本身工作在
+      深度精度边界附近（`hiz_half` 两半差异只有 1e-5~1e-1 量级，取决于相机）；本任务的判据
+      因此用"**只切换 UV 约定**"的 A/B（同一帧、同一深度场），而不是绝对遮挡数量。
+   2. 场景无法造出"上下半屏深度差足够大 + 簇本身两半都有"的教科书式反转（合成实例本质是
+      同一份 Sponza 网格的微小平移副本 ⇒ 簇的世界位置与深度场强相关），故证据形态是
+      "镜像把远半屏的簇按近半屏的深度判掉"，而不是"遮挡分布整体上下互换"。
+   3. `hiz_flip=0` 档保留是**为可复现对照**，不是可选项的推荐值；默认恒为 1。
+
+### 14.29 任务 19 实施记录：真实材质接入（2026-09-21）
+
+**① 簇 → 源网格 → 材质的映射（本任务的关键）**
+   · 源区间来自 `MeshBatcher::GetDrawCommands()`（`firstIndex/indexCount`；索引已加 baseVertex，
+     `MeshBatcher.cpp:53`）⇒ 三角形区间 `[firstIndex/3,(firstIndex+indexCount)/3)`，首尾相接、升序；
+     簇的区间 = `NaniteClusterRecord::triangleOffset/triangleCount`。
+   · 新规则函数 `NaniteAssignClusterMaterials`（`NaniteUpload.{h,cpp}`，RHI-free、可单测）：
+     **三角形多数票**归属；**平票取下标更小的网格**；一个三角形都落不进任何区间 ⇒ `unmappedClusters`
+     并兜底 0 号材质；跨 ≥2 个网格 ⇒ `multiMeshClusters`（如实计数，不隐藏）。二分查找，
+     复杂度 O(簇×三角形×log 网格)，无哈希容器遍历序 ⇒ 同输入逐位一致。
+   · 逐网格材质快照新增在 `MeshBatcher`（`MergedMeshMaterial`，与绘制命令**同序同长**，
+     在同一个 `collect` 调用里产出）：字段与 `SceneRenderer.cpp:110-130` 填 `GPUObjectData`
+     时同一批来源（因子取组件字段、纹理路径按 `ComputeMaterialTextureMask` 压成掩码、
+     `bindlessTextureBase = MeshComponent::materialID`）。**只增不改**：`IndirectDrawCommand`
+     一个字节未动。
+   · 【与任务书的偏差，如实报告】任务书写"`MeshBatcher` 的合并几何带逐网格材质索引"——实测
+     `MeshBatcher.cpp:58` 只写 5 个绘制参数，**没有材质字段**（材质索引原本只存在于 GPUScene 的
+     `materialIndex`，而 `u_Objects` 那条缓冲还被视锥剔除压缩过、下标与合并几何不对应）。
+     因此按"最小侵入"在 `MeshBatcher` 加一份**只读快照**（它本来就是合并几何的唯一产地），
+     而不是去依赖 GPUScene 的下标对齐。
+
+**② 材质段：8B → **32B**（先报告后扩展，最小可行）**
+   §8/任务 7 的 8B 只有两个 bindless 纹理 ID，放不下 GBuffer 路径逐项对照所需的字段
+   （`baseColorFactor.rgb` 15B 语义 + 两个因子 + 纹理掩码）。定稿为
+   `{float4 baseColorFactor; float metallicFactor; float roughnessFactor; uint textureMask; uint bindlessTextureBase;}`
+   （16B 对齐，`static_assert` 钉住 5 个偏移）。软光栅按掩码决定是否采样：
+   BaseColor 槽 0、MetallicRoughness 槽 2（与 `GBuffer.frag.slang:32` 的槽位约定一致）。
+
+**③ 软光栅取真实材质（不再有中性常数）**
+   · `softRasterEvaluateMaterial`（`Nanite_SoftRasterCommon.slang`）逐句复制
+     `GBuffer.frag.slang:57-81` 的公式：`albedo = baseColorFactor.rgb × Sample(BaseColor,uv)`、
+     `metallic = metallicFactor × Sample(MR,uv).b`、`roughness = clamp(roughnessFactor × Sample(MR,uv).g,0.04,1)`；
+   · 采样必须用 `SampleLevel(...,0)`：compute 入口 `[numthreads(16,1,1)]` 没有 2×2 派生组，
+     `Sample` 会报 `E31210`（实测）。**代价如实记**：只采 mip0，既有片元路径有隐式 LOD。
+   · 材质段用**普通 SSBO（binding 12）**绑定；纹理/采样器数组（binding 13/14）走
+     `heap->RegisterDescriptorSet(set,13,14,0)` 接到**引擎同一个 bindless 堆**。
+   · 【踩到并修掉的一个真 bug】软光栅开启时 `GBufferRenderer_CPU::Render`（唯一每帧
+     `heap->Flush()` 的地方，`:29`）**让位不执行** ⇒ 本集合的 bindless 数组永远是未绑定，
+     实测症状是"albedo 全 0、roughness 落到下限 0.04"（不是崩溃，是静默错值）。修法：
+     登记后模块**自己 Flush 一次**（先 `RegisterTexture(nullptr,nullptr)` 标 pending）。
+   · 读数：`neutral_material_pixels`（任务 18 的口径）**恒 0**；新增
+     `material_pixels`（真从材质段取到材质的像素）、`fallback_pixels`（越界/缺失而兜底，正常 0）、
+     `materials`（材质段条数）、`distinct_materials`、`textured_materials`、`multi_mesh_clusters`；
+     另加一行一次性 `materials_sample m0=(…) m1=(…) cluster_material_id=[min,max,distinct]`。
+
+**④ 验收证据（真实 GPU 读回 + 同场景同相机转储对照，参考档 = `nanite_off`）**
+   · 阈值 16：`soft=61 pixels_written=3264 material_pixels=3264 neutral_material_pixels=0 fallback_pixels=0`；
+     阈值 64：`soft=31648 pixels_written=44318207 material_pixels=44318207 neutral=0 fallback=0`
+     （`material_pixels == pixels_written` 逐档成立）。
+   · 映射读数：`materials=103 distinct_materials=103 textured_materials=103 multi_mesh_clusters=97`；
+     资产上传 `upload_bytes=13406096 readback_match=1 mismatch_bytes=0`（材质段 103 条 ×32B）。
+   · 材质**逐项对照**（`build/verify/p1_matcmp.py`，阈值 64 的 919956 个写入像素；
+     参考 = 既有路径全屏）：
+     | 字段 | 参考 mean/std/min/max | 测试 mean/std/min/max | 直方图相关(32 bin) |
+     |---|---|---|---|
+     | albedo RGB | 0.2556 / 0.1310 / 0 / 0.5874 | 0.1771 / 0.0862 / 0 / **0.5879** | 0.5302 |
+     | metallic | 0.0368 / 0.1454 / 0 / 1.0 | 0.0108 / 0.0799 / 0 / 1.0 | **0.9992** |
+     | roughness | 0.7709 / 0.1752 / 0.04 / 1.0 | 0.4477 / 0.2304 / **0.04** / **1.0** | 0.3112 |
+     · 极值一致（albedo max 0.5879 vs 0.5874；metallic/roughness 的 0/1 与 clamp 下限 0.04 完全一致）
+       与 metallic 直方图相关 0.9992 是"同一批来源"的直接证据；
+     · 均值差异来自**覆盖率与几何**（模块只画 LOD 选中的 44.37% 像素、且画的是合成实例的
+       平移副本，§14.27 已记录的偏差），不是材质来源不同；逐像素相关为负(-0.3452) 同理。
+     · 中性常数已消失的硬判据：三字段恰为 (0.8,0,0.5) 的像素 = **0**（阈值 64 全图）。
+   · 既有口径对照（`nanite_soft_cmp.py`）：`gb_worldpos corr(双方覆盖)=0.9293`（与任务 18 的
+     0.9292 同量级）、`gb_lightmapkey` 页号全部落在 Nanite 段 `[1025,1087]`。
+
+**⑤ 自证**：两 target 构建 EXIT=0；单测 **309 例**（新增"材质记录 32B"重写 + "簇→源网格映射"
+用例；62169 断言）全绿；关闭档 12 pass / `vuid_lines=41` / 指纹 `1C15AB72E688B530…`；
+开启档 14 pass / `vuid_lines=**46**`（与任务 18 相同，**无新增**）/ `passlist_sha=750CC247BF8B9C3D…`。
+
+**⑥ 偏差与风险（不掩盖）**
+   1. 只采 **mip0**（compute 无派生组）⇒ 与片元路径的隐式 LOD 在贴图高频区域会有差异。
+   2. 合成实例是"整份合并网格的平移副本"（§14.22③）⇒ 与既有路径**不能逐像素比材质**；
+      本任务给的是分布/极值/直方图对照 + 映射规则单测 + 像素计数闭合。
+   3. `alphaCutoff`、法线贴图、ostex/emissive 仍未接入（模块不写 MRT2、不做 alpha 测试）——
+      保持任务 18 的通道边界；`NaniteMaterialRecord` 里因此**没有**这两个字段（如实报告）。
+   4. `MeshBatcher` 的快照是"新增只读数组"，但它是本任务唯一改到的**非 Nanite 模块**文件
+      （只增成员/getter + 在既有 `collect` 里多填一条记录，未改任何既有结构体与行为）。
+   5. bindless 纹理数组因"强制一次 Flush"永久多一个占位槽（不影响任何已分配的材质 ID）。
