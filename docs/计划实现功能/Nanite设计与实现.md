@@ -2892,3 +2892,45 @@ on vs off 转储逐位 `must_same_diff=0`。
    本次没有把 `NaniteTypes.slang` 作为公共 include（它仍未进 `SLANG_INCLUDES`，那是任务 18 的事），
    故新 shader 里重复声明了镜像结构 —— 这是**有意的**：把 `NaniteTypes.slang` 加进 `SLANG_INCLUDES`
    会让所有 shader 因 `DEPENDS` 全量重编译。
+### 14.24 任务 15 实施记录：三阶段簇剔除 + Hi-Z（2026-09-20）
+
+**① 最重要的一条发现（计划盲点，比任务本身更有价值）：`GPUCulling::BuildHiZPyramid` 在本引擎里构建不出正确金字塔，且从未被执行过。**
+- 位置：`GPUCulling::BuildHiZPyramid` = `Engine/Render/Pipeline/GPUCulling.cpp:478-543`；纹理 `GetHiZTexture()` = `GPUCulling.h:97`；层数上限 `kHiZMips=8` = `GPUCulling.h:130`；
+  格式 `R32_FLOAT`、层 L 存 `2^L×2^L` 足迹的**最小深度**（`HiZDownsample.comp.slang:31`）；深度为标准 Vulkan `[0,1]`（近=0）——三处交叉确认。
+- 实测：直接复用 ⇒ Hi-Z 剔掉 87% 的簇 ⇒ 逐层采样发现 **mip0/1/4/7 全为 0**（而深度纹理本身实测 ≈0.9998）。
+- **根因（用两个对照实验钉死）**：该函数在循环里**逐 mip 更新同一个描述符集**，而本引擎的 GPU 在**执行期**读描述符、**最后一次主机写对整段命令缓冲生效**：
+  ① 同一个 UB 先写 A、录 Dispatch、再写 B ⇒ GPU 读到 **B**；② 在 Dispatch **之后**改绑深度纹理 ⇒ 该次派发采样读到深度值 **0.9999**。
+  于是 7 次派发全用最后一个状态（都写进 mip7），mip1..6 从未被写 ⇒ 金字塔全 0。
+- 另外：`useTwoPhase` 在所有配置里恒 false ⇒ `HiZ_Build` pass 从不注册 ⇒ 这个函数在本仓库**从未真正执行过**（所以缺陷一直没被发现）。
+- **上游修法（3 行级，已写进代码注释）**：为每个目标 mip 分配**专属描述符集**（或循环内 `vkCmdPushDescriptorSet`）。
+- **本次裁决**：`GPUCulling.*` 不在改动面内 ⇒ **复用其纹理资源与"2×2 取最小深度"口径，构建改由模块自己完成**（每个目标 mip 一个专属描述符集，
+  各绑定每帧只写一次，从根上避开次序依赖；新增 `Nanite_HiZDownsample.comp.slang`，因写目标需 GENERAL、采样源需只读，同一张图不能同时满足，故 mip>0 的源改用存储图像读取，整条链只在开始/结束各一次整图转换）。
+  副作用（正面）：模块不再调用它 ⇒ `m_HiZMipCount` 不被改写 ⇒ 既有 `GPU_Cull`/PTG 路径行为一位不变。
+
+**② Phase1→Phase2 的顺序保证（不靠注册顺序）**：`Nanite_InstanceCull` 额外写一张**可见实例掩码**（每个在范围内的实例都显式写 ⇒ 无需清零、无竞态；用掩码而非压缩列表是因为遍历域按实例下标寻址，
+钳到 64 后子集**确定**，而压缩列表"取前 64 个"是不确定子集、会让逐项比较失去意义）；Phase1 派发 + Hi-Z 构建 + Phase2/3 派发录在**同一个帧图 pass** 内
+（新 `Nanite_CullChain3`，注册在 `AddPostGBufferPasses`，声明 `reads={gbDepth}` 以被定序在 `GB_Clear` 之后），顺序由命令缓冲里的 `PipelineBarrier` **显式**给出 —— 比声明一条帧图依赖更强。
+代价（如实）：开启档 pass 数 16→**15**（`Nanite_InstanceCull` + `Nanite_ClusterBVH` 合并为 `Nanite_CullChain3`，`nanite_passes` 4→3）；判据 ⑥b 只要求"多出 Nanite pass 且既有集合与顺序不变"，仍 PASS。
+
+**③ LOD 选择（含一处量纲修正）**：设计 §5.1 的 `projectedError = maxError / distance`、阈值 1 像素**量纲不自洽**，必须乘像素焦距：
+`projectedErrorPixels = maxError / distance × focalPixels`，`focalPixels = 0.5×screenH/tan(fovY/2)`（从 `CameraData::fov` 算，**不**反解 viewProj 的 m11，它被视图旋转污染）；阈值取原文 `1.0` 像素，判据写成乘法形式减少舍入。
+DAG 割用任务 9 的 `maxParentLODError`：`ownError` = 孩子记录的该值（叶子 0）、`parentError` = 本簇自己的该值（根 0）；选本簇 ⇔ `ownError ≤ 阈值` 且（根 或 `parentError > 阈值`），
+**根必须靠显式根位判定**（只看数值会把根永远筛掉）。误差随级单调 ⇒ 每条链至多一个交点、实测恰好选中一级（单测断言）。LOD 元数据由新增
+`BuildNaniteClusterLODInfo()` 从簇记录 + LOD 段推出（16B/条，CPU 与 GPU 读同一份比特）。
+
+**④ 验收证据（本人复跑）**：单测 **295 → 303 例**（断言 63894）全绿；关闭档 12 pass、指纹冻结 `1C15AB72E688B530…`、`vuid_lines=41`；开启档 15 pass、`vuid_lines=41`；
+- `nanite_hiz=0`（**默认**）两次同参数读数**逐位相同**且 **GPU 与 CPU 参考逐簇一致**：
+  `cull3 phase1=61 phase2=120561 phase3=31648 hiz=off gpu_clusters=31648 cpu_clusters=31648 mismatch=0 lod=[7553,23973,122,0,0,0,0,0] cpu_lod=[同] extra_gpu=0 occluded=0 inst_mismatch=0 nodes=5345 depth=15 visited=140495`。
+- `nanite_hiz=1`：`phase2=64215 phase3=18888 gpu_clusters=18888 cpu_clusters=31648 mismatch=12760 extra_gpu=0 occluded=56346 occl_mip=[0,0,0,0,0,244,3000,9516] hiz_req=1 hiz_mips=8`，
+  且 **12760 = 244+3000+9516**（差集恰好是投影盒落在金字塔 5/6/7 层的那批簇）⇒ 差异**可量化解释**；`extra_gpu=0` 证明 Hi-Z 只会"少"不会"多"（保守方向）。
+- `off vs on`（含 `hiz=on`）转储逐位：`must_same_diff=0`（仅 3 个抖动族文件不同）。
+- 任务 3 假簇读数仍 `6/6/6/6`（**顺手修掉了它的同类竞态**：三处每帧主机写改为命令缓冲内拷贝，含 20KB 常驻 0xFF 哨兵整块拷贝，末尾屏障 srcStage 补 `Transfer`）。
+
+**⑤ 偏差与风险（不掩盖）**
+1. 最大偏差 = 未直接复用 `BuildHiZPyramid`（理由与证据见 ①）。
+2. Hi-Z 依赖 GBuffer 深度 ⇒ 需 `gpu_cull=1`；无 Hi-Z 纹理时自动退化为 `hiz=off`（读数用 `hiz_req=1 hiz_mips=0` 区分"没开"与"开了但没纹理"）。
+3. `nanite_hiz` **默认 0**：默认档必须保住"与 CPU 参考逐簇一致"这条硬验收（CPU 不可能复现 Hi-Z）。
+4. CPU 参考恒为"Hi-Z 关闭"；打开档差异只做**统计可解释**（三条独立证据自洽 + 单测用合成金字塔把两档判据本身测全）。
+5. 逐帧主机写（实例表 / 三阶段参数 / 假簇表）仍是任务 13/14/15 的既有债（相机运动时理论上跨帧交错）；真正修法是随帧轮转暂存环。
+6. 64 实例域钳制保留（CPU/GPU 同口径）。
+7. 逐簇局部 LOD 判据在"父子距离跨过阈值"时可能同时选中父子两级（局部判据固有余量，真实 Nanite 用 DAG 遍历消掉）；CPU/GPU 同一判据 ⇒ 不影响逐簇一致。
