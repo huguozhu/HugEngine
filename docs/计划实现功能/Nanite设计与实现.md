@@ -2211,7 +2211,7 @@ if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
 > **进度（2026-09-20）**：**阶段 0（任务 1–6）与阶段 1 前两项（任务 7 数据格式定稿、任务 8 离线簇切分）已完成**并通过验收：模块骨架与独立开关、
 > 开关不变式判据 ⑥、模块自持的「计数 → 间接绘制」链（含最小 RHI 扩展）、GBuffer UAV（A1 裁决）、
 > objectIndex 分区契约与单测、mesh PSO 真正接入。**任务 7（`.nanite` 数据格式定稿）也已完成**
-> （§8 的四处不一致已裁决并写回 §8，见 §14.17）；**下一步从任务 10（量化与打包）开始**；
+> （§8 的四处不一致已裁决并写回 §8，见 §14.17）；**下一步从任务 11（NaniteTypes 单测收口）与任务 12（资产加载与 GPU 上传）开始**；
 > 每一步的证据分别见 §14.11、§14.13–§14.17，且都有对应的中文提交。
 
 **阶段 0：模块化前置（独立开关先落地）**
@@ -2671,3 +2671,42 @@ A1/A2 的完整裁决已写回 §14.5（A2 = 自建 VisBuffer，仅在确需跨�
 **⑦ 已知限制（如实记录）**：LOD1 以上几乎不再去重 —— 因为本实现是**全局简化**（忠实 §4.1 的 `edge_collapse(lods[-1], 0.5)`），
 meshopt 对互不相连的相同副本会给出逐副本不同的折叠顺序；真正 Nanite 的"按簇组分别简化"收益更大，属后续可选优化。
 任务 8 的 `BuildNaniteClusters` 一行未改（仍只切簇、留 0 字段），DAG 版本在 `BuildNaniteClusterDAG` 里填真值。
+### 14.20 任务 10 实施记录：量化与打包（2026-09-20）
+
+**① 位置量化基准裁决（任务 7 的已知取舍在此结案）**：改为**簇 AABB 中心基准 + 吃满 10 位**。
+编码 `signed = clamp(lround((v-origin)/range×1022), -512, 511)`、`raw = clamp10(signed + quantBias)`，解码 `v = origin + (raw-quantBias)/1022×range`。
+- 乘数由任务 7 的 511 改为 **1022**（新增 `kNaniteVertexQuantFullScale`，`static_assert == 1022`），把 `[origin-range/2, origin+range/2]`
+  映到有符号 `[-512,511]` ⇒ 1024 个码点全可用（实测极端簇 `raw ∈ [1,1023]`）；任务 7 的 `bboxMin` 口径只用上半段（等效 ~9 位）。
+- **不会 clamp，且可证**：簇是网格子集 ⇒ 每轴 `|v-origin| ≤ 簇半轴长 ≤ range/2` ⇒ `|signed| ≤ 511`。函数内保留夹取作防御，
+  并新增 `NanitePositionQuantizeClamps()` 把"无 clamp"变成可测读数：4 个测试网格全部 `positionClampCount = 0`。
+- 精度步长 `range/1022`、往返误差 ≤ `range/2044`（比任务 7 再小一半），实测**恰好压在上界**：6→0.002935、32→0.015656、48→0.023483、68→0.033268。
+- 与 §8.4 建议的 `center=(bboxMin+bboxMax)/2`、`halfExtent=maxExtent/2` **完全等价**（`signed/511×halfExtent == signed/1022×range`）；
+  **§8.4 中"沿用 bboxMin 基准"的旧表述就此作废**（任务 7 的取舍项结案）。
+- 口径钉死：抽出共用的 `ComputeMeshBounds()`，任务 9 的 DAG 哈希与任务 10 的打包共用同一函数；打包器还会把 DAG 的位置词**逐位重算比对**（`positionMismatchCount` 实测恒 0）。
+
+**② 其它属性**：法线取**八面体 10+10 位**落在 `packedNormal` 的 x/y 域（z/w 留 0，不改 §8.4 的 R10G10B10A2 位域），
+实测最坏 **0.227282°**（阈值 0.5°），不采用"重解释成 R16G16"（省 4 倍精度但需改三处位运算，收益不足）；
+UV 取 **unorm16**（实测最大误差 7.689e-06 < 1/65535；half 在 (0.5,1) 的间距是本方案 32 倍），越界 UV 按 clamp 并单列 `uvClampCount`；
+索引沿用任务 7 的 **3×u16 进 `u32[2]`**，新增 `IsNaniteTriangleIndexCount()` 把"必须 3 个一组"显式化；
+材质 8B = 两个 bindless 纹理 ID（word0=albedo、word1=normal），补 `NanitePackMaterial/NaniteUnpackMaterial` 显式化字节位序。
+
+**③ 打包产物** `PackNaniteClusters`：完整 `.nanite` 镜像 `[96B 头][簇×64B][顶点×16B][索引×8B/三角形][材质×8B][LOD×4B]`，
+段偏移不落盘、由 `TryBuildNaniteFileLayout` 推导（每段起点 16B 对齐、长度向上取整），返回前用 `ValidateNaniteFile()` 自校验。
+实测（单测断言逐项相等）：32×32（2048 tri、5 级）= 头 96 + 簇 3968 + 顶点 45376 + 索引 31696 + 材质 0 + LOD 32 = **81168 B**；
+6×6（72 tri）= **1680 B**；平铺 3×3 = **14272 B**。LOD 段语义本任务定义为"该级第一个出现簇的下标"（任务 7 只定了 4B 步长与条数），任务 15 可直接用。
+
+**④ pack / upload / shader 三处一致的达成程度**：C++（`NaniteTypes.h`）与**新建的仅供 include** 的
+`Engine/Shader/Shaders/Nanite/NaniteTypes.slang` 已写同一套位域/公式/常量（位置乘数 1022、八面体折叠与符号约定、unorm16、
+材质字段顺序、段步长与对齐），两侧互写同步指针注释；该 Slang 镜像**语法已用临时 harness 通过 `slangc` 编译验证**（未写进仓库）。
+它**不在 `COMP_SLANG`**（不是 shader 入口，Engine/Shader/CMakeLists.txt 一行未改），**任务 18 接入时必须把它加进 `SLANG_INCLUDES`**（已写入文件注释）。
+真正的端到端三处一致要到**任务 12**（CPU 字节 vs GPU 读回逐字节）与**任务 18**（shader 解码对照，需 push constant 传 `meshMaxExtent`）才能验证。
+
+**⑤ 验收证据**：单测 **270 → 279 例**（断言 61954）全绿；关闭档 12 pass、指纹冻结 `1C15AB72E688B530…`、`vuid_lines=41`；
+全量六条判据 `ACCEPTANCE SWEEP: PASS`（本次运行前遇到一次环境异常：`06.GILab` 进程卡在启动、日志 0 字节，终止后干净重跑即全绿，与本次改动无关）。
+
+**⑥ 已知缺陷（重要，任务 12/18/19 必读）**：DAG 的内容哈希是**顺序无关**的，而任务 8 的 `meshopt_optimizeMeshlet` 会就地重排簇内顶点
+⇒ 两个"内容相同"的簇可能有**不同的簇内顶点顺序**。共享的顶点/三角形段是首份出现的一致配对，**几何完全正确**（点集 + 三角形），
+但法线/UV 是**按局部下标**关联的 ⇒ 顺序不一致的出现会取到别的顶点的属性。实测平铺 3×3：19 个出现簇中 **8 个**顺序与首份不一致，
+属性冲突计数 1，下标一一对应最大误差 7.00587，而**点集匹配最大误差仅 0.0298**（≤ √3×半步长）。
+彻底修法二选一：① 把法线/UV 词混进规范键流（更严格，但会降低去重率）；② 按位置而非下标关联属性。
+**必须在任务 19（真实材质接入）与任务 21（画面级对照验收）之前修掉**，否则属性保真度无法通过验收。
