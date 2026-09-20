@@ -1,9 +1,13 @@
 // ============================================================
 // Nanite/NaniteUpload.cpp — 上传段（任务 1 生命周期桩）+ 离线簇切分（任务 8，CPU 侧）
 //
-// 【本文件由 §14.8 任务 1 建立骨架，任务 8 加入 CPU 侧簇切分，其余内容由任务 12 填充】
+// 【本文件由 §14.8 任务 1 建立骨架，任务 8/9/10 依次加入 CPU 侧构建，任务 12 加入资产入口】
 //   · 任务 1：只有"记住设备与尺寸 / 清空"这几个动作，**没有任何 GPU 资源**。
 //   · 任务 8：`BuildNaniteClusters()` —— `meshopt_buildMeshlets` 的落地（见头文件的接口说明）。
+//   · 任务 9/10：`BuildNaniteClusterDAG()` / `PackNaniteClusters()` —— LOD+DAG 去重与量化打包。
+//   · 任务 12：`BuildNaniteAssetFromGeometry()` —— 上面两者的顺序组合，即"资产加载"的 CPU 侧；
+//     **GPU 上传与读回校验不在本文件**（device 调用会破坏本翻译单元的 RHI-free 纪律，
+//     见 `Tests/CMakeLists.txt:50-54`），落在 `NaniteScene`（GPU 资源宿主）。
 //     本翻译单元**不 include 任何 RHI 头**（上传类只把 `rhi::IRHIDevice*` 存下来/判空），
 //     因此它可被单测目标 `HugEngineTests` 直接编译（`Tests/CMakeLists.txt` 里登记了本文件）。
 //
@@ -1035,6 +1039,28 @@ bool PackNaniteClusters(std::span<const float>                positions,
 
     outResult = std::move(result);   // 只有走到这里才动调用方的对象
     return true;
+}
+
+// ============================================================
+// §14.8 任务 12：资产加载 —— 合并几何快照 → `.nanite` 字节镜像
+//
+// 只是任务 9 + 任务 10 的**顺序组合**（口径说明见 `NaniteUpload.h` 的同名小节）：
+//   DAG（LOD 链 + 去重） → Pack（量化 + 打包 + 自校验）⇒ 一份可直接上传的字节镜像。
+// 刻意不在这里加任何缓存/状态：本模块要的"只读一次合并几何"由调用方
+// （`NaniteRenderer::EnsureAssetUploaded` 的一次性门闩）保证，而不是靠这里记住什么。
+// ============================================================
+bool BuildNaniteAssetFromGeometry(std::span<const float>                positions,
+                                  std::span<const float>                normals,
+                                  std::span<const float>                uvs,
+                                  std::span<const u32>                  indices,
+                                  std::span<const NaniteMaterialRecord> materials,
+                                  NanitePackedAsset&                    outResult) {
+    // ① LOD 链 + DAG 去重（任务 9）。失败时不改写出参，直接返回 false。
+    NaniteClusterDAG dag;
+    if (!BuildNaniteClusterDAG(positions, indices, dag)) return false;
+
+    // ② 量化 + 打包 + 段表自校验（任务 10）。同样"先本地构建、成功才交出"。
+    return PackNaniteClusters(positions, normals, uvs, materials, dag, outResult);
 }
 
 bool NaniteUpload::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {

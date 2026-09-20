@@ -35,6 +35,10 @@
 //  18. 与 DAG 的衔接：平铺网格（有共享内容）下逐簇解码回输入几何、同一 `vertexOffset` 被多次引用
 //  19. 共享内容的属性冲突：任务 9 的哈希不含法线/UV ⇒ **如实报告**冲突计数（不静默）
 //  20. 可复现性 + 失败路径（空 DAG / 位置或属性长度非法 / DAG 内部不一致 / 属性 span 可空）
+//
+// §14.8 任务 12（资产加载的 CPU 侧入口）追加的用例：
+//  21. `BuildNaniteAssetFromGeometry`：与"手工 DAG + Pack"逐字节一致、产物自洽可校验、
+//      确定性、空几何 ⇒ 96B 空资产、失败不改写出参
 // ============================================================
 
 #include "doctest.h"
@@ -1757,5 +1761,82 @@ TEST_CASE("NanitePack: 可复现性与失败路径（空 DAG / 非法输入）")
         CHECK(asset.layout.materialBytes == AlignUp16(kNaniteMaterialRecordBytes));
         CHECK(asset.materials[0].albedoTexture == 0xABu);
         CHECK(asset.materials[0].normalTexture == 0xCDu);
+    }
+}
+
+// ============================================================
+// 21. §14.8 任务 12：资产加载入口（合并几何快照 → `.nanite` 字节镜像，CPU 侧）
+//
+// 【为什么补这一条】`BuildNaniteAssetFromGeometry()` 是任务 12 新加的公共入口（渲染侧用它把
+//   `MeshBatcher` 的合并几何**一次性**转成待上传的字节镜像）。它虽然只是任务 9 + 任务 10 的
+//   顺序组合，但仍必须钉住三件事：
+//     ① 产物是一份**合法且自洽**的 `.nanite`（能用 `ValidateNaniteFile` 校验、计数与段表一致）；
+//     ② 空几何 ⇒ 合法空资产（96B 头、计数全 0），上层据此跳过 GPU 上传；
+//     ③ 失败 ⇒ 返回 false 且**不改写出参**（与任务 7/8/9/10 同口径）。
+//   至于"上了 GPU 之后字节是否一致"，由任务 12 运行期的真实读回校验负责（本文件不碰 RHI）。
+// ============================================================
+TEST_CASE("NaniteUpload: 合并几何快照 → .nanite 资产（任务 12 的 CPU 侧入口）") {
+    const GridMesh       mesh       = MakeGrid(8);            // 8×8 四边形 = 128 三角形（多级 LOD）
+    const MeshAttributes attributes = MakeSphereAttributes(mesh);
+
+    // ── ① 入口产物与"手工 DAG + Pack"逐字节一致：入口不许引入任何额外加工/重排 ──
+    NanitePackedAsset viaEntry;
+    REQUIRE(BuildNaniteAssetFromGeometry(mesh.positions, attributes.normals, attributes.uvs,
+                                         mesh.indices, {}, viaEntry));
+    NaniteClusterDAG dag;
+    REQUIRE(BuildNaniteClusterDAG(mesh.positions, mesh.indices, dag));
+    NanitePackedAsset viaCalls;
+    REQUIRE(PackNaniteClusters(mesh.positions, attributes.normals, attributes.uvs, {}, dag, viaCalls));
+    CHECK(viaEntry.bytes == viaCalls.bytes);
+
+    // ── ② 产物自洽：镜像长度 = 段表总长；校验通过；头部计数与各段/统计一致 ──
+    CHECK(viaEntry.bytes.size() == viaEntry.layout.totalBytes);
+    CHECK(ValidateNaniteFile(viaEntry.bytes.data(), viaEntry.bytes.size()) == NaniteFileError::None);
+    CHECK(viaEntry.header.clusterCount == (u32)viaEntry.clusters.size());
+    CHECK(viaEntry.header.clusterCount > 0u);
+    CHECK(viaEntry.header.vertexCount  == (u32)viaEntry.vertices.size());
+    CHECK(viaEntry.header.lodLevelCount > 0u);
+    CHECK(viaEntry.header.materialCount == 0u);   // 材质段留空：逐簇材质解析属任务 19
+    CHECK(viaEntry.stats.clusterCount == viaEntry.header.clusterCount);
+    CHECK(viaEntry.stats.vertexCount  == viaEntry.header.vertexCount);
+    CHECK(viaEntry.stats.triangleCount * kNaniteIndicesPerTriangle == viaEntry.header.indexCount);
+
+    MESSAGE("任务 12 资产入口：镜像 " << viaEntry.bytes.size() << " 字节，簇 "
+            << viaEntry.header.clusterCount << "，顶点 " << viaEntry.header.vertexCount
+            << "，索引 " << viaEntry.header.indexCount
+            << "，LOD 级 " << viaEntry.header.lodLevelCount);
+
+    // ── ③ 确定性：同一输入两次调用逐位一致（入口自身不加任何状态/缓存）──
+    NanitePackedAsset again;
+    REQUIRE(BuildNaniteAssetFromGeometry(mesh.positions, attributes.normals, attributes.uvs,
+                                         mesh.indices, {}, again));
+    CHECK(again.bytes == viaEntry.bytes);
+    CHECK(std::memcmp(&again.header, &viaEntry.header, sizeof(NaniteFileHeader)) == 0);
+
+    // ── ④ 空几何：合法空资产（96B 头、计数全 0）⇒ 上层据此跳过 GPU 上传 ──
+    {
+        NanitePackedAsset empty;
+        REQUIRE(BuildNaniteAssetFromGeometry({}, {}, {}, {}, {}, empty));
+        CHECK(empty.bytes.size() == kNaniteFileHeaderBytes);
+        CHECK(empty.bytes.size() == empty.layout.totalBytes);
+        CHECK(empty.header.clusterCount  == 0u);
+        CHECK(empty.header.vertexCount   == 0u);
+        CHECK(empty.header.indexCount    == 0u);
+        CHECK(empty.header.materialCount == 0u);
+        CHECK(empty.header.lodLevelCount == 0u);
+        CHECK(ValidateNaniteFile(empty.bytes.data(), empty.bytes.size()) == NaniteFileError::None);
+    }
+
+    // ── ⑤ 失败路径：索引越界 ⇒ false，且**不改写**出参 ──
+    {
+        std::vector<u32> badIndices = mesh.indices;
+        badIndices[1] = 0xFFFFFFFFu;   // 越界索引（≥ 顶点数）
+        NanitePackedAsset poisoned;
+        poisoned.stats.clusterCount = 77u;
+        poisoned.bytes.resize(5u);
+        CHECK_FALSE(BuildNaniteAssetFromGeometry(mesh.positions, attributes.normals, attributes.uvs,
+                                                 badIndices, {}, poisoned));
+        CHECK(poisoned.stats.clusterCount == 77u);
+        CHECK(poisoned.bytes.size() == 5u);
     }
 }

@@ -79,6 +79,13 @@ static VkBufferUsageFlags ToVkBufferUsage(BufferUsage usage) {
         flags |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
     if (u32(usage) & u32(BufferUsage::ShaderBindingTable))
         flags |= VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR;
+    // 【§14.8 任务 12 的最小补充】TransferSrc：`IRHICommandList::CopyBuffer` 的**源**缓冲需要
+    // VK_BUFFER_USAGE_TRANSFER_SRC_BIT（否则 `vkCmdCopyBuffer` 会报 VUID-srcBuffer-00119）。
+    // 这里过去只硬编码了 TRANSFER_DST、没有映射这个位，于是 `BufferUsage::TransferSrc` 成了
+    // 一个"写进 desc 也不生效"的空位。补上它是**只增不改**：当前没有任何调用方请求该位
+    // （全仓 `BufferUsage::TransferSrc` 只出现在 Nanite 任务 12 的上传缓冲上），
+    // 因此既有全部缓冲的 VkBufferUsageFlags 一个位都不变，既有渲染路径逐位不受影响。
+    if (u32(usage) & u32(BufferUsage::TransferSrc)) flags |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     return flags;
 }
 

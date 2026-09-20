@@ -31,6 +31,9 @@
 
 namespace he::render {
 
+class MeshBatcher;   // 【任务 12】只作**一次性输入**的类型：头文件不 include，避免把它的
+                     // 依赖（Scene/GPUScene/RHI）带进模块门面；`.cpp` 里才 include 它的头。
+
 /// 帧图接入所需的 GBuffer 句柄组（与 `GBufferRenderer::Handles` 同构）
 ///
 /// 任务 3 只用到 `depth` / `worldPos`（复刻 `GB_Clear` 的那组 WAW 声明，§14.5 第一条硬约束）；
@@ -105,6 +108,30 @@ public:
     /// 【将来】任务 26 的调试可视化落点也在这里（GBuffer 之后的可视化叠加）。
     void AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHandles& gb);
 
+    // ============================================================
+    // §14.8 任务 12：资产构建 + 一次性上传 + 读数校验的门闩
+    // ============================================================
+
+    /// 【§14.8 任务 12】把 `MeshBatcher` 的**合并几何**当作一次性输入，做一次
+    /// "资产构建（CPU 字节镜像）→ GPU 上传 → 真实读回校验"，并打印恰好一行
+    ///   `[Nanite] upload_bytes=<N> readback_match=<0|1> mismatch_bytes=<M> clusters=… lod_levels=…`
+    ///
+    /// 【门控与次数：这是本任务"只做一次"的实现点】
+    ///   · 开关关闭 / 模块未就绪 ⇒ **直接返回**：一个 GPU 资源都不建、一行日志都不打
+    ///     （§14.2 不变式 1，关闭档与基线逐位一致）；
+    ///   · 已经做过一次 ⇒ 直接返回（`m_AssetUploaded` 门闩）。
+    /// 【几何来源】只读**一次** `batcher.GetMergedVertices()/GetMergedIndices()`
+    ///   （`MeshBatcher.h:60-61` 已公开的 const getter，本任务**没有**改 `MeshBatcher`），
+    ///   随后转成扁平 SoA 交给 RHI-free 的 `BuildNaniteAssetFromGeometry()`。
+    ///   `MeshBatcher` 只以**参数**形式出现一次，模块不持有它的指针、不在每帧回读它的表
+    ///   （§14.3 的依赖禁令；与 `LumenSDF::Step(cmd, batcher)` 同款口径）。
+    /// 【调用点】`DeferredPipeline_FrameGraph.cpp`，在"合并几何已构建"之后、注册模块 pass 之前。
+    ///   为什么不在样例里触发：合并几何的唯一持有者是 `DeferredPipeline`，样例侧拿不到它，
+    ///   硬加一层访问器只会扩大接触面。
+    /// 【已知口径】本任务把**整份**合并几何当成"一个 `.nanite` 资产"（不做逐网格资产拆分、
+    ///   不施加每物体变换、不解析材质）；这些属 §14.4 的每网格资产路径与任务 19 的材质解析。
+    void EnsureAssetUploaded(const MeshBatcher& batcher);
+
     /// dump 帧（`HE_DUMP_GI_FRAME`）打印**恰好一行**真实 GPU 读回：
     ///   `[Nanite] fake_clusters=<N> count_buffer=<X> indirect_cmds=<Y> rasterized_clusters=<Z>`
     ///
@@ -143,6 +170,10 @@ private:
     u32 m_Width  = 0;
     u32 m_Height = 0;
     bool m_Ready = false;   ///< "骨架就绪"（任务 1 的语义，见 IsReady 的说明）
+
+    /// 【§14.8 任务 12】资产"只上传一次"的门闩（`Initialize` 时复位 ⇒ 重建后可再来一次）。
+    /// 它的存在保证 `EnsureAssetUploaded` 即使在帧循环里被反复调用，也只做一次 GPU 上传 + 读回。
+    bool m_AssetUploaded = false;
 
     /// 开关与档位的唯一真值（默认 `enabled = false` ⇒ §14.2 不变式 1）
     NaniteSettings m_Settings;

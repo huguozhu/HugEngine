@@ -438,11 +438,43 @@ struct NanitePackedAsset {
                                       NanitePackedAsset&                      outResult);
 
 // ============================================================
-// 上传类（任务 1 骨架；任务 12 填 GPU 侧）
+// §14.8 任务 12：资产加载（合并几何快照 → `.nanite` 字节镜像，RHI-free）
 //
-// 任务 8/9/10 与它的关系：任务 12 会先调用 `BuildNaniteClusterDAG()`（CPU 侧准备）与
-// `PackNaniteClusters()`（量化/打包），再把 `NanitePackedAsset::bytes` 上传到 GPU 缓冲；
-// 本任务**不碰任何 GPU/渲染路径**，只交付这些纯函数。
+// 【本函数存在的理由】任务 12 的输入是 `MeshBatcher` 的**合并几何**（§14.8 任务 12、
+//   §14.3 的依赖禁令：只当**一次性输入**）。把"快照 → 字节镜像"这一整步收在一个
+//   RHI-free 的函数里，是为了：
+//     ① 让 `NaniteRenderer`（唯一持有设备的一侧）只做"取几何快照 + 转 SoA + 交给 Scene 上传"
+//        三件事，不在门面里散落三段调用顺序；
+//     ② 这一步能被单测直接覆盖（`HugEngineTests` 直接编译本翻译单元，不需要 GPU）；
+//     ③ 保持 `MeshBatcher` 只出现在调用方的 `.cpp` 里（本文件不 include 它的头）。
+//
+// 【输入口径】与 `BuildNaniteClusterDAG` + `PackNaniteClusters` 完全一致：
+//   · `positions` / `normals` / `uvs` 是**扁平 SoA**（每顶点 3 / 3 / 2 个 float），
+//     调用方负责把 `StaticVertex[]` 转成这三条数组（合批索引已是绝对索引，不需要再加偏移）；
+//   · `indices` 是三角形列表（u32，长度是 3 的倍数）；
+//   · `materials` 可为空（⇒ `materialCount = 0`）：逐簇材质解析属任务 19，本任务不伪造 ID。
+// 【失败】与两个被调函数同口径：输入非法（索引不是 3 的倍数、越界索引、位置/属性长度不符、
+//   DAG 内部不一致、切不出簇等）⇒ 返回 false 且**不改写** `outResult`。
+// 【空几何】`indices` 为空 ⇒ 返回 true，产出一份"只有 96B 头部、计数全 0"的合法资产
+//   （上层据此跳过 GPU 上传，见 `NaniteRenderer::EnsureAssetUploaded`）。
+// 【确定性】同一输入两次调用逐位一致（两个被调函数各自都是确定性的，本函数不加任何状态）。
+// ============================================================
+[[nodiscard]] bool BuildNaniteAssetFromGeometry(std::span<const float>                positions,
+                                                std::span<const float>                normals,
+                                                std::span<const float>                uvs,
+                                                std::span<const u32>                  indices,
+                                                std::span<const NaniteMaterialRecord> materials,
+                                                NanitePackedAsset&                    outResult);
+
+// ============================================================
+// 上传类（任务 1 骨架；任务 12 的 GPU 侧落在 `NaniteScene`）
+//
+// 任务 8/9/10/12 与它的关系：`BuildNaniteClusters()` / `BuildNaniteClusterDAG()` /
+// `PackNaniteClusters()` / `BuildNaniteAssetFromGeometry()` 都在本文件，负责产出
+// **CPU 侧字节镜像**；把这份镜像搬上 GPU 的 device 调用落在 `NaniteScene`（它是 GPU 资源
+// 宿主）。**为什么不在本类里做**：本翻译单元被 `HugEngineTests` 直接编译，必须保持
+// RHI-free（`Tests/CMakeLists.txt:50-54` 是一条纪律钉子），任何 RHI include 都会让单测
+// 目标编译失败。本类因此仍只持有 `rhi::IRHIDevice*` 的指针（不前向调用它的成员）。
 // ============================================================
 class NaniteUpload {
 public:

@@ -21,6 +21,7 @@
 //  13. 任务 7：三角形索引编码（3×u16 进 u32[2]）的位边界与簇内下标语义边界
 //  14. 任务 7：cone 数据解码（单位轴 / cos 半角 / 无锥哨兵）
 //  15. 任务 7：段表推导（计数 → 各段 offset/size、16B 对齐、总长）
+//  15b. 任务 11：段对齐原语 `NaniteAlignUpFile` 与 LOD 段步长的边界（偏移契约的原语层）
 //  16. 任务 7：校验函数的正例与反例（空指针/截断/魔数错/版本错/索引数错/越界/尾部多余）
 //
 // §14.8 任务 10（量化编解码的验收，全部在本文件；打包/段布局在 TestNaniteBuilder.cpp）：
@@ -964,6 +965,57 @@ TEST_CASE("NaniteTypes: .nanite 段表推导（计数 → offset/size）") {
     untouched.totalBytes = 0xEEEEu;
     CHECK(TryBuildNaniteFileLayout(badTriangles, untouched) == NaniteFileError::BadIndexCount);
     CHECK(untouched.totalBytes == 0xEEEEu);
+}
+
+// ============================================================
+// 15b. 任务 11：段对齐原语与 LOD 段步长边界（"偏移"验收的原语层）
+//
+// 【为什么补这一条（任务 11 收口）】任务 11 的验收是"尺寸 / 偏移 / 量化往返 / 边界全绿"。
+//   段偏移的**所有**数字都由 `NaniteAlignUpFile` 产生，而它此前只被 `TryBuildNaniteFileLayout`
+//   间接使用、没有被直接钉过边界；`kNaniteLodOffsetBytes`（每个 LOD 一个 u32 的步长）也只在
+//   段表用例里被间接推算。这里把这两个"偏移契约的原语"的边界（0 / 1 / 半对齐 / 恰好对齐 /
+//   对齐 + 1 / 大值）与 LOD 段的取整行为逐点钉住 —— 与上面 `TryBuildNaniteFileLayout` 的属性
+//   循环互补：那边测"推导结果"，这边测"产生结果的原语本身"。
+// ============================================================
+TEST_CASE("NaniteTypes: 段对齐原语与 LOD 段步长边界（任务 11 偏移验收）") {
+    // ① 对齐原语：恰好对齐不动、不足一律向上取整到 16B、0 仍是 0（空段的段长必须是 0）
+    CHECK(NaniteAlignUpFile(0u)  == 0u);
+    CHECK(NaniteAlignUpFile(1u)  == 16u);
+    CHECK(NaniteAlignUpFile(15u) == 16u);
+    CHECK(NaniteAlignUpFile(16u) == 16u);
+    CHECK(NaniteAlignUpFile(17u) == 32u);
+    CHECK(NaniteAlignUpFile(31u) == 32u);
+    CHECK(NaniteAlignUpFile(32u) == 32u);
+    CHECK(NaniteAlignUpFile(33u) == 48u);
+    CHECK(NaniteAlignUpFile(kNaniteFileAlignment) == (u64)kNaniteFileAlignment);
+
+    // 属性循环：任何输入都得到 16B 的倍数、不截断、且是**最小**的那个对齐值（增量 < 一个步长）
+    for (u64 v = 0; v <= 128u; ++v) {
+        const u64 aligned = NaniteAlignUpFile(v);
+        CHECK(aligned % (u64)kNaniteFileAlignment == 0u);
+        CHECK(aligned >= v);
+        CHECK(aligned - v < (u64)kNaniteFileAlignment);
+    }
+
+    // 大值不溢出（u64 内）：u32 计数上限 × 64B 的簇段仍能正常对齐
+    const u64 huge = (u64)0xFFFFFFFFu * (u64)kNaniteClusterRecordBytes;
+    CHECK(NaniteAlignUpFile(huge) >= huge);
+    CHECK(NaniteAlignUpFile(huge) % (u64)kNaniteFileAlignment == 0u);
+
+    // ② LOD 段的步长（任务 7 定稿：每级一个 u32 = 4B）；段的取整由它决定 ⇒ 直接钉住这个尺寸
+    CHECK(kNaniteLodOffsetBytes == 4u);
+
+    // ③ LOD 段边界：0 级 ⇒ 0 字节（空资产没有 LOD 段）；1~4 级恰好取整到 16B；5 级 ⇒ 20 → 32B
+    const u32   lodCounts[6] = { 0u, 1u, 2u, 4u, 5u, 8u };
+    const usize expected[6]  = { 0u, 16u, 16u, 16u, 32u, 32u };
+    for (u32 i = 0; i < 6u; ++i) {
+        NaniteFileHeader probe{};
+        probe.lodLevelCount = lodCounts[i];
+        NaniteFileLayout layout{};
+        REQUIRE(TryBuildNaniteFileLayout(probe, layout) == NaniteFileError::None);
+        CHECK(layout.lodBytes == expected[i]);
+        CHECK(layout.totalBytes == layout.lodOffset + layout.lodBytes);
+    }
 }
 
 // ============================================================

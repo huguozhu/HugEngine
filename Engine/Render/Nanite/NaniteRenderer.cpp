@@ -17,16 +17,28 @@
 //
 // 【可见画面零影响】`Nanite_Raster` 渲染到模块自建的 1×1 R8 小目标（不是 GBuffer 附件），
 //   `Nanite_Cull` 只写模块自持缓冲 ⇒ 开启档转储与关闭档逐位相同。
+//   【任务 12 追加】资产上传/读回也不注册任何 pass：它在帧图构建期做一次"一次性命令表 +
+//   WaitIdle"，只写模块自建的资产缓冲与读回缓冲 ⇒ 开启档的 pass 集合仍是
+//   `Nanite_Cull` + `Nanite_Raster`（判据 ⑥ 的 pass 列表因此不变）。
 //
 // 【§14.3 依赖禁令】模块内不得引用 `GI_*` / `Lumen*` / `GPUCulling` 的内部结构
 //   （可借其 Hi-Z 纹理句柄与描述符写法）；不得依赖 `MeshBatcher` 的运行时状态
-//   —— 它只当**一次性输入**。故本文件不 include 任何 GI/Lumen/GPUCulling 头。
+//   —— 它只当**一次性输入**。故本文件不 include 任何 GI/Lumen/GPUCulling 头；
+//   `MeshBatcher` 只以 `const&` 参数出现在 `EnsureAssetUploaded` 里一次。
 // ============================================================
 
 #include "Nanite/NaniteRenderer.h"
 
 #include "Core/CVar.h"
 #include "Core/Log.h"
+
+// 【§14.8 任务 12】合并几何的一次性来源。只在本 .cpp include：`NaniteRenderer.h` 只用前置声明，
+// 这样模块门面不把 MeshBatcher 的依赖（Scene/GPUScene/RHI）带给所有使用者。
+// §14.3 的禁令是"不得依赖它的**运行时状态**"——本文件只把 `const MeshBatcher&` 当参数读一次，
+// 不持有指针、不在每帧回读它的内部表（与 `LumenSDF::Step(cmd, batcher)` 同款口径）。
+#include "Pipeline/MeshBatcher.h"
+
+#include <vector>   // 任务 12：SoA 转换的临时数组（positions / normals / uvs）
 
 // CVar: Nanite 独立开关（§14.4 的"配置"层，默认 0）。
 // 与 `r.Decal.Project` 同风格（DeferredPipeline_FrameGraph.cpp:40）。它只是**配置载体**：
@@ -45,6 +57,8 @@ bool NaniteRenderer::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) 
     m_Device = device;
     m_Width  = width;
     m_Height = height;
+    // 任务 12：重新初始化 ⇒ 资产门闩复位（旧资产缓冲已在 Shutdown/Scene::Initialize 里作废）
+    m_AssetUploaded = false;
 
     // 配置层 → 真值：只在启动时读一次 CVar 作为默认值。之后 cfg 与面板都可以覆盖它，
     // 而 CVar 不再每帧回写（否则面板的勾选会被控制台默认值每帧抹掉）。
@@ -187,6 +201,68 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
         [this, albedo](rhi::IRHICommandList* cmd) {
             m_Raster.RecordTestWritePass(cmd, albedo);
         });
+}
+
+// ============================================================
+// §14.8 任务 12：资产构建 + 一次性上传 + 读回校验
+//
+// 门控与次数的口径写在 `NaniteRenderer.h` 的同名小节里，这里只留与代码逐句对应的短注释。
+// 三步：① 读一次合并几何并转扁平 SoA；② RHI-free 的 `BuildNaniteAssetFromGeometry` 出字节镜像；
+// ③ `NaniteScene::UploadPackedAsset` 建缓冲 + 上传 + 真实 GPU 读回逐字节比较（它打印那一行）。
+// ============================================================
+void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
+    // 【关闭 / 未就绪 ⇒ 一个资源都不建】§14.2 不变式 1：关闭档不产生新的 GPU 资源、不打日志。
+    if (!m_Settings.enabled || !m_Ready) return;
+    // 【只做一次】门闩在 Initialize 时复位；此后无论这个函数被调用多少次都只走一次上传。
+    if (m_AssetUploaded) return;
+    m_AssetUploaded = true;
+
+    // ── ① 合并几何只读一次（§14.3：MeshBatcher 只当一次性输入）──
+    // 两个 getter 都是 `MeshBatcher.h:60-61` 上**已有**的 const 访问器 ⇒ 本任务没有为几何来源
+    // 改过 `MeshBatcher` 一行。索引在合批时已经加过 baseVertex（`MeshBatcher.cpp:53`），
+    // 所以它们直接就是合并顶点表的下标，调用方**不得**再加 `vertexOffset`。
+    const std::vector<StaticVertex>& merged = batcher.GetMergedVertices();
+    const std::vector<u32>&          indices = batcher.GetMergedIndices();
+    if (indices.empty() || merged.empty()) {
+        HE_CORE_WARN("NaniteRenderer: 合并几何为空（{} 顶点 / {} 索引）⇒ 跳过资产构建与上传；"
+                     "本帧仍照常注册模块 pass（模块不写 GBuffer，画面不受影响）",
+                     merged.size(), indices.size());
+        return;
+    }
+
+    // ── ② SoA 转换：打包器只吃扁平数组（`StaticVertex` 是 AoS，且它属于 Scene 头）──
+    // 这是一次性拷贝（O(V)），不是每帧路径；之后再不触碰 `batcher`。
+    std::vector<float> positions(merged.size() * 3u);
+    std::vector<float> normals(merged.size() * 3u);
+    std::vector<float> uvs(merged.size() * 2u);
+    for (usize i = 0; i < merged.size(); ++i) {
+        positions[i * 3u + 0u] = merged[i].position.x;
+        positions[i * 3u + 1u] = merged[i].position.y;
+        positions[i * 3u + 2u] = merged[i].position.z;
+        normals[i * 3u + 0u]   = merged[i].normal.x;
+        normals[i * 3u + 1u]   = merged[i].normal.y;
+        normals[i * 3u + 2u]   = merged[i].normal.z;
+        uvs[i * 2u + 0u]       = merged[i].uv.x;
+        uvs[i * 2u + 1u]       = merged[i].uv.y;
+    }
+
+    // ── ③ CPU 字节镜像（任务 9 的 DAG + 任务 10 的量化打包）──
+    // 材质段本任务**留空**：合并几何不携带材质 ID，`NaniteClusterRecord::materialID` 逐簇解析
+    // 属任务 19；这里传空 span ⇒ `materialCount = 0`（日志里的 `materials=0` 就是这个事实，
+    // 不是失败）。伪造 ID 会掩盖"材质还没接上"这件事。
+    NanitePackedAsset asset;
+    if (!BuildNaniteAssetFromGeometry(positions, normals, uvs, indices, {}, asset)) {
+        HE_CORE_ERROR("NaniteRenderer: 资产构建失败（{} 顶点 / {} 索引）—— 跳过上传，"
+                      "不做部分上传；本帧仍照常注册模块 pass",
+                      merged.size(), indices.size());
+        return;
+    }
+
+    // ── ④ GPU 上传 + 读回校验（失败时 NaniteScene 会打错误行，成功时打验收行）──
+    if (!m_Scene.UploadPackedAsset(asset)) {
+        HE_CORE_ERROR("NaniteRenderer: 资产上传/读回校验失败（镜像 {} 字节）",
+                      (unsigned long long)asset.bytes.size());
+    }
 }
 
 void NaniteRenderer::LogFakePipelineReadback() {

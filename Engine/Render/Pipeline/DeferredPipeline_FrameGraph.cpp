@@ -100,19 +100,32 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
 
     // GPUScene 收集 → [GPU 模式: 填充 IndirectDraw 参数] → 上传
     m_GPUScene.Collect(world, sg, camera);
-    // MeshBatcher 的构建条件有两条：① GPU 模式要靠它填 IndirectDraw 参数；
+    // MeshBatcher 的构建条件有三条：① GPU 模式要靠它填 IndirectDraw 参数；
     // ② **Lumen 的 Mesh SDF 构建需要这份 CPU 侧几何**（步骤 8）——CPU GBuffer 模式下
-    //    绘制不走它，但 SDF 仍然要有几何输入，否则距离场队列为空（实测就是这么发现的）。
+    //    绘制不走它，但 SDF 仍然要有几何输入，否则距离场队列为空（实测就是这么发现的）；
+    // ③ **Nanite 的资产构建也要这份合并几何**（§14.8 任务 12）：模块只把它当**一次性输入**，
+    //    且这条条件带 `enabled`，所以关闭档下这一行与今天逐字等价（§14.2 不变式 1）。
     const bool lumenNeedsGeometry = m_GIConfig.diffuse.Has(GISourceId::Lumen)
                                  || m_GIConfig.specular.Has(GISourceId::Lumen);
+    const bool naniteNeedsGeometry = m_Nanite.GetSettings().enabled && m_Nanite.IsReady();
     if (m_GBuffer->GetMode() == GBufferRenderer::Mode::GPU) {
         if (!m_BatchBuilt) { m_MeshBatcher.Build(world, m_ExcludeDecalCards); m_BatchBuilt = true; }
         m_MeshBatcher.FillGPUScene(m_GPUScene);  // 在 Upload 前写入 draw 参数
-    } else if (lumenNeedsGeometry && !m_BatchBuilt) {
-        m_MeshBatcher.Build(world, m_ExcludeDecalCards);   // 仅供 Lumen 的 SDF 使用
+    } else if ((lumenNeedsGeometry || naniteNeedsGeometry) && !m_BatchBuilt) {
+        m_MeshBatcher.Build(world, m_ExcludeDecalCards);   // 供 Lumen 的 SDF / Nanite 的资产使用
         m_BatchBuilt = true;
     }
     m_GPUScene.Upload(m_Device);
+
+    // ── §14.8 任务 12：Nanite 资产构建 + 一次性 GPU 上传 + 真实读回校验 ──
+    // 位置：紧接"合并几何已构建"之后（这就是任务里说的"资产构建完成时"），且**不注册任何 pass**
+    //   ——它只建模块自建的资产缓冲并打印那一行 `[Nanite] upload_bytes=…`。
+    // 门控：与下面两处接入点**同一个真值**（`enabled` + `IsReady`）；关闭档下这一行只是调用一个
+    //   立刻返回的空函数（模块内部再判一次），既不建资源也不打日志 ⇒ 关闭档逐位与基线一致。
+    // 次数：模块内部有"只做一次"的门闩，所以放在帧图里（每帧都会走到）也只上传一次。
+    if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
+        m_Nanite.EnsureAssetUploaded(m_MeshBatcher);
+    }
 
     // GPU 剔除读回（上帧结果）+ 过滤可见物体
     // 禁用时必须清空，避免 GBufferRenderer_CPU 使用脏数据过滤物体
