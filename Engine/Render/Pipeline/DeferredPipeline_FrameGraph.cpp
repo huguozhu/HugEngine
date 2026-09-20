@@ -333,7 +333,27 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     // 既有 pass 的注册顺序与声明**完全不变**：这里只是在 `GB_Clear` 之后**追加**一次注册调用。
     // ════════════════════════════════════════════════════════════════════
     if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
-        m_Nanite.AddPostGBufferPasses(rg, naniteGB);
+        // ── 【§14.8 任务 15】Hi-Z 金字塔的来源（复用 GPUCulling 的**纹理资源**与同一套下采样口径）──
+        // 模块不 include `GPUCulling.h`（§14.3 依赖禁令），所以这里把两个"取纹理"包成回调：
+        //   · `texture` = 既有的 Hi-Z 金字塔纹理（`GPUCulling::GetHiZTexture()`；`R32_FLOAT`、最多
+        //     8 层、层 L 存 2^L×2^L 足迹的**最小深度**、mip0 从不被写入）；
+        //   · `depth`   = 本帧的 GBuffer 深度（金字塔第 1 级的输入）。
+        //   两者都在**执行期**取：第 1 帧构建期金字塔纹理还没被创建，且窗口尺寸变化会重建它。
+        // 【金字塔由谁构建】**模块自己**构建（`NaniteCull::BuildHiZPyramid`）。**不是**直接调
+        //   `GPUCulling::BuildHiZPyramid` —— 实测那条路径在本引擎里构建不出正确金字塔：它在循环里
+        //   逐 mip 更新同一个描述符集，而本引擎的 GPU 在**执行期**读取描述符、最后一次主机写对整段
+        //   命令缓冲生效 ⇒ 7 次派发全部用最后一个状态（实测金字塔全 0）。GPUCulling.* 在任务 15 的
+        //   改动面之外，故模块按同一口径自建（详见 `NaniteRenderer.h` 的 `NaniteHiZSource` 注释与
+        //   §14.24 实施记录）。
+        // 【执行时机】由 `Nanite_CullChain3` pass 在**本帧深度画完之后**执行（该 pass 声明读 gbDepth
+        //   ⇒ 帧图把它定序在 `GB_Clear` 之后）；模块内部在构建前后各发一次整图布局转换
+        //   （GENERAL ↔ 只读），因此不依赖"另一条路径恰好也做了转换"。
+        NaniteHiZSource hizSrc;
+        if (m_GPUCulling.enabled) {
+            hizSrc.texture = [this]() -> rhi::IRHITexture* { return m_GPUCulling.GetHiZTexture(); };
+            hizSrc.depth   = [this]() -> rhi::IRHITexture* { return m_GBuffer->GetDepth(); };
+        }
+        m_Nanite.AddPostGBufferPasses(rg, naniteGB, hizSrc);
     }
 
     // ── GBuffer 投影贴花（任务 24）──

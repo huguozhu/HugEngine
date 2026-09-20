@@ -606,12 +606,17 @@ int main() {
             naniteSettings.instanceTestCount = (u32)std::max(0, std::min(
                 GetInt(cfgData, "nanite_instance_test_count", (int)naniteSettings.instanceTestCount),
                 (int)render::kNaniteMaxTestInstances));
+            // 任务 15 的 Hi-Z 遮挡开关（默认 0 = 关闭）：cfg → 真值，写法与上面几个键完全同构。
+            // 它只决定 Phase 2 的簇球是否与既有 Hi-Z 金字塔做遮挡测试（关闭 ⇒ 退化为"不遮挡"）。
+            naniteSettings.hiz = GetInt(cfgData, "nanite_hiz",
+                                        naniteSettings.hiz ? 1 : 0) != 0;
             deferredPipeline.SetNaniteSettings(naniteSettings);
             HE_CORE_INFO("[Nanite] 配置恢复: nanite_enable={} nanite_fake_clusters={} "
-                         "nanite_test_write={} nanite_mesh_test={} nanite_instance_test_count={}",
+                         "nanite_test_write={} nanite_mesh_test={} nanite_instance_test_count={} "
+                         "nanite_hiz={}",
                          naniteSettings.enabled ? 1 : 0, naniteSettings.fakeClusters,
                          naniteSettings.testWrite ? 1 : 0, naniteSettings.meshTest ? 1 : 0,
-                         naniteSettings.instanceTestCount);
+                         naniteSettings.instanceTestCount, naniteSettings.hiz ? 1 : 0);
         }
 
         auto& ae = deferredPipeline.GetAutoExposure();
@@ -1797,15 +1802,12 @@ int main() {
             // 关闭档下模块自身会直接返回（不打印），保证关闭档日志与基线一致。
             if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
                 dpNanite->GetNanite().LogFakePipelineReadback();
-            // ── Nanite（§14.8 任务 13）：dump 帧打印**恰好一行**实例剔除的 GPU/CPU 逐项对照 ──
-            // 同步同样依赖上一行的 `WaitIdle()`；关闭档下模块内部直接返回、不打印。
-            if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
-                dpNanite->GetNanite().LogInstanceCullReadback();
-            // ── Nanite（§14.8 任务 14）：dump 帧打印**恰好一行** cluster BVH 的
-            //    节点数/深度 + GPU 与 CPU 参考的"访问节点数 / 可见簇数 / 逐项差异" ──
+            // ── Nanite（§14.8 任务 15）：dump 帧打印**恰好一行**三阶段剔除的
+            //    GPU/CPU 逐项对照（三阶段读数 + Hi-Z 档位 + 可见簇集合差 + LOD 级分布 +
+            //    被遮挡簇的选层分布 + 实例剔除一致性）──
             // 同步同样依赖上面的 `WaitIdle()`；关闭档下模块内部直接返回、不打印。
             if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
-                dpNanite->GetNanite().LogClusterBVHReadback();
+                dpNanite->GetNanite().LogCull3Readback();
             // ── Nanite（§14.8 任务 6）：mesh PSO 通道的**恰好一行**真实 GPU 读回 ──
             // 同步同样已在上一行的 `WaitIdle()` 完成；`nanite_mesh_test=0`（默认）时模块内部
             // 直接返回、不打印，因此不改变任何既有档位的日志。
@@ -1944,6 +1946,8 @@ int main() {
         // 任务 13：合成实例网格条数（默认 64）——同写法、同在 Shutdown() 之后回写
         out["nanite_instance_test_count"] =
             std::to_string(deferredPipeline.GetNaniteSettings().instanceTestCount);
+        // 任务 15：Hi-Z 遮挡剔除开关（默认 0 = 关闭，理由见 NaniteSettings.h）——同写法回写
+        out["nanite_hiz"] = std::to_string(deferredPipeline.GetNaniteSettings().hiz ? 1 : 0);
 
         // ── AutoExposure ──
         auto& ae = deferredPipeline.GetAutoExposure();

@@ -54,11 +54,13 @@ struct InstanceSphere {
 //   0 = 实例表（128B 契约，只读；本任务读 indexCount 判空实例）
 //   1 = 包围球表（只读）
 //   2 = 可见实例列表（读写；原子压缩写入）
-//   3 = 可见实例计数（读写；单个 uint，CPU 每帧清零）
+//   3 = 可见实例计数（读写；单个 uint，命令缓冲内的拷贝每帧清 0）
+//   4 = 【任务 15】可见实例**掩码**（读写；`mask[i] = 1/0`，按实例下标寻址）
 [[vk::binding(0, 0)]] StructuredBuffer<InstanceObject> u_Instances;
 [[vk::binding(1, 0)]] StructuredBuffer<InstanceSphere> u_Spheres;
 [[vk::binding(2, 0)]] RWStructuredBuffer<uint>          u_VisibleInstances;
 [[vk::binding(3, 0)]] RWStructuredBuffer<uint>          u_VisibleCount;
+[[vk::binding(4, 0)]] RWStructuredBuffer<uint>          u_VisibleMask;
 
 [[vk::push_constant]] cbuffer NaniteInstanceCullParams {
     float4 planes[6];      // 偏移 0：世界空间视锥六平面（[左,右,下,上,近,远]，n 已归一化）
@@ -75,14 +77,25 @@ void main(uint3 id : SV_DispatchThreadID) {
     // ① 空实例（无索引可画）不参与 —— 与 CPU 参考的 indexCount == 0 跳过逐条对应。
     //    这一读也让“实例表就是 GPUSceneObject 的 128B 契约”在 shader 侧真正被消费。
     InstanceObject instance = u_Instances[id.x];
-    if (instance.indexCount == 0u) return;
+    if (instance.indexCount == 0u) {
+        // 【任务 15】掩码必须对**每个**在范围内的实例都写（0 或 1）：这样掩码永远是自洽的，
+        // 不需要任何每帧清零，也就没有“清零 vs 派发”的顺序问题（本 pass 的计数清零才需要）。
+        u_VisibleMask[id.x] = 0u;
+        return;
+    }
 
     // ② 逐平面球测试：任一平面外侧 ⇒ 不可见（与 NaniteSphereVisibleInFrustum 同判据）
     InstanceSphere sphere = u_Spheres[id.x];
+    bool visible = true;
     for (int i = 0; i < 6; ++i) {
         float distance = dot(planes[i].xyz, sphere.centerRadius.xyz) + planes[i].w;
-        if (distance < -sphere.centerRadius.w) return;
+        if (distance < -sphere.centerRadius.w) { visible = false; break; }
     }
+    if (!visible) {
+        u_VisibleMask[id.x] = 0u;   // 视锥外 ⇒ 掩码 0（Phase 2 的实例域由它决定）
+        return;
+    }
+    u_VisibleMask[id.x] = 1u;       // 可见 ⇒ 掩码 1
 
     // ③ 原子取槽位并计数：计数缓冲的最终值 = 实际写入的可见实例数（压缩列表）
     uint slot;

@@ -29,6 +29,8 @@
 #include "RHI/RHI.h"
 #include "RenderGraph.h"
 
+#include <functional>   // 【任务 15】NaniteHiZSource 的两个回调
+
 namespace he::render {
 
 class MeshBatcher;   // 【任务 12】只作**一次性输入**的类型：头文件不 include，避免把它的
@@ -59,6 +61,29 @@ struct NaniteGBufferHandles {
     /// 【生命周期】纹理归 `GBufferRenderer` 所有；模块只在一个 pass 内借用（不持有）。
     /// 前一处挂钩（`AddPasses`）不用它，故默认 nullptr。
     rhi::IRHITexture* albedoTexture = nullptr;
+};
+
+/// 【§14.8 任务 15】Hi-Z 金字塔的来源（由 `DeferredPipeline` 在帧图构建期提供）
+///
+/// 【为什么是回调而不是直接传纹理指针】
+///   ① 第 1 帧的帧图构建期，`GPUCulling` 的 Hi-Z 纹理还没被创建（它是在 `GPU_Cull` pass 执行期
+///      由 `SetDepthTexture` 建的）⇒ 纹理指针必须在 **pass 执行期**取；
+///   ② 窗口尺寸变化会**重建**纹理 ⇒ 构建期捕获的裸指针会悬空；
+///   ③ §14.3 禁止模块 include `GPUCulling.h`。
+/// 【金字塔由谁构建（本次实测后的裁决）】模块自己构建，但**复用 GPUCulling 的纹理资源**与它那套
+///   下采样口径（`R32_FLOAT` / ≤8 层 / 层 L = 2^L 足迹最小深度 / mip0 不写）。
+///   【为什么不是直接调 `GPUCulling::BuildHiZPyramid`】实测该函数在本引擎里**不可能**构建出正确
+///   金字塔：它在循环里逐 mip 更新**同一个**描述符集，而本引擎的 GPU 在**执行期**读取描述符、
+///   最后一次主机写对整段命令缓冲生效（已用对照实验钉死）⇒ 7 次派发全部用最后一个状态，
+///   结果整张金字塔全 0。`GPUCulling.*` 在本次改动面之外，故模块侧按同一口径自建。
+///   完整证据、上游修法与影响面见任务 15 实施记录。
+struct NaniteHiZSource {
+    /// 取当前帧的 Hi-Z 纹理（金字塔资源本身；执行期调用；nullptr ⇒ 本帧退化为"Hi-Z 关闭"）
+    std::function<rhi::IRHITexture*()> texture;
+    /// 取当前帧的深度纹理（金字塔的输入；执行期调用）
+    std::function<rhi::IRHITexture*()> depth;
+
+    [[nodiscard]] bool valid() const { return texture && depth; }
 };
 
 /// Nanite 模块门面：资源生命周期 + 帧图接入 + 耗时读数/诊断（后两者是后续任务）
@@ -93,14 +118,16 @@ public:
     /// 帧图接入点（在 `DeferredPipeline_FrameGraph.cpp` 的 GBuffer 段被调用）。
     /// 【门控只有一处】`DeferredPipeline_FrameGraph.cpp` 里的
     /// `if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady())`。
-    /// 开启时注册三个 pass：`Nanite_InstanceCull` + `Nanite_Cull` + `Nanite_Raster`
-    /// （原序 12 个 pass 一个不动）；【任务 14】再追加 `Nanite_ClusterBVH`（per-instance cluster
-    /// BVH 的深度优先遍历，只读写模块自持缓冲 ⇒ 不声明任何帧图资源）；
+    /// 开启时注册两个 pass：`Nanite_Cull` + `Nanite_Raster`（原序 12 个 pass 一个不动）；
     /// 【§14.8 任务 6】`meshTest` 为真时**再追加**一个 `Nanite_MeshTest`（mesh PSO 通道）。
+    /// 【§14.8 任务 15 的改动】`Nanite_InstanceCull` 与 `Nanite_ClusterBVH` 两个 pass **不再**在
+    ///   这里注册 —— 它们被合并成**一个** `Nanite_CullChain3` pass（Phase 1 → Phase 2/3 同一条链），
+    ///   并搬到 `AddPostGBufferPasses`（原因：它的 Phase 2 要采样**本帧** GBuffer 深度建出来的
+    ///   Hi-Z 金字塔，因此必须排在 `GB_Clear` 之后；注册在本函数后面会被帧图排到 GB_Clear 之前）。
     ///
-    /// 【§14.8 任务 13 的 camera 参数】实例剔除需要世界空间视锥与相机位置：
-    ///   `NaniteCull::SetInstanceCullFrame` 由 view-proj 提取 6 平面、并以相机位置为基准生成
-    ///   合成实例网格（来源/坐标系见 `NaniteCull.h` 的 `SetInstanceCullFrame` 注释）。
+    /// 【§14.8 任务 13/15 的 camera 参数】实例剔除需要世界空间视锥与相机位置：
+    ///   `NaniteCull::SetCullChainFrame` 由 view-proj 提取 6 平面、以相机位置为基准生成
+    ///   合成实例网格，并用相机的 fov + 屏幕高度算 Phase 3 的**像素焦距**。
     ///   【为什么从调用方传入】相机的唯一持有者是 `DeferredPipeline`；模块不自造也没有别处可取。
     void AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb, const CameraData& camera);
 
@@ -110,13 +137,20 @@ public:
     ///     `GB_Clear` 覆盖，无法被同帧的 Lighting 读到；任务 4 的验收（"compute 写 GBuffer 且
     ///     同帧被 Lighting 读到"）只能在 GBuffer 之后注册才能成立。
     ///   · 开关守卫与 `AddPasses` 是**同一个真值**（`NaniteSettings::enabled` + `IsReady()`），
-    ///     不是新门控；`nanite_test_write` 只是模块内部的第二个条件。
-    ///   · 关闭档 / 未就绪 / `testWrite=false` ⇒ 一个 pass 都不注册（§14.2 不变式 1）。
-    ///   · 注意：这里写的是 `gbAlbedo` 的 UAV，因此**不能**声明 `gbDepth/gbWorldPos` 的那组
-    ///     WAW —— `GB_Clear` 已经在前面写过它们，再声明只会多出一条无意义的依赖。
+    ///     不是新门控；`nanite_test_write` / 三阶段链只是模块内部的第二个条件。
+    ///   · 关闭档 / 未就绪 ⇒ 一个 pass 都不注册（§14.2 不变式 1）。
+    ///   · 注意：`Nanite_TestWrite` 写的是 `gbAlbedo` 的 UAV，因此**不能**声明 `gbDepth/gbWorldPos`
+    ///     的那组 WAW —— `GB_Clear` 已经在前面写过它们，再声明只会多出一条无意义的依赖。
     ///
+    /// 【§14.8 任务 15 新增的 `Nanite_CullChain3`】三阶段簇剔除链（Phase 1 实例剔除 + 掩码 →
+    ///   Phase 2 构建 Hi-Z 并做视锥/遮挡剔除 → Phase 3 LOD 选择）在这里注册：
+    ///   · 声明 `reads = {gbDepth}`：这是**真的**在读（Hi-Z 金字塔由本帧深度下采样而来），
+    ///     它同时给帧图一条把本 pass 定序在 `GB_Clear` 之后的 RAW 依赖；
+    ///   · 内部三段的相对顺序**不靠帧图**，而是靠同一 pass 体内命令缓冲的屏障（见 `NaniteCull`）。
+    ///   · `hiz` 为空（默认）⇒ 该 pass 照常注册，但 Hi-Z 遮挡测试关闭（退化为"不遮挡"）。
     /// 【将来】任务 26 的调试可视化落点也在这里（GBuffer 之后的可视化叠加）。
-    void AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHandles& gb);
+    void AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHandles& gb,
+                              const NaniteHiZSource& hiz = NaniteHiZSource{});
 
     // ============================================================
     // §14.8 任务 12：资产构建 + 一次性上传 + 读数校验的门闩
@@ -154,43 +188,26 @@ public:
     /// 关闭档下直接返回（不打印），保证关闭档日志与基线一致。
     void LogFakePipelineReadback();
 
-    /// 【§14.8 任务 13】dump 帧打印**恰好一行**实例剔除的 GPU/CPU 逐项对照：    ///   `[Nanite] instance_cull gpu=<k> cpu=<m> mismatch=0 first=<i0,i1,...>`
+    /// 【§14.8 任务 15】dump 帧打印**恰好一行**三阶段剔除的 GPU/CPU 逐项对照：
+    ///   `[Nanite] cull3 phase1=<a> phase2=<b> phase3=<c> hiz=<on|off> gpu_clusters=<C>
+    ///    cpu_clusters=<C> mismatch=<M> lod=[…] extra_gpu=… occluded=… frustum=… …`
     ///
-    /// · `gpu` = GPU 读回的可见实例计数（`Nanite_InstanceCull` 的计数缓冲）；
-    /// · `cpu` = CPU 参考剔除（`NaniteCullInstancesCPU`）的可见数；
-    /// · `mismatch` = 两个可见**集合**的逐项差异数（含条数差）；
-    /// · `first` = 排序后的 GPU 可见列表前若干个下标（可核对的样本；空列表打 `-`）。
-    ///
-    /// 【为什么比较前要排序】GPU 用"原子取槽位"做压缩，槽位分配顺序与线程调度相关，
-    ///   同一个可见集合可能有不同的列表顺序；CPU 参考是升序紧凑的。故比较口径是
-    ///   **排序后的逐项相等**（集合等价），顺序本身不是语义（任务 14+ 也不依赖顺序）。
-    ///
-    /// 【同步约定】与 `LogFakePipelineReadback` 相同：只做 Map 读回、不做等待；调用方必须已
-    /// `WaitIdle()`。关闭档 / 未就绪时直接返回、不打印 —— 保证关闭档日志与基线一致。
-    void LogInstanceCullReadback();
-
-    /// 【§14.8 任务 14】dump 帧打印**恰好一行** per-instance cluster BVH 的读数：
-    ///   `[Nanite] cluster_bvh nodes=<N> depth=<D> gpu_visited=<V> cpu_visited=<V>
-    ///    gpu_clusters=<C> cpu_clusters=<C> mismatch=<M>`
-    ///
-    /// · `nodes` / `depth` = CPU 构建出的 BVH 节点数与最大深度（**同一份数据**也上传给了 GPU）；
-    /// · `gpu_visited` = GPU 读回的"已访问节点数"（原子累加；**真实 GPU 读回**）；
-    /// · `cpu_visited` = CPU 参考遍历（`NaniteTraverseClusterBVHCPU`）的同一读数；
-    /// · `gpu_clusters` = GPU 读回的"可见簇引用数"（原子累加）；`cpu_clusters` = CPU 参考同一读数；
-    /// · `mismatch` = 两个可见簇**集合**的逐项差异数（含条数差）—— 不是只比计数。
-    ///
-    /// 【比较口径】GPU 用"原子取槽位"压缩 ⇒ 列表顺序不定；两边都按 (instance, cluster) 排序后
-    ///   逐项比较（集合等价），与任务 13 相同。
-    /// 【容量截断】可见簇引用表容量 = `kNaniteMaxBVHInstances × kNaniteMaxBVHClusters`
-    ///   （正常配置下 53 万 < 105 万 ⇒ **不截断**）；两个计数都先按容量截断再比较，口径一致。
-    /// 【CPU 参考为什么在这里算（而不是每帧在 `RecordClusterBVHPass` 里算）】BVH 遍历的成本是
-    ///   实例域 × 全簇数（默认 64 × 8287 ≈ 53 万次球测试），每帧跑一遍会拖慢开启档；而 dump 帧的
-    ///   读回紧跟在 `WaitIdle()` 之后、期间没有录制新帧 ⇒ 这里的 CPU 输入正是被读回那一帧的输入
-    ///   （同一个视锥、同一张实例表、同一个实例域），仍然是"同帧同输入"的比较。
+    /// · `phase1` = GPU 读回的**可见实例数**（Phase 1 的输出；与 CPU 参考升序集合逐项一致）；
+    /// · `phase2` = GPU 读回的"通过视锥 + Hi-Z"的簇引用数（Phase 2 的输出）；
+    /// · `phase3` = GPU 读回的"再经 Phase 3 LOD 选择"后的簇引用数（= `gpu_clusters`）；
+    /// · `hiz` = Hi-Z 遮挡测试**是否真的生效**（`on` 要求金字塔层数 ≥ 2 且外部纹理已绑定）；
+    /// · `cpu_clusters` = CPU 参考的最终可见簇数（**Hi-Z 恒关闭**：CPU 拿不到金字塔的逐 texel
+    ///   内容，理由见 `NaniteCull::RunCullChainCPUReference`）；
+    /// · `mismatch` = 两个可见簇**集合**的对称差大小（排序后做真正的集合差，不是只比计数）；
+    /// · `extra_gpu` = `gpu \ cpu`（**Hi-Z 只能少不能多** ⇒ 这一项非 0 就是真 bug，不是"可解释差异"）；
+    /// · `occluded` / `frustum` = 被 Hi-Z 剔除 / 通过视锥的簇引用数（Phase 2 的两个中间读数）；
+    /// · `lod=[…]` = Phase 3 的**选中级别分布**（GPU 读回；8 个槽对应 LOD 0..7）；
+    /// · `occl_mip=[…]` = Hi-Z 打开时"CPU 可见但 GPU 判遮挡"的簇的**选层分布**（CPU 侧按同一公式
+    ///   复算）—— 它把"两档差异"量化到"这些簇恰好是投影盒较大、落在金字塔较深层的那批"。
     ///
     /// 【同步约定】与 `LogFakePipelineReadback` 相同：只做 Map 读回、不做等待；调用方必须已
     /// `WaitIdle()`。关闭档 / 未就绪时直接返回、不打印 —— 保证关闭档日志与基线一致。
-    void LogClusterBVHReadback();
+    void LogCull3Readback();
 
     /// 【§14.8 任务 6】dump 帧打印**恰好一行** mesh 通道的真实 GPU 读回：
     ///   `[Nanite] mesh_pso=<ok|fail> meshlet_outputs=<n> target_max=<v>`

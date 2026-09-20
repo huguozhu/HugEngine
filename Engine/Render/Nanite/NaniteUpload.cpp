@@ -1296,6 +1296,73 @@ bool BuildNaniteClusterBVH(std::span<const NaniteClusterRecord> clusters,
     return true;
 }
 
+// ============================================================
+// §14.8 任务 15：每簇 LOD 元数据（Phase 3 的 DAG 割判据的输入）
+// 口径与失败条件写在 `NaniteUpload.h` 的同名小节里；这里只留与代码逐句对应的短注释。
+// ============================================================
+bool BuildNaniteClusterLODInfo(std::span<const NaniteClusterRecord> clusters,
+                               std::span<const u32>                 lodOffsets,
+                               std::vector<NaniteClusterLODInfo>&   outResult) {
+    const u32 clusterCount = (u32)clusters.size();
+
+    // ── ① LOD 段自校验（单调不减、首元素为 0、元素都 < 簇数）──
+    // 段本身由任务 10 的 `PackNaniteClusters` 从 DAG 的 `levelClusterOffset` 拷来；这里再查一次
+    // 是为了让"元数据错位"这类问题在**构建点**就暴露，而不是变成运行期的错误 LOD 选择。
+    for (usize i = 0; i < lodOffsets.size(); ++i) {
+        if (lodOffsets[i] > clusterCount) return false;
+        if (i > 0u && lodOffsets[i] < lodOffsets[i - 1u]) return false;
+    }
+
+    std::vector<NaniteClusterLODInfo> result(clusterCount);
+    if (clusterCount == 0u) {
+        outResult = std::move(result);   // 空输入是合法输入（与任务 7/9/10 同口径）
+        return true;
+    }
+
+    // ── ② 根簇判定：被任何簇引为孩子的簇不是根 ──
+    std::vector<u8> hasParent(clusterCount, 0u);
+    for (u32 i = 0; i < clusterCount; ++i) {
+        const NaniteClusterRecord& record = clusters[i];
+        if (record.childCount == 0u) continue;
+        // 越界防御：`childClusterOffset + childCount` 必须落在簇表内（否则返回 false，不改写出参）
+        if (record.childClusterOffset > clusterCount
+            || record.childCount > clusterCount - record.childClusterOffset) {
+            return false;
+        }
+        for (u32 k = 0u; k < record.childCount; ++k) {
+            hasParent[record.childClusterOffset + k] = 1u;
+        }
+    }
+
+    // ── ③ 逐簇填元数据 ──
+    u32 levelCursor = 0u;   // `lodOffsets` 的游标（簇表按级升序 ⇒ 单次线性扫描即可）
+    for (u32 i = 0; i < clusterCount; ++i) {
+        const NaniteClusterRecord& record = clusters[i];
+        NaniteClusterLODInfo& info = result[i];
+
+        // LOD 级：满足 lodOffsets[L] <= i 的最大 L（空段 ⇒ 全部算 0 级）
+        if (!lodOffsets.empty()) {
+            while (levelCursor + 1u < (u32)lodOffsets.size() && lodOffsets[levelCursor + 1u] <= i) {
+                ++levelCursor;
+            }
+        }
+        info.lodLevel = levelCursor;
+
+        // ownError = 用本簇替代其孩子渲染的误差 = 孩子的 `maxParentLODError`（叶子 = 0）
+        info.ownError = (record.childCount > 0u)
+            ? clusters[record.childClusterOffset].maxParentLODError : 0.0f;
+        if (!(info.ownError > 0.0f)) info.ownError = 0.0f;   // NaN / 负值一律归 0（防御）
+
+        // parentError = 用父簇替代本簇渲染的误差 = 本簇自己的 `maxParentLODError`（根 = 0）
+        info.parentError = (record.maxParentLODError > 0.0f) ? record.maxParentLODError : 0.0f;
+
+        info.flags = (hasParent[i] == 0u) ? kNaniteLODInfoFlagRoot : 0u;
+    }
+
+    outResult = std::move(result);   // 只有走到这里才动调用方的对象
+    return true;
+}
+
 bool NaniteUpload::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     // 任务 1：骨架就绪 = 拿到设备。任务 12 起在这里建暂存缓冲与目标缓冲，
     // 并把"缓冲是否真的建成"纳入这个返回值。

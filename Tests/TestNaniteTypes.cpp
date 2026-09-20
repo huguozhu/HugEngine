@@ -38,6 +38,15 @@
 //  23. CPU 参考遍历：空表与空指针、单簇、手搭 7 节点树的访问数（全部在内/全部在外/部分相交/
 //      内部节点剪枝）、多实例与实例域钳制、栈溢出防御（计数器不静默）
 //  24. 视图与读数仍是纯 POD（可被 Scene 侧 include 的前提）
+//
+// §14.8 任务 15（三阶段簇剔除）追加的用例：
+//  25a. Hi-Z 金字塔层数公式（与 GPUCulling::BuildHiZPyramid 同式）与可采样层下限
+//  25b. 球 → 屏幕 AABB + 最近深度（含相机之后 / 空指针 / 退化球）
+//  25c. Hi-Z 选层公式与边界（NaN/负尺寸/层数不足）
+//  25d. 遮挡判据与**开关两档**（关闭恒不遮挡且 0 次采样；打开时按最近深度 > 采样值判定）
+//  25e. LOD 选择的**单调性**（距离越远级别越粗）+ 链上恰好选中一级 + 关闭档不筛
+//  25f. 三阶段参考遍历：Phase 1 掩码、视锥、Hi-Z、LOD 级分布、复现性、空表/单簇/退化球边界
+//  25g. 三阶段参数与元数据的布局契约（GPU 侧结构体逐字段对应）
 // ============================================================
 
 #include "doctest.h"
@@ -1680,3 +1689,492 @@ TEST_CASE("NaniteTypes: cluster BVH 视图与读数是纯 POD") {
     CHECK(stats.stackOverflows == 0u);
     CHECK(stats.traversedInstances == 0u);
 }
+
+// ============================================================
+// 25. 任务 15：三阶段簇剔除（Phase 1 掩码 → Phase 2 视锥 + Hi-Z → Phase 3 LOD 选择）
+//
+// 【本节测什么】判据层（`NaniteTypes.h` 的"任务 15"小节）的**已知进/出/遮挡用例**、
+//   Hi-Z 开关两档的差异、LOD 选择的单调性（距离越远级别越粗）、边界（空表/单簇/退化球）、
+//   以及"两次调用逐位可复现"。GPU 侧的同名判据在 `Nanite_ClusterBVH.comp.slang`。
+// 【Hi-Z 在 CPU 侧怎么做得到】生产路径传空采样器（CPU 拿不到金字塔的逐 texel 内容），
+//   但**判据本身**可以用一个"合成金字塔"的回调完整测起来 —— 这正是本节的 `SyntheticHiZ`。
+// ============================================================
+
+namespace {
+
+/// 合成 Hi-Z 金字塔：每层返回一个固定深度（用来把"遮挡/不遮挡"两档做成可判定的已知用例）
+struct SyntheticHiZ {
+    float depthPerMip[kNaniteMaxHiZMips] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+    u32   sampleCalls = 0u;
+    u32   lastMip     = 0u;
+};
+
+bool SyntheticHiZSample(void* user, float /*u*/, float /*v*/, u32 mip, float* outDepth) {
+    auto* hiz = static_cast<SyntheticHiZ*>(user);
+    if (hiz == nullptr || outDepth == nullptr || mip >= kNaniteMaxHiZMips) return false;
+    ++hiz->sampleCalls;
+    hiz->lastMip = mip;
+    *outDepth = hiz->depthPerMip[mip];
+    return true;
+}
+
+/// 合成"标准透视投影"的视锥（Vulkan [0,1] 深度、列主序 glm 口径：`m[col*4+row]`）
+///
+/// 相机在原点、朝 -Z，`view = I` ⇒ 世界点 `(0,0,-d)` 的 ndc.z = f/(f-n) × (1 - n/d)（近 = 0）。
+/// 【为什么要自己写而不是用 glm】单测不引入新的矩阵库依赖，也把"列主序"这条口径写死在用例里。
+void MakeTestPerspective(float fovYDegrees, float aspect, float nearZ, float farZ, float outM[16]) {
+    const float f = 1.0f / std::tan(fovYDegrees * 0.5f * 3.14159265358979323846f / 180.0f);
+    for (u32 i = 0u; i < 16u; ++i) outM[i] = 0.0f;
+    outM[0]  = f / aspect;                       // m[0][0]
+    outM[5]  = f;                                // m[1][1]
+    outM[10] = farZ / (nearZ - farZ);            // m[2][2]
+    outM[11] = -1.0f;                            // m[2][3]
+    outM[14] = -(farZ * nearZ) / (farZ - nearZ); // m[3][2]
+}
+
+/// 列主序矩阵 → 4 个"行"（`rows[r*4+c] = m[c*4+r]`），与 `NaniteCull::SetCullChainFrame` 同一口径
+void MakeViewProjRows(const float m[16], float outRows[16]) {
+    for (u32 row = 0u; row < 4u; ++row) {
+        for (u32 col = 0u; col < 4u; ++col) {
+            outRows[row * 4u + col] = m[col * 4u + row];
+        }
+    }
+}
+
+/// 合成一条 LOD 链的元数据（级 0 = 最细 … 级 n-1 = 根）：
+///   级 L 的 ownError = stepErrors[L-1]（叶子 0）、parentError = stepErrors[L]、根带根标志
+void MakeLODChain(const float* stepErrors, u32 stepCount, std::vector<NaniteClusterLODInfo>& out) {
+    out.assign(stepCount + 1u, NaniteClusterLODInfo{});
+    for (u32 level = 0u; level <= stepCount; ++level) {
+        NaniteClusterLODInfo& info = out[level];
+        info.lodLevel    = level;
+        info.ownError    = (level == 0u) ? 0.0f : stepErrors[level - 1u];
+        info.parentError = (level < stepCount) ? stepErrors[level] : 0.0f;
+        info.flags       = (level == stepCount) ? kNaniteLODInfoFlagRoot : 0u;
+    }
+}
+
+/// 在一条 LOD 链上找"被选中的那一级"（正常应恰好一级；找不到返回哨兵）
+u32 SelectedLevelOnChain(const std::vector<NaniteClusterLODInfo>& chain,
+                         float distance, float focalPixels, float thresholdPixels) {
+    for (u32 level = 0u; level < (u32)chain.size(); ++level) {
+        if (NaniteLODClusterSelected(chain[level], distance, focalPixels, thresholdPixels)) {
+            return level;
+        }
+    }
+    return 0xFFFFFFFFu;
+}
+
+} // namespace
+
+// ── 25a. Hi-Z 金字塔层数公式（必须与 GPUCulling::BuildHiZPyramid 的公式一致）──
+TEST_CASE("NaniteHiZ: 金字塔层数公式与可采样层下限") {
+    CHECK(NaniteHiZPyramidMipCount(1u, 1u) == 1u);      // 单像素：连一层都写不出（<2 尺寸会关闭）
+    CHECK(NaniteHiZPyramidMipCount(2u, 1u) == 1u);
+    CHECK(NaniteHiZPyramidMipCount(4u, 4u) == 2u);      // 4 → 2
+    CHECK(NaniteHiZPyramidMipCount(8u, 8u) == 3u);      // 8 → 4 → 2
+    CHECK(NaniteHiZPyramidMipCount(256u, 128u) == 8u);  // 256 → … → 2，正好 8 层
+    CHECK(NaniteHiZPyramidMipCount(1920u, 1080u) == kNaniteMaxHiZMips);  // 10 层被钳到 8
+    CHECK(NaniteHiZPyramidMipCount(4096u, 4096u) == kNaniteMaxHiZMips);
+    CHECK(kNaniteHiZMinMip == 1u);   // mip0 从不被写入 ⇒ 采样下限必须是 1
+    MESSAGE("Hi-Z 层数：2x2=" << NaniteHiZPyramidMipCount(2u, 2u)
+            << " 4x4=" << NaniteHiZPyramidMipCount(4u, 4u)
+            << " 8x8=" << NaniteHiZPyramidMipCount(8u, 8u)
+            << " 1920x1080=" << NaniteHiZPyramidMipCount(1920u, 1080u));
+}
+
+// ── 25b. 投影：世界球 → 屏幕 AABB + 最近深度（与 shader 的 hizOccluded 前半同式）──
+TEST_CASE("NaniteHiZ: 球投影到屏幕 AABB 与最近深度") {
+    float m[16];
+    MakeTestPerspective(60.0f, 16.0f / 9.0f, 0.1f, 2000.0f, m);
+    float rows[16];
+    MakeViewProjRows(m, rows);
+
+    // 半径 0 的退化球：盒退化成点，且正好落在屏幕中心（相机朝 -Z、点在轴上）
+    {
+        const float center[3] = { 0.0f, 0.0f, -10.0f };
+        float minUV[2], maxUV[2], nearest = 0.0f;
+        REQUIRE(NaniteProjectSphereToScreen(rows, center, 0.0f, minUV, maxUV, &nearest));
+        CHECK(std::fabs(minUV[0] - 0.5f) < 1.0e-5f);
+        CHECK(std::fabs(minUV[1] - 0.5f) < 1.0e-5f);
+        CHECK(std::fabs(maxUV[0] - minUV[0]) < 1.0e-6f);
+        // ndc.z(d) = far/(far-near) × (1 - near/d) ⇒ d = 10 时 ≈ 0.990
+        CHECK(nearest > 0.98f);
+        CHECK(nearest < 1.0f);
+    }
+    // 半径 1 的球：盒以中心为中心、有正的尺寸；最近深度 < 中心处深度
+    {
+        const float center[3] = { 0.0f, 0.0f, -10.0f };
+        float minUV[2], maxUV[2], nearestNear = 0.0f;
+        float minUV0[2], maxUV0[2], nearestFar = 0.0f;
+        REQUIRE(NaniteProjectSphereToScreen(rows, center, 1.0f, minUV, maxUV, &nearestNear));
+        REQUIRE(NaniteProjectSphereToScreen(rows, center, 0.0f, minUV0, maxUV0, &nearestFar));
+        CHECK(minUV[0] < minUV0[0]);
+        CHECK(maxUV[0] > maxUV0[0]);
+        CHECK(nearestNear < nearestFar);
+        // 10 单位处半径 1 ⇒ 屏幕半宽 ≈ 1/10 × focal / (0.5×height)；用 focal 反算的一致性：
+        //   tan(fov/2) = 0.5×H/focal，此处 focal = 0.5/sin(30°)；只断言"尺寸 > 0 且 < 半屏"
+        CHECK((maxUV[0] - minUV[0]) > 0.0f);
+        CHECK((maxUV[0] - minUV[0]) < 1.0f);
+    }
+    // 相机之后（点在 +Z 侧）⇒ 投影无意义 ⇒ 必须返回 false（调用方按"保守不剔除"处理）
+    {
+        const float behind[3] = { 0.0f, 0.0f, 10.0f };
+        float minUV[2], maxUV[2], nearest = 0.0f;
+        CHECK_FALSE(NaniteProjectSphereToScreen(rows, behind, 1.0f, minUV, maxUV, &nearest));
+    }
+    // 空指针防御
+    {
+        const float center[3] = { 0.0f, 0.0f, -10.0f };
+        float minUV[2], maxUV[2], nearest = 0.0f;
+        CHECK_FALSE(NaniteProjectSphereToScreen(nullptr, center, 1.0f, minUV, maxUV, &nearest));
+        CHECK_FALSE(NaniteProjectSphereToScreen(rows, nullptr, 1.0f, minUV, maxUV, &nearest));
+        CHECK_FALSE(NaniteProjectSphereToScreen(rows, center, 1.0f, nullptr, maxUV, &nearest));
+        CHECK_FALSE(NaniteProjectSphereToScreen(rows, center, 1.0f, minUV, maxUV, nullptr));
+    }
+}
+
+// ── 25c. 选层：ceil(log2(最长边)) 且下限钳到 1、上限钳到 mipCount-1 ──
+TEST_CASE("NaniteHiZ: 选层公式与边界") {
+    CHECK(NaniteHiZSelectMip(0.0f, 0.0f, 8u) == 1u);
+    CHECK(NaniteHiZSelectMip(1.0f, 1.0f, 8u) == 1u);
+    CHECK(NaniteHiZSelectMip(2.0f, 1.0f, 8u) == 1u);
+    CHECK(NaniteHiZSelectMip(3.0f, 1.0f, 8u) == 2u);
+    CHECK(NaniteHiZSelectMip(4.0f, 4.0f, 8u) == 2u);
+    CHECK(NaniteHiZSelectMip(32.0f, 8.0f, 8u) == 5u);
+    CHECK(NaniteHiZSelectMip(64.0f, 64.0f, 8u) == 6u);
+    CHECK(NaniteHiZSelectMip(200.0f, 1.0f, 8u) == 7u);   // 上限 = mipCount-1 = 7
+    CHECK(NaniteHiZSelectMip(1000.0f, 1000.0f, 4u) == 3u);  // 层数少时上限跟着降
+    CHECK(NaniteHiZSelectMip(1000.0f, 1000.0f, 1u) == kNaniteHiZMinMip);  // 没有可采样层
+    CHECK(NaniteHiZSelectMip(1000.0f, 1000.0f, 0u) == kNaniteHiZMinMip);
+    // NaN 尺寸 ⇒ 退化为 1（不产生 NaN 层号）；负尺寸同理
+    const float nanValue = std::nanf("");
+    CHECK(NaniteHiZSelectMip(nanValue, 1.0f, 8u) == 1u);
+    CHECK(NaniteHiZSelectMip(-5.0f, -5.0f, 8u) == 1u);
+}
+
+// ── 25d. Hi-Z 遮挡判据的两档（开关关闭 = 恒不遮挡；打开时按最近深度 > 采样值判遮挡）──
+TEST_CASE("NaniteHiZ: 遮挡判据与开关两档") {
+    float m[16];
+    MakeTestPerspective(60.0f, 16.0f / 9.0f, 0.1f, 2000.0f, m);
+    float rows[16];
+    MakeViewProjRows(m, rows);
+
+    SyntheticHiZ hiz;
+    for (u32 i = 0u; i < kNaniteMaxHiZMips; ++i) hiz.depthPerMip[i] = 0.995f;  // 屏幕上几乎处处有"很近的遮挡物"
+    const NaniteHiZSampler sampler{ &SyntheticHiZSample, &hiz };
+
+    const float near10[3]  = { 0.0f, 0.0f, -10.0f };
+    const float near500[3] = { 0.0f, 0.0f, -500.0f };   // ndc.z ≈ 0.9998 > 0.995 ⇒ 应被遮挡
+    const float farOff[3]  = { 10000.0f, 0.0f, -10.0f };  // 完全在屏幕外 ⇒ 保守不剔除
+
+    // 【关闭档】mipCount < 2（含 0）⇒ 恒不遮挡，且**一次都不采样**（不浪费带宽）
+    hiz.sampleCalls = 0u;
+    CHECK_FALSE(NaniteHiZOccluded(rows, near500, 1.0f, 1920.0f, 1080.0f, 0u, sampler));
+    CHECK_FALSE(NaniteHiZOccluded(rows, near500, 1.0f, 1920.0f, 1080.0f, 1u, sampler));
+    CHECK(hiz.sampleCalls == 0u);
+    // 空采样器同样是"关闭"（生产路径的 CPU 参考就是这一档）
+    CHECK_FALSE(NaniteHiZOccluded(rows, near500, 1.0f, 1920.0f, 1080.0f, 8u, NaniteHiZSampler{}));
+
+    // 【打开档】
+    CHECK_FALSE(NaniteHiZOccluded(rows, near10, 1.0f, 1920.0f, 1080.0f, 8u, sampler));   // 0.99 < 0.99x ⇒ 在前
+    CHECK(NaniteHiZOccluded(rows, near500, 1.0f, 1920.0f, 1080.0f, 8u, sampler));        // 0.9998 > 0.99 ⇒ 被挡
+    CHECK(hiz.sampleCalls >= 4u);       // 四个角各采一次
+    CHECK(hiz.lastMip >= 1u);           // 采样层下限是 1（mip0 从不被写入）
+
+    // 屏幕尺寸为 0 ⇒ 关掉（避免除零/无意义的层计算）
+    CHECK_FALSE(NaniteHiZOccluded(rows, near500, 1.0f, 0.0f, 1080.0f, 8u, sampler));
+    CHECK_FALSE(NaniteHiZOccluded(rows, near500, 1.0f, 1920.0f, 0.0f, 8u, sampler));
+    // 完全在屏幕外的球（沿 X 偏出视锥）⇒ 保守不剔除（Hi-Z 只覆盖已光栅化区域）
+    CHECK_FALSE(NaniteHiZOccluded(rows, farOff, 0.5f, 1920.0f, 1080.0f, 8u, sampler));
+    // 【可解释性】遮挡只与"采样值 < 最近深度"有关：把合成金字塔改成 1.0（全屏都在最远处）⇒ 一个都不遮挡
+    for (u32 i = 0u; i < kNaniteMaxHiZMips; ++i) hiz.depthPerMip[i] = 1.0f;
+    CHECK_FALSE(NaniteHiZOccluded(rows, near500, 1.0f, 1920.0f, 1080.0f, 8u, sampler));
+    MESSAGE("Hi-Z 两档：关闭恒不遮挡（0 次采样）；打开且金字塔=0.995 时 500 单位的球被遮挡、"
+            "10 单位的球不遮挡；金字塔=1.0 时都不遮挡");
+}
+
+// ── 25e. LOD 选择：距离越远级别越粗（单调性）+ 恰好选中一级 ──
+TEST_CASE("NaniteLOD: 选择级别的单调性与唯一性") {
+    const float stepErrors[5] = { 0.01f, 0.1f, 1.0f, 10.0f, 100.0f };
+    std::vector<NaniteClusterLODInfo> chain;
+    MakeLODChain(stepErrors, 5u, chain);
+    REQUIRE(chain.size() == 6u);
+
+    const float focal = 935.0f;            // ≈ 1080p / 60° 的像素焦距（0.5×1080/tan30°）
+    const float threshold = kNaniteLODThresholdPixels;
+
+    u32 previous = 0u;
+    bool first = true;
+    const float distances[9] = { 0.1f, 1.0f, 10.0f, 100.0f, 1000.0f, 5000.0f, 50000.0f, 5.0e5f, 5.0e6f };
+    for (float distance : distances) {
+        const u32 level = SelectedLevelOnChain(chain, distance, focal, threshold);
+        REQUIRE(level != 0xFFFFFFFFu);                 // 每条链上必须恰好选中一级
+        if (!first) CHECK(level >= previous);          // 距离越远 ⇒ 级别越粗（单调不减）
+        previous = level;
+        first = false;
+        // 唯一性：把选中的那一级排除后，剩下的级一个都不该被选
+        u32 selectedCount = 0u;
+        for (const NaniteClusterLODInfo& info : chain) {
+            if (NaniteLODClusterSelected(info, distance, focal, threshold)) ++selectedCount;
+        }
+        CHECK(selectedCount == 1u);
+    }
+    // 端点：贴脸 ⇒ 最细（级 0）；极远 ⇒ 根（级 5）
+    CHECK(SelectedLevelOnChain(chain, 0.1f, focal, threshold) == 0u);
+    CHECK(SelectedLevelOnChain(chain, 5.0e6f, focal, threshold) == 5u);
+    // 极远时根被选，是因为"没有父簇可比"（根标志），不是因为它自带 parentError = 0
+    CHECK(chain.back().parentError == 0.0f);
+    CHECK((chain.back().flags & kNaniteLODInfoFlagRoot) != 0u);
+    // 【关闭档】focalPixels <= 0 ⇒ 不筛任何簇（所有级都"被选"）
+    for (const NaniteClusterLODInfo& info : chain) {
+        CHECK(NaniteLODClusterSelected(info, 10.0f, 0.0f, threshold));
+        CHECK(NaniteLODClusterSelected(info, 10.0f, -1.0f, threshold));
+    }
+    // 距离为 0 / NaN ⇒ 按下限兜底（不产生 inf/NaN 判定）
+    CHECK(NaniteLODClusterSelected(chain[0], 0.0f, focal, threshold));
+    CHECK_FALSE(NaniteLODClusterSelected(chain[5], 0.0f, focal, threshold));   // 根的 ownError 很大 ⇒ 需要更细
+    const float nanValue = std::nanf("");
+    CHECK(NaniteLODClusterSelected(chain[0], nanValue, focal, threshold));
+    // 阈值越大 ⇒ 越容易"够好"（选更粗的级）
+    CHECK(SelectedLevelOnChain(chain, 100.0f, focal, 1000.0f) >=
+          SelectedLevelOnChain(chain, 100.0f, focal, 1.0f));
+    MESSAGE("LOD 单调性：距离 0.1→5e6 时选中级别 = "
+            << SelectedLevelOnChain(chain, 0.1f, focal, threshold) << "→"
+            << SelectedLevelOnChain(chain, 10.0f, focal, threshold) << "→"
+            << SelectedLevelOnChain(chain, 1000.0f, focal, threshold) << "→"
+            << SelectedLevelOnChain(chain, 5.0e6f, focal, threshold));
+}
+
+// ── 25f. 三阶段 CPU 参考遍历：已知进/出/遮挡 + 级分布 + 复现性 + 边界 ──
+TEST_CASE("NaniteCull3: 三阶段参考遍历的已知进/出/遮挡用例") {
+    // 手搭 3 节点树：根 → 左叶（簇 0、1）、右叶（簇 2）。
+    // 【坐标口径】相机在原点、朝 -Z（`MakeTestPerspective` 的 view = I）⇒ 簇必须放在 **-Z** 侧，
+    //   否则它们落在相机平面上（`clip.w = 0`）⇒ Hi-Z 投影按"保守不剔除"提前返回，用例就测不到遮挡。
+    NaniteBVHNode nodes[3];
+    nodes[0] = MakeInnerNode(4.5f, 0.0f, -10.0f, 40.0f, 1u, 2u);
+    nodes[1] = MakeLeafNode(2.5f, 0.0f, -10.0f, 20.0f, 0u, 2u);
+    nodes[2] = MakeLeafNode(9.0f, 0.0f, -10.0f, 20.0f, 2u, 1u);
+    const u32 leaves[3] = { 0u, 1u, 2u };
+    NaniteClusterSphere spheres[3] = {};
+    spheres[0].center[0] = 0.0f;  spheres[0].center[2] = -10.0f;  spheres[0].radius = 2.0f;
+    spheres[1].center[0] = 5.0f;  spheres[1].center[2] = -10.0f;  spheres[1].radius = 2.0f;
+    spheres[2].center[0] = 9.0f;  spheres[2].center[2] = -10.0f;  spheres[2].radius = 2.0f;
+
+    NaniteClusterBVHView view;
+    view.nodes              = nodes;
+    view.nodeCount          = 3u;
+    view.leafClusterIndices = leaves;
+    view.clusterSpheres     = spheres;
+    view.clusterCount       = 3u;
+
+    const NaniteInstanceGpuObject instance = MakeBVHTranslatedInstance(0.0f, 0.0f, 0.0f, 36u);
+    const NaniteFrustumPlanes frustum = MakeBVHBoxFrustum(40.0f);   // 三个簇全在盒内
+
+    // 真实的透视 vpRows（Hi-Z 投影用；与盒状视锥各管一段判据，互不干扰）
+    float m[16];
+    MakeTestPerspective(60.0f, 16.0f / 9.0f, 0.1f, 2000.0f, m);
+    float rows[16];
+    MakeViewProjRows(m, rows);
+
+    // 【已知用例 1：Phase 1 掩码 = 0 ⇒ 整个实例都不遍历】
+    {
+        const u32 maskOff[1] = { 0u };
+        NaniteCullChainDesc chain;
+        chain.visibleMask = maskOff;
+        std::vector<NaniteVisibleClusterRef> out(64u);
+        NaniteClusterBVHTraversalStats stats{};
+        const u32 written = NaniteTraverseClusterBVHCPU(frustum, view, &instance, 1u, 4u,
+                                                       out.data(), (u32)out.size(), &stats, chain);
+        CHECK(written == 0u);
+        CHECK(stats.traversedInstances == 0u);
+        CHECK(stats.frustumPassClusters == 0u);
+    }
+
+    // 【已知用例 2：掩码 = 1、Hi-Z 关闭、LOD 关闭 ⇒ 三个簇全可见，phase2 = phase3 = 3】
+    {
+        const u32 maskOn[1] = { 1u };
+        NaniteCullChainDesc chain;
+        chain.visibleMask = maskOn;
+        chain.vpRows[0] = 0.0f;   // 故意不填：Hi-Z 关闭时投影不该被用到
+        std::vector<NaniteVisibleClusterRef> out(64u);
+        NaniteClusterBVHTraversalStats stats{};
+        const u32 written = NaniteTraverseClusterBVHCPU(frustum, view, &instance, 1u, 4u,
+                                                       out.data(), (u32)out.size(), &stats, chain);
+        CHECK(written == 3u);
+        CHECK(stats.frustumPassClusters == 3u);
+        CHECK(stats.occludedClusters == 0u);
+        CHECK(stats.lodRejectedClusters == 0u);
+        CHECK(stats.traversedInstances == 1u);
+    }
+
+    // 【已知用例 3：Hi-Z 打开且合成金字塔=0（等价"全屏都被挡住"）⇒ 三个簇全被剔除】
+    {
+        SyntheticHiZ hiz;                       // depthPerMip 全 0
+        const u32 maskOn[1] = { 1u };
+        NaniteCullChainDesc chain;
+        chain.visibleMask = maskOn;
+        for (u32 i = 0u; i < 16u; ++i) chain.vpRows[i] = rows[i];
+        chain.screenW = 1920.0f;
+        chain.screenH = 1080.0f;
+        chain.hizMipCount = 8u;
+        chain.hiz = NaniteHiZSampler{ &SyntheticHiZSample, &hiz };
+        std::vector<NaniteVisibleClusterRef> outHiZ(64u);
+        NaniteClusterBVHTraversalStats statsHiZ{};
+        const u32 writtenHiZ = NaniteTraverseClusterBVHCPU(frustum, view, &instance, 1u, 4u,
+                                                          outHiZ.data(), (u32)outHiZ.size(),
+                                                          &statsHiZ, chain);
+        CHECK(writtenHiZ == 0u);
+        CHECK(statsHiZ.frustumPassClusters == 3u);   // phase2 前半：仍然通过了视锥
+        CHECK(statsHiZ.occludedClusters == 3u);      // phase2 后半：全被遮挡
+        CHECK(hiz.sampleCalls > 0u);
+    }
+
+    // 【已知用例 4：合成金字塔=1（全屏都在最远处）⇒ 一个都不遮挡；两档差集 = "被遮挡的那批"】
+    {
+        SyntheticHiZ hiz;
+        for (u32 i = 0u; i < kNaniteMaxHiZMips; ++i) hiz.depthPerMip[i] = 1.0f;
+        const u32 maskOn[1] = { 1u };
+        NaniteCullChainDesc chain;
+        chain.visibleMask = maskOn;
+        for (u32 i = 0u; i < 16u; ++i) chain.vpRows[i] = rows[i];
+        chain.screenW = 1920.0f;
+        chain.screenH = 1080.0f;
+        chain.hizMipCount = 8u;
+        chain.hiz = NaniteHiZSampler{ &SyntheticHiZSample, &hiz };
+        std::vector<NaniteVisibleClusterRef> out(64u);
+        NaniteClusterBVHTraversalStats stats{};
+        const u32 written = NaniteTraverseClusterBVHCPU(frustum, view, &instance, 1u, 4u,
+                                                       out.data(), (u32)out.size(), &stats, chain);
+        CHECK(written == 3u);
+        CHECK(stats.occludedClusters == 0u);
+    }
+
+    // 【已知用例 5：Phase 3 的 DAG 割：极远 ⇒ 只有根级（级 1）被选，级分布落在 1】
+    {
+        std::vector<NaniteClusterLODInfo> chainInfo;
+        const float stepErrors[1] = { 1000.0f };   // 级 0 → 级 1 的误差很大 ⇒ 极远时选级 1
+        MakeLODChain(stepErrors, 1u, chainInfo);
+        NaniteClusterLODInfo infos[3];
+        infos[0] = chainInfo[0];   // 簇 0、1：级 0（叶子）
+        infos[1] = chainInfo[0];
+        infos[2] = chainInfo[1];   // 簇 2：级 1（根）
+
+        const u32 maskOn[1] = { 1u };
+        NaniteCullChainDesc chain;
+        chain.visibleMask = maskOn;
+        chain.lodInfo = infos;
+        chain.cameraPos[0] = 0.0f; chain.cameraPos[1] = 0.0f; chain.cameraPos[2] = 0.0f;
+        chain.focalPixels = 935.0f;
+        chain.lodThresholdPixels = kNaniteLODThresholdPixels;
+        std::vector<NaniteVisibleClusterRef> out(64u);
+        NaniteClusterBVHTraversalStats stats{};
+        const u32 written = NaniteTraverseClusterBVHCPU(frustum, view, &instance, 1u, 4u,
+                                                       out.data(), (u32)out.size(), &stats, chain);
+        // 三个簇都在 0..30 单位处（离相机很近）⇒ 级 0 的 ownError=0 且级 1 的 parentError 很大
+        // ⇒ 级 0 被选；级 1 的 ownError=1000 在 30 单位处投影远超 1 像素 ⇒ 被判"需要更细"而拒绝
+        //（这条合成数据里没有级 1 的孩子，所以它是"被拒绝"而不是"换个级"—— 正好覆盖拒绝计数）
+        CHECK(written == 2u);
+        CHECK(stats.lodHistogram[0] == 2u);
+        CHECK(stats.lodHistogram[1] == 0u);
+        CHECK(stats.lodRejectedClusters == 1u);
+        CHECK(stats.frustumPassClusters == 3u);
+        CHECK(stats.visibleClusters == written);
+    }
+
+    // 【可复现】同输入两次调用，输出逐位一致（GPU 侧唯一的非确定性是槽位顺序）
+    {
+        const u32 maskOn[1] = { 1u };
+        NaniteCullChainDesc chain;
+        chain.visibleMask = maskOn;
+        std::vector<NaniteVisibleClusterRef> a(64u), b(64u);
+        NaniteClusterBVHTraversalStats sa{}, sb{};
+        const u32 wa = NaniteTraverseClusterBVHCPU(frustum, view, &instance, 1u, 4u,
+                                                  a.data(), (u32)a.size(), &sa, chain);
+        const u32 wb = NaniteTraverseClusterBVHCPU(frustum, view, &instance, 1u, 4u,
+                                                  b.data(), (u32)b.size(), &sb, chain);
+        REQUIRE(wa == wb);
+        a.resize(wa);
+        b.resize(wb);
+        CHECK(std::memcmp(a.data(), b.data(), (usize)wa * sizeof(NaniteVisibleClusterRef)) == 0);
+        CHECK(sa.visitedNodes == sb.visitedNodes);
+        CHECK(sa.frustumPassClusters == sb.frustumPassClusters);
+    }
+
+    // 【边界】空 BVH、空实例表、0 容量、单簇、退化球（半径 0）
+    {
+        NaniteCullChainDesc chain;
+        std::vector<NaniteVisibleClusterRef> out(8u);
+        NaniteClusterBVHTraversalStats stats{};
+        NaniteClusterBVHView emptyView;
+        CHECK(NaniteTraverseClusterBVHCPU(frustum, emptyView, &instance, 1u, 4u,
+                                         out.data(), (u32)out.size(), &stats, chain) == 0u);
+        CHECK(NaniteTraverseClusterBVHCPU(frustum, view, nullptr, 0u, 4u,
+                                         out.data(), (u32)out.size(), &stats, chain) == 0u);
+        CHECK(NaniteTraverseClusterBVHCPU(frustum, view, &instance, 0u, 4u,
+                                         out.data(), (u32)out.size(), &stats, chain) == 0u);
+        CHECK(NaniteTraverseClusterBVHCPU(frustum, view, &instance, 1u, 0u,
+                                         out.data(), (u32)out.size(), &stats, chain) == 0u);
+        // 【计数与容量无关】输出指针为空 / 容量 0 时仍照常计数（与 GPU 的槽位口径一致）
+        CHECK(NaniteTraverseClusterBVHCPU(frustum, view, &instance, 1u, 4u,
+                                         nullptr, 0u, &stats, chain) == 3u);
+        CHECK(stats.visibleClusters == 3u);
+        // 计数与容量无关（容量 0 时写入 0 条但计数照常）
+        const u32 writtenZeroCap = NaniteTraverseClusterBVHCPU(frustum, view, &instance, 1u, 4u,
+                                                              nullptr, 0u, &stats, chain);
+        CHECK(writtenZeroCap == 3u);
+        CHECK(stats.visibleClusters == 3u);
+
+        // 退化球：半径 0 的簇仍参与点测试（可见）
+        NaniteClusterSphere flat[1] = {};
+        flat[0].center[0] = 0.0f;
+        flat[0].radius = 0.0f;
+        NaniteBVHNode leaf = MakeLeafNode(0.0f, 0.0f, 0.0f, 0.0f, 0u, 1u);
+        NaniteClusterBVHView flatView;
+        flatView.nodes = &leaf;
+        flatView.nodeCount = 1u;
+        flatView.leafClusterIndices = leaves;
+        flatView.clusterSpheres = flat;
+        flatView.clusterCount = 1u;
+        const u32 maskOn[1] = { 1u };
+        NaniteCullChainDesc flatChain;
+        flatChain.visibleMask = maskOn;
+        CHECK(NaniteTraverseClusterBVHCPU(frustum, flatView, &instance, 1u, 4u,
+                                         out.data(), (u32)out.size(), &stats, flatChain) == 1u);
+    }
+}
+
+// ── 25g. 三阶段参数与元数据的布局契约（GPU 侧结构体逐字段对应）──
+TEST_CASE("NaniteCull3: 参数与元数据的布局契约") {
+    CHECK(sizeof(NaniteClusterLODInfo) == 16u);
+    CHECK(offsetof(NaniteClusterLODInfo, ownError) == 0u);
+    CHECK(offsetof(NaniteClusterLODInfo, parentError) == 4u);
+    CHECK(offsetof(NaniteClusterLODInfo, lodLevel) == 8u);
+    CHECK(offsetof(NaniteClusterLODInfo, flags) == 12u);
+    CHECK(kNaniteLODInfoFlagRoot == 1u);
+
+    // 直方图必须容得下任务 9 的 6 级 LOD 链
+    CHECK(kNaniteLODHistogramLevels >= 6u);
+    CHECK(kNaniteLODThresholdPixels == 1.0f);   // 设计 §5.1 的阈值（未改）
+    CHECK(kNaniteLODMinDistance > 0.0f);
+    CHECK(kNaniteMaxHiZMips == 8u);             // 与 GPUCulling::kHiZMips 一致（镜像常量）
+
+    // 读数结构体的新增字段默认全 0（不传 chain 时天然保持 0）
+    const NaniteClusterBVHTraversalStats stats{};
+    CHECK(stats.frustumPassClusters == 0u);
+    CHECK(stats.occludedClusters == 0u);
+    CHECK(stats.lodRejectedClusters == 0u);
+    for (u32 i = 0u; i < kNaniteLODHistogramLevels; ++i) CHECK(stats.lodHistogram[i] == 0u);
+
+    // 可选输入结构体的默认值 = 任务 14 的原口径（不过滤实例、不做 Hi-Z、不做 LOD）
+    const NaniteCullChainDesc chain{};
+    CHECK(chain.visibleMask == nullptr);
+    CHECK(chain.lodInfo == nullptr);
+    CHECK(chain.focalPixels == 0.0f);
+    CHECK(chain.hizMipCount == 0u);
+    CHECK_FALSE(chain.lodEnabled());
+    CHECK(chain.lodThresholdPixels == kNaniteLODThresholdPixels);
+    CHECK(std::is_trivially_copyable<NaniteClusterLODInfo>::value);
+    CHECK(std::is_trivially_copyable<NaniteCullChainDesc>::value);
+}
+

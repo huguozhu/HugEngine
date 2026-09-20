@@ -63,6 +63,22 @@ struct NaniteSettings {
     /// 模块把它钳制到 `kNaniteMaxTestInstances`（256）。
     /// 【0 的含义】不生成任何合成实例 ⇒ 该 pass 派发 0 个线程、可见数恒 0（仍照常注册）。
     u32 instanceTestCount = kNaniteDefaultTestInstances;
+
+    /// 【§14.8 任务 15】Phase 2 的 **Hi-Z 遮挡剔除开关**（默认 **false**）。
+    ///
+    /// 【语义】开启后，簇球（世界 AABB）投影到屏幕空间后与既有 Hi-Z 金字塔做遮挡测试
+    ///   （4 角最小深度比较，层数下限 1：金字塔 mip0 从未被写入）；关闭时**退化为"不遮挡"**
+    ///   （判据的第一句就返回 false，`hizMipCount = 0`），没有别的副作用。
+    /// 【为什么默认关闭（而不是默认打开）】默认档要保持"与 CPU 参考剔除**逐簇一致**"这条硬验收。
+    ///   CPU 拿不到 Hi-Z 金字塔的逐 texel 内容（RHI 的 `CopyTextureToBuffer` 只读 mip0，而
+    ///   `BuildHiZPyramid` 从不写 mip0）⇒ 遮挡剔除**不可能**在 CPU 侧复现；打开时 GPU 与 CPU 的
+    ///   差异是"可解释的"（`cull3` 行给出差集大小与选层分布），但不是"逐簇一致"。因此：
+    ///     默认 false ⇒ mismatch=0（硬验收）；`nanite_hiz=1` ⇒ 差异可解释（软验收，单独统计）。
+    /// 【依赖】Hi-Z 金字塔由既有 `GPUCulling::BuildHiZPyramid` 构建（`DeferredPipeline` 以回调
+    ///   形式传给模块）。若该管线未启用（`gpu_cull=0`）或纹理不可用 ⇒ 本开关**自动退化**为关闭
+    ///   （`cull3` 行里的 `hiz=off` + `hiz_req=1 hiz_mips=0` 就是这个情形）。
+    /// 配置层 = cfg 键 `nanite_hiz`（默认 0），样例负责解析/序列化。
+    bool hiz = false;
 };
 
 } // namespace he::render

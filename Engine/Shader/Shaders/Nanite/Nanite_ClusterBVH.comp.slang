@@ -1,48 +1,69 @@
 // ============================================================
-// Nanite_ClusterBVH.comp.slang — per-instance cluster BVH 的显式栈深度优先遍历
-//   （§14.8 任务 14；设计 §5.1 Phase 2 的 "BVH traverse (cluster tree, depth-first)"）
+// Nanite_ClusterBVH.comp.slang — per-instance cluster BVH 的三阶段簇剔除
+//   （§14.8 任务 14 的 DFS 遍历 + 任务 15 的 Phase 2 Hi-Z 遮挡 / Phase 3 LOD 选择）
 //
-// 【目标】逐实例遍历同一棵簇 BVH（由 CPU 构建并上传），用世界空间视锥对**节点球**与**簇球**
-//   做保守剔除，把被接受的簇压缩写入可见簇列表（元素是 (instance, cluster) 二元组），同时
-//   累加两个计数：可见簇数、**已访问节点数**。验收 = "BVH 节点数与遍历访问数可复现"。
+// 【与设计 §5.1 的对应】
+//   Phase 2 "Persistent Cluster Culling (per-instance)":
+//       For each visible instance: BVH traverse (cluster tree, depth-first)
+//       → Frustum cull cluster bounds → Hi-Z occlusion cull (sample Hi-Z pyramid)
+//   Phase 3 "LOD Selection (per surviving cluster)":
+//       projectedError = cluster.maxError / distance → selectLevel(…, threshold = 1 pixel)
+//
+// 【本文件在任务 15 里的改动（三处，逐条）】
+//   ① 实例域改为 **Phase 1 的可见实例**：任务 13 的 `Nanite_InstanceCull` 每帧写一张
+//      `u_VisibleMask`（按实例下标寻址），本 pass 只处理 `mask[i] != 0` 的实例。
+//      【为什么用掩码而不是"可见列表"】掩码与实例域 `[0, min(instanceCount, maxInstances))`
+//      天然对齐 ⇒ 钳制后的子集**确定**；压缩列表的槽位顺序由 GPU 原子决定，"取前 k 个"
+//      在可见数超过上限时是不确定的子集，会让 CPU/GPU 逐项比较失去意义。
+//   ② Phase 2 后半：簇球通过视锥后做 Hi-Z 遮挡测试（`hizOccluded`，4 角最小深度比较）。
+//   ③ Phase 3：DAG 割（`lodSelected`，用 `u_LodInfo` 的 own/parent 误差 + 相机距离 + 像素焦距）。
+//   另加三组读数（`u_Stats`）：通过视锥的簇数、被遮挡的簇数、**选中级别分布**直方图 + 访问节点数。
 //
 // 【与 C++ 侧的布局契约】本文件的每个结构体都必须与
-//   `Engine/Render/Nanite/NaniteTypes.h` 的 "§14.8 任务 14" 小节逐字段一致（那边用
+//   `Engine/Render/Nanite/NaniteTypes.h` 的 "§14.8 任务 14/15" 小节逐字段一致（那边用
 //   sizeof + offsetof 的 static_assert 钉住）：
 //     · `BVHNode`        —— 32B：float4 centerRadius + uint4 link(left,right,count,flags)
 //     · `ClusterSphere`  —— 16B：float4(xyz = 网格空间球心，w = 半径)
 //     · `ClusterRef`     —— 8B：(instance, cluster)
-//     · `InstanceObject` —— GPUSceneObject（128B）契约的镜像；真身在
-//       `Engine/Render/Pipeline/GPUScene.h:26-40`，`NaniteCull.cpp` 另有逐字段交叉 static_assert。
-//       本文件**只用**它的平移列（localToWorld 的第 4 列）与 `indexCount`。
-//     · push constant    —— 6 个世界空间视锥平面 + 4 个 u32（112B）。
+//     · `LODInfo`        —— 16B：ownError / parentError / lodLevel / flags(bit0 = 根)
+//     · `InstanceObject` —— GPUSceneObject（128B）契约的镜像（只用 `ltw3.xyz` 与 `indexCount`）
+//     · `CullChainParams`—— 112B：4 个 vp 行 + cameraPos + lodParams + misc
+//     · `u_Stats`        —— 扁平 u32：0=通过视锥、1=遮挡、2..9=级直方图、10=访问节点数
+//     · push constant    —— 6 个世界空间视锥平面 + 4 个 u32（112B，与任务 14 完全一致）
 //
-// 【为什么把 localToWorld 拆成 4 个 float4 而不是写 `float4x4`】Slang 的矩阵布局约定
-//   （行/列主序）与"内存里的 16 个 float"之间的对应关系依赖编译选项，读 `m[3]` 时容易
-//   在两种约定下取到不同的槽位。拆成 `ltw0..ltw3` 后 `ltw3.xyz` **无条件**是内存里的
-//   第 12/13/14 个 float（= 列主序矩阵的平移列，与 C++ 侧 `localToWorld[12..14]` 同一份比特），
-//   风险归零。CPU 与 GPU 读的是同一份比特，因此不存在"两处各推一次"的末位差异。
+// 【为什么把 localToWorld 拆成 4 个 float4】Slang 的矩阵布局约定（行/列主序）与"内存里的
+//   16 个 float"之间的对应关系依赖编译选项 ⇒ 拆成 `ltw0..ltw3` 后 `ltw3.xyz` **无条件**是
+//   内存里的第 12/13/14 个 float（列主序矩阵的平移列，与 C++ 侧 `localToWorld[12..14]` 同一份
+//   比特），风险归零。**任务 15 的 view-proj 沿用同一手法**（4 个 `vpRow` + 显式点积）：
+//   `vpRow{r}` = 列主序 glm 矩阵的 **row r**（即 `viewProj[c][r]`），CPU 侧按同一口径填。
 //
-// 【判据（必须与 CPU 参考逐字一致）】平面 `planes[i] = (n.xyz, d)`，`dot(n, p) + d >= 0` 在内侧；
-//   任一平面满足 `dot(n, c) + d < -radius` ⇒ 不可见（**不加 epsilon**）。顺序
-//   `[左, 右, 下, 上, 近, 远]`，法线已归一化（CPU 侧提取函数负责）。
-//
-// 【深度优先 + 显式栈】shader 没有递归，故用**固定大小的本地数组**当栈：先压右孩子、再压左
-//   孩子 ⇒ 下一次弹出的是左孩子（左子树先访问），与 `NaniteTraverseClusterBVHCPU` 的顺序一致。
-//   栈容量 32 取自 C++ 侧 `kNaniteBVHMaxStackDepth`（= 深度上限 24 + 8 余量）；构建器保证树高
-//   ≤ 24 ⇒ 栈里同时存在的条目数（每层至多一个"待访问的右兄弟"）不会超过 24。真溢出不静默：
-//   构建端把"深度上限"当硬不变量，单测直接断言。
-//
-// 【可见列表的顺序】用"原子取槽位再写"压缩 ⇒ 槽位分配顺序**不定**（GPU 线程调度相关）。
-//   CPU 参考按实例升序 + DFS 顺序紧凑写入；验收读回会把 GPU 列表排序后再逐项比较
-//   （集合等价，见 NaniteRenderer.cpp），与任务 13 同一口径。
+// 【判据（必须与 CPU 参考逐字一致）】
+//   · 视锥：平面 `planes[i] = (n.xyz, d)`，`dot(n, p) + d >= 0` 在内侧；任一平面满足
+//     `dot(n, c) + d < -radius` ⇒ 不可见（**不加 epsilon**）。顺序 `[左, 右, 下, 上, 近, 远]`。
+//   · LOD：`error × focal > threshold × distance` ⇒ "该误差在该距离下投影超过 threshold 像素"。
+//   · Hi-Z：世界球 → 屏幕 UV 包围盒 + 最近 ndc.z；完全在屏幕外 ⇒ 不剔除；按盒子的最长边像素
+//     选层（`ceil(log2(max(1, 最长边)))`，**下限钳到 1**：金字塔 mip0 从未被写入）；
+//     取 4 角的**最小深度**的最大值，`zNear > 该值` ⇒ 被遮挡。
 //
 // 【§14.3 依赖禁令】只依赖本模块自己的 POD，不引用 GI/Lumen/GPUCulling。
 // ============================================================
 
+// ── 描述符绑定（set=0；顺序与 `NaniteCull::Initialize` 的布局逐条对应）──
+//   0 = BVH 节点表（只读）
+//   1 = 叶子簇表（只读；叶子用 [link.x, link.x + link.z)）
+//   2 = 簇包围球表（只读，网格空间）
+//   3 = 实例表（128B 契约，只读）
+//   4 = 可见簇列表（读写；原子取槽位压缩写入）
+//   5 = 可见簇计数（读写；单个 uint，每帧由命令缓冲内的拷贝清 0）
+//   6 = 【任务 15】可见实例掩码（只读；Phase 1 的输出，按实例下标寻址）
+//   7 = 【任务 15】每簇 LOD 元数据（只读；own/parent 误差 + LOD 级 + 根标志）
+//   8 = 【任务 15】三阶段参数（只读；vp 的 4 行 + 相机 + LOD/Hi-Z 参数）
+//   9 = 【任务 15】三阶段读数（读写；每帧由命令缓冲内的拷贝清 0）
+//  10 = 【任务 15】Hi-Z 金字塔（R32_FLOAT，采样器点采样 + 层间线性；见下面的选层说明）
+
 // BVH 节点（32B）：与 NaniteBVHNode 逐字段一致
 //   link.x = 内部节点左孩子下标 / 叶子簇表首下标
-//   link.y = 内部节点右孩子下标 / 叶子为 kNaniteBVHNoChild
+//   link.y = 内部节点右孩子下标 / 叶子为 kNoChild
 //   link.z = 内部节点 2 / 叶子簇数（≥1）
 //   link.w = 位标志：bit0 = 1 表示叶子
 struct BVHNode {
@@ -59,6 +80,17 @@ struct ClusterSphere {
 struct ClusterRef {
     uint instance;
     uint cluster;
+};
+
+// 【任务 15】每簇 LOD 元数据（16B；与 NaniteClusterLODInfo 逐字段一致）
+//   ownError    = 用本簇替代其孩子渲染的绝对误差（叶子 = 0）
+//   parentError = 用本簇的父簇替代本簇渲染的绝对误差（根 = 0，用 flags 区分）
+//   flags bit0  = 根簇（没有任何簇以它为子）
+struct LODInfo {
+    float ownError;
+    float parentError;
+    uint  lodLevel;
+    uint  flags;
 };
 
 // GPUSceneObject（128B）的 Slang 镜像：字段顺序/类型必须与 NaniteInstanceGpuObject 一致。
@@ -81,24 +113,33 @@ struct InstanceObject {
     uint   _pad;              // 偏移 124
 };
 
-// 显式栈容量：必须与 C++ 侧 kNaniteBVHMaxStackDepth（= 32）一致。
-static const uint kBVHMaxStackDepth = 32u;
+// 【任务 15】三阶段参数（112B；与 `NaniteCullChainParams` 逐字段一致）
+//   vpRow{r}  = 列主序 viewProj 的 row r（= viewProj[c][r]），显式点积 ⇒ 与 CPU 同式
+//   cameraPos = 相机世界坐标（xyz；w 未用）
+//   lodParams = (focalPixels, thresholdPixels, screenW, screenH)
+//   misc      = (hizMipCount, lodEnabled, 保留, 保留)
+struct CullChainParams {
+    float4 vpRow0;
+    float4 vpRow1;
+    float4 vpRow2;
+    float4 vpRow3;
+    float4 cameraPos;
+    float4 lodParams;
+    uint4  misc;
+};
 
-// 显式描述符绑定（set=0）：
-//   0 = BVH 节点表（只读）
-//   1 = 叶子簇表（只读；叶子用 [link.x, link.x + link.z)）
-//   2 = 簇包围球表（只读，网格空间）
-//   3 = 实例表（128B 契约，只读；本任务读平移列与 indexCount）
-//   4 = 可见簇列表（读写；原子取槽位压缩写入）
-//   5 = 可见簇计数（读写；单个 uint，每帧由命令缓冲内的拷贝清 0）
-//   6 = 已访问节点计数（读写；单个 uint，同上）
 [[vk::binding(0, 0)]] StructuredBuffer<BVHNode>       u_Nodes;
 [[vk::binding(1, 0)]] StructuredBuffer<uint>          u_LeafClusters;
 [[vk::binding(2, 0)]] StructuredBuffer<ClusterSphere> u_ClusterSpheres;
 [[vk::binding(3, 0)]] StructuredBuffer<InstanceObject> u_Instances;
 [[vk::binding(4, 0)]] RWStructuredBuffer<ClusterRef>  u_VisibleClusters;
 [[vk::binding(5, 0)]] RWStructuredBuffer<uint>        u_VisibleClusterCount;
-[[vk::binding(6, 0)]] RWStructuredBuffer<uint>        u_VisitedNodeCount;
+[[vk::binding(6, 0)]] StructuredBuffer<uint>          u_VisibleMask;
+[[vk::binding(7, 0)]] StructuredBuffer<LODInfo>       u_LodInfo;
+[[vk::binding(8, 0)]] StructuredBuffer<CullChainParams> u_Params;
+[[vk::binding(9, 0)]] RWStructuredBuffer<uint>        u_Stats;
+[[vk::binding(10, 0)]] Texture2D<float>               u_HiZ;
+[[vk::binding(10, 0)]] SamplerState                   u_HiZSampler;
 
 [[vk::push_constant]] cbuffer NaniteClusterBVHParams {
     float4 planes[6];         // 偏移 0 ：世界空间视锥六平面（[左,右,下,上,近,远]，n 已归一化）
@@ -108,6 +149,19 @@ static const uint kBVHMaxStackDepth = 32u;
     uint   visibleCapacity;   // 偏移 108：可见簇列表容量（超出容量的槽位不写；计数照常累加，
                               //             读回时按容量截断 —— 与 CPU 参考的写入口径一致）
 };
+
+// 显式栈容量：必须与 C++ 侧 kNaniteBVHMaxStackDepth（= 32）一致。
+static const uint kBVHMaxStackDepth = 32u;
+
+// ── u_Stats 的槽位约定（与 C++ 侧 `NaniteCullStats` 的 static_assert 逐条对应）──
+static const uint kStatFrustumPass = 0u;    // Phase 2 前半：通过簇球视锥测试的引用数
+static const uint kStatOccluded    = 1u;    // Phase 2 后半：被 Hi-Z 判为遮挡的引用数
+static const uint kStatLodBase     = 2u;    // Phase 3：直方图起点（8 个槽：级 0..7）
+static const uint kStatVisited     = 10u;   // 本 pass 访问过的 BVH 节点数（全部实例求和）
+
+// Hi-Z 的最小可采样层：**1**（金字塔贴图的 mip0 从未被写入 —— `BuildHiZPyramid` 从深度输入
+//   直接下采样进 mip1；既有 `GPUCull_TwoPhase.comp.slang:34` 把下限钳到 0 是一处既有缺陷）。
+static const float kHiZMinMip = 1.0f;
 
 // 球-视锥可见性：任一面外侧即不可见（与 NaniteSphereVisibleInFrustum 同判据、同比较符）
 bool sphereVisibleInFrustum(float3 center, float radius) {
@@ -120,6 +174,73 @@ bool sphereVisibleInFrustum(float3 center, float radius) {
     return true;
 }
 
+// 【任务 15】Phase 2 后半：Hi-Z 遮挡测试
+//   ① 世界 AABB 的 8 个角 → 屏幕 UV 包围盒 + 最近 ndc.z；
+//   ② 任一角跨越相机平面（clip.w <= 0）或完全在屏幕外 ⇒ **保守不剔除**；
+//   ③ 选层：`ceil(log2(max(1, 盒子最长边像素)))` 钳到 [1, mipCount-1]；
+//   ④ 4 角的**最小深度**取最大；`zNear > 该值` ⇒ 被遮挡。
+// 【为什么 4 角而不是整盒】层 L 的每个 texel 覆盖 2^L×2^L 足迹；取 4 个角的采样 ⇒ 覆盖盒子的
+//   4 个象限，对"盒子不比 texel 足迹大"的情形不会漏掉遮挡物（保守方向）。
+bool hizOccluded(float3 center, float radius) {
+    CullChainParams p = u_Params[0];
+    uint mipCount = p.misc.x;
+    // mipCount < 2 ⇒ 没有可采样的层（mip0 未写入）⇒ 关闭遮挡测试（= cfg 键 nanite_hiz=0 的退化口径）
+    if (mipCount < 2u) return false;
+
+    float2 rMin = float2(1.0e30f, 1.0e30f);
+    float2 rMax = float2(-1.0e30f, -1.0e30f);
+    float zNear = 1.0e30f;
+
+    for (uint c = 0u; c < 8u; ++c) {
+        float3 corner = center + radius * float3((c & 1u) != 0u ? 1.0f : -1.0f,
+                                                 (c & 2u) != 0u ? 1.0f : -1.0f,
+                                                 (c & 4u) != 0u ? 1.0f : -1.0f);
+        float4 hp = float4(corner, 1.0f);
+        float4 clip = float4(dot(p.vpRow0, hp), dot(p.vpRow1, hp),
+                             dot(p.vpRow2, hp), dot(p.vpRow3, hp));
+        if (!(clip.w > 1.0e-6f)) return false;   // 跨越相机平面 ⇒ 保守不剔除
+
+        float3 ndc = clip.xyz / clip.w;
+        if (ndc.x != ndc.x || ndc.y != ndc.y || ndc.z != ndc.z) return false;   // NaN 兜底
+        float2 s = ndc.xy * 0.5f + 0.5f;
+        rMin = min(rMin, s);
+        rMax = max(rMax, s);
+        zNear = min(zNear, ndc.z);
+    }
+
+    // 完全在屏幕外（与 [0,1]² 无交）⇒ Hi-Z 覆盖不到 ⇒ 保守不剔除
+    if (rMax.x < 0.0f || rMax.y < 0.0f || rMin.x > 1.0f || rMin.y > 1.0f) return false;
+    rMin = clamp(rMin, 0.0f, 1.0f);
+    rMax = clamp(rMax, 0.0f, 1.0f);
+
+    float2 sizePixels = (rMax - rMin) * p.lodParams.zw;   // zw = (screenW, screenH)
+    float largest = max(1.0f, max(sizePixels.x, sizePixels.y));
+    float mip = clamp(ceil(log2(largest)), kHiZMinMip, float(mipCount - 1u));
+
+    float d0 = u_HiZ.SampleLevel(u_HiZSampler, float2(rMin.x, rMin.y), mip);
+    float d1 = u_HiZ.SampleLevel(u_HiZSampler, float2(rMax.x, rMin.y), mip);
+    float d2 = u_HiZ.SampleLevel(u_HiZSampler, float2(rMin.x, rMax.y), mip);
+    float d3 = u_HiZ.SampleLevel(u_HiZSampler, float2(rMax.x, rMax.y), mip);
+    float deepest = max(max(d0, d1), max(d2, d3));
+    return zNear > deepest;
+}
+
+// 【任务 15】Phase 3：DAG 割（LOD 选择）
+//   ① `ownError × focal > threshold × distance` ⇒ 本簇还不够好（应交给更细的孩子）⇒ 不选；
+//   ② 父簇"够好"（`parentError × focal <= threshold × distance`）⇒ 父簇会被选中 ⇒ 本簇不选；
+//      根簇没有父簇 ⇒ ② 自动成立（用 flags 的根位，不能用 parentError == 0：根的它也是 0）。
+// 【与 C++ 侧】`NaniteLODClusterSelected` 是逐字同构的实现（单测直接覆盖它）。
+bool lodSelected(uint cluster, float3 worldCenter, float focalPixels, float thresholdPixels) {
+    LODInfo info = u_LodInfo[cluster];
+    float3 delta = worldCenter - u_Params[0].cameraPos.xyz;
+    float distance = length(delta);
+    if (!(distance > 1.0e-4f)) distance = 1.0e-4f;   // 与 kNaniteLODMinDistance 同一个常量
+
+    if (info.ownError * focalPixels > thresholdPixels * distance) return false;
+    if ((info.flags & 1u) != 0u) return true;        // 根簇
+    return info.parentError * focalPixels > thresholdPixels * distance;
+}
+
 [numthreads(64, 1, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
     if (id.x >= instanceCount) return;
@@ -128,10 +249,18 @@ void main(uint3 id : SV_DispatchThreadID) {
     InstanceObject instance = u_Instances[id.x];
     if (instance.indexCount == 0u) return;
 
-    // ② 实例变换的平移列（列主序的第 4 列）；本任务的合成实例是纯平移，半径不变
+    // ② 【任务 15】Phase 1 的可见实例掩码：不可见 ⇒ 本实例一个节点都不遍历
+    if (u_VisibleMask[id.x] == 0u) return;
+
+    CullChainParams params = u_Params[0];
+    float focalPixels     = params.lodParams.x;
+    float thresholdPixels = params.lodParams.y;
+    bool  lodEnabled      = (params.misc.y != 0u) && (focalPixels > 0.0f);
+
+    // ③ 实例变换的平移列（列主序的第 4 列）；本任务的合成实例是纯平移，半径不变
     float3 origin = instance.ltw3.xyz;
 
-    // ③ 每实例一次深度优先遍历（显式栈；先压右、再压左 ⇒ 左子树先访问）
+    // ④ 每实例一次深度优先遍历（显式栈；先压右、再压左 ⇒ 左子树先访问）
     uint visited = 0u;
     uint stack[kBVHMaxStackDepth];
     uint stackSize = 0u;
@@ -148,16 +277,34 @@ void main(uint3 id : SV_DispatchThreadID) {
         }
 
         if ((node.link.w & 1u) != 0u) {
-            // 叶子：对 [link.x, link.x + link.z) 的每个簇做球测试
+            // 叶子：对 [link.x, link.x + link.z) 的每个簇做三阶段判据
             uint first = node.link.x;
             uint count = node.link.z;
             for (uint k = 0u; k < count; ++k) {
                 uint cluster = u_LeafClusters[first + k];
                 if (cluster >= clusterCount) continue;   // 防御：越界簇下标不读球表
                 ClusterSphere sphere = u_ClusterSpheres[cluster];
-                if (!sphereVisibleInFrustum(origin + sphere.centerRadius.xyz, sphere.centerRadius.w)) {
+                float3 worldCenter = origin + sphere.centerRadius.xyz;
+                if (!sphereVisibleInFrustum(worldCenter, sphere.centerRadius.w)) {
                     continue;
                 }
+                // ── Phase 2 前半：通过视锥（计数位置与 CPU 参考的 ++ 同位置）──
+                InterlockedAdd(u_Stats[kStatFrustumPass], 1u);
+
+                // ── Phase 2 后半：Hi-Z 遮挡（mipCount < 2 ⇒ 恒不遮挡）──
+                if (hizOccluded(worldCenter, sphere.centerRadius.w)) {
+                    InterlockedAdd(u_Stats[kStatOccluded], 1u);
+                    continue;
+                }
+
+                // ── Phase 3：DAG 割（LOD 选择；关闭时不筛任何簇）──
+                if (lodEnabled) {
+                    if (!lodSelected(cluster, worldCenter, focalPixels, thresholdPixels)) continue;
+                    LODInfo info = u_LodInfo[cluster];
+                    uint level = (info.lodLevel < 8u) ? info.lodLevel : 7u;
+                    InterlockedAdd(u_Stats[kStatLodBase + level], 1u);
+                }
+
                 // 原子取槽位：计数缓冲的最终值 = 被接受的簇引用总数（与 CPU 的 written 同义）
                 uint slot;
                 InterlockedAdd(u_VisibleClusterCount[0], 1u, slot);
@@ -178,7 +325,7 @@ void main(uint3 id : SV_DispatchThreadID) {
         }
     }
 
-    // ④ 把本线程（本实例）访问过的节点数一次性累加：整数加法可交换 ⇒ 与线程顺序无关，
+    // ⑤ 把本线程（本实例）访问过的节点数一次性累加：整数加法可交换 ⇒ 与线程顺序无关，
     //    同输入两次运行的读数逐位相同（这正是"遍历访问数可复现"的实现前提）。
-    InterlockedAdd(u_VisitedNodeCount[0], visited);
+    InterlockedAdd(u_Stats[kStatVisited], visited);
 }

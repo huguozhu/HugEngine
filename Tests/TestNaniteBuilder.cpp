@@ -2251,3 +2251,86 @@ TEST_CASE("NaniteBVH: DFS 遍历的访问数（全部在内/全部在外/部分�
     }
 }
 
+// ============================================================
+// 23. §14.8 任务 15：每簇 LOD 元数据的构建（own/parent 误差 + LOD 级 + 根标志）
+//
+// 【验收对应】任务 15 的 Phase 3（DAG 割）需要三个判据量：`ownError`（本簇替代其孩子的误差）、
+//   `parentError`（父簇替代本簇的误差）、"是不是根"。它们全部由本构建器从 `.nanite` 簇记录 +
+//   LOD 段推出 ⇒ 这里逐条钉住：级号来自 LOD 段、own 来自孩子的 `maxParentLODError`、
+//   parent 来自本簇的 `maxParentLODError`、根由"没有任何簇以它为子"判定（**不能**只看数值 0）、
+//   确定性（两次逐位一致）、非法输入（越界孩子 / 非单调 LOD 段）返回 false 且不改写出参。
+// ============================================================
+TEST_CASE("NaniteLOD: 每簇 LOD 元数据的构建（级/误差/根/确定性/非法输入）") {
+    // 三条出现记录：簇 0、1 属级 0（细），簇 2 属级 1（根，是 0/1 的父）
+    //   · 级 0 → 级 1 那次简化的绝对误差 = 12.5（记在级 0 的 maxParentLODError 上）
+    //   · 级 1 是根 ⇒ maxParentLODError = 0
+    std::vector<NaniteClusterRecord> clusters(3);
+    for (NaniteClusterRecord& record : clusters) record = NaniteClusterRecord{};
+    clusters[0].boundsCenterRadius[3] = 1.0f;
+    clusters[1].boundsCenterRadius[3] = 1.0f;
+    clusters[2].boundsCenterRadius[3] = 2.0f;
+    clusters[0].maxParentLODError = 12.5f;   // 级 0 ⇒ 切到父级（级 1）的误差
+    clusters[1].maxParentLODError = 12.5f;
+    clusters[2].maxParentLODError = 0.0f;    // 根
+    clusters[2].childClusterOffset = 0u;     // 根的孩子的扁平区间 [0, 2)
+    clusters[2].childCount         = 2u;
+    const u32 lodOffsets[2] = { 0u, 2u };    // 级 0 = [0,2)、级 1 = [2,3)
+
+    std::vector<NaniteClusterLODInfo> info;
+    REQUIRE(BuildNaniteClusterLODInfo(clusters, lodOffsets, info));
+    REQUIRE(info.size() == 3u);
+
+    CHECK(info[0].lodLevel == 0u);
+    CHECK(info[1].lodLevel == 0u);
+    CHECK(info[2].lodLevel == 1u);
+    // ownError：叶子（级 0）没有孩子 ⇒ 0；根（级 1）用本簇替代孩子 ⇒ 孩子的 maxParentLODError
+    CHECK(info[0].ownError == 0.0f);
+    CHECK(info[1].ownError == 0.0f);
+    CHECK(info[2].ownError == 12.5f);
+    // parentError：级 0 是 12.5（切到父级），根是 0
+    CHECK(info[0].parentError == 12.5f);
+    CHECK(info[2].parentError == 0.0f);
+    // 根标志只能靠"谁是谁的孩子"判定
+    CHECK((info[0].flags & kNaniteLODInfoFlagRoot) == 0u);
+    CHECK((info[1].flags & kNaniteLODInfoFlagRoot) == 0u);
+    CHECK((info[2].flags & kNaniteLODInfoFlagRoot) != 0u);
+
+    // ── 确定性：两次构建逐位一致 ──
+    std::vector<NaniteClusterLODInfo> again;
+    REQUIRE(BuildNaniteClusterLODInfo(clusters, lodOffsets, again));
+    REQUIRE(again.size() == info.size());
+    CHECK(std::memcmp(info.data(), again.data(),
+                      info.size() * sizeof(NaniteClusterLODInfo)) == 0);
+
+    // ── 空输入是合法输入（长度 0）──
+    {
+        std::vector<NaniteClusterLODInfo> empty;
+        CHECK(BuildNaniteClusterLODInfo({}, {}, empty));
+        CHECK(empty.empty());
+        // 簇表非空但 LOD 段为空 ⇒ 全部记为 0 级（退化为"只有一级"），仍成功
+        std::vector<NaniteClusterLODInfo> noLods;
+        CHECK(BuildNaniteClusterLODInfo(clusters, {}, noLods));
+        REQUIRE(noLods.size() == 3u);
+        for (const NaniteClusterLODInfo& entry : noLods) CHECK(entry.lodLevel == 0u);
+    }
+
+    // ── 非法输入：孩子区间越界 ⇒ 失败且不改写出参 ──
+    {
+        std::vector<NaniteClusterRecord> bad = clusters;
+        bad[2].childClusterOffset = 2u;
+        bad[2].childCount         = 5u;   // 2 + 5 > 3
+        std::vector<NaniteClusterLODInfo> untouched(7u);
+        CHECK_FALSE(BuildNaniteClusterLODInfo(bad, lodOffsets, untouched));
+        CHECK(untouched.size() == 7u);    // 出参未被改动
+    }
+    // ── 非法输入：LOD 段非单调 / 越界 ⇒ 失败 ──
+    {
+        const u32 notMonotonic[3] = { 0u, 2u, 1u };
+        std::vector<NaniteClusterLODInfo> untouched;
+        CHECK_FALSE(BuildNaniteClusterLODInfo(clusters, notMonotonic, untouched));
+        const u32 outOfRange[2] = { 0u, 99u };
+        std::vector<NaniteClusterLODInfo> untouched2;
+        CHECK_FALSE(BuildNaniteClusterLODInfo(clusters, outOfRange, untouched2));
+    }
+}
+

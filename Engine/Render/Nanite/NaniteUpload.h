@@ -548,6 +548,35 @@ struct NaniteClusterBVH {
                                          NaniteClusterBVH&                    outResult);
 
 // ============================================================
+// §14.8 任务 15：每簇 LOD 元数据（Phase 3 的 DAG 割判据的输入）
+//
+// 【为什么要这张表（而不是让 shader 现读 64B 簇记录）】
+//   · Phase 3 需要两个数：`ownError`（用本簇替代其孩子渲染的误差 = 孩子的 `maxParentLODError`）
+//     与 `parentError`（= 本簇自己的 `maxParentLODError`）。前者要么在 shader 里按
+//     `childClusterOffset` 再读一条 64B 记录（访存放大 4 倍、还多一次分支），要么在这里预计算。
+//   · 另外还需要 `lodLevel`（"选中级别分布"直方图）与"是不是根簇"（**必须显式**：根的
+//     `parentError` 也是 0，只靠数值判断会把根永远筛掉 ⇒ 一个簇都选不出来，见
+//     `NaniteClusterLODInfo` 的注释）。这两件都来自本任务的元数据表。
+//   · 预计算还让 **CPU 参考与 GPU 读同一份比特**（任务 13/14 一以贯之的口径）。
+//
+// 【LOD 级从哪来】用 `.nanite` 的 LOD 段 `lodOffsets`（任务 10 定义为"该级第一个出现簇的下标"，
+//   §14.20③ 明确写了"任务 15 可直接用"）：簇表按级升序排列 ⇒ `lodLevel(i)` = 满足
+//   `lodOffsets[L] <= i` 的**最大** L。空 `lodOffsets` ⇒ 全部记为 0 级（退化为"只有一级"）。
+//
+// 【根簇的判定】扫描全部 `childClusterOffset/childCount`，被任何簇引为孩子的簇**不是**根；
+//   其余都是根（DAG 里每个非根簇恰有一个父，任务 9 保证）。扫描与顺序无关 ⇒ 确定性。
+//
+// 【确定性】纯函数、无随机、无并行；同一输入两次调用逐位一致（单测直接比字节）。
+// 【失败】簇记录与元数据长度不一致、`childClusterOffset + childCount` 越界、`lodOffsets` 非单调
+//   ⇒ 返回 false 且**不改写出参**。
+// ============================================================
+
+/// 由簇记录 + LOD 段构建每簇 LOD 元数据（输出长度恒 == `clusters.size()`）
+[[nodiscard]] bool BuildNaniteClusterLODInfo(std::span<const NaniteClusterRecord> clusters,
+                                             std::span<const u32>                 lodOffsets,
+                                             std::vector<NaniteClusterLODInfo>&   outResult);
+
+// ============================================================
 // 上传类（任务 1 骨架；任务 12 的 GPU 侧落在 `NaniteScene`）
 //
 // 任务 8/9/10/12 与它的关系：`BuildNaniteClusters()` / `BuildNaniteClusterDAG()` /

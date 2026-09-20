@@ -184,6 +184,9 @@ if(SLANGC)
         # Nanite（虚拟几何模块）——§14.8 任务 14：per-instance cluster BVH 的
         # 显式栈深度优先遍历（视锥 → 可见簇列表 + 可见簇计数 + 已访问节点计数）
         "${SHADER_DIR}/Nanite/Nanite_ClusterBVH.comp.slang"
+        # Nanite（虚拟几何模块）——§14.8 任务 15：模块自持的 Hi-Z 金字塔下采样
+        # （与 Culling/HiZDownsample.comp.slang 同一"2×2 取最小"口径；为什么另起一份见文件头注释）
+        "${SHADER_DIR}/Nanite/Nanite_HiZDownsample.comp.slang"
     )
     # Ray Tracing 着色器（.rgen / .rmiss / .rchit / .rahit / .rcall）
     # 命名约定: EffectName.rgen.slang (RayGen), EffectName.rmiss.slang (Miss),

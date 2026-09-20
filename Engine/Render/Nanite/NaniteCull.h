@@ -39,14 +39,33 @@
 //   两个计数**每帧在命令缓冲内用 4B 拷贝清 0**（照任务 13 修法，不用主机写：见
 //   `RecordInstanceCullPass` 里那段负向验证）；可见簇列表**不逐帧重置**，理由与任务 13 相同。
 //
-//   【Phase 1 → Phase 2 的接线为什么留到任务 15（如实说明）】Phase 2 的形式是"对每个**可见**实例
-//   遍历 BVH"，但 `Nanite_InstanceCull` 与本 pass 在帧图里都**不声明任何帧图资源**，
-//   `RenderGraph::TopologicalSort` 对 inDegree=0 的 pass 按 LIFO 处理 ⇒ **帧图无法表达**
-//   "本 pass 必须排在实例剔除之后"这条顺序（同 Task 3 的假簇链）。本任务因此把 Phase 2 的
-//   实例域定义为"**全部非空实例**"（`indexCount != 0`，与任务 13 的跳过规则同一个判据），
-//   这是一个**自洽、确定、CPU/GPU 同口径**的域。真正的三阶段接线（Phase 1 可见列表 → Phase 2
-//   → Hi-Z → Phase 3 LOD 选择）正是 §14.8 任务 15 的正文，届时两个 pass 必须合并进同一条链
-//   （或让实例剔除把结果落到帧图资源上）—— 已写进任务 15 的记录项。
+//   【Phase 1 → Phase 2 的接线（任务 15 已落地；任务 14 的缺口在此关闭）】
+//   Phase 1（`Nanite_InstanceCull`）每帧写两张东西：可见实例**压缩列表**+计数（任务 13 的验收
+//   读数）与**可见实例掩码**（`mask[i] = 1/0`，按实例下标寻址）。Phase 2（本类的 BVH 遍历）只处理
+//   `mask[i] != 0` 的实例。
+//   【为什么用掩码而不是直接消费压缩列表】掩码与遍历的实例域 `[0, min(实例数, 64))` 天然对齐
+//   ⇒ 钳制后的子集是**确定的**；压缩列表的槽位顺序由 GPU 原子决定，"取前 64 个"在可见数超过
+//   上限时是一个**不确定**的子集，会让 CPU/GPU 的逐项比较失去意义。
+//   【顺序怎么保证（**不靠注册顺序**）】两个派发被录制在**同一个帧图 pass** 体内
+//   （`RecordCullChainPass`：Phase 1 → 屏障 → Hi-Z 构建 → Phase 2/3），顺序由命令缓冲里的
+//   `PipelineBarrier` 显式给出；帧图无法表达这条顺序（两个 pass 都不声明帧图资源 ⇒
+//   `RenderGraph::TopologicalSort` 对 inDegree=0 的 pass 按 LIFO 处理，注册顺序 ≠ 执行顺序）。
+//   另外下游只读 `[0, 计数)` / 掩码，属于"自洽计数"的第二重保险：任何时刻读到的
+//   (计数, 列表) 对都来自同一次派发（上一帧完整 / 清零后的 0 / 本帧完整），不会撕裂。
+//
+// 【§14.8 任务 15：Phase 2 的 Hi-Z 遮挡 + Phase 3 的 LOD 选择】本类再新增四个自持缓冲：
+//     · 可见实例掩码    —— u32/实例（Phase 1 每线程写 0/1，**无需清零**：每个实例都被显式写过）
+//     · 每簇 LOD 元数据 —— `NaniteClusterLODInfo`（16B/条；CPU 构建器产出，一次性上传）
+//     · 三阶段参数      —— `NaniteCullChainParams`（112B；vp 的 4 行 + 相机 + LOD/Hi-Z 参数）
+//     · 三阶段读数      —— 扁平 u32（通过视锥/遮挡/级直方图/访问节点数），每帧命令缓冲内清零
+//   Hi-Z 金字塔**复用既有资源与口径**（`GPUCulling` 的那张 `R32_FLOAT` / ≤8 层纹理 + 与其
+//   `HiZDownsample.comp.slang` 逐字相同的"2×2 取最小深度"公式），但**构建由本类自己做**
+//   （`BuildHiZPyramid`，逐目标 mip 一个专属描述符集）—— 既有 `GPUCulling::BuildHiZPyramid`
+//   在本引擎里构建不出正确金字塔（逐 mip 更新同一个描述符集 vs GPU 执行期读描述符），
+//   完整证据与上游修法见 `NaniteRenderer.h` 的 `NaniteHiZSource` 注释。
+//   【金字塔的三条约定（核实自既有实现，见 `NaniteTypes.h` 的任务 15 小节）】
+//     ① 格式 `R32_FLOAT`、最多 8 层；② 层 L 存 2^L×2^L 足迹的**最小深度**（近 = 小）；
+//     ③ **mip0 从未被写入** ⇒ 采样层下限钳到 1（`kNaniteHiZMinMip`）。
 // ============================================================
 
 #include "Nanite/NaniteTypes.h"
@@ -54,8 +73,8 @@
 #include "RHI/RHI.h"
 #include "Math/Math.h"   // 【任务 13】float3 / float4x4（相机视锥与合成实例网格的输入类型）
 
-#include <memory>
-#include <vector>
+#include <functional>   // 【任务 15】`NaniteRenderer` 的 Hi-Z 源回调（纹理/深度）经这里传递
+#include <memory>#include <vector>
 #include <span>   // 【任务 14】SetClusterBVH 的簇记录视图
 
 namespace he::render {
@@ -104,6 +123,80 @@ static_assert(offsetof(NaniteClusterBVHParams, instanceCount) == 96,
 static_assert(offsetof(NaniteClusterBVHParams, visibleCapacity) == 108,
               "visibleCapacity 必须在偏移 108");
 
+/// 【§14.8 任务 15】三阶段剔除的参数缓冲（112B；GPU 侧是 `Nanite_ClusterBVH.comp.slang` 的
+/// `CullChainParams`，逐字段一致）
+///
+/// 【为什么单独一个 SSBO 而不是塞进 push constant】push constant 限 128B，而视锥六平面已经占了
+///   96B（它们是逐节点测试最热的读，放 push constant 最划算）。这里再加 112B 会超限 ⇒ 把
+///   "每帧只读一次"的参数（vp 的 4 行、相机、LOD/Hi-Z 标量）放进一个小 SSBO。
+/// 【为什么把 viewProj 拆成 4 个"行"】与任务 14 拆 `localToWorld` 同一个理由：Slang 的
+///   `float4x4` 行/列主序依赖编译选项，拆成 4 个 float4 + 显式点积后，CPU 与 GPU 乘的表达式同一。
+///   本结构里 `vpRows[r*4+c]` 是**行优先**存储（row r），Slang 侧对应 `vpRow0..vpRow3`。
+struct alignas(16) NaniteCullChainParams {
+    float vpRows[16];     // 偏移 0  ：view-proj 的 4 个行（row 优先；`viewProj[c][r]`）
+    float cameraPos[3];   // 偏移 64 ：相机世界坐标（LOD 判据的距离基准）
+    float _pad0;          // 偏移 76
+    float focalPixels;    // 偏移 80 ：像素焦距（0 ⇒ 关闭 LOD 选择）
+    float lodThreshold;   // 偏移 84 ：LOD 阈值（像素；默认 1.0）
+    float screenW;        // 偏移 88 ：屏幕宽（Hi-Z 选层的像素换算）
+    float screenH;        // 偏移 92 ：屏幕高
+    u32   hizMipCount;    // 偏移 96 ：Hi-Z 金字塔层数（< 2 ⇒ 关闭遮挡测试）
+    u32   lodEnabled;     // 偏移 100：1 = 打开 LOD 选择（与 focalPixels > 0 同时成立才算）
+    u32   _pad1;          // 偏移 104
+    u32   _pad2;          // 偏移 108
+};
+static_assert(sizeof(NaniteCullChainParams) == 112,
+              "NaniteCullChainParams 必须与 Slang 结构体一致（4×float4 + float4 + float4 + uint4）");
+static_assert(offsetof(NaniteCullChainParams, vpRows)      == 0,   "vpRows 必须在偏移 0");
+static_assert(offsetof(NaniteCullChainParams, cameraPos)   == 64,  "cameraPos 必须在偏移 64");
+static_assert(offsetof(NaniteCullChainParams, focalPixels) == 80,  "focalPixels 必须在偏移 80");
+static_assert(offsetof(NaniteCullChainParams, screenW)     == 88,  "screenW 必须在偏移 88");
+static_assert(offsetof(NaniteCullChainParams, hizMipCount) == 96,  "hizMipCount 必须在偏移 96");
+static_assert(offsetof(NaniteCullChainParams, lodEnabled)  == 100, "lodEnabled 必须在偏移 100");
+
+/// 【§14.8 任务 15】三阶段读数的 GPU 缓冲布局（扁平 u32；与 shader 的 `u_Stats` 槽位一一对应）
+///
+/// ```text
+/// [0]  通过视锥的簇引用数（Phase 2 前半）
+/// [1]  被 Hi-Z 判为遮挡的簇引用数（Phase 2 后半）
+/// [2..9] "选中级别分布"直方图：lodHistogram[L] = 被选中的 L 级簇引用数（L = 0..7）
+/// [10] 访问过的 BVH 节点数（全部实例求和）
+/// [11..15] 保留（写 0；缓冲按 16 个 u32 分配，便于一次对齐的拷贝清零）
+/// ```
+///
+/// 【为什么平坦 u32 而不是结构体】std430 下"结构体里的 u32 数组"步长细节依赖编译器，
+///   平坦数组 + 常量下标没有任何布局歧义（任务 14 的 `uint4 link` 已经踩过这一类坑）。
+inline constexpr u32 kNaniteCullStatFrustumPass = 0u;
+inline constexpr u32 kNaniteCullStatOccluded    = 1u;
+inline constexpr u32 kNaniteCullStatLodBase     = 2u;   ///< 直方图起点（8 个槽）
+inline constexpr u32 kNaniteCullStatVisited     = 10u;  ///< 访问节点数
+inline constexpr u32 kNaniteCullStatsU32        = 11u;  ///< 实际使用的槽数
+inline constexpr u32 kNaniteCullStatsCapacity   = 16u;  ///< 缓冲容量（16B 对齐，一次拷贝清零）
+inline constexpr u64 kNaniteCullStatsBytes      = sizeof(u32) * kNaniteCullStatsCapacity;
+static_assert(kNaniteCullStatsU32 <= kNaniteCullStatsCapacity, "读数槽位不得超出缓冲容量");
+
+/// 【§14.8 任务 15】模块自持的 Hi-Z 金字塔构建所需的**目标层存储视图**数量（= 金字塔最大层数）
+///   —— 只写 mip1..mipCount-1，故视图也只按这些层建。
+inline constexpr u32 kNaniteHiZBuildMaxViews = kNaniteMaxHiZMips;
+
+/// 【§14.8 任务 15】Hi-Z 下采样（`Nanite_HiZDownsample.comp.slang`）的 push constant（24B）
+///
+/// 【布局与既有 `HiZDownsample.comp.slang` 的 `Params` 同形】`uint2 srcSize; uint2 dstSize;
+///   uint srcMip; uint _pad;` —— 源/目标尺寸都是**像素**，`srcMip == 0` 表示源是本帧深度纹理
+///   （用采样器按目标纹素中心取 2×2），`srcMip > 0` 表示源是金字塔的该层（存储图像显式取 2×2）。
+struct alignas(4) NaniteHiZDownsampleParams {
+    u32 srcW = 0u;     ///< 偏移 0 ：源级宽（像素）
+    u32 srcH = 0u;     ///< 偏移 4 ：源级高（像素）
+    u32 dstW = 0u;     ///< 偏移 8 ：目标级宽（像素）
+    u32 dstH = 0u;     ///< 偏移 12：目标级高（像素）
+    u32 srcMip = 0u;   ///< 偏移 16：源层号（0 = 深度纹理）
+    u32 _pad = 0u;     ///< 偏移 20：填充到 24B
+};
+static_assert(sizeof(NaniteHiZDownsampleParams) == 24,
+              "Hi-Z 下采样的 push constant 必须与 Slang 侧一致（24B）");
+static_assert(offsetof(NaniteHiZDownsampleParams, dstW)   == 8,  "dstW 必须在偏移 8");
+static_assert(offsetof(NaniteHiZDownsampleParams, srcMip) == 16, "srcMip 必须在偏移 16");
+
 class NaniteCull {
 public:
     NaniteCull() = default;
@@ -149,8 +242,14 @@ public:
     ///   · 网格随相机走（用 `cameraPosition` 与 `viewProj` 反投影），因此相机移动时样本集合
     ///     依然覆盖"里/外/跨越"三类，不依赖硬编码的世界坐标。
     /// 【调用时机】`NaniteRenderer::AddPasses` 每帧调用一次（帧图构建期）。
-    void SetInstanceCullFrame(const float4x4& viewProj, const float3& cameraPosition,
-                              u32 testInstanceCount);
+    ///
+    /// 【§14.8 任务 15 新增的三个入参】`screenW/H` 与 `fovYDegrees` 用来算 Phase 3 的**像素焦距**
+    ///   （`focalPixels = 0.5 × screenH / tan(fovY/2)`，见 `NaniteClusterLODFocalPixels`）。
+    ///   取"相机 fov + 屏幕高度"而不是"反解 viewProj 的 m11"：view-proj 是 `P×V`，
+    ///   它的 (1,1) 元素被视图旋转污染，反解出来的焦距在相机有俯仰/偏航时是错的。
+    void SetCullChainFrame(const float4x4& viewProj, const float3& cameraPosition,
+                           u32 screenWidth, u32 screenHeight, float fovYDegrees,
+                           u32 testInstanceCount);
 
     /// 录制 `Nanite_InstanceCull` pass：
     ///   ① 上传合成实例表 + 包围球（主机可见缓冲，与任务 3 同款）；
@@ -161,7 +260,7 @@ public:
     ///   实测读回恰为 CPU 参考的 2 倍）。完整负向验证见 `NaniteCull.cpp` 的 `RecordInstanceCullPass`。
     void RecordInstanceCullPass(rhi::IRHICommandList* cmd);
 
-    // ── 实例剔除的读回访问（模块内部与 `NaniteRenderer::LogInstanceCullReadback` 使用）──
+    // ── 实例剔除的读回访问（模块内部与 `NaniteRenderer::LogCull3Readback` 使用）──
     [[nodiscard]] rhi::IRHIBuffer* GetVisibleInstanceBuffer()      const { return m_VisibleInstanceBuf.get(); }
     [[nodiscard]] rhi::IRHIBuffer* GetVisibleInstanceCountBuffer() const { return m_VisibleInstanceCountBuf.get(); }
     /// CPU 参考剔除的可见实例下标（升序）—— 最近一次 `RecordInstanceCullPass` 的结果
@@ -174,44 +273,106 @@ public:
     // §14.8 任务 14：per-instance cluster BVH（构建产物入库 + 每帧深度优先遍历）
     // ============================================================
 
-    /// 按 `.nanite` 的簇记录构建 BVH 并**一次性上传**三个只读缓冲（节点 / 叶子簇表 / 簇球）。
+    /// 按 `.nanite` 的簇记录构建 BVH 并**一次性上传**四个只读缓冲（节点 / 叶子簇表 / 簇球 /
+    /// LOD 元数据）。
     ///
     /// 【调用时机与次数】`NaniteRenderer::EnsureAssetUploaded` 在开关开启时**只调一次**
-    ///   （资产构建成功后）。之后每帧不再碰这三个缓冲。
+    ///   （资产构建成功后）。之后每帧不再碰这四个缓冲。
     /// 【簇数上限】按 `kNaniteMaxBVHClusters` 截断（超出时打印一次中文告警，不静默）；
     ///   被截断掉的是"下标 ≥ 上限"的簇 —— 可见簇引用表的大小由这个上限推出。
+    /// 【§14.8 任务 15 新增的 `lodOffsets`】`.nanite` 的 LOD 段（"该级第一个出现簇的下标"）。
+    ///   它只用于 `BuildNaniteClusterLODInfo`（Phase 3 的级直方图与根簇判定）；传空表示
+    ///   "只有一级"，元数据仍会生成（全部记为 0 级）。
     /// 【失败】设备/PSO 未就绪、构建失败 ⇒ 返回 false（此后该 pass 直接跳过，不派发）。
     /// 【同步约定】本函数只在**一次性启动路径**上被调用（与任务 12 的资产上传同一时机），
     ///   此缓冲尚未被任何已提交的 GPU 工作引用 ⇒ 主机 `Map` 写入不存在竞争。
-    [[nodiscard]] bool SetClusterBVH(std::span<const NaniteClusterRecord> clusters);
+    [[nodiscard]] bool SetClusterBVH(std::span<const NaniteClusterRecord> clusters,
+                                     std::span<const u32>                 lodOffsets);
 
     /// 本 pass 是否可用（BVH 已入库 + PSO/描述符集就绪）
     [[nodiscard]] bool IsClusterBVHReady() const { return m_BVHReady; }
 
-    /// 录制 `Nanite_ClusterBVH` pass：
-    ///   ① **命令缓冲内**把可见簇计数与已访问节点计数清 0（两次 4B 拷贝，GPU 有序）+ 屏障；
-    ///   ② Dispatch（每实例一个线程；实例域 = `min(合成实例数, kNaniteMaxBVHInstances)`）；
-    ///   ③ 屏障（compute → compute|transfer，后者为下一帧的清零消 WAR）。
-    /// 【为什么与实例剔除分成两个 pass】本任务只做"构建 + 遍历"；三阶段合并属任务 15。
-    void RecordClusterBVHPass(rhi::IRHICommandList* cmd);
+    /// 【§14.8 任务 15】把 Phase 1 与 Phase 2/3 录制进**同一个命令缓冲**（同一个帧图 pass 体内）：
+    ///   ① Phase 1：`RecordInstanceCullPass`（清零 → 上传 → 派发 → 屏障；含可见性掩码）；
+    ///   ② Hi-Z 金字塔：先做整图布局转换（可写）→ `BuildHiZPyramid`（逐目标 mip 专属描述符集，
+    ///      复用既有纹理与"2×2 取最小深度"口径）→ 再转回可采样（同时是采样前的内存屏障）；
+    ///   ③ Phase 2/3：**命令缓冲内**清零三阶段读数 → 派发 BVH 遍历（Phase 1 掩码 → 视锥 → Hi-Z
+    ///      → LOD 选择）→ 屏障。
+    /// 【顺序为什么可靠】三段都在**一个** pass 体内、靠命令缓冲里的屏障定序 —— 不依赖帧图的两个
+    ///   pass "恰好按注册顺序执行"（那是不成立的：`RenderGraph::TopologicalSort` 对 inDegree=0 的
+    ///   pass 按 LIFO 处理）。帧图层面本 pass 只声明 `reads = {gbDepth}`（它真的读：Hi-Z 由本帧
+    ///   深度下采样而来），因此它被排在 `GB_Clear` 之后（本帧深度已经画完）。
+    /// @param hizTexture 本帧的 Hi-Z 纹理（空 ⇒ 退化为模块自建的 1×1 占位纹理，遮挡关闭）
+    /// @param depthTexture 本帧的深度纹理（金字塔的输入；空 ⇒ 不构建金字塔）
+    /// @param enableOcclusion cfg 键 `nanite_hiz`（false ⇒ 不构建金字塔、层数传 0、恒不遮挡）
+    void RecordCullChainPass(rhi::IRHICommandList* cmd,
+                             rhi::IRHITexture* hizTexture, rhi::IRHITexture* depthTexture,
+                             bool enableOcclusion);
 
-    /// 【任务 14】CPU 参考遍历（dump 帧算一次；输入与 GPU **同一份比特**：同一个视锥、同一张
-    ///   128B 实例表、同一棵 BVH、同一张簇球表、同一个实例域钳制）。
+    /// 【§14.8 任务 15】CPU 参考三阶段剔除（dump 帧算一次；输入与 GPU **同一份比特**：同一个视锥、
+    ///   同一张 128B 实例表、同一棵 BVH、同一张簇球表、同一张 LOD 元数据表、同一个实例域钳制、
+    ///   同一个像素焦距与阈值）。
+    ///   【Hi-Z 在 CPU 侧恒为关闭】CPU 拿不到金字塔的逐 texel 内容（RHI 的 `CopyTextureToBuffer`
+    ///   只读 mip0，而本引擎的金字塔从不写 mip0）⇒ 参考实现传空采样器（= "Hi-Z 关闭"口径）。
+    ///   这也是验收口径允许的：Hi-Z 打开档允许差异，但必须可解释（`LogCull3Readback`
+    ///   会打印"GPU 独有的簇数（必须 0）/ CPU 独有的簇数（= 被遮挡剔除数）"与选层分布）。
     /// @param outVisible 输出可见簇引用（会被 resize 到可见数）
-    /// @return 遍历读数（visited / visible / stackOverflows / traversedInstances）
-    NaniteClusterBVHTraversalStats RunClusterBVHCPUReference(
+    /// @return 三阶段读数（Phase 1 掩码 → 视锥 → LOD；`visited/frustum/occluded/lodHistogram`）
+    NaniteClusterBVHTraversalStats RunCullChainCPUReference(
         std::vector<NaniteVisibleClusterRef>& outVisible) const;
 
-    // ── 任务 14 的读回访问（`NaniteRenderer::LogClusterBVHReadback` 使用）──
+    /// 【§14.8 任务 15】按既有 Hi-Z 口径构建金字塔（写 mip1..mipCount-1），
+    /// 并在构建前后各做一次**整图**布局转换（GENERAL ↔ 只读）。
+    /// 【为什么要模块自建】见 `NaniteRenderer.h` 的 `NaniteHiZSource` 注释（既有
+    ///   `GPUCulling::BuildHiZPyramid` 逐 mip 更新同一描述符集 ⇒ 实测全 0）。
+    /// 【正确性靠什么】每个目标 mip 一个**专属描述符集**（各绑定每帧只写一次），
+    ///   因此不存在"最后一次主机写对整段命令缓冲生效"的次序依赖。
+    /// @param pyramid 目标金字塔纹理（GPUCulling 的 R32_FLOAT、≤8 层纹理；模块只借用不持有）
+    /// @param depth   本帧深度纹理（金字塔第 1 级的输入）
+    /// @return 真正构建出的层数（< 2 ⇒ 调用方应把遮挡测试关掉）
+    u32 BuildHiZPyramid(rhi::IRHICommandList* cmd, rhi::IRHITexture* pyramid,
+                        rhi::IRHITexture* depth, u32 screenW, u32 screenH);
+
+    // ── 任务 14/15 的读回访问（`NaniteRenderer::LogCull3Readback` 使用）──
     [[nodiscard]] rhi::IRHIBuffer* GetVisibleClusterBuffer()      const { return m_VisibleClusterBuf.get(); }
     [[nodiscard]] rhi::IRHIBuffer* GetVisibleClusterCountBuffer() const { return m_VisibleClusterCountBuf.get(); }
-    [[nodiscard]] rhi::IRHIBuffer* GetBVHVisitedCountBuffer()     const { return m_BVHVisitedCountBuf.get(); }
+    /// 【任务 15】三阶段读数缓冲（扁平 u32，槽位见 `kNaniteCullStat*`）
+    [[nodiscard]] rhi::IRHIBuffer* GetCullStatsBuffer()           const { return m_CullStatsBuf.get(); }
+    /// 【任务 15】可见实例掩码缓冲（`mask[i] != 0` ⇒ Phase 1 判可见；调试/对照用）
+    [[nodiscard]] rhi::IRHIBuffer* GetVisibleMaskBuffer()         const { return m_VisibleMaskBuf.get(); }
+    /// 【任务 15】每簇 LOD 元数据（CPU 侧镜像；数量 == 参与剔除的簇数）
+    [[nodiscard]] const std::vector<NaniteClusterLODInfo>& GetClusterLODInfo() const { return m_LODInfo; }
+    /// 【§14.8 任务 15】把"CPU 参考可见、GPU 未见"的簇做一次**选层分布**统计 —— 这是"Hi-Z 打开档
+    /// 与关闭档差异"的量化解释：被剔除的簇各自会落在金字塔的哪一层上。
+    ///
+    /// 【为什么放在这里】世界球 = 实例平移（`m_TestInstances[i].localToWorld[12..14]`）+ 网格空间
+    ///   球心，这份数据只有本类持有；渲染层不该再去拼一份实例表。
+    /// 【口径】投影用与 shader **同一份** view-proj 行、选层用 `NaniteHiZSelectMip`（同公式）。
+    /// @param cpuVisible / gpuVisible 两边都已按 (instance, cluster) 升序
+    /// @param outMipHistogram 长度 `kNaniteMaxHiZMips`（调用方清零）
+    /// @param outProjectedOffscreen 完全在屏幕外/投影失败（`NaniteProjectSphereToScreen` 返回 false）
+    ///        而无法参与 Hi-Z 的个数 —— 正常情况下应当为 0（它们本来也不该被剔除）
+    /// @return CPU 独有的簇数（Hi-Z 关闭时应当为 0）
+    [[nodiscard]] u32 CountOccludedClustersByMip(
+        const std::vector<NaniteVisibleClusterRef>& cpuVisible,
+        const std::vector<NaniteVisibleClusterRef>& gpuVisible,
+        u32 outMipHistogram[kNaniteMaxHiZMips],
+        u32* outProjectedOffscreen) const;
     [[nodiscard]] u32 GetBVHNodeCount()    const { return (u32)m_BVHData.nodes.size(); }
     [[nodiscard]] u32 GetBVHDepth()        const { return m_BVHData.depth; }
     [[nodiscard]] u32 GetBVHClusterCount() const { return m_BVHData.clusterCount; }
     [[nodiscard]] u32 GetBVHInstanceDomain() const { return m_BVHInstanceDomain; }
     [[nodiscard]] u32 GetBVHVisibleCapacity() const { return kNaniteMaxVisibleClusterRefs; }
     [[nodiscard]] static constexpr u32 MaxBVHInstances() { return kNaniteMaxBVHInstances; }
+
+    /// 【§14.8 任务 15】本帧的 LOD/Hi-Z 参数（读回日志用；都是 `SetCullChainFrame` 与
+    ///   `RecordCullChainPass` 时记下的真值，不是重新推断的）
+    [[nodiscard]] float GetFrameFocalPixels()  const { return m_FrameFocalPixels; }
+    [[nodiscard]] float GetFrameLODThreshold() const { return m_FrameLODThreshold; }
+    [[nodiscard]] u32   GetFrameHiZMipCount()  const { return m_FrameHiZMipCount; }
+    [[nodiscard]] bool  GetFrameHiZRequested() const { return m_FrameHiZRequested; }
+    [[nodiscard]] bool  GetFrameHiZTextureBound() const { return m_FrameHiZTextureBound; }
+    [[nodiscard]] const float* GetFrameViewProjRows() const { return m_FrameViewProjRows; }
 
     /// 录制 `Nanite_Cull` pass：
     ///   ① CPU 侧每帧重置三个计数/命令缓冲（沿用引擎既有的 `Map` 清零写法）
@@ -290,22 +451,40 @@ private:
     float3              m_FrameCameraPos{0.0f};// 本帧相机世界坐标（网格深度/半径基准）
     NaniteInstanceCullParams m_InstanceCullParams{};  // 最近一次 push constant（含 planes + count）
 
+    // ── 【任务 15】本帧的 LOD/Hi-Z 参数与状态 ──
+    /// view-proj 的 4 个行（`m_FrameViewProjRows[r*4+c] = viewProj[c][r]`）——
+    /// 与 GPU 参数缓冲里的 `vpRows` **同一份比特**（Hi-Z 投影用）
+    float m_FrameViewProjRows[16] = { 0.0f };
+    float m_FrameFocalPixels  = 0.0f;   ///< 像素焦距（0 ⇒ 关闭 LOD 选择）
+    float m_FrameLODThreshold = kNaniteLODThresholdPixels;
+    u32   m_FrameScreenW = 0u;          ///< 屏幕宽（Hi-Z 选层）
+    u32   m_FrameScreenH = 0u;          ///< 屏幕高
+    bool  m_FrameHiZRequested = false;  ///< 本帧调用方是否请求了 Hi-Z（cfg `nanite_hiz`）
+    bool  m_FrameHiZTextureBound = false; ///< 本帧是否真的绑定了外部 Hi-Z 纹理（否则用占位）
+    u32   m_FrameHiZMipCount = 0u;      ///< 本帧实际传给 shader 的 Hi-Z 层数（<2 ⇒ 遮挡关闭）
+    NaniteCullChainParams m_ChainParams{};  ///< 最近一次上传的参数（回读/参考共用）
+
     // 合成实例表与包围球（CPU 侧镜像；每帧按 `m_TestInstanceCount` 重建/上传）
     std::vector<NaniteInstanceGpuObject> m_TestInstances;
     std::vector<NaniteInstanceSphere>    m_TestSpheres;
     // CPU 参考剔除结果（升序可见下标）—— dump 帧与 GPU 读回逐项比较
     std::vector<u32> m_CpuVisibleInstances;
+    /// 【任务 15】CPU 侧的可见实例掩码（由 `m_CpuVisibleInstances` 展开；与 GPU 掩码同语义）
+    std::vector<u32> m_CpuVisibleMask;
 
     // ============================================================
     // §14.8 任务 14：per-instance cluster BVH 的自持资源与状态
     // ============================================================
 
-    /// BVH 是否已入库（`SetClusterBVH` 成功）。未入库 ⇒ `RecordClusterBVHPass` 直接跳过。
+    /// BVH 是否已入库（`SetClusterBVH` 成功）。未入库 ⇒ `RecordCullChainPass` 直接跳过 Phase 2/3。
     bool m_BVHReady = false;
 
     /// CPU 侧 BVH 镜像（节点/叶子簇表/簇球/读数）——GPU 侧三个只读缓冲由它上传；
     /// 同时是 CPU 参考遍历的输入 ⇒ **GPU 与 CPU 读的是同一份比特**。
     NaniteClusterBVH m_BVHData;
+
+    /// 【任务 15】CPU 侧 LOD 元数据镜像（与 `m_BVHData.clusterSpheres` 同序、同长度）
+    std::vector<NaniteClusterLODInfo> m_LODInfo;
 
     /// 本帧实例域 = `min(合成实例数, kNaniteMaxBVHInstances)`（CPU 参考与 GPU 同口径）
     u32 m_BVHInstanceDomain = 0u;
@@ -314,19 +493,52 @@ private:
     std::unique_ptr<rhi::IRHIBuffer> m_BVHNodeBuf;     // 节点（32B/条，容量 kNaniteMaxBVHNodes）
     std::unique_ptr<rhi::IRHIBuffer> m_BVHLeafBuf;     // 叶子簇表（u32/条，容量 kNaniteMaxBVHClusters）
     std::unique_ptr<rhi::IRHIBuffer> m_BVHSphereBuf;   // 簇球（16B/条，容量 kNaniteMaxBVHClusters）
+    /// 【任务 15】LOD 元数据（16B/条，容量 kNaniteMaxBVHClusters）
+    std::unique_ptr<rhi::IRHIBuffer> m_LODInfoBuf;
     // ── 每帧由 GPU 写的可写缓冲 ──
     std::unique_ptr<rhi::IRHIBuffer> m_VisibleClusterBuf;       // 可见簇引用（8B/条，容量 kNaniteMaxVisibleClusterRefs）
-    std::unique_ptr<rhi::IRHIBuffer> m_VisibleClusterCountBuf;  // 可见簇计数（u32）
-    std::unique_ptr<rhi::IRHIBuffer> m_BVHVisitedCountBuf;      // 已访问节点计数（u32）
-    /// 两个计数的清零源（8B 常驻 0，TransferSrc）：前 4B 给可见簇计数、后 4B 给访问计数。
-    /// 与任务 13 的 `m_VisibleCountClearBuf` 同款；**每帧的清零在命令缓冲内**（不用主机写）。
-    std::unique_ptr<rhi::IRHIBuffer> m_BVHZeroClearBuf;
+    std::unique_ptr<rhi::IRHIBuffer> m_VisibleClusterCountBuf;  // 可见簇计数（u32；Phase 3 的最终计数）
+    /// 【任务 15】可见实例掩码（u32/实例；Phase 1 每线程写 0/1，**不需要清零**）
+    std::unique_ptr<rhi::IRHIBuffer> m_VisibleMaskBuf;
+    /// 【任务 15】三阶段读数（扁平 u32，容量 `kNaniteCullStatsCapacity`）
+    std::unique_ptr<rhi::IRHIBuffer> m_CullStatsBuf;
+    /// 【任务 15】三阶段参数（112B；CPU 每帧上传）
+    std::unique_ptr<rhi::IRHIBuffer> m_ChainParamBuf;
+    /// 【任务 15】两个计数的清零源（48B 常驻 0，TransferSrc）：
+    ///   【0,4) 可见簇计数；【4,8) 已访问节点数 → 与任务 13 同款；【8,48) 三阶段读数（40B）
+    ///   = 通过视锥(4) + 遮挡(4) + 级直方图(32)。**每帧的清零都在命令缓冲内**（不用主机写）。
+    std::unique_ptr<rhi::IRHIBuffer> m_ClearZeroBuf;
+    /// 【任务 15】Hi-Z 占位纹理（1×1 R32_FLOAT）+ 采样器：当本帧没有外部 Hi-Z 纹理时占位，
+    ///   保证 binding 10 永远是**合法描述符**（Vulkan 不接受"未绑定/空纹理"的采样器绑定）。
+    ///   层数传 0 ⇒ shader 的 `hizOccluded` 第一句就返回 false ⇒ 不会真的采样它。
+    std::unique_ptr<rhi::IRHITexture> m_HiZPlaceholderTex;
+    std::unique_ptr<rhi::IRHISampler> m_HiZSampler;
 
     // ── cluster BVH 遍历的 compute 管线 ──
     rhi::ShaderBytecode m_BVHCS;   // Nanite_ClusterBVH.comp.spv
     rhi::DescriptorSetLayoutHandle m_BVHLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_BVHSet    = rhi::kInvalidSet;
     std::unique_ptr<rhi::IRHIPipelineState> m_BVHPSO;
+
+    // ============================================================
+    // §14.8 任务 15：模块自持的 Hi-Z 金字塔构建（复用既有纹理与口径；为什么自建见头注释）
+    // ============================================================
+
+    /// 目标层（mip1..mipCount-1）的存储视图；由 `EnsureHiZBuildViews` 按纹理缓存/重建。
+    /// 【为什么要缓存】视图要随"纹理被重建（窗口尺寸变化）"一起重建，而每次创建/销毁都有成本。
+    void* m_HiZDestViews[kNaniteHiZBuildMaxViews] = { nullptr };
+    /// 这些视图属于哪张纹理 / 建了几层（纹理指针变了就整批重建）
+    rhi::IRHITexture* m_HiZViewOwner = nullptr;
+    u32               m_HiZViewCount = 0u;
+    /// 建/重建视图（幂等；`pyramid` 为空或层数不足时把可用视图数记下）
+    void EnsureHiZBuildViews(rhi::IRHITexture* pyramid);
+
+    rhi::ShaderBytecode m_HiZBuildCS;   // Nanite_HiZDownsample.comp.spv（与既有 HiZDownsample 同口径）
+    rhi::DescriptorSetLayoutHandle m_HiZBuildLayout = rhi::kInvalidLayout;
+    /// **每个目标 mip 一个专属描述符集**：这是本实现正确的关键 —— 各集合的每个绑定每帧只写一次，
+    ///   因此不受"GPU 在执行期读描述符、最后一次主机写生效"这条次序规则影响。
+    rhi::DescriptorSetHandle m_HiZBuildSets[kNaniteHiZBuildMaxViews] = { rhi::kInvalidSet };
+    std::unique_ptr<rhi::IRHIPipelineState> m_HiZBuildPSO;
 };
 
 } // namespace he::render
