@@ -3120,3 +3120,169 @@ CULL DIFF: PASS
    此前没有判据解析它，故一直未暴露。工具把空 `exit=` 视为"未报告"（只对数字非 0 判失败），失败判定由读数/回显/指纹承担。
    **最小修法**：改用 `[System.Diagnostics.Process]::Start` + 异步读输出（保留 300 s 超时守卫）——属脚手架改动，建议单独一条提交。
 3. 仍是**合成实例网格**上的对照（§14.22③），不是场景实例；"相机完全背对 ⇒ 零可见簇"仍无法构造（§14.25⑧），零可见簇入口仍是 `nanite_instance_test_count=0`。
+### 14.27 任务 18 实施记录：软光栅写 GBuffer（含 P0 的共享内容属性错配修复，2026-09-20）
+
+**① P0：把属性词纳入内容键流（修掉 §14.20⑥ 的缺陷）**
+- 缺陷：DAG 内容哈希**顺序无关**，而 `meshopt_optimizeMeshlet` 会就地重排簇内顶点 ⇒
+  位置/拓扑同构但**局部顺序不同**的簇共享顶点段，按局部下标取法线/UV 就会读到别的顶点。
+- 修法（改动最小、语义最直白）：`BuildClusterCanonicalKeys` 的键流追加第四段
+  `[属性标记 'NAAT'][顶点数][逐局部下标的法线词、UV 词]`（法线 = 八面体 10+10 位、
+  UV = unorm16，与打包器**同一组函数**）。前三段仍是顺序无关的（平移副本照常命中），
+  第四段刻意**按局部下标有序** ⇒ "共享 ⇒ 逐下标属性逐位相同"由哈希保证。
+- 接口：新增五参数 `BuildNaniteClusterDAG(positions, normals, uvs, indices, out)`；
+  三参数重载 = 空属性（属性段退化为常量 ⇒ 等价关系与任务 9 当时**逐位相同**，
+  既有调用方/单测的去重率不受影响）。`BuildNaniteAssetFromGeometry` 恒传属性。
+- **打包器变成硬门**：`attributeConflictCount != 0` ⇒ `PackNaniteClusters` **返回 false**
+  （不再"如实报告后照写"）：绕过五参数重载手工拼的 DAG 会被拒，不再可能静默产出错配资产。
+- 去重率重测（单测 MESSAGE 原文，`Tests/TestNaniteBuilder.cpp`）：
+  | 网格 | 任务 9 口径（属性不进键流） | 修复后（属性进键流） |
+  |---|---|---|
+  | 平铺 16×64 tri（每片 UV 平移 = 属性真不同） | 51.61%（unique 15/31） | **6.45%**（unique 29/31） |
+  | 平铺 16×64 tri（逐片属性完全相同的真副本） | 51.61% | **32.26%**（unique 21/31，仍显著 > 10%） |
+  | 一般网格 32×32（2048 tri） | 0.00% | 0.00%（如实） |
+  | 3×3 平铺 576 tri（真副本，走资产路径） | 42.11% | 26.32%（去重照常命中） |
+  | 每片 UV 平移（真冲突） | 42.11% | 6.45%（"每片 UV 平移"的 4×4 档见上表第一行） |
+- 属性一致性：`attributeConflictCount == 0`、逐"出现 × 局部下标"重算属性词与落盘值
+  **1663 个全一致、0 个不一致**；负向回归用例（三参数 DAG + 带属性打包）**必须被拒**。
+
+**② 软光栅（设计 §5.2）：** **两趟"原子深度键 + 等值复检"**，不是"一趟 + ROV/interlock"**
+- **为什么不能用 ROV（实测证据，重要）**：Slang 2026.13 对 compute 入口里的
+  `RasterizerOrderedTexture2D` **静默降级**成普通 `RWTexture2D`（exit 0、`-warnings-as-errors all`
+  下零诊断、SPIR-V 里既没有 `OpBeginInvocationInterlockEXT` 也没有任何 `OpExtension`）；
+  而 SPIR-V 规定 interlock 的 execution mode 只对 **Fragment** 入口合法（手工汇编后 `spirv-val`
+  报 "Execution mode can only be used with the Fragment execution model."）。⇒ 单趟写法
+  （"原子最小深度后紧接着写颜色"）**有竞态**：更近的三角形赢了深度，更远的那个的颜色写入
+  可能后落地。设计 §5.2 的原文与 §12 的伪码按此裁决**修正为两趟**。
+- 第 1 趟 `Nanite_SoftRasterDepth.comp.slang`：每簇一个工作组（`[numthreads(16,1,1)]`，
+  dispatch 按可见簇容量取整、shader 按可见计数早退），逐三角形投影 → 2D 包围盒 → 重心覆盖 →
+  `InterlockedMin(u_DepthKey[py*W+px], key)`；`key = (asuint(ndcZ) & 0xFFFFFF00) | (triLocal & 0xFF)`
+  （高 24 位深度位模式，非负浮点与无符号整数同序；低 8 位三角形下标给出平局全序）。
+  深度键是 `RWStructuredBuffer<uint>`（不是 R32_UINT 存储图像）：结构化缓冲上的 `InterlockedMin`
+  同样零额外设备特性，而且**每帧清屏就是一次 `CopyBuffer`**（常驻 0xFF 源，GPU 有序，不用主机写）。
+- 第 2 趟 `Nanite_SoftRaster.comp.slang`（任务 18 要求的文件）：**重跑同一段光栅化**
+  （同代码路径 ⇒ 覆盖集合与深度逐位一致），对每个像素做 `u_DepthKey[idx] == 自己的 key`
+  **等值复检**，相等才写 albedo / normal / worldPos / lightmapKey ⇒ 每像素恰好一个三角形写一次，
+  多目标天然一致。**实测自洽**：无重叠场景下第 1 趟覆盖像素数 == 第 2 趟写入像素数
+  （3264 == 3264）；满覆盖档 3.14 亿次覆盖 → 4431 万次写入（重叠由等值复检去重）。
+- **只对 `triangleCount <= maxTriangles`（默认 16 = §5.2）的簇走软光栅**，超过的簇跳过并计数
+  （`skipped_big`），留给任务 22 的 mesh 硬光栅；阈值可配 `nanite_soft_max_triangles`（1..64）。
+- **材质**：资产材质段为空（任务 19 才解析）⇒ 中性常数 `albedo = 0.8`、`metallic = 0`、
+  `roughness = 0.5`，并用 `neutral_material_pixels` 如实标出（不假装是真材质）。
+- **深度**：compute **不写** `D32_SFLOAT` —— 本机 NVIDIA 支持它做存储图像、同机 AMD 核显不支持
+  （§14.14），且 GBuffer 深度纹理按任务 4 的 A1 裁决**没有** `UnorderedAccess`，本次改动面又
+  禁止改 `GBufferRenderer`。故走 §14.5 裁决里的另一条路：模块自持深度键 + 全屏片元
+  `Nanite_DepthResolve.*`（`SV_Depth`：键的高 24 位还原成 NDC 深度，哨兵 ⇒ 1.0 远平面）
+  写**既有深度附件**。运行时仍调新增的 `IRHIDevice::SupportsStorageImage(Format)`
+  （`vkGetPhysicalDeviceFormatProperties` + `STORAGE_IMAGE_BIT`，按格式缓存）把
+  "该格式能不能做存储图像"查一次并打进读数（本机 `depth_storage_image_supported=1`）——
+  降级是**被报告**的，不是静默的。
+
+**③ 接线（让位）与取舍**
+- **让位的落点不是"换掉 GB_Clear"**：pass 的**名字、reads/writes 声明、在帧图里的位置一个都没变**
+  （判据 ⑥ 的 pass 集合与指纹判据因此不受影响），变的是 `GB_Clear` 这个 pass 体内"谁写几何"：
+  `enabled && IsReady() && softRaster` ⇒ 只清屏（模块 compute 写 8 张颜色目标 UAV + 深度由深度解析
+  全屏重写），既有 `m_GBuffer->Render(...)` 让位（帧图侧门控）；否则既有路径原样执行。
+- **清屏为什么用 compute 而不是渲染通道**：`BeginOffscreenPassMRT` 的 loadOp 取自 PSO，而 render pass
+  在 RHI 里按格式组合复用（Decal 用同一组 8 格式 + `Load`）⇒ 实测**清不掉**（未覆盖像素读出
+  (0,0,0,0)，albedo.a 均值 0.0000 而清除值是 1.0）。改用 `Nanite_GBufferClear.comp.slang`
+  （8 张颜色目标都是任务 4 已加 UAV 的存储图像）后 albedo.a 均值 = **0.9999**（清除值生效，见④）。
+  深度不经 `ClearDepthStencil`（它在本引擎的 GBuffer 深度上会多出 10+10+10 条校验行），
+  由深度解析通道逐像素写。
+- **软光栅录在 `Nanite_CullChain3` 的同一个 pass 体内**（紧随剔除链的派发之后）：它要读同帧剔除链
+  写出的可见簇列表/计数，而帧图无法为两个"零帧图资源"的模块 pass 表达这条顺序（inDegree=0 按 LIFO
+  处理 —— 任务 15/16 的教训）。该 pass 因此**新增**四条 `UAV` 写声明（albedo/normal/worldPos/
+  lightmapKey）⇒ 帧图据此把它排在 `GB_Clear` 之后、Lighting 之前；深度**不声明**（它在 pass 体内
+  作为附件被写，RHI 的 render pass 结束时会还原成只读，与帧图模型一致，声明成 Write 反而会破坏
+  Hi-Z 对本帧深度的采样）。
+- 三趟的**内部顺序全部由命令缓冲里的显式屏障给出**（清键 → 第 1 趟 → 第 2 趟 → 深度解析），
+  不依赖帧图。
+- 开启档 pass 数仍是 **14**（既有 12 + `Nanite_Cull` + `Nanite_CullChain3`），
+  `passlist_sha` 与任务 16 完全一致（`750CC247BF8B9C3D…`）。
+
+**④ 验收证据（本人复跑，2026-09-20）**
+- 两个 target 构建 `EXIT=0`；4 个新 `.spv.h` 全部生成（`Nanite_SoftRasterDepth.comp` 60,286 B、
+  `Nanite_SoftRaster.comp` 103,897 B、`Nanite_DepthResolve.vert/frag`、`Nanite_GBufferClear.comp`）。
+- 单测 **308 → 308 例**（62142 断言）全绿；新增 1 例（`NanitePack: 属性错配的资产被拒绝`）、
+  重写 1 例（`NaniteDAG: 共享簇必须属性逐位一致`）。
+- 关闭档：`passes_per_frame=12`、`nanite_passes=0`、`vuid_lines=41`、
+  指纹 `1C15AB72E688B5302332AEC391C41A5FE2B4D9512258CCDCD5D3E9D7E8F5390D`（= 冻结值）。
+- 开启档（默认 `nanite_soft_max_triangles=16`）：14 pass、`vuid_lines=46`、
+  `passlist_sha=750CC247BF8B9C3D…`（与任务 16 相同）、读数一行：
+  `[Nanite] soft_raster clusters=31648 soft=61 skipped_big=31587 triangles=61 pixels_written=3264
+   degenerate=0 neutral_material_pixels=3264 depth_written=1 depth_storage_image_supported=1
+   depth_src=key+SV_Depth max_triangles=16 instances=64 depth_key_pixels=2073600 covered_px=3264
+   diag_screenw=1920 diag_screenh=1080 diag_maxtri=16 diag_extent_milli=3720854 tested_px=9767`
+  （**Sponza 的簇绝大多数是满簇 64 tri ⇒ 阈值 16 下只有 61 个簇、3264 个像素**；
+   `covered_px == pixels_written` 证明两趟逐位一致）。
+- 满覆盖档（`nanite_soft_max_triangles=64`）：`soft=31648 skipped_big=0 triangles=1758608
+   pixels_written=44318207 degenerate=262899 covered_px=314423307 tested_px=1112509107`，
+  整档 117 s（121 帧）。
+- **同场景同相机对照**（`build/verify/nanite_soft_cmp.py`，AI 面板 1920×1080，转储帧 120；
+  参考 = `nanite_off`（既有路径），测试 = 模块开）：
+
+  | 对照 | 目标 | 覆盖率(参考/测试) | 均值(参考/测试) | 相关系数(全图) | 相关系数(双方覆盖) |
+  |---|---|---|---|---|---|
+  | off vs on(16) | albedo | 1.0000 / 1.0000 | 0.2009 / 0.2500 | −0.5749 | −0.5749 |
+  | off vs on(16) | gb_normal | 1.0000 / 1.0000 | 0.6777 / 0.2500 | 0.2255 | 0.2255 |
+  | off vs on(16) | gb_worldpos | 1.0000 / **0.0001** | −45.24 / −0.0037 | 0.0045 | **0.9987**(106 px) |
+  | off vs on(64) | albedo | 1.0000 / 1.0000 | 0.2009 / 0.4055 | −0.0678 | −0.0678 |
+  | off vs on(64) | gb_normal | 1.0000 / 1.0000 | 0.6777 / 0.2252 | 0.2564 | 0.2564 |
+  | off vs on(64) | gb_worldpos | 1.0000 / **0.4443** | −45.24 / −18.44 | 0.7935 | **0.9292**(921,399 px) |
+  | off vs on(64) | gb_lightmapkey | 1.0000 / 0.4443 | 5.17 / 119.29 | 0.3038 | 0.7133 |
+
+  **差异来源（逐条解释，不要求逐位一致）**：
+  1. **覆盖范围**：`worldpos` 的覆盖率就是模块真正写了几何的比例 —— 阈值 16 时只有 0.01%（61 簇），
+     阈值 64 时 44.43%。剩下的是"清屏值"（worldPos=0、albedo=(0,0,0,1)）⇒ 不能与既有路径逐位比。
+  2. **几何不同**：模块画的是剔除链的**合成实例网格**（同一份合并几何的 61 个平移副本，
+     §14.22③），既有路径画的是场景本体 ⇒ 双方都覆盖的像素上世界坐标相差一个实例平移
+     （RMS 296），`gb_worldpos` 的"全图相关"因此被背景主导（0.79），而"双方覆盖"上是 0.93。
+  3. **材质是中性常数**：`albedo` 恒 0.8（任务 19 才接真实材质）⇒ 与既有路径的贴图 albedo 相关为负，
+     这是预期的。
+  4. **法线**：模块写的是**量化法线**（八面体 10+10 位，单测实测最大角误差 0.2017°）+ 透视校正插值，
+     既有路径用插值后的世界法线 ⇒ 分布相近但逐像素不同（相关 0.23~0.26）。
+- **"白炉 1.0000" 的等价自洽检验**（07.Nanite 的炉子路径是 GI 源自身的标度，与"谁写 GBuffer"无关，
+  不能用来判软光栅）⇒ 在**软光栅自己的输出**上做三条逐位自洽检验（`nanite_on64` 的 921,399 个
+  被写像素）：
+  1. **albedo 逐位等于中性材质常数（f16 位相等）= 1.000000**、`metallic == 0` = 1.000000；
+  2. **法线单位长度**（|n| ∈ [0.999,1.001]）= **1.000000**，最大 |len−1| = 8.3e-4；
+     `roughness == 0.5` = 1.000000；
+  3. **光照图键**：`uv ∈ [0,1]` = 0.999995；**页号 = 1024 + 实例下标、整数、落在 Nanite 段** = **1.000000**
+     （页号 1025..1087，61 个不同实例）。
+  这三条正是"模块自己写的内容与其解码来源（中性常数 / 量化法线 / UV / 实例号）一致"，
+  等价于设计里"白炉 1.0000"这种**逐位自洽**判据。
+- **P2 的按段分类得到真实生产者**：`python Tools/gi/lightmap_key_check.py build/verify nanite_on64`
+  ⇒ 4/5 判据 PASS，其中两条正是本次要修的：
+  `page values are exact integers -- 100.0000%`、
+  `page values fall inside the object-index segments -- normal 0 px + nanite 921399 px,
+  no out-of-range page`，并打印 `nanite 61 page(s), 921399 pixels, global page [1025,1087],
+  local index [1,63]`。第 5 条（`key uniqueness @128x128`，17.17% > 10%）是**既有的报告项**：
+  模块一帧里叠了 61 个平移副本 ⇒ 同一 texel 上必然有多层表面，是**场景属性**而非键编码回归。
+
+**⑤ 偏差与风险（不掩盖）**
+1. **`vuid_lines` 41 → 46（+5）**：全部是 `VUID-vkCmdDraw-None-09600` 的**启动期布局告警**
+   （与基线 41 行里的 6 条同一 VUID/同一类）；开档因为多了"颜色目标在 UAV/附件布局之间往返"，
+   命中校验层"同一 VUID 最多 10 条"的封顶后**构成变了**（8 条 COLOR_ATTACHMENT + 2 条 SHADER_READ，
+   基线是 6 条 SHADER_READ）⇒ 行数 +4，另 +1 是封顶提示行。**没有新的 VUID 类型**，
+   类目集合与基线逐条相同；`nanite_soft_raster=0` 档（模块开、软光栅关）实测仍是 **41**，
+   证明增量确实来自软光栅这条路径。**未修**（需要动 RHI 的 render pass 缓存/布局追踪，超出本任务
+   改动面），列为后续项。
+2. **软光栅的深度精度**：深度键的高 24 位 = NDC 深度位模式（截掉低 8 位 ≈ 256 ulp）；
+   深度解析把它还原进深度附件 ⇒ 深度比既有路径略粗（本任务不逐位对照深度，未量化）。
+3. **阈值 16 下覆盖率 ~0.01%**：Sponza 的簇绝大多数是满簇（64 tri），这是 §5.2 阈值的直接后果，
+   不是通路问题（阈值 64 档覆盖率 44.43% 即证据）；混合光栅分流是任务 22。
+4. **模块不写 velocity/emissive/disneyA/disneyB**：这 4 张只有清屏值（与既有路径的清屏值相同），
+   于是 TAA 的 motion vector 恒 0、emissive/AO/Disney 参数为默认 —— 本任务的明确边界（任务 19/21）。
+5. **深度解析恒执行**（全屏片元，每帧 1 次全屏片元调用）；`depth_written=1` 是恒真的读数，
+   "能不能用 compute 写深度"由 `depth_storage_image_supported` 单独如实报告。
+6. **本次踩到并修掉的三个真 bug（值得全仓借鉴）**：
+   ① 边函数**手性写反**（`(p-pk).x*e.y - (p-pk).y*e.x` 与 `area2 = e.x*b.y - e.y*b.x` 不同向）
+   ⇒ 三角形内部的三个边函数全为负、一个像素都不覆盖（实测 61 三角形 / 9767 次像素测试 / 0 覆盖）；
+   ② 帧图 lambda **按引用捕获局部变量** `naniteGB`（lambda 在 `BuildFrameGraph` 返回后才执行）
+   ⇒ 纹理句柄是悬空垃圾指针（albedo 有效、normal/depth 为 0、其余像栈地址）；
+   这两个都是"能编译、能跑、结果全 0/全错"的静默失败。
+   ③ 渲染通道清屏在本引擎**不可靠**（render pass 按格式组合复用，Decal 的 `Load` 变体会被复用）。
+7. **一处观察（不在改动面内）**：剔除链的 Hi-Z 采样用 `s = ndc.xy*0.5+0.5`（`s.y` 当纹理 V 用），
+   而本引擎的离屏通道用**负高度视口**（NDC y=+1 落在帧缓冲第 0 行）⇒ `s.y` 与纹理行是**镜像**的。
+   软光栅因此用 `row = (0.5 − 0.5*ndc.y)*H`（已按真实行约定写，并在注释里写明）。
+   任务 15 的 Hi-Z 遮挡判据疑似受同一问题影响（深度以 0.99 背景为主时不易暴露），
+   **本次不改**（会改动任务 15 的已验收读数），列为后续项。
