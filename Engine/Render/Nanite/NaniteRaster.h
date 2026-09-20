@@ -33,6 +33,8 @@
 
 #include "RHI/RHI.h"
 
+#include "Nanite/NaniteTypes.h"   // 【任务 18】NaniteSoftRasterParams / 读数槽位 / 深度键编码
+
 #include <memory>
 
 namespace he::render {
@@ -133,6 +135,99 @@ public:
     /// 读回 mesh 通道 1×1 R8 目标像素的**最大**值（`CopyTextureToBuffer` → Map 的真实 GPU 读回）。
     [[nodiscard]] u32 ReadbackMeshTestTargetMax();
 
+    // ============================================================
+    // 【§14.8 任务 18】软光栅：两趟「原子深度键 + 等值复检」写 GBuffer
+    //
+    // 【与设计 §5.2 的关系】§5.2 写的是"每簇一个 wave，interlock 写 GBuffer"（ROV）。本仓库的
+    //   Slang 版本**在 compute 里静默丢弃 ROV 语义**（实测：exit 0、零诊断、SPIR-V 里没有
+    //   任何 interlock；SPIR-V 规范规定 interlock 的 execution mode 只对 Fragment 合法）
+    //   ⇒ 单趟写法有竞态。改用**两趟**：第 1 趟只做逐像素 `InterlockedMin(深度键)`，
+    //   第 2 趟重跑光栅化 + 等值复检后才写颜色 ⇒ 每个像素恰好一个三角形写一次。
+    //   完整证据见 `Nanite_SoftRasterCommon.slang` 头部与实施记录。
+    //
+    // 【深度】compute **不写** `D32_SFLOAT`：本机 NVIDIA 支持它做存储图像、同机 AMD 核显不支持
+    //   （§14.14），且 GBuffer 深度纹理按任务 4 的 A1 裁决**没有** `UnorderedAccess` usage
+    //   （本次改动面禁止改 `GBufferRenderer`）。故走 §14.5 裁决里的另一条路：
+    //   模块自持一张**深度键**缓冲，最后一趟用全屏片元 + `SV_Depth` 把深度写进既有深度附件。
+    //   运行时仍会查一次"该格式能不能做存储图像"（`IRHIDevice::SupportsStorageImage`）并打进度数，
+    //   让降级是**被报告**的而不是静默的。
+    // ============================================================
+
+    /// 软光栅 / 清屏要用的既有 GBuffer 纹理集合（**只借用**，生命周期归 `GBufferRenderer`）
+    struct GBufferTargets {
+        rhi::IRHITexture* albedo      = nullptr;   ///< MRT0 RGBA16F（albedo.rgb + metallic.a）
+        rhi::IRHITexture* normal      = nullptr;   ///< MRT1 RGBA16F（normal.xyz + roughness.a）
+        rhi::IRHITexture* emissive    = nullptr;   ///< MRT2 RGBA16F（本任务只清、不写）
+        rhi::IRHITexture* velocity    = nullptr;   ///< MRT3 RG16F （本任务只清、不写）
+        rhi::IRHITexture* worldPos    = nullptr;   ///< MRT4 RGBA16F
+        rhi::IRHITexture* disneyA     = nullptr;   ///< MRT5 RGBA16F（本任务只清、不写）
+        rhi::IRHITexture* disneyB     = nullptr;   ///< MRT6 RGBA16F（本任务只清、不写）
+        rhi::IRHITexture* lightmapKey = nullptr;   ///< MRT7 RGBA16F（uv.xy + Nanite 段页号）
+        rhi::IRHITexture* depth       = nullptr;   ///< D32_SFLOAT（清 + 深度解析写入）
+
+        [[nodiscard]] bool HasClearTargets() const {
+            return albedo && normal && emissive && velocity && worldPos
+                && disneyA && disneyB && lightmapKey && depth;
+        }
+        [[nodiscard]] bool HasSoftRasterTargets() const {
+            return albedo && normal && worldPos && lightmapKey && depth;
+        }
+    };
+
+    /// 软光栅要读的资产缓冲（**只读**；由 `NaniteScene` 持有，模块内借用）
+    struct AssetViews {
+        rhi::IRHIBuffer* clusters = nullptr;   ///< 簇记录段（64B/条）
+        rhi::IRHIBuffer* vertices = nullptr;   ///< 量化顶点段（16B/条）
+        rhi::IRHIBuffer* indices  = nullptr;   ///< 索引段（3×u16 进 u32[2]）
+        rhi::IRHIBuffer* header   = nullptr;   ///< 文件头（取 meshMaxExtent 由调用方算好传入）
+        [[nodiscard]] bool valid() const { return clusters && vertices && indices; }
+    };
+
+    /// **清屏**：用 compute 把 8 个颜色附件清成**既有路径的同一组清除值**，并用 RHI 的
+    /// `ClearDepthStencil` 把深度清成远平面 —— **不画任何几何**（这就是"既有几何路径让位、
+    /// 模块接管写入"的第一步）。
+    /// 【为什么不是渲染通道清屏】`BeginOffscreenPassMRT` 的 loadOp 取自 PSO，而 render pass 在
+    ///   RHI 里按格式组合复用（Decal 用同一组 8 格式 + `Load`）⇒ 实测清不掉（未覆盖像素读出
+    ///   (0,0,0,0) 而不是清除值）。compute 写 UAV 完全在模块手里，不依赖 render pass 的缓存行为。
+    void RecordGBufferClearPass(rhi::IRHICommandList* cmd, const GBufferTargets& targets);
+
+    /// **软光栅**（三趟录在同一个命令缓冲里，用屏障定序）：
+    ///   ① 4B/像素的 `CopyBuffer`（常驻 0xFF 源 → 深度键）= 每帧清成"没有几何"的哨兵；
+    ///   ② 第 1 趟 compute（`Nanite_SoftRasterDepth.comp`）：逐簇逐三角形的原子深度键；
+    ///   ③ 第 2 趟 compute（`Nanite_SoftRaster.comp`）：重跑光栅化 + 等值复检 → 写 4 张 GBuffer；
+    ///   ④ 深度解析（全屏片元 `Nanite_DepthResolve.*`）：深度键 → `SV_Depth` 写既有深度附件。
+    /// 顺序全部由函数内**显式**发出的屏障给出（帧图不跟踪模块自持资源，也排不动这些内部段）。
+    void RecordSoftRasterPass(rhi::IRHICommandList* cmd,
+                              const GBufferTargets& targets,
+                              const AssetViews& asset,
+                              const NaniteSoftRasterParams& params,
+                              rhi::IRHIBuffer* visibleRefs,
+                              rhi::IRHIBuffer* visibleCount,
+                              rhi::IRHIBuffer* instances,
+                              u32 visibleCapacity,
+                              const float clearDepth);
+
+    /// dump 帧打印**恰好一行**软光栅读数（真实 GPU 读回）：
+    ///   `[Nanite] soft_raster clusters=<C> soft=<S> skipped_big=<B> triangles=<T> pixels_written=<P>
+    ///    degenerate=<D> neutral_material_pixels=<N> depth_written=<0|1> depth_storage_image_supported=<0|1>
+    ///    depth_src=<key+SV_Depth> ...`
+    /// 【同步约定】与其它读回相同：只 Map，不等待；调用方必须已 `WaitIdle()`。
+    void LogSoftRasterReadback();
+
+    /// 软光栅是否就绪（资源 + PSO 都建起来了）
+    [[nodiscard]] bool IsSoftRasterReady() const { return m_SoftColorPSO != nullptr; }
+
+    /// 【任务 18】懒建软光栅资源（两趟 compute PSO + 深度解析 PSO + 三套描述符集布局）。
+    /// 【为什么放在 public】`NaniteRenderer`（门面）在**帧图构建期**调用它：帧图不注册这个 pass，
+    ///   本函数只保证执行期的资源就绪；真正的派发录在 `Nanite_CullChain3` 的 pass 体内。
+    /// 描述符集只建一次；**每次录制**再把绑定重写一遍（资产/可见簇/实例缓冲与 4 张颜色目标）。
+    /// @param targets 本帧的 GBuffer 纹理（用来建第 2 趟的 4 张颜色目标绑定）
+    bool EnsureSoftRasterResources(const GBufferTargets& targets);
+
+
+    /// 深度键缓冲当前覆盖的像素数（= 宽×高；dump/日志用）
+    [[nodiscard]] u32 GetDepthKeyPixelCount() const { return m_DepthKeyPixels; }
+
 private:
     /// 懒建 `Nanite_TestWrite` 的 PSO + 描述符集布局（首次录制时调用一次）。
     /// 返回 false 表示创建失败（调用方跳过本次录制，不影响其它 pass）。
@@ -149,6 +244,18 @@ private:
     /// 懒建 `Nanite_MeshTest` 的目标/缓冲/描述符集/mesh PSO（首次录制时调用一次）。
     /// 返回 false 表示创建失败或设备不支持 mesh shader。
     bool EnsureMeshTestResources();
+
+    /// 【任务 18】按当前视口重建深度键缓冲与其常驻 0xFF 源（容量变化时）。
+    bool EnsureDepthKeyBuffers(u32 width, u32 height);
+
+    /// 【任务 18】在命令缓冲内清深度键（`CopyBuffer` 常驻 0xFF 源 → 深度键整块）
+    void RecordDepthKeyClear(rhi::IRHICommandList* cmd);
+
+    /// 【任务 18】在命令缓冲内清软光栅读数（`CopyBuffer` 常驻 0 源 → 读数缓冲整块）
+    void RecordSoftStatsClear(rhi::IRHICommandList* cmd);
+
+    /// 【任务 18】懒建清屏 compute 的 PSO + 描述符集布局（8 张颜色目标的 UAV）
+    bool EnsureGBufferClearResources();
 
     rhi::IRHIDevice* m_Device = nullptr;
     u32 m_Width  = 0;
@@ -204,6 +311,58 @@ private:
     rhi::DescriptorSetLayoutHandle m_MeshTestLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_MeshTestSet    = rhi::kInvalidSet;
     std::unique_ptr<rhi::IRHIPipelineState> m_MeshTestPSO;
+
+    // ── §14.8 任务 18：软光栅（懒建；软光栅关闭或资产未就绪时为空）──
+    /// 三个入口的字节码：两趟 compute + 深度解析的 VS/FS
+    rhi::ShaderBytecode m_SoftDepthCS;   // Nanite_SoftRasterDepth.comp.spv
+    rhi::ShaderBytecode m_SoftColorCS;   // Nanite_SoftRaster.comp.spv
+    rhi::ShaderBytecode m_DepthResolveVS;  // Nanite_DepthResolve.vert.spv
+    rhi::ShaderBytecode m_DepthResolveFS;  // Nanite_DepthResolve.frag.spv
+
+    /// 两趟 compute 共用的描述符集布局（bindings 0..7）与**每趟一个**的描述符集：
+    /// 【为什么两趟各一个集合】第 2 趟多绑 4 张 GBuffer 颜色目标（binding 8..11），
+    ///   且引擎的 GPU 在**执行期**读描述符、最后一次主机写对整段命令缓冲生效（任务 15 的教训）
+    ///   ⇒ 两次派发必须在**不同的**集合上，且每个集合每帧只写一次。
+    rhi::DescriptorSetLayoutHandle m_SoftDepthLayout = rhi::kInvalidLayout;
+    rhi::DescriptorSetHandle       m_SoftDepthSet    = rhi::kInvalidSet;
+    rhi::DescriptorSetLayoutHandle m_SoftColorLayout = rhi::kInvalidLayout;
+    rhi::DescriptorSetHandle       m_SoftColorSet    = rhi::kInvalidSet;
+    std::unique_ptr<rhi::IRHIPipelineState> m_SoftRasterPSO;      // 第 1 趟（深度键）
+    std::unique_ptr<rhi::IRHIPipelineState> m_SoftColorPSO;       // 第 2 趟（写 GBuffer）
+
+    /// 深度解析通道（全屏片元；只写深度附件，无颜色附件）
+    rhi::DescriptorSetLayoutHandle m_DepthResolveLayout = rhi::kInvalidLayout;
+    rhi::DescriptorSetHandle       m_DepthResolveSet    = rhi::kInvalidSet;
+    std::unique_ptr<rhi::IRHIPipelineState> m_DepthResolvePSO;
+
+    /// 【任务 18】清屏 compute（8 张颜色目标的存储图像绑定 + 128B 清除值 push constant）
+    rhi::ShaderBytecode m_ClearCS;   // Nanite_GBufferClear.comp.spv
+    rhi::DescriptorSetLayoutHandle m_ClearLayout = rhi::kInvalidLayout;
+    rhi::DescriptorSetHandle       m_ClearSet    = rhi::kInvalidSet;
+    std::unique_ptr<rhi::IRHIPipelineState> m_ClearPSO;
+
+    /// 深度键缓冲（`RWStructuredBuffer<uint>`，W×H 条）+ 每帧清零用的常驻 0xFF 源
+    /// 【为什么用缓冲而不是 R32_UINT 存储图像】结构化缓冲上的 `InterlockedMin` 同样零额外设备
+    ///   特性，而且**清屏等价于一次 `CopyBuffer`**（存储图像没有等价的"整图填充"命令，
+    ///   否则要再写一个小 compute）。代价是 4B/像素（1920×1080 ≈ 8.3MB）。
+    std::unique_ptr<rhi::IRHIBuffer> m_DepthKey;
+    std::unique_ptr<rhi::IRHIBuffer> m_DepthKeyZeroSrc;   ///< 常驻 0xFF（`TransferSrc`）
+    u32 m_DepthKeyPixels = 0u;                            ///< 当前容量（像素数）；尺寸变化时重建
+    u32 m_DepthKeyZeroSrcPixels = 0u;                     ///< 常驻 0xFF 源的容量（与深度键同步重建）
+
+    /// 读数缓冲（扁平 u32，`kNaniteSoftStatsCapacity` 条）+ 每帧清零用的常驻 0 源
+    std::unique_ptr<rhi::IRHIBuffer> m_SoftStats;
+    std::unique_ptr<rhi::IRHIBuffer> m_SoftStatsZeroSrc;
+
+    /// 上一次录制时记下的参数（dump 帧日志用：真实 GPU 读回 + CPU 侧真值对照）
+    u32 m_SoftLastMaxTriangles  = 0u;
+    u32 m_SoftLastInstanceCount = 0u;
+
+    /// 【运行时格式能力】**GBuffer 深度格式能否做存储图像**（启动时查一次；
+    ///   `IRHIDevice::SupportsStorageImage(Format::D32_FLOAT)`）。它决定"compute 写深度"这条
+    ///   备选路线可不可用 —— 本实现走 `SV_Depth`，但读数里必须把这个能力标出来（§14.14 的裁决：
+    ///   不支持时降级要**被报告**）。
+    bool m_DepthStorageImageSupported = false;
 };
 
 } // namespace he::render

@@ -179,6 +179,32 @@ DeviceCaps VulkanDevice::GetCaps() const {
 }
 
 // ============================================================
+// SupportsStorageImage — 【§14.8 任务 18】某格式能否作为**存储图像**（UAV）被着色器读写
+//
+// 【为什么需要这个查询】软光栅是 compute（用 `RWTexture2D` 写 GBuffer 颜色 UAV，任务 4 已给
+//   8 张颜色目标加了 `UnorderedAccess`），而"compute 写深度"是否成立取决于 `D32_SFLOAT` 是否
+//   带 `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT`：实测本机 NVIDIA RTX 4060 支持、同机 AMD 核显
+//   **不支持**（§14.14 的 A1 裁决 / §14.5）。模块必须**运行时**查这个能力，按结果选择路径并
+//   在读数里标出，而不是静默失败（深度在本实现里走 `SV_Depth` + 既有深度附件，正是这条裁决）。
+//
+// 【缓存与保守方向】`vkGetPhysicalDeviceFormatProperties` 每次都要进驱动，故按格式缓存：
+//   0 = 未查询、1 = 支持、2 = 不支持。越界/Unknown 一律返回 false（= 按不支持处理）。
+// ============================================================
+bool VulkanDevice::SupportsStorageImage(Format format) const {
+    const usize index = (usize)format;
+    if (format == Format::Unknown || index >= (usize)Format::Count) return false;
+    if (m_StorageImageSupport[index] == 0) {
+        VkFormatProperties props{};
+        vkGetPhysicalDeviceFormatProperties(m_Physical, ToVkFormat(format), &props);
+        const bool supported =
+            (props.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0u
+         || (props.linearTilingFeatures  & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0u;
+        m_StorageImageSupport[index] = supported ? (i8)1 : (i8)2;
+    }
+    return m_StorageImageSupport[index] == (i8)1;
+}
+
+// ============================================================
 // Initialize — 创建 VkInstance → Device → 设置一切
 // ============================================================
 void VulkanDevice::Initialize(const DeviceInitDesc& desc) {

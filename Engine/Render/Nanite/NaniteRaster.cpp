@@ -33,6 +33,12 @@
 #include "Nanite_TestWrite.comp.spv.h"   // k_Nanite_TestWrite_comp_spv（§14.8 任务 4 的 UAV 自证通道）
 #include "Nanite_MeshTest.mesh.spv.h"    // k_Nanite_MeshTest_mesh_spv（§14.8 任务 6 的 mesh 通道）
 #include "Nanite_MeshTest.frag.spv.h"    // k_Nanite_MeshTest_frag_spv
+// 【§14.8 任务 18】软光栅三趟：深度键 / 写 GBuffer / 深度解析
+#include "Nanite_SoftRasterDepth.comp.spv.h"   // k_Nanite_SoftRasterDepth_comp_spv
+#include "Nanite_SoftRaster.comp.spv.h"        // k_Nanite_SoftRaster_comp_spv
+#include "Nanite_DepthResolve.vert.spv.h"      // k_Nanite_DepthResolve_vert_spv
+#include "Nanite_DepthResolve.frag.spv.h"      // k_Nanite_DepthResolve_frag_spv
+#include "Nanite_GBufferClear.comp.spv.h"     // k_Nanite_GBufferClear_comp_spv（compute 清屏 8 张颜色目标）
 
 #include <cstring>   // std::memcpy（占位顶点/索引缓冲的初值）
 
@@ -60,6 +66,23 @@ bool NaniteRaster::Initialize(rhi::IRHIDevice* device, u32 width, u32 height,
     if (!m_MeshShaderSupported) {
         HE_CORE_WARN("NaniteRaster: 设备不支持 VK_EXT_mesh_shader ⇒ 任务 6 的 Nanite_MeshTest "
                      "不会注册（其余链路不受影响）");
+    }
+
+    // ── 0b. 【任务 18】GBuffer 深度格式能否做**存储图像**（运行时能力查询）──
+    // 【为什么要查】软光栅是 compute：写颜色（8 张颜色目标在任务 4 已加 `UnorderedAccess`）
+    //   没问题，但"compute 写深度"只在 `D32_SFLOAT` 带 `STORAGE_IMAGE_BIT` 时成立 ——
+    //   实测本机 NVIDIA RTX 4060 支持、同机 AMD 核显不支持（§14.14 的 A1 裁决）。
+    //   本实现的深度走 `SV_Depth` + 既有深度附件（跨厂商），这个查询的结果只进读数：
+    //   让"为什么没走 compute 写深度"成为一行**被报告**的事实，而不是静默的取舍。
+    m_DepthStorageImageSupported = m_Device->SupportsStorageImage(rhi::Format::D32_FLOAT);
+    if (!m_DepthStorageImageSupported) {
+        HE_CORE_WARN("NaniteRaster: 本设备不支持 D32_SFLOAT 作为存储图像 ⇒ 软光栅不写深度 UAV，"
+                     "深度改走全屏片元的 SV_Depth（跨厂商路径；读数里 depth_written=1 / "
+                     "depth_storage_image_supported=0）");
+    } else {
+        HE_CORE_INFO("NaniteRaster: D32_SFLOAT 支持存储图像（compute 写深度可用），但本实现按 "
+                     "§14.5 的 A1 裁决仍走 SV_Depth + 既有深度附件（GBuffer 深度纹理没有 "
+                     "UnorderedAccess usage，且跨厂商一致性更好）");
     }
 
     // ── 1. 模块自建的 1×1 R8 目标 ──
@@ -155,6 +178,29 @@ void NaniteRaster::Shutdown() {
     m_MeshTestTarget.reset();
     m_MeshTestCount.reset();
     m_MeshTestReadback.reset();
+
+    // ── 【§14.8 任务 18】软光栅的懒建资源（未开启软光栅时它们是空的，这里自然是空操作）──
+    m_SoftRasterPSO.reset();
+    m_SoftColorPSO.reset();
+    m_DepthResolvePSO.reset();
+    if (m_Device && m_SoftDepthLayout != rhi::kInvalidLayout)
+        m_Device->DestroyDescriptorSetLayout(m_SoftDepthLayout);
+    if (m_Device && m_SoftColorLayout != rhi::kInvalidLayout)
+        m_Device->DestroyDescriptorSetLayout(m_SoftColorLayout);
+    if (m_Device && m_DepthResolveLayout != rhi::kInvalidLayout)
+        m_Device->DestroyDescriptorSetLayout(m_DepthResolveLayout);
+    m_SoftDepthLayout       = rhi::kInvalidLayout;
+    m_SoftDepthSet          = rhi::kInvalidSet;
+    m_SoftColorLayout       = rhi::kInvalidLayout;
+    m_SoftColorSet          = rhi::kInvalidSet;
+    m_DepthResolveLayout    = rhi::kInvalidLayout;
+    m_DepthResolveSet       = rhi::kInvalidSet;
+    m_DepthKey.reset();
+    m_DepthKeyZeroSrc.reset();
+    m_DepthKeyPixels        = 0u;
+    m_DepthKeyZeroSrcPixels = 0u;
+    m_SoftStats.reset();
+    m_SoftStatsZeroSrc.reset();
 
     m_Target.reset();
     m_DummyVB.reset();
@@ -547,6 +593,462 @@ u32 NaniteRaster::ReadbackMeshTestTargetMax() {
         }
     }
     return v;
+}
+
+// ============================================================
+// §14.8 任务 18：软光栅（两趟"原子深度键 + 等值复检"写 GBuffer）
+//
+// 【三趟的顺序与同步】全部录在同一个命令缓冲里、用**显式屏障**定序（帧图不跟踪模块自持资源，
+//   也排不动这些内部段；与任务 15/16 的 CullChain 是同一套做法）：
+//     清深度键（CopyBuffer）→ 屏障 → 第 1 趟 compute → 屏障 → 第 2 趟 compute
+//     → 屏障（颜色 UAV → 可采样）→ 深度解析（全屏片元写 SV_Depth）
+// ============================================================
+
+bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
+    if (m_SoftColorPSO) return true;
+    if (!m_Device || !targets.HasSoftRasterTargets()) return false;
+
+    // ── 1. 第 1 趟（深度键）的描述符集布局：bindings 0..7 ──
+    // 【为什么不走 bindless】模块私有缓冲、生命周期清晰；显式绑定最简单也最稳（与任务 3/13/15 同口径）。
+    {
+        rhi::DescriptorSetLayoutDesc layout;
+        layout.bindings = {
+            { 0, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 簇记录
+            { 1, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 量化顶点
+            { 2, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 打包三角形
+            { 3, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 可见簇引用
+            { 4, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 可见簇计数
+            { 5, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 实例表
+            { 6, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 深度键（读写）
+            { 7, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 读数（读写）
+        };
+        m_SoftDepthLayout = m_Device->CreateDescriptorSetLayout(layout);
+        if (m_SoftDepthLayout == rhi::kInvalidLayout) {
+            HE_CORE_ERROR("NaniteRaster: 软光栅第 1 趟描述符集布局创建失败");
+            return false;
+        }
+        m_SoftDepthSet = m_Device->AllocateDescriptorSet(m_SoftDepthLayout);
+
+        m_SoftDepthCS.stage      = rhi::ShaderStage::Compute;
+        m_SoftDepthCS.spirv      = k_Nanite_SoftRasterDepth_comp_spv;
+        m_SoftDepthCS.entryPoint = "main";
+
+        rhi::PushConstantRange pc;
+        pc.stageMask = rhi::kStageMaskCompute;
+        pc.size      = sizeof(NaniteSoftRasterParams);   // 96B
+
+        rhi::PipelineStateDesc desc;
+        desc.computeShader        = &m_SoftDepthCS;
+        desc.bindPoint            = rhi::PipelineBindPoint::Compute;
+        desc.pushConstantRanges   = { pc };
+        desc.descriptorSetLayouts = { m_SoftDepthLayout };
+        desc.debugName            = "NaniteSoftRasterDepth";
+        m_SoftRasterPSO = m_Device->CreatePipelineState(desc);
+        if (!m_SoftRasterPSO) { HE_CORE_ERROR("NaniteRaster: 软光栅第 1 趟 PSO 创建失败"); return false; }
+    }
+
+    // ── 2. 第 2 趟（写 GBuffer）的描述符集布局：bindings 0..7 同第 1 趟 + 8..11 = 4 张颜色目标 ──
+    // 【为什么是两个集合】引擎的 GPU 在**执行期**读描述符、最后一次主机写对整段命令缓冲生效
+    //   （任务 15 踩过的坑）⇒ 两次派发的绑定必须在不同集合上，且各自每帧只写一次。
+    {
+        rhi::DescriptorSetLayoutDesc layout;
+        layout.bindings = {
+            { 0, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },
+            { 1, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },
+            { 2, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },
+            { 3, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },
+            { 4, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },
+            { 5, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },
+            { 6, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },
+            { 7, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },
+            { 8, rhi::DescriptorType::StorageImage,  1, rhi::kStageMaskCompute, false },  // MRT0 albedo
+            { 9, rhi::DescriptorType::StorageImage,  1, rhi::kStageMaskCompute, false },  // MRT1 normal
+            {10, rhi::DescriptorType::StorageImage,  1, rhi::kStageMaskCompute, false },  // MRT4 worldPos
+            {11, rhi::DescriptorType::StorageImage,  1, rhi::kStageMaskCompute, false },  // MRT7 lightmapKey
+        };
+        m_SoftColorLayout = m_Device->CreateDescriptorSetLayout(layout);
+        if (m_SoftColorLayout == rhi::kInvalidLayout) {
+            HE_CORE_ERROR("NaniteRaster: 软光栅第 2 趟描述符集布局创建失败");
+            return false;
+        }
+        m_SoftColorSet = m_Device->AllocateDescriptorSet(m_SoftColorLayout);
+
+        m_SoftColorCS.stage      = rhi::ShaderStage::Compute;
+        m_SoftColorCS.spirv      = k_Nanite_SoftRaster_comp_spv;
+        m_SoftColorCS.entryPoint = "main";
+
+        rhi::PushConstantRange pc;
+        pc.stageMask = rhi::kStageMaskCompute;
+        pc.size      = sizeof(NaniteSoftRasterParams);
+
+        rhi::PipelineStateDesc desc;
+        desc.computeShader        = &m_SoftColorCS;
+        desc.bindPoint            = rhi::PipelineBindPoint::Compute;
+        desc.pushConstantRanges   = { pc };
+        desc.descriptorSetLayouts = { m_SoftColorLayout };
+        desc.debugName            = "NaniteSoftRasterWrite";
+        m_SoftColorPSO = m_Device->CreatePipelineState(desc);
+        if (!m_SoftColorPSO) { HE_CORE_ERROR("NaniteRaster: 软光栅第 2 趟 PSO 创建失败"); return false; }
+    }
+
+    // ── 3. 深度解析：无颜色附件 + D32 深度附件（写法与 CSMTechnique 的深度专用 PSO 同款）──
+    {
+        rhi::DescriptorSetLayoutDesc layout;
+        layout.bindings = {
+            { 0, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment, false },  // 深度键（只读）
+        };
+        m_DepthResolveLayout = m_Device->CreateDescriptorSetLayout(layout);
+        if (m_DepthResolveLayout == rhi::kInvalidLayout) {
+            HE_CORE_ERROR("NaniteRaster: 深度解析描述符集布局创建失败");
+            return false;
+        }
+        m_DepthResolveSet = m_Device->AllocateDescriptorSet(m_DepthResolveLayout);
+
+        m_DepthResolveVS.stage      = rhi::ShaderStage::Vertex;
+        m_DepthResolveVS.spirv      = k_Nanite_DepthResolve_vert_spv;
+        m_DepthResolveVS.entryPoint = "main";
+        m_DepthResolveFS.stage      = rhi::ShaderStage::Pixel;
+        m_DepthResolveFS.spirv      = k_Nanite_DepthResolve_frag_spv;
+        m_DepthResolveFS.entryPoint = "main";
+
+        rhi::PipelineStateDesc desc;
+        desc.vertexShader         = &m_DepthResolveVS;
+        desc.pixelShader          = &m_DepthResolveFS;
+        desc.topology             = rhi::PrimitiveTopology::TriangleList;
+        desc.cullMode             = rhi::CullMode::None;   // 全屏大三角形只看覆盖，不挑绕序
+        desc.depthTest            = false;                 // 深度值由 shader 决定 ⇒ 不做硬件比较
+        desc.depthWrite           = true;                  // 但要**写**深度
+        desc.depthFormat          = rhi::Format::D32_FLOAT;
+        desc.colorAttachmentCount = 0;                     // 深度专用通道（与 CSM/Spot 阴影同款）
+        desc.descriptorSetLayouts = { m_DepthResolveLayout };
+        desc.debugName            = "NaniteDepthResolve";
+        m_DepthResolvePSO = m_Device->CreatePipelineState(desc);
+        if (!m_DepthResolvePSO) { HE_CORE_ERROR("NaniteRaster: 深度解析 PSO 创建失败"); return false; }
+    }
+
+    // ── 4. 读数缓冲（16×u32）+ 常驻 0 源（每帧在命令缓冲内清）──
+    {
+        rhi::BufferDesc d;
+        d.size      = sizeof(u32) * kNaniteSoftStatsCapacity;
+        d.usage     = rhi::BufferUsage::Storage;
+        d.cpuAccess = true;   // dump 帧读回
+        m_SoftStats = m_Device->CreateBuffer(d);
+        if (!m_SoftStats) { HE_CORE_ERROR("NaniteRaster: 软光栅读数缓冲创建失败"); return false; }
+    }
+    if (!m_SoftStatsZeroSrc) {
+        rhi::BufferDesc d;
+        d.size      = sizeof(u32) * kNaniteSoftStatsCapacity;
+        d.usage     = rhi::BufferUsage::TransferSrc;   // 只当拷贝源
+        d.cpuAccess = true;
+        m_SoftStatsZeroSrc = m_Device->CreateBuffer(d);
+        if (!m_SoftStatsZeroSrc) { HE_CORE_ERROR("NaniteRaster: 软光栅读数清零源创建失败"); return false; }
+        if (void* p = m_SoftStatsZeroSrc->Map()) {
+            std::memset(p, 0, sizeof(u32) * kNaniteSoftStatsCapacity);
+            m_SoftStatsZeroSrc->Unmap();
+        }
+    }
+
+    HE_CORE_INFO("NaniteRaster: 任务 18 软光栅就绪（两趟：原子深度键 + 等值复检写 GBuffer；"
+                 "深度走 SV_Depth + 既有深度附件；depth_storage_image_supported={}）",
+                 m_DepthStorageImageSupported ? 1 : 0);
+    return true;
+}
+
+bool NaniteRaster::EnsureDepthKeyBuffers(u32 width, u32 height) {
+    if (!m_Device || width == 0u || height == 0u) return false;
+    const u32 pixels = width * height;
+    if (m_DepthKey && m_DepthKeyPixels == pixels) return true;
+
+    // 【替换的安全性】本函数在 `RecordSoftRasterPass` 里被调用（帧内录制期），而深度键只被
+    //   模块自己的三趟使用、且这三趟都录在**当前**命令缓冲里。视口变化时引擎会 OnResize →
+    //   此处重建；旧缓冲可能仍被上一帧在飞的命令缓冲引用 —— 与 `NaniteRaster` 的占位索引缓冲
+    //   同一取舍（引擎在本设备上是"提交后即弃"的帧模型，重建发生在帧边界）。为避免在飞引用，
+    //   录制期不重建：尺寸不一致时**跳过本帧软光栅**并告警一次（由 IsReady 之外的门控承担）。
+    rhi::BufferDesc d;
+    d.size      = sizeof(u32) * pixels;
+    d.usage     = rhi::BufferUsage::Storage;   // Storage 路径恒定带 TRANSFER_DST（每帧的 CopyBuffer 目标）
+    d.cpuAccess = true;
+    m_DepthKey = m_Device->CreateBuffer(d);
+    if (!m_DepthKey) { HE_CORE_ERROR("NaniteRaster: 深度键缓冲创建失败（{} 像素）", pixels); return false; }
+    m_DepthKeyPixels = pixels;
+
+    // 【为什么用"常驻 0xFF 源 + CopyBuffer"而不是主机写】任务 13 的教训：录制期的主机写会与
+    //   GPU 派发竞争（CPU 领先 GPU ⇒ 第 N+1 帧的写落到第 N 帧派发之前）。命令缓冲内的拷贝
+    //   由 GPU 有序执行，零停顿。
+    if (!m_DepthKeyZeroSrc || m_DepthKeyZeroSrcPixels != pixels) {
+        rhi::BufferDesc z;
+        z.size      = d.size;
+        z.usage     = rhi::BufferUsage::TransferSrc;
+        z.cpuAccess = true;
+        m_DepthKeyZeroSrc = m_Device->CreateBuffer(z);
+        if (!m_DepthKeyZeroSrc) { HE_CORE_ERROR("NaniteRaster: 深度键清零源创建失败"); return false; }
+        if (void* p = m_DepthKeyZeroSrc->Map()) {
+            std::memset(p, 0xFF, d.size);
+            m_DepthKeyZeroSrc->Unmap();
+        }
+        m_DepthKeyZeroSrcPixels = pixels;
+    }
+    HE_CORE_INFO("NaniteRaster: 深度键缓冲就绪（{}×{} = {} B；每帧由命令缓冲内的拷贝清成 0xFFFFFFFF）",
+                 width, height, (unsigned long long)d.size);
+    return true;
+}
+
+void NaniteRaster::RecordDepthKeyClear(rhi::IRHICommandList* cmd) {
+    if (!cmd || !m_DepthKey || !m_DepthKeyZeroSrc) return;
+    cmd->CopyBuffer(m_DepthKeyZeroSrc.get(), m_DepthKey.get(), (u64)m_DepthKeyPixels * sizeof(u32), 0, 0);
+    // 拷贝 → 第 1 趟 compute：显式内存屏障（模块自持缓冲不在帧图里，同步必须自己给）
+    cmd->PipelineBarrier(rhi::PipelineStage::Transfer, rhi::PipelineStage::ComputeShader,
+                         rhi::ResourceState::CopyDst, rhi::ResourceState::UnorderedAccess);
+}
+
+void NaniteRaster::RecordSoftStatsClear(rhi::IRHICommandList* cmd) {
+    if (!cmd || !m_SoftStats || !m_SoftStatsZeroSrc) return;
+    cmd->CopyBuffer(m_SoftStatsZeroSrc.get(), m_SoftStats.get(),
+                    (u64)kNaniteSoftStatsCapacity * sizeof(u32), 0, 0);
+    cmd->PipelineBarrier(rhi::PipelineStage::Transfer, rhi::PipelineStage::ComputeShader,
+                         rhi::ResourceState::CopyDst, rhi::ResourceState::UnorderedAccess);
+}
+
+bool NaniteRaster::EnsureGBufferClearResources() {
+    if (m_ClearPSO) return true;
+    if (!m_Device) return false;
+
+    // 8 张颜色目标的存储图像绑定（任务 4 的 A1 裁决已给全部 8 张加了 UnorderedAccess）
+    rhi::DescriptorSetLayoutDesc layout;
+    layout.bindings = {
+        {0, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskCompute, false},
+        {1, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskCompute, false},
+        {2, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskCompute, false},
+        {3, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskCompute, false},
+        {4, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskCompute, false},
+        {5, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskCompute, false},
+        {6, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskCompute, false},
+        {7, rhi::DescriptorType::StorageImage, 1, rhi::kStageMaskCompute, false},
+    };
+    m_ClearLayout = m_Device->CreateDescriptorSetLayout(layout);
+    if (m_ClearLayout == rhi::kInvalidLayout) {
+        HE_CORE_ERROR("NaniteRaster: 清屏描述符集布局创建失败");
+        return false;
+    }
+    m_ClearSet = m_Device->AllocateDescriptorSet(m_ClearLayout);
+
+    m_ClearCS.stage      = rhi::ShaderStage::Compute;
+    m_ClearCS.spirv      = k_Nanite_GBufferClear_comp_spv;
+    m_ClearCS.entryPoint = "main";
+
+    rhi::PushConstantRange pc;
+    pc.stageMask = rhi::kStageMaskCompute;
+    pc.size      = sizeof(float) * 4u * 8u;   // 8 × float4 = 128B（引擎的 push constant 上限）
+
+    rhi::PipelineStateDesc desc;
+    desc.computeShader        = &m_ClearCS;
+    desc.bindPoint            = rhi::PipelineBindPoint::Compute;
+    desc.pushConstantRanges   = { pc };
+    desc.descriptorSetLayouts = { m_ClearLayout };
+    desc.debugName            = "NaniteGBufferClear";
+    m_ClearPSO = m_Device->CreatePipelineState(desc);
+    if (!m_ClearPSO) { HE_CORE_ERROR("NaniteRaster: 清屏 compute PSO 创建失败"); return false; }
+    return true;
+}
+
+void NaniteRaster::RecordGBufferClearPass(rhi::IRHICommandList* cmd, const GBufferTargets& targets) {
+    if (!cmd || !targets.HasClearTargets()) return;
+    if (!EnsureGBufferClearResources()) return;
+
+    const u32 w = targets.albedo->GetWidth();
+    const u32 h = targets.albedo->GetHeight();
+    if (w == 0u || h == 0u) return;
+
+    // 【清除值必须与既有路径逐位相同】复刻 `GBufferRenderer_CPU.cpp:38-54`，一个数都不改：
+    //   这样"模块接管"与"既有路径"的起点（未被几何覆盖的像素）完全一致，
+    //   两档转储的差异才只可能来自几何写入本身。
+    float clears[32] = { 0.0f };
+    clears[0 * 4 + 3] = 1.0f;   // MRT0 albedo.a  = metallic 1
+    clears[1 * 4 + 3] = 1.0f;   // MRT1 normal.a  = roughness 1
+    clears[2 * 4 + 3] = 1.0f;   // MRT2 emissive.a= ao 1
+    clears[3 * 4 + 0] = 0.0f;   // MRT3 velocity  = 0
+    clears[3 * 4 + 1] = 0.0f;
+    clears[5 * 4 + 2] = 0.5f;   // MRT5 disneyA: specular = 0.5
+    clears[5 * 4 + 3] = 0.0f;
+    clears[6 * 4 + 1] = 1.0f;   // MRT6 disneyB: clearcoatGloss = 1
+    clears[6 * 4 + 2] = 1.0f;
+    clears[6 * 4 + 3] = 1.0f;
+    clears[7 * 4 + 3] = 0.0f;   // MRT7 lightmapKey: 天空页号无效
+
+    // 每帧重写绑定：GBuffer 纹理在视口变化时会重建（与任务 4 的 UAV 自证通道同款处理）
+    rhi::IRHITexture* colors[8] = { targets.albedo, targets.normal, targets.emissive, targets.velocity,
+                                    targets.worldPos, targets.disneyA, targets.disneyB, targets.lightmapKey };
+    for (u32 i = 0; i < 8u; ++i) {
+        m_Device->UpdateDescriptorSetWithImageView(m_ClearSet, i, rhi::DescriptorType::StorageImage,
+                                                   colors[i]->GetNativeHandle());
+    }
+
+    // 颜色目标：帧图把它们当 RenderTarget（GB_Clear 的声明），本 pass 要当 UAV 写
+    // ⇒ 显式屏障（帧图推导的 dstStage 是保守映射，不含 ComputeShader —— 任务 4 的教训）。
+    for (u32 i = 0; i < 8u; ++i) {
+        cmd->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput,
+                             rhi::PipelineStage::ComputeShader,
+                             rhi::ResourceState::RenderTarget,
+                             rhi::ResourceState::UnorderedAccess,
+                             colors[i]);
+    }
+
+    cmd->SetPipeline(m_ClearPSO.get());
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_ClearSet);
+    cmd->SetPushConstants(0, (u32)sizeof(clears), clears);
+    cmd->SetDrawDebugLabel("Nanite_GBufferClear (8 MRT via UAV)");
+    cmd->Dispatch((w + 7u) / 8u, (h + 7u) / 8u, 1);
+
+    // 清完即可被后续 pass 采样（帧图还会推导一次，但它的 dstStage 同样偏保守）
+    for (u32 i = 0; i < 8u; ++i) {
+        cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader,
+                             rhi::PipelineStage::FragmentShader,
+                             rhi::ResourceState::UnorderedAccess,
+                             rhi::ResourceState::ShaderResource,
+                             colors[i]);
+    }
+
+    // 【深度不在这里清】`ClearDepthStencil` 在本引擎的 GBuffer 深度上会报
+    //   `vkCmdClearDepthStencilImage-pRanges-02659/02660` 与 `VkImageMemoryBarrier-oldLayout-01213`
+    //   （实测 10+10+10 条校验行）；而模块的"深度解析"通道在同一个 pass 体内**逐像素**写
+    //   `SV_Depth`（未覆盖像素写 1.0 = 远平面）⇒ 深度本来就是全屏重写的，不需要预先清。
+}
+void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
+                                        const GBufferTargets& targets,
+                                        const AssetViews& asset,
+                                        const NaniteSoftRasterParams& params,
+                                        rhi::IRHIBuffer* visibleRefs,
+                                        rhi::IRHIBuffer* visibleCount,
+                                        rhi::IRHIBuffer* instances,
+                                        u32 visibleCapacity,
+                                        const float clearDepth) {
+    if (!cmd || !targets.HasSoftRasterTargets() || !asset.valid()) return;
+    if (!visibleRefs || !visibleCount || !instances) return;
+    if (!EnsureSoftRasterResources(targets)) return;
+
+    const u32 w = targets.albedo->GetWidth();
+    const u32 h = targets.albedo->GetHeight();
+    if (!EnsureDepthKeyBuffers(w, h)) return;
+
+    m_SoftLastMaxTriangles  = params.maxTriangles;
+    m_SoftLastInstanceCount = params.instanceCount;
+
+    // ── 绑定：每帧重写易变项（资产/可见簇/实例缓冲在资产上传后就不再变，但重写只是几个
+    //    vkUpdateDescriptorSets，且引擎的 GPU 在执行期读描述符 ⇒ "每帧写一次"是最稳的口径）──
+    m_Device->UpdateDescriptorSet(m_SoftDepthSet, 0, rhi::DescriptorType::StorageBuffer, asset.clusters);
+    m_Device->UpdateDescriptorSet(m_SoftDepthSet, 1, rhi::DescriptorType::StorageBuffer, asset.vertices);
+    m_Device->UpdateDescriptorSet(m_SoftDepthSet, 2, rhi::DescriptorType::StorageBuffer, asset.indices);
+    m_Device->UpdateDescriptorSet(m_SoftDepthSet, 3, rhi::DescriptorType::StorageBuffer, visibleRefs);
+    m_Device->UpdateDescriptorSet(m_SoftDepthSet, 4, rhi::DescriptorType::StorageBuffer, visibleCount);
+    m_Device->UpdateDescriptorSet(m_SoftDepthSet, 5, rhi::DescriptorType::StorageBuffer, instances);
+    m_Device->UpdateDescriptorSet(m_SoftDepthSet, 6, rhi::DescriptorType::StorageBuffer, m_DepthKey.get());
+    m_Device->UpdateDescriptorSet(m_SoftDepthSet, 7, rhi::DescriptorType::StorageBuffer, m_SoftStats.get());
+
+    m_Device->UpdateDescriptorSet(m_SoftColorSet, 0, rhi::DescriptorType::StorageBuffer, asset.clusters);
+    m_Device->UpdateDescriptorSet(m_SoftColorSet, 1, rhi::DescriptorType::StorageBuffer, asset.vertices);
+    m_Device->UpdateDescriptorSet(m_SoftColorSet, 2, rhi::DescriptorType::StorageBuffer, asset.indices);
+    m_Device->UpdateDescriptorSet(m_SoftColorSet, 3, rhi::DescriptorType::StorageBuffer, visibleRefs);
+    m_Device->UpdateDescriptorSet(m_SoftColorSet, 4, rhi::DescriptorType::StorageBuffer, visibleCount);
+    m_Device->UpdateDescriptorSet(m_SoftColorSet, 5, rhi::DescriptorType::StorageBuffer, instances);
+    m_Device->UpdateDescriptorSet(m_SoftColorSet, 6, rhi::DescriptorType::StorageBuffer, m_DepthKey.get());
+    m_Device->UpdateDescriptorSet(m_SoftColorSet, 7, rhi::DescriptorType::StorageBuffer, m_SoftStats.get());
+    m_Device->UpdateDescriptorSetWithImageView(m_SoftColorSet, 8,  rhi::DescriptorType::StorageImage,
+                                               targets.albedo->GetNativeHandle());
+    m_Device->UpdateDescriptorSetWithImageView(m_SoftColorSet, 9,  rhi::DescriptorType::StorageImage,
+                                               targets.normal->GetNativeHandle());
+    m_Device->UpdateDescriptorSetWithImageView(m_SoftColorSet, 10, rhi::DescriptorType::StorageImage,
+                                               targets.worldPos->GetNativeHandle());
+    m_Device->UpdateDescriptorSetWithImageView(m_SoftColorSet, 11, rhi::DescriptorType::StorageImage,
+                                               targets.lightmapKey->GetNativeHandle());
+    m_Device->UpdateDescriptorSet(m_DepthResolveSet, 0, rhi::DescriptorType::StorageBuffer, m_DepthKey.get());
+
+    // ── ① 清深度键 + 清读数（命令缓冲内拷贝，GPU 有序）──
+    RecordDepthKeyClear(cmd);
+    RecordSoftStatsClear(cmd);
+
+    // ── ② 颜色目标的布局：帧图推导的 `RenderTarget → UnorderedAccess` 的 dstStage 是保守映射
+    //      （RayTracingShader），对 compute 派发不构成执行依赖 ⇒ 这里补显式屏障（与任务 4 同款）──
+    for (rhi::IRHITexture* tex : { targets.albedo, targets.normal, targets.worldPos, targets.lightmapKey }) {
+        cmd->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput,
+                             rhi::PipelineStage::ComputeShader,
+                             rhi::ResourceState::RenderTarget,
+                             rhi::ResourceState::UnorderedAccess,
+                             tex);
+    }
+
+    // ── ③ 第 1 趟：逐簇一个工作组，dispatch 条数 = 可见簇容量（着色器按可见计数提前返回）──
+    // 【为什么要按容量而不是按可见数派发】可见计数是**同一帧 GPU 刚写出的**值，CPU 读不到（读回
+    //   要等 GPU ⇒ 破坏无停顿）；按容量派发、由 shader 按 `slot >= visibleCount` 早退，是本引擎
+    //   既有的"GPU 驱动"写法。容量 = 可见引用表容量（`NaniteCull::GetBVHVisibleCapacity`）。
+    cmd->SetPipeline(m_SoftRasterPSO.get());
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_SoftDepthSet);
+    cmd->SetPushConstants(0, (u32)sizeof(NaniteSoftRasterParams), &params);
+    cmd->SetDrawDebugLabel("Nanite_SoftRasterDepth (atomic depth key)");
+    cmd->Dispatch(visibleCapacity, 1, 1);
+
+    // ── ④ 第 1 趟 → 第 2 趟：深度键的 RAW（全局内存屏障）──
+    cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                         rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess);
+
+    cmd->SetPipeline(m_SoftColorPSO.get());
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_SoftColorSet);
+    cmd->SetPushConstants(0, (u32)sizeof(NaniteSoftRasterParams), &params);
+    cmd->SetDrawDebugLabel("Nanite_SoftRaster (equality test -> GBuffer)");
+    cmd->Dispatch(visibleCapacity, 1, 1);
+
+    // ── ⑤ 第 2 趟 → 深度解析：深度键 UAV → 只读；4 张颜色 UAV → 可采样（Lighting 要读）──
+    cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::FragmentShader,
+                         rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource);
+    for (rhi::IRHITexture* tex : { targets.albedo, targets.normal, targets.worldPos, targets.lightmapKey }) {
+        cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader,
+                             rhi::PipelineStage::FragmentShader,
+                             rhi::ResourceState::UnorderedAccess,
+                             rhi::ResourceState::ShaderResource,
+                             tex);
+    }
+
+    // ── ⑥ 深度解析：全屏片元，把深度键还原成 NDC 深度写既有深度附件（SV_Depth）──
+    // 【布局转换由 RHI 的 render pass 自己完成】`BeginOffscreenPass` 内部会把深度从当前布局
+    //   （帧图模型里 GB_Clear 之后的 DEPTH_STENCIL_READ_ONLY）转到 ATTACHMENT，并在结束时
+    //   还原成 READ_ONLY —— 于是帧图的模型与真实布局继续一致，不需要额外的深度屏障。
+    rhi::ClearValue depthClear{};
+    depthClear.depth = clearDepth;
+    cmd->SetPipeline(m_DepthResolvePSO.get());
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DepthResolveSet);
+    cmd->BeginOffscreenPass(nullptr, targets.depth->GetNativeHandle(), w, h, &depthClear, false);
+    cmd->SetViewport({ 0.0f, (float)h, (float)w, -(float)h, 0.0f, 1.0f });
+    cmd->SetScissor({ 0, 0, w, h });
+    cmd->SetDrawDebugLabel("Nanite_DepthResolve (key -> SV_Depth)");
+    cmd->Draw(3);
+    cmd->EndOffscreenPass();
+}
+
+void NaniteRaster::LogSoftRasterReadback() {
+    // 真实 GPU 读回（与其它读数同一约定：只 Map、不等待；调用方已 WaitIdle）
+    if (!m_SoftStats) return;
+    u32 s[kNaniteSoftStatsCapacity] = {};
+    if (void* p = m_SoftStats->Map()) {
+        std::memcpy(s, p, sizeof(s));
+        m_SoftStats->Unmap();
+    }
+    HE_CORE_INFO("[Nanite] soft_raster clusters={} soft={} skipped_big={} triangles={} pixels_written={} "
+                 "degenerate={} neutral_material_pixels={} depth_written={} "
+                 "depth_storage_image_supported={} depth_src=key+SV_Depth max_triangles={} "
+                 "instances={} depth_key_pixels={} covered_px={} diag_screenw={} diag_screenh={} "
+                 "diag_maxtri={} diag_extent_milli={} tested_px={}",
+                 s[kNaniteSoftStatRasterClusters] + s[kNaniteSoftStatSkippedClusters],
+                 s[kNaniteSoftStatRasterClusters],
+                 s[kNaniteSoftStatSkippedClusters],
+                 s[kNaniteSoftStatTriangles],
+                 s[kNaniteSoftStatPixels],
+                 s[kNaniteSoftStatDegenerate],
+                 s[kNaniteSoftStatNeutralPixels],
+                 1,        // 深度解析恒执行（全屏片元写 SV_Depth）⇒ depth_written 恒 1
+                 m_DepthStorageImageSupported ? 1 : 0,
+                 m_SoftLastMaxTriangles,
+                 m_SoftLastInstanceCount,
+                 m_DepthKeyPixels,
+                 s[6], s[7], s[8], s[9], s[10], s[11]);
 }
 
 } // namespace he::render

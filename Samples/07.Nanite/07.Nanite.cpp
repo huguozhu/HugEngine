@@ -620,14 +620,26 @@ int main() {
             naniteSettings.drawCapacity = (u32)std::max(0, std::min(
                 GetInt(cfgData, "nanite_draw_capacity", (int)naniteSettings.drawCapacity),
                 (int)render::kNaniteMaxIndirectDraws));
+            // 任务 18 的**软光栅写 GBuffer**（默认 1 = 模块是几何写入者）：cfg → 真值，同写法。
+            // 1 ⇒ 既有 GB_Clear 的几何绘制让位，改由模块清屏 + 软光栅三趟写 GBuffer；
+            // 0 ⇒ 既有几何路径原样执行（"同场景同相机对照"的对照档 + 回退档）。
+            naniteSettings.softRaster = GetInt(cfgData, "nanite_soft_raster",
+                                               naniteSettings.softRaster ? 1 : 0) != 0;
+            // 任务 18 的**软光栅三角形数上限**（默认 16 = §5.2 的阈值）：钳到 [1, 64]。
+            // 超过该值的簇跳过并计数（留给任务 22 的 mesh 硬光栅）；调到 64 可让软光栅吃下全部簇。
+            naniteSettings.softMaxTriangles = (u32)std::max(1, std::min(
+                GetInt(cfgData, "nanite_soft_max_triangles", (int)naniteSettings.softMaxTriangles),
+                (int)render::kNaniteMaxClusterTriangles));
             deferredPipeline.SetNaniteSettings(naniteSettings);
             HE_CORE_INFO("[Nanite] 配置恢复: nanite_enable={} nanite_fake_clusters={} "
                          "nanite_test_write={} nanite_mesh_test={} nanite_instance_test_count={} "
-                         "nanite_hiz={} nanite_fake_chain={} nanite_draw_capacity={}",
+                         "nanite_hiz={} nanite_fake_chain={} nanite_draw_capacity={} "
+                         "nanite_soft_raster={} nanite_soft_max_triangles={}",
                          naniteSettings.enabled ? 1 : 0, naniteSettings.fakeClusters,
                          naniteSettings.testWrite ? 1 : 0, naniteSettings.meshTest ? 1 : 0,
                          naniteSettings.instanceTestCount, naniteSettings.hiz ? 1 : 0,
-                         naniteSettings.fakeChain ? 1 : 0, naniteSettings.drawCapacity);
+                         naniteSettings.fakeChain ? 1 : 0, naniteSettings.drawCapacity,
+                         naniteSettings.softRaster ? 1 : 0, naniteSettings.softMaxTriangles);
         }
 
         auto& ae = deferredPipeline.GetAutoExposure();
@@ -1846,6 +1858,14 @@ int main() {
             if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
                 dpNanite->GetNanite().LogMeshTestReadback();
 
+            // ── Nanite（§14.8 任务 18）：软光栅的**恰好一行**真实 GPU 读回 ──
+            // 字段：clusters/soft/skipped_big/triangles/pixels_written/degenerate/
+            //       neutral_material_pixels/depth_written/depth_storage_image_supported/…
+            // 同步已在上面几行的 `WaitIdle()` 完成；`nanite_soft_raster=0` 或模块关闭时
+            // 模块内部直接返回、不打印，因此不改变任何既有档位的日志。
+            if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
+                dpNanite->GetNanite().LogSoftRasterReadback();
+
             const String dir  = "build/verify/";
             const String base = dir + "gi_" + g_DumpTag;
             std::filesystem::create_directories(dir);
@@ -1985,6 +2005,13 @@ int main() {
             std::to_string(deferredPipeline.GetNaniteSettings().fakeChain ? 1 : 0);
         out["nanite_draw_capacity"] =
             std::to_string(deferredPipeline.GetNaniteSettings().drawCapacity);
+        // 任务 18：软光栅写 GBuffer 开关（默认 1）与每簇三角形数上限（默认 16）——同写法回写。
+        // 【为什么必须回写】冒烟脚本用 `nanite_soft_max_triangles` 跑"阈值 16 / 阈值 64"两档，
+        // 判据之一是"配置回显逐键等于本档请求"（Extra 被静默丢弃这个坑已踩过两次）。
+        out["nanite_soft_raster"] =
+            std::to_string(deferredPipeline.GetNaniteSettings().softRaster ? 1 : 0);
+        out["nanite_soft_max_triangles"] =
+            std::to_string(deferredPipeline.GetNaniteSettings().softMaxTriangles);
 
         // ── AutoExposure ──
         auto& ae = deferredPipeline.GetAutoExposure();

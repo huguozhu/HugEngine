@@ -284,6 +284,10 @@ public:
     // ── 实例剔除的读回访问（模块内部与 `NaniteRenderer::LogCull3Readback` 使用）──
     [[nodiscard]] rhi::IRHIBuffer* GetVisibleInstanceBuffer()      const { return m_VisibleInstanceBuf.get(); }
     [[nodiscard]] rhi::IRHIBuffer* GetVisibleInstanceCountBuffer() const { return m_VisibleInstanceCountBuf.get(); }
+    /// 【§14.8 任务 18】本帧的实例表（128B/条 `NaniteInstanceGpuObject` 契约）。
+    /// 软光栅按可见簇引用的 `instance` 取它的**平移列**（`localToWorld[12..14]`）把网格空间的
+    /// 簇顶点搬到世界空间；表内容由 Phase 1 的 `UploadInstanceCullInputs` 写入。
+    [[nodiscard]] rhi::IRHIBuffer* GetInstanceBuffer()             const { return m_InstanceBuf.get(); }
     /// CPU 参考剔除的可见实例下标（升序）—— 最近一次 `RecordInstanceCullPass` 的结果
     [[nodiscard]] const std::vector<u32>& GetCpuVisibleInstances() const { return m_CpuVisibleInstances; }
     /// 本帧合成实例条数（= 最近一次 `SetInstanceCullFrame` 的钳制后入参）

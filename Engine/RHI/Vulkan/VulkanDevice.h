@@ -51,6 +51,10 @@ public:
     Backend    GetBackend() const override { return Backend::Vulkan; }
     DeviceCaps GetCaps()    const override;
 
+    // 【§14.8 任务 18】该格式能否作为**存储图像**（UAV）。实现 = `vkGetPhysicalDeviceFormatProperties`
+    //   查 `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT`；查询结果按格式缓存（见 .cpp 的成员）。
+    bool SupportsStorageImage(he::rhi::Format format) const override;
+
     void Initialize(const DeviceInitDesc& desc) override;
     void Shutdown() override;
 
@@ -331,6 +335,10 @@ private:
     bool             m_SupportsDGC             = false;
     bool             m_SupportsGPL            = false;
     bool             m_SupportsGPLFastLinking = false;
+
+    /// 【§14.8 任务 18】存储图像（UAV）能力的**按格式缓存**：0 = 未查询、1 = 支持、2 = 不支持。
+    /// 由 `SupportsStorageImage()`（const）在首次查询时填入，故必须是 mutable。
+    mutable i8       m_StorageImageSupport[(usize)Format::Count] = {};
     // RT Pipeline 属性
     u32              m_MaxRayRecursionDepth     = 1;
     u32              m_ShaderGroupHandleSize    = 32;

@@ -39,6 +39,15 @@ public:
     virtual Backend    GetBackend() const = 0;
     virtual DeviceCaps GetCaps()    const = 0;
 
+    // --- 格式能力查询（§14.8 任务 18 新增；最小扩展，性质同任务 3/6/12 的 RHI 补充）---
+    // 该格式能否作为**存储图像**（UAV / `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT`）被着色器读写。
+    // 【为什么需要】任务 18 的软光栅是 compute（写 GBuffer 颜色 UAV），而"compute 写深度"能否
+    //   成立取决于 `D32_SFLOAT` 是否支持存储图像：实测本机 NVIDIA RTX 4060 支持、
+    //   同机 AMD 核显**不支持**（§14.14 的 A1 裁决与 §14.5）。故模块必须**运行时查**这个能力，
+    //   不支持时走"深度不写 + 明确告警 + 读数标出"的降级路径，而不是静默失败。
+    // 默认返回 false：后端未实现时按"不支持"处理（保守方向 = 不走存储图像路径）。
+    virtual bool SupportsStorageImage(Format /*format*/) const { return false; }
+
     // --- Resource creation ---
     virtual std::unique_ptr<IRHISwapChain>      CreateSwapChain(const SwapChainDesc& desc) = 0;
     virtual std::unique_ptr<IRHICommandList>    CreateCommandList(QueueType queue = QueueType::Graphics) = 0;

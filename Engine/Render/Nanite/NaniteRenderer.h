@@ -61,6 +61,20 @@ struct NaniteGBufferHandles {
     /// 【生命周期】纹理归 `GBufferRenderer` 所有；模块只在一个 pass 内借用（不持有）。
     /// 前一处挂钩（`AddPasses`）不用它，故默认 nullptr。
     rhi::IRHITexture* albedoTexture = nullptr;
+
+    /// 【任务 18】8 个颜色附件 + 深度的**纹理对象**（按 MRT 槽位下标：0=albedo … 7=lightmapKey）。
+    /// 任务 18 起模块要①按既有清除值清屏这 8 张 + 深度、②用存储图像写其中 4 张、
+    /// ③把深度解析结果写进深度附件 —— 这三件事都只有 `IRHITexture*` 能做（帧图句柄只够排序）。
+    /// 【生命周期】同上：归 `GBufferRenderer`；模块只在 pass 内借用。
+    rhi::IRHITexture* colorTextures[8] = { nullptr, nullptr, nullptr, nullptr,
+                                          nullptr, nullptr, nullptr, nullptr };
+    rhi::IRHITexture* depthTexture = nullptr;
+
+    /// 【任务 18】把 8 张颜色 + 深度打包成 `NaniteRaster::GBufferTargets`（模块内部用）
+    [[nodiscard]] bool HasFullGBufferTextures() const {
+        for (u32 i = 0; i < 8u; ++i) if (!colorTextures[i]) return false;
+        return depthTexture != nullptr;
+    }
 };
 
 /// 【§14.8 任务 15】Hi-Z 金字塔的来源（由 `DeferredPipeline` 在帧图构建期提供）
@@ -189,6 +203,23 @@ public:
     ///   打印那一行 —— 否则同一帧会有两条互相矛盾的"画了多少"读数。
     void LogFakePipelineReadback();
 
+    /// 【§14.8 任务 18】把模块自持的软光栅读数组建起来（懒建；资产与 GBuffer 纹理齐了才成功）。
+    /// 由 `AddPasses` 在开关开启时调用一次 —— 它**不注册任何 pass**，只保证执行期的资源就绪。
+    void EnsureSoftRasterReady(const NaniteGBufferHandles& gb);
+
+    /// 【§14.8 任务 18】**让位**的落点：既有 `GB_Clear` 的几何绘制让给模块，本函数只做
+    /// "按既有清除值清屏 8×MRT + 深度"（模块自己建 PSO/附件布局、直接写既有 GBuffer 纹理句柄）。
+    /// 【调用点】`DeferredPipeline_FrameGraph.cpp` 的 `GB_Clear` pass 体内，由**同一个开关**门控：
+    ///   `if (enabled && IsReady() && softRaster) 模块清屏 else 既有 GBufferRenderer::Render(...)`。
+    ///   这样既有 pass 的**名字、声明与顺序一个都没变**（判据 ⑥ 的 pass 集合与指纹判据不受影响），
+    ///   变的只是那一个 pass 体内"谁写几何"。模块的清屏是**compute 写 8 张颜色目标的 UAV** +
+    ///   `ClearDepthStencil`（不依赖 render pass 的 loadOp/缓存行为，见 `Nanite_GBufferClear.comp.slang`）。
+    void RecordGBufferClearPass(rhi::IRHICommandList* cmd, const NaniteGBufferHandles& gb);
+
+    /// dump 帧打印**恰好一行**软光栅读数（真实 GPU 读回；字段说明见 `NaniteRaster`）。
+    /// 关闭档 / 未就绪 / 未开软光栅时直接返回、不打印（关闭档日志与基线一致）。
+    void LogSoftRasterReadback();
+
     /// 【§14.8 任务 16】dump 帧打印**恰好一行**"可见簇 → 间接绘制"的接线读数：
     ///   `[Nanite] visible_wiring visible=<V> indirect_count=<C> draws=<D> rasterized=<R>
     ///    empty_draws=<E> mismatch=<M> src=<visible|fake> truncated=<T> max_draws=<X>
@@ -274,6 +305,16 @@ private:
     ///   注意"实例数为 0"**不算**退化：那正是"零可见簇 ⇒ 零绘制"这条边界，必须走可见链
     ///   （走假簇链会画出 6 条，把边界验收掩盖掉）。
     bool m_DrawFromFakeChain = false;
+
+    /// 【§14.8 任务 18】软光栅两趟的 push constant（`AddPasses` 每帧填一次，录制期按值使用）。
+    /// 【为什么是成员而不是 lambda 捕获】参数要在**帧图构建期**算（view-proj 与屏幕尺寸），
+    ///   而在**执行期**推给 GPU；与任务 15 的 `m_ChainParams` 同一套做法（帧图是单线程构建的）。
+    NaniteSoftRasterParams m_SoftParams{};
+
+    /// 【§14.8 任务 18】资产的位置量化尺度（整网格最大轴长）。由 `EnsureAssetUploaded` 从
+    ///   打包读数里取（与 DAG 哈希/顶点词同一个函数算出来的那份），资产未入库时为 0
+    ///   ⇒ 软光栅会解出退化位置，故执行期还有"资产是否入库"的门控。
+    float m_MeshMaxExtent = 0.0f;
 
     /// 开关与档位的唯一真值（默认 `enabled = false` ⇒ §14.2 不变式 1）
     NaniteSettings m_Settings;

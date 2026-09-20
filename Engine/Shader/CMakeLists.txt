@@ -66,6 +66,9 @@ if(SLANGC)
         "${SHADER_DIR}/Particles/ParticleRender.vert.slang"
         # Nanite（虚拟几何模块）——§14.8 任务 3 的绘制端最小顶点着色器（1×1 目标全屏三角）
         "${SHADER_DIR}/Nanite/Nanite_Raster.vert.slang"
+        # Nanite（虚拟几何模块）——§14.8 任务 18：深度解析通道的顶点着色器（全屏大三角形，
+        # 从软光栅的深度键还原 NDC 深度后用 SV_Depth 写既有深度附件）
+        "${SHADER_DIR}/Nanite/Nanite_DepthResolve.vert.slang"
     )
     set(FRAG_SLANG
         # Lighting
@@ -121,6 +124,8 @@ if(SLANGC)
         "${SHADER_DIR}/Nanite/Nanite_Raster.frag.slang"
         # Nanite（虚拟几何模块）——§14.8 任务 6：mesh PSO 通道的片元（数非空图元 + 写 1×1 R8 目标）
         "${SHADER_DIR}/Nanite/Nanite_MeshTest.frag.slang"
+        # Nanite（虚拟几何模块）——§14.8 任务 18：把软光栅的深度键还原成 NDC 深度写进既有深度附件
+        "${SHADER_DIR}/Nanite/Nanite_DepthResolve.frag.slang"
     )
     set(COMP_SLANG
         # GI
@@ -187,6 +192,14 @@ if(SLANGC)
         # Nanite（虚拟几何模块）——§14.8 任务 15：模块自持的 Hi-Z 金字塔下采样
         # （与 Culling/HiZDownsample.comp.slang 同一"2×2 取最小"口径；为什么另起一份见文件头注释）
         "${SHADER_DIR}/Nanite/Nanite_HiZDownsample.comp.slang"
+        # Nanite（虚拟几何模块）——§14.8 任务 18：软光栅两趟（第 1 趟原子深度键 / 第 2 趟等值复检
+        # 后写 GBuffer 颜色）。共用的绑定 + 光栅化内联函数在 Nanite_SoftRasterCommon.slang
+        # （它在下面的 SLANG_INCLUDES 里，不是入口）
+        "${SHADER_DIR}/Nanite/Nanite_SoftRasterDepth.comp.slang"
+        "${SHADER_DIR}/Nanite/Nanite_SoftRaster.comp.slang"
+        # Nanite（虚拟几何模块）——§14.8 任务 18：清屏 8 张 GBuffer 颜色目标（compute 写 UAV，
+        # 不依赖 render pass 的 loadOp/缓存行为；深度由 RHI 的 `ClearDepthStencil` 单独清）
+        "${SHADER_DIR}/Nanite/Nanite_GBufferClear.comp.slang"
     )
     # Ray Tracing 着色器（.rgen / .rmiss / .rchit / .rahit / .rcall）
     # 命名约定: EffectName.rgen.slang (RayGen), EffectName.rmiss.slang (Miss),
@@ -244,6 +257,12 @@ if(SLANGC)
         "${SHADER_DIR}/Particles/ParticleTypes.slang"
         "${SHADER_DIR}/Lumen/SurfaceCache.slang"
         "${SHADER_DIR}/Lumen/ScreenProbe.slang"
+        # Nanite（虚拟几何模块）——§14.8 任务 18 起**正式收纳**：C++/Slang 共享的二进制契约与
+        # 量化公式（`Engine/Render/Nanite/NaniteTypes.h` 的镜像），以及软光栅两趟共用的
+        # 绑定/参数/光栅化内联函数。改这两个文件会触发所有 shader 重编（这是"契约改动必须
+        # 全量重编"的正确代价；任务 10 当初就是为了避免这次重编才没提前加进来）。
+        "${SHADER_DIR}/Nanite/NaniteTypes.slang"
+        "${SHADER_DIR}/Nanite/Nanite_SoftRasterCommon.slang"
     )
 
     set(COMPILE_SOURCES ${VERT_SLANG} ${FRAG_SLANG} ${COMP_SLANG} ${RT_SLANG} ${MESH_SLANG})

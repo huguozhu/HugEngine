@@ -273,6 +273,19 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     naniteGB.depth       = gbDepth;
     // 任务 4：albedo 的纹理对象本身（UAV 自证通道要绑存储图像 + 取真实分辨率；句柄只够排序）
     naniteGB.albedoTexture = m_GBuffer ? m_GBuffer->GetAlbedo() : nullptr;
+    // 【任务 18】8 张颜色附件 + 深度的纹理对象：模块要按既有清除值清屏、用存储图像写其中 4 张、
+    //   并把深度解析结果写进深度附件 —— 这些事只有 `IRHITexture*` 能做（帧图句柄只够排序）。
+    if (m_GBuffer) {
+        naniteGB.colorTextures[0] = m_GBuffer->GetAlbedo();
+        naniteGB.colorTextures[1] = m_GBuffer->GetNormal();
+        naniteGB.colorTextures[2] = m_GBuffer->GetEmissive();
+        naniteGB.colorTextures[3] = m_GBuffer->GetVelocity();
+        naniteGB.colorTextures[4] = m_GBuffer->GetWorldPos();
+        naniteGB.colorTextures[5] = m_GBuffer->GetDisneyA();
+        naniteGB.colorTextures[6] = m_GBuffer->GetDisneyB();
+        naniteGB.colorTextures[7] = m_GBuffer->GetLightmapKey();
+        naniteGB.depthTexture    = m_GBuffer->GetDepth();
+    }
 
     if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
         // 【任务 13】相机随帧图构建期传入：实例剔除要由 view-proj 提取世界空间视锥、
@@ -284,12 +297,46 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     }
 
     // GBuffer 8×MRT + 绘制（委托给 IGBufferRenderer，支持 CPU/GPU 双模式）
-    rg.AddPass("GB_Clear", {}, {{gbA, ResourceAccess::Write}, {gbB, ResourceAccess::Write},
-        {gbC, ResourceAccess::Write}, {gbVel, ResourceAccess::Write}, {gbWorldPos, ResourceAccess::Write},
-        {gbDisneyA, ResourceAccess::Write}, {gbDisneyB, ResourceAccess::Write},
-        {gbLightmapKey, ResourceAccess::Write},
+    // 【任务 18 的声明改动（只在模块接管时生效）】模块用 **compute 写 UAV** 清这 8 张颜色目标
+    //   （见 `Nanite_GBufferClear.comp.slang`：渲染通道清屏在本引擎里不可靠），因此接管时把
+    //   8 个颜色附件的访问类型从 `Write`（颜色附件布局）改成 `UAV`（GENERAL 布局）；
+    //   深度的声明保持 `Write` 不变 —— 它是 `Shadow` 那条 WAW 假依赖（§14.5 第一条硬约束）的
+    //   一半，改它会让 Shadow → GB_Clear 的排序静默变化。关闭档（不接管）时声明与今天**逐位相同**。
+    const bool naniteTakesOver = m_Nanite.GetSettings().enabled && m_Nanite.IsReady()
+                              && m_Nanite.GetSettings().softRaster;
+    const ResourceAccess gbColorAccess = naniteTakesOver ? ResourceAccess::UAV : ResourceAccess::Write;
+    rg.AddPass("GB_Clear", {}, {{gbA, gbColorAccess}, {gbB, gbColorAccess},
+        {gbC, gbColorAccess}, {gbVel, gbColorAccess}, {gbWorldPos, gbColorAccess},
+        {gbDisneyA, gbColorAccess}, {gbDisneyB, gbColorAccess},
+        {gbLightmapKey, gbColorAccess},
         {gbDepth, ResourceAccess::Write}},
-        [&](rhi::IRHICommandList* c) {
+        // 【捕获说明（任务 18）】`naniteGB` 是**局部变量**，而 lambda 在 `BuildFrameGraph` 返回
+        //   之后才执行 ⇒ 必须**按值**捕获；只按引用捕（默认的 `[&]`）会拿到悬空引用，症状是
+        //   "纹理句柄全是垃圾指针/0"（实测：albedo 有效、normal/depth 为 0、其余像栈地址）。
+        [&, naniteGB](rhi::IRHICommandList* c) {
+            // ════════════════════════════════════════════════════════════════
+            // 【§14.8 任务 18】"让位"：模块是几何写入者时，既有几何路径**不执行**
+            //
+            // 【为什么在这里而不是把 GB_Clear 整个换成新 pass】§14.4 的 if/else 形态要求
+            //   "模块写 ⇒ 既有路径不写"。本项目选的是**最小改动面**的实现：pass 的名字、
+            //   reads/writes 声明、在帧图里的位置**一个都没变**（判据 ⑥ 的 pass 集合与指纹
+            //   判据因此不受影响），变的是这个 pass 体内"谁写几何"：
+            //     · 模块接管 ⇒ 只按**既有清除值**清屏 8×MRT + 深度（模块自建 PSO/附件布局、
+            //       直接写既有 GBuffer 纹理句柄，见 §14.5 的"GBuffer 契约"）；真正的几何写入
+            //       由 `Nanite_CullChain3` 体内的软光栅三趟完成（它声明了 4 张颜色的 UAV 写 ⇒
+            //       帧图保证它排在本 pass 之后、Lighting 之前）。
+            //     · 否则 ⇒ 既有 `m_GBuffer->Render(...)` 原样执行（关闭档与今天逐位相同）。
+            //   【已知代价】模块接管时下面这段既有代码不执行 ⇒ 每帧的 `SetObjectBuffer/
+            //   SetPrevViewProj/SetInstanceCuller/DGC 上下文` 也不更新。它们在模块接管期间没有
+            //   消费者（GPU_Cull 的可见列表只服务既有 GBuffer 绘制），切回关闭档时会在下一帧
+            //   重新填充 ⇒ 不构成状态残留，只是"接管期间这些每帧设置不更新"（如实记录）。
+            // ════════════════════════════════════════════════════════════════
+            if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()
+                && m_Nanite.GetSettings().softRaster) {
+                m_Nanite.RecordGBufferClearPass(c, naniteGB);
+                return;
+            }
+
             // 更新每帧动态参数
             m_GBuffer->SetObjectBuffer(m_ObjectBuffers[m_CurrentFrameSlot].get());
             m_GBuffer->SetPrevViewProj(m_PrevViewProj);

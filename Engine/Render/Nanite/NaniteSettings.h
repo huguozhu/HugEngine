@@ -103,6 +103,31 @@ struct NaniteSettings {
     ///   （`vkCmdDrawIndexedIndirectCount` 的硬约束），可以逐位观察"截断而**不越界**"。
     /// 配置层 = cfg 键 `nanite_draw_capacity`（默认 0），样例负责解析/序列化。
     u32 drawCapacity = 0u;
+
+    /// 【§14.8 任务 18】软光栅写 GBuffer 开关（默认 **true**）。
+    ///
+    /// 【语义】true（默认）⇒ **模块成为 GBuffer 段的几何写入者**：既有 `GB_Clear` 的
+    ///   几何绘制**让位**（帧图侧门控，见 `DeferredPipeline_FrameGraph.cpp`），改为由模块
+    ///   ①清屏 8×MRT + 深度、②软光栅两趟（原子深度键 + 等值复检写 albedo/normal/worldPos/
+    ///   lightmapKey）、③深度解析（深度键 → `SV_Depth` 写既有深度附件）；
+    ///   false ⇒ 既有 `GB_Clear` 的几何路径**原样执行**（模块只跑剔除链与光栅占位通道）。
+    /// 【为什么默认 true】§14.2 不变式 3："开关打开时 GBuffer 的几何写入者唯一"—— 任务 18 是
+    ///   模块真正接管几何写入的那一步。默认关闭会让 `nanite_enable=1` 的语义退回任务 16。
+    /// 【为什么还留这个开关】它是**同场景同相机对照**的钥匙：`enabled=1; softRaster=0` 与
+    ///   `enabled=1; softRaster=1` 除"谁写 GBuffer"之外其余全同，用于把差异归因到软光栅；
+    ///   同时是回退档（软光栅出问题时不必关掉整个模块）。
+    /// 配置层 = cfg 键 `nanite_soft_raster`（默认 1），样例负责解析/序列化。
+    bool softRaster = true;
+
+    /// 【§14.8 任务 18】走软光栅的**每簇三角形数上限**（默认 **16**，§5.2 的阈值）。
+    ///
+    /// 【语义】`cluster.triangleCount > softMaxTriangles` 的簇**跳过并计数**
+    ///   （读数 `skipped_big`），留给任务 22 的 mesh shader 硬光栅（§5.2 的混合光栅分流）。
+    /// 【为什么可配】验收要看"软光栅真的画出了东西"：Sponza 的簇绝大多数是满簇（64 tri），
+    ///   阈值 16 下覆盖极少（这正是"覆盖范围差异"的来源，见实施记录）；把它调到 64 就能让
+    ///   软光栅吃下全部可见簇，用于"同相机对照"里对照软光栅自身的正确性（而不是覆盖率）。
+    /// 配置层 = cfg 键 `nanite_soft_max_triangles`（默认 16，钳到 [1, 64]），样例负责解析/序列化。
+    u32 softMaxTriangles = 16u;
 };
 
 } // namespace he::render

@@ -165,6 +165,28 @@ void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb,
                              m_Width, m_Height, camera.fov,
                              m_Settings.instanceTestCount);
 
+    // ── 【任务 18】软光栅两趟的 push constant（本帧算一次；执行期推给 GPU）──
+    // 【view-proj 拆成 4 个"行"】与任务 15 同一口径：`vpRows[r*4+c] = viewProj[c][r]`
+    //   （glm 列主序的 row r），shader 侧用 4 次显式点积 ⇒ 两侧乘的是同一个表达式。
+    {
+        const float4x4& vp = camera.GetViewProjMatrix();
+        const float* m = &vp[0][0];
+        for (u32 row = 0u; row < 4u; ++row) {
+            for (u32 col = 0u; col < 4u; ++col) {
+                m_SoftParams.vpRows[row * 4u + col] = m[col * 4u + row];
+            }
+        }
+        m_SoftParams.screenWidth   = m_Width;
+        m_SoftParams.screenHeight  = m_Height;
+        m_SoftParams.maxTriangles  = m_Settings.softMaxTriangles;
+        m_SoftParams.instanceCount = std::min(m_Settings.instanceTestCount,
+                                              NaniteCull::MaxBVHInstances());
+        m_SoftParams.meshMaxExtent = m_MeshMaxExtent;
+        m_SoftParams.depthKeyEpsilon = 0.0f;   // 两趟的等值复检实测严格逐位相等即可
+    }
+    // 软光栅资源懒建（不注册 pass；只保证执行期资源就绪）。资产未入库时它内部直接返回。
+    EnsureSoftRasterReady(gb);
+
     // ── Nanite_Cull：compute 逐簇写间接命令 + 原子累加计数（任务 3 的**假簇链**）──
     // writes = {gbDepth, gbWorldPos} 是复刻 `GB_Clear` 的 WAW 声明（§14.5），
     // 本 pass 并不真的写它们；它真正的输出是模块自持的命令/计数缓冲（不走帧图资源）。
@@ -236,10 +258,27 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
     // 【三段顺序】不靠帧图，靠同一 pass 体内命令缓冲的屏障（见 `NaniteCull::RecordCullChainPass`）。
     // 【回调】**执行期**才取纹理与构建函数：第 1 帧构建期纹理还不存在，且尺寸变化会重建它。
     const bool drawFromVisibleChain = !m_DrawFromFakeChain;   // 按值捕获（见 `Nanite_Cull` 的说明）
+    // ── 【任务 18】软光栅的写入声明 ──
+    // 【为什么声明这 4 张颜色为 UAV 写】任务 18 起模块是 GBuffer 段的几何写入者：帧图据此
+    //   ①把本 pass 排在 `GB_Clear`（写这些资源）之后（WAW）、②把 Lighting/SSAO 等读 albedo/
+    //   normal/worldPos 的 pass 排在本 pass 之后（RAW）、③在本 pass 前插入
+    //   `RenderTarget → UnorderedAccess` 的转换（pass 体内还会补一条 ComputeShader 阶段的显式屏障，
+    //   因为帧图推导的 dstStage 是保守映射，不含 ComputeShader —— 任务 4 的教训）。
+    // 【为什么不声明深度】深度由本 pass 体内的"深度解析"pass 作为**附件**写，且 RHI 的 render pass
+    //   结束时会把它还原成 READ_ONLY（与帧图在 `GB_Clear` 之后记录的模型一致）⇒ 不需要也不应该
+    //   在帧图里再声明一次（声明成 Write 会把深度转成 ATTACHMENT 布局，破坏 Hi-Z 对本帧深度的采样）。
+    const bool softRasterOn = m_Settings.softRaster;
+    std::vector<PassResource> cullWrites;
+    if (softRasterOn) {
+        cullWrites.push_back({gb.albedo,      ResourceAccess::UAV});
+        cullWrites.push_back({gb.normal,      ResourceAccess::UAV});
+        cullWrites.push_back({gb.worldPos,    ResourceAccess::UAV});
+        cullWrites.push_back({gb.lightmapKey, ResourceAccess::UAV});
+    }
     rg.AddPass("Nanite_CullChain3",
         {{gb.depth, ResourceAccess::Read}},
-        {},
-        [this, hiz, drawFromVisibleChain](rhi::IRHICommandList* cmd) {
+        std::move(cullWrites),
+        [this, hiz, drawFromVisibleChain, softRasterOn, gb](rhi::IRHICommandList* cmd) {
             rhi::IRHITexture* hizTexture = hiz.texture ? hiz.texture() : nullptr;
             rhi::IRHITexture* depthTex   = hiz.depth ? hiz.depth() : nullptr;
             m_Cull.RecordCullChainPass(cmd, hizTexture, depthTex, m_Settings.hiz);
@@ -253,6 +292,40 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
                                           m_Cull.GetDrawCountBuffer(),
                                           m_Cull.GetMaxIndirectDraws());
             }
+
+            // ── 【任务 18】软光栅三趟（深度键 → 写 GBuffer → 深度解析）──
+            // 【为什么录在同一个 pass 体内】它必须排在"本帧的剔除链"之后（要读它写出的可见簇
+            //   列表与计数），而帧图无法为两个"零帧图资源"的模块 pass 表达这条顺序（inDegree=0
+            //   的 pass 按 LIFO 处理 —— 任务 15/16 的教训）。录进同一个 pass 体 + 命令缓冲里的
+            //   显式屏障，是唯一稳的写法（任务 16 的间接绘制同理）。
+            if (!softRasterOn) return;
+            const NaniteScene::AssetBuffers& asset = m_Scene.GetAssetBuffers();
+            if (!asset.clusters || !asset.vertices || !asset.indices) return;   // 资产未入库
+
+            NaniteRaster::GBufferTargets targets;
+            targets.albedo      = gb.colorTextures[0];
+            targets.normal      = gb.colorTextures[1];
+            targets.emissive    = gb.colorTextures[2];
+            targets.velocity    = gb.colorTextures[3];
+            targets.worldPos    = gb.colorTextures[4];
+            targets.disneyA     = gb.colorTextures[5];
+            targets.disneyB     = gb.colorTextures[6];
+            targets.lightmapKey = gb.colorTextures[7];
+            targets.depth       = gb.depthTexture;
+            if (!targets.HasSoftRasterTargets()) return;
+
+            NaniteRaster::AssetViews views;
+            views.clusters = asset.clusters.get();
+            views.vertices = asset.vertices.get();
+            views.indices  = asset.indices.get();
+            views.header   = asset.header.get();
+
+            m_Raster.RecordSoftRasterPass(cmd, targets, views, m_SoftParams,
+                                          m_Cull.GetVisibleClusterBuffer(),
+                                          m_Cull.GetVisibleClusterCountBuffer(),
+                                          m_Cull.GetInstanceBuffer(),
+                                          m_Cull.GetBVHVisibleCapacity(),
+                                          1.0f /* 深度解析的清屏值：远平面 */);
         });
 
     // 任务 4 的 UAV 自证通道：默认关闭（`nanite_test_write=0`）⇒ 这里什么都不注册。
@@ -359,6 +432,84 @@ void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
     // 【为什么在这里调用是安全的】上面 `UploadPackedAsset` 内部已经 `WaitIdle()` ⇒ 没有任何在飞
     //   的命令缓冲引用旧缓冲，替换/扩容不会造成 use-after-free；之后各帧只读新缓冲。
     m_Raster.SetPlaceholderIndexCapacity(asset.header.indexCount);
+
+    // ── ⑦ 【任务 18】软光栅要的量化尺度：`meshMaxExtent`（整网格最大轴长）──
+    // 【为什么由 CPU 传而不是 shader 从头部算】打包器已经把真值算在 `stats.meshMaxExtent`
+    //   （与任务 9 的 DAG 哈希、任务 10 的顶点词同一个函数），直接用它 ⇒ 解码口径与编码口径
+    //   同源；shader 侧从头部 bbox 现算会和它差一次浮点舍入（虽然理论上同值，但"同一份比特"
+    //   才是可验证的口径）。
+    m_MeshMaxExtent = asset.stats.meshMaxExtent;
+}
+
+// ============================================================
+// §14.8 任务 18：软光栅的接线（让位 + 清屏 + 三趟派发 + 读数）
+// ============================================================
+
+void NaniteRenderer::EnsureSoftRasterReady(const NaniteGBufferHandles& gb) {
+    // 【关闭 / 未就绪 / 未开软光栅 / 纹理不全 ⇒ 什么都不做】
+    //   本函数**不注册 pass**，只保证执行期的资源就绪；真正的 pass 体在 `Nanite_CullChain3`
+    //   与 `GB_Clear` 的 lambda 里（都按同一个开关门控）。
+    if (!m_Settings.enabled || !m_Ready || !m_Settings.softRaster) return;
+    if (!gb.HasFullGBufferTextures()) return;
+    const NaniteScene::AssetBuffers& asset = m_Scene.GetAssetBuffers();
+    if (!asset.clusters || !asset.vertices || !asset.indices) return;   // 资产未入库
+
+    NaniteRaster::GBufferTargets targets;
+    targets.albedo      = gb.colorTextures[0];
+    targets.normal      = gb.colorTextures[1];
+    targets.emissive    = gb.colorTextures[2];
+    targets.velocity    = gb.colorTextures[3];
+    targets.worldPos    = gb.colorTextures[4];
+    targets.disneyA     = gb.colorTextures[5];
+    targets.disneyB     = gb.colorTextures[6];
+    targets.lightmapKey = gb.colorTextures[7];
+    targets.depth       = gb.depthTexture;
+    m_Raster.EnsureSoftRasterResources(targets);
+}
+
+void NaniteRenderer::RecordGBufferClearPass(rhi::IRHICommandList* cmd, const NaniteGBufferHandles& gb) {
+    if (!m_Settings.enabled || !m_Ready || !m_Settings.softRaster) return;
+    if (!gb.HasFullGBufferTextures()) {
+        // 【一次性告警】纹理句柄不全 ⇒ 本帧无法清屏（不静默）
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            HE_CORE_ERROR("NaniteRenderer: GBuffer 纹理句柄不全，模块无法清屏"
+                          "（albedo={} normal={} emissive={} velocity={} worldPos={} disneyA={} disneyB={} "
+                          "lightmapKey={} depth={}）",
+                          (const void*)gb.colorTextures[0], (const void*)gb.colorTextures[1],
+                          (const void*)gb.colorTextures[2], (const void*)gb.colorTextures[3],
+                          (const void*)gb.colorTextures[4], (const void*)gb.colorTextures[5],
+                          (const void*)gb.colorTextures[6], (const void*)gb.colorTextures[7],
+                          (const void*)gb.depthTexture);
+        }
+        return;
+    }
+
+    NaniteRaster::GBufferTargets targets;
+    targets.albedo      = gb.colorTextures[0];
+    targets.normal      = gb.colorTextures[1];
+    targets.emissive    = gb.colorTextures[2];
+    targets.velocity    = gb.colorTextures[3];
+    targets.worldPos    = gb.colorTextures[4];
+    targets.disneyA     = gb.colorTextures[5];
+    targets.disneyB     = gb.colorTextures[6];
+    targets.lightmapKey = gb.colorTextures[7];
+    targets.depth       = gb.depthTexture;
+    // 【一次性诊断】确认清屏真的被录制（这是"模块接管写入"的第一步，值得留一行）
+    static bool logged = false;
+    if (!logged) {
+        logged = true;
+        HE_CORE_INFO("NaniteRenderer: 任务 18 清屏已接管（8×MRT UAV + ClearDepthStencil；"
+                     "既有 GBufferRenderer::Render 本帧起让位）");
+    }
+    m_Raster.RecordGBufferClearPass(cmd, targets);
+}
+
+void NaniteRenderer::LogSoftRasterReadback() {
+    // 关闭档 / 未就绪 / 未开软光栅：不打印（关闭档日志与基线逐字一致）
+    if (!m_Settings.enabled || !m_Ready || !m_Settings.softRaster) return;
+    m_Raster.LogSoftRasterReadback();
 }
 
 void NaniteRenderer::LogFakePipelineReadback() {

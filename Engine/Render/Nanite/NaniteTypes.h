@@ -2123,4 +2123,77 @@ static_assert(kNanitePlaceholderIndexCountMax == 16384u * 64u * 3u,
     return written;
 }
 
+// ============================================================
+// §14.8 任务 18：软光栅（两趟"原子深度键 + 等值复检"写 GBuffer）
+//
+// 【为什么是两趟而不是"一趟 + interlock"（设计 §5.2 的原文）】
+//   设计 §5.2 写的是"每个 cluster 一个 wave，interlock 写 GBuffer"，即用 Slang/HLSL 的
+//   `RasterizerOrderedTexture2D`（ROV）拿逐像素互锁。**本仓库的 Slang 版本做不到**：
+//   Slang 2026.13 对 compute 入口里的 ROV **静默降级**成普通 `RWTexture2D`（exit 0、
+//   `-warnings-as-errors all` 下零诊断、SPIR-V 里没有任何 `OpBeginInvocationInterlockEXT`），
+//   而且 SPIR-V 规定 interlock 的 execution mode 只对 Fragment 入口合法（手工汇编后
+//   `spirv-val` 报 "Execution mode can only be used with the Fragment execution model."）。
+//   ⇒ 单趟写法（"原子最小深度后紧接着写 GBuffer"）**有竞态**：更近的三角形赢了深度，
+//   但更远的那个三角形的**颜色写入可能后落地**，像素最终留错属性。
+//   ⇒ 本实现：**第 1 趟**只做 `InterlockedMin(深度键)`（R32_UINT 存储图像上的无符号原子最小，
+//      **零额外设备特性**）；**第 2 趟**重跑同样的光栅化、对自己的键做**等值复检**，
+//      相等才写 GBuffer ⇒ 每个像素恰好一个三角形写一次，多张颜色目标天然一致。
+// ============================================================
+
+/// 软光栅两趟共用的 push constant（96B）
+///
+/// 【与 Slang 的契约】`Engine/Shader/Shaders/Nanite/Nanite_SoftRasterCommon.slang` 的
+///   `[[vk::push_constant]] cbuffer NaniteSoftRasterParams` 必须与本结构**逐字段一致**
+///   （下面的 static_assert 把 C++ 侧的尺寸/偏移钉住）。
+/// 【为什么 view-proj 拆成 4 个"行"】与任务 15 同一理由：Slang 的矩阵行/列主序依赖编译选项，
+///   拆成 4 个 float4 + 显式点积后，CPU 与 GPU 乘的是同一个表达式。
+/// 【为什么 `depthKeyEpsilon` 留着】两趟的等值复检实测**严格逐位相等**即可（两趟跑的是同一段
+///   浮点表达式）；字段留着是为了将来"改精度/改布局"时有一个显式的调节点，默认 0。
+struct NaniteSoftRasterParams {
+    float vpRows[16];       ///< 偏移 0 ：view-proj 的 4 个行（row-major：`vpRows[r*4+c] = viewProj[c][r]`）
+    u32   screenWidth;      ///< 偏移 64：帧缓冲宽（像素）
+    u32   screenHeight;     ///< 偏移 68：帧缓冲高（像素）
+    u32   maxTriangles;     ///< 偏移 72：只对 `triangleCount ≤ 该值` 的簇走软光栅（§5.2 的 16）
+    u32   instanceCount;    ///< 偏移 76：实例域上界（越界引用直接跳过，不读实例表）
+    float meshMaxExtent;    ///< 偏移 80：位置量化尺度（整网格最大轴长，§14.19 硬约束①）
+    float depthKeyEpsilon;  ///< 偏移 84：等值复检容差（0 = 严格逐位相等）
+    float _pad0;            ///< 偏移 88
+    float _pad1;            ///< 偏移 92
+};
+
+static_assert(sizeof(NaniteSoftRasterParams) == 96u,
+              "软光栅 push constant 必须 96B（4×float4 + 3×u32 + 2×float）");
+static_assert(offsetof(NaniteSoftRasterParams, vpRows)        == 0,  "vpRows 在偏移 0");
+static_assert(offsetof(NaniteSoftRasterParams, screenWidth)   == 64, "screenWidth 在偏移 64");
+static_assert(offsetof(NaniteSoftRasterParams, screenHeight)  == 68, "screenHeight 在偏移 68");
+static_assert(offsetof(NaniteSoftRasterParams, maxTriangles)  == 72, "maxTriangles 在偏移 72");
+static_assert(offsetof(NaniteSoftRasterParams, instanceCount) == 76, "instanceCount 在偏移 76");
+static_assert(offsetof(NaniteSoftRasterParams, meshMaxExtent) == 80, "meshMaxExtent 在偏移 80");
+
+/// 软光栅读数槽位（扁平 u32；与 `Nanite_SoftRasterCommon.slang` 的 `kSoftStat*` 一一对应）
+inline constexpr u32 kNaniteSoftStatRasterClusters  = 0u;   ///< 真正走软光栅的簇数（≤ maxTriangles）
+inline constexpr u32 kNaniteSoftStatSkippedClusters = 1u;   ///< 因三角形数超阈值跳过的簇数（任务 22 的活）
+inline constexpr u32 kNaniteSoftStatTriangles       = 2u;   ///< 参与光栅化的非退化三角形数（第 1 趟）
+inline constexpr u32 kNaniteSoftStatDegenerate      = 3u;   ///< 被丢弃的三角形数（相机后/退化/越界）
+inline constexpr u32 kNaniteSoftStatPixels          = 4u;   ///< 通过深度复检、真正写进 GBuffer 的像素数
+inline constexpr u32 kNaniteSoftStatNeutralPixels   = 5u;   ///< 其中用中性材质常数写入的像素数
+inline constexpr u32 kNaniteSoftStatsCapacity       = 16u;  ///< 读数缓冲条数（与 shader 一致）
+
+/// "该像素没有几何"的深度键哨兵（第 1 趟之前由模块把整张深度键清成它）
+inline constexpr u32 kNaniteSoftRasterNoGeometryKey = 0xFFFFFFFFu;
+
+/// 深度键编码（与 `Nanite_SoftRasterCommon.slang` 的 `softRasterDepthKey` **逐字一致**）
+///
+/// 高 24 位 = NDC 深度（Vulkan `[0,1]`，近 = 0）的**浮点位模式**：非负浮点的位模式与无符号整数
+/// 同序 ⇒ `InterlockedMin` 就是"取最近"（与 Lumen 的 `InterlockedMin(asuint())` 同一惯用法）；
+/// 低 8 位 = 簇内三角形下标（0..63）⇒ 深度恰好相同时也有全序，第 2 趟的等值复检因此确定。
+[[nodiscard]] inline u32 NaniteSoftRasterDepthKey(float ndcZ, u32 triLocal) {
+    static_assert(sizeof(float) == sizeof(u32), "float 必须是 32 位");
+    // 用 memcpy 取位模式（C++17 没有 bit_cast；reinterpret_cast 在 constexpr 里不可用，
+    // 而本函数只用于 CPU 参考/单测，不需要常量求值）
+    u32 bits = 0u;
+    std::memcpy(&bits, &ndcZ, sizeof(bits));
+    return (bits & 0xFFFFFF00u) | (triLocal & 0xFFu);
+}
+
 } // namespace he::render
