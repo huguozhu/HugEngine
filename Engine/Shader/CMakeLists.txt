@@ -119,6 +119,8 @@ if(SLANGC)
         "${SHADER_DIR}/Particles/ParticleRender.frag.slang"
         # Nanite（虚拟几何模块）——§14.8 任务 3 的绘制端：每光栅化一个簇把计数原子加一
         "${SHADER_DIR}/Nanite/Nanite_Raster.frag.slang"
+        # Nanite（虚拟几何模块）——§14.8 任务 6：mesh PSO 通道的片元（数非空图元 + 写 1×1 R8 目标）
+        "${SHADER_DIR}/Nanite/Nanite_MeshTest.frag.slang"
     )
     set(COMP_SLANG
         # GI
@@ -216,6 +218,9 @@ if(SLANGC)
     set(MESH_SLANG
         "${SHADER_DIR}/GBuffer/GBuffer.mesh.slang"
         "${SHADER_DIR}/Utility/Triangle.mesh.slang"
+        # Nanite（虚拟几何模块）——§14.8 任务 6：真正输出图元（SetMeshOutputCounts(4,2)）
+        # 的最小 mesh shader，用于把 `PipelineStateDesc::meshShader` 这条路径接进 PSO。
+        "${SHADER_DIR}/Nanite/Nanite_MeshTest.mesh.slang"
     )
     # 公共共享头（被多个 shader include）——每个 shader 编译依赖这些；
     # 单个着色器文件本身由各自 SRC 依赖。改为显式列表而非 glob 所有 .slang，

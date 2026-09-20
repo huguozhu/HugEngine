@@ -597,10 +597,15 @@ int main() {
             // 它只决定模块是否在 GBuffer 之后追加 `Nanite_TestWrite`（往 albedo 写棋盘图案）。
             naniteSettings.testWrite = GetInt(cfgData, "nanite_test_write",
                                               naniteSettings.testWrite ? 1 : 0) != 0;
+            // 任务 6 的 mesh PSO 自证开关（默认 0）：cfg → 真值，写法与上面三个键完全同构。
+            // 它只决定模块是否追加 `Nanite_MeshTest`（最小 mesh PSO，只画模块自建的 1×1 小目标）。
+            naniteSettings.meshTest = GetInt(cfgData, "nanite_mesh_test",
+                                             naniteSettings.meshTest ? 1 : 0) != 0;
             deferredPipeline.SetNaniteSettings(naniteSettings);
-            HE_CORE_INFO("[Nanite] 配置恢复: nanite_enable={} nanite_fake_clusters={} nanite_test_write={}",
+            HE_CORE_INFO("[Nanite] 配置恢复: nanite_enable={} nanite_fake_clusters={} "
+                         "nanite_test_write={} nanite_mesh_test={}",
                          naniteSettings.enabled ? 1 : 0, naniteSettings.fakeClusters,
-                         naniteSettings.testWrite ? 1 : 0);
+                         naniteSettings.testWrite ? 1 : 0, naniteSettings.meshTest ? 1 : 0);
         }
 
         auto& ae = deferredPipeline.GetAutoExposure();
@@ -1301,6 +1306,20 @@ int main() {
                                       "默认关（会改变画面，仅供 A1 裁决取证）");
                 ImGui::TextDisabled("模块就绪=%s（任务 3：Nanite_Cull + Nanite_Raster，画面不变）",
                                     dp->GetNanite().IsReady() ? "是" : "否");
+                // ── 任务 6 的 mesh PSO 自证开关（默认关）──
+                // 勾上后模块追加 `Nanite_MeshTest`：用 `PipelineStateDesc::meshShader` 建一条
+                // 最小 mesh 管线（真正输出 4 顶点 / 2 图元），只画模块自建的 1×1 R8 小目标
+                // ⇒ 即使打开也**不改动可见画面**，dump 帧会多打印一行 mesh_pso/meshlet_outputs/target_max。
+                bool naniteMeshTest = naniteSettings.meshTest;
+                if (ImGui::Checkbox("mesh PSO 自证：任务 6 mesh PSO 通道##nanite_mt", &naniteMeshTest)) {
+                    naniteSettings.meshTest = naniteMeshTest;
+                    dp->SetNaniteSettings(naniteSettings);
+                    HE_CORE_INFO("[Nanite] 面板 mesh PSO 自证开关: mesh_test={}",
+                                 naniteSettings.meshTest ? 1 : 0);
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("任务 6 mesh PSO 自证开关，默认关；\n"
+                                      "开启后多一个 Nanite_MeshTest pass（写模块自建 1×1 目标，画面不变）");
             }
 
             // ── GI 通道：Diffuse / Specular / AO / Shadow ──
@@ -1772,6 +1791,11 @@ int main() {
             // 关闭档下模块自身会直接返回（不打印），保证关闭档日志与基线一致。
             if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
                 dpNanite->GetNanite().LogFakePipelineReadback();
+            // ── Nanite（§14.8 任务 6）：mesh PSO 通道的**恰好一行**真实 GPU 读回 ──
+            // 同步同样已在上一行的 `WaitIdle()` 完成；`nanite_mesh_test=0`（默认）时模块内部
+            // 直接返回、不打印，因此不改变任何既有档位的日志。
+            if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
+                dpNanite->GetNanite().LogMeshTestReadback();
 
             const String dir  = "build/verify/";
             const String base = dir + "gi_" + g_DumpTag;
@@ -1900,6 +1924,8 @@ int main() {
         out["nanite_fake_clusters"] = std::to_string(deferredPipeline.GetNaniteSettings().fakeClusters);
         // 任务 4：UAV 自证开关（默认 0）——同样在 Shutdown() 之后回写，故真值必须保留
         out["nanite_test_write"]    = std::to_string(deferredPipeline.GetNaniteSettings().testWrite ? 1 : 0);
+        // 任务 6：mesh PSO 自证开关（默认 0）——同写法、同在 Shutdown() 之后回写
+        out["nanite_mesh_test"]     = std::to_string(deferredPipeline.GetNaniteSettings().meshTest ? 1 : 0);
 
         // ── AutoExposure ──
         auto& ae = deferredPipeline.GetAutoExposure();

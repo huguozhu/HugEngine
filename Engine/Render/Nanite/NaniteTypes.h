@@ -354,4 +354,13 @@ inline constexpr u32 kNaniteFakeClusterIndexCount = 3u;
 // 因此这个 pass 对可见画面零影响（§14.2 不变式 1、§14.8 任务 3 的验收）。
 inline constexpr u32 kNaniteRasterTargetSize = 1u;
 
+// ── §14.8 任务 6：mesh 通道自建的小目标尺寸 ──
+// 【为什么又是 1×1】与上面那条同理：mesh shader 输出一个覆盖整个 NDC 的四边形（2 个三角形），
+// 1×1 目标 ⇒ 每个三角形恰好 1 个片元 ⇒ 片元的原子加就等于**被光栅化的 mesh 图元数**，
+// "非空"读数的语义因此完全确定（本任务下恒为 2）。
+// 【为什么不复用 kNaniteRasterTargetSize 那个目标】任务 3 的目标 `usage` 只有 RenderTarget，
+// 而任务 6 要用 `CopyTextureToBuffer` 把它读回 host ⇒ 必须带 `TextureUsage::TransferSrc`；
+// 给任务 3 的目标加 usage 会改变那条已经验收过的链路，故另建一张独立小目标（互不干扰）。
+inline constexpr u32 kNaniteMeshTestTargetSize = 1u;
+
 } // namespace he::render

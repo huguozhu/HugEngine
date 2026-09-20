@@ -6,6 +6,9 @@
 // 【开启档的 pass 集合】既有 12 个 pass（相对顺序不变）+ `Nanite_Cull` + `Nanite_Raster`。
 //   任务 4 追加一个**可选**的第三个 pass `Nanite_TestWrite`（仅在 `NaniteSettings::testWrite`
 //   为真时注册；它写既有 GBuffer albedo 的 UAV，必须在 GBuffer 之后注册才能被 Lighting 同帧读到）。
+//   任务 6 追加另一个**可选**的第四个 pass `Nanite_MeshTest`（仅在 `NaniteSettings::meshTest`
+//   为真且设备支持 `VK_EXT_mesh_shader` 时注册；它只画模块自建的 1×1 R8 目标 + 写模块自持计数缓冲，
+//   因此与 GBuffer 无关，注册在第一处挂钩即可）。
 //   两个 pass 的 `reads/writes` 复刻 `GB_Clear` 对 `gbDepth/gbWorldPos` 的那组 WAW 声明：
 //   `Shadow` 用 `RG_WRITE(gbDepth)/RG_WRITE(gbWorldPos)` 这条**假 WAW 依赖**
 //   把自己定序在 GBuffer 写入者之前（DeferredPipeline_FrameGraph.cpp:213-215）。
@@ -130,6 +133,30 @@ void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb) 
                                       m_Cull.GetCountBuffer(),
                                       m_Cull.GetMaxFakeClusters());
         });
+
+    // ── §14.8 任务 6：Nanite_MeshTest（最小 mesh PSO 通道）──
+    // 【为什么注册在**这一处**（GBuffer 之前的第一处挂钩），而不是 GBuffer 之后那一处】
+    //   1. 本 pass **完全不碰 GBuffer**：它画进模块自建的 1×1 R8 小目标、写模块自持的计数缓冲，
+    //      因此对 GBuffer 没有任何读写依赖 —— 第二处挂钩（`AddPostGBufferPasses`）的语义是
+    //      "必须在 GBuffer 几何段之后、Lighting 之前注册的那些 pass"（任务 4 的 UAV 自证），
+    //      把不碰 GBuffer 的 pass 放进去只会让那处挂钩的语义变模糊。
+    //   2. 三处模块私有 pass（Cull / Raster / MeshTest）集中在同一个注册点，便于对照与回退。
+    // 【为什么不声明 gbDepth/gbWorldPos 的那组假 WAW】那组声明是 `GB_Clear` 写入者之间的排序
+    //   契约（§14.5）。本 pass 没有任何帧图资源，声明空 reads/writes 反而是**最保守**的选择：
+    //   `RenderGraph::CullDeadPasses` 明确不裁剪 `writes.empty()` 的 pass，而
+    //   `TopologicalSort` 把它放在所有 inDegree=0 的 pass 之前 —— 也就是说它既不改变任何既有
+    //   pass 之间的相对顺序，也不会被裁剪（既有 pass 顺序逐位不变）。
+    // 【相对顺序】它注册在 `Nanite_Cull`/`Nanite_Raster` 之后，既有 12 个 pass 的注册位置不变。
+    // 【门控】`meshTest`（默认 0）**且**设备支持 `VK_EXT_mesh_shader`；两者任一不满足就
+    //   一个 pass 都不注册（关闭档的 pass 集合与今天逐位一致）。
+    if (m_Settings.meshTest && m_Raster.IsMeshTestSupported()) {
+        rg.AddPass("Nanite_MeshTest",
+            {},
+            {},
+            [this](rhi::IRHICommandList* cmd) {
+                m_Raster.RecordMeshTestPass(cmd);
+            });
+    }
 }
 
 void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHandles& gb) {
@@ -197,6 +224,21 @@ void NaniteRenderer::LogFakePipelineReadback() {
     // 【恰好一行】任务 3 的验收出口：X == Y == Z == N
     HE_CORE_INFO("[Nanite] fake_clusters={} count_buffer={} indirect_cmds={} rasterized_clusters={}",
                  m_Settings.fakeClusters, x, y, z);
+}
+
+void NaniteRenderer::LogMeshTestReadback() {
+    // 关闭档 / 未就绪 / 未开 mesh 自证：不打印（关闭档与"只开 enabled"的日志必须与基线一致）。
+    if (!m_Settings.enabled || !m_Ready) return;
+    if (!m_Settings.meshTest) return;
+
+    // 两个数都是**真实 GPU 读回**（样例在 dump 帧已 `WaitIdle()`，与白炉探针同一套同步做法）：
+    //   n = 片元原子计数（被光栅化的 mesh 图元数），v = 1×1 R8 目标的像素值。
+    const u32 n = m_Raster.ReadbackMeshTestOutputs();
+    const u32 v = m_Raster.ReadbackMeshTestTargetMax();
+
+    // 【恰好一行】任务 6 的验收出口：mesh_pso=ok 且 n >= 1 / v > 0 即"输出非空"。
+    HE_CORE_INFO("[Nanite] mesh_pso={} meshlet_outputs={} target_max={}",
+                 m_Raster.IsMeshTestPSOReady() ? "ok" : "fail", n, v);
 }
 
 } // namespace he::render

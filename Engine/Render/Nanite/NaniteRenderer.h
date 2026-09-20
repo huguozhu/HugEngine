@@ -87,7 +87,8 @@ public:
     /// 帧图接入点（在 `DeferredPipeline_FrameGraph.cpp` 的 GBuffer 段被调用）。
     /// 【门控只有一处】`DeferredPipeline_FrameGraph.cpp` 里的
     /// `if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady())`。
-    /// 开启时注册两个 pass：`Nanite_Cull` + `Nanite_Raster`（原序 12 个 pass 一个不动）。
+    /// 开启时注册两个 pass：`Nanite_Cull` + `Nanite_Raster`（原序 12 个 pass 一个不动）；
+    /// 【§14.8 任务 6】`meshTest` 为真时**再追加**一个 `Nanite_MeshTest`（mesh PSO 通道）。
     void AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb);
 
     /// 【§14.8 任务 4：GBuffer 之后的后置挂钩】在 **GBuffer 几何段结束之后、任何读取 GBuffer
@@ -115,6 +116,18 @@ public:
     /// （样例的 dump 路径已经有 `device->WaitIdle()`，照抄既有白炉探针/落盘的读数方式）。
     /// 关闭档下直接返回（不打印），保证关闭档日志与基线一致。
     void LogFakePipelineReadback();
+
+    /// 【§14.8 任务 6】dump 帧打印**恰好一行** mesh 通道的真实 GPU 读回：
+    ///   `[Nanite] mesh_pso=<ok|fail> meshlet_outputs=<n> target_max=<v>`
+    ///
+    /// n = mesh 通道片元的原子计数（本帧被光栅化的 mesh 图元数；mesh shader 输出 2 个三角形
+    /// 且目标是 1×1 ⇒ 期望 2）；v = 模块自建的 1×1 R8 目标的读回值（写 1.0 ⇒ 期望 255）。
+    /// 两个数**互相独立**（一个来自缓冲、一个来自纹理拷贝），任一 > 0 都说明"输出了非空画面"。
+    ///
+    /// 【同步约定】与 `LogFakePipelineReadback` 相同：只做 Map 读回，不做等待；调用方必须已
+    /// `WaitIdle()`。`meshTest=false`（默认）时直接返回、不打印 —— 保证关闭档与开启档
+    /// （不勾 mesh 自证时）的日志与基线一致。
+    void LogMeshTestReadback();
 
     // ── 模块内部各段（任务 1 只有生命周期桩；外部不得越过本类直接驱动它们）──
     [[nodiscard]] NaniteScene&  GetScene()  { return m_Scene; }

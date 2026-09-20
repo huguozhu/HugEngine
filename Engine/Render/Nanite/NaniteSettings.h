@@ -45,6 +45,16 @@ struct NaniteSettings {
     /// 【默认 false 的理由】§14.2 不变式 1：关闭时模块一个 pass 都不注册，画面与今天逐位相同；
     /// 它只改 albedo 的**内容**（不改任何既有 pass 的声明与顺序），是纯粹的自证开关。
     bool testWrite = false;
+
+    /// 【§14.8 任务 6】mesh PSO 自证开关（默认 **false**）。
+    /// 开启后模块注册一个 `Nanite_MeshTest` pass：用 `PipelineStateDesc::meshShader` 建一条
+    /// **最小 mesh 管线**（`Nanite_MeshTest.mesh.slang` 真正输出 4 顶点 / 2 图元），画进
+    /// 模块自建的 1×1 R8 小目标，并读回两个 GPU 数值证明"确实输出了非空图元"。
+    /// 配置层 = cfg 键 `nanite_mesh_test`（默认 0），样例负责解析/序列化 + 面板勾选框。
+    /// 【默认 false 的理由】§14.2 不变式 1：关闭时该 pass **完全不注册**，
+    /// 开启档 / 关闭档的 pass 集合与转储逐位不变；它写的是模块私有目标与私有缓冲，
+    /// 即使打开也不会改动可见画面（这正是任务 6 与任务 22 的边界：任务 22 才接硬光栅分流）。
+    bool meshTest = false;
 };
 
 } // namespace he::render
