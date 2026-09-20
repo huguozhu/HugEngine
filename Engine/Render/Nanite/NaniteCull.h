@@ -27,14 +27,36 @@
 //   与任务 3 的假簇链**互相独立**（各自一套缓冲/描述符/PSO），互不影响既有验收读数。
 //   【列表不需要逐帧重置】读回只取 `[0, 计数)`，而这些槽位必定由**同一次派发**写入（计数与列表
 //   写在同一个着色器里）；不重置反而消掉了"主机 memset 与派发竞争"的隐患。
+//
+// 【§14.8 任务 14：per-instance cluster BVH 遍历】本类再自持一组"簇 BVH"资源：
+//     · 节点缓冲        —— `NaniteBVHNode`（32B/条；CPU 构建器产出，一次性上传）
+//     · 叶子簇表缓冲    —— u32（叶子用 [left, left+count)）
+//     · 簇球缓冲        —— `NaniteClusterSphere`（16B/条；CPU 从簇记录逐位搬运）
+//     · 可见簇列表      —— `NaniteVisibleClusterRef`（8B/条；GPU 原子压缩写）
+//     · 可见簇计数      —— 单个 u32（GPU 原子累加）
+//     · 已访问节点计数  —— 单个 u32（GPU 原子累加；验收的"遍历访问数"）
+//     · 清零源          —— 8B 常驻 0（TransferSrc；上面两个计数每帧的"清 0"拷贝源）
+//   两个计数**每帧在命令缓冲内用 4B 拷贝清 0**（照任务 13 修法，不用主机写：见
+//   `RecordInstanceCullPass` 里那段负向验证）；可见簇列表**不逐帧重置**，理由与任务 13 相同。
+//
+//   【Phase 1 → Phase 2 的接线为什么留到任务 15（如实说明）】Phase 2 的形式是"对每个**可见**实例
+//   遍历 BVH"，但 `Nanite_InstanceCull` 与本 pass 在帧图里都**不声明任何帧图资源**，
+//   `RenderGraph::TopologicalSort` 对 inDegree=0 的 pass 按 LIFO 处理 ⇒ **帧图无法表达**
+//   "本 pass 必须排在实例剔除之后"这条顺序（同 Task 3 的假簇链）。本任务因此把 Phase 2 的
+//   实例域定义为"**全部非空实例**"（`indexCount != 0`，与任务 13 的跳过规则同一个判据），
+//   这是一个**自洽、确定、CPU/GPU 同口径**的域。真正的三阶段接线（Phase 1 可见列表 → Phase 2
+//   → Hi-Z → Phase 3 LOD 选择）正是 §14.8 任务 15 的正文，届时两个 pass 必须合并进同一条链
+//   （或让实例剔除把结果落到帧图资源上）—— 已写进任务 15 的记录项。
 // ============================================================
 
 #include "Nanite/NaniteTypes.h"
+#include "Nanite/NaniteUpload.h"   // 【任务 14】`NaniteClusterBVH`（构建产物；RHI-free 头）
 #include "RHI/RHI.h"
 #include "Math/Math.h"   // 【任务 13】float3 / float4x4（相机视锥与合成实例网格的输入类型）
 
 #include <memory>
 #include <vector>
+#include <span>   // 【任务 14】SetClusterBVH 的簇记录视图
 
 namespace he::render {
 
@@ -63,6 +85,25 @@ static_assert(sizeof(NaniteInstanceCullParams) == 112,
 static_assert(offsetof(NaniteInstanceCullParams, instanceCount) == 96,
               "instanceCount 必须紧跟 6 个 float4（偏移 96）");
 
+/// 【§14.8 任务 14】Nanite_ClusterBVH.comp.slang 的 push constant
+///
+/// 【布局】`planes[6]`（96B）+ 4 个 u32（16B）= 112B，与任务 13 的实例剔除同形（同一套视锥提取）。
+///   `visibleCapacity` 进 push constant 是为了让 shader 自己判断"槽位是否越出可见列表容量"，
+///   从而 GPU 的写入与 CPU 参考的写入口径（只写容量内、计数照常累加）逐条一致。
+struct alignas(16) NaniteClusterBVHParams {
+    float planes[6][4];     // 偏移 0：世界空间视锥六平面（[左,右,下,上,近,远]，n 已归一化）
+    u32   instanceCount;    // 偏移 96：本帧实例数（合成实例表的条数）
+    u32   clusterCount;     // 偏移 100：簇数（= 簇球表条数）
+    u32   nodeCount;        // 偏移 104：BVH 节点数
+    u32   visibleCapacity;  // 偏移 108：可见簇列表容量
+};
+static_assert(sizeof(NaniteClusterBVHParams) == 112,
+              "NaniteClusterBVHParams 必须与 Slang cbuffer 一致（6×float4 + 4×u32 = 112B）");
+static_assert(offsetof(NaniteClusterBVHParams, instanceCount) == 96,
+              "instanceCount 必须紧跟 6 个 float4（偏移 96）");
+static_assert(offsetof(NaniteClusterBVHParams, visibleCapacity) == 108,
+              "visibleCapacity 必须在偏移 108");
+
 class NaniteCull {
 public:
     NaniteCull() = default;
@@ -79,7 +120,10 @@ public:
     void Shutdown();
     void OnResize(u32 width, u32 height);
 
-    [[nodiscard]] bool IsReady() const { return m_Device != nullptr && m_PSO != nullptr && m_InstanceCullPSO != nullptr; }
+    [[nodiscard]] bool IsReady() const {
+        return m_Device != nullptr && m_PSO != nullptr && m_InstanceCullPSO != nullptr
+            && m_BVHPSO != nullptr;   // 【任务 14】BVH 遍历的 compute 管线也必须建成
+    }
 
     /// 设置本帧假簇数量（超上限钳制）。由 `NaniteRenderer::AddPasses` 从
     /// `NaniteSettings::fakeClusters` 转发，是任务 3 的唯一输入。
@@ -126,6 +170,49 @@ public:
     [[nodiscard]] u32 GetTestInstanceCount() const { return m_TestInstanceCount; }
     [[nodiscard]] static constexpr u32 MaxTestInstances() { return kNaniteMaxTestInstances; }
 
+    // ============================================================
+    // §14.8 任务 14：per-instance cluster BVH（构建产物入库 + 每帧深度优先遍历）
+    // ============================================================
+
+    /// 按 `.nanite` 的簇记录构建 BVH 并**一次性上传**三个只读缓冲（节点 / 叶子簇表 / 簇球）。
+    ///
+    /// 【调用时机与次数】`NaniteRenderer::EnsureAssetUploaded` 在开关开启时**只调一次**
+    ///   （资产构建成功后）。之后每帧不再碰这三个缓冲。
+    /// 【簇数上限】按 `kNaniteMaxBVHClusters` 截断（超出时打印一次中文告警，不静默）；
+    ///   被截断掉的是"下标 ≥ 上限"的簇 —— 可见簇引用表的大小由这个上限推出。
+    /// 【失败】设备/PSO 未就绪、构建失败 ⇒ 返回 false（此后该 pass 直接跳过，不派发）。
+    /// 【同步约定】本函数只在**一次性启动路径**上被调用（与任务 12 的资产上传同一时机），
+    ///   此缓冲尚未被任何已提交的 GPU 工作引用 ⇒ 主机 `Map` 写入不存在竞争。
+    [[nodiscard]] bool SetClusterBVH(std::span<const NaniteClusterRecord> clusters);
+
+    /// 本 pass 是否可用（BVH 已入库 + PSO/描述符集就绪）
+    [[nodiscard]] bool IsClusterBVHReady() const { return m_BVHReady; }
+
+    /// 录制 `Nanite_ClusterBVH` pass：
+    ///   ① **命令缓冲内**把可见簇计数与已访问节点计数清 0（两次 4B 拷贝，GPU 有序）+ 屏障；
+    ///   ② Dispatch（每实例一个线程；实例域 = `min(合成实例数, kNaniteMaxBVHInstances)`）；
+    ///   ③ 屏障（compute → compute|transfer，后者为下一帧的清零消 WAR）。
+    /// 【为什么与实例剔除分成两个 pass】本任务只做"构建 + 遍历"；三阶段合并属任务 15。
+    void RecordClusterBVHPass(rhi::IRHICommandList* cmd);
+
+    /// 【任务 14】CPU 参考遍历（dump 帧算一次；输入与 GPU **同一份比特**：同一个视锥、同一张
+    ///   128B 实例表、同一棵 BVH、同一张簇球表、同一个实例域钳制）。
+    /// @param outVisible 输出可见簇引用（会被 resize 到可见数）
+    /// @return 遍历读数（visited / visible / stackOverflows / traversedInstances）
+    NaniteClusterBVHTraversalStats RunClusterBVHCPUReference(
+        std::vector<NaniteVisibleClusterRef>& outVisible) const;
+
+    // ── 任务 14 的读回访问（`NaniteRenderer::LogClusterBVHReadback` 使用）──
+    [[nodiscard]] rhi::IRHIBuffer* GetVisibleClusterBuffer()      const { return m_VisibleClusterBuf.get(); }
+    [[nodiscard]] rhi::IRHIBuffer* GetVisibleClusterCountBuffer() const { return m_VisibleClusterCountBuf.get(); }
+    [[nodiscard]] rhi::IRHIBuffer* GetBVHVisitedCountBuffer()     const { return m_BVHVisitedCountBuf.get(); }
+    [[nodiscard]] u32 GetBVHNodeCount()    const { return (u32)m_BVHData.nodes.size(); }
+    [[nodiscard]] u32 GetBVHDepth()        const { return m_BVHData.depth; }
+    [[nodiscard]] u32 GetBVHClusterCount() const { return m_BVHData.clusterCount; }
+    [[nodiscard]] u32 GetBVHInstanceDomain() const { return m_BVHInstanceDomain; }
+    [[nodiscard]] u32 GetBVHVisibleCapacity() const { return kNaniteMaxVisibleClusterRefs; }
+    [[nodiscard]] static constexpr u32 MaxBVHInstances() { return kNaniteMaxBVHInstances; }
+
     /// 录制 `Nanite_Cull` pass：
     ///   ① CPU 侧每帧重置三个计数/命令缓冲（沿用引擎既有的 `Map` 清零写法）
     ///   ② 上传 N 条假簇
@@ -156,7 +243,6 @@ private:
     void BuildTestInstances();
     /// 【任务 13】把合成实例表与包围球写进各自的 GPU 缓冲
     void UploadInstanceCullInputs();
-
     rhi::IRHIDevice* m_Device = nullptr;
     u32 m_Width  = 0;
     u32 m_Height = 0;
@@ -209,6 +295,38 @@ private:
     std::vector<NaniteInstanceSphere>    m_TestSpheres;
     // CPU 参考剔除结果（升序可见下标）—— dump 帧与 GPU 读回逐项比较
     std::vector<u32> m_CpuVisibleInstances;
+
+    // ============================================================
+    // §14.8 任务 14：per-instance cluster BVH 的自持资源与状态
+    // ============================================================
+
+    /// BVH 是否已入库（`SetClusterBVH` 成功）。未入库 ⇒ `RecordClusterBVHPass` 直接跳过。
+    bool m_BVHReady = false;
+
+    /// CPU 侧 BVH 镜像（节点/叶子簇表/簇球/读数）——GPU 侧三个只读缓冲由它上传；
+    /// 同时是 CPU 参考遍历的输入 ⇒ **GPU 与 CPU 读的是同一份比特**。
+    NaniteClusterBVH m_BVHData;
+
+    /// 本帧实例域 = `min(合成实例数, kNaniteMaxBVHInstances)`（CPU 参考与 GPU 同口径）
+    u32 m_BVHInstanceDomain = 0u;
+
+    // ── 三个只读输入缓冲（容量固定，`SetClusterBVH` 一次性上传）──
+    std::unique_ptr<rhi::IRHIBuffer> m_BVHNodeBuf;     // 节点（32B/条，容量 kNaniteMaxBVHNodes）
+    std::unique_ptr<rhi::IRHIBuffer> m_BVHLeafBuf;     // 叶子簇表（u32/条，容量 kNaniteMaxBVHClusters）
+    std::unique_ptr<rhi::IRHIBuffer> m_BVHSphereBuf;   // 簇球（16B/条，容量 kNaniteMaxBVHClusters）
+    // ── 每帧由 GPU 写的可写缓冲 ──
+    std::unique_ptr<rhi::IRHIBuffer> m_VisibleClusterBuf;       // 可见簇引用（8B/条，容量 kNaniteMaxVisibleClusterRefs）
+    std::unique_ptr<rhi::IRHIBuffer> m_VisibleClusterCountBuf;  // 可见簇计数（u32）
+    std::unique_ptr<rhi::IRHIBuffer> m_BVHVisitedCountBuf;      // 已访问节点计数（u32）
+    /// 两个计数的清零源（8B 常驻 0，TransferSrc）：前 4B 给可见簇计数、后 4B 给访问计数。
+    /// 与任务 13 的 `m_VisibleCountClearBuf` 同款；**每帧的清零在命令缓冲内**（不用主机写）。
+    std::unique_ptr<rhi::IRHIBuffer> m_BVHZeroClearBuf;
+
+    // ── cluster BVH 遍历的 compute 管线 ──
+    rhi::ShaderBytecode m_BVHCS;   // Nanite_ClusterBVH.comp.spv
+    rhi::DescriptorSetLayoutHandle m_BVHLayout = rhi::kInvalidLayout;
+    rhi::DescriptorSetHandle       m_BVHSet    = rhi::kInvalidSet;
+    std::unique_ptr<rhi::IRHIPipelineState> m_BVHPSO;
 };
 
 } // namespace he::render

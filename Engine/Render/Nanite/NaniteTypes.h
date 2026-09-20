@@ -1276,6 +1276,277 @@ static_assert(offsetof(NaniteFrustumPlanes, planes) == 0, "planes 必须在偏�
     return true;
 }
 
+// ============================================================
+// §14.8 任务 14：per-instance cluster BVH（节点布局 + CPU 参考深度优先遍历）
+//
+// 【本节放什么（两处位置的取舍）】
+//   · **节点/球/引用的 POD 与 CPU 参考遍历**放在本文件：它们是"与 Slang 共享的 GPU 布局"
+//     （shader 侧按本节的逐字段布局镜像）以及"GPU 与 CPU 逐项一致的参考实现"，与任务 13 把
+//     `NaniteCullInstancesCPU` 放在这里的做法完全同构；本文件仍是 RHI-free、纯头实现、可单测。
+//   · **构建器**（`BuildNaniteClusterBVH`）放在 `NaniteUpload.{h,cpp}`：它消费 `.nanite` 的
+//     簇记录（任务 9/10 的产物）、属于"资产 → 加速结构"的构建阶段，与 `PackNaniteClusters`
+//     同一层；放在那里也让它天然被 `Tests/TestNaniteBuilder.cpp`（直接编译 NaniteUpload.cpp）
+//     覆盖，而本文件不必为了一个构建器引入 `<vector>` 算法。
+//
+// 【与 §5.1 Phase 2 的对应】"For each visible instance: BVH traverse (cluster tree, depth-first)
+//   → Frustum cull cluster bounds"。本任务实现**遍历本身**（构建 + 显式栈 DFS + 视锥球判据）；
+//   "Phase 1 的可见实例列表 → Phase 2"这条接线与 Hi-Z 遮挡、LOD 选择一起属任务 15
+//   （§14.8 任务 15 的原文就是"三阶段簇剔除 + Hi-Z"）。
+//
+// 【坐标与判据口径（与任务 13 逐字一致）】簇球的 `center/radius` 是**资产网格空间**（= 任务 9
+//   的 `NaniteClusterRecord::boundsCenterRadius`，即合并几何的世界坐标，未施加任何逐物体变换）；
+//   实例的平移取自 128B `NaniteInstanceGpuObject::localToWorld` 的**第 4 列**（列主序的
+//   元素 12/13/14）。世界球 = 平移 + 网格空间球心、半径不变（本任务的合成实例变换是**纯平移**，
+//   见 `NaniteCull.cpp` 的生成代码）。可见性判据 = `NaniteSphereVisibleInFrustum`
+//   （任一面 `dot(n,c)+d < -r` ⇒ 不可见，无 epsilon），与 GPU 侧同一表达式。
+// ============================================================
+
+/// 每个叶子的簇容量（BVH 的叶子容量）
+///
+/// 【为什么是 4】每簇的包围球很小（≤64 三角形），叶子放 4 个簇后叶子球仍然足够紧；遍历到叶子
+///   后至多 4 次球测试，成本可忽略。代价是树高 ~log2(N/4)：本仓库实测资产 8287 簇 ⇒ 深度 13 级，
+///   对显式栈（32）留有充足余量。
+inline constexpr u32 kNaniteBVHLeafCapacity = 4u;
+
+/// BVH 的**深度硬上限**（节点数，根节点深度 = 1）
+///
+/// 【为什么必须有它】中点分裂在极端分布下可能一次只切掉 1 个簇 ⇒ 递归深度退化。超上限即
+///   停止分裂（该结点变成"更大的叶子"），把"显式栈会不会溢出"从**运行期风险**变成**构建期
+///   不变量**：单测直接断言 `depth <= kNaniteBVHMaxDepth`。
+inline constexpr u32 kNaniteBVHMaxDepth = 24u;
+
+/// GPU 显式栈的深度上界（**必须 ≥ `kNaniteBVHMaxDepth`**）
+///
+/// 【为什么是 32 而不是 24】构建期的深度上界是"节点数"，而 DFS 栈里同时存在的条目数不会超过
+///   树高（每层至多压一个"右兄弟"），故 24 其实够用；这里多留 8 层余量，让"栈容量"与"树的
+///   深度"这两件事各自有余量、不会因为将来调 `kNaniteBVHMaxDepth` 而互相踩到。
+inline constexpr u32 kNaniteBVHMaxStackDepth = kNaniteBVHMaxDepth + 8u;
+static_assert(kNaniteBVHMaxStackDepth >= kNaniteBVHMaxDepth, "显式栈必须至少能装下最大深度");
+
+/// "没有这个孩子"的哨兵（叶子节点的 `right`）
+inline constexpr u32 kNaniteBVHNoChild = 0xFFFFFFFFu;
+
+/// Phase 2 遍历的**实例域上限**（可见簇引用表的容量 = 它 × 簇数上限）
+///
+/// 【为什么要有上限】可见簇引用表必须**一次分配、容量恒定**（GPU 原子压缩写入不能中途扩容），
+///   而它的最坏规模 = 实例数 × 簇数。把实例域钳到 64：默认配置（`nanite_instance_test_count`
+///   = 64）正好用满，而 64 × 8287（本仓库实测资产）= 53 万条引用 < 1M 的容量 ⇒ **永不截断**
+///   （截断会让"集合逐项比较"失去意义）。CPU 参考与 GPU 用**同一个钳制口径**。
+inline constexpr u32 kNaniteMaxBVHInstances = 64u;
+
+/// BVH 覆盖的**簇数上限**（`NaniteCull::SetClusterBVH` 按它截断并告警）
+///
+/// 见上：可见簇引用表的大小 = `kNaniteMaxBVHInstances × kNaniteMaxBVHClusters`。本仓库实测资产
+/// 8287 簇，16384 留了近一倍余量；超出时**如实告警**并只对前 16384 个簇建 BVH（不静默）。
+/// 节点数上界 = 2 × 簇数 - 1（满二叉树），故节点表按 `2 × 16384` 条分配。
+inline constexpr u32 kNaniteMaxBVHClusters = 16384u;
+
+/// 可见簇引用表容量（= 实例域上限 × 簇数上限）
+inline constexpr u32 kNaniteMaxVisibleClusterRefs =
+    kNaniteMaxBVHInstances * kNaniteMaxBVHClusters;
+
+/// BVH 节点表容量（满二叉树的上界：叶子 ≤ 簇数 ⇒ 节点 ≤ 2 × 簇数 - 1）
+inline constexpr u32 kNaniteMaxBVHNodes = 2u * kNaniteMaxBVHClusters;
+
+/// BVH 节点（32B；与 `Nanite_ClusterBVH.comp.slang` 的 `BVHNode` 逐字段一致）
+///
+/// ```text
+/// 偏移  0：float4 centerRadius   —— center.xyz = 网格空间包围球心，w = 半径
+/// 偏移 16：uint4  link           —— x = left，y = right，z = count，w = flags
+///                                   内部节点：left/right = 左右孩子下标，count = 2，flags 无 leaf 位
+///                                   叶子节点：left = 叶子簇表首下标，right = kNaniteBVHNoChild，
+///                                             count = 簇数（≥1），flags bit0 = 1
+/// ```
+/// 【为什么用"左/右孩子显式下标"而不是"右孩子 = 左 + 1"】后一种要求两个孩子**下标相邻**，
+///   而自顶向下的递归构建无法保证（左子树会吃掉中间的下标）；显式写两个下标只多 4B，
+///   换掉一整类"布局约束"，也让 shader 的压栈只需读一个 uint4。
+/// 【`flags` 只定义 bit0】其余位保留写 0，避免"某些位有语义但没人知道"的隐患。
+struct alignas(16) NaniteBVHNode {
+    float center[3];   ///< 偏移 0：网格空间包围球心
+    float radius;      ///< 偏移 12：包围球半径（≥ 0）
+    u32   left;        ///< 偏移 16：内部节点 = 左孩子下标；叶子 = 叶子簇表首下标
+    u32   right;       ///< 偏移 20：内部节点 = 右孩子下标；叶子 = kNaniteBVHNoChild
+    u32   count;       ///< 偏移 24：内部节点 = 2；叶子 = 该叶子的簇数（≥ 1）
+    u32   flags;       ///< 偏移 28：bit0 = 1 表示叶子
+};
+
+static_assert(sizeof(NaniteBVHNode) == 32, "BVH 节点必须 32B（= float4 + uint4）");
+static_assert(alignof(NaniteBVHNode) == 16, "BVH 节点必须 16B 对齐（std430 的 float4 步长）");
+static_assert(offsetof(NaniteBVHNode, center) == 0,  "center 必须在偏移 0");
+static_assert(offsetof(NaniteBVHNode, radius) == 12, "radius 必须在偏移 12");
+static_assert(offsetof(NaniteBVHNode, left)   == 16, "left 必须在偏移 16");
+static_assert(offsetof(NaniteBVHNode, right)  == 20, "right 必须在偏移 20");
+static_assert(offsetof(NaniteBVHNode, count)  == 24, "count 必须在偏移 24");
+static_assert(offsetof(NaniteBVHNode, flags)  == 28, "flags 必须在偏移 28");
+
+/// `NaniteBVHNode::flags` 的叶子位（其余位保留 0）
+inline constexpr u32 kNaniteBVHNodeFlagLeaf = 1u;
+
+/// 该节点是不是叶子（与 shader 侧的 `(link.w & 1u) != 0` 逐字对应）
+[[nodiscard]] inline bool NaniteBVHNodeIsLeaf(const NaniteBVHNode& node) {
+    return (node.flags & kNaniteBVHNodeFlagLeaf) != 0u;
+}
+
+/// 每簇一个 16B 包围球（**网格空间**；与 `Nanite_ClusterBVH.comp.slang` 的 `ClusterSphere` 一致）
+///
+/// 【为什么单独一张表而不是让 shader 读 64B 的簇记录】① 遍历只需要 `boundsCenterRadius` 这
+///   16B，专门的紧凑表让 GPU 的访存步长与缓存占用都小 4 倍；② 这张表由 CPU 从
+///   `NaniteClusterRecord::boundsCenterRadius` **逐位搬运**，CPU 参考遍历读的是**同一份比特**
+///   （与任务 13 把实例包围球落成表同一个理由：不让 GPU 现推 sqrt/FMA 的末位差异翻转边界可见性）。
+struct alignas(16) NaniteClusterSphere {
+    float center[3];   ///< 偏移 0：网格空间球心
+    float radius;      ///< 偏移 12：半径（≥ 0）
+};
+
+static_assert(sizeof(NaniteClusterSphere) == 16, "簇包围球必须 16B（StructuredBuffer 步长）");
+static_assert(offsetof(NaniteClusterSphere, center) == 0,  "球心必须在偏移 0");
+static_assert(offsetof(NaniteClusterSphere, radius) == 12, "半径必须在偏移 12");
+
+/// 一条可见簇引用（8B；与 shader 侧的 `ClusterRef` 一致）
+///
+/// 【为什么带 instance】Phase 2 是 per-instance 的：同一个簇下标会被同一份资产的不同实例
+///   （平移副本）分别引用 ⇒ "可见簇集合"的元素必须是 (实例, 簇) 二元组，否则多个实例的可见
+///   结果会被错误地折叠成一个集合。
+struct alignas(4) NaniteVisibleClusterRef {
+    u32 instance;   ///< 偏移 0：实例下标（128B 实例表的条目）
+    u32 cluster;    ///< 偏移 4：簇下标（`NaniteClusterRecord` 的下标）
+};
+
+static_assert(sizeof(NaniteVisibleClusterRef) == 8, "可见簇引用必须 8B（StructuredBuffer 步长）");
+static_assert(offsetof(NaniteVisibleClusterRef, instance) == 0, "instance 必须在偏移 0");
+static_assert(offsetof(NaniteVisibleClusterRef, cluster)  == 4, "cluster 必须在偏移 4");
+
+/// BVH 的只读视图（CPU 参考遍历的输入；不含所有权，故本结构仍是纯 POD）
+struct NaniteClusterBVHView {
+    const NaniteBVHNode*       nodes              = nullptr;  ///< 节点表（[0, nodeCount)）
+    u32                        nodeCount          = 0u;       ///< 节点数（0 ⇒ 空 BVH）
+    const u32*                 leafClusterIndices = nullptr;  ///< 叶子簇表（扁平；叶子用 [left, left+count)）
+    const NaniteClusterSphere* clusterSpheres     = nullptr;  ///< 每簇包围球（网格空间）
+    u32                        clusterCount       = 0u;       ///< 簇数（= 簇球表条数）
+};
+
+/// CPU 参考遍历的读数（验收要的每个数字都在这里）
+struct NaniteClusterBVHTraversalStats {
+    u32 visitedNodes      = 0u;  ///< 被访问（测试过）的节点数 —— 与 GPU 的 visited 计数同义
+    u32 visibleClusters   = 0u;  ///< 被接受的簇引用总数（**未按输出容量截断**，与 GPU 计数同义）
+    u32 stackOverflows    = 0u;  ///< 显式栈放不下的次数（构建期上界保证恒 0；非 0 即上界失效）
+    u32 traversedInstances = 0u; ///< 真正参与遍历的非空实例数（indexCount != 0）
+};
+
+/// **CPU 参考的 per-instance cluster BVH 深度优先遍历**（§14.8 任务 14 的验收基准）
+///
+/// 输入：
+///   · `frustum`       —— 6 个世界空间平面（`NaniteExtractFrustumPlanes(viewProj)` 得到）；
+///   · `bvh`           —— 节点表 + 叶子簇表 + 簇球表（GPU 侧读的是同一份比特）；
+///   · `instances`     —— 128B `NaniteInstanceGpuObject` 表（只读 `localToWorld` 的平移列与
+///                        `indexCount`）；
+///   · `instanceCount` / `maxInstances` —— 实例域 = `min(instanceCount, maxInstances)`（与 GPU 的
+///                        钳制口径一致：可见簇引用表按 `maxInstances × clusterCount` 分配）；
+///   · `outVisible` / `outCapacity` —— 输出可见簇引用（写入前 `outCapacity` 条；**计数不受容量影响**）。
+/// 输出：返回值 = 可见簇引用总数（**未截断**）；`outStats`（可空）填读数。
+///
+/// 【与 GPU 通道逐条对应（`Nanite_ClusterBVH.comp.slang`）】
+///   ① `bvh.nodes == nullptr || nodeCount == 0` ⇒ 0（没有 BVH 就没有遍历）；
+///   ② `instances == nullptr || instanceCount == 0 || maxInstances == 0` ⇒ 0；
+///   ③ 逐实例：`indexCount == 0` ⇒ 跳过（"空实例无可画几何"，与任务 13 同规则）；
+///   ④ 每个实例**独立**从根做一次 DFS（per-instance），显式栈、先压右再压左 ⇒ 左子树先访问；
+///   ⑤ 每弹出一个节点即 `visitedNodes += 1`（**先计数、后判可见**：与 GPU 的 `++visited` 同位置）；
+///   ⑥ 节点球不可见 ⇒ 整棵子树跳过（节点球是其所有后代簇球的保守并集）；
+///   ⑦ 叶子：对 `[left, left+count)` 的每个簇做球测试，可见则计入并写入（容量内）。
+///
+/// 【确定性】不含随机数、不读时间、不并行；同一输入两次调用逐位一致。GPU 侧唯一的非确定性是
+///   "原子取槽位"决定可见引用的**写入顺序**，故比较口径是**排序后的逐项相等**（集合等价），
+///   与任务 13 相同。
+/// 【空/退化输入】空 BVH、空实例表、0 容量、空指针一律返回 0（不崩、不写越界）。
+[[nodiscard]] inline u32 NaniteTraverseClusterBVHCPU(
+        const NaniteFrustumPlanes& frustum,
+        const NaniteClusterBVHView& bvh,
+        const NaniteInstanceGpuObject* instances,
+        u32 instanceCount,
+        u32 maxInstances,
+        NaniteVisibleClusterRef* outVisible,
+        u32 outCapacity,
+        NaniteClusterBVHTraversalStats* outStats) {
+    if (outStats != nullptr) *outStats = NaniteClusterBVHTraversalStats{};
+    if (bvh.nodes == nullptr || bvh.nodeCount == 0u) return 0u;
+    if (instances == nullptr || instanceCount == 0u || maxInstances == 0u) return 0u;
+
+    const u32 domain = (instanceCount < maxInstances) ? instanceCount : maxInstances;
+
+    u32 written = 0u;   // 可见簇引用总数（未截断）
+    NaniteClusterBVHTraversalStats stats{};
+
+    // 显式栈（固定大小、无分配）：与 GPU 的 `uint stack[kNaniteBVHMaxStackDepth]` 同构。
+    // DFS 栈里同时存在的条目数不超过树高，故 `kNaniteBVHMaxDepth` 是它的构造性上界。
+    u32 stack[kNaniteBVHMaxStackDepth];
+
+    for (u32 instance = 0u; instance < domain; ++instance) {
+        if (instances[instance].indexCount == 0u) continue;   // ③ 空实例跳过
+        ++stats.traversedInstances;
+
+        // 实例变换的平移列（列主序：localToWorld[12..14]）；本任务的合成实例是纯平移。
+        const float origin[3] = {
+            instances[instance].localToWorld[12],
+            instances[instance].localToWorld[13],
+            instances[instance].localToWorld[14],
+        };
+
+        u32 stackSize = 0u;
+        stack[stackSize++] = 0u;   // 根节点恒为 0（构建器保证 DFS 布局下根先分配）
+
+        while (stackSize > 0u) {
+            const u32 nodeIndex = stack[--stackSize];
+            if (nodeIndex >= bvh.nodeCount) continue;   // 防御：非法孩子下标不越界
+            ++stats.visitedNodes;                       // ⑤ 先计数、后判可见
+
+            const NaniteBVHNode& node = bvh.nodes[nodeIndex];
+            const float nodeCenter[3] = {
+                node.center[0] + origin[0],
+                node.center[1] + origin[1],
+                node.center[2] + origin[2],
+            };
+            if (!NaniteSphereVisibleInFrustum(frustum, nodeCenter, node.radius)) {
+                continue;   // ⑥ 节点球不可见 ⇒ 整棵子树跳过
+            }
+
+            if (NaniteBVHNodeIsLeaf(node)) {
+                if (bvh.leafClusterIndices == nullptr || bvh.clusterSpheres == nullptr) continue;
+                const u32 first = node.left;
+                for (u32 k = 0u; k < node.count; ++k) {
+                    const u32 cluster = bvh.leafClusterIndices[first + k];
+                    if (cluster >= bvh.clusterCount) continue;   // 防御：越界簇下标不读球表
+                    const NaniteClusterSphere& sphere = bvh.clusterSpheres[cluster];
+                    const float clusterCenter[3] = {
+                        sphere.center[0] + origin[0],
+                        sphere.center[1] + origin[1],
+                        sphere.center[2] + origin[2],
+                    };
+                    if (!NaniteSphereVisibleInFrustum(frustum, clusterCenter, sphere.radius)) {
+                        continue;
+                    }
+                    if (outVisible != nullptr && written < outCapacity) {
+                        outVisible[written].instance = instance;
+                        outVisible[written].cluster  = cluster;
+                    }
+                    ++written;
+                }
+            } else {
+                // ④ 先压右、再压左 ⇒ 下一次弹出的是左孩子（深度优先、顺序确定）
+                if (stackSize + 2u <= kNaniteBVHMaxStackDepth) {
+                    stack[stackSize++] = node.right;
+                    stack[stackSize++] = node.left;
+                } else {
+                    ++stats.stackOverflows;   // 构建期上界失效（正常恒 0）
+                }
+            }
+        }
+    }
+
+    stats.visibleClusters = written;
+    if (outStats != nullptr) *outStats = stats;
+    return written;
+}
+
 /// **CPU 参考实例剔除**（§14.8 任务 13 的验收基准；RHI-free、可单测）
 ///
 /// 输入（全部世界空间）：

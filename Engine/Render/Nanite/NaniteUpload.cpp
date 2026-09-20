@@ -1063,6 +1063,239 @@ bool BuildNaniteAssetFromGeometry(std::span<const float>                position
     return PackNaniteClusters(positions, normals, uvs, materials, dag, outResult);
 }
 
+// ============================================================
+// §14.8 任务 14：per-instance cluster BVH 的构建（CPU 侧）
+//
+// 口径（分裂策略 / 叶子容量 / 深度上限 / 包围球规则 / 确定性）全部写在
+// `NaniteUpload.h` 的 "§14.8 任务 14" 小节，这里只留与代码逐句对应的短注释。
+//
+// 递归深度 ≤ kNaniteBVHMaxDepth（24），故用普通递归而不是显式栈 —— 调用栈吃不满 24 层；
+// GPU 侧才必须用显式栈（shader 没有递归）。
+// ============================================================
+namespace {
+
+/// 半径防御：NaN / 负值一律取 0
+///
+/// 与遍历判据（`NaniteSphereVisibleInFrustum` 把 `radius < 0` 归零）同口径 ⇒ 构建期算出的球
+/// 不会比遍历期的判据"更大或更小"，不会出现两处口径不一致导致的边界翻转。
+[[nodiscard]] inline float SanitizeClusterBVHRadius(float radius) {
+    return (radius > 0.0f) ? radius : 0.0f;
+}
+
+/// 一组簇球的 AABB 包围球（`count == 0` ⇒ 退化为原点、半径 0）
+///
+/// 【为什么父球这样算】`center` = 全部球 AABB 的中心、`radius` = 到任一球边界的**最远**距离。
+/// 父球因此恒包含所有子球（以及后代的簇球）⇒ "父球不可见 ⇒ 后代全不可见"这条早退是正确的。
+/// 【确定性】只用 min/max/max，与遍历顺序无关（同类运算在 IEEE 下可交换/可结合地进行比较），
+/// 故逐位可复现。
+void ComputeSphereUnion(const u32* order, u32 begin, u32 end,
+                        const std::vector<NaniteClusterSphere>& spheres,
+                        float outCenter[3], float& outRadius) {
+    outCenter[0] = outCenter[1] = outCenter[2] = 0.0f;
+    outRadius = 0.0f;
+    if (order == nullptr || end <= begin) return;
+
+    float lo[3] = { 0.0f, 0.0f, 0.0f };
+    float hi[3] = { 0.0f, 0.0f, 0.0f };
+    for (u32 k = begin; k < end; ++k) {
+        const NaniteClusterSphere& s = spheres[order[k]];
+        for (u32 axis = 0; axis < 3u; ++axis) {
+            const float a = s.center[axis] - s.radius;
+            const float b = s.center[axis] + s.radius;
+            if (k == begin) { lo[axis] = a; hi[axis] = b; }
+            else { lo[axis] = (a < lo[axis]) ? a : lo[axis]; hi[axis] = (b > hi[axis]) ? b : hi[axis]; }
+        }
+    }
+    for (u32 axis = 0; axis < 3u; ++axis) outCenter[axis] = (lo[axis] + hi[axis]) * 0.5f;
+
+    float maxDistance = 0.0f;
+    for (u32 k = begin; k < end; ++k) {
+        const NaniteClusterSphere& s = spheres[order[k]];
+        const float dx = s.center[0] - outCenter[0];
+        const float dy = s.center[1] - outCenter[1];
+        const float dz = s.center[2] - outCenter[2];
+        // 不开方：比较平方距离后再开一次方，既少一次开方又不改变"取最远"的选择
+        const float distanceSquared = dx * dx + dy * dy + dz * dz;
+        const float reach = std::sqrt(distanceSquared) + s.radius;
+        if (reach > maxDistance) maxDistance = reach;
+    }
+    outRadius = maxDistance;
+}
+
+/// 在一个 [begin, end) 的簇区间上递归构建 BVH，返回新建结点的下标
+///
+/// @param order          簇下标的工作数组（区间内会被本函数按分裂轴就地排序）
+/// @param depth          该结点的深度（根 = 1）
+/// @param maxDepth       出参：整棵树的最大深度
+/// @param leafCount      出参：叶子数
+/// @param maxLeafClusters 出参：实际最大叶子簇数
+[[nodiscard]] u32 BuildClusterBVHNode(NaniteClusterBVH& bvh, u32* order, u32 begin, u32 end,
+                                      u32 depth, u32& maxDepth, u32& leafCount,
+                                      u32& maxLeafClusters) {
+    const u32 clusterCount = end - begin;
+    const u32 nodeIndex = (u32)bvh.nodes.size();
+    bvh.nodes.emplace_back(NaniteBVHNode{});
+    if (depth > maxDepth) maxDepth = depth;
+
+    // ── 叶子判据：数量已够小，或已到深度硬上限（超上限就停止分裂 ⇒ 栈溢出变成构建期不变量）──
+    if (clusterCount <= kNaniteBVHLeafCapacity || depth >= kNaniteBVHMaxDepth) {
+        float center[3] = { 0.0f, 0.0f, 0.0f };
+        float radius = 0.0f;
+        ComputeSphereUnion(order, begin, end, bvh.clusterSpheres, center, radius);
+
+        NaniteBVHNode& node = bvh.nodes[nodeIndex];
+        node.center[0] = center[0];
+        node.center[1] = center[1];
+        node.center[2] = center[2];
+        node.radius    = radius;
+        node.left      = (u32)bvh.leafClusterIndices.size();   // 叶子簇表首下标
+        node.right     = kNaniteBVHNoChild;
+        node.count     = clusterCount;
+        node.flags     = kNaniteBVHNodeFlagLeaf;
+        // 叶子簇表按当前 order 顺序追加：`order` 的排列是确定性的，故产物逐位可复现。
+        for (u32 k = begin; k < end; ++k) bvh.leafClusterIndices.push_back(order[k]);
+        ++leafCount;
+        if (clusterCount > maxLeafClusters) maxLeafClusters = clusterCount;
+        return nodeIndex;
+    }
+
+    // ── 分裂轴：质心 AABB 上跨度最大的轴（标准 BVH 启发式）──
+    float cmin[3] = { 0.0f, 0.0f, 0.0f };
+    float cmax[3] = { 0.0f, 0.0f, 0.0f };
+    for (u32 k = begin; k < end; ++k) {
+        const NaniteClusterSphere& s = bvh.clusterSpheres[order[k]];
+        for (u32 axis = 0; axis < 3u; ++axis) {
+            if (k == begin) { cmin[axis] = s.center[axis]; cmax[axis] = s.center[axis]; }
+            else {
+                if (s.center[axis] < cmin[axis]) cmin[axis] = s.center[axis];
+                if (s.center[axis] > cmax[axis]) cmax[axis] = s.center[axis];
+            }
+        }
+    }
+    u32   axis        = 0u;
+    float bestExtent  = -1.0f;
+    for (u32 a = 0; a < 3u; ++a) {
+        const float extent = cmax[a] - cmin[a];
+        // NaN 的 extent 与任何值比较都为 false ⇒ 不会成为 bestExtent，轴退化为 x
+        if (extent > bestExtent) { bestExtent = extent; axis = a; }
+    }
+    const float splitPosition = (cmin[axis] + cmax[axis]) * 0.5f;
+
+    // 排序的比较器带**下标兜底**：坐标相同时按下标，保证全序 ⇒ 排序结果唯一（可复现）
+    std::sort(order + begin, order + end,
+              [axis, &bvh](u32 lhs, u32 rhs) {
+                  const float a = bvh.clusterSpheres[lhs].center[axis];
+                  const float b = bvh.clusterSpheres[rhs].center[axis];
+                  if (a < b) return true;
+                  if (a > b) return false;
+                  return lhs < rhs;
+              });
+
+    // 切点 = 第一个质心坐标 ≥ 中点的位置（质心 < 中点的全在左侧）
+    u32 split = begin;
+    while (split < end && bvh.clusterSpheres[order[split]].center[axis] < splitPosition) ++split;
+    // 【回退：保证终止 + 保证平衡】两种情形都退回"按数量中位数"（前半 n/2）：
+    //   ① 一侧为空（质心全相同 / 极密集 / NaN）—— 中点分裂永远要有进展；
+    //   ② 中点分裂**过偏**（任一侧不足 n/3）—— 这是中点分裂的真实风险：Sponza 这类
+    //      "少量离群簇 + 一大团"的分布会让中点一次只切掉 1~2 个簇，树深退化到深度上限
+    //      （实测未加护栏时 8287 簇的树深恰好顶到 24、叶子数 3103 ⇒ 大量 1~2 簇的叶子）。
+    //      加了 n/3 护栏后每次分裂都把规模压到 ≤ 2n/3 ⇒ 深度 ≤ 1 + log_{1.5}(n / 叶子容量)，
+    //      对 n ≤ 16384（`kNaniteMaxBVHClusters`）恒 ≤ 22 < 24 ⇒ **深度上限重新变成安全网**，
+    //      而不是形状的决定因素。单测直接断言这条上界。
+    const u32 kMinSideCount = (clusterCount + 2u) / 3u;   // ceil(n/3)
+    if (split == begin || split == end ||
+        (split - begin) < kMinSideCount || (end - split) < kMinSideCount) {
+        split = begin + clusterCount / 2u;
+    }
+
+    // ── 递归两个孩子，然后用两个孩子的球重算本结点的球（父球包含孩子球 ⇒ 早退正确）──
+    const u32 left  = BuildClusterBVHNode(bvh, order, begin, split, depth + 1u,
+                                          maxDepth, leafCount, maxLeafClusters);
+    const u32 right = BuildClusterBVHNode(bvh, order, split, end, depth + 1u,
+                                          maxDepth, leafCount, maxLeafClusters);
+
+    // 两个孩子的球（顺序固定为 左、右 ⇒ 并集与逐位结果确定）
+    const float* childCenter[2] = { bvh.nodes[left].center, bvh.nodes[right].center };
+    const float  childRadius[2] = { bvh.nodes[left].radius, bvh.nodes[right].radius };
+    float parentCenter[3];
+    float parentRadius = 0.0f;
+    {
+        for (u32 a = 0; a < 3u; ++a) {
+            const float lo = (childCenter[0][a] - childRadius[0] < childCenter[1][a] - childRadius[1])
+                           ? childCenter[0][a] - childRadius[0] : childCenter[1][a] - childRadius[1];
+            const float hi = (childCenter[0][a] + childRadius[0] > childCenter[1][a] + childRadius[1])
+                           ? childCenter[0][a] + childRadius[0] : childCenter[1][a] + childRadius[1];
+            parentCenter[a] = (lo + hi) * 0.5f;
+        }
+        float maxReach = 0.0f;
+        for (u32 c = 0; c < 2u; ++c) {
+            const float dx = childCenter[c][0] - parentCenter[0];
+            const float dy = childCenter[c][1] - parentCenter[1];
+            const float dz = childCenter[c][2] - parentCenter[2];
+            const float reach = std::sqrt(dx * dx + dy * dy + dz * dz) + childRadius[c];
+            if (reach > maxReach) maxReach = reach;
+        }
+        parentRadius = maxReach;
+    }
+
+    NaniteBVHNode& node = bvh.nodes[nodeIndex];
+    node.center[0] = parentCenter[0];
+    node.center[1] = parentCenter[1];
+    node.center[2] = parentCenter[2];
+    node.radius    = parentRadius;
+    node.left      = left;
+    node.right     = right;
+    node.count     = 2u;   // 内部结点恒有 2 个孩子（分裂保证两侧非空）
+    node.flags     = 0u;
+    return nodeIndex;
+}
+
+} // namespace
+
+bool BuildNaniteClusterBVH(std::span<const NaniteClusterRecord> clusters,
+                           NaniteClusterBVH&                    outResult) {
+    NaniteClusterBVH result;
+    const u32 clusterCount = (u32)clusters.size();
+    result.clusterCount = clusterCount;
+
+    if (clusterCount > 0u) {
+        // ① 簇球表：从任务 9/10 的 `boundsCenterRadius` **逐位搬运**（CPU 参考遍历与 GPU 读同一份比特）
+        result.clusterSpheres.resize(clusterCount);
+        for (u32 i = 0; i < clusterCount; ++i) {
+            const NaniteClusterRecord& record = clusters[i];
+            result.clusterSpheres[i].center[0] = record.boundsCenterRadius[0];
+            result.clusterSpheres[i].center[1] = record.boundsCenterRadius[1];
+            result.clusterSpheres[i].center[2] = record.boundsCenterRadius[2];
+            result.clusterSpheres[i].radius    = SanitizeClusterBVHRadius(record.boundsCenterRadius[3]);
+        }
+
+        // ② 递归构建。节点数上界 = 2 × 叶子数 - 1 ≤ 2 × 簇数 - 1（每个叶子至少 1 个簇）
+        result.nodes.reserve((usize)clusterCount * 2u);
+        result.leafClusterIndices.reserve(clusterCount);
+
+        std::vector<u32> order(clusterCount);
+        for (u32 i = 0; i < clusterCount; ++i) order[i] = i;
+
+        u32 maxDepth = 0u;
+        u32 leafCount = 0u;
+        u32 maxLeafClusters = 0u;
+        BuildClusterBVHNode(result, order.data(), 0u, clusterCount, 1u,
+                            maxDepth, leafCount, maxLeafClusters);
+
+        result.leafCount            = leafCount;
+        result.depth                = maxDepth;
+        result.maxLeafClusterCount  = maxLeafClusters;
+        // DFS 显式栈的占用上界 = 树高（每层至多压入一个"待访问的右兄弟"）
+        result.maxStackDepthUpperBound = maxDepth;
+
+        if (result.nodes.size() != (usize)leafCount * 2u - 1u) return false;   // 自校验：满二叉树
+        if (maxDepth > kNaniteBVHMaxDepth) return false;                        // 自校验：深度上界
+    }
+
+    outResult = std::move(result);   // 只有走到这里才动调用方的对象
+    return true;
+}
+
 bool NaniteUpload::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     // 任务 1：骨架就绪 = 拿到设备。任务 12 起在这里建暂存缓冲与目标缓冲，
     // 并把"缓冲是否真的建成"纳入这个返回值。

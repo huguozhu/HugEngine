@@ -1801,6 +1801,11 @@ int main() {
             // 同步同样依赖上一行的 `WaitIdle()`；关闭档下模块内部直接返回、不打印。
             if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
                 dpNanite->GetNanite().LogInstanceCullReadback();
+            // ── Nanite（§14.8 任务 14）：dump 帧打印**恰好一行** cluster BVH 的
+            //    节点数/深度 + GPU 与 CPU 参考的"访问节点数 / 可见簇数 / 逐项差异" ──
+            // 同步同样依赖上面的 `WaitIdle()`；关闭档下模块内部直接返回、不打印。
+            if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
+                dpNanite->GetNanite().LogClusterBVHReadback();
             // ── Nanite（§14.8 任务 6）：mesh PSO 通道的**恰好一行**真实 GPU 读回 ──
             // 同步同样已在上一行的 `WaitIdle()` 完成；`nanite_mesh_test=0`（默认）时模块内部
             // 直接返回、不打印，因此不改变任何既有档位的日志。

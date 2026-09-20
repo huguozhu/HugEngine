@@ -15,6 +15,8 @@
 //   · 任务 10（本任务）：`PackNaniteClusters()` —— 量化（位置/法线/UV）+ 打包（索引/材质/段表）
 //     成**最终 GPU 侧字节布局**，并把量化误差/段字节数做成实测读数。
 //   · 任务 12：`.nanite` 资产读取 + 从 `MeshBatcher` 的合并几何**读一次** → 上传 GPU 缓冲。
+//   · 任务 14：`BuildNaniteClusterBVH()` —— 按簇记录（`boundsCenterRadius`）构建 per-instance
+//     cluster BVH（§5.1 Phase 2 的"构建"部分；遍历与 GPU 侧落在 `NaniteTypes.h` / `NaniteCull`）。
 //
 // 【为什么本头文件不再 include RHI（任务 8 的改动）】
 //   簇切分必须 RHI-free 才能被单测直接调用（`Tests/TestNaniteBuilder.cpp`；单测目标只加
@@ -465,6 +467,85 @@ struct NanitePackedAsset {
                                                 std::span<const u32>                  indices,
                                                 std::span<const NaniteMaterialRecord> materials,
                                                 NanitePackedAsset&                    outResult);
+
+// ============================================================
+// §14.8 任务 14：per-instance cluster BVH 的**构建**（CPU 侧，RHI-free）
+//
+// 【放在这里的理由（两处位置的取舍，见 `NaniteTypes.h` 任务 14 小节的对称说明）】
+//   · 它消费的是 `.nanite` 的**簇记录**（任务 9/10 的产物 `NaniteClusterRecord`），属于
+//     "资产 → 加速结构"的构建阶段，与 `PackNaniteClusters` 同一层；
+//   · `NaniteUpload.{h,cpp}` 已被 `Tests/TestNaniteBuilder.cpp` 直接编译进单测目标
+//     （`Tests/CMakeLists.txt:50-54` 的纪律钉子），构建器因此天然可单测；
+//   · POD 布局（`NaniteBVHNode` / `NaniteClusterSphere`）与 **CPU 参考遍历**
+//     （`NaniteTraverseClusterBVHCPU`）留在 `NaniteTypes.h`：前者要与 Slang 共享、
+//     后者是"GPU 与 CPU 逐项一致"的参考实现，与任务 13 的 `NaniteCullInstancesCPU` 同构。
+//
+// 【分裂策略：最长轴中点分裂 + 数量中位数回退，叶子容量 4】
+//   · **轴向**：取该结点内全部簇球的**质心**在 x/y/z 上的跨度（max-min），沿最大的一轴分裂。
+//     这是标准 BVH 启发式：沿最长轴分裂最可能把体积真正分开。
+//   · **切点**：取该轴上质心范围的**中点**（空间中点），把质心 < 中点的簇放左边。
+//     为什么不用 SAH：SAH 要对每个候选分裂算面积代价（或做分桶），既有浮点分箱又有
+//     "桶边界 vs 精确坐标"的对比，而本任务的验收是**可复现**与 CPU/GPU 逐项一致；
+//     中点分裂只有"一次排序 + 一次扫描"，确定性与可解释性都更强，且沿分裂轴产生
+//     **互不重叠**的孩子体积 —— 对"节点不可见 ⇒ 整棵子树跳过"的早退最有利。
+//   · **回退（保证终止 + 保证平衡）**：一侧为空（质心全相同/极密集/NaN）**或**中点分裂过偏
+//     （任一侧不足 n/3）时，退回**按数量中位数**（前半 n/2）分裂。护栏是必需的：Sponza 这类
+//     "少量离群簇 + 一大团"的分布会让纯中点一次只切掉 1~2 个簇，树深退化（实测未加护栏时
+//     8287 簇的树深恰好顶到上限 24、叶子数 3103 ⇒ 大量 1~2 簇的叶子、节点数 6205）。
+//     加 n/3 护栏后每次分裂都把规模压到 ≤ 2n/3 ⇒ 深度 ≤ 1 + log_{1.5}(n / 叶子容量)，
+//     对 n ≤ `kNaniteMaxBVHClusters`(16384) 恒 ≤ 22 < 24 ⇒ 深度上限只是**安全网**。
+//   · **叶子容量 4**：簇球很小（每簇 ≤64 三角形），4 个簇的叶子球仍然紧；遍历到叶子后至多
+//     4 次球测试。树高 ≈ log(n/4)（实测 8287 簇 ⇒ 19 级），对 32 深的显式栈留有充分余量。
+//   · **深度硬上限**（`kNaniteBVHMaxDepth` = 24）：超上限即停止分裂（该结点变成更大的叶子），
+//     把"GPU 显式栈会不会溢出"从运行期风险变成构建期不变量（单测直接断言）。
+//
+// 【节点包围球的口径（确定性）】叶子 = 该叶子全部簇球的 AABB 包围球；内部节点 = 两个孩子
+//   包围球的 AABB 包围球（`center` = 两者 AABB 的中心，`radius` = 到任一孩子球边界的最远距离）。
+//   两者都只用 min/max/max 这类**与顺序无关**的运算，故逐位可复现；且父球恒包含所有后代簇球
+//   ⇒ "父不可见 ⇒ 后代全不可见"这条早退是正确的保守判据。
+//
+// 【确定性】不含随机数、不读时间、不并行；排序的比较器带**下标兜底**（坐标相同时按下标），
+//   因此即使坐标大量重复，顺序仍然唯一。同一输入两次构建逐位一致。
+// ============================================================
+
+/// 一次 cluster BVH 构建的产物（CPU 侧镜像；GPU 缓冲由 `NaniteCull` 从这个镜像上传）
+struct NaniteClusterBVH {
+    std::vector<NaniteBVHNode>       nodes;              ///< 节点表（[0] 恒为根；DFS 布局）
+    std::vector<u32>                 leafClusterIndices; ///< 叶子簇表（扁平；叶子用 [left, left+count)）
+    std::vector<NaniteClusterSphere> clusterSpheres;     ///< 每簇包围球（网格空间；与输入簇记录同序）
+
+    u32 clusterCount        = 0u;  ///< 参与构建的簇数（= clusterSpheres.size()）
+    u32 leafCount           = 0u;  ///< 叶子数（= nodes 里 leaf 位为 1 的个数）
+    u32 depth               = 0u;  ///< 最大深度（**节点数**；根 = 1；空 BVH = 0）
+    u32 maxLeafClusterCount = 0u;  ///< 实际最大叶子簇数（≤ 叶子容量；仅在深度上限触发时会更大）
+    u32 maxStackDepthUpperBound = 0u;  ///< DFS 显式栈占用的上界（= 树高；单测用它核对 ≤ 栈容量）
+
+    /// 产物是否为空（0 个簇 ⇒ 合法输入，节点表为空）
+    [[nodiscard]] bool Empty() const { return nodes.empty(); }
+
+    /// 只读视图（交给 `NaniteTraverseClusterBVHCPU` 用）
+    [[nodiscard]] NaniteClusterBVHView View() const {
+        NaniteClusterBVHView view;
+        view.nodes              = nodes.empty() ? nullptr : nodes.data();
+        view.nodeCount          = (u32)nodes.size();
+        view.leafClusterIndices = leafClusterIndices.empty() ? nullptr : leafClusterIndices.data();
+        view.clusterSpheres     = clusterSpheres.empty() ? nullptr : clusterSpheres.data();
+        view.clusterCount       = clusterCount;
+        return view;
+    }
+};
+
+/// 按任务 9/10 的簇记录构建 per-instance cluster BVH（§14.8 任务 14）
+///
+/// 【输入】`clusters`：`NanitePackedAsset::clusters`（或 DAG 的出现记录）——只消费
+///   `boundsCenterRadius`（center.xyz + radius）。**调用方负责钳制簇数上限**
+///   （`NaniteCull::SetClusterBVH` 按 `kNaniteMaxBVHClusters` 截断并告警）。
+/// 【输出】成功时整体写满 `outResult`；失败时不改写出参。
+/// 【空输入】`clusters` 为空 ⇒ 返回 true 且产物为空（与任务 7/8/9/10/12 的"空网格是合法输入"同口径）。
+/// 【半径防御】半径取 `max(radius, 0)` 并丢弃 NaN ⇒ 与遍历判据（`radius < 0` 归零）一致，
+///   不会出现"构建期算出的球比遍历期判据更大/更小"的分歧。
+[[nodiscard]] bool BuildNaniteClusterBVH(std::span<const NaniteClusterRecord> clusters,
+                                         NaniteClusterBVH&                    outResult);
 
 // ============================================================
 // 上传类（任务 1 骨架；任务 12 的 GPU 侧落在 `NaniteScene`）

@@ -39,6 +39,11 @@
 // §14.8 任务 12（资产加载的 CPU 侧入口）追加的用例：
 //  21. `BuildNaniteAssetFromGeometry`：与"手工 DAG + Pack"逐字节一致、产物自洽可校验、
 //      确定性、空几何 ⇒ 96B 空资产、失败不改写出参
+//
+// §14.8 任务 14（per-instance cluster BVH 的构建）追加的用例：
+//  22. `NaniteBVH:` 节点数/深度上界、叶子容量、结构自洽（叶子簇表是排列 / 父球包含孩子球）、
+//      三种网格规模、两次构建逐位可复现、空表与单簇边界、DFS 遍历访问数（全部在内/全部在外/
+//      部分相交/多实例/实例域钳制/容量截断）
 // ============================================================
 
 #include "doctest.h"
@@ -1840,3 +1845,409 @@ TEST_CASE("NaniteUpload: 合并几何快照 → .nanite 资产（任务 12 的 C
         CHECK(poisoned.bytes.size() == 5u);
     }
 }
+
+// ============================================================
+// 22. §14.8 任务 14：per-instance cluster BVH 的构建（节点数/深度上界/叶子容量/确定性）
+//
+// 【本组用例覆盖的验收项】（§14.8 任务 14："BVH 节点数与遍历访问数可复现"）
+//   ① 节点数与深度的**上界**：节点数 = 2 × 叶子数 - 1（满二叉树）、深度 ≤ `kNaniteBVHMaxDepth`；
+//   ② 叶子容量：每个叶子 ≤ `kNaniteBVHLeafCapacity`（深度上限未触发时）；
+//   ③ 结构自洽：叶子簇表是 [0, 簇数) 的**排列**（不丢不重）、父子下标不越界、
+//      父球包含孩子球 / 叶子球包含其簇球（"父不可见 ⇒ 整棵子树跳过"的前提）；
+//   ④ 三种网格规模（72 tri / 2048 tri / 3×3 平铺 576 tri）都能建出 BVH 并给出读数；
+//   ⑤ 同一输入两次构建**逐位可复现**；
+//   ⑥ 空表与单簇边界（合法输入，不崩、不越界）。
+//
+// 【为什么在构建器这一侧做遍历断言】"访问数"取决于树形状，而树形状是构建器的产物；这里用
+//   **盒状视锥 + 手工实例表**把"全部在内 / 全部在外 / 部分相交"三类算成已知数（见下一个用例），
+//   避免把验收建立在"某个具体网格碰巧的读数"上。
+// ============================================================
+
+namespace {
+
+/// 盒状视锥 [-half, half]^3（平面法线朝内；与任务 13 的单测同一口径，不引入相机/矩阵的间接性）
+NaniteFrustumPlanes MakeBoxFrustum(float halfExtent) {
+    NaniteFrustumPlanes frustum{};
+    const float planes[6][4] = {
+        {  1.0f, 0.0f, 0.0f, halfExtent },   // 左：  x >= -half
+        { -1.0f, 0.0f, 0.0f, halfExtent },   // 右：  x <=  half
+        {  0.0f, 1.0f, 0.0f, halfExtent },   // 下：  y >= -half
+        {  0.0f,-1.0f, 0.0f, halfExtent },   // 上：  y <=  half
+        {  0.0f, 0.0f, 1.0f, halfExtent },   // 近：  z >= -half
+        {  0.0f, 0.0f,-1.0f, halfExtent },   // 远：  z <=  half
+    };
+    std::memcpy(frustum.planes, planes, sizeof(planes));
+    return frustum;
+}
+
+/// 一条"只带平移 + indexCount"的合成实例（与 `NaniteCull::BuildTestInstances` 同形：
+/// 平移写在列主序 `localToWorld` 的第 4 列 = 元素 12/13/14）
+NaniteInstanceGpuObject MakeTranslatedInstance(float x, float y, float z, u32 indexCount) {
+    NaniteInstanceGpuObject instance{};
+    instance.localToWorld[0]  = 1.0f;
+    instance.localToWorld[5]  = 1.0f;
+    instance.localToWorld[10] = 1.0f;
+    instance.localToWorld[15] = 1.0f;
+    instance.localToWorld[12] = x;
+    instance.localToWorld[13] = y;
+    instance.localToWorld[14] = z;
+    instance.indexCount = indexCount;
+    return instance;
+}
+
+/// 球 a 是否包含球 b（容差用相对量，避免把浮点末位差异当成结构错误）
+bool SphereContains(const float outerCenter[3], float outerRadius,
+                    const float innerCenter[3], float innerRadius) {
+    const float dx = innerCenter[0] - outerCenter[0];
+    const float dy = innerCenter[1] - outerCenter[1];
+    const float dz = innerCenter[2] - outerCenter[2];
+    const float reach = std::sqrt(dx * dx + dy * dy + dz * dz) + innerRadius;
+    const float tolerance = 1.0e-4f * (1.0f + outerRadius);
+    return reach <= outerRadius + tolerance;
+}
+
+/// 逐条核对 BVH 的结构不变量（父球/叶子球包含关系、下标合法、叶子簇表是排列）
+void CheckBVHInvariants(const NaniteClusterBVH& bvh) {
+    REQUIRE_FALSE(bvh.Empty());
+    CHECK(bvh.clusterCount == (u32)bvh.clusterSpheres.size());
+    CHECK(bvh.nodes.size() == (usize)bvh.leafCount * 2u - 1u);   // 满二叉树
+    CHECK(bvh.depth >= 1u);
+    CHECK(bvh.depth <= kNaniteBVHMaxDepth);
+    CHECK(bvh.maxStackDepthUpperBound == bvh.depth);
+    CHECK(bvh.leafClusterIndices.size() == bvh.clusterCount);
+
+    // 叶子簇表必须是 [0, clusterCount) 的一个**排列**：每个簇恰好出现一次
+    std::vector<u32> seen(bvh.clusterCount, 0u);
+    for (u32 cluster : bvh.leafClusterIndices) {
+        REQUIRE(cluster < bvh.clusterCount);
+        seen[cluster] += 1u;
+    }
+    u32 duplicated = 0u;
+    u32 missing = 0u;
+    for (u32 i = 0u; i < bvh.clusterCount; ++i) {
+        if (seen[i] == 0u) ++missing;
+        if (seen[i] > 1u)  ++duplicated;
+    }
+    CHECK(missing == 0u);
+    CHECK(duplicated == 0u);
+
+    u32 leafSeen = 0u;
+    for (const NaniteBVHNode& node : bvh.nodes) {
+        CHECK(node.radius >= 0.0f);
+        if (NaniteBVHNodeIsLeaf(node)) {
+            ++leafSeen;
+            CHECK(node.right == kNaniteBVHNoChild);
+            CHECK(node.count >= 1u);
+            REQUIRE((usize)node.left + node.count <= bvh.leafClusterIndices.size());
+            // 叶子球必须包含它的每一个簇球（"叶子球不可见 ⇒ 这些簇都不可见"的前提）
+            for (u32 k = 0u; k < node.count; ++k) {
+                const NaniteClusterSphere& s =
+                    bvh.clusterSpheres[bvh.leafClusterIndices[node.left + k]];
+                CHECK(SphereContains(node.center, node.radius, s.center, s.radius));
+            }
+        } else {
+            CHECK(node.count == 2u);
+            REQUIRE(node.left  < bvh.nodes.size());
+            REQUIRE(node.right < bvh.nodes.size());
+            CHECK(node.left != node.right);
+            // 父球必须包含两个孩子球（同上：早退的正确性前提）
+            for (u32 c = 0u; c < 2u; ++c) {
+                const NaniteBVHNode& child = bvh.nodes[(c == 0u) ? node.left : node.right];
+                CHECK(SphereContains(node.center, node.radius, child.center, child.radius));
+            }
+        }
+    }
+    CHECK(leafSeen == bvh.leafCount);
+}
+
+/// BVH 读数行（验收要的每个数字；用 MESSAGE 打印到测试输出里）
+std::string BVHStatsLine(const char* label, const NaniteClusterBVH& bvh) {
+    return std::string(label)
+         + " 簇=" + std::to_string(bvh.clusterCount)
+         + " 节点=" + std::to_string(bvh.nodes.size())
+         + " 叶子=" + std::to_string(bvh.leafCount)
+         + " 深度=" + std::to_string(bvh.depth)
+         + " 最大叶子簇数=" + std::to_string(bvh.maxLeafClusterCount)
+         + " 栈上界=" + std::to_string(bvh.maxStackDepthUpperBound)
+         + " 叶子簇表=" + std::to_string(bvh.leafClusterIndices.size());
+}
+
+} // namespace
+
+TEST_CASE("NaniteBVH: 节点数/深度上界与叶子容量（三种网格规模）") {
+    // 三种规模：72 tri（6×6）、2048 tri（32×32）、3×3 平铺 576 tri（有大量重复内容）
+    const GridMesh meshes[3] = {
+        MakeGrid(6),
+        MakeGrid(32),
+        MakeTiledPatches(3u, 3u, 8u, 4u, 20.0f).mesh,
+    };
+    const char* labels[3] = {
+        "6x6 网格（72 tri）:",
+        "32x32 网格（2048 tri）:",
+        "3x3 平铺（9×64 tri）:",
+    };
+
+    for (u32 which = 0u; which < 3u; ++which) {
+        const GridMesh&       mesh       = meshes[which];
+        const MeshAttributes attributes = MakeSphereAttributes(mesh);
+
+        NanitePackedAsset asset;
+        REQUIRE(BuildNaniteAssetFromGeometry(mesh.positions, attributes.normals, attributes.uvs,
+                                             mesh.indices, {}, asset));
+        REQUIRE(asset.header.clusterCount > 0u);
+
+        NaniteClusterBVH bvh;
+        REQUIRE(BuildNaniteClusterBVH(asset.clusters, bvh));
+        CheckBVHInvariants(bvh);
+
+        // 叶子容量：这三种规模都远未触发深度上限 ⇒ 每个叶子不超过叶子容量
+        CHECK(bvh.depth < kNaniteBVHMaxDepth);
+        CHECK(bvh.maxLeafClusterCount <= kNaniteBVHLeafCapacity);
+        // 深度的**闭式上界**：每次分裂都把规模压到 ≤ ceil(2n/3)（平衡护栏）⇒
+        // depth ≤ 1 + log_{1.5}(簇数 / 叶子容量)。这条断言等于把"深度上限只是安全网"钉住。
+        u32 depthBound = 1u;
+        for (u32 size = bvh.clusterCount; size > kNaniteBVHLeafCapacity; ) {
+            size = (size * 2u + 2u) / 3u;   // ceil(2 × size / 3)
+            ++depthBound;
+        }
+        CHECK(bvh.depth <= depthBound);
+        // 节点数上界：满二叉树 ⇒ 节点 = 2 × 叶子 - 1 且 ≤ 2 × 簇数 - 1
+        CHECK(bvh.nodes.size() <= (usize)bvh.clusterCount * 2u - 1u);
+        // 显式栈容量必须够：DFS 栈占用上界 = 树高 ≤ 32
+        CHECK(bvh.maxStackDepthUpperBound <= kNaniteBVHMaxStackDepth);
+        // 簇球表与簇记录逐位一致（GPU 与 CPU 读同一份比特的前提）
+        for (u32 i = 0u; i < bvh.clusterCount; ++i) {
+            CHECK(bvh.clusterSpheres[i].center[0] == asset.clusters[i].boundsCenterRadius[0]);
+            CHECK(bvh.clusterSpheres[i].center[1] == asset.clusters[i].boundsCenterRadius[1]);
+            CHECK(bvh.clusterSpheres[i].center[2] == asset.clusters[i].boundsCenterRadius[2]);
+            CHECK(bvh.clusterSpheres[i].radius    ==
+                  ((asset.clusters[i].boundsCenterRadius[3] > 0.0f)
+                       ? asset.clusters[i].boundsCenterRadius[3] : 0.0f));
+        }
+
+        MESSAGE(BVHStatsLine(labels[which], bvh).c_str());
+    }
+}
+
+TEST_CASE("NaniteBVH: 空表与单簇边界") {
+    // ── ① 空表：合法输入 ⇒ 返回 true 且产物为空（节点/叶子/深度全 0）──
+    {
+        const std::vector<NaniteClusterRecord> none;
+        NaniteClusterBVH bvh;
+        REQUIRE(BuildNaniteClusterBVH(none, bvh));
+        CHECK(bvh.Empty());
+        CHECK(bvh.nodes.empty());
+        CHECK(bvh.leafClusterIndices.empty());
+        CHECK(bvh.clusterSpheres.empty());
+        CHECK(bvh.clusterCount == 0u);
+        CHECK(bvh.leafCount == 0u);
+        CHECK(bvh.depth == 0u);
+        CHECK(bvh.maxStackDepthUpperBound == 0u);
+
+        // 空 BVH 的视图：节点表为空 ⇒ CPU 参考遍历给出全 0（不崩）
+        const NaniteClusterBVHView view = bvh.View();
+        CHECK(view.nodes == nullptr);
+        CHECK(view.nodeCount == 0u);
+        const NaniteInstanceGpuObject instance = MakeTranslatedInstance(0.0f, 0.0f, 0.0f, 36u);
+        NaniteVisibleClusterRef out[4] = {};
+        NaniteClusterBVHTraversalStats stats{};
+        CHECK(NaniteTraverseClusterBVHCPU(MakeBoxFrustum(100.0f), view, &instance, 1u, 4u,
+                                          out, 4u, &stats) == 0u);
+        CHECK(stats.visitedNodes == 0u);
+        CHECK(stats.visibleClusters == 0u);
+    }
+
+    // ── ② 单簇：根既是叶子也是全部（深度 1、节点 1、叶子簇表 1 条）──
+    {
+        NaniteClusterRecord record{};
+        record.boundsCenterRadius[0] = 1.0f;
+        record.boundsCenterRadius[1] = 2.0f;
+        record.boundsCenterRadius[2] = 3.0f;
+        record.boundsCenterRadius[3] = 0.5f;
+        const std::vector<NaniteClusterRecord> one = { record };
+
+        NaniteClusterBVH bvh;
+        REQUIRE(BuildNaniteClusterBVH(one, bvh));
+        CHECK(bvh.nodes.size() == 1u);
+        CHECK(bvh.leafCount == 1u);
+        CHECK(bvh.depth == 1u);
+        CHECK(bvh.maxLeafClusterCount == 1u);
+        CHECK(bvh.leafClusterIndices.size() == 1u);
+        CHECK(bvh.leafClusterIndices[0] == 0u);
+        CHECK(NaniteBVHNodeIsLeaf(bvh.nodes[0]));
+        CHECK(bvh.nodes[0].count == 1u);
+        CHECK(bvh.nodes[0].radius == 0.5f);
+        CheckBVHInvariants(bvh);
+
+        // 退化半径（负值 / 0）被夹到 0：与遍历判据（radius < 0 归零）同口径
+        std::vector<NaniteClusterRecord> degenerate = one;
+        degenerate[0].boundsCenterRadius[3] = -3.0f;
+        NaniteClusterBVH negative;
+        REQUIRE(BuildNaniteClusterBVH(degenerate, negative));
+        CHECK(negative.clusterSpheres[0].radius == 0.0f);
+        CheckBVHInvariants(negative);
+    }
+}
+
+TEST_CASE("NaniteBVH: 同一输入两次构建逐位可复现") {
+    const TiledMesh tiled = MakeTiledPatches(3u, 3u, 8u, 4u, 20.0f);
+    const MeshAttributes attributes = MakeSphereAttributes(tiled.mesh);
+
+    NanitePackedAsset asset;
+    REQUIRE(BuildNaniteAssetFromGeometry(tiled.mesh.positions, attributes.normals, attributes.uvs,
+                                         tiled.mesh.indices, {}, asset));
+
+    NaniteClusterBVH first;
+    NaniteClusterBVH second;
+    REQUIRE(BuildNaniteClusterBVH(asset.clusters, first));
+    REQUIRE(BuildNaniteClusterBVH(asset.clusters, second));
+    CheckBVHInvariants(first);
+
+    // 逐位比较整份产物（节点表 / 叶子簇表 / 簇球表 / 四个读数）
+    CHECK(first.nodes.size() == second.nodes.size());
+    CHECK(first.leafClusterIndices == second.leafClusterIndices);
+    CHECK(first.clusterCount == second.clusterCount);
+    CHECK(first.leafCount == second.leafCount);
+    CHECK(first.depth == second.depth);
+    CHECK(first.maxLeafClusterCount == second.maxLeafClusterCount);
+    CHECK(std::memcmp(first.nodes.data(), second.nodes.data(),
+                      sizeof(NaniteBVHNode) * first.nodes.size()) == 0);
+    CHECK(std::memcmp(first.clusterSpheres.data(), second.clusterSpheres.data(),
+                      sizeof(NaniteClusterSphere) * first.clusterSpheres.size()) == 0);
+
+    MESSAGE(BVHStatsLine("可复现性（3x3 平铺）:", first).c_str());
+}
+
+TEST_CASE("NaniteBVH: DFS 遍历的访问数（全部在内/全部在外/部分相交）") {
+    // ── 手工簇布局：16 个半径 0.25 的簇沿 x 轴等距排在 [-7.5, 7.5] ──
+    // 盒视锥取 [-4, 4]^3、实例为纯平移 ⇒ 三类情形的可见集合与访问数都是**解析可算**的已知值：
+    //   · 实例在原点   ⇒ 16 个簇全在盒内：访问数 = 全部节点、可见 16
+    //   · 实例在 x=100 ⇒ 全部在外：只有根被测试 ⇒ 访问数 = 1、可见 0
+    //   · 实例在 x=6   ⇒ 部分相交：可见的是 x ∈ [-9.75, -2.25] 的 6 个簇（下标 0..5）
+    std::vector<NaniteClusterRecord> records(16u);
+    for (u32 i = 0u; i < 16u; ++i) {
+        records[i].boundsCenterRadius[0] = -7.5f + (float)i;
+        records[i].boundsCenterRadius[1] = 0.0f;
+        records[i].boundsCenterRadius[2] = 0.0f;
+        records[i].boundsCenterRadius[3] = 0.25f;
+    }
+    NaniteClusterBVH bvh;
+    REQUIRE(BuildNaniteClusterBVH(records, bvh));
+    CheckBVHInvariants(bvh);
+
+    const NaniteFrustumPlanes frustumSmall = MakeBoxFrustum(4.0f);   // 部分相交用
+    const NaniteFrustumPlanes frustumAll   = MakeBoxFrustum(8.5f);   // 全部在内用（16 个簇的跨度是 ±7.75）
+    const NaniteClusterBVHView view = bvh.View();
+    const u32 totalNodes = (u32)bvh.nodes.size();
+
+    // ── ① 全部在内：整棵树都被访问（根可见 ⇒ 每个节点都会被测试到）──
+    {
+        const NaniteInstanceGpuObject instance = MakeTranslatedInstance(0.0f, 0.0f, 0.0f, 36u);
+        std::vector<NaniteVisibleClusterRef> visible(16u);
+        NaniteClusterBVHTraversalStats stats{};
+        const u32 written = NaniteTraverseClusterBVHCPU(frustumAll, view, &instance, 1u, 8u,
+                                                        visible.data(), (u32)visible.size(), &stats);
+        CHECK(written == 16u);
+        CHECK(stats.visibleClusters == 16u);
+        CHECK(stats.visitedNodes == totalNodes);      // 全在内 ⇒ 无早退
+        CHECK(stats.traversedInstances == 1u);
+        CHECK(stats.stackOverflows == 0u);
+        MESSAGE("DFS 全部在内：节点 " << totalNodes << "，访问 " << stats.visitedNodes
+                << "，可见簇 " << stats.visibleClusters);
+    }
+
+    // ── ② 全部在外：只有根被测试（根球不可见 ⇒ 整棵子树跳过）──
+    {
+        const NaniteInstanceGpuObject instance = MakeTranslatedInstance(100.0f, 0.0f, 0.0f, 36u);
+        std::vector<NaniteVisibleClusterRef> visible(16u);
+        NaniteClusterBVHTraversalStats stats{};
+        const u32 written = NaniteTraverseClusterBVHCPU(frustumSmall, view, &instance, 1u, 8u,
+                                                        visible.data(), (u32)visible.size(), &stats);
+        CHECK(written == 0u);
+        CHECK(stats.visibleClusters == 0u);
+        CHECK(stats.visitedNodes == 1u);              // 根：访问一次、判不可见、不再下降
+        CHECK(stats.traversedInstances == 1u);
+        CHECK(stats.stackOverflows == 0u);
+        MESSAGE("DFS 全部在外：节点 " << totalNodes << "，访问 " << stats.visitedNodes
+                << "，可见簇 " << stats.visibleClusters);
+    }
+
+    // ── ③ 部分相交：可见 = 下标 0..5（解析值），访问数在 1 与全树之间 ──
+    {
+        const NaniteInstanceGpuObject instance = MakeTranslatedInstance(6.0f, 0.0f, 0.0f, 36u);
+        std::vector<NaniteVisibleClusterRef> visible(16u);
+        NaniteClusterBVHTraversalStats stats{};
+        const u32 written = NaniteTraverseClusterBVHCPU(frustumSmall, view, &instance, 1u, 8u,
+                                                        visible.data(), (u32)visible.size(), &stats);
+        CHECK(written == 6u);
+        CHECK(stats.visibleClusters == 6u);
+        CHECK(stats.visitedNodes > 1u);
+        CHECK(stats.visitedNodes < totalNodes);       // 有一部分子树被剪掉
+        CHECK(stats.traversedInstances == 1u);
+        std::vector<u32> clusters;
+        for (u32 i = 0u; i < written; ++i) {
+            CHECK(visible[i].instance == 0u);
+            clusters.push_back(visible[i].cluster);
+        }
+        std::sort(clusters.begin(), clusters.end());
+        for (u32 i = 0u; i < 6u; ++i) CHECK(clusters[i] == i);
+        MESSAGE("DFS 部分相交：节点 " << totalNodes << "，访问 " << stats.visitedNodes
+                << "，可见簇 " << stats.visibleClusters << "（下标 0..5）");
+    }
+
+    // ── ④ 多实例：内 + 外 = 访问数 = 全树 + 1、可见 = 16；空实例不参与遍历 ──
+    {
+        const std::vector<NaniteInstanceGpuObject> instances = {
+            MakeTranslatedInstance(0.0f, 0.0f, 0.0f, 36u),     // 全在内
+            MakeTranslatedInstance(100.0f, 0.0f, 0.0f, 36u),   // 全在外
+            MakeTranslatedInstance(0.0f, 0.0f, 0.0f, 0u),      // 空实例（indexCount = 0）
+        };
+        std::vector<NaniteVisibleClusterRef> visible(64u);
+        NaniteClusterBVHTraversalStats stats{};
+        const u32 written = NaniteTraverseClusterBVHCPU(frustumAll, view, instances.data(), 3u, 8u,
+                                                        visible.data(), (u32)visible.size(), &stats);
+        CHECK(written == 16u);
+        CHECK(stats.visibleClusters == 16u);
+        CHECK(stats.visitedNodes == totalNodes + 1u);
+        CHECK(stats.traversedInstances == 2u);            // 空实例被跳过
+        CHECK(stats.stackOverflows == 0u);
+        // 可见簇必须全部属于实例 0（实例 1 一个都看不见）
+        for (u32 i = 0u; i < written; ++i) CHECK(visible[i].instance == 0u);
+    }
+
+    // ── ⑤ 实例域钳制：maxInstances = 1 ⇒ 只遍历第 0 个实例（CPU 与 GPU 同一口径）──
+    {
+        const std::vector<NaniteInstanceGpuObject> instances = {
+            MakeTranslatedInstance(0.0f, 0.0f, 0.0f, 36u),
+            MakeTranslatedInstance(0.0f, 0.0f, 0.0f, 36u),
+        };
+        std::vector<NaniteVisibleClusterRef> visible(64u);
+        NaniteClusterBVHTraversalStats stats{};
+        const u32 written = NaniteTraverseClusterBVHCPU(frustumAll, view, instances.data(), 2u, 1u,
+                                                        visible.data(), (u32)visible.size(), &stats);
+        CHECK(written == 16u);                            // 只算第 1 个实例
+        CHECK(stats.traversedInstances == 1u);
+        CHECK(stats.visitedNodes == totalNodes);
+        for (u32 i = 0u; i < written; ++i) CHECK(visible[i].instance == 0u);
+    }
+
+    // ── ⑥ 容量截断：计数不受容量影响，只截断写入（与 GPU 的槽位口径一致）──
+    {
+        const NaniteInstanceGpuObject instance = MakeTranslatedInstance(0.0f, 0.0f, 0.0f, 36u);
+        NaniteVisibleClusterRef out[4] = {};
+        NaniteClusterBVHTraversalStats stats{};
+        const u32 written = NaniteTraverseClusterBVHCPU(frustumAll, view, &instance, 1u, 8u,
+                                                        out, 4u, &stats);
+        CHECK(written == 16u);                  // 计数不截断
+        CHECK(stats.visibleClusters == 16u);
+        CHECK(out[0].instance == 0u);           // 容量内的前 4 条确实写了
+        CHECK(out[3].cluster != 0xFFFFFFFFu);
+
+        // 容量 0 / 空输出指针：只计数、不写（不崩）
+        CHECK(NaniteTraverseClusterBVHCPU(frustumAll, view, &instance, 1u, 8u,
+                                          nullptr, 0u, &stats) == 16u);
+        CHECK(NaniteTraverseClusterBVHCPU(frustumAll, view, &instance, 1u, 8u,
+                                          out, 0u, nullptr) == 16u);
+    }
+}
+

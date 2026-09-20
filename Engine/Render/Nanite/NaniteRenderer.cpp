@@ -184,8 +184,22 @@ void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb,
                                       m_Cull.GetMaxFakeClusters());
         });
 
-    // ── §14.8 任务 6：Nanite_MeshTest（最小 mesh PSO 通道）──
-    // 【为什么注册在**这一处**（GBuffer 之前的第一处挂钩），而不是 GBuffer 之后那一处】
+    // ── 【任务 14】Nanite_ClusterBVH：per-instance cluster BVH 的显式栈深度优先遍历 ──
+    // 【输入】本帧的视锥与合成实例表：由上面的 `SetInstanceCullFrame` 一并设置（同一个真值），
+    //   因此本 pass 与实例剔除**读同一个视锥、同一张实例表**，不需要额外的每帧参数。
+    // 【reads/writes 为空】与 `Nanite_InstanceCull` / `Nanite_MeshTest` 同理：它只读写模块自持
+    //   缓冲（节点/叶子簇表/簇球/可见簇列表/两个计数），不碰任何帧图资源 ⇒ 不改变任何既有 pass
+    //   的相对顺序，也不会被 `CullDeadPasses` 裁掉。
+    // 【为什么不在本 pass 里接 Phase 1 的可见列表】见 `NaniteCull.h` 的"任务 14"小节：两处
+    //   都不声明帧图资源，帧图无法表达"必须排在实例剔除之后"；三阶段接线属任务 15。
+    rg.AddPass("Nanite_ClusterBVH",
+        {},
+        {},
+        [this](rhi::IRHICommandList* cmd) {
+            m_Cull.RecordClusterBVHPass(cmd);
+        });
+
+    // ── §14.8 任务 6：Nanite_MeshTest（最小 mesh PSO 通道）──    // 【为什么注册在**这一处**（GBuffer 之前的第一处挂钩），而不是 GBuffer 之后那一处】
     //   1. 本 pass **完全不碰 GBuffer**：它画进模块自建的 1×1 R8 小目标、写模块自持的计数缓冲，
     //      因此对 GBuffer 没有任何读写依赖 —— 第二处挂钩（`AddPostGBufferPasses`）的语义是
     //      "必须在 GBuffer 几何段之后、Lighting 之前注册的那些 pass"（任务 4 的 UAV 自证），
@@ -299,6 +313,17 @@ void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
         HE_CORE_ERROR("NaniteRenderer: 资产上传/读回校验失败（镜像 {} 字节）",
                       (unsigned long long)asset.bytes.size());
     }
+
+    // ── ⑤ 【任务 14】按同一份簇记录构建 per-instance cluster BVH ──
+    // 【为什么收在这里】簇记录（`asset.clusters`）的唯一产地就是本函数；构建器是 RHI-free 的
+    //   CPU 侧步骤（`BuildNaniteClusterBVH`），上传到模块自持缓冲由 `NaniteCull` 负责。
+    // 【为什么在资产上传之后】两者互不依赖，但放在后面能让日志顺序与"先有资产、后有加速结构"
+    //   的语义一致；构建失败 ⇒ `NaniteCull` 内的门闩保持关闭，`Nanite_ClusterBVH` 直接跳过
+    //   （不派发、读回打印 0），不会用半成品数据骗过验收。
+    if (!m_Cull.SetClusterBVH(asset.clusters)) {
+        HE_CORE_ERROR("NaniteRenderer: cluster BVH 构建/上传失败（簇 {}）—— "
+                      "Nanite_ClusterBVH 本帧起跳过派发", (u32)asset.clusters.size());
+    }
 }
 
 void NaniteRenderer::LogFakePipelineReadback() {
@@ -392,8 +417,72 @@ void NaniteRenderer::LogInstanceCullReadback() {
                  gpuCount, cpuCount, mismatch, first);
 }
 
-void NaniteRenderer::LogMeshTestReadback() {
-    // 关闭档 / 未就绪 / 未开 mesh 自证：不打印（关闭档与"只开 enabled"的日志必须与基线一致）。
+void NaniteRenderer::LogClusterBVHReadback() {
+    // 关闭档 / 未就绪：不打印（关闭档的日志必须与基线逐位一致）。
+    if (!m_Settings.enabled || !m_Ready) return;
+
+    const u32 nodes = m_Cull.GetBVHNodeCount();
+    const u32 depth = m_Cull.GetBVHDepth();
+
+    // ── GPU 读数①：已访问节点计数 + 可见簇计数（都是 GPU 原子累加的真实读回）──
+    u32 gpuVisited = 0u;
+    if (auto* b = m_Cull.GetBVHVisitedCountBuffer()) {
+        if (void* p = b->Map()) { gpuVisited = *static_cast<const u32*>(p); b->Unmap(); }
+    }
+    u32 gpuClusterCount = 0u;
+    if (auto* b = m_Cull.GetVisibleClusterCountBuffer()) {
+        if (void* p = b->Map()) { gpuClusterCount = *static_cast<const u32*>(p); b->Unmap(); }
+    }
+
+    // ── GPU 读数②：可见簇列表的 [0, min(计数, 容量)) ──
+    // 容量恒为 `kNaniteMaxVisibleClusterRefs`，正常配置（64 实例 × 8287 簇）下不会截断。
+    const u32 capacity = m_Cull.GetBVHVisibleCapacity();
+    const u32 gpuReadable = (gpuClusterCount < capacity) ? gpuClusterCount : capacity;
+    std::vector<NaniteVisibleClusterRef> gpuVisible;
+    gpuVisible.reserve(gpuReadable);
+    if (auto* b = m_Cull.GetVisibleClusterBuffer()) {
+        if (void* p = b->Map()) {
+            const auto* list = static_cast<const NaniteVisibleClusterRef*>(p);
+            for (u32 i = 0u; i < gpuReadable; ++i) gpuVisible.push_back(list[i]);
+            b->Unmap();
+        }
+    }
+
+    // ── CPU 参考遍历（同帧同输入；只在这里算一次，理由见头文件）──
+    std::vector<NaniteVisibleClusterRef> cpuVisible;
+    const NaniteClusterBVHTraversalStats cpuStats = m_Cull.RunClusterBVHCPUReference(cpuVisible);
+
+    // 【口径】两边都按容量截断后再比较（正常运行不截断）；计数与集合用同一份截断结果。
+    const u32 gpuClusters = (gpuClusterCount < capacity) ? gpuClusterCount : capacity;
+    const u32 cpuClusters = (cpuStats.visibleClusters < capacity) ? cpuStats.visibleClusters : capacity;
+
+    // 排序（instance 优先、cluster 次之）后逐项比较：GPU 的槽位顺序不定，集合才是语义
+    const auto lessRef = [](const NaniteVisibleClusterRef& a, const NaniteVisibleClusterRef& b) {
+        if (a.instance != b.instance) return a.instance < b.instance;
+        return a.cluster < b.cluster;
+    };
+    std::sort(gpuVisible.begin(), gpuVisible.end(), lessRef);
+    std::sort(cpuVisible.begin(), cpuVisible.end(), lessRef);
+
+    u32 mismatch = (gpuClusters > cpuClusters) ? (gpuClusters - cpuClusters)
+                                               : (cpuClusters - gpuClusters);
+    const u32 common = std::min<u32>((u32)gpuVisible.size(), (u32)cpuVisible.size());
+    for (u32 i = 0u; i < common; ++i) {
+        if (gpuVisible[i].instance != cpuVisible[i].instance ||
+            gpuVisible[i].cluster  != cpuVisible[i].cluster) {
+            ++mismatch;
+        }
+    }
+
+    // 【恰好一行】任务 14 的验收出口：gpu_visited == cpu_visited、gpu_clusters == cpu_clusters、
+    // mismatch == 0（逐项）；`nodes` / `depth` 由同一份 BVH 数据给出（它同时是 GPU 的输入）。
+    HE_CORE_INFO("[Nanite] cluster_bvh nodes={} depth={} gpu_visited={} cpu_visited={} "
+                 "gpu_clusters={} cpu_clusters={} mismatch={}",
+                 nodes, depth, gpuVisited, cpuStats.visitedNodes,
+                 gpuClusters, cpuClusters, mismatch);
+}
+
+void NaniteRenderer::LogMeshTestReadback() {    // 关闭档 / 未就绪 / 未开 mesh 自证：不打印（关闭档与"只开 enabled"的日志必须与基线一致）。
     if (!m_Settings.enabled || !m_Ready) return;
     if (!m_Settings.meshTest) return;
 

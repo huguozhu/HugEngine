@@ -94,7 +94,8 @@ public:
     /// 【门控只有一处】`DeferredPipeline_FrameGraph.cpp` 里的
     /// `if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady())`。
     /// 开启时注册三个 pass：`Nanite_InstanceCull` + `Nanite_Cull` + `Nanite_Raster`
-    /// （原序 12 个 pass 一个不动）；
+    /// （原序 12 个 pass 一个不动）；【任务 14】再追加 `Nanite_ClusterBVH`（per-instance cluster
+    /// BVH 的深度优先遍历，只读写模块自持缓冲 ⇒ 不声明任何帧图资源）；
     /// 【§14.8 任务 6】`meshTest` 为真时**再追加**一个 `Nanite_MeshTest`（mesh PSO 通道）。
     ///
     /// 【§14.8 任务 13 的 camera 参数】实例剔除需要世界空间视锥与相机位置：
@@ -153,8 +154,7 @@ public:
     /// 关闭档下直接返回（不打印），保证关闭档日志与基线一致。
     void LogFakePipelineReadback();
 
-    /// 【§14.8 任务 13】dump 帧打印**恰好一行**实例剔除的 GPU/CPU 逐项对照：
-    ///   `[Nanite] instance_cull gpu=<k> cpu=<m> mismatch=0 first=<i0,i1,...>`
+    /// 【§14.8 任务 13】dump 帧打印**恰好一行**实例剔除的 GPU/CPU 逐项对照：    ///   `[Nanite] instance_cull gpu=<k> cpu=<m> mismatch=0 first=<i0,i1,...>`
     ///
     /// · `gpu` = GPU 读回的可见实例计数（`Nanite_InstanceCull` 的计数缓冲）；
     /// · `cpu` = CPU 参考剔除（`NaniteCullInstancesCPU`）的可见数；
@@ -168,6 +168,29 @@ public:
     /// 【同步约定】与 `LogFakePipelineReadback` 相同：只做 Map 读回、不做等待；调用方必须已
     /// `WaitIdle()`。关闭档 / 未就绪时直接返回、不打印 —— 保证关闭档日志与基线一致。
     void LogInstanceCullReadback();
+
+    /// 【§14.8 任务 14】dump 帧打印**恰好一行** per-instance cluster BVH 的读数：
+    ///   `[Nanite] cluster_bvh nodes=<N> depth=<D> gpu_visited=<V> cpu_visited=<V>
+    ///    gpu_clusters=<C> cpu_clusters=<C> mismatch=<M>`
+    ///
+    /// · `nodes` / `depth` = CPU 构建出的 BVH 节点数与最大深度（**同一份数据**也上传给了 GPU）；
+    /// · `gpu_visited` = GPU 读回的"已访问节点数"（原子累加；**真实 GPU 读回**）；
+    /// · `cpu_visited` = CPU 参考遍历（`NaniteTraverseClusterBVHCPU`）的同一读数；
+    /// · `gpu_clusters` = GPU 读回的"可见簇引用数"（原子累加）；`cpu_clusters` = CPU 参考同一读数；
+    /// · `mismatch` = 两个可见簇**集合**的逐项差异数（含条数差）—— 不是只比计数。
+    ///
+    /// 【比较口径】GPU 用"原子取槽位"压缩 ⇒ 列表顺序不定；两边都按 (instance, cluster) 排序后
+    ///   逐项比较（集合等价），与任务 13 相同。
+    /// 【容量截断】可见簇引用表容量 = `kNaniteMaxBVHInstances × kNaniteMaxBVHClusters`
+    ///   （正常配置下 53 万 < 105 万 ⇒ **不截断**）；两个计数都先按容量截断再比较，口径一致。
+    /// 【CPU 参考为什么在这里算（而不是每帧在 `RecordClusterBVHPass` 里算）】BVH 遍历的成本是
+    ///   实例域 × 全簇数（默认 64 × 8287 ≈ 53 万次球测试），每帧跑一遍会拖慢开启档；而 dump 帧的
+    ///   读回紧跟在 `WaitIdle()` 之后、期间没有录制新帧 ⇒ 这里的 CPU 输入正是被读回那一帧的输入
+    ///   （同一个视锥、同一张实例表、同一个实例域），仍然是"同帧同输入"的比较。
+    ///
+    /// 【同步约定】与 `LogFakePipelineReadback` 相同：只做 Map 读回、不做等待；调用方必须已
+    /// `WaitIdle()`。关闭档 / 未就绪时直接返回、不打印 —— 保证关闭档日志与基线一致。
+    void LogClusterBVHReadback();
 
     /// 【§14.8 任务 6】dump 帧打印**恰好一行** mesh 通道的真实 GPU 读回：
     ///   `[Nanite] mesh_pso=<ok|fail> meshlet_outputs=<n> target_max=<v>`
