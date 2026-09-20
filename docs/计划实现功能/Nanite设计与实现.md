@@ -2208,10 +2208,10 @@ if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
 
 > 依赖关系：阶段 0 是**硬前置**（没有它，N2/N3 产出的可见簇与间接参数没有消费者）。
 >
-> **进度（2026-09-20）**：**阶段 0（任务 1–6）已全部完成**并通过验收：模块骨架与独立开关、
+> **进度（2026-09-20）**：**阶段 0（任务 1–6）与阶段 1 前两项（任务 7 数据格式定稿、任务 8 离线簇切分）已完成**并通过验收：模块骨架与独立开关、
 > 开关不变式判据 ⑥、模块自持的「计数 → 间接绘制」链（含最小 RHI 扩展）、GBuffer UAV（A1 裁决）、
 > objectIndex 分区契约与单测、mesh PSO 真正接入。**任务 7（`.nanite` 数据格式定稿）也已完成**
-> （§8 的四处不一致已裁决并写回 §8，见 §14.17）；**下一步从任务 8（离线 cluster 切分）开始**；
+> （§8 的四处不一致已裁决并写回 §8，见 §14.17）；**下一步从任务 9（LOD 与 DAG：边折叠逐级减半 + 哈希去重）开始**；
 > 每一步的证据分别见 §14.11、§14.13–§14.17，且都有对应的中文提交。
 
 **阶段 0：模块化前置（独立开关先落地）**
@@ -2600,3 +2600,34 @@ A1/A2 的完整裁决已写回 §14.5（A2 = 自建 VisBuffer，仅在确需跨�
 **⑤ 边界声明**：本任务**只定稿格式**（布局/位域/编解码约定），不产出任何离线工具或运行时数据：
 任务 8 的 cluster 切分、任务 10 的量化打包（含 #13 normal/UV）、任务 12 的上传/加载均未开始；
 `NaniteUpload.cpp` 仍是任务 1 的生命周期桩。渲染路径一行未改（关档 12 pass 指纹逐位不变）。
+### 14.18 任务 8 实施记录：离线簇切分（meshopt_buildMeshlets，2026-09-20）
+
+**① 前置**：`meshoptimizer v0.22` 已 vendored（`Engine/External/meshoptimizer`，根 `CMakeLists.txt:57 add_subdirectory`），
+但 `HugEngineRender`/`HugEngineTests` 都**没有链接过它** —— 本任务补了两处 `PRIVATE` 链接。仓库**没有**离线打包脚本宿主
+（设计里提到的 `NanitePack.py` 不存在），故按默认项把 CPU 侧构建代码放进模块的 `NaniteUpload.{h,cpp}`（资产准备侧），
+**不新增文件、不新建 Python 工具**，保持 §14.3 的模块边界。
+
+**② meshopt 真实接口约束（核实自 vendored 源码 `src/clusterizer.cpp:538-550`，写进代码注释与 static_assert）**
+- `meshopt_buildMeshlets(meshlets, meshlet_vertices, meshlet_triangles, indices, index_count, positions, vertex_count, stride, max_vertices, max_triangles, cone_weight)`；
+- assert 约束：`max_vertices ∈ [3,255]`（**不是 256**）、`max_triangles ∈ [1,512]` 且**必须被 4 整除**、`stride` 为 4 的倍数。
+  设计给的 128/64 恰好合法（64 是 4 的倍数），直接传 128/64。
+- 缓冲容量必须用官方最坏情况 `meshopt_buildMeshletsBound()` 推导（已照做）。
+- `meshlet_Meshlet.triangle_offset` 是**字节**偏移且每簇 4B 对齐；`meshlet_triangles` 是 u8（每三角形 3 字节）。
+- `meshopt_computeMeshletBounds()` 的 `cone_cutoff` 实现就是 `sqrt(1-cos²)`，**正是**任务 7 `NaniteConeAxisAngle::cosHalfAngle`
+  要的量，直接落盘无需角度换算。**任务 15 的锥剔除测试请沿用 `dot(dir, axis) >= cosHalfAngle`**（哨兵 −1 表示恒不剔除）。
+
+**③ 落盘口径（不伪造语义）**：填真值的是 `boundsCenterRadius`、`cone`、`triangleOffset/triangleCount/vertexOffset`；
+留 0 并逐行注明归属的是 `materialID`（任务 10/12）、`maxParentLODError`（任务 9/10）、`childClusterOffset/childCount`（任务 9）。
+顶点表跨簇允许重复（"局部下标 + vertexOffset"契约的直接代价），每簇局部顶点数另放平行数组。`cone_weight` 取 0（锥质量调参属任务 15）。
+"无锥"统一按任务 7 哨兵编码（`axis=0, cosHalfAngle=-1`）并单列 `noConeClusterCount`，不伪造单位轴。
+
+**④ 验收证据（本人复跑）**
+- 单测 **254 → 264 例**（断言 30199），新增 `Tests/TestNaniteBuilder.cpp` 10 个用例（测试目标直接编译 `NaniteUpload.cpp`，
+  顺带成为"RHI 依赖闯进该 .cpp 就编译失败"的纪律钉子）。
+- 簇统计（测试 MESSAGE 原文）：6×6 网格（72 tri）→ 簇数 2、最大每簇 64 tri / 44 vert；**32×32 网格（2048 tri）→ 簇数 32、
+  最大每簇 64 tri / 51 vert、退化簇 0**；1 tri / 18 tri / 64 tri / 立方体 12 tri 各 1 簇、退化簇 0。
+  覆盖完整性用例证明 2048 个输入三角形的有序三元组多重集与产物**逐项相等**（不丢不重、绕序保留）；可复现用例两次切分逐位一致。
+- 关闭档 12 pass、指纹冻结 `1C15AB72E688B530…`、`vuid_lines=41`；全量六条判据 `ACCEPTANCE SWEEP: PASS`。
+
+**⑤ 遗留（交给后续任务）**：顶点表跨簇重复（32×32 → 2048 tri 产生 1471 条顶点表条目），去重/共享属任务 9 的 DAG；
+量化打包属任务 10；`materialID` 与 LOD 误差字段属任务 9/10/12。
