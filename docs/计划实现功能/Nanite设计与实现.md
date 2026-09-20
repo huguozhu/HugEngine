@@ -3071,3 +3071,52 @@ Nanite_CullChain3（单个帧图 pass 体）
 8. 绘制端的两处"占位"性质必须记住：索引缓冲是模块自建的 `0,1,2` 周期模式、几何是覆盖全 NDC 的
    占位三角形 —— **本任务没有做真实簇光栅化**（那是任务 18），本任务交付的是"可见簇数 → 绘制条数"
    这条接线与它的可读回证据。
+### 14.26 任务 17 实施记录：CPU 参考对照工具（2026-09-20）
+
+**① 交付物**：新增 `build\verify\nanite_cull_diff.ps1`（纯 ASCII、无 BOM），并把它作为**判据 ⑦** 接进
+`build\verify\acceptance_sweep.ps1`。工具**不重算任何数字**：只重跑既有 `nanite_smoke.ps1`，再解析引擎在 dump 帧打印的
+恰好一行 `[Nanite] cull3 …`（任务 15 的验收出口）与恰好一行 `[Nanite] visible_wiring …`（任务 16 的验收出口），
+判据与任务 15/16 **同源**（不另立阈值）。一条命令：
+`powershell -NoProfile -ExecutionPolicy Bypass -File build\verify\nanite_cull_diff.ps1`
+（参数：`-Tag <前缀>`、`-SkipHeavy`（跳过复跑，五档覆盖不变）、`-RepeatTiers <逗号表>`，默认 `default,hiz1`；退出码 PASS=0/FAIL=1，整体 ≈2.4 min）。
+
+**② 五档判据（与任务 15/16 同源）**
+
+| 档 | Extra | 判据 |
+|---|---|---|
+| default | `nanite_enable=1` | `mismatch=0`（GPU 与 CPU 参考逐簇一致）、`extra_gpu=0`、`occl_mip` 八项全 0、`gpu=cpu`；接线 `V=C=D=R`、`empty_draws=mismatch=truncated=0`、`src=visible`、`cpu_cmds=V`；非空转守卫 `visible>0` |
+| hiz1 | `+nanite_hiz=1` | `extra_gpu=0` 且 `mismatch == sum(occl_mip)`；`hiz=on`、`hiz_req=1`、`hiz_mips>=2`；守卫 `sum>0`、`gpu<cpu`、`gpu+mismatch=cpu` |
+| ic8 | `+nanite_instance_test_count=8` | 同 default 档 |
+| ic0 | `+nanite_instance_test_count=0` | `phase1=2=3=0`、`gpu=cpu=0`、`mismatch=0`；接线 `V=C=D=R=0` 且 `src=visible`（零可见簇必须仍走可见链，走假簇链会把边界掩盖掉） |
+| cap1000 | `+nanite_draw_capacity=1000` | `mismatch=0`（容量不影响剔除输出）；`draws=rasterized=indirect_count=1000=容量`、`truncated>0`、`truncated=empty_draws=visible-rasterized`、`mismatch==|V-C|+|V-D|+|D-R|` |
+
+每档另查三件事（都属既有口径）：① 引擎日志 `[Nanite] 配置恢复:` 必须逐键等于本档请求（防 Extra 被静默丢弃——此坑已踩两次）；
+② 本档开启列表去掉 `Nanite*` 行后逐字节哈希 == 冻结关闭档指纹 `1C15AB72E688B530…`，且五档 `passlist_sha` 唯一；
+③ 跨档关系：`hiz1` 的 CPU 参考与 default 完全相同（CPU 参考恒为 Hi-Z 关闭口径）、`hiz1.gpu<default.gpu`、`0<ic8.gpu<default.gpu`、`cap1000` 剔除输出与 default 逐位相同、`ic0.gpu=0`。
+
+**③ 复现性**：`default` 与 `hiz1` 在同一次调用内各跑两遍，去掉时间戳后两行读数必须**逐字符相同**、`passlist_sha` 相同。
+
+**④ 实测读数（本人复跑，并已作为 N2 阶段收口跑过全量七条判据）**
+```
+[1/5] default  hiz=off visible= 31648 mismatch=     0 extra_gpu=    0 occl_mip_sum=     0 gpu/cpu=31648/31648 draws= 31648 rasterized= 31648 truncated=     0 => OK
+[2/5] hiz1     hiz=on  visible= 18888 mismatch= 12760 extra_gpu=    0 occl_mip_sum= 12760 gpu/cpu=18888/31648 draws= 18888 rasterized= 18888 truncated=     0 => OK
+[3/5] ic8      hiz=off visible=  2593 mismatch=     0 extra_gpu=    0 occl_mip_sum=     0 gpu/cpu=2593/2593 draws=  2593 rasterized=  2593 truncated=     0 => OK
+[4/5] ic0      hiz=off visible=     0 mismatch=     0 extra_gpu=    0 occl_mip_sum=     0 gpu/cpu=0/0 draws=     0 rasterized=     0 truncated=     0 => OK
+[5/5] cap1000  hiz=off visible= 31648 mismatch=     0 extra_gpu=    0 occl_mip_sum=     0 gpu/cpu=31648/31648 draws=  1000 rasterized=  1000 truncated= 30648 => OK
+CULL DIFF: PASS
+```
+`hiz1` 的 `12760 = 244+3000+9516 = sum(occl_mip)`（与任务 15 逐位一致）；`cap1000` 的 `30648 = 31648-1000`。
+**N2 阶段收口实测**：`ACCEPTANCE SWEEP: PASS`（七条判据：白炉 1.0000、背靠背严格 0、关 Lumen 0、默认预设严格 0、单测全绿、开关不变式、cull diff）。
+
+**⑤ 判据 ⑦ 接入方式与理由**：放在判据 ⑥ 之后、`if (-not $OnlyNanite)` **之外** ⇒ 全量与 `-OnlyNanite` 都跑
+（⑥⑦ 同属 Nanite 不变式，排除 ⑦ 会让"一条命令覆盖 Nanite"失真；代价 `-OnlyNanite` 从 ~50 s 变 ~4 min）；
+用**子进程**调用（工具以 `exit 0/1` 收尾，进程内调用会把整个验收脚本一起结束）；**不加 `-SkipHeavy`**，让复现性证据进入一条命令的验收。
+另做了**负向验证**（副本把 hiz 档判据改成 `mismatch == sum(occl_mip)+1` ⇒ 仅该档 FAIL、`CULL DIFF: FAIL`、exit 1，副本在 `%TEMP%`，未入仓库）⇒ 判据非空转。
+
+**⑥ 偏差与风险（不掩盖）**
+1. 判据不重算可见簇集合，只消费引擎已打印的读数（这正是"同源"的实现方式）；读数行被改坏时只能由"字段缺失/配置回显不符/passlist 指纹不符"间接发现。
+2. **既有脚手架缺陷（本次发现，未修，不在改动面内）**：`nanite_smoke.ps1`/`lumen_smoke.ps1` 打印的 `exit=` **恒为空** ——
+   `Start-Process -PassThru` + `WaitForExit()` 在本机不填 `Process.ExitCode`（实测 `cmd /c exit 7`：`-Wait` 得 7，`-PassThru`+`WaitForExit` 得空）。
+   此前没有判据解析它，故一直未暴露。工具把空 `exit=` 视为"未报告"（只对数字非 0 判失败），失败判定由读数/回显/指纹承担。
+   **最小修法**：改用 `[System.Diagnostics.Process]::Start` + 异步读输出（保留 300 s 超时守卫）——属脚手架改动，建议单独一条提交。
+3. 仍是**合成实例网格**上的对照（§14.22③），不是场景实例；"相机完全背对 ⇒ 零可见簇"仍无法构造（§14.25⑧），零可见簇入口仍是 `nanite_instance_test_count=0`。
