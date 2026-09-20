@@ -59,15 +59,15 @@
 
 | # | 条目 | 说法 A | 说法 B | 位置 |
 |---|---|---|---|---|
-| 1 | `NaniteCluster` 第 2 个字段命名 | 设计：`float4 coneData`（"normal cone（法线锥剔除）"） | 计划：`float4 coneAxisAngle`（"xyz=coneAxis, w=coneAngle(cos)"） | §8.1 |
+| 1 | `NaniteCluster` 第 2 个字段命名 | 设计：`float4 coneData`（"normal cone（法线锥剔除）"） | 计划：`float4 coneAxisAngle`（"xyz=coneAxis, w=coneAngle(cos)"） | §8.1；**任务 7 定稿：取 `coneAxisAngle`** |
 | 2 | Python 预处理工具的落点 | 设计 §4：`Engine/Shader/Shaders/Nanite/Nanite_Preprocess.py` | 计划：`Tools/NanitePreprocess/NanitePreprocess.py`（另拆 5 个模块） | §4.3 / §11 |
 | 3 | 软光栅 Shader 文件名 | 设计 §4：`Nanite_SoftRasterize.comp` | 计划：`Nanite_SoftRaster.comp` | §7.2 / §11 |
 | 4 | Shader 扩展名规范 | 计划 Global Constraints："Shader 统一使用 Slang `.comp`/`.mesh` 命名规范"；设计 §4 与计划 File Structure 均写 `.comp`/`.mesh` | 仓库实际：`*.comp.slang` / `*.mesh.slang`（`Engine/Shader/CMakeLists.txt:125-127`） | §10 / §11 / §12 Task 6、8 |
 | 5 | 软/硬光栅分流阈值 | 设计 §3.3：`triCount > 16` → Mesh Shader，`<= 16` → Compute 软光栅 | 计划 N1-N3：只有软光栅，`Nanite_SoftRaster.comp` 对 cluster 最多 64 个三角形统一处理，无 16 三角形阈值 | §5.2 |
-| 6 | 索引编码 | 计划 `NaniteTypes.slang` 注释："3×u16 打包到一个 u32[2]" | 计划 `NanitePack.py` 按 `indexCount × 4B` 写 u32/索引；`Nanite_SoftRaster.comp` 逐 u32 取 3 个索引 | §8.5 |
-| 7 | 量化顶点步长 | 计划 `NaniteVertex` = 4×u32（含 `_pad`）= 16B | 计划 `NanitePack.py` 每顶点写 12B；`NaniteUpload.cpp` 按 `vertexCount*3*sizeof(u32)` = 12B/顶点读 | §8.4 |
-| 8 | `.nanite` 文件头大小 | 计划 `pack_nanite` docstring：`[NaniteFileHeader 128B]` | 按字段累加 = 96B（`8+4×6+4+12+12+4+32`），Python 写 `<32x>` reserved | §8.3 |
-| 9 | 量化/反量化对称性 | 计划 `quantize_vertices`：`(vertices-bbox_min)*scale`，打包无符号 0…1023 | 计划 `decodeVertexPosition`：`int(packed & 0x3FF) - 512`，按 SNORM 有符号解码 | §8.4 |
+| 6 | 索引编码 | 计划 `NaniteTypes.slang` 注释："3×u16 打包到一个 u32[2]" | 计划 `NanitePack.py` 按 `indexCount × 4B` 写 u32/索引；`Nanite_SoftRaster.comp` 逐 u32 取 3 个索引 | §8.5；**任务 7 定稿：取 3×u16 进 `u32[2]`（8B/三角形，簇内局部下标）** |
+| 7 | 量化顶点步长 | 计划 `NaniteVertex` = 4×u32（含 `_pad`）= 16B | 计划 `NanitePack.py` 每顶点写 12B；`NaniteUpload.cpp` 按 `vertexCount*3*sizeof(u32)` = 12B/顶点读 | §8.4；**任务 7 定稿：取 16B，第 4 个 u32 改为 `quantBias`** |
+| 8 | `.nanite` 文件头大小 | 计划 `pack_nanite` docstring：`[NaniteFileHeader 128B]` | 按字段累加 = 96B（`8+4×6+4+12+12+4+32`），Python 写 `<32x>` reserved | §8.3；**任务 7 定稿：取 96B** |
+| 9 | 量化/反量化对称性 | 计划 `quantize_vertices`：`(vertices-bbox_min)*scale`，打包无符号 0…1023 | 计划 `decodeVertexPosition`：`int(packed & 0x3FF) - 512`，按 SNORM 有符号解码 | §8.4；**任务 7 定稿：编码端补 `+512`，与解码互逆** |
 | 10 | 软光栅入参 | 计划 Task 8 Interfaces："Consumes: visible clusters" | `Nanite_SoftRaster.comp` 只绑 `u_Clusters` 并按 `tid.x` 直接索引，未绑 Task 7 的可见 cluster 列表 | §12 Task 8 |
 | 11 | `RasterParams` 字段名 | 结构体声明 `uint materialID; // bindless base` | 函数体使用 `u_Params.materialBase` | §12 Task 8 |
 | 12 | "Cluster 剔除（两阶段）" | 设计 §3.3 小标题写"两阶段" | 同一小节正文列了 Phase 1 / Phase 2 / **Phase 3**（LOD Selection） | §5.1 |
@@ -521,14 +521,19 @@ struct alignas(16) NaniteCluster {
 };
 ```
 
+**定稿（任务 7，2026-09-20）**：上两块的字段名分歧取第二块（计划侧）的 `coneAxisAngle`
+（xyz=单位轴，w=cos 锥半角）；第一块的 `coneData` 作废。两个"原文"块保留为历史引用，
+**权威定义以本表 + `Engine/Render/Nanite/NaniteTypes.h` 的 `NaniteClusterRecord` /
+`NaniteConeAxisAngle` 为准**（`static_assert` 钉住 64B / 16B 与逐字段偏移）。
+
 **逐字段**（按 `alignas(16)` / std430 推算偏移；两边字段顺序完全一致，总计 64B，与
 `NanitePack.py` 的 `clusterCount × 64B` 相符）：
 
 | 偏移 | 字段 | 类型 | 含义（两边注释合并） | 差异 |
 |---|---|---|---|---|
 | 0 | `boundingSphere` | `float4` | xyz=center, w=radius（cluster 包围球） | 一致 |
-| 16 | `coneData` / `coneAxisAngle` | `float4` | 设计："normal cone（法线锥剔除）"；计划："xyz=coneAxis, w=coneAngle(cos)" | **注：源文档此处不一致（#1）**——字段名与语义描述都不同，实现时必须二选一并同步 C++ 与 slang |
-| 32 | `triangleOffset` | `u32` / `uint` | index buffer 中的偏移；计划注释另写"(三角形数)" | 一致（注释措辞差异） |
+| 16 | `coneAxisAngle` | `float4` | xyz=单位锥轴, w=cos(锥半角)；`w = -1` 是"无锥"哨兵（半角 180°，恒不可剔除，此时轴允许为 0） | 已裁决（原注 #1：设计写 `coneData`、计划写 `coneAxisAngle`）——**定稿（任务 7，2026-09-20）**：取 `coneAxisAngle`，理由：`coneData` 只有名字、没有字段语义（据此写不出 C++/Slang 一致的解码器），两者同为 float4 / 16B、尺寸与省法都不分高下 ⇒ 取"能唯一确定解码、不依赖外部约定"的那个（规则②的"自包含"意图）。与之冲突的旧名 `coneData` 作废 |
+| 32 | `triangleOffset` | `u32` / `uint` | **单位是三角形**（不是索引个数）：字节偏移 = `triangleOffset × 8`（索引定稿为 8B/三角形，见 §8.5） | 一致（注释措辞差异）；**定稿（任务 7，2026-09-20）**：单位取**三角形**，因为 §8.5 的索引段按三角形打包 |
 | 36 | `triangleCount` | `u32` | 三角形数（≤64） | 一致 |
 | 40 | `vertexOffset` | `u32` | vertex buffer 中的偏移 | 一致 |
 | 44 | `materialID` | `u32` | 指向 bindless 材质 / bindless 材质 ID | 一致 |
@@ -609,24 +614,42 @@ struct NaniteFileHeader {
 | 36 | `bboxMin[3]` | `float[3]` | 包围盒最小角（量化范围下界） |
 | 48 | `bboxMax[3]` | `float[3]` | 包围盒最大角（量化范围上界） |
 | 60 | `maxLODError` | `float` | 最大几何误差 |
-| 64 | `_reserved[8]` | `u32[8]` | 保留 |
-| — | 合计 | — | **96 字节** |
+| 64 | `_reserved[8]` | `u32[8]` | 保留（**写 0**；段的偏移不落盘，见下） |
+| — | 合计 | — | **96 字节**（定稿） |
 
-**注：源文档此处不一致（#8）**：`NanitePack.pack_nanite` 的 docstring 写
-`[NaniteFileHeader 128B]`，但按上表字段累加是 **96B**（Python 侧写的是 `<32x>` 保留区，
-与 `u32 _reserved[8]` 一致）。实现时以 96B 为准（或统一改成 128B，但两边必须同时改）。
+**定稿（任务 7，2026-09-20）**：文件头取 **96B**（原注 #8 的 96B vs 128B 之争），理由：
+① §8.3 已写"实现时以 96B 为准"（规则①）；② 96 = 6×16，天然 16B 对齐且自包含（规则②）；
+③ `NanitePack.pack_nanite` docstring 里的 `[NaniteFileHeader 128B]` 是**笔误** —— 它实际写的是
+`struct.pack('<32x')`（32B 保留区），按上表字段累加正好 96B。与之冲突的旧表述（128B）作废，
+`§12 Task 4` 的 docstring 已同步改成 96B。
+
+**段偏移不落盘**：`.nanite` 的文件布局 = 头部 + 5 个段，**每段的偏移与长度都是「头部计数 + 固定
+步长」的纯函数**（落盘只会制造两份可以互相矛盾的真相）。定稿布局（每段起点 16B 对齐、每段长度
+向上取整到 16B；文件尾允许有额外字节）：
+
+| 序 | 段 | 条数 | 单条 | 定稿说明 |
+|---|---|---|---|---|
+| 0 | `NaniteFileHeader` | 1 | 96B | 本节的头部 |
+| 1 | `NaniteClusterRecord[]` | `clusterCount` | 64B | = §8.1 的 GPU `NaniteCluster`（二进制同构） |
+| 2 | `NaniteVertex[]` | `vertexCount` | **16B** | 量化顶点（含量化偏置，见 §8.4 定稿） |
+| 3 | `NanitePackedTriangle[]` | `indexCount / 3` | **8B** | 3×u16 进 `u32[2]`（见 §8.5 定稿） |
+| 4 | `NaniteMaterialRecord[]` | `materialCount` | 8B | bindless 纹理 ID 对（字段语义由任务 10/12 细化） |
+| 5 | `u32[]` | `lodLevelCount` | 4B | 每个 LOD 一个偏移 |
+
+C++ 侧的权威实现：`NaniteFileLayout` + `TryBuildNaniteFileLayout()` + `ValidateNaniteFile()`
+（`Engine/Render/Nanite/NaniteTypes.h`，RHI-free、可单测），段表与上表逐项一致。
 
 #### 8.4 量化顶点与打包格式
 
-实现计划 Task 1 的 slang 定义（原文）：
+实现计划 Task 1 的 slang 定义（**已定稿的字段，任务 7 后以此为准**）：
 
 ```hlsl
-// 量化顶点 (R10G10B10A2 + 量化范围)
+// 量化顶点（16B：3×u32 位域 + 量化偏置）
 struct NaniteVertex {
     uint packedPosition;   // R10G10B10A2_SNORM (xyz) + w=1
     uint packedNormal;     // R10G10B10A2_SNORM (xyz)
     uint packedUV;         // R16G16_UNORM (uv)
-    uint _pad;
+    int  quantBias;        // 量化偏置（默认 +512）：有符号量 = 10 位 raw - quantBias
 };
 ```
 
@@ -635,64 +658,89 @@ struct NaniteVertex {
 | 0 | `packedPosition` | R10G10B10A2_SNORM（xyz）+ w=1 |
 | 4 | `packedNormal` | R10G10B10A2_SNORM（xyz） |
 | 8 | `packedUV` | R16G16_UNORM（uv） |
-| 12 | `_pad` | 对齐填充（结构体 16B） |
+| 12 | `quantBias` | 量化偏置（默认 `+512`；**不是** `_pad`，见下方定稿） |
 
-打包/解包实现（Task 3 `quantize_vertices`、Task 8 `NaniteShared.slang`）：
+**定稿（任务 7，2026-09-20）**：
+- **#7 步长取 16B**（原注：slang 结构体 16B vs `NanitePack.py` / `NaniteUpload.cpp` 的 12B）。
+  理由：规则②优先"16 字节对齐且自包含"——量化偏置落在记录内（`quantBias`），解码不再依赖外部
+  常量表；12B 版本既不 16B 对齐、也没有偏置的落点。旧表述（12B/顶点、
+  `vertexCount * 3 * sizeof(u32)`、`vertexCount × 12B`）作废，`§12 Task 4` 已同步改成 16B。
+- **#9 量化偏置在编码端补上 `+512`**（原注：`quantize_vertices` 产出无符号 `0…511`，而
+  `decodeVertexPosition` 按 `int(raw) - 512` 的有符号 SNORM 解码，两边差一个偏置）。
+  定稿：单轴 `raw = clamp(round((v - bboxMin) / maxExtent × 511)) + quantBias`，
+  解码 `v = bboxMin + (raw - quantBias) / 511 × maxExtent`，**严格互逆**（误差 ≤ maxExtent/1022）。
+  C++ 落点：`NaniteQuantizePositionAxis()` / `NaniteDequantizePositionAxis()`（含往返单测）。
+- **`quantBias` 的语义**：10 位字段按**有符号** SNORM 解释（`raw - 512 ∈ [-512, 511]`）；
+  盒内顶点编码后 `raw ∈ [512, 1023]`（`0…511` 属于盒下方，这正是旧无符号编码的 bug）。
+  偏置写进每条顶点记录 ⇒ C++/Slang 双方都从记录里取值，不需要额外约定。
+  **已知取舍（1 位精度）**：本节保留了既有解码式里的 `bboxMin` 基准（最小改动、与 §8.4 原文
+  一致），因此盒内只用到 10 位有符号范围的上半段（512 级）。若要吃满 1024 级，可改成以盒
+  **中心**为基准（`center = (bboxMin+bboxMax)/2`、`halfExtent = maxExtent/2`）——那需要同时改
+  `bboxMin` 的语义与解码式，留给任务 10 按量化误差验收决定，本任务不动。
+- 仍留给任务 10 的：#13 `packedNormal` / `packedUV` 的量化函数（本节只定稿它们的位域与偏移）。
+
+打包/解包实现（Task 3 `quantize_vertices`、Task 8 `NaniteShared.slang`；**已按定稿 #9 修正**）：
 
 ```python
 def quantize_vertices(vertices: np.ndarray, bbox_min: np.ndarray,
-                      bbox_max: np.ndarray, bits: int = 10) -> np.ndarray:
+                      bbox_max: np.ndarray, bias: int = 512) -> np.ndarray:
     """
     将顶点量化到 R10G10B10A2_SNORM 空间。
-    bits=10: 每轴 [-512, 511] 范围，精度 ~0.1%
+    每轴 10 位有符号（[-512, 511]）；编码 raw = signed + bias（默认 512），
+    与 decodeVertexPosition 的 `int(raw) - quantBias` 严格互逆（任务 7 裁决 #9）。
+    精度 ~0.1%（半步 = maxExtent/1022）。
     """
     extent = bbox_max - bbox_min
-    scale = (2 ** (bits - 1) - 1) / np.max(extent)
-    quantized = ((vertices - bbox_min) * scale).astype(np.int32)
-    # 打包到 uint32: x[9:0] | y[19:10] | z[29:20] | w[31:30]
+    max_extent = np.max(extent)
+    signed = np.rint((vertices - bbox_min) / max_extent * 511.0).astype(np.int32)
+    signed = np.clip(signed, -512, 511)
+    raw = (signed + bias).astype(np.uint32)          # 盒内 ⇒ raw ∈ [512, 1023]
+    # 打包到 uint32: x[9:0] | y[19:10] | z[29:20] | w[31:30]=1
     packed = np.zeros(len(vertices), dtype=np.uint32)
-    packed |= ((quantized[:, 0].astype(np.uint32) & 0x3FF))       # x bits 0-9
-    packed |= ((quantized[:, 1].astype(np.uint32) & 0x3FF) << 10) # y bits 10-19
-    packed |= ((quantized[:, 2].astype(np.uint32) & 0x3FF) << 20) # z bits 20-29
-    # w=1 (implicit, decode 时补)
+    packed |= ((raw[:, 0] & 0x3FF))        # x bits 0-9
+    packed |= ((raw[:, 1] & 0x3FF) << 10)  # y bits 10-19
+    packed |= ((raw[:, 2] & 0x3FF) << 20)  # z bits 20-29
+    packed |= (1 << 30)                    # w = 1（显式写入，解码不再"补"）
     return packed
 ```
 
 ```hlsl
-// 量化顶点解码
-float3 decodeVertexPosition(uint packed, float3 bboxMin, float3 bboxMax) {
+// 量化顶点解码（与上面的编码互逆；quantBias 取自顶点记录的 quantBias 字段）
+float3 decodeVertexPosition(uint packed, int quantBias, float3 bboxMin, float3 bboxMax) {
     float3 extent = bboxMax - bboxMin;
     float invScale = max(extent.x, max(extent.y, extent.z)) / 511.0;
+    int3 raw = int3(packed & 0x3FF, (packed >> 10) & 0x3FF, (packed >> 20) & 0x3FF);
+    float3 q = float3(raw) - float(quantBias);       // 有符号 SNORM 量化值 [-512, 511]
     float3 pos;
-    pos.x = float(int(packed & 0x3FF) - 512) * invScale + bboxMin.x;
-    pos.y = float(int((packed >> 10) & 0x3FF) - 512) * invScale + bboxMin.y;
-    pos.z = float(int((packed >> 20) & 0x3FF) - 512) * invScale + bboxMin.z;
+    pos.x = q.x * invScale + bboxMin.x;
+    pos.y = q.y * invScale + bboxMin.y;
+    pos.z = q.z * invScale + bboxMin.z;
     return pos;
 }
 ```
 
-**注：源文档此处不一致（#7、#9）**：
-- #7 步长：`NaniteVertex` = 4×`u32` = **16B**（含 `_pad`），但 `NanitePack.py` 每顶点只写
-  12B，`NaniteUpload.cpp` 也按 `vertexCount * 3 * sizeof(u32)`（= 12B/顶点）读取。
-- #9 对称性：`quantize_vertices` 产出的是**无符号** `0…1023`（`(v-bbox_min)*511/maxExtent`），
-  而 `decodeVertexPosition` 用 `int(...) - 512` 按 **SNORM 有符号**解码。两边差一个 512 偏置；
-  且 `quantize_vertices` 未打包 `packedNormal` / `packedUV`（见 #13）。
-
 #### 8.5 三角形索引编码
 
-实现计划 Task 1 的注释（原文）：
+实现计划 Task 1 的注释（**已定稿的编码，任务 7 后以此为准**）：
 
 ```hlsl
-// 三角形索引 (3×u16 打包到一个 u32[2])
-// indices[0]: i0 | (i1 << 16)
-// indices[1]: i2 | (padding << 16)
+// 三角形索引 (3×u16 打包到一个 u32[2] = 8B/三角形)
+// indices[0].lo: i0 | (i1 << 16)
+// indices[0].hi: i2 | (padding << 16)
 ```
 
-**注：源文档此处不一致（#6）**：`NanitePack.py` 按 `indices (indexCount × 4B)` 逐索引写
-`u32`，`NaniteUpload.cpp` 按 `std::vector<u32> indices(header.indexCount)` 读，
-`Nanite_SoftRaster.comp` 也按 `u_Indices[idxBase + 0/1/2]` 逐个 u32 取三个索引 —— 三处都是
-"1 索引 1 个 u32"，与上面"3×u16 打包进 `u32[2]`"的注释不符。实现时二选一（打包版省一半带宽，
-但 pack / upload / shader 三处必须同时改）。
+**定稿（任务 7，2026-09-20）**：索引取 **3×u16 打包进 `u32[2]`（= 8B/三角形，
+`NanitePackedTriangle`）**，不是"1 索引 1 个 u32"（12B/三角形）。理由：
+① 两个候选都**不是** 16B 对齐 ⇒ 规则②不裁决，落到规则③"取更省方案"⇒ 8B < 12B，索引带宽 −33%；
+② §8.4 的"每簇 ≤128 顶点"让簇内局部下标只需 7 位，u16 绰绰有余；③ 一簇 64 三角形 = 512B，
+天然 16B 对齐。**索引语义同时定稿**：`i0/i1/i2` 是**簇内局部**顶点下标（合法区间 `[0, 127]`），
+全局顶点下标 = `NaniteClusterRecord::vertexOffset + local`；`indexCount` 仍是**索引总数**
+（必须是 3 的倍数），索引段字节数 = `ceil(indexCount / 3) × 8` 再向上取整到 16B。
+
+与之冲突的旧表述作废：`indices (indexCount × 4B)`、`std::vector<u32> indices(header.indexCount)`、
+`u_Indices[idxBase + 0/1/2]` 逐个 u32（§12 Task 4 的打包草图已同步改成按三角形打包）。
+C++ 落点：`NanitePackedTriangle` + `NanitePackTriangle()` / `NaniteTriangleIndex0/1/2()` /
+`IsValidClusterLocalVertexIndex()`（含位边界与语义边界单测）。
 
 ### 9. 里程碑与已知风险
 
@@ -1188,8 +1236,10 @@ python Tools/NanitePreprocess/NanitePreprocess.py --input Content/gltf/Sponza/gl
 > 落地提示（本文件补充，非源文档正文）：
 > - §8.1 的 LOD 级数表述（设计 `range(5)` vs 本任务 `max_levels=6` + `range(1, ...)`）两边都为
 >   6 级；LOD1/LOD2 的 docstring 与 `len(indices)//(2**level)` 的算式一致（相对原始网格减半）。
-> - §8.4 的量化偏置不对称（#9）与 normal/UV 未打包（#13）需在 Step 3 内解决，否则 Task 8 的
->   `decodeVertexPosition/Normal/UV` 无法与编码对上。
+> - §8.4 的量化偏置不对称（#9）**已由任务 7 定稿**（2026-09-20）：编码端 `raw = clamp(round(...)) + quantBias`
+>   （默认 +512），与 `decodeVertexPosition` 的 `int(raw) - quantBias` 严格互逆 —— Step 3 只需按此实现，
+>   不要再自行二选一。normal/UV 未打包（#13）仍需在 Step 3 内解决，否则 Task 8 的
+>   `decodeVertexPosition/Normal/UV` 无法与编码对上（§8.4 已定稿它们的位域与偏移）。
 > - 测试资材：`Content/gltf/Sponza/glTF/Sponza.gltf` 存在；Task 10 用的
 >   `Content/gltf/Cube/Cube.gltf` 实际路径为 `Content/gltf/cube/cube.gltf`（大小写不一致，
 >   Windows 下可工作）。
@@ -1205,6 +1255,12 @@ python Tools/NanitePreprocess/NanitePreprocess.py --input Content/gltf/Sponza/gl
 - Consumes: Task 2 clusters + Task 3 LODs + DAG + quantized vertices
 - Produces: `.nanite` 二进制文件
 
+> **定稿（任务 7，2026-09-20）**：下面的打包草图已按 §8 的四处裁决改写 ——
+> 头部 **96B**（不是 128B）、顶点 **16B**（含 `quantBias`，不是 12B）、
+> 索引 **8B/三角形**（3×u16 进 `u32[2]`，不是 4B/索引）、cone 字段用 `cone_axis + cone_cutoff`
+> （= §8.1 的 `coneAxisAngle`）。段偏移由计数推导、每段 16B 对齐，C++ 侧权威实现见
+> `Engine/Render/Nanite/NaniteTypes.h` 的 `NaniteFileLayout` / `ValidateNaniteFile()`。
+
 ```python
 # Tools/NanitePreprocess/NanitePack.py
 
@@ -1214,11 +1270,11 @@ def pack_nanite(output_path: str, header: dict, clusters: list,
                 vertices: np.ndarray, indices: np.ndarray,
                 materials: list, lod_offsets: list):
     """
-    打包 .nanite 二进制文件:
-        [NaniteFileHeader 128B]
+    打包 .nanite 二进制文件（任务 7 定稿布局；每段起点 16B 对齐、长度向上取整到 16B）:
+        [NaniteFileHeader 96B]
         [NaniteCluster[]      (clusterCount × 64B)]
-        [quantized vertices[] (vertexCount × 12B)]
-        [indices[]            (indexCount × 4B)]
+        [quantized vertices[] (vertexCount × 16B：3×u32 位域 + int quantBias)]
+        [indices[]            ((indexCount/3) × 8B：3×u16 打包进 u32[2]，簇内局部下标)]
         [materials[]          (materialCount × 8B, bindless IDs)]
         [LOD offsets[]        (lodLevelCount × 4B)]
     """
@@ -1235,26 +1291,30 @@ def pack_nanite(output_path: str, header: dict, clusters: list,
         f.write(struct.pack('<3f', *header['bbox_min']))
         f.write(struct.pack('<3f', *header['bbox_max']))
         f.write(struct.pack('<f', header['max_lod_error']))
-        f.write(struct.pack('<32x'))  # reserved[8]
+        f.write(struct.pack('<32x'))  # reserved[8]（写 0；段偏移不落盘）
 
         # Clusters (64B each)
         for c in clusters:
             f.write(struct.pack('<4f', *c['bounds_center'], c['bounds_radius']))
-            f.write(struct.pack('<4f', *c['cone_axis'], c['cone_cutoff']))
+            f.write(struct.pack('<4f', *c['cone_axis'], c['cone_cutoff']))  # = coneAxisAngle(xyz, w=cos)
             f.write(struct.pack('<4I', c['triangle_offset'], c['triangle_count'],
                                 c['vertex_offset'], c['material_id']))
             f.write(struct.pack('<f', c['max_parent_lod_error']))
             f.write(struct.pack('<2I', c['child_cluster_offset'], c['child_count']))
             f.write(struct.pack('<I', 0))  # _pad
 
-        # Quantized vertices (12B each: position(4B) + normal(4B) + uv(4B))
+        # Quantized vertices (16B each: position(4B) + normal(4B) + uv(4B) + quantBias(4B))
         for v in vertices:
-            f.write(struct.pack('<I', v['packed_position']))
+            f.write(struct.pack('<I', v['packed_position']))   # 10 位有符号字段已含 +bias
             f.write(struct.pack('<I', v['packed_normal']))
             f.write(struct.pack('<I', v['packed_uv']))
+            f.write(struct.pack('<i', v.get('quant_bias', 512)))  # 解码用：signed = raw - quantBias
 
-        # Indices (4B each)
-        f.write(indices.astype('<u4').tobytes())
+        # Indices (8B per triangle: u32[2]，i0 | (i1 << 16) 与 i2)
+        tri = indices.reshape(-1, 3).astype('<u4')
+        packed_lo = (tri[:, 0] & 0xFFFF) | ((tri[:, 1] & 0xFFFF) << 16)
+        packed_hi = (tri[:, 2] & 0xFFFF)
+        f.write(np.stack([packed_lo, packed_hi], axis=1).astype('<u4').tobytes())
 
         # Materials (8B each: bindless texture ID)
         for m in materials:
@@ -1289,10 +1349,12 @@ with open('Sponza.nanite', 'rb') as f:
 
 预期: magic="NANITE01", version=1。
 
-> 落地提示（本文件补充，非源文档正文）：docstring 里的 `[NaniteFileHeader 128B]` 与实际
-> 96B（§8.3 / #8）以及"顶点 12B vs `NaniteVertex` 16B"（#7）、"indexCount × 4B vs 3×u16 打包"
-> （#6）需要在 Step 1 内统一；本文件 Task 5 的 `NaniteUpload.cpp` 读取口径（按 12B/顶点、
-> 4B/索引、96B 头）与 docstring 的 128B 说法不一致。
+> 落地提示（本文件补充，非源文档正文）：docstring 与读取口径的四处分歧已由**任务 7 定稿**
+> （2026-09-20）：头部 **96B**（§8.3 / #8）、顶点 **16B**（§8.4 / #7，第 4 个 u32 = `quantBias`）、
+> 索引 **8B/三角形**（3×u16 进 `u32[2]`，§8.5 / #6）、量化偏置**编码端补 `+512`**（§8.4 / #9）。
+> 本文件 Task 5 的 `NaniteUpload.cpp` 读取口径请按此实现（96B 头 / 16B 顶点 / 8B 三角形），
+> 不要再按 128B 头、12B 顶点、4B 索引读。C++ 权威定义与校验函数见
+> `Engine/Render/Nanite/NaniteTypes.h`（`static_assert` 钉住布局，`ValidateNaniteHeader()` 校验文件）。
 
 ---
 
@@ -2148,8 +2210,9 @@ if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
 >
 > **进度（2026-09-20）**：**阶段 0（任务 1–6）已全部完成**并通过验收：模块骨架与独立开关、
 > 开关不变式判据 ⑥、模块自持的「计数 → 间接绘制」链（含最小 RHI 扩展）、GBuffer UAV（A1 裁决）、
-> objectIndex 分区契约与单测、mesh PSO 真正接入。**下一步从任务 7（`.nanite` 数据格式定稿）开始**；
-> 每一步的证据分别见 §14.11、§14.13–§14.16，且都有对应的中文提交。
+> objectIndex 分区契约与单测、mesh PSO 真正接入。**任务 7（`.nanite` 数据格式定稿）也已完成**
+> （§8 的四处不一致已裁决并写回 §8，见 §14.17）；**下一步从任务 8（离线 cluster 切分）开始**；
+> 每一步的证据分别见 §14.11、§14.13–§14.17，且都有对应的中文提交。
 
 **阶段 0：模块化前置（独立开关先落地）**
 
@@ -2484,3 +2547,56 @@ A1/A2 的完整裁决已写回 §14.5（A2 = 自建 VisBuffer，仅在确需跨�
 **⑤ 阶段 0 收口**：任务 1–6 全部完成。这意味着后续 N1/N2/N3（任务 7 起）要用的四件基础设施都已就位：
 独立开关与不变式判据、模块自持的计数→间接绘制链、GBuffer UAV（A1）、objectIndex 分区契约、
 以及 mesh 光栅的 PSO 通路（任务 22 直接复用）。
+
+### 14.17 任务 7 实施记录：`.nanite` 数据格式定稿（2026-09-20）
+
+**① 四处不一致的裁决（逐条给出规则依据；已在 §8 就地标注"定稿（任务 7，2026-09-20）"）**
+
+| # | 分歧（原文位置） | 裁决 | 规则依据 |
+|---|---|---|---|
+| 8 | 文件头 96B vs 128B（§8.3 表格 vs `NanitePack` docstring `[NaniteFileHeader 128B]`） | **96B** | ① §8.3 已写"实现时以 96B 为准"；② 96 = 6×16，天然 16B 对齐且自包含；③ Python 实际写的是 `<32x>`（= `u32 _reserved[8]`），字段累加正好 96B ⇒ 128B 是 docstring 笔误 |
+| 7 | 顶点 16B vs 12B（§8.4 `NaniteVertex` 4×u32 vs `NanitePack` 12B/顶点、`NaniteUpload` 按 12B 读） | **16B** | ② 规则②优先"16 字节对齐且自包含"：量化偏置落在记录内（第 4 个 u32 命名 `quantBias`，不是 `_pad`）；12B 版本既不 16B 对齐、偏差量也无处安放 |
+| 9 | 量化偏置（编码端无符号 0…1023 vs 解码端 `-512` SNORM） | **编码端补 `+512`** | ③ 单轴 `raw = clamp(round(...)) + quantBias`、解码 `v = bboxMin + (raw - quantBias)/511 × maxExtent`，严格互逆（误差 ≤ maxExtent/1022）；偏置取自记录内的 `quantBias` ⇒ 自包含 |
+| 1 | `coneData` vs `coneAxisAngle`（§8.1 两版结构体） | **`coneAxisAngle`**（xyz=单位轴，w=cos 锥半角；`w=-1` = 无锥哨兵） | ① 两案都未被标"权威"；② 两者同为 float4/16B，尺寸与省法都不分高下 ⇒ 按规则②的"自包含"意图取"能唯一确定解码、不依赖外部约定"的那个；`coneData` 只有名字、写不出解码器 |
+| 6 | 索引 3×u16 进 `u32[2]` vs 1 索引 1 个 u32（§8.5 注释 vs `NanitePack`/`NaniteUpload`/`Nanite_SoftRaster` 三处 u32） | **3×u16 进 `u32[2]`（8B/三角形）** | ② 两个候选都**不是** 16B 对齐 ⇒ 规则②不裁决；③ 落到"取更省方案"⇒ 8B < 12B（索引带宽 −33%），且 §8.4 的"每簇 ≤128 顶点"让簇内局部下标只需 7 位、u16 绰绰有余；一簇 64 tri = 512B 天然 16B 对齐 |
+
+**② 派生定稿（为了自洽必须一起定的两件语义）**
+- `indexCount` 保持"索引**总数**"（必须是 3 的倍数）；索引段字节数 = `ceil(indexCount/3) × 8` 再向上
+  取整到 16B；`cluster.triangleOffset` 的单位是**三角形**（× 8B = 索引段字节偏移）。
+- 索引是**簇内局部**顶点下标（`[0,127]`），全局顶点下标 = `cluster.vertexOffset + local` —— 这也解释了
+  §8.1 里 `vertexOffset` 为什么必需。
+- 段偏移**不落盘**：`[头部 96B][簇 64B×n][顶点 16B×n][三角形 8B×n][材质 8B×n][LOD 4B×n]`，
+  每段起点 16B 对齐、长度向上取整到 16B，由计数纯函数推导（`NaniteFileLayout`）。
+
+**③ 交付**
+- `Engine/Render/Nanite/NaniteTypes.h`（RHI-free、可被 Scene 侧 include）新增：
+  `NaniteFileHeader`(96B) / `NaniteConeAxisAngle`(16B) / `NaniteClusterRecord`(64B) /
+  `NaniteVertex`(16B，含 `quantBias`) / `NanitePackedTriangle`(8B) / `NaniteMaterialRecord`(8B) +
+  段对齐与步长常量；量化编解码 `NaniteQuantizePositionAxis`/`NaniteDequantizePositionAxis`、
+  位域 `NanitePackR10G10B10A2`/`NaniteUnpackR10G10B10A2`、索引 `NanitePackTriangle`/
+  `NaniteTriangleIndex0..2`/`IsValidClusterLocalVertexIndex`、cone `IsValidConeAxisAngle`/
+  `NaniteConeHalfAngleRadians`。**每个结构体都有 `sizeof` / `offsetof` 的 `static_assert`**，
+  并写明"与将来 Slang 的 `NaniteTypes.slang` 共享、改布局必须同步 §8 与本文件"。
+- **校验函数**（RHI-free、可单测）：`NaniteFileLayout` + `TryBuildNaniteFileLayout()`（计数 → 段表、
+  溢出/对齐兜底）+ `ValidateNaniteFile()`（魔数/版本/索引数是 3 的倍数/各段不越界/截断）
+  + 布尔外壳 `ValidateNaniteHeader(const void*, size_t)`；失败原因枚举 `NaniteFileError` 可读。
+- `Tests/TestNaniteTypes.cpp` **扩展**（未新建第二套测试文件）8 个 `TEST_CASE`，覆盖：头部逐字段与尺寸、
+  簇记录/cone 字段尺寸偏移、顶点记录与偏置落点、量化偏置往返（盒内逐点 + 半步误差上界 + 越界夹取 +
+  退化轴）、索引编码位边界与簇内下标语义边界、cone 解码（单位轴/cos 半角/无锥哨兵/反例）、
+  段表推导（含 36 组计数的对齐属性循环）、校验函数正例与反例（空指针/截断/魔数错/版本错/索引数错/越界/尾部多余）。
+- `Tests/CMakeLists.txt` **无需改动**（`TestNaniteTypes.cpp` 早在任务 5 已登记）。
+- 设计文档：§8.1 / §8.3 / §8.4 / §8.5 写回裁决并改写冲突旧表述；§0.2 不一致清单 #1/#6/#7/#8/#9 标注定稿；
+  §12 Task 3/4 的落地提示与打包草图同步（128B→96B、12B→16B、4B/索引→8B/三角形）。
+
+**④ 验收证据（本人复跑）**
+- `cmake --build build --config Release --target HugEngineTests` ⇒ `EXIT=0`；
+  `build\bin\Release\HugEngineTests.exe` ⇒ **254 例 / 23195 断言全绿**（任务 5/6 时为 246 例 / 22289 断言，+8 例）。
+- `cmake --build build --config Release --target 07.Nanite` ⇒ `EXIT=0`。
+- `build\verify\nanite_smoke.ps1 -Tag nanite_off` ⇒ `passes_per_frame=12`、`vuid_lines=41`、
+  `passlist_sha=1C15AB72E688B5302332AEC391C41A5FE2B4D9512258CCDCD5D3E9D7E8F5390D`（= 冻结值）。
+- `build\verify\acceptance_sweep.ps1 -OnlyNanite` ⇒ 6a off=12 pass、`nanite_leak=0`、sha `1C15AB72E688B530`；
+  6b on=14 pass、既有集合未变；6c 抖动族外 `differing_outside_jitter=0`；**`ACCEPTANCE SWEEP: PASS`**。
+
+**⑤ 边界声明**：本任务**只定稿格式**（布局/位域/编解码约定），不产出任何离线工具或运行时数据：
+任务 8 的 cluster 切分、任务 10 的量化打包（含 #13 normal/UV）、任务 12 的上传/加载均未开始；
+`NaniteUpload.cpp` 仍是任务 1 的生命周期桩。渲染路径一行未改（关档 12 pass 指纹逐位不变）。
