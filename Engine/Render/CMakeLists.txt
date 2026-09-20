@@ -225,3 +225,7 @@ target_include_directories(HugEngineRender
 # ImGui 头文件路径（供 ProfilerPanel 使用）
 target_include_directories(HugEngineRender PRIVATE ${CMAKE_SOURCE_DIR}/Engine/External/imgui)
 target_link_libraries(HugEngineRender PUBLIC HugEngineRHI HugEngineShader HugEngineScene HugEngineAsset)
+# §14.8 任务 8：离线簇切分（Nanite/NaniteUpload.cpp）调用 meshoptimizer v0.22 的
+# meshopt_buildMeshlets / optimizeMeshlet / computeMeshletBounds。用 PRIVATE：
+# meshoptimizer.h 只出现在 .cpp 里（NaniteUpload.h 保持 RHI-free 且不含第三方头）。
+target_link_libraries(HugEngineRender PRIVATE meshoptimizer)
