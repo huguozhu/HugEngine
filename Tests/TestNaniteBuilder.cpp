@@ -19,11 +19,18 @@
 //   8. 非法输入 ⇒ 返回 false 且**不改写**出参
 //   9. 包围球 / 锥字段：字段合法（`IsValidConeAxisAngle`）、顶点都落在包围球内、无锥哨兵映射
 //  10. 与任务 7 的 `.nanite` 布局兼容：计数 → 段表 → `ValidateNaniteFile` 全通过、偏移不越界
+//
+// §14.8 任务 9（本文件后半段）追加 LOD 链 + DAG 去重的用例：
+//  11. LOD 链：`levelCount > 0`、逐级减半的单调性、终止阈值；每簇仍 ≤64 tri / ≤128 vert
+//  12. DAG 去重率：**(a) 平铺的相同子网格**（期望 > 10%）与 **(b) 一般网格**（如实报告）两类数字
+//  13. DAG 链接自洽：`childClusterOffset/childCount` 不越界、每个子簇恰有一个父、无孤儿、无环
+//  14. 共享内容一致：出现记录 → 唯一内容的偏移/计数自洽，`maxParentLODError` 非负、根为 0
+//  15. 可复现性 + 边界（空网格 / 非法输入 / 凑不出一个满簇的单三角形）
 // ============================================================
 
 #include "doctest.h"
 
-#include "Nanite/NaniteUpload.h"   // BuildNaniteClusters（任务 8）
+#include "Nanite/NaniteUpload.h"   // BuildNaniteClusters（任务 8）/ BuildNaniteClusterDAG（任务 9）
 
 #include <algorithm>   // std::sort
 #include <array>       // std::array（三角形键）
@@ -556,4 +563,549 @@ TEST_CASE("NaniteBuilder: 产物与任务 7 的 .nanite 布局兼容") {
     CHECK((usize)build.clusters.size() * kNaniteClusterRecordBytes <= layout.clusterBytes);
     CHECK((usize)build.vertexIndices.size() * kNaniteVertexRecordBytes <= layout.vertexBytes);
     CHECK((usize)build.triangles.size() * kNaniteIndexBytesPerTriangle <= layout.indexBytes);
+}
+
+// ============================================================
+// §14.8 任务 9 的测试网格与检查辅助
+// ============================================================
+namespace {
+
+/// 平铺的相同子网格：`tilesX × tilesY` 个**互不相连**的副本，每片都是同一份
+/// `quadsX × quadsY` 规则网格，按 `spacing` 平移铺开（每片自带一份顶点 ⇒ 不是共享顶点的大网格）。
+/// 这样"内容相同的簇"会在不同世界位置重复出现 —— DAG 去重的天然用武之地。
+struct TiledMesh {
+    GridMesh mesh;    ///< 合并后的网格
+    u32      tiles = 0;
+};
+
+TiledMesh MakeTiledPatches(u32 tilesX, u32 tilesY, u32 quadsX, u32 quadsY, float spacing) {
+    TiledMesh tiled;
+    const GridMesh patch = MakeGridRect(quadsX, quadsY);
+    tiled.tiles = tilesX * tilesY;
+    tiled.mesh.positions.reserve((usize)tiled.tiles * patch.positions.size());
+    tiled.mesh.indices.reserve((usize)tiled.tiles * patch.indices.size());
+    for (u32 ty = 0; ty < tilesY; ++ty) {
+        for (u32 tx = 0; tx < tilesX; ++tx) {
+            const float offsetX = (float)tx * spacing;
+            const float offsetY = (float)ty * spacing;
+            const u32   base    = (u32)(tiled.mesh.positions.size() / 3u);
+            for (usize v = 0; v + 2u < patch.positions.size(); v += 3u) {
+                tiled.mesh.positions.push_back(patch.positions[v + 0u] + offsetX);
+                tiled.mesh.positions.push_back(patch.positions[v + 1u] + offsetY);
+                tiled.mesh.positions.push_back(patch.positions[v + 2u]);
+            }
+            for (const u32 index : patch.indices) {
+                tiled.mesh.indices.push_back(base + index);
+            }
+        }
+    }
+    return tiled;
+}
+
+/// 任务 9 的验收读数行（每级簇数/每级三角形/levelCount/unique/去重率/上限/退化簇）
+std::string DAGStatsLine(const char* label, const NaniteClusterDAG& dag) {
+    const NaniteClusterDAGStats& s = dag.stats;
+    std::string line = std::string(label) +
+        " levelCount=" + std::to_string(s.levelCount) +
+        " 简化级数=" + std::to_string(s.simplifiedLevelCount) +
+        " 总簇数=" + std::to_string(s.totalClusterCount) +
+        " unique=" + std::to_string(s.uniqueClusterCount) +
+        " 去重率=" + std::to_string(s.dedupRate) +
+        " (" + std::to_string(s.dedupRate * 100.0f) + "%)" +
+        " 每级簇数=[";
+    for (usize level = 0; level < dag.levelClusterCount.size(); ++level) {
+        line += std::to_string(dag.levelClusterCount[level]);
+        line += (level + 1u < dag.levelClusterCount.size()) ? "," : "";
+    }
+    line += "] 每级三角形=[";
+    for (usize level = 0; level < dag.levelTriangleCount.size(); ++level) {
+        line += std::to_string(dag.levelTriangleCount[level]);
+        line += (level + 1u < dag.levelTriangleCount.size()) ? "," : "";
+    }
+    line += "] 每级unique=[";
+    for (usize level = 0; level < dag.levelUniqueCount.size(); ++level) {
+        line += std::to_string(dag.levelUniqueCount[level]);
+        line += (level + 1u < dag.levelUniqueCount.size()) ? "," : "";
+    }
+    line += "] 最大每簇三角形=" + std::to_string(s.maxClusterTriangles) +
+            " 最大每簇顶点=" + std::to_string(s.maxClusterVertices) +
+            " 退化簇=" + std::to_string(s.degenerateClusterCount) +
+            " 叶子簇=" + std::to_string(s.leafClusterCount) +
+            " 根簇=" + std::to_string(s.rootClusterCount) +
+            " maxLODError=" + std::to_string(s.maxLODError);
+    return line;
+}
+
+/// 任务 9 的"每簇硬上限 + 退化 + 偏移自洽"检查
+bool AllDAGClustersRespectCaps(const NaniteClusterDAG& dag) {
+    if (dag.clusters.size() != dag.clusterVertexCount.size()) return false;
+    if (dag.clusters.size() != dag.clusterVertexIndexOffset.size()) return false;
+    if (dag.clusters.size() != dag.clusterLevel.size()) return false;
+    if (dag.clusters.size() != dag.clusterUnique.size()) return false;
+    if (dag.uniqueVertexOffset.size() != dag.uniqueVertexCount.size()) return false;
+    if (dag.uniqueTriangleOffset.size() != dag.uniqueTriangleCount.size()) return false;
+    if (dag.uniqueVertexOffset.size() != dag.uniqueVertexCount.size()) return false;
+    if (dag.stats.totalClusterCount != (u32)dag.clusters.size()) return false;
+    if (dag.stats.uniqueClusterCount != (u32)dag.uniqueVertexCount.size()) return false;
+    if (dag.levelClusterOffset.size() != dag.levelClusterCount.size() + 1u) return false;
+
+    u32 expectedVertexIndexOffset = 0u;
+    for (usize c = 0; c < dag.clusters.size(); ++c) {
+        const u32 localTriangles = dag.clusters[c].triangleCount;
+        const u32 localVertices  = dag.clusterVertexCount[c];
+        if (localTriangles == 0u || localTriangles > kNaniteMaxClusterTriangles) return false;
+        if (localVertices  == 0u || localVertices  > kNaniteMaxClusterVertices)  return false;
+        // 出现记录的偏移必须落在**共享内容**表内
+        if (dag.clusters[c].vertexOffset + localVertices > (u32)dag.uniqueVertexWords.size()) return false;
+        if (dag.clusters[c].triangleOffset + localTriangles >
+            (u32)dag.uniqueTriangles.size()) return false;
+        // 放置数据（局部顶点 → 网格顶点）按出现连续排布
+        if (dag.clusterVertexIndexOffset[c] != expectedVertexIndexOffset) return false;
+        expectedVertexIndexOffset += localVertices;
+        // 出现 → 唯一内容的映射必须与偏移/计数一致（共享口径的守卫）
+        const u32 unique = dag.clusterUnique[c];
+        if (unique >= dag.uniqueVertexCount.size()) return false;
+        if (dag.clusters[c].vertexOffset   != dag.uniqueVertexOffset[unique])   return false;
+        if (dag.clusters[c].triangleOffset != dag.uniqueTriangleOffset[unique]) return false;
+        if (localVertices  != dag.uniqueVertexCount[unique])    return false;
+        if (localTriangles != dag.uniqueTriangleCount[unique])  return false;
+    }
+
+    // 共享内容表自身连续排布
+    u32 expectedVertexOffset = 0u;
+    u32 expectedTriangleOffset = 0u;
+    for (usize u = 0; u < dag.uniqueVertexCount.size(); ++u) {
+        if (dag.uniqueVertexOffset[u] != expectedVertexOffset) return false;
+        if (dag.uniqueTriangleOffset[u] != expectedTriangleOffset) return false;
+        expectedVertexOffset   += dag.uniqueVertexCount[u];
+        expectedTriangleOffset += dag.uniqueTriangleCount[u];
+    }
+    return expectedVertexOffset == (u32)dag.uniqueVertexWords.size() &&
+           expectedTriangleOffset == (u32)dag.uniqueTriangles.size() &&
+           expectedVertexIndexOffset == (u32)dag.clusterVertexIndices.size();
+}
+
+/// 两次 DAG 构建是否逐位一致（记录/表/平行数组/统计都按字节比）
+bool SameDAG(const NaniteClusterDAG& a, const NaniteClusterDAG& b) {
+    if (a.uniqueVertexWords != b.uniqueVertexWords) return false;
+    if (a.uniqueVertexOffset != b.uniqueVertexOffset) return false;
+    if (a.uniqueVertexCount != b.uniqueVertexCount) return false;
+    if (a.uniqueTriangleOffset != b.uniqueTriangleOffset) return false;
+    if (a.uniqueTriangleCount != b.uniqueTriangleCount) return false;
+    if (a.clusterVertexCount != b.clusterVertexCount) return false;
+    if (a.clusterVertexIndexOffset != b.clusterVertexIndexOffset) return false;
+    if (a.clusterVertexIndices != b.clusterVertexIndices) return false;
+    if (a.clusterLevel != b.clusterLevel) return false;
+    if (a.clusterUnique != b.clusterUnique) return false;
+    if (a.levelClusterOffset != b.levelClusterOffset) return false;
+    if (a.levelClusterCount != b.levelClusterCount) return false;
+    if (a.levelTriangleCount != b.levelTriangleCount) return false;
+    if (a.levelUniqueCount != b.levelUniqueCount) return false;
+    if (a.childClusterIndices != b.childClusterIndices) return false;
+    if (a.parentCluster != b.parentCluster) return false;
+    if (a.clusters.size() != b.clusters.size()) return false;
+    if (a.uniqueTriangles.size() != b.uniqueTriangles.size()) return false;
+    if (!a.clusters.empty() &&
+        std::memcmp(a.clusters.data(), b.clusters.data(),
+                    a.clusters.size() * sizeof(NaniteClusterRecord)) != 0) return false;
+    if (!a.uniqueTriangles.empty() &&
+        std::memcmp(a.uniqueTriangles.data(), b.uniqueTriangles.data(),
+                    a.uniqueTriangles.size() * sizeof(NanitePackedTriangle)) != 0) return false;
+    return std::memcmp(&a.stats, &b.stats, sizeof(NaniteClusterDAGStats)) == 0;
+}
+
+} // namespace
+
+// ============================================================
+// 11. LOD 链：levelCount > 0 且逐级减半（单调性）
+// ============================================================
+TEST_CASE("NaniteDAG: LOD 链逐级减半（levelCount > 0、每级三角形不增且不超过上一级一半）") {
+    const GridMesh mesh = MakeGrid(32);   // 2048 个三角形
+    REQUIRE(mesh.indices.size() == 2048u * 3u);
+
+    NaniteClusterDAG dag;
+    REQUIRE(BuildNaniteClusterDAG(mesh.positions, mesh.indices, dag));
+    MESSAGE(DAGStatsLine("(b) 一般网格 32x32（2048 tri）:", dag).c_str());
+
+    // 验收原文：LOD 层级 > 0；这里同时钉住"至少 1 级以上"（简化级数 = levelCount - 1）
+    CHECK(dag.stats.levelCount > 0u);
+    CHECK(dag.stats.simplifiedLevelCount > 0u);
+    CHECK(dag.stats.simplifiedLevelCount == dag.stats.levelCount - 1u);
+    // 级数上限（含 LOD0）：meshopt 每次可能略微超额（结果 ≤ 目标），故实际级数 ≤ 6
+    CHECK(dag.stats.levelCount >= 2u);
+    CHECK(dag.stats.levelCount <= kNaniteMaxLODLevels);
+    CHECK(dag.levelTriangleCount[0] == 2048u);
+
+    for (usize level = 1; level < dag.levelTriangleCount.size(); ++level) {
+        // 单调性：每级三角形数 ≤ 上一级；"逐级减半"更强：≤ 上一级 / 2（整除向下）
+        CHECK(dag.levelTriangleCount[level] <= dag.levelTriangleCount[level - 1]);
+        CHECK(dag.levelTriangleCount[level] <= dag.levelTriangleCount[level - 1] / 2u);
+        // 终止阈值：最后一级仍不少于一个满簇，下一级目标会低于它
+        CHECK(dag.levelTriangleCount[level] >= kNaniteMinLODTriangles);
+        // 级视图与出现表的区间自洽
+        CHECK(dag.levelClusterCount[level] > 0u);
+        CHECK(dag.levelClusterOffset[level] + dag.levelClusterCount[level] ==
+              dag.levelClusterOffset[level + 1u]);
+    }
+    // 簇数也随级递减（父簇数 ≤ 子簇数：父一定有人认）
+    for (usize level = 1; level < dag.levelClusterCount.size(); ++level) {
+        CHECK(dag.levelClusterCount[level] <= dag.levelClusterCount[level - 1]);
+    }
+
+    CHECK(dag.stats.maxClusterTriangles <= kNaniteMaxClusterTriangles);
+    CHECK(dag.stats.maxClusterVertices  <= kNaniteMaxClusterVertices);
+    CHECK(dag.stats.degenerateClusterCount == 0u);
+    CHECK(AllDAGClustersRespectCaps(dag));
+
+    // 出现表与每级视图对得上：Σ 每级簇数 = 总簇数
+    u32 summed = 0u;
+    for (const u32 count : dag.levelClusterCount) summed += count;
+    CHECK(summed == dag.stats.totalClusterCount);
+    CHECK(dag.levelClusterOffset.back() == dag.stats.totalClusterCount);
+}
+
+// ============================================================
+// 12. DAG 去重率：平铺相同子网格（>10%） vs 一般网格（如实报告）
+// ============================================================
+TEST_CASE("NaniteDAG: DAG 去重率（平铺的相同子网格 vs 一般网格）") {
+    // ── (a) 有重复结构的网格：4×4 个互不相连的同一份 8×4 网格副本（每片 64 tri）──
+    {
+        const TiledMesh tiled = MakeTiledPatches(4, 4, 8, 4, 20.0f);
+        REQUIRE(tiled.tiles == 16u);
+        REQUIRE(tiled.mesh.indices.size() == 16u * 64u * 3u);   // 1024 个三角形
+
+        NaniteClusterDAG dag;
+        REQUIRE(BuildNaniteClusterDAG(tiled.mesh.positions, tiled.mesh.indices, dag));
+        MESSAGE(DAGStatsLine("(a) 平铺相同子网格 16×64 tri:", dag).c_str());
+
+        // 验收：DAG 去重率 > 10%
+        CHECK(dag.stats.dedupRate > 0.10f);
+        CHECK(dag.stats.uniqueClusterCount < dag.stats.totalClusterCount);
+        // 每级都应当受益于重复内容（每级引用的唯一内容远少于该级簇数）
+        REQUIRE(dag.levelUniqueCount.size() == dag.levelClusterCount.size());
+        for (usize level = 0; level < dag.levelUniqueCount.size(); ++level) {
+            CHECK(dag.levelUniqueCount[level] <= dag.levelClusterCount[level]);
+        }
+        CHECK(dag.levelUniqueCount[0] < dag.levelClusterCount[0]);
+        CHECK(dag.stats.maxClusterTriangles <= kNaniteMaxClusterTriangles);
+        CHECK(dag.stats.maxClusterVertices  <= kNaniteMaxClusterVertices);
+        CHECK(dag.stats.degenerateClusterCount == 0u);
+        CHECK(AllDAGClustersRespectCaps(dag));
+    }
+    // ── (b) 一般网格：单一连通的规则网格，几何本身没有任何重复 ──
+    {
+        const GridMesh mesh = MakeGrid(32);   // 2048 tri
+        NaniteClusterDAG dag;
+        REQUIRE(BuildNaniteClusterDAG(mesh.positions, mesh.indices, dag));
+        MESSAGE(DAGStatsLine("(b) 一般网格 32x32（2048 tri）:", dag).c_str());
+
+        // 如实报告：不设 >10% 的下限，只钉住口径合法性（[0,1] 且与计数一致）
+        CHECK(dag.stats.dedupRate >= 0.0f);
+        CHECK(dag.stats.dedupRate <= 1.0f);
+        const float expectedRate = 1.0f - (float)dag.stats.uniqueClusterCount /
+                                            (float)dag.stats.totalClusterCount;
+        CHECK(dag.stats.dedupRate == expectedRate);
+        CHECK(AllDAGClustersRespectCaps(dag));
+    }
+    // ── (c) 混合网格：一般网格 + 重复子网格（证明"一般场景里出现重复结构 ⇒ 去重率被拉过 10%"）──
+    {
+        GridMesh mixed = MakeGrid(32);                   // 2048 tri 的连通地面
+        const TiledMesh repeated = MakeTiledPatches(6, 6, 8, 4, 40.0f);   // 36×64 = 2304 tri 的重复柱
+        const u32 base = (u32)(mixed.positions.size() / 3u);
+        for (usize v = 0; v + 2u < repeated.mesh.positions.size(); v += 3u) {
+            mixed.positions.push_back(repeated.mesh.positions[v + 0u] + 40.0f);
+            mixed.positions.push_back(repeated.mesh.positions[v + 1u] + 40.0f);
+            mixed.positions.push_back(repeated.mesh.positions[v + 2u] + 5.0f);
+        }
+        for (const u32 index : repeated.mesh.indices) {
+            mixed.indices.push_back(base + index);
+        }
+
+        NaniteClusterDAG dag;
+        REQUIRE(BuildNaniteClusterDAG(mixed.positions, mixed.indices, dag));
+        MESSAGE(DAGStatsLine("(c) 混合网格（2048 地面 + 36×64 重复柱）:", dag).c_str());
+        CHECK(dag.stats.dedupRate > 0.10f);
+        CHECK(AllDAGClustersRespectCaps(dag));
+    }
+}
+
+// ============================================================
+// 13. DAG 链接自洽：不越界、每个子簇恰有一个父、无孤儿、无环
+// ============================================================
+TEST_CASE("NaniteDAG: 父子链接自洽（不越界 / 每子一父 / 无孤儿 / 无环）") {
+    const GridMesh grid = MakeGrid(32);
+    const TiledMesh tiled = MakeTiledPatches(3, 3, 8, 4, 20.0f);
+    const GridMesh* const meshes[2] = { &grid, &tiled.mesh };
+    const char* const     labels[2] = { "一般网格", "平铺网格" };
+
+    for (u32 which = 0; which < 2u; ++which) {
+        const GridMesh& mesh = *meshes[which];
+        NaniteClusterDAG dag;
+        REQUIRE(BuildNaniteClusterDAG(mesh.positions, mesh.indices, dag));
+        REQUIRE(dag.stats.levelCount > 0u);
+        MESSAGE(DAGStatsLine(labels[which], dag).c_str());
+
+        const usize clusterCount = dag.clusters.size();
+        const u32   levelCount   = dag.stats.levelCount;
+        REQUIRE(dag.parentCluster.size() == clusterCount);
+
+        // ① 子表不越界、连续排布、反向一致；每个子簇的级恰好比父簇细一级
+        std::vector<u32> parentCount(clusterCount, 0u);
+        u32 expectedChildOffset = 0u;
+        for (usize c = 0; c < clusterCount; ++c) {
+            const NaniteClusterRecord& record = dag.clusters[c];
+            CHECK(record.childClusterOffset == expectedChildOffset);   // 扁平表按出现顺序连续写
+            CHECK((usize)record.childClusterOffset + record.childCount <=
+                  dag.childClusterIndices.size());
+            for (u32 k = 0; k < record.childCount; ++k) {
+                const u32 child = dag.childClusterIndices[record.childClusterOffset + k];
+                CHECK(child < clusterCount);                              // 不越界
+                CHECK(dag.clusterLevel[child] + 1u == dag.clusterLevel[c]);  // 子恰好细一级
+                CHECK(dag.parentCluster[child] == (u32)c);                // 反向链接一致
+                ++parentCount[child];
+            }
+            expectedChildOffset += record.childCount;
+        }
+        CHECK(expectedChildOffset == (u32)dag.childClusterIndices.size());
+
+        // ② 每个非根簇恰有一个父（无孤儿），根簇没有父；叶子（LOD0）没有孩子
+        u32 rootCount = 0u;
+        u32 leafCount = 0u;
+        for (usize c = 0; c < clusterCount; ++c) {
+            if (dag.clusterLevel[c] + 1u < levelCount) {
+                CHECK(dag.parentCluster[c] != kNaniteNoParentCluster);
+                CHECK(parentCount[c] == 1u);            // 恰有一个父 ⇒ 不重复挂靠、无孤儿
+            } else {
+                CHECK(dag.parentCluster[c] == kNaniteNoParentCluster);
+                CHECK(parentCount[c] == 0u);
+                ++rootCount;
+            }
+            // "有孩子"的判据是"不在最细一级"（LOD0 的簇是叶子，必然没有孩子）
+            if (dag.clusterLevel[c] > 0u) {
+                CHECK(dag.clusters[c].childCount > 0u);   // 每个非叶簇都有人认（连通性）
+            } else {
+                CHECK(dag.clusters[c].childCount == 0u);  // 叶子
+                ++leafCount;
+            }
+        }
+        CHECK(rootCount == dag.stats.rootClusterCount);
+        CHECK(leafCount == dag.stats.leafClusterCount);
+
+        // ③ 无环：沿父链走，级严格递增，必然在"最高一级"终止
+        for (usize c = 0; c < clusterCount; ++c) {
+            u32 cursor = (u32)c;
+            u32 steps  = 0u;
+            while (dag.parentCluster[cursor] != kNaniteNoParentCluster) {
+                const u32 parent = dag.parentCluster[cursor];
+                CHECK(dag.clusterLevel[parent] == dag.clusterLevel[cursor] + 1u);
+                cursor = parent;
+                ++steps;
+                REQUIRE(steps <= levelCount);   // 级数上限兜底：出现环必然在这里炸掉
+            }
+            CHECK(dag.clusterLevel[cursor] + 1u == levelCount);   // 根一定在最高一级
+        }
+    }
+}
+
+// ============================================================
+// 14. 共享内容与 maxParentLODError
+// ============================================================
+TEST_CASE("NaniteDAG: 共享内容自洽、maxParentLODError 来源正确（根为 0）") {
+    const TiledMesh tiled = MakeTiledPatches(4, 4, 8, 4, 20.0f);
+    NaniteClusterDAG dag;
+    REQUIRE(BuildNaniteClusterDAG(tiled.mesh.positions, tiled.mesh.indices, dag));
+    REQUIRE(dag.stats.levelCount > 0u);
+
+    // ① 共享内容表：每个唯一内容的顶点词都是位置词（低 30 位有效，w 位 = 1 的 R10G10B10A2）
+    for (const u32 word : dag.uniqueVertexWords) {
+        CHECK((word >> 30) == 1u);   // NanitePackPosition 的 w = 1（任务 7 的既定约定）
+    }
+    // ② 每个唯一内容都被至少一条出现记录引用（没有"死内容"）
+    std::vector<u32> referenceCount(dag.uniqueVertexCount.size(), 0u);
+    for (usize c = 0; c < dag.clusters.size(); ++c) {
+        REQUIRE(dag.clusterUnique[c] < referenceCount.size());
+        ++referenceCount[dag.clusterUnique[c]];
+    }
+    for (const u32 count : referenceCount) CHECK(count > 0u);
+
+    // ③ maxParentLODError：非根级 > 0（meshopt 的绝对简化误差），根 = 0（没有父级）
+    for (usize c = 0; c < dag.clusters.size(); ++c) {
+        const float error = dag.clusters[c].maxParentLODError;
+        CHECK(error >= 0.0f);
+        if (dag.clusterLevel[c] + 1u < dag.stats.levelCount) {
+            CHECK(error > 0.0f);
+        } else {
+            CHECK(error == 0.0f);
+        }
+    }
+    // 同一级的误差阈值一致（口径：整网格一次简化 ⇒ 该级共用同一个保守上界）
+    for (usize c = 1; c < dag.clusters.size(); ++c) {
+        if (dag.clusterLevel[c] == dag.clusterLevel[c - 1u] &&
+            dag.clusterLevel[c] + 1u < dag.stats.levelCount) {
+            CHECK(dag.clusters[c].maxParentLODError == dag.clusters[c - 1u].maxParentLODError);
+        }
+    }
+    // ④ 任务 9 的包围球口径：球心 = 簇 AABB 中心、半径 = 到最远顶点的距离（包含本簇全部顶点）。
+    //    这条同时是"量化原点是 AABB 中心"的可验证落点 —— 平移副本因此才能算出逐位相同的位置词。
+    for (usize c = 0; c < dag.clusters.size(); ++c) {
+        const NaniteClusterRecord& record = dag.clusters[c];
+        const u32 localVertexCount = dag.clusterVertexCount[c];
+        REQUIRE(localVertexCount > 0u);
+
+        float aabbMin[3] = { 0.0f, 0.0f, 0.0f };
+        float aabbMax[3] = { 0.0f, 0.0f, 0.0f };
+        for (u32 v = 0; v < localVertexCount; ++v) {
+            const u32 meshVertex = dag.clusterVertexIndices[dag.clusterVertexIndexOffset[c] + v];
+            for (u32 axis = 0; axis < 3u; ++axis) {
+                const float value = tiled.mesh.positions[(usize)meshVertex * 3u + axis];
+                if (v == 0u || value < aabbMin[axis]) aabbMin[axis] = value;
+                if (v == 0u || value > aabbMax[axis]) aabbMax[axis] = value;
+            }
+        }
+        // 注意：`clusters[c].vertexOffset` 是**共享顶点表**的偏移；本簇的"局部顶点 → 网格顶点"
+        // 映射在 `clusterVertexIndices` 里按出现顺序连续存放，起点是 `clusterVertexIndexOffset[c]`。
+        CHECK(record.boundsCenterRadius[0] == (aabbMin[0] + aabbMax[0]) * 0.5f);
+        CHECK(record.boundsCenterRadius[1] == (aabbMin[1] + aabbMax[1]) * 0.5f);
+        CHECK(record.boundsCenterRadius[2] == (aabbMin[2] + aabbMax[2]) * 0.5f);
+        for (u32 v = 0; v < localVertexCount; ++v) {
+            const u32 meshVertex = dag.clusterVertexIndices[dag.clusterVertexIndexOffset[c] + v];
+            const float dx = tiled.mesh.positions[(usize)meshVertex * 3u + 0u] - record.boundsCenterRadius[0];
+            const float dy = tiled.mesh.positions[(usize)meshVertex * 3u + 1u] - record.boundsCenterRadius[1];
+            const float dz = tiled.mesh.positions[(usize)meshVertex * 3u + 2u] - record.boundsCenterRadius[2];
+            CHECK(std::sqrt(dx * dx + dy * dy + dz * dz) <= record.boundsCenterRadius[3] + 1.0e-4f);
+        }
+        CHECK(IsValidConeAxisAngle(record.cone));
+    }
+
+    // ⑤ 局部位移上界：局部顶点词解码后（相对簇心）必须落在"网格最大范围的一半"量级内；
+    //    这里只钉住"量化是可逆的位域"（w 位 = 1），具体几何误差属于任务 10 的量化往返判据。
+    CHECK(dag.stats.maxLODError > 0.0f);
+}
+
+// ============================================================
+// 15. 可复现性与边界（空网格 / 非法输入 / 凑不出一个满簇）
+// ============================================================
+TEST_CASE("NaniteDAG: 同一输入两次构建逐位可复现") {
+    const TiledMesh tiled = MakeTiledPatches(3, 3, 8, 4, 20.0f);
+
+    NaniteClusterDAG first;
+    NaniteClusterDAG second;
+    REQUIRE(BuildNaniteClusterDAG(tiled.mesh.positions, tiled.mesh.indices, first));
+    REQUIRE(BuildNaniteClusterDAG(tiled.mesh.positions, tiled.mesh.indices, second));
+    MESSAGE(DAGStatsLine("可复现性（3x3 平铺）:", first).c_str());
+
+    CHECK(first.stats.levelCount == second.stats.levelCount);
+    CHECK(first.stats.uniqueClusterCount == second.stats.uniqueClusterCount);
+    CHECK(first.stats.dedupRate == second.stats.dedupRate);
+    CHECK(SameDAG(first, second));
+}
+
+TEST_CASE("NaniteDAG: 空网格 / 非法输入 / 凑不出满簇的边界") {
+    // ① 空网格：成功、级数 0、产物为空（出参先污染，成功路径必须整体写满）
+    {
+        const std::vector<float> positions;
+        const std::vector<u32>   indices;
+        NaniteClusterDAG dag;
+        dag.stats.levelCount = 9u;
+        dag.clusters.resize(3u);
+        dag.clusterLevel.push_back(7u);
+        CHECK(BuildNaniteClusterDAG(positions, indices, dag));
+        CHECK(dag.Empty());
+        CHECK(dag.clusters.empty());
+        CHECK(dag.clusterVertexCount.empty());
+        CHECK(dag.clusterVertexIndices.empty());
+        CHECK(dag.clusterLevel.empty());
+        CHECK(dag.clusterUnique.empty());
+        CHECK(dag.uniqueVertexWords.empty());
+        CHECK(dag.uniqueTriangles.empty());
+        CHECK(dag.levelClusterCount.empty());
+        CHECK(dag.levelClusterOffset.empty());
+        CHECK(dag.levelTriangleCount.empty());
+        CHECK(dag.levelUniqueCount.empty());
+        CHECK(dag.childClusterIndices.empty());
+        CHECK(dag.parentCluster.empty());
+        CHECK(dag.stats.levelCount == 0u);
+        CHECK(dag.stats.simplifiedLevelCount == 0u);
+        CHECK(dag.stats.totalClusterCount == 0u);
+        CHECK(dag.stats.uniqueClusterCount == 0u);
+        CHECK(dag.stats.dedupRate == 0.0f);
+    }
+    // ② 非法输入：返回 false 且不改写出参（与任务 8 同口径）
+    {
+        const GridMesh mesh = MakeGrid(2);
+        auto makePoisoned = []() {
+            NaniteClusterDAG dag;
+            dag.stats.levelCount = 42u;
+            dag.clusters.resize(3u);
+            dag.parentCluster.push_back(5u);
+            return dag;
+        };
+        // 索引个数不是 3 的倍数
+        {
+            std::vector<u32> badIndices(mesh.indices.begin(), mesh.indices.begin() + 4);
+            NaniteClusterDAG dag = makePoisoned();
+            CHECK_FALSE(BuildNaniteClusterDAG(mesh.positions, badIndices, dag));
+            CHECK(dag.stats.levelCount == 42u);
+            CHECK(dag.clusters.size() == 3u);
+            CHECK(dag.parentCluster.size() == 1u);
+        }
+        // 位置个数不是 3 的倍数
+        {
+            std::vector<float> badPositions(mesh.positions.begin(), mesh.positions.begin() + 4);
+            NaniteClusterDAG dag = makePoisoned();
+            CHECK_FALSE(BuildNaniteClusterDAG(badPositions, mesh.indices, dag));
+            CHECK(dag.stats.levelCount == 42u);
+        }
+        // 越界索引
+        {
+            const std::vector<float> positions = { 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f };
+            const std::vector<u32>   indices   = { 0u, 1u, 3u };
+            NaniteClusterDAG dag = makePoisoned();
+            CHECK_FALSE(BuildNaniteClusterDAG(positions, indices, dag));
+            CHECK(dag.stats.levelCount == 42u);
+        }
+        // 有三角形却没有顶点
+        {
+            const std::vector<float> positions;
+            const std::vector<u32>   indices = { 0u, 1u, 2u };
+            NaniteClusterDAG dag = makePoisoned();
+            CHECK_FALSE(BuildNaniteClusterDAG(positions, indices, dag));
+            CHECK(dag.stats.levelCount == 42u);
+        }
+    }
+    // ③ 单个三角形：合法，但凑不出"下一级 ≥ 一个满簇"⇒ 只有 LOD0（levelCount = 1）
+    {
+        const std::vector<float> positions = { 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f };
+        const std::vector<u32>   indices   = { 0u, 1u, 2u };
+        NaniteClusterDAG dag;
+        REQUIRE(BuildNaniteClusterDAG(positions, indices, dag));
+        MESSAGE(DAGStatsLine("单三角形（凑不出满簇）:", dag).c_str());
+        CHECK(dag.stats.levelCount == 1u);            // 只有 LOD0
+        CHECK(dag.stats.simplifiedLevelCount == 0u);
+        CHECK(dag.stats.totalClusterCount == 1u);
+        CHECK(dag.stats.uniqueClusterCount == 1u);
+        CHECK(dag.stats.leafClusterCount == 1u);
+        CHECK(dag.stats.rootClusterCount == 1u);
+        CHECK(dag.clusters[0].childCount == 0u);
+        CHECK(dag.parentCluster[0] == kNaniteNoParentCluster);
+        CHECK(AllDAGClustersRespectCaps(dag));
+    }
+    // ④ 恰好 72 tri 的 6×6 网格：下一级目标 36 < 64 ⇒ 仍然只有 LOD0（终止条件①的显式覆盖）
+    {
+        const GridMesh mesh = MakeGrid(6);
+        NaniteClusterDAG dag;
+        REQUIRE(BuildNaniteClusterDAG(mesh.positions, mesh.indices, dag));
+        CHECK(dag.levelTriangleCount[0] == 72u);
+        CHECK(dag.stats.levelCount == 1u);
+    }
+    // ⑤ 恰好 128 tri（16×4 网格）：下一级目标 64 ≥ 一个满簇 ⇒ 会生成 LOD1（终止阈值边界）
+    {
+        const GridMesh mesh = MakeGridRect(16, 4);   // 16×4 四边形 = 128 三角形
+        REQUIRE(mesh.indices.size() == 128u * 3u);
+        NaniteClusterDAG dag;
+        REQUIRE(BuildNaniteClusterDAG(mesh.positions, mesh.indices, dag));
+        MESSAGE(DAGStatsLine("16x4 网格（128 tri，恰好能减半）:", dag).c_str());
+        CHECK(dag.stats.levelCount >= 2u);
+        CHECK(dag.levelTriangleCount[1] <= 64u);
+    }
 }
