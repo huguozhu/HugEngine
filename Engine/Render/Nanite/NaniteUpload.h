@@ -421,6 +421,12 @@ struct NanitePackStats {
 
     // ── DAG 衔接的如实读数 ──
     u32   attributeConflictCount = 0;  ///< 共享内容的不同出现给出不同 normal/UV 的唯一内容数（**必须 0**；非 0 ⇒ 打包返回 false）
+
+    // ── 【§14.8 任务 19】簇 → 源网格 → 材质的映射读数 ──
+    u32   multiMeshClusters   = 0;  ///< 三角形跨越 **≥2 个源网格**的簇数（按三角形多数票归属，见下）
+    u32   unmappedClusters    = 0;  ///< 一个三角形都落不进任何源网格区间的簇数（防御：正常必须 0）
+    u32   distinctMaterialCount = 0;///< 材质段里**内容各不相同**的记录数（按 32B 记录逐位比较）
+    u32   texturedMaterialCount = 0;///< 其中带 BaseColor 纹理（`textureMask` bit0）的记录数
 };
 
 /// 一次打包的产物：**最终 GPU 侧字节布局** + 分段强类型视图 + 实测读数
@@ -434,7 +440,7 @@ struct NanitePackedAsset {
     std::vector<NaniteClusterRecord>  clusters;    ///< 簇段（每次"出现"一条，64B）
     std::vector<NaniteVertex>         vertices;    ///< 顶点段（每个唯一内容一份，16B）
     std::vector<NanitePackedTriangle> triangles;   ///< 索引段（3×u16，8B/三角形）
-    std::vector<NaniteMaterialRecord> materials;   ///< 材质段（8B）
+    std::vector<NaniteMaterialRecord> materials;   ///< 材质段（32B；任务 19 由 8B 最小扩展）
     std::vector<u32>                  lodOffsets;  ///< LOD 段（每级一个 u32，见 `PackNaniteClusters`）
     std::vector<u8>                   bytes;       ///< 上面五段按 `layout` 拼成的字节镜像
     NanitePackStats                   stats;       ///< 实测读数（见上）
@@ -442,6 +448,51 @@ struct NanitePackedAsset {
     /// 产物是否为空（空 DAG = 合法输入：只有 96B 头部，计数全 0）
     [[nodiscard]] bool Empty() const { return clusters.empty(); }
 };
+
+// ============================================================
+// 【§14.8 任务 19】簇 → 源网格 → 材质 的映射（RHI-free，可单测）
+//
+// 【为什么需要它】任务 12 的资产是"**整份合并几何当一个资产**"：簇是在合并后的顶点/索引段上
+//   切出来的，簇记录里没有"我来自哪个原始网格"的信息，而材质是**逐网格**的（每个 MeshComponent
+//   一份 PBRMaterial）。要把真实材质接进软光栅，必须先把每个簇的三角形区间映射回源网格。
+//
+// 【映射规则（确定、可复现）】
+//   · 源网格区间来自 `MeshBatcher` 的**逐网格绘制区间**（`GetDrawCommands()` 的
+//     `firstIndex/indexCount`；索引已加过 baseVertex，见 `MeshBatcher.cpp:53`）⇒ 三角形区间
+//     就是 `[firstIndex/3, (firstIndex+indexCount)/3)`，且它们**首尾相接、按构建顺序升序**。
+//   · 簇的三角形区间 = `NaniteClusterRecord::triangleOffset/triangleCount`（单位是**三角形**，
+//     见 §8.1 定稿）。
+//   · **一个簇跨两个网格时按"三角形多数票"归属**：统计该簇的每个三角形落在哪个源网格，
+//     取计数最大的那个；**票数相同时取下标更小的网格**（确定性，不依赖容器遍历序）。
+//     跨 ≥2 个网格的簇计入 `multiMeshClusters`（如实计数，不隐藏）。
+//   · 一个三角形都落不进任何区间（越界/空洞）⇒ 归属 0 号网格并计入 `unmappedClusters`
+//     （正常必须 0：合并几何是连续拼接的，不存在空洞）。
+//
+// 【为什么放在 `NaniteUpload.h`】与任务 9/10/14 的构建器同一层（"资产 → 派生数据"），
+//   且本翻译单元已被单测直接编译（`Tests/CMakeLists.txt`），映射规则因此天然可测。
+// ============================================================
+
+/// 一个源网格在**合并索引段**里的三角形区间 + 它的材质段下标
+struct NaniteSourceMeshRange {
+    u32 firstTriangle = 0;    ///< 首个三角形的下标（= `MeshBatcher` 的 `firstIndex / 3`）
+    u32 triangleCount = 0;    ///< 三角形数（= `indexCount / 3`）
+    u32 materialIndex = 0;    ///< 该网格用的材质记录下标（调用方按"一网格一条记录"填 i 即可）
+};
+
+/// 映射的如实读数（写进 `NanitePackStats` 的同名字段）
+struct NaniteClusterMaterialMapStats {
+    u32 multiMeshClusters = 0;   ///< 三角形跨越 ≥2 个源网格的簇数（多数票归属）
+    u32 unmappedClusters  = 0;   ///< 一个三角形都落不进任何源网格区间的簇数（正常 0）
+};
+
+/// 按"三角形多数票"把每个簇映射到源网格的材质下标。
+/// @param outClusterMaterialIndex 输出数组（长度必须 == `clusters.size()`；每项写材质段下标）
+/// @return 映射读数（见上）
+/// 【确定性】不含哈希容器遍历序、不含随机数、不并行；平票取最小网格下标 ⇒ 同输入逐位一致。
+[[nodiscard]] NaniteClusterMaterialMapStats NaniteAssignClusterMaterials(
+    std::span<const NaniteClusterRecord>   clusters,
+    std::span<const NaniteSourceMeshRange> meshes,
+    std::span<u32>                         outClusterMaterialIndex);
 
 /// 把任务 9 的 DAG 产物量化/打包成最终 GPU 侧字节布局（§14.8 任务 10）
 ///
@@ -483,7 +534,10 @@ struct NanitePackedAsset {
 //   · `positions` / `normals` / `uvs` 是**扁平 SoA**（每顶点 3 / 3 / 2 个 float），
 //     调用方负责把 `StaticVertex[]` 转成这三条数组（合批索引已是绝对索引，不需要再加偏移）；
 //   · `indices` 是三角形列表（u32，长度是 3 的倍数）；
-//   · `materials` 可为空（⇒ `materialCount = 0`）：逐簇材质解析属任务 19，本任务不伪造 ID。
+//   · `materials` 可为空（⇒ `materialCount = 0`）：本函数**原样搬运**记录，不解释字段；
+//     【任务 19】新增重载额外接收 `meshes`（逐源网格的三角形区间 + 材质下标），
+//     它会把每个簇的 `materialID` 按"三角形多数票"写成**材质段下标**（映射规则见上），
+//     于是软光栅能从资产材质段取到真实材质（旧重载保持"materialID 一律 0"的语义不变）。
 // 【失败】与两个被调函数同口径：输入非法（索引不是 3 的倍数、越界索引、位置/属性长度不符、
 //   DAG 内部不一致、切不出簇等）⇒ 返回 false 且**不改写** `outResult`。
 // 【空几何】`indices` 为空 ⇒ 返回 true，产出一份"只有 96B 头部、计数全 0"的合法资产
@@ -496,6 +550,22 @@ struct NanitePackedAsset {
                                                 std::span<const u32>                  indices,
                                                 std::span<const NaniteMaterialRecord> materials,
                                                 NanitePackedAsset&                    outResult);
+
+/// 【§14.8 任务 19】带"簇 → 源网格 → 材质"映射的资产构建重载。
+///
+/// 【与上一个重载的唯一差别】额外接收 `meshes`：构建完成后按 `NaniteAssignClusterMaterials`
+///   把每个簇记录的 `materialID` 写成材质段下标，并把结果（`multiMeshClusters` /
+///   `unmappedClusters` / `distinctMaterialCount` / `texturedMaterialCount`）写进
+///   `outResult.stats`；随后**重新序列化簇段并再跑一次 `ValidateNaniteFile`** —— 字节镜像与
+///   强类型分段视图必须仍然逐字节一致（这条自校验是"改记录就得改镜像"的硬门）。
+/// 【`meshes` 为空】等价于旧重载（`materialID` 保持打包器写入的默认值 0）。
+[[nodiscard]] bool BuildNaniteAssetFromGeometry(std::span<const float>                  positions,
+                                                std::span<const float>                  normals,
+                                                std::span<const float>                  uvs,
+                                                std::span<const u32>                    indices,
+                                                std::span<const NaniteMaterialRecord>   materials,
+                                                std::span<const NaniteSourceMeshRange>  meshes,
+                                                NanitePackedAsset&                      outResult);
 
 // ============================================================
 // §14.8 任务 14：per-instance cluster BVH 的**构建**（CPU 侧，RHI-free）

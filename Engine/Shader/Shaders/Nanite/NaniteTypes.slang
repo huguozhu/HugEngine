@@ -56,7 +56,7 @@ static const uint NANITE_FILE_HEADER_BYTES        = 96;
 static const uint NANITE_CLUSTER_RECORD_BYTES     = 64;
 static const uint NANITE_VERTEX_RECORD_BYTES      = 16;
 static const uint NANITE_INDEX_BYTES_PER_TRIANGLE = 8;
-static const uint NANITE_MATERIAL_RECORD_BYTES    = 8;
+static const uint NANITE_MATERIAL_RECORD_BYTES    = 32;   // 任务 19：由 8B 最小扩展为 32B
 static const uint NANITE_LOD_OFFSET_BYTES         = 4;
 static const uint NANITE_INDICES_PER_TRIANGLE     = 3;
 
@@ -154,11 +154,23 @@ struct NanitePackedTriangle {
     uint hi;
 };
 
-// 材质记录（8B）：bindless 纹理 ID 对（0 = 该槽未绑定）
+// 材质记录（32B；任务 19 由 8B 最小扩展，与 C++ 的 `NaniteMaterialRecord` 逐字段一致）
+//   baseColorFactor / metallicFactor / roughnessFactor / textureMask / bindlessTextureBase
+//   正是既有 GBuffer 路径（`GBuffer.frag.slang:57-81`）算 albedo/metallic/roughness 所需的全套字段。
 struct NaniteMaterialRecord {
-    uint albedoTexture;
-    uint normalTexture;
+    float4 baseColorFactor;      // 偏移 0 ：与 GPUObjectData::baseColorFactor 同口径
+    float  metallicFactor;       // 偏移 16
+    float  roughnessFactor;      // 偏移 20
+    uint   textureMask;          // 偏移 24：bit0=BaseColor / bit1=Normal / bit2=MetallicRough / bit3=Occlusion
+    uint   bindlessTextureBase;  // 偏移 28：bindless 纹理基索引（每材质占 4 个槽）
 };
+
+// 【任务 19】纹理掩码的位（与 C++ 的 `ComputeMaterialTextureMask` 同一套位序）
+static const uint NANITE_TEXMASK_BASECOLOR      = 1u;
+static const uint NANITE_TEXMASK_METALLICROUGH  = 4u;
+// bindless 纹理槽位偏移（与 `GBuffer.frag.slang:32` 的约定一致）
+static const uint NANITE_TEXSLOT_BASECOLOR      = 0u;
+static const uint NANITE_TEXSLOT_METALLICROUGH  = 2u;
 
 // ============================================================
 // ── 4. 位域打包/解包（与 C++ 的 `NanitePackR10G10B10A2` / `NaniteUnpackR10G10B10A2` 一致）──
@@ -332,9 +344,14 @@ bool naniteIsValidClusterLocalVertexIndex(uint localIndex) {
     return localIndex < NANITE_MAX_CLUSTER_VERTICES;
 }
 
-// 材质记录 → 两个 bindless 纹理 ID（word 0 = albedo、1 = normal）
-uint2 naniteDecodeMaterial(NaniteMaterialRecord material) {
-    return uint2(material.albedoTexture, material.normalTexture);
+// 材质记录 → (baseColorFactor.rgb, metallicFactor, roughnessFactor)（任务 19：真实材质三元组）
+void naniteDecodeMaterialFactors(NaniteMaterialRecord material,
+                                 out float3 baseColorFactor,
+                                 out float metallicFactor,
+                                 out float roughnessFactor) {
+    baseColorFactor = material.baseColorFactor.rgb;
+    metallicFactor  = material.metallicFactor;
+    roughnessFactor = material.roughnessFactor;
 }
 
 // cone 轴角 → 剔除判据：`dot(viewDirection, axis) >= cosHalfAngle` 时该簇可被剔除。

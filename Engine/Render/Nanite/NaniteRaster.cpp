@@ -665,6 +665,13 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
             { 9, rhi::DescriptorType::StorageImage,  1, rhi::kStageMaskCompute, false },  // MRT1 normal
             {10, rhi::DescriptorType::StorageImage,  1, rhi::kStageMaskCompute, false },  // MRT4 worldPos
             {11, rhi::DescriptorType::StorageImage,  1, rhi::kStageMaskCompute, false },  // MRT7 lightmapKey
+            // 【任务 19】材质：12 = 资产材质段（32B/条，普通 SSBO，不走 bindless —— 它每帧只绑一次）；
+            //   13/14 = **bindless 纹理/采样器数组**，与既有 GBuffer 路径注册在**同一个堆**上
+            //   （`heap->RegisterDescriptorSet(..., 13, 14, 0)`）⇒ 模块采样到的是同一批材质贴图。
+            //   `bindless = true` 的两个绑定：堆 Flush 时按"已注册的槽位数"写入（PARTIALLY_BOUND）。
+            {12, rhi::DescriptorType::StorageBuffer, 1,    rhi::kStageMaskCompute, false },
+            {13, rhi::DescriptorType::SampledImage,  4096, rhi::kStageMaskCompute, true  },
+            {14, rhi::DescriptorType::Sampler,       4096, rhi::kStageMaskCompute, true  },
         };
         m_SoftColorLayout = m_Device->CreateDescriptorSetLayout(layout);
         if (m_SoftColorLayout == rhi::kInvalidLayout) {
@@ -672,6 +679,27 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
             return false;
         }
         m_SoftColorSet = m_Device->AllocateDescriptorSet(m_SoftColorLayout);
+
+        // ── 【任务 19】把第 2 趟的集合登记到 bindless 堆，并**立刻自己 Flush 一次** ──
+        // 【为什么必须"登记 + 强制一次 Flush"】堆只在**有 pending** 时把纹理数组写进已登记的集合，
+        //   而材质贴图在场景加载期就注册完了（此后 m_Pending 恒 false）⇒ 若只登记不触发，
+        //   本集合的 bindless 数组会一直是"未绑定"（采样读到 0 —— 实测：albedo 全 0、
+        //   roughness 落到下限 0.04，正是这条路径的症状）。
+        // 【为什么不能指望既有的 Flush】唯一每帧调 `heap->Flush()` 的地方是
+        //   `GBufferRenderer_CPU::Render:29`，而软光栅开启时该渲染器**让位、根本不执行**
+        //   （§14.27③）⇒ 模块必须自己推一次。触发方式沿用既有做法：
+        //   `RegisterTexture(nullptr, nullptr)` 占一个槽位（默认占位纹理）并把堆标成 pending，
+        //   随后马上 `Flush()` 把**完整数组**写进所有已登记集合（含本集合）。
+        //   代价：bindless 纹理数组永久多一个占位槽（不影响任何材质 ID —— 那些 ID 在此调用之前
+        //   就已分配完毕）。Flush 是纯主机侧描述符写（UPDATE_AFTER_BIND），与既有每帧 Flush 同一性质。
+        if (!m_BindlessRegistered) {
+            if (auto* heap = m_Device->GetBindlessHeap()) {
+                heap->RegisterDescriptorSet(m_SoftColorSet, 13u, 14u, 0u);
+                heap->RegisterTexture(nullptr, nullptr);
+                heap->Flush();
+                m_BindlessRegistered = true;
+            }
+        }
 
         m_SoftColorCS.stage      = rhi::ShaderStage::Compute;
         m_SoftColorCS.spirv      = k_Nanite_SoftRaster_comp_spv;
@@ -952,6 +980,11 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
     m_Device->UpdateDescriptorSet(m_SoftColorSet, 5, rhi::DescriptorType::StorageBuffer, instances);
     m_Device->UpdateDescriptorSet(m_SoftColorSet, 6, rhi::DescriptorType::StorageBuffer, m_DepthKey.get());
     m_Device->UpdateDescriptorSet(m_SoftColorSet, 7, rhi::DescriptorType::StorageBuffer, m_SoftStats.get());
+    // 【任务 19】材质段（bindings 13/14 由 bindless 堆负责，这里不写）
+    if (asset.materials) {
+        m_Device->UpdateDescriptorSet(m_SoftColorSet, 12, rhi::DescriptorType::StorageBuffer,
+                                      asset.materials);
+    }
     m_Device->UpdateDescriptorSetWithImageView(m_SoftColorSet, 8,  rhi::DescriptorType::StorageImage,
                                                targets.albedo->GetNativeHandle());
     m_Device->UpdateDescriptorSetWithImageView(m_SoftColorSet, 9,  rhi::DescriptorType::StorageImage,
@@ -1032,7 +1065,9 @@ void NaniteRaster::LogSoftRasterReadback() {
         m_SoftStats->Unmap();
     }
     HE_CORE_INFO("[Nanite] soft_raster clusters={} soft={} skipped_big={} triangles={} pixels_written={} "
-                 "degenerate={} neutral_material_pixels={} depth_written={} "
+                 "degenerate={} neutral_material_pixels={} material_pixels={} fallback_pixels={} "
+                 "materials={} distinct_materials={} textured_materials={} multi_mesh_clusters={} "
+                 "depth_written={} "
                  "depth_storage_image_supported={} depth_src=key+SV_Depth max_triangles={} "
                  "instances={} depth_key_pixels={} covered_px={} diag_screenw={} diag_screenh={} "
                  "diag_maxtri={} diag_extent_milli={} tested_px={}",
@@ -1043,6 +1078,12 @@ void NaniteRaster::LogSoftRasterReadback() {
                  s[kNaniteSoftStatPixels],
                  s[kNaniteSoftStatDegenerate],
                  s[kNaniteSoftStatNeutralPixels],
+                 s[kNaniteSoftStatMaterialPixels],
+                 s[kNaniteSoftStatFallbackPixels],
+                 m_MaterialCount,
+                 m_DistinctMaterials,
+                 m_TexturedMaterials,
+                 m_MultiMeshClusters,
                  1,        // 深度解析恒执行（全屏片元写 SV_Depth）⇒ depth_written 恒 1
                  m_DepthStorageImageSupported ? 1 : 0,
                  m_SoftLastMaxTriangles,

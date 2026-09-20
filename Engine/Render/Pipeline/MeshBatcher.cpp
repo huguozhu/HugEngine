@@ -1,6 +1,7 @@
 // Pipeline/MeshBatcher.cpp — Mesh 合并实现
 #include "Pipeline/MeshBatcher.h"
 #include "Pipeline/GPUScene.h"
+#include "Pipeline/Material.h"   // 【任务 19】PBRMaterial / ComputeMaterialTextureMask（材质快照同源）
 #include "Scene/World.h"
 #include "RHI/RHI.h"
 #include "Scene/CubeComponent.h"
@@ -19,6 +20,7 @@ bool MeshBatcher::Build(World& world, bool excludeDecals) {
     m_MergedIndices.clear();
     m_Commands.clear();
     m_DGCTokens.clear();
+    m_MeshMaterials.clear();
 
     u32 baseVertex = 0;
     u32 baseIndex  = 0;
@@ -56,6 +58,32 @@ bool MeshBatcher::Build(World& world, bool excludeDecals) {
 
         // 记录间接绘制命令
         m_Commands.push_back({idxCount, 1, baseIndex, (i32)baseVertex, 0});
+
+        // 【§14.8 任务 19】材质快照：与上面那条命令**同一个 collect 调用**里产出 ⇒ 顺序天然对齐。
+        // 字段来源与 `SceneRenderer.cpp:110-130` 填 GPUObjectData 时同一批：
+        // 因子直接取组件的 PBR 字段，纹理掩码按"路径非空"压位（与 `ComputeMaterialTextureMask`
+        // 同一套位序：bit0=BaseColor / bit1=Normal / bit2=MetallicRough / bit3=Occlusion）。
+        {
+            PBRMaterial mat = GetDefaultMaterial();
+            mat.baseColorFactor         = mc.baseColorFactor;
+            mat.metallicFactor          = mc.metallicFactor;
+            mat.roughnessFactor         = mc.roughnessFactor;
+            mat.baseColorTexture        = mc.baseColorTexture;
+            mat.normalTexture           = mc.normalTexture;
+            mat.metallicRoughnessTexture = mc.metallicRoughnessTexture;
+            mat.occlusionTexture        = mc.occlusionTexture;
+
+            MergedMeshMaterial material{};
+            material.baseColorFactor[0] = mat.baseColorFactor.x;
+            material.baseColorFactor[1] = mat.baseColorFactor.y;
+            material.baseColorFactor[2] = mat.baseColorFactor.z;
+            material.baseColorFactor[3] = mat.baseColorFactor.w;
+            material.metallicFactor     = mat.metallicFactor;
+            material.roughnessFactor    = mat.roughnessFactor;
+            material.textureMask        = ComputeMaterialTextureMask(mat);
+            material.bindlessTextureBase = mc.materialID;
+            m_MeshMaterials.push_back(material);
+        }
 
         // DGC 模式：记录含 objectIndex 的 draw token
         // objectIndex = 当前物体在 GPUScene 中的索引（与 m_Commands 顺序一致）

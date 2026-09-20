@@ -778,34 +778,51 @@ TEST_CASE("NaniteTypes: UV unorm16 量化往返（≤ 1/65535）与越界 clamp"
 }
 
 // ============================================================
-// 12e. 任务 10：材质记录 8B 打包/解包（字段按 §8 定稿，只有两个 bindless 纹理 ID）
+// 12e. 任务 19：材质记录 32B 打包/解包（由任务 7/10 的 8B **最小扩展**而来）
+//   §8/任务 7 的 8B 记录只有两个 bindless 纹理 ID，放不下"因子 + 基础色 + 纹理掩码"这三样
+//   GBuffer 路径逐项对照所需的字段 ⇒ 扩到 32B（字段语义见 `NaniteTypes.h`）。
 // ============================================================
-TEST_CASE("NaniteTypes: 材质记录 8B 打包/解包（任务 10）") {
-    static_assert(sizeof(NaniteMaterialRecord) == 8, "材质记录必须 8B");
-    CHECK(kNaniteMaterialRecordBytes == 8u);
-    CHECK(offsetof(NaniteMaterialRecord, albedoTexture) == 0u);
-    CHECK(offsetof(NaniteMaterialRecord, normalTexture) == 4u);
+TEST_CASE("NaniteTypes: 材质记录 32B 打包/解包（任务 19 最小扩展）") {
+    static_assert(sizeof(NaniteMaterialRecord) == 32, "材质记录必须 32B（任务 19 最小扩展）");
+    CHECK(kNaniteMaterialRecordBytes == 32u);
+    CHECK(offsetof(NaniteMaterialRecord, baseColorFactor)     == 0u);
+    CHECK(offsetof(NaniteMaterialRecord, metallicFactor)      == 16u);
+    CHECK(offsetof(NaniteMaterialRecord, roughnessFactor)     == 20u);
+    CHECK(offsetof(NaniteMaterialRecord, textureMask)         == 24u);
+    CHECK(offsetof(NaniteMaterialRecord, bindlessTextureBase) == 28u);
 
-    const NaniteMaterialRecord material = NanitePackMaterial(0xDEADBEEFu, 0x12345678u);
-    CHECK(material.albedoTexture == 0xDEADBEEFu);
-    CHECK(material.normalTexture == 0x12345678u);
-    CHECK(NaniteUnpackMaterial(material, 0u) == 0xDEADBEEFu);
-    CHECK(NaniteUnpackMaterial(material, 1u) == 0x12345678u);
-    CHECK(NaniteUnpackMaterial(material, 2u) == 0u);    // 越界 word
+    const float factor[4] = { 0.25f, 0.5f, 0.75f, 1.0f };
+    const NaniteMaterialRecord material = NaniteMakeMaterialRecord(factor, 0.125f, 0.875f, 0x7u, 0xDEADBEEFu);
+    CHECK(material.baseColorFactor[0] == 0.25f);
+    CHECK(material.baseColorFactor[3] == 1.0f);
+    CHECK(material.metallicFactor == 0.125f);
+    CHECK(material.roughnessFactor == 0.875f);
+    CHECK(material.textureMask == 0x7u);
+    CHECK(material.bindlessTextureBase == 0xDEADBEEFu);
+
+    // 原始字视图（word 0..7 = 8×u32）：偏移与 Slang 侧 `StructuredBuffer` 视角逐位对应
+    CHECK(NaniteUnpackMaterial(material, 0u) == 0x3E800000u);   // 0.25f 的位模式
+    CHECK(NaniteUnpackMaterial(material, 4u) == 0x3E000000u);   // 0.125f
+    CHECK(NaniteUnpackMaterial(material, 5u) == 0x3F600000u);   // 0.875f
+    CHECK(NaniteUnpackMaterial(material, 6u) == 0x7u);
+    CHECK(NaniteUnpackMaterial(material, 7u) == 0xDEADBEEFu);
+    CHECK(NaniteUnpackMaterial(material, 8u) == 0u);            // 越界 word
     CHECK(NaniteUnpackMaterial(material, 0xFFFFFFFFu) == 0u);
 
-    // 字节序：word0 = albedo、word1 = normal（与 Slang 侧的 `uint2` 视角逐位一致）
-    const u32 words[2] = { 0xA1B2C3D4u, 0x01020304u };
-    NaniteMaterialRecord fromWords{};
-    std::memcpy(&fromWords, words, sizeof(fromWords));
-    CHECK(fromWords.albedoTexture == 0xA1B2C3D4u);
-    CHECK(fromWords.normalTexture == 0x01020304u);
-    CHECK(NaniteUnpackMaterial(fromWords, 0u) == 0xA1B2C3D4u);
-
-    // 默认记录（0 ⇒ 该槽未绑定；具体语义属任务 12/19 的材质解析）
+    // 默认记录：glTF 的中性默认（基础色 1、金属度 1、粗糙度 1、无纹理掩码）
     const NaniteMaterialRecord empty{};
-    CHECK(empty.albedoTexture == 0u);
-    CHECK(empty.normalTexture == 0u);
+    CHECK(empty.baseColorFactor[0] == 1.0f);
+    CHECK(empty.metallicFactor == 1.0f);
+    CHECK(empty.roughnessFactor == 1.0f);
+    CHECK(empty.textureMask == 0u);
+    CHECK(empty.bindlessTextureBase == 0u);
+
+    // 空指针兜底：因子退化为 1（不崩）
+    const NaniteMaterialRecord fallback = NaniteMakeMaterialRecord(nullptr, 0.0f, 0.5f, 0u, 3u);
+    CHECK(fallback.baseColorFactor[0] == 1.0f);
+    CHECK(fallback.baseColorFactor[3] == 1.0f);
+    // 【簇 → 源网格 → 材质 的映射规则由 `Tests/TestNaniteBuilder.cpp` 覆盖】
+    //   （`NaniteAssignClusterMaterials` 定义在 `NaniteUpload.cpp`，本文件只编格式、不链接它）
 }
 
 // ============================================================
@@ -946,10 +963,10 @@ TEST_CASE("NaniteTypes: .nanite 段表推导（计数 → offset/size）") {
     CHECK(layout.indexOffset    == 288u + 160u);
     CHECK(layout.indexBytes     == 10u * 8u);     // 80B 已经是 16 的倍数
     CHECK(layout.materialOffset == 448u + 80u);
-    CHECK(layout.materialBytes  == 2u * 8u);
-    CHECK(layout.lodOffset      == 528u + 16u);
+    CHECK(layout.materialBytes  == 2u * 32u);     // 任务 19：材质记录 32B（2×32 = 64B，已是 16 的倍数）
+    CHECK(layout.lodOffset      == 528u + 64u);
     CHECK(layout.lodBytes       == 16u);          // 1 × 4B 向上取整到 16B
-    CHECK(layout.totalBytes     == 544u + 16u);
+    CHECK(layout.totalBytes     == 592u + 16u);
     CHECK(layout.triangleCount  == 10u);
     CHECK(layout.totalBytes % kNaniteFileAlignment == 0u);
 
@@ -960,7 +977,7 @@ TEST_CASE("NaniteTypes: .nanite 段表推导（计数 → offset/size）") {
             NaniteFileHeader probe{};
             probe.clusterCount  = clusterCount;
             probe.vertexCount   = vertexCount;
-            probe.materialCount = clusterCount;    // 让材质段出现奇数个（8B 步长的对齐压力）
+            probe.materialCount = clusterCount;    // 让材质段随簇数变化（32B 步长的对齐压力）
             probe.lodLevelCount = vertexCount;
             probe.indexCount    = clusterCount * kNaniteIndicesPerTriangle;
 
@@ -1054,7 +1071,7 @@ TEST_CASE("NaniteTypes: .nanite 校验函数的正例与反例") {
 
     std::vector<u8> buffer;
     const NaniteFileLayout layout = BuildNaniteBuffer(header, buffer);
-    REQUIRE(layout.totalBytes == 560u);
+    REQUIRE(layout.totalBytes == 608u);   // 任务 19：材质段 2×32 = 64B（原 8B 记录时为 560u）
     REQUIRE(buffer.size() == layout.totalBytes);
 
     // ① 正例：完整文件 ⇒ None，且段表与推导一致

@@ -180,8 +180,24 @@ public:
         rhi::IRHIBuffer* vertices = nullptr;   ///< 量化顶点段（16B/条）
         rhi::IRHIBuffer* indices  = nullptr;   ///< 索引段（3×u16 进 u32[2]）
         rhi::IRHIBuffer* header   = nullptr;   ///< 文件头（取 meshMaxExtent 由调用方算好传入）
+        /// 【任务 19】材质段（32B/条）。为 nullptr ⇒ 软光栅按 `materialCount = 0` 走中性兜底
+        /// 并把像素计进 `fallback_pixels`（**不静默**）。
+        rhi::IRHIBuffer* materials = nullptr;
         [[nodiscard]] bool valid() const { return clusters && vertices && indices; }
     };
+
+    /// 【任务 19】材质读数（由 `NaniteRenderer` 在资产构建后一次性告知；软光栅日志打印它们）
+    ///   `multiMeshClusters`  = 三角形跨越 ≥2 个源网格的簇数（按多数票归属）
+    ///   `distinctMaterials`  = 材质段里内容各不相同的记录数
+    ///   `texturedMaterials`  = 其中带 BaseColor 纹理的记录数
+    void SetMaterialStats(u32 materialCount, u32 multiMeshClusters,
+                          u32 distinctMaterials, u32 texturedMaterials) {
+        m_MaterialCount      = materialCount;
+        m_MultiMeshClusters  = multiMeshClusters;
+        m_DistinctMaterials  = distinctMaterials;
+        m_TexturedMaterials  = texturedMaterials;
+    }
+    [[nodiscard]] u32 GetMaterialCount() const { return m_MaterialCount; }
 
     /// **清屏**：用 compute 把 8 个颜色附件清成**既有路径的同一组清除值**，并用 RHI 的
     /// `ClearDepthStencil` 把深度清成远平面 —— **不画任何几何**（这就是"既有几何路径让位、
@@ -357,6 +373,15 @@ private:
     /// 上一次录制时记下的参数（dump 帧日志用：真实 GPU 读回 + CPU 侧真值对照）
     u32 m_SoftLastMaxTriangles  = 0u;
     u32 m_SoftLastInstanceCount = 0u;
+
+    // ── 【任务 19】材质接入的读数与状态 ──
+    /// 材质段条数（= `NaniteScene::AssetBuffers::materials` 的记录数；0 ⇒ 中性兜底）
+    u32 m_MaterialCount     = 0u;
+    u32 m_MultiMeshClusters = 0u;   ///< 跨源网格的簇数（多数票归属）
+    u32 m_DistinctMaterials = 0u;   ///< 材质段里内容各不相同的记录数
+    u32 m_TexturedMaterials = 0u;   ///< 其中带 BaseColor 纹理的记录数
+    /// 【任务 19】第 2 趟的描述符集是否已登记到 bindless 堆（只登记一次；登记后强制一次 Flush）
+    bool m_BindlessRegistered = false;
 
     /// 【运行时格式能力】**GBuffer 深度格式能否做存储图像**（启动时查一次；
     ///   `IRHIDevice::SupportsStorageImage(Format::D32_FLOAT)`）。它决定"compute 写深度"这条

@@ -1257,7 +1257,7 @@ void NaniteCull::EnsureHiZBuildViews(rhi::IRHITexture* pyramid) {
 
 void NaniteCull::RecordCullChainPass(rhi::IRHICommandList* cmd,
                                      rhi::IRHITexture* hizTexture, rhi::IRHITexture* depthTexture,
-                                     bool enableOcclusion) {
+                                     bool enableOcclusion, bool hizFlipY) {
     if (!cmd) return;
 
     // ── Phase 1：实例剔除（写可见列表 + 可见性掩码）──
@@ -1293,6 +1293,8 @@ void NaniteCull::RecordCullChainPass(rhi::IRHICommandList* cmd,
     const bool hizRequested = enableOcclusion && (hizTexture != nullptr) && (depthTexture != nullptr)
                            && (hizTexture->GetMipLevels() >= 2u)   // 单层纹理不是金字塔（防护）
                            && (m_FrameScreenW > 0u) && (m_FrameScreenH > 0u);
+    // 【P0 修复】先记下本帧的 UV 翻转真值（无论 Hi-Z 是否真的开起来，读数都要如实反映约定）
+    m_FrameHiZFlip         = hizFlipY;
     m_FrameHiZRequested    = hizRequested;
     m_FrameHiZTextureBound = hizRequested;
     m_FrameHiZMipCount     = 0u;
@@ -1353,7 +1355,9 @@ void NaniteCull::RecordCullChainPass(rhi::IRHICommandList* cmd,
     m_ChainParams.lodEnabled   = (m_FrameFocalPixels > 0.0f) ? 1u : 0u;
     // 【任务 16】绘制容量（`misc.z`）：间接命令与绘制计数都按它设门 ⇒ 计数恒 ≤ 容量。
     m_ChainParams._pad1        = m_FrameDrawCapacity;
-    if (void* p = m_ChainParamBuf ? m_ChainParamBuf->Map() : nullptr) {
+    // 【P0 修复】Hi-Z 采样 UV 的 y 翻转（`misc.w`）：负高度视口下 `v = 0.5 - 0.5*ndc.y` 才是
+    //   纹理行一致的写法；`false` 是给"历史镜像约定"的可复现 A/B 对照留的（默认 true）。
+    m_ChainParams.hizFlip       = hizFlipY ? 1u : 0u;    if (void* p = m_ChainParamBuf ? m_ChainParamBuf->Map() : nullptr) {
         std::memcpy(p, &m_ChainParams, sizeof(m_ChainParams));
         m_ChainParamBuf->Unmap();
     }

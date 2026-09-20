@@ -80,6 +80,19 @@ struct NaniteSettings {
     /// 配置层 = cfg 键 `nanite_hiz`（默认 0），样例负责解析/序列化。
     bool hiz = false;
 
+    /// 【P0 修复】Hi-Z 采样 UV 的 **y 翻转**（默认 **true** = 负高度视口的正确约定）。
+    ///
+    /// 【为什么必须有这一项】本引擎的离屏通道用**负高度视口**（`GBufferRenderer_CPU.cpp:61`：
+    ///   `SetViewport({0,h,w,-h,0,1})`）⇒ NDC y=+1 落在帧缓冲**第 0 行**，而纹理 UV 的 v 向下增长
+    ///   ⇒ 正确的采样 UV 是 `s = (ndc.x*0.5+0.5, 0.5-0.5*ndc.y)`；历史写法 `ndc.xy*0.5+0.5`
+    ///   把 v 当"y 向上"用，采样到**上下颠倒**的 texel（同引擎内 `GI/SSR.frag.slang:67-68`
+    ///   的 `NdcToUv` 就是正确的那条，并由平面镜解析对照实测确认）。**默认 true = 已修**。
+    /// 【为什么还留 false 这一档】它是"镜像是否真的存在"这条结论的**可复现 A/B 对照**：
+    ///   同一场景、同一相机、同一帧，只切换 `hiz_flip` 就能比较被遮挡簇的数量与落屏半屏分布；
+    ///   配置层 = cfg 键 `nanite_hiz_flip`（默认 1），样例负责解析/序列化。
+    ///   读数里的 `hiz_flip=` 与 `occl_uv=[上半屏,下半屏]` 是这条对照的出口。
+    bool hizFlip = true;
+
     /// 【§14.8 任务 16】绘制来源：**假簇链自证 / 退化通道**（默认 **false** = 走可见簇列表）。
     ///
     /// 【语义】false（默认）⇒ 光栅端消费 `Nanite_ClusterBVH.comp.slang` 从**可见簇列表**写出的

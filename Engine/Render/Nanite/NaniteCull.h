@@ -160,8 +160,8 @@ struct alignas(16) NaniteCullChainParams {
     float screenH;        // 偏移 92 ：屏幕高
     u32   hizMipCount;    // 偏移 96 ：Hi-Z 金字塔层数（< 2 ⇒ 关闭遮挡测试）
     u32   lodEnabled;     // 偏移 100：1 = 打开 LOD 选择（与 focalPixels > 0 同时成立才算）
-    u32   _pad1;          // 偏移 104
-    u32   _pad2;          // 偏移 108
+    u32   _pad1;          // 偏移 104：绘制容量（`misc.z`；任务 16 的截断门）
+    u32   hizFlip;        // 偏移 108：【P0】1 = Hi-Z 采样 UV 的 y 翻转（负高度视口的正确约定）
 };
 static_assert(sizeof(NaniteCullChainParams) == 112,
               "NaniteCullChainParams 必须与 Slang 结构体一致（4×float4 + float4 + float4 + uint4）");
@@ -180,8 +180,26 @@ static_assert(offsetof(NaniteCullChainParams, lodEnabled)  == 100, "lodEnabled �
 /// [2..9] "选中级别分布"直方图：lodHistogram[L] = 被选中的 L 级簇引用数（L = 0..7）
 /// [10] 访问过的 BVH 节点数（全部实例求和）
 /// [11] 【任务 16】因**绘制容量**不足而未写间接命令的簇数（截断计数）
-/// [12..15] 保留（写 0；缓冲按 16 个 u32 分配，便于一次对齐的拷贝清零）
+/// [12] 【P0 修复】被遮挡且屏幕包围盒中心落在**上半屏**（ndc.y > 0）的簇数
+/// [13] 【P0 修复】被遮挡且屏幕包围盒中心落在**下半屏**（ndc.y <= 0）的簇数
+/// [14] 【P0 实验】Hi-Z mip1 上半屏平均深度 ×1000（32×32 网格；+0.5 截断，读回按 `/1000` 报）
+/// [15] 【P0 实验】Hi-Z mip1 下半屏平均深度 ×1000
 /// ```
+///
+/// 【为什么要有 [12]/[13] 两个"上半屏/下半屏"槽（P0 修复的可复现判据）】
+///   本引擎的离屏通道用**负高度视口**（`GBufferRenderer_CPU.cpp:61` 的 `SetViewport({0,h,w,-h,0,1})`），
+///   于是 NDC y=+1 落在帧缓冲第 0 行、纹理 UV 的 v 向下增长 ⇒ `s.y = ndc.y*0.5+0.5` 与纹理行是
+///   **镜像**的（正确写法是 `v = 0.5 - 0.5*ndc.y`，同引擎内已由 SSR 的镜面解析对照实测确认，
+///   见 `GI/SSR.frag.slang:55-68`）。把"被遮挡的簇落在哪半屏"单独计数，就能用一个**上下不对称的
+///   遮挡场景**直接判定镜像：遮挡物只在半屏时，错误约定会把**另一半屏**的簇判成被遮挡。
+///   两槽都用**投影包围盒中心的 ndc.y** 分类（与采样用的 UV 约定无关），因此不会自我印证。
+inline constexpr u32 kNaniteCullStatOccludedUpper = 12u;
+inline constexpr u32 kNaniteCullStatOccludedLower = 13u;
+/// 【P0 实验】Hi-Z mip1 的上/下半屏平均深度 ×1000（32×32 采样网格；由 `Nanite_ClusterBVH.comp.slang`
+///   的 0 号线程写入）。用途：证明"遮挡物只在半屏"这一实验前提，并把两档 UV 的遮挡差异
+///   归因到**真实深度场**，而不是只靠数字变大变小。
+inline constexpr u32 kNaniteCullStatHiZUpperMeanMilli = 14u;
+inline constexpr u32 kNaniteCullStatHiZLowerMeanMilli = 15u;
 ///
 /// 【为什么平坦 u32 而不是结构体】std430 下"结构体里的 u32 数组"步长细节依赖编译器，
 ///   平坦数组 + 常量下标没有任何布局歧义（任务 14 的 `uint4 link` 已经踩过这一类坑）。
@@ -191,7 +209,7 @@ inline constexpr u32 kNaniteCullStatLodBase     = 2u;   ///< 直方图起点（8
 inline constexpr u32 kNaniteCullStatVisited     = 10u;  ///< 访问节点数
 /// 【任务 16】因绘制容量不足被截断的簇数（与 shader 的 `kStatDrawTruncated` 逐条对应）
 inline constexpr u32 kNaniteCullStatDrawTruncated = 11u;
-inline constexpr u32 kNaniteCullStatsU32        = 12u;  ///< 实际使用的槽数
+inline constexpr u32 kNaniteCullStatsU32        = 16u;  ///< 实际使用的槽数（含 P0 的四个诊断槽）
 inline constexpr u32 kNaniteCullStatsCapacity   = 16u;  ///< 缓冲容量（16B 对齐，一次拷贝清零）
 inline constexpr u64 kNaniteCullStatsBytes      = sizeof(u32) * kNaniteCullStatsCapacity;
 static_assert(kNaniteCullStatsU32 <= kNaniteCullStatsCapacity, "读数槽位不得超出缓冲容量");
@@ -330,9 +348,12 @@ public:
     /// @param hizTexture 本帧的 Hi-Z 纹理（空 ⇒ 退化为模块自建的 1×1 占位纹理，遮挡关闭）
     /// @param depthTexture 本帧的深度纹理（金字塔的输入；空 ⇒ 不构建金字塔）
     /// @param enableOcclusion cfg 键 `nanite_hiz`（false ⇒ 不构建金字塔、层数传 0、恒不遮挡）
+    /// @param hizFlipY 【P0 修复】Hi-Z 采样 UV 的 y 是否翻转（负高度视口的正确约定）。
+    ///   由 `NaniteSettings::hizFlip` 转发；`params.misc.w` 把它带进 shader。
+    ///   `false` 只用于"历史镜像约定"的可复现 A/B 对照（cfg 键 `nanite_hiz_flip=0`）。
     void RecordCullChainPass(rhi::IRHICommandList* cmd,
                              rhi::IRHITexture* hizTexture, rhi::IRHITexture* depthTexture,
-                             bool enableOcclusion);
+                             bool enableOcclusion, bool hizFlipY);
 
     /// 【§14.8 任务 15】CPU 参考三阶段剔除（dump 帧算一次；输入与 GPU **同一份比特**：同一个视锥、
     ///   同一张 128B 实例表、同一棵 BVH、同一张簇球表、同一张 LOD 元数据表、同一个实例域钳制、
@@ -419,6 +440,8 @@ public:
     [[nodiscard]] u32   GetFrameHiZMipCount()  const { return m_FrameHiZMipCount; }
     [[nodiscard]] bool  GetFrameHiZRequested() const { return m_FrameHiZRequested; }
     [[nodiscard]] bool  GetFrameHiZTextureBound() const { return m_FrameHiZTextureBound; }
+    /// 【P0 修复】本帧 Hi-Z 采样 UV 是否按"负高度视口"翻转（读数 `hiz_flip` 的真值来源）
+    [[nodiscard]] bool  GetFrameHiZFlip() const { return m_FrameHiZFlip; }
     [[nodiscard]] const float* GetFrameViewProjRows() const { return m_FrameViewProjRows; }
 
     /// 录制 `Nanite_Cull` pass：
@@ -509,6 +532,9 @@ private:
     bool  m_FrameHiZRequested = false;  ///< 本帧调用方是否请求了 Hi-Z（cfg `nanite_hiz`）
     bool  m_FrameHiZTextureBound = false; ///< 本帧是否真的绑定了外部 Hi-Z 纹理（否则用占位）
     u32   m_FrameHiZMipCount = 0u;      ///< 本帧实际传给 shader 的 Hi-Z 层数（<2 ⇒ 遮挡关闭）
+    /// 【P0 修复】本帧 Hi-Z 采样 UV 的 y 翻转真值（= `NaniteSettings::hizFlip`）——
+    ///   读数行里的 `hiz_flip=` 直接打印它，避免"日志说翻转了、shader 其实没翻"。
+    bool  m_FrameHiZFlip = true;
     NaniteCullChainParams m_ChainParams{};  ///< 最近一次上传的参数（回读/参考共用）
 
     // 合成实例表与包围球（CPU 侧镜像；每帧按 `m_TestInstanceCount` 重建/上传）

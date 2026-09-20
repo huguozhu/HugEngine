@@ -49,7 +49,8 @@
 //     · `InstanceObject` —— GPUSceneObject（128B）契约的镜像（只用 `ltw3.xyz` 与 `indexCount`）
 //     · `CullChainParams`—— 112B：4 个 vp 行 + cameraPos + lodParams + misc
 //     · `u_Stats`        —— 扁平 u32：0=通过视锥、1=遮挡、2..9=级直方图、10=访问节点数、
-//                           11=【任务 16】因绘制容量不足被截断的簇数
+//                           11=【任务 16】因绘制容量不足被截断的簇数、
+//                           12/13=【P0 修复】被遮挡簇落在上半屏/下半屏的个数
 //     · push constant    —— 6 个世界空间视锥平面 + 4 个 u32（112B，与任务 14 完全一致）
 //
 // 【为什么把 localToWorld 拆成 4 个 float4】Slang 的矩阵布局约定（行/列主序）与"内存里的
@@ -65,6 +66,16 @@
 //   · Hi-Z：世界球 → 屏幕 UV 包围盒 + 最近 ndc.z；完全在屏幕外 ⇒ 不剔除；按盒子的最长边像素
 //     选层（`ceil(log2(max(1, 最长边)))`，**下限钳到 1**：金字塔 mip0 从未被写入）；
 //     取 4 角的**最小深度**的最大值，`zNear > 该值` ⇒ 被遮挡。
+//   · **Hi-Z 的 UV 约定（P0 修复）**：本引擎的离屏通道用**负高度视口**
+//     （`GBufferRenderer_CPU.cpp:61`：`SetViewport({0,h,w,-h,0,1})`）⇒ NDC y=+1 落在帧缓冲
+//     **第 0 行**、纹理 UV 的 v **向下**增长 ⇒ 正确的采样 UV 是
+//     `s = float2(ndc.x*0.5+0.5, 0.5-0.5*ndc.y)`（**y 要翻**）。历史写法 `ndc.xy*0.5+0.5`
+//     把 v 当"y 向上"用 ⇒ 采样到**上下颠倒**的 texel（同引擎内 `GI/SSR.frag.slang:67-68`
+//     的 `NdcToUv` 就是正确的这一条，并由平面镜解析对照实测确认）。由 `params.misc.w`
+//     选择：1 = 正确（翻转）、0 = 历史镜像约定（仅用于可复现的 A/B 对照）。
+//   · **半屏遮挡计数**：被遮挡的簇按"投影包围盒中心的 ndc.y"分上/下半屏各记一个槽
+//     （`kStatOccludedUpper` / `kStatOccludedLower`）—— 这是 P0 修复的可复现判据：
+//     用一个上下不对称的遮挡场景，错误约定会把**没有遮挡物那半屏**的簇判成被遮挡。
 //
 // 【§14.3 依赖禁令】只依赖本模块自己的 POD，不引用 GI/Lumen/GPUCulling。
 // ============================================================
@@ -162,7 +173,9 @@ struct InstanceObject {
 //   vpRow{r}  = 列主序 viewProj 的 row r（= viewProj[c][r]），显式点积 ⇒ 与 CPU 同式
 //   cameraPos = 相机世界坐标（xyz；w 未用）
 //   lodParams = (focalPixels, thresholdPixels, screenW, screenH)
-//   misc      = (hizMipCount, lodEnabled, 保留, 保留)
+//   misc      = (hizMipCount, lodEnabled, drawCapacity, hizFlip)
+//               【hizFlip】1 = Hi-Z 采样 UV 的 y 翻转（负高度视口的正确约定）；
+//                          0 = 历史镜像约定（只用于可复现的 A/B 对照，默认 1）
 struct CullChainParams {
     float4 vpRow0;
     float4 vpRow1;
@@ -170,7 +183,7 @@ struct CullChainParams {
     float4 vpRow3;
     float4 cameraPos;
     float4 lodParams;
-    uint4  misc;          // (hizMipCount, lodEnabled, drawCapacity, 保留)
+    uint4  misc;          // (hizMipCount, lodEnabled, drawCapacity, hizFlip)
 };
 
 [[vk::binding(0, 0)]] StructuredBuffer<BVHNode>       u_Nodes;
@@ -209,6 +222,15 @@ static const uint kStatOccluded    = 1u;    // Phase 2 后半：被 Hi-Z 判为�
 static const uint kStatLodBase     = 2u;    // Phase 3：直方图起点（8 个槽：级 0..7）
 static const uint kStatVisited     = 10u;   // 本 pass 访问过的 BVH 节点数（全部实例求和）
 static const uint kStatDrawTruncated = 11u; // 【任务 16】因绘制容量不足而未写间接命令的簇数
+// 【P0 修复】被遮挡簇的"落屏半屏"分布（分类用投影包围盒中心的 **ndc.y 符号**，与采样 UV 约定无关）
+static const uint kStatOccludedUpper = 12u; // 上半屏（ndc.y > 0；本引擎 NDC y 向上）
+static const uint kStatOccludedLower = 13u; // 下半屏（ndc.y <= 0）
+// 【P0 实验读数】Hi-Z mip1 的上/下半屏平均深度（定点 ×1000）。用途：把"遮挡物只在半屏"这个
+//   实验前提变成可核对的数据，并把两档 UV 的遮挡差异归因到真实深度场（32×32 网格 ×2，一帧一次）。
+static const uint kStatHiZUpperMeanMilli = 14u;
+static const uint kStatHiZLowerMeanMilli = 15u;
+// 半屏平均深度的采样网格边长（C++ 侧读回时用同一个数换算回浮点均值）
+static const uint kHiZHalfMeanGrid = 32u;
 
 // Hi-Z 的最小可采样层：**1**（金字塔贴图的 mip0 从未被写入 —— `BuildHiZPyramid` 从深度输入
 //   直接下采样进 mip1；既有 `GPUCull_TwoPhase.comp.slang:34` 把下限钳到 0 是一处既有缺陷）。
@@ -232,15 +254,22 @@ bool sphereVisibleInFrustum(float3 center, float radius) {
 //   ④ 4 角的**最小深度**取最大；`zNear > 该值` ⇒ 被遮挡。
 // 【为什么 4 角而不是整盒】层 L 的每个 texel 覆盖 2^L×2^L 足迹；取 4 个角的采样 ⇒ 覆盖盒子的
 //   4 个象限，对"盒子不比 texel 足迹大"的情形不会漏掉遮挡物（保守方向）。
-bool hizOccluded(float3 center, float radius) {
+// 【UV 的 y 翻转（P0 修复）】`flipY != 0` ⇒ `v = 0.5 - 0.5*ndc.y`（负高度视口的正确约定）；
+//   `flipY == 0` ⇒ 历史写法 `v = ndc.y*0.5+0.5`（镜像，仅作 A/B 对照）。
+// 【outNdcYCenter】回传**投影包围盒中心的 ndc.y**（未受 UV 约定影响），供上/下半屏计数分类。
+bool hizOccluded(float3 center, float radius, out float outNdcYCenter) {
     CullChainParams p = u_Params[0];
     uint mipCount = p.misc.x;
+    outNdcYCenter = 0.0f;
     // mipCount < 2 ⇒ 没有可采样的层（mip0 未写入）⇒ 关闭遮挡测试（= cfg 键 nanite_hiz=0 的退化口径）
     if (mipCount < 2u) return false;
 
+    bool flipY = (p.misc.w != 0u);
     float2 rMin = float2(1.0e30f, 1.0e30f);
     float2 rMax = float2(-1.0e30f, -1.0e30f);
     float zNear = 1.0e30f;
+    float nyMin = 1.0e30f;
+    float nyMax = -1.0e30f;
 
     for (uint c = 0u; c < 8u; ++c) {
         float3 corner = center + radius * float3((c & 1u) != 0u ? 1.0f : -1.0f,
@@ -253,11 +282,17 @@ bool hizOccluded(float3 center, float radius) {
 
         float3 ndc = clip.xyz / clip.w;
         if (ndc.x != ndc.x || ndc.y != ndc.y || ndc.z != ndc.z) return false;   // NaN 兜底
-        float2 s = ndc.xy * 0.5f + 0.5f;
+        // 【P0 修复】v 的方向：负高度视口下纹理行 0 = ndc.y=+1 ⇒ v 必须翻转
+        float2 s = float2(ndc.x * 0.5f + 0.5f,
+                          flipY ? (0.5f - 0.5f * ndc.y) : (ndc.y * 0.5f + 0.5f));
         rMin = min(rMin, s);
         rMax = max(rMax, s);
         zNear = min(zNear, ndc.z);
+        // 落屏分类用**原始 ndc.y**（与上面的 UV 约定无关，避免"用错的约定自证对的结论"）
+        nyMin = min(nyMin, ndc.y);
+        nyMax = max(nyMax, ndc.y);
     }
+    outNdcYCenter = 0.5f * (nyMin + nyMax);
 
     // 完全在屏幕外（与 [0,1]² 无交）⇒ Hi-Z 覆盖不到 ⇒ 保守不剔除
     if (rMax.x < 0.0f || rMax.y < 0.0f || rMin.x > 1.0f || rMin.y > 1.0f) return false;
@@ -295,6 +330,35 @@ bool lodSelected(uint cluster, float3 worldCenter, float focalPixels, float thre
 [numthreads(64, 1, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
     if (id.x >= instanceCount) return;
+
+    // ── 【P0 实验读数】Hi-Z mip1 的上/下半屏平均深度（只由 0 号线程做一次）──
+    // 【为什么必须在任何 early-return 之前】0 号实例是"故意在视锥外"的样本 ⇒ 它的 Phase 1
+    //   掩码为 0，若放在后面就永远不会执行。这里只需要"恰好一个线程"，与实例是否可见无关。
+    // 【v 的方向】纹理 v=0 是帧缓冲第 0 行 = 屏幕**上**边（负高度视口），故 v<0.5 是上半屏 ——
+    //   这正是本实验要核对的约定；把两半的均值打出来，就能判定"遮挡物只在半屏"是否成立。
+    if (id.x == 0u) {
+        CullChainParams hp = u_Params[0];
+        if (hp.misc.x >= 2u) {
+            float sumUp = 0.0f;
+            float sumLow = 0.0f;
+            const float invGrid = 1.0f / float(kHiZHalfMeanGrid);
+            for (uint gy = 0u; gy < kHiZHalfMeanGrid; ++gy) {
+                const float fv = ((float)gy + 0.5f) * invGrid;   // [0,1) 内的半屏纵向分数
+                const float vTop = 0.5f * fv;                    // 上半屏 [0, 0.5)
+                const float vBot = 0.5f + 0.5f * fv;             // 下半屏 [0.5, 1)
+                for (uint gx = 0u; gx < kHiZHalfMeanGrid; ++gx) {
+                    const float u = ((float)gx + 0.5f) * invGrid;
+                    sumUp  += u_HiZ.SampleLevel(u_HiZSampler, float2(u, vTop), 1.0f);
+                    sumLow += u_HiZ.SampleLevel(u_HiZSampler, float2(u, vBot), 1.0f);
+                }
+            }
+            const float norm = 1.0f / float(kHiZHalfMeanGrid * kHiZHalfMeanGrid);
+            // 定点 ×1e6：本引擎 near=0.1 / far=2000 的 ZO 投影把深度压到 0.999x，×1000 会截断成
+            //   同一个数 ⇒ 半屏差异读不出来。×1e6 后 u32 仍远不溢出（均值 ≤ 1）。
+            InterlockedAdd(u_Stats[kStatHiZUpperMeanMilli], (uint)(sumUp  * norm * 1000000.0f));
+            InterlockedAdd(u_Stats[kStatHiZLowerMeanMilli], (uint)(sumLow * norm * 1000000.0f));
+        }
+    }
 
     // ① 空实例（无索引可画）不参与 —— 与 CPU 参考的 indexCount == 0 跳过逐条对应
     InstanceObject instance = u_Instances[id.x];
@@ -346,8 +410,12 @@ void main(uint3 id : SV_DispatchThreadID) {
                 InterlockedAdd(u_Stats[kStatFrustumPass], 1u);
 
                 // ── Phase 2 后半：Hi-Z 遮挡（mipCount < 2 ⇒ 恒不遮挡）──
-                if (hizOccluded(worldCenter, sphere.centerRadius.w)) {
+                float occludedNdcY = 0.0f;
+                if (hizOccluded(worldCenter, sphere.centerRadius.w, occludedNdcY)) {
                     InterlockedAdd(u_Stats[kStatOccluded], 1u);
+                    // 【P0 修复的可复现判据】按投影包围盒中心的 ndc.y 分半屏计数
+                    InterlockedAdd(u_Stats[(occludedNdcY > 0.0f) ? kStatOccludedUpper
+                                                                : kStatOccludedLower], 1u);
                     continue;
                 }
 

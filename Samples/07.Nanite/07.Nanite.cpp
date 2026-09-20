@@ -610,6 +610,10 @@ int main() {
             // 它只决定 Phase 2 的簇球是否与既有 Hi-Z 金字塔做遮挡测试（关闭 ⇒ 退化为"不遮挡"）。
             naniteSettings.hiz = GetInt(cfgData, "nanite_hiz",
                                         naniteSettings.hiz ? 1 : 0) != 0;
+            // 【P0 修复】Hi-Z 采样 UV 的 y 翻转（默认 1 = 负高度视口的正确约定）。
+            // 置 0 只用于"历史镜像约定"的可复现 A/B 对照（判定镜像是否真的存在）。
+            naniteSettings.hizFlip = GetInt(cfgData, "nanite_hiz_flip",
+                                            naniteSettings.hizFlip ? 1 : 0) != 0;
             // 任务 16 的**绘制来源**开关（默认 0 = 走可见簇列表）：cfg → 真值，同写法。
             // 1 ⇒ 退回任务 3 的假簇链（自证 / 可见链不可用时的退化路径），此时那一行读数变成
             // `fake_clusters=…`；默认 0 ⇒ 绘制由可见簇列表驱动（任务 16 的验收档）。
@@ -633,11 +637,12 @@ int main() {
             deferredPipeline.SetNaniteSettings(naniteSettings);
             HE_CORE_INFO("[Nanite] 配置恢复: nanite_enable={} nanite_fake_clusters={} "
                          "nanite_test_write={} nanite_mesh_test={} nanite_instance_test_count={} "
-                         "nanite_hiz={} nanite_fake_chain={} nanite_draw_capacity={} "
+                         "nanite_hiz={} nanite_hiz_flip={} nanite_fake_chain={} nanite_draw_capacity={} "
                          "nanite_soft_raster={} nanite_soft_max_triangles={}",
                          naniteSettings.enabled ? 1 : 0, naniteSettings.fakeClusters,
                          naniteSettings.testWrite ? 1 : 0, naniteSettings.meshTest ? 1 : 0,
                          naniteSettings.instanceTestCount, naniteSettings.hiz ? 1 : 0,
+                         naniteSettings.hizFlip ? 1 : 0,
                          naniteSettings.fakeChain ? 1 : 0, naniteSettings.drawCapacity,
                          naniteSettings.softRaster ? 1 : 0, naniteSettings.softMaxTriangles);
         }
@@ -2000,6 +2005,8 @@ int main() {
             std::to_string(deferredPipeline.GetNaniteSettings().instanceTestCount);
         // 任务 15：Hi-Z 遮挡剔除开关（默认 0 = 关闭，理由见 NaniteSettings.h）——同写法回写
         out["nanite_hiz"] = std::to_string(deferredPipeline.GetNaniteSettings().hiz ? 1 : 0);
+        // P0 修复：Hi-Z 采样 UV 的 y 翻转（默认 1）——同写法回写，冒烟脚本据此回显对照档
+        out["nanite_hiz_flip"] = std::to_string(deferredPipeline.GetNaniteSettings().hizFlip ? 1 : 0);
         // 任务 16：绘制来源开关（默认 0 = 可见簇列表）与绘制容量（默认 0 = 容量上界）——同写法回写
         out["nanite_fake_chain"] =
             std::to_string(deferredPipeline.GetNaniteSettings().fakeChain ? 1 : 0);

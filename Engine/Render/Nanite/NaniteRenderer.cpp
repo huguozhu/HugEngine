@@ -183,6 +183,8 @@ void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb,
                                               NaniteCull::MaxBVHInstances());
         m_SoftParams.meshMaxExtent = m_MeshMaxExtent;
         m_SoftParams.depthKeyEpsilon = 0.0f;   // 两趟的等值复检实测严格逐位相等即可
+        // 【任务 19】材质段条数（资产构建时记下；0 ⇒ shader 走中性兜底并把像素计进 fallback_pixels）
+        m_SoftParams.materialCount = m_MaterialCount;
     }
     // 软光栅资源懒建（不注册 pass；只保证执行期资源就绪）。资产未入库时它内部直接返回。
     EnsureSoftRasterReady(gb);
@@ -281,7 +283,8 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
         [this, hiz, drawFromVisibleChain, softRasterOn, gb](rhi::IRHICommandList* cmd) {
             rhi::IRHITexture* hizTexture = hiz.texture ? hiz.texture() : nullptr;
             rhi::IRHITexture* depthTex   = hiz.depth ? hiz.depth() : nullptr;
-            m_Cull.RecordCullChainPass(cmd, hizTexture, depthTex, m_Settings.hiz);
+            m_Cull.RecordCullChainPass(cmd, hizTexture, depthTex, m_Settings.hiz,
+                                       m_Settings.hizFlip);
             // 【任务 16】可见链是绘制来源 ⇒ 在**同一个 pass 体**内紧接着录制间接绘制：
             //   命令与绘制计数刚由上面的派发写出，`RecordRasterPass` 开头的
             //   `Compute → DrawIndirect` 屏障把可见性定序到绘制之前。
@@ -319,6 +322,7 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
             views.vertices = asset.vertices.get();
             views.indices  = asset.indices.get();
             views.header   = asset.header.get();
+            views.materials = asset.materials.get();   // 【任务 19】真实材质段
 
             m_Raster.RecordSoftRasterPass(cmd, targets, views, m_SoftParams,
                                           m_Cull.GetVisibleClusterBuffer(),
@@ -396,15 +400,76 @@ void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
     }
 
     // ── ③ CPU 字节镜像（任务 9 的 DAG + 任务 10 的量化打包）──
-    // 材质段本任务**留空**：合并几何不携带材质 ID，`NaniteClusterRecord::materialID` 逐簇解析
-    // 属任务 19；这里传空 span ⇒ `materialCount = 0`（日志里的 `materials=0` 就是这个事实，
-    // 不是失败）。伪造 ID 会掩盖"材质还没接上"这件事。
+    // 【任务 19】材质段不再是空 span：按 `MeshBatcher` 的**逐网格绘制区间 + 逐网格材质快照**
+    // 建两份输入：
+    //   · `meshRanges[i]`：第 i 个源网格在合并索引段里的三角形区间（`firstIndex/3`、`indexCount/3`）
+    //     + 它的材质段下标（一网格一条记录 ⇒ 下标 = i）；
+    //   · `materials[i]`：该网格的 PBR 字段（与既有 GBuffer 路径同一批来源）。
+    // 资产构建器随后按"三角形多数票"把每个簇映射回源网格，并把 `materialID` 写成材质段下标
+    // ⇒ 软光栅能取到**真实材质**（映射规则与读数见 `NaniteUpload.h`/`NanitePackedAsset::stats`）。
+    std::vector<NaniteMaterialRecord>  materials;
+    std::vector<NaniteSourceMeshRange> meshRanges;
+    {
+        const std::vector<IndirectDrawCommand>& commands = batcher.GetDrawCommands();
+        const std::vector<MergedMeshMaterial>&  meshMats = batcher.GetMeshMaterials();
+        if (commands.size() != meshMats.size()) {
+            // 不静默：绘制区间与材质快照必须一一对应（两者由同一个 collect 调用产出）
+            HE_CORE_WARN("NaniteRenderer: 合并网格数 {} 与材质快照数 {} 不一致 ⇒ 材质映射按较小者进行",
+                         commands.size(), meshMats.size());
+        }
+        const usize meshCount = std::min(commands.size(), meshMats.size());
+        materials.reserve(meshCount);
+        meshRanges.reserve(meshCount);
+        for (usize i = 0u; i < meshCount; ++i) {
+            materials.push_back(NaniteMakeMaterialRecord(meshMats[i].baseColorFactor,
+                                                         meshMats[i].metallicFactor,
+                                                         meshMats[i].roughnessFactor,
+                                                         meshMats[i].textureMask,
+                                                         meshMats[i].bindlessTextureBase));
+            NaniteSourceMeshRange range;
+            range.firstTriangle = commands[i].firstIndex / kNaniteIndicesPerTriangle;
+            range.triangleCount = commands[i].indexCount / kNaniteIndicesPerTriangle;
+            range.materialIndex = (u32)i;
+            meshRanges.push_back(range);
+        }
+    }
     NanitePackedAsset asset;
-    if (!BuildNaniteAssetFromGeometry(positions, normals, uvs, indices, {}, asset)) {
+    if (!BuildNaniteAssetFromGeometry(positions, normals, uvs, indices, materials, meshRanges, asset)) {
         HE_CORE_ERROR("NaniteRenderer: 资产构建失败（{} 顶点 / {} 索引）—— 跳过上传，"
                       "不做部分上传；本帧仍照常注册模块 pass",
                       merged.size(), indices.size());
         return;
+    }
+    // 【任务 19】材质映射的如实读数（转给软光栅日志：`materials=` / `distinct_materials=` /
+    //   `textured_materials=` / `multi_mesh_clusters=`；`fallback_pixels` 由 GPU 侧单独计数）
+    m_MaterialCount     = (u32)asset.materials.size();
+    m_MultiMeshClusters = asset.stats.multiMeshClusters;
+    m_Raster.SetMaterialStats(m_MaterialCount, asset.stats.multiMeshClusters,
+                              asset.stats.distinctMaterialCount, asset.stats.texturedMaterialCount);
+    // 【任务 19】一次性打印映射的可核对样本（材质段前两条 + 簇 materialID 的取值范围/种类数）：
+    //   材质字段与既有 GBuffer 路径同源，必须能在日志里直接看到真值，而不是只看到"像素数"。
+    if (!asset.materials.empty()) {
+        const NaniteMaterialRecord& m0 = asset.materials[0];
+        const NaniteMaterialRecord& m1 = asset.materials[asset.materials.size() > 1u ? 1u : 0u];
+        u32 idMin = 0xFFFFFFFFu, idMax = 0u, idDistinct = 0u;
+        std::vector<u32> seen;
+        for (const NaniteClusterRecord& c : asset.clusters) {
+            if (c.materialID < idMin) idMin = c.materialID;
+            if (c.materialID > idMax) idMax = c.materialID;
+            if (std::find(seen.begin(), seen.end(), c.materialID) == seen.end()) {
+                seen.push_back(c.materialID);
+                ++idDistinct;
+            }
+        }
+        HE_CORE_INFO("[Nanite] materials_sample m0=(rgb={:.3f},{:.3f},{:.3f} metallic={:.3f} rough={:.3f} "
+                     "mask={} base={}) m1=(rgb={:.3f},{:.3f},{:.3f} metallic={:.3f} rough={:.3f} mask={} base={}) "
+                     "cluster_material_id=[min={} max={} distinct={}] multi_mesh={} unmapped={}",
+                     m0.baseColorFactor[0], m0.baseColorFactor[1], m0.baseColorFactor[2],
+                     m0.metallicFactor, m0.roughnessFactor, m0.textureMask, m0.bindlessTextureBase,
+                     m1.baseColorFactor[0], m1.baseColorFactor[1], m1.baseColorFactor[2],
+                     m1.metallicFactor, m1.roughnessFactor, m1.textureMask, m1.bindlessTextureBase,
+                     idMin, idMax, idDistinct,
+                     asset.stats.multiMeshClusters, asset.stats.unmappedClusters);
     }
 
     // ── ④ GPU 上传 + 读回校验（失败时 NaniteScene 会打错误行，成功时打验收行）──
@@ -770,11 +835,16 @@ void NaniteRenderer::LogCull3Readback() {
 
     // 【恰好一行】任务 15 的验收出口。三个 phase、Hi-Z 档位、GPU/CPU 逐项差异、LOD 级分布、
     // 以及"被遮挡那批簇的选层分布"（差异的量化解释）都在这一行里。
+    // 【P0 修复新增两个字段】
+    //   · `hiz_flip=` —— 本帧 Hi-Z 采样 UV 的 y 是否按负高度视口翻转（1 = 正确约定，见
+    //     `NaniteSettings::hizFlip`）。它是"shader 用了哪条约定"的唯一真值出口。
+    //   · `occl_uv=[上半屏,下半屏]` —— 被遮挡簇的**落屏半屏**分布（用投影包围盒中心的 ndc.y
+    //     分类，与采样 UV 约定无关）。上下不对称的遮挡场景下，若两档的分布互换，即为镜像的直接证据。
     HE_CORE_INFO("[Nanite] cull3 phase1={} phase2={} phase3={} hiz={} gpu_clusters={} "
                  "cpu_clusters={} mismatch={} lod=[{},{},{},{},{},{},{},{}] "
                  "cpu_lod=[{},{},{},{},{},{},{},{}] extra_gpu={} occluded={} frustum={} "
                  "occl_mip=[{},{},{},{},{},{},{},{}] inst_mismatch={} nodes={} depth={} visited={} "
-                 "hiz_req={} hiz_mips={} first={}",
+                 "hiz_req={} hiz_mips={} hiz_flip={} occl_uv=[{},{}] hiz_half=[{}.{:06},{}.{:06}] first={}",
                  gpuInstanceCount, gpuPhase2, gpuClusterCount, hizOn ? "on" : "off",
                  gpuClusterCount, cpuStats.visibleClusters, mismatch,
                  stats[kNaniteCullStatLodBase + 0u], stats[kNaniteCullStatLodBase + 1u],
@@ -789,7 +859,13 @@ void NaniteRenderer::LogCull3Readback() {
                  occludedMip[0], occludedMip[1], occludedMip[2], occludedMip[3],
                  occludedMip[4], occludedMip[5], occludedMip[6], occludedMip[7],
                  instanceMismatch, nodes, depth, gpuVisited,
-                 m_Cull.GetFrameHiZRequested() ? 1 : 0, hizMips, first);
+                 m_Cull.GetFrameHiZRequested() ? 1 : 0, hizMips,
+                 m_Cull.GetFrameHiZFlip() ? 1 : 0,
+                 stats[kNaniteCullStatOccludedUpper], stats[kNaniteCullStatOccludedLower],
+                 stats[kNaniteCullStatHiZUpperMeanMilli] / 1000000u,
+                 stats[kNaniteCullStatHiZUpperMeanMilli] % 1000000u,
+                 stats[kNaniteCullStatHiZLowerMeanMilli] / 1000000u,
+                 stats[kNaniteCullStatHiZLowerMeanMilli] % 1000000u, first);
 }
 
 void NaniteRenderer::LogMeshTestReadback() {    // 关闭档 / 未就绪 / 未开 mesh 自证：不打印（关闭档与"只开 enabled"的日志必须与基线一致）。

@@ -316,6 +316,12 @@ private:
     ///   ⇒ 软光栅会解出退化位置，故执行期还有"资产是否入库"的门控。
     float m_MeshMaxExtent = 0.0f;
 
+    /// 【§14.8 任务 19】材质段条数（= 逐源网格一条；`AddPasses` 填进 push constant 的
+    ///   `materialCount`，执行期由 shader 用来判"材质下标是否越界"）。资产未入库时为 0。
+    u32 m_MaterialCount = 0u;
+    /// 【§14.8 任务 19】三角形跨越 ≥2 个源网格的簇数（映射读数，如实报告）
+    u32 m_MultiMeshClusters = 0u;
+
     /// 开关与档位的唯一真值（默认 `enabled = false` ⇒ §14.2 不变式 1）
     NaniteSettings m_Settings;
 

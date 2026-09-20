@@ -72,6 +72,10 @@ struct InstanceObject {
 //   5 = 实例表（只读；128B 契约，只用平移列）
 //   6 = 深度键（读写；`RWStructuredBuffer<uint>`，长度 = W×H，行主序：index = y*W + x）
 //   7 = 读数（读写；扁平 u32，槽位见下面的 kSoftStat*）
+//   8..11 = 第 2 趟专属：4 张 GBuffer 颜色目标（albedo/normal/worldPos/lightmapKey，见入口文件）
+//  12 = 【任务 19】资产材质段（只读；`NaniteMaterial` 32B/条，与 §8 的任务 19 定稿一致）
+//  13 = 【任务 19】bindless 纹理数组（`Texture2D<float4>[]`；与既有 GBuffer 路径**同一个堆**）
+//  14 = 【任务 19】bindless 采样器数组（与纹理槽位一一对应）
 [[vk::binding(0, 0)]] StructuredBuffer<NaniteCluster>        u_Clusters;
 [[vk::binding(1, 0)]] StructuredBuffer<NaniteVertex>         u_Vertices;
 [[vk::binding(2, 0)]] StructuredBuffer<NanitePackedTriangle> u_Triangles;
@@ -80,6 +84,9 @@ struct InstanceObject {
 [[vk::binding(5, 0)]] StructuredBuffer<InstanceObject>       u_Instances;
 [[vk::binding(6, 0)]] RWStructuredBuffer<uint>               u_DepthKey;
 [[vk::binding(7, 0)]] RWStructuredBuffer<uint>               u_Stats;
+[[vk::binding(12, 0)]] StructuredBuffer<NaniteMaterialRecord> u_Materials;
+[[vk::binding(13, 0)]] Texture2D<float4>                     u_MaterialTextures[];
+[[vk::binding(14, 0)]] SamplerState                          u_MaterialSamplers[];
 
 // ── 读数槽位（与 C++ 侧 `NaniteSoftRasterStats` 的 static_assert 逐条对应）──
 static const uint kSoftStatRasterClusters  = 0u;   // 本帧真正走软光栅的簇数（triangleCount <= maxTriangles）
@@ -87,8 +94,11 @@ static const uint kSoftStatSkippedClusters = 1u;   // 因 triangleCount > maxTri
 static const uint kSoftStatTriangles       = 2u;   // 参与光栅化的**非退化**三角形数（第 1 趟）
 static const uint kSoftStatDegenerate      = 3u;   // 被丢弃的三角形数（在相机后 / 面积过小 / 越界下标）
 static const uint kSoftStatPixels          = 4u;   // 通过深度等值复检、**真正写进 GBuffer** 的像素数（第 2 趟）
-static const uint kSoftStatNeutralPixels   = 5u;   // 其中用**中性材质常数**写入的像素数（资产材质段为空）
+static const uint kSoftStatNeutralPixels   = 5u;   // 【任务 19 起恒 0】用中性材质常数写入的像素数
 static const uint kSoftStatCapacity        = 16u;  // 缓冲条数（与 C++ 侧一致）
+// ── 【任务 19】材质相关读数 ──
+static const uint kSoftStatMaterialPixels  = 12u;  // 用**资产材质段**的真实材质写入的像素数
+static const uint kSoftStatFallbackPixels  = 13u;  // 材质段越界/缺失而退化为中性常数的像素数（正常 0）
 // ── 诊断槽位（第 1 趟的工作组 0 写入；把"shader 实际收到的 push constant"读回来）──
 static const uint kSoftStatCoveredPixels   = 6u;   // 第 1 趟通过重心覆盖测试的像素数（未做原子）
 static const uint kSoftStatDiagScreenW     = 7u;   // push constant 的 screenWidth（原样回读）
@@ -112,9 +122,50 @@ static const uint kSoftStatTestedPixels    = 11u;  // 第 1 趟包围盒内的�
     uint   instanceCount;     // 偏移 76：实例域上界（越界引用直接跳过，不读实例表）
     float  meshMaxExtent;     // 偏移 80：位置量化尺度（整网格最大轴长）
     float  depthKeyEpsilon;   // 偏移 84：第 2 趟等值复检的容差（0 = 严格逐位相等；实测严格即可）
-    float  _pad0;             // 偏移 88
-    float  _pad1;             // 偏移 92
+    uint   materialCount;     // 偏移 88：【任务 19】资产材质段条数（0 ⇒ 退化为中性常数并计数）
+    uint   _pad1;             // 偏移 92
 };
+
+// ── 【任务 19】按**资产材质段** + bindless 纹理算一个像素的 albedo/metallic/roughness ──
+// 【与既有 GBuffer 路径逐句同源】（`GBuffer.frag.slang:57-81` 的表达式）：
+//     albedo    = baseColorFactor.rgb × Sample(BaseColor, uv).rgb               （无纹理槽 ⇒ ×1.0）
+//     metallic  = metallicFactor      × Sample(MetallicRough, uv).b             （无纹理槽 ⇒ ×0.0）
+//     roughness = clamp(roughnessFactor × Sample(MetallicRough, uv).g, 0.04, 1) （无纹理槽 ⇒ ×1.0）
+// 这正是任务 19 验收"材质字段与既有 GBuffer 路径逐项可比"的实现口径：
+//   字段来自同一批来源（MeshComponent 的 PBR 参数 + 同一个 bindless 纹理堆），公式逐句相同。
+// 【材质段越界】`materialIndex >= materialCount` ⇒ 返回 false（调用方用中性常数兜底并单独计数，
+//   不静默；正常路径下 `materialIndex` 由任务 19 的"三角形多数票"映射保证在界内）。
+bool softRasterEvaluateMaterial(uint materialIndex, float2 uv,
+                                out float3 outAlbedo, out float metallic, out float roughness) {
+    outAlbedo = float3(0.8, 0.8, 0.8);
+    metallic  = 0.0;
+    roughness = 0.5;
+    if (materialIndex >= materialCount) return false;   // 兜底：越界不读缓冲（防越界读）
+
+    NaniteMaterialRecord material = u_Materials[materialIndex];
+    outAlbedo = material.baseColorFactor.rgb;
+    float mrG = 1.0;   // 无 MetallicRough 纹理：g（粗糙度）不调制
+    float mrB = 0.0;   // 无 MetallicRough 纹理：b（金属度）为 0（与 GBuffer 路径的中性值一致）
+    if ((material.textureMask & NANITE_TEXMASK_BASECOLOR) != 0u) {
+        uint slot = material.bindlessTextureBase + NANITE_TEXSLOT_BASECOLOR;
+        // 【为什么是 `SampleLevel(..., 0)` 而不是 `Sample`】compute 入口没有导数（quad）语义：
+        //   `Sample` 需要 2×2 线程的派生组，而本入口是 `[numthreads(16,1,1)]`（Y=1 不是 2 的倍数）
+        //   ⇒ Slang 直接报 E31210。改用显式 LOD 0（= 只采 mip0）。
+        //   【如实偏差】既有 GBuffer 路径是片元里的 `Sample`（有隐式 LOD）⇒ 双方在"贴图有 mip 且
+        //   像素覆盖率大于一个 texel"时可能取到不同 mip。本任务用 mip0 是为了可复现与零额外特性，
+        //   已在实施记录里列为偏差（对 albedo 均值/相关系数的影响可测）。
+        outAlbedo *= u_MaterialTextures[slot].SampleLevel(u_MaterialSamplers[slot], uv, 0.0).rgb;
+    }
+    if ((material.textureMask & NANITE_TEXMASK_METALLICROUGH) != 0u) {
+        uint slot = material.bindlessTextureBase + NANITE_TEXSLOT_METALLICROUGH;
+        float4 mr = u_MaterialTextures[slot].SampleLevel(u_MaterialSamplers[slot], uv, 0.0);
+        mrG = mr.g;
+        mrB = mr.b;
+    }
+    metallic  = material.metallicFactor * mrB;
+    roughness = clamp(material.roughnessFactor * mrG, 0.04, 1.0);
+    return true;
+}
 
 // 世界坐标 → 裁剪空间（与 CPU 侧 `NaniteProjectPoint` / 任务 15 的 Hi-Z 投影同一表达式）
 float4 softRasterProjectWorld(float3 worldPos) {
@@ -127,8 +178,8 @@ float4 softRasterProjectWorld(float3 worldPos) {
 //   引擎的离屏通道统一用**负高度视口**抵消（见 `NaniteRaster::RecordRasterPass` 的
 //   `SetViewport({..., -height, ...})`）⇒ NDC y = +1 落在**帧缓冲第 0 行**。故：
 //     row = (0.5 - 0.5 × ndc.y) × H，col = (0.5 + 0.5 × ndc.x) × W
-//   （与剔除链的 `s = ndc.xy*0.5+0.5` 相比，y 是镜像的 —— 那一处是采样 Hi-Z 纹理的 UV，
-//    属任务 15 的口径，不在本次改动面内，已在实施记录里作为观察项记下。）
+//   （剔除链的 Hi-Z 采样在 P0 修复后用的是同一条约定 `v = 0.5 - 0.5*ndc.y`，
+//     见 `Nanite_ClusterBVH.comp.slang` 的 `hizOccluded` 与实施记录。）
 float2 softRasterNdcToPixel(float2 ndc) {
     return float2((0.5 + 0.5 * ndc.x) * (float)screenWidth,
                   (0.5 - 0.5 * ndc.y) * (float)screenHeight);

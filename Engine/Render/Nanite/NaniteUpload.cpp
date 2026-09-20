@@ -1152,6 +1152,145 @@ bool BuildNaniteAssetFromGeometry(std::span<const float>                position
 }
 
 // ============================================================
+// 【§14.8 任务 19】簇 → 源网格 → 材质 的映射
+//
+// 规则与理由写在 `NaniteUpload.h` 的同名小节里；这里只留与代码逐句对应的实现注释。
+// 输入保证（调用方 = `MeshBatcher` 的构建顺序）：`meshes[i]` 的三角形区间首尾相接、升序。
+// ============================================================
+namespace {
+
+/// 二分查找"包含三角形 `tri` 的源网格下标"；找不到返回 `meshes.size()`（调用方按未映射处理）。
+/// 【为什么二分而不是线性】Sponza 有上百个网格、每个簇至多 64 个三角形、簇数上万 ⇒ 二分把
+///   这一步从 O(簇×三角形×网格) 压到 O(簇×三角形×log 网格)，且仍然是纯只读、确定的。
+[[nodiscard]] u32 FindSourceMeshForTriangle(std::span<const NaniteSourceMeshRange> meshes,
+                                            u32 tri) {
+    u32 lo = 0u;
+    u32 hi = (u32)meshes.size();
+    while (lo < hi) {
+        const u32 mid = lo + (hi - lo) / 2u;
+        const NaniteSourceMeshRange& m = meshes[mid];
+        if (tri < m.firstTriangle) {
+            hi = mid;
+        } else if (tri >= m.firstTriangle + m.triangleCount) {
+            lo = mid + 1u;
+        } else {
+            return mid;   // tri ∈ [first, first+count)
+        }
+    }
+    return (u32)meshes.size();
+}
+
+} // namespace
+
+NaniteClusterMaterialMapStats NaniteAssignClusterMaterials(
+        std::span<const NaniteClusterRecord>   clusters,
+        std::span<const NaniteSourceMeshRange> meshes,
+        std::span<u32>                         outClusterMaterialIndex) {
+    NaniteClusterMaterialMapStats stats{};
+    if (outClusterMaterialIndex.size() < clusters.size()) return stats;   // 防御：输出不够就不写
+
+    for (usize ci = 0u; ci < clusters.size(); ++ci) {
+        const NaniteClusterRecord& cluster = clusters[ci];
+        // 未映射 / 空网状网格的兜底归属：0 号材质（正常路径不会走到这里）
+        u32 fallbackMaterial = meshes.empty() ? 0u : meshes[0].materialIndex;
+        if (cluster.triangleCount == 0u || meshes.empty()) {
+            outClusterMaterialIndex[ci] = fallbackMaterial;
+            continue;
+        }
+
+        // ① 逐三角形查源网格，累计票数（`votes` 按网格下标寻址；网格数 ≤ 合并绘制条数 ≤ 1024）
+        //    【为什么不用哈希表】票数数组 + 一次线性扫描完全没有容器遍历序的不确定性。
+        std::vector<u32> votes(meshes.size(), 0u);
+        u32 mappedTriangles = 0u;
+        for (u32 k = 0u; k < cluster.triangleCount; ++k) {
+            const u32 tri = cluster.triangleOffset + k;
+            const u32 mesh = FindSourceMeshForTriangle(meshes, tri);
+            if (mesh >= (u32)meshes.size()) continue;   // 落不进任何区间 ⇒ 记未映射
+            ++votes[mesh];
+            ++mappedTriangles;
+        }
+
+        // ② 多数票：票数最大者胜；**平票取下标更小的网格**（`>` 而非 `>=` 保证这一点）
+        u32 bestMesh = 0xFFFFFFFFu;
+        u32 bestVotes = 0u;
+        u32 contributingMeshes = 0u;
+        for (u32 m = 0u; m < (u32)votes.size(); ++m) {
+            if (votes[m] == 0u) continue;
+            ++contributingMeshes;
+            if (votes[m] > bestVotes) { bestVotes = votes[m]; bestMesh = m; }
+        }
+
+        if (bestMesh >= (u32)meshes.size() || mappedTriangles == 0u) {
+            ++stats.unmappedClusters;
+            outClusterMaterialIndex[ci] = fallbackMaterial;
+            continue;
+        }
+        if (contributingMeshes > 1u) ++stats.multiMeshClusters;
+        outClusterMaterialIndex[ci] = meshes[bestMesh].materialIndex;
+    }
+    return stats;
+}
+
+// ============================================================
+// §14.8 任务 19：带"簇 → 源网格 → 材质"映射的资产构建重载
+// ============================================================
+bool BuildNaniteAssetFromGeometry(std::span<const float>                  positions,
+                                  std::span<const float>                  normals,
+                                  std::span<const float>                  uvs,
+                                  std::span<const u32>                    indices,
+                                  std::span<const NaniteMaterialRecord>   materials,
+                                  std::span<const NaniteSourceMeshRange>  meshes,
+                                  NanitePackedAsset&                      outResult) {
+    // ① 先按任务 12/18 的老路径产出一份**完整且已自校验**的资产（不含逐簇材质）
+    NanitePackedAsset asset;
+    if (!BuildNaniteAssetFromGeometry(positions, normals, uvs, indices, materials, asset)) {
+        return false;
+    }
+    if (meshes.empty() || asset.clusters.empty()) {
+        outResult = std::move(asset);   // 没有映射输入 / 空资产 ⇒ 与旧重载完全同义
+        return true;
+    }
+
+    // ② 逐簇映射（多数票）并把材质段下标写进簇记录的 `materialID`（§8.1 的"bindless 材质"字段）
+    std::vector<u32> clusterMaterial(asset.clusters.size(), 0u);
+    const NaniteClusterMaterialMapStats mapStats =
+        NaniteAssignClusterMaterials(asset.clusters, meshes, clusterMaterial);
+    for (usize i = 0u; i < asset.clusters.size(); ++i) {
+        asset.clusters[i].materialID = clusterMaterial[i];
+    }
+
+    // ③ **改记录就必须改镜像**：把簇段重新拷回字节镜像，并再跑一次 `ValidateNaniteFile`
+    //    （段表/长度/对齐没变，校验的是"镜像与分段视图仍然自洽且合法"）。失败 ⇒ 不改写出参。
+    std::memcpy(asset.bytes.data() + asset.layout.clusterOffset, asset.clusters.data(),
+                asset.clusters.size() * sizeof(NaniteClusterRecord));
+    NaniteFileLayout checked{};
+    if (ValidateNaniteFile(asset.bytes.data(), asset.bytes.size(), &checked) != NaniteFileError::None) {
+        return false;
+    }
+    if (checked.totalBytes != asset.layout.totalBytes) return false;
+
+    // ④ 如实读数：跨网格簇数 / 未映射簇数 / 材质段的"内容各不相同"记录数 / 带 BaseColor 纹理数
+    asset.stats.multiMeshClusters = mapStats.multiMeshClusters;
+    asset.stats.unmappedClusters  = mapStats.unmappedClusters;
+    u32 distinct = 0u;
+    u32 textured = 0u;
+    for (usize i = 0u; i < asset.materials.size(); ++i) {
+        if ((asset.materials[i].textureMask & 1u) != 0u) ++textured;
+        bool seen = false;
+        for (usize j = 0u; j < i; ++j) {
+            if (std::memcmp(&asset.materials[i], &asset.materials[j],
+                            sizeof(NaniteMaterialRecord)) == 0) { seen = true; break; }
+        }
+        if (!seen) ++distinct;
+    }
+    asset.stats.distinctMaterialCount = distinct;
+    asset.stats.texturedMaterialCount = textured;
+
+    outResult = std::move(asset);
+    return true;
+}
+
+// ============================================================
 // §14.8 任务 14：per-instance cluster BVH 的构建（CPU 侧）
 //
 // 口径（分裂策略 / 叶子容量 / 深度上限 / 包围球规则 / 确定性）全部写在

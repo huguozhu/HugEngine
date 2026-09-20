@@ -59,10 +59,9 @@ void main(uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
     if (triangleCount == 0u) return;
     if (triangleCount > maxTriangles) return;    // 与第 1 趟同一条跳过规则（计数只在第 1 趟做）
 
-    // 中性材质常数（资产材质段为空；任务 19 换成真实材质解析）
-    const float3 kNeutralAlbedo = float3(0.8, 0.8, 0.8);
-    const float  kNeutralMetallic = 0.0;
-    const float  kNeutralRoughness = 0.5;
+    // ── 【任务 19】真实材质：从**资产材质段**取（`cluster.materialID` 是任务 19 的
+    //    "三角形多数票"映射写下的材质下标）。材质段为空 / 下标越界 ⇒ 中性常数兜底并单独计数。
+    //    albedo/metallic/roughness 的公式与既有 GBuffer 路径逐句相同（见 softRasterEvaluateMaterial）。
 
     // ── ② 逐三角形：重跑光栅化 → 等值复检 → 写 GBuffer ──
     for (uint triLocal = tid.x; triLocal < triangleCount; triLocal += 16u) {
@@ -113,12 +112,27 @@ void main(uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
                 float2 uv = softRasterAttribute(bary, tri, float3(t0, 0.0), float3(t1, 0.0),
                                                 float3(t2, 0.0)).xy;
 
-                u_Albedo[uint2((uint)px, (uint)py)]      = float4(kNeutralAlbedo, kNeutralMetallic);
-                u_Normal[uint2((uint)px, (uint)py)]      = float4(normal, kNeutralRoughness);
+                // ── 【任务 19】真实材质（与既有 GBuffer 路径同一批来源 + 同一组公式）──
+                float3 matAlbedo;
+                float  matMetallic;
+                float  matRoughness;
+                const bool materialFromAsset =
+                    softRasterEvaluateMaterial(cluster.materialID, uv,
+                                               matAlbedo, matMetallic, matRoughness);
+
+                u_Albedo[uint2((uint)px, (uint)py)]      = float4(matAlbedo, matMetallic);
+                u_Normal[uint2((uint)px, (uint)py)]      = float4(normal, matRoughness);
                 u_WorldPos[uint2((uint)px, (uint)py)]    = float4(worldPos, 1.0);
                 u_LightmapKey[uint2((uint)px, (uint)py)] = float4(uv, (float)(kNaniteObjectIndexBegin + ref.instance), 0.0);
                 InterlockedAdd(u_Stats[kSoftStatPixels], 1u);
-                InterlockedAdd(u_Stats[kSoftStatNeutralPixels], 1u);
+                // 【读数分离】`material_pixels` = 真的从资产材质段取到材质的像素；
+                //   `fallback_pixels` = 材质段缺失/越界的像素（正常必须 0）；
+                //   `neutral_material_pixels`（任务 18 的中性常数计数）**恒为 0** —— 不再写中性常数。
+                if (materialFromAsset) {
+                    InterlockedAdd(u_Stats[kSoftStatMaterialPixels], 1u);
+                } else {
+                    InterlockedAdd(u_Stats[kSoftStatFallbackPixels], 1u);
+                }
             }
         }
     }

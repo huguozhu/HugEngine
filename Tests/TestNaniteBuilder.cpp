@@ -64,6 +64,15 @@ using namespace he::render;
 namespace {
 
 // ============================================================
+// 【§14.8 任务 19】测试用材质记录构造（32B：因子 + 纹理掩码 + bindless 基索引）
+//   与 `NaniteMakeMaterialRecord` 同义，只是把 4 个字段塞进两个参数，便于老用例迁移。
+// ============================================================
+inline NaniteMaterialRecord NaniteMakeTestMaterial(u32 bindlessTextureBase, u32 textureMask) {
+    const float factor[4] = { 0.5f, 0.6f, 0.7f, 1.0f };
+    return NaniteMakeMaterialRecord(factor, 0.25f, 0.75f, textureMask, bindlessTextureBase);
+}
+
+// ============================================================
 // 测试用网格生成（确定性；不依赖任何资产文件）
 // ============================================================
 
@@ -1306,8 +1315,8 @@ TEST_CASE("NanitePack: 段布局、总字节数与字节镜像（任务 7 契约
     const GridMesh mesh = MakeGrid(6);                       // 72 tri / 49 vert
     const MeshAttributes attributes = MakeSphereAttributes(mesh);
     const std::vector<NaniteMaterialRecord> materials = {
-        NanitePackMaterial(0x11u, 0x22u),
-        NanitePackMaterial(0x33u, 0x44u),
+        NaniteMakeTestMaterial(0x11u, 0x22u),
+        NaniteMakeTestMaterial(0x33u, 0x44u),
     };
 
     NaniteClusterDAG dag;
@@ -1414,8 +1423,9 @@ TEST_CASE("NanitePack: 段布局、总字节数与字节镜像（任务 7 契约
     // ── 材质段：原样搬运（不解析 ID）──
     REQUIRE(asset.materials.size() == materials.size());
     for (usize i = 0; i < materials.size(); ++i) {
-        CHECK(asset.materials[i].albedoTexture == materials[i].albedoTexture);
-        CHECK(asset.materials[i].normalTexture == materials[i].normalTexture);
+        CHECK(asset.materials[i].bindlessTextureBase == materials[i].bindlessTextureBase);
+        CHECK(asset.materials[i].textureMask == materials[i].textureMask);
+        CHECK(asset.materials[i].metallicFactor == materials[i].metallicFactor);
     }
     // 簇段的 materialID：本任务统一写 0（归属任务 12/19）
     for (const NaniteClusterRecord& record : asset.clusters) CHECK(record.materialID == 0u);
@@ -1483,7 +1493,7 @@ TEST_CASE("NanitePack: DAG 衔接（共享内容 + 各自簇心解码回几何�
     // 【任务 18 / P0】属性也交给 DAG（五参数重载）：本用例要走**真实的资产路径**
     //   （`BuildNaniteAssetFromGeometry` 恒带属性），属性是"逐片相同"的真副本 ⇒ 共享照常命中。
     const MeshAttributes attributes = MakeTileLocalAttributes(tiled, 8, 4);
-    const std::vector<NaniteMaterialRecord> materials = { NanitePackMaterial(7u, 9u) };
+    const std::vector<NaniteMaterialRecord> materials = { NaniteMakeTestMaterial(7u, 9u) };
 
     NaniteClusterDAG dag;
     REQUIRE(BuildNaniteClusterDAG(tiled.mesh.positions, attributes.normals, attributes.uvs,
@@ -1757,7 +1767,7 @@ TEST_CASE("NanitePack: 属性错配的资产被拒绝（P0 修复的负向回归
 TEST_CASE("NanitePack: 可复现性与失败路径（空 DAG / 非法输入）") {
     const GridMesh mesh = MakeGrid(6);
     const MeshAttributes attributes = MakeSphereAttributes(mesh);
-    const std::vector<NaniteMaterialRecord> materials = { NanitePackMaterial(1u, 2u) };
+    const std::vector<NaniteMaterialRecord> materials = { NaniteMakeTestMaterial(1u, 2u) };
 
     NaniteClusterDAG dag;
     REQUIRE(BuildNaniteClusterDAG(mesh.positions, mesh.indices, dag));
@@ -1869,13 +1879,13 @@ TEST_CASE("NanitePack: 可复现性与失败路径（空 DAG / 非法输入）")
     // ── ⑤ 材质条数为 1 时的搬运与索引段不变（防 0/1/2 条材质的边界）──
     {
         NanitePackedAsset asset;
-        const std::vector<NaniteMaterialRecord> single = { NanitePackMaterial(0xABu, 0xCDu) };
+        const std::vector<NaniteMaterialRecord> single = { NaniteMakeTestMaterial(0xABu, 0xCDu) };
         REQUIRE(PackNaniteClusters(mesh.positions, attributes.normals, attributes.uvs,
                                    single, dag, asset));
         CHECK(asset.header.materialCount == 1u);
         CHECK(asset.layout.materialBytes == AlignUp16(kNaniteMaterialRecordBytes));
-        CHECK(asset.materials[0].albedoTexture == 0xABu);
-        CHECK(asset.materials[0].normalTexture == 0xCDu);
+        CHECK(asset.materials[0].bindlessTextureBase == 0xABu);
+        CHECK(asset.materials[0].textureMask == 0xCDu);
     }
 }
 
@@ -2445,3 +2455,63 @@ TEST_CASE("NaniteLOD: 每簇 LOD 元数据的构建（级/误差/根/确定性/�
     }
 }
 
+
+// ============================================================
+// 【§14.8 任务 19】簇 → 源网格 → 材质的映射（三角形多数票 + 跨网格计数）
+// ============================================================
+TEST_CASE("NaniteMaterialMap: 簇按三角形多数票映射到源网格并计数跨网格簇") {
+    // 三个源网格：三角形区间 [0,4) [4,10) [10,16)（首尾相接、升序 —— 与 MeshBatcher 一致）
+    const NaniteSourceMeshRange meshes[3] = {
+        { 0u,  4u, 0u },   // 材质段下标 0
+        { 4u,  6u, 1u },   // 材质段下标 1
+        { 10u, 6u, 2u },   // 材质段下标 2
+    };
+
+    // 五个簇：
+    //  0) [0,4)   完全在网格 0                        ⇒ 材质 0
+    //  1) [2,8)   2 个在网格 0、4 个在网格 1           ⇒ 多数票 = 网格 1（跨网格）
+    //  2) [3,10)  1 个在网格 0、6 个在网格 1           ⇒ 多数票 = 网格 1（跨网格）
+    //  3) [8,14)  2 个在网格 1、4 个在网格 2           ⇒ 多数票 = 网格 2（跨网格）
+    //  4) [20,24) 完全落在所有区间之外                 ⇒ 未映射（计 unmapped，归属 0 号材质）
+    std::vector<NaniteClusterRecord> clusters(5);
+    clusters[0].triangleOffset = 0u;  clusters[0].triangleCount = 4u;
+    clusters[1].triangleOffset = 2u;  clusters[1].triangleCount = 6u;
+    clusters[2].triangleOffset = 3u;  clusters[2].triangleCount = 7u;
+    clusters[3].triangleOffset = 8u;  clusters[3].triangleCount = 6u;
+    clusters[4].triangleOffset = 20u; clusters[4].triangleCount = 4u;
+
+    std::vector<u32> out(clusters.size(), 0xFFFFFFFFu);
+    const NaniteClusterMaterialMapStats stats =
+        NaniteAssignClusterMaterials(clusters, meshes, out);
+
+    CHECK(out.size() == 5u);
+    CHECK(out[0] == 0u);
+    CHECK(out[1] == 1u);   // 2 vs 4
+    CHECK(out[2] == 1u);   // 6 vs 1
+    CHECK(out[3] == 2u);   // 4 vs 2
+    CHECK(out[4] == 0u);   // 未映射 ⇒ 兜底 0 号材质
+    CHECK(stats.multiMeshClusters == 3u);
+    CHECK(stats.unmappedClusters == 1u);
+
+    // 平票 ⇒ 取**下标更小**的网格（确定性）：区间 [0,2) 与 [2,4) 各得 1 票
+    const NaniteSourceMeshRange tie[2] = { { 0u, 2u, 5u }, { 2u, 2u, 6u } };
+    NaniteClusterRecord tieCluster;
+    tieCluster.triangleOffset = 1u;
+    tieCluster.triangleCount = 2u;
+    std::vector<u32> tieOut(1u, 0xFFFFFFFFu);
+    const NaniteClusterMaterialMapStats tieStats =
+        NaniteAssignClusterMaterials({ &tieCluster, 1u }, tie, tieOut);
+    CHECK(tieOut[0] == 5u);                 // 平票取小下标（材质段下标 5）
+    CHECK(tieStats.multiMeshClusters == 1u);
+
+    // 输出数组过短 ⇒ 一个字节都不写（防御）
+    std::vector<u32> shortOut(2u, 0xA5A5A5A5u);
+    const NaniteClusterMaterialMapStats shortStats =
+        NaniteAssignClusterMaterials(clusters, meshes, shortOut);
+    CHECK(shortStats.multiMeshClusters == 0u);
+    CHECK(shortStats.unmappedClusters == 0u);
+    CHECK(shortOut[0] == 0xA5A5A5A5u);
+    MESSAGE("映射：多数票 " << out[1] << "/" << out[2] << "/" << out[3]
+            << "，跨网格簇 " << stats.multiMeshClusters
+            << "，未映射 " << stats.unmappedClusters << "，平票取小下标 " << tieOut[0]);
+}

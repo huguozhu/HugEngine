@@ -402,7 +402,7 @@ inline constexpr u32 kNaniteMeshTestTargetSize = 1u;
 //   [+96]                  NaniteClusterRecord[]   clusterCount  × 64B
 //   [..]                   NaniteVertex[]          vertexCount   × 16B
 //   [..]                   NanitePackedTriangle[]  (indexCount/3) × 8B
-//   [..]                   NaniteMaterialRecord[]  materialCount × 8B
+//   [..]                   NaniteMaterialRecord[]  materialCount × 32B（任务 19 起；此前 8B）
 //   [..]                   u32[]                   lodLevelCount × 4B
 //   每个段的"起点 16B 对齐、长度向上取整到 16B"。文件尾允许有额外字节（不参与校验）。
 //
@@ -436,7 +436,7 @@ inline constexpr u32 kNaniteFileFlagHasDAG = 1u << 0;
 inline constexpr usize kNaniteClusterRecordBytes   = 64u;   ///< 簇记录（与 §8.1 的 GPU 布局同构）
 inline constexpr usize kNaniteVertexRecordBytes    = 16u;   ///< 量化顶点（含量化偏置，见下）
 inline constexpr usize kNaniteIndexBytesPerTriangle = 8u;   ///< 3×u16 打包进 u32[2]
-inline constexpr usize kNaniteMaterialRecordBytes  = 8u;    ///< 材质（bindless 纹理 ID 对）
+inline constexpr usize kNaniteMaterialRecordBytes  = 32u;   ///< 材质（任务 19：由 8B 最小扩展为 32B，见下）
 inline constexpr usize kNaniteLodOffsetBytes       = 4u;    ///< 每个 LOD 一个 u32 偏移
 /// 每三角形的索引个数（索引总数必须是它的整数倍）
 inline constexpr u32   kNaniteIndicesPerTriangle   = 3u;
@@ -559,7 +559,8 @@ static_assert(offsetof(NaniteClusterRecord, _pad)               == 60, "_pad 在
 //   · UV：`NaniteQuantizeUV` / `NaniteDequantizeUV` —— **unorm16**（不用 half）；
 //   · 索引：`NanitePackTriangle` / `NaniteTriangleIndex0/1/2`（任务 7 已定稿，本任务只加
 //     `IsNaniteTriangleIndexCount` 把"3 个一组"的结构前提显式化）；
-//   · 材质：`NanitePackMaterial` / `NaniteUnpackMaterial`（8B，两个 bindless 纹理 ID）。
+//   · 材质：`NaniteMakeMaterialRecord`（任务 19 起 32B：baseColorFactor + metallic/roughness
+//     因子 + 纹理掩码 + bindless 纹理基索引；原 8B 的"两个纹理 ID"放不下这些必需字段）。
 // 每个函数上方都写了"为什么这么选 + 与 Slang 镜像的同步纪律"；端到端的
 // "pack → upload → shader" 一致性要到任务 12（上传读回）与任务 18（shader 解码）才能验证。
 // ============================================================
@@ -922,37 +923,63 @@ static_assert(offsetof(NanitePackedTriangle, hi) == 4, "hi 必须在偏移 4");
     return (indexCount % (usize)kNaniteIndicesPerTriangle) == 0u;
 }
 
-// ── 材质记录（8B；字段语义由任务 10/12 细化，步长已定稿）──
+// ── 材质记录（32B；字段语义由任务 19 定稿，步长由任务 7/10 的 8B **最小扩展**而来）──
 //
-// 【§14.8 任务 10 的裁决：字段按 §8.1/§12 Task 4 的"bindless 纹理 ID 对"落盘，不新增字段】
-//   · `albedoTexture` / `normalTexture` 是 bindless 堆里的**纹理 ID**（0 = 该槽未绑定；
-//     具体语义——0 是否等于"默认白纹理"、要不要再加 roughness/metallic 打包——属任务 12/19
-//     的材质解析议题：本任务的打包器只**原样搬运**调用方给出的记录，不解释 ID）。
-//   · 8B 步长与"两个 u32"的字段划分都是任务 7 定稿的，本任务只补打包/解包函数（位序显式化），
-//     让 C++ 侧与 Slang 侧的 `uint2` 视角有一处**逐字对应**的落点。
-/// 材质记录：bindless 纹理 ID 对（§12 Task 4 的 `<2I>`）
-struct alignas(4) NaniteMaterialRecord {
-    u32 albedoTexture = 0;   // 偏移 0：albedo 纹理的 bindless ID
-    u32 normalTexture = 0;   // 偏移 4：normal 纹理的 bindless ID
+// 【为什么必须从 8B 扩到 32B（任务 19 的裁决，先报告后扩展）】
+//   §8/任务 7 定稿的 8B 记录只有两个 bindless 纹理 ID。任务 19 的验收是"材质字段与既有
+//   GBuffer 路径**逐项可比**"，而 GBuffer 路径（`GBuffer.frag.slang:57-81`）的每个字段都由
+//   **三个量**共同决定：
+//       albedo    = baseColorFactor.rgb × Sample(BaseColor纹理, uv).rgb
+//       metallic  = metallicFactor      × Sample(MetallicRoughness纹理, uv).b
+//       roughness = clamp(roughnessFactor × Sample(MetallicRoughness纹理, uv).g, 0.04, 1.0)
+//   8B 放不下"两个因子 + 一个 float4 基础色因子 + 纹理存在掩码"这三样必需信息 ⇒ 最小扩展为
+//   32B：`float4 baseColorFactor`（16B）+ `metallicFactor`（4）+ `roughnessFactor`（4）
+//   + `textureMask`（4）+ `bindlessTextureBase`（4）。16B 对齐、字段全是 4B 对齐的标量，
+//   与 Slang 侧 `StructuredBuffer` 的 std430 视角逐字段一致。
+//   【如实说明取不到什么】`alphaCutoff`（GBuffer 用它做 `discard`）与 ao/emissive 仍**不在**
+//   本条记录里：软光栅本任务**不做 alpha 测试**、也**不写** MRT2（emissive/ao 仍是清屏值）——
+//   这是任务 18 划定的边界，任务 19 不扩大（扩大就要动"谁写哪些通道"的契约）。
+/// 材质记录：与既有 GBuffer 路径**同源**的 PBR 字段（32B；C++ / Slang 二进制契约）
+struct alignas(16) NaniteMaterialRecord {
+    float baseColorFactor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };  // 偏移 0 ：与 GPUObjectData::baseColorFactor 同口径
+    float metallicFactor     = 1.0f;   // 偏移 16：金属度因子
+    float roughnessFactor    = 1.0f;   // 偏移 20：粗糙度因子
+    u32   textureMask        = 0u;     // 偏移 24：纹理存在位掩码（与 ComputeMaterialTextureMask 同一套位）
+    u32   bindlessTextureBase = 0u;    // 偏移 28：bindless 纹理基索引（= MeshComponent::materialID）
 };
 
 static_assert(sizeof(NaniteMaterialRecord) == kNaniteMaterialRecordBytes,
-              "材质记录必须 8B（§12 Task 4 的 materialCount × 8B）");
-static_assert(offsetof(NaniteMaterialRecord, albedoTexture) == 0, "albedoTexture 在偏移 0");
-static_assert(offsetof(NaniteMaterialRecord, normalTexture) == 4, "normalTexture 在偏移 4");
+              "材质记录必须 32B（任务 19 的最小扩展：16B 对齐 + 逐字段与 Slang 一致）");
+static_assert(offsetof(NaniteMaterialRecord, baseColorFactor)      == 0,  "baseColorFactor 在偏移 0");
+static_assert(offsetof(NaniteMaterialRecord, metallicFactor)       == 16, "metallicFactor 在偏移 16");
+static_assert(offsetof(NaniteMaterialRecord, roughnessFactor)      == 20, "roughnessFactor 在偏移 20");
+static_assert(offsetof(NaniteMaterialRecord, textureMask)          == 24, "textureMask 在偏移 24");
+static_assert(offsetof(NaniteMaterialRecord, bindlessTextureBase)  == 28, "bindlessTextureBase 在偏移 28");
 
-/// 材质打包：两个 bindless 纹理 ID → 8B 记录（与 Slang 侧的 `uint2` 逐位一致）
-[[nodiscard]] constexpr NaniteMaterialRecord NanitePackMaterial(u32 albedoTexture,
-                                                                u32 normalTexture) {
+/// 材质记录打包：按字段填一条记录（与既有 GBuffer 路径读的**同一批**字段）
+[[nodiscard]] inline NaniteMaterialRecord NaniteMakeMaterialRecord(const float baseColorFactor[4],
+                                                                  float metallicFactor,
+                                                                  float roughnessFactor,
+                                                                  u32 textureMask,
+                                                                  u32 bindlessTextureBase) {
     NaniteMaterialRecord record;
-    record.albedoTexture = albedoTexture;
-    record.normalTexture = normalTexture;
+    for (u32 i = 0u; i < 4u; ++i) {
+        record.baseColorFactor[i] = (baseColorFactor != nullptr) ? baseColorFactor[i] : 1.0f;
+    }
+    record.metallicFactor      = metallicFactor;
+    record.roughnessFactor     = roughnessFactor;
+    record.textureMask         = textureMask;
+    record.bindlessTextureBase = bindlessTextureBase;
     return record;
 }
 
-/// 材质解包：`word` 0 = albedo、1 = normal（越界 word 返回 0；与 `NanitePackMaterial` 互逆）
-[[nodiscard]] constexpr u32 NaniteUnpackMaterial(const NaniteMaterialRecord& record, u32 word) {
-    return (word == 0u) ? record.albedoTexture : ((word == 1u) ? record.normalTexture : 0u);
+/// 材质记录的**原始 u32 字**视图（`word` 0..7；越界返回 0）：单测用它核对字节序/偏移，
+///   与 Slang 侧的 `uint8` 视角逐位对应。
+[[nodiscard]] inline u32 NaniteUnpackMaterial(const NaniteMaterialRecord& record, u32 word) {
+    if (word >= 8u) return 0u;
+    u32 raw[8];
+    std::memcpy(raw, &record, sizeof(raw));
+    return raw[word];
 }
 
 // ── 段表与校验（RHI-free、可单测）──
@@ -1453,6 +1480,11 @@ struct NaniteHiZSampler {
 ///   是同一份比特、乘的是同一个表达式，风险归零。
 /// 输出：`outMinUV/outMaxUV` = 8 个角的屏幕 UV 包围盒（**不钳制**）；`outNearestDepth` = 8 个角的
 ///   最小 ndc.z（= 最近点；Vulkan `[0,1]`：近 = 0）。
+/// 【UV 的 y 方向（P0 修复：与 GPU 侧同一条约定）】本引擎的离屏通道用**负高度视口**
+///   （`GBufferRenderer_CPU.cpp:61`），NDC y=+1 落在帧缓冲第 0 行、纹理 v 向下增长 ⇒
+///   `v = 0.5 - 0.5*ndc.y`（不是 `ndc.y*0.5+0.5`）。这里与 `Nanite_ClusterBVH.comp.slang` 的
+///   `hizOccluded` 保持**同一条**约定；对生产路径的 CPU 参考无行为影响（Hi-Z 恒关闭，且
+///   盒尺寸/越屏判据对 y 镜像不变），但单测里的合成金字塔回调因此与 GPU 的 UV 语义一致。
 /// 【返回 false 的两种情形（都要求"保守不剔除"）】
 ///   ① 任一角 `clip.w <= 1e-6`（跨越相机平面 / 在相机之后）—— 投影无意义；
 ///   ② 任一角出现 NaN/Inf（`!(z > -inf)` 之类的兜底判据）。
@@ -1486,7 +1518,7 @@ struct NaniteHiZSampler {
         if (!(ndcZ == ndcZ)) return false;        // ② NaN 兜底（NaN != NaN）
 
         const float u = ndcX * 0.5f + 0.5f;
-        const float v = ndcY * 0.5f + 0.5f;
+        const float v = 0.5f - ndcY * 0.5f;   // 【P0】负高度视口：v 向下增长 ⇒ y 要翻
         if (u < minU) minU = u;
         if (u > maxU) maxU = u;
         if (v < minV) minV = v;
@@ -2157,18 +2189,19 @@ struct NaniteSoftRasterParams {
     u32   instanceCount;    ///< 偏移 76：实例域上界（越界引用直接跳过，不读实例表）
     float meshMaxExtent;    ///< 偏移 80：位置量化尺度（整网格最大轴长，§14.19 硬约束①）
     float depthKeyEpsilon;  ///< 偏移 84：等值复检容差（0 = 严格逐位相等）
-    float _pad0;            ///< 偏移 88
-    float _pad1;            ///< 偏移 92
+    u32   materialCount;    ///< 偏移 88：【任务 19】资产材质段条数（0 ⇒ 退化为中性常数并计数）
+    u32   _pad1;            ///< 偏移 92
 };
 
 static_assert(sizeof(NaniteSoftRasterParams) == 96u,
-              "软光栅 push constant 必须 96B（4×float4 + 3×u32 + 2×float）");
+              "软光栅 push constant 必须 96B（4×float4 + 3×u32 + 3×float/u32）");
 static_assert(offsetof(NaniteSoftRasterParams, vpRows)        == 0,  "vpRows 在偏移 0");
 static_assert(offsetof(NaniteSoftRasterParams, screenWidth)   == 64, "screenWidth 在偏移 64");
 static_assert(offsetof(NaniteSoftRasterParams, screenHeight)  == 68, "screenHeight 在偏移 68");
 static_assert(offsetof(NaniteSoftRasterParams, maxTriangles)  == 72, "maxTriangles 在偏移 72");
 static_assert(offsetof(NaniteSoftRasterParams, instanceCount) == 76, "instanceCount 在偏移 76");
 static_assert(offsetof(NaniteSoftRasterParams, meshMaxExtent) == 80, "meshMaxExtent 在偏移 80");
+static_assert(offsetof(NaniteSoftRasterParams, materialCount) == 88, "materialCount 在偏移 88");
 
 /// 软光栅读数槽位（扁平 u32；与 `Nanite_SoftRasterCommon.slang` 的 `kSoftStat*` 一一对应）
 inline constexpr u32 kNaniteSoftStatRasterClusters  = 0u;   ///< 真正走软光栅的簇数（≤ maxTriangles）
@@ -2176,7 +2209,11 @@ inline constexpr u32 kNaniteSoftStatSkippedClusters = 1u;   ///< 因三角形数
 inline constexpr u32 kNaniteSoftStatTriangles       = 2u;   ///< 参与光栅化的非退化三角形数（第 1 趟）
 inline constexpr u32 kNaniteSoftStatDegenerate      = 3u;   ///< 被丢弃的三角形数（相机后/退化/越界）
 inline constexpr u32 kNaniteSoftStatPixels          = 4u;   ///< 通过深度复检、真正写进 GBuffer 的像素数
-inline constexpr u32 kNaniteSoftStatNeutralPixels   = 5u;   ///< 其中用中性材质常数写入的像素数
+inline constexpr u32 kNaniteSoftStatNeutralPixels   = 5u;   ///< 【任务 19 起恒 0】用中性常数写入的像素数
+/// 【任务 19】用**资产材质段**的真实材质写入的像素数（目标：== `kNaniteSoftStatPixels`）
+inline constexpr u32 kNaniteSoftStatMaterialPixels  = 12u;
+/// 【任务 19】材质段越界/缺失而退化为中性常数的像素数（正常必须 0；`neutral_material_pixels` 的替代口径）
+inline constexpr u32 kNaniteSoftStatFallbackPixels  = 13u;
 inline constexpr u32 kNaniteSoftStatsCapacity       = 16u;  ///< 读数缓冲条数（与 shader 一致）
 
 /// "该像素没有几何"的深度键哨兵（第 1 趟之前由模块把整张深度键清成它）
