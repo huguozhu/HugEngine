@@ -2211,8 +2211,11 @@ if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
 > **进度（2026-09-20）**：**阶段 0（任务 1–6）与阶段 1 前两项（任务 7 数据格式定稿、任务 8 离线簇切分）已完成**并通过验收：模块骨架与独立开关、
 > 开关不变式判据 ⑥、模块自持的「计数 → 间接绘制」链（含最小 RHI 扩展）、GBuffer UAV（A1 裁决）、
 > objectIndex 分区契约与单测、mesh PSO 真正接入。**任务 7（`.nanite` 数据格式定稿）也已完成**
-> （§8 的四处不一致已裁决并写回 §8，见 §14.17）；**下一步从任务 14（per-instance cluster BVH）开始**；
-> 每一步的证据分别见 §14.11、§14.13–§14.17，且都有对应的中文提交。
+> （§8 的四处不一致已裁决并写回 §8，见 §14.17）；**任务 8/9/10/11/12/13/14 均已完成**——
+> 任务 9–13 的证据见 §14.19–§14.22，**任务 14（per-instance cluster BVH：构建 + 深度优先遍历）见 §14.23**；
+> **下一步从任务 15（三阶段簇剔除 + Hi-Z）开始**（它要做的第一件事就是把任务 13 的实例剔除与任务 14 的
+> BVH 遍历接成同一条链，见 §14.23⑥）。
+> 每一步的证据分别见 §14.11、§14.13–§14.17、§14.19–§14.23，且都有对应的中文提交。
 
 **阶段 0：模块化前置（独立开关先落地）**
 
@@ -2789,3 +2792,103 @@ on vs off 转储逐位 `must_same_diff=0`。
 **⑦ 未完成的脚手架问题（下一轮第一件事）**：修完上述三处后，判据 ①（白炉）报 `gi_aq_furnace_prov6_final.f16 MISSING` ——
 即**白炉档这次没有产出转储**（日志 212 KB、正常退出）。判据 ②③④⑤⑥ 均 PASS，且同一配置的直接探针能产出白炉转储，
 故判定为脚手架/环境问题而非产品回归；**必须先把判据 ① 恢复成能真正产出并校验白炉转储，再继续后续任务**。
+
+### 14.23 任务 14 实施记录：per-instance cluster BVH（构建 + 深度优先遍历，2026-09-20）
+
+**① 分裂策略：最长轴中点分裂 + n/3 平衡护栏（每条由单测钉住）**
+- **轴向**：取结点内全部簇球**质心** AABB 上跨度最大的轴（标准 BVH 启发式：沿最长轴分裂最可能把体积真正分开）。
+- **切点**：该轴质心范围的**空间中点**（质心 < 中点的归左）。**为什么不用 SAH**：SAH 要对每个候选分裂
+  算面积代价（或做分桶），既有浮点分箱又有"桶边界 vs 精确坐标"的对比；本任务的验收是**可复现**与
+  CPU/GPU 逐项一致，中点分裂只有"一次排序 + 一次扫描"，确定性与可解释性都更强，且沿分裂轴产生
+  **互不重叠**的孩子体积 —— 对"节点不可见 ⇒ 整棵子树跳过"的早退最有利。
+- **回退（保证终止 + 保证平衡）**：一侧为空（质心全相同 / 极密集 / NaN）**或**任一侧不足 `ceil(n/3)` 时，
+  退回**按数量中位数**（前半 n/2）分裂。
+  **护栏不是预防性设计，是实测踩出来的**：先只做"一侧为空才回退"时，Sponza 合并几何（8287 簇）的树
+  **深度恰好顶到上限 24、叶子 3103、节点 6205**（大量 1~2 簇的叶子）—— 根因是中点分裂遇到
+  "少量离群簇 + 一大团"的分布时会一次只切掉 1~2 个簇。加 n/3 护栏后同一资产变成
+  **节点 5345 / 叶子 2673 / 深度 15**，且深度有了**闭式上界**：每次分裂规模 ≤ `ceil(2n/3)` ⇒
+  `depth ≤ 1 + log₁.₅(n / 叶子容量)`，对 `n ≤ kNaniteMaxBVHClusters`(16384) 恒 ≤ 22 < 24
+  ⇒ 深度上限退化回**安全网**而不是树形的决定因素（单测直接断言这条上界）。
+- **叶子容量 4**：每簇球很小（≤64 tri），4 个簇的叶子球仍然紧，叶子内至多 4 次球测试。
+- **深度硬上限 24 / 显式栈 32**：见②。**确定性**：不含随机数、不读时间、不并行；排序比较器带
+  **下标兜底**（坐标相同时按下标）⇒ 全序唯一；两次构建逐位一致（单测直接比节点表字节）。
+
+**② 遍历实现（CPU 参考 + GPU 显式栈，逐条同构）**
+- **CPU 参考**（`NaniteTraverseClusterBVHCPU`，放 `NaniteTypes.h` 的 inline 纯函数）：逐实例做一次 DFS，
+  每弹出一个结点即 `visitedNodes += 1`（**先计数、后判可见**），结点球不可见 ⇒ 整棵子树跳过；叶子对
+  `[left, left+count)` 逐个簇做球测试。判据复用任务 13 的 `NaniteSphereVisibleInFrustum`（`dot(n,c)+d < -r`
+  ⇒ 不可见，无 epsilon），与 GPU 同一表达式。**显式栈**：`u32 stack[kNaniteBVHMaxStackDepth]`（**无分配**）。
+- **GPU**（`Nanite_ClusterBVH.comp.slang`）：`[numthreads(64,1,1)]`，**一个线程一个实例**（本任务的实例域
+  上限 64 ⇒ 1 个 workgroup 就够；PTG / work-stealing 属性能任务，不在本任务）。栈是 shader 私有数组
+  `uint stack[32]`，先压右、再压左 ⇒ 下一次弹出左孩子，**访问顺序与 CPU 参考逐字一致**。本线程的访问数
+  用一次 `InterlockedAdd` 汇总（整数加法可交换 ⇒ 与线程调度无关，这正是"访问数可复现"的实现前提）。
+- **栈深度上界为什么是 32**：DFS 栈里同时存在的条目数 = "每层至多一个待访问的右兄弟" ≤ 树高，而构建器
+  把树高硬限制在 24（n/3 护栏后实测 15）⇒ 32 有充分余量。真溢出不静默：参考实现有 `stackOverflows`
+  计数（单测用手搭 41 层退化树证明它会 +1 而不是越界）。
+- **实例域**：本任务把 Phase 2 挂在**全部非空实例**上（`indexCount != 0`，与任务 13 的跳过规则同一判据），
+  钳到 `kNaniteMaxBVHInstances` = 64（可见簇引用表必须一次分配、容量恒定）。**为什么不用 Phase 1 的可见列表**：
+  `Nanite_InstanceCull` 与 `Nanite_ClusterBVH` 在帧图里都**不声明任何帧图资源**，`RenderGraph::TopologicalSort`
+  对 inDegree=0 的 pass 按 LIFO 处理 ⇒ **帧图无法表达**"本 pass 必须排在实例剔除之后"（同任务 3 的假簇链
+  的同类隐患）。把 Phase 2 接到 Phase 1 的 GPU 计数上会引入一条不可由帧图表达的顺序假设 —— 三阶段接线
+  正是**任务 15 的正文**（见⑥）。
+
+**③ 两处位置的取舍（POD 与参考遍历 → `NaniteTypes.h`；构建器 → `NaniteUpload.{h,cpp}`）**
+- `NaniteTypes.h`：`NaniteBVHNode`（32B：`float4 centerRadius` + `uint4 link`）、`NaniteClusterSphere`（16B）、
+  `NaniteVisibleClusterRef`（8B）、`NaniteClusterBVHView`、读数结构、容量常量与 **CPU 参考遍历**。
+  理由：它们是"与 Slang 共享的 GPU 布局"+"GPU/CPU 逐项一致的参考实现"，与任务 13 把
+  `NaniteCullInstancesCPU` 放在这里**完全同构**；本文件仍是 RHI-free、纯头实现、可单测。
+- `NaniteUpload.{h,cpp}`：`NaniteClusterBVH`（容器 + 读数）与 `BuildNaniteClusterBVH`。理由：它消费的是
+  `.nanite` 的**簇记录**（任务 9/10 的产物），属于"资产 → 加速结构"的构建阶段，与 `PackNaniteClusters`
+  同一层；且该翻译单元已被 `Tests/TestNaniteBuilder.cpp` 直接编译（`Tests/CMakeLists.txt:50-54` 的纪律钉子），
+  构建器因此天然可单测。
+
+**④ GPU 侧接线（缓冲 / 描述符 / pass / 清零）**：`NaniteCull` 自持 7 个缓冲 —— 节点（32768 条）、叶子簇表
+（16384 条）、簇球（16384 条）、可见簇引用（1048576 条 = 64 × 16384，8MB）、可见簇计数、已访问节点计数、
+8B 常驻 0 的清零源；7 个显式 SSBO 绑定（复用任务 13 的 128B 实例表缓冲）+ 112B push constant
+（6 平面 + instanceCount/clusterCount/nodeCount/visibleCapacity）。**两个计数每帧在命令缓冲内用 4B 拷贝
+清 0**（同一个 8B 零源的前后两半），照任务 13 的修法，**不用主机写**。新 pass `Nanite_ClusterBVH` 注册在
+`Nanite_Raster` 之后、`reads/writes` 为空（只碰模块自持缓冲）⇒ 既有 12 个 pass 的相对顺序与集合不变。
+`SetClusterBVH` 只在任务 12 的一次性资产构建路径上被调用一次（此缓冲还没有被任何已提交的 GPU 工作引用
+⇒ 主机 `Map` 上传不存在竞争）。
+
+**⑤ 验收证据（本人复跑）**
+- 单测 **286 → 295 例**（断言 63707）全绿；新增 9 例：`NaniteBVH:` 四种网格规模/边界/复现/DFS 访问数
+  （`TestNaniteBuilder.cpp`）+ 布局契约/空表/手搭 7 节点树/栈溢出防御/纯 POD（`TestNaniteTypes.cpp`）。
+  关键 MESSAGE：`6x6 网格（72 tri）: 簇=2 节点=1 叶子=1 深度=1 最大叶子簇数=2`、
+  `32x32 网格（2048 tri）: 簇=62 节点=37 叶子=19 深度=6 最大叶子簇数=4`、
+  `3x3 平铺（9×64 tri）: 簇=19 节点=11 叶子=6 深度=4`；
+  `DFS 全部在内：节点 7，访问 7，可见簇 16`、`DFS 全部在外：节点 7，访问 1，可见簇 0`、
+  `DFS 部分相交：节点 7，访问 5，可见簇 6（下标 0..5）`、`栈溢出防御：链深 40，访问 63，溢出 1，可见 31`。
+- 关闭档 12 pass、`nanite_passes=0`、指纹冻结 `1C15AB72E688B530…`、`vuid_lines=41`。
+- 开启档 **16 pass** = 既有 12 + `Nanite_InstanceCull` / `Nanite_Cull` / `Nanite_Raster` / `Nanite_ClusterBVH`，
+  `vuid_lines=41`；dump 帧恰好一行（三个配置各跑两次，同参数两次逐位相同）：
+  - 默认（64 实例、相机 A）两次：`cluster_bvh nodes=5345 depth=15 gpu_visited=145095 cpu_visited=145095 gpu_clusters=124513 cpu_clusters=124513 mismatch=0`；
+  - 相机 B（`cam_yaw=3.5; cam_pos_x=120`）两次：`… gpu_visited=97985 … gpu_clusters=43410 … mismatch=0`；
+  - 8 实例（`nanite_instance_test_count=8`）两次：`… gpu_visited=16117 … gpu_clusters=13832 … mismatch=0`。
+- `acceptance_sweep.ps1 -OnlyNanite`：`[6a] off passes=12 nanite_leak=0 sha=1C15AB72E688B530`、
+  `[6b] on passes=16 nanite_passes=4 preexisting_set_changed=False`、
+  `[6c] pairs=20 differing_outside_jitter=0 jitter_family_ondiff=3` ⇒ **ACCEPTANCE SWEEP: PASS**
+  （6c 的 0 差异 = 任务 14 的 on/off 转储逐位一致）。
+
+**⑥ 如实记录的偏差与风险（都不掩盖）**
+1. **Phase 1 → Phase 2 的接线留到任务 15**（理由见②）。本任务的实例域是"全部非空实例"，
+   不是 Phase 1 的可见列表；任务 15 必须把两个 pass 接成同一条链（或让实例剔除把结果落到帧图资源上），
+   这是它的第一件事。
+2. **实例域上限 64**：`nanite_instance_test_count=256` 的档位只会遍历前 64 个实例（CPU 与 GPU 同一口径，
+   故 mismatch 仍为 0）。上限来自"可见簇引用表要一次分配"这一硬约束；把上限提到 256 需要 4M 条引用
+   （32MB），属任务 15/16 决定是否值得。
+3. **本任务的 CPU/GPU 逐项一致继承了任务 13 已知的"实例表上传是主机写"债务**：相机静止时实例表逐位相同，
+   实测 6 次运行 mismatch=0；相机运动时理论上存在"第 N+1 帧主机写 vs 第 N 帧派发"的交错（修法同任务 13：
+   随帧轮转的暂存环）。
+4. **本任务不含 Hi-Z 遮挡与 LOD 选择**（§5.1 Phase 2 的后半与 Phase 3 是任务 15），也不消费可见簇列表
+   （接光栅端是任务 16）—— 遍历的产物目前只用于验收读数。
+5. **BVH 只在资产构建时建一次**（整份合并几何 = 一个资产，与任务 12 的口径一致）；逐网格资产/实例级
+   动态增删属后续任务。
+6. 新增 GPU 常驻约 9.3MB（节点 1MB + 叶子 64KB + 簇球 256KB + 可见引用 8MB + 计数/零源），
+   **关闭档同样分配**（`NaniteCull::Initialize` 与任务 13 一样不区分开关）。关闭档的判据（pass 集合与
+   转储逐位一致）不受影响，但"关闭档零新增 GPU 资源"这条口径从任务 13 起就不再成立（如实记录）。
+7. **契约三处镜像**：`BVHNode`/`ClusterSphere`/`ClusterRef` 的布局在 `NaniteTypes.h`（static_assert 钉住）、
+   `Nanite_ClusterBVH.comp.slang`（逐字段注释）与 `NaniteTypes.slang`（尚未收纳本节）三处需要人工同步；
+   本次没有把 `NaniteTypes.slang` 作为公共 include（它仍未进 `SLANG_INCLUDES`，那是任务 18 的事），
+   故新 shader 里重复声明了镜像结构 —— 这是**有意的**：把 `NaniteTypes.slang` 加进 `SLANG_INCLUDES`
+   会让所有 shader 因 `DEPENDS` 全量重编译。
