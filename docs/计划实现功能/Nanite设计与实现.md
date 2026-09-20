@@ -2216,6 +2216,12 @@ if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
 > **下一步从任务 15（三阶段簇剔除 + Hi-Z）开始**（它要做的第一件事就是把任务 13 的实例剔除与任务 14 的
 > BVH 遍历接成同一条链，见 §14.23⑥）。
 > 每一步的证据分别见 §14.11、§14.13–§14.17、§14.19–§14.23，且都有对应的中文提交。
+>
+> **进度更新（任务 15/16 已完成）**：任务 15（三阶段簇剔除 + Hi-Z）见 §14.24；**任务 16（可见簇列表 +
+> 间接参数接线）见 §14.25** —— 开启档默认档的绘制由**可见簇列表**写出的真实间接命令驱动
+> （`visible_wiring visible=C=D=R`、`empty_draws=0`、`mismatch=0`），任务 3 的假簇链保留为
+> `nanite_fake_chain` 自证/退化开关；开启档 pass 数为 **14**（既有 12 + `Nanite_Cull` + `Nanite_CullChain3`，
+> 绘制录在后者体内）。**下一步从任务 17（CPU 参考对照工具）开始**。
 
 **阶段 0：模块化前置（独立开关先落地）**
 
@@ -2246,7 +2252,7 @@ if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
 | 13 | 实例剔除 | 沿用 `GPUSceneObject`（128B）契约（§5.1 Phase 1） | 与 CPU 实例剔除逐项一致 |
 | 14 | per-instance cluster BVH | 构建 + 深度优先遍历（§5.1 Phase 2） | BVH 节点数与遍历访问数可复现 |
 | 15 | 三阶段簇剔除 + Hi-Z | Phase1 视锥 → Phase2 持久化 BVH + Hi-Z 遮挡 → Phase3 LOD 选择（§5.1）；复用 `BuildHiZPyramid` | 与 CPU 参考剔除**逐簇一致**；Hi-Z 打开/关闭差异可解释 |
-| 16 | 可见簇列表 + 间接参数接线 | `u_VisibleClusters` 真正接到光栅端（旧计划 Task8 的缺口） | 绘制次数 = 可见簇数；无空转 |
+| 16 | 可见簇列表 + 间接参数接线 | `u_VisibleClusters` 真正接到光栅端（旧计划 Task8 的缺口） | 绘制次数 = 可见簇数；无空转 —— **已完成（§14.25，2026-09-20）**：`visible=indirect_count=draws=rasterized`、`empty_draws=0`、`mismatch=0`；零可见簇 ⇒ 零绘制；容量不足 ⇒ 截断并计数（不越界） |
 | 17 | CPU 参考对照工具 | 一个可复现脚本/命令，输出"可见簇集合差异" | 与任务 15 的验收判据同源、可回归 |
 
 **阶段 3：N3 软光栅**
@@ -2934,3 +2940,134 @@ DAG 割用任务 9 的 `maxParentLODError`：`ownError` = 孩子记录的该值�
 5. 逐帧主机写（实例表 / 三阶段参数 / 假簇表）仍是任务 13/14/15 的既有债（相机运动时理论上跨帧交错）；真正修法是随帧轮转暂存环。
 6. 64 实例域钳制保留（CPU/GPU 同口径）。
 7. 逐簇局部 LOD 判据在"父子距离跨过阈值"时可能同时选中父子两级（局部判据固有余量，真实 Nanite 用 DAG 遍历消掉）；CPU/GPU 同一判据 ⇒ 不影响逐簇一致。
+
+### 14.25 任务 16 实施记录：可见簇列表 → 间接绘制参数（2026-09-20）
+
+**① 补掉的缺口与最终数据流**：任务 14/15 把可见簇算出来了却没有消费者（光栅端吃的是任务 3 的假簇链，
+`fake_clusters=6 → count_buffer=6 indirect_cmds=6 rasterized_clusters=6`）。任务 16 把两段接成一条链：
+
+```
+Nanite_CullChain3（单个帧图 pass 体）
+  Phase1 实例剔除（掩码）→ Hi-Z 构建 → Phase2/3 三阶段剔除
+    └─ 接受一个可见簇时（Nanite_ClusterBVH.comp.slang）：
+         slot = InterlockedAdd(u_VisibleClusterCount, 1)          // 可见簇素（不截断）
+         if (slot < visibleCapacity) u_VisibleClusters[slot] = ref
+         if (slot < drawCapacity)  { u_IndirectCommands[slot] = cmd; InterlockedAdd(u_DrawCount, 1) }
+         else                        InterlockedAdd(u_Stats[kStatDrawTruncated], 1)
+  → 屏障 Compute → DrawIndirect
+  → NaniteRaster::RecordRasterPass(DrawIndexedIndirectCount(indirect, count=u_DrawCount,
+                                                             maxDrawCount=容量, stride=20))
+```
+
+**② 字段映射（`NaniteMakeClusterDrawRange` / `NaniteMakeIndirectCommand`，CPU/GPU 同一份定义）**
+
+| 命令字段 | 取值 | 依据 |
+|---|---|---|
+| `indexCount` | `triangleCount × 3` | 簇内**索引个数**（`NaniteClusterRecord::triangleCount` ≤ 64） |
+| `firstIndex` | `triangleOffset × 3` | 簇在打包索引段里的**首个索引位置**（索引段是 3×u16 进 u32[2] = 8B/三角形，故"索引位置"与索引宽度无关） |
+| `vertexOffset` | `vertexOffset`（原样搬运） | 簇的顶点段起始**记录下标** |
+| `instanceCount` | `1` | 一个簇 = 一次绘制 |
+| `firstInstance` | **簇号**（簇表下标） | 光栅端用 `SV_InstanceID` 收它；也是"每条命令归属哪个簇"的唯一标识 |
+
+**③ "无空转"的三重保证（逐条可查）**
+1. **同一次派发写出**：命令与可见簇引用写在同一原子槽位 `slot`；绘制计数只在"真的写了命令"时 +1
+   ⇒ `u_DrawCount` 恒等于"命令缓冲里 `[0, count)` 的有效条数"，不存在"没写就画"。
+2. **只画 `[0, count)`**：`DrawIndexedIndirectCount` 的条数由 GPU 写出（CPU 不参与），
+   `maxDrawCount` 只是容量上界；`drawCapacity ≤ 容量` 是 CPU 侧钳制 ⇒ `count ≤ maxDrawCount` 恒成立
+   （`IRHICommandList::DrawIndexedIndirectCount` 的硬约束）。
+3. **不残留上一帧命令**：绘制计数每帧在**命令缓冲内**用 4B 拷贝清 0（常驻 0 源，任务 13/15 的修法）；
+   零可见簇时计数为 0 ⇒ 画 0 条。**全链路没有一处主机写清零**（任务 13 实测主机写会错读成两倍）。
+
+**④ 假簇链的取舍（明确裁决：保留为"自证 + 退化"开关，默认不参与绘制）**
+- 新增 cfg 键 `nanite_fake_chain`（默认 0）：`0` = 绘制由可见簇列表驱动（默认档，任务 16 的验收对象）；
+  `1` = 退回任务 3 的固定命令通道（自证/回归）。
+- 退化路径：可见链**尚未就绪**（资产/BVH 未入库 ⇒ Phase 2/3 不派发、一条命令都产不出来）时自动走假簇链。
+  **"实例数为 0"不算退化** —— 那正是"零可见簇 ⇒ 零绘制"的边界，必须走可见链（走假簇链会画出 6 条，
+  把边界验收掩盖掉）。
+- **绘制录在产出命令的那个 pass 体内**（假簇链录在 `Nanite_Cull`、可见链录在 `Nanite_CullChain3`），
+  顺序由命令缓冲里的 `Compute → DrawIndirect` 屏障给出 —— 帧图对两个零资源 pass 的排序不可依赖
+  （`TopologicalSort` 对 inDegree=0 的 pass 按 LIFO 处理；任务 15 已为 Phase1→Phase2 踩过这条）。
+  代价（如实）：开启档 pass 数 **15 → 14**（`Nanite_Raster` 不再单独注册），既有 12 个 pass 的集合与顺序
+  一字不变（判据 ⑥b 仍 PASS）。
+- `LogFakePipelineReadback` 只在**假簇链是绘制来源**时打印（否则同一帧会有两条互相矛盾的"画了多少"）。
+
+**⑤ 绘制端的两处必要改动**
+- **占位索引缓冲必须覆盖整个索引位置空间**：本通道仍是"数次数"的占位光栅（真实软光栅是任务 18），
+  但 `DrawIndexedIndirectCount` 会拿命令里的真实 `firstIndex/indexCount` 去**绑定索引缓冲**取索引。
+  本设备**未启用** `robustBufferAccess`，越界读索引不是定义行为 ⇒ 缓冲容量按**资产的索引总数**
+  （`header.indexCount`，实测 1,571,091）分配、并钳到可证上界 `簇数上限 × 每簇三角形上限 × 3`。
+  内容 = `0,1,2` 周期模式：任意 `[firstIndex, firstIndex+indexCount)`（两端都是 3 的倍数）都读出
+  `{0,1,2}` 周期序列 ⇒ 顶点着色器按 `SV_VertexID % 3` 取角 ⇒ **每个三角形都非退化**、每个绘制至少
+  1 个片元（退化三角形会被光栅器整块丢弃，计数就不可信）。
+- **计数语义改为"每个绘制恰好一次"**：任务 16 起 `indexCount` 是簇的真实索引数（最多 192）⇒ 一条命令
+  会产生多个片元，"每个片元 +1"不再等于绘制次数。改用 `SV_PrimitiveID == 0`（**绘制内**图元序号，
+  每条命令都从 0 开始）。
+  - **为什么不用"按簇号去重位图"**：可见簇引用是 (实例, 簇) 二元组，同一簇会被同一份资产的多个实例
+    各引用一次，而命令的 `firstInstance` 只带簇号 ⇒ 按簇号去重会把它们的绘制错误地折叠成一条。
+    `SV_PrimitiveID` 是**逐次执行**的量，天然不受影响（这也是它能同时服务"空转=0"判据的原因）。
+  - **设备依赖（如实记录，且已实测）**：Slang 对 HLSL 拼写的 `SV_PrimitiveID` 会让 SPIR-V 声明
+    `OpCapability Geometry`，而 Vulkan 的 SPIR-V 环境规定 `Geometry ⇒ 必须启用
+    VkPhysicalDeviceFeatures::geometryShader`。故在 `VulkanDevice.cpp` **按支持情况启用该特性**
+    （3 行，带中文注释与本条依据）；本引擎不建任何几何着色器管线，开启它对渲染结果零影响。
+    实测开启后 `vuid_lines` 仍是 41、VUID 组成逐条不变。
+
+**⑥ 可验证读数（dump 帧恰好一行，四个数来自四条独立的真实 GPU 路径）**
+
+```
+[Nanite] visible_wiring visible=31648 indirect_count=31648 draws=31648 rasterized=31648
+         empty_draws=0 mismatch=0 src=visible truncated=0 max_draws=1048576
+         cpu_cmds=31648 placeholder_indices=1571091
+```
+
+- `visible` = 可见簇计数缓冲（剔除端原子）——"应该画多少条"；
+- `indirect_count` = 间接命令缓冲 `[0, visible)` 里**字段合法且与 CPU 参考逐字段一致**的条数
+  （CPU 逐字节读回 GPU 内存核验）——"命令缓冲里真的有这么多条"；
+- `draws` = 绘制计数缓冲（= `DrawIndexedIndirectCount` 实际用的 count）——"间接参数条数"；
+- `rasterized` = 绘制端片元 `SV_PrimitiveID == 0` 的原子计数——"GPU 真的执行了这么多次绘制"；
+- `empty_draws = visible − rasterized`（画了却没出片元的条数，必须 0）；
+- `mismatch` = 逐条字段不一致数 + |V−C| + |V−D| + |D−R|（正常运行必须 0）。
+- 两个"边界"自证开关：`nanite_draw_capacity`（截断）与 `nanite_instance_test_count=0`（零可见簇）。
+
+**⑦ 验收证据（本人复跑）**
+- 两个 target 构建 `EXIT=0`（含 3 个改动过的 shader 经 slangc 编译通过）。
+- 单测 **303 → 307 例**（断言 63894 → 64010）全绿；新增 4 例：字段映射（首/末簇、簇内索引范围、
+  `firstInstance=簇号`、合法性反例）、容量截断/零可见簇/空指针/越界簇下标、与 CPU 参考遍历串起来
+  的逐条一致 + 两次打包逐位可复现、布局契约与占位索引上界。关键 MESSAGE：
+  `可见簇=8 → 命令=8 截断=0；首条 indexCount=12 firstIndex=0 vertexOffset=0 firstInstance(簇号)=0；两次打包逐位一致`。
+- 关闭档：12 pass、`nanite_passes=0`、`vuid_lines=41`、指纹冻结 `1C15AB72E688B530…`（未动）。
+- 开启档：14 pass = 既有 12 + `Nanite_Cull` / `Nanite_CullChain3`；`vuid_lines=41`（VUID 组成逐条不变）；
+  两次同参数运行的 `visible_wiring` 行与 `passlist_sha` 逐位相同。
+- 各档读数（同一行口径）：
+  - 默认（64 实例）：`visible=31648 indirect_count=31648 draws=31648 rasterized=31648 empty_draws=0 mismatch=0`；
+  - `nanite_hiz=1`：`…=18888` 四个数一致、`empty_draws=0 mismatch=0`（与任务 15 的 `gpu_clusters=18888` 吻合）；
+  - `nanite_instance_test_count=8`：`…=2593`（8 实例 vs 64 实例 ⇒ 2593 vs 31648，比例关系正确）；
+  - `nanite_draw_capacity=1000`（截断自证）：`visible=31648 indirect_count=1000 draws=1000 rasterized=1000
+    truncated=30648`，`max_draws=1048576` ⇒ **截断但不越界、不崩**（`empty_draws/mismatch` 非 0 是**故意的**
+    截断后果，由 `truncated` 解释）；
+  - `nanite_instance_test_count=0`（零可见簇边界）：`visible=0 indirect_count=0 draws=0 rasterized=0
+    empty_draws=0 mismatch=0` ⇒ 零绘制、不崩、不残留上一帧命令；
+  - `nanite_fake_chain=1`（自证/退化档）：任务 3 的读数仍 `6/6/6/6`，`visible_wiring … src=fake` 如实标注。
+- `on vs off` 转储逐位：**仅 3 个抖动族文件不同**（`hdr` / `prov0_ao_final` / `prov0_ao_raw`），
+  其余 15 个目标 0 差异；并以 `off vs off` 作对照，差异集合**完全相同**（同一族三个文件）⇒ 差异是基线
+  自带抖动，与本改动无关。`on` 的 pass 列表去掉两个 Nanite pass 后与 `off` **逐行相同**。
+
+**⑧ 偏差与风险（不掩盖）**
+1. **"rasterized" 用 `SV_PrimitiveID` 而非"簇号去重位图"**：位图方案在多实例下会把多个实例的绘制
+   折叠（理由见 ⑤），故放弃；代价是引入 `geometryShader` 特性的启用（已实测无新 VUID）。
+2. **`cpu_cmds` 在 `hiz=1` 档与 `visible` 不相等**（31648 vs 18888）：CPU 参考恒为"Hi-Z 关闭"口径
+   （任务 15 的既定口径，CPU 拿不到金字塔逐 texel 内容）；判据只用 GPU 的四个数，`cpu_cmds` 仅作对照。
+3. **占位索引缓冲 ≈ 6.3 MB（Sponza）**：本通道仍是占位光栅，任务 18 的真实软光栅改从 SSBO 读索引/顶点后
+   它即可废弃（或转给任务 22 的 mesh 管线复用）；关闭档不创建（懒建在首次录制时）。
+4. **可见簇为 0 的实测入口是"实例数为 0"**：合成实例网格是**按相机 NDC 反投影**摆出来的，永远在相机前方，
+   因此"相机完全背对"无法在合成场景里构造（如实记录；真实场景接入后才有意义）。
+5. **绘制端每帧要跑 ~3.2 万次间接绘制**（`indexCount` 是簇的真实索引数，最多 192）⇒ 顶点/片元调用数
+   是"可见簇数 × 平均三角形数 × 3"（百万量级）。这是"命令字段用真实索引范围"的必然代价，属占位通道；
+   性能读数与优化归任务 23。
+6. 逐帧主机写（实例表 / 三阶段参数 / 假簇表 / 绘制参数表的**一次性**上传）仍是任务 13/14/15 的既有债。
+7. **新增 GPU 常驻约 21.3 MB**（间接命令 20 B × 1048576 = 21 MB + 每簇绘制参数 16 B × 16384 = 256 KB
+   + 绘制计数 4 B），且**关闭档同样分配**（`NaniteCull::Initialize` 与任务 13/14 一样不区分开关）——
+   与任务 14 §6 记录的"关闭档零新增 GPU 资源这条口径从任务 13 起就不再成立"同一条既有偏差。
+   占位索引缓冲（≈6.3 MB）是**懒建**的，关闭档不创建。
+8. 绘制端的两处"占位"性质必须记住：索引缓冲是模块自建的 `0,1,2` 周期模式、几何是覆盖全 NDC 的
+   占位三角形 —— **本任务没有做真实簇光栅化**（那是任务 18），本任务交付的是"可见簇数 → 绘制条数"
+   这条接线与它的可读回证据。
