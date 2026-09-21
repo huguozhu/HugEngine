@@ -3888,3 +3888,60 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
 **⑫ 明确不做（防止范围蔓延）**
 - 磁盘 I/O 与分段读取（阶段 2）；LOD 选择与预取；页压缩/去重；多资产共享页池的装箱优化；
   画面上的页可视化（任务 26）。
+
+### 14.33 任务 25 前置核查：Material Bin 的现状事实（2026-09-21 起草）
+
+> 按 §14.1「先测量再改」的惯例，任务 25（Material Bin，§5.4）动手前先把"现在到底是什么样"钉死。
+> 下面的每一条都是可复核的代码事实，不是设计意图的复述。
+
+**① 现状：延迟路径**已经**没有逐材质描述符切换**
+- 光栅端读材质的方式是**索引进一个 SSBO**：`softRasterEvaluateMaterial(cluster.materialID, uv, …)`
+  → `u_Materials[materialIndex]`（`Nanite_SoftRasterCommon.slang`），纹理经 **bindless 数组**
+  `u_MaterialTextures[]/u_MaterialSamplers[]` 取（同一个堆）。
+- 硬光栅同源：`Nanite_HardRaster.mesh.slang:198` 把 `cluster.materialID` 透传给片元，
+  片元调**同一个** `softRasterEvaluateMaterial`。
+- ⇒ **一次 dispatch / 一次 draw 就能处理任意多材质的簇**，"draw 爆炸"与"描述符切换"在当前结构下
+  **不可能发生**（不是"优化掉了"，而是结构上不存在这个变量）。§5.4 想减少的那种切换，
+  在本仓库的延迟路径里**从未出现**；它对应的是"每个材质一个描述符集"的旧式实现。
+
+**② 那么 §5.4「按材质分组 cluster」还剩什么价值**
+- 剩下的价值只有**访存局部性**：同材质的簇相邻处理 ⇒ bindless 纹理采样更可能命中同页/同 cache。
+- 而"一次 Draw/Dispatch 处理同一材质的多个 cluster"这条**已经成立**（①），不需要 bin 来实现。
+
+**③ 由此推出的任务 25 范围建议（默认项）**
+1. **读数**（验收明文要求"描述符切换次数可读"）：新增一行报告
+   `descriptor_switches`（预期恒为 0～1）、`material_switches`（相邻处理的簇换材质的次数，
+   作为局部性代理）、`clusters_per_material` 的分布摘要。
+2. **只读的材质 bin**：上传期用 `JobSystem` 生成一份 `u32[clusterCount]` 的"按材质排序的簇下标"
+   辅助数组（不动资产本体、不动 BVH/DAG 引用，故不可能破坏既有路径），并给出"按 bin 顺序遍历时
+   `material_switches` 降到多少"的对照数字。
+3. **开关** `NaniteSettings::materialBin`（默认 **false**），关闭时逐位不变。
+4. **明确不做**：把光栅的遍历顺序真的改成 bin 顺序。理由是一条硬约束 —— 软光栅的最终像素在
+   **深度键平局**时由 UAV 写入顺序决定（§14.31 ⑩ 已实测：模块接管档两次相同运行并非逐位可复现，
+   `lightmapkey.page` 平均差 18.8）。**在平局确定性修好之前改遍历顺序会改变画面**，
+   属"先修根因再谈优化"。这一点必须在任务 25 的报告里写清，不能含糊。
+
+**④ 起草时已取到的实测数（供任务 25 的对照基线）**
+- 资产：`clusters=8287 vertices=542190 materials=103 lod_levels=6`（Sponza）。
+- 簇的材质映射：`cluster_material_id=[min=0 max=101 distinct=90] multi_mesh=97 unmapped=4103`。
+
+**⑤ ⚠ 起草时发现的一处异常：`unmapped=4103`（占 8287 个簇的 49.5%）**
+- `NaniteUpload.h:427` 对这个计数器的定义是「一个三角形都落不进任何源网格区间的簇数
+  （**防御：正常必须 0**）」；而实测是 **4103**。按代码自己的口径，这是一个**缺陷候选**，不是正常值。
+- 机理已定位到具体函数（`NaniteUpload.cpp` 的 `FindSourceMeshForTriangle`）：它对
+  `NaniteSourceMeshRange[]` 做**二分查找**，因此**要求该数组按 `firstTriangle` 有序且区间无空洞**。
+  二分查找在"未排序/有空洞"时会返回"未找到"（`return meshes.size()`），于是这些三角形的票数为 0；
+  一个簇的**所有**三角形都未命中时（`mappedTriangles == 0`）才计入 `unmappedClusters`
+  （`NaniteUpload.cpp:1204-1227`），并回落到 `meshes[0].materialIndex`（`:1195,1225`）。
+- 影响：`unmapped` 的簇**全部**被赋成 0 号网格的材质 ⇒ ① 材质归属对这些簇无意义；
+  ② 「按材质分组」在这个资产上对**一半的簇没有区分度**；③ `distinct=90` 与 `materials=103`
+  也对不上，说明有材质没有任何簇在用它。
+- 因此**任务 25 的第一步不是做 bin，而是先裁决这 4103**：是"源网格区间表未排序/有空洞"
+  （则修表或改查找），还是"合并几何的三角形空间本就不被区间覆盖"（则注释里的『正常必须 0』
+  这条期望本身需要更正）。**在裁决之前，任何 Material Bin 的收益数字都不可信。**
+- 这条同时也解释了为什么任务 19 的验收（材质字段与既有 GBuffer 路径逐项可比）能通过：
+  它比的是**材质公式**，不涉及"每个簇的材质归属是否正确"。
+
+> 处置建议（默认项）：把本项列为**任务 25 的前置缺陷**，在其报告里给出裁决与修法；
+> 若判定为"期望值写错"（即该资产合法地存在未覆盖三角形），则只更正 `NaniteUpload.h` 的注释与
+> 读数语义，并把「正常必须 0」改成「在覆盖完整的资产上必须 0」，同时给出该资产的覆盖统计。
