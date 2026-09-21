@@ -60,12 +60,12 @@ GBuffer(8 MRT) ──┬─▶ Shadow(CSM/点/聚/矩形) ──▶ AS_Build(TLA
 | `Engine/Render/GI/RSMIndirect.{h,cpp}` | RSM 间接光的**半分辨率** VPL 求和（16 点 Poisson 盘） |
 | `Engine/Render/GI/GI_SSGI.{h,cpp}` | 屏幕空间漫反射（默认 16 采样、半径 1.0、可半分辨率） |
 | `Engine/Render/GI/GI_SSR.{h,cpp}` | 屏幕空间反射（Hi-Z 层次 march + 线性回退） |
-| `Engine/Render/GI/GI_DDGI.{h,cpp}` | 探针网格 + 二阶 SH（9×float4/探针，32 采样/探针） |
+| `Engine/Render/GI/GI_DDGI.{h,cpp}` | 探针网格 + 二阶 SH（4×float4/探针 = band 0/1 四系数，32 采样/探针） |
 | `Engine/Render/GI/DDGITracePass.{h,cpp}` + `GIProbeGrid.h` | 探针射线的硬件光追 march（可关）+ 网格拟合的纯几何 |
 | `Engine/Render/GI/GITiming.{h,cpp}` | 每源 GPU 时间戳（环形查询池，不阻塞读回） |
 | `Engine/Render/GI/GIRadianceHistory.{h,cpp}` | 前帧 HDR 辐射度（DDGI 回退 / SSGI 的 `L_in` 共同输入） |
-| `Engine/Render/GI/SpatialDenoiseAux.h` | SSGI/SSR 共用的"主输出 → 空间降噪"附属 pass 适配器 |
-| `Engine/Render/GI/*Provider.h` | **6 个常驻 Provider 类**：`ScreenAOProvider`（SSAO/GTAO 同 pass 双模式）、`IBLProvider`、`RSMProvider`、`SSGIProvider`、`SSRProvider`、`DDGIProvider`；**光追四效果**（阴影/RTAO/反射/RTGI）共用一个 `RTProvider.h` 里的 `RTEffectProvider`（4 个实例） |
+| `Engine/Render/GI/SpatialDenoiseAux.h` | SSGI/SSR 共用的附属链适配器：「主输出 → 空间降噪 →（半分辨率时）重建升采样」 |
+| `Engine/Render/GI/*Provider.h` | **7 个常驻 Provider 类**：`ScreenAOProvider`（SSAO/GTAO 同 pass 双模式）、`IBLProvider`、`RSMProvider`、`SSGIProvider`、`SSRProvider`、`DDGIProvider`、`LumenProvider`；**光追四效果**（阴影/RTAO/反射/RTGI）共用一个 `RTProvider.h` 里的 `RTEffectProvider`（4 个实例） |
 | `Engine/Render/RT/` | RT 效果实现：`RTShadowPass` / `RTAOPass` / `RTReflectionPass` / `RTGIPass` + `RTEffectPass`（RT 管线 + SBT + set0 生命周期）+ `STBN` |
 | `Engine/Render/Pipeline/DeferredPipeline_FrameGraph.cpp` | **帧图**：pass 顺序、Provider 遍历、各源依赖声明、Lighting 输入装配 |
 | `Engine/Render/Pipeline/LightingPass.{h,cpp}` | Lighting 的 PSO / 描述符集（每飞行帧一份）/ 合成参数 UBO / 中性占位纹理 |
@@ -82,11 +82,11 @@ GBuffer(8 MRT) ──┬─▶ Shadow(CSM/点/聚/矩形) ──▶ AS_Build(TLA
 
 ### 3.1 源与分类
 
-`GISourceId`（11 个），按**估计器类别**分三类（三个互斥且完备的谓词，不再有"低频/中频/高频"枚举）：
+`GISourceId`（12 个），按**估计器类别**分三类（三个互斥且完备的谓词，不再有"低频/中频/高频"枚举）：
 
 | 类别 | 谓词 | 源 | 语义 |
 |---|---|---|---|
-| 世界空间 / 环境 | `IsWorldSpaceSource` | `IBL`、`Lightmap`（**未实现**）、`DDGI` | 与视角无关，屏外仍有效 |
+| 世界空间 / 环境 | `IsWorldSpaceSource` | `IBL`、`Lightmap`（**未实现**）、`DDGI`、`Lumen` | 与视角无关，屏外仍有效 |
 | 屏幕空间 / 单次反弹光栅 | `IsScreenSpaceSource` | `SSGI`、`SSR`、`SSAO`、`GTAO`、`RSM` | 逐屏幕像素估计，受屏幕覆盖限制 |
 | 硬件光追 | `IsRayTracingSource` | `RTGI`、`RTReflection`、`RTAO` | 需要 TLAS + RT PSO |
 
@@ -168,7 +168,7 @@ struct GIConfig {
 
 **注册**（`DeferredPipeline::Initialize`，顺序即帧图遍历顺序）：
 `ScreenAOProvider` → `IBLProvider` → `RSMProvider` → `SSGIProvider` → `SSRProvider` → `DDGIProvider`
-→（RT 基础设施就绪后）`RTEffectProvider` × 4（Shadow / AO / Reflection / GI）。
+→ `LumenProvider` →（RT 基础设施就绪后）`RTEffectProvider` × 4（Shadow / AO / Reflection / GI）。
 
 ---
 
@@ -265,8 +265,8 @@ color += emissive;
 | **RSM** | 单次反弹 VPL（16 点 Poisson 盘） | diffuse | RSM 512²×3；间接光半分辨率 | RSM 光栅 ~0.14 ms + 间接 ~0.14 ms | 光源视锥按**场景包围盒**拟合（固定、视角无关） |
 | **SSGI** | `Σ(L_in·cosθ)/Σcosθ`，解析上等于 `E/π` | diffuse | 全/半分辨率（`halfRes`） | ~0.44 ms @16 采样（64 采样 1.27 ms） | 需前帧 HDR 作 `L_in`；噪声较高 |
 | **SSR** | Hi-Z 层次 march + 线性回退 | specular | 全/半分辨率 | ~4.3 ms（场景尺度参数、256 步） | 只能命中深度图里的**可见面**；`alpha<0` 协议 |
-| **SSAO / GTAO** | 屏幕空间遮蔽（GTAO：地平线切片 + 解析积分） | AO | 全/半分辨率 | — | 同一 Provider 双模式；半分辨率时**不降噪**（已知边界） |
-| **DDGI** | 探针网格二阶 SH（9×float4/探针，32 采样） | diffuse | 探针场（拟合后 192/1408/9408 探针） | 探针更新 ~0.019 ms + 可选光追 march | 网格按场景包围盒拟合；网格覆盖置信度；可 `updateStride` 时间分摊 |
+| **SSAO / GTAO** | 屏幕空间遮蔽（GTAO：地平线切片 + 解析积分） | AO | 全/半分辨率 | — | 同一 Provider 双模式；半分辨率时 AO/Blur 纹理均降半（无独立降噪链） |
+| **DDGI** | 探针网格二阶 SH（4×float4/探针 = 4 系数，32 采样） | diffuse | 探针场（拟合后 192/1408/9408 探针） | 探针更新 ~0.019 ms + 可选光追 march | 网格按场景包围盒拟合；网格覆盖置信度；可 `updateStride` 时间分摊 |
 | **RTGI** | 余弦加权半球追踪 | diffuse | 1/4 分辨率（默认） | — | 命中点辐射度走共用 `EvaluateHitRadiance` |
 | **RT 反射** | 镜面方向追踪 + GGX | specular | 1/2 分辨率 | — | 同 `alpha<0` 协议 |
 | **RTAO** | 半球遮蔽 | AO | — | — | 与 SSAO/GTAO 归一化共存 |
@@ -306,13 +306,13 @@ color += emissive;
   门控 `CaptureRadiance`。
 - 采样方向由 GBuffer 法线构造 TBN 后变换（世界/view 空间混用曾是主因缺陷）；可见性判据是
   `sZ ≤ sPos.z + bias`（view 空间朝 −Z）。
-- 默认 16 采样、半径 1.0，可半分辨率（半分辨率时**附属降噪被跳过**，是已知边界）。
+- 默认 16 采样、半径 1.0，可半分辨率（半分辨率的降噪链见 §9.2：先按信号分辨率降噪，再由升采样级重建到全分辨率）。
 - 与 DDGI 的关系：两者估计同一物理量但**不同频段**——实测不存在使 `LowPass(SSGI) ≈ DDGI` 的
   低通尺度（这是 P5"频率分离"整波退场的依据）。两者同时启用会被 REDUNDANCY 判为"重复估计"。
 
 ### 7.4 SSR（屏幕空间反射）
 
-- 两条 march：**Hi-Z 层次**（屏幕空间 DDA，默认）与**线性回退**（`ssr_use_hiz=0`，正式支持的回退路径）。
+- 两条 march：**Hi-Z 层次**（屏幕空间 DDA，默认；`GI_SSR::useHiZ = true`）与**线性回退**（`useHiZ = false`，正式支持的回退路径）。
 - **屏幕参数必须做透视校正**：屏幕段的参数 `t` 不是射线参数，`1/w` 才在屏幕空间线性。修法：
   `w(t) = w0·wT/((1−t)·wT + t·w0)`、`tau(t) = t·worldLen·w0/((1−t)·wT + t·w0)`，由此精确得到射线点
   与其 NDC 深度。不做校正时实测偏差可达命中容差的 100 倍以上（反射整片丢失）。
@@ -328,7 +328,7 @@ color += emissive;
 
 ### 7.5 DDGI（动态漫反射探针）
 
-- 结构：3D 探针网格 → compute 每帧采样/追踪更新二阶 SH（band 0/1/2 = 9×float4/探针，32 采样/探针）
+- 结构：3D 探针网格 → compute 每帧采样/追踪更新二阶 SH（band 0/1 = 4 系数，4×float4/探针，32 采样/探针）
   → Lighting 三线性插值采样。
 - **网格按场景包围盒自动拟合**：纯几何在 `GIProbeGrid.h`（有单测）。规则：三轴共用同一格距，但每轴
   探针数按自己的边长取 `ceil(size/cell)+1`；原点是包围盒最小角。
@@ -356,8 +356,9 @@ color += emissive;
 - 一个 Provider 两种模式（`Handles(SSAO)` 与 `Handles(GTAO)` 都为真），层栈选哪个就切哪个模式；
   二者互为替代，同时启用会被 REDUNDANCY 判为**严格冗余**并可去重。
 - AO 只作用于**间接项**（直接光与自发光不乘 AO）；`aoIntensity` 是强度控制。
-- SSAO 的模糊（`SSAO_Blur`）在 SSAO pass **内部**完成，因此本 Provider 不暴露附属 pass 链；
-  半分辨率的"不降噪"问题只出现在 SSGI / SSR（它们有独立的 `SpatialDenoiseAux` 链）。
+- SSAO 的模糊（`SSAO_Blur`）在 SSAO pass **内部**完成（半分辨率时模糊同样在半分辨率上进行），
+  因此本 Provider 不暴露附属 pass 链；需要"降噪 + 重建升采样"两级链的只有 SSGI / SSR
+  （它们共用 `SpatialDenoiseAux`）。
 
 ---
 
@@ -395,8 +396,11 @@ color += emissive;
 ### 9.2 半分辨率
 
 `GIConfig::halfRes` 打开后，屏幕空间源（SSGI/SSR/SSAO/GTAO）输出纹理降半（省约 3/4 像素着色），
-Lighting 侧线性升采样。**已知边界**：半分辨率下 SSGI/SSR 的附属降噪被跳过（`AuxActive()` 直接
-返回 false），根治需要"重建升采样"这一信号属性（属统一降噪框架）。
+Lighting 侧线性升采样。**SSGI / SSR 的降噪链按信号分辨率自适应**（步骤 34 起）：
+全分辨率信号走 `[Denoise]`，半分辨率信号走 `[Denoise@信号分辨率] → [Upscale→全分辨率]`
+（`SpatialDenoiseAux::SyncSizes` 每帧按纹理实况核对，运行时切 `halfRes` 当场生效）；
+`HE_DENOISE_HALFRES=off/denoise/full` 可在不重编的前提下 A/B 这三种形态（默认 `full`）。
+SSAO/GTAO 的 AO 纹理仍在半分辨率直接线性升采样（其 `SSAO_Blur` 在半分辨率上执行）。
 
 ### 9.3 降噪现状
 
@@ -404,7 +408,7 @@ Lighting 侧线性升采样。**已知边界**：半分辨率下 SSGI/SSR 的附
 |---|---|
 | 屏幕空间源 | `Denoiser`（空间 5×5 双边；σ 可配 `SetDepthSigma/SetNormalSigma`，SSGI/SSR 共用 `SpatialDenoiseAux.h`） |
 | 光追效果 | `RTDenoiser`（时域累积 + 空间滤波），链路是 `std::vector<Stage>`（顺序即执行顺序，加一级只需 push） |
-| 统一框架 | **未做**（`DenoiseSignal` + 统一历史分配 + 批量 dispatch + 框架级有效性契约）。任务已迁到 `Lumen设计与实现` §10，因为它的验收对象是 Lumen 的多信号共存 |
+| 统一框架 | **已落地（步骤 34 / 35）**：`PostProcess/DenoiseSignal.{h,cpp}` 的 `DenoiseSignal`（含 `needsUpscale`）/ `DenoiseHistoryPool`（统一历史分配，纹理与缓冲）/ `DenoiseSignalRegistry`（多信号登记 + 摘要），以及框架级有效性契约（`alpha < 0` = 本条无数据，合成端唯一判定入口 `SourceIsValid()`）。**未做**的是"一次 dispatch 处理所有信号"的批量派发。任务记录在 `Lumen设计与实现` §10（它的验收对象是 Lumen 的多信号共存） |
 
 ### 9.4 读数与告警
 
@@ -456,13 +460,13 @@ Lighting 侧线性升采样。**已知边界**：半分辨率下 SSGI/SSR 的附
 
 | 项 | 状态 |
 |---|---|
-| SSR 只能反射相机可见面；单 pass ~4.3 ms | 固有性质 + 已知成本，半分辨率/降噪是后续方向 |
+| SSR 只能反射相机可见面；单 pass ~4.3 ms | 固有性质 + 已知成本；半分辨率与降噪链已落地（步骤 34），进一步靠时域重投影 |
 | SSR Hi-Z 在"射线脚下的地面永远比射线近"的几何里层级长期停在 0 | 时间收益远小于步数收益（实测 ~1.06×）；优化（只在穿越时降级）已记为重开条件 |
 | Lightmap 源 | **未实现**（`ToPipelineCap` 刻意不给能力位）。原任务已取消；已落地的基础设施（GBuffer 第 8 MRT 的光照图键、程序化箱式投影、检查脚本）保留 |
-| 统一降噪框架 / Provider 执行单位收敛 / P6 | **未做**，任务在 `Lumen设计与实现` §10 / §11 |
+| 统一降噪框架（11.3） | **已落地**（步骤 34/35：`DenoiseSignal` / `DenoiseHistoryPool` / `DenoiseSignalRegistry` + 框架级有效性契约）。剩余：批量派发、Provider 执行单位收敛、P6，任务在 `Lumen设计与实现` §10 / §11 |
 | IBL / DDGI / RSM 的逐源白炉真值校验 | 未做（RTGI 与 SSGI 已补齐） |
 | 其它示例（02.Cube / 03.Sponza-Forward / AISamples）的 Forward 观感 | 未逐个跑图（工作区只构建 06.GILab）；IBL 修好、RSM 换固定光锥后画面变亮/变阴影是修复 |
-| 半分辨率下不降噪 | 同上（需 `needsUpscale` 信号属性） |
+| 半分辨率降噪 | **已做**（步骤 34：`[Denoise@信号分辨率] → [Upscale→全分辨率]`）；SSAO/GTAO 仍为半分辨率直接升采样 |
 
 ---
 
@@ -491,8 +495,8 @@ Lighting 侧线性升采样。**已知边界**：半分辨率下 SSGI/SSR 的附
 | 通道 stack | `diffuse` / `specular` / `ao` 三个源列表（每通道最多 4 个源） |
 | `mode` | `0` = 相加（对照），`1` = 归一化加权（默认） |
 | `furnace` | 白炉数值测试：全白环境 + albedo 1 + 关直接光，各源真值 = 1 |
-| `alpha < 0` | 该源"本条光线无效"（SSR / RT 反射 / RSM 未产出等） |
+| `alpha < 0` | 该源"本条无效"（SSR / RT 反射 / Lumen；其余源在整屏恒有效）。RSM 未产出时由 LightingPass 回绑黑色占位，不走该协议 |
 | 置信度位 | `CAMERA_COVERAGE`（屏幕覆盖）/ `PROBE_GRID`（DDGI 网格覆盖） |
 | 能力位 | `kPipelineGI*`：管线"架构上能否承载"，与设备能力（`rtSupported`）两层判断 |
-| 关键 binding | 0/1/2 GBuffer A/B/C、3 Depth、4 光照图键、5 RSM 间接光、6 DDGI 网格参数、9 聚光阴影、17 光源 SSBO、18 阴影 SSBO、19 SSGI、20 SSAO、21 SSR、22 DDGI 探针、23 GBuffer worldPos、24–27 RT 效果、28/29 disneyA/B、31 `GIBlendParams` |
+| 关键 binding | 0/1/2 GBuffer A/B/C、3 Depth、5 RSM 间接光、6 DDGI 网格参数、9 聚光阴影、17 光源 SSBO、18 阴影 SSBO、19 SSGI、20 SSAO、21 SSR、22 DDGI 探针、23 GBuffer worldPos、24–27 RT 效果、28/29 disneyA/B、30 光照图键、31 `GIBlendParams`、32 Lumen 输出 |
 | 关键常量 | IBL：32²/128²×5/512²；RSM：512²×3 + 16 VPL；SSGI：16 采样/半径 1.0；DDGI：32 采样/探针、二阶 SH；RTGI：1/4 分辨率；RSM 间接光 `kDownscale = 2` |

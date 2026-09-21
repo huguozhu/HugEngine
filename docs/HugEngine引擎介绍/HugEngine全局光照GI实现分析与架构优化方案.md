@@ -1,6 +1,6 @@
 # HugEngine 全局光照（GI）实现分析与架构优化方案
 
-> 日期：2026-09-08
+> 日期：2026-09-08（内容核对更新：2026-09-21）
 >
 > 说明：本文由三份文档按逻辑顺序（**现状分析 → 架构选型 → 工程落地**）合并而成：
 > 1. `HugEngine全局光照GI实现分析与优化建议.md`（现状盘点 + 正确性缺陷 + 优化建议 + 工业界缺口）
@@ -24,121 +24,130 @@
 
 ## 一、现有 GI 技术清单
 
-工程里 GI 分两套并行体系：**光栅化 GI 子系统**（`Engine/Render/GI/`，统一继承 `IGlobalIllumination`）和**硬件光追路径**（`Engine/Render/RT/`，继承 `RTEffectPass`）。
+工程里 GI 分三套并行体系：**光栅化 GI 子系统**（`Engine/Render/GI/`，`GI_*` 类统一继承 `IGlobalIllumination`，并由 `IGIProvider` 包装成帧图可遍历的 Provider）、**硬件光追路径**（`Engine/Render/RT/`，继承 `RTEffectPass`），以及**虚拟化几何 GI（Lumen）**（`Engine/Render/GI/LumenProvider.h` + `Engine/Render/Lumen/`）。
 
 | # | 技术 | 文件 | 原理 | 反弹 | 动态性 | 状态 |
 |---|---|---|---|---|---|---|
 | 1 | **GI_IBL** | `GI/GI_IBL.cpp` | Split-Sum 近似：辐照度图 + 预滤波图 + BRDF LUT | 环境光 | 天空盒变化时 | ✅ 完整 |
-| 2 | **GI_SSGI** | `GI/GI_SSGI.cpp` | 屏幕空间半球采样 + 深度可见性 | 1 次 | 每帧 | ✅（有 bug）|
-| 3 | **GI_SSR** | `GI/GI_SSR.cpp` | 屏幕空间线性 Ray March 镜面反射 | 1 次 | 每帧 | ✅ |
-| 4 | **GI_RSM** | `GI/GI_RSM.cpp` | 光源 POV 渲染 VPL + 5×5 邻域累积 | 1 次 | 每帧 | ✅ |
-| 5 | **GI_DDGI** | `GI/GI_DDGI.cpp` | 探针网格 + SH 辐照度 + 时间混合 | 多帧累积 | 每帧 | ✅ |
+| 2 | **GI_SSGI** | `GI/GI_SSGI.cpp` | 屏幕空间半球采样 + 深度可见性 + 前帧 HDR 作 `L_in` | 1 次 | 每帧 | ✅ |
+| 3 | **GI_SSR** | `GI/GI_SSR.cpp` | Hi-Z 层次 march（含线性回退）镜面反射 | 1 次 | 每帧 | ✅ |
+| 4 | **GI_RSM** | `GI/GI_RSM.cpp` | 光源 POV 渲染 VPL（3 附件）+ 半分辨率 16 点 Poisson 盘求和 | 1 次 | 每帧 | ✅ |
+| 5 | **GI_DDGI** | `GI/GI_DDGI.cpp` | 探针网格 + 二阶 4 系数 SH 辐照度 + 时间混合 | 多帧累积 | 每帧 | ✅ |
 | 6 | **RTGIPass** | `RT/RTGIPass.cpp` | 硬件光追余弦半球采样 1 次反弹 | 1 次 | 每帧 | ✅ |
-| 7 | **SSAO** | `PostProcess/SSAO.cpp` | 半球采样环境光遮蔽（属 AO 而非 GI，但同属间接光）| — | 每帧 | ✅ |
+| 7 | **SSAO / GTAO** | `PostProcess/SSAO.cpp` | 半球采样环境光遮蔽（GTAO 为地平线切片，同 pass 双模式）| — | 每帧 | ✅ |
+| 8 | **Lumen** | `GI/LumenProvider.h` + `Lumen/` | Mesh SDF + Surface Cache + Screen Probe + Radiance Cache | 多帧累积 | 每帧 | 🚧 在建（骨架已接入层栈）|
 
 `GIMode` 枚举中 **VXGI（体素锥追踪）和 ReSTIR GI 仍是占位，无实现类**（`ReSTIRPass` 实现的是直接光照 DI 重采样）。
 
 ## 二、各技术现状要点
 
 - **IBL**：辐照度 32²、预滤波 128²×5 mip、BRDF LUT 512²；用光栅化全屏三角形逐面 offscreen pass 生成（共 37 个 pass = 辐照度 6 面 + 预滤波 5 mip×6 面 + BRDF LUT 1），仅在 `m_Dirty` 时重建。⚠️ **BRDF LUT 的 Smith `k` 值存疑**：`IBL_BRDF_LUT.frag.slang:49-50` 是 `a = roughness*roughness; k = a*a*0.5;`，实际展开为 `k = roughness⁴/2`，比 Karis/UE4 IBL 标准的 `k = roughness²/2`（`a=roughness²` 时 `k=a/2`）**多平方了一次**。高粗糙度下几何遮蔽项偏小、间接高光偏亮，建议对照参考实现核查是否为笔误。
-- **SSGI**：32 半球采样、全分辨率、无时域累积、无降噪；参数走 UBO（592 字节超 push constant 256 上限）。
-- **SSR**：64 步线性 march、`stepSize=0.5`、全分辨率、无 Hi-Z、无时域重投影。
-- **RSM**：512² 光源 POV 双 MRT，消费端每像素 5×5=25 个 VPL 采样，硬编码 `*0.03`。
-- **DDGI**：8×4×8=256 探针、32 Fibonacci 球面采样、SH band 0/1/2、`blendAlpha=0.85`、前帧 HDR 反馈；三线性插值消费。
-- **RTGI**：**每轴 /4（= 总 1/16 像素）**分辨率、SPP 默认 **1**（shader 端 clamp 1–8、cpp 端 clamp 1–16，`RTGIPass.cpp:154`/`RT_GI.rgen.slang:88`）、miss 回退 DDGI 探针、CVar 热更新。仅在 原 `HybridRTPipeline`（该类已于 2026-09 删除；RT 现作为 GI 源由 Deferred 层栈消费） 路径激活（`DeferredPipeline` 里 RT 纹理指针恒 `nullptr`）。
+- **SSGI**：采样核 32 方向（CPU 固定种子生成，`kSSGIKernelSize = 32`）、默认 16 采样/半径 1.0；`halfRes` 可半分辨率；降噪链 `[Denoise@信号分辨率] → [Upscale]`（步骤 34 起半分辨率也降噪）；参数走 UBO（720 字节超 push constant 256 上限）。
+- **SSR**：默认 **Hi-Z 层次 march**（屏幕空间 DDA，`useHiZ = true`），另有线性回退路径；`maxSteps ≥ 256`、`thickness = 场景对角线×0.0025`（场景尺度参数，帧图推导）；半分辨率 + 空间降噪（`SpatialDenoiseAux`）；无时域重投影。
+- **RSM**：512² 光源 POV **三 MRT**（世界位置 / 编码法线 / VPL 出射辐射度 `L_v`）；消费端为**半分辨率独立 pass**（`RSM_Indirect`，16 点 Poisson 盘），VPL 采样缩放由光锥半宽推出（`RSMVplScale`），不再是经验常数。
+- **DDGI**：二阶 4 系数 SH（`4×float4/探针`）、32 Fibonacci 球面采样、`blendAlpha=0.85`；网格默认按场景包围盒**自动拟合**（`autoFitGrid`，字段默认 8×4×8/cellSize 3.0 仅为回退值）；三线性插值消费；辐射度来源优先级为 Screen Probe → 光追 march → RSM → IBL 辐照度（不再采前帧 HDR）。
+- **RTGI**：**每轴 /4（= 总 1/16 像素）**分辨率、SPP 默认 **1**（shader 端 clamp 1–8、cpp 端 clamp 1–16，见 `RTGIPass::Execute` 与 `RT_GI.rgen.slang` 的 `min(g_PC.sampleCount, 8u)`）、miss 回退 DDGI 探针（**仅当 DDGI 不在漫反射层栈时**）、CVar 热更新。作为 GI 源由 Deferred 层栈消费（`RTEffectProvider::Effect::GI` 注册），RT 输出纹理在本帧产出时绑给 Lighting（`DeferredPipeline_FrameGraph.cpp` 的 `in.rtGI = rtGITex`）。
 - **SSAO**：64 采样核 + 4² 噪声旋转 + blur。
 
 ---
 
 ## 三、优化建议（按优先级）
 
+> **状态标注（2026-09-21 核对）**：本节是 2026-09-08 的缺陷盘点。下列第 1–7、10–13 项已修复或改造，第 14 项的一半（余弦加权）已按标准做法落地；第 8 项（GBuffer 采样数）与第 15 项（IBL 用 Compute 生成）至今仍然成立，第 9 项部分成立。每项保留原始分析，并在标题后标注现状。
+
 ### 🔴 第一优先级：正确性 Bug
 
-**1. SSGI 采样点投影用了错误的矩阵** — `SSGI.frag.slang:34`
+**1. SSGI 采样点投影用了错误的矩阵** —— ✅ **已修复**
 
 ```hlsl
-float4 off = mul(u_Proj, float4(sPos, 1.0)); off.xyz /= off.w;  // ❌ 用逆投影矩阵投影 view-space 点
+// 当时（错误）：u_Proj 实际是逆投影矩阵，却用它把 view-space 采样点投影到屏幕
+float4 off = mul(u_Proj, float4(sPos, 1.0)); off.xyz /= off.w;  // ❌
 ```
 
-`u_Proj` 在 `GI_SSGI.cpp:93` 被赋值为 `glm::inverse(perspective...)`（**逆**投影，clip→view）。第 22–23 行用它重建 view 位置是对的，但第 34 行把 view-space 采样点 `sPos` 再乘**逆**投影矩阵去求屏幕 UV 是数学错误的——应该乘**正向**投影矩阵。这导致可见性检测采样的屏幕位置 `suv` 是错的，SSGI 大概率处于"半残"状态。需把正向投影矩阵一并传入 UBO（参考 SSAO 同时传 `u_InvProj` + `u_Proj` 两个矩阵的正确做法，见 `SSAO.cpp:198-205`）。
+`u_Proj` 曾被赋值为 `glm::inverse(perspective...)`（**逆**投影，clip→view）：用它重建 view 位置是对的，把 view-space 采样点 `sPos` 再乘**逆**投影矩阵去求屏幕 UV 则是数学错误的——应该乘**正向**投影矩阵。这导致可见性检测采样的屏幕位置 `suv` 是错的，SSGI 一度处于"半残"状态。
 
-**2. DDGI 网格参数在 C++ 与 Shader 里硬编码重复，且不同步** — `RT_DDGI.slang:5-11`
+**现状**：UBO 里 `invProj` / `proj` / `view` 三个矩阵各自独立（`GI_SSGI.cpp` 的 `Render` 填充 `ub.invProj/ub.proj/ub.view`），着色器重建用逆矩阵、投影用正矩阵（`SSGI.frag.slang` 的 `mul(u_Proj, float4(sPos,1.0))`），法线用 `u_View` 从世界空间转到 view 空间。
+
+**2. DDGI 网格参数在 C++ 与 Shader 里硬编码重复，且不同步** —— ✅ **已修复**
 
 ```hlsl
-// TODO: 改为 Uniform Buffer，当前与 GI_DDGI 默认值保持同步
+// 当时：RT_DDGI.slang 自持常量
 static const uint kDDGI_GridX = 8; ... static const float3 kDDGI_Origin = float3(-10,-2,-10);
 ```
 
-而 `GI_DDGI.h:47` 的 `gridX/gridY/gridZ/gridOrigin/cellSize` 是可变的运行时字段。一旦 C++ 侧改网格，`SampleDDGI` 的三线性插值索引和钳位边界就全部错位（越界读取、辐照度错位），而 `DDGI.comp` 里又用 UBO 传的 `u_GridSize`。**三处参数源不一致是隐患**，应统一改为 UBO/SSBO 传递，`RT_DDGI.slang` 不再自持常量。
+而 `GI_DDGI.h` 的 `gridX/gridY/gridZ/gridOrigin/cellSize` 是可变运行时字段；一旦 C++ 侧改网格，`SampleDDGI` 的三线性插值索引与钳位边界就会错位。
 
-**3. RSM 无条件索引 `u_ShadowData[0]` 且守卫字段选错** — `DeferredLighting.frag.slang:245`
+**现状**：`RT_DDGI.slang` 不再自持常量，网格参数由 includer 声明为 cbuffer（`u_DDGIGridOrigin` / `u_DDGIGridSize`，与 `GI_DDGI::ProbeGridUniform` 前两个 float4 一致）——Deferred 侧走 `ShaderTypes` 的 `kGPUBinding_DDGIGridParams = 6`，RTGI 侧走 set0 的 binding 8。**三处参数源已收敛为一处**。
+
+**3. RSM 无条件索引 `u_ShadowData[0]` 且守卫字段选错** —— ✅ **已修复**
 
 ```hlsl
+// 当时（逻辑 UB，非内存越界）：
 if (iblIntensity > 0.0 && u_ShadowData[0].shadowParams.z > 0.0) {
 ```
 
-`u_ShadowData` 是 `StructuredBuffer<GPUShadowData>`，C++ 侧恒按 `MAX_SHADOWS`（>0，`DeferredPipeline.cpp:67`）分配，故 `[0]` **始终在界内，并非内存越界**。真正的缺陷是**读脏数据 + 守卫字段选错（逻辑 UB）**：
+`u_ShadowData` 是 `StructuredBuffer<GPUShadowData>`，C++ 侧恒按 `MAX_SHADOWS` 分配，故 `[0]` 始终在界内；真正的缺陷是**读脏数据 + 守卫字段选错**：`lightCount==0` 时该元素保留上一帧残留，`shadowParams.z` 为脏值可能误触发；首个 shadow 非方向光时又会用 spot/point 的 VP 矩阵去采样方向光 RSM 渲染的图。
 
-- `lightCount==0` 时 `ShadowSystem` 不写入任何元素（`ShadowSystem.cpp` 仅 `m_ActiveCount>0` 才写），`u_ShadowData[0]` 保留上一帧残留/未初始化内容，`shadowParams.z` 为脏值，RSM 分支可能被误触发；
-- 首个 shadow 非方向光（Spot/Point/Rect）时，`shadowParams.z` 对所有光源类型都是 shadowStrength、恒 `>0`，导致用 spot/point 的 VP 矩阵去采样为方向光 RSM 渲染的 Position/Flux 图 → **结果错位**。
-
-**正确修复**：不能只加 `lightCount > 0`，还应校验光源类型字段 `shadowParams.w`（区分方向光/CSM，参考同文件 210-211 行的用法），确保只有存在方向光 shadow 时才走 RSM 分支。
+**现状**：RSM 求和已搬进共享的半分辨率 pass（`GI/RSM_Indirect.frag.slang`），该 pass 由帧图按 `rsmPassRegistered && rsmDirLightValid` 门控（方向光存在且投影才注册），光源类型与阴影强度在 C++ 侧判定；`DeferredLighting.frag.slang` 不再读 `u_ShadowData[0]` 走 RSM 分支，只对 `u_RSMIndirect` 做一次采样。原建议的"校验 `shadowParams.w`"由帧图的 `rsmDirLightValid` 谓词承担。
 
 ### 🟠 第二优先级：性能
 
-**4. 光栅化 GI 全部跑在全分辨率，`GISettings.halfRes` 从未接线**
+**4. 光栅化 GI 全部跑在全分辨率，`GISettings.halfRes` 从未接线** —— ✅ **已接线**
 
-`GlobalIllumination.h:43` 定义了 `halfRes`，但 SSGI/SSR/RSM/DDGI/SSAO 的 `Render` 都用 `m_Width/m_Height`（全分辨率）。GI 是低频信号，SSGI/SSAO/DDGI 探针采样、SSR 均可在半分辨率计算后 bilinear 上采样，性能可省约 3/4 像素着色开销。RT 路径已各自支持 `halfRes/quarterRes`，光栅化侧反而没有——这是性价比最高的一处改动。
+`GlobalIllumination.h` 的 `halfRes`（以及 `GITypes.h` 的 `GIConfig::halfRes`）现在真正生效：`GI_SSGI` / `GI_SSR` 用 `halfResW/halfResH` 决定输出纹理尺寸，`SSAO` 有同名的半分辨率尺寸，帧图在构图前调 `SyncOutputSize()` 让开关当场生效；Lighting 侧线性升采样，SSGI/SSR 的降噪链按信号分辨率自适应（`[Denoise@信号分辨率] → [Upscale]`）。
 
-**5. DDGI 探针用全分辨率 HDR 采样低频辐照度** — `DDGI.comp.slang:147`
+**5. DDGI 探针用全分辨率 HDR 采样低频辐照度** —— ✅ **已改造（该路径已不存在）**
 
 ```hlsl
+// 当时：
 float3 radiance = u_PrevHDR.SampleLevel(u_LinearSampler, uv, 0).rgb;
 ```
 
-256 探针 × 32 方向 = 8192 次全分辨率 HDR 纹理采样。DDGI 是极低频信息，`CaptureHDR` 里（`GI_DDGI.cpp:229`）应额外维护一张 1/4 分辨率的 HDR 副本供探针采样，带宽立减。
+`GI_DDGI` 曾自持 `m_PrevHDR` + 下采样 pass，256 探针 × 32 方向 = 8192 次全分辨率 HDR 采样。
 
-**6. SSR 用 64 步线性 march，无 Hi-Z 层级追踪** — `GI_SSR.cpp:59` + `SSR.frag.slang`
+**现状**：探针辐射度来源改为世界空间、视角无关的四条路径（Screen Probe → 光追 march → RSM 世界辐射度 → IBL 辐照度），`DDGI.comp.slang` 已不再采样前帧 HDR；前帧 HDR 也收敛成共享组件 `GIRadianceHistory`（帧图 `CaptureRadiance` 一次捕获，供 SSGI 的 `L_in` 等消费者共用），不再各源各拷一份。
 
-改 Hi-Z（深度 mip 链）层级步进可将步数从 64 降到 ~log2 级别，且命中后用二分细化，质量反而更高。是 SSR 标准优化。
+**6. SSR 用 64 步线性 march，无 Hi-Z 层级追踪** —— ✅ **已实现**
 
-**7. RSM 每像素 25 次 VPL 采样** — `DeferredLighting.frag.slang:249-251`
+**现状**：`GI_SSR::useHiZ = true`（默认）时走 Hi-Z 层次 march（屏幕空间 DDA：射线先投影成屏幕段 s0→s1，按 `2^level` 像素步进，穿透则升层、被遮挡则降层，level 0 用世界空间厚度判据细化），`useHiZ = false` 时回退线性 march；`maxSteps` 默认提到 ≥256（场景尺度参数下），Hi-Z 深度金字塔由 `HiZ_Build` 产出并绑到 binding 4。命中判据仍是世界空间厚度带，另加透视校正（屏幕段参数 `t` ≠ 射线参数 `tau`）。
 
-5×5 全分辨率邻域累积，无重要性采样。可降到 4×4 或用固定 Poisson 盘 16 点 + 随机旋转，配合半分辨率，代价可忽略。
+**7. RSM 每像素 25 次 VPL 采样** —— ✅ **已改造**
 
-**8. DeferredLighting 一次采样 7 张 GBuffer MRT + 阴影/IBL/RSM/SSGI/SSR/DDGI/AO 全套**
+**现状**：5×5 全分辨率邻域累积已被替换为**半分辨率独立 pass**（`GI/RSM_Indirect.frag.slang`，`RSMIndirect::kDownscale = 2`）+ **16 点 Poisson 盘**（`RSM_VPL_COUNT = 16`）；VPL 采样缩放由光锥半宽推出（`RSMVplScale`）。实测该项从 Lighting 里独占约 0.45 ms 降到 1/4 量级，Lighting 侧只剩一次升采样。
 
-`DeferredLighting.frag.slang:82-94` 每像素采样 GBuffer A/B/C/E/F/G 七张，加阴影 3 张 + IBL 3 张 + RSM 2 张 + SSGI/SSR/AO/DDGI。其中 `u_GBufferE`（worldPos）和 `u_Depth` 在阴影、SSGI、clustered 中重复读取。可考虑合并 GBuffer 通道（如把 metallic/roughness 打包进一个 R8G8B8A8），并让 SSGI/SSR 输出降采样纹理减少后续采样带宽。
+**8. DeferredLighting 一次采样 7 张 GBuffer MRT + 阴影/IBL/RSM/SSGI/SSR/DDGI/AO 全套** —— 仍然成立
 
-**9. 两处 push constant 采样核可下沉为静态常量**
+`DeferredLighting.frag.slang` 每像素采样 GBuffer A/B/C/Depth/E/F/G 与光照图键，加阴影贴图 + IBL 3 张 + RSM 间接光 + Lumen/SSGI/SSR/AO/DDGI。其中 `u_GBufferE`（worldPos）与 `u_Depth` 在阴影、SSGI、clustered 中重复读取。可考虑合并 GBuffer 通道（如把 metallic/roughness 打包进一个 R8G8B8A8），并让 SSGI/SSR 输出降采样纹理减少后续采样带宽。
 
-SSGI 的采样核在 CPU 每帧 `Map/Unmap` 重传（`GI_SSGI.cpp:88-95`），实际核是固定种子生成的常量，只需初始化时传一次（与 SSAO 的 kernel 一样是一次性的）。
+**9. 两处 push constant 采样核可下沉为静态常量** —— 部分成立
+
+SSGI 的采样核本身确实是"固定种子生成一次的常量"（`static std::vector<float4> kernel`，只在首次 `Render` 时生成）；但每帧仍要把整个 `ub`（含 `ub.k[32]`）`Map/Unmap` 写进 UBO，所以核数据仍在每帧重传。若要省下这部分，应把核拆到独立的、只写一次的缓冲（或改用 specialization constant），与 SSAO 的一次性 kernel 同做法。
 
 ### 🟡 第三优先级：质量与架构
 
-**10. 多种 GI 同时叠加 + 魔法系数，能量不守恒**
+**10. 多种 GI 同时叠加 + 魔法系数，能量不守恒** —— ✅ **已解决（Wave 1 层栈归一化）**
 
-`DeferredLighting.frag.slang` 里 IBL + RSM + SSGI/RTGI + DDGI + SSR **全部累加**，靠 `*0.5`（DDGI，line 275）、`*0.03`（RSM，line 260）这些硬编码系数压亮度。没有"一份漫反射 GI + 一份镜面 GI + 一个预算"的统一策略。建议：按质量档位显式选型（例如 IBL 打底 + DDGI 或 RTGI 二选一作为漫反射，SSR 或 RT 反射二选一作为镜面），用 `GISettings.enabled/intensity` 统一控制，去掉散落的魔法系数。
+`DeferredLighting.frag.slang` 里曾 IBL + RSM + SSGI/RTGI + DDGI + SSR **全部累加**，靠 `*0.5`（DDGI）、`*0.03`（RSM）等硬编码系数压亮度。
 
-**11. RTGI 声称"时域累积"但实际没有历史缓冲**
+**现状**：三个通道（漫反射 / 镜面 / AO）各持一个**源数组**（`GIBlendParams` UBO，binding 31），合成端按 `GISourceId` 分派采样并做**归一化加权** `Σ(源×w)/Σw`（`mode == 0` 时才是直接相加，仅作 A/B 对照）；IBL / RSM 已变成层栈里的普通源，`*0.5` / `*0.03` 两个魔法系数**在着色器里已不存在**（`GI_DDGI::debugScale` 只用于调试可视化，不参与合成）。强度改由 `giIntensity` / `aoIntensity` 与每源 `weight` 控制。
 
-`RT_GI.rgen.slang:93` 传了 `frameIndex` 做随机抖动，但**没有 history buffer、没有重投影、没有累积/降噪**（RT 目录里只有 ReSTIR/PT 有时域处理）。默认 SPP=1（`RT_GI.rgen.slang:115` 的 `radiance /= n` 只是当帧多 SPP 平均，非跨帧累积）直接输出，噪点严重。要么接一个真正的时域累积 + 降噪 pass，要么靠 DDGI 兜底时把 SPP 压到 1，避免浪费。
+**11. RTGI 声称"时域累积"但实际没有历史缓冲** —— ✅ **已补齐**
 
-**12. DDGI 与 RTGI 双重计入（当前潜在，RT 路径接线后触发）**
+**现状**：RTGI 输出的降噪链由 `RTEffectProvider` 参数化装配：`SetGIPass(pass, temporal, spatial, upscale)` → `[RT_GI_Temporal] → [RT_GI_Denoise] → [RT_GI_Upscale]`（`RTDenoiser` 时域累积 + `Denoiser` 空间滤波 + 亚分辨率重建升采样）。`RT_GI.rgen.slang` 仍用 `frameIndex` 做逐帧抖动供时域累积使用；shader 侧 SPP 上限 8（`min(g_PC.sampleCount, 8u)`）。
 
-`RT_GI.rgen.slang:108` miss 时每条射线回退 `SampleDDGI`，而 `DeferredLighting.frag.slang:275` 又无条件 `color += ddgi * 0.5`。当 RTGI 作为漫反射源时 DDGI 被算了两次。
+**12. DDGI 与 RTGI 双重计入** —— ✅ **已修复（按"源独立"处理）**
 
-⚠️ **注意触发条件**：此缺陷目前**尚未在运行路径激活**——`DeferredPipeline_FrameGraph.cpp:418` 传给 Lighting 的 4 个 RT 指针恒为 `nullptr`（注释"RT 纹理暂未使用"），`rtDiffuseSource` 恒为 0，RTGI 分支不生效。它只在 **原 `HybridRTPipeline`（该类已于 2026-09 删除；RT 现作为 GI 源由 Deferred 层栈消费） 路径**（RT 纹理真正接线）下暴露。修复方向不变：在启用 RTGI 时用 push constant 关掉 DDGI 的直接叠加，或把 miss 回退改为纯天空色。
+**现状**：`RT_GI.rgen.slang` 的 miss 分支在 **DDGI 也在漫反射层栈**时贡献 0——`RTEffectProvider::SetDDGIInStack` 把"DDGI 是否自己就是层栈源"写进 push constant 的 `flags` bit1，rgen 据此决定是否回退 `SampleDDGI`（且回退时要按 `E/π = L` 换算量纲）。归一化合成因此不再把同一份 DDGI 信息按两个槽位的权重计入。同时 RT 输出纹理在本帧产出时**真的绑给了 Lighting**（`in.rtGI = rtGITex`），"RT 纹理恒 nullptr、缺陷未激活"的描述已不成立。
 
-**13. DDGI 探针"屏幕空间采样"导致屏幕外探针永不更新**
+**13. DDGI 探针"屏幕空间采样"导致屏幕外探针永不更新** —— ✅ **已移除屏幕空间依赖**
 
-`DDGI.comp.slang:133` 采样点投影到屏幕外就 `continue`，探针 SH 只靠历史混合维持。转身后 GI 是过期的（时滞/鬼影）。若要真正确保动态，需改用探针射线 march（RT 路径下）或至少用上一帧 HDR 的宽范围采样 + 更低的 `blendAlpha` 兜底。这是当前 DDGI 方案的根本局限，值得在文档里明确。
+**现状**：探针辐射度不再来自屏幕空间重投影采样，改为世界空间来源（Screen Probe 的探针辐射度 SH / 光追 march 的 `u_TracedRadiance` / RSM 世界辐射度 / IBL 辐照度），因此不存在"采样点投影到屏幕外就 `continue`、屏外探针只靠历史混合"的问题；Screen Probe 是屏幕空间的，故加入了深度一致性门限与"没有可用屏幕探针就整条继承历史"的处理（`DDGI.comp.slang` 的 `FetchScreenProbe`）。DDGI 仍保留 `blendAlpha` 时间混合与 `updateStride` 分摊，低频时滞是其固有特性。
 
-**14. DDGI SH 投影缺余弦加权 + 评估端 `max(result,0)` 破坏重建**
+**14. DDGI SH 投影缺余弦加权 + 评估端 `max(result,0)` 破坏重建** —— 一半已按标准做法处理
 
-`DDGI.comp.slang:155-159` 直接投影裸 radiance（无 `cos` 权重），`RT_DDGI.slang:33` 评估端又 `max(result,0)` 逐通道截断。二者都会让辐照度偏暗/畸变。标准 DDGI 应在投影时乘 `cos`（或选辐照度 SH），评估端不做截断（负值来自 band-2 振铃，应靠提高 SH 阶数或 blum 滤波缓解）。
+**现状**：探针投影得到的是**辐射度** SH（`L_lm = 4π/N·Σ L·Y`，不含 cos），Lambert 余弦波瓣的卷积系数 `A_l` 在**评估端**施加（`RT_DDGI.slang` 的 `kDDGI_SH_A0` / `kDDGI_SH_A1`，`EvalDDGI_SH` 里 `E(n) = Σ_l A_l·L_lm·Y_lm(n)`）——这已是 Ramamoorthi & Hanrahan 的标准形式：不能在投影时乘 cos，因为 cos 依赖评估方向（法线），而探针存储时方向未知。**仍保留**的是评估端的 `max(result, 0)` 负值截断（二阶表示的振铃防护）；若要进一步抑制，可改为 SH 窗口化。另：band 2 已在步骤 30 随 Radiance Cache 的统一表示（二阶 4 系数）一并移除。
 
-**15. IBL 生成是光栅化全屏三角形，可用 Compute 一步替代**
+**15. IBL 生成是光栅化全屏三角形，可用 Compute 一步替代** —— 仍然成立
 
 37 个 offscreen pass 属一次性开销，问题不大；但若未来做**运行时动态天空盒**（日夜切换），这 37 pass 会每帧跑。届时建议换 Compute Shader（辐照度/预滤波各一个 dispatch，共享内存分块）。
 
@@ -146,11 +155,13 @@ SSGI 的采样核在 CPU 每帧 `Map/Unmap` 重传（`GI_SSGI.cpp:88-95`），�
 
 ## 四、建议的落地顺序
 
-1. 先修 3 个正确性 bug（SSGI 投影矩阵、DDGI 参数同步、RSM 越界）——低成本、消除隐性错误。
-2. 接上半分辨率管线（`halfRes` 落地到 SSGI/SSR/RSM/DDGI/SSAO）——最大性能杠杆。
-3. SSR 上 Hi-Z + DDGI 用降采样 HDR——次大的带宽收益。
-4. 统一 GI 叠加策略，去掉魔法系数，解决 DDGI/RTGI 双重计入。
-5. 视需求再补 RTGI 时域累积/降噪与 DDGI 探针射线 march。
+> 完成状态（2026-09-21 核对）：下列 1–5 项**已全部落地**，括号内为落点。
+
+1. ✅ 先修 3 个正确性 bug（SSGI 投影矩阵、DDGI 参数同步、RSM 门控）——低成本、消除隐性错误。（第 1–3 项，见 §三）
+2. ✅ 接上半分辨率管线（`halfRes` 落地到 SSGI/SSR/SSAO，RSM 走半分辨率 `RSM_Indirect`）——最大性能杠杆。
+3. ✅ SSR 上 Hi-Z（默认路径，含线性回退）。（DDGI 侧原计划的"降采样 HDR 副本"已不需要：探针辐射度来源已改为 Screen Probe / 光追 march / RSM / IBL，不再采样前帧 HDR。）
+4. ✅ 统一 GI 叠加策略（三通道层栈 + 归一化加权），去掉魔法系数，解决 DDGI/RTGI 双重计入。
+5. ✅ RTGI 的时域累积/降噪链与 DDGI 探针射线 march（`DDGITracePass` + `DDGI_Trace.rgen`）均已实现。
 
 ---
 
@@ -186,7 +197,7 @@ SSGI 的采样核在 CPU 每帧 `Map/Unmap` 重传（`GI_SSGI.cpp:88-95`），�
 #### 全动态混合标杆
 | 技术 | 说明 | 状态 |
 |---|---|---|
-| Lumen（UE5） | Surface Cache + 屏幕追踪 + HW/软光追 + Final Gather | 已有设计规范文档，未实现 |
+| Lumen（UE5） | Surface Cache + 屏幕追踪 + HW/软光追 + Final Gather | **已落地自研实现**（`GI/LumenProvider.h` + `Engine/Render/Lumen/`：Mesh SDF、Surface Cache、Screen Probe、Radiance Cache），并作为 `GISourceId::Lumen` 接入层栈；与 UE5 完整 Lumen 相比仍在建（详见 `Lumen设计与实现.md`）|
 
 #### 神经 / 学习类（前沿）
 | 技术 | 说明 | 代表 |
@@ -201,15 +212,15 @@ SSGI 的采样核在 CPU 每帧 `Map/Unmap` 重传（`GI_SSGI.cpp:88-95`），�
 |---|---|---|
 | DDGI | 探针 relocation / 可见性 / 无限滚动体积 | → RTXGI |
 | RTGI（1 bounce）| 时空重采样 + 多反弹 | → ReSTIR GI |
-| SSAO | 地平线 AO、方向遮蔽 | → HBAO / GTAO / SSDO |
-| SSR | Hi-Z 层级追踪 + 时域重投影 | → UE / 寒霜 SSR |
+| SSAO / GTAO | 方向遮蔽、GTAO 的地平线搜索已落地；再往上是 HBAO / SSDO | → HBAO / SSDO |
+| SSR | Hi-Z 层级追踪已落地；缺时域重投影 | → UE / 寒霜 SSR |
 | 降噪栈（RTDenoiser + A-Trous）| SVGF / NRD | 实时光追 GI 配套 |
 
 ### 5.3 落地建议（按性价比）
 
 1. **ReSTIR GI**：工程已有 ReSTIR DI 完整基础设施（蓄水池、时域/空间复用、STBN），推广到间接光即实现 `GIMode::ReSTIR`，性价比最高。
 2. **DDGI → RTXGI 进阶**：修探针缺陷（可见性、屏幕外更新、relocation），不动现有架构。
-3. **SSAO → GTAO**：成本低、画面提升明显（UE 默认）。
+3. **SSAO → GTAO**：✅ **已落地**（`GISourceId::GTAO` + `GI/GTAO.frag.slang`，与 SSAO 共用一个 Provider/pass 双模式）。
 4. **Lightmap 烘焙**：仅进军移动端/主机静态场景时需要，PC 实时路线可缓。
 5. **体素类（VXGI/LPV/SVOGI）与神经类（NRC 等）**：作为长期/研究方向，不在近期工程路线内。
 
@@ -224,7 +235,9 @@ SSGI 的采样核在 CPU 每帧 `Map/Unmap` 重传（`GI_SSGI.cpp:88-95`），�
 
 ## 一、当前架构的根本问题
 
-不是"算法不够"，而是**"选型"散落在各处，没有统一编排层**：
+> **现状更新（2026-09-21）**：本节是方案提出时（2026-09-08）的盘点。其中前两条与第四条的第一半已由 Wave 0/1 解决——`DeferredLighting.frag.slang` 不再硬编码累加、魔法系数已移除，选型改由 `GITypes.h` 的**通道层栈**（`GIChannelStack` 源数组）表达，`rtDiffuseSource` / `rtSpecularSource` / `rtAOSource` 三个 push constant 字段已删除，`halfRes` 已接线。仍然成立的是：`GIMode::VXGI/ReSTIR` 空占位、`GISettings::maxBounces` 未接线，以及 PT 与实时路径之间没有统一入口。
+
+提出时的问题：不是"算法不够"，而是**"选型"散落在各处，没有统一编排层**：
 
 - `DeferredLighting.frag.slang` 把所有 GI **硬编码累加**，靠 `*0.5`、`*0.03` 压亮度；
 - 选型靠零散的 push constant（`rtDiffuseSource` / `rtSpecularSource` / `rtAOSource`），每加一种算法就要改 shader + 改 `LightingPass` 绑定；
@@ -379,20 +392,22 @@ DeferredFrameGraph::BuildGI(cmd, giConfig):
 
 #### 缺陷 1：4 个通道并不正交，"Ambient=IBL"是错误建模。
 `DeferredLighting.frag.slang` 里 IBL **同时**贡献两项：
-- `:239` `color += kD * u_IrradianceMap... * albedo`（间接**漫反射**）
-- `:242` `color += prefiltered * (F*envBRDF.r + envBRDF.g)`（间接**镜面**）
+- `SampleDiffuseSource(GISOURCE_IBL, …)`：`kD * u_IrradianceMap... * albedo`（间接**漫反射**）
+- `SampleSpecularSource(GISOURCE_IBL, …)`：`prefiltered * (F*envBRDF.r + envBRDF.g)`（间接**镜面**）
 
-而第三章预设表把 IBL 只放进 `Ambient` 一列。实际上 IBL **不是一个通道**，而是 Diffuse 和 Specular 两项的**默认 provider / 兜底**（`:280` 注释自陈"specular IBL prefilter 已提供回退"）。同理 **AO 不是加性通道**，它是对间接项的**乘法调制**——把相加与相乘两种运算并列为"正交通道"是概念混淆。
+而第三章预设表把 IBL 只放进 `Ambient` 一列。实际上 IBL **不是一个通道**，而是 Diffuse 和 Specular 两项的**默认 provider / 兜底**。同理 **AO 不是加性通道**，它是对间接项的**乘法调制**——把相加与相乘两种运算并列为"正交通道"是概念混淆。
 
 #### 缺陷 2：`GetChannelTexture()` 单纹理契约对非屏幕空间技术不成立。
 IBL 输出 cubemap（irradiance + prefilter），DDGI 输出探针 SSBO（`SampleDDGI` 用 worldPos+normal 采样），只有 SSGI/SSR/SSAO/RTGI 是屏幕空间纹理。**恰恰是非屏幕空间的 IBL/DDGI 不适配"统一纹理"契约**——第二章 `LightingInputs` 已不得不把 `ddgiProbeBuffer` 单列，即是此漏抽象的证据。
 
 #### 缺陷 3（最关键）：真正的病根是"光照方程的装配顺序随意"，而非"选谁"。
-`DeferredLighting.frag.slang:266` 的 AO：
+提出方案时 `DeferredLighting.frag.slang` 的 AO 是这样施加的：
 ```hlsl
-color *= ao * aoVal;   // 位于 IBL/RSM 之后、SSGI/DDGI/SSR 之前
+color *= ao * aoVal;   // 当时位于 IBL/RSM 之后、SSGI/DDGI/SSR 之前
 ```
-当前累加顺序为：直接光 → `*rtShadow` → +IBL(diffuse+spec) → +RSM → **`*AO`** → +SSGI/RTGI → +DDGI → +SSR → +emissive。结果是 **AO 乘到了直接光上（物理错误，AO 只该衰减间接光），又完全漏掉了 SSGI/DDGI/SSR 三个间接项**。这是真实的正确性 bug，而"4 slot 通道"模型**并不能防止它**——它只管"哪个 provider 填哪个 slot"，不管"这些 slot 按什么方程、什么顺序装配"。
+当时的累加顺序为：直接光 → `*rtShadow` → +IBL(diffuse+spec) → +RSM → **`*AO`** → +SSGI/RTGI → +DDGI → +SSR → +emissive。结果是 **AO 乘到了直接光上（物理错误，AO 只该衰减间接光），又完全漏掉了 SSGI/DDGI/SSR 三个间接项**。这是真实的正确性 bug，而"4 slot 通道"模型**并不能防止它**——它只管"哪个 provider 填哪个 slot"，不管"这些 slot 按什么方程、什么顺序装配"。
+
+> **已修复（§9.2-D / Wave 0.5）**：现在先记下 `directColor`，AO 只以 `aoFactor` 乘在 `(indirectDiffuse * giIntensity + indirectSpecular)` 上，直接光与自发光原样保留（`color = directColor + (indirectDiffuse * giIntensity + indirectSpecular) * aoFactor; color += emissive;`）。本条的历史价值在于：**该缺陷不是"选型"能防住的，只有"装配"能防住**——这正是本章主张单一装配点的依据。
 
 > **原模型抽象了"选型"，却没有抽象"装配（composite）"——而装配才是双重计入、魔法系数、AO 错位这些问题的共同来源。**
 
@@ -507,14 +522,14 @@ for (auto* p : enabledProviders) p->Build(rg, giResources); // 新增技术完�
 
 ## 0. 现状基线（方案的前提）
 
-通过代码核对，当前有 4 个关键事实决定方案走向：
+通过代码核对，方案提出时有 4 个关键事实决定方案走向（**2026-09-21 现状标注见每行末尾**）：
 
 | # | 事实 | 位置 |
 |---|---|---|
-| F1 | **`LightingSource` 枚举 + `LightingInputSources` 结构体已定义但未接线**——`Render` 仍用 33 个位置参数（含 cmd）+ 裸指针推断 | `LightingPass.h:19-45`、`LightingPass.cpp:55-76`（签名）、`167-170`（推断） |
-| F2 | **GI 是分散成员**：`m_GI`(IBL, `unique_ptr<IGlobalIllumination>`) + `m_RSM` + `m_SSGI`/`m_SSR`/`m_DDGI`(值成员)，`GetGI()` 只返回 IBL，无统一注册表 | `DeferredPipeline.h:141-167` |
-| F3 | **帧图硬编码顺序**：DDGI → SSAO → SSR → DenoiseSSR → SSGI → DenoiseSSGI → IBL → Lighting → DDGI_CaptureHDR，无选型分支 | `DeferredPipeline_FrameGraph.cpp:262-446` |
-| F4 | **shader 端魔法系数叠加**：IBL + RSM(`*0.03`) + SSGI/RTGI + DDGI(`*0.5`) + SSR 全部累加；DDGI 双重计入为**潜在缺陷**（当前 `DeferredPipeline` 里 RT 指针恒 `nullptr`、`rtDiffuseSource` 恒 0，仅 原 `HybridRTPipeline`（该类已于 2026-09 删除；RT 现作为 GI 源由 Deferred 层栈消费） 接线后触发） | `DeferredLighting.frag.slang:235-281`、`DeferredPipeline_FrameGraph.cpp:418` |
+| F1 | **`LightingSource` 枚举 + `LightingInputSources` 结构体已定义但未接线**——`Render` 仍用 33 个位置参数（含 cmd）+ 裸指针推断 | `LightingPass.h`、`LightingPass.cpp`。**现状：已收敛为 `LightingPass::Render(cmd, const LightingInputs&)`（M1.1）；但 `LightingSource` / `LightingInputSources` 这两个类型从未落地（全仓 0 命中），选型实际由 `GITypes.h` 的 `GIChannelStack` 源数组表达** |
+| F2 | **GI 是分散成员**：`m_GI`(IBL, `unique_ptr<IGlobalIllumination>`) + `m_RSM` + `m_SSGI`/`m_SSR`/`m_DDGI`(值成员)，`GetGI()` 只返回 IBL，无统一注册表 | `DeferredPipeline.h`。**现状：底层成员仍是分散的（另有 `m_LumenScene`），但已有统一注册表 `std::vector<std::unique_ptr<IGIProvider>> m_GIProviders`（帧图按它遍历）** |
+| F3 | **帧图硬编码顺序**：DDGI → SSAO → SSR → DenoiseSSR → SSGI → DenoiseSSGI → IBL → Lighting → DDGI_CaptureHDR，无选型分支 | `DeferredPipeline_FrameGraph.cpp`。**现状：GI pass 已按 Provider 注册表 + `NeedsPass(层栈)` 条件注册（降噪附属链由 `GetAuxPassCount()` 自报），帧图不再为每种源手写；前帧 HDR 捕获改由 `NeedsRadianceHistory()` 门控的 `CaptureRadiance` pass 承担** |
+| F4 | **shader 端魔法系数叠加**：IBL + RSM(`*0.03`) + SSGI/RTGI + DDGI(`*0.5`) + SSR 全部累加；DDGI 双重计入为**潜在缺陷**（当时 `DeferredPipeline` 里 RT 指针恒 `nullptr`、`rtDiffuseSource` 恒 0，仅原 `HybridRTPipeline`（该类已于 2026-09 删除；RT 现作为 GI 源由 Deferred 层栈消费）接线后触发） | `DeferredLighting.frag.slang`、`DeferredPipeline_FrameGraph.cpp`。**现状：魔法系数与 `rtDiffuseSource` 已随 Wave 1 层栈合成移除；RT 纹理在本帧产出时真的绑给 Lighting（`in.rtGI = rtGITex`），DDGI 双重计入已按"源独立"修复（`RT_GI.rgen` 的 flags bit1）** |
 
 结论：**骨架已经存在（F1），问题在"接线"**。本方案基于现有骨架增量改造，不重写管线。
 
@@ -544,6 +559,8 @@ Phase 5（注册表 + fallback，可独立、最后做）
 ### 改动文件
 - `Engine/Render/Pipeline/LightingPass.h`
 - `Engine/Render/Pipeline/LightingPass.cpp`
+
+> **后续演进（M1.1 / 2026-09）**：`Render` 签名已收敛为 `Render(rhi::IRHICommandList* cmd, const LightingInputs& in)`（33 参数 → 2 参数），但落地形态不是本章的 `LightingSource` / `LightingInputSources`（这两个类型全仓 0 命中）：选型由 `GI/GITypes.h` 的 `GIChannelStack`（每通道一个 4 槽源数组）+ `IGIProvider` 注册表表达，强度经 `LightingInputs::giIntensity/aoIntensity` 与 UBO 里的每源权重传递。本章余下内容保留为演进脉络。
 
 ### 2.1 扩展 `LightingSource` 枚举（补 ambient 通道 + 预留未来算法）
 
@@ -655,6 +672,8 @@ lpc.rtDiffuseSource  = (src.diffuse  == LightingSource::Diffuse_RTGI)? 1u : 0u;
 ### 改动文件
 - `Engine/Shader/Shaders/Lighting/DeferredLighting.frag.slang`
 - `Engine/Shader/Shaders/ShaderTypes.slang`（`DeferredLightingPushConstant` 结构）
+
+> **后续演进（Wave 0/1 / 2026-09）**：本节目标已达成 —— 魔法系数 `*0.03` / `*0.5` 已从 `DeferredLighting.frag.slang` 移除；`rt*Source` 二选一开关已删除，改为遍历层栈源数组并按 `GISourceId` 分派（`SampleDiffuseSource` / `SampleSpecularSource` / `SourceWeight`）。每通道的源、模式与边缘淡出落在 `GIBlendParams` UBO（binding 31，`GIChannelBlendParams` = 4 槽源数组 + `mode` + `edgeFade` + `furnaceMode`）；每通道强度落在 push constant 的 `giIntensity` / `aoIntensity`。DDGI 是否参与不再由 `diffuseFallback` 决定，而由"漫反射层栈里有没有 DDGI"决定。
 
 ### 3.1 push constant 增加每通道强度字段
 
@@ -789,6 +808,8 @@ GIConfig GIConfig::FromQuality(GIQuality q) { return kGIPresets[(int)q]; }
 
 ### 改动文件
 - `Engine/Render/Pipeline/DeferredPipeline_FrameGraph.cpp`
+
+> **后续演进（Wave 2 / P4 / 2026-09）**：帧图已改为按 Provider 注册表遍历 —— `DeferredPipeline::Initialize` 把 Provider 注册进 `m_GIProviders`（顺序即遍历顺序），帧图对每个 Provider 询问 `NeedsPass(层栈)` 决定是否注册 pass，附属降噪链由 `GetAuxPassCount/Name/Input/Output` 自报。因此"未选中的源不注册 pass"这一判据已经成立；差别是判定不在管线文件里写 `if (cfg.diffuse == …)`，而是 Provider 自己声明。
 
 ### 5.1 用 `shouldRun` 判定包装每个 GI pass
 
