@@ -54,6 +54,11 @@ add_executable(HugEngineTests
     # §14.8 任务 24：页划分（`BuildNanitePagePlan`，纯函数）的不变式/守卫/确定性用例。
     # 单独一文件：`TestNaniteBuilder.cpp` 已 2500+ 行且按任务分段累加。
     TestNaniteStream.cpp
+    # §14.8 任务 25：Material Bin（`BuildNaniteMaterialBin`，纯函数）的正确性用例 ——
+    # "bin 是按材质非降序的、且是 0..clusterCount-1 的一个排列"（任务 27 明确要求补的那一项），
+    # 外加"生成 bin 不改动资产"与"真实 Sponza 资产上按 bin 顺序的 material_switches 收益"。
+    # 单独一文件：与前两个 Nanite 测试文件同一个理由（避免单文件无限膨胀）。
+    TestNaniteMaterialBin.cpp
     # §14.8 任务 8：离线簇切分的实现落在 Engine/Render/Nanite/NaniteUpload.cpp。
     # 该翻译单元（连同 NaniteUpload.h）是 RHI-free 的（只前置声明 rhi::IRHIDevice），
     # 所以单测可以**直接编译它**，而不必链接 HugEngineRender（后者会拉入 RHI/Vulkan/SPV）。

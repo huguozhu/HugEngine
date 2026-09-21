@@ -33,6 +33,7 @@
 #include <array>           // std::array（三角形规范键）
 #include <cmath>           // std::sqrt / std::acos（量化误差实测）
 #include <cstring>         // std::memcpy（任务 10：把各段铺进字节镜像）
+#include <span>            // 【任务 25】材质 bin 的**可选**输出（空 span = 只要读数、不写数组）
 #include <unordered_map>   // 任务 9 的去重桶（只查不改产物顺序，见头文件的确定性说明）
 
 namespace he::render {
@@ -1378,6 +1379,88 @@ NaniteClusterMaterialMapStats NaniteAssignClusterMaterialsByVertexOwner(
         outClusterMaterialIndex[ci] = meshes[bestMesh].materialIndex;
     }
     return stats;
+}
+
+// ============================================================
+// 【§14.8 任务 25】Material Bin：按材质分组的簇下标（纯函数；口径与理由见 `NaniteUpload.h`）
+//
+// 三步（计数排序的教科书形态，全部与容器遍历序无关）：
+//   ① 直方图：逐簇把 `materialID` 计进桶；顺带挡住越界 ID（否则下一步会越界写）；
+//   ② 前缀和 → 每个材质的起始槽位（`materialCount + 1` 项，末项 = 簇数）；
+//   ③ 稳定放置：按**簇下标升序**把每个簇放到"它的材质那一段"的下一个空位里。
+//      【为什么第三趟必须再扫一遍、而不能在第一趟里就放置】第一趟时后面材质的起始槽位还不知道
+//      （前缀和还没算）—— 计数排序的标准做法就是"先数、再定位、最后放"。
+// 【为什么"稳定"是硬要求】稳定性保证同材质的簇保持原有相对顺序 ⇒ `bins[]` 逐位可复现，
+//   单测可以按字节比较两次调用的结果（不必先排序再比）。
+// ============================================================
+namespace {
+
+/// 计数排序的公共实现（`outBins` 可以是空 span = 只算读数）
+NaniteMaterialBinStats BuildMaterialBinImpl(std::span<const NaniteClusterRecord> clusters,
+                                            u32                                  materialCount,
+                                            std::span<u32>                       outBins) {
+    NaniteMaterialBinStats stats;
+    const usize count = clusters.size();
+    stats.clusterCount  = (u32)count;
+    stats.materialCount = materialCount;
+    // 空输入 ⇒ 合法（与任务 7/8/9/10 的"空网格是合法输入"同口径）
+    if (count == 0u) return stats;
+
+    // ── ① 直方图（桶键 = materialID；越界一律计入读数而不是夹值）──
+    std::vector<u32> histogram(materialCount, 0u);
+    for (const NaniteClusterRecord& cluster : clusters) {
+        if (cluster.materialID >= materialCount) {
+            ++stats.outOfRangeCount;
+            continue;
+        }
+        ++histogram[cluster.materialID];
+    }
+    if (stats.outOfRangeCount != 0u) {
+        // 越界 ID ⇒ **不产出 bin**（调用方会看到 `bins` 为空 + 非 0 的 `outOfRangeCount`）。
+        // 【为什么不 clamp 到 0 号材质】那会让 bin "看起来正确"却把簇分进了错的组；
+        //   读数上的 0 与静默的 clamp 组合起来正是"缺陷不可见"的典型配方。
+        return stats;
+    }
+    for (u32 c : histogram) {
+        if (c != 0u) ++stats.distinctCount;
+    }
+
+    // ── ② 前缀和：`offset[m]` = 材质 m 那一段的起始槽位（多一项收尾 = 簇数）──
+    std::vector<u32> offset(materialCount + 1u, 0u);
+    for (u32 m = 0u; m < materialCount; ++m) {
+        offset[m + 1u] = offset[m] + histogram[m];
+    }
+
+    // ── ③ 稳定放置（只在真的要求输出时做；`outBins` 为空 ⇒ 调用方只要读数）──
+    if (!outBins.empty()) {
+        if (outBins.size() < count) return stats;   // 防御：输出太短 ⇒ 不写（读数照常返回）
+        for (u32 i = 0u; i < (u32)count; ++i) {
+            const u32 m = clusters[i].materialID;
+            outBins[offset[m]] = i;   // 按簇下标升序放 ⇒ 同材质内部保持原相对顺序（稳定）
+            ++offset[m];
+        }
+    }
+    return stats;
+}
+
+} // namespace
+
+NaniteMaterialBinStats BuildNaniteMaterialBin(std::span<const NaniteClusterRecord> clusters,
+                                              u32                                  materialCount,
+                                              std::span<u32>                       outBins) {
+    return BuildMaterialBinImpl(clusters, materialCount, outBins);
+}
+
+NaniteMaterialBinStats BuildNaniteMaterialBin(std::span<const NaniteClusterRecord> clusters,
+                                              u32                                  materialCount,
+                                              NaniteMaterialBin&                   outResult) {
+    // 先把数组按簇数准备好（失败路径随后会把 `bins` 清空 ⇒ 出参不会留半成品）
+    outResult.bins.assign(clusters.size(), 0u);
+    outResult.stats = BuildMaterialBinImpl(clusters, materialCount,
+                                           std::span<u32>(outResult.bins.data(),
+                                                          outResult.bins.size()));
+    if (outResult.stats.outOfRangeCount != 0u) outResult.bins.clear();
+    return outResult.stats;
 }
 
 // ============================================================

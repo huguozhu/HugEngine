@@ -544,6 +544,73 @@ struct NaniteClusterMaterialMapStats {
     std::span<const NaniteSourceMeshRange> meshes,
     std::span<u32>                         outClusterMaterialIndex);
 
+// ============================================================
+// 【§14.8 任务 25】Material Bin —— 只读的"按材质分组的簇下标"辅助数组
+//
+// 【它是什么、不是什么（先划清边界，因为本任务的验收就是"不动任何既有东西"）】
+//   · 它是一份 **`u32[clusterCount]` 的排列**：元素是簇记录的下标，按该簇的 `materialID`
+//     非降序排列（同材质的簇在数组里**连续**）。这就是 §5.4 说的 "按材质分组" 的数据形态。
+//   · 它**不动**任何既有数据：资产本体（`clusters` / `vertices` / `triangles` / `materials` /
+//     `lodOffsets` / `bytes`）、BVH、DAG 引用、页池/页表、`.nanite` 格式**一个字节都不改**；
+//     本函数是**纯函数**（收 `span`、写调用方给的输出缓冲），不持有也不修改任何输入。
+//   · 它**不**改变光栅的遍历顺序（本任务的"明确不做"，理由见 `NaniteSettings::materialBin`）：
+//     光栅端仍然按可见簇列表的顺序处理簇，bin 只被**读数**用来算"若按 bin 顺序遍历会怎样"。
+//
+// 【为什么用计数排序（而不是 `std::sort` 一个比较器）】
+//   ① 与仓库既有口径一致：`BuildNanitePagePlan` 等处也是"排序 + 线性扫描"，全程与容器遍历序无关；
+//   ② O(n + 材质数) 且**稳定**：同材质的簇保持它们原本的相对顺序 ⇒ `bins[]` 在"同材质簇之间的
+//      先后"这一层是完全确定的（两条独立运行逐位一致），可以直接被单测按字节比较；
+//   ③ `materialID` 是"材质段下标"（值域小且在 `materials.size()` 以内），直方图分箱天然合适。
+//
+// 【材质序 = 材质段下标的升序】bin 只关心"同材质相邻"，材质之间本身没有顺序要求；取下标升序是
+//   最直白的确定性选择（不引入任何"按名称/按指针/按哈希"这类不可复现的排序键）。
+// ============================================================
+
+/// 材质 bin 的构建读数（如实报告，不隐藏异常输入）
+struct NaniteMaterialBinStats {
+    u32 clusterCount  = 0u;  ///< 参与分组的簇数（= `clusters.size()`）
+    u32 distinctCount = 0u;  ///< 实际出现的不同 `materialID` 个数（= 非空的直方图桶数）
+    u32 materialCount = 0u;  ///< 材质段的条数（= `materialCount` 入参，直方图的桶数）
+    /// `materialID` 超出 `[0, materialCount)` 的簇数（**防御：正常必须 0**）。
+    /// 【为什么单列而不静默 clamp】越界 ID 一旦被悄悄夹到某个桶里，bin 就会"看起来正确"而实际
+    ///   把簇分到了错的材质组；更糟的是直方图必须按 `materialCount` 分配 ⇒ 不检查就会越界写。
+    ///   非 0 时本函数**返回 false**（调用方拿到"没有 bin"，而不是一份静默错分的 bin）。
+    u32 outOfRangeCount = 0u;
+};
+
+/// 一次材质分组的产物（**只读取的辅助数组**；不是资产的一部分、不进 `.nanite`）
+struct NaniteMaterialBin {
+    /// 按材质非降序排列的簇下标（长度 == `clusterCount`；是 `0..clusterCount-1` 的一个排列）
+    std::vector<u32> bins;
+    NaniteMaterialBinStats stats;   ///< 构建读数（见上）
+
+    /// 产物是否为空（没有簇 ⇒ 合法输入，数组为空）
+    [[nodiscard]] bool Empty() const { return bins.empty(); }
+};
+
+/// 按"簇的 `materialID`"把簇下标分组排序（§14.8 任务 25；纯函数、RHI-free）
+///
+/// @param clusters      资产簇段（每次出现一条 64B 记录；只读 `materialID`）
+/// @param materialCount 材质段条数（= `NanitePackedAsset::header.materialCount`；`materialID`
+///                      的合法值域是 `[0, materialCount)`）
+/// @param outBins       **可选**输出：按材质分组后的簇下标（长度必须 ≥ `clusters.size()`）。
+///                      传空 span ⇒ 只算读数、不写任何东西（用于"只要统计"的调用方）。
+/// @return 构建读数；`materialID` 越界 ⇒ 返回的 `bins` 为空且 `outOfRangeCount > 0`
+///         （**不改写出参**：先算完、校验通过后才写，与任务 7/8/9/10 的失败口径一致）。
+/// 【空输入】`clusters` 为空 ⇒ 返回空读数，合法（与其它构建器同口径）。
+/// 【确定性】只有一次计数直方图 + 一次前缀和 + 一趟稳定放置；不排序比较器、不含哈希容器遍历序、
+///   不含随机数、不并行 ⇒ 同一输入两次调用逐位一致。
+[[nodiscard]] NaniteMaterialBinStats BuildNaniteMaterialBin(
+    std::span<const NaniteClusterRecord> clusters,
+    u32                                  materialCount,
+    std::span<u32>                       outBins);
+
+/// 覆盖式重载：直接把 bin 建进 `outResult`（`outResult.bins` 被整体重写）
+[[nodiscard]] NaniteMaterialBinStats BuildNaniteMaterialBin(
+    std::span<const NaniteClusterRecord> clusters,
+    u32                                  materialCount,
+    NaniteMaterialBin&                   outResult);
+
 /// 把任务 9 的 DAG 产物量化/打包成最终 GPU 侧字节布局（§14.8 任务 10）
 ///
 /// 【输入】
