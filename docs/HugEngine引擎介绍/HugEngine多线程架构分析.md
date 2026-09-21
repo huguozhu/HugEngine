@@ -1,6 +1,6 @@
 # HugEngine 多线程架构分析
 
-> 分析日期：2026-07-17 | 分析范围：Core/Threading、Render/SceneRenderer、Render/Pipeline、Render/RenderGraph
+> 分析日期：2026-07-17 | 校订：2026-09-21 | 分析范围：Core/Threading、Render/SceneRenderer、Render/Pipeline、Render/RenderGraph
 
 ---
 
@@ -14,7 +14,8 @@ HugEngine 的多线程架构分为 **五个层次**，从上到下：
 │    主线程事件循环 + 帧渲染                                     │
 ├─────────────────────────────────────────────────────────────┤
 │ 4. 渲染管线层 (ForwardPipeline / DeferredPipeline)            │
-│    ParallelInvoke 多线程录制命令到 Secondary CommandBuffer    │
+│    ForwardPipeline: ParallelInvoke 多线程录制到 Secondary CB   │
+│    DeferredPipeline: 走 RenderGraph 路径（无 MTCR）           │
 ├─────────────────────────────────────────────────────────────┤
 │ 3. 场景准备层 (SceneRenderer::Prepare)                        │
 │    ParallelForChunked 并行视锥剔除                             │
@@ -31,7 +32,10 @@ HugEngine 的多线程架构分为 **五个层次**，从上到下：
 - 主线程 × 1
 - Taskflow 工作线程 × N（N = `std::thread::hardware_concurrency()`，通常 8-16）
 - Shader HotReload 监控线程 × 1
-- **总计**: 约 10-18 个系统线程
+- Jolt 物理线程池 × 2（`Engine/Physics/Physics/PhysicsWorld.cpp:38` 的 `JPH::JobSystemThreadPool(1024, 8, 2)`，
+  随物理系统初始化而常驻，与 Taskflow 线程池相互独立）
+- （架构上还有 PSOPrecompileManager 的后台预编译 worker × 1，但当前在 `DeferredPipeline::Initialize` 中被注释禁用，不在运行中）
+- **总计**: 约 12-20 个系统线程（不含上一条被禁用的预编译线程）
 
 ---
 
@@ -56,12 +60,12 @@ private:
 | API | 语义 | 底层实现 | 使用场景 |
 |-----|------|----------|----------|
 | `Submit(job)` | 发射后忘记 | `executor->silent_async()` | 不需要等待的一次性工作 |
-| `ParallelFor(count, body)` | 等分并行 | 拆分为 count 个任务 → `ParallelInvoke` | 简单逐元素并行 |
+| `ParallelFor(count, body)` | 逐元素并行 | 拆分为 count 个任务 → `ParallelInvoke` | 简单逐元素并行 |
 | `ParallelForChunked(count, chunkSize, body)` | 分块并行 | `numChunks = (count+chunkSize-1)/chunkSize` | **主要使用的 API** |
 | `ParallelInvoke(tasks)` | 一批任务全部并行，等待全部完成 | `silent_async` × N + `wait_for_all` | 多线程命令录制 |
 | `Async<T>(task)` | 异步 + future | `executor->async()` | 需要返回值的异步工作 |
 | `WaitAll()` | 等待全部 | `executor->wait_for_all()` | 帧边界同步 |
-| `IsWorkerThread()` | 查询当前线程身份 | 始终返回 `false`（TF 未暴露此信息） | 调试诊断 |
+| `IsWorkerThread()` | 查询当前线程身份 | 始终返回 `false`（Taskflow 4.1.0 有 `Executor::this_worker()` / `this_worker_id()` 可接，未接入） | 调试诊断 |
 
 ### 2.3 线程数管理
 
@@ -175,7 +179,7 @@ SceneRenderer::Prepare(world, sg, camera, objectBuffer)
 
 ## 四、多线程命令录制（MTCR）
 
-这是 HugEngine 最核心的渲染多线程机制。实现在 `ForwardPipeline::Render()` 中。
+这是 HugEngine 最核心的渲染多线程机制。实现在 `ForwardPipeline::RenderScene()` 中（非 RG 路径由 `Render()` 调用，RG 路径由 "Scene" Pass 的回调调用）。
 
 ### 4.1 预分配阶段（管线初始化时）
 
@@ -198,7 +202,7 @@ if (m_MultiThreadRecord) {
 ### 4.2 录制阶段（每帧 Render 时）
 
 ```
-ForwardPipeline::Render(cmd, ...)
+ForwardPipeline::RenderScene(cmd, ...)
   │
   ├─ 1. SceneRenderer::Prepare() → filteredItems[]
   │      └─ 并行视锥剔除（见第三章）
@@ -217,9 +221,9 @@ ForwardPipeline::Render(cmd, ...)
   │         │
   │         ├─ for (i = start; i < end; ++i) {
   │         │     auto& item = filteredItems[i]
-  │         │     secCmd->BindDescriptorSet(0, bindlessSet)
+  │         │     secCmd->BindDescriptorSet(0, bindlessSet)   // set=0: per-frame + bindless
   │         │     secCmd->SetPushConstants(...)
-  │         │     secCmd->BindDescriptorSet(1, perDrawSet)
+  │         │     // set=1 已移除 — 纹理采样改走 bindless u_Textures[]
   │         │     secCmd->DrawIndexed(...)
   │         │   }
   │         │
@@ -244,7 +248,7 @@ VulkanCommandList 的 Sec CB 设计:
   m_SecCmdBuffers[0], m_SecCmdBuffers[1], m_SecCmdBuffers[2]
 
 BeginSecondary(PSO) → 轮转选择一个空闲 CB:
-  idx = (m_SecSlot++) % kMaxSecondaryCBs
+  idx = m_SecSlot % kMaxSecondaryCBs   // End() 里再 ++m_SecSlot
   设置 VkCommandBufferInheritanceInfo { renderPass, subpass }
 
 ExecuteSecondary(other) → vkCmdExecuteCommands(cb, 1, &other->m_SecCmdBuffers[idx])
@@ -261,7 +265,7 @@ ExecuteSecondary(other) → vkCmdExecuteCommands(cb, 1, &other->m_SecCmdBuffers[
 | 每线程录制 | VkCommandBufferLevel::SECONDARY |
 | 合并方式 | 主线程串行 `vkCmdExecuteCommands` |
 | 同步原语 | `ParallelInvoke` 隐式 barrier（等待全部完成） |
-| 开关 | `EngineConfig::enableMultiThreadRecord`（默认 true） |
+| 开关 | `ForwardPipeline::m_MultiThreadRecord`（硬默认 true，经 `SetMultiThreadedRecording()` 切换；`EngineConfig::enableMultiThreadRecord` 字段存在但从未被读取） |
 | 回退 | ≤ 0 个绘制时自动跳过 |
 
 ### 4.5 ForwardPipeline vs DeferredPipeline
@@ -285,8 +289,8 @@ RenderGraph::ExecuteWithAsyncCompute(mainCmd, device, ...)
   ├─ Phase 1: 创建 computeCmd (独立 Compute 队列)
   │    └─ device->CreateCommandList(QueueType::Compute)
   │
-  ├─ Phase 2: 在 computeCmd 上录制所有 Compute Pass
-  │    ├─ GPU Culling、SSAO、AutoExposure 等
+  ├─ Phase 2: 在 computeCmd 上录制**帧首连续的 Compute Pass**
+  │    ├─ 实际只有 GPU_Cull（两阶段模式为 GPU_Cull_Phase1）
   │    ├─ 跨队列 Barrier: Graphics→Compute (QueueOwnershipTransfer)
   │    └─ 跨队列 Barrier: Compute→Graphics (Release)
   │
@@ -313,6 +317,9 @@ for each Compute Pass:
   │
   └─ 对可异步 Pass: 自动插入 crossQueueAcquire/crossQueueRelease Barrier
 ```
+
+> 注：`asyncSchedule` / `requiresSync` 两个标志只在本函数里写入，全库没有读取点；实际拆分只看
+> `queueHint` 与"帧首连续 Compute 前缀"规则（见 `HugEngine多线程渲染实现分析.md` §6.5）。
 
 ---
 
@@ -365,7 +372,7 @@ for each Compute Pass:
                     │             │  │         │         │
          SceneRenderer      ForwardPipeline  其他并行任务
          (ParallelFor       (ParallelInvoke
-          Chunked)           8× SecCB 录制)
+          Chunked)           ≤8× SecCB 录制)
               │
     ┌─────────┴────────────────────────────┐
     │           Main Thread                 │
@@ -403,12 +410,12 @@ for each Compute Pass:
 |------|------|:------:|
 | **工作窃取线程池** | `JobSystem` + Taskflow | ✅ |
 | **并行视锥剔除** | `SceneRenderer::Prepare` | ✅ |
-| **多线程命令录制** | `ForwardPipeline::Render` (8× SecCB) | ✅ |
+| **多线程命令录制** | `ForwardPipeline::RenderScene` (≤8× SecCB，`min(8, 线程数)`) | ✅ |
 | **AsyncCompute GPU 并行** | `RenderGraph::ExecuteWithAsyncCompute` | ✅ |
 | **Shader 热重载** | 独立 `std::thread` + `ReadDirectoryChangesW` | ✅ |
 | **任务阈值自适应** | `ParallelForEach` count > 1024 自动选择 | ✅ |
 | **分块并行** | `ParallelForChunked` 可调 chunk size | ✅ |
-| **帧配置** | `EngineConfig::enableMultiThreadRecord` | ✅ |
+| **帧配置** | `ForwardPipeline::SetMultiThreadedRecording`（`EngineConfig::enableMultiThreadRecord` 未被读取） | ✅ |
 
 ### 8.2 未实现
 
@@ -419,12 +426,12 @@ for each Compute Pass:
 | **Game Thread 分离** | `FGameThread` | 所有逻辑和渲染都在同一线程 |
 | **任务图依赖调度** | `tf::Taskflow` DAG | 尽管 Taskflow 支持图，但当前只用了 `silent_async` + `wait_for_all` 的简单模式 |
 | **流水线并行** | `ParallelFor` + pipe | 当前帧必须完成所有任务才能提交，无帧间重叠 |
-| **GPU 端剔除** | `GPUScene` | 所有剔除在 CPU 端（SceneRenderer），GPU Culling 仅用于粒子系统 |
+| **GPU 端剔除** | `GPUScene` | CPU 剔除（SceneRenderer）之外，GPU 剔除已用于**场景几何**：Forward 的 `RunGPUCulling` + `DrawIndexedIndirect`、Deferred 的 `GPU_Cull`（两阶段为 `GPU_Cull_Phase1/Phase2`）Pass，以及逐实例剔除 `InstanceCuller`；CPU 侧仍保留一套完整剔除作为回退 |
 | **DeferredPipeline MTCR** | — | Deferred 管线未实现多线程命令录制 |
 | **WorkerThread 识别** | `IsInRHIThread()` | `JobSystem::IsWorkerThread()` 总是返回 false |
 | **线程亲和性/优先级** | `FThreadAffinity` | 无 |
 | **任务优先级** | `TaskPriority` | 无 |
-| **PipelineState 并行创建** | PSO cache + ParallelCreate | PSO 在主线程串行创建 |
+| **PipelineState 并行创建** | PSO cache + ParallelCreate | PSO 默认在主线程串行创建；后台预编译管理器（`PSOPrecompileManager`，独立 worker 线程）已实现但当前被注释禁用 |
 
 ### 8.3 当前瓶颈
 
