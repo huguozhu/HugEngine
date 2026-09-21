@@ -1164,91 +1164,18 @@ bool BuildNaniteAssetFromGeometry(std::span<const float>                position
 // 规则与理由写在 `NaniteUpload.h` 的同名小节里；这里只留与代码逐句对应的实现注释。
 // 输入保证（调用方 = `MeshBatcher` 的构建顺序）：`meshes[i]` 的三角形区间首尾相接、升序。
 //
-// 【两个函数的分工（§14.8 任务 25 修复的要点）】
-//   · `NaniteAssignClusterMaterials`：**三角形下标空间**的低层规则 —— 直接用
-//     `cluster.triangleOffset + k` 去查 `meshes[]`。只有在"调用方已保证该字段是**合并空间**
-//     的三角形下标"时才成立（真实资产不成立，实测 Sponza 的 4103/8287 会落空、另有
-//     3957/4099 个 LOD0 簇选错网格）。
-//   · `NaniteAssignClusterMaterialsByVertexOwner`：**顶点归属空间** —— 资产构建器用这个。
-//     它不读 `triangleOffset`，而是用 DAG 里"每次出现 → 网格顶点"的映射把簇的三角形还原成
-//     **原始合并顶点下标**，再用"顶点 → 源网格"归属表定源网格 ⇒ 对所有 LOD 级与去重状态都成立。
+// 【口径：**顶点归属空间**（§14.8 任务 25 修复的要点）】
+//   `NaniteAssignClusterMaterialsByVertexOwner` **不读** `cluster.triangleOffset` —— 那个字段是
+//   去重后共享三角形段的下标，与 `meshes[]` 不同空间（真实资产上实测 Sponza 的 4103/8287 会落空、
+//   另有 3957/4099 个 LOD0 簇选错网格）。它用 DAG 里"每次出现 → 网格顶点"的映射把簇的三角形
+//   还原成**原始合并顶点下标**，再用"顶点 → 源网格"归属表定源网格 ⇒ 对所有 LOD 级与去重状态都成立。
 // ============================================================
 namespace {
-
-/// 二分查找"包含三角形 `tri` 的源网格下标"；找不到返回 `meshes.size()`（调用方按未映射处理）。
-/// 【为什么二分而不是线性】Sponza 有上百个网格、每个簇至多 64 个三角形、簇数上万 ⇒ 二分把
-///   这一步从 O(簇×三角形×网格) 压到 O(簇×三角形×log 网格)，且仍然是纯只读、确定的。
-[[nodiscard]] u32 FindSourceMeshForTriangle(std::span<const NaniteSourceMeshRange> meshes,
-                                            u32 tri) {
-    u32 lo = 0u;
-    u32 hi = (u32)meshes.size();
-    while (lo < hi) {
-        const u32 mid = lo + (hi - lo) / 2u;
-        const NaniteSourceMeshRange& m = meshes[mid];
-        if (tri < m.firstTriangle) {
-            hi = mid;
-        } else if (tri >= m.firstTriangle + m.triangleCount) {
-            lo = mid + 1u;
-        } else {
-            return mid;   // tri ∈ [first, first+count)
-        }
-    }
-    return (u32)meshes.size();
-}
 
 /// "顶点查不到源网格"哨兵（与 `kNaniteNoParentCluster` 一样是**有意义**的取值，不是越界值）
 constexpr u32 kNoSourceMesh = 0xFFFFFFFFu;
 
 } // namespace
-
-NaniteClusterMaterialMapStats NaniteAssignClusterMaterials(
-        std::span<const NaniteClusterRecord>   clusters,
-        std::span<const NaniteSourceMeshRange> meshes,
-        std::span<u32>                         outClusterMaterialIndex) {
-    NaniteClusterMaterialMapStats stats{};
-    if (outClusterMaterialIndex.size() < clusters.size()) return stats;   // 防御：输出不够就不写
-
-    for (usize ci = 0u; ci < clusters.size(); ++ci) {
-        const NaniteClusterRecord& cluster = clusters[ci];
-        // 未映射 / 空网状网格的兜底归属：0 号材质（正常路径不会走到这里）
-        u32 fallbackMaterial = meshes.empty() ? 0u : meshes[0].materialIndex;
-        if (cluster.triangleCount == 0u || meshes.empty()) {
-            outClusterMaterialIndex[ci] = fallbackMaterial;
-            continue;
-        }
-
-        // ① 逐三角形查源网格，累计票数（`votes` 按网格下标寻址；网格数 ≤ 合并绘制条数 ≤ 1024）
-        //    【为什么不用哈希表】票数数组 + 一次线性扫描完全没有容器遍历序的不确定性。
-        std::vector<u32> votes(meshes.size(), 0u);
-        u32 mappedTriangles = 0u;
-        for (u32 k = 0u; k < cluster.triangleCount; ++k) {
-            const u32 tri = cluster.triangleOffset + k;
-            const u32 mesh = FindSourceMeshForTriangle(meshes, tri);
-            if (mesh >= (u32)meshes.size()) continue;   // 落不进任何区间 ⇒ 记未映射
-            ++votes[mesh];
-            ++mappedTriangles;
-        }
-
-        // ② 多数票：票数最大者胜；**平票取下标更小的网格**（`>` 而非 `>=` 保证这一点）
-        u32 bestMesh = 0xFFFFFFFFu;
-        u32 bestVotes = 0u;
-        u32 contributingMeshes = 0u;
-        for (u32 m = 0u; m < (u32)votes.size(); ++m) {
-            if (votes[m] == 0u) continue;
-            ++contributingMeshes;
-            if (votes[m] > bestVotes) { bestVotes = votes[m]; bestMesh = m; }
-        }
-
-        if (bestMesh >= (u32)meshes.size() || mappedTriangles == 0u) {
-            ++stats.unmappedClusters;
-            outClusterMaterialIndex[ci] = fallbackMaterial;
-            continue;
-        }
-        if (contributingMeshes > 1u) ++stats.multiMeshClusters;
-        outClusterMaterialIndex[ci] = meshes[bestMesh].materialIndex;
-    }
-    return stats;
-}
 
 NaniteClusterMaterialMapStats NaniteAssignClusterMaterialsByVertexOwner(
         std::span<const u32>                   indices,

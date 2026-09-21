@@ -2463,78 +2463,17 @@ TEST_CASE("NaniteLOD: 每簇 LOD 元数据的构建（级/误差/根/确定性/�
 
 
 // ============================================================
-// 【§14.8 任务 19】簇 → 源网格 → 材质的映射（三角形多数票 + 跨网格计数）
-// ============================================================
-TEST_CASE("NaniteMaterialMap: 簇按三角形多数票映射到源网格并计数跨网格簇") {
-    // 三个源网格：三角形区间 [0,4) [4,10) [10,16)（首尾相接、升序 —— 与 MeshBatcher 一致）
-    const NaniteSourceMeshRange meshes[3] = {
-        { 0u,  4u, 0u },   // 材质段下标 0
-        { 4u,  6u, 1u },   // 材质段下标 1
-        { 10u, 6u, 2u },   // 材质段下标 2
-    };
-
-    // 五个簇：
-    //  0) [0,4)   完全在网格 0                        ⇒ 材质 0
-    //  1) [2,8)   2 个在网格 0、4 个在网格 1           ⇒ 多数票 = 网格 1（跨网格）
-    //  2) [3,10)  1 个在网格 0、6 个在网格 1           ⇒ 多数票 = 网格 1（跨网格）
-    //  3) [8,14)  2 个在网格 1、4 个在网格 2           ⇒ 多数票 = 网格 2（跨网格）
-    //  4) [20,24) 完全落在所有区间之外                 ⇒ 未映射（计 unmapped，归属 0 号材质）
-    std::vector<NaniteClusterRecord> clusters(5);
-    clusters[0].triangleOffset = 0u;  clusters[0].triangleCount = 4u;
-    clusters[1].triangleOffset = 2u;  clusters[1].triangleCount = 6u;
-    clusters[2].triangleOffset = 3u;  clusters[2].triangleCount = 7u;
-    clusters[3].triangleOffset = 8u;  clusters[3].triangleCount = 6u;
-    clusters[4].triangleOffset = 20u; clusters[4].triangleCount = 4u;
-
-    std::vector<u32> out(clusters.size(), 0xFFFFFFFFu);
-    const NaniteClusterMaterialMapStats stats =
-        NaniteAssignClusterMaterials(clusters, meshes, out);
-
-    CHECK(out.size() == 5u);
-    CHECK(out[0] == 0u);
-    CHECK(out[1] == 1u);   // 2 vs 4
-    CHECK(out[2] == 1u);   // 6 vs 1
-    CHECK(out[3] == 2u);   // 4 vs 2
-    CHECK(out[4] == 0u);   // 未映射 ⇒ 兜底 0 号材质
-    CHECK(stats.multiMeshClusters == 3u);
-    CHECK(stats.unmappedClusters == 1u);
-
-    // 平票 ⇒ 取**下标更小**的网格（确定性）：区间 [0,2) 与 [2,4) 各得 1 票
-    const NaniteSourceMeshRange tie[2] = { { 0u, 2u, 5u }, { 2u, 2u, 6u } };
-    NaniteClusterRecord tieCluster;
-    tieCluster.triangleOffset = 1u;
-    tieCluster.triangleCount = 2u;
-    std::vector<u32> tieOut(1u, 0xFFFFFFFFu);
-    const NaniteClusterMaterialMapStats tieStats =
-        NaniteAssignClusterMaterials({ &tieCluster, 1u }, tie, tieOut);
-    CHECK(tieOut[0] == 5u);                 // 平票取小下标（材质段下标 5）
-    CHECK(tieStats.multiMeshClusters == 1u);
-
-    // 输出数组过短 ⇒ 一个字节都不写（防御）
-    std::vector<u32> shortOut(2u, 0xA5A5A5A5u);
-    const NaniteClusterMaterialMapStats shortStats =
-        NaniteAssignClusterMaterials(clusters, meshes, shortOut);
-    CHECK(shortStats.multiMeshClusters == 0u);
-    CHECK(shortStats.unmappedClusters == 0u);
-    CHECK(shortOut[0] == 0xA5A5A5A5u);
-    MESSAGE("映射：多数票 " << out[1] << "/" << out[2] << "/" << out[3]
-            << "，跨网格簇 " << stats.multiMeshClusters
-            << "，未映射 " << stats.unmappedClusters << "，平票取小下标 " << tieOut[0]);
-}
-
-// ============================================================
 // §14.8 任务 25 回归：**去重命中 + 多源网格**下的簇材质归属
 //
-// 【为什么必须有这一条】上面那条用例直接喂"合并空间的三角形下标"给
-//   `NaniteAssignClusterMaterials`，测的是**低层规则本身**；它测不到"真实资产路径"的缺陷 ——
-//   缺陷在于资产构建器把**去重后**的 `triangleOffset` 当成了合并空间下标。本用例走
+// 【为什么必须有这一条】簇材质映射的缺陷**只在真实资产路径上显形** —— 拿**去重后**的
+//   `triangleOffset` 当合并空间三角形下标去查 `meshes[]`，是构建器曾犯过的错。本用例走
 //   `BuildNaniteAssetFromGeometry` 的**带材质重载**（真实路径），并刻意构造出缺陷的两个前提：
 //     ① **多个源网格**（否则"选错网格"观察不到）；
 //     ② **平移副本 ⇒ DAG 去重真的命中**（否则去重空间的偏移恰好等于真值，缺陷不显形）。
-//   实测 Sponza 上旧口径的失败形态是"非 LOD0 的簇 `triangleOffset` 越出原始三角形表" +
-//   "LOD0 有 3957/4099 选错网格"；本用例用最小构造复现后者的**同型**失败：
+//   实测 Sponza 上"按 `triangleOffset` 投票"的失败形态是"非 LOD0 的簇 `triangleOffset` 越出
+//   原始三角形表" + "LOD0 有 3957/4099 选错网格"；本用例用最小构造复现后者的**同型**失败：
 //   平移副本的簇共享同一份内容 ⇒ 它们的 `triangleOffset` 全都指向**第一份副本**的三角形区间
-//   ⇒ 用旧口径投票会把第 2/3 份副本的簇判成第 1 份的材质。
+//   ⇒ 按那个字段投票会把第 2/3 份副本的簇判成第 1 份的材质。
 //
 // 【判据是"手工期望"，不是实现的自证】三个源网格在空间上互不相连（间距 100，
 //   自身范围只有 x∈[0,16]）⇒ **每个三角形的归属由它的顶点 x 唯一确定**（副本之间不共享顶点，
@@ -2646,19 +2585,6 @@ TEST_CASE("NaniteMaterialMap: 平移副本（去重命中）仍归属各自的�
     // 每一份副本都必须**真的有簇**归属到它的材质（否则"全部判成第 1 份"也会让上面那条通过）
     for (u32 copy = 0u; copy < kCopies; ++copy) CHECK(perCopy[copy] > 0u);
 
-    // ── ④ 对照读数（不设断言）：旧口径（去重空间）在同一个资产上有多少簇**选错** ──
-    std::vector<u32> legacyOut(asset.clusters.size(), 0u);
-    const NaniteClusterMaterialMapStats legacyStats =
-        NaniteAssignClusterMaterials(dag.clusters, meshes, legacyOut);
-    u32 legacyWrong = 0u;
-    std::vector<u32> legacyPerCopy(kCopies, 0u);
-    for (usize ci = 0u; ci < asset.clusters.size(); ++ci) {
-        const float centerX = asset.clusters[ci].boundsCenterRadius[0];
-        const u32 expected = (centerX < 0.5f * kSpacing) ? 0u
-                           : (centerX < 1.5f * kSpacing) ? 1u : 2u;
-        if (legacyOut[ci] != expected) ++legacyWrong;
-        if (legacyOut[ci] < kCopies) ++legacyPerCopy[legacyOut[ci]];
-    }
     MESSAGE("任务 25 回归：簇数=" << asset.clusters.size()
             << " levels=" << dag.stats.levelCount
             << " 去重率=" << dag.stats.dedupRate
@@ -2666,9 +2592,6 @@ TEST_CASE("NaniteMaterialMap: 平移副本（去重命中）仍归属各自的�
             << " 选错材质=" << wrongMaterial
             << " 跨副本簇=" << straddlingClusters
             << " 每份副本簇数=[" << perCopy[0] << "," << perCopy[1] << "," << perCopy[2] << "]"
-            << " | 旧口径 unmapped=" << legacyStats.unmappedClusters
-            << " 选错材质=" << legacyWrong
-            << " 每份副本簇数=[" << legacyPerCopy[0] << "," << legacyPerCopy[1] << ","
-            << legacyPerCopy[2] << "]" << wrongDetail.c_str());
+            << wrongDetail.c_str());
 }
 

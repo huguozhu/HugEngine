@@ -821,8 +821,9 @@ TEST_CASE("NaniteTypes: 材质记录 32B 打包/解包（任务 19 最小扩展�
     const NaniteMaterialRecord fallback = NaniteMakeMaterialRecord(nullptr, 0.0f, 0.5f, 0u, 3u);
     CHECK(fallback.baseColorFactor[0] == 1.0f);
     CHECK(fallback.baseColorFactor[3] == 1.0f);
-    // 【簇 → 源网格 → 材质 的映射规则由 `Tests/TestNaniteBuilder.cpp` 覆盖】
-    //   （`NaniteAssignClusterMaterials` 定义在 `NaniteUpload.cpp`，本文件只编格式、不链接它）
+    // 【簇 → 源网格 → 材质 的映射规则由 `Tests/TestNaniteBuilder.cpp` 与
+    //   `Tests/TestNaniteMaterialMap.cpp` 覆盖：映射函数定义在 `NaniteUpload.cpp`，
+    //   本文件只编格式、不链接它】
 }
 
 // ============================================================

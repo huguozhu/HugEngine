@@ -255,14 +255,6 @@ TEST_CASE("NaniteMaterialMap(真实资产): Sponza 上 unmapped==0 且材质与�
     u32 badMeshLookup = 0u;      // 真值三角形查不到源网格的次数 ⇒ 必须 0（区间表应无缝覆盖）
     u32 unownedVertexClusters = 0u;  // 有顶点查不到源网格的簇数 ⇒ 必须 0
     u32 offMeshClusters = 0u;        // 簇的包围球与所选源网格的 AABB 不相交的簇数 ⇒ 必须 0
-    u32 legacyUnmapped = 0u;         // 修复前口径（去重空间）的 unmapped —— 仅作对照读数
-    u32 legacyWrongOnLevel0 = 0u;    // 修复前口径在 LOD0 上选错源网格的簇数 —— 仅作对照读数
-    u32 changedMaterial = 0u;        // 修复前 → 修复后材质归属发生变化的簇数（影响面）
-
-    std::vector<u32> legacyOut(asset.clusters.size(), 0u);
-    const render::NaniteClusterMaterialMapStats legacyStats =
-        render::NaniteAssignClusterMaterials(dag.clusters, g.meshes, legacyOut);
-    legacyUnmapped = legacyStats.unmappedClusters;
 
     // DAG 结构性守卫：一次核对（**不放进主循环** —— 那样会把断言数刷成几万条噪声）
     u32 dagBoundsViolations = 0u;
@@ -288,7 +280,6 @@ TEST_CASE("NaniteMaterialMap(真实资产): Sponza 上 unmapped==0 且材质与�
     for (usize ci = 0u; ci < asset.clusters.size(); ++ci) {
         const render::NaniteClusterRecord& cluster = asset.clusters[ci];
         const u32 level = dag.clusterLevel[ci];
-        if (legacyOut[ci] != asset.clusters[ci].materialID) ++changedMaterial;
 
         // 该出现的三角形 → 网格顶点（原始合并空间）
         const u32 unique = dag.clusterUnique[ci];
@@ -331,7 +322,6 @@ TEST_CASE("NaniteMaterialMap(真实资产): Sponza 上 unmapped==0 且材质与�
             ++level0Checked;
             const u32 expected = g.meshes[truthMesh].materialIndex;
             if (cluster.materialID != expected) ++level0Mismatch;
-            if (legacyOut[ci] != expected) ++legacyWrongOnLevel0;
         }
 
         // 【判据 3】每个簇的每个顶点都必须有源网格归属（"任何空间都命不中"的簇数为 0）
@@ -369,9 +359,8 @@ TEST_CASE("NaniteMaterialMap(真实资产): Sponza 上 unmapped==0 且材质与�
     CHECK(badMeshLookup == 0u);
     CHECK(unownedVertexClusters == 0u);
     CHECK(offMeshClusters == 0u);
-    CHECK(changedMaterial > 0u);   // 修复确实改变了材质归属（否则说明判据没覆盖到缺陷路径）
 
-    // `materials_sample` 那一行的 `cluster_material_id=[min max distinct]` 口径（修复前 / 后对照）
+    // `materials_sample` 那一行的 `cluster_material_id=[min max distinct]` 口径
     const auto idRange = [](const std::vector<u32>& ids, u32& outMin, u32& outMax, u32& outDistinct) {
         outMin = 0xFFFFFFFFu; outMax = 0u; outDistinct = 0u;
         std::vector<u32> seen;
@@ -383,8 +372,7 @@ TEST_CASE("NaniteMaterialMap(真实资产): Sponza 上 unmapped==0 且材质与�
     };
     std::vector<u32> newIds(asset.clusters.size());
     for (usize ci = 0u; ci < asset.clusters.size(); ++ci) newIds[ci] = asset.clusters[ci].materialID;
-    u32 oldMin = 0u, oldMax = 0u, oldDistinct = 0u, newMin = 0u, newMax = 0u, newDistinct = 0u;
-    idRange(legacyOut, oldMin, oldMax, oldDistinct);
+    u32 newMin = 0u, newMax = 0u, newDistinct = 0u;
     idRange(newIds, newMin, newMax, newDistinct);
 
     MESSAGE("真实资产映射: clusters=" << asset.clusters.size()
@@ -394,13 +382,8 @@ TEST_CASE("NaniteMaterialMap(真实资产): Sponza 上 unmapped==0 且材质与�
             << " | LOD0 真值核对 " << level0Checked << " 簇错 " << level0Mismatch
             << " | 无归属顶点簇 " << unownedVertexClusters
             << " | 几何核对越界簇 " << offMeshClusters);
-    MESSAGE("修复前后对照: 旧口径 unmapped=" << legacyUnmapped
-            << "（其中 LOD0 选错源网格 " << legacyWrongOnLevel0 << " 簇）"
-            << " cluster_material_id=[min=" << oldMin << " max=" << oldMax
-            << " distinct=" << oldDistinct << "]"
-            << " ⇒ 新口径 unmapped=" << asset.stats.unmappedClusters
+    MESSAGE("材质段映射读数: unmapped=" << asset.stats.unmappedClusters
             << " multi_mesh=" << asset.stats.multiMeshClusters
             << " cluster_material_id=[min=" << newMin << " max=" << newMax
-            << " distinct=" << newDistinct << "]"
-            << " 材质归属变化的簇=" << changedMaterial);
+            << " distinct=" << newDistinct << "]");
 }

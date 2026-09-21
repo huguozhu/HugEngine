@@ -505,8 +505,10 @@ struct NaniteClusterMaterialMapStats {
 
 /// 【§14.8 任务 25 缺陷修复】按"**三角形顶点的源网格归属**"把每个簇映射到材质段下标。
 ///
-/// 【与 `NaniteAssignClusterMaterials` 的区别（务必看清）】本函数**不读** `triangleOffset`
-///   —— 那个字段是去重后共享三角形段的下标，与 `meshes[]` 不同空间（见上）。它改用
+/// 【为什么本函数**不读** `triangleOffset`（务必看清）】那个字段是**去重后共享三角形段**的下标，
+///   与 `meshes[]` 的"原始合并三角形空间"不是同一个坐标系（见上：`meshopt_buildMeshlets` 会按簇内
+///   局部性重排三角形，级 ≥1 的共享段又是整体追加在原始表**之后**）⇒ 拿它去查 `meshes[]` 会大面积
+///   落空，还会让"落得进区间"的簇静默选错源网格。本函数改用
 ///   `dag` 里"每次出现 → 网格顶点"的映射（`clusterVertexIndexOffset` / `clusterVertexIndices`）
 ///   把簇的三角形还原成**原始合并顶点下标**，再用归属表定源网格。
 ///   ⇒ 因此它对**任何 LOD 级**、**任何去重状态**都成立，这正是资产构建器该用的口径。
@@ -525,23 +527,6 @@ struct NaniteClusterMaterialMapStats {
     u32                                    vertexCount,
     std::span<const NaniteSourceMeshRange> meshes,
     const NaniteClusterDAG&                dag,
-    std::span<u32>                         outClusterMaterialIndex);
-
-/// 【三角形下标空间的低层规则】按"三角形多数票"把每个簇映射到源网格的材质下标。
-///
-/// 【⚠ 使用前提】本函数**假定** `clusters[i].triangleOffset` 已经是**合并空间的三角形下标**
-///   （即调用方自己保证了这一点，例如"尚未引入 LOD/去重、簇按原始顺序切出"的场景）。
-///   **真实资产（`.nanite` 的 DAG 产物）不满足这个前提** —— 那里的 `triangleOffset` 是去重后
-///   共享三角形段的下标（实测 Sponza 会有 4103/8287 个簇落空、另有 3957/4099 个 LOD0 簇选错），
-///   所以资产构建器用的是上面的 `NaniteAssignClusterMaterialsByVertexOwner`。
-///   本函数保留：它的规则本身就是"给定合并空间三角形区间时该怎么投票"的**规范定义**，
-///   单测直接覆盖它，且不需要任何额外输入。
-/// @param outClusterMaterialIndex 输出数组（长度必须 == `clusters.size()`；每项写材质段下标）
-/// @return 映射读数（见上）
-/// 【确定性】不含哈希容器遍历序、不含随机数、不并行；平票取最小网格下标 ⇒ 同输入逐位一致。
-[[nodiscard]] NaniteClusterMaterialMapStats NaniteAssignClusterMaterials(
-    std::span<const NaniteClusterRecord>   clusters,
-    std::span<const NaniteSourceMeshRange> meshes,
     std::span<u32>                         outClusterMaterialIndex);
 
 // ============================================================
@@ -655,9 +640,9 @@ struct NaniteMaterialBin {
 //     【任务 19】新增重载额外接收 `meshes`（逐源网格的三角形区间 + 材质下标），
 //     它会把每个簇的 `materialID` 按"三角形多数票"写成**材质段下标**（映射规则见上），
 //     于是软光栅能从资产材质段取到真实材质（旧重载保持"materialID 一律 0"的语义不变）。
-//     【任务 25 修复】投票改走 `NaniteAssignClusterMaterialsByVertexOwner`（顶点归属空间，
-//     与 `meshes[]` 同一坐标系）—— 旧口径用去重后的 `triangleOffset` 查 `meshes[]`，
-//     实测 Sponza 有 4103 个簇落空、另有 3957 个 LOD0 簇选错网格（论证见上）。
+//     【任务 25 修复】投票走 `NaniteAssignClusterMaterialsByVertexOwner`（顶点归属空间，
+//     与 `meshes[]` 同一坐标系）—— **不能**拿簇记录的 `triangleOffset` 去查 `meshes[]`：
+//     那是去重后共享三角形段的下标，实测 Sponza 有 4103 个簇落空、另有 3957 个 LOD0 簇选错网格。
 // 【失败】与两个被调函数同口径：输入非法（索引不是 3 的倍数、越界索引、位置/属性长度不符、
 //   DAG 内部不一致、切不出簇等）⇒ 返回 false 且**不改写** `outResult`。
 // 【空几何】`indices` 为空 ⇒ 返回 true，产出一份"只有 96B 头部、计数全 0"的合法资产
