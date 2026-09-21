@@ -2230,7 +2230,10 @@ if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
 > 现已修复且判据 ⑦ 恢复 PASS（未改档位、未放宽守卫）。**判据 ⑦ 的 hiz1 档在默认阈值 16 下读数偏薄
 > （`occluded=4`），原因是任务 18 把 >16 三角形的簇留给任务 22 —— 任务 22 落地后该档会自然变强。
 > **任务 20 与任务 21 均已完成、全量八条判据 `ACCEPTANCE SWEEP: PASS`。**
-> 下一步 = 任务 22（mesh shader 硬光栅 + 分流）。
+> **进度更新（2026-09-21）**：**任务 22（mesh shader 硬光栅 + 软硬分流）已完成**，见 §14.31。
+> 硬光栅为独立开关 `nanite_hard_raster`（**默认关**），关闭时冻结指纹与任务 21 逐字相同。
+> **下一步 = 任务 23（混合光栅分配策略 + 性能读数）**：任务 22 已暴露两处性能事实 ——
+> 硬光栅 341× 过绘、mesh 线程利用率约 50%（§14.31 的"存疑未做"），正是任务 23 的输入。
 
 **阶段 0：模块化前置（独立开关先落地）**
 
@@ -2277,7 +2280,7 @@ if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
 
 | # | 目标 | 备注 | 验收 |
 |---|---|---|---|
-| 22 | mesh shader 硬光栅 + 分流 | 复用任务 6 的管线；`triCount > 16` 走硬光栅（§5.2 L322-334） | 混合光栅画面一致、软硬占比可读 |
+| 22 | mesh shader 硬光栅 + 分流 | 复用任务 6 的管线；`triCount > 16` 走硬光栅（§5.2 L322-334） | 混合光栅画面一致、软硬占比可读 —— **已完成（§14.31，2026-09-21）**：硬光栅接手 31587/31587 个大簇（100%）、软硬占比读数齐备、A/B 覆盖 99.62% 且 `worldpos corr=0.9989`；附带宽带修掉 3 个既有 RHI 潜伏缺陷 |
 | 23 | 混合光栅分配策略 + 性能读数 | 阈值/簇大小分布对帧时的影响（接入 `HE_CPU_PASSES` 与 `LogFrameBudget`） | 帧时读数可复现；无回归 |
 | 24 | LOD 流式（反馈 + 页池） | **文档空白**（无 cluster page / page pool / 流式设计），需先补设计再实现 | 先补设计评审，再定验收 |
 | 25 | Material Bin | 按材质分组 + bindless 材质数组（§5.4） | 多材质场景无 draw 爆炸；描述符切换次数可读 |
@@ -2392,6 +2395,21 @@ if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
   参考：A 档（= 阈值 64 全覆盖档）的既有实测为写标记 `921399 px`、覆盖 `0.4443`、
   `worldpos corr=0.9290`（**该值是"模块 vs 引擎"，含几何差异**，故只有 0.93）、
   `metallic corr=0.9992`、`material_pixels == pixels_written == 44318207`、`skipped_big=0`。
+
+- **实测回填（2026-09-21，任务 22 落地后；详见 §14.31）**
+  | 量 | 期望 | **实测** |
+  |---|---|---|
+  | `soft` | 61 | **61**（与基线逐位相同） |
+  | 硬光栅簇数 | ≈31587 | **31587**（== `skipped_big`，100% 接手） |
+  | 覆盖（写标记像素） | ≈921399（0.4443） | **917903（0.4427，= A 的 99.62%）** |
+  | A vs B `gb_worldpos` corr | ≈1.0 且远高于 0.9290 | **0.9989** |
+  | A vs B `metallic` 直方图 corr | ≥0.99 | **1.0000**（双方都写 / 整幅对整幅两种口径都是） |
+  | A vs B neutral-material pixels | 0 | **0** |
+  两条口径提醒（实测踩到，务必沿用）：① 既有 `nanite_takeover_cmp.py` 的 `metallic` 直方图是
+  "**参考帧整幅** vs **受测帧被写像素**"，为"模块 vs 引擎"设计；用于**模块 vs 模块**的 A/B 会给出
+  假的 FAIL（A 整幅有 ~55% 清屏值 `metallic=1.0`）⇒ A/B 必须改用"双方都写"或"整幅对整幅"口径。
+  ② `hardRaster=1` 档的 `nanite_passes` 仍是 **2**（硬光栅录在既有 pass 体内，帧图零新增），
+  **不是** 3 —— 本文档上一版把这里写成 3 是错的。
 
 - **尺寸约束（2026-09-21 实测本机）**
   - `meshInvocations=128, meshVertices=256, meshPrimitives=256` ⇒ **`[numthreads(N,1,1)]` 的 N ≤ 128**；
@@ -3651,5 +3669,118 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
   - `(8e)` 关闭档与基线逐位一致：开启档 pass 列表去掉 `Nanite*` 行后与关闭档**逐行相同**
     且 sha 命中冻结指纹 `1C15AB72E688B530…`。
 - 因此 **§14.8 的任务 20 与任务 21 均已完成**；本轮同时修掉了它们下面的两处 P0 深度缺陷。
-  下一步 = **任务 22（mesh shader 硬光栅 + 分流）**：它会把 `triCount > 16` 的簇从"跳过并计数"
-  变成真正画出，从而补全模块的深度场与覆盖范围（判据 ⑦ 的 `hiz1` 档与判据 ⑧c 的覆盖率会随之变强）。
+
+### 14.31 任务 22 实施记录：mesh shader 硬光栅 + 软硬分流（2026-09-21）
+
+**目标**：按 §5.2 让 `triangleCount > softMaxTriangles`（默认 16）的簇走 mesh shader 硬光栅，
+`<= 16` 的仍走既有 compute 软光栅；验收 = 混合光栅画面一致 + 软硬占比可读。
+
+**① 分流契约（两侧用同一份判据，故可证"并集全覆盖 + 交集为空"）**
+- 软光栅：`Nanite_SoftRaster.comp.slang` 的 `if (triangleCount > maxTriangles) return;`（既有，任务 18）。
+- 硬光栅：`Nanite_HardRaster.mesh.slang` 的 `if (triangleCount <= maxTriangles) HARD_RASTER_BAILOUT();`
+  —— **同一个 push constant 字段、同一份 `triangleCount`**，只是判据取反 ⇒ 两集合互补。
+- 新开关 **`NaniteSettings::hardRaster`（默认 `false`）**，cfg 键 `nanite_hard_raster`（默认 0）。
+  **默认关是硬要求**，理由见 §14.11 的新增段（判据 8b 只允许 4 个 GBuffer 目标 + 抖动族变化）。
+
+**② 深度次序：选方案 (b)（硬光栅排在软光栅三趟之后），两个方向遮挡都正确**
+次序（`Nanite_CullChain3` 同一个 pass 体内，命令缓冲内显式屏障定序；**帧图零新增 pass**）：
+`GB_Clear → 剔除链 + 间接绘制 → 软光栅两趟 → 深度解析 → 硬光栅(mesh)`。
+硬光栅 PSO：`depthTest=true + depthCompare=LessEqual + depthWrite=true`、
+**`colorLoadOp=Load` + `depthLoadOp=Load`**（Load 是关键：Clear 会抹掉软光栅刚写的结果）、
+8 个颜色附件 + per-MRT `writeMask`（只写 MRT0/1/4/7）。
+关键推导（**已复核并纠正了本文档上一轮的判断**）：
+- `dh < ds` ⇒ 深度测试通过 ⇒ 硬颜色**覆盖**软颜色、深度改写为 `dh` ⇒ **硬遮软 ✓**；
+- `dh > ds` ⇒ 测试失败 ⇒ 硬片元丢弃、软颜色保留 ⇒ **软遮硬 ✓**；
+- 无软几何的像素 `ds = 1.0` ⇒ 硬照常写入 ✓。
+⇒ **遮挡正确性只取决于"后写者是否带深度测试"，与"谁先写"无关**。方案 (a)（硬在前）才是真的只成立
+一半 —— 软颜色趟的等值复检只对照**软自己的深度键**，看不见硬几何。方案 (c)（从 D32 播种深度键）
+在 (b) 已两向正确时属纯增量风险，未采纳。
+
+**③ 已知边界（如实记录，不是"完全等价"）**
+1. 软深度键截断到 **24 位尾数**（`asfloat(key & 0xFFFFFF00)`）；`near=0.1/far=2000` 下远处 1 个桶
+   ≈ 1.2e3 世界单位 —— 这是**软光栅既有精度**，不是本任务引入。实测受测帧在 **69.6%** 的像素上
+   选中比全软档**更近**的面、4.2% 更远 ⇒ 硬光栅在中远处反而更准。
+2. 深度恰好相等时 `LessEqual` 让**硬**胜出。
+3. 硬光栅写深度附件 ⇒ 下游 Hi-Z / SSAO / SSR 结果变化 —— 这是"默认必须关"的第二个理由。
+4. 覆盖率缺口 **3496 px 100% 落在远平面之外**（轴向距离 2070~2162 > `far=2000`）：软光栅按
+   "不做近/远平面裁剪"照画，硬件按规范裁掉 ⇒ 这是**两套光栅的既有语义差**，不是缺陷。
+
+**④ 软硬占比读数（真实 GPU 回读；受测档 `nanite_enable=1; nanite_hard_raster=1`，阈值 16）**
+```
+[Nanite] hard_raster clusters=31587 prims=2021446 pixels=308810322 fallback_pixels=0
+         soft_clusters=61 soft_pixels=3264 skipped_big=31587
+         hard_share_permille=999 soft_share_permille=0 max_triangles=16
+         visible_capacity=1048576 mesh_supported=1 pso=ok
+```
+- `soft_clusters=61` / `skipped_big=31587` 与**改前基线逐位相同**（基线见 §14.11 的期望数值表）；
+- 硬光栅 `clusters=31587` **== `skipped_big`** ⇒ 大簇 **100% 被接手**（不是"几百"）；
+- `fallback_pixels=0` ⇒ 硬光栅写的是**资产材质**、没有退化成中性常数；
+- `mesh_supported=1 pso=ok` ⇒ 走的是**真硬件路径**，不是"设备不支持"的降级；
+- **交叉核对**：硬 `prims=2021446` vs 全软档 `triangles+degenerate=1758608+262899=2021507`（差 61 =
+  小簇）；硬 `pixels=308.8M` vs 全软档 `covered_px=314.4M`（差 1.8%）。
+- `hard_share_permille` 是**片段数**之比（含过绘），**不是屏幕覆盖率**，口径已在报告里写明。
+- 关闭档（`hardRaster=0`）**不打印该行** ⇒ 关闭档日志与基线一致（既有纪律）。
+
+**⑤ 画面一致性（A/B；A = 阈值 64 全软光栅，B = 阈值 16 + 硬光栅）**
+用既有 `nanite_takeover_cmp.py` 与自制 `t22_ab_diag.py`（脚本在被 gitignore 的 `build/verify/` 下）：
+| 指标 | A vs B | 噪声底（A 两次） | 对照（硬光栅开但 0 簇） |
+|---|---|---|---|
+| 写标记像素 | 917903（**99.62%** of A 的 921399） | 100% | 100% |
+| `gb_worldpos` 相关（双方都写） | **0.9989** | 1.0000 | 1.0000 |
+| `metallic` 直方图（双方都写） | **1.0000** | 1.0000 | 1.0000 |
+| `metallic` 直方图（整幅 vs 整幅） | **1.0000** | 1.0000 | 1.0000 |
+- **工具原文的 `[2] metallic hist = 0.6222 FAIL` 是口径不适用，不是回归**：该脚本的 hist 是
+  "**参考帧整幅** vs **受测帧被写像素**"（为"模块 vs 引擎"设计），而 A 档整幅有 ~55% 是清屏值
+  （`metallic=1.0`）⇒ 与"模块 vs 模块"不匹配。同口径与整幅对整幅重算均为 **1.0000**。
+- **逐像素几何身份不成立**（如实记录）：92% 的像素由**不同实例**胜出 —— 本样例是 **64 份几乎同深度
+  的重叠整场景拷贝**；在两条路径挑到**同一实例**的像素上，77.5% 的世界坐标差 < 0.01。
+- 三组亮度/材质平均差（A/B、噪声底、对照）：`albedo 0.0228 / metallic 0.0048 / hdr 0.0252`
+  vs 噪声底 `0.0095 / 0.0053 / 0.0042` ⇒ 分别 2.4× / 0.9× / 6×；`hdr` 的 6× 属抖动族。
+
+**⑥ 构建与验收**
+- 构建：`06.GILab` / `07.Nanite` / `HugEngineTests` 全 `exit 0`；单测 `Status: SUCCESS!`。
+  （独立复建 `07.Nanite` 亦 `exit 0`。）
+- `acceptance_sweep.ps1 -OnlyNanite`：改前基线 **PASS**；改后 **run1 PASS / run2 FAIL / run3 PASS**，
+  独立复跑一次 **PASS**。
+- **run2 的 FAIL 不是本任务引入**：它是 `tier on: smoke run TIMEOUT (sample killed after 300s)`，
+  而该档 cfg 为 `nanite_hard_raster=0` ⇒ **根本不走新代码**（日志跑到第 117 帧、
+  2.56 s/帧 vs 正常 0.2 s/帧，机器侧 10× 变慢命中脚本 300 s 上限）；同一次运行的判据 ⑥/⑦ 全 PASS。
+- PASS 档冻结指纹逐项一致：`off passes=12 sha=1C15AB72E688B530`、
+  `on passes=14 nanite_passes=2 sha=750CC247BF8B9C3D`、`on-minus-Nanite==off True`；
+  8a `soft=61 skipped_big=31587`；8b `unexpected=0 missing=0`；8c `corr 0.9289 / hist 0.9993`；
+  8d `vuid on=42 new=0`；判据 ⑦ `CULL DIFF: PASS`（五档全 OK）。
+- **纠正一处预期**：`hardRaster=1` 档的 `nanite_passes` 仍是 **2**（不是 3）—— 硬光栅录在既有
+  `Nanite_CullChain3` pass **体内**（与任务 16 的间接绘制、任务 18 的三趟同手法），帧图零新增，
+  pass 列表 sha 与 on 档**逐字相同**。
+
+**⑦ 顺带修掉的 3 个既有 RHI 潜伏缺陷（均为加法/纠错；冻结指纹逐字未动即"既有行为未变"的证据）**
+1. **`kStageMaskMesh` / `kStageMaskAmplification` 值互换**（`Engine/RHI/RHI/Types.h`）：原为
+   Mesh=64 / Amplification=128，而 Vulkan 真值是 `VK_SHADER_STAGE_TASK_BIT_EXT=0x40`(64) /
+   `VK_SHADER_STAGE_MESH_BIT_EXT=0x80`(128)（已对照本机 SDK `vulkan_core.h:3150-3151` 核实）。
+   任务 22 是**第一个**把 `kStageMaskMesh` 放进描述符集布局的调用者 ⇒ 立刻
+   `vkCreateGraphicsPipelines` 失败并随后 `EXCEPTION_ACCESS_VIOLATION` 崩溃。已按真值改正。
+2. **`SetPushConstants` 对图形管线只发 `VS|FS`** ⇒ mesh 阶段读不到 push constant；改为
+   布局与发送使用同一份并集 `VS|FS|Mesh|Task`（`VulkanCommandList.cpp` + `VulkanPipeline.cpp`）。
+3. 新增 `PipelineStage::{MeshShader, TaskShader}`，让"清零 → mesh 原子累加"的屏障**显式**表达
+   （此前只能靠掩码为空退化成 `ALL_COMMANDS`）。
+
+**⑧ 交付文件**
+新增 `Engine/Shader/Shaders/Nanite/Nanite_HardRaster.{mesh,frag}.slang`（分别登记进
+`MESH_SLANG` / `FRAG_SLANG`，构建日志确认真编了）；改 `NaniteSettings.h`、`NaniteTypes.h`、
+`NaniteRaster.{h,cpp}`、`NaniteRenderer.{h,cpp}`、`Samples/07.Nanite/07.Nanite.cpp`（解析 / 面板 /
+回写 / 日志四处齐备，cfg 往返已验证）、RHI 三文件。**未新增 C++ 文件**（`Engine/Render/CMakeLists.txt`
+无需改）；**未改 `GBufferRenderer`**；模块内未引用 GI/Lumen/GPUCulling。
+
+**⑨ 存疑未做（明确留给后续）**
+- 方案 (c)（从 D32 播种深度键）、独立的帧图 pass、`DrawMeshTasksIndirectCount`（RHI 已就绪但本轮
+  未接线，网格任务数仍由 CPU 给出上界 + shader 早退）；
+- 深度附件的逐像素比对（转储清单里没有深度目标，只能给间接证据）；
+- 软光栅 24 位深度键截断未改（属既有精度口径）；
+- **性能优化属任务 23**：本轮实测硬光栅 **341× 过绘**、mesh 线程利用率约 **50%**；
+- 屏幕上的软硬占比可视化属任务 26。
+
+**⑩ 一条既有问题（非本任务引入，但影响判据 ⑧ 稳定性）**
+模块接管档**两次相同运行并非逐位可复现**：20 个转储里 7 个不同（恰好 4 个 GBuffer + `hdr` +
+`prov0_ao` ×2），同档两次之间 `lightmapkey.page` 平均差 18.8。根因是软光栅"深度键相同 ⇒ 多个
+三角形都通过等值复检 ⇒ 由 UAV 写入顺序决定"，在 64 份重叠拷贝下被放大。这与 §14.11 记录的
+判据 ⑦/⑧ 历史抖动方向一致，**建议另立一项**（会影响判据 ⑧ 的可复现性）。
