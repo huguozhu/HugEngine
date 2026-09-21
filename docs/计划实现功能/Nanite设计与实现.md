@@ -3996,23 +3996,31 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
       （8 个日志的 `size_dist` 取值唯一）⇒ 它是"页表/间接层没算错"的**最强证据**。
     - **⚠ 2026-09-21 (d1) 的非空洞化修正（关键，防"空洞通过"）**：仅写"`page_misses == 0`"这条
       判据**本身没有证明力**，因为读数缓冲是**按 C++ 容量分配并每帧清零**的 ——
-      `NaniteRaster.cpp:834` 按 `sizeof(u32) * kNaniteSoftStatsCapacity` 分配（任务 24 后为 24 个 u32），
+      `NaniteRaster.cpp:834` 按 `sizeof(u32) * kNaniteSoftStatsCapacity` 分配
+      （任务 24 定稿为 **22 个 u32**：槽 0..21，见 `NaniteTypes.h:2307`），
       并由 `m_SoftStatsZeroSrc`（创建于 `:837-849`）**每帧整段清零** ——
       清零函数是 `NaniteRaster::RecordSoftStatsClear`（`NaniteRaster.cpp:906-912`），
-      它按 `kNaniteSoftStatsCapacity * sizeof(u32)`（任务 24 后 **24 个 u32 = 96 字节**）
+      它按 `kNaniteSoftStatsCapacity * sizeof(u32)`（任务 24 定稿 **22 个 u32 = 88 字节**）
       整段 `CopyBuffer` 覆盖 `m_SoftStats`，并紧接一条 Transfer→ComputeShader 屏障。
-      ⇒ **清零范围覆盖槽位 20~23**，而写权限随后整段交给 compute（UAV）——
+      ⇒ **清零范围覆盖槽位 20~21**，而写权限随后整段交给 compute（UAV）——
       没被 shader 写的槽位就**稳定读回 0**，不是"未初始化"而是"被明确清零"，
       所以这个空洞通过是**确定会发生的**，不是随机现象。
-      ⇒ **若 shader 根本没写流式槽位 20~23，C++ 读回的就是 0**，
+      ⇒ **若 shader 不写流式槽位 20/21，C++ 读回的就是 0**，
       "`page_misses == 0`"会在**流式功能完全没工作**时同样成立。
-      这正是任务 24 实现期实测到的状态：`Nanite_SoftRasterCommon.slang:98`
-      `kSoftStatCapacity` 仍是 `20u`，与 C++ 的 `24u` 不同步，且全部 shader 中**零处**写入流式槽位。
+      【这条风险在实现期被实测确认为真实】起草时 `Nanite_SoftRasterCommon.slang` 的
+      `kSoftStatCapacity` 仍是 `20u`（与当时的 C++ 不同步），且**全部 shader 零处**写入流式槽位；
+      实现者随后补齐为 `22u` + 槽 20/21 的原子写入（`Nanite_SoftRaster.comp.slang` 写 `page_requests`、
+      `Nanite_SoftRasterDepth.comp.slang` 写 `page_misses`，详见 §14.37）。
+      **本条修正不因"已补齐"而失效** —— 它防范的是后续改动把它退回"不写"的回归，
+      而 (c) 就是那条必须真跑一次的非空洞守卫。
       **因此 (d1) 必须加强为**：流式开启且页池充足时**同时**满足
       **`page_requests > 0` 且 `page_misses == 0`** ——
       `page_requests > 0` 证明"光栅→反馈回读"链路真的在跑，(d1) 才具备证明力。
       配套两条硬要求：
-      1. Slang `kSoftStatCapacity` 必须同步为 `24u`（与 C++ 一致），且流式槽位的累加写入必须发生在
+      1. Slang `kSoftStatCapacity` 必须与 C++ 的 `kNaniteSoftStatsCapacity` **相等**
+         （当前两侧都是 **22u**，槽 0..21 吃满；且**必须只有一处定义** ——
+         实现期曾出现 `Nanite_SoftRasterCommon.slang` 同作用域重复定义 `20u`/`22u` 的缺陷，
+         已修），且流式槽位的累加写入必须发生在
          本帧清零**之后**（即本帧光栅之内），否则读数会被清零或丢失。
       2. **(c) 是 (d1) 的非空洞守卫**：必须在"页池 8 页"下**真拿到一次 `page_misses > 0`**，并把读数原文
          写进记录。若 (c) 拿不到 `page_misses > 0`，说明写入链路本身有问题，
