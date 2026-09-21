@@ -59,6 +59,11 @@ add_executable(HugEngineTests
     # 外加"生成 bin 不改动资产"与"真实 Sponza 资产上按 bin 顺序的 material_switches 收益"。
     # 单独一文件：与前两个 Nanite 测试文件同一个理由（避免单文件无限膨胀）。
     TestNaniteMaterialBin.cpp
+    # §14.8 任务 26：每簇 BVH 节点深度（`ComputeNaniteClusterBVHDepths`，纯函数）的正确性用例 ——
+    # "根 = 1、长度恒等于簇数、不在任何叶里的簇保持 0、损坏镜像不越界、退化的 400 层深链不爆栈"，
+    # 以及与真实 `BuildNaniteClusterBVH` 报出的 `depth` 的交叉核对。
+    # 单独一文件：与上面三个 Nanite 测试文件同一个理由（避免单文件无限膨胀）。
+    TestNaniteBvhDepth.cpp
     # §14.8 任务 8：离线簇切分的实现落在 Engine/Render/Nanite/NaniteUpload.cpp。
     # 该翻译单元（连同 NaniteUpload.h）是 RHI-free 的（只前置声明 rhi::IRHIDevice），
     # 所以单测可以**直接编译它**，而不必链接 HugEngineRender（后者会拉入 RHI/Vulkan/SPV）。
