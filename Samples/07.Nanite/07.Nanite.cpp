@@ -1916,6 +1916,35 @@ int main() {
             if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
                 dpNanite->GetNanite().LogHardRasterReadback();
 
+            // ── Nanite（§14.8 任务 23）：可见簇的**簇大小分布**（五桶）的**恰好一行**真实 GPU 读回 ──
+            // 字段：buckets=[1-4, 5-8, 9-16, 17-32, 33-64] + total（五桶之和）+ clusters（分流两侧合计）
+            //       + visible（剔除链的可见簇数）+ sum_eq_clusters / sum_eq_visible（两条不变式的判定位）。
+            // 【为什么与上面那条软光栅行**同门控**】桶计数就写在软光栅**第 1 趟**里、用同一个读数缓冲
+            //   ⇒ 两行必须同生同灭（`nanite_soft_raster=0` 或模块关闭时都不打印，既有档位的日志逐字不变）。
+            // 同步同样依赖上面的 `WaitIdle()`。
+            if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
+                dpNanite->GetNanite().LogSizeDistReadback();
+
+            // ── 【§14.8 任务 23】整帧预算 + "分流 × 帧时"的 perf 行（同一个 `LogFrameBudget`）──
+            // 【为什么这里必须补一次 `LogFrameBudget()` 调用】它原本**只**在 Lumen 段
+            //   （`Lumen_SDF_Build` 的 pass 体内）被调用，而 07.Nanite 的 cfg 没有请求 Lumen 源
+            //   （`gi_blend_diffuse_lumen=0`）⇒ 那个 pass 根本不注册 ⇒ 【帧预算】行永远不会打印
+            //   （上面"帧率读数"行里写的"pass 合计见【帧预算】行"因此一直指不到东西）。
+            //   【为什么放在 dump 帧、`WaitIdle()` 之后】每档只付一次调用；且 perf 行里的分流计数
+            //   与上面几行读数**同一帧同一份**（全都在这一个 `WaitIdle()` 之后读回）。
+            //   **帧时不是新测的**：就是 `LogFrameBudget()` 自己算出的"各 pass 合计"，
+            //   与它打印的【帧预算】行逐位相同（任务 23 的"同一帧、同一来源"口径）。
+            // 【门控】只在 Nanite 模块开启且 `HE_CPU_PASSES` 打开时调用
+            //   （模块内部还会再查一次 `HE_CPU_PASSES`）⇒ 关闭档与既有档位的日志逐字不变。
+            // 【已知的良性重复】若该 cfg 将来请求了 Lumen 源（`gi_blend_diffuse_lumen != 0`），
+            //    Lumen 段那一处也会按它自己的 120 帧节拍打印【帧预算】 ⇒ 本档会各出现两行。
+            //    两行的 `total` 同源同公式，只是采样帧不同；当前 cfg 未请求 Lumen，故不会发生。
+            if (std::getenv("HE_CPU_PASSES") != nullptr) {
+                if (auto* dpBudget = dynamic_cast<render::DeferredPipeline*>(curPipeline)) {
+                    if (dpBudget->GetNanite().GetSettings().enabled) dpBudget->LogFrameBudget();
+                }
+            }
+
             const String dir  = "build/verify/";
             const String base = dir + "gi_" + g_DumpTag;
             std::filesystem::create_directories(dir);

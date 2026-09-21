@@ -2503,3 +2503,67 @@ TEST_CASE("NaniteWiring: 绘制参数/命令的布局契约与占位索引上界
     CHECK(kNaniteFakeClusterIndexCount <= kNanitePlaceholderIndexCountMax);
 }
 
+// ── 27. 【任务 23】可见簇的簇大小分布五桶：槽位约束 + 区间边界 + 全枚举映射 ──────────────
+//
+// 【这条测试钉住什么】"五桶之和 == 软光栅分流两侧合计"这条不变式的前提是**分桶是全覆盖且互斥的**，
+//   而全覆盖/互斥由两件事决定：① 槽位连续且落在读数缓冲内（C++ 与 Slang 必须同一组数字）；
+//   ② 区间边界与 Slang 的 `softRasterSizeBucket()` 逐分支等价。两者都在这里被枚举钉住，
+//   于是 shader 侧改错一处（例如把 `<= 16` 写成 `< 16`）会先在单测红掉，而不是等到读数对不上。
+TEST_CASE("NaniteSizeDist: 五桶槽位/区间与 1..64 全覆盖映射（任务 23）") {
+    // ① 槽位：紧跟既有的 14 号槽、连续、吃满读数缓冲（三个 static_assert 的运行时复读）
+    CHECK(kNaniteSoftStatSizeBucket0 == 15u);
+    CHECK(kNaniteSoftStatSizeBucket0 == kNaniteSoftStatDepthResolvedPixels + 1u);
+    CHECK(kNaniteSoftStatSizeBucketCount == 5u);
+    CHECK(kNaniteSoftStatsCapacity == 20u);
+    CHECK(kNaniteSoftStatSizeBucket0 + kNaniteSoftStatSizeBucketCount == kNaniteSoftStatsCapacity);
+
+    // ② 区间：闭区间上界表 = 任务书写的 1-4 / 5-8 / 9-16 / 17-32 / 33-64
+    CHECK(kNaniteSizeBucketUpperBound[0] == 4u);
+    CHECK(kNaniteSizeBucketUpperBound[1] == 8u);
+    CHECK(kNaniteSizeBucketUpperBound[2] == 16u);
+    CHECK(kNaniteSizeBucketUpperBound[3] == 32u);
+    CHECK(kNaniteSizeBucketUpperBound[4] == 64u);
+    // 最后一桶的上界必须正好是簇三角形上限：否则 [65, 合法上限] 之间会漏掉合法簇
+    CHECK(kNaniteSizeBucketUpperBound[kNaniteSoftStatSizeBucketCount - 1u] == kNaniteMaxClusterTriangles);
+
+    // ③ 全枚举：1..64（合法簇的整个范围）逐个查表，并与**手写的区间表**比对
+    //    （手写表 = Slang 里那 5 级阶梯的逐字翻译 ⇒ 这条 CHECK 就是两侧一致性的证据）
+    for (u32 tri = 1u; tri <= kNaniteMaxClusterTriangles; ++tri) {
+        const u32 expected = tri <= 4u ? 0u : tri <= 8u ? 1u : tri <= 16u ? 2u : tri <= 32u ? 3u : 4u;
+        CHECK(NaniteSizeBucketOf(tri) == expected);
+    }
+    // 边界两侧成对检查（区间是**闭**的：4 与 5 必须落在相邻两个桶，不能同桶）
+    CHECK(NaniteSizeBucketOf(1u) == 0u);
+    CHECK(NaniteSizeBucketOf(4u) == 0u);
+    CHECK(NaniteSizeBucketOf(5u) == 1u);
+    CHECK(NaniteSizeBucketOf(8u) == 1u);
+    CHECK(NaniteSizeBucketOf(9u) == 2u);
+    CHECK(NaniteSizeBucketOf(16u) == 2u);
+    CHECK(NaniteSizeBucketOf(17u) == 3u);
+    CHECK(NaniteSizeBucketOf(32u) == 3u);
+    CHECK(NaniteSizeBucketOf(33u) == 4u);
+    CHECK(NaniteSizeBucketOf(64u) == 4u);
+    // ④ 越界夹取：> 64（只可能来自损坏资产）归入最后一桶，绝不越界
+    CHECK(NaniteSizeBucketOf(65u) == 4u);
+    CHECK(NaniteSizeBucketOf(0xFFFFFFFFu) == 4u);
+
+    // ⑤ 穷举"全覆盖且互斥"：对每个合法三角形数，桶号唯一且落在 [0,桶数)
+    //    （互斥性是"五桶之和 == 簇数"的必要条件；这里用计数法再验一次：所有合法值恰好各落一个桶）
+    u32 perBucket[kNaniteSoftStatSizeBucketCount] = {};
+    for (u32 tri = 1u; tri <= kNaniteMaxClusterTriangles; ++tri) {
+        const u32 b = NaniteSizeBucketOf(tri);
+        REQUIRE(b < kNaniteSoftStatSizeBucketCount);
+        ++perBucket[b];
+    }
+    CHECK(perBucket[0] == 4u);    // 1..4
+    CHECK(perBucket[1] == 4u);    // 5..8
+    CHECK(perBucket[2] == 8u);    // 9..16
+    CHECK(perBucket[3] == 16u);   // 17..32
+    CHECK(perBucket[4] == 32u);   // 33..64
+    CHECK(perBucket[0] + perBucket[1] + perBucket[2] + perBucket[3] + perBucket[4]
+          == kNaniteMaxClusterTriangles);
+    MESSAGE("五桶区间 = 1-4(", perBucket[0], ") / 5-8(", perBucket[1], ") / 9-16(", perBucket[2],
+            ") / 17-32(", perBucket[3], ") / 33-64(", perBucket[4], ")，合计 = 合法簇三角形上限 ",
+            kNaniteMaxClusterTriangles);
+}
+

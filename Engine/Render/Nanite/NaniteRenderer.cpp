@@ -44,6 +44,7 @@
 
 #include <algorithm>   // std::sort（实例剔除读回：GPU 原子压缩列表的顺序不定，比较前排序）
 #include <cstdio>      // std::snprintf（实例剔除读回的 first= 样本串）
+#include <cstdlib>     // 【任务 23】std::getenv（perf 行复用既有的 HE_CPU_PASSES 开关）
 #include <cstring>     // 【任务 15】std::memcpy（三阶段读数整块读回）
 #include <vector>      // 任务 12：SoA 转换的临时数组（positions / normals / uvs）
 
@@ -631,6 +632,78 @@ void NaniteRenderer::LogHardRasterReadback() {
     //（关闭档与"只开 enabled"档的日志必须与基线逐字一致 —— 判据 ⑥/⑧e 的守卫）。
     if (!m_Settings.enabled || !m_Ready || !m_Settings.softRaster || !m_Settings.hardRaster) return;
     m_Raster.LogHardRasterReadback();
+}
+
+void NaniteRenderer::LogSizeDistReadback() {
+    // 关闭档 / 未就绪 / 未开软光栅：不打印（关闭档日志与基线逐字一致）。
+    // 【为什么门控与 `soft_raster` 行完全一致】桶计数就写在软光栅**第 1 趟**里，
+    //   用的是同一个读数缓冲 ⇒ 没有第 1 趟就没有分布可读，两行的可打印性必须同步。
+    if (!m_Settings.enabled || !m_Ready || !m_Settings.softRaster) return;
+
+    // ── ① 五桶 + 分流两侧合计：来自**同一个**软光栅读数缓冲（同一次 GPU 原子累加）──
+    u32 s[kNaniteSoftStatsCapacity] = {};
+    m_Raster.ReadbackSoftStats(s);
+    u32 buckets[kNaniteSoftStatSizeBucketCount] = {};
+    u64 bucketSum = 0ull;
+    for (u32 b = 0u; b < kNaniteSoftStatSizeBucketCount; ++b) {
+        buckets[b] = s[kNaniteSoftStatSizeBucket0 + b];
+        bucketSum += (u64)buckets[b];
+    }
+    const u32 clusters = s[kNaniteSoftStatRasterClusters] + s[kNaniteSoftStatSkippedClusters];
+
+    // ── ② 可见簇计数：剔除链 Phase 3 的原子计数（与 `visible_wiring` 行的 `visible` 同源）──
+    u32 visible = 0u;
+    if (auto* b = m_Cull.GetVisibleClusterCountBuffer()) {
+        if (void* p = b->Map()) { visible = *static_cast<const u32*>(p); b->Unmap(); }
+    }
+
+    // ── ③ 两条不变式的判定位（1 = 成立）──
+    //   ① 五桶之和 == 分流两侧合计：两者来自**同一次可见簇枚举**（第 1 趟的同一个合法性子集），
+    //      唯一的差别是桶计数在分流判据之前、`soft/skipped_big` 在判据之后 ⇒ 必须相等。
+    //   ② 分流两侧合计 == 可见簇数：可见簇列表里的每一项都被第 1 趟枚举到才会相等
+    //      （容量截断、`triangleCount == 0` 的退化簇、越界引用都会让它变小 —— 那时如实打印 0）。
+    const u32 sumEqClusters = (bucketSum == (u64)clusters) ? 1u : 0u;
+    const u32 sumEqVisible  = ((u64)clusters == (u64)visible) ? 1u : 0u;
+
+    // 【恰好一行】任务 23 的"分布"出口。字段名自成一格（buckets/total/clusters/visible/…），
+    //   与 `soft_raster` / `hard_raster` 两行的字段刻意不重名，避免任何按行抽键值的脚本抓错行。
+    HE_CORE_INFO("[Nanite] size_dist buckets=[{},{},{},{},{}] total={} clusters={} visible={} "
+                 "sum_eq_clusters={} sum_eq_visible={} max_triangles={}",
+                 buckets[0], buckets[1], buckets[2], buckets[3], buckets[4],
+                 (unsigned long long)bucketSum, clusters, visible,
+                 sumEqClusters, sumEqVisible, m_Raster.SoftLastMaxTriangles());
+}
+
+void NaniteRenderer::LogPerfReadback(float frameTotalMs, float nanitePassMs, u32 nanitePassCount) {
+    // 【开关：HE_CPU_PASSES，默认关】默认档一行都不打印，也不做任何读回
+    //   （"默认关闭时不打印、不新建每帧 GPU 资源"—— 这里连 Map 都不做）。
+    if (std::getenv("HE_CPU_PASSES") == nullptr) return;
+    // 与 `size_dist` 同一门控：没有软光栅就没有分流数字可绑。
+    if (!m_Settings.enabled || !m_Ready || !m_Settings.softRaster) return;
+
+    u32 s[kNaniteSoftStatsCapacity] = {};
+    m_Raster.ReadbackSoftStats(s);
+    u32 h[kNaniteHardStatsCapacity] = {};
+    m_Raster.ReadbackHardStats(h);   // 未开硬光栅 ⇒ 全 0（基线档打印 hard_clusters=0，字段不缺）
+
+    // 【一条行的口径】左边是"分流"，右边是"帧时"：
+    //   · soft_clusters / hard_clusters = 两侧各自接手的簇数（硬光栅未开时为 0）；
+    //   · soft_pixels / hard_pixels = 两侧写入的**片段数**（含过绘；屏幕覆盖率是另一个口径）；
+    //   · frame_ms = `LogFrameBudget` 的整帧合计（**原样传入**，不是本函数自己测的）；
+    //   · nanite_pass_ms = profiler 里 Nanite 前缀 pass 的 GPU 耗时之和 —— 硬光栅录在
+    //     `Nanite_CullChain3` 体内，所以"硬光栅贵不贵"就体现在这个数上。
+    const u32 softClusters = s[kNaniteSoftStatRasterClusters];
+    const u32 hardClusters = h[kNaniteHardStatClusters];
+    HE_CORE_INFO("[Nanite] perf max_triangles={} hard_raster={} soft_clusters={} hard_clusters={} "
+                 "soft_pixels={} hard_pixels={} nanite_pass_ms={:.3f} nanite_pass_count={} "
+                 "frame_ms={:.3f} frame_fps_equiv={:.1f} frame_ms_src=gpu_pass_sum",
+                 m_Raster.SoftLastMaxTriangles(),
+                 m_Settings.hardRaster ? 1 : 0,
+                 softClusters, hardClusters,
+                 s[kNaniteSoftStatPixels], h[kNaniteHardStatPixels],
+                 (double)nanitePassMs, nanitePassCount,
+                 (double)frameTotalMs,
+                 frameTotalMs > 0.0f ? 1000.0 / (double)frameTotalMs : 0.0);
 }
 
 void NaniteRenderer::LogFakePipelineReadback() {

@@ -230,6 +230,26 @@ public:
     /// 【同步约定】与其它读回相同：只 Map，不等待；调用方必须已 `WaitIdle()`。
     void LogSoftRasterReadback();
 
+    /// 【§14.8 任务 23】把**软光栅读数缓冲**原样读进 `out`（`kNaniteSoftStatsCapacity` 条扁平 u32）。
+    ///
+    /// 【为什么暴露原始数组而不是 5 个逐桶 getter】"5 个桶"在类型上不是 5 个各自独立的量，
+    ///   而是**一段连续槽位 + 一组区间常量**（`kNaniteSoftStatSizeBucket0` 与
+    ///   `kNaniteSizeBucketUpperBound`）；把整段交出去，读的人（`NaniteRenderer` 的 `size_dist` 行）
+    ///   就能按同一组常量解释它，且新增槽位时不需要改本函数的签名。
+    /// 【同步约定】与 `LogSoftRasterReadback` 相同：只 Map、不等待；调用方必须已 `WaitIdle()`。
+    ///   缓冲不存在（软光栅未就绪）时把 `out` 清零后返回。
+    void ReadbackSoftStats(u32 (&out)[kNaniteSoftStatsCapacity]);
+
+    /// 【§14.8 任务 23】最近一次软光栅录制用的阈值（push constant 的真值，来自 `NaniteSettings`）。
+    /// `size_dist` / `perf` 读数行打印它 —— 与 `soft_raster` 行的 `max_triangles` 同源同值。
+    [[nodiscard]] u32 SoftLastMaxTriangles() const { return m_SoftLastMaxTriangles; }
+
+    /// 【§14.8 任务 23】把**硬光栅读数缓冲**原样读进 `out`（`kNaniteHardStatsCapacity` 条）。
+    /// 【为什么也要它】`perf` 行要把"分流"与"帧时"绑在同一行 ⇒ 需要硬光栅侧的接手簇数/像素数；
+    ///   硬光栅未开（`hardRaster=0`）时缓冲不存在，本函数把 `out` 清零（`perf` 行的基线档因此
+    ///   打印 `hard_clusters=0`，而不是缺字段）。
+    void ReadbackHardStats(u32 (&out)[kNaniteHardStatsCapacity]);
+
     /// 软光栅是否就绪（资源 + PSO 都建起来了）
     [[nodiscard]] bool IsSoftRasterReady() const { return m_SoftColorPSO != nullptr; }
 

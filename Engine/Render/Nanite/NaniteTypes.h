@@ -2240,7 +2240,75 @@ inline constexpr u32 kNaniteSoftStatFallbackPixels  = 13u;
 ///   （通过等值复检的"簇×三角形×像素"写次数，会因键完全相同的平局而更大）不是同一个量。
 ///   可核对的不变式：本项 ≤ `kNaniteSoftStatPixels` ≤ `kNaniteSoftStatCoveredPixels`。
 inline constexpr u32 kNaniteSoftStatDepthResolvedPixels = 14u;
-inline constexpr u32 kNaniteSoftStatsCapacity       = 16u;  ///< 读数缓冲条数（与 shader 一致）
+
+// ============================================================
+// 【§14.8 任务 23】可见簇的「簇大小分布」五桶
+//
+// 【为什么要有它】任务 23 的验收文字是"阈值 / 簇大小分布对帧时的影响"，而在此之前**只有**
+//   分流两侧的**总数**（`soft` / `skipped_big`）可读 —— 看不出"被分给硬光栅的那批簇到底多大"，
+//   于是"阈值该往哪边挪"只能猜。这一组槽位补上分布本身。
+//
+// 【口径（必须与 shader 逐字一致）】统计对象 = **本帧的可见簇**（可见簇列表里通过合法性检查、
+//   且 `triangleCount != 0` 的那些簇），按 `cluster.triangleCount` 落入 **5 个闭区间桶**：
+//     桶 0 = [1,4]  桶 1 = [5,8]  桶 2 = [9,16]  桶 3 = [17,32]  桶 4 = [33,64]
+//   （`> 64` 只可能来自损坏的资产，归入最后一桶，不越界。）
+//   **计数发生在分流判据之前** ⇒ 五桶覆盖"软 + 硬"两侧的全部簇，于是有一条可核对的不变式：
+//     `桶 0 + … + 桶 4 == kNaniteSoftStatRasterClusters + kNaniteSoftStatSkippedClusters`
+//     （= `soft_raster` 读数行的 `clusters`），并进一步等于 `visible_wiring` 行的 `visible`。
+//   `size_dist` 读数行把这三个数与两个判定标志一起打印出来（见 `NaniteRenderer::LogSizeDistReadback`）。
+//
+// 【槽位与容量：为什么把 16 扩到 20】任务 22 落地后 0..14 全部被占用，**只剩槽 15 一个空闲**，
+//   而 5 个桶需要 5 个连续槽。这里把**同一个** `u_Stats` 读数缓冲从 16 条扩到 20 条、五桶占
+//   槽 15..19 —— 复用既有的清零（`RecordSoftStatsClear` 的 `CopyBuffer`）与读回路径，
+//   不加任何新 GPU 资源、不加 pass、不改既有槽位语义（0..14 一个都没动）。
+//   【互锁】三个数字必须同时成立，否则编译期就炸：
+//     ① 桶区间与 shader 的 `softRasterSizeBucket()` 逐字一致（由 `Tests/TestNaniteTypes.cpp` 钉住）；
+//     ② 桶槽位紧跟既有的 14 号槽（`kNaniteSoftStatSizeBucket0 == kNaniteSoftStatDepthResolvedPixels + 1`）；
+//     ③ 桶槽位连续且吃满容量（下面的 static_assert）。
+//   `Nanite_SoftRasterCommon.slang` 的 `kSoftStatSizeBucket0 / kSoftStatSizeBucketCount /
+//   kSoftStatCapacity` 必须与这三个常量一一对应（改一处必须同步另一处）。
+// ============================================================
+inline constexpr u32 kNaniteSoftStatSizeBucket0     = 15u;   ///< 五桶的第一个槽（= 14 + 1）
+inline constexpr u32 kNaniteSoftStatSizeBucketCount = 5u;    ///< 桶数（1-4 / 5-8 / 9-16 / 17-32 / 33-64）
+inline constexpr u32 kNaniteSoftStatsCapacity       = 20u;   ///< 读数缓冲条数（任务 23：16 → 20，与 shader 一致）
+
+static_assert(kNaniteSoftStatSizeBucket0 == kNaniteSoftStatDepthResolvedPixels + 1u,
+              "五桶必须紧跟在任务 20 的深度解析槽之后（0..14 已被占用，15 是任务 23 之前的唯一空闲槽）");
+static_assert(kNaniteSoftStatSizeBucket0 + kNaniteSoftStatSizeBucketCount == kNaniteSoftStatsCapacity,
+              "五桶必须连续且恰好吃满读数缓冲（不许留空洞、不许越界）");
+
+/// 每个桶的**闭区间上界**：桶 i 覆盖 `triangleCount ∈ (上界[i-1], 上界[i]]`
+/// （第一个桶的下界是 1 —— 调用方必须先滤掉 `triangleCount == 0` 的簇）。
+inline constexpr u32 kNaniteSizeBucketUpperBound[kNaniteSoftStatSizeBucketCount] = {
+    4u, 8u, 16u, 32u, 64u,
+};
+static_assert(kNaniteSizeBucketUpperBound[kNaniteSoftStatSizeBucketCount - 1u] == kNaniteMaxClusterTriangles,
+              "最后一桶的上界必须是簇三角形上限（64）—— 否则会漏掉合法簇");
+
+/// 簇大小分桶（CPU 侧镜像；`triangleCount` 必须 ≥ 1）。
+///
+/// 【与 shader 的关系】`Nanite_SoftRasterCommon.slang` 的 `softRasterSizeBucket()` 是它的
+///   **逐分支改写**（shader 里没有数组常量，写成 5 级阶梯）。两者必须给出相同结果：
+///   单测对 1..64 全枚举比对，并覆盖 `> 64` 的夹取分支。
+/// 【为什么 CPU 侧也要有一份】① 它是"桶区间"这条口径的**可读真值**（C++ 注释与测试都引用它）；
+///   ② 将来若做 CPU 参考剔除的分布对照，链接的是同一个函数，不会出现两套区间。
+[[nodiscard]] constexpr u32 NaniteSizeBucketOf(u32 triangleCount) {
+    for (u32 bucket = 0u; bucket < kNaniteSoftStatSizeBucketCount; ++bucket) {
+        if (triangleCount <= kNaniteSizeBucketUpperBound[bucket]) return bucket;
+    }
+    return kNaniteSoftStatSizeBucketCount - 1u;   // > 64（损坏资产）：归入最后一桶，不越界
+}
+
+/// 桶 i 的**人类可读区间标签**（`size_dist` 行的注释与报告用；不参与任何数值判据）
+[[nodiscard]] inline const char* NaniteSizeBucketLabel(u32 bucket) {
+    switch (bucket) {
+        case 0u: return "1-4";
+        case 1u: return "5-8";
+        case 2u: return "9-16";
+        case 3u: return "17-32";
+        default: return "33-64";
+    }
+}
 
 // ============================================================
 // 【§14.8 任务 22】硬光栅（mesh shader 分流）的尺寸常量与读数槽位

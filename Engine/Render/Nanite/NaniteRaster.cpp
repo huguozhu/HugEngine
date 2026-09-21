@@ -1429,24 +1429,41 @@ void NaniteRaster::RecordHardRasterPass(rhi::IRHICommandList* cmd,
     //   深度通道（若有）由 `EnsureDepthAttachmentLayout` 自己补布局往返。
 }
 
-void NaniteRaster::LogHardRasterReadback() {
+void NaniteRaster::ReadbackSoftStats(u32 (&out)[kNaniteSoftStatsCapacity]) {
+    // 【清零语义】缓冲不存在（软光栅未就绪）时全部写 0：调用方不必先自己清，
+    //   也不会读到未初始化的栈内存（`size_dist` / `perf` 行在未就绪档下会打印全 0 而不是垃圾）。
+    for (u32 i = 0u; i < kNaniteSoftStatsCapacity; ++i) out[i] = 0u;
+    if (!m_SoftStats) return;
     // 真实 GPU 读回（与其它读数同一约定：只 Map、不等待；调用方已 WaitIdle）
+    if (void* p = m_SoftStats->Map()) {
+        std::memcpy(out, p, sizeof(u32) * kNaniteSoftStatsCapacity);
+        m_SoftStats->Unmap();
+    }
+}
+
+void NaniteRaster::ReadbackHardStats(u32 (&out)[kNaniteHardStatsCapacity]) {
+    // 与 `ReadbackSoftStats` 同款：缓冲不存在（`hardRaster=0` 或设备不支持）⇒ 全 0
+    for (u32 i = 0u; i < kNaniteHardStatsCapacity; ++i) out[i] = 0u;
     if (!m_HardStats) return;
-    u32 hs[kNaniteHardStatsCapacity] = {};
     if (void* p = m_HardStats->Map()) {
-        std::memcpy(hs, p, sizeof(hs));
+        std::memcpy(out, p, sizeof(u32) * kNaniteHardStatsCapacity);
         m_HardStats->Unmap();
     }
+}
+
+void NaniteRaster::LogHardRasterReadback() {
+    // 【为什么保留这条早退】任务 22 的读数行只在"硬光栅资源真的建起来了"时打印
+    //   （关闭档 / 设备不支持时一行都不打，日志与基线逐字一致）。
+    //   而 `ReadbackHardStats` 本身对"缓冲不存在"是**清零**语义 —— 那是给任务 23 的 `perf` 行
+    //   用的（基线档要打印 `hard_clusters=0` 而不是缺字段），两者的口径不要混。
+    if (!m_HardStats) return;
+    u32 hs[kNaniteHardStatsCapacity] = {};
+    ReadbackHardStats(hs);
     // 软光栅侧的两个对照量（同一个缓冲、同一帧的读数）：用来算"软/硬占比"。
     // 【为什么占比按**像素**算而不是按簇数】簇数只说明"分流判据生效了"，而"谁来画屏幕"
     //   是像素量的对比；两者都打印出来，读的人不必自己猜口径。
     u32 ss[kNaniteSoftStatsCapacity] = {};
-    if (m_SoftStats) {
-        if (void* p = m_SoftStats->Map()) {
-            std::memcpy(ss, p, sizeof(ss));
-            m_SoftStats->Unmap();
-        }
-    }
+    ReadbackSoftStats(ss);
     const u32 hardPixels = hs[kNaniteHardStatPixels];
     const u32 softPixels = ss[kNaniteSoftStatPixels];
     const u64 totalPixels = (u64)hardPixels + (u64)softPixels;
@@ -1479,10 +1496,7 @@ void NaniteRaster::LogSoftRasterReadback() {
     // 真实 GPU 读回（与其它读数同一约定：只 Map、不等待；调用方已 WaitIdle）
     if (!m_SoftStats) return;
     u32 s[kNaniteSoftStatsCapacity] = {};
-    if (void* p = m_SoftStats->Map()) {
-        std::memcpy(s, p, sizeof(s));
-        m_SoftStats->Unmap();
-    }
+    ReadbackSoftStats(s);
     HE_CORE_INFO("[Nanite] soft_raster clusters={} soft={} skipped_big={} triangles={} pixels_written={} "
                  "degenerate={} neutral_material_pixels={} material_pixels={} fallback_pixels={} "
                  "materials={} distinct_materials={} textured_materials={} multi_mesh_clusters={} "

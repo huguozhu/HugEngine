@@ -1824,11 +1824,18 @@ void DeferredPipeline::LogFrameBudget() {
     if (pdata.empty()) return;
 
     float total = 0.0f;
+    // 【§14.8 任务 23】把 Nanite 通道的 GPU 耗时单独累出来，供"分流 × 帧时"那一行使用。
+    //   为什么按**名字前缀**归集：硬光栅按任务 22 的裁决录在 `Nanite_CullChain3` 的 pass 体内
+    //   （帧图零新增 pass），所以"硬光栅贵不贵"只能从这条既有 pass 的耗时变化上看出来；
+    //   按前缀归集是唯一不需要给 profiler 加新字段的做法（它的 pass 名就是帧图 pass 名）。
+    float naniteMs = 0.0f;
+    u32 nanitePassCount = 0u;
     std::vector<const ProfilerManager::PassProfile*> sorted;
     sorted.reserve(pdata.size());
     for (const auto& p : pdata) {
         if (p.gpuMs < 0.0f) continue;   // 未使用的 pass
         total += p.gpuMs;
+        if (p.name.rfind("Nanite", 0) == 0) { naniteMs += p.gpuMs; ++nanitePassCount; }
         sorted.push_back(&p);
     }
     if (sorted.empty()) return;
@@ -1854,6 +1861,14 @@ void DeferredPipeline::LogFrameBudget() {
             HE_CORE_INFO("   附属 pass（{}）: {:.3f} ms", m_GIProviders[i]->GetName(), (double)aux);
         }
     }
+
+    // ── 【§14.8 任务 23】分流 × 帧时：把"软硬分流计数"与上面这个**整帧合计**绑在同一行 ──
+    // 【为什么由这里调用、由本函数把 `total` 传进去】本文函数就是帧时那个数字的**唯一来源**
+    //   （它与上一行的"各 pass 合计"用的是同一个 `total`）。模块**绝不**自己再测一遍帧时 ——
+    //   否则同一次运行里会出现两个互相打架的数字，"分流对帧时的影响"就无从判定。
+    // 【开关】复用既有的 `HE_CPU_PASSES`（默认关）：关闭时模块内部直接返回，不打印、不读回。
+    static const bool s_cpuPasses = (std::getenv("HE_CPU_PASSES") != nullptr);
+    if (s_cpuPasses) m_Nanite.LogPerfReadback(total, naniteMs, nanitePassCount);
 }
 
 } // namespace he::render

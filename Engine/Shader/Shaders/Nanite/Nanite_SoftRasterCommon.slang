@@ -95,7 +95,7 @@ static const uint kSoftStatTriangles       = 2u;   // 参与光栅化的**非退
 static const uint kSoftStatDegenerate      = 3u;   // 被丢弃的三角形数（在相机后 / 面积过小 / 越界下标）
 static const uint kSoftStatPixels          = 4u;   // 通过深度等值复检、**真正写进 GBuffer** 的像素数（第 2 趟）
 static const uint kSoftStatNeutralPixels   = 5u;   // 【任务 19 起恒 0】用中性材质常数写入的像素数
-static const uint kSoftStatCapacity        = 16u;  // 缓冲条数（与 C++ 侧一致）
+static const uint kSoftStatCapacity        = 20u;  // 缓冲条数（与 C++ 侧一致；任务 23：16 → 20）
 // ── 【任务 19】材质相关读数 ──
 static const uint kSoftStatMaterialPixels  = 12u;  // 用**资产材质段**的真实材质写入的像素数
 static const uint kSoftStatFallbackPixels  = 13u;  // 材质段越界/缺失而退化为中性常数的像素数（正常 0）
@@ -115,6 +115,28 @@ static const uint kSoftStatDiagScreenH     = 8u;   // push constant 的 screenHe
 static const uint kSoftStatDiagMaxTri      = 9u;   // push constant 的 maxTriangles
 static const uint kSoftStatDiagExtent      = 10u;  // meshMaxExtent × 1000（定点回读，验证非 0）
 static const uint kSoftStatTestedPixels    = 11u;  // 第 1 趟包围盒内的像素测试数（诊断）
+
+// ── 【任务 23】可见簇的「簇大小分布」五桶（占任务 23 之前**唯一空闲**的槽 15 起连续 5 槽）──
+// 【与 C++ 的互锁】下面三个常量必须与 `NaniteTypes.h` 的
+//   `kNaniteSoftStatSizeBucket0 / kNaniteSoftStatSizeBucketCount / kNaniteSoftStatsCapacity`
+//   一一对应（C++ 侧有 static_assert 钉住"紧跟 14 号槽 + 连续 + 吃满容量"；改一处必须同步另一处）。
+// 【口径】统计**本帧全部可见簇**（通过合法性检查且 `triangleCount != 0`），按 `triangleCount`
+//   落入 1-4 / 5-8 / 9-16 / 17-32 / 33-64 五个闭区间桶；计数发生在分流判据**之前**
+//   ⇒ 五桶之和 == `kSoftStatRasterClusters + kSoftStatSkippedClusters`（可核对的不变式）。
+static const uint kSoftStatSizeBucket0     = 15u;  // 五桶的第一个槽（= kSoftStatDepthResolvedPixels + 1）
+static const uint kSoftStatSizeBucketCount = 5u;   // 桶数（1-4 / 5-8 / 9-16 / 17-32 / 33-64）
+
+// 簇大小 → 桶号（调用方必须先滤掉 `triangleCount == 0`）。
+// 【为什么写成 5 级阶梯而不是查表】Slang 侧没有编译期数组常量（`static const uint[kN]` 的
+//   下标不能用于常量表达式），写成显式比较既零成本又与 C++ 侧的 `NaniteSizeBucketOf()`
+//   逐分支等价 —— 单测对 1..64 全枚举比对两者。
+static uint softRasterSizeBucket(uint triangleCount) {
+    if (triangleCount <= 4u)  return 0u;   // 1-4
+    if (triangleCount <= 8u)  return 1u;   // 5-8
+    if (triangleCount <= 16u) return 2u;   // 9-16
+    if (triangleCount <= 32u) return 3u;   // 17-32
+    return 4u;                             // 33-64（> 64 只可能来自损坏资产：归入最后一桶，不越界）
+}
 
 // ── push constant（96B；与 C++ 的 `NaniteSoftRasterParams` 逐字段一致）──
 //   vpRows  = 列主序 viewProj 的 4 个**行**（`vpRow{r}` = viewProj[c][r]），显式点积 ⇒ 与 CPU 同式

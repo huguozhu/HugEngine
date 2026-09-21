@@ -239,6 +239,60 @@ public:
     ///   档的日志必须与基线逐字一致）。
     void LogHardRasterReadback();
 
+    /// 【§14.8 任务 23】dump 帧打印**恰好一行**"可见簇的簇大小分布"（真实 GPU 读回）：
+    ///   `[Nanite] size_dist buckets=[a,b,c,d,e] total=N clusters=M visible=V
+    ///    sum_eq_clusters=1 sum_eq_visible=1 max_triangles=16`
+    ///
+    /// · `buckets=[…]` = 5 个桶的簇数，区间 `1-4 / 5-8 / 9-16 / 17-32 / 33-64`
+    ///   （口径与区间常量见 `NaniteTypes.h` 的"任务 23 五桶"一节）；
+    /// · `total` = 五桶之和（即"分类到桶里的可见簇数"）；
+    /// · `clusters` = **同一个读数缓冲**里的 `soft + skipped_big`（软光栅分流两侧的合计）；
+    /// · `visible` = 可见簇计数缓冲的原子计数（剔除链 Phase 3 的输出，与 `visible_wiring` 行同源）；
+    /// · `sum_eq_clusters` / `sum_eq_visible` = **不变式的判定位**（1 = 成立）：
+    ///   五桶之和必须等于分流两侧合计（同一次枚举）；受测帧里后者还必须等于 `visible`
+    ///   （剔除端写出的每个可见簇都被第 1 趟枚举到 —— 有容量截断或零三角形簇时它会是 0，
+    ///   那时读数会把偏差如实标出来，而不是静默）。
+    ///
+    /// 【为什么单起一行而不追加到 `soft_raster` 行】判据 ⑧a 按字段名 grep 那一行
+    ///   （`soft / material_pixels / pixels_written / neutral_material_pixels / skipped_big`），
+    ///   动它的字段会让它直接判红；分布是本任务新增的独立口径，另起一行最干净。
+    /// 【门控】关闭档 / 未就绪 / 未开软光栅一律不打印（关闭档日志与基线逐字一致）。
+    /// 【同步约定】与其它读回相同：只 Map、不等待；调用方必须已 `WaitIdle()`。
+    void LogSizeDistReadback();
+
+    /// 【§14.8 任务 23】把"**分流**"与"**帧时**"绑在**同一行**输出（性能读数）：
+    ///   `[Nanite] perf max_triangles=16 hard_raster=1 soft_clusters=61 hard_clusters=31587
+    ///    soft_pixels=… hard_pixels=… nanite_pass_ms=… nanite_pass_count=2 frame_ms=…
+    ///    frame_fps_equiv=… frame_ms_src=gpu_pass_sum`
+    ///
+    /// 【口径必须一眼看清（这行里的数**都是 GPU 侧**的）】
+    /// · `frame_ms` = **`DeferredPipeline::LogFrameBudget()` 自己算出的"各 pass 合计"**，
+    ///   由那个函数原样传入（`frameTotalMs`）—— 同一帧、同一数据来源（profiler 的 GPU 时间戳）。
+    ///   字段名保留任务书建议的 `frame_ms`，同时用 `frame_ms_src=gpu_pass_sum` **显式标注口径**：
+    ///   它是"GPU 各 pass 耗时之和"，**不是**墙钟帧时，也不是 CPU 侧耗时。
+    ///   墙钟/CPU 侧的读数在样例既有那一行（"帧率读数（步骤 37）: … 墙钟 X ms ⇒ Y fps；
+    ///   CPU 侧 Z ms"）；两者**不要混读**（本样例实测就是 CPU 受限：GPU 合计约 42 ms 而墙钟约 146 ms）。
+    ///   **为什么必须这样取**：若本行自己再测一遍帧时，同一次运行里就会出现两个互相打架的数字，
+    ///   "分流对帧时的影响"也就无从判定。
+    /// · `nanite_pass_ms` = profiler 里**名字以 `Nanite` 开头**的 pass 的 GPU 耗时之和
+    ///   （硬光栅录在 `Nanite_CullChain3` 的 pass 体内 ⇒ 它的成本就体现在这个数的变化里）；
+    /// · `nanite_pass_count` = 参与求和的 pass 数（受测档应为 2：`Nanite_Cull` + `Nanite_CullChain3`）。
+    ///
+    /// 【为什么叫 `frame_fps_equiv` 而不是 `frame_fps_cap`】它就是 `1000 / frame_ms`，即
+    ///   "**由 GPU pass 合计推出的等效帧率**"，不是帧率上限、也不是被 cap 的帧率。
+    ///   本样例实测它与真实帧率差一个数量级（GPU 合计 11.6 ms ⇒ 86 fps，而墙钟 140 ms ⇒ 7.1 fps，
+    ///   因为整帧 CPU 受限）—— 名字里必须带 `equiv` 才不会被误读成"帧率达标"。
+    ///
+    /// 【开关：`HE_CPU_PASSES`】**默认关闭 ⇒ 不打印、也不做任何读回**（§14.2 不变式 1 的
+    ///   "关闭时不产生新开销"口径；`HE_CPU_PASSES` 是仓库既有的 CPU 步骤计时开关，
+    ///   `DeferredPipeline_FrameGraph.cpp` 与 `RenderGraph.cpp` 已在用它，本行复用同一个开关，
+    ///   不另造一套 plumbing）。
+    /// 【调用点】`DeferredPipeline::LogFrameBudget()` 的末尾（它每 120 帧打印一次整帧预算）。
+    /// @param frameTotalMs   `LogFrameBudget` 算出的整帧合计（ms）
+    /// @param nanitePassMs   profiler 里 Nanite 前缀 pass 的 GPU 耗时合计（ms）
+    /// @param nanitePassCount 参与求和的 Nanite pass 数
+    void LogPerfReadback(float frameTotalMs, float nanitePassMs, u32 nanitePassCount);
+
     /// 【§14.8 任务 16】dump 帧打印**恰好一行**"可见簇 → 间接绘制"的接线读数：
     ///   `[Nanite] visible_wiring visible=<V> indirect_count=<C> draws=<D> rasterized=<R>
     ///    empty_draws=<E> mismatch=<M> src=<visible|fake> truncated=<T> max_draws=<X>

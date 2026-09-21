@@ -56,6 +56,14 @@ void main(uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
     uint triangleCount = cluster.triangleCount;
     if (triangleCount == 0u) return;
 
+    // ── 【任务 23】簇大小分布：**在分流判据之前**计数 ⇒ 五桶覆盖"软 + 硬"两侧的全部可见簇。
+    //   不变式：五桶之和 == kSoftStatRasterClusters + kSoftStatSkippedClusters
+    //   （同一次枚举、同一个合法性子集），由 C++ 侧的 `size_dist` 读数行核对。
+    //   只让 0 号线程加一次（每簇一个工作组），与下面两条分流计数的写法一致。
+    if (tid.x == 0u) {
+        InterlockedAdd(u_Stats[kSoftStatSizeBucket0 + softRasterSizeBucket(triangleCount)], 1u);
+    }
+
     // ── ② 只对 ≤ maxTriangles 的簇走软光栅；大的跳过并计数（任务 22 的硬光栅）──
     if (triangleCount > maxTriangles) {
         if (tid.x == 0u) InterlockedAdd(u_Stats[kSoftStatSkippedClusters], 1u);
