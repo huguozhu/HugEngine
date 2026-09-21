@@ -188,6 +188,9 @@ public:
     bool    SupportsMaintenance7() const { return m_SupportsMaintenance7; }   // 嵌套命令缓冲能力
     /// Vulkan 1.2 drawIndirectCount（`vkCmdDrawIndexedIndirectCount` 前置特性，§14.8 任务 3）
     bool    SupportsDrawIndirectCount() const { return m_SupportsDrawIndirectCount; }
+    /// 【§14.8 任务 22】`vkCmdDrawMeshTasksIndirectCountEXT` 是否可用
+    ///   （= 有 mesh shader 且驱动导出了该入口）。不可用时硬光栅端告警并跳过。
+    bool    SupportsMeshTasksIndirectCount() const { return m_CmdDrawMeshTasksIndirectCount != nullptr; }
     /// 顶点属性健壮性（缺失的顶点属性按默认值读取，而不是未定义行为）
     bool    SupportsVertexAttributeRobustness() const { return m_SupportsVertexAttributeRobustness; }
     // Graphics Pipeline Library 支持状态（fast-link 四段库拆分）
@@ -249,6 +252,9 @@ public:
     // Mesh Shader 函数指针
     PFN_vkCmdDrawMeshTasksEXT          m_CmdDrawMeshTasks         = nullptr;
     PFN_vkCmdDrawMeshTasksIndirectEXT  m_CmdDrawMeshTasksIndirect = nullptr;
+    /// 【§14.8 任务 22】`vkCmdDrawMeshTasksIndirectCountEXT`（`VK_EXT_mesh_shader` 的间接计数变体）。
+    ///   驱动没导出时保持 nullptr ⇒ 绘制端告警并跳过（不崩），与 `DrawIndexedIndirectCount` 同口径。
+    PFN_vkCmdDrawMeshTasksIndirectCountEXT m_CmdDrawMeshTasksIndirectCount = nullptr;
 
     // Debug Utils 函数指针（VK_EXT_debug_utils）
     PFN_vkSetDebugUtilsObjectNameEXT   m_SetDebugUtilsObjectName     = nullptr;

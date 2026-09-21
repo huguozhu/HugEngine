@@ -144,6 +144,18 @@ public:
     virtual void DrawMeshTasksIndirect(IRHIBuffer* buffer, u64 offset,
                                        u32 drawCount, u32 stride) = 0;
 
+    // 【§14.8 任务 22】带 GPU 侧计数的间接 mesh 绘制（Vulkan: `vkCmdDrawMeshTasksIndirectCountEXT`）
+    //
+    // 【为什么需要它】任务 22 的硬光栅分流要求"网格任务数由 GPU 当帧写出的可见簇计数决定"
+    //   —— 那个数在 CPU 侧读不到（读回要等 GPU，破坏无停顿）。`DrawMeshTasksIndirect` 的
+    //   `drawCount` 是 **CPU 侧常量**，只能表达"最多画多少"，不能表达"实际画多少"。
+    // 【前置特性】`VK_EXT_mesh_shader` 的间接计数变体 + Vulkan 1.2 `drawIndirectCount`
+    //   （后者任务 3 已启用）。函数指针缺失或缓冲为空时**打印中文告警并跳过**（不崩），
+    //   与 `DrawIndexedIndirectCount` 的处理口径一致。
+    virtual void DrawMeshTasksIndirectCount(IRHIBuffer* buffer, u64 offset,
+                                            IRHIBuffer* countBuffer, u64 countOffset,
+                                            u32 maxDrawCount, u32 stride) = 0;
+
     // Push constants（小型常量数据，直接推送到 GPU 寄存器）
     virtual void BindDescriptorSet(u32 setIndex, DescriptorSetHandle set) = 0;
 

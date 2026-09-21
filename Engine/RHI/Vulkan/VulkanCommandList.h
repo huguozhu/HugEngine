@@ -66,6 +66,10 @@ public:
     void DrawMeshTasks(u32 groupCountX, u32 groupCountY, u32 groupCountZ) override;
     void DrawMeshTasksIndirect(IRHIBuffer* buffer, u64 offset,
                                u32 drawCount, u32 stride) override;
+    // 【§14.8 任务 22】带 GPU 侧计数的间接 mesh 绘制（vkCmdDrawMeshTasksIndirectCountEXT）
+    void DrawMeshTasksIndirectCount(IRHIBuffer* buffer, u64 offset,
+                                    IRHIBuffer* countBuffer, u64 countOffset,
+                                    u32 maxDrawCount, u32 stride) override;
     void SetPushConstants(u32 offset, u32 size, const void* data) override;
     void Dispatch(u32 groupCountX, u32 groupCountY, u32 groupCountZ) override;
     void DispatchIndirect(IRHIBuffer* buffer, u64 offset) override;

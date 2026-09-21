@@ -81,9 +81,15 @@ void VulkanDevice::LoadMeshFunctions() {
         vkGetDeviceProcAddr(m_Device, "vkCmdDrawMeshTasksEXT"));
     m_CmdDrawMeshTasksIndirect = reinterpret_cast<PFN_vkCmdDrawMeshTasksIndirectEXT>(
         vkGetDeviceProcAddr(m_Device, "vkCmdDrawMeshTasksIndirectEXT"));
+    // 【§14.8 任务 22】间接计数变体：**不做 HE_ASSERT**。它只服务硬光栅分流，缺失时绘制端
+    //   告警并跳过即可（硬光栅档退化为"不画"，其余通道不受影响）—— 与
+    //   `vkCmdDrawIndexedIndirectCount` 的可得性处理同一口径（任务 3）。
+    m_CmdDrawMeshTasksIndirectCount = reinterpret_cast<PFN_vkCmdDrawMeshTasksIndirectCountEXT>(
+        vkGetDeviceProcAddr(m_Device, "vkCmdDrawMeshTasksIndirectCountEXT"));
     HE_ASSERT(m_CmdDrawMeshTasks, "加载 vkCmdDrawMeshTasksEXT 失败");
     HE_ASSERT(m_CmdDrawMeshTasksIndirect, "加载 vkCmdDrawMeshTasksIndirectEXT 失败");
-    HE_CORE_INFO("Mesh Shader 扩展函数加载成功");
+    HE_CORE_INFO("Mesh Shader 扩展函数加载成功（间接计数变体 vkCmdDrawMeshTasksIndirectCountEXT={}）",
+                 m_CmdDrawMeshTasksIndirectCount ? "可用" : "缺失（硬光栅分流将跳过绘制）");
 }
 
 // ============================================================

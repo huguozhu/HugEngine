@@ -951,6 +951,31 @@ void VulkanCommandList::DrawMeshTasksIndirect(IRHIBuffer* buffer, u64 offset,
     m_VulkanDevice->m_CmdDrawMeshTasksIndirect(cb, vkBuf->GetHandle(), offset, drawCount, stride);
 }
 
+// 【§14.8 任务 22】带 GPU 侧计数的间接 mesh 绘制
+//
+// 与 `DrawIndexedIndirectCount` 同一套防护：函数指针缺失（设备/驱动没提供
+// `vkCmdDrawMeshTasksIndirectCountEXT`）或缓冲为空时**告警并跳过**，绝不崩。
+void VulkanCommandList::DrawMeshTasksIndirectCount(IRHIBuffer* buffer, u64 offset,
+                                                   IRHIBuffer* countBuffer, u64 countOffset,
+                                                   u32 maxDrawCount, u32 stride) {
+    EmitDrawLabel();
+    if (!m_VulkanDevice->m_CmdDrawMeshTasksIndirectCount) {
+        HE_CORE_WARN("DrawMeshTasksIndirectCount: 设备未提供 vkCmdDrawMeshTasksIndirectCountEXT，"
+                     "本次绘制已跳过");
+        return;
+    }
+    if (!buffer || !countBuffer) {
+        HE_CORE_WARN("DrawMeshTasksIndirectCount: 间接命令缓冲或计数缓冲为空，本次绘制已跳过");
+        return;
+    }
+    auto* vkBuf   = static_cast<VulkanBuffer*>(buffer);
+    auto* vkCount = static_cast<VulkanBuffer*>(countBuffer);
+    VkCommandBuffer cb = m_CmdBuffers[m_FrameIndex];
+    m_VulkanDevice->m_CmdDrawMeshTasksIndirectCount(cb, vkBuf->GetHandle(), offset,
+                                                    vkCount->GetHandle(), countOffset,
+                                                    maxDrawCount, stride);
+}
+
 // ============================================================
 // Ray Tracing 命令
 // ============================================================
