@@ -3937,6 +3937,20 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
 - **阶段 1（本任务的范围）**：页池 + 页表 + 间接层 + 反馈 + 驻留管理 + 读数 + 开关。
   页数据源为**已在内存的完整资产**（把对应区段拷进页池）⇒ 不需要任何磁盘 I/O，
   这也回避了"Core 层无文件系统封装"这个既有缺口（扩展性分析已记录该缺口）。
+  - **⚠ 2026-09-21 追加：这个前提现在**不成立**，阶段一必须先补"资产留存"（一条硬前置）**
+    复核生命周期后确认：`NaniteRenderer::EnsureAssetUploaded` 里的
+    `NanitePackedAsset asset;`（`NaniteRenderer.cpp:458`）是**局部变量**，只以 `const&` 传给
+    `NaniteScene::UploadPackedAsset`（`NaniteScene.h:108`，该函数**不保留**它），且整条路径由
+    `m_AssetUploaded` 门闩保证**只执行一次**（`NaniteRenderer.h:369` + `NaniteCull.h:322`）。
+    ⇒ **上传之后 CPU 侧资产数据即被销毁**，`NaniteScene::AssetBuffers` 里只有 GPU 缓冲与
+    `totalBytes/mismatchBytes/verified` 元数据（`NaniteScene.h:87-97`），**没有任何 CPU 字节镜像**。
+    ⇒ 阶段一做不了"从已在内存的资产拷页"。
+    **默认修法**：把资产**留存为成员**（`NanitePackedAsset` 或至少它需要的三段 + 页划分所需的
+    `clusters`），由 `NaniteRenderer`（或 `NaniteScene`）持有；流式默认关时**不额外建 GPU 资源**，
+    但这份 CPU 留存会常驻 —— 请在 §14.37 里如实标出它的内存代价（Sponza 实测
+    `upload_bytes=13406096` ⇒ 约 13 MB），并说明它是否是"只开 enabled 也不变"这条不变式的例外。
+    **若判定"常驻 13 MB 不可接受"**，替代做法是让 `NaniteScene` 在关闭流式时释放、开启时按需重建
+    （但重建需要原始几何，而 `MeshBatcher` 只被 `const&` 用一次）—— **两条路都请显式裁决并写清后果**。
 - **阶段 2（不在本任务）**：真正的磁盘流式（异步文件读、.nanite 分段 mmap/随机读、LOD 选择与预取）。
 - 理由：阶段 1 就能把"页表/池/反馈/不变式"这套**最容易出错又最难测**的部分做完并用小页池
   （例如 8 页）造出大量页缺失，从而**在可控条件下**验证缺页行为；阶段 2 再换数据源即可。
