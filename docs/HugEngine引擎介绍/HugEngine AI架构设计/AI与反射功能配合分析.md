@@ -1,7 +1,7 @@
 # HugEngine 中 AI 与反射系统的配合分析
 
 > 基于实际代码与设计文档（`docs/HugEngine引擎介绍/HugEngine AI架构设计/1~7` 系列）的分析，只读未修改任何源码。
-> 最后更新: 2026-09-01（覆盖至 G2.3；"现状评估"随 AI 模块演进同步修正）
+> 最后更新: 2026-09-21（覆盖至 G2.3；"现状评估"随 AI 模块演进同步修正）
 
 ## 一、核心设计原则："反射即世界模型"
 
@@ -27,10 +27,11 @@ HE_ATTR_AI_TOOL(name)         // 该方法暴露为 AI 可调用的工具
 
 这些宏实现为往 `PropertyInfo::attributes` 追加键值对（`("AiVisible","1")` 等），键名统一收敛在 `Engine/Reflect/Reflect/Attribute.h` 的 `AttrKey::Ai*` 常量（`AiVisible/AiDescription/AiWritable/AiTool`），与 `Category/Range/Tooltip` 等编辑器注解共用同一套属性存储——**AI 注解是反射属性系统的"一等公民"，而非另开机制**。
 
-**已实际落地的注解**（`Engine/Scene/Scene/SceneReflect.cpp`）：
+**已实际落地的注解**（`Engine/Scene/Scene/SceneReflect.cpp`，注解面已随组件扩充大幅扩展）：
 - `TransformComponent`：`position`（"世界空间位置，单位米"）、`rotation`、`scale`，均 `AI_VISIBLE + AI_WRITABLE + AI_DESCRIPTION`；
-- `DirectionalLight`：`direction/color/intensity/castShadow`，均带 AI 注解；
-- `PointLight`：`color/intensity/range`，均带 AI 注解。
+- 光照族：`DirectionalLight`（`direction/color/intensity/castShadow`）、`PointLight`（`color/intensity/range`）、`SpotLight`（含 `innerConeAngle/outerConeAngle`）、`RectLight`（含 `width/height/normal/softness`），均带 AI 注解；
+- 其余已注解组件（不逐一列字段）：`CameraComponent`、`AnimationComponent`、`ParticleComponent`、`ProjectileMovementComponent`、`HealthComponent`、`SpringArmComponent`、`BillboardComponent`、`TextRenderComponent`、`DecalComponent`、`CollisionComponent`、`CharacterMovementComponent`、`AbilityComponent`、`SplineComponent`、`SplineMeshComponent`、`NavMeshComponent`、`NavAgentComponent`、`InstancedMeshComponent`、`SkeletalMeshComponent`。
+- AI 智能体组件在 `Engine/AI/Agent/AgentReflect.cpp` 内注册（`AgentComponent` 四个属性带完整 AI 注解；`MemoryComponent` / `GoalComponent` 仅注册类型、暂不注册属性），以避免 Scene → AI 的反向依赖。
 
 ## 三、AI 侧（读方向）：WorldModel 消费反射
 
@@ -56,7 +57,7 @@ HE_ATTR_AI_TOOL(name)         // 该方法暴露为 AI 可调用的工具
        └─ description（来自 AiDescription 注解）
 ```
 
-**配套过滤器**（`Observation.h` 的 `ObservationFilter`）：`targetEntity` / `componentTypes` / 空间半径，控制快照范围，避免把上千实体的整帧世界塞进 LLM prompt（token 预算控制）。
+**配套过滤器**（`Observation.h` 的 `ObservationFilter`）：`targetEntity` / `componentTypes` 两个字段已在 `Snapshot` 中生效，控制快照范围，避免把上千实体的整帧世界塞进 LLM prompt（token 预算控制）；`radius` / `center` 空间半径字段已声明但**暂未启用**（`Observation.h` 注释明确标注）。
 
 ## 四、AI 侧（写方向）：LLM 端到端场景生成
 
@@ -83,7 +84,7 @@ SceneBuilder::BuildScene：JSON → 真实 Entity/Component 树
      └─ 全程容错：字段类型检查、缺省降级、未知组件类型跳过不崩溃
   │
   ▼
-05.LLMScene.exe 用 ForwardPipeline 直接渲染出 LLM 生成的场景
+05.LLMScene 时代用 ForwardPipeline 直接渲染出 LLM 生成的场景；现已并入 `07.AISamples` 的 `FeatureLLMScene`（`GenerativeAssetFactory::GenerateScene` → `BuildScene`），渲染路径不变。
 ```
 
 ## 五、两条 schema 路径：现状与演进目标
@@ -103,7 +104,7 @@ SceneBuilder::BuildScene：JSON → 真实 Entity/Component 树
 - **零拷贝互操作**：`WrapRHITexture` / `ExportBuffer` 已实现（A3.2，`GPUTextureTensor` 包装渲染纹理、推理输出缓冲导出），`WrapRHIBuffer` 仍为占位；
 - `AIModule` 单例（进程级入口）+ `InferenceScheduler`（流式 token 按序投递主线程）。
 
-设计文档中的目标形态（`docs/HugEngine引擎介绍/HugEngine AI架构设计/3.HugEngine AI统一基座设计规格.md`）：AI 写世界封装为 `he::Command` 走 `CommandHistory`（**可撤销/可审查**）——已实现（A2 的 `Action→CompileAction→he::Command`）；AIGC 平台生成的内容与人工编辑走完全相同的 Entity/Component/Asset/Command/Archive 管线——已实现（G1/G2）。
+设计文档中的目标形态（`docs/HugEngine引擎介绍/HugEngine AI架构设计/3.HugEngine AI统一基座设计规格.md`）：AI 写世界封装为 `he::Command` 走 `CommandHistory`（**可撤销/可审查**）——已实现（A2 的 `Action→CompileAction→he::Command`，支持 SpawnEntity/SetTransform/SetProperty/CastAbility）；AIGC 场景生成走 `GenerateSceneCommand`（可撤销）+ 与人工编辑相同的 Entity/Component 树——已实现（G1）；但资产生成（G2 的 `TextTo*`）只产出内存数据/PNG 文件，**未**写入 `AssetRegistry`、也未经 `Archive` 落库，即"Asset/Archive 同管线"尚未闭环。
 
 ## 七、配合关系总览（数据流闭环）
 
@@ -126,15 +127,15 @@ SceneBuilder::BuildScene：JSON → 真实 Entity/Component 树
 - **AI 是反射的"消费者"**（也是编辑器 Details 面板之外反射系统的第二个主要消费方）；
 - 两者通过 `PropertyInfo`（offset/typeName/attributes）这一个数据契约解耦——AI 层完全不需要包含任何 `Scene/*Component.h` 的具体头文件依赖。
 
-## 八、现状评估（2026-09-01，覆盖至 G2.3）
+## 八、现状评估（2026-09-21，覆盖至 G2.3）
 
 **已落地**（git 记录 `4ca47f1` / `d75d56d` / `113fb4e` / `fd97458` / `132c599` / `a8b720d` / `4c21a87` / `6d5024f` / `9da585d`）：
-- 反射侧：4 个 `HE_ATTR_AI_*` 宏 + `AttrKey::Ai*` 键 + 3 个组件类型的实际注解；
+- 反射侧：4 个 `HE_ATTR_AI_*` 宏 + `AttrKey::Ai*` 键 + 20 余个组件类型的实际注解（见 §二）；
 - AI 侧：`WorldModel`（反射读）、`SceneBuilder`/`PromptToScene`/`DeepSeekClient`（LLM 写）、`IAIDevice`/`InferenceScheduler`/`AIModule`/`GPUBackend`/`RemoteBackend`（推理运行时）；
-- AIGC：`GenerateSceneCommand`（可撤销）+ `GenerativeAssetFactory`（场景/纹理/材质/网格/动画四类）+ `AIPipeline` + 编辑器面板；
-- 智能体：`AgentComponent`/`Memory`/`Goal` + `IBrain`/`LLMBrain`/`MockBrain` + `Action→Command`（SpawnEntity/SetTransform/SetProperty 可撤销）+ `AgentSystem` 节律驱动 + `ToolUse`；
+- AIGC：`GenerateSceneCommand`（可撤销）+ `GenerativeAssetFactory`（场景/纹理/材质/网格/动画四类）+ `AIPipeline` + `07.AISamples` 的 ImGui 功能窗口（`FeatureLLMScene` / `FeatureTextureGen` / `FeatureMaterialGen` / `FeatureMeshAnimGen` 等；**不在 `Engine/Editor` 内**）；
+- 智能体：`AgentComponent`/`Memory`/`Goal` + `IBrain`/`LLMBrain`/`MockBrain` + `Action→Command`（SpawnEntity/SetTransform/SetProperty/CastAbility 可撤销）+ `AgentSystem` 节律驱动 + `ToolUse`；
 - 神经收编：零拷贝互操作（`WrapRHITexture`/`ExportBuffer`）+ 首个神经子系统 `NeuralUpscaler`（IRenderSubsystem 形态）+ GPU 纹理生成核；
-- 测试：doctest 30 用例 / 135 断言；Samples 05~10 端到端。
+- 测试：doctest AI 相关用例 40 个 / 218 处断言；`07.AISamples`（已合并原 05~10 号示例）端到端。
 
 **未落地**（设计文档中的后续路线，多数依赖外部 SDK/模型或属较大工程）：
 - `SceneBuilder` 反射泛型化（硬编码组件映射 → `ClassInfo::factory` 按名构造）——MVP 与反射通路合流的演进点；
