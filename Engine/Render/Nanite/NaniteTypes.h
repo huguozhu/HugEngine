@@ -1691,6 +1691,26 @@ inline constexpr u32 kNaniteMaxBVHInstances = 64u;
 /// 节点数上界 = 2 × 簇数 - 1（满二叉树），故节点表按 `2 × 16384` 条分配。
 inline constexpr u32 kNaniteMaxBVHClusters = 16384u;
 
+// ── 【确定性赢家选择】候选号位段的**编译期钉子**（与软光栅第 2.5 趟的着色器逐位耦合）──
+//
+// 【耦合点在哪】`Nanite_SoftRasterWinner.comp.slang` 与 `Nanite_SoftRaster.comp.slang` 里那句
+//   逐字相同的
+//       candidateID = (ref.cluster << 12) | (ref.instance << 6) | (triLocal & 0x3Fu)
+//   把"稳定身份"（资产簇下标 / 实例下标 / 簇内三角形下标）打包成一个 32 位单射编号：
+//       bits 12..25 : cluster   —— 需要 cluster  < 2^14
+//       bits  6..11 : instance  —— 需要 instance < 2^6
+//       bits  0..5  : triLocal  —— 需要 triLocal < 2^6
+//   候选号只有**单射**时，"取最小候选号"才是"取唯一的那个赢家"；任何一段溢出，两个不同的候选
+//   就会算出同一个编号 ⇒ 仲裁失效（等价于退回"由 UAV 写序决定像素归属"，也就是本机制要修的 bug）。
+//
+// 【⚠ 改大任何一个上限，必须同步改着色器里的位段与移位量】下面三条断言就是那道闸：把上限调大到
+//   超过它的位宽会**编译期报错**（而不是让 GPU 静默出错号）。修法有两种，选哪种都行，但必须同步：
+//     · 收紧上限（若新上限仍塞得进原定宽 ⇒ 只改常量即可）；或
+//     · 重排位段（改宽/改移位量 ⇒ 着色器与这里一起改，并重新核对总位宽 ≤ 32）。
+static_assert(kNaniteMaxBVHClusters     <= (1u << 14), "候选号位段：cluster 占 14 位（bits 12..25）");
+static_assert(kNaniteMaxBVHInstances    <= (1u << 6),  "候选号位段：instance 占 6 位（bits 6..11）");
+static_assert(kNaniteMaxClusterTriangles <= (1u << 6), "候选号位段：triLocal 占 6 位（bits 0..5）");
+
 /// 可见簇引用表容量（= 实例域上限 × 簇数上限）
 inline constexpr u32 kNaniteMaxVisibleClusterRefs =
     kNaniteMaxBVHInstances * kNaniteMaxBVHClusters;

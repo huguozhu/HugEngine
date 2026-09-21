@@ -200,6 +200,10 @@ if(SLANGC)
         # （它在下面的 SLANG_INCLUDES 里，不是入口）
         "${SHADER_DIR}/Nanite/Nanite_SoftRasterDepth.comp.slang"
         "${SHADER_DIR}/Nanite/Nanite_SoftRaster.comp.slang"
+        # Nanite（虚拟几何模块）——确定性赢家选择：夹在第 1 趟与第 2 趟之间的仲裁趟（第 2.5 趟）。
+        # 深度键的低 8 位只有簇内唯一性 ⇒ 跨簇撞键时"等值复检"会让多个候选都通过、由 UAV 写序
+        # 决定像素归属（实测两次相同运行不是逐位可复现）。本趟用全局唯一候选号的原子最小值定赢家。
+        "${SHADER_DIR}/Nanite/Nanite_SoftRasterWinner.comp.slang"
         # Nanite（虚拟几何模块）——§14.8 任务 18：清屏 8 张 GBuffer 颜色目标（compute 写 UAV，
         # 不依赖 render pass 的 loadOp/缓存行为；深度由 RHI 的 `ClearDepthStencil` 单独清）
         "${SHADER_DIR}/Nanite/Nanite_GBufferClear.comp.slang"
