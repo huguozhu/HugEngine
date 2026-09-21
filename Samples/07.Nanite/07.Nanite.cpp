@@ -643,18 +643,42 @@ int main() {
             //   `NaniteSettings::hardRaster` 的注释块。
             naniteSettings.hardRaster = GetInt(cfgData, "nanite_hard_raster",
                                                naniteSettings.hardRaster ? 1 : 0) != 0;
+            // ── 任务 24 的 **LOD 流式（反馈 + 页池，阶段一）**：总开关 + 四个档位 ──
+            // 【为什么必须有这几个 cfg 键】验收 (c) 要求"把页池调到 8 页"这一档可复现，
+            //   而 cfg 是冒烟脚本驱动档位的唯一入口（`HE_SMOKE_EXTRA`）。
+            // 【钳制口径与模块侧一致】K ∈ [1, 4096]、槽数 ∈ [0, kNanitePagePoolSlotsMax]
+            //   （0 是**有意义的**取值：读数会报 `stream=off reason=pool_zero_slots`）、
+            //   延迟 ∈ [1, kNaniteFeedbackLatencyMax]、每帧上限 ∈ [1, kNanitePageUploadsPerFrameMax]。
+            naniteSettings.streaming = GetInt(cfgData, "nanite_streaming",
+                                              naniteSettings.streaming ? 1 : 0) != 0;
+            naniteSettings.pageContents = (u32)std::max(1, std::min(
+                GetInt(cfgData, "nanite_page_contents", (int)naniteSettings.pageContents), 4096));
+            naniteSettings.pagePoolSlots = (u32)std::max(0, std::min(
+                GetInt(cfgData, "nanite_page_pool_slots", (int)naniteSettings.pagePoolSlots),
+                (int)render::kNanitePagePoolSlotsMax));
+            naniteSettings.feedbackLatency = (u32)std::max(1, std::min(
+                GetInt(cfgData, "nanite_feedback_latency", (int)naniteSettings.feedbackLatency),
+                (int)render::kNaniteFeedbackLatencyMax));
+            naniteSettings.pageUploadsPerFrame = (u32)std::max(1, std::min(
+                GetInt(cfgData, "nanite_page_uploads", (int)naniteSettings.pageUploadsPerFrame),
+                (int)render::kNanitePageUploadsPerFrameMax));
             deferredPipeline.SetNaniteSettings(naniteSettings);
             HE_CORE_INFO("[Nanite] 配置恢复: nanite_enable={} nanite_fake_clusters={} "
                          "nanite_test_write={} nanite_mesh_test={} nanite_instance_test_count={} "
                          "nanite_hiz={} nanite_hiz_flip={} nanite_fake_chain={} nanite_draw_capacity={} "
-                         "nanite_soft_raster={} nanite_soft_max_triangles={} nanite_hard_raster={}",
+                         "nanite_soft_raster={} nanite_soft_max_triangles={} nanite_hard_raster={} "
+                         "nanite_streaming={} nanite_page_contents={} nanite_page_pool_slots={} "
+                         "nanite_feedback_latency={} nanite_page_uploads={}",
                          naniteSettings.enabled ? 1 : 0, naniteSettings.fakeClusters,
                          naniteSettings.testWrite ? 1 : 0, naniteSettings.meshTest ? 1 : 0,
                          naniteSettings.instanceTestCount, naniteSettings.hiz ? 1 : 0,
                          naniteSettings.hizFlip ? 1 : 0,
                          naniteSettings.fakeChain ? 1 : 0, naniteSettings.drawCapacity,
                          naniteSettings.softRaster ? 1 : 0, naniteSettings.softMaxTriangles,
-                         naniteSettings.hardRaster ? 1 : 0);
+                         naniteSettings.hardRaster ? 1 : 0,
+                         naniteSettings.streaming ? 1 : 0, naniteSettings.pageContents,
+                         naniteSettings.pagePoolSlots, naniteSettings.feedbackLatency,
+                         naniteSettings.pageUploadsPerFrame);
         }
 
         auto& ae = deferredPipeline.GetAutoExposure();
@@ -1408,6 +1432,23 @@ int main() {
                                       "的簇改走 mesh shader 硬光栅（§5.2 的混合光栅分流）。\n"
                                       "默认关：大簇仍被软光栅跳过（skipped_big），与任务 21 逐位一致。\n"
                                       "开启会改变画面并写深度附件（下游 SSAO/SSR/Hi-Z 都会变）。");
+                // ── 任务 24 的 LOD 流式开关（默认关）──
+                // 【为什么默认关】关闭档必须与任务 23 逐位相同（冻结指纹不变），而流式开启会新建
+                // 页池/页表/反馈环三组 GPU 资源 + 每帧一次 `WaitIdle`；阶段一还多一份约 11.7 MB 的
+                // 资产 CPU 留存。理由全文见 `NaniteSettings::streaming`。
+                bool naniteStreaming = naniteSettings.streaming;
+                if (ImGui::Checkbox("LOD 流式：反馈 + 页池（任务 24）##nanite_st", &naniteStreaming)) {
+                    naniteSettings.streaming = naniteStreaming;
+                    dp->SetNaniteSettings(naniteSettings);
+                    HE_CORE_INFO("[Nanite] 面板 LOD 流式: streaming={}", naniteSettings.streaming ? 1 : 0);
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("任务 24（阶段一）：页池 %u 槽 / 每页 %u 份共享内容 / 反馈延迟 %u 帧 / 每帧上传 %u 页。\n"
+                                      "生效条件 enabled && softRaster && streaming。\n"
+                                      "页池足够大时画面必须与流式关闭档逐位可比（判据 (d)）；\n"
+                                      "调到 8 页可复现大量缺页（判据 (c)），缺页的簇跳过不画并计数。",
+                                      naniteSettings.pagePoolSlots, naniteSettings.pageContents,
+                                      naniteSettings.feedbackLatency, naniteSettings.pageUploadsPerFrame);
             }
 
             // ── GI 通道：Diffuse / Specular / AO / Shadow ──
@@ -1925,6 +1966,16 @@ int main() {
             if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
                 dpNanite->GetNanite().LogSizeDistReadback();
 
+            // ── Nanite（§14.8 任务 24）：LOD 流式（反馈 + 页池）的**恰好一行**读数 ──
+            // 字段：pages_total/resident/pool/uploads_this_frame/evicted/page_misses/
+            //       pages_requested/stream=on|off/reason=… + 池内存足迹与累计请求数。
+            // 【门控】`nanite_streaming=0`（默认）时模块内部直接返回、不打印 ⇒ 关闭档与既有档位的
+            //   日志逐字不变。`page_misses` / `pages_requested` 是**真实 GPU 读回**（软光栅读数
+            //   缓冲的第 20/21 槽，由软光栅第 1 趟原子累加，且写入发生在同一帧清零之后）。
+            // 同步同样依赖上面的 `WaitIdle()`。
+            if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
+                dpNanite->GetNanite().LogStreamReadback();
+
             // ── 【§14.8 任务 23】整帧预算 + "分流 × 帧时"的 perf 行（同一个 `LogFrameBudget`）──
             // 【为什么这里必须补一次 `LogFrameBudget()` 调用】它原本**只**在 Lumen 段
             //   （`Lumen_SDF_Build` 的 pass 体内）被调用，而 07.Nanite 的 cfg 没有请求 Lumen 源
@@ -2098,6 +2149,19 @@ int main() {
         // 就是任务 22 的受测档）；缺这一行会让档位在下一次运行时被写回成默认值、档位互相污染。
         out["nanite_hard_raster"] =
             std::to_string(deferredPipeline.GetNaniteSettings().hardRaster ? 1 : 0);
+        // 任务 24：LOD 流式开关（默认 0）与四个档位 —— 同写法回写。
+        // 【为什么必须回写】验收 (c) 用 `nanite_page_pool_slots=8` 造缺页档、(d) 用默认 64 槽跑
+        // 驻留档；缺这一行，档位会在下一次运行时被写回成默认值、两档互相污染（任务 18/22 踩过）。
+        out["nanite_streaming"] =
+            std::to_string(deferredPipeline.GetNaniteSettings().streaming ? 1 : 0);
+        out["nanite_page_contents"] =
+            std::to_string(deferredPipeline.GetNaniteSettings().pageContents);
+        out["nanite_page_pool_slots"] =
+            std::to_string(deferredPipeline.GetNaniteSettings().pagePoolSlots);
+        out["nanite_feedback_latency"] =
+            std::to_string(deferredPipeline.GetNaniteSettings().feedbackLatency);
+        out["nanite_page_uploads"] =
+            std::to_string(deferredPipeline.GetNaniteSettings().pageUploadsPerFrame);
 
         // ── AutoExposure ──
         auto& ae = deferredPipeline.GetAutoExposure();
