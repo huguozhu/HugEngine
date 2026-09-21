@@ -3462,6 +3462,11 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
      **三角形多数票**归属；**平票取下标更小的网格**；一个三角形都落不进任何区间 ⇒ `unmappedClusters`
      并兜底 0 号材质；跨 ≥2 个网格 ⇒ `multiMeshClusters`（如实计数，不隐藏）。二分查找，
      复杂度 O(簇×三角形×log 网格)，无哈希容器遍历序 ⇒ 同输入逐位一致。
+       > **⚠ 2026-09-21 更新（§14.41）**：该函数**已删除**。它的前提 —— "`triangleOffset` 与源网格区间
+       > 同空间" —— 对真实资产（DAG 去重后）**从不成立**；真正落地的是
+       > `NaniteAssignClusterMaterialsByVertexOwner`（**顶点归属口径**：不读 `triangleOffset`，
+       > 改用"每次出现 → 网格顶点"的映射把三角形还原成原始合并顶点下标）。
+       > 上面这一条保留为**本任务最初的设计记录**，不代表今天的实现。
    · 逐网格材质快照新增在 `MeshBatcher`（`MergedMeshMaterial`，与绘制命令**同序同长**，
      在同一个 `collect` 调用里产出）：字段与 `SceneRenderer.cpp:110-130` 填 `GPUObjectData`
      时同一批来源（因子取组件字段、纹理路径按 `ComputeMaterialTextureMask` 压成掩码、
@@ -4116,7 +4121,7 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
 - **⚠ 2026-09-21 追加：首选修法在当前调用点上"做不到"，必须先补管道。** 复核调用点
   （`NaniteUpload.cpp:1237-1260`）后确认：
   - 该重载先调内层构建器产出**完整资产**（`:1245-1248`），再调
-    `NaniteAssignClusterMaterials(asset.clusters, meshes, clusterMaterial)`（`:1256-1257`）；
+    `NaniteAssignClusterMaterials(asset.clusters, meshes, clusterMaterial)`（`:1256-1257`）【⚠ 该函数与这两个行号都已是**历史记录**：函数已于 §14.41 删除】；
   - ⇒ 材质映射函数**只拿到"已打包的簇数组 + 原始空间的网格区间表"**，
     **既没有原始 `indices`，也没有"每簇三角形 → 原始下标"的映射**。
   - 因此"让投票改用原始空间的三角形下标"**不是换一个变量就能做的事**，它要求上游**新增一份
@@ -4146,7 +4151,7 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
 **⑨ 实测确认（2026-09-21；真实资产离线插桩）**
 
 > 第 ⑥ 条的推导链此前只做到"代码走查 + 文件行依据"（证据强度见 ⑦）。现已用**真实 Sponza 资产离线跑一遍**
-> `BuildNaniteClusterDAG` + `PackNaniteClusters` + `NaniteAssignClusterMaterials`，把各索引空间**逐簇对照** ⇒ **根因确认**，
+> `BuildNaniteClusterDAG` + `PackNaniteClusters` + `NaniteAssignClusterMaterials`（⚠ 已于 §14.41 删除；这条是当时的**离线插桩**记录，用的是临时复现载体，不是今天的路径），把各索引空间**逐簇对照** ⇒ **根因确认**，
 > 并且发现原判断**低估了缺陷范围**（见 ⑩）。
 
 可复现的实测数据（插桩载体为 `Tests/TestNaniteMaterialMapRepro.cpp`；确认后已按"把插桩转正"的要求
@@ -4221,8 +4226,10 @@ LOD0 真值逐簇一致、无归属顶点簇 0、几何核对越界 0，并断�
 > "we currently just pick the closest triangle irrespective of connectivity"）⇒ 一个簇**合法地**可横跨多个源网格。
 > 旧的 97 是"用错索引空间下偶然落在同一网格内"的产物，**2291 才是真实值**。
 
-> 保留说明：三角形空间的低层函数 `NaniteAssignClusterMaterials` **保留未删**（真实路径已不再调用它），
-> 其头文件已写明"使用前提：资产满足三角形偏移与源网格区间同空间"，以免后来者误用。
+> 保留说明：三角形空间的低层函数 `NaniteAssignClusterMaterials` **已删除**（§14.41）。
+> 真实资产**从不满足**它的前提（`triangleOffset` 是去重后共享三角形段的下标、与 `meshes[]` 不同空间），
+> 因此它既不是"可用的备选路径"、也没有保留价值；资产构建器唯一使用的是
+> `NaniteAssignClusterMaterialsByVertexOwner`（顶点归属口径）。
 
 **⑬ 任务 25 剩余部分的实施记录（2026-09-21 落地）**
 
@@ -5012,3 +5019,75 @@ C++ 侧三条 `static_assert` 把上限钉住（`NaniteTypes.h`，注释写明"�
     8d `distinct VUID types: new=0`；8e `on-minus-Nanite == off` 逐行相同且 `frozen_match=True`
 - ⇒ **冻结指纹、判据 ⑥⑦⑧、单测全部不受影响**；并且"**抖动族之外 0 项差异**"这句话
   **现在在接管档也成立**（本条 ⑧ 的前提已在 ⑤ 里给出实测）。
+
+### 14.41 删除旧 API `NaniteAssignClusterMaterials`（2026-09-21）
+
+> 依据：用户决定**删除**该函数（保留 `NaniteAssignClusterMaterialsByVertexOwner`）。
+> 它是**三角形下标空间**的低层规则，**假定** `clusters[i].triangleOffset` 已经是合并空间的三角形下标。
+> 真实 `.nanite` 资产（DAG 去重后）**从不满足**这个前提 —— `triangleOffset` 是去重后**共享**三角形段的
+> 下标，与 `meshes[]` 描述的空间不同。实测后果（§14.33 ⑩ / §14.37）：
+> **4103/8287** 个簇落空（计 `unmapped`），另有 LOD0 的 **3957/4099（96.5%）** 个簇被**静默映射到错误的网格**。
+
+**① 为什么删而不是继续保留**
+
+任务 25 当初把它**保留**下来（理由："它的规则是'给定合并空间三角形区间时该怎么投票'的规范定义，
+单测直接覆盖它"）。现在决定删除，理由有三：
+
+1. **它不可用**：唯一的使用前提对真实资产**恒假** ⇒ 后来者照它写必然重蹈覆辙；
+2. **它的"规范定义"价值已被取代**：真正落地的是 `NaniteAssignClusterMaterialsByVertexOwner`
+   （**顶点归属口径**，不读 `triangleOffset`），且后者有真实资产上的真值核对覆盖；
+3. **保留它等于保留一条"只有单测在跑、生产路径永不执行"的代码路径** —— 这正是
+   "用读数/用例自证"的隐患（与 §14.34 第 2 行同一个道理）。
+
+**② 改了什么**
+
+| 文件 | 改动 |
+|---|---|
+| `Engine/Render/Nanite/NaniteUpload.h` | 删除函数声明 + 其文档注释；把 `...ByVertexOwner` 注释里的"与旧函数的区别"改写成**自足**的"为什么本函数**不读** `triangleOffset`"（实质内容全部保留）；去掉另外两处对旧函数名的引用 |
+| `Engine/Render/Nanite/NaniteUpload.cpp` | 删除函数定义；**连带删除只被它调用的匿名命名空间辅助函数 `FindSourceMeshForTriangle`**（否则成为死代码）；映射小节注释改写为单一（顶点归属）口径 |
+| `Tests/TestNaniteBuilder.cpp` | 整块删除只测低层规则的 `TEST_CASE("NaniteMaterialMap: 簇按三角形多数票映射到源网格并计数跨网格簇")`；摘掉任务 25 回归用例里"④ 对照读数：旧口径…"整块与 `MESSAGE` 中对应输出项（**其余断言与 MESSAGE 一字未改**） |
+| `Tests/TestNaniteMaterialMap.cpp` | 删除 `legacyOut` / `legacyStats` / `legacyUnmapped` / `legacyWrongOnLevel0` / `changedMaterial` 的全部使用点与旧口径 `MESSAGE` 项（**真值断言全部保留**） |
+| `Tests/TestNaniteTypes.cpp` | 把提到旧函数名的从句改成不带它的等价说明 |
+
+**③ 验证（本机实测）**
+
+- **零残留**：`git grep -E 'NaniteAssignClusterMaterials([^B]|$)'` 扫全部受跟踪的 `.h/.cpp/.slang/.ps1/.py`
+  ⇒ **0 处**独立引用；`NaniteAssignClusterMaterialsByVertexOwner` 仍被引用（引擎侧 6 处），**保留完整**；
+  被连带删除的 `FindSourceMeshForTriangle` 引用数 **0**（确认删的是死代码，不是活代码）。
+- `07.Nanite` 与 `HugEngineTests` 两个目标构建均 **exit 0**。
+- `HugEngineTests`：**exit 0**，`328 用例 / 71231 断言 / Status: SUCCESS!`
+  —— 用例 **329 → 328（−1）**、断言 **71245 → 71231（−14）**，逐条对得上：
+  - **−1 用例** = 被删的那个 `TEST_CASE`；
+  - 该用例 **−13** 条断言（`out.size()`、`out[0..4]`、`multiMeshClusters`、`unmappedClusters`、
+    `tieOut[0]`、`tieStats.multiMeshClusters`、`shortStats.multiMeshClusters`、
+    `shortStats.unmappedClusters`、`shortOut[0]`）；
+  - **−1** 条 = `TestNaniteMaterialMap.cpp` 的 `CHECK(changedMaterial > 0u)`（整条依赖 `legacyOut`）。
+  - **没有为了凑回原数字补新用例。**
+- 筛选复跑 `--test-case="NaniteMaterialMap*"`：**2 用例 / 50 断言全过** ——
+  Sponza 真实资产 `clusters=8287 / unmapped=0 / multi_mesh=2291`、LOD0 真值核对 **4099 簇错 0**；
+  合成用例 23 簇 `unmapped=0`、选错材质 0。
+
+**④ 如实标注的覆盖损失**
+
+`TestNaniteMaterialMap.cpp` 里的 `CHECK(changedMaterial > 0u)`（"这次修复**确实改变了**材质归属"）
+**随 `legacyOut` 一起消失**：它表达的是"新口径 vs 旧口径有差异"，而旧口径已不复存在 ⇒
+**无法用替代手段补回**。"修复改变了画面"这条证据**现在只存在于本文档的历史记录里**
+（§14.37：8086/8287 = **97.57%** 的簇改变了材质归属）。**不要**拿判据 ⑧b 的
+`gbuffer_changed=4 (of 4)` 替代它 —— 那是"**模块接管档 vs 关闭档**"的差异，口径不同。
+
+**⑤ 行为不变性**
+
+被删函数**从未被渲染器调用**（生产路径一直走 `...ByVertexOwner`）⇒ 本项是**纯代码/测试清理**，
+不改变任何运行期行为；构建与两轮判据 ⑥⑦⑧ 的实测见 ⑥。
+
+**⑥ 验收（判据 ⑥⑦⑧，连续两轮）**
+
+`acceptance_sweep.ps1 -OnlyNanite` → **连续两轮均 `ACCEPTANCE SWEEP: PASS`**，且两轮数字**逐项相同**：
+
+| 判据 | 两轮实测 |
+|---|---|
+| ⑥ 开关不变式 | `off passes=12 nanite_leak=0 sha=1C15AB72E688B530`；`pairs=20 differing_outside_jitter=0` |
+| ⑦ CPU 参考剔除对照 | `CULL DIFF: PASS`；`default` / `hiz1` 各跑两次**读数逐字符一致** |
+| ⑧ 接管档画质比对 | `TAKEOVER CMP: PASS`；`dumps compared=18 identical=11 gbuffer_changed=4 (of 4) jitter=3 unexpected=0 missing=0`；`PIC CMP: PASS`；`distinct VUID types: new=0` |
+
+冻结指纹**未变**（off `1C15AB72…` / on `750CC247…`）⇒ 与"纯清理、不改变运行期行为"的判断一致。
