@@ -3802,18 +3802,36 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
 - §8.3 定稿：`.nanite` 的段偏移**不落盘**，每段偏移与长度都是「头部计数 + 固定步长」的纯函数。
   ⇒ 任意簇下标区间在**簇段**里的字节范围算术可得：`96 + start×64`。
 - 顶点段与索引段的范围**不能**由簇下标直接推出（每簇的 `vertexOffset` 是打包时分配的）。
-  本设计采用的判据：**离线打包保证 `cluster.vertexOffset` 随簇下标单调不减**（页内首/末簇记录
-  即可给出该页覆盖的顶点范围，而这两条记录就在页内）。
-  - **必须落地的守卫**：离线侧（`NaniteUpload` / 打包器）加一条**单调性断言**并在上传时校验一次；
-    不成立时该资产的流式**自动禁用**并在读数里标注（`stream=off reason=nonmonotonic`），
-    退化为既有的"整段常驻"路径 —— 不静默、不崩。
-  - **起草时已核实的证据（供评审）**：`cluster.vertexOffset` 有**两处**赋值，语义不同 ——
-    `NaniteUpload.cpp:387`（打包期按累计大小推进，天然单调）与 `NaniteUpload.cpp:588`
-    （按 `result.uniqueVertexOffset[uniqueIndex]` 查表，**是否单调取决于去重表的生成顺序**）。
-    ⇒ 守卫必须**在资产上传时对成品数组实测一次**，不能只看其中一条路径。
-    对照：**LOD 偏移段已有同类自校验**（`NaniteUpload.cpp:1535`「单调不减、首元素为 0、
-    元素都 < 簇数」，失败例见 `NaniteUpload.h:669`）⇒ 本设计要求的守卫与仓库既有做法一致，
-    不是新发明。
+
+> **⚠ 2026-09-21 修正（起草后复核代码得出，推翻了本设计的初始假设）**
+> 本节初稿要求"离线打包保证 `cluster.vertexOffset` 随簇下标单调不减"，并据此把"簇下标区间"当作页。
+> **该假设在正式路径上是假的**，复核过程与结论如下：
+> - `cluster.vertexOffset` 有**两处**赋值：
+>   - `NaniteUpload.cpp:387`（非去重路径）：`= result.vertexIndices.size()` 累计推进 ⇒ **单调**；
+>   - `NaniteUpload.cpp:588`（**去重/DAG 路径**）：`= result.uniqueVertexOffset[uniqueIndex]` ⇒
+>     `uniqueVertexOffset[]` 本身单调（`:572` 用 `uniqueVertexWords.size()` 追加），
+>     但 `uniqueIndex` 来自哈希去重查找（`:540-567`），**命中时会把 `uniqueIndex` 指回一个更早的
+>     共享内容** ⇒ 相邻簇的 `vertexOffset` **可以变小** ⇒ **簇下标区间不映射到连续的顶点区间**。
+> - ⇒ 按初稿的守卫，正式资产（走去重路径）会直接判 `nonmonotonic` 并**永远禁用流式** ——
+>   设计等同不可用。**必须改页的定义。**
+>
+> **修正后的页定义（默认项）：页 = 共享（去重后）数组上的一段，且对齐到"整份共享内容"边界。**
+> - 因为 `uniqueVertexOffset[]` / `uniqueTriangleOffset[]` **本身是单调的**，所以"共享内容下标区间"
+>   总能映射到连续的顶点/三角形区间。
+> - 页 = `[共享内容下标 s, s+K)`（K 默认 512 份共享内容），其顶点/三角形字节范围由
+>   `uniqueVertexOffset[s]` 与 `uniqueVertexOffset[s+K]` 直接给出（两端都在页内）；
+>   **要求离线侧把每份共享内容按页边界对齐**（不足则补 padding），使任何一份共享内容**不跨页**。
+> - 簇 → 页的映射用**它已经在用的那个 `vertexOffset`**：落在这个页的顶点区间内的簇就属于这个页。
+>   于是**着色器侧不必新增索引空间**，只把 `cluster.vertexOffset` 经页表从"共享数组的绝对偏移"
+>   换算成"页池内的偏移"（`poolOffset + (vertexOffset - pageBeginOffset)`）。
+> - `clusterUnique`（`NaniteUpload.cpp:598` 的平行数组）**不参与**页的划分，也不要求上传。
+> - **仍需的守卫**：上传时校验"每份共享内容不跨页"（对齐或 padding 是否真的做到了），
+>   不成立则 `stream=off reason=page_straddle` 并退化到整段常驻 —— 与初稿"不静默、不崩"的口径一致，
+>   但**判据换成了可成立的那一条**。
+> - **权衡（如实记录）**：按"共享内容"分页会比按簇分页产生更小的页（簇的记录段仍可按簇分页，
+>   但顶点/三角形段按共享内容分页）⇒ 页表要能同时描述两类页，或**统一把页定义为"簇段 + 顶点段 +
+>   三角形段三段各取一段"**（即一个页 = 三个区间）。实现时应选后者，避免两套页语义。
+
 - 页大小默认 **512 簇/页**（可配 `kNanitePageClusters`）；页数 = `ceil(clusterCount / 512)`。
 - LOD 维度：`lodLevelCount` + LOD 偏移段（§8.3 段 5）给出每个 LOD 的簇下标范围 ⇒
   "某 LOD 的某几页"是一次**页区间查询**，不需要额外索引。
