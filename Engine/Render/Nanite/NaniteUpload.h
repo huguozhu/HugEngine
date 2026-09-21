@@ -676,6 +676,113 @@ struct NaniteClusterBVH {
                                              std::vector<NaniteClusterLODInfo>&   outResult);
 
 // ============================================================
+// §14.8 任务 24：页划分（CPU 侧，RHI-free；纯函数 ⇒ 可单测）
+//
+// 【权威设计】§14.32 的 ②（含 6 处修正）与「页边界从资产本身即可推出」那一段。
+//   本函数把那份设计变成一条**由资产自身推出**的划分，不改 `.nanite` 格式、不依赖构建期
+//   临时数组：唯一输入就是落盘后的 `clusters` 段与两段的记录数。
+//
+// 【为什么页边界推得出来（设计的关键依据）】
+//   · `UniqueVertexOffset[]` / `uniqueTriangleOffset[]` 是构建期**单调追加**的（每份共享内容
+//     一份），但**没有落盘**；而 `clusters[i].vertexOffset` 就是它的取值。
+//   · 取 `clusters[i].vertexOffset` 的**去重升序集合** ⇒ 恰好等于那两套构建期数组
+//     （内容是"因簇的需要"才被创建的 ⇒ 每份至少被一个簇引用 ⇒ 集合完整）。
+//   · 相邻两个不同值之间就是一份共享内容的范围（最后一份到 `vertices.size()`）。
+//   ⇒ 一份共享内容的三段区间全部由资产自身给出，**不需要改文件格式**。
+//
+// 【页的定义（实现口径，逐条对应 §14.32）】
+//   · 份数分页：页 p 覆盖共享内容下标 `[p×K, min(C, (p+1)×K))`（K = `kNanitePageContentsPerPage`）；
+//   · **顶点段 / 三角形段** = 该内容区间的**连续**记录区间
+//     `[starts[p×K], starts[min(C,(p+1)×K)])`（端点都在页内 ⇒ 任何一份内容不跨页）；
+//   · **簇段** = 引用了这些内容的那些"簇出现"记录，按**出现下标升序密集打包**
+//     （去重路径下 `vertexOffset` 不单调 ⇒ 簇下标区间不可能同时是区间，见 `NaniteTypes.h`
+//     的任务 24 小节）；每簇在页内的下标写在 `clusterPage[].local` 里；
+//   · **顺序无关性**：顶点段与三角形段的秩必须**逐一对应**（同一份内容的两个秩相等），
+//     不等就返回 false —— 这条守卫把"两张共享表不同源"这种损坏资产挡在门外。
+//
+// 【失败（返回 false，不抛、不崩、不改写出参）】簇段为空以外的任何输入异常：
+//   `vertexCount/triangleCount` 为 0 却有簇；首份内容不从记录 0 开始（有前缀空洞）；
+//   某份内容的区间为空或越出段尾；顶点秩与三角形秩不一致；`contentsPerPage == 0`。
+// 【空资产】`clusters` 为空 ⇒ 返回 true 且产物为空（页数 0），与任务 7/8/9/10/12 同口径。
+// 【确定性】只有排序与线性扫描，不含随机/时间/并行/哈希容器遍历序 ⇒ 同输入逐位一致。
+// ============================================================
+
+/// 页划分的**实测读数**（每一条都是验收 (b)/(c) 要核对的量）
+struct NanitePagePlanStats {
+    /// 【这三个与 `NanitePagePlan` 的同名字段**故意冗余**】两者是同一次划分的同一批量的两份
+    ///   投影：plan 层是"结构"，这里的一份是"读数出口"（与 `pageStraddleCount` / 三个 `*Stride` /
+    ///   `slot*Bytes` 同一处取用）。实现里在成功路径末尾一次写完两者，单测显式断言逐位相等。
+    ///   【为什么必须写】留着恒 0 的同名字段会让"从 stats 读读数"的人拿到 0 ——
+    ///   判据 (b) 的 `resident + 非驻留 == pages_total` 就会变成 `0 == 0 + 0` 的**空洞通过**。
+    u32 clusterCount = 0;    ///< 簇出现总数（= `clusters.size()` = `NanitePagePlan::clusterCount`）
+    u32 contentCount = 0;    ///< 共享内容份数（= 去重升序的 `vertexOffset` 个数）
+    u32 pageCount    = 0;    ///< 页数（= `ceil(contentCount / K)`）
+
+    /// 池槽步长（**条数**）：每页在三段里的最大条数。池缓冲的大小 = 槽数 × 步长 × 记录大小。
+    /// 【为什么取"每页最大"而不是平均】池是**定长槽**的物理数组：任何一个槽都必须装得下
+    ///   最坏的那一页，否则上传就会越界。
+    u32 clusterStride  = 0;  ///< 一个槽最多装多少条簇记录（64B/条）
+    u32 vertexStride   = 0;  ///< 一个槽最多装多少条量化顶点（16B/条）
+    u32 triangleStride = 0;  ///< 一个槽最多装多少条打包三角形（8B/条）
+
+    u32 maxClustersPerPage  = 0;  ///< 实测每页最大簇出现数（= `clusterStride`）
+    u32 maxVerticesPerPage  = 0;  ///< 实测每页最大顶点条数（= `vertexStride`）
+    u32 maxTrianglesPerPage = 0;  ///< 实测每页最大三角形条数（= `triangleStride`）
+
+    /// **每份共享内容不跨页**的违反数（必须 0；非 0 ⇒ 调用方按 `page_straddle` 退化并报读数）
+    u32 pageStraddleCount = 0;
+    /// 顶点段与三角形段的秩不一致的簇数（正常 0）。**失败路径不通过出参外传**（本函数返回 false
+    /// 且不改写出参）⇒ 它只是内部诊断，真正可见的证据是失败时那一条 `HE_CORE_WARN` 日志
+    ///（带上第一个出问题的簇下标与两个秩）。成功路径下它恒为 0，调用方可以放心断言。
+    u32 rankMismatchCount = 0;
+
+    /// 三个段的"池总字节"上界（= 槽数 × 步长 × 记录大小；由调用方按池槽数算出，见 `NanitePagePlan::PoolBytes`）
+    usize slotClusterBytes  = 0;  ///< 一个槽的簇段字节（= clusterStride × 64）
+    usize slotVertexBytes   = 0;  ///< 一个槽的顶点段字节（= vertexStride × 16）
+    usize slotTriangleBytes = 0;  ///< 一个槽的三角形段字节（= triangleStride × 8）
+};
+
+/// 一次页划分的产物（CPU 侧镜像；GPU 侧的页表由 `NaniteStream` 动态维护）
+struct NanitePagePlan {
+    u32 contentsPerPage = kNanitePageContentsPerPage;  ///< 每页共享内容份数（K）
+    u32 clusterCount    = 0;   ///< 簇出现总数
+    u32 contentCount    = 0;   ///< 共享内容份数
+    u32 pageCount       = 0;   ///< 页数
+
+    /// 每簇的（页号，页内簇序号）；长度 == clusterCount。**上传给 GPU 的正是这一份**。
+    std::vector<NaniteClusterPageRef> clusterPage;
+    /// 每页在三段里的区间（长度都 == pageCount）
+    std::vector<u32> pageVertexBegin;     ///< 顶点段起始记录下标（共享顶点数组内）
+    std::vector<u32> pageVertexCount;     ///< 顶点段条数
+    std::vector<u32> pageTriangleBegin;   ///< 三角形段起始记录下标
+    std::vector<u32> pageTriangleCount;   ///< 三角形段条数
+    std::vector<u32> pageClusterBegin;    ///< 该页在"收集后的簇记录序"里的起点（= 前缀和）
+    std::vector<u32> pageClusterCount;    ///< 该页收集到多少条簇出现记录
+
+    NanitePagePlanStats stats;  ///< 实测读数
+
+    /// 产物是否为空（空资产 = 合法输入：页数 0）
+    [[nodiscard]] bool Empty() const { return pageCount == 0u; }
+
+    /// 池在给定槽数下的三段总字节（越界防护与容量报告都用它；不进 shader）
+    [[nodiscard]] usize PoolBytes(u32 slots) const {
+        return (usize)slots * (stats.slotClusterBytes + stats.slotVertexBytes + stats.slotTriangleBytes);
+    }
+};
+
+/// 由落盘后的簇记录 + 两段记录数构建页划分（§14.8 任务 24，纯函数）
+/// @param clusters        资产簇段（每次出现一条 64B 记录）
+/// @param vertexCount     顶点段记录数（= `header.vertexCount` = `asset.vertices.size()`）
+/// @param triangleCount   三角形段记录数（= `asset.triangles.size()`）
+/// @param contentsPerPage 每页共享内容份数（0 ⇒ 返回 false；调用方一般传 `kNanitePageContentsPerPage`）
+/// @return 成功写满 `outResult`；失败**不改写出参**
+[[nodiscard]] bool BuildNanitePagePlan(std::span<const NaniteClusterRecord> clusters,
+                                       u32                                  vertexCount,
+                                       u32                                  triangleCount,
+                                       u32                                  contentsPerPage,
+                                       NanitePagePlan&                      outResult);
+
+// ============================================================
 // 上传类（任务 1 骨架；任务 12 的 GPU 侧落在 `NaniteScene`）
 //
 // 任务 8/9/10/12 与它的关系：`BuildNaniteClusters()` / `BuildNaniteClusterDAG()` /

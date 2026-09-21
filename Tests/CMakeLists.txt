@@ -47,6 +47,9 @@ add_executable(HugEngineTests
     TestPTVolumeMath.cpp
     TestNaniteTypes.cpp
     TestNaniteBuilder.cpp
+    # §14.8 任务 24：页划分（`BuildNanitePagePlan`，纯函数）的不变式/守卫/确定性用例。
+    # 单独一文件：`TestNaniteBuilder.cpp` 已 2500+ 行且按任务分段累加。
+    TestNaniteStream.cpp
     # §14.8 任务 8：离线簇切分的实现落在 Engine/Render/Nanite/NaniteUpload.cpp。
     # 该翻译单元（连同 NaniteUpload.h）是 RHI-free 的（只前置声明 rhi::IRHIDevice），
     # 所以单测可以**直接编译它**，而不必链接 HugEngineRender（后者会拉入 RHI/Vulkan/SPV）。

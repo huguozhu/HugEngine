@@ -2510,12 +2510,18 @@ TEST_CASE("NaniteWiring: 绘制参数/命令的布局契约与占位索引上界
 //   ② 区间边界与 Slang 的 `softRasterSizeBucket()` 逐分支等价。两者都在这里被枚举钉住，
 //   于是 shader 侧改错一处（例如把 `<= 16` 写成 `< 16`）会先在单测红掉，而不是等到读数对不上。
 TEST_CASE("NaniteSizeDist: 五桶槽位/区间与 1..64 全覆盖映射（任务 23）") {
-    // ① 槽位：紧跟既有的 14 号槽、连续、吃满读数缓冲（三个 static_assert 的运行时复读）
+    // ① 槽位：紧跟既有的 14 号槽、连续；**后面紧接任务 24 的两个流式槽**（20/21）
+    //   【任务 24 起的口径变化】读数缓冲从 20 扩到 22，五桶不再"吃满容量"，
+    //   而是"紧接流式槽位之前、且不许留空洞"（C++/Slang 两处 static_assert 钉住同一件事）。
     CHECK(kNaniteSoftStatSizeBucket0 == 15u);
     CHECK(kNaniteSoftStatSizeBucket0 == kNaniteSoftStatDepthResolvedPixels + 1u);
     CHECK(kNaniteSoftStatSizeBucketCount == 5u);
-    CHECK(kNaniteSoftStatsCapacity == 20u);
-    CHECK(kNaniteSoftStatSizeBucket0 + kNaniteSoftStatSizeBucketCount == kNaniteSoftStatsCapacity);
+    CHECK(kNaniteSoftStatsCapacity == 22u);
+    CHECK(kNaniteSoftStatSizeBucket0 + kNaniteSoftStatSizeBucketCount
+          == kNaniteSoftStatPageMissClusters);
+    CHECK(kNaniteSoftStatPageMissClusters == 20u);
+    CHECK(kNaniteSoftStatPageRequests == 21u);
+    CHECK(kNaniteSoftStatPageRequests + 1u == kNaniteSoftStatsCapacity);
 
     // ② 区间：闭区间上界表 = 任务书写的 1-4 / 5-8 / 9-16 / 17-32 / 33-64
     CHECK(kNaniteSizeBucketUpperBound[0] == 4u);

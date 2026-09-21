@@ -21,6 +21,12 @@
 
 #include "Nanite/NaniteUpload.h"
 
+// 【任务 24】失败路径的日志（秩不一致时**必须**说清是哪一条簇、两个秩各是多少）：
+//   本翻译单元仍然 RHI-free（`Core/Log.h` 只依赖 Core，不牵入 RHI/Vulkan），
+//   因此这条 include 不破坏 `Tests/CMakeLists.txt:50-54` 的纪律钉子 —— 单测目标本来就链接
+//   `HugEngineCore`。
+#include "Core/Log.h"
+
 #include <meshoptimizer.h>   // meshopt_buildMeshlets / optimizeMeshlet / computeMeshletBounds / meshopt_simplify（v0.22）
 
 #include <algorithm>       // std::max / std::sort / std::equal
@@ -1610,6 +1616,202 @@ void NaniteUpload::OnResize(u32 width, u32 height) {
     // 上传段的资源与世界空间挂钩，不随视口变化；这里只记录尺寸以便后续诊断。
     m_Width  = width;
     m_Height = height;
+}
+
+// ============================================================
+// §14.8 任务 24：页划分（纯函数；口径的完整推导在 `NaniteUpload.h` 的同名小节）
+//
+// 【四步，全部只用资产自身的数据】
+//   ① 取 `clusters[i].vertexOffset` 与 `.triangleOffset` 的**去重升序集合** ⇒ 两份内容起点表；
+//   ② 秩一致性守卫：同一簇的两个秩必须相等（两张共享表同源）；
+//   ③ 按"每页 K 份内容"切页 ⇒ 顶点段/三角形段是**连续区间**（端点取自起点表）；
+//   ④ 按"簇引用的内容落在哪一页"把簇出现记录**收集**成每页一段，并算出页内序号。
+// 【为什么第 ④ 步必须是"收集"】去重路径下 `vertexOffset` 不单调（设计 ② 的修正），
+//   所以"连续簇下标区间"与"连续顶点区间"不可兼得；本实现让顶点/三角形保持区间
+//   （偏移换算才能只靠一次减法），簇段改为收集 + 每簇一个页内序号（8B/簇）。
+// ============================================================
+bool BuildNanitePagePlan(std::span<const NaniteClusterRecord> clusters,
+                         u32                                  vertexCount,
+                         u32                                  triangleCount,
+                         u32                                  contentsPerPage,
+                         NanitePagePlan&                      outResult) {
+    // 每页份数为 0 ⇒ 分页不终止；直接拒绝（调用方传的是 `kNanitePageContentsPerPage`）
+    if (contentsPerPage == 0u) return false;
+
+    NanitePagePlan plan;
+    plan.contentsPerPage = contentsPerPage;
+    plan.clusterCount    = (u32)clusters.size();
+
+    // 空资产：合法输入（页数 0），与任务 7/8/9/10/12 的"空网格"口径一致
+    if (clusters.empty()) {
+        outResult = std::move(plan);
+        return true;
+    }
+    // 有簇却没有顶点/三角形段 ⇒ 资产自相矛盾
+    if (vertexCount == 0u || triangleCount == 0u) return false;
+
+    // ── ① 两份"共享内容起点表"：去重 + 升序 ──
+    // 【为什么排序后去重就等于构建期的 uniqueVertexOffset[]】见头文件的三条推导；这里再做
+    //   两条**自洽性**守卫：首份内容必须从记录 0 开始（否则段首有没人引用的前缀 ⇒ 页划分
+    //   覆盖不到它，页池也就永远装不下它）。
+    std::vector<u32> vStarts;
+    std::vector<u32> tStarts;
+    vStarts.reserve(clusters.size());
+    tStarts.reserve(clusters.size());
+    for (const NaniteClusterRecord& c : clusters) {
+        vStarts.push_back(c.vertexOffset);
+        tStarts.push_back(c.triangleOffset);
+    }
+    std::sort(vStarts.begin(), vStarts.end());
+    vStarts.erase(std::unique(vStarts.begin(), vStarts.end()), vStarts.end());
+    std::sort(tStarts.begin(), tStarts.end());
+    tStarts.erase(std::unique(tStarts.begin(), tStarts.end()), tStarts.end());
+
+    // 两份表的份数必须相等（同一份内容既有顶点段也有三角形段）
+    if (vStarts.size() != tStarts.size()) return false;
+    // 段首空洞 / 份数超出段长 ⇒ 资产自相矛盾
+    if (vStarts.front() != 0u || tStarts.front() != 0u) return false;
+    if (vStarts.back() >= vertexCount || tStarts.back() >= triangleCount) return false;
+
+    const u32 contentCount = (u32)vStarts.size();
+    plan.contentCount = contentCount;
+
+    // 每份内容的条数：相邻起点之差（最后一份到段尾）—— 这就是构建期 uniqueVertexCount[] 的重建
+    // 【守卫】每份至少要有一条记录，否则"内容"是空的（顶点数为 0 的簇是退化簇，正式路径不允许）
+    for (u32 c = 0u; c < contentCount; ++c) {
+        const u32 vEnd = (c + 1u < contentCount) ? vStarts[c + 1u] : vertexCount;
+        const u32 tEnd = (c + 1u < contentCount) ? tStarts[c + 1u] : triangleCount;
+        if (vEnd <= vStarts[c] || tEnd <= tStarts[c]) return false;
+    }
+
+    // ── ② 秩一致性守卫 + 每簇的（内容下标，页号）──
+    // 二分查找：`starts` 升序且互不相同 ⇒ 结果唯一、可复现（不依赖任何哈希容器顺序）
+    plan.pageCount = (contentCount + contentsPerPage - 1u) / contentsPerPage;
+    plan.clusterPage.resize(plan.clusterCount);
+    std::vector<u32> clusterContent(plan.clusterCount, 0u);
+    for (u32 i = 0u; i < plan.clusterCount; ++i) {
+        const u32 vRank = (u32)(std::lower_bound(vStarts.begin(), vStarts.end(),
+                                                 clusters[i].vertexOffset) - vStarts.begin());
+        const u32 tRank = (u32)(std::lower_bound(tStarts.begin(), tStarts.end(),
+                                                 clusters[i].triangleOffset) - tStarts.begin());
+        if (vRank >= contentCount || tRank >= contentCount || vRank != tRank) {
+            // 两根共享表不同源 ⇒ 页划分没有意义；**不改写出参**、由调用方按 plan_failed 退化。
+            // 【为什么这里必须打日志】失败路径不写出参 ⇒ `stats.rankMismatchCount` 传不到调用方，
+            //   调用方只会看到 `PlanFailed`。把"第几个簇、两个秩各是多少"打出来，才不会留下一个
+            //   "看起来能读、实际恒 0"的字段（与 `stream=off reason=…` 同一条纪律：不静默）。
+            plan.stats.rankMismatchCount = plan.stats.rankMismatchCount + 1u;
+            if (plan.stats.rankMismatchCount == 1u) {   // 只打第一条，避免刷屏
+                HE_CORE_WARN("[Nanite] 页划分失败：第 {} 个簇的共享内容秩不一致"
+                             "（vertexOffset={} ⇒ 秩 {}；triangleOffset={} ⇒ 秩 {}）；"
+                             "顶点段与三角形段必须来自同一份共享内容表",
+                             i, clusters[i].vertexOffset, vRank,
+                             clusters[i].triangleOffset, tRank);
+            }
+            return false;
+        }
+        clusterContent[i] = vRank;
+    }
+
+    // ── ③ 每页的顶点段 / 三角形段（连续区间，端点都取自起点表）──
+    plan.pageVertexBegin.resize(plan.pageCount);
+    plan.pageVertexCount.resize(plan.pageCount);
+    plan.pageTriangleBegin.resize(plan.pageCount);
+    plan.pageTriangleCount.resize(plan.pageCount);
+    plan.pageClusterBegin.assign(plan.pageCount, 0u);
+    plan.pageClusterCount.assign(plan.pageCount, 0u);
+    for (u32 p = 0u; p < plan.pageCount; ++p) {
+        const u32 first = p * contentsPerPage;
+        const u32 next  = first + contentsPerPage;          // 下一份内容的下标（可能 ≥ contentCount）
+        const u32 vBegin = vStarts[first];
+        const u32 tBegin = tStarts[first];
+        const u32 vEnd = (next < contentCount) ? vStarts[next] : vertexCount;
+        const u32 tEnd = (next < contentCount) ? tStarts[next] : triangleCount;
+        plan.pageVertexBegin[p]    = vBegin;
+        plan.pageVertexCount[p]    = vEnd - vBegin;
+        plan.pageTriangleBegin[p]  = tBegin;
+        plan.pageTriangleCount[p]  = tEnd - tBegin;
+    }
+
+    // ── ④ 簇段的收集：先数、再前缀和、再填（三步都是线性扫描，确定）──
+    for (u32 i = 0u; i < plan.clusterCount; ++i) {
+        plan.pageClusterCount[clusterContent[i] / contentsPerPage]++;
+    }
+    {
+        u32 running = 0u;
+        for (u32 p = 0u; p < plan.pageCount; ++p) {
+            plan.pageClusterBegin[p] = running;
+            running += plan.pageClusterCount[p];
+        }
+        // 收集后的总条数必须恰好等于簇出现总数（否则前缀和/计数有洞）
+        if (running != plan.clusterCount) return false;
+    }
+    {
+        // 【必须从 0 开始计数，而不是从 `pageClusterBegin[page]` 开始】
+        //   `NaniteClusterPageRef::local` 的语义是"**该页的**收集序里的下标"（0..count-1）：
+        //   着色器用它算池内地址 `slot × clusterStride + local`。若这里误用绝对位置
+        //   （`cursor = pageClusterBegin`），地址就会整体偏移 `pageClusterBegin[page]` ——
+        //   轻则读到自己槽里的错记录，重则越过槽边界读到别的页的数据（**静默错画**）。
+        //   这条正是单测 `NanitePage:` 抓出来的（`local` 必须是每页 0..count-1 的排列）。
+        std::vector<u32> cursor(plan.pageCount, 0u);   // 每页的下一个可写位置（页内下标）
+        for (u32 i = 0u; i < plan.clusterCount; ++i) {
+            const u32 page = clusterContent[i] / contentsPerPage;
+            plan.clusterPage[i].page  = page;
+            plan.clusterPage[i].local = cursor[page]++;
+        }
+    }
+
+    // ── ⑤ "每份共享内容不跨页"的守卫（设计 ② 要求的上传期校验）──
+    // 【为什么现在按构造成立还要真的查】它是**输入自洽**的防线：只要有人改了分页口径
+    //   （例如把内容区间改成按簇切），这条检查会立刻把"某份内容跨了两页"变成可读的
+    //   `page_straddle` 退化，而不是让着色器在两个槽里各读到半份数据（静默错画）。
+    for (u32 i = 0u; i < plan.clusterCount; ++i) {
+        const u32 page   = plan.clusterPage[i].page;
+        const u32 vRank  = clusterContent[i];
+        const u32 vCount = (vRank + 1u < contentCount) ? (vStarts[vRank + 1u] - vStarts[vRank])
+                                                       : (vertexCount - vStarts[vRank]);
+        const u32 tCount = (vRank + 1u < contentCount) ? (tStarts[vRank + 1u] - tStarts[vRank])
+                                                       : (triangleCount - tStarts[vRank]);
+        const u32 vLo = plan.pageVertexBegin[page];
+        const u32 vHi = vLo + plan.pageVertexCount[page];
+        const u32 tLo = plan.pageTriangleBegin[page];
+        const u32 tHi = tLo + plan.pageTriangleCount[page];
+        const u32 cv  = clusters[i].vertexOffset;
+        const u32 ct  = clusters[i].triangleOffset;
+        if (cv < vLo || cv + vCount > vHi || ct < tLo || ct + tCount > tHi) {
+            plan.stats.pageStraddleCount++;
+        }
+    }
+
+    // ── ⑥ 池槽步长 = 每页在三段里的最大条数（定长槽必须装得下最坏的那一页）──
+    for (u32 p = 0u; p < plan.pageCount; ++p) {
+        plan.stats.maxClustersPerPage  = std::max(plan.stats.maxClustersPerPage,  plan.pageClusterCount[p]);
+        plan.stats.maxVerticesPerPage  = std::max(plan.stats.maxVerticesPerPage,  plan.pageVertexCount[p]);
+        plan.stats.maxTrianglesPerPage = std::max(plan.stats.maxTrianglesPerPage, plan.pageTriangleCount[p]);
+    }
+    plan.stats.clusterStride  = plan.stats.maxClustersPerPage;
+    plan.stats.vertexStride   = plan.stats.maxVerticesPerPage;
+    plan.stats.triangleStride = plan.stats.maxTrianglesPerPage;
+    // 三个步长都必须 ≥ 1（页非空），否则池槽建不出来
+    if (plan.stats.clusterStride == 0u || plan.stats.vertexStride == 0u ||
+        plan.stats.triangleStride == 0u) {
+        return false;
+    }
+    plan.stats.slotClusterBytes  = (usize)plan.stats.clusterStride  * sizeof(NaniteClusterRecord);
+    plan.stats.slotVertexBytes   = (usize)plan.stats.vertexStride   * sizeof(NaniteVertex);
+    plan.stats.slotTriangleBytes = (usize)plan.stats.triangleStride * sizeof(NanitePackedTriangle);
+
+    // ── ⑦ 把三个"规模计数"也写进 `stats`（与 plan 层同名的冗余）──
+    // 【为什么冗余也必须写】`NanitePagePlanStats` 的注释明确邀请调用方**从 stats 读读数**
+    //   （"每一条都是验收 (b)/(c) 要核对的量"），而 `NaniteStream` 已经在读 `stats.pageStraddleCount`
+    //   —— 留着三个恒 0 的同名字段，后来者（例如任务 26 的可视化）照这个惯例读 `stats.pageCount`
+    //   会拿到 0，判据 (b) 的 `resident + 非驻留 == pages_total` 就成了 `0 == 0 + 0` 的**空洞通过**。
+    //   两个真值源在同一个函数里一次写完、且写入处相邻，漂移风险可忽略（单测显式断言两者相等）。
+    plan.stats.clusterCount = plan.clusterCount;
+    plan.stats.contentCount = plan.contentCount;
+    plan.stats.pageCount    = plan.pageCount;
+
+    outResult = std::move(plan);   // 只有走到这里才动调用方的对象
+    return true;
 }
 
 } // namespace he::render

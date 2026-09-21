@@ -2515,3 +2515,4 @@ TEST_CASE("NaniteMaterialMap: 簇按三角形多数票映射到源网格并计�
             << "，跨网格簇 " << stats.multiMeshClusters
             << "，未映射 " << stats.unmappedClusters << "，平票取小下标 " << tieOut[0]);
 }
+

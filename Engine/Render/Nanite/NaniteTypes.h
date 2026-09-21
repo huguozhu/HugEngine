@@ -2172,7 +2172,7 @@ static_assert(kNanitePlaceholderIndexCountMax == 16384u * 64u * 3u,
 //      相等才写 GBuffer ⇒ 每个像素恰好一个三角形写一次，多张颜色目标天然一致。
 // ============================================================
 
-/// 软光栅两趟共用的 push constant（96B）
+/// 软光栅两趟共用的 push constant（**112B**；任务 24 从 96B 扩到 112B）
 ///
 /// 【与 Slang 的契约】`Engine/Shader/Shaders/Nanite/Nanite_SoftRasterCommon.slang` 的
 ///   `[[vk::push_constant]] cbuffer NaniteSoftRasterParams` 必须与本结构**逐字段一致**
@@ -2181,6 +2181,13 @@ static_assert(kNanitePlaceholderIndexCountMax == 16384u * 64u * 3u,
 ///   拆成 4 个 float4 + 显式点积后，CPU 与 GPU 乘的是同一个表达式。
 /// 【为什么 `depthKeyEpsilon` 留着】两趟的等值复检实测**严格逐位相等**即可（两趟跑的是同一段
 ///   浮点表达式）；字段留着是为了将来"改精度/改布局"时有一个显式的调节点，默认 0。
+/// 【任务 24 为什么会变长】LOD 流式要额外给 GPU 四个数：**开关**与**三段池槽的步长（条数）**。
+///   它们**不能**从资产头部推出来（池槽步长是"每页最大条数"的纯函数，取决于实际页划分），
+///   所以必须由 CPU 显式传入。原结构偏移 92 处有一个 `_pad1` 空洞 ⇒ 把 `pagesEnabled` 放进
+///   空洞、再追加 3 个 u32 + 1 个对齐 pad，**既有 7 个字段的偏移与语义一个都没动**
+///   （`soft_raster` 行的全部字段与判据 8a 因此不受影响）。
+/// 【为什么四个数而不是"页表项里带步长"】步长是**全池统一**的量（所有页共用一个槽布局），
+///   放 push constant 比每个页表项重复一遍更省、也更难写错。
 struct NaniteSoftRasterParams {
     float vpRows[16];       ///< 偏移 0 ：view-proj 的 4 个行（row-major：`vpRows[r*4+c] = viewProj[c][r]`）
     u32   screenWidth;      ///< 偏移 64：帧缓冲宽（像素）
@@ -2190,11 +2197,15 @@ struct NaniteSoftRasterParams {
     float meshMaxExtent;    ///< 偏移 80：位置量化尺度（整网格最大轴长，§14.19 硬约束①）
     float depthKeyEpsilon;  ///< 偏移 84：等值复检容差（0 = 严格逐位相等）
     u32   materialCount;    ///< 偏移 88：【任务 19】资产材质段条数（0 ⇒ 退化为中性常数并计数）
-    u32   _pad1;            ///< 偏移 92
+    u32   pagesEnabled;     ///< 偏移 92：【任务 24】1 = 经页表从页池取几何；0 = 直读资产段（默认）
+    u32   clusterStride;    ///< 偏移 96：【任务 24】池内**一个槽**占多少条簇记录（= 每页最大簇数）
+    u32   vertexStride;     ///< 偏移 100：【任务 24】池内一个槽占多少条量化顶点（= 每页最大顶点数）
+    u32   triangleStride;   ///< 偏移 104：【任务 24】池内一个槽占多少条打包三角形（= 每页最大三角形数）
+    u32   assetClusterCount;///< 偏移 108：【任务 24】资产的簇出现总数（页映射的索引空间上界）
 };
 
-static_assert(sizeof(NaniteSoftRasterParams) == 96u,
-              "软光栅 push constant 必须 96B（4×float4 + 3×u32 + 3×float/u32）");
+static_assert(sizeof(NaniteSoftRasterParams) == 112u,
+              "软光栅 push constant 必须 112B（4×float4 + 11×u32/float；任务 24 从 96B 扩展）");
 static_assert(offsetof(NaniteSoftRasterParams, vpRows)        == 0,  "vpRows 在偏移 0");
 static_assert(offsetof(NaniteSoftRasterParams, screenWidth)   == 64, "screenWidth 在偏移 64");
 static_assert(offsetof(NaniteSoftRasterParams, screenHeight)  == 68, "screenHeight 在偏移 68");
@@ -2202,6 +2213,10 @@ static_assert(offsetof(NaniteSoftRasterParams, maxTriangles)  == 72, "maxTriangl
 static_assert(offsetof(NaniteSoftRasterParams, instanceCount) == 76, "instanceCount 在偏移 76");
 static_assert(offsetof(NaniteSoftRasterParams, meshMaxExtent) == 80, "meshMaxExtent 在偏移 80");
 static_assert(offsetof(NaniteSoftRasterParams, materialCount) == 88, "materialCount 在偏移 88");
+static_assert(offsetof(NaniteSoftRasterParams, pagesEnabled)  == 92, "pagesEnabled 在偏移 92");
+static_assert(offsetof(NaniteSoftRasterParams, clusterStride) == 96, "clusterStride 在偏移 96");
+static_assert(offsetof(NaniteSoftRasterParams, vertexStride)  == 100,"vertexStride 在偏移 100");
+static_assert(offsetof(NaniteSoftRasterParams, triangleStride)== 104,"triangleStride 在偏移 104");
 
 /// 【P0 修复（§14.30）】深度解析通道的 push constant（8B）
 ///
@@ -2270,12 +2285,36 @@ inline constexpr u32 kNaniteSoftStatDepthResolvedPixels = 14u;
 // ============================================================
 inline constexpr u32 kNaniteSoftStatSizeBucket0     = 15u;   ///< 五桶的第一个槽（= 14 + 1）
 inline constexpr u32 kNaniteSoftStatSizeBucketCount = 5u;    ///< 桶数（1-4 / 5-8 / 9-16 / 17-32 / 33-64）
-inline constexpr u32 kNaniteSoftStatsCapacity       = 20u;   ///< 读数缓冲条数（任务 23：16 → 20，与 shader 一致）
+
+// ============================================================
+// 【§14.8 任务 24】LOD 流式的读数槽位（同一个 `u_Stats` 缓冲：20 → 22 条）
+//
+// 【为什么继续复用同一个缓冲】任务 23 的三条纪律在这里同样成立：不新建 GPU 资源、不加 pass、
+//   复用同一条清零（`CopyBuffer`）与读回（`Map`）路径；既有 0..19 槽一个都没动
+//   （`soft_raster` / `size_dist` 两行的字段与语义因此逐字不变）。
+// 【为什么必须真 GPU 原子计数（这条决定判据是否空洞）】设计 ⑨ 明确要求 `page_misses` 是
+//   **真实读回**而不是 CPU 推测量：缺页判定发生在着色器里（它才知道该页有没有驻留），CPU 只能
+//   靠"哪些页驻留"去猜"哪些可见簇会缺页"——那是推测量。更要紧的是：读数缓冲每帧由
+//   `m_SoftStatsZeroSrc` 清 0，若着色器**不写**这两个槽，读回就恒为 0 ⇒ "page_misses == 0"
+//   会在"流式完全没工作"时也成立（**空洞通过**）。所以这两个槽必须由软光栅第 1 趟真的原子累加，
+//   并且**写入发生在同一帧的清零之后**（`RecordSoftRasterPass` 里的顺序：清读数 → 派发）。
+// 【口径】`page_misses` 计的是**被跳过的可见簇数**（不是页数）：它才能对上
+//   `soft + skipped_big + page_misses == visible` 这条不变式；页数口径的"请求了多少条"由
+//   `page_requests` 表达。两个量并列打印，不互相冒充。
+// ============================================================
+inline constexpr u32 kNaniteSoftStatPageMissClusters = 20u;  ///< 因所在页未驻留而被跳过的可见簇数
+inline constexpr u32 kNaniteSoftStatPageRequests     = 21u;  ///< 第 1 趟写入请求环的请求**条数**
+inline constexpr u32 kNaniteSoftStatsCapacity       = 22u;   ///< 读数缓冲条数（任务 24：20 → 22，与 shader 一致）
 
 static_assert(kNaniteSoftStatSizeBucket0 == kNaniteSoftStatDepthResolvedPixels + 1u,
               "五桶必须紧跟在任务 20 的深度解析槽之后（0..14 已被占用，15 是任务 23 之前的唯一空闲槽）");
-static_assert(kNaniteSoftStatSizeBucket0 + kNaniteSoftStatSizeBucketCount == kNaniteSoftStatsCapacity,
-              "五桶必须连续且恰好吃满读数缓冲（不许留空洞、不许越界）");
+static_assert(kNaniteSoftStatSizeBucket0 + kNaniteSoftStatSizeBucketCount ==
+              kNaniteSoftStatPageMissClusters,
+              "五桶必须连续、且后面紧接任务 24 的流式槽位（不许留空洞）");
+static_assert(kNaniteSoftStatPageRequests + 1u == kNaniteSoftStatsCapacity,
+              "任务 24 的两个流式槽必须紧跟在五桶之后且吃满读数缓冲（20/21，容量 22）；"
+              "改这一处必须同步 `Nanite_SoftRasterCommon.slang` 的 kSoftStatCapacity（两边不等长 = "
+              "要么越界写、要么读回恒 0 —— 后者会让判据 (d1) 空洞通过）");
 
 /// 每个桶的**闭区间上界**：桶 i 覆盖 `triangleCount ∈ (上界[i-1], 上界[i]]`
 /// （第一个桶的下界是 1 —— 调用方必须先滤掉 `triangleCount == 0` 的簇）。
@@ -2365,5 +2404,142 @@ inline constexpr u32 kNaniteSoftRasterNoGeometryKey = 0xFFFFFFFFu;
     std::memcpy(&bits, &ndcZ, sizeof(bits));
     return (bits & 0xFFFFFF00u) | (triLocal & 0xFFu);
 }
+
+// ============================================================
+// 【§14.8 任务 24】LOD 流式（反馈 + 页池）的共享 POD 与常量
+//
+// 【权威设计】§14.32（含 6 处修正）。本节的每一条都对应那一节的一句话，括号里给出处。
+//
+// 【页的定义（② 修正后的默认项）】**一个页 = 簇段 + 顶点段 + 三角形段各取一段**：
+//   · 顶点段 = 共享（去重后）数组上**连续 K 份共享内容**的区间 ⇒ 端点由"去重升序的
+//     `cluster.vertexOffset` 集合"直接给出（最后一份到 `vertices.size()`），**不需要改 .nanite
+//     格式、也不需要保留构建期的 `uniqueVertexOffset[]`**（§14.32 末段"页边界从资产本身即可推出"）；
+//   · 三角形段同理，用"去重升序的 `cluster.triangleOffset` 集合"；
+//   · 簇段 = **引用了这些共享内容的那些"簇出现"记录**（按出现下标升序密集打包）。
+//     为什么簇段是"收集"而不是"区间"：去重路径下 `cluster.vertexOffset` **不单调**
+//     （`NaniteUpload.cpp:588` 命中共享内容时会指回更早的一份）⇒ 一个连续簇区间里的簇可以引用
+//     任意分散的共享内容，两者不可能同时是区间。设计 ② 也点明了这个权衡，并把默认项定为
+//     "统一成三段各取一段"，本节就是它的落地形式。
+//   · **守卫**：每份共享内容**不跨页**（同页的簇引用的内容整段落在该页的顶点/三角形区间内）。
+//     页划分按"整份内容"对齐 ⇒ 该守卫按构造成立；实现里仍然**真的检查**并按 `page_straddle`
+//     退化（不静默）—— 它同时是"输入自洽"的防线。
+//
+// 【着色器怎么知道"我在哪一页"（§14.32 的默认项）】上传期在 CPU 侧构建
+//   `NaniteClusterPageRef pageOfCluster[clusterCount]`（每簇 8B：页号 + 页内簇序号），
+//   着色器只做两次查表：`ref = u_ClusterPage[clusterIndex]` → `entry = u_PageTable[ref.page]`
+//   → 偏移换算。**不做除法、不做二分**（页的顶点条数可变，除法根本不成立）。
+//
+// 【为什么页表项要带"页起点"（§14.32 的第一处追加）】页对齐到共享内容边界后每页顶点条数
+//   **可变**，着色器拿到 `cluster.vertexOffset`（共享数组的记录下标）后，只有知道该页起点
+//   才算得出页内偏移：`页内偏移 = vertexOffset - pageBeginVertex`，
+//   `池内地址 = slot × vertexStride + 页内偏移`。
+//   【与设计措辞的一处等价偏离（已在 §14.37 说明）】设计建议页表项带 `poolBase`；本实现改为
+//   "带 `slot` + 把三段槽步长放进 push constant"。理由：三段各有各的步长，"一个 poolBase"
+//   表达不了三段，带三个 base 又等于把 push constant 里的步长抄三遍（多三处可能不一致）；
+//   而 `slot × stride` 只是一次整数乘法。字段数与语义强度都不变（起点字段一个不少）。
+// ============================================================
+
+/// 一个页的**共享内容份数**（§14.32 的 `kNanitePageClusters` 默认值 512 的最终口径）
+///
+/// 【口径说明（任务书要求"在报告里说明最终口径"）】任务书给的默认值是"512 **簇**/页"，
+///   而 §14.32 修正后页必须对齐到"整份共享内容"边界 ⇒ 512 的含义相应变成
+///   **512 份共享内容/页**。两者在去重率低的资产上数值接近（Sponza 实测去重率很低，
+///   8287 个簇出现对应约 8000+ 份共享内容），所以页数量级不变。
+inline constexpr u32 kNanitePageContentsPerPage     = 512u;
+/// 页池槽位数的默认值（§14.32 ③：默认 64 页）
+inline constexpr u32 kNanitePagePoolSlotsDefault    = 64u;
+/// 页池槽位数的硬上限（cfg 钳制用：池是"每槽三段"的显存，别让人用一个 cfg 键把它撑爆）
+inline constexpr u32 kNanitePagePoolSlotsMax        = 1024u;
+/// 反馈延迟的默认值（§14.32 ④：默认 2 帧）
+inline constexpr u32 kNaniteFeedbackLatencyDefault  = 2u;
+/// 反馈延迟的硬上限（= 请求环的条数；环是"延迟帧数"个缓冲，别让它无限增长）
+inline constexpr u32 kNaniteFeedbackLatencyMax      = 8u;
+/// 每帧上传页数的默认值与硬上限（§14.32 ④：默认 4 页/帧）
+inline constexpr u32 kNanitePageUploadsPerFrameDefault = 4u;
+inline constexpr u32 kNanitePageUploadsPerFrameMax  = 64u;
+/// 淘汰的安全延迟（§14.32 ⑤："淘汰前必须确认没有在飞命令引用它" ⇒ 按 3 帧在飞保守延迟）
+inline constexpr u32 kNanitePageEvictionSafetyFrames = 3u;
+
+/// 热点内容的**页数上界**（每份共享内容至少 1 个顶点 / 1 个三角形 / 1 条簇出现）
+/// 【用途】它是 ②"页边界可从资产推出"这条结论的算术依据，也是单测的断言：
+///   页数 = ceil(内容份数 / K) ≤ ceil(clusterCount / K)（内容数不超过出现数）。
+inline constexpr u32 kNanitePageIndexLimit          = 0xFFFFu;
+
+/// 请求环的槽数（定长；§14.32 ④ 的"定长环形缓冲"）
+///
+/// 【口径】GPU 每次发现"页未驻留"就原子取一个序号并写下页号，**不做 GPU 侧去重**：
+///   去重放在 CPU 读回侧（合并进待上传集合）。理由见 §14.37：设计 ④ 原写"去重由页表里的
+///   `requestedFrame == 当前帧` 判定"，那要求 GPU 写页表，而页表同时被 CPU 写 ⇒ 两侧无同步地
+///   写同一块内存。改成"GPU 只追加、CPU 去重"后，页表**只由 CPU 写**，语义更简单也更快。
+/// 【容量取 1024 的理由】一帧的缺页簇数不超过可见簇数（本样例 3 万量级），但**请求是逐页**的、
+///   页数只有几十 ⇒ 1024 槽足够容纳重复请求；溢出单独计数（`page_request_overflow`），不静默。
+inline constexpr u32 kNanitePageRequestSlots        = 1024u;
+/// 反馈缓冲的**头部**条数（2 个原子计数器），环从它的后面开始
+inline constexpr u32 kNanitePageFeedbackRingOffset  = 2u;
+/// 反馈缓冲的总 u32 条数（= 2 + 槽数；每帧由 CPU 在 `WaitIdle` 之后清 0）
+inline constexpr u32 kNanitePageFeedbackWords       = kNanitePageFeedbackRingOffset + kNanitePageRequestSlots;
+/// 反馈缓冲里"本帧已请求过这一页"的**戳记数组**起点（下标 = `本值 + page`）
+///
+/// 【为什么需要它（实测踩过）】没有去重时，一个缺页会被它引用的**每一个可见簇**各请求一次：
+///   首次实测 31648 个可见簇 → 单帧请求 31648 条，而环只有 1024 槽 ⇒ `overflow_total=119476`，
+///   且"某一页的请求恰好全部落在环外"时该页**永远不会被上传**（画面与关流式档不同，且难查）。
+///   GPU 侧按页去重后，单帧请求条数 ≤ 页数（Sponza 17）⇒ 环再也不会满。
+/// 【为什么戳记放在同一块缓冲的尾部，而不是另开一个缓冲】① 不新增描述符绑定/资源
+///   （页数在 setup 时才知道，尾部区域按 `pageCount` 追加即可）；② 它每帧与环一起被清 0
+///   ⇒ "本帧是否已请求"与"本帧请求了什么"天然同生命周期。
+/// 【为什么 GPU 可以独占写它】它**不是**页表（页表只由 CPU 写）：这块区域 CPU 只在
+///   `WaitIdle` 之后清 0、GPU 只在帧内写，两边不存在同时写同一字节的窗口。
+inline constexpr u32 kNanitePageFeedbackStampOffset = kNanitePageFeedbackWords;
+/// 反馈缓冲里"本帧写入的请求条数"的槽下标（原子累加；同时也是追加的序号来源）
+inline constexpr u32 kNanitePageFeedbackCountSlot   = 0u;
+/// 反馈缓冲里"环满而丢弃的请求条数"的槽下标（原子累加；正常必须 0）
+inline constexpr u32 kNanitePageFeedbackOverflowSlot = 1u;
+
+/// 页表项（16B；与 Slang 侧 `NanitePageEntry` 逐字段一致）
+///
+/// 【为什么 `resident` 单独一个字段而不把哨兵塞进 slot】两条判据要分开读：`resident` 是
+///   "这一页在不在池里"，`slot` 是"在哪一个槽"。用哨兵合并后，"槽号非法"与"页未驻留"就再也
+///   分不开，而验收 (b) 正好要求把这两件事分别核对（驻留页数 == 页总数、且没有两个页共用一个槽）。
+/// 【`lastRequestedFrame` 为什么不在这一项里】它是**纯 CPU 侧**的 LRU 记账（GPU 一个字节都不读），
+///   放进上传的页表只会白白多占显存并让"GPU 会写页表"的误解有生存空间。它单独放在
+///   `NaniteStream` 的 CPU 状态里（§14.37 记录这处与设计措辞的偏离）。
+struct NanitePageTableEntry {
+    u32 slot;           ///< 偏移 0 ：池内槽号；非驻留时为 `kInvalidNanitePageSlot`
+    u32 vertexBegin;    ///< 偏移 4 ：该页顶点段在**共享顶点数组**里的起始记录下标
+    u32 triangleBegin;  ///< 偏移 8 ：该页三角形段在共享三角形数组里的起始记录下标
+    u32 resident;       ///< 偏移 12：1 = 已驻留（slot 有效）；0 = 未驻留（着色器跳过）
+};
+
+/// 页表项里"没有槽"的哨兵（与 `resident == 0` 同时出现；两个字段一致由 CPU 侧保证）
+inline constexpr u32 kInvalidNanitePageSlot = 0xFFFFFFFFu;
+
+/// 簇 → 页的映射项（8B；与 Slang 侧 `NaniteClusterPageRef` 逐字段一致）
+///
+/// 【为什么还要 `local`（页内簇序号）】簇段在本方案里是**收集**（见文件头的说明）：同页的
+///   簇出现记录在下标空间里不连续，所以池内位置不能由"簇下标 - 页起点"算出来，必须查表。
+///   代价是每簇 8B（Sponza 8287 簇 ⇒ 66 KB），换来的是"页的顶点/三角形段是真正的连续区间"
+///   这条能让偏移换算保持一次减法 + 一次乘法的性质。
+struct NaniteClusterPageRef {
+    u32 page;           ///< 偏移 0 ：页号（用 K 份共享内容分页；由资产自身推出）
+    u32 local;          ///< 偏移 4 ：**页内**相对下标（0 .. `pageClusterCount[page]-1`）
+};
+// 【`local` 的口径必须无歧义（这一条由单测抓出来过）】它**不是**"在整条收集序里的绝对下标"，
+//   而是"在该页自己的收集段里的下标"。判据有两条，缺一不可：
+//     · 着色器：`u_Clusters[entry.slot * clusterStride + local]` —— 槽内第一条记录的下标是 0；
+//     · CPU 侧装页：`收集位置 = pageClusterBegin[page] + local` —— 且必须 < clusterCount。
+//   若误把它写成绝对下标，第 0 页（begin == 0）碰巧仍然正确，第 1 页起就会读到位移错的记录
+//   （可能仍在槽内 ⇒ **画面错但不崩**），同时 CPU 侧的反查表会越界写。详见 §14.37。
+
+static_assert(sizeof(NanitePageTableEntry) == 16, "页表项必须 16B（StructuredBuffer 步长）");
+static_assert(offsetof(NanitePageTableEntry, slot)          == 0,  "slot 必须在偏移 0");
+static_assert(offsetof(NanitePageTableEntry, vertexBegin)   == 4,  "vertexBegin 必须在偏移 4");
+static_assert(offsetof(NanitePageTableEntry, triangleBegin) == 8,  "triangleBegin 必须在偏移 8");
+static_assert(offsetof(NanitePageTableEntry, resident)      == 12, "resident 必须在偏移 12");
+static_assert(sizeof(NaniteClusterPageRef) == 8, "簇→页映射项必须 8B（StructuredBuffer 步长）");
+static_assert(offsetof(NaniteClusterPageRef, page)  == 0, "page 必须在偏移 0");
+static_assert(offsetof(NaniteClusterPageRef, local) == 4, "local 必须在偏移 4");
+static_assert(kNanitePageFeedbackRingOffset + kNanitePageRequestSlots == kNanitePageFeedbackWords,
+              "反馈缓冲的头部 + 环必须恰好等于总条数（不许留空洞、不许越界）");
+static_assert(kNanitePageContentsPerPage >= 1u, "页至少要装得下一份共享内容，否则分页不终止");
 
 } // namespace he::render
