@@ -3997,7 +3997,13 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
     - **⚠ 2026-09-21 (d1) 的非空洞化修正（关键，防"空洞通过"）**：仅写"`page_misses == 0`"这条
       判据**本身没有证明力**，因为读数缓冲是**按 C++ 容量分配并每帧清零**的 ——
       `NaniteRaster.cpp:834` 按 `sizeof(u32) * kNaniteSoftStatsCapacity` 分配（任务 24 后为 24 个 u32），
-      并由 `m_SoftStatsZeroSrc`（`:233-234`、`:840`）每帧清零。
+      并由 `m_SoftStatsZeroSrc`（创建于 `:837-849`）**每帧整段清零** ——
+      清零函数是 `NaniteRaster::RecordSoftStatsClear`（`NaniteRaster.cpp:906-912`），
+      它按 `kNaniteSoftStatsCapacity * sizeof(u32)`（任务 24 后 **24 个 u32 = 96 字节**）
+      整段 `CopyBuffer` 覆盖 `m_SoftStats`，并紧接一条 Transfer→ComputeShader 屏障。
+      ⇒ **清零范围覆盖槽位 20~23**，而写权限随后整段交给 compute（UAV）——
+      没被 shader 写的槽位就**稳定读回 0**，不是"未初始化"而是"被明确清零"，
+      所以这个空洞通过是**确定会发生的**，不是随机现象。
       ⇒ **若 shader 根本没写流式槽位 20~23，C++ 读回的就是 0**，
       "`page_misses == 0`"会在**流式功能完全没工作**时同样成立。
       这正是任务 24 实现期实测到的状态：`Nanite_SoftRasterCommon.slang:98`
