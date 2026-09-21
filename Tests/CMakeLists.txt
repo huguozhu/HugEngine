@@ -47,6 +47,10 @@ add_executable(HugEngineTests
     TestPTVolumeMath.cpp
     TestNaniteTypes.cpp
     TestNaniteBuilder.cpp
+    # §14.8 任务 25 回归：簇 → 源网格 → 材质映射（真实 Sponza 资产上断言 unmapped==0 +
+    # 与"原始三角形真值"逐簇一致）。单独一文件：要用 cgltf 离线合并真实几何，与
+    # `TestNaniteBuilder.cpp` 的合成网格用例互补。
+    TestNaniteMaterialMap.cpp
     # §14.8 任务 24：页划分（`BuildNanitePagePlan`，纯函数）的不变式/守卫/确定性用例。
     # 单独一文件：`TestNaniteBuilder.cpp` 已 2500+ 行且按任务分段累加。
     TestNaniteStream.cpp
@@ -65,6 +69,9 @@ target_include_directories(HugEngineTests PRIVATE
     # Core/Types.h 与 Math/Math.h，链接 Render 会连带拉入 RHI/Vulkan 以及 slangc 生成的
     # SPV 头，对单元测试是不必要的重负担。
     ${CMAKE_SOURCE_DIR}/Engine/Render
+    # §14.8 任务 25 回归用例用 cgltf 直接读真实 glTF（实现体已由 HugEngineAsset 的
+    # glTFLoader.cpp 展开 `CGLTF_IMPLEMENTATION`，这里只需要头文件的包含路径）。
+    ${CMAKE_SOURCE_DIR}/Engine/External/meshoptimizer/extern
 )
 
 target_compile_definitions(HugEngineTests PRIVATE

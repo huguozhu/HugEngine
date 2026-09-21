@@ -45,6 +45,12 @@
 //  22. `NaniteBVH:` 节点数/深度上界、叶子容量、结构自洽（叶子簇表是排列 / 父球包含孩子球）、
 //      三种网格规模、两次构建逐位可复现、空表与单簇边界、DFS 遍历访问数（全部在内/全部在外/
 //      部分相交/多实例/实例域钳制/容量截断）
+//
+// §14.8 任务 19 / 25（簇 → 源网格 → 材质）追加的用例：
+//  23. `NaniteMaterialMap:` 低层规则（三角形空间的多数票 / 跨网格计数 / 平票取小下标 / 防御）
+//  24. `NaniteMaterialMap:` 任务 25 回归 —— 平移副本（去重命中）的多源网格资产上，
+//      `BuildNaniteAssetFromGeometry` 的带材质重载必须 `unmapped == 0`、且逐三角形手工期望的
+//      材质零错；真实 Sponza 资产的同类回归在 `Tests/TestNaniteMaterialMap.cpp`。
 // ============================================================
 
 #include "doctest.h"
@@ -2514,5 +2520,155 @@ TEST_CASE("NaniteMaterialMap: 簇按三角形多数票映射到源网格并计�
     MESSAGE("映射：多数票 " << out[1] << "/" << out[2] << "/" << out[3]
             << "，跨网格簇 " << stats.multiMeshClusters
             << "，未映射 " << stats.unmappedClusters << "，平票取小下标 " << tieOut[0]);
+}
+
+// ============================================================
+// §14.8 任务 25 回归：**去重命中 + 多源网格**下的簇材质归属
+//
+// 【为什么必须有这一条】上面那条用例直接喂"合并空间的三角形下标"给
+//   `NaniteAssignClusterMaterials`，测的是**低层规则本身**；它测不到"真实资产路径"的缺陷 ——
+//   缺陷在于资产构建器把**去重后**的 `triangleOffset` 当成了合并空间下标。本用例走
+//   `BuildNaniteAssetFromGeometry` 的**带材质重载**（真实路径），并刻意构造出缺陷的两个前提：
+//     ① **多个源网格**（否则"选错网格"观察不到）；
+//     ② **平移副本 ⇒ DAG 去重真的命中**（否则去重空间的偏移恰好等于真值，缺陷不显形）。
+//   实测 Sponza 上旧口径的失败形态是"非 LOD0 的簇 `triangleOffset` 越出原始三角形表" +
+//   "LOD0 有 3957/4099 选错网格"；本用例用最小构造复现后者的**同型**失败：
+//   平移副本的簇共享同一份内容 ⇒ 它们的 `triangleOffset` 全都指向**第一份副本**的三角形区间
+//   ⇒ 用旧口径投票会把第 2/3 份副本的簇判成第 1 份的材质。
+//
+// 【判据是"手工期望"，不是实现的自证】三个源网格在空间上互不相连（间距 100，
+//   自身范围只有 x∈[0,16]）⇒ **每个三角形的归属由它的顶点 x 唯一确定**（副本之间不共享顶点，
+//   简化也不可能跨副本折叠）⇒ 期望值可以逐三角形手算，再按"多数票、平票取小下标"汇总。
+//   这一条与实现用的"顶点归属表 + 逐三角形多数票"是**两条独立路径**（这里只看顶点位置）。
+//
+// 【一个必须写明的实测性质】`meshopt_buildMeshlets` 在当前簇没有未发射的**连通**邻居时，
+//   会退化成"按空间最近挑一个三角形、**不管连通性**"（`meshoptimizer/src/clusterizer.cpp`：
+//   "we currently just pick the closest triangle irrespective of connectivity"）⇒ 一个簇
+//   **合法地**可以同时含两份远距离、互不相连的副本的三角形（本用例实测 23 簇里有 5 簇如此）。
+//   所以"多网格簇"不是错误，`multiMeshClusters` 只是如实计数。
+// ============================================================
+TEST_CASE("NaniteMaterialMap: 平移副本（去重命中）仍归属各自的源网格，unmapped==0") {
+    const GridMesh patch = MakeGridRect(16u, 8u);                 // 128 四边形 = 256 三角形
+    const u32 patchVertexCount  = (u32)(patch.positions.size() / 3u);
+    const u32 patchTriangleCount = (u32)(patch.indices.size() / 3u);
+    constexpr u32 kCopies = 3u;
+    constexpr float kSpacing = 100.0f;   // 远大于 patch 自身范围（x∈[0,16]）⇒ 副本互不相连
+
+    std::vector<float> positions, normals, uvs;
+    std::vector<u32>   indices;
+    std::vector<NaniteSourceMeshRange> meshes;
+    std::vector<NaniteMaterialRecord>  materials;
+    for (u32 copy = 0u; copy < kCopies; ++copy) {
+        const float offsetX = (float)copy * kSpacing;
+        for (usize v = 0u; v + 2u < patch.positions.size(); v += 3u) {
+            positions.push_back(patch.positions[v + 0u] + offsetX);
+            positions.push_back(patch.positions[v + 1u]);
+            positions.push_back(patch.positions[v + 2u]);
+            normals.push_back(0.0f);
+            normals.push_back(0.0f);
+            normals.push_back(1.0f);
+            // UV 是**局部**量（同一份 patch 上逐顶点相同）⇒ 平移副本的簇内容才逐位相同（去重会命中）
+            uvs.push_back(patch.positions[v + 0u] / 16.0f);
+            uvs.push_back(patch.positions[v + 1u] / 8.0f);
+        }
+        const u32 baseVertex = copy * patchVertexCount;
+        for (const u32 index : patch.indices) indices.push_back(baseVertex + index);
+
+        NaniteSourceMeshRange range;
+        range.firstTriangle = (u32)meshes.size() * patchTriangleCount;
+        range.triangleCount = patchTriangleCount;
+        range.materialIndex = copy;
+        meshes.push_back(range);
+        materials.push_back(NaniteMakeTestMaterial(copy * 3u + 1u, 0u));
+    }
+
+    // ── ① 真实路径：带 `meshes` 的重载（缺陷就在这里）──
+    NanitePackedAsset asset;
+    REQUIRE(BuildNaniteAssetFromGeometry(positions, normals, uvs, indices, materials, meshes, asset));
+    REQUIRE(asset.clusters.size() > 0u);
+
+    // 去重真的命中（否则本用例没有覆盖缺陷路径；这是**前提**，不是结论）
+    NaniteClusterDAG dag;
+    REQUIRE(BuildNaniteClusterDAG(positions, normals, uvs, indices, dag));
+    REQUIRE(dag.clusters.size() == asset.clusters.size());
+    CHECK(dag.stats.dedupRate > 0.0f);
+
+    // ── ② 契约：正常必须 0 ──
+    CHECK(asset.stats.unmappedClusters == 0u);
+    // 多级 LOD 链确实产生（否则"非 LOD0 也映射对"这条没被覆盖）
+    CHECK(dag.stats.levelCount > 1u);
+
+    // ── ③ 手工期望：**逐三角形**判它属于哪一份副本（按顶点 x 所在的带），再取多数票 ──
+    std::vector<u32> perCopy(kCopies, 0u);
+    u32 wrongMaterial = 0u;
+    u32 straddlingClusters = 0u;
+    std::string wrongDetail;
+    for (usize ci = 0u; ci < asset.clusters.size(); ++ci) {
+        const NaniteClusterRecord& cluster = asset.clusters[ci];
+        const u32 unique = dag.clusterUnique[ci];
+        const u32 triBase = dag.uniqueTriangleOffset[unique];
+        const u32 vertexBase = dag.clusterVertexIndexOffset[ci];
+        std::vector<u32> votes(kCopies, 0u);
+        for (u32 t = 0u; t < cluster.triangleCount; ++t) {
+            const NanitePackedTriangle& packed = dag.uniqueTriangles[triBase + t];
+            const u32 local[3] = { NaniteTriangleIndex0(packed),
+                                   NaniteTriangleIndex1(packed),
+                                   NaniteTriangleIndex2(packed) };
+            // 用**顶点位置**（而不是实现用的归属表）判副本：x ∈ [0,16] → 0，[100,116] → 1，其余 → 2
+            const float x = positions[(usize)dag.clusterVertexIndices[vertexBase + local[0]] * 3u];
+            const u32 copy = (x < 0.5f * kSpacing) ? 0u : (x < 1.5f * kSpacing) ? 1u : 2u;
+            ++votes[copy];
+        }
+        u32 expected = 0u;
+        for (u32 copy = 1u; copy < kCopies; ++copy) {
+            if (votes[copy] > votes[expected]) expected = copy;   // 平票取小下标（与实现同口径）
+        }
+        u32 contributing = 0u;
+        for (u32 copy = 0u; copy < kCopies; ++copy) if (votes[copy] > 0u) ++contributing;
+        if (contributing > 1u) ++straddlingClusters;   // 如实计数，不是错误
+
+        CHECK(cluster.materialID < (u32)materials.size());
+        if (cluster.materialID != expected) {
+            ++wrongMaterial;
+            if (wrongDetail.size() < 400u) {
+                wrongDetail += " [#" + std::to_string(ci) + " level=" +
+                               std::to_string(dag.clusterLevel[ci]) + " tri=" +
+                               std::to_string(cluster.triangleCount) + " votes=[" +
+                               std::to_string(votes[0]) + "," + std::to_string(votes[1]) + "," +
+                               std::to_string(votes[2]) + "] got=" +
+                               std::to_string(cluster.materialID) + " want=" +
+                               std::to_string(expected) + "]";
+            }
+        }
+        if (cluster.materialID < kCopies) ++perCopy[cluster.materialID];
+    }
+    CHECK(wrongMaterial == 0u);
+    // 每一份副本都必须**真的有簇**归属到它的材质（否则"全部判成第 1 份"也会让上面那条通过）
+    for (u32 copy = 0u; copy < kCopies; ++copy) CHECK(perCopy[copy] > 0u);
+
+    // ── ④ 对照读数（不设断言）：旧口径（去重空间）在同一个资产上有多少簇**选错** ──
+    std::vector<u32> legacyOut(asset.clusters.size(), 0u);
+    const NaniteClusterMaterialMapStats legacyStats =
+        NaniteAssignClusterMaterials(dag.clusters, meshes, legacyOut);
+    u32 legacyWrong = 0u;
+    std::vector<u32> legacyPerCopy(kCopies, 0u);
+    for (usize ci = 0u; ci < asset.clusters.size(); ++ci) {
+        const float centerX = asset.clusters[ci].boundsCenterRadius[0];
+        const u32 expected = (centerX < 0.5f * kSpacing) ? 0u
+                           : (centerX < 1.5f * kSpacing) ? 1u : 2u;
+        if (legacyOut[ci] != expected) ++legacyWrong;
+        if (legacyOut[ci] < kCopies) ++legacyPerCopy[legacyOut[ci]];
+    }
+    MESSAGE("任务 25 回归：簇数=" << asset.clusters.size()
+            << " levels=" << dag.stats.levelCount
+            << " 去重率=" << dag.stats.dedupRate
+            << " ⇒ 新口径 unmapped=" << asset.stats.unmappedClusters
+            << " 选错材质=" << wrongMaterial
+            << " 跨副本簇=" << straddlingClusters
+            << " 每份副本簇数=[" << perCopy[0] << "," << perCopy[1] << "," << perCopy[2] << "]"
+            << " | 旧口径 unmapped=" << legacyStats.unmappedClusters
+            << " 选错材质=" << legacyWrong
+            << " 每份副本簇数=[" << legacyPerCopy[0] << "," << legacyPerCopy[1] << ","
+            << legacyPerCopy[2] << "]" << wrongDetail.c_str());
 }
 
