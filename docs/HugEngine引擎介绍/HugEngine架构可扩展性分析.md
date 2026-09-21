@@ -1,7 +1,7 @@
 # HugEngine 架构可扩展性分析
 
-> 分析日期：2026-08-04
-> 范围：Engine 全模块（Core/Reflect/Serialize/RHI/Shader/Scene/Asset/Render/Editor）+ Samples，聚焦**可扩展性**
+> 分析日期：2026-08-04；最后更新 2026-09-21（按当前源码基线校订事实与行号）
+> 范围：Engine 全模块（Core/Reflect/Serialize/RHI/Shader/Scene/Asset/Render/Editor/Physics/AI）+ Samples，聚焦**可扩展性**
 > 依据：全库 include 依赖扫描、各模块 CMake 链接关系、渲染管线/资源/序列化代码通读
 
 ---
@@ -22,11 +22,11 @@ Core (L0 平台/工具)
   ← RHI (L2, 抽象接口 + Vulkan 实现)
     ← Shader (L3, INTERFACE 库)
       ← Scene (L5 组件层)  ← Asset (L4)
-        ← Render (L4)      ← Editor (L8) ← Samples
+        ← Render (L4)      ← Editor (L8) ← Physics (C2, Jolt) ← AI (L2.5 AI 运行时) ← Samples
 ```
 
-- 各模块链接关系见各子目录 CMakeLists.txt（Core 仅外部库；Reflect→Core；Serialize→Reflect；RHI→Core；Shader(INTERFACE)→RHI；Scene→Reflect+Core+RHI；Asset→Scene+Reflect；Render→RHI+Shader+Scene+Asset；Editor→Render+Serialize+imgui）
-- 全量 include 扫描确认：**无循环依赖**，Render 是引擎内依赖顶端，纯消费者
+- 各模块链接关系见各子目录 CMakeLists.txt（Core 仅外部库；Reflect→Core；Serialize→Reflect；RHI→Core+Vulkan；Shader(INTERFACE)→RHI；Scene→Reflect+Core+RHI；Asset→Scene+Reflect；Render→RHI+Shader+Scene+Asset；Editor→Render+Serialize+imgui；Physics→Scene+Core+Jolt；AI→Scene+Core+Render+Editor+Physics+nlohmann_json）
+- 全量 include 扫描确认：**无循环依赖**，AI 是引擎内依赖顶端（消费 Render/Editor/Physics），Render 退为纯消费者之一
 
 ### 1.2 各层职责评价
 
@@ -38,14 +38,17 @@ Core (L0 平台/工具)
 | RHI (L2) | IRHIDevice 纯虚接口 + Vulkan 实现 + 瞬态资源 | 抽象设计良好，但有 void* 逃逸口（见 三.1） |
 | Shader (L3) | slangc→SPIR-V→内嵌 .spv.h 编译管线 | C++/Slang 共享常量设计巧妙 |
 | Scene (L5) | 自制组件系统：World + Entity + Component + SceneGraph | 职责明确，但组件直接持有 GPU 资源（见 三.2） |
-| Asset (L4) | glTF 加载 + BindlessTextureManager | 加载与 ECS 强耦合，无加载器注册表 |
-| Render (L4) | 5 条管线 + IRenderSubsystem 子系统 + RenderGraph | 架构意图最好的一层 |
+| Asset (L4) | glTF 加载（cgltf 单头文件） | 加载与 ECS 强耦合，无加载器注册表 |
+| Physics (C2) | Jolt 封装：PhysicsWorld/PhysicsSystem/RigidBodyComponent | 组件放本模块，Scene 不依赖 Jolt，边界干净 |
+| AI (L2.5) | SceneBuilder/TypeSchema/Agent/AIGC/推理运行时 | 位于依赖顶端；复用 Editor 的 Command，耦合面偏大 |
+| Render (L4) | 3 条管线 + IRenderSubsystem 子系统 + RenderGraph | 架构意图最好的一层 |
 | Editor (L8) | EditorContext/ImGui 集成/SceneSerializer | 模块边界存在，但有 Vulkan 泄漏（见 三.1） |
 
 ### 1.3 全局单例模式
 
 - `rhi::g_Device`（RHIBase.cpp:7）：裸全局指针，最危险——跨层可见、生命周期无主
-- 其余单例（JobSystem/Logger/TypeRegistry/BindlessTextureManager/Allocator）均为标准成对或 Meyers 单例，合理
+- 其余单例（JobSystem/Logger/TypeRegistry/Allocator）均为标准成对或 Meyers 单例，合理
+- AI 模块另引入 `ai::AIModule`（静态 `s_Scheduler` / `s_Device`，AIModule.h:32-33）：模块级单例，生命周期独立于 Engine
 
 ### 1.4 通信方式
 
@@ -58,8 +61,8 @@ Core (L0 平台/工具)
 | 扩展路径 | 改动量 | 评价 |
 |---|---|---|
 | 新独立 Pass | 4-6 处（RG AddPass lambda） | 好，RG 自动推导依赖/Barrier/别名 |
-| 新渲染管线（如全 PT 生产管线） | 5-6 处，全在应用层 | 差：模式切换是每个 Sample 里复制 if/else，引擎无管线注册表 |
-| 新光源类型（如面光源） | **8-12 处** | **最痛**：CollectLights 序列化 switch 复制 4 份 + GPU 侧魔数编码 |
+| 新渲染管线（如全 PT 生产管线） | 5-6 处，全在应用层 | 差：模式切换是每个 Sample 里复制 if/else（02.Cube/06.GILab/07.Nanite 各一份），引擎无管线注册表 |
+| 新光源类型（如管状光源） | **8-12 处** | **最痛**：CollectLights 序列化 switch 复制 3 份 + GPU 侧魔数编码 |
 | 新材质模式 | 4-6 处 | 标志位方案，shader 分支随标志位增多 |
 | 新阴影技术 | 2-3 处 | 最好，管线端阴影索引魔数化是隐患 |
 | 新后端（D3D12/Metal） | **受阻** | void* 泄漏 + 描述符模型 Vulkan 化 |
@@ -76,7 +79,7 @@ Core (L0 平台/工具)
 4. **RTEffectPass 基类**：RTShadow/AO/Reflection/GI 共享管线创建/SBT/屏障逻辑，子类只实现 Execute
 5. **每 Pass 每帧上下文结构体**（RTExecuteContext/PTRenderContext/ReSTIRDispatchContext）：管线与 Pass 显式数据契约
 6. **ShaderTypes.slang 单一数据源 + static_assert**：C++/Slang 共享 GPU 布局，尺寸不符编译期报错
-7. **RHI 集中式生命周期**：DeferredDestructionQueue 三槽轮转 + PSO 哈希缓存（历史 5 次 crash 修复记录）
+7. **RHI 集中式生命周期**：DeferredDestructionQueue 环形槽位轮转（kSlots = 2 × kMaxFramesInFlight = 6）+ PSO 哈希缓存（历史 5 次 crash 修复记录）
 8. **反射 + 序列化驱动编辑器属性面板**（骨架）
 
 ---
@@ -85,38 +88,38 @@ Core (L0 平台/工具)
 
 ### P0-1：后端抽象纪律失守 —— Vulkan 泄漏到 Render/Editor
 
-- `Engine/Render/GI/GI_RSM.cpp:5` 直接 `#include "Vulkan/VulkanResources.h"`（还是死依赖）
-- `Engine/Editor/Editor/ImGuiIntegration.cpp:14` include `Vulkan/VulkanDevice.h`，用 `static_cast<VulkanDevice*>` 下行转换拿 `VkInstance`（VulkanDevice.cpp:1129）；Editor 的 CMake 为此专门暴露后端头路径（Editor/CMakeLists.txt:23）
-- RHI 接口自身有 `void*` 逃逸口：`GetNativeHandle()` 返回 VkImageView（Buffer.h:59）、`BeginOffscreenPass(void*...)`（CommandList.h:62）、`UpdateDescriptorSetWithImageView`、`GetBackendFormat()` 返回 VkFormat 数值；Types.h:52 注释自认 StageMask 常量"当前映射 Vulkan VkShaderStageFlagBits"
+- `Engine/Render/GI/GI_RSM.cpp:5` 直接 `#include "Vulkan/VulkanResources.h"`（死依赖：该文件全文未使用任何 Vulkan 符号）
+- `Engine/Editor/Editor/ImGuiIntegration.cpp:14` include `Vulkan/VulkanDevice.h`，用 `rhi::VulkanDeviceAccess::GetInstance/GetPhysical/GetDevice`（VulkanDevice.h:428 / VulkanDevice.cpp:1334-1349）取出 `VkInstance`/`VkDevice`；Editor 的 CMake 为此专门暴露后端头路径（Editor/CMakeLists.txt:23）
+- RHI 接口自身有 `void*` 逃逸口：`GetNativeHandle()` 返回 VkImageView（Buffer.h:60）、`BeginOffscreenPass(void*...)`（CommandList.h:62）、`UpdateDescriptorSetWithImageView`、`GetBackendFormat()` 返回 VkFormat 数值；Types.h:53 注释自认 StageMask 常量"当前映射 Vulkan VkShaderStageFlagBits"
 - **事实修正**：当前后端是 **Vulkan**（D3D12 代码已在 commit `5c62523` 删除），`Backend` 枚举里的 D3D12/Metal/WebGPU 只是占位
 - **后果**：加 D3D12/Metal 后端时，GI_RSM 和 ImGuiIntegration 直接编译失败；`BeginOffscreenPass` 等泄漏点需逐处后端化
 
 ### P0-2：Scene 组件层反向依赖 RHI —— 数据层被 GPU 类型污染
 
-- `MeshComponent.h:4,35` 直接持有 `unique_ptr<rhi::IRHIBuffer>`，Skybox/Particle 组件同样；Scene/CMakeLists.txt:43 链接 RHI
+- `MeshComponent.h:4,94-95` 直接持有 `unique_ptr<rhi::IRHIBuffer>`，Skybox/Particle 组件同样（Skybox 持 `unique_ptr<IRHITexture>`/`IRHISampler`，Particle 持 bindless 纹理句柄）；Scene/CMakeLists.txt:98 链接 RHI
 - **后果**：ECS 无法脱离 GPU 复用（服务器模拟、离线烘焙、headless 测试全不可行）；组件生命周期与 GPU 资源纠缠
 - 正确做法：组件存 CPU 数据 + 句柄，GPU 缓冲归 Render/Asset 层持有
 
-### P0-3：序列化链路"半残" —— 反射自动化只完成 40%
+### P0-3：序列化链路"半残" —— 属性已能存盘，反序列化仍靠硬编码名字表
 
-- `HE_REGISTER_PROPERTY` 宏**定义但零使用**（ReflectionMacros.h:51）→ SceneSerializer::Save 遍历属性为空 → **.hescene 存盘丢光所有属性值**，Load 出来全是默认值
-- `ClassInfo::factory`（ReflectionAPI.h:66，宏自动生成）建好了没人用——反序列化靠 SceneSerializer.cpp:125 / LevelLoader.cpp:41 两份名字 if-else
-- 类型分派表复制了 3 份（Archive.h:72 / SceneSerializer.cpp:25 / LevelLoader.cpp:26），加一个 `u8` 属性类型要改 3 处
+- `HE_REGISTER_PROPERTY` 已在 SceneReflect.cpp（89 处）/ AgentReflect.cpp（4 处）/ PhysicsReflect.cpp（11 处）共 **104 处**调用（宏定义见 ReflectionMacros.h:54）；`SceneSerializer::Save` 走 `reflect::ForEachProperty`（SceneSerializer.cpp:64-66）逐属性写入，**.hescene 存盘不再丢属性值**
+- 仍"半残"的一侧在 Load：`ClassInfo::factory`（ReflectionAPI.h:66，宏在 ReflectionMacros.h:49 自动生成）**无任何消费方**——反序列化靠 SceneSerializer.cpp:130-138 / LevelLoader.cpp:45-54 两份名字 if-else，且 SceneSerializer 只覆盖 8 种组件类型，其余类型数据直接跳过（`p+=ds; continue`）
+- 类型分派表复制了 3 份（Archive.h:72-83 / SceneSerializer.cpp:27-37 / LevelLoader.cpp:28-38），加一个属性类型要改 3 处；已注册的 `u8` 属性（`DecalComponent::blendMode`、`CollisionComponent::shape`）不在任何一份分派表里 → 静默不存
 - 好消息：基础设施齐全，接线成本低
 
 ### P1：全局设备指针 + 应用层样板复制
 
 - `rhi::GetDevice()` 裸全局（RHIBase.cpp:7），Scene/Render 到处取，多设备/多上下文/单测不可行
-- 渲染模式切换链（02.Cube.cpp:450-491）在 4 个 Sample 里各复制一份，`r.Pipeline.Mode` 定义在应用层而非引擎；管线注册表/工厂缺失
+- 渲染模式切换链（02.Cube.cpp:1229-1276 的 `cvPipelineMode` 分派）在 3 个 Sample 里各复制一份（06.GILab.cpp:925-932 / 07.Nanite.cpp:996-1003 的 `g_PipelineMode` 开关），`r.Pipeline.Mode` 只定义在应用层（02.Cube.cpp:76）而非引擎；管线注册表/工厂缺失
 - Sample 层 ~50% 样板重复：配置解析、相机主循环、skybox、stb_image 纹理加载各复制一份；01.Triangle 还链接了 Editor（复制粘贴事故）
 - Core 缺口：无输入/时间/文件系统封装，glfwGetKey 直接散落在 Sample
 
 ### P2：Render 层细节债
 
-- `LightingPass::Render` **20+ 裸指针参数**（LightingPass.h:69-97）——"新效果→新参数"扩散点
-- 三缓冲 SSBO 在 3 条管线各声明一份（ForwardPipeline.h:125 / DeferredPipeline.h:134 / PathTracingPipeline.h:91；原第 4 处 HybridRTPipeline.h:164 已随该类于 2026-09 删除），创建代码同构复制；SSBO 完全绕过 RenderGraph（依赖单一队列提交序，ReSTIRPass.h:43 自认）
-- 魔数：阴影索引硬编码 `GetShadowMap(4)`（DeferredPipeline_FrameGraph.cpp:157）、物理模式用 `positionRange.w < 0` hack、`static bool firstFrame` 函数级静态变量（DeferredPipeline_FrameGraph.cpp:50）
-- 两个裸 `static int32_t` 未走 CVar（DeferredPipeline_FrameGraph.cpp:24-27）；RT 着色器（.rgen/.rchit）不触发热重载（ShaderHotReload.cpp:67-80 只认 vert/frag/comp）
+- `LightingPass::Render` 曾以 **20+ 裸指针参数**扩散（"新效果→新参数"）；现已收敛为 `LightingInputs` 结构体（LightingPass.h:129-130）——此处债务已还，但结构体本身仍随新 GI 源增长
+- 三缓冲 SSBO 在 3 条管线各声明一份（ForwardPipeline.h:158-163 / DeferredPipeline.h:204-207 / PathTracingPipeline.h:132；原第 4 处 HybridRTPipeline.h:164 已随该类于 2026-09 删除），创建代码同构复制；SSBO 完全绕过 RenderGraph（依赖单一队列提交序，ReSTIRPass.h:43 自认）
+- 魔数：阴影索引硬编码 `GetShadowMap(4)`（DeferredPipeline_FrameGraph.cpp:216）、物理模式用 `positionRange.w < 0` hack、`static bool firstFrame` 函数级静态变量（DeferredPipeline_FrameGraph.cpp:88）
+- 两个裸 `static int32_t` 未走 CVar（DeferredPipeline_FrameGraph.cpp:31,34）；RT 着色器（.rgen/.rchit）不触发热重载（ShaderHotReload.cpp:67-86 只认 vert/frag/comp）
 
 ---
 
@@ -124,9 +127,9 @@ Core (L0 平台/工具)
 
 1. **① 先还 P0-2**：把 MeshComponent 的 GPU 缓冲上移到 Render 侧资源管理器，组件只留路径/句柄——收益最大，同时消除"8 处逐类型 ForEach"的根因之一（组件实现统一 Renderable 接口后枚举自然收敛）
 2. **② 封住后端泄漏**：GI_RSM 的下沉调用补进 RHI 接口；ImGuiIntegration 全走 RHI 已有的 CreateImGui* 虚函数；void* 接口逐个换强类型抽象——这是未来 D3D12 的必经之路
-3. **③ 打通序列化**（成本最低、见效快）：SceneSerializer::Load 改用 ClassInfo::factory 替代 if-else；在组件上启用 HE_REGISTER_PROPERTY，3 份类型分派表收敛到 Archive::SerializeObject 一处——完成后"新组件全链路"从 8-12 处降到 5 处
-4. **④ 收编应用层样板**：引擎内加 PipelineRegistry（注册表 + 工厂，替代 Sample 里的模式 if/else）和 AppBase（设备/交换链/主循环/配置），4 个 Sample 去重，新增 Sample 成本从"复制 700 行"降到"继承一个基类"
-5. **⑤ 抽公共渲染组件**：4 份 CollectLights switch 抽成单一 LightSerializer；三缓冲 SSBO 封装成可复用类；LightingPass 参数收敛为上下文结构体
+3. **③ 打通序列化**（成本最低、见效快）：SceneSerializer::Load 改用 ClassInfo::factory 替代 if-else（属性注册已就绪，只差工厂接线）；3 份类型分派表收敛到 Archive::SerializeObject 一处并补齐 `u8` 等已注册类型——完成后"新组件全链路"从 8-12 处降到 5 处
+4. **④ 收编应用层样板**：引擎内加 PipelineRegistry（注册表 + 工厂，替代 Sample 里的模式 if/else）和 AppBase（设备/交换链/主循环/配置），8 个 Sample 去重，新增 Sample 成本从"复制 700 行"降到"继承一个基类"
+5. **⑤ 抽公共渲染组件**：3 份 CollectLights switch 抽成单一 LightSerializer；三缓冲 SSBO 封装成可复用类（LightingPass 参数收敛为上下文结构体一条已由 `LightingInputs` 完成）
 
 ---
 

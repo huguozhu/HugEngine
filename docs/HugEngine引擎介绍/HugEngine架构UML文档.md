@@ -1,6 +1,6 @@
 # HugEngine 架构 UML 文档
 
-> 基于全工程源码逐文件分析生成（2026-08-18）。
+> 基于全工程源码逐文件分析生成（2026-08-18）；最后更新 2026-09-21（补 AI/Physics 模块，修正计数与失效引用）。
 > 所有图使用 Mermaid 语法，GitHub / VS Code / Typora 等可直接渲染。
 > 对应 PlantUML 源文件见 `docs/uml/*.puml`。
 
@@ -27,16 +27,19 @@
 
 ## 1. 总体分层架构
 
-依赖方向：上层 → 下层；CMake 构建顺序即依赖方向（Core → Reflect → Serialize → RHI → Shader → Scene → Asset → Render → Editor）。
+依赖方向：上层 → 下层；CMake 构建顺序即依赖方向（Core → Reflect → Serialize → RHI → Shader → Scene → Asset → Render → Editor → Physics → AI）。
 
 ```mermaid
 flowchart TD
     subgraph samples["Samples 应用层（各自独立 main，无共享基类）"]
         s01["01.Triangle<br/>裸 RHI 演示"]
-        s02["02.Cube<br/>四管线全功能演示"]
+        s02["02.Cube<br/>三管线全功能演示（模式 0~3）"]
         s03["03.Sponza-Forward<br/>glTF + Forward"]
         s04["04.Sponza-Deferred<br/>GBuffer + Lighting"]
         s05["05.Sponza-PathTracing<br/>glTF + 全路径追踪"]
+        s06["06.GILab<br/>GI 实验台"]
+        s07["07.AISamples<br/>AI 综合示例（LLM/Agent/AIGC）"]
+        s08["07.Nanite<br/>虚拟几何"]
         sedit["HugEditor<br/>EditorApp 编辑器"]
     end
 
@@ -47,7 +50,18 @@ flowchart TD
             e3["ImGuiIntegration"]
             e4["SceneSerializer<br/>.hescene"]
         end
-        subgraph L4["Render（136 文件）"]
+        subgraph Lp["Physics（8 文件，Jolt 集成）"]
+            p1["PhysicsWorld<br/>Jolt 世界封装"]
+            p2["PhysicsSystem<br/>刚体步进 + 回写 Transform"]
+            p3["RigidBodyComponent<br/>+ PhysicsReflect"]
+        end
+        subgraph Lai["AI（53 文件，L2.5 AI 运行时）"]
+            ai1["SceneBuilder / TypeSchema<br/>LLM JSON → World"]
+            ai2["AgentSystem / Brain<br/>Agent · Goal · Memory 组件"]
+            ai3["Runtime<br/>AIModule / InferenceScheduler / Backend"]
+            ai4["AIGC / WorldModel<br/>生成资产 / 观测·动作"]
+        end
+        subgraph L4["Render（194 文件）"]
             r1["IRenderPipeline x3<br/>Forward/Deferred/PathTrace<br/>（HybridRT 已删除）"]
             r2["RenderGraph<br/>帧编排"]
             r3["SceneRenderer / GPUScene<br/>GPU 场景"]
@@ -59,15 +73,15 @@ flowchart TD
         subgraph L5b["Asset（2 文件）"]
             a1["LoadGLTF<br/>cgltf 解析"]
         end
-        subgraph L5["Scene（26 文件）"]
+        subgraph L5["Scene（76 文件）"]
             sc1["World<br/>ECS 组件容器"]
             sc2["SceneGraph<br/>层级变换"]
-            sc3["Component x15<br/>Transform/Mesh/Light/..."]
+            sc3["Component ×32<br/>Transform/Mesh/Light/...（含 3 基类）"]
         end
         subgraph L3["Shader"]
             sh1["CompileShaders<br/>.slang → .spv.h"]
         end
-        subgraph L2["RHI（43 文件）"]
+        subgraph L2["RHI（49 文件）"]
             rh1["IRHIDevice / IRHICommandList<br/>纯虚接口 + 工厂"]
             rh2["IRHIBindlessHeap<br/>纹理/采样器/SSBO 统一堆"]
             rh3["RayTracing / MeshShader / DGC<br/>抽象描述"]
@@ -85,7 +99,7 @@ flowchart TD
         subgraph L1r["Reflect（5 文件）"]
             rf1["TypeRegistry<br/>宏驱动反射"]
         end
-        subgraph L0["Core（19 文件）"]
+        subgraph L0["Core（21 文件）"]
             c1["Engine<br/>启动引导"]
             c2["JobSystem<br/>Taskflow 封装"]
             c3["Window<br/>GLFW 封装"]
@@ -98,12 +112,17 @@ flowchart TD
         t1["GLFW / glm / spdlog"]
         t2["Taskflow / VMA / slang"]
         t3["cgltf / stb_image / ImGui"]
+        t4["Jolt / nlohmann_json / meshoptimizer"]
     end
 
     s01 -.-> L2
     s02 -.-> L4
     s03 -.-> L4
     s04 -.-> L4
+    s05 -.-> L4
+    s06 -.-> L4
+    s07 -.-> L4
+    s08 -.-> L4
     sedit -.-> L8
     L8 -.->|"Viewport 渲染"| L4
     L8 -.-> L5
@@ -124,6 +143,12 @@ flowchart TD
     r6 -.->|"slangc"| t2
     a1 -.->|"cgltf/stb"| t3
     e3 -.->|"ImGui"| t3
+    p2 -.->|"回写 TransformComponent"| L5
+    p1 -.->|"Jolt"| t4
+    ai1 -.->|"写入 World"| L5
+    ai2 -.-> L4
+    ai3 -.->|"复用 Command 系统"| L8
+    ai4 -.->|"JSON 解析"| t4
 ```
 
 ---
@@ -260,7 +285,8 @@ class `he::Sphere` {
 
 设计：**纯虚接口 + 工厂**（类似 UE RHI / Filament Driver），设备全局单例
 `g_Device` + `GetDevice()/SetDevice()`；资源工厂返回 `unique_ptr` 所有权转移。
-引擎其他模块只依赖 `RHI/RHI.h` 公共头，不直接触碰图形 API。
+引擎其他模块依赖 `RHI/*.h` 公共头；**例外**：`GI/GI_RSM.cpp` 与 `Editor/ImGuiIntegration.cpp`
+仍直接 include `Vulkan/Vulkan*.h`（后端纪律缺口，见可扩展性分析 P0-1）。
 
 ```mermaid
 classDiagram
@@ -532,7 +558,7 @@ class `he::rhi::VulkanRTPipelineState` {
     -vector<u8> m_Handles
 }
 class `he::rhi::DeferredDestructionQueue` {
-    -vector<function> m_Queue[3]
+    -vector<function> m_Queue[kSlots]
     -u32 m_WriteIndex
     +Enqueue(deleter) void
     +Advance() void
@@ -600,8 +626,8 @@ class `he::rhi::VulkanDGCFuncs`
 `he::rhi::VulkanBindlessHeap` --> "1" `he::rhi::VulkanDevice` : Flush 调 UpdateDescriptorSet
 ```
 
-> **延迟销毁机制（DeferredDestructionQueue）**：三缓冲槽位 `m_Queue[3]`，资源销毁 lambda
-> 压入当前写槽位；每帧 `Begin()` 等 GPU fence 后 `Advance()` 执行 3 帧前的槽位——
+> **延迟销毁机制（DeferredDestructionQueue）**：环形槽位 `m_Queue[kSlots]`（`kSlots = 2 × kMaxFramesInFlight = 6`），
+> 资源销毁 lambda 压入当前写槽位；每帧 `Begin()` 等 GPU fence 后 `Advance()` 轮转并执行最老槽位——
 > GPU 必已用完。入队来源四类：缓存模式 PSO（最后引用释放）、SwapChain Framebuffer 重建、
 > 离屏临时 Framebuffer、GPL 四段库（Shutdown）。替代原先分散的 ad-hoc 管理（消除 ~22 个历史 bug）。
 >
@@ -612,14 +638,14 @@ class `he::rhi::VulkanDGCFuncs`
 > **GPL 四段库**：VertexInput / PreRaster / FragmentShader / FragmentOutput 分别按段哈希，
 > 任一段命中即复用，只重编变化段（fast-link 约 0.5ms vs 单片 50ms）；任一段失败回退单片路径。
 >
-> **描述符池**：7 种 DescriptorPoolSize（SSBO 16384 / SampledImage 16384 / Sampler 16384 等），
+> **描述符池**：7 种 DescriptorPoolSize（SSBO 16384 / SampledImage 32768 / Sampler 32768 等），
 > maxSets=1024，`UPDATE_AFTER_BIND`；bindless 最大 binding 号额外加 `VARIABLE_DESCRIPTOR_COUNT`。
 
 ---
 
 ## 5. Render 框架与 GPU 场景
 
-无中枢单例、无独立渲染线程。4 个平行管线继承 `IRenderPipeline`，应用层按
+无中枢单例、无独立渲染线程。3 个平行管线继承 `IRenderPipeline`，应用层按
 CVar `r.Pipeline.Mode`（0=Forward 1=Deferred 2=Deferred(RT sources) 3=PathTrace）实例化。
 （原 `HybridRTPipeline` 已于 2026-09 删除，RT 效果并入 Deferred 层栈。）
 帧编排 = 每帧新建 RenderGraph + 手写注册序 + 自动拓扑/Barrier/别名/裁剪。
@@ -726,7 +752,7 @@ class `he::render::ParticleRenderer` {
 }
 class `he::render::ProfilerManager`
 class `he::render::GPUObjectData` {
-    <<GPU 176B binding2>>
+    <<GPU 208B binding2>>
 }
 class `he::render::GPUSceneObject` {
     <<GPU 128B>>
@@ -776,7 +802,7 @@ class `he::render::CameraData` {
 >
 > | SSBO | 元素/容量 | 上传策略 |
 > |---|---|---|
-> | GPUObjectData（176B, binding 2） | MAX_OBJECTS=1024 | 每帧全量 Map/Unmap |
+> | GPUObjectData（208B, binding 2） | MAX_OBJECTS=1024 | 每帧全量 Map/Unmap |
 > | GPUSceneObject（128B） | kMaxGPUObjects=2048 | 矩阵比较去重 → 脏标记增量 memcpy |
 > | u_Materials / GPUMaterialData（112B, binding 30） | 动态 | 材质 ID 去重后重建式上传（材质集静态，非每帧） |
 > | GPULight（64B, binding 1） | MAX_LIGHTS=8 | 每帧逐光源 Map 写入 |
@@ -789,7 +815,7 @@ class `he::render::CameraData` {
 > **RenderGraph Compile 五步**：BuildDependencies(RAW/WAW/WAR) → TopologicalSort →
 > DeriveBarriers → CullDeadPasses → ApplyAliasing（贪心生命周期合并 → 瞬态内存池）→ ScheduleAsyncPasses。
 >
-> **Deferred 管线 Pass 顺序**：GPU_Cull → Shadow(CSM×3+Spot) → GB_Clear(7×MRT+D32) → HiZ →
+> **Deferred 管线 Pass 顺序**：GPU_Cull → Shadow(CSM×3+Spot/Rect) → GB_Clear(8×MRT+D32) → HiZ →
 > DDGI → SSAO → SSR → SSGI → Lighting(全屏 PBR+IBL+阴影+聚集着色) → Skybox → Particle →
 > Bloom → DOF → MotionBlur → TAA → ToneMap → ColorGrading → CameraEffects → SMAA/FXAA。
 
@@ -799,8 +825,8 @@ class `he::render::CameraData` {
 
 ### 6.1 阴影：双层策略模式
 
-外层 `IShadowSystem`（Mode：None/Traditional/RayTraced）→ 组合器 `ShadowSystem` 注册 3 个技术；
-内层 `IShadowTechnique` 按光源类型分派（CSM/Point/Spot），软硬阴影差异由采样侧 PCF 决定。
+外层 `IShadowSystem`（Mode：None/Traditional/RayTraced）→ 组合器 `ShadowSystem` 注册 4 个技术；
+内层 `IShadowTechnique` 按光源类型分派（CSM/Point/Spot/Rect），软硬阴影差异由采样侧 PCF 决定。
 
 ### 6.2 后处理/AA/GI/RT/PT
 
@@ -840,6 +866,9 @@ class `he::render::PointShadowTechnique` {
 }
 class `he::render::SpotShadowTechnique` {
     -IRHITexture* m_SpotShadowMap
+}
+class `he::render::RectLightShadowTechnique` {
+    -IRHITexture* m_RectShadowMap
 }
 class `he::render::IPostProcessPass` {
     <<interface>>
@@ -939,10 +968,11 @@ class `he::render::ShaderHotReload` {
 `he::render::IRenderSubsystem` <|-- `he::render::IPostProcessPass`
 `he::render::IShadowSystem` <|-- `he::render::ShadowSystem`
 `he::render::IShadowSystem` <|-- `he::render::ShadowNone`
-`he::render::ShadowSystem` *-- "3" `he::render::IShadowTechnique` : m_Techniques
+`he::render::ShadowSystem` *-- "4" `he::render::IShadowTechnique` : m_Techniques
 `he::render::IShadowTechnique` <|-- `he::render::CSMTechnique`
 `he::render::IShadowTechnique` <|-- `he::render::PointShadowTechnique`
 `he::render::IShadowTechnique` <|-- `he::render::SpotShadowTechnique`
+`he::render::IShadowTechnique` <|-- `he::render::RectLightShadowTechnique`
 `he::render::IPostProcessPass` <|-- `he::render::IAntiAliasing`
 `he::render::IAntiAliasing` <|-- `he::render::AA_TAA`
 `he::render::IAntiAliasing` <|-- `he::render::AA_FXAA`
@@ -964,7 +994,7 @@ class `he::render::ShaderHotReload` {
 `he::render::PTPass` --> "1" `he::render::PTRenderContext`
 ```
 
-> **阴影贴图规格**：CSM 3 级联 2048² D32（混合分割 λ=0.5）｜Point 512² Cubemap（6 面逐面渲染）｜Spot 1024² D32。
+> **阴影贴图规格**：CSM 3 级联 2048² D32（混合分割 λ=0.5）｜Point 512² Cubemap（6 面逐面渲染）｜Spot 1024² D32｜RectLight 1024² D32（2D 透视投影）。
 > Deferred 中 Spot 阴影索引 = 4。
 >
 > **TAA（AA_TAA）**：Halton(2,3) 8 样本 jitter 循环表；历史双缓冲末帧 swap；GBuffer MRT3 存
@@ -978,7 +1008,7 @@ class `he::render::ShaderHotReload` {
 >   `reservoirReady` = 帧号>1 且光源数未变（历史失效判定）。
 > - 降噪：`RTDenoiser` 时域累积（velocity 重投影 + 去遮挡 + 相机运动自适应混合）→
 >   `PTAtrousPass` SVGF 风格多迭代边感知滤波；输入选择 atrous → denoised → raw。
-> - 质量开关全部 CVar 热更新（`r.PT.*`）；STBN 蓝噪声 128³ 由 PT + ReSTIR 三 Pass 共用。
+> - 质量开关全部 CVar 热更新（`r.PT.*`）；STBN 蓝噪声 128×128×64 由 PT + ReSTIR 三 Pass 共用。
 >
 > **Shader 热重载**：后台线程 `ReadDirectoryChangesW` 监听 `.slang`（200ms debounce）→
 > `CreateProcessA` 调 slangc 编译 → mutex 队列投递主线程 `Poll()` → `IRenderPipeline::ReloadShader`
@@ -1032,12 +1062,33 @@ class `he::LightComponent`
 class `he::DirectionalLight`
 class `he::PointLight`
 class `he::SpotLight`
+class `he::RectLight`
 class `he::CameraComponent`
 class `he::SkyboxComponent`
 class `he::PhysicalSkyComponent`
 class `he::ParticleComponent`
 class `he::AnimationComponent`
 class `he::LevelComponent`
+class `he::InstancedMeshComponent`
+class `he::SkeletalMeshComponent`
+class `he::SplineComponent`
+class `he::SplineMeshComponent`
+class `he::BillboardComponent`
+class `he::TextRenderComponent`
+class `he::CollisionDebugComponent`
+class `he::DecalComponent`
+class `he::CollisionComponent`
+class `he::CharacterMovementComponent`
+class `he::ProjectileMovementComponent`
+class `he::HealthComponent`
+class `he::AbilityComponent`
+class `he::NavMeshComponent`
+class `he::NavAgentComponent`
+class `he::SpringArmComponent`
+class `he::RigidBodyComponent`
+class `he::ai::AgentComponent`
+class `he::ai::GoalComponent`
+class `he::ai::MemoryComponent`
 class `he::reflect::ClassInfo` {
     +String name
     +u64 typeHash
@@ -1107,16 +1158,37 @@ class `he::asset::LoadGLTF` {
 `he::Component` <|-- `he::MeshComponent`
 `he::MeshComponent` <|-- `he::CubeComponent`
 `he::MeshComponent` <|-- `he::SphereComponent`
+`he::MeshComponent` <|-- `he::InstancedMeshComponent`
+`he::MeshComponent` <|-- `he::SkeletalMeshComponent`
+`he::MeshComponent` <|-- `he::SplineMeshComponent`
+`he::MeshComponent` <|-- `he::BillboardComponent`
+`he::MeshComponent` <|-- `he::CollisionDebugComponent`
+`he::MeshComponent` <|-- `he::DecalComponent`
+`he::BillboardComponent` <|-- `he::TextRenderComponent`
 `he::Component` <|-- `he::LightComponent`
 `he::LightComponent` <|-- `he::DirectionalLight`
 `he::LightComponent` <|-- `he::PointLight`
 `he::LightComponent` <|-- `he::SpotLight`
+`he::LightComponent` <|-- `he::RectLight`
 `he::Component` <|-- `he::CameraComponent`
 `he::Component` <|-- `he::SkyboxComponent`
 `he::Component` <|-- `he::PhysicalSkyComponent`
 `he::Component` <|-- `he::ParticleComponent`
 `he::Component` <|-- `he::AnimationComponent`
 `he::Component` <|-- `he::LevelComponent`
+`he::Component` <|-- `he::SplineComponent`
+`he::Component` <|-- `he::CollisionComponent`
+`he::Component` <|-- `he::CharacterMovementComponent`
+`he::Component` <|-- `he::ProjectileMovementComponent`
+`he::Component` <|-- `he::HealthComponent`
+`he::Component` <|-- `he::AbilityComponent`
+`he::Component` <|-- `he::NavMeshComponent`
+`he::Component` <|-- `he::NavAgentComponent`
+`he::Component` <|-- `he::SpringArmComponent`
+`he::Component` <|-- `he::RigidBodyComponent`
+`he::Component` <|-- `he::ai::AgentComponent`
+`he::Component` <|-- `he::ai::GoalComponent`
+`he::Component` <|-- `he::ai::MemoryComponent`
 `he::World` *-- "0..*" `he::ComponentEntry`
 `he::World` --> "0..1" `he::SceneGraph` : SetSceneGraph 不拥有
 `he::SceneGraph` --> "1" `he::World` : m_World 引用
@@ -1143,7 +1215,9 @@ class `he::asset::LoadGLTF` {
 >
 > **反射链**：`HE_CLASS()/HE_COMPONENT()` 宏注入 `StaticClass()`；`HE_BEGIN_REGISTER` 生成
 > 静态 `ClassInfo`（FNV-1a typeHash + factory）；`HE_REGISTER_PROPERTY` 用 offsetof 记录成员偏移。
-> 注意：property 注册宏当前无调用点，序列化靠 `ForEachProperty` + typeName 字符串分派。
+> 注意：property 注册宏（`HE_REGISTER_PROPERTY`）在 SceneReflect / AgentReflect / PhysicsReflect
+> 共 104 处调用点，Save 走 `ForEachProperty` + typeName 字符串分派写属性；`ClassInfo::factory`
+> 仍无消费方，Load 的组件构造按类型名 if-else。
 >
 > **.hescene 二进制格式**：`HESC magic(u32) + version(u32=1) + entity_count +
 > [entityID u64 + comp_count + [typeHash u64 + data_size u32 + 反射属性字节流]...] + 层级配对`。
@@ -1210,7 +1284,7 @@ sequenceDiagram
 
 ## 9. GPU 资源延迟销毁时序
 
-三缓冲槽位 + 每帧 GPU fence 确认后执行 3 帧前的销毁 lambda。
+环形槽位（kSlots = 2 × kMaxFramesInFlight = 6）+ 每帧 GPU fence 确认后轮转并执行最老槽位的销毁 lambda。
 
 ```mermaid
 sequenceDiagram
@@ -1223,19 +1297,19 @@ sequenceDiagram
 
     Note over Frame,PSO: == 帧 N ==
     Frame->>Cmd: Begin()
-    Cmd->>Cmd: 等槽位 N 的 GPU fence（帧 N-3 已确认完成）
+    Cmd->>Cmd: 等槽位 N 的 GPU fence（在飞帧已确认完成）
     Cmd->>Dev: AdvanceFrame()
     Dev->>DDQ: AdvanceDeferredDestroy(frameId) 帧 ID 去重
-    DDQ->>DDQ: WriteIndex=(N+1)%3，执行 3 帧前入队的销毁
+    DDQ->>DDQ: WriteIndex=(N+1)%6（kSlots=6），执行最老槽位入队的销毁
     Frame->>PSO: 某 PSO 最后外部引用释放
     PSO->>DDQ: Enqueue(销毁 VkPipeline/Layout/RenderPass)
     Note over DDQ: lambda 压入当前写槽位（帧 N）
     Frame->>Cmd: End() / Submit()
 
-    Note over Frame,PSO: == 帧 N+1 / N+2 ==
+    Note over Frame,PSO: == 帧 N+1 … N+5 ==
     Note over DDQ: 槽位轮转，lambda 休眠
 
-    Note over Frame,PSO: == 帧 N+3 ==
+    Note over Frame,PSO: == 帧 N+6 ==
     Frame->>Cmd: Begin()
     Cmd->>Cmd: 等 fence 确认帧 N 命令已完成
     Dev->>DDQ: Advance()
@@ -1361,7 +1435,7 @@ sequenceDiagram
 
 > 质量开关全部 CVar 热更新：`r.PT.SPP / Bounces / SkyIntensity / Denoise / ReSTIR / MIS /
 > Roulette / Denoise.Blend / Atrous.* / ReSTIR.*`。
-> STBN 蓝噪声 128³ RGBA8 由 PT + ReSTIR 三 Pass 共用（初始化失败则禁用 RT）。
+> STBN 蓝噪声 128×128×64 RGBA8 由 PT + ReSTIR 三 Pass 共用（初始化失败则禁用 RT）。
 
 ---
 
@@ -1371,16 +1445,18 @@ sequenceDiagram
 
 | 模块 | 文件数 | 依赖 | 定位 |
 |---|---|---|---|
-| HugEngineCore | 19 | GLFW/glm/spdlog/Taskflow | L0 基础库 |
+| HugEngineCore | 21 | GLFW/glm/spdlog/Taskflow（WIN32 另加 dbghelp） | L0 基础库 |
 | HugEngineReflect | 5 | Core | 宏驱动反射 |
 | HugEngineSerialize | 3 | Reflect | 二进制序列化 |
-| HugEngineRHI | 43 | Core, VMA | 图形抽象 + Vulkan 实现 |
-| HugEngineShader | （.slang 资产） | Core | slang 编译生成 .spv.h |
-| HugEngineScene | 26 | RHI, Reflect | ECS + SceneGraph |
-| HugEngineAsset | 2 | Scene, cgltf | glTF 加载 |
-| HugEngineRender | 136 | RHI/Shader/Scene/Asset | 管线 + 特性 |
-| HugEngineEditor | 8 | Scene/Serialize/Reflect | 编辑器框架 |
-| Samples | 27 | 组合链接静态模块 | 5 个独立应用 |
+| HugEngineRHI | 49 | Core, Vulkan, VMA | 图形抽象 + Vulkan 实现 |
+| HugEngineShader | （.slang 资产，156 个） | RHI（INTERFACE 库） | slang 编译生成 .spv.h |
+| HugEngineScene | 76 | Reflect, Core, RHI（PRIVATE stb） | ECS + SceneGraph |
+| HugEngineAsset | 2 | Scene, Reflect, cgltf | glTF 加载 |
+| HugEngineRender | 194 | RHI/Shader/Scene/Asset（PRIVATE meshoptimizer） | 管线 + 特性 |
+| HugEngineEditor | 8 | Render/Serialize/imgui | 编辑器框架 |
+| HugEnginePhysics | 8 | Scene, Core, Jolt | Jolt 刚体集成 |
+| HugEngineAI | 53 | Scene/Core/Render/Editor/Physics, nlohmann_json | LLM 场景生成 + Agent/AIGC/推理运行时 |
+| Samples | 48 | 组合链接静态模块 | 9 个可执行目标（8 示例 + HugEditor） |
 
 ### 13.2 线程模型
 
@@ -1410,7 +1486,7 @@ sequenceDiagram
 
 | 常量 | 值 |
 |---|---|
-| kMaxFramesInFlight | 3（三缓冲 + 延迟销毁槽位数上界） |
+| kMaxFramesInFlight | 3（三缓冲；延迟销毁槽位 kSlots = 2 × 该值 = 6） |
 | kSwapchainImageCount | 3 |
 | kMaxColorAttachments | 8（GBuffer 用 7 + 深度） |
 | kMaxMeshShaderStages | 3（Task/Mesh/Fragment） |
@@ -1430,24 +1506,25 @@ sequenceDiagram
    `IRenderPipeline`，由 CVar `r.Pipeline.Mode` 切换；Deferred 为最完整主管线（~20 Pass）。
 3. **帧编排 = 每帧新建 RenderGraph**：手写注册序 + 自动拓扑排序/Barrier 推导/死 Pass 裁剪/
    别名分析（瞬态内存池）/异步调度；首个 Compute 段走独立队列 + Timeline Semaphore 同步。
-4. **GPU 场景三层 SSBO**：GPUObjectData(176B) 每帧全量、GPUSceneObject(128B) 矩阵去重后
+4. **GPU 场景三层 SSBO**：GPUObjectData(208B) 每帧全量、GPUSceneObject(128B) 矩阵去重后
    脏标记增量、u_Materials(112B) 材质 ID 去重后重建式上传（bindless SSBO，binding 30）。
-5. **GPU 资源生命周期中枢**：VulkanDevice 值组合 6 个子系统 —— 延迟销毁队列（三缓冲槽位+
+5. **GPU 资源生命周期中枢**：VulkanDevice 值组合 6 个子系统 —— 延迟销毁队列（环形槽位 kSlots=6 +
    帧围栏确认）、PSO 哈希缓存+共享引用、GPL 四段库（变体 ~0.5ms）、后台预编译（~50ms→~2ms）、
    瞬态分配器（双 128MB Heap bump 分配）、VMA。
 6. **阴影 = 双层策略**：外层 IShadowSystem（None/Traditional/RayTraced）+ 内层 IShadowTechnique
-   （CSM 3 级联 2048² / Point Cubemap 512² / Spot 1024²）；软硬阴影由采样侧 PCF 决定。
+   （CSM 3 级联 2048² / Point Cubemap 512² / Spot 1024² / RectLight 1024²）；软硬阴影由采样侧 PCF 决定。
 7. **路径追踪（Mode=3）**：阶段 A PTPass（NEE+MIS+俄罗斯轮盘赌，5 UAV 输出）→ 阶段 B
    ReSTIRPass（Init/Temporal/Spatial 三 dispatch，PT 反弹 0 读上帧 reservoir）→ RTDenoiser
    时域累积 → PTAtrousPass SVGF 滤波；STBN 蓝噪声共用。
 8. **ECS + 反射 + 序列化闭环**：World 按 type_index 分桶存组件，HE_COMPONENT 宏注入
    ClassInfo（FNV-1a 哈希），.hescene 二进制经 BinaryArchive 按反射属性流存取，编辑器
    Undo 走 PropertyChangeCommand lambda 对。
-9. **单例约束**：全局单例仅 4 处 —— RHI g_Device、JobSystem::s_Instance、MallocAllocator、
-   TypeRegistry；其余全部组合注入，EditorApp 是唯一"全知"应用编排者。
+9. **单例约束**：全局单例仅 5 处 —— RHI g_Device、JobSystem::s_Instance、MallocAllocator、
+   TypeRegistry、AI 的 AIModule（s_Scheduler / s_Device）；其余全部组合注入，EditorApp 是唯一"全知"应用编排者。
 10. **句柄三元化**：资源 = unique_ptr<IRHI*>、描述符集/Fence = u64 索引、跨模块图像视图/DGC = void*。
 
 ---
 
 *本文档由全工程源码逐文件分析生成，类名/关系/行号经六个子系统探索代理交叉验证。
-命名空间已确认为 `he` / `he::rhi` / `he::render` / `he::editor` / `he::asset` / `he::reflect` / `he::serialize`。*
+命名空间已确认为 `he` / `he::rhi` / `he::render` / `he::editor` / `he::asset` / `he::reflect` / `he::serialize`
+/ `he::ai` / `he::physics`；2026-09-21 按当前源码基线校订。*

@@ -4,8 +4,8 @@
 > 「组件模型怎么组织」「每种组件做什么、有哪些参数、由谁驱动」以及「渲染/编辑器/AI 三条消费者链路
 > 如何使用这些组件」。计划与逐任务的落地记录见 `docs/已实现功能/HugEngine Entity Component 架构与开发计划.md`。
 >
-> 日期：2026-09-18 | 状态：与代码基线一致（可挂载组件 33 项、反射注册 32 个类 / 89 个属性、
-> LLM 词表 14 种类型；计划内任务 1~26 全部完成）。
+> 日期：2026-09-18 | 最后更新：2026-09-21 | 状态：与代码基线一致（可挂载组件 33 项、反射注册 36 个类 /
+> 104 个属性、LLM 词表 14 种类型；计划内任务 1~26 全部完成）。
 
 ---
 
@@ -17,7 +17,7 @@ UE 的 Actor-Component，只是把"组件存储"做成按类型分桶的稀疏�
 | 概念 | 引擎实现 | 对应 UE5 | 说明 |
 |---|---|---|---|
 | 世界 | `he::World`（`Engine/Scene/Scene/World.h`） | `UWorld` | 实体注册表 + 按类型分桶的组件存储 + 遍历入口 |
-| 实体 | `he::Entity`（`Scene/Entity.h`，id + 版本号） | `AActor` | 只是一个稳定句柄；**没有**自己的数据，数据全在组件里 |
+| 实体 | `he::Entity`（`Scene/Entity.h`，单个 `EntityID`(u64)） | `AActor` | 只是一个稳定句柄；**没有**自己的数据，数据全在组件里 |
 | 组件 | `he::Component` 及其派生（`Scene/*Component.h`） | `UActorComponent` / `USceneComponent` | 数据 + 少量自更新逻辑（`OnUpdate`）；一个实体同类型组件最多一个 |
 | 层级 | `he::SceneGraph`（`Scene/SceneGraph.h`） | `USceneComponent` 的 attach 树 | 父子关系 + 世界矩阵求解（变换不在组件里做） |
 | 系统 | 各 `*System` 静态类（`Scene/*System.h`、`AI/Agent/AgentSystem.h`、`Physics/PhysicsSystem.h`） | `FTickFunction` / 子系统 | 每帧由宿主（示例/编辑器主循环）按固定顺序调用 |
@@ -66,7 +66,7 @@ UE 的 Actor-Component，只是把"组件存储"做成按类型分桶的稀疏�
 
 ### 2.2 实体与层级
 
-- `Entity` = `{ id, version }`：`IsValid()` 检查；`World` 用 `m_NextID` 分配，销毁走 `CleanupEntity`。
+- `Entity` = `{ id }`（`using EntityID = u64`，常量 `kInvalidEntity = 0`）：`IsValid()` 检查；`World` 用 `m_NextID` 分配，销毁走 `CleanupEntity`。
 - `SceneGraph`：`SetParent(child, parent)` / `GetParent` / `GetWorldMatrix(entity)` / `UpdateTransforms()`。
   变换本身放在 `TransformComponent`（position / rotation / scale + `GetLocalMatrix()`），
   **世界矩阵由 SceneGraph 按父链合成** —— 所以子实体的世界位置随父变化自动更新，
@@ -76,7 +76,9 @@ UE 的 Actor-Component，只是把"组件存储"做成按类型分桶的稀疏�
 
 ### 2.3 反射与编辑器
 
-`Engine/Scene/Scene/SceneReflect.cpp` 集中注册（当前 **32 个类 / 89 个属性**）：
+`Engine/Scene/Scene/SceneReflect.cpp` 集中注册（当前 **32 个类 / 89 个属性**；另有
+`Engine/AI/Agent/AgentReflect.cpp` 3 个类 / 4 个属性、`Engine/Physics/Physics/PhysicsReflect.cpp`
+1 个类 / 11 个属性，合计 36 个类 / 104 个属性）：
 
 ```cpp
 HE_BEGIN_REGISTER(he::SpotLight)                       // 生成 StaticClass()（含工厂）
@@ -393,8 +395,9 @@ HE_END_REGISTER()
 
 ### 7.2 AgentComponent / GoalComponent / MemoryComponent
 
-- `AgentComponent`：`brainType`（LLM / Mock / RL，按名字从反射工厂构造 `IBrain`）+ `systemPrompt` +
-  `enabled`；`AgentSystem::Update(world, sg, ...)` 驱动一轮"观测 → 决策 → 动作"。
+- `AgentComponent`：`brainType`（LLM / Mock；源码注释另把 RL 列为计划项）+ `systemPrompt` +
+  `enabled`；`AgentSystem` 按名字分派构造 `IBrain`（`Mock` → MockBrain，其余 → LLMBrain），
+  `AgentSystem::Update(world, sg, ...)` 驱动一轮"观测 → 决策 → 动作"。
 - `GoalComponent`：目标按优先级插入，`GetCurrentGoal()` 取最高优先级未达成项；
   `MemoryComponent`：短期键值记忆（带重要度、超限淘汰最旧）。
 - 这两者的**内部结构不注册反射属性**（`InternalStructure` 不外露），避免 LLM 直接改写内部列表。
@@ -448,8 +451,10 @@ HE_END_REGISTER()
 - **碰撞调试线框**是世界单位线宽（不随距离变化），走半透明路径、有少量 overdraw。
 - **两套碰撞**并存（`CollisionComponent` 轻量检测 vs Jolt `RigidBodyComponent`），二者不自动同步。
 - **实体引用类属性**（`homingTarget` / `targetEntity` / `cameraEntity`…）不进反射/词表：不可快照序列化。
-- **场景序列化**：本次检索只看到 `Engine/Serialize` 的 `Archive` / `BinaryArchive` 抽象，
-  未见公开的 `SaveScene` / `LoadScene` 入口；示例的场景来自代码构造或 LLM 生成后的内存世界
-  （面板配置另存为 `Content/Config/*.cfg`）。
+- **场景序列化**：`Engine/Editor/Editor/SceneSerializer.cpp` 提供 `SceneSerializer::Save/Load`
+  （`.hescene`，magic `HESC` + version + 实体/组件/层级），`Samples/Editor/Panels/LevelLoader.cpp`
+  提供 `LevelLoader::LoadLevel` 读取 Level 资产；两者都靠 `ForEachProperty` + typeName 分派，
+  但组件构造仍是按类型名的 if-else（各只覆盖一部分组件类型）。示例的场景也可来自代码构造
+  或 LLM 生成后的内存世界（面板配置另存为 `Content/Config/*.cfg`）。
 - 计划文档中原 **27/28**（渲染类型注册表化 / CollectLights 数据驱动抽取）**已删除**：
   属于"没有消费方就不提前泛化"的架构改动，编号不复用。
