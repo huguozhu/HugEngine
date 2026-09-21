@@ -3867,6 +3867,29 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
 > 那要求每份共享内容不跨页且页长固定，等于给每次打包加填充约束（改离线产物），成本高于多两个 u32。
 > 若实现者选择别的等价方案（例如另开一个 `pageBegin[]` 平行数组），请在 §14.37 里说明并给出理由。
 >
+> **⚠ 2026-09-21 追加（第二次）：侵入点不止"软/硬光栅里的几行"，实测为 8 处、跨 4 个着色器文件**
+> 初稿写"这是本任务唯一侵入既有着色器的地方：软光栅与硬光栅取顶点/三角形的那几行"，**低估了**。
+> 逐处清点（`Engine/Shader/Shaders/Nanite/`）：
+> | # | 位置 | 内容 |
+> |---|---|---|
+> | 1 | `Nanite_SoftRasterCommon.slang:244` | `u_Triangles[cluster.triangleOffset + triLocal]` |
+> | 2 | `Nanite_SoftRasterCommon.slang:246` | `uint base = cluster.vertexOffset;` |
+> | 3 | `Nanite_SoftRaster.comp.slang:73` | 第 2 趟**再次**取三角形（未复用上面的公共函数） |
+> | 4-6 | `Nanite_SoftRaster.comp.slang:75-77` | 三个顶点 `u_Vertices[cluster.vertexOffset + local.x/y/z]` |
+> | 7 | `Nanite_HardRaster.mesh.slang:142` | `u_Triangles[cluster.triangleOffset + triLocal]` |
+> | 8 | `Nanite_HardRaster.mesh.slang:144` | `uint base = cluster.vertexOffset;` |
+> **另有一条初稿完全没提的链路（重要）**：
+> - `Nanite_ClusterBVH.comp.slang:453` 把 `range.vertexOffset` **原样写进间接绘制命令**；
+> - `Nanite_Raster.vert.slang:13-14,38-39` 的占位光栅**从命令里的 `vertexOffset` 推导三角形顶点**
+>   （`v = vertexOffset + 3k`）。
+> ⇒ **间接绘制命令里的 `vertexOffset` 也是偏移空间的一部分**。任务 16 起 `visible=indirect_count=draws`
+> 说明这条链**每帧都在真跑**（不是只有假簇链才用），所以流式必须同时决定：
+> **(i)** 命令里写"共享数组的绝对偏移"再让顶点着色器翻译，还是 **(ii)** cull 阶段就写"池内偏移"。
+> 两者都可行，但**必须显式选一个并写进 §14.37** —— 只改 1–8 而漏掉命令链，会出现"软/硬光栅正确、
+> 但占位光栅用错偏移"的静默错误（画面看不出来，只有读数与判据 8a 的 `rasterized` 会露出来）。
+> **建议的默认项**：选 **(ii)**（cull 阶段按页表写出池内偏移），因为命令是一次性写出的，
+> 在那里翻译只影响 1 处，而 (i) 要在顶点着色器里再翻译一次、多一处可能不一致的地方。
+>
 > **页边界从资产本身即可推出（2026-09-21 追加，去掉了对新增落盘数据的依赖）**
 > 复核 `NanitePackedAsset`（`NaniteUpload.h`）的字段后确认：它保留了
 > `clusters`（64B/出现）、`vertices`（**每个唯一内容一份**）、`triangles`、`materials`、`lodOffsets`
