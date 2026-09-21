@@ -3994,6 +3994,23 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
       `streaming=1`（页池足够大）与 `streaming=0` 之间**完全一致**；其中
       **`page_misses == 0` 且"全部页驻留"是必要条件**。这类读数任务 23 已证明**逐位可复现**
       （8 个日志的 `size_dist` 取值唯一）⇒ 它是"页表/间接层没算错"的**最强证据**。
+    - **⚠ 2026-09-21 (d1) 的非空洞化修正（关键，防"空洞通过"）**：仅写"`page_misses == 0`"这条
+      判据**本身没有证明力**，因为读数缓冲是**按 C++ 容量分配并每帧清零**的 ——
+      `NaniteRaster.cpp:834` 按 `sizeof(u32) * kNaniteSoftStatsCapacity` 分配（任务 24 后为 24 个 u32），
+      并由 `m_SoftStatsZeroSrc`（`:233-234`、`:840`）每帧清零。
+      ⇒ **若 shader 根本没写流式槽位 20~23，C++ 读回的就是 0**，
+      "`page_misses == 0`"会在**流式功能完全没工作**时同样成立。
+      这正是任务 24 实现期实测到的状态：`Nanite_SoftRasterCommon.slang:98`
+      `kSoftStatCapacity` 仍是 `20u`，与 C++ 的 `24u` 不同步，且全部 shader 中**零处**写入流式槽位。
+      **因此 (d1) 必须加强为**：流式开启且页池充足时**同时**满足
+      **`page_requests > 0` 且 `page_misses == 0`** ——
+      `page_requests > 0` 证明"光栅→反馈回读"链路真的在跑，(d1) 才具备证明力。
+      配套两条硬要求：
+      1. Slang `kSoftStatCapacity` 必须同步为 `24u`（与 C++ 一致），且流式槽位的累加写入必须发生在
+         本帧清零**之后**（即本帧光栅之内），否则读数会被清零或丢失。
+      2. **(c) 是 (d1) 的非空洞守卫**：必须在"页池 8 页"下**真拿到一次 `page_misses > 0`**，并把读数原文
+         写进记录。若 (c) 拿不到 `page_misses > 0`，说明写入链路本身有问题，
+         **(d1) 的通过无效，不得据此验收**。
     - **(d2) 像素类差异不得超过"噪声底"**：用**同配置跑两次**（`streaming=0` 两次）作噪声底，
       与 `streaming=1` vs `streaming=0` 的逐文件 `diff_px` / `maxULP` **并列比较**
       （工具即仓库既有的 `build/verify/cmp_dumps.py <A> <B>`，验收判据 ② 正是这么用的）。
