@@ -22,7 +22,7 @@ set(SPDLOG_FMT_EXTERNAL OFF CACHE BOOL "" FORCE)
 set(SPDLOG_INSTALL      OFF CACHE BOOL "" FORCE)
 add_subdirectory(spdlog)
 
-# --- Taskflow v3.9.0 (header-only) ---
+# --- Taskflow v4.1.0 (header-only，TF_VERSION 400100) ---
 set(TF_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(TF_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 add_subdirectory(taskflow)
