@@ -200,9 +200,30 @@ void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb,
         // 【任务 19】材质段条数（资产构建时记下；0 ⇒ shader 走中性兜底并把像素计进 fallback_pixels）
         m_SoftParams.materialCount = m_MaterialCount;
     }
+    // ── 【§14.8 任务 26】可视化的 push constant（同一次循环、同一份比特）──
+    // 【为什么 `vpRows` 再填一遍而不是拷 `m_SoftParams`】可视化有自己的结构体（96B），
+    //   字段集合不同；两者的 `vpRows` 用**同一个**"列主序 → 4 个行"的填法 ⇒ 投影逐位一致。
+    {
+        const float4x4& vp = camera.GetViewProjMatrix();
+        const float* m = &vp[0][0];
+        for (u32 row = 0u; row < 4u; ++row) {
+            for (u32 col = 0u; col < 4u; ++col) {
+                m_DebugParams.vpRows[row * 4u + col] = m[col * 4u + row];
+            }
+        }
+        m_DebugParams.screenWidth   = m_Width;
+        m_DebugParams.screenHeight  = m_Height;
+        m_DebugParams.maxTriangles  = m_Settings.softMaxTriangles;   // 与两条光栅路径**同一个**阈值
+        m_DebugParams.instanceCount = std::min(m_Settings.instanceTestCount,
+                                               NaniteCull::MaxBVHInstances());
+        m_DebugParams.mode          = m_Settings.debugView;          // 0 = 关（不录、不建、不打）
+        m_DebugParams.panelWidth    = kNaniteDebugViewPanel;
+        m_DebugParams.panelHeight   = kNaniteDebugViewPanel;
+    }
+    // 【§14.8 任务 26】可视化资源懒建（不注册 pass；`debugView=0` 时内部第一句就返回）
+    EnsureDebugViewReady();
     // 软光栅资源懒建（不注册 pass；只保证执行期资源就绪）。资产未入库时它内部直接返回。
-    EnsureSoftRasterReady(gb);
-    // 【任务 22】硬光栅资源懒建（同样不注册 pass）。门控在函数内：`hardRaster` 默认关 ⇒
+    EnsureSoftRasterReady(gb);    // 【任务 22】硬光栅资源懒建（同样不注册 pass）。门控在函数内：`hardRaster` 默认关 ⇒
     //   关闭档一个资源都不建。次序上必须**晚于**软光栅：硬光栅录在软光栅之后，
     //   它依赖软光栅第 2 趟建好的深度键缓冲（binding 6 的占位绑定）。
     EnsureHardRasterReady(gb);
@@ -340,6 +361,14 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
                                           m_Cull.GetDrawCountBuffer(),
                                           m_Cull.GetMaxIndirectDraws());
             }
+
+            // ── 【§14.8 任务 26】屏幕可视化：紧接在剔除链之后（它只消费可见簇列表/计数 +
+            //    三张 CPU 一次性上传的只读表，与光栅结果无关）──
+            // 【为什么在 `softRasterOn` 早退**之前**】可视化的输入是**剔除链的输出**，
+            //   与"谁写 GBuffer"无关 ⇒ `softRaster=0` 档也应该能看到它（那是 A/B 对照档，
+            //   恰恰最需要"簇都落在哪"这张图）。这也是它比硬光栅摆得更靠前的原因。
+            // 【门控在函数内】`debugView=0`（默认）时本行是一次成员读后立刻返回，不录任何命令。
+            RecordDebugViewPass(cmd);
 
             // ── 【任务 18】软光栅三趟（深度键 → 写 GBuffer → 深度解析）──
             // 【为什么录在同一个 pass 体内】它必须排在"本帧的剔除链"之后（要读它写出的可见簇
@@ -657,8 +686,60 @@ void NaniteRenderer::EnsureHardRasterReady(const NaniteGBufferHandles& gb) {
 }
 
 // ============================================================
-// §14.8 任务 24：LOD 流式（反馈 + 页池）的门面实现
+// 【§14.8 任务 26】屏幕可视化的门面接线（懒建 + 录制 + 读数）
 //
+// 【三件事】① `EnsureDebugViewReady`：帧图构建期保证执行期资源就绪（不注册 pass）；
+//   ② `RecordDebugViewPass`：录在 `Nanite_CullChain3` 体内（剔除链之后）；
+//   ③ `LogDebugViewReadback`：dump 帧把 64×32 目标读回并打印一行统计。
+// 【门控全在 `debugView != 0`】默认档：不建资源（连目标都不建）、不录派发、不打日志。
+// 【为什么不注册独立 pass】它只读剔除链的输出与三张 CPU 一次性上传的只读表，写模块自持目标；
+//   帧图对"零帧图资源的 pass"的排序不可依赖（任务 15/16 的教训）⇒ 与硬光栅同一做法。
+// ============================================================
+void NaniteRenderer::EnsureDebugViewReady() {
+    if (!m_Settings.enabled || !m_Ready) return;
+    if (m_Settings.debugView == kNaniteDebugViewOff) return;   // 默认档：一个资源都不建
+    if (m_Settings.debugView > kNaniteDebugViewMaxMode) return; // 防御：越界档位不建（cfg 已钳）
+
+    const NaniteScene::AssetBuffers& asset = m_Scene.GetAssetBuffers();
+    if (!asset.clusters) return;                       // 资产未入库：没有数据可可视化
+    rhi::IRHIBuffer* spheres = m_Cull.GetBVHSphereBuffer();
+    rhi::IRHIBuffer* lodInfo = m_Cull.GetLODInfoBuffer();
+    if (!spheres || !lodInfo) return;                  // BVH 未入库（模式 3/4 无输入）
+
+    // 【模式 4 的输入】每簇 BVH 深度：CPU 侧懒计算一次（**只在可视化档位开启时才会走到这里**）
+    const std::span<const u32> depths = m_Cull.EnsureClusterBVHDepths();
+    if (depths.empty()) return;
+
+    m_Raster.EnsureDebugViewResources(m_Settings.debugView, asset.clusters.get(),
+                                      spheres, lodInfo, depths);
+}
+
+void NaniteRenderer::RecordDebugViewPass(rhi::IRHICommandList* cmd) {
+    if (!m_Settings.enabled || !m_Ready) return;
+    if (m_Settings.debugView == kNaniteDebugViewOff) return;
+    if (!m_Raster.IsDebugViewReady()) return;
+    // 与两条光栅路径**同一份**可见簇列表/实例表（同一个来源 ⇒ 可视化与真实绘制看到同一批簇）
+    m_Raster.RecordDebugViewPass(cmd,
+                                 m_Cull.GetVisibleClusterBuffer(),
+                                 m_Cull.GetVisibleClusterCountBuffer(),
+                                 m_Cull.GetInstanceBuffer(),
+                                 m_Cull.GetBVHVisibleCapacity(),
+                                 m_DebugParams);
+}
+
+void NaniteRenderer::LogDebugViewReadback() {
+    // 【门控】`debugView=0`（默认）时直接返回：不 Map 任何缓冲、不打一个字符
+    if (!m_Settings.enabled || m_Settings.debugView == kNaniteDebugViewOff) return;
+    // 可见簇数：剔除链 Phase 3 的原子计数（与 `visible_wiring` / `size_dist` 行的同源读数）
+    u32 visible = 0u;
+    if (auto* b = m_Cull.GetVisibleClusterCountBuffer()) {
+        if (void* p = b->Map()) { visible = *static_cast<const u32*>(p); b->Unmap(); }
+    }
+    m_Raster.LogDebugViewReadback(visible);
+}
+
+// ============================================================
+// §14.8 任务 24：LOD 流式（反馈 + 页池）的门面实现//
 // 【三件事】① 懒建页池/页表/反馈环（只一次）；② 每帧步进（读回延迟反馈 → 淘汰 → 限流上传 →
 //   写页表）；③ dump 帧一行读数。三件事**全部门控在 `enabled && softRaster && streaming`**：
 //   默认档一个 GPU 资源都不建、一次同步都不做、一行日志都不打（§14.2 不变式 1）。

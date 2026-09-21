@@ -215,6 +215,30 @@ public:
     ///   已经在；硬光栅的次序在软光栅之后，见 `NaniteRaster::RecordHardRasterPass` 的推导）。
     void EnsureHardRasterReady(const NaniteGBufferHandles& gb);
 
+    // ============================================================
+    // 【§14.8 任务 26 / §14.34 末尾最小范围第 1 条】屏幕可视化的门面接线
+    //
+    // 【门控】`enabled && IsReady() && debugView != 0`，且三张只读表齐备
+    //   （资产簇段 / 簇球 / LOD 元数据 / BVH 深度镜像）。任一不满足：
+    //   · 一个 GPU 资源都不建（`NaniteRaster::EnsureDebugViewResources` 连目标都不创建）；
+    //   · 不录任何派发（`RecordDebugViewPass` 在渲染器侧就不会被调用）；
+    //   · dump 帧一行都不打。
+    //   ⇒ 默认档（`debugView == 0`）的日志与转储与今天**逐字/逐位相同**（§14.2 不变式 1）。
+    // ============================================================
+
+    /// 懒建可视化资源（不注册 pass；真正的两次派发录在 `Nanite_CullChain3` 的 pass 体内）。
+    /// 【为什么放在 public 且由 `AddPasses` 调用】与软/硬光栅同一条既有做法：帧图构建期保证
+    ///   执行期资源就绪；帧图**不**为它注册独立 pass（它对零帧图资源的 pass 排序不可依赖）。
+    void EnsureDebugViewReady();
+
+    /// 录制可视化（在 `Nanite_CullChain3` 的 pass 体内、剔除链之后调用）。
+    void RecordDebugViewPass(rhi::IRHICommandList* cmd);
+
+    /// dump 帧打印**恰好一行**可视化读数（把 64×32 小目标读回 host 后统计）。
+    /// 【门控】`debugView == 0` 时直接返回：不 Map、不打一个字符。
+    /// 【同步约定】与其它读回相同：只 Map、不等待；调用方必须已 `WaitIdle()`。
+    void LogDebugViewReadback();
+
     /// 【§14.8 任务 18】**让位**的落点：既有 `GB_Clear` 的几何绘制让给模块，本函数只做
     /// "按既有清除值清屏 8×MRT + 深度"（模块自己建 PSO/附件布局、直接写既有 GBuffer 纹理句柄）。
     /// 【调用点】`DeferredPipeline_FrameGraph.cpp` 的 `GB_Clear` pass 体内，由**同一个开关**门控：
@@ -490,6 +514,13 @@ private:
     /// 【为什么是成员而不是 lambda 捕获】参数要在**帧图构建期**算（view-proj 与屏幕尺寸），
     ///   而在**执行期**推给 GPU；与任务 15 的 `m_ChainParams` 同一套做法（帧图是单线程构建的）。
     NaniteSoftRasterParams m_SoftParams{};
+
+    /// 【§14.8 任务 26】可视化的 push constant（`AddPasses` 每帧填一次；`debugView == 0` 时
+    ///   它不会被任何录制路径读到 —— 默认档零开销，只是结构体里多 96B 的成员）。
+    /// 【为什么 `vpRows` 不共用 `m_SoftParams` 的那 16 个 float】两份是**同样的填法**
+    ///   （同一个双重循环、同一份比特），但各自的 push constant 是独立的结构；让可视化依赖
+    ///   "软光栅恰好也在跑"会把两个档位绑死（可视化在 `softRaster=0` 档也该能用）。
+    NaniteDebugViewParams m_DebugParams{};
 
     /// 【§14.8 任务 18】资产的位置量化尺度（整网格最大轴长）。由 `EnsureAssetUploaded` 从
     ///   打包读数里取（与 DAG 哈希/顶点词同一个函数算出来的那份），资产未入库时为 0
