@@ -2222,6 +2222,14 @@ if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
 > （`visible_wiring visible=C=D=R`、`empty_draws=0`、`mismatch=0`），任务 3 的假簇链保留为
 > `nanite_fake_chain` 自证/退化开关；开启档 pass 数为 **14**（既有 12 + `Nanite_Cull` + `Nanite_CullChain3`，
 > 绘制录在后者体内）。**下一步从任务 17（CPU 参考对照工具）开始**。
+>
+> **进度更新（2026-09-21）**：任务 17–19 已完成（§14.26–§14.29），任务 15 的 P0（Hi-Z UV 镜像）见 §14.28；
+> **任务 20（深度与排序契约）见 §14.30** —— 本轮修掉两处 P0：① 深度解析 PSO 的 `depthTest=false`
+> 让 Vulkan 规范**丢弃全部 `SV_Depth` 写入**；② `StructuredBuffer::GetDimensions` 被当成二维宽高用，
+> 使深度解析只写了第 0 行。两处合起来导致"模块接管后深度附件恒为远平面"、判据 ⑦ 的 `hiz1` 档变空转；
+> 现已修复且判据 ⑦ 恢复 PASS（未改档位、未放宽守卫）。**判据 ⑦ 的 hiz1 档在默认阈值 16 下读数偏薄
+> （`occluded=4`），原因是任务 18 把 >16 三角形的簇留给任务 22 —— 任务 22 落地后该档会自然变强。
+> 下一步 = 任务 21/22**（画面级对照验收收口 → mesh shader 硬光栅 + 分流）。
 
 **阶段 0：模块化前置（独立开关先落地）**
 
@@ -3416,3 +3424,139 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
    4. `MeshBatcher` 的快照是"新增只读数组"，但它是本任务唯一改到的**非 Nanite 模块**文件
       （只增成员/getter + 在既有 `collect` 里多填一条记录，未改任何既有结构体与行为）。
    5. bindless 纹理数组因"强制一次 Flush"永久多一个占位槽（不影响任何已分配的材质 ID）。
+
+### 14.30 任务 20 实施记录：深度与排序契约（两处 P0 修复，2026-09-21）
+
+> 本节记录**任务 20（深度与排序契约）**。开工时的第一件事是复核基线，结果发现**判据 ⑦ 的 `hiz1`
+> 档在任务 18/19 之后已经变红**（`occluded=0`）—— 基线不是绿的，所以本轮先把它修绿，再谈契约。
+
+**① 开工基线（本人复跑，任务 19 之后的状态）**
+- `acceptance_sweep.ps1`：判据 ①–⑥ 与 ⑧ 全 PASS，**判据 ⑦ FAIL**，理由是
+  `tier hiz1 : occl_mip sum=0 (Hi-Z removed nothing: the criterion would be vacuous)` 与
+  `gpu_clusters=31648 >= cpu_clusters=31648`。
+- 读数（`07.Nanite`，`nanite_enable=1;nanite_hiz=1`）：
+  `cull3 … occluded=0 occl_mip=[0,0,0,0,0,0,0,0] hiz_half=[1.000000,1.000000] hiz_mips=8`。
+- 对照（`nanite_enable=1;nanite_hiz=1;nanite_soft_raster=0`，即模块在场但既有 GBuffer 路径仍写几何）：
+  `occluded=32031 hiz_half=[0.999821,0.999795]`（**与 §14.28④ 记录的 32031 逐位一致**）。
+  ⇒ 差异只在"谁写 GBuffer"：**模块接管后，深度附件恒为远平面 1.0**，Hi-Z 因此是一座空金字塔。
+
+**② P0-A：`depthTest=false` 会让 `SV_Depth` 被整块丢弃（规范级错误）**
+- 位置：`NaniteRaster.cpp` 的深度解析 PSO 建参处，原文 `desc.depthTest = false;` + 注释
+  "深度值由 shader 决定 ⇒ 不做硬件比较"。
+- **Vulkan 规范原文**（`VkPipelineDepthStencilStateCreateInfo::depthWriteEnable`）：
+  "controls whether depth writes are enabled **when `depthTestEnable` is `VK_TRUE`**.
+  Depth writes are **always disabled when `depthTestEnable` is `VK_FALSE`**."
+  ⇒ 关掉深度测试就**同时关掉深度写入**，`SV_Depth` 一点也写不进去。
+- 修法：`depthTest = true` + `depthCompare = CompareFunc::Always`（`Always` 恒通过 ⇒ 与"shader 写什么
+  就是什么"语义完全等价，只是让写入真正生效）。
+- 实测（只改这一处）：`occluded=0 → 12024`、`occl_mip=[0,0,0,0,0,0,122,3696]`、`mismatch=3818`。
+  **但 `hiz_half` 仍是 `[1.000000,1.000000]`** ⇒ 还有第二个 bug。
+
+**③ P0-B：`StructuredBuffer::GetDimensions` 返回的是"元素个数 + 1"，不是二维宽高**
+- 位置：`Nanite_DepthResolve.frag.slang` 原文
+  `u_DepthKey.GetDimensions(width, height);` 之后
+  `if (pixel.x >= width || pixel.y >= height) { depth = 1.0; return; }`。
+- 深度键是**一维** `RWStructuredBuffer<uint>`（长度 = 宽×高）⇒ `GetDimensions` 给出
+  `width = 宽×高`、`height = 1`。于是 `pixel.y >= 1` 对**除第 0 行以外的所有像素**成立，
+  深度解析只写了第 0 行，其余全部写成远平面 1.0。
+- **三个判定实验（各自单独可复核，缺一不可）**：
+  1. **把解析输出强制成常量 `0.5`**（临时改 shader，`.spv.h` 时间戳已确认重编译）⇒ 读数
+     **逐字不变**。说明解析的输出根本没到达 Hi-Z；且那行常量写在第 0 行之后、大多数像素早已在
+     早退里返回 1.0 ⇒ 与"只有第 0 行被写"完全一致。
+  2. **把深度附件从 `Clear` 换成 `Load`**（临时改 PSO）⇒ 读数**逐字不变**。说明那个 1.0
+     **不是清除值**造成的（若是，`Load` 会保留上一帧的真实深度）。
+  3. **把 Hi-Z 的深度源临时换成 albedo**（临时改 `DeferredPipeline_FrameGraph.cpp` 一行）⇒
+     `hiz_half=[0.000000,0.000000]`、`occluded=104579`。**证明 Hi-Z 构建确实在读它的输入纹理**
+     （排除"构建器/绑定坏了"这条怀疑），于是问题只可能在"深度附件里到底是什么"。
+     三个实验合起来把根因唯一地钉在 `GetDimensions` 上。
+- 修法：屏幕尺寸由 CPU 用**显式 push constant** 传进来（新 POD `NaniteDepthResolveParams`，8B，
+  `static_assert` 钉住尺寸/偏移），shader 不再从一维缓冲反推二维形状；顺带保留"宽高为 0 就按
+  没有几何处理"的防御分支（不越界读）。
+
+**④ 顺手修掉的第三、第四条**
+
+**(4a) `depth_written` 是个恒真常量，正是它掩盖了 P0-B**
+- 旧实现里 `depth_written` 在 C++ 侧**硬编码为 1**，注释写"深度解析恒执行（全屏片元写 SV_Depth）
+  ⇒ depth_written 恒 1"。一个恒真读数把一个"一列都没写进去"的 bug 掩盖了一整个任务。
+- 修法：深度解析通道自己 `InterlockedAdd` 计数（新增绑定 1 = 软光栅读数缓冲；新槽位
+  `kNaniteSoftStatDepthResolvedPixels = 14`，C++/Slang 两侧同步 + 注释对齐）。
+  语义是**去重后的像素数**（全屏片元对每个像素只访问一次），与第 2 趟的 `pixels_written`
+  （通过等值复检的"簇×三角形×像素"写次数）不是同一个量；可核对的不变式是
+  `depth_written <= pixels_written <= covered_px`（实测两档都成立）。
+  交叉核对：阈值 64 档 `depth_written=921399`，与判据 ⑧c 的写标记计数
+  （`gb_lightmapkey` 落在 Nanite 段的像素）**同一个数** —— 两条互不相干的路径给出同一个值。
+
+**(4b) 判据 ⑧d 的启动期布局告警：接管档 46 → 42 行（模块内一行级修法）**
+- 判据 ⑧d 的豁免口径里已经写明这条修法（`build\verify\nanite_takeover_cmp.ps1` 头部），
+  但**代码里并不存在**（`git status` 干净、`NaniteRaster.cpp` 当时写的是
+  `from = ResourceState::RenderTarget`）⇒ 判据 ⑧d 事实上卡在 `delta <= 1` 上。
+- 修法：模块的清屏屏障把 8 张颜色目标的**源状态**从 `RenderTarget` 改成 `Undefined`。
+  语义精确 —— 本 pass 是全屏 compute 清屏，8 张目标的每个像素都会被覆盖，"丢弃旧内容"
+  正是要表达的；而写 `RenderTarget` 会在纹理刚（重）建、RHI 布局追踪器还没记录的那一帧被当真，
+  让校验层记下"该命令缓冲期望 COLOR_ATTACHMENT_OPTIMAL"。实测 `vuid_lines 46 → 42`
+  （`startup layout warnings` off=6 / on=7，`delta=1`），VUID 类目集合不变（`new=0`）。
+
+**⑤ 验收证据（本人复跑，2026-09-21）**
+
+| 档位 | `occluded` | `mismatch` | `occl_mip` | `hiz_half` |
+|---|---|---|---|---|
+| 修前（基线，接管 + 阈值 16） | 0 | 0 | 全 0 | `[1.000000,1.000000]` |
+| 只修 P0-A | 12024 | 3818 | `[0,0,0,0,0,0,122,3696]` | `[1.000000,1.000000]` |
+| **P0-A + P0-B（阈值 16，默认档）** | **4** | **4** | `[0,0,0,0,0,0,4,0]` | `[1.000000,1.000000]` |
+| **P0-A + P0-B（阈值 64，全覆盖）** | **48150** | 11678 | `[0,0,0,0,0,183,2739,8756]` | `[0.999845,1.000000]` |
+| 对照：`nanite_soft_raster=0` | 32031 | 7498 | `[0,0,0,0,0,61,1950,5487]` | `[0.999821,0.999795]` |
+
+- **默认档（阈值 16）下 Hi-Z 恢复为"真的在按深度剔除"**：`extra_gpu=0`、
+  `mismatch == sum(occl_mip)`（4 == 4）、`gpu_clusters + mismatch == cpu_clusters`（31644+4=31648）、
+  `gpu < cpu`、`sum > 0` —— 判据 ⑦ `hiz1` 档的全部守卫**现在都成立**（修前 `sum=0` 直接判空转）。
+- **阈值 64 档**给出"深度场完整时"的量级（48150），与对照档（32031）同量级，且 `hiz_half`
+  不再是 1.0（`0.999845`）⇒ 深度附件里确实有几何深度。
+- 真实读数（不再恒 1）：阈值 16 ⇒ `pixels_written=3053 depth_written=101`；
+  阈值 64 ⇒ `pixels_written=44318207 depth_written=921399`（**不变式成立**：
+  `101 ≤ 3053 ≤ 3053`、`921399 ≤ 44318207 ≤ 314423307`）。
+- **判据 ⑧（任务 20/21 的画面级对照）随之回到 PASS**：`(8e)` 开启档去掉 Nanite pass 后与关闭档
+  **逐行相同**、sha 命中冻结值 `1C15AB72E688B530…`；`(8a)` `V=C=D=R`、`material_pixels ==
+  pixels_written`、`neutral_material_pixels=0`；`(8b)` 差异**恰好**是 4 张 GBuffer 目标 + 3 个抖动族
+  （`unexpected=0 missing=0`）；`(8c)` 阈值 64 档 `gb_worldpos corr=0.9290 ≥ 0.90`、
+  `metallic 直方图 corr=0.9993 ≥ 0.99`、roughness 边界与参考相同、写标记 **921399 px**；
+  `(8d)` `vuid_lines off=41 on=42 delta=1`、`new VUID type=0`。
+- **判据 ⑦（任务 17）**：`CULL DIFF: PASS`，五档全 OK，其中 `hiz1` 档
+  `visible=31644 mismatch=4 gpu/cpu=31644/31648`（修前是 `sum=0` 判空转）。
+- **全量八条判据**（`powershell -NoProfile -ExecutionPolicy Bypass -File build\verify\acceptance_sweep.ps1`）
+  一次跑完 ⇒ **`ACCEPTANCE SWEEP: PASS`**：
+  ① 白炉 `prov6_final` `min=mean=max=1.0000`、`rgb_mean=(1.0000,1.0000,1.0000)`；
+  ② 背靠背抖动族之外 **0 项差异**、`max ULP = 0`（有界漂移族 5 项，与既有口径一致）；
+  ③ `lumen_passes=0`；④ 默认预设 vs `s37fin2` 抖动族之外 **0 项差异**；
+  ⑤ `HugEngineTests` **309 例 / 62169 断言全绿**；
+  ⑥ 关闭档 12 pass、`nanite_leak=0`、指纹 `1C15AB72E688B530…`（= 冻结值）、开启档 14 pass 且既有集合与顺序未变；
+  ⑦ `CULL DIFF: PASS`；⑧ `TAKEOVER CMP: PASS`。
+- **本轮的改动面**（4 个文件，逐条可回退）：`NaniteRaster.cpp`（PSO 深度状态 + 清屏屏障源状态 +
+  深度解析 push constant + 读数）、`NaniteTypes.h`（`NaniteDepthResolveParams` + 新读数槽位）、
+  `Nanite_DepthResolve.frag.slang`（push constant 取代 `GetDimensions` + 真实原子计数）、
+  `Nanite_SoftRasterCommon.slang`（新读数槽位常量）。**渲染路径的 pass 集合、声明与顺序一个都没动**
+  （判据 ⑥ 的冻结指纹与判据 ⑧e 的逐行对比即证据）。
+
+**⑥ 一处明确的裁决：本次**没有**改判据 ⑦ 的档位定义**
+- 一开始的判断是"`hiz1` 档在接管下测不出东西，应该改成 `nanite_soft_raster=0`"（与判据 ⑥c 的
+  结构性理由相同）。**修完 P0-A/P0-B 后这个改法不再必要**：接管档自己就能给出
+  `sum>0`、等式成立、`gpu<cpu` 的读数 ⇒ 判据保持"测真正在生产的那条路径"，比换档更严格。
+  **不改档位、不放宽任何守卫。**
+- 如实记录的弱点是：默认阈值 16 下只有 61 个簇（≈101 个像素）进入软光栅，
+  所以 `occluded` 只有 **4** —— 数字薄，但**非空且三条等式逐项成立**。它偏薄的原因正是
+  任务 18 的通道边界（>16 三角形的簇留给任务 22 的硬光栅、当前一个都不画）；
+  **任务 22 落地后模块会补全整个深度场，该档会自然变成强判据**（阈值 64 档的 48150 就是预演）。
+
+**⑦ 偏差与风险（不掩盖）**
+1. **`pixels_written` 的平局口径未动**：它是"通过等值复检的（簇×三角形×像素）写次数"，
+   而等值复检的键低 8 位只到"簇内三角形下标" ⇒ **两个不同簇的三角形若深度位模式与簇内下标
+   都相同，会同时通过复检并各自写一次颜色**（最终颜色是竞态）。合成实例网格里同一深度层有多个
+   平移副本 ⇒ 阈值 16 档实测 `pixels_written=3053` 而**去重像素只有 101**（30 倍）。
+   这是 §14.27④ 已记录的"平局全序只在簇内成立"的直接后果，**本次不改**
+   （修它要动键编码或加簇号位，属任务 21/22 的改动面）。
+2. **`hiz_half` 在阈值 16 档仍是 `1.000000`**：32×32 网格采样 mip1 时命不中那 101 个像素，
+   属采样粒度问题，不是深度没写（阈值 64 档的 `0.999845` 即反证）。
+3. **深度精度**：深度键高 24 位 = NDC 深度位模式（截掉低 8 位 ≈ 256 ulp），现在真正落进
+   深度附件 ⇒ 接管档的深度比既有路径略粗（与 §14.27⑤-2 同一条偏差，量级未变）。
+4. 判据 ⑧ 的 `vuid_lines` 上界与类目判据在本次改动后**未新增类型**（见本轮验收读数）；
+   若接管档转储里出现新的差异目标，属"深度变真实"的**预期后果**，按判据 ⑧b 的"四张 GBuffer
+   目标 + 抖动族"口径核对（本轮实测见提交说明）。
