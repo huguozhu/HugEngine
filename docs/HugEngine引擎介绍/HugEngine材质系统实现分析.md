@@ -4,7 +4,7 @@
 > 范围：**延迟渲染路径**（`DeferredPipeline` → `GBuffer.frag` → `DeferredLighting.frag`）的材质参数、
 > 各参数的意义与数学原理、以及与材质系统相关的已知边界与改进清单。
 > 相关文档：[HugEngine渲染管线实现分析.md](HugEngine渲染管线实现分析.md)（管线与 GBuffer 通道）、
-> [HugEngine全局光照GI实现分析与架构优化方案.md](HugEngine全局光照GI实现分析与架构优化方案.md)（IBL 烘焙与 split-sum）、
+> [HugEngine全局光照GI本质、实现与架构优化.md](HugEngine全局光照GI本质、实现与架构优化.md)（IBL 烘焙与 split-sum）、
 > [HugEngine Entity-Component 架构与组件功能.md](HugEngine%20Entity-Component%20架构与组件功能.md)（组件字段）、
 > [HugEngine架构UML文档.md](HugEngine架构UML文档.md)（类关系）。
 >
@@ -389,7 +389,7 @@ clearcoat/sheen/transmission 贴图同样无处放。
 `IBL_BRDF_LUT.frag.slang:49-50`：`a = roughness²; k = a²·0.5` ⇒ `k = roughness⁴/2`，而 Karis/UE4 的
 IBL 惯例是 `k = a/2 = roughness²/2` ⇒ 高粗糙下 Smith 遮蔽偏小 ⇒ **间接高光偏亮**。
 （直接光路径的 `k=(r+1)²/8`，`pbr_common.slang:53`，是正确的，两者不可混用。）
-该疑点此前已记录于 [GI 分析文档](HugEngine全局光照GI实现分析与架构优化方案.md) 第 44 行（IBL 小节）。
+该疑点此前已记录于 [GI 本质、实现与架构优化](HugEngine全局光照GI本质、实现与架构优化.md) §2.2.3（IBL 的 Shader 算法细节），并在 §4.2 各技术现状要点里复核。
 
 ### 6.14 注释与文档漂移
 

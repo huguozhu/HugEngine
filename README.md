@@ -43,10 +43,10 @@ cmake --build Build         # 需要 Release：cmake --build Build --config Rele
 - [技术全景与实施计划](docs/HugEngine引擎介绍/HugEngine技术全景与实施计划.md)
 - [技术名词全目录](docs/HugEngine引擎介绍/HugEngine技术名词全目录.md)
 - [渲染管线实现分析](docs/HugEngine引擎介绍/HugEngine渲染管线实现分析.md) / [RHI 架构与 Vulkan 实现分析](docs/HugEngine引擎介绍/HugEngine RHI架构与Vulkan实现分析.md)
-- [全局光照（GI）实现原理](docs/HugEngine引擎介绍/HugEngine全局光照GI实现原理.md) / [GI 系统的结构和实现细节](docs/HugEngine引擎介绍/HugEngine全局光照系统的结构和实现细节.md)
+- [全局光照（GI）本质、实现与架构优化](docs/HugEngine引擎介绍/HugEngine全局光照GI本质、实现与架构优化.md)
 - [AI 架构设计](docs/HugEngine引擎介绍/HugEngine AI架构设计/)（AI 一等公民 / 统一基座 / AIGC 平台 / LLM 通信协议，共 9 篇）
 
-> 该目录是 **HugEngine 自身的技术文档**（共 15 篇 + AI 架构设计 9 篇）：架构总览、各子系统实现分析（渲染管线 / RHI / GI / 多线程 / 可扩展性）、规划评审与缺口分析。
+> 该目录是 **HugEngine 自身的技术文档**（共 12 篇 + AI 架构设计 9 篇）：架构总览、各子系统实现分析（渲染管线 / RHI / GI / 多线程 / 可扩展性）、规划评审与缺口分析。
 
 **架构与规划**
 
