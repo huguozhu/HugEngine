@@ -2344,6 +2344,80 @@ if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
   的判据 ⑥ 段。两者都在被 gitignore 的 `build/` 下（与 Lumen 的验收脚本同处），
   仓库内的**权威记录是本节的判据定义与冻结指纹**；指纹变化时先改这里再改脚本。
 
+**任务 22 的分流验收口径（2026-09-21 拟定；数值为改动前基线，实现后需回填实测）**
+
+> 本节是任务 22（mesh shader 硬光栅 + 软硬分流）的验收定义。定这些口径的依据是**既有脚本的实际
+> 判据**（`build\verify\nanite_takeover_cmp.ps1` / `nanite_smoke.ps1`）与 **2026-09-21 的实测读数**，
+> 不是设计意图的复述。
+
+- **三档语义（新开关必须默认关闭）**
+  - `enabled=0`：逐位不变（判据 ⑥）。
+  - `enabled=1`（硬光栅**默认关**）：**必须与任务 21 完全一致** —— 关闭档指纹
+    `1C15AB72E688B530…`、开启档 14 个 pass / `nanite_passes=2` / sha `750CC247BF8B9C3D…` 一字不变。
+  - `enabled=1 && hard_raster=1`：任务 22 的新路径，本节的 A/B 读数只在这一档取。
+  - **为什么硬光栅必须默认关（这条有硬证据，不是保守）**：判据 8b 逐文件比对开关两档转储，只允许
+    `$gbTargets = albedo/gb_normal/gb_worldpos/gb_lightmapkey` 与抖动族
+    `hdr|prov0_ao_final|prov0_ao_raw|radiance` 变化，其余任何差异即 `unexpected != 0` → FAIL。
+    而默认阈值 16 档模块**只覆盖 0.16% 屏幕**（`pixels_written=3264`），所以 `prov1_*` / `rsm_*` /
+    `ssr` / `ibl_irr` 这些 **GBuffer 下游**转储仍在 f16 容差内。一旦分流让覆盖率跳到几十 %，
+    这些转储必然变化 ⇒ 8b 立刻红。故硬光栅只能是**独立开关 + 默认关**（与任务 4 的 `testWrite`、
+    任务 6 的 `meshTest` 同款）。
+
+- **A/B 配对（"混合光栅画面一致"的量化形式）**
+  任务 22 的本质是"**同一批几何，一部分换了光栅化路径**"，所以正确的参考不是"模块 vs 引擎"，
+  而是"全软光栅 vs 软硬混合"：
+  | 档 | cfg（经 `HE_SMOKE_EXTRA` 传入） | 语义 |
+  |---|---|---|
+  | A 参考 | `nanite_enable=1;nanite_soft_max_triangles=64` | 全部簇走软件光栅 |
+  | B 受测 | `nanite_enable=1;nanite_hard_raster=1`（阈值默认 16） | 小簇软件、大簇硬件 |
+  ```powershell
+  $env:HE_SMOKE_EXTRA = 'nanite_enable=1;nanite_soft_max_triangles=64'
+  powershell -NoProfile -ExecutionPolicy Bypass -File build\verify\nanite_smoke.ps1 -Tag t22_soft64
+  $env:HE_SMOKE_EXTRA = 'nanite_enable=1;nanite_hard_raster=1'
+  powershell -NoProfile -ExecutionPolicy Bypass -File build\verify\nanite_smoke.ps1 -Tag t22_hard16
+  python build\verify\nanite_takeover_cmp.py t22_soft64 t22_hard16 --dir build\verify
+  ```
+  （覆盖必须走 `HE_SMOKE_EXTRA`：脚本第 9-10 行注明 `-Extra` 作为 `-File` 参数在本环境被拒。）
+
+- **期望数值（改动前基线 → 实现后须逐项回填）**
+  | 量 | 基线（`enabled=1`，阈值 16） | 实现后期望 | 不符时的含义 |
+  |---|---|---|---|
+  | `soft` | **61** | 仍为 61 | 小簇被硬光栅抢走 ⇒ 早退条件写反 |
+  | `skipped_big` | **31587** | 字段名与语义**不许改**（判据 8a 依赖）；由硬光栅行新字段表达"被接手" | — |
+  | 硬光栅簇数（新字段） | — | **≈31587** | 只有 0/几百 ⇒ 网格任务数用了 CPU 常量 |
+  | 覆盖（写标记像素） | 3264（**0.16%**） | **≈921399（0.4443）**，即与 A 档同量级 | 显著偏低 ⇒ 大簇被丢，分流未真正生效 |
+  | A vs B `gb_worldpos` corr | — | **≈1.0，应远高于 0.9290** | 只有 0.92x ⇒ 两套顶点投影不一致（很可能用了 Slang 矩阵乘法而非 vpRow 点积） |
+  | A vs B `metallic` 直方图 corr | — | ≥0.99 | — |
+  | A vs B neutral-material pixels | — | 0 | 硬光栅用中性常数而非资产材质 |
+  参考：A 档（= 阈值 64 全覆盖档）的既有实测为写标记 `921399 px`、覆盖 `0.4443`、
+  `worldpos corr=0.9290`（**该值是"模块 vs 引擎"，含几何差异**，故只有 0.93）、
+  `metallic corr=0.9992`、`material_pixels == pixels_written == 44318207`、`skipped_big=0`。
+
+- **尺寸约束（2026-09-21 实测本机）**
+  - `meshInvocations=128, meshVertices=256, meshPrimitives=256` ⇒ **`[numthreads(N,1,1)]` 的 N ≤ 128**；
+    建议按 `DeviceCaps::maxMeshOutputVertices/maxMeshOutputPrimitives` 与
+    `VulkanDevice::m_MaxMeshWorkGroupInvocations` 钳制，不要硬编码。
+  - 簇上限 `kNaniteMaxClusterTriangles=64` / `kNaniteMaxClusterVertices=128` ⇒ mesh shader 输出数组
+    必须声明到 **64 图元 / 128 顶点**，靠 `SetMeshOutputCounts` 报实际值。
+
+- **深度次序的既有约束（决定硬光栅能插在哪一步）**
+  深度解析 PSO（`NaniteRaster.cpp`）是 `depthTest=true` + `depthCompare=**Always**` + `depthWrite=true`，
+  且 `depthLoadOp` 取默认 **Clear**，配合 `BeginOffscreenPass(..., &depthClear, ...)`
+  ⇒ **它每帧把整个深度附件清掉再全屏重写**。因此"硬光栅排在深度解析之前"按原样不成立
+  （深度会被清掉/覆盖），除非把解析 PSO 改成 `Load` + `LessEqual`（回归面大）。
+  推荐次序（两个遮挡方向都正确，且不动 §14.30 的解析 PSO）：
+  `GB_Clear → 硬光栅(LessEqual+depthWrite，写 4 张 GBuffer + 深度) → 从 D32 点采样播种深度键
+   → 软光栅第 1 趟(InterlockedMin) → 第 2 趟(等值复检写色) → 既有深度解析`。
+
+- **判据 ⑦/⑧ 有已知抖动，单次结果不足以定罪**
+  同一份未改动代码上实测过三次完整 sweep：`log_baseline_r20.txt`（判据 ⑦ FAIL）、
+  `log_r20_final.txt`（判据 ⑧ FAIL，但 8b 仍 `unexpected=0 missing=0`、`PIC CMP: PASS`）、
+  `log_r20_final2.txt`（全 PASS）。⇒ 复验必须**跑 ≥2 次**，并把失败落在 8a/8b/8c/8e 的哪一小节
+  原文贴出来，再判断是否由本次改动引起。
+
+- **校验层基线**：`vuid_lines off=41 on=42 delta=1`、`distinct VUID types new=0`
+  ⇒ 新 mesh 管线**不得引入新的 VUID 类型**。
+
 **判据 ④ 的一处既有漂移裁决（2026-09-20，与 Nanite 无关）**
 - 现状：`aq_def` 与基线 `s37fin2` 相比，**17 项转储逐位一致**，只有
   `lumen_irradiance` 与下游 `prov6_*` 共 5 项不同（`maxULP=6`、`maxAbs=1.5e-4`、
@@ -2357,7 +2431,8 @@ if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
   一定会 FAIL。④ 的输出会显式打印"容差族里有几项"，不允许静默放过。
 
 **核验时间**：§14.1 的代码引用为 **2026-09-19（本次评审）** 逐条核对；§14.11 的判据 ⑥ 与
-④ 漂移裁决为 **2026-09-20（任务 1–2 实施时）** 实测。
+④ 漂移裁决为 **2026-09-20（任务 1–2 实施时）** 实测；§14.11 的任务 22 分流验收口径为
+**2026-09-21** 依既有脚本判据与当日实测读数拟定，其中"实现后期望"一列须在任务 22 落地后回填实测值。
 
 ### 14.12 接手须知（新会话从这里开始）
 
