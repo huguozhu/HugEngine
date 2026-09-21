@@ -4743,6 +4743,13 @@ Sponza 实测（同一资产、同一相机，只改 K）：
 - 按 §14.35 ② 的要求，这里写明「**容差族里有 5 项**」而不是笼统的"0 项差异"；这 5 项是 §14.11 记录的
   **既有豁免**（与 Nanite 无关——判据 ⑥ 已证明关闭档一个 pass 都不注册），**不要试图修**。
 - 基线目录 `build\verify\gi_s37fin2_*`（28 个文件）**不要删**，删了判据 ④ 会"跳过"而不是判定。
+- **本轮全量复跑（任务 26 其余部分落地后，`acceptance_sweep.ps1` 不带 `-OnlyNanite`）**：
+  `ACCEPTANCE SWEEP: PASS`，**八条判据全过** —— ① 白炉 `prov6_final` `min=mean=max=1.0000`；
+  ② 背靠背采样抖动族之外 **0** 项、`max ULP = 0`；③ Lumen 关闭 `lumen_passes=0`；
+  ④ 默认预设对 `s37fin2` 抖动族之外 **0** 项（容差族 5）；⑤ `HugEngineTests: SUCCESS!`；
+  ⑥ `off passes=12 nanite_leak=0`、`passes=14 nanite_passes=2 preexisting_set_changed=False`、
+  `differing_outside_jitter=0`；⑦ `CULL DIFF: PASS`；⑧ `TAKEOVER CMP: PASS`。
+  ⇒ 判据 ④ 与⑤ 在**当前**代码上重新实测通过（不是复读早先的记录）。
 
 **③ 开关不变式常跑 —— 载体 ✅，但"常跑"不成立（如实标注）**
 
