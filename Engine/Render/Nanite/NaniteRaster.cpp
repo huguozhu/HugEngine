@@ -944,10 +944,16 @@ void NaniteRaster::RecordGBufferClearPass(rhi::IRHICommandList* cmd, const GBuff
 
     // 颜色目标：帧图把它们当 RenderTarget（GB_Clear 的声明），本 pass 要当 UAV 写
     // ⇒ 显式屏障（帧图推导的 dstStage 是保守映射，不含 ComputeShader —— 任务 4 的教训）。
+    // 【§14.8 任务 20：源状态取 `Undefined` 而不是 `RenderTarget`】
+    //   本 pass 是**全屏 compute 清屏**：8 张颜色目标的**每个像素都会被覆盖**，所以"丢弃上一份
+    //   内容"在语义上是精确的，不需要把旧内容当作有效数据。而声明 `from = RenderTarget` 会在
+    //   纹理刚（重）建、RHI 布局追踪器还没有记录的那一帧被当真，让校验层记下
+    //   "该命令缓冲期望 COLOR_ATTACHMENT_OPTIMAL" ⇒ 接管档的**启动期**布局告警多出 7 条
+    //   （实测 `vuid_lines 46 → 42`）。这正是判据 ⑧d 的豁免口径里那条"模块内便宜的修法"。
     for (u32 i = 0; i < 8u; ++i) {
         cmd->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput,
                              rhi::PipelineStage::ComputeShader,
-                             rhi::ResourceState::RenderTarget,
+                             rhi::ResourceState::Undefined,
                              rhi::ResourceState::UnorderedAccess,
                              colors[i]);
     }
