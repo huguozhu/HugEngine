@@ -2293,7 +2293,7 @@ if (m_Nanite.GetSettings().enabled && m_Nanite.IsReady()) {
 |---|---|---|---|
 | 22 | mesh shader 硬光栅 + 分流 | 复用任务 6 的管线；`triCount > 16` 走硬光栅（§5.2 L322-334） | 混合光栅画面一致、软硬占比可读 —— **已完成（§14.31，2026-09-21）**：硬光栅接手 31587/31587 个大簇（100%）、软硬占比读数齐备、A/B 覆盖 99.62% 且 `worldpos corr=0.9989`；附带宽带修掉 3 个既有 RHI 潜伏缺陷 |
 | 23 | 混合光栅分配策略 + 性能读数 | 阈值/簇大小分布对帧时的影响（接入 `HE_CPU_PASSES` 与 `LogFrameBudget`） | 帧时读数可复现；无回归 —— **已完成（§14.36，2026-09-21）**：新增 `size_dist` 五桶分布（25 个日志零违反）与 `perf` 行（`frame_ms` 与【帧预算】逐位同源）；同覆盖对照 soft64 vs hard16 = **GPU 15~23× / 墙钟 5.5~7×**；阈值 ∈[4,32] 等价、=64 退化；数据类读数逐位可复现、时序类给中位数+极差口径；`-OnlyNanite` sweep **PASS**、冻结指纹不变 |
-| 24 | LOD 流式（反馈 + 页池） | **文档空白**（无 cluster page / page pool / 流式设计），需先补设计再实现 | 先补设计评审，再定验收 |
+| 24 | LOD 流式（反馈 + 页池） | **文档空白**（无 cluster page / page pool / 流式设计），需先补设计再实现 —— 设计由 §14.32 补齐（含 6 处修正） | 先补设计评审，再定验收 —— **已完成（§14.37，2026-09-21）**：阶段一（页池 + 页表 + 间接层 + 反馈 + 驻留管理 + 读数 + 开关）落地；页 = 「簇段 + 顶点段 + 三角形段各取一段」（对齐整份共享内容边界，**不改 .nanite 格式**）；判据 (a)(b)(c)(d1)(d2)(d3)(e) 全部有实测（(c) 池 8 槽 `page_misses=122` 且读数与 `visible` 精确对账；(d1) 数据类读数逐位相同 + `requests_total>0` 非空洞守卫；(d2) 信号 729 ≤ 噪声底 734）；单测 **316/71,095 全绿**；**判据 (d) 的原始形式（4 张 GBuffer 逐位相同）不可达**（§14.31 ⑩ 的既有不确定性），已按 (d1)/(d2)/(d3) 改口径并如实记录；**存疑**：预取/LOD 选择、磁盘 I/O（阶段二） |
 | 25 | Material Bin | 按材质分组 + bindless 材质数组（§5.4） | 多材质场景无 draw 爆炸；描述符切换次数可读 |
 
 **阶段 7：横切**
@@ -4314,3 +4314,225 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
 - 未优化过绘与 mesh 线程利用率（本轮只量化）；未改软光栅 24 位深度键截断与平局口径；
   未接线 `DrawMeshTasksIndirectCount`；未把硬光栅做成独立帧图 pass（沿用任务 22 裁决）。
 - 只测了 07.Nanite 的 1920×1080 单场景单相机；未测多分辨率与极端阈值（1 / 4）。
+
+### 14.37 任务 24 实施记录：LOD 流式（反馈 + 页池，阶段一）（2026-09-21）
+
+**目标**：落地 §14.32 的**阶段一** = 页池 + 页表 + 间接层 + 反馈通路 + 驻留管理 + 读数 + 开关，
+页数据源为**留存在内存里的完整资产**（不做磁盘 I/O）。新增 `Engine/Render/Nanite/NaniteStream.{h,cpp}`
+（已进 `Engine/Render/CMakeLists.txt` 显式列表），改动 6 个既有 C++ 文件、4 个着色器、样例与单测；
+未新增着色器文件（因此 `Engine/Shader/CMakeLists.txt` 无需改动）。
+**明确不做**（§14.32 ⑫）：磁盘 I/O 与分段读取、LOD 选择与预取、页压缩/去重、多资产共享池装箱、画面页可视化。
+
+**① 最终页口径（与 §14.32 的对应关系）**
+
+- **页 = 簇段 + 顶点段 + 三角形段三段各取一段**（§14.32 ② 的默认项；实现选的是"统一成三段"那条）：
+  - **顶点段 / 三角形段** = "**连续 K 份共享内容**"的记录区间，端点由**去重升序**的
+    `cluster.vertexOffset` / `cluster.triangleOffset` 集合给出（最后一份到段尾）⇒
+    **页边界完全由资产自身推出**：不改 `.nanite` 格式、不保留构建期临时数组（§14.32 末段的结论成立）；
+  - **簇段** = 引用了这些内容的那些"簇出现"记录的**收集**（按出现下标升序密集打包）+
+    每簇一个**页内相对**下标（`NaniteClusterPageRef::local`）。
+- **K 的口径变更（任务书 512 簇/页 → 实现 512 份共享内容/页）**：§14.32 修正后页必须对齐到"整份共享内容"
+  边界，K 的含义相应变化。Sponza 实测 `contentCount=8202`、`pageCount=17`（K=512）。
+- **为什么簇段是"收集"而不是"区间"**：去重路径下 `cluster.vertexOffset` **不单调**（§14.32 的修正）。
+  单测在**真实资产**上把这条钉成可执行事实：`前 4 个 vertexOffset=[0 45 0 90 …] 单调=0`
+  （造法：4 片 64 tri 的网格里第 0/2 片形状逐位相同、第 1/3 片各起一条脊 ⇒ 第 2 片去重命中回第 0 片）。
+  代价是每簇 8B 映射表（Sponza 66 KB），换来"顶点/三角形段是真正的区间"⇒ 偏移换算只有一次减法 + 一次乘法。
+- **纯函数 + 单测**：`BuildNanitePagePlan`（RHI-free，`NaniteUpload.cpp`）。新增 `Tests/TestNaniteStream.cpp`
+  （文件头按仓库体例写了覆盖范围，编号续 `TestNaniteBuilder.cpp` 的 22 条、从 23 起）：
+  **6 用例 / 8,766 断言**，覆盖空资产、K=0、段空、段首空洞、**两张共享表不同源**、不变式
+  （页数 / 双射 / 不跨页 / 槽步长 / 槽字节）、前缀和自洽、`PoolBytes`、确定性、K 的影响、真实资产路径。
+
+**② 判据 (d) 的改口径（原始形式不可达；不悄悄放宽）**
+
+§14.32 ⑪(d) 原文要求"页池足够大时 `streaming=1` 与 `streaming=0` 在 4 张 GBuffer 上**逐位相同**"。
+**该形式不可达，原因与任务 24 无关**：§14.31 ⑩ 已实测"模块接管档两次**同配置**运行并非逐位可复现"
+（软光栅深度键平局 ⇒ 多个三角形都通过等值复检 ⇒ 由 UAV 写入顺序决定）。本轮重新量了这条噪声底，实际采用三条：
+
+**(d1) 数据类读数逐位相同（最强证据）** —— `nan_t24_off_a`（`nanite_enable=1`）vs
+`nan_t24_on`（`nanite_enable=1;nanite_streaming=1`）；**两档只差 `nanite_streaming` 一个键**（逐键核对：差异键数 = 1）：
+
+```
+soft_raster   soft=61 skipped_big=31587 pixels_written=3264 degenerate=0 neutral_material_pixels=0
+              material_pixels=3264 fallback_pixels=0 multi_mesh_clusters=97 max_triangles=16
+              instances=64 depth_written=106 covered_px=3264 tested_px=9767
+              diag_screenw=1920 diag_screenh=1080 diag_maxtri=16 diag_extent_milli=3720854
+size_dist     buckets=[61,0,0,0,31587] total=31648 clusters=31648 visible=31648
+              sum_eq_clusters=1 sum_eq_visible=1
+visible_wiring visible=indirect_count=draws=rasterized=31648 empty_draws=0 mismatch=0
+```
+两档**逐字段相同**；开启档的 `stream` 行另有 `page_misses=0`、`table_ok=1`、`dup_slots=0`、
+`gpu_resident=resident=9`、`uploads_this_frame=0 ≤ uploads_limit=4`。
+**非空洞守卫必须用累计量**：稳态下当帧请求数天然为 0（需要的页都已驻留），所以断言的是
+**`requests_total=24 > 0`**（`pages_requested_total=9 > 0`、`max_requests_per_frame=9`）——
+若拿当帧 `pages_requested=0` 去判，功能完全正常时也会误报失败。
+
+**(d2) 像素类差异不超过噪声底**（工具 `build/verify/cmp_dumps.py`）：
+
+| 对照 | 总差异像素 | 受影响文件 | 其余文件 |
+|---|---|---|---|
+| 噪声底 `off_a` vs `off_b`（同配置两次） | **734** | albedo 238 / hdr 208 / gb_lightmapkey 158 / gb_normal 64 / gb_worldpos 66 | 13 个**逐位相同** |
+| 信号 `off_a` vs `on` | **729** | albedo 240 / hdr 205 / gb_lightmapkey 206 / gb_normal 64 / gb_worldpos 14 | 13 个**逐位相同** |
+
+⇒ 信号 ≤ 噪声底，且**受影响文件集合完全相同**（恰好是 §14.31 ⑩ 记录的那 4 张 GBuffer + `hdr`）。
+**如实标注两点**：① 逐文件的 `maxULP`/`maxRel` 是"差异像素上的最大值"、本身抖动很大
+（albedo `maxRel` 28.17 → 79.33、gb_normal `maxULP` 2914 → 2081），稳健判据是 `diff_px` 与 `total`；
+② 噪声底取自**一次**配对运行 ⇒ 结论是"差异与同档抖动同阶、受影响集合一致"，
+**不是**"已证明统计意义上无差异"。
+
+**(d3) 结构性证据（口径修正）** —— `resident=9`、`pages_total=17`、`page_misses=0`、`gpu_resident=9`。
+**`resident == pages_total` 按字面不可达**：阶段一**不做预取**（§14.32 ⑫），只有被请求过的页才驻留；
+当前视角只需要 9 页，另外 8 页从未被任何可见簇引用（由 `page_misses=0` 反证）。
+⇒ 实际口径是 **`resident ≤ pages_total` 且 `resident == gpu_resident`（CPU/GPU 两本账一致）
+且 `page_misses == 0`（所有**被需要的**页都已驻留）**。
+
+**③ 实施中做出的显式选择与偏离（设计允许但要求说明）**
+
+1. **命令链：选"命令保持资产空间"，即 §14.32 第二处追加的 (i)，而非它建议的 (ii)**。理由：
+   ① 间接命令**唯一**的消费者是占位光栅（`Nanite_Raster.vert/frag`），它只用 `vid % 3` 与
+   `SV_PrimitiveID` —— 对任意整数 `vertexOffset` 都给出 `{0,1,2}` 的一个排列（该文件自己的注释证明了这点）
+   ⇒ 命令里的偏移**不被当作地址使用**；② 把 `firstIndex` 换成池内偏移会让 `firstIndex + indexCount`
+   冲出占位索引缓冲的覆盖范围（本设备未启用 `robustBufferAccess`）⇒ 引入真实越界读风险、收益为零；
+   ③ 命令字段还被 `LogVisibleWiringReadback` 与 CPU 参考逐字段比对，改口径就要同时改参考。
+   **证据**：流式开启档 `visible = indirect_count = draws = rasterized = 31648`、`mismatch=0`
+   ⇒ 命令链没有被间接层弄坏（设计担心的"占位光栅静默用错偏移"因此不成立）。
+2. **页请求由光栅第 1 趟产生，而不是剔除链**（§14.32 ④ 的原文是剔除链）。这样**剔除链一行未改**
+   ⇒ 任务 16 的 `V=C=D=R` 与 CPU 参考交叉核对在流式档仍然成立；代价是缺页判定在光栅端。
+3. **去重 = GPU 侧戳记数组 + CPU 读回侧合并，页表仍然"只由 CPU 写"**。§14.32 ④ 原写"去重由页表的
+   `requestedFrame == 当前帧` 判定"，那要求 **GPU 写页表**，而页表同时被 CPU 每帧重写 ⇒ 同一块内存
+   无同步双边写。改成"反馈缓冲尾部一段**只由 GPU 写**的戳记（CPU 只在 `WaitIdle` 之后清 0）"后，
+   页表保持单写者。**实测必要性**：不去重时单帧请求数 = 可见簇数（`max_requests_per_frame=1024` 撞满、
+   `overflow_total=119476`，且有"某页的请求恰好全落在环外 ⇒ 永不驻留"的风险）；去重后
+   `max_requests_per_frame=9`、`overflow_total=0`。
+4. **页表项 = `slot` + 三个池槽步长（push constant），而不是设计建议的 `poolBase`**：三段各有各的步长，
+   "一个 poolBase"表达不了三段；带三个 base 又等于把 push constant 里的步长抄三遍，而
+   `slot × stride` 只是一次整数乘法。**"页起点"字段一个不少**（`vertexBegin` / `triangleBegin`）。
+5. **每帧一次 `WaitIdle()`**（`NaniteStream::BeginFrame` 开头）。页表与页池都是 **CPU 写、GPU 读**，
+   而本引擎的缓冲是持久映射的 host-visible 内存（`VulkanResources.cpp` 的 VMA 参数）⇒
+   只有"没有在飞命令"时重写它们才无竞态。有了它，"淘汰前确认没有在飞命令引用它"
+   **在物理上不可能违反**；`kNanitePageEvictionSafetyFrames`（3 帧）仍保留，用来挡住"刚请求就被踢掉"的抖动。
+   代价：流式档把 CPU/GPU 并行度压成串行（本样例整帧本就 CPU 受限，§14.36 实测墙钟 126–146 ms
+   vs GPU 9–43 ms，对功能验收无影响）。**真正的流水线化（双缓冲页表 + 帧龄延迟写入）留给阶段二**。
+6. **资产留存为 CPU 副本**（§14.32 ⑦ 的第三处追加）：`NaniteScene::StoreAssetCPUCopy` 收下资产的
+   簇/顶点/三角形/材质四段并**丢掉 `bytes` 字节镜像**（它的唯一消费者——上传时的逐字节读回校验——已跑完）。
+   **实测**：`asset_retained clusters=8287 vertices=542190 triangles=524657 materials=103
+   retained_bytes=13405960 dropped_mirror_bytes=13406096` ⇒ 留存 **13,405,960 字节（12.78 MiB）**；
+   丢掉镜像省下一半（否则约 26.8 MB）。它**不改变帧图 / pass 集合 / 转储**（不变式 1 管的是这三件事），
+   但确实是"只开 `enabled` 也不变"在**内存侧**的一个例外，如实记录在此。
+7. **`NaniteClusterPageRef::local` 的口径统一为"页内相对"**（**单测抓出来的真缺陷**）。实现初版把它写成
+   "整条收集序里的绝对下标"，而 GPU 侧按"页内相对"用（`slot*clusterStride + local`）、CPU 侧装页时
+   又把 `pageClusterBegin + local` 当绝对位置 ⇒ 两处都不对：第 0 页（begin==0）碰巧正确，第 1 页起
+   **读到位移错的簇记录**（画面错但不崩），同时 CPU 侧反查表**越界写**。修法：`cursor` 从 0 起计数
+   （`local ∈ [0, pageClusterCount)`）。三个消费者现在一致（生产者 `NaniteUpload.cpp`、
+   CPU 消费者 `NaniteStream.cpp`、GPU 消费者 `Nanite_SoftRasterCommon.slang`）。
+8. **两处防御性加固（都在实测的驱动下补上）**：
+   - `UploadPage` 改为"**三段都写成功才标记驻留**"（`Map()` 失败时保持非驻留并打一条错误）。
+     此前"先标记驻留、Map 失败就静默跳过"会让着色器去读**未初始化**的池内存 ⇒ 里面的
+     `triangleCount`/包围盒是任意值 ⇒ 最坏情形是 GPU 看门狗超时（CPU 侧只表现为 `WaitIdle` 永久阻塞、
+     **零错误输出**）。**这正是池 8 槽档从"卡死在第 97 帧"变成"完整跑完 121 帧"的那处改动**（见 ⑥）。
+   - 软光栅第 1 趟把 `triangleCount` **夹到资产契约上限 64**（不是夹到 `maxTriangles`！）。
+     **这里踩过一次坑并如实记录**：先写成"夹到 `maxTriangles`"，结果 64 三角形的簇被"变成"16 个、
+     **不再被分流判据跳过**，实测 `soft=31526 / skipped_big=0 / tested_px=285M`
+     （健康档是 `soft=61 / skipped_big=31587 / tested_px=9767`）—— 那是**语义破坏**而不是加固。
+     夹到 64 则**语义不可见**：>64 的簇在夹取前后都走"超阈值跳过"，分桶也都是最后一桶，任何读数都不变。
+
+**④ 读数（默认关闭时不打印）**
+
+```
+[Nanite] stream pages_total=17 resident=9 pool=64 uploads_this_frame=0 evicted=0 page_misses=0
+         pages_requested=0 stream=on reason=ok gpu_resident=9 table_ok=1 nonresident=8 dup_slots=0
+         contents=8202 K=512 strides=(c=589 v=55256 t=32768) slot_bytes=(c=37696 v=884096 t=262144)
+         pool_bytes=75771904 requests_total=24 pages_requested_total=9 max_requests_per_frame=9
+         overflow_total=0 latency=2 uploads_limit=4
+```
+- 门控：`enabled && streaming` 才打印 ⇒ **默认档与关闭档的日志逐字不变**（判据 (a)）。
+- `page_misses` / `pages_requested` 是**真实 GPU 读回**（软光栅读数缓冲第 20/21 槽，第 1 趟原子累加，
+  且写入在同一帧那次清零**之后**）。**这不是形式要求**：读数缓冲每帧被清 0，着色器若不写这两个槽，
+  读回就恒为 0 ⇒ `page_misses == 0` 会在"流式完全没工作"时也成立（**空洞通过**）。
+  C++ 与 Slang 的容量现在都是 22（`static_assert` 钉住连续性与"不得越界/不得恒 0"的注释约定）。
+- **退化不静默**：`stream=off reason=<…>` 取值为 `requires_soft_raster` / `pool_zero_slots` / `no_asset` /
+  `plan_failed` / `page_straddle` / `resource_failed` / `no_device`；`plan_failed` 时另有一条
+  `HE_CORE_WARN` 带上"第一个秩不一致的簇下标与两个秩"（避免留一个"看起来能读、实际恒 0"的字段）。
+- **不变式的推广（任务 23 那条要延拓）**：五桶之和 == `soft + skipped_big`（`sum_eq_clusters`）**依旧成立**；
+  而 `sum_eq_visible` 在流式档会因为**缺页被跳过的簇**而变 0。正确形式是
+  **`Σ五桶 + page_misses == visible`**（池 8 槽档实测 `31526 + 122 = 31648` ✓ 精确成立）；
+  关闭档 `page_misses` 恒为 0 ⇒ 退化成既有形式。
+
+**⑤ 页池足迹与调参建议（只建议，默认值不动）**
+
+Sponza 实测（同一资产、同一相机，只改 K）：
+
+| K | pages_total | 每槽字节 | 池@64 槽 | 池@`slots = pages_total` | 全驻留最小槽数 |
+|---|---|---|---|---|---|
+| **512（默认）** | 17 | 1,183,936 | **75,771,904**（72.26 MiB） | 20,126,912（19.19 MiB） | 17 |
+| 128 | 65 | 301,648 | 19,305,472（18.41 MiB） | 19,607,120（18.70 MiB） | 65 |
+| 64 | 129 | 155,184 | 9,931,776（9.47 MiB） | 20,018,736（19.09 MiB） | 129 |
+
+- **恒等式**：`每槽字节 × pages_total` 在三档里稳定在 **19.6–20.1 MB（±1.5%）≈ 资产的总内容字节**；
+  于是 **池膨胀倍数 = `pool_slots / pages_total`**（64/17=3.76×、64/65=0.98×、64/129=0.50×，与实测吻合）。
+  ⇒ 75.77 MB 的来源**不是 K**，而是"64 槽 / 17 页"这个比值。
+- **建议（后续优化，不改本任务默认值）**：`pool_slots = pages_total`（默认 K=512 时是 17 槽）可同时做到
+  "全部页可同时驻留 + 稳态零驱逐 + 池约 20 MB"；更强的做法是让槽数**由页划分自动推导**（cfg 值退化为上限）。
+  **注意**：`pool_slots < pages_total` 会**强制驱逐**，而驱逐路径正是本轮唯一卡死过的那一档（见 ⑥）——
+  不能靠调参绕过去。
+- K 只影响池足迹、**不影响画面**：K=512/128/64 三档的 `soft_raster` / `size_dist` 读数**逐字段相同**，
+  `passlist_sha` 都是 `750CC247…`、`passes_per_frame=14`。
+
+**⑥ 构建与验收**
+
+- 构建 `07.Nanite` / `HugEngineTests` / `HugEngineRender` 全 **exit 0**。
+- 单测 **316 用例 / 71,095 断言全绿**（`Status: SUCCESS!`；任务 23 基线 310 / 62,326 ⇒ 新增 6 用例 / 8,769 断言）。
+- **判据 (a)**：`nanite_enable=1`（`nanite_streaming` 缺省 = 0）的 `nan_t24_off_a/off_b`：
+  `passes_per_frame=14`、`passlist_sha=750CC247BF8B9C3DA2DEA6B7E893BED91E611145663CC037D0F198699F5C3E6F`
+  —— 与任务 23 的开启档**逐位相同**；关闭档 12 pass 的冻结指纹 `1C15AB72…` 由 `acceptance_sweep` 判据 ⑥ 复核。
+  【这一档还**首次真正执行了 bindings 15~20 的占位绑定分支**（此前只做过静态检查）：VUID 行数与类型分布
+  （42 行 / 6 类）与任务 23 基线 `nan_takeover_on64` **完全一致** ⇒ 占位绑定不产生任何新校验错误。】
+- **判据 (b)**：`table_ok=1`、`dup_slots=0`、`nonresident=8`（9+8=17=`pages_total`）、
+  **`gpu_resident == resident`**（页表缓冲里真实标成驻留的条数与 CPU 的账一致）。
+- **判据 (c)（页池 8 槽）**：完整跑完 121 帧、`vuid_lines=42`（与基线一致）、
+  `page_misses=122 > 0`、`resident=8 = gpu_resident=8`、`evicted=58`、`table_ok=1`、`dup_slots=0`、
+  `overflow_total=0`，且**读数与 `visible` 的差额精确可核对**：
+  `soft(61) + skipped_big(31465) + page_misses(122) = 31648 = visible`、
+  `Σ五桶(31526) + page_misses(122) = 31648 = visible`。⇒ 不崩、不越界、表自洽、账目对得上。
+  **本档最初是卡死的**（第 97 帧、`WaitIdle` 永久阻塞、零错误输出）：定位结论是"页被标成驻留但槽里
+  还是未初始化内存"（见 ③ 条 8 的第一条），修好后连续两次完整跑完。**驱逐/槽位复用这条路径
+  此前从未被任何档走到过**（64 槽档预热后零驱逐），本轮是它的第一次验证。
+- **判据 (d)**：按 (d1)/(d2)/(d3) 三条执行，全部成立（见 ②）。
+- **判据 (e)**：`uploads_this_frame=0 ≤ uploads_limit=4`（8 槽档为持续驱逐，同一字段仍受上限约束）；
+  反馈延迟 `latency=2` 由环槽 `frameIndex % latency` 实现 ⇒ "请求到驻留"的延迟**恰好**是常量。
+- **判据 (f)**：`acceptance_sweep.ps1 -OnlyNanite` **两次都 PASS**（跑前清掉 `HE_NO_VSYNC`，
+  原始输出见 `build/verify/t24_sweep.txt`）：
+  ```
+  [6a] off passes=12 nanite_leak=0 sha=1C15AB72E688B530            ← 冻结指纹（完整值见下）
+  [6b] module-on passes=14 nanite_passes=2 preexisting_set_changed=False
+  [6c] tier=nanite_soft_raster=0 pairs=20 differing_outside_jitter=0 jitter_family_ondiff=3
+  (7)  CULL DIFF: PASS      (5 档：default/hiz1/ic8/ic0/cap1000 全 OK)
+  (8)  TAKEOVER CMP: PASS   (8a V=C=D=R=31648、wiring_mismatch=0；8c 阈值 64 档也成立)
+  ACCEPTANCE SWEEP: PASS    （两次）
+  ```
+  冻结指纹逐位复核：关闭档 12 pass =
+  `1C15AB72E688B5302332AEC391C41A5FE2B4D9512258CCDCD5D3E9D7E8F5390D`（= 冻结值）；
+  开启档 14 pass / `nanite_passes=2` =
+  `750CC247BF8B9C3DA2DEA6B7E893BED91E611145663CC037D0F198699F5C3E6F`。本轮**无抖动**（两次结果逐字相同）。
+- **未改**：`GBufferRenderer.*`（一行未动）、`NaniteSettings` 的既有默认值、模块内无 GI/Lumen/GPUCulling 引用；
+  `Engine/Shader/CMakeLists.txt` 无需改动（未新增着色器文件，4 个改动的 shader 早已登记）；
+  `Engine/Render/CMakeLists.txt` 与 `Tests/CMakeLists.txt` 各加了一条显式登记（新文件）。
+
+**⑦ 存疑未做 / 已知问题**
+
+1. **LRU 在"池 < 工作集"时无法收敛**（设计层面的观察，不是实现 bug）：LRU 的键是"最近一次被请求的帧"，
+   而静态视角下所有驻留页**每帧都被请求** ⇒ 池小于工作集时**找不到任何可驱逐的页**……
+   实测 8 槽档确实发生了 58 次驱逐（因为缺页页的请求会把 `lastRequestedFrame` 推进，
+   驱逐发生在"某些页这一帧没被请求"的间隙），但稳态仍是"永久缺页"（`page_misses=122` 持续存在）。
+   就 (c) 的字面要求（`page_misses > 0` 且无未定义行为）这是可接受的，但**"池小于工作集"不是优雅降级
+   而是长期少画** —— 真正的降级策略（回退更粗 LOD）属 LOD 选择，**明确留给阶段二**。
+2. **流式档每帧一次 `WaitIdle()`**（③ 条 5）：功能正确但不流水线化；替代方案（双缓冲页表 +
+   延迟 N 帧写入 + GPU 侧清环）留给阶段二。
+3. **不做预取 / LOD 选择**（§14.32 ⑫）：N5 的"无 pop"判据**未触及** —— 本任务只做到"缺页时不崩、
+   不越界、可观测"。(d3) 的口径已按"按需分页"修正。
+4. **页池不压缩、不去重、不多资产共享**（§14.32 ⑫）；默认档池足迹 75.77 MB 明显大于资产的 12.78 MB，
+   调参建议见 ⑤，但**默认值按任务书保持不变**。
+5. **只测了 07.Nanite 的 1920×1080 单场景单相机**；相机固定 ⇒ 可见集固定 ⇒ 稳态缺页为 0，
+   测不到"相机移动时的 pop 与缺页轨迹"。未测多分辨率、多资产。
+6. **`page_misses` 的口径**是"被跳过的**可见簇数**"（不是页数）——它能对上
+   `soft + skipped_big + page_misses == visible`；"请求了多少"由 `pages_requested` /
+   `pages_requested_total`（**累计入队页次数**，同页可重复计）表达。两者并列打印，不互相冒充。
