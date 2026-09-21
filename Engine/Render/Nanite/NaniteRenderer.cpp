@@ -594,8 +594,10 @@ void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
     //   （§14.32 ⑦ 的第三处追加点明了这一点）。`StoreAssetCPUCopy` 会丢掉 `bytes` 字节镜像
     //   （它的唯一消费者——上面的逐字节读回校验——已经跑完），只留页池要用的段。
     // 【位置：必须是本函数最后一步】它以 `std::move` 收走 `asset`，此后不得再使用它。
+    // 【任务 25】`materialBin` 一并传进去：bin 的生成与资产留存同处（一次性），
+    //   默认档传 false ⇒ 该函数内部一个字节都不分配（关闭档零新增资源）。
     m_AssetClusterCount = (u32)asset.clusters.size();
-    if (!m_Scene.StoreAssetCPUCopy(std::move(asset))) {
+    if (!m_Scene.StoreAssetCPUCopy(std::move(asset), m_Settings.materialBin)) {
         HE_CORE_WARN("NaniteRenderer: 资产 CPU 留存为空 ⇒ 流式（若开启）会退化为 no_asset");
     }
 }
@@ -1246,6 +1248,147 @@ void NaniteRenderer::LogCull3Readback() {
                  stats[kNaniteCullStatHiZUpperMeanMilli] % 1000000u,
                  stats[kNaniteCullStatHiZLowerMeanMilli] / 1000000u,
                  stats[kNaniteCullStatHiZLowerMeanMilli] % 1000000u, first);
+}
+
+void NaniteRenderer::LogMaterialBinReadback() {
+    // 【门控】`materialBin` 默认 false ⇒ 默认档与关闭档的日志**逐字不变**（连 Map 都不做）。
+    // 另外两项是模块总开关与就绪（与其它读回行同口径）。
+    if (!m_Settings.enabled || !m_Ready || !m_Settings.materialBin) return;
+
+    // ⚠ 【**不要**把本行的任何数写进软光栅读数缓冲】`SelfCheckSoftStats` 会检查那个缓冲里
+    //   "非 0 且跨读回从未变过"的槽并报警。本行只用**本来就有的**读数与该缓冲的既有槽，
+    //   一个槽都不新增、不改语义。
+    const NanitePackedAsset& asset = m_Scene.GetAssetCPUCopy();
+    if (asset.clusters.empty()) return;   // 资产未入库（无 bin 可算）
+
+    // ── ① descriptor_switches：本帧材质切换导致的**描述符集切换次数** ──
+    // 【为什么恒为 0～1（这不是"没测到"，而是结构决定的上界）】
+    //   · 材质是按**索引进一个 SSBO** 取的（`softRasterEvaluateMaterial(cluster.materialID, …)`
+    //     → `u_Materials[materialIndex]`，`Nanite_SoftRasterCommon.slang`），纹理经 **bindless
+    //     数组** `u_MaterialTextures[]/u_MaterialSamplers[]` 从同一个堆取；硬光栅同源
+    //     （`Nanite_HardRaster.mesh.slang` 把 `cluster.materialID` 透传给片元，片元调**同一个**函数）。
+    //     ⇒ 材质是一条**随簇变化的索引**，不是一次描述符绑定。
+    //   · 本模块的软/硬光栅各自只建**一对**描述符集（`NaniteRaster` 里的软光栅集与硬光栅集），
+    //     帧内**不重绑**：bindless 材质数组 + 单描述符集意味着"处理任意多材质"不需要拿新的描述符。
+    //   · 因此本帧真实发生的描述符集切换只有"进入软光栅趟 / 进入硬光栅趟"这两处，而上界是
+    //     **1 次**（两者都用同一批 GBuffer 目标的那一对集；硬光栅未开时为 0）。
+    //   ⇒ 这里如实报这个**结构上界**，而不是去伪造一个"切换计数器"（那会是个永远读不到的假数）。
+    const u32 softPassCount = 1u;   // 软光栅趟的录制（`m_Raster.RecordSoftRasterPass`）
+    const u32 hardPassCount = (m_Settings.hardRaster && m_Raster.IsHardRasterSupported()) ? 1u : 0u;
+    const u32 descriptorSwitches = softPassCount + hardPassCount;
+
+    // ── ② 本帧实际处理的簇序列：**GPU 可见簇列表缓冲**（Phase 3 写出的真实顺序）──
+    // 【为什么读 GPU 而不是 CPU 参考列表】读数必须反映 GPU 真实处理顺序；两条链
+    //   （软光栅第 1 趟、硬光栅 mesh 工作组）都是**按这个缓冲的下标顺序**枚举的
+    //   （见 `Nanite_SoftRasterCommon.slang` 的 dispatch id → `u_VisibleClusters[id]`）。
+    // 【顺序说明（如实）】该列表由 Phase 3 用**原子槽位压缩**写出 ⇒ 槽位顺序不保证等于 CPU 参考的
+    //   遍历顺序；但"GPU 真正处理的顺序"就是槽位顺序，这正是本读数要度量的东西。
+    const u32 capacity = m_Cull.GetBVHVisibleCapacity();
+    u32 visibleCount = 0u;
+    if (auto* b = m_Cull.GetVisibleClusterCountBuffer()) {
+        if (void* p = b->Map()) { visibleCount = *static_cast<const u32*>(p); b->Unmap(); }
+    }
+    const u32 readable = (visibleCount < capacity) ? visibleCount : capacity;   // 防御脏计数
+    std::vector<NaniteVisibleClusterRef> visible;
+    visible.reserve(readable);
+    if (auto* b = m_Cull.GetVisibleClusterBuffer()) {
+        if (void* p = b->Map()) {
+            const auto* list = static_cast<const NaniteVisibleClusterRef*>(p);
+            // 越界防御：簇下标必须落在资产簇段内，否则不参与统计（不越界读 `clusters[]`）
+            for (u32 i = 0u; i < readable; ++i) {
+                if (list[i].cluster < (u32)asset.clusters.size()) visible.push_back(list[i]);
+            }
+            b->Unmap();
+        }
+    }
+
+    // 相邻处理的簇换材质的次数（局部性代理；`prev` 哨兵保证第一条不计为切换）
+    const auto countSwitches = [&asset](const std::vector<u32>& clusterOrder) {
+        u32 switches = 0u;
+        u32 prev = 0xFFFFFFFFu;
+        for (const u32 cluster : clusterOrder) {
+            const u32 material = asset.clusters[cluster].materialID;
+            if (prev != 0xFFFFFFFFu && material != prev) ++switches;
+            prev = material;
+        }
+        return switches;
+    };
+
+    std::vector<u32> currentOrder;
+    currentOrder.reserve(visible.size());
+    for (const NaniteVisibleClusterRef& ref : visible) currentOrder.push_back(ref.cluster);
+    const u32 materialSwitches = countSwitches(currentOrder);
+
+    // ── ②b 参考口径：**资产自然顺序**（簇下标 `0..N-1`）下的同一个数 ──
+    // 【为什么还要一个参考数】当前顺序（GPU 可见簇列表）随相机变，单看它无法回答"bin 到底值多少"
+    //   这种与相机无关的问题；资产自然顺序是**确定的**，它同时也是单测
+    //   （`Tests/TestNaniteMaterialBin.cpp`）钉住的那个口径 ⇒ 日志与单测可以互相对账。
+    //   它与 `material_switches` 的差别来自"可见集合不同"，两者不可直接比较。
+    std::vector<u32> assetOrder(asset.clusters.size());
+    for (u32 i = 0u; i < (u32)assetOrder.size(); ++i) assetOrder[i] = i;
+    const u32 materialSwitchesAsset = countSwitches(assetOrder);
+
+    // ── ③ 对照数字：**若按 bin 顺序遍历**，本帧的 `material_switches` 会是多少 ──
+    // 【为什么这样算才是可比的】bin 是全局簇下标的一个排列（按材质非降序）。把本帧的**同一批**
+    //   可见簇按 bin 顺序重排，再数相邻切换：可见集合完全不变，变的只有顺序 ⇒ 两个数字之差
+    //   就是"按材质分组"这件事本身的收益。实现上用 `binRank[cluster]`（bin 里的位次）当排序键，
+    //   对可见簇下标做一次稳定排序（计数排序的位次表 = O(1) 的键）。
+    // 【为什么不用 `std::sort` 一个 lambda】位次表本来就要建（bin 的元素是**簇下标**，
+    //   要按"位次"排可见簇就必须反查）；有了位次表，直接按位次插入到输出数组即可，
+    //   既不引入比较器、也不必依赖排序的稳定性细节。
+    const NaniteMaterialBin& bin = m_Scene.GetMaterialBin();
+    u32 materialSwitchesBin = 0u;
+    u32 binOrderClusters = 0u;
+    if (!bin.bins.empty() && !currentOrder.empty()) {
+        std::vector<u32> rank(asset.clusters.size(), 0xFFFFFFFFu);
+        for (u32 i = 0u; i < (u32)bin.bins.size(); ++i) rank[bin.bins[i]] = i;
+        std::vector<u32> sorted(currentOrder.size(), 0u);
+        u32 cursor = 0u;
+        for (const u32 cluster : currentOrder) {
+            const u32 r = rank[cluster];
+            if (r == 0xFFFFFFFFu) continue;   // 不在 bin 里（异常）：不计
+            sorted[cursor++] = r;
+        }
+        sorted.resize(cursor);
+        std::sort(sorted.begin(), sorted.end());   // 按 bin 位次升序 = 按 bin 顺序遍历
+        // 位次 → 簇下标（`bin.bins[位次]`），再数相邻切换
+        std::vector<u32> binOrder;
+        binOrder.reserve(sorted.size());
+        for (const u32 r : sorted) binOrder.push_back(bin.bins[r]);
+        binOrderClusters = (u32)binOrder.size();
+        materialSwitchesBin = countSwitches(binOrder);
+    }
+
+    // ── ④ `clusters_per_material` 的分布摘要（四个数；不打印上百个桶）──
+    // 【口径】对**资产的全部簇**按 `materialID` 计数：`distinct` = 出现的材质数，
+    //   `max/min/mean` = 每材质簇数的最大 / 最小（只统计出现的材质）/ 平均。
+    // 【为什么是资产而不是本帧可见簇】`clusters_per_material` 是**资产**的分布性质
+    //   （bin 本来就是按整份资产建的），逐帧可见集合的分布会随相机动；本帧可见簇的规模已由
+    //   `visible_refs` 单列，两个口径不混。
+    std::vector<u32> perMaterial(asset.materials.size(), 0u);
+    for (const NaniteClusterRecord& cluster : asset.clusters) {
+        if (cluster.materialID < (u32)perMaterial.size()) ++perMaterial[cluster.materialID];
+    }
+    u32 distinct = 0u, maxPer = 0u, minPer = 0xFFFFFFFFu;
+    for (const u32 count : perMaterial) {
+        if (count == 0u) continue;
+        ++distinct;
+        if (count > maxPer) maxPer = count;
+        if (count < minPer) minPer = count;
+    }
+    if (distinct == 0u) minPer = 0u;
+    const double meanPer = (distinct != 0u)
+                         ? (double)asset.clusters.size() / (double)distinct : 0.0;
+
+    // 【恰好一行】任务 25 的验收出口。字段名与 `materials_sample` / `soft_raster` / `size_dist`
+    //   三行的字段**刻意不重名**：按行或按字段名解析的既有脚本不会抓错行。
+    HE_CORE_INFO("[Nanite] material_bin descriptor_switches={} material_switches={} "
+                 "material_switches_bin={} order_src=gpu_visible_cluster_buffer visible_refs={} "
+                 "bin_clusters={} material_switches_asset_order={} "
+                 "clusters_per_material=[distinct={} max={} min={} mean={:.2f}]",
+                 descriptorSwitches, materialSwitches, materialSwitchesBin,
+                 (u32)currentOrder.size(), binOrderClusters, materialSwitchesAsset,
+                 distinct, maxPer, minPer, meanPer);
 }
 
 void NaniteRenderer::LogMeshTestReadback() {    // 关闭档 / 未就绪 / 未开 mesh 自证：不打印（关闭档与"只开 enabled"的日志必须与基线一致）。

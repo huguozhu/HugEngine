@@ -134,11 +134,28 @@ public:
 
     /// 把资产的 CPU 副本留存下来（只留页池要用的段；`bytes` 镜像被丢弃）
     /// @param asset 通过 `std::move` 交进来的资产（调用方此后不得再使用它）
+    /// @param materialBin 【§14.8 任务 25】是否**顺带**生成材质 bin（默认 false）
+    ///   —— 默认档**不分配任何内存**（`m_MaterialBin.bins` 保持空）；只有开关打开时才建。
+    ///   生成时机与资产留存同处（一次性），因此不需要门面另记一个门闩、也不会每帧重建。
     /// @return 是否留下了非空的三段
-    [[nodiscard]] bool StoreAssetCPUCopy(NanitePackedAsset&& asset);
+    [[nodiscard]] bool StoreAssetCPUCopy(NanitePackedAsset&& asset, bool materialBin = false);
 
     /// 留存的资产 CPU 副本（页池的数据源；未留存时为一份空资产）
     [[nodiscard]] const NanitePackedAsset& GetAssetCPUCopy() const { return m_AssetCPU; }
+
+    // ============================================================
+    // 【§14.8 任务 25】材质 bin（只读辅助数组；不是资产的一部分）
+    //
+    // 【存放位置的取舍】它**不放进** `NanitePackedAsset`：那个结构是"`.nanite` 字节镜像 + 分段
+    //   强类型视图"，加一个字段就等于让资产本体多一份数据（与"不动资产本体"的硬性要求相悖，
+    //   也会让 `ValidateNaniteFile` 之外多出一条"镜像与视图是否一致"的口径）。放在本类（资源的
+    //   宿主）里，语义就是"由资产**派生**的只读索引表"，与 `m_Asset` 的 GPU 缓冲同级。
+    // ============================================================
+
+    /// 材质 bin（未生成时为空；`materialBin=false` 时永远为空）
+    [[nodiscard]] const NaniteMaterialBin& GetMaterialBin() const { return m_MaterialBin; }
+    /// 是否已经生成了可用的材质 bin（读数行据此决定打印 `bin=none` 还是真实长度）
+    [[nodiscard]] bool HasMaterialBin() const { return !m_MaterialBin.bins.empty(); }
 
     /// 是否已经留存了可用的资产 CPU 副本
     [[nodiscard]] bool HasAssetCPUCopy() const {
@@ -161,6 +178,9 @@ private:
 
     /// 【§14.8 任务 24】留存的资产 CPU 副本（页池的数据源；`bytes` 镜像被丢弃）
     NanitePackedAsset m_AssetCPU;
+
+    /// 【§14.8 任务 25】由留存资产派生的材质 bin（**只读辅助数组**；`materialBin=false` 时为空）
+    NaniteMaterialBin m_MaterialBin;
 };
 
 } // namespace he::render

@@ -362,6 +362,47 @@ public:
     /// `WaitIdle()`。关闭档 / 未就绪时直接返回、不打印 —— 保证关闭档日志与基线一致。
     void LogCull3Readback();
 
+    /// 【§14.8 任务 25】dump 帧打印**恰好一行** Material Bin 的读数：
+    ///   `[Nanite] material_bin descriptor_switches=<D> material_switches=<M>
+    ///    material_switches_bin=<B> order_src=gpu_visible_cluster_buffer visible_refs=<R>
+    ///    bin_clusters=<P> material_switches_asset_order=<A>
+    ///    clusters_per_material=[distinct=<d> max=<x> min=<n> mean=<m>]`
+    ///
+    /// 【三个数的口径（每个都写清"测的是什么"，否则读数无法核对）】
+    /// · `descriptor_switches` = 本帧**材质切换导致的描述符集切换次数**（验收明文要求的那个数）。
+    ///   **它恒为 0～1 是结构决定的，不是"没测到"**：本模块的软/硬光栅各自只有一对描述符集
+    ///   （`NaniteRaster`），材质是**索引进一个 SSBO**（`u_Materials[materialID]`）+ **bindless**
+    ///   纹理数组（`u_MaterialTextures[]`）取的，帧内不重绑 ⇒ 真实发生的切换只有"进入软光栅趟
+    ///   （1 次）"与"进入硬光栅趟（0/1 次）"。§5.4 想减少的"每材质一个描述符集"那种切换，
+    ///   在本仓库的延迟路径里**从未存在**（论据见 `docs/计划实现功能/Nanite设计与实现.md` §14.33 ①②）。
+    /// · `material_switches` = **相邻处理的簇换材质的次数**（局部性代理）。
+    ///   **顺序口径 = GPU 可见簇列表缓冲的槽位顺序**（`NaniteCull::GetVisibleClusterBuffer`，
+    ///   Phase 3 写出的真实列表；软光栅第 1 趟与硬光栅 mesh 工作组都按这个下标顺序枚举）
+    ///   ⇒ 测的就是 GPU 真实的处理顺序。`visible_refs` 是本行实际统计到的条数（分母）。
+    ///   【如实标注一处细节】该列表由 Phase 3 用原子槽位压缩写出，槽位顺序不保证等于 CPU 参考
+    ///   遍历顺序；但"GPU 真正按什么顺序处理"正是这个槽位顺序，故本读数**不**改用 CPU 列表。
+    /// · `material_switches_bin` = **若按 bin 顺序遍历**（同一批可见簇按"按材质分组"重排）时的同一个
+    ///   数 —— 它与 `material_switches` 的差就是"按材质分组"这项优化的收益证据。
+    ///   `bin_clusters` = 参与该对照的簇数（正常情况下等于 `visible_refs`）。
+    /// · `material_switches_asset_order` = **资产自然顺序**（簇下标 `0..N-1`）下的同一个数。
+    ///   【为什么多这一个】当前顺序随相机变，单看它回答不了"bin 与不分组差多少"这种与相机无关的
+    ///   问题；资产自然顺序是**确定的**，且正是 `Tests/TestNaniteMaterialBin.cpp` 钉住的口径 ⇒
+    ///   日志与单测可以互相对账（该用例实测：自然顺序远高于 bin 顺序，且 bin 顺序 = 材质数 - 1）。
+    /// · `clusters_per_material=[…]` = **资产**的逐材质簇数分布摘要（四个数：出现的材质数 /
+    ///   每材质最大 / 最小 / 平均簇数），不打印上百个桶。
+    ///
+    /// 【本函数**不做**的事（本任务的"明确不做"，理由必须写清）】它**不**把光栅的遍历顺序改成
+    ///   bin 顺序。软光栅在**深度键平局**时像素由 **UAV 写入顺序**决定（§14.31 ⑩ 实测：模块接管档
+    ///   两次相同运行并非逐位可复现，`lightmapkey.page` 平均差 18.8）⇒ 在平局确定性修好之前改
+    ///   遍历顺序会**改变画面**，属"先修根因再谈优化"。bin 因此只是**只读的收益证据**。
+    ///
+    /// 【门控】`materialBin=false`（默认）时直接返回：不 Map 任何缓冲、不打一个字符
+    ///   （关闭档的日志与转储必须逐字/逐位不变）。
+    /// 【同步约定】与其它读回相同：只 Map、不等待；调用方必须已 `WaitIdle()`。
+    /// 【资源】本行**不新增任何 GPU 资源**：bin 是 CPU 侧的 `u32[]`（上传期一次），
+    ///   其余三个读数全部来自既有缓冲（可见簇计数缓冲 / 可见簇列表缓冲 / GPU 相位计数）。
+    void LogMaterialBinReadback();
+
     /// 【§14.8 任务 6】dump 帧打印**恰好一行** mesh 通道的真实 GPU 读回：
     ///   `[Nanite] mesh_pso=<ok|fail> meshlet_outputs=<n> target_max=<v>`
     ///

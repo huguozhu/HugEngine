@@ -211,6 +211,31 @@ struct NaniteSettings {
 
     /// 每帧上传页数上限（默认 4，cfg 键 `nanite_page_uploads`；钳到 [1, kNanitePageUploadsPerFrameMax]）
     u32 pageUploadsPerFrame = kNanitePageUploadsPerFrameDefault;
+
+    // ============================================================
+    // 【§14.8 任务 25】Material Bin —— 只读的"按材质分组的簇下标" + 三条读数
+    //
+    // 【这个开关到底控制什么（三条，缺一不可看全）】
+    //   ① **上传期建一份 `u32[clusterCount]` 的 bin**（按 `materialID` 非降序的簇下标排列），
+    //      与既有的"资产只上传一次"门闩同处生成一次；它**不是**资产的一部分，不进 `.nanite`、
+    //      不进 DAG/BVH/页表，也不被任何光栅路径读取；
+    //   ② 开启后在 dump 帧**多打印恰好一行**读数
+    //      （`descriptor_switches` / `material_switches` / `material_switches_bin` /
+    //       `clusters_per_material` 的分布摘要）；
+    //   ③ **不做**的事：不改光栅的遍历顺序（见下）。
+    //
+    // 【为什么默认 false】§14.2 不变式 1：关闭时帧图、pass 集合、转储与日志**逐位/逐字不变**，
+    //   且不新建任何每帧 GPU 资源、不多一份常驻数组。bin 的唯一消费者是那条读数行，
+    //   而读数的意义是"**这项优化的收益有多大**"—— 收益在真实资产上一量就有，不需要默认开着
+    //   为一个恒 0～1 的 `descriptor_switches` 常驻 32 KB。配置层 = cfg 键 `nanite_material_bin`
+    //   （默认 0），样例负责解析/序列化 + 面板勾选框。
+    //
+    // 【为什么"按材质分组遍历"这条路本任务明确不做（硬约束，不是保守）】
+    //   软光栅的最终像素在**深度键平局**时由 **UAV 写入顺序**决定（§14.31 ⑩ 已用同档两次运行
+    //   实测：模块接管档并非逐位可复现，`lightmapkey.page` 平均差 18.8）。簇的遍历顺序一旦改变，
+    //   平局时谁先写就变了 ⇒ **画面会变**。在平局确定性修好之前改遍历顺序属"先修根因再谈优化"。
+    //   因此 bin 在本任务里是**只读的收益证据**，而不是一条已经生效的路径。
+    bool materialBin = false;
 };
 
 } // namespace he::render

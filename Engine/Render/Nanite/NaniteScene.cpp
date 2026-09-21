@@ -48,6 +48,8 @@ bool NaniteScene::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
 
     // 任务 24：留存的资产 CPU 副本同样作废（重新初始化 = 重新建资产）
     m_AssetCPU = NanitePackedAsset{};
+    // 【任务 25】材质 bin 与资产同生命周期（它是资产的派生视图 ⇒ 必须一起作废）
+    m_MaterialBin = NaniteMaterialBin{};
 
     return m_Device != nullptr;
 }
@@ -63,6 +65,9 @@ void NaniteScene::Shutdown() {
 
     // 任务 24：留存的 CPU 副本一并释放（它可能有十几 MB，不能留在 shutdown 之后）
     m_AssetCPU = NanitePackedAsset{};
+
+    // 【任务 25】材质 bin 一并释放（几万个 u32；同样不该留在 shutdown 之后）
+    m_MaterialBin = NaniteMaterialBin{};
 
     m_Device = nullptr;
     m_Width  = 0;
@@ -239,9 +244,10 @@ bool NaniteScene::UploadPackedAsset(const NanitePackedAsset& asset) {
 // ============================================================
 // §14.8 任务 24：资产 CPU 留存（页池的数据源；口径与代价见 `NaniteScene.h`）
 // ============================================================
-bool NaniteScene::StoreAssetCPUCopy(NanitePackedAsset&& asset) {
+bool NaniteScene::StoreAssetCPUCopy(NanitePackedAsset&& asset, bool materialBin) {
     // 释放上一份（允许重复调用；正常路径由门面的"只做一次"门闩保证只调一次）
     m_AssetCPU = NanitePackedAsset{};
+    m_MaterialBin = NaniteMaterialBin{};   // 【任务 25】bin 与资产同生命周期：资产换 ⇒ bin 作废
     m_AssetCPU = std::move(asset);
 
     // 【丢掉字节镜像】它是五段的第二份拷贝，唯一消费者（上传时的逐字节读回校验）已经跑完；
@@ -260,6 +266,31 @@ bool NaniteScene::StoreAssetCPUCopy(NanitePackedAsset&& asset) {
                  (u32)m_AssetCPU.clusters.size(), (u32)m_AssetCPU.vertices.size(),
                  (u32)m_AssetCPU.triangles.size(), (u32)m_AssetCPU.materials.size(),
                  (unsigned long long)total, (unsigned long long)droppedBytes);
+
+    // ── 【§14.8 任务 25】材质 bin（**只在开关打开时**建；默认档连一个字节都不分配）──
+    // 【为什么在这里、为什么只一次】本函数是"资产进模块"的唯一入口、且由门面的 `m_AssetUploaded`
+    //   门闩保证只跑一次 ⇒ 与"上传期一次"这条口径天然重合，不需要再加一个门闩，也不可能每帧重建。
+    // 【为什么数据源是刚留存的 CPU 资产】不另持有第二份几何：bin 只是一个 `u32[簇数]` 的下标排列，
+    //   由 `clusters[i].materialID` 直接算出（排序键就在簇记录里）。
+    // 【不动的东西】资产本体（含 `bytes` 镜像已丢弃后的分段视图）、BVH/DAG、页池/页表、
+    //   `.nanite` 格式**一个字节都不动**：这里是**新增**一个派生数组，没有任何回写。
+    if (materialBin) {
+        const u32 materialCount = (u32)m_AssetCPU.materials.size();
+        const NaniteMaterialBinStats binStats =
+            BuildNaniteMaterialBin(m_AssetCPU.clusters, materialCount, m_MaterialBin);
+        // 如实报告三个数（不隐藏越界）；越界时 bin 为空 ⇒ 读数行会打 `bin=none`。
+        HE_CORE_INFO("[Nanite] material_bin clusters={} distinct={} materials={} out_of_range={} "
+                     "bin_bytes={}",
+                     binStats.clusterCount, binStats.distinctCount, binStats.materialCount,
+                     binStats.outOfRangeCount,
+                     (unsigned long long)(m_MaterialBin.bins.size() * sizeof(u32)));
+        if (binStats.outOfRangeCount != 0u) {
+            HE_CORE_WARN("[Nanite] 材质 bin 未生成：有 {} 个簇的 materialID 越出材质段 [0, {})"
+                         "（不 clamp、不静默：越界的 bin 会把簇分进错材质组）",
+                         binStats.outOfRangeCount, materialCount);
+        }
+    }
+
     return HasAssetCPUCopy();
 }
 
