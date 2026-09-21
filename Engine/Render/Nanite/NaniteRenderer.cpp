@@ -804,6 +804,77 @@ void NaniteRenderer::LogHardRasterReadback() {
     m_Raster.LogHardRasterReadback();
 }
 
+void NaniteRenderer::SelfCheckSoftStats(const u32 (&s)[kNaniteSoftStatsCapacity],
+                                        u32& outDiagOk, u32& outConstSuspect) {
+    outDiagOk = 1u;
+    outConstSuspect = 0u;
+
+    // 槽位沿用 `NaniteRaster::LogSoftRasterReadback` 的既有口径（那一行也是按裸下标读的）：
+    //   6 = covered_px、7 = diag_screenw、8 = diag_screenh、9 = diag_maxtri、
+    //   10 = diag_extent_milli、11 = tested_px
+    const u32 diagScreenW = s[7];
+    const u32 diagScreenH = s[8];
+    const u32 diagMaxTri  = s[9];
+    const u32 diagExtent  = s[10];
+
+    // ── ① 已知关系式：读数到底是不是来自**本帧的 push constant** ──
+    // 【为什么这三条是"无需新增输入"的】屏幕像素数有现成访问器（= 宽 × 高），`maxTriangles`
+    //   有现成的"上一次送下去的值"，量化尺度只需"场景非空时应当 > 0"。三者都不引入新状态。
+    const u32 depthKeyPixels = m_Raster.GetDepthKeyPixelCount();
+    const u32 expectMaxTri   = m_Raster.SoftLastMaxTriangles();
+    const bool pixelsOk = (depthKeyPixels != 0u)
+                       && ((u64)diagScreenW * (u64)diagScreenH == (u64)depthKeyPixels);
+    const bool maxTriOk = (diagMaxTri == expectMaxTri);
+    // 场景非空（有簇）时量化尺度不该是 0；空资产档不参与这条（避免误报）。
+    const bool extentOk = (m_AssetClusterCount == 0u) || (diagExtent > 0u);
+    if (!pixelsOk || !maxTriOk || !extentOk) {
+        outDiagOk = 0u;
+        HE_CORE_WARN("[Nanite] 读数自检不通过：push constant 回读与 CPU 端期望不符 ⇒ "
+                     "**这一帧的读数不可信**（diag_screenw={} × diag_screenh={} = {} ，"
+                     "而屏幕像素数应为 {} ；diag_maxtri={} 而期望 {} ；diag_extent_milli={} ）",
+                     diagScreenW, diagScreenH,
+                     (unsigned long long)((u64)diagScreenW * (u64)diagScreenH),
+                     depthKeyPixels, diagMaxTri, expectMaxTri, diagExtent);
+    }
+
+    // ── ② 跨读回的恒定性：谁是"从未变过"的读数 ──
+    if (m_StatSelfCheckCalls == 0u) {
+        // 第一次读回只建立基线。此时"变过"标志全部清 0，**不能**据此下任何结论。
+        for (u32 i = 0u; i < kNaniteSoftStatsCapacity; ++i) {
+            m_StatPrev[i] = s[i];
+            m_StatEverChanged[i] = 0u;
+        }
+        m_StatSelfCheckCalls = 1u;
+        return;
+    }
+    ++m_StatSelfCheckCalls;
+    u32 changedThisTime = 0u;
+    for (u32 i = 0u; i < kNaniteSoftStatsCapacity; ++i) {
+        if (s[i] != m_StatPrev[i]) {
+            m_StatEverChanged[i] = 1u;   // 只增不减：一旦变过就不再是"恒真"嫌疑
+            ++changedThisTime;
+        }
+        m_StatPrev[i] = s[i];
+    }
+    // 【诚实口径】本次读回里若**一个槽都没变**（例如相机固定、整轮只转储一帧），
+    //   就无法区分"这个槽是恒真读数"与"这一帧确实什么都没动" ⇒ **不下结论、不报警**。
+    //   宁可漏报（下一次读回还有机会），也不误报（误报会让人不再相信这条告警）。
+    if (changedThisTime == 0u) return;
+
+    u32 suspect = 0u;
+    for (u32 i = 0u; i < kNaniteSoftStatsCapacity; ++i) {
+        if (s[i] != 0u && m_StatEverChanged[i] == 0u) ++suspect;
+    }
+    outConstSuspect = suspect;
+    if (suspect != 0u) {
+        HE_CORE_WARN("[Nanite] 读数自检：在同一批读回里**确有其它槽在变**的前提下，仍有 {} 个槽"
+                     "非 0 且**从未变过** ⇒ 疑似恒真/硬编码读数（§14.34 第 2 行）。"
+                     "请逐个核对这些槽是否真的来自 GPU 原子计数（槽位定义见 NaniteTypes.h 的 "
+                     "kNaniteSoftStat*）—— 历史上 depth_written 就曾硬编码成 1 并掩盖了一个真 bug",
+                     suspect);
+    }
+}
+
 void NaniteRenderer::LogSizeDistReadback() {
     // 关闭档 / 未就绪 / 未开软光栅：不打印（关闭档日志与基线逐字一致）。
     // 【为什么门控与 `soft_raster` 行完全一致】桶计数就写在软光栅**第 1 趟**里，
@@ -835,13 +906,23 @@ void NaniteRenderer::LogSizeDistReadback() {
     const u32 sumEqClusters = (bucketSum == (u64)clusters) ? 1u : 0u;
     const u32 sumEqVisible  = ((u64)clusters == (u64)visible) ? 1u : 0u;
 
+    // ── 【§14.8 任务 26 第 2 条】读数自检（§14.34 表格第 2 行）──
+    // 【为什么把结论**追加**到本行而不是另起一行】本行已经承载"分布 + 两条不变式"，
+    //   自检回答的是同一类问题（"这一帧的读数可不可信"）；追加字段不新建行、不改名，
+    //   对任何按行或按字段名解析的既有脚本都是纯增量（与任务 24 给 `soft_raster` 追加字段同一做法）。
+    u32 statDiagOk = 1u;
+    u32 statConstSuspect = 0u;
+    SelfCheckSoftStats(s, statDiagOk, statConstSuspect);
+
     // 【恰好一行】任务 23 的"分布"出口。字段名自成一格（buckets/total/clusters/visible/…），
     //   与 `soft_raster` / `hard_raster` 两行的字段刻意不重名，避免任何按行抽键值的脚本抓错行。
     HE_CORE_INFO("[Nanite] size_dist buckets=[{},{},{},{},{}] total={} clusters={} visible={} "
-                 "sum_eq_clusters={} sum_eq_visible={} max_triangles={}",
+                 "sum_eq_clusters={} sum_eq_visible={} max_triangles={} "
+                 "stat_ok={} const_suspect={}",
                  buckets[0], buckets[1], buckets[2], buckets[3], buckets[4],
                  (unsigned long long)bucketSum, clusters, visible,
-                 sumEqClusters, sumEqVisible, m_Raster.SoftLastMaxTriangles());
+                 sumEqClusters, sumEqVisible, m_Raster.SoftLastMaxTriangles(),
+                 statDiagOk, statConstSuspect);
 }
 
 void NaniteRenderer::LogPerfReadback(float frameTotalMs, float nanitePassMs, u32 nanitePassCount) {

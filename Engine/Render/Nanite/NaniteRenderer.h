@@ -260,6 +260,30 @@ public:
     /// 【同步约定】与其它读回相同：只 Map、不等待；调用方必须已 `WaitIdle()`。
     void LogSizeDistReadback();
 
+    /// 【§14.8 任务 26 的第 2 条】读数自检：判定"这一帧的读数是否可信"。
+    ///
+    /// 【为什么要它（§14.34 表格第 2 行）】"读数必须是真实 GPU 读回"是一条纪律，但纪律本身
+    ///   **不是工具**：历史上 `depth_written` 曾硬编码成 1，把一个真 bug 掩盖了整整一个任务；
+    ///   任务 24 的第一版也出现过整块读数被覆写（`diag_screenw` 回读成一个小十位数而**不是
+    ///   屏幕宽**），而当时 (c)/(d1) 恰好只依赖其中两个字段。⇒ 需要一条**机械**检查。
+    ///
+    /// 【怎么查——两路，都不需要任何新增输入】
+    ///   ① **已知关系式**（恒真，与运行档位无关）：
+    ///      `diag_screenw × diag_screenh == depth_key_pixels`（屏幕像素数）、
+    ///      `diag_maxtri == SoftLastMaxTriangles()`（push constant 回读必须等于 CPU 送下去的值）、
+    ///      `diag_extent_milli > 0`（场景非空时量化尺度不该是 0）。
+    ///      这三条是"读数是否真的来自本帧 push constant"的直接证据。
+    ///   ② **跨读回的恒定性**：逐个槽记录"是否曾经变化过"。若某槽**非 0 且从未变过**、
+    ///      而同一批读回里**确实有别的槽在变**（⇒ 说明帧内容在动），该槽就是"疑似恒真读数"。
+    ///      【诚实标注】若本次运行里没有任何槽变化（例如相机固定、只转储一帧），
+    ///      则**无法判定**，此时返回 0 并**不报警** —— 宁可漏报也不误报。
+    ///
+    /// @param s              已读回的软光栅读数缓冲（长度 `kNaniteSoftStatsCapacity`）
+    /// @param outDiagOk      出参：1 = ①的三条关系式全部成立；0 = 有任一条不成立
+    /// @param outConstSuspect 出参：疑似"恒真读数"的槽数（0 = 未发现或无法判定）
+    void SelfCheckSoftStats(const u32 (&s)[kNaniteSoftStatsCapacity],
+                            u32& outDiagOk, u32& outConstSuspect);
+
     /// 【§14.8 任务 23】把"**分流**"与"**帧时**"绑在**同一行**输出（性能读数）：
 
     ///   `[Nanite] perf max_triangles=16 hard_raster=1 soft_clusters=61 hard_clusters=31587
@@ -449,6 +473,14 @@ private:
     u32 m_FrameIndex = 0u;
     /// 资产的簇出现总数（页映射的索引空间上界；流式开启档给着色器做越界收口用）
     u32 m_AssetClusterCount = 0u;
+
+    // ── 【§14.8 任务 26 第 2 条】读数自检的跨读回状态 ──
+    /// 自检被调用过几次（0 = 还没有基线，第一次只记录不下结论）
+    u32 m_StatSelfCheckCalls = 0u;
+    /// 上一次的读数快照（用于判定"这一帧有没有东西在变"）
+    u32 m_StatPrev[kNaniteSoftStatsCapacity] = {};
+    /// 每个槽"是否曾经变化过"（1 = 变过）。**只增不减**：一旦变过就不再是"恒真"嫌疑。
+    u8  m_StatEverChanged[kNaniteSoftStatsCapacity] = {};
 
     /// 开关与档位的唯一真值（默认 `enabled = false` ⇒ §14.2 不变式 1）
     NaniteSettings m_Settings;
