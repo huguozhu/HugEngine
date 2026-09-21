@@ -10,6 +10,14 @@
 //   为什么不能用单趟 + ROV：见 `Nanite_SoftRasterCommon.slang` 顶部的实测证据（本仓库的
 //   Slang 在 compute 里静默丢弃 ROV 语义；SPIR-V 的 interlock 只对 Fragment 入口合法）。
 //
+// 【三趟：本文件是第 3 趟（C 趟）】在"原子深度键（A 趟）"与"写 GBuffer（C 趟，本文件）"之间，
+//   现在夹了一趟 `Nanite_SoftRasterWinner.comp.slang`（B 趟，确定性赢家仲裁）。原因是深度键的
+//   低 8 位只有**簇内**唯一性：两个**不同簇**的三角形若深度位模式相同且簇内下标相同，键就
+//   逐位相同 ⇒ 只靠等值复检的话两个候选都能通过、由 UAV 写序决定谁赢（实测：模块接管档两次
+//   相同运行，20 个转储里 7 个不同）。B 趟用**全局唯一候选号**（`(槽位 << 8) | 簇内三角形下标`）
+//   的原子最小值把归属定成全序，本文件在等值复检之后再核一遍候选号（见下面的 ③b）。
+//   三趟都录在既有 `Nanite_CullChain3` 的 pass 体内用显式屏障定序 ⇒ 帧图 pass 列表不变。
+//
 // 【写哪些通道】albedo（MRT0：rgb = 反照率、a = metallic）、normal（MRT1：xyz = 世界法线、
 //   a = roughness）、worldPos（MRT4：xyz = 世界坐标）、lightmapKey（MRT7：uv.xy + 页号 + 0）。
 //   · 材质：资产的材质段**为空**（任务 12/19 才解析材质）⇒ 用**中性材质常数**
@@ -35,6 +43,14 @@ static const uint kNaniteObjectIndexBegin = 1024u;
 [[vk::binding(9, 0)]]  [[vk::image_format("rgba16f")]] RWTexture2D<float4> u_Normal;      // MRT1
 [[vk::binding(10, 0)]] [[vk::image_format("rgba16f")]] RWTexture2D<float4> u_WorldPos;    // MRT4
 [[vk::binding(11, 0)]] [[vk::image_format("rgba16f")]] RWTexture2D<float4> u_LightmapKey; // MRT7
+
+// ── 【确定性赢家选择】赢家候选号缓冲（只读；R32_UINT，与 `u_DepthKey` 同尺寸同格式）──
+// 【为什么本趟要读它】见第 2.5 趟 `Nanite_SoftRasterWinner.comp.slang` 的文件头：深度键的低 8 位
+//   只有**簇内**唯一性，跨簇撞键时"等值复检"会让多个候选同时通过、由 UAV 写序决定像素归属
+//   （实测两次相同运行不是逐位可复现）。第 2.5 趟已经把"每个像素的赢家"用**全局唯一候选号**的
+//   原子最小值定死；本趟在等值复检之后再核一遍候选号，不等就 `continue` ⇒ 每个像素**恰好一个**
+//   赢家写 GBuffer，且赢家的选择与任何写序无关（键最小者；键相同 ⇒ 候选号最小者）。
+[[vk::binding(21, 0)]] RWStructuredBuffer<uint> u_WinnerID;
 
 [numthreads(16, 1, 1)]
 void main(uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
@@ -113,6 +129,19 @@ void main(uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
                 // ── ③ 深度等值复检（两趟之间唯一的同步点，替代 ROV/interlock）──
                 uint pixelIndex = (uint)py * screenWidth + (uint)px;
                 if (u_DepthKey[pixelIndex] != key) continue;
+
+                // ── ③b 【确定性赢家选择】候选号复检：只有第 2.5 趟仲裁出的那个赢家才能往下走 ──
+                //   【为什么这一道是必需的】深度键的低 8 位只是**簇内**三角形下标，两个**不同簇**的
+                //   三角形若深度位模式相同且簇内下标相同，键就**逐位相同** ⇒ 两个候选都通过上一道
+                //   等值复检，最终由 UAV 写序决定谁写进 GBuffer（实测：模块接管档两次相同运行，
+                //   20 个转储里 7 个不同）。这一道把归属改由 (键, 全局唯一候选号) 的全序决定。
+                //   【候选号的编码必须与第 2.5 趟逐位相同】`(ref.cluster << 12) | (ref.instance << 6)
+                //   | (triLocal & 0x3F)` —— **稳定身份**，与可见簇列表的槽位顺序无关；两处的表达式
+                //   一字不差，否则赢家会与候选对不上（全部像素不写）。完整理由（为什么不能用
+                //   `gid.x`、这个打包为什么是单射、上限调大会撞号）见
+                //   `Nanite_SoftRasterWinner.comp.slang` 的 ④ 段长注释。
+                if (u_WinnerID[pixelIndex] != ((ref.cluster << 12) | (ref.instance << 6)
+                                               | (triLocal & 0x3Fu))) continue;
 
                 // ── ④ 透视校正插值 → 写 GBuffer ──
                 float3 worldPos = softRasterAttribute(bary, tri,

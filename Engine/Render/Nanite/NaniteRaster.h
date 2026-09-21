@@ -216,11 +216,15 @@ public:
     ///   (0,0,0,0) 而不是清除值）。compute 写 UAV 完全在模块手里，不依赖 render pass 的缓存行为。
     void RecordGBufferClearPass(rhi::IRHICommandList* cmd, const GBufferTargets& targets);
 
-    /// **软光栅**（三趟录在同一个命令缓冲里，用屏障定序）：
-    ///   ① 4B/像素的 `CopyBuffer`（常驻 0xFF 源 → 深度键）= 每帧清成"没有几何"的哨兵；
+    /// **软光栅**（四段录在同一个命令缓冲里，用屏障定序）：
+    ///   ① 4B/像素的 `CopyBuffer`（常驻 0xFF 源 → 深度键**与赢家候选号**）= 每帧清成"没有几何"的哨兵；
     ///   ② 第 1 趟 compute（`Nanite_SoftRasterDepth.comp`）：逐簇逐三角形的原子深度键；
-    ///   ③ 第 2 趟 compute（`Nanite_SoftRaster.comp`）：重跑光栅化 + 等值复检 → 写 4 张 GBuffer；
-    ///   ④ 深度解析（全屏片元 `Nanite_DepthResolve.*`）：深度键 → `SV_Depth` 写既有深度附件。
+    ///   ③ 第 2.5 趟 compute（`Nanite_SoftRasterWinner.comp`）：重跑光栅化 + 等值复检 →
+    ///      对命中的候选做 `InterlockedMin(赢家候选号)`（**确定性赢家选择**，不写任何 GBuffer、
+    ///      不加任何读数；为什么必须有这一趟见那个着色器的文件头）；
+    ///   ④ 第 3 趟 compute（`Nanite_SoftRaster.comp`）：重跑光栅化 + 等值复检 + **候选号复检**
+    ///      → 写 4 张 GBuffer（每个像素恰好一个确定性赢家）；
+    ///   ⑤ 深度解析（全屏片元 `Nanite_DepthResolve.*`）：深度键 → `SV_Depth` 写既有深度附件。
     /// 顺序全部由函数内**显式**发出的屏障给出（帧图不跟踪模块自持资源，也排不动这些内部段）。
     void RecordSoftRasterPass(rhi::IRHICommandList* cmd,
                               const GBufferTargets& targets,
@@ -405,9 +409,13 @@ private:
     bool EnsureMeshTestResources();
 
     /// 【任务 18】按当前视口重建深度键缓冲与其常驻 0xFF 源（容量变化时）。
+    /// 【确定性赢家选择】同时按**同尺寸同格式**重建赢家候选号缓冲（`m_WinnerID`）——
+    ///   它与深度键同生共死（同一份容量、同一个常驻 0xFF 清零源）。
     bool EnsureDepthKeyBuffers(u32 width, u32 height);
 
     /// 【任务 18】在命令缓冲内清深度键（`CopyBuffer` 常驻 0xFF 源 → 深度键整块）
+    /// 【确定性赢家选择】复用**同一个** `m_DepthKeyZeroSrc` 再对赢家候选号做一次 `CopyBuffer`
+    ///   （初值必须是 `0xFFFFFFFF`，这样 `InterlockedMin` 才等价于"取最小候选号"）。
     void RecordDepthKeyClear(rhi::IRHICommandList* cmd);
 
     /// 【任务 18】在命令缓冲内清软光栅读数（`CopyBuffer` 常驻 0 源 → 读数缓冲整块）
@@ -475,9 +483,13 @@ private:
     std::unique_ptr<rhi::IRHIPipelineState> m_MeshTestPSO;
 
     // ── §14.8 任务 18：软光栅（懒建；软光栅关闭或资产未就绪时为空）──
-    /// 三个入口的字节码：两趟 compute + 深度解析的 VS/FS
-    rhi::ShaderBytecode m_SoftDepthCS;   // Nanite_SoftRasterDepth.comp.spv
-    rhi::ShaderBytecode m_SoftColorCS;   // Nanite_SoftRaster.comp.spv
+    /// 四个入口的字节码：三趟 compute + 深度解析的 VS/FS
+    rhi::ShaderBytecode m_SoftDepthCS;    // Nanite_SoftRasterDepth.comp.spv
+    rhi::ShaderBytecode m_SoftColorCS;    // Nanite_SoftRaster.comp.spv
+    /// 【确定性赢家选择】第 2.5 趟（仲裁趟）的字节码：`Nanite_SoftRasterWinner.comp.spv`
+    /// 【为什么单独一个成员】它是**第三个 compute 入口**，与上面两个入口共用同一份
+    ///   `Nanite_SoftRasterCommon.slang`（光栅化内联函数一份 ⇒ 三趟的覆盖集合不可能分叉）。
+    rhi::ShaderBytecode m_SoftWinnerCS;
     rhi::ShaderBytecode m_DepthResolveVS;  // Nanite_DepthResolve.vert.spv
     rhi::ShaderBytecode m_DepthResolveFS;  // Nanite_DepthResolve.frag.spv
 
@@ -485,12 +497,17 @@ private:
     /// 【为什么两趟各一个集合】第 2 趟多绑 4 张 GBuffer 颜色目标（binding 8..11），
     ///   且引擎的 GPU 在**执行期**读描述符、最后一次主机写对整段命令缓冲生效（任务 15 的教训）
     ///   ⇒ 两次派发必须在**不同的**集合上，且每个集合每帧只写一次。
+    /// 【确定性赢家选择】仲裁趟（第 2.5 趟）**复用第 2 趟的布局与集合**（`m_SoftColorLayout` /
+    ///   `m_SoftColorSet`）—— 它需要的 0..7 / 15..20 与第 2 趟完全一样，只多读一个 binding 21
+    ///   （`u_WinnerID`，只在仲裁着色器里声明）⇒ 不必新建集合，也不必新建布局。
     rhi::DescriptorSetLayoutHandle m_SoftDepthLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_SoftDepthSet    = rhi::kInvalidSet;
     rhi::DescriptorSetLayoutHandle m_SoftColorLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_SoftColorSet    = rhi::kInvalidSet;
     std::unique_ptr<rhi::IRHIPipelineState> m_SoftRasterPSO;      // 第 1 趟（深度键）
-    std::unique_ptr<rhi::IRHIPipelineState> m_SoftColorPSO;       // 第 2 趟（写 GBuffer）
+    std::unique_ptr<rhi::IRHIPipelineState> m_SoftColorPSO;       // 第 3 趟（写 GBuffer）
+    /// 【确定性赢家选择】第 2.5 趟的 PSO（仲裁；复用 `m_SoftColorLayout`，不写任何 GBuffer）
+    std::unique_ptr<rhi::IRHIPipelineState> m_SoftWinnerPSO;
 
     /// 深度解析通道（全屏片元；只写深度附件，无颜色附件）
     rhi::DescriptorSetLayoutHandle m_DepthResolveLayout = rhi::kInvalidLayout;
@@ -511,6 +528,14 @@ private:
     std::unique_ptr<rhi::IRHIBuffer> m_DepthKeyZeroSrc;   ///< 常驻 0xFF（`TransferSrc`）
     u32 m_DepthKeyPixels = 0u;                            ///< 当前容量（像素数）；尺寸变化时重建
     u32 m_DepthKeyZeroSrcPixels = 0u;                     ///< 常驻 0xFF 源的容量（与深度键同步重建）
+
+    /// 【确定性赢家选择】赢家候选号缓冲（`RWStructuredBuffer<uint>`，W×H 条；R32_UINT）
+    /// 【为什么与深度键同尺寸同格式】仲裁趟对每个像素做的是**同一形状**的逐像素原子最小值：
+    ///   同一份 `pixelIndex = y × screenWidth + x` 寻址、同一条"常驻 0xFF 源 + CopyBuffer"清零
+    ///   路径（复用 `m_DepthKeyZeroSrc`）⇒ 同尺寸同格式是这套复用成立的前提。
+    /// 【容量】与深度键**共用** `m_DepthKeyPixels`（两者永远同生共死、尺寸逐位相同），
+    ///   不另开一个容量字段 —— 避免出现"两个容量字段互相不一致"这种可以避免的状态。
+    std::unique_ptr<rhi::IRHIBuffer> m_WinnerID;
 
     /// 读数缓冲（扁平 u32，`kNaniteSoftStatsCapacity` 条）+ 每帧清零用的常驻 0 源
     std::unique_ptr<rhi::IRHIBuffer> m_SoftStats;

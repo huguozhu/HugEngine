@@ -104,6 +104,14 @@ struct InstanceObject {
 // [2, 2 + kNanitePageRequestSlots) = 环形缓冲本体。**GPU 只追加，去重在 CPU 读回侧做**。
 [[vk::binding(20, 0)]] RWStructuredBuffer<uint>               u_PageFeedback;
 
+// ── 【确定性赢家选择】赢家候选号（binding 21；读写；R32_UINT，与深度键**同尺寸同格式**）──
+// 【为什么不在本文件里声明】它只被第 2.5 趟（`Nanite_SoftRasterWinner.comp.slang`，做原子最小）
+//   与第 3 趟（`Nanite_SoftRaster.comp.slang`，做候选号复检）使用；第 1 趟（深度键）既不用它、
+//   它的描述符集布局里也没有这个绑定 ⇒ 声明放在两个入口文件里（与 binding 8..11 同一写法）。
+// 【为什么需要它】深度键的低 8 位只有**簇内**唯一性，跨簇撞键时"等值复检"会让多个候选同时
+//   通过、由 UAV 写序决定像素归属（实测两次相同运行不是逐位可复现）。完整论证见
+//   `Nanite_SoftRasterWinner.comp.slang` 的文件头。
+
 // ── 读数槽位（与 C++ 侧 `NaniteSoftRasterStats` 的 static_assert 逐条对应）──
 static const uint kSoftStatRasterClusters  = 0u;   // 本帧真正走软光栅的簇数（triangleCount <= maxTriangles）
 static const uint kSoftStatSkippedClusters = 1u;   // 因 triangleCount > maxTriangles 跳过的簇数（留给任务 22）

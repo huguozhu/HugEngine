@@ -36,6 +36,8 @@
 // 【§14.8 任务 18】软光栅三趟：深度键 / 写 GBuffer / 深度解析
 #include "Nanite_SoftRasterDepth.comp.spv.h"   // k_Nanite_SoftRasterDepth_comp_spv
 #include "Nanite_SoftRaster.comp.spv.h"        // k_Nanite_SoftRaster_comp_spv
+// 【确定性赢家选择】第 2.5 趟：赢家候选号仲裁（夹在第 1 趟与第 3 趟之间）
+#include "Nanite_SoftRasterWinner.comp.spv.h"  // k_Nanite_SoftRasterWinner_comp_spv
 #include "Nanite_DepthResolve.vert.spv.h"      // k_Nanite_DepthResolve_vert_spv
 #include "Nanite_DepthResolve.frag.spv.h"      // k_Nanite_DepthResolve_frag_spv
 #include "Nanite_GBufferClear.comp.spv.h"     // k_Nanite_GBufferClear_comp_spv（compute 清屏 8 张颜色目标）
@@ -214,6 +216,8 @@ void NaniteRaster::Shutdown() {
     // ── 【§14.8 任务 18】软光栅的懒建资源（未开启软光栅时它们是空的，这里自然是空操作）──
     m_SoftRasterPSO.reset();
     m_SoftColorPSO.reset();
+    // 【确定性赢家选择】仲裁趟（第 2.5 趟）的 PSO：与另外两趟同一批懒建资源，一起释放
+    m_SoftWinnerPSO.reset();
     m_DepthResolvePSO.reset();
     if (m_Device && m_SoftDepthLayout != rhi::kInvalidLayout)
         m_Device->DestroyDescriptorSetLayout(m_SoftDepthLayout);
@@ -229,6 +233,8 @@ void NaniteRaster::Shutdown() {
     m_DepthResolveSet       = rhi::kInvalidSet;
     m_DepthKey.reset();
     m_DepthKeyZeroSrc.reset();
+    // 【确定性赢家选择】赢家候选号缓冲与深度键同生共死（同一份容量、同一个清零源）
+    m_WinnerID.reset();
     m_DepthKeyPixels        = 0u;
     m_DepthKeyZeroSrcPixels = 0u;
     m_SoftStats.reset();
@@ -640,12 +646,17 @@ u32 NaniteRaster::ReadbackMeshTestTargetMax() {
 }
 
 // ============================================================
-// §14.8 任务 18：软光栅（两趟"原子深度键 + 等值复检"写 GBuffer）
+// §14.8 任务 18：软光栅（"原子深度键 + 等值复检"写 GBuffer）
 //
-// 【三趟的顺序与同步】全部录在同一个命令缓冲里、用**显式屏障**定序（帧图不跟踪模块自持资源，
+// 【四段的顺序与同步】全部录在同一个命令缓冲里、用**显式屏障**定序（帧图不跟踪模块自持资源，
 //   也排不动这些内部段；与任务 15/16 的 CullChain 是同一套做法）：
-//     清深度键（CopyBuffer）→ 屏障 → 第 1 趟 compute → 屏障 → 第 2 趟 compute
+//     清深度键 + 清赢家候选号（两次 CopyBuffer）→ 屏障 → A 趟（深度键）
+//     → 屏障 A→B → B 趟（**确定性赢家仲裁**，第 2.5 趟）
+//     → 屏障 B→C → C 趟（等值复检 + 候选号复检 → 写 GBuffer）
 //     → 屏障（颜色 UAV → 可采样）→ 深度解析（全屏片元写 SV_Depth）
+// 【确定性赢家选择】B 趟是"深度键的低 8 位只有簇内唯一性"这个缺陷的修法：跨簇撞键时不再由
+//   UAV 写序决定像素归属，而由全局唯一候选号的最小值决定（完整论证见
+//   `Nanite_SoftRasterWinner.comp.slang` 的文件头）。三个派发都录在本函数里 ⇒ 帧图 pass 列表不变。
 // ============================================================
 
 bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
@@ -733,6 +744,11 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
             {18, rhi::DescriptorType::StorageBuffer, 1,    rhi::kStageMaskCompute, false },
             {19, rhi::DescriptorType::StorageBuffer, 1,    rhi::kStageMaskCompute, false },
             {20, rhi::DescriptorType::StorageBuffer, 1,    rhi::kStageMaskCompute, false },
+            // 【确定性赢家选择】21 = 赢家候选号（读写；R32_UINT，与深度键同尺寸同格式）。
+            // 【为什么加在第 2 趟的布局上】仲裁趟（第 2.5 趟）**复用本布局与本集合**：它需要
+            //   0..7 / 15..20 与第 2 趟完全一样，只多读一个 21。第 2 趟的着色器不声明 21
+            //   （多余绑定在 Vulkan 里是合法的：管线布局允许是着色器所用绑定的**超集**）。
+            {21, rhi::DescriptorType::StorageBuffer, 1,    rhi::kStageMaskCompute, false },
         };
         m_SoftColorLayout = m_Device->CreateDescriptorSetLayout(layout);
         if (m_SoftColorLayout == rhi::kInvalidLayout) {
@@ -778,6 +794,30 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
         desc.debugName            = "NaniteSoftRasterWrite";
         m_SoftColorPSO = m_Device->CreatePipelineState(desc);
         if (!m_SoftColorPSO) { HE_CORE_ERROR("NaniteRaster: 软光栅第 2 趟 PSO 创建失败"); return false; }
+
+        // ── 【确定性赢家选择】第 2.5 趟（仲裁）：**复用第 2 趟的布局**，只多读 binding 21 ──
+        // 【为什么复用而不是新建一套集合】它需要的 0..7 / 15..20 与第 2 趟完全一致，push constant
+        //   范围也一致（同一个 `NaniteSoftRasterParams`）⇒ 新建集合只会多一份每帧要写的描述符，
+        //   且多一处"两个集合内容必须一致"的隐性契约。复用之后，"第 2 趟看到的光栅化输入"与
+        //   "仲裁趟看到的光栅化输入"在**绑定层面**就是同一份，不可能分叉。
+        // 【它不写 GBuffer】着色器里根本没有 u_Albedo/u_Normal/... 的声明（8..11 白白躺着不用），
+        //   布局里有它们是合法的（超集），且不构成任何副作用。
+        m_SoftWinnerCS.stage      = rhi::ShaderStage::Compute;
+        m_SoftWinnerCS.spirv      = k_Nanite_SoftRasterWinner_comp_spv;
+        m_SoftWinnerCS.entryPoint = "main";
+
+        rhi::PushConstantRange winnerPc;
+        winnerPc.stageMask = rhi::kStageMaskCompute;
+        winnerPc.size      = sizeof(NaniteSoftRasterParams);   // 与第 1/2 趟同一个范围
+
+        rhi::PipelineStateDesc winnerDesc;
+        winnerDesc.computeShader        = &m_SoftWinnerCS;
+        winnerDesc.bindPoint            = rhi::PipelineBindPoint::Compute;
+        winnerDesc.pushConstantRanges   = { winnerPc };
+        winnerDesc.descriptorSetLayouts = { m_SoftColorLayout };
+        winnerDesc.debugName            = "NaniteSoftRasterWinner";
+        m_SoftWinnerPSO = m_Device->CreatePipelineState(winnerDesc);
+        if (!m_SoftWinnerPSO) { HE_CORE_ERROR("NaniteRaster: 软光栅仲裁趟 PSO 创建失败"); return false; }
     }
 
     // ── 3. 深度解析：无颜色附件 + D32 深度附件（写法与 CSMTechnique 的深度专用 PSO 同款）──
@@ -877,7 +917,10 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
 bool NaniteRaster::EnsureDepthKeyBuffers(u32 width, u32 height) {
     if (!m_Device || width == 0u || height == 0u) return false;
     const u32 pixels = width * height;
-    if (m_DepthKey && m_DepthKeyPixels == pixels) return true;
+    // 【确定性赢家选择】就绪条件必须**一并包含**赢家候选号缓冲：两者永远同尺寸同格式、
+    //   同生共死；只判深度键会让"深度键在、候选号不在"这种半就绪状态溜进录制路径
+    //   （仲裁趟会绑一个空缓冲 ⇒ 未定义行为）。
+    if (m_DepthKey && m_WinnerID && m_DepthKeyPixels == pixels) return true;
 
     // 【替换的安全性】本函数在 `RecordSoftRasterPass` 里被调用（帧内录制期），而深度键只被
     //   模块自己的三趟使用、且这三趟都录在**当前**命令缓冲里。视口变化时引擎会 OnResize →
@@ -890,6 +933,12 @@ bool NaniteRaster::EnsureDepthKeyBuffers(u32 width, u32 height) {
     d.cpuAccess = true;
     m_DepthKey = m_Device->CreateBuffer(d);
     if (!m_DepthKey) { HE_CORE_ERROR("NaniteRaster: 深度键缓冲创建失败（{} 像素）", pixels); return false; }
+
+    // 【确定性赢家选择】赢家候选号缓冲：与深度键**逐字段相同**的 `BufferDesc`（同尺寸、同格式
+    //   R32_UINT、同 usage）。它是仲裁趟（第 2.5 趟）的 `u_WinnerID`：每帧先被清成 0xFFFFFFFF，
+    //   再由命中等值复检的候选做 `InterlockedMin` ⇒ 最终值 = 该像素的最小候选号 = 确定性赢家。
+    m_WinnerID = m_Device->CreateBuffer(d);
+    if (!m_WinnerID) { HE_CORE_ERROR("NaniteRaster: 赢家候选号缓冲创建失败（{} 像素）", pixels); return false; }
     m_DepthKeyPixels = pixels;
 
     // 【为什么用"常驻 0xFF 源 + CopyBuffer"而不是主机写】任务 13 的教训：录制期的主机写会与
@@ -908,7 +957,8 @@ bool NaniteRaster::EnsureDepthKeyBuffers(u32 width, u32 height) {
         }
         m_DepthKeyZeroSrcPixels = pixels;
     }
-    HE_CORE_INFO("NaniteRaster: 深度键缓冲就绪（{}×{} = {} B；每帧由命令缓冲内的拷贝清成 0xFFFFFFFF）",
+    HE_CORE_INFO("NaniteRaster: 深度键缓冲就绪（{}×{} = {} B；每帧由命令缓冲内的拷贝清成 0xFFFFFFFF；"
+                 "赢家候选号缓冲同尺寸同格式）",
                  width, height, (unsigned long long)d.size);
     return true;
 }
@@ -916,6 +966,14 @@ bool NaniteRaster::EnsureDepthKeyBuffers(u32 width, u32 height) {
 void NaniteRaster::RecordDepthKeyClear(rhi::IRHICommandList* cmd) {
     if (!cmd || !m_DepthKey || !m_DepthKeyZeroSrc) return;
     cmd->CopyBuffer(m_DepthKeyZeroSrc.get(), m_DepthKey.get(), (u64)m_DepthKeyPixels * sizeof(u32), 0, 0);
+    // 【确定性赢家选择】赢家候选号用**同一个**常驻 0xFF 源再拷一次。
+    //   【为什么初值必须是 0xFFFFFFFF】仲裁趟做的是 `InterlockedMin(u_WinnerID[p], candidateID)`；
+    //   只有"初始值大于任何合法候选号"时，这次原子最小才等价于"取最小候选号"。哨兵
+    //   `0xFFFFFFFF` 满足它（合法候选号 = (槽位 < 2^24) << 8 | 下标 ≤ 0xFFFFFF3F < 0xFFFFFFFF）。
+    if (m_WinnerID) {
+        cmd->CopyBuffer(m_DepthKeyZeroSrc.get(), m_WinnerID.get(),
+                        (u64)m_DepthKeyPixels * sizeof(u32), 0, 0);
+    }
     // 拷贝 → 第 1 趟 compute：显式内存屏障（模块自持缓冲不在帧图里，同步必须自己给）
     cmd->PipelineBarrier(rhi::PipelineStage::Transfer, rhi::PipelineStage::ComputeShader,
                          rhi::ResourceState::CopyDst, rhi::ResourceState::UnorderedAccess);
@@ -1051,6 +1109,10 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
     if (!cmd || !targets.HasSoftRasterTargets() || !asset.valid()) return;
     if (!visibleRefs || !visibleCount || !instances) return;
     if (!EnsureSoftRasterResources(targets)) return;
+    // 【确定性赢家选择】仲裁趟的 PSO 必须就绪：第 3 趟现在要核对它写下的候选号，缺了它
+    //   "仲裁"与"写 GBuffer"两件事都不成立 ⇒ 直接跳过本帧软光栅（**不静默**：创建失败时
+    //   `EnsureSoftRasterResources` 已经报过 HE_CORE_ERROR；这里只是不走空 PSO 的派发路径）。
+    if (!m_SoftWinnerPSO) return;
 
     const u32 w = targets.albedo->GetWidth();
     const u32 h = targets.albedo->GetHeight();
@@ -1120,6 +1182,14 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
         m_Device->UpdateDescriptorSet(m_SoftColorSet, 12, rhi::DescriptorType::StorageBuffer,
                                       asset.materials);
     }
+    // 【确定性赢家选择】binding 21 = 赢家候选号：**只写给第 2 趟的集合**（`m_SoftColorSet`）。
+    //   【为什么必须在上面那个循环之外单独写】第 1 趟的布局（`m_SoftDepthLayout`）**根本没有 21**
+    //   ——它的着色器（深度键趟）不读候选号。若把这一句塞进 `{m_SoftDepthSet, m_SoftColorSet}`
+    //   循环里，对第 1 趟的集合写一个不存在的绑定就是描述符越界写（未定义行为 / 校验层报错）。
+    if (m_WinnerID) {
+        m_Device->UpdateDescriptorSet(m_SoftColorSet, 21, rhi::DescriptorType::StorageBuffer,
+                                      m_WinnerID.get());
+    }
     m_Device->UpdateDescriptorSetWithImageView(m_SoftColorSet, 8,  rhi::DescriptorType::StorageImage,
                                                targets.albedo->GetNativeHandle());
     m_Device->UpdateDescriptorSetWithImageView(m_SoftColorSet, 9,  rhi::DescriptorType::StorageImage,
@@ -1146,7 +1216,7 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
                              tex);
     }
 
-    // ── ③ 第 1 趟：逐簇一个工作组，dispatch 条数 = 可见簇容量（着色器按可见计数提前返回）──
+    // ── ③ A 趟：逐簇一个工作组，dispatch 条数 = 可见簇容量（着色器按可见计数提前返回）──
     // 【为什么要按容量而不是按可见数派发】可见计数是**同一帧 GPU 刚写出的**值，CPU 读不到（读回
     //   要等 GPU ⇒ 破坏无停顿）；按容量派发、由 shader 按 `slot >= visibleCount` 早退，是本引擎
     //   既有的"GPU 驱动"写法。容量 = 可见引用表容量（`NaniteCull::GetBVHVisibleCapacity`）。
@@ -1156,17 +1226,32 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
     cmd->SetDrawDebugLabel("Nanite_SoftRasterDepth (atomic depth key)");
     cmd->Dispatch(visibleCapacity, 1, 1);
 
-    // ── ④ 第 1 趟 → 第 2 趟：深度键的 RAW（全局内存屏障）──
+    // ── ④ A → B：深度键的 RAW（全局内存屏障）──
     cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
                          rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess);
 
+    // ── ⑤ B 趟（新增）：确定性赢家仲裁 —— 重跑与 C 趟逐字相同的光栅化，对通过等值复检的候选
+    //      做 `InterlockedMin(u_WinnerID[p], 候选号)`。**不写 GBuffer、不加任何读数**。
+    // 【为什么绑 `m_SoftColorSet`】它复用第 2 趟的布局（多出来的只有 binding 21），且 0..7 / 15..20
+    //   与第 2 趟是同一份绑定 ⇒ "仲裁趟看到的光栅化输入"与"写色趟看到的"在绑定层面不可能分叉。
+    cmd->SetPipeline(m_SoftWinnerPSO.get());
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_SoftColorSet);
+    cmd->SetPushConstants(0, (u32)sizeof(NaniteSoftRasterParams), &paramsEff);
+    cmd->SetDrawDebugLabel("Nanite_SoftRasterWinner (deterministic winner id)");
+    cmd->Dispatch(visibleCapacity, 1, 1);
+
+    // ── ⑥ B → C：赢家候选号的 RAW（全局内存屏障）──
+    cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                         rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess);
+
+    // ── ⑦ C 趟：重跑光栅化 → 等值复检 → **候选号复检** → 写 4 张 GBuffer ──
     cmd->SetPipeline(m_SoftColorPSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_SoftColorSet);
     cmd->SetPushConstants(0, (u32)sizeof(NaniteSoftRasterParams), &paramsEff);
     cmd->SetDrawDebugLabel("Nanite_SoftRaster (equality test -> GBuffer)");
     cmd->Dispatch(visibleCapacity, 1, 1);
 
-    // ── ⑤ 第 2 趟 → 深度解析：深度键 UAV → 只读；4 张颜色 UAV → 可采样（Lighting 要读）──
+    // ── ⑧ C 趟 → 深度解析：深度键 UAV → 只读；4 张颜色 UAV → 可采样（Lighting 要读）──
     cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::FragmentShader,
                          rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource);
     for (rhi::IRHITexture* tex : { targets.albedo, targets.normal, targets.worldPos, targets.lightmapKey }) {
@@ -1177,7 +1262,7 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
                              tex);
     }
 
-    // ── ⑥ 深度解析：全屏片元，把深度键还原成 NDC 深度写既有深度附件（SV_Depth）──
+    // ── ⑨ 深度解析：全屏片元，把深度键还原成 NDC 深度写既有深度附件（SV_Depth）──
     // 【布局转换由 RHI 的 render pass 自己完成】`BeginOffscreenPass` 内部会把深度从当前布局
     //   （帧图模型里 GB_Clear 之后的 DEPTH_STENCIL_READ_ONLY）转到 ATTACHMENT，并在结束时
     //   还原成 READ_ONLY —— 于是帧图的模型与真实布局继续一致，不需要额外的深度屏障。
