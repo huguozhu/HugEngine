@@ -137,7 +137,8 @@ public:
 
     // 创建独立的 RT 效果管线 + SBT
     // @param descLayouts  set0(效果 RayGen) + 可选 set1/set2 布局
-    // @param maxPayloadSize  Reflection/GI 需要 32 字节（Shadow/AO 16 字节）
+    // @param maxPayloadSize  载荷字节数；各 RT 效果（Shadow/AO/Reflection/GI）均为单个 float4，
+    //                        故统一取默认值 rhi::kRTMaxPayloadSize = 16
     static RTEffectPipeline CreateEffectPipeline(
         rhi::IRHIDevice* device,
         const std::vector<rhi::ShaderBytecode>& rtShaders,

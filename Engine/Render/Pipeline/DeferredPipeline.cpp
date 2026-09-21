@@ -23,16 +23,16 @@
 #include "Fullscreen.vert.spv.h"
 #include "FullscreenCopy.frag.spv.h"
 
-// CVar: DGC 运行时开关（0=关闭，1=开启，默认关闭以保留传统 ExecuteIndirect 回退）
-// 在控制台输入 "r.DGC.Enable 1" 可动态启用
+// DGC 开关（0=关闭，1=开启，默认关闭以保留传统 ExecuteIndirect 回退）
+// 注意：这是 static 编译期常量，**未注册到 CVar 系统**，控制台改不了；
+// "r.DGC.Enable" 仅作为日志/诊断用的名字存在，需改开关请直接改此初值并重新编译。
 static int32_t cvDGC_Enable = 0;
 static const char* kCVar_DGC_Enable_Name = "r.DGC.Enable";
 
-// CVar: 瞬态资源路径验证开关（0=关闭，1=开启，默认关闭）
-// 在控制台输入 "r.TransientTest 1" 可启用，验证 Transient Allocator 端到端路径
+// 瞬态资源路径验证开关（0=关闭，1=开启，默认关闭）；同为编译期常量，未注册 CVar
 static int32_t cvTransientTest = 0;
 
-// CVar: GPL 变体演示开关（0=关闭，1=开启，默认关闭）
+// GPL 变体演示开关（0=关闭，1=开启，默认关闭）；同为编译期常量，未注册 CVar
 // 设为 1 重新编译启用：初始化时生成 N 个仅 blend 状态不同的变体 PSO，
 // 经限流器逐帧 fast-link 创建，验证 GPL 四段库缓存与限流协同工作。
 static int32_t cvGPLVariantTest = 0;

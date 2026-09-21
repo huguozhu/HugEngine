@@ -72,7 +72,7 @@ public:
     // @param rtShaders/shaderGroups 效果管线着色器组合
     // @param pcRange            push constant 范围（RayGen 阶段）
     // @param outFormat/outUsage 输出 UAV 纹理格式与用途
-    // @param maxPayloadSize     Reflection/GI 需要 32 字节（Shadow/AO 16 字节）
+    // @param maxPayloadSize     载荷字节数；各 RT 效果均为单个 float4，统一取 rhi::kRTMaxPayloadSize = 16
     bool Initialize(rhi::IRHIDevice* device,
                     u32 width, u32 height,
                     std::vector<rhi::DescriptorSetLayoutBinding> rayGenBindings,

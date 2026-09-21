@@ -65,7 +65,8 @@ namespace he::render {
 // DeferredPipeline — 延迟渲染管线（GBuffer + Lighting Pass）
 //
 // 复用 ShadowSystem / GI_IBL / GI_RSM / ToneMapPass / SkyboxPass
-// GBuffer 5×MRT（albedo+metallic / normal+roughness / emissive+AO / velocity / worldPos）
+// GBuffer 8×MRT（0=albedo+metallic / 1=normal+roughness / 2=emissive+AO / 3=velocity /
+//                    4=worldPos / 5=disneyA / 6=disneyB / 7=lightmapKey）
 // Lighting Pass 全屏三角形 PBR + IBL + RSM + Shadow
 // ============================================================================
 class DeferredPipeline : public IRenderPipeline {

@@ -14,7 +14,9 @@
 // ============================================================
 // Render Graph — 帧级渲染资源编排器
 //
-// Phase 2: 自动 Barrier 推导 + 资源别名 + Pass 裁剪
+// 编译阶段（顺序见 RenderGraph::Compile）：
+//   BuildDependencies → TopologicalSort → DeriveBarriers
+//   → CullDeadPasses → ApplyAliasing → ScheduleAsyncPasses
 // ============================================================
 
 namespace he::render {

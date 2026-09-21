@@ -181,7 +181,7 @@ private:
     bool m_MultiThreadRecord = true;
     bool m_UseExecuteIndirect = true;
     static constexpr u32 kMaxSecRecordLists = 8;
-    // RenderGraph 模式（默认关闭，渐进迁移到声明式编排）
+    // RenderGraph 模式（默认开启，声明式编排为正式路径；可经 SetUseRenderGraph 切回旧路径）
     bool m_UseRenderGraph = true;   // 启用 RenderGraph（含 GPU Profiler）
     std::vector<std::unique_ptr<rhi::IRHICommandList>> m_SecRecordLists;
 

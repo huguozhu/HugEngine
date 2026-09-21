@@ -107,7 +107,7 @@ public:
 // ============================================================
 // GBufferRenderer — GBuffer 纹理所有权 + 渲染（共享组件）
 //
-// 拥有 5 个 MRT 颜色纹理 + 深度纹理，提供 ImportToRenderGraph
+// 拥有 8 个 MRT 颜色纹理 + 深度纹理，提供 ImportToRenderGraph
 // 和 Render 接口。内部委托给 IGBufferRenderer（CPU/GPU 策略）。
 // 供 DeferredPipeline 使用。
 // ============================================================

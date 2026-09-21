@@ -103,7 +103,7 @@ bool PathTracingPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 hei
         // 全路径追踪 Pass（全分辨率，4 输出 UAV）
         m_PT = std::make_unique<PTPass>();
         if (!m_PT->Initialize(device, m_Width, m_Height)) {
-            HE_CORE_ERROR("PathTracingPipeline: PTPass 初始化失败（设备 maxPayloadSize 可能 < 48B），禁用 PT");
+            HE_CORE_ERROR("PathTracingPipeline: PTPass 初始化失败（设备 maxPayloadSize 可能 < 112B），禁用 PT");
             m_PT.reset();
             m_RTEnabled = false;
         }
