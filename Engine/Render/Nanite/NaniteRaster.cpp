@@ -664,6 +664,16 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
             { 5, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 实例表
             { 6, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 深度键（读写）
             { 7, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 读数（读写）
+            // 【任务 24】流式的五个只读视图 + 一个反馈环。**关闭档也声明**（布局是 PSO 期固定的），
+            //   但关闭档把它们绑到**既有**资产/读数缓冲上作占位、着色器一个字节都不读
+            //   ⇒ 不新建任何 GPU 资源（§14.2 不变式 1 的可核对形式：关闭档的 pass 集合与
+            //   冻结指纹逐位不变，且本部件一个缓冲都不创建）。
+            {15, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 簇→页
+            {16, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 页表
+            {17, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 池·簇段
+            {18, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 池·顶点段
+            {19, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 池·三角形段
+            {20, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskCompute, false },  // 反馈环（读写）
         };
         m_SoftDepthLayout = m_Device->CreateDescriptorSetLayout(layout);
         if (m_SoftDepthLayout == rhi::kInvalidLayout) {
@@ -715,6 +725,13 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
             {12, rhi::DescriptorType::StorageBuffer, 1,    rhi::kStageMaskCompute, false },
             {13, rhi::DescriptorType::SampledImage,  4096, rhi::kStageMaskCompute, true  },
             {14, rhi::DescriptorType::Sampler,       4096, rhi::kStageMaskCompute, true  },
+            // 【任务 24】流式视图（与第 1 趟同槽位；关闭档绑既有资产/读数缓冲作占位）
+            {15, rhi::DescriptorType::StorageBuffer, 1,    rhi::kStageMaskCompute, false },
+            {16, rhi::DescriptorType::StorageBuffer, 1,    rhi::kStageMaskCompute, false },
+            {17, rhi::DescriptorType::StorageBuffer, 1,    rhi::kStageMaskCompute, false },
+            {18, rhi::DescriptorType::StorageBuffer, 1,    rhi::kStageMaskCompute, false },
+            {19, rhi::DescriptorType::StorageBuffer, 1,    rhi::kStageMaskCompute, false },
+            {20, rhi::DescriptorType::StorageBuffer, 1,    rhi::kStageMaskCompute, false },
         };
         m_SoftColorLayout = m_Device->CreateDescriptorSetLayout(layout);
         if (m_SoftColorLayout == rhi::kInvalidLayout) {
@@ -1043,23 +1060,60 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
 
     // ── 绑定：每帧重写易变项（资产/可见簇/实例缓冲在资产上传后就不再变，但重写只是几个
     //    vkUpdateDescriptorSets，且引擎的 GPU 在执行期读描述符 ⇒ "每帧写一次"是最稳的口径）──
-    m_Device->UpdateDescriptorSet(m_SoftDepthSet, 0, rhi::DescriptorType::StorageBuffer, asset.clusters);
-    m_Device->UpdateDescriptorSet(m_SoftDepthSet, 1, rhi::DescriptorType::StorageBuffer, asset.vertices);
-    m_Device->UpdateDescriptorSet(m_SoftDepthSet, 2, rhi::DescriptorType::StorageBuffer, asset.indices);
-    m_Device->UpdateDescriptorSet(m_SoftDepthSet, 3, rhi::DescriptorType::StorageBuffer, visibleRefs);
-    m_Device->UpdateDescriptorSet(m_SoftDepthSet, 4, rhi::DescriptorType::StorageBuffer, visibleCount);
-    m_Device->UpdateDescriptorSet(m_SoftDepthSet, 5, rhi::DescriptorType::StorageBuffer, instances);
-    m_Device->UpdateDescriptorSet(m_SoftDepthSet, 6, rhi::DescriptorType::StorageBuffer, m_DepthKey.get());
-    m_Device->UpdateDescriptorSet(m_SoftDepthSet, 7, rhi::DescriptorType::StorageBuffer, m_SoftStats.get());
+    // 【任务 24：0/1/2 号槽一槽两用】流式开启时这三槽指向**页池**的三段（着色器经页表换算到
+    //   池内偏移），关闭时指向资产段（着色器直读、与任务 23 逐字相同）。15..20 号槽同理，
+    //   关闭档把它们绑到**既有**缓冲作占位（着色器不读）⇒ 关闭档不新建任何 GPU 资源。
+    const bool streamOn = asset.stream.enabled && asset.stream.valid();
+    rhi::IRHIBuffer* clusterSrc  = streamOn ? asset.stream.poolClusters  : asset.clusters;
+    rhi::IRHIBuffer* vertexSrc   = streamOn ? asset.stream.poolVertices  : asset.vertices;
+    rhi::IRHIBuffer* triangleSrc = streamOn ? asset.stream.poolTriangles : asset.indices;
+    // 占位绑定（关闭档）：全部指向**已经存在**的缓冲，且类型合法（structured storage / RW）
+    rhi::IRHIBuffer* clusterPageSrc = streamOn ? asset.stream.clusterPage  : asset.clusters;
+    rhi::IRHIBuffer* pageTableSrc   = streamOn ? asset.stream.pageTable    : asset.header;
+    rhi::IRHIBuffer* poolClusterSrc = streamOn ? asset.stream.poolClusters : asset.clusters;
+    rhi::IRHIBuffer* poolVertexSrc  = streamOn ? asset.stream.poolVertices : asset.vertices;
+    rhi::IRHIBuffer* poolTriSrc     = streamOn ? asset.stream.poolTriangles: asset.indices;
+    rhi::IRHIBuffer* feedbackSrc    = streamOn ? asset.stream.feedback     : m_SoftStats.get();
 
-    m_Device->UpdateDescriptorSet(m_SoftColorSet, 0, rhi::DescriptorType::StorageBuffer, asset.clusters);
-    m_Device->UpdateDescriptorSet(m_SoftColorSet, 1, rhi::DescriptorType::StorageBuffer, asset.vertices);
-    m_Device->UpdateDescriptorSet(m_SoftColorSet, 2, rhi::DescriptorType::StorageBuffer, asset.indices);
-    m_Device->UpdateDescriptorSet(m_SoftColorSet, 3, rhi::DescriptorType::StorageBuffer, visibleRefs);
-    m_Device->UpdateDescriptorSet(m_SoftColorSet, 4, rhi::DescriptorType::StorageBuffer, visibleCount);
-    m_Device->UpdateDescriptorSet(m_SoftColorSet, 5, rhi::DescriptorType::StorageBuffer, instances);
-    m_Device->UpdateDescriptorSet(m_SoftColorSet, 6, rhi::DescriptorType::StorageBuffer, m_DepthKey.get());
-    m_Device->UpdateDescriptorSet(m_SoftColorSet, 7, rhi::DescriptorType::StorageBuffer, m_SoftStats.get());
+    // ── 【任务 24】push constant 的流式四个数**由绑定侧唯一决定** ──
+    // 【为什么不在调用方填】`pagesEnabled` 必须与"0/1/2 号槽绑的是谁"逐位一致：两者由不同的
+    //   代码路径产出时（调用方算 push constant、本函数绑描述符）就有分叉的余地 ——
+    //   首次实测的症状正是"着色器按页池取址、描述符却指着资产段"：`page_misses` 很大而
+    //   `resident` 恒为 0。这里改成从 `streamOn` 反推，结构上不可能不一致。
+    // 【同步约定】调用方只负责 `assetClusterCount`（那是资产元数据，与绑定无关）。
+    const u32 callerPagesEnabled = params.pagesEnabled;
+    NaniteSoftRasterParams paramsEff = params;
+    paramsEff.pagesEnabled   = streamOn ? 1u : 0u;
+    paramsEff.clusterStride  = streamOn ? asset.stream.clusterStride  : 0u;
+    paramsEff.vertexStride   = streamOn ? asset.stream.vertexStride   : 0u;
+    paramsEff.triangleStride = streamOn ? asset.stream.triangleStride : 0u;
+    if (streamOn != (callerPagesEnabled != 0u)) {
+        // 一次性告警（不静默）：调用方与本函数对"这一帧走不走页池"的判断不一致
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            HE_CORE_ERROR("NaniteRaster: 流式档位不一致（调用方 pagesEnabled={}，绑定侧 {}）"
+                          "—— 已按**绑定侧**执行；请检查 `AddPostGBufferPasses` 是否设置了 "
+                          "`views.stream`", callerPagesEnabled, streamOn ? 1 : 0);
+        }
+    }
+
+    for (rhi::DescriptorSetHandle set : { m_SoftDepthSet, m_SoftColorSet }) {
+        m_Device->UpdateDescriptorSet(set, 0, rhi::DescriptorType::StorageBuffer, clusterSrc);
+        m_Device->UpdateDescriptorSet(set, 1, rhi::DescriptorType::StorageBuffer, vertexSrc);
+        m_Device->UpdateDescriptorSet(set, 2, rhi::DescriptorType::StorageBuffer, triangleSrc);
+        m_Device->UpdateDescriptorSet(set, 3, rhi::DescriptorType::StorageBuffer, visibleRefs);
+        m_Device->UpdateDescriptorSet(set, 4, rhi::DescriptorType::StorageBuffer, visibleCount);
+        m_Device->UpdateDescriptorSet(set, 5, rhi::DescriptorType::StorageBuffer, instances);
+        m_Device->UpdateDescriptorSet(set, 6, rhi::DescriptorType::StorageBuffer, m_DepthKey.get());
+        m_Device->UpdateDescriptorSet(set, 7, rhi::DescriptorType::StorageBuffer, m_SoftStats.get());
+        m_Device->UpdateDescriptorSet(set, 15, rhi::DescriptorType::StorageBuffer, clusterPageSrc);
+        m_Device->UpdateDescriptorSet(set, 16, rhi::DescriptorType::StorageBuffer, pageTableSrc);
+        m_Device->UpdateDescriptorSet(set, 17, rhi::DescriptorType::StorageBuffer, poolClusterSrc);
+        m_Device->UpdateDescriptorSet(set, 18, rhi::DescriptorType::StorageBuffer, poolVertexSrc);
+        m_Device->UpdateDescriptorSet(set, 19, rhi::DescriptorType::StorageBuffer, poolTriSrc);
+        m_Device->UpdateDescriptorSet(set, 20, rhi::DescriptorType::StorageBuffer, feedbackSrc);
+    }
     // 【任务 19】材质段（bindings 13/14 由 bindless 堆负责，这里不写）
     if (asset.materials) {
         m_Device->UpdateDescriptorSet(m_SoftColorSet, 12, rhi::DescriptorType::StorageBuffer,
@@ -1097,7 +1151,7 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
     //   既有的"GPU 驱动"写法。容量 = 可见引用表容量（`NaniteCull::GetBVHVisibleCapacity`）。
     cmd->SetPipeline(m_SoftRasterPSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_SoftDepthSet);
-    cmd->SetPushConstants(0, (u32)sizeof(NaniteSoftRasterParams), &params);
+    cmd->SetPushConstants(0, (u32)sizeof(NaniteSoftRasterParams), &paramsEff);
     cmd->SetDrawDebugLabel("Nanite_SoftRasterDepth (atomic depth key)");
     cmd->Dispatch(visibleCapacity, 1, 1);
 
@@ -1107,7 +1161,7 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
 
     cmd->SetPipeline(m_SoftColorPSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_SoftColorSet);
-    cmd->SetPushConstants(0, (u32)sizeof(NaniteSoftRasterParams), &params);
+    cmd->SetPushConstants(0, (u32)sizeof(NaniteSoftRasterParams), &paramsEff);
     cmd->SetDrawDebugLabel("Nanite_SoftRaster (equality test -> GBuffer)");
     cmd->Dispatch(visibleCapacity, 1, 1);
 
@@ -1203,6 +1257,13 @@ bool NaniteRaster::EnsureHardRasterResources(const GBufferTargets& targets) {
             {12, rhi::DescriptorType::StorageBuffer, 1,    kStages, false },  // 资产材质段
             {13, rhi::DescriptorType::SampledImage,  4096, kStages, true  },  // bindless 纹理数组
             {14, rhi::DescriptorType::Sampler,       4096, kStages, true  },  // bindless 采样器数组
+            // 【任务 24】流式视图（与软光栅同槽位；关闭档绑既有资产/硬光栅读数缓冲作占位）
+            {15, rhi::DescriptorType::StorageBuffer, 1,    kStages, false },  // 簇→页
+            {16, rhi::DescriptorType::StorageBuffer, 1,    kStages, false },  // 页表
+            {17, rhi::DescriptorType::StorageBuffer, 1,    kStages, false },  // 池·簇段
+            {18, rhi::DescriptorType::StorageBuffer, 1,    kStages, false },  // 池·顶点段
+            {19, rhi::DescriptorType::StorageBuffer, 1,    kStages, false },  // 池·三角形段
+            {20, rhi::DescriptorType::StorageBuffer, 1,    kStages, false },  // 反馈环（未使用，占位）
         };
         m_HardRasterLayout = m_Device->CreateDescriptorSetLayout(layout);
         if (m_HardRasterLayout == rhi::kInvalidLayout) {
@@ -1352,9 +1413,22 @@ void NaniteRaster::RecordHardRasterPass(rhi::IRHICommandList* cmd,
 
     // ── 绑定：每帧重写（与软光栅同一口径：资产/可见簇/实例缓冲在资产上传后就不再变，
     //    但重写只是几个 vkUpdateDescriptorSets，且引擎的 GPU 在执行期读描述符）──
-    m_Device->UpdateDescriptorSet(m_HardRasterSet, 0, rhi::DescriptorType::StorageBuffer, asset.clusters);
-    m_Device->UpdateDescriptorSet(m_HardRasterSet, 1, rhi::DescriptorType::StorageBuffer, asset.vertices);
-    m_Device->UpdateDescriptorSet(m_HardRasterSet, 2, rhi::DescriptorType::StorageBuffer, asset.indices);
+    // 【任务 24：0/1/2 与 15..20 一槽两用】与软光栅第 1/2 趟**逐条同口径**（同一个 include 里
+    //   的同一段取值表达式 ⇒ 两条光栅路径不可能分叉）。关闭档的占位绑定指向既有缓冲。
+    const bool streamOn = asset.stream.enabled && asset.stream.valid();
+    // 【任务 24】与软光栅**同一口径**：流式的四个数由绑定侧唯一决定（见 `RecordSoftRasterPass`
+    //   的说明），避免"push constant 说走页池、描述符却指着资产段"这种分叉。
+    NaniteSoftRasterParams paramsEff = params;
+    paramsEff.pagesEnabled   = streamOn ? 1u : 0u;
+    paramsEff.clusterStride  = streamOn ? asset.stream.clusterStride  : 0u;
+    paramsEff.vertexStride   = streamOn ? asset.stream.vertexStride   : 0u;
+    paramsEff.triangleStride = streamOn ? asset.stream.triangleStride : 0u;
+    rhi::IRHIBuffer* clusterSrc  = streamOn ? asset.stream.poolClusters  : asset.clusters;
+    rhi::IRHIBuffer* vertexSrc   = streamOn ? asset.stream.poolVertices  : asset.vertices;
+    rhi::IRHIBuffer* triangleSrc = streamOn ? asset.stream.poolTriangles : asset.indices;
+    m_Device->UpdateDescriptorSet(m_HardRasterSet, 0, rhi::DescriptorType::StorageBuffer, clusterSrc);
+    m_Device->UpdateDescriptorSet(m_HardRasterSet, 1, rhi::DescriptorType::StorageBuffer, vertexSrc);
+    m_Device->UpdateDescriptorSet(m_HardRasterSet, 2, rhi::DescriptorType::StorageBuffer, triangleSrc);
     m_Device->UpdateDescriptorSet(m_HardRasterSet, 3, rhi::DescriptorType::StorageBuffer, visibleRefs);
     m_Device->UpdateDescriptorSet(m_HardRasterSet, 4, rhi::DescriptorType::StorageBuffer, visibleCount);
     m_Device->UpdateDescriptorSet(m_HardRasterSet, 5, rhi::DescriptorType::StorageBuffer, instances);
@@ -1369,6 +1443,20 @@ void NaniteRaster::RecordHardRasterPass(rhi::IRHICommandList* cmd,
         m_Device->UpdateDescriptorSet(m_HardRasterSet, 12, rhi::DescriptorType::StorageBuffer,
                                       asset.materials);
     }
+    // 【任务 24】流式视图（关闭档绑既有缓冲作占位；反馈环绑本通道自己的读数缓冲 —— 它合法且可写，
+    //   而本通道从不写它：缺页上报只发生在软光栅第 1 趟，每簇只记一次）
+    m_Device->UpdateDescriptorSet(m_HardRasterSet, 15, rhi::DescriptorType::StorageBuffer,
+                                  streamOn ? asset.stream.clusterPage : asset.clusters);
+    m_Device->UpdateDescriptorSet(m_HardRasterSet, 16, rhi::DescriptorType::StorageBuffer,
+                                  streamOn ? asset.stream.pageTable : asset.header);
+    m_Device->UpdateDescriptorSet(m_HardRasterSet, 17, rhi::DescriptorType::StorageBuffer,
+                                  streamOn ? asset.stream.poolClusters : asset.clusters);
+    m_Device->UpdateDescriptorSet(m_HardRasterSet, 18, rhi::DescriptorType::StorageBuffer,
+                                  streamOn ? asset.stream.poolVertices : asset.vertices);
+    m_Device->UpdateDescriptorSet(m_HardRasterSet, 19, rhi::DescriptorType::StorageBuffer,
+                                  streamOn ? asset.stream.poolTriangles : asset.indices);
+    m_Device->UpdateDescriptorSet(m_HardRasterSet, 20, rhi::DescriptorType::StorageBuffer,
+                                  streamOn ? asset.stream.feedback : m_HardStats.get());
 
     // ── ① 清读数（命令缓冲内拷贝；与软光栅的 `RecordSoftStatsClear` 同一惯例）──
     RecordHardStatsClear(cmd);
@@ -1395,7 +1483,7 @@ void NaniteRaster::RecordHardRasterPass(rhi::IRHICommandList* cmd,
     // ── ③ 渲染：mesh 绘制 ──
     cmd->SetPipeline(m_HardRasterPSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_HardRasterSet);
-    cmd->SetPushConstants(0, (u32)sizeof(NaniteSoftRasterParams), &params);
+    cmd->SetPushConstants(0, (u32)sizeof(NaniteSoftRasterParams), &paramsEff);
 
     void* views[8] = {};
     for (u32 i = 0u; i < 8u; ++i) views[i] = colors[i]->GetNativeHandle();

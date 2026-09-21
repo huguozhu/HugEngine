@@ -261,6 +261,7 @@ public:
     void LogSizeDistReadback();
 
     /// 【§14.8 任务 23】把"**分流**"与"**帧时**"绑在**同一行**输出（性能读数）：
+
     ///   `[Nanite] perf max_triangles=16 hard_raster=1 soft_clusters=61 hard_clusters=31587
     ///    soft_pixels=… hard_pixels=… nanite_pass_ms=… nanite_pass_count=2 frame_ms=…
     ///    frame_fps_equiv=… frame_ms_src=gpu_pass_sum`
@@ -349,6 +350,47 @@ public:
     /// （不勾 mesh 自证时）的日志与基线一致。
     void LogMeshTestReadback();
 
+    // ============================================================
+    // 【§14.8 任务 24】LOD 流式（反馈 + 页池）的门面
+    //
+    // 【门控】生效条件是 `enabled && softRaster && streaming`（§14.32 ⑧）。三者任一不满足：
+    //   · 不建任何页池资源（`m_Stream` 仍是"只记住设备"的空壳）；
+    //   · 不产生每帧开销（`StepStreaming` 里一次 `IsReady()` 判空就返回，连同步都不做）；
+    //   · 默认档（`streaming=0`）**不打印** `stream` 行 ⇒ 关闭档日志逐字不变。
+    // ============================================================
+
+    /// **懒建**页池/页表/反馈环（只做一次；资产留存的 CPU 副本是它的数据源）。
+    /// 【为什么在帧图构建期调用】`AddPasses` 每帧都会走到，而真正的资源只在**第一次**
+    ///   有效调用时创建（`m_StreamSetupTried` 门闩）；这也保证"关闭档一个资源都不建"。
+    /// 【退化】`Setup` 失败时原因记在 `m_Stream.Reason()`（`pool_zero_slots` / `plan_failed` /
+    ///   `page_straddle` / `no_asset` / `resource_failed`），由 `LogStreamReadback` 如实打印。
+    void EnsureStreamReady();
+
+    /// **每帧步进**：读回延迟反馈 → 合并去重 → LRU 淘汰 → 限流上传 → 重写页表。
+    /// 【同步】内部在帧图构建期做一次 `WaitIdle()`（页表与页池是 CPU 写、GPU 读，只有
+    ///   "没有在飞命令"时才无竞态）；未就绪时**一次都不做**（默认档零开销）。
+    void StepStreaming();
+
+    /// dump 帧打印**恰好一行**流式读数：
+    ///   `[Nanite] stream pages_total=P resident=R pool=K uploads_this_frame=U evicted=E
+    ///    page_misses=M pages_requested=Q stream=on/off reason=<...>`
+    ///
+    /// 【字段口径（每一个都是可核对的确定性量）】
+    /// · `pages_total`  = 页数（由资产自身推出的纯函数：`ceil(共享内容份数 / K)`）；
+    /// · `resident`     = CPU 侧认为驻留的页数；`gpu_resident` = **页表缓冲里真的被标成驻留的条数**
+    ///   （Map 读回 ⇒ 它同时证明"CPU 的账"和"GPU 看到的内容"一致）；
+    /// · `pool`         = 页池槽数（cfg）；`uploads_this_frame` ≤ 每帧上限；
+    /// · `evicted`      = 累计淘汰页数；
+    /// · `page_misses`  = **真实 GPU 原子计数**：本帧因页未驻留被跳过的**可见簇数**；
+    /// · `pages_requested` = CPU 本帧从延迟反馈里读出的请求条数（含重复页）；
+    /// · `pages_requested_total` / `requests_total` = 累计（非空洞守卫：池足够大时**必然 > 0**，
+    ///   因为开局的每一页都要先被请求一次才会驻留）；
+    /// · `stream=on/off reason=<...>` = 生效状态与**退化原因**（不静默）。
+    ///
+    /// 【门控】`enabled && streaming` 才打印（默认档与关闭档的日志必须与基线逐字一致）。
+    /// 【同步约定】与其它读回相同：只 Map、不等待；调用方必须已 `WaitIdle()`。
+    void LogStreamReadback();
+
     // ── 模块内部各段（任务 1 只有生命周期桩；外部不得越过本类直接驱动它们）──
     [[nodiscard]] NaniteScene&  GetScene()  { return m_Scene; }
     [[nodiscard]] NaniteUpload& GetUpload() { return m_Upload; }
@@ -394,6 +436,19 @@ private:
     u32 m_MaterialCount = 0u;
     /// 【§14.8 任务 19】三角形跨越 ≥2 个源网格的簇数（映射读数，如实报告）
     u32 m_MultiMeshClusters = 0u;
+
+    // ── 【§14.8 任务 24】LOD 流式的状态 ──
+    /// 页池 + 页表 + 反馈环 + 驻留管理的宿主（默认档是空壳：一个缓冲都不建）
+    NaniteStream m_Stream;
+    /// "只尝试建一次"的门闩（`Initialize`/`Shutdown` 复位）。**只在资产 CPU 副本已就绪时才置位**
+    /// —— 否则第一帧资产还没入库就会把一次 `no_asset` 当成永久结论。
+    bool m_StreamSetupTried = false;
+    /// 流式自己的帧号（从流式生效的第一帧开始数）。
+    /// 【为什么不复用引擎的帧计数】反馈环的槽位 = 帧号 % 延迟，"延迟恰好等于常量"这条口径
+    ///   依赖一个**只在本模块内线性递增**的计数；复用引擎计数会把它的语义绑死在引擎实现上。
+    u32 m_FrameIndex = 0u;
+    /// 资产的簇出现总数（页映射的索引空间上界；流式开启档给着色器做越界收口用）
+    u32 m_AssetClusterCount = 0u;
 
     /// 开关与档位的唯一真值（默认 `enabled = false` ⇒ §14.2 不变式 1）
     NaniteSettings m_Settings;

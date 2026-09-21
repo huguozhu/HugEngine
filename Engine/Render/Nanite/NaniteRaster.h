@@ -33,6 +33,7 @@
 
 #include "RHI/RHI.h"
 
+#include "Nanite/NaniteStream.h"   // 【任务 24】流式视图（页池/页表/簇→页/反馈环）
 #include "Nanite/NaniteTypes.h"   // 【任务 18】NaniteSoftRasterParams / 读数槽位 / 深度键编码
 
 #include <memory>
@@ -183,6 +184,13 @@ public:
         /// 【任务 19】材质段（32B/条）。为 nullptr ⇒ 软光栅按 `materialCount = 0` 走中性兜底
         /// 并把像素计进 `fallback_pixels`（**不静默**）。
         rhi::IRHIBuffer* materials = nullptr;
+
+        /// 【任务 24】流式视图（bindings 15..20）。
+        /// 【为什么放在这里而不是另开一个参数】`RecordSoftRasterPass` / `RecordHardRasterPass`
+        ///   已经收一个 `AssetViews`；流式是"同一批几何的另一个来源"，与资产视图同生共死
+        ///   （关闭档 `stream.enabled == false`，绑定槽位复用既有资产缓冲作占位）。
+        NaniteStreamViews stream;
+
         [[nodiscard]] bool valid() const { return clusters && vertices && indices; }
     };
 

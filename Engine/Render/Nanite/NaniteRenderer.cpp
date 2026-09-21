@@ -89,6 +89,12 @@ bool NaniteRenderer::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) 
     const bool cullOk   = m_Cull.Initialize(device, width, height);
     const bool rasterOk = m_Raster.Initialize(device, width, height,
                                               m_Cull.GetRasterCountBuffer());
+    // 【任务 24】流式宿主：只记住设备（**不建任何 GPU 资源**；池/页表/反馈环都在
+    //   `EnsureStreamReady` 里按门控懒建，默认档一个都不会创建）。
+    m_Stream.Initialize(device);
+    m_StreamSetupTried = false;
+    m_FrameIndex = 0u;
+    m_AssetClusterCount = 0u;
 
     // "骨架就绪"判据：设备有效且四段都建起来了。任务 3 起剔除/绘制段还要求
     // 自持缓冲与 PSO 真正建成（IsReady），否则开启档不会注册任何 pass。
@@ -115,6 +121,9 @@ bool NaniteRenderer::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) 
 void NaniteRenderer::Shutdown() {
     // 四段自持资源必须先于本类清指针之前释放（绘制端引用了剔除段的计数缓冲，
     // 故先释放绘制端再释放剔除段）
+    // 【任务 24】流式宿主先释放：它的页池/页表/反馈环是模块自持资源，且 `m_Raster` 的描述符集
+    //   里还引用着它们 ⇒ 必须在 `m_Raster.Shutdown()` 之前拆掉（否则描述符指向已释放的缓冲）。
+    m_Stream.Shutdown();
     m_Raster.Shutdown();
     m_Cull.Shutdown();
     m_Upload.Shutdown();
@@ -124,6 +133,10 @@ void NaniteRenderer::Shutdown() {
     m_Width  = 0;
     m_Height = 0;
     m_Ready  = false;
+    // 【任务 24】流式的"只建一次"门闩复位（重新 Initialize 后可以按新档位重建）
+    m_StreamSetupTried = false;
+    m_FrameIndex = 0u;
+    m_AssetClusterCount = 0u;
     // 【故意不重置 m_Settings】样例在 `DeferredPipeline::Shutdown()` **之后**才回写 cfg，
     // 清掉真值会让 `nanite_enable` / `nanite_fake_clusters` 的往返有损。
 }
@@ -193,6 +206,29 @@ void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb,
     //   关闭档一个资源都不建。次序上必须**晚于**软光栅：硬光栅录在软光栅之后，
     //   它依赖软光栅第 2 趟建好的深度键缓冲（binding 6 的占位绑定）。
     EnsureHardRasterReady(gb);
+    // 【任务 24】流式：懒建（只一次）+ 每帧步进。门控在 `EnsureStreamReady` 内部
+    //   （`enabled && softRaster && streaming`）⇒ 默认档一个资源都不建、一次同步都不做。
+    EnsureStreamReady();
+    StepStreaming();
+    // 【任务 24】把流式的四个数写进 push constant。
+    // 【为什么在这里（帧图构建期）】它与下面的 `m_SoftParams` 其余字段同一处产出，且
+    //   `StepStreaming` 刚更新完页表/页池 ⇒ 本帧的绘制看到的是本帧的驻留状态。
+    // 【谁是权威】`NaniteRaster::RecordSoftRasterPass` / `RecordHardRasterPass` 会**按绑定侧**
+    //   重算这四个数（`streamOn` 由 `views.stream` 决定）⇒ 这里填的值只是一个"同源镜像"，
+    //   两者不一致时由光栅端打一次性告警并按绑定侧执行（防"push constant 说走页池、
+    //   描述符却指着资产段"这类分叉 —— 首次实测踩过：`page_misses` 很大而 `resident` 恒 0）。
+    {
+        const NaniteStreamViews& sv = m_Stream.Views();
+        // 【生效判据与 `EnsureStreamReady` 完全一致】这里再判一次是兜底：未就绪 ⇒ 三个数归零，
+        //   着色器走"直读资产段"的老路径（`pagesEnabled == 0`）。
+        const bool streamOn = m_Settings.enabled && m_Settings.softRaster
+                           && m_Settings.streaming && sv.enabled && sv.valid();
+        m_SoftParams.pagesEnabled     = streamOn ? 1u : 0u;
+        m_SoftParams.clusterStride    = streamOn ? sv.clusterStride  : 0u;
+        m_SoftParams.vertexStride     = streamOn ? sv.vertexStride   : 0u;
+        m_SoftParams.triangleStride   = streamOn ? sv.triangleStride : 0u;
+        m_SoftParams.assetClusterCount = m_AssetClusterCount;
+    }
 
     // ── Nanite_Cull：compute 逐簇写间接命令 + 原子累加计数（任务 3 的**假簇链**）──
     // writes = {gbDepth, gbWorldPos} 是复刻 `GB_Clear` 的 WAW 声明（§14.5），
@@ -332,6 +368,14 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
             views.indices  = asset.indices.get();
             views.header   = asset.header.get();
             views.materials = asset.materials.get();   // 【任务 19】真实材质段
+            // 【任务 24】**必须**把流式视图交给光栅端：`views.stream.enabled` 同时决定
+            //   ① 0/1/2 号槽绑资产段还是页池、② push constant 的 `pagesEnabled`。
+            //   漏掉这一行的症状是"读数说在缺页（page_misses 很大）但一页都没上传"——
+            //   着色器按页池取址、描述符却还指着资产段（首次实测就是这样：resident=0 而
+            //   page_misses=55379）。现在 push constant 由**绑定侧**唯一决定（见
+            //   `RecordSoftRasterPass` 的 `streamOn`），这一行漏了也只会退回"直读资产段"，
+            //   不会再出现两种口径同时生效。
+            views.stream = m_Stream.Views();
 
             m_Raster.RecordSoftRasterPass(cmd, targets, views, m_SoftParams,
                                           m_Cull.GetVisibleClusterBuffer(),
@@ -526,6 +570,17 @@ void NaniteRenderer::EnsureAssetUploaded(const MeshBatcher& batcher) {
     //   同源；shader 侧从头部 bbox 现算会和它差一次浮点舍入（虽然理论上同值，但"同一份比特"
     //   才是可验证的口径）。
     m_MeshMaxExtent = asset.stats.meshMaxExtent;
+
+    // ── ⑧ 【任务 24】资产 CPU 留存（页池的数据源；阶段一的硬前置）──
+    // 【为什么必须留】流式的阶段一口径是"页数据源 = 已在内存的完整资产"，而本函数是**唯一**
+    //   的资产产地、且只跑一次（`m_AssetUploaded` 门闩）⇒ 不留存就等于上传完就丢，页池无页可拷
+    //   （§14.32 ⑦ 的第三处追加点明了这一点）。`StoreAssetCPUCopy` 会丢掉 `bytes` 字节镜像
+    //   （它的唯一消费者——上面的逐字节读回校验——已经跑完），只留页池要用的段。
+    // 【位置：必须是本函数最后一步】它以 `std::move` 收走 `asset`，此后不得再使用它。
+    m_AssetClusterCount = (u32)asset.clusters.size();
+    if (!m_Scene.StoreAssetCPUCopy(std::move(asset))) {
+        HE_CORE_WARN("NaniteRenderer: 资产 CPU 留存为空 ⇒ 流式（若开启）会退化为 no_asset");
+    }
 }
 
 // ============================================================
@@ -580,6 +635,104 @@ void NaniteRenderer::EnsureHardRasterReady(const NaniteGBufferHandles& gb) {
     targets.lightmapKey = gb.colorTextures[7];
     targets.depth       = gb.depthTexture;
     m_Raster.EnsureHardRasterResources(targets);
+}
+
+// ============================================================
+// §14.8 任务 24：LOD 流式（反馈 + 页池）的门面实现
+//
+// 【三件事】① 懒建页池/页表/反馈环（只一次）；② 每帧步进（读回延迟反馈 → 淘汰 → 限流上传 →
+//   写页表）；③ dump 帧一行读数。三件事**全部门控在 `enabled && softRaster && streaming`**：
+//   默认档一个 GPU 资源都不建、一次同步都不做、一行日志都不打（§14.2 不变式 1）。
+// 【与设计的两处偏离（完整理由见 §14.37）】
+//   · 页请求由**光栅第 1 趟**产生，而不是剔除链（剔除链一行未改 ⇒ 任务 16 的
+//     `V == C == D == R` 与 CPU 参考交叉核对在流式开关下仍然成立）；
+//   · 间接绘制命令里的偏移**保持资产空间**（占位光栅的 `vid % 3` 对 `vertexOffset` 恒定，
+//     而把 `firstIndex` 换成池内偏移会让占位索引缓冲的越界防护失效）。
+// ============================================================
+void NaniteRenderer::EnsureStreamReady() {
+    if (!m_Settings.enabled || !m_Ready) return;
+    if (!m_Settings.streaming) return;          // 默认档：一个资源都不建
+    if (!m_Settings.softRaster) return;         // 生效条件（读数里报 requires_soft_raster）
+    if (m_StreamSetupTried) return;
+    // 【资产还没入库就不尝试】否则第一帧会把一次 `no_asset` 当成永久结论（门闩一旦置位不再重试）
+    if (!m_Scene.HasAssetCPUCopy()) return;
+    m_StreamSetupTried = true;
+
+    NaniteStreamConfig cfg;
+    cfg.contentsPerPage = m_Settings.pageContents;
+    cfg.poolSlots       = m_Settings.pagePoolSlots;
+    cfg.feedbackLatency = m_Settings.feedbackLatency;
+    cfg.uploadsPerFrame = m_Settings.pageUploadsPerFrame;
+    // 【返回值必须消费】`Setup` 是 `[[nodiscard]]`，而且 `m_StreamSetupTried` 已经置位 ⇒
+    //   失败就是**永久不重试**（阶段一的资源只在资产入库后建一次）。所以这里显式告警一条：
+    //   失败原因同时也由 `LogStreamReadback` 的 `stream=off reason=…` 打印（不静默）。
+    if (!m_Stream.Setup(m_Scene.GetAssetCPUCopy(), cfg)) {
+        HE_CORE_WARN("[Nanite] 流式初始化失败（本档起退化为整段常驻）：reason={}；"
+                     "页池 {} 槽 / 每页 {} 份内容 —— 画面仍是整段常驻的正确结果，"
+                     "只是没有按需驻留",
+                     m_Stream.ReasonName(), m_Settings.pagePoolSlots, m_Settings.pageContents);
+    }
+}
+
+void NaniteRenderer::StepStreaming() {
+    // 【未就绪 ⇒ 零开销】默认档（`streaming=0`）连这一步的判空都只是一次成员读，
+    //   不会发生任何 GPU 同步、也不会读任何缓冲。
+    if (!m_Stream.IsReady()) return;
+    m_Stream.BeginFrame(m_FrameIndex);
+    ++m_FrameIndex;
+}
+
+void NaniteRenderer::LogStreamReadback() {
+    // 【门控】只在"显式要求流式"的档位打印：默认档与关闭档的日志因此逐字不变。
+    if (!m_Settings.enabled || !m_Settings.streaming) return;
+
+    // ── 退化档也要打印**一行**（不静默）：原因直接来自 `NaniteStreamReason` ──
+    if (!m_Stream.IsReady()) {
+        // 三个前置条件里最先不满足的那个就是原因；`m_Stream` 自己的原因优先（它更具体）
+        const NaniteStreamReason reason =
+            (!m_Settings.softRaster) ? NaniteStreamReason::RequiresSoftRaster
+                                     : m_Stream.Reason();
+        HE_CORE_INFO("[Nanite] stream pages_total=0 resident=0 pool={} uploads_this_frame=0 "
+                     "evicted=0 page_misses=0 pages_requested=0 stream=off reason={}",
+                     m_Settings.pagePoolSlots, NaniteStreamReasonName(reason));
+        return;
+    }
+
+    // ── 自洽判据（验收 (b)）：驻留 + 非驻留 == 页总数，且没有两页共用一个槽 ──
+    u32 resident = 0u, nonResident = 0u, duplicateSlots = 0u;
+    const bool consistent = m_Stream.PageTableSelfConsistent(resident, nonResident, duplicateSlots);
+    // ── **GPU 侧**的驻留条数（Map 页表缓冲数一遍；它与 CPU 的账必须相等）──
+    const u32 gpuResident = m_Stream.ReadbackGpuResidentPages();
+
+    // ── 真实 GPU 读回：缺页簇数与本帧请求条数（与 `soft_raster` 行同一个读数缓冲）──
+    u32 stats[kNaniteSoftStatsCapacity] = {};
+    m_Raster.ReadbackSoftStats(stats);
+
+    const u32 slotC = m_Stream.SlotClusterBytes();
+    const u32 slotV = m_Stream.SlotVertexBytes();
+    const u32 slotT = m_Stream.SlotTriangleBytes();
+    const u32 strideC = m_Stream.Plan().stats.clusterStride;
+    const u32 strideV = m_Stream.Plan().stats.vertexStride;
+    const u32 strideT = m_Stream.Plan().stats.triangleStride;
+
+    HE_CORE_INFO("[Nanite] stream pages_total={} resident={} pool={} uploads_this_frame={} "
+                 "evicted={} page_misses={} pages_requested={} stream=on reason={} "
+                 "gpu_resident={} table_ok={} nonresident={} dup_slots={} contents={} K={} "
+                 "strides=(c={} v={} t={}) slot_bytes=(c={} v={} t={}) pool_bytes={} "
+                 "requests_total={} pages_requested_total={} max_requests_per_frame={} "
+                 "overflow_total={} latency={} uploads_limit={}",
+                 m_Stream.PagesTotal(), resident, m_Stream.PoolSlots(),
+                 m_Stream.UploadsThisFrame(), m_Stream.EvictedTotal(),
+                 stats[kNaniteSoftStatPageMissClusters],
+                 stats[kNaniteSoftStatPageRequests],
+                 m_Stream.ReasonName(),
+                 gpuResident, consistent ? 1 : 0, nonResident, duplicateSlots,
+                 m_Stream.Plan().contentCount, m_Stream.ContentsPerPage(),
+                 strideC, strideV, strideT, slotC, slotV, slotT,
+                 (unsigned long long)m_Stream.PoolBytes(),
+                 m_Stream.RequestsTotal(), m_Stream.PagesRequestedTotal(),
+                 m_Stream.MaxRequestsPerFrame(), m_Stream.RequestOverflowTotal(),
+                 m_Stream.FeedbackLatency(), m_Stream.UploadsPerFrameLimit());
 }
 
 void NaniteRenderer::RecordGBufferClearPass(rhi::IRHICommandList* cmd, const NaniteGBufferHandles& gb) {

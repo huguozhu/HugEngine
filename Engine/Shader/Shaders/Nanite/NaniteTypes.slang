@@ -173,6 +173,30 @@ static const uint NANITE_TEXSLOT_BASECOLOR      = 0u;
 static const uint NANITE_TEXSLOT_METALLICROUGH  = 2u;
 
 // ============================================================
+// 【§14.8 任务 24】LOD 流式（页池 + 页表）的共享 POD
+//
+// 【与 C++ 的契约】`NanitePageTableEntry` / `NaniteClusterPageRef` 必须与 `NaniteTypes.h`
+//   的同名结构**逐字段、逐尺寸**一致（C++ 侧有 `static_assert` 钉住尺寸与偏移；这里靠
+//   `StructuredBuffer<T>` 的 std430 步长与注释对照）。改任何一边都必须同步另一边。
+// 【为什么着色器要这两个结构】页对齐到"整份共享内容"边界后每页的顶点/三角形条数是**可变的**，
+//   所以页内偏移只能靠 `cluster.vertexOffset - pageBeginVertex` 算（除法不成立、也不做二分）。
+// ============================================================
+
+// 页表项（16B）：一页在池里的槽号 + 它在两段共享数组里的**起点** + 驻留标志
+struct NanitePageEntry {
+    uint slot;           // 池内槽号（非驻留时为 0xFFFFFFFF）
+    uint vertexBegin;    // 该页顶点段在共享顶点数组里的起始记录下标
+    uint triangleBegin;  // 该页三角形段在共享三角形数组里的起始记录下标
+    uint resident;       // 1 = 已驻留；0 = 未驻留（调用方必须跳过这一簇）
+};
+
+// 簇 → 页（8B）：页号 + 该簇记录在**收集后的簇段**里的页内下标
+struct NaniteClusterPageRef {
+    uint page;           // 页号
+    uint local;          // 页内簇记录下标
+};
+
+// ============================================================
 // ── 4. 位域打包/解包（与 C++ 的 `NanitePackR10G10B10A2` / `NaniteUnpackR10G10B10A2` 一致）──
 // ============================================================
 

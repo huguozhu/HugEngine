@@ -88,6 +88,22 @@ struct InstanceObject {
 [[vk::binding(13, 0)]] Texture2D<float4>                     u_MaterialTextures[];
 [[vk::binding(14, 0)]] SamplerState                          u_MaterialSamplers[];
 
+// ── 【任务 24】LOD 流式的五 + 一个视图（bindings 15..20）──
+// 【口径：0/1/2 号槽一槽两用】流式开启时，binding 0/1/2 绑的是**页池**的簇段/顶点段/三角形段，
+//   关闭时绑的仍是资产段。两种档位共用下面**同一段取值表达式**（`softRasterResolveCluster`
+//   只在开启档多做一次页表查表 + 偏移减法）⇒ "间接层算错没算错"这件事有一条**逐位可比**的
+//   判据：页池足够大时两档的四个 GBuffer 必须一致。
+// 【为什么 15..20 在关闭档也要绑】描述符集布局是建 PSO 时固定的；关闭档把它们绑到**既有**
+//   资产缓冲上作占位（着色器在该档一个字节都不读），因此不新建任何 GPU 资源（§14.2 不变式 1）。
+[[vk::binding(15, 0)]] StructuredBuffer<NaniteClusterPageRef> u_ClusterPage;
+[[vk::binding(16, 0)]] StructuredBuffer<NanitePageEntry>      u_PageTable;
+[[vk::binding(17, 0)]] StructuredBuffer<NaniteCluster>        u_PoolClusters;
+[[vk::binding(18, 0)]] StructuredBuffer<NaniteVertex>         u_PoolVertices;
+[[vk::binding(19, 0)]] StructuredBuffer<NanitePackedTriangle> u_PoolTriangles;
+// 反馈环（读写）：[0] = 本帧写入的请求条数（原子取号）、[1] = 环满丢弃数（原子）、
+// [2, 2 + kNanitePageRequestSlots) = 环形缓冲本体。**GPU 只追加，去重在 CPU 读回侧做**。
+[[vk::binding(20, 0)]] RWStructuredBuffer<uint>               u_PageFeedback;
+
 // ── 读数槽位（与 C++ 侧 `NaniteSoftRasterStats` 的 static_assert 逐条对应）──
 static const uint kSoftStatRasterClusters  = 0u;   // 本帧真正走软光栅的簇数（triangleCount <= maxTriangles）
 static const uint kSoftStatSkippedClusters = 1u;   // 因 triangleCount > maxTriangles 跳过的簇数（留给任务 22）
@@ -95,7 +111,9 @@ static const uint kSoftStatTriangles       = 2u;   // 参与光栅化的**非退
 static const uint kSoftStatDegenerate      = 3u;   // 被丢弃的三角形数（在相机后 / 面积过小 / 越界下标）
 static const uint kSoftStatPixels          = 4u;   // 通过深度等值复检、**真正写进 GBuffer** 的像素数（第 2 趟）
 static const uint kSoftStatNeutralPixels   = 5u;   // 【任务 19 起恒 0】用中性材质常数写入的像素数
-static const uint kSoftStatCapacity        = 20u;  // 缓冲条数（与 C++ 侧一致；任务 23：16 → 20）
+// 【缓冲条数 kSoftStatCapacity 的唯一权威定义在下面「任务 24」小节（= 22）】
+//   —— 它的位置必须跟着**最后一个槽**走（任务 23 时是 20、任务 24 起是 22）；
+//   本行原来是任务 23 的定义，已上移合并，避免同作用域重定义。
 // ── 【任务 19】材质相关读数 ──
 static const uint kSoftStatMaterialPixels  = 12u;  // 用**资产材质段**的真实材质写入的像素数
 static const uint kSoftStatFallbackPixels  = 13u;  // 材质段越界/缺失而退化为中性常数的像素数（正常 0）
@@ -126,6 +144,21 @@ static const uint kSoftStatTestedPixels    = 11u;  // 第 1 趟包围盒内的�
 static const uint kSoftStatSizeBucket0     = 15u;  // 五桶的第一个槽（= kSoftStatDepthResolvedPixels + 1）
 static const uint kSoftStatSizeBucketCount = 5u;   // 桶数（1-4 / 5-8 / 9-16 / 17-32 / 33-64）
 
+// ── 【任务 24】LOD 流式的两个读数槽（占 20/21；容量 20 → 22）──
+// 【必须真的写，否则判据空洞】读数缓冲每帧由 C++ 用 `CopyBuffer` 清 0，若这里不写，C++ 读回就
+//   恒为 0 ⇒ `page_misses == 0` 会在"流式完全没工作"时也成立（**空洞通过**）。
+//   与 C++ 的 `kNaniteSoftStatPageMissClusters / kNaniteSoftStatPageRequests /
+//   kNaniteSoftStatsCapacity` 一一对应（改一处必须同步另一处）。
+static const uint kSoftStatPageMissClusters = 20u;  // 因所在页未驻留而被跳过的**可见簇数**
+static const uint kSoftStatPageRequests     = 21u;  // 本帧写入反馈环的请求**条数**（含重复页）
+static const uint kSoftStatCapacity         = 22u;  // 缓冲条数（与 C++ 的 kNaniteSoftStatsCapacity 必须相等）
+
+// 反馈环的常量（与 C++ 的 `kNanitePageFeedbackRingOffset / kNanitePageRequestSlots /
+//   kNanitePageFeedbackStampOffset` 一致）
+static const uint kPageFeedbackRingOffset = 2u;     // 环从第 2 个 u32 开始（前两个是原子计数）
+static const uint kPageRequestSlots       = 1024u;  // 环槽数（满则计入 [1] 号溢出计数，不静默）
+static const uint kPageFeedbackStampOffset = kPageFeedbackRingOffset + kPageRequestSlots;  // 戳记数组起点
+
 // 簇大小 → 桶号（调用方必须先滤掉 `triangleCount == 0`）。
 // 【为什么写成 5 级阶梯而不是查表】Slang 侧没有编译期数组常量（`static const uint[kN]` 的
 //   下标不能用于常量表达式），写成显式比较既零成本又与 C++ 侧的 `NaniteSizeBucketOf()`
@@ -138,7 +171,9 @@ static uint softRasterSizeBucket(uint triangleCount) {
     return 4u;                             // 33-64（> 64 只可能来自损坏资产：归入最后一桶，不越界）
 }
 
-// ── push constant（96B；与 C++ 的 `NaniteSoftRasterParams` 逐字段一致）──
+// ── push constant（112B；与 C++ 的 `NaniteSoftRasterParams` 逐字段一致）──
+//   任务 24 从 96B 扩到 112B：原偏移 92 的 `_pad1` 空洞改为 `pagesEnabled`，后面追加四个 u32
+//   （三个池槽步长 + 资产簇数），既有 7 个字段的偏移与语义一个都没动。
 //   vpRows  = 列主序 viewProj 的 4 个**行**（`vpRow{r}` = viewProj[c][r]），显式点积 ⇒ 与 CPU 同式
 //             （与任务 15 的 `CullChainParams` 同一份比特、同一手法）
 //   maxTriangles = 只对"triangleCount ≤ 该值"的簇走软光栅（§5.2 的 16；可配 `nanite_soft_max_triangles`）
@@ -154,7 +189,12 @@ static uint softRasterSizeBucket(uint triangleCount) {
     float  meshMaxExtent;     // 偏移 80：位置量化尺度（整网格最大轴长）
     float  depthKeyEpsilon;   // 偏移 84：第 2 趟等值复检的容差（0 = 严格逐位相等；实测严格即可）
     uint   materialCount;     // 偏移 88：【任务 19】资产材质段条数（0 ⇒ 退化为中性常数并计数）
-    uint   _pad1;             // 偏移 92
+    // ── 【任务 24】流式四个数（原偏移 92 是 `_pad1` 空洞，既有字段偏移一个都没动）──
+    uint   pagesEnabled;      // 偏移 92：1 = 经页表从页池取几何；0 = 直读资产段（默认档）
+    uint   clusterStride;     // 偏移 96：池内一个槽占多少条簇记录（= 每页最大簇数）
+    uint   vertexStride;      // 偏移 100：池内一个槽占多少条量化顶点
+    uint   triangleStride;    // 偏移 104：池内一个槽占多少条打包三角形
+    uint   assetClusterCount; // 偏移 108：资产的簇出现总数（页映射的索引空间上界）
 };
 
 // ── 【任务 19】按**资产材质段** + bindless 纹理算一个像素的 albedo/metallic/roughness ──
@@ -216,6 +256,82 @@ float2 softRasterNdcToPixel(float2 ndc) {
                   (0.5 - 0.5 * ndc.y) * (float)screenHeight);
 }
 
+// ============================================================
+// 【任务 24】页池取址：一个"已解析"的簇视图
+//
+// 【为什么要有这一层】流式的间接层只有一个职责：把"共享数组的绝对偏移"换算成"页池内的偏移"。
+//   软光栅第 1/2 趟与硬光栅都经过**同一个**函数拿地址 ⇒ 三条路径不可能各算一套
+//   （§14.32 第二处追加点名的 8 处侵入点，在这里被收成 1 处 + 3 个调用点）。
+// 【关闭档逐位不变】`pagesEnabled == 0` 时本函数返回的 `vertexBase / triangleBase` 就是簇记录
+//   里的原始偏移，后续取值表达式与任务 23 的实现**逐字相同**。
+// ============================================================
+struct SoftRasterClusterView {
+    NaniteCluster cluster;   // 簇记录（来自资产段或页池，取决于档位）
+    uint vertexBase;         // 顶点取址基（页池内的**绝对**元素下标；关闭档 = 簇记录里的偏移）
+    uint triangleBase;       // 三角形取址基
+    uint page;               // 该簇所在页（0xFFFFFFFF = 关闭档，无页语义）
+    bool resident;           // false ⇒ 页未驻留（调用方必须跳过这一簇并计缺页）
+    bool valid;              // false ⇒ 引用非法或页未驻留，调用方一律跳过
+};
+
+SoftRasterClusterView softRasterResolveCluster(uint clusterIndex) {
+    SoftRasterClusterView v;
+    v.vertexBase = 0u;
+    v.triangleBase = 0u;
+    v.page = 0xFFFFFFFFu;
+    v.resident = false;
+    v.valid = false;
+    if (pagesEnabled == 0u) {
+        // 关闭档：直读资产段（与任务 23 的代码路径逐字相同）
+        v.cluster = u_Clusters[clusterIndex];
+        v.vertexBase = v.cluster.vertexOffset;
+        v.triangleBase = v.cluster.triangleOffset;
+        v.resident = true;
+        v.valid = true;
+        return v;
+    }
+    // 开启档：两次查表 —— 簇→页、页→（槽，两段起点）
+    // 【为什么这里要按资产簇数收口，而不是 `GetDimensions`】页映射的下标空间是**资产**簇下标，
+    //   而 binding 0 这时绑的是**页池**（元素个数 = 槽数 × clusterStride，池小时会**小于**簇数）
+    //   ⇒ 用 GetDimensions 做越界判据会误杀大量合法簇（静默少画）。所以开启档必须按资产簇数查。
+    //   （入口文件里保留了关闭档原来的 GetDimensions 判据，一字未改。）
+    if (clusterIndex >= assetClusterCount) return v;
+    NaniteClusterPageRef cp = u_ClusterPage[clusterIndex];
+    NanitePageEntry e = u_PageTable[cp.page];
+    v.page = cp.page;
+    if (e.resident == 0u) return v;                 // 缺页：valid=false，但 page 有效（供上报用）
+    v.cluster = u_Clusters[e.slot * clusterStride + cp.local];
+    v.vertexBase   = e.slot * vertexStride   + (v.cluster.vertexOffset   - e.vertexBegin);
+    v.triangleBase = e.slot * triangleStride + (v.cluster.triangleOffset - e.triangleBegin);
+    v.resident = true;
+    v.valid = true;
+    return v;
+}
+
+// 【任务 24】缺页上报：把页号追加进反馈环（**按页去重**，每帧每页至多一条）。
+// 【为什么不在 GPU 侧用页表去重】设计 ④ 原写"去重由页表的 `requestedFrame == 当前帧` 判定"，
+//   那要求 **GPU 写页表**，而页表同时被 CPU 每帧重写 ⇒ 同一块内存无同步地双边写。
+//   这里改用一个**独立的戳记数组**（反馈缓冲的尾部区域，CPU 只在 `WaitIdle` 之后清 0、
+//   GPU 只在帧内写）⇒ 页表仍然**只由 CPU 写**，去重却回到了 GPU 侧。
+// 【为什么必须去重（实测踩过）】不去重时，一个缺页会被引用它的**每一个可见簇**各请求一次：
+//   首次实测 31648 个可见簇 → 单帧 31648 条请求 vs 1024 槽的环 ⇒ `overflow_total=119476`，
+//   且"某一页的请求恰好全落在环外"时该页**永远传不上来**（画面与关流式档不同，且极难定位）。
+void softRasterRequestPage(uint page) {
+    // 交换取旧值：只有"本帧第一个发现这一页缺失"的调用者拿到 0 ⇒ 由它追加
+    uint prev;
+    InterlockedExchange(u_PageFeedback[kPageFeedbackStampOffset + page], 1u, prev);
+    if (prev != 0u) return;
+
+    uint slot;
+    InterlockedAdd(u_PageFeedback[0], 1u, slot);
+    if (slot < kPageRequestSlots) {
+        u_PageFeedback[kPageFeedbackRingOffset + slot] = page;
+        InterlockedAdd(u_Stats[kSoftStatPageRequests], 1u);   // 真 GPU 计数（判据 (d1) 的非空洞守卫）
+    } else {
+        InterlockedAdd(u_PageFeedback[1], 1u);   // 环满：单独计数，不静默丢
+    }
+}
+
 // 深度键：高 24 位 = NDC 深度位模式、低 8 位 = 三角形下标（平局全序）
 uint softRasterDepthKey(float ndcZ, uint triLocal) {
     return (asuint(ndcZ) & 0xFFFFFF00u) | (triLocal & 0xFFu);
@@ -234,16 +350,20 @@ struct SoftRasterTriangle {
 // 取簇内第 `triLocal` 个三角形的屏幕形态。
 // 【有效性判据（两趟一致）】三个顶点的 clip.w 都必须 > 0（跨越相机平面的三角形直接丢弃 ——
 //   简单、可复现，不做近平面裁剪）；屏幕面积过小（共线/退化）也丢弃，避免除零与无意义的遍历。
-SoftRasterTriangle softRasterFetchTriangle(NaniteCluster cluster, uint triLocal, float3 instanceTranslation) {
+// 【任务 24】取址经 `SoftRasterClusterView`：关闭档 = 资产段（与任务 23 逐字相同），
+//   开启档 = 页池段（基址已由页表换算）。**函数体只有一份** ⇒ 两档不可能分叉。
+SoftRasterTriangle softRasterFetchTriangle(SoftRasterClusterView view, uint triLocal,
+                                           float3 instanceTranslation) {
     SoftRasterTriangle tri;
     tri.valid = false;
     tri.p0 = tri.p1 = tri.p2 = float2(0.0, 0.0);
     tri.z0 = tri.z1 = tri.z2 = 0.0;
     tri.invW0 = tri.invW1 = tri.invW2 = 0.0;
 
-    NanitePackedTriangle packed = u_Triangles[cluster.triangleOffset + triLocal];
+    NaniteCluster cluster = view.cluster;
+    NanitePackedTriangle packed = u_Triangles[view.triangleBase + triLocal];
     uint3 local = naniteDecodeTriangle(packed);
-    uint base = cluster.vertexOffset;
+    uint base = view.vertexBase;
 
     float3 world[3];
     float4 clip[3];

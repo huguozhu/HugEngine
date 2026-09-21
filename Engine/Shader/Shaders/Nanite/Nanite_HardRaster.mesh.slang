@@ -100,16 +100,27 @@ void main(
 
     ClusterRef ref = u_VisibleClusters[slot];
     if (ref.instance >= instanceCount) HARD_RASTER_BAILOUT();  // 越界引用：不读实例表（防御性）
-    uint clusterCapacity = 0u;
-    uint clusterStride = 0u;
-    u_Clusters.GetDimensions(clusterCapacity, clusterStride);
-    if (ref.cluster >= clusterCapacity) HARD_RASTER_BAILOUT();
+    if (pagesEnabled != 0u) {
+        // 【任务 24】开启档：页映射的下标空间是**资产**簇下标 ⇒ 按资产簇数收口
+        //   （binding 0 这时绑的是页池，GETDIMENSIONS 的判据不适用，与软光栅两趟同一口径）
+        if (ref.cluster >= assetClusterCount) HARD_RASTER_BAILOUT();
+    } else {
+        uint clusterCapacity = 0u;
+        uint clusterStride = 0u;
+        u_Clusters.GetDimensions(clusterCapacity, clusterStride);
+        if (ref.cluster >= clusterCapacity) HARD_RASTER_BAILOUT();
+    }
 
     InstanceObject instance = u_Instances[ref.instance];
     if (instance.indexCount == 0u) HARD_RASTER_BAILOUT();      // 空实例：与剔除链的规则一致
     float3 translation = instance.ltw3.xyz;
 
-    NaniteCluster cluster = u_Clusters[ref.cluster];
+    // ── 【任务 24】页解析（与软光栅两趟逐字相同的口径）──
+    //   缺页的簇在软光栅两趟里已被跳过（没有颜色也没有深度）⇒ 硬光栅也必须跳过它，
+    //   否则它会在一片空白上画出一个"流式关闭档不会出现"的像素（两档就不再逐位可比）。
+    SoftRasterClusterView view = softRasterResolveCluster(ref.cluster);
+    if (!view.valid) HARD_RASTER_BAILOUT();
+    NaniteCluster cluster = view.cluster;
     uint triangleCount = cluster.triangleCount;
     if (triangleCount == 0u) HARD_RASTER_BAILOUT();
 
@@ -139,9 +150,9 @@ void main(
     if (tid >= triangleCount) return;
 
     uint triLocal = tid;
-    NanitePackedTriangle packed = u_Triangles[cluster.triangleOffset + triLocal];
+    NanitePackedTriangle packed = u_Triangles[view.triangleBase + triLocal];
     uint3 local = naniteDecodeTriangle(packed);
-    uint base = cluster.vertexOffset;
+    uint base = view.vertexBase;
 
     // ── ④ 解码三个顶点（与 `softRasterFetchTriangle` 逐字一致）──
     float3 world[3];

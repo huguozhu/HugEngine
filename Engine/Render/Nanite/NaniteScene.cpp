@@ -46,6 +46,9 @@ bool NaniteScene::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     // 任务 12：旧的资产缓冲随重新初始化一并作废（新资产由 UploadPackedAsset 建立）
     m_Asset = AssetBuffers{};
 
+    // 任务 24：留存的资产 CPU 副本同样作废（重新初始化 = 重新建资产）
+    m_AssetCPU = NanitePackedAsset{};
+
     return m_Device != nullptr;
 }
 
@@ -57,6 +60,9 @@ void NaniteScene::Shutdown() {
 
     // 任务 12：资产缓冲随 unique_ptr 一起释放（重新 Initialize 会重新上传一次）
     m_Asset = AssetBuffers{};
+
+    // 任务 24：留存的 CPU 副本一并释放（它可能有十几 MB，不能留在 shutdown 之后）
+    m_AssetCPU = NanitePackedAsset{};
 
     m_Device = nullptr;
     m_Width  = 0;
@@ -228,6 +234,33 @@ bool NaniteScene::UploadPackedAsset(const NanitePackedAsset& asset) {
                  asset.header.clusterCount, asset.header.vertexCount,
                  asset.header.materialCount, asset.header.lodLevelCount);
     return m_Asset.verified;
+}
+
+// ============================================================
+// §14.8 任务 24：资产 CPU 留存（页池的数据源；口径与代价见 `NaniteScene.h`）
+// ============================================================
+bool NaniteScene::StoreAssetCPUCopy(NanitePackedAsset&& asset) {
+    // 释放上一份（允许重复调用；正常路径由门面的"只做一次"门闩保证只调一次）
+    m_AssetCPU = NanitePackedAsset{};
+    m_AssetCPU = std::move(asset);
+
+    // 【丢掉字节镜像】它是五段的第二份拷贝，唯一消费者（上传时的逐字节读回校验）已经跑完；
+    //   留着只会让常驻内存翻倍。`shrink_to_fit` 之后那份 buffer 真正还给分配器。
+    const usize droppedBytes = m_AssetCPU.bytes.size();
+    m_AssetCPU.bytes.clear();
+    m_AssetCPU.bytes.shrink_to_fit();
+
+    const usize clusters  = m_AssetCPU.clusters.size()  * sizeof(NaniteClusterRecord);
+    const usize vertices  = m_AssetCPU.vertices.size()  * sizeof(NaniteVertex);
+    const usize triangles = m_AssetCPU.triangles.size() * sizeof(NanitePackedTriangle);
+    const usize materials = m_AssetCPU.materials.size() * sizeof(NaniteMaterialRecord);
+    const usize total     = clusters + vertices + triangles + materials;
+    HE_CORE_INFO("[Nanite] asset_retained clusters={} vertices={} triangles={} materials={} "
+                 "retained_bytes={} dropped_mirror_bytes={}",
+                 (u32)m_AssetCPU.clusters.size(), (u32)m_AssetCPU.vertices.size(),
+                 (u32)m_AssetCPU.triangles.size(), (u32)m_AssetCPU.materials.size(),
+                 (unsigned long long)total, (unsigned long long)droppedBytes);
+    return HasAssetCPUCopy();
 }
 
 } // namespace he::render

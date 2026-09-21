@@ -45,16 +45,26 @@ void main(uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
 
     ClusterRef ref = u_VisibleClusters[slot];
     if (ref.instance >= instanceCount) return;
-    uint clusterCapacity = 0u;
-    uint clusterStride = 0u;
-    u_Clusters.GetDimensions(clusterCapacity, clusterStride);
-    if (ref.cluster >= clusterCapacity) return;
+    if (pagesEnabled != 0u) {
+        // 【任务 24】与第 1 趟逐字相同的收口口径（见 `Nanite_SoftRasterDepth.comp.slang`）
+        if (ref.cluster >= assetClusterCount) return;
+    } else {
+        uint clusterCapacity = 0u;
+        uint clusterStride = 0u;
+        u_Clusters.GetDimensions(clusterCapacity, clusterStride);
+        if (ref.cluster >= clusterCapacity) return;
+    }
 
     InstanceObject instance = u_Instances[ref.instance];
     if (instance.indexCount == 0u) return;
     float3 translation = instance.ltw3.xyz;
 
-    NaniteCluster cluster = u_Clusters[ref.cluster];
+    // ── 【任务 24】与第 1 趟**逐字相同**的页解析（这是等值复检成立的前提）──
+    //   缺页的簇在第 1 趟没有写过深度键 ⇒ 本趟也必须跳过它，否则会写出"没有任何深度键与之匹配"
+    //   的颜色（等值复检会拦住它，但白跑一遍包围盒）。两趟口径一致 ⇒ 结果与关闭档逐位可比。
+    SoftRasterClusterView view = softRasterResolveCluster(ref.cluster);
+    if (!view.valid) return;
+    NaniteCluster cluster = view.cluster;
     uint triangleCount = cluster.triangleCount;
     if (triangleCount == 0u) return;
     if (triangleCount > maxTriangles) return;    // 与第 1 趟同一条跳过规则（计数只在第 1 趟做）
@@ -65,16 +75,17 @@ void main(uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
 
     // ── ② 逐三角形：重跑光栅化 → 等值复检 → 写 GBuffer ──
     for (uint triLocal = tid.x; triLocal < triangleCount; triLocal += 16u) {
-        SoftRasterTriangle tri = softRasterFetchTriangle(cluster, triLocal, translation);
+        SoftRasterTriangle tri = softRasterFetchTriangle(view, triLocal, translation);
         if (!tri.valid) continue;
 
         // 三个顶点的属性（法线 / UV 按**簇内局部下标**取 —— 任务 18 的 P0 修复保证了
         // "共享内容 ⇒ 逐下标属性逐位一致"，因此这里按局部下标取法线/UV 是安全的）
-        NanitePackedTriangle packed = u_Triangles[cluster.triangleOffset + triLocal];
+        // 【任务 24】取址同样经 `view` 的两段基址（关闭档 = 资产段，开启档 = 页池段）。
+        NanitePackedTriangle packed = u_Triangles[view.triangleBase + triLocal];
         uint3 local = naniteDecodeTriangle(packed);
-        NaniteVertex v0 = u_Vertices[cluster.vertexOffset + local.x];
-        NaniteVertex v1 = u_Vertices[cluster.vertexOffset + local.y];
-        NaniteVertex v2 = u_Vertices[cluster.vertexOffset + local.z];
+        NaniteVertex v0 = u_Vertices[view.vertexBase + local.x];
+        NaniteVertex v1 = u_Vertices[view.vertexBase + local.y];
+        NaniteVertex v2 = u_Vertices[view.vertexBase + local.z];
 
         float3 n0 = naniteDecodeNormal(v0.packedNormal);
         float3 n1 = naniteDecodeNormal(v1.packedNormal);

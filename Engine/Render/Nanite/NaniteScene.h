@@ -110,6 +110,42 @@ public:
     /// 已上传的资产缓冲组（任务 13+ 绑定用；本任务只创建 + 校验）
     [[nodiscard]] const AssetBuffers& GetAssetBuffers() const { return m_Asset; }
 
+    // ============================================================
+    // 【§14.8 任务 24】资产的 **CPU 留存**（页池的数据源；阶段一的硬前置）
+    //
+    // 【为什么必须有它（§14.32 ⑦ 的第三处追加）】流式阶段一的口径是"页数据源 = **已在内存的**
+    //   完整资产"，但复核生命周期后确认这句话原先**不成立**：`NaniteRenderer::EnsureAssetUploaded`
+    //   里的 `NanitePackedAsset asset;` 是**局部变量**，只以 `const&` 传给 `UploadPackedAsset`
+    //   （本类**不保留**它），整条路径又被 `m_AssetUploaded` 门闩保证只跑一次
+    //   ⇒ 上传之后 CPU 侧资产数据即被销毁，页池无页可拷。本函数就是那条硬前置的落地。
+    //
+    // 【为什么只留"三段 + 材质 + LOD 段"而不留整个 `NanitePackedAsset`】资产的 `bytes` 是
+    //   五段的**字节镜像**（与那几个强类型容器是同一批数据的第二份拷贝）⇒ 一起留就是双倍内存，
+    //   而它的唯一消费者（上传时的逐字节读回校验）在 `UploadPackedAsset` 内已经跑完。
+    //   本函数因此**丢掉 `bytes`**，只留页池真正要用的段。
+    //
+    // 【代价（如实记录；Sponza 实测见 §14.37）】留存 = 簇段 + 顶点段 + 三角形段的常驻内存
+    //   （**实测 13,405,960 字节 = 12.78 MiB**，由 `asset_retained … retained_bytes=` 量出）。
+    //   它是"只开 `enabled` 也不变"这条不变式的**内存侧例外**：
+    //   帧图、pass 集合与转储**逐位不变**（不变式 1 管的是这三件事），但进程内存会多这一份。
+    //   替代路径（不留存、按需重建）需要原始几何，而 `MeshBatcher` 只被 `const&` 用过一次 ——
+    //   两条路的裁决与后果写在 §14.37。
+    // ============================================================
+
+    /// 把资产的 CPU 副本留存下来（只留页池要用的段；`bytes` 镜像被丢弃）
+    /// @param asset 通过 `std::move` 交进来的资产（调用方此后不得再使用它）
+    /// @return 是否留下了非空的三段
+    [[nodiscard]] bool StoreAssetCPUCopy(NanitePackedAsset&& asset);
+
+    /// 留存的资产 CPU 副本（页池的数据源；未留存时为一份空资产）
+    [[nodiscard]] const NanitePackedAsset& GetAssetCPUCopy() const { return m_AssetCPU; }
+
+    /// 是否已经留存了可用的资产 CPU 副本
+    [[nodiscard]] bool HasAssetCPUCopy() const {
+        return !m_AssetCPU.clusters.empty() && !m_AssetCPU.vertices.empty()
+            && !m_AssetCPU.triangles.empty();
+    }
+
 private:
     rhi::IRHIDevice* m_Device = nullptr;
     u32 m_Width  = 0;
@@ -122,6 +158,9 @@ private:
 
     /// 【§14.8 任务 12】资产缓冲组（GPU 资源宿主；`Shutdown` 时随 unique_ptr 一起释放）
     AssetBuffers m_Asset;
+
+    /// 【§14.8 任务 24】留存的资产 CPU 副本（页池的数据源；`bytes` 镜像被丢弃）
+    NanitePackedAsset m_AssetCPU;
 };
 
 } // namespace he::render

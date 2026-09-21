@@ -171,6 +171,46 @@ struct NaniteSettings {
     ///
     /// 配置层 = cfg 键 `nanite_hard_raster`（默认 0），样例负责解析/序列化 + 面板勾选框。
     bool hardRaster = false;
+
+    // ============================================================
+    // 【§14.8 任务 24】LOD 流式（反馈 + 页池）—— 阶段一
+    //
+    // 【权威设计】§14.32（含 6 处修正）。生效条件 **`enabled && softRaster && streaming`**：
+    //   · `enabled`：模块总开关（§14.2 不变式 1）；
+    //   · `softRaster`：页池的意义是"软光栅经页表取几何"，而"模块接管 GBuffer"只在
+    //     `softRaster` 为真时发生 ⇒ 它是必要条件（不满足时读数报 `reason=requires_soft_raster`）；
+    //   · `streaming`：本开关，**默认 false**。
+    // 【为什么默认 false（三条，都是硬理由）】
+    //   ① §14.2 不变式 1：关闭档的 pass 集合、帧图与转储必须与任务 23 **逐位相同**，
+    //      而流式在开启档会新增页池/页表/反馈环三组 GPU 资源与每帧一次 `WaitIdle`
+    //      ⇒ 只能挂在独立开关上；
+    //   ② 阶段一的页数据源是"留存在 CPU 的完整资产"（Sponza **实测 13,405,960 字节 = 12.78 MiB**，
+    //      经 `asset_retained … retained_bytes=13405960` 量出；丢弃字节镜像省下一半），
+    //      默认开启等于让所有样机白付这份内存；
+    //   ③ N5 的真正判据是"帧率稳定、无 pop"，而"无 pop"依赖 LOD 选择与预取（**本任务明确不做**）
+    //      ⇒ 现在开着它只有成本、没有收益。
+    // ============================================================
+
+    /// LOD 流式总开关（默认 **false**，cfg 键 `nanite_streaming`）
+    bool streaming = false;
+
+    /// 每页的**共享内容份数** K（默认 512，cfg 键 `nanite_page_contents`）
+    ///
+    /// 【口径说明】任务书给的默认值是"512 **簇**/页"，而 §14.32 修正后页必须对齐到"整份共享
+    ///   内容"的边界 ⇒ K 的含义相应变成 **512 份共享内容/页**。理由与权衡见 §14.37。
+    u32 pageContents = kNanitePageContentsPerPage;
+
+    /// 页池槽位（默认 64，cfg 键 `nanite_page_pool_slots`；钳到 [0, kNanitePagePoolSlotsMax]）
+    /// 【0 = 显式退化】读数会报 `stream=off reason=pool_zero_slots`（不静默）。
+    u32 pagePoolSlots = kNanitePagePoolSlotsDefault;
+
+    /// 反馈延迟（帧；默认 2，cfg 键 `nanite_feedback_latency`；钳到 [1, kNaniteFeedbackLatencyMax]）
+    /// 语义精确：帧 N 提交的请求在**帧 N+延迟**被 CPU 读回（环槽 = N % 延迟）
+    /// ⇒ "请求到驻留的延迟"是一条可核对的常量，而不是一个形容词。
+    u32 feedbackLatency = kNaniteFeedbackLatencyDefault;
+
+    /// 每帧上传页数上限（默认 4，cfg 键 `nanite_page_uploads`；钳到 [1, kNanitePageUploadsPerFrameMax]）
+    u32 pageUploadsPerFrame = kNanitePageUploadsPerFrameDefault;
 };
 
 } // namespace he::render

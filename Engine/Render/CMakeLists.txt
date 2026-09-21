@@ -209,6 +209,12 @@ set(RENDER_SOURCES
     Nanite/NaniteCull.cpp
     Nanite/NaniteRaster.h
     Nanite/NaniteRaster.cpp
+    # §14.8 任务 24：LOD 流式（反馈 + 页池，阶段一）。
+    # 【为什么单独一个文件】它把"页池 + 页表 + 反馈环 + 驻留管理"这套状态收在一处，
+    # 门面（`NaniteRenderer`）只做门控与每帧步进、光栅端只消费它的只读视图；
+    # 塞进 `NaniteRaster` 会让那个已经 1500 行的文件再多一整套生命周期。
+    Nanite/NaniteStream.h
+    Nanite/NaniteStream.cpp
     Nanite/NaniteRenderer.h
     Nanite/NaniteRenderer.cpp
 )

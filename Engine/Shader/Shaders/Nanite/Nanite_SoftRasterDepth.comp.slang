@@ -43,18 +43,48 @@ void main(uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
 
     ClusterRef ref = u_VisibleClusters[slot];
     if (ref.instance >= instanceCount) return;   // 越界引用：不读实例表（防御性）
-    uint clusterCapacity = 0u;
-    uint clusterStride = 0u;
-    u_Clusters.GetDimensions(clusterCapacity, clusterStride);
-    if (ref.cluster >= clusterCapacity) return;
+    if (pagesEnabled != 0u) {
+        // 【任务 24】开启档：页映射的下标空间是**资产**簇下标 ⇒ 抗越界判据按资产簇数收口
+        //   （binding 0 这时绑的是页池，它的元素个数可能比簇数小，GetDimensions 不适用）
+        if (ref.cluster >= assetClusterCount) return;
+    } else {
+        // 【关闭档：与任务 23 逐字相同的既有判据，一字未改】
+        uint clusterCapacity = 0u;
+        uint srcStride = 0u;
+        u_Clusters.GetDimensions(clusterCapacity, srcStride);
+        if (ref.cluster >= clusterCapacity) return;
+    }
 
     InstanceObject instance = u_Instances[ref.instance];
     if (instance.indexCount == 0u) return;          // 空实例：与剔除链的跳过规则一致
     float3 translation = instance.ltw3.xyz;
 
-    NaniteCluster cluster = u_Clusters[ref.cluster];
+    // ── 【任务 24】页解析：取记录 + 三段基址（缺页 ⇒ 跳过、计数、上报请求）──
+    // 【位置：必须在任何分流判据之前】这样"每个可见簇的页归属"只判定一次，且与
+    //   `soft + skipped_big + page_misses == visible` 这条不变式对齐（三条互斥且全覆盖）。
+    SoftRasterClusterView view = softRasterResolveCluster(ref.cluster);
+    if (!view.valid) {
+        if (view.page != 0xFFFFFFFFu) {          // 页未驻留（不是非法引用）
+            if (tid.x == 0u) {
+                InterlockedAdd(u_Stats[kSoftStatPageMissClusters], 1u);
+                softRasterRequestPage(view.page);   // 由 0 号线程上报一次（每簇一个工作组）
+            }
+        }
+        return;
+    }
+    NaniteCluster cluster = view.cluster;
+    // 【防御：把三角形数夹到**资产契约的上限 64**，而不是夹到 `maxTriangles`】
+    //   【为什么不能夹到 maxTriangles（实测踩过）】那会把 64 个三角形的簇"变成"16 个，
+    //   于是它们**不再被分流判据跳过**、全部涌进软光栅：实测 `soft=31526 / skipped_big=0 /
+    //   buckets=[61,0,31465,0,0] / tested_px=285M`（健康档是 `soft=61 / skipped_big=31587 /
+    //   buckets=[61,0,0,0,31587] / tested_px=9767`）—— 读数与画面全变，是**语义破坏**而非加固。
+    //   【夹到 64 是语义不可见的】`NANITE_MAX_CLUSTER_TRIANGLES` 是资产契约：合法簇恒 ≤64；
+    //   而 >64 的簇在夹取前后都会走"超阈值跳过"那条路，分桶也都是最后一桶 ⇒ 任何读数都不变。
+    //   它只是给下面那个 `for` 与第 2 趟的循环加一道与资产契约同源的硬界（防损坏记录）。
     uint triangleCount = cluster.triangleCount;
+    if (triangleCount > 64u) triangleCount = 64u;
     if (triangleCount == 0u) return;
+    cluster.triangleCount = triangleCount;
 
     // ── 【任务 23】簇大小分布：**在分流判据之前**计数 ⇒ 五桶覆盖"软 + 硬"两侧的全部可见簇。
     //   不变式：五桶之和 == kSoftStatRasterClusters + kSoftStatSkippedClusters
@@ -76,7 +106,7 @@ void main(uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
 
     // ── ③ 逐三角形：投影 → 2D 包围盒 → 重心坐标 → 原子深度键 ──
     for (uint triLocal = tid.x; triLocal < triangleCount; triLocal += 16u) {
-        SoftRasterTriangle tri = softRasterFetchTriangle(cluster, triLocal, translation);
+        SoftRasterTriangle tri = softRasterFetchTriangle(view, triLocal, translation);
         if (!tri.valid) {
             InterlockedAdd(u_Stats[kSoftStatDegenerate], 1u);
             continue;
