@@ -724,6 +724,9 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
         rhi::DescriptorSetLayoutDesc layout;
         layout.bindings = {
             { 0, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment, false },  // 深度键（只读）
+            // 【P0 修复（§14.30）】读数缓冲（可写）：本通道原子计数"真正写入非远平面深度的像素数"。
+            //   旧实现把 `depth_written` 在 C++ 侧硬编码成 1，正是那个恒真读数掩盖了本 bug。
+            { 1, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskFragment, false },  // 软光栅读数
         };
         m_DepthResolveLayout = m_Device->CreateDescriptorSetLayout(layout);
         if (m_DepthResolveLayout == rhi::kInvalidLayout) {
@@ -739,13 +742,41 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
         m_DepthResolveFS.spirv      = k_Nanite_DepthResolve_frag_spv;
         m_DepthResolveFS.entryPoint = "main";
 
+        rhi::PushConstantRange resolvePc;
+        resolvePc.stageMask = rhi::kStageMaskVertex | rhi::kStageMaskFragment;
+        resolvePc.size      = sizeof(NaniteDepthResolveParams);
+
         rhi::PipelineStateDesc desc;
         desc.vertexShader         = &m_DepthResolveVS;
         desc.pixelShader          = &m_DepthResolveFS;
         desc.topology             = rhi::PrimitiveTopology::TriangleList;
         desc.cullMode             = rhi::CullMode::None;   // 全屏大三角形只看覆盖，不挑绕序
-        desc.depthTest            = false;                 // 深度值由 shader 决定 ⇒ 不做硬件比较
-        desc.depthWrite           = true;                  // 但要**写**深度
+        // 【P0 修复（§14.30）：屏幕尺寸必须显式传进来】
+        //   深度键是**一维** `RWStructuredBuffer<uint>`，它的 `GetDimensions` 返回的是
+        //   "元素个数 + 1"（宽=元素数、高=1），**不是**二维宽高。过去 shader 按二维用，
+        //   于是"除第 0 行外全部像素"都被当成越界并写成远平面 ⇒ 模块接管时深度附件恒为 1.0
+        //   （Hi-Z 因此永远是空金字塔，见 `NaniteDepthResolveParams` 的注释与实施记录）。
+        desc.pushConstantRanges   = { resolvePc };
+        // ════════════════════════════════════════════════════════════════════════════════
+        // 【P0 修复（§14.30）】这里过去写的是 `depthTest = false`，本意是"深度值完全由 shader 的
+        //   `SV_Depth` 决定、不做硬件比较"。**那是错的**：Vulkan 规范对
+        //   `VkPipelineDepthStencilStateCreateInfo::depthWriteEnable` 的原文是
+        //     "controls whether depth writes are enabled **when depthTestEnable is VK_TRUE**.
+        //      Depth writes are **always disabled when depthTestEnable is VK_FALSE**."
+        //   ⇒ 深度测试关闭时 `SV_Depth` 被**整块丢弃**，深度附件永远停在 `depthLoadOp`
+        //   （`desc.depthLoadOp` 默认 `Clear`）清出来的远平面上。
+        // 【实测症状（修前，07.Nanite）】模块接管几何写入后：
+        //   · Hi-Z 金字塔恒为远平面 ⇒ `cull3 … occluded=0 occl_mip=[0,0,0,0,0,0,0,0]
+        //     hiz_half=[1.000000,1.000000]`（阈值 16 档如此，**阈值 64 全覆盖档也一样**）；
+        //   · 阈值 64 档说明它不是"覆盖率不足"的问题，而是深度根本没写进附件；
+        //   · 后果不止剔除：接管期间 GBuffer 深度对所有消费者（SSR / 贴花 / 任何深度重建）
+        //     都是"全是天空"。判据 ⑦ 的 `hiz1` 档正是被它打红的（§14.30 有完整证据）。
+        // 【修法】启用深度测试并取 `Always` —— 语义上与"shader 写什么就是什么"完全等价
+        //   （`Always` 恒通过 ⇒ 没有任何片元会被比较丢弃），只是让深度**写入**真正生效。
+        // ════════════════════════════════════════════════════════════════════════════════
+        desc.depthTest            = true;                  // 必须开：关掉会让下面的 depthWrite 失效
+        desc.depthCompare         = rhi::CompareFunc::Always;   // 恒通过 ⇒ 深度值仍由 SV_Depth 决定
+        desc.depthWrite           = true;                  // 真正把 SV_Depth 写进深度附件
         desc.depthFormat          = rhi::Format::D32_FLOAT;
         desc.colorAttachmentCount = 0;                     // 深度专用通道（与 CSM/Spot 阴影同款）
         desc.descriptorSetLayouts = { m_DepthResolveLayout };
@@ -994,6 +1025,8 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
     m_Device->UpdateDescriptorSetWithImageView(m_SoftColorSet, 11, rhi::DescriptorType::StorageImage,
                                                targets.lightmapKey->GetNativeHandle());
     m_Device->UpdateDescriptorSet(m_DepthResolveSet, 0, rhi::DescriptorType::StorageBuffer, m_DepthKey.get());
+    // 【P0 修复（§14.30）】读数缓冲：深度解析通道自己原子累加"真实写入深度的像素数"
+    m_Device->UpdateDescriptorSet(m_DepthResolveSet, 1, rhi::DescriptorType::StorageBuffer, m_SoftStats.get());
 
     // ── ① 清深度键 + 清读数（命令缓冲内拷贝，GPU 有序）──
     RecordDepthKeyClear(cmd);
@@ -1048,6 +1081,10 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
     depthClear.depth = clearDepth;
     cmd->SetPipeline(m_DepthResolvePSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DepthResolveSet);
+    // 【P0 修复（§14.30）】把屏幕尺寸推给片元：深度键是一维结构化缓冲，shader 不能从它反推
+    //   二维宽高（`GetDimensions` 只会给出"元素个数 + 1"）。这里传的就是深度键的二维形状。
+    NaniteDepthResolveParams resolveParams{ w, h };
+    cmd->SetPushConstants(0, (u32)sizeof(resolveParams), &resolveParams);
     cmd->BeginOffscreenPass(nullptr, targets.depth->GetNativeHandle(), w, h, &depthClear, false);
     cmd->SetViewport({ 0.0f, (float)h, (float)w, -(float)h, 0.0f, 1.0f });
     cmd->SetScissor({ 0, 0, w, h });
@@ -1084,7 +1121,11 @@ void NaniteRaster::LogSoftRasterReadback() {
                  m_DistinctMaterials,
                  m_TexturedMaterials,
                  m_MultiMeshClusters,
-                 1,        // 深度解析恒执行（全屏片元写 SV_Depth）⇒ depth_written 恒 1
+                 // 【P0 修复（§14.30）】深度解析通道的**真实原子计数**（不再是恒 1 常量）：
+                 //   全屏片元逐像素访问一次 ⇒ 语义是**去重后的像素数**，与 `pixels_written`
+                 //   （通过等值复检的"簇×三角形×像素"写次数）不是同一个量，不变式是本项 ≤ 它。
+                 //   旧实现硬编码 1，正是这个恒真读数掩盖了"深度一列都没写进去"的真 bug。
+                 s[kNaniteSoftStatDepthResolvedPixels],
                  m_DepthStorageImageSupported ? 1 : 0,
                  m_SoftLastMaxTriangles,
                  m_SoftLastInstanceCount,

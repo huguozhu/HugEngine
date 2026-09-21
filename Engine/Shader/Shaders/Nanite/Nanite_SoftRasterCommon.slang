@@ -99,6 +99,15 @@ static const uint kSoftStatCapacity        = 16u;  // 缓冲条数（与 C++ 侧
 // ── 【任务 19】材质相关读数 ──
 static const uint kSoftStatMaterialPixels  = 12u;  // 用**资产材质段**的真实材质写入的像素数
 static const uint kSoftStatFallbackPixels  = 13u;  // 材质段越界/缺失而退化为中性常数的像素数（正常 0）
+// ── 【P0 修复（§14.30）】深度解析读数 ──
+// 【为什么加这一项】过去 `depth_written` 在 C++ 侧是**硬编码的 1**（"深度解析恒执行"），
+//   于是"深度解析其实一列都没写进去"这个真 bug 被一个恒真读数掩盖了整整一个任务。
+//   现在由深度解析通道**自己原子计数**：只有"读到非哨兵深度键"的像素才 +1
+//   ⇒ 它是真实 GPU 读回。语义是**去重后的像素数**（全屏片元对每个像素只访问一次），
+//   与第 2 趟的 `kSoftStatPixels` 不是同一个量：后者是"通过等值复检的
+//   （簇×三角形×像素）写次数"，会因**键完全相同的平局**（任务 18 已记录的已知口径）
+//   大于去重像素数。可核对的不变式是 `depthResolvedPixels <= pixels`。
+static const uint kSoftStatDepthResolvedPixels = 14u;   // 深度解析真正写进非远平面深度的**像素数**（去重）
 // ── 诊断槽位（第 1 趟的工作组 0 写入；把"shader 实际收到的 push constant"读回来）──
 static const uint kSoftStatCoveredPixels   = 6u;   // 第 1 趟通过重心覆盖测试的像素数（未做原子）
 static const uint kSoftStatDiagScreenW     = 7u;   // push constant 的 screenWidth（原样回读）

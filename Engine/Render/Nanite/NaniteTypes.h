@@ -2203,6 +2203,25 @@ static_assert(offsetof(NaniteSoftRasterParams, instanceCount) == 76, "instanceCo
 static_assert(offsetof(NaniteSoftRasterParams, meshMaxExtent) == 80, "meshMaxExtent 在偏移 80");
 static_assert(offsetof(NaniteSoftRasterParams, materialCount) == 88, "materialCount 在偏移 88");
 
+/// 【P0 修复（§14.30）】深度解析通道的 push constant（8B）
+///
+/// 【为什么需要它（这条是本模块最隐蔽的一个真 bug）】深度键是 `RWStructuredBuffer<uint>`
+///   （一维、长度 = 宽×高），而**结构化缓冲的 `GetDimensions` 返回的是"元素个数 + 1"**，
+///   不是二维宽高 —— 即 `width = 宽×高`、`height = 1`。`Nanite_DepthResolve.frag.slang` 过去
+///   用 `u_DepthKey.GetDimensions(width, height)` 当二维尺寸用，于是
+///     `if (pixel.y >= height) { depth = 1.0; return; }`
+///   对**除第 0 行以外的所有像素**都命中 ⇒ 深度解析只写了第 0 行，其余像素被写成远平面。
+///   实测症状：模块接管时 Hi-Z 金字塔恒为 1.0（`hiz_half=[1.000000,1.000000]`、
+///   `occluded` 与深度无关），把解析通道的输出强制成常量 0.5 也**不改变**读数 ——
+///   因为那行常量写在第 0 行之后、且大多数像素早已在早退里返回 1.0。
+///   修法：屏幕尺寸由 CPU 用**显式 push constant** 传进来（不再从缓冲反推二维形状）。
+struct NaniteDepthResolveParams {
+    u32 screenWidth;    ///< 偏移 0：帧缓冲宽（像素）
+    u32 screenHeight;   ///< 偏移 4：帧缓冲高（像素）
+};
+static_assert(sizeof(NaniteDepthResolveParams) == 8u, "深度解析 push constant 必须 8B");
+static_assert(offsetof(NaniteDepthResolveParams, screenHeight) == 4, "screenHeight 在偏移 4");
+
 /// 软光栅读数槽位（扁平 u32；与 `Nanite_SoftRasterCommon.slang` 的 `kSoftStat*` 一一对应）
 inline constexpr u32 kNaniteSoftStatRasterClusters  = 0u;   ///< 真正走软光栅的簇数（≤ maxTriangles）
 inline constexpr u32 kNaniteSoftStatSkippedClusters = 1u;   ///< 因三角形数超阈值跳过的簇数（任务 22 的活）
@@ -2214,6 +2233,13 @@ inline constexpr u32 kNaniteSoftStatNeutralPixels   = 5u;   ///< 【任务 19 �
 inline constexpr u32 kNaniteSoftStatMaterialPixels  = 12u;
 /// 【任务 19】材质段越界/缺失而退化为中性常数的像素数（正常必须 0；`neutral_material_pixels` 的替代口径）
 inline constexpr u32 kNaniteSoftStatFallbackPixels  = 13u;
+/// 【P0 修复（§14.30）】深度解析通道**真正写入非远平面深度**的像素数（原子计数，真实 GPU 读回）。
+/// 【为什么它取代了旧的 `depth_written` 常量】旧读数在 C++ 侧硬编码为恒 1（"深度解析恒执行"），
+///   于是"深度解析其实一列都没写进去"这个真 bug 被一个恒真读数掩盖了一整个任务。
+/// 【语义】全屏片元对每个像素只访问一次 ⇒ 它是**去重后的像素数**，与 `kNaniteSoftStatPixels`
+///   （通过等值复检的"簇×三角形×像素"写次数，会因键完全相同的平局而更大）不是同一个量。
+///   可核对的不变式：本项 ≤ `kNaniteSoftStatPixels` ≤ `kNaniteSoftStatCoveredPixels`。
+inline constexpr u32 kNaniteSoftStatDepthResolvedPixels = 14u;
 inline constexpr u32 kNaniteSoftStatsCapacity       = 16u;  ///< 读数缓冲条数（与 shader 一致）
 
 /// "该像素没有几何"的深度键哨兵（第 1 趟之前由模块把整张深度键清成它）
