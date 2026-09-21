@@ -1,6 +1,6 @@
 # HugEngine 材质系统实现分析
 
-> 分析日期：2026-09-21 | 基线提交：`1ee4c1e`
+> 分析日期：2026-09-21 | 基线提交：`1ee4c1e`（2026-09-21 编写；2026-09-21 按当前代码复核）
 > 范围：**延迟渲染路径**（`DeferredPipeline` → `GBuffer.frag` → `DeferredLighting.frag`）的材质参数、
 > 各参数的意义与数学原理、以及与材质系统相关的已知边界与改进清单。
 > 相关文档：[HugEngine渲染管线实现分析.md](HugEngine渲染管线实现分析.md)（管线与 GBuffer 通道）、
@@ -40,7 +40,7 @@
 | 纹理 | **4 个 bindless 槽**（BaseColor / Normal / MetallicRoughness / Occlusion），`materialID` 为基索引 |
 | 承载 | GBuffer 8 张 MRT，材质占 MRT0/1/2/4/5/6 = 48 B/像素 |
 | **最严重的三处事实** | ① 材质**全部不入存档**（`MeshComponent` 零反射属性）；② 贴图**无 sRGB→线性解码**；③ `SceneRenderer` 少拷贝 Disney/ior ⇒ 延迟画面里 MRT5/6 与 F0 **恒为中性默认值** |
-| 改进项 | 19 项，分 P0（正确性/数据完整性，6 项）、P1（表达能力，5 项）、P2（架构与工作流，7 项）、P3（数值精度，3 项） |
+| 改进项 | 19 项，分 P0（正确性/数据完整性，5 项）、P1（表达能力，5 项）、P2（架构与工作流，7 项）、P3（数值精度，2 项） |
 
 ---
 
@@ -53,7 +53,7 @@ MeshComponent(CPU 字段)
    │                                                        │
    │                                          GBuffer.frag ──┴─→ 8×MRT ─→ DeferredLighting.frag ─→ PBR_BRDF
    │
-   ├─(RT/PT 路径) RTPass::BuildSceneMaterialTexture ─→ 材质纹理 row0~row7 ─→ RT/PT 着色器
+   ├─(RT/PT 路径) RTPass::BuildSceneMaterialTexture ─→ 材质纹理 row0~row10 ─→ RT/PT 着色器
    │              （直接读 MeshComponent，不经 PBRMaterial）
    │
    └─(Forward 路径) ForwardPipeline::UploadMaterialBindless ─→ GPUMaterialData ─→ PBR.frag
@@ -65,7 +65,7 @@ MeshComponent(CPU 字段)
 |---|---|---|---|
 | 光栅（Forward/Deferred 共用 GBuffer/PBR） | `GPUObjectData`（208 B，内联材质） | `GBuffer.frag.slang:54`、`PBR.frag.slang:290` | 每物体一份，未去重 |
 | 光栅（Forward bindless 可选） | `GPUMaterialData`（112 B，按 `materialID>>2` 索引） | `PBR.frag.slang:281`（`useBindlessMaterial`） | **延迟路径不用**这条 |
-| RT/PT | 材质纹理 row0~row7 + `PathPayload` | `RT_Bindless.rcall.slang`、`PT_Full.rchit.slang` | `u_Materials` 在 RT 侧**未绑定**（`RT_Bindless.rcall.slang:4` 自述） |
+| RT/PT | 材质纹理 row0~row10（11 行，含 bindless 贴图基索引与因子）+ `PathPayload` | `RT_Bindless.rcall.slang`、`PT_Full.rchit.slang` | `u_Materials` 在 RT 侧**未绑定**（`RT_Bindless.rcall.slang:4` 自述） |
 
 ---
 
@@ -227,7 +227,7 @@ aoFactor = lerp(1.0, ao·aoVal, aoIntensity)                // :505
 color = directColor + (indirectDiffuse·gi + indirectSpecular)·aoFactor   // :536
 ```
 
-只在间接项上施加是**正确**的；历史上曾乘到直接光上（`:445-446` 记录的 4.7 倍亮度事故）。
+只在间接项上施加是**正确**的；历史上曾乘到直接光上（`:445-446` 记录了这处能量错误；本文别处的 4.7 倍事故是 `u_BRDF_LUT` 未烘焙，与 AO 无关，见 §7 P2-13）。
 
 #### 5.2.7 alphaCutoff — 非 BRDF
 
@@ -305,7 +305,7 @@ color += PBR_BRDF(albedo, metallic, roughness, N, V, L, F0, envBRDF, disneyA, di
 
 `SceneRenderer.cpp:110-125` 与 `ForwardPipeline.cpp:650-665` 各写一份 `MeshComponent → PBRMaterial` 拷贝，
 **两份都漏了** `ior/anisotropic/subsurface/specular/specularTint/sheen/clearcoat/clearcoatGloss`。
-⇒ 延迟画面里 MRT5/6 与 F0 恒等于 `PBRMaterial` 的默认值（与 GBuffer 清屏值逐位相同），
+⇒ 延迟画面里 MRT5/6 与 F0 恒等于 `PBRMaterial` 的默认值（MRT5/6 与 GBuffer 清屏值逐位相同；F0 则是 `ior=1.5` 派生的 0.04，而 MRT4 清屏值是 0），
 `KHR_materials_clearcoat / specular / sheen / ior / anisotropy` 在延迟路径**全部无效**。
 RT/PT 侧因直读 `MeshComponent`（`RTPass.cpp:601-605`）而是有效的。
 
@@ -373,6 +373,13 @@ clearcoat/sheen/transmission 贴图同样无处放。
 `Nanite_SoftRaster.comp.slang:123-126` 只写 albedo/normal/worldPos/lightmapKey
 ⇒ 其覆盖像素上 emissive、disneyA/B、velocity 保持清屏值（Disney 与自发光无效）。
 
+> ⚠ **MRT4.a（`dielectricF0`）在 Nanite 像素上是第三种值**：软光栅把 worldPos 写成
+> `float4(worldPos, 1.0)`（`Nanite_SoftRaster.comp.slang:125`），即 `.a` = **1.0**；
+> 而清屏值未设 `clears[4]`（= **0**，`GBufferRenderer_CPU.cpp:38-54`），常规 `GBuffer.frag`
+> 路径写的是 `ior` 派生的 **0.04**（`Material.h:136-137`，`ior=1.5`）。
+> ⇒ 同屏三种 F0 并存，Nanite 覆盖像素的 Fresnel 被抬到全反射。本文 §6.1 的"F0 恒为默认值"
+> 只对常规几何成立，**不适用于 Nanite 覆盖像素**。
+
 ### 6.12 MRT7 光照图键尚未被消费
 
 `DeferredLighting.frag.slang:30` 声明了 `u_LightmapKey`，全文件**再无引用**。
@@ -382,7 +389,7 @@ clearcoat/sheen/transmission 贴图同样无处放。
 `IBL_BRDF_LUT.frag.slang:49-50`：`a = roughness²; k = a²·0.5` ⇒ `k = roughness⁴/2`，而 Karis/UE4 的
 IBL 惯例是 `k = a/2 = roughness²/2` ⇒ 高粗糙下 Smith 遮蔽偏小 ⇒ **间接高光偏亮**。
 （直接光路径的 `k=(r+1)²/8`，`pbr_common.slang:53`，是正确的，两者不可混用。）
-该疑点此前已记录于 [GI 分析文档](HugEngine全局光照GI实现分析与架构优化方案.md) 第 43 行。
+该疑点此前已记录于 [GI 分析文档](HugEngine全局光照GI实现分析与架构优化方案.md) 第 44 行（IBL 小节）。
 
 ### 6.14 注释与文档漂移
 
@@ -390,8 +397,8 @@ IBL 惯例是 `k = a/2 = roughness²/2` ⇒ 高粗糙下 Smith 遮蔽偏小 ⇒ 
 |---|---|
 | `ShaderTypes.slang:265` | 写"GPUObjectData：176 字节"，实际 `sizeof == 208`（`Material.h:52` 断言） |
 | `GBufferRenderer.h:24-26`、`GBuffer.frag.slang:9` | 写"lightmapKey = uv0.xy"，实际是**按物体 AABB 的箱式投影**（`GBuffer.frag.slang:112-134`） |
-| `HugEngine渲染管线实现分析.md:456` | "头部注释过时：GBuffer 5×MRT 实际 7 MRT"（现为 8 张） |
-| `GBuffer.vert.slang:1`、`GBufferRenderer.h:110` | "5 个 MRT 颜色纹理"、"4 MRT + velocity" 等旧计数 |
+| `HugEngine渲染管线实现分析.md` 的"文档/代码漂移"表 | 该表记录的是 **`DeferredPipeline.h` 头部注释**过时（"GBuffer 5×MRT" 实际 8 MRT），不是姊妹文档自身写错 |
+| `GBuffer.vert.slang:1` | 写"（4 MRT + velocity）"旧计数（`GBufferRenderer.h` 的"5 个 MRT 颜色纹理"注释已修正为 8 个，不再列入本表） |
 | `MaterialEditor.h` | 节点图 UI 为**游离存根**（无序列化、无编译、无消费者），UI 上无任何标注 |
 
 ### 6.15 其它近似（标注，不急于修改）
@@ -422,7 +429,7 @@ IBL 惯例是 `k = a/2 = roughness²/2` ⇒ 高粗糙下 Smith 遮蔽偏小 ⇒ 
 | 12 | P2 | 三条解析路径不同源 | `SceneRenderer.cpp` vs `RTPass.cpp:601` | 同一材质三处语义不一致 |
 | 13 | P2 | 延迟不用 `GPUMaterialData` | `GBuffer.frag.slang:54` 读内联 | 同材质多物体重复 208 B/物体 |
 | 14 | P2 | `materialID` 靠样本手工注册 | `04.Sponza-Deferred.cpp:423-434` 等 | 引擎无材质→纹理绑定流程 |
-| 15 | P2 | 材质上传无脏标记 | `ForwardPipeline.cpp:1108` | 每帧 O(物体数) 哈希 + 全量上传 |
+| 15 | P2 | 材质上传无脏标记 | `ForwardPipeline.cpp:1108` | 每帧 O(物体数) 哈希；仅材质数变化时才重建/上传材质 buffer |
 | 16 | P2 | 编辑器材质能力缺口 | `DetailsPanel.cpp:251-261` | 纹理只读、无 ior/Disney 编辑 |
 | 17 | P2 | 文档/注释漂移 | 见 §6.14 | 误导后续改动 |
 | 18 | P3 | IBL LUT `k = roughness⁴/2` | `IBL_BRDF_LUT.frag.slang:49-50` | 高粗糙间接高光偏亮 |
@@ -503,7 +510,7 @@ inline PBRMaterial MakeMaterialFrom(const he::MeshComponent& mc);   // 全字段
 #### P1-6 把 `specularTint.b` 放回 GBuffer（零成本）
 
 `GBuffer.frag.slang:134` 的 `lightmapKey.a` 空闲 ⇒ `output.lightmapKey.a = obj.disneyC;`，
-光照侧用**点采样**读 `.a`（键是索引，线性过滤会插值出无意义值，理由同 `:28-29` 对页号的说明）。
+光照侧用**点采样**读 `.a`（键是索引，线性过滤会插值出无意义值，理由同 `DeferredLighting.frag.slang:28-29` 对页号的说明）。
 同步 `GBufferRenderer.h:24-26` 的语义注释与 `Material.h` 的 `offsetof` 断言。
 
 #### P1-7 纹理槽 4 → 8
@@ -511,7 +518,7 @@ inline PBRMaterial MakeMaterialFrom(const he::MeshComponent& mc);   // 全字段
 1. `kGPUMaterialTexSlot_Count = 8`（`>>3`），新增 `Emissive=4, Clearcoat=5, Sheen=6, Transmission=7`。
 2. **同步修改点（必须一次搜全）**：`ShaderTypes.slang:229`、`common.slang:72-73` 注释、
    `PBR.frag.slang:281`、`GBuffer.frag.slang`（新增 emissive 采样 + sRGB 解码）、
-   `ForwardPipeline.cpp:680-696`、`Nanite_SoftRasterCommon.slang:87,145`、`RT_Bindless.rcall.slang`、
+   `ForwardPipeline.cpp:680-696`、`Nanite_SoftRasterCommon.slang:87`、`NaniteTypes.slang:165,172-173`、`RT_Bindless.rcall.slang`、
    `PT_Full.rchit.slang:139-161`。
 3. 注册入口集中在 P2-14 的 `RegisterMaterial`，避免 N 处手写。
 4. emissive 贴图接入后，`emissiveFactor` 变为乘性（`emissiveFactor.rgb * Sample(Emissive,uv).rgb`）。
@@ -549,7 +556,7 @@ inline PBRMaterial MakeMaterialFrom(const he::MeshComponent& mc);   // 全字段
 |---|---|---|
 | P2-11 | 材质不是资产 | 定义 `MaterialAsset`（`.hemat`）：`PBRMaterial` + 名字 + 纹理相对路径；`MeshComponent` 增加材质引用（字段保留为内联覆盖以兼容现有样本）；运行时 `MaterialTable` 解析并去重成 `GPUMaterialData`。编辑器先做"资产 + DetailsPanel 指派"，节点图暂留为长期目标 |
 | P2-12 | 三条路径不同源 | `MaterialTable` 落地后，光栅 / RT/PT / Forward 三处**只读同一份** `GPUMaterialData`；`RTPass` 的 row4~row7 直接由它序列化 |
-| P2-13 | 延迟不用 per-material 表 | `GBuffer.frag.slang` 增加 `u_Materials[0][materialID>>shift]` 分支（复用 `common.slang:73`），并把 `useBindlessMaterial` 默认改为 true。**注意**：必须在 GBuffer 的 per-frame set 里完成绑定与 Flush —— 历史上 `u_BRDF_LUT` 因漏绑一度让整幅画面直接光算错 4.7 倍 |
+| P2-13 | 延迟不用 per-material 表 | `GBuffer.frag.slang` 增加 `u_Materials[0][materialID>>shift]` 分支（复用 `common.slang:73`），并把 `useBindlessMaterial` 默认改为 true。**注意**：必须在 GBuffer 的 per-frame set 里完成绑定与 Flush —— 历史上 `u_BRDF_LUT` 因 IBL 烘焙 pass 未注册（漏了"直接光也消费它"这一条）而从未写入，一度让整幅画面直接光算错 4.7 倍（任务 27，`DeferredPipeline_FrameGraph.cpp:1297-1305`） |
 | P2-14 | 注册流程缺失 | 新增 `RegisterMaterial(MeshComponent&, BindlessHeap*)`：按 `ComputeMaterialTextureMask` 逐槽注册（缺贴图注册**中性默认纹理**：法线 `(0.5,0.5,1)`、MR `(1,1,0,1)`）、校验基索引连续、按路径缓存去重。样本（`04/05/06/07`、`EditorApp.cpp:332-341`）统一改调 |
 | P2-15 | 上传无脏标记 | `MaterialTable` 持版本号，材质/路径变化时 bump；`UploadMaterialBindless`（`ForwardPipeline.cpp:1108`）版本未变则早退 |
 | P2-16 | 编辑器缺口 | `DetailsPanel.cpp:251-261` 纹理路径改为可指派 + 立即重注册；补 ior/Disney/transmission 控件；加材质预览球（可复用 GBuffer+Lighting 迷你尺寸，或用 PathTracingPipeline 做参考预览）；`MaterialEditor.h` 在 UI 上标注为存根 |
@@ -615,7 +622,7 @@ inline PBRMaterial MakeMaterialFrom(const he::MeshComponent& mc);   // 全字段
 | `SceneRenderer::Prepare` | `Engine/Render/SceneRenderer.cpp:105-147` | 材质 → `GPUObjectData` 填充（**当前漏 Disney**） |
 | `UploadMaterialBindless` | `ForwardPipeline.cpp:645-696`、调用点 `:1108` | per-material 表去重上传（仅 Forward 使用） |
 | `RTPass::BuildSceneMaterialTexture` | `RTPass.cpp:575-624` | RT/PT 材质纹理（直读 `MeshComponent`） |
-| 清屏值 | `GBufferRenderer_CPU.cpp:38-54`、`GBufferRenderer_GPU.cpp:47-55` | GBuffer 中性默认值 |
+| 清屏值 | `GBufferRenderer_CPU.cpp:38-54`、`GBufferRenderer_GPU.cpp:43-58` | GBuffer 中性默认值 |
 | 序列化 | `SceneSerializer.cpp:25-39`、`SceneReflect.cpp:57-58` | 反射驱动的 `.hescene`（**MeshComponent 零注册**） |
 
 ## 附录 B：通道预算与承载能力
