@@ -1,7 +1,7 @@
 # HugEngine 技术名词全目录
 
-> 2026-07-22 | 完整引擎技术概念索引，共 102 个技术名词
-> 按系统分层：核心引擎 → RHI → RenderGraph → 渲染管线 → 后处理 → GI → GPU驱动 → 光线追踪 → 工具链
+> 2026-09-21 | 完整引擎技术概念索引，共 117 个技术名词
+> 按系统分层：核心引擎 → RHI → RenderGraph → 渲染管线 → 后处理 → GI → GPU驱动 → 光线追踪 → Lumen / Nanite → 物理 → AI → 工具链
 
 ---
 
@@ -286,7 +286,7 @@
 
 ### 46. DeferredPipeline — 延迟渲染
 - **类别**: 渲染管线
-- **原理**: GBuffer 5×MRT：Slot 0=Albedo+Metallic(RGBA16_FLOAT)、Slot 1=Normal+Roughness(RGBA16_FLOAT)、Slot 2=Emissive+AO(RGBA16_FLOAT)、Slot 3=Velocity(RG16_FLOAT)、Slot 4=WorldPos(RGBA16_FLOAT)。Deferred Lighting 全屏三角形采样全部 GBuffer + CSM 阴影 + IBL + RSM + SSGI + SSAO + SSR + DDGI + Clustered Shading，单 Pass 完成全部光照。
+- **原理**: GBuffer **8×MRT**：Slot 0=Albedo+Metallic(RGBA16_FLOAT)、Slot 1=Normal+Roughness(RGBA16_FLOAT)、Slot 2=Emissive+AO(RGBA16_FLOAT)、Slot 3=Velocity(RG16_FLOAT)、Slot 4=WorldPos(RGBA16_FLOAT)、Slot 5=DisneyA(RGBA16_FLOAT)、Slot 6=DisneyB(RGBA16_FLOAT)、Slot 7=LightmapKey(uv0.xy+objectIndex，RGBA16_FLOAT)。Deferred Lighting 全屏三角形采样全部 GBuffer + CSM 阴影 + IBL + RSM/RSMIndirect + SSGI + SSAO + SSR + DDGI + Lumen + Clustered Shading，单 Pass 完成全部光照。
 - **解决问题**: 单遍几何 + 全屏光照，减少带宽 vs 多 Pass 光照。
 
 ### 47. ForwardPipeline — 前向渲染
@@ -294,9 +294,9 @@
 - **原理**: 单 PBR PSO（PBR.vert + PBR.frag），支持 Forward+（Clustered Shading）、多线程命令录制（辅助命令列表并行录制）、ExecuteIndirect（GPU 驱动绘制）、光线追踪（RTPass: BLAS/TLAS/SBT）。HDR 输出 `RGBA16_FLOAT`。
 - **解决问题**: 前向 PBR 渲染路径，适合半透明材质和简单场景。
 
-### 48. GBuffer 5×MRT 布局
+### 48. GBuffer 8×MRT 布局
 - **类别**: 延迟着色
-- **原理**: 5 张渲染目标 + 深度，单次几何 Pass 存储全部表面属性。GBuffer PSO 使用 bindless 描述符集（set=0: GPUObjectData SSBO + Texture[4096] + Sampler[4096]）。
+- **原理**: 8 张渲染目标 + 深度（Slot 0–7，见词条 46），单次几何 Pass 存储全部表面属性。GBuffer PSO 使用 bindless 描述符集（set=0: GPUObjectData SSBO + Texture[4096] + Sampler[4096]）。
 - **解决问题**: 光照 Pass 无需重新访问几何——全屏三角形直接读取 GBuffer。
 
 ### 49. GBufferMode（CPU vs GPU 驱动）
@@ -427,7 +427,7 @@
 
 ### 71. DDGI — 动态漫反射 GI
 - **类别**: GI/探针
-- **原理**: 3D 探针网格（8×4×8，cellSize=3.0），球谐(SH)存储辐照度（16 float4/探针：9 SH 系数 + 7 保留）。Compute Shader 逐帧更新：GBuffer 屏幕采样投影到 SH + 与上一帧历史 temporal blend（85% 保留率）。Lighting Pass 三线性插值 8 个最近探针。AsyncCompute 运行。
+- **原理**: 3D 探针网格——**默认按场景包围盒自动拟合**（`GIProbeGrid` 的 `FitGridToBounds`：格距由最长边推出、每轴探针数取"刚好罩住该轴"）；`8×4×8` / `cellSize=3.0` 只是自动拟合不可用时的**回退默认值**。球谐(SH)存储辐照度：**每探针 4×float4（64 B）——band 0/1 共 4 个 SH 系数**（由三阶 9 系数降到二阶 4 系数，与 Screen Probe 的 shR/shG/shB 同构）。Compute Shader 逐帧更新，辐射度来源优先级为 **Screen Probe → 光追 march → RSM（VPL 出射辐射度）→ IBL 回退**（不再球面采样 GBuffer；原"屏幕 HDR 回退"因依赖视锥已改为 IBL 辐照度）。结果与上一帧历史 temporal blend（85% 保留率）。Lighting Pass 三线性插值 8 个最近探针。AsyncCompute 运行。
 - **解决问题**: 动态实时漫反射 GI，无需光照烘焙，支持移动光源和动态几何。
 
 ### 72. RSM — 反射阴影贴图 GI
@@ -446,7 +446,7 @@
 
 ### 74. MeshBatcher
 - **类别**: GPU 驱动
-- **原理**: 合并所有 StaticVertex 网格到共享 VB/IB → 记录 IndirectDrawCommand/DGCDrawToken 数组。DGC 模式输出 `DGCDrawToken`（36 字节，含 objectIndex）。
+- **原理**: 合并所有 StaticVertex 网格到共享 VB/IB → 记录 IndirectDrawCommand/DGCDrawToken 数组。DGC 模式输出 `DGCDrawToken`（32 字节：`alignas(16)` 的 6×u32，比 IndirectDrawCommand 多一个 objectIndex）。
 - **解决问题**: 单次 DrawIndexedIndirect 批量渲染，GPU 剔除着色器直接写绘制命令。
 
 ### 75. GPUCulling — GPU 剔除
@@ -631,7 +631,98 @@
 
 ---
 
-## 三十、第三方库
+## 三十、Lumen 全局光照
+
+### 103. Lumen Surface Cache（Card 捕获 + 页表状态机）
+- **类别**: Lumen/GI
+- **原理**: `LumenScene` 是 Lumen 的持久资源宿主——Surface Cache atlas、Global SDF clipmap、探针缓冲都是**跨帧持久**的 GPU 资源，既不进 RenderGraph 的瞬态分配、也不散落在 Provider 里（Provider 回答"每帧怎么算"，它回答"数据放在哪、什么时候重建/释放"）。页表由 `SurfaceCacheTypes.h` 的 CPU 侧六态状态机驱动：`Invalid → Requested → Allocating → Capturing → Captured → Dirty`，任何状态 → Invalid 都合法（释放/淘汰是最通用的兜底），非法迁移在 Debug 下由 `HE_ASSERT` 直接断言；页表项布局定义在 `Lumen/SurfaceCache.slang`（C++ 与 Slang 共享同一份），用 `static_assert` 钉死大小与关键字段偏移。运行期按每帧预算逐卡捕获：状态为 Capturing 的页做软件光栅化写入 atlas，并把页表镜像做一次 GPU 一致性校验（读回校验和与 CPU 侧比对）。
+- **解决问题**: 把"每帧重算 GI"变成"按页增量维护的辐射度缓存"，同时把分配/淘汰策略留在 CPU 侧，使合法性可断言、可单测。
+
+### 104. Lumen SDF（Mesh SDF → Global SDF → Sphere Tracing）
+- **类别**: Lumen/GI
+- **原理**: `LumenSDF` 负责 Lumen 距离场体系的第一层——每个 mesh 一张距离场。几何取自 `MeshBatcher::GetMergedVertices/GetMergedIndices`（未施加变换的合并几何），按 `GetDrawCommands()` 的 `(firstIndex, vertexOffset)` 切出每个 mesh 的三角形区间，AABB 建在 **mesh 局部空间**（世界变换由实例数据在 tracing 阶段提供）。默认分辨率 128³、R16F（每个 128³ mesh 约 4.2 MB），每帧构建预算 4 个 mesh，每 mesh 三角形上限 20000；Global SDF 为单层 128³（clipmap 分层留待后续），sphere tracing 在其上求交。每帧构建完第一个 mesh 后把 shader 写入探针缓冲的距离读回，与 CPU 侧独立实现按同一公式逐点比对，误差超阈值即报 ERROR——校验的是缓冲布局 / 网格映射 / 描述符 / push constant 这条数据链路。
+- **解决问题**: 让硬件无关的软件光追后端有可查询的场景距离场，并把首版分辨率与上限显式记录为前置约束（不是遗漏）。
+
+### 105. Lumen Screen Probe 与远场（ScreenProbe + SH + FarField）
+- **类别**: Lumen/GI
+- **原理**: 屏幕探针按 **16×16 单元**布点、2×2 平铺单元自适应合并为一个探针。探针半球追踪有两种采样模式（`LumenProbeSampleMode`：GGX 重要性采样 / 均匀半球），取值与 `ScreenProbeSampling.slang` 的约定一致——**追踪与投影必须同值**；命中点着色从 Surface Cache atlas 取材质，缺页返回中性值并计数。每条光线结果投成**二阶 SH（4 系数 × RGB，每系数一个 float4）**写回探针的 shR/shG/shB；白炉（furnace）自检时强制辐照度 L≈1，此时 l0 必须等于 √π（解析值，可断言）。`LumenFarFieldPass` 承担远场补充，`LumenScene_ProbeFilter` 做探针滤波。
+- **解决问题**: 用屏幕空间探针 + 球谐把少量屏幕采样放大成低频间接光，并为探针覆盖不到的远场提供廉价兜底。
+
+---
+
+## 三十一、Nanite 虚拟几何
+
+### 106. NaniteRenderer — 模块唯一门面
+- **类别**: Nanite/虚拟几何
+- **原理**: `NaniteRenderer` 是 Nanite 模块的唯一门面：模块公共面只有三个——本类、`NaniteSettings`（开关/档位）、`NaniteTypes.h` 的 POD；`NaniteScene / NaniteUpload / NaniteCull / NaniteRaster` 都是模块内部实现，外部（含 `DeferredPipeline`）只能经门面使用。唯一真值是 `NaniteSettings::enabled`（**默认 false**：关闭时一个 pass 都不注册，帧图与现状逐位相同）；配置层是 CVar `r.Nanite.Enable`（默认 0）与 cfg 键 `nanite_enable`，面板层是样例 `07.Nanite` 的勾选框 + 档位下拉。开启后按 `AddPasses` / `AddPostGBufferPasses` 把 `Nanite_Cull`（compute 写间接命令 + 计数）与 `Nanite_Raster`（消费计数的间接绘制）挂进帧图。模块内禁止引用 `GI_*` / `Lumen*` / `GPUCulling` 的内部结构，只依赖 RenderGraph 与 RHI 公开接口。
+- **解决问题**: 在不改动既有 GBuffer / Lighting 路径的前提下，把虚拟几何做成可开关、可 A/B 对照的模块接入 Deferred 帧图。
+
+### 107. NaniteCull — 簇剔除
+- **类别**: Nanite/虚拟几何
+- **原理**: 消费 `NaniteUpload` 打包的簇 BVH 与 LOD 元数据，产出"计数 → 间接绘制"链所需的间接命令与计数缓冲。实例域与既有 `objectIndex` 分区契约对齐：普通段 `[0, 1024)`、Nanite 段 `[1024, 2048)`、保留哨兵 `kInvalidObjectIndex = 0xFFFFFFFF`，总容量 2048——分区上界由 MRT7（lightmapKey）是 RGBA16_FLOAT 推出：binary16 只有 1+5+10 位有效位，**精确整数**只在 |n| ≤ 2^11 = 2048 内成立。Hi-Z 遮挡剔除默认关闭（`nanite_hiz`，默认 0）：关闭时才与 CPU 参考剔除逐簇一致（CPU 拿不到 Hi-Z 金字塔的逐 texel 内容），开启后复用既有 `GPUCulling` 的 Hi-Z 纹理资源与下采样口径，差异单独统计。
+- **解决问题**: GPU 侧完成 Nanite 簇的视锥 / LOD / Hi-Z 遮挡剔除，并把"与 CPU 参考逐簇一致"设为默认档的硬验收条件。
+
+### 108. NaniteRaster — 软光栅与 mesh shader 硬光栅
+- **类别**: Nanite/虚拟几何
+- **原理**: 两种光栅档位（`NaniteRasterMode`：`Soft` = compute 写 GBuffer；`Hybrid` = 软光栅 + mesh shader 硬光栅分流）。`softRaster` 默认 true，此时模块成为 GBuffer 段的几何写入者：清屏 8×MRT + 深度，软光栅两遍（原子深度键 + 等值复检写 albedo / normal / worldPos / lightmapKey），再做深度解析（深度键 → `SV_Depth` 写既有深度附件）；`softRaster=false` 时既有 `GB_Clear` 几何路径原样执行。打开 `meshTest` 时用 `PipelineStateDesc::meshShader` 建一条最小 mesh 管线（`Nanite_MeshTest.mesh.slang` 真实输出 4 顶点 / 2 图元），写模块自建 1×1 R8 目标并读回两个 GPU 数值以自证。`softMaxTriangles` 默认 16，超限簇跳过并计入 `skipped_big`，留给混合光栅分流。
+- **解决问题**: 先用 compute 软光栅打通正确性（可与既有 `GB_Clear` 逐位 A/B），再以 mesh shader 分流承接大簇。
+
+### 109. NaniteUpload — 量化资产打包与上传
+- **类别**: Nanite/虚拟几何
+- **原理**: `NaniteRenderer::EnsureAssetUploaded` 以合并几何（`MeshBatcher`）作为**一次性输入**构建资产：位置基准取簇 AABB 中心并吃满 10 位、法线用八面体 10+10 位、UV 用 unorm16、索引 3×u16、材质 8 字节打包/解包，并配 `NaniteTypes.slang` 作为 Slang 镜像；`.nanite` 文件含文件头 / 簇记录 / 顶点记录（含量化偏移）/ 索引编码 / cone 轴角字段 / 段表与校验函数。同时构建并上传簇 BVH 与 LOD 元数据，上传后按字节读回镜像校验；合并网格数与材质快照数不一致时按较小者映射并告警。几何为空时跳过资产构建与上传（打印一次中文告警，不静默越界、不崩溃）。
+- **解决问题**: 把"数十亿面片"压到可显存驻留的紧凑格式，并用 Slang/C++ 镜像 + 读回校验把布局钉死。
+
+---
+
+## 三十二、物理系统（JoltPhysics）
+
+### 110. PhysicsWorld — Jolt PhysicsSystem 封装
+- **类别**: 物理
+- **原理**: 封装 `JPH::PhysicsSystem` 的初始化 / 步进 / 关闭 + 碰撞层接口。碰撞层 `0 = NON_MOVING`（静态/非移动）、`1 = MOVING`（动态/移动），宽相层同构；对象层 × 宽相层过滤为"静态只与动态碰撞"，对象层 × 对象层过滤为"静态之间不碰撞"。默认 `maxBodies = 1024`、`maxBodyPairs = 65536`、`maxContactConstraints = 10240`、`gravity = -9.81`；`Step(fixedDt)` 内部走 `JPH::PhysicsSystem::Update`，带 2 工作线程的 JobSystemThreadPool 与 10MB TempAllocatorImpl。`JoltRuntimeGuard` 作为**基类**先于成员构造，保证 Jolt 的全局分配器与 `Factory` 在任何 Jolt 对象构造前就位。
+- **解决问题**: 用生产级刚体后端替换"零物理"，并把 Jolt 全局状态初始化顺序这一隐蔽崩溃点（进程级静态对象析构时调用空函数指针 → 退出即 0xC0000005）显式固化成基类。
+
+### 111. PhysicsSystem / RigidBodyComponent — 固定步长刚体
+- **类别**: 物理
+- **原理**: `PhysicsSystem::Update(world, sg, dt)` 静态入口每帧驱动三步：① 遍历挂 `RigidBodyComponent` 的实体，无 body 则按 Transform / 形状创建 Jolt Body；② 固定步长累加器 Step（**1/120s**，单帧步数有上限防 spiral）；③ 每步之后把激活（移动中）body 的世界变换回写实体 `TransformComponent`。`RigidBodyComponent` 是**纯数据组件**（不包含任何 Jolt 类型，且放在 Physics 模块而非 Scene 模块，保证 Scene 层不依赖 Jolt 头）：`shape` 0=Sphere / 1=Box / 2=Capsule（与 `CollisionComponent.shape` 对齐）、`radius` / `halfExtent` / `height`、`isDynamic` / `mass` / `friction` / `restitution`、线性与角阻尼、`enabled`。
+- **解决问题**: 把 ECS 与物理 tick 的耦合收敛到一个固定步长入口，实体 Transform 成为唯一数据交换面（渲染与物理不共享内部状态）。
+
+---
+
+## 三十三、AI 运行时与智能体
+
+### 112. IAIDevice — 推理设备门面（IHI）
+- **类别**: AI 运行时
+- **原理**: 与 `rhi::IRHIDevice` 同构，抽象的是"模型执行"而非"图元绘制"。`AIDeviceCaps` 声明能力（`supportsGPU` / `supportsCPU` / `supportsRemoteLLM` / `supportsNPU`、`maxModelSizeMB`）；`LoadModel` 按模型格式分派后端（无可用后端返回 nullptr）、`CreateTensor` 创建张量、`Submit` 异步提交推理返回句柄。零拷贝互操作是神经渲染的关键：`WrapRHITexture` / `WrapRHIBuffer` 读渲染纹理与 bindless 缓冲、`ExportBuffer` 写回渲染缓冲。LLM 便捷方法 `Chat` / `ChatStream` 委派 RemoteBackend（DeepSeek，API key 取环境变量 `DEEPSEEK_API_KEY`）。工厂 `CreateAIDevice(scheduler, rhiDevice)` 注册 RemoteBackend + GPUBackend，`AIModule` 持有进程级单例。
+- **解决问题**: 让"神经特性 = 渲染子系统 + 统一推理底座"，上层不再直接调用各家 SDK。
+
+### 113. InferenceScheduler — 推理优先级车道
+- **类别**: AI 运行时
+- **原理**: **自建工作线程 + 优先级队列**（`std::priority_queue<Task>`，按 `InferencePriority` 再按 FIFO 出队），**不依赖 JobSystem**——`InferenceScheduler` 自己持有 `std::thread` 并在析构时 join。两条能力：① **优先级车道**——`InferencePriority::Frame`（帧内高优先：渲染耦合推理，如 NRC/超分）、`Normal`、`Background`（后台低优先：LLM 智能体等），三档互不阻塞；② **流式回调投递**——token 经 `PostToMain` 投递到主线程队列，由主线程 `DrainMainThread()` 时按序执行，**禁止推理线程直接改 World**。
+- **解决问题**: 让帧内推理与后台 LLM 推理共用一套调度而不互相拖尾，并把所有世界状态变更集中回主线程。
+
+### 114. WorldModel — 反射驱动世界模型
+- **类别**: AI
+- **原理**: 不新增任何场景数据结构——`World + TypeRegistry` 本身就是世界模型。`Snapshot(world, filter)` 把 World 序列化成 LLM 可读的 JSON 语义快照，**只导出**带 `HE_ATTR_AI_VISIBLE` 注解的属性，并附带 `HE_ATTR_AI_DESCRIPTION` 作为字段说明；`TypeSchema()` 遍历 TypeRegistry，输出所有含 AI_VISIBLE 属性的组件类型及其字段清单，注入 LLM system prompt 充当"可用词表"。
+- **解决问题**: 消除"手写世界描述喂给 LLM"的双份真相——模型看到的就是引擎真实反射出来的属性。
+
+### 115. AIGC 生成管线（PromptToScene / SceneBuilder / AIPipeline）
+- **类别**: AI/AIGC
+- **原理**: prompt → LLM → 场景 JSON → World 的三段式。`BuildSceneSystemPrompt()` 自动注入 `BuildTypeSchema()` 作为组件词表；`PromptToScene` 调 `ILLMClient`（远程 DeepSeek 或测试用 FakeLLM），解析 OpenAI 兼容响应的 `choices[0].message.content` 后交给 `BuildScene`；`SceneBuilder` 用硬编码组件映射（不碰反射属性注册）支持 **14 种组件**——Cube / Sphere / DirectionalLight / PointLight / SpotLight / RectLight / Camera / Health / Decal / PhysicalSky / Animation / RigidBody / NavMesh / NavAgent（与 `TypeSchema.cpp` 的词表一一对应），无 RHI 设备时跳过几何缓冲创建，因而可无设备单测。`AIPipeline` 负责异步与生命周期：`Enqueue(GenRequest)` → 后台线程（InferenceScheduler）调 `IAIGCProvider.Generate` → 完成回调投递主线程（PostToMain）→ 主线程 `Poll()` 派发 → 结果进"待接受队列" → 用户在编辑器示例 `Samples/Editor/Panels/GenerationQueuePanel`（`he::editor` 命名空间，不在 `Engine/Editor` 模块里）接受才 `CommandHistory.Execute(GenerateSceneCommand)`（可撤销）；含同 `(kind, prompt)` 去重、取消、失败重试。
+- **解决问题**: 把"AI 直接改场景"变成"AI 产出候选、人确认、走可撤销命令"，杜绝不可回退的世界状态变更。
+
+### 116. AgentSystem — LLM 智能体运行时
+- **类别**: AI/智能体
+- **原理**: 每帧遍历所有 `AgentComponent`：计时 → 到 `thinkInterval` 触发 → 构造观测（`WorldModel::Snapshot`）→ 按 `brainType` 构造大脑（`LLMBrain` / `MockBrain`）→ `Decide` 产出 ActionPlan → `CompileAction` 编译为 `he::Command` → `CommandHistory.Execute`（可撤销）。配套 `MemoryComponent`（记忆）、`GoalComponent`（目标）与 `ToolUse`（工具调用），`Action` / `Observation` 定义在 `WorldModel` 模块。
+- **解决问题**: 让 NPC / 编辑器智能体的动作与编辑器撤销栈同源——AI 的每一步都可被人类撤销。
+
+### 117. NeuralUpscaler — 首个神经渲染子系统
+- **类别**: AI/神经渲染
+- **原理**: 以 `IRenderSubsystem` 形态实现的第一个神经渲染子系统，内部经 `IAIDevice` 推理：每帧 `Update` 做 `WrapRHITexture`（输入纹理）→ `Submit(texture_sample 核)` → 输出缓冲读回统计（平均亮度）供面板展示。当前以"静态渐变输入纹理 + 每帧推理统计"验证架构形态（神经特性 = 渲染子系统 + 统一推理底座，不再直调 SDK），真实超分（低分辨率渲染 + 上采样）待接入第三方 SDK 时落地。
+- **解决问题**: 为 DLSS / FSR / XeSS 这类依赖第三方 SDK 的超分预留"可插拔后端 + 渲染子系统"接入位，先用内置核把架构跑通。
+
+---
+
+## 三十四、第三方库
 
 | 库 | 用途 |
 |---|---|
@@ -645,9 +736,14 @@
 | **ImGui** | 编辑器 UI 框架 |
 | **meshoptimizer** | 网格优化（顶点缓存/过度绘制） |
 | **stb** | 图像加载（stb_image） |
-| **cgltf** | glTF 2.0 解析 |
+| **cgltf** | glTF 2.0 解析（随 meshoptimizer 的 `extern/` 目录 vendor，无独立子模块） |
+| **nlohmann/json** | 场景与 LLM 协议 JSON 解析（本地 vendor 单头文件） |
+| **JoltPhysics** | 刚体物理引擎（`Engine/Physics` 的 `PhysicsWorld` 封装；CMake 入口在 `Engine/External/JoltPhysics/Build/`） |
+| **doctest** | 单元测试框架（`HUGENGINE_BUILD_TESTS` 打开时使用，默认 OFF） |
+
+> 上述库均以 `Engine/External/` 下的 git 子模块或本地 vendor 形式随仓库分发（首次需 `git submodule update --init --recursive`），**不使用 vcpkg**；Vulkan SDK 为系统安装件，由 `cmake/VulkanSDK.cmake` 在 `C:/VulkanSDK` 下自动选取版本号最新且内容完整（含 `include/vulkan/vulkan.h` 与 `Lib/vulkan-1.lib`）的目录，找不到即 `FATAL_ERROR`。根 `CMakeLists.txt` 不写死 SDK 版本。
 
 ---
 
-> 共 102 个技术名词，覆盖 HugEngine 全部核心系统。
-> 生成日期：2026-07-22
+> 共 117 个技术名词，覆盖 HugEngine 全部核心系统。
+> 生成日期：2026-07-22（2026-09-21 修订：补入 Lumen / Nanite / 物理 / AI 运行时条目，同步第三方库清单与总数）

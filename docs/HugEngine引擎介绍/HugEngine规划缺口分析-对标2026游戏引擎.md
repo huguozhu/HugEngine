@@ -1,10 +1,10 @@
 # HugEngine 规划缺口分析 — 对标 2025-2026 游戏引擎架构
 
-> **定位**: 审视《HugEngine技术全景与实施计划》(340+ 项) + 《HugEngine架构设计与任务划分》(145 模块) + 《HugEngine开发进度》 + 《HugEngine AI架构设计/》系列，对照 2025-2026 年最新商用引擎（UE5.5/5.6、Unity 6、Godot 4.x）与未来趋势，找出**规划层面**的缺失。
+> **定位**: 审视《HugEngine技术全景与实施计划》(350+ 项) + 《HugEngine架构设计与任务划分》(145 模块) + 《HugEngine开发进度》 + 《HugEngine AI架构设计/》系列，对照 2025-2026 年最新商用引擎（UE5.5/5.6、Unity 6、Godot 4.x）与未来趋势，找出**规划层面**的缺失。
 >
-> **结论**: HugEngine 的规划是一份非常完整的"渲染引擎"规划（甚至超前，覆盖 SIGGRAPH 2025 / SM 6.10 / RTX Kit / 3DGS），但距离"游戏引擎"架构还差一整个游戏层——物理、音频、脚本、运行时 UI、游戏 AI、输入、调试渲染七个子系统几乎为零。同时渲染层自身也有几个已商用/将商用的空白。AI 一等公民规划是亮点，但配套的安全/测试/成本缺失。
+> **结论**: HugEngine 的规划是一份非常完整的"渲染引擎"规划（甚至超前，覆盖 SIGGRAPH 2025 / SM 6.10 / RTX Kit / 3DGS），但距离"游戏引擎"架构仍缺一层——音频、脚本运行时、运行时 UI、输入抽象、NPC 决策/感知、通用调试渲染原语六项未立项（物理、角色移动与碰撞/射线查询、导航寻路、通用玩法组件族已于 2026-09 落地，见第 2 节）。同时渲染层自身也有几个已商用/将商用的空白。AI 一等公民规划是亮点，其运行时层（`Engine/AI`）与物理层（`Engine/Physics`，JoltPhysics）已于 2026-09 落地，但配套的安全/测试/成本仍然缺失。
 >
-> **最后更新**: 2026-07-16（当日会话产出）
+> **最后更新**: 2026-09-21（依据 2026-09 源码复核修订：物理与 AI 运行时两项缺口状态已更新，特性计数改为与《技术全景》正文一致的 351 条口径）
 
 ---
 
@@ -28,15 +28,15 @@
 
 一句话总结：
 
-> **渲染规划已经足够超前，缺的不是"更前沿的渲染"，而是"把引擎变成游戏引擎的那一层"（物理/音频/脚本/UI/AI/工具链），以及让 340 项特性可验证、可降级、可交付的工程化设计。**
+> **渲染规划已经足够超前，缺的不是"更前沿的渲染"，而是"把引擎变成游戏引擎的那一层"（音频/脚本运行时/运行时 UI/输入/工具链），以及让 350+ 项特性可验证、可降级、可交付的工程化设计。**
 
 现状画像：
 
 | 维度 | 现状 | 判断 |
 |------|------|------|
-| 渲染技术覆盖 | 340+ 项，含 2026 前沿（ReSTIR PT、RTX Kit、3DGS、SM 6.10） | ✅ 超前，甚至需要裁剪 |
-| 游戏层（物理/音频/脚本/UI/AI/输入） | 几乎为零 | ❌ 最大缺口 |
-| 工具链/工程化 | 测试策略有文档、无落地规划；无 CPU Profiler/CI 细节 | ⚠️ 有想法、缺执行 |
+| 渲染技术覆盖 | 350+ 项，含 2026 前沿（ReSTIR PT、RTX Kit、3DGS、SM 6.10） | ✅ 超前，甚至需要裁剪 |
+| 游戏层（物理/音频/脚本/UI/AI/输入） | 物理（JoltPhysics）、角色移动 + 碰撞/射线查询（`CollisionSystem`）、导航寻路（`NavMeshSystem` / `NavAgentSystem`）、通用玩法组件族均已落地并接入 ECS tick；**音频 / 脚本运行时 / 运行时 UI / 输入抽象仍为零** | ⚠️ 缺口显著收窄，剩余 4 项 |
+| 工具链/工程化 | doctest 单元测试套件已落地（`Tests/`，含物理/AI/Lumen/反射等用例）；无 CPU Profiler、无 CI、无金图回归 | ⚠️ 有想法、缺执行 |
 | 横切架构（内存预算/时间/资源服务） | 缺位 | ⚠️ 单点特性无法替代 |
 | AI 一等公民 | 设计超前（L2.5 AI 运行时层） | ✅ 亮点，配套待补 |
 
@@ -44,17 +44,17 @@
 
 ## 2. 结构性空白：完全缺失的子系统
 
-> 以下七个子系统在 340+ 项特性清单中**均无规划条目**（或在架构图中只有一行字），属于结构性空白，应作为新特性族补入。
+> 以下子系统中，**物理、角色移动、碰撞/射线查询、导航寻路、通用玩法组件族已落地**（见各行标注）；其余在 350+ 项特性清单里**仍无规划条目**（或在架构图中只有一行字），属于结构性空白，应作为新特性族补入。
 
 | # | 子系统 | 现状（对照现有文档） | 现代引擎对标（UE5 / Unity / Godot） | 缺失影响 |
 |---|--------|----------------------|-------------------------------------|----------|
-| 1 | **物理系统** | 技术全景 340+ 项中零项；架构 L7 仅一句 "Gameplay Systems (Physics, Audio, AI...)" | Chaos（UE5）/ PhysX（Unity）/ Jolt（Godot）：刚体、碰撞、角色控制器、射线/形状查询 API | 物理是引擎核心服务而非插件；决定 ECS 与 tick 耦合方式，影响 Phase 1 架构决策 |
+| 1 | **物理系统** ✅ *已落地（2026-09）* | `Engine/Physics/` 已集成 **JoltPhysics**：`PhysicsWorld`（封装 `JPH::PhysicsSystem`，碰撞层 `NON_MOVING`/`MOVING`，maxBodies=1024）、`PhysicsSystem::Update` 固定步长 **1/120s**、`RigidBodyComponent`（Sphere/Box/Capsule 纯数据组件，Scene 层不依赖 Jolt）；`CollisionSystem` 提供 Overlap / Contains / **Raycast**（含命中法线，供地面检测与弹道用），`CharacterMovementComponent` + `MovementSystem` 提供角色移动（走/跳/重力/地面检测）；但《技术全景》特性清单中**仍为零项**（未回写特性表） | Chaos（UE5）/ PhysX（Unity）/ Jolt（Godot）：刚体、碰撞、角色控制器、射线/形状查询 API | 刚体 + 碰撞 + 射线查询 + 角色移动 + 固定步长 tick 耦合已解决；**ragdoll / 物理动画、坡度过滤与水平碰撞滑移（MVP 约定可穿墙）、raycast 的多形状查询仍缺** |
 | 2 | **音频系统** | 架构 L6 画了 "Audio System" 方块，特性清单零项 | 空间音频、流式回放、混音总线、HRTF（Wwise/FMOD 或自研） | 多线程音频架构需早期预留；否则后期硬塞 |
-| 3 | **游戏逻辑运行时 + 游戏框架** | 仅 24.43 Visual Scripting（🟢 P5）、25.37 脚本绑定（🟢）；L7 一行 "C#/Lua Bindings + Blueprint VM" | GameMode/PlayerController/Pawn 生命周期、固定时间步长、Tick 分级（Actor/Component/渲染）、时间膨胀 | **脚本是游戏引擎的分水岭**——没有脚本运行时，再强的渲染也只是技术演示 |
+| 3 | **脚本运行时（游戏逻辑运行时）** | ⚠️ *部分落地*：引擎侧已有可复用的玩法组件族——`CharacterMovementComponent` / `MovementSystem`、`HealthComponent` / `DamageSystem`、`AbilityComponent` / `AbilitySystem`（简化 GAS：冷却计时）、`ProjectileMovementComponent` / `ProjectileSystem`、`SpringArmComponent` / `SpringArmSystem`、`SplineComponent` / `SplineMeshComponent` / `SplineSystem`、`LevelComponent`（Level Instance），均有单测且在 `02.Cube`、`07.AISamples` 中被驱动；但《技术全景》只有 24.43 Visual Scripting（🟢 P5）、25.37 脚本绑定（🟢） | GameMode/PlayerController/Pawn 生命周期、固定时间步长、Tick 分级（Actor/Component/渲染）、时间膨胀 | **脚本运行时仍是分水岭**：玩法组件已就位，但缺可热更的脚本层与统一时间系统（时间膨胀/固定步长调度） |
 | 4 | **运行时 UI** | 只有 ImGui 编辑器 UI | UMG 式：Canvas / 布局 / 事件 / 数据绑定 | ImGui 是工具 UI，不能当游戏 UI；缺游戏内 HUD/菜单体系 |
-| 5 | **游戏 AI** | 零规划（NavMesh / 寻路 / 行为树 / 感知） | Recast/Detour 寻路、Behavior Tree、EQS（UE5） | 注意区分：`HugEngine AI架构设计/` 文档规划的是 **LLM Agent（内容生成/编辑器智能体）**，不是 NPC 行为 AI——两套东西，后者完全没有 |
+| 5 | **游戏 AI（NPC 行为）** | ⚠️ *寻路已落地*：`NavMeshComponent` + `NavMeshSystem`（网格 8 向 A*，对角不穿角）+ `NavAgentSystem`（每帧沿路径点移动、到达/不可达判定）；`Engine/AI/Agent` 的 LLM 智能体属**内容/编辑器侧**。**仍缺**：行为树 / 状态机 AI、感知系统、EQS | Recast/Detour 寻路、Behavior Tree、EQS（UE5） | 注意区分：`HugEngine AI架构设计/` 文档规划的是 **LLM Agent（内容生成/编辑器智能体）**，不是 NPC 行为 AI——两套东西；NPC 侧现在的空缺是**决策与感知**，不是寻路 |
 | 6 | **输入抽象** | 只有 CameraController + GLFW 原始事件 | Input Action / 键位重绑 / 手柄 / 触屏统一 | 多平台（Web/移动/主机）输入必须抽象层，进 Phase 1 |
-| 7 | **DebugDraw（调试渲染原语）** | 零规划 | DrawDebugLine/Box/Sphere/Text（UE） | 引擎开发必备基础设施，渲染调试没有它寸步难行；应进 Phase 1 核心 |
+| 7 | **DebugDraw（调试渲染原语）** | ⚠️ *部分落地*：`CollisionDebugSystem` 生成碰撞体线框（AABB / Sphere / Capsule，与检测共用同一份世界形状语义，走既有网格渲染路径）、`TextRenderComponent` / `TextRenderSystem` 提供世界空间文字；**仍缺**：通用即时原语（DrawDebugLine / Box / Sphere / Point，任意颜色与存活时长，无需挂组件） | DrawDebugLine/Box/Sphere/Text（UE） | 现有实现必须"挂组件 + 走网格路径"，临时调试仍需通用即时原语；应进 Phase 1 核心 |
 
 ---
 
@@ -93,11 +93,11 @@
 | # | 缺口 | 现状 | 建议方案 |
 |---|------|------|----------|
 | 1 | **CPU / 内存 Profiler** | 只有 GPU 时间戳 + ImGui 面板 | 直接规划 **Tracy** 集成（CPU 采样 + 内存追踪），现代引擎标配；另补内存碎片分析、帧分析器 |
-| 2 | **CI / 金图测试落地** | 架构文档写了测试金字塔（截图对比 PSNR>40dB 等），WBS 里 CI 仅 ST-01.02 一行 | GitHub Actions + 金图对比工具选型 + 夜间回归：340 项特性没有自动验证的 CI 就是裸奔 |
+| 2 | **CI / 金图测试落地** | doctest 单元测试套件已落地（`Tests/`）；架构文档写了测试金字塔（截图对比 PSNR>40dB 等），但 WBS 里 CI 仅 ST-01.02 一行，无 CI 执行 | GitHub Actions + 金图对比工具选型 + 夜间回归：350+ 项特性没有自动验证的 CI 就是裸奔 |
 | 3 | **Live Coding** | 只有 Shader 热重载 | C++ 游戏代码热重载（UE Live Coding 模式） |
 | 4 | **插件 / 模块系统** | 无第三方插件 API、无模块动态加载 | UE Plugin / Unity Package 式扩展点，直接影响产品化程度 |
 | 5 | **Sequencer / 过场系统** | 编辑器 53 项无时间线/过场编辑器 | 过场动画是游戏引擎标准功能 |
-| 6 | **崩溃处理 / 遥测** | 零规划 | D3D12 DEVICE_REMOVED 处理、crash dump、GPU fault 诊断、遥测数据采集 |
+| 6 | **崩溃处理 / 遥测** | ⚠️ *崩溃处理已落地*：`Engine/Core/CrashHandler`（DbgHelp 符号化调用栈 + minidump，引擎与测试共用；记录后返回 `EXCEPTION_CONTINUE_SEARCH` 保留 WER）；**仍缺**：D3D12 `DEVICE_REMOVED` / GPU fault 诊断、遥测采集 | 补 GPU fault / 设备丢失处理 + 崩溃报告聚合 + 遥测采集 |
 
 ---
 
@@ -122,8 +122,8 @@
 | # | 缺口 | 说明 |
 |---|------|------|
 | 1 | **安全边界** | LLM 输出 JSON 有类型校验，但无 **prompt injection 防御、资源爆炸防护**（LLM 生成 1 万实体 / 超大纹理怎么办）、执行限额 |
-| 2 | **AI 回归测试** | prompt 生成结果无金图 / 结构断言测试（生成场景如何自动验证不破坏引擎） |
-| 3 | **模型与成本管理** | 本地/远程模型切换、推理预算（每帧 token 上限）、失败重试策略；`6.LLM与引擎通信协议` 未覆盖 |
+| 2 | **AI 回归测试** | ⚠️ *部分落地*：`Tests/` 已有结构性断言单测（`TestSceneBuilder` / `TestPromptToScene` / `TestWorldModel` / `TestAgentAction` / `TestAgentBrain` / `TestAIPipeline` / `TestAIGCProvider` / `TestDeepSeekProtocol`）；**仍缺**：生成结果的渲染级/金图回归与"生成不破坏引擎"的集成测试 |
+| 3 | **模型与成本管理** | ⚠️ *部分落地*：`IAIDevice` 已按模型格式分派 GPU / CPU / Remote 后端，`AIPipeline` 有失败重试与同 prompt 去重合并，`InferenceScheduler` 有优先级车道；**仍缺**：每帧 token / 显存预算上限与成本计量；`6.LLM与引擎通信协议` 未覆盖 |
 
 ---
 
@@ -131,8 +131,8 @@
 
 | # | 问题 | 说明 |
 |---|------|------|
-| 1 | **无验收标准** | 340 项特性几乎没有可验证指标（"Nanite 支持 1B 三角 @ 60fps？""VSM 页表命中率目标？"）；架构文档有金图测试，但验收标准没有落到每个特性 |
-| 2 | **优先级失衡** | 🔴 核心约 60 项、🟡 重要约 110 项、🟢 进阶约 170 项——🟢 占比过大；建议区分**研究型（证明概念）**与**产品型（可交付）** |
+| 1 | **无验收标准** | 350+ 项特性几乎没有可验证指标（"Nanite 支持 1B 三角 @ 60fps？""VSM 页表命中率目标？"）；架构文档有金图测试，但验收标准没有落到每个特性 |
+| 2 | **优先级失衡** | 按《技术全景》正文逐条清点：🔴 核心 93 项、🟡 重要 172 项、🟢 进阶 86 项（共 351 条）——三档分布与 8 个 Phase 的排期并不对应；建议区分**研究型（证明概念）**与**产品型（可交付）** |
 | 3 | **无对标基线更新机制** | 文档写"对标 UE5.5+"，但无持续追踪 UE6 / Godot 4.x / Unity 6 新特性的流程，规划会逐年过期 |
 | 4 | **规划碎片化** | 技术全景 / 架构任务 / 开发进度 / HugEngine AI架构设计 四套体系无单一"路线图"文档做索引（如 `7.LLM创建场景实现计划` 引用了不在主清单中的 AI 模块） |
 
@@ -142,9 +142,9 @@
 
 ### P0 — 进 Phase 1-2，否则影响其他架构决策
 
-- [ ] 物理抽象层 + 选型（Jolt / PhysX / 自研），物理 tick 与渲染 tick 耦合设计
+- [x] 物理抽象层 + 选型（**已选 JoltPhysics 并落地**，见 `Engine/Physics`），物理 tick 与渲染 tick 耦合设计（`PhysicsSystem::Update` 固定步长 1/120s + Transform 回写）
 - [ ] 时间系统（固定步长 / 时间膨胀 / 回放时间线）
-- [ ] DebugDraw 调试渲染原语（Phase 1 核心）
+- [x] DebugDraw 调试渲染原语（**部分落地**：`CollisionDebugSystem` 碰撞体线框 + `TextRenderSystem` 世界空间文字；仍缺通用 `DrawDebugLine/Box/Sphere` 即时原语）
 - [ ] 输入抽象层（Input Action / 键位绑定）
 - [ ] 运行时 AssetManager（异步加载 / 依赖图 / 引用计数）
 - [ ] GPU 内存预算管理器设计文档（VSM/VT/Nanite/3DGS/RT 共存）
@@ -153,7 +153,7 @@
 
 - [ ] 脚本运行时决策（Lua / C# / 自研 VM 三选一）+ 游戏框架（GameMode/PlayerController/Pawn）
 - [ ] 运行时 UI 系统（Canvas / 布局 / 事件 / 数据绑定）
-- [ ] 游戏 AI（NavMesh 起步：Recast/Detour + 行为树）
+- [x] 游戏 AI：**寻路已落地**（自研网格 8 向 A*：`NavMeshSystem` + `NavAgentSystem`，替代原 Recast/Detour 建议）；**仍缺**行为树 / 状态机决策与感知系统
 - [ ] 动画状态机（AnimGraph）/ BlendSpace / IK / 物理动画
 - [ ] Sequencer 过场系统
 - [ ] Tracy CPU Profiler 集成
@@ -179,7 +179,7 @@
 
 | 缺口 | 应更新到 | 建议动作 |
 |------|----------|----------|
-| 物理 / 音频 / 游戏框架 / UI / 游戏 AI / 输入 / DebugDraw | `技术全景` 新增特性族（如 Section 26 游戏层）+ `架构设计与任务划分` 新增模块（M146+） | 补特性表 + 依赖 + Phase |
+| 物理 / 游戏框架 / 导航寻路 / DebugDraw（**已落地但未回写特性表**）+ 音频 / 运行时 UI / NPC 决策与感知 / 输入 / 通用调试原语（仍缺） | `技术全景` 新增特性族（如 Section 26 游戏层）+ `架构设计与任务划分` 新增模块（M146+） | 先把已落地项补进特性表，再补缺失项 + 依赖 + Phase |
 | 时间系统 / AssetManager / 内存预算 / 确定性 | `架构设计与任务划分` 新增横切设计章节（Section 9） | 各写一份设计文档 |
 | 动画状态机 / IK / 水系统 / VHM / DirectStorage | `技术全景` 对应 Section 18/12/3 增补条目 | 补特性表 |
 | USD / MaterialX / Cook / 色彩管理 | `技术全景` Section 20/23 增补 | 补特性表 |
@@ -191,7 +191,7 @@
 
 ## 11. 参考来源文档
 
-- `docs/HugEngine引擎介绍/HugEngine技术全景与实施计划.md`（340+ 项特性清单，v3.1）
+- `docs/HugEngine引擎介绍/HugEngine技术全景与实施计划.md`（350+ 项特性清单，v3.1）
 - `docs/HugEngine架构设计与任务划分.md`（145 模块、WBS、测试策略、风险）
 - `docs/HugEngine开发进度.md`（Phase 1-2 完成度、缺失项 Top 20）
 - `docs/HugEngine引擎介绍/HugEngine AI架构设计/1.HugEngine AI一等公民架构设计.md`

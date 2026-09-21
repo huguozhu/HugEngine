@@ -2,9 +2,9 @@
 
 > **目标定位**: 对标 UE5.5+ 及 2026 年最新渲染研究，覆盖从底层 RHI 到神经网络渲染的完整技术栈。
 >
-> **总计特性**: 340+ 项（原设计 294 项 + v2 新增 20 项 + v3 组件架构 26 项）
+> **总计特性**: 350+ 项（正文 Section 0–25 逐条清点共 351 个特性条目：原设计 294 项 + v2 新增 + v3 Actor-Component 架构 26 项）
 >
-> **最后更新**: 2026-06-24
+> **最后更新**: 2026-09-21
 
 ---
 
@@ -16,10 +16,10 @@
    - [0. 架构基础](#0-架构基础)
    - [1. GPU Driven 管线](#1-gpu-driven-管线)
    - [2. 场景管理与组件化渲染架构 🆕](#2-场景管理与组件化渲染架构-)
-   - [3. 虚拟几何系统](#3-虚拟几何系统)
+   - [3. 虚拟几何系统](#3-虚拟几何系统对标-nanite)
    - [4. 虚拟阴影](#4-虚拟阴影)
    - [5. 虚拟纹理](#5-虚拟纹理)
-   - [6. 全局光照](#6-全局光照)
+   - [6. 全局光照](#6-全局光照gi)
    - [7. AO 与屏幕空间效果](#7-ao-与屏幕空间效果)
    - [8. 光线追踪](#8-光线追踪)
    - [9. Mesh Shader](#9-mesh-shader)
@@ -41,7 +41,7 @@
    - [25. 宏驱动反射系统](#25-宏驱动反射系统)
 4. [分阶段实施计划](#4-分阶段实施计划)
 5. [关键技术选型参考](#5-关键技术选型参考)
-6. [🆕 新增技术对照表](#6-新增技术对照表)
+6. [🆕 新增技术对照表](#6--新增技术对照表)
 
 ---
 
@@ -51,7 +51,7 @@
 
 | 维度 | 选型 |
 |------|------|
-| 构建系统 | CMake + FetchContent（无需 vcpkg） |
+| 构建系统 | CMake + 预置 External 依赖（`Engine/External/` 子模块 / 本地 vendor，无需 vcpkg） |
 | C++ 编译器 | MSVC 2026 (Windows) / GCC 16 (MinGW 备选) |
 | C++ 标准 | C++20 |
 | 数学库 | GLM + 自研扩展 |
@@ -673,7 +673,7 @@ Phase 6: 大气+后处理  (14 周)  ── 视觉效果完整
 Phase 7: 高斯+焦散    (12 周)  ── 🆕 新一代渲染图元
 Phase 8: 打磨+发布    (10 周)  ── 优化+文档+示例
 ─────────────────────────────────────────
-总计: 约 115 周 (约 2.2 年)
+总计: 约 117 周 (约 2.2 年)
 ```
 
 ---
@@ -684,7 +684,7 @@ Phase 8: 打磨+发布    (10 周)  ── 优化+文档+示例
 
 | 周 | 任务 |
 |----|------|
-| 1-2 | 项目脚手架: CMake + vcpkg + GLFW/SDL3 + spdlog + 目录结构 |
+| 1-2 | 项目脚手架: CMake + 预置 External 依赖（GLFW + spdlog + glm + taskflow 等） + 目录结构 |
 | 3-4 | 数学库扩展: GLM 封装 + SIMD 优化 + 几何工具 |
 | 5-8 | **RHI 抽象层**: Vulkan 1.3+ + D3D12 SM6.6+ 双后端, Device/SwapChain/Buffer/Texture 封装 |
 | 9-10 | **Slang 着色器编译管线**: Slang → SPIR-V / DXIL 编译, Include 系统, 预编译缓存 |
@@ -903,7 +903,7 @@ Phase 8: 打磨+发布    (10 周)  ── 优化+文档+示例
 
 ## 6. 🆕 新增技术对照表
 
-以下是与原始设计文档 (v1) 相比，本次头脑风暴新增的全部技术点：
+以下是与原始设计文档 (v1) 相比，本次头脑风暴新增的全部技术点（共 55 项）：
 
 | # | 新增技术 | 所属模块 | 优先级 | 来源 |
 |----|----------|----------|--------|------|
@@ -922,54 +922,54 @@ Phase 8: 打磨+发布    (10 周)  ── 优化+文档+示例
 | 13 | Reservoir Splatting | 8.光线追踪 | 🟢 | SIGGRAPH 2025 |
 | 14 | Shader Execution Reordering (SER) | 8.光线追踪 | 🟡 | SM 6.9 |
 | 15 | Opacity Micromaps (OMM) | 8.光线追踪 | 🟡 | SM 6.9 / DXR 1.2 |
-| 17 | DLSS 4.5+ (Transformer FP8) | 10.神经渲染 | 🟡 | NVIDIA RTX 50 Series / GTC 2025 |
-| 18 | FSR 4.1 (ML-based) | 10.神经渲染 | 🟡 | AMD |
-| 19 | PSSR 2.0 (Project Amethyst) | 10.神经渲染 | 🟢 | Sony + AMD |
-| 20 | DLSS Multi Frame Generation 6× | 10.神经渲染 | 🟡 | GTC 2026 |
-| 21 | RTX Neural Shaders (RTXNS) | 10.神经渲染 | 🟡 | NVIDIA RTX Kit |
-| 22 | DirectX LinAlg (SM 6.10) | 10.神经渲染 | 🟡 | GDC 2026, SDK 1.720 |
-| 23 | DirectX Compute Graph Compiler | 10.神经渲染 | 🟢 | GDC 2026 |
-| 24 | RTX Character Rendering (RTXCR) | 10.神经渲染 | 🟢 | NVIDIA RTX Kit |
-| 25 | SpatioTemporal Blue Noise (STBN) | 10.神经渲染 | 🟡 | NVIDIA RTX Kit |
-| 26 | Spectral Rendering | 11.光照着色 | 🟢 | 2025-2026 研究趋势 |
-| 27 | Neural Appearance Models (NIV) | 11.光照着色 | 🟢 | Eurographics 2026 |
-| 28 | Volumetric Caustics | 12.大气体积 | 🟢 | KIT 2025, ACM CGIT |
-| 29 | Streamline SDK (跨厂商超分) | 14.抗锯齿 | 🟡 | NVIDIA v2.7.2+ |
-| 30 | Full Path Tracing Pipeline | 15.渲染管线 | 🟢 | 行业趋势 |
-| 31 | SIGMA Shadow Denoiser | 16.降噪 | 🟡 | NVIDIA NRD |
-| 32 | Newton's Method Refraction | 17.反射折射 | 🟢 | JCGT 2026 |
-| 33 | GPU Procedural Generation | 18.动画 | 🟢 | AMD 52KB Demo |
-| 34 | RTX Memory Utility (RTXMU) | 19.性能优化 | 🟢 | NVIDIA RTX Kit |
-| 35 | Variable Group Shared Memory | 19.性能优化 | 🟢 | SM 6.10 |
-| 36 | Reflex 2 Frame Warp | 19.性能优化 | 🟡 | NVIDIA |
-| 37 | KHR_gaussian_splatting | 20.glTF | 🟢 | glTF 扩展提案 |
-| 38 | 3DGS Rasterization Pipeline | 21.3DGS 🆕 | 🟡 | 2025-2026 主流引擎集成 |
-| 39 | Hybrid Mesh + 3DGS Compositing | 21.3DGS 🆕 | 🟡 | SplatBus / GDGS |
-| 40 | Nanite-style LOD for GS | 21.3DGS 🆕 | 🟢 | NanoGS (2026) |
-| 41 | 4DGS (Dynamic/Volumetric) | 21.3DGS 🆕 | 🟢 | MLSLabs, Bevy |
-| 42 | Relightable 3DGS | 21.3DGS 🆕 | 🟢 | Volinga / Pixotope |
-| 43 | Deformable Beta Splatting | 21.3DGS 🆕 | 🟢 | SIGGRAPH 2025 (USC ICT) |
-| 44 | VR/XR 3DGS Support | 21.3DGS 🆕 | 🟢 | Bevy OpenXR, MLSLabs Pro |
-| 45 | Screen-Space Caustics (Newton) | 22.焦散 🆕 | 🟡 | JCGT 2026 |
-| 46 | SMS + ReSTIR Caustics | 22.焦散 🆕 | 🟢 | SIGGRAPH Asia 2025 |
-| 47 | Markov Chain Path Guiding | 22.焦散 🆕 | 🟢 | KIT 2025 |
-| 48 | WebGPU RHI Backend | 架构 | 🟢 | W3C Standard 2025 |
-| 49 | **Actor-Component 渲染架构** 🆕 | 2.场景管理 | 🔴 | UE5 Actor-Component 模型 + 宏驱动反射 |
-| 50 | **Scene Graph + Transform 层级** 🆕 | 2.场景管理 | 🔴 | 树形空间层级，Dirty Flag 传播 |
-| 51 | **渲染组件族 (StaticMesh/Light/Camera/SkeletalMesh/Decal/Particle/3DGS/Volume)** 🆕 | 2.场景管理 | 🔴 | 以 Component 形式挂载渲染图元 |
-| 52 | **Component 生命周期与依赖** 🆕 | 2.场景管理 | 🔴 | OnCreate→Start→Update→Destroy + [[engine::require<T>]] |
-| 53 | **Prefab + Diff 序列化** 🆕 | 2.场景管理 | 🟡 | Entity 模板，Override 存储，继承变体 |
-| 54 | **Network Replication (Component 级)** 🆕 | 2.场景管理 | 🟢 | `[[engine::replicated]]` 属性自动网络同步 + RPC |
-| 55 | **Spatial Hash Grid** 🆕 | 2.场景管理 | 🟢 | 空间哈希网格加速邻近查询 |
-| 56 | **Level Streaming + Component 标记** 🆕 | 2.场景管理 | 🟡 | `[[engine::streaming_source]]` 异步关卡加载 |
+| 16 | DLSS 4.5+ (Transformer FP8) | 10.神经渲染 | 🟡 | NVIDIA RTX 50 Series / GTC 2025 |
+| 17 | FSR 4.1 (ML-based) | 10.神经渲染 | 🟡 | AMD |
+| 18 | PSSR 2.0 (Project Amethyst) | 10.神经渲染 | 🟢 | Sony + AMD |
+| 19 | DLSS Multi Frame Generation 6× | 10.神经渲染 | 🟡 | GTC 2026 |
+| 20 | RTX Neural Shaders (RTXNS) | 10.神经渲染 | 🟡 | NVIDIA RTX Kit |
+| 21 | DirectX LinAlg (SM 6.10) | 10.神经渲染 | 🟡 | GDC 2026, SDK 1.720 |
+| 22 | DirectX Compute Graph Compiler | 10.神经渲染 | 🟢 | GDC 2026 |
+| 23 | RTX Character Rendering (RTXCR) | 10.神经渲染 | 🟢 | NVIDIA RTX Kit |
+| 24 | SpatioTemporal Blue Noise (STBN) | 10.神经渲染 | 🟡 | NVIDIA RTX Kit |
+| 25 | Spectral Rendering | 11.光照着色 | 🟢 | 2025-2026 研究趋势 |
+| 26 | Neural Appearance Models (NIV) | 11.光照着色 | 🟢 | Eurographics 2026 |
+| 27 | Volumetric Caustics | 12.大气体积 | 🟢 | KIT 2025, ACM CGIT |
+| 28 | Streamline SDK (跨厂商超分) | 14.抗锯齿 | 🟡 | NVIDIA v2.7.2+ |
+| 29 | Full Path Tracing Pipeline | 15.渲染管线 | 🟢 | 行业趋势 |
+| 30 | SIGMA Shadow Denoiser | 16.降噪 | 🟡 | NVIDIA NRD |
+| 31 | Newton's Method Refraction | 17.反射折射 | 🟢 | JCGT 2026 |
+| 32 | GPU Procedural Generation | 18.动画 | 🟢 | AMD 52KB Demo |
+| 33 | RTX Memory Utility (RTXMU) | 19.性能优化 | 🟢 | NVIDIA RTX Kit |
+| 34 | Variable Group Shared Memory | 19.性能优化 | 🟢 | SM 6.10 |
+| 35 | Reflex 2 Frame Warp | 19.性能优化 | 🟡 | NVIDIA |
+| 36 | KHR_gaussian_splatting | 20.glTF | 🟢 | glTF 扩展提案 |
+| 37 | 3DGS Rasterization Pipeline | 21.3DGS 🆕 | 🟡 | 2025-2026 主流引擎集成 |
+| 38 | Hybrid Mesh + 3DGS Compositing | 21.3DGS 🆕 | 🟡 | SplatBus / GDGS |
+| 39 | Nanite-style LOD for GS | 21.3DGS 🆕 | 🟢 | NanoGS (2026) |
+| 40 | 4DGS (Dynamic/Volumetric) | 21.3DGS 🆕 | 🟢 | MLSLabs, Bevy |
+| 41 | Relightable 3DGS | 21.3DGS 🆕 | 🟢 | Volinga / Pixotope |
+| 42 | Deformable Beta Splatting | 21.3DGS 🆕 | 🟢 | SIGGRAPH 2025 (USC ICT) |
+| 43 | VR/XR 3DGS Support | 21.3DGS 🆕 | 🟢 | Bevy OpenXR, MLSLabs Pro |
+| 44 | Screen-Space Caustics (Newton) | 22.焦散 🆕 | 🟡 | JCGT 2026 |
+| 45 | SMS + ReSTIR Caustics | 22.焦散 🆕 | 🟢 | SIGGRAPH Asia 2025 |
+| 46 | Markov Chain Path Guiding | 22.焦散 🆕 | 🟢 | KIT 2025 |
+| 47 | WebGPU RHI Backend | 架构 | 🟢 | W3C Standard 2025 |
+| 48 | **Actor-Component 渲染架构** 🆕 | 2.场景管理 | 🔴 | UE5 Actor-Component 模型 + 宏驱动反射 |
+| 49 | **Scene Graph + Transform 层级** 🆕 | 2.场景管理 | 🔴 | 树形空间层级，Dirty Flag 传播 |
+| 50 | **渲染组件族 (StaticMesh/Light/Camera/SkeletalMesh/Decal/Particle/3DGS/Volume)** 🆕 | 2.场景管理 | 🔴 | 以 Component 形式挂载渲染图元 |
+| 51 | **Component 生命周期与依赖** 🆕 | 2.场景管理 | 🔴 | OnCreate→Start→Update→Destroy + [[engine::require<T>]] |
+| 52 | **Prefab + Diff 序列化** 🆕 | 2.场景管理 | 🟡 | Entity 模板，Override 存储，继承变体 |
+| 53 | **Network Replication (Component 级)** 🆕 | 2.场景管理 | 🟢 | `[[engine::replicated]]` 属性自动网络同步 + RPC |
+| 54 | **Spatial Hash Grid** 🆕 | 2.场景管理 | 🟢 | 空间哈希网格加速邻近查询 |
+| 55 | **Level Streaming + Component 标记** 🆕 | 2.场景管理 | 🟡 | `[[engine::streaming_source]]` 异步关卡加载 |
 
 ---
 
 > **文档版本**: v3.1  
 > **基于**: 原始 NewEngine_Feature_Plan.docx (v1) + 2025-2026 最新渲染技术研究 + Actor-Component 架构  
-> **特性变更**: 294 → 320+ (+26 个全新特性，+56 个增强/新增子项)  
+> **特性变更**: 294 → 350+（正文 Section 0–25 共 351 个特性条目；Section 6 列出 55 项新增技术点）  
 > **v3 核心新增**: Actor-Component 渲染架构 (26 项)  
-> **实施周期**: 约 115 周 (约 2.2 年)，8 个阶段  
+> **实施周期**: 约 117 周 (约 2.2 年)，8 个阶段  
 > 
 > 关键参考文献:
 > - GDC 2025/2026 Advanced Graphics Summit
