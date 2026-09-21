@@ -68,6 +68,10 @@ static VkPipelineStageFlags ToVkPipelineStageFlags(PipelineStage stage) {
     if (s & u32(PipelineStage::VertexShader))             flags |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
     if (s & u32(PipelineStage::RayTracingShader))          flags |= VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
     if (s & u32(PipelineStage::AccelerationStructureBuild)) flags |= VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+    // 【§14.8 任务 22】Mesh / Task 阶段：Nanite 的硬光栅读数缓冲由 mesh 着色器原子累加，
+    //   清零屏障的 dstStage 必须覆盖它（见 `RHI/Types.h` 里 PipelineStage 的说明）。
+    if (s & u32(PipelineStage::MeshShader))                flags |= VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT;
+    if (s & u32(PipelineStage::TaskShader))                flags |= VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT;
     return flags ? flags : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
 }
 
@@ -474,7 +478,17 @@ void VulkanCommandList::SetPushConstants(u32 offset, u32 size, const void* data)
               | VK_SHADER_STAGE_ANY_HIT_BIT_KHR
               | VK_SHADER_STAGE_CALLABLE_BIT_KHR;
     } else {
-        stage = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        // 【§14.8 任务 22】图形管线一律带上 **Mesh / Task** 位。
+        // 【为什么必须带】`push constant` 的可见阶段由这里给出的 stageFlags 决定；而任务 22 的
+        //   硬光栅是**图形管线里的 mesh 着色器**，它自己要读 push constant（阈值 / vpRows /
+        //   meshMaxExtent / materialCount）。若这里只发 VS|FS，mesh 阶段就读不到任何 push
+        //   constant（校验层会直接报 vkCmdPushConstants 的 stageFlags 与静态使用不匹配）。
+        // 【为什么改这里而不是给 mesh 单独开一条分支】Vulkan 要求发出去的 stageFlags 是
+        //   **管线布局 stageFlags 的子集**，所以唯一稳的写法是"布局与发送用同一份并集"：
+        //   `VulkanPipeline.cpp` 里传统分支与 mesh 分支的 push range 都拓宽到同一份并集
+        //   （多声明一个阶段只是"允许"，不影响任何既有行为），这里也就照同一份并集发。
+        stage = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT
+              | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT;
     }
     vkCmdPushConstants(m_CmdBuffers[m_FrameIndex], m_CurrentLayout,
                       stage, offset, size, data);

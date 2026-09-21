@@ -57,8 +57,18 @@ constexpr u32 kStageMaskGeometry      = 8;       // Geometry Shader
 constexpr u32 kStageMaskFragment      = 16;      // Fragment / Pixel Shader
 constexpr u32 kStageMaskCompute       = 32;      // Compute Shader
 // Mesh Shader 管线
-constexpr u32 kStageMaskMesh          = 64;      // Mesh Shader (VK_EXT_mesh_shader)
-constexpr u32 kStageMaskAmplification = 128;     // Task / Amplification Shader
+// 【§14.8 任务 22 的修正：这两个值此前**互换了**（Mesh=64 / Amplification=128），而 Vulkan 的
+//   真实位是 `VK_SHADER_STAGE_TASK_BIT_EXT = 0x40(64)`、`VK_SHADER_STAGE_MESH_BIT_EXT = 0x80(128)`
+//   —— 本文件的常量注释就写着"当前映射 Vulkan VkShaderStageFlagBits"，且
+//   `VulkanDevice_Descriptors.cpp:109` 把 `stageMask` **直接**当 `VkShaderStageFlags` 用，
+//   所以互换是错的。此前没有人踩到：全仓库只有 mesh PSO 的 push constant 范围用到这两个阶段，
+//   而那里写的是 `VK_SHADER_STAGE_MESH_BIT_EXT` 字面量，从没走过这两个常量。
+//   任务 22 是第一个把 `kStageMaskMesh` 放进**描述符集布局**的调用者，于是校验层立刻报
+//   `vkCreateGraphicsPipelines(): ... uses descriptor [Set 0, Binding N] ... but the
+//    VkDescriptorSetLayoutBinding::stageFlags was VK_SHADER_STAGE_FRAGMENT_BIT|VK_SHADER_STAGE_TASK_BIT_EXT`
+//   （MESH 位缺失 ⇒ 管线创建失败 ⇒ 后续使用崩溃）。此处按 Vulkan 真值改正。
+constexpr u32 kStageMaskMesh          = 128;     // Mesh Shader  (VK_SHADER_STAGE_MESH_BIT_EXT = 0x80)
+constexpr u32 kStageMaskAmplification = 64;      // Task / Amplification (VK_SHADER_STAGE_TASK_BIT_EXT = 0x40)
 // Ray Tracing 管线
 constexpr u32 kStageMaskRayGen        = 0x100;   // Ray Generation Shader
 constexpr u32 kStageMaskAnyHit        = 0x200;   // Any-Hit Shader
@@ -419,6 +429,16 @@ enum class PipelineStage : u32 {
     BottomOfPipe                = 1 << 10,
     RayTracingShader            = 1 << 11,  // VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
     AccelerationStructureBuild  = 1 << 12,  // VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR
+    // 【§14.8 任务 22】Mesh / Task（amplification）着色器阶段。
+    // 【为什么必须补这两项】Nanite 的硬光栅是**图形管线里的 mesh 着色器**，它会对模块自持的
+    //   读数缓冲做 `InterlockedAdd`。而"清零（Transfer）→ mesh 阶段写"这条依赖必须有一条
+    //   dstStage 覆盖 mesh 阶段的屏障，否则清零与原子累加之间没有定义的顺序
+    //   （`VulkanCommandList.cpp` 的 `ToVkPipelineStageFlags` 在掩码里没有任何已知位时会退化成
+    //   `ALL_COMMANDS`，那是"碰巧对"，不是"说清楚"）。
+    // 【为什么是加法不是改法】新增枚举值只影响"能不能表达"，既有位掩码的语义一位都没变
+    //   （没有代码对 PipelineStage 做哈希，也没有把它当持久化格式）。
+    MeshShader                  = 1 << 13,  // VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT
+    TaskShader                  = 1 << 14,  // VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT
 };
 
 inline PipelineStage operator|(PipelineStage a, PipelineStage b) { return PipelineStage(u32(a) | u32(b)); }

@@ -343,7 +343,11 @@ static bool BuildGraphicsPipelineParts(VkDevice device, const PipelineStateDesc&
     // VUID-vkCmdPushConstants-offset-01795。宽一点只是"允许"，不影响任何行为。
     for (auto& pcRange : desc.pushConstantRanges) {
         VkPushConstantRange vkRange{};
-        vkRange.stageFlags = pcRange.stageMask | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;  // 直接使用 Vulkan 兼容的位掩码
+        // 【§14.8 任务 22】并集里再加上 Mesh / Task：`SetPushConstants` 对**所有**图形管线发出的
+        //   阶段掩码都是这一份并集（见 `VulkanCommandList::SetPushConstants` 的说明），Vulkan 要求
+        //   它是布局 stageFlags 的子集 ⇒ 传统分支也必须把它声明进去（宽声明只是"允许"）。
+        vkRange.stageFlags = pcRange.stageMask | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT
+                           | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT;  // 直接使用 Vulkan 兼容的位掩码
         vkRange.offset     = pcRange.offset;
         vkRange.size       = pcRange.size;
         out.pushRanges.push_back(vkRange);
@@ -352,7 +356,8 @@ static bool BuildGraphicsPipelineParts(VkDevice device, const PipelineStateDesc&
     // 避免 Vulkan 验证层警告 "push constants but no VkPushConstantRange found"
     if (out.pushRanges.empty()) {
         VkPushConstantRange defaultRange{};
-        defaultRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        defaultRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT
+                                | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT;
         defaultRange.size       = kDefaultPushConstantSize;  // 最小保证范围
         out.pushRanges.push_back(defaultRange);
     }
@@ -624,7 +629,10 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
         std::vector<VkPushConstantRange> vkPushRanges;
         for (auto& pcRange : desc.pushConstantRanges) {
             VkPushConstantRange vkRange{};
-            vkRange.stageFlags = pcRange.stageMask | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT;
+            // 【§14.8 任务 22】与 `VulkanCommandList::SetPushConstants` 发出的阶段并集保持一致
+            //   （Vulkan 要求发出的 stageFlags 是布局 stageFlags 的子集），故这里也带上 VS。
+            vkRange.stageFlags = pcRange.stageMask | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT
+                               | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT;
             vkRange.offset     = pcRange.offset;
             vkRange.size       = pcRange.size;
             vkPushRanges.push_back(vkRange);
@@ -632,7 +640,7 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
         if (vkPushRanges.empty()) {  // 自动补全避免验证层警告
             VkPushConstantRange r{};
             r.stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT
-                         | VK_SHADER_STAGE_FRAGMENT_BIT;
+                         | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT;
             r.size = kDefaultPushConstantSize;  // Mesh Shader 回退默认值
             vkPushRanges.push_back(r);
         }
