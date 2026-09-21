@@ -3853,6 +3853,20 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
 > `page = pageOfCluster[clusterIndex]` → `slot = pageTable[page]` → 偏移换算。
 > 该数组是**纯函数**（由页划分唯一决定），所以可单测、可离线校验，且**不影响**任何既有缓冲的语义。
 >
+> **⚠ 2026-09-21 追加：页表项必须携带"页起点"，否则着色器算不出页内偏移（设计缺口）**
+> 本节初稿把页表写成 `slot[pageIndex] = { resident, poolSlot, lastRequestedFrame }` —— **缺一个字段**。
+> 因为页的可变长度（对齐到共享内容边界 ⇒ 每页顶点条数不同），着色器拿到
+> `cluster.vertexOffset`（**共享内容数组的记录下标**，见 `NaniteTypes.h:530` 与
+> `NaniteTypes.slang:143`「共享内容的下标」）后，**只有知道该页的起点**才能算出页内偏移：
+> ```
+> 页内偏移 = cluster.vertexOffset − pageBeginVertex
+> 池内地址 = entry.poolBase + 页内偏移          （三角形段同理，用 pageBeginTriangle）
+> ```
+> 默认做法：**页表项改为携带 `poolBase` / `pageBeginVertex` / `pageBeginTriangle`**（页数很小，
+> Sponza 实测 `ceil(8287/512)` ≈ 17 页 ⇒ 表本身可忽略）。**不要**退化成"等分页 + 乘法"：
+> 那要求每份共享内容不跨页且页长固定，等于给每次打包加填充约束（改离线产物），成本高于多两个 u32。
+> 若实现者选择别的等价方案（例如另开一个 `pageBegin[]` 平行数组），请在 §14.37 里说明并给出理由。
+>
 > **页边界从资产本身即可推出（2026-09-21 追加，去掉了对新增落盘数据的依赖）**
 > 复核 `NanitePackedAsset`（`NaniteUpload.h`）的字段后确认：它保留了
 > `clusters`（64B/出现）、`vertices`（**每个唯一内容一份**）、`triangles`、`materials`、`lodOffsets`
