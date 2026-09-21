@@ -2,7 +2,7 @@
 // 07.Nanite — Cornell Box 场景 + 延迟渲染管线；Nanite 虚拟几何（cluster 光栅化）实验台
 //
 // 基线自 06.GILab 整体拷贝：先保证与既有验收口径（白炉 / 逐帧 dump / 开关不变性）完全一致，
-//      再在此基础上按 docs/计划实现功能/Nanite设计与实现.md §14 逐项接入 Nanite 模块。
+//      再在此基础上按 docs/已实现功能/Nanite设计与实现.md §14 逐项接入 Nanite 模块。
 // 用途：检验与对比各种 GI（IBL/RSM/SSGI/DDGI/SSR）在同一 Cornell Box 场景下的效果，
 //      并作为 Nanite 虚拟几何与后续新 GI 的接入试验场。
 // 使用 DeferredPipeline（GBuffer + 全屏 Lighting Pass）。

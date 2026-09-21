@@ -398,7 +398,7 @@ public:
     ///   （`NaniteRaster`），材质是**索引进一个 SSBO**（`u_Materials[materialID]`）+ **bindless**
     ///   纹理数组（`u_MaterialTextures[]`）取的，帧内不重绑 ⇒ 真实发生的切换只有"进入软光栅趟
     ///   （1 次）"与"进入硬光栅趟（0/1 次）"。§5.4 想减少的"每材质一个描述符集"那种切换，
-    ///   在本仓库的延迟路径里**从未存在**（论据见 `docs/计划实现功能/Nanite设计与实现.md` §14.33 ①②）。
+    ///   在本仓库的延迟路径里**从未存在**（论据见 `docs/已实现功能/Nanite设计与实现.md` §14.33 ①②）。
     /// · `material_switches` = **相邻处理的簇换材质的次数**（局部性代理）。
     ///   **顺序口径 = GPU 可见簇列表缓冲的槽位顺序**（`NaniteCull::GetVisibleClusterBuffer`，
     ///   Phase 3 写出的真实列表；软光栅第 1 趟与硬光栅 mesh 工作组都按这个下标顺序枚举）
