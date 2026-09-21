@@ -3839,6 +3839,16 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
 > 8287 簇 ⇒ 约 33 KB），与资产缓冲一起上传。着色器只做两次查表：
 > `page = pageOfCluster[clusterIndex]` → `slot = pageTable[page]` → 偏移换算。
 > 该数组是**纯函数**（由页划分唯一决定），所以可单测、可离线校验，且**不影响**任何既有缓冲的语义。
+>
+> **页边界从资产本身即可推出（2026-09-21 追加，去掉了对新增落盘数据的依赖）**
+> 复核 `NanitePackedAsset`（`NaniteUpload.h`）的字段后确认：它保留了
+> `clusters`（64B/出现）、`vertices`（**每个唯一内容一份**）、`triangles`、`materials`、`lodOffsets`
+> —— 但**没有**保留构建期的 `uniqueVertexOffset[]` / `uniqueTriangleOffset[]`。
+> 不过页边界**不需要**它们：把 `clusters[i].vertexOffset` 取**去重后的升序集合**，
+> 相邻两个不同值之间的区间就是一份共享内容的范围（最后一份到 `vertices.size()` 为止）；
+> 每份内容至少被一个簇引用（内容是**因簇的需要**才创建的）⇒ 该集合完整。
+> ⇒ **`pageOfCluster` 与页起始偏移都能在上传期由资产自身算出**，不必改 `.nanite` 格式、
+> 也不必保留新的构建期临时数组。**这是本设计不需要动文件格式的关键依据。**
 
 - 页大小默认 **512 簇/页**（可配 `kNanitePageClusters`）；页数 = `ceil(clusterCount / 512)`。
 - LOD 维度：`lodLevelCount` + LOD 偏移段（§8.3 段 5）给出每个 LOD 的簇下标范围 ⇒
@@ -3974,6 +3984,13 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
 - **证据强度（如实标注）**：本条的推导链每一环都有 `文件:行` 依据，但**尚未用插桩实测确认**
   （例如在构建器里同时打印"原始下标"与"去重下标"看它们从第几个簇开始分叉）。
   ⇒ 任务 25 的**第一步应当是这条插桩确认**，然后再谈修法。
+- **旁证（2026-09-21 追加，强化了缺陷定性）**：`NaniteUpload.h` 的映射规则注释自己写明了本设计**假设**
+  `triangleOffset` 就是合并空间的三角形下标 —— 原文「簇的三角形区间 =
+  `NaniteClusterRecord::triangleOffset/triangleCount`（单位是三角形）」以及
+  「一个三角形都落不进任何区间（越界/空洞）⇒ 归属 0 号网格并计入 `unmappedClusters`
+  （**正常必须 0：合并几何是连续拼接的，不存在空洞**）」。
+  ⇒ 去重路径让 `triangleOffset` 落在**另一个空间**，等于**违反了文档写明的契约**，
+  因此这不是"注释里的期望值写错"，而是**实现与契约不一致** ⇒ 定性为**缺陷**，修法应让实现回到契约。
 
 **⑦ 修法方向（供任务 25 裁决，默认项）**
 - **首选**：让投票**使用原始空间的三角形下标**。构建器在去重/重排时已经维护了
