@@ -4308,6 +4308,38 @@ LOD0 真值逐簇一致、无归属顶点簇 0、几何核对越界 0，并断�
 > **本节的作用**：任务 26 的报告必须**逐行回应本表**（每行给"已可观测 / 本轮补了 / 明确不做"），
 > 这样"每个已知故障模式都能被至少一个工具观察到"才是一句可核对的话，而不是自我评价。
 
+**任务 26 逐行回应（2026-09-21 收口）**
+
+> 口径：**已可观测** = 今天已有工具/读数能发现它，本轮不需要新增；**本轮补** = 任务 26 新增的手段
+> （标注是第一批「读数自检」还是第二批「硬光栅回读 + 四项可视化」）；**明确不做** = 本轮不做并给出理由。
+> 下表**不重复** #11/#12/#15 —— 那三行的"已可观测"结论与证据已在 §14.33 与 §14.36 就地改正，
+> 本表只记"本轮无变更"。
+
+| # | 结论 | 观察手段（本轮落地后） | 缺口 / 明确不做 |
+|---|---|---|---|
+| 1 | 已可观测 | `soft_raster` 行的 `depth_written`（真实原子计数）+ `cull3` 行的 `hiz_half` / `occl_mip`；判据 ⑦ 的 `hiz1` 档做开关对照 | **明确不做**：不新增"深度目标转储"。它是"间接看"（差值与对照），足以判定 §14.30 那类缺陷，转储会新增资源与判据面 |
+| 2 | **本轮补（第一批）** | `size_dist` 行追加 `stat_ok` / `const_suspect`：① 三条**无需新增输入**的关系式（`diag_screenw × diag_screenh == depth_key_pixels`、`diag_maxtri == 上次送下去的 maxTriangles`、场景非空时 `diag_extent_milli > 0`）；② 逐槽"是否曾经变化过"，检出**非 0 且从未变过**的槽。不通过时打**告警级**日志并列出实测值 | **已闭合**。已做**负向验证**证明非空转（把一条关系式故意反置 ⇒ `stat_ok=0` 且告警按预期打出实测值，还原后复测 `stat_ok=1`）。**如实标注局限**：② 在"本次读回里一个槽都没变"（相机固定、整轮只转储一帧）时**无法判定**，此时**不报警**（宁可漏报、不误报，见 `NaniteRenderer::SelfCheckSoftStats` 的注释） |
+| 3 | 已可观测 | 判据 ⑦ 的 `hiz1` 档（`occl_mip` / `occl_uv` / `hiz_flip` 开关对照） | **明确不做**：不做"某个 pass 是否真的执行过"的通用观测。本例是靠"关掉就该变"的对照发现的，通用化需要 pass 级执行计数，属渲染器基础设施而非 Nanite 范围 |
+| 4 | 已可观测 | `Tests/TestNaniteTypes.cpp` 的属性保真度用例（DAG 内容哈希顺序无关 + `meshopt` 原地重排簇内顶点） | **明确不做**运行时读数。这是**离线/单测口径**的机制，运行时无对应量可报 |
+| 5 | 已可观测 | 离线工具按 `objectIndex` 分区分类解码页号（`Tools/gi/lightmap_key_check.py`）+ 属性保真度单测 | 无 |
+| 6 | 已可观测 | 判据 ⑧e 的 pass 列表与冻结指纹；校验层 VUID 行 | 无 |
+| 7 | **本轮补（第一批）** | 软光栅读数缓冲新增槽 22 `depth_key_ties`：在 `Nanite_SoftRasterDepth.comp.slang` 里用 `InterlockedMin` 的**回读前值**判定 —— `prev == key` 即"同一像素被第二个三角形以等值键再次写入"，计一次；`key == 0xFFFFFFFF`（空槽）不计 | **剩余缺口如实标注**：平局本身**仍未消除**（§14.31 ⑩：像素由 UAV 写序决定，接管档两次运行并非逐位可复现）——本轮只把它**变成可数**。**且该式不是等式判据**：可核对的不变式是 `ties >= pixels_written - depth_written`（恒成立），等号**当且仅当**该像素的最小键从未被更小的键取代；实测阈值 16 档 `3158 == 3264 - 106` ✓，阈值 64 档 `98714537 vs 43396808` ✗ ⇒ `ties_eq_diff` **只作参考、不作验收判据** |
+| 8 | **已闭合（任务 25 + 第一批）** | `materials_sample` 读数行 + `unmapped > 0` 的**告警级**日志（`HE_CORE_WARN("[Nanite] unmapped_clusters=… > 0（契约要求 0）…")`）+ 常驻单测 `Tests/TestNaniteMaterialMap.cpp` 钉住 `unmapped == 0` 与 LOD0 真值逐簇一致 | 无。回归一旦发生，告警会跳出来、单测会变红 |
+| 9 | 已可观测 | 校验层 + 崩溃日志（`07_Nanite_crash.log`） | 无（崩溃本身即可观测） |
+| 10 | **本轮补（第二批）** | 硬光栅读数缓冲 **4 → 11 槽**，槽 4..10 = `DiagScreenW / DiagScreenH / DiagMaxTri / DiagExtent / DiagInstances / DiagMaterials / DiagPages`，在 `Nanite_HardRaster.mesh.slang` 里由 `gid.x == 0 && tid == 0` **在任何提前返回之前**写入 ⇒ 即使后续 `HARD_RASTER_BAILOUT()`，仍能回读到"push constant 实际收到了什么"（对齐软光栅既有的 `diag_*` 做法）。**实测**：`hard_raster` 行打出 `diag_screenw=1920 diag_screenh=1080 diag_maxtri=16 diag_extent_milli=3720854 diag_instances=64 diag_materials=103 diag_pages=0`，与 `diag_cpu=[1920,1080,16,3720854,64,103,0]` 逐项相同 ⇒ `diag_match=1` | 无（按 §14.34 第 2 条的最小范围补齐）。**如实标注**：它验证的是"送下去的值正确"，**不**能反推"硬光栅是否真的画了像素"——后者由 `hard_pixels` / `perf` 行覆盖（`perf` 行另受 `HE_CPU_PASSES` 环境开关门控，默认关） |
+| 11 | 已可观测（本轮**无变更**） | 页划分按"收集序"而非区间（正为 `vertexOffset` 非单调而设计）；`Tests/TestNaniteStream.cpp` 在**真实资产**上断言前 4 个 `vertexOffset = [0 45 0 90 …]`、单调 = 0 | **如实标注**：它是"已被正确处理的事实"，不是待告警的异常 ⇒ **没有**运行时告警读数（见 §14.33 就地改正） |
+| 12 | 已可观测（本轮**无变更**） | 任务 24 的 `stream` 行十个字段（`pages_total / resident / nonresident / pool / uploads_this_frame / evicted / page_misses / pages_requested / overflow_total / reason`）+ `stream_setup` 行给出页划分与池足迹；池 8 槽档实测真跑到 `page_misses=122`、`evicted=58`，且与 `visible` 精确对账（`soft + skipped_big + page_misses == visible`） | 无（见 §14.37） |
+| 13 | 已可观测 | 离线工具 + `static_assert` 分区断言 | 无 |
+| 14 | **部分可观测** | 判据 ⑧b 的 A/B 覆盖像素差能看出"有差" | **明确不做**"缺口落在哪"的**深度分桶**分类（§14.34 末尾最小范围第 4 条已声明可在时间不足时不做）。本轮**如实列为未做** |
+| 15 | 已可观测（本轮**无变更**） | 任务 23：`size_dist` 五桶分布 + `perf` 行（`soft_clusters / hard_clusters / soft_pixels / hard_pixels / nanite_pass_ms / frame_ms`），并给出同覆盖对照（soft64 对 hard16：GPU **21.24×**、墙钟 **6.38×**） | 无（复核证据见 §14.36） |
+| 16 | 已可观测 | 判据 ⑥（含**负向验证**）+ 判据 8e 冻结指纹；本轮 `debugView` 可视化**默认关**时同样受它守卫（一个 pass 都不注册） | 无 |
+| 17 | **仍未闭合 —— 如实标注** | 只在人肉对比历史日志时可见 | **本轮未修任何一条**（不把"记录"说成"修复"）。六条脆弱点已集中记在本表原处：① 验收脚本必须从仓库根运行（相对路径 `build/verify/`）；② 判据 ⑦ 只有 `sum > 0` 一条空转守卫、对量级不敏感；③ **整套脚手架未纳入版本控制**且 7 个脚本含硬编码绝对路径 ⇒ 判据无法从克隆重现；④ 样例自动退出后残留进程；⑤ 判据 ④ 只扫 `diff_px` 行，对 `MISSING` / `SIZE` 视而不见（与 ⑧b/⑧c 同属"缺转储即空洞通过"）；⑥ 两套 smoke 脚本不可混用（判据 ①–④ 走 `lumen_smoke`，Nanite 各判据走 `nanite_smoke`）。本轮**又实测到 ⑤ 与 ⑥ 各一次**（先后据此误报过"材质修复回归"与"判据 ④ FAIL"），证据见 §14.38 ④ |
+
+**四项可视化（验收明文点名的第 1 条）落在哪一行**：可见簇数 / 软硬光栅占比 / LOD 层级 / BVH 深度
+四项**不是**"已知故障模式"，而是本表所要的**工具本体**。它们的落点是 `nanite_debug_view`
+档位 1..4 的模块自建 64×32 `R32_UINT` 小目标（**不碰任何既有 GBuffer / 渲染目标**），
+默认 0 = 关 ⇒ 与 §14.2 不变式 1 一致（关闭档一个 pass 都不注册、一个 GPU 资源都不建、一行日志都不打）。
+
 ### 14.35 任务 27 前置核查：收口清单（2026-09-21 起草）
 
 > 任务 27 的验收原文：「`HugEngineTests` 全绿；默认预设抖动族之外 0 项差异；开关不变式（任务 2）常跑」。
@@ -4674,7 +4706,10 @@ Sponza 实测（同一资产、同一相机，只改 K）：
 
 - `cmake --build build --config Release --target HugEngineTests` → **exit 0**；
   `build\bin\Release\HugEngineTests.exe` → **exit 0**，`test cases: 322 | 322 passed | 0 failed`、
-  `assertions: 71192 | 71192 passed`、**`Status: SUCCESS!`**。
+  `assertions: 71194 | 71194 passed`、**`Status: SUCCESS!`**。
+  （断言数 **71192 → 71194**：任务 26 其余部分给软/硬光栅读数槽容量与可视化
+  push-constant 布局**补了 `static_assert`**（槽位连续性、容量、96 B 布局的 8 条偏移断言），
+  用例数不变 —— 断言是**编译期**钉住的，不新增运行时用例。）
 - **为任务 23–26 新增机制补测**（§14.35 ① 的硬要求）：三项点名要求**全部已有覆盖** ——
 
 | 点名要求 | 覆盖用例 | 实测 |
@@ -4730,7 +4765,7 @@ Sponza 实测（同一资产、同一相机，只改 K）：
 
 | 载体 | 结论 |
 |---|---|
-| ① 单测全绿 | ✅ 322 用例 / 71192 断言 / `SUCCESS!`；任务 23–26 的三项点名补测**全部有覆盖** |
+| ① 单测全绿 | ✅ 322 用例 / 71194 断言 / `SUCCESS!`；任务 23–26 的三项点名补测**全部有覆盖** |
 | ② 默认预设抖动族之外 0 项差异 | ✅ **PASS**（逐位相同 18、抖动族 3、**容差族 5**、抖动族之外 **0**） |
 | ③ 开关不变式常跑 | 载体 ✅ 且实测通过；但"**常跑**"**不成立** —— 无 CI，且脚手架未纳入版本控制 |
 
@@ -4740,3 +4775,96 @@ Sponza 实测（同一资产、同一相机，只改 K）：
 3. **运行时页表**与三项 RHI/着色器侧机制（读数自检、平局计数、硬光栅回读）只有**运行期证据**、无单测。
 4. **判据 ④ 对缺转储（`MISSING` / `SIZE`）空洞通过** —— 与判据 ⑧b/⑧c 同属"缺转储即通过"，建议一并修。
 5. **只测 07.Nanite 的 1920×1080 单场景单相机**；未测多分辨率、多资产、相机移动。
+
+### 14.39 任务 26 其余部分实施记录：四项屏幕可视化 + 两处读数回读（2026-09-21）
+
+> 本节对应 §14.34 末尾"任务 26 最小范围"的第 1、2 条（四项可视化、#7 平局计数、#10 硬光栅回读）。
+> 第 3 条（`unmapped > 0` 升级为告警）见 §14.33/§14.34 第 8 行；第 4 条（#14 深度分桶）**明确不做**。
+> 本文所有数字为**本轮实测**（构建后同一环境），不是复读旧记录。
+
+**① 落点与门控（四项可视化）**
+
+- cfg 键 `nanite_debug_view`，取值 **0..4**，**默认 0 = 关**：`0` 关 / `1` 可见簇数 / `2` 软硬光栅占比 /
+  `3` LOD 层级 / `4` BVH 深度。模块**自建**一张 64×32 `R32_UINT`（8 KB）目标 + 8 KB 读回缓冲，
+  1 个 PSO + 1 个 descriptor set；**不碰任何既有 GBuffer / 渲染目标**。
+- **不注册独立 pass**：两次派发（清除 + 累加）录在既有 `Nanite_CullChain3` 的 pass 体内
+  —— 帧图不为"零帧图资源的 pass"的排序负责，这是本模块既有做法（软/硬光栅同款）。
+- **默认档的硬纪律**：不建资源、不录制、不 Map、**一行日志都不打**。
+- 亮度编码：**面板 A**（左 32 列）= 该模式的主量；**面板 B**（右 32 列）= 辅助量
+  （模式 1/2 分别是"可见簇计数"与"硬簇计数"的重排，模式 3/4 = 每 tile 的簇计数）。
+  一个像素 = 一个屏幕 tile。
+
+**② 四档实测（1920×1080、`soft_max_triangles=16`、31648 可见簇）**
+
+| 档 | 模式 | `px_nonzero` | `distinct_vals` | 面板 A `sum/max/nonzero` | 面板 B `sum/max/nonzero` | `tiled` | `mean_lod_milli` | `max_bvh_depth` | 模式独有 |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | `visible_cluster_count` | 183（89‰） | 62 | 23452 / 701 / 183 | 0 / 0 / 0 | 23452 | 0 | 0 | — |
+| 2 | `raster_share` | 183（89‰） | 1 | 61 / 61 / 1 | 23391 / 701 / 182 | 23452 | 0 | 0 | `hard_share_clusters_permille=997` |
+| 3 | `lod_level` | 322（157‰） | 45 | 18916 / 701 / 139 | 23452 / 701 / 183 | 23452 | **806** | 0 | — |
+| 4 | `bvh_depth` | 366（178‰） | 5 | 2329 / **15** / 183 | 23452 / 701 / 183 | 23452 | 0 | **15** | — |
+
+- 四档**互不相同且都非空**（`px_nonzero` 183/183/322/366、`distinct_vals` 62/1/45/5），
+  且**跨模式自洽**：四档都满足 `visible=31648`、`tiled=23452`、`offscreen=8196`、
+  并且 `visible - tiled == offscreen` 精确成立（31548−23452=8196）；模式 2 还有 `面板A+面板B == tiled`（61+23391=23452）。
+- 模式 2 的 `hard_share_clusters_permille=997` 是**按簇数**的硬占比；`hard_raster` 行另有**按像素**占比。
+  两个口径都打印、不互相冒充。
+
+**③ 提交前自查发现并修掉的两处"读数说谎"（本轮）**
+
+| 问题 | 为什么是缺陷 | 修法 | 证据（修前 → 修后） |
+|---|---|---|---|
+| `max_bvh_depth` 恒取 `maxA`、`mean_lod_milli` 恒取 `sumA/sumB`，而**面板 A 的语义随模式变** | 模式 1 的 `maxA=701` 是**簇数**、模式 4 的 `maxA=15` 才是**深度** ⇒ 按字段名 grep 跨档会读到"701 与 15 两个深度"，`max_bvh_depth` 在 3/4 的档位里**说谎**（正是 §14.34 第 2 行要防的"读数掩盖缺陷"） | 只在**定义它的模式**填真值（模式 3 填 `mean_lod_milli`、模式 4 填 `max_bvh_depth`），其余模式打印 0 —— 与同行 `hard_share_clusters_permille`（本就只在模式 2 计算）**统一口径** | `max_bvh_depth` 701/701/701/15 → **0/0/0/15**；`mean_lod_milli` 0/0/806/99 → **0/0/806/0** |
+| `distinct_vals` 把 `0` 也算作一个"取值" | `0` 在本图里表示"该 tile 上没有簇"，是**空值**；计进去会让 `distinct_vals` 恒 ≥ 1 ⇒ **一张全黑面板也报 1**，"不是黑屏"的非空转信号失效 | 收集取值集合时排除 `0` | 63/2/46/6 → **62/1/45/5**（全黑面板现在报 **0**，与 `px_nonzero`/`panelA.nonzero` 同向） |
+
+**④ #7 深度键平局计数（软光栅读数槽 22 `depth_key_ties`）**
+
+- 做法：`Nanite_SoftRasterDepth.comp.slang` 里用 `InterlockedMin` 的**回读前值**判定 ——
+  `prev == key` 即"同一像素被第二个三角形以等值键再次写入"，`InterlockedAdd` 计一次；
+  `key == 0xFFFFFFFF`（空槽）不计。
+- 实测（阈值 16）：`depth_key_ties=3158`，而 `pixels_written - depth_written = 3264 - 106 = 3158`
+  ⇒ `ties_eq_diff=1`。
+- **如实标注（不是等式判据）**：原子 min 是**递减**的，一个更大的键后到、随后被更小的键取代，
+  仍然计过一次 ⇒ 可核对的不变式方向是 `ties >= pixels_written - depth_written`（恒成立），
+  等号**当且仅当**该像素的最小键从未被更小的键取代。阈值 64 档实测
+  `ties=98714537` 而 `pixels_written - depth_written = 43396808`（✗ 不等）⇒
+  `ties_eq_diff` **只作参考、不作验收判据**。
+- **剩余缺口**：平局本身**仍未消除**（§14.31 ⑩：像素由 UAV 写序决定）——本轮只把它**变成可数**。
+
+**⑤ #10 硬光栅 push constant 回读（硬光栅读数槽 4..10）**
+
+- 实测 `hard_raster` 行：
+  `diag_screenw=1920 diag_screenh=1080 diag_maxtri=16 diag_extent_milli=3720854 diag_instances=64 diag_materials=103 diag_pages=0 diag_match=1 diag_cpu=[1920,1080,16,3720854,64,103,0]`
+  ⇒ 七个槽与 CPU 端期望**逐项相同**。
+- 写入点在**任何 `HARD_RASTER_BAILOUT()` 之前**，所以"提前返回"的档位也能回读到送下去的值。
+
+**⑥ 零影响证据（默认档 = 可视化关闭）**
+
+| 检查 | 结果 |
+|---|---|
+| pass 集指纹（`nanite_enable=0`，`debug_view` = 0/1/2/3/4） | **全部 12 pass / sha `1C15AB72E688B530…`**（等于冻结值）⇒ 模块关闭时**连非 0 档位也不注册任何 pass** |
+| pass 集指纹（`nanite_enable=1`，`debug_view` = 0/1/2/3/4） | **全部 14 pass / `nanite_passes=242` / sha `750CC247BF8B9C3D…`**（等于冻结值）⇒ 档位不改 pass 集、不改顺序 |
+| 读数行 | `debug_view=0` ⇒ **恰好 0 行**；`1..4` ⇒ 各**恰好 1 行** |
+| VUID | 唯一类型集合 dv0 与 dv1 **完全一致**（各 7 类）。on 档 42 行 / off 档 41 行是**既有的** on/off 差（自 `nan_t20b_on` 起就是 42），非本批引入 |
+| 转储 | 可视化落地前 vs 落地后（同为 `debug_view=0`）差 **489 px**；**同一构建同配置跑两次**的噪声底是 **571 px**，且两者差异落在**同一组**五个目标上（`albedo` 206/216、`gb_lightmapkey` 200/159、`gb_normal` 5/4、`gb_worldpos` 30/74、`hdr` 48/118）⇒ 差异**完全由 §14.31 ⑩ 的平局非确定性解释**，无超出噪声底的改变 |
+
+**⑦ 单测与验收（本轮实测）**
+
+- `HugEngineTests`：**exit 0**，`322 用例 / 71194 断言 / Status: SUCCESS!`
+  （断言 71192 → 71194：新增的 `static_assert` 是编译期断言，不新增运行时用例）。
+- `acceptance_sweep.ps1 -OnlyNanite`：**连续两轮均 `ACCEPTANCE SWEEP: PASS`**，且两轮数字**逐项相同**：
+  - 判据 ⑥：6a `off passes=12 nanite_leak=0`；6b `passes=14 nanite_passes=2 preexisting_set_changed=False`；
+    6c `pairs=20 differing_outside_jitter=0`
+  - 判据 ⑦（`CULL DIFF: PASS`）：五档全 `OK`，其中 hiz1 档 `mismatch=4 == occl_mip_sum=4` 且 `extra_gpu=0`；
+    `default`/`hiz1` 各跑两次读数**逐字符一致**
+  - 判据 ⑧（`TAKEOVER CMP: PASS`）：8b `compared=18 identical=11 gbuffer_changed=4 (of 4) jitter=3 unexpected=0 missing=0`；
+    8c `gb_worldpos corr=0.9290 (>=0.90)`、`metallic corr=0.9973 (>=0.99)`、roughness 边界一致、`neutral=0`；
+    8d `distinct VUID types: new=0`、`vuid_lines delta=1 (allowed <=1)`；
+    8e `on-minus-Nanite == off` 逐行相同且 `frozen_match=True`
+
+**⑧ 未做 / 如实标注**
+
+1. 模式 1 的**面板 B 全 0**（该模式没有辅助量）；这是设计而非缺陷，但看转储的人要知道"面板 B 全 0"不等于"没有簇"。
+2. 可视化只证明"产出了**非空且随模式变化**的画面"，**不参与**任何画面正确性判据 —— 它不写 GBuffer，
+   所以它**不能**替代判据 ⑧c 的像素级比对。
+3. 平局确定性**未修**；`#14` 的深度分桶**明确不做**（§14.34 末尾第 4 条允许）。
+4. 验收脚手架**仍未纳入版本控制**（§14.34 第 17 行第 ③ 条），本节的"两轮 PASS"仍无法从克隆重现。
