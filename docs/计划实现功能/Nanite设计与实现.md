@@ -4230,7 +4230,7 @@ LOD0 真值逐簇一致、无归属顶点簇 0、几何核对越界 0，并断�
 | # | 已知故障模式（出处） | 今天的可观测手段 | 缺口 |
 |---|---|---|---|
 | 1 | **深度解析不写深度**（§14.30 ②③：`depthTest=false` 丢 `SV_Depth`；`GetDimensions` 一维/二维混用） | `soft_raster` 的 `depth_written`（已改成真实原子计数）+ `cull3` 的 `hiz_half` / `occl_mip` | 无（已可观测；**但转储里没有深度目标**，只能间接看） |
-| 2 | **恒真读数掩盖缺陷**（§14.30 4a：`depth_written` 曾硬编码 1） | 「读数必须是真实 GPU 读回」这条纪律本身 | **无通用工具**：需要一条"读数是否为常量"的检查 |
+| 2 | **恒真读数掩盖缺陷**（§14.30 4a：`depth_written` 曾硬编码 1） | **新增读数自检**（`size_dist` 行追加 `stat_ok` / `const_suspect`，可疑时打告警级日志）：① 三条**无需新增输入**的已知关系式判定"读数是否真来自本帧 push constant"——`diag_screenw × diag_screenh == depth_key_pixels`、`diag_maxtri == 上次送下去的 maxTriangles`、场景非空时 `diag_extent_milli > 0`；② 逐槽记录"是否曾经变化过"，检出**非 0 且从未变过**的槽 | **已闭合**（任务 26 本轮）。已验证**非空转**：把其中一条关系式故意反置 ⇒ `stat_ok=0` 且告警按预期打出实测值，还原后复测 `stat_ok=1`、无告警。**如实标注一处局限**：② 在"本次读回里一个槽都没变"（相机固定、整轮只转储一帧）时**无法判定**，此时不报警（宁可漏报、不误报） |
 | 3 | **Hi-Z UV y 镜像**（§14.28：`mip0/1/4/7` 全 0；且 `useTwoPhase` 恒 false ⇒ `HiZ_Build` 从未执行） | 判据 ⑦ 的 `hiz1` 档（`occl_mip`、`occl_uv`、`hiz_flip` 开关对照） | **pass 是否真的执行过**没有通用观测（本例靠"关掉就该变"的对照才发现） |
 | 4 | **DAG 内容哈希顺序无关 + `meshopt` 原地重排簇内顶点**（§14.20⑥、§14.22①） | `Tests/TestNaniteTypes.cpp` 的属性保真度用例 | 运行时无读数（只在离线/单测可见） |
 | 5 | **共享内容属性错配**（§14.27 的 P0、任务 18） | 离线检查工具按 `objectIndex` 分区分类解码页号（`Tools/gi/lightmap_key_check.py`） | 无 |
