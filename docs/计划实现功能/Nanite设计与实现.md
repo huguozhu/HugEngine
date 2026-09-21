@@ -4705,11 +4705,11 @@ Sponza 实测（同一资产、同一相机，只改 K）：
 **① 单测全绿 —— ✅**
 
 - `cmake --build build --config Release --target HugEngineTests` → **exit 0**；
-  `build\bin\Release\HugEngineTests.exe` → **exit 0**，`test cases: 322 | 322 passed | 0 failed`、
-  `assertions: 71194 | 71194 passed`、**`Status: SUCCESS!`**。
-  （断言数 **71192 → 71194**：任务 26 其余部分给软/硬光栅读数槽容量与可视化
-  push-constant 布局**补了 `static_assert`**（槽位连续性、容量、96 B 布局的 8 条偏移断言），
-  用例数不变 —— 断言是**编译期**钉住的，不新增运行时用例。）
+  `build\bin\Release\HugEngineTests.exe` → **exit 0**，`test cases: 329 | 329 passed | 0 failed`、
+  `assertions: 71245 | 71245 passed`、**`Status: SUCCESS!`**。
+  （用例 **322 → 329**、断言 **71192 → 71245**：任务 26 其余部分给软/硬光栅读数槽容量与可视化
+  push-constant 布局**补了 `static_assert`**（编译期断言，不新增运行时用例），并新增
+  `Tests/TestNaniteBvhDepth.cpp` 的 **7 个**运行时用例。）
 - **为任务 23–26 新增机制补测**（§14.35 ① 的硬要求）：三项点名要求**全部已有覆盖** ——
 
 | 点名要求 | 覆盖用例 | 实测 |
@@ -4718,6 +4718,8 @@ Sponza 实测（同一资产、同一相机，只改 K）：
 | **材质 bin 的排序正确性**（任务 25） | `NaniteMaterialBin*`（合成 3 + 真实资产 1） | **4/4 passed** |
 | 任务 24 页表自洽 | `NanitePage*` | **6/6 passed** |
 | （另）材质映射正确性（任务 25 的缺陷修复） | `NaniteMaterialMap*` | **3/3 passed** |
+| **每簇 BVH 深度**（任务 26 档位 4 的数据源） | `NaniteBvhDepth*`（合成 6 + 真实构建 1） | **7/7 passed** |
+| 软/硬光栅**读数槽容量**与可视化 **push constant 布局**（任务 26） | 编译期 `static_assert`（槽位连续性、容量、96 B 的 8 条偏移） | **编译期钉住**（编译失败即回归） |
 
 - **必须分清的口径（如实标注）**：`NanitePage*` 覆盖的是**页划分纯函数**（`BuildNanitePagePlan`）；
   运行时**页表**的自洽需要 RHI、**无法单测**，它由 `stream` 读数行的 `table_ok=1` / `dup_slots=0` /
@@ -4765,14 +4767,18 @@ Sponza 实测（同一资产、同一相机，只改 K）：
 
 | 载体 | 结论 |
 |---|---|
-| ① 单测全绿 | ✅ 322 用例 / 71194 断言 / `SUCCESS!`；任务 23–26 的三项点名补测**全部有覆盖** |
+| ① 单测全绿 | ✅ 329 用例 / 71245 断言 / `SUCCESS!`；任务 23–26 的三项点名补测**全部有覆盖** |
 | ② 默认预设抖动族之外 0 项差异 | ✅ **PASS**（逐位相同 18、抖动族 3、**容差族 5**、抖动族之外 **0**） |
 | ③ 开关不变式常跑 | 载体 ✅ 且实测通过；但"**常跑**"**不成立** —— 无 CI，且脚手架未纳入版本控制 |
 
 **未覆盖 / 已知缺口（如实列出）**：
 1. **无 CI** ⇒ 没有常驻守卫，"常跑"依赖人工。
 2. **验收脚手架未纳入版本控制且含硬编码绝对路径** ⇒ 判据不可从克隆重现。
-3. **运行时页表**与三项 RHI/着色器侧机制（读数自检、平局计数、硬光栅回读）只有**运行期证据**、无单测。
+3. **运行时页表**与三项 RHI/着色器侧机制（读数自检、平局计数、硬光栅回读）只有**运行期证据**、无单测
+   —— 它们的实现分别在 `NaniteRenderer` / `NaniteRaster` 里，**绑定 RHI**，单测目标（RHI-free）够不到。
+   **补记**：任务 26 的**第四个**新机制（每簇 BVH 深度）因为落在 RHI-free 的 `NaniteUpload.cpp` 里，
+   已由 `Tests/TestNaniteBvhDepth.cpp` 的 7 个用例钉住（见上表）；可视化 push-constant 的 96 B 布局
+   则由编译期 `static_assert` 钉住。
 4. **判据 ④ 对缺转储（`MISSING` / `SIZE`）空洞通过** —— 与判据 ⑧b/⑧c 同属"缺转储即通过"，建议一并修。
 5. **只测 07.Nanite 的 1920×1080 单场景单相机**；未测多分辨率、多资产、相机移动。
 
@@ -4849,8 +4855,9 @@ Sponza 实测（同一资产、同一相机，只改 K）：
 
 **⑦ 单测与验收（本轮实测）**
 
-- `HugEngineTests`：**exit 0**，`322 用例 / 71194 断言 / Status: SUCCESS!`
-  （断言 71192 → 71194：新增的 `static_assert` 是编译期断言，不新增运行时用例）。
+- `HugEngineTests`：**exit 0**，`329 用例 / 71245 断言 / Status: SUCCESS!`
+  （322 → 329 用例：新增 `Tests/TestNaniteBvhDepth.cpp` 的 7 个用例；71192 → 71245 断言：
+  其中 2 条是新增的编译期 `static_assert`，其余来自新用例）。
 - `acceptance_sweep.ps1 -OnlyNanite`：**连续两轮均 `ACCEPTANCE SWEEP: PASS`**，且两轮数字**逐项相同**：
   - 判据 ⑥：6a `off passes=12 nanite_leak=0`；6b `passes=14 nanite_passes=2 preexisting_set_changed=False`；
     6c `pairs=20 differing_outside_jitter=0`
