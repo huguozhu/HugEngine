@@ -670,13 +670,21 @@ int main() {
             //   **只读的收益证据**（明确不做"把光栅遍历顺序改成 bin 顺序"，理由见 NaniteSettings）。
             naniteSettings.materialBin = GetInt(cfgData, "nanite_material_bin",
                                                 naniteSettings.materialBin ? 1 : 0) != 0;
+            // ── 任务 26 的 **屏幕可视化**（默认 0 = 关）：cfg → 真值，写法与上面完全同构。
+            // 1=可见簇数 / 2=软硬光栅占比 / 3=LOD 层级 / 4=BVH 深度；钳到 [0, 4]（与模块侧同口径）。
+            // 【为什么默认 0】§14.2 不变式 1：关闭时模块一个 pass 都不注册、一个 GPU 资源都不建、
+            //   一行日志都不打 —— 可视化的目标与读回缓冲只挂在非 0 档位上。
+            naniteSettings.debugView = (u32)std::max(0, std::min(
+                GetInt(cfgData, "nanite_debug_view", (int)naniteSettings.debugView),
+                (int)render::kNaniteDebugViewMaxMode));
             deferredPipeline.SetNaniteSettings(naniteSettings);
             HE_CORE_INFO("[Nanite] 配置恢复: nanite_enable={} nanite_fake_clusters={} "
                          "nanite_test_write={} nanite_mesh_test={} nanite_instance_test_count={} "
                          "nanite_hiz={} nanite_hiz_flip={} nanite_fake_chain={} nanite_draw_capacity={} "
                          "nanite_soft_raster={} nanite_soft_max_triangles={} nanite_hard_raster={} "
                          "nanite_streaming={} nanite_page_contents={} nanite_page_pool_slots={} "
-                         "nanite_feedback_latency={} nanite_page_uploads={} nanite_material_bin={}",
+                         "nanite_feedback_latency={} nanite_page_uploads={} nanite_material_bin={} "
+                         "nanite_debug_view={}",
                          naniteSettings.enabled ? 1 : 0, naniteSettings.fakeClusters,
                          naniteSettings.testWrite ? 1 : 0, naniteSettings.meshTest ? 1 : 0,
                          naniteSettings.instanceTestCount, naniteSettings.hiz ? 1 : 0,
@@ -687,7 +695,8 @@ int main() {
                          naniteSettings.streaming ? 1 : 0, naniteSettings.pageContents,
                          naniteSettings.pagePoolSlots, naniteSettings.feedbackLatency,
                          naniteSettings.pageUploadsPerFrame,
-                         naniteSettings.materialBin ? 1 : 0);
+                         naniteSettings.materialBin ? 1 : 0,
+                         naniteSettings.debugView);
         }
 
         auto& ae = deferredPipeline.GetAutoExposure();
@@ -2019,6 +2028,17 @@ int main() {
             if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
                 dpNanite->GetNanite().LogMaterialBinReadback();
 
+            // ── Nanite（§14.8 任务 26）：**屏幕可视化**的**恰好一行**读数 ──
+            // 字段：mode / name（1=可见簇数 2=软硬光栅占比 3=LOD 层级 4=BVH 深度）/
+            //       px_nonzero / px_nonzero_permille / distinct_vals（"不是黑屏"的三条判据）/
+            //       panelA=[sum max nonzero] panelB=[sum max nonzero] / tiled / visible / offscreen /
+            //       hard_share_clusters_permille（模式 2）/ mean_lod_milli（模式 3）/ max_bvh_depth（模式 4）。
+            // 【门控】`nanite_debug_view=0`（默认）时模块内部直接返回：不 Map 目标、一个字符都不打印
+            //   ⇒ 关闭档与既有档位的日志逐字不变。目标本身在默认档**根本不会被创建**。
+            // 同步同样依赖上面的 `WaitIdle()`（`CopyTextureToBuffer` 已把目标拷进 host 可见缓冲）。
+            if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
+                dpNanite->GetNanite().LogDebugViewReadback();
+
             // ── 【§14.8 任务 23】整帧预算 + "分流 × 帧时"的 perf 行（同一个 `LogFrameBudget`）──
             // 【为什么这里必须补一次 `LogFrameBudget()` 调用】它原本**只**在 Lumen 段
             //   （`Lumen_SDF_Build` 的 pass 体内）被调用，而 07.Nanite 的 cfg 没有请求 Lumen 源
@@ -2210,6 +2230,11 @@ int main() {
         //   缺这一行，档位会在下一次运行时被写回成默认值、两档互相污染（任务 18/22/24 踩过）。
         out["nanite_material_bin"] =
             std::to_string(deferredPipeline.GetNaniteSettings().materialBin ? 1 : 0);
+        // 任务 26：屏幕可视化档位（默认 0 = 关）—— 同写法回写。
+        // 【为什么必须回写】冒烟脚本用 `nanite_debug_view=1..4` 跑四种模式档、用默认档跑对照档；
+        //   缺这一行，档位会在下一次运行时被写回成默认值、四档互相污染（任务 18/22/24/25 踩过）。
+        out["nanite_debug_view"] =
+            std::to_string(deferredPipeline.GetNaniteSettings().debugView);
 
         // ── AutoExposure ──
         auto& ae = deferredPipeline.GetAutoExposure();
