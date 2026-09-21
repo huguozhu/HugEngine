@@ -471,7 +471,7 @@ GPUScene Collect→(MeshBatcher)→Upload → GPU 剔除 Readback（禁用时 cl
 | 6 | MSAA 运行时切换无效（需重启） | DeferredPipeline.cpp |
 | 7 | Shadow Pass 的 descriptor 就地改绑与 AsyncCompute 队列有 cross-queue 风险 | DeferredPipeline_FrameGraph.cpp |
 | 8 | Compute dispatch 后必须恢复 graphics pipeline（4 处防御） | DeferredPipeline_FrameGraph.cpp |
-| 9 | 头部注释过时："GBuffer 5×MRT" 实际 8 MRT；"两阶段模式在 AsyncCompute 队列"实际进主队列 | DeferredPipeline.h, GPUCulling.h |
+| 9 | 头部注释过时："GBuffer 5×MRT" 实际 8 MRT。（同处 "两阶段模式在 AsyncCompute 队列" 是**准确**的：`GPU_Cull_Phase1` 是帧图首个 Pass 且带 `RGPassQueue::Compute`，落入 `ExecuteWithAsyncCompute` 的帧首连续 Compute 前缀，确实在计算队列执行） | DeferredPipeline.h, GPUCulling.h |
 | 10 | 4 个"CVar"实为 static int32 编译期常量，**未注册控制台**，注释声称可在控制台改实际不行 | DeferredPipeline.cpp |
 | 11 | 多处 CPU Map 同步点：CollectLights 逐光源 Map/Unmap、聚集回读、剔除 Readback、PTG 参数写入 | — |
 | 12 | GBuffer.frag 法线贴图强度固定 0.5，无独立参数 | GBuffer.frag.slang |
