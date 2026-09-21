@@ -3981,6 +3981,27 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
   读数与 `visible` 的差额可核对）。
 - (d) **驻留正确性（关键）**：页池足够大（≥ `pages_total`）时，`streaming=1` 的画面必须与
   `streaming=0` **在 4 张 GBuffer 上逐位相同** —— 这是"间接层没有算错偏移"的唯一硬证据。
+  - **⚠ 2026-09-21 判据修正（本条按字面不可达，必须改口径）**：上式的"逐位相同"**做不到**，
+    而且原因与本任务无关 —— §14.31 ⑩（原始证据见 `build/verify/t22_report.md:269-273`）已实测：
+    **模块接管档两次「完全相同」的运行之间就不是逐位可复现的**，20 个转储里 7 个不同，
+    且**恰好是 `albedo / gb_normal / gb_worldpos / gb_lightmapkey` 这 4 张 GBuffer**
+    （+ `hdr` + `prov0_ao_{final,raw}` 抖动族）；像素级量级为 `lightmapkey.page` 平均差 18.8、
+    worldpos 平均差 0.104、**87.6% 的像素胜出实例不同**（根因是软光栅深度键平局由 UAV 写序决定）。
+    ⇒ 照字面执行只会得到两种坏结果：**误判自己的间接层错了**，或**悄悄放宽判据不说清**。
+  - **改用三分口径（默认项，已在实现期以消息送达实现者）**：
+    - **(d1) 数据类读数逐位相同**：`soft_clusters` / `hard_clusters` / `soft_pixels` / `hard_pixels` /
+      `prims` / `size_dist` 五桶 / `page_misses` / `resident` / `pages_total` 在
+      `streaming=1`（页池足够大）与 `streaming=0` 之间**完全一致**；其中
+      **`page_misses == 0` 且"全部页驻留"是必要条件**。这类读数任务 23 已证明**逐位可复现**
+      （8 个日志的 `size_dist` 取值唯一）⇒ 它是"页表/间接层没算错"的**最强证据**。
+    - **(d2) 像素类差异不得超过"噪声底"**：用**同配置跑两次**（`streaming=0` 两次）作噪声底，
+      与 `streaming=1` vs `streaming=0` 的逐文件 `diff_px` / `maxULP` **并列比较**
+      （工具即仓库既有的 `build/verify/cmp_dumps.py <A> <B>`，验收判据 ② 正是这么用的）。
+      **某一项明显超出噪声底才是间接层真错了。**
+    - **(d3) 结构性证据**：`resident == pages_total`、`uploads_this_frame ≤ 每帧上限`、
+      请求到驻留延迟与 `kNaniteFeedbackLatency` 一致（都在读数里）。
+  - **要求**：实现者必须在 §14.37 里**写出"判据 (d) 原始形式不可达"及实际采用的口径与实测数值**，
+    不允许悄悄放宽。
 - (e) **反馈时延**：`uploads_this_frame ≤ kNanitePageUploadsPerFrame`；请求到驻留的延迟可读且与
   `kNaniteFeedbackLatency` 一致。
 - (f) 判据 ⑦/⑧ 保持 PASS（跑 ≥2 次，注意既有抖动史）。
