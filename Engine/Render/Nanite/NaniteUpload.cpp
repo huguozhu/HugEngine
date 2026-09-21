@@ -1158,10 +1158,19 @@ bool BuildNaniteAssetFromGeometry(std::span<const float>                position
 }
 
 // ============================================================
-// 【§14.8 任务 19】簇 → 源网格 → 材质 的映射
+// 【§14.8 任务 19 / 25】簇 → 源网格 → 材质 的映射
 //
 // 规则与理由写在 `NaniteUpload.h` 的同名小节里；这里只留与代码逐句对应的实现注释。
 // 输入保证（调用方 = `MeshBatcher` 的构建顺序）：`meshes[i]` 的三角形区间首尾相接、升序。
+//
+// 【两个函数的分工（§14.8 任务 25 修复的要点）】
+//   · `NaniteAssignClusterMaterials`：**三角形下标空间**的低层规则 —— 直接用
+//     `cluster.triangleOffset + k` 去查 `meshes[]`。只有在"调用方已保证该字段是**合并空间**
+//     的三角形下标"时才成立（真实资产不成立，实测 Sponza 的 4103/8287 会落空、另有
+//     3957/4099 个 LOD0 簇选错网格）。
+//   · `NaniteAssignClusterMaterialsByVertexOwner`：**顶点归属空间** —— 资产构建器用这个。
+//     它不读 `triangleOffset`，而是用 DAG 里"每次出现 → 网格顶点"的映射把簇的三角形还原成
+//     **原始合并顶点下标**，再用"顶点 → 源网格"归属表定源网格 ⇒ 对所有 LOD 级与去重状态都成立。
 // ============================================================
 namespace {
 
@@ -1185,6 +1194,9 @@ namespace {
     }
     return (u32)meshes.size();
 }
+
+/// "顶点查不到源网格"哨兵（与 `kNaniteNoParentCluster` 一样是**有意义**的取值，不是越界值）
+constexpr u32 kNoSourceMesh = 0xFFFFFFFFu;
 
 } // namespace
 
@@ -1237,6 +1249,137 @@ NaniteClusterMaterialMapStats NaniteAssignClusterMaterials(
     return stats;
 }
 
+NaniteClusterMaterialMapStats NaniteAssignClusterMaterialsByVertexOwner(
+        std::span<const u32>                   indices,
+        u32                                    vertexCount,
+        std::span<const NaniteSourceMeshRange> meshes,
+        const NaniteClusterDAG&                dag,
+        std::span<u32>                         outClusterMaterialIndex) {
+    NaniteClusterMaterialMapStats stats{};
+    const usize occurrenceCount = dag.clusters.size();
+    if (outClusterMaterialIndex.size() < occurrenceCount) return stats;   // 防御：输出不够就不写
+    if (occurrenceCount == 0u) return stats;
+
+    // ── ① 「顶点 → 源网格」归属表（**只在原始合并空间里有定义**）──
+    //   为什么由"原始索引 + 三角形区间"反推、而不是让调用方多传一份顶点区间：
+    //     `meshes[]` 已经完整（区间首尾相接、覆盖全部原始三角形），每个原始三角形的 3 个顶点
+    //     必然都落在它所属网格那一段里，所以扫一遍原始索引就能把归属表建全 —— **零新增输入**。
+    //   每个顶点只写一次（不同源网格的顶点区间互不相交：合批时每个网格各拷一份自己的顶点）。
+    std::vector<u32> ownerOfVertex(vertexCount, kNoSourceMesh);
+    for (usize m = 0u; m < meshes.size(); ++m) {
+        const NaniteSourceMeshRange& range = meshes[m];
+        const u64 firstTri = (u64)range.firstTriangle;
+        const u64 endTri   = firstTri + (u64)range.triangleCount;
+        for (u64 tri = firstTri; tri < endTri; ++tri) {
+            const u64 base = tri * (u64)kNaniteIndicesPerTriangle;
+            // 防御：区间越出索引表 ⇒ 跳过这个三角形（绝不越界读；调用方数据坏了也不崩）
+            if (base + 2u >= (u64)indices.size()) break;
+            for (u32 k = 0u; k < kNaniteIndicesPerTriangle; ++k) {
+                const u32 vertex = indices[(usize)base + k];
+                if ((usize)vertex < ownerOfVertex.size()) ownerOfVertex[vertex] = (u32)m;
+            }
+        }
+    }
+
+    // ── ② 逐"出现"投票：每个三角形投给"它 3 个顶点里占多数的那个源网格" ──
+    //   票数缓冲提到循环外只做清零，避免每簇一次堆分配（Sponza 8287 簇 / 103 网格）。
+    std::vector<u32> votes(meshes.size(), 0u);
+    for (usize ci = 0u; ci < occurrenceCount; ++ci) {
+        const NaniteClusterRecord& cluster = dag.clusters[ci];
+        u32 fallbackMaterial = meshes.empty() ? 0u : meshes[0].materialIndex;
+        if (cluster.triangleCount == 0u || meshes.empty()) {
+            outClusterMaterialIndex[ci] = fallbackMaterial;
+            continue;
+        }
+
+        // 该出现的共享内容下标与它的三角形区间（防御：任何一处越界都按"未映射"处理）
+        bool usable = (ci < dag.clusterUnique.size()) &&
+                      (ci < dag.clusterVertexIndexOffset.size()) &&
+                      (ci < dag.clusterVertexCount.size());
+        u32 unique = 0u;
+        if (usable) {
+            unique = dag.clusterUnique[ci];
+            usable = (unique < dag.uniqueTriangleOffset.size()) &&
+                     (unique < dag.uniqueTriangleCount.size());
+        }
+        u32 triBase = 0u;
+        if (usable) {
+            triBase = dag.uniqueTriangleOffset[unique];
+            usable = (usize)triBase + cluster.triangleCount <= dag.uniqueTriangles.size();
+        }
+        const u32 vertexBase = usable ? dag.clusterVertexIndexOffset[ci] : 0u;
+        const u32 localVertexCount = usable ? dag.clusterVertexCount[ci] : 0u;
+        if (usable && (usize)vertexBase + localVertexCount > dag.clusterVertexIndices.size()) {
+            usable = false;
+        }
+        if (!usable) {
+            ++stats.unmappedClusters;
+            outClusterMaterialIndex[ci] = fallbackMaterial;
+            continue;
+        }
+
+        std::fill(votes.begin(), votes.end(), 0u);
+        u32 mappedTriangles = 0u;
+        for (u32 t = 0u; t < cluster.triangleCount; ++t) {
+            const NanitePackedTriangle& packed = dag.uniqueTriangles[(usize)triBase + t];
+            const u32 local[3] = { NaniteTriangleIndex0(packed),
+                                   NaniteTriangleIndex1(packed),
+                                   NaniteTriangleIndex2(packed) };
+            // 三角形自己的三个顶点里，投给多数归属（平票取下标更小的网格；全无归属 ⇒ 弃权）
+            u32 candidate[3] = { kNoSourceMesh, kNoSourceMesh, kNoSourceMesh };
+            u32 candidateVotes[3] = { 0u, 0u, 0u };
+            u32 candidateCount = 0u;
+            for (u32 k = 0u; k < kNaniteIndicesPerTriangle; ++k) {
+                if (local[k] >= localVertexCount) continue;   // 防御：局部下标越出本簇顶点表
+                const u32 vertex = dag.clusterVertexIndices[(usize)vertexBase + local[k]];
+                const u32 owner = ((usize)vertex < ownerOfVertex.size()) ? ownerOfVertex[vertex]
+                                                                        : kNoSourceMesh;
+                if (owner == kNoSourceMesh || owner >= (u32)meshes.size()) continue;
+                u32 slot = 0u;
+                while (slot < candidateCount && candidate[slot] != owner) ++slot;
+                if (slot == candidateCount) {
+                    if (candidateCount >= 3u) continue;   // 不可能：最多 3 个不同顶点
+                    candidate[candidateCount] = owner;
+                    candidateVotes[candidateCount] = 0u;
+                    ++candidateCount;
+                }
+                ++candidateVotes[slot];
+            }
+            if (candidateCount == 0u) continue;   // 这个三角形一个顶点都查不到归属 ⇒ 弃权
+            u32 bestSlot = 0u;
+            for (u32 slot = 1u; slot < candidateCount; ++slot) {
+                // 平票取**下标更小**的网格（`>` 而非 `>=`），与全部映射规则同口径
+                if (candidateVotes[slot] > candidateVotes[bestSlot] ||
+                    (candidateVotes[slot] == candidateVotes[bestSlot] &&
+                     candidate[slot] < candidate[bestSlot])) {
+                    bestSlot = slot;
+                }
+            }
+            ++votes[candidate[bestSlot]];
+            ++mappedTriangles;
+        }
+
+        // 多数票：票数最大者胜；平票取下标更小的网格（`>` 而非 `>=`）
+        u32 bestMesh = kNoSourceMesh;
+        u32 bestVotes = 0u;
+        u32 contributingMeshes = 0u;
+        for (u32 m = 0u; m < (u32)votes.size(); ++m) {
+            if (votes[m] == 0u) continue;
+            ++contributingMeshes;
+            if (votes[m] > bestVotes) { bestVotes = votes[m]; bestMesh = m; }
+        }
+
+        if (bestMesh >= (u32)meshes.size() || mappedTriangles == 0u) {
+            ++stats.unmappedClusters;
+            outClusterMaterialIndex[ci] = fallbackMaterial;
+            continue;
+        }
+        if (contributingMeshes > 1u) ++stats.multiMeshClusters;
+        outClusterMaterialIndex[ci] = meshes[bestMesh].materialIndex;
+    }
+    return stats;
+}
+
 // ============================================================
 // §14.8 任务 19：带"簇 → 源网格 → 材质"映射的资产构建重载
 // ============================================================
@@ -1247,25 +1390,29 @@ bool BuildNaniteAssetFromGeometry(std::span<const float>                  positi
                                   std::span<const NaniteMaterialRecord>   materials,
                                   std::span<const NaniteSourceMeshRange>  meshes,
                                   NanitePackedAsset&                      outResult) {
-    // ① 先按任务 12/18 的老路径产出一份**完整且已自校验**的资产（不含逐簇材质）
+    // ① LOD 链 + DAG 去重（任务 9）⇒ ② 量化 + 打包 + 自校验（任务 10）。
+    //    【与旧口径的差别（§14.8 任务 25）】这里**显式持有 DAG**，因为逐簇材质映射必须用
+    //    "每次出现 → 网格顶点"的映射才能落在与 `meshes[]` 相同的（原始合并）空间里；
+    //    两步合起来与 6 参数重载逐字等价（那个重载内部就是这两次调用）。
+    NaniteClusterDAG dag;
+    if (!BuildNaniteClusterDAG(positions, normals, uvs, indices, dag)) return false;
     NanitePackedAsset asset;
-    if (!BuildNaniteAssetFromGeometry(positions, normals, uvs, indices, materials, asset)) {
-        return false;
-    }
+    if (!PackNaniteClusters(positions, normals, uvs, materials, dag, asset)) return false;
     if (meshes.empty() || asset.clusters.empty()) {
         outResult = std::move(asset);   // 没有映射输入 / 空资产 ⇒ 与旧重载完全同义
         return true;
     }
 
-    // ② 逐簇映射（多数票）并把材质段下标写进簇记录的 `materialID`（§8.1 的"bindless 材质"字段）
+    // ③ 逐簇映射（顶点归属空间 + 多数票）并把材质段下标写进簇记录的 `materialID`（§8.1 字段）
     std::vector<u32> clusterMaterial(asset.clusters.size(), 0u);
     const NaniteClusterMaterialMapStats mapStats =
-        NaniteAssignClusterMaterials(asset.clusters, meshes, clusterMaterial);
+        NaniteAssignClusterMaterialsByVertexOwner(indices, (u32)(positions.size() / 3u), meshes,
+                                                  dag, clusterMaterial);
     for (usize i = 0u; i < asset.clusters.size(); ++i) {
         asset.clusters[i].materialID = clusterMaterial[i];
     }
 
-    // ③ **改记录就必须改镜像**：把簇段重新拷回字节镜像，并再跑一次 `ValidateNaniteFile`
+    // ④ **改记录就必须改镜像**：把簇段重新拷回字节镜像，并再跑一次 `ValidateNaniteFile`
     //    （段表/长度/对齐没变，校验的是"镜像与分段视图仍然自洽且合法"）。失败 ⇒ 不改写出参。
     std::memcpy(asset.bytes.data() + asset.layout.clusterOffset, asset.clusters.data(),
                 asset.clusters.size() * sizeof(NaniteClusterRecord));
@@ -1275,7 +1422,7 @@ bool BuildNaniteAssetFromGeometry(std::span<const float>                  positi
     }
     if (checked.totalBytes != asset.layout.totalBytes) return false;
 
-    // ④ 如实读数：跨网格簇数 / 未映射簇数 / 材质段的"内容各不相同"记录数 / 带 BaseColor 纹理数
+    // ⑤ 如实读数：跨网格簇数 / 未映射簇数 / 材质段的"内容各不相同"记录数 / 带 BaseColor 纹理数
     asset.stats.multiMeshClusters = mapStats.multiMeshClusters;
     asset.stats.unmappedClusters  = mapStats.unmappedClusters;
     u32 distinct = 0u;
