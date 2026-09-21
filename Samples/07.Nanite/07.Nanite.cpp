@@ -634,17 +634,27 @@ int main() {
             naniteSettings.softMaxTriangles = (u32)std::max(1, std::min(
                 GetInt(cfgData, "nanite_soft_max_triangles", (int)naniteSettings.softMaxTriangles),
                 (int)render::kNaniteMaxClusterTriangles));
+            // 任务 22 的**硬光栅分流**开关（默认 0 = 关闭）：cfg → 真值，写法与上面完全同构。
+            // 1 ⇒ `triangleCount > nanite_soft_max_triangles` 的簇改走模块自己的 mesh shader 硬光栅
+            // （§5.2 的混合光栅）；0 ⇒ 大簇仍被软光栅跳过并计进 `skipped_big`（任务 18/21 的行为）。
+            // 【为什么默认 0】判据 ⑧b 只允许 4 个 GBuffer 目标 + 抖动族变化，而默认阈值 16 档下
+            //   模块覆盖率只有 0.16%（阈值 64 档 44.4%）—— 分流会把覆盖率抬到几十个百分点，
+            //   `prov1_*/rsm_*/ssr` 必然跟着变 ⇒ 默认开启会立刻打红 ⑧b。理由的全文见
+            //   `NaniteSettings::hardRaster` 的注释块。
+            naniteSettings.hardRaster = GetInt(cfgData, "nanite_hard_raster",
+                                               naniteSettings.hardRaster ? 1 : 0) != 0;
             deferredPipeline.SetNaniteSettings(naniteSettings);
             HE_CORE_INFO("[Nanite] 配置恢复: nanite_enable={} nanite_fake_clusters={} "
                          "nanite_test_write={} nanite_mesh_test={} nanite_instance_test_count={} "
                          "nanite_hiz={} nanite_hiz_flip={} nanite_fake_chain={} nanite_draw_capacity={} "
-                         "nanite_soft_raster={} nanite_soft_max_triangles={}",
+                         "nanite_soft_raster={} nanite_soft_max_triangles={} nanite_hard_raster={}",
                          naniteSettings.enabled ? 1 : 0, naniteSettings.fakeClusters,
                          naniteSettings.testWrite ? 1 : 0, naniteSettings.meshTest ? 1 : 0,
                          naniteSettings.instanceTestCount, naniteSettings.hiz ? 1 : 0,
                          naniteSettings.hizFlip ? 1 : 0,
                          naniteSettings.fakeChain ? 1 : 0, naniteSettings.drawCapacity,
-                         naniteSettings.softRaster ? 1 : 0, naniteSettings.softMaxTriangles);
+                         naniteSettings.softRaster ? 1 : 0, naniteSettings.softMaxTriangles,
+                         naniteSettings.hardRaster ? 1 : 0);
         }
 
         auto& ae = deferredPipeline.GetAutoExposure();
@@ -1374,6 +1384,30 @@ int main() {
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("任务 6 mesh PSO 自证开关，默认关；\n"
                                       "开启后多一个 Nanite_MeshTest pass（写模块自建 1×1 目标，画面不变）");
+                // ── 任务 22 的硬光栅分流开关（默认关）──
+                // 勾上后 `triangleCount > nanite_soft_max_triangles` 的簇改走模块自己的 mesh shader
+                // 硬光栅（§5.2 的混合光栅）。它会**真的改变画面**（接管了原本被软光栅跳过、由
+                // GB_Clear 清成空白的那些大簇），并且会写深度附件 ⇒ 下游 SSAO/SSR/Hi-Z 都会跟着变，
+                // 故默认关闭（理由全文见 `NaniteSettings::hardRaster`）。自动化用 cfg 键
+                // `nanite_hard_raster`（配合 `nanite_soft_max_triangles` 造大小簇混合档）。
+                bool naniteHardRaster = naniteSettings.hardRaster;
+                if (ImGui::Checkbox("硬光栅分流：mesh shader 画大簇（任务 22）##nanite_hr",
+                                    &naniteHardRaster)) {
+                    naniteSettings.hardRaster = naniteHardRaster;
+                    // 【顺带把设计 §14.4 的档位标签对齐】`rasterMode` 是"软光栅 / 混合光栅"这个
+                    //   面板下拉的枚举占位；勾上硬光栅就是"混合光栅"，取消就是"软光栅"。
+                    //   真值仍在 `hardRaster`（本开关），这里只是让两处标签不再互相矛盾。
+                    naniteSettings.rasterMode = naniteHardRaster ? render::NaniteRasterMode::Hybrid
+                                                                 : render::NaniteRasterMode::Soft;
+                    dp->SetNaniteSettings(naniteSettings);
+                    HE_CORE_INFO("[Nanite] 面板硬光栅分流: hard_raster={}",
+                                 naniteSettings.hardRaster ? 1 : 0);
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("任务 22：cluster.triCount > nanite_soft_max_triangles（默认 16）\n"
+                                      "的簇改走 mesh shader 硬光栅（§5.2 的混合光栅分流）。\n"
+                                      "默认关：大簇仍被软光栅跳过（skipped_big），与任务 21 逐位一致。\n"
+                                      "开启会改变画面并写深度附件（下游 SSAO/SSR/Hi-Z 都会变）。");
             }
 
             // ── GI 通道：Diffuse / Specular / AO / Shadow ──
@@ -1871,6 +1905,17 @@ int main() {
             if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
                 dpNanite->GetNanite().LogSoftRasterReadback();
 
+            // ── Nanite（§14.8 任务 22）：硬光栅（mesh shader 分流）的**恰好一行**真实 GPU 读回 ──
+            // 字段：clusters/prims/pixels/fallback_pixels（硬光栅侧）+ soft_clusters/soft_pixels/
+            //       skipped_big（同一帧的软光栅侧对照）+ hard_share_permille/soft_share_permille
+            //       （"软硬占比"，按像素算的千分比）。
+            // 【为什么单起一行】判据 ⑧a 按**字段名**读上面那条 `soft_raster` 行，改它的字段会
+            // 直接判红；软硬占比由两条行并列读出。
+            // 同步同样依赖上面的 `WaitIdle()`；`nanite_hard_raster=0`（默认）时模块内部直接返回、
+            // 不打印，因此不改变任何既有档位的日志。
+            if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
+                dpNanite->GetNanite().LogHardRasterReadback();
+
             const String dir  = "build/verify/";
             const String base = dir + "gi_" + g_DumpTag;
             std::filesystem::create_directories(dir);
@@ -2019,6 +2064,11 @@ int main() {
             std::to_string(deferredPipeline.GetNaniteSettings().softRaster ? 1 : 0);
         out["nanite_soft_max_triangles"] =
             std::to_string(deferredPipeline.GetNaniteSettings().softMaxTriangles);
+        // 任务 22：硬光栅分流开关（默认 0）——同写法回写。
+        // 【为什么必须回写】冒烟脚本靠 cfg 键驱动档位（`nanite_enable=1;nanite_hard_raster=1`
+        // 就是任务 22 的受测档）；缺这一行会让档位在下一次运行时被写回成默认值、档位互相污染。
+        out["nanite_hard_raster"] =
+            std::to_string(deferredPipeline.GetNaniteSettings().hardRaster ? 1 : 0);
 
         // ── AutoExposure ──
         auto& ae = deferredPipeline.GetAutoExposure();
