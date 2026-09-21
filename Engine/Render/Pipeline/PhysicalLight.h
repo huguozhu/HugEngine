@@ -35,7 +35,7 @@ inline bool IsPhysicalLightEnabled(float physicalValue) {
 // 物理光照系统（LightComponent::illuminance/luminousIntensity）使用真实
 // 物理单位：方向光太阳照度可达 12 万 lux、点光发光强度为坎德拉量级。
 // 若直接作为 shader 的 colorIntensity.w（radiance 乘数），会把 HDR 打到
-// ACES 饱和爆白。无自动曝光的管线（Forward/HybridRT/PathTracing）在收集
+// ACES 饱和爆白。无自动曝光的管线（Forward/PathTracing）在收集
 // 光源时需乘此系数换算到渲染强度量级（≈EV15 晴日曝光）。
 // 注意：Deferred 管线有自动曝光（r.AutoExposure.WhitePoint），不需要此换算。
 // ============================================================

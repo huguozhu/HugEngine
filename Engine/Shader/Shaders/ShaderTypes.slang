@@ -98,7 +98,7 @@ GPU_CONST(GPU_UINT kGPUBinding_RSMIndirect    = 5);  // RSM 间接光 E（半分
 GPU_CONST(GPU_UINT kGPUBinding_LightmapKey    = 30);  // GBuffer 光照图键（uv0.xy + objectIndex）
 GPU_CONST(GPU_UINT kGPUBinding_Lightmap       = 7);   // 烘焙光照图（Texture2DArray，页=物体）—— 暂未使用
 
-// --- Hybrid RT 管线 Binding 索引（Lighting 采样 RT 效果输出纹理）---
+// --- 光追（RT）效果 Binding 索引（Lighting 采样 RT 效果输出纹理）---
 GPU_CONST(GPU_UINT kGPUBinding_RT_ShadowMask = 24);  // RT 阴影遮罩（R16_FLOAT）
 GPU_CONST(GPU_UINT kGPUBinding_RT_Reflection = 25);  // RT 反射（RGBA16_FLOAT）
 GPU_CONST(GPU_UINT kGPUBinding_RT_AO         = 26);  // RT 环境光遮蔽（R8_UNORM）

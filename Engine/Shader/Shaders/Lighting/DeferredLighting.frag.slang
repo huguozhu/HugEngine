@@ -58,7 +58,7 @@ struct VSOutput {
 [[vk::binding(kGPUBinding_Lumen, kGPUDescSet_PerFrame)]] Texture2D<float4> u_Lumen;  // Lumen 输出（间接漫反射/镜面共用）
 [[vk::binding(kGPUBinding_DDGIProbes, kGPUDescSet_PerFrame)]] StructuredBuffer<float4> u_DDGIProbes;  // DDGI 探针数据（步骤 30：每探针 4 float4 的 SH）
 
-// Hybrid RT 效果输出纹理（由 HybridRTPipeline 通过 LightingPass 绑定）
+// RT 效果输出纹理（由 DeferredPipeline 通过 LightingPass 绑定）
 // 通过 push constant 的 rt*Source 字段在 shader 内选择 RT 或屏幕空间源
 [[vk::binding(kGPUBinding_RT_ShadowMask, kGPUDescSet_PerFrame)]] Texture2D<float>  u_RT_ShadowMask;  // RT 阴影遮罩（0=全影, 1=无影）
 [[vk::binding(kGPUBinding_RT_Reflection, kGPUDescSet_PerFrame)]] Texture2D<float4> u_RT_Reflection;  // RT 反射（rgb=反射色, a=有效标记）

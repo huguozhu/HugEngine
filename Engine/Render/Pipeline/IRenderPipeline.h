@@ -81,7 +81,7 @@ public:
     /// 获取该管线的 GI 通道配置（各管线独立——可用通道子集不同）
     virtual GIConfig* GetGIConfig() { return nullptr; }
 
-    /// 该管线支持的 GI 通道能力位（PipelineCaps::Forward/Deferred/HybridRT）
+    /// 该管线支持的 GI 通道能力位（PipelineCaps::Forward / PipelineCaps::Deferred）
     virtual u32 GetGIPipelineCaps() const { return 0; }
 
     // ---- Shader 热重载 ----

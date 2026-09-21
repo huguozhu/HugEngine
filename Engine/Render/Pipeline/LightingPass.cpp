@@ -124,7 +124,7 @@ void LightingPass::Render(rhi::IRHICommandList* cmd, const LightingInputs& in) {
     // RSM 间接光 E（半分辨率）：线性采样以便升采样到全分辨率；未产出时黑色占位（无间接光）
     bindTex(kGPUBinding_RSMIndirect, in.rsmIndirectTex, m_HDRSampler.get(), black);
 
-    // ── 绑定 Hybrid RT 效果输出纹理（未提供时回落到中性占位）──
+    // ── 绑定光追（RT）效果输出纹理（未提供时回落到中性占位）──
     // 阴影/AO 遮罩用线性采样上采样到全分辨率；反射/GI HDR 结果用线性采样
     bindTex(kGPUBinding_RT_ShadowMask, in.rtShadowMask, m_HDRSampler.get(), m_PlaceholderWhite.get());  // RT 阴影遮罩
     bindTex(kGPUBinding_RT_Reflection, in.rtReflection, m_HDRSampler.get(), black);   // RT 反射
@@ -365,7 +365,7 @@ void LightingPass::CreatePSOAndDescriptorSet(rhi::IRHIDevice* device) {
             updateAllTex(kGPUBinding_LightmapKey, m_PlaceholderBlack.get());
 
             // SSGI/SSAO/SSR 占位（19/20/21）：
-            // HybridRT 不计算屏幕空间效果，对应 RT 效果关闭时 shader 回退采样这些纹理。
+            // 光追效果关闭、回退屏幕空间源时，shader 会采样这些纹理。
             // 必须绑定中性占位，避免采样未初始化描述符 → 黑屏。
             //   SSGI → 黑（无间接漫反射），SSAO → 白（无遮蔽），SSR → 黑（无镜面反射）
             updateAllTex(kGPUBinding_SSGI, m_PlaceholderBlack.get());

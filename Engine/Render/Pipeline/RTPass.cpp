@@ -57,7 +57,7 @@ bool RTPass::Initialize(rhi::IRHIDevice* device,
     }
 
     // 1. 创建 RT Pipeline State（AS-only 模式：rtShaders 为空则跳过管线+SBT，
-    //    仅构建 BLAS/TLAS——HybridRT 的效果管线由 RTEffectPass 各自创建）
+    //    仅构建 BLAS/TLAS——各 RT 效果的管线由 RTEffectPass 各自创建）
     if (!rtShaders.empty()) {
         rhi::RTPipelineStateDesc rtpDesc;
         rtpDesc.shaders        = rtShaders;
@@ -201,7 +201,7 @@ bool RTPass::CreateSBT(rhi::IRHIDevice* device) {
 }
 
 // ============================================================
-// CreateEffectPipeline — 创建独立 RT 效果管线 + SBT（HybridRT 使用）
+// CreateEffectPipeline — 创建独立 RT 效果管线 + SBT（Deferred 的 RT 效果使用）
 // ============================================================
 RTPass::RTEffectPipeline RTPass::CreateEffectPipeline(
     rhi::IRHIDevice* device,

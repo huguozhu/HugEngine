@@ -11,7 +11,7 @@ namespace he::render {
 
 // ============================================================
 // RTExecuteContext — RT 效果 Pass 每帧执行上下文
-// 由 HybridRTPipeline 在 BuildFrameGraph 的 RT Pass lambda 中填充
+// 由 DeferredPipeline 在 BuildFrameGraph 的 RT Pass lambda 中填充
 // ============================================================
 struct RTExecuteContext {
     float4x4 invViewProj = float4x4(1.0f);   // 逆 ViewProj（深度 → 世界坐标）
@@ -39,7 +39,7 @@ struct RTExecuteContext {
 // ============================================================
 // RTEffectPass — RT 效果 Pass 基类
 //
-// 为 HybridRT 的每个 RT 效果（阴影/反射/AO/GI）提供公共能力：
+// 为 Deferred 的每个 RT 效果（阴影/反射/AO/GI）提供公共能力：
 //   1. set0 RayGen 描述符集布局创建 + 描述符集分配
 //   2. 独立效果 RT 管线 + SBT（RTPass::CreateEffectPipeline）
 //   3. 输出 UAV 纹理创建

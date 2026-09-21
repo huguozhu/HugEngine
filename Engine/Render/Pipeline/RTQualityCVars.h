@@ -5,8 +5,8 @@
 namespace he::render {
 
 // ============================================================
-// RTQualityCVars — HybridRT 质量参数 CVar 声明（定义见 .cpp）
-// 所有 r.RT.* CVar 集中于此，RT Passes 与 HybridRTPipeline 统一 include 访问
+// RTQualityCVars — 光追质量参数 CVar 声明（定义见 .cpp）
+// 所有 r.RT.* CVar 集中于此，各 RT 效果 Pass 统一 include 访问
 // ============================================================
 // 开关
 extern CVar<bool>  cvRTShadow;          // r.RT.Shadow            RT 阴影开关

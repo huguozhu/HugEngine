@@ -125,7 +125,7 @@ public:
     rhi::IRHIAccelerationStructure* GetTLAS() const { return m_TLAS.get(); }
 
     // ============================================================
-    // 多管线工厂（HybridRT 效果 Pass 使用）
+    // 多管线工厂（Deferred 的 RT 效果 Pass 使用）
     // RTPass 本身保留单一管线（向后兼容 03.Sponza-Forward），此工厂用于
     // 为每个 RT 效果（阴影/反射/AO/GI）创建独立管线 + SBT。
     // ============================================================
