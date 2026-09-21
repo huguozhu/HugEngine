@@ -1,6 +1,6 @@
 # HugEngine RHI 相对于 UE5 的功能缺口分析
 
-> 分析日期：2026-07-17 | 基于 RHI 架构分析文档的延续
+> 分析日期：2026-09-21 | 基于 RHI 架构分析文档的延续
 
 ---
 
@@ -15,8 +15,8 @@ UE5 RHI 有一套成熟的 **RHI Thread** 架构：
 │  Game Thread  →  Render Thread  →  RHI Thread  │  ← UE5
 │  (逻辑/提交)     (可见性/剔除)    (API 调用)      │
 ├──────────────────────────────────────────────┤
-│  Main Thread  →  CommandList::Submit            │  ← HugEngine
-│  (逻辑+渲染+API 调用在同一线程)                    │
+│  Main Thread  →  JobSystem 并行录制  →  Submit   │  ← HugEngine
+│  (逻辑+主 CB)     (Secondary CB)        (提交)     │
 └──────────────────────────────────────────────┘
 ```
 
@@ -24,7 +24,7 @@ UE5 RHI 有一套成熟的 **RHI Thread** 架构：
 | 特性 | UE5 | HugEngine |
 |------|-----|-----------|
 | 专用 RHI 线程 | `FRHIThread` 将 API 调用卸载到独立线程 | 无（Secondary CB 仅支持并行录制，提交仍在主线程） |
-| 命令列表多线程录制 | `FRHICommandList` 可在任意线程创建并录制 | `VulkanCommandList` 有 Secondary CB 支持但整体未独立 |
+| 命令列表多线程录制 | `FRHICommandList` 可在任意线程创建并录制 | ⚠️ `VulkanCommandList` 支持 Secondary CB；`ForwardPipeline` 已用 JobSystem 分块并行录制（每线程一条独立 sec CL），提交仍在主线程 |
 | 线程安全资源管理 | `FThreadSafeRHI` 保证跨线程安全 | 无线程安全机制 |
 | RHI 命令批处理 | 命令缓冲在 Immediata/Deferred 模式间切换 | 无批处理 |
 
@@ -34,23 +34,23 @@ UE5 的核心基础设施：
 
 | 特性 | UE5 | HugEngine |
 |------|-----|-----------|
-| **自动 Barrier 生成** | `RHICmdList.Transition()` 自动插入布局转换和同步 | 手动调用 `PipelineBarrier()`，无状态追踪 |
-| **子资源状态追踪** | 纹理每个 subresource 独立追踪状态（mip/array/slice 级别） | 仅有整资源级别的 `ResourceState` 枚举 |
-| **状态去重** | 引擎追踪当前状态，跳过冗余 Barrier | 每次屏障都发出，可能产生冗余 |
+| **自动 Barrier 生成** | `RHICmdList.Transition()` 自动插入布局转换和同步 | RHI 层只有手动 `PipelineBarrier()`；L3 的 `RenderGraph::DeriveBarriers()` 按拓扑序自动推导并插入（含导入资源真实布局查询） |
+| **子资源状态追踪** | 纹理每个 subresource 独立追踪状态（mip/array/slice 级别） | 仅有整资源级别的 `ResourceState` 枚举（另有视图级 `TextureLayoutTracker` 记录真实布局） |
+| **状态去重** | 引擎追踪当前状态，跳过冗余 Barrier | `DeriveBarriers()` 追踪当前状态，状态未变时不发 Barrier；RHI 层手动调用不保证去重 |
 | **Split Barrier** | 支持 `VK_KHR_synchronization2` / `VK_PIPELINE_STAGE_2_*` | 仅使用传统 `VkMemoryBarrier` / `VkImageMemoryBarrier` |
-| **跨队列自动同步** | `ERHIAccess` + 自动所有权转移 | 需手动调用 `QueueOwnershipTransfer()` |
+| **跨队列自动同步** | `ERHIAccess` + 自动所有权转移 | RenderGraph 的 AsyncCompute 路径自动插入跨队列 Barrier 与 `QueueOwnershipTransfer()`；直接使用 RHI 时仍需手动调用 |
 
 ### 1.3 资源池化与缓存
 
 | 特性 | UE5 | HugEngine |
 |------|-----|-----------|
-| **渲染目标池** | `FRenderTargetPool` 管理瞬态纹理的分配/回收/别名 | 无，每次手动 `CreateTexture` |
-| **PSO 缓存** | `FPipelineCacheFile` 磁盘持久化 + base/derived pipeline 派生 | 无 PSO 缓存 |
-| **Pipeline Library** | 使用 `VK_KHR_pipeline_library` 加速 PSO 编译 | 未使用 |
+| **渲染目标池** | `FRenderTargetPool` 管理瞬态纹理的分配/回收/别名 | ⚠️ 有 RenderGraph 别名分析 + `TransientResourceAllocator`（128MB × 2 Heap），但没有独立的池化分配器 |
+| **PSO 缓存** | `FPipelineCacheFile` 磁盘持久化 + base/derived pipeline 派生 | ⚠️ 已有 `VkPipelineCache` 磁盘持久化 + 内存哈希复用 + GPL 四段库；未使用 base/derived pipeline 派生 |
+| **Pipeline Library** | 使用 `VK_KHR_pipeline_library` 加速 PSO 编译 | ⚠️ 已用于 GPL 四段库 + fast-link（图形管线；RT 管线未使用） |
 | **Pipeline Derivatives** | 利用 `VK_PIPELINE_CREATE_DERIVATIVE_BIT` 快速创建变体 | 未使用 |
-| **描述符集缓存** | 线程本地描述符堆，按需分配和复用 | 全局单一 `VkDescriptorPool`，无分层缓存 |
+| **描述符集缓存** | 线程本地描述符堆，按需分配和复用 | 全局单一 `VkDescriptorPool` + 设备级 bindless 堆（槽位环形分配/回收） |
 | **上传堆** | `FRHIUploadHeap` 环形缓冲池化动态数据上传 | `BufferDesc::initialData` 每次创建 staging buffer |
-| **瞬态资源管理** | `RHICmdList::CreateTransientResource` 内存别名、lazy allocation | 无 |
+| **瞬态资源管理** | `RHICmdList::CreateTransientResource` 内存别名、lazy allocation | ⚠️ 有 `TransientResourceAllocator`（帧内 bump 子分配 + VkImage 缓存 + 双缓冲 Heap），RenderGraph 对所有别名资源走此路径 |
 | **纹理流送** | `FRHITexture` 支持部分常驻（sparse binding / tiled resources） | 无稀疏纹理支持 |
 
 ### 1.4 调试与诊断
@@ -58,10 +58,10 @@ UE5 的核心基础设施：
 | 特性 | UE5 | HugEngine |
 |------|-----|-----------|
 | **GPU 崩溃定位** | `BreadcrumbContext` 记录 GPU 进度，崩溃时定位问题命令 | 无 |
-| **GPU Profiler** | `Tracy`/`RenderDoc` 集成 + 内置 `Stat GPU` 系统 | 仅有 `VulkanQueryPool` 时间戳查询 |
-| **事件标记** | 每个 Draw/Dispatch 自动插入 `PROFILE_Gpu(RenderPass)` | 无 debug marker/label 支持 |
-| **资源命名** | `BindDebugLabelName()` 对所有资源命名 | 仅有 PSO `debugName` 字符串 |
-| **管线统计** | `VK_QUERY_TYPE_PIPELINE_STATISTICS` 查询 VS/PS 调用次数 | 仅 `VK_QUERY_TYPE_TIMESTAMP` |
+| **GPU Profiler** | `Tracy`/`RenderDoc` 集成 + 内置 `Stat GPU` 系统 | ⚠️ 有 `ProfilerManager`（逐 Pass/Scope 时间戳 + 调试标签 + Profiler 面板），无 Tracy/RenderDoc 集成 |
+| **事件标记** | 每个 Draw/Dispatch 自动插入 `PROFILE_Gpu(RenderPass)` | ⚠️ 有 `VK_EXT_debug_utils` 标签（Pass 边界 Begin/End + DrawCall 级 `SetDrawDebugLabel`，受 `r.Debug.DrawMarker` 控制），非逐 Draw 自动插入 |
+| **资源命名** | `BindDebugLabelName()` 对所有资源命名 | ⚠️ `SetResourceDebugName` 覆盖 Buffer/Texture/PSO/Sampler/AS 五类资源 |
+| **管线统计** | `VK_QUERY_TYPE_PIPELINE_STATISTICS` 查询 VS/PS 调用次数 | ⚠️ 已支持 `VK_QUERY_TYPE_PIPELINE_STATISTICS`（IA/VS/裁剪/FS 共 6 个计数器） |
 | **着色器调试** | `VK_KHR_shader_non_semantic_info` + shader printf | 无 |
 | **GPU 验证** | `VK_EXT_gpu_validation` / GPU-Based Validation | 仅 `VK_LAYER_KHRONOS_validation` |
 
@@ -89,8 +89,8 @@ UE5 的核心基础设施：
 | **动态渲染** (`VK_KHR_dynamic_rendering`) | ✅ UE5.2+ (减少 VkRenderPass 对象，按需构建渲染通道) | ❌ 仍使用传统 VkRenderPass + VkFramebuffer |
 | **扩展动态状态** (`VK_EXT_extended_dynamic_state`) | ✅ (减少 PSO 变体) | ❌ 仅有 viewport + scissor 两个动态状态 |
 | **动态图元拓扑** (`VK_EXT_extended_dynamic_state2`) | ✅ | ❌ 固定在 PSO 创建时 |
-| **动态多边形模式** | ✅ (线框/填充切换无需变 PSO) | ❌ |
-| **动态 Cull Mode / Front Face** | ✅ | ❌ 固定在 `CULL_MODE_NONE` / `FRONT_FACE_CLOCKWISE` |
+| **动态多边形模式** | ✅ (线框/填充切换无需变 PSO) | ❌ PSO 创建时可配置 `FillMode`（Solid/Wireframe），非动态状态 |
+| **动态 Cull Mode / Front Face** | ✅ | ❌ PSO 创建时可配置 `cullMode` / `frontFace`（默认 `CullMode::None` / `FrontFace::Clockwise`），非动态状态 |
 | **动态深度测试状态** | ✅ (depthTestEnable / depthWriteEnable / depthCompareOp 动态) | ❌ 固定在 PSO |
 | **动态混合状态** | ✅ | ❌ 固定在 PSO |
 | **动态顶点输入** (`VK_EXT_vertex_input_dynamic_state`) | ✅ | ❌ 绑定在 PSO |
@@ -111,8 +111,8 @@ UE5 的核心基础设施：
 | **Sample Rate Shading** | ✅ | ❌ |
 | **多视口渲染** | ✅ (VR / 瀑布 / cubemap 单通道) | ❌ viewportCount 固定为 1 |
 | **VR 支持 (Multi-View)** | ✅ (VK_KHR_multiview) | ❌ |
-| **Occlusion Query** | ✅ (硬件遮挡查询) | ❌ 仅有时间戳查询 |
-| **Pipeline Statistics** | ✅ | ❌ 仅有时间戳查询 |
+| **Occlusion Query** | ✅ (硬件遮挡查询) | ❌ 无遮挡查询（查询池支持 Timestamp / PipelineStatistics 两类） |
+| **Pipeline Statistics** | ✅ | ⚠️ 已支持 `VK_QUERY_TYPE_PIPELINE_STATISTICS`（6 个计数器） |
 | **Stream Output (Transform Feedback)** | ✅ (旧版，逐步淘汰) | ❌ |
 
 ### 2.4 离屏渲染
@@ -121,7 +121,7 @@ UE5 的核心基础设施：
 |------|-----|-----------|
 | **Render Dependency Graph** | ✅ 完整的 RDG（资源生命周期管理、状态推导、Pass 合并、图可视化） | ⚠️ 有基础 RenderGraph（见下文更正），但缺少图可视化、Pass 合并优化、显式外部依赖 API |
 | **Graph 导出/可视化** | ✅ | ❌ |
-| **Pass 剔除** | ✅ (无输出的 Pass 自动跳过) | ❌ |
+| **Pass 剔除** | ✅ (无输出的 Pass 自动跳过) | ✅ `CullDeadPasses()`：输出未被消费的 Pass 从执行列表移除 |
 | **显式依赖表达** | ✅ (`AddReadback()`, `AddExternalAccess()`) | ❌ |
 
 ---
@@ -134,9 +134,9 @@ UE5 的核心基础设施：
 |------|-----|-----------|
 | **结构化缓冲** | ✅ (RWStructuredBuffer, ByteAddressBuffer) | ⚠️ 基础 Storage Buffer，无结构化语义 |
 | **Upload Heap** | ✅ (环形缓冲 + 围栏同步) | ❌ 每次 `initialData` 创建临时 staging buffer |
-| **Readback Heap** | ✅ (GPU→CPU 回读管线) | ❌ 仅有 `Map()`/`Unmap()` 同步回读 |
+| **Readback Heap** | ✅ (GPU→CPU 回读管线) | ⚠️ `Map()`/`Unmap()` 同步回读 + `CopyTextureToBuffer`（GPU 端纹理→缓冲拷贝），无专用回读堆 |
 | **稀疏/瓦片资源** | ✅ (VK_EXT_sparse_residency) | ❌ |
-| **资源别名** | ✅ (同一内存复用) | ❌ |
+| **资源别名** | ✅ (同一内存复用) | ⚠️ RenderGraph `ApplyAliasing()` 做生命周期分析并让别名资源走瞬态内存池，非同一 offset 的显式内存别名 |
 | **磁盘常驻纹理** | ✅ (部分 mip 常驻) | ❌ |
 | **Lock/Unlock 语义** | ✅ (区域锁定，非整缓冲) | ❌ `Map()` 返回整缓冲指针 |
 
@@ -147,8 +147,8 @@ UE5 的核心基础设施：
 | **纹理数组 / Atlas** | ✅ 通用支持 | ⚠️ 基础 `arrayLayers` 支持 |
 | **体积纹理 (3D)** | ✅ | ⚠️ `depth > 1` 时创建 VK_IMAGE_TYPE_3D |
 | **MSAA 纹理** | ✅ 含 resolve | ⚠️ sampleCount 字段存在但 PSO 未使用 |
-| **纹理视图 (SRV/UAV/RTV/DSV)** | ✅ 多种视图（不同格式/子资源） | ⚠️ 仅有 Per-Mip 存储/采样视图 |
-| **Clear/Copy 专用路径** | ✅ 快速清除和拷贝（无需渲染通道） | ❌ 无 `ClearRenderTarget` / `ClearDepthStencil` 接口 |
+| **纹理视图 (SRV/UAV/RTV/DSV)** | ✅ 多种视图（不同格式/子资源） | ⚠️ 仅有 Per-Mip 存储/采样视图（含 mip+layer 变体） |
+| **Clear/Copy 专用路径** | ✅ 快速清除和拷贝（无需渲染通道） | ⚠️ 有 `ClearDepthStencil` / `CopyTextureToTexture` / `CopyTextureToBuffer`，仍无 `ClearRenderTarget` 接口 |
 | **Mipmap 生成 API** | ✅ `GenerateMipMaps()` | ⚠️ 仅在 `initialData` 上传时自动生成 |
 | **渲染目标格式转换** | ✅ (R11G11B10 → HDR 等) | ❌ |
 
@@ -158,7 +158,7 @@ UE5 的核心基础设施：
 
 | 特性 | UE5 | HugEngine |
 |------|-----|-----------|
-| **Async Compute 调度策略** | ✅ 优先级调度、依赖图自动识别可异步 Pass | ⚠️ 基础 AsyncCompute 支持（Tier 0-2 检测）但无智能调度 |
+| **Async Compute 调度策略** | ✅ 优先级调度、依赖图自动识别可异步 Pass | ⚠️ 队列层有 Tier 0-2 检测；RenderGraph 有 `ScheduleAsyncPasses()`（标记无依赖 Compute Pass）+ `ExecuteWithAsyncCompute()`（自动拆分 Graphics/Compute 并跨队列同步），但无优先级调度 |
 | **Subgroup 操作** | ✅ (wave/warp 内通信) | ❌ |
 | **Cooperative Matrix** | ✅ (VK_KHR_cooperative_matrix / 硬件矩阵乘法) | ❌ (DeviceCaps 无此标志) |
 | **Cooperative Vectors** | ✅ (VK_KHR_cooperative_vector) | ❌ (DeviceCaps 有 `supportsCooperativeVectors` 标志，无实现) |
@@ -187,9 +187,9 @@ UE5 的核心基础设施：
 
 | 特性 | UE5 | HugEngine |
 |------|-----|-----------|
-| **GPU Work Graphs** | ✅ (VK_EXT_device_generated_commands 用于复杂 GPU 端工作) | ⚠️ 基础 DGC 支持（仅 DRAW_INDEXED 令牌） |
-| **GPU Scene 完整管线** | ✅ (GPU 端剔除 → LOD 选择 → 间接绘制) | ❌ DGC 仅有 infrastructure，无完整 GPU-Driven 管线 |
-| **Multi-Draw Indirect (MDI)** | ✅ 含 CountBuffer | ⚠️ `DrawIndexedIndirect` 支持但无 fragment count buffer 优化 |
+| **GPU Work Graphs** | ✅ (VK_EXT_device_generated_commands 用于复杂 GPU 端工作) | ⚠️ 基础 DGC 支持（EXECUTION_SET + DRAW_INDEXED 两个令牌） |
+| **GPU Scene 完整管线** | ✅ (GPU 端剔除 → LOD 选择 → 间接绘制) | ⚠️ 已有 GPU 侧视锥/Hi-Z 遮挡剔除（`GPUCulling` / `InstanceCuller`）与 Nanite 簇层次剔除 + LOD 选择 + 间接绘制（含 DGC 路径），但不是单一统一的 GPU Scene 管线 |
+| **Multi-Draw Indirect (MDI)** | ✅ 含 CountBuffer | ✅ `DrawIndexedIndirect` / `DrawIndexedIndirectCount` / `DrawMeshTasksIndirectCount`（GPU 侧计数缓冲） |
 | **ExecuteIndirect 分组** | ✅ (按材质/Pipeline 分组) | ❌ |
 
 ---
@@ -198,12 +198,12 @@ UE5 的核心基础设施：
 
 | 特性 | UE5 | HugEngine |
 |------|-----|-----------|
-| **D3D12 后端** | ✅ | ❌ (接口层已就绪) |
-| **Metal 后端** | ✅ | ❌ |
-| **WebGPU 后端** | ✅ (实验性) | ❌ |
+| **D3D12 后端** | ✅ | ❌ (仅 `Backend::D3D12` 枚举占位，无实现文件) |
+| **Metal 后端** | ✅ | ❌ (仅 `Backend::Metal` 枚举占位) |
+| **WebGPU 后端** | ✅ (实验性) | ❌ (仅 `Backend::WebGPU` 枚举占位) |
 | **移动 Vulkan** | ✅ (Android + Vulkan 1.1+) | ❌ (仅 Win32，使用 Vulkan 1.3+ 特性) |
 | **多 GPU 支持** | ✅ (CrossFire/SLI/NVLink/mGPU VR SLI) | ❌ |
-| **HDR 输出** | ✅ (HDR10 / scRGB / HDR 显示器) | ❌ (仅 SDR swapchain) |
+| **HDR 输出** | ✅ (HDR10 / scRGB / HDR 显示器) | ⚠️ 有 HDR10 交换链（`SwapChainDesc::hdr` → A2B10G10R10 + ST.2084），无 scRGB 等其他色彩空间 |
 | **VRR (FreeSync/GSync)** | ✅ | ❌ (仅 Mailbox/FIFO) |
 | **全屏独占模式** | ✅ | ❌ (无全屏模式管理) |
 | **多窗口/多 Viewport** | ✅ | ❌ |
@@ -216,7 +216,7 @@ UE5 的核心基础设施：
 | 特性 | UE5 | HugEngine |
 |------|-----|-----------|
 | **Shader 编译管线** | ✅ `DXC` + shader reflection + binding 自动发现 | ⚠️ 预编译 SPIR-V，binding 手动指定 |
-| **PSO 预热/预编译** | ✅ (PSO precaching 系统) | ❌ |
+| **PSO 预热/预编译** | ✅ (PSO precaching 系统) | ⚠️ 有 `PSOPrecompileManager`（独立 VkPipelineCache + 后台线程 + 合并回主缓存），注册与逐帧限流队列已接入生产管线，但后台预热线程的启动当前在 `DeferredPipeline` 中被注释掉 |
 | **Shader 变体管理** | ✅ (自动排列组合 + permutation reduction) | ❌ |
 | **Shader 缓存** | ✅ (磁盘 + 内存 LRU) | ❌ |
 | **RenderDoc 深度集成** | ✅ (renderdoc_app.h) | ❌ |
@@ -230,12 +230,12 @@ UE5 的核心基础设施：
 | 优先级 | 功能 | 理由 |
 |--------|------|------|
 | **P0** | 动态渲染 (`VK_KHR_dynamic_rendering`) | 消除 VkRenderPass 的复杂性，简化 RenderGraph 实现 |
-| **P0** | 资源状态追踪 + 自动 Barrier | 手动 Barrier 易出错，是正确性和性能的基础 |
+| **P0** | 资源状态追踪 + 自动 Barrier | 手动 Barrier 易出错，是正确性和性能的基础；**基础版已实现**（`RenderGraph::DeriveBarriers()` 自动推导 + 状态去重），RHI 层仍是手动接口 |
 | **P0** | D3D12 后端 | 覆盖绝大多数 Windows 用户的 GPU (NVIDIA/AMD/Intel) |
-| **P0** | PSO 缓存 (磁盘持久化) | 减少启动停顿，用户直接体感 |
+| **P0** | PSO 缓存 (磁盘持久化) | 减少启动停顿，用户直接体感；**基础版已实现**（VkPipelineCache 持久化 + GPL 四段库 + 创建限流），剩余的是 base/derived pipeline 派生 |
 | **P1** | RenderGraph 完善（图可视化/Pass合并优化/显式外部依赖） | 已有基础 RG，需继续完善 |
 | **P1** | 扩展动态状态 | 大量减少 PSO 变体数量，降低编译开销 |
-| **P1** | GPU Profiler / Debug Markers | 开发效率倍增器 |
+| **P1** | GPU Profiler / Debug Markers | 开发效率倍增器；**基础版已实现**（`ProfilerManager` 逐 Pass 时间戳 + `VK_EXT_debug_utils` 标签），缺 Tracy/RenderDoc 集成与 GPU 崩溃定位 |
 | **P1** | Upload Heap (环形缓冲) | 消除每帧创建/销毁 staging buffer 的开销 |
 | **P2** | MSAA | 基础抗锯齿方案 |
 | **P2** | Subpass Input Attachment | 移动端性能优化关键 |
@@ -262,7 +262,7 @@ UE5 的核心基础设施：
 
 ### 10.1 实现位置
 
-`Engine/Render/RenderGraph.h` + `RenderGraph.cpp`（约 635 行），属于 L3 Render 层，构建在 RHI 之上。
+`Engine/Render/RenderGraph.h` + `RenderGraph.cpp`（约 756 行），属于 L3 Render 层，构建在 RHI 之上。
 
 ### 10.2 已实现功能
 
@@ -294,9 +294,9 @@ UE5 的核心基础设施：
 | **图可视化** (RDG Dump/Insights) | ❌ 无导出功能 |
 | **Pass 合并** (相邻 Pass 合为一个 RenderPass) | ❌ 每 Pass 独立执行 |
 | **显式外部依赖 API** (`AddExternalAccess`, `AddReadback`) | ❌ 仅有 `ImportTexture` |
-| **Scoped 资源创建** (`GraphBuilder.CreateTexture` 自动生命周期) | ⚠️ 资源手动 `CreateTexture`，RG 只管理 Barrier |
+| **Scoped 资源创建** (`GraphBuilder.CreateTexture` 自动生命周期) | ⚠️ RG 在 `Execute()` 时按 `ResourceDesc` 统一创建资源，但无 RAII/Scoped 生命周期 API |
 | **Pass 条件执行** (`if (IsEnabled)`) | ❌ 无 |
 | **异步 Compute 自动调度** | ⚠️ 需通过 `RGPassQueue::Compute` 显式标记 |
-| **瞬态资源池** (RDG Transient Resource Allocator) | ⚠️ 有别名分析但未与 GPU 内存分配器深度集成 |
+| **瞬态资源池** (RDG Transient Resource Allocator) | ⚠️ 别名资源在 `Execute()` 中走 `CreateTransientTexture`（TransientResourceAllocator 的 Heap + VkImage 缓存），未做显式的 offset 级内存别名 |
 | **子资源级追踪** (mip/array slice 级别 Barrier) | ❌ 仅整资源级别 |
 | **Resource->Pass 反向索引** (谁生产了此资源) | ❌ 需遍历查找 |
