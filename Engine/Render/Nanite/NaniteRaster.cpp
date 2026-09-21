@@ -39,6 +39,9 @@
 #include "Nanite_DepthResolve.vert.spv.h"      // k_Nanite_DepthResolve_vert_spv
 #include "Nanite_DepthResolve.frag.spv.h"      // k_Nanite_DepthResolve_frag_spv
 #include "Nanite_GBufferClear.comp.spv.h"     // k_Nanite_GBufferClear_comp_spv（compute 清屏 8 张颜色目标）
+// 【§14.8 任务 22】硬光栅（mesh shader 分流）
+#include "Nanite_HardRaster.mesh.spv.h"       // k_Nanite_HardRaster_mesh_spv
+#include "Nanite_HardRaster.frag.spv.h"       // k_Nanite_HardRaster_frag_spv
 
 #include <cstring>   // std::memcpy（占位顶点/索引缓冲的初值）
 
@@ -83,6 +86,34 @@ bool NaniteRaster::Initialize(rhi::IRHIDevice* device, u32 width, u32 height,
         HE_CORE_INFO("NaniteRaster: D32_SFLOAT 支持存储图像（compute 写深度可用），但本实现按 "
                      "§14.5 的 A1 裁决仍走 SV_Depth + 既有深度附件（GBuffer 深度纹理没有 "
                      "UnorderedAccess usage，且跨厂商一致性更好）");
+    }
+
+    // ── 0c. 【任务 22】硬光栅的**静态可判据**：mesh shader 可用 + 上限容得下编译期声明 ──
+    // 【为什么在建 PSO 之前就把上限核对掉】mesh 的输出数组尺寸、`[numthreads]` 的线程数都是
+    //   **编译期常量**（192 顶点 / 64 图元 / 128 线程），如果设备的物理上限比它们小，
+    //   `vkCreateGraphicsPipelines` 会直接失败（而不是降级）。与其让它失败在 PSO 创建里，
+    //   不如在这里算出一个明确的"能不能走这条通道"，为假就不建 PSO、不录绘制
+    //   （与任务 6 对 `VK_EXT_mesh_shader` 的处理口径一致：能力不足就明说，不造替代方案）。
+    {
+        const rhi::DeviceCaps caps = m_Device->GetCaps();
+        const bool enoughThreads = caps.maxMeshWorkGroupInvocations >= kNaniteHardRasterThreads;
+        const bool enoughVerts   = caps.maxMeshOutputVertices >= kNaniteHardRasterMaxVertices;
+        const bool enoughPrims   = caps.maxMeshOutputPrimitives >= kNaniteHardRasterMaxPrimitives;
+        m_HardRasterCapable = m_MeshShaderSupported && enoughThreads && enoughVerts && enoughPrims;
+        if (m_MeshShaderSupported && !m_HardRasterCapable) {
+            HE_CORE_WARN("NaniteRaster: 设备支持 mesh shader，但上限不足以承载任务 22 的硬光栅声明"
+                         "（需要 invocations>={} / vertices>={} / primitives>={}；"
+                         "实测 {}/{}/{}）⇒ 硬光栅通道不会创建",
+                         kNaniteHardRasterThreads, kNaniteHardRasterMaxVertices,
+                         kNaniteHardRasterMaxPrimitives, caps.maxMeshWorkGroupInvocations,
+                         caps.maxMeshOutputVertices, caps.maxMeshOutputPrimitives);
+        } else if (m_HardRasterCapable) {
+            HE_CORE_INFO("NaniteRaster: 任务 22 硬光栅上限核对通过（mesh invocations={} vertices={} "
+                         "primitives={} ≥ 本通道声明 {}/{}/{}）",
+                         caps.maxMeshWorkGroupInvocations, caps.maxMeshOutputVertices,
+                         caps.maxMeshOutputPrimitives, kNaniteHardRasterThreads,
+                         kNaniteHardRasterMaxVertices, kNaniteHardRasterMaxPrimitives);
+        }
     }
 
     // ── 1. 模块自建的 1×1 R8 目标 ──
@@ -201,6 +232,18 @@ void NaniteRaster::Shutdown() {
     m_DepthKeyZeroSrcPixels = 0u;
     m_SoftStats.reset();
     m_SoftStatsZeroSrc.reset();
+
+    // ── 【§14.8 任务 22】硬光栅的懒建资源（未开启分流时它们是空的，这里自然是空操作）──
+    m_HardRasterPSO.reset();
+    if (m_Device && m_HardRasterLayout != rhi::kInvalidLayout)
+        m_Device->DestroyDescriptorSetLayout(m_HardRasterLayout);
+    m_HardRasterLayout     = rhi::kInvalidLayout;
+    m_HardRasterSet        = rhi::kInvalidSet;
+    m_HardBindlessRegistered = false;
+    m_HardStats.reset();
+    m_HardStatsZeroSrc.reset();
+    m_HardLastMaxTriangles     = 0u;
+    m_HardLastVisibleCapacity  = 0u;
 
     m_Target.reset();
     m_DummyVB.reset();
@@ -1097,6 +1140,339 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
     cmd->SetDrawDebugLabel("Nanite_DepthResolve (key -> SV_Depth)");
     cmd->Draw(3);
     cmd->EndOffscreenPass();
+}
+
+// ============================================================
+// §14.8 任务 22：硬光栅（mesh shader 分流，大簇一侧）
+//
+// 【次序的正确性推导（本任务的关键裁决）】硬光栅录在**软光栅全部三趟之后**（颜色两趟 +
+//   深度解析都已把结果写进既有 GBuffer 与 D32 深度附件），PSO 上是
+//   `depthTest=LessEqual + depthWrite=true + depthLoadOp=Load + colorLoadOp=Load`：
+//     · 软几何已把颜色与深度写进附件；
+//     · 硬片元 `dh < ds`（硬更近）⇒ 通过深度测试 ⇒ 硬颜色**覆盖**软颜色、深度改写成 dh
+//       ⇒ **硬遮软成立**；
+//     · 硬片元 `dh > ds`（软更近）⇒ 深度测试失败 ⇒ 硬片元被丢弃、软颜色与软深度原样保留
+//       ⇒ **软遮硬成立**；
+//     · 没有软几何的像素 ds = 1.0（深度解析写的远平面）⇒ 硬片元照常写入。
+//   也就是说**两个方向的遮挡都正确**，而且不依赖"谁先写"——关键只在"**后写者**是否带深度测试"。
+//   反过来把硬光栅排在软光栅**之前**（或在软光栅第 1 趟之前）是不成立的：软光栅第 2 趟的
+//   等值复检只对照**软自己的**深度键，看不见硬几何，会无条件覆盖更近的硬颜色。
+//
+// 【已知边界（如实记录，不是"完全等价"）】
+//   ① 深度解析把软深度**截断到 24 位尾数**（`asfloat(key & 0xFFFFFF00)`），所以附件里的软深度
+//      比数学值略小；硬片元深度落在"截断值 ~ 真值"这条 < 256 ULP 的极窄带里时，本会比较出
+//      "软更近"（实际硬更近）。深度 24 位尾数的相对误差约 6e-8 量级，屏幕上不可见。
+//   ② 深度**恰好相等**时 `LessEqual` 让硬片元胜出（平局口径；两侧都可辩护，这里选硬的）。
+//   ③ 硬光栅会**写深度附件** ⇒ 它之后的下游（Hi-Z / SSAO / SSR / 任何深度重建）看到的是
+//      "软 + 硬"的合成深度，而不再是软光栅时代那个"大簇像素 = 远平面"的深度。
+//      这正是 `NaniteSettings::hardRaster` 必须默认关闭的直接原因（判据 ⑧b 只允许 4 个
+//      GBuffer 目标变化，而深度变化会牵动 prov1_* / rsm_* / ssr / ibl_irr 等下游转储）。
+// ============================================================
+
+bool NaniteRaster::EnsureHardRasterResources(const GBufferTargets& targets) {
+    if (m_HardRasterPSO) return true;
+    if (!m_Device || !m_HardRasterCapable) return false;
+    // 【为什么要求 HasClearTargets（8 张颜色 + 深度）而不是只要 4 张】本通道是**渲染通道**：
+    //   PSO 的附件数必须与实际帧缓冲一致（8 张颜色 + 深度），未被写入的 4 张靠
+    //   per-MRT `writeMask=None` 保护。少一张就没法建出合法的帧缓冲/渲染通道。
+    if (!targets.HasClearTargets()) return false;
+
+    // ── 1. 描述符集布局：与软光栅**同槽位同语义**（bindings 0..7 + 12/13/14）──
+    // 【为什么要同槽位】本通道的两个着色器 include 的是同一份 `Nanite_SoftRasterCommon.slang`
+    //   （材质求值 `softRasterEvaluateMaterial` 与几何解码都从那里来，不另写一份公式），
+    //   那个文件把绑定写死在 0..7/12/13/14 上 ⇒ 布局必须逐条对上。
+    // 【binding 7 指向另一个缓冲】软光栅的 7 是那 16 槽读数缓冲；本通道指模块自持的 4 槽
+    //   硬光栅读数缓冲（`kNaniteHardStat*`）。shader 源码里的 `u_Stats[...]` 是同一行，
+    //   "写到哪里"完全由描述符指向谁决定 —— 这正是把两者的槽位语义隔开的最小手法。
+    // 【binding 6（深度键）本通道不用】仍声明并绑定它：Slang 若把它从 SPIR-V 里削掉，
+    //   多声明的绑定是合法的；若没削掉，绑定了也不会读到未定义描述符。两边都安全。
+    {
+        // 阶段掩码：0..5 是 mesh 阶段读、7/12/13/14 是片元阶段用；这里统一写成
+        // `Mesh|Fragment` 的并集 —— 布局的 stageFlags 是"允许访问的阶段"，宽声明永远合法。
+        const u32 kStages = rhi::kStageMaskMesh | rhi::kStageMaskFragment;
+        rhi::DescriptorSetLayoutDesc layout;
+        layout.bindings = {
+            { 0, rhi::DescriptorType::StorageBuffer, 1,    kStages, false },  // 簇记录
+            { 1, rhi::DescriptorType::StorageBuffer, 1,    kStages, false },  // 量化顶点
+            { 2, rhi::DescriptorType::StorageBuffer, 1,    kStages, false },  // 打包三角形
+            { 3, rhi::DescriptorType::StorageBuffer, 1,    kStages, false },  // 可见簇引用
+            { 4, rhi::DescriptorType::StorageBuffer, 1,    kStages, false },  // 可见簇计数
+            { 5, rhi::DescriptorType::StorageBuffer, 1,    kStages, false },  // 实例表
+            { 6, rhi::DescriptorType::StorageBuffer, 1,    kStages, false },  // 深度键（未使用，占位）
+            { 7, rhi::DescriptorType::StorageBuffer, 1,    kStages, false },  // 硬光栅读数（本通道自己的缓冲）
+            {12, rhi::DescriptorType::StorageBuffer, 1,    kStages, false },  // 资产材质段
+            {13, rhi::DescriptorType::SampledImage,  4096, kStages, true  },  // bindless 纹理数组
+            {14, rhi::DescriptorType::Sampler,       4096, kStages, true  },  // bindless 采样器数组
+        };
+        m_HardRasterLayout = m_Device->CreateDescriptorSetLayout(layout);
+        if (m_HardRasterLayout == rhi::kInvalidLayout) {
+            HE_CORE_ERROR("NaniteRaster: 硬光栅描述符集布局创建失败");
+            return false;
+        }
+        m_HardRasterSet = m_Device->AllocateDescriptorSet(m_HardRasterLayout);
+    }
+
+    // ── 2. 读数缓冲（4 槽）+ 常驻 0 源（每帧在命令缓冲内清）──
+    // 【为什么不用主机写】任务 13 的教训：录制期的主机写会与 GPU 派发竞争（CPU 领先 GPU 时
+    //   第 N+1 帧的写落到第 N 帧派发之前）。命令缓冲内的 `CopyBuffer` 由 GPU 有序执行。
+    {
+        rhi::BufferDesc d;
+        d.size      = sizeof(u32) * kNaniteHardStatsCapacity;
+        d.usage     = rhi::BufferUsage::Storage;
+        d.cpuAccess = true;   // dump 帧读回
+        m_HardStats = m_Device->CreateBuffer(d);
+        if (!m_HardStats) { HE_CORE_ERROR("NaniteRaster: 硬光栅读数缓冲创建失败"); return false; }
+
+        rhi::BufferDesc z;
+        z.size      = d.size;
+        z.usage     = rhi::BufferUsage::TransferSrc;   // 只当拷贝源
+        z.cpuAccess = true;
+        m_HardStatsZeroSrc = m_Device->CreateBuffer(z);
+        if (!m_HardStatsZeroSrc) { HE_CORE_ERROR("NaniteRaster: 硬光栅读数清零源创建失败"); return false; }
+        if (void* p = m_HardStatsZeroSrc->Map()) {
+            std::memset(p, 0, d.size);
+            m_HardStatsZeroSrc->Unmap();
+        }
+    }
+
+    // ── 3. mesh PSO：8 个 GBuffer 颜色附件（Load + 只写 MRT0/1/4/7）+ D32 深度附件（Load + 测试 + 写）──
+    m_HardRasterMS.stage      = rhi::ShaderStage::Mesh;
+    m_HardRasterMS.spirv      = k_Nanite_HardRaster_mesh_spv;
+    m_HardRasterMS.entryPoint = "main";
+    m_HardRasterFS.stage      = rhi::ShaderStage::Pixel;
+    m_HardRasterFS.spirv      = k_Nanite_HardRaster_frag_spv;
+    m_HardRasterFS.entryPoint = "main";
+
+    rhi::PushConstantRange pc;
+    pc.stageMask = rhi::kStageMaskMesh | rhi::kStageMaskFragment;
+    pc.size      = sizeof(NaniteSoftRasterParams);   // 96B：与软光栅**同一个**参数结构（同一阈值/同一 vpRows）
+
+    rhi::PipelineStateDesc desc;
+    desc.meshShader           = &m_HardRasterMS;   // ← 走 `VulkanPipeline.cpp` 的 mesh 分支（无 IA、无顶点输入）
+    desc.pixelShader          = &m_HardRasterFS;
+    desc.topology             = rhi::PrimitiveTopology::TriangleList;
+    // 与软光栅一致的双面光栅（软光栅的 `softRasterCovered` 明确按面积符号翻转 ⇒ 不挑绕序）
+    desc.cullMode             = rhi::CullMode::None;
+    desc.depthTest            = true;
+    // ── 【本任务最关键的两个状态】──
+    // `LessEqual`：排在软光栅之后 ⇒ 只画"不比软几何更远"的片元（两个方向的遮挡都正确，见上面的推导）。
+    // `depthWrite = true`：硬的深度也要写回附件，否则后续硬片元之间无法正确互相遮挡。
+    desc.depthCompare         = rhi::CompareFunc::LessEqual;
+    desc.depthWrite           = true;
+    desc.depthFormat          = rhi::Format::D32_FLOAT;
+    // ── 【保留软光栅的成果：两个 loadOp 都必须是 Load】──
+    // `Load` 而不是 `Clear`：深度解析刚把软深度写进附件、软光栅两趟刚把颜色写进 4 张 MRT；
+    // 任何一处用 Clear 都会把 (b) 方案的前提直接抹掉（颜色被清成清除值、深度被清成远平面）。
+    desc.colorLoadOp          = rhi::LoadOp::Load;
+    desc.depthLoadOp          = rhi::LoadOp::Load;
+    desc.colorAttachmentCount = 8;
+    // 格式必须与**实际帧缓冲**逐附件一致（否则 vkCreateFramebuffer 与渲染通道不匹配）。
+    // 这 8 个格式与 `DecalPass` 用的是同一组（它已在同一批 GBuffer 纹理上验证过）。
+    desc.colorFormats[0] = rhi::Format::RGBA16_FLOAT;   // Albedo + Metallic   （写）
+    desc.colorFormats[1] = rhi::Format::RGBA16_FLOAT;   // Normal + Roughness  （写）
+    desc.colorFormats[2] = rhi::Format::RGBA16_FLOAT;   // Emissive + AO       （不写）
+    desc.colorFormats[3] = rhi::Format::RG16_FLOAT;     // Velocity            （不写）
+    desc.colorFormats[4] = rhi::Format::RGBA16_FLOAT;   // WorldPos            （写）
+    desc.colorFormats[5] = rhi::Format::RGBA16_FLOAT;   // DisneyA             （不写）
+    desc.colorFormats[6] = rhi::Format::RGBA16_FLOAT;   // DisneyB             （不写）
+    desc.colorFormats[7] = rhi::Format::RGBA16_FLOAT;   // LightmapKey         （写）
+    for (u32 i = 0u; i < 8u; ++i) {
+        rhi::ColorBlendDesc& b = desc.colorBlend[i];
+        b.blendEnable = false;   // 不做混合：本通道的语义是"覆盖"（混合会让硬软颜色互相污染）
+        const bool written = (i == 0u || i == 1u || i == 4u || i == 7u);
+        // 【未写的 4 张必须显式关掉写入】不能靠"片元没声明这个 location"—— 只写一部分 location
+        //   是允许的，但没有 writeMask 保护时驱动可以写未定义值进 emissive/velocity/disney，
+        //   那会直接打红判据 ⑧b（"差异只允许 4 个 GBuffer 目标"）。
+        b.writeMask = written ? rhi::ColorWriteMask::All : rhi::ColorWriteMask::None;
+    }
+    desc.pushConstantRanges   = { pc };
+    desc.descriptorSetLayouts = { m_HardRasterLayout };
+    desc.debugName            = "NaniteHardRaster";
+    m_HardRasterPSO = m_Device->CreatePipelineState(desc);
+    if (!m_HardRasterPSO) {
+        HE_CORE_ERROR("NaniteRaster: 硬光栅 mesh PSO 创建失败（8 附件 + D32，LessEqual + Load）");
+        return false;
+    }
+
+    // ── 4. bindless 登记 + **强制一次 Flush**（与软光栅第 2 趟集合同一手法）──
+    // 【为什么必须自己推一次】堆只在有 pending 时把纹理数组写进已登记的集合，而材质贴图在
+    //   场景加载期就注册完了（此后 m_Pending 恒 false）；唯一每帧调 `heap->Flush()` 的
+    //   `GBufferRenderer_CPU::Render` 在模块接管时**根本不执行**（§14.27③）⇒ 不自己推一次的话
+    //   本集合的 bindless 数组会一直是"未绑定"，硬光栅的 albedo 会全 0（软光栅踩过同样的坑）。
+    // 【代价】`RegisterTexture(nullptr, nullptr)` 占一个占位槽位并标 pending；它在本通道的
+    //   首次且仅此一次的懒建路径上发生（不在每帧路径里），且不影响任何已分配的材质 ID。
+    if (!m_HardBindlessRegistered) {
+        if (auto* heap = m_Device->GetBindlessHeap()) {
+            heap->RegisterDescriptorSet(m_HardRasterSet, 13u, 14u, 0u);
+            heap->RegisterTexture(nullptr, nullptr);
+            heap->Flush();
+            m_HardBindlessRegistered = true;
+        }
+    }
+
+    HE_CORE_INFO("NaniteRaster: 任务 22 硬光栅就绪（mesh 管线：1 工作组/可见簇，"
+                 "`triangleCount > maxTriangles` 的簇走这里；LessEqual + Load 保留软光栅结果；"
+                 "只写 MRT0/1/4/7）");
+    return true;
+}
+
+void NaniteRaster::RecordHardStatsClear(rhi::IRHICommandList* cmd) {
+    if (!cmd || !m_HardStats || !m_HardStatsZeroSrc) return;
+    cmd->CopyBuffer(m_HardStatsZeroSrc.get(), m_HardStats.get(),
+                    (u64)kNaniteHardStatsCapacity * sizeof(u32), 0, 0);
+    // 拷贝 → mesh/片元着色器的原子累加：显式内存屏障。
+    // 【为什么 dstStage 必须显式写出 mesh 阶段】清 0 与 `InterlockedAdd` 之间必须有定义的顺序，
+    //   而 `InterlockedAdd` 发生在 **mesh** 与 **fragment** 两个阶段。RHI 的 PipelineStage 为此
+    //   新增了 `MeshShader`/`TaskShader` 两位（见 `RHI/Types.h`），不再依赖"掩码为空时退化成
+    //   ALL_COMMANDS"这种碰巧成立的写法。
+    cmd->PipelineBarrier(rhi::PipelineStage::Transfer,
+                         rhi::PipelineStage::MeshShader | rhi::PipelineStage::FragmentShader,
+                         rhi::ResourceState::CopyDst,
+                         rhi::ResourceState::UnorderedAccess);
+}
+
+void NaniteRaster::RecordHardRasterPass(rhi::IRHICommandList* cmd,
+                                        const GBufferTargets& targets,
+                                        const AssetViews& asset,
+                                        const NaniteSoftRasterParams& params,
+                                        rhi::IRHIBuffer* visibleRefs,
+                                        rhi::IRHIBuffer* visibleCount,
+                                        rhi::IRHIBuffer* instances,
+                                        u32 visibleCapacity) {
+    if (!cmd || !targets.HasClearTargets() || !asset.valid()) return;
+    if (!visibleRefs || !visibleCount || !instances) return;
+    if (!EnsureHardRasterResources(targets)) return;
+
+    const u32 w = targets.albedo->GetWidth();
+    const u32 h = targets.albedo->GetHeight();
+    if (w == 0u || h == 0u) return;
+
+    m_HardLastMaxTriangles    = params.maxTriangles;
+    m_HardLastVisibleCapacity = visibleCapacity;
+
+    // ── 绑定：每帧重写（与软光栅同一口径：资产/可见簇/实例缓冲在资产上传后就不再变，
+    //    但重写只是几个 vkUpdateDescriptorSets，且引擎的 GPU 在执行期读描述符）──
+    m_Device->UpdateDescriptorSet(m_HardRasterSet, 0, rhi::DescriptorType::StorageBuffer, asset.clusters);
+    m_Device->UpdateDescriptorSet(m_HardRasterSet, 1, rhi::DescriptorType::StorageBuffer, asset.vertices);
+    m_Device->UpdateDescriptorSet(m_HardRasterSet, 2, rhi::DescriptorType::StorageBuffer, asset.indices);
+    m_Device->UpdateDescriptorSet(m_HardRasterSet, 3, rhi::DescriptorType::StorageBuffer, visibleRefs);
+    m_Device->UpdateDescriptorSet(m_HardRasterSet, 4, rhi::DescriptorType::StorageBuffer, visibleCount);
+    m_Device->UpdateDescriptorSet(m_HardRasterSet, 5, rhi::DescriptorType::StorageBuffer, instances);
+    // binding 6：本通道不读深度键，但布局声明了它 ⇒ 有就绑上（避免"声明了却从未更新"的告警）
+    if (m_DepthKey) {
+        m_Device->UpdateDescriptorSet(m_HardRasterSet, 6, rhi::DescriptorType::StorageBuffer,
+                                      m_DepthKey.get());
+    }
+    m_Device->UpdateDescriptorSet(m_HardRasterSet, 7, rhi::DescriptorType::StorageBuffer,
+                                  m_HardStats.get());
+    if (asset.materials) {
+        m_Device->UpdateDescriptorSet(m_HardRasterSet, 12, rhi::DescriptorType::StorageBuffer,
+                                      asset.materials);
+    }
+
+    // ── ① 清读数（命令缓冲内拷贝；与软光栅的 `RecordSoftStatsClear` 同一惯例）──
+    RecordHardStatsClear(cmd);
+
+    // ── ② 8 张颜色目标：可采样 → 渲染目标附件 ──
+    // 【为什么 8 张都要转】本通道的渲染通道把**全部 8 张**当作颜色附件（未被写的 4 张靠
+    //   writeMask=None 保护），而 Vulkan 要求每个附件的真实布局等于渲染通道声明的
+    //   initialLayout（`LoadOp::Load` ⇒ COLOR_ATTACHMENT_OPTIMAL）。软光栅第 2 趟结束时把它们
+    //   留在"可采样"（`UnorderedAccess → ShaderResource`），清屏通道结束时也是可采样
+    //   ⇒ 8 张都得显式转过去，否则 `vkCmdBeginRenderPass` 报 initialLayout 不符。
+    // 【帧图为什么不管这件事】帧图只跟踪**它 import 的资源在 pass 边界**的状态，模块在这一段
+    //   里插了自己的渲染通道，帧图完全看不见 ⇒ 这一段的布局往返只能由本函数负责。
+    rhi::IRHITexture* colors[8] = { targets.albedo, targets.normal, targets.emissive,
+                                    targets.velocity, targets.worldPos, targets.disneyA,
+                                    targets.disneyB, targets.lightmapKey };
+    for (u32 i = 0u; i < 8u; ++i) {
+        cmd->PipelineBarrier(rhi::PipelineStage::FragmentShader,
+                             rhi::PipelineStage::ColorAttachmentOutput,
+                             rhi::ResourceState::ShaderResource,
+                             rhi::ResourceState::RenderTarget,
+                             colors[i]);
+    }
+
+    // ── ③ 渲染：mesh 绘制 ──
+    cmd->SetPipeline(m_HardRasterPSO.get());
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_HardRasterSet);
+    cmd->SetPushConstants(0, (u32)sizeof(NaniteSoftRasterParams), &params);
+
+    void* views[8] = {};
+    for (u32 i = 0u; i < 8u; ++i) views[i] = colors[i]->GetNativeHandle();
+    // clears = nullptr：两个 loadOp 都是 Load，清除值不参与（`BeginOffscreenPassMRT` 的
+    // 清除值数组契约是"颜色数 + 1 个深度"，传 nullptr 时它的内部数组是零初始化的）。
+    cmd->BeginOffscreenPassMRT(views, 8u, targets.depth->GetNativeHandle(), w, h, nullptr, false);
+    // 【视口必须与软光栅/深度解析同款（负高度）】本引擎的离屏通道统一用 `-h` 抵消"NDC y 向上、
+    //   帧缓冲 y 向下"的差异；软光栅的 `softRasterNdcToPixel` 也是按这条约定把 NDC 映射到行列的
+    //   ⇒ 只有用同一个负高度视口，两条光栅路径才会落在**同一批像素**上。
+    cmd->SetViewport({ 0.0f, (float)h, (float)w, -(float)h, 0.0f, 1.0f });
+    cmd->SetScissor({ 0, 0, w, h });
+    // 任务数 = 可见簇容量（与软光栅同一条既有口径：可见计数是**同一帧 GPU 刚写出**的、CPU 读不到，
+    // 读回会破坏无停顿）⇒ 由 shader 按 `slot >= visibleCount` 与分流判据早退收口。
+    cmd->SetDrawDebugLabel("Nanite_HardRaster (mesh, triangleCount > maxTriangles)");
+    cmd->DrawMeshTasks(visibleCapacity, 1u, 1u);
+    cmd->EndOffscreenPass();
+
+    // ── ④ 画完转回可采样（Lighting / Decal 等下游按帧图模型把它们当 ShaderResource）──
+    // 【为什么 8 张都要转回】渲染通道结束时 8 张附件都停在 COLOR_ATTACHMENT（RHI 的
+    //   `TrackColorAttachmentsAfterPass` 也是这么记账的）⇒ 全部转回可采样，帧图后续推导的
+    //   `RenderTarget → ShaderResource` 才与追踪器一致。
+    for (u32 i = 0u; i < 8u; ++i) {
+        cmd->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput,
+                             rhi::PipelineStage::FragmentShader,
+                             rhi::ResourceState::RenderTarget,
+                             rhi::ResourceState::ShaderResource,
+                             colors[i]);
+    }
+    // 【深度不在这里转】深度附件在渲染通道结束时由 RHI 记成"只读"（`EndOffscreenPass`），
+    //   与深度解析通道之后的状态一致 ⇒ 与帧图对 gbDepth 的模型继续吻合；下一次以 Load 开始的
+    //   深度通道（若有）由 `EnsureDepthAttachmentLayout` 自己补布局往返。
+}
+
+void NaniteRaster::LogHardRasterReadback() {
+    // 真实 GPU 读回（与其它读数同一约定：只 Map、不等待；调用方已 WaitIdle）
+    if (!m_HardStats) return;
+    u32 hs[kNaniteHardStatsCapacity] = {};
+    if (void* p = m_HardStats->Map()) {
+        std::memcpy(hs, p, sizeof(hs));
+        m_HardStats->Unmap();
+    }
+    // 软光栅侧的两个对照量（同一个缓冲、同一帧的读数）：用来算"软/硬占比"。
+    // 【为什么占比按**像素**算而不是按簇数】簇数只说明"分流判据生效了"，而"谁来画屏幕"
+    //   是像素量的对比；两者都打印出来，读的人不必自己猜口径。
+    u32 ss[kNaniteSoftStatsCapacity] = {};
+    if (m_SoftStats) {
+        if (void* p = m_SoftStats->Map()) {
+            std::memcpy(ss, p, sizeof(ss));
+            m_SoftStats->Unmap();
+        }
+    }
+    const u32 hardPixels = hs[kNaniteHardStatPixels];
+    const u32 softPixels = ss[kNaniteSoftStatPixels];
+    const u64 totalPixels = (u64)hardPixels + (u64)softPixels;
+    const u32 hardPermille = (totalPixels > 0u) ? (u32)((u64)hardPixels * 1000u / totalPixels) : 0u;
+    const u32 softPermille = (totalPixels > 0u) ? (u32)((u64)softPixels * 1000u / totalPixels) : 0u;
+
+    // 【恰好一行】任务 22 的验收出口：
+    //   · `clusters` 应当与软光栅行的 `skipped_big` 相等（同一条分流判据的两侧计数）；
+    //   · `soft_clusters` 应当仍是软光栅的 `soft`（小簇不该被硬光栅抢走）；
+    //   · `hard_share_permille / soft_share_permille` 就是"软硬占比"（按像素、千分比）。
+    HE_CORE_INFO("[Nanite] hard_raster clusters={} prims={} pixels={} fallback_pixels={} "
+                 "soft_clusters={} soft_pixels={} skipped_big={} hard_share_permille={} "
+                 "soft_share_permille={} max_triangles={} visible_capacity={} mesh_supported={} pso={}",
+                 hs[kNaniteHardStatClusters],
+                 hs[kNaniteHardStatPrimitives],
+                 hardPixels,
+                 hs[kNaniteHardStatFallbackPixels],
+                 ss[kNaniteSoftStatRasterClusters],
+                 softPixels,
+                 ss[kNaniteSoftStatSkippedClusters],
+                 hardPermille,
+                 softPermille,
+                 m_HardLastMaxTriangles,
+                 m_HardLastVisibleCapacity,
+                 m_HardRasterCapable ? 1 : 0,
+                 m_HardRasterPSO ? "ok" : "fail");
 }
 
 void NaniteRaster::LogSoftRasterReadback() {

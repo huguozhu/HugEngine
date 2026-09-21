@@ -188,6 +188,10 @@ void NaniteRenderer::AddPasses(RenderGraph& rg, const NaniteGBufferHandles& gb,
     }
     // 软光栅资源懒建（不注册 pass；只保证执行期资源就绪）。资产未入库时它内部直接返回。
     EnsureSoftRasterReady(gb);
+    // 【任务 22】硬光栅资源懒建（同样不注册 pass）。门控在函数内：`hardRaster` 默认关 ⇒
+    //   关闭档一个资源都不建。次序上必须**晚于**软光栅：硬光栅录在软光栅之后，
+    //   它依赖软光栅第 2 趟建好的深度键缓冲（binding 6 的占位绑定）。
+    EnsureHardRasterReady(gb);
 
     // ── Nanite_Cull：compute 逐簇写间接命令 + 原子累加计数（任务 3 的**假簇链**）──
     // writes = {gbDepth, gbWorldPos} 是复刻 `GB_Clear` 的 WAW 声明（§14.5），
@@ -270,6 +274,10 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
     //   结束时会把它还原成 READ_ONLY（与帧图在 `GB_Clear` 之后记录的模型一致）⇒ 不需要也不应该
     //   在帧图里再声明一次（声明成 Write 会把深度转成 ATTACHMENT 布局，破坏 Hi-Z 对本帧深度的采样）。
     const bool softRasterOn = m_Settings.softRaster;
+    // 【任务 22】硬光栅的档位门控（按值捕获：帧图执行发生在注册之后）。
+    //   四个条件与 `EnsureHardRasterReady` 完全一致 —— 这里再判一次是兜底，保证"没建资源就不录"。
+    const bool hardRasterOn = softRasterOn && m_Settings.hardRaster
+                           && m_Raster.IsHardRasterSupported();
     std::vector<PassResource> cullWrites;
     if (softRasterOn) {
         cullWrites.push_back({gb.albedo,      ResourceAccess::UAV});
@@ -280,7 +288,7 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
     rg.AddPass("Nanite_CullChain3",
         {{gb.depth, ResourceAccess::Read}},
         std::move(cullWrites),
-        [this, hiz, drawFromVisibleChain, softRasterOn, gb](rhi::IRHICommandList* cmd) {
+        [this, hiz, drawFromVisibleChain, softRasterOn, hardRasterOn, gb](rhi::IRHICommandList* cmd) {
             rhi::IRHITexture* hizTexture = hiz.texture ? hiz.texture() : nullptr;
             rhi::IRHITexture* depthTex   = hiz.depth ? hiz.depth() : nullptr;
             m_Cull.RecordCullChainPass(cmd, hizTexture, depthTex, m_Settings.hiz,
@@ -330,6 +338,19 @@ void NaniteRenderer::AddPostGBufferPasses(RenderGraph& rg, const NaniteGBufferHa
                                           m_Cull.GetInstanceBuffer(),
                                           m_Cull.GetBVHVisibleCapacity(),
                                           1.0f /* 深度解析的清屏值：远平面 */);
+
+            // ── §14.8 任务 22：硬光栅（大簇一侧）──
+            // 【次序：**必须在软光栅全部三趟之后**】这不是排版偏好而是正确性的前提：
+            //   软光栅先把颜色与深度写进既有附件，硬光栅再以 `LessEqual + depthWrite` 画上去 ⇒
+            //   更近的硬片元通过测试并覆盖软颜色（硬遮软 ✓），更远的被丢弃、软颜色保留（软遮硬 ✓）。
+            //   完整推导与三条已知边界写在 `NaniteRaster::RecordHardRasterPass` 的注释里。
+            if (hardRasterOn) {
+                m_Raster.RecordHardRasterPass(cmd, targets, views, m_SoftParams,
+                                              m_Cull.GetVisibleClusterBuffer(),
+                                              m_Cull.GetVisibleClusterCountBuffer(),
+                                              m_Cull.GetInstanceBuffer(),
+                                              m_Cull.GetBVHVisibleCapacity());
+            }
         });
 
     // 任务 4 的 UAV 自证通道：默认关闭（`nanite_test_write=0`）⇒ 这里什么都不注册。
@@ -532,6 +553,34 @@ void NaniteRenderer::EnsureSoftRasterReady(const NaniteGBufferHandles& gb) {
     m_Raster.EnsureSoftRasterResources(targets);
 }
 
+// ── §14.8 任务 22：硬光栅资源的懒建（同样不注册 pass，只保证执行期资源就绪）──
+// 【门控：四个条件全都要】`enabled`（模块总开关）+ `softRaster`（模块是几何写入者且已清屏）
+//   + `hardRaster`（任务 22 的档位开关，默认关）+ 设备能力（`IsHardRasterSupported()`：
+//   mesh shader 可用且 `DeviceCaps` 的上限容得下 128/192/64 的编译期声明）。
+// 【为什么 `softRaster` 是必要条件】硬光栅写的是**同一批 GBuffer 附件**，而"既有几何路径让位 +
+//   模块清屏"只在 `softRaster` 为真时发生。若 `softRaster=0` 还画硬几何，就会在没有清屏的
+//   GBuffer 上再叠一层几何（与既有 `GBufferRenderer` 重复绘制）⇒ 明确要求它必须为真。
+void NaniteRenderer::EnsureHardRasterReady(const NaniteGBufferHandles& gb) {
+    if (!m_Settings.enabled || !m_Ready) return;
+    if (!m_Settings.softRaster || !m_Settings.hardRaster) return;
+    if (!m_Raster.IsHardRasterSupported()) return;
+    if (!gb.HasFullGBufferTextures()) return;
+    const NaniteScene::AssetBuffers& asset = m_Scene.GetAssetBuffers();
+    if (!asset.clusters || !asset.vertices || !asset.indices) return;   // 资产未入库
+
+    NaniteRaster::GBufferTargets targets;
+    targets.albedo      = gb.colorTextures[0];
+    targets.normal      = gb.colorTextures[1];
+    targets.emissive    = gb.colorTextures[2];
+    targets.velocity    = gb.colorTextures[3];
+    targets.worldPos    = gb.colorTextures[4];
+    targets.disneyA     = gb.colorTextures[5];
+    targets.disneyB     = gb.colorTextures[6];
+    targets.lightmapKey = gb.colorTextures[7];
+    targets.depth       = gb.depthTexture;
+    m_Raster.EnsureHardRasterResources(targets);
+}
+
 void NaniteRenderer::RecordGBufferClearPass(rhi::IRHICommandList* cmd, const NaniteGBufferHandles& gb) {
     if (!m_Settings.enabled || !m_Ready || !m_Settings.softRaster) return;
     if (!gb.HasFullGBufferTextures()) {
@@ -575,6 +624,13 @@ void NaniteRenderer::LogSoftRasterReadback() {
     // 关闭档 / 未就绪 / 未开软光栅：不打印（关闭档日志与基线逐字一致）
     if (!m_Settings.enabled || !m_Ready || !m_Settings.softRaster) return;
     m_Raster.LogSoftRasterReadback();
+}
+
+void NaniteRenderer::LogHardRasterReadback() {
+    // 关闭档 / 未就绪 / 未开软光栅 / 未开硬光栅分流：不打印
+    //（关闭档与"只开 enabled"档的日志必须与基线逐字一致 —— 判据 ⑥/⑧e 的守卫）。
+    if (!m_Settings.enabled || !m_Ready || !m_Settings.softRaster || !m_Settings.hardRaster) return;
+    m_Raster.LogHardRasterReadback();
 }
 
 void NaniteRenderer::LogFakePipelineReadback() {

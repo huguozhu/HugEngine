@@ -141,6 +141,36 @@ struct NaniteSettings {
     ///   软光栅吃下全部可见簇，用于"同相机对照"里对照软光栅自身的正确性（而不是覆盖率）。
     /// 配置层 = cfg 键 `nanite_soft_max_triangles`（默认 16，钳到 [1, 64]），样例负责解析/序列化。
     u32 softMaxTriangles = 16u;
+
+    /// 【§14.8 任务 22】**硬光栅分流**开关（默认 **false**）。
+    ///
+    /// 【语义】true ⇒ `cluster.triangleCount > softMaxTriangles` 的簇**不再被丢弃**，改走
+    ///   模块自己的 **mesh shader 硬光栅**（`Nanite_HardRaster.mesh/frag.slang`）：一个网格
+    ///   工作组 = 一条可见簇引用，与软光栅**同一份**可见簇列表、**同一个**阈值、**同一套**
+    ///   GBuffer 字段与材质求值函数（§5.2 的混合光栅分流）。
+    ///   false（默认）⇒ 大簇仍被软光栅跳过并计进 `skipped_big`（= 任务 18/21 的行为，一字不变）。
+    ///
+    /// 【生效条件】`enabled && softRaster && hardRaster && 设备支持 VK_EXT_mesh_shader`
+    ///   —— 四个都成立才建 PSO、才录绘制。
+    ///   · `enabled`：§14.2 不变式 1（模块总开关）；
+    ///   · `softRaster`：硬光栅写的是**同一批 GBuffer 附件**，而"既有几何路径让位 + 模块清屏"
+    ///     只在 `softRaster` 为真时发生。若 `softRaster=0` 还画硬几何，就会与既有
+    ///     `GBufferRenderer` 的几何重复绘制（且没有清屏）⇒ 明确要求它必须为真。
+    ///   · 设备能力：不支持就不建 PSO、不录（与任务 6 对 mesh shader 的处理口径一致）。
+    ///
+    /// 【为什么默认关闭（这条有硬证据，不是保守）】判据 ⑧b 逐文件比较"关闭档 vs 只开 enabled 档"
+    ///   的转储，只允许 `albedo / gb_normal / gb_worldpos / gb_lightmapkey` 四个目标 + 抖动族
+    ///   发生变化。而默认阈值 16 档下模块的覆盖率只有 **0.16%**（阈值 64 档是 44.4%）——
+    ///   一旦默认开启分流，覆盖率会跳到几十个百分点，`prov1_*` / `rsm_*` / `ssr` / `ibl_irr`
+    ///   这些**能读到 GBuffer 与深度**的下游转储必然跟着变，判据 ⑧b 会立刻判红。
+    ///   ⇒ 它与任务 4 的 `testWrite`、任务 6 的 `meshTest` 同类：是**独立档位开关**，
+    ///     而不是"模块第四阶段"的默认行为。三档语义因此是：
+    ///       `enabled=0`                     ⇒ 逐位不变（pass 集合与冻结指纹都不动）；
+    ///       `enabled=1`（hardRaster 默认关）⇒ 与任务 21 完全一致（判据 ⑥/⑧ 继续 PASS）；
+    ///       `enabled=1 + hardRaster=1`      ⇒ 任务 22 的新路径（软硬分流真正发生）。
+    ///
+    /// 配置层 = cfg 键 `nanite_hard_raster`（默认 0），样例负责解析/序列化 + 面板勾选框。
+    bool hardRaster = false;
 };
 
 } // namespace he::render

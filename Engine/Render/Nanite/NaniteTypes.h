@@ -2242,6 +2242,45 @@ inline constexpr u32 kNaniteSoftStatFallbackPixels  = 13u;
 inline constexpr u32 kNaniteSoftStatDepthResolvedPixels = 14u;
 inline constexpr u32 kNaniteSoftStatsCapacity       = 16u;  ///< 读数缓冲条数（与 shader 一致）
 
+// ============================================================
+// 【§14.8 任务 22】硬光栅（mesh shader 分流）的尺寸常量与读数槽位
+//
+// 【设计 §5.2 的分流口径】`cluster.triangleCount > softMaxTriangles` ⇒ 硬光栅；
+//   `<=` ⇒ 软光栅。两侧用的是**同一个 push constant 字段**（`NaniteSoftRasterParams::maxTriangles`）
+//   与**同一份可见簇列表**，因此并集全覆盖、交集为空。
+//
+// 【尺寸常量的来源与互锁】它们必须与 `Nanite_HardRaster.mesh.slang` 的
+//   `kHardNumThreads / kHardMaxVertices / kHardMaxPrimitives` 一一对应；`NaniteRaster` 在
+//   建 mesh PSO **之前**会用 `DeviceCaps` 逐项核对（不够就不建 PSO、不录 pass，不做替代方案）。
+//   · `kNaniteHardRasterThreads`：本机 `maxMeshWorkGroupInvocations = 128`，
+//     `[numthreads(N,1,1)]` 的 N 超过它 PSO 直接建不出来；
+//   · `kNaniteHardRasterMaxVertices = 3 × kNaniteMaxClusterTriangles`：mesh 的输出顶点是
+//     **逐图元角点**展开的（不做索引去重）⇒ 64 个三角形 = 192 个输出顶点。注意它比
+//     `kNaniteMaxClusterVertices`(=128，顶点**表**的容量) 大 —— 两者不是同一个量。
+//   · `kNaniteHardRasterMaxPrimitives = kNaniteMaxClusterTriangles`。
+// ============================================================
+inline constexpr u32 kNaniteHardRasterThreads       = 128u;
+inline constexpr u32 kNaniteHardRasterMaxVertices   = 3u * kNaniteMaxClusterTriangles;
+inline constexpr u32 kNaniteHardRasterMaxPrimitives = kNaniteMaxClusterTriangles;
+static_assert(kNaniteHardRasterMaxVertices == 192u,
+              "硬光栅的 mesh 输出顶点数 = 3 × 簇三角形上限（逐角点展开，不做索引去重）");
+static_assert(kNaniteHardRasterMaxPrimitives == 64u, "硬光栅的 mesh 输出图元数 = 簇三角形上限");
+
+/// 硬光栅读数槽位（模块**自持**的小缓冲，不与软光栅那 16 槽共用；与
+/// `Nanite_HardRaster.{mesh,frag}.slang` 的 `kHardStat*` 一一对应）
+///
+/// 【为什么不复用软光栅的 16 槽缓冲】那 16 槽里 0..14 全部已占用（判据 8a 直接按字段名读它们），
+///   只剩 1 个空槽，而"软硬占比"至少要三个量（接手簇数 / 输出图元数 / 写入像素数）。
+///   另开一个模块自持的 4 槽缓冲，两侧的槽位语义就不会互相纠缠。
+inline constexpr u32 kNaniteHardStatClusters       = 0u;   ///< 真的交给硬光栅的簇数（应 == 软光栅的 skipped_big）
+inline constexpr u32 kNaniteHardStatPrimitives     = 1u;   ///< 这些簇输出并被光栅化的图元数（mesh 侧累加）
+inline constexpr u32 kNaniteHardStatPixels         = 2u;   ///< 硬光栅写进 GBuffer 的像素数（片元原子计数）
+inline constexpr u32 kNaniteHardStatFallbackPixels = 3u;   ///< 材质段缺失/越界的中性兜底像素数（正常 0）
+inline constexpr u32 kNaniteHardStatsCapacity      = 4u;   ///< 缓冲条数（与 shader 一致）
+static_assert(kNaniteHardStatFallbackPixels + 1u == kNaniteHardStatsCapacity,
+              "硬光栅读数槽必须连续覆盖 [0, kNaniteHardStatsCapacity)");
+
+
 /// "该像素没有几何"的深度键哨兵（第 1 趟之前由模块把整张深度键清成它）
 inline constexpr u32 kNaniteSoftRasterNoGeometryKey = 0xFFFFFFFFu;
 

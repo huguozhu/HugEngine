@@ -126,6 +126,9 @@ if(SLANGC)
         "${SHADER_DIR}/Nanite/Nanite_MeshTest.frag.slang"
         # Nanite（虚拟几何模块）——§14.8 任务 18：把软光栅的深度键还原成 NDC 深度写进既有深度附件
         "${SHADER_DIR}/Nanite/Nanite_DepthResolve.frag.slang"
+        # Nanite（虚拟几何模块）——§14.8 任务 22：硬光栅（mesh shader 分流）的片元。写与软光栅
+        # **逐字段一致**的 4 张 GBuffer（MRT0/1/4/7），材质复用 `softRasterEvaluateMaterial`。
+        "${SHADER_DIR}/Nanite/Nanite_HardRaster.frag.slang"
     )
     set(COMP_SLANG
         # GI
@@ -242,6 +245,10 @@ if(SLANGC)
         # Nanite（虚拟几何模块）——§14.8 任务 6：真正输出图元（SetMeshOutputCounts(4,2)）
         # 的最小 mesh shader，用于把 `PipelineStateDesc::meshShader` 这条路径接进 PSO。
         "${SHADER_DIR}/Nanite/Nanite_MeshTest.mesh.slang"
+        # Nanite（虚拟几何模块）——§14.8 任务 22：**硬光栅**。一个网格工作组 = 一条可见簇引用
+        # （与软光栅同一约定），只对 `triangleCount > maxTriangles` 的簇调用
+        # `SetMeshOutputCounts(3*triCount, triCount)`（逐角点展开，最多 192 顶点 / 64 图元）。
+        "${SHADER_DIR}/Nanite/Nanite_HardRaster.mesh.slang"
     )
     # 公共共享头（被多个 shader include）——每个 shader 编译依赖这些；
     # 单个着色器文件本身由各自 SRC 依赖。改为显式列表而非 glob 所有 .slang，

@@ -207,6 +207,14 @@ public:
     /// 由 `AddPasses` 在开关开启时调用一次 —— 它**不注册任何 pass**，只保证执行期的资源就绪。
     void EnsureSoftRasterReady(const NaniteGBufferHandles& gb);
 
+    /// 【§14.8 任务 22】把硬光栅（mesh shader 分流）的 PSO/描述符集/读数缓冲懒建起来。
+    /// 【门控】`enabled && softRaster && hardRaster && 设备支持`，四个全真才建 —— 因此
+    ///   `hardRaster` 默认关时**一个资源都不会创建**（§14.2 不变式 1 的口径），
+    ///   `enabled=1` 档的 pass 列表与转储与任务 21 逐位相同。
+    /// 【调用点】`AddPasses`，紧跟在 `EnsureSoftRasterReady` 之后（软光栅先建 ⇒ 深度键缓冲一定
+    ///   已经在；硬光栅的次序在软光栅之后，见 `NaniteRaster::RecordHardRasterPass` 的推导）。
+    void EnsureHardRasterReady(const NaniteGBufferHandles& gb);
+
     /// 【§14.8 任务 18】**让位**的落点：既有 `GB_Clear` 的几何绘制让给模块，本函数只做
     /// "按既有清除值清屏 8×MRT + 深度"（模块自己建 PSO/附件布局、直接写既有 GBuffer 纹理句柄）。
     /// 【调用点】`DeferredPipeline_FrameGraph.cpp` 的 `GB_Clear` pass 体内，由**同一个开关**门控：
@@ -219,6 +227,17 @@ public:
     /// dump 帧打印**恰好一行**软光栅读数（真实 GPU 读回；字段说明见 `NaniteRaster`）。
     /// 关闭档 / 未就绪 / 未开软光栅时直接返回、不打印（关闭档日志与基线一致）。
     void LogSoftRasterReadback();
+
+    /// 【§14.8 任务 22】dump 帧打印**恰好一行**硬光栅读数（真实 GPU 读回）：
+    ///   `[Nanite] hard_raster clusters=<C> prims=<P> pixels=<X> fallback_pixels=<F>
+    ///    soft_clusters=<S> soft_pixels=<Y> skipped_big=<B> hard_share_permille=<h>
+    ///    soft_share_permille=<s> max_triangles=<T> visible_capacity=<V> mesh_supported=<0|1> pso=<ok|fail>`
+    /// 【为什么单起一行而不动 `soft_raster` 行】判据 ⑧a 按字段名 grep 那一行
+    ///   （`soft / material_pixels / pixels_written / neutral_material_pixels / skipped_big`），
+    ///   改字段名或删字段会让它直接判红。软硬占比由本行与那一行**并列**读出。
+    /// 【门控】关闭档 / 未就绪 / 未开软光栅 / `hardRaster=0` 一律不打印（关闭档与"只开 enabled"
+    ///   档的日志必须与基线逐字一致）。
+    void LogHardRasterReadback();
 
     /// 【§14.8 任务 16】dump 帧打印**恰好一行**"可见簇 → 间接绘制"的接线读数：
     ///   `[Nanite] visible_wiring visible=<V> indirect_count=<C> draws=<D> rasterized=<R>
