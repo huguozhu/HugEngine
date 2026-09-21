@@ -37,6 +37,7 @@
 #include "Nanite/NaniteTypes.h"   // 【任务 18】NaniteSoftRasterParams / 读数槽位 / 深度键编码
 
 #include <memory>
+#include <span>   // 【任务 26】每簇 BVH 深度镜像的只读视图（可视化模式 4 的输入）
 
 namespace he::render {
 
@@ -329,6 +330,59 @@ public:
     /// @param targets 本帧的 GBuffer 纹理（用来建第 2 趟的 4 张颜色目标绑定）
     bool EnsureSoftRasterResources(const GBufferTargets& targets);
 
+    // ============================================================
+    // 【§14.8 任务 26 / §14.34 末尾最小范围第 1 条】屏幕可视化（debug view）
+    //
+    // 【四项验收明文点名的可视化】可见簇数 / 软硬光栅占比 / LOD 层级 / BVH 深度；由
+    //   `NaniteSettings::debugView` 切换（**默认 0 = 关**）。
+    //
+    // 【落点：模块自建小目标，不改任何 GBuffer/既有渲染目标】一张 64×32 的 `R32_UINT`
+    //   （8 KB）+ 一个 8 KB 读回缓冲 + 一个 compute PSO + 一个描述符集。关闭档**一个都不建**
+    //   （§14.2 不变式 1：既不多建 GPU 资源、也不多一行日志）。
+    //   口径（一像素 = 一个屏幕 tile、四种模式的编码）写在 `NaniteTypes.h` 的
+    //   `kNaniteDebugView*` 与 `Nanite_DebugView.comp.slang` 的文件头注释里。
+    //
+    // 【为什么不在帧图里注册一个 pass】它只读剔除链的输出（可见簇列表/计数）与三张 CPU 一次性
+    //   上传的只读表，写的是模块自持目标 ⇒ 与硬光栅同理，录在 `Nanite_CullChain3` 的 pass 体内、
+    //   用命令缓冲里的屏障定序，是唯一稳的写法（帧图对零帧图资源的 pass 排序不可依赖）。
+    // ============================================================
+
+    /// 可视化是否可用（目标 + PSO + 描述符集都建起来了）
+    [[nodiscard]] bool IsDebugViewReady() const { return m_DebugViewPSO != nullptr; }
+
+    /// 懒建可视化的目标/读回缓冲/描述符集/PSO（只在 `debugView != 0` 时被调用）。
+    /// @param mode          档位（1..4；0 不建任何东西）
+    /// @param assetClusters 【模式 2】资产簇记录段（64B/条；只为取 `triangleCount` 做软/硬分类）
+    /// @param spheres       簇包围球表（16B/条，**按资产簇下标**；与 BVH 遍历同一份比特）
+    /// @param lodInfo       每簇 LOD 元数据（16B/条，`lodLevel` 是模式 3 的唯一输入）
+    /// @param bvhDepths     每簇 BVH 节点深度（u32/条；CPU 由同一棵树逐叶展开，模式 4 的唯一输入）
+    /// 【失败】设备缺失 / 档位为 0 / 输入缓冲为空 ⇒ 返回 false（调用方跳过本帧的可视化，不崩）
+    bool EnsureDebugViewResources(u32 mode,
+                                  rhi::IRHIBuffer* assetClusters,
+                                  rhi::IRHIBuffer* spheres,
+                                  rhi::IRHIBuffer* lodInfo,
+                                  std::span<const u32> bvhDepths);
+
+    /// 录制可视化：先清屏（`mode == 0` 的内部趟）再按档位累加，最后把目标拷进 host 可见缓冲。
+    /// 【必须在剔除链之后调用】它消费 `visibleRefs` / `visibleCount`（同一帧 GPU 刚写出的列表）。
+    /// 【同步】内部发三条显式屏障（清屏前 / 清屏→累加 / 累加→拷贝），帧图不跟踪模块自持资源。
+    void RecordDebugViewPass(rhi::IRHICommandList* cmd,
+                             rhi::IRHIBuffer* visibleRefs,
+                             rhi::IRHIBuffer* visibleCount,
+                             rhi::IRHIBuffer* instances,
+                             u32 visibleCapacity,
+                             const NaniteDebugViewParams& params);
+
+    /// dump 帧打印**恰好一行**可视化读数（把 64×32 目标读回 host 后统计）：
+    ///   `[Nanite] debug_view mode=<1..4> name=<...> px_nonzero=<n> px_nonzero_permille=<p>
+    ///    distinct_vals=<d> panelA=[sum max nonzero distinct] panelB=[sum max nonzero] …`
+    /// 【"不是黑屏"的判据就在这里】`px_nonzero` / `distinct_vals` / 各面板的 sum/max 都是
+    ///   **真实 GPU 读回**（`CopyTextureToBuffer → Map`）；四种模式若产出同一张图，
+    ///   这些数会完全相同（报告里逐档对比即可发现）。
+    /// @param visible 本帧可见簇数（来自剔除链的计数缓冲；用来给出"落在屏幕外的簇数"）
+    /// 【门控】`debugView == 0` 时直接返回：不 Map、不打一个字符。
+    void LogDebugViewReadback(u32 visible);
+
 
     /// 深度键缓冲当前覆盖的像素数（= 宽×高；dump/日志用）
     [[nodiscard]] u32 GetDepthKeyPixelCount() const { return m_DepthKeyPixels; }
@@ -508,6 +562,39 @@ private:
     /// 上一次录制时记下的硬光栅参数（dump 帧日志用：真实 GPU 读回 + CPU 侧真值对照）
     u32 m_HardLastMaxTriangles = 0u;
     u32 m_HardLastVisibleCapacity = 0u;
+    /// 【§14.8 任务 26 / §14.34 第 10 行】上一次**实际推给 mesh 阶段**的那组 push constant 的
+    /// CPU 侧真值（= `paramsEff`，包含由绑定侧唯一决定的 `pagesEnabled`）。
+    /// 【为什么必须存"推下去的那一份"而不是调用方的入参】回读的用途是核对"CPU 送下去的值 ==
+    ///   shader 收到的值"；存调用方入参会在 `pagesEnabled` 这类由录制侧改写的字段上与真实推送值
+    ///   分叉，回读判据就会自欺（与软光栅 `m_SoftLastMaxTriangles` 同一口径，只是多存几项）。
+    u32 m_HardLastScreenW        = 0u;
+    u32 m_HardLastScreenH        = 0u;
+    u32 m_HardLastExtentMilli    = 0u;
+    u32 m_HardLastInstanceCount  = 0u;
+    u32 m_HardLastMaterialCount  = 0u;
+    u32 m_HardLastPagesEnabled   = 0u;
+
+    // ── 【§14.8 任务 26】屏幕可视化（懒建；`debugView == 0` 时全部为空）──
+    /// 模块自建的 64×32 `R32_UINT` 小目标：**不是** GBuffer 的任何附件 ⇒ 改不动可见画面。
+    /// usage = `UnorderedAccess`（compute 原子写）| `TransferSrc`（`CopyTextureToBuffer` 读回）
+    ///         | `ShaderResource`（拷完 RHI 无条件还原成 SHADER_READ_ONLY ⇒ 缺这一位会报
+    ///         VUID-VkImageMemoryBarrier-oldLayout-01211，与任务 6 的 1×1 目标同一个坑）。 
+    std::unique_ptr<rhi::IRHITexture> m_DebugTarget;
+    /// 目标 → host 的读回缓冲（`kNaniteDebugViewPixels × 4B`；dump 帧 Map）
+    std::unique_ptr<rhi::IRHIBuffer>  m_DebugReadback;
+    /// 【模式 4】每簇 BVH 节点深度的 GPU 承载（CPU 侧数组在资源懒建时一次性上传；
+    ///   默认档不建）。它只被可视化读，不改任何剔除状态。
+    std::unique_ptr<rhi::IRHIBuffer>  m_DebugDepths;
+
+    rhi::ShaderBytecode m_DebugCS;   // Nanite_DebugView.comp.spv
+    /// 可视化自己的描述符集布局 + 集合（bindings 0..7；与两条光栅路径**不共用**）
+    rhi::DescriptorSetLayoutHandle m_DebugLayout = rhi::kInvalidLayout;
+    rhi::DescriptorSetHandle       m_DebugSet    = rhi::kInvalidSet;
+    std::unique_ptr<rhi::IRHIPipelineState> m_DebugViewPSO;
+
+    /// 上一次录制用的档位与容量（dump 帧读数行打印；也是"清屏趟"要派发多少组的依据）
+    u32 m_DebugLastMode    = 0u;
+    u32 m_DebugLastVisibleCapacity = 0u;
 };
 
 } // namespace he::render

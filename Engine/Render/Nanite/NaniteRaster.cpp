@@ -42,6 +42,7 @@
 // 【§14.8 任务 22】硬光栅（mesh shader 分流）
 #include "Nanite_HardRaster.mesh.spv.h"       // k_Nanite_HardRaster_mesh_spv
 #include "Nanite_HardRaster.frag.spv.h"       // k_Nanite_HardRaster_frag_spv
+#include "Nanite_DebugView.comp.spv.h"        // k_Nanite_DebugView_comp_spv（§14.8 任务 26 的可视化）
 
 #include <cstring>   // std::memcpy（占位顶点/索引缓冲的初值）
 
@@ -1410,7 +1411,6 @@ void NaniteRaster::RecordHardRasterPass(rhi::IRHICommandList* cmd,
 
     m_HardLastMaxTriangles    = params.maxTriangles;
     m_HardLastVisibleCapacity = visibleCapacity;
-
     // ── 绑定：每帧重写（与软光栅同一口径：资产/可见簇/实例缓冲在资产上传后就不再变，
     //    但重写只是几个 vkUpdateDescriptorSets，且引擎的 GPU 在执行期读描述符）──
     // 【任务 24：0/1/2 与 15..20 一槽两用】与软光栅第 1/2 趟**逐条同口径**（同一个 include 里
@@ -1423,6 +1423,16 @@ void NaniteRaster::RecordHardRasterPass(rhi::IRHICommandList* cmd,
     paramsEff.clusterStride  = streamOn ? asset.stream.clusterStride  : 0u;
     paramsEff.vertexStride   = streamOn ? asset.stream.vertexStride   : 0u;
     paramsEff.triangleStride = streamOn ? asset.stream.triangleStride : 0u;
+    // ── 【任务 26 / §14.34 第 10 行】把**这一份**（`paramsEff`）的 7 个字段记成 CPU 侧真值 ──
+    // 【为什么在这一行而不是函数开头】`pagesEnabled` 只在这里定型（由绑定侧唯一决定）；
+    //   记在它之前会把"回读该等于谁"记错，回读判据随即变成自欺。
+    //   它们与 mesh shader 写回的 `kHardStatDiag*` 槽逐项对应（见 `LogHardRasterReadback`）。
+    m_HardLastScreenW       = paramsEff.screenWidth;
+    m_HardLastScreenH       = paramsEff.screenHeight;
+    m_HardLastExtentMilli   = (u32)std::max(0.0f, paramsEff.meshMaxExtent * 1000.0f);
+    m_HardLastInstanceCount = paramsEff.instanceCount;
+    m_HardLastMaterialCount = paramsEff.materialCount;
+    m_HardLastPagesEnabled  = paramsEff.pagesEnabled;
     rhi::IRHIBuffer* clusterSrc  = streamOn ? asset.stream.poolClusters  : asset.clusters;
     rhi::IRHIBuffer* vertexSrc   = streamOn ? asset.stream.poolVertices  : asset.vertices;
     rhi::IRHIBuffer* triangleSrc = streamOn ? asset.stream.poolTriangles : asset.indices;
@@ -1517,8 +1527,281 @@ void NaniteRaster::RecordHardRasterPass(rhi::IRHICommandList* cmd,
     //   深度通道（若有）由 `EnsureDepthAttachmentLayout` 自己补布局往返。
 }
 
-void NaniteRaster::ReadbackSoftStats(u32 (&out)[kNaniteSoftStatsCapacity]) {
-    // 【清零语义】缓冲不存在（软光栅未就绪）时全部写 0：调用方不必先自己清，
+// ============================================================
+// 【§14.8 任务 26 / §14.34 末尾最小范围第 1 条】屏幕可视化的资源 / 录制 / 读回
+//
+// 【三件事】① 懒建一张 64×32 R32_UINT 小目标 + 读回缓冲 + PSO + 描述符集（只一次）；
+//   ② 每帧录两趟（清屏 + 按档位累加）并把目标拷进 host 可见缓冲；
+//   ③ dump 帧把目标读回、打印一行统计（"不是黑屏"的判据）。
+// 【门控】全部挂在 `debugView != 0` 上：默认档**一个资源都不建、一次派发都不录、一行都不打**。
+// 【为什么不碰 GBuffer】可视化写的是模块自建目标（与任务 6 的 1×1 目标同一做法），
+//   因此它对可见画面零影响 —— 它证明的是"可视化真的产出了非空画面"，而不是"改了画面"。
+// ============================================================
+bool NaniteRaster::EnsureDebugViewResources(u32 mode,
+                                            rhi::IRHIBuffer* assetClusters,
+                                            rhi::IRHIBuffer* spheres,
+                                            rhi::IRHIBuffer* lodInfo,
+                                            std::span<const u32> bvhDepths) {
+    // 【默认关：一个字节都不建】档位为 0 直接返回（调用方本来也不会调，这里再兜一次）
+    if (!m_Device || mode == kNaniteDebugViewOff || mode > kNaniteDebugViewMaxMode) return false;
+    // 四张只读输入表缺一不可（缺了就没有"非空洞"的可视化数据可用，宁可跳过也不画假图）
+    if (!assetClusters || !spheres || !lodInfo || bvhDepths.empty()) return false;
+
+    if (m_DebugViewPSO) {
+        // 已经建好：只需在档位变化时刷新 push constant 的镜像（PSO/资源与档位无关，
+        // 四种模式共用同一个 PSO 与同一张目标 —— 模式只决定累加时的编码）
+        return true;
+    }
+
+    // ── 1. 模块自建的 64×32 R32_UINT 小目标（8 KB）──
+    {
+        rhi::TextureDesc td;
+        td.width  = kNaniteDebugViewWidth;
+        td.height = kNaniteDebugViewHeight;
+        td.format = rhi::Format::R32_UINT;   // 整数目标：原子累加/取最大值直接写计数，不做浮点量化
+        td.usage  = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::TransferSrc
+                  | rhi::TextureUsage::ShaderResource;   // 见头文件对 ShaderResource 的说明
+        m_DebugTarget = m_Device->CreateTexture(td);
+        if (!m_DebugTarget) {
+            HE_CORE_ERROR("NaniteRaster: 可视化目标创建失败（{}×{} R32_UINT）",
+                          kNaniteDebugViewWidth, kNaniteDebugViewHeight);
+            return false;
+        }
+    }
+
+    // ── 2. 目标 → host 的读回缓冲（紧凑行距：宽 × 高 × 4B）──
+    {
+        rhi::BufferDesc d;
+        d.size      = sizeof(u32) * kNaniteDebugViewPixels;
+        d.usage     = rhi::BufferUsage::Storage;   // Storage 路径恒定带 TRANSFER_DST（拷贝目标）
+        d.cpuAccess = true;
+        m_DebugReadback = m_Device->CreateBuffer(d);
+        if (!m_DebugReadback) { HE_CORE_ERROR("NaniteRaster: 可视化读回缓冲创建失败"); return false; }
+    }
+
+    // ── 3. 描述符集布局：与 `Nanite_DebugView.comp.slang` 的绑定逐条对应 ──
+    {
+        const u32 kStage = rhi::kStageMaskCompute;
+        rhi::DescriptorSetLayoutDesc layout;
+        layout.bindings = {
+            { 0, rhi::DescriptorType::StorageBuffer, 1, kStage, false },  // 可见簇引用
+            { 1, rhi::DescriptorType::StorageBuffer, 1, kStage, false },  // 可见簇计数
+            { 2, rhi::DescriptorType::StorageBuffer, 1, kStage, false },  // 实例表（128B 契约）
+            { 3, rhi::DescriptorType::StorageBuffer, 1, kStage, false },  // 簇包围球
+            { 4, rhi::DescriptorType::StorageBuffer, 1, kStage, false },  // LOD 元数据
+            { 5, rhi::DescriptorType::StorageBuffer, 1, kStage, false },  // 每簇 BVH 深度
+            { 6, rhi::DescriptorType::StorageBuffer, 1, kStage, false },  // 资产簇记录（三角形数）
+            { 7, rhi::DescriptorType::StorageImage,  1, kStage, false },  // 可视化目标（64×32 R32_UINT）
+        };
+        m_DebugLayout = m_Device->CreateDescriptorSetLayout(layout);
+        if (m_DebugLayout == rhi::kInvalidLayout) {
+            HE_CORE_ERROR("NaniteRaster: 可视化描述符集布局创建失败");
+            return false;
+        }
+        m_DebugSet = m_Device->AllocateDescriptorSet(m_DebugLayout);
+    }
+
+    // ── 4. 一次性绑定"不变的"四项（目标 + 三张 CPU 一次性上传的只读表）──
+    // 【为什么"不变量"只绑一次】引擎的 GPU 在**执行期**读描述符、最后一次主机写对整段命令缓冲
+    //   生效（任务 15 的教训）⇒ 同一个集合每帧只应该写一次。可见簇引用/计数/实例表每帧都可能
+    //   换缓冲（流式/重建），故它们在**录制期**写；这里写的是与资产同生共死的三张表与目标。
+    m_Device->UpdateDescriptorSet(m_DebugSet, 3, rhi::DescriptorType::StorageBuffer, spheres);
+    m_Device->UpdateDescriptorSet(m_DebugSet, 4, rhi::DescriptorType::StorageBuffer, lodInfo);
+    m_Device->UpdateDescriptorSetWithImageView(m_DebugSet, 7, rhi::DescriptorType::StorageImage,
+                                               m_DebugTarget->GetNativeHandle());
+
+    // ── 5. compute PSO（push constant = 96B 的 `NaniteDebugViewParams`）──
+    // 【每簇 BVH 深度表】它是 CPU 侧数组，需要一个 GPU 缓冲承载 ⇒ 模块自建一个小缓冲并在这里
+    //   一次性上传（长度 = 参与 BVH 的簇数，实测 8287 条 = 33 KB；默认档不建）。
+    {
+        rhi::BufferDesc d;
+        d.size      = sizeof(u32) * bvhDepths.size();
+        d.usage     = rhi::BufferUsage::Storage;
+        d.cpuAccess = true;
+        m_DebugDepths = m_Device->CreateBuffer(d);
+        if (!m_DebugDepths) { HE_CORE_ERROR("NaniteRaster: 可视化 BVH 深度表创建失败"); return false; }
+        if (void* p = m_DebugDepths->Map()) {
+            std::memcpy(p, bvhDepths.data(), d.size);
+            m_DebugDepths->Unmap();
+        }
+        m_Device->UpdateDescriptorSet(m_DebugSet, 5, rhi::DescriptorType::StorageBuffer,
+                                      m_DebugDepths.get());
+    }
+    m_Device->UpdateDescriptorSet(m_DebugSet, 6, rhi::DescriptorType::StorageBuffer, assetClusters);
+
+    m_DebugCS.stage      = rhi::ShaderStage::Compute;
+    m_DebugCS.spirv      = k_Nanite_DebugView_comp_spv;
+    m_DebugCS.entryPoint = "main";
+
+    rhi::PushConstantRange pc;
+    pc.stageMask = rhi::kStageMaskCompute;
+    pc.size      = sizeof(NaniteDebugViewParams);
+
+    rhi::PipelineStateDesc desc;
+    desc.computeShader        = &m_DebugCS;
+    desc.bindPoint            = rhi::PipelineBindPoint::Compute;
+    desc.pushConstantRanges   = { pc };
+    desc.descriptorSetLayouts = { m_DebugLayout };
+    desc.debugName            = "NaniteDebugView";
+    m_DebugViewPSO = m_Device->CreatePipelineState(desc);
+    if (!m_DebugViewPSO) {
+        HE_CORE_ERROR("NaniteRaster: 可视化 compute PSO 创建失败");
+        return false;
+    }
+
+    HE_CORE_INFO("NaniteRaster: 任务 26 屏幕可视化就绪（{}×{} R32_UINT 小目标 = 两个 {}×{} 面板；"
+                 "四种模式：1=可见簇数 2=软硬光栅占比 3=LOD 层级 4=BVH 深度；"
+                 "**不碰任何 GBuffer**，dump 帧读回并打印统计）",
+                 kNaniteDebugViewWidth, kNaniteDebugViewHeight,
+                 kNaniteDebugViewPanel, kNaniteDebugViewPanel);
+    return true;
+}
+
+void NaniteRaster::RecordDebugViewPass(rhi::IRHICommandList* cmd,
+                                       rhi::IRHIBuffer* visibleRefs,
+                                       rhi::IRHIBuffer* visibleCount,
+                                       rhi::IRHIBuffer* instances,
+                                       u32 visibleCapacity,
+                                       const NaniteDebugViewParams& params) {
+    if (!cmd || !m_DebugViewPSO || !visibleRefs || !visibleCount || !instances) return;
+    if (params.mode == kNaniteDebugViewOff || params.mode > kNaniteDebugViewMaxMode) return;
+    m_DebugLastMode = params.mode;
+    m_DebugLastVisibleCapacity = visibleCapacity;
+
+    // 【每帧重写易变项】可见簇列表/计数与实例表都可能换缓冲（资产重建/流式），
+    //   每个集合每帧只写一次（同一集合、两次派发只用不同的 push constant ⇒ 无那个陷阱）。
+    m_Device->UpdateDescriptorSet(m_DebugSet, 0, rhi::DescriptorType::StorageBuffer, visibleRefs);
+    m_Device->UpdateDescriptorSet(m_DebugSet, 1, rhi::DescriptorType::StorageBuffer, visibleCount);
+    m_Device->UpdateDescriptorSet(m_DebugSet, 2, rhi::DescriptorType::StorageBuffer, instances);
+
+    // ── ① 目标布局：可采样/上一帧的状态 → 存储图像（UAV）──
+    // 【为什么 from 取 `Undefined`】本入口每次都会先把整张目标清 0（清屏趟），
+    //   丢弃旧内容是语义精确的；而纹理刚建好时布局追踪器也没有记录（与清屏通道同一手法，
+    //   那里正是为了消掉启动期的那 7 条布局告警才从 RenderTarget 改成 Undefined）。
+    cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                         rhi::ResourceState::Undefined, rhi::ResourceState::UnorderedAccess,
+                         m_DebugTarget.get());
+
+    // ── ② 清屏趟（mode == 0 的内部趟；见 shader 文件头的说明）──
+    NaniteDebugViewParams clearParams = params;
+    clearParams.mode = kNaniteDebugViewClearMode;
+    cmd->SetPipeline(m_DebugViewPSO.get());
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DebugSet);
+    cmd->SetPushConstants(0, (u32)sizeof(clearParams), &clearParams);
+    cmd->SetDrawDebugLabel("Nanite_DebugView (clear target)");
+    cmd->Dispatch((kNaniteDebugViewPixels + 63u) / 64u, 1u, 1u);
+
+    // 清屏 → 累加：显式内存屏障（两者都是对**同一张目标**的原子/普通写，必须定序）
+    cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
+                         rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess);
+
+    // ── ③ 累加趟（一个线程 = 一条可见簇引用；按容量派发、由 shader 按可见计数早退）──
+    cmd->SetPushConstants(0, (u32)sizeof(params), &params);
+    cmd->SetDrawDebugLabel("Nanite_DebugView (cluster -> tile)");
+    cmd->Dispatch((visibleCapacity + 63u) / 64u, 1u, 1u);
+
+    // ── ④ 目标 → host 可见缓冲（dump 帧 Map 读回；`CopyTextureToBuffer` 自己管布局往返）──
+    cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::Transfer,
+                         rhi::ResourceState::UnorderedAccess, rhi::ResourceState::CopySrc,
+                         m_DebugTarget.get());
+    cmd->CopyTextureToBuffer(m_DebugTarget.get(), m_DebugReadback.get(),
+                             0, 0, kNaniteDebugViewWidth, kNaniteDebugViewHeight, 0);
+}
+
+void NaniteRaster::LogDebugViewReadback(u32 visible) {
+    // 【门控】档位为 0（默认）或资源没建 ⇒ 直接返回：不 Map、不打一个字符
+    if (m_DebugLastMode == kNaniteDebugViewOff || !m_DebugReadback) return;
+
+    u32 px[kNaniteDebugViewPixels] = {};
+    if (void* p = m_DebugReadback->Map()) {
+        std::memcpy(px, p, sizeof(u32) * kNaniteDebugViewPixels);
+        m_DebugReadback->Unmap();
+    }
+
+    // ── 统计（"不是黑屏"的判据全在这里；两种面板分别统计）──
+    u32 nonzero = 0u;
+    // 【面板 A 的取值集合】只需容纳"面板 A 的格子数"（32×32 = 1024）个不同取值，
+    //   所以按面板尺寸开数组而不是按整张目标（省一半栈）
+    constexpr u32 kPanelCells = kNaniteDebugViewPanel * kNaniteDebugViewPanel;
+    u32 distinctVals[kPanelCells] = {};
+    u32 distinctCount = 0u;
+    u64 sumA = 0u, sumB = 0u;
+    u32 maxA = 0u, maxB = 0u;
+    u32 nonzeroA = 0u, nonzeroB = 0u;
+    for (u32 ty = 0u; ty < kNaniteDebugViewHeight; ++ty) {
+        for (u32 tx = 0u; tx < kNaniteDebugViewPanel; ++tx) {
+            const u32 a = px[ty * kNaniteDebugViewWidth + tx];
+            const u32 b = px[ty * kNaniteDebugViewWidth + kNaniteDebugViewPanelBColumn + tx];
+            if (a != 0u) { ++nonzero; ++nonzeroA; }
+            if (b != 0u) { ++nonzero; ++nonzeroB; }
+            sumA += (u64)a;
+            sumB += (u64)b;
+            if (a > maxA) maxA = a;
+            if (b > maxB) maxB = b;
+            // 面板 A 的"不同取值个数"：线性查重（1024 个像素，O(n²) 也只是一百万次比较）
+            //   【为什么把 0 排除在外】0 在本图里表示"这个 tile 上没有簇"、是**空值**而不是一个取值。
+            //   把 0 计进去会让 `distinct_vals` 恒 ≥ 1 —— 一张**全黑**的面板也会报 1，
+            //   于是它作为"不是黑屏"的非空转信号就失效了（正是 §14.34 第 2 行要防的"恒真读数"）。
+            //   排除 0 之后：全黑面板 ⇒ `distinct_vals=0`，与 `px_nonzero`/`nonzeroA` 三个信号同向。
+            bool seen = false;
+            for (u32 i = 0u; i < distinctCount; ++i) {
+                if (distinctVals[i] == a) { seen = true; break; }
+            }
+            if (a != 0u && !seen && distinctCount < kPanelCells) distinctVals[distinctCount++] = a;
+        }
+    }
+    const u32 totalCells = kNaniteDebugViewPixels;
+    const u32 nonzeroPermille = (totalCells > 0u) ? (u32)((u64)nonzero * 1000u / totalCells) : 0u;
+
+    // 【模式独有的量】把"这张图到底编码了什么"落到几个可核对数字上：
+    //   · `tiled` = 落在某个 tile 上的可见簇数（模式 1 = 面板 A 之和；模式 2 = A + B；
+    //     模式 3/4 = 面板 B 之和）。`visible - tiled` 就是"球心投影到屏幕外"的簇数。
+    //   · 模式 2：软/硬簇数与按簇数的硬占比（分母 = 两侧之和；与 `hard_raster` 行的
+    //     **按像素**占比口径不同，两者都打印、不互相冒充）。
+    //   · 模式 3：平均 LOD = A 之和 / B 之和（定点 ×1000）；模式 4：最大 BVH 深度 = maxA。
+    //     ⚠ 这两个量**只在各自的模式里填真值**，其余模式打印 0（理由见下）。
+    //
+    // 【口径纪律：**字段名不许说谎**】`tiled` 之所以能跨模式共用一个名字，是因为它在四个模式里
+    //   **语义始终一样**（"落在 tile 上的可见簇数"，只是取的加法项随编码位置而变）。
+    //   而 `maxA` / `sumA / sumB` 的**语义是随模式变的**：模式 1 的 `maxA = 701` 是**簇数**，
+    //   模式 4 的 `maxA = 15` 才是**深度**。若把 maxA 无条件冒充成 `max_bvh_depth`，
+    //   按字段名 grep 跨档就会读到"701 与 15 两个深度"——那正是 §14.34 第 2 行
+    //   （读数说谎/掩盖缺陷）要防的事。⇒ 只有**定义它的那个模式**才填真值，
+    //   其余模式一律填 0，与同行的 `hard_share_clusters_permille` 采用**完全相同的口径**
+    //   （「本模式不适用」 = 0，而不是「随便报一个看着像的数」）。
+    const u64 tiled = (m_DebugLastMode == kNaniteDebugViewRasterShare) ? (sumA + sumB)
+                    : (m_DebugLastMode == kNaniteDebugViewVisibleClusters) ? sumA
+                                                                          : sumB;
+    const u64 offscreen = ((u64)visible > tiled) ? ((u64)visible - tiled) : 0u;
+    const u32 hardSharePermille = (sumA + sumB > 0u)
+        ? (u32)((m_DebugLastMode == kNaniteDebugViewRasterShare ? sumB : 0u) * 1000u / (sumA + sumB))
+        : 0u;
+    // 平均 LOD 只在模式 3 有意义（模式 3 的面板 A = LOD 之和、面板 B = 簇计数）
+    const u32 meanLodMilli =
+        (m_DebugLastMode == kNaniteDebugViewLodLevel && sumB > 0u)
+            ? (u32)(sumA * 1000u / sumB) : 0u;
+    // 最大 BVH 深度只在模式 4 有意义（该模式的面板 A 才编码 BVH 深度）
+    const u32 maxBvhDepth =
+        (m_DebugLastMode == kNaniteDebugViewBvhDepth) ? maxA : 0u;
+
+    // 【恰好一行】任务 26 的可视化出口。字段名与其它读数行刻意不重名（便于按字段名 grep）。
+    HE_CORE_INFO("[Nanite] debug_view mode={} name={} target={}x{} panels={} tiles={} "
+                 "px_nonzero={} px_nonzero_permille={} distinct_vals={} "
+                 "panelA=[sum={} max={} nonzero={}] panelB=[sum={} max={} nonzero={}] "
+                 "tiled={} visible={} offscreen={} hard_share_clusters_permille={} mean_lod_milli={} "
+                 "max_bvh_depth={} visible_capacity={}",
+                 m_DebugLastMode, NaniteDebugViewModeName(m_DebugLastMode),
+                 kNaniteDebugViewWidth, kNaniteDebugViewHeight, 2u,
+                 kNaniteDebugViewPanel * kNaniteDebugViewPanel,
+                 (unsigned long long)nonzero, nonzeroPermille, distinctCount,
+                 (unsigned long long)sumA, maxA, nonzeroA,
+                 (unsigned long long)sumB, maxB, nonzeroB,
+                 (unsigned long long)tiled, visible, (unsigned long long)offscreen,
+                 hardSharePermille, meanLodMilli, maxBvhDepth,
+                 m_DebugLastVisibleCapacity);
+}
+
+void NaniteRaster::ReadbackSoftStats(u32 (&out)[kNaniteSoftStatsCapacity]) {    // 【清零语义】缓冲不存在（软光栅未就绪）时全部写 0：调用方不必先自己清，
     //   也不会读到未初始化的栈内存（`size_dist` / `perf` 行在未就绪档下会打印全 0 而不是垃圾）。
     for (u32 i = 0u; i < kNaniteSoftStatsCapacity; ++i) out[i] = 0u;
     if (!m_SoftStats) return;
@@ -1562,9 +1845,34 @@ void NaniteRaster::LogHardRasterReadback() {
     //   · `clusters` 应当与软光栅行的 `skipped_big` 相等（同一条分流判据的两侧计数）；
     //   · `soft_clusters` 应当仍是软光栅的 `soft`（小簇不该被硬光栅抢走）；
     //   · `hard_share_permille / soft_share_permille` 就是"软硬占比"（按像素、千分比）。
+    //
+    // ── 【§14.8 任务 26 / §14.34 表格第 10 行】**追加** push constant 回读字段 ──
+    // 【为什么追加到本行而不另起一行】本行已经是"硬光栅这一趟到底发生了什么"的出口；
+    //   回读回答的是同一类问题（这一趟的输入对不对），追加字段对任何按行或按字段名解析的
+    //   既有脚本都是纯增量（既有字段名一个都没改，与任务 24/26-B 的同一做法）。
+    // 【口径】`diag_*` 是 **mesh shader 实际收到**并原样写回的值；`diag_cpu_*` 是 CPU 侧
+    //   **真正推下去**的那一份（`paramsEff`）对应的真值 —— 两组逐项相等才说明"没有漏阶段、
+    //   没有错位"。`diag_match` = 逐项相等的判定（1 = 七项全等）。
+    //   `diag_extent_milli` 是浮点字段的定点回读（×1000），用来证明浮点字段没被读成 0。
+    const u32 diagScreenW = hs[kNaniteHardStatDiagScreenW];
+    const u32 diagScreenH = hs[kNaniteHardStatDiagScreenH];
+    const u32 diagMaxTri  = hs[kNaniteHardStatDiagMaxTri];
+    const u32 diagExtent  = hs[kNaniteHardStatDiagExtent];
+    const u32 diagInst    = hs[kNaniteHardStatDiagInstances];
+    const u32 diagMats    = hs[kNaniteHardStatDiagMaterials];
+    const u32 diagPages   = hs[kNaniteHardStatDiagPages];
+    const bool diagMatch =
+        (diagScreenW == m_HardLastScreenW) && (diagScreenH == m_HardLastScreenH)
+     && (diagMaxTri  == m_HardLastMaxTriangles) && (diagExtent == m_HardLastExtentMilli)
+     && (diagInst    == m_HardLastInstanceCount) && (diagMats == m_HardLastMaterialCount)
+     && (diagPages   == m_HardLastPagesEnabled);
+
     HE_CORE_INFO("[Nanite] hard_raster clusters={} prims={} pixels={} fallback_pixels={} "
                  "soft_clusters={} soft_pixels={} skipped_big={} hard_share_permille={} "
-                 "soft_share_permille={} max_triangles={} visible_capacity={} mesh_supported={} pso={}",
+                 "soft_share_permille={} max_triangles={} visible_capacity={} mesh_supported={} pso={} "
+                 "diag_screenw={} diag_screenh={} diag_maxtri={} diag_extent_milli={} "
+                 "diag_instances={} diag_materials={} diag_pages={} diag_match={} "
+                 "diag_cpu=[{},{},{},{},{},{},{}]",
                  hs[kNaniteHardStatClusters],
                  hs[kNaniteHardStatPrimitives],
                  hardPixels,
@@ -1577,7 +1885,12 @@ void NaniteRaster::LogHardRasterReadback() {
                  m_HardLastMaxTriangles,
                  m_HardLastVisibleCapacity,
                  m_HardRasterCapable ? 1 : 0,
-                 m_HardRasterPSO ? "ok" : "fail");
+                 m_HardRasterPSO ? "ok" : "fail",
+                 diagScreenW, diagScreenH, diagMaxTri, diagExtent,
+                 diagInst, diagMats, diagPages,
+                 diagMatch ? 1u : 0u,
+                 m_HardLastScreenW, m_HardLastScreenH, m_HardLastMaxTriangles, m_HardLastExtentMilli,
+                 m_HardLastInstanceCount, m_HardLastMaterialCount, m_HardLastPagesEnabled);
 }
 
 void NaniteRaster::LogSoftRasterReadback() {
@@ -1591,7 +1904,18 @@ void NaniteRaster::LogSoftRasterReadback() {
                  "depth_written={} "
                  "depth_storage_image_supported={} depth_src=key+SV_Depth max_triangles={} "
                  "instances={} depth_key_pixels={} covered_px={} diag_screenw={} diag_screenh={} "
-                 "diag_maxtri={} diag_extent_milli={} tested_px={}",
+                 "diag_maxtri={} diag_extent_milli={} tested_px={} "
+                 // ── 【§14.8 任务 26 / §14.34 表格第 7 行】**追加**两个字段（既有字段名一个不改）──
+                 //   `depth_key_ties` = 软光栅**深度键平局次数**（第 1 趟原子取最小值时，返回的旧值
+                 //     与本次写入的键相等且非哨兵的次数 —— 即"这个像素上已有一个键完全相同的三角形
+                 //     先到"，真实 GPU 原子计数）。
+                 //   `ties_eq_diff`  = 它与"差额口径" `pixels_written - depth_written` 是否相等的
+                 //     判定（1 = 相等）。**这是信息性字段，不参与任何 PASS/FAIL**：平局计数发生在
+                 //     写入**当时**（对照当时的最小值），而最小值会继续变小 ⇒ 恒有
+                 //     `ties >= pixels_written - depth_written`，相等只发生在"最小键一旦写定就不再
+                 //     被更小键取代"的档位（实测阈值 16 相等、阈值 64 偏大，见 `NaniteTypes.h`）。
+                 //     两个数都原样打印，**不**用差额去覆盖实测值、也不为了相等而改计数逻辑。
+                 "depth_key_ties={} ties_eq_diff={}",
                  s[kNaniteSoftStatRasterClusters] + s[kNaniteSoftStatSkippedClusters],
                  s[kNaniteSoftStatRasterClusters],
                  s[kNaniteSoftStatSkippedClusters],
@@ -1614,7 +1938,12 @@ void NaniteRaster::LogSoftRasterReadback() {
                  m_SoftLastMaxTriangles,
                  m_SoftLastInstanceCount,
                  m_DepthKeyPixels,
-                 s[6], s[7], s[8], s[9], s[10], s[11]);
+                 s[6], s[7], s[8], s[9], s[10], s[11],
+                 s[kNaniteSoftStatDepthKeyTies],
+                 (s[kNaniteSoftStatPixels] >= s[kNaniteSoftStatDepthResolvedPixels]
+                      && s[kNaniteSoftStatDepthKeyTies]
+                         == (s[kNaniteSoftStatPixels] - s[kNaniteSoftStatDepthResolvedPixels]))
+                     ? 1u : 0u);
 }
 
 } // namespace he::render

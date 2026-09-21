@@ -1047,6 +1047,9 @@ bool NaniteCull::SetClusterBVH(std::span<const NaniteClusterRecord> clusters,
     m_ClusterDrawRanges = std::move(drawRanges);
     m_BVHReady  = !m_BVHData.Empty();
     m_BVHInstanceDomain = 0u;   // 每帧在 RecordCullChainPass 里按本帧实例数重算
+    // 【任务 26】换了 BVH ⇒ 之前的深度镜像作废（懒计算，等可视化档位真要它时再算）
+    m_BVHClusterDepths.clear();
+    m_BVHDepthsComputed = false;
 
     // 【任务 15】级分布读数（入库时打一次，人工可核对；每帧的分布由 cull3 行给出）
     u32 levelCounts[kNaniteLODHistogramLevels] = { 0u };
@@ -1082,6 +1085,22 @@ bool NaniteCull::SetClusterBVH(std::span<const NaniteClusterRecord> clusters,
                      maxIndexCount, indexEnd);
     }
     return true;
+}
+
+// ============================================================
+// 【§14.8 任务 26】每簇 BVH 节点深度的 CPU 镜像（懒计算；调试可视化模式 4 的唯一数据源）
+// 口径与失败条件写在 `NaniteCull.h` / `NaniteUpload.h` 的同名小节里。
+// 【为什么在这里而不是 `SetClusterBVH` 里】默认档（`debugView == 0`）永远不需要它 ⇒
+//   把这次 O(节点数 + 簇数) 的遍历挂在**可视化档位**的懒建路径上，默认档一个字节都不算。
+// ============================================================
+std::span<const u32> NaniteCull::EnsureClusterBVHDepths() {
+    if (m_BVHDepthsComputed) return m_BVHClusterDepths;
+    // 【只有成功算完才置门闩】否则资产还没入库时的一次"空 BVH"会被记成永久结论
+    //（与 `NaniteRenderer::m_StreamSetupTried` 同一教训）。
+    if (!m_BVHReady) return {};
+    if (!ComputeNaniteClusterBVHDepths(m_BVHData, m_BVHClusterDepths)) return {};
+    m_BVHDepthsComputed = true;
+    return m_BVHClusterDepths;
 }
 
 NaniteClusterBVHTraversalStats NaniteCull::RunCullChainCPUReference(

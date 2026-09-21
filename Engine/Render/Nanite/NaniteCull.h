@@ -389,6 +389,28 @@ public:
     /// 【任务 15】每簇 LOD 元数据（CPU 侧镜像；数量 == 参与剔除的簇数）
     [[nodiscard]] const std::vector<NaniteClusterLODInfo>& GetClusterLODInfo() const { return m_LODInfo; }
 
+    // ============================================================
+    // 【§14.8 任务 26】调试可视化的两个只读数据源 + 每簇 BVH 深度镜像
+    //
+    // 【为什么由本类提供】这三份数据都是**剔除段**的资产：簇球表与 LOD 元数据是 `SetClusterBVH`
+    //   一次性上传的缓冲，BVH 深度只有持有 CPU 镜像的那棵树才推得出来（把 CPU 镜像复制一份到
+    //   渲染端等于让"GPU 与 CPU 看的是同一棵树"这条不变量多一个分叉点）。
+    //   可视化只是**读者**：它不改任何剔除状态、不在每帧路径上加一次计算。
+    // ============================================================
+
+    /// 簇包围球表（16B/条，**按资产簇下标**索引；与 GPU 遍历读的是同一份比特）
+    [[nodiscard]] rhi::IRHIBuffer* GetBVHSphereBuffer() const { return m_BVHSphereBuf.get(); }
+    /// 每簇 LOD 元数据（16B/条，`lodLevel` 是可视化模式 3 的唯一输入）
+    [[nodiscard]] rhi::IRHIBuffer* GetLODInfoBuffer() const { return m_LODInfoBuf.get(); }
+
+    /// 【§14.8 任务 26】每簇的 BVH 节点深度（根 = 1；**懒计算一次**，只为调试可视化服务）
+    ///
+    /// 【懒计算的边界（这是"默认关零影响"的一部分）】本函数只在可视化档位开启时被调用
+    ///   （`NaniteRenderer::EnsureDebugViewReady` 门控），第一次调用走一次 O(节点数 + 簇数) 的
+    ///   显式栈遍历，此后返回同一份缓存。默认档一个字节都不算、不分配。
+    /// 【长度】恒 == 参与 BVH 的簇数（`GetBVHClusterCount()`）；BVH 未入库时返回空 span。
+    [[nodiscard]] std::span<const u32> EnsureClusterBVHDepths();
+
     // ── 【§14.8 任务 16】可见簇 → 间接绘制参数的读回访问（`NaniteRenderer` 与光栅端使用）──
     /// 间接绘制命令缓冲（20B/条；与可见簇引用同槽位、同容量）
     [[nodiscard]] rhi::IRHIBuffer* GetIndirectDrawBuffer()  const { return m_IndirectDrawBuf.get(); }
@@ -558,6 +580,13 @@ private:
 
     /// 【任务 15】CPU 侧 LOD 元数据镜像（与 `m_BVHData.clusterSpheres` 同序、同长度）
     std::vector<NaniteClusterLODInfo> m_LODInfo;
+
+    /// 【§14.8 任务 26】每簇 BVH 节点深度的 CPU 镜像（懒计算；`EnsureClusterBVHDepths` 填充）
+    /// 【为什么不在 `SetClusterBVH` 里顺手算掉】默认档永远不需要它；把一次 O(N) 遍历放进
+    ///   资产上传路径会给**所有**档位加成本，而调试可视化是少数档位才用的东西。
+    std::vector<u32> m_BVHClusterDepths;
+    /// 深度镜像是否已经算过（只算一次；`Shutdown`/重新入库时复位）
+    bool m_BVHDepthsComputed = false;
 
     /// 【任务 16】CPU 侧绘制参数镜像（与簇记录同序、同长度）——GPU 侧的只读表由它上传，
     ///   CPU 参考打包与 GPU 打包因此读的是**同一份比特**

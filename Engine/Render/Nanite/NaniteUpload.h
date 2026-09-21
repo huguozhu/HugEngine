@@ -768,6 +768,28 @@ struct NaniteClusterBVH {
                                          NaniteClusterBVH&                    outResult);
 
 // ============================================================
+// 【§14.8 任务 26】由 BVH 镜像推出**每簇的节点深度**（调试可视化模式 4 的数据源）
+//
+// 【为什么放在这里】它是"资产 → 加速结构"派生出来的只读量，与 `BuildNaniteClusterBVH`
+//   同一层（RHI-free、纯函数、可单测），也天然被 `Tests/TestNaniteBuilder.cpp` 覆盖。
+//
+// 【口径（必须与 GPU 遍历逐字同源）】
+//   · 深度 = **节点数**，根（`nodes[0]`）= 1（与 `NaniteClusterBVH::depth` 同一口径）；
+//   · 每个叶子把它的簇（`leafClusterIndices[left .. left+count)`）记成"该叶子的深度"；
+//     BVH 的构建保证每个簇恰好落在一个叶子里 ⇒ 输出是一张**满射且无冲突**的表；
+//   · 输出长度恒 == `bvh.clusterCount`（未出现在任何叶子里的簇保持 0 ⇒ 读的人能看出
+//     "这个簇不在 BVH 里"，而不是被一个编造的深度骗过）。
+//
+// 【为什么用显式栈而不是递归】深度可达 `kNaniteBVHMaxDepth`（24）；递归写法在
+//   `-Werror` 的构建里没有优势，而显式栈与 GPU/shader 的遍历写法同构，读起来更容易对照。
+// 【复杂度】O(节点数 + 簇数)，一次性（只在调试可视化开启时算一次）。
+// 【失败】`bvh.nodes` 为空 ⇒ 输出被清空并返回 false（调用方按"无可视化数据"处理）；
+//   节点/叶子下标越界（损坏镜像）⇒ 跳过该孩子并继续（不越界读，也不编造深度）。
+// ============================================================
+[[nodiscard]] bool ComputeNaniteClusterBVHDepths(const NaniteClusterBVH& bvh,
+                                                 std::vector<u32>&        outDepths);
+
+// ============================================================
 // §14.8 任务 15：每簇 LOD 元数据（Phase 3 的 DAG 割判据的输入）
 //
 // 【为什么要这张表（而不是让 shader 现读 64B 簇记录）】

@@ -1760,6 +1760,50 @@ bool BuildNaniteClusterBVH(std::span<const NaniteClusterRecord> clusters,
 }
 
 // ============================================================
+// 【§14.8 任务 26】由 BVH 镜像推出每簇的节点深度（调试可视化模式 4 的数据源）
+// 口径与失败条件写在 `NaniteUpload.h` 的同名小节里；这里只留与代码逐句对应的短注释。
+// ============================================================
+bool ComputeNaniteClusterBVHDepths(const NaniteClusterBVH& bvh, std::vector<u32>& outDepths) {
+    // 【失败语义】空 BVH ⇒ 清零 + false（调用方按"无可视化数据"处理，不编造深度）
+    if (bvh.nodes.empty()) {
+        outDepths.clear();
+        return false;
+    }
+
+    // 输出长度恒 == 簇数：未出现在任何叶子里的簇保持 0（"这个簇不在 BVH 里"是可读的信息）
+    outDepths.assign((usize)bvh.clusterCount, 0u);
+
+    // 显式栈 DFS：元素 = (节点下标, 该节点的深度)。根 = 1（与 `NaniteClusterBVH::depth` 同口径）
+    struct Frame { u32 node; u32 depth; };
+    std::vector<Frame> stack;
+    stack.reserve(kNaniteBVHMaxStackDepth);
+    stack.push_back({ 0u, 1u });
+
+    while (!stack.empty()) {
+        const Frame frame = stack.back();
+        stack.pop_back();
+        if (frame.node >= (u32)bvh.nodes.size()) continue;   // 防御：损坏镜像的下标不越界读
+        const NaniteBVHNode& node = bvh.nodes[frame.node];
+        if (NaniteBVHNodeIsLeaf(node)) {
+            // 叶子：把 [left, left+count) 里的簇记成该叶子的深度
+            const u32 first = node.left;
+            const u32 count = node.count;
+            for (u32 i = 0u; i < count; ++i) {
+                const u32 slot = first + i;
+                if (slot >= (u32)bvh.leafClusterIndices.size()) break;   // 防御：叶子簇表越界
+                const u32 cluster = bvh.leafClusterIndices[slot];
+                if (cluster < (u32)outDepths.size()) outDepths[cluster] = frame.depth;
+            }
+            continue;
+        }
+        // 内部节点：两个孩子入栈（深度 +1）。压栈顺序不影响结果（每个簇只被一个叶子写）。
+        stack.push_back({ node.right, frame.depth + 1u });
+        stack.push_back({ node.left,  frame.depth + 1u });
+    }
+    return true;
+}
+
+// ============================================================
 // §14.8 任务 15：每簇 LOD 元数据（Phase 3 的 DAG 割判据的输入）
 // 口径与失败条件写在 `NaniteUpload.h` 的同名小节里；这里只留与代码逐句对应的短注释。
 // ============================================================

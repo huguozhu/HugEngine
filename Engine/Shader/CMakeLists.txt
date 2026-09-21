@@ -203,6 +203,10 @@ if(SLANGC)
         # Nanite（虚拟几何模块）——§14.8 任务 18：清屏 8 张 GBuffer 颜色目标（compute 写 UAV，
         # 不依赖 render pass 的 loadOp/缓存行为；深度由 RHI 的 `ClearDepthStencil` 单独清）
         "${SHADER_DIR}/Nanite/Nanite_GBufferClear.comp.slang"
+        # Nanite（虚拟几何模块）——§14.8 任务 26：**屏幕可视化**（可见簇数 / 软硬光栅占比 /
+        # LOD 层级 / BVH 深度），写模块自建的 64×32 R32_UINT 小目标。
+        # 【默认关】`nanite_debug_view=0`（默认）时这个 PSO 与目标一个都不建、一行日志都不打。
+        "${SHADER_DIR}/Nanite/Nanite_DebugView.comp.slang"
     )
     # Ray Tracing 着色器（.rgen / .rmiss / .rchit / .rahit / .rcall）
     # 命名约定: EffectName.rgen.slang (RayGen), EffectName.rmiss.slang (Miss),
