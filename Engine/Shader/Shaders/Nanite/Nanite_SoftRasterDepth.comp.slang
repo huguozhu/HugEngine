@@ -132,8 +132,20 @@ void main(uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
                 float ndcZ = bary.x * tri.z0 + bary.y * tri.z1 + bary.z * tri.z2;
                 uint key = softRasterDepthKey(ndcZ, triLocal);
 
-                // 原子最小 = "取最近"（非负浮点位模式与无符号整数同序）
-                InterlockedMin(u_DepthKey[(uint)py * screenWidth + (uint)px], key);
+                // 原子最小 = "取最近"（非负浮点位模式与无符号整数同序）。
+                // 【任务 26 / §14.34 第 7 行：顺手拿到"平局次数"】
+                //   原子操作会**返回旧值** `prev`：若 `prev == key`，说明这个像素上已经有一个
+                //   **键完全相同**的三角形先到（低 8 位含簇内三角形下标，故"键相同"= 深度位模式
+                //   与该三角形下标都相同）⇒ 本次就是一次平局，也就是"这个像素会被多个三角形
+                //   通过等值复检"的那一次 —— §14.31 ⑩ 记录的"UAV 写序决定像素"正是从这里来的。
+                //   【为什么必须排除哨兵】第 1 趟之前缓冲被清成 0xFFFFFFFF；若某个像素的旧值仍是
+                //   哨兵而本次写入的键恰好也是 0xFFFFFFFF（合法几何不可能：NDC 深度的浮点位模式
+                //   恒 < 0x3F800100），那只是"第一次写入"，不是平局。显式排掉它，不改判据语义。
+                uint prev = 0u;
+                InterlockedMin(u_DepthKey[(uint)py * screenWidth + (uint)px], key, prev);
+                if (prev == key && key != 0xFFFFFFFFu) {
+                    InterlockedAdd(u_Stats[kSoftStatDepthKeyTies], 1u);
+                }
             }
         }
     }

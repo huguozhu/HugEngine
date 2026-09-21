@@ -173,6 +173,28 @@ static const uint NANITE_TEXSLOT_BASECOLOR      = 0u;
 static const uint NANITE_TEXSLOT_METALLICROUGH  = 2u;
 
 // ============================================================
+// 【§14.8 任务 26】屏幕可视化（debug view）的共享常量
+//
+// 【与 C++ 的互锁】下面这些常量与 `NaniteTypes.h` 的 `kNaniteDebugView*` 一一对应；
+//   改任何一处都必须同步另一处（C++ 侧有 `static_assert` 钉住尺寸/面板布局，
+//   shader 侧的入口 `Nanite_DebugView.comp.slang` 只用这里的名字，不写字面量）。
+// 【一像素代表什么】屏幕被切成 `NANITE_DEBUG_VIEW_PANEL × NANITE_DEBUG_VIEW_PANEL` 个矩形
+//   tile，屏幕像素 (px,py) 落在 tile `(px × 面板 / 屏幕宽, py × 面板 / 屏幕高)`；
+//   一个可见簇按"包围球球心 + 实例平移"投影后的落点计入一个 tile。
+//   目标宽 = 两个面板并排：面板 A（列 [0,32)）是主量、面板 B（列 [32,64)）是辅助量。
+// ============================================================
+static const uint NANITE_DEBUG_VIEW_OFF              = 0u;   // 档位 0 = 关（默认）
+static const uint NANITE_DEBUG_VIEW_VISIBLE_CLUSTERS = 1u;   // 模式 1：可见簇数（A）
+static const uint NANITE_DEBUG_VIEW_RASTER_SHARE     = 2u;   // 模式 2：软簇数（A）/ 硬簇数（B）
+static const uint NANITE_DEBUG_VIEW_LOD_LEVEL        = 3u;   // 模式 3：LOD 之和（A）/ 簇计数（B）
+static const uint NANITE_DEBUG_VIEW_BVH_DEPTH        = 4u;   // 模式 4：BVH 深度最大值（A）/ 簇计数（B）
+static const uint NANITE_DEBUG_VIEW_PANEL            = 32u;  // 一个面板的边长（tile 数）
+static const uint NANITE_DEBUG_VIEW_WIDTH            = 64u;  // 目标宽 = 2 × 面板
+static const uint NANITE_DEBUG_VIEW_HEIGHT           = 32u;  // 目标高 = 面板边长
+static const uint NANITE_DEBUG_VIEW_PANEL_B_COLUMN   = 32u;  // 面板 B 的列偏移
+static const uint NANITE_DEBUG_VIEW_THREADS          = 64u;  // [numthreads] 的 X（清屏趟一维展平也用它）
+
+// ============================================================
 // 【§14.8 任务 24】LOD 流式（页池 + 页表）的共享 POD
 //
 // 【与 C++ 的契约】`NanitePageTableEntry` / `NaniteClusterPageRef` 必须与 `NaniteTypes.h`
@@ -194,6 +216,33 @@ struct NanitePageEntry {
 struct NaniteClusterPageRef {
     uint page;           // 页号
     uint local;          // 页内簇记录下标
+};
+
+// ============================================================
+// 【§14.8 任务 26】补进共享契约的两个只读 POD
+//
+// 【为什么现在才补进来】它们此前只以"局部结构"的形式存在于 `Nanite_ClusterBVH.comp.slang`
+//   （`ClusterSphere` / `LODInfo`）：那一个 shader 是它们唯一的消费者，放在共享文件里只会
+//   让每个 shader 多一条依赖。任务 26 的调试可视化是**第二个**消费者（它要读簇球与 LOD 级），
+//   于是按"两处以上消费 ⇒ 进共享契约"的既有口径把 C++ 的两个 POD 镜像补到这里。
+//   【不要去改 `Nanite_ClusterBVH.comp.slang` 的局部结构】它的局部名（`ClusterSphere` /
+//   `LODInfo`）与这里的名字不同，两者并存不冲突；改它属无关改动面。
+// 【与 C++ 的互锁】`NaniteTypes.h` 的 `NaniteClusterSphere` / `NaniteClusterLODInfo`
+//   有 static_assert 钉住尺寸与偏移，这里逐字段对应。
+// ============================================================
+
+// 每簇一个 16B 包围球（**资产网格空间**；纯平移的实例变换不改变半径）
+struct NaniteClusterSphere {
+    float3 center;   // 偏移 0 ：网格空间球心
+    float  radius;   // 偏移 12：半径（≥ 0）
+};
+
+// 每簇的 LOD 元数据（16B；与 C++ 的 `NaniteClusterLODInfo` 逐字段一致）
+struct NaniteClusterLODInfo {
+    float ownError;      // 偏移 0 ：用本簇替代其孩子渲染的绝对误差（叶子 = 0）
+    float parentError;   // 偏移 4 ：父簇替代本簇的绝对误差（根 = 0，用 flags 区分）
+    uint  lodLevel;      // 偏移 8 ：LOD 级（0 = 最细）
+    uint  flags;         // 偏移 12：bit0 = 根簇
 };
 
 // ============================================================

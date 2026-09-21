@@ -2304,17 +2304,63 @@ inline constexpr u32 kNaniteSoftStatSizeBucketCount = 5u;    ///< 桶数（1-4 /
 // ============================================================
 inline constexpr u32 kNaniteSoftStatPageMissClusters = 20u;  ///< 因所在页未驻留而被跳过的可见簇数
 inline constexpr u32 kNaniteSoftStatPageRequests     = 21u;  ///< 第 1 趟写入请求环的请求**条数**
-inline constexpr u32 kNaniteSoftStatsCapacity       = 22u;   ///< 读数缓冲条数（任务 24：20 → 22，与 shader 一致）
+
+// ============================================================
+// 【§14.8 任务 26 / §14.34 表格第 7 行】软光栅**深度键平局次数**（同一个 `u_Stats` 缓冲：22 → 23 条）
+//
+// 【它在回答什么问题（这是 §14.31 ⑩ 那个已知故障模式的**直接读数**）】
+//   任务 18 的两趟写法里，第 1 趟用 `InterlockedMin(深度键)` 把"每个像素最终归哪个三角形"定下来，
+//   第 2 趟做**等值复检**再写 GBuffer。于是"同一个像素被多个三角形通过等值复检"时，
+//   谁写颜色由 **UAV 写入顺序**决定 —— §14.31 ⑩ 实测模块接管档两次相同运行并不逐位可复现。
+//   在此之前这件事只能用一个**差额**反推（`pixels_written - depth_written`，§14.34 第 7 行的
+//   "今天的可观测手段"栏），没有专门读数。
+//
+// 【为什么原子取最小值可以顺手给出它（零额外成本的那条路）】
+//   `InterlockedMin(dest, value)` 会**返回旧值**。若返回的旧值**等于**本次写入的值
+//   （且两者都不是"没有几何"的哨兵 `kNaniteSoftRasterNoGeometryKey`），就说明这个像素上
+//   已经有一个**键完全相同**的三角形先到 ⇒ 本次就是一次平局。
+//   ⇒ 计数器 = Σ_像素 (写该像素的键 == 最终最小键的三角形数 − 1)，正是"多写了几次颜色"。
+//
+// 【与 `pixels_written - depth_written` 的关系（**不是恒等式**，必须如实分档说）】
+//   · `pixels_written`（槽 4）= 第 2 趟通过等值复检的"簇×三角形×像素"写次数；
+//   · `depth_written`（槽 14）= 深度解析写入非远平面深度的**去重**像素数。
+//   本计数器计的是**第 1 趟写入当时**与"当时的最小值"同键的次数，而原子最小值是**递减**的：
+//   一个三角形可能在键 K 上形成平局（当时 K 是最小），**之后**又来了更小的键把最小值降到
+//   K' < K —— 那次平局已经被计入，尽管 K 最终不是最小值；而第 2 趟的等值复检只认**最终**
+//   最小值那一侧 ⇒ 差额口径只统计"最终最小值"那一侧的同键三角形数 − 1。
+//   ⇒ 可核对的方向性结论（逐像素推得）：
+//       `kNaniteSoftStatDepthKeyTies >= pixels_written - depth_written`（恒成立），
+//       相等 ⇔ 该帧里"最小键一旦写定就不再被更小的键取代"；
+//       一般档位下本项会**偏大**（实测阈值 64 的宽覆盖档：平局 98,714,537 而差额 43,396,808）。
+//   【这不是缺陷，也不许为了让它相等而改计数逻辑】"写入当时与当前最小值同键"正是 §14.31 ⑩
+//   那个故障模式（"同键竞争过 ⇒ 最终像素由 UAV 写序决定"）的**直接读数**；差额口径看不见
+//   "较大键上的平局"，那恰恰是最容易发生写序竞争的那一批。
+//   `soft_raster` 行的 `ties_eq_diff` 就是"这一次是否相等"的**信息性**判定（1 = 相等）。
+//   **它不参与任何 PASS/FAIL 判据**：0 只说明这一档的最小值下降过，不代表任何一方出错。
+//   【为什么不把它写进软光栅读数缓冲就没有别的办法】CPU 侧无法复现"原子竞争的先后"，
+//   差额虽然方向可比却**不能区分**"平局"与"深度解析漏写/多写"这两类完全不同的故障 ⇒ 需要独立读数。
+//
+// 【槽位与容量：为什么把 22 扩到 23】任务 24 落地后 0..21 全部被占用，**唯一空闲槽是 22**。
+//   沿用任务 23/24 的同一纪律：复用**同一个** `u_Stats` 缓冲与既有的清零（`CopyBuffer`）/
+//   读回（`Map`）路径，不加任何新 GPU 资源、不加 pass、不改既有 0..21 槽的语义。
+//   【互锁】`Nanite_SoftRasterCommon.slang` 的 `kSoftStatDepthKeyTies / kSoftStatCapacity`
+//   必须与下面两个常量一一对应（改一处必须同步另一处）。
+// ============================================================
+inline constexpr u32 kNaniteSoftStatDepthKeyTies     = 22u;  ///< 深度键平局（等值复检命中 > 1 次）的**次数**
+inline constexpr u32 kNaniteSoftStatsCapacity       = 23u;   ///< 读数缓冲条数（任务 26：22 → 23，与 shader 一致）
 
 static_assert(kNaniteSoftStatSizeBucket0 == kNaniteSoftStatDepthResolvedPixels + 1u,
               "五桶必须紧跟在任务 20 的深度解析槽之后（0..14 已被占用，15 是任务 23 之前的唯一空闲槽）");
 static_assert(kNaniteSoftStatSizeBucket0 + kNaniteSoftStatSizeBucketCount ==
               kNaniteSoftStatPageMissClusters,
               "五桶必须连续、且后面紧接任务 24 的流式槽位（不许留空洞）");
-static_assert(kNaniteSoftStatPageRequests + 1u == kNaniteSoftStatsCapacity,
-              "任务 24 的两个流式槽必须紧跟在五桶之后且吃满读数缓冲（20/21，容量 22）；"
-              "改这一处必须同步 `Nanite_SoftRasterCommon.slang` 的 kSoftStatCapacity（两边不等长 = "
-              "要么越界写、要么读回恒 0 —— 后者会让判据 (d1) 空洞通过）");
+static_assert(kNaniteSoftStatPageRequests + 1u == kNaniteSoftStatDepthKeyTies,
+              "任务 26 的平局槽必须紧跟在任务 24 的两个流式槽之后（21 → 22，不许留空洞）；"
+              "改这一处必须同步 `Nanite_SoftRasterCommon.slang` 的 kSoftStatDepthKeyTies");
+static_assert(kNaniteSoftStatDepthKeyTies + 1u == kNaniteSoftStatsCapacity,
+              "平局槽必须吃满读数缓冲（容量 = 最后一个槽 + 1，22/23）；改这一处必须同步 "
+              "`Nanite_SoftRasterCommon.slang` 的 kSoftStatCapacity（两边不等长 = 要么越界写、"
+              "要么读回恒 0 —— 后者会让判据 (d1) 空洞通过）");
 
 /// 每个桶的**闭区间上界**：桶 i 覆盖 `triangleCount ∈ (上界[i-1], 上界[i]]`
 /// （第一个桶的下界是 1 —— 调用方必须先滤掉 `triangleCount == 0` 的簇）。
@@ -2383,10 +2429,162 @@ inline constexpr u32 kNaniteHardStatClusters       = 0u;   ///< 真的交给硬�
 inline constexpr u32 kNaniteHardStatPrimitives     = 1u;   ///< 这些簇输出并被光栅化的图元数（mesh 侧累加）
 inline constexpr u32 kNaniteHardStatPixels         = 2u;   ///< 硬光栅写进 GBuffer 的像素数（片元原子计数）
 inline constexpr u32 kNaniteHardStatFallbackPixels = 3u;   ///< 材质段缺失/越界的中性兜底像素数（正常 0）
-inline constexpr u32 kNaniteHardStatsCapacity      = 4u;   ///< 缓冲条数（与 shader 一致）
-static_assert(kNaniteHardStatFallbackPixels + 1u == kNaniteHardStatsCapacity,
-              "硬光栅读数槽必须连续覆盖 [0, kNaniteHardStatsCapacity)");
 
+// ============================================================
+// 【§14.8 任务 26 / §14.34 表格第 10 行】硬光栅的 **push constant 回读**（同一个缓冲：4 → 11 条）
+//
+// 【它在回答什么问题】§14.31 ⑦② 记录的故障模式是"`SetPushConstants` 漏了 mesh 阶段"：
+//   症状只有"着色器读到的值与期望不符"这种间接表现 —— 软光栅两趟早就有 `diag_*` 回读
+//   （把 shader **实际收到**的 push constant 原样写回读数缓冲），**硬光栅一条都没有**。
+//   于是同一个故障落在 mesh 阶段时只能靠猜（改一个值看画面变不变）。
+//
+// 【对齐软光栅的既有做法（同一个手法、同一组字段名）】mesh shader 在**任何提前返回之前**，
+//   由 `gid.x == 0 && tid == 0` 那一个线程把 7 个 push constant 字段原样写回本缓冲的 4..10 槽：
+//     · `diag_screenw` / `diag_screenh` —— 与 CPU 送下去的屏幕尺寸逐位相等；
+//     · `diag_maxtri`  —— 分流阈值（`softMaxTriangles`，两侧同一条判据的那个数）；
+//     · `diag_extent_milli` —— `meshMaxExtent × 1000` 的定点回读（验证浮点字段没被错位读成 0）；
+//     · `diag_instances` / `diag_materials` / `diag_pages` —— 其余三个 u32 字段。
+//   ⇒ "mesh 阶段有没有收到 push constant"这件事从"猜"变成**逐项可比**：
+//     `hard_raster` 行把这 7 项与 CPU 侧真值并排打印（`diag_cpu_*`），相等即 1。
+//
+// 【槽位与容量：为什么把 4 扩到 11】0..3 已被占用，追加 7 个连续槽 ⇒ 4..10，容量 11。
+//   沿用任务 23/24/26-B 的同一纪律：复用**同一个**模块自持的硬光栅读数缓冲与既有的
+//   清零（`CopyBuffer`）/读回（`Map`）路径，不加任何新 GPU 资源、不改既有 0..3 槽的语义。
+//   【互锁】`Nanite_HardRaster.mesh.slang` 的 `kHardStatDiag* / kHardStatsCapacity`
+//   必须与下面这些常量一一对应（改一处必须同步另一处）。
+// ============================================================
+inline constexpr u32 kNaniteHardStatDiagScreenW    = 4u;   ///< push constant 的 screenWidth（原样回读）
+inline constexpr u32 kNaniteHardStatDiagScreenH    = 5u;   ///< push constant 的 screenHeight
+inline constexpr u32 kNaniteHardStatDiagMaxTri     = 6u;   ///< push constant 的 maxTriangles（分流阈值）
+inline constexpr u32 kNaniteHardStatDiagExtent     = 7u;   ///< meshMaxExtent × 1000（定点回读）
+inline constexpr u32 kNaniteHardStatDiagInstances  = 8u;   ///< push constant 的 instanceCount
+inline constexpr u32 kNaniteHardStatDiagMaterials  = 9u;   ///< push constant 的 materialCount
+inline constexpr u32 kNaniteHardStatDiagPages      = 10u;  ///< push constant 的 pagesEnabled（流式档位）
+inline constexpr u32 kNaniteHardStatDiagCount      = 7u;   ///< 回读槽个数（供循环与 static_assert 用）
+inline constexpr u32 kNaniteHardStatsCapacity      = 11u;  ///< 缓冲条数（任务 26：4 → 11，与 shader 一致）
+
+static_assert(kNaniteHardStatFallbackPixels + 1u == kNaniteHardStatDiagScreenW,
+              "任务 26 的 push constant 回读槽必须紧跟在任务 22 的四个既有槽之后（不许留空洞）");
+static_assert(kNaniteHardStatDiagScreenW + kNaniteHardStatDiagCount ==
+              kNaniteHardStatDiagPages + 1u,
+              "七个回读槽必须连续覆盖 [diag_screenw, diag_pages]");
+static_assert(kNaniteHardStatDiagPages + 1u == kNaniteHardStatsCapacity,
+              "回读槽必须吃满硬光栅读数缓冲（容量 = 最后一个槽 + 1，10/11）；改这一处必须同步 "
+              "`Nanite_HardRaster.mesh.slang` 的 kHardStatsCapacity（两边不等长 = 要么越界写、"
+              "要么读回恒 0 ⇒ 回读判据空洞通过）");
+
+
+// ============================================================
+// 【§14.8 任务 26 / §14.34 末尾最小范围第 1 条】屏幕可视化（debug view）
+//
+// 【它回答什么】验收明文点名的四项：**可见簇数 / 软硬光栅占比 / LOD 层级 / BVH 深度**。
+//   在此之前模块**没有任何画在屏幕上的可视化**（§14.13–§14.33 记录的多起故障都只能靠读数
+//   与 A/B 对照定位；"模块画出来的到底是什么形状"这件事一次都没被直接看过）。
+//
+// 【落点与纪律】模块**自建一张小目标**（不改任何 GBuffer / 既有渲染目标，与任务 6 的
+//   `m_MeshTestTarget` 同一做法），由一个档位 `NaniteSettings::debugView` 切换四种模式：
+//     · 默认 0 = 关：一个 pass 都不注册、一个 GPU 资源都不建、一行日志都不打；
+//     · 1..4 = 四种模式（下表）；
+//   目标尺寸 **64×32 的 `R32_UINT`（8 KB）**，分成左右两个 **32 列**面板：
+//     · **面板 A**（x ∈ [0,32)）= 各模式的**主量**；
+//     · **面板 B**（x ∈ [32,64)）= 各模式的**辅助量**（见下表）。
+//   【为什么不是 1×1（与任务 6 的"同款"差在哪）】1×1 目标在语义上是"一个标量读数"，
+//   而本任务要的是**可视化**：四种模式必须产出**互不相同**的画面，且"非零像素占比/颜色数"
+//   这类判据只有在有空间分布时才有意义。32×32 = 1024 个 tile 仍然极小（8 KB，比深度键缓冲
+//   的 8.3 MB 小三个数量级），也不改任何既有目标。
+//
+// 【共同的空间口径：一像素代表什么】屏幕被切成 32×32 个**矩形 tile**：屏幕像素 (px,py) 落在
+//   tile `(px × 32 / 屏幕宽, py × 32 / 屏幕高)`（整数除法 ⇒ 1920×1080 下每 tile 约 60×34 px）。
+//   **一个可见簇**按它的**包围球球心**（资产空间球心 + 实例平移）投影后落在哪个 tile 计入哪个
+//   tile：球心投影到屏幕外（NDC x/y 超出 [-1,1]）或在相机平面后的簇**不落在任何 tile 上**
+//   （如实记录，读数的 `tiled < visible` 就是这批簇的数量，不做任何钳制/伪造）。
+//
+// 【四种模式的编码（亮度 = 该量，逐字写清）】
+//   · 模式 1 `visible_cluster_count`：**面板 A** 的像素值 = 落在该 tile 的**可见簇数**
+//     （原子累加）；面板 B 恒 0。**亮度编码簇数**（0 = 该 tile 没有可见簇的球心）。
+//   · 模式 2 `raster_share`：**面板 A** 的像素值 = 该 tile 里 `triangleCount ≤ maxTriangles`
+//     的**软光栅簇数**；**面板 B** = 该 tile 里 `triangleCount > maxTriangles` 的**硬光栅簇数**
+//     （两侧用的是与软/硬光栅**同一个**阈值字段 `maxTriangles`、同一份簇记录 ⇒ 与真实分流同源）。
+//     **本模式按"簇数"计占比（不是按像素）**：按像素的软/硬占比由 `hard_raster` 行的
+//     `hard_share_permille` / `soft_share_permille` 给出 —— 两者的**分母不同，不要混读**。
+//   · 模式 3 `lod_level`：**面板 A** 的像素值 = 该 tile 内可见簇的 `lodLevel` **之和**
+//     （来自 Phase 3 用的同一张 LOD 元数据表）；**面板 B** = 该 tile 内的簇计数
+//     ⇒ 平均 LOD = A / B（CPU 侧算，shader 不做除法）。**亮度编码"层级之和"**（配合 B 才是均值）。
+//     【为什么不用 max】max 会被单个离群簇主导；和 + 计数同时给出均值与覆盖度，
+//     而且面板 B 与模式 1 的面板 A **必须逐像素相等**（同一批簇、同一个 tile 判定）
+//     ⇒ 这是一条可机械核对的跨模式一致式。
+//   · 模式 4 `bvh_depth`：**面板 A** 的像素值 = 该 tile 内可见簇在 **cluster BVH 里的节点深度**
+//     的**最大值**（根 = 1；深度由 CPU 侧按 GPU 遍历的**同一棵树**逐叶展开后上传，
+//     见 `ComputeNaniteClusterBVHDepths`）；**面板 B** = 该 tile 内的簇计数。
+//     **亮度编码 BVH 深度**（越亮 = 剔除链要走得越深）。合法簇的深度恒 ≥ 1
+//     ⇒ "A == 0" 明确表示该 tile 没有簇（B 也为 0 可交叉确认）。
+//
+// 【"不是黑屏"怎么证明（本任务要求可核对，不接受"看起来对"）】dump 帧把这张小目标
+//   `CopyTextureToBuffer` 读回 host，打印非零像素占比、**不同取值的个数**、各面板的和/最大/非零
+//   个数，以及模式独有的量（模式 3 的平均 LOD、模式 4 的最大深度、模式 2 的软/硬簇数）。
+//   ⇒ "四种模式产出完全相同的图"这件事会立刻在读数里显形（见 `LogDebugViewReadback`）。
+// ============================================================
+inline constexpr u32 kNaniteDebugViewOff            = 0u;   ///< 默认档：一个资源/一行日志都不产生
+inline constexpr u32 kNaniteDebugViewVisibleClusters = 1u;  ///< 模式 1：可见簇数（面板 A）
+inline constexpr u32 kNaniteDebugViewRasterShare     = 2u;  ///< 模式 2：软（A）/硬（B）簇数
+inline constexpr u32 kNaniteDebugViewLodLevel        = 3u;  ///< 模式 3：LOD 层级之和（A）+ 簇计数（B）
+inline constexpr u32 kNaniteDebugViewBvhDepth        = 4u;  ///< 模式 4：BVH 深度最大值（A）+ 簇计数（B）
+inline constexpr u32 kNaniteDebugViewMaxMode         = kNaniteDebugViewBvhDepth;  ///< cfg 钳制上界
+/// 一个面板的边长（tile 数）；**一个像素 = 一个屏幕 tile**
+inline constexpr u32 kNaniteDebugViewPanel          = 32u;
+/// 目标宽 = 两个面板并排；高 = 面板边长
+inline constexpr u32 kNaniteDebugViewWidth          = 2u * kNaniteDebugViewPanel;
+inline constexpr u32 kNaniteDebugViewHeight         = kNaniteDebugViewPanel;
+inline constexpr u32 kNaniteDebugViewPixels         = kNaniteDebugViewWidth * kNaniteDebugViewHeight;
+/// 面板 B 的**列偏移**（同一个目标内的第二块面板；两个面板的像素区间互不相交 ⇒ 原子写在
+/// 两个面板之间不可能互相干扰，也不需要把两个量塞进同一个 u32 的上下半字节）
+inline constexpr u32 kNaniteDebugViewPanelBColumn   = kNaniteDebugViewPanel;
+/// 清屏趟的内部模式号（**不是**用户档位；由录制侧在累加之前先派发一次，把整张目标清 0）
+inline constexpr u32 kNaniteDebugViewClearMode      = 0u;
+static_assert(kNaniteDebugViewMaxMode == 4u, "任务 26 的四种模式编号固定为 1..4（0 = 关）");
+static_assert(kNaniteDebugViewWidth == 64u && kNaniteDebugViewHeight == 32u,
+              "可视化目标固定为 64×32（两个 32 列面板）；改尺寸必须同步 shader 的 "
+              "NANITE_DEBUG_VIEW_* 常量与读回统计的 stride");
+static_assert(kNaniteDebugViewPanelBColumn + kNaniteDebugViewPanel == kNaniteDebugViewWidth,
+              "面板 B 必须紧接在面板 A 之后并吃满目标宽度（不许有第三块区域）");
+
+/// 可视化的 push constant（96B；与 `Nanite_DebugView.comp.slang` 的 cbuffer 逐字段一致）
+///
+/// 【为什么重新声明一份而不是复用 `NaniteSoftRasterParams`】本入口**独立于两条光栅路径**
+///   （它不读几何、不做等值复检，只做"簇 → tile"的统计），因此它的 push constant 只需要
+///   `vpRows` + 屏幕尺寸 + 阈值 + 实例域 + 模式；复用 112B 的结构会让"多出来的字段谁填"
+///   变成一个没人负责的坑。两份的 `vpRows` 由**同一个** CPU 循环填（同一份比特）。
+struct NaniteDebugViewParams {
+    float vpRows[16];       ///< 偏移 0 ：view-proj 的 4 个行（与软光栅同一编码：`vpRows[r*4+c] = vp[c][r]`）
+    u32   screenWidth;      ///< 偏移 64：帧缓冲宽（决定 tile 的列宽）
+    u32   screenHeight;     ///< 偏移 68：帧缓冲高（决定 tile 的行高）
+    u32   maxTriangles;     ///< 偏移 72：软/硬分流阈值（模式 2 用它分类，与两条光栅路径同一个数）
+    u32   instanceCount;    ///< 偏移 76：实例域上界（越界引用直接跳过，不读实例表）
+    u32   mode;             ///< 偏移 80：1..4 = 四种模式；0 = 清屏趟（内部用，不是用户档位）
+    u32   panelWidth;       ///< 偏移 84：一个面板的列数（= `kNaniteDebugViewPanel`）
+    u32   panelHeight;      ///< 偏移 88：tile 行数（= `kNaniteDebugViewPanel`）
+    u32   _pad;             ///< 偏移 92：对齐填充（保持 96B，push constant 的 4B 对齐）
+};
+static_assert(sizeof(NaniteDebugViewParams) == 96u,
+              "可视化 push constant 必须 96B（4×float4 + 8×u32）");
+static_assert(offsetof(NaniteDebugViewParams, screenWidth)  == 64, "screenWidth 在偏移 64");
+static_assert(offsetof(NaniteDebugViewParams, screenHeight) == 68, "screenHeight 在偏移 68");
+static_assert(offsetof(NaniteDebugViewParams, maxTriangles) == 72, "maxTriangles 在偏移 72");
+static_assert(offsetof(NaniteDebugViewParams, instanceCount)== 76, "instanceCount 在偏移 76");
+static_assert(offsetof(NaniteDebugViewParams, mode)         == 80, "mode 在偏移 80");
+static_assert(offsetof(NaniteDebugViewParams, panelWidth)   == 84, "panelWidth 在偏移 84");
+static_assert(offsetof(NaniteDebugViewParams, panelHeight)  == 88, "panelHeight 在偏移 88");
+
+/// 可视化模式的**人类可读名**（`debug_view` 读数行与报告用；不参与任何数值判据）
+[[nodiscard]] inline const char* NaniteDebugViewModeName(u32 mode) {
+    switch (mode) {
+        case kNaniteDebugViewVisibleClusters: return "visible_cluster_count";
+        case kNaniteDebugViewRasterShare:     return "raster_share";
+        case kNaniteDebugViewLodLevel:        return "lod_level";
+        case kNaniteDebugViewBvhDepth:        return "bvh_depth";
+        default:                              return "off";
+    }
+}
 
 /// "该像素没有几何"的深度键哨兵（第 1 趟之前由模块把整张深度键清成它）
 inline constexpr u32 kNaniteSoftRasterNoGeometryKey = 0xFFFFFFFFu;

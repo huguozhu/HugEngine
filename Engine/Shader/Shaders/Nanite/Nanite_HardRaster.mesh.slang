@@ -51,9 +51,23 @@ static const uint kHardMaxPrimitives  = 64u;    // NANITE_MAX_CLUSTER_TRIANGLES
 static const uint kHardStatClusters   = 0u;   // 本帧**真的交给硬光栅**的簇数（= 软光栅的 skipped_big）
 static const uint kHardStatPrimitives = 1u;   // 这些簇**输出并被光栅化**的图元数（mesh 侧累加）
 static const uint kHardStatPixels     = 2u;   // 硬光栅片元数（= 真正写进 4 张 GBuffer 的像素数）
-static const uint kHardStatsCapacity  = 4u;   // 缓冲条数（与 C++ 侧一致）
-// 槽 3 = `kHardStatFallbackPixels`（材质段越界/缺失的像素数，正常 0）：只有片元侧会写它，
-// 这里留一行说明是为了让"容量 4"与四个槽的对齐关系在同一个文件里可读。
+// 槽 3 = `kHardStatFallbackPixels`（材质段越界/缺失的像素数，正常 0）：只有片元侧会写它。
+
+// ── 【任务 26 / §14.34 表格第 10 行】push constant 回读槽（4..10；容量 4 → 11）──
+// 【为什么必须有】§14.31 ⑦② 的故障模式是"`SetPushConstants` 漏了 mesh 阶段"，而在此之前
+//   软光栅两趟有 `diag_*` 回读、**硬光栅一条都没有** ⇒ 这类故障落在 mesh 阶段只能靠猜。
+//   现在 mesh shader 在**任何提前返回之前**把收到的 push constant 原样写回，CPU 侧把它们与
+//   "自己送下去的值"逐项比对（见 `NaniteRaster::LogHardRasterReadback`）。
+//   【与 C++ 的互锁】下面 7 个槽与 `NaniteTypes.h` 的 `kNaniteHardStatDiag*` 一一对应
+//   （C++ 侧有 static_assert 钉住"紧跟槽 3 + 连续 + 吃满容量"；改一处必须同步另一处）。
+static const uint kHardStatDiagScreenW   = 4u;   // push constant 的 screenWidth（原样回读）
+static const uint kHardStatDiagScreenH   = 5u;   // push constant 的 screenHeight
+static const uint kHardStatDiagMaxTri    = 6u;   // push constant 的 maxTriangles（分流阈值）
+static const uint kHardStatDiagExtent    = 7u;   // meshMaxExtent × 1000（定点回读，验证浮点字段没错位）
+static const uint kHardStatDiagInstances = 8u;   // push constant 的 instanceCount
+static const uint kHardStatDiagMaterials = 9u;   // push constant 的 materialCount
+static const uint kHardStatDiagPages     = 10u;  // push constant 的 pagesEnabled（流式档位）
+static const uint kHardStatsCapacity     = 11u;  // 缓冲条数（与 C++ 侧一致）
 
 // ── mesh → fragment 的输出顶点 ──
 // 【为什么 position 保留**未除 w 的裁剪空间**（`clip`，而不是 `ndc`）】
@@ -93,6 +107,24 @@ void main(
     out vertices HardRasterVertexOut verts[kHardMaxVertices],
     out indices uint3 prims[kHardMaxPrimitives])
 {
+    // ── ⓪ 【任务 26 / §14.34 第 10 行】push constant 回读（必须**在任何提前返回之前**）──
+    // 【为什么放这里而不是"画完再写"】本入口有多处 `HARD_RASTER_BAILOUT()` 早退（多派发的组、
+    //   越界引用、空实例、缺页、小簇不归硬光栅…）。若把回读写在这些早退之后，最常见的档
+    //   （`visibleCount == 0` 或全是小簇）就一个字节都写不进去 ⇒ 读回恒 0，回读判据空洞通过。
+    //   放在最前面，由**恰好一个**线程（工作组 0 的 0 号线程）写一次，与软光栅第 1 趟的
+    //   `kSoftStatDiag*` 完全同一手法（那里也是 `gid.x == 0 && tid.x == 0`）。
+    //   【为什么用非原子写而不是原子累加】它是"原样回读"，语义是**赋值**而不是计数；
+    //   多个工作组写同一个槽反而会让结果取决于执行顺序。只让 0 号线程写 ⇒ 无竞态。
+    if (gid.x == 0u && tid == 0u) {
+        u_Stats[kHardStatDiagScreenW]   = screenWidth;
+        u_Stats[kHardStatDiagScreenH]   = screenHeight;
+        u_Stats[kHardStatDiagMaxTri]    = maxTriangles;
+        u_Stats[kHardStatDiagExtent]    = (uint)max(0.0, meshMaxExtent * 1000.0);
+        u_Stats[kHardStatDiagInstances] = instanceCount;
+        u_Stats[kHardStatDiagMaterials] = materialCount;
+        u_Stats[kHardStatDiagPages]     = pagesEnabled;
+    }
+
     // ── ① 取簇：与软光栅第 1/2 趟**逐字相同**的取簇逻辑（同一条可见簇列表 + 同一份资产）──
     uint visibleCount = u_VisibleClusterCount[0];
     uint slot = gid.x;

@@ -151,7 +151,18 @@ static const uint kSoftStatSizeBucketCount = 5u;   // 桶数（1-4 / 5-8 / 9-16 
 //   kNaniteSoftStatsCapacity` 一一对应（改一处必须同步另一处）。
 static const uint kSoftStatPageMissClusters = 20u;  // 因所在页未驻留而被跳过的**可见簇数**
 static const uint kSoftStatPageRequests     = 21u;  // 本帧写入反馈环的请求**条数**（含重复页）
-static const uint kSoftStatCapacity         = 22u;  // 缓冲条数（与 C++ 的 kNaniteSoftStatsCapacity 必须相等）
+
+// ── 【任务 26 / §14.34 第 7 行】软光栅**深度键平局次数**（占任务 24 之后唯一空闲的槽 22）──
+// 【语义】第 1 趟的 `InterlockedMin(深度键)` 返回旧值；旧值**等于**本次写入的键（且非哨兵）
+//   ⇒ 这个像素上已有一个键完全相同的三角形先到，本次即一次平局。计数与 C++ 侧的
+//   `kNaniteSoftStatDepthKeyTies` 一一对应（改一处必须同步另一处）。
+// 【与差额口径的关系（**不是恒等式**）】本计数发生在**写入当时**（对照的是当时的最小值），
+//   而原子最小值会**继续变小** ⇒ 在"后来被更小键取代"的那些较大键上形成的平局也会被计入，
+//   而第 2 趟的等值复检只认最终最小值。故恒有
+//     `kSoftStatDepthKeyTies >= kSoftStatPixels - kSoftStatDepthResolvedPixels`，
+//   相等只发生在"最小键一旦写定就不再被更小键取代"的档位。
+static const uint kSoftStatDepthKeyTies    = 22u;  // 深度键平局（写入当时与当前最小值同键）的**次数**
+static const uint kSoftStatCapacity        = 23u;  // 缓冲条数（与 C++ 的 kNaniteSoftStatsCapacity 必须相等）
 
 // 反馈环的常量（与 C++ 的 `kNanitePageFeedbackRingOffset / kNanitePageRequestSlots /
 //   kNanitePageFeedbackStampOffset` 一致）
