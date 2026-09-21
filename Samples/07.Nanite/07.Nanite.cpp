@@ -662,13 +662,21 @@ int main() {
             naniteSettings.pageUploadsPerFrame = (u32)std::max(1, std::min(
                 GetInt(cfgData, "nanite_page_uploads", (int)naniteSettings.pageUploadsPerFrame),
                 (int)render::kNanitePageUploadsPerFrameMax));
+            // ── 任务 25 的 **Material Bin**（默认 0 = 关闭）：cfg → 真值，写法与上面完全同构。
+            // 1 ⇒ 上传期建一份"按材质分组的簇下标"只读数组，并在 dump 帧多打印**一行**读数
+            // （`descriptor_switches` / `material_switches` / `material_switches_bin` /
+            // `clusters_per_material` 的分布摘要）；0 ⇒ 连那个数组都不分配、一个字符都不打印。
+            // 【为什么默认 0】§14.2 不变式 1：关闭时日志/转储/pass 集逐位不变；bin 在本任务里是
+            //   **只读的收益证据**（明确不做"把光栅遍历顺序改成 bin 顺序"，理由见 NaniteSettings）。
+            naniteSettings.materialBin = GetInt(cfgData, "nanite_material_bin",
+                                                naniteSettings.materialBin ? 1 : 0) != 0;
             deferredPipeline.SetNaniteSettings(naniteSettings);
             HE_CORE_INFO("[Nanite] 配置恢复: nanite_enable={} nanite_fake_clusters={} "
                          "nanite_test_write={} nanite_mesh_test={} nanite_instance_test_count={} "
                          "nanite_hiz={} nanite_hiz_flip={} nanite_fake_chain={} nanite_draw_capacity={} "
                          "nanite_soft_raster={} nanite_soft_max_triangles={} nanite_hard_raster={} "
                          "nanite_streaming={} nanite_page_contents={} nanite_page_pool_slots={} "
-                         "nanite_feedback_latency={} nanite_page_uploads={}",
+                         "nanite_feedback_latency={} nanite_page_uploads={} nanite_material_bin={}",
                          naniteSettings.enabled ? 1 : 0, naniteSettings.fakeClusters,
                          naniteSettings.testWrite ? 1 : 0, naniteSettings.meshTest ? 1 : 0,
                          naniteSettings.instanceTestCount, naniteSettings.hiz ? 1 : 0,
@@ -678,7 +686,8 @@ int main() {
                          naniteSettings.hardRaster ? 1 : 0,
                          naniteSettings.streaming ? 1 : 0, naniteSettings.pageContents,
                          naniteSettings.pagePoolSlots, naniteSettings.feedbackLatency,
-                         naniteSettings.pageUploadsPerFrame);
+                         naniteSettings.pageUploadsPerFrame,
+                         naniteSettings.materialBin ? 1 : 0);
         }
 
         auto& ae = deferredPipeline.GetAutoExposure();
@@ -1449,6 +1458,27 @@ int main() {
                                       "调到 8 页可复现大量缺页（判据 (c)），缺页的簇跳过不画并计数。",
                                       naniteSettings.pagePoolSlots, naniteSettings.pageContents,
                                       naniteSettings.feedbackLatency, naniteSettings.pageUploadsPerFrame);
+                // ── 任务 25 的 Material Bin 开关（默认关）──
+                // 【为什么它**不改变画面**（与任务 22 的硬光栅正好相反）】bin 在本任务里是**只读的
+                //   收益证据**：光栅仍按可见簇列表的顺序处理簇，bin 只被读数用来算"若按 bin 顺序
+                //   遍历会怎样"。真正改遍历顺序被明确推迟 —— 软光栅在**深度键平局**时像素由 UAV
+                //   写入顺序决定（§14.31 ⑩ 实测），在平局确定性修好之前改顺序会改变画面。
+                //   自动化用 cfg 键 `nanite_material_bin`。
+                bool naniteMaterialBin = naniteSettings.materialBin;
+                if (ImGui::Checkbox("Material Bin：按材质分组的簇下标（任务 25）##nanite_mb",
+                                    &naniteMaterialBin)) {
+                    naniteSettings.materialBin = naniteMaterialBin;
+                    dp->SetNaniteSettings(naniteSettings);
+                    HE_CORE_INFO("[Nanite] 面板 Material Bin: material_bin={}",
+                                 naniteSettings.materialBin ? 1 : 0);
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("任务 25：上传期建一份「按材质非降序的簇下标」只读数组，\n"
+                                      "dump 帧多打印一行 material_bin 读数\n"
+                                      "（descriptor_switches / material_switches / material_switches_bin\n"
+                                      "/ clusters_per_material 的分布摘要）。\n"
+                                      "**不改光栅遍历顺序**（深度键平局时像素由 UAV 写序决定 ⇒ 改顺序会改变画面），\n"
+                                      "故默认关、且开启也不改变画面。");
             }
 
             // ── GI 通道：Diffuse / Specular / AO / Shadow ──
@@ -1976,6 +2006,19 @@ int main() {
             if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
                 dpNanite->GetNanite().LogStreamReadback();
 
+            // ── Nanite（§14.8 任务 25）：Material Bin 的**恰好一行**读数 ──
+            // 字段：descriptor_switches（本帧材质切换导致的描述符集切换次数，结构上是 0～1）/
+            //       material_switches（相邻处理的簇换材质的次数；顺序 = GPU 可见簇列表槽位顺序）/
+            //       material_switches_bin（若按 bin 顺序遍历的同一个数 —— 收益证据）/
+            //       material_switches_asset_order（资产自然顺序下的同一个数，与单测同口径）/
+            //       clusters_per_material=[distinct max min mean]（资产侧分布摘要）。
+            // 【门控】`nanite_material_bin=0`（默认）时模块内部直接返回、一个字符都不打印
+            //   ⇒ 关闭档与既有档位的日志逐字不变（这是本仓库"默认关闭时不打印"的纪律）。
+            // 【本行不新增 GPU 资源】bin 是上传期建一次的 CPU `u32[]`，其余读数全部来自既有缓冲。
+            // 同步同样依赖上面的 `WaitIdle()`。
+            if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
+                dpNanite->GetNanite().LogMaterialBinReadback();
+
             // ── 【§14.8 任务 23】整帧预算 + "分流 × 帧时"的 perf 行（同一个 `LogFrameBudget`）──
             // 【为什么这里必须补一次 `LogFrameBudget()` 调用】它原本**只**在 Lumen 段
             //   （`Lumen_SDF_Build` 的 pass 体内）被调用，而 07.Nanite 的 cfg 没有请求 Lumen 源
@@ -2162,6 +2205,11 @@ int main() {
             std::to_string(deferredPipeline.GetNaniteSettings().feedbackLatency);
         out["nanite_page_uploads"] =
             std::to_string(deferredPipeline.GetNaniteSettings().pageUploadsPerFrame);
+        // 任务 25：Material Bin 开关（默认 0）—— 同写法回写。
+        // 【为什么必须回写】冒烟脚本用 `nanite_material_bin=1` 跑受测档、默认档跑对照档；
+        //   缺这一行，档位会在下一次运行时被写回成默认值、两档互相污染（任务 18/22/24 踩过）。
+        out["nanite_material_bin"] =
+            std::to_string(deferredPipeline.GetNaniteSettings().materialBin ? 1 : 0);
 
         // ── AutoExposure ──
         auto& ae = deferredPipeline.GetAutoExposure();
