@@ -245,7 +245,7 @@ RTGI · RT 反射 · RTAO。注意它**不等于**分类谓词 `IsScreenSpaceSou
   ⇒ 必须包含。
 
 **置信度是「相对再加权」，不是亮度缩放**：它只决定某像素信不信某个源，不信就把权重让给
-同通道的其他源（`Σ(c·w)/Σw`）。两个直接推论：
+同通道的其他源（$\sum (c \cdot w) / \sum w$）。两个直接推论：
 
 1. 通道里只有**一个**源时，置信度在 `num/den` 里**精确抵消**，看不出任何效果 ——
    它的作用是「屏幕边缘只剩 IBL/DDGI」这类**多源**语义；
@@ -301,7 +301,7 @@ float3 gi     = base + detail;                    // 频段不重叠 → 数学�
 
 > **数据说明（前两组数字都不可引用，务必看清）**：本表是 **SSGI-CAL（任务 10）之后**重测的。
 > · `corr` 0.15/0.28、量级比 67.7×/33.3× —— 测于 **DDGI 实际不做 GI** 期间（§11.3.1）；
-> · `corr` 0.9238/0.9251、量级比 21.0×、未解释方差 37.7% —— 测于 **SSGI 还不是 `E/π`
+> · `corr` 0.9238/0.9251、量级比 21.0×、未解释方差 37.7% —— 测于 **SSGI 还不是 $E/\pi$
 >   的估计**期间（§9.2-P）：那时它的输出近似「命中点反照率 × 常数」，与同样带接收面 albedo
 >   的 DDGI 天然高度相关 —— 那个 0.92 主要来自共同乘子，而不是来自"两源在估同一件事"。
 > 结论方向不变，但**理由被这次重测改写**（见下方两点判定）。
@@ -339,7 +339,7 @@ float3 gi     = base + detail;                    // 频段不重叠 → 数学�
    上的平滑多次弹射解，SSGI 是单次弹射、单半径、带屏幕空间缺失的噪声解。
 
 **结论**：DDGI 与 SSGI 同频段，但**并非冗余**——两者弱相关、各自带不同的偏差与噪声，且按
-§3.4 已在同一量纲（都是 `E/π`）。这**正是** §3.1 归一化的适用场景，即**现状已是正确的
+§3.4 已在同一量纲（都是 $E/\pi$）。这**正是** §3.1 归一化的适用场景，即**现状已是正确的
 合成方式**：频率分离的前提（`LowPass(SSGI) ≈ DDGI`）被实测否定；而"两源弱相关"还给归一化
 的加权平均带来了方差下降的额外收益（改前相关 0.92 时几乎没有这个收益）。三选一的落点：
 
@@ -359,7 +359,7 @@ float3 gi     = base + detail;                    // 频段不重叠 → 数学�
 > **应先做 §10 `SSGI-CAL` 标定，而不是改合成模式**：在标定完成前调整混合规则，
 > 等于给一个未标定的启发式量加权。
 >
-> ✅ **该阻塞点已解除（任务 10 已完成）**：SSGI 现在是真正的 `E/π` 估计，量级比由 21 倍
+> ✅ **该阻塞点已解除（任务 10 已完成）**：SSGI 现在是真正的 $E/\pi$ 估计，量级比由 21 倍
 > 降到 **2.2 倍**，等权重下它约占输出值的 **31%**（= 1/(1+2.2)）而不是 4.5%。上面那段
 > 「先标定再改合成」的判断因此已经执行完毕：合成模式**不需要改**，标定之后归一化的理由
 > 反而更强（§3.3 的结论）。
@@ -370,9 +370,11 @@ float3 gi     = base + detail;                    // 频段不重叠 → 数学�
 
 **统一约定（基准由 IBL 确立）**：
 
-```
-L_o = albedo × E/π          ← 已乘接收面 albedo 的间接出射辐射度
-```
+$$
+L_o \;=\; \text{albedo} \times \frac{E}{\pi}
+$$
+
+—— 即"已乘接收面 albedo 的间接出射辐射度"。
 
 基准之所以是 IBL：其辐照度图在卷积时**已归一化为 E/π**（见 `GI/IBL_Irradiance.frag`
 末尾的 `× π / sampleCount`），故 `kD × irradianceMap × albedo` 本身就是出射辐射度。
@@ -381,21 +383,21 @@ L_o = albedo × E/π          ← 已乘接收面 albedo 的间接出射辐射�
 
 | 源 | 修复前返回 | 含接收面 albedo | 修复动作 |
 |---|---|---|---|
-| IBL | `kD × (E/π) × albedo` | ✅ | —（基准） |
-| SSGI | 修复前 = `albedo × 命中点 albedo × cos × 假距离项`（**既不是 E/π，也没有 L_in**） | ✅ | **任务 10 已重写为 `albedo × Σ(L_in·cosθ)/Σcosθ`**（精确等于 `albedo × E/π`） |
-| DDGI | **E** | ❌ | 补 `albedo/π` |
+| IBL | $\text{kD} \times (E/\pi) \times \text{albedo}$ | ✅ | —（基准） |
+| SSGI | 修复前 = `albedo × 命中点 albedo × cos × 假距离项`（**既不是 E/π，也没有 L_in**） | ✅ | **任务 10 已重写为 $\text{albedo} \times \sum (L_{\text{in}} \cdot \cos\theta) / \sum \cos\theta$**（精确等于 $\text{albedo} \times E/\pi$） |
+| DDGI | **E** | ❌ | 补 $\text{albedo}/\pi$ |
 | RTGI | **E/π** | ❌（含的是命中面 albedo） | 补接收面 `albedo` |
 | RSM | **≈E**（经验常数已含 1/π） | ❌ | 补接收面 `albedo`，并**解耦 `iblIntensity`** |
 
 第 4 处（同一缺陷的另一实例）：`RayTracing/RT_GI.rgen.slang` 的 DDGI miss 回退
-把**辐照度 E** 当**辐射度 L** 累加（命中路径给的是 L），已补 `× 1/π`。
+把**辐照度 E** 当**辐射度 L** 累加（命中路径给的是 L），已补 $\times 1/\pi$。
 
 **为什么白炉抓不到它**：`SampleDiffuseSource` 首行 `if (furnace) return float3(1,1,1)`
 把源真值**短路**了——白炉验证的是**归一化数学**，不是源量纲。
 故当时改用**单源亮度实测**验证（见 §9.2 的实测记录）。
 
 > ✅ **该遗留已由任务 10 关闭，且顺手把白炉的盲区也补上了**：SSGI 现在返回精确的
-> `E/π`（估计式是余弦加权平均，归一化常数是解析的 1，不再需要"拿 PT 标定一个增益"），
+> $E/\pi$（估计式是余弦加权平均，归一化常数是解析的 1，不再需要"拿 PT 标定一个增益"），
 > 并且**白炉下不再被短路**——白炉条件（全白环境 + 接收面 albedo = 1）恰好是它的解析
 > 真值条件，所以白炉现在**同时校验 SSGI 的标度**（实测 1.0000；把估计式临时改回
 > 「除以 N」的旧形式则读数为 0.444，证明该判据不是同义反复）。
@@ -602,7 +604,7 @@ UE 的 `r.DynamicGlobalIlluminationMethod` 与 `r.ReflectionMethod` 是两个独
 **关键：UE 不是靠「一个 provider 填两个通道」，而是靠「两个槽位指向同一个系统」。**
 HugEngine 的等价表达更简单——**两个通道的层栈里出现同一个源 id**。
 
-**不学 UE 的部分**：不要改成「每槽位选一个」。单元素栈时 `Σ(c·w)/Σw ⇒ num/den = c`
+**不学 UE 的部分**：不要改成「每槽位选一个」。单元素栈时 $\sum (c \cdot w) / \sum w \Rightarrow \text{num}/\text{den} = c$
 已是**精确直通**，**「选一个」本就是「加权平均」的特例**；换过去是纯损失表达力，
 而这个表达力正是 §1.1 声称要从那类模型里挣回来的东西。另外 UE 的方法枚举还带来锁死
 （前向着色下 GI/反射/阴影三个方法**都不可编辑**；选 Lumen GI 强制 Lumen 反射），
@@ -810,11 +812,11 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 3. **多开一个源不会变亮**；单源时行为与「二选一」时代完全一致。
 4. **光追是「GI 源」而非「管线类型」**——管线能力位（架构）× 设备能力（`rtSupported`）两层判断。
 5. **阴影是「可见性（乘法项）」而非「能量（加法项）」**——不进层栈。
-6. **所有参与合成的源必须返回同一物理量**（`L_o = albedo × E/π`）—— ✅ **已满足**（P1·A 统一了
+6. **所有参与合成的源必须返回同一物理量**（$L_o = \text{albedo} \times E/\pi$）—— ✅ **已满足**（P1·A 统一了
    四处量纲，§3.4）。*（校正与收尾：此处曾写「当前未满足」；后来发现 `EvaluateHitRadiance`
    返回的是 `albedo × E` 且直接光项连 albedo 都没有，属**同一类**问题的残留实例 ——
-   RSM 那一支由任务 30 改成解析面积归一 + `L_v = albedo·lightColor·intensity·NdotL/π`；
-   光追命中点那一支由任务 33 修成 `albedo/π·(E_ambient + E_direct)`，并用白炉判据锁住
+   RSM 那一支由任务 30 改成解析面积归一 + $L_v = \text{albedo} \cdot \text{lightColor} \cdot \text{intensity} \cdot \text{NdotL}/\pi$；
+   光追命中点那一支由任务 33 修成 $\text{albedo}/\pi \cdot (E_{\text{ambient}} + E_{\text{direct}})$，并用白炉判据锁住
    （命中与未命中都返回理想值 ⇒ 白炉恒为 1）。至此这条不变量在**实现上**也成立。）*
 
 ---
@@ -849,7 +851,7 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 | **第 1 批遗留** | M4.4 RSM VPL 25→16（Poisson 盘 + 能量常数按 1/N 重标定）· M4.5（经核查**不适用**）· 06 面板候选由注册表派生 · 文档同步 | ✅ 完成 |
 | **P0 / D2** | GI 数据模型下沉为 RHI-free `GI/GITypes.h`（断开旧 `GIConfig.h → LightingPass.h → RHI` 传导链，并移除 `GIConfig.h`/`GIRegistry.h` 两个转发头） | ✅ 完成 |
 | **P0 / REDUNDANCY** | 冗余源诊断（严格冗余 / 重复估计 / 相关估计 / 成本提示）+ 可证等价去重；删除语义混淆的 `GIBand` 与死接口 `GetBand()`，改为三个分类谓词；06.GILab 诊断面板 | ✅ 完成 |
-| **P1 / A·B·C** | 源量纲统一（`L_o = albedo × E/π`）· SSR 投影矩阵进 UBO · SSR 有效性协议贯通四处 | ✅ 完成 |
+| **P1 / A·B·C** | 源量纲统一（$L_o = \text{albedo} \times E/\pi$）· SSR 投影矩阵进 UBO · SSR 有效性协议贯通四处 | ✅ 完成 |
 | **P1 / L** | **SSGI 完全不生效**（Provider 覆写改名 → 输入恒空）；顺带确立「纹理级数值对照」判定手段 | ✅ 完成 |
 | **P1 / M·N·O** | **SSGI 采样方向与可见性**：TBN 变换方向、世界/view 空间混用、可见性判据方向；顺带修掉 SSGI 侧的 §9.2-E（改用真实相机投影） | ✅ 完成 |
 | **P2 / P5** | 频率分离 —— 步骤 0 实测**判定不需要**（两源同频段，`LowPass(SSGI) ≈ DDGI` 不成立） | ⛔ 已判定退场 |
@@ -864,7 +866,7 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 | **B / E** | **SSR 与 SSAO 的投影改用真实相机**（§9.2-E 的两个剩余实例）：Provider 把 `ctx.camera` 交给 pass，pass 用 `CameraData::GetProjMatrix()`，无相机时才退化为原来的默认投影。实测 `cam_fov=100` 时 AO 输出逐像素最大差 0.387、均值差 −0.79%；`cam_fov=60` 时与同配置重复运行的抖动同量级（0.069 对 0.078）⇒ 标准路径不变 | ✅ 完成 |
 | **B / H** | **Forward 的能力位不再"声称支持但不存在"**（§9.2-H）：`PipelineCaps::Forward` 改为只含光栅阴影（GI 源位为空），新增 `AllSources` 供 Deferred 与 UI 使用；面板对无层栈 GI 源的管线显示说明并置灰层栈控件。判据为单元测试：`IsAvailable(IBL/RSM, Forward)` 为假、`Degrade(Ultra, Forward)` 后三个 GI 通道为空且兜底不发生；Forward 的 IBL/RSM 渲染不受影响（本就不读层栈） | ✅ 完成 |
 | **C / §3.2** | **逐像素置信度进 UBO、判据数据驱动**（任务 9）：`GISourceSlotData::confidence` 掩码由 `ToConfidenceMask` 在 `Add` 里统一推导（着色器不再硬编码源 id 列表，GTAO 与 AO 通道一并归位），边缘带宽 `edgeFade` 从着色器常量变为 UBO 字段。实测：默认 5% 带宽下最外圈 SSGI 贡献仅为中央的 1.6%，带宽调到 50% 后 5%~15% 环带的贡献降到 32.4%（解析预测 33%）；改前二进制该检查必失败。三变体读数与白炉、各回归检查不变 | ✅ 完成 |
-| **C / P** | **SSGI 成为真正的 `E/π` 估计**（任务 10 / §9.2-P）：补入射辐射度（前帧 HDR，**捕获门控改由消费者声明**）、余弦归一化、估计量改为 `Σ(L_in·cosθ)/Σcosθ`（解析归一化，无需拟合增益）、删除量纲不对的距离项；白炉下不再短路 SSGI，白炉因此同时校验它的标度。实测：白炉单源 **1.0000**（旧形式 0.444）、量级比 **21×→2.2×**、输出占比 **4.5%→31%**、与 DDGI 相关性 **0.9238→0.1480**；新增 `Tools/gi/ssgi_cal_check.ps1` 三例全过 | ✅ 完成 |
+| **C / P** | **SSGI 成为真正的 $E/\pi$ 估计**（任务 10 / §9.2-P）：补入射辐射度（前帧 HDR，**捕获门控改由消费者声明**）、余弦归一化、估计量改为 $\sum (L_{\text{in}} \cdot \cos\theta) / \sum \cos\theta$（解析归一化，无需拟合增益）、删除量纲不对的距离项；白炉下不再短路 SSGI，白炉因此同时校验它的标度。实测：白炉单源 **1.0000**（旧形式 0.444）、量级比 **21×→2.2×**、输出占比 **4.5%→31%**、与 DDGI 相关性 **0.9238→0.1480**；新增 `Tools/gi/ssgi_cal_check.ps1` 三例全过 | ✅ 完成 |
 | **C / 11.1** | **降噪去重 + 参数可配**（原任务 11.1，**已迁至 Lumen 文档 §5.1**）：SSGI/SSR 的降噪附属 pass 合并为 `GI/SpatialDenoiseAux.h`；`Denoiser` 的 σ 可配并集中在一处按信号赋值。**判据**：改前/改后两个二进制、每次运行用私有 cfg 副本，`ssgi` 变体 −0.0009%、`both` 变体 +0.0002%（均在抖动内）；白炉 1.0000、单测全绿。**参数仍取默认值**是实测结论（放宽 σ 只再降 5% 高频，瓶颈是核大小与时域），并据此指出 11.3 的方向 | ✅ 完成 |
 | **C / 11.2** | **降噪链条数据化**（原任务 11.2，**已迁至 Lumen 文档 §5.1**）：`RTProvider` 的 `m_Temporal` + `m_Spatial` 与位置约定改为 `std::vector<Stage>`（顺序即执行顺序），框架侧改为遍历。**判据**：三种 RT 效果的 pass 链与改造前同名同序；`rtgi_coupling_check` 0.000% PASS；三变体读数、白炉、单测不变；**临时多 push 一级即多出一个 pass、框架代码零改动**（已演示并还原） | ✅ 完成 |
 | **D / AMORTIZE** | **DDGI 探针更新的时间维分摊**（任务 12）：`updateStride` + 相位轮转，未轮到的探针把历史拷进当前（ping-pong 下不拷就会倒退一代）。**判据「等量工作 ⇒ 等量结果」**：`S(4,4k)/S(1,k)` = **1.010 / 1.000 / 1.000**（k=30/60/120）；同帧下 `S(4,120)` 是 `S(1,120)` 的 **99%**（本场景约 30 次更新即收敛）。每帧样本量 8192 → 2048（**−75%**）。默认仍为 1（不 churn 基线）；新增 `Tools/gi/amortize_check.ps1`。**顺带发现 §9.2-Z**：面板的每源耗时是假的（`avgRenderTimeMs` 从未被赋值） | ✅ 完成 |
@@ -872,9 +874,9 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 | **D / §9.2-Z** | **给 GI 源装真实耗时读数**（任务 29）：每源每帧一对 GPU 时间戳 → 环形查询池 → **不阻塞**读回 → 滚动平均写回源的 `GIDebugData`；`HE_GI_TIMING=1` 输出脚本可读日志。**实测**：SSGI 16→64 采样 **0.436 → 1.271 ms**（×2.92，随工作量线性）、不在层栈的源恰好为 0、重复运行离散度 **0.0%**。**第一次拿到成本结构**：IBL 首次烘焙 ~5 ms、SSGI(16) 0.44 ms、DDGI 更新 **0.019 ms**（后者解释了任务 12 为何量不出收益） | ✅ 完成 |
 | **D / §9.2-J** | **跨帧重绑**（任务 15）：不止合成参数 UBO —— Lighting 的逐帧轮换资源（光源/阴影/探针 SSBO、UBO）此前全绑在**同一份**描述符集上，逐帧重绑跨帧串味。改为**每飞行帧一份描述符集 + 一份 UBO**，`LightingInputs::frameSlot` 指明本帧用哪份。**判据**：读数逐位不变、校验 56/56/56/56 不变、白炉 1.0000、单测全过。**顺带证伪**：它不是 §9.2-Y 基线分成两组的成因（改前/改后各跑 4 次，两组都照样出现） | ✅ 完成 |
 | **D / CULL** | **pass 级空间剔除：实测判定不做**（任务 13）：先补齐计时覆盖（RT 源与 `AS_Build`），量出**全部 GI 项合计约 0.7 ms/帧**（SSGI 0.44 占六成，其余每项 0.02~0.09 ms）；可剔除的只有"无几何 tile"，由 albedo 判据得空像素 7.2%，且屏幕空间着色器本来就对天空像素深度早退 ⇒ **收益上限约 0.03 ms（GI 预算的 4%）**，代价是上一帧掩码造成的边界缺失条带。**不做**，并写明改判条件；新增 `Tools/gi/cost_report.ps1` | ✅ 完成 |
-| **E / §9.2-AA** | **RSM 链路的量级与通道约定**（任务 30）：逐级落盘证明三张 RSM 附件此前只有清除值（`BeginOffscreenPassMRT` 的清除值长度契约被越界读破坏）、VPL 的 albedo 读错索引空间（3.18% 覆盖）；四项一起修 —— 受光项按**解析面积**归一（旧经验常数隐含"半径 60 场景"，比值 3942）、RSM 改**三个附件一个量**、辐射度带 albedo 与光源颜色、光源视锥按**场景包围盒**拟合。**判据**：三中间层 0% → **53%** 覆盖、`S_rsm` 0 → **4.28e-5**（与 `E/π×albedo` 相关 0.966）、`rsm_indirect_check` 全过 | ✅ 完成 |
+| **E / §9.2-AA** | **RSM 链路的量级与通道约定**（任务 30）：逐级落盘证明三张 RSM 附件此前只有清除值（`BeginOffscreenPassMRT` 的清除值长度契约被越界读破坏）、VPL 的 albedo 读错索引空间（3.18% 覆盖）；四项一起修 —— 受光项按**解析面积**归一（旧经验常数隐含"半径 60 场景"，比值 3942）、RSM 改**三个附件一个量**、辐射度带 albedo 与光源颜色、光源视锥按**场景包围盒**拟合。**判据**：三中间层 0% → **53%** 覆盖、`S_rsm` 0 → **4.28e-5**（与 $E/\pi \times \text{albedo}$ 相关 0.966）、`rsm_indirect_check` 全过 | ✅ 完成 |
 | **E / §9.2-W 解析对照** | **SSR 的平面镜解析对照**（任务 32）：地面镜 + 两个已知立方体，把物体中心按镜面镜像后经同一相机投影得到"反射该出现的像素"。查出并修掉四处方向/尺度错（view/world 法线混用、y 约定两处漏翻、起点偏移小于容差导致自交、假的"仍在几何之前"命中），并按场景尺度重取 march 参数。**判据**：反射落点 **0.44 / 0.35 px**、远像素 **0.00%**、相机平移 40 后位移差 **2.39 px**、米制参数负对照 **2432 vs 30676**（`Tools/gi/ssr_mirror_check.ps1`） | ✅ 完成 |
-| **E / §9.2-AC** | **光追命中点的量纲**（任务 33）：共用的 `EvaluateHitRadiance` 缺命中面 albedo、整体缺 1/π；改为返回 `albedo/π·(E_ambient + E_direct)` 并加**白炉分支**（命中与未命中都返回理想值 ⇒ 读数与几何无关）。**判据**：白炉 `diffuse={RTGI}` 中心 **1.0000**（负对照 0.0000）、SSGI 仍 1.0000、RTGI/RT 反射原始输出比 0.209 / 0.541，DDGI 绝对读数方向正确地下移 | ✅ 完成 |
+| **E / §9.2-AC** | **光追命中点的量纲**（任务 33）：共用的 `EvaluateHitRadiance` 缺命中面 albedo、整体缺 1/π；改为返回 $\text{albedo}/\pi \cdot (E_{\text{ambient}} + E_{\text{direct}})$ 并加**白炉分支**（命中与未命中都返回理想值 ⇒ 读数与几何无关）。**判据**：白炉 `diffuse={RTGI}` 中心 **1.0000**（负对照 0.0000）、SSGI 仍 1.0000、RTGI/RT 反射原始输出比 0.209 / 0.541，DDGI 绝对读数方向正确地下移 | ✅ 完成 |
 | **E / §9.2-AD + §9.2-AF** | **Forward 的 RSM 真有生产者**（任务 34）：四层根因 —— 示例不驱动阴影系统（Forward 此前连阴影都没有）、RSM 用相机视锥的 CSM VP 且帧图无序、RG 路径从不绑定 RSM 纹理、以及共享结构体布局漂移（`float[3]` 在 std140 里占 48 字节 ⇒ `rsmValid` 恒读 0）。**判据**：`forward_stack_check` **10 条全过** —— `S_rsm` 恰好 0 → **8.875e-05**、三张 RSM 图覆盖 53.36%/53.36%/53.31%、换相机后逐字节相同；`GIBlendParams` 的 `sizeof` 与三个 `offsetof` 已被静态断言钉死 | ✅ 完成 |
 | **E / §9.2-AE** | **SSR 的 Hi-Z 路径漏反射**（任务 35）：Hi-Z 把屏幕段参数当成射线参数用（实测在目标像素处偏差 **1251 / 1481** 世界单位 = 容差的 100 倍以上），改用透视校正的 `w(t)`/`tau(t)` 精确换算；并按实测把默认步数预算提到 256。**判据**：`ssr_mirror_check` **13 条全过**（两条路径都落在预测像素 0.44/0.35 px、远像素 0.00%、步数 256 ≤ 600 的 60%）。**同时更正**任务 25 的"Hi-Z 快 3.2 倍"（实测 4.256 对 4.505 ms） | ✅ 完成 |
 | **E / §9.2-AG** | **MRT 帧缓冲写死 7 个颜色附件**（RHI，第 8 个 GBuffer MRT 接入时暴露）：附件数组与循环都写死 7，而 render pass 按 PSO 的 `colorAttachmentCount` 建（上限 8）⇒ `vkCreateFramebuffer` 与 render pass 附件数不一致，驱动在 `vkCmdBeginRenderPass` 崩溃。改为按"颜色上限 + 1（深度）"开数组、循环用 `kMaxColorAttachments` | ✅ 完成 |
@@ -946,9 +948,9 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 | ~~**K**~~ | ✅ **已修复**（任务 14） | **DDGI 网格外查询退化为「贴边常数外推」**，无 falloff 或无效标记；探针网格为固定参数，覆盖不到的区域静默缺失低频 GI。**修法两半一起做**：(1) 新增「探针网格覆盖」置信度位（`kGIConfProbeGrid`，网格 AABB 外一格起线性淡出、再外面归零，权重让给同通道其他源）；(2) 探针网格按场景包围盒自动拟合（每 30 帧重算；拟合规则抽为纯几何 `GI/GIProbeGrid.h` 并被单元测试覆盖）。**实测**：固定网格 8×4×8 格距 3 只覆盖 21×9×21 世界单位，而场景包围盒是 3720.9×1555.9×2288.2 ⇒ 打开覆盖语义后 DDGI 贡献 **0.019595 → 噪声量级**（两次运行 2.9e-08 / −3.9e-07），即此前那个贡献**整个**来自 clamp（`SampleDDGI` 对超界查询把 8 个采样坐标全钳到同一个边界探针）；拟合后网格 16×8×11 格距 248 真罩住场景，贡献回到 **0.019596**，与改前逐位一致。回归检查 `Tools/gi/ddgi_grid_check.ps1`（4 配置 5 判定全过） | `GI/GITypes.h`（`kGIConfProbeGrid`）；`GI/GIProbeGrid.h`（新）；`GI/GI_DDGI.{h,cpp}`；`ShaderTypes.slang` + `Lighting/DeferredLighting.frag.slang`（`ProbeGridConfidence`）；`Pipeline/DeferredPipeline{,_FrameGraph}`；`Samples/06.GILab`；`Tests/TestGIProbeGrid.cpp`（新） |
 | ~~**L**~~ | ✅ **已修复** | **SSGI 完全不生效**：`SSGIProvider` 把接口覆写写成了 `SetGBuffer`，而基类 `IGIProvider::SetInputs` 带**空实现的默认体** → 改名既不报错也不警告，静默落到空实现 → `m_Depth/m_Normal/m_Albedo` 恒为 `nullptr` → `GI_SSGI::Render` 在守卫处提前返回，SSGI 输出纹理只剩清屏值 `(0,0,0,1)`。表现为「SSGI 已启用、`IsValid()` 为真、面板一切正常，但对画面的贡献恒为 0」 | 见下方「L 的修复与实测」 |
 | ~~**M**~~ | ✅ **已修复** | **SSGI 的 TBN 变换方向反了**（L 修好后暴露的主因）：`mul(TBN, 样本)` 算的是 `(T·v, B·v, N·v)`——把切线空间样本**投影到** TBN 轴上，而非变换到本空间。结果采样方向几乎与法线垂直，半球采样失效 | 见下方「M/N/O 的修复与实测」 |
-| ~~**N**~~ | ✅ **已修复** | **SSGI 世界/view 空间混用**：`sDir` 由 GBuffer 的**世界空间**法线构造，却被加到 **view 空间**的 `viewPos` 上（`sPos = viewPos + sDir × radius`）。同时属 §9.2-E：SSGI 用硬编码默认 FOV/near/far 自拼投影矩阵 | 同上 |
+| ~~**N**~~ | ✅ **已修复** | **SSGI 世界/view 空间混用**：`sDir` 由 GBuffer 的**世界空间**法线构造，却被加到 **view 空间**的 `viewPos` 上（$\text{sPos} = \text{viewPos} + \text{sDir} \times \text{radius}$）。同时属 §9.2-E：SSGI 用硬编码默认 FOV/near/far 自拼投影矩阵 | 同上 |
 | ~~**O**~~ | ✅ **已修复** | **SSGI 可见性判据方向相反**：view 空间朝 −Z，未被遮挡应为 `sZ <= sPos.z + bias`，原写作 `sZ >= sPos.z - 0.01`，等于只累积**被遮挡**的样本 | 同上 |
-| ~~**P**~~ | ✅ **已修复**（任务 10） | **SSGI 的累加项不是入射辐射度**：只累加命中点的**反照率**（不含任何 `L_in`），余弦项用未归一化的 `sDir`（把 cos 项与样本长度混在一起），距离项还写成了长度的平方。故 SSGI 长期不是 `E/π` 的估计（§3.4），在归一化里只占输出值的约 4.5%。**修法**：`L_in` 取前帧 HDR（`GIRadianceHistory`，由 Provider 声明消费者、帧图据此捕获），余弦改为 `dot(N, normalize(sDir))`，估计量改为 **`Σ(L_in·cosθ) / Σcosθ`** —— 由 `∫cosθ dω = π` 可知它精确等于 `E/π`，**归一化常数是解析值 1、无需标定**；量纲错误的那一项直接删除（固定半径采样对 L 的估计偏差改记为已知近似，不再用经验项掩盖）。**实测指纹**：白炉下 SSGI 单源读数 **1.0000**（改回「除以 N」的旧形式则为 **0.444**）；单源做差量级比 **21× → 2.2×**；SSGI 在输出中的占比 **4.5% → 31%**；与 DDGI 的相关性 **0.9238 → 0.1480**（§3.3） | `GI/SSGI.frag.slang`；`GI/GI_SSGI.{h,cpp}`；`Lighting/DeferredLighting.frag.slang`（白炉不再短路 SSGI）；`GI/IGIProvider.h`（`NeedsRadianceHistory`）；`DeferredPipeline_FrameGraph.cpp`；`GIRadianceHistory` |
+| ~~**P**~~ | ✅ **已修复**（任务 10） | **SSGI 的累加项不是入射辐射度**：只累加命中点的**反照率**（不含任何 `L_in`），余弦项用未归一化的 `sDir`（把 cos 项与样本长度混在一起），距离项还写成了长度的平方。故 SSGI 长期不是 $E/\pi$ 的估计（§3.4），在归一化里只占输出值的约 4.5%。**修法**：`L_in` 取前帧 HDR（`GIRadianceHistory`，由 Provider 声明消费者、帧图据此捕获），余弦改为 `dot(N, normalize(sDir))`，估计量改为 **$\sum (L_{\text{in}} \cdot \cos\theta) / \sum \cos\theta$** —— 由 $\int \cos\theta \, d\omega = \pi$ 可知它精确等于 $E/\pi$，**归一化常数是解析值 1、无需标定**；量纲错误的那一项直接删除（固定半径采样对 L 的估计偏差改记为已知近似，不再用经验项掩盖）。**实测指纹**：白炉下 SSGI 单源读数 **1.0000**（改回「除以 N」的旧形式则为 **0.444**）；单源做差量级比 **21× → 2.2×**；SSGI 在输出中的占比 **4.5% → 31%**；与 DDGI 的相关性 **0.9238 → 0.1480**（§3.3） | `GI/SSGI.frag.slang`；`GI/GI_SSGI.{h,cpp}`；`Lighting/DeferredLighting.frag.slang`（白炉不再短路 SSGI）；`GI/IGIProvider.h`（`NeedsRadianceHistory`）；`DeferredPipeline_FrameGraph.cpp`；`GIRadianceHistory` |
 | ~~**Q**~~ | **高** → ✅ **已修复** | **IBL 的辐照度/预滤波图在「IBL 不在漫反射层栈」时从不烘焙**，而帧图仍把它们交给 specular 通道与 DDGI 探针使用 ⇒ **未初始化显存被当作光照数据采样**。门控用的是 `IBLProvider::NeedsPass(m_GIConfig.diffuse)`，但消费者有三个（diffuse / specular / DDGI 的辐射度回退 `GI_DDGI::SetIBL`） | 见 §11.3.1 的定位与修复 |
 | ↑ | 续（Q） | **同一族的第三、第四个实例**，都被后来的任务逮到 —— 说明"手工列举消费者"这条路走不通：任务 26 发现 **Forward 侧连 `SetIBLSkybox` 都没有人调**（烘焙的是未设置的天空盒，间接光恒为 0，见 §9.2-AB）；任务 27 发现门控**还漏了第四个消费者 —— `u_BRDF_LUT` 是 PBR 在直接光路径上无条件采样的**，镜面栈为空时那张 LUT 从未写入 ⇒ 直接光的 BRDF 读未初始化显存（见 §9.2-X）。**结论**：这类"一份产物 + 多个消费者"的东西不再按消费者清单门控 —— IBL 烘焙现在**恒注册**，由 pass 内部的 `IsDirty()` 早退（不脏时耗时读数为 0） | 见 §9.2-AB、§9.2-X 与 §10.2 任务 26/27 |
 | ~~**R**~~ | **高** → ✅ **已修复** | **DDGI 的 `useRSM` 是只置位、永不清除的闩锁**：帧图把 RSM 的 position/flux 图交给 DDGI 是**无条件**的，而 RSM pass 的注册条件是「RSM 在漫反射层栈里」⇒ 在「DDGI 开 + 有活动阴影 + RSM 不在漫反射栈」时，DDGI 永久走**从未渲染**的 RSM 路径，全部探针样本无效，落入着色器硬编码兜底 —— **DDGI 表面正常却完全不做 GI** | 同上；判定指纹：贡献的 R:G:B 恰为 1:1.5:4（= 兜底常数 `(0.02,0.03,0.08)`） |
@@ -958,21 +960,21 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 | ~~**W**~~ | **高** → ✅ **已修复**（任务 25） | **SSR 一个命中都没有**：新增的镜面通道落盘显示 SSR 输出**逐像素全为 0**，且有效性 alpha **100% 为 −1**（= 全部 miss），改前改后皆然。因此镜面层栈里"有 SSR"与"没有 SSR"在画面上完全等价 —— 与 §9.2-L（SSGI 恒为 0）同一种失效形态。**根因不止一处，三处独立叠加**：① Hi-Z 的深度判据方向反了（金字塔是 **min** 深度 = 每格最近的几何，而引擎是 **zero-to-one**；正确判据是"射线点深度**小于**该格最小深度 ⇒ 该格空 ⇒ 前进"，代码写的是大于）；② **层级步长方向也反了**（`stepT = 1/2^level` 在 level 0 一步跨完整条射线，第二轮就越界退出 —— 层级是**屏幕空间**的金字塔，步长必须折算成 `2^L / 屏幕段长(像素)`）；③ level 0 的命中阈值把 **NDC 深度差**与 `thickness*0.1`（世界单位）比，量纲不对。另外线性回退路径把"射线仍在几何之前"（`rayPos.z > rpZ`）记成命中 0.5：把它单独放回去会让有效像素从 10.22% 涨到 **73.91%**，也就是说历史文档里那个"线性 march 有 34.66% 有效命中"正是被这条假命中抬起来的。**【任务 32 的后续】任务 25 的"有效率 + 两条 march 同量级"只证明了内部一致，随后用平面镜解析真值又逮到三处它看不见的错**（世界/view 空间法线混用、y 约定两处漏翻让重建几何上下镜像、起点偏移小于命中容差导致自交），并发现**默认 Hi-Z 路径仍漏掉一个反射**（§9.2-AE / 任务 35） | 见下方「25 · §9.2-W 的修复与实测」与「32 · SSR 的解析对照（平面镜）」 |
 | **X** | 中 → ✅ **已修复**（任务 27） | **镜面层栈为空时画面出现 463 量级的异常亮点**：三通道全空 `mean 0.2022 / max 463.32`；只放 `specular={IBL}` `0.0694 / 42.20`；只放 `ao={SSAO}`（specular 仍空）⇒ 回到 `0.2022 / 463.32`。**根因不在镜面通道的合成里**（空栈时那里给 0），而是 **IBL 烘焙门控漏了第四个消费者**：`u_BRDF_LUT` 由 PBR 在**直接光路径**上无条件采样，而烘焙 pass 只在「漫反射栈要它 ∨ 镜面栈要它 ∨ DDGI 要它」时注册 ⇒ 镜面栈为空且 IBL 不在别处时 LUT 从未写入，直接光的 BRDF 读未初始化显存。**所以它不是一个亮点，而是整幅画面的直接光都算错了**（均值 0.2022 → 修后 0.0429，4.7 倍）。修法：IBL 烘焙**恒注册**、由 pass 内部 `IsDirty()` 早退 | 见下方「27 · §9.2-X 的修复与实测」 |
 | **Y** | 中 → ✅ **已修复**（任务 28） | **同一份「写进配置文件的键」在不同写法下落到了不同的兜底路径**：`dump_gi.ps1` 与标定脚本都要产出「漫反射层栈为空」的基线，两者写出的 `gi_blend_diffuse_w0..w3` 全为 0 的配置**逐字节等价**，但实测基线稳定地分成两组 —— 0.05720 与 0.07554（后者运行后配置文件被回写成 `gi_blend_diffuse_w0=1.000000`）。**根因（任务 28 查清）**：`GIRegistry::Degrade` 末尾有一段**静默兜底**——某个通道被裁空时补一个 IBL（AO 补 SSAO）。于是"空层栈"这个状态**取决于经过哪条路径**：配置加载路径直接重建层栈（空就是空），而任何经过 `Degrade` 的路径（预设按钮、阴影下拉）都会把它补成 `{IBL}`；示例退出时把**内存里那份**回写成文件 ⇒ 下一次运行读到被补过的配置。**修法**：`Degrade` 只裁不加（空通道是有定义的合法状态，见 §3.1），同一份输入在任何路径上同义；单测锁住"只裁不加 + 幂等"。**修后判据**：同一份配置连跑 5 次，读数离散 **0.0003%**、cfg 的层栈键逐键不变（`Tools/gi/repeatability_check.ps1`）。**另一条历史观察同时降级**：早期"同一二进制同一 cfg 分成 0.057733 / 0.05719x 两组（差 1%）"今天**未复现**，最可能是当时尚未装 §9.2-U 的陈旧转储护栏 | 见下方「28 · §9.2-Y 的修复与实测」；另见 §11.3 的采样注意事项（每次对照必须用私有 cfg 副本） |
-| **AA** | 高 → ✅ **已修复**（任务 30） | **RSM 间接光整条链路实际不产出**。改前指纹：`S_rsm = lum(HDR{diffuse=RSM}) − lum(HDR{空漫反射栈})` **逐像素为 0**（连 1e-8 都取不出来），而 `RSM` / `RSM_Indirect` 两个 pass 的耗时照付（0.086 / 0.108 ms）—— 与 §9.2-L/W/X 同一种失效形态。**根因是三层叠加，前两层让"链路根本不产出"，第三层让"产出了也看不见"**：① **三张 RSM 附件里只有清除值**（逐级落盘看到 `(0,0,0,1)` = `ClearValue` 默认值 ⇒ 一个片元都没通过）。根因是 `BeginOffscreenPassMRT` 的清除值**长度契约**（`clears` 需 colorCount 个颜色项 + 末尾一个深度项），调用点写的是 `ClearValue clears[2]` 而 colorCount=2 ⇒ **越界读栈上垃圾当深度清除值**，深度清成使 `LessEqual` 全失败的值。**已修**：给足 4 项，并把契约写进 `RHI/CommandList.h` 的接口注释。② **VPL 的 albedo 读到别人的索引空间**：`RSM_Generate.frag` 从 `u_Objects[objectIndex].baseColorFactor` 取漫反射率，而对象缓冲是**相机可见性列表**（只写可见物体、索引是相机列表下标），本 pass 遍历的却是全部网格、索引用自己的计数器 ⇒ 实测只有 **3.18%** 的 texel 有非零 albedo（且与 `N·L>0` 的 53.31% 一比即知：非零辐射度恰好是两者的交）。**已修**：albedo 改走 push constant（`vplAlbedo`），本 pass 改用自己持有的 `GPUObjectData[]`。③ **量级归一与覆盖面都是场景尺度相关的**：光源视锥硬编码 `sceneCenter=(0,3,0)/sceneRadius=60`（只罩住 3720 单位宽场景的 1/60），而能量常数 `RSM_VPL_ENERGY = 0.046875` 数值上恰好等于"一个 RSM texel 在半径 60 光锥下的世界面积"（`(120/512)²=0.0549`，比 0.85）—— 把整项钉死在一个隐含的 60 单位场景上。**已修**：光锥按场景包围盒拟合（`GI/RSMFrustum.h`，纯几何 + 单测），能量归一改成解析面积 `scale = (radiusUV·2·halfExtent)²/N`（每个采样点代表的世界面积 / π），与旧常数之比 **3942**；并顺带①修掉 `flux` 的通道约定（RSM 从"两个附件塞三个量"改成**三个附件一个量**，DDGI 不再把编码法线当辐射度读，见 `ShaderTypes.slang` 的「RSM 贴图通道约定」）②把通量从灰度标量变成**带 albedo 与光源颜色的辐射度** `L_v = albedo·lightColor·intensity·NdotL/π`。**修后判据**：`rsm_pos` 覆盖 0% → **53.36%**、`rsm_rad` 非零 0% → **53.31%**（均值 0.205）、`rsm_indirect` 非零 0% → **54.62%**、`S_rsm` 0 → **4.28e-5**（与 `E/π×albedo` 逐像素相关 **0.966**）。**量级仍只占屏幕均值 0.06%，这是估计量本身的性质**（2.5D RSM 里接收点与采样到的 VPL 大多共面 ⇒ 两个余弦同时趋零，CPU 重算同一求和得中位数 0、仅 17% 接收点非零；把采样盘半径扫 10 倍均值只在 2.5 倍内波动），故判据守结构不守绝对量级 | `GI/GI_RSM.{h,cpp}`、`GI/RSMFrustum.h`（新）、`GI/RSMIndirect.{h,cpp}`、`Shader/GI/RSM_Generate.{vert,frag}.slang`、`Shader/GI/RSM_Indirect.frag.slang`、`Shader/GI/DDGI.comp.slang`、`ShaderTypes.slang`、`Pipeline/DeferredPipeline_FrameGraph.cpp`、`Pipeline/ForwardPipeline{,_FrameGraph}.cpp`、`RHI/CommandList.h`（契约注释）；复现与判据见 §10.2 任务 30 与 `Tools/gi/rsm_indirect_check.ps1` |
+| **AA** | 高 → ✅ **已修复**（任务 30） | **RSM 间接光整条链路实际不产出**。改前指纹：`S_rsm = lum(HDR{diffuse=RSM}) − lum(HDR{空漫反射栈})` **逐像素为 0**（连 1e-8 都取不出来），而 `RSM` / `RSM_Indirect` 两个 pass 的耗时照付（0.086 / 0.108 ms）—— 与 §9.2-L/W/X 同一种失效形态。**根因是三层叠加，前两层让"链路根本不产出"，第三层让"产出了也看不见"**：① **三张 RSM 附件里只有清除值**（逐级落盘看到 `(0,0,0,1)` = `ClearValue` 默认值 ⇒ 一个片元都没通过）。根因是 `BeginOffscreenPassMRT` 的清除值**长度契约**（`clears` 需 colorCount 个颜色项 + 末尾一个深度项），调用点写的是 `ClearValue clears[2]` 而 colorCount=2 ⇒ **越界读栈上垃圾当深度清除值**，深度清成使 `LessEqual` 全失败的值。**已修**：给足 4 项，并把契约写进 `RHI/CommandList.h` 的接口注释。② **VPL 的 albedo 读到别人的索引空间**：`RSM_Generate.frag` 从 `u_Objects[objectIndex].baseColorFactor` 取漫反射率，而对象缓冲是**相机可见性列表**（只写可见物体、索引是相机列表下标），本 pass 遍历的却是全部网格、索引用自己的计数器 ⇒ 实测只有 **3.18%** 的 texel 有非零 albedo（且与 `N·L>0` 的 53.31% 一比即知：非零辐射度恰好是两者的交）。**已修**：albedo 改走 push constant（`vplAlbedo`），本 pass 改用自己持有的 `GPUObjectData[]`。③ **量级归一与覆盖面都是场景尺度相关的**：光源视锥硬编码 `sceneCenter=(0,3,0)/sceneRadius=60`（只罩住 3720 单位宽场景的 1/60），而能量常数 `RSM_VPL_ENERGY = 0.046875` 数值上恰好等于"一个 RSM texel 在半径 60 光锥下的世界面积"（`(120/512)²=0.0549`，比 0.85）—— 把整项钉死在一个隐含的 60 单位场景上。**已修**：光锥按场景包围盒拟合（`GI/RSMFrustum.h`，纯几何 + 单测），能量归一改成解析面积 $\text{scale} = (\text{radiusUV} \cdot 2 \cdot \text{halfExtent})^2 / N$（每个采样点代表的世界面积 / π），与旧常数之比 **3942**；并顺带①修掉 `flux` 的通道约定（RSM 从"两个附件塞三个量"改成**三个附件一个量**，DDGI 不再把编码法线当辐射度读，见 `ShaderTypes.slang` 的「RSM 贴图通道约定」）②把通量从灰度标量变成**带 albedo 与光源颜色的辐射度** $L_v = \text{albedo} \cdot \text{lightColor} \cdot \text{intensity} \cdot \text{NdotL}/\pi$。**修后判据**：`rsm_pos` 覆盖 0% → **53.36%**、`rsm_rad` 非零 0% → **53.31%**（均值 0.205）、`rsm_indirect` 非零 0% → **54.62%**、`S_rsm` 0 → **4.28e-5**（与 $E/\pi \times \text{albedo}$ 逐像素相关 **0.966**）。**量级仍只占屏幕均值 0.06%，这是估计量本身的性质**（2.5D RSM 里接收点与采样到的 VPL 大多共面 ⇒ 两个余弦同时趋零，CPU 重算同一求和得中位数 0、仅 17% 接收点非零；把采样盘半径扫 10 倍均值只在 2.5 倍内波动），故判据守结构不守绝对量级 | `GI/GI_RSM.{h,cpp}`、`GI/RSMFrustum.h`（新）、`GI/RSMIndirect.{h,cpp}`、`Shader/GI/RSM_Generate.{vert,frag}.slang`、`Shader/GI/RSM_Indirect.frag.slang`、`Shader/GI/DDGI.comp.slang`、`ShaderTypes.slang`、`Pipeline/DeferredPipeline_FrameGraph.cpp`、`Pipeline/ForwardPipeline{,_FrameGraph}.cpp`、`RHI/CommandList.h`（契约注释）；复现与判据见 §10.2 任务 30 与 `Tools/gi/rsm_indirect_check.ps1` |
 | **AB** | **高** → ✅ **已修复**（任务 26 顺带） | **Forward 的 IBL 从未被交给天空盒 ⇒ 烘焙出的辐照度/预滤波图近全黑，PBR 里的 IBL 漫反射与镜面恒为 0**。`ForwardPipeline` 走 RenderGraph 时，帧图直接按 `giIBL->IsDirty()` 注册烘焙 pass，而**全工程没有一处在 RG 路径上调用 `SetIBLSkybox`**（只有不走 RG 的 `PrepareGI` 里有）—— 于是烘焙的输入是"未设置的天空盒"。这与 §9.2-Q（IBL 从不烘焙、消费者照样采样）是同一类失效，只是发生在 Forward：**层栈、能力位、面板、日志全都正常，输出恒为 0**。**实测指纹**：`pipeline_mode=0` 下把漫反射层栈从 `{IBL}` 换成 `{IBL,RSM}`、甚至只放 `{RSM}`，HDR 读数**逐位相同**（0.1836214）；而把 UBO 的 `count` 直接画到颜色上又能看到 1 与 2 的差别 ⇒ 配置与 UBO 都是通的，是这两个源**本身的贡献**为 0。**修法**：RG 路径在注册烘焙 pass 之前先从 `SkyboxComponent` 调 `SetIBLSkybox`（与 Deferred / `PrepareGI` 同源），并在同一处补上 Forward RG 路径漏掉的 `m_RSM->SetLightBuffer(...)`（§9.2-AA ① 的同一个坑，Forward 有两条路径就漏了一条）。修后 Forward 的读数变成 `{IBL}` **0.1269305** / `{RSM}` **0.0865436** / `{IBL,RSM}` **0.1067366**（恰为前两者的加权平均）。**【任务 30 的更正】其中 `{RSM}` 那个数其实是"漫反射层栈为空"的读数**：Forward 的 RSM 从未产出（示例没驱动 Forward 的阴影系统 ⇒ `Shadow`/`RSM_Generate` 两个 pass 都不注册），三条判据在"源恒为 0"时全部成立 ⇒ 该检查看不出这件事。已记录为 §9.2-AD 与任务 34。**【任务 34 已修】**：示例现在照 `02.Cube` 驱动 Forward 的阴影系统（Forward 画面第一次有阴影），RSM 改用按场景包围盒拟合的固定光锥并把**同一个** VP 交给 PBR 的内联查表；`{RSM}` 现在是真读数 **0.0866324**（`S_rsm` = 8.875e-05，改前恰为 0），`forward_stack_check` 也把 `S_rsm(Forward)` 从报告项升级成了断言 | `Pipeline/ForwardPipeline_FrameGraph.cpp`；回归检查 `Tools/gi/forward_stack_check.ps1` |
-| **AC** | 中 → ✅ **已修复**（任务 33） | **光追命中点的出射辐射度算错**（不变量 6 的最后一处残留）。`RT_HitCommon.slang` 的 `EvaluateHitRadiance` 被 RTGI、RT 反射、DDGI 探针三处共用，而它此前把两项直接相加就返回：`albedo·E_ambient + Σ(lightColor·intensity·N·L)` —— **两处量纲错**：① 直接光项**没有乘命中面 albedo**；② 整体**没有除以 π**（朗伯面出射辐射度是 `albedo/π·E`）。三处调用点里只有 `DDGI_Trace.rgen` 在调用后除了 π（任务 17 修探针过亮时加的补偿），RTGI 与 RT 反射直接当辐射度用 ⇒ 它们的绝对量级偏大（实测 RTGI 命中项在修正前后之比约 0.21）。**修法**：函数自己返回辐射度 `albedo/π·(E_ambient + E_direct)`，三个调用点一律不再做换算；并给该函数加**白炉分支**（全白环境 E=π ⇒ 返回 albedo），rgen 的 miss 分支在白炉下取 1 —— 命中与未命中两条路径都返回理想值，于是白炉读数**与场景几何无关、恒等于 1**，成为一条能看见绝对量级的判据。**实测**：`diffuse={RTGI}` 白炉读数 中心 **1.0000**（改前把白炉分支关掉负对照读到 **0.0000**）；SSGI 仍为 1.0000（任务 10 的判据未被破坏）。**连带影响（同一函数 → 同一修正）**：DDGI 探针的命中项也少了 albedo，故 DDGI 的绝对读数整体下移（`ddgi` 0.0873536 → **0.0775732**、`S_ddgi` 0.0308175 → **0.0206226**、`corr(SSGI,DDGI)` 0.6819 → **0.6457**），这在物理上是对的方向（深色命中面反射更少）；相关检查重跑全过 | `Shader/RT_HitCommon.slang`；`Shader/RT/RT_GI.rchit.slang`、`RT_Reflection.rchit.slang`（调用点）；`Shader/RT/DDGI_Trace.rgen.slang`（去掉重复的 /π）；`Shader/RT/RT_GI.rgen.slang`（白炉 miss）；`Shader/Lighting/DeferredLighting.frag.slang`（白炉下 RTGI 走真实路径）；`Render/RT/{RTEffectPass.h,RTGIPass.cpp,RTReflectionPass.cpp}`、`Render/GI/RTProvider.h`（furnace 位）；判据 `Tools/gi/rtgi_furnace_check.ps1` |
+| **AC** | 中 → ✅ **已修复**（任务 33） | **光追命中点的出射辐射度算错**（不变量 6 的最后一处残留）。`RT_HitCommon.slang` 的 `EvaluateHitRadiance` 被 RTGI、RT 反射、DDGI 探针三处共用，而它此前把两项直接相加就返回：$\text{albedo} \cdot E_{\text{ambient}} + \sum (\text{lightColor} \cdot \text{intensity} \cdot N \cdot L)$ —— **两处量纲错**：① 直接光项**没有乘命中面 albedo**；② 整体**没有除以 π**（朗伯面出射辐射度是 $\text{albedo}/\pi \cdot E$）。三处调用点里只有 `DDGI_Trace.rgen` 在调用后除了 π（任务 17 修探针过亮时加的补偿），RTGI 与 RT 反射直接当辐射度用 ⇒ 它们的绝对量级偏大（实测 RTGI 命中项在修正前后之比约 0.21）。**修法**：函数自己返回辐射度 $\text{albedo}/\pi \cdot (E_{\text{ambient}} + E_{\text{direct}})$，三个调用点一律不再做换算；并给该函数加**白炉分支**（全白环境 E=π ⇒ 返回 albedo），rgen 的 miss 分支在白炉下取 1 —— 命中与未命中两条路径都返回理想值，于是白炉读数**与场景几何无关、恒等于 1**，成为一条能看见绝对量级的判据。**实测**：`diffuse={RTGI}` 白炉读数 中心 **1.0000**（改前把白炉分支关掉负对照读到 **0.0000**）；SSGI 仍为 1.0000（任务 10 的判据未被破坏）。**连带影响（同一函数 → 同一修正）**：DDGI 探针的命中项也少了 albedo，故 DDGI 的绝对读数整体下移（`ddgi` 0.0873536 → **0.0775732**、`S_ddgi` 0.0308175 → **0.0206226**、`corr(SSGI,DDGI)` 0.6819 → **0.6457**），这在物理上是对的方向（深色命中面反射更少）；相关检查重跑全过 | `Shader/RT_HitCommon.slang`；`Shader/RT/RT_GI.rchit.slang`、`RT_Reflection.rchit.slang`（调用点）；`Shader/RT/DDGI_Trace.rgen.slang`（去掉重复的 /π）；`Shader/RT/RT_GI.rgen.slang`（白炉 miss）；`Shader/Lighting/DeferredLighting.frag.slang`（白炉下 RTGI 走真实路径）；`Render/RT/{RTEffectPass.h,RTGIPass.cpp,RTReflectionPass.cpp}`、`Render/GI/RTProvider.h`（furnace 位）；判据 `Tools/gi/rtgi_furnace_check.ps1` |
 | **AD** | 中 → ✅ **已修复**（任务 34） | **Forward 的 RSM 源在 06.GILab 下没有生产者（连阴影也没有）**：`pipeline_mode=0` 时 Forward 管线的阴影系统**从不被驱动** —— `ShadowSystem` 要靠调用方先 `SetRenderResources` + `Update`（`02.Cube` / `03.Sponza-Forward` / `AISamples` 都这么做，**06.GILab 漏了**），于是 `HasActiveShadows()` 恒为 false ⇒ RG 里的 `Shadow` pass 与 `RSM_Generate` pass **都不注册**，`GetLightViewProj(0)` 行列式为 0，Forward 画面**没有阴影**。**实测指纹**：Forward 下 `diffuse={RSM}` 的 HDR 与**空漫反射栈**逐位相同（0.0865436），而 `forward_stack_check` 的三条判据（层栈改变画面、多源不变亮、双源等于加权平均）在"某个源恒为 0"时**全部成立** —— 一条**看不出源为 0** 的检查，任务 26 的"Forward 的 RSM 读数 0.0865436"因此是把"没有源"读成了"源很暗"。**第二层根因（补上驱动之后实测）**：即使补上 `Update`，`Shadow` 与 `RSM_Generate` 都注册了，三张 RSM 图仍只有清除值 —— 本 pass 用的是 **CSM 级联 0** 的 VP，而它由 `CSMTechnique::RenderCascade` **在 Shadow pass 执行时**才写进 `m_LightVPs`；帧图里这两个 pass 声明的是**互不相干的纹理**（阴影图 vs RSM 三张图），**没有依赖边** ⇒ 执行顺序不受保证。更深一层：CSM 的 VP 拟合**相机视锥**，用它渲染的 RSM 内容随视角变化（世界空间源的前提被破坏）。**第三层根因（补上固定视锥之后实测）**：RSM 三张图有 53% 覆盖了，`{RSM}` 的 HDR 仍与空栈逐位相同 —— RG 路径**从不调用 `UpdateRSMBindings()`**（只有非 RG 的 `PrepareGI` 调），PBR 采样的是 Initialize 时绑的 **bindless 占位纹理**。**第四层（顺着第三层查出来的另一类缺陷）**：给 `GIBlendParams` 加 `float4x4` + `float` 之后 `rsmValid` 恒读 0，根因是共享结构体里 `float _padBlend[3]` 在 C++ 占 12 字节、在 Slang 的 cbuffer（std140）里占 48 字节 ⇒ 数组之后的成员两端偏移全部错开（§9.2-AF）。**修法**：示例驱动阴影系统；`ForwardPipeline::RefreshRSMFrustum` 按场景包围盒拟合固定光锥（与 Deferred 同一份 `FitRSMFrustumToBounds`），同一个 VP 经 `GIBlendParams` 交给 PBR 的内联查表；每帧刷新时调用 `UpdateRSMBindings()`；`rsmValid` 由 C++ 统一判定。**判据**：`forward_stack_check` **10 条**全过 —— `S_rsm` 恰好 0 → **8.875e-05**；三张 RSM 图覆盖 **53.36% / 53.36% / 53.31%**（均值 0.2049）；相机沿 x 挪 300 后三张 RSM 图**逐字节相同**（视角无关，改前的相机视锥不可能满足）。**第 1 层只在 Forward 生效**：Deferred 侧本身一直由帧图驱动阴影 | `Samples/06.GILab/06.GILab.cpp`（驱动阴影系统）；`Pipeline/ForwardPipeline.cpp`（`RefreshRSMFrustum` + UBO + `UpdateRSMBindings`）；`Pipeline/ForwardPipeline_FrameGraph.cpp`（固定光锥）；`Lighting/PBR.frag.slang`（同一个 VP + `rsmValid`）；`ShaderTypes.slang`（`rsmLightViewProj` / `rsmValid`）；`Tools/gi/forward_stack_check.{ps1,py}`（断言 + 逐级判定 + 视角无关） |
 | **AF** | 中 → ✅ **已修复**（任务 34 顺带） | **C++ 与 Slang 的共享结构体在「非 float4 数组」上布局不一致**：`ShaderTypes.slang` 是两端共用的单一定义，但**布局规则不同** —— Slang 的 cbuffer 按 std140，**数组元素步长固定 16 字节**，而 C++ 侧 `float[3]` 只占 12 字节 ⇒ 数组**之后**的所有成员偏移全部错开。实测（`slangc -reflection-json`）：`GIBlendParams` 里写 `float _padBlend[3]` 时 Slang 把 `rsmLightViewProj` 放在 **304**、`rsmValid` 放在 **368**、块大小 **432**，而 C++ 是 **256 / 320 / 336**；于是 PBR 读到的 `rsmValid` 恒为 0（落在 C++ 从未写入的区间），RSM 源静默不产出、且**没有任何报错**（`rsmVplScale` 在数组**之前**，所以它一直是对的 —— 这正是这个缺陷能潜伏两个任务的原因）。**修法**：填充一律用 `float4`（两端都是 16 字节、16 对齐），并在 `Pipeline/Material.h` 里把 `sizeof` 与三个字段的 `offsetof` **逐个钉死**（任何人再改这个结构都会在编译期被拦下）。**排查工具**：`slangc <shader> -reflection-json <out.json>` + `Tools/gi` 的说明（§11.3）。**同类残留检查**：`ShaderTypes.slang` 里其余数组都是 `float4x4[3]`（元素步长 64 = C++ 一致）或末尾纯填充（后面没有成员），不受影响 | `Shader/ShaderTypes.slang`；`Pipeline/Material.h`；§11.3 的排查方法 |
-| **AE** | 中 → ✅ **已修复**（任务 35） | **SSR 的 Hi-Z 层次 march 会漏掉反射**（任务 32 的平面镜解析对照发现）：同一个镜面、同一帧、同一套场景尺度参数下，线性 march（`ssr_use_hiz=0`，本 pass 的正式回退路径）把红盒与绿盒的反射**都**放在解析预测像素上（偏差 0.44 px / 0.35 px），而**默认**的 Hi-Z 路径只找到红盒（0.44 px，8633 像素），**绿盒一个像素都没有**；Hi-Z 的镜面有效率反而**最高**（71%），所以"有效率 / 两条 march 同量级"这类判据看不见它。**根因（任务 35 查清）**：Hi-Z 在**屏幕空间**做 DDA（每步 2^level 像素），而代码把屏幕段的参数 `t` **直接当成射线参数**用（`rayPos = rayStart + R*(worldLen*t)` 再投影取深度）。透视投影把"世界线性"映射成"屏幕分数"的**射影**函数，两者只在射线两端深度相近时才近似一致 —— 实测（地面镜 + 解析真值）：在预测反射像素所在的屏幕分数处，这样算出的射线点比真实射线点远 **1251**（红盒）/ **1481**（绿盒）世界单位，是命中容差（11.6）的 **100 倍以上**。于是深度比较比的是射线上**另一个点**：红盒只是"蒙对"了附近的像素（最近命中 0.44 px 而整片图案是错的），绿盒一个像素都找不到。**修法**：用标准**透视校正**插值把屏幕参数换算成射线参数 —— clip 坐标沿射线线性（`cA = Proj·(rayStart,1)`、`cR = Proj·(R,0)`），`1/w` 在屏幕空间线性 ⇒ `w(t) = w0·wT / ((1−t)·wT + t·w0)`、`tau(t) = t·worldLen·w0 / ((1−t)·wT + t·w0)`，于是 `rayPos` 与 NDC 深度都能精确写出（顺带省掉一次投影）。**连带修正：步数预算**。修正后射线不再靠错误深度"蒙"到目标附近，需要更多步覆盖同一段屏幕距离（同一场景、同一套参数，参照线性 march 的 30676 / 13489 个物体色像素）：64 步 红 0 / 绿 0；128 步 17719 / 7971；**256 步 30137 / 15847**；600 步 32579 / 15902 ⇒ `autoScaleMarch` 把默认 `maxSteps` 提到 **256**（同时是线性回退的迭代上限：射程 64×11.59≈742 → 256×11.59≈2967 单位）。**判据**：`ssr_mirror_check` **13 条全过** —— Hi-Z 两条反射都落在预测像素（0.44 / 0.35 px）、远像素 **0.00%**、像素数 ≥ 线性参照的一半（30137/30676、15847/13489）、步数 256 ≤ 600 的 60%。**【测量更正】任务 25 的"Hi-Z 比线性快 3.2 倍"不成立**：那是**错误 march** + 米制参数下的读数；修正后实测 SSR pass **4.256 ms（Hi-Z 256 步）vs 4.505 ms（线性 600 步）= 0.94×**，步数比是 2.3× 而时间比只有 ~1.06× —— 每一次 Hi-Z 迭代要多付一次金字塔采样（并在 level 0 细化时付一次深度采样 + 逆投影），而地面镜场景会让层级长期停在 0（射线脚下的地面永远比射线近）⇒ 层次结构在这个几何下帮不上忙。回退手段（level-0 抖动、"只在穿越时降级"的层级策略）记在任务 35 的收尾项里 | `Shader/GI/SSR.frag.slang`（透视校正的射线参数）；`Pipeline/DeferredPipeline_FrameGraph.cpp`（步数预算 256）；`Tools/gi/ssr_mirror_check.{ps1,py}`（Hi-Z 断言 + 步数断言 + 耗时报告） |
+| **AE** | 中 → ✅ **已修复**（任务 35） | **SSR 的 Hi-Z 层次 march 会漏掉反射**（任务 32 的平面镜解析对照发现）：同一个镜面、同一帧、同一套场景尺度参数下，线性 march（`ssr_use_hiz=0`，本 pass 的正式回退路径）把红盒与绿盒的反射**都**放在解析预测像素上（偏差 0.44 px / 0.35 px），而**默认**的 Hi-Z 路径只找到红盒（0.44 px，8633 像素），**绿盒一个像素都没有**；Hi-Z 的镜面有效率反而**最高**（71%），所以"有效率 / 两条 march 同量级"这类判据看不见它。**根因（任务 35 查清）**：Hi-Z 在**屏幕空间**做 DDA（每步 2^level 像素），而代码把屏幕段的参数 `t` **直接当成射线参数**用（`rayPos = rayStart + R*(worldLen*t)` 再投影取深度）。透视投影把"世界线性"映射成"屏幕分数"的**射影**函数，两者只在射线两端深度相近时才近似一致 —— 实测（地面镜 + 解析真值）：在预测反射像素所在的屏幕分数处，这样算出的射线点比真实射线点远 **1251**（红盒）/ **1481**（绿盒）世界单位，是命中容差（11.6）的 **100 倍以上**。于是深度比较比的是射线上**另一个点**：红盒只是"蒙对"了附近的像素（最近命中 0.44 px 而整片图案是错的），绿盒一个像素都找不到。**修法**：用标准**透视校正**插值把屏幕参数换算成射线参数 —— clip 坐标沿射线线性（$\text{cA} = \text{Proj} \cdot (\text{rayStart}, 1)$、$\text{cR} = \text{Proj} \cdot (R, 0)$），`1/w` 在屏幕空间线性 ⇒ $w(t) = w_0 \cdot w_T / ((1 - t) \cdot w_T + t \cdot w_0)$、$\tau(t) = t \cdot \text{worldLen} \cdot w_0 / ((1 - t) \cdot w_T + t \cdot w_0)$，于是 `rayPos` 与 NDC 深度都能精确写出（顺带省掉一次投影）。**连带修正：步数预算**。修正后射线不再靠错误深度"蒙"到目标附近，需要更多步覆盖同一段屏幕距离（同一场景、同一套参数，参照线性 march 的 30676 / 13489 个物体色像素）：64 步 红 0 / 绿 0；128 步 17719 / 7971；**256 步 30137 / 15847**；600 步 32579 / 15902 ⇒ `autoScaleMarch` 把默认 `maxSteps` 提到 **256**（同时是线性回退的迭代上限：射程 64×11.59≈742 → 256×11.59≈2967 单位）。**判据**：`ssr_mirror_check` **13 条全过** —— Hi-Z 两条反射都落在预测像素（0.44 / 0.35 px）、远像素 **0.00%**、像素数 ≥ 线性参照的一半（30137/30676、15847/13489）、步数 256 ≤ 600 的 60%。**【测量更正】任务 25 的"Hi-Z 比线性快 3.2 倍"不成立**：那是**错误 march** + 米制参数下的读数；修正后实测 SSR pass **4.256 ms（Hi-Z 256 步）vs 4.505 ms（线性 600 步）= 0.94×**，步数比是 2.3× 而时间比只有 ~1.06× —— 每一次 Hi-Z 迭代要多付一次金字塔采样（并在 level 0 细化时付一次深度采样 + 逆投影），而地面镜场景会让层级长期停在 0（射线脚下的地面永远比射线近）⇒ 层次结构在这个几何下帮不上忙。回退手段（level-0 抖动、"只在穿越时降级"的层级策略）记在任务 35 的收尾项里 | `Shader/GI/SSR.frag.slang`（透视校正的射线参数）；`Pipeline/DeferredPipeline_FrameGraph.cpp`（步数预算 256）；`Tools/gi/ssr_mirror_check.{ps1,py}`（Hi-Z 断言 + 步数断言 + 耗时报告） |
 | **AG** | 中 → ✅ **已修复**（第 8 个 GBuffer MRT 接入时顺带） | **MRT 帧缓冲的附件数写死 7 个颜色**：`VulkanCommandList::BeginOffscreenPassMRT` 里附件数组是 `VkImageView attachments[kMaxColorAttachments]`（8）且循环写成 `attachmentCount < 7`，而 render pass 是按 PSO 的 `colorAttachmentCount` 建的（`kMaxColorAttachments` = 8，render pass 侧本来用 `kMaxColorAttachments + 1` = 9 个附件）。于是给 GBuffer 加第 8 个 MRT（光照图键）时，`vkCreateFramebuffer` 收到 8 个附件而 render pass 期望 9 个 ⇒ 校验层报 `attachmentCount 8 does not match 9`，紧接着驱动在 `vkCmdBeginRenderPass` 里崩溃（`0xC0000005`，栈顶 nvoglv64）。**这解释了为什么"GBuffer 七个 MRT 已满"看起来是硬上限**：真正的上限是 8 个颜色，卡住的是这段写死的 7。**修法**：附件数组与清除值数组都按"颜色上限 + 1（深度）"开，循环用 `kMaxColorAttachments`；pass 内其余逻辑不变 | `RHI/Vulkan/VulkanCommandList_RenderPass.cpp`；复现与判据 `Tools/gi/lightmap_key_check.ps1` |
 | ~~**Z**~~ | ✅ **已修复** | **面板上的「每源耗时」是假信息**：`GIDebugData::avgRenderTimeMs` 只有声明与显示两处，**全仓没有一处给它赋值**，因此 06.GILab 面板上「SSGI 耗时 / DDGI 耗时 / IBL 耗时 / SSR 耗时」**恒为 0.00 ms**。危害在于它长得像一个可用的性能读数：性能类任务（时间维分摊、pass 级剔除、march 换实现）都会自然地去读它，而它会一直回答 0 —— 与 §9.2-U（旧转储）、§9.2-Y（基线分两组）同属**测量可靠性**这一类。**修法**：每源每帧一对 GPU 时间戳 → 环形查询池 → 不阻塞地读回（`TryGetQueryResults`）→ 滚动平均写回源自己的 `GIDebugData`；`HE_GI_TIMING=1` 时每 120 帧打一行日志，便于脚本读取。**实测**：SSGI 16 采样 **0.436 ms**、64 采样 **1.271 ms**（×2.92，随工作量线性变化）；不启用 SSGI 的配置里它恒为 **0**；重复运行离散度 **0.0%**。过程中踩到三个坑（写进 §10.2）：`GetQueryResults` 带 `WAIT_BIT` 会把进程挂死；整池可用性判断因"从未写过的查询永远不可用"而恒假；pass 注册但内部直接返回（IBL 不在脏时）会留下**过期读数** | `GI/GITiming.{h,cpp}`；`RHI/CommandList.h` + `VulkanCommandList`（新增不阻塞读回）；`GI/GlobalIllumination.h`（`SetRenderTimeMs`）；`GI/IGIProvider.h`（`GetTimedPass`）；`DeferredPipeline{,_FrameGraph}`；回归检查 `Tools/gi/timing_check.ps1` |
 
 **A 的修复与实测**（4 处量纲修正 + 单源亮度验证）
 
 改动：
-1. `Lighting/DeferredLighting.frag.slang` · `SampleDiffuseSource`：DDGI 补 `albedo/π`；RTGI 补接收面 `albedo`；RSM 补接收面 `albedo`
+1. `Lighting/DeferredLighting.frag.slang` · `SampleDiffuseSource`：DDGI 补 $\text{albedo}/\pi$；RTGI 补接收面 `albedo`；RSM 补接收面 `albedo`
 2. 同上 · `SampleRSMIndirect`：移除对 `iblIntensity` 的**门控与缩放**（此前「把 IBL 调暗」会连带关掉 RSM）
-3. `RayTracing/RT_GI.rgen.slang`：DDGI miss 回退补 `× 1/π`（E → L，与命中路径量纲对齐）
+3. `RayTracing/RT_GI.rgen.slang`：DDGI miss 回退补 $\times 1/\pi$（E → L，与命中路径量纲对齐）
 
 实测（`HE_FURNACE_PROBE=1`，不启白炉；cfg 设为 **diffuse 层栈 = 仅 DDGI**、无镜面/AO/阴影、关闭直接光）：
 
@@ -986,7 +988,7 @@ GIConfigFromPreset(档位)                  → 层栈 + 精度
 - **修复前中心亮度与接收面 albedo 无关** → 中心与背景读数一模一样（都是 0.0279）——
   这正是「DDGI 返回 E、不含 albedo」的直接指纹；
 - **修复后逐通道比值 = π/albedo_c**：整体 8.21× 反推 albedo ≈ 0.38；逐通道反推得
-  R = 0.43 / G = 0.39 / B = 0.33 —— Sponza 中心像素的**暖色** albedo，与 `albedo/π` 的预测关系一致。
+  R = 0.43 / G = 0.39 / B = 0.33 —— Sponza 中心像素的**暖色** albedo，与 $\text{albedo}/\pi$ 的预测关系一致。
 
 回归：白炉读数仍为 **1.0000**（预期——白炉短路源真值，本就不覆盖量纲）；VUID 46 = 改前 46。
 *（`build/verify/` 下保留了 before/after 两份运行日志可供查阅）*
@@ -1106,7 +1108,7 @@ Vulkan 校验 46 条与改前一致。
 > 遗留（**已由任务 10 关闭**）：三处几何缺陷修完后，SSGI 仍明显弱于 DDGI（21.0 倍，修复
 > §11.3.1 后重测），且累加项用的仍是命中点 **反照率**而非入射辐射度（§9.2-P）。**这两件事不是
 > 同一类问题**：前者是几何/方向错误（本次已修），后者是量纲缺失，必须补 `L_in` 并做实测
-> 标定才能解决——归 §10.1 `SSGI-CAL`。任务 10 已完成该标定：SSGI 现在是精确的 `E/π` 估计，
+> 标定才能解决——归 §10.1 `SSGI-CAL`。任务 10 已完成该标定：SSGI 现在是精确的 $E/\pi$ 估计，
 > 量级比 **2.2 倍**，与 DDGI 的相关性由 0.92 降到 **0.148**（§3.3、§9.2-P）。
 
 > ⚠️ **校验层条数只在同一配置、同一去重条件、同一采样设置下纵向比较。** 各处出现的
@@ -1251,7 +1253,7 @@ Vulkan 校验 46 条与改前一致。
 | # | 任务 | 规模/风险 | 理由 / 依赖 |
 |:---:|---|---|---|
 | ~~**9**~~ | ~~**§3.2 置信度体系**（屏幕空间源的逐像素可信度）~~ —— ✅ **已完成**（屏幕覆盖一项落地；探针网格归任务 14，其余两项已写明为何不做） | 中 / 中 | §3.2 此前只有硬编码在着色器里的「屏幕边缘 5% 降权」，UBO 里根本没有 confidence 字段，且 C++ 与着色器**各有一份源 id 列表**（GTAO 就被漏掉）。现在置信度掩码逐槽进 UBO、由 `ToConfidenceMask` 统一推导，着色器不再认识任何源 id，边缘带宽也从着色器常量变成 UBO 字段。**实测**（新增 `Tools/gi/confidence_check.ps1`）：默认 5% 带宽下屏幕最外圈 SSGI 的贡献只为中央的 **1.6%**（≈ 像素中心偏移的理论值 2%），中央仍正常贡献；带宽调到 50% 后同一环带（距边 5%~15%）的贡献降到 **32.4%**，与解析预测 `2c/(1+c) = 33%` 吻合。**改前二进制该检查必失败**（5%→50% 的比值为 **1.000**）。三变体读数、白炉、告警、各回归检查与改前逐项一致 |
-| **10** | ~~**SSGI-CAL · 标度与量纲标定**（= §9.2-P）~~ —— ✅ **已完成** | 中 / 中 | P5 退场后的接棒项。**做了什么**：累加项补入射辐射度 `L_in`（**前帧 HDR**，由 Provider 声明消费者、帧图据此捕获 —— 此前捕获门控只写死 DDGI，只放 SSGI 时该纹理从未被写入，SSGI 恒 0）；余弦项改为 `dot(N, normalize(sDir))`；估计量改为 `Σ(L_in·cosθ)/Σcosθ`，由 `∫cosθ dω = π` 可知它**精确等于 `E/π`**，归一化常数是解析值 1，**不需要"以 PT 为参考标定一个增益"**；量纲不对的距离项删除。**白炉判据升级**：白炉下不再短路 SSGI（白炉条件恰是它的解析真值条件），白炉因此同时校验它的标度。**实测**：白炉单源 **1.0000**（改回旧「除以 N」形式则 **0.444**）；量级比 **21× → 2.2×**；输出占比 **4.5% → 31%**；与 DDGI 相关性 **0.9238 → 0.1480**（§3.3 的结论方向不变、理由被改写）。新增回归检查 `Tools/gi/ssgi_cal_check.ps1` 三例全过 |
+| **10** | ~~**SSGI-CAL · 标度与量纲标定**（= §9.2-P）~~ —— ✅ **已完成** | 中 / 中 | P5 退场后的接棒项。**做了什么**：累加项补入射辐射度 `L_in`（**前帧 HDR**，由 Provider 声明消费者、帧图据此捕获 —— 此前捕获门控只写死 DDGI，只放 SSGI 时该纹理从未被写入，SSGI 恒 0）；余弦项改为 `dot(N, normalize(sDir))`；估计量改为 $\sum (L_{\text{in}} \cdot \cos\theta) / \sum \cos\theta$，由 $\int \cos\theta \, d\omega = \pi$ 可知它**精确等于 $E/\pi$**，归一化常数是解析值 1，**不需要"以 PT 为参考标定一个增益"**；量纲不对的距离项删除。**白炉判据升级**：白炉下不再短路 SSGI（白炉条件恰是它的解析真值条件），白炉因此同时校验它的标度。**实测**：白炉单源 **1.0000**（改回旧「除以 N」形式则 **0.444**）；量级比 **21× → 2.2×**；输出占比 **4.5% → 31%**；与 DDGI 相关性 **0.9238 → 0.1480**（§3.3 的结论方向不变、理由被改写）。新增回归检查 `Tools/gi/ssgi_cal_check.ps1` 三例全过 |
 
 **D 组 · 质量与性能**
 
@@ -1281,9 +1283,9 @@ Vulkan 校验 46 条与改前一致。
 | **27** | ~~**§9.2-X · 镜面层栈为空时出现 463 量级亮点**~~ —— ✅ **已完成** | 中 / 低 | 复现与读数：三通道全空 ⇒ `mean 0.2022 / max 463.32`（位置固定在 (416,996)）；`specular={IBL}` ⇒ `0.0694 / 42.20`；只放 `ao={SSAO}`（specular 仍空）⇒ 回到 `0.2022 / 463.32`。**根因不在镜面通道的合成里**（那里 `specNum/max(specDen,1e-4)` 在空栈时给 0），而在 **IBL 烘焙的门控漏了第四个消费者**：`u_BRDF_LUT` 是 PBR 在**直接光路径**上无条件采样的（与任何层栈无关），而烘焙 pass 只在「漫反射栈要它 ∨ 镜面栈要它 ∨ DDGI 要它」时注册 ⇒ 镜面栈为空且 IBL 不在别处时**那张 LUT 从未被写入**，直接光的 BRDF 读到未初始化显存。**判据**：`Tools/gi/ibl_lut_gate_check.ps1`（三种配置 max 都必须落在 42 量级 + 空镜面栈下 `IBL_Bake` pass 必须仍在注册列表里）全过；修后三种配置的 `max` 都是 **42.20**，空栈均值 **0.2022 → 0.0429**（也就是说这不是"一个亮点"而是**整幅画面的直接光都算错了** 4.7 倍）。**历史读数注意**：凡以"空镜面栈"为基线的绝对值都受过这一项污染（差分对照不受影响，两侧同样被污染） |
 | **28** | ~~**§9.2-Y · "空层栈"这一配置状态不可靠**~~ —— ✅ **已完成** | 中 / 中 | 根因是**两个写者 + 一处静默补源**：配置加载路径直接按 cfg 重建层栈（全 0 权重 ⇒ 空栈），而任何经过 `GIRegistry::Degrade` 的路径（预设按钮、阴影下拉）会被它的**兜底**补成 `{IBL}`；示例退出时又把**内存里那份**回写成配置文件 ⇒ 下一次运行读到被补过的配置，读数 0.05773 与 0.07554 两组、相差 32%。**修法**：`Degrade` 改成**只裁不加**（"空通道"是有定义的合法状态，见 §3.1，也是做差实验的基线），于是同一份输入在任何调用路径上同义；单测新增"只裁不加 + 幂等"三条断言。**判据**（`Tools/gi/repeatability_check.ps1`，5 次同配置）：读数离散 **0.0003%**（0.0577333～0.0577335）、cfg 里的层栈键**逐键不变**、且落在"空栈"量级而非"被补 IBL"量级 —— 三条全过。**同时把另一条历史观察降级**：文档里"同一二进制同一 cfg 连跑四次分成 0.057733 与 0.05719x 两组（差 1%）"在今天的 5 次运行里**没有复现**（离散 0.0003%），最可能的解释是当时尚未装上 §9.2-U 的陈旧转储护栏，混入了上一次运行的产物 |
 | **29** | ~~**§9.2-Z · 给 GI 源装真实耗时读数**（面板现在恒显示 0.00 ms）~~ —— ✅ **已完成** | 中 / 低 | 每源每帧一对 GPU 时间戳 → 环形查询池 → **不阻塞**读回 → 滚动平均写回源自己的 `GIDebugData`；`HE_GI_TIMING=1` 时每 120 帧打一行日志供脚本读取。**判据（读数是真的）**：SSGI 16 采样 **0.436 ms** → 64 采样 **1.271 ms**（×2.92，随工作量变化）；不启用 SSGI 的配置里恒为 0；重复运行离散度 **0.0%**。**顺带第一次拿到真实成本结构**：SSGI 0.44 ms、DDGI 探针更新 **0.019 ms**、IBL 首次烘焙约 5 ms（之后不再跑）—— 这也解释了为什么任务 12 的分摊收益在这个网格尺寸下量不出来 |
-| **30** | ~~**§9.2-AA · RSM 链路的量级与通道约定**（任务 16 发现）~~ —— ✅ **已完成** | 中 / 中 | 修前 RSM 间接光**整项不产出**（`S_rsm` 逐像素为 0），成本照付 0.19 ms/帧。任务 16 只看到"量级太小"，本次逐级落盘发现**三张 RSM 附件里只有清除值**（`BeginOffscreenPassMRT` 的清除值长度契约被越界读破坏 ⇒ 深度清成垃圾 ⇒ 片元全被丢弃），以及 **VPL 的 albedo 读的是相机可见性列表的索引空间**（只有 3% 的 texel 拿到非零 albedo）。四项一起过：① 受光项的量级归一改成**解析面积**（`GI/RSMFrustum.h`：`scale = (radiusUV·2·halfExtent)²/N`，旧经验常数隐含"半径 60 的场景"，比值 3942）；② RSM 改成**三个附件一个量**（位置 / 编码法线 / VPL 辐射度），`DDGI` 不再把编码法线当辐射度读；③ 辐射度带上 albedo 与光源颜色（不再只能是灰度）；④ 光源视锥按**场景包围盒**拟合（去掉硬编码 `sceneCenter/Radius`）。**判据**：三个中间层从 0% 覆盖变成 53% 且均值 0.2 量级、`S_rsm` 0 → 4.28e-5（与 `E/π×albedo` 相关 0.966）、`rsm_indirect_check` 7 条判定全过、半分辨率保真度按真实量级重测（均值差 0.25%、相关 0.941、对比度 1.11）。**量级仍只占屏幕均值 0.06%**，这是 2.5D RSM 估计量的性质（共面 VPL 的两个余弦同时趋零），判据守结构不守绝对量级。完整实测见 §10.2 任务 30 |
+| **30** | ~~**§9.2-AA · RSM 链路的量级与通道约定**（任务 16 发现）~~ —— ✅ **已完成** | 中 / 中 | 修前 RSM 间接光**整项不产出**（`S_rsm` 逐像素为 0），成本照付 0.19 ms/帧。任务 16 只看到"量级太小"，本次逐级落盘发现**三张 RSM 附件里只有清除值**（`BeginOffscreenPassMRT` 的清除值长度契约被越界读破坏 ⇒ 深度清成垃圾 ⇒ 片元全被丢弃），以及 **VPL 的 albedo 读的是相机可见性列表的索引空间**（只有 3% 的 texel 拿到非零 albedo）。四项一起过：① 受光项的量级归一改成**解析面积**（`GI/RSMFrustum.h`：$\text{scale} = (\text{radiusUV} \cdot 2 \cdot \text{halfExtent})^2 / N$，旧经验常数隐含"半径 60 的场景"，比值 3942）；② RSM 改成**三个附件一个量**（位置 / 编码法线 / VPL 辐射度），`DDGI` 不再把编码法线当辐射度读；③ 辐射度带上 albedo 与光源颜色（不再只能是灰度）；④ 光源视锥按**场景包围盒**拟合（去掉硬编码 `sceneCenter/Radius`）。**判据**：三个中间层从 0% 覆盖变成 53% 且均值 0.2 量级、`S_rsm` 0 → 4.28e-5（与 $E/\pi \times \text{albedo}$ 相关 0.966）、`rsm_indirect_check` 7 条判定全过、半分辨率保真度按真实量级重测（均值差 0.25%、相关 0.941、对比度 1.11）。**量级仍只占屏幕均值 0.06%**，这是 2.5D RSM 估计量的性质（共面 VPL 的两个余弦同时趋零），判据守结构不守绝对量级。完整实测见 §10.2 任务 30 |
 | **32** | ~~**SSR 的解析对照（平面镜）**（任务 25 留下的空缺）~~ —— ✅ **已完成** | 中 / 低 | 任务 25 只证明了"射线有效性恢复、两条 march 路径同量级、Hi-Z 更快"，**没有**证明反射的**位置/方向**正确 —— 平面镜的闭式答案（物体中心按镜面镜像后再经**同一个**相机投影）一上来就逮到**四处**"有效率"类判据看不见的错：① `reflect(-V, N)` 把 **view 空间**的入射方向与**世界空间**的 GBuffer 法线混用（反射只在相机与世界轴对齐时才对）；② 深度→view 重建与 view→屏幕投影**都**漏了本引擎的 y 约定（负高度视口 ⇒ `ndc.y = 1−2v`），两处漏项让**位置**自洽（shader 重建的 `viewPos.y = +70.3`，真值 **−70.7**）却把几何上下镜像 ⇒ 反射方向错；③ 起点自交偏移写死 `0.1`，而命中容差按场景尺度取到 11.6 ⇒ 每条射线**立刻命中自己**（地面镜上 62% 的像素"有效"，输出的却是镜面自己的 albedo）；④ 线性 march 把"射线仍在几何之前"记成命中 0.5（§9.2-W 的历史有效率就是这么抬起来的）。**另按场景尺度重取 march 参数**：`diag`=**4636.97** ⇒ `maxDistance=diag`、`thickness=diag×0.0025`（≈11.6）、`stepSize ≤ thickness`；历史默认（50/0.1/0.5/64）在 3720 单位宽的 Sponza 上只找到 **2432** 个反射像素（场景尺度 **30676**，差 12.6×）。**判据**（`Tools/gi/ssr_mirror_check.ps1`，7 条全过；**先在直视图上自检相机模型** —— 盒心投影到最近自身像素 0.49 / 0.18 px）：反射落点偏差 **0.44 px（红）/ 0.35 px（绿）**、远离预测的杂色 **0.00%**、相机平移 40 后反射位移与解析值差 **2.39 px**、米制参数负对照 **30676 vs 2432**。**Hi-Z 路径仍漏掉绿盒**（§9.2-AE / 任务 35），故解析断言钉在**线性回退路径**上。完整表、负对照与测量卫生见 §10.2 任务 32 |
-| **33** | ~~**§9.2-AC · 光追命中点的量纲**（任务 30 期间顺带确认）~~ —— ✅ **已完成** | 小 / 中 | `EvaluateHitRadiance`（RTGI / RT 反射 / DDGI 探针三处共用）把 `albedo·E_ambient` 与**未乘 albedo** 的 `Σ lightColor·intensity·N·L` 相加后直接当辐射度返回 —— 两处量纲错（缺 albedo、缺 1/π），而三处调用点只有 DDGI 探针自己除了 π。**修法**：函数返回辐射度 `albedo/π·(E_ambient + E_direct)`，调用点不再换算；并加**白炉分支**（命中与未命中都返回理想值 ⇒ 白炉读数与几何无关、恒为 1），把一条**能看见绝对量级**的判据做出来（此前的短路与相对判据都看不见这个错）。**实测**：白炉 `diffuse={RTGI}` 中心 **1.0000**（负对照 0.0000）、SSGI 仍 1.0000；RTGI 命中项修正前后之比 ≈0.21、RT 反射原始输出 0.54（天空占比较大）；连带 DDGI 绝对读数下移（`S_ddgi` 0.0308175 → 0.0206226，方向正确：深色命中面反射更少），相关检查全部重跑通过。完整判据、负对照与当前基线表见 §10.2 任务 33 |
+| **33** | ~~**§9.2-AC · 光追命中点的量纲**（任务 30 期间顺带确认）~~ —— ✅ **已完成** | 小 / 中 | `EvaluateHitRadiance`（RTGI / RT 反射 / DDGI 探针三处共用）把 $\text{albedo} \cdot E_{\text{ambient}}$ 与**未乘 albedo** 的 $\sum \text{lightColor} \cdot \text{intensity} \cdot N \cdot L$ 相加后直接当辐射度返回 —— 两处量纲错（缺 albedo、缺 1/π），而三处调用点只有 DDGI 探针自己除了 π。**修法**：函数返回辐射度 $\text{albedo}/\pi \cdot (E_{\text{ambient}} + E_{\text{direct}})$，调用点不再换算；并加**白炉分支**（命中与未命中都返回理想值 ⇒ 白炉读数与几何无关、恒为 1），把一条**能看见绝对量级**的判据做出来（此前的短路与相对判据都看不见这个错）。**实测**：白炉 `diffuse={RTGI}` 中心 **1.0000**（负对照 0.0000）、SSGI 仍 1.0000；RTGI 命中项修正前后之比 ≈0.21、RT 反射原始输出 0.54（天空占比较大）；连带 DDGI 绝对读数下移（`S_ddgi` 0.0308175 → 0.0206226，方向正确：深色命中面反射更少），相关检查全部重跑通过。完整判据、负对照与当前基线表见 §10.2 任务 33 |
 | **34** | ~~**§9.2-AD · 让 Forward 的 RSM 真有生产者**~~ —— ✅ **已完成** | 中 / 中 | 实际有**四层**根因，全部修掉：① 06.GILab 的 Forward 模式不驱动阴影系统（照 `02.Cube` 补 `SetRenderResources` + `Update`；此前 Forward 画面**连阴影都没有**）；② Forward 的 RSM 用 **CSM 级联 0** 的 VP（拟合相机视锥 ∧ 由 Shadow pass 执行时才写入 ∧ 帧图里与 RSM_Generate 无依赖边）⇒ 改成与 Deferred 同一份按场景包围盒拟合的**固定光锥**（`RefreshRSMFrustum`），并把**同一个** VP 经 `GIBlendParams` 交给 PBR 的内联查表（写入 UV 与查找 UV 同源）；③ RG 路径**从不调用 `UpdateRSMBindings()`**（只有非 RG 的 `PrepareGI` 调）⇒ PBR 采样的是 Initialize 时绑的 **bindless 占位纹理**，补齐到每帧刷新处；④ 顺着③查出的 **§9.2-AF**（共享结构体里 `float[3]` 在 Slang cbuffer 里步长是 16 ⇒ 数组之后的字段两端偏移错开，`rsmValid` 恒读 0）。**判据**（`Tools/gi/forward_stack_check.ps1`，**10 条**全过）：`S_rsm` = mean({RSM}) − mean(空栈) **恰好 0 → 8.875e-05**（占屏幕均值 0.102%）；三张 RSM 图覆盖 **53.36% / 53.36% / 53.31%**（VPL 辐射度均值 0.2049，与 Deferred 侧同阈值）；相机沿 x 挪 300 后三张 RSM 图**逐字节相同**（视角无关 —— 改前的相机视锥不可能满足）；原有三条（层栈改变画面 / 多源不变亮 / 双源等于加权平均，相对误差 0.000%）仍全过，`{RSM}` 读数 0.0865436 → **0.0866324**。回归：`rsm_indirect_check` 8/8（Deferred 侧 `S_rsm` 4.284e-05 不变）、单测 **172 例 / 5233 断言**全过。完整记录见 §10.2 任务 34 |
 | **35** | ~~**§9.2-AE · SSR 的 Hi-Z 路径漏反射**（任务 32 发现）~~ —— ✅ **已完成** | 中 / 低 | 根因是 Hi-Z 的屏幕空间 DDA 把**屏幕段参数**当成了**射线参数**（`rayPos = rayStart + R*(worldLen*t)`），而透视投影下两者是射影关系：实测在目标像素所在的屏幕分数处，这样算出的射线点比真实射线点远 **1251 / 1481** 世界单位（容差 11.6 的 100 倍以上）⇒ 深度比较比的是射线上另一个点，绿盒整片丢掉、红盒只是"蒙对"。修法：用透视校正的 `w(t)` / `tau(t)`（`1/w` 在屏幕空间线性）精确换算出射线点与 NDC 深度。修完还要提步数预算：同一场景下 64 步两个盒子都找不到、128 步红 17719 / 绿 7971、**256 步 30137 / 15847**、600 步 32579 / 15902（参照线性 march 的 30676 / 13489）⇒ `autoScaleMarch` 把默认 `maxSteps` 提到 256。**判据**（`ssr_mirror_check`，**13 条全过**）：两条路径都必须把红/绿反射放在解析预测像素 6 px 内、远像素 ≤5%（实测 0.44 / 0.35 px、0.00%）、Hi-Z 的像素数 ≥ 线性参照的一半、以及**步数断言** 256 ≤ 600 的 60%。**【测量更正】任务 25 的"Hi-Z 快 3.2 倍"改为不成立**：那是错误 march + 米制参数下的读数，修正后 SSR pass 4.256 ms（Hi-Z 256 步）对 4.505 ms（线性 600 步）⇒ 时间比仅 ~1.06×（步数比 2.3×）—— 每次 Hi-Z 迭代多付一次金字塔采样与 level-0 细化，而地面镜会让层级长期停在 0，层次结构在这个几何下帮不上忙；level-0 抖动/层级策略优化作为**重开条件**记在 §10.2 任务 35 |
 
@@ -1697,7 +1699,7 @@ Vulkan 校验 46 条与改前一致。
 
 - 动机（改前）：§9.2-L 修好后 SSGI 已真正生效，但实测（同一场景、单源层栈）DDGI 仍是它的
   **21 倍**，且 `GI/SSGI.frag` 的累加式**只含命中点 albedo**，余弦项混了样本长度、距离项量纲
-  也不对 —— 它不是 `E/π` 的估计，在归一化里只拿约 **4.5%** 的贡献：每帧付一整幅 pass 的成本，
+  也不对 —— 它不是 $E/\pi$ 的估计，在归一化里只拿约 **4.5%** 的贡献：每帧付一整幅 pass 的成本，
   却几乎看不见。
 - **前置**：原列的"两处疑似几何缺陷"实际查出**三处**（§9.2 的 M/N/O，已完成）；**剩余缺口是
   量纲问题不是几何问题**，不能靠继续修方向解决。
@@ -1711,8 +1713,8 @@ Vulkan 校验 46 条与改前一致。
      `dot(sDir,sDir)`，长度的平方；正确的距离衰减需要采样点与几何的实际距离，而本方案只在
      固定半径处取一个样本，没有这个信息 —— 固定半径采样对 `L` 的估计偏差改记为**已知近似**，
      不再用经验项掩盖）。
-  3. **标定方式改为解析而非拟合**：估计量取 `Σ(L_in·cosθ) / Σcosθ`。因为 `∫cosθ dω = π`，
-     它**精确等于 `E/π`** —— 归一化常数是 1，不需要"以 PT 为参考拟合一个增益"。这比原计划的
+  3. **标定方式改为解析而非拟合**：估计量取 $\sum (L_{\text{in}} \cdot \cos\theta) / \sum \cos\theta$。因为 $\int \cos\theta \, d\omega = \pi$，
+     它**精确等于 $E/\pi$** —— 归一化常数是 1，不需要"以 PT 为参考拟合一个增益"。这比原计划的
      PT 标定更硬：无收敛噪声、无拟合自由度、与采样核方向分布无关（权重在分子分母里抵消）。
      白炉条件（全白环境 + 接收面 albedo = 1）正是它的解析真值条件，故**白炉不再短路 SSGI**，
      于是白炉同时校验它的标度。
@@ -1720,7 +1722,7 @@ Vulkan 校验 46 条与改前一致。
 
   | 判据 | 结果 |
   |---|---|
-  | 白炉解析真值（SSGI 单源，`E/π` 应为 1） | **1.0000 / 1.0000**（中心 / 背景） |
+  | 白炉解析真值（SSGI 单源，$E/\pi$ 应为 1） | **1.0000 / 1.0000**（中心 / 背景） |
   | 同上，把估计式临时改回「除以 N」 | **0.444** ⇒ 判据确实在校验标度，非同义反复 |
   | 双源做差 vs 两单源做差的平均 | 比值 **1.042**（+4.2% 来自边缘置信度只丢 SSGI、不丢 DDGI） |
   | 单源做差量级比 DDGI / SSGI | **2.2×**（全掩码）/ **2.3×**（收紧掩码），改前 **21×** |
@@ -1859,7 +1861,7 @@ Vulkan 校验 46 条与改前一致。
   （`S_rsm` 恒在 1e-8 量级、低于 16 位浮点转储的分辨率），而成本照付 0.188 ms/帧。
   这是 §9.2-L/W 同一族（"开关为真、pass 在跑、成本在付、内容恒空"），只是这一族的第四例。
 - **要做什么（四项，一起过一遍）**
-  1. **量级**：受光项是 `flux·cos·cos / d²`，接收点与 VPL 相距数百到数千世界单位 ⇒
+  1. **量级**：受光项是 $\text{flux} \cdot \cos \cdot \cos / d^2$，接收点与 VPL 相距数百到数千世界单位 ⇒
      `1/d² ≈ 1e-6`；`RSM_VPL_ENERGY = 0.046875` 只做了"25 点 → 16 点"的积分归一，
      隐含"场景约 60 单位"的假设。要么给 VPL 补上面积/能量项（物理化），要么把整项改成
      与尺度无关的形式 —— **不能再用一个经验常数去吸收场景尺度**（§9.2-K/任务 14 已经
@@ -2044,15 +2046,15 @@ minidump **14.3 MB**、报告 4.7 KB 且**含源文件行号的符号化帧**
 
 - **改前的指纹**：`RT_HitCommon.slang` 的 `EvaluateHitRadiance`（RTGI / RT 反射 / DDGI 探针
   三处共用）把两项相加后**直接当辐射度返回**：
-  `albedo·E_ambient + Σ(lightColor·intensity·max(N·L,0)·atten)`。
+  $\text{albedo} \cdot E_{\text{ambient}} + \sum (\text{lightColor} \cdot \text{intensity} \cdot \max(N \cdot L, 0) \cdot \text{atten})$。
   两处量纲错：① 直接光项**没有乘命中面 albedo**；② 整体**没有 1/π**（朗伯面出射辐射度是
-  `albedo/π·E`）。三处调用点里只有 `DDGI_Trace.rgen` 在调用后除了 π（任务 17 修探针过亮时
+  $\text{albedo}/\pi \cdot E$）。三处调用点里只有 `DDGI_Trace.rgen` 在调用后除了 π（任务 17 修探针过亮时
   加的补偿，注释就写在那一行），RTGI 与 RT 反射直接当辐射度用。
 - **为什么此前看不见**：白炉测试对各源的短路分支（`if (furnace && id != SSGI) return 1`）
   让 RTGI 走不到真实路径；而 `rtgi_coupling_check` 是**相对**判据（两配置互比），1/π 的缩放
   它天然看不见。所以这一项的要求是"**修它与做判据必须同时**"。
 - **修法**（三件一起）：
-  1. 函数返回辐射度：`albedo/π·(E_ambient + E_direct)`；`DDGI_Trace.rgen` **去掉**它自己那
+  1. 函数返回辐射度：$\text{albedo}/\pi \cdot (E_{\text{ambient}} + E_{\text{direct}})$；`DDGI_Trace.rgen` **去掉**它自己那
      个重复的 1/π；三个调用点一律不再做换算（换算只发生一次、在函数内部）。
   2. 函数加**白炉分支**：白炉条件（全白环境辐射度 1 + albedo 1 + 关直接光）下 E_ambient = π
      ⇒ 返回 `albedo`；`RT_GI.rgen` 的 miss 分支在白炉下取 1。于是**命中与未命中两条路径都返回
@@ -2197,7 +2199,7 @@ minidump **14.3 MB**、报告 4.7 KB 且**含源文件行号的符号化帧**
   投影区域内（"最近命中 0.44 px"的判据被蒙过），绿盒的投影区域更小（94.8 px 对 150.6 px）
   就一个都剩不下。
 - **修法**（`Shader/GI/SSR.frag.slang`，Hi-Z 分支）：用标准**透视校正**把屏幕参数换成射线参数。
-  clip 坐标沿射线是线性的（`cA = Proj·(rayStart,1)`、`cR = Proj·(R,0)`），而 `1/w` 在屏幕
+  clip 坐标沿射线是线性的（$\text{cA} = \text{Proj} \cdot (\text{rayStart}, 1)$、$\text{cR} = \text{Proj} \cdot (R, 0)$），而 `1/w` 在屏幕
   空间线性 ⇒
   ```
   w(t)   = w0·wT / ((1−t)·wT + t·w0)
@@ -2255,15 +2257,15 @@ minidump **14.3 MB**、报告 4.7 KB 且**含源文件行号的符号化帧**
 
 **（已完成）§9.2 A/B/C** —— ✅ **全部完成**（详见 §9.2 的「A/B/C 的修复与实测」）
 
-- ✅ **A · 量纲统一**——约定 `L_o = albedo × E/π`，修 4 处（DDGI 补 `albedo/π`、
-  RTGI/RSM 补接收面 albedo、`RT_GI.rgen` 的 miss 回退补 `1/π`），并解耦 RSM 对
+- ✅ **A · 量纲统一**——约定 $L_o = \text{albedo} \times E/\pi$，修 4 处（DDGI 补 $\text{albedo}/\pi$、
+  RTGI/RSM 补接收面 albedo、`RT_GI.rgen` 的 miss 回退补 $1/\pi$），并解耦 RSM 对
   `iblIntensity` 的依赖。**单源亮度实测验证**。
 - ✅ **B · SSR 投影矩阵**——矩阵进 UBO（用 `GI_SSR.cpp` 本就声明却未使用的 binding 3），
   正/逆分开传；push constant 96B → 32B。4 处用法全部正确。
 - ✅ **C · SSR 有效性协议**——贯通**四处**：SSR.frag 写 −1、空间降噪保住符号、
   时域降噪的有效性取自本帧、合成端判定终有生产者。**顺带修好了 RT 反射侧**
   （它的 rgen 早已写 −1，但时域降噪把符号 lerp 掉了）。
-- 遗留：`SSGI-CAL` —— SSGI 整体标度是启发式，未按 `E/π` 校准，需以 PT 为参考实测标定。
+- 遗留：`SSGI-CAL` —— SSGI 整体标度是启发式，未按 $E/\pi$ 校准，需以 PT 为参考实测标定。
   原述「非 P5 前置」**已不成立**：P5 判定退场后它成为接棒项，已从「遗留」升级为
   **§10.1 的第 10 项**（见 §10.1 顺位表与 §10.2 详情）。
 
@@ -2357,10 +2359,10 @@ minidump **14.3 MB**、报告 4.7 KB 且**含源文件行号的符号化帧**
      march」——否则"只开 DDGI"的配置里根本不会建 TLAS。
 - **一个必须写下来的坑（第一版就是这样错的）**：`RT_HitCommon.slang` 的 `EvaluateHitRadiance`
   返回 `albedo × (环境 + Σ 光源强度·N·L)`，即 **albedo × 辐照度 E**；而漫反射出射辐射度是
-  `L = albedo·E/π`。探针 SH 里"命中"与"未命中"两条路径必须是**同一量纲**（后者给的是 L），
+  $L = \text{albedo} \cdot E/\pi$。探针 SH 里"命中"与"未命中"两条路径必须是**同一量纲**（后者给的是 L），
   否则**同一个探针里命中样本比未命中样本亮 π 倍**，SH 就是两个尺度的混合。第一版没除 π：
   `S_ddgi` 0.0938、DDGI/SSGI 量级比 **10.4×**，直接把 `ssgi_cal_check` 的 Test 3 打挂；
-  在 rgen 里给命中项补上 `1/π` 后 `S_ddgi` **0.0308**、比值 **3.48×**，检查恢复通过。
+  在 rgen 里给命中项补上 $1/\pi$ 后 `S_ddgi` **0.0308**、比值 **3.48×**，检查恢复通过。
   （RTGI 侧沿用同一函数且不除 π，属既有约定问题，记在 §9.2-AA 的相邻项；本任务只保证
   探针内部两条路径自洽。）
 - **实测**（Frame 120 / Sponza / 同一次采样设施；改前列为任务 14/16 的读数）
@@ -2459,15 +2461,15 @@ minidump **14.3 MB**、报告 4.7 KB 且**含源文件行号的符号化帧**
   - 光锥由**场景包围盒**拟合（新纯头 `GI/RSMFrustum.h` 的 `FitRSMFrustumToBounds`，与任务 14
     的探针网格共用同一份包围盒，每 30 帧刷新一次）；正交盒恒取方形（texel 必须方），
     Sponza 实测半宽 **2174.8**（旧硬编码的 36 倍）。
-  - 能量归一改成**解析面积**：`E/π = scale · Σ L_v·cosθ_s·cosθ_r/d²`，
-    `scale = (radiusUV·2·halfExtent)² / N`（= 每个采样点代表的世界面积 / π，π 恰好约掉）。
+  - 能量归一改成**解析面积**：$E/\pi = \text{scale} \cdot \sum L_v \cdot \cos\theta_s \cdot \cos\theta_r / d^2$，
+    $\text{scale} = (\text{radiusUV} \cdot 2 \cdot \text{halfExtent})^2 / N$（= 每个采样点代表的世界面积 / π，π 恰好约掉）。
     旧的硬编码常数与新的解析值之比 = **3942**，即这一项此前被低估了近四千倍。
     `RHI`-free 的单测锁住两条性质：**拟合出的正交盒逐角点罩住包围盒**（含"硬编码视锥一个
-    角点都罩不住"的反证），以及**尺度不变性**（场景整体缩放 k 倍时 `scale ∝ k²`、`1/d² ∝ 1/k²`，
+    角点都罩不住"的反证），以及**尺度不变性**（场景整体缩放 k 倍时 $\text{scale} \propto k^2$、$1/d^2 \propto 1/k^2$，
     估计量不变 —— 辐射度是尺度不变量）。
 - **通道约定一起改对（原 ②③④）**：RSM 从「两个附件塞三个量（`编码法线.rgb + 通量.a`）」
   改成**三个附件一个量**——位置 / 编码法线 / VPL 出射辐射度
-  `L_v = albedo·lightColor·intensity·NdotL/π`（带颜色，不再只能是灰度）。约定集中写在
+  $L_v = \text{albedo} \cdot \text{lightColor} \cdot \text{intensity} \cdot \text{NdotL}/\pi$（带颜色，不再只能是灰度）。约定集中写在
   `ShaderTypes.slang` 的「RSM 贴图通道约定」一节，四处消费者（`RSM_Indirect`、`DDGI.comp`、
   Forward 的 `PBR.frag` 内联路径、采样设施）各自读**同一个通道**，不再需要"解包知识"：
   `DDGI.comp` 此前把 `flux.rgb`（其实是编码法线）当辐射度读，现在读 `radiance.rgb`。
@@ -2478,12 +2480,12 @@ minidump **14.3 MB**、报告 4.7 KB 且**含源文件行号的符号化帧**
   | `rsm_pos` 覆盖率 | 0%（只剩清除值） | **53.36%** |
   | `rsm_rad` 非零占比 / 均值 | 0% / 0 | **53.31%** / **0.205** |
   | `rsm_indirect` 非零占比 / 均值 / 最大 | 0% / 0 / 0 | **54.62%** / **2.01e-4** / **0.374** |
-  | `S_rsm`（HDR 做差均值） | 0（噪声底） | **4.28e-5**，与 `E/π × albedo` 逐像素相关 **0.966** |
+  | `S_rsm`（HDR 做差均值） | 0（噪声底） | **4.28e-5**，与 $E/\pi \times \text{albedo}$ 逐像素相关 **0.966** |
   | `RSM` / `RSM_Indirect` 耗时 | 0.086 / 0.108 ms | **0.147 / 0.126 ms** |
 
 - **量级为什么仍然只有屏幕均值的 0.06%**（这一条要写清楚，否则下一个人会以为没修好）：
   用落盘的 RSM 图在 CPU 上重算同一个求和（16 点 Poisson 盘，采样盘半径 0.0125 UV）得到
-  `E/π` 均值 **1.2e-3**，但**中位数为 0、只有 17% 的接收点非零** —— 光源在上方时，RSM 里
+  $E/\pi$ 均值 **1.2e-3**，但**中位数为 0、只有 17% 的接收点非零** —— 光源在上方时，RSM 里
   可见的几乎都是**同朝向（朝上）的面**，接收点与采样到的 VPL 大多**共面**，两个余弦项同时趋零。
   也就是说这是**估计量本身**的性质（2.5D RSM + 单个小采样盘），不是单位错误：把采样盘半径
   从 0.0125 扫到 0.125（6.4 → 64 texel）均值只在 0.8e-3 ~ 2.0e-3 之间波动（同样非零占比
@@ -2616,7 +2618,7 @@ cmake --build Build --config Release --target 06.GILab -j 8
 | `slangc -reflection-json`（§9.2-AF 的排查手法） | **查 C++/Slang 共享结构体的真实布局**：`slangc <shader>.slang -target spirv -entry <entry> -stage <stage> -I Engine/Shader/Shaders -o <tmp>.spv -reflection-json <out>.json`，然后在 JSON 里按字段名找 `binding.offset`。**为什么要用它**：共享结构体是两端各自按自己的规则布局的，C++ 侧的 `sizeof`/`offsetof` 只能证明 C++ 自洽 —— 本次 `GIBlendParams` 加了 `float4x4` 之后 `rsmValid` 在着色器里恒读 0，就是靠它才看到 Slang 把它放在 368 而 C++ 写在 320（根因：std140 下**非 float4 数组**的元素步长是 16，`float[3]` 占 48 而非 12）。规则：共享结构体里的填充/数组一律用 `float4`（或 `float4x4`），并在 C++ 侧用 `static_assert(sizeof)` + `offsetof` 钉住 |
 | `Tools/gi/ssr_check.ps1` + `ssr_check.py` | **SSR 检查**（任务 25 / §9.2-W 的回归测试），四例：`specular={SSR}` 走 Hi-Z、`specular={SSR}` 走线性 march（`ssr_use_hiz=0`）、`specular={IBL}`、`specular={IBL,SSR}`。三条判定——① Hi-Z 的有效像素（输出 alpha > 0）≥ 5%（改前恰为 0）；② Hi-Z 的命中最少是线性 march 的一半（任务 35 修好 Hi-Z 的透视校正之后实测 26.86% 对 46.31% ⇒ **0.58 倍**；改前是 1.39 倍，但那个数字是错误 march 的假命中抬起来的，见 §9.2-AE）；③ 把 SSR 加进已有 IBL 的镜面栈后 HDR 必须变化（改前逐像素相同，现在 +1.335%）。**它取的是 `prov4_spec_raw`**（dump 按 Provider 注册序命名：0=AO、1=IBL、2=RSM、3=SSGI、4=SSR、5=DDGI，之后是四个 RT 效果），脚本会把实际用的文件打印出来，注册序变了不会静默读错源。**注意这三条都是"内部一致性"判据**：反射的方向错、Hi-Z 漏掉一个反射，它们全都看不见（任务 32 用平面镜解析真值才发现）⇒ 位置类判据见下一条 |
 | `Tools/gi/ssr_mirror_check.ps1` + `ssr_mirror_check.py` | **SSR 平面镜解析对照**（任务 32 / §9.2-W 的后续判据）：测试场景里放一块地面镜与两个已知立方体（`HE_SSR_MIRROR=1`），把物体中心按镜面**镜像**后再经**同一个**相机投影，得到反射**该出现**的像素。四个 run —— 线性 march 细步（`base`，断言在这里）、同样参数但相机平移 40（`jitter`，反射必须跟着几何走）、米制历史参数（`legacy`，负对照，必须几乎找不到反射）、默认 Hi-Z（`hiz`，只报告）。**先自检相机模型**：盒心投影到"最近的自身像素"必须 ≤ 8 px（实测 0.49 / 0.18 px），否则"反射错了"可能是参照错了。判定：反射落点 ≤ 6 px（实测 0.44 / 0.35 px）、远离预测的物体色像素 ≤ 5%（实测 0.00%）、抖动位移与解析位移差 ≤ 5 px（实测 2.39 px）、场景尺度 vs 米制的物体色像素数 ≥ 10×（实测 30676 vs 2432）。**断言两条路径都成立**（任务 35 起）：解析判据同时钉线性回退与**默认 Hi-Z** 路径 —— 两者都必须把红/绿反射放在预测像素 6 px 内、像素数不少于线性参照的一半、远像素 ≤5%（实测 Hi-Z 0.44 / 0.35 px、30137 / 15847 像素、0.00%）；另加**步数断言**（Hi-Z 的 `ssr_max_steps` 不超过线性的 60%，实测 256 对 600）与 **pass 耗时报告**（`HE_PASS_TIMING=1`，实测 4.256 ms 对 4.505 ms —— 任务 25 的"快 3.2 倍"已被更正，见 §9.2-AE）。**运行时序注意**：不要在 `cmake --build` 还在重新链接 exe 时并行启动本脚本 —— 会拿到"链接中的 exe"（实测 SSR 输出 14.4 万像素"有效"但颜色全为 0，jitter 判定假失败） |
-| `Tools/gi/rsm_indirect_check.ps1` + `rsm_indirect_check.py` | **RSM 链路检查**（任务 16 建立、任务 30 扩到 7 条判定：`diffuse={RSM}` 与空漫反射栈两例，都带 `HE_PASS_TIMING=1`）——① 半分辨率 `RSM_Indirect` pass 在跑且耗时非零（任务 16 的全部要点）；② RSM 光栅化 pass 在；③~⑥ **任务 30 新增的逐级产出判定**：`rsm_pos` 覆盖率 > 20%、`rsm_nrm` 覆盖与之一致、`rsm_rad` 非零占比 > 20% 且均值 > 0.005、`rsm_indirect` 非零占比 > 20%（这四条在 9.2-AA 存续期间**全部必然失败**：三张附件里只有清除值）；⑦ `S_rsm > 1e-6`（源必须到达 HDR，不设上界——见下）。**为什么只设下界不设期望值**：本场景里 RSM 的 `E/π` 中位数为 0、只有约 17% 的接收点非零（光源在上方时 RSM 里可见的几乎都是同朝向的面，接收点与采样到的 VPL 大多共面 ⇒ 两个余弦同时趋零），量级是**估计量**的性质而不是单位错误，把某个期望值写成断言等于把取样图案的偶然性固化成判据。**第一条原本是耗时阈值，任务 17 期间被改成只报告**：本机的逐 pass GPU 耗时跨会话整体漂移（同一二进制连跑两次 `Lighting(rsm)` 读到 0.774 与 1.105 ms），任何绝对阈值都会判翻；耗时证据留在 §10.2 任务 16（改前 0.882 / 改后 0.513 ms，带 `GB_Clear` 作对照）。**镜面栈必须非空**（否则触发 §9.2-X 的 463 亮点，把要看的量淹掉） |
+| `Tools/gi/rsm_indirect_check.ps1` + `rsm_indirect_check.py` | **RSM 链路检查**（任务 16 建立、任务 30 扩到 7 条判定：`diffuse={RSM}` 与空漫反射栈两例，都带 `HE_PASS_TIMING=1`）——① 半分辨率 `RSM_Indirect` pass 在跑且耗时非零（任务 16 的全部要点）；② RSM 光栅化 pass 在；③~⑥ **任务 30 新增的逐级产出判定**：`rsm_pos` 覆盖率 > 20%、`rsm_nrm` 覆盖与之一致、`rsm_rad` 非零占比 > 20% 且均值 > 0.005、`rsm_indirect` 非零占比 > 20%（这四条在 9.2-AA 存续期间**全部必然失败**：三张附件里只有清除值）；⑦ `S_rsm > 1e-6`（源必须到达 HDR，不设上界——见下）。**为什么只设下界不设期望值**：本场景里 RSM 的 $E/\pi$ 中位数为 0、只有约 17% 的接收点非零（光源在上方时 RSM 里可见的几乎都是同朝向的面，接收点与采样到的 VPL 大多共面 ⇒ 两个余弦同时趋零），量级是**估计量**的性质而不是单位错误，把某个期望值写成断言等于把取样图案的偶然性固化成判据。**第一条原本是耗时阈值，任务 17 期间被改成只报告**：本机的逐 pass GPU 耗时跨会话整体漂移（同一二进制连跑两次 `Lighting(rsm)` 读到 0.774 与 1.105 ms），任何绝对阈值都会判翻；耗时证据留在 §10.2 任务 16（改前 0.882 / 改后 0.513 ms，带 `GB_Clear` 作对照）。**镜面栈必须非空**（否则触发 §9.2-X 的 463 亮点，把要看的量淹掉） |
 | `Tools/gi/vk_layer_settings.txt` | 校验层设置（配 `VK_LAYER_SETTINGS_PATH=Tools/gi`）：关闭重复消息上限，得到违规**真实次数**。**注意计数随该设置变化**——关掉去重后同一次运行为 `75/75/81`，不设该文件则为 `49/49/51`；两种都稳定，但**不可互相比较**（§11.3.1 方法论第 6 条） |
 
 采样时有两个易踩的坑：
