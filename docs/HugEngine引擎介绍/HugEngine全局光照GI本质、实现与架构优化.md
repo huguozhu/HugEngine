@@ -106,20 +106,20 @@
 
 渲染方程（Kajiya 1986）：
 
-```
-L_o(p, ω_o) = L_e(p, ω_o) + ∫_Ω f_r(p, ω_i, ω_o) · L_i(p, ω_i) · cosθ_i dω_i
-```
+$$
+L_o(p,\omega_o) \;=\; L_e(p,\omega_o) \;+\;
+\int_{\Omega} f_r(p,\omega_i,\omega_o)\, L_i(p,\omega_i)\, \cos\theta_i \,\mathrm{d}\omega_i
+$$
 
-关键在于 **`L_i` 本身不是已知量**——它等于「从 ω_i 方向能看到的某个点 q 的出射光」，而 q 的出射光又依赖 q 自己的入射光……于是这是无限递归。它的形式解是 **Neumann 级数**：
+关键在于 **$L_i$ 本身不是已知量**——它等于「从 $\omega_i$ 方向能看到的某个点 $q$ 的出射光」，而 $q$ 的出射光又依赖 $q$ 自己的入射光……于是这是无限递归。它的形式解是 **Neumann 级数**（$T$ 为一次散射传输算子）：
 
-```
-L = L_e  +  T·L_e  +  T²·L_e  +  T³·L_e  +  ...
-     零次反弹   一次反弹    二次反弹    ...
-```
+$$
+L \;=\; L_e \;+\; T L_e \;+\; T^2 L_e \;+\; T^3 L_e \;+\; \cdots
+$$
 
-- 直接光照 = `L_e`（零次反弹）；
+- 直接光照 = $L_e$（零次反弹）；
 - 环境光 / IBL ≈ 无穷次反弹被折叠成一张环境图；
-- SSGI / RSM / RTGI = 只算 `T·L_e`（一次反弹）；
+- SSGI / RSM / RTGI = 只算 $T L_e$（一次反弹）；
 - 路径追踪 = 用 Monte Carlo 一直采样到收敛。
 
 所以「做几 bounce」不是工程参数的偏好，而是在**决定截断这个级数的第几项**。这解释了为什么实时 GI 几乎都停在 1 次反弹：级数项贡献递减，但每多一项代价翻倍。
@@ -224,17 +224,20 @@ enum class GIMode : u8 {
 
 ### 2.2.1 原理：Split-Sum 近似（参数唯一出处）
 
-PBR 的镜面 IBL 积分：
+PBR 的镜面 IBL 积分（着色器里 $N\!\cdot\!L$、$N\!\cdot\!V$ 记作 `NdotL`、`NdotV`）：
 
-```
-L_spec = ∫_Ω  L_i(L) · D·F·G / (4·NdotL·NdotV) · NdotL  dω
-```
+$$
+L_{\mathrm{spec}} \;=\; \int_{\Omega} L_i(L)\;
+\frac{D\,F\,G}{4\,(N\!\cdot\!L)(N\!\cdot\!V)}\,(N\!\cdot\!L)\;\mathrm{d}\omega
+$$
 
 直接实时计算不可行，HugEngine 采用 UE4 的 **Split-Sum（分裂求和）近似**，把积分拆成两个可预计算的独立部分相乘：
 
-```
-L_spec ≈ (预滤波环境贴图) × (BRDF 积分 LUT)
-```
+$$
+L_{\mathrm{spec}} \;\approx\; F_{\mathrm{prefilter}}(r)\;\times\;B(N\!\cdot\!V,\;r)
+$$
+
+（$F_{\mathrm{prefilter}}$：预滤波环境贴图，按 roughness $r$ 选取对应 mip；$B$：BRDF 积分查找表。）
 
 其中漫反射部分用一张低分辨率的辐照度图（`Irradiance Map`）近似。因此 `GI_IBL` 从天空盒 Cubemap 预生成三张图：
 
@@ -329,8 +332,8 @@ float G_Smith(float NdotV, float NdotL, float roughness) {
 // 积分：A += (1-Fc)·G_Vis, B += Fc·G_Vis, Fc = (1-VdotH)^5（Fresnel-Schlick）
 ```
 
-> **注意**：`a = roughness * roughness` 之后再取 `k = a * a * 0.5`，展开即 `k = roughness⁴/2`；
-> 这比 Karis / UE4 IBL 的标准 `k = roughness²/2` 多平方了一次。原始分析已把它标为**存疑点**，
+> **注意**：`a = roughness * roughness` 之后再取 `k = a * a * 0.5`，展开即 $k = \mathrm{roughness}^4/2$；
+> 这比 Karis / UE4 IBL 的标准 $k = \mathrm{roughness}^2/2$ 多平方了一次。原始分析已把它标为**存疑点**，
 > 详见 §4.2 与 §4.3 的状态标注。
 
 ### 2.2.4 消费方式
@@ -356,11 +359,17 @@ return u_PrefilterMap.SampleLevel(u_IBLSampler, R,
 
 ### 2.3.1 原理
 
-屏幕空间间接漫反射：对每个像素在**法线半球内采样 N 个方向**，沿方向在深度缓冲中做可见性检测，把可见采样点处的**入射辐射度** `L_in` 按余弦加权平均累加，得到 `Σ(L_in·cosθ)/Σcosθ`。因为 `∫cosθdω = π`，该估计量**精确等于 `E/π`**（归一化常数是解析值，不需要经验增益标定）。`L_in` 取自**前帧 HDR**（`GIRadianceHistory`），既解决因果（本 pass 排在 Lighting 之前）又构成多次弹射的时域反馈。这是一种廉价的单次反弹近似，只能利用屏幕内可见信息。
+屏幕空间间接漫反射：对每个像素在**法线半球内采样 $N$ 个方向**，沿方向在深度缓冲中做可见性检测，把可见采样点处的**入射辐射度** $L_{\mathrm{in}}$（着色器里记作 `L_in`）按余弦加权平均累加：
+
+$$
+\frac{E}{\pi} \;\approx\; \frac{\sum_i L_{\mathrm{in},i}\,\cos\theta_i}{\sum_i \cos\theta_i}
+$$
+
+因为 $\int_{\Omega} \cos\theta \,\mathrm{d}\omega = \pi$，该估计量**精确等于 $E/\pi$**（归一化常数是解析值，不需要经验增益标定）。$L_{\mathrm{in}}$ 取自**前帧 HDR**（`GIRadianceHistory`），既解决因果（本 pass 排在 Lighting 之前）又构成多次弹射的时域反馈。这是一种廉价的单次反弹近似，只能利用屏幕内可见信息。
 
 ### 2.3.2 采样核与参数传递（参数唯一出处）
 
-**采样核**：CPU 侧用固定种子（`gen(42)`）预生成 32 个半球方向（`kSSGIKernelSize = 32`），并按索引距离分级（`scale = mix(0.1, 1.0, i²/N²)`），实现近密远疏；实际使用的采样数由 `sampleCount` 决定（默认 **16**）；半径默认 **1.0**（`Engine/Render/GI/GI_SSGI.h:64-65`）：
+**采样核**：CPU 侧用固定种子（`gen(42)`）预生成 32 个半球方向（`kSSGIKernelSize = 32`），并按索引距离分级（`scale = mix(0.1, 1.0, i^2 / N^2)`），实现近密远疏；实际使用的采样数由 `sampleCount` 决定（默认 **16**）；半径默认 **1.0**（`Engine/Render/GI/GI_SSGI.h:64-65`）：
 
 ```cpp
 // Engine/Render/GI/GI_SSGI.cpp:21-36 —— 半球采样核生成（半径按索引平方分级）
@@ -468,7 +477,10 @@ if ((rayPos.z - rpZ) * R.z > 0.0) break;   // 已越过该处几何 → 早退�
 
 **关键点**：
 
-- **透视校正**：屏幕段的参数 `t` 不是射线参数，`1/w` 才在屏幕空间线性；不做校正时实测偏差可达命中容差的 100 倍以上（反射整片丢失）。代码与推导见 `SSR.frag.slang:141-170`；
+- **透视校正**：屏幕段的参数 $t$ 不是射线参数，$1/w$ 才在屏幕空间线性。校正式为
+  $w(t)=\dfrac{w_0 w_T}{(1-t)w_T+t w_0}$、$\tau(t)=\dfrac{t\,\text{worldLen}\,w_0}{(1-t)w_T+t w_0}$
+  （$w_0/w_T/\text{worldLen}$ 即代码里的 `w0` / `wT` / `worldLen`）；
+  不做校正时实测偏差可达命中容差的 100 倍以上（反射整片丢失）。代码与推导见 `SSR.frag.slang:141-170`；
 - `thickness` 厚度带用于容忍浮点误差（世界空间量纲）；
 - NR 与深度比较都在 **view 空间**，故 GBuffer 的**世界空间**法线必须先经 `u_View` 转成 view 空间再 `reflect`；
 - 命中返回 `alpha = +1`、未命中返回 `alpha = -1`（`SSR.frag.slang:73/104/116/124/238` 多处返回 `float4(0,0,0,-1)`），合成端据此跳过无效源；
@@ -496,6 +508,14 @@ Reflective Shadow Maps：从**光源视角**渲染一次场景，把每个 texel
 | 2（`RSM_Radiance`）| RGBA16F | 该 VPL 的**出射辐射度** `L_v` |
 
 RSM 图分辨率为 **512²**（`GI_RSM.cpp` 的纹理创建；与第三、四部分提到的 `512²×3` 同源）。
+
+每个 VPL 写入 MRT2 的**出射辐射度**（Lambertian 面的一次反射）：
+
+$$
+L_v \;=\; \frac{\rho_v}{\pi}\,\bigl(\text{lightColor}\cdot\text{intensity}\bigr)\,\max(N\!\cdot\!L,\;0)
+$$
+
+其中 $\rho_v$ 是该 VPL 的漫反射率（着色器里由 push constant `vplAlbedo` 传入），$N$ 为 VPL 表面法线、$L$ 为指向光源的单位向量。
 
 ```hlsl
 // RSM_Generate.frag.slang:66-69 —— VPL 出射辐射度 = albedo · 光源颜色 · 强度 · cos / π
@@ -577,7 +597,7 @@ float3 FibonacciSphere(int i, int n) {
 radiance = u_IBLIrradiance.SampleLevel(u_LinearSampler, dir, 0).rgb;
 ```
 
-3. **SH 投影**：把辐射度投影到 **4 个 SH 系数（band 0/1）**，蒙特卡洛缩放因子 `4π/N × intensity`；
+3. **SH 投影**：把辐射度投影到 **4 个 SH 系数（band 0/1）**，蒙特卡洛缩放因子 $\dfrac{4\pi}{N}\times\text{intensity}$；
 
 ```hlsl
 // DDGI.comp.slang:72-76 —— 方向投影为 4 个 SH 系数（bands 0/1）
@@ -611,7 +631,7 @@ float3 gridCoord = (worldPos - u_DDGIGridOrigin.xyz) / u_DDGIGridSize.w;   // .w
 // 每个探针读取 4 个 SH 系数，用 EvalDDGI_SH(sh, normal) 评估辐照度（A_l 卷积系数在评估端施加）
 ```
 
-**Lambert 卷积在评估端施加**（`RT_DDGI.slang:25-38`）：`kDDGI_SH_A0 = 0.8862269254527580`、`kDDGI_SH_A1 = 1.0233267079464886`，`EvalDDGI_SH` 里 `E(n) = Σ_l A_l·L_lm·Y_lm(n)`，最后 `max(result, 0)` 做负值截断。
+**Lambert 卷积在评估端施加**（`RT_DDGI.slang:25-38`）：`kDDGI_SH_A0 = 0.8862269254527580`、`kDDGI_SH_A1 = 1.0233267079464886`，`EvalDDGI_SH` 里 $E(n)=\sum_l A_l\,L_{lm}\,Y_{lm}(n)$，最后 `max(result, 0)` 做负值截断。
 
 消费点（`DeferredLighting.frag.slang` 的 `SampleDiffuseSource(GISOURCE_DDGI, …)`）：
 
@@ -1036,7 +1056,7 @@ color += emissive;
 |---|---|---|---|---|---|
 | **IBL** | 环境辐照度 + 预滤波 + BRDF LUT（§2.2.1）| diffuse + specular | 图集 | 仅**脏时**烘焙（首次约 5 ms，之后 0） | 恒注册、内部 `IsDirty()` 早退 |
 | **RSM** | 单次反弹 VPL（§2.5.2 / §2.5.3）| diffuse | RSM 三附件（§2.5.2）；间接光半分辨率 | RSM 光栅 ~0.14 ms + 间接 ~0.14 ms | 光源视锥按**场景包围盒**拟合（固定、视角无关） |
-| **SSGI** | `Σ(L_in·cosθ)/Σcosθ`，解析上等于 `E/π`（§2.3.2）| diffuse | 全/半分辨率（`halfRes`） | ~0.44 ms（默认采样数；64 采样时 1.27 ms） | 需前帧 HDR 作 `L_in`；噪声较高 |
+| **SSGI** | $\sum_i L_{\mathrm{in},i}\cos\theta_i / \sum_i \cos\theta_i$，解析上等于 $E/\pi$（§2.3.2）| diffuse | 全/半分辨率（`halfRes`） | ~0.44 ms（默认采样数；64 采样时 1.27 ms） | 需前帧 HDR 作 `L_in`；噪声较高 |
 | **SSR** | Hi-Z 层次 march + 线性回退（§2.4.2）| specular | 全/半分辨率 | ~4.3 ms（场景尺度参数、256 步） | 只能命中深度图里的**可见面**；`alpha<0` 协议 |
 | **SSAO / GTAO** | 屏幕空间遮蔽（GTAO：地平线切片 + 解析积分；参数见 §3.7.7）| AO | 全/半分辨率 | — | 同一 Provider 双模式；半分辨率时 AO/Blur 纹理均降半（无独立降噪链） |
 | **DDGI** | 探针网格二阶 SH（§2.6.2 / §2.6.3）| diffuse | 探针场（拟合后 192/1408/9408 探针） | 探针更新 ~0.019 ms + 可选光追 march | 网格按场景包围盒拟合；网格覆盖置信度；可 `updateStride` 时间分摊 |
@@ -1059,11 +1079,11 @@ color += emissive;
 
 - 三张附件：**世界位置** / **编码法线** / **VPL 出射辐射度**（"一个附件一个量"，此前两个量
   挤在一张图里导致 DDGI 把编码法线当辐射度读，见 §2.5.2 与 `ShaderTypes.slang:65-69`）。
-- 辐射度 `L_v = albedo·lightColor·intensity·NdotL/π`（`RSM_Generate.frag.slang:67-68`），不再是灰度标量。
+- 辐射度 $L_v = \mathrm{albedo}\cdot\text{lightColor}\cdot\text{intensity}\cdot(N\!\cdot\!L)/\pi$（`RSM_Generate.frag.slang:67-68`），不再是灰度标量。
 - **光源视锥按场景包围盒拟合**（`GI/RSMFrustum.h:52` 的 `FitRSMFrustumToBounds`，纯几何 + 单测）：固定、不随相机；
   帧图每 30 帧重算包围盒（`DeferredPipeline_FrameGraph.cpp:572`）。旧实现硬编码 `sceneCenter=(0,3,0)/radius=60`，
   在一个 3720 单位宽的场景里只覆盖 1/60（`GI_DDGI.h:126-128` 记录了这个量级）。
-- **VPL 采样面积由光锥推出**：`scale = (radiusUV·2·halfExtent)²/N`（`RSMFrustum.h:143-160`），
+- **VPL 采样面积由光锥推出**：$\text{scale} = (\text{radiusUV}\cdot 2\cdot\text{halfExtent})^2/N$（`RSMFrustum.h:143-160`），
   替代旧经验常数 `RSM_VPL_ENERGY = 0.046875`（两者差 3942 倍，`RSM_Indirect.frag.slang:20-26`）。
 - **间接光在半分辨率独立 pass**（`RSM_Indirect`，`kDownscale = 2`）：此前它在 Lighting 里逐全分辨率
   像素做 VPL 求和，独占约 0.45 ms（Lighting 含 RSM 0.882 ms 对不含 0.433 ms）。搬走后 Lighting
@@ -1078,7 +1098,7 @@ color += emissive;
 
 ### 3.7.3 SSGI（屏幕空间间接漫反射）
 
-- 估计量：`Σ(L_in·cosθ)/Σcosθ`，由 `∫cosθdω = π` 可知它**精确等于 `E/π`** —— 归一化常数是解析值 1，
+- 估计量：$\sum_i L_{\mathrm{in},i}\cos\theta_i / \sum_i \cos\theta_i$，由 $\int_{\Omega}\cos\theta\,\mathrm{d}\omega = \pi$ 可知它**精确等于 $E/\pi$** —— 归一化常数是解析值 1，
   不需要"以 PT 为参考标定一个增益"。
 - `L_in` 取**前帧 HDR**（`GIRadianceHistory`，见 §2.6.5）；消费者通过 `NeedsRadianceHistory()` 声明，帧图据此
   门控 `CaptureRadiance`。
@@ -1126,7 +1146,7 @@ color += emissive;
 
 - 共用 `RTEffectPass` 基类（RT 管线 + SBT + set0 生命周期）与 `RTEffectProvider`（参数化四种效果）。
 - **命中点辐射度共用一份**（`RT_HitCommon.slang::EvaluateHitRadiance`）：
-  `L_o = albedo/π·(E_ambient + E_direct)` —— 两处量纲（命中面 albedo、1/π）在多个调用点必须一致。
+  $L_o = \mathrm{albedo}/\pi\cdot(E_{\mathrm{ambient}} + E_{\mathrm{direct}})$ —— 两处量纲（命中面 albedo、1/π）在多个调用点必须一致。
   白炉下返回理想值（命中与未命中两条路径都返回），使白炉读数**与场景几何无关、恒等于 1**。
 - 有效性：反射类写 `alpha = -1` 表示本条无效；RTGI 输出 1/4 分辨率（默认，`RTGIPass.h:40`）。
 - CT 常量（`GPUShadowData.lightViewProj[3]` / `GPULight`）与着色器逐字段一致（有 `static_assert` 尺寸，`Pipeline/Material.h:50-51`）。
@@ -1257,7 +1277,7 @@ SSAO/GTAO 的 AO 纹理仍在半分辨率直接线性升采样（其 `SSAO_Blur`
    `DeferredPipeline::Initialize` 里注册；声明 `GetDiffuse/Specular/AOOutput()`、
    `NeedsRadianceHistory()`、附属降噪链。
 4. **合成端**：`DeferredLighting.frag.slang` 的 `SampleDiffuseSource` / `SampleSpecularSource`
-   加一个 `case`（**必须返回已乘接收面 albedo 的 `E/π`**，或完整镜面辐射度，见 §3.6.1）；
+   加一个 `case`（**必须返回已乘接收面 albedo 的 $E/\pi$**，或完整镜面辐射度，见 §3.6.1）；
    需要"本条无效"就在 `SourceIsValid()` 里加一行（`alpha < 0` 协议）。
 5. **帧图**：只需在 Provider 遍历里被注册（`Offscreen`/`Compute`/`Custom` 三种形状各有一处循环），
    无需改 UBO 结构或合成循环。
@@ -1324,7 +1344,7 @@ SSAO/GTAO 的 AO 纹理仍在半分辨率直接线性升采样（其 `SSAO_Blur`
 
 ## 4.2 各技术现状要点
 
-- **IBL**：三张产物的尺寸/格式与 37 个 offscreen pass 见 §2.2.1 / §2.2.2，仅在 `m_Dirty` 时重建。⚠️ **BRDF LUT 的 Smith `k` 值存疑**：`IBL_BRDF_LUT.frag.slang:49-50` 是 `a = roughness*roughness; k = a*a*0.5;`，实际展开为 `k = roughness⁴/2`，比 Karis/UE4 IBL 标准的 `k = roughness²/2`（`a=roughness²` 时 `k=a/2`）**多平方了一次**。高粗糙度下几何遮蔽项偏小、间接高光偏亮，建议对照参考实现核查是否为笔误。（本条**已复核行号与代码**；是否为笔误仍待参考实现比对。）
+- **IBL**：三张产物的尺寸/格式与 37 个 offscreen pass 见 §2.2.1 / §2.2.2，仅在 `m_Dirty` 时重建。⚠️ **BRDF LUT 的 Smith `k` 值存疑**：`IBL_BRDF_LUT.frag.slang:49-50` 是 `a = roughness*roughness; k = a*a*0.5;`，实际展开为 $k = \mathrm{roughness}^4/2$，比 Karis/UE4 IBL 标准的 $k = \mathrm{roughness}^2/2$（$a=\mathrm{roughness}^2$ 时 $k=a/2$）**多平方了一次**。高粗糙度下几何遮蔽项偏小、间接高光偏亮，建议对照参考实现核查是否为笔误。（本条**已复核行号与代码**；是否为笔误仍待参考实现比对。）
 - **SSGI**：采样核 / 采样数 / 半径 / UBO 见 §2.3.2；`halfRes` 可半分辨率；降噪链 `[Denoise@信号分辨率] → [Upscale]`（步骤 34 起半分辨率也降噪，§3.9.2）。
 - **SSR**：默认 **Hi-Z 层次 march**（屏幕空间 DDA，`useHiZ = true`），另有线性回退路径；march 参数（场景尺度推导）见 §2.4.2；半分辨率 + 空间降噪（`SpatialDenoiseAux`）；**无时域重投影**。
 - **RSM**：光源 POV **三 MRT** 的通道约定见 §2.5.2；消费端为**半分辨率独立 pass**（`RSM_Indirect`，16 点 Poisson 盘），VPL 采样缩放由光锥半宽推出（`RSMVplScale`），不再是经验常数（§2.5.3）。
@@ -1425,7 +1445,7 @@ SSGI 的采样核本身确实是"固定种子生成一次的常量"（`static st
 
 **12. DDGI 与 RTGI 双重计入** —— ✅ **已修复（按"源独立"处理）**
 
-**现状**：`RT_GI.rgen.slang` 的 miss 分支在 **DDGI 也在漫反射层栈**时贡献 0（`RT_GI.rgen.slang:131`）——`RTEffectProvider::SetDDGIInStack` 把"DDGI 是否自己就是层栈源"写进 push constant 的 `flags` bit1（`RTProvider.h:116`、`RTGIPass.cpp:176-177`），rgen 据此决定是否回退 `SampleDDGI`（且回退时要按 `E/π = L` 换算量纲）。归一化合成因此不再把同一份 DDGI 信息按两个槽位的权重计入。同时 RT 输出纹理在本帧产出时**真的绑给了 Lighting**（`in.rtGI = rtGITex`，`DeferredPipeline_FrameGraph.cpp:1476`），"RT 纹理恒 nullptr、缺陷未激活"的描述已不成立。
+**现状**：`RT_GI.rgen.slang` 的 miss 分支在 **DDGI 也在漫反射层栈**时贡献 0（`RT_GI.rgen.slang:131`）——`RTEffectProvider::SetDDGIInStack` 把"DDGI 是否自己就是层栈源"写进 push constant 的 `flags` bit1（`RTProvider.h:116`、`RTGIPass.cpp:176-177`），rgen 据此决定是否回退 `SampleDDGI`（且回退时要按 $E/\pi = L$ 换算量纲）。归一化合成因此不再把同一份 DDGI 信息按两个槽位的权重计入。同时 RT 输出纹理在本帧产出时**真的绑给了 Lighting**（`in.rtGI = rtGITex`，`DeferredPipeline_FrameGraph.cpp:1476`），"RT 纹理恒 nullptr、缺陷未激活"的描述已不成立。
 
 **13. DDGI 探针"屏幕空间采样"导致屏幕外探针永不更新** —— ✅ **已移除屏幕空间依赖**
 
@@ -1433,7 +1453,7 @@ SSGI 的采样核本身确实是"固定种子生成一次的常量"（`static st
 
 **14. DDGI SH 投影缺余弦加权 + 评估端 `max(result,0)` 破坏重建** —— **一半已按标准做法处理**
 
-**现状**：探针投影得到的是**辐射度** SH（`L_lm = 4π/N·Σ L·Y`，不含 cos），Lambert 余弦波瓣的卷积系数 `A_l` 在**评估端**施加（`RT_DDGI.slang:25-26` 的 `kDDGI_SH_A0` / `kDDGI_SH_A1`，`EvalDDGI_SH` 里 `E(n) = Σ_l A_l·L_lm·Y_lm(n)`）——这已是 Ramamoorthi & Hanrahan 的标准形式：不能在投影时乘 cos，因为 cos 依赖评估方向（法线），而探针存储时方向未知。**仍保留**的是评估端的 `max(result, 0)` 负值截断（`RT_DDGI.slang:38`，二阶表示的振铃防护）；若要进一步抑制，可改为 SH 窗口化（代码注释里已写明这条升级路径）。另：band 2 已在步骤 30 随 Radiance Cache 的统一表示（二阶 4 系数）一并移除。
+**现状**：探针投影得到的是**辐射度** SH（$L_{lm} = \dfrac{4\pi}{N}\sum L\,Y$，不含 cos），Lambert 余弦波瓣的卷积系数 $A_l$ 在**评估端**施加（`RT_DDGI.slang:25-26` 的 `kDDGI_SH_A0` / `kDDGI_SH_A1`，`EvalDDGI_SH` 里 $E(n)=\sum_l A_l\,L_{lm}\,Y_{lm}(n)$）——这已是 Ramamoorthi & Hanrahan 的标准形式：不能在投影时乘 cos，因为 cos 依赖评估方向（法线），而探针存储时方向未知。**仍保留**的是评估端的 `max(result, 0)` 负值截断（`RT_DDGI.slang:38`，二阶表示的振铃防护）；若要进一步抑制，可改为 SH 窗口化（代码注释里已写明这条升级路径）。另：band 2 已在步骤 30 随 Radiance Cache 的统一表示（二阶 4 系数）一并移除。
 
 **15. IBL 生成是光栅化全屏三角形，可用 Compute 一步替代** —— **仍然成立**
 
@@ -2290,7 +2310,7 @@ GIConfig（数据）
 
 以下各条**没有**在源码或实测中亲自确认，正文相应处也已就地标注：
 
-1. `IBL_BRDF_LUT.frag.slang` 的 `k = roughness⁴/2` **是否为笔误** —— 代码与行号已确认，但"标准应为 `roughness²/2`"缺少可引用的参考实现比对（本仓库内无第三方源码可对照）。
+1. `IBL_BRDF_LUT.frag.slang` 的 $k = \mathrm{roughness}^4/2$ **是否为笔误** —— 代码与行号已确认，但"标准应为 $\mathrm{roughness}^2/2$"缺少可引用的参考实现比对（本仓库内无第三方源码可对照）。
 2. `docs/未实现功能/全流程RayTracing渲染实施规划.md` —— 该路径**当前仓库不存在**，无法核对被引内容。
 3. `RHI/CommandList.h` 中 `BeginOffscreenPassMRT` 清除值契约注释的**具体行号**未逐字核对（契约内容本身已在正文说明）。
 4. IBL BRDF LUT 纹理创建处的**格式常量行号**（512×512 RG16F）未在 `GI_IBL.cpp` 中定位；容量数值已确认。
