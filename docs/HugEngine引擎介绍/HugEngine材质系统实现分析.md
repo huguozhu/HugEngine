@@ -76,11 +76,11 @@ MeshComponent(CPU 字段)
 
 | MRT | 格式 | 内容 | 材质参数来源 | 清屏值 |
 |---|---|---|---|---|
-| 0 | RGBA16F | albedo.rgb + metallic | `baseColorFactor × BaseColor` 贴图；`metallicFactor × MR.b` | a=1.0 |
-| 1 | RGBA16F | normal×0.5+0.5 + roughness | 几何法线 + Normal 贴图（`N + t×0.5`）；`roughnessFactor × MR.g`，clamp[0.04,1] | a=1.0 |
-| 2 | RGBA16F | emissive.rgb + ao | `emissiveFactor.rgb`；`aoFactor × Occlusion.r` | a=1.0 |
-| 3 | RG16F | velocity = currUV−prevUV | **非材质**（TAA / 运动模糊） | 0 |
-| 4 | RGBA16F | worldPos.xyz + **dielectricF0** | `ior` → `(ior−1)²/(ior+1)²` | 0 |
+| 0 | RGBA16F | albedo.rgb + metallic | $\mathrm{baseColorFactor} \times \mathrm{BaseColor}$ 贴图；$\mathrm{metallicFactor} \times \mathrm{MR.b}$ | a=1.0 |
+| 1 | RGBA16F | $\mathrm{normal}\times 0.5 + 0.5 + \mathrm{roughness}$ | 几何法线 + Normal 贴图（$N + t \times 0.5$）；$\mathrm{roughnessFactor} \times \mathrm{MR.g}$，clamp[0.04,1] | a=1.0 |
+| 2 | RGBA16F | emissive.rgb + ao | `emissiveFactor.rgb`；$\mathrm{aoFactor} \times \mathrm{Occlusion.r}$ | a=1.0 |
+| 3 | RG16F | $\mathrm{velocity} = \mathrm{currUV} - \mathrm{prevUV}$ | **非材质**（TAA / 运动模糊） | 0 |
+| 4 | RGBA16F | worldPos.xyz + **dielectricF0** | `ior` → $\dfrac{(\mathrm{ior}-1)^2}{(\mathrm{ior}+1)^2}$ | 0 |
 | 5 | RGBA16F | **disneyA** = aniso, subsurface, specular, sheen | Disney 扩展 | x=0, z=0.5 |
 | 6 | RGBA16F | **disneyB** = clearcoat, clearcoatGloss, specularTint.rg | Disney 扩展 | y=1, z=1, w=1 |
 | 7 | RGBA16F | lightmapKey（按物体 AABB 的箱式投影 + objectIndex），**`.a` 空闲**（写 0） | 物体级，非材质 | 0 |
@@ -109,17 +109,17 @@ lightmapKey= boxProject(worldPos, N, obj.boundsMin/Max) + objectIndex    // :112
 |---|---|---|---|
 | `baseColorFactor` (rgb) | (1,1,1,1) | ×BaseColor 贴图 → albedo，参与漫反射与金属 F0 | `GBuffer.frag.slang:61` |
 | `metallicFactor` | 0.0 | ×MR 贴图.b → MRT0.a，进 `lerp(dielectric, albedo, metallic)` | `:66` |
-| `roughnessFactor` | 0.8 | ×MR 贴图.g，clamp 0.04…1 → GGX α、clearcoat、IBL mip、RT 反射锥角 | `:78` |
+| `roughnessFactor` | 0.8 | ×MR 贴图.g，clamp 0.04…1 → GGX $\alpha$、clearcoat、IBL mip、RT 反射锥角 | `:78` |
 | `emissiveFactor` (rgb) | (0,0,0) | MRT2.rgb，光照末尾**原样相加**（不吃 AO、不吃直接光） | `:95`、`DeferredLighting.frag.slang:538` |
 | `aoFactor` | 1.0 | ×Occlusion 贴图.r → MRT2.a，只作用于**间接**漫反射/镜面（×`aoIntensity`） | `:79`、`DeferredLighting.frag.slang:484-505` |
-| `alphaCutoff` | 0.5 | `alpha(=factor.a×tex.a) < cutoff` → discard | `:68` |
+| `alphaCutoff` | 0.5 | $\mathrm{alpha}(= \mathrm{factor.a} \times \mathrm{tex.a}) < \mathrm{cutoff}$ → discard | `:68` |
 | `ior` | 1.5 | 预计算 `dielectricF0` 存 MRT4.a，用于 Fresnel | `Material.h:136-137` |
 | `anisotropic` | 0.0 | MRT5.x → 各向异性 GGX | `pbr_common.slang:184-189` |
 | `subsurface` | 0.0 | MRT5.y → wrap 漫反射 | `:205-207` |
-| `specular` | 0.5 | MRT5.z → 覆盖 F0（`0.16·specular²`） | `:178` |
-| `sheen` | 0.0 | MRT5.w → 边缘项 `sheen·(1−h·v)⁵·albedo` | `:209-210` |
+| `specular` | 0.5 | MRT5.z → 覆盖 F0（$0.16 \cdot \mathrm{specular}^2$） | `:178` |
+| `sheen` | 0.0 | MRT5.w → 边缘项 $\mathrm{sheen} \cdot (1 - h \cdot v)^5 \cdot \mathrm{albedo}$ | `:209-210` |
 | `clearcoat` | 0.0 | MRT6.x → 第二层镜面混合 | `:215-220` |
-| `clearcoatGloss` | 1.0 | MRT6.y → 清漆层 GGX α | `:217-218` |
+| `clearcoatGloss` | 1.0 | MRT6.y → 清漆层 GGX $\alpha$ | `:217-218` |
 | `specularTint.r/g` | (1,1) | MRT6.z/w → f0 着色 | `:180` |
 | 4 张贴图槽 + `textureMask` | — | BaseColor/Normal/MetallicRough/Occlusion，`materialID` 为基索引 | `ShaderTypes.slang:225-229` |
 
@@ -133,16 +133,16 @@ lightmapKey= boxProject(worldPos, N, obj.boundsMin/Max) + objectIndex    // :112
 
 ### 5.1 总纲：渲染方程与存储判据
 
-```
-L_o(x, ω_o) = ∫_Ω  f_r(x, ω_i, ω_o) · L_i(x, ω_i) · (n·ω_i) dω_i  +  L_e(x, ω_o)
-```
+$$
+L_o(x,\omega_o) \;=\; \int_{\Omega} f_r(x,\omega_i,\omega_o)\, L_i(x,\omega_i)\, (n \cdot \omega_i) \,\mathrm{d}\omega_i \;+\; L_e(x,\omega_o)
+$$
 
-延迟渲染把积分拆成两半：几何阶段算 `f_r` 的**参数**写进 GBuffer，光照阶段对每个光源/GI 源求乘积与累加
+延迟渲染把积分拆成两半：几何阶段算 $f_r$ 的**参数**写进 GBuffer，光照阶段对每个光源/GI 源求乘积与累加
 （`DeferredLighting.frag.slang:366` 的 `color += PBR_BRDF(...) * radiance * shadow`）。
 
 | 类别 | 例 | 是否进 GBuffer | 原因 |
 |---|---|---|---|
-| 与 ω_i 无关、与 ω_o 近似无关的材质常量 | albedo、F0、roughness、Disney 参数 | **必须** | 光照阶段每光源都要用，重算 = 重采样贴图 |
+| 与 $\omega_i$ 无关、与 $\omega_o$ 近似无关的材质常量 | albedo、F0、roughness、Disney 参数 | **必须** | 光照阶段每光源都要用，重算 = 重采样贴图 |
 | 视角相关但可解析重建 | V、NdotV、H | **不进** | 光照阶段有 worldPos（MRT4）+ cameraPosition，一次减法即得（`:276`） |
 | 光源相关量 | L、辐照度、阴影 | **不进** | 光照阶段直接取 |
 | 逐像素高频几何量 | N、worldPos、velocity | 进（N 在 MRT1） | 无法从深度稳定重建，AO/反射/降噪都要 |
@@ -153,15 +153,22 @@ L_o(x, ω_o) = ∫_Ω  f_r(x, ω_i, ω_o) · L_i(x, ω_i) · (n·ω_i) dω_i  + 
 
 **意义**：表面固有色；金属的 albedo 同时兼作镜面颜色。
 
-**数学**：Lambert 漫反射的反射率 ρ。
+**数学**：Lambert 漫反射的反射率 $\rho$。
 
-```
-f_d = k_D · albedo / π                                    // pbr_common.slang:203
-∫_hemisphere (ρ/π) cosθ dω = ρ                            // 1/π 的来历：半球积分 ∫cosθ dω = π
-```
+$$
+f_d = k_D \cdot \frac{\mathrm{albedo}}{\pi}
+$$
 
-`1/π` 是归一化因子而非调参：只有除以 π，漫反射的方向积分才等于 ρ。这也是所有 GI 源必须返回
-`L_o = albedo·E/π` 而非 `E` 的原因（`DeferredLighting.frag.slang:165-171` 的"统一量纲约定"）。
+（`pbr_common.slang:203`）
+
+$$
+\int_{\text{hemisphere}} \frac{\rho}{\pi} \cos\theta \,\mathrm{d}\omega = \rho
+$$
+
+（$1/\pi$ 的来历：半球积分 $\int_{\Omega} \cos\theta \,\mathrm{d}\omega = \pi$）
+
+$1/\pi$ 是归一化因子而非调参：只有除以 $\pi$，漫反射的方向积分才等于 $\rho$。这也是所有 GI 源必须返回
+$L_o = \mathrm{albedo} \cdot E/\pi$ 而非 $E$ 的原因（`DeferredLighting.frag.slang:165-171` 的"统一量纲约定"）。
 贴图必须按 sRGB 解码成线性（**当前缺失**，§6.2）。
 
 #### 5.2.2 metallic — MRT0.a
@@ -170,10 +177,14 @@ f_d = k_D · albedo / π                                    // pbr_common.slang:
 
 **数学**：在电介质与导体两套光学参数间插值，并关闭导体的漫反射。
 
-```
-f0 = lerp(float3(0.04), albedo, metallic)                 // :180
-k_D = (1 - F) · (1 - metallic)                            // :202
-```
+$$
+\begin{aligned}
+f_0 &= \mathrm{lerp}\left(\mathrm{float3}(0.04),\ \mathrm{albedo},\ \mathrm{metallic}\right) \\
+k_D &= (1 - F) \cdot (1 - \mathrm{metallic})
+\end{aligned}
+$$
+
+（`:180`、`:202`）
 
 导体内部无透射（自由电子气重新辐射），没有次表面散射 ⇒ 没有漫反射项。这是 metallic-roughness
 工作流唯一的"开关"。贴图缺省时 MR 采样返回 `(0,1,0,1)`（`GBuffer.frag.slang:65`），即 b=0 不污染 factor。
@@ -184,21 +195,25 @@ k_D = (1 - F) · (1 - metallic)                            // :202
 
 **数学**：控制 GGX / Trowbridge-Reitz 法线分布的宽度。
 
-```
-α = roughness²                                            // :186
-D(n,h) = α² / (π · ((n·h)²(α²-1) + 1)²)                   // :28-33
-G_Smith = G_SchlickGGX(n·v)·G_SchlickGGX(n·l), k=(r+1)²/8 // :52-58  （直接光形式）
-```
+$$
+\begin{aligned}
+\alpha &= \mathrm{roughness}^2 \\
+D(n,h) &= \frac{\alpha^2}{\pi \left((n \cdot h)^2 (\alpha^2 - 1) + 1\right)^2} \\
+G_{\mathrm{Smith}} &= G_{\mathrm{SchlickGGX}}(n \cdot v)\, G_{\mathrm{SchlickGGX}}(n \cdot l), \quad k = \frac{(r+1)^2}{8}
+\end{aligned}
+$$
 
-- **为什么平方**：Disney 的感知线性映射，物理宽度是 α；所以 `D_GGX(NdotH, roughness)` 内部自己再平方一次。
-- **为什么 clamp 0.04**（`GBuffer.frag.slang:78`）：α→0 时 D 趋于 δ，`D·G·F/(4 n·v n·l)` 数值爆炸。
-- 间接影响：IBL 预滤波 mip = `roughness·(mips-1)`（`DeferredLighting.frag.slang:236`）、RT 反射锥角、SSR 淡出。
+（`:186`、`:28-33`、`:52-58`；末行为直接光形式）
+
+- **为什么平方**：Disney 的感知线性映射，物理宽度是 $\alpha$；所以 `D_GGX(NdotH, roughness)` 内部自己再平方一次。
+- **为什么 clamp 0.04**（`GBuffer.frag.slang:78`）：$\alpha \to 0$ 时 $D$ 趋于 $\delta$，$D \cdot G \cdot F/(4\, n \cdot v\, n \cdot l)$ 数值爆炸。
+- 间接影响：IBL 预滤波 mip = $\mathrm{roughness} \cdot (\mathrm{mips}-1)$（`DeferredLighting.frag.slang:236`）、RT 反射锥角、SSR 淡出。
 
 #### 5.2.4 法线 N — MRT1.xyz（编码 ×0.5+0.5）
 
-**意义**：介观起伏；BRDF 里**所有**方向量的基准（`n·l`、`n·v`、`n·h`）。
+**意义**：介观起伏；BRDF 里**所有**方向量的基准（$n \cdot l$、$n \cdot v$、$n \cdot h$）。
 
-**数学**：正确形式是切线基变换 `N = normalize(T·t.x + B·t.y + N_geom·t.z)`，`t = (2·tex−1)·scale`。
+**数学**：正确形式是切线基变换 $N = \mathrm{normalize}(T \cdot t.x + B \cdot t.y + N_{\mathrm{geom}} \cdot t.z)$，$t = (2 \cdot \mathrm{tex} - 1) \cdot \mathrm{scale}$。
 当前实现（`GBuffer.frag.slang:71-76`）退化为世界空间直接相加 + 固定 0.5 强度，且顶点布局无 tangent
 （`MeshComponent.h:19-23`）、`normalTexture.scale` 未读取 ⇒ 见 §6.5。
 
@@ -206,12 +221,16 @@ G_Smith = G_SchlickGGX(n·v)·G_SchlickGGX(n·l), k=(r+1)²/8 // :52-58  （直�
 
 **意义**：自发光表面（灯管、屏幕、岩浆），HDR 光源。
 
-**数学**：渲染方程的 `L_e`，**加法项**，不经 BRDF、不乘 `n·l`、不受阴影影响：
+**数学**：渲染方程的 $L_e$，**加法项**，不经 BRDF、不乘 $n \cdot l$、不受阴影影响：
 
-```
-color = direct + (indirectDiffuse·giIntensity + indirectSpecular)·aoFactor
-color += gbC.rgb;                                          // :536-538
-```
+$$
+\begin{aligned}
+\mathrm{color} &= \mathrm{direct} + \left(\mathrm{indirectDiffuse} \cdot \mathrm{giIntensity} + \mathrm{indirectSpecular}\right) \cdot \mathrm{aoFactor} \\
+\mathrm{color} &\;{+}{=}\; \mathrm{gbC.rgb}
+\end{aligned}
+$$
+
+（`:536-538`）
 
 注释明确记录 AO 不应作用于自发光（`:442-446`）。
 
@@ -221,11 +240,20 @@ color += gbC.rgb;                                          // :536-538
 
 **数学**：把方向相关的可见性压成标量常数因子：
 
-```
-L_o ≈ ∫ f_r·L_i·cosθ·V(ω_i) dω   →   (1−occlusion) · ∫ f_r·L_i·cosθ dω
-aoFactor = lerp(1.0, ao·aoVal, aoIntensity)                // :505
-color = directColor + (indirectDiffuse·gi + indirectSpecular)·aoFactor   // :536
-```
+$$
+L_o \;\approx\; \int f_r \cdot L_i \cdot \cos\theta \cdot V(\omega_i) \,\mathrm{d}\omega
+\;\;\longrightarrow\;\;
+(1 - \mathrm{occlusion}) \cdot \int f_r \cdot L_i \cdot \cos\theta \,\mathrm{d}\omega
+$$
+
+$$
+\begin{aligned}
+\mathrm{aoFactor} &= \mathrm{lerp}(1.0,\ \mathrm{ao} \cdot \mathrm{aoVal},\ \mathrm{aoIntensity}) \\
+\mathrm{color} &= \mathrm{directColor} + \left(\mathrm{indirectDiffuse}\cdot\mathrm{gi} + \mathrm{indirectSpecular}\right)\cdot\mathrm{aoFactor}
+\end{aligned}
+$$
+
+（`:505`、`:536`）
 
 只在间接项上施加是**正确**的；历史上曾乘到直接光上（`:445-446` 记录了这处能量错误；本文别处的 4.7 倍事故是 `u_BRDF_LUT` 未烘焙，与 AO 无关，见 §7 P2-13）。
 
@@ -242,10 +270,14 @@ MSAA 对 GBuffer 失效（`AA_MSAA.h:9`），边缘只能靠 TAA/SMAA；半透�
 
 **数学**：
 
-```
-F(θ) = F0 + (1−F0)(1−cosθ)⁵          （Schlick 近似）       // :15-17
-F0   = ((n1−n2)/(n1+n2))², n1=1, n2=ior                    // Material.h:137
-```
+$$
+\begin{aligned}
+F(\theta) &= F_0 + (1 - F_0)(1 - \cos\theta)^5 \\
+F_0 &= \left(\frac{n_1 - n_2}{n_1 + n_2}\right)^2, \quad n_1 = 1,\ n_2 = \mathrm{ior}
+\end{aligned}
+$$
+
+（`:15-17` Schlick 近似、`Material.h:137`）
 
 存 F0 而非 ior：BRDF 只需 F0（每像素省一次除法，通道也紧张）。**丢失**：标量 F0 无色散、无导体复折射率
 k 项、Schlick 在掠射角误差最大。
@@ -257,44 +289,49 @@ Disney principled BSDF 的做法是在基础层上增加**正交的叶**，每�
 
 | 参数 | 数学形式 | 物理/美术意义 | 代码 |
 |---|---|---|---|
-| `specular` | `dielectric = 0.16·specular²`（≠0.5 时覆盖 ior 派生 F0） | 电介质 F0 覆盖（KHR_materials_specular） | `:178` |
+| `specular` | $\mathrm{dielectric} = 0.16 \cdot \mathrm{specular}^2$（≠0.5 时覆盖 ior 派生 F0） | 电介质 F0 覆盖（KHR_materials_specular） | `:178` |
 | `specularTint` | `f0 *= tint`（RGB 三分量） | 金属/有色镜面的色调 | `:180` |
-| `anisotropic` | `aspect=√(1−0.9a)`，`ax=α/aspect`，`ay=α·aspect`，`D_GGX_aniso`（Burley 2012） | 拉丝金属、头发、唱片；`ax=ay` 时精确退化为等向 | `:41-47, 184-189` |
-| `subsurface` | wrap 漫反射 `NdotL_wrap=(n·l+ss)/(1+ss)` | 蜡/玉/皮肤的明暗交界线扩散（Hanrahan-Krueger 廉价版） | `:205-207` |
-| `sheen` | `diffuse += albedo·sheen·(1−h·v)⁵` | 布料微纤维的掠射"银边" | `:210` |
-| `clearcoat` | `Fcc=0.04+0.96(1−h·v)⁵`；`base = lerp(base, (1−Fcc)·base + Fcc·lobe_cc, cc)` | 车漆/釉面：外层无色镜面 + 内层有色 | `:215-220` |
-| `clearcoatGloss` | `D_GGX(n·h, ccGloss)`（内部再平方） | 清漆层的光滑度；glTF 存 roughness ⇒ 加载时取反 | `:217`、`glTFLoader.cpp:185` |
+| `anisotropic` | $\mathrm{aspect}=\sqrt{1-0.9a}$，$a_x=\alpha/\mathrm{aspect}$，$a_y=\alpha \cdot \mathrm{aspect}$，`D_GGX_aniso`（Burley 2012） | 拉丝金属、头发、唱片；$a_x=a_y$ 时精确退化为等向 | `:41-47, 184-189` |
+| `subsurface` | wrap 漫反射 $\text{NdotL\_wrap}=(n \cdot l + ss)/(1 + ss)$ | 蜡/玉/皮肤的明暗交界线扩散（Hanrahan-Krueger 廉价版） | `:205-207` |
+| `sheen` | $\mathrm{diffuse} \;{+}{=}\; \mathrm{albedo} \cdot \mathrm{sheen} \cdot (1 - h \cdot v)^5$ | 布料微纤维的掠射"银边" | `:210` |
+| `clearcoat` | $F_{cc}=0.04+0.96(1-h \cdot v)^5$；$\mathrm{base} = \mathrm{lerp}(\mathrm{base},\ (1-F_{cc}) \cdot \mathrm{base} + F_{cc} \cdot \mathrm{lobe\_cc},\ cc)$ | 车漆/釉面：外层无色镜面 + 内层有色 | `:215-220` |
+| `clearcoatGloss` | $D_{\mathrm{GGX}}(n \cdot h,\ \mathrm{ccGloss})$（内部再平方） | 清漆层的光滑度；glTF 存 roughness ⇒ 加载时取反 | `:217`、`glTFLoader.cpp:185` |
 
 **要点**：
-- `clearcoat` 的 `(1−Fcc)·base` 是**分层能量守恒**的标准写法（外层反射走 Fcc，透过的按 1−Fcc 衰减到内层），
+- `clearcoat` 的 $(1-F_{cc}) \cdot \mathrm{base}$ 是**分层能量守恒**的标准写法（外层反射走 $F_{cc}$，透过的按 $1-F_{cc}$ 衰减到内层），
   比"再叠一个高光"正确。
-- `sheen` 是**加法**、不减 `f_d`，严格意义上不守恒（真实模型见 Charlie 分布 / Zeltner 2022）——已知近似。
+- `sheen` 是**加法**、不减 $f_d$，严格意义上不守恒（真实模型见 Charlie 分布 / Zeltner 2022）——已知近似。
 - 多重散射能量补偿（Kulla-Conty / Frostbite，`:197-199`）由 roughness+F0 共同决定：
-  `E(f0)=f0·A+B`，`f_ms = 1 + f0(1/E−1)`，`specularBRDF *= f_ms`。**只补偿镜面**。
+  $E(f_0)=f_0 \cdot A+B$，$f_{\text{ms}} = 1 + f_0(1/E-1)$，`specularBRDF *= f_ms`。**只补偿镜面**。
 
 ### 5.4 光照阶段：参数如何进入积分
 
 **直接光**（`:366`）：
 
-```
-color += PBR_BRDF(albedo, metallic, roughness, N, V, L, F0, envBRDF, disneyA, disneyB, disneyC)
-         · radiance · shadow
-```
+$$
+\begin{aligned}
+\mathrm{color} &\;{+}{=}\; \text{PBR\_BRDF}(\mathrm{albedo}, \mathrm{metallic}, \mathrm{roughness}, N, V, L, F_0, \mathrm{envBRDF}, \mathrm{disneyA}, \mathrm{disneyB}, \mathrm{disneyC}) \\
+&\quad \cdot \mathrm{radiance} \cdot \mathrm{shadow}
+\end{aligned}
+$$
 
-`PBR_BRDF` 的返回已含 `(n·l)`（`:222` 的 `baseBRDF * NdotL`），所以外面只乘 `L_i` 与可见性。
+`PBR_BRDF` 的返回已含 $(n \cdot l)$（`:222` 的 `baseBRDF * NdotL`），所以外面只乘 $L_i$ 与可见性。
 
 **间接光（split-sum）**：
 
-```
-∫ f(l,v)·L_i·cosθ dω ≈ (∫ f·cosθ dω) × (∫ L_i·D·cosθ dω / ∫ D·cosθ dω)
-                         ↑ BRDF LUT (A,B)     ↑ 预滤波 cubemap（按 roughness 分 mip）
-```
+$$
+\int f(l,v) \cdot L_i \cdot \cos\theta \,\mathrm{d}\omega \;\approx\;
+\left(\int f \cdot \cos\theta \,\mathrm{d}\omega\right) \times
+\frac{\int L_i \cdot D \cdot \cos\theta \,\mathrm{d}\omega}{\int D \cdot \cos\theta \,\mathrm{d}\omega}
+$$
 
-- 镜面：`(F0·A + B) · prefiltered(R, roughness·(mips−1))`（`:235-237`）；A/B 的来历是 Schlick 拆成
-  常数项与掠射项后的两个积分 `∫(1−Fc)·G_vis`、`∫Fc·G_vis`，Hammersley + GGX 重要性采样 256 样本
+↑ BRDF LUT (A,B)　　　↑ 预滤波 cubemap（按 roughness 分 mip）
+
+- 镜面：$(F_0 \cdot A + B) \cdot \mathrm{prefiltered}(R,\ \mathrm{roughness}\cdot(\mathrm{mips}-1))$（`:235-237`）；A/B 的来历是 Schlick 拆成
+  常数项与掠射项后的两个积分 $\int (1 - F_c) \cdot G_{\text{vis}}$、$\int F_c \cdot G_{\text{vis}}$，Hammersley + GGX 重要性采样 256 样本
   （`IBL_BRDF_LUT.frag.slang:56-86`，512² RG16F）。
-- 漫反射：辐照度图存 `E/π`（`IBL_Irradiance.frag.slang:44-49`），故只需 `k_D·irradiance·albedo`（`:211`）。
-- GI 层栈：各源统一到 `L_o = albedo·E/π` 后按权重归一化（`:456-470`），权重和 = 1 保证不双重计数；
+- 漫反射：辐照度图存 $E/\pi$（`IBL_Irradiance.frag.slang:44-49`），故只需 $k_D \cdot \mathrm{irradiance} \cdot \mathrm{albedo}$（`:211`）。
+- GI 层栈：各源统一到 $L_o = \mathrm{albedo} \cdot E/\pi$ 后按权重归一化（`:456-470`），权重和 = 1 保证不双重计数；
   白炉测试（`:293-296`、`:472-478`）用"全白环境真值 = 1"验证归一化。
 
 ---
@@ -329,10 +366,10 @@ ColorGrading 用自己那份**（`ColorGrading.frag.slang:31`）。数学后果�
 
 ### 6.5 法线贴图不是 TBN
 
-`GBuffer.frag.slang:71-76` 把切线空间的 `t` 直接加到世界空间法线上（`N + t·0.5`），
+`GBuffer.frag.slang:71-76` 把切线空间的 `t` 直接加到世界空间法线上（$N + t \cdot 0.5$），
 顶点无 tangent（`MeshComponent.h:19-23`、`GBufferRenderer.cpp:224-227`），`normalTexture.scale` 未读取。
 ⇒ 方向错误（仅在起伏极小时近似）、强度不可调、各向异性无方向（§6.10）。
-另：占位纹理是全白，法线槽若 `textureMask` 位误置位，`(2·1−1)` 会把 N 偏 45°。
+另：占位纹理是全白，法线槽若 `textureMask` 位误置位，$(2 \cdot 1 - 1)$ 会把 N 偏 45°。
 
 ### 6.6 specularTint.b 无通道
 
@@ -386,9 +423,9 @@ clearcoat/sheen/transmission 贴图同样无处放。
 
 ### 6.13 IBL BRDF LUT 的 `k` 多平方一次
 
-`IBL_BRDF_LUT.frag.slang:49-50`：`a = roughness²; k = a²·0.5` ⇒ `k = roughness⁴/2`，而 Karis/UE4 的
-IBL 惯例是 `k = a/2 = roughness²/2` ⇒ 高粗糙下 Smith 遮蔽偏小 ⇒ **间接高光偏亮**。
-（直接光路径的 `k=(r+1)²/8`，`pbr_common.slang:53`，是正确的，两者不可混用。）
+`IBL_BRDF_LUT.frag.slang:49-50`：$a = \mathrm{roughness}^2;\ k = a^2 \cdot 0.5$ ⇒ $k = \mathrm{roughness}^4/2$，而 Karis/UE4 的
+IBL 惯例是 $k = a/2 = \mathrm{roughness}^2/2$ ⇒ 高粗糙下 Smith 遮蔽偏小 ⇒ **间接高光偏亮**。
+（直接光路径的 $k=(r+1)^2/8$，`pbr_common.slang:53`，是正确的，两者不可混用。）
 该疑点此前已记录于 [GI 本质、实现与架构优化](HugEngine全局光照GI本质、实现与架构优化.md) §2.2.3（IBL 的 Shader 算法细节），并在 §4.2 各技术现状要点里复核。
 
 ### 6.14 注释与文档漂移
@@ -404,7 +441,7 @@ IBL 惯例是 `k = a/2 = roughness²/2` ⇒ 高粗糙下 Smith 遮蔽偏小 ⇒ 
 ### 6.15 其它近似（标注，不急于修改）
 
 - `sheen` 加法不守恒（`:210`）；能量补偿只作用于镜面（`:197-199`）。
-- `k_D = (1−F)(1−metallic)` 里的 F 是单点采样（行业通行简化）。
+- $k_D = (1-F)(1-\mathrm{metallic})$ 里的 F 是单点采样（行业通行简化）。
 - 硬编码魔法数：`clamp(roughness, 0.04)`、法线强度 `0.5`、PCF 核 `1/2048`（`pbr_common.slang:94`）。
 
 ---
@@ -432,7 +469,7 @@ IBL 惯例是 `k = a/2 = roughness²/2` ⇒ 高粗糙下 Smith 遮蔽偏小 ⇒ 
 | 15 | P2 | 材质上传无脏标记 | `ForwardPipeline.cpp:1108` | 每帧 O(物体数) 哈希；仅材质数变化时才重建/上传材质 buffer |
 | 16 | P2 | 编辑器材质能力缺口 | `DetailsPanel.cpp:251-261` | 纹理只读、无 ior/Disney 编辑 |
 | 17 | P2 | 文档/注释漂移 | 见 §6.14 | 误导后续改动 |
-| 18 | P3 | IBL LUT `k = roughness⁴/2` | `IBL_BRDF_LUT.frag.slang:49-50` | 高粗糙间接高光偏亮 |
+| 18 | P3 | IBL LUT $k = \mathrm{roughness}^4/2$ | `IBL_BRDF_LUT.frag.slang:49-50` | 高粗糙间接高光偏亮 |
 | 19 | P3 | sheen 加法不守恒 / 魔法数散落 | `pbr_common.slang:210,94` | 已知近似，可标注 |
 
 ### 7.1 P0：正确性与数据完整性
@@ -498,7 +535,7 @@ inline PBRMaterial MakeMaterialFrom(const he::MeshComponent& mc);   // 全字段
 **改法（两档，建议先 A）**：
 
 - **A. 屏幕空间导数 cotangent frame**（Schüler）：`GBuffer.frag` 用 `ddx/ddy(worldPos, uv)` 构造 T/B，
-  零顶点改动，顺手支持 `scale` 与正确强度语义；UV 退化处（`det≈0`）回退几何法线。
+  零顶点改动，顺手支持 `scale` 与正确强度语义；UV 退化处（$\det \approx 0$）回退几何法线。
 - **B. 加 tangent 属性**：`StaticVertex` 加 `float4 tangent`，`glTFLoader` 读 `TANGENT` 或 MikkTSpace 生成，
   同步 `GBufferRenderer.cpp:224-227`、`GBuffer.vert.slang`、`GBuffer.mesh.slang`、Nanite 顶点解码
   （`NaniteTypes.slang`）。成本高，但各向异性（P1-10）必需。
@@ -566,7 +603,7 @@ inline PBRMaterial MakeMaterialFrom(const he::MeshComponent& mc);   // 全字段
 
 | # | 项 | 改法 |
 |---|---|---|
-| P3-18 | IBL LUT 的 `k` | `IBL_BRDF_LUT.frag.slang:50` 改为 `k = a * 0.5`（`a = roughness²`）；用 PT 作参考对拍或与解析真值对照 |
+| P3-18 | IBL LUT 的 $k$ | `IBL_BRDF_LUT.frag.slang:50` 改为 `k = a * 0.5`（$a = \mathrm{roughness}^2$）；用 PT 作参考对拍或与解析真值对照 |
 | P3-19 | 近似与魔法数 | sheen 不守恒、镜面-only 能量补偿：在代码注释与本文档标注；把 `0.04`、`0.5`（法线强度）、`1/2048`（PCF）等集中成常量表，便于对照调参 |
 
 ---
@@ -617,7 +654,7 @@ inline PBRMaterial MakeMaterialFrom(const he::MeshComponent& mc);   // 全字段
 | `PBR_BRDF` | `Engine/Shader/Shaders/pbr_common.slang:149-223` | 唯一 BRDF 求值点（直接光 / IBL / PT 共用） |
 | `D_GGX` / `D_GGX_aniso` / `F_Schlick` / `G_Smith` | `pbr_common.slang:15-59` | BRDF 分项 |
 | `IntegrateBRDF` / `G_Smith`（IBL 版） | `IBL_BRDF_LUT.frag.slang:48-86` | split-sum 的 A/B 预计算 |
-| `IBL_Irradiance` | `IBL_Irradiance.frag.slang:27-50` | 辐照度烘焙（归一化为 `E/π`） |
+| `IBL_Irradiance` | `IBL_Irradiance.frag.slang:27-50` | 辐照度烘焙（归一化为 $E/\pi$） |
 | GBuffer 通道常量 | `GBufferRenderer.h:16-26` | MRT 语义 |
 | `SceneRenderer::Prepare` | `Engine/Render/SceneRenderer.cpp:105-147` | 材质 → `GPUObjectData` 填充（**当前漏 Disney**） |
 | `UploadMaterialBindless` | `ForwardPipeline.cpp:645-696`、调用点 `:1108` | per-material 表去重上传（仅 Forward 使用） |
