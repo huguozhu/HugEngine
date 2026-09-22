@@ -2609,7 +2609,7 @@ A1/A2 的完整裁决已写回 §14.5（A2 = 自建 VisBuffer，仅在确需跨�
 **④ 判据②也扩了 probe-6 有界容差（同一族、同一签名）**：任务 4 期间判据② 从 `0 ULP` 变成
 `6 ULP / 5 个文件`，而这 5 个文件正是 §14.11 记录过的 `lumen_irradiance` + `prov6_*`
 （`maxULP=6 maxAbs=1.5e-4 meanAbs=2.6e-8`，0.5% 像素）⇒ 该族在**运行间非确定**（同一轮内先 0 后 6），并非 Nanite 引入。
-处理与判据④ 一致：仅对该族给出硬上界容差（`maxULP <= 8` 且 `meanAbs <= 1e-6`）并**显式打印命中项数**，
+处理与判据④ 一致：仅对该族给出硬上界容差（ $ \text{maxULP} <= 8 $ 且 $ \text{meanAbs} <= 1e-6 $ ）并**显式打印命中项数**，
 其余转储仍严格 `<= 2 ULP`。**若该族幅度超过上界，一律按回归处理。**
 
 ### 14.15 任务 5 实施记录：objectIndex 分区契约（2026-09-20）
@@ -2630,7 +2630,7 @@ A1/A2 的完整裁决已写回 §14.5（A2 = 自建 VisBuffer，仅在确需跨�
 | 段 | 起止 | 容量 | 依据 |
 |---|---|---|---|
 | 普通段 | `[0, 1024)` | 1024 | `= kGPUMaxObjects = MAX_OBJECTS`，与 `GPUObjectData` 缓冲一致 |
-| Nanite 段 | `[1024, 2048)` | **1024**（任务 1 预置的 16384 已修正） | binary16 精确整数上限 2^11 = 2048 |
+| Nanite 段 | `[1024, 2048)` | **1024**（任务 1 预置的 16384 已修正） | binary16 精确整数上限 $ 2^{11} = 2048 $ |
 | 哨兵 | `0xFFFFFFFF` | — | 超出两段、段判定 Invalid、binary16 为 NaN，三重不冲突 |
 
 **③ 一处契约修正（必须记住）**：Nanite 段容量 `16384 → 1024`。理由：`gb_lightmapkey` 是 RGBA16_FLOAT，
@@ -2689,12 +2689,12 @@ A1/A2 的完整裁决已写回 §14.5（A2 = 自建 VisBuffer，仅在确需跨�
 |---|---|---|---|
 | 8 | 文件头 96B vs 128B（§8.3 表格 vs `NanitePack` docstring `[NaniteFileHeader 128B]`） | **96B** | ① §8.3 已写"实现时以 96B 为准"；② 96 = 6×16，天然 16B 对齐且自包含；③ Python 实际写的是 `<32x>`（= `u32 _reserved[8]`），字段累加正好 96B ⇒ 128B 是 docstring 笔误 |
 | 7 | 顶点 16B vs 12B（§8.4 `NaniteVertex` 4×u32 vs `NanitePack` 12B/顶点、`NaniteUpload` 按 12B 读） | **16B** | ② 规则②优先"16 字节对齐且自包含"：量化偏置落在记录内（第 4 个 u32 命名 `quantBias`，不是 `_pad`）；12B 版本既不 16B 对齐、偏差量也无处安放 |
-| 9 | 量化偏置（编码端无符号 0…1023 vs 解码端 `-512` SNORM） | **编码端补 `+512`** | ③ 单轴 `raw = clamp(round(...)) + quantBias`、解码 `v = bboxMin + (raw - quantBias)/511 × maxExtent`，严格互逆（误差 ≤ maxExtent/1022）；偏置取自记录内的 `quantBias` ⇒ 自包含 |
+| 9 | 量化偏置（编码端无符号 0…1023 vs 解码端 `-512` SNORM） | **编码端补 `+512`** | ③ 单轴 $ \text{raw} = \text{clamp}(\text{round}(...)) + \text{quantBias} $ 、解码 $ v = \text{bboxMin} + (\text{raw} - \text{quantBias})/511 \times \text{maxExtent} $ ，严格互逆（误差 $ \le \text{maxExtent}/1022 $ ）；偏置取自记录内的 `quantBias` ⇒ 自包含 |
 | 1 | `coneData` vs `coneAxisAngle`（§8.1 两版结构体） | **`coneAxisAngle`**（xyz=单位轴，w=cos 锥半角；`w=-1` = 无锥哨兵） | ① 两案都未被标"权威"；② 两者同为 float4/16B，尺寸与省法都不分高下 ⇒ 按规则②的"自包含"意图取"能唯一确定解码、不依赖外部约定"的那个；`coneData` 只有名字、写不出解码器 |
 | 6 | 索引 3×u16 进 `u32[2]` vs 1 索引 1 个 u32（§8.5 注释 vs `NanitePack`/`NaniteUpload`/`Nanite_SoftRaster` 三处 u32） | **3×u16 进 `u32[2]`（8B/三角形）** | ② 两个候选都**不是** 16B 对齐 ⇒ 规则②不裁决；③ 落到"取更省方案"⇒ 8B < 12B（索引带宽 −33%），且 §8.4 的"每簇 ≤128 顶点"让簇内局部下标只需 7 位、u16 绰绰有余；一簇 64 tri = 512B 天然 16B 对齐 |
 
 **② 派生定稿（为了自洽必须一起定的两件语义）**
-- `indexCount` 保持"索引**总数**"（必须是 3 的倍数）；索引段字节数 = `ceil(indexCount/3) × 8` 再向上
+- `indexCount` 保持"索引**总数**"（必须是 3 的倍数）；索引段字节数 = $ \lceil \text{indexCount}/3 \rceil \times 8 $ 再向上
   取整到 16B；`cluster.triangleOffset` 的单位是**三角形**（× 8B = 索引段字节偏移）。
 - 索引是**簇内局部**顶点下标（`[0,127]`），全局顶点下标 = `cluster.vertexOffset + local` —— 这也解释了
   §8.1 里 `vertexOffset` 为什么必需。
@@ -2742,11 +2742,11 @@ A1/A2 的完整裁决已写回 §14.5（A2 = 自建 VisBuffer，仅在确需跨�
 
 **② meshopt 真实接口约束（核实自 vendored 源码 `src/clusterizer.cpp:538-550`，写进代码注释与 static_assert）**
 - `meshopt_buildMeshlets(meshlets, meshlet_vertices, meshlet_triangles, indices, index_count, positions, vertex_count, stride, max_vertices, max_triangles, cone_weight)`；
-- assert 约束：`max_vertices ∈ [3,255]`（**不是 256**）、`max_triangles ∈ [1,512]` 且**必须被 4 整除**、`stride` 为 4 的倍数。
+- assert 约束： $ \text{max\_vertices} \in [3,255] $ （**不是 256**）、 $ \text{max\_triangles} \in [1,512] $ 且**必须被 4 整除**、`stride` 为 4 的倍数。
   设计给的 128/64 恰好合法（64 是 4 的倍数），直接传 128/64。
 - 缓冲容量必须用官方最坏情况 `meshopt_buildMeshletsBound()` 推导（已照做）。
 - `meshlet_Meshlet.triangle_offset` 是**字节**偏移且每簇 4B 对齐；`meshlet_triangles` 是 u8（每三角形 3 字节）。
-- `meshopt_computeMeshletBounds()` 的 `cone_cutoff` 实现就是 `sqrt(1-cos²)`，**正是**任务 7 `NaniteConeAxisAngle::cosHalfAngle`
+- `meshopt_computeMeshletBounds()` 的 `cone_cutoff` 实现就是 $ \text{sqrt}(1-\text{cos}^2) $ ，**正是**任务 7 `NaniteConeAxisAngle::cosHalfAngle`
   要的量，直接落盘无需角度换算。**任务 15 的锥剔除测试请沿用 `dot(dir, axis) >= cosHalfAngle`**（哨兵 −1 表示恒不剔除）。
 
 **③ 落盘口径（不伪造语义）**：填真值的是 `boundsCenterRadius`、`cone`、`triangleOffset/triangleCount/vertexOffset`；
@@ -2798,7 +2798,7 @@ A1/A2 的完整裁决已写回 §14.5（A2 = 自建 VisBuffer，仅在确需跨�
 **⑥ 必须记住的两条约束（后续任务会用）**
 1. **任务 10 的解码口径必须沿用"簇内局部量化 + `boundsCenterRadius` + 网格最大范围"**，否则共享的 `vertexOffset`
    会让不同位置的簇读到同一份坐标（已写进 `NaniteUpload.h` 头注释）。
-2. `maxParentLODError` = 该次简化的绝对误差（`result_error × simplifyScale`，同级共用，属保守上界），
+2. `maxParentLODError` = 该次简化的绝对误差（ $ \text{result\_error} \times \text{simplifyScale} $ ，同级共用，属保守上界），
    meshopt 报 0 时退几何兜底；**偏保守**（32 单位网格实测 22.19），方向安全（LOD 切换偏晚 = 偏细）。任务 15 的 LOD 选择直接用它。
 
 **⑦ 已知限制（如实记录）**：LOD1 以上几乎不再去重 —— 因为本实现是**全局简化**（忠实 §4.1 的 `edge_collapse(lods[-1], 0.5)`），
@@ -2807,13 +2807,13 @@ meshopt 对互不相连的相同副本会给出逐副本不同的折叠顺序；
 ### 14.20 任务 10 实施记录：量化与打包（2026-09-20）
 
 **① 位置量化基准裁决（任务 7 的已知取舍在此结案）**：改为**簇 AABB 中心基准 + 吃满 10 位**。
-编码 `signed = clamp(lround((v-origin)/range×1022), -512, 511)`、`raw = clamp10(signed + quantBias)`，解码 `v = origin + (raw-quantBias)/1022×range`。
-- 乘数由任务 7 的 511 改为 **1022**（新增 `kNaniteVertexQuantFullScale`，`static_assert == 1022`），把 `[origin-range/2, origin+range/2]`
-  映到有符号 `[-512,511]` ⇒ 1024 个码点全可用（实测极端簇 `raw ∈ [1,1023]`）；任务 7 的 `bboxMin` 口径只用上半段（等效 ~9 位）。
+编码 $ \text{signed} = \text{clamp}(\text{lround}((v-\text{origin})/\text{range}\times 1022), -512, 511) $ 、 $ \text{raw} = \text{clamp10}(\text{signed} + \text{quantBias}) $ ，解码 $ v = \text{origin} + (\text{raw}-\text{quantBias})/1022\times\text{range} $ 。
+- 乘数由任务 7 的 511 改为 **1022**（新增 `kNaniteVertexQuantFullScale`，`static_assert == 1022`），把 $ [\text{origin}-\text{range}/2, \text{origin}+\text{range}/2] $
+  映到有符号 `[-512,511]` ⇒ 1024 个码点全可用（实测极端簇 $ \text{raw} ∈ [1,1023] $ ）；任务 7 的 `bboxMin` 口径只用上半段（等效 ~9 位）。
 - **不会 clamp，且可证**：簇是网格子集 ⇒ 每轴 `|v-origin| ≤ 簇半轴长 ≤ range/2` ⇒ `|signed| ≤ 511`。函数内保留夹取作防御，
   并新增 `NanitePositionQuantizeClamps()` 把"无 clamp"变成可测读数：4 个测试网格全部 `positionClampCount = 0`。
-- 精度步长 `range/1022`、往返误差 ≤ `range/2044`（比任务 7 再小一半），实测**恰好压在上界**：6→0.002935、32→0.015656、48→0.023483、68→0.033268。
-- 与 §8.4 建议的 `center=(bboxMin+bboxMax)/2`、`halfExtent=maxExtent/2` **完全等价**（`signed/511×halfExtent == signed/1022×range`）；
+- 精度步长 $ \text{range}/1022 $ 、往返误差 $ \le \text{range}/2044 $ （比任务 7 再小一半），实测**恰好压在上界**：6→0.002935、32→0.015656、48→0.023483、68→0.033268。
+- 与 §8.4 建议的 $ \text{center}=(\text{bboxMin}+\text{bboxMax})/2 $ 、 $ \text{halfExtent}=\text{maxExtent}/2 $ **完全等价**（ $ \text{signed}/511\times\text{halfExtent} == \text{signed}/1022\times\text{range} $ ）；
   **§8.4 中"沿用 bboxMin 基准"的旧表述就此作废**（任务 7 的取舍项结案）。
 - 口径钉死：抽出共用的 `ComputeMeshBounds()`，任务 9 的 DAG 哈希与任务 10 的打包共用同一函数；打包器还会把 DAG 的位置词**逐位重算比对**（`positionMismatchCount` 实测恒 0）。
 
@@ -2888,8 +2888,8 @@ LOD 级数 0/1/2/4/5/8 的段长取整）。**没有为凑数加用例**；完�
 **① 契约核实**：`Engine/Render/Pipeline/GPUScene.h:26-40` 定义 `GPUSceneObject`（`localToWorld` 64B + `boundsMin/boundsMax` 各 16B + 8×u32 + pad，`static_assert(sizeof==128)` 在同文件 `:40`）。
 `NaniteTypes.h` 放 RHI-free 同布局镜像 `NaniteInstanceGpuObject`（`alignas(16)` + 12 条 `offsetof` 断言）；**跨契约钉子在 `NaniteCull.cpp`**（include 真身头，`sizeof` 与逐字段 `offsetof` 双重 `static_assert`）——任一边漂移即编译失败。
 
-**② 口径**：视锥平面与 `Math/Geometry.h` 的 `he::Frustum` **逐字同源**（`dot(n,p)+d>=0` 在内侧、顺序左右下上近远、Gribb/Hartmann + 归一化、Vulkan `[0,1]` 深度取 row2）；
-球判据 `dot(n,c)+d < -radius ⇒ 不可见`（无 epsilon，与 `Frustum::Intersects(Sphere)` 一致）；包围球由 128B 契约的 `boundsMin/Max` 推出，
+**② 口径**：视锥平面与 `Math/Geometry.h` 的 `he::Frustum` **逐字同源**（ $ \text{dot}(n,p)+d>=0 $ 在内侧、顺序左右下上近远、Gribb/Hartmann + 归一化、Vulkan `[0,1]` 深度取 row2）；
+球判据 $ \text{dot}(n,c)+d < -\text{radius} $ ⇒ 不可见（无 epsilon，与 `Frustum::Intersects(Sphere)` 一致）；包围球由 128B 契约的 `boundsMin/Max` 推出，
 **CPU 与 GPU 读同一张 16B 球表的同一份比特**（避免 GPU 现推 sqrt/FMA 的末位差异翻转"恰切平面"的可见性）。
 
 **③ 实例来源（如实）**：cfg 键 `nanite_instance_test_count`（默认 64，钳 [0,256]）生成的**合成实例网格**（NDC 网格经 `inverse(viewProj)` 反投影到世界空间、
@@ -2931,13 +2931,13 @@ on vs off 转储逐位 `must_same_diff=0`。
   算面积代价（或做分桶），既有浮点分箱又有"桶边界 vs 精确坐标"的对比；本任务的验收是**可复现**与
   CPU/GPU 逐项一致，中点分裂只有"一次排序 + 一次扫描"，确定性与可解释性都更强，且沿分裂轴产生
   **互不重叠**的孩子体积 —— 对"节点不可见 ⇒ 整棵子树跳过"的早退最有利。
-- **回退（保证终止 + 保证平衡）**：一侧为空（质心全相同 / 极密集 / NaN）**或**任一侧不足 `ceil(n/3)` 时，
+- **回退（保证终止 + 保证平衡）**：一侧为空（质心全相同 / 极密集 / NaN）**或**任一侧不足 $ \lceil n/3 \rceil $ 时，
   退回**按数量中位数**（前半 n/2）分裂。
   **护栏不是预防性设计，是实测踩出来的**：先只做"一侧为空才回退"时，Sponza 合并几何（8287 簇）的树
   **深度恰好顶到上限 24、叶子 3103、节点 6205**（大量 1~2 簇的叶子）—— 根因是中点分裂遇到
   "少量离群簇 + 一大团"的分布时会一次只切掉 1~2 个簇。加 n/3 护栏后同一资产变成
-  **节点 5345 / 叶子 2673 / 深度 15**，且深度有了**闭式上界**：每次分裂规模 ≤ `ceil(2n/3)` ⇒
-  `depth ≤ 1 + log₁.₅(n / 叶子容量)`，对 `n ≤ kNaniteMaxBVHClusters`(16384) 恒 ≤ 22 < 24
+  **节点 5345 / 叶子 2673 / 深度 15**，且深度有了**闭式上界**：每次分裂规模 $ \le \lceil 2n/3 \rceil $ ⇒
+  `depth ≤ 1 + log₁.₅(n / 叶子容量)`，对 $ n ≤ \text{kNaniteMaxBVHClusters} $ (16384) 恒 ≤ 22 < 24
   ⇒ 深度上限退化回**安全网**而不是树形的决定因素（单测直接断言这条上界）。
 - **叶子容量 4**：每簇球很小（≤64 tri），4 个簇的叶子球仍然紧，叶子内至多 4 次球测试。
 - **深度硬上限 24 / 显式栈 32**：见②。**确定性**：不含随机数、不读时间、不并行；排序比较器带
@@ -2946,7 +2946,7 @@ on vs off 转储逐位 `must_same_diff=0`。
 **② 遍历实现（CPU 参考 + GPU 显式栈，逐条同构）**
 - **CPU 参考**（`NaniteTraverseClusterBVHCPU`，放 `NaniteTypes.h` 的 inline 纯函数）：逐实例做一次 DFS，
   每弹出一个结点即 `visitedNodes += 1`（**先计数、后判可见**），结点球不可见 ⇒ 整棵子树跳过；叶子对
-  `[left, left+count)` 逐个簇做球测试。判据复用任务 13 的 `NaniteSphereVisibleInFrustum`（`dot(n,c)+d < -r`
+  `[left, left+count)` 逐个簇做球测试。判据复用任务 13 的 `NaniteSphereVisibleInFrustum`（ $ \text{dot}(n,c)+d < -r $
   ⇒ 不可见，无 epsilon），与 GPU 同一表达式。**显式栈**：`u32 stack[kNaniteBVHMaxStackDepth]`（**无分配**）。
 - **GPU**（`Nanite_ClusterBVH.comp.slang`）：`[numthreads(64,1,1)]`，**一个线程一个实例**（本任务的实例域
   上限 64 ⇒ 1 个 workgroup 就够；PTG / work-stealing 属性能任务，不在本任务）。栈是 shader 私有数组
@@ -2973,7 +2973,7 @@ on vs off 转储逐位 `must_same_diff=0`。
   构建器因此天然可单测。
 
 **④ GPU 侧接线（缓冲 / 描述符 / pass / 清零）**：`NaniteCull` 自持 7 个缓冲 —— 节点（32768 条）、叶子簇表
-（16384 条）、簇球（16384 条）、可见簇引用（1048576 条 = 64 × 16384，8MB）、可见簇计数、已访问节点计数、
+（16384 条）、簇球（16384 条）、可见簇引用（ $ 1048576 = 64 \times 16384 $ 条，8MB）、可见簇计数、已访问节点计数、
 8B 常驻 0 的清零源；7 个显式 SSBO 绑定（复用任务 13 的 128B 实例表缓冲）+ 112B push constant
 （6 平面 + instanceCount/clusterCount/nodeCount/visibleCapacity）。**两个计数每帧在命令缓冲内用 4B 拷贝
 清 0**（同一个 8B 零源的前后两半），照任务 13 的修法，**不用主机写**。新 pass `Nanite_ClusterBVH` 注册在
@@ -3026,7 +3026,7 @@ on vs off 转储逐位 `must_same_diff=0`。
 
 **① 最重要的一条发现（计划盲点，比任务本身更有价值）：`GPUCulling::BuildHiZPyramid` 在本引擎里构建不出正确金字塔，且从未被执行过。**
 - 位置：`GPUCulling::BuildHiZPyramid` = `Engine/Render/Pipeline/GPUCulling.cpp:478-543`；纹理 `GetHiZTexture()` = `GPUCulling.h:97`；层数上限 `kHiZMips=8` = `GPUCulling.h:130`；
-  格式 `R32_FLOAT`、层 L 存 `2^L×2^L` 足迹的**最小深度**（`HiZDownsample.comp.slang:31`）；深度为标准 Vulkan `[0,1]`（近=0）——三处交叉确认。
+  格式 `R32_FLOAT`、层 L 存 $ 2^L\times 2^L $ 足迹的**最小深度**（`HiZDownsample.comp.slang:31`）；深度为标准 Vulkan `[0,1]`（近=0）——三处交叉确认。
 - 实测：直接复用 ⇒ Hi-Z 剔掉 87% 的簇 ⇒ 逐层采样发现 **mip0/1/4/7 全为 0**（而深度纹理本身实测 ≈0.9998）。
 - **根因（用两个对照实验钉死）**：该函数在循环里**逐 mip 更新同一个描述符集**，而本引擎的 GPU 在**执行期**读描述符、**最后一次主机写对整段命令缓冲生效**：
   ① 同一个 UB 先写 A、录 Dispatch、再写 B ⇒ GPU 读到 **B**；② 在 Dispatch **之后**改绑深度纹理 ⇒ 该次派发采样读到深度值 **0.9999**。
@@ -3042,8 +3042,8 @@ on vs off 转储逐位 `must_same_diff=0`。
 （新 `Nanite_CullChain3`，注册在 `AddPostGBufferPasses`，声明 `reads={gbDepth}` 以被定序在 `GB_Clear` 之后），顺序由命令缓冲里的 `PipelineBarrier` **显式**给出 —— 比声明一条帧图依赖更强。
 代价（如实）：开启档 pass 数 16→**15**（`Nanite_InstanceCull` + `Nanite_ClusterBVH` 合并为 `Nanite_CullChain3`，`nanite_passes` 4→3）；判据 ⑥b 只要求"多出 Nanite pass 且既有集合与顺序不变"，仍 PASS。
 
-**③ LOD 选择（含一处量纲修正）**：设计 §5.1 的 `projectedError = maxError / distance`、阈值 1 像素**量纲不自洽**，必须乘像素焦距：
-`projectedErrorPixels = maxError / distance × focalPixels`，`focalPixels = 0.5×screenH/tan(fovY/2)`（从 `CameraData::fov` 算，**不**反解 viewProj 的 m11，它被视图旋转污染）；阈值取原文 `1.0` 像素，判据写成乘法形式减少舍入。
+**③ LOD 选择（含一处量纲修正）**：设计 §5.1 的 $ \text{projectedError} = \text{maxError} / \text{distance} $ 、阈值 1 像素**量纲不自洽**，必须乘像素焦距：
+$ \text{projectedErrorPixels} = \text{maxError} / \text{distance} \times \text{focalPixels} $ ， $ \text{focalPixels} = 0.5\times\text{screenH}/\tan(\text{fovY}/2) $ （从 `CameraData::fov` 算，**不**反解 viewProj 的 m11，它被视图旋转污染）；阈值取原文 `1.0` 像素，判据写成乘法形式减少舍入。
 DAG 割用任务 9 的 `maxParentLODError`：`ownError` = 孩子记录的该值（叶子 0）、`parentError` = 本簇自己的该值（根 0）；选本簇 ⇔ `ownError ≤ 阈值` 且（根 或 `parentError > 阈值`），
 **根必须靠显式根位判定**（只看数值会把根永远筛掉）。误差随级单调 ⇒ 每条链至多一个交点、实测恰好选中一级（单测断言）。LOD 元数据由新增
 `BuildNaniteClusterLODInfo()` 从簇记录 + LOD 段推出（16B/条，CPU 与 GPU 读同一份比特）。
@@ -3052,7 +3052,7 @@ DAG 割用任务 9 的 `maxParentLODError`：`ownError` = 孩子记录的该值�
 - `nanite_hiz=0`（**默认**）两次同参数读数**逐位相同**且 **GPU 与 CPU 参考逐簇一致**：
   `cull3 phase1=61 phase2=120561 phase3=31648 hiz=off gpu_clusters=31648 cpu_clusters=31648 mismatch=0 lod=[7553,23973,122,0,0,0,0,0] cpu_lod=[同] extra_gpu=0 occluded=0 inst_mismatch=0 nodes=5345 depth=15 visited=140495`。
 - `nanite_hiz=1`：`phase2=64215 phase3=18888 gpu_clusters=18888 cpu_clusters=31648 mismatch=12760 extra_gpu=0 occluded=56346 occl_mip=[0,0,0,0,0,244,3000,9516] hiz_req=1 hiz_mips=8`，
-  且 **12760 = 244+3000+9516**（差集恰好是投影盒落在金字塔 5/6/7 层的那批簇）⇒ 差异**可量化解释**；`extra_gpu=0` 证明 Hi-Z 只会"少"不会"多"（保守方向）。
+  且 **$ 12760 = 244+3000+9516 $**（差集恰好是投影盒落在金字塔 5/6/7 层的那批簇）⇒ 差异**可量化解释**；`extra_gpu=0` 证明 Hi-Z 只会"少"不会"多"（保守方向）。
 - `off vs on`（含 `hiz=on`）转储逐位：`must_same_diff=0`（仅 3 个抖动族文件不同）。
 - 任务 3 假簇读数仍 `6/6/6/6`（**顺手修掉了它的同类竞态**：三处每帧主机写改为命令缓冲内拷贝，含 20KB 常驻 0xFF 哨兵整块拷贝，末尾屏障 srcStage 补 `Transfer`）。
 
@@ -3087,17 +3087,17 @@ Nanite_CullChain3（单个帧图 pass 体）
 
 | 命令字段 | 取值 | 依据 |
 |---|---|---|
-| `indexCount` | `triangleCount × 3` | 簇内**索引个数**（`NaniteClusterRecord::triangleCount` ≤ 64） |
-| `firstIndex` | `triangleOffset × 3` | 簇在打包索引段里的**首个索引位置**（索引段是 3×u16 进 u32[2] = 8B/三角形，故"索引位置"与索引宽度无关） |
+| `indexCount` | $ \text{triangleCount} \times 3 $ | 簇内**索引个数**（`NaniteClusterRecord::triangleCount` ≤ 64） |
+| `firstIndex` | $ \text{triangleOffset} \times 3 $ | 簇在打包索引段里的**首个索引位置**（索引段是 3×u16 进 u32[2] = 8B/三角形，故"索引位置"与索引宽度无关） |
 | `vertexOffset` | `vertexOffset`（原样搬运） | 簇的顶点段起始**记录下标** |
 | `instanceCount` | `1` | 一个簇 = 一次绘制 |
 | `firstInstance` | **簇号**（簇表下标） | 光栅端用 `SV_InstanceID` 收它；也是"每条命令归属哪个簇"的唯一标识 |
 
 **③ "无空转"的三重保证（逐条可查）**
 1. **同一次派发写出**：命令与可见簇引用写在同一原子槽位 `slot`；绘制计数只在"真的写了命令"时 +1
-   ⇒ `u_DrawCount` 恒等于"命令缓冲里 `[0, count)` 的有效条数"，不存在"没写就画"。
-2. **只画 `[0, count)`**：`DrawIndexedIndirectCount` 的条数由 GPU 写出（CPU 不参与），
-   `maxDrawCount` 只是容量上界；`drawCapacity ≤ 容量` 是 CPU 侧钳制 ⇒ `count ≤ maxDrawCount` 恒成立
+   ⇒ `u_DrawCount` 恒等于"命令缓冲里 $ [0, \text{count}) $ 的有效条数"，不存在"没写就画"。
+2. **只画 $ [0, \text{count}) $**：`DrawIndexedIndirectCount` 的条数由 GPU 写出（CPU 不参与），
+   `maxDrawCount` 只是容量上界；`drawCapacity ≤ 容量` 是 CPU 侧钳制 ⇒ $ \text{count} ≤ \text{maxDrawCount} $ 恒成立
    （`IRHICommandList::DrawIndexedIndirectCount` 的硬约束）。
 3. **不残留上一帧命令**：绘制计数每帧在**命令缓冲内**用 4B 拷贝清 0（常驻 0 源，任务 13/15 的修法）；
    零可见簇时计数为 0 ⇒ 画 0 条。**全链路没有一处主机写清零**（任务 13 实测主机写会错读成两倍）。
@@ -3120,7 +3120,7 @@ Nanite_CullChain3（单个帧图 pass 体）
   但 `DrawIndexedIndirectCount` 会拿命令里的真实 `firstIndex/indexCount` 去**绑定索引缓冲**取索引。
   本设备**未启用** `robustBufferAccess`，越界读索引不是定义行为 ⇒ 缓冲容量按**资产的索引总数**
   （`header.indexCount`，实测 1,571,091）分配、并钳到可证上界 `簇数上限 × 每簇三角形上限 × 3`。
-  内容 = `0,1,2` 周期模式：任意 `[firstIndex, firstIndex+indexCount)`（两端都是 3 的倍数）都读出
+  内容 = `0,1,2` 周期模式：任意 $ [\text{firstIndex}, \text{firstIndex}+\text{indexCount}) $ （两端都是 3 的倍数）都读出
   `{0,1,2}` 周期序列 ⇒ 顶点着色器按 `SV_VertexID % 3` 取角 ⇒ **每个三角形都非退化**、每个绘制至少
   1 个片元（退化三角形会被光栅器整块丢弃，计数就不可信）。
 - **计数语义改为"每个绘制恰好一次"**：任务 16 起 `indexCount` 是簇的真实索引数（最多 192）⇒ 一条命令
@@ -3144,11 +3144,11 @@ Nanite_CullChain3（单个帧图 pass 体）
 ```
 
 - `visible` = 可见簇计数缓冲（剔除端原子）——"应该画多少条"；
-- `indirect_count` = 间接命令缓冲 `[0, visible)` 里**字段合法且与 CPU 参考逐字段一致**的条数
+- `indirect_count` = 间接命令缓冲 $ [0, \text{visible}) $ 里**字段合法且与 CPU 参考逐字段一致**的条数
   （CPU 逐字节读回 GPU 内存核验）——"命令缓冲里真的有这么多条"；
 - `draws` = 绘制计数缓冲（= `DrawIndexedIndirectCount` 实际用的 count）——"间接参数条数"；
 - `rasterized` = 绘制端片元 `SV_PrimitiveID == 0` 的原子计数——"GPU 真的执行了这么多次绘制"；
-- `empty_draws = visible − rasterized`（画了却没出片元的条数，必须 0）；
+- $ \text{empty\_draws} = \text{visible} − \text{rasterized} $ （画了却没出片元的条数，必须 0）；
 - `mismatch` = 逐条字段不一致数 + |V−C| + |V−D| + |D−R|（正常运行必须 0）。
 - 两个"边界"自证开关：`nanite_draw_capacity`（截断）与 `nanite_instance_test_count=0`（零可见簇）。
 
@@ -3208,11 +3208,11 @@ Nanite_CullChain3（单个帧图 pass 体）
 
 | 档 | Extra | 判据 |
 |---|---|---|
-| default | `nanite_enable=1` | `mismatch=0`（GPU 与 CPU 参考逐簇一致）、`extra_gpu=0`、`occl_mip` 八项全 0、`gpu=cpu`；接线 `V=C=D=R`、`empty_draws=mismatch=truncated=0`、`src=visible`、`cpu_cmds=V`；非空转守卫 `visible>0` |
-| hiz1 | `+nanite_hiz=1` | `extra_gpu=0` 且 `mismatch == sum(occl_mip)`；`hiz=on`、`hiz_req=1`、`hiz_mips>=2`；守卫 `sum>0`、`gpu<cpu`、`gpu+mismatch=cpu` |
+| default | `nanite_enable=1` | `mismatch=0`（GPU 与 CPU 参考逐簇一致）、`extra_gpu=0`、`occl_mip` 八项全 0、`gpu=cpu`；接线 $ V = C = D = R $ 、`empty_draws=mismatch=truncated=0`、`src=visible`、`cpu_cmds=V`；非空转守卫 `visible>0` |
+| hiz1 | `+nanite_hiz=1` | `extra_gpu=0` 且 $ \text{mismatch} == \text{sum}(\text{occl\_mip}) $ ；`hiz=on`、`hiz_req=1`、`hiz_mips>=2`；守卫 $ \text{sum}>0 $ 、 $ \text{gpu}<\text{cpu} $ 、 $ \text{gpu}+\text{mismatch}=\text{cpu} $ |
 | ic8 | `+nanite_instance_test_count=8` | 同 default 档 |
-| ic0 | `+nanite_instance_test_count=0` | `phase1=2=3=0`、`gpu=cpu=0`、`mismatch=0`；接线 `V=C=D=R=0` 且 `src=visible`（零可见簇必须仍走可见链，走假簇链会把边界掩盖掉） |
-| cap1000 | `+nanite_draw_capacity=1000` | `mismatch=0`（容量不影响剔除输出）；`draws=rasterized=indirect_count=1000=容量`、`truncated>0`、`truncated=empty_draws=visible-rasterized`、`mismatch==|V-C|+|V-D|+|D-R|` |
+| ic0 | `+nanite_instance_test_count=0` | `phase1=2=3=0`、`gpu=cpu=0`、`mismatch=0`；接线 $ V = C = D = R = 0 $ 且 `src=visible`（零可见簇必须仍走可见链，走假簇链会把边界掩盖掉） |
+| cap1000 | `+nanite_draw_capacity=1000` | `mismatch=0`（容量不影响剔除输出）；`draws=rasterized=indirect_count=1000=容量`、 $ \text{truncated}>0 $ 、 $ \text{truncated}=\text{empty\_draws}=\text{visible}-\text{rasterized} $ 、`mismatch==|V-C|+|V-D|+|D-R|` |
 
 每档另查三件事（都属既有口径）：① 引擎日志 `[Nanite] 配置恢复:` 必须逐键等于本档请求（防 Extra 被静默丢弃——此坑已踩两次）；
 ② 本档开启列表去掉 `Nanite*` 行后逐字节哈希 == 冻结关闭档指纹 `1C15AB72E688B530…`，且五档 `passlist_sha` 唯一；
@@ -3229,13 +3229,13 @@ Nanite_CullChain3（单个帧图 pass 体）
 [5/5] cap1000  hiz=off visible= 31648 mismatch=     0 extra_gpu=    0 occl_mip_sum=     0 gpu/cpu=31648/31648 draws=  1000 rasterized=  1000 truncated= 30648 => OK
 CULL DIFF: PASS
 ```
-`hiz1` 的 `12760 = 244+3000+9516 = sum(occl_mip)`（与任务 15 逐位一致）；`cap1000` 的 `30648 = 31648-1000`。
+`hiz1` 的 $ 12760 = 244+3000+9516 = \text{sum}(\text{occl\_mip}) $ （与任务 15 逐位一致）；`cap1000` 的 $ 30648 = 31648-1000 $ 。
 **N2 阶段收口实测**：`ACCEPTANCE SWEEP: PASS`（七条判据：白炉 1.0000、背靠背严格 0、关 Lumen 0、默认预设严格 0、单测全绿、开关不变式、cull diff）。
 
 **⑤ 判据 ⑦ 接入方式与理由**：放在判据 ⑥ 之后、`if (-not $OnlyNanite)` **之外** ⇒ 全量与 `-OnlyNanite` 都跑
 （⑥⑦ 同属 Nanite 不变式，排除 ⑦ 会让"一条命令覆盖 Nanite"失真；代价 `-OnlyNanite` 从 ~50 s 变 ~4 min）；
 用**子进程**调用（工具以 `exit 0/1` 收尾，进程内调用会把整个验收脚本一起结束）；**不加 `-SkipHeavy`**，让复现性证据进入一条命令的验收。
-另做了**负向验证**（副本把 hiz 档判据改成 `mismatch == sum(occl_mip)+1` ⇒ 仅该档 FAIL、`CULL DIFF: FAIL`、exit 1，副本在 `%TEMP%`，未入仓库）⇒ 判据非空转。
+另做了**负向验证**（副本把 hiz 档判据改成 $ \text{mismatch} == \text{sum}(\text{occl\_mip})+1 $ ⇒ 仅该档 FAIL、`CULL DIFF: FAIL`、exit 1，副本在 `%TEMP%`，未入仓库）⇒ 判据非空转。
 
 **⑥ 偏差与风险（不掩盖）**
 1. 判据不重算可见簇集合，只消费引擎已打印的读数（这正是"同源"的实现方式）；读数行被改坏时只能由"字段缺失/配置回显不符/passlist 指纹不符"间接发现。
@@ -3288,7 +3288,7 @@ CULL DIFF: PASS
   **等值复检**，相等才写 albedo / normal / worldPos / lightmapKey ⇒ 每像素恰好一个三角形写一次，
   多目标天然一致。**实测自洽**：无重叠场景下第 1 趟覆盖像素数 == 第 2 趟写入像素数
   （3264 == 3264）；满覆盖档 3.14 亿次覆盖 → 4431 万次写入（重叠由等值复检去重）。
-- **只对 `triangleCount <= maxTriangles`（默认 16 = §5.2）的簇走软光栅**，超过的簇跳过并计数
+- **只对 $ \text{triangleCount} <= \text{maxTriangles} $ （默认 16 = §5.2）的簇走软光栅**，超过的簇跳过并计数
   （`skipped_big`），留给任务 22 的 mesh 硬光栅；阈值可配 `nanite_soft_max_triangles`（1..64）。
 - **材质**：资产材质段为空（任务 19 才解析）⇒ 中性常数 `albedo = 0.8`、`metallic = 0`、
   `roughness = 0.5`，并用 `neutral_material_pixels` 如实标出（不假装是真材质）。
@@ -3337,7 +3337,7 @@ CULL DIFF: PASS
    depth_src=key+SV_Depth max_triangles=16 instances=64 depth_key_pixels=2073600 covered_px=3264
    diag_screenw=1920 diag_screenh=1080 diag_maxtri=16 diag_extent_milli=3720854 tested_px=9767`
   （**Sponza 的簇绝大多数是满簇 64 tri ⇒ 阈值 16 下只有 61 个簇、3264 个像素**；
-   `covered_px == pixels_written` 证明两趟逐位一致）。
+   $ \text{covered\_px} == \text{pixels\_written} $ 证明两趟逐位一致）。
 - 满覆盖档（`nanite_soft_max_triangles=64`）：`soft=31648 skipped_big=0 triangles=1758608
    pixels_written=44318207 degenerate=262899 covered_px=314423307 tested_px=1112509107`，
   整档 117 s（121 帧）。
@@ -3465,7 +3465,7 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
 
 **① 簇 → 源网格 → 材质的映射（本任务的关键）**
    · 源区间来自 `MeshBatcher::GetDrawCommands()`（`firstIndex/indexCount`；索引已加 baseVertex，
-     `MeshBatcher.cpp:53`）⇒ 三角形区间 `[firstIndex/3,(firstIndex+indexCount)/3)`，首尾相接、升序；
+     `MeshBatcher.cpp:53`）⇒ 三角形区间 $ [\text{firstIndex}/3,(\text{firstIndex}+\text{indexCount})/3) $ ，首尾相接、升序；
      簇的区间 = `NaniteClusterRecord::triangleOffset/triangleCount`。
    · 新规则函数 `NaniteAssignClusterMaterials`（`NaniteUpload.{h,cpp}`，RHI-free、可单测）：
      **三角形多数票**归属；**平票取下标更小的网格**；一个三角形都落不进任何区间 ⇒ `unmappedClusters`
@@ -3496,8 +3496,8 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
 
 **③ 软光栅取真实材质（不再有中性常数）**
    · `softRasterEvaluateMaterial`（`Nanite_SoftRasterCommon.slang`）逐句复制
-     `GBuffer.frag.slang:57-81` 的公式：`albedo = baseColorFactor.rgb × Sample(BaseColor,uv)`、
-     `metallic = metallicFactor × Sample(MR,uv).b`、`roughness = clamp(roughnessFactor × Sample(MR,uv).g,0.04,1)`；
+     `GBuffer.frag.slang:57-81` 的公式： $ \text{albedo} = \text{baseColorFactor.rgb} \times \text{Sample}(\text{BaseColor},uv) $ 、
+     $ \text{metallic} = \text{metallicFactor} \times \text{Sample}(\text{MR},uv).b $ 、 $ \text{roughness} = \text{clamp}(\text{roughnessFactor} \times \text{Sample}(\text{MR},uv).g,0.04,1) $ ；
    · 采样必须用 `SampleLevel(...,0)`：compute 入口 `[numthreads(16,1,1)]` 没有 2×2 派生组，
      `Sample` 会报 `E31210`（实测）。**代价如实记**：只采 mip0，既有片元路径有隐式 LOD。
    · 材质段用**普通 SSBO（binding 12）**绑定；纹理/采样器数组（binding 13/14）走
@@ -3514,7 +3514,7 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
 **④ 验收证据（真实 GPU 读回 + 同场景同相机转储对照，参考档 = `nanite_off`）**
    · 阈值 16：`soft=61 pixels_written=3264 material_pixels=3264 neutral_material_pixels=0 fallback_pixels=0`；
      阈值 64：`soft=31648 pixels_written=44318207 material_pixels=44318207 neutral=0 fallback=0`
-     （`material_pixels == pixels_written` 逐档成立）。
+     （ $ \text{material\_pixels} == \text{pixels\_written} $ 逐档成立）。
    · 映射读数：`materials=103 distinct_materials=103 textured_materials=103 multi_mesh_clusters=97`；
      资产上传 `upload_bytes=13406096 readback_match=1 mismatch_bytes=0`（材质段 103 条 ×32B）。
    · 材质**逐项对照**（`build/verify/p1_matcmp.py`，阈值 64 的 919956 个写入像素；
@@ -3603,7 +3603,7 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
   `kNaniteSoftStatDepthResolvedPixels = 14`，C++/Slang 两侧同步 + 注释对齐）。
   语义是**去重后的像素数**（全屏片元对每个像素只访问一次），与第 2 趟的 `pixels_written`
   （通过等值复检的"簇×三角形×像素"写次数）不是同一个量；可核对的不变式是
-  `depth_written <= pixels_written <= covered_px`（实测两档都成立）。
+  $ \text{depth\_written} <= \text{pixels\_written} <= \text{covered\_px} $ （实测两档都成立）。
   交叉核对：阈值 64 档 `depth_written=921399`，与判据 ⑧c 的写标记计数
   （`gb_lightmapkey` 落在 Nanite 段的像素）**同一个数** —— 两条互不相干的路径给出同一个值。
 
@@ -3628,16 +3628,16 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
 | 对照：`nanite_soft_raster=0` | 32031 | 7498 | `[0,0,0,0,0,61,1950,5487]` | `[0.999821,0.999795]` |
 
 - **默认档（阈值 16）下 Hi-Z 恢复为"真的在按深度剔除"**：`extra_gpu=0`、
-  `mismatch == sum(occl_mip)`（4 == 4）、`gpu_clusters + mismatch == cpu_clusters`（31644+4=31648）、
-  `gpu < cpu`、`sum > 0` —— 判据 ⑦ `hiz1` 档的全部守卫**现在都成立**（修前 `sum=0` 直接判空转）。
+  $ \text{mismatch} == \text{sum}(\text{occl\_mip}) $ （ $ 4 == 4 $ ）、 $ \text{gpu\_clusters} + \text{mismatch} == \text{cpu\_clusters} $ （ $ 31644+4=31648 $ ）、
+  $ \text{gpu} < \text{cpu} $ 、 $ \text{sum} > 0 $ —— 判据 ⑦ `hiz1` 档的全部守卫**现在都成立**（修前 `sum=0` 直接判空转）。
 - **阈值 64 档**给出"深度场完整时"的量级（48150），与对照档（32031）同量级，且 `hiz_half`
   不再是 1.0（`0.999845`）⇒ 深度附件里确实有几何深度。
 - 真实读数（不再恒 1）：阈值 16 ⇒ `pixels_written=3053 depth_written=101`；
   阈值 64 ⇒ `pixels_written=44318207 depth_written=921399`（**不变式成立**：
-  `101 ≤ 3053 ≤ 3053`、`921399 ≤ 44318207 ≤ 314423307`）。
+  $ 101 ≤ 3053 ≤ 3053 $ 、 $ 921399 ≤ 44318207 ≤ 314423307 $ ）。
 - **判据 ⑧（任务 20/21 的画面级对照）随之回到 PASS**：`(8e)` 开启档去掉 Nanite pass 后与关闭档
-  **逐行相同**、sha 命中冻结值 `1C15AB72E688B530…`；`(8a)` `V=C=D=R`、`material_pixels ==
-  pixels_written`、`neutral_material_pixels=0`；`(8b)` 差异**恰好**是 4 张 GBuffer 目标 + 3 个抖动族
+  **逐行相同**、sha 命中冻结值 `1C15AB72E688B530…`；`(8a)` $ V = C = D = R $ 、
+  $ \text{material\_pixels} == \text{pixels\_written} $ 、`neutral_material_pixels=0`；`(8b)` 差异**恰好**是 4 张 GBuffer 目标 + 3 个抖动族
   （`unexpected=0 missing=0`）；`(8c)` 阈值 64 档 `gb_worldpos corr=0.9290 ≥ 0.90`、
   `metallic 直方图 corr=0.9993 ≥ 0.99`、roughness 边界与参考相同、写标记 **921399 px**；
   `(8d)` `vuid_lines off=41 on=42 delta=1`、`new VUID type=0`。
@@ -3699,7 +3699,7 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
 
 ### 14.31 任务 22 实施记录：mesh shader 硬光栅 + 软硬分流（2026-09-21）
 
-**目标**：按 §5.2 让 `triangleCount > softMaxTriangles`（默认 16）的簇走 mesh shader 硬光栅，
+**目标**：按 §5.2 让 $ \text{triangleCount} > \text{softMaxTriangles} $ （默认 16）的簇走 mesh shader 硬光栅，
 `<= 16` 的仍走既有 compute 软光栅；验收 = 混合光栅画面一致 + 软硬占比可读。
 
 **① 分流契约（两侧用同一份判据，故可证"并集全覆盖 + 交集为空"）**
@@ -3716,9 +3716,9 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
 **`colorLoadOp=Load` + `depthLoadOp=Load`**（Load 是关键：Clear 会抹掉软光栅刚写的结果）、
 8 个颜色附件 + per-MRT `writeMask`（只写 MRT0/1/4/7）。
 关键推导（**已复核并纠正了本文档上一轮的判断**）：
-- `dh < ds` ⇒ 深度测试通过 ⇒ 硬颜色**覆盖**软颜色、深度改写为 `dh` ⇒ **硬遮软 ✓**；
-- `dh > ds` ⇒ 测试失败 ⇒ 硬片元丢弃、软颜色保留 ⇒ **软遮硬 ✓**；
-- 无软几何的像素 `ds = 1.0` ⇒ 硬照常写入 ✓。
+- $ dh < ds $ ⇒ 深度测试通过 ⇒ 硬颜色**覆盖**软颜色、深度改写为 `dh` ⇒ **硬遮软 ✓**；
+- $ dh > ds $ ⇒ 测试失败 ⇒ 硬片元丢弃、软颜色保留 ⇒ **软遮硬 ✓**；
+- 无软几何的像素 $ ds = 1.0 $ ⇒ 硬照常写入 ✓。
 ⇒ **遮挡正确性只取决于"后写者是否带深度测试"，与"谁先写"无关**。方案 (a)（硬在前）才是真的只成立
 一半 —— 软颜色趟的等值复检只对照**软自己的深度键**，看不见硬几何。方案 (c)（从 D32 播种深度键）
 在 (b) 已两向正确时属纯增量风险，未采纳。
@@ -3743,7 +3743,7 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
 - 硬光栅 `clusters=31587` **== `skipped_big`** ⇒ 大簇 **100% 被接手**（不是"几百"）；
 - `fallback_pixels=0` ⇒ 硬光栅写的是**资产材质**、没有退化成中性常数；
 - `mesh_supported=1 pso=ok` ⇒ 走的是**真硬件路径**，不是"设备不支持"的降级；
-- **交叉核对**：硬 `prims=2021446` vs 全软档 `triangles+degenerate=1758608+262899=2021507`（差 61 =
+- **交叉核对**：硬 `prims=2021446` vs 全软档 $ \text{triangles}+\text{degenerate}=1758608+262899=2021507 $ （差 61 =
   小簇）；硬 `pixels=308.8M` vs 全软档 `covered_px=314.4M`（差 1.8%）。
 - `hard_share_permille` 是**片段数**之比（含过绘），**不是屏幕覆盖率**，口径已在报告里写明。
 - 关闭档（`hardRaster=0`）**不打印该行** ⇒ 关闭档日志与基线一致（既有纪律）。
@@ -4297,17 +4297,17 @@ LOD0 真值逐簇一致、无归属顶点簇 0、几何核对越界 0，并断�
 | # | 已知故障模式（出处） | 今天的可观测手段 | 缺口 |
 |---|---|---|---|
 | 1 | **深度解析不写深度**（§14.30 ②③：`depthTest=false` 丢 `SV_Depth`；`GetDimensions` 一维/二维混用） | `soft_raster` 的 `depth_written`（已改成真实原子计数）+ `cull3` 的 `hiz_half` / `occl_mip` | 无（已可观测；**但转储里没有深度目标**，只能间接看） |
-| 2 | **恒真读数掩盖缺陷**（§14.30 4a：`depth_written` 曾硬编码 1） | **新增读数自检**（`size_dist` 行追加 `stat_ok` / `const_suspect`，可疑时打告警级日志）：① 三条**无需新增输入**的已知关系式判定"读数是否真来自本帧 push constant"——`diag_screenw × diag_screenh == depth_key_pixels`、`diag_maxtri == 上次送下去的 maxTriangles`、场景非空时 `diag_extent_milli > 0`；② 逐槽记录"是否曾经变化过"，检出**非 0 且从未变过**的槽 | **已闭合**（任务 26 本轮）。已验证**非空转**：把其中一条关系式故意反置 ⇒ `stat_ok=0` 且告警按预期打出实测值，还原后复测 `stat_ok=1`、无告警。**如实标注一处局限**：② 在"本次读回里一个槽都没变"（相机固定、整轮只转储一帧）时**无法判定**，此时不报警（宁可漏报、不误报） |
+| 2 | **恒真读数掩盖缺陷**（§14.30 4a：`depth_written` 曾硬编码 1） | **新增读数自检**（`size_dist` 行追加 `stat_ok` / `const_suspect`，可疑时打告警级日志）：① 三条**无需新增输入**的已知关系式判定"读数是否真来自本帧 push constant"——$ \text{diag\_screenw} \times \text{diag\_screenh} == \text{depth\_key\_pixels} $ 、`diag_maxtri == 上次送下去的 maxTriangles`、场景非空时 $ \text{diag\_extent\_milli} > 0 $ ；② 逐槽记录"是否曾经变化过"，检出**非 0 且从未变过**的槽 | **已闭合**（任务 26 本轮）。已验证**非空转**：把其中一条关系式故意反置 ⇒ `stat_ok=0` 且告警按预期打出实测值，还原后复测 `stat_ok=1`、无告警。**如实标注一处局限**：② 在"本次读回里一个槽都没变"（相机固定、整轮只转储一帧）时**无法判定**，此时不报警（宁可漏报、不误报） |
 | 3 | **Hi-Z UV y 镜像**（§14.28：`mip0/1/4/7` 全 0；且 `useTwoPhase` 恒 false ⇒ `HiZ_Build` 从未执行） | 判据 ⑦ 的 `hiz1` 档（`occl_mip`、`occl_uv`、`hiz_flip` 开关对照） | **pass 是否真的执行过**没有通用观测（本例靠"关掉就该变"的对照才发现） |
 | 4 | **DAG 内容哈希顺序无关 + `meshopt` 原地重排簇内顶点**（§14.20⑥、§14.22①） | `Tests/TestNaniteTypes.cpp` 的属性保真度用例 | 运行时无读数（只在离线/单测可见） |
 | 5 | **共享内容属性错配**（§14.27 的 P0、任务 18） | 离线检查工具按 `objectIndex` 分区分类解码页号（`Tools/gi/lightmap_key_check.py`） | 无 |
 | 6 | **深度与排序契约两处 P0**（§14.30 ①：`depthTest`/`depthLoadOp`） | 判据 ⑧e 的 pass 列表与冻结指纹；校验层 VUID 行 | 无 |
-| 7 | **软光栅深度键平局 ⇒ 由 UAV 写序决定像素**（§14.31 ⑩，实测接管档两次运行 7/20 转储不同） | 判据 ⑧b 的差异范围；**间接**：`pixels_written` 与 `depth_written` 的差额就是"同一像素被多个三角形通过等值复检"的次数（§14.30 已把它写成可核对不变式 `depth_written ≤ pixels_written`） | **无专门读数**把平局次数直接报出来（只有差额可反推）⇒ 任务 26 可补一条显式平局计数 |
+| 7 | **软光栅深度键平局 ⇒ 由 UAV 写序决定像素**（§14.31 ⑩，实测接管档两次运行 7/20 转储不同） | 判据 ⑧b 的差异范围；**间接**：`pixels_written` 与 `depth_written` 的差额就是"同一像素被多个三角形通过等值复检"的次数（§14.30 已把它写成可核对不变式 $ \text{depth\_written} ≤ \text{pixels\_written} $ ） | **无专门读数**把平局次数直接报出来（只有差额可反推）⇒ 任务 26 可补一条显式平局计数 |
 | 8 | **材质映射 `unmapped=4103`**（§14.33 ⑤） | `materials_sample` 读数行 + **`unmapped > 0` 的告警级日志** | **已闭合**：任务 25 修掉根因（§14.33 ⑫，实测 4103 → 0），任务 26 把它升级为告警级日志，并由常驻测试 `Tests/TestNaniteMaterialMap.cpp` 钉住（`unmapped == 0` + LOD0 真值逐簇一致）⇒ 一旦回归，告警会跳出来、单测会变红 |
 | 9 | **RHI 阶段掩码互换**（§14.31 ⑦①）：错值 ⇒ PSO 创建失败 + `EXCEPTION_ACCESS_VIOLATION` | 校验层 + 崩溃日志（`07_Nanite_crash.log`） | 无（崩溃本身可观测） |
 | 10 | **`SetPushConstants` 缺 mesh 阶段**（§14.31 ⑦②） | 只有"着色器读到的值与期望不符"这种症状 | **无工具**：缺"push constant 实际收到什么"的回读（软光栅有 `diag_*` 回读，硬光栅没有） |
 | 11 | **资产 `vertexOffset` 非单调**（§14.32 ②） | **任务 24 的页划分本身就是按"非单调"设计的** —— 簇段取"收集序"而不是区间，正是为此；并且单测在**真实资产**上把它钉成可执行事实（`前 4 个 vertexOffset=[0 45 0 90 …] 单调=0`，由 `Tests/TestNaniteStream.cpp` 断言），页划分在其上照常成立 | **已可观测**（**本轮改正**：原标注"待任务 24"，而任务 24 已落地）。**如实标注**：它是"已被正确处理的事实"、不是需要告警的异常，因此**没有**专门的运行时告警读数 |
-| 12 | **页缺失 / 页池满**（§14.32 ⑨） | **任务 24 的 `stream` 读数行**：`pages_total / resident / nonresident / pool / uploads_this_frame / evicted / page_misses / pages_requested / overflow_total / reason`；`stream_setup` 行给出页划分与池足迹；池 8 槽档实测真跑到 `page_misses=122`、`evicted=58`，且读数与 `visible` 精确对账（`soft + skipped_big + page_misses == visible`） | **已可观测**（**本轮改正**：原标注"待任务 24"，而任务 24 已落地并经两轮 `-OnlyNanite` 验收） |
+| 12 | **页缺失 / 页池满**（§14.32 ⑨） | **任务 24 的 `stream` 读数行**：`pages_total / resident / nonresident / pool / uploads_this_frame / evicted / page_misses / pages_requested / overflow_total / reason`；`stream_setup` 行给出页划分与池足迹；池 8 槽档实测真跑到 `page_misses=122`、`evicted=58`，且读数与 `visible` 精确对账（ $ \text{soft} + \text{skipped\_big} + \text{page\_misses} == \text{visible} $ ） | **已可观测**（**本轮改正**：原标注"待任务 24"，而任务 24 已落地并经两轮 `-OnlyNanite` 验收） |
 | 13 | **`objectIndex` 分区越界**（§14.15：今天不存在越界路径，风险在离线工具） | 离线工具 + `static_assert` 分区断言 | 无 |
 | 14 | **覆盖率语义差**：软光栅不做近/远平面裁剪、硬件按规范裁掉（§14.31 ③④，实测 3496 px 100% 在远平面外） | A/B 覆盖像素差 | **无工具**把"缺口落在哪"分类（需按深度分桶） |
 | 15 | **硬光栅过绘 / mesh 线程利用率**（§14.31 ⑨，实测 336.4× / 50.0%） | **任务 23 已落地**：`size_dist` 五桶分布 + `perf` 行（`soft_clusters / hard_clusters / soft_pixels / hard_pixels / nanite_pass_ms / frame_ms`），并给出**同覆盖**对照（soft64 对 hard16：GPU **21.24×**、墙钟 **6.38×**） | **已可观测**（**本轮改正**：原标注"任务 23 落地后复核"，复核已完成，证据见 §14.36） |
@@ -4338,17 +4338,17 @@ LOD0 真值逐簇一致、无归属顶点簇 0、几何核对越界 0，并断�
 | # | 结论 | 观察手段（本轮落地后） | 缺口 / 明确不做 |
 |---|---|---|---|
 | 1 | 已可观测 | `soft_raster` 行的 `depth_written`（真实原子计数）+ `cull3` 行的 `hiz_half` / `occl_mip`；判据 ⑦ 的 `hiz1` 档做开关对照 | **明确不做**：不新增"深度目标转储"。它是"间接看"（差值与对照），足以判定 §14.30 那类缺陷，转储会新增资源与判据面 |
-| 2 | **本轮补（第一批）** | `size_dist` 行追加 `stat_ok` / `const_suspect`：① 三条**无需新增输入**的关系式（`diag_screenw × diag_screenh == depth_key_pixels`、`diag_maxtri == 上次送下去的 maxTriangles`、场景非空时 `diag_extent_milli > 0`）；② 逐槽"是否曾经变化过"，检出**非 0 且从未变过**的槽。不通过时打**告警级**日志并列出实测值 | **已闭合**。已做**负向验证**证明非空转（把一条关系式故意反置 ⇒ `stat_ok=0` 且告警按预期打出实测值，还原后复测 `stat_ok=1`）。**如实标注局限**：② 在"本次读回里一个槽都没变"（相机固定、整轮只转储一帧）时**无法判定**，此时**不报警**（宁可漏报、不误报，见 `NaniteRenderer::SelfCheckSoftStats` 的注释） |
+| 2 | **本轮补（第一批）** | `size_dist` 行追加 `stat_ok` / `const_suspect`：① 三条**无需新增输入**的关系式（ $ \text{diag\_screenw} \times \text{diag\_screenh} == \text{depth\_key\_pixels} $ 、`diag_maxtri == 上次送下去的 maxTriangles`、场景非空时 $ \text{diag\_extent\_milli} > 0 $ ）；② 逐槽"是否曾经变化过"，检出**非 0 且从未变过**的槽。不通过时打**告警级**日志并列出实测值 | **已闭合**。已做**负向验证**证明非空转（把一条关系式故意反置 ⇒ `stat_ok=0` 且告警按预期打出实测值，还原后复测 `stat_ok=1`）。**如实标注局限**：② 在"本次读回里一个槽都没变"（相机固定、整轮只转储一帧）时**无法判定**，此时**不报警**（宁可漏报、不误报，见 `NaniteRenderer::SelfCheckSoftStats` 的注释） |
 | 3 | 已可观测 | 判据 ⑦ 的 `hiz1` 档（`occl_mip` / `occl_uv` / `hiz_flip` 开关对照） | **明确不做**：不做"某个 pass 是否真的执行过"的通用观测。本例是靠"关掉就该变"的对照发现的，通用化需要 pass 级执行计数，属渲染器基础设施而非 Nanite 范围 |
 | 4 | 已可观测 | `Tests/TestNaniteTypes.cpp` 的属性保真度用例（DAG 内容哈希顺序无关 + `meshopt` 原地重排簇内顶点） | **明确不做**运行时读数。这是**离线/单测口径**的机制，运行时无对应量可报 |
 | 5 | 已可观测 | 离线工具按 `objectIndex` 分区分类解码页号（`Tools/gi/lightmap_key_check.py`）+ 属性保真度单测 | 无 |
 | 6 | 已可观测 | 判据 ⑧e 的 pass 列表与冻结指纹；校验层 VUID 行 | 无 |
-| 7 | **本轮补（第一批）** | 软光栅读数缓冲新增槽 22 `depth_key_ties`：在 `Nanite_SoftRasterDepth.comp.slang` 里用 `InterlockedMin` 的**回读前值**判定 —— `prev == key` 即"同一像素被第二个三角形以等值键再次写入"，计一次；`key == 0xFFFFFFFF`（空槽）不计 | **剩余缺口如实标注**：平局本身（多个候选键相同）**仍在**，只是**赢家已经唯一**了 —— **§14.40 的三趟"确定性赢家选择"已把它修掉**（修复前"像素由 UAV 写序决定、接管档两次运行并非逐位可复现"）。**⚠ 该式在 §14.40 之后不再是等式判据**：可核对的不变式是 `ties >= pixels_written - depth_written`（恒成立），等号**当且仅当**该像素的最小键从未被更小的键取代；实测阈值 16 档 `3158 == 3264 - 106` ✓，阈值 64 档 `98714537 vs 43396808` ✗ ⇒ `ties_eq_diff` **只作参考、不作验收判据** |
+| 7 | **本轮补（第一批）** | 软光栅读数缓冲新增槽 22 `depth_key_ties`：在 `Nanite_SoftRasterDepth.comp.slang` 里用 `InterlockedMin` 的**回读前值**判定 —— `prev == key` 即"同一像素被第二个三角形以等值键再次写入"，计一次；`key == 0xFFFFFFFF`（空槽）不计 | **剩余缺口如实标注**：平局本身（多个候选键相同）**仍在**，只是**赢家已经唯一**了 —— **§14.40 的三趟"确定性赢家选择"已把它修掉**（修复前"像素由 UAV 写序决定、接管档两次运行并非逐位可复现"）。**⚠ 该式在 §14.40 之后不再是等式判据**：可核对的不变式是 $ \text{ties} >= \text{pixels\_written} - \text{depth\_written} $ （恒成立），等号**当且仅当**该像素的最小键从未被更小的键取代；实测阈值 16 档 $ 3158 == 3264 - 106 $ ✓，阈值 64 档 `98714537 vs 43396808` ✗ ⇒ `ties_eq_diff` **只作参考、不作验收判据** |
 | 8 | **已闭合（任务 25 + 第一批）** | `materials_sample` 读数行 + `unmapped > 0` 的**告警级**日志（`HE_CORE_WARN("[Nanite] unmapped_clusters=… > 0（契约要求 0）…")`）+ 常驻单测 `Tests/TestNaniteMaterialMap.cpp` 钉住 `unmapped == 0` 与 LOD0 真值逐簇一致 | 无。回归一旦发生，告警会跳出来、单测会变红 |
 | 9 | 已可观测 | 校验层 + 崩溃日志（`07_Nanite_crash.log`） | 无（崩溃本身即可观测） |
 | 10 | **本轮补（第二批）** | 硬光栅读数缓冲 **4 → 11 槽**，槽 4..10 = `DiagScreenW / DiagScreenH / DiagMaxTri / DiagExtent / DiagInstances / DiagMaterials / DiagPages`，在 `Nanite_HardRaster.mesh.slang` 里由 `gid.x == 0 && tid == 0` **在任何提前返回之前**写入 ⇒ 即使后续 `HARD_RASTER_BAILOUT()`，仍能回读到"push constant 实际收到了什么"（对齐软光栅既有的 `diag_*` 做法）。**实测**：`hard_raster` 行打出 `diag_screenw=1920 diag_screenh=1080 diag_maxtri=16 diag_extent_milli=3720854 diag_instances=64 diag_materials=103 diag_pages=0`，与 `diag_cpu=[1920,1080,16,3720854,64,103,0]` 逐项相同 ⇒ `diag_match=1` | 无（按 §14.34 第 2 条的最小范围补齐）。**如实标注**：它验证的是"送下去的值正确"，**不**能反推"硬光栅是否真的画了像素"——后者由 `hard_pixels` / `perf` 行覆盖（`perf` 行另受 `HE_CPU_PASSES` 环境开关门控，默认关） |
 | 11 | 已可观测（本轮**无变更**） | 页划分按"收集序"而非区间（正为 `vertexOffset` 非单调而设计）；`Tests/TestNaniteStream.cpp` 在**真实资产**上断言前 4 个 `vertexOffset = [0 45 0 90 …]`、单调 = 0 | **如实标注**：它是"已被正确处理的事实"，不是待告警的异常 ⇒ **没有**运行时告警读数（见 §14.33 就地改正） |
-| 12 | 已可观测（本轮**无变更**） | 任务 24 的 `stream` 行十个字段（`pages_total / resident / nonresident / pool / uploads_this_frame / evicted / page_misses / pages_requested / overflow_total / reason`）+ `stream_setup` 行给出页划分与池足迹；池 8 槽档实测真跑到 `page_misses=122`、`evicted=58`，且与 `visible` 精确对账（`soft + skipped_big + page_misses == visible`） | 无（见 §14.37） |
+| 12 | 已可观测（本轮**无变更**） | 任务 24 的 `stream` 行十个字段（`pages_total / resident / nonresident / pool / uploads_this_frame / evicted / page_misses / pages_requested / overflow_total / reason`）+ `stream_setup` 行给出页划分与池足迹；池 8 槽档实测真跑到 `page_misses=122`、`evicted=58`，且与 `visible` 精确对账（ $ \text{soft} + \text{skipped\_big} + \text{page\_misses} == \text{visible} $ ） | 无（见 §14.37） |
 | 13 | 已可观测 | 离线工具 + `static_assert` 分区断言 | 无 |
 | 14 | **部分可观测** | 判据 ⑧b 的 A/B 覆盖像素差能看出"有差" | **明确不做**"缺口落在哪"的**深度分桶**分类（§14.34 末尾最小范围第 4 条已声明可在时间不足时不做）。本轮**如实列为未做** |
 | 15 | 已可观测（本轮**无变更**） | 任务 23：`size_dist` 五桶分布 + `perf` 行（`soft_clusters / hard_clusters / soft_pixels / hard_pixels / nanite_pass_ms / frame_ms`），并给出同覆盖对照（soft64 对 hard16：GPU **21.24×**、墙钟 **6.38×**） | 无（复核证据见 §14.36） |
@@ -4379,7 +4379,7 @@ LOD0 真值逐簇一致、无归属顶点簇 0、几何核对越界 0，并断�
 **② 默认预设抖动族之外 0 项差异**
 - 载体：`acceptance_sweep.ps1` 的**判据 ④**（默认预设 `aq_def` vs 基线 `s37fin2`）。
 - **既有豁免（不是 Nanite 引起，也不要试图修）**：§14.11 的「判据 ④ 的一处既有漂移裁决」——
-  `lumen_irradiance` 与下游 `prov6_*` 共 5 项给了**硬上界容差**（`maxULP ≤ 8` 且 `meanAbs ≤ 1e-6`），
+  `lumen_irradiance` 与下游 `prov6_*` 共 5 项给了**硬上界容差**（ $ \text{maxULP} ≤ 8 $ 且 $ \text{meanAbs} ≤ 1e-6 $ ），
   其余转储仍要求**逐位一致**。⇒ 收口报告要写清"容差族里有几项"，而不是笼统说"0 项差异"。
 - 抖动的判定口径：`maxULP > 2`（抖动族之外）才算失败；抖动族 = `prov0_ao_*` / `hdr` / `radiance`。
 - **基线目录不要删**：`build\verify\gi_s37fin2_*`；删了判据 ④ 会"跳过"而不是判定。
@@ -4473,7 +4473,7 @@ LOD0 真值逐簇一致、无归属顶点簇 0、几何核对越界 0，并断�
    `CPU 侧 ≈ 墙钟`）⇒ 把 GPU 从 781 ms 降到 42 ms 在同覆盖下只值约 11% 的墙钟。
 5. **本轮量化了两项任务 22 只给了估计的量**：硬光栅**过绘 336.4×**
    （`hard_pixels 308810322 ÷ 本帧唯一写标记像素 917903`；任务 22 的"341×"用的是另一档的分母 921399，两者都对）；
-   **mesh 线程利用率 50.0%**（`prims/clusters = 2021446/31587 = 63.996` ⇒ 交接的簇几乎都是满 64 三角形，
+   **mesh 线程利用率 50.0%**（ $ \text{prims}/\text{clusters} = 2021446/31587 = 63.996 $ ⇒ 交接的簇几乎都是满 64 三角形，
    而工作组 128 线程）。
 6. **建议（只建议，默认阈值按现状保持 16）**：① 默认项不动；② 要提速，先修 CPU 侧（约 130 ms）与
    **软光栅逐像素路径**（44.3M 次像素写要 644~917 ms ≈ 48~69k 写/ms，而硬光栅 308.8M 片元只用 42 ms ≈ 7.3G 片元/s
@@ -4579,7 +4579,7 @@ visible_wiring visible=indirect_count=draws=rasterized=31648 empty_draws=0 misma
    **证据**：流式开启档 `visible = indirect_count = draws = rasterized = 31648`、`mismatch=0`
    ⇒ 命令链没有被间接层弄坏（设计担心的"占位光栅静默用错偏移"因此不成立）。
 2. **页请求由光栅第 1 趟产生，而不是剔除链**（§14.32 ④ 的原文是剔除链）。这样**剔除链一行未改**
-   ⇒ 任务 16 的 `V=C=D=R` 与 CPU 参考交叉核对在流式档仍然成立；代价是缺页判定在光栅端。
+   ⇒ 任务 16 的 $ V = C = D = R $ 与 CPU 参考交叉核对在流式档仍然成立；代价是缺页判定在光栅端。
 3. **去重 = GPU 侧戳记数组 + CPU 读回侧合并，页表仍然"只由 CPU 写"**。§14.32 ④ 原写"去重由页表的
    `requestedFrame == 当前帧` 判定"，那要求 **GPU 写页表**，而页表同时被 CPU 每帧重写 ⇒ 同一块内存
    无同步双边写。改成"反馈缓冲尾部一段**只由 GPU 写**的戳记（CPU 只在 `WaitIdle` 之后清 0）"后，
@@ -4637,7 +4637,7 @@ visible_wiring visible=indirect_count=draws=rasterized=31648 empty_draws=0 misma
   `HE_CORE_WARN` 带上"第一个秩不一致的簇下标与两个秩"（避免留一个"看起来能读、实际恒 0"的字段）。
 - **不变式的推广（任务 23 那条要延拓）**：五桶之和 == `soft + skipped_big`（`sum_eq_clusters`）**依旧成立**；
   而 `sum_eq_visible` 在流式档会因为**缺页被跳过的簇**而变 0。正确形式是
-  **`Σ五桶 + page_misses == visible`**（池 8 槽档实测 `31526 + 122 = 31648` ✓ 精确成立）；
+  **`Σ五桶 + page_misses == visible`**（池 8 槽档实测 $ 31526 + 122 = 31648 $ ✓ 精确成立）；
   关闭档 `page_misses` 恒为 0 ⇒ 退化成既有形式。
 
 **⑤ 页池足迹与调参建议（只建议，默认值不动）**
@@ -4651,7 +4651,7 @@ Sponza 实测（同一资产、同一相机，只改 K）：
 | 64 | 129 | 155,184 | 9,931,776（9.47 MiB） | 20,018,736（19.09 MiB） | 129 |
 
 - **恒等式**：`每槽字节 × pages_total` 在三档里稳定在 **19.6–20.1 MB（±1.5%）≈ 资产的总内容字节**；
-  于是 **池膨胀倍数 = `pool_slots / pages_total`**（64/17=3.76×、64/65=0.98×、64/129=0.50×，与实测吻合）。
+  于是 **池膨胀倍数 = $ \text{pool\_slots} / \text{pages\_total} $**（64/17=3.76×、64/65=0.98×、64/129=0.50×，与实测吻合）。
   ⇒ 75.77 MB 的来源**不是 K**，而是"64 槽 / 17 页"这个比值。
 - **建议（后续优化，不改本任务默认值）**：`pool_slots = pages_total`（默认 K=512 时是 17 槽）可同时做到
   "全部页可同时驻留 + 稳态零驱逐 + 池约 20 MB"；更强的做法是让槽数**由页划分自动推导**（cfg 值退化为上限）。
@@ -4674,7 +4674,7 @@ Sponza 实测（同一资产、同一相机，只改 K）：
 - **判据 (c)（页池 8 槽）**：完整跑完 121 帧、`vuid_lines=42`（与基线一致）、
   `page_misses=122 > 0`、`resident=8 = gpu_resident=8`、`evicted=58`、`table_ok=1`、`dup_slots=0`、
   `overflow_total=0`，且**读数与 `visible` 的差额精确可核对**：
-  `soft(61) + skipped_big(31465) + page_misses(122) = 31648 = visible`、
+  $ \text{soft}(61) + \text{skipped\_big}(31465) + \text{page\_misses}(122) = 31648 = \text{visible} $ 、
   `Σ五桶(31526) + page_misses(122) = 31648 = visible`。⇒ 不崩、不越界、表自洽、账目对得上。
   **本档最初是卡死的**（第 97 帧、`WaitIdle` 永久阻塞、零错误输出）：定位结论是"页被标成驻留但槽里
   还是未初始化内存"（见 ③ 条 8 的第一条），修好后连续两次完整跑完。**驱逐/槽位复用这条路径
@@ -4717,7 +4717,7 @@ Sponza 实测（同一资产、同一相机，只改 K）：
 5. **只测了 07.Nanite 的 1920×1080 单场景单相机**；相机固定 ⇒ 可见集固定 ⇒ 稳态缺页为 0，
    测不到"相机移动时的 pop 与缺页轨迹"。未测多分辨率、多资产。
 6. **`page_misses` 的口径**是"被跳过的**可见簇数**"（不是页数）——它能对上
-   `soft + skipped_big + page_misses == visible`；"请求了多少"由 `pages_requested` /
+   $ \text{soft} + \text{skipped\_big} + \text{page\_misses} == \text{visible} $ ；"请求了多少"由 `pages_requested` /
    `pages_requested_total`（**累计入队页次数**，同页可重复计）表达。两者并列打印，不互相冒充。
 
 ### 14.38 任务 27 收口记录：单测 / 默认预设 / 开关不变式（2026-09-21）
@@ -4843,7 +4843,7 @@ Sponza 实测（同一资产、同一相机，只改 K）：
 
 - 四档**互不相同且都非空**（`px_nonzero` 183/183/322/366、`distinct_vals` 62/1/45/5），
   且**跨模式自洽**：四档都满足 `visible=31648`、`tiled=23452`、`offscreen=8196`、
-  并且 `visible - tiled == offscreen` 精确成立（31548−23452=8196）；模式 2 还有 `面板A+面板B == tiled`（61+23391=23452）。
+  并且 $ \text{visible} - \text{tiled} == \text{offscreen} $ 精确成立（ $ 31548 - 23452 = 8196 $ ）；模式 2 还有 `面板A+面板B == tiled`（61+23391=23452）。
 - 模式 2 的 `hard_share_clusters_permille=997` 是**按簇数**的硬占比；`hard_raster` 行另有**按像素**占比。
   两个口径都打印、不互相冒充。
 
@@ -4859,7 +4859,7 @@ Sponza 实测（同一资产、同一相机，只改 K）：
 - 做法：`Nanite_SoftRasterDepth.comp.slang` 里用 `InterlockedMin` 的**回读前值**判定 ——
   `prev == key` 即"同一像素被第二个三角形以等值键再次写入"，`InterlockedAdd` 计一次；
   `key == 0xFFFFFFFF`（空槽）不计。
-- 实测（阈值 16）：`depth_key_ties=3158`，而 `pixels_written - depth_written = 3264 - 106 = 3158`
+- 实测（阈值 16）：`depth_key_ties=3158`，而 $ \text{pixels\_written} - \text{depth\_written} = 3264 - 106 = 3158 $
   ⇒ `ties_eq_diff=1`。
 - **如实标注（不是等式判据）**：原子 min 是**递减**的，一个更大的键后到、随后被更小的键取代，
   仍然计过一次 ⇒ 可核对的不变式方向是 `ties >= pixels_written - depth_written`（恒成立），
@@ -4952,7 +4952,7 @@ Sponza 实测（同一资产、同一相机，只改 K）：
 ⇒ 用它仲裁等于没仲裁。实测该版本两次运行差 **8003785** 个像素元素
 （`albedo 1908881 / gb_lightmapkey 1558673 / gb_normal 1528493 / gb_worldpos 876262 / hdr 1589668`），
 **比不修还糟**。旁证：两次运行 `depth_key_ties` 为 94152012 / 98146236（不同），
-而 `pixels_written == depth_written == 921399`、`ties_eq_diff = 0` 两次都成立
+而 $ \text{pixels\_written} == \text{depth\_written} == 921399 $ 、`ties_eq_diff = 0` 两次都成立
 ⇒ 说明"只让赢家写"这条链路是通的，只是**身份选错了**。
 
 改为只依赖**与列表顺序无关**的身份，并用三个上限把位段钉死：
@@ -4989,7 +4989,7 @@ C++ 侧三条 `static_assert` 把上限钉住（`NaniteTypes.h`，注释写明"�
 **⑥ 一个必须如实标注的读数语义变化**
 
 第 2 趟改成"只让赢家写"后，`soft_raster` 行的 `pixels_written` 从"通过等值复检的**候选次数**（含重复）"
-变成"真正写出的**不同像素数**"⇒ 现在 `pixels_written == depth_written`（阈值 64 时都是 **921399**）、
+变成"真正写出的**不同像素数**"⇒ 现在 $ \text{pixels\_written} == \text{depth\_written} $ （阈值 64 时都是 **921399**）、
 `ties_eq_diff = 0`。**字段名一个都没动**（符合"只允许纯增量"的约束），变的是**语义** —— 它变严格了。
 - `depth_key_ties` **不是确定性判据**：它数的是"原子操作回读到相等旧值"的次数，而中间态最小值出现几次
   **依赖处理顺序** ⇒ 两次运行不同是**正常**的（实测 94152012 / 98146236 / 100311520）。
@@ -5036,7 +5036,7 @@ C++ 侧三条 `static_assert` 把上限钉住（`NaniteTypes.h`，注释写明"�
   - 判据 ⑧（`TAKEOVER CMP: PASS`）：8b `compared=18 identical=11 gbuffer_changed=4 (of 4)
     jitter=3 unexpected=0 missing=0`；8c `gb_worldpos corr=0.9290 (>=0.90)`、
     `metallic corr=0.9973 (>=0.99)`、roughness 边界一致、`neutral=0`；
-    8a `material_pixels == pixels_written`（阈值 16 档 `106 == 106`、阈值 64 档 `921399 == 921399`）；
+    8a $ \text{material\_pixels} == \text{pixels\_written} $ （阈值 16 档 `106 == 106`、阈值 64 档 `921399 == 921399`）；
     8d `distinct VUID types: new=0`；8e `on-minus-Nanite == off` 逐行相同且 `frozen_match=True`
 - ⇒ **冻结指纹、判据 ⑥⑦⑧、单测全部不受影响**；并且"**抖动族之外 0 项差异**"这句话
   **现在在接管档也成立**（本条 ⑧ 的前提已在 ⑤ 里给出实测）。
@@ -5136,7 +5136,7 @@ C++ 侧三条 `static_assert` 把上限钉住（`NaniteTypes.h`，注释写明"�
 
 - **要什么**：一次计数/基数排序 —— 按材质的直方图 → 前缀和 → 散射写第二张 refs 表，
   至少 **3 个新派发 + 2~3 张新缓冲**；排序域是
-  `visibleCapacity = kNaniteMaxBVHInstances × kNaniteMaxBVHClusters` = **1,048,576** 条引用
+  $ \text{visibleCapacity} = \text{kNaniteMaxBVHInstances} \times \text{kNaniteMaxBVHClusters} $ = **1,048,576** 条引用
   （本仓库实测可见 31648 条）。而且排序本身必须**确定性**，否则刚修好的"逐位可复现"
   会被排序的并行度重新打破 —— 等于要把 §14.40 那把尺再用一遍。
 - **值多少（两项都指向"不值"）**：
