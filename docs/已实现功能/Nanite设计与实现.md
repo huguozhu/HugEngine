@@ -542,7 +542,7 @@ struct alignas(16) NaniteCluster {
 |---|---|---|---|---|
 | 0 | `boundingSphere` | `float4` | xyz=center, w=radius（cluster 包围球） | 一致 |
 | 16 | `coneAxisAngle` | `float4` | xyz=单位锥轴, w=cos(锥半角)；`w = -1` 是"无锥"哨兵（半角 180°，恒不可剔除，此时轴允许为 0） | 已裁决（原注 #1：设计写 `coneData`、计划写 `coneAxisAngle`）——**定稿（任务 7，2026-09-20）**：取 `coneAxisAngle`，理由：`coneData` 只有名字、没有字段语义（据此写不出 C++/Slang 一致的解码器），两者同为 float4 / 16B、尺寸与省法都不分高下 ⇒ 取"能唯一确定解码、不依赖外部约定"的那个（规则②的"自包含"意图）。与之冲突的旧名 `coneData` 作废 |
-| 32 | `triangleOffset` | `u32` / `uint` | **单位是三角形**（不是索引个数）：字节偏移 = `triangleOffset × 8`（索引定稿为 8B/三角形，见 §8.5） | 一致（注释措辞差异）；**定稿（任务 7，2026-09-20）**：单位取**三角形**，因为 §8.5 的索引段按三角形打包 |
+| 32 | `triangleOffset` | `u32` / `uint` | **单位是三角形**（不是索引个数）：字节偏移 = $ \text{triangleOffset} \times 8 $ （索引定稿为 8B/三角形，见 §8.5） | 一致（注释措辞差异）；**定稿（任务 7，2026-09-20）**：单位取**三角形**，因为 §8.5 的索引段按三角形打包 |
 | 36 | `triangleCount` | `u32` | 三角形数（≤64） | 一致 |
 | 40 | `vertexOffset` | `u32` | vertex buffer 中的偏移 | 一致 |
 | 44 | `materialID` | `u32` | 指向 bindless 材质 / bindless 材质 ID | 一致 |
@@ -676,15 +676,15 @@ struct NaniteVertex {
   `vertexCount * 3 * sizeof(u32)`、`vertexCount × 12B`）作废，`§12 Task 4` 已同步改成 16B。
 - **#9 量化偏置在编码端补上 `+512`**（原注：`quantize_vertices` 产出无符号 `0…511`，而
   `decodeVertexPosition` 按 `int(raw) - 512` 的有符号 SNORM 解码，两边差一个偏置）。
-  定稿：单轴 `raw = clamp(round((v - bboxMin) / maxExtent × 511)) + quantBias`，
-  解码 `v = bboxMin + (raw - quantBias) / 511 × maxExtent`，**严格互逆**（误差 ≤ maxExtent/1022）。
+  定稿：单轴 $ \text{raw} = \mathrm{clamp}\left(\mathrm{round}\left(\frac{v - \text{bboxMin}}{\text{maxExtent}} \times 511\right)\right) + \text{quantBias} $ ，
+  解码 $ v = \text{bboxMin} + \frac{\text{raw} - \text{quantBias}}{511} \times \text{maxExtent} $ ，**严格互逆**（误差 $ \le \text{maxExtent} / 1022 $ ）。
   C++ 落点：`NaniteQuantizePositionAxis()` / `NaniteDequantizePositionAxis()`（含往返单测）。
-- **`quantBias` 的语义**：10 位字段按**有符号** SNORM 解释（`raw - 512 ∈ [-512, 511]`）；
-  盒内顶点编码后 `raw ∈ [512, 1023]`（`0…511` 属于盒下方，这正是旧无符号编码的 bug）。
+- **`quantBias` 的语义**：10 位字段按**有符号** SNORM 解释（ $ \text{raw} - 512 \in [-512, 511] $ ）；
+  盒内顶点编码后 $ \text{raw} \in [512, 1023] $ （`0…511` 属于盒下方，这正是旧无符号编码的 bug）。
   偏置写进每条顶点记录 ⇒ C++/Slang 双方都从记录里取值，不需要额外约定。
   **已知取舍（1 位精度）**：本节保留了既有解码式里的 `bboxMin` 基准（最小改动、与 §8.4 原文
   一致），因此盒内只用到 10 位有符号范围的上半段（512 级）。若要吃满 1024 级，可改成以盒
-  **中心**为基准（`center = (bboxMin+bboxMax)/2`、`halfExtent = maxExtent/2`）——那需要同时改
+  **中心**为基准（ $ \text{center} = (\text{bboxMin} + \text{bboxMax}) / 2 $ 、 $ \text{halfExtent} = \text{maxExtent} / 2 $ ）——那需要同时改
   `bboxMin` 的语义与解码式，留给任务 10 按量化误差验收决定，本任务不动。
 - 仍留给任务 10 的：#13 `packedNormal` / `packedUV` 的量化函数（本节只定稿它们的位域与偏移）。
 
@@ -744,7 +744,7 @@ float3 decodeVertexPosition(uint packed, int quantBias, float3 bboxMin, float3 b
 ② §8.4 的"每簇 ≤128 顶点"让簇内局部下标只需 7 位，u16 绰绰有余；③ 一簇 64 三角形 = 512B，
 天然 16B 对齐。**索引语义同时定稿**：`i0/i1/i2` 是**簇内局部**顶点下标（合法区间 `[0, 127]`），
 全局顶点下标 = `NaniteClusterRecord::vertexOffset + local`；`indexCount` 仍是**索引总数**
-（必须是 3 的倍数），索引段字节数 = `ceil(indexCount / 3) × 8` 再向上取整到 16B。
+（必须是 3 的倍数），索引段字节数 = $ \lceil \text{indexCount} / 3 \rceil \times 8 $ 再向上取整到 16B。
 
 与之冲突的旧表述作废：`indices (indexCount × 4B)`、`std::vector<u32> indices(header.indexCount)`、
 `u_Indices[idxBase + 0/1/2]` 逐个 u32（§12 Task 4 的打包草图已同步改成按三角形打包）。
@@ -3831,7 +3831,7 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
 
 **② 页粒度：以「簇区间」定义页，页的字节范围由头部计数推出（无需新增落盘结构）**
 - §8.3 定稿：`.nanite` 的段偏移**不落盘**，每段偏移与长度都是「头部计数 + 固定步长」的纯函数。
-  ⇒ 任意簇下标区间在**簇段**里的字节范围算术可得：`96 + start×64`。
+  ⇒ 任意簇下标区间在**簇段**里的字节范围算术可得： $ 96 + \text{start} \times 64 $ 。
 - 顶点段与索引段的范围**不能**由簇下标直接推出（每簇的 `vertexOffset` 是打包时分配的）。
 
 > **⚠ 2026-09-21 修正（起草后复核代码得出，推翻了本设计的初始假设）**
@@ -3854,7 +3854,7 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
 >   **要求离线侧把每份共享内容按页边界对齐**（不足则补 padding），使任何一份共享内容**不跨页**。
 > - 簇 → 页的映射用**它已经在用的那个 `vertexOffset`**：落在这个页的顶点区间内的簇就属于这个页。
 >   于是**着色器侧不必新增索引空间**，只把 `cluster.vertexOffset` 经页表从"共享数组的绝对偏移"
->   换算成"页池内的偏移"（`poolOffset + (vertexOffset - pageBeginOffset)`）。
+>   换算成"页池内的偏移"（ $ \text{poolOffset} + (\text{vertexOffset} - \text{pageBeginOffset}) $ ）。
 > - `clusterUnique`（`NaniteUpload.cpp:598` 的平行数组）**不参与**页的划分，也不要求上传。
 > - **仍需的守卫**：上传时校验"每份共享内容不跨页"（对齐或 padding 是否真的做到了），
 >   不成立则 `stream=off reason=page_straddle` 并退化到整段常驻 —— 与初稿"不静默、不崩"的口径一致，
@@ -3864,7 +3864,7 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
 >   三角形段三段各取一段"**（即一个页 = 三个区间）。实现时应选后者，避免两套页语义。
 >
 > **页对齐后的一个必要补充：着色器怎么知道"我在哪一页"（默认项）**
-> 因为页对齐到"整份共享内容"边界后页的顶点条数是**可变的**，`vertexOffset / recordsPerPage`
+> 因为页对齐到"整份共享内容"边界后页的顶点条数是**可变的**， $ \text{vertexOffset} / \text{recordsPerPage} $
 > 这类除法**不成立**，也不该在着色器里做二分查找。默认做法：
 > **上传期在 CPU 侧构建一份 `u32 pageOfCluster[clusterCount]`**（每簇一个页号；Sponza 实测
 > 8287 簇 ⇒ 约 33 KB），与资产缓冲一起上传。着色器只做两次查表：
@@ -3899,7 +3899,7 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
 > **另有一条初稿完全没提的链路（重要）**：
 > - `Nanite_ClusterBVH.comp.slang:453` 把 `range.vertexOffset` **原样写进间接绘制命令**；
 > - `Nanite_Raster.vert.slang:13-14,38-39` 的占位光栅**从命令里的 `vertexOffset` 推导三角形顶点**
->   （`v = vertexOffset + 3k`）。
+>   （ $ v = \text{vertexOffset} + 3k $ ）。
 > ⇒ **间接绘制命令里的 `vertexOffset` 也是偏移空间的一部分**。任务 16 起 `visible=indirect_count=draws`
 > 说明这条链**每帧都在真跑**（不是只有假簇链才用），所以流式必须同时决定：
 > **(i)** 命令里写"共享数组的绝对偏移"再让顶点着色器翻译，还是 **(ii)** cull 阶段就写"池内偏移"。
@@ -3918,7 +3918,7 @@ CPU 侧 `NaniteProjectSphereToScreen` 同步改成同一条约定（生产路径
 > ⇒ **`pageOfCluster` 与页起始偏移都能在上传期由资产自身算出**，不必改 `.nanite` 格式、
 > 也不必保留新的构建期临时数组。**这是本设计不需要动文件格式的关键依据。**
 
-- 页大小默认 **512 簇/页**（可配 `kNanitePageClusters`）；页数 = `ceil(clusterCount / 512)`。
+- 页大小默认 **512 簇/页**（可配 `kNanitePageClusters`）；页数 = $ \lceil \text{clusterCount} / 512 \rceil $ 。
 - LOD 维度：`lodLevelCount` + LOD 偏移段（§8.3 段 5）给出每个 LOD 的簇下标范围 ⇒
   "某 LOD 的某几页"是一次**页区间查询**，不需要额外索引。
 

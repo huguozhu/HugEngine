@@ -81,17 +81,17 @@
 2. `meshopt_simplify` 回吐的 `relativeError` 是**相对**误差，乘网格尺度得到绝对误差
    （`NaniteUpload.cpp:639-642`）：
 
-   ```text
-   absoluteError = relativeError × meshopt_simplifyScale(positions, vertexCount, stride)
-   ```
+   $$
+   \text{absoluteError} = \text{relativeError} \times \mathrm{meshopt\_simplifyScale}(\text{positions},\ \text{vertexCount},\ \text{stride})
+   $$
 
    这个 `absoluteError` 按级存进 `stepErrors[level]`（`NaniteUpload.cpp:642`）。
 3. 兜底：meshopt 报 0 或负数时，改用**几何兜底界**
    （`NaniteUpload.cpp:668-671`）：
 
-   ```text
-   bound = ‖center(child) − center(parent)‖ + radius(child)
-   ```
+   $$
+   \text{bound} = \left\| \mathrm{center}(\text{child}) - \mathrm{center}(\text{parent}) \right\| + \mathrm{radius}(\text{child})
+   $$
 
    即"父簇球心到子簇球边界的最大距离"——一个必然覆盖该次 LOD 切换位移的保守上界。
 4. 逐簇写回（`NaniteUpload.cpp:717-727`）：
@@ -123,10 +123,10 @@
 
 **代码落点** `BuildNaniteClusterLODInfo`（`NaniteUpload.cpp:1737-1798`）：
 
-```text
-ownError    = (childCount > 0) ? clusters[childClusterOffset].maxParentLODError : 0   // :1786-1788
-parentError = max(record.maxParentLODError, 0)                                        // :1791
-```
+$$
+\begin{aligned} \text{ownError} &= (\text{childCount} > 0)\ ?\ \text{clusters}[\text{childClusterOffset}].\text{maxParentLODError} : 0 \\ \text{parentError} &= \mathrm{max}(\text{record}.\text{maxParentLODError},\ 0) \end{aligned}
+$$
+// :1786-1788、:1791
 
 两者都做了 NaN/负值归零的防御（`:1788`、`:1791`）。注意 `lodLevel` 是**单次线性扫描**推出来的
 （`:1772`、`:1778-1783`：簇表按级升序，取满足 `lodOffsets[L] <= i` 的最大 L），不是二分。
@@ -181,31 +181,31 @@ DAG 的节点是**簇出现**（occurrence），边是 `childClusterOffset/child
 
 **误差 → 像素**（`NaniteTypes.h:1320-1332` 的"量纲修正"注释，以及 `NaniteTypes.h:1417-1429`）：
 
-```text
-projectedErrorPixels = error / distance × focalPixels
-focalPixels          = 0.5 × screenH / tan(fovY / 2)        // = 半屏高 × 投影矩阵 m11
-```
+$$
+\begin{aligned} \text{projectedErrorPixels} &= \frac{\text{error}}{\text{distance}} \times \text{focalPixels} \\ \text{focalPixels} &= \frac{0.5 \times \text{screenH}}{\mathrm{tan}(\text{fovY} / 2)} \end{aligned}
+$$
+// = 半屏高 × 投影矩阵 m11
 
 `NaniteClusterLODFocalPixels` 实现（`NaniteTypes.h:1423-1429`）：
 `screenH <= 0` 或 `tan(fov/2)` 过小 ⇒ 返回 0（`focalPixels == 0` 表示**关闭 LOD 选择**）。
 
 **谓词**（`NaniteTypes.h:1434-1438`）：
 
-```text
-NaniteLODErrorTooCoarse(error, distance, focal, threshold)
-  ⇔ error × focal > threshold × distance          // 乘法形式，等价于除法但少一次舍入
-```
+$$
+\text{NaniteLODErrorTooCoarse}(\text{error},\ \text{distance},\ \text{focal},\ \text{threshold}) \Leftrightarrow \text{error} \times \text{focal} > \text{threshold} \times \text{distance}
+$$
+// 乘法形式，等价于除法但少一次舍入
 
 距离下限兜底 `kNaniteLODMinDistance = 1.0e-4`（`NaniteTypes.h:1367`、`:1436`），
 GPU 侧同常量同分支（`Nanite_ClusterBVH.comp.slang:323`）。
 
 **DAG 割判据**（`NaniteTypes.h:1451-1460`）：
 
-```text
-selected(info, d) ⇔
-    ¬TooCoarse(info.ownError,  d)                      // ① 本簇已经够好
-  ∧ ( isRoot(info) ∨ TooCoarse(info.parentError, d) )  // ② 父簇不够好（根簇自动成立）
-```
+$$
+\text{selected}(\text{info}, d) \Leftrightarrow \neg\,\text{TooCoarse}(\text{info}.\text{ownError},\ d) \land \left( \text{isRoot}(\text{info}) \lor \text{TooCoarse}(\text{info}.\text{parentError},\ d) \right)
+$$
+// ① 本簇已经够好
+// ② 父簇不够好（根簇自动成立）
 
 `focalPixels <= 0` ⇒ 直接返回 true（不筛任何簇，退化为"全选"，`NaniteTypes.h:1454`）。
 阈值取自设计原文"threshold = 1 pixel"：`kNaniteLODThresholdPixels = 1.0f`（`NaniteTypes.h:1363`，**数值未改**）。
@@ -271,10 +271,9 @@ cosHalfAngle   : cos(锥半角)      ← 就是 meshopt 的 cone_cutoff
 
 判据函数（`NaniteTypes.slang:430-435`）：
 
-```text
-naniteConeCulls(axis, cosHalfAngle, directionToCluster)
-  ⇔ cosHalfAngle != -1  ∧  dot(normalize(directionToCluster), axis) >= cosHalfAngle
-```
+$$
+\text{naniteConeCulls}(\text{axis},\ \text{cosHalfAngle},\ \text{directionToCluster}) \Leftrightarrow \text{cosHalfAngle} \ne -1 \land \mathrm{dot}(\mathrm{normalize}(\text{directionToCluster}),\ \text{axis}) \ge \text{cosHalfAngle}
+$$
 
 即：**视线方向与锥轴的夹角 ≤ 锥半角** ⇒ 整个法线锥背向相机 ⇒ 可剔除。
 
@@ -345,12 +344,10 @@ planes[i] = (n.xyz, d) ； dot(n, p) + d >= 0 表示 p 在平面内侧
 
 实现：`NaniteTypes.h:1250-1285`。取列主序 view-proj 的 16 个 float（`m[col*4 + row]`），然后
 
-```text
-左 : row3 + row0        右 : row3 − row0
-下 : row3 + row1        上 : row3 − row1
-近 : row2               （Vulkan [0,1]：z >= 0 ⇒ 直接取 row2，不是 row3+row2）
-远 : row3 − row2
-```
+- 左 : $ \text{row}_3 + \text{row}_0 $ 右 : $ \text{row}_3 - \text{row}_0 $
+- 下 : $ \text{row}_3 + \text{row}_1 $ 上 : $ \text{row}_3 - \text{row}_1 $
+- 近 : $ \text{row}_2 $ （Vulkan [0,1]：z >= 0 ⇒ 直接取 row2，不是 row3+row2）
+- 远 : $ \text{row}_3 - \text{row}_2 $
 
 `makePlane` 的循环体（`NaniteTypes.h:1257-1262`）：`outPlane[col] = m[col*4+3] + sign * m[col*4+row]`。
 随后**按 xyz 长度归一化**（`:1273-1283`），且注释明确"不取反、保留 Gribb/Hartmann 原始朝向"。
@@ -359,8 +356,8 @@ planes[i] = (n.xyz, d) ； dot(n, p) + d >= 0 表示 p 在平面内侧
 是同一套 `makePlane(rowN, add)`（`:19-27`）、同样的平面顺序（`:29-35`）、同样的"不取反、只按长度归一化"
 （`:37-42`）、同样的近平面取 `row2`（`:33-34` 的注释写明是 Vulkan [0,1] 而非 OpenGL 的 `row3+row2`）。
 
-**为什么归一化**：球-平面距离判据 `dot(n,c)+d < -r` 只有在 `‖n‖ = 1` 时量纲才等于"世界距离"，
-否则阈值会被 `‖n‖` 缩放（`NaniteTypes.h:1273`）。
+**为什么归一化**：球-平面距离判据 `dot(n,c)+d < -r` 只有在 $ \|n\| = 1 $ 时量纲才等于"世界距离"，
+否则阈值会被 $ \|n\| $ 缩放（`NaniteTypes.h:1273`）。
 
 **为什么 CPU 要自己写一份而不是调 `he::Frustum`**：`NaniteTypes.h` 是 RHI-free 的（`NaniteTypes.h:18-21`），
 而 `he::Frustum` 牵入 `Math/Geometry.h`（本不在它的依赖白名单内）；两处的一致靠单测比对同一个 view-proj
@@ -368,9 +365,7 @@ planes[i] = (n.xyz, d) ； dot(n, p) + d >= 0 表示 p 在平面内侧
 
 ### 1.4.3 球-平面判据与 CPU/GPU 逐项一致
 
-```text
-可见 ⇔ ∀ i ∈ [0,6) : dot(n_i, c) + d_i >= −r
-```
+可见 ⇔ $ \forall i \in [0, 6) : \mathrm{dot}(n_i, c) + d_i \ge -r $
 
 CPU：`NaniteSphereVisibleInFrustum`（`NaniteTypes.h:1293-1305`），
 `radius < 0` 按 0 处理（`:1296`），任一面 `distance < -radius` ⇒ 不可见（`:1302`）。
@@ -429,30 +424,24 @@ CPU 参考与 GPU 读**同一份比特**，避免"GPU 现推 sqrt 的末位差�
 
 **编码公式**（`NaniteQuantizePositionAxis`，`NaniteTypes.h:676-686`）：
 
-```text
-signed = clamp(round((v − origin) / range × 1022), −512, +511)
-raw    = clamp10(signed + 512)
-```
+$$
+\begin{aligned} \text{signed} &= \mathrm{clamp}\left(\mathrm{round}\left(\frac{v - \text{origin}}{\text{range}} \times 1022\right),\ -512,\ +511\right) \\ \text{raw} &= \mathrm{clamp}_{10}(\text{signed} + 512) \end{aligned}
+$$
 
 **解码公式**（`NaniteDequantizePositionAxis`，`NaniteTypes.h:694-699`）：
 
-```text
-v' = origin + (raw − 512) / 1022 × range
-```
+$$
+v' = \text{origin} + \frac{\text{raw} - 512}{1022} \times \text{range}
+$$
 
 其中 `1022 = kNaniteVertexQuantFullScale = 2 × 511`（`NaniteTypes.h:579-581`，带 `static_assert == 1022`）。
 往返误差上界 = 半个量化步 = `range / 2044`（`:688`）。
 
 **三轴解码**（Slang，`NaniteTypes.slang:300-311`）：
 
-```text
-naniteDecodePosition(packed, quantBias, clusterCenter, meshMaxExtent)
-  = float3( decodeAxis((packed >> 0)  & 0x3FF, c.x, meshMaxExtent, quantBias),
-            decodeAxis((packed >> 10) & 0x3FF, c.y, meshMaxExtent, quantBias),
-            decodeAxis((packed >> 20) & 0x3FF, c.z, meshMaxExtent, quantBias) )
-naniteDecodeVertexPosition(v, cluster, meshMaxExtent)
-  = naniteDecodePosition(v.packedPosition, v.quantBias, cluster.boundsCenterRadius.xyz, meshMaxExtent)
-```
+$$
+\begin{aligned} \text{naniteDecodePosition}(\text{packed},\ \text{quantBias},\ \text{clusterCenter},\ \text{meshMaxExtent}) &= \mathrm{float3}\left( \mathrm{decodeAxis}((\text{packed} \gg 0)\ \&\ \text{0x3FF},\ c.x,\ \text{meshMaxExtent},\ \text{quantBias}), \right. \\ &\quad \mathrm{decodeAxis}((\text{packed} \gg 10)\ \&\ \text{0x3FF},\ c.y,\ \text{meshMaxExtent},\ \text{quantBias}), \\ &\quad \left. \mathrm{decodeAxis}((\text{packed} \gg 20)\ \&\ \text{0x3FF},\ c.z,\ \text{meshMaxExtent},\ \text{quantBias}) \right) \\ \text{naniteDecodeVertexPosition}(v,\ \text{cluster},\ \text{meshMaxExtent}) &= \text{naniteDecodePosition}(v.\text{packedPosition},\ v.\text{quantBias},\ \text{cluster}.\text{boundsCenterRadius}.xyz,\ \text{meshMaxExtent}) \end{aligned}
+$$
 
 `bias` 来自**顶点记录自己的** `quantBias` 字段（`NaniteTypes.h:595`，默认 +512）⇒ 解码**自包含**
 （不需要外部常量表，裁决 #7/#9 的理由，`NaniteTypes.h:588-590`）。
@@ -484,10 +473,8 @@ naniteDecodeVertexPosition(v, cluster, meshMaxExtent)
 **位域**：`packedNormal` 复用 R10G10B10A2 的 **x/y 两个 10 位域**，z、w **恒写 0**
 （`NaniteTypes.h:720-723`、`:807-813`）。位值按 **UNORM** 解释（不走纹理采样语义）。
 
-```text
-[-1,1] → 10 位：raw = clamp10(round(clamp((v + 1) × 0.5 × 1023, 0, 1023)))     // :741-748
-10 位 → [-1,1]：v   = raw / 1023 × 2 − 1                                       // :751-753
-```
+- [-1,1] → 10 位： $ \text{raw} = \mathrm{clamp}_{10}(\mathrm{round}(\mathrm{clamp}((v + 1) \times 0.5 \times 1023,\ 0,\ 1023))) $  // :741-748
+- 10 位 → [-1,1]： $ v = \frac{\text{raw}}{1023} \times 2 - 1 $  // :751-753
 
 **八面体编码**（`NaniteEncodeOctahedral`，`NaniteTypes.h:761-784`）：
 
@@ -529,11 +516,9 @@ n ← normalize(float3(x, y, z))
 
 ### 1.5.3 UV：R16G16_UNORM
 
-```text
-packedUV : u = 低 16 位、v = 高 16 位                                // :625-633
-编码：raw = lround(clamp(v × 65535, 0, 65535))                      // :850-856，NaN ⇒ 0
-解码：v'  = raw / 65535                                             // :859-861
-```
+- packedUV : u = 低 16 位、v = 高 16 位  // :625-633
+- 编码： $ \text{raw} = \mathrm{lround}(\mathrm{clamp}(v \times 65535,\ 0,\ 65535)) $  // :850-856，NaN ⇒ 0
+- 解码： $ v' = \frac{\text{raw}}{65535} $  // :859-861
 
 · 位宽与满值：`kNaniteUVQuantMax = 0xFFFF`（`NaniteTypes.h:847`）。
 · 往返误差 ≤ 1/131070（半个量化步，`NaniteTypes.h:858`）。
@@ -548,10 +533,11 @@ packedUV : u = 低 16 位、v = 高 16 位                                // :62
 
 ### 1.5.4 三角形索引：3×u16 进 `u32[2]`（8B/三角形）
 
-```text
-lo = i0 | (i1 << 16)        // i0 低 16 位、i1 高 16 位
-hi = i2                     // 高 16 位保留写 0
-```
+$$
+\begin{aligned} \text{lo} &= i_0 \mid (i_1 \ll 16) \\ \text{hi} &= i_2 \end{aligned}
+$$
+// i0 低 16 位、i1 高 16 位
+// 高 16 位保留写 0
 
 · 结构：`NanitePackedTriangle`（`NaniteTypes.h:881-889`，8B，`static_assert` 钉住尺寸与偏移）。
 · 打包/取索引：`NanitePackTriangle` / `NaniteTriangleIndex0/1/2`（`NaniteTypes.h:892-910`）。
@@ -614,10 +600,9 @@ hi = i2                     // 高 16 位保留写 0
 view-proj 被拆成 **4 个 `float4` 行**（push constant `vpRow0..vpRow3`，`:200-203`），
 每行与齐次点显式点积：
 
-```text
-hp   = float4(worldPos, 1)
-clip = float4(dot(vpRow0, hp), dot(vpRow1, hp), dot(vpRow2, hp), dot(vpRow3, hp))
-```
+$$
+\begin{aligned} \text{hp} &= \mathrm{float4}(\text{worldPos},\ 1) \\ \text{clip} &= \mathrm{float4}(\mathrm{dot}(\text{vpRow}_0,\ \text{hp}),\ \mathrm{dot}(\text{vpRow}_1,\ \text{hp}),\ \mathrm{dot}(\text{vpRow}_2,\ \text{hp}),\ \mathrm{dot}(\text{vpRow}_3,\ \text{hp})) \end{aligned}
+$$
 
 **为什么拆成 4 个行**：Slang 的 `float4x4` 行/列主序与内存 16 个 float 的对应依赖编译选项；
 拆开后 `vpRow{r}` **无条件**是列主序矩阵的 row r（`Nanite_SoftRasterCommon.slang:196-197`、
@@ -625,15 +610,14 @@ clip = float4(dot(vpRow0, hp), dot(vpRow1, hp), dot(vpRow2, hp), dot(vpRow3, hp)
 
 **NDC 与像素**（`Nanite_SoftRasterCommon.slang:273-276`）：
 
-```text
-ndc = clip.xyz / clip.w
-col = (0.5 + 0.5 × ndc.x) × screenWidth
-row = (0.5 − 0.5 × ndc.y) × screenHeight        ← y 必须翻
-```
+$$
+\begin{aligned} \text{ndc} &= \frac{\text{clip}.xyz}{\text{clip}.w} \\ \text{col} &= (0.5 + 0.5 \times \text{ndc}.x) \times \text{screenWidth} \\ \text{row} &= (0.5 - 0.5 \times \text{ndc}.y) \times \text{screenHeight} \end{aligned}
+$$
+← y 必须翻
 
 **y 反转的原因**（`:266-272`）：引擎用 `glm::perspectiveRH_ZO`（NDC y 向上），而 Vulkan 帧缓冲 y 向下；
 引擎的离屏通道统一用**负高度视口**（`SetViewport({..., -height, ...})`）抵消 ⇒ NDC y = +1 落在帧缓冲**第 0 行**。
-⇒ `row = (0.5 − 0.5·ndc.y)·H`。同一条约定被剔除链的 Hi-Z 采样复用（见 1.9.3）。
+⇒ $ \text{row} = (0.5 - 0.5 \cdot \text{ndc}.y) \cdot H $ 。同一条约定被剔除链的 Hi-Z 采样复用（见 1.9.3）。
 
 **有效性判据**（`softRasterFetchTriangle`，`:374-420`）：
 
@@ -649,11 +633,9 @@ area2 = (p1.x − p0.x)(p2.y − p0.y) − (p2.x − p0.x)(p1.y − p0.y)
 A/C 两趟（以及 B 趟）用**逐字相同**的四行（`Nanite_SoftRasterDepth.comp.slang:117-122`、
 `Nanite_SoftRaster.comp.slang:113-118`、`Nanite_SoftRasterWinner.comp.slang:97-102`）：
 
-```text
-lo = min(p0, p1, p2) ;  hi = max(p0, p1, p2)
-bmin = clamp(floor(lo), 0, (W−1, H−1))
-bmax = clamp(ceil(hi),  0, (W−1, H−1))
-```
+$$
+\begin{aligned} \text{lo} &= \mathrm{min}(p_0, p_1, p_2),\quad \text{hi} = \mathrm{max}(p_0, p_1, p_2) \\ \text{bmin} &= \mathrm{clamp}(\lfloor \text{lo} \rfloor,\ 0,\ (W - 1,\ H - 1)) \\ \text{bmax} &= \mathrm{clamp}(\lceil \text{hi} \rceil,\ 0,\ (W - 1,\ H - 1)) \end{aligned}
+$$
 
 **为什么用 `floor`/`ceil` 而不是 `±1`**：`floor(lo)` 是"第一个可能被覆盖的像素中心所在的行/列"，
 `ceil(hi)` 是"最后一个"，因为像素中心取 `px + 0.5`、`py + 0.5`（`:128`）。
@@ -669,14 +651,9 @@ bmax = clamp(ceil(hi),  0, (W−1, H−1))
 
 实现：`Nanite_SoftRasterCommon.slang:426-456`。
 
-```text
-e0 = p1 − p0 ;  e1 = p2 − p1 ;  e2 = p0 − p2
-a0 = e0.x(p.y − p0.y) − e0.y(p.x − p0.x)
-a1 = e1.x(p.y − p1.y) − e1.y(p.x − p1.x)
-a2 = e2.x(p.y − p2.y) − e2.y(p.x − p2.x)
-area2 = (p1.x − p0.x)(p2.y − p0.y) − (p2.x − p0.x)(p1.y − p0.y)
-flip  = (area2 < 0) ? −1 : +1
-```
+$$
+\begin{aligned} \text{e}_0 &= p_1 - p_0,\quad \text{e}_1 = p_2 - p_1,\quad \text{e}_2 = p_0 - p_2 \\ a_0 &= \text{e}_0.x\,(p.y - p_0.y) - \text{e}_0.y\,(p.x - p_0.x) \\ a_1 &= \text{e}_1.x\,(p.y - p_1.y) - \text{e}_1.y\,(p.x - p_1.x) \\ a_2 &= \text{e}_2.x\,(p.y - p_2.y) - \text{e}_2.y\,(p.x - p_2.x) \\ \text{area2} &= (p_1.x - p_0.x)(p_2.y - p_0.y) - (p_2.x - p_0.x)(p_1.y - p_0.y) \\ \text{flip} &= (\text{area2} < 0)\ ?\ -1 : +1 \end{aligned}
+$$
 
 **三个细节，每一个都有实测踩坑记录**：
 
@@ -706,9 +683,9 @@ flip  = (area2 < 0) ? −1 : +1
 代码里的结论与实现：`Nanite_SoftRasterDepth.comp.slang:131-132`（"NDC 深度是屏幕坐标的线性函数
 ⇒ 直接重心插值（不需要透视校正）"），代码为
 
-```text
-ndcZ = bary.x × tri.z0 + bary.y × tri.z1 + bary.z × tri.z2
-```
+$$
+\text{ndcZ} = \text{bary}.x \times \text{tri}.\text{z}_0 + \text{bary}.y \times \text{tri}.\text{z}_1 + \text{bary}.z \times \text{tri}.\text{z}_2
+$$
 
 （`tri.z0/1/2` 是三个顶点的 NDC z，`:408`；同样三行出现在
 `Nanite_SoftRaster.comp.slang:126` 与 `Nanite_SoftRasterWinner.comp.slang:111`。）
@@ -720,9 +697,9 @@ ndcZ = bary.x × tri.z0 + bary.y × tri.z1 + bary.z × tri.z2
    即 Vulkan `[0,1]` 深度。对右手系，`w_clip = −z_eye`，而
    `z_clip = m22·z_eye + m32`（`m22`、`m32` 为投影矩阵第 2 行元素）⇒
 
-   ```text
-   z_ndc = z_clip / w_clip = −m22 + m32 × (1 / w_clip)
-   ```
+   $$
+   z_{\text{ndc}} = \frac{z_{\text{clip}}}{w_{\text{clip}}} = -m_{22} + m_{32} \times \frac{1}{w_{\text{clip}}}
+   $$
 
    即 `z_ndc` 是 `1/w` 的**仿射**函数。
 3. 仿射 ∘ 仿射 = 仿射，而重心坐标本身就是屏幕坐标的仿射函数
@@ -737,19 +714,18 @@ ndcZ = bary.x × tri.z0 + bary.y × tri.z1 + bary.z × tri.z2
 
 实现：`softRasterAttribute`（`Nanite_SoftRasterCommon.slang:458-467`）：
 
-```text
-w_k   = bary_k / clipW_k                     // 即 bary_k × invW_k（tri.invW0/1/2 = 1/clip.w，:409-411）
-sum   = w0 + w1 + w2
-attr  = (a0·w0 + a1·w1 + a2·w2) / sum
-```
+$$
+\begin{aligned} w_k &= \frac{\text{bary}_k}{\text{clipW}_k} \\ \text{sum} &= w_0 + w_1 + w_2 \\ \text{attr} &= \frac{a_0 \cdot w_0 + a_1 \cdot w_1 + a_2 \cdot w_2}{\text{sum}} \end{aligned}
+$$
+// 即 bary_k × invW_k（tri.invW0/1/2 = 1/clip.w，:409-411）
 
 调用点（第 2 趟写 GBuffer 前）：`Nanite_SoftRaster.comp.slang:147-153`
 （worldPos、normal（再 normalize）、uv）。
 
 **为什么必须校正（本文的推理解释）**：屏幕空间的线性插值只在被插值量是屏幕坐标的仿射函数时才精确。
 属性（世界坐标、法线、UV）在**物体表面**上是透视投影下的有理函数，只有**除以 w 之后**才落回仿射类：
-屏幕空间的线性插值给出的其实是 `Σ bary_k·attr_k`，而正确的透视值必须写成
-`Σ (bary_k/w_k)·attr_k / Σ (bary_k/w_k)`。若不校正，离相机近的三角形纹理会被拉伸错位
+屏幕空间的线性插值给出的其实是 $ \sum \text{bary}_k \cdot \text{attr}_k $ ，而正确的透视值必须写成
+$ \frac{\sum \left( \frac{\text{bary}_k}{w_k} \right) \cdot \text{attr}_k}{\sum \left( \frac{\text{bary}_k}{w_k} \right)} $ 。若不校正，离相机近的三角形纹理会被拉伸错位
 （经典的"仿射纹理映射"扭曲）。
 
 **与 1.6.4 的边界为什么刚好相反**（源码在 `:459` 一句话点明）：
@@ -767,9 +743,9 @@ attr  = (a0·w0 + a1·w1 + a2·w2) / sum
 
 C++ 权威定义（`NaniteSoftRasterDepthKey`，`NaniteTypes.h:2612-2624`）：
 
-```text
-key = (asuint(ndcZ) & 0xFFFFFF00) | (triLocal & 0xFF)
-```
+$$
+\text{key} = (\mathrm{asuint}(\text{ndcZ})\ \&\ \text{0xFFFFFF00}) \mid (\text{triLocal}\ \&\ \text{0xFF})
+$$
 
 Slang 镜像（`softRasterDepthKey`，`Nanite_SoftRasterCommon.slang:355-357`）逐字符相同
 （`(asuint(ndcZ) & 0xFFFFFF00u) | (triLocal & 0xFFu)`）。
@@ -872,9 +848,9 @@ Slang 镜像（`softRasterDepthKey`，`Nanite_SoftRasterCommon.slang:355-357`）
 **编码**（逐字相同的两处：`Nanite_SoftRasterWinner.comp.slang:141` 与
 `Nanite_SoftRaster.comp.slang:143-144`）：
 
-```text
-candidateID = (ref.cluster << 12) | (ref.instance << 6) | (triLocal & 0x3F)
-```
+$$
+\text{candidateID} = (\text{ref}.\text{cluster} \ll 12) \mid (\text{ref}.\text{instance} \ll 6) \mid (\text{triLocal}\ \&\ \text{0x3F})
+$$
 
 | 字段 | 位段 | 位宽 | 上限常量 | 上限值 |
 |---|---|---|---|---|
@@ -982,9 +958,9 @@ lightmapKey）由同一段代码顺序写入（`Nanite_SoftRaster.comp.slang:163
   `m' < k` 取代。第一种计入且最终也在 `m` 那一侧；第二种**也计入**，但最终不在 `m` 那一侧。
   ⇒ `ties` 至少覆盖"最终最小键那一侧的同键次数 − 1"，即
 
-  ```text
-  depth_key_ties >= pixels_written − depth_written
-  ```
+  $$
+  \text{depth\_key\_ties} \ge \text{pixels\_written} - \text{depth\_written}
+  $$
 
 · **等号成立条件**（源码 `NaniteTypes.h:2352-2354`）：该帧里"最小键**一旦写定就不再被更小的键取代**"。
   源码给出的实测：阈值 16 档 `3158 == 3264 − 106` ✓（等号成立）；
@@ -1075,7 +1051,7 @@ GPU `:281`、`:284`）；完全在屏外 → 不剔除（`NaniteTypes.h:1568`；
 
 **UV 的 y 翻转（P0 修复）**：`NaniteTypes.h:1483-1487` 与 `Nanite_ClusterBVH.comp.slang:69-75`、`:257-258`：
 本引擎离屏通道用负高度视口 ⇒ 纹理 v 向下增长 ⇒ 正确的采样 UV 是
-`s = (ndc.x·0.5 + 0.5, 0.5 − 0.5·ndc.y)`（**y 要翻**）；历史写法 `ndc.xy*0.5+0.5` 会采样到上下颠倒的 texel。
+$ s = (\text{ndc}.x \cdot 0.5 + 0.5,\ 0.5 - 0.5 \cdot \text{ndc}.y) $ （**y 要翻**）；历史写法 `ndc.xy*0.5+0.5` 会采样到上下颠倒的 texel。
 由 `params.misc.w`（`hizFlip`）选择，1 = 正确、0 = 历史镜像约定（仅用于可复现 A/B 对照，
 `Nanite_ClusterBVH.comp.slang:176-178`）。
 
@@ -1298,11 +1274,9 @@ depth = **节点数**，根（nodes[0]）= 1；空 BVH = 0
   着色器只做两次查表 —— `ref = u_ClusterPage[clusterIndex]` → `entry = u_PageTable[ref.page]` → 偏移换算。
   实现 `softRasterResolveCluster`（`Nanite_SoftRasterCommon.slang:296-328`）：
 
-  ```text
-  池内地址 = e.slot × stride + (cluster.vertexOffset − e.vertexBegin)        // :323
-             三角形段同理用 triangleStride / triangleBegin                   // :324
-  记录     = u_Clusters[e.slot × clusterStride + cp.local]                   // :322
-  ```
+  - 池内地址 = $ \text{e}.\text{slot} \times \text{stride} + (\text{cluster}.\text{vertexOffset} - \text{e}.\text{vertexBegin}) $  // :323
+  - 三角形段同理用 triangleStride / triangleBegin  // :324
+  - 记录 = $ \text{u\_Clusters}[\text{e}.\text{slot} \times \text{clusterStride} + \text{cp}.\text{local}] $  // :322
 · **簇 → 页映射项**（`NaniteClusterPageRef`，`NaniteTypes.h:2740-2743`）：`page`（页号）+ `local`（**页内**序号）。
   `local` 的口径由单测抓出来过（`NaniteTypes.h:2744-2749`）：它**不是**绝对下标，而是"该页自己的收集段里的下标"；
   着色器用它算 `slot × clusterStride + local`（槽内第一条 = 0），CPU 侧装页时
@@ -1345,11 +1319,9 @@ depth = **节点数**，根（nodes[0]）= 1；空 BVH = 0
 
 **槽步长（定长槽必须装得下最坏的那一页）**（`NaniteUpload.cpp:1986-1999`）：
 
-```text
-clusterStride  = max_p(pageClusterCount[p])
-vertexStride   = max_p(pageVertexCount[p])
-triangleStride = max_p(pageTriangleCount[p])
-```
+$$
+\begin{aligned} \text{clusterStride} &= \mathrm{max}_p(\text{pageClusterCount}[p]) \\ \text{vertexStride} &= \mathrm{max}_p(\text{pageVertexCount}[p]) \\ \text{triangleStride} &= \mathrm{max}_p(\text{pageTriangleCount}[p]) \end{aligned}
+$$
 
 三者都必须 ≥ 1（页非空），否则池槽建不出来（`:1995-1999`）。
 字节数换算 `slotClusterBytes = clusterStride × 64` 等（`:2000-2002`）。
@@ -1429,9 +1401,9 @@ else            原子累加溢出计数（不静默丢）
 
 **核心不变式**：
 
-```text
-soft + skipped_big + page_misses == visible
-```
+$$
+\text{soft} + \text{skipped\_big} + \text{page\_misses} = \text{visible}
+$$
 
 **推导（源码给出三个计数的位置，据此可推）**——第 1 趟里的顺序是决定性的
 （`Nanite_SoftRasterDepth.comp.slang`）：
@@ -1572,10 +1544,8 @@ bestMesh = argmax_m votes[m]，平票取下标更小者（遍历用 > 而不是 
 
 **判据**（`NaniteTypes.h:2421-2423`，与设计 §5.2 原文对齐）：
 
-```text
-cluster.triangleCount >  softMaxTriangles  ⇒ 硬光栅（mesh shader）
-cluster.triangleCount <= softMaxTriangles  ⇒ 软光栅（compute）
-```
+- $ \text{cluster}.\text{triangleCount} > \text{softMaxTriangles} $ ⇒ 硬光栅（mesh shader）
+- $ \text{cluster}.\text{triangleCount} \le \text{softMaxTriangles} $ ⇒ 软光栅（compute）
 
 **两侧共用同一个字段、同一份列表**（这是"并集全覆盖、交集为空"的全部依据）：
 
@@ -2141,7 +2111,7 @@ flowchart LR
 ### 量化打包
 
 - 位置：10 位（`kNaniteVertexQuantBits = 10`、`Mask = 0x3FF`、`Bias = 512`，
-  `NaniteTypes.h:571-573`；误差上界 `meshMaxExtent / 2044`，`NaniteUpload.h:411`）。
+  `NaniteTypes.h:571-573`；误差上界 $ \frac{\text{meshMaxExtent}}{2044} $ ，`NaniteUpload.h:411`）。
   量化尺度 = `meshMaxExtent` = `max(每轴范围)`（`NaniteUpload.h:405`，与 DAG 同口径）。
   打包器**重算一遍位置词**并与 DAG 的词逐位比对（`positionMismatchCount` 必须 0，
   `NaniteUpload.h:342-343`）。
@@ -2210,7 +2180,7 @@ flowchart TD
   `kNanitePageContentsPerPage = 512`（`NaniteTypes.h:2666`）。
 - **与设计的一处口径变化**：任务书写"512 **簇**/页"，实现改成"512 **份共享内容**/页"
   （`NaniteSettings.h:199-200` 明确记录了这个变化）。
-- 页数 = `ceil(contentCount / K)`（`NaniteStream.h:133` + `NaniteUpload.h:847`）。
+- 页数 = $ \left\lceil \frac{\text{contentCount}}{K} \right\rceil $ （`NaniteStream.h:133` + `NaniteUpload.h:847`）。
 - 槽长 = 每页各段条数的**最大值**（`NaniteStream.h:8-9`），
   因为池是定长槽的物理数组，任何槽都必须装得下最坏的那页。
 - **一份共享内容跨页是划分守卫的失败条件** → `PageStraddle`
@@ -3492,7 +3462,7 @@ GBuffer。三趟都录在 `Nanite_CullChain3` 的 pass 体内，靠命令缓冲�
 `naniteConeCulls`（`Engine/Shader/Shaders/Nanite/NaniteTypes.slang:432`）与簇的锥轴角数据都被完整算出并落盘（`NaniteUpload.cpp`），但**全仓库零调用点**；剔除链只做**包围球视锥测试**（`Nanite_ClusterBVH.comp.slang:406`）。即"模块声明了锥字段与判据，却没有消费者"，文档里此前没有任何标注。
 
 **C2 · 位置量化与法线打包：设计 §8.4 仍是旧口径（未回写）**
-§8.4 正文写 `bboxMin + raw/511 × maxExtent`（`docs/已实现功能/Nanite设计与实现.md:679-680`、`:718-728`）与 `R10G10B10A2_SNORM` 法线（`:659`、`:668`），而代码是**簇 AABB 中心 + 1022** 与**八面体 10+10 落 x/y（z/w 恒 0）**（`NaniteTypes.h:676-699`、`:807-813`）。裁决只留在 §14.20 ①，**§8.4 正文没有回写、也没有"已被任务 10 取代"的指针**，读起来像"还没决定"。
+§8.4 正文写 $ \text{bboxMin} + \frac{\text{raw}}{511} \times \text{maxExtent} $ （`docs/已实现功能/Nanite设计与实现.md:679-680`、`:718-728`）与 `R10G10B10A2_SNORM` 法线（`:659`、`:668`），而代码是**簇 AABB 中心 + 1022** 与**八面体 10+10 落 x/y（z/w 恒 0）**（`NaniteTypes.h:676-699`、`:807-813`）。裁决只留在 §14.20 ①，**§8.4 正文没有回写、也没有"已被任务 10 取代"的指针**，读起来像"还没决定"。
 
 **C3 · 三趟里只有 A/B 两趟把 `triangleCount` 夹到 64，C 趟没有**
 A 趟（`Nanite_SoftRasterDepth.comp.slang:85`）与 B 趟（`Nanite_SoftRasterWinner.comp.slang:88`）都是"先夹到 64 再判阈值"，C 趟（`Nanite_SoftRaster.comp.slang:84-86`）**直接判 `> maxTriangles`**。当"损坏资产 `triangleCount > 64`"**且** `maxTriangles == 64`（cfg 上界恰为 64，`NaniteSettings.h:142`）时，A/B 会处理、C 直接返回 ⇒ 该批像素**有深度键但永远无色**，`pixels_written < depth_written`，与注释记录的不变式方向相反。**合法资产（≤64）不可达。**
