@@ -395,8 +395,8 @@
 
 **参考答案要点**：
 - ① 当前帧的亮度需等渲染完成后才能统计 → 造成循环依赖。使用上一帧避免延迟：帧 N 渲染 → 统计亮度 → 用于帧 N+1 的曝光。单帧延迟人眼几乎无感知
-- ② 流程：① Compute Shader 生成亮度直方图（256 bins，log2 分布）；② 计算场景平均亮度（histogram 加权）；③ `EV = log2(averageLuminance * kKeyValue / kCalibrationConstant)`；④ 应用曝光补偿（用户设置）
-- ③ 平滑：`newExposure = lerp(prevExposure, targetExposure, adaptSpeed * deltaTime)`。adaptSpeed 区分明暗适应：亮→暗慢（0.5-1.0/s），暗→亮快（2.0-4.0/s）→ 模拟人眼的非对称适应特性
+- ② 流程：① Compute Shader 生成亮度直方图（256 bins，log2 分布）；② 计算场景平均亮度（histogram 加权）；③ $\text{EV} = \log_2(\text{averageLuminance} \times \text{kKeyValue} / \text{kCalibrationConstant})$；④ 应用曝光补偿（用户设置）
+- ③ 平滑：$\text{newExposure} = \text{lerp}(\text{prevExposure}, \text{targetExposure}, \text{adaptSpeed} \times \text{deltaTime})$。adaptSpeed 区分明暗适应：亮→暗慢（0.5-1.0/s），暗→亮快（2.0-4.0/s）→ 模拟人眼的非对称适应特性
 
 ---
 

@@ -96,7 +96,7 @@ public:
 ### T1 — Jolt 引入与冒烟（0.5 天）
 
 - submodule 拉取（`git submodule add https://github.com/jrouwe/JoltPhysics Engine/External/JoltPhysics`）→ External CMake 接入
-- 20 行冒烟：建 Jolt PhysicsSystem + 一个球 + 静态地面，`Step` 数帧后球位移 ≈ ½gt²
+- 20 行冒烟：建 Jolt PhysicsSystem + 一个球 + 静态地面，`Step` 数帧后球位移 $\approx \frac{1}{2} g t^2$
 - **验证**：编译通过；位移符合重力（先不接引擎，验证坐标系/单位/基本链路）
 
 ### T2 — PhysicsWorld + 转换层（0.5 天）
@@ -117,7 +117,7 @@ public:
 3. **Step**：固定步长（accumulator，单帧步数上限）；
 4. **回写**：每步后把激活 body 的世界变换写回实体 TransformComponent（position/rotation；scale 保持不变）。
 
-- **验证**：doctest（丢球 → 下落位移 ≈ ½gt²；落地后静止；销毁实体 → body 删除，无泄漏计数）
+- **验证**：doctest（丢球 → 下落位移 $\approx \frac{1}{2} g t^2$；落地后静止；销毁实体 → body 删除，无泄漏计数）
 
 ### T5 — 静态碰撞体（0.5 天）
 
@@ -146,7 +146,7 @@ public:
 | 风险 | 缓解 |
 |---|---|
 | Jolt 编译选项/宏（多线程、double、CPU 特性）不匹配 | T1 独立冒烟先行；Debug 开 `JPH_ENABLE_ASSERTS` |
-| 坐标/单位不一致 | Jolt 同为 Y-up 米制；T1 冒烟即验证 ½gt²；转换层集中收口 |
+| 坐标/单位不一致 | Jolt 同为 Y-up 米制；T1 冒烟即验证 $\frac{1}{2} g t^2$；转换层集中收口 |
 | 父子层级/非均匀缩放实体被物理化 | MVP 规则：带父级或被非均匀缩放的实体不允许 isDynamic（告警跳过），文档化 |
 | 与 MovementSystem/CharacterMovement 并存冲突 | 演示场景互斥使用；集成策略写入 T8 文档 |
 | body 泄漏/悬挂（实体销毁后） | T4 在实体销毁路径统一回收；doctest 断言 body 计数归零 |

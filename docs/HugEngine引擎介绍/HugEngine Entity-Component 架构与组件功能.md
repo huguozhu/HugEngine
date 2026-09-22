@@ -252,7 +252,7 @@ HE_END_REGISTER()
 
 - `SetSkeleton(asset)` 上传蒙皮顶点/索引（`JOINTS_0`/`WEIGHTS_0` 布局），走 GPU 蒙皮（Forward 路径）。
 - 播放：`PlayClip(clip, loop)`；**剪辑混合**：`SetBlendLayers` / `SetBlendLayer` / `CrossFadeTo`
-  （最多 `kMaxBlendLayers = 4` 层，权重按 Σw 归一化，旋转加权 nlerp，交叉淡入结束收敛为单层）；
+  （最多 `kMaxBlendLayers = 4` 层，权重按 $\sum w$ 归一化，旋转加权 nlerp，交叉淡入结束收敛为单层）；
   **动画重定向**：`SetAnimationSource(source, profile)` 后剪辑表切到源骨架、按关节名字映射，
   本组件的网格与绑定姿势仍用自身骨架。
 - 每帧由 `SkeletalMeshSystem` 采样关节 TRS → 层级合成世界矩阵 → `skin = world × inverseBind` → 骨骼 SSBO。
@@ -348,7 +348,7 @@ HE_END_REGISTER()
 
 ### 6.2 CharacterMovementComponent
 
-- 参数：走跑速度、跳跃高度（起跳初速 = √(2gh)）、重力、最大可站立坡度。
+- 参数：走跑速度、跳跃高度（起跳初速 $= \sqrt{2gh}$）、重力、最大可站立坡度。
 - 每帧输入由调用方写入（`inputDirection` 世界 XZ、`bWantsJump` 跳一次、`bRunning`），
   `MovementSystem` 消费并写回 `velocity` / `bOnGround`；地面检测与坡度过滤依赖
   `CollisionComponent` + `CollisionSystem`。

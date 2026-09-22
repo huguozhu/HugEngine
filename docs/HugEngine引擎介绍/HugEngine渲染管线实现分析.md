@@ -210,7 +210,7 @@ localToWorld + boundsMin/Max + meshIndex/materialIndex/objectID + IndirectDraw �
 ### 3.5 材质系统（Material.h）
 
 - `PBRMaterial`：glTF 2.0 PBR + Disney 扩展（ior/specular/specularTint/sheen/clearcoat/anisotropic/subsurface）；
-  `dielectricF0 = (ior-1)²/(ior+1)²` CPU 预计算；`disneyA = (anisotropic, subsurface, specular, sheen)`、
+  $\text{dielectricF0} = (ior-1)^2 / (ior+1)^2$ CPU 预计算；`disneyA = (anisotropic, subsurface, specular, sheen)`、
   `disneyB = (clearcoat, clearcoatGloss, specularTint.rg)`、`disneyC = specularTint.b`。
 - `FillObjectData`（GPUObjectData 每帧）与 `FillMaterialData`（bindless SSBO）字段映射一致，
   差异仅是后者去掉 worldMatrix/materialID。
@@ -388,7 +388,7 @@ GPUScene Collect→(MeshBatcher)→Upload → GPU 剔除 Readback（禁用时 cl
 | 20 | DOF | Graphics | hdrC | dofOut | 源选择：Bloom > HDR |
 | 21 | MotionBlur | Graphics | hdrC | mbOut | 源选择：DOF > Bloom > HDR；velocity 输入 |
 | 22 | TAA_Resolve | Graphics | hdrC | — | 输入链：mb > dof > bloom > HDR；HDR 空间运行 |
-| 23 | ToneMap | Graphics | — | LDR 或 backBuf | 输入三级选择：TAA > 后处理末端 > HDR；物理曝光 = AE × 2^exposureBias；`needLDR = FXAA‖SMAA‖ColorGrading‖CameraEffects` |
+| 23 | ToneMap | Graphics | — | LDR 或 backBuf | 输入三级选择：TAA > 后处理末端 > HDR；物理曝光 $= \text{AE} \times 2^{\text{exposureBias}}$；`needLDR = FXAA‖SMAA‖ColorGrading‖CameraEffects` |
 | 24 | ColorGrading | Graphics | ldrTarget | cgOut | |
 | 25 | CameraEffects | Graphics | ldrTarget | fxOut | 输入：CG > LDR |
 | 26 | SMAA | Graphics | ldrTarget | backBuf | 输入链：FX > CG > LDR；Pass3 直写 BackBuffer |
@@ -456,7 +456,7 @@ GPUScene Collect→(MeshBatcher)→Upload → GPU 剔除 Readback（禁用时 cl
 - 三类光源 ForEach 按注册顺序连续编号；色温 `KelvinToRGB`；
 - 阴影索引 = 光源 Entity 在 ShadowSystem m_AllEntities 中的下标；
 - **物理光照 hack**：`positionRange.w < 0` 标记物理模式（Directional 照度 lux / Point 发光强度 cd /
-  Spot cd，范围取负）；shader 端 w<0 → 1/d² 平方反比 + smoothstep 软截止，w>0 → 1/(1+2d+d²) 多项式衰减；
+  Spot cd，范围取负）；shader 端 w<0 → $1/d^2$ 平方反比 + smoothstep 软截止，w>0 → $1/(1+2d+d^2)$ 多项式衰减；
 - 逐光源一次 Map/Unmap（性能低但简单）；MAX_LIGHTS=8 上限。
 
 ### 5.9 坑与备注
@@ -648,7 +648,7 @@ normalThreshold=0.85）→ PTAtrousPass（CVar 读初值）。
 
 ### 7.4 PTPass raygen 算法（PT_Full.rgen.slang）
 
-1. 相机光线：StratifiedJitter（√N 网格 + STBN 偏移）→ ndc → invViewProj 反投影；
+1. 相机光线：StratifiedJitter（$\sqrt{N}$ 网格 + STBN 偏移）→ ndc → invViewProj 反投影；
 2. 反弹循环（bounce < maxBounces）：TraceRay 后 payload.emissiveT.a<0 即 Miss → 加天空色终止
    （**阴影射线哨兵技巧**：ACCEPT_FIRST_HIT + SKIP_CLOSEST，命中 payload.a=0=被遮挡，miss 由 rmiss
    写 a=-1）；
@@ -676,7 +676,7 @@ rchit：sceneMaterialTex 4 行查询（row0/1/3 材质、row2 定位法线纹理
 
 | compute | 职责 |
 |---|---|
-| Init（WRS） | miss 像素（depth≥-0.01 哨兵）写空蓄水池；有效像素重建世界坐标，对 candidateCount（1-64）个随机光源评估 p̂ = Luminance(brdf·Li)/max(lightPdf,1e-6)，WRS 替换 |
+| Init（WRS） | miss 像素（depth≥-0.01 哨兵）写空蓄水池；有效像素重建世界坐标，对 candidateCount（1-64）个随机光源评估 $\hat{p} = \text{Luminance}(\text{brdf} \cdot L_i) / \max(\text{lightPdf}, 1e-6)$，WRS 替换 |
 | Temporal | **先把本帧 depth/normal 拷贝到历史槽（早于一切 early-out，保证天空像素历史也被填充）**；速度重投影 historyUV = uv - velocity；去遮挡验证（深度差 < maxDistance=1.0 且 dot(N,histN)>0.9）；对历史样本**对当前像素重评估**后 WRS 合并（totalW/totalM 累加） |
 | Spatial | 邻域随机采样 spatialSamples（1-16）个、radius（1-8）像素；几何验证（距离>1.0 跳过、法线 dot<0.9 跳过）；重评估 + WRS 合并 → FinalReservoir |
 
@@ -691,8 +691,8 @@ rchit：sceneMaterialTex 4 行查询（row0/1/3 材质、row2 定位法线纹理
 - **RTDenoiser**：velocity 重投影 → 去遮挡（depthDiff > 1.0 米制 || normalDot < 0.85 → 历史权重 0）
   → `effectiveBlend = max(temporalBlend=0.30, motionBlend)` → lerp；首帧直接输出；全部点采样；
 - **PTAtrousPass**：CVar 迭代次数（默认 4，clamp 1-5），步长 1/2/4/8 翻倍，5-tap 十字核；
-  边权重 = exp(-|Δz|/σdepth=0.05m) × pow(dot(N), 128) × exp(-|ΔLum|/σcolor)，
-  σcolor 由 3×3 局部亮度方差自适应；火萤钳制（默认关）；
+  边权重 $= \exp(-|\Delta z| / \sigma_{\text{depth}} = 0.05\,\text{m}) \times \text{pow}(\text{dot}(N), 128) \times \exp(-|\Delta \text{Lum}| / \sigma_{\text{color}})$，
+  $\sigma_{\text{color}}$ 由 3×3 局部亮度方差自适应；火萤钳制（默认关）；
 - **ToneMap 输入选择链**：atrous > denoised > raw（`PathTracingPipeline.cpp`）。
 
 ### 7.7 PT 质量 CVar 清单（PTQualityCVars.cpp）

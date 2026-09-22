@@ -645,7 +645,7 @@
 
 ### 105. Lumen Screen Probe 与远场（ScreenProbe + SH + FarField）
 - **类别**: Lumen/GI
-- **原理**: 屏幕探针按 **16×16 单元**布点、2×2 平铺单元自适应合并为一个探针。探针半球追踪有两种采样模式（`LumenProbeSampleMode`：GGX 重要性采样 / 均匀半球），取值与 `ScreenProbeSampling.slang` 的约定一致——**追踪与投影必须同值**；命中点着色从 Surface Cache atlas 取材质，缺页返回中性值并计数。每条光线结果投成**二阶 SH（4 系数 × RGB，每系数一个 float4）**写回探针的 shR/shG/shB；白炉（furnace）自检时强制辐照度 L≈1，此时 l0 必须等于 √π（解析值，可断言）。`LumenFarFieldPass` 承担远场补充，`LumenScene_ProbeFilter` 做探针滤波。
+- **原理**: 屏幕探针按 **16×16 单元**布点、2×2 平铺单元自适应合并为一个探针。探针半球追踪有两种采样模式（`LumenProbeSampleMode`：GGX 重要性采样 / 均匀半球），取值与 `ScreenProbeSampling.slang` 的约定一致——**追踪与投影必须同值**；命中点着色从 Surface Cache atlas 取材质，缺页返回中性值并计数。每条光线结果投成**二阶 SH（4 系数 × RGB，每系数一个 float4）**写回探针的 shR/shG/shB；白炉（furnace）自检时强制辐照度 $L \approx 1$，此时 $l_0$ 必须等于 $\sqrt{\pi}$（解析值，可断言）。`LumenFarFieldPass` 承担远场补充，`LumenScene_ProbeFilter` 做探针滤波。
 - **解决问题**: 用屏幕空间探针 + 球谐把少量屏幕采样放大成低频间接光，并为探针覆盖不到的远场提供廉价兜底。
 
 ---
@@ -659,7 +659,7 @@
 
 ### 107. NaniteCull — 簇剔除
 - **类别**: Nanite/虚拟几何
-- **原理**: 消费 `NaniteUpload` 打包的簇 BVH 与 LOD 元数据，产出"计数 → 间接绘制"链所需的间接命令与计数缓冲。实例域与既有 `objectIndex` 分区契约对齐：普通段 `[0, 1024)`、Nanite 段 `[1024, 2048)`、保留哨兵 `kInvalidObjectIndex = 0xFFFFFFFF`，总容量 2048——分区上界由 MRT7（lightmapKey）是 RGBA16_FLOAT 推出：binary16 只有 1+5+10 位有效位，**精确整数**只在 |n| ≤ 2^11 = 2048 内成立。Hi-Z 遮挡剔除默认关闭（`nanite_hiz`，默认 0）：关闭时才与 CPU 参考剔除逐簇一致（CPU 拿不到 Hi-Z 金字塔的逐 texel 内容），开启后复用既有 `GPUCulling` 的 Hi-Z 纹理资源与下采样口径，差异单独统计。
+- **原理**: 消费 `NaniteUpload` 打包的簇 BVH 与 LOD 元数据，产出"计数 → 间接绘制"链所需的间接命令与计数缓冲。实例域与既有 `objectIndex` 分区契约对齐：普通段 `[0, 1024)`、Nanite 段 `[1024, 2048)`、保留哨兵 `kInvalidObjectIndex = 0xFFFFFFFF`，总容量 2048——分区上界由 MRT7（lightmapKey）是 RGBA16_FLOAT 推出：binary16 只有 1+5+10 位有效位，**精确整数**只在 $|n| \le 2^{11} = 2048$ 内成立。Hi-Z 遮挡剔除默认关闭（`nanite_hiz`，默认 0）：关闭时才与 CPU 参考剔除逐簇一致（CPU 拿不到 Hi-Z 金字塔的逐 texel 内容），开启后复用既有 `GPUCulling` 的 Hi-Z 纹理资源与下采样口径，差异单独统计。
 - **解决问题**: GPU 侧完成 Nanite 簇的视锥 / LOD / Hi-Z 遮挡剔除，并把"与 CPU 参考逐簇一致"设为默认档的硬验收条件。
 
 ### 108. NaniteRaster — 软光栅与 mesh shader 硬光栅

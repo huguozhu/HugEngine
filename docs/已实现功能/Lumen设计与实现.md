@@ -1158,7 +1158,7 @@ Provider 生命周期遍历（`OnResize` / `Shutdown` 现在不遍历 `m_GIProvi
 |---|---|---|
 | ReSTIR DI | ✅ 三个 compute（Init/Temporal/Spatial）单 RG Pass 顺序执行；蓄水池双缓冲 + 历史 depth/normal 双缓冲 | `Engine/Render/RT/ReSTIRPass.{h,cpp}`、`PathTracingPipeline.cpp` 的 `ReSTIR_DI` pass |
 | 蓄水池结构 | `PTReservoir` **32 B**：`lightIndex / weightSum / M / W / lightPos(float4)` —— 只存**一个光源样本** | `ShaderTypes.slang` 的 `GPU_STRUCT PTReservoir` |
-| 目标函数 | 复用 PT 第 5 UAV 的真实 albedo/metallic，`PBR_BRDF(albedo, metallic, roughness, N, V, L)·Li` | `ReSTIR_Init.comp.slang` |
+| 目标函数 | 复用 PT 第 5 UAV 的真实 albedo/metallic，$\text{PBR\_BRDF}(\text{albedo}, \text{metallic}, \text{roughness}, N, V, L) \cdot L_i$ | `ReSTIR_Init.comp.slang` |
 | PT 路径结构 | **单 RayGen 迭代循环**（NEE + MIS + 轮盘赌 + 天空），命中信息经 112B `PathPayload` 回传；**没有逐 bounce 的 shader 分离** | `PT_Full.rgen.slang` / `PT_Full.rchit.slang` / `RT/PathPayload.h` |
 | 随机数 | **无状态确定性**：`Rand(idx, frame, s)` / `RandInt(...)` / `StratifiedJitter(sampleIdx, sampleCount, frame)`，全部由 `(像素, 帧, 维度槽 s)` 决定 | `PT_Common.slang` L43~76 |
 | 材质/贴图数据 | 材质纹理 **11 行**（含 `materialID`/`textureMask`/因子）、三角形法线 + UV 纹理、`PBR_BRDF` 求值端共用 | `RTPass::BuildSceneMaterialTexture`、`全路径追踪管线规划.md` §0.6 缺陷 3 |
@@ -1205,10 +1205,10 @@ struct PTIndirectReservoir {   // 推算 80 B（可压到 48 B：位置/方向�
 
 **关键实现要点（决定 reservoir 能不能只存这些）**：
 
-1. **吞吐不能预先乘来源像素的 BSDF**：shift 后的一阶边属于*当前*像素，`f(y0)·G(y0,x1)/pdf_shift` 必须在**目标像素**重算。因此 reservoir 只存"材质量（`normalX1`、`posX1`、`radiance`）"，与"来源像素的 BSDF 无关"。
+1. **吞吐不能预先乘来源像素的 BSDF**：shift 后的一阶边属于*当前*像素，$f(y_0) \cdot G(y_0, x_1) / \text{pdf\_shift}$ 必须在**目标像素**重算。因此 reservoir 只存"材质量（`normalX1`、`posX1`、`radiance`）"，与"来源像素的 BSDF 无关"。
 2. **重放式的随机数**：因为 `Rand` 是 `(idx, frame, s)` 的纯函数，深段重放只需 `(srcPixel, srcFrame, rngSlot)`；`rngSlot` 用现有维度槽编号约定即可，**无需逐顶点存 RNG**（这是本引擎独有的便利，见 §A.2）。
 3. **重连的可见性**：`x0→x1` 一条 shadow ray；失败即丢弃该候选（GRIS 的标准做法）。
-4. **雅可比**：重连 shift 的 `|∂T/∂x|` 用闭式解（GRIS 论文给出；实现时写成 `Tools/check_*` 式的可单测函数，配 doctest）。
+4. **雅可比**：重连 shift 的 $\left| \partial T / \partial x \right|$ 用闭式解（GRIS 论文给出；实现时写成 `Tools/check_*` 式的可单测函数，配 doctest）。
 
 #### A.3.3 Pass 划分与帧图插入点
 
@@ -1240,7 +1240,7 @@ AS_Build → PT_Indirect_Init（新，1 条间接光线/像素 → 首顶点样�
 
 #### A.3.4 无偏性要点（写给实现者）
 
-- 复用必须满足：`W_shifted = p̂(y0)·... / (M · p_shift(x))`，其中 `p_shift` 是**shift 后的 pdf**（含雅可比）；漏掉雅可比 ⇒ 系统性偏差，且在"参考渲染器"定位下是**致命**的（比慢更糟）。
+- 复用必须满足：$W_{\text{shifted}} = \hat{p}(y_0) \cdot \ldots / \left( M \cdot p_{\text{shift}}(x) \right)$，其中 `p_shift` 是**shift 后的 pdf**（含雅可比）；漏掉雅可比 ⇒ 系统性偏差，且在"参考渲染器"定位下是**致命**的（比慢更糟）。
 - MIS/权重：时域与空间合并用 pairwise MIS（与现有 DI 的加权和保持同一套写法，避免两套约定）。
 - 可见性拒绝是一种**合法的零贡献**（不引入偏差），但要在 `M` 的记账上保持一致（与 DI 的 `weightSum/M` 同样处理）。
 - 目标函数必须用**当前像素**的 albedo/metallic（现有 `albedoMetallic` UAV 已经在做这件事，直接沿用）。
@@ -1271,7 +1271,7 @@ AS_Build → PT_Indirect_Init（新，1 条间接光线/像素 → 首顶点样�
 
   像素 ×4 而帧时只 ×2.8 ⇒ 存在与分辨率无关的每帧固定开销；显存增量含 VMA 池缓存与交换链/驱动开销，
   **不要**把它当逐像素预算用（逐像素预算仍以 §A.4.3 的设计公式为准）。
-- ⚠ **不要把上面这组数外推成跨分辨率的公式**。曾写过 `ms ≈ spp × (2.1 + 2.4 × (b−1))`，它只在 960×540 拟合：
+- ⚠ **不要把上面这组数外推成跨分辨率的公式**。曾写过 $\text{ms} \approx \text{spp} \times (2.1 + 2.4 \times (b - 1))$，它只在 960×540 拟合：
   · 在 960×540 的 4×4 上误差 <3%，`6×7` 上高估（轮盘赌截断深弹射）；
   · **跨分辨率不成立**：像素 ×7（0.52 → 3.64 MP）时 1×1 只 ×5.0、1×4 只 ×3.1（见上表）；
   · 低分辨率读数还可能被**每帧 CPU/日志开销**钳制（960×540 下 1×1 已达 488 FPS ≈ 2.05 ms/帧，而引擎每帧约 20 行日志 + 帧图重建）。
