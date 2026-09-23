@@ -60,9 +60,9 @@ cmake --build Build         # 需要 Release：cmake --build Build --config Rele
 - [20 编辑器实现分析](docs/HugEngine引擎介绍/20.编辑器实现分析.md)（ImGui 集成 / 10 个面板 / Gizmo / 撤销体系）
 - [21 构建与依赖管理](docs/HugEngine引擎介绍/21.构建与依赖管理.md)（preset / 11 个第三方库 / 新增依赖步骤）
 - [22 开发与验证手册](docs/HugEngine引擎介绍/22.开发与验证手册.md)（构建 / 9 个示例导读 / 测试 / 39 个验证脚本 / 环境变量与 CVar）
-- [23 AI 架构设计](docs/HugEngine引擎介绍/23.AI架构设计/)（AI 一等公民 / 统一基座 / AIGC 平台 / LLM 通信协议，共 9 篇）
+- [23 AI 架构设计](docs/HugEngine引擎介绍/23.AI架构设计.md)（AI 一等公民 / 统一基座 / AIGC 平台 / LLM 协议与实现计划）
 
-> 该目录是 **HugEngine 自身的技术文档**（共 22 篇 + AI 架构设计 9 篇）；**文件名序号即推荐阅读顺序**：
+> 该目录是 **HugEngine 自身的技术文档**（共 23 篇）；**文件名序号即推荐阅读顺序**：
 > `01–04` 认识工程（全景 → 架构 → 名词 → 缺口）→ `05–13` 渲染主线（管线 → 材质 → GI → Lumen → 光追/PT → Nanite → 后处理 → 阴影 → Shader）→
 > `14–15` 平台层（RHI → 多线程）→ `16–20` 场景与游戏层（ECS → 物理 → 资产 → 反射序列化 → 编辑器）→ `21–22` 上手与工程化 → `23` AI。
 >
