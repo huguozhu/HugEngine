@@ -52,7 +52,7 @@ cmake --build Build         # 需要 Release：cmake --build Build --config Rele
 **架构与规划**
 
 - [架构设计与任务划分](docs/HugEngine架构设计与任务划分.md)
-- [开发进度](docs/HugEngine开发进度.md)
+- [规划缺口分析-对标 2026 游戏引擎](docs/HugEngine引擎介绍/HugEngine规划缺口分析-对标2026游戏引擎.md)
 
 **专项文档**
 
