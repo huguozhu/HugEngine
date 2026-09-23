@@ -7,6 +7,13 @@
 > 并通过验收（白炉 1.0000、背靠背抖动族之外 ≤2 ULP、`HugEngineTests` 237 例 / 5792 断言全绿、
 > 默认预设不回归；一条命令复跑见 `build/verify/acceptance_sweep.ps1`）。**步骤 37（L6：1080p/60fps）
 > 未达成且已暂停**，其测量、归因与接手起点见 §四 进度表与其后的附四十四；既有缺陷清单也记在那里。
+>
+> **2026-09-23 补充（抖动族根因已修）**：判据 ② 里"抖动族"（`prov0_ao_*` / `hdr` / `radiance`）
+> 的排除口径反映的是当时的事实，本轮已查明根因并修复 —— SSAO 与 Blur 共处同一离屏通道
+> （attachment feedback loop，UB）+ 帧图 `lightingReads` 漏声明 AO 输出（`Lighting` 在 AO 纹理
+> 仍处 `COLOR_ATTACHMENT` 布局时采样它）。修复后同一构建连跑（OFF 3 趟 / ON 2 趟）**全部 18 个
+> 转储逐位一致**。判据 ② 的口径与冻结指纹**无需改动**，该豁免在实际测量中已不再被触发。
+> 详见 `docs/HugEngine引擎介绍/11.后处理链与抗锯齿实现分析.md` §7.3。
 
 本文件由两份源文档合并重写而成：《Lumen 与 Nanite 完整设计规范》（只取其 Lumen / 全局光照
 部分，Nanite 部分归 `Nanite设计与实现.md`）与《ReSTIR PT / GRIS 预研》（全文并入附录 A）。
