@@ -2,7 +2,6 @@
 
 > **状态**: Steps 1-7 已全部实现，AsyncCompute 默认开启（多阶段提交架构已完成）
 > **最后更新**: 2026-07-15
-> **关联文档**: [HugEngine架构设计与任务划分.md](../HugEngine架构设计与任务划分.md)
 
 ---
 
@@ -474,4 +473,4 @@ SSR/SSGI/SSAO/Denoise/Bloom/DOF/MotionBlur 当前使用全屏三角形 + Graphic
 ---
 
 > **文档版本**: v1.0
-> **基于**: [HugEngine架构设计与任务划分.md](../HugEngine架构设计与任务划分.md) v1.0
+> **基于**: 《HugEngine架构设计与任务划分》v1.0（该文档已于 2026-09 删除，此处仅存出处）

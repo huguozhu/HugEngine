@@ -3,7 +3,6 @@
 > **日期**: 2026-07-06
 > **状态**: ✅ 已实现（最近一次改动 2026-09-16 `f4a7476`：监控改为递归子目录）
 > **实现落点**: `Engine/Render/ShaderHotReload.{h,cpp}`（文件监控线程 + `slangc` 编译 + `LoadSpirv`）、`IRenderPipeline::ReloadShader`（`ForwardPipeline` / `RTPass` 已实现 PSO 重建与替换，日志前缀 `[HotReload]`）；由 `Samples/Editor/EditorApp` 创建、`Start(shaderDir, slangcPath, ...)` 启动并每帧 `Poll()`
-> **关联**: [HugEngine架构设计与任务划分.md](../HugEngine架构设计与任务划分.md)
 
 ---
 
