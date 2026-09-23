@@ -794,7 +794,16 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         u32 aoW = aoTex->GetWidth();
         u32 aoH = aoTex->GetHeight();
         const u32 giIdx = (u32)(&prov - m_GIProviders.data());   // 计时下标（任务 29）
-        rg.AddPass(prov->GetName(), {}, {{ssaoOut, ResourceAccess::Write}},
+        // 【为什么要显式声明 reads（2026-09 画质阶段 0 修复）】本 pass 的体内 `SetInputs` 实际读了
+        //   GBuffer 的**深度 / 法线 / albedo**，但此前这里声明的是**空 reads** ⇒ 帧图给不出本 pass
+        //   相对 GBuffer 写入方的排序（`RenderGraph::TopologicalSort` 对 inDegree=0 的 pass 按 LIFO
+        //   处理，**注册序 ≠ 执行序**）⇒ AO 可能漂到 GBuffer 完成之前、读到半成品。
+        //   实测后果：同一配置两次运行的 `hdr` 差 **242 万像素**；把 AO 的层栈权重置 0（该 pass 不再
+        //   注册）后**全部 20 个转储逐位相同** ⇒ 这不是"设计上的抖动"，是排序缺陷。
+        //   补上真实 reads 后由帧图自动插入屏障（与 `Lighting` 的 `lightingReads` 同一范式）。
+        rg.AddPass(prov->GetName(),
+            {{gbDepth, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbA, ResourceAccess::Read}},
+            {{ssaoOut, ResourceAccess::Write}},
             [&, aoW, aoH, p = prov.get(), giIdx, aoCtx = GIProviderContext{ &world, &sg, &camera, m_CurrentFrameSlot, m_GIConfig.furnaceMode }](rhi::IRHICommandList* c) {
                 p->PreBind(c);                                  // 绑定该源 pass 的管线状态
                 p->SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetAlbedo());
