@@ -1,6 +1,8 @@
 # HugEngine RHI 相对于 UE5 的功能缺口分析
 
-> 分析日期：2026-09-21 | 基于 RHI 架构分析文档的延续
+> 分析日期：2026-09-21；复核更新 2026-09-22（① 修正 MSAA 判断——已有实现，问题在默认路径与两条 PSO 路径不一致；② 把 RenderGraph 更正并入正文，§十 只留实现位置与差距清单；③ 补记若干实测证据）
+> 姊妹文档（RHI 架构与 Vulkan 实现细节）：[HugEngine RHI架构与Vulkan实现分析.md](HugEngine%20RHI架构与Vulkan实现分析.md)
+> 判定口径：❌ = 未实现；⚠️ = 部分实现或实现但不生效（**⚠️ 一律给出代码位置**，便于复核）
 
 ---
 
@@ -96,12 +98,23 @@ UE5 的核心基础设施：
 | **动态顶点输入** (`VK_EXT_vertex_input_dynamic_state`) | ✅ | ❌ 绑定在 PSO |
 | **动态 MSAA 状态** | ✅ | ❌ |
 
+> **两条 PSO 创建路径对采样数的处理不一致（2026-09-22 复核发现）**
+>
+> | PSO 创建路径 | 采样数来源 |
+> |---|---|
+> | `VulkanPipeline.cpp:307`（图形 PSO 主路径） | **硬编码** `VK_SAMPLE_COUNT_1_BIT` |
+> | `VulkanPipeline.cpp:596`（另一条 PSO 路径） | **硬编码** `VK_SAMPLE_COUNT_1_BIT` |
+> | `PSOPrecompileManager.cpp:376`（后台预热） | **使用** `desc.sampleCount` |
+>
+> **后果**：MSAA 开启时，**预热产出的 PSO 与运行时创建的 PSO 不是同一条管线** ⇒ 预热被浪费、运行期重新编译，且难以命中 `VkPipelineCache`。这是一条"实现不一致"而非"功能缺失"的缺口。
+> **修法二选一**：① 两条路径统一改读 `desc.sampleCount`；② 统一拒绝在 RHI 层配置采样数（让 MSAA 只走上层描述符覆盖，见 §2.3），并把预热路径也改成固定 1。
+
 ### 2.3 渲染特性
 
 | 特性 | UE5 | HugEngine |
 |------|-----|-----------|
 | **Subpass Input Attachment** | ✅ (移动端 TBDR 优化) | ❌ `DescriptorType::InputAttachment` 已定义但未实现绑定 |
-| **MSAA** | ✅ (硬件 MSAA 2/4/8x + 自定义 resolve) | ⚠️ `TextureDesc::sampleCount` 字段存在但 PSO 中硬编码 `SAMPLE_COUNT_1_BIT` |
+| **MSAA** | ✅ (硬件 MSAA 2/4/8x + 自定义 resolve) | ⚠️ **已有实现，但默认 PSO 路径不生效**：`AA_MSAA`（`Engine/Render/AntiAliasing/AA_MSAA.h`）通过覆盖纹理/PSO 创建描述符的 `sampleCount` 实现硬件 MSAA（`AntiAliasing.h:71/74` 钩子，`DeferredPipeline.cpp:68` 已接线）；而 RHI 默认图形 PSO 路径仍硬编码 `VK_SAMPLE_COUNT_1_BIT`（`VulkanPipeline.cpp:307`/`:596`）⇒ 实际效果全看上层的覆盖是否生效，且与预热路径不一致（见 §2.2 注） |
 | **Conservative Rasterization** | ✅ | ❌ |
 | **Variable Rate Shading (VRS)** | ✅ | ❌ (DeviceCaps 有 `supportsVRS` 标志，无实现) |
 | **Fragment Shading Rate** | ✅ | ❌ |
@@ -119,7 +132,7 @@ UE5 的核心基础设施：
 
 | 特性 | UE5 | HugEngine |
 |------|-----|-----------|
-| **Render Dependency Graph** | ✅ 完整的 RDG（资源生命周期管理、状态推导、Pass 合并、图可视化） | ⚠️ 有基础 RenderGraph（见下文更正），但缺少图可视化、Pass 合并优化、显式外部依赖 API |
+| **Render Dependency Graph** | ✅ 完整的 RDG（资源生命周期管理、状态推导、Pass 合并、图可视化） | ⚠️ 已在 **Render 层**实现基础 RenderGraph（`Engine/Render/RenderGraph.{h,cpp}`，约 756 行）：依赖图构建（RAW/WAW/WAR）+ 拓扑排序 + 自动 Barrier 推导与状态去重 + 死 Pass 裁剪 + 资源别名 + AsyncCompute 调度 + Profiler 集成，`DeferredPipeline::BuildFrameGraph()` 与 `ForwardPipeline` 均已使用；**仍缺**：图可视化/导出、Pass 合并优化、显式外部依赖 API（`AddExternalAccess`/`AddReadback`）、子资源级追踪、Scoped 资源生命周期、Pass 条件执行（完整清单见 §十） |
 | **Graph 导出/可视化** | ✅ | ❌ |
 | **Pass 剔除** | ✅ (无输出的 Pass 自动跳过) | ✅ `CullDeadPasses()`：输出未被消费的 Pass 从执行列表移除 |
 | **显式依赖表达** | ✅ (`AddReadback()`, `AddExternalAccess()`) | ❌ |
@@ -146,7 +159,7 @@ UE5 的核心基础设施：
 |------|-----|-----------|
 | **纹理数组 / Atlas** | ✅ 通用支持 | ⚠️ 基础 `arrayLayers` 支持 |
 | **体积纹理 (3D)** | ✅ | ⚠️ `depth > 1` 时创建 VK_IMAGE_TYPE_3D |
-| **MSAA 纹理** | ✅ 含 resolve | ⚠️ sampleCount 字段存在但 PSO 未使用 |
+| **MSAA 纹理** | ✅ 含 resolve | ⚠️ 纹理侧 `sampleCount` 已可用并被 `AA_MSAA` 覆盖写入（`AA_MSAA.h:60/64`），但**无自定义 resolve 路径**；采样数是否真正生效取决于 PSO 侧（见 §2.2 注与 §2.3） |
 | **纹理视图 (SRV/UAV/RTV/DSV)** | ✅ 多种视图（不同格式/子资源） | ⚠️ 仅有 Per-Mip 存储/采样视图（含 mip+layer 变体） |
 | **Clear/Copy 专用路径** | ✅ 快速清除和拷贝（无需渲染通道） | ⚠️ 有 `ClearDepthStencil` / `CopyTextureToTexture` / `CopyTextureToBuffer`，仍无 `ClearRenderTarget` 接口 |
 | **Mipmap 生成 API** | ✅ `GenerateMipMaps()` | ⚠️ 仅在 `initialData` 上传时自动生成 |
@@ -237,7 +250,7 @@ UE5 的核心基础设施：
 | **P1** | 扩展动态状态 | 大量减少 PSO 变体数量，降低编译开销 |
 | **P1** | GPU Profiler / Debug Markers | 开发效率倍增器；**基础版已实现**（`ProfilerManager` 逐 Pass 时间戳 + `VK_EXT_debug_utils` 标签），缺 Tracy/RenderDoc 集成与 GPU 崩溃定位 |
 | **P1** | Upload Heap (环形缓冲) | 消除每帧创建/销毁 staging buffer 的开销 |
-| **P2** | MSAA | 基础抗锯齿方案 |
+| **P2** | MSAA（**已有实现，属"修通"而非"从零做"**） | `AA_MSAA` 的上层描述符覆盖已接线（`DeferredPipeline.cpp:68`）；需修的是 RHI 默认 PSO 路径与预热路径的采样数不一致（见 §2.2 注） |
 | **P2** | Subpass Input Attachment | 移动端性能优化关键 |
 | **P2** | Geometry/Tessellation Shader | 兼容旧内容，特定效果仍有需要 |
 | **P2** | VRS / Conservative Rasterization | 性能优化手段 |
@@ -256,15 +269,15 @@ UE5 的核心基础设施：
 
 ---
 
-## 十、更正：RenderGraph 已实现
+## 十、附：RenderGraph 实现位置与与 RDG 的差距
 
-> 本文档初版错误地将 RenderGraph 标记为"未实现"。实际上 HugEngine 在 **Render 模块**（非 RHI 模块）中有一套完整运行的 RenderGraph。
+> 本章原为"更正"章节——文档初版曾把 RenderGraph 误判为未实现。**正文口径已修正**：§2.4 现在直接给出 RenderGraph 的实现范围与缺口，本章只保留实现位置、功能入口与与 UE5 RDG 的逐项差距，避免同一内容两处维护。
 
 ### 10.1 实现位置
 
 `Engine/Render/RenderGraph.h` + `RenderGraph.cpp`（约 756 行），属于 L3 Render 层，构建在 RHI 之上。
 
-### 10.2 已实现功能
+### 10.2 功能入口与细节（摘要见正文 §2.4，此处为明细）
 
 | 功能 | 状态 | 实现细节 |
 |------|------|----------|
