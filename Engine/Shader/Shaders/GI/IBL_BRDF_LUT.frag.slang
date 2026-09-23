@@ -46,8 +46,13 @@ float3 ImportanceSampleGGX(float2 Xi, float roughness, float3 N) {
 
 // Geometry term (Schlick-GGX + Smith) for IBL
 float G_Smith(float NdotV, float NdotL, float roughness) {
-    float a = roughness * roughness;
-    float k = a * a * 0.5;  // IBL 用简化 k
+    float a = roughness * roughness;   // α（Disney/GGX 的 α = roughness²）
+    // 【2026-09 画质阶段 0 修复】原式 `k = a * a * 0.5` 展开为 **roughness⁴/2**，比 Karis/UE4 的
+    //   IBL 惯例 `k = a / 2`（= roughness²/2）**多平方了一次**。k 越小 ⇒ 分母越小 ⇒ G1 越大
+    //   ⇒ 几何遮蔽越少 ⇒ **间接高光偏亮**（roughness=1.0 处两式相等，故只影响中低粗糙度；
+    //   按同一套采样复算：roughness 0.5 / NdotV 0.5 处 A、B 分别偏大 16.6% 与 27.0%）。
+    //   ⚠ 直接光路径用的是另一套 `k = (roughness+1)²/8`（`pbr_common.slang:53`），两者不可混用。
+    float k = a * 0.5;  // IBL 简化 k = α/2，α = roughness²
     float G1V = NdotV / (NdotV * (1.0 - k) + k);
     float G1L = NdotL / (NdotL * (1.0 - k) + k);
     return G1V * G1L;
