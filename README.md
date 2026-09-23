@@ -38,20 +38,35 @@ cmake --build Build         # 需要 Release：cmake --build Build --config Rele
 
 **引擎介绍**（`docs/HugEngine引擎介绍/`）
 
-- [Entity-Component 架构与组件功能](docs/HugEngine引擎介绍/HugEngine Entity-Component 架构与组件功能.md)
-- [架构 UML 与可扩展性分析](docs/HugEngine引擎介绍/HugEngine架构UML与可扩展性分析.md)
-- [技术全景与实施计划](docs/HugEngine引擎介绍/HugEngine技术全景与实施计划.md)
-- [技术名词全目录](docs/HugEngine引擎介绍/HugEngine技术名词全目录.md)
-- [渲染管线实现分析](docs/HugEngine引擎介绍/HugEngine渲染管线实现分析.md) / [RHI 架构与 Vulkan 实现分析](docs/HugEngine引擎介绍/HugEngine RHI架构与Vulkan实现分析.md)
-- [全局光照（GI）本质、实现与架构优化](docs/HugEngine引擎介绍/HugEngine全局光照GI本质、实现与架构优化.md)
-- [Nanite 实现分析](docs/HugEngine引擎介绍/HugEngine Nanite实现分析.md)（数学原理 / 架构设计 / 实现细节）
-- [AI 架构设计](docs/HugEngine引擎介绍/HugEngine AI架构设计/)（AI 一等公民 / 统一基座 / AIGC 平台 / LLM 通信协议，共 9 篇）
+- [01 技术全景与实施计划](docs/HugEngine引擎介绍/01.技术全景与实施计划.md)（技术清单 / 分阶段路线图）
+- [02 架构 UML 与可扩展性分析](docs/HugEngine引擎介绍/02.架构UML与可扩展性分析.md)（架构总览 / 分层类图 / 关键时序 / 可扩展性与债务）
+- [03 技术名词全目录](docs/HugEngine引擎介绍/03.技术名词全目录.md)（117 条术语索引，当字典用）
+- [04 功能缺口与对标分析](docs/HugEngine引擎介绍/04.功能缺口与对标分析.md)（RHI / 渲染 / 游戏层 / 工程化缺口 + 16 条代码级债务）
+- [05 渲染管线实现分析](docs/HugEngine引擎介绍/05.渲染管线实现分析.md)（Forward+ / Deferred / PathTracing 三管线 + 公共基础设施）
+- [06 材质系统实现分析](docs/HugEngine引擎介绍/06.材质系统实现分析.md)（GBuffer 通道 / PBR 参数 / 数学原理）
+- [07 全局光照（GI）本质、实现与架构优化](docs/HugEngine引擎介绍/07.全局光照GI本质、实现与架构优化.md)（IBL / SSGI / SSR / RSM / DDGI / 层栈合成）
+- [08 Lumen 实现分析](docs/HugEngine引擎介绍/08.Lumen实现分析.md)（Mesh/Global SDF / Surface Cache / Screen Probe / 远场 HW RT）
+- [09 硬件光追与路径追踪实现分析](docs/HugEngine引擎介绍/09.硬件光追与路径追踪实现分析.md)（RTEffectPass 四效果 / PathTracingPipeline / ReSTIR / STBN）
+- [10 Nanite 实现分析](docs/HugEngine引擎介绍/10.Nanite实现分析.md)（数学原理 / 架构设计 / 实现细节）
+- [11 后处理链与抗锯齿实现分析](docs/HugEngine引擎介绍/11.后处理链与抗锯齿实现分析.md)（ToneMap/Bloom/DOF/降噪体系 / TAA·FXAA·SMAA·MSAA 实情）
+- [12 阴影系统实现分析](docs/HugEngine引擎介绍/12.阴影系统实现分析.md)（双层策略模式 / CSM / 点光 / 聚光 / 矩形光 / 与 RT 阴影切换）
+- [13 Shader 系统实现分析](docs/HugEngine引擎介绍/13.Shader系统实现分析.md)（slangc 构建管线 / 15 组着色器目录 / 绑定约定 / 热重载边界）
+- [14 RHI 架构与 Vulkan 实现分析](docs/HugEngine引擎介绍/14.RHI架构与Vulkan实现分析.md)（抽象接口层 / Vulkan 后端 / 延迟销毁与 PSO 管线）
+- [15 多线程架构与渲染实现分析](docs/HugEngine引擎介绍/15.多线程架构与渲染实现分析.md)（JobSystem / 并行剔除 / MTCR / AsyncCompute）
+- [16 Entity-Component 架构与组件功能](docs/HugEngine引擎介绍/16.Entity-Component%20架构与组件功能.md)（组件总表 + 逐组件详解 + 扩展指南）
+- [17 Physics 系统实现分析](docs/HugEngine引擎介绍/17.Physics系统实现分析.md)（Jolt 封装 / 固定步长 tick / 查询与角色移动）
+- [18 资产管线与 glTF 加载实现分析](docs/HugEngine引擎介绍/18.资产管线与glTF加载实现分析.md)（加载器 / 顶点与坐标系约定 / 骨骼与动画）
+- [19 反射与序列化实现分析](docs/HugEngine引擎介绍/19.反射与序列化实现分析.md)（宏驱动注册 / TypeRegistry / 属性注解 / `.hescene` 存取）
+- [20 编辑器实现分析](docs/HugEngine引擎介绍/20.编辑器实现分析.md)（ImGui 集成 / 10 个面板 / Gizmo / 撤销体系）
+- [21 构建与依赖管理](docs/HugEngine引擎介绍/21.构建与依赖管理.md)（preset / 11 个第三方库 / 新增依赖步骤）
+- [22 开发与验证手册](docs/HugEngine引擎介绍/22.开发与验证手册.md)（构建 / 9 个示例导读 / 测试 / 39 个验证脚本 / 环境变量与 CVar）
+- [23 AI 架构设计](docs/HugEngine引擎介绍/23.AI架构设计/)（AI 一等公民 / 统一基座 / AIGC 平台 / LLM 通信协议，共 9 篇）
 
-> 该目录是 **HugEngine 自身的技术文档**（共 12 篇 + AI 架构设计 9 篇）：架构总览、各子系统实现分析（渲染管线 / RHI / GI / **Nanite** / 多线程 / 可扩展性）、规划评审与缺口分析。
-
-**架构与规划**
-
-- [规划缺口分析-对标 2026 游戏引擎](docs/HugEngine引擎介绍/HugEngine规划缺口分析-对标2026游戏引擎.md)
+> 该目录是 **HugEngine 自身的技术文档**（共 22 篇 + AI 架构设计 9 篇）；**文件名序号即推荐阅读顺序**：
+> `01–04` 认识工程（全景 → 架构 → 名词 → 缺口）→ `05–13` 渲染主线（管线 → 材质 → GI → Lumen → 光追/PT → Nanite → 后处理 → 阴影 → Shader）→
+> `14–15` 平台层（RHI → 多线程）→ `16–20` 场景与游戏层（ECS → 物理 → 资产 → 反射序列化 → 编辑器）→ `21–22` 上手与工程化 → `23` AI。
+>
+> **重命名对照（2026-09-22 按阅读顺序编号）**：全部文档加了 `NN.` 前缀并去掉 `HugEngine` 前缀，旧的文档链接会失效，对照：`01`←技术全景与实施计划 · `02`←架构UML与可扩展性分析 · `03`←技术名词全目录 · `04`←功能缺口与对标分析 · `05`←渲染管线实现分析 · `06`←材质系统实现分析 · `07`←全局光照GI本质、实现与架构优化 · `08`←Lumen实现分析 · `09`←RayTracing与路径追踪实现分析 · `10`←Nanite实现分析 · `11`←后处理与抗锯齿实现分析 · `12`←阴影系统实现分析 · `13`←Shader系统实现分析 · `14`←RHI架构与Vulkan实现分析 · `15`←多线程架构与渲染实现分析 · `16`←Entity-Component 架构与组件功能 · `17`←Physics系统实现分析 · `18`←资产管线与glTF加载实现分析 · `19`←反射与序列化实现分析 · `20`←编辑器实现分析 · `21`←构建与依赖管理 · `22`←开发与验证手册 · `23`←AI架构设计/（以上旧名均带 `HugEngine` 前缀）。
 
 **专项文档**
 

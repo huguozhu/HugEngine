@@ -97,7 +97,7 @@
 | 设计 §5.1/§5.2 内的《HugEngine GI 架构与开发计划》§4.4 与《ReSTIR PT / GRIS 预研》引用 | 随 §5.1/§5.2 一并归入 Lumen 文档，本文件不展开（相关判据按 §0.2 的口径只做归属说明） |
 
 保留的、指向仍存在文档的链接：`docs/已实现功能/DeferredPipeline实现规范.md`、
-`docs/HugEngine引擎介绍/HugEngine技术全景与实施计划.md`（见 §2、§7）。
+`docs/HugEngine引擎介绍/01.技术全景与实施计划.md`（见 §2、§7）。
 
 ---
 
@@ -455,7 +455,7 @@ else
 ```
 
 延伸阅读（仍存在的文档）：`docs/已实现功能/DeferredPipeline实现规范.md`（GBuffer/帧图现状）、
-`docs/HugEngine引擎介绍/HugEngine技术全景与实施计划.md`（总体计划）。
+`docs/HugEngine引擎介绍/01.技术全景与实施计划.md`（总体计划）。
 
 #### 7.2 新 Shader 文件（源文档 §4 原文，含 Lumen 条目）
 
