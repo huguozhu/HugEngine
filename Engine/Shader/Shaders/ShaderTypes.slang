@@ -345,7 +345,7 @@ GPU_STRUCT ShadowPushConstant {
 // --- GBufferPushConstant: GBuffer 渲染 Push Constant（192 字节）---
 GPU_STRUCT GBufferPushConstant {
     float4x4 viewProjMatrix;        // [0..64]   当前帧 VP（含 TAA jitter）
-    float4x4 prevViewProjMatrix;    // [64..128] 上一帧 VP（无 jitter，velocity 用）
+    float4x4 prevViewProjMatrix;    // [64..128] 上一帧 VP（含**上帧** TAA jitter；velocity 因此自带抖动差）
     GPU_UINT objectIndex;           // [128]
     GPU_UINT useInstanceID;         // [132]     1=GPU Driven (SV_InstanceID)；2=实例化网格（任务 25）
     GPU_UINT instanceSSBOHandle;    // [136]     实例化网格的实例变换 SSBO 句柄（bindless u_SSBO[]）

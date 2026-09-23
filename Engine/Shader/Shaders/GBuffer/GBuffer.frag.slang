@@ -81,6 +81,12 @@ FSOutput fragmentMain(VSOutput input) {
         : 1.0);
 
     // ── MRT 3：Velocity（UV 空间运动矢量 = currUV - prevUV） ──
+    // 【为什么两帧都不去抖动（2026-09 画质阶段 0 第②项）】两帧的 NDC 各自带着**那一帧**的
+    //   TAA 抖动，所以 motion 里天然含有 (jitter_curr − jitter_prev)。TAA resolve 取
+    //   `historyUV = uv − motion`：uv 是本帧像素中心（其世界点在本帧被采样于 uv，即
+    //   unjittered_uv + jitter_curr），减去 motion 后正好等于 unjittered_prev_uv + jitter_prev，
+    //   也就是"同一世界点在上帧实际被采样到的位置" ⇒ 历史取样天然对齐，resolve 无需再补抖动项。
+    //   若这里把抖动去掉（只留真实位移），历史就会偏 (jitter_prev) 个亚像素，TAA 会糊边。
     float3 currNDC = input.position.xyz / input.position.w;
     float2 currUV  = currNDC.xy * 0.5 + 0.5;
 

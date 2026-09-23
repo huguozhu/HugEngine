@@ -318,6 +318,14 @@ private:
     float4x4 m_PrevViewProj = float4x4(1.0f);
     float4x4 m_CurrViewProj = float4x4(1.0f);
 
+    // 【本帧渲染相机（2026-09 画质阶段 0 第②项）】
+    //   = 调用方相机 + 当前帧的 TAA 子像素抖动；帧图里所有下游消费者共用它。
+    //   **必须是成员而不是帧图里的局部变量**：帧图的 lambda 只是**注册**，真正执行发生在
+    //   `BuildFrameGraph` 返回之后的 `rg.Execute()` 里；捕获局部变量的引用会立刻悬垂
+    //   （实测症状：GBuffer 全空、HDR 退化成一片均匀值、启动期可见物体数 55→29）。
+    //   原实现的 `[&]` 捕获的是**调用方参数**（样例的相机成员，生命周期覆盖整帧）才一直安全。
+    CameraData m_FrameCamera;
+
     u32 m_Width = rhi::kDefaultBackBufferWidth, m_Height = rhi::kDefaultBackBufferHeight;
     bool m_Ready = false;
 };

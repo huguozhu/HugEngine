@@ -55,7 +55,7 @@ static constexpr he::u32 kLumenProbeTimerIdx    = 27u;   // 其中：探针布�
 static constexpr he::u32 kLumenDebugTimerIdx    = 28u;   // 其中：SDF 逐像素追踪可视化（调试视图）
 
 void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
-                                        he::SceneGraph& sg, const CameraData& camera) {
+                                        he::SceneGraph& sg, const CameraData& cameraIn) {
     he::SyncPhysicalSkyToSun(world);  // 物理天空太阳→方向光同步（阴影/光照收集前）
     if (m_SwapChain) rg.SetSwapChain(m_SwapChain);
     u32 w = m_Width, h = m_Height;
@@ -84,10 +84,31 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     (void)sg;
 
     // ── 帧首：更新成员变量（lambda 内通过 this 安全访问，无悬垂引用风险）──
+    // 【TAA 子像素抖动接进投影矩阵（2026-09 画质阶段 0 第②项）】
+    //   接线事实（修复前）：`AA_TAA::GetJitterOffset()` 在整个 Engine/Samples 里**零调用点**，
+    //   而 `GBuffer.vert.slang:3` 的注释却写着"viewProjMatrix 已在 CPU 端加 jitter" ⇒
+    //   TAA 每帧把 8 个 Halton 偏移**算出来又丢掉**：相机始终对准像素中心，时域上没有任何
+    //   新采样信息，TAA 退化为"同一张图反复混合"（几乎等于纯时域模糊）。
+    //   修法：帧首把当前帧偏移写进 `camera.jitterNdc`，由 `CameraData::GetProjMatrix()` 施加在
+    //   投影矩阵上 —— 深度/法线/速度/光照重建/屏幕空间 GI/天空盒全部取自同一份 viewProj，
+    //   因此天然同相位（详见 Camera.h 该字段的说明）。
+    //   抖动为 0 的路径不变：TAA 关闭（`useTAA == false`）时 `jitterNdc` 保持 0，
+    //   整帧与修复前**逐位相同**（这一点在验收里用关闭档作对照验证）。
+    auto* taa = m_PostProcess.GetTAA();
+    const bool taaActive = (taa != nullptr) && taa->IsEnabled();
+    // 序列每帧推进（无论启用与否）：`OnBeginFrame` 同时推进 m_FrameIndex，混合系数的前两帧
+    // 收敛行为（AA_TAA.cpp 的 blendFactor）依赖它，改动这里会改变首帧的收敛口径。
+    if (taa) taa->OnBeginFrame();
+    // 本帧渲染相机 = 原相机 + 抖动后的投影矩阵。
+    // 【为什么落到成员 m_FrameCamera 而不是局部变量】帧图的 lambda 在此只被**注册**，真正
+    //   执行在 `BuildFrameGraph` 返回之后的 `rg.Execute()`；捕获局部变量的引用会悬垂
+    //   （实测：GBuffer 全空、HDR 均匀、可见物体数异常）。成员的生命周期覆盖整帧执行。
+    CameraData& camera = m_FrameCamera;
+    camera = cameraIn;
+    if (taaActive) camera.jitterNdc = taa->GetJitterOffset();
     m_CurrViewProj = camera.GetViewProjMatrix();
     static bool firstFrame = true;
     if (firstFrame) { m_PrevViewProj = m_CurrViewProj; firstFrame = false; }
-    if (m_PostProcess.GetTAA()) m_PostProcess.GetTAA()->OnBeginFrame();
 
     // ── 物理相机参数推导（根据 camera.exposureBias 等字段判断是否启用）──
     // 非零 exposureBias 表示使用了物理相机参数，将其传递到 DOF/MotionBlur/Exposure
@@ -197,7 +218,11 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         SubsystemContext sctx;
         sctx.world       = &world;
         sctx.sceneGraph  = &sg;
-        sctx.camera      = &camera;
+        // 【阴影用未抖动的相机（cameraIn）】CSM 的级联拟合由相机视锥推级联包围盒；若这里用带
+        //   TAA 抖动的相机，级联会逐帧亚像素摆动 ⇒ 阴影贴图 texel 对齐抖动 ⇒ TAA 反而把阴影
+        //   边缘抹糊（UE 同样只在主视图施加抖动，阴影深度 pass 不抖）。光照采样阴影时用的是
+        //   阴影系统自己算出的光源 VP，与这里的相机无关，故两侧仍然自洽。
+        sctx.camera      = &cameraIn;
         m_ShadowSystem->Update(sctx);  // 收集光源 → 填充 GPUShadowData（光源 VP 矩阵）
     }
 
@@ -1518,6 +1543,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             if (m_GIConfig.furnaceMode) return;   // 白炉模式：不画天空（见上）
             SubsystemContext sctx;
             sctx.world = &world;
+            // 天空盒属于主视图：必须与几何用**同一份带抖动的投影**，否则天空与几何相差一个
+            // 亚像素相位，TAA 会在天地交界处反复混出不存在的边缘（见帧首的抖动说明）。
             sctx.camera = &camera;
             m_PostProcess.GetSkybox()->Update(sctx);
             m_PostProcess.GetSkybox()->PreBind(c);

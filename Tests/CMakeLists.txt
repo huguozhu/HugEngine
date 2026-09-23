@@ -8,6 +8,9 @@ add_executable(HugEngineTests
     Main.cpp
     TestSceneBuilder.cpp
     TestPrimaryCamera.cpp
+    # 2026-09 画质阶段 0 第②项：TAA 抖动接进投影矩阵的符号/量级断言（纯 CPU，只需
+    # `Pipeline/Camera.h` 的包含路径；它只依赖 Core/Types.h 与 Math/）。
+    TestCameraJitter.cpp
     TestGameplayComponents.cpp
     TestBillboard.cpp
     TestTextRender.cpp
