@@ -2,6 +2,15 @@
 
 > 日期：2026-07-03 | 状态：设计完成 | Phase：P1
 > 架构文档引用：M98 AntiAliasing_TAA | M35 DeferredPipeline
+>
+> **2026-09-23 实施补记（画质阶段 0 第②项）**：本文设计的"每帧子像素抖动"此前**没有接线** ——
+> `GetJitterOffset()` 零调用点，投影矩阵每帧完全相同 ⇒ TAA 实际只做了"历史混合 + 邻域 AABB 裁剪"，
+> 没有亚像素信息可累积。现已接通：帧图帧首把当前帧偏移写进 `CameraData::jitterNdc`
+> （`Engine/Render/Pipeline/Camera.h` 的 `GetProjMatrix()`），深度/法线/速度/光照重建/屏幕空间 GI/天空盒
+> 共用同一份抖动投影；**阴影（CSM/Spot/Point）保持不抖**（级联拟合用未抖动相机）。
+> 速度矢量按本文 §2.2 的"双 VP"设计实现，两帧都含**各自**的抖动 ⇒ resolve 里 `uv − velocity`
+> 天然对齐历史采样的亚像素位置，**不需要**在 resolve 里再补 jitter 项（该 push constant 因此仍未被使用，
+> 属有意保留）。符号与量级由 `Tests/TestCameraJitter.cpp` 断言（同一点 NDC 恰好平移 +δ 且与深度无关）。
 
 ---
 
