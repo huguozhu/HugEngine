@@ -69,14 +69,24 @@ void SSAO::CreateAOTexture(u32 w, u32 h) {
     m_AOSampler = m_Device->CreateSampler(sd);
 }
 
-void SSAO::CreateBlurTexture(u32 w, u32 h) {
+/// 创建「原始 AO」纹理：SSAO/GTAO 直接写入这里，随后由 Blur pass 采样。
+/// 之所以与最终 AO 分开两张：Blur 不能采样自己正在写的附件（attachment feedback loop）。
+void SSAO::CreateRawAOTexture(u32 w, u32 h) {
     rhi::TextureDesc td;
     td.format=rhi::Format::R16_FLOAT;
     td.width=w;
     td.height=h;
     td.mipLevels=1;
     td.usage=rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
-    m_BlurTexture = m_Device->CreateTexture(td);
+    m_RawAOTexture = m_Device->CreateTexture(td);
+
+    // Blur pass 的输入就是这张纹理：地址只在重建时变，故在这里写一次描述符。
+    // 【为什么不再每帧写】描述符集是 GPU 执行期读取的对象，在 kMaxFramesInFlight=3 下
+    //   每帧改写同一份会和正在执行的帧争用（与参数 UBO 同类风险），而输入地址其实没变。
+    if (m_BlurSet != rhi::kInvalidSet && m_AOSampler) {
+        m_Device->UpdateDescriptorSet(m_BlurSet, kSSAOBlurBindInput,
+            rhi::DescriptorType::CombinedImageSampler, m_RawAOTexture.get(), m_AOSampler.get());
+    }
 }
 
 bool SSAO::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
@@ -95,15 +105,20 @@ bool SSAO::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
                       {kSSAOBindNoise,rhi::DescriptorType::CombinedImageSampler,1,16},  // Noise
                       {kSSAOBindParams,rhi::DescriptorType::UniformBuffer,1,16}};         // Params
         m_SSAOLayout = device->CreateDescriptorSetLayout(l);
-        m_SSAOSet    = device->AllocateDescriptorSet(m_SSAOLayout);
 
-        // 创建 SSAO 参数 UBO（kernel[64] + params + proj = 1104 bytes）
+        // 【按帧在飞分槽（2026-09 画质阶段 0 修复）】每槽一份描述符集 + 一份参数 UBO：
+        //   写第 N+1 帧时不会覆盖第 N 帧仍在读的那一份（修复前是单份 + 每帧重写 ⇒ AO 逐帧不确定，
+        //   详见 `SSAO.h` 描述符集处的说明）。范式与 `LightingPass::m_BlendUBO/m_Sets` 一致。
         rhi::BufferDesc ubDesc;
         ubDesc.size  = 64 * sizeof(float4) + sizeof(float4) + sizeof(float4x4) * 2;
         ubDesc.usage = rhi::BufferUsage::Uniform;
         ubDesc.cpuAccess = true;
-        m_ParamUBO = device->CreateBuffer(ubDesc);
-        device->UpdateDescriptorSet(m_SSAOSet, kSSAOBindParams, rhi::DescriptorType::UniformBuffer, m_ParamUBO.get());
+        for (u32 i = 0; i < rhi::kMaxFramesInFlight; ++i) {
+            m_SSAOSets[i] = device->AllocateDescriptorSet(m_SSAOLayout);
+            m_ParamUBO[i] = device->CreateBuffer(ubDesc);
+            device->UpdateDescriptorSet(m_SSAOSets[i], kSSAOBindParams,
+                                        rhi::DescriptorType::UniformBuffer, m_ParamUBO[i].get());
+        }
 
         // 存储 ShaderBytecode 副本（供惰性创建 PSO 时使用）
         m_SSAO_VS.stage = rhi::ShaderStage::Vertex;
@@ -188,7 +203,7 @@ bool SSAO::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_PointSampler = device->CreateSampler(ptSamp);
 
     CreateAOTexture(halfResW(width), halfResH(height));
-    CreateBlurTexture(halfResW(width), halfResH(height));
+    CreateRawAOTexture(halfResW(width), halfResH(height));
 
     m_Ready = true;
     HE_CORE_INFO("SSAO initialized ({}×{})", width, height);
@@ -201,23 +216,33 @@ void SSAO::Shutdown() {
     m_SSAO_PSO.reset();
     m_Blur_PSO.reset();
     m_AOTexture.reset();
-    m_BlurTexture.reset();
+    m_RawAOTexture.reset();
     m_AOSampler.reset();
     m_PointSampler.reset();
     m_NoiseTex.reset();
-    m_ParamUBO.reset();
+    for (u32 i = 0; i < rhi::kMaxFramesInFlight; ++i) m_ParamUBO[i].reset();
+    m_InputsBound = false;
     m_Device = nullptr;
     m_Ready = false;
 }
 
-void SSAO::OnResize(u32 w, u32 h) { m_Width=w; m_Height=h; CreateAOTexture(halfResW(w), halfResH(h)); CreateBlurTexture(halfResW(w), halfResH(h)); }
+void SSAO::OnResize(u32 w, u32 h) { m_Width=w; m_Height=h; CreateAOTexture(halfResW(w), halfResH(h)); CreateRawAOTexture(halfResW(w), halfResH(h)); }
 
 void SSAO::SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal) {
-    m_DepthTex = depth;
+    // 【只在输入真的变了才写描述符】GBuffer 的深度/法线跨帧稳定 ⇒ 缓存比较可把"每帧写描述符"
+    //   降为"输入变化时写一次"，顺带消除描述符集被正在执行的帧读到中间状态的风险。
+    //   写入时覆盖**全部帧槽**的集合（输入对所有槽位都相同）。
+    const bool changed = (depth != m_DepthTex) || (normal != m_NormalTex) || !m_InputsBound;
+    m_DepthTex  = depth;
     m_NormalTex = normal;
-    if (m_DepthTex) m_Device->UpdateDescriptorSet(m_SSAOSet, kSSAOBindDepth,rhi::DescriptorType::CombinedImageSampler,m_DepthTex,m_PointSampler.get());
-    if (m_NormalTex) m_Device->UpdateDescriptorSet(m_SSAOSet, kSSAOBindNormal,rhi::DescriptorType::CombinedImageSampler,m_NormalTex,m_PointSampler.get());
-    m_Device->UpdateDescriptorSet(m_SSAOSet, kSSAOBindNoise,rhi::DescriptorType::CombinedImageSampler,m_NoiseTex.get(),m_PointSampler.get());
+    if (!changed) return;
+    for (u32 i = 0; i < rhi::kMaxFramesInFlight; ++i) {
+        if (m_SSAOSets[i] == rhi::kInvalidSet) continue;
+        if (m_DepthTex)  m_Device->UpdateDescriptorSet(m_SSAOSets[i], kSSAOBindDepth,  rhi::DescriptorType::CombinedImageSampler, m_DepthTex,  m_PointSampler.get());
+        if (m_NormalTex) m_Device->UpdateDescriptorSet(m_SSAOSets[i], kSSAOBindNormal, rhi::DescriptorType::CombinedImageSampler, m_NormalTex, m_PointSampler.get());
+        m_Device->UpdateDescriptorSet(m_SSAOSets[i], kSSAOBindNoise, rhi::DescriptorType::CombinedImageSampler, m_NoiseTex.get(), m_PointSampler.get());
+    }
+    m_InputsBound = true;
 }
 
 void SSAO::PreBind(rhi::IRHICommandList* cmd) {
@@ -245,18 +270,35 @@ void SSAO::Render(rhi::IRHICommandList* cmd) {
         m_Blur_PSO = m_Device->CreatePipelineState(m_Blur_PsoDesc);
     }
 
-    // --- SSAO / GTAO Pass（按模式选择 PSO；视口用 AO 纹理实际尺寸）---
+    // 视口/附件尺寸一律用 AO 纹理实际尺寸（halfRes 时为半分辨率）
+    const u32 aoW = m_AOTexture->GetWidth();
+    const u32 aoH = m_AOTexture->GetHeight();
+
+    // 【为什么拆成两个 render pass（2026-09 画质阶段 0 修复）】
+    //   此前 SSAO 与 Blur 共处**同一个** render pass：Blur 一边把 `m_AOTexture` 当颜色附件写，
+    //   一边通过描述符采样**同一张**纹理（attachment feedback loop）。Vulkan 明确规定在同一
+    //   subpass 内采样自己正在写的附件是**未定义行为**，结果取决于驱动的 tile/缓存行为
+    //   ⇒ **逐帧不确定**。实测同一配置两次运行 `hdr` 差 5.8 万像素、
+    //   `prov0_ao_*` 差 2.2 万像素；把 AO 的层栈应用权重置 0（该 pass 不注册）后全部转储逐位相同
+    //   ⇒ 抖动确实源自本 pass，不是"设计上的随机"。
+    //   现改为标准两趟：Pass 1 写 `m_RawAOTexture` → 显式屏障 RT→SRV → Pass 2 读原始 AO、写最终 AO。
+    //   （原先已存在的 `m_BlurTexture` 成员正是为此准备的，但一直没被用上。）
+    //   对外的最终输出仍是 `m_AOTexture`，消费者（Lighting/帧图）无需改动。
+    // 【为什么 pass 在这里开关而不是帧图 lambda 里】两趟各有自己的附件与 PSO，且中间必须插屏障，
+    //   帧图只声明"本 pass 写最终 AO"这一个资源，内部趟次由本函数自管（同 `AA_SMAA::Render`）。
+    rhi::ClearValue aoClear;
+    aoClear.color[0]=aoClear.color[1]=aoClear.color[2]=aoClear.color[3]=1.0f;
+
+    // --- Pass 1: SSAO / GTAO → m_RawAOTexture（按模式选择 PSO）---
     cmd->SetPipeline(useGTAO ? m_GTAO_PSO.get() : m_SSAO_PSO.get());
-    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_SSAOSet);
-    u32 aoW = m_AOTexture->GetWidth();
-    u32 aoH = m_AOTexture->GetHeight();
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_SSAOSets[m_FrameSlot]);
     cmd->SetViewport({0,(float)aoH,(float)aoW,-(float)aoH,0,1});
     cmd->SetScissor({0,0,aoW,aoH});
 
     // 上传 SSAO 参数到 Uniform Buffer（kernel[64] + params + proj）
     // 对齐 shader 中 SSAOParams cbuffer 布局
     {
-        u8* dst = static_cast<u8*>(m_ParamUBO->Map());
+        u8* dst = static_cast<u8*>(m_ParamUBO[m_FrameSlot]->Map());
         if (dst) {
             // kernel[64] — 半球采样方向（view-space）
             memcpy(dst, m_Kernel.data(), 64 * sizeof(float4));
@@ -283,20 +325,35 @@ void SSAO::Render(rhi::IRHICommandList* cmd) {
             memcpy(dst, &projInv, sizeof(float4x4));
             dst += sizeof(float4x4);
             memcpy(dst, &proj, sizeof(float4x4));
-            m_ParamUBO->Unmap();
+            m_ParamUBO[m_FrameSlot]->Unmap();
         }
     }
-    cmd->Draw(3);
 
-    // --- Blur Pass ---
+    cmd->BeginOffscreenPass(m_RawAOTexture->GetNativeHandle(), nullptr, aoW, aoH, &aoClear, false);
+    cmd->Draw(3);
+    cmd->EndOffscreenPass();
+
+    // 原始 AO 布局转换：RenderTarget → ShaderResource（Pass 2 要采样它）。
+    // render pass 自身的 finalLayout 转变不经过 barrier，必须显式发一条（同 `AA_SMAA::Render`）。
+    cmd->PipelineBarrier(rhi::PipelineStage::ColorAttachmentOutput,
+                         rhi::PipelineStage::FragmentShader,
+                         rhi::ResourceState::RenderTarget,
+                         rhi::ResourceState::ShaderResource,
+                         m_RawAOTexture.get());
+
+    // --- Pass 2: Blur（读 m_RawAOTexture → 写 m_AOTexture）---
     cmd->SetPipeline(m_Blur_PSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_BlurSet);
-    m_Device->UpdateDescriptorSet(m_BlurSet, kSSAOBlurBindInput,rhi::DescriptorType::CombinedImageSampler,m_AOTexture.get(),m_AOSampler.get());
+    cmd->SetViewport({0,(float)aoH,(float)aoW,-(float)aoH,0,1});
+    cmd->SetScissor({0,0,aoW,aoH});
 
     struct { float2 ts; float _pad[2]; } bpc;
     bpc.ts = float2(1.0f/float(aoW), 1.0f/float(aoH));   // 模糊半径按 AO 纹理实际尺寸
     cmd->SetPushConstants(0, sizeof(bpc), &bpc);
+
+    cmd->BeginOffscreenPass(m_AOTexture->GetNativeHandle(), nullptr, aoW, aoH, &aoClear, false);
     cmd->Draw(3);
+    cmd->EndOffscreenPass();
 }
 
 } // namespace he::render

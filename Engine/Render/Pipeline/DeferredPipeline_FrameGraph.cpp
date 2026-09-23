@@ -783,6 +783,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     // 替代原先手写的「ShouldRunAO + useGTAO 赋值 + 固定 pass 名」：
     // 只要 Provider 声明处理该通道的源且 NeedsPass 为真，就为它注册 pass。
     // 新增 AO 类算法（如 HBAO/VXAO）只需注册一个新 Provider，此处不再改动。
+    // 本帧 AO 产出的句柄（供 Lighting 声明读依赖，见 lightingReads 处说明）
+    render::ResourceHandle aoLightingHandle = kInvalidHandle;
     for (auto& prov : m_GIProviders) {
         if (!prov->Handles(GISourceId::SSAO) && !prov->Handles(GISourceId::GTAO)) continue;  // 非 AO 通道
         prov->SyncToStack(m_GIConfig.ao);                       // 层栈要求 GTAO → 切 pass 模式
@@ -790,9 +792,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         rhi::IRHITexture* aoTex = prov->GetAOOutput();
         if (!aoTex) continue;
         auto ssaoOut = rg.ImportTexture("AO_Output", aoTex);
-        // halfRes：AO 纹理可能为半分辨率，pass 尺寸用纹理实际尺寸
-        u32 aoW = aoTex->GetWidth();
-        u32 aoH = aoTex->GetHeight();
+        aoLightingHandle = ssaoOut;                             // 记下产出句柄，供 Lighting 声明读
         const u32 giIdx = (u32)(&prov - m_GIProviders.data());   // 计时下标（任务 29）
         // 【为什么要显式声明 reads（2026-09 画质阶段 0 修复）】本 pass 的体内 `SetInputs` 实际读了
         //   GBuffer 的**深度 / 法线 / albedo**，但此前这里声明的是**空 reads** ⇒ 帧图给不出本 pass
@@ -804,16 +804,18 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         rg.AddPass(prov->GetName(),
             {{gbDepth, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbA, ResourceAccess::Read}},
             {{ssaoOut, ResourceAccess::Write}},
-            [&, aoW, aoH, p = prov.get(), giIdx, aoCtx = GIProviderContext{ &world, &sg, &camera, m_CurrentFrameSlot, m_GIConfig.furnaceMode }](rhi::IRHICommandList* c) {
+            [&, p = prov.get(), giIdx, aoCtx = GIProviderContext{ &world, &sg, &camera, m_CurrentFrameSlot, m_GIConfig.furnaceMode }](rhi::IRHICommandList* c) {
                 p->PreBind(c);                                  // 绑定该源 pass 的管线状态
                 p->SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetAlbedo());
-                rhi::ClearValue aoClear;
-                aoClear.color[0]=aoClear.color[1]=aoClear.color[2]=aoClear.color[3]=1.0f;
-                c->BeginOffscreenPass(p->GetAOOutput()->GetNativeHandle(), nullptr, aoW, aoH, &aoClear, false);
+                // 【为什么这里不再开关 render pass（2026-09 画质阶段 0 修复）】
+                //   AO 需要**两趟**独立的 render pass（SSAO 写原始 AO → 屏障 → Blur 读原始 AO 写最终 AO），
+                //   而此前帧图只开了一个 pass，Blur 就在这个 pass 里采样自己正在写的附件
+                //   （attachment feedback loop，UB，逐帧不确定）。现在趟次由 `SSAO::Render` 自管，
+                //   帧图只声明"本 pass 写最终 AO"这一个对外资源（同 `AA_SMAA` 的多趟写法）。
+                //   声明 ssaoOut 为写仍必要：它给出本 pass 相对 Lighting 消费者的排序与屏障。
                 m_GITimer.Begin(c, giIdx);
                 p->Render(c, aoCtx);
                 m_GITimer.End(c, giIdx);
-                c->EndOffscreenPass();
             });
     }
 
@@ -1332,6 +1334,18 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         // 光照图键（任务 31）：Lighting 用它查烘焙光照图，故必须声明读依赖
         {gbLightmapKey, ResourceAccess::Read},
     };
+    // AO 输出（SSAO/GTAO）：Lighting 通过 `in.ssaoTex = m_SSAO.GetAOTexture()` 采样它，
+    // 判据与 SSGI/SSR/Lumen 一致 —— 本帧注册了 AO pass 才算产出。
+    // 【为什么必须声明（2026-09 画质阶段 0 修复）】此前漏了这一条，帧图因此**不给
+    //   AO→Lighting 插屏障**：Lighting 会在 AO 纹理仍停在 COLOR_ATTACHMENT 布局、
+    //   甚至仍被 Blur 趟写入的时候就采样它（校验层 VUID-vkCmdDraw-None-09600，
+    //   日志里那几条 09600 就是它）⇒ 结果取决于 GPU 时序，**逐帧不确定**。
+    //   实测：同一构建连跑 7 趟，其中 1 趟 `hdr` 有 **133 万像素**不同（差异集中在物体
+    //   轮廓——AO 影响最强处），其余 6 趟逐位一致；把 AO 从层栈关掉后两趟逐位一致。
+    //   补上这一条后由帧图自动插入 RT→SRV 屏障（与 AO pass 自身的 reads 修复同一范式）。
+    if (aoLightingHandle != kInvalidHandle) {
+        lightingReads.push_back({aoLightingHandle, ResourceAccess::Read});
+    }
     // 屏幕空间源本帧是否真的产出了内容（= 其 pass 是否注册）。这是**唯一**判据：
     // 它同时决定「声明读取依赖」与「绑给 Lighting 的纹理」，避免两处判断不一致。
     const bool ssgiProduced = (ssgiDenoised != kInvalidHandle);

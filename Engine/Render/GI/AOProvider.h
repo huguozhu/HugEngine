@@ -58,6 +58,9 @@ public:
         if (m_Pass) {
             // 屏幕空间重建/回投影必须用渲染深度图的那套投影参数（§9.2-E）
             m_Pass->SetCamera(ctx.camera);
+            // 【按帧在飞分槽】把当前帧槽转交给 pass：它的参数 UBO 与描述符集按槽位分开，
+            //   否则三个在飞的帧会写坏彼此正在读的那一份（见 SSAO.h 的说明）。
+            m_Pass->SetFrameSlot(ctx.frameIndex);
             m_Pass->Render(cmd);
         }
     }

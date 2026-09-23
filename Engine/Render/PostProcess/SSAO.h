@@ -10,7 +10,9 @@
 //
 // 输入：深度 + 法线缓冲（GBuffer）
 // 输出：单通道 AO 纹理（应用到环境光分量）
-// 流程：SSAO Pass → Blur Pass → 应用到 Lighting
+// 流程：SSAO Pass（写 m_RawAOTexture）→ 屏障 → Blur Pass（读 m_RawAOTexture、写 m_AOTexture）
+//       → 应用到 Lighting。两趟是**两个独立的 render pass**，Blur 绝不能采样自己正在写的附件
+//       （attachment feedback loop），详见 SSAO.cpp 的 Render。
 // ============================================================
 
 namespace he::render {
@@ -46,17 +48,23 @@ public:
     /// 传 nullptr 时退化为默认投影，保证独立运行该 pass 也不会拿到未初始化矩阵。
     void SetCamera(const CameraData* camera) { m_Camera = camera; }
 
-    /// 执行 SSAO + Blur Pass，写入 m_AOTexture
+    /// 注入当前帧在飞槽位（由 `ScreenAOProvider` 每帧从 `GIProviderContext::frameIndex` 转交）。
+    /// 【为什么必需】参数 UBO 与描述符集按槽位分开，写第 N+1 帧时不能覆盖第 N 帧正在读的那一份。
+    void SetFrameSlot(u32 slot) { m_FrameSlot = slot % rhi::kMaxFramesInFlight; }
+
+    /// 执行 SSAO + Blur Pass（两趟独立 render pass），最终结果写入 m_AOTexture
     void Render(rhi::IRHICommandList* cmd);
 
-    // 输出
+    // 输出（`m_AOTexture` = 模糊后的最终 AO，供光照消费）
     rhi::IRHITexture* GetAOTexture() const { return m_AOTexture.get(); }
+    /// 模糊前的原始 SSAO/GTAO 输出（诊断/对比用；光照消费的是 GetAOTexture）
+    rhi::IRHITexture* GetRawAOTexture() const { return m_RawAOTexture.get(); }
     rhi::IRHISampler* GetAOSampler() const { return m_AOSampler.get(); }
     void PreBind(rhi::IRHICommandList* cmd);  // 惰性创建 PSO 并绑定
 
 private:
     void CreateAOTexture(u32 w, u32 h);
-    void CreateBlurTexture(u32 w, u32 h);
+    void CreateRawAOTexture(u32 w, u32 h);
     void GenerateKernel();
     void GenerateNoise(u32 size);
     // 半分辨率尺寸（halfRes 时 AO/Blur 纹理降半）
@@ -80,14 +88,27 @@ private:
     rhi::ShaderBytecode    m_Blur_VS,  m_Blur_FS;
 
     // 描述符集
+    //   【按帧在飞分槽（2026-09 画质阶段 0 修复）】SSAO 的参数 UBO（1168 B =
+    //   64×16 kernel + 16 params + 2×64 投影矩阵）与承载它的描述符集
+    //   此前都是**单份**，却每帧 Map 后整块重写 ⇒ 在 `kMaxFramesInFlight = 3` 的多帧在飞下，
+    //   CPU 为第 N+1 帧写这块缓冲时，GPU 可能仍在读第 N 帧的同一块 ⇒ 参数（u_InvProj/u_Proj/
+    //   u_Samples[64]）被读到写到一半 ⇒ **AO 逐帧不确定**。实测同一构建两次运行 `prov0_ao_*`
+    //   差 2.5~23.9 万像素，且量级随运行时机浮动（典型的竞争特征）；把 AO 从层栈关掉后
+    //   全部 20 个转储逐位相同。现改为与 `LightingPass::m_BlendUBO/m_Sets` 同款的**按槽数组**，
+    //   槽位由帧图经 Provider 注入（见 `SetFrameSlot`）。
+    //   `m_BlurSet` 保持单份：Blur pass 的参数走 push constant，且它的输入（原始 AO 纹理）
+    //   在两次重建之间地址不变，故只在 `CreateRawAOTexture` 里写一次描述符，不每帧写。
     rhi::DescriptorSetLayoutHandle m_SSAOLayout = rhi::kInvalidLayout;
-    rhi::DescriptorSetHandle       m_SSAOSet    = rhi::kInvalidSet;
+    rhi::DescriptorSetHandle       m_SSAOSets[rhi::kMaxFramesInFlight] = {};
     rhi::DescriptorSetLayoutHandle m_BlurLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_BlurSet    = rhi::kInvalidSet;
 
     // 纹理
-    std::unique_ptr<rhi::IRHITexture> m_AOTexture;    // AO 结果
-    std::unique_ptr<rhi::IRHITexture> m_BlurTexture;  // 模糊中间纹理
+    //   【两张而非一张（2026-09 画质阶段 0 修复）】`m_RawAOTexture` 承接 SSAO/GTAO 原始输出，
+    //   `m_AOTexture` 承接 Blur 结果。此前 Blur 直接采样并写回同一张 `m_AOTexture`
+    //   （在同一个 render pass 内）⇒ attachment feedback loop，结果不确定。
+    std::unique_ptr<rhi::IRHITexture> m_RawAOTexture;  // SSAO/GTAO 原始输出（Blur 的输入）
+    std::unique_ptr<rhi::IRHITexture> m_AOTexture;     // 模糊后的最终 AO（对外输出）
     std::unique_ptr<rhi::IRHISampler> m_AOSampler;
     std::unique_ptr<rhi::IRHISampler> m_PointSampler; // 点采样（深度/法线）
 
@@ -102,7 +123,14 @@ private:
     std::unique_ptr<rhi::IRHITexture> m_NoiseTex;
 
     // SSAO 参数 Uniform Buffer（对应 shader SSAOParams: kernel[64] + params + proj）
-    std::unique_ptr<rhi::IRHIBuffer> m_ParamUBO;
+    //   【按帧在飞分槽】见上面描述符集处的说明：单份缓冲 + 每帧重写 = CPU/GPU 竞争。
+    std::unique_ptr<rhi::IRHIBuffer> m_ParamUBO[rhi::kMaxFramesInFlight];
+
+    /// 当前帧在飞槽位（`SetFrameSlot` 注入；默认 0）
+    u32 m_FrameSlot = 0;
+
+    /// 输入描述符是否已写入（`SetInputs` 用它把"每帧写"降为"输入变化时写一次"）
+    bool m_InputsBound = false;
 };
 
 } // namespace he::render
