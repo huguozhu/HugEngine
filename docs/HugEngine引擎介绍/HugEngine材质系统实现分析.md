@@ -6,7 +6,7 @@
 > 相关文档：[HugEngine渲染管线实现分析.md](HugEngine渲染管线实现分析.md)（管线与 GBuffer 通道）、
 > [HugEngine全局光照GI本质、实现与架构优化.md](HugEngine全局光照GI本质、实现与架构优化.md)（IBL 烘焙与 split-sum）、
 > [HugEngine Entity-Component 架构与组件功能.md](HugEngine%20Entity-Component%20架构与组件功能.md)（组件字段）、
-> [HugEngine架构UML文档.md](HugEngine架构UML文档.md)（类关系）。
+> [HugEngine架构UML与可扩展性分析.md](HugEngine架构UML与可扩展性分析.md)（类关系）。
 >
 > **本文怎么读**：第 2~4 节是"现在支持什么"（事实），第 5 节是"这些参数在数学上是什么"（原理），
 > 第 6 节是"哪些声明了但没生效"（坑），第 7~9 节是"该怎么改"（改进清单 + 验证 + 落地顺序）。

@@ -16,7 +16,7 @@
 > DeferredPipeline.cpp 444→811 行、DeferredPipeline_FrameGraph.cpp 737→1761 行），行号已普遍漂移，
 > 故**统一改为不带行号的写法**，只保留文件名。
 > 覆盖公共基础设施（RenderGraph / GPU Scene / ShaderTypes / 粒子 / Profiler / PSO 预热 / 热重载）。
-> 架构总览见 [HugEngine架构UML文档.md](HugEngine架构UML文档.md)。
+> 架构总览见 [HugEngine架构UML与可扩展性分析.md](HugEngine架构UML与可扩展性分析.md)。
 
 ---
 
