@@ -31,6 +31,7 @@
 9. [附录 A：任务总表（可勾选）](#9-附录-a任务总表可勾选)
 10. [附录 B：自动化迁移检查](#10-附录-b自动化迁移检查)
 11. [参考](#11-参考)
+12. [附录 C：升级到 UE 三线程模型的增量路径](#12-附录-c升级到-ue-三线程模型的增量路径)
 
 ---
 
@@ -74,7 +75,7 @@
 |---|---|---|
 | Game Thread | 游戏线程（主线程） | 不变 |
 | Render Thread | **渲染线程**（本次新增） | 承担 UE 渲染线程的全部职责：剔除、MDC/绘制收集、RDG 建图、记录 RHI 命令 |
-| RHI Thread | **不存在**（本次明确不做） | 渲染线程即"Render + RHI 合并"，等价于 UE 的 `r.RHIThread.Enable=0` |
+| RHI Thread | **不存在**（本次明确不做） | 渲染线程即"Render + RHI 合并"，等价于 UE 的 `r.RHIThread.Enable=0`；**将来升级到三线程的增量路径见 §12** |
 | `ENQUEUE_RENDER_COMMAND` | `RenderCommandQueue` | 游戏 → 渲染的命令投递 |
 | Scene Proxy / FPrimitiveSceneProxy | `FrameSceneSnapshot` | 游戏线程产出的不可变渲染数据 |
 | `FParallelCommandListSet` | JobSystem + `m_SecRecordLists` | 已有雏形（仅 ForwardPipeline），本方案推广到全部管线 |
@@ -336,8 +337,11 @@ private:
 | **T0.3** | `RenderCommandQueue` + `RenderThread` **壳实现**：游戏线程入队，主线程（当前线程）消费——**行为完全等价于现在** | `Engine/Render/Threading/`（新增） | 样例帧序与改前一致；`cmp_dumps` 前后 dump 逐像素相同 |
 | **T0.4** | 帧票据与背压骨架（`FrameTicket` + 在飞帧计数），上限 `kMaxFramesInFlight` | 同上 | 人为把上限设为 1 时能观察到游戏线程阻塞（可测） |
 | **T0.5** | `EngineConfig` 新增 `enableRenderThread`（默认 **false**）与 `renderThreadSpinWaitUs` | `Engine/Core/Core/Engine.h` | 编译期与运行期开关均可切换；关闭时走旧路径 |
+| **T0.6** | **（为 §12 预埋，可选但强烈建议）** 定义 RHI 命令流的**记录端契约**与 `RHICommand` 载荷形态（类型擦除 + 内联参数），暂不改变执行方式 | `Engine/RHI/RHI/RHICommandList.h`（新增） | 契约评审通过；本轮不接入生产路径，只落头文件与单测 |
+| **T0.7** | **（为 §12 预埋，可选但强烈建议）** 资源句柄化：新增 `RHIBufferHandle` / `RHITextureHandle`（含 generation），并让新代码优先用句柄；`unique_ptr<IRHIBuffer>` 保留为兼容层 | `Engine/RHI/RHI/RHI.h`、`Engine/RHI/RHI/RHIHandles.h`（新增） | 新代码不再新增 `unique_ptr<IRHIBuffer>` 成员（grep 断言）；旧代码可渐进迁移 |
 
 **退出判据**：阶段 0 全绿 = 现有样例在 `enableRenderThread=false/true`（壳模式）下**输出一致**、帧时间不退化 > 3%。
+> **T0.6/T0.7 是本方案唯一的"现在不做、以后要付大代价"的两件事**，理由见 §12：RHI 命令流与资源句柄化是升级到三线程模型的前置条件，而在阶段 0 预埋只需 +5~8 人日，等到阶段 2 之后再补则要动全工程 200+ 处资源持有者。
 
 ### 阶段 1 · 场景快照（把渲染与 World 解耦）
 
@@ -445,6 +449,8 @@ private:
 | 阶段 | 内容 | 建议投入 | 依赖 |
 |---|---|---|---|
 | 阶段 0 | 地基（断言 + 队列壳 + 背压骨架） | 3~5 人日 | — |
+| 阶段 0 预埋 | T0.6 命令流契约 + T0.7 资源句柄化（**为 §12 的三线程升级留口**） | +5~8 人日 | 与阶段 0 同期 |
+| **（可选）三线程升级** | 仅做 A-1/A-2/A-3 三步（§12.8），**在阶段 2 之后才做** | **+6~12 人日**（已预埋）/ +15~30 人日（未预埋） | 阶段 2 起 |
 | 阶段 1 | 场景快照（核心） | **8~15 人日** | 阶段 0 |
 | 阶段 2 | 起渲染线程（设备/交换链/管线/样例/编辑器） | **10~18 人日** | 阶段 1 |
 | 阶段 3 | 并行录制推广 | 5~10 人日 | 阶段 2 |
@@ -463,6 +469,8 @@ private:
 - [ ] T0.3 `RenderCommandQueue` + `RenderThread` 壳实现（行为等价）
 - [ ] T0.4 帧票据与背压骨架
 - [ ] T0.5 `EngineConfig::enableRenderThread` / `renderThreadSpinWaitUs`
+- [ ] T0.6 **（预埋，见 §12）** RHI 命令流记录端契约 + `RHICommand` 载荷形态
+- [ ] T0.7 **（预埋，见 §12）** 资源句柄化（`RHIBufferHandle` / `RHITextureHandle` + generation）
 - [ ] T1.1 `FrameSceneSnapshot` 定义（与 `ShaderTypes.slang` 对齐 + `static_assert`）
 - [ ] T1.2 `SceneSnapshotBuilder`（集中现有 Collect 遍历）
 - [ ] T1.3 `CollectLights` / `GPUScene::Collect` 改消费快照
@@ -511,5 +519,189 @@ private:
 
 ---
 
-> **文档版本**：v1.0（2026-09-22）
+## 12. 附录 C：升级到 UE 三线程模型的增量路径
+
+> 本附录回答："本方案（方案 B）将来若要转成 UE 的 **Game → Render → RHI** 三线程模型，需要改什么、哪些决定必须提前做。"
+> 阅读顺序：§12.5（必须提前定的决定）→ §12.6（逐任务改动）→ §12.8（落地策略）。
+
+### 12.1 一句话：分水岭在 T2.6
+
+| 如果 T2.6 的 `RenderThreadContext` 被设计成… | 那么升级到 A 是… |
+|---|---|
+| **吐命令流**（渲染线程只 push `RHICommand`，不碰 Vulkan API） | **加一层线程 + 换执行位置**（增量 +6~12 人日，见 §12.9） |
+| 直接调 Vulkan（`IRHIDevice::Create*`、`vkCmd*`） | **重写渲染层**（命令流与句柄化都要事后补，面极大） |
+
+因此 §5 阶段 0 额外预埋了 **T0.6（命令流契约）** 与 **T0.7（资源句柄化）** 两个任务。
+
+### 12.2 本质差异
+
+```
+B（本方案）:   渲染线程 ──► IRHICommandList（直接产 vkCmd*）──► vkQueueSubmit ──► Acquire/Present
+A（UE 三线程）: 渲染线程 ──► RHI 命令流（纯数据，零 API 调用）
+                              RHI 线程 ──► 翻译成 vkCmd* ──► vkQueueSubmit ──► Acquire/Present
+```
+
+职责对照（对应 UE 的 `FRHICommandListExecutor` / `FDynamicRHI` / `FRHIThread`）：
+
+| 环节 | B（渲染线程一人全包） | A（拆成两段） |
+|---|---|---|
+| 剔除 / 收集 / 建帧图 | 渲染线程 | 渲染线程（不变） |
+| 记录"要做什么" | 直接生成 `vkCmd*` | **只 append `RHICommand`**（渲染线程） |
+| 翻译成 API 调用 | 记录时立即发生 | **RHI 线程** |
+| `vkQueueSubmit` / `Acquire` / `Present` | 渲染线程 | **RHI 线程（唯一提交者）** |
+| fence 与背压 | 两层（游戏↔渲染） | **三层**（游戏↔渲染↔RHI） |
+
+### 12.3 必须新增的 5 件东西
+
+| # | 新增件 | 说明 | 难度 |
+|---|---|---|---|
+| **A-1** | **抽象 RHI 命令流**（记录/执行分离） | 渲染线程 push 类型擦除的命令载荷，RHI 线程 pop 并翻译。**不要用 `std::function`**：每帧数千条命令会造成堆分配与虚调用开销，UE 用"类型擦除 + 内联参数存储"（`FRHICommand`） | **最高** |
+| **A-2** | **RHI 线程** | 命令流唯一消费者、唯一提交者；`Submit` / `SubmitAll` / `AcquireNextImage` / `Present` / fence 全归它 | 中 |
+| **A-3** | **资源创建命令化 + 句柄化** | `std::unique_ptr<IRHIBuffer>` 的"同步立即给所有权"语义必须换成句柄（创建在 RHI 线程执行） | **面最广** |
+| **A-4** | **三层背压与同步点** | 游戏→渲染、渲染→RHI 各自有在飞上限；语义对齐 UE 的 `FRHIThread::Sync()` | 中 |
+| **A-5** | **ImGui / PSO / 读回的命令化** | UI 产 `ImDrawData` → 命令流；PSO 走已有异步队列；`Map()` 改轮询或延迟取值 | 中 |
+
+### 12.4 现状接口的改造面（含两个有利条件）
+
+| 现状 | 位置 | 对 A 的含义 |
+|---|---|---|
+| `CreateSwapChain` / `CreateCommandList` / `CreateBuffer` / `CreateTexture` / `CreateSampler` / `CreatePipelineState` 均返回 **`std::unique_ptr<T>`** | `Engine/RHI/RHI/RHI.h:52-58` | ⚠️ **最大改造面**：同步所有权语义 ⇒ 必须句柄化（A-3） |
+| `CreateTextureMipStorageView` / `CreateTextureMipSampledView` 返回 **`void*`**；`CreateImGuiDescriptorPool` / `CreateImGuiRenderPass` 返回 **`void*`** | `RHI.h:127-135`、`RHI.h:163-167` | ⚠️ A 方案中"立即返回原生句柄"全部作废，须改为命令流内的抽象引用 |
+| `Submit()` 在命令列表上、`Submit(IRHICommandList*)` / `SubmitAll(Span<...>)` 在 device 上 | `Engine/RHI/RHI/CommandList.h:283`、`RHI.h:172`、`RHI.h:208` | A 方案中只允许 RHI 线程调用 |
+| ✅ `CreateDescriptorSetLayout` 返回 **`DescriptorSetLayoutHandle`**、`CreateFence` 返回 **`RHIFenceHandle`** | `RHI.h:99`、`RHI.h:188` | **句柄式 API 已有先例**，可照此推广到 buffer/texture/PSO |
+| ✅ 已有 `EnqueuePSOCreate` / `ProcessPSOCreateQueue` / `GetPendingPSOCreateCount` | `RHI.h:82-86` | **PSO 异步创建的雏形已存在**，A-5 只需扩展它，不必从零设计 |
+
+### 12.5 B 方案里"必须提前定"的 5 个决定
+
+| B 阶段的决定 | A 阶段的要求 | 建议提前到 |
+|---|---|---|
+| 资源创建同步返回 `unique_ptr`，各 Pass 用 `unique_ptr` 成员持有 | 改为**句柄 + 延迟解析**（并由 `FrameRetireQueue` 承担生命周期） | **阶段 0（T0.7）**——否则要二次动全工程 200+ 处持有者 |
+| `BufferDesc::initialData` 同步上传（`VulkanResources.cpp:486,651`） | 拷贝入队，RHI 线程执行 | 阶段 0 |
+| device 由渲染线程持有并直接调 `Create*` | device 归 RHI 线程；渲染线程只拿"命令接口" | 阶段 2（T2.6，分水岭） |
+| 交换链归渲染线程 | 归 **RHI 线程** | 阶段 2 起就抽象成 `ISwapChainController`，不让管线直接持有 |
+| ImGui 后端直接写命令缓冲（`EditorApp.cpp:536-542`） | UI 只产 `ImDrawData` → 命令流 | 阶段 4，但接口**不得暴露** `VkCommandBuffer` |
+
+### 12.6 逐任务改动表
+
+| 原任务 | A 方案的改法 | 增量 |
+|---|---|---|
+| T0.1 线程断言 | 断言分**双角色**：记录期 = 渲染线程、执行期 = RHI 线程 | 小 |
+| **T0.6（新增）** | `RHICommandList` 记录端契约 + `RHICommand` 载荷（§12.7） | **大** |
+| **T0.7（新增）** | 资源句柄化（`RHIBufferHandle` / `RHITextureHandle` + generation） | **大** |
+| T0.3 / T0.4 命令队列与帧票据 | 基本不变，额外加一层 RHI 背压计数 | 小 |
+| **T1.x 场景快照（阶段 1）** | ✅ **完全复用，零改动** | **0** |
+| T2.2 交换链迁移 | 目标线程从"渲染线程"改为 **RHI 线程** | 小 |
+| T2.3 资源创建服务 | 从"转发到渲染线程执行"改为"**命令化，RHI 线程执行**" | 中 |
+| **T2.6 `RenderThreadContext`** | 从"RHI 唯一出口"升级为"**只能吐命令流**"，不再暴露 device | **大** |
+| **阶段 2.5（新增）** | RHI 线程落地：消费命令流 + 唯一提交 + fence 管理 | **大** |
+| T3.1~T3.4 并行录制 | worker 产出的命令流片段由 **RHI 线程合并翻译**（UE 的 `TranslateCommandList` 模式） | 中 |
+| T4.1~T4.4 编辑器 / ImGui | UI 命令化；后门接口改为命令流内的描述符池引用（`RHI.h:163-169` 移除） | 中 |
+| T5.x 验收调优 | 增加三层背压调优、提交批优化、`enableRHIThread` 运行期开关 | 中 |
+
+### 12.7 命令流接口草案
+
+```cpp
+// Engine/RHI/RHI/RHICommandList.h —— 记录端（渲染线程唯一可调，对应 UE 的 FRHICommandList）
+namespace he::rhi {
+
+/// 一条命令的载荷：类型擦除 + **内联存储**。
+/// 为什么内联：每帧可能有数千条命令，逐条堆分配会成为新的瓶颈（UE 同做法）。
+struct RHICommand {
+    u32 type;                            // 命令类型（SetPipeline / DrawIndexed / PipelineBarrier / …）
+    u32 payloadSize;                     // 实际参数字节数
+    alignas(16) u8 inlinePayload[64];    // 小参数直接内联；超出 64B 的走列表私有 arena
+};
+
+/// 命令列表 = 命令流 + 参数 arena。渲染线程写，RHI 线程读；交接后只读（铁律 2）。
+class RHICommandList {
+public:
+    /// 记录一条命令：参数按值内联，禁止捕获会被游戏线程继续修改的引用
+    template <typename TPayload>
+    void Enqueue(u32 type, const TPayload& payload) {
+        static_assert(sizeof(TPayload) <= 64, "参数超过 64B，请走 AllocArena 通道");
+        // … 追加到 m_Commands
+    }
+
+    /// 大块数据（常量缓冲、上传源、SBT 记录）写入本列表私有 arena，RHI 线程执行期读取
+    [[nodiscard]] void* AllocArena(u64 size, u64 alignment = 16);
+
+    /// 标记本列表为此帧的提交边界（RHI 线程翻译完成后执行一次 submit）
+    void MarkSubmitBoundary() { m_HasSubmit = true; }
+
+private:
+    std::vector<RHICommand> m_Commands;
+    // … arena / 提交标记 / 目标队列类型
+};
+
+/// 资源句柄：取代 unique_ptr 的同步所有权语义；generation 用于检测悬挂引用
+struct RHIBufferHandle  { u32 index = 0; u32 generation = 0; };
+struct RHITextureHandle { u32 index = 0; u32 generation = 0; };
+
+} // namespace he::rhi
+```
+
+```cpp
+// Engine/RHI/Threading/RHIThread.h —— 执行端（对应 UE 的 FRHICommandListExecutor + FRHIThread）
+namespace he::rhi {
+
+/// RHI 线程：命令流的唯一消费者与唯一提交者。
+/// 职责：翻译 RHICommand → 平台 API；执行 queue submit；Acquire/Present；fence 管理。
+/// 对应关系：等价于 UE 的 r.RHIThread.Enable=1 模式。
+class RHIThread {
+public:
+    bool Start(IRHIDevice* device);          // 设备由本线程创建与持有
+    void Stop();
+
+    /// 渲染线程：提交一帧命令流（有界队列，满则渲染线程阻塞 —— 第二层背压）
+    void EnqueueCommandList(RHICommandList&& list);
+
+    /// 渲染线程：同步点（仅当确实需要"GPU 已完成某事"时使用，禁止进入帧循环）
+    void Sync();
+
+    static bool IsCurrent();
+
+private:
+    void ThreadMain();                        // 消费命令流 → 翻译 → 提交 → 呈现
+    std::thread     m_Thread;
+    RHICommandQueue m_Queue;                  // 有界
+    // … fence / 提交批 / 背压计数
+};
+
+} // namespace he::rhi
+```
+
+### 12.8 落地策略：把 A 做成"加开关"，而不是重写
+
+| 步骤 | 内容 | 验收 |
+|---|---|---|
+| **A1** | 命令流落地，**执行位置 = 渲染线程就地执行**（翻译与执行都在渲染线程） | 行为与 B **逐像素一致**、帧时间不退化 ⇒ 证明命令流层本身不引入开销 |
+| **A2** | 新增 `RHIThread`，执行位置切到它（`enableRHIThread` 开关）；**两个位置共用同一套命令流代码** | 主线程与渲染线程零 API 调用；提交在 RHI 线程；validation（含 sync）零告警 |
+| **A3** | 三层背压调优 + **提交批优化**（合并 barrier、批量描述符更新、批量提交） | `vkQueueSubmit` 调用次数下降；渲染线程可跑前于 RHI 线程 |
+
+> 运行期开关直接对齐 UE 的 `r.RHIThread.Enable`：**关 = 渲染线程就地执行；开 = RHI 线程执行**。
+> 这也解释了为何 UE 能把它做成可选——它的结构从第一天起就是"记录/执行分离"。
+
+### 12.9 代价与收益
+
+| 项 | 评估 |
+|---|---|
+| 额外工作量（不预埋） | 命令流层 + RHI 线程 + 句柄化改造：在 B 的 33~62 人日之上 **+15~30 人日** |
+| 额外工作量（阶段 0 预埋 T0.6/T0.7） | 增量降到 **+6~12 人日**（预埋成本约 +5~8 人日） |
+| 收益兑现条件 | ① 落地 **D3D12 后端**（描述符堆/PSO 开销大，RHI 线程收益显著）；② 实测"提交 + 驱动时间"占比 > 10~15%；③ 需要渲染线程在提交期间继续跑下一帧 |
+| 新增风险 | 三层时序难以调试；**命令流翻译本身可能成为新瓶颈**——这正是必须先做 A1（就地执行版）验证的原因 |
+| 与 §7 风险表的关系 | §7 的 R1~R7 全部适用；额外增加 R8「命令流翻译开销」与 R9「三层背压抖动」 |
+
+### 12.10 不建议的做法
+
+| 做法 | 为什么不好 |
+|---|---|
+| 先把 B 做完，再回头把 `vkCmd*` 调用"包装"成命令流 | 等于把渲染层重写一遍；且 `unique_ptr` 资源持有者已扩散到 200+ 处 |
+| 用 `std::function` 作为命令载荷 | 每帧数千次堆分配 + 间接调用；应为类型擦除 + 内联存储 |
+| 一开始就上三线程 | 录制耗时（16.4 ms，见 §1.5）才是当前瓶颈，三线程治不了它；且前置改造面最大 |
+| 让渲染线程与 RHI 线程都能调 `IRHIDevice::Create*` | 资源创建就必须线程安全化，等于把 RHI 改成两套锁；应保持"创建只在 RHI 线程" |
+
+---
+
+> **文档版本**：v1.1（2026-09-22）
 > **性质**：实施计划（未开工）。开工后每完成一个任务，请回到 §9 勾选并在 §6 记录实测数字。
+> **v1.1 变更**：新增 §12 附录 C「升级到 UE 三线程模型的增量路径」；阶段 0 增加预埋任务 **T0.6（RHI 命令流契约）** 与 **T0.7（资源句柄化）**，二者是 §12 所列升级路径的前置条件。
