@@ -175,6 +175,12 @@ public:
         return m_Scene ? m_Scene->GetIrradianceTexture() : nullptr;
     }
     [[nodiscard]] float GetIrradianceMax() const { return m_Scene ? m_Scene->GetIrradianceMax() : 0.0f; }
+    /// 【2026-09-24 诊断】全局 SDF 层（两层 clipmap，Texture3D<float>）。
+    /// 排查探针追踪逐趟不确定时，必须能直接比对**场本身**是否逐位一致 —— 否则"命中不同"
+    /// 只能在"场变了"与"追踪竞争"之间猜。
+    [[nodiscard]] rhi::IRHITexture* GetGlobalSDFField(u32 layer) const {
+        return m_Scene ? m_Scene->GetSDF().GetGlobalField(layer) : nullptr;
+    }
     [[nodiscard]] u32 GetIrradianceCoveredPixels() const {
         return m_Scene ? m_Scene->GetIrradianceCoveredPixels() : 0u;
     }

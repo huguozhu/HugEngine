@@ -16,6 +16,7 @@
 #include "Pipeline/IRenderPipeline.h"
 #include "GI/GITypes.h"   // GI 数据模型 + GIRegistry（RHI-free）
 #include "GI/LumenProvider.h"   // 步骤 12：取 SDF 追踪可视化纹理做转储
+#include "Lumen/ScreenProbe.slang"   // 2026-09-24 诊断：探针缓冲落盘需要 sizeof(ScreenProbe)
 #include "Pipeline/CameraController.h"
 #include "Pipeline/PhysicalCamera.h"
 #include "Scene/World.h"
@@ -547,8 +548,16 @@ int main() {
         rhi::IRHITexture*               tex = nullptr;
         std::unique_ptr<rhi::IRHIBuffer> buf;
         u32                             w = 0, h = 0;
+        // 【2026-09-24 诊断扩展（画质阶段 0 · Lumen 探针确定性排查）】缓冲也可以落盘。
+        //   动机：探针级证据此前只能靠"辐照度纹理 + CPU 统计"间接推断，排查 Lumen 屏幕探针的
+        //   逐趟不确定性时无法区分"同一探针（身份）值不同"与"值相同但槽位被原子追加换了位置"。
+        //   用 `HE_DUMP_LUMEN_PROBES=1` 开启（默认关 ⇒ 不改变既有验收的转储集合），
+        //   落盘名 `gi_<tag>_<name>.bin`（原始字节、无文件头）。
+        bool                            isBuffer = false;
+        usize                           bytes    = 0;
     };
     std::vector<DumpTarget> g_DumpTargets;
+    const bool dumpProbeBuffers = (std::getenv("HE_DUMP_LUMEN_PROBES") != nullptr);
     if (g_DumpGI)
         HE_CORE_INFO("[GI采样] 已启用：标签={} 目标帧={} 输出 build/verify/gi_{}_*.f16",
                      g_DumpTag, g_DumpFrame, g_DumpTag);
@@ -1584,6 +1593,22 @@ int main() {
                 cmdList->CopyTextureToBuffer(tex, t.buf.get(), 0, 0, t.w, t.h, 0);
                 g_DumpTargets.push_back(std::move(t));
             };
+            // 【诊断用】缓冲落盘（只在 HE_DUMP_LUMEN_PROBES=1 时调用）
+            auto addBufferTarget = [&](const String& name, rhi::IRHIBuffer* src, usize bytes) {
+                if (!src || bytes == 0) return;
+                DumpTarget t;
+                t.name     = name;
+                t.isBuffer = true;
+                t.bytes    = bytes;
+                rhi::BufferDesc dd;
+                dd.size      = bytes;
+                dd.usage     = rhi::BufferUsage::Storage;   // 该路径恒定带 TRANSFER_DST
+                dd.cpuAccess = true;
+                t.buf = device->CreateBuffer(dd);
+                if (!t.buf) { HE_CORE_ERROR("[GI采样] 缓冲读回创建失败: {}（{} B）", name, (u64)bytes); return; }
+                cmdList->CopyBuffer(src, t.buf.get(), bytes, 0, 0);
+                g_DumpTargets.push_back(std::move(t));
+            };
             // HDR 取**当前管线**的那张（任务 26）：Forward 没有 GBuffer / Provider 输出，
             // 但它的 HDR 目标就是层栈归一化的产物 —— 这正是 Forward 侧唯一可读的判据出口。
             // 此前这里无条件取 deferredPipeline 的 HDR，于是 `pipeline_mode=0` 下落盘的
@@ -1638,6 +1663,23 @@ int main() {
                     // 步骤 13（L2 的输入）：卡片覆盖率可视化（上半 = 代表 mesh 的 6 个投影面，下半 = 逐 mesh 覆盖条）
                     addTarget("lumen_card_coverage", lp->GetCardCoverageTexture());
                     addTarget("lumen_sc_atlas_albedo", lp->GetCardAtlasAlbedo());   // 步骤 15：Card 捕获的 albedo atlas
+                    // 【2026-09-24 诊断】探针级原始数据落盘（HE_DUMP_LUMEN_PROBES=1 才开）：
+                    //   probes  = 过滤后的探针（下游逐像素辐照度用的就是它）
+                    //   rawprobes = 追踪 + SH 投影后、未过滤的探针（区分"源头不同"还是"滤波不同"）
+                    //   cellmap = 单元 → 探针槽位（看槽位排列是否逐趟变化）
+                    // 落盘量：前 8192 个探针 × sizeof(ScreenProbe) + 单元数 × 4 B，量级 < 1 MB。
+                    if (dumpProbeBuffers) {
+                        constexpr usize kDumpProbes = 8192;
+                        addBufferTarget("lumen_probes",    lp->GetProbeBuffer(),     kDumpProbes * sizeof(ScreenProbe));
+                        addBufferTarget("lumen_rawprobes", lp->GetRawProbeBuffer(),  kDumpProbes * sizeof(ScreenProbe));
+                        if (auto* cells = lp->GetCellProbeBuffer()) {
+                            addBufferTarget("lumen_cellmap", cells,
+                                            (usize)lp->GetScreenCellsX() * lp->GetScreenCellsY() * sizeof(u32));
+                        }
+                        // 两层全局 SDF 场：直接判定"场本身是否逐趟一致"（探针追踪的输入）
+                        addTarget("lumen_sdf_layer0", lp->GetGlobalSDFField(0));
+                        addTarget("lumen_sdf_layer1", lp->GetGlobalSDFField(1));
+                    }
                 }
             }
             }   // if (!forwardMode)
@@ -1702,13 +1744,14 @@ int main() {
             std::filesystem::create_directories(dir);
             std::ofstream meta(base + "_meta.txt");
             for (auto& t : g_DumpTargets) {                        // 逐目标写：像素直落，无头
-                const usize bytes = (usize)t.w * t.h * 8;
+                const usize bytes = t.isBuffer ? t.bytes : ((usize)t.w * t.h * 8);
                 const void* p = t.buf ? t.buf->Map() : nullptr;
                 if (p) {
-                    std::ofstream f(base + "_" + t.name + ".f16", std::ios::binary);
+                    // 缓冲目标写 .bin（原始字节，无文件头）；纹理目标照旧写 .f16
+                    std::ofstream f(base + "_" + t.name + (t.isBuffer ? ".bin" : ".f16"), std::ios::binary);
                     f.write(static_cast<const char*>(p), (std::streamsize)bytes);
                     t.buf->Unmap();
-                    meta << t.name << " " << t.w << " " << t.h << " RGBA16F\n";
+                    meta << t.name << " " << t.w << " " << t.h << (t.isBuffer ? " RAWBUFFER\n" : " RGBA16F\n");
                     HE_CORE_INFO("[GI采样] {}_{}.f16  {}x{}  {} B", base, t.name, t.w, t.h, bytes);
                 } else {
                     HE_CORE_ERROR("[GI采样] 映射失败: {}_{}", base, t.name);
