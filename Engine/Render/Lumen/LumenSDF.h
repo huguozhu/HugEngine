@@ -214,6 +214,21 @@ public:
     [[nodiscard]] double GetMeshFieldBytes() const {
         return (double)GetMeshFieldCount() * 128.0 * 128.0 * 128.0 * 2.0;
     }
+    /// 【2026-09-24 诊断】"第 index 个**已建好**的 mesh 级距离场"。
+    /// 口径与 `GetMeshFieldCount()` 一致（跳过尚未构建的条目，只对已建好的场编号），
+    /// 因此 `index < GetMeshFieldCount()` 时保证返回非空。
+    /// 为什么需要单独的入口：全局层是 mesh 场的 min 归并 ⇒ 非最小项的 ULP 差异会被掩盖，
+    /// 要判定"场本身是否逐趟一致"只能直接比 mesh 场。调用方：06.GILab 的诊断转储（默认关闭）。
+    /// 注意：这是 128³ 的 **3D** 场；当前 dump 路径按 w×h 读回，实际只覆盖第 0 层（非整场）。
+    [[nodiscard]] rhi::IRHITexture* GetMeshFieldTexture(u32 index) const {
+        u32 built = 0;
+        for (const auto& e : m_Entries) {
+            if (!e.field) continue;              // 尚未构建的条目不参与编号
+            if (built == index) return e.field.get();
+            ++built;
+        }
+        return nullptr;                          // 越界或尚未建够，一律返回 nullptr（调用方已有空指针判断）
+    }
     /// 【步骤 37】每帧构建预算（`meshesPerFrame`）是否已经把全部 mesh 场建完。
     /// 帧时读数必须区分"启动期"（每帧多花几倍去建场）与"稳态"：把两者平均起来会得到
     /// 一个既不是启动期、也不是稳态的数（步骤 29 报的 27 ms 就是这么来的）。
