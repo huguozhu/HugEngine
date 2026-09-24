@@ -555,6 +555,7 @@ int main() {
         //   落盘名 `gi_<tag>_<name>.bin`（原始字节、无文件头）。
         bool                            isBuffer = false;
         usize                           bytes    = 0;
+        u32                             bytesPerPixel = 8;   // 诊断：按纹理实际格式算（R16F=2 / R32F=4 / RGBA16F=8）
     };
     std::vector<DumpTarget> g_DumpTargets;
     const bool dumpProbeBuffers = (std::getenv("HE_DUMP_LUMEN_PROBES") != nullptr);
@@ -1578,13 +1579,26 @@ int main() {
         if (g_DumpGI && !g_DumpDone && frameIndex >= g_DumpFrame) {
             auto addTarget = [&](const String& name, rhi::IRHITexture* tex) {
                 if (!tex) return;
+                // 【2026-09-24 诊断】按纹理**实际格式**算 bytes/px：此前写死 8 B（RGBA16F），
+                //   而 mesh 级距离场是 R16F/R32F —— 写死会让读回缓冲的其余部分保持未初始化，
+                //   两趟对比就会把"未初始化内存"当成差异（或反之掩盖真差异），结论不可信。
+                auto bppOf = [](rhi::Format f) -> u32 {
+                    switch (f) {
+                    case rhi::Format::R16_FLOAT:    return 2;
+                    case rhi::Format::RG16_FLOAT:   return 4;
+                    case rhi::Format::R32_FLOAT:    return 4;
+                    case rhi::Format::RGBA16_FLOAT: return 8;
+                    default:                        return 8;
+                    }
+                };
                 DumpTarget t;
                 t.name = name;
                 t.tex  = tex;
                 t.w    = tex->GetWidth();
                 t.h    = tex->GetHeight();
-                rhi::BufferDesc dd;                             // 宽×高×8 B（RGBA16F）
-                dd.size      = (usize)t.w * t.h * 8;
+                t.bytesPerPixel = bppOf(tex->GetFormat());
+                rhi::BufferDesc dd;                             // 宽×高×bpp B
+                dd.size      = (usize)t.w * t.h * t.bytesPerPixel;
                 dd.usage     = rhi::BufferUsage::Storage;       // 该路径恒定带 TRANSFER_DST，可作拷贝目标
                 dd.cpuAccess = true;                            // 需要 Map 读回
                 t.buf = device->CreateBuffer(dd);
@@ -1679,6 +1693,11 @@ int main() {
                         // 两层全局 SDF 场：直接判定"场本身是否逐趟一致"（探针追踪的输入）
                         addTarget("lumen_sdf_layer0", lp->GetGlobalSDFField(0));
                         addTarget("lumen_sdf_layer1", lp->GetGlobalSDFField(1));
+                        // mesh 级距离场（前 4 个已建好的）：全局层是 min 归并 ⇒ 非最小项的 ULP 差异
+                        // 会被掩盖；原地洪泛（JFA）是否逐趟一致只能看这一层。
+                        for (u32 m = 0; m < 4u; ++m) {
+                            addTarget("lumen_meshfield" + std::to_string(m), lp->GetMeshSDFField(m));
+                        }
                     }
                 }
             }
@@ -1744,14 +1763,16 @@ int main() {
             std::filesystem::create_directories(dir);
             std::ofstream meta(base + "_meta.txt");
             for (auto& t : g_DumpTargets) {                        // 逐目标写：像素直落，无头
-                const usize bytes = t.isBuffer ? t.bytes : ((usize)t.w * t.h * 8);
+                const usize bytes = t.isBuffer ? t.bytes : ((usize)t.w * t.h * t.bytesPerPixel);
                 const void* p = t.buf ? t.buf->Map() : nullptr;
                 if (p) {
                     // 缓冲目标写 .bin（原始字节，无文件头）；纹理目标照旧写 .f16
                     std::ofstream f(base + "_" + t.name + (t.isBuffer ? ".bin" : ".f16"), std::ios::binary);
                     f.write(static_cast<const char*>(p), (std::streamsize)bytes);
                     t.buf->Unmap();
-                    meta << t.name << " " << t.w << " " << t.h << (t.isBuffer ? " RAWBUFFER\n" : " RGBA16F\n");
+                    meta << t.name << " " << t.w << " " << t.h << " "
+                         << (t.isBuffer ? String("RAWBUFFER") : (std::to_string(t.bytesPerPixel * 8u) + "bit"))
+                         << "\n";
                     HE_CORE_INFO("[GI采样] {}_{}.f16  {}x{}  {} B", base, t.name, t.w, t.h, bytes);
                 } else {
                     HE_CORE_ERROR("[GI采样] 映射失败: {}_{}", base, t.name);

@@ -181,6 +181,14 @@ public:
     [[nodiscard]] rhi::IRHITexture* GetGlobalSDFField(u32 layer) const {
         return m_Scene ? m_Scene->GetSDF().GetGlobalField(layer) : nullptr;
     }
+    /// 【2026-09-24 诊断】第 index 个已建好的 **mesh 级**距离场（128³，R16F/R32F）。
+    /// 全局层是 mesh 场的 min 归并 ⇒ 非最小项的 ULP 差异会被掩盖，必须直接比 mesh 场。
+    [[nodiscard]] rhi::IRHITexture* GetMeshSDFField(u32 index) const {
+        return m_Scene ? m_Scene->GetSDF().GetMeshFieldTexture(index) : nullptr;
+    }
+    [[nodiscard]] u32 GetMeshSDFFieldCount() const {
+        return m_Scene ? m_Scene->GetSDF().GetMeshFieldCount() : 0u;
+    }
     [[nodiscard]] u32 GetIrradianceCoveredPixels() const {
         return m_Scene ? m_Scene->GetIrradianceCoveredPixels() : 0u;
     }
