@@ -11,6 +11,11 @@ add_executable(HugEngineTests
     # 2026-09 画质阶段 0 第②项：TAA 抖动接进投影矩阵的符号/量级断言（纯 CPU，只需
     # `Pipeline/Camera.h` 的包含路径；它只依赖 Core/Types.h 与 Math/）。
     TestCameraJitter.cpp
+    # 渲染线程化方案 T0.1：线程归属（`RHI/ThreadAffinity.h`，头文件实现）的三态断言——
+    # "未 Claim 不设限 / Claim 后只有认领线程放行 / Release 后重新不设限"。
+    TestThreadAffinity.cpp
+    # 开关路径的钉子：`HE_DISABLE_THREAD_ASSERT` 必须在包含头文件之前定义，故单独一个 TU。
+    TestThreadAffinityDisabled.cpp
     TestGameplayComponents.cpp
     TestBillboard.cpp
     TestTextRender.cpp
@@ -82,6 +87,9 @@ target_include_directories(HugEngineTests PRIVATE
     # Core/Types.h 与 Math/Math.h，链接 Render 会连带拉入 RHI/Vulkan 以及 slangc 生成的
     # SPV 头，对单元测试是不必要的重负担。
     ${CMAKE_SOURCE_DIR}/Engine/Render
+    # 渲染线程化方案 T0.1：`RHI/ThreadAffinity.h` 是**头文件实现**（不含 Vulkan 依赖、也不需要
+    # 链接 HugEngineRHI），这里只为单元测试补上 RHI 的包含路径。
+    ${CMAKE_SOURCE_DIR}/Engine/RHI
     # §14.8 任务 25 回归用例用 cgltf 直接读真实 glTF（实现体已由 HugEngineAsset 的
     # glTFLoader.cpp 展开 `CGLTF_IMPLEMENTATION`，这里只需要头文件的包含路径）。
     ${CMAKE_SOURCE_DIR}/Engine/External/meshoptimizer/extern

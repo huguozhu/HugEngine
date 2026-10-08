@@ -13,6 +13,7 @@ set(RHI_SOURCES
     RHI/BindlessSlotRing.h
     RHI/FrameRetireQueue.h
     RHI/SwapChain.h
+    RHI/ThreadAffinity.h
     RHI/QueryPool.h
     RHI/MeshShader.h
     RHI/RayTracing.h

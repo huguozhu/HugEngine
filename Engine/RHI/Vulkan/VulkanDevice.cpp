@@ -3,6 +3,7 @@
 #include "RHI/CommandList.h"
 #include "RHI/Buffer.h"
 #include "RHI/Shader.h"
+#include "RHI/ThreadAffinity.h"   // T0.1：线程归属断言（RHI 只允许在拥有线程上调用）
 #include "Core/Log.h"
 
 #define VK_USE_PLATFORM_WIN32_KHR
@@ -37,7 +38,11 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(VkDevice, const Pipeline
 uint64_t HashPipelineStateDesc(const PipelineStateDesc& desc);
 
 // VulkanDevice 析构函数实现（声明在 VulkanInternal.h，需要非内联定义锚定 vtable）
-VulkanDevice::~VulkanDevice() { Shutdown(); }
+VulkanDevice::~VulkanDevice() {
+    Shutdown();
+    // 设备已销毁 ⇒ 注销拥有线程：此后（退出期）断言回到"永不触发"，不会把无关调用误判为违规
+    GetThreadAffinity().Release();
+}
 
 // ============================================================
 // Helper: 查找队列族
@@ -323,6 +328,8 @@ IRHIBindlessHeap* VulkanDevice::GetBindlessHeap() {
 // Shutdown — 销毁所有 Vulkan 资源
 // ============================================================
 void VulkanDevice::Shutdown() {
+    HE_ASSERT_RENDER_THREAD();   // T0.1：设备销毁只在拥有线程（渲染线程）上做
+
     // 1. 等待 GPU 完成所有工作
     if (m_Device) vkDeviceWaitIdle(m_Device);
 
@@ -836,6 +843,7 @@ void VulkanDevice::WaitIdle() {
 }
 
 void VulkanDevice::Submit(IRHICommandList* cmdList) {
+    HE_ASSERT_RENDER_THREAD();   // T0.1：提交只允许在拥有线程（渲染线程）
     auto* vulkanCmd = static_cast<VulkanCommandList*>(cmdList);
     vulkanCmd->Submit();
 }
@@ -913,6 +921,7 @@ u64 VulkanDevice::GetFenceValue(RHIFenceHandle fence) const {
 }
 
 void VulkanDevice::SignalFenceOnQueue(QueueType queue, RHIFenceHandle fence, u64 value) {
+    HE_ASSERT_RENDER_THREAD();   // T0.1：队列栅栏操作只允许在拥有线程（渲染线程）
     if (fence == kInvalidFence || fence > m_Fences.size()) return;
     auto& fs = m_Fences[static_cast<usize>(fence - 1)];
 
@@ -936,6 +945,7 @@ void VulkanDevice::SignalFenceOnQueue(QueueType queue, RHIFenceHandle fence, u64
 }
 
 void VulkanDevice::WaitFenceOnQueue(QueueType queue, RHIFenceHandle fence, u64 value) {
+    HE_ASSERT_RENDER_THREAD();   // T0.1：等待型提交只允许在拥有线程（渲染线程），且受铁律 3 约束
     if (fence == kInvalidFence || fence > m_Fences.size()) return;
     auto& fs = m_Fences[static_cast<usize>(fence - 1)];
 
@@ -960,6 +970,7 @@ void VulkanDevice::WaitFenceOnQueue(QueueType queue, RHIFenceHandle fence, u64 v
 }
 
 void VulkanDevice::SubmitAll(Span<IRHICommandList*> cmdLists) {
+    HE_ASSERT_RENDER_THREAD();   // T0.1：批量提交只允许在拥有线程（渲染线程）
     std::vector<VulkanCommandList*> gfxLists, compLists;
     for (auto* cl : cmdLists) {
         auto* vkCl = static_cast<VulkanCommandList*>(cl);
@@ -1325,8 +1336,13 @@ std::unique_ptr<IRHISampler> VulkanDevice::CreateSampler(const SamplerDesc& desc
 // Factory
 // ============================================================
 std::unique_ptr<IRHIDevice> CreateDevice(Backend backend) {
-    if (backend == Backend::Vulkan)
-        return std::make_unique<VulkanDevice>();
+    if (backend == Backend::Vulkan) {
+        auto device = std::make_unique<VulkanDevice>();
+        // T0.1：把**创建设备的线程**记为 RHI 拥有线程（阶段 0 即主线程；阶段 2 起是渲染线程）。
+        // 由于认领的是"创建线程"，阶段 2 的 T2.2 必须保证设备在渲染线程上创建与销毁。
+        GetThreadAffinity().Claim();
+        return device;
+    }
     return nullptr;
 }
 

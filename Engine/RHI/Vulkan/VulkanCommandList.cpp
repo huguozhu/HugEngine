@@ -11,6 +11,7 @@
 #include "RHI/Buffer.h"
 #include "RHI/Shader.h"
 #include "RHI/TextureLayoutTracker.h"   // 纹理布局追踪（跨帧真实布局，供 RenderGraph 查询）
+#include "RHI/ThreadAffinity.h"         // T0.1：命令录制只允许在拥有线程（渲染线程）
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include "Core/CVar.h"
@@ -193,6 +194,7 @@ VulkanCommandList::~VulkanCommandList() {
 // ============================================================
 
 void VulkanCommandList::BeginSecondary(IRHIPipelineState* pso) {
+    HE_ASSERT_RENDER_THREAD();   // T0.1：录制（含 worker 的 secondary）只允许在拥有线程上发起
     u32 idx = m_SecSlot % kMaxSecondaryCBs;
 
     auto* vkPSO = static_cast<VulkanPipelineState*>(pso);
@@ -230,6 +232,7 @@ void VulkanCommandList::ExecuteSecondary(IRHICommandList* secondary) {
 // ============================================================
 
 void VulkanCommandList::Begin() {
+    HE_ASSERT_RENDER_THREAD();   // T0.1：录制开始（本帧主命令列表）
     // 等待当前帧槽位的 GPU 栅栏
     vkWaitForFences(m_Device, 1, &m_Fences[m_FrameIndex], VK_TRUE, UINT64_MAX);
 
@@ -272,6 +275,7 @@ void VulkanCommandList::Begin() {
 }
 
 void VulkanCommandList::BeginLightweight() {
+    HE_ASSERT_RENDER_THREAD();   // T0.1：轻量录制（一次性小上传）同样只允许在拥有线程
     // 仅开始录制，不推进帧计数器也不等待栅栏。
     // 用于 AsyncCompute 等内部临时命令列表，避免双 Begin 导致
     // AdvanceFrame 每帧调用两次 → 延迟销毁队列提前触发。
@@ -284,6 +288,7 @@ void VulkanCommandList::BeginLightweight() {
 }
 
 void VulkanCommandList::End() {
+    HE_ASSERT_RENDER_THREAD();   // T0.1：录制结束（与 Begin 配对，同样受归属约束）
     if (m_SecondaryPool) {
         vkEndCommandBuffer(m_SecCmdBuffers[m_SecActive]);
         ++m_SecSlot;

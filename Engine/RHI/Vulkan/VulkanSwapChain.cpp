@@ -4,6 +4,7 @@
 // ============================================================
 #include "VulkanSwapChain.h"
 #include "RHI/TextureLayoutTracker.h"   // 呈现后记录 PRESENT_SRC 布局（见 Present）
+#include "RHI/ThreadAffinity.h"         // T0.1：交换链操作只允许在拥有线程（渲染线程）
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include <algorithm>
@@ -228,6 +229,8 @@ void VulkanSwapChain::Resize(u32 width, u32 height) {
 }
 
 bool VulkanSwapChain::AcquireNextImage() {
+    HE_ASSERT_RENDER_THREAD();   // T0.1：交换链图像获取只允许在拥有线程（渲染线程）
+
     // 窗口最小化时跳过图像获取
     if (m_IsMinimized || m_Swapchain == VK_NULL_HANDLE) return false;
 
@@ -259,6 +262,8 @@ bool VulkanSwapChain::AcquireNextImage() {
 }
 
 void VulkanSwapChain::Present(bool /*vsync*/) {
+    HE_ASSERT_RENDER_THREAD();   // T0.1：呈现只允许在拥有线程（渲染线程）
+
     // 用"当前图像自己的" render-complete 信号量：同一图像再次被 acquire 蕴含上次 present
     // 已完成，因此不会出现"信号量仍有未完成操作"（详见头文件成员注释）
     VkSemaphore waitSem = GetRenderCompleteSemaphore();

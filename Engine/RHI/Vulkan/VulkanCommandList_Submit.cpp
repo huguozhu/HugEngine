@@ -3,6 +3,7 @@
 
 #include "RHI/RHI.h"
 #include "RHI/SwapChain.h"
+#include "RHI/ThreadAffinity.h"   // T0.1：命令列表提交只允许在拥有线程（渲染线程）
 #include "Core/Log.h"
 
 #define VK_USE_PLATFORM_WIN32_KHR
@@ -145,6 +146,8 @@ void VulkanCommandList::SetTimelineWait(RHIFenceHandle fence, u64 value) {
 // ============================================================
 
 void VulkanCommandList::Submit() {
+    HE_ASSERT_RENDER_THREAD();   // T0.1：命令列表提交只允许在拥有线程（渲染线程）
+
     // 等待 SwapChain 图像可用
     VkSemaphore waitSem   = VK_NULL_HANDLE;
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
