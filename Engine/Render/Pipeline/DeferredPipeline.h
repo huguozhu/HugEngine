@@ -88,9 +88,15 @@ public:
     void OnResize(u32 width, u32 height) override;
     const char* GetName() const override { return "DeferredPipeline"; }
 
-    void Render(rhi::IRHICommandList* cmd, he::World& world,
-                he::SceneGraph& sg, const CameraData& camera,
+    /// 帧入口收**快照**（第③段：不再收 World/SceneGraph；装配由样例经 `GetFrameAssembler()` 驱动）
+    void Render(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snapshot,
+                const CameraData& camera,
                 float deltaTime = 0.016f) override;
+
+    // ── 快照交接（第③段：帧入口收快照）──
+    FrameSnapshotAssembler& GetFrameAssembler() override { return m_Assembler; }
+    const FrameSceneSnapshot& GetFrameSnapshot() const override { return m_Snapshot; }
+    const MeshRegistry& GetMeshRegistry() const override { return m_MeshRegistry; }
 
     // AsyncCompute: 在 Graphics Submit 之后调用，提交 Compute 工作
     // 内部使用 Timeline Semaphore 确保跨队列同步顺序
@@ -184,8 +190,7 @@ public:
     rhi::IRHIBuffer* GetCurrentShadowObjBuffer(){ return m_ShadowObjBuffers[m_CurrentFrameSlot].get(); }
 
 private:
-    void BuildFrameGraph(RenderGraph& rg, he::World& world,
-                         he::SceneGraph& sg, const CameraData& camera);
+    void BuildFrameGraph(RenderGraph& rg, const CameraData& camera);
     void CollectLights(PushConstantData& pc);
     void UpdateIBLBindings(GI_IBL* gi);
     void UpdateRSMBindings();

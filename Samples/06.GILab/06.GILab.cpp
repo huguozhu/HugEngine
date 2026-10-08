@@ -960,6 +960,10 @@ int main() {
             break;
         }
         curPipeline->NextFrame();
+        // 【阶段 1 §15.1 第③段：帧入口收快照】装配在**游戏线程**统一经接口完成（三条管线同构；
+        // `AssembleScene` 每帧幂等 ⇒ Forward 分支下面再调一次也无副作用）。必须在任何阴影收集之前，
+        // 因为阴影技术现在从快照取几何与光源。
+        curPipeline->GetFrameAssembler().AssembleScene(world, sceneGraph, camCtrl.GetCamera());
         // --- Forward 的阴影系统必须由**调用方**驱动（任务 34 / §9.2-AD）---
         // `ShadowSystem` 不像 GI 子系统那样自己从帧图拿数据：它要靠调用方先
         // `SetRenderResources`（对象/阴影缓冲 + 描述符集）再 `Update`（收集投影光源、拟合 CSM），
@@ -975,14 +979,10 @@ int main() {
                                               forwardPipeline.GetCurrentShadowBuffer(),
                                               forwardPipeline.GetCurrentDescSet());
                 render::SubsystemContext shadowCtx;
-                shadowCtx.world      = &world;
-                shadowCtx.sceneGraph = &sceneGraph;
                 shadowCtx.camera     = &camCtrl.GetCamera();
                 // 物理天空的太阳方向先同步到方向光：阴影与光照必须同向（02.Cube 同款做法）
                 he::SyncPhysicalSkyToSun(world);
-                // 【阶段 1 §15.1 第③段第 2 批】渲染输入先取成快照（阴影收集要吃它；
-                // 顺序：世界同步 → 快照 → 阴影收集）
-                forwardPipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, camCtrl.GetCamera());
+                // 快照已在上面统一装配（`AssembleScene` 幂等）；阴影收集吃的就是它
                 shadowCtx.snapshot     = &forwardPipeline.GetFrameSnapshot();
                 shadowCtx.meshRegistry = &forwardPipeline.GetMeshRegistry();
                 shadowSys->Update(shadowCtx);
@@ -1011,11 +1011,11 @@ int main() {
                 // 阶段 2 起把 `SubmitAndPump` 换成"只提交"，由渲染线程的循环去 Pump。
                 renderQueue.BeginFrame();
                 renderQueue.Enqueue([&](render::RenderThreadContext&) {
-                    curPipeline->Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
+                    curPipeline->Render(cmdList.get(), curPipeline->GetFrameSnapshot(), camCtrl.GetCamera());
                 });
                 frameScheduler.SubmitAndPump();
             } else {
-                curPipeline->Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
+                curPipeline->Render(cmdList.get(), curPipeline->GetFrameSnapshot(), camCtrl.GetCamera());
             }
             s_accPipelineMs += std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - t0).count();

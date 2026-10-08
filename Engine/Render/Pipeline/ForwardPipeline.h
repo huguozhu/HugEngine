@@ -55,8 +55,10 @@ public:
     void NextFrame() override;
     void OnResize(u32 width, u32 height) override;
     const char* GetName() const override { return "ForwardPipeline"; }
-    void Render(rhi::IRHICommandList* cmd, he::World& world,
-                he::SceneGraph& sg, const CameraData& camera,
+    /// 帧入口收**快照**（第③段）：不再收 World/SceneGraph —— 渲染输入由样例经
+    /// `GetFrameAssembler().AssembleScene(...)` 装配（见 `IRenderPipeline::Render` 的顺序契约）
+    void Render(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snapshot,
+                const CameraData& camera,
                 float deltaTime = 0.016f) override;
 
     // 子系统访问
@@ -131,17 +133,11 @@ public:
     /// 逐实例剔除器（暴露给示例做开关与统计）
     InstanceCuller& GetInstanceCuller() { return m_InstanceCuller; }
 
-    // ── 阶段 1 §15.1 第③段：快照交接（样例 → 管线）──
-    /// **快照装配器**（游戏线程用）：样例每帧按
-    /// `AssembleScene(world, sg, camera)` → 阴影收集 → `ResolveLightShadowIndices(...)` 的顺序调用，
-    /// 然后把 `GetFrameSnapshot()` 交给 `Render`。
-    /// 【为什么装配器在 Threading 白名单层】取齐渲染输入天然要读世界，而**管线的帧入口必须不收世界**
-    /// （附录 B1 的收敛目标）；把这段代码放到白名单层、只把口径配置进管线，两侧要求同时满足。
-    FrameSnapshotAssembler& GetFrameAssembler() { return m_Assembler; }
-    /// 本帧快照（`AssembleScene` 之后有效）
-    const FrameSceneSnapshot& GetFrameSnapshot() const { return m_Snapshot; }
-    /// 网格注册表（阴影技术等按 `meshIndex` 取顶点/索引缓冲）
-    const MeshRegistry& GetMeshRegistry() const { return m_MeshRegistry; }
+    // ── 快照交接（样例 → 管线）──
+    // ── 快照交接（第③段：帧入口收快照）──
+    FrameSnapshotAssembler& GetFrameAssembler() override { return m_Assembler; }
+    const FrameSceneSnapshot& GetFrameSnapshot() const override { return m_Snapshot; }
+    const MeshRegistry& GetMeshRegistry() const override { return m_MeshRegistry; }
 
 private:
     void CollectLights(PushConstantData& pc);

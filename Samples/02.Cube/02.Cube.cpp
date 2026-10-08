@@ -1268,7 +1268,7 @@ int main() {
                 [&](he::Entity le) { return shadowSys->GetShadowIndex(le); });
             forwardPipeline.GetFrameAssembler().ReserveOnce();
 
-            forwardPipeline.Render(cmdList.get(), world, sceneGraph, frameCamera);
+            forwardPipeline.Render(cmdList.get(), forwardPipeline.GetFrameSnapshot(), frameCamera);
             // pass 级调试标记：BackBuffer 合成（ToneMap + ImGui），RenderDoc 可识别
             cmdList->BeginDebugLabel("ToneMap + ImGui (BackBuffer)");
             cmdList->BeginRenderPass(1, backFmt);
@@ -1277,7 +1277,9 @@ int main() {
         // --- Deferred 模式 ---
         else if (cvPipelineMode.Get() == 1) {
             deferredPipeline.NextFrame();
-            deferredPipeline.Render(cmdList.get(), world, sceneGraph, frameCamera, deltaTime);
+            // 【第③段：帧入口收快照】装配由样例在游戏线程驱动（管线只配置口径）
+            deferredPipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, frameCamera);
+            deferredPipeline.Render(cmdList.get(), deferredPipeline.GetFrameSnapshot(), frameCamera, deltaTime);
             // ImGui 叠加：Deferred 已写 BackBuffer，Load 保留内容
             cmdList->BeginDebugLabel("Deferred + ImGui (BackBuffer)");
             cmdList->BeginRenderPass(1, backFmt,
@@ -1286,7 +1288,9 @@ int main() {
         // --- 兼容旧模式 2：HybridRT 已并入 Deferred（光追经 GI 层栈的 RT 源启用）---
         else if (cvPipelineMode.Get() == 2) {
             deferredPipeline.NextFrame();
-            deferredPipeline.Render(cmdList.get(), world, sceneGraph, frameCamera, deltaTime);
+            // 【第③段：帧入口收快照】装配由样例在游戏线程驱动（管线只配置口径）
+            deferredPipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, frameCamera);
+            deferredPipeline.Render(cmdList.get(), deferredPipeline.GetFrameSnapshot(), frameCamera, deltaTime);
             // ImGui 叠加：管线已写 BackBuffer，Load 保留内容
             cmdList->BeginDebugLabel("Deferred(RT sources) + ImGui (BackBuffer)");
             cmdList->BeginRenderPass(1, backFmt,
@@ -1295,7 +1299,9 @@ int main() {
         // --- 全路径追踪模式（Level 2: PT 参考） ---
         else if (cvPipelineMode.Get() == 3) {
             pathTracingPipeline.NextFrame();
-            pathTracingPipeline.Render(cmdList.get(), world, sceneGraph, frameCamera, deltaTime);
+            // 【第③段：帧入口收快照】装配由样例在游戏线程驱动（管线只配置口径）
+            pathTracingPipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, frameCamera);
+            pathTracingPipeline.Render(cmdList.get(), pathTracingPipeline.GetFrameSnapshot(), frameCamera, deltaTime);
             // ImGui 叠加：管线已写 BackBuffer，Load 保留内容
             cmdList->BeginDebugLabel("PathTrace + ImGui (BackBuffer)");
             cmdList->BeginRenderPass(1, backFmt,

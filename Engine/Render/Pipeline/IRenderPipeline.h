@@ -2,6 +2,10 @@
 
 #include "Pipeline/Camera.h"
 #include "Core/Types.h"
+// 第③段第 4/5 批：帧入口收快照 ⇒ 接口要暴露快照、装配器与网格注册表（样例经接口切换管线时用）
+#include "Threading/FrameSceneSnapshot.h"
+#include "Threading/FrameSnapshotAssembler.h"
+#include "Threading/MeshRegistry.h"
 
 // 前向声明
 namespace he { class World; class SceneGraph; }
@@ -52,10 +56,23 @@ public:
     virtual void NextFrame() = 0;
 
     /// 渲染完整一帧（场景 → 后处理 → 输出到 SwapChain）
+    /// 【阶段 1 §15.1 第③段：帧入口收**快照**】不再收 `World&`/`SceneGraph&` —— 渲染输入由样例
+    /// 在游戏线程用 `GetFrameAssembler().AssembleScene(...)` 装配好，管线只消费它。
+    /// 调用顺序契约：`NextFrame()` → `AssembleScene` →（Forward/带阴影的路径）阴影收集 →
+    /// `ResolveLightShadowIndices` → `Render(cmd, GetFrameSnapshot(), camera, dt)`。
     virtual void Render(rhi::IRHICommandList* cmd,
-                        he::World& world, he::SceneGraph& sg,
+                        const FrameSceneSnapshot& snapshot,
                         const CameraData& camera,
                         float deltaTime = 0.016f) = 0;
+
+    // ---- 快照交接（阶段 1 §15.1 第③段）----
+
+    /// 本帧快照装配器（**游戏线程**用；读世界的代码在 `Threading/` 白名单层，管线只配置口径）
+    virtual FrameSnapshotAssembler& GetFrameAssembler() = 0;
+    /// 本帧快照（`AssembleScene` 之后有效；交给 `Render` 的就是它）
+    virtual const FrameSceneSnapshot& GetFrameSnapshot() const = 0;
+    /// 网格注册表（阴影技术 / RTPass 等按 `meshIndex` 取几何）
+    virtual const MeshRegistry& GetMeshRegistry() const = 0;
 
     // ---- 窗口适配 ----
 

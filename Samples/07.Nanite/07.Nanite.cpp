@@ -1054,6 +1054,8 @@ int main() {
             break;
         }
         curPipeline->NextFrame();
+        // 【阶段 1 §15.1 第③段：帧入口收快照】装配在游戏线程统一经接口完成（每帧幂等）
+        curPipeline->GetFrameAssembler().AssembleScene(world, sceneGraph, camCtrl.GetCamera());
         // --- Forward 的阴影系统必须由**调用方**驱动（任务 34 / §9.2-AD）---
         // `ShadowSystem` 不像 GI 子系统那样自己从帧图拿数据：它要靠调用方先
         // `SetRenderResources`（对象/阴影缓冲 + 描述符集）再 `Update`（收集投影光源、拟合 CSM），
@@ -1069,8 +1071,6 @@ int main() {
                                               forwardPipeline.GetCurrentShadowBuffer(),
                                               forwardPipeline.GetCurrentDescSet());
                 render::SubsystemContext shadowCtx;
-                shadowCtx.world      = &world;
-                shadowCtx.sceneGraph = &sceneGraph;
                 shadowCtx.camera     = &camCtrl.GetCamera();
                 // 物理天空的太阳方向先同步到方向光：阴影与光照必须同向（02.Cube 同款做法）
                 he::SyncPhysicalSkyToSun(world);
@@ -1100,7 +1100,7 @@ int main() {
         static double s_accPipelineMs = 0.0;
         {
             const auto t0 = std::chrono::steady_clock::now();
-            curPipeline->Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
+            curPipeline->Render(cmdList.get(), curPipeline->GetFrameSnapshot(), camCtrl.GetCamera());
             s_accPipelineMs += std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - t0).count();
         }

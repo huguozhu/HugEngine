@@ -201,7 +201,7 @@ int main() {
             pipeline.GetFrameAssembler().ResolveLightShadowIndices(
                 [&](he::Entity le) { return shadowSys->GetShadowIndex(le); });
             pipeline.GetFrameAssembler().ReserveOnce();
-            pipeline.Render(cmdList.get(), *fWorld, *fSG, frameCamera);
+            pipeline.Render(cmdList.get(), pipeline.GetFrameSnapshot(), frameCamera);
             // pass 级调试标记：BackBuffer 合成（ToneMap + ImGui），RenderDoc 可识别
             cmdList->BeginDebugLabel("ToneMap + ImGui (BackBuffer)");
             cmdList->BeginRenderPass(1, backFmt);

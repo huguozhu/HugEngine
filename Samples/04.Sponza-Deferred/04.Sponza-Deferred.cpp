@@ -687,7 +687,9 @@ int main() {
         // --- 渲染（DeferredPipeline 通过 RenderGraph 全自动编排）---
         cmdList->Begin();
         pipeline.NextFrame();
-        pipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
+        // 【第③段：帧入口收快照】装配由样例在游戏线程驱动（管线只配置口径）
+        pipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, camCtrl.GetCamera());
+        pipeline.Render(cmdList.get(), pipeline.GetFrameSnapshot(), camCtrl.GetCamera());
 
         // --- ImGui（LOAD 保留 ToneMap 输出）---
         cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,

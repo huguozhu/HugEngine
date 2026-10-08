@@ -866,18 +866,21 @@ void ForwardPipeline::FillGIBlendUBO() {
     }
 }
 
-void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
-                              he::SceneGraph& sg, const CameraData& camera,
-                              float deltaTime)
+void ForwardPipeline::Render(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snapshot,
+                              const CameraData& camera, float deltaTime)
 {
-    // 【阶段 1 §15.1 第③段第 4 批：装配搬到白名单层】
-    // 本函数与其 helper 已**不再读世界**（光源/物体/实例/蒙皮/阴影几何全部来自快照），
-    // 唯一还需要 world/sg 的地方就是"这一句装配兜底"：样例通常已经为了阴影收集先装配过一次
-    //（`GetFrameAssembler().AssembleScene(...)`），此处只是保证"没先装配"的调用方也能工作。
-    // 装配器本身在 `Engine/Render/Threading/`（附录 B1 白名单层）⇒ 渲染期读世界只剩这一处入口。
-    if (!m_Assembler.AssembledThisFrame()) m_Assembler.AssembleScene(world, sg, camera);
-    m_FrameSnapshot = &m_Snapshot;
-    m_Assembler.ReserveOnce();   // 首帧按实际规模自校准预留一次容量（幂等）   // 供各 helper 与帧图 lambda（都在本次 Render 内执行）使用
+    // 【阶段 1 §15.1 第③段：帧入口收快照】
+    // 本函数与其全部 helper **不再读世界**：渲染输入（物体/实例/蒙皮/光源/天空盒/材质）都来自
+    // 参数快照，而快照由样例在游戏线程经 `GetFrameAssembler().AssembleScene(...)` 装配
+    //（读世界的代码在 `Engine/Render/Threading/` 白名单层）。这里只把指针记下来，
+    // 供各 helper 与帧图 lambda（都在本次 Render 内执行）使用。
+    m_FrameSnapshot = &snapshot;
+    if (!m_Assembler.AssembledThisFrame()) {
+        // 顺序契约被破坏时给出明确诊断：没有 world 参数 ⇒ 本函数无法补救，只能提示调用方先装配
+        HE_CORE_WARN("ForwardPipeline::Render: 本帧快照未装配（应先调用 "
+                     "GetFrameAssembler().AssembleScene(world, sg, camera)）");
+    }
+    m_Assembler.ReserveOnce();   // 首帧按实际规模自校准预留一次容量（幂等）
 
     // RSM 固定光锥必须**先**刷新（任务 34）：UBO（FillGIBlendUBO）与 frame graph 的
     // RSM pass 注册/参数两处消费者都读它，且两者都在下面几步之内。

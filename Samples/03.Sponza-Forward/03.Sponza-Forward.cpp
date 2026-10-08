@@ -699,7 +699,7 @@ int main() {
         }
 
         // --- RenderGraph 全 Pass 编排（Shadow→IBL→RSM→HDR→Skybox→ToneMap）---
-        pipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
+        pipeline.Render(cmdList.get(), pipeline.GetFrameSnapshot(), camCtrl.GetCamera());
 
         // --- ToneMap + ImGui / RT 路径分支 ---
         if (renderMode == 1 && rtPass.IsValid()) {

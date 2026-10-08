@@ -727,9 +727,8 @@ GIProviderContext DeferredPipeline::MakeGIContext(const CameraData* cam, bool fu
     return ctx;
 }
 
-void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
-                               he::SceneGraph& sg, const CameraData& camera,
-                               float deltaTime) {
+void DeferredPipeline::Render(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snapshot,
+                               const CameraData& camera, float deltaTime) {
     // 【阶段 1 §15.1 第③段第 4 批：装配搬到白名单层】
     // 三条管线现在共用同一个 `FrameSnapshotAssembler`（Engine/Render/Threading/）：本管线只配置
     // **口径**（贴花是否排除、要构建哪些数组），取齐渲染输入（含两处必须在收集之前的世界写：
@@ -742,9 +741,11 @@ void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
     // 否则 Deferred 的阴影会静默消失（`HasActiveShadows()` 恒 false）。
     m_Assembler.Settings().objectOptions.excludeDecals = m_ExcludeDecalCards;
     m_Assembler.Settings().physicalUnitsEnabled = cvLightPhysicalUnits.Get();
-    if (!m_Assembler.AssembledThisFrame()) m_Assembler.AssembleScene(world, sg, camera);
-    m_FrameSnapshot = &m_Snapshot;
-    m_Assembler.ReserveOnce();   // 首帧按实际规模自校准预留一次（幂等）
+    m_FrameSnapshot = &snapshot;   // 帧入口收快照（装配由样例经 GetFrameAssembler() 驱动）
+    if (!m_Assembler.AssembledThisFrame()) {
+        HE_CORE_WARN("DeferredPipeline::Render: 本帧快照未装配（应先调用 "
+                     "GetFrameAssembler().AssembleScene(world, sg, camera)）");
+    }
 
     // ============================================================
     // AsyncCompute: RenderGraph 多阶段提交
@@ -841,7 +842,7 @@ void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
     // 实测 1080p 下整帧 CPU 侧 34~51 ms 全在管线里，而 GPU 各 pass 合计只有 14 ms ——
     // 不拆开就不知道该修图构建还是修执行，只能靠猜。
     const auto tGraph0 = std::chrono::steady_clock::now();
-    BuildFrameGraph(rg, world, sg, camera);
+    BuildFrameGraph(rg, camera);
     const auto tGraph1 = std::chrono::steady_clock::now();
     rg.Compile();
     const auto tCompile1 = std::chrono::steady_clock::now();

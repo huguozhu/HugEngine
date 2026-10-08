@@ -771,10 +771,12 @@ int main() {
         cmdList->Begin();
         if (g_UseDeferred) {
             deferredPipeline.NextFrame();
-            deferredPipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera(), deltaTime);
+            deferredPipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, camCtrl.GetCamera());
+            deferredPipeline.Render(cmdList.get(), deferredPipeline.GetFrameSnapshot(), camCtrl.GetCamera(), deltaTime);
         } else {
             pathTracingPipeline.NextFrame();
-            pathTracingPipeline.Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera(), deltaTime);
+            pathTracingPipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, camCtrl.GetCamera());
+            pathTracingPipeline.Render(cmdList.get(), pathTracingPipeline.GetFrameSnapshot(), camCtrl.GetCamera(), deltaTime);
         }
 
         // ── PT 参考图落盘：整幅 CopyTextureToBuffer 到 host 可见缓冲（仅对照路径）──

@@ -255,9 +255,8 @@ i32  PathTracingPipeline::GetPTMaxBounces() const { return cvPTMaxBounces.Get();
 // ============================================================
 // Render — 主渲染入口
 // ============================================================
-void PathTracingPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
-                                 he::SceneGraph& sg, const CameraData& camera,
-                                 float deltaTime) {
+void PathTracingPipeline::Render(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snapshot,
+                                 const CameraData& camera, float deltaTime) {
     if (!m_SwapChain || !m_Device) {
         HE_CORE_ERROR("PathTracingPipeline::Render: SwapChain 或 Device 未设置");
         return;
@@ -267,12 +266,14 @@ void PathTracingPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
     if (m_PTDenoiser)
         m_PTDenoiser->SetTemporalBlend(std::clamp(cvPTDenoiseBlend.Get(), 0.0f, 1.0f));
 
-    // 【阶段 1 §15.1 第③段第 4 批：装配搬到白名单层】三条管线共用 `FrameSnapshotAssembler`：
-    // 本管线只配置口径（PT 的光源口径要写 shadowRadius、粒子要收集），取齐渲染输入（含两处
-    // 必须在收集之前的世界写：物理天空→方向光同步、世界矩阵刷新）由装配器执行。
+    // 【阶段 1 §15.1 第③段：帧入口收快照】本函数不再收 World/SceneGraph：渲染输入由样例在
+    // 游戏线程经 `GetFrameAssembler().AssembleScene(...)` 装配（读世界的代码在 Threading 白名单层）。
     m_Assembler.Settings().physicalUnitsEnabled = cvLightPhysicalUnits.Get();
-    if (!m_Assembler.AssembledThisFrame()) m_Assembler.AssembleScene(world, sg, camera);
-    m_FrameSnapshot = m_FrameSnapshot;
+    m_FrameSnapshot = &snapshot;
+    if (!m_Assembler.AssembledThisFrame()) {
+        HE_CORE_WARN("PathTracingPipeline::Render: 本帧快照未装配（应先调用 "
+                     "GetFrameAssembler().AssembleScene(world, sg, camera)）");
+    }
     m_Assembler.ReserveOnce();
 
     // ── 粒子模拟 (Compute，在 RenderGraph 之前) ──
@@ -289,7 +290,7 @@ void PathTracingPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
     RenderGraph rg;
     rg.SetSwapChain(m_SwapChain);
 
-    BuildFrameGraph(rg, world, sg, camera);
+    BuildFrameGraph(rg, camera);
 
     rg.Compile();
     rg.Execute(cmd, m_Device);
@@ -319,8 +320,7 @@ void PathTracingPipeline::CollectLights(u32& outLightCount) {
 // ============================================================
 // BuildFrameGraph — 渲染图定义
 // ============================================================
-void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
-                                          he::SceneGraph& sg, const CameraData& camera) {
+void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera) {
     if (m_SwapChain) rg.SetSwapChain(m_SwapChain);
     u32 w = m_Width, h = m_Height;
     auto backBuf = rg.ImportBackBuffer();
@@ -348,7 +348,7 @@ void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     // ── AS Build — BLAS/TLAS 构建 ──
     if (m_RTEnabled && m_RTPass && GetRTPass() && GetRTPass()->IsValid()) {
         rg.AddPass("AS_Build", {}, {},
-            [this, &world, &sg](rhi::IRHICommandList* c) {
+            [this](rhi::IRHICommandList* c) {
                 GetRTPass()->BuildAS(c, FrameSnap(), m_MeshRegistry);
             });
 

@@ -56,8 +56,7 @@ static constexpr he::u32 kLumenCacheTimerIdx    = 26u;   // 其中：页表推�
 static constexpr he::u32 kLumenProbeTimerIdx    = 27u;   // 其中：探针布置/追踪/着色/SH/逐像素辐照度
 static constexpr he::u32 kLumenDebugTimerIdx    = 28u;   // 其中：SDF 逐像素追踪可视化（调试视图）
 
-void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
-                                        he::SceneGraph& sg, const CameraData& cameraIn) {
+void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& cameraIn) {
     // 【第③段第 4 批】`SyncPhysicalSkyToSun` 已搬进快照装配器（必须在收集之前、且聚合在一处）
     if (m_SwapChain) rg.SetSwapChain(m_SwapChain);
     u32 w = m_Width, h = m_Height;
@@ -82,8 +81,6 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     auto hdrC = rg.ImportTexture("HDR_C", m_Lighting.GetHDRTarget());
     auto backBuf = rg.ImportBackBuffer();
 
-    (void)world;
-    (void)sg;
 
     // ── 帧首：更新成员变量（lambda 内通过 this 安全访问，无悬垂引用风险）──
     // 【TAA 子像素抖动接进投影矩阵（2026-09 画质阶段 0 第②项）】
@@ -220,9 +217,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             m_GBuffer->GetDescriptorSet());
 
         SubsystemContext sctx;
-        sctx.world       = &world;
-        sctx.sceneGraph  = &sg;
-        // 【第③段第 2 批】阴影收集改吃快照（`shadowLights` 已由 BuildObjects/BuildShadowLights 取齐）；
+                // 【第③段第 2 批】阴影收集改吃快照（`shadowLights` 已由 BuildObjects/BuildShadowLights 取齐）；
         // 网格注册表供各技术按 meshIndex 取顶点/索引缓冲。
         sctx.snapshot    = m_FrameSnapshot;
         sctx.meshRegistry = &m_MeshRegistry;
@@ -500,13 +495,10 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     //   只覆盖场景的 1/60，于是绝大多数接收像素在 RSM 里**找不到邻近 VPL**，`1/d²` 把整项
     //   压到 1e-8（噪声底），而 pass 的成本照付（§9.2-AA ①④）。两个消费者共用同一份包围盒。
     // ============================================================
+    // 【第③段第 5 批】包围盒改从**快照**取（装配器按同一公式算好：网格包围盒 × 组件局部变换）。
+    // 仍保留"每 30 帧刷一次"的缓存语义 —— 只是数据来源从"渲染期遍历世界"换成"快照里已算好的值"。
     if (m_SceneBoundsCountdown == 0u) {
-        he::AABB sceneBounds;
-        world.ForEach<he::MeshComponent>([&](he::Entity e, he::MeshComponent& mesh) {
-            if (auto* tf = world.GetComponent<TransformComponent>(e)) {
-                sceneBounds.Expand(mesh.GetBounds().Transform(tf->GetLocalMatrix()));
-            }
-        });
+        const he::AABB sceneBounds{float3(FrameSnap().sceneBoundsMin), float3(FrameSnap().sceneBoundsMax)};
         if (sceneBounds.IsValid()) m_SceneBounds = sceneBounds;
         m_SceneBoundsCountdown = kSceneBoundsRefreshFrames;
     }
@@ -593,12 +585,13 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         // 有单测）：此前是硬编码的 sceneCenter=(0,3,0) / sceneRadius=60 —— 那等于把 RSM
         // 钉在一个半径 60 的球里，几乎没有接收像素能找到邻近 VPL。
         float3 ldir = float3(0.3f, -1.0f, 0.4f);   // 无方向光时的默认方向
-        world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& l) {
-            if (l.enabled && l.castShadow) {
-                ldir = glm::normalize(l.direction);
-                rsmDirLightValid = true;           // RSM 间接光只在有方向光投影时才有意义
-            }
-        });
+        // 【第③段第 5 批】方向光改从**快照**取：`shadowLights` 里最后一条 Directional
+        //（与旧的 `ForEach` 逐个覆盖同义；该集合本身就按 enabled ∧ castShadow 收集）
+        for (const SnapshotShadowLight& sl : FrameSnap().shadowLights) {
+            if (sl.type != static_cast<u32>(he::LightType::Directional)) continue;
+            ldir = glm::normalize(sl.direction);
+            rsmDirLightValid = true;               // RSM 间接光只在有方向光投影时才有意义
+        }
         // 场景包围盒还没算出来时（首帧 / 空场景）退回一个覆盖相机附近的保守视锥，
         // 保证"有产出"而不是"零覆盖"。包围盒通常在第 0 帧就算好了。
         const float3 fitMin = m_SceneBounds.IsValid() ? m_SceneBounds.min : (camera.position - float3(50.0f));
@@ -704,7 +697,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         if (anyRT || ddgiTraceWanted || lumenFarWanted) {
             // 加速结构（TLAS）：每帧一次，被所有 RT 消费者共享（含本帧的 DDGI march）
             rg.AddPass("AS_Build", {}, {},
-                [this, &world, &sg](rhi::IRHICommandList* c) {
+                [this](rhi::IRHICommandList* c) {
                     m_GITimer.Begin(c, GITimer::kCommonItemIdx);
                     m_RTPass->BuildAS(c, FrameSnap(), m_MeshRegistry);
                     m_GITimer.End(c, GITimer::kCommonItemIdx);
@@ -1547,8 +1540,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         [&, w, h](rhi::IRHICommandList* c) {
             if (m_GIConfig.furnaceMode) return;   // 白炉模式：不画天空（见上）
             SubsystemContext sctx;
-            sctx.world = &world;
-            // 【第③段】天空盒数据改从快照取（`SkyboxPass::Update` 只读 ctx.snapshot）
+                    // 【第③段】天空盒数据改从快照取（`SkyboxPass::Update` 只读 ctx.snapshot）
             sctx.snapshot = m_FrameSnapshot;
             // 天空盒属于主视图：必须与几何用**同一份带抖动的投影**，否则天空与几何相差一个
             // 亚像素相位，TAA 会在天地交界处反复混出不存在的边缘（见帧首的抖动说明）。
