@@ -59,8 +59,17 @@ struct SceneSnapshotLightOptions {
     bool writeShadowRadius = false;
 };
 
+/// 物体收集的口径开关（与光源同理：先保调用方现状，统一另立改动）
+struct SceneSnapshotObjectOptions {
+    /// 是否排除贴花（Deferred 用 `DecalPass` 把贴花投影进 GBuffer ⇒ 它不进场景物体列表；
+    /// 其它管线按组件收集）。默认 false = 包含。
+    bool excludeDecals = false;
+};
+
 class SceneSnapshotBuilder {
 public:
+    // ── 光源（T1.2a）──────────────────────────────────────────────
+
     /// 收集光源到快照，返回实际收集数（按 `kGPUMaxLights` 截断）。
     /// 口径与 `CollectLights` 逐字段对齐：遍历顺序（方向光 → 点光 → 聚光，同一组件类型按实体顺序）、
     /// 色温叠加、物理模式的**负范围标记**、聚光的锥角与（默认归一化的）方向、阴影索引解析。
@@ -68,6 +77,50 @@ public:
                            const SceneSnapshotResolvers& resolvers,
                            FrameSceneSnapshot& out,
                            const SceneSnapshotLightOptions& options = {});
+
+    // ── 物体（T1.2b）──────────────────────────────────────────────
+
+    /// 单个组件 → 一条 draw item 的映射（与 `GPUScene::Collect` 的 `FillObj` 逐字段对齐）。
+    /// 【为什么把它单独暴露成模板】组件存储按**精确类型**分桶（`ForEach<T>` 用 `type_index`），
+    /// 所以"假组件"派生自 `CubeComponent` 也进不了同一桶 ⇒ 遍历部分无法单测。
+    /// 把映射抽成模板后，单测可以用一个只提供 `GetIndexCount()/GetBounds()/materialID` 的假类型
+    /// 直接验证它（duck typing），遍历部分则由代码检查 + T1.3b-3 的集成验证覆盖。
+    /// @param worldMatrix 已算好的世界矩阵（广告牌会被调用方换成对齐相机的矩阵）
+    /// @param objectID    收集序号（= 在 `out.draws` 里的下标，与旧路径一致）
+    /// @param prev        上一帧快照（可为空）：用于取 `prevWorldMatrix`（TAA/运动矢量需要）
+    template <typename TComponent>
+    static void CollectObjectItem(he::Entity entity, TComponent& comp, const float4x4& worldMatrix,
+                                  u32 objectID, const FrameSceneSnapshot* prev,
+                                  FrameSceneSnapshot& out) {
+        (void)entity;
+        if (comp.GetIndexCount() == 0u) return;      // 旧路径：无索引的组件不进场景物体列表
+
+        SnapshotDrawItem item{};
+        item.object.worldMatrix = worldMatrix;
+        const he::AABB worldBounds = comp.GetBounds().Transform(worldMatrix);
+        item.object.boundsMin = float4(worldBounds.min, 0.0f);
+        item.object.boundsMax = float4(worldBounds.max, 0.0f);
+        item.object.materialID = comp.materialID;    // bindless 纹理基索引（着色器采样用）
+        item.materialIndex     = comp.materialID;    // GPU 剔除/间接绘制路径的材质槽
+        item.objectID          = objectID;
+        item.visibilityFlags   = 1u;                 // 与 `FillObj` 一致（"可见"，剔除在渲染线程做）
+        // meshIndex / indexCount / firstIndex / vertexOffset 由 MeshBatcher 在 Prepare 阶段填充
+        // 上一帧世界矩阵：按**下标**对齐（与 GPUScene 的 `m_CachedMatrices[idx]` 同一假设）。
+        // 首帧（prev 为空或该下标不存在）取当前矩阵 ⇒ 运动矢量为 0，与既有行为一致。
+        if (prev && objectID < prev->draws.size()) {
+            item.prevWorldMatrix = prev->draws[objectID].object.worldMatrix;
+        } else {
+            item.prevWorldMatrix = worldMatrix;
+        }
+        out.draws.push_back(item);
+    }
+
+    /// 收集全部可渲染物体（遍历顺序与 `GPUScene::Collect` 的**首次全量**分支逐条对齐）。
+    /// @param prev 上一帧快照（可为空）
+    /// @return 收集到的物体数
+    static u32 BuildObjects(he::World& world, he::SceneGraph& sg, const CameraData& camera,
+                            const SceneSnapshotObjectOptions& options,
+                            const FrameSceneSnapshot* prev, FrameSceneSnapshot& out);
 };
 
 } // namespace he::render

@@ -49,11 +49,14 @@ struct SnapshotDrawItem {
     /// 可见性/实例化位标记（与 `GPUSceneObject::visibilityFlags` 同源）
     u32 visibilityFlags = 0;
 
-    /// 间接绘制参数（与 `GPUSceneObject` 的三元组一致）
+    /// 间接绘制参数（与 `GPUSceneObject` 的三元组一致；**由 MeshBatcher 填充**，收集阶段恒为 0）
     u32 indexCount = 0;
     u32 firstIndex = 0;
     i32 vertexOffset = 0;
-    u32 _pad = 0;
+    /// 材质索引（与 `GPUSceneObject::materialIndex` 对应；组件里的 `materialID`）。
+    /// 【与 `object.materialID` 不是一回事】后者是 bindless 纹理数组的**基索引**（着色器用它采样纹理），
+    /// 前者是 GPU 剔除/间接绘制路径里的材质槽。两条路径都要，故都留在快照里。
+    u32 materialIndex = 0;
 };
 
 // 【布局钉子】物体数据必须能整块拷贝、且 16B 对齐（std430 要求）

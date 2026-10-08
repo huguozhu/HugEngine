@@ -1,8 +1,16 @@
 #include "Threading/SceneSnapshotBuilder.h"
 
 #include "Pipeline/PhysicalLight.h"   // KelvinToRGB / kPhysicalLightExposure（纯函数，无 RHI 依赖）
+#include "Scene/BillboardComponent.h"
+#include "Scene/CubeComponent.h"
+#include "Scene/DecalComponent.h"
+#include "Scene/InstancedMeshComponent.h"
 #include "Scene/LightComponent.h"
+#include "Scene/MeshComponent.h"
 #include "Scene/SceneGraph.h"
+#include "Scene/SkeletalMeshComponent.h"
+#include "Scene/SphereComponent.h"
+#include "Scene/TextRenderComponent.h"
 #include "Scene/World.h"
 
 #include <glm/gtx/norm.hpp>           // glm::normalize（与 CollectLights 用的是同一个）
@@ -106,6 +114,43 @@ u32 SceneSnapshotBuilder::BuildLights(he::World& world, he::SceneGraph& sg,
     }
 
     return static_cast<u32>(out.lights.size());
+}
+
+u32 SceneSnapshotBuilder::BuildObjects(he::World& world, he::SceneGraph& sg, const CameraData& camera,
+                                       const SceneSnapshotObjectOptions& options,
+                                       const FrameSceneSnapshot* prev, FrameSceneSnapshot& out) {
+    out.draws.clear();
+
+    // 与 `GPUScene::Collect` 的**首次全量**分支逐条对齐：组件类型顺序、无索引跳过、
+    // 贴花是否排除、广告牌/文字的相机对齐矩阵、世界 AABB、objectID = 收集序号。
+    // 【为什么按精确类型遍历】组件存储是 `unordered_map<type_index, bucket>`（见 `Scene/World.h`），
+    // `ForEach<T>` 只匹配**精确类型**；因此这里的类型清单必须与旧路径完全一致，否则收集集合会变。
+    const auto addPlain = [&](he::Entity e, auto& comp) {
+        const u32 id = static_cast<u32>(out.draws.size());
+        CollectObjectItem(e, comp, sg.GetWorldMatrix(e), id, prev, out);
+    };
+
+    // 广告牌 / 3D 文字：矩阵对齐相机（每帧随相机变化；这也是"收集必须发生在有相机的帧里"的原因）
+    const auto addBillboard = [&](he::Entity e, auto& comp) {
+        const float4x4 base = sg.GetWorldMatrix(e);
+        const float4x4 wm = BillboardComponent::MakeBillboardMatrix(
+            float3(base[3]), camera.forward, camera.up, comp.size);
+        const u32 id = static_cast<u32>(out.draws.size());
+        CollectObjectItem(e, comp, wm, id, prev, out);
+    };
+
+    world.ForEach<MeshComponent>([&](he::Entity e, MeshComponent& mc) { addPlain(e, mc); });
+    world.ForEach<CubeComponent>([&](he::Entity e, CubeComponent& cc) { addPlain(e, cc); });
+    world.ForEach<SphereComponent>([&](he::Entity e, SphereComponent& sc) { addPlain(e, sc); });
+    world.ForEach<BillboardComponent>([&](he::Entity e, BillboardComponent& bb) { addBillboard(e, bb); });
+    world.ForEach<TextRenderComponent>([&](he::Entity e, TextRenderComponent& tr) { addBillboard(e, tr); });
+    if (!options.excludeDecals) {
+        world.ForEach<DecalComponent>([&](he::Entity e, DecalComponent& dc) { addPlain(e, dc); });
+    }
+    world.ForEach<InstancedMeshComponent>([&](he::Entity e, InstancedMeshComponent& im) { addPlain(e, im); });
+    world.ForEach<SkeletalMeshComponent>([&](he::Entity e, SkeletalMeshComponent& sm) { addPlain(e, sm); });
+
+    return static_cast<u32>(out.draws.size());
 }
 
 } // namespace he::render

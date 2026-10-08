@@ -461,6 +461,96 @@ TEST_CASE("SceneSnapshotBuilder：与改动前 CollectLights 逐字段一致（�
     }
 }
 
+TEST_CASE("SceneSnapshotBuilder：物体映射（与 GPUScene::Collect 的 FillObj 逐字段对齐）") {
+    // 假组件：只提供映射需要的三个成员（duck typing）
+    struct FakeComponent {
+        u32        indexCount = 0;
+        u32        materialID = 0;
+        he::AABB   bounds;
+        u32 GetIndexCount() const { return indexCount; }
+        he::AABB GetBounds() const { return bounds; }
+    };
+
+    FrameSceneSnapshot snap;
+    FakeComponent comp;
+    comp.indexCount = 36;
+    comp.materialID = 12;
+    comp.bounds     = he::AABB{float3(-1.0f, -2.0f, -3.0f), float3(1.0f, 2.0f, 3.0f)};
+
+    he::Entity e{1};
+    he::SceneGraph* dummy = nullptr;   // 映射本身不需要 SceneGraph（矩阵由调用方算好）
+    (void)dummy;
+
+    const float4x4 wm = glm::translate(float4x4(1.0f), float3(10.0f, 0.0f, 0.0f));
+    SceneSnapshotBuilder::CollectObjectItem(e, comp, wm, 5u, nullptr, snap);
+
+    REQUIRE(snap.draws.size() == 1u);
+    const SnapshotDrawItem& item = snap.draws[0];
+    CHECK(item.object.worldMatrix[3].x == doctest::Approx(10.0f));   // 平移进入世界矩阵
+    CHECK(item.object.boundsMin.x == doctest::Approx(9.0f));         // 包围盒已变换到世界空间
+    CHECK(item.object.boundsMax.x == doctest::Approx(11.0f));
+    CHECK(item.object.boundsMin.y == doctest::Approx(-2.0f));
+    CHECK(item.materialIndex == 12u);
+    CHECK(item.object.materialID == 12u);
+    CHECK(item.objectID == 5u);                    // 收集序号由调用方给（= 下标）
+    CHECK(item.visibilityFlags == 1u);             // 与 FillObj 一致
+    CHECK(item.prevWorldMatrix[3].x == doctest::Approx(10.0f));   // 无上一帧 ⇒ 取当前矩阵
+    CHECK(item.indexCount == 0u);                  // 由 MeshBatcher 填充，收集阶段恒 0
+}
+
+TEST_CASE("SceneSnapshotBuilder：物体映射的跳过与上一帧矩阵") {
+    struct FakeComponent {
+        u32      indexCount = 0;
+        u32      materialID = 0;
+        he::AABB bounds;
+        u32 GetIndexCount() const { return indexCount; }
+        he::AABB GetBounds() const { return bounds; }
+    };
+
+    he::Entity e{1};
+    const float4x4 wm = float4x4(1.0f);
+
+    SUBCASE("无索引的组件不进列表") {
+        FrameSceneSnapshot snap;
+        FakeComponent comp;                        // indexCount = 0
+        SceneSnapshotBuilder::CollectObjectItem(e, comp, wm, 0u, nullptr, snap);
+        CHECK(snap.draws.empty());
+    }
+
+    SUBCASE("提供上一帧快照时按下标取 prevWorldMatrix") {
+        FrameSceneSnapshot prev;
+        SnapshotDrawItem prevItem;
+        prevItem.object.worldMatrix = glm::translate(float4x4(1.0f), float3(-4.0f, 0.0f, 0.0f));
+        prev.draws.push_back(prevItem);
+
+        FrameSceneSnapshot snap;
+        FakeComponent comp;
+        comp.indexCount = 3;
+        SceneSnapshotBuilder::CollectObjectItem(e, comp, wm, 0u, &prev, snap);
+        REQUIRE(snap.draws.size() == 1u);
+        CHECK(snap.draws[0].prevWorldMatrix[3].x == doctest::Approx(-4.0f));   // 来自上一帧
+        CHECK(snap.draws[0].object.worldMatrix[3].x == doctest::Approx(0.0f));
+    }
+
+    SUBCASE("上一帧下标不存在时退回当前矩阵（首帧语义）") {
+        FrameSceneSnapshot prev;                   // 空
+        FrameSceneSnapshot snap;
+        FakeComponent comp;
+        comp.indexCount = 3;
+        SceneSnapshotBuilder::CollectObjectItem(e, comp, wm, 7u, &prev, snap);   // 下标越界
+        REQUIRE(snap.draws.size() == 1u);
+        CHECK(snap.draws[0].prevWorldMatrix[3].x == doctest::Approx(0.0f));
+    }
+}
+
+TEST_CASE("SceneSnapshotBuilder：空世界的物体收集为 0（遍历入口）") {
+    LightWorld lw;
+    FrameSceneSnapshot snap;
+    const u32 n = SceneSnapshotBuilder::BuildObjects(lw.world, lw.sg, CameraData{}, {}, nullptr, snap);
+    CHECK(n == 0u);
+    CHECK(snap.draws.empty());
+}
+
 TEST_CASE("SceneSnapshotBuilder：逐帧复用不残留上一帧光源") {
     LightWorld lw;
     const Entity e = lw.AddEntity("p", float3(0.0f, 0.0f, 0.0f));
