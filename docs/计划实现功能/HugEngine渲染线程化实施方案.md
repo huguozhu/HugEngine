@@ -667,8 +667,11 @@ private:
     **只需这两个字段**：粒子模拟/绘制早就按 id 索引驱动渲染器自有缓冲（`DispatchCompute(cmd, id, dt,
     viewProj)`），渲染期唯一读组件的地方就是"发射位置"。
     单测 1 例；实测 **384 例 / 71701 断言全通过**；`02.Cube` / `04.Sponza-Deferred` 编译通过。
-    **消费侧未做**：`DispatchCompute` 仍从 `CompState::comp` 取位置，下一步改从快照取
-    （对外接口不变，之后 `CompState` 不必缓存组件指针）。
+    **消费侧未做**：`DispatchCompute` 仍从 `CompState::comp` 取位置与参数，下一步改从快照取
+    （对外接口只需多两个入参，之后 `CompState` 不必在帧内读组件指针）。
+    > 查清：emit 分支每帧读**约 15 个字段**（`ParticleComponent::GetParam()` 的方向/形状/速度/寿命/
+    > 尺寸/纹理行列……），只搬"位置"不够 ⇒ 快照条目已改为**整份携带 `ParticleSystemParam`**，
+    > 消费侧切换因此降为机械替换（实测单测 384 例 / 71703 断言）。
 - [ ] T1.5 渲染期移除 World/SceneGraph 引用（grep 断言）
   - **闸门与基线已就位（2026-09-24）**：`Tools/check_threading.py --world-deps` 统计 `Engine/Render/`
     内 `World&` / `SceneGraph&` 的出现处，按**所属函数名**分"渲染期 / 加载期"（与调用点清点同一份
