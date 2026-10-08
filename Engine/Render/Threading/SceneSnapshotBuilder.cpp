@@ -1,4 +1,6 @@
 #include "Threading/SceneSnapshotBuilder.h"
+// 共享注册器需要 MeshRegistryEntry 的完整定义
+#include "Threading/MeshRegistry.h"
 
 #include "Pipeline/PhysicalLight.h"   // KelvinToRGB / kPhysicalLightExposure（纯函数，无 RHI 依赖）
 #include "Scene/BillboardComponent.h"
@@ -205,6 +207,40 @@ bool SceneSnapshotBuilder::BuildEnvironment(he::World& world, FrameSceneSnapshot
     const bool found = he::GetPhysicalSkySun(world, sunDir, turbidity);
     out.atmosphere = float4(sunDir, turbidity);
     return found;
+}
+
+u32 SceneSnapshotBuilder::RegisterMeshes(he::World& world, MeshRegistry& registry) {
+    u32 count = 0;
+    // 登记一个网格组件：缓冲只借指针（所有权在组件）、回填注册表索引。
+    // `instanced=true` 的形态（实例化/骨骼）顶点由各自专用路径提供，绘制循环会跳过普通绘制。
+    auto add = [&](auto& comp, bool instanced, rhi::IRHIBuffer* skinBuffer = nullptr) {
+        if (comp.GetIndexCount() == 0u) return;                // 与收集口径一致：无索引不登记
+        MeshRegistryEntry entry;
+        entry.vertexBuffer     = comp.GetVertexBuffer().get();
+        entry.indexBuffer      = comp.GetIndexBuffer().get();
+        entry.skinMatrixBuffer = skinBuffer;                   // 仅骨骼网格非空（骨骼上传的写入目标）
+        entry.indexCount       = comp.GetIndexCount();
+        entry.materialID       = comp.materialID;
+        entry.instanced        = instanced;
+        comp.meshIndex         = registry.Register(&comp, entry);
+        ++count;
+    };
+
+    // 遍历顺序与 `BuildObjects` / `SceneRenderer::Prepare` 的收集顺序无关（注册表按组件地址为键），
+    // 因此这里按"基类 → 各派生类型"逐个列出即可；`World::ForEach<T>` 只匹配**精确**类型，故要列全。
+    world.ForEach<MeshComponent>([&](he::Entity, MeshComponent& c) { add(c, false); });
+    world.ForEach<CubeComponent>([&](he::Entity, CubeComponent& c) { add(c, false); });
+    world.ForEach<SphereComponent>([&](he::Entity, SphereComponent& c) { add(c, false); });
+    world.ForEach<BillboardComponent>([&](he::Entity, BillboardComponent& c) { add(c, false); });
+    world.ForEach<TextRenderComponent>([&](he::Entity, TextRenderComponent& c) { add(c, false); });
+    world.ForEach<DecalComponent>([&](he::Entity, DecalComponent& c) { add(c, false); });
+    world.ForEach<SplineMeshComponent>([&](he::Entity, SplineMeshComponent& c) { add(c, false); });
+    world.ForEach<InstancedMeshComponent>([&](he::Entity, InstancedMeshComponent& c) { add(c, true); });
+    // 骨骼网格：除上述字段外还要登记**骨骼缓冲**（骨骼上传的写入目标，会重建 ⇒ 每帧刷新正为此刻）
+    world.ForEach<SkeletalMeshComponent>([&](he::Entity, SkeletalMeshComponent& sm) {
+        add(sm, true, sm.boneBuffer.get());
+    });
+    return count;
 }
 
 u32 SceneSnapshotBuilder::BuildParticles(he::World& world, FrameSceneSnapshot& out) {

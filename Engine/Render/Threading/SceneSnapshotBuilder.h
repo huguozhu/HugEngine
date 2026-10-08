@@ -32,7 +32,11 @@ class MeshComponent;           // E-3：材质映射的输入（实现里才需�
 // 阴影索引由调用方用它的阴影系统解析（快照层不反向依赖管线状态）。
 // ============================================================
 
+namespace he::rhi { class IRHIBuffer; }   // 注册器签名里用到（前向声明足够）
+
 namespace he::render {
+
+class MeshRegistry;   // 注册器签名里只用到引用（实现在 .cpp 里，需要完整类型）
 
 /// 收集光源时的外部输入
 struct SceneSnapshotResolvers {
@@ -157,6 +161,17 @@ public:
     static PBRMaterial MakePBRMaterial(const he::MeshComponent& comp);
 
     // ── 粒子发射器（T1.4）────────────────────────────────────────
+
+    // ── 网格注册（附录 E / E-2①，唯一实现）──────────────────────
+
+    /// 把世界中**所有**可绘制网格组件登记/更新进注册表，并回填组件上的 `meshIndex`。
+    /// 【为什么必须覆盖全部类型】绘制路径（E-3②）要靠 `meshIndex` 从注册表取顶点/索引缓冲；
+    /// 只登记骨骼网格的话，普通网格 `meshIndex == 0` ⇒ 消费侧只能继续留指针兜底，闸门降不下来。
+    /// 【为什么每帧调用】骨骼缓冲会重建（`RetireBoneBuffer` 走 N 帧延迟队列后新建）⇒ 一次性注册会
+    /// 留过期指针；`Register` 同 key = 更新、索引不变，因此每帧刷新廉价且安全。
+    /// 【为什么收在这里】原先三条管线各抄一份只登记骨骼网格的代码 —— 三份口径必然漂移。
+    /// @return 登记到的网格数
+    static u32 RegisterMeshes(he::World& world, MeshRegistry& registry);
 
     /// 收集粒子发射器列表（`{rendererId, 发射位置}`）。
     /// 【为什么只需要这两个字段】粒子模拟与绘制早就按 id 索引驱动渲染器自有缓冲

@@ -257,19 +257,9 @@ void PathTracingPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
     if (m_PTDenoiser)
         m_PTDenoiser->SetTemporalBlend(std::clamp(cvPTDenoiseBlend.Get(), 0.0f, 1.0f));
 
-    // 阶段 1 附录 E（E-2①，三管线对称）：登记/更新网格资源并回填 `meshIndex`。
-    // 每帧刷新（骨骼缓冲会重建 ⇒ 一次性注册会留过期指针；Register 同 key = 更新、索引不变）。
-    world.ForEach<he::SkeletalMeshComponent>([&](he::Entity, he::SkeletalMeshComponent& sm) {
-        if (sm.GetIndexCount() == 0u) return;                  // 与收集口径一致：无索引不登记
-        MeshRegistryEntry entry;
-        entry.vertexBuffer     = sm.GetVertexBuffer().get();   // 只借指针，所有权仍在组件
-        entry.indexBuffer      = sm.GetIndexBuffer().get();
-        entry.skinMatrixBuffer = sm.boneBuffer.get();
-        entry.indexCount       = sm.GetIndexCount();
-        entry.materialID       = sm.materialID;
-        entry.instanced        = true;
-        sm.meshIndex           = m_MeshRegistry.Register(&sm, entry);
-    });
+    // 阶段 1 附录 E（E-2①）：登记/更新**全部**网格资源并回填 `meshIndex`（唯一实现在
+    // `SceneSnapshotBuilder::RegisterMeshes`，三条管线共用）。每帧刷新 ⇒ 骨骼缓冲重建也不会留过期指针。
+    SceneSnapshotBuilder::RegisterMeshes(world, m_MeshRegistry);
 
     // ── 粒子模拟 (Compute，在 RenderGraph 之前) ──
     float4x4 viewProj = camera.GetViewProjMatrix();

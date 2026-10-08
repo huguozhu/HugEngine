@@ -913,22 +913,11 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
                               he::SceneGraph& sg, const CameraData& camera,
                               float deltaTime)
 {
-    // 阶段 1 附录 E（E-2 第①步）：把网格资源登记/更新进注册表，并回填 `meshIndex`。
-    // 【为什么每帧跑】骨骼缓冲会被重建（`RetireBoneBuffer` 走 N 帧延迟队列后新建）⇒ 只登记一次会
-    // 留下**过期指针**；`MeshRegistry::Register` 对同一 key 是"更新"，索引不变 ⇒ 每帧刷新是廉价且安全的。
-    // 【为什么必须在构建快照之前】快照的 `SnapshotDrawItem::meshIndex` 直接取组件字段。
-    // 目前只登记骨骼网格（E-2 的消费者）；其它类型随各自消费者接入时再登记。
-    world.ForEach<he::SkeletalMeshComponent>([&](he::Entity, he::SkeletalMeshComponent& sm) {
-        if (sm.GetIndexCount() == 0u) return;              // 与收集口径一致：无索引不登记
-        MeshRegistryEntry entry;
-        entry.vertexBuffer     = sm.GetVertexBuffer().get();   // 只借指针，所有权仍在组件
-        entry.indexBuffer      = sm.GetIndexBuffer().get();
-        entry.skinMatrixBuffer = sm.boneBuffer.get();           // 骨骼上传的写入目标（可能每帧重建）
-        entry.indexCount       = sm.GetIndexCount();
-        entry.materialID       = sm.materialID;
-        entry.instanced        = true;                         // 骨骼网格：顶点由蒙皮路径提供
-        sm.meshIndex           = m_MeshRegistry.Register(&sm, entry);
-    });
+    // 阶段 1 附录 E（E-2①）：登记/更新**全部**网格资源并回填 `meshIndex`。
+    // 唯一实现在 `SceneSnapshotBuilder::RegisterMeshes`（三条管线共用；原先各抄一份只登记骨骼网格）。
+    // 每帧刷新：骨骼缓冲会被重建（`RetireBoneBuffer` 走 N 帧延迟队列后新建）⇒ 只登记一次会留过期指针；
+    // `Register` 同 key = 更新、索引不变，因此廉价且安全。必须在构建快照之前（`meshIndex` 取组件字段）。
+    SceneSnapshotBuilder::RegisterMeshes(world, m_MeshRegistry);
 
     // 阶段 1 附录 E（E-2②）：构建**完整**快照（物体 + 蒙皮矩阵）。
     // 【为什么需要】骨骼上传（下面 11xx 行）要按 `sourceEntity` 找回逐实体状态、并从
