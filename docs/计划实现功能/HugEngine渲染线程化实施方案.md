@@ -1203,6 +1203,12 @@ python Tools\check_threading.py --world-deps --handles --gate
   > B1 仍为 82（骨骼循环本身仍在 `Render(world, …)` 之内）。**B1 真正开始下降是在 T1.5**
   > （把管线帧入口从"收 `world/sg`"改成"收快照"）。本附录的 E-1/E-2 因此按"组件依赖是否消失"
   > 衡量（代码检查 + 逐位判据），不按 B1 计数衡量。
+- **组件指针依赖有独立闸门（2026-09-24 新增）**：`python Tools/check_threading.py --mesh-ptrs`
+  统计 `Engine/Render/` 内 `*Component*` 的出现处，按所属函数名分**渲染期 / 加载期**
+  （与 B1 共用同一套分类口径与白名单），基线即上限并接入 `--gate`。
+  **实测基线：渲染期 20 处 / 加载期 4 处**，命中清单（= E-3 后半的收敛对象）：
+  `Pipeline/RTPass.cpp`(9)、`SceneRenderer.cpp`(4)、`Pipeline/RTPass.h`(4)、`SceneRenderer.h`(1)、
+  `Pipeline/ForwardPipeline.{h,cpp}`(各 1)。**E-3 每推进一步就复测并把 `MESH_PTR_BASELINE` 下调。**
 
 ---
 
