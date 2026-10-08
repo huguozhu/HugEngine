@@ -78,7 +78,7 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera)
 
         // 【T2.4】无条件把**本帧**快照交给阴影系统（不依赖"样例是否调过 Update"）⇒ `Render` 里
     // 用的永远是本帧那一份（多飞行帧快照的前提）
-    if (m_ShadowSystem) m_ShadowSystem->SetFrameSnapshot(SnapBuf(), m_MeshRegistry);
+    if (m_ShadowSystem) m_ShadowSystem->SetFrameSnapshot(FrameSnap(), m_MeshRegistry);
 
     rg.AddPass("Shadow", {}, std::move(shadowWrites),
             [this](rhi::IRHICommandList* c) {
@@ -158,7 +158,7 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera)
                 // 这条此前只加在 PrepareGI（非 RG 路径）里，RG 路径漏了 —— 同一个坑两处。
                 m_RSM->SetLightBuffer(GetCurrentLightBuffer());
                 // 【第③段第 3 批】几何改从快照取 + 按 meshIndex 查注册表（不再需要捕获 world/sg）
-                m_RSM->RenderRSMPass(c, SnapBuf(), m_MeshRegistry);
+                m_RSM->RenderRSMPass(c, FrameSnap(), m_MeshRegistry);
             });
     }
 

@@ -701,7 +701,7 @@ void ForwardPipeline::PrepareGI(rhi::IRHICommandList* cmd) {
         m_RSM->SetLightBuffer(GetCurrentLightBuffer());
         // 从光源 POV 渲染几何体 → RSM 纹理（使用 RSM 自有的独立深度缓冲）
         // 【第③段第 3 批】几何改从快照取 + 按 meshIndex 查注册表（不再需要 world/sg）
-        m_RSM->RenderRSMPass(cmd, SnapBuf(), m_MeshRegistry);
+        m_RSM->RenderRSMPass(cmd, FrameSnap(), m_MeshRegistry);
         UpdateRSMBindings();
     }
 }
@@ -947,7 +947,7 @@ void ForwardPipeline::RunGPUCulling(rhi::IRHICommandList* cmd, const CameraData&
 
     // 2) 收集场景对象 → GPUScene SSBO
     // 【第③段】GPUScene 不再自建快照：直接消费本帧快照（物体收集口径已由 `BuildObjects` 决定）
-    m_GPUScene.CollectFromSnapshot(SnapBuf());
+    m_GPUScene.CollectFromSnapshot(FrameSnap());
     // FillGPUScene 必须在 Collect 之后、Upload 之前（与 Deferred 一致）
     // 【第③段第 4 批】MeshBatcher 改吃快照 + 网格注册表（它原先要遍历世界取顶点/索引与材质）
     if (!m_BatchBuilt) { m_MeshBatcher.Build(FrameSnap(), m_MeshRegistry); m_BatchBuilt = true; }
@@ -1015,7 +1015,7 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
     // BeginHDRPass 之前调用，两条路径都不再落在 render pass 里。
 
     // SceneRenderer 准备所有 draw items（阶段 1 §15.1 第②段：改吃快照，不再遍历世界）
-    auto allDrawItems = m_SceneRenderer->Prepare(SnapBuf(), camera,
+    auto allDrawItems = m_SceneRenderer->Prepare(FrameSnap(), camera,
                                                  m_ObjectBuffers[m_CurrentFrameSlot].get());
 
     // GPU 剔除后过滤：构建可见 draw 列表
