@@ -50,6 +50,11 @@ struct SnapshotDrawItem {
 
     /// 网格资源索引：**不是指针** —— 渲染线程据此去查自己的顶点/索引缓冲表
     u32 meshIndex = 0;
+    /// 实例化/骨骼网格标记：顶点由**专用路径**提供（实例化 Pass / 蒙皮 Pass），普通绘制循环跳过。
+    /// 【为什么要进快照】原先这个标记由 `SceneRenderer::Prepare` 现场判定（它自己遍历世界）；
+    /// 第②段起 `Prepare` 改吃快照，标记就必须由收集侧给出 —— 否则消费侧无从区分，
+    /// 会把实例化网格当普通网格再画一遍。
+    bool bInstanced = false;
     /// 场景物体唯一 ID（调试、剔除统计、与 GPU Culling 的 objectID 对应）
     u32 objectID = 0;
     /// **来源实体 id**（`he::Entity::id`）。渲染侧仍有少量"逐实体"的状态机（骨骼缓冲的

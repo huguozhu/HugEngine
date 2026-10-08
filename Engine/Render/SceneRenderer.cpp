@@ -1,81 +1,32 @@
+// SceneRenderer.cpp — 通用几何体数据准备器（阶段 1 §15.1 第②段：只消费快照）
+//
+// 【这次改动做了什么】收集（遍历 ECS、算世界矩阵/世界 AABB/材质）已经在游戏线程由
+// `SceneSnapshotBuilder::BuildObjects` 做完；本类只做两件事：**视锥剔除**与
+// **把条目的 GPUObjectData 整块上传**。于是：
+//   · `Prepare` 的签名去掉了 `World&` / `SceneGraph&`（附录 B1 因此下降）；
+//   · `DrawItem::mesh` 这个组件指针字段被删除（附录 E 的组件指针闸门收敛点）——
+//     消费侧改为按 `meshIndex` 查 `MeshRegistry` 取顶点/索引缓冲。
+// 语义保持不变：剔除口径（世界 AABB + 并行分块 + `MAX_OBJECTS` 截断）、可见顺序、
+// objectIndex 的分配方式（= 可见列表下标）都与旧实现逐条一致。
 #include "SceneRenderer.h"
-// E-3：材质映射的唯一实现（`SceneSnapshotBuilder::MakePBRMaterial`）
-#include "Threading/SceneSnapshotBuilder.h"
-#include "Scene/World.h"
-#include "Scene/SceneGraph.h"
-#include "Scene/MeshComponent.h"
-#include "Scene/CubeComponent.h"
-#include "Scene/SphereComponent.h"
-#include "Scene/BillboardComponent.h"
-#include "Scene/TextRenderComponent.h"
-#include "Scene/DecalComponent.h"
-#include "Scene/SplineMeshComponent.h"
-#include "Scene/InstancedMeshComponent.h"
-#include "Scene/SkeletalMeshComponent.h"
+#include "Math/Geometry.h"        // he::AABB（从快照的 world AABB 还原）+ Frustum
 #include "Threading/JobSystem.h"
 #include "Core/Log.h"
 #include <mutex>
 
 namespace he::render {
 
-std::vector<DrawItem> SceneRenderer::Prepare(he::World& world, he::SceneGraph& sg,
+std::vector<DrawItem> SceneRenderer::Prepare(const FrameSceneSnapshot& snapshot,
                                              const CameraData& camera,
-                                             rhi::IRHIBuffer* objectBuffer,
-                                             bool excludeDecals)
+                                             rhi::IRHIBuffer* objectBuffer)
 {
     std::vector<DrawItem> result;
     if (!objectBuffer) return result;
 
-    // ---- Step 1: 收集所有可绘制实体 + 预计算包围盒 ----
-    struct Entry { he::MeshComponent* mesh; AABB worldBounds; float4x4 worldMatrix; bool bInstanced = false; };
-    std::vector<Entry> entries;
-
-    auto gather = [&](he::Entity e, he::MeshComponent& m) {
-        if (m.GetIndexCount() == 0) return;
-        float4x4 wm = sg.GetWorldMatrix(e);
-        entries.push_back({&m, m.GetBounds().Transform(wm), wm, false});
-    };
-    world.ForEach<he::MeshComponent>([&](he::Entity e, he::MeshComponent& m) { gather(e, m); });
-    world.ForEach<he::CubeComponent>([&](he::Entity e, he::CubeComponent& c) { gather(e, static_cast<he::MeshComponent&>(c)); });
-    world.ForEach<he::SphereComponent>([&](he::Entity e, he::SphereComponent& s) { gather(e, static_cast<he::MeshComponent&>(s)); });
-    // 广告牌：世界矩阵替换为对齐相机的 billboard 矩阵（每帧随相机旋转）
-    auto gatherBillboard = [&](he::Entity e, he::BillboardComponent& b) {
-        if (b.GetIndexCount() == 0) return;
-        // 位置取世界矩阵平移分量（支持挂在父节点下；旋转/缩放忽略，MVP）
-        float4x4 base = sg.GetWorldMatrix(e);
-        float4x4 wm = he::BillboardComponent::MakeBillboardMatrix(
-            float3(base[3]), camera.forward, camera.up, b.size);
-        entries.push_back({static_cast<he::MeshComponent*>(&b), b.GetBounds().Transform(wm), wm});
-    };
-    world.ForEach<he::BillboardComponent>([&](he::Entity e, he::BillboardComponent& b) { gatherBillboard(e, b); });
-    // 3D 文字（继承 Billboard，同样对齐相机）
-    world.ForEach<he::TextRenderComponent>([&](he::Entity e, he::TextRenderComponent& t) { gatherBillboard(e, t); });
-    // 贴花：固定朝向（Transform 摆放），走普通 mesh 路径
-    // 任务 24：Deferred 路径下由 DecalPass 做 GBuffer 投影，卡片在此排除
-    //（Force 路径仍走卡片：Forward 没有 GBuffer 可投影）
-    if (!excludeDecals)
-        world.ForEach<he::DecalComponent>([&](he::Entity e, he::DecalComponent& d) { gather(e, d); });
-    // 样条网格（B2 遗留）：沿样条生成的条带，走普通 mesh 路径
-    world.ForEach<he::SplineMeshComponent>([&](he::Entity e, he::SplineMeshComponent& sm) { gather(e, sm); });
-    // 实例化网格（B1）：登记一个对象条目（材质数据用），实例由专用 Pass 绘制
-    world.ForEach<he::InstancedMeshComponent>([&](he::Entity e, he::InstancedMeshComponent& im) {
-        if (im.GetIndexCount() == 0) return;
-        float4x4 wm = sg.GetWorldMatrix(e);
-        entries.push_back({static_cast<he::MeshComponent*>(&im),
-                           im.GetBounds().Transform(wm), wm, true});
-    });
-    // 骨骼网格（C1b）：同实例化处理——对象条目供材质/世界变换，顶点由蒙皮 Pass 绘制
-    world.ForEach<he::SkeletalMeshComponent>([&](he::Entity e, he::SkeletalMeshComponent& sm) {
-        if (sm.GetIndexCount() == 0) return;
-        float4x4 wm = sg.GetWorldMatrix(e);
-        entries.push_back({static_cast<he::MeshComponent*>(&sm),
-                           sm.GetBounds().Transform(wm), wm, true});
-    });
-
-    u32 total = (u32)entries.size();
+    const u32 total = static_cast<u32>(snapshot.draws.size());
     if (total == 0) return result;
 
-    // ---- Step 2: 并行视锥剔除 ----
+    // ---- Step 1: 并行视锥剔除（世界 AABB 由收集侧算好，见 `CollectObjectItem`）----
     Frustum frustum = camera.GetFrustum();
     std::mutex mtx;
     std::vector<u32> visibleIdx;
@@ -86,7 +37,10 @@ std::vector<DrawItem> SceneRenderer::Prepare(he::World& world, he::SceneGraph& s
             std::vector<u32> local;
             local.reserve(end - start);
             for (u32 i = start; i < end; ++i) {
-                if (!entries[i].worldBounds.IsValid() || frustum.Intersects(entries[i].worldBounds))
+                const SnapshotDrawItem& item = snapshot.draws[i];
+                // GPUObjectData 里的 AABB 是 float4（std430 布局），这里还原成 float3 做盒测试
+                const he::AABB worldBounds{float3(item.object.boundsMin), float3(item.object.boundsMax)};
+                if (!worldBounds.IsValid() || frustum.Intersects(worldBounds))
                     local.push_back(i);
             }
             if (!local.empty()) { std::lock_guard<std::mutex> lk(mtx); visibleIdx.insert(visibleIdx.end(), local.begin(), local.end()); }
@@ -96,40 +50,33 @@ std::vector<DrawItem> SceneRenderer::Prepare(he::World& world, he::SceneGraph& s
             visibleIdx.push_back(i);
     }
 
-    u32 visibleCount = (u32)visibleIdx.size();
+    u32 visibleCount = static_cast<u32>(visibleIdx.size());
     if (visibleCount == 0) return result;
     if (visibleCount > MAX_OBJECTS) visibleCount = MAX_OBJECTS;
 
-    // ---- Step 3: 上传 GPUObjectData + 构建 DrawList ----
+    // ---- Step 2: 上传 GPUObjectData + 构建 DrawList ----
     auto* objData = static_cast<GPUObjectData*>(objectBuffer->Map());
+    if (!objData) return result;      // 映射失败：返回空列表（调用方跳过绘制），不写野指针
     result.reserve(visibleCount);
 
     for (u32 vi = 0; vi < visibleCount; ++vi) {
-        u32 ei = visibleIdx[vi];
-        auto& e = entries[ei];
+        const SnapshotDrawItem& item = snapshot.draws[visibleIdx[vi]];
 
-        // 材质数据（E-3：映射已抽到 `SceneSnapshotBuilder::MakePBRMaterial`，两侧共用一份口径）
-        const PBRMaterial mat = SceneSnapshotBuilder::MakePBRMaterial(*e.mesh);
+        // 【整块拷贝】材质参数（E-3：收集侧用 `MakePBRMaterial` + `FillObjectData` 算好）、
+        // 世界矩阵、世界 AABB、materialID 都在 `item.object` 里 —— 消费侧不再重算，
+        // 从根上避免"两边各算一份然后漂移"。
+        objData[vi] = item.object;
 
-        GPUObjectData& obj = objData[vi];
-        obj.worldMatrix = e.worldMatrix;
-        FillObjectData(obj, mat);
-        obj.materialID = e.mesh->materialID;
-        // 物体世界空间 AABB（任务 31）：光照图的程序化展开要用它把世界位置归一化到页内，
-        // 从而**不依赖 uv0**（uv0 是平铺纹理坐标，实测 128² 页下 70% 的 texel 会被多个不同
-        // 世界位置命中）。这里用"网格局部包围盒 × 世界矩阵"，与场景包围盒同一套算法。
-        {
-            const he::AABB wb = e.mesh->GetBounds().Transform(e.worldMatrix);
-            obj.boundsMin = float4(wb.min, 0.0f);
-            obj.boundsMax = float4(wb.max, 0.0f);
-        }
-
-        result.push_back({e.mesh, vi, e.bInstanced, e.mesh->meshIndex});   // 透传注册表索引（E-3）
+        DrawItem di{};
+        di.objectIndex = vi;
+        di.bInstanced  = item.bInstanced;
+        di.meshIndex   = item.meshIndex;   // 顶点/索引缓冲由消费侧按它查注册表
+        result.push_back(di);
     }
     objectBuffer->Unmap();
 
     static bool s_First = true;
-    if (s_First) { HE_CORE_INFO("SceneRenderer: {} draws (from {} entities)", visibleCount, total); s_First = false; }
+    if (s_First) { HE_CORE_INFO("SceneRenderer: {} draws (from {} snapshot items)", visibleCount, total); s_First = false; }
     return result;
 }
 

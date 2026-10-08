@@ -18,6 +18,7 @@
 #include "Scene/MeshComponent.h"          // E-3：MakePBRMaterial 的输入类型
 #include "Pipeline/Material.h"            // PBRMaterial / GetDefaultMaterial（参考实现用）
 #include "Scene/PhysicalSkyComponent.h"   // 环境（太阳方向/浑浊度）进快照的用例
+#include "Scene/CubeComponent.h"           // 第②段：普通网格与实例化网格的 bInstanced 标记用例
 #include "Scene/ParticleComponent.h"      // 粒子发射器进快照的用例
 #include "Scene/SkeletalMeshComponent.h"  // 蒙皮矩阵进快照的用例
 #include "Scene/InstancedMeshComponent.h" // 阶段 1 第①段：实例化网格进快照的用例
@@ -563,6 +564,24 @@ TEST_CASE("SceneSnapshotBuilder：空世界的物体收集为 0（遍历入口�
     const u32 n = SceneSnapshotBuilder::BuildObjects(lw.world, lw.sg, CameraData{}, {}, nullptr, snap);
     CHECK(n == 0u);
     CHECK(snap.draws.empty());
+}
+
+TEST_CASE("SceneSnapshotBuilder：实例化/骨骼网格在快照里带 bInstanced 标记（第②段）") {
+    // 【为什么必须由收集侧给出】第②段起 `SceneRenderer::Prepare` 改吃快照，它原先"遍历世界时
+    // 按组件类型现场判定 bInstanced"的能力随之消失 —— 标记必须随条目一起走，
+    // 否则消费侧会把实例化网格当普通网格再画一遍（顶点会按普通网格路径读，直接错位）。
+    LightWorld lw;
+    const Entity eCube = lw.AddEntity("cube", float3(0.0f, 0.0f, 0.0f));
+    lw.world.AddComponent<he::CubeComponent>(eCube);
+    const Entity eInst = lw.AddEntity("inst", float3(2.0f, 0.0f, 0.0f));
+    lw.world.AddComponent<he::InstancedMeshComponent>(eInst);
+
+    FrameSceneSnapshot snap;
+    const u32 n = SceneSnapshotBuilder::BuildObjects(lw.world, lw.sg, CameraData{}, {}, nullptr, snap);
+    REQUIRE(n == 2u);
+    // 枚举顺序与旧 `SceneRenderer::Prepare` 一致：普通网格在前，实例化网格在后
+    CHECK(snap.draws[0].bInstanced == false);
+    CHECK(snap.draws[1].bInstanced == true);
 }
 
 TEST_CASE("GPUScene::MakeObjectRecord：与旧 FillObj 逐位一致（迁移钉子）") {

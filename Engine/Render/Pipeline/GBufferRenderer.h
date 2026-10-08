@@ -64,9 +64,6 @@ struct GBufferContext {
     // CPU 可见索引（GPU 剔除 Readback 结果）
     const std::vector<u32>* gpuVisibleIndices = nullptr;
 
-    // 任务 24：Deferred 路径排除贴花卡片（改由 DecalPass 投影到 GBuffer）
-    bool excludeDecals = false;
-
     // 任务 25：逐实例剔除器（实例化网格的可见列表 + 间接命令）。为空 = 不做逐实例剔除
     class InstanceCuller* instanceCuller = nullptr;
     /// 当前飞行帧槽位（逐实例剔除的可见列表/命令按槽位分开）
@@ -166,9 +163,6 @@ public:
     void SetMeshBatcher(MeshBatcher* mb)           { m_Ctx.meshBatcher = mb; }
     /// 阶段 1 第①段：网格注册表（实例化绘制按 meshIndex 取缓冲与索引数，不再持有组件指针）
     void SetMeshRegistry(const MeshRegistry* mr)    { m_Ctx.meshRegistry = mr; }
-    /// 任务 24：贴花改由 DecalPass 投影 → GBuffer 绘制时排除贴花卡片
-    void SetExcludeDecals(bool v)                  { m_Ctx.excludeDecals = v; }
-    bool GetExcludeDecals() const                  { return m_Ctx.excludeDecals; }
     /// 任务 25：逐实例剔除器与当前飞行帧槽位（实例化网格的可见列表/间接命令）
     void SetInstanceCuller(InstanceCuller* c, u32 frameSlot) {
         m_Ctx.instanceCuller = c;

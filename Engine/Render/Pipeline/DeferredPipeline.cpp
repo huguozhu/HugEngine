@@ -122,7 +122,9 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     m_GBuffer->SetMeshBatcher(&m_MeshBatcher);
     // 阶段 1 第①段：实例化绘制按 `meshIndex` 从注册表取顶点/索引缓冲（渲染期不再持有组件指针）
     m_GBuffer->SetMeshRegistry(&m_MeshRegistry);
-    m_GBuffer->SetExcludeDecals(m_ExcludeDecalCards);
+    // 说明：贴花口径（任务 24 的"排除贴花卡片"）自第②段起完全由**收集侧**决定 ——
+    // `BuildObjects` 的 `SceneSnapshotObjectOptions::excludeDecals` 已把结果烘进快照，
+    // GBuffer 消费侧不再需要这个开关（原来的 `SetExcludeDecals` 已删除）。
 
     // GBuffer 投影贴花 Pass（任务 24）：盒子几何 + PSO + 描述符集（读 worldPos/depth 采样）
     m_DecalPass.Initialize(device, m_Width, m_Height);
@@ -708,7 +710,13 @@ void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
     // 阶段 1 附录 E（E-2②/Deferred 侧，与 ForwardPipeline 对称）：构建**完整**快照并在首帧后
     // 按实际规模**自校准**预留一次容量 —— 稳态下快照数组不再重分配（"帧内不做分配"与
     // "帧内不做同步等待"同一条纪律）。骨骼上传/材质消费将来都要从这份快照取。
-    SceneSnapshotBuilder::BuildObjects(world, sg, camera, {}, nullptr, m_Snapshot);
+    // 【第②段：贴花口径必须在这里烘进快照】GBuffer 消费侧原先靠 `Prepare(..., excludeDecals=true)`
+    // 排除贴花卡片（改由 `DecalPass` 投影）；`Prepare` 改吃快照后，这个口径只能由收集侧决定 ——
+    // 否则贴花卡片会**既被投影又被当普通网格画进 GBuffer**，而且会与 `GPUScene`/`MeshBatcher`
+    // 的收集集合错位（三者的 objectIndex 按顺序对齐）。
+    SceneSnapshotObjectOptions objOptions;
+    objOptions.excludeDecals = m_ExcludeDecalCards;
+    SceneSnapshotBuilder::BuildObjects(world, sg, camera, objOptions, nullptr, m_Snapshot);
     // 实例化网格（阶段 1 第①段 / §15.1）：实例变换按值进快照，渲染侧因此不再读 InstancedMeshComponent。
     // 必须在 `RegisterMeshes`（回填 meshIndex）之后、帧图**执行**之前。
     SceneSnapshotBuilder::BuildInstances(world, m_Snapshot);

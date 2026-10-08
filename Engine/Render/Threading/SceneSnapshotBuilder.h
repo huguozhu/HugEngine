@@ -96,16 +96,18 @@ public:
     /// @param worldMatrix 已算好的世界矩阵（广告牌会被调用方换成对齐相机的矩阵）
     /// @param objectID    收集序号（= 在 `out.draws` 里的下标，与旧路径一致）
     /// @param prev        上一帧快照（可为空）：用于取 `prevWorldMatrix`（TAA/运动矢量需要）
+    /// @param bInstanced  实例化/骨骼网格（顶点由专用路径提供，普通绘制循环跳过）
     template <typename TComponent>
     static void CollectObjectItem(he::Entity entity, TComponent& comp, const float4x4& worldMatrix,
                                   u32 objectID, const FrameSceneSnapshot* prev,
-                                  FrameSceneSnapshot& out) {
+                                  FrameSceneSnapshot& out, bool bInstanced = false) {
         if (comp.GetIndexCount() == 0u) return;      // 旧路径：无索引的组件不进场景物体列表
 
         SnapshotDrawItem item{};
         // 来源实体 id（附录 E / E-2②）：渲染侧逐实体状态机（骨骼缓冲的脏标记/容量/退役队列）
         // 靠它从快照条目找回对应状态 ⇒ "矩阵走快照、生命周期留渲染侧"才成立。
         item.sourceEntity = entity.id;
+        item.bInstanced   = bInstanced;
         item.object.worldMatrix = worldMatrix;
         const he::AABB worldBounds = comp.GetBounds().Transform(worldMatrix);
         item.object.boundsMin = float4(worldBounds.min, 0.0f);

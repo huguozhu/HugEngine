@@ -158,11 +158,17 @@ u32 SceneSnapshotBuilder::BuildObjects(he::World& world, he::SceneGraph& sg, con
     // 会漏掉样条网格。**插入位置必须与 `SceneRenderer::Prepare` 一致**：Decal 之后、实例化之前。
     // 说明：当前样例中没有样条网格，无法做前后对比验证，本修正依据是"两处口径必须一致"这一硬约束。
     world.ForEach<SplineMeshComponent>([&](he::Entity e, SplineMeshComponent& spl) { addPlain(e, spl); });
-    world.ForEach<InstancedMeshComponent>([&](he::Entity e, InstancedMeshComponent& im) { addPlain(e, im); });
-    // 骨骼网格：除对象条目外，还要把**蒙皮矩阵**追加进快照的扁平数组（T1.4）
+    // 实例化网格：只登记对象条目（材质/世界变换），顶点由实例化 Pass 提供 ⇒ bInstanced=true
+    world.ForEach<InstancedMeshComponent>([&](he::Entity e, InstancedMeshComponent& im) {
+        const u32 id = static_cast<u32>(out.draws.size());
+        CollectObjectItem(e, im, sg.GetWorldMatrix(e), id, prev, out, /*bInstanced=*/true);
+    });
+    // 骨骼网格：除对象条目外，还要把**蒙皮矩阵**追加进快照的扁平数组（T1.4）；
+    // 顶点由蒙皮 Pass 提供 ⇒ bInstanced=true
     world.ForEach<SkeletalMeshComponent>([&](he::Entity e, SkeletalMeshComponent& sm) {
         const u32 before = static_cast<u32>(out.draws.size());
-        addPlain(e, sm);
+        const u32 id     = before;
+        CollectObjectItem(e, sm, sg.GetWorldMatrix(e), id, prev, out, /*bInstanced=*/true);
         if (out.draws.size() > before) {
             AppendSkinMatrices(out.draws.back(), sm, out);
         }

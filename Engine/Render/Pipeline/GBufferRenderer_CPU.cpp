@@ -62,8 +62,9 @@ void GBufferRenderer_CPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
     cmd->SetViewport({0, (float)h, (float)w, -(float)h, 0, 1});
     cmd->SetScissor({0, 0, w, h});
 
-    // SceneRenderer 准备所有绘制项（任务 24：Deferred 排除贴花卡片，改由 DecalPass 投影）
-    auto drawItems = ctx.sceneRenderer->Prepare(world, sg, camera, ctx.objectBuffer, ctx.excludeDecals);
+    // SceneRenderer 准备所有绘制项（阶段 1 §15.1 第②段：改吃快照，不再遍历世界；
+    // 贴花是否排除已在收集侧由 `SceneSnapshotObjectOptions` 决定 ⇒ 这里不再传 excludeDecals）
+    auto drawItems = ctx.sceneRenderer->Prepare(snapshot, camera, ctx.objectBuffer);
 
     // GPU 剔除过滤（Readback 上帧结果 → 过滤可见物体）
     // 仅 GPU Culling 启用且 visIndices 非空时才过滤，避免使用脏数据
@@ -121,9 +122,12 @@ void GBufferRenderer_CPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
         snprintf(label, sizeof(label), "GBuffer Obj#%u", di.objectIndex);
         cmd->SetDrawDebugLabel(label);
         cmd->SetPushConstants(0, sizeof(pc), &pc);
-        cmd->SetVertexBuffer(di.mesh->GetVertexBuffer().get(), 0);
-        cmd->SetIndexBuffer(di.mesh->GetIndexBuffer().get());
-        cmd->DrawIndexed(di.mesh->GetIndexCount());
+        // 顶点/索引缓冲按 `meshIndex` 从注册表取（第②段：`DrawItem` 不再持有组件指针）
+        const MeshRegistryEntry* me = ctx.meshRegistry ? ctx.meshRegistry->Find(di.meshIndex) : nullptr;
+        if (!me || !me->vertexBuffer || !me->indexBuffer) continue;
+        cmd->SetVertexBuffer(me->vertexBuffer, 0);
+        cmd->SetIndexBuffer(me->indexBuffer);
+        cmd->DrawIndexed(me->indexCount);
     }
 
     // ── 实例化网格（任务 25）：逐实例剔除 + 间接绘制 ──

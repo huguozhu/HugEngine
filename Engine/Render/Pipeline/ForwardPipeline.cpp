@@ -1060,9 +1060,9 @@ void ForwardPipeline::RenderScene(
     // 现拆成独立的 RunGPUCulling：RG 路径由 "GPU_Cull" compute pass 调用，非 RG 路径在
     // BeginHDRPass 之前调用，两条路径都不再落在 render pass 里。
 
-    // SceneRenderer 准备所有 draw items
-    auto allDrawItems = m_SceneRenderer->Prepare(world, sceneGraph, camera,
-                                                  m_ObjectBuffers[m_CurrentFrameSlot].get());
+    // SceneRenderer 准备所有 draw items（阶段 1 §15.1 第②段：改吃快照，不再遍历世界）
+    auto allDrawItems = m_SceneRenderer->Prepare(m_Snapshot, camera,
+                                                 m_ObjectBuffers[m_CurrentFrameSlot].get());
 
     // GPU 剔除后过滤：构建可见 draw 列表
     std::vector<DrawItem> filteredItems;
@@ -1233,13 +1233,12 @@ void ForwardPipeline::RenderScene(
             sm.bBonesDirty = false;
         }
 
-        // 定位对象条目（objectIndex → 材质数据）
+        // 定位对象条目（objectIndex → 材质数据）：按 meshIndex（整数）对齐
+        //（第②段：`DrawItem` 已无组件指针，兜底的地址比较随之删除）
         u32 objIndex = 0;
         bool found = false;
         for (auto& di : filteredItems) {
-            // E-3：同实例化分支 —— 优先 meshIndex，未注册时兜底地址比较
-        if ((sm.meshIndex != 0u && sm.meshIndex == di.meshIndex) ||
-            (sm.meshIndex == 0u && di.mesh == static_cast<he::MeshComponent*>(&sm))) { objIndex = di.objectIndex; found = true; break; }
+            if (sm.meshIndex != 0u && sm.meshIndex == di.meshIndex) { objIndex = di.objectIndex; found = true; break; }
         }
         if (!found) return;
 
@@ -1294,9 +1293,12 @@ void ForwardPipeline::RenderScene(
                     snprintf(label, sizeof(label), "Forward Obj#%u", di.objectIndex);
                     secCmd->SetDrawDebugLabel(label);
                     secCmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
-                    secCmd->SetVertexBuffer(di.mesh->GetVertexBuffer().get(), 0);
-                    secCmd->SetIndexBuffer(di.mesh->GetIndexBuffer().get());
-                    secCmd->DrawIndexed(di.mesh->GetIndexCount());
+                    // 顶点/索引缓冲按 `meshIndex` 查注册表（第②段：DrawItem 不再持有组件指针）
+                    const MeshRegistryEntry* me = m_MeshRegistry.Find(di.meshIndex);
+                    if (!me || !me->vertexBuffer || !me->indexBuffer) continue;
+                    secCmd->SetVertexBuffer(me->vertexBuffer, 0);
+                    secCmd->SetIndexBuffer(me->indexBuffer);
+                    secCmd->DrawIndexed(me->indexCount);
                 }
                 secCmd->End();
             });
@@ -1337,9 +1339,12 @@ void ForwardPipeline::RenderScene(
                 snprintf(label, sizeof(label), "Forward Obj#%u", di.objectIndex);
                 cmd->SetDrawDebugLabel(label);
                 cmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
-                cmd->SetVertexBuffer(di.mesh->GetVertexBuffer().get(), 0);
-                cmd->SetIndexBuffer(di.mesh->GetIndexBuffer().get());
-                cmd->DrawIndexed(di.mesh->GetIndexCount());
+                // 顶点/索引缓冲按 `meshIndex` 查注册表（第②段：DrawItem 不再持有组件指针）
+                const MeshRegistryEntry* me = m_MeshRegistry.Find(di.meshIndex);
+                if (!me || !me->vertexBuffer || !me->indexBuffer) continue;
+                cmd->SetVertexBuffer(me->vertexBuffer, 0);
+                cmd->SetIndexBuffer(me->indexBuffer);
+                cmd->DrawIndexed(me->indexCount);
                 drawCount++;
             }
         }
@@ -1347,9 +1352,11 @@ void ForwardPipeline::RenderScene(
 
     m_LastDrawCount = drawCount;
     m_LastTriCount  = 0;
-    // 三角形计数（粗略估算：每个 draw 平均 indexCount/3）
-    for (auto& di : filteredItems)
-        m_LastTriCount += di.mesh->GetIndexCount() / 3;
+    // 三角形计数（粗略估算：每个 draw 平均 indexCount/3）；索引数同样按 `meshIndex` 查注册表
+    for (auto& di : filteredItems) {
+        const MeshRegistryEntry* me = m_MeshRegistry.Find(di.meshIndex);
+        if (me) m_LastTriCount += me->indexCount / 3;
+    }
 
     // 任务 25：逐实例剔除统计（0 个走剔除时不覆盖，保留最后一次有效值）
     if (culledInstanceMeshes > 0) {

@@ -26,8 +26,8 @@ void GBufferRenderer_GPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
                                   const CameraData& camera) {
     // MeshBatcher::Build + FillGPUScene 已在 BuildFrameGraph 中完成（Upload 之前）
     // 上传 ObjectBuffer 并获取 DrawItem 列表（GPU 路径用不到但 CPU 回退需要）
-    // 任务 24：Deferred 排除贴花卡片（与 MeshBatcher/GPUScene 口径一致）
-    auto drawItems = ctx.sceneRenderer->Prepare(world, sg, camera, ctx.objectBuffer, ctx.excludeDecals);
+    // 阶段 1 §15.1 第②段：`Prepare` 改吃快照（贴花口径已在收集侧决定）
+    auto drawItems = ctx.sceneRenderer->Prepare(snapshot, camera, ctx.objectBuffer);
 
     u32 w = ctx.width, h = ctx.height;
 
@@ -139,9 +139,12 @@ void GBufferRenderer_GPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
             snprintf(label, sizeof(label), "GBuffer Obj#%u", di.objectIndex);
             cmd->SetDrawDebugLabel(label);
             cmd->SetPushConstants(0, sizeof(pc), &pc);
-            cmd->SetVertexBuffer(di.mesh->GetVertexBuffer().get(), 0);
-            cmd->SetIndexBuffer(di.mesh->GetIndexBuffer().get());
-            cmd->DrawIndexed(di.mesh->GetIndexCount());
+            // 顶点/索引缓冲按 `meshIndex` 从注册表取（第②段：`DrawItem` 不再持有组件指针）
+            const MeshRegistryEntry* me = ctx.meshRegistry ? ctx.meshRegistry->Find(di.meshIndex) : nullptr;
+            if (!me || !me->vertexBuffer || !me->indexBuffer) continue;
+            cmd->SetVertexBuffer(me->vertexBuffer, 0);
+            cmd->SetIndexBuffer(me->indexBuffer);
+            cmd->DrawIndexed(me->indexCount);
         }
 
         // ── 实例化网格（任务 25，与 CPU 模式/Forward 同一套机制）──
