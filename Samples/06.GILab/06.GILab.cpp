@@ -11,6 +11,7 @@
 #include <chrono>   // 步骤 37：CPU 侧帧时（判定 CPU 受限还是 GPU 受限）
 #include "Platform/Window.h"
 #include "RHI/RHI.h"
+#include "RHI/ThreadAffinity.h"   // T2.2：渲染线程启动钩子里认领 RHI 归属（GetThreadAffinity）
 #include "Pipeline/DeferredPipeline.h"
 #include "Pipeline/ForwardPipeline.h"
 #include "Pipeline/IRenderPipeline.h"
@@ -887,7 +888,13 @@ int main() {
     const bool strictRenderThread = std::getenv("HE_RENDER_THREAD_STRICT") != nullptr;
     if (strictRenderThread) {
         renderThread.SetSpinWaitUs(50);
-        HE_CORE_WARN("06.GILab：HE_RENDER_THREAD_STRICT=1 ⇒ 真起渲染线程（用于测量 T2.2 的待搬调用点）");
+        // 【T2.2 步骤 (a)】把 RHI 归属**转移**到渲染线程：RHI 侧断言读的是
+        // `rhi::ThreadAffinity`，而设备创建时它把拥有者记成了**创建设备的游戏线程** ⇒ 不认领的话
+        // 渲染线程一录制就违规（实测首条 = VulkanCommandList.cpp:278）。
+        // 认领必须在新线程里做（记录的是当前线程 id）⇒ 走渲染线程的启动钩子。
+        renderThread.SetThreadStartHook([] { he::rhi::GetThreadAffinity().Claim(); });
+        HE_CORE_WARN("06.GILab：HE_RENDER_THREAD_STRICT=1 ⇒ 真起渲染线程并把 RHI 归属认领到它"
+                     "（用于测量 T2.2 的待搬调用点）");
         renderThread.Start();
     }
     HE_CORE_INFO("06.GILab：渲染线程模式 = {}（{}）⇒ 每帧渲染{}经命令队列",

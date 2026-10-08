@@ -21,6 +21,10 @@ bool RenderThread::Start() {
         // 线程 id 必须由**新线程自己**登记（否则比较的是调用者）
         s_RenderThreadHash.store(std::hash<std::thread::id>{}(std::this_thread::get_id()) + 1u,
                                  std::memory_order_release);
+        // 【T2.2】启动钩子：在消费任何帧**之前**、于渲染线程上执行一次。
+        // 样例借此把 RHI 归属认领到渲染线程（`he::rhi::GetThreadAffinity().Claim()`）——
+        // 认领必须在新线程里做（记录的是当前线程 id），而本层保持 RHI-free ⇒ 由调用方注入。
+        if (m_StartHook) m_StartHook();
         ThreadMain();
     });
     return true;

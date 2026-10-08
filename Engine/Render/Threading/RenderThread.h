@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <functional>
 #include <thread>
 
 // ============================================================
@@ -39,6 +40,12 @@ public:
     /// 空闲自旋时长（微秒；0 = 不自旋，直接休眠）。与 `EngineConfig::renderThreadSpinWaitUs` 对应。
     void SetSpinWaitUs(u32 us) { m_SpinWaitUs.store(us, std::memory_order_relaxed); }
 
+    /// 线程启动钩子（T2.2）：在**渲染线程**上、进入消费循环之前调用一次。
+    /// 【为什么需要它】RHI 的归属（`he::rhi::ThreadAffinity`）按"当前线程"认领，而本层刻意保持
+    /// **RHI-free**（便于单测直接编译）⇒ 认领动作由调用方通过这个钩子注入（样例里一行
+    /// `GetThreadAffinity().Claim()`）。这也是将来 T2.6 初始化 `RenderThreadContext` 的挂点。
+    void SetThreadStartHook(std::function<void()> hook) { m_StartHook = std::move(hook); }
+
     /// 取出并执行**一帧**待处理命令；没有待处理帧时返回 false
     bool PumpOnce();
 
@@ -63,6 +70,7 @@ private:
     std::atomic<u32>    m_SpinWaitUs{0};
     u64                 m_ExecutedFrames   = 0;   // 仅渲染线程写（x64 上 u64 读写原子，统计用）
     u64                 m_ExecutedCommands = 0;
+    std::function<void()> m_StartHook;   // 渲染线程启动钩子（T2.2：由调用方注入 RHI 归属认领）
 
     /// 渲染线程 id 的哈希 + 1（0 = 无渲染线程/壳模式）。用哈希而不是 `atomic<thread::id>`：
     /// `std::thread::id` 的比较需要读一致快照，哈希成 `size_t` 后可用普通原子量。
