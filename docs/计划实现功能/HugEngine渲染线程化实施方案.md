@@ -586,9 +586,19 @@ private:
     单组件映射抽成模板 `CollectObjectItem<TComponent>` 以便单测（组件存储按精确类型分桶，
     假组件无法进入遍历）。`SnapshotDrawItem` 增加 `materialIndex`（≠ `object.materialID`）。
     实测：单测 **379 例 / 71666 断言全通过**。
-  - **T1.2c 待做**：材质参数（`GPUObjectData` 的非矩阵/非 AABB 字段）目前仍由 `SceneRenderer`
-    的 `FillObjectData(PBRMaterial)` 在**带视锥剔除的渲染侧遍历**里填 —— 需要把"剔除留在渲染线程、
-    只快照化输入"一并设计；`meshIndex`/间接绘制三元组由 MeshBatcher 在 Prepare 阶段填。
+  - **T1.2c 待做（已查明设计阻塞点，2026-09-24）**：材质参数（`GPUObjectData` 的非矩阵/非 AABB 字段）
+    目前仍由 `SceneRenderer::Prepare(world, sg, camera, objectBuffer, excludeDecals)` 在**带视锥剔除的
+    渲染侧遍历**里填。查清后有 3 个必须先定的问题：
+    ① **`SceneRenderer` 有自己的第二套遍历**，且与 `GPUScene::Collect`/`BuildObjects` **口径不一致**：
+    它额外包含 `SplineMeshComponent`（样条网格），而后者不包含 —— **新发现的第 5 处收集口径漂移**
+    （前四处见 `SceneSnapshotBuilder.h`：Rect 光、点光方向、聚光归一化、shadowRadius）；
+    ② 它的 DrawList 元素携带 **`MeshComponent*` 指针**，而快照**不允许带指针** ⇒ 需要先有一个
+    **mesh 注册表**（`meshIndex` ↔ 顶点/索引缓冲 + 材质路径），把"指针"换成索引；这也是 §4.2 里
+    `SnapshotDrawItem::meshId` 的隐含前提；
+    ③ 材质填充依赖 **5 条纹理路径字符串**（决定 `textureMask`）⇒ 快照化的更简做法是在**收集侧**就跑
+    `FillObjectData`（纯计算），把**算好的 `GPUObjectData` 字段**放进快照（`SnapshotDrawItem::object`
+    生来就是这个用途），而不是把字符串搬进快照。
+    结论：T1.2c 应先定 **mesh 注册表**，再谈材质快照化；在此之前 `SceneRenderer` 保持现状。
   - **T1.2b 待做**：物体收集（`GPUScene::Collect` 的遍历 + 材质参数 + 间接绘制参数），
     以及本任务退出判据要求的"与旧路径并行跑一帧、逐字段比对（`HE_SNAPSHOT_VERIFY`）" ——
     该判据在 T1.3 让管线消费快照时最自然（可直接对比 UBO/SSBO 字节）。
