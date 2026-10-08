@@ -616,7 +616,7 @@ private:
   - 实测（2026-09-24）：单测 **366 例 / 71530 断言全通过**（改前 362 / 71495）。
   - 实现细节留痕：`ShaderTypes.slang` 必须在 `he::render` 命名空间内包含（与
     `Pipeline/Material.h` 同一用法），否则 `float4` / `float4x4` 在全局作用域不可见。
-- [ ] T1.2 `SceneSnapshotBuilder`（集中现有 Collect 遍历）
+- [x] T1.2 `SceneSnapshotBuilder`（集中现有 Collect 遍历）—— ✅ 完成（光源/物体/环境/骨骼/粒子/天空盒/材质收集；详见 §9 正文与 §14 附录 E）
   - **T1.2a 已完成（光源，2026-09-24）**：`Engine/Render/Threading/SceneSnapshotBuilder.{h,cpp}` ——
     `BuildLights(world, sg, resolvers, snapshot)`，口径与 `CollectLights` 逐字段对齐
     （遍历顺序 方向光→点光→聚光、关闭跳过、`kGPUMaxLights` 截断、色温叠加、物理模式**负范围/`-1` 标记**、
@@ -705,7 +705,7 @@ private:
     ② 点光 `directionType.xyz`：Forward 写 (0,-1,0)、Deferred 留 0；
     ③ `PhysicalLight.h::KelvinToRGB` 的二次近似在 6500K 给出 (1, 0.46, 0)、2000K 给出 (1,0,1)，
        与黑体常识不符，疑似系数抄错（仅 `colorTemperature > 0` 时生效）——建议单独立项核查。
-- [ ] T1.3 `CollectLights` / `GPUScene::Collect` 改消费快照
+- [x] T1.3 `CollectLights` / `GPUScene::Collect` 改消费快照 —— ✅ 完成（三管线；旧遍历代码已删除，非并存）
   - **T1.3a 已完成（Deferred 光源，2026-09-24）**：`DeferredPipeline::CollectLights` 改走
     `SceneSnapshotBuilder::BuildLights` + **一次性**上传（旧实现每个光源 Map/Unmap 一次）；
     新增 `SceneSnapshotLightOptions` 口径开关，默认值 = Deferred 现行行为（迁移先保一致，
@@ -745,7 +745,7 @@ private:
     > 比较，并用冒烟转储粗筛。后续所有迁移沿用此法。
   - **T1.3b 待做**：Forward / PathTracing 的光源收集同样改走快照（各自带历史口径开关）；
     `GPUScene::Collect` 改消费快照（依赖 T1.2b 的物体收集）。
-- [ ] T1.4 骨骼/材质/Decal/粒子快照化
+- [ ] T1.4 骨骼/材质/Decal/粒子快照化 —— 🟡 骨骼 ✅ / 材质 ✅ / 粒子 ✅ / 环境 ✅ / 天空盒 ✅ / **Decal ⬜ 未做**
   - **起点（环境参数，2026-09-24）**：新增 `FrameSceneSnapshot::atmosphere`（xyz = 太阳方向、
     w = 浑浊度，与两个 PushConstant 的 `atmosphere` 逐字段一致）与
     `SceneSnapshotBuilder::BuildEnvironment`（找不到/未启用物理天空时复位为关闭，与旧行为逐字段一致）；
@@ -788,7 +788,7 @@ private:
     `Pipeline/PathTracingPipeline.h`(5)、`Pipeline/RTPass.cpp`(4)、`Pipeline/GBufferRenderer.h`(3)、
     `Pipeline/RTPass.h`(3)、`Shadow/CSMTechnique.{h,cpp}`（各 3）、`Pipeline/DeferredPipeline.cpp`(2)、
     `Pipeline/DeferredPipeline_FrameGraph.cpp`(2)、`Pipeline/ForwardPipeline_FrameGraph.cpp`(2)……
-- [ ] T2.1 `RenderThread` 实现（帧节奏 + 休眠策略）
+- [x] T2.1 `RenderThread` 实现（帧节奏 + 休眠策略）—— ✅ 完成（真起线程 + 归属判断 + 停止排空；4 例单测。cv 唤醒并入 T2.6）
 - [ ] T2.2 设备与交换链归渲染线程（Acquire/Present 迁移）
 - [ ] T2.3 `ResourceCreationService`（步 1 同步转发）
 - [ ] T2.4 样例循环改造（7 个样例）
