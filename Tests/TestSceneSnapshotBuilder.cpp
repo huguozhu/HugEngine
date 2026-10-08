@@ -470,6 +470,7 @@ TEST_CASE("SceneSnapshotBuilder：物体映射（与 GPUScene::Collect 的 FillO
     struct FakeComponent {
         u32        indexCount = 0;
         u32        materialID = 0;
+        u32      meshIndex  = 0;   // 附录 E：注册表索引（快照条目要透传）
         he::AABB   bounds;
         u32 GetIndexCount() const { return indexCount; }
         he::AABB GetBounds() const { return bounds; }
@@ -506,6 +507,7 @@ TEST_CASE("SceneSnapshotBuilder：物体映射的跳过与上一帧矩阵") {
     struct FakeComponent {
         u32      indexCount = 0;
         u32      materialID = 0;
+        u32      meshIndex  = 0;   // 附录 E：注册表索引（快照条目要透传）
         he::AABB bounds;
         u32 GetIndexCount() const { return indexCount; }
         he::AABB GetBounds() const { return bounds; }

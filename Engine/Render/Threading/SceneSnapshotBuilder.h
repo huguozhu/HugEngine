@@ -103,6 +103,9 @@ public:
         item.object.boundsMax = float4(worldBounds.max, 0.0f);
         item.object.materialID = comp.materialID;    // bindless 纹理基索引（着色器采样用）
         item.materialIndex     = comp.materialID;    // GPU 剔除/间接绘制路径的材质槽
+        // 渲染侧网格注册表索引（附录 E / E-2）：组件上的 `meshIndex` 由加载期注册时回填，
+        // 0 = 未注册 ⇒ 消费侧 `Find(0)` 返回空并跳过（可见化，而不是指错资源）。
+        item.meshIndex         = comp.meshIndex;
         item.objectID          = objectID;
         item.visibilityFlags   = 1u;                 // 与 `FillObj` 一致（"可见"，剔除在渲染线程做）
         // meshIndex / indexCount / firstIndex / vertexOffset 由 MeshBatcher 在 Prepare 阶段填充
