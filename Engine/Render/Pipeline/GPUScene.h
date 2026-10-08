@@ -4,6 +4,8 @@
 #include "Pipeline/Camera.h"
 #include "Math/Geometry.h"
 #include "RHI/RHI.h"
+// 阶段 1 T1.3b-3：收集改由快照承担（`SceneSnapshotBuilder`），本类只做"快照 → GPU 记录"。
+#include "Threading/FrameSceneSnapshot.h"
 #include <vector>
 #include <memory>
 
@@ -49,6 +51,30 @@ public:
     /// 从 World 收集所有可渲染物体的数据
     /// @param camera 当前帧相机（广告牌矩阵对齐相机用）
     void Collect(class World& world, class SceneGraph& sg, const CameraData& camera);
+
+    /// 阶段 1 T1.3b-3：从**快照**收集（收集逻辑已集中到 `SceneSnapshotBuilder`）。
+    /// 保留 `Collect(world, sg, camera)` 作为过渡签名：它内部构建快照再转发到这里 ——
+    /// 这样"收集口径"只有一份实现，而调用点（仍在渲染管线里）不必一次全改；
+    /// 阶段 2 的 T2.4 会让样例在游戏线程构建快照并直接交给管线，那时本函数就是唯一入口。
+    void CollectFromSnapshot(const FrameSceneSnapshot& snapshot);
+
+    /// 快照条目 → GPU 剔除记录的转换（与旧 `FillObj` 逐字段对齐）。
+    /// 【为什么内联在头文件】单测要能在**不链接 HugEngineRHI** 的前提下验证它与旧 `FillObj`
+    /// 逐位一致（`GPUScene.cpp` 会拉进设备接口的实现符号）。
+    [[nodiscard]] static GPUSceneObject MakeObjectRecord(const SnapshotDrawItem& item) {
+        GPUSceneObject o{};
+        o.localToWorld    = item.object.worldMatrix;   // 快照里已是世界矩阵
+        o.boundsMin       = item.object.boundsMin;     // 快照里已是**世界空间** AABB（变换在收集侧做过）
+        o.boundsMax       = item.object.boundsMax;
+        o.meshIndex       = item.meshIndex;            // 由 MeshBatcher 后填（收集阶段恒 0）
+        o.materialIndex   = item.materialIndex;
+        o.objectID        = item.objectID;
+        o.visibilityFlags = item.visibilityFlags;
+        o.indexCount      = item.indexCount;           // 同上：由 MeshBatcher 后填
+        o.firstIndex      = item.firstIndex;
+        o.vertexOffset    = item.vertexOffset;
+        return o;
+    }
 
     /// 任务 24：是否把贴花卡片排除在场景物体之外（Deferred 用 DecalPass 投影贴花）。
     /// **必须在首次 Collect 之前设置**：Collect 首次全量收集后走增量分支，

@@ -3,6 +3,8 @@
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
 #include "Scene/Transform.h"
+// 阶段 1 T1.3b-3：收集口径集中到快照构造器（本文件不再自己遍历 ECS 组件）
+#include "Threading/SceneSnapshotBuilder.h"
 #include "Scene/MeshComponent.h"
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
@@ -50,66 +52,44 @@ static void FillObj(GPUSceneObject& o, const float4x4& wm, const AABB& b, u32 id
 }
 
 void GPUScene::Collect(World& world, SceneGraph& sg, const CameraData& camera) {
-    m_DirtyIndices.clear();
+    // 阶段 1 T1.3b-3：**收集口径已集中到 `SceneSnapshotBuilder`**，本函数只做两件事：
+    // 构建快照（过渡期仍在管线里做）→ 转发给 `CollectFromSnapshot`。
+    // 这里用局部快照是安全的：`CollectFromSnapshot` 在本函数内同步消费完，不像帧图那样延后执行。
+    FrameSceneSnapshot snapshot;
+    SceneSnapshotObjectOptions options;
+    options.excludeDecals = m_ExcludeDecals;   // 与既有口径一致（Deferred 排除贴花）
+    SceneSnapshotBuilder::BuildObjects(world, sg, camera, options, nullptr, snapshot);
+    CollectFromSnapshot(snapshot);
+}
 
-    if (m_Objects.empty()) {
-        // 首次：全量收集
-        auto collect = [&](Entity e, auto& comp, const float4x4& wm, u32 matID) {
-            if (comp.GetIndexCount()==0) return;
-            GPUSceneObject o{};
-            FillObj(o,wm,comp.GetBounds().Transform(wm),(u32)m_Objects.size());
-            o.materialIndex=matID;
-            m_Objects.push_back(o);
-            m_CachedMatrices.push_back(wm);
-            m_DirtyIndices.push_back((u32)m_Objects.size()-1);
-        };
-        world.ForEach<MeshComponent>([&](Entity e, MeshComponent& mc){collect(e,mc,sg.GetWorldMatrix(e),mc.materialID);});
-        world.ForEach<CubeComponent>([&](Entity e, CubeComponent& cc){collect(e,cc,sg.GetWorldMatrix(e),0);});
-        world.ForEach<SphereComponent>([&](Entity e, SphereComponent& sc){collect(e,sc,sg.GetWorldMatrix(e),0);});
-        // 广告牌/3D 文字：矩阵对齐相机（每帧随相机变化，天然每帧 dirty）
-        auto collectBillboard = [&](Entity e, BillboardComponent& bb) {
-            float4x4 base = sg.GetWorldMatrix(e);
-            float4x4 wm = BillboardComponent::MakeBillboardMatrix(
-                float3(base[3]), camera.forward, camera.up, bb.size);
-            collect(e, bb, wm, bb.materialID);
-        };
-        world.ForEach<BillboardComponent>([&](Entity e, BillboardComponent& bb){ collectBillboard(e, bb); });
-        world.ForEach<TextRenderComponent>([&](Entity e, TextRenderComponent& tr){ collectBillboard(e, tr); });
-        // 任务 24：贴花由 DecalPass 投影到 GBuffer，不进场景物体列表（与 Prepare/MeshBatcher 口径一致）
-        if (!m_ExcludeDecals)
-            world.ForEach<DecalComponent>([&](Entity e, DecalComponent& dc){ collect(e, dc, sg.GetWorldMatrix(e), dc.materialID); });
-        world.ForEach<InstancedMeshComponent>([&](Entity e, InstancedMeshComponent& im){ collect(e, im, sg.GetWorldMatrix(e), im.materialID); });
-        world.ForEach<SkeletalMeshComponent>([&](Entity e, SkeletalMeshComponent& sm){ collect(e, sm, sg.GetWorldMatrix(e), sm.materialID); });
+void GPUScene::CollectFromSnapshot(const FrameSceneSnapshot& snapshot) {
+    m_DirtyIndices.clear();
+    const u32 count = static_cast<u32>(snapshot.draws.size());
+
+    if (m_Objects.size() != count) {
+        // 收集集合变化（物体增删/首次收集）：整表重建并全部标脏
+        m_Objects.clear();
+        m_CachedMatrices.clear();
+        m_Objects.reserve(count);
+        m_CachedMatrices.reserve(count);
+        for (u32 i = 0; i < count; ++i) {
+            m_Objects.push_back(MakeObjectRecord(snapshot.draws[i]));
+            m_CachedMatrices.push_back(snapshot.draws[i].object.worldMatrix);
+            m_DirtyIndices.push_back(i);
+        }
     } else {
-        // 增量：只更新变化的对象
-        u32 idx=0;
-        auto update = [&](Entity e, auto& comp, const float4x4& wm) {
-            if (comp.GetIndexCount()==0){idx++;return;}
-            if (idx>=m_Objects.size()) return;
-            if (wm!=m_CachedMatrices[idx]) {
-                FillObj(m_Objects[idx],wm,comp.GetBounds().Transform(wm),idx);
-                m_CachedMatrices[idx]=wm;
-                m_DirtyIndices.push_back(idx);
+        // 集合不变：只更新世界矩阵变化的条目（与旧增量分支同一口径：广告牌每帧随相机变化，
+        // 天然每帧 dirty）
+        for (u32 i = 0; i < count; ++i) {
+            const float4x4& wm = snapshot.draws[i].object.worldMatrix;
+            if (wm != m_CachedMatrices[i]) {
+                m_Objects[i] = MakeObjectRecord(snapshot.draws[i]);
+                m_CachedMatrices[i] = wm;
+                m_DirtyIndices.push_back(i);
             }
-            idx++;
-        };
-        world.ForEach<MeshComponent>([&](Entity e, MeshComponent& mc){update(e,mc,sg.GetWorldMatrix(e));});
-        world.ForEach<CubeComponent>([&](Entity e, CubeComponent& cc){update(e,cc,sg.GetWorldMatrix(e));});
-        world.ForEach<SphereComponent>([&](Entity e, SphereComponent& sc){update(e,sc,sg.GetWorldMatrix(e));});
-        auto updateBillboard = [&](Entity e, BillboardComponent& bb) {
-            float4x4 base = sg.GetWorldMatrix(e);
-            update(e, bb, BillboardComponent::MakeBillboardMatrix(
-                float3(base[3]), camera.forward, camera.up, bb.size));
-        };
-        world.ForEach<BillboardComponent>([&](Entity e, BillboardComponent& bb){ updateBillboard(e, bb); });
-        world.ForEach<TextRenderComponent>([&](Entity e, TextRenderComponent& tr){ updateBillboard(e, tr); });
-        // 排除口径必须与首次全量收集一致（否则 idx 错位）
-        if (!m_ExcludeDecals)
-            world.ForEach<DecalComponent>([&](Entity e, DecalComponent& dc){ update(e, dc, sg.GetWorldMatrix(e)); });
-        world.ForEach<InstancedMeshComponent>([&](Entity e, InstancedMeshComponent& im){ update(e, im, sg.GetWorldMatrix(e)); });
-        world.ForEach<SkeletalMeshComponent>([&](Entity e, SkeletalMeshComponent& sm){ update(e, sm, sg.GetWorldMatrix(e)); });
+        }
     }
-    m_ObjectCount=(u32)m_Objects.size();
+    m_ObjectCount = static_cast<u32>(m_Objects.size());
 }
 
 void GPUScene::Upload(rhi::IRHIDevice* device) {

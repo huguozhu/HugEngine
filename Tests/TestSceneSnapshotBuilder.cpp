@@ -12,6 +12,7 @@
 // ============================================================
 #include "Threading/SceneSnapshotBuilder.h"
 
+#include "Pipeline/GPUScene.h"        // GPUSceneObject + MakeObjectRecord（只用到静态转换，不需要链接 RHI）
 #include "Pipeline/PhysicalLight.h"   // kPhysicalLightExposure（与收集口径同源）
 #include "Scene/LightComponent.h"
 #include "Scene/SceneGraph.h"
@@ -549,6 +550,55 @@ TEST_CASE("SceneSnapshotBuilder：空世界的物体收集为 0（遍历入口�
     const u32 n = SceneSnapshotBuilder::BuildObjects(lw.world, lw.sg, CameraData{}, {}, nullptr, snap);
     CHECK(n == 0u);
     CHECK(snap.draws.empty());
+}
+
+TEST_CASE("GPUScene::MakeObjectRecord：与旧 FillObj 逐位一致（迁移钉子）") {
+    // 旧 `FillObj(o, wm, b, idx)` 的逐行转写（`GPUScene.cpp` 里那份已被快照取代）
+    auto fillObjReference = [](GPUSceneObject& o, const float4x4& wm, const he::AABB& b, u32 idx) {
+        o.localToWorld = wm;
+        o.boundsMin = float4(b.min, 0);
+        o.boundsMax = float4(b.max, 0);
+        o.objectID = idx;
+        o.visibilityFlags = 1;
+        o.meshIndex = 0;
+        o.indexCount = 0;
+        o.firstIndex = 0;
+        o.vertexOffset = 0;
+    };
+
+    SnapshotDrawItem item;
+    item.object.worldMatrix = glm::translate(float4x4(1.0f), float3(3.0f, -2.0f, 7.0f));
+    item.object.boundsMin   = float4(-1.0f, -2.0f, -3.0f, 0.0f);
+    item.object.boundsMax   = float4(1.0f, 2.0f, 3.0f, 0.0f);
+    item.objectID           = 4u;
+    item.visibilityFlags    = 1u;
+    item.materialIndex      = 9u;
+    item.meshIndex          = 0u;    // 收集阶段恒 0（由 MeshBatcher 后填）⇒ 可与旧路径逐位对比
+
+    const GPUSceneObject fromSnapshot = GPUScene::MakeObjectRecord(item);
+
+    GPUSceneObject reference{};
+    const he::AABB worldBounds{float3(-1.0f, -2.0f, -3.0f), float3(1.0f, 2.0f, 3.0f)};
+    fillObjReference(reference, item.object.worldMatrix, worldBounds, item.objectID);
+    reference.materialIndex = item.materialIndex;    // 旧路径在 FillObj 之后单独设它
+
+    CHECK(std::memcmp(&fromSnapshot, &reference, sizeof(GPUSceneObject)) == 0);
+
+    // MeshBatcher 后填的三个字段必须能透传（这是快照相对旧路径新增的能力）
+    SnapshotDrawItem batched = item;
+    batched.meshIndex    = 3u;
+    batched.indexCount   = 36u;
+    batched.firstIndex   = 72u;
+    batched.vertexOffset = 12;
+    const GPUSceneObject fromBatched = GPUScene::MakeObjectRecord(batched);
+    CHECK(fromBatched.meshIndex == 3u);
+    CHECK(fromBatched.indexCount == 36u);
+    CHECK(fromBatched.firstIndex == 72u);
+    CHECK(fromBatched.vertexOffset == 12);
+}
+
+TEST_CASE("GPUSceneObject：布局必须与着色器 std430 一致（128 字节）") {
+    CHECK(sizeof(GPUSceneObject) == 128u);
 }
 
 TEST_CASE("SceneSnapshotBuilder：逐帧复用不残留上一帧光源") {
