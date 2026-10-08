@@ -133,7 +133,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
 
     // --- 快照装配器（第③段第 4 批）：配置本管线的口径（贴花改由 `DecalPass` 投影 ⇒ 排除贴花卡片）---
     {
-        m_Assembler.Bind(&m_Snapshot, &m_MeshRegistry);
+        m_Assembler.Bind(&SnapBuf(), &m_MeshRegistry);
         FrameSnapshotAssemblySettings as;
         as.objectOptions.excludeDecals = m_ExcludeDecalCards;   // 每帧在 Render 里再同步一次
         as.buildDecals                 = true;                  // DecalPass 读快照

@@ -154,7 +154,7 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera)
                 // 这条此前只加在 PrepareGI（非 RG 路径）里，RG 路径漏了 —— 同一个坑两处。
                 m_RSM->SetLightBuffer(GetCurrentLightBuffer());
                 // 【第③段第 3 批】几何改从快照取 + 按 meshIndex 查注册表（不再需要捕获 world/sg）
-                m_RSM->RenderRSMPass(c, m_Snapshot, m_MeshRegistry);
+                m_RSM->RenderRSMPass(c, SnapBuf(), m_MeshRegistry);
             });
     }
 

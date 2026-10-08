@@ -106,7 +106,7 @@ bool PathTracingPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 hei
 
     // --- 快照装配器（第③段第 4 批）：配置本管线的口径 ---
     {
-        m_Assembler.Bind(&m_Snapshot, &m_MeshRegistry);
+        m_Assembler.Bind(&SnapBuf(), &m_MeshRegistry);
         FrameSnapshotAssemblySettings as;
         as.buildParticles = true;                       // 粒子模拟读快照
         as.buildDecals    = false;                      // PT 不走 DecalPass
