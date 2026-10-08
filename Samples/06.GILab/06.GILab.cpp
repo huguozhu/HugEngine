@@ -918,13 +918,24 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
     // 【T2.2 步骤 (b)】一帧两条命令的统一交接：模式 0 直接在本线程执行（此时本线程就是渲染
     // 线程）；模式 1/2 经队列 + **严格握手**（`SubmitAndWait`）⇒ 游戏线程在渲染线程工作期间
     // 阻塞，所以命令里 `[&]` 捕获的帧内局部量不会被并发改写（T2.6 会换成类型化载荷 + cv 唤醒）。
-    auto submitRender = [&](auto&& fn) {
+    // 【T2.4 步骤 (b)：去掉每帧的第二次握手】`waitForCompletion = false` 时**只发布不等待** ——
+    // 真线程模式下渲染线程按 FIFO 消费，所以"下一帧的命令 1"必然在"本帧的命令 2"之后执行；
+    // 于是游戏线程**不必**在命令 2 之后等待，可以直接去准备下一帧（输入/相机/装配快照），
+    // 与渲染线程执行本帧命令 2（ImGui 录制 + Submit + Present）**重叠**。
+    // 帧内资源仍安全：命令 2 不读快照，而同一份 `cmdList` 由 FIFO 保证了先来后到。
+    u64 lastAsyncFrame = UINT64_MAX;
+    auto submitRender = [&](auto&& fn, bool waitForCompletion = true) {
         if (useRenderQueue) {
             renderQueue.BeginFrame();
             renderQueue.Enqueue([&](render::RenderThreadContext&) { fn(); });
-            bool timedOut = false;
-            frameScheduler.SubmitAndWait(timedOut);
-            if (timedOut) HE_CORE_WARN("06.GILab：等待本帧渲染命令完成超时");
+            if (waitForCompletion) {
+                bool timedOut = false;
+                frameScheduler.SubmitAndWait(timedOut);
+                if (timedOut) HE_CORE_WARN("06.GILab：等待本帧渲染命令完成超时");
+            } else {
+                // 只发布：真线程模式下由渲染线程执行；壳模式下 SubmitAndPump 会就地执行并回收
+                lastAsyncFrame = frameScheduler.SubmitAndPump();
+            }
         } else {
             fn();
         }
@@ -1863,6 +1874,15 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
                 s_accMs += (double)deltaTime * 1000.0;
                 s_accCpuMs += cpuMs;
                 ++s_n;
+                // 【测量确定性】转储/读数之前先把在飞的"命令 2"等掉：流水线化后它可能还没做完，
+                // 否则读回的是"少一帧"的状态（表现为转储差异与 pass/VUID 计数偏移）。
+                if (useRenderQueue && lastAsyncFrame != UINT64_MAX) {
+                    // 【必须有超时】这是诊断/转储路径，不是背压点：无界等待会在"该帧因故未被回收"时
+                    // 永久挂住（实测出现过一次 300 秒未退出）。超时只告警、继续转储。
+                    if (!renderQueue.WaitFrameRetired(lastAsyncFrame, 5000u))
+                        HE_CORE_WARN("06.GILab：转储前等待在飞渲染命令超时（帧 {}）", lastAsyncFrame);
+                    lastAsyncFrame = UINT64_MAX;
+                }
                 if (g_DumpGI && s_n >= 120u) {
                     const double wallMs = s_accMs / (double)s_n;
                     const double cm     = s_accCpuMs / (double)s_n;
@@ -1885,7 +1905,8 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
                     s_n = 0;
                 }
             }        };
-        submitRender(recordUiAndPresent);
+        // 命令 2 只发布：游戏线程随即进入下一帧的准备（与渲染线程重叠）
+        submitRender(recordUiAndPresent, /*waitForCompletion=*/false);
 
 
     }
