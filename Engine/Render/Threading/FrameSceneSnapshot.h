@@ -57,6 +57,12 @@ struct SnapshotDrawItem {
     /// 【与 `object.materialID` 不是一回事】后者是 bindless 纹理数组的**基索引**（着色器用它采样纹理），
     /// 前者是 GPU 剔除/间接绘制路径里的材质槽。两条路径都要，故都留在快照里。
     u32 materialIndex = 0;
+
+    /// 蒙皮矩阵在 `FrameSceneSnapshot::skinMatrices` 里的**切片**（仅骨骼网格非 0）。
+    /// 【为什么用扁平数组 + 偏移】快照里不放容器嵌套，渲染线程按 `[offset, offset+count)` 切片即可；
+    /// 这也是 §4.2 里 `skinMatrices` 的设计意图（替代"读组件拿骨骼矩阵"）。
+    u32 skinMatrixOffset = 0;
+    u32 skinMatrixCount  = 0;
 };
 
 // 【布局钉子】物体数据必须能整块拷贝、且 16B 对齐（std430 要求）

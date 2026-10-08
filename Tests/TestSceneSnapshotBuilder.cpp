@@ -16,6 +16,7 @@
 #include "Pipeline/PhysicalLight.h"   // kPhysicalLightExposure（与收集口径同源）
 #include "Scene/LightComponent.h"
 #include "Scene/PhysicalSkyComponent.h"   // 环境（太阳方向/浑浊度）进快照的用例
+#include "Scene/SkeletalMeshComponent.h"  // 蒙皮矩阵进快照的用例
 #include "Scene/SceneGraph.h"
 #include "Scene/Transform.h"
 #include "Scene/World.h"
@@ -634,6 +635,37 @@ TEST_CASE("SceneSnapshotBuilder：环境（太阳方向 + 浑浊度）进快照"
         CHECK_FALSE(SceneSnapshotBuilder::BuildEnvironment(lw.world, snap));
         CHECK(snap.atmosphere.w == 0.0f);
     }
+}
+
+TEST_CASE("SceneSnapshotBuilder：骨骼矩阵进快照的扁平数组（T1.4）") {
+    FrameSceneSnapshot snap;
+    he::SkeletalMeshComponent first;
+    he::SkeletalMeshComponent second;
+
+    first.boneMatrices  = {float4x4(1.0f), float4x4(2.0f)};
+    second.boneMatrices = {float4x4(3.0f), float4x4(4.0f), float4x4(5.0f)};
+
+    SnapshotDrawItem a{};
+    SnapshotDrawItem b{};
+    SceneSnapshotBuilder::AppendSkinMatrices(a, first, snap);
+    SceneSnapshotBuilder::AppendSkinMatrices(b, second, snap);
+
+    CHECK(a.skinMatrixOffset == 0u);
+    CHECK(a.skinMatrixCount == 2u);
+    CHECK(b.skinMatrixOffset == 2u);                 // 第二段紧接第一段（不覆盖）
+    CHECK(b.skinMatrixCount == 3u);
+    REQUIRE(snap.skinMatrices.size() == 5u);
+    CHECK(snap.skinMatrices[0][0][0] == 1.0f);
+    CHECK(snap.skinMatrices[2][0][0] == 3.0f);       // b 的第一段
+    CHECK(snap.skinMatrices[4][0][0] == 5.0f);
+
+    // 无骨骼的网格：切片为空，且不污染共享数组
+    FrameSceneSnapshot snap2;
+    he::SkeletalMeshComponent empty;
+    SnapshotDrawItem c{};
+    SceneSnapshotBuilder::AppendSkinMatrices(c, empty, snap2);
+    CHECK(c.skinMatrixCount == 0u);
+    CHECK(snap2.skinMatrices.empty());
 }
 
 TEST_CASE("SceneSnapshotBuilder：逐帧复用不残留上一帧光源") {

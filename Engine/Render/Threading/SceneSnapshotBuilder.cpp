@@ -149,9 +149,23 @@ u32 SceneSnapshotBuilder::BuildObjects(he::World& world, he::SceneGraph& sg, con
         world.ForEach<DecalComponent>([&](he::Entity e, DecalComponent& dc) { addPlain(e, dc); });
     }
     world.ForEach<InstancedMeshComponent>([&](he::Entity e, InstancedMeshComponent& im) { addPlain(e, im); });
-    world.ForEach<SkeletalMeshComponent>([&](he::Entity e, SkeletalMeshComponent& sm) { addPlain(e, sm); });
+    // 骨骼网格：除对象条目外，还要把**蒙皮矩阵**追加进快照的扁平数组（T1.4）
+    world.ForEach<SkeletalMeshComponent>([&](he::Entity e, SkeletalMeshComponent& sm) {
+        const u32 before = static_cast<u32>(out.draws.size());
+        addPlain(e, sm);
+        if (out.draws.size() > before) {
+            AppendSkinMatrices(out.draws.back(), sm, out);
+        }
+    });
 
     return static_cast<u32>(out.draws.size());
+}
+
+void SceneSnapshotBuilder::AppendSkinMatrices(SnapshotDrawItem& item, const he::SkeletalMeshComponent& comp,
+                                             FrameSceneSnapshot& out) {
+    item.skinMatrixOffset = static_cast<u32>(out.skinMatrices.size());
+    item.skinMatrixCount  = static_cast<u32>(comp.boneMatrices.size());
+    out.skinMatrices.insert(out.skinMatrices.end(), comp.boneMatrices.begin(), comp.boneMatrices.end());
 }
 
 bool SceneSnapshotBuilder::BuildEnvironment(he::World& world, FrameSceneSnapshot& out) {

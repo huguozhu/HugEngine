@@ -8,6 +8,7 @@
 namespace he {
 class World;
 class SceneGraph;
+class SkeletalMeshComponent;   // 蒙皮矩阵的收集入口（实现里才需要完整类型）
 } // namespace he
 
 // ============================================================
@@ -121,6 +122,16 @@ public:
     static u32 BuildObjects(he::World& world, he::SceneGraph& sg, const CameraData& camera,
                             const SceneSnapshotObjectOptions& options,
                             const FrameSceneSnapshot* prev, FrameSceneSnapshot& out);
+
+    // ── 蒙皮（T1.4：骨骼矩阵）────────────────────────────────────
+
+    /// 把骨骼网格的**蒙皮矩阵**追加到快照的扁平数组，并给该 draw item 记下切片。
+    /// 【数据来源】`SkeletalMeshComponent::boneMatrices`（CPU 侧，= world × inverseBind，正是 GPU SSBO
+    /// 需要的形态）；渲染侧因此不必再遍历组件去取它。
+    /// 【为什么单列一个函数】`CollectObjectItem` 是"单组件 → 单条目"的纯映射，而蒙皮要写**共享的**
+    /// 扁平数组、还要回填条目的切片 ⇒ 分成两步，且这一步可以单独单测（不需要网格索引数据）。
+    static void AppendSkinMatrices(SnapshotDrawItem& item, const he::SkeletalMeshComponent& comp,
+                                   FrameSceneSnapshot& out);
 
     // ── 环境（T1.4 起）────────────────────────────────────────────
 
