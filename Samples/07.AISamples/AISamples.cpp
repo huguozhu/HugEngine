@@ -10,6 +10,8 @@
 #include "Core/Engine.h"
 #include "Platform/Window.h"
 #include "RHI/RHI.h"
+#include "RHI/ThreadAffinity.h"      // T2.4：渲染线程启动/停止钩子里认领与撤销 RHI 归属
+#include "Threading/RenderThread.h"  // T2.4：命令队列 + 渲染线程 + 帧票据（严格握手）
 #include "Pipeline/ForwardPipeline.h"
 #include "SceneRenderer.h"
 #include "Pipeline/CameraController.h"
@@ -125,7 +127,37 @@ int main() {
         camCtrl.SetAspectRatio((float)w, (float)h);
     });
 
-    // --- 6. 主循环 ---
+    // --- 6. 渲染线程化（T2.4）：整帧 RHI 交给渲染线程，游戏线程只做输入/相机/装配快照/UI ---
+    // 【交接形态】一帧两条命令：① Acquire + 录制（管线 + 后处理 + BackBuffer pass）；
+    // ② ImGui 的**录制**（draw data）+ End + Submit + Present。控件（CPU 侧）留在游戏线程，
+    // 仍位于两条命令之间 —— 与改动前的帧内顺序一致。
+    render::RenderCommandQueue renderQueue(rhi::kMaxFramesInFlight);
+    render::RenderThread       renderThread(renderQueue);
+    render::FrameScheduler     frameScheduler(renderQueue, renderThread);
+    const bool                 useRenderQueue = he::UsesRenderThread();
+    const bool                 forceShell = std::getenv("HE_RENDER_THREAD_FORCE_SHELL") != nullptr;
+    if (useRenderQueue && !forceShell) {
+        renderThread.SetSpinWaitUs(50);
+        // RHI 归属：启动时认领给渲染线程、停止时撤销（认领必须在新线程里做 ⇒ 走启动钩子）
+        renderThread.SetThreadStartHook([] { he::rhi::GetThreadAffinity().Claim(); });
+        renderThread.SetThreadStopHook([] { he::rhi::GetThreadAffinity().Release(); });
+        HE_CORE_INFO("[AISamples] 已起真渲染线程（整帧 RHI 归它；游戏线程按帧严格握手等待）");
+        renderThread.Start();
+    }
+    // 模式 0 直接在本线程执行（此时本线程就是渲染线程）；模式 1/2 经队列 + 严格握手
+    auto submitRender = [&](auto&& fn) {
+        if (useRenderQueue) {
+            renderQueue.BeginFrame();
+            renderQueue.Enqueue([&](render::RenderThreadContext&) { fn(); });
+            bool timedOut = false;
+            frameScheduler.SubmitAndWait(timedOut);
+            if (timedOut) HE_CORE_WARN("[AISamples] 等待本帧渲染命令完成超时");
+        } else {
+            fn();
+        }
+    };
+
+    // --- 7. 主循环 ---
     f64 lastTime = glfwGetTime();
     while (!engine.GetWindow()->ShouldClose()) {
         f64 now = glfwGetTime();
@@ -133,7 +165,7 @@ int main() {
         lastTime = now;
 
         engine.GetWindow()->PollEvents();
-        if (!swapchain->AcquireNextImage()) continue;
+        // 【T2.4】AcquireNextImage 已移入渲染命令（命令 1）—— 交换链归属在渲染线程
 
         // 相机控制（WASD + 右键）
         bool mouseDown = glfwGetMouseButton(glfwWin, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
@@ -166,14 +198,14 @@ int main() {
         IFeature* cur = features[currentFeature].get();
         cur->Update(dt);
 
-        // 渲染（当前功能的 World，经共享管线）
-        rhi::Format backFmt = swapchain->GetColorFormat();
-        cmdList->Begin();
+        // ---- 游戏线程：帧前准备（相机/装配快照/阴影收集；都不碰 RHI）----
+        rhi::Format backFmt = swapchain->GetColorFormat();   // 只读查询，不涉及归属
         pipeline.NextFrame();
-
         World* fWorld = cur->GetWorld();
         SceneGraph* fSG = cur->GetSceneGraph();
-        if (cur->NeedsRender3D() && fWorld && fSG) {
+        const bool needs3D = cur->NeedsRender3D() && fWorld && fSG;
+        render::CameraData frameCamera = camCtrl.GetCamera();
+        if (needs3D) {
             auto* shadowSys = pipeline.GetShadowSystem();
             shadowSys->SetRenderResources(
                 pipeline.GetCurrentShadowObjectBuffer(),
@@ -181,12 +213,10 @@ int main() {
                 pipeline.GetCurrentDescSet());
             // 帧相机解析：LLM 生成的场景含主相机实体（Camera 组件 isMain=true）时优先使用，
             // 否则回退自由相机 CameraController（S0.4 主相机接入）
-            // 第③段第 4 批：场景查询在调用方（渲染模块的 ResolveFrameCamera 已不再收 World）
             he::CameraComponent* mainCam = fWorld->GetPrimaryCamera();
             he::TransformComponent* mainCamXform =
                 mainCam ? fWorld->GetComponent<he::TransformComponent>(mainCam->GetEntity()) : nullptr;
-            render::CameraData frameCamera =
-                render::ResolveFrameCamera(mainCam, mainCamXform, camCtrl.GetCamera());
+            frameCamera = render::ResolveFrameCamera(mainCam, mainCamXform, camCtrl.GetCamera());
             render::SubsystemContext shadowCtx;
             shadowCtx.world = fWorld;
             shadowCtx.sceneGraph = fSG;
@@ -201,18 +231,32 @@ int main() {
             pipeline.GetFrameAssembler().ResolveLightShadowIndices(
                 [&](he::Entity le) { return shadowSys->GetShadowIndex(le); });
             pipeline.GetFrameAssembler().ReserveOnce();
-            pipeline.Render(cmdList.get(), pipeline.GetFrameSnapshot(), frameCamera);
-            // pass 级调试标记：BackBuffer 合成（ToneMap + ImGui），RenderDoc 可识别
-            cmdList->BeginDebugLabel("ToneMap + ImGui (BackBuffer)");
-            cmdList->BeginRenderPass(1, backFmt);
-            pipeline.RenderToneMapPass(cmdList.get());
-        } else {
-            // 无 3D 场景：仅 ImGui 面板（用 LoadOp::Load 保留背景色）
-            cmdList->BeginDebugLabel("ImGui Only (BackBuffer)");
-            cmdList->BeginRenderPass(1, backFmt, rhi::Format::Unknown, nullptr, rhi::LoadOp::Clear);
         }
 
-        // ImGui：顶部功能切换 TabBar + 当前功能面板
+        // ---- 命令 1：Acquire + 录制（管线 → 后处理 → BackBuffer pass 开始）----
+        bool frameAborted = false;
+        auto recordScene = [&]() {
+            if (!swapchain->AcquireNextImage()) {
+                frameAborted = true;   // 命令可能在渲染线程跑 ⇒ 用标志代替 while 的 continue
+                return;
+            }
+            cmdList->Begin();
+            if (needs3D) {
+                pipeline.Render(cmdList.get(), pipeline.GetFrameSnapshot(), frameCamera);
+                // pass 级调试标记：BackBuffer 合成（ToneMap + ImGui），RenderDoc 可识别
+                cmdList->BeginDebugLabel("ToneMap + ImGui (BackBuffer)");
+                cmdList->BeginRenderPass(1, backFmt);
+                pipeline.RenderToneMapPass(cmdList.get());
+            } else {
+                // 无 3D 场景：仅 ImGui 面板（用 LoadOp::Load 保留背景色）
+                cmdList->BeginDebugLabel("ImGui Only (BackBuffer)");
+                cmdList->BeginRenderPass(1, backFmt, rhi::Format::Unknown, nullptr, rhi::LoadOp::Clear);
+            }
+        };
+        submitRender(recordScene);
+        if (frameAborted) continue;   // Acquire 失败：跳过本帧剩余部分
+
+        // ImGui：顶部功能切换 TabBar + 当前功能面板（CPU 侧，游戏线程）
         imgui.BeginFrame();
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
         ImGui::SetNextWindowBgAlpha(0.5f);
@@ -240,14 +284,21 @@ int main() {
 
         cur->RenderUI();   // 当前功能面板
 
-        imgui.EndFrame(cmdList.get());
-        cmdList->EndDebugLabel();   // 闭合 BackBuffer pass 级标记
-        cmdList->EndRenderPass();
-        cmdList->End();
-
-        device->Submit(cmdList.get());
-        swapchain->Present(true);
+        // ---- 命令 2：ImGui 录制 + End + Submit + Present ----
+        auto recordUiAndPresent = [&]() {
+            imgui.EndFrame(cmdList.get());
+            cmdList->EndDebugLabel();   // 闭合 BackBuffer pass 级标记
+            cmdList->EndRenderPass();
+            cmdList->End();
+            device->Submit(cmdList.get());
+            swapchain->Present(true);
+        };
+        submitRender(recordUiAndPresent);
     }
+
+    // 【T2.4】退出前停渲染线程并撤销 RHI 归属认领：收尾期的 WaitIdle/设备销毁仍在游戏线程
+    renderThread.Stop();
+    he::rhi::GetThreadAffinity().Release();
 
     imgui.Shutdown();
     device->WaitIdle();
