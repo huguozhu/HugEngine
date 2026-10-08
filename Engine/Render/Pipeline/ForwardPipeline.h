@@ -133,7 +133,7 @@ public:
 
 private:
     void CollectLights(PushConstantData& pc, he::World& world, he::SceneGraph& sg, const CameraData& camera);
-    void UploadMaterialBindless(he::World& world);  // 去重收集场景材质 → 写入 bindless 材质 SSBO 并注册（须在 heap->Flush() 前调用）
+    void UploadMaterialBindless();  // 从**快照**取已去重的材质数组 → 写入 bindless 材质 SSBO 并注册（须在 heap->Flush() 前调用）
     void UploadLightBuffer();
     void UpdateIBLBindings(GI_IBL* gi);
     void UpdateRSMBindings();
