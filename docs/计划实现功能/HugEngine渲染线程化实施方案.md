@@ -589,6 +589,21 @@ private:
     ③ `PhysicalLight.h::KelvinToRGB` 的二次近似在 6500K 给出 (1, 0.46, 0)、2000K 给出 (1,0,1)，
        与黑体常识不符，疑似系数抄错（仅 `colorTemperature > 0` 时生效）——建议单独立项核查。
 - [ ] T1.3 `CollectLights` / `GPUScene::Collect` 改消费快照
+  - **T1.3a 已完成（Deferred 光源，2026-09-24）**：`DeferredPipeline::CollectLights` 改走
+    `SceneSnapshotBuilder::BuildLights` + **一次性**上传（旧实现每个光源 Map/Unmap 一次）；
+    新增 `SceneSnapshotLightOptions` 口径开关，默认值 = Deferred 现行行为（迁移先保一致，
+    "统一两条管线的口径"留作另一次可单独验证/回退的改动）。
+    等价性判据：单测把**改动前的内联逻辑逐行转写**为参考实现，用覆盖全部分支的场景
+    逐元素 `memcmp` 比较 ⇒ **逐位一致**。
+  - **重要实测（影响本方案的验收口径）**：当前构建下 `06.GILab` **同一二进制两趟**、
+    即使带 `HE_LUMEN_PROBE_FILTER=off`，也差约 **4.5k 像素**（`hdr` 719 px / maxULP 21 /
+    meanAbs 5.9e-8；`lumen_irradiance` 764 px / maxULP 552）⇒ 本方案里"逐像素一致"这类判据
+    在**单条收集路径迁移**的尺度上不可判定（本次改动与基线的 4574 px 差异正落在该噪声底噪之内）。
+    根因与画质线登记的「Lumen 屏幕探针逐趟不确定」同源（根因已定位为 mesh 级 SDF 泛洪的**就地**
+    读-写竞争；修复曾以 `f6566b6` 提交后按要求回退，补丁留在 `build/verify/jfa_only.patch`）。
+    **在此之前，迁移类改动一律用"参考实现 + 逐位比较"的单元级判据**，全帧转储只用于粗筛并如实标注噪声。
+  - **T1.3b 待做**：Forward / PathTracing 的光源收集同样改走快照（各自带历史口径开关）；
+    `GPUScene::Collect` 改消费快照（依赖 T1.2b 的物体收集）。
 - [ ] T1.4 骨骼/材质/Decal/粒子快照化
 - [ ] T1.5 渲染期移除 World/SceneGraph 引用（grep 断言）
 - [ ] T2.1 `RenderThread` 实现（帧节奏 + 休眠策略）
