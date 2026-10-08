@@ -93,10 +93,12 @@ public:
     static void CollectObjectItem(he::Entity entity, TComponent& comp, const float4x4& worldMatrix,
                                   u32 objectID, const FrameSceneSnapshot* prev,
                                   FrameSceneSnapshot& out) {
-        (void)entity;
         if (comp.GetIndexCount() == 0u) return;      // 旧路径：无索引的组件不进场景物体列表
 
         SnapshotDrawItem item{};
+        // 来源实体 id（附录 E / E-2②）：渲染侧逐实体状态机（骨骼缓冲的脏标记/容量/退役队列）
+        // 靠它从快照条目找回对应状态 ⇒ "矩阵走快照、生命周期留渲染侧"才成立。
+        item.sourceEntity = entity.id;
         item.object.worldMatrix = worldMatrix;
         const he::AABB worldBounds = comp.GetBounds().Transform(worldMatrix);
         item.object.boundsMin = float4(worldBounds.min, 0.0f);

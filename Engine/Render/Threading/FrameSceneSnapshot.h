@@ -48,6 +48,11 @@ struct SnapshotDrawItem {
     u32 meshIndex = 0;
     /// 场景物体唯一 ID（调试、剔除统计、与 GPU Culling 的 objectID 对应）
     u32 objectID = 0;
+    /// **来源实体 id**（`he::Entity::id`）。渲染侧仍有少量"逐实体"的状态机（骨骼缓冲的
+    /// 脏标记/容量/退役队列、动画驱动的重建等），它们需要"从快照条目找回对应的实体状态"
+    /// —— 这就是 E-2② 能做到"矩阵走快照、生命周期留渲染侧"的前提。
+    /// 【注意】它不是指针，交接后只读 ✓（与"快照不放指针"不冲突）。
+    u64 sourceEntity = 0;
     /// 可见性/实例化位标记（与 `GPUSceneObject::visibilityFlags` 同源）
     u32 visibilityFlags = 0;
 

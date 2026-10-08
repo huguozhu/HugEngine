@@ -498,6 +498,7 @@ TEST_CASE("SceneSnapshotBuilder：物体映射（与 GPUScene::Collect 的 FillO
     CHECK(item.object.boundsMin.y == doctest::Approx(-2.0f));
     CHECK(item.materialIndex == 12u);
     CHECK(item.meshIndex == 5u);                   // 附录 E：组件上的注册表索引必须透传（E-2② 靠它取缓冲）
+    CHECK(item.sourceEntity == 1u);                // 来源实体 id：渲染侧逐实体状态机靠它找回状态（E-2②）
     CHECK(item.object.materialID == 12u);
     CHECK(item.objectID == 5u);                    // 收集序号由调用方给（= 下标）
     CHECK(item.visibilityFlags == 1u);             // 与 FillObj 一致
