@@ -930,6 +930,12 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
         sm.meshIndex           = m_MeshRegistry.Register(&sm, entry);
     });
 
+    // 阶段 1 附录 E（E-2②）：构建**完整**快照（物体 + 蒙皮矩阵）。
+    // 【为什么需要】骨骼上传（下面 11xx 行）要按 `sourceEntity` 找回逐实体状态、并从
+    // `m_Snapshot.skinMatrices` 取矩阵 —— 因此快照必须在那个循环之前就是完整的。
+    // 本步只**构建**、尚无消费者读 `draws`，渲染结果不变；代价是每帧一次组件遍历（与既有遍历同量级）。
+    SceneSnapshotBuilder::BuildObjects(world, sg, camera, {}, nullptr, m_Snapshot);
+
     // RSM 固定光锥必须**先**刷新（任务 34）：UBO（FillGIBlendUBO）与 frame graph 的
     // RSM pass 注册/参数两处消费者都读它，且两者都在下面几步之内。
     RefreshRSMFrustum(world, camera);
