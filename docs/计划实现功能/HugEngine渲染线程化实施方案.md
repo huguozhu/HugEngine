@@ -1170,6 +1170,22 @@ private:
     让真实异步去暴露并修正这些隐含依赖，而不是先改存储形态。三个管线保留了 `SnapBuf()` 访问器，
     下次切换只动访问器与 `NextFrame`。
   · 剩余（T2.4 后续）：其余 6 个样例同源改造（循环体 → 投递 + `SubmitFrame`）+ ImGui CPU 侧。
+
+- **T2.2 就绪度实测（本轮，`06.GILab` 的 `HE_RENDER_THREAD_STRICT=1` 开关，默认关闭）**：
+  · **归属机制有两套且当前不一致**：RHI 侧是 `rhi::ThreadAffinity`（`HE_ASSERT_RENDER_THREAD` 读它；
+    `VulkanDevice` 在创建设备时 `Claim()` 给**创建线程 = 游戏线程**），`RenderThread` 侧是
+    `s_RenderThreadHash`（`ThreadMain` 设置、`IsCurrent()` 读它）。**起线程不会转移 RHI 归属** ⇒
+    "起了线程也没报错"不能当作正确性证据。
+  · **mode 1 + 真线程的实测**：首条违规 = `Engine/RHI/Vulkan/VulkanCommandList.cpp:278`
+    （录制期的一次性小上传），出现在**渲染线程**执行管线录制时；随后运行**停在 Frame 1**
+    （RenderGraph 执行 15 passes 之后不再推进）⇒ 除归属外还有**帧推进的同步缺口**。
+  · **因此 T2.2 的搬迁清单**：(a) 渲染线程启动时把 RHI 归属转移过去（`ThreadMain` 里 `Claim()`、
+    `Stop()` 里恢复/`Release()`）；(b) 把 `Acquire` / 录制 / ImGui 录制 / `Submit` / `Present` /
+    探针 `WaitIdle` 全部搬进渲染命令，其中 ImGui 要做"**CPU 侧建 UI、录制侧 `EndFrame(cmdList)`**"
+    的拆分（UI 控件仍在游戏线程，draw data 在渲染线程录制）；(c) 设计帧推进的同步（背压 + 帧票据 +
+    呈现完成）。做完 (a)(b)(c) 后 `HE_RENDER_THREAD_STRICT` 才应默认打开。
+  · **教训**：读数前必须先确认渲染线程模式 —— 模式 0（SingleThreaded）时队列不参与、渲染线程空转，
+    第一次测量因此"什么都没测到"。
 - [ ] T2.4 样例循环改造（7 个样例）
 - [ ] T2.5 编辑器主循环改造
 - [ ] T2.6 `RenderThreadContext`：RHI 唯一出口（记录/执行分离）
