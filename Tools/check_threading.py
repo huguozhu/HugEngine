@@ -73,14 +73,20 @@ WORLD_DEP_ROOTS = ("Engine/Render",)
 # 【白名单】快照层（`Engine/Render/Threading/`）是渲染侧**唯一**允许读世界的代码 —— 它就是干这个的：
 # 在游戏线程把渲染输入取齐成不可变快照。把它的命中排除在外，度量才对准"渲染期泄漏"。
 WORLD_DEP_WHITELIST_PATHS = ("Engine/Render/Threading/",)
-WORLD_DEP_BASELINE = 80        # 2026-09-24 实测（已排除快照层白名单；阶段 1 退出目标 = 0）
+WORLD_DEP_BASELINE = 76        # 2026-10-09 实测（第②段后：`SceneRenderer::Prepare` 的声明 + 定义各去掉
+                               # 1 处 `World&`/`SceneGraph&`；其中 1~2 处差额来自"两个参数合并到一行"的
+                               # 行计数效应，见方案 §9 口径说明二。阶段 1 退出目标 = 0）
 
 # --- 附录 E 的度量：渲染侧的**组件指针依赖**（`MeshComponent*` 等）---
 # 【为什么需要第二项】B1 统计的是签名里的 `World&` / `SceneGraph&`，量不出 E-1/E-2/E-3 消除的东西 ——
 # 它们的产物是"渲染侧不再持有 `MeshComponent*`"（快照只带 `meshIndex`）。这两项是**不同度量**，
 # 已在方案 §14.5 里写明；本项让 E-3 的收敛可量化。
 MESH_PTR_PATTERN = re.compile(r"\b(?:he::)?(?:Mesh|SkeletalMesh|InstancedMesh|SplineMesh|Decal)Component\s*\*")
-MESH_PTR_BASELINE = 18         # 2026-09-24 实测（渲染期 18 / 加载期 4；只允许下降，E-3 收敛到 0）
+MESH_PTR_BASELINE = 13         # 2026-10-09 实测（第②段后：`SceneRenderer.{h,cpp}` 的 1+4 处已清除
+                               # —— `DrawItem::mesh` 字段与其地址兜底分支全部删除；剩下的是
+                               # `Pipeline/RTPass.{h,cpp}` 的 4+9 处：BLAS 缓存键 `MeshComponent*`、
+                               # 顶点拉取路径与场景材质纹理的逐网格取值。该文件属 E-3② 的收尾项
+                               # （方案 §14.5 建议与 E-4 口径统一一起做），目标仍是渲染期 0）
 
 LOAD_TIME_WHITELIST = ("Initialize", "Init", "Shutdown", "Resize", "Load", "Upload",
                        "Setup", "Construct", "OnCreate")
