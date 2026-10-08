@@ -480,6 +480,7 @@ TEST_CASE("SceneSnapshotBuilder：物体映射（与 GPUScene::Collect 的 FillO
     FakeComponent comp;
     comp.indexCount = 36;
     comp.materialID = 12;
+    comp.meshIndex  = 5;                     // 附录 E：注册表索引必须透传进快照条目
     comp.bounds     = he::AABB{float3(-1.0f, -2.0f, -3.0f), float3(1.0f, 2.0f, 3.0f)};
 
     he::Entity e{1};
@@ -496,6 +497,7 @@ TEST_CASE("SceneSnapshotBuilder：物体映射（与 GPUScene::Collect 的 FillO
     CHECK(item.object.boundsMax.x == doctest::Approx(11.0f));
     CHECK(item.object.boundsMin.y == doctest::Approx(-2.0f));
     CHECK(item.materialIndex == 12u);
+    CHECK(item.meshIndex == 5u);                   // 附录 E：组件上的注册表索引必须透传（E-2② 靠它取缓冲）
     CHECK(item.object.materialID == 12u);
     CHECK(item.objectID == 5u);                    // 收集序号由调用方给（= 下标）
     CHECK(item.visibilityFlags == 1u);             // 与 FillObj 一致
@@ -578,7 +580,7 @@ TEST_CASE("GPUScene::MakeObjectRecord：与旧 FillObj 逐位一致（迁移钉�
     item.objectID           = 4u;
     item.visibilityFlags    = 1u;
     item.materialIndex      = 9u;
-    item.meshIndex          = 0u;    // 收集阶段恒 0（由 MeshBatcher 后填）⇒ 可与旧路径逐位对比
+    item.meshIndex          = 0u;    // 显式置 0：与旧 FillObj（meshIndex 恒 0）逐位对比；真实路径由收集侧透传组件字段
 
     const GPUSceneObject fromSnapshot = GPUScene::MakeObjectRecord(item);
 
