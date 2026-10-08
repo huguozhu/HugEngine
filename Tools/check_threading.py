@@ -73,18 +73,19 @@ WORLD_DEP_ROOTS = ("Engine/Render",)
 # 【白名单】快照层（`Engine/Render/Threading/`）是渲染侧**唯一**允许读世界的代码 —— 它就是干这个的：
 # 在游戏线程把渲染输入取齐成不可变快照。把它的命中排除在外，度量才对准"渲染期泄漏"。
 WORLD_DEP_WHITELIST_PATHS = ("Engine/Render/Threading/",)
-WORLD_DEP_BASELINE = 24        # 2026-10-09 实测（第③段第 4 批之二：Deferred 与 PathTracing 也
+WORLD_DEP_BASELINE = 17        # 2026-10-09 实测（第③段第 5 批：RTPass 改吃快照 + 注册表后。\n                               # 上一批（第 4 批之二）为 24：Deferred 与 PathTracing 也
                                # 统一走 `FrameSnapshotAssembler`，各自的 `CollectLights` 改为只消费快照
-                               # ⇒ 三条管线的光源收集都离开渲染期）。剩余 24 全是"帧入口签名 + RTPass"：
-                               # DeferredPipeline.h 4、PathTracingPipeline.h 4、RTPass.h 3 + .cpp 4、
-                               # DeferredPipeline_FrameGraph.cpp 2、PathTracingPipeline.cpp 2、
-                               # ForwardPipeline.{h,cpp} 各 2、IRenderPipeline.h 1。
+                               # ⇒ 三条管线的光源收集都离开渲染期）
+                               # —— 第③段第 5 批（RTPass 改吃快照）后**实测 17**，见下方 B1 说明。
                                # 阶段 1 退出目标 = 0；注：按行计数，参数行合并/拆分会有 ±1 效应）
-MESH_PTR_BASELINE = 13         # 2026-10-09 实测（第②段后：`SceneRenderer.{h,cpp}` 的 1+4 处已清除
-                               # —— `DrawItem::mesh` 字段与其地址兜底分支全部删除；剩下的是
-                               # `Pipeline/RTPass.{h,cpp}` 的 4+9 处：BLAS 缓存键 `MeshComponent*`、
-                               # 顶点拉取路径与场景材质纹理的逐网格取值。该文件属 E-3② 的收尾项
-                               # （方案 §14.5 建议与 E-4 口径统一一起做），目标仍是渲染期 0）
+# 【第③段第 5 批的实测值】17 = 帧入口签名（三条管线的 `Render`/`BuildFrameGraph` 与
+# `IRenderPipeline.h` 的接口声明）+ 各文件定义行；`RTPass.{h,cpp}` 的 7 处已随"改吃快照"清零。
+MESH_PTR_PATTERN = re.compile(r"\b(?:he::)?(?:Mesh|SkeletalMesh|InstancedMesh|SplineMesh|Decal)Component\s*\*")
+MESH_PTR_BASELINE = 0          # 2026-10-09 实测（第③段第 5 批：`RTPass` 的 BLAS 缓存键从
+                               # `MeshComponent*` 换成 `meshIndex`、`CollectMeshList` 改吃快照、
+                               # 无调用点的顶点拉取死路径删除 ⇒ **渲染期组件指针 = 0**，
+                               # 即 E-3 的收敛目标达成。此基线从此只允许保持 0：任何新增的
+                               # `*Component*` 指针参数都会让闸门失败）
 
 LOAD_TIME_WHITELIST = ("Initialize", "Init", "Shutdown", "Resize", "Load", "Upload",
                        "Setup", "Construct", "OnCreate")
