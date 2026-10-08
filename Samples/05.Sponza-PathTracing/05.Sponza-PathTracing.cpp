@@ -17,6 +17,8 @@
 #include "Core/Engine.h"
 #include "Platform/Window.h"
 #include "RHI/RHI.h"
+#include "RHI/ThreadAffinity.h"      // T2.4：渲染线程启动/停止钩子认领与撤销 RHI 归属
+#include "Threading/RenderThread.h"  // T2.4：命令队列 + 渲染线程（严格握手）
 #include "Pipeline/PathTracingPipeline.h"
 #include "Pipeline/PTQualityCVars.h"
 #include "Pipeline/DeferredPipeline.h"   // 对照模式：PT 当标准答案 vs GI 层栈（HE_DUMP_MODE=deferred）
@@ -657,13 +659,13 @@ int main() {
     // ============================================================
     // 10. 窗口调整回调
     // ============================================================
+    // 【T2.4】回调跑在游戏线程，而里面是 RHI（Resize/SetSwapChain/OnResize）⇒ 只置标志，
+    // 真正落地放到渲染命令里。
+    u32 g_PendingResizeW = 0, g_PendingResizeH = 0;
     engine.GetWindow()->SetResizeCallback([&](u32 w, u32 h) {
         if (w == 0 || h == 0) return;
-        swapchain->Resize(w, h);
-        cmdList->SetSwapChain(swapchain.get());
-        pathTracingPipeline.OnResize(w, h);
-        if (g_UseDeferred) deferredPipeline.OnResize(w, h);
-        camCtrl.SetAspectRatio(static_cast<float>(w), static_cast<float>(h));
+        g_PendingResizeW = w;
+        g_PendingResizeH = h;
     });
     // ============================================================
     // 10.5 PT 参考图落盘（对照流程，PT 任务 5）
@@ -704,6 +706,35 @@ int main() {
     u64 frameIndex = 0;
     f64 lastTime   = glfwGetTime();
 
+    // ============================================================
+    // 渲染线程化（T2.4）：一帧两条命令 —— ① Acquire + 录制（管线 + 打开 ImGui 的 RP）；
+    // ② ImGui 的**录制**（draw data）+ End + Submit +（对照用途的）WaitIdle + 探测读回 + Present。
+    // 控件（CPU 侧）与探测结果的消费留在游戏线程、位于两条命令之间 ⇒ 帧内顺序与改动前一致。
+    // ============================================================
+    render::RenderCommandQueue renderQueue(rhi::kMaxFramesInFlight);
+    render::RenderThread       renderThread(renderQueue);
+    render::FrameScheduler     frameScheduler(renderQueue, renderThread);
+    const bool                 useRenderQueue = he::UsesRenderThread();
+    const bool                 forceShell = std::getenv("HE_RENDER_THREAD_FORCE_SHELL") != nullptr;
+    if (useRenderQueue && !forceShell) {
+        renderThread.SetSpinWaitUs(50);
+        renderThread.SetThreadStartHook([] { he::rhi::GetThreadAffinity().Claim(); });
+        renderThread.SetThreadStopHook([] { he::rhi::GetThreadAffinity().Release(); });
+        HE_CORE_INFO("05.Sponza-PathTracing：已起真渲染线程（整帧 RHI 归它；游戏线程按帧严格握手等待）");
+        renderThread.Start();
+    }
+    auto submitRender = [&](auto&& fn) {
+        if (useRenderQueue) {
+            renderQueue.BeginFrame();
+            renderQueue.Enqueue([&](render::RenderThreadContext&) { fn(); });
+            bool timedOut = false;
+            frameScheduler.SubmitAndWait(timedOut);
+            if (timedOut) HE_CORE_WARN("05.Sponza-PathTracing：等待本帧渲染命令完成超时");
+        } else {
+            fn();
+        }
+    };
+
     while (!engine.GetWindow()->ShouldClose()) {
         f64 now       = glfwGetTime();
         f32 deltaTime = static_cast<f32>(now - lastTime);
@@ -711,128 +742,92 @@ int main() {
 
         engine.GetWindow()->PollEvents();
 
-        if (!swapchain->AcquireNextImage())
-            continue;
+        bool frameAborted = false;   // 渲染命令里 Acquire 失败时置位
 
-        // --- 相机控制 ---
-        {
-            bool mouseDown = glfwGetMouseButton(glfwWin, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
-            if (mouseDown && !rightMouseDown) {
-                rightMouseDown = true;
-                glfwGetCursorPos(glfwWin, &lastMouseX, &lastMouseY);
-                glfwSetInputMode(glfwWin, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-            } else if (!mouseDown && rightMouseDown) {
-                rightMouseDown = false;
-                glfwSetInputMode(glfwWin, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-            } else if (mouseDown && rightMouseDown) {
-                double cx, cy;
-                glfwGetCursorPos(glfwWin, &cx, &cy);
-                float dx = static_cast<float>(cx - lastMouseX);
-                float dy = static_cast<float>(cy - lastMouseY);
-                lastMouseX = cx;
-                lastMouseY = cy;
-                camCtrl.Rotate(dx * 0.003f, -dy * 0.003f);
+        // ---- 命令 1：Acquire + 录制（管线 + 打开 ImGui 的 RP）----
+        auto recordScene = [&]() {
+            if (!swapchain->AcquireNextImage()) {
+                frameAborted = true;   // 命令可能在渲染线程跑 ⇒ 用标志代替 while 的 continue
+                return;
             }
-
-            // T 键切换动画/手动相机模式
-            static bool tWasDown = false;
-            bool tDown = glfwGetKey(glfwWin, GLFW_KEY_T) == GLFW_PRESS;
-            if (tDown && !tWasDown) animCameraMode = !animCameraMode;
-            tWasDown = tDown;
-
-            // 动画相机模式：动画播放时同步 AnimationComponent 的位置
-            if (animCameraMode && camAnim->playing) {
-                auto* camTf = world.GetComponent<TransformComponent>(camAnimEntity);
-                if (camTf) {
-                    camCtrl.SetPosition(camTf->position);
-                    float3 toOrigin = glm::normalize(float3(0, 200, 0) - camTf->position);
-                    camCtrl.SetOrientationFromForward(toOrigin);
-                }
+            // 窗口尺寸变化的落地（回调只置了标志）
+            if (g_PendingResizeW != 0u && g_PendingResizeH != 0u) {
+                const u32 rw = g_PendingResizeW, rh = g_PendingResizeH;
+                g_PendingResizeW = g_PendingResizeH = 0u;
+                swapchain->Resize(rw, rh);
+                cmdList->SetSwapChain(swapchain.get());
+                deferredPipeline.OnResize(rw, rh);
+                pathTracingPipeline.OnResize(rw, rh);
             }
-
-            render::CameraController::MoveInput moveIn;
-            moveIn.forward  = glfwGetKey(glfwWin, GLFW_KEY_W) == GLFW_PRESS;
-            moveIn.backward = glfwGetKey(glfwWin, GLFW_KEY_S) == GLFW_PRESS;
-            moveIn.left     = glfwGetKey(glfwWin, GLFW_KEY_A) == GLFW_PRESS;
-            moveIn.right    = glfwGetKey(glfwWin, GLFW_KEY_D) == GLFW_PRESS;
-            moveIn.up       = glfwGetKey(glfwWin, GLFW_KEY_E) == GLFW_PRESS;
-            moveIn.down     = glfwGetKey(glfwWin, GLFW_KEY_Q) == GLFW_PRESS;
-            moveIn.sprint   = glfwGetKey(glfwWin, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
-            camCtrl.Update(deltaTime, moveIn);
-        }
-
-        // Transform 动画更新（驱动 AnimationComponent → TransformComponent）
-        world.ForEach<he::AnimationComponent>([&](he::Entity e, he::AnimationComponent& anim) {
-            auto* tf = world.GetComponent<TransformComponent>(e);
-            if (tf) anim.Update(deltaTime, tf);
-        });
-
-        // --- 渲染（PathTracingPipeline / 对照模式下的 DeferredPipeline，均通过 RenderGraph 编排）---
-        cmdList->Begin();
-        if (g_UseDeferred) {
-            deferredPipeline.NextFrame();
-            deferredPipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, camCtrl.GetCamera());
-            deferredPipeline.Render(cmdList.get(), deferredPipeline.GetFrameSnapshot(), camCtrl.GetCamera(), deltaTime);
-        } else {
-            pathTracingPipeline.NextFrame();
-            pathTracingPipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, camCtrl.GetCamera());
-            pathTracingPipeline.Render(cmdList.get(), pathTracingPipeline.GetFrameSnapshot(), camCtrl.GetCamera(), deltaTime);
-        }
-
-        // ── PT 参考图落盘：整幅 CopyTextureToBuffer 到 host 可见缓冲（仅对照路径）──
-        // 必须在 render pass 之外录制；缓冲在采样帧才创建，尺寸取自纹理本身。
-        if (g_DumpPT && !g_DumpDone && frameIndex >= g_DumpFrame) {
-            auto addTarget = [&](const String& name, rhi::IRHITexture* tex, u32 bytesPerPixel,
-                                 const char* fmt) {
-                if (!tex) return;
-                DumpTarget t;
-                t.name = name;
-                t.tex  = tex;
-                t.w    = tex->GetWidth();
-                t.h    = tex->GetHeight();
-                t.bytesPerPixel = bytesPerPixel;
-                t.fmt  = fmt;
-                rhi::BufferDesc dd;
-                dd.size      = (usize)t.w * t.h * bytesPerPixel;
-                dd.usage     = rhi::BufferUsage::Storage;   // 该路径恒定带 TRANSFER_DST，可作拷贝目标
-                dd.cpuAccess = true;                        // 需要 Map 读回
-                t.buf = device->CreateBuffer(dd);
-                if (!t.buf) {
-                    HE_CORE_ERROR("[PT采样] 读回缓冲创建失败: {}（{}x{}）", name, t.w, t.h);
-                    return;
-                }
-                // x=y=0 且取满宽高 ⇒ bufferRowLength=0 的紧密排布正好等于线性落盘布局
-                cmdList->CopyTextureToBuffer(tex, t.buf.get(), 0, 0, t.w, t.h, 0);
-                g_DumpTargets.push_back(std::move(t));
-            };
+            cmdList->Begin();
             if (g_UseDeferred) {
-                // 对照模式：落盘延迟管线的 HDR（ToneMap 前的线性光照结果）+ GBuffer 的关键输入
-                addTarget("hdr", deferredPipeline.GetLighting().GetHDRTarget(), 8, "RGBA16F");
-                if (auto* gb = deferredPipeline.GetGBuffer()) {
-                    addTarget("albedo", gb->GetAlbedo(), 8, "RGBA16F");
-                    addTarget("normal", gb->GetNormal(), 8, "RGBA16F");
-                }
-            } else if (auto* pt = pathTracingPipeline.GetPT()) {
-                addTarget("hdr",    pt->GetHDR(),            8, "RGBA16F");   // 最终辐射度
-                addTarget("depth",  pt->GetDepth(),          4, "R32F");      // 线性视图深度
-                addTarget("normal", pt->GetNormal(),         8, "RGBA16F");   // 世界法线 + roughness
-                addTarget("albedo", pt->GetAlbedoMetallic(), 8, "RGBA16F");   // albedo + metallic
-                // ToneMap 之后、FXAA 之前的 LDR：用来确认"屏幕上看到的"与 HDR 一致
-                // （排查"渲染一片黑"时，先分清是渲染还是显示链路）
-                if (auto* pp = pathTracingPipeline.GetPostProcess())
-                    addTarget("ldr", pp->GetLDRTarget(), 4, "BGRA8");
-            }
-            if (!g_DumpTargets.empty()) {
-                g_DumpDone = true;   // 已录制；实际读取放在 Submit 之后
+                deferredPipeline.NextFrame();
+                deferredPipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, camCtrl.GetCamera());
+                deferredPipeline.Render(cmdList.get(), deferredPipeline.GetFrameSnapshot(), camCtrl.GetCamera(), deltaTime);
             } else {
-                HE_CORE_WARN("[PT采样] 无可用目标，关闭落盘");
-                g_DumpPT = false;
+                pathTracingPipeline.NextFrame();
+                pathTracingPipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, camCtrl.GetCamera());
+                pathTracingPipeline.Render(cmdList.get(), pathTracingPipeline.GetFrameSnapshot(), camCtrl.GetCamera(), deltaTime);
             }
-        }
 
-        // --- ImGui（LOAD 保留 ToneMap 输出）---
-        cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
-            rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
+            // ── PT 参考图落盘：整幅 CopyTextureToBuffer 到 host 可见缓冲（仅对照路径）──
+            // 必须在 render pass 之外录制；缓冲在采样帧才创建，尺寸取自纹理本身。
+            if (g_DumpPT && !g_DumpDone && frameIndex >= g_DumpFrame) {
+                auto addTarget = [&](const String& name, rhi::IRHITexture* tex, u32 bytesPerPixel,
+                                     const char* fmt) {
+                    if (!tex) return;
+                    DumpTarget t;
+                    t.name = name;
+                    t.tex  = tex;
+                    t.w    = tex->GetWidth();
+                    t.h    = tex->GetHeight();
+                    t.bytesPerPixel = bytesPerPixel;
+                    t.fmt  = fmt;
+                    rhi::BufferDesc dd;
+                    dd.size      = (usize)t.w * t.h * bytesPerPixel;
+                    dd.usage     = rhi::BufferUsage::Storage;   // 该路径恒定带 TRANSFER_DST，可作拷贝目标
+                    dd.cpuAccess = true;                        // 需要 Map 读回
+                    t.buf = device->CreateBuffer(dd);
+                    if (!t.buf) {
+                        HE_CORE_ERROR("[PT采样] 读回缓冲创建失败: {}（{}x{}）", name, t.w, t.h);
+                        return;
+                    }
+                    // x=y=0 且取满宽高 ⇒ bufferRowLength=0 的紧密排布正好等于线性落盘布局
+                    cmdList->CopyTextureToBuffer(tex, t.buf.get(), 0, 0, t.w, t.h, 0);
+                    g_DumpTargets.push_back(std::move(t));
+                };
+                if (g_UseDeferred) {
+                    // 对照模式：落盘延迟管线的 HDR（ToneMap 前的线性光照结果）+ GBuffer 的关键输入
+                    addTarget("hdr", deferredPipeline.GetLighting().GetHDRTarget(), 8, "RGBA16F");
+                    if (auto* gb = deferredPipeline.GetGBuffer()) {
+                        addTarget("albedo", gb->GetAlbedo(), 8, "RGBA16F");
+                        addTarget("normal", gb->GetNormal(), 8, "RGBA16F");
+                    }
+                } else if (auto* pt = pathTracingPipeline.GetPT()) {
+                    addTarget("hdr",    pt->GetHDR(),            8, "RGBA16F");   // 最终辐射度
+                    addTarget("depth",  pt->GetDepth(),          4, "R32F");      // 线性视图深度
+                    addTarget("normal", pt->GetNormal(),         8, "RGBA16F");   // 世界法线 + roughness
+                    addTarget("albedo", pt->GetAlbedoMetallic(), 8, "RGBA16F");   // albedo + metallic
+                    // ToneMap 之后、FXAA 之前的 LDR：用来确认"屏幕上看到的"与 HDR 一致
+                    // （排查"渲染一片黑"时，先分清是渲染还是显示链路）
+                    if (auto* pp = pathTracingPipeline.GetPostProcess())
+                        addTarget("ldr", pp->GetLDRTarget(), 4, "BGRA8");
+                }
+                if (!g_DumpTargets.empty()) {
+                    g_DumpDone = true;   // 已录制；实际读取放在 Submit 之后
+                } else {
+                    HE_CORE_WARN("[PT采样] 无可用目标，关闭落盘");
+                    g_DumpPT = false;
+                }
+            }
+
+            // --- ImGui（LOAD 保留 ToneMap 输出）---
+            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
+                rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
+
+        };
+        submitRender(recordScene);
+        if (frameAborted) continue;
 
         imgui.BeginFrame();
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
@@ -992,57 +987,65 @@ int main() {
         }
         ImGui::End();
 
-        imgui.EndFrame(cmdList.get());
-        cmdList->EndRenderPass();
-        cmdList->End();
+        // ---- 命令 2：ImGui 录制 + End + Submit + WaitIdle + 探测读回 + Present ----
+        auto recordUiAndPresent = [&]() {
+            imgui.EndFrame(cmdList.get());
+            cmdList->EndRenderPass();
+            cmdList->End();
 
-        device->Submit(cmdList.get());
+            device->Submit(cmdList.get());
 
-        // ── PT 参考图落盘：等 GPU 完成后原样写文件（原始像素、无文件头）──
-        if (g_DumpDone && !g_DumpWritten) {
-            device->WaitIdle();   // 对照用途，允许停顿
-            const String dir  = "build/verify/";
-            const String base = dir + "pt_" + g_DumpTag;
-            std::filesystem::create_directories(dir);
-            std::ofstream meta(base + "_meta.txt");
-            for (auto& t : g_DumpTargets) {
-                const usize bytes = (usize)t.w * t.h * t.bytesPerPixel;
-                const void* p = t.buf ? t.buf->Map() : nullptr;
-                if (p) {
-                    std::ofstream f(base + "_" + t.name + ".f16", std::ios::binary);
-                    f.write(static_cast<const char*>(p), (std::streamsize)bytes);
-                    t.buf->Unmap();
-                    meta << t.name << " " << t.w << " " << t.h << " " << t.fmt << "\n";
-                    HE_CORE_INFO("[PT采样] {}_{}.f16  {}x{}  {} B", base, t.name, t.w, t.h, bytes);
-                } else {
-                    HE_CORE_ERROR("[PT采样] 映射失败: {}_{}", base, t.name);
+            // ── PT 参考图落盘：等 GPU 完成后原样写文件（原始像素、无文件头）──
+            if (g_DumpDone && !g_DumpWritten) {
+                device->WaitIdle();   // 对照用途，允许停顿
+                const String dir  = "build/verify/";
+                const String base = dir + "pt_" + g_DumpTag;
+                std::filesystem::create_directories(dir);
+                std::ofstream meta(base + "_meta.txt");
+                for (auto& t : g_DumpTargets) {
+                    const usize bytes = (usize)t.w * t.h * t.bytesPerPixel;
+                    const void* p = t.buf ? t.buf->Map() : nullptr;
+                    if (p) {
+                        std::ofstream f(base + "_" + t.name + ".f16", std::ios::binary);
+                        f.write(static_cast<const char*>(p), (std::streamsize)bytes);
+                        t.buf->Unmap();
+                        meta << t.name << " " << t.w << " " << t.h << " " << t.fmt << "\n";
+                        HE_CORE_INFO("[PT采样] {}_{}.f16  {}x{}  {} B", base, t.name, t.w, t.h, bytes);
+                    } else {
+                        HE_CORE_ERROR("[PT采样] 映射失败: {}_{}", base, t.name);
+                    }
                 }
+                // 相机参数一并落盘：离线对照需要**渲染这一帧时**的相机参数，
+                // 否则判据只能靠硬编码，而硬编码一旦被 cfg 改动就失效
+                {
+                    const render::CameraData& cam = camCtrl.GetCamera();
+                    std::ofstream cm(base + "_camera.txt");
+                    cm << "pos "     << cam.position.x << " " << cam.position.y << " " << cam.position.z << "\n";
+                    cm << "forward " << cam.forward.x  << " " << cam.forward.y  << " " << cam.forward.z  << "\n";
+                    cm << "up "      << cam.up.x       << " " << cam.up.y       << " " << cam.up.z       << "\n";
+                    cm << "fov "     << cam.fov        << "\n";
+                    cm << "near "    << cam.nearPlane  << "\n";
+                    cm << "far "     << cam.farPlane   << "\n";
+                    cm << "aspect "  << cam.aspectRatio << "\n";
+                    cm << "frame "   << frameIndex << "\n";
+                }
+                HE_CORE_INFO("[PT采样] 共落盘 {} 个目标，请求退出", g_DumpTargets.size());
+                g_DumpWritten = true;
+                // 采样完成即请求关窗：脚本无需超时等待，也保证退出前正常走完清理与保存流程
+                glfwSetWindowShouldClose(glfwWin, GLFW_TRUE);
             }
-            // 相机参数一并落盘：离线对照需要**渲染这一帧时**的相机参数，
-            // 否则判据只能靠硬编码，而硬编码一旦被 cfg 改动就失效
-            {
-                const render::CameraData& cam = camCtrl.GetCamera();
-                std::ofstream cm(base + "_camera.txt");
-                cm << "pos "     << cam.position.x << " " << cam.position.y << " " << cam.position.z << "\n";
-                cm << "forward " << cam.forward.x  << " " << cam.forward.y  << " " << cam.forward.z  << "\n";
-                cm << "up "      << cam.up.x       << " " << cam.up.y       << " " << cam.up.z       << "\n";
-                cm << "fov "     << cam.fov        << "\n";
-                cm << "near "    << cam.nearPlane  << "\n";
-                cm << "far "     << cam.farPlane   << "\n";
-                cm << "aspect "  << cam.aspectRatio << "\n";
-                cm << "frame "   << frameIndex << "\n";
-            }
-            HE_CORE_INFO("[PT采样] 共落盘 {} 个目标，请求退出", g_DumpTargets.size());
-            g_DumpWritten = true;
-            // 采样完成即请求关窗：脚本无需超时等待，也保证退出前正常走完清理与保存流程
-            glfwSetWindowShouldClose(glfwWin, GLFW_TRUE);
-        }
 
-        swapchain->Present(true);
-        frameIndex++;
+            swapchain->Present(true);
+            frameIndex++;        };
+        submitRender(recordUiAndPresent);
+
     }
 
     // 清理
+    // 【T2.4】退出前停渲染线程并撤销 RHI 归属
+    renderThread.Stop();
+    he::rhi::GetThreadAffinity().Release();
+
     imgui.Shutdown();
     device->WaitIdle();
     if (g_UseDeferred) deferredPipeline.Shutdown();
