@@ -29,6 +29,11 @@ namespace he::render {
 struct MeshRegistryEntry {
     rhi::IRHIBuffer* vertexBuffer = nullptr;   // 顶点缓冲（所有权在组件/资产）
     rhi::IRHIBuffer* indexBuffer  = nullptr;   // 索引缓冲
+    /// 蒙皮矩阵缓冲（仅骨骼网格；`SkeletalMeshComponent::boneBuffer`）。
+    /// 【为什么要它】骨骼上传的写入目标是这张缓冲，而不是顶点/索引缓冲 ⇒ 只登记后者**不足以**
+    /// 让消费侧脱离组件。注意它**会重建**（`RetireBoneBuffer` 走 N 帧延迟队列后新建），
+    /// 因此注册方必须**每帧更新**这条记录（`Register` 同 key = 更新，索引不变）。
+    rhi::IRHIBuffer* skinMatrixBuffer = nullptr;
     u32  indexCount = 0;                       // 索引数（间接绘制参数的兜底来源）
     u32  materialID = 0;                       // bindless 纹理基索引（与组件同源）
     bool instanced  = false;                   // 实例化网格：顶点由实例路径提供
