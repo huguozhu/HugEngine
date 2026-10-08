@@ -21,8 +21,12 @@ public:
     void UnregisterComponent(u32 id);
 
     /// GPU Tick: TickBegin → Emit → Simulate → Culling（Compute 队列）
+    /// 【T1.4：参数由**快照**传入】`params` / `emitPosition` 来自 `FrameSceneSnapshot::particles`
+    /// （收集侧按值带走 `ParticleComponent::GetParam()` 与 `GetWorldEmitPosition()`）——
+    /// 渲染期因此不再读 `ParticleComponent`（铁律：交接后不碰 ECS）。
     void DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float deltaTime,
-                         const float4x4& viewProj);
+                         const float4x4& viewProj,
+                         const he::ParticleSystemParam& params, const float3& emitPosition);
 
     /// Render: 粒子 Billboard 渲染到当前 RenderTarget
     void Render(rhi::IRHICommandList* cmd, u32 id,

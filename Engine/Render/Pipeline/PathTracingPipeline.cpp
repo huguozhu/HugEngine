@@ -257,8 +257,11 @@ void PathTracingPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
 
     // ── 粒子模拟 (Compute，在 RenderGraph 之前) ──
     float4x4 viewProj = camera.GetViewProjMatrix();
-    for (u32 pid : m_ParticleComponentIDs) {
-        m_ParticleRenderer.DispatchCompute(cmd, pid, deltaTime, viewProj);
+    // T1.4：发射器列表与参数都从**快照**取（不再遍历 ECS 组件、也不依赖管线自持的 id 列表）
+    SceneSnapshotBuilder::BuildParticles(world, m_Snapshot);
+    for (const SnapshotParticleEmitter& emitter : m_Snapshot.particles) {
+        m_ParticleRenderer.DispatchCompute(cmd, emitter.rendererId, deltaTime, viewProj,
+                                           emitter.params, emitter.emitPosition);
     }
 
     m_FrameIndex++;  // 帧索引递增（PT 抖动 / ReSTIR 种子）

@@ -530,7 +530,9 @@ void ParticleRenderer::DebugDumpState(u32 id, const char* step) {
 // ============================================================
 
 void ParticleRenderer::DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float deltaTime,
-                                        const float4x4& viewProj) {
+                                        const float4x4& viewProj,
+                                        const he::ParticleSystemParam& params,
+                                        const float3& emitPosition) {
     if (id >= m_Components.size() || !m_Initialized) return;
     auto& cs = m_Components[id];
     auto* comp = cs.comp;
@@ -608,27 +610,28 @@ void ParticleRenderer::DispatchCompute(rhi::IRHICommandList* cmd, u32 id, float 
         // 更新 Emit 参数（使用 memcpy 复制 glm 类型到 float 数组，确保 std140 布局匹配）
         GpuEmitParam emitParam = {};
         {
-            float3 pos = comp->GetWorldEmitPosition();
+            // T1.4：位置与参数都来自快照（帧内不再读组件）
+            float3 pos = emitPosition;
             std::memcpy(emitParam.position, &pos, sizeof(float3));
-            float3 dir = comp->GetParam().direction;
+            float3 dir = params.direction;
             std::memcpy(emitParam.direction, &dir, sizeof(float3));
-            float3 box = comp->GetParam().boxSize;
+            float3 box = params.boxSize;
             std::memcpy(emitParam.boxSize, &box, sizeof(float3));
-            uint2 tc = comp->GetParam().texRowsCols;
+            uint2 tc = params.texRowsCols;
             std::memcpy(emitParam.texRowsCols, &tc, sizeof(uint2));
         }
         emitParam.maxParticles   = cs.maxParticles;
-        emitParam.minInitSpeed   = comp->GetParam().minInitSpeed;
-        emitParam.maxInitSpeed   = comp->GetParam().maxInitSpeed;
-        emitParam.minLifeTime    = comp->GetParam().minLifeTime;
-        emitParam.maxLifeTime    = comp->GetParam().maxLifeTime;
-        emitParam.emitShape      = (i32)comp->GetParam().emitShape;
-        emitParam.sphereRadius   = comp->GetParam().sphereRadius;
-        emitParam.directionSpread = comp->GetParam().directionSpread;
-        emitParam.emitDirectionType = (u32)comp->GetParam().emitDirectionType;
-        emitParam.texTimeSampling = (u32)comp->GetParam().texTimeSampling;
-        emitParam.minSize = comp->GetParam().minSize;
-        emitParam.maxSize = comp->GetParam().maxSize;
+        emitParam.minInitSpeed   = params.minInitSpeed;
+        emitParam.maxInitSpeed   = params.maxInitSpeed;
+        emitParam.minLifeTime    = params.minLifeTime;
+        emitParam.maxLifeTime    = params.maxLifeTime;
+        emitParam.emitShape      = (i32)params.emitShape;
+        emitParam.sphereRadius   = params.sphereRadius;
+        emitParam.directionSpread = params.directionSpread;
+        emitParam.emitDirectionType = (u32)params.emitDirectionType;
+        emitParam.texTimeSampling = (u32)params.texTimeSampling;
+        emitParam.minSize = params.minSize;
+        emitParam.maxSize = params.maxSize;
         std::memcpy(cs.emitUB->Map(), &emitParam, sizeof(GpuEmitParam));
         cs.emitUB->Unmap();
 
