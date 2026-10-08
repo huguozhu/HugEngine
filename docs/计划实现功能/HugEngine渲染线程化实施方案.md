@@ -1002,6 +1002,28 @@ private:
         走样例驱动的阴影收集）同样出现该诊断且 `VUID=0`；冒烟同批双跑 **299 像素**、
         与第 1 批二进制对比 **314 像素**（`hdr` 仅 4 像素 / maxULP=1）⇒ 落在同批底噪内；
         四项闸门：B1 **69 → 51**（基线随之下调）、组件指针 13、帧内 RHI 380、持有者 277。
+    - **第 3 批（已提交）**：GI 子系统里唯一真正读世界的地方 —— `GI_RSM::RenderRSMPass` 的几何遍历
+      （`world.ForEach<he::MeshComponent>`）—— 改吃快照 + 网格注册表；`ForwardPipeline::PrepareGI`
+      随之去掉 `World&`/`SceneGraph&`（它此前只为转交给 RSM 才收世界）。⇒ **B1 51 → 47**。
+      · **快照契约顺带升级**：把"每个消费者各一个 bool"的做法收敛成**网格类别** `SnapshotMeshClass`
+        （`Base`/`Cube`/`Sphere`/`Billboard`/`Text`/`Decal`/`Spline`/`Instanced`/`Skeletal`）+
+        `castsShadow`，`bShadowCaster` 由两者推出。**这不是抽象洁癖，而是口径差异的如实表达**：
+        阴影技术收 `Base`/`Cube`/`Sphere` 且 `castShadow`；RSM **只收 `Base`**（旧实现只遍历
+        `ForEach<MeshComponent>`，不含 Cube/Sphere —— 若照阴影口径收就会改变 RSM 内容）；
+        后面 `RTPass`（`Base`/`Cube`/`Sphere`）与 `MeshBatcher`（含 `Instanced`、**不含**
+        `Spline`/`Skeletal`）也各自不同。一个类别标签同时服务四个消费者。
+      · `GIProviderContext` 新增 `snapshot`/`meshRegistry`（放在结构体**末尾**：前几项有按位置聚合
+        初始化的用法），`DeferredPipeline::MakeGIContext` 统一注入 ⇒ 帧图里 6 处构造点不再需要
+        `world`/`sg`。**顺带查清**：全 GI 源（SSGI/DDGI/Lumen/RTGI/IBL/AO）**没有任何一处**读
+        `ctx.world`/`ctx.sceneGraph`，只有 RSM 那一处 —— 即 `GIProviderContext` 的 world 指针
+        本就是过渡遗留，可在第 5 批直接删除。
+      · 判据：单测 **398 例 / 71840 断言**（新增 8 条断言覆盖类别标签与 `bShadowCaster` 的
+        类别 ∧ `castShadow` 口径）；冒烟 `rsm_pos`/`rsm_rad`/`rsm_nrm`/`rsm_indirect` **全部 identical**
+        —— 本批的功能等价性证据（RSM 的几何输入换了来源、输出逐位不变）；
+        同批双跑 **4539 像素**、与第 2 批二进制对比 **4838 像素**，且差异**全部**落在
+        `hdr`(723 px / maxULP 21) 与 `lumen_irradiance`/`prov6_*`(823 px / maxULP 552) 上 ——
+        与 §9 T1.3a 记录的噪声底噪（`hdr` 719 px / maxULP 21 / `lumen_irradiance` 764 px / maxULP 552）
+        **几乎逐项吻合** ⇒ 是已知的探针噪声，非本批差异。
 - [x] T2.1 `RenderThread` 实现（帧节奏 + 休眠策略）—— ✅ 完成（真起线程 + 归属判断 + 停止排空；4 例单测。cv 唤醒并入 T2.6）
 - [ ] T2.2 设备与交换链归渲染线程（Acquire/Present 迁移）
 - [ ] T2.3 `ResourceCreationService`（步 1 同步转发）
