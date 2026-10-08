@@ -942,6 +942,57 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
     };
 
 
+        // --- 相机控制（鼠标右键拖拽旋转 / WASD+EQ 移动 / T 切换相机动画）---
+        // 【回归修复】这段在 `da57916`（把帧体拆成两条渲染命令）时被整段丢失，导致鼠标与键盘都无法
+        // 操作相机。它属于**游戏线程的帧前准备**（必须在装配快照之前更新相机），因此放在这里：
+        // acquire 已在命令 1 里、与输入无关，故输入直接前置即可。
+        // --- 相机控制 ---
+        {
+            bool mouseDown = glfwGetMouseButton(glfwWin, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
+            if (mouseDown && !rightMouseDown) {
+                rightMouseDown = true;
+                glfwGetCursorPos(glfwWin, &lastMouseX, &lastMouseY);
+                glfwSetInputMode(glfwWin, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+            } else if (!mouseDown && rightMouseDown) {
+                rightMouseDown = false;
+                glfwSetInputMode(glfwWin, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+            } else if (mouseDown && rightMouseDown) {
+                double cx, cy;
+                glfwGetCursorPos(glfwWin, &cx, &cy);
+                float dx = static_cast<float>(cx - lastMouseX);
+                float dy = static_cast<float>(cy - lastMouseY);
+                lastMouseX = cx;
+                lastMouseY = cy;
+                camCtrl.Rotate(dx * 0.003f, -dy * 0.003f);
+            }
+
+            // T 键切换动画/手动相机模式
+            static bool tWasDown = false;
+            bool tDown = glfwGetKey(glfwWin, GLFW_KEY_T) == GLFW_PRESS;
+            if (tDown && !tWasDown) animCameraMode = !animCameraMode;
+            tWasDown = tDown;
+
+            // 动画相机模式：动画播放时同步 AnimationComponent 的位置
+            if (animCameraMode && camAnim->playing) {
+                auto* camTf = world.GetComponent<TransformComponent>(camAnimEntity);
+                if (camTf) {
+                    camCtrl.SetPosition(camTf->position);
+                    float3 toOrigin = glm::normalize(float3(0, 200, 0) - camTf->position);
+                    camCtrl.SetOrientationFromForward(toOrigin);
+                }
+            }
+
+            render::CameraController::MoveInput moveIn;
+            moveIn.forward  = glfwGetKey(glfwWin, GLFW_KEY_W) == GLFW_PRESS;
+            moveIn.backward = glfwGetKey(glfwWin, GLFW_KEY_S) == GLFW_PRESS;
+            moveIn.left     = glfwGetKey(glfwWin, GLFW_KEY_A) == GLFW_PRESS;
+            moveIn.right    = glfwGetKey(glfwWin, GLFW_KEY_D) == GLFW_PRESS;
+            moveIn.up       = glfwGetKey(glfwWin, GLFW_KEY_E) == GLFW_PRESS;
+            moveIn.down     = glfwGetKey(glfwWin, GLFW_KEY_Q) == GLFW_PRESS;
+            moveIn.sprint   = glfwGetKey(glfwWin, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
+            camCtrl.Update(deltaTime, moveIn);
+        }
+
         // Transform 动画更新（驱动 AnimationComponent → TransformComponent）
         world.ForEach<he::AnimationComponent>([&](he::Entity e, he::AnimationComponent& anim) {
             auto* tf = world.GetComponent<TransformComponent>(e);
