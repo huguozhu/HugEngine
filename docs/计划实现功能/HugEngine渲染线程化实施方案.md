@@ -1179,6 +1179,11 @@ private:
   · **mode 1 + 真线程的实测**：首条违规 = `Engine/RHI/Vulkan/VulkanCommandList.cpp:278`
     （录制期的一次性小上传），出现在**渲染线程**执行管线录制时；随后运行**停在 Frame 1**
     （RenderGraph 执行 15 passes 之后不再推进）⇒ 除归属外还有**帧推进的同步缺口**。
+  · **步骤 (a) 已完成（已提交）**：`RenderThread::SetThreadStartHook` + 样例注入 `Claim()`（认领必须在
+    新线程里做，而 Threading 层保持 RHI-free ⇒ 由调用方注入）。**验证证据 = 首条违规的转移**：
+    转移前是渲染线程录制路径（`VulkanCommandList.cpp:278`），转移后渲染线程录制合法、首条变成
+    **游戏线程的 `AcquireNextImage`（`VulkanSwapChain.cpp:232`）** ⇒ 归属确实转移，且步骤 (b) 的
+    工单第一项就是 `Acquire`。
   · **因此 T2.2 的搬迁清单**：(a) 渲染线程启动时把 RHI 归属转移过去（`ThreadMain` 里 `Claim()`、
     `Stop()` 里恢复/`Release()`）；(b) 把 `Acquire` / 录制 / ImGui 录制 / `Submit` / `Present` /
     探针 `WaitIdle` 全部搬进渲染命令，其中 ImGui 要做"**CPU 侧建 UI、录制侧 `EndFrame(cmdList)`**"
