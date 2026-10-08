@@ -523,7 +523,20 @@ private:
   - 【单测当场抓到的契约缺陷】初版用 `std::vector<u8>` 存 arena、只对齐**偏移量** ⇒ 绝对地址不保证
     对齐（64B 用例量到 48）。已改为**固定容量、64B 对齐的块**（对齐建立在绝对地址上；容量耗尽即断言，
     可增长块分配器随 §12 的 A-1 落地）。
-- [ ] T0.7 **（预埋，见 §12）** 资源句柄化（`RHIBufferHandle` / `RHITextureHandle` + generation）
+- [x] T0.7 **（预埋，见 §12）** 资源句柄化（`RHIBufferHandle` / `RHITextureHandle` + generation）
+  - 落地：`Engine/RHI/RHI/RHIHandles.h`（头文件实现）：两种句柄（`index == 0` 为无效、`generation` 代次）
+    + 句柄表 `RHIResourceTable<THandle, TResource>`（`Add` / `Get` / `Remove` / `LiveCount` /
+    `SlotCount` / `FreeSlotCount`）+ `RHIBufferTable` / `RHITextureTable` 别名。
+    **本阶段不强制迁移**任何现有持有者，`unique_ptr` 保持为兼容层（§12.5 的"渐进迁移"）。
+  - 为什么代次是关键：槽位会被回收复用，只有下标的句柄在复用后会**静默指向另一个资源**
+    （不崩、画面莫名错乱，最难查的一类 bug）。`Remove` 提升槽位代次 ⇒ 旧句柄一律解析为 nullptr，
+    错误立刻表现为"资源为空"。
+  - 6 例单测：登记/解析（下标从 1 开始）、`Remove` 后失效且幂等、**槽位复用后代次前进且旧句柄
+    绝不指向新资源**、越界/伪造代次/跨表句柄一律 nullptr、多轮复用槽位不增长、两种句柄互不干扰。
+  - 实测（2026-09-24）：单测 **362 例 / 71495 断言全通过**（改前 356 / 71443）。
+  - grep 闸门已接入 `Tools/check_threading.py --handles`：实测 **277 处 / 76 个文件**（正是 §12.5
+    所说"200+ 处持有者"）。该基数是**上限而非目标** —— 迁移可以渐进，但**新增一处**即说明新代码
+    没走句柄，闸门会失败。
 - [ ] T1.1 `FrameSceneSnapshot` 定义（与 `ShaderTypes.slang` 对齐 + `static_assert`）
 - [ ] T1.2 `SceneSnapshotBuilder`（集中现有 Collect 遍历）
 - [ ] T1.3 `CollectLights` / `GPUScene::Collect` 改消费快照

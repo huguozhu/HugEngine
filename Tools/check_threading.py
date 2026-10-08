@@ -24,7 +24,8 @@
     python Tools/check_threading.py                 # 汇总（Engine/Render）
     python Tools/check_threading.py --detail        # 附每条 file:line + 所属函数
     python Tools/check_threading.py --root Samples  # 换目录（附录 B 的 B2 查样例）
-    python Tools/check_threading.py --gate          # 闸门模式：帧内命中非 0 时返回 1（各阶段退出用）
+    python Tools/check_threading.py --handles       # 附带 T0.7 的资源持有者统计（基线即上限）
+    python Tools/check_threading.py --gate          # 闸门模式：帧内命中非 0（或持有者超基线）返回 1
 """
 import argparse
 import os
@@ -49,6 +50,15 @@ CATEGORIES = [
     ("UPLOAD_DESC", re.compile(r"\binitialData\b"),
      "创建期上传（desc.initialData）", "阶段 2 T2.3：创建期上传经创建服务在渲染线程执行"),
 ]
+
+# --- T0.7 的 grep 闸门：资源持有者（`unique_ptr<IRHIBuffer/IRHITexture>`）数量只允许下降 ---
+# 判据（方案 §9 T0.7）："新代码不再新增 unique_ptr<IRHIBuffer> 成员"。基线是 2026-09-24 在
+# multi_thread 分支上的实测值：277 处、76 个文件（正是 §12.5 所说"200+ 处持有者"）。
+# 注意它是**上限**而不是目标：迁移可以慢慢做，但新增一个就说明新代码没走句柄。
+HOLDER_PATTERN = re.compile(r"unique_ptr<\s*(?:rhi::)?IRHI(?:Buffer|Texture)")
+HOLDER_BASELINE = 277
+HOLDER_ROOTS = ("Engine", "Samples")
+HOLDER_EXTS = (".h", ".hpp", ".cpp")
 
 LOAD_TIME_WHITELIST = ("Initialize", "Init", "Shutdown", "Resize", "Load", "Upload",
                        "Setup", "Construct", "OnCreate")
@@ -100,13 +110,47 @@ def scan_file(path, root):
     return hits
 
 
+def count_resource_holders(repo_root):
+    """统计 `unique_ptr<IRHIBuffer/IRHITexture>` 的出现次数与文件数（T0.7 的 grep 闸门）。
+
+    为什么按"出现次数"而不是"成员数"：成员声明、函数参数、局部变量都算"持有者"，
+    它们都是句柄化要替换的对象；用同一个口径做基数比较即可，不需要区分语法位置。
+    """
+    total = 0
+    per_file = {}
+    for root_name in HOLDER_ROOTS:
+        root_path = os.path.join(repo_root, root_name)
+        if not os.path.isdir(root_path):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(root_path):
+            for fn in sorted(filenames):
+                if not fn.endswith(HOLDER_EXTS):
+                    continue
+                full = os.path.join(dirpath, fn)
+                count = 0
+                try:
+                    with open(full, "r", encoding="utf-8", errors="replace") as fh:
+                        for line in fh:
+                            if line.strip().startswith(("//", "*", "/*")):
+                                continue                       # 注释里提到不算
+                            count += len(HOLDER_PATTERN.findall(line))
+                except OSError:
+                    continue
+                if count:
+                    total += count
+                    per_file[os.path.relpath(full, repo_root).replace("\\", "/")] = count
+    return total, per_file
+
+
 def main():
     ap = argparse.ArgumentParser(description="渲染线程化方案：跨线程调用点清点 / 闸门")
     ap.add_argument("--root", default="Engine/Render", help="扫描目录（默认 Engine/Render）")
     ap.add_argument("--ext", default=".cpp,.h,.slang", help="参与扫描的扩展名（逗号分隔）")
     ap.add_argument("--detail", action="store_true", help="打印每条 file:line + 所属函数")
     ap.add_argument("--gate", action="store_true",
-                    help="闸门模式：帧内命中 > 0 时退出码 1（阶段退出判据用；默认只看报告）")
+                    help="闸门模式：帧内命中 > 0（或资源持有者超过基线）时退出码 1")
+    ap.add_argument("--handles", action="store_true",
+                    help="附带 T0.7 的资源持有者统计（`unique_ptr<IRHIBuffer/IRHITexture>`）")
     args = ap.parse_args()
 
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -150,7 +194,20 @@ def main():
                 print("  %s%-70s %s:%d" % ("[加载]" if load else "[帧内] ", func, rel, line_no))
 
     print("\n帧内命中合计 = %d（阶段 2 退出时应为 0；加载期用例保留但需经创建服务）" % total_frame)
-    if args.gate and total_frame > 0:
+
+    holders_over = False
+    if args.handles:
+        total, per_file = count_resource_holders(repo_root)
+        print("\n=== T0.7 资源持有者（unique_ptr<IRHIBuffer/IRHITexture>）===")
+        print("当前 %d 处 / %d 个文件；基线 %d（只允许下降：新代码必须用句柄）"
+              % (total, len(per_file), HOLDER_BASELINE))
+        if total > HOLDER_BASELINE:
+            holders_over = True
+            print("超出基线的文件（新增持有者必须改为 RHIBufferHandle / RHITextureHandle）：")
+            for path, count in sorted(per_file.items(), key=lambda kv: -kv[1])[:10]:
+                print("  %-70s %d" % (path, count))
+
+    if args.gate and (total_frame > 0 or holders_over):
         return 1
     return 0
 
