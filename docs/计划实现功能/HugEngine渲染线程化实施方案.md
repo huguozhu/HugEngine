@@ -464,7 +464,13 @@ private:
 
 ## 9. 附录 A：任务总表（可勾选）
 
-- [ ] T0.1 线程归属断言（`ThreadAffinity` + `HE_ASSERT_RENDER_THREAD`）
+- [x] T0.1 线程归属断言（`ThreadAffinity` + `HE_ASSERT_RENDER_THREAD`）
+  - 落地：`Engine/RHI/RHI/ThreadAffinity.h`（原子拥有者 + 宏）；认领点 `CreateDevice`，注销点 `~VulkanDevice`；
+    断言点 `Shutdown` / `Submit` / `SubmitAll` / `SignalFenceOnQueue` / `WaitFenceOnQueue` /
+    `AcquireNextImage` / `Present` / `VulkanCommandList::Begin` / `BeginSecondary` / `BeginLightweight` / `End` / `Submit`。
+  - 实测（2026-09-24，multi_thread 分支）：单测 **334 例 / 71303 断言全通过**（含新增的
+    `TestThreadAffinity.cpp` 三态用例与 `TestThreadAffinityDisabled.cpp` 关闭路径用例）；
+    `06.GILab` 实跑 120 帧零断言触发、28 个转储正常、`vuid_lines=42` 无新增。
 - [ ] T0.2 帧内同步 RHI 调用清点清单
 - [ ] T0.3 `RenderCommandQueue` + `RenderThread` 壳实现（行为等价）
 - [ ] T0.4 帧票据与背压骨架
