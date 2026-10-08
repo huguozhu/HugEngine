@@ -22,6 +22,11 @@ void RenderCommandQueue::BeginFrame() {
     m_NextSlot = (m_NextSlot + 1u) % m_MaxInFlight;
 }
 
+u32 RenderCommandQueue::CurrentFrameSlot() const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    return m_CollectSlot;
+}
+
 void RenderCommandQueue::Enqueue(RenderCommand fn) {
     std::lock_guard<std::mutex> lock(m_Mutex);
     if (!m_Collecting) return;              // 未 BeginFrame 就 Enqueue：忽略（避免污染上一帧）

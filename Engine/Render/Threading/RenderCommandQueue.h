@@ -54,6 +54,10 @@ public:
     /// 开始收集本帧命令：拿到帧号与槽位（帧号单调递增，槽位在 [0, maxInFlight) 内轮转）
     void BeginFrame();
 
+    /// 本帧的帧槽位（`BeginFrame` 分配，`[0, MaxInFlight)`）：供调用方按槽位取"每飞行帧一份"的资源
+    /// （例如每帧一个命令缓冲）—— 这是"游戏线程跑到渲染线程前面"时资源不互相踩的前提。
+    [[nodiscard]] u32 CurrentFrameSlot() const;
+
     /// 入队一条命令。`fn` 在渲染线程执行；**禁止捕获 World / SceneGraph 引用或任何会被
     /// 游戏线程继续修改的数据**（铁律 2）。
     void Enqueue(RenderCommand fn);
