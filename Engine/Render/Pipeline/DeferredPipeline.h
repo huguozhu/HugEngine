@@ -221,6 +221,8 @@ private:
     // 【为什么每帧刷新】骨骼缓冲会重建（N 帧延迟队列后新建）⇒ 只登记一次会留下过期指针；
     // `Register` 同 key = 更新（索引不变），因此每帧刷新廉价且安全。帧内只读。
     MeshRegistry       m_MeshRegistry;
+    // 快照容量是否已按实际规模预留过一次（自校准；与 ForwardPipeline 对称）
+    bool               m_SnapshotReserved = false;
 
     // 子系统
     std::unique_ptr<IShadowSystem>       m_ShadowSystem;

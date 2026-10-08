@@ -713,6 +713,18 @@ void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
         sm.meshIndex           = m_MeshRegistry.Register(&sm, entry);
     });
 
+    // 阶段 1 附录 E（E-2②/Deferred 侧，与 ForwardPipeline 对称）：构建**完整**快照并在首帧后
+    // 按实际规模**自校准**预留一次容量 —— 稳态下快照数组不再重分配（"帧内不做分配"与
+    // "帧内不做同步等待"同一条纪律）。骨骼上传/材质消费将来都要从这份快照取。
+    SceneSnapshotBuilder::BuildObjects(world, sg, camera, {}, nullptr, m_Snapshot);
+    if (!m_SnapshotReserved) {
+        m_Snapshot.Reserve(static_cast<u32>(m_Snapshot.draws.size()) * 2u + 64u,
+                           static_cast<u32>(m_Snapshot.lights.size()) * 2u + 64u,
+                           static_cast<u32>(m_Snapshot.skinMatrices.size()) * 2u + 256u,
+                           static_cast<u32>(m_Snapshot.particles.size()) * 2u + 8u);
+        m_SnapshotReserved = true;
+    }
+
     // ============================================================
     // AsyncCompute: RenderGraph 多阶段提交
     //
