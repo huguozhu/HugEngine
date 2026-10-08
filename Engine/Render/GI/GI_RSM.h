@@ -4,8 +4,12 @@
 #include "RHI/RHI.h"
 #include "RHI/Buffer.h"
 #include "Math/Math.h"
+// 第③段第 3 批：RSM pass 改吃快照 + 网格注册表
+#include "Threading/FrameSceneSnapshot.h"
 
 namespace he::render {
+
+class MeshRegistry;
 
 // RSM（Reflective Shadow Map）默认分辨率
 constexpr u32 kDefaultRSMResolution = 512;
@@ -65,7 +69,11 @@ public:
     void SetLightBuffer(rhi::IRHIBuffer* lightBuffer) { m_ExternalLightBuf = lightBuffer; }
 
     // 从光源 POV 渲染几何体到 RSM 纹理（使用独立深度缓冲）
-    void RenderRSMPass(rhi::IRHICommandList* cmd, he::World& world, he::SceneGraph& sg);
+    // 【第③段第 3 批】改吃快照 + 网格注册表：几何只取 `SnapshotMeshClass::Base` 的条目
+    //（与旧实现 `world.ForEach<he::MeshComponent>` 的**精确类型**范围逐条一致），
+    // 顶点/索引缓冲按 `meshIndex` 查注册表。
+    void RenderRSMPass(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snapshot,
+                       const MeshRegistry& registry);
 
     // 纹理访问
     rhi::IRHITexture* GetRSMPositionMap() const { return m_RSMPos.get(); }

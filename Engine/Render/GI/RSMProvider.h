@@ -32,9 +32,10 @@ public:
     void Shutdown() override {}
     void OnResize(u32, u32) override {}
     /// 生成 RSM（需要场景数据；由帧图在光源阴影之后、DDGI 之前调用）
+    /// 【第③段第 3 批】场景数据改从 `ctx.snapshot` + `ctx.meshRegistry` 取（不再经 world/sceneGraph）
     void Render(rhi::IRHICommandList* cmd, const GIProviderContext& ctx) override {
-        if (m_RSM && ctx.world && ctx.sceneGraph) {
-            m_RSM->RenderRSMPass(cmd, *ctx.world, *ctx.sceneGraph);
+        if (m_RSM && ctx.snapshot && ctx.meshRegistry) {
+            m_RSM->RenderRSMPass(cmd, *ctx.snapshot, *ctx.meshRegistry);
         }
     }
 

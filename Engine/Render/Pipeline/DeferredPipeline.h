@@ -143,6 +143,13 @@ public:
     [[nodiscard]] const NaniteSettings& GetNaniteSettings() const  { return m_Nanite.GetSettings(); }
     /// 已注册的 GI Provider（帧图按注册表遍历构建 pass，而非手写门控）
     std::vector<std::unique_ptr<IGIProvider>>& GetGIProviders() { return m_GIProviders; }
+
+    /// 构造本帧的 GI 源上下文（第③段第 3 批）：统一注入**本帧快照 + 网格注册表**。
+    /// 【为什么 world/sceneGraph 不再传】全 GI 源里唯一真正读世界的是 RSM 的几何遍历，
+    /// 本批已改吃快照 ⇒ 这两个字段只剩过渡意义（留待第 5 批"B1 盲区收尾"一并删除）。
+    GIProviderContext MakeGIContext(const CameraData* cam, bool furnace,
+                                    rhi::IRHIBuffer* lightBuffer = nullptr, u32 lightCount = 0,
+                                    rhi::IRHIAccelerationStructure* tlas = nullptr) const;
     /// RSM 子系统与它的半分辨率求值 pass（供离线采样设施逐级查看 RSM 链路：
     /// 位置 / 法线 / VPL 辐射度 / 间接光输出。任务 30 的缺陷正是"pass 在跑、输出恒空"，
     /// 没有这几级就只能猜 —— 见文档 §11.3 的采样目标清单）。

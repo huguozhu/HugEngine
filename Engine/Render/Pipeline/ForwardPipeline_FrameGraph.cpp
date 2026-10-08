@@ -154,7 +154,8 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 // 通量要读方向光的颜色/强度：不绑光源缓冲就会读到对象缓冲（§9.2-AA ①）。
                 // 这条此前只加在 PrepareGI（非 RG 路径）里，RG 路径漏了 —— 同一个坑两处。
                 m_RSM->SetLightBuffer(GetCurrentLightBuffer());
-                m_RSM->RenderRSMPass(c, world, sg);
+                // 【第③段第 3 批】几何改从快照取 + 按 meshIndex 查注册表（不再需要捕获 world/sg）
+                m_RSM->RenderRSMPass(c, m_Snapshot, m_MeshRegistry);
             });
     }
 

@@ -699,6 +699,23 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
     }
 }
 
+GIProviderContext DeferredPipeline::MakeGIContext(const CameraData* cam, bool furnace,
+                                                  rhi::IRHIBuffer* lightBuffer, u32 lightCount,
+                                                  rhi::IRHIAccelerationStructure* tlas) const {
+    // 【第③段第 3 批】GI 源的渲染输入一律从快照取；world/sceneGraph 不再注入
+    //（唯一读它们的 RSM 已改吃快照 + 网格注册表）。
+    GIProviderContext ctx{};
+    ctx.camera       = cam;
+    ctx.frameIndex   = m_CurrentFrameSlot;
+    ctx.furnace      = furnace;
+    ctx.lightBuffer  = lightBuffer;
+    ctx.lightCount   = lightCount;
+    ctx.tlas         = tlas;
+    ctx.snapshot     = &m_Snapshot;
+    ctx.meshRegistry = &m_MeshRegistry;
+    return ctx;
+}
+
 void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
                                he::SceneGraph& sg, const CameraData& camera,
                                float deltaTime) {

@@ -41,6 +41,26 @@ namespace he::render {
 // 的用法完全一致；放到全局作用域包含会变成"未知类型"。
 #include "ShaderTypes.slang"
 
+/// 网格组件**类别**（收集侧判定）：让消费侧按"与旧路径逐条一致"的范围过滤条目，
+/// 而不必各自持有组件指针。多消费侧的旧遍历范围本来就不同，用类别表达才不会把口径改掉：
+///   · 阴影技术：`Base`/`Cube`/`Sphere` 且 `castShadow`（旧的 `ForEach<MeshComponent/Cube/Sphere>`）；
+///   · RSM pass：**只有** `Base`（旧实现只遍历 `ForEach<MeshComponent>`，不收 Cube/Sphere）；
+///   · RT（`RTPass`）：`Base`/`Cube`/`Sphere`（与其 `CollectMeshList` 一致）；
+///   · `MeshBatcher`：`Base`/`Cube`/`Sphere`/`Billboard`/`Text`/`Decal`/`Instanced`（**不含** `Spline`/`Skeletal`）。
+/// 【为什么不用一串 bool】每多一个消费者就多一个 bool 会迅速失控；类别是稳定的一组，且与
+/// `World::ForEach<T>` 的精确类型分桶一一对应。
+enum class SnapshotMeshClass : u8 {
+    Base = 0,   // he::MeshComponent（精确类型桶）
+    Cube,
+    Sphere,
+    Billboard,
+    Text,
+    Decal,
+    Spline,
+    Instanced,
+    Skeletal,
+};
+
 /// 单个可见物体的渲染输入（与 ECS 完全解耦：只有值，没有指针）
 struct SnapshotDrawItem {
     /// 世界矩阵 + 材质参数 + 世界 AABB（与着色器逐字段一致，可直接 memcpy 进对象 SSBO）
@@ -60,7 +80,13 @@ struct SnapshotDrawItem {
     /// 且 `castShadow == true` —— 与旧阴影路径的遍历范围逐条一致（它只枚举这三类；
     /// 广告牌/文字/贴花/样条/实例化/骨骼都不进阴影，`SplineMeshComponent` 虽派生自
     /// `MeshComponent` 但 `ForEach<T>` 按精确类型分桶，故天然排除）。
+    /// 【已由 meshClass + castsShadow 取代？】保留本字段：它是"该类条目进阴影"的**单一判据**，
+    /// 消费侧（四个技术）只需读它；`meshClass` 是更一般的类别信息，供 RSM/RT/合批等不同口径使用。
     bool bShadowCaster = false;
+    /// 网格组件类别（见 `SnapshotMeshClass`）：各消费侧按自己的旧口径过滤
+    SnapshotMeshClass meshClass = SnapshotMeshClass::Base;
+    /// 组件的 `castShadow` 标志（阴影技术的口径里要用；与 `bShadowCaster` 的区别是后者已含"类别"过滤）
+    bool castsShadow = false;
     /// 场景物体唯一 ID（调试、剔除统计、与 GPU Culling 的 objectID 对应）
     u32 objectID = 0;
     /// **来源实体 id**（`he::Entity::id`）。渲染侧仍有少量"逐实体"的状态机（骨骼缓冲的

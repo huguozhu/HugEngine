@@ -12,8 +12,13 @@ class World;
 class SceneGraph;
 class SkeletalMeshComponent;   // 蒙皮矩阵的收集入口（实现里才需要完整类型）
 class MeshComponent;           // E-3：材质映射的输入（实现里才需要完整类型）
-class CubeComponent;           // 第③段第 2 批：阴影投射者的精确类型判定（`is_same_v` 只需声明）
+class CubeComponent;           // 第③段第 2/3 批：网格类别的精确类型判定（`is_same_v` 只需声明）
 class SphereComponent;         // 同上
+class BillboardComponent;      // 同上
+class TextRenderComponent;     // 同上
+class DecalComponent;          // 同上
+class SplineMeshComponent;     // 同上
+class InstancedMeshComponent;  // 同上
 } // namespace he
 
 // ============================================================
@@ -130,15 +135,26 @@ public:
             FillObjectData(item.object, MakePBRMaterial(comp));
         }
         item.visibilityFlags   = 1u;                 // 与 `FillObj` 一致（"可见"，剔除在渲染线程做）
-        // 阴影投射者（第③段第 2 批）：口径与旧阴影路径的遍历范围逐条一致 ——
-        // **精确**的 `MeshComponent` / `CubeComponent` / `SphereComponent` + `castShadow`。
-        // 用 `if constexpr` 判定（`SplineMeshComponent` 虽派生自 MeshComponent，但 `ForEach<T>`
-        // 按精确类型分桶，走的是它自己的实例化，故不会命中这一支）。
-        if constexpr (std::is_same_v<TComponent, he::MeshComponent> ||
-                      std::is_same_v<TComponent, he::CubeComponent> ||
-                      std::is_same_v<TComponent, he::SphereComponent>) {
-            item.bShadowCaster = comp.castShadow;
+        // 网格组件类别 + 阴影投射标记（第③段第 2/3 批）：口径与各消费侧的旧遍历范围逐条一致。
+        // `ForEach<T>` 按**精确类型**分桶，故这里的 if constexpr 链就是"这个条目来自哪一类组件"。
+        if constexpr (std::is_same_v<TComponent, he::MeshComponent>)      item.meshClass = SnapshotMeshClass::Base;
+        else if constexpr (std::is_same_v<TComponent, he::CubeComponent>)   item.meshClass = SnapshotMeshClass::Cube;
+        else if constexpr (std::is_same_v<TComponent, he::SphereComponent>) item.meshClass = SnapshotMeshClass::Sphere;
+        else if constexpr (std::is_same_v<TComponent, he::BillboardComponent>) item.meshClass = SnapshotMeshClass::Billboard;
+        else if constexpr (std::is_same_v<TComponent, he::TextRenderComponent>) item.meshClass = SnapshotMeshClass::Text;
+        else if constexpr (std::is_same_v<TComponent, he::DecalComponent>)  item.meshClass = SnapshotMeshClass::Decal;
+        else if constexpr (std::is_same_v<TComponent, he::SplineMeshComponent>) item.meshClass = SnapshotMeshClass::Spline;
+        else if constexpr (std::is_same_v<TComponent, he::InstancedMeshComponent>) item.meshClass = SnapshotMeshClass::Instanced;
+        else if constexpr (std::is_same_v<TComponent, he::SkeletalMeshComponent>) item.meshClass = SnapshotMeshClass::Skeletal;
+        // `castShadow` 是所有网格组件共有的字段（`SplineMeshComponent` 派生自 MeshComponent，
+        // 但走的是自己的类别分支 ⇒ 与旧阴影路径"只枚举 Mesh/Cube/Sphere"的口径一致）
+        if constexpr (std::is_base_of_v<he::MeshComponent, TComponent>) {
+            item.castsShadow = comp.castShadow;
         }
+        item.bShadowCaster = item.castsShadow &&
+            (item.meshClass == SnapshotMeshClass::Base ||
+             item.meshClass == SnapshotMeshClass::Cube ||
+             item.meshClass == SnapshotMeshClass::Sphere);
         // meshIndex / indexCount / firstIndex / vertexOffset 由 MeshBatcher 在 Prepare 阶段填充
         // 上一帧世界矩阵：按**下标**对齐（与 GPUScene 的 `m_CachedMatrices[idx]` 同一假设）。
         // 首帧（prev 为空或该下标不存在）取当前矩阵 ⇒ 运动矢量为 0，与既有行为一致。

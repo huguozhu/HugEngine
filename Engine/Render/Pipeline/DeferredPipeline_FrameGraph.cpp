@@ -620,7 +620,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             if (!prov->NeedsPass(m_GIConfig.diffuse)) continue;
             rg.AddPass(prov->GetName(), {}, {},
                 [&, p = prov.get()](rhi::IRHICommandList* c) {
-                    GIProviderContext ctx{ &world, &sg, &camera, m_CurrentFrameSlot };
+                    GIProviderContext ctx = MakeGIContext(&camera, /*furnace=*/false);
                     p->Render(c, ctx);
                 });
             rsmPassRegistered = true;
@@ -806,7 +806,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             {},
             [&, p = prov.get(), cam = &camera, giIdx](rhi::IRHICommandList* c) {
                 m_GITimer.Begin(c, giIdx);
-                p->Render(c, GIProviderContext{ &world, &sg, cam, m_CurrentFrameSlot, m_GIConfig.furnaceMode });
+                p->Render(c, MakeGIContext(cam, m_GIConfig.furnaceMode));
                 m_GITimer.End(c, giIdx);
                 c->SetPipeline(m_Lighting.GetPSO());
             },
@@ -838,7 +838,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         rg.AddPass(prov->GetName(),
             {{gbDepth, ResourceAccess::Read}, {gbB, ResourceAccess::Read}, {gbA, ResourceAccess::Read}},
             {{ssaoOut, ResourceAccess::Write}},
-            [&, p = prov.get(), giIdx, aoCtx = GIProviderContext{ &world, &sg, &camera, m_CurrentFrameSlot, m_GIConfig.furnaceMode }](rhi::IRHICommandList* c) {
+            [&, p = prov.get(), giIdx, aoCtx = MakeGIContext(&camera, m_GIConfig.furnaceMode)](rhi::IRHICommandList* c) {
                 p->PreBind(c);                                  // 绑定该源 pass 的管线状态
                 p->SetInputs(m_GBuffer->GetDepth(), m_GBuffer->GetNormal(), m_GBuffer->GetAlbedo());
                 // 【为什么这里不再开关 render pass（2026-09 画质阶段 0 修复）】
@@ -874,7 +874,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 rhi::ClearValue clr{};
                 c->BeginOffscreenPass(p->GetSpecularOutput()->GetNativeHandle(), nullptr, pw, ph, &clr, false);
                 m_GITimer.Begin(c, giIdx);
-                p->Render(c, GIProviderContext{ &world, &sg, &camera, m_CurrentFrameSlot, m_GIConfig.furnaceMode });
+                p->Render(c, MakeGIContext(&camera, m_GIConfig.furnaceMode));
                 m_GITimer.End(c, giIdx);
                 c->EndOffscreenPass();
             });
@@ -927,7 +927,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 rhi::ClearValue clr{};
                 c->BeginOffscreenPass(p->GetDiffuseOutput()->GetNativeHandle(), nullptr, pw, ph, &clr, false);
                 m_GITimer.Begin(c, giIdx);
-                p->Render(c, GIProviderContext{ &world, &sg, &camera, m_CurrentFrameSlot, m_GIConfig.furnaceMode });
+                p->Render(c, MakeGIContext(&camera, m_GIConfig.furnaceMode));
                 m_GITimer.End(c, giIdx);
                 c->EndOffscreenPass();
             });
@@ -1150,8 +1150,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             const u32 ph = out->GetHeight();
             lumenHandle = rg.ImportTexture(prov->GetName(), out);
             const u32 giIdx = lumenGiIdx;   // 计时下标（与步骤 29 的耗时日志同源）
-            const GIProviderContext lumenCtx{ &world, &sg, &camera, m_CurrentFrameSlot,
-                                              m_GIConfig.furnaceMode };
+            const GIProviderContext lumenCtx = MakeGIContext(&camera, m_GIConfig.furnaceMode);
             rg.AddPass(prov->GetName(),
                 {{gbDepth, ResourceAccess::Read}, {gbA, ResourceAccess::Read}, {gbB, ResourceAccess::Read}},
                 {{lumenHandle, ResourceAccess::Write}},
@@ -1195,10 +1194,9 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         // 加速结构（TLAS）与场景材质纹理已在 **DDGI 段之前**注册/构建（见那里的说明：
         // DDGI 的光追 march 也要用它们）。此处不再重复注册，否则同一帧会构建两次 TLAS。
 
-        const GIProviderContext rtCtx{ &world, &sg, &camera, m_CurrentFrameSlot,
-                                       m_GIConfig.furnaceMode,
-                                       m_LightBuffers[m_CurrentFrameSlot].get(), rtfpc.lightCount,
-                                       m_RTPass->GetTLAS() };
+        const GIProviderContext rtCtx = MakeGIContext(&camera, m_GIConfig.furnaceMode,
+                                                m_LightBuffers[m_CurrentFrameSlot].get(), rtfpc.lightCount,
+                                                m_RTPass->GetTLAS());
 
         for (auto& prov : m_GIProviders) {
             auto* rtp = dynamic_cast<RTEffectProvider*>(prov.get());
@@ -1355,7 +1353,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         rg.AddPass("IBL_Bake", {}, {},
             [&, p = prov.get(), giIdx](rhi::IRHICommandList* c) {
                 m_GITimer.Begin(c, giIdx);
-                p->Render(c, GIProviderContext{ &world, &sg, &camera, m_CurrentFrameSlot, m_GIConfig.furnaceMode });
+                p->Render(c, MakeGIContext(&camera, m_GIConfig.furnaceMode));
                 m_GITimer.End(c, giIdx);
             });
     }

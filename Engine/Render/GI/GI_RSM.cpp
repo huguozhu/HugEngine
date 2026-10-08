@@ -7,6 +7,8 @@
 #include "Scene/SceneGraph.h"
 #include "Scene/MeshComponent.h"
 #include "Pipeline/Material.h"   // GPUObjectData
+// 第③段第 3 批：按 meshIndex 从注册表取顶点/索引缓冲（不再遍历 ECS）
+#include "Threading/MeshRegistry.h"
 #include "RSM_Generate.vert.spv.h"
 #include "RSM_Generate.frag.spv.h"
 #include <cstdio>
@@ -158,7 +160,8 @@ void GI_RSM::Render(rhi::IRHICommandList* cmd) {
     // 实际渲染委托给 RenderRSMPass（由 ForwardPipeline 在 Render 中调用）
 }
 
-void GI_RSM::RenderRSMPass(rhi::IRHICommandList* cmd, he::World& world, he::SceneGraph& sg) {
+void GI_RSM::RenderRSMPass(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snapshot,
+                            const MeshRegistry& registry) {
     if (!m_Ready || !m_ObjectBuf || !m_RSMDepth) return;
 
     // binding 1 = GPULight[]：**必须是光源缓冲**。此前这里绑的是对象缓冲
@@ -201,16 +204,18 @@ void GI_RSM::RenderRSMPass(rhi::IRHICommandList* cmd, he::World& world, he::Scen
     auto* objData = static_cast<GPUObjectData*>(m_ObjectBuf->Map());
     u32 objectIndex = 0;
 
-    auto renderMesh = [&](he::Entity e, he::MeshComponent& m) {
-        if (m.GetIndexCount() == 0 || objectIndex >= MAX_OBJECTS) return;
-        objData[objectIndex].worldMatrix = sg.GetWorldMatrix(e);
-        // 光照图展开用的世界 AABB（任务 31）：本 pass 不读它，但对象缓冲的同一元素会被别的
-        // 消费者看到，留成未初始化会让"读 AABB"变成读垃圾 ⇒ 一并填上。
-        {
-            const he::AABB wb = m.GetBounds().Transform(objData[objectIndex].worldMatrix);
-            objData[objectIndex].boundsMin = float4(wb.min, 0.0f);
-            objData[objectIndex].boundsMax = float4(wb.max, 0.0f);
-        }
+    // 【第③段第 3 批】遍历**快照**里的 `Base` 类条目 —— 旧实现是 `world.ForEach<he::MeshComponent>`，
+    // 即**只收精确的 MeshComponent 桶**（不含 Cube/Sphere/广告牌/…），故这里按 `meshClass == Base`
+    // 过滤，口径逐条一致；世界矩阵/世界 AABB 直接用快照里已算好的值（与旧式
+    // `sg.GetWorldMatrix(e)` + `GetBounds().Transform(...)` 同一份数据）。
+    for (const SnapshotDrawItem& it : snapshot.draws) {
+        if (it.meshClass != SnapshotMeshClass::Base) continue;
+        if (objectIndex >= MAX_OBJECTS) break;
+        const MeshRegistryEntry* me = registry.Find(it.meshIndex);
+        if (!me || !me->vertexBuffer || !me->indexBuffer) continue;
+        objData[objectIndex].worldMatrix = it.object.worldMatrix;
+        objData[objectIndex].boundsMin   = it.object.boundsMin;
+        objData[objectIndex].boundsMax   = it.object.boundsMax;
 
         // DrawCall 调试 marker：标记当前 RSM 物体（RenderDoc 定位用）
         char label[64];
@@ -227,16 +232,15 @@ void GI_RSM::RenderRSMPass(rhi::IRHICommandList* cmd, he::World& world, he::Scen
         pc.lightVP = m_LightVP;
         pc.objIdx  = objectIndex;
         pc.lightIdx = 0;  // 使用第一个方向光
-        pc.albedo  = m.baseColorFactor;
+        pc.albedo  = it.object.baseColorFactor;   // 逐网格 albedo（旧实现读组件字段，快照里同一份值）
         cmd->SetPushConstants(0, sizeof(RSMPush), &pc);
 
-        cmd->SetVertexBuffer(m.GetVertexBuffer().get(), 0);
-        cmd->SetIndexBuffer(m.GetIndexBuffer().get());
-        cmd->DrawIndexed(m.GetIndexCount());
+        cmd->SetVertexBuffer(me->vertexBuffer, 0);
+        cmd->SetIndexBuffer(me->indexBuffer);
+        cmd->DrawIndexed(me->indexCount);
         objectIndex++;
-    };
+    }
 
-    world.ForEach<he::MeshComponent>(renderMesh);
     m_ObjectBuf->Unmap();
 
     cmd->EndOffscreenPass();

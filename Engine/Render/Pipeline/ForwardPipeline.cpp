@@ -675,7 +675,7 @@ void ForwardPipeline::EndHDRPass(rhi::IRHICommandList* cmd) {
     if (m_ToneMap) m_ToneMap->PreBind(cmd);
 }
 
-void ForwardPipeline::PrepareGI(rhi::IRHICommandList* cmd, he::World& world, he::SceneGraph& sg) {
+void ForwardPipeline::PrepareGI(rhi::IRHICommandList* cmd) {
     if (!m_GI || !m_GI->IsEnabled()) return;
 
     // 天空盒（IBL 天空源）：走快照（T1.4），本函数不再 `world.ForEach<SkyboxComponent>`。
@@ -703,7 +703,8 @@ void ForwardPipeline::PrepareGI(rhi::IRHICommandList* cmd, he::World& world, he:
         // 通量计算要读方向光的颜色/强度（§9.2-AA：不绑光源缓冲就会读到对象缓冲）
         m_RSM->SetLightBuffer(GetCurrentLightBuffer());
         // 从光源 POV 渲染几何体 → RSM 纹理（使用 RSM 自有的独立深度缓冲）
-        m_RSM->RenderRSMPass(cmd, world, sg);
+        // 【第③段第 3 批】几何改从快照取 + 按 meshIndex 查注册表（不再需要 world/sg）
+        m_RSM->RenderRSMPass(cmd, m_Snapshot, m_MeshRegistry);
         UpdateRSMBindings();
     }
 }
@@ -971,7 +972,7 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
         m_Device->UpdateDescriptorSet(m_DescSets[slot], rhi::kBindingObjectData,
             rhi::DescriptorType::StorageBuffer, m_ObjectBuffers[slot].get());
     }
-    PrepareGI(cmd, world, sg);
+    PrepareGI(cmd);
     // GPU 视锥剔除：必须在 render pass 之外（BeginHDRPass 会 Begin 本帧的 HDR pass）
     RunGPUCulling(cmd, world, sg, camera);
     BeginHDRPass(cmd, m_HDRWidth, m_HDRHeight);

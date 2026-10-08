@@ -19,16 +19,19 @@
 #include "GI/GITypes.h"
 #include "PostProcess/DenoiseSignal.h"   // 步骤 34（11.3）：DenoiseSignal / 统一历史池 / 有效性契约
 #include "RHI/RHI.h"
+// 第③段第 3 批：GI 源的渲染输入改从快照取（`GIProviderContext::snapshot` / `meshRegistry`）
+#include "Threading/FrameSceneSnapshot.h"
 
 namespace he::render {
 
 struct CameraData;   // 前向声明（避免头文件循环）
+class MeshRegistry;
 
 /// Provider 执行上下文（帧图在调用 Render/RenderAux 时注入）
 /// 有些源只依赖 GBuffer（如屏幕空间 AO），有些需要场景数据（RSM/DDGI 需要光源与几何），
 /// 光追类源还需要加速结构与光照缓冲。
 struct GIProviderContext {
-    he::World*       world      = nullptr;   // 场景（RSM/DDGI 生成探针用）
+    he::World*       world      = nullptr;   // 场景（**过渡期**：快照化完成后应删除；当前只有 RSM 用，已改吃快照）
     he::SceneGraph*  sceneGraph = nullptr;
     const CameraData* camera    = nullptr;
     u32              frameIndex = 0;
@@ -42,6 +45,14 @@ struct GIProviderContext {
     rhi::IRHIBuffer* lightBuffer = nullptr;   // 光照缓冲（射线命中着色用）
     u32              lightCount  = 0;
     rhi::IRHIAccelerationStructure* tlas = nullptr;   // 顶层加速结构（AS_Build 产物）
+
+    // ── 本帧渲染输入（第③段第 3 批）──
+    /// 【为什么放在末尾】前面几项是按位置聚合初始化的（`GIProviderContext{&world, &sg, cam, slot, furnace}`），
+    /// 新字段追加在末尾才不会打乱既有初始化列表。
+    /// GI 源需要的渲染输入从这里取，不再经 `world`/`sceneGraph`
+    ///（RSM 的几何遍历是本批唯一真正读世界的源，已切换 ⇒ world/sceneGraph 目前只剩占位意义）。
+    const FrameSceneSnapshot* snapshot = nullptr;
+    const MeshRegistry*       meshRegistry = nullptr;
 };
 
 /// GI Provider 接口

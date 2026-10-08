@@ -582,6 +582,20 @@ TEST_CASE("SceneSnapshotBuilder：实例化/骨骼网格在快照里带 bInstanc
     // 枚举顺序与旧 `SceneRenderer::Prepare` 一致：普通网格在前，实例化网格在后
     CHECK(snap.draws[0].bInstanced == false);
     CHECK(snap.draws[1].bInstanced == true);
+    // 【第③段第 2/3 批】网格类别 + 阴影投射标记：各消费侧按"自己那条旧遍历范围"过滤条目。
+    // 立方体是 `Cube` 类且 `castShadow` 默认为真 ⇒ 进阴影；实例化网格不在阴影口径内 ⇒ 不进。
+    CHECK(snap.draws[0].meshClass == SnapshotMeshClass::Cube);
+    CHECK(snap.draws[1].meshClass == SnapshotMeshClass::Instanced);
+    CHECK(snap.draws[0].castsShadow == true);
+    CHECK(snap.draws[0].bShadowCaster == true);
+    CHECK(snap.draws[1].bShadowCaster == false);
+
+    // `castShadow=false` 时同一条目不再进阴影（口径 = 类别 ∧ castShadow）
+    lw.world.ForEach<he::CubeComponent>([&](he::Entity, he::CubeComponent& c) { c.castShadow = false; });
+    FrameSceneSnapshot snap2;
+    CHECK(SceneSnapshotBuilder::BuildObjects(lw.world, lw.sg, CameraData{}, {}, nullptr, snap2) == 2u);
+    CHECK(snap2.draws[0].castsShadow == false);
+    CHECK(snap2.draws[0].bShadowCaster == false);
 }
 
 TEST_CASE("GPUScene::MakeObjectRecord：与旧 FillObj 逐位一致（迁移钉子）") {

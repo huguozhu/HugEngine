@@ -100,7 +100,7 @@ public:
     void SetGI(std::unique_ptr<IGlobalIllumination> gi) { m_GI = std::move(gi); }
     IAntiAliasing* GetAntiAliasing() { return m_AntiAliasing.get(); }
     void SetAntiAliasing(std::unique_ptr<IAntiAliasing> aa) { m_AntiAliasing = std::move(aa); }
-    void PrepareGI(rhi::IRHICommandList* cmd, he::World& world, he::SceneGraph& sg);
+    void PrepareGI(rhi::IRHICommandList* cmd);
     GI_RSM* GetRSM() { return m_RSM.get(); }
 
     // 后处理（委托给子系统）
