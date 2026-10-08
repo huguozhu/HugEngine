@@ -459,6 +459,12 @@ private:
 >
 > 判据口径的两点提醒（都已写进 §9）：① 迁移类改动一律用**旧实现逐行转写 + `memcmp` 逐位比较**
 > （全帧转储在单条路径尺度上不可判定）；② 闸门基线（B1 82、持有者 277）是**上限**，随收敛手动下调。
+>
+> **端到端复核（2026-09-24，阶段 1 收尾时的绿灯基线）**：7 个目标（`HugEngineTests` / `06.GILab` /
+> `07.Nanite` / `03.Sponza-Forward` / `05.Sponza-PathTracing` / `02.Cube` / `04.Sponza-Deferred`）
+> 全部编译通过；单测 **384 例 / 71703 断言**；两项闸门都在基线（B1 渲染期 82、持有者 277）；
+> `acceptance_sweep.ps1 -OnlyNanite` **PASS**（两类 pass 指纹 `1C15AB72E688B530` / `750CC247BF8B9C3D`
+> 未变，CULL DIFF / PIC CMP / TAKEOVER CMP 全过）⇒ 阶段 0 与本阶段改动**未破坏既有验收**。
 
 ---
 
