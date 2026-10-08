@@ -880,6 +880,16 @@ int main() {
     render::RenderThread       renderThread(renderQueue);
     render::FrameScheduler     frameScheduler(renderQueue, renderThread);
     const bool                 useRenderQueue = he::UsesRenderThread();
+    // 【T2.2 读数开关，默认关闭】`HE_RENDER_THREAD_STRICT=1` 时**真的起渲染线程**。
+    // 现在样例里仍有大量游戏线程直接调 RHI 的地方（acquire / 录制 / Submit / Present / WaitIdle），
+    // 而 RHI 侧对"拥有线程"有断言（`HE_ASSERT_RENDER_THREAD`）⇒ 打开本开关就能**实测**出
+    // 还差哪些调用点没搬。默认关闭 ⇒ 正常路径（壳模式）与既有判据完全不变。
+    const bool strictRenderThread = std::getenv("HE_RENDER_THREAD_STRICT") != nullptr;
+    if (strictRenderThread) {
+        renderThread.SetSpinWaitUs(50);
+        HE_CORE_WARN("06.GILab：HE_RENDER_THREAD_STRICT=1 ⇒ 真起渲染线程（用于测量 T2.2 的待搬调用点）");
+        renderThread.Start();
+    }
     HE_CORE_INFO("06.GILab：渲染线程模式 = {}（{}）⇒ 每帧渲染{}经命令队列",
                  he::RenderThreadingModeName(he::GetRenderThreadingMode()),
                  static_cast<int>(he::GetRenderThreadingMode()),
