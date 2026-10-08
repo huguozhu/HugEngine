@@ -258,7 +258,7 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             BeginHDRPass(c, w, h);
             BeginFrame(c, w, h);
             RenderScene(c, world, sg, camera);
-            RenderSkybox(c, world, camera);
+            RenderSkybox(c, camera);
             EndHDRPass(c);
         });
 

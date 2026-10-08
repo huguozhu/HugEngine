@@ -181,7 +181,12 @@ int main() {
                 pipeline.GetCurrentDescSet());
             // 帧相机解析：LLM 生成的场景含主相机实体（Camera 组件 isMain=true）时优先使用，
             // 否则回退自由相机 CameraController（S0.4 主相机接入）
-            render::CameraData frameCamera = render::ResolveFrameCamera(*fWorld, camCtrl.GetCamera());
+            // 第③段第 4 批：场景查询在调用方（渲染模块的 ResolveFrameCamera 已不再收 World）
+            he::CameraComponent* mainCam = fWorld->GetPrimaryCamera();
+            he::TransformComponent* mainCamXform =
+                mainCam ? fWorld->GetComponent<he::TransformComponent>(mainCam->GetEntity()) : nullptr;
+            render::CameraData frameCamera =
+                render::ResolveFrameCamera(mainCam, mainCamXform, camCtrl.GetCamera());
             render::SubsystemContext shadowCtx;
             shadowCtx.world = fWorld;
             shadowCtx.sceneGraph = fSG;

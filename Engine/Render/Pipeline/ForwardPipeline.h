@@ -105,7 +105,7 @@ public:
 
     // 后处理（委托给子系统）
     void RenderToneMapPass(rhi::IRHICommandList* cmd);
-    void RenderSkybox(rhi::IRHICommandList* cmd, he::World& world, const CameraData& camera);
+    void RenderSkybox(rhi::IRHICommandList* cmd, const CameraData& camera);
 
     rhi::IRHIBuffer*         GetCurrentObjectBuffer() { return m_ObjectBuffers[m_CurrentFrameSlot].get(); }
     rhi::IRHIBuffer*         GetCurrentShadowBuffer() { return m_ShadowBuffers[m_CurrentFrameSlot].get(); }

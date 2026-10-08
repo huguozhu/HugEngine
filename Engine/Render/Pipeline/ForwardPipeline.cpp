@@ -737,13 +737,12 @@ void ForwardPipeline::UpdateIBLBindings(GI_IBL* gi) {
     }
 }
 
-void ForwardPipeline::RenderSkybox(rhi::IRHICommandList* cmd, he::World& world,
-                                    const CameraData& camera) {
+void ForwardPipeline::RenderSkybox(rhi::IRHICommandList* cmd, const CameraData& camera) {
     if (!m_Skybox) return;
     SubsystemContext ctx;
-    ctx.world = &world;
     ctx.camera = &camera;
-    // 【第③段】天空盒数据改从快照取（`SkyboxPass::Update` 只读 ctx.snapshot）
+    // 【第③段第 4 批】天空盒数据只从快照取（`SkyboxPass::Update` 只读 ctx.snapshot）⇒
+    // 本函数不再需要 `World&`（上一批还只是"不用 world 里的数据"，现在连参数也去掉）。
     ctx.snapshot = &m_Snapshot;
     m_Skybox->Update(ctx);
     m_Skybox->Render(cmd);
@@ -978,7 +977,7 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
     BeginHDRPass(cmd, m_HDRWidth, m_HDRHeight);
     BeginFrame(cmd, m_HDRWidth, m_HDRHeight);
     RenderScene(cmd, world, sg, camera);
-    RenderSkybox(cmd, world, camera);
+    RenderSkybox(cmd, camera);
     EndHDRPass(cmd);
 
     // AA Pass（FXAA 等在 HDR→ToneMap 之间或 ToneMap 之后）

@@ -92,10 +92,16 @@ struct CameraData {
 CameraData MakeCameraData(const he::CameraComponent& camComp,
                           const he::TransformComponent& transform);
 
-/// 帧入口相机解析（S0.4 主相机接入）：
-/// 优先取 World 主相机实体（isMain 的 CameraComponent + 其 Transform）组装 CameraData；
-/// 无主相机实体（或缺 Transform）时回退 fallback（如 CameraController 的自由相机）。
-/// 各渲染管线帧入口用本函数替代直接传 camCtrl.GetCamera()。
-CameraData ResolveFrameCamera(he::World& world, const CameraData& fallback);
+/// 帧入口相机解析（S0.4 主相机接入 / 阶段 1 §15.1 第③段第 4 批：**不再收 World**）：
+/// 优先用主相机组件（`isMain` 的 CameraComponent + 它的 Transform）组装 CameraData；
+/// `cam == nullptr`（无主相机实体）或 `xform == nullptr`（相机实体缺 Transform，数据异常）时
+/// 回退 fallback（如 CameraController 的自由相机）。
+/// 【为什么改成收组件而不是 World】原签名 `ResolveFrameCamera(World&, …)` 让 `Engine/Render/`
+/// 里多了一处"渲染期读世界"，而它其实是**场景查询**：查询本身应在游戏线程/调用方完成
+/// （`world.GetPrimaryCamera()` + `world.GetComponent<TransformComponent>(…)`），
+/// 本函数只做"组件 → CameraData"的纯映射（附录 B1 因此下降）。
+CameraData ResolveFrameCamera(const he::CameraComponent* cam,
+                              const he::TransformComponent* xform,
+                              const CameraData& fallback);
 
 } // namespace he::render

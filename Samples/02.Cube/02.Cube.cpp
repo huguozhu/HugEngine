@@ -1068,7 +1068,12 @@ int main() {
 
         // 帧相机解析（S0.4）：场景含主相机实体时优先使用，否则回退自由相机
         // 本示例场景无 CameraComponent 实体，行为与之前一致（始终走 CameraController 回退）
-        render::CameraData frameCamera = render::ResolveFrameCamera(world, camCtrl.GetCamera());
+        // 帧相机解析（S0.4 主相机接入 / 第③段第 4 批：场景查询在调用方，渲染模块不再收 World）
+        he::CameraComponent* mainCam = world.GetPrimaryCamera();
+        he::TransformComponent* mainCamXform =
+            mainCam ? world.GetComponent<he::TransformComponent>(mainCam->GetEntity()) : nullptr;
+        render::CameraData frameCamera =
+            render::ResolveFrameCamera(mainCam, mainCamXform, camCtrl.GetCamera());
 
         // 3D 文字系统：脏标记 → 重栅格化 → 纹理更新（A5）
         he::TextRenderSystem::Update(world, device.get());
