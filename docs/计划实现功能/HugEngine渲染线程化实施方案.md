@@ -1296,6 +1296,44 @@ python Tools\check_threading.py --world-deps --mesh-ptrs --handles --gate
 ---
 
 > **文档版本**：v1.3（2026-09-24）
+
+---
+
+## 15. 第二轮交接快照（2026-09-24 晚；新会话请从这里开始）
+
+**分支与状态**：`multi_thread`，**11 条提交未推送**（`git push origin multi_thread` 可推；PR 入口
+`https://github.com/huguozhu/HugEngine/pull/new/multi_thread`）。工作区干净（仅另一个会话留下的
+未跟踪占位文件 `docs/计划实现功能/占位.md`，不要动它）。
+
+**四项闸门（都在基线，只允许下降）**：帧内同步 RHI 调用 **376**｜附录 B1 世界依赖 渲染期 **81** /
+加载期 14｜组件指针依赖 渲染期 **18** / 加载期 4｜T0.7 资源持有者 **277** / 76 文件。
+复测：`python Tools/check_threading.py --world-deps --mesh-ptrs --handles --gate`
+
+**验收**：单测 **394 例 / 71789 断言全通过**；`acceptance_sweep.ps1 -OnlyNanite` **PASS** 且两类
+pass 指纹（`1C15AB72E688B530` / `750CC247BF8B9C3D`）未变；`06.GILab` 冒烟**同二进制双跑 = 4539 像素**
+（= 噪声底噪）、"改动前后另一趟 = 0 像素" ⇒ 判据要**多跑一趟做对照**（单次对比会被噪声误导）。
+
+**已完成**：阶段 0 全部（T0.1–T0.7 + 两条退出判据）；阶段 1 的快照契约、光源/物体/环境/骨骼/粒子/
+天空盒/材质收集、三管线消费（光源 + `GPUScene`）、E-1 注册表、E-2① 注册点（三管线对称）、E-2② 骨骼
+矩阵走快照、E-3① 材质映射唯一化、E-3② 前半（收集侧算材质）、E-4 样条口径统一、稳态零分配（`Reserve`
+补漏 + 自校准预留）、Forward/Deferred 完整快照；**阶段 2 的 T2.1 渲染线程真起线程**（含 4 例单测）。
+
+**下一步（按序，规格都已入档）**：
+1. **Decal 快照化** ⇒ B1 81 → 79（字段 ↔ 原代码行号对照见 §9 T1.4 的那条子项）；
+2. `GBufferRenderer`（3 处）与 `RenderSkybox`（需天空盒子系统 `Update(ctx)` 一并改）的签名；
+3. **三条管线帧入口改收 `const FrameSceneSnapshot&`** ⇒ **B1 → 0**（阶段 1 退出条件 = 附录 B 断言通过）；
+   样例在游戏线程构建完整快照（`RegisterMeshes`/`BuildObjects`/`BuildLights`/`BuildMaterials`/
+   `BuildSkybox`/`BuildEnvironment`/`BuildParticles` 均已就绪）；
+4. **T2.4** 样例循环改造（06.GILab 试点 → 7 个样例）：游戏线程构建快照、**按值**交接、渲染线程执行
+   （顺带修掉 06.GILab 现有的**按引用捕获**）；
+5. **T2.2** 设备与交换链归渲染线程（`CreateDevice` 的归属 claim 迁移、`Acquire/Present` 迁移）；
+6. **按需 T2.3**（资源创建同步转发）、**T2.6**（`RenderThreadContext` 为 RHI 唯一出口 + 队列 cv 唤醒）；
+7. **判据**：模式 0 / 模式 1 同场景转储**逐位一致** + 帧时间**不退化 >3%**（06.GILab 121 帧自测）。
+   **模式 2 本轮不做**（你已明确）；T2.5/T3.x/T4.x/T5.x 属后续范围。
+
+**开工前固定命令（顺序不可省）**：先查并发构建（`Get-Process cl,MSBuild`）→ **后台**构建
+（前台会被 600s 截断并留孤儿 `cl`，表现为"假挂死"）→ 看退出码与 `error C`/`error LNK` →**确认全绿后
+再单独提交**（不要把构建与提交串成一条命令）。
 > **性质**：实施计划（**已开工**）。开工后每完成一个任务，回到 §9 勾选并在 §6 记录实测数字。
 > **v1.1 变更**：新增 §12 附录 C「升级到 UE 三线程模型的增量路径」；阶段 0 增加预埋任务 **T0.6（RHI 命令流契约）** 与 **T0.7（资源句柄化）**，二者是 §12 所列升级路径的前置条件。
 > **v1.2 变更**：T0.5 的开关改为**三态** `RenderThreadingMode`（单线程 / 游戏+渲染 / 游戏+渲染+RHI，见 §5 与 §7 的口径说明）；新增 §13 附录 D「阶段 0 T0.2 帧内同步 RHI 调用清单」与配套脚本 `Tools/check_threading.py`（含 `--gate` 闸门模式）。
