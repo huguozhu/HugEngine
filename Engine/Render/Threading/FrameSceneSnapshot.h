@@ -108,6 +108,11 @@ struct FrameSceneSnapshot {
     u32        viewportWidth  = 0;
     u32        viewportHeight = 0;
 
+    /// 空中透视（大气）参数：xyz = 太阳方向（指向太阳），w = 浑浊度（0 = 关闭）。
+    /// 与 `PushConstantData::atmosphere` / `DeferredLightingPushConstant::atmosphere` 逐字段一致；
+    /// 由游戏线程从物理天空组件取（T1.4），渲染期因此不必再读世界。
+    float4     atmosphere{0.0f, 1.0f, 0.0f, 0.0f};
+
     std::vector<SnapshotDrawItem> draws;
     std::vector<SnapshotLight>    lights;
     /// 骨骼矩阵（扁平数组：`boneOffset..boneOffset+boneCount` 属于某个 draw，

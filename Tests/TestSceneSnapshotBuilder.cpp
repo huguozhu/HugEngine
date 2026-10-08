@@ -15,6 +15,7 @@
 #include "Pipeline/GPUScene.h"        // GPUSceneObject + MakeObjectRecord（只用到静态转换，不需要链接 RHI）
 #include "Pipeline/PhysicalLight.h"   // kPhysicalLightExposure（与收集口径同源）
 #include "Scene/LightComponent.h"
+#include "Scene/PhysicalSkyComponent.h"   // 环境（太阳方向/浑浊度）进快照的用例
 #include "Scene/SceneGraph.h"
 #include "Scene/Transform.h"
 #include "Scene/World.h"
@@ -599,6 +600,40 @@ TEST_CASE("GPUScene::MakeObjectRecord：与旧 FillObj 逐位一致（迁移钉�
 
 TEST_CASE("GPUSceneObject：布局必须与着色器 std430 一致（128 字节）") {
     CHECK(sizeof(GPUSceneObject) == 128u);
+}
+
+TEST_CASE("SceneSnapshotBuilder：环境（太阳方向 + 浑浊度）进快照") {
+    LightWorld lw;
+    FrameSceneSnapshot snap;
+
+    SUBCASE("没有物理天空 ⇒ 复位为关闭（方向 (0,1,0)、浑浊度 0）") {
+        CHECK_FALSE(SceneSnapshotBuilder::BuildEnvironment(lw.world, snap));
+        CHECK(snap.atmosphere.y == 1.0f);
+        CHECK(snap.atmosphere.w == 0.0f);          // 浑浊度 0 = 关闭
+    }
+
+    SUBCASE("有启用的物理天空 ⇒ 取它的方向与浑浊度") {
+        const Entity e = lw.AddEntity("sky", float3(0.0f));
+        auto* ps = lw.world.AddComponent<he::PhysicalSkyComponent>(e);
+        ps->enabled      = true;
+        ps->sunDirection = float3(0.3f, -0.9f, 0.2f);
+        ps->turbidity    = 4.5f;
+
+        CHECK(SceneSnapshotBuilder::BuildEnvironment(lw.world, snap));
+        CHECK(snap.atmosphere.x == doctest::Approx(0.3f));
+        CHECK(snap.atmosphere.y == doctest::Approx(-0.9f));
+        CHECK(snap.atmosphere.w == doctest::Approx(4.5f));
+    }
+
+    SUBCASE("物理天空存在但未启用 ⇒ 仍视为关闭") {
+        const Entity e = lw.AddEntity("sky", float3(0.0f));
+        auto* ps = lw.world.AddComponent<he::PhysicalSkyComponent>(e);
+        ps->enabled   = false;
+        ps->turbidity = 9.0f;
+
+        CHECK_FALSE(SceneSnapshotBuilder::BuildEnvironment(lw.world, snap));
+        CHECK(snap.atmosphere.w == 0.0f);
+    }
 }
 
 TEST_CASE("SceneSnapshotBuilder：逐帧复用不残留上一帧光源") {

@@ -552,11 +552,10 @@ void ForwardPipeline::CollectLights(
 {
     pc.lightCount = 0;
 
-    // 空中透视参数：从物理天空组件读取太阳方向 + 浑浊度（无物理天空时保持 0=关闭）
-    float3 atmSunDir = float3(0, 1, 0);
-    float atmTurbidity = 0.0f;
-    he::GetPhysicalSkySun(world, atmSunDir, atmTurbidity);
-    pc.atmosphere = float4(atmSunDir, atmTurbidity);
+    // 空中透视参数（太阳方向 + 浑浊度）：**走快照**（T1.4），本函数不再直接读世界。
+    // 收集器在找不到启用的物理天空时会复位为"关闭"（方向 (0,1,0)、浑浊度 0），与旧行为一致。
+    SceneSnapshotBuilder::BuildEnvironment(world, m_LightSnapshot);
+    pc.atmosphere = m_LightSnapshot.atmosphere;
 
     // 阶段 1 T1.3b：光源收集集中到 `SceneSnapshotBuilder`，但**保持 Forward 的历史口径** ——
     // 收集 Rect 光、点光写 (0,-1,0)、聚光不归一化。迁移只搬位置、不改口径；四处口径差异与统一计划

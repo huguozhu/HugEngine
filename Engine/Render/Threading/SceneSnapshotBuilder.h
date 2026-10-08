@@ -121,6 +121,14 @@ public:
     static u32 BuildObjects(he::World& world, he::SceneGraph& sg, const CameraData& camera,
                             const SceneSnapshotObjectOptions& options,
                             const FrameSceneSnapshot* prev, FrameSceneSnapshot& out);
+
+    // ── 环境（T1.4 起）────────────────────────────────────────────
+
+    /// 收集"空中透视"参数（太阳方向 + 浑浊度）到快照。
+    /// 原来两处渲染期代码直接读世界（`ForwardPipeline::CollectLights` 与
+    /// `DeferredPipeline` 的帧图），T1.4 起统一走快照 —— 渲染期不再出现这次世界读。
+    /// @return 是否找到启用的物理天空组件（false 时 `atmosphere` 复位为"关闭"：方向 (0,1,0)、浑浊度 0）
+    static bool BuildEnvironment(he::World& world, FrameSceneSnapshot& out);
 };
 
 } // namespace he::render
