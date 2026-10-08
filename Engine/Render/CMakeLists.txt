@@ -222,6 +222,8 @@ set(RENDER_SOURCES
     # 因此它们不依赖 RHI，单测可以直接编译这几个 .cpp（与 NaniteUpload.cpp 同一手法）；
     # 这也是一条钉子：T2.6 之前不允许把 RHI 依赖塞进这一组文件。
     Threading/RenderThreadContext.h
+    # 阶段 1 T1.1：游戏线程产出的不可变渲染输入（与 ShaderTypes.slang 布局一致）。
+    Threading/FrameSceneSnapshot.h
     Threading/RenderCommandQueue.h
     Threading/RenderCommandQueue.cpp
     Threading/RenderThread.h

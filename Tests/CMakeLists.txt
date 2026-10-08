@@ -27,6 +27,8 @@ add_executable(HugEngineTests
     TestRHICommandList.cpp
     # 阶段 0 T0.7：资源句柄与句柄表（generation 校验）。同样是纯头文件实现，不链接 HugEngineRHI。
     TestRHIHandles.cpp
+    # 阶段 1 T1.1：`FrameSceneSnapshot`（布局与 `ShaderTypes.slang` 一致 + 值语义）。
+    TestFrameSceneSnapshot.cpp
     # 开关路径的钉子：`HE_DISABLE_THREAD_ASSERT` 必须在包含头文件之前定义，故单独一个 TU。
     TestThreadAffinityDisabled.cpp
     TestGameplayComponents.cpp
@@ -103,6 +105,9 @@ target_include_directories(HugEngineTests PRIVATE
     # 渲染线程化方案 T0.1：`RHI/ThreadAffinity.h` 是**头文件实现**（不含 Vulkan 依赖、也不需要
     # 链接 HugEngineRHI），这里只为单元测试补上 RHI 的包含路径。
     ${CMAKE_SOURCE_DIR}/Engine/RHI
+    # 阶段 1 T1.1：`Pipeline/Camera.h` 与 `ShaderTypes.slang`（C++/Slang 共享 GPU 布局）
+    # 让快照的单测能在**不链接 HugEngineRender/Shader** 的前提下验证布局一致性。
+    ${CMAKE_SOURCE_DIR}/Engine/Shader/Shaders
     # §14.8 任务 25 回归用例用 cgltf 直接读真实 glTF（实现体已由 HugEngineAsset 的
     # glTFLoader.cpp 展开 `CGLTF_IMPLEMENTATION`，这里只需要头文件的包含路径）。
     ${CMAKE_SOURCE_DIR}/Engine/External/meshoptimizer/extern
