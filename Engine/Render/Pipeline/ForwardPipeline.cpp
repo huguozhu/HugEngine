@@ -1186,15 +1186,34 @@ void ForwardPipeline::RenderScene(
         sm.AdvanceRetireQueue();
         if (!sm.skeleton || sm.GetIndexCount() == 0 || sm.boneMatrices.empty()) return;
 
+        // 阶段 1 附录 E（E-2②）：**矩阵数据**改从快照取，**生命周期**（脏标记/容量/退役队列/缓冲创建）
+        // 仍留在渲染侧 —— 后者是渲染侧资源管理，将来归 T2.3 的 ResourceCreationService。
+        // 逐实体对齐：快照条目带 `sourceEntity`（= 本组件实体 id），据此找回该实体的条目与矩阵切片。
+        // 同一帧内 `BuildObjects` 先于本循环执行，且中间没有游戏 tick ⇒ 快照里的矩阵与组件当前值相同。
+        const SnapshotDrawItem* snapItem = nullptr;
+        for (const SnapshotDrawItem& d : m_Snapshot.draws) {
+            if (d.sourceEntity == sm.GetEntity().id) { snapItem = &d; break; }
+        }
+        u32             skinCount = 0;
+        const float4x4* skinMats  = nullptr;
+        if (snapItem && snapItem->skinMatrixCount > 0u &&
+            static_cast<usize>(snapItem->skinMatrixOffset) + snapItem->skinMatrixCount <=
+                m_Snapshot.skinMatrices.size()) {
+            skinMats  = m_Snapshot.skinMatrices.data() + snapItem->skinMatrixOffset;
+            skinCount = snapItem->skinMatrixCount;
+        }
+        // 快照里没有对应条目时退回组件数据（首帧/未注册/组件与快照口径不一致等边界情况）
+        const float4x4* skinSrc = skinCount ? skinMats : sm.boneMatrices.data();
+
         // 骨骼矩阵上传：容量够 → Map 原地更新（句柄不变）；容量不够 → 扩建 + 旧缓冲延迟释放
         //（禁止每帧重建缓冲：SSBO 数组容量有限，重建会不断消耗 bindless 槽位）
-        const u32 needCount = (u32)sm.boneMatrices.size();
+        const u32 needCount = skinCount ? skinCount : (u32)sm.boneMatrices.size();   // E-2②：优先快照切片
         if (sm.bBonesDirty || !sm.boneBuffer) {
             if (!sm.boneBuffer || sm.boneBufferCapacity < needCount) {
                 rhi::BufferDesc desc;
                 desc.size        = sizeof(float4x4) * needCount;
                 desc.usage       = rhi::BufferUsage::Storage;
-                desc.initialData = sm.boneMatrices.data();
+                desc.initialData = skinSrc;   // E-2②：快照切片（或组件兜底）
                 desc.cpuAccess   = true;
                 if (sm.boneBuffer) {
                     m_Device->GetBindlessHeap()->ReleaseBuffer(sm.boneSSBOHandle);
@@ -1207,7 +1226,7 @@ void ForwardPipeline::RenderScene(
                 // 复用缓冲：重映射写入最新骨骼矩阵（与 GPUScene::Upload 同一模式）
                 void* mapped = sm.boneBuffer->Map();
                 if (mapped) {
-                    std::memcpy(mapped, sm.boneMatrices.data(), sizeof(float4x4) * needCount);
+                    std::memcpy(mapped, skinSrc, sizeof(float4x4) * needCount);   // E-2②：同上
                     sm.boneBuffer->Unmap();
                 }
             }
