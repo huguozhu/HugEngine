@@ -1068,6 +1068,35 @@ private:
       > 同一批调用，新文件里启发式的"所属函数名"落到 `BeginFrame`，而不再落到名字含 `Upload`
       > 的函数上。调用点一个没变。**附录 B1 不变（43）**——本批消除的是 B1 量不到的
       > **函数体内**世界依赖，正是它让下一批的签名改动能真的落地。
+    - **第 4 批之一（已提交）**：**新增 `FrameSnapshotAssembler`**（`Engine/Render/Threading/`，
+      白名单层）承载"取齐本帧渲染输入"，管线的帧入口只**配置口径**：
+      · `FrameSnapshotAssemblySettings`（光源/物体选项、构建哪些数组）由管线在 `Initialize` 配置
+        ⇒ 三条管线的历史口径差异仍然显式可查，而读世界的代码只有一份、且在白名单层；
+      · 装配器负责两处"必须在收集之前的**世界写**"，**顺带修掉两个顺序缺陷**：
+        `SyncPhysicalSkyToSun`（旧代码放在渲染期，而快照在那之前构建 ⇒ 快照里的方向光照度慢一拍）、
+        `SceneGraph::UpdateTransforms`（旧代码在 `RenderScene` 开头，同样晚于快照构建 ⇒
+        同帧被改脏的变换会让快照旧一帧）。两者现在都在 `AssembleScene` 开头、早于任何收集。
+      · 每帧一次装配（`BeginFrame` 复位 + `AssembleScene` 幂等）⇒ 样例为阴影收集先装配时管线不重复收集。
+      · 快照新增 `lightSourceEntities`（与 `lights` 同序同长）与 `sceneBoundsMin/Max`：前者让
+        `shadowIndex` 能在阴影收集之后用**不收世界**的 `ResolveLightShadowIndices` 补齐
+        （光源收集因此完全离开渲染期）；后者把 `RefreshRSMFrustum` 原先"自己遍历世界算包围盒"
+        改成读快照（按既有公式：网格包围盒 × 组件**局部**变换 —— 刻意不改口径）。
+      · `MeshBatcher::Build` 改吃快照 + 注册表：收集集用 `SnapshotMeshClass` 如实表达
+        （`Base`/`Cube`/`Sphere`/`Billboard`/`Text`/(`Decal`)/`Instanced`，**不含** `Spline`/`Skeletal`，
+        与旧遍历范围逐条一致）；材质字段（含 `textureMask`）直接取快照 `GPUObjectData` ⇒ 与 GBuffer 同源；
+        注册表新增 `vertexCount`（合批要按顶点数搬运并累加 `baseVertex`）。
+      · Forward 的 `CollectLights`/`RenderScene`/`RunGPUCulling`/`BuildFrameGraph`/`RefreshRSMFrustum`
+        全部去 `world`/`sg` ⇒ **B1 43 → 27**。
+      · 判据：单测 398 例 / 71841 断言；`02.Cube` 首帧统计与上一批二进制**完全一致**
+        （`RenderScene: 25 draws, 8150 tris, 4 lights`；阴影级联 0 绘制物体数 12）、`VUID=0`；
+        `06.GILab` 冒烟同批双跑 **4615 像素**、与上一批二进制对比 **0 像素**（28 个目标逐位一致）
+        —— 注意这次改动**包含收集顺序变化**（两个世界写提前），结果仍是 0 像素。
+      > **剩余 27 的分布与"必须同批"的约束**：`DeferredPipeline.h` 6 + `.cpp` 2 + `_FrameGraph.cpp` 2、
+      > `PathTracingPipeline.h` 5（+ `.cpp`）、`RTPass.h` 3 + `.cpp` 4、`ForwardPipeline.{h,cpp}` 各 2
+      > （帧入口签名本身）、`IRenderPipeline.h` 1。**`IRenderPipeline::Render` 的签名一变，
+      > 三条管线与 `RTPass` 就必须同批改完**（接口强制）—— 这正是本批先把"装配器 + 各 helper 去世界"
+      > 做完、把入口签名留到最后的原因：那一改要一次覆盖 Deferred/PathTracing 的
+      > `BuildFrameGraph`/`CollectLights` 与 `RTPass::BuildAS`（后者还要一并收掉它剩下的 13 处组件指针）。
 - [x] T2.1 `RenderThread` 实现（帧节奏 + 休眠策略）—— ✅ 完成（真起线程 + 归属判断 + 停止排空；4 例单测。cv 唤醒并入 T2.6）
 - [ ] T2.2 设备与交换链归渲染线程（Acquire/Present 迁移）
 - [ ] T2.3 `ResourceCreationService`（步 1 同步转发）

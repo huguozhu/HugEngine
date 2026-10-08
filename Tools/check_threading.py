@@ -73,11 +73,13 @@ WORLD_DEP_ROOTS = ("Engine/Render",)
 # 【白名单】快照层（`Engine/Render/Threading/`）是渲染侧**唯一**允许读世界的代码 —— 它就是干这个的：
 # 在游戏线程把渲染输入取齐成不可变快照。把它的命中排除在外，度量才对准"渲染期泄漏"。
 WORLD_DEP_WHITELIST_PATHS = ("Engine/Render/Threading/",)
-WORLD_DEP_BASELINE = 43        # 2026-10-09 实测（第③段第 4 批：`ForwardPipeline::RenderSkybox` 去掉
-                               # `World&`（天空盒数据早就在快照里）；`ResolveFrameCamera` 从
-                               # `(World&, fallback)` 改为 `(CameraComponent*, TransformComponent*, fallback)`
-                               # —— 场景查询交回调用方，渲染模块不再收世界。阶段 1 退出目标 = 0；
-                               # 注：该脚本按行计数，参数行合并/拆分会有 ±1 效应）
+WORLD_DEP_BASELINE = 27        # 2026-10-09 实测（第③段第 4 批之一：新增白名单层的
+                               # `FrameSnapshotAssembler` 承载"取齐渲染输入"，Forward 的
+                               # CollectLights/RenderScene/RunGPUCulling/BuildFrameGraph/
+                               # RefreshRSMFrustum 全部去 world/sg、`MeshBatcher::Build` 改吃快照。
+                               # 剩余 27 集中在 Deferred/PathTracing 入口、RTPass 与两条管线的
+                               # 帧入口签名本身（`IRenderPipeline::Render` 一变，三者必须同批改）。
+                               # 阶段 1 退出目标 = 0；注：按行计数，参数行合并/拆分会有 ±1 效应）
 
 # --- 附录 E 的度量：渲染侧的**组件指针依赖**（`MeshComponent*` 等）---
 # 【为什么需要第二项】B1 统计的是签名里的 `World&` / `SceneGraph&`，量不出 E-1/E-2/E-3 消除的东西 ——
