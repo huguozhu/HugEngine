@@ -13,6 +13,8 @@
 #include "Core/Engine.h"
 #include "Platform/Window.h"
 #include "RHI/RHI.h"
+#include "RHI/ThreadAffinity.h"      // T2.4：渲染线程启动/停止钩子认领与撤销 RHI 归属
+#include "Threading/RenderThread.h"  // T2.4：命令队列 + 渲染线程（严格握手）
 #include "Pipeline/ForwardPipeline.h"
 #include "Pipeline/DeferredPipeline.h"
 #include "Pipeline/PathTracingPipeline.h"
@@ -945,20 +947,50 @@ int main() {
     double lastMouseX = 0.0, lastMouseY = 0.0;
 
     // --- 8. 窗口调整回调 ---
+    // 【T2.4】回调跑在游戏线程，而里面是 RHI（Resize/SetSwapChain/OnResize）⇒ 只置标志，
+    // 真正落地放到渲染命令里。
+    u32 g_PendingResizeW = 0, g_PendingResizeH = 0;
     engine.GetWindow()->SetResizeCallback([&](u32 w, u32 h) {
         if (w == 0 || h == 0) return;
-        swapchain->Resize(w, h);
-        cmdList->SetSwapChain(swapchain.get());
-        forwardPipeline.OnResize(w, h);
-        deferredPipeline.OnResize(w, h);
-                pathTracingPipeline.OnResize(w, h);
-        camCtrl.SetAspectRatio(static_cast<float>(w), static_cast<float>(h));
+        g_PendingResizeW = w;
+        g_PendingResizeH = h;
     });
 
     // --- 9. 主循环 ---
     HE_CORE_INFO("02.Cube demo started — WASD=移动, 右键拖拽=旋转, 滚轮=缩放, Shift=加速");
     u64  frameIndex = 0;
     f64  lastTime   = glfwGetTime();
+
+    // ============================================================
+    // 渲染线程化（T2.4）：一帧两条命令 —— ① Acquire + 录制（当前管线 + BackBuffer pass 开始）；
+    // ② ImGui 的**录制**（draw data）+ End + Submit + Present。
+    // 控件（CPU 侧）留在游戏线程、位于两条命令之间 ⇒ 帧内顺序与改动前一致。
+    // ============================================================
+    render::RenderCommandQueue renderQueue(rhi::kMaxFramesInFlight);
+    render::RenderThread       renderThread(renderQueue);
+    render::FrameScheduler     frameScheduler(renderQueue, renderThread);
+    const bool                 useRenderQueue = he::UsesRenderThread();
+        // 【纪律】当前流水线深度只有 1（命令 1 需握手）⇒ 轻帧样例在模式 1 下会明显变慢；
+        // 故与其余未实测样例一致：**按需**起线程（待流水线深度补齐后再测并默认打开）。
+        const bool startRenderThread = std::getenv("HE_RENDER_THREAD_STRICT") != nullptr;
+        if (useRenderQueue && startRenderThread) {
+        renderThread.SetSpinWaitUs(50);
+        renderThread.SetThreadStartHook([] { he::rhi::GetThreadAffinity().Claim(); });
+        renderThread.SetThreadStopHook([] { he::rhi::GetThreadAffinity().Release(); });
+        HE_CORE_INFO("02.Cube：已起真渲染线程（整帧 RHI 归它；游戏线程按帧严格握手等待）");
+        renderThread.Start();
+    }
+    auto submitRender = [&](auto&& fn) {
+        if (useRenderQueue) {
+            renderQueue.BeginFrame();
+            renderQueue.Enqueue([&](render::RenderThreadContext&) { fn(); });
+            bool timedOut = false;
+            frameScheduler.SubmitAndWait(timedOut);
+            if (timedOut) HE_CORE_WARN("02.Cube：等待本帧渲染命令完成超时");
+        } else {
+            fn();
+        }
+    };
 
     while (!engine.GetWindow()->ShouldClose()) {
         // 计算帧时间
@@ -968,8 +1000,8 @@ int main() {
 
         engine.GetWindow()->PollEvents();
 
-        if (!swapchain->AcquireNextImage())
-            continue;
+        bool frameAborted = false;   // 渲染命令里 Acquire 失败时置位
+
 
         // ============================================================
         // 相机控制
@@ -1237,76 +1269,96 @@ int main() {
         rhi::Format backFmt = swapchain->GetColorFormat();
 
         // 渲染一帧
-        cmdList->Begin();
+        // ---- 命令 1：Acquire + 录制（当前管线 + BackBuffer pass 开始）----
+        auto recordScene = [&]() {
+            if (!swapchain->AcquireNextImage()) {
+                frameAborted = true;   // 命令可能在渲染线程跑 ⇒ 用标志代替 while 的 continue
+                return;
+            }
+            // 窗口尺寸变化的落地（回调只置了标志）
+            if (g_PendingResizeW != 0u && g_PendingResizeH != 0u) {
+                const u32 rw = g_PendingResizeW, rh = g_PendingResizeH;
+                g_PendingResizeW = g_PendingResizeH = 0u;
+                swapchain->Resize(rw, rh);
+                cmdList->SetSwapChain(swapchain.get());
+                forwardPipeline.OnResize(rw, rh);
+                deferredPipeline.OnResize(rw, rh);
+                pathTracingPipeline.OnResize(rw, rh);
+            }
+            cmdList->Begin();
 
-        // --- Forward 模式 ---
-        if (cvPipelineMode.Get() == 0) {
-            forwardPipeline.NextFrame();
+            // --- Forward 模式 ---
+            if (cvPipelineMode.Get() == 0) {
+                forwardPipeline.NextFrame();
 
-            auto* shadowSys = forwardPipeline.GetShadowSystem();
-            shadowSys->SetRenderResources(
-                forwardPipeline.GetCurrentShadowObjectBuffer(),
-                forwardPipeline.GetCurrentShadowBuffer(),
-                forwardPipeline.GetCurrentDescSet());
+                auto* shadowSys = forwardPipeline.GetShadowSystem();
+                shadowSys->SetRenderResources(
+                    forwardPipeline.GetCurrentShadowObjectBuffer(),
+                    forwardPipeline.GetCurrentShadowBuffer(),
+                    forwardPipeline.GetCurrentDescSet());
 
-            render::SubsystemContext shadowCtx;
-            shadowCtx.world = &world;
-            shadowCtx.sceneGraph = &sceneGraph;
-            shadowCtx.camera = &frameCamera;
-            he::SyncPhysicalSkyToSun(world);   // 在阴影烘焙前同步太阳方向，保证阴影/光照同向
-            // 【阶段 1 §15.1 第③段第 2 批】渲染输入先取成快照：阴影收集要知道"哪些网格投射阴影"，
-            // 且顶点/索引缓冲改为按 meshIndex 从注册表取（渲染期不再遍历世界）。
-            // 【顺序】同步世界（上一行）必须早于快照构建，否则快照里的阴影光源方向是同步前的值。
-            // 【第③段第 4 批】快照由样例在游戏线程装配（口径已由管线配置）；
-            // 顺序：装配场景 → 阴影收集 → 解析光源的 shadowIndex → Render(快照)
-            forwardPipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, frameCamera);
-            shadowCtx.snapshot     = &forwardPipeline.GetFrameSnapshot();
-            shadowCtx.meshRegistry = &forwardPipeline.GetMeshRegistry();
-            shadowSys->Update(shadowCtx);
-            // 阴影收集之后才拿得到本帧的"实体 → 阴影下标"映射 ⇒ 此时补齐光源的 shadowIndex
-            forwardPipeline.GetFrameAssembler().ResolveLightShadowIndices(
-                [&](he::Entity le) { return shadowSys->GetShadowIndex(le); });
-            forwardPipeline.GetFrameAssembler().ReserveOnce();
+                render::SubsystemContext shadowCtx;
+                shadowCtx.world = &world;
+                shadowCtx.sceneGraph = &sceneGraph;
+                shadowCtx.camera = &frameCamera;
+                he::SyncPhysicalSkyToSun(world);   // 在阴影烘焙前同步太阳方向，保证阴影/光照同向
+                // 【阶段 1 §15.1 第③段第 2 批】渲染输入先取成快照：阴影收集要知道"哪些网格投射阴影"，
+                // 且顶点/索引缓冲改为按 meshIndex 从注册表取（渲染期不再遍历世界）。
+                // 【顺序】同步世界（上一行）必须早于快照构建，否则快照里的阴影光源方向是同步前的值。
+                // 【第③段第 4 批】快照由样例在游戏线程装配（口径已由管线配置）；
+                // 顺序：装配场景 → 阴影收集 → 解析光源的 shadowIndex → Render(快照)
+                forwardPipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, frameCamera);
+                shadowCtx.snapshot     = &forwardPipeline.GetFrameSnapshot();
+                shadowCtx.meshRegistry = &forwardPipeline.GetMeshRegistry();
+                shadowSys->Update(shadowCtx);
+                // 阴影收集之后才拿得到本帧的"实体 → 阴影下标"映射 ⇒ 此时补齐光源的 shadowIndex
+                forwardPipeline.GetFrameAssembler().ResolveLightShadowIndices(
+                    [&](he::Entity le) { return shadowSys->GetShadowIndex(le); });
+                forwardPipeline.GetFrameAssembler().ReserveOnce();
 
-            forwardPipeline.Render(cmdList.get(), forwardPipeline.GetFrameSnapshot(), frameCamera);
-            // pass 级调试标记：BackBuffer 合成（ToneMap + ImGui），RenderDoc 可识别
-            cmdList->BeginDebugLabel("ToneMap + ImGui (BackBuffer)");
-            cmdList->BeginRenderPass(1, backFmt);
-            forwardPipeline.RenderToneMapPass(cmdList.get());
-        }
-        // --- Deferred 模式 ---
-        else if (cvPipelineMode.Get() == 1) {
-            deferredPipeline.NextFrame();
-            // 【第③段：帧入口收快照】装配由样例在游戏线程驱动（管线只配置口径）
-            deferredPipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, frameCamera);
-            deferredPipeline.Render(cmdList.get(), deferredPipeline.GetFrameSnapshot(), frameCamera, deltaTime);
-            // ImGui 叠加：Deferred 已写 BackBuffer，Load 保留内容
-            cmdList->BeginDebugLabel("Deferred + ImGui (BackBuffer)");
-            cmdList->BeginRenderPass(1, backFmt,
-                rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
-        }
-        // --- 兼容旧模式 2：HybridRT 已并入 Deferred（光追经 GI 层栈的 RT 源启用）---
-        else if (cvPipelineMode.Get() == 2) {
-            deferredPipeline.NextFrame();
-            // 【第③段：帧入口收快照】装配由样例在游戏线程驱动（管线只配置口径）
-            deferredPipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, frameCamera);
-            deferredPipeline.Render(cmdList.get(), deferredPipeline.GetFrameSnapshot(), frameCamera, deltaTime);
-            // ImGui 叠加：管线已写 BackBuffer，Load 保留内容
-            cmdList->BeginDebugLabel("Deferred(RT sources) + ImGui (BackBuffer)");
-            cmdList->BeginRenderPass(1, backFmt,
-                rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
-        }
-        // --- 全路径追踪模式（Level 2: PT 参考） ---
-        else if (cvPipelineMode.Get() == 3) {
-            pathTracingPipeline.NextFrame();
-            // 【第③段：帧入口收快照】装配由样例在游戏线程驱动（管线只配置口径）
-            pathTracingPipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, frameCamera);
-            pathTracingPipeline.Render(cmdList.get(), pathTracingPipeline.GetFrameSnapshot(), frameCamera, deltaTime);
-            // ImGui 叠加：管线已写 BackBuffer，Load 保留内容
-            cmdList->BeginDebugLabel("PathTrace + ImGui (BackBuffer)");
-            cmdList->BeginRenderPass(1, backFmt,
-                rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
-        }
+                forwardPipeline.Render(cmdList.get(), forwardPipeline.GetFrameSnapshot(), frameCamera);
+                // pass 级调试标记：BackBuffer 合成（ToneMap + ImGui），RenderDoc 可识别
+                cmdList->BeginDebugLabel("ToneMap + ImGui (BackBuffer)");
+                cmdList->BeginRenderPass(1, backFmt);
+                forwardPipeline.RenderToneMapPass(cmdList.get());
+            }
+            // --- Deferred 模式 ---
+            else if (cvPipelineMode.Get() == 1) {
+                deferredPipeline.NextFrame();
+                // 【第③段：帧入口收快照】装配由样例在游戏线程驱动（管线只配置口径）
+                deferredPipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, frameCamera);
+                deferredPipeline.Render(cmdList.get(), deferredPipeline.GetFrameSnapshot(), frameCamera, deltaTime);
+                // ImGui 叠加：Deferred 已写 BackBuffer，Load 保留内容
+                cmdList->BeginDebugLabel("Deferred + ImGui (BackBuffer)");
+                cmdList->BeginRenderPass(1, backFmt,
+                    rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
+            }
+            // --- 兼容旧模式 2：HybridRT 已并入 Deferred（光追经 GI 层栈的 RT 源启用）---
+            else if (cvPipelineMode.Get() == 2) {
+                deferredPipeline.NextFrame();
+                // 【第③段：帧入口收快照】装配由样例在游戏线程驱动（管线只配置口径）
+                deferredPipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, frameCamera);
+                deferredPipeline.Render(cmdList.get(), deferredPipeline.GetFrameSnapshot(), frameCamera, deltaTime);
+                // ImGui 叠加：管线已写 BackBuffer，Load 保留内容
+                cmdList->BeginDebugLabel("Deferred(RT sources) + ImGui (BackBuffer)");
+                cmdList->BeginRenderPass(1, backFmt,
+                    rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
+            }
+            // --- 全路径追踪模式（Level 2: PT 参考） ---
+            else if (cvPipelineMode.Get() == 3) {
+                pathTracingPipeline.NextFrame();
+                // 【第③段：帧入口收快照】装配由样例在游戏线程驱动（管线只配置口径）
+                pathTracingPipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, frameCamera);
+                pathTracingPipeline.Render(cmdList.get(), pathTracingPipeline.GetFrameSnapshot(), frameCamera, deltaTime);
+                // ImGui 叠加：管线已写 BackBuffer，Load 保留内容
+                cmdList->BeginDebugLabel("PathTrace + ImGui (BackBuffer)");
+                cmdList->BeginRenderPass(1, backFmt,
+                    rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
+            }
+        };
+        submitRender(recordScene);
+        if (frameAborted) continue;
+
         imgui.BeginFrame();
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
         ImGui::SetNextWindowBgAlpha(0.5f);
@@ -1698,32 +1750,36 @@ int main() {
         }
 
         ImGui::End();
-        imgui.EndFrame(cmdList.get());
-        cmdList->EndDebugLabel();  // 闭合 BackBuffer pass 级标记
-        cmdList->EndRenderPass();  // 关闭 ImGui RP（RG 和 non-RG 都需要）
-        cmdList->End();
+        // ---- 命令 2：ImGui 录制 + End + Submit + Present ----
+        auto recordUiAndPresent = [&]() {
+            imgui.EndFrame(cmdList.get());
+            cmdList->EndDebugLabel();  // 闭合 BackBuffer pass 级标记
+            cmdList->EndRenderPass();  // 关闭 ImGui RP（RG 和 non-RG 都需要）
+            cmdList->End();
 
-        device->Submit(cmdList.get());
-        swapchain->Present(true);
-        frameIndex++;
+            device->Submit(cmdList.get());
+            swapchain->Present(true);
+            frameIndex++;
 
-        // 每秒更新窗口标题，显示 FPS
-        static f64  titleTimer  = 0.0;
-        static u64  titleFrame  = 0;
-        titleTimer += deltaTime;
-        titleFrame++;
-        if (titleTimer >= 0.5) {
-            f64 fps = static_cast<f64>(titleFrame) / titleTimer;
-            char buf[256];
-            snprintf(buf, sizeof(buf),
-                "HugEngine — PBR | FPS: %.0f | Pos: (%.1f, %.1f, %.1f) "
-                "| 右键拖拽旋转 WASD移动",
-                fps,
-                camCtrl.GetCamera().position.x, camCtrl.GetCamera().position.y, camCtrl.GetCamera().position.z);
-            glfwSetWindowTitle(glfwWin, buf);
-            titleTimer = 0.0;
-            titleFrame = 0;
-        }
+            // 每秒更新窗口标题，显示 FPS
+            static f64  titleTimer  = 0.0;
+            static u64  titleFrame  = 0;
+            titleTimer += deltaTime;
+            titleFrame++;
+            if (titleTimer >= 0.5) {
+                f64 fps = static_cast<f64>(titleFrame) / titleTimer;
+                char buf[256];
+                snprintf(buf, sizeof(buf),
+                    "HugEngine — PBR | FPS: %.0f | Pos: (%.1f, %.1f, %.1f) "
+                    "| 右键拖拽旋转 WASD移动",
+                    fps,
+                    camCtrl.GetCamera().position.x, camCtrl.GetCamera().position.y, camCtrl.GetCamera().position.z);
+                glfwSetWindowTitle(glfwWin, buf);
+                titleTimer = 0.0;
+                titleFrame = 0;
+            }        };
+        submitRender(recordUiAndPresent);
+
     }
 
     // 保存全部面板参数（相机 + 渲染模式 + 天空盒 + 各光源）到 ini
@@ -1825,6 +1881,10 @@ int main() {
     }
 
     // 清理
+    // 【T2.4】退出前停渲染线程并撤销 RHI 归属
+    renderThread.Stop();
+    he::rhi::GetThreadAffinity().Release();
+
     imgui.Shutdown();
     device->WaitIdle();
 
