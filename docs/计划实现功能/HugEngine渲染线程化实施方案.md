@@ -1532,8 +1532,8 @@ python Tools\check_threading.py --world-deps --mesh-ptrs --handles --gate
 `docs/计划实现功能/占位.md`，不要动它）。
 
 **四项闸门（都在基线，只允许下降）**：帧内同步 RHI 调用 **380**（= 376 + 4 处**归属漂移**，非新增
-调用；见 §9 T1.5 第①段口径说明一）｜附录 B1 世界依赖 渲染期 **51** / 加载期 11
-（80 → 76 见 §9 第②段、76 → 69 见第③段第 1 批、69 → 51 见第③段第 2 批）｜
+调用；见 §9 T1.5 第①段口径说明一）｜附录 B1 世界依赖 渲染期 **47** / 加载期 11
+（80 → 76 见 §9 第②段、76 → 69 / 69 → 51 / 51 → 47 见第③段第 1/2/3 批）｜
 组件指针依赖 渲染期 **13** / 加载期 0（**18 → 13**，只剩 `RTPass`）｜T0.7 资源持有者 **277** / 75 文件。
 复测：`python Tools/check_threading.py --world-deps --mesh-ptrs --handles --gate`
 （注意 `--gate` 的退出码目前恒为 1：`帧内同步 RHI = 380 > 0` 是**阶段 2** 的退出条件，
@@ -1559,25 +1559,44 @@ pass 指纹（`1C15AB72E688B530` / `750CC247BF8B9C3D`）未变；`06.GILab` 冒�
 **第③段第 2 批**（阴影系统全链路改吃快照 + 样例先建快照，含顺带修掉的 Deferred 阴影静默消失回归）。
 
 **下一步（按序，规格都已入档）**：
-1. **§15.1 第③段第 3 批（进行中）**：**三条管线的帧入口改收 `const FrameSceneSnapshot&`**
-   ⇒ **B1 → 0**（当前 **51**：`ForwardPipeline.{h,cpp}` 12+8、`DeferredPipeline.{h,cpp}` 6+2、
-   `DeferredPipeline_FrameGraph.cpp` 2、`PathTracingPipeline.{h,cpp}` 5+、`ForwardPipeline_FrameGraph.cpp` 2）。
-   第 2 批已经把"样例在渲染前建快照"这条路铺好（`BuildFrameSnapshot` 幂等）⇒ 本批把
-   `Render(cmd, world, sg, camera, dt)` 改成 `Render(cmd, snapshot, camera, dt)`，
-   管线内部不再自建快照、`BuildFrameSnapshot` 交由样例调用（同时删掉 `m_SnapshotBuiltThisFrame`
-   这套过渡机制），并逐个收掉管线内部 helper（`CollectLights`/`RenderScene`/`RunGPUCulling`/
-   `PrepareGI`/`RenderSkybox`/`RefreshRSMFrustum`/`BuildFrameGraph`）的 `World&`/`SceneGraph&`。
-2. **§15.1 第③段第 4 批**：`RTPass`（7 处 B1 + 13 处组件指针：BLAS 缓存键、`CollectMeshList` 指针载荷、
-   `HasGeometryChanged`/`HashGeometry`、以及一条无调用点的顶点拉取死路径；注意 RT 可见子集 =
-   `MeshComponent`/`Cube`/`Sphere`，与 `BuildObjects` 全集不同）、`GI_RSM::RenderRSMPass`(2)、
-   `ResolveFrameCamera`(2，需挪出 `Engine/Render`)、`MeshBatcher::Build`(2，注意它的收集集与快照的
-   差异：它**不含 Spline**、含 Instanced 但跳过 Skeletal ⇒ 换吃快照会改变合批几何，需要显式裁决)。
-3. **§15.1 第③段第 5 批（B1 盲区收尾）**：`SubsystemContext::world/sceneGraph` 与
-   `GIProviderContext::world/sceneGraph`（`GI/IGIProvider.h`）这两条指针通路、以及
-   `he::SyncPhysicalSkyToSun(world)`（每帧写世界）与 `SceneGraph::UpdateTransforms()`
-   （只在渲染期调用）—— 它们不被 B1 统计，但换线程后就是数据竞争。**这批才是"渲染期真的不读世界"的判据。**
+1. **§15.1 第③段第 4 批（下一步，最大的一块）**：**三条管线的帧入口改收 `const FrameSceneSnapshot&`**
+   ⇒ **B1 → 0**。当前 47 的分布：`ForwardPipeline.{h,cpp}` 11+7、`DeferredPipeline.h` 6 +
+   `.cpp` 2 + `_FrameGraph.cpp` 2、`PathTracingPipeline.h` 5（+ .cpp，在 top-12 之外）、
+   `ForwardPipeline_FrameGraph.cpp` 2、`IRenderPipeline.h` 1、`Camera.{h,cpp}` 1+1、
+   `RTPass.{h,cpp}` 3+4、`MeshBatcher` 2（在 top-12 之外）。
+   **落地要点（第 2/3 批已经铺好的路）**：
+   · **快照构建必须移出 `Engine/Render`** —— `ForwardPipeline::BuildFrameSnapshot(world, sg, camera)`
+     本身带 `World&`/`SceneGraph&`，**它就是 B1 命中**（第 2 批引入，当时未计入预期）。正确形态是
+     **样例直接调 `SceneSnapshotBuilder`**（它在 `Engine/Render/Threading/` 白名单内）：
+     样例持久持有一个 `FrameSceneSnapshot`（首帧 `Reserve`），每帧按
+     `RegisterMeshes → BuildObjects → BuildInstances → BuildShadowLights → BuildSkybox →
+     BuildEnvironment → BuildMaterials → BuildDecals/BuildParticles（按管线需要）` 填充，
+     然后交给 `pipeline.Render(cmd, snapshot, camera, dt)`。
+   · 管线侧：删 `BuildFrameSnapshot`/`m_SnapshotBuiltThisFrame`，把 `m_Snapshot` 换成
+     `const FrameSceneSnapshot* m_FrameSnapshot`（Render 入口赋值，帧图 lambda 在 Render 内执行 ⇒
+     引用安全），并逐个收掉 helper 的 `World&`/`SceneGraph&`：`CollectLights`（光源收集也要移出
+     Render —— 它需要 `sg` 与阴影下标解析器）、`RenderScene`、`RunGPUCulling`、`RenderSkybox`、
+     `RefreshRSMFrustum`、`BuildFrameGraph`。
+   · **光源收集的顺序约束**：`SnapshotLight::shadowIndex` 由 `m_ShadowSystem->GetShadowIndex(e)` 解析，
+     而该映射在 `ShadowSystem::Update` 里建立 ⇒ 快照的"光源部分"必须在阴影收集**之后**填；
+     建议快照增设 `lightSourceEntities` 平行数组 + 一个**无 world 参数**的
+     `SceneSnapshotBuilder::ResolveLightShadowIndices(snapshot, resolver)`，由样例在阴影收集之后调用
+     （`BuildLights` 先留 `shadowIndex = -1`）。这样既保持"阴影下标是本帧的"，又不让管线收世界。
+   · `RunGPUCulling` 里的 `MeshBatcher::Build(world)` 是**一次性**构建（`m_BatchBuilt` 门控）⇒
+     移到样例首帧调用（或第 5 批把 `MeshBatcher::Build` 改成吃快照 + 注册表）。
+2. **§15.1 第③段第 5 批**：`RTPass`（`RTPass.{h,cpp}` 的 3+4 处 B1 + 13 处组件指针：BLAS 缓存键、
+   `CollectMeshList` 指针载荷、`HasGeometryChanged`/`HashGeometry`、以及一条无调用点的顶点拉取死路径；
+   RT 可见子集 = `Base`/`Cube`/`Sphere`，现在可以用 `SnapshotMeshClass` 表达）、
+   `MeshBatcher::Build`(2，注意它的收集集含 `Instanced`、**不含** `Spline`/`Skeletal`，与快照全集不同)、
+   `ResolveFrameCamera`(2，`Camera.{h,cpp}` —— 它是**场景查询**，应挪出 `Engine/Render`
+   或改吃已解析的值)、以及 `IRenderPipeline.h` 的 1 处。
+3. **§15.1 第③段第 6 批（B1 盲区收尾）**：`SubsystemContext::world/sceneGraph` 与
+   `GIProviderContext::world/sceneGraph`（后者已查明全 GI 源无一处使用，可直接删）、
+   `he::SyncPhysicalSkyToSun(world)`（每帧写世界）、`SceneGraph::UpdateTransforms()`
+   （只在渲染期调用）—— 它们不被 B1 统计，但换线程后就是数据竞争。
+   **这批才是"渲染期真的不读世界"的判据。**
 4. **T2.4** 样例循环改造（06.GILab 试点 → 7 个样例）：**按值**交接（修掉 06.GILab 的按引用捕获）、
-   渲染线程执行；第 3 批已把"游戏线程建快照"这一步做掉。
+   渲染线程执行；第 4 批已把"游戏线程建快照"这一步做掉。
 5. **T2.2** 设备与交换链归渲染线程（`CreateDevice` 的归属 claim 迁移、`Acquire/Present` 迁移）；
 6. **按需 T2.3**（资源创建同步转发）、**T2.6**（`RenderThreadContext` 为 RHI 唯一出口 + 队列 cv 唤醒）；
 7. **判据**：模式 0 / 模式 1 同场景转储**逐位一致** + 帧时间**不退化 >3%**（06.GILab 121 帧自测）。
