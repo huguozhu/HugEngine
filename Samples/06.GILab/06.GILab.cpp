@@ -173,6 +173,12 @@ int main() {
     config.appName      = "HugEngine — 06.GILab (Cornell Box GI 对比)";
     config.windowWidth  = 1920;   // 窗口宽（960×2）
     config.windowHeight = 1080;   // 窗口高（540×2）
+
+    // 【默认模式 1】06.GILab 默认走"游戏线程 + 渲染线程"（T2.2）：整帧 RHI（Acquire → 录制 →
+    // ImGui 录制 → Submit → 探测读回 → Present）都归渲染线程，游戏线程只做输入/相机/装配快照。
+    // 仍可被覆盖：环境变量 `HE_RENDER_THREADING_MODE=0` 可回到单线程（`Engine::Initialize` 里
+    // 环境变量优先于本配置，见 Engine.cpp）；`HE_RENDER_THREAD_FORCE_SHELL=1` 可强制壳模式做对照。
+    config.renderThreadingMode = he::RenderThreadingMode::RenderThread;
     // 【步骤 37 / L6 帧时判据】vsync 打开时墙钟帧率被锁在刷新率（60Hz），"有没有 60fps"
     // 这件事就没法从帧率上判定。`HE_NO_VSYNC=1` 关掉垂直同步，让墙钟帧率反映真实 GPU 吞吐。
     const bool noVsync = (std::getenv("HE_NO_VSYNC") != nullptr);
