@@ -641,10 +641,10 @@ private:
   - **起点（环境参数，2026-09-24）**：新增 `FrameSceneSnapshot::atmosphere`（xyz = 太阳方向、
     w = 浑浊度，与两个 PushConstant 的 `atmosphere` 逐字段一致）与
     `SceneSnapshotBuilder::BuildEnvironment`（找不到/未启用物理天空时复位为关闭，与旧行为逐字段一致）；
-    `ForwardPipeline` 已改用它 ⇒ 该管线不再直接读世界。单测 1 例 3 子用例；
-    实测 **382 例 / 71681 断言全通过**。
-    **未做**：`DeferredPipeline_FrameGraph.cpp:1326` 的同一处调用（在帧图 lambda 的另一分支里，
-    需单独核对执行时机），以及骨骼矩阵 / 材质参数（T1.2c）/ Decal / 粒子的快照化。
+    `ForwardPipeline` 与 `DeferredPipeline_FrameGraph` 均已改用它 ⇒ **两条光栅管线都不再直接读世界**
+    （PathTracing 不使用空中透视）。单测 1 例 3 子用例；实测 **382 例 / 71681 断言全通过**；
+    `06.GILab` 冒烟与上一提交逐位对比 4554 像素（噪声底噪 4539）⇒ 无可测差异。
+    **未做**：骨骼矩阵 / 材质参数（T1.2c）/ Decal / 粒子的快照化。
 - [ ] T1.5 渲染期移除 World/SceneGraph 引用（grep 断言）
   - **闸门与基线已就位（2026-09-24）**：`Tools/check_threading.py --world-deps` 统计 `Engine/Render/`
     内 `World&` / `SceneGraph&` 的出现处，按**所属函数名**分"渲染期 / 加载期"（与调用点清点同一份
