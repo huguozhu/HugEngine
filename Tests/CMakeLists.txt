@@ -29,6 +29,8 @@ add_executable(HugEngineTests
     TestRHIHandles.cpp
     # 阶段 1（附录 E / E-1）：mesh 注册表（`meshIndex → 渲染侧资源`，快照不带指针的前提）。
     TestMeshRegistry.cpp
+    # 阶段 2（T2.1）：渲染线程真起线程（归属判断、帧序、排空与退出）
+    TestRenderThread.cpp
     # 阶段 1 T1.1：`FrameSceneSnapshot`（布局与 `ShaderTypes.slang` 一致 + 值语义）。
     TestFrameSceneSnapshot.cpp
     # 阶段 1 T1.2a：光源收集（快照口径）。`SceneSnapshotBuilder.cpp` 是 RHI-free 的（只依赖 Scene 与

@@ -1,6 +1,57 @@
 #include "Threading/RenderThread.h"
 
+#include <chrono>
+#include <functional>
+
 namespace he::render {
+
+std::atomic<size_t> RenderThread::s_RenderThreadHash{0};
+
+bool RenderThread::IsCurrent() {
+    const size_t hash = s_RenderThreadHash.load(std::memory_order_acquire);
+    if (hash == 0) return true;      // 壳模式：没有第二根线程，"当前线程即渲染线程"
+    return (std::hash<std::thread::id>{}(std::this_thread::get_id()) + 1u) == hash;
+}
+
+bool RenderThread::Start() {
+    if (m_Running.load(std::memory_order_acquire)) return true;   // 幂等
+    m_Exit.store(false, std::memory_order_release);
+    m_Running.store(true, std::memory_order_release);
+    m_Thread = std::thread([this] {
+        // 线程 id 必须由**新线程自己**登记（否则比较的是调用者）
+        s_RenderThreadHash.store(std::hash<std::thread::id>{}(std::this_thread::get_id()) + 1u,
+                                 std::memory_order_release);
+        ThreadMain();
+    });
+    return true;
+}
+
+void RenderThread::ThreadMain() {
+    while (!m_Exit.load(std::memory_order_acquire)) {
+        if (PumpOnce()) continue;                                  // 有活就连续干，不睡
+
+        // 空闲：先按配置自旋（低延迟场景），再短休眠（不烧核）
+        const u32 spinUs = m_SpinWaitUs.load(std::memory_order_relaxed);
+        if (spinUs > 0u) {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(spinUs);
+            while (!m_Exit.load(std::memory_order_relaxed) && std::chrono::steady_clock::now() < deadline) {
+                if (PumpOnce()) break;
+                std::this_thread::yield();
+            }
+        } else {
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+        }
+    }
+    PumpAll();   // 退出前排空：已提交的帧不能丢（否则游戏线程会永远等票据回收）
+}
+
+void RenderThread::Stop() {
+    if (!m_Running.load(std::memory_order_acquire)) return;
+    m_Exit.store(true, std::memory_order_release);
+    if (m_Thread.joinable()) m_Thread.join();
+    m_Running.store(false, std::memory_order_release);
+    s_RenderThreadHash.store(0, std::memory_order_release);         // 回到壳语义
+}
 
 bool RenderThread::PumpOnce() {
     RenderFrameCommands frame;
@@ -29,14 +80,15 @@ u32 RenderThread::PumpAll() {
 
 u64 FrameScheduler::SubmitAndPump() {
     const FrameTicket ticket = m_Queue.SubmitFrameBlocking();
-    m_RenderThread.PumpOnce();
+    // 真线程模式：交给渲染线程执行并回收票据（**不**在调用线程执行）；壳模式：就地执行（阶段 0 语义）
+    if (!m_RenderThread.IsRunning()) m_RenderThread.PumpOnce();
     return ticket.frameIndex;
 }
 
 bool FrameScheduler::TrySubmitAndPump() {
     FrameTicket ticket{};
     if (!m_Queue.TrySubmitFrame(ticket)) return false;
-    m_RenderThread.PumpOnce();
+    if (!m_RenderThread.IsRunning()) m_RenderThread.PumpOnce();
     return true;
 }
 
