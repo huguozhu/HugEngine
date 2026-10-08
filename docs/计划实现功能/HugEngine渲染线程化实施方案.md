@@ -678,6 +678,21 @@ private:
     **判据（如实）**：当前样例无样条网格 ⇒ 无法前后逐位对比；依据是"两处收集口径必须一致"这一硬约束。
     **欠账**：一旦有样条网格内容，补一次逐位/逐像素复核（已在此处登记）。
     回归检查：`06.GILab` 冒烟 4539 像素（底噪同量级）；单测 390 例 / 71750 断言。
+  - **渲染期剩余 World 读的登记与裁决（2026-09-24，T1.5 推进中发现）**：
+    天空盒已收敛（Deferred + Forward，见下）；以下两处**刻意暂缓**，因为直接改会引入**未经验证的
+    行为变更**，按"遇到选择取推荐项"的约定，推荐处理是**先登记、等有验证内容再改**：
+    1. **场景包围盒**（`DeferredPipeline_FrameGraph` 的 `MeshComponent + TransformComponent` 遍历，
+       每 `kSceneBoundsRefreshFrames` 帧算一次）：旧代码用的是 `TransformComponent::GetLocalMatrix()`
+       （**局部**矩阵）去变换 `GetBounds()`，而快照 `SnapshotDrawItem::object` 里存的是**世界** AABB
+       （收集时用 `SceneGraph::GetWorldMatrix`）。两者对根级对象相同、对挂父节点的对象**不同**
+       ⇒ 换成快照 = 修正一处坐标系不一致（很可能本就该用世界矩阵），但 RSM 的拟合范围会随之变化，
+       而当前样例（06.GILab）不验证 RSM ⇒ **无法给出前后对比**。推荐：改之前先准备一个用 RSM 的
+       验证场景，或把这一改动与 RSM 的其它口径统一一起做。
+    2. **RSM 方向光**（同文件的 `world.ForEach<DirectionalLight>`：取 `enabled && castShadow` 的第一盏
+       作为 RSM 拟合方向）：快照里的光源同样含方向光方向，但"是否投影"要靠 light→shadow 索引的
+       语义映射，且同属 RSM 路径 ⇒ 与上一条并入同一次改动。
+    说明：这两处**不影响 B1 的下降路径**（它们不新增也不减少 `World&` 签名），先做下面的"帧入口收快照"
+    更能推进阶段 1 的退出条件。
   - **E-3 附加进展（2026-09-24）**：`DrawItem` 增加 `meshIndex`（组件透传），Forward 的两处
     "用组件地址反查对象条目"改为**优先整数 `meshIndex`**、未注册时兜底地址比较。
     **闸门诚实说明**：`--mesh-ptrs` 仍为渲染期 20 处 —— 兜底分支仍有 `static_cast<MeshComponent*>`；
