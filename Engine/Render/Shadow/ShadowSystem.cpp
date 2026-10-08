@@ -69,14 +69,18 @@ void ShadowSystem::Update(const SubsystemContext& ctx){
     if(!m_Ready||!m_Enabled)return;
     m_CachedWorld=ctx.world;
     m_CachedSceneGraph=ctx.sceneGraph;
-    if(!ctx.world||!ctx.sceneGraph||!ctx.camera)return;
+    // 【第③段第 2 批】收集改吃快照：`shadowLights` 由收集侧（`BuildShadowLights`）按
+    // "enabled && castShadow" 一次取齐，四个技术只做"过滤自己那一类"。
+    m_CachedSnapshot = ctx.snapshot;
+    m_CachedRegistry = ctx.meshRegistry;
+    if(!ctx.snapshot||!ctx.camera)return;
 
     m_AllShadowData.clear();
     m_AllEntities.clear();
     m_PerTechniqueCounts.clear();
 
     for(auto& t:m_Techniques){
-        u32 n=t->CollectLights(*ctx.world,*ctx.sceneGraph,*ctx.camera,m_AllShadowData,m_AllEntities);
+        u32 n=t->CollectLights(*ctx.snapshot,*ctx.camera,m_AllShadowData,m_AllEntities);
         m_PerTechniqueCounts.push_back(n);
     }
 
@@ -95,11 +99,11 @@ void ShadowSystem::Update(const SubsystemContext& ctx){
 
 void ShadowSystem::Render(rhi::IRHICommandList* cmd){
     if(!m_Ready||!m_Enabled||!m_ActiveCount)return;
-    if(!m_CachedWorld||!m_CachedSceneGraph)return;
+    if(!m_CachedSnapshot||!m_CachedRegistry)return;
 
     u32 offset=0;
     for(usize i=0;i<m_Techniques.size();++i){
-        m_Techniques[i]->Render(cmd,*m_CachedWorld,*m_CachedSceneGraph,m_AllShadowData,offset);
+        m_Techniques[i]->Render(cmd,*m_CachedSnapshot,*m_CachedRegistry,m_AllShadowData,offset);
         offset+=m_PerTechniqueCounts[i];
     }
 }

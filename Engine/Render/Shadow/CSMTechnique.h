@@ -26,11 +26,12 @@ public:
     void Shutdown()override;
     void SetRenderResources(rhi::IRHIBuffer* objBuf,rhi::DescriptorSetHandle descSet)override;
 
-    u32 CollectLights(he::World& world,he::SceneGraph& sg,const CameraData& camera,
+    u32 CollectLights(const FrameSceneSnapshot& snapshot,const CameraData& camera,
                       std::vector<GPUShadowData>& outData,
                       std::vector<he::Entity>& outEntities)override;
 
-    void Render(rhi::IRHICommandList* cmd,he::World& world,he::SceneGraph& sg,
+    void Render(rhi::IRHICommandList* cmd,const FrameSceneSnapshot& snapshot,
+                const MeshRegistry& registry,
                 const std::vector<GPUShadowData>& shadowData,u32 dataStartIndex)override;
 
     u32 GetShadowMapCount()const override{return CASCADE_COUNT;}
@@ -48,8 +49,8 @@ public:
     u32      GetShadowMapSize()    const { return m_ShadowMapSize; }
 
 private:
-    void RenderCascade(rhi::IRHICommandList* cmd,u32 ci,he::World& w,he::SceneGraph& sg,
-                       const GPUShadowData& sd);
+    void RenderCascade(rhi::IRHICommandList* cmd,u32 ci,const FrameSceneSnapshot& snapshot,
+                       const MeshRegistry& registry,const GPUShadowData& sd);
     static float4x4 ComputeCascadeViewProj(const float3& ld,const CameraData& cam,float sn,float sf);
 
     rhi::ShaderBytecode m_ShadowVS,m_ShadowFS;

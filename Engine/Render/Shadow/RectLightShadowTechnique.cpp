@@ -1,4 +1,6 @@
 #include "Shadow/RectLightShadowTechnique.h"
+// 第③段第 2 批：按 meshIndex 从注册表取顶点/索引缓冲（不再遍历 ECS）
+#include "Threading/MeshRegistry.h"
 #include "Pipeline/Camera.h"
 #include "Shadow.vert.spv.h"
 #include "Shadow.frag.spv.h"
@@ -80,13 +82,15 @@ void RectLightShadowTechnique::SetRenderResources(rhi::IRHIBuffer* ob,rhi::Descr
     m_ExternalDescSet=ds;
 }
 
-u32 RectLightShadowTechnique::CollectLights(he::World& w,he::SceneGraph& sg,const CameraData&,
+u32 RectLightShadowTechnique::CollectLights(const FrameSceneSnapshot& snapshot,const CameraData&,
                                              std::vector<GPUShadowData>& out,std::vector<he::Entity>& ent){
     u32 start=(u32)out.size();
-    w.ForEach<he::RectLight>([&](he::Entity e,he::RectLight& lc){
-        if(!lc.enabled||!lc.castShadow||out.size()-start>=MAX_SHADOWS)return;
-        float3 lp=sg.GetWorldPosition(e);
-        float3 n=glm::normalize(lc.normal);
+    // 只过滤自己那一类（面光）；同类型内保持实体顺序（与旧 `world.ForEach<RectLight>` 一致）
+    for(const SnapshotShadowLight& lc : snapshot.shadowLights){
+        if(lc.type!=static_cast<u32>(he::LightType::Rect))continue;
+        if(out.size()-start>=MAX_SHADOWS)break;
+        float3 lp=lc.position;
+        float3 n=glm::normalize(lc.direction);
         // 面光阴影视锥：覆盖面光前方（发光法线半球）主要区域。
         // 原用矩形对角/range 的窄锥（~17°），遮挡物（如球）偏离法线即不在视锥内 → 渲染不到 → 无阴影。
         float fov=glm::radians(90.0f);
@@ -103,12 +107,13 @@ u32 RectLightShadowTechnique::CollectLights(he::World& w,he::SceneGraph& sg,cons
         sd.splitDistances=float4(n,0.0f);
         sd.splitDistances.w=lc.softness;               // 软阴影系数（PCF 半径缩放）
         out.push_back(sd);
-        ent.push_back(e);
-    });
+        ent.push_back(he::Entity{lc.sourceEntity});
+    }
     return (u32)(out.size()-start);
 }
 
-void RectLightShadowTechnique::Render(rhi::IRHICommandList* cmd,he::World& w,he::SceneGraph&,
+void RectLightShadowTechnique::Render(rhi::IRHICommandList* cmd,const FrameSceneSnapshot& snapshot,
+                                       const MeshRegistry& registry,
                                        const std::vector<GPUShadowData>& sd,u32 start){
     if(!m_RectShadowMap||!m_ExternalObjectBuffer||m_ExternalDescSet==rhi::kInvalidSet)return;
     for(u32 li=start;li<(u32)sd.size()&&li-start<MAX_SHADOWS;++li){
@@ -129,21 +134,21 @@ void RectLightShadowTechnique::Render(rhi::IRHICommandList* cmd,he::World& w,he:
         cmd->SetScissor({0,0,m_MapSize,m_MapSize});
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_ExternalDescSet);
         u32 oi=0;
-        auto rm=[&](he::Entity,he::MeshComponent& m){
-            if(m.GetIndexCount()==0||oi>=MAX_OBJECTS)return;
-            if(!m.castShadow)return;   // castShadow=false 不写入阴影
+        // 【第③段第 2 批】遍历快照里的阴影投射者（顺序 = 旧的 Mesh→Cube→Sphere 相对顺序），
+        // 顶点/索引缓冲从注册表按 meshIndex 取。
+        for(const SnapshotDrawItem& it : snapshot.draws){
+            if(!it.bShadowCaster||oi>=MAX_OBJECTS)continue;
+            const MeshRegistryEntry* me=registry.Find(it.meshIndex);
+            if(!me||!me->vertexBuffer||!me->indexBuffer)continue;
             char label[64];
             snprintf(label,sizeof(label),"Shadow R%u Obj#%u",li,oi);
             cmd->SetDrawDebugLabel(label);
             ShadowPushConstant pc{};pc.lightViewProj=vp;pc.objectIndex=oi++;
             cmd->SetPushConstants(0,sizeof(ShadowPushConstant),&pc);
-            cmd->SetVertexBuffer(m.GetVertexBuffer().get(),0);
-            cmd->SetIndexBuffer(m.GetIndexBuffer().get());
-            cmd->DrawIndexed(m.GetIndexCount());
-        };
-        w.ForEach<he::MeshComponent>(rm);
-        w.ForEach<he::CubeComponent>([&](he::Entity e,he::CubeComponent&c){rm(e,static_cast<he::MeshComponent&>(c));});
-        w.ForEach<he::SphereComponent>([&](he::Entity e,he::SphereComponent&s){rm(e,static_cast<he::MeshComponent&>(s));});
+            cmd->SetVertexBuffer(me->vertexBuffer,0);
+            cmd->SetIndexBuffer(me->indexBuffer);
+            cmd->DrawIndexed(me->indexCount);
+        }
         cmd->EndOffscreenPass();
         // 阴影 pass 的深度附件结束时停在 DEPTH_STENCIL_READ_ONLY（见 VulkanPipeline.cpp
         // 的 depthAttach.finalLayout），因此 srcState 必须是 DepthStencilRead；

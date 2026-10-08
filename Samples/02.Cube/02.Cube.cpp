@@ -1249,6 +1249,12 @@ int main() {
             shadowCtx.sceneGraph = &sceneGraph;
             shadowCtx.camera = &frameCamera;
             he::SyncPhysicalSkyToSun(world);   // 在阴影烘焙前同步太阳方向，保证阴影/光照同向
+            // 【阶段 1 §15.1 第③段第 2 批】渲染输入先取成快照：阴影收集要知道"哪些网格投射阴影"，
+            // 且顶点/索引缓冲改为按 meshIndex 从注册表取（渲染期不再遍历世界）。
+            // 【顺序】同步世界（上一行）必须早于快照构建，否则快照里的阴影光源方向是同步前的值。
+            forwardPipeline.BuildFrameSnapshot(world, sceneGraph, frameCamera);
+            shadowCtx.snapshot     = &forwardPipeline.GetFrameSnapshot();
+            shadowCtx.meshRegistry = &forwardPipeline.GetMeshRegistry();
             shadowSys->Update(shadowCtx);
 
             forwardPipeline.Render(cmdList.get(), world, sceneGraph, frameCamera);

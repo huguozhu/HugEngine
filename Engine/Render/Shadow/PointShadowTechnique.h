@@ -26,11 +26,12 @@ public:
     void Shutdown()override;
     void SetRenderResources(rhi::IRHIBuffer* objBuf,rhi::DescriptorSetHandle descSet)override;
 
-    u32 CollectLights(he::World& world,he::SceneGraph& sg,const CameraData& camera,
+    u32 CollectLights(const FrameSceneSnapshot& snapshot,const CameraData& camera,
                       std::vector<GPUShadowData>& outData,
                       std::vector<he::Entity>& outEntities)override;
 
-    void Render(rhi::IRHICommandList* cmd,he::World& world,he::SceneGraph& sg,
+    void Render(rhi::IRHICommandList* cmd,const FrameSceneSnapshot& snapshot,
+                const MeshRegistry& registry,
                 const std::vector<GPUShadowData>& shadowData,u32 dataStartIndex)override;
 
     u32 GetShadowMapCount()const override{return 1;}

@@ -720,6 +720,9 @@ void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
     // 实例化网格（阶段 1 第①段 / §15.1）：实例变换按值进快照，渲染侧因此不再读 InstancedMeshComponent。
     // 必须在 `RegisterMeshes`（回填 meshIndex）之后、帧图**执行**之前。
     SceneSnapshotBuilder::BuildInstances(world, m_Snapshot);
+    // 阴影投射光源（第③段第 2 批）：帧图里的 `m_ShadowSystem->Update(sctx)` 改吃快照，
+    // 因此这里必须收齐 —— 否则 Deferred 的阴影会静默消失（`HasActiveShadows()` 恒 false）。
+    SceneSnapshotBuilder::BuildShadowLights(world, sg, m_Snapshot);
     // 贴花（T1.4）：`DecalPass` 已改读快照，必须在帧图**执行**之前收集好
     SceneSnapshotBuilder::BuildDecals(world, sg, m_Snapshot);
     if (!m_SnapshotReserved) {

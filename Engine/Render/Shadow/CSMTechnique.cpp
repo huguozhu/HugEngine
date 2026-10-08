@@ -2,6 +2,8 @@
 #include "Pipeline/Camera.h"
 #include "Shadow.vert.spv.h"
 #include "Shadow.frag.spv.h"
+// 第③段第 2 批：按 meshIndex 从注册表取顶点/索引缓冲（不再遍历 ECS）
+#include "Threading/MeshRegistry.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
 #include "Scene/MeshComponent.h"
@@ -118,11 +120,13 @@ void CSMTechnique::CreatePSO(rhi::DescriptorSetLayoutHandle layout){
 void CSMTechnique::Shutdown(){for(u32 c=0;c<CASCADE_COUNT;++c)m_ShadowMaps[c].reset();m_ShadowSampler.reset();m_ShadowPSO.reset();}
 void CSMTechnique::SetRenderResources(rhi::IRHIBuffer* ob,rhi::DescriptorSetHandle ds){m_ExternalObjectBuffer=ob;m_ExternalDescSet=ds;}
 
-u32 CSMTechnique::CollectLights(he::World& w,he::SceneGraph&,const CameraData& cam,
+u32 CSMTechnique::CollectLights(const FrameSceneSnapshot& snapshot,const CameraData& cam,
                                  std::vector<GPUShadowData>& out,std::vector<he::Entity>& ent){
     u32 start=(u32)out.size();
-    w.ForEach<he::DirectionalLight>([&](he::Entity e,he::DirectionalLight& lc){
-        if(!lc.enabled||!lc.castShadow||out.size()-start>=MAX_SHADOWS)return;
+    // 只过滤自己那一类（方向光）；同类型内保持实体顺序 ⇒ 序列与旧 `world.ForEach<DirectionalLight>` 一致
+    for(const SnapshotShadowLight& lc : snapshot.shadowLights){
+        if(lc.type!=static_cast<u32>(he::LightType::Directional))continue;
+        if(out.size()-start>=MAX_SHADOWS)break;
         float3 ld=glm::normalize(lc.direction);GPUShadowData sd{};float la=.5f;
         // CSM 有效阴影距离：限制在近处（避免用 farPlane=2000 导致级联覆盖巨大、
         // 贴图分辨率低、地板自影出现风车状伪影）
@@ -138,21 +142,23 @@ u32 CSMTechnique::CollectLights(he::World& w,he::SceneGraph&,const CameraData& c
         sd.cameraForward=float4(glm::normalize(cam.forward),0);
         sd.shadowParams=float4(lc.shadowBias,lc.shadowNormalBias,lc.shadowStrength,0);
         out.push_back(sd);
-        ent.push_back(e);
-    });
+        ent.push_back(he::Entity{lc.sourceEntity});
+    }
     return (u32)(out.size()-start);
 }
 
-void CSMTechnique::Render(rhi::IRHICommandList* cmd,he::World& w,he::SceneGraph& sg,
+void CSMTechnique::Render(rhi::IRHICommandList* cmd,const FrameSceneSnapshot& snapshot,
+                           const MeshRegistry& registry,
                            const std::vector<GPUShadowData>& sd,u32 start){
     if(sd.empty()||!m_ExternalObjectBuffer||m_ExternalDescSet==rhi::kInvalidSet)return;
-    for(u32 c=0;c<CASCADE_COUNT;++c)RenderCascade(cmd,c,w,sg,sd[start]);
+    for(u32 c=0;c<CASCADE_COUNT;++c)RenderCascade(cmd,c,snapshot,registry,sd[start]);
     for(u32 c=0;c<CASCADE_COUNT;++c)
         cmd->PipelineBarrier(rhi::PipelineStage::LateFragmentTests,rhi::PipelineStage::FragmentShader,
             rhi::ResourceState::DepthStencilRead,rhi::ResourceState::ShaderResource,m_ShadowMaps[c].get());
 }
 
-void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,he::World& w,he::SceneGraph& sg,const GPUShadowData& sd){
+void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,const FrameSceneSnapshot& snapshot,
+                                  const MeshRegistry& registry,const GPUShadowData& sd){
     m_LightVPs[ci] = sd.lightViewProj[ci];  // 缓存供 RSM 查询
     void*dv=m_ShadowMaps[ci]->GetNativeHandle();
     if(!dv)return;
@@ -169,30 +175,27 @@ void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,he::World& w,h
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_ExternalDescSet);
     auto*objData=static_cast<GPUObjectData*>(m_ExternalObjectBuffer->Map());
     u32 oi=0;
-    auto rm=[&](he::Entity e,he::MeshComponent& m){
-        if(m.GetIndexCount()==0||oi>=MAX_OBJECTS)return;
-        if(!m.castShadow)return;   // castShadow=false 不写入阴影（光源可视化球等）
-        objData[oi].worldMatrix=sg.GetWorldMatrix(e);
+    // 【第③段第 2 批】遍历**快照**里的阴影投射者（顺序 = 旧的 Mesh→Cube→Sphere 相对顺序），
+    // 顶点/索引缓冲与索引数从注册表按 meshIndex 取。
+    for(const SnapshotDrawItem& it : snapshot.draws){
+        if(!it.bShadowCaster||oi>=MAX_OBJECTS)continue;
+        const MeshRegistryEntry* me=registry.Find(it.meshIndex);
+        if(!me||!me->vertexBuffer||!me->indexBuffer)continue;
+        objData[oi].worldMatrix=it.object.worldMatrix;
         // 光照图展开用的世界 AABB（任务 31）：阴影路径不读它，但对象缓冲的同一元素会被
         // 别的消费者看到，留成未初始化会让"读 AABB"变成读垃圾 ⇒ 一并填上（成本可忽略）。
-        {
-            const he::AABB wb = m.GetBounds().Transform(objData[oi].worldMatrix);
-            objData[oi].boundsMin = float4(wb.min, 0.0f);
-            objData[oi].boundsMax = float4(wb.max, 0.0f);
-        }
+        objData[oi].boundsMin=it.object.boundsMin;
+        objData[oi].boundsMax=it.object.boundsMax;
         // DrawCall 调试 marker：标记当前级联与物体（RenderDoc 定位用）
         char label[64];
         snprintf(label,sizeof(label),"Shadow C%u Obj#%u",ci,oi);
         cmd->SetDrawDebugLabel(label);
         ShadowPushConstant pc{};pc.lightViewProj=sd.lightViewProj[ci];pc.objectIndex=oi++;
         cmd->SetPushConstants(0,sizeof(ShadowPushConstant),&pc);
-        cmd->SetVertexBuffer(m.GetVertexBuffer().get(),0);
-        cmd->SetIndexBuffer(m.GetIndexBuffer().get());
-        cmd->DrawIndexed(m.GetIndexCount());
-    };
-    w.ForEach<he::MeshComponent>(rm);
-    w.ForEach<he::CubeComponent>([&](he::Entity e,he::CubeComponent&c){rm(e,static_cast<he::MeshComponent&>(c));});
-    w.ForEach<he::SphereComponent>([&](he::Entity e,he::SphereComponent&s){rm(e,static_cast<he::MeshComponent&>(s));});
+        cmd->SetVertexBuffer(me->vertexBuffer,0);
+        cmd->SetIndexBuffer(me->indexBuffer);
+        cmd->DrawIndexed(me->indexCount);
+    }
     m_ExternalObjectBuffer->Unmap();
     // 一次性诊断日志：确认阴影级联实际绘制了物体数（RenderDoc 复核用）
     static bool s_CSMDrawDiagLogged = false;

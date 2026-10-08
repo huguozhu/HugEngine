@@ -12,6 +12,8 @@ class World;
 class SceneGraph;
 class SkeletalMeshComponent;   // 蒙皮矩阵的收集入口（实现里才需要完整类型）
 class MeshComponent;           // E-3：材质映射的输入（实现里才需要完整类型）
+class CubeComponent;           // 第③段第 2 批：阴影投射者的精确类型判定（`is_same_v` 只需声明）
+class SphereComponent;         // 同上
 } // namespace he
 
 // ============================================================
@@ -128,6 +130,15 @@ public:
             FillObjectData(item.object, MakePBRMaterial(comp));
         }
         item.visibilityFlags   = 1u;                 // 与 `FillObj` 一致（"可见"，剔除在渲染线程做）
+        // 阴影投射者（第③段第 2 批）：口径与旧阴影路径的遍历范围逐条一致 ——
+        // **精确**的 `MeshComponent` / `CubeComponent` / `SphereComponent` + `castShadow`。
+        // 用 `if constexpr` 判定（`SplineMeshComponent` 虽派生自 MeshComponent，但 `ForEach<T>`
+        // 按精确类型分桶，走的是它自己的实例化，故不会命中这一支）。
+        if constexpr (std::is_same_v<TComponent, he::MeshComponent> ||
+                      std::is_same_v<TComponent, he::CubeComponent> ||
+                      std::is_same_v<TComponent, he::SphereComponent>) {
+            item.bShadowCaster = comp.castShadow;
+        }
         // meshIndex / indexCount / firstIndex / vertexOffset 由 MeshBatcher 在 Prepare 阶段填充
         // 上一帧世界矩阵：按**下标**对齐（与 GPUScene 的 `m_CachedMatrices[idx]` 同一假设）。
         // 首帧（prev 为空或该下标不存在）取当前矩阵 ⇒ 运动矢量为 0，与既有行为一致。
@@ -202,6 +213,17 @@ public:
     /// 每次调用清空重填（逐帧复用安全）。
     /// @return 条目数（= 世界里的实例化网格组件数）
     static u32 BuildInstances(he::World& world, FrameSceneSnapshot& out);
+
+    // ── 阴影投射光源（阶段 1 第③段第 2 批）────────────────────────
+
+    /// 收集**投射阴影**的光源（`enabled && castShadow`）：四个阴影技术的 `CollectLights`
+    /// 原先各自 `world.ForEach<XxxLight>` + `sg.GetWorldPosition(e)`，现由本函数在收集侧一次取齐。
+    /// 【顺序】方向光 → 点光 → 聚光 → 面光（与 `BuildLights` 同序、同类型内按实体顺序）：
+    /// 各技术只过滤自己的类型，故该顺序足以保证每个技术推出的序列与旧实现逐条一致。
+    /// 【方向**不归一化**】照抄组件原值（旧口径由消费侧 `glm::normalize`）。
+    /// 每次调用清空重填（逐帧复用安全）。
+    /// @return 条目数
+    static u32 BuildShadowLights(he::World& world, he::SceneGraph& sg, FrameSceneSnapshot& out);
 
     // ── 网格注册（附录 E / E-2①，唯一实现）──────────────────────
 

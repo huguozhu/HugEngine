@@ -2,6 +2,8 @@
 #include "Pipeline/Camera.h"
 #include "Shadow.vert.spv.h"
 #include "Shadow.frag.spv.h"
+// 第③段第 2 批：按 meshIndex 从注册表取顶点/索引缓冲（不再遍历 ECS）
+#include "Threading/MeshRegistry.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
 #include "Scene/MeshComponent.h"
@@ -81,12 +83,14 @@ void SpotShadowTechnique::SetRenderResources(rhi::IRHIBuffer* ob,rhi::Descriptor
     m_ExternalDescSet=ds;
 }
 
-u32 SpotShadowTechnique::CollectLights(he::World& w,he::SceneGraph& sg,const CameraData&,
+u32 SpotShadowTechnique::CollectLights(const FrameSceneSnapshot& snapshot,const CameraData&,
                                         std::vector<GPUShadowData>& out,std::vector<he::Entity>& ent){
     u32 start=(u32)out.size();
-    w.ForEach<he::SpotLight>([&](he::Entity e,he::SpotLight& lc){
-        if(!lc.enabled||!lc.castShadow||out.size()-start>=MAX_SHADOWS)return;
-        float3 lp=sg.GetWorldPosition(e);
+    // 只过滤自己那一类（聚光）；同类型内保持实体顺序（与旧 `world.ForEach<SpotLight>` 一致）
+    for(const SnapshotShadowLight& lc : snapshot.shadowLights){
+        if(lc.type!=static_cast<u32>(he::LightType::Spot))continue;
+        if(out.size()-start>=MAX_SHADOWS)break;
+        float3 lp=lc.position;
         float3 dir=glm::normalize(lc.direction);
         float fov=lc.outerConeAngle*2.0f;
         float4x4 proj=glm::perspectiveRH_ZO(glm::radians(glm::degrees(fov)),1.0f,.1f,std::max(lc.range,.2f));
@@ -99,12 +103,13 @@ u32 SpotShadowTechnique::CollectLights(he::World& w,he::SceneGraph& sg,const Cam
         sd.shadowParams=float4(lc.shadowBias,lc.shadowNormalBias,lc.shadowStrength, 2.0f); // 2=Spot
         sd.splitDistances=float4(dir, lc.outerConeAngle); // 方向 + 外锥角（供 Render 重建 VP）
         out.push_back(sd);
-        ent.push_back(e);
-    });
+        ent.push_back(he::Entity{lc.sourceEntity});
+    }
     return (u32)(out.size()-start);
 }
 
-void SpotShadowTechnique::Render(rhi::IRHICommandList* cmd,he::World& w,he::SceneGraph&,
+void SpotShadowTechnique::Render(rhi::IRHICommandList* cmd,const FrameSceneSnapshot& snapshot,
+                                   const MeshRegistry& registry,
                                    const std::vector<GPUShadowData>& sd,u32 start){
     if(!m_SpotShadowMap||!m_ExternalObjectBuffer||m_ExternalDescSet==rhi::kInvalidSet)return;
     for(u32 li=start;li<(u32)sd.size()&&li-start<MAX_SHADOWS;++li){
@@ -129,22 +134,22 @@ void SpotShadowTechnique::Render(rhi::IRHICommandList* cmd,he::World& w,he::Scen
         cmd->SetScissor({0,0,m_MapSize,m_MapSize});
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_ExternalDescSet);
         u32 oi=0;
-        auto rm=[&](he::Entity,he::MeshComponent& m){
-            if(m.GetIndexCount()==0||oi>=MAX_OBJECTS)return;
-            if(!m.castShadow)return;   // castShadow=false 不写入阴影（光源可视化球等）
+        // 【第③段第 2 批】遍历快照里的阴影投射者（顺序 = 旧的 Mesh→Cube→Sphere 相对顺序），
+        // 顶点/索引缓冲从注册表按 meshIndex 取。
+        for(const SnapshotDrawItem& it : snapshot.draws){
+            if(!it.bShadowCaster||oi>=MAX_OBJECTS)continue;
+            const MeshRegistryEntry* me=registry.Find(it.meshIndex);
+            if(!me||!me->vertexBuffer||!me->indexBuffer)continue;
             // DrawCall 调试 marker：标记当前聚光灯与物体（RenderDoc 定位用）
             char label[64];
             snprintf(label,sizeof(label),"Shadow S%u Obj#%u",li,oi);
             cmd->SetDrawDebugLabel(label);
             ShadowPushConstant pc{};pc.lightViewProj=vp;pc.objectIndex=oi++;
             cmd->SetPushConstants(0,sizeof(ShadowPushConstant),&pc);
-            cmd->SetVertexBuffer(m.GetVertexBuffer().get(),0);
-            cmd->SetIndexBuffer(m.GetIndexBuffer().get());
-            cmd->DrawIndexed(m.GetIndexCount());
-        };
-        w.ForEach<he::MeshComponent>(rm);
-        w.ForEach<he::CubeComponent>([&](he::Entity e,he::CubeComponent&c){rm(e,static_cast<he::MeshComponent&>(c));});
-        w.ForEach<he::SphereComponent>([&](he::Entity e,he::SphereComponent&s){rm(e,static_cast<he::MeshComponent&>(s));});
+            cmd->SetVertexBuffer(me->vertexBuffer,0);
+            cmd->SetIndexBuffer(me->indexBuffer);
+            cmd->DrawIndexed(me->indexCount);
+        }
         cmd->EndOffscreenPass();
         // barrier: depth 已在阴影 pass 结束时停在 READ_ONLY（VulkanPipeline.cpp 的
         // depthAttach.finalLayout），故 srcState 必须是 DepthStencilRead

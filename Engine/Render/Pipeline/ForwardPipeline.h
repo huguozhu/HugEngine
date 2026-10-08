@@ -131,6 +131,17 @@ public:
     /// 逐实例剔除器（暴露给示例做开关与统计）
     InstanceCuller& GetInstanceCuller() { return m_InstanceCuller; }
 
+    // ── 阶段 1 §15.1 第③段：快照交接（样例 → 管线）──
+    /// **游戏线程**：构建本帧完整快照（注册网格 → 物体 → 实例 → 阴影光源 → 天空盒/材质/环境，
+    /// 并在首帧后自校准预留容量）。样例在**需要渲染前数据**时先调它，例如阴影收集
+    /// （`shadowSys->Update(shadowCtx)` 必须在 `Render` 之前，且 `shadowCtx.snapshot` 要指向本帧快照）。
+    /// 【幂等】同一帧内重复调用只构建一次（`NextFrame()` 清标记）；`Render` 会复用它。
+    void BuildFrameSnapshot(he::World& world, he::SceneGraph& sg, const CameraData& camera);
+    /// 本帧快照（`BuildFrameSnapshot` 之后有效；未构建时为空快照）
+    const FrameSceneSnapshot& GetFrameSnapshot() const { return m_Snapshot; }
+    /// 网格注册表（阴影技术等按 `meshIndex` 取顶点/索引缓冲）
+    const MeshRegistry& GetMeshRegistry() const { return m_MeshRegistry; }
+
 private:
     void CollectLights(PushConstantData& pc, he::World& world, he::SceneGraph& sg, const CameraData& camera);
     void UploadMaterialBindless();  // 从**快照**取已去重的材质数组 → 写入 bindless 材质 SSBO 并注册（须在 heap->Flush() 前调用）
@@ -166,6 +177,9 @@ private:
     MeshRegistry                     m_MeshRegistry;
     // 快照容量是否已按实际规模预留过一次（自校准；见 ForwardPipeline.cpp 里的说明）
     bool                             m_SnapshotReserved = false;
+    /// 本帧快照是否已构建（`BuildFrameSnapshot` 幂等：样例可能先调它给阴影收集用，
+    /// 之后 `Render` 再调一次不应重复收集；`NextFrame()` 清标记）
+    bool                             m_SnapshotBuiltThisFrame = false;
     /// GI 分层合成参数 UBO（每飞行帧一份，与 Deferred 的 LightingPass 同结构同语义）
     std::unique_ptr<rhi::IRHIBuffer> m_GIBuffers[MAX_FRAMES_IN_FLIGHT];
     std::unique_ptr<rhi::IRHIBuffer> m_ObjectBuffers[MAX_FRAMES_IN_FLIGHT];

@@ -353,6 +353,71 @@ u32 SceneSnapshotBuilder::BuildInstances(he::World& world, FrameSceneSnapshot& o
     return static_cast<u32>(out.instances.size());
 }
 
+u32 SceneSnapshotBuilder::BuildShadowLights(he::World& world, he::SceneGraph& sg,
+                                            FrameSceneSnapshot& out) {
+    out.shadowLights.clear();
+
+    // 四个阴影技术的过滤条件是同一句（`!enabled || !castShadow` 即跳过），故在收集侧一次过滤。
+    // `type` 用 `he::LightType` 的枚举值，技术侧按它分流（顺序见头文件说明）。
+    auto addDirectional = [&](he::Entity e, he::DirectionalLight& lc) {
+        if (!lc.enabled || !lc.castShadow) return;
+        SnapshotShadowLight l{};
+        l.type               = static_cast<u32>(he::LightType::Directional);
+        l.direction          = lc.direction;                 // 不归一化：CSM 侧自己 normalize
+        l.shadowBias         = lc.shadowBias;
+        l.shadowNormalBias   = lc.shadowNormalBias;
+        l.shadowStrength     = lc.shadowStrength;
+        l.sourceEntity       = e.id;
+        out.shadowLights.push_back(l);
+    };
+    auto addPoint = [&](he::Entity e, he::PointLight& lc) {
+        if (!lc.enabled || !lc.castShadow) return;
+        SnapshotShadowLight l{};
+        l.type               = static_cast<u32>(he::LightType::Point);
+        l.position           = sg.GetWorldPosition(e);
+        l.range              = lc.range;
+        l.shadowBias         = lc.shadowBias;
+        l.shadowNormalBias   = lc.shadowNormalBias;
+        l.shadowStrength     = lc.shadowStrength;
+        l.sourceEntity       = e.id;
+        out.shadowLights.push_back(l);
+    };
+    auto addSpot = [&](he::Entity e, he::SpotLight& lc) {
+        if (!lc.enabled || !lc.castShadow) return;
+        SnapshotShadowLight l{};
+        l.type               = static_cast<u32>(he::LightType::Spot);
+        l.direction          = lc.direction;                 // 不归一化：Spot 侧自己 normalize
+        l.position           = sg.GetWorldPosition(e);
+        l.range              = lc.range;
+        l.outerConeAngle     = lc.outerConeAngle;
+        l.shadowBias         = lc.shadowBias;
+        l.shadowNormalBias   = lc.shadowNormalBias;
+        l.shadowStrength     = lc.shadowStrength;
+        l.sourceEntity       = e.id;
+        out.shadowLights.push_back(l);
+    };
+    auto addRect = [&](he::Entity e, he::RectLight& lc) {
+        if (!lc.enabled || !lc.castShadow) return;
+        SnapshotShadowLight l{};
+        l.type               = static_cast<u32>(he::LightType::Rect);
+        l.direction          = lc.normal;                    // 面光复用 direction 字段存法线
+        l.position           = sg.GetWorldPosition(e);
+        l.range              = lc.range;
+        l.softness           = lc.softness;
+        l.shadowBias         = lc.shadowBias;
+        l.shadowNormalBias   = lc.shadowNormalBias;
+        l.shadowStrength     = lc.shadowStrength;
+        l.sourceEntity       = e.id;
+        out.shadowLights.push_back(l);
+    };
+
+    world.ForEach<he::DirectionalLight>(addDirectional);
+    world.ForEach<he::PointLight>(addPoint);
+    world.ForEach<he::SpotLight>(addSpot);
+    world.ForEach<he::RectLight>(addRect);
+    return static_cast<u32>(out.shadowLights.size());
+}
+
 u32 SceneSnapshotBuilder::BuildParticles(he::World& world, FrameSceneSnapshot& out) {
     out.particles.clear();
     world.ForEach<he::ParticleComponent>([&](he::Entity, he::ParticleComponent& pc) {

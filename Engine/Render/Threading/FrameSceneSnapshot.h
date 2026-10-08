@@ -55,6 +55,12 @@ struct SnapshotDrawItem {
     /// 第②段起 `Prepare` 改吃快照，标记就必须由收集侧给出 —— 否则消费侧无从区分，
     /// 会把实例化网格当普通网格再画一遍。
     bool bInstanced = false;
+    /// **阴影投射者标记**（阶段 1 第③段第 2 批）：该条目的网格要进阴影 Pass。
+    /// 【口径】= 组件类属**精确** `MeshComponent` / `CubeComponent` / `SphereComponent`
+    /// 且 `castShadow == true` —— 与旧阴影路径的遍历范围逐条一致（它只枚举这三类；
+    /// 广告牌/文字/贴花/样条/实例化/骨骼都不进阴影，`SplineMeshComponent` 虽派生自
+    /// `MeshComponent` 但 `ForEach<T>` 按精确类型分桶，故天然排除）。
+    bool bShadowCaster = false;
     /// 场景物体唯一 ID（调试、剔除统计、与 GPU Culling 的 objectID 对应）
     u32 objectID = 0;
     /// **来源实体 id**（`he::Entity::id`）。渲染侧仍有少量"逐实体"的状态机（骨骼缓冲的
@@ -202,6 +208,29 @@ struct SnapshotPhysicalSky {
     float  sunIntensity = 0.0f;                   // 太阳盘亮度倍率
 };
 
+/// 阴影投射光源条目（阶段 1 第③段第 2 批）：四个阴影技术的 `CollectLights` 渲染期读它的
+/// **唯一**入口，替代原先各自 `world.ForEach<XxxLight>` + `sg.GetWorldPosition(e)`。
+/// 【为什么按值带全部字段】四个技术实际用到的字段一并列出（一处不漏）：
+///   方向光 CSM：direction / shadowBias / shadowNormalBias / shadowStrength；
+///   点光：position / range / 三个阴影参数；
+///   聚光：direction / position / range / outerConeAngle / 三个阴影参数；
+///   面光：normal（= `direction` 字段）/ position / range / softness / 三个阴影参数。
+/// 【方向**不归一化**】旧口径是"取组件原值，由消费侧决定要不要 `glm::normalize`"
+///（CSM 与 Spot 归一化、Rect 也归一化）—— 快照照抄原值，避免把归一化搬进收集侧而改变数值。
+/// 【只收 `enabled && castShadow`】四个技术的过滤条件完全相同，故在收集侧一次过滤。
+struct SnapshotShadowLight {
+    u32    type = 0;               // `he::LightType`（0=Directional, 1=Point, 2=Spot, 3=Rect）
+    float3 direction{0.0f};        // 方向光/聚光的方向；面光为法线（均**未归一化**）
+    float3 position{0.0f};         // 世界位置（方向光为 0）
+    float  range = 0.0f;           // 点/聚光/面光的范围
+    float  outerConeAngle = 0.0f;  // 仅聚光
+    float  softness = 0.0f;        // 仅面光（软阴影系数）
+    float  shadowBias = 0.0f;
+    float  shadowNormalBias = 0.0f;
+    float  shadowStrength = 0.0f;
+    u64    sourceEntity = 0;       // 来源实体 id（还原 `he::Entity` 供阴影下标映射用）
+};
+
 /// 一帧的完整渲染输入。游戏线程在 tick 结束后构造，交接后**只读**（铁律 2）。
 struct FrameSceneSnapshot {
     u64        frameIndex = 0;              // 与 CommandQueue 的帧号对应（对账用）
@@ -245,6 +274,11 @@ struct FrameSceneSnapshot {
     /// 实例变换的扁平数组（`SnapshotInstance::transformOffset` 切片；与 `skinMatrices` 同款）
     std::vector<float4x4>         instanceTransforms;
 
+    /// 阴影投射光源（第③段第 2 批）：按 方向光 → 点光 → 聚光 → 面光 分类型、同类型按实体顺序。
+    /// 【跨类型顺序无关紧要】四个技术各自只过滤自己的类型 ⇒ 只要同类型内保持实体顺序，
+    /// 每个技术推出的 `GPUShadowData` 序列就与旧实现逐条一致（下标即 shader 的 `shadowIndex`）。
+    std::vector<SnapshotShadowLight> shadowLights;
+
     /// 世界版本号（游戏线程每次结构性改动 +1）：渲染线程可据此判断"快照是否落后于世界"，
     /// 流式/缓存类模块（Lumen 表面缓存、Nanite 页表）用它做失效判断，避免又去读世界。
     u64 sourceWorldVersion = 0;
@@ -259,6 +293,7 @@ struct FrameSceneSnapshot {
         skinMatrices.clear();
         instances.clear();
         instanceTransforms.clear();
+        shadowLights.clear();
     }
 
     /// 预留容量（首帧/场景规模变化时调用一次，之后每帧 `Clear()` 复用）

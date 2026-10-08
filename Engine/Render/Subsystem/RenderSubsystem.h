@@ -20,6 +20,7 @@ namespace he::render {
 
 class RenderGraphBuilder; // Frame Graph 桥梁（Phase 2）
 struct FrameSceneSnapshot;  // 阶段 1 §15.1 第③段：子系统改从快照取渲染输入
+class MeshRegistry;         // 同上：按 meshIndex 取顶点/索引缓冲
 
 // ============================================================================
 // SubsystemContext — 渲染子系统每帧上下文
@@ -36,6 +37,8 @@ struct SubsystemContext {
     /// 本帧**不可变渲染输入**（阶段 1 §15.1 第③段）：子系统应优先读它，`world`/`sceneGraph`
     /// 是过渡期保留给尚未快照化的子系统（如阴影系统）的入口，快照化完成后应一并删除。
     const FrameSceneSnapshot* snapshot = nullptr;
+    /// 网格注册表（第③段第 2 批）：按 `meshIndex` 取顶点/索引缓冲（阴影技术绘制要用）
+    const MeshRegistry* meshRegistry = nullptr;
 };
 
 // ============================================================================

@@ -187,6 +187,11 @@ int main() {
             shadowCtx.sceneGraph = fSG;
             shadowCtx.camera = &frameCamera;
             he::SyncPhysicalSkyToSun(*fWorld);
+            // 【阶段 1 §15.1 第③段第 2 批】渲染输入先取成快照（阴影收集要吃它；
+            // 顺序：世界同步 → 快照 → 阴影收集）
+            pipeline.BuildFrameSnapshot(*fWorld, *fSG, frameCamera);
+            shadowCtx.snapshot     = &pipeline.GetFrameSnapshot();
+            shadowCtx.meshRegistry = &pipeline.GetMeshRegistry();
             shadowSys->Update(shadowCtx);
             pipeline.Render(cmdList.get(), *fWorld, *fSG, frameCamera);
             // pass 级调试标记：BackBuffer 合成（ToneMap + ImGui），RenderDoc 可识别

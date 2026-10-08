@@ -222,6 +222,10 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         SubsystemContext sctx;
         sctx.world       = &world;
         sctx.sceneGraph  = &sg;
+        // 【第③段第 2 批】阴影收集改吃快照（`shadowLights` 已由 BuildObjects/BuildShadowLights 取齐）；
+        // 网格注册表供各技术按 meshIndex 取顶点/索引缓冲。
+        sctx.snapshot    = &m_Snapshot;
+        sctx.meshRegistry = &m_MeshRegistry;
         // 【阴影用未抖动的相机（cameraIn）】CSM 的级联拟合由相机视锥推级联包围盒；若这里用带
         //   TAA 抖动的相机，级联会逐帧亚像素摆动 ⇒ 阴影贴图 texel 对齐抖动 ⇒ TAA 反而把阴影
         //   边缘抹糊（UE 同样只在主视图施加抖动，阴影深度 pass 不抖）。光照采样阴影时用的是

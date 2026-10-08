@@ -2,12 +2,16 @@
 
 #include "Shadow/IShadowSystem.h"
 #include "Shadow/IShadowTechnique.h"
+// 第③段第 2 批：`Update` 改吃快照（`SubsystemContext::snapshot`）
+#include "Threading/FrameSceneSnapshot.h"
 #include <memory>
 #include <vector>
 
 namespace he { class World; class SceneGraph; }
 
 namespace he::render {
+
+class MeshRegistry;   // 第③段第 2 批：技术渲染时按 meshIndex 取顶点/索引缓冲
 
 // ============================================================================
 // ShadowSystem — 阴影子系统组合器
@@ -69,6 +73,10 @@ private:
     bool m_Ready=false;
     he::World* m_CachedWorld=nullptr;
     he::SceneGraph* m_CachedSceneGraph=nullptr;
+    /// 【第③段第 2 批】本帧快照与网格注册表：`Update` 时从 `SubsystemContext` 取得，
+    /// `Render` 时交给各技术（两者都在同一帧内有效；快照归管线所有，这里只借指针）。
+    const FrameSceneSnapshot* m_CachedSnapshot=nullptr;
+    const MeshRegistry*       m_CachedRegistry=nullptr;
 };
 
 } // namespace he::render

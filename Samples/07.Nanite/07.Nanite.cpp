@@ -1074,6 +1074,11 @@ int main() {
                 shadowCtx.camera     = &camCtrl.GetCamera();
                 // 物理天空的太阳方向先同步到方向光：阴影与光照必须同向（02.Cube 同款做法）
                 he::SyncPhysicalSkyToSun(world);
+                // 【阶段 1 §15.1 第③段第 2 批】渲染输入先取成快照（阴影收集要吃它；
+                // 顺序：世界同步 → 快照 → 阴影收集）
+                forwardPipeline.BuildFrameSnapshot(world, sceneGraph, camCtrl.GetCamera());
+                shadowCtx.snapshot     = &forwardPipeline.GetFrameSnapshot();
+                shadowCtx.meshRegistry = &forwardPipeline.GetMeshRegistry();
                 shadowSys->Update(shadowCtx);
             }
         }

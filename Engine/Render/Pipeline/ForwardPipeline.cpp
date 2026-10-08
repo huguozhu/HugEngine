@@ -531,6 +531,8 @@ void ForwardPipeline::NextFrame() {
 
     // 同步阴影子系统帧槽位
     m_ShadowSystem->NextFrame();
+    // 新的一帧：快照标记复位（`BuildFrameSnapshot` 因此本帧会重新收集一次）
+    m_SnapshotBuiltThisFrame = false;
     // per-mesh 描述符集 (set=1) 是静态纹理绑定，不需要每帧更新
 }
 
@@ -552,8 +554,8 @@ void ForwardPipeline::CollectLights(
     pc.lightCount = 0;
 
     // 空中透视参数（太阳方向 + 浑浊度）：**走快照**（T1.4），本函数不再直接读世界。
-    // 收集器在找不到启用的物理天空时会复位为"关闭"（方向 (0,1,0)、浑浊度 0），与旧行为一致。
-    SceneSnapshotBuilder::BuildEnvironment(world, m_Snapshot);
+    // 【第③段第 2 批】收集已移到 `BuildFrameSnapshot`（它同时填 `physicalSky` 供 SkyboxPass 用，
+    // 必须在帧图构建之前完成）；这里只读结果。
     pc.atmosphere = m_Snapshot.atmosphere;
 
     // 阶段 1 T1.3b：光源收集集中到 `SceneSnapshotBuilder`，但**保持 Forward 的历史口径** ——
@@ -881,10 +883,13 @@ void ForwardPipeline::FillGIBlendUBO() {
     }
 }
 
-void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
-                              he::SceneGraph& sg, const CameraData& camera,
-                              float deltaTime)
-{
+void ForwardPipeline::BuildFrameSnapshot(he::World& world, he::SceneGraph& sg,
+                                          const CameraData& camera) {
+    // 【幂等】样例可能在本帧的 `Render` 之前先调本函数（阴影收集需要 `shadowCtx.snapshot`），
+    // 因此这里必须只构建一次；`NextFrame()` 复位标记。
+    if (m_SnapshotBuiltThisFrame) return;
+    m_SnapshotBuiltThisFrame = true;
+
     // 阶段 1 附录 E（E-2①）：登记/更新**全部**网格资源并回填 `meshIndex`。
     // 唯一实现在 `SceneSnapshotBuilder::RegisterMeshes`（三条管线共用；原先各抄一份只登记骨骼网格）。
     // 每帧刷新：骨骼缓冲会被重建（`RetireBoneBuffer` 走 N 帧延迟队列后新建）⇒ 只登记一次会留过期指针；
@@ -893,6 +898,9 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
     // 天空盒（T1.4）：必须在**帧图构建之前**收集 —— 帧图里的 IBL pass 在"注册 pass"阶段就会读
     // `m_Snapshot.skybox`（见 ForwardPipeline_FrameGraph.cpp 的 Pass 1），晚一步就会用上一帧的天空盒。
     SceneSnapshotBuilder::BuildSkybox(world, m_Snapshot);
+    // 环境（T1.4 / 第③段第 2 批）：`atmosphere`（光照用）与 `physicalSky`（SkyboxPass 用）
+    // 一次取齐 —— 原先后者由 SkyboxPass 自己遍历世界、前者在 `CollectLights` 里收集。
+    SceneSnapshotBuilder::BuildEnvironment(world, m_Snapshot);
     // 材质数组（T1.5）：`UploadMaterialBindless` 改为读快照，因此必须在它之前收集。
     // 代价：每帧一次六类组件的材质收集（原先在 bindless 上传里同样要做，只是按需触发）。
     SceneSnapshotBuilder::BuildMaterials(world, m_Snapshot);
@@ -907,6 +915,9 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
     // 必须在 `RegisterMeshes`（回填 meshIndex）之后 —— 否则条目带的是"未注册"。
     SceneSnapshotBuilder::BuildInstances(world, m_Snapshot);
 
+    // 阴影投射光源（第③段第 2 批）：四个阴影技术的收集改吃快照，故必须由收集侧一次取齐。
+    SceneSnapshotBuilder::BuildShadowLights(world, sg, m_Snapshot);
+
     // 首帧构建之后按**实际规模自校准**预留一次容量：稳态下快照数组不再重分配。
     // 【为什么】`Reserve` 之前从未被调用 ⇒ 头几帧靠 vector 反复扩容；而"帧内不做分配"与
     // "帧内不做同步等待"是方案里的同一条纪律（分配会引入不可预期的耗时与锁竞争）。
@@ -920,6 +931,14 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
                            static_cast<u32>(m_Snapshot.instanceTransforms.size()) * 2u + 1024u);
         m_SnapshotReserved = true;
     }
+}
+
+void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
+                              he::SceneGraph& sg, const CameraData& camera,
+                              float deltaTime)
+{
+    // 收集本帧渲染输入（幂等：样例可能已经为了阴影收集先调过一次）
+    BuildFrameSnapshot(world, sg, camera);
 
     // RSM 固定光锥必须**先**刷新（任务 34）：UBO（FillGIBlendUBO）与 frame graph 的
     // RSM pass 注册/参数两处消费者都读它，且两者都在下面几步之内。
