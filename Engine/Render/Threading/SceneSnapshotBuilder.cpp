@@ -13,6 +13,7 @@
 #include "Scene/PhysicalSkyComponent.h"   // GetPhysicalSkySun（T1.4：环境参数进快照）
 #include "Scene/SceneGraph.h"
 #include "Scene/SkeletalMeshComponent.h"
+#include "Scene/SkyboxComponent.h"       // T1.4：天空盒进快照（渲染期不再读组件）
 #include "Scene/SplineMeshComponent.h"   // 附录 E / E-4：与 SceneRenderer 的收集口径统一
 #include "Scene/SphereComponent.h"
 #include "Scene/TextRenderComponent.h"
@@ -209,8 +210,20 @@ bool SceneSnapshotBuilder::BuildEnvironment(he::World& world, FrameSceneSnapshot
     return found;
 }
 
-u32 SceneSnapshotBuilder::RegisterMeshes(he::World& world, MeshRegistry& registry) {
-    u32 count = 0;
+bool SceneSnapshotBuilder::BuildSkybox(he::World& world, FrameSceneSnapshot& out) {
+    out.skybox = SnapshotSkybox{};          // 逐帧复位：上一帧的天空盒不得残留
+    // 与原先帧图里的 `world.ForEach<SkyboxComponent>` 循环逐条一致（逐个赋值 ⇒ 后者覆盖前者）。
+    world.ForEach<he::SkyboxComponent>([&](he::Entity, he::SkyboxComponent& sc) {
+        if (sc.enabled && sc.GetCubemap()) {
+            out.skybox.cubemap = sc.GetCubemap();
+            out.skybox.sampler = sc.GetCubemapSampler();
+            out.skybox.enabled = true;
+        }
+    });
+    return out.skybox.enabled;
+}
+
+u32 SceneSnapshotBuilder::RegisterMeshes(he::World& world, MeshRegistry& registry) {    u32 count = 0;
     // 登记一个网格组件：缓冲只借指针（所有权在组件）、回填注册表索引。
     // `instanced=true` 的形态（实例化/骨骼）顶点由各自专用路径提供，绘制循环会跳过普通绘制。
     auto add = [&](auto& comp, bool instanced, rhi::IRHIBuffer* skinBuffer = nullptr) {

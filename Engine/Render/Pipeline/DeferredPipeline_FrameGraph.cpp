@@ -1312,11 +1312,12 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     {
         auto* giIBL = dynamic_cast<GI_IBL*>(m_GI.get());
         if (giIBL) {
-            world.ForEach<he::SkyboxComponent>([&](he::Entity, he::SkyboxComponent& sc) {
-                if (sc.enabled && sc.GetCubemap()) {
-                    giIBL->SetIBLSkybox(sc.GetCubemap(), sc.GetCubemapSampler());
-                }
-            });
+            // 阶段 1 T1.4：天空盒也走快照（本文件不再 `world.ForEach<SkyboxComponent>`）
+            SceneSnapshotBuilder::BuildSkybox(world, m_Snapshot);
+            if (m_Snapshot.skybox.enabled) {
+                giIBL->SetIBLSkybox(const_cast<rhi::IRHITexture*>(m_Snapshot.skybox.cubemap),
+                                    const_cast<rhi::IRHISampler*>(m_Snapshot.skybox.sampler));
+            }
         }
     }
 

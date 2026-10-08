@@ -29,6 +29,8 @@
 //      · 物体数据（大、已经是着色器布局）直接**内嵌 `GPUObjectData`**，从根上杜绝漂移。
 // ============================================================
 
+namespace he::rhi { class IRHITexture; class IRHISampler; }   // 天空盒条目携带 RHI 资源指针
+
 namespace he::render {
 
 // C++/Slang 共享的 GPU 布局单一真源。
@@ -112,6 +114,16 @@ static_assert(offsetof(SnapshotLight, shadowIndex)    == offsetof(GPULight, shad
 static_assert(offsetof(SnapshotLight, shadowRadius)   == offsetof(GPULight, shadowRadius),   "shadowRadius 偏移漂移");
 static_assert(std::is_trivially_copyable_v<SnapshotLight>, "SnapshotLight 必须可平凡拷贝");
 
+/// 天空盒条目（T1.4/T2.4）：渲染期读取天空盒的**唯一**入口。
+/// 【为什么携带 RHI 资源裸指针】GI 的 IBL 设置接口（`SetIBLSkybox(texture, sampler)`）要的就是指针；
+/// 它们指向**渲染资源**、不是 ECS 组件，因此不违反"快照不放组件指针"。句柄化
+/// （T0.7 的 `RHITextureHandle`）会在资源表落地后替换这两个字段。
+struct SnapshotSkybox {
+    const rhi::IRHITexture* cubemap = nullptr;
+    const rhi::IRHISampler* sampler = nullptr;
+    bool                    enabled = false;   // 找到"启用且真的有 cubemap"的天空盒组件时为真
+};
+
 /// 粒子发射器条目（T1.4）：渲染侧只按 id 驱动**自己**的缓冲，因此不必再缓存 `ParticleComponent*`。
 /// 【为什么连参数一起收】渲染器的发射路径原本每帧从组件读**约 15 个字段**（方向/形状/速度/寿命/
 /// 尺寸/纹理行列…，见 `ParticleRenderer::DispatchCompute` 的 emit 分支），只搬"位置"不足以让消费侧
@@ -131,10 +143,12 @@ struct FrameSceneSnapshot {
     u32        viewportWidth  = 0;
     u32        viewportHeight = 0;
 
-    /// 空中透视（大气）参数：xyz = 太阳方向（指向太阳），w = 浑浊度（0 = 关闭）。
-    /// 与 `PushConstantData::atmosphere` / `DeferredLightingPushConstant::atmosphere` 逐字段一致；
+    /// 空中透视（大气）参数：xyz = 太阳方向（指向太阳），w = 浑浊度（0 = 关闭）。    /// 与 `PushConstantData::atmosphere` / `DeferredLightingPushConstant::atmosphere` 逐字段一致；
     /// 由游戏线程从物理天空组件取（T1.4），渲染期因此不必再读世界。
     float4     atmosphere{0.0f, 1.0f, 0.0f, 0.0f};
+
+    /// 天空盒（IBL 天空源）：渲染期读它的**唯一**入口，替代原先在帧图里 `world.ForEach<SkyboxComponent>`。
+    SnapshotSkybox skybox{};
 
     std::vector<SnapshotDrawItem> draws;
     std::vector<SnapshotLight>    lights;
