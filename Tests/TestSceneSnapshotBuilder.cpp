@@ -47,7 +47,7 @@ struct LightWorld {
 /// 参考实现是确定性的、可逐位比较的，能把"迁移"与"口径变更"分开验证。
 u32 ReferenceCollectLights(World& world, SceneGraph& sg, bool physicalUnits,
                            const std::function<i32(Entity)>& shadowResolver,
-                           std::vector<GPULight>& out) {
+                           std::vector<GPULight>& out, bool writeShadowRadius = false) {
     out.clear();
     auto cl = [&](Entity e, LightComponent& lc) {
         u32 i = static_cast<u32>(out.size());
@@ -61,6 +61,7 @@ u32 ReferenceCollectLights(World& world, SceneGraph& sg, bool physicalUnits,
 
         gl.colorIntensity = float4(lightColor, lc.intensity);
         gl.shadowIndex    = shadowResolver ? shadowResolver(e) : -1;
+        if (writeShadowRadius) gl.shadowRadius = lc.shadowRadius;   // PathTracing 独有
 
         switch (lc.type) {
         case he::LightType::Directional: {
@@ -105,7 +106,7 @@ u32 ReferenceCollectLights(World& world, SceneGraph& sg, bool physicalUnits,
 }
 
 /// 建一个覆盖全部分支的场景：方向光（色温 + 物理照度）、点光 ×2（含物理光强）、聚光、
-/// 关闭的光源、以及超出上限的补光
+/// REC 面光（只有 Forward 收集）、关闭的光源、以及超出上限的补光
 void BuildRichLightScene(LightWorld& lw) {
     const Entity de = lw.AddEntity("dir", float3(0.0f));
     auto* dl = lw.world.AddComponent<DirectionalLight>(de);
@@ -114,6 +115,7 @@ void BuildRichLightScene(LightWorld& lw) {
     dl->intensity        = 3.5f;
     dl->colorTemperature = 5000.0f;
     dl->illuminance      = 90000.0f;          // 走物理模式
+    dl->shadowRadius     = 0.37f;             // 只有 PathTracing 会写进 GPULight
 
     for (int i = 0; i < 2; ++i) {
         const Entity pe = lw.AddEntity("point", float3(1.0f + i, 2.0f, 3.0f));
@@ -121,6 +123,7 @@ void BuildRichLightScene(LightWorld& lw) {
         pl->color             = float3(0.8f, 0.7f, 0.6f);
         pl->intensity         = 5.0f + static_cast<float>(i);
         pl->range             = 10.0f + static_cast<float>(i);
+        pl->shadowRadius      = 0.11f + static_cast<float>(i);
         pl->luminousIntensity = (i == 1) ? 400.0f : 0.0f;   // 只让第二个走物理模式
     }
 
@@ -131,6 +134,15 @@ void BuildRichLightScene(LightWorld& lw) {
     sl->innerConeAngle = 0.2f;
     sl->outerConeAngle = 0.45f;
 
+    const Entity re = lw.AddEntity("rect", float3(3.0f, 4.0f, 5.0f));
+    auto* rl = lw.world.AddComponent<RectLight>(re);
+    rl->normal            = float3(0.0f, -1.0f, 0.0f);
+    rl->width             = 2.5f;
+    rl->height            = 1.25f;
+    rl->range             = 6.0f;
+    rl->intensity         = 2.0f;
+    rl->luminousIntensity = 0.0f;
+
     const Entity offE = lw.AddEntity("off", float3(0.0f));
     lw.world.AddComponent<PointLight>(offE)->enabled = false;
 
@@ -138,6 +150,78 @@ void BuildRichLightScene(LightWorld& lw) {
         const Entity e = lw.AddEntity("fill", float3(static_cast<float>(k), 0.0f, 0.0f));
         lw.world.AddComponent<PointLight>(e)->range = 3.0f;
     }
+}
+
+/// 迁移参考实现（二）：**逐行转写 `ForwardPipeline::CollectLights`**。
+/// 与 Deferred 版的差异就是头文件登记的三处：收集 `RectLight`、点光写 (0,-1,0)、聚光不归一化。
+u32 ReferenceCollectLightsForward(World& world, SceneGraph& sg, bool physicalUnits,
+                                  const std::function<i32(Entity)>& shadowResolver,
+                                  std::vector<GPULight>& out) {
+    out.clear();
+    auto cl = [&](Entity e, LightComponent& lc) {
+        if (!lc.enabled) return;                                // Forward 先判开关，再判上限
+        u32 i = static_cast<u32>(out.size());
+        if (i >= kGPUMaxLights) return;
+
+        float3 lightColor = lc.color;
+        if (lc.colorTemperature > 0.0f) lightColor *= render::KelvinToRGB(lc.colorTemperature);
+
+        GPULight gl{};
+        gl.colorIntensity = float4(lightColor, lc.intensity);
+        gl.shadowIndex    = shadowResolver ? shadowResolver(e) : -1;
+
+        switch (lc.type) {
+        case he::LightType::Directional: {
+            auto* dl = static_cast<he::DirectionalLight*>(&lc);
+            gl.directionType = float4(dl->direction, 0.0f);
+            gl.positionRange = float4(0.0f, 0.0f, 0.0f, 0.0f);
+            if (render::IsPhysicalLightEnabled(physicalUnits, lc.illuminance)) {
+                gl.colorIntensity.w = lc.illuminance * render::kPhysicalLightExposure;
+                gl.positionRange.w  = -1.0f;
+            }
+            break;
+        }
+        case he::LightType::Point: {
+            auto* pl = static_cast<he::PointLight*>(&lc);
+            gl.positionRange = float4(sg.GetWorldPosition(e), pl->range);
+            gl.directionType = float4(0.0f, -1.0f, 0.0f, 1.0f);
+            if (render::IsPhysicalLightEnabled(physicalUnits, lc.luminousIntensity)) {
+                gl.colorIntensity.w = lc.luminousIntensity * render::kPhysicalLightExposure;
+                gl.positionRange.w  = -(pl->range);
+            }
+            break;
+        }
+        case he::LightType::Spot: {
+            auto* sl = static_cast<he::SpotLight*>(&lc);
+            const float r = render::IsPhysicalLightEnabled(physicalUnits, lc.luminousIntensity)
+                          ? -(sl->range) : sl->range;
+            gl.positionRange = float4(sg.GetWorldPosition(e), r);
+            gl.directionType = float4(sl->direction, 2.0f);     // 不归一化
+            gl.coneAngles    = float2(sl->innerConeAngle, sl->outerConeAngle);
+            if (render::IsPhysicalLightEnabled(physicalUnits, lc.luminousIntensity)) {
+                gl.colorIntensity.w = lc.luminousIntensity * render::kPhysicalLightExposure;
+            }
+            break;
+        }
+        case he::LightType::Rect: {
+            auto* rl = static_cast<he::RectLight*>(&lc);
+            gl.positionRange = float4(sg.GetWorldPosition(e), rl->range);
+            gl.directionType = float4(rl->normal, 3.0f);
+            gl.coneAngles    = float2(rl->width, rl->height);
+            if (render::IsPhysicalLightEnabled(physicalUnits, rl->luminousIntensity)) {
+                gl.colorIntensity.w = rl->luminousIntensity * render::kPhysicalLightExposure;
+            }
+            break;
+        }
+        default: break;
+        }
+        out.push_back(gl);
+    };
+    world.ForEach<he::DirectionalLight>(cl);
+    world.ForEach<he::PointLight>(cl);
+    world.ForEach<he::SpotLight>(cl);
+    world.ForEach<he::RectLight>(cl);
+    return static_cast<u32>(out.size());
 }
 
 } // namespace
@@ -327,27 +411,52 @@ TEST_CASE("SceneSnapshotBuilder：与改动前 CollectLights 逐字段一致（�
 
     // 阴影索引解析器：给每个实体一个可区分且确定的值
     auto resolver = [](he::Entity e) -> i32 { return static_cast<i32>(e.id % 4u) - 1; };
+    // PathTracing：没有传统阴影系统（恒 -1），但要写 shadowRadius
+    auto noShadow = [](he::Entity) -> i32 { return -1; };
 
-    for (int physical = 0; physical < 2; ++physical) {
-        SceneSnapshotResolvers resolvers;
-        resolvers.physicalUnitsEnabled = (physical != 0);
-        resolvers.shadowIndex          = resolver;
+    struct Case {
+        const char*             name;
+        SceneSnapshotLightOptions options;      // 传给收集器的口径开关
+        bool                    forwardRef;     // 用哪份转写参考实现
+        bool                    useNoShadow;    // 用恒 -1 的阴影解析器（PT）
+        bool                    writeRadius;    // 参考实现是否写 shadowRadius（PT）
+    };
+    const Case cases[] = {
+        // Deferred：默认口径（不收集 Rect、点光 xyz=0、聚光归一化、不写 shadowRadius）
+        {"Deferred", SceneSnapshotLightOptions{}, false, false, false},
+        // Forward：收集 Rect、点光写 (0,-1,0)、聚光不归一化（shadowRadius 仍不写）
+        {"Forward", SceneSnapshotLightOptions{true, true, false, false}, true, false, false},
+        // PathTracing：口径同 Deferred，但 shadowIndex 恒 -1、且写 shadowRadius
+        {"PathTracing", SceneSnapshotLightOptions{false, false, true, true}, false, true, true},
+    };
 
-        FrameSceneSnapshot snap;
-        const u32 newCount = SceneSnapshotBuilder::BuildLights(lw.world, lw.sg, resolvers, snap);
+    for (const Case& c : cases) {
+        for (int physical = 0; physical < 2; ++physical) {
+            SceneSnapshotResolvers resolvers;
+            resolvers.physicalUnitsEnabled = (physical != 0);
+            resolvers.shadowIndex          = c.useNoShadow ? noShadow : resolver;
 
-        std::vector<GPULight> reference;
-        const u32 refCount = ReferenceCollectLights(lw.world, lw.sg, resolvers.physicalUnitsEnabled,
-                                                   resolver, reference);
+            FrameSceneSnapshot snap;
+            const u32 newCount = SceneSnapshotBuilder::BuildLights(lw.world, lw.sg, resolvers, snap,
+                                                                  c.options);
 
-        REQUIRE(newCount == refCount);
-        REQUIRE(snap.lights.size() == reference.size());
-        REQUIRE(!reference.empty());
+            std::vector<GPULight> reference;
+            const u32 refCount = c.forwardRef
+                ? ReferenceCollectLightsForward(lw.world, lw.sg, resolvers.physicalUnitsEnabled,
+                                                resolvers.shadowIndex, reference)
+                : ReferenceCollectLights(lw.world, lw.sg, resolvers.physicalUnitsEnabled,
+                                         resolvers.shadowIndex, reference, c.writeRadius);
 
-        // 逐元素整块逐位比较（GPULight 与 SnapshotLight 布局一致已由头文件 static_assert 保证）
-        for (usize i = 0; i < reference.size(); ++i) {
-            const GPULight gpu = snap.lights[i].ToGpu();
-            CHECK(std::memcmp(&gpu, &reference[i], sizeof(GPULight)) == 0);
+            INFO("口径=", c.name, " 物理开关=", physical);
+            REQUIRE(newCount == refCount);
+            REQUIRE(snap.lights.size() == reference.size());
+            REQUIRE(!reference.empty());
+
+            // 逐元素整块逐位比较（GPULight 与 SnapshotLight 布局一致已由头文件 static_assert 保证）
+            for (usize i = 0; i < reference.size(); ++i) {
+                const GPULight gpu = snap.lights[i].ToGpu();
+                CHECK(std::memcmp(&gpu, &reference[i], sizeof(GPULight)) == 0);
+            }
         }
     }
 }

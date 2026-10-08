@@ -39,15 +39,24 @@ struct SceneSnapshotResolvers {
 };
 
 /// 光源收集的**口径开关**：默认值是 Deferred 管线的现行行为（= 逐像素基线）。
-/// 【为什么要有它】两条管线在历史上出现了漂移（见文件头说明），而 T1.3 的迁移必须**先保持各管线
-/// 逐像素一致**、再单独决定"统一成哪一个"。把差异做成显式开关，而不是让某条管线悄悄跟着另一条变：
-/// 这样"迁移"与"口径变更"是两次可分别验证、可分别回退的改动。
+/// 【为什么要有它】三条管线在历史上出现了 **4 处漂移**（逐一列在下面），而 T1.3 的迁移必须
+/// **先保持各管线逐像素一致**、再单独决定"统一成哪一个"。把差异做成显式开关，而不是让某条管线
+/// 悄悄跟着另一条变：这样"迁移"与"口径变更"是两次可分别验证、可分别回退的改动。
+/// 【已登记的四处理差异】（迁移完成后应单独立项统一，并如实标注是"修正"还是"改版"）
+///   ① `RectLight`：Forward 收集（`directionType.w=3`、`coneAngles` 复用为宽×高），
+///      Deferred / PathTracing **完全不收集**；
+///   ② 点光 `directionType.xyz`：Forward 写 (0,-1,0)，Deferred / PathTracing 留 0；
+///   ③ 聚光方向：Deferred / PathTracing **归一化**，Forward 写原值；
+///   ④ `shadowRadius`：PathTracing 写 `lc.shadowRadius`，Deferred / Forward 不写（保持 0）。
 struct SceneSnapshotLightOptions {
-    /// 点光的 `directionType.xyz` 是否写 (0,-1,0)：Deferred 不写（保持 0），Forward 写。
-    /// 着色器对点光只用 `directionType.w`，但实测两者会产生可测量的差异 ⇒ 默认按 Deferred 口径。
+    /// 是否收集 `RectLight`（默认 false = Deferred / PathTracing 的现状）
+    bool includeRectLights = false;
+    /// 点光的 `directionType.xyz` 是否写 (0,-1,0)（默认 false = Deferred / PathTracing 的现状）
     bool pointLightWritesDirection = false;
-    /// 聚光方向是否归一化：Deferred 归一化，Forward 不归一化。默认按 Deferred 口径（更正确）。
+    /// 聚光方向是否归一化（默认 true = Deferred / PathTracing 的现状，也更正确）
     bool normalizeSpotDirection = true;
+    /// 是否把 `lc.shadowRadius` 写进 `shadowRadius`（默认 false；PathTracing 需要 true）
+    bool writeShadowRadius = false;
 };
 
 class SceneSnapshotBuilder {

@@ -33,6 +33,9 @@ u32 SceneSnapshotBuilder::BuildLights(he::World& world, he::SceneGraph& sg,
         }
         light.colorIntensity = float4(lightColor, lc.intensity);
         light.shadowIndex    = resolvers.shadowIndex ? resolvers.shadowIndex(e) : -1;
+        // shadowRadius 只有 PathTracing 会写（它把软阴影半径交给路径追踪本身用）；
+        // Deferred / Forward 保持 0（旧行为）
+        light.shadowRadius   = options.writeShadowRadius ? lc.shadowRadius : 0.0f;
 
         switch (lc.type) {
         case he::LightType::Directional: {
@@ -73,6 +76,19 @@ u32 SceneSnapshotBuilder::BuildLights(he::World& world, he::SceneGraph& sg,
             }
             break;
         }
+        case he::LightType::Rect: {
+            // 只有 Forward 收集 Rect 光（见头文件登记的口径漂移①）：Deferred / PathTracing 走
+            // `includeRectLights = false`，它们连遍历都不做 ⇒ 收集数也不同（这一点必须由调用方口径决定）
+            auto* rl = static_cast<he::RectLight*>(&lc);
+            light.positionRange = float4(sg.GetWorldPosition(e), rl->range);
+            light.directionType = float4(rl->normal, 3.0f);      // w=3 标记 Rect；xyz=发光面法线
+            light.coneAngles    = float2(rl->width, rl->height); // 复用：x=宽度, y=高度
+            // 注意：Forward 的 Rect 分支**不**把范围取负（只有 colorIntensity.w 走物理换算）
+            if (IsPhysicalLightEnabled(physicalUnits, lc.luminousIntensity)) {
+                light.colorIntensity.w = lc.luminousIntensity * kPhysicalLightExposure;
+            }
+            break;
+        }
         default:
             break;   // 未知类型：仍然落一条（与旧路径一致）
         }
@@ -80,11 +96,14 @@ u32 SceneSnapshotBuilder::BuildLights(he::World& world, he::SceneGraph& sg,
         out.lights.push_back(light);
     };
 
-    // 遍历顺序必须与旧路径一致：三类各一次 ForEach，且顺序是 方向光 → 点光 → 聚光
+    // 遍历顺序必须与旧路径一致：方向光 → 点光 → 聚光（→ Rect，仅 Forward 口径）
     // （光源下标会影响阴影索引与着色器里的光源循环次序）
     world.ForEach<he::DirectionalLight>(collect);
     world.ForEach<he::PointLight>(collect);
     world.ForEach<he::SpotLight>(collect);
+    if (options.includeRectLights) {
+        world.ForEach<he::RectLight>(collect);
+    }
 
     return static_cast<u32>(out.lights.size());
 }
