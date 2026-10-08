@@ -1335,6 +1335,35 @@ pass 指纹（`1C15AB72E688B530` / `750CC247BF8B9C3D`）未变；`06.GILab` 冒�
 **开工前固定命令（顺序不可省）**：先查并发构建（`Get-Process cl,MSBuild`）→ **后台**构建
 （前台会被 600s 截断并留孤儿 `cl`，表现为"假挂死"）→ 看退出码与 `error C`/`error LNK` →**确认全绿后
 再单独提交**（不要把构建与提交串成一条命令）。
+
+### 15.1 走向 B1 → 0 的**剩余三段**（2026-09-24 已查清，零决策）
+
+**第 ① 段：实例数据进快照**
+- 现状：`GBufferRenderer_CPU.cpp:131` 与 `GBufferRenderer_GPU.cpp:147` 各有一处
+  `world.ForEach<InstancedMeshComponent>`，其中 `ctx.instanceCuller->UploadInstanceTransforms(ctx.device, im)`
+  （`InstanceCuller.h:77`）**吃组件**、内部读它的实例变换 ⇒ 这是实例路径脱离 ECS 的唯一障碍。
+- 做法：给 `InstanceCuller` 加**重载** `u32 UploadInstanceTransforms(device, const float4x4* transforms, u32 count)`
+  （原重载内部转发到它，两条路径共用一份缓冲逻辑）；快照新增
+  `std::vector<SnapshotInstance>`（`{ u32 meshIndex; u32 instanceCount; std::vector<float4x4> transforms; }`
+  或扁平数组 + 偏移，与 `skinMatrices` 同款）与 `SceneSnapshotBuilder::BuildInstances(world, out)`；
+  两处调用改为从快照取（对象条目查找**已**改成 `meshIndex` 优先，见 `8a71949`）。
+
+**第 ② 段：`SceneRenderer::Prepare` 收快照，`DrawItem` 去指针**
+- 快照已具备：`meshIndex`（→ `MeshRegistry::Find` 取顶点/索引缓冲）、材质字段（收集侧算好）、
+  世界 AABB（剔除用）、`objectID`/`sourceEntity`；`GBufferRenderer_{CPU,GPU}.cpp:{65,29}` 与
+  三条管线的绘制循环是消费者。
+- `DrawItem::mesh` 删除后，附录 E 的**组件指针闸门**（`--mesh-ptrs`，当前渲染期 18）才会真正下降。
+
+**第 ③ 段：帧入口收快照 ⇒ B1 归零**
+- `GBufferRenderer::{Prepare,Render}`、`IRenderPipeline::Render` 与三条管线实现改收
+  `const FrameSceneSnapshot&`；样例在游戏线程构建完整快照（`RegisterMeshes`/`BuildObjects`/
+  `BuildLights`/`BuildMaterials`/`BuildSkybox`/`BuildEnvironment`/`BuildParticles`/`BuildDecals`/
+  `BuildInstances` 均已或即将就绪）。
+- 判据：`--world-deps` 渲染期 **80 → 0**（附录 B 断言通过）+ 每次改动都跑
+  `06.GILab` 冒烟（**同二进制双跑做噪声对照**）。
+
+**之后**：T2.4 样例按值交接与渲染线程执行（修掉 06.GILab 的按引用捕获）→ T2.2 设备与交换链归渲染
+线程 → 模式 0/1 判据（转储逐位一致 + 帧时间不退化 >3%）。
 > **性质**：实施计划（**已开工**）。开工后每完成一个任务，回到 §9 勾选并在 §6 记录实测数字。
 > **v1.1 变更**：新增 §12 附录 C「升级到 UE 三线程模型的增量路径」；阶段 0 增加预埋任务 **T0.6（RHI 命令流契约）** 与 **T0.7（资源句柄化）**，二者是 §12 所列升级路径的前置条件。
 > **v1.2 变更**：T0.5 的开关改为**三态** `RenderThreadingMode`（单线程 / 游戏+渲染 / 游戏+渲染+RHI，见 §5 与 §7 的口径说明）；新增 §13 附录 D「阶段 0 T0.2 帧内同步 RHI 调用清单」与配套脚本 `Tools/check_threading.py`（含 `--gate` 闸门模式）。
