@@ -121,8 +121,6 @@ void SkyboxPass::Update(const SubsystemContext& ctx){
     // 收集侧（`SceneSnapshotBuilder::BuildSkybox` / `BuildEnvironment`）已按与原先**逐条一致**的
     // 口径填好"启用且真有 cubemap"的天空盒与"第一个启用"的物理天空整份参数。
     if(!ctx.snapshot)return;
-    m_PhysSky = ctx.snapshot->physicalSky;
-
     // 天空盒 cubemap（物理天空不存在时的回退；快照的 `enabled` 已含"启用且真有 cubemap"）
     if(!ctx.snapshot->skybox.enabled || !ctx.snapshot->skybox.cubemap){
         m_CachedCubemap=nullptr;

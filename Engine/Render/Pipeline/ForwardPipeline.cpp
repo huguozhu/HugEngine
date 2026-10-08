@@ -533,6 +533,9 @@ void ForwardPipeline::Shutdown() {
 }
 
 void ForwardPipeline::NextFrame() {
+    // 【T2.4 步骤 (b)】推进快照槽位：命令载荷指向的快照在其被消费完之前不会被复用
+    m_SnapshotSlot = (m_SnapshotSlot + 1u) % MAX_FRAMES_IN_FLIGHT;
+    m_Assembler.Bind(&SnapBuf(), &m_MeshRegistry);
     // 推进三缓冲槽位（帧首调用，确保 Shadow 和 Scene 使用同一帧的缓冲区）
     m_CurrentFrameSlot = (m_CurrentFrameSlot + 1) % MAX_FRAMES_IN_FLIGHT;
 
@@ -875,13 +878,6 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, const FrameSceneSnapshot
     //（读世界的代码在 `Engine/Render/Threading/` 白名单层）。这里只把指针记下来，
     // 供各 helper 与帧图 lambda（都在本次 Render 内执行）使用。
     m_FrameSnapshot = &snapshot;
-    if (!m_Assembler.AssembledThisFrame()) {
-        // 顺序契约被破坏时给出明确诊断：没有 world 参数 ⇒ 本函数无法补救，只能提示调用方先装配
-        HE_CORE_WARN("ForwardPipeline::Render: 本帧快照未装配（应先调用 "
-                     "GetFrameAssembler().AssembleScene(world, sg, camera)）");
-    }
-    m_Assembler.ReserveOnce();   // 首帧按实际规模自校准预留一次容量（幂等）
-
     // RSM 固定光锥必须**先**刷新（任务 34）：UBO（FillGIBlendUBO）与 frame graph 的
     // RSM pass 注册/参数两处消费者都读它，且两者都在下面几步之内。
     RefreshRSMFrustum(camera);

@@ -171,9 +171,17 @@ private:
     /// 消费者的取值口径（实测 GI 探针转储大幅变化）⇒ 先退回单份，等 T2.2 真正异步执行时
     /// 再连同"渲染线程自己持有命令缓冲"一起做（那时才真正需要多份）。按值交接本身已满足铁律 2：
     /// 载荷按值携带"指针 + 相机 + 时长"，不再按引用捕获游戏线程的栈变量。
-    FrameSceneSnapshot m_Snapshot;
-    [[nodiscard]] FrameSceneSnapshot&       SnapBuf()       { return m_Snapshot; }
-    [[nodiscard]] const FrameSceneSnapshot& SnapBuf() const { return m_Snapshot; }
+    /// 每飞行帧一份快照（T2.4 步骤 (b)：流水线深度的前置）
+    /// 【为什么不能只有一份】游戏线程装配第 N+1 帧时，渲染线程可能仍在读第 N 帧的快照 ——
+    /// 单份缓冲会被"写一半就被读"。按帧槽位分流（+ 队列背压保证在飞帧 ≤ 3）后，载荷指向的快照
+    /// 在其被消费完之前不会被复用。
+    /// 【第 10 轮曾因此回退】当时有消费者**跨帧缓存快照指针**（`ShadowSystem::m_CachedSnapshot`
+    /// 只在 `Update` 里写）⇒ 多槽后读到别的槽位。该缓存已由 `IShadowSystem::SetFrameSnapshot`
+    /// （每帧无条件绑定）消除，故现在可以启用。
+    FrameSceneSnapshot m_Snapshots[MAX_FRAMES_IN_FLIGHT];
+    u32                m_SnapshotSlot = 0;
+    [[nodiscard]] FrameSceneSnapshot&       SnapBuf()       { return m_Snapshots[m_SnapshotSlot]; }
+    [[nodiscard]] const FrameSceneSnapshot& SnapBuf() const { return m_Snapshots[m_SnapshotSlot]; }
 
 
     // 阶段 1 附录 E（E-2）：网格注册表。

@@ -645,6 +645,13 @@ void DeferredPipeline::EnableMSAA(bool enable) {
 }
 
 void DeferredPipeline::NextFrame() {
+    // 【T2.4 步骤 (b)】推进快照槽位：命令载荷指向的快照在其被消费完之前不会被复用
+    m_SnapshotSlot = (m_SnapshotSlot + 1u) % MAX_FRAMES_IN_FLIGHT;
+    m_Assembler.Bind(&SnapBuf(), &m_MeshRegistry);
+    // 【必须每帧复位】`AssembleScene` 靠 `m_Assembled` 做"每帧只装配一次"的幂等；不复位就会
+    // **只在第一帧装配**（静态场景看不出来，但动态场景会冻结，且多槽快照下其它槽永远为空）。
+    m_Assembler.BeginFrame();
+    m_Assembler.Settings().physicalUnitsEnabled = cvLightPhysicalUnits.Get();
     m_CurrentFrameSlot = (m_CurrentFrameSlot + 1) % MAX_FRAMES_IN_FLIGHT;
 
     // PSO 预热：主线程检查后台编译进度，完成后合并缓存
@@ -741,12 +748,7 @@ void DeferredPipeline::Render(rhi::IRHICommandList* cmd, const FrameSceneSnapsho
     // 否则 Deferred 的阴影会静默消失（`HasActiveShadows()` 恒 false）。
     m_Assembler.Settings().objectOptions.excludeDecals = m_ExcludeDecalCards;
     m_Assembler.Settings().physicalUnitsEnabled = cvLightPhysicalUnits.Get();
-    m_FrameSnapshot = &snapshot;   // 帧入口收快照（装配由样例经 GetFrameAssembler() 驱动）
-    if (!m_Assembler.AssembledThisFrame()) {
-        HE_CORE_WARN("DeferredPipeline::Render: 本帧快照未装配（应先调用 "
-                     "GetFrameAssembler().AssembleScene(world, sg, camera)）");
-    }
-
+    m_FrameSnapshot = &snapshot;
     // ============================================================
     // AsyncCompute: RenderGraph 多阶段提交
     //

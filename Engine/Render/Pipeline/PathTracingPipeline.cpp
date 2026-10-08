@@ -208,6 +208,13 @@ void PathTracingPipeline::Shutdown() {
 }
 
 void PathTracingPipeline::NextFrame() {
+    // 【T2.4 步骤 (b)】推进快照槽位：命令载荷指向的快照在其被消费完之前不会被复用
+    m_SnapshotSlot = (m_SnapshotSlot + 1u) % MAX_FRAMES_IN_FLIGHT;
+    m_Assembler.Bind(&SnapBuf(), &m_MeshRegistry);
+    // 【必须每帧复位】`AssembleScene` 靠 `m_Assembled` 做"每帧只装配一次"的幂等；不复位就会
+    // **只在第一帧装配**（静态场景看不出来，但动态场景会冻结，且多槽快照下其它槽永远为空）。
+    m_Assembler.BeginFrame();
+    m_Assembler.Settings().physicalUnitsEnabled = cvLightPhysicalUnits.Get();
     m_CurrentFrameSlot = (m_CurrentFrameSlot + 1) % MAX_FRAMES_IN_FLIGHT;
 }
 
