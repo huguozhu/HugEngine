@@ -11,6 +11,7 @@
 #include "Scene/PhysicalSkyComponent.h"   // GetPhysicalSkySun（T1.4：环境参数进快照）
 #include "Scene/SceneGraph.h"
 #include "Scene/SkeletalMeshComponent.h"
+#include "Scene/SplineMeshComponent.h"   // 附录 E / E-4：与 SceneRenderer 的收集口径统一
 #include "Scene/SphereComponent.h"
 #include "Scene/TextRenderComponent.h"
 #include "Scene/World.h"
@@ -149,6 +150,11 @@ u32 SceneSnapshotBuilder::BuildObjects(he::World& world, he::SceneGraph& sg, con
     if (!options.excludeDecals) {
         world.ForEach<DecalComponent>([&](he::Entity e, DecalComponent& dc) { addPlain(e, dc); });
     }
+    // 样条网格（附录 E / E-4 口径修正）：`SceneRenderer::Prepare` 一直会收集它，而这里原先漏了 ——
+    // 两处枚举顺序不一致会让 `objectIndex` 错位（`FillGPUScene` 按顺序对齐），且 GPU 剔除/间接绘制
+    // 会漏掉样条网格。**插入位置必须与 `SceneRenderer::Prepare` 一致**：Decal 之后、实例化之前。
+    // 说明：当前样例中没有样条网格，无法做前后对比验证，本修正依据是"两处口径必须一致"这一硬约束。
+    world.ForEach<SplineMeshComponent>([&](he::Entity e, SplineMeshComponent& spl) { addPlain(e, spl); });
     world.ForEach<InstancedMeshComponent>([&](he::Entity e, InstancedMeshComponent& im) { addPlain(e, im); });
     // 骨骼网格：除对象条目外，还要把**蒙皮矩阵**追加进快照的扁平数组（T1.4）
     world.ForEach<SkeletalMeshComponent>([&](he::Entity e, SkeletalMeshComponent& sm) {
