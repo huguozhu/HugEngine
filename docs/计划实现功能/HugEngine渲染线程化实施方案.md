@@ -1088,14 +1088,45 @@ public:
 组件销毁时在同一处注销（且必须帧外，见 §14.3 第 2 条）。渲染侧只做 `Find`。
 这样"谁创建谁注册"与缓冲所有权一致，也保证注册表在帧内**只读**（与快照同一条纪律）。
 
-**E-2 的具体步骤（建议按此顺序，每步单独提交 + 逐位判据）**：
-1. 给 `ForwardPipeline` 加 `MeshRegistry m_MeshRegistry;`（成员）与最小注册点：**加载期**遍历一次
+**E-2 的具体步骤（建议按此顺序，每步单独提交 + 逐位判据）**：1. 给 `ForwardPipeline` 加 `MeshRegistry m_MeshRegistry;`（成员）与最小注册点：**加载期**遍历一次
    `SkeletalMeshComponent`，用组件地址作 key 注册其顶点/索引缓冲与 `indexCount`；
 2. 骨骼上传改为：遍历快照里 `skinMatrixCount > 0` 的条目 → `Find(item.meshIndex)` 取缓冲 →
    写入 `skinMatrices[offset, offset+count)`；旧实现（遍历组件 + `sm.boneBuffer`）逐行转写为参考实现
    做 `memcmp` 逐位比较；
 3. 完成 E-2 后复测 `--world-deps`（预期 `ForwardPipeline.cpp` 的 7 处与 `.h` 的 12 处各降若干），
    并把 `WORLD_DEP_BASELINE` 手动下调到新值。
+
+**E-2 代码骨架（真实字段名/调用，可直接照抄；`meshIndex` 字段已于 2026-09-24 落在 `MeshComponent` 上）**：
+
+```cpp
+// ① 注册（加载期；只做一次 —— 用 bool m_MeshRegistryReady 守；必须在首次构建快照之前）
+//    ForwardPipeline.cpp / DeferredPipeline.cpp 同款
+if (!m_MeshRegistryReady) {
+    world.ForEach<he::SkeletalMeshComponent>([&](he::Entity, he::SkeletalMeshComponent& sm) {
+        if (sm.GetIndexCount() == 0u) return;                 // 与收集口径一致：无索引不登记
+        MeshRegistryEntry e;
+        e.vertexBuffer = sm.GetVertexBuffer().get();          // 只借指针，所有权仍在组件
+        e.indexBuffer  = sm.GetIndexBuffer().get();
+        e.indexCount   = sm.GetIndexCount();
+        e.materialID   = sm.materialID;
+        e.instanced    = true;                                // 骨骼网格：顶点由蒙皮路径提供
+        sm.meshIndex   = m_MeshRegistry.Register(&sm, e);      // 回填：快照靠它索引
+    });
+    m_MeshRegistryReady = true;
+}
+
+// ② 消费（骨骼上传：遍历快照条目而不是组件）
+SceneSnapshotBuilder::BuildObjects(world, sg, camera, {}, nullptr, m_Snapshot);   // 若尚未构建
+for (const SnapshotDrawItem& item : m_Snapshot.draws) {
+    if (item.skinMatrixCount == 0u) continue;
+    const MeshRegistryEntry* entry = m_MeshRegistry.Find(item.meshIndex);
+    if (!entry) continue;                                     // 未注册/已注销 ⇒ 跳过（可见化，而不是指错资源）
+    // …把 m_Snapshot.skinMatrices[item.skinMatrixOffset, +skinMatrixCount) 写进 entry 对应的骨骼缓冲
+}
+```
+
+> 判据：把"遍历组件 + `sm.boneBuffer`"的旧实现**逐行转写**成参考实现，与上面①②的结果做 `memcmp`
+> 逐位比较（全帧转储只作粗筛，原因见 §9 T1.3a 的噪声底噪记录）。
 
 ### 14.5 判据与闸门
 - 注册表本体：单测覆盖"注册/更新/注销/复用/越界与已注销返回 nullptr"（与 `TestRHIHandles.cpp` 同款）。
