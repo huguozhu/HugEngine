@@ -1024,6 +1024,27 @@ private:
         `hdr`(723 px / maxULP 21) 与 `lumen_irradiance`/`prov6_*`(823 px / maxULP 552) 上 ——
         与 §9 T1.3a 记录的噪声底噪（`hdr` 719 px / maxULP 21 / `lumen_irradiance` 764 px / maxULP 552）
         **几乎逐项吻合** ⇒ 是已知的探针噪声，非本批差异。
+    - **第 4 批（已提交）**：先收掉管线侧两处"能独立完成"的世界依赖 ——
+      · `ForwardPipeline::RenderSkybox(cmd, world, camera)` → `(cmd, camera)`：天空盒数据自第 1 批起
+        就只从快照取（`SkyboxPass` 只读 `ctx.snapshot`），`World&` 已纯属遗留 ⇒ 去掉。
+      · `ResolveFrameCamera(World&, fallback)` → `ResolveFrameCamera(const CameraComponent*,
+        const TransformComponent*, fallback)`：它本是**场景查询**（`GetPrimaryCamera()` +
+        `GetComponent<TransformComponent>()`），查询交回调用方（样例），渲染模块只做
+        "组件 → CameraData"的纯映射 ⇒ `Engine/Render/` 里少一处渲染期读世界。
+        两个调用点（`02.Cube`、`07.AISamples`）改为自己查主相机与 Transform。
+      ⇒ **B1 47 → 43**。判据：单测 398 例 / 71840 断言；冒烟同批双跑 **4554 像素**、
+      与第 3 批二进制对比 **hdr 719 px / maxULP 21 / meanAbs 5.91e-08、
+      lumen_irradiance 与 prov6_* 764 px / maxULP 552 / meanAbs 2.56e-07** ——
+      **与 §9 T1.3a 记录的噪声签名逐项相同**（不是"量级接近"，是数值全等）⇒ 无可测差异；
+      `02.Cube`（相机路径改动的样例）阴影级联 0 绘制物体数 **12**（与第 2/3 批二进制相同）、
+      实例可见 4820 = CPU 复算、`VUID=0`。
+    - **第 4 批剩余（下一步，最大的一块）与一处必须一并做的迁移**：把三条管线的帧入口改成收快照，
+      需要先解决**骨骼网格的逐网格缓冲状态仍在组件上**（`SkeletalMeshComponent` 的
+      `boneBuffer`/`boneBufferCapacity`/`bBonesDirty`/`boneSSBOHandle`/退役队列）——
+      `ForwardPipeline::RenderScene` 的骨骼循环正是靠它才必须收 `World&`，形态与第①段的实例缓冲
+      完全相同（**矩阵走快照、缓冲生命周期留渲染侧**，按 `meshIndex` 索引；注意
+      `MeshRegistryEntry::skinMatrixBuffer` 现在指向组件缓冲，迁移后应指向渲染侧表里的那份）。
+      连同上面第 1 条的 `FrameSnapshotAssembler` 设计一起做，才是"帧入口收快照"的完整落地。
 - [x] T2.1 `RenderThread` 实现（帧节奏 + 休眠策略）—— ✅ 完成（真起线程 + 归属判断 + 停止排空；4 例单测。cv 唤醒并入 T2.6）
 - [ ] T2.2 设备与交换链归渲染线程（Acquire/Present 迁移）
 - [ ] T2.3 `ResourceCreationService`（步 1 同步转发）

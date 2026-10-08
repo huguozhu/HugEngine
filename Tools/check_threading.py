@@ -73,9 +73,10 @@ WORLD_DEP_ROOTS = ("Engine/Render",)
 # 【白名单】快照层（`Engine/Render/Threading/`）是渲染侧**唯一**允许读世界的代码 —— 它就是干这个的：
 # 在游戏线程把渲染输入取齐成不可变快照。把它的命中排除在外，度量才对准"渲染期泄漏"。
 WORLD_DEP_WHITELIST_PATHS = ("Engine/Render/Threading/",)
-WORLD_DEP_BASELINE = 47        # 2026-10-09 实测（第③段第 3 批后：GI 子系统里唯一真正读世界的
-                               # `GI_RSM::RenderRSMPass` 改吃快照 + 网格注册表，`ForwardPipeline::PrepareGI`
-                               # 随之去掉 `World&`/`SceneGraph&`。阶段 1 退出目标 = 0；
+WORLD_DEP_BASELINE = 43        # 2026-10-09 实测（第③段第 4 批：`ForwardPipeline::RenderSkybox` 去掉
+                               # `World&`（天空盒数据早就在快照里）；`ResolveFrameCamera` 从
+                               # `(World&, fallback)` 改为 `(CameraComponent*, TransformComponent*, fallback)`
+                               # —— 场景查询交回调用方，渲染模块不再收世界。阶段 1 退出目标 = 0；
                                # 注：该脚本按行计数，参数行合并/拆分会有 ±1 效应）
 
 # --- 附录 E 的度量：渲染侧的**组件指针依赖**（`MeshComponent*` 等）---
