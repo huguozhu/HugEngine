@@ -639,6 +639,16 @@ private:
     `GPUScene::Collect` 改消费快照（依赖 T1.2b 的物体收集）。
 - [ ] T1.4 骨骼/材质/Decal/粒子快照化
 - [ ] T1.5 渲染期移除 World/SceneGraph 引用（grep 断言）
+  - **闸门与基线已就位（2026-09-24）**：`Tools/check_threading.py --world-deps` 统计 `Engine/Render/`
+    内 `World&` / `SceneGraph&` 的出现处，按**所属函数名**分"渲染期 / 加载期"（与调用点清点同一份
+    白名单）。**实测：渲染期 86 处 / 加载期 15 处**（阶段 1 退出目标 = 渲染期 **0**）。
+    > 口径说明：同一函数的**声明与定义各算一处**（.h + .cpp），故数值大于函数个数；作为闸门只需
+    > 前后一致、单调下降。迁移期它是**上限**（`--gate` 超基线即失败），随每次收敛手动下调。
+  - 渲染期命中最多的文件（= T1.4/T1.5 的收敛对象）：`Pipeline/ForwardPipeline.h`(12)、
+    `Pipeline/ForwardPipeline.cpp`(7)、`Pipeline/DeferredPipeline.h`(6)、
+    `Pipeline/PathTracingPipeline.h`(5)、`Pipeline/RTPass.cpp`(4)、`Pipeline/GBufferRenderer.h`(3)、
+    `Pipeline/RTPass.h`(3)、`Shadow/CSMTechnique.{h,cpp}`（各 3）、`Pipeline/DeferredPipeline.cpp`(2)、
+    `Pipeline/DeferredPipeline_FrameGraph.cpp`(2)、`Pipeline/ForwardPipeline_FrameGraph.cpp`(2)……
 - [ ] T2.1 `RenderThread` 实现（帧节奏 + 休眠策略）
 - [ ] T2.2 设备与交换链归渲染线程（Acquire/Present 迁移）
 - [ ] T2.3 `ResourceCreationService`（步 1 同步转发）
