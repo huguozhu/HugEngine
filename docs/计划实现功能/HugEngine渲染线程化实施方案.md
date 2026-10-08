@@ -556,7 +556,21 @@ private:
   - grep 闸门已接入 `Tools/check_threading.py --handles`：实测 **277 处 / 76 个文件**（正是 §12.5
     所说"200+ 处持有者"）。该基数是**上限而非目标** —— 迁移可以渐进，但**新增一处**即说明新代码
     没走句柄，闸门会失败。
-- [ ] T1.1 `FrameSceneSnapshot` 定义（与 `ShaderTypes.slang` 对齐 + `static_assert`）
+- [x] T1.1 `FrameSceneSnapshot` 定义（与 `ShaderTypes.slang` 对齐 + `static_assert`）
+  - 落地：`Engine/Render/Threading/FrameSceneSnapshot.h`（值语义、无指针、RHI-free）：
+    `SnapshotDrawItem`（内嵌 `GPUObjectData` + `prevWorldMatrix` + `meshIndex`/`objectID`/
+    `visibilityFlags` + 间接绘制三元组）、`SnapshotLight`（**逐字段镜像** `GPULight`，
+    带 `ToGpu()` / `FromGpu()`）、`FrameSceneSnapshot`（帧号/槽位/相机/dt/视口/draws/lights/
+    skinMatrices/`sourceWorldVersion` + `Clear()` / `Reserve()` / `IsEmpty()`）。
+  - 两条硬约束写进文件头：① **只放值不放指针**（资源只放索引与 ID，由渲染线程自查表），
+    否则"交接后只读"是假的；② **布局与着色器同源** —— 小结构逐字段镜像 + 静态断言，
+    大结构直接内嵌 GPU 结构，杜绝两份字段定义漂移。
+  - 布局钉子（本任务的核心判据）：`SnapshotLight` 与 `GPULight` 的**大小与每个字段偏移**逐一
+    `static_assert`（只锁大小不够：字段互换位置时大小不变但着色器会读错）；
+    `SnapshotDrawItem` 锁"可平凡拷贝 + 16B 对齐"，`CameraData` 锁"值类型"。
+  - 实测（2026-09-24）：单测 **366 例 / 71530 断言全通过**（改前 362 / 71495）。
+  - 实现细节留痕：`ShaderTypes.slang` 必须在 `he::render` 命名空间内包含（与
+    `Pipeline/Material.h` 同一用法），否则 `float4` / `float4x4` 在全局作用域不可见。
 - [ ] T1.2 `SceneSnapshotBuilder`（集中现有 Collect 遍历）
 - [ ] T1.3 `CollectLights` / `GPUScene::Collect` 改消费快照
 - [ ] T1.4 骨骼/材质/Decal/粒子快照化
