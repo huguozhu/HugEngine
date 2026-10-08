@@ -16,6 +16,10 @@
 #include "Pipeline/IRenderPipeline.h"
 #include "GI/GITypes.h"   // GI 数据模型 + GIRegistry（RHI-free）
 #include "GI/LumenProvider.h"   // 步骤 12：取 SDF 追踪可视化纹理做转储
+// 渲染线程化（方案 B 阶段 0 T0.3）：命令队列 + 渲染线程壳 + 帧票据/背压。
+// 阶段 0 的壳在**调用线程**上执行（帧序与结果不变），阶段 2 起同一段代码由真线程消费。
+#include "Threading/RenderCommandQueue.h"
+#include "Threading/RenderThread.h"
 #include "Lumen/ScreenProbe.slang"   // 2026-09-24 诊断：探针缓冲落盘需要 sizeof(ScreenProbe)
 #include "Pipeline/CameraController.h"
 #include "Pipeline/PhysicalCamera.h"
@@ -864,6 +868,21 @@ int main() {
     u64 frameIndex = 0;
     f64 lastTime   = glfwGetTime();
 
+    // ── 渲染线程化（方案 B 阶段 0 T0.3/T0.4）：帧渲染经命令队列交给"渲染线程" ──
+    // 【阶段 0 的语义】`RenderThread` 是**壳**：`SubmitAndPump` 在调用线程上立即执行命令，
+    // 因此帧序、录制顺序与结果与直接调用逐像素一致（判据即 `cmp_dumps` 前后相同）。
+    // 三态模式（T0.5）决定是否走队列：`SingleThreaded` 走旧路径，另外两种模式走队列。
+    // 【已知并记录的偏离】阶段 0 的命令载荷仍按引用捕获；铁律 2 要求按值捕获，这要等
+    // 阶段 1 的 `FrameSceneSnapshot` 把渲染输入变成不可变数据后才能真正满足（T1.2/T2.4）。
+    render::RenderCommandQueue renderQueue(rhi::kMaxFramesInFlight);
+    render::RenderThread       renderThread(renderQueue);
+    render::FrameScheduler     frameScheduler(renderQueue, renderThread);
+    const bool                 useRenderQueue = he::UsesRenderThread();
+    HE_CORE_INFO("06.GILab：渲染线程模式 = {}（{}）⇒ 每帧渲染{}经命令队列",
+                 he::RenderThreadingModeName(he::GetRenderThreadingMode()),
+                 static_cast<int>(he::GetRenderThreadingMode()),
+                 useRenderQueue ? "" : "不");
+
     while (!engine.GetWindow()->ShouldClose()) {
         f64 now       = glfwGetTime();
         f32 deltaTime = static_cast<f32>(now - lastTime);
@@ -979,7 +998,17 @@ int main() {
         static double s_accPipelineMs = 0.0;
         {
             const auto t0 = std::chrono::steady_clock::now();
-            curPipeline->Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
+            if (useRenderQueue) {
+                // 阶段 0：入队 → 发布（含背压语义）→ 壳在本线程立即执行并回收票据。
+                // 阶段 2 起把 `SubmitAndPump` 换成"只提交"，由渲染线程的循环去 Pump。
+                renderQueue.BeginFrame();
+                renderQueue.Enqueue([&](render::RenderThreadContext&) {
+                    curPipeline->Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
+                });
+                frameScheduler.SubmitAndPump();
+            } else {
+                curPipeline->Render(cmdList.get(), world, sceneGraph, camCtrl.GetCamera());
+            }
             s_accPipelineMs += std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - t0).count();
         }
