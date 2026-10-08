@@ -172,6 +172,15 @@ public:
     /// @return 材质槽位数（= 上传时的 buffer 元素数）
     static u32 BuildMaterials(he::World& world, FrameSceneSnapshot& out);
 
+    // ── 贴花（T1.4：渲染期不再读 DecalComponent）──────────────────
+
+    /// 收集贴花：把 `DecalPass` 原先两处遍历读到的字段按值带走（含 `sg.GetWorldMatrix(e)`）。
+    /// 【为什么矩阵要单独带】Deferred 的物体收集 `excludeDecals` ⇒ 贴花不在 `draws` 里，取不到矩阵。
+    /// 每次调用清空重填（逐帧复用安全）。保留全部贴花（含 `opacity<=0`），由消费侧按原口径过滤 ——
+    /// 这样"判空"与"绘制"的过滤条件仍在同一处（`DecalPass`），迁移不改语义。
+    /// @return 贴花数
+    static u32 BuildDecals(he::World& world, he::SceneGraph& sg, FrameSceneSnapshot& out);
+
     // ── 天空盒（T1.4：渲染期不再读 SkyboxComponent）──────────────
 
     /// 收集天空盒（IBL 天空源）：取"启用且真的有 cubemap"的组件。

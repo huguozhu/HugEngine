@@ -126,6 +126,23 @@ struct SnapshotSkybox {
     bool                    enabled = false;   // 找到"启用且真的有 cubemap"的天空盒组件时为真
 };
 
+/// 贴花条目（T1.4）：`DecalPass` 原先遍历 `DecalComponent` 两次（判空 + 逐贴花绘制），并按
+/// `SceneGraph::GetWorldMatrix(e)` 取矩阵 —— 这些值在这里按值带走，渲染侧因此不再读 ECS。
+/// 【为什么矩阵要单独带】Deferred 的物体收集会 `excludeDecals`（贴花卡片不进 `draws`），
+/// 所以贴花的世界矩阵不能从 `draws` 里找。
+struct SnapshotDecal {
+    float4x4 worldMatrix{1.0f};        // 原 `sg.GetWorldMatrix(e)`（DecalPass.cpp:249）
+    float2   size{0.0f};               // 组件 size（float2；:247/:272 只用到 x/y）
+    float    projectionDepth = 0.0f;   // :273
+    float    rotation        = 0.0f;   // :257
+    float3   baseColorFactor{0.0f};    // :274
+    float    metallicFactor  = 0.0f;   // :275
+    float    roughnessFactor = 0.0f;   // :277
+    float    opacity         = 0.0f;   // :208/:245/:274
+    u32      materialID      = 0;      // :276/:278
+    bool     hasBaseColorTexture = false;  // 由 `!baseColorTexture.empty()` 预先算好（:276）
+};
+
 /// 粒子发射器条目（T1.4）：渲染侧只按 id 驱动**自己**的缓冲，因此不必再缓存 `ParticleComponent*`。
 /// 【为什么连参数一起收】渲染器的发射路径原本每帧从组件读**约 15 个字段**（方向/形状/速度/寿命/
 /// 尺寸/纹理行列…，见 `ParticleRenderer::DispatchCompute` 的 emit 分支），只搬"位置"不足以让消费侧
@@ -151,6 +168,9 @@ struct FrameSceneSnapshot {
 
     /// 天空盒（IBL 天空源）：渲染期读它的**唯一**入口，替代原先在帧图里 `world.ForEach<SkyboxComponent>`。
     SnapshotSkybox skybox{};
+
+    /// 贴花（T1.4）：`DecalPass` 读它的**唯一**入口，替代原先两处 `world.ForEach<DecalComponent>`。
+    std::vector<SnapshotDecal> decals;
 
     /// bindless 材质 SSBO 的内容：按 `materialID >> 2` 作槽位、已去重、已补齐空槽（值初始化）。
     /// 【为什么要进快照】`UploadMaterialBindless` 原先自己遍历组件收集材质 —— 那是"渲染期读 ECS"的一处；

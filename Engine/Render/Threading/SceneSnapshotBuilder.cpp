@@ -240,6 +240,25 @@ u32 SceneSnapshotBuilder::BuildMaterials(he::World& world, FrameSceneSnapshot& o
     return static_cast<u32>(out.materials.size());
 }
 
+u32 SceneSnapshotBuilder::BuildDecals(he::World& world, he::SceneGraph& sg, FrameSceneSnapshot& out) {
+    out.decals.clear();
+    world.ForEach<he::DecalComponent>([&](he::Entity e, he::DecalComponent& d) {
+        SnapshotDecal item;
+        item.worldMatrix          = sg.GetWorldMatrix(e);   // 原 DecalPass.cpp:249
+        item.size                 = d.size;
+        item.projectionDepth      = d.projectionDepth;
+        item.rotation             = d.rotation;
+        item.baseColorFactor      = d.baseColorFactor;
+        item.metallicFactor       = d.metallicFactor;
+        item.roughnessFactor      = d.roughnessFactor;
+        item.opacity              = d.opacity;
+        item.materialID           = d.materialID;
+        item.hasBaseColorTexture  = !d.baseColorTexture.empty();
+        out.decals.push_back(item);
+    });
+    return static_cast<u32>(out.decals.size());
+}
+
 bool SceneSnapshotBuilder::BuildSkybox(he::World& world, FrameSceneSnapshot& out) {
     out.skybox = SnapshotSkybox{};          // 逐帧复位：上一帧的天空盒不得残留
     // 与原先帧图里的 `world.ForEach<SkyboxComponent>` 循环逐条一致（逐个赋值 ⇒ 后者覆盖前者）。
