@@ -73,13 +73,11 @@ WORLD_DEP_ROOTS = ("Engine/Render",)
 # 【白名单】快照层（`Engine/Render/Threading/`）是渲染侧**唯一**允许读世界的代码 —— 它就是干这个的：
 # 在游戏线程把渲染输入取齐成不可变快照。把它的命中排除在外，度量才对准"渲染期泄漏"。
 WORLD_DEP_WHITELIST_PATHS = ("Engine/Render/Threading/",)
-WORLD_DEP_BASELINE = 17        # 2026-10-09 实测（第③段第 5 批：RTPass 改吃快照 + 注册表后。\n                               # 上一批（第 4 批之二）为 24：Deferred 与 PathTracing 也
-                               # 统一走 `FrameSnapshotAssembler`，各自的 `CollectLights` 改为只消费快照
-                               # ⇒ 三条管线的光源收集都离开渲染期）
-                               # —— 第③段第 5 批（RTPass 改吃快照）后**实测 17**，见下方 B1 说明。
-                               # 阶段 1 退出目标 = 0；注：按行计数，参数行合并/拆分会有 ±1 效应）
-# 【第③段第 5 批的实测值】17 = 帧入口签名（三条管线的 `Render`/`BuildFrameGraph` 与
-# `IRenderPipeline.h` 的接口声明）+ 各文件定义行；`RTPass.{h,cpp}` 的 7 处已随"改吃快照"清零。
+WORLD_DEP_BASELINE = 0         # 2026-10-09 实测（第③段收口：三条管线的帧入口 `Render` 与
+                               # `BuildFrameGraph` 不再收 `World&`/`SceneGraph&`，`IRenderPipeline`
+                               # 的接口声明同步改成收快照 ⇒ **渲染期世界依赖 = 0**，阶段 1 退出目标达成。
+                               # 从今往后此基线只允许保持 0：任何在 `Engine/Render/`（`Threading/`
+                               # 白名单层除外）里新出现的 `World&`/`SceneGraph&` 都会让闸门失败）
 MESH_PTR_PATTERN = re.compile(r"\b(?:he::)?(?:Mesh|SkeletalMesh|InstancedMesh|SplineMesh|Decal)Component\s*\*")
 MESH_PTR_BASELINE = 0          # 2026-10-09 实测（第③段第 5 批：`RTPass` 的 BLAS 缓存键从
                                # `MeshComponent*` 换成 `meshIndex`、`CollectMeshList` 改吃快照、
