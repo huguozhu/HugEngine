@@ -472,6 +472,27 @@ private:
 > E-2② 之前的转储逐位对比 = **4539 像素**（与同二进制噪声底噪同量级）⇒ 骨骼矩阵改走快照、
 > 材质映射唯一化、收集侧算材质这三项改动**均无可测回归**。
 
+> **第三次复核：§15.1 第①段（实例缓冲状态搬迁 + 实例数据进快照）之后（2026-10-09）**
+>
+> | 项 | 数字 | 说明 / 复现 |
+> |---|---|---|
+> | 构建 | 7 个目标全绿（`HugEngineTests` / `02.Cube` / `03.Sponza-Forward` / `04.Sponza-Deferred` / `05.Sponza-PathTracing` / `06.GILab` / `07.Nanite`）+ `07.AISamples` | 无 `error C` / `error LNK` |
+> | 单测规模 | **397 例 / 71829 断言全通过** | `build\bin\Release\HugEngineTests.exe` |
+> | `06.GILab` 冒烟 | 同二进制双跑 **0 像素**（逐位一致） | `HE_LUMEN_PROBE_FILTER=off`；告警行 42 → 42 |
+> | `02.Cube` 实例化实跑（Forward + Deferred） | GPU 剔除读回与 CPU 复算**逐帧相等**（4820/4820、4839/4839）；SSBO 只建一次后原地复用（退役恒 0）；`VUID=0` | 唯一含实例化网格的样例；见 §9 T1.5 第①段 |
+> | 帧内同步 RHI 调用 | **380**（376 → 380，**口径漂移，非新增调用**） | `Tools/check_threading.py`；理由见 §9 T1.5 第①段"口径说明一" |
+> | 附录 B1 世界依赖 | 渲染期 **78** / 加载期 13（80 → 78，**行合并少计一行，非进展**） | 同上"口径说明二"；基线仍留 80 |
+> | 组件指针依赖 | 渲染期 **18**（不变） | 第②段（`DrawItem::mesh` 去指针）才会真正下降 |
+> | T0.7 资源持有者 | **277** / 75 个文件（不变） | 基线 277 |
+> | `acceptance_sweep.ps1 -OnlyNanite` | **PASS**：两类指纹 `1C15AB72E688B530` / `750CC247BF8B9C3D` **未变**，CULL DIFF / PIC CMP / TAKEOVER CMP 全过，`vuid` off=41 / on=42（新增类型 0） | 端到端回归确认 |
+>
+> **本段顺带修掉一个隐藏缺陷**：三条管线的 `CollectLights` 原先在帧中调用 `m_Snapshot.Clear()`，
+> 会连带抹掉同帧已填好的 `draws`/`skinMatrices`/`instances`。蒙皮消费侧有"退回组件数据"的兜底
+> （所以 E-2② 的快照路径实际没被走到、也没被发现），实例化没有兜底 ⇒ 表现为"一个实例都不画"。
+> 这个问题是**先有鸡还是先有蛋**的典型：它由第①段引入的"无兜底消费侧"暴露出来，属既有缺陷。
+>
+> **未做**：第②③段（`DrawItem` 去指针 / 帧入口收快照 ⇒ B1 归零）与 T2.4/T2.2。
+
 ---
 
 ## 7. 风险与回退
@@ -802,6 +823,53 @@ private:
     `Pipeline/PathTracingPipeline.h`(5)、`Pipeline/RTPass.cpp`(4)、`Pipeline/GBufferRenderer.h`(3)、
     `Pipeline/RTPass.h`(3)、`Shadow/CSMTechnique.{h,cpp}`（各 3）、`Pipeline/DeferredPipeline.cpp`(2)、
     `Pipeline/DeferredPipeline_FrameGraph.cpp`(2)、`Pipeline/ForwardPipeline_FrameGraph.cpp`(2)……
+  - **第①段·实例缓冲状态搬迁 + 实例数据进快照（2026-10-09）** —— ✅ 完成（§15.1 ①）
+    契约：`FrameSceneSnapshot` 新增 `SnapshotInstance{meshIndex, transformOffset, transformCount,
+    transformVersion, enableFrustumCull, localBoundsMin/Max, sourceEntity}` 与扁平数组
+    `instanceTransforms`（与 `skinMatrices` 同款切片；`Clear`/`Reserve` 同步扩展），
+    `SceneSnapshotBuilder::BuildInstances` 按组件收集 —— **含实例数为 0 的组件**：渲染侧靠
+    "本帧又见到这个 meshIndex"来推进退役队列并回收已销毁组件留下的缓冲与 bindless 槽位。
+    组件侧：`InstancedMeshComponent` 只留 `instanceTransforms` + `instanceTransformVersion`
+    （`SetInstanceTransforms` 递增，取代原来的 `bTransformsDirty`）；逐网格 GPU 状态（实例 SSBO、
+    容量、脏判据、退役队列、逐实例剔除的命令缓冲、可见数）全部搬到渲染侧
+    `InstanceCuller::InstanceState`（按 `meshIndex` 索引），新增 `BeginInstancesFrame`
+    （帧边界：推进退役队列 + 回收上帧未见的条目）与
+    `UploadInstanceTransforms(device, meshIndex, transforms, count, version, ownerEntity)`。
+    `ownerEntity` 用来识别"注册表索引被回收后复用给新网格"—— 否则新的组件版本号可能恰好等于
+    旧条目已上传的版本号，直接画出**上一个组件的实例**。
+    三个消费侧（`ForwardPipeline::RenderScene` / `GBufferRenderer_CPU` / `GBufferRenderer_GPU`）
+    全部改为遍历 `snapshot.instances`、按 `meshIndex` 从 `MeshRegistry` 取顶点/索引缓冲与索引数
+    （`GBufferContext` 新增 `meshRegistry`，`GBufferRenderer::Render` 新增快照入参）
+    ⇒ **渲染期不再遍历世界、也不再读 `InstancedMeshComponent`**。
+    **顺带修掉一个隐藏缺陷**：三条管线的 `CollectLights` 原先在帧中调用 `m_Snapshot.Clear()`
+    （本意只是重建光源数组），它会把同帧**已填好**的 `draws`/`skinMatrices`/`instances` 一起抹掉。
+    蒙皮消费侧有"退回组件数据"的兜底，所以 E-2② 之后这条快照路径实际上从未被走到也没人发现；
+    实例化没有兜底 ⇒ 直接表现为"一个实例都不画"。现已删除那三处 `Clear()`
+    （`SceneSnapshotBuilder::BuildLights` 自己会清 `lights`，其余数组各自由自己的收集器清）。
+    证据（2026-10-09）：
+    · 单测 **397 例 / 71829 断言全通过**（+3 例 / +40 断言）：`BuildInstances` 切片与组件数组
+      `memcmp` **逐位一致**、版本号语义、实例状态表的每飞行帧分槽、快照预留与纯值类型；
+    · `02.Cube`（唯一的实例化样例：10000 实例 + 每帧改变换 + 逐实例剔除）**双管线实跑**：
+      Forward `SSBO 句柄 7（容量 10000）、退役 0（原地复用，未新建）`、
+      `可见 4820/10000；CPU 参考复算 4820`；Deferred `首帧：实例 10000（对象 #22）、
+      实例 SSBO 句柄 6、命令句柄 7、可见列表句柄 4`、`可见 4839/10000；CPU 参考复算 4839`
+      —— GPU 读回与样例内置的 CPU 复算**逐帧相等**，"缓冲只建一次、之后原地复用"不变式成立，
+      两条路径 `VUID/Validation Error = 0`；
+    · `06.GILab` 冒烟（`HE_LUMEN_PROBE_FILTER=off`）**同二进制双跑 = 0 像素**（逐位一致）；
+      该样例**没有实例化网格**，故此处只用于确认无连带回归（告警行数 42 → 42，零新增）；
+    · 四项闸门：帧内同步 RHI **380** / B1 渲染期 **78** / 组件指针渲染期 **18** /
+      资源持有者 **277**（75 个文件）—— **三项基线一律不下调**，理由见下。
+    > **口径说明一：帧内同步 RHI 376 → 380 不是新增调用。** 这 4 处是
+    > `Tools/check_threading.py` 的"所属函数名"启发式**归属漂移**：`UploadInstanceTransforms`
+    > 的新签名跨了 3 行（旧签名单行，函数名可识别），于是它体内的 `desc.initialData` /
+    > `CreateBuffer` / `Map()` 由"归属上传函数 ⇒ 加载期"变成"归属上一处单行函数名 ⇒ 渲染期"；
+    > `Cull` 里那处 `commandBuffer->Map()` 同理（它本来就每帧执行，属**纠正**而非新增）。
+    > 代码是从组件逐行搬过来的同一批调用，故本项按"未变"记账。
+    > **口径说明二：B1 80 → 78 也不是进展。** 该脚本按**行**计数 `World&`/`SceneGraph&`，
+    > 而我把 `GBufferRenderer::Render` 的 `he::World& world,` 与 `he::SceneGraph& sg,` 合并到了
+    > 同一行 ⇒ 少计一行。本段真实的世界依赖下降发生在**函数体内**（删掉的三处
+    > `world.ForEach<InstancedMeshComponent>`），而 B1 只量签名、量不到它。
+    > 同理不下调基线，避免用格式变化去"刷"闸门；B1 的真实归零留给第③段。
 - [x] T2.1 `RenderThread` 实现（帧节奏 + 休眠策略）—— ✅ 完成（真起线程 + 归属判断 + 停止排空；4 例单测。cv 唤醒并入 T2.6）
 - [ ] T2.2 设备与交换链归渲染线程（Acquire/Present 迁移）
 - [ ] T2.3 `ResourceCreationService`（步 1 同步转发）
@@ -1302,71 +1370,84 @@ python Tools\check_threading.py --world-deps --mesh-ptrs --handles --gate
 
 ## 15. 第二轮交接快照（2026-09-24 晚；新会话请从这里开始）
 
-**分支与状态**：`multi_thread`，**11 条提交未推送**（`git push origin multi_thread` 可推；PR 入口
+> **2026-10-09 更新（§15.1 第①段完成）**：本节的"分支与状态 / 四项闸门 / 验收 / 已完成 / 下一步"
+> 五段已按第①段落地后的实测刷新；**§15.1 的三段只剩 ②③**（第①段的收尾说明写在那一节里）。
+
+**分支与状态**：`multi_thread`，**12 条提交未推送**（`git push origin multi_thread` 可推；PR 入口
 `https://github.com/huguozhu/HugEngine/pull/new/multi_thread`）。工作区干净（仅另一个会话留下的
 未跟踪占位文件 `docs/计划实现功能/占位.md`，不要动它）。
 
-**四项闸门（都在基线，只允许下降）**：帧内同步 RHI 调用 **376**｜附录 B1 世界依赖 渲染期 **81** /
-加载期 14｜组件指针依赖 渲染期 **18** / 加载期 4｜T0.7 资源持有者 **277** / 76 文件。
+**四项闸门（都在基线，只允许下降）**：帧内同步 RHI 调用 **380**（= 376 + 4 处**归属漂移**，非新增
+调用；见 §9 T1.5 第①段口径说明一）｜附录 B1 世界依赖 渲染期 **78** / 加载期 13（80 → 78 = 行合并
+少计一行，**不是进展**，基线仍留 80）｜组件指针依赖 渲染期 **18** / 加载期 1｜
+T0.7 资源持有者 **277** / 75 文件。
 复测：`python Tools/check_threading.py --world-deps --mesh-ptrs --handles --gate`
 
-**验收**：单测 **394 例 / 71789 断言全通过**；`acceptance_sweep.ps1 -OnlyNanite` **PASS** 且两类
-pass 指纹（`1C15AB72E688B530` / `750CC247BF8B9C3D`）未变；`06.GILab` 冒烟**同二进制双跑 = 4539 像素**
-（= 噪声底噪）、"改动前后另一趟 = 0 像素" ⇒ 判据要**多跑一趟做对照**（单次对比会被噪声误导）。
+**验收**：单测 **397 例 / 71829 断言全通过**；`acceptance_sweep.ps1 -OnlyNanite` **PASS** 且两类
+pass 指纹（`1C15AB72E688B530` / `750CC247BF8B9C3D`）未变；`06.GILab` 冒烟在
+`HE_LUMEN_PROBE_FILTER=off` 下**同二进制双跑 = 0 像素**（逐位一致）—— 该环境变量是**必须**的：
+默认滤波下同一二进制两趟差 **≈ 2.25M 像素**（Lumen 屏幕探针的逐趟不确定性），会把判据淹没。
+`02.Cube`（唯一含实例化网格的样例）双管线实跑：GPU 剔除读回与 CPU 复算逐帧相等（4820/4820、
+4839/4839），实例 SSBO 只建一次后原地复用。
 
 **已完成**：阶段 0 全部（T0.1–T0.7 + 两条退出判据）；阶段 1 的快照契约、光源/物体/环境/骨骼/粒子/
-天空盒/材质收集、三管线消费（光源 + `GPUScene`）、E-1 注册表、E-2① 注册点（三管线对称）、E-2② 骨骼
+天空盒/材质/贴花收集、三管线消费（光源 + `GPUScene`）、E-1 注册表、E-2① 注册点（三管线对称）、E-2② 骨骼
 矩阵走快照、E-3① 材质映射唯一化、E-3② 前半（收集侧算材质）、E-4 样条口径统一、稳态零分配（`Reserve`
-补漏 + 自校准预留）、Forward/Deferred 完整快照；**阶段 2 的 T2.1 渲染线程真起线程**（含 4 例单测）。
+补漏 + 自校准预留）、Forward/Deferred 完整快照；**阶段 2 的 T2.1 渲染线程真起线程**（含 4 例单测）；
+**§15.1 第①段：实例缓冲状态搬迁 + 实例数据进快照**（含顺带修掉的 `CollectLights` 误清快照缺陷）。
 
 **下一步（按序，规格都已入档）**：
-1. **Decal 快照化** ⇒ B1 81 → 79（字段 ↔ 原代码行号对照见 §9 T1.4 的那条子项）；
-2. `GBufferRenderer`（3 处）与 `RenderSkybox`（需天空盒子系统 `Update(ctx)` 一并改）的签名；
-3. **三条管线帧入口改收 `const FrameSceneSnapshot&`** ⇒ **B1 → 0**（阶段 1 退出条件 = 附录 B 断言通过）；
-   样例在游戏线程构建完整快照（`RegisterMeshes`/`BuildObjects`/`BuildLights`/`BuildMaterials`/
-   `BuildSkybox`/`BuildEnvironment`/`BuildParticles` 均已就绪）；
-4. **T2.4** 样例循环改造（06.GILab 试点 → 7 个样例）：游戏线程构建快照、**按值**交接、渲染线程执行
+1. **§15.1 第②段**：`SceneRenderer::Prepare` 收快照、`DrawItem` 去掉 `mesh` 指针
+   （⇒ 组件指针闸门 18 开始下降；`RTPass` 的 BLAS 缓存键换 `meshIndex` 也在此段）；
+2. **§15.1 第③段**：**三条管线帧入口改收 `const FrameSceneSnapshot&`** ⇒ **B1 → 0**
+   （阶段 1 退出条件 = 附录 B 断言通过）；样例在游戏线程构建完整快照
+   （`RegisterMeshes`/`BuildObjects`/`BuildInstances`/`BuildLights`/`BuildMaterials`/
+   `BuildSkybox`/`BuildEnvironment`/`BuildParticles`/`BuildDecals` 均已就绪）；
+3. **T2.4** 样例循环改造（06.GILab 试点 → 7 个样例）：游戏线程构建快照、**按值**交接、渲染线程执行
    （顺带修掉 06.GILab 现有的**按引用捕获**）；
-5. **T2.2** 设备与交换链归渲染线程（`CreateDevice` 的归属 claim 迁移、`Acquire/Present` 迁移）；
-6. **按需 T2.3**（资源创建同步转发）、**T2.6**（`RenderThreadContext` 为 RHI 唯一出口 + 队列 cv 唤醒）；
-7. **判据**：模式 0 / 模式 1 同场景转储**逐位一致** + 帧时间**不退化 >3%**（06.GILab 121 帧自测）。
+4. **T2.2** 设备与交换链归渲染线程（`CreateDevice` 的归属 claim 迁移、`Acquire/Present` 迁移）；
+5. **按需 T2.3**（资源创建同步转发）、**T2.6**（`RenderThreadContext` 为 RHI 唯一出口 + 队列 cv 唤醒）；
+6. **判据**：模式 0 / 模式 1 同场景转储**逐位一致** + 帧时间**不退化 >3%**（06.GILab 121 帧自测）。
    **模式 2 本轮不做**（你已明确）；T2.5/T3.x/T4.x/T5.x 属后续范围。
 
 **开工前固定命令（顺序不可省）**：先查并发构建（`Get-Process cl,MSBuild`）→ **后台**构建
 （前台会被 600s 截断并留孤儿 `cl`，表现为"假挂死"）→ 看退出码与 `error C`/`error LNK` →**确认全绿后
 再单独提交**（不要把构建与提交串成一条命令）。
 
-### 15.1 走向 B1 → 0 的**剩余三段**（2026-09-24 已查清，零决策）
+### 15.1 走向 B1 → 0 的**剩余三段**（2026-09-24 已查清，零决策；① 已于 2026-10-09 完成）
 
-**第 ① 段：实例数据进快照**
-- 现状：`GBufferRenderer_CPU.cpp:131` 与 `GBufferRenderer_GPU.cpp:147` 各有一处
-  `world.ForEach<InstancedMeshComponent>`，其中 `ctx.instanceCuller->UploadInstanceTransforms(ctx.device, im)`
-  （`InstanceCuller.h:77`）**吃组件**、内部读它的实例变换 ⇒ 这是实例路径脱离 ECS 的唯一障碍。
-- **⚠️ 2026-09-24 复核后的修正（比原先预估更深一层）**：该函数不只"读"组件 —— 它还**改组件的 GPU 缓冲状态**：
-  `InstanceCuller.cpp:120-137` 里 `im.AdvanceRetireQueue()`、`im.instanceBuffer / instanceBufferCapacity /
-  bTransformsDirty / instanceTransforms` 都是**组件上的成员**。⇒ 只加一个"吃 `(const float4x4*, u32)` 的重载
-  **不够**，必须把**逐网格的实例缓冲状态**（缓冲、容量、脏标记、退役队列）从组件搬到渲染侧的一张表里
-  （与骨骼缓冲 E-2② 的处理同款：**矩阵数据走快照、缓冲生命周期留渲染侧**，并按 `meshIndex` 索引）。
-  组件侧只保留 `instanceTransforms`（CPU 数据源）+ 一个"数据变了"的标志。
-- 做法：快照新增 `SnapshotInstance{ u32 meshIndex; std::vector<float4x4> transforms; }`（或扁平数组 + 偏移，
-  与 `skinMatrices` 同款）与 `SceneSnapshotBuilder::BuildInstances(world, out)`；`InstanceCuller` 新增
-  "按 meshIndex 管理缓冲"的状态表 + `UploadInstanceTransforms(const float4x4*, u32 count, u32 meshIndex)`
-  重载（原重载内部转发，保持两条路径共用一份缓冲逻辑）；两处调用改从快照取（对象条目查找**已**改成
-  `meshIndex` 优先，见 `8a71949`）。
+**第 ① 段：实例数据进快照 —— ✅ 完成（2026-10-09）**
+- 落地内容与实测数字见 §9 T1.5 的"第①段"条目与 §6 的"第三次复核"表。要点：
+  快照新增 `SnapshotInstance` + `instanceTransforms` 扁平数组 + `BuildInstances`；
+  `InstancedMeshComponent` 只留 CPU 数据源与 `instanceTransformVersion`；
+  逐网格 GPU 缓冲状态搬到 `InstanceCuller::InstanceState`（按 `meshIndex`，含 `BeginInstancesFrame`
+  的回收与 `ownerEntity` 的索引复用识别）；三个消费侧全部改读快照。
+- **落地时修正了两处原方案**：① 原方案说"原重载内部转发、保持两条路径共用"——实际三个消费侧全部
+  切到快照后就没有第二条路径了，旧重载直接删除（避免留一份"吃组件"的死代码）；
+  ② 原方案没预见到 `CollectLights` 里的 `m_Snapshot.Clear()` 会把实例数组一起抹掉（见 §6 第三次复核）。
+- 组件侧只保留 `instanceTransforms`（CPU 数据源）+ 版本号；`enableFrustumCull` 与局部 AABB 由快照携带。
 
-**第 ② 段：`SceneRenderer::Prepare` 收快照，`DrawItem` 去指针**
+**第 ② 段：`SceneRenderer::Prepare` 收快照，`DrawItem` 去指针**（未开工）
 - 快照已具备：`meshIndex`（→ `MeshRegistry::Find` 取顶点/索引缓冲）、材质字段（收集侧算好）、
-  世界 AABB（剔除用）、`objectID`/`sourceEntity`；`GBufferRenderer_{CPU,GPU}.cpp:{65,29}` 与
-  三条管线的绘制循环是消费者。
+  世界 AABB（剔除用）、`objectID`/`sourceEntity`；`GBufferRenderer_{CPU,GPU}.cpp` 与
+  三条管线的绘制循环是消费者。**第①段已把两处 GBuffer 的实例地址兜底分支删掉**，
+  剩下的是"按 `meshIndex` 查注册表取缓冲"这一步的推广。
 - `DrawItem::mesh` 删除后，附录 E 的**组件指针闸门**（`--mesh-ptrs`，当前渲染期 18）才会真正下降。
+- 一并做：`RTPass` 的 BLAS 缓存键从 `MeshComponent*` 换成 `meshIndex`（13 处，涉及缓存重建）。
 
-**第 ③ 段：帧入口收快照 ⇒ B1 归零**
-- `GBufferRenderer::{Prepare,Render}`、`IRenderPipeline::Render` 与三条管线实现改收
-  `const FrameSceneSnapshot&`；样例在游戏线程构建完整快照（`RegisterMeshes`/`BuildObjects`/
-  `BuildLights`/`BuildMaterials`/`BuildSkybox`/`BuildEnvironment`/`BuildParticles`/`BuildDecals`/
-  `BuildInstances` 均已或即将就绪）。
+**第 ③ 段：帧入口收快照 ⇒ B1 归零**（未开工）
+- `GBufferRenderer::Render`（第①段已加 `const FrameSceneSnapshot&` 入参）、
+  `IRenderPipeline::Render` 与三条管线实现改收快照；样例在游戏线程构建完整快照
+  （`RegisterMeshes`/`BuildObjects`/`BuildInstances`/`BuildLights`/`BuildMaterials`/`BuildSkybox`/
+  `BuildEnvironment`/`BuildParticles`/`BuildDecals` 均已就绪）。
+- **B1 归零还要处理"非管线入口"的世界依赖**（它们同样计入 80）：`MeshBatcher::Build(World&)`、
+  `GPUScene::Collect(World&, SceneGraph&)`、`ResolveFrameCamera(World&, …)`（在 `Engine/Render/` 内，
+  样例在游戏线程调用 ⇒ 需要挪出 `Engine/Render` 或改吃已解析的值）、四类阴影技术
+  （`IShadowTechnique` 及 CSM/Spot/Point/Rect 的 `CollectLights`/`Render`）、`GI_RSM::RenderRSMPass`、
+  `RTPass` 的四处。这一步是**机械但面广**的改动，建议按子系统分批提交。
 - 判据：`--world-deps` 渲染期 **80 → 0**（附录 B 断言通过）+ 每次改动都跑
-  `06.GILab` 冒烟（**同二进制双跑做噪声对照**）。
+  `06.GILab` 冒烟（**同二进制双跑做噪声对照**，且必须带 `HE_LUMEN_PROBE_FILTER=off`：
+  默认滤波下噪声底噪约 2.25M 像素，判据会被淹没）。
 
 **之后**：T2.4 样例按值交接与渲染线程执行（修掉 06.GILab 的按引用捕获）→ T2.2 设备与交换链归渲染
 线程 → 模式 0/1 判据（转储逐位一致 + 帧时间不退化 >3%）。
@@ -1374,3 +1455,8 @@ pass 指纹（`1C15AB72E688B530` / `750CC247BF8B9C3D`）未变；`06.GILab` 冒�
 > **v1.1 变更**：新增 §12 附录 C「升级到 UE 三线程模型的增量路径」；阶段 0 增加预埋任务 **T0.6（RHI 命令流契约）** 与 **T0.7（资源句柄化）**，二者是 §12 所列升级路径的前置条件。
 > **v1.2 变更**：T0.5 的开关改为**三态** `RenderThreadingMode`（单线程 / 游戏+渲染 / 游戏+渲染+RHI，见 §5 与 §7 的口径说明）；新增 §13 附录 D「阶段 0 T0.2 帧内同步 RHI 调用清单」与配套脚本 `Tools/check_threading.py`（含 `--gate` 闸门模式）。
 > **v1.3 变更**：新增 §14 附录 E「mesh 注册表设计草案」（T1.2c 与 T1.4 骨骼消费侧的前置：API、生命周期规则、两个首个消费者、第 5 处口径漂移的裁决与判据）；§6 增补"阶段 0/1 累计实测"与端到端绿灯复核记录。
+> **v1.4 变更（2026-10-09）**：§15.1 **第①段完成**（实例缓冲状态搬迁 + 实例数据进快照，含顺带修掉的
+> `CollectLights` 误清快照缺陷）；§6 增补"第三次复核"；§9 T1.5 增补第①段条目与两条**口径说明**
+> （帧内 RHI 376 → 380 是启发式归属漂移、B1 80 → 78 是行合并少计，两者都不下调基线）；
+> §15 交接快照按实测刷新（单测 397 例 / 71829 断言、`06.GILab` 冒烟须带 `HE_LUMEN_PROBE_FILTER=off`，
+> 否则默认滤波下同二进制双跑差约 2.25M 像素）。
