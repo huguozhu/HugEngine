@@ -1250,6 +1250,10 @@ python Tools\check_threading.py --world-deps --mesh-ptrs --handles --gate
   **实测基线：渲染期 20 处 / 加载期 4 处**，命中清单（= E-3 后半的收敛对象）：
   `Pipeline/RTPass.cpp`(9)、`SceneRenderer.cpp`(4)、`Pipeline/RTPass.h`(4)、`SceneRenderer.h`(1)、
   `Pipeline/ForwardPipeline.{h,cpp}`(各 1)。**E-3 每推进一步就复测并把 `MESH_PTR_BASELINE` 下调。**
+  > **首次下调（2026-09-24）**：`ForwardPipeline::DrawMesh` 是**私有且零调用的死代码**（全仓库核查，
+  > 其余 `DrawMesh*` 命中都是无关的 RHI `DrawMeshTasks`）⇒ 删除声明与定义，渲染期命中
+  > **20 → 18**，基线随之下调为 18。这类"重构遗留的死函数"也是组件指针依赖的来源之一，
+  > 值得在收敛过程中顺手清掉（判据：全仓库无调用点 + 构建通过）。
   > **20 处的分类与替代方案（2026-09-24 逐条查清；没有"顺手能啃掉"的边角，都是结构性的）**：
   > ① **RT 的 BLAS 缓存**（`RTPass.h:177/183` 等 4 处 + `.cpp` 9 处）：`unordered_map<MeshComponent*, BLASEntry>`
   > —— 按组件地址做键 ⇒ 换成**按 `meshIndex`（或 `sourceEntity`）为键**，并在 E-4 的口径统一后重建缓存；

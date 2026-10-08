@@ -80,7 +80,7 @@ WORLD_DEP_BASELINE = 82        # 2026-09-24 实测（已排除快照层白名单
 # 它们的产物是"渲染侧不再持有 `MeshComponent*`"（快照只带 `meshIndex`）。这两项是**不同度量**，
 # 已在方案 §14.5 里写明；本项让 E-3 的收敛可量化。
 MESH_PTR_PATTERN = re.compile(r"\b(?:he::)?(?:Mesh|SkeletalMesh|InstancedMesh|SplineMesh|Decal)Component\s*\*")
-MESH_PTR_BASELINE = 20         # 2026-09-24 实测（渲染期 20 / 加载期 4；只允许下降，E-3 收敛到 0）
+MESH_PTR_BASELINE = 18         # 2026-09-24 实测（渲染期 18 / 加载期 4；只允许下降，E-3 收敛到 0）
 
 LOAD_TIME_WHITELIST = ("Initialize", "Init", "Shutdown", "Resize", "Load", "Upload",
                        "Setup", "Construct", "OnCreate")
