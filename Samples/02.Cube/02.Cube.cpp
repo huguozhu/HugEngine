@@ -1257,10 +1257,16 @@ int main() {
             // 【阶段 1 §15.1 第③段第 2 批】渲染输入先取成快照：阴影收集要知道"哪些网格投射阴影"，
             // 且顶点/索引缓冲改为按 meshIndex 从注册表取（渲染期不再遍历世界）。
             // 【顺序】同步世界（上一行）必须早于快照构建，否则快照里的阴影光源方向是同步前的值。
-            forwardPipeline.BuildFrameSnapshot(world, sceneGraph, frameCamera);
+            // 【第③段第 4 批】快照由样例在游戏线程装配（口径已由管线配置）；
+            // 顺序：装配场景 → 阴影收集 → 解析光源的 shadowIndex → Render(快照)
+            forwardPipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, frameCamera);
             shadowCtx.snapshot     = &forwardPipeline.GetFrameSnapshot();
             shadowCtx.meshRegistry = &forwardPipeline.GetMeshRegistry();
             shadowSys->Update(shadowCtx);
+            // 阴影收集之后才拿得到本帧的"实体 → 阴影下标"映射 ⇒ 此时补齐光源的 shadowIndex
+            forwardPipeline.GetFrameAssembler().ResolveLightShadowIndices(
+                [&](he::Entity le) { return shadowSys->GetShadowIndex(le); });
+            forwardPipeline.GetFrameAssembler().ReserveOnce();
 
             forwardPipeline.Render(cmdList.get(), world, sceneGraph, frameCamera);
             // pass 级调试标记：BackBuffer 合成（ToneMap + ImGui），RenderDoc 可识别

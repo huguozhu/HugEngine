@@ -192,12 +192,15 @@ int main() {
             shadowCtx.sceneGraph = fSG;
             shadowCtx.camera = &frameCamera;
             he::SyncPhysicalSkyToSun(*fWorld);
-            // 【阶段 1 §15.1 第③段第 2 批】渲染输入先取成快照（阴影收集要吃它；
-            // 顺序：世界同步 → 快照 → 阴影收集）
-            pipeline.BuildFrameSnapshot(*fWorld, *fSG, frameCamera);
+            // 【阶段 1 §15.1 第③段第 4 批】快照由样例装配（口径由管线在 Initialize 配置）；
+            // 顺序：世界同步 → 装配场景 → 阴影收集 → 解析光源 shadowIndex → Render(快照)
+            pipeline.GetFrameAssembler().AssembleScene(*fWorld, *fSG, frameCamera);
             shadowCtx.snapshot     = &pipeline.GetFrameSnapshot();
             shadowCtx.meshRegistry = &pipeline.GetMeshRegistry();
             shadowSys->Update(shadowCtx);
+            pipeline.GetFrameAssembler().ResolveLightShadowIndices(
+                [&](he::Entity le) { return shadowSys->GetShadowIndex(le); });
+            pipeline.GetFrameAssembler().ReserveOnce();
             pipeline.Render(cmdList.get(), *fWorld, *fSG, frameCamera);
             // pass 级调试标记：BackBuffer 合成（ToneMap + ImGui），RenderDoc 可识别
             cmdList->BeginDebugLabel("ToneMap + ImGui (BackBuffer)");

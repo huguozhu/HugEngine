@@ -1076,10 +1076,13 @@ int main() {
                 he::SyncPhysicalSkyToSun(world);
                 // 【阶段 1 §15.1 第③段第 2 批】渲染输入先取成快照（阴影收集要吃它；
                 // 顺序：世界同步 → 快照 → 阴影收集）
-                forwardPipeline.BuildFrameSnapshot(world, sceneGraph, camCtrl.GetCamera());
+                forwardPipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, camCtrl.GetCamera());
                 shadowCtx.snapshot     = &forwardPipeline.GetFrameSnapshot();
                 shadowCtx.meshRegistry = &forwardPipeline.GetMeshRegistry();
                 shadowSys->Update(shadowCtx);
+                forwardPipeline.GetFrameAssembler().ResolveLightShadowIndices(
+                    [&](he::Entity le) { return shadowSys->GetShadowIndex(le); });
+                forwardPipeline.GetFrameAssembler().ReserveOnce();
             }
         }
         // 帧边界应用延迟的半分辨率纹理重建（先等待 GPU 空闲，避免销毁正在使用的纹理）

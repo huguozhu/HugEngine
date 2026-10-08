@@ -34,6 +34,8 @@ u32 SceneSnapshotBuilder::BuildLights(he::World& world, he::SceneGraph& sg,
     // 与旧路径（`DeferredPipeline::CollectLights` / `ForwardPipeline::CollectLights`）逐字段对齐。
     // 注意：**未知 `LightType` 也要落一条**（旧路径的 `default: break` 之后照样写入并计数）——
     // 这里保持同样行为，避免"同场景收集数不同"这种最难查的差异。
+    // 【第③段第 4 批】顺带把来源实体 id 写进平行数组（供事后解析 `shadowIndex`，见快照头注释）。
+    out.lightSourceEntities.clear();
     auto collect = [&](he::Entity e, he::LightComponent& lc) {
         if (!lc.enabled) return;
         if (out.lights.size() >= kGPUMaxLights) return;   // 与 MAX_LIGHTS(=kGPUMaxLights) 同口径
@@ -108,6 +110,7 @@ u32 SceneSnapshotBuilder::BuildLights(he::World& world, he::SceneGraph& sg,
         }
 
         out.lights.push_back(light);
+        out.lightSourceEntities.push_back(e.id);   // 平行数组：事后解析 shadowIndex 用（见快照头注释）
     };
 
     // 遍历顺序必须与旧路径一致：方向光 → 点光 → 聚光（→ Rect，仅 Forward 口径）
@@ -308,6 +311,7 @@ u32 SceneSnapshotBuilder::RegisterMeshes(he::World& world, MeshRegistry& registr
         entry.vertexBuffer     = comp.GetVertexBuffer().get();
         entry.indexBuffer      = comp.GetIndexBuffer().get();
         entry.indexCount       = comp.GetIndexCount();
+        entry.vertexCount      = comp.GetVertexCount();   // MeshBatcher 合批用（第③段第 4 批）
         entry.materialID       = comp.materialID;
         entry.instanced        = instanced;
         comp.meshIndex         = registry.Register(&comp, entry);

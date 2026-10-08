@@ -227,6 +227,9 @@ set(RENDER_SOURCES
     Threading/RenderThreadContext.h
     # 阶段 1 T1.1：游戏线程产出的不可变渲染输入（与 ShaderTypes.slang 布局一致）。
     Threading/FrameSceneSnapshot.h
+    # 阶段 1 §15.1 第③段第 4 批：快照装配器（白名单层里读世界，管线帧入口只配置口径）
+    Threading/FrameSnapshotAssembler.h
+    Threading/FrameSnapshotAssembler.cpp
     Threading/MeshRegistry.h
     Threading/SceneSnapshotBuilder.h
     Threading/SceneSnapshotBuilder.cpp

@@ -688,10 +688,13 @@ int main() {
             shadowCtx.camera      = &camCtrl.GetCamera();
             // 【阶段 1 §15.1 第③段第 2 批】渲染输入先取成快照：阴影收集要知道"哪些网格投射阴影"，
             // 顶点/索引缓冲改为按 meshIndex 从注册表取（渲染期不再遍历世界）。
-            pipeline.BuildFrameSnapshot(world, sceneGraph, camCtrl.GetCamera());
+            pipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, camCtrl.GetCamera());
             shadowCtx.snapshot     = &pipeline.GetFrameSnapshot();
             shadowCtx.meshRegistry = &pipeline.GetMeshRegistry();
             shadowSys->Update(shadowCtx);
+            pipeline.GetFrameAssembler().ResolveLightShadowIndices(
+                [&](he::Entity le) { return shadowSys->GetShadowIndex(le); });
+            pipeline.GetFrameAssembler().ReserveOnce();
             // Render() 已迁移到 BuildFrameGraph 的 ShadowCSM Pass
         }
 

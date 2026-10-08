@@ -134,10 +134,10 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                                  || m_GIConfig.specular.Has(GISourceId::Lumen);
     const bool naniteNeedsGeometry = m_Nanite.GetSettings().enabled && m_Nanite.IsReady();
     if (m_GBuffer->GetMode() == GBufferRenderer::Mode::GPU) {
-        if (!m_BatchBuilt) { m_MeshBatcher.Build(world, m_ExcludeDecalCards); m_BatchBuilt = true; }
+        if (!m_BatchBuilt) { m_MeshBatcher.Build(m_Snapshot, m_MeshRegistry, m_ExcludeDecalCards); m_BatchBuilt = true; }
         m_MeshBatcher.FillGPUScene(m_GPUScene);  // 在 Upload 前写入 draw 参数
     } else if ((lumenNeedsGeometry || naniteNeedsGeometry) && !m_BatchBuilt) {
-        m_MeshBatcher.Build(world, m_ExcludeDecalCards);   // 供 Lumen 的 SDF / Nanite 的资产使用
+        m_MeshBatcher.Build(m_Snapshot, m_MeshRegistry, m_ExcludeDecalCards);   // 供 Lumen 的 SDF / Nanite 的资产使用
         m_BatchBuilt = true;
     }
     m_GPUScene.Upload(m_Device);

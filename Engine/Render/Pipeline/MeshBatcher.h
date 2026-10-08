@@ -1,22 +1,26 @@
 #pragma once
 
-#include "Scene/MeshComponent.h"
+#include "Scene/MeshComponent.h"   // StaticVertex（合批后的顶点布局；本类不再遍历组件）
 #include "RHI/Buffer.h"
+// 阶段 1 §15.1 第③段第 4 批：合批改吃快照（`SnapshotMeshClass` 表达收集集）+ 网格注册表
+#include "Threading/FrameSceneSnapshot.h"
 #include <vector>
 #include <memory>
+
+namespace he::render {
+
+class MeshRegistry;
 
 // ============================================================
 // MeshBatcher — 合并所有 StaticVertex Mesh 到共享 VB+IB
 //
-// Build() 遍历 World，将全部 StaticVertex 网格合并到单个
-// Vertex Buffer + Index Buffer，记录每个原始 mesh 的偏移。
+// Build() 消费**本帧快照**（阶段 1 §15.1 第③段第 4 批起不再遍历 World），
+// 将收集集内的网格合并到单个 Vertex Buffer + Index Buffer，记录每个原始 mesh 的偏移。
 // 输出 IndirectDrawCommand 数组，配合 ExecuteIndirect 使用。
 //
 // DGC 模式：扩展输出 DGCDrawToken（含 objectIndex），供 GPU Culling
 // 写入 DGC preprocess buffer，配合 vkCmdExecuteGeneratedCommandsEXT 使用。
 // ============================================================
-
-namespace he::render {
 
 // GPU 间接绘制命令（匹配 VkDrawIndexedIndirectCommand）
 struct IndirectDrawCommand {
@@ -64,9 +68,19 @@ struct MergedMeshMaterial {
 
 class MeshBatcher {
 public:
+    /// 合批（阶段 1 §15.1 第③段第 4 批：改吃**快照 + 网格注册表**，不再遍历世界）
     /// @param excludeDecals 跳过贴花卡片（任务 24：Deferred 用 DecalPass 投影贴花）。
-    ///        必须与 SceneRenderer::Prepare / GPUScene::Collect 的口径一致，否则 objectIndex 错位。
-    bool Build(class World& world, bool excludeDecals = false);
+    ///        必须与 `SceneRenderer::Prepare` / `GPUScene::CollectFromSnapshot` 的口径一致，
+    ///        否则 objectIndex 错位。
+    /// 【收集集与快照全集**不同**，用 `SnapshotMeshClass` 如实表达】旧实现遍历
+    /// `MeshComponent`/`Cube`/`Sphere`/`Billboard`/`TextRender`/(`Decal`)/`Instanced`，
+    /// **不含** `SplineMesh` 与 `SkeletalMesh` ⇒ 这里按类别过滤，一个不多一个不少
+    ///（`SplineMeshComponent` 虽派生自 `MeshComponent`，但它的类别是 `Spline`，天然排除）。
+    /// 【几何来源】顶点/索引缓冲与顶点/索引数都按 `meshIndex` 从注册表取（`MeshRegistryEntry`）；
+    /// 材质字段（含 `textureMask`）取自快照条目的 `GPUObjectData`（收集侧已用
+    /// `MakePBRMaterial` + `FillObjectData` 算好，与 GBuffer 路径同源）。
+    bool Build(const FrameSceneSnapshot& snapshot, const MeshRegistry& registry,
+               bool excludeDecals = false);
 
     // 合并后的 GPU 缓冲
     rhi::IRHIBuffer* GetVertexBuffer() const { return m_MergedVB.get(); }

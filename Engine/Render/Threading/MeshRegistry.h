@@ -30,6 +30,7 @@ struct MeshRegistryEntry {
     rhi::IRHIBuffer* vertexBuffer = nullptr;   // 顶点缓冲（所有权在组件/资产）
     rhi::IRHIBuffer* indexBuffer  = nullptr;   // 索引缓冲
     u32  indexCount = 0;                       // 索引数（间接绘制参数的兜底来源）
+    u32  vertexCount = 0;                      // 顶点数（MeshBatcher 合批要用：它按顶点数搬运与累加 baseVertex）
     u32  materialID = 0;                       // bindless 纹理基索引（与组件同源）
     bool instanced  = false;                   // 实例化网格：顶点由实例路径提供
 };

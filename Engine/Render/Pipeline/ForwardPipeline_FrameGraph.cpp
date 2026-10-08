@@ -31,10 +31,9 @@ namespace he::render {
 
 // 从 ForwardPipeline.cpp 提取 — BuildFrameGraph 渲染图定义
 
-void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
-                                       he::SceneGraph& sg, const CameraData& camera)
+void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera)
 {
-    he::SyncPhysicalSkyToSun(world);  // 物理天空太阳→方向光同步（阴影/光照收集前）
+    // 【第③段第 4 批】`SyncPhysicalSkyToSun` 已搬进快照装配器（必须在收集之前、且聚合在一处）
     if (m_SwapChain) rg.SetSwapChain(m_SwapChain);
     // 交换链颜色格式（SDR=BGRA8，HDR=A2B10G10R10），同步到 ToneMap 输出格式与 HDR 开关
     rhi::Format swapFmt = m_SwapChain ? m_SwapChain->GetColorFormat() : rhi::Format::BGRA8_UNORM;
@@ -108,9 +107,9 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     if (giIBL && giIBL->IsEnabled()) {
         // 天空盒走快照（T1.4；`Render` 已在**帧图构建之前**收集好）。口径与旧循环一致：
         // "启用且真的有 cubemap"才设置；一个都没有时保持 GI 内部上一次的绑定（与旧行为相同）。
-        if (m_Snapshot.skybox.enabled) {
-            giIBL->SetIBLSkybox(const_cast<rhi::IRHITexture*>(m_Snapshot.skybox.cubemap),
-                                const_cast<rhi::IRHISampler*>(m_Snapshot.skybox.sampler));
+        if (FrameSnap().skybox.enabled) {
+            giIBL->SetIBLSkybox(const_cast<rhi::IRHITexture*>(FrameSnap().skybox.cubemap),
+                                const_cast<rhi::IRHISampler*>(FrameSnap().skybox.sampler));
         }
     }
     bool iblNeedsUpdate = false;
@@ -146,7 +145,7 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         rg.AddPass("RSM_Generate", {},
             {{rsmPos, ResourceAccess::Write}, {rsmNrm, ResourceAccess::Write},
              {rsmRad, ResourceAccess::Write}},
-            [this, &world, &sg, lightVP](rhi::IRHICommandList* c) {
+            [this, lightVP](rhi::IRHICommandList* c) {
                 m_RSM->SetLightViewProj(lightVP,
                     m_RSM->GetRSMPositionMap()->GetWidth(),
                     m_ShadowSystem->GetShadowSampler(),
@@ -163,10 +162,10 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     if (m_UseForwardPlus && m_ClusteredShading.enabled) {
         rg.AddPass("ForwardPlus_LightCull",
             {}, {},
-            [this, &world, &sg, &camera, w, h](rhi::IRHICommandList* c) {
+            [this, &camera, w, h](rhi::IRHICommandList* c) {
                 // 收集光源到 GPU 缓冲区
                 PushConstantData pc;
-                CollectLights(pc, world, sg, camera);
+                CollectLights(pc);
 
                 // 缓存光源到 CPU（供 Cluster 剔除使用）
                 m_CachedLights.resize(pc.lightCount);
@@ -239,8 +238,8 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         rg.AddPass("GPU_Cull",
             {{hdrDepth, ResourceAccess::Read}},
             {},
-            [this, &world, &sg, &camera](rhi::IRHICommandList* c) {
-                RunGPUCulling(c, world, sg, camera);
+            [this, &camera](rhi::IRHICommandList* c) {
+                RunGPUCulling(c, camera);
             },
             RGPassQueue::Compute);
     }
@@ -249,7 +248,7 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     rg.AddPass("Scene",
         {{hdrDepth, ResourceAccess::Read}},  // 读深度确保在 Shadow 之后
         {{hdrColor, ResourceAccess::Write}, {hdrDepth, ResourceAccess::Write}},
-        [this, w, h, &world, &sg, &camera, iblNeedsUpdate](rhi::IRHICommandList* c) {
+        [this, w, h, &camera, iblNeedsUpdate](rhi::IRHICommandList* c) {
             // IBL bindings 更新（IBL pass 之后纹理已变化）
             if (iblNeedsUpdate && m_GI) {
                 auto* gi = dynamic_cast<GI_IBL*>(m_GI.get());
@@ -257,7 +256,7 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             }
             BeginHDRPass(c, w, h);
             BeginFrame(c, w, h);
-            RenderScene(c, world, sg, camera);
+            RenderScene(c, camera);
             RenderSkybox(c, camera);
             EndHDRPass(c);
         });

@@ -15,6 +15,8 @@
 #include "AntiAliasing/AntiAliasing.h"
 // 阶段 1 T1.3b：光源走快照（`FrameSceneSnapshot`）而不是直接遍历 ECS。
 #include "Threading/FrameSceneSnapshot.h"
+// 第③段第 4 批：快照装配器（在 Engine/Render/Threading 白名单层里读世界；管线只配置口径）
+#include "Threading/FrameSnapshotAssembler.h"
 // 阶段 1 附录 E：meshIndex → 渲染侧资源 的注册表（快照不带指针的前提）
 #include "Threading/MeshRegistry.h"
 #include "Profiler/ProfilerManager.h"
@@ -69,20 +71,17 @@ public:
 
     // ForwardPipeline 特有方法（命令式，保留兼容）
     void BeginFrame(rhi::IRHICommandList* cmd, u32 width, u32 height);
-    void RenderScene(rhi::IRHICommandList* cmd, he::World& world,
-                     he::SceneGraph& sg, const CameraData& camera);
+    void RenderScene(rhi::IRHICommandList* cmd, const CameraData& camera);
     /// GPU 视锥剔除：收集场景对象 → 上传 GPUScene SSBO → 读回上帧可见性 → Dispatch Compute。
     /// **必须在任何 render pass 之外调用**：vkCmdDispatch 不允许出现在 render pass 内部
     /// （VUID-vkCmdDispatch-None-10672），且它会采样 HDR 深度 —— 那正是本帧 Scene pass 的
     /// 深度附件，在 pass 内采样构成非法反馈。RG 路径由独立的 "GPU_Cull" compute pass 调用，
     /// 非 RG 路径在 BeginHDRPass 之前调用。
-    void RunGPUCulling(rhi::IRHICommandList* cmd, he::World& world,
-                       he::SceneGraph& sg, const CameraData& camera);
+    void RunGPUCulling(rhi::IRHICommandList* cmd, const CameraData& camera);
     void EndFrame(rhi::IRHICommandList* cmd);
 
     // RenderGraph 模式（声明式 Pass 编排，自动 Barrier）
-    void BuildFrameGraph(RenderGraph& rg, he::World& world, he::SceneGraph& sg,
-                         const CameraData& camera);
+    void BuildFrameGraph(RenderGraph& rg, const CameraData& camera);
     bool UseRenderGraph() const { return m_UseRenderGraph; }
     void SetUseRenderGraph(bool use) { m_UseRenderGraph = use; }
     void SetSwapChain(rhi::IRHISwapChain* sc) override { m_SwapChain = sc; }
@@ -133,18 +132,19 @@ public:
     InstanceCuller& GetInstanceCuller() { return m_InstanceCuller; }
 
     // ── 阶段 1 §15.1 第③段：快照交接（样例 → 管线）──
-    /// **游戏线程**：构建本帧完整快照（注册网格 → 物体 → 实例 → 阴影光源 → 天空盒/材质/环境，
-    /// 并在首帧后自校准预留容量）。样例在**需要渲染前数据**时先调它，例如阴影收集
-    /// （`shadowSys->Update(shadowCtx)` 必须在 `Render` 之前，且 `shadowCtx.snapshot` 要指向本帧快照）。
-    /// 【幂等】同一帧内重复调用只构建一次（`NextFrame()` 清标记）；`Render` 会复用它。
-    void BuildFrameSnapshot(he::World& world, he::SceneGraph& sg, const CameraData& camera);
-    /// 本帧快照（`BuildFrameSnapshot` 之后有效；未构建时为空快照）
+    /// **快照装配器**（游戏线程用）：样例每帧按
+    /// `AssembleScene(world, sg, camera)` → 阴影收集 → `ResolveLightShadowIndices(...)` 的顺序调用，
+    /// 然后把 `GetFrameSnapshot()` 交给 `Render`。
+    /// 【为什么装配器在 Threading 白名单层】取齐渲染输入天然要读世界，而**管线的帧入口必须不收世界**
+    /// （附录 B1 的收敛目标）；把这段代码放到白名单层、只把口径配置进管线，两侧要求同时满足。
+    FrameSnapshotAssembler& GetFrameAssembler() { return m_Assembler; }
+    /// 本帧快照（`AssembleScene` 之后有效）
     const FrameSceneSnapshot& GetFrameSnapshot() const { return m_Snapshot; }
     /// 网格注册表（阴影技术等按 `meshIndex` 取顶点/索引缓冲）
     const MeshRegistry& GetMeshRegistry() const { return m_MeshRegistry; }
 
 private:
-    void CollectLights(PushConstantData& pc, he::World& world, he::SceneGraph& sg, const CameraData& camera);
+    void CollectLights(PushConstantData& pc);
     void UploadMaterialBindless();  // 从**快照**取已去重的材质数组 → 写入 bindless 材质 SSBO 并注册（须在 heap->Flush() 前调用）
     void UploadLightBuffer();
     void UpdateIBLBindings(GI_IBL* gi);
@@ -159,7 +159,7 @@ private:
     /// `m_LightVPs`，帧图里 Shadow 与 RSM_Generate 没有依赖边 ⇒ 顺序不受保证。现在两份消费者
     /// （RSM pass 与 PBR 的内联查找）读**同一份**这个视锥 —— 写入 UV 与查找 UV 同源。
     /// 每帧在 Render 开头（填 UBO 之前）调用一次，结果同时喂 frame graph 与 UBO。
-    void RefreshRSMFrustum(he::World& world, const CameraData& camera);
+    void RefreshRSMFrustum(const CameraData& camera);
     rhi::IRHIDevice* m_Device = nullptr;
     std::unique_ptr<rhi::IRHIPipelineState> m_PBR_PSO;
     // 蒙皮网格 PSO（C1b）：扩展顶点布局（location 3/4 = JOINTS/WEIGHTS），同着色器
@@ -176,11 +176,16 @@ private:
     // 【为什么每帧刷新】骨骼缓冲会重建（N 帧延迟队列后新建）⇒ 只登记一次会留下过期指针；
     // `Register` 同 key = 更新（索引不变），因此每帧刷新廉价且安全。帧内只读。
     MeshRegistry                     m_MeshRegistry;
-    // 快照容量是否已按实际规模预留过一次（自校准；见 ForwardPipeline.cpp 里的说明）
+    /// 本帧快照装配器（第③段第 4 批：在 `Threading/` 白名单层读世界；管线只配置口径）。
+    /// 【为什么不是管线自己收 world】`BuildFrameSnapshot(World&, SceneGraph&, …)` 本身就是 B1 命中 ——
+    /// 装配必须发生在白名单层、由样例驱动，帧入口才能真的不收世界。
+    FrameSnapshotAssembler           m_Assembler;
+    /// 本帧快照指针（`Render` 入口赋值；各 helper 与帧图 lambda 都通过 `FrameSnap()` 读它）。
+    /// 【生命周期】帧图 lambda 在 `Render` 内部执行 ⇒ 指向调用方快照的指针始终有效。
+    const FrameSceneSnapshot*        m_FrameSnapshot = nullptr;
+    [[nodiscard]] const FrameSceneSnapshot& FrameSnap() const { return *m_FrameSnapshot; }
+    /// 本帧快照容量是否已按实际规模预留过一次（自校准由装配器的 `ReserveOnce()` 负责）
     bool                             m_SnapshotReserved = false;
-    /// 本帧快照是否已构建（`BuildFrameSnapshot` 幂等：样例可能先调它给阴影收集用，
-    /// 之后 `Render` 再调一次不应重复收集；`NextFrame()` 清标记）
-    bool                             m_SnapshotBuiltThisFrame = false;
     /// GI 分层合成参数 UBO（每飞行帧一份，与 Deferred 的 LightingPass 同结构同语义）
     std::unique_ptr<rhi::IRHIBuffer> m_GIBuffers[MAX_FRAMES_IN_FLIGHT];
     std::unique_ptr<rhi::IRHIBuffer> m_ObjectBuffers[MAX_FRAMES_IN_FLIGHT];
@@ -219,11 +224,10 @@ private:
     GIConfig                             m_GIConfig;   // 该管线的 GI 通道配置（可用子集见 PipelineCaps::Forward）
     std::unique_ptr<IShadowSystem>       m_ShadowSystem;
     // ── RSM 固定光源视锥（任务 34 / §9.2-AD）──
-    // 与 Deferred 侧同一套做法：包围盒每 30 帧重算（遍历带变换的网格包围盒不是零成本），
-    // 视锥由纯几何函数 `FitRSMFrustumToBounds` 拟合，结果缓存给 frame graph 与 UBO 两处消费者。
-    static constexpr u32 kSceneBoundsRefreshFrames = 30;
-    he::AABB  m_SceneBounds;
-    u32       m_SceneBoundsCountdown = 0;
+    // 与 Deferred 侧同一套做法：视锥由纯几何函数 `FitRSMFrustumToBounds` 拟合，
+    // 结果缓存给 frame graph 与 UBO 两处消费者。
+    // 【第③段第 4 批】原先这里还缓存"每 30 帧重算一次的场景包围盒"（遍历世界算的）——
+    // 现在包围盒由装配器按同一公式算好放进快照（`sceneBoundsMin/Max`），本类不再持有它。
     float4x4  m_RSMLightViewProj = float4x4(1.0f);  // 本帧 RSM pass 与 PBR 内联查找共用的 VP
     float     m_RSMVplScale      = 0.0f;            // 由该视锥的正交半宽推出的采样面积缩放
     bool      m_RSMFrustumValid  = false;           // 本帧 RSM pass 是否注册（写入与查找的共同前提）

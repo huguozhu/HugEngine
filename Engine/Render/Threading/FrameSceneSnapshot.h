@@ -293,6 +293,16 @@ struct FrameSceneSnapshot {
 
     std::vector<SnapshotDrawItem> draws;
     std::vector<SnapshotLight>    lights;
+    /// 光源的**来源实体 id**（与 `lights` 同序同长）。
+    /// 【为什么要它】`SnapshotLight::shadowIndex` 只能在阴影收集（`ShadowSystem::Update`）**之后**解析，
+    /// 而那时渲染侧手里只有快照；带上实体 id，就能用一个**不收 World** 的
+    /// `ResolveLightShadowIndices(snapshot, resolver)` 事后补齐（见 `FrameSnapshotAssembler`）。
+    std::vector<u64>              lightSourceEntities;
+    /// 场景包围盒（网格包围盒 × **局部**变换，与 RSM 固定光锥的既有口径一致；无效 = min>max）。
+    /// 【为什么要它】`ForwardPipeline::RefreshRSMFrustum` 原先自己遍历世界算它（每 30 帧一次），
+    /// 那是渲染期读世界的一处 ⇒ 改由收集侧算好带进快照。
+    float4                        sceneBoundsMin{0.0f};
+    float4                        sceneBoundsMax{0.0f};
     /// 粒子发射器（渲染侧按 `rendererId` 驱动自己的缓冲；见 `SnapshotParticleEmitter`）
     std::vector<SnapshotParticleEmitter> particles;
     /// 骨骼矩阵（扁平数组：`boneOffset..boneOffset+boneCount` 属于某个 draw，

@@ -381,6 +381,20 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
     m_InstanceCuller.Initialize(device);   // 任务 25：逐实例剔除（可见列表 + 间接命令）
     m_Profiler.Initialize(device, rhi::kMaxProfilerPasses, MAX_FRAMES_IN_FLIGHT);  // GPU Profiler
 
+    // --- 快照装配器（第③段第 4 批）：把**本管线的口径**配置进去，读世界的代码留在白名单层 ---
+    // 光源口径 = Forward 的历史行为（收 Rect 光、点光写 (0,-1,0)、聚光不归一化）；
+    // 物体口径 = 包含贴花卡片（Forward 没有 DecalPass 投影）；材质数组要给 `UploadMaterialBindless`。
+    {
+        m_Assembler.Bind(&m_Snapshot, &m_MeshRegistry);
+        FrameSnapshotAssemblySettings s;
+        s.lightOptions.includeRectLights         = true;
+        s.lightOptions.pointLightWritesDirection = true;
+        s.lightOptions.normalizeSpotDirection    = false;
+        s.objectOptions.excludeDecals            = false;
+        s.buildMaterials                         = true;   // UploadMaterialBindless 读快照
+        m_Assembler.Configure(s);
+    }
+
     // --- SceneRenderer ---
     m_SceneRenderer = std::make_unique<SceneRenderer>();
 
@@ -532,8 +546,9 @@ void ForwardPipeline::NextFrame() {
 
     // 同步阴影子系统帧槽位
     m_ShadowSystem->NextFrame();
-    // 新的一帧：快照标记复位（`BuildFrameSnapshot` 因此本帧会重新收集一次）
-    m_SnapshotBuiltThisFrame = false;
+    // 新的一帧：装配器允许重新装配，并把全局物理光开关刷进去（它不读全局 CVar，口径由管线传入）
+    m_Assembler.BeginFrame();
+    m_Assembler.Settings().physicalUnitsEnabled = cvLightPhysicalUnits.Get();
     // per-mesh 描述符集 (set=1) 是静态纹理绑定，不需要每帧更新
 }
 
@@ -546,48 +561,26 @@ void ForwardPipeline::BeginFrame(rhi::IRHICommandList* cmd, u32 width, u32 heigh
     cmd->SetScissor({ 0, 0, width, height });
 }
 
-void ForwardPipeline::CollectLights(
-    PushConstantData& pc,
-    he::World& world,
-    he::SceneGraph& sg,
-    const CameraData& camera)
+void ForwardPipeline::CollectLights(PushConstantData& pc)
 {
     pc.lightCount = 0;
 
     // 空中透视参数（太阳方向 + 浑浊度）：**走快照**（T1.4），本函数不再直接读世界。
-    // 【第③段第 2 批】收集已移到 `BuildFrameSnapshot`（它同时填 `physicalSky` 供 SkyboxPass 用，
-    // 必须在帧图构建之前完成）；这里只读结果。
-    pc.atmosphere = m_Snapshot.atmosphere;
+    pc.atmosphere = FrameSnap().atmosphere;
 
-    // 阶段 1 T1.3b：光源收集集中到 `SceneSnapshotBuilder`，但**保持 Forward 的历史口径** ——
-    // 收集 Rect 光、点光写 (0,-1,0)、聚光不归一化。迁移只搬位置、不改口径；四处口径差异与统一计划
-    // 见 `SceneSnapshotBuilder.h` 的登记（默认值 = Deferred 现状，故这里必须把 Forward 关掉的两项打开、
-    // 把只有 Deferred 才做的归一化关掉）。
-    SceneSnapshotResolvers resolvers;
-    resolvers.physicalUnitsEnabled = cvLightPhysicalUnits.Get();
-    resolvers.shadowIndex = [this](he::Entity e) -> i32 {
-        return m_ShadowSystem ? m_ShadowSystem->GetShadowIndex(e) : -1;   // 空指针防护（口径不变）
-    };
-
-    SceneSnapshotLightOptions options;
-    options.includeRectLights         = true;
-    options.pointLightWritesDirection = true;
-    options.normalizeSpotDirection    = false;
-
-    // 【不要在收集光源时 `m_Snapshot.Clear()`（阶段 1 第①段修正）】
-    // 快照在同一帧内是**分步构建、分步消费**的：`BuildObjects`/`BuildInstances`/`BuildMaterials`
-    // 在本函数**之前**就已填好，而 `RenderScene` 的实例化与蒙皮循环在本函数**之后**才读它们。
-    // 旧代码在这里调 `Clear()`（当时的用意是"重建光源数组"），会把 `draws`/`skinMatrices`/
-    // `instances` 一起抹掉 —— 蒙皮有"退回组件"的兜底所以一直没暴露，实例化没有兜底，
-    // 直接表现为"实例一个都不画"。`BuildLights` 自己会 `out.lights.clear()`，故这里无需清理。
-    const u32 lightCount = SceneSnapshotBuilder::BuildLights(world, sg, resolvers, m_Snapshot, options);
+    // 【阶段 1 §15.1 第③段第 4 批：本函数只**消费**快照，不再自己收集光源】
+    // 收集（含 Forward 的历史口径：收 Rect 光、点光写 (0,-1,0)、聚光不归一化）已交给
+    // `FrameSnapshotAssembler`（它在 `Threading/` 白名单层读世界，口径由管线在 Initialize 配置）。
+    // `shadowIndex` 也在那里、在阴影收集之后由 `ResolveLightShadowIndices` 补齐 ——
+    // 本函数只把结果上传进光源 SSBO。
+    const u32 lightCount = static_cast<u32>(FrameSnap().lights.size());
     pc.lightCount = lightCount;
 
     // 一次性上传（旧实现是每个光源 Map/Unmap 一次，写入内容相同）
     {
         GPULight* lights = static_cast<GPULight*>(m_LightBuffers[m_CurrentFrameSlot]->Map());
         if (lights) {
-            for (u32 i = 0; i < lightCount; ++i) lights[i] = m_Snapshot.lights[i].ToGpu();
+            for (u32 i = 0; i < lightCount; ++i) lights[i] = FrameSnap().lights[i].ToGpu();
         }
         m_LightBuffers[m_CurrentFrameSlot]->Unmap();
     }
@@ -615,7 +608,7 @@ void ForwardPipeline::UploadMaterialBindless() {
     // 材质数组来自**快照**（阶段 1 T1.4/T1.5）：收集/去重（按 materialID）、按 materialID >> 2 补空槽、
     // 以及「组件 → PBRMaterial」的映射都已在收集侧完成（`SceneSnapshotBuilder::BuildMaterials` +
     // `MakePBRMaterial` 的唯一实现）。本函数不再遍历世界 ⇒ `World&` 参数消失（附录 B1 随之下降）。
-    const std::vector<GPUMaterialData>& data = m_Snapshot.materials;
+    const std::vector<GPUMaterialData>& data = FrameSnap().materials;
     if (data.empty()) return;  // 场景无材质，跳过
 
     const u32 newCount = (u32)data.size();
@@ -682,11 +675,11 @@ void ForwardPipeline::PrepareGI(rhi::IRHICommandList* cmd) {
     // 天空盒（IBL 天空源）：走快照（T1.4），本函数不再 `world.ForEach<SkyboxComponent>`。
     // 【口径】快照里"启用且真的有 cubemap"的组件只有一个（收集时后者覆盖前者），因此下面的
     // `giIBL->Render(cmd)` 只跑一次 —— 旧实现在多天空盒时会按组件个数重复烘焙，那属于退化场景。
-    if (m_Snapshot.skybox.enabled) {
+    if (FrameSnap().skybox.enabled) {
         auto* giIBL = dynamic_cast<GI_IBL*>(m_GI.get());
         if (giIBL) {
-            giIBL->SetIBLSkybox(const_cast<rhi::IRHITexture*>(m_Snapshot.skybox.cubemap),
-                                const_cast<rhi::IRHISampler*>(m_Snapshot.skybox.sampler));
+            giIBL->SetIBLSkybox(const_cast<rhi::IRHITexture*>(FrameSnap().skybox.cubemap),
+                                const_cast<rhi::IRHISampler*>(FrameSnap().skybox.sampler));
             // 若 IBL 脏 → 生成辐照度/预滤波/BRDF LUT
             giIBL->Render(cmd);
             // 更新 PBR 描述符集绑定到新生成的 IBL 纹理
@@ -744,7 +737,7 @@ void ForwardPipeline::RenderSkybox(rhi::IRHICommandList* cmd, const CameraData& 
     ctx.camera = &camera;
     // 【第③段第 4 批】天空盒数据只从快照取（`SkyboxPass::Update` 只读 ctx.snapshot）⇒
     // 本函数不再需要 `World&`（上一批还只是"不用 world 里的数据"，现在连参数也去掉）。
-    ctx.snapshot = &m_Snapshot;
+    ctx.snapshot = m_FrameSnapshot;
     m_Skybox->Update(ctx);
     m_Skybox->Render(cmd);
 }
@@ -783,21 +776,10 @@ void ForwardPipeline::ResizeHDRTarget(u32 width, u32 height) {
 
 // ---- IRenderPipeline 包装方法 ----
 
-void ForwardPipeline::RefreshRSMFrustum(he::World& world, const CameraData& camera) {
-    // 场景包围盒：与 Deferred 侧同一条做法（网格包围盒 × 世界变换），每 30 帧重算一次。
-    // 【不要用帧计数器当这个计时器】它未必每帧自增，用取模判据会退化成"每帧都重算"。
-    if (m_SceneBoundsCountdown == 0u) {
-        he::AABB sceneBounds;
-        world.ForEach<he::MeshComponent>([&](he::Entity e, he::MeshComponent& mesh) {
-            if (auto* tf = world.GetComponent<TransformComponent>(e)) {
-                sceneBounds.Expand(mesh.GetBounds().Transform(tf->GetLocalMatrix()));
-            }
-        });
-        if (sceneBounds.IsValid()) m_SceneBounds = sceneBounds;
-        m_SceneBoundsCountdown = kSceneBoundsRefreshFrames;
-    }
-    --m_SceneBoundsCountdown;
-
+void ForwardPipeline::RefreshRSMFrustum(const CameraData& camera) {
+    // 【第③段第 4 批】场景包围盒与"是否存在投影方向光"都改从**快照**取 —— 本函数不再读世界：
+    //   · 包围盒由装配器按既有公式（网格包围盒 × 组件**局部**变换）算好带进快照；
+    //   · 方向光取 `shadowLights` 里最后一条 Directional（与旧的 `ForEach` 逐个覆盖同义）。
     // 先按"本帧没有 RSM"复位：下面任一条件不成立时，UBO 里的 rsmValid 就是 0，
     // PBR 侧据此直接返回 0，不去采可能没写过的 RSM 纹理（§9.2-T 的约定）。
     m_RSMFrustumValid  = false;
@@ -814,18 +796,18 @@ void ForwardPipeline::RefreshRSMFrustum(he::World& world, const CameraData& came
     // 光源方向与"是否存在投影方向光"：无方向光时 RSM 的通量为 0（也就没有间接光可言），
     // 但 pass 仍会注册 —— 与 Deferred 侧一致；这个布尔只用于决定 PBR 要不要做内联查找。
     float3 ldir = float3(0.3f, -1.0f, 0.4f);   // 与 Deferred 同一个默认方向
-    world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& l) {
-        if (l.enabled && l.castShadow) {
-            ldir = glm::normalize(l.direction);
-            m_RSMDirLightValid = true;
-        }
-    });
+    for (const SnapshotShadowLight& l : FrameSnap().shadowLights) {
+        if (l.type != static_cast<u32>(he::LightType::Directional)) continue;
+        ldir = glm::normalize(l.direction);    // 逐个覆盖 ⇒ 取最后一条（与旧 `ForEach` 同义）
+        m_RSMDirLightValid = true;
+    }
 
     // 【固定视锥】RSM 是被当作**世界空间**源使用的（接收点与探针都在世界空间查表），
     // 所以光锥不能拟合相机视锥；覆盖范围由场景包围盒推出（纯几何在 GI/RSMFrustum.h，有单测）。
     // 包围盒还没算出来时（首帧 / 空场景）退回覆盖相机附近的保守视锥，保证"有产出"。
-    const float3 fitMin = m_SceneBounds.IsValid() ? m_SceneBounds.min : (camera.position - float3(50.0f));
-    const float3 fitMax = m_SceneBounds.IsValid() ? m_SceneBounds.max : (camera.position + float3(50.0f));
+    const he::AABB sceneBounds{float3(FrameSnap().sceneBoundsMin), float3(FrameSnap().sceneBoundsMax)};
+    const float3 fitMin = sceneBounds.IsValid() ? sceneBounds.min : (camera.position - float3(50.0f));
+    const float3 fitMax = sceneBounds.IsValid() ? sceneBounds.max : (camera.position + float3(50.0f));
     const auto   fit    = FitRSMFrustumToBounds(fitMin, fitMax, ldir);
     if (!fit) return;   // 包围盒退化/方向为零向量 ⇒ 本帧不注册 RSM
 
@@ -884,72 +866,28 @@ void ForwardPipeline::FillGIBlendUBO() {
     }
 }
 
-void ForwardPipeline::BuildFrameSnapshot(he::World& world, he::SceneGraph& sg,
-                                          const CameraData& camera) {
-    // 【幂等】样例可能在本帧的 `Render` 之前先调本函数（阴影收集需要 `shadowCtx.snapshot`），
-    // 因此这里必须只构建一次；`NextFrame()` 复位标记。
-    if (m_SnapshotBuiltThisFrame) return;
-    m_SnapshotBuiltThisFrame = true;
-
-    // 阶段 1 附录 E（E-2①）：登记/更新**全部**网格资源并回填 `meshIndex`。
-    // 唯一实现在 `SceneSnapshotBuilder::RegisterMeshes`（三条管线共用；原先各抄一份只登记骨骼网格）。
-    // 每帧刷新：骨骼缓冲会被重建（`RetireBoneBuffer` 走 N 帧延迟队列后新建）⇒ 只登记一次会留过期指针；
-    // `Register` 同 key = 更新、索引不变，因此廉价且安全。必须在构建快照之前（`meshIndex` 取组件字段）。
-    SceneSnapshotBuilder::RegisterMeshes(world, m_MeshRegistry);
-    // 天空盒（T1.4）：必须在**帧图构建之前**收集 —— 帧图里的 IBL pass 在"注册 pass"阶段就会读
-    // `m_Snapshot.skybox`（见 ForwardPipeline_FrameGraph.cpp 的 Pass 1），晚一步就会用上一帧的天空盒。
-    SceneSnapshotBuilder::BuildSkybox(world, m_Snapshot);
-    // 环境（T1.4 / 第③段第 2 批）：`atmosphere`（光照用）与 `physicalSky`（SkyboxPass 用）
-    // 一次取齐 —— 原先后者由 SkyboxPass 自己遍历世界、前者在 `CollectLights` 里收集。
-    SceneSnapshotBuilder::BuildEnvironment(world, m_Snapshot);
-    // 材质数组（T1.5）：`UploadMaterialBindless` 改为读快照，因此必须在它之前收集。
-    // 代价：每帧一次六类组件的材质收集（原先在 bindless 上传里同样要做，只是按需触发）。
-    SceneSnapshotBuilder::BuildMaterials(world, m_Snapshot);
-
-    // 阶段 1 附录 E（E-2②）：构建**完整**快照（物体 + 蒙皮矩阵）。
-    // 【为什么需要】骨骼上传（下面 11xx 行）要按 `sourceEntity` 找回逐实体状态、并从
-    // `m_Snapshot.skinMatrices` 取矩阵 —— 因此快照必须在那个循环之前就是完整的。
-    // 本步只**构建**、尚无消费者读 `draws`，渲染结果不变；代价是每帧一次组件遍历（与既有遍历同量级）。
-    SceneSnapshotBuilder::BuildObjects(world, sg, camera, {}, nullptr, m_Snapshot);
-
-    // 实例化网格（阶段 1 第①段 / §15.1）：实例变换按值进快照，渲染侧因此不再读 InstancedMeshComponent。
-    // 必须在 `RegisterMeshes`（回填 meshIndex）之后 —— 否则条目带的是"未注册"。
-    SceneSnapshotBuilder::BuildInstances(world, m_Snapshot);
-
-    // 阴影投射光源（第③段第 2 批）：四个阴影技术的收集改吃快照，故必须由收集侧一次取齐。
-    SceneSnapshotBuilder::BuildShadowLights(world, sg, m_Snapshot);
-
-    // 首帧构建之后按**实际规模自校准**预留一次容量：稳态下快照数组不再重分配。
-    // 【为什么】`Reserve` 之前从未被调用 ⇒ 头几帧靠 vector 反复扩容；而"帧内不做分配"与
-    // "帧内不做同步等待"是方案里的同一条纪律（分配会引入不可预期的耗时与锁竞争）。
-    // 乘 2 + 常数余量：留出场景增长的余量；超出后仍会自然扩容（正确性不受影响）。
-    if (!m_SnapshotReserved) {
-        m_Snapshot.Reserve(static_cast<u32>(m_Snapshot.draws.size()) * 2u + 64u,
-                           static_cast<u32>(m_Snapshot.lights.size()) * 2u + 64u,
-                           static_cast<u32>(m_Snapshot.skinMatrices.size()) * 2u + 256u,
-                           static_cast<u32>(m_Snapshot.particles.size()) * 2u + 8u,
-                           static_cast<u32>(m_Snapshot.instances.size()) * 2u + 8u,
-                           static_cast<u32>(m_Snapshot.instanceTransforms.size()) * 2u + 1024u);
-        m_SnapshotReserved = true;
-    }
-}
-
 void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
                               he::SceneGraph& sg, const CameraData& camera,
                               float deltaTime)
 {
-    // 收集本帧渲染输入（幂等：样例可能已经为了阴影收集先调过一次）
-    BuildFrameSnapshot(world, sg, camera);
+    // 【阶段 1 §15.1 第③段第 4 批：装配搬到白名单层】
+    // 本函数与其 helper 已**不再读世界**（光源/物体/实例/蒙皮/阴影几何全部来自快照），
+    // 唯一还需要 world/sg 的地方就是"这一句装配兜底"：样例通常已经为了阴影收集先装配过一次
+    //（`GetFrameAssembler().AssembleScene(...)`），此处只是保证"没先装配"的调用方也能工作。
+    // 装配器本身在 `Engine/Render/Threading/`（附录 B1 白名单层）⇒ 渲染期读世界只剩这一处入口。
+    if (!m_Assembler.AssembledThisFrame()) m_Assembler.AssembleScene(world, sg, camera);
+    m_FrameSnapshot = &m_Snapshot;
+    m_Assembler.ReserveOnce();   // 首帧按实际规模自校准预留一次容量（幂等）   // 供各 helper 与帧图 lambda（都在本次 Render 内执行）使用
 
     // RSM 固定光锥必须**先**刷新（任务 34）：UBO（FillGIBlendUBO）与 frame graph 的
     // RSM pass 注册/参数两处消费者都读它，且两者都在下面几步之内。
-    RefreshRSMFrustum(world, camera);
+    RefreshRSMFrustum(camera);
     // GI 分层合成参数：RG 路径与非 RG 路径都要用，故在分支之前填（每帧一次的小 UBO 写入）
     FillGIBlendUBO();
     if (m_UseRenderGraph) {
         RenderGraph rg;
         rg.SetProfiler(&m_Profiler);
-        BuildFrameGraph(rg, world, sg, camera);
+        BuildFrameGraph(rg, camera);
         rg.Compile();
         rg.Execute(cmd, m_Device);
         return;
@@ -959,7 +897,7 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
     rhi::Format swapFmt = m_SwapChain ? m_SwapChain->GetColorFormat() : rhi::Format::BGRA8_UNORM;
     m_ToneMap->SetOutputFormat(swapFmt);
     m_ToneMap->SetHDREnabled(swapFmt == rhi::Format::A2B10G10R10_UNORM_PACK32);
-    he::SyncPhysicalSkyToSun(world);  // 物理天空太阳→方向光同步（阴影/光照收集前）
+    // 【第③段第 4 批】`SyncPhysicalSkyToSun` 已搬进快照装配器（必须在收集之前、且聚合在一处）
     if (m_ShadowSystem && m_ShadowSystem->HasActiveShadows()) {
         u32 slot = m_CurrentFrameSlot;
         // 切换 binding 2 到阴影 Object Buffer（仅更新 set=0 per-frame 集）
@@ -974,10 +912,10 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
     }
     PrepareGI(cmd);
     // GPU 视锥剔除：必须在 render pass 之外（BeginHDRPass 会 Begin 本帧的 HDR pass）
-    RunGPUCulling(cmd, world, sg, camera);
+    RunGPUCulling(cmd, camera);
     BeginHDRPass(cmd, m_HDRWidth, m_HDRHeight);
     BeginFrame(cmd, m_HDRWidth, m_HDRHeight);
-    RenderScene(cmd, world, sg, camera);
+    RenderScene(cmd, camera);
     RenderSkybox(cmd, camera);
     EndHDRPass(cmd);
 
@@ -1001,11 +939,7 @@ void ForwardPipeline::OnResize(u32 width, u32 height) {
 // GPU 视锥剔除（Compute）— 读回上帧结果 → 调度下帧
 // 必须在 render pass **之外**调用（见头文件说明）。
 // ============================================================
-void ForwardPipeline::RunGPUCulling(
-    rhi::IRHICommandList* cmd,
-    he::World& world,
-    he::SceneGraph& sceneGraph,
-    const CameraData& camera)
+void ForwardPipeline::RunGPUCulling(rhi::IRHICommandList* cmd, const CameraData& camera)
 {
     if (!m_GPUCulling.enabled) return;
 
@@ -1016,7 +950,8 @@ void ForwardPipeline::RunGPUCulling(
     // 【第③段】GPUScene 不再自建快照：直接消费本帧快照（物体收集口径已由 `BuildObjects` 决定）
     m_GPUScene.CollectFromSnapshot(m_Snapshot);
     // FillGPUScene 必须在 Collect 之后、Upload 之前（与 Deferred 一致）
-    if (!m_BatchBuilt) { m_MeshBatcher.Build(world); m_BatchBuilt = true; }
+    // 【第③段第 4 批】MeshBatcher 改吃快照 + 网格注册表（它原先要遍历世界取顶点/索引与材质）
+    if (!m_BatchBuilt) { m_MeshBatcher.Build(FrameSnap(), m_MeshRegistry); m_BatchBuilt = true; }
     m_MeshBatcher.FillGPUScene(m_GPUScene);
     m_GPUScene.Upload(m_Device);
 
@@ -1030,13 +965,10 @@ void ForwardPipeline::RunGPUCulling(
     cmd->SetPipeline(m_PBR_PSO.get());
 }
 
-void ForwardPipeline::RenderScene(
-    rhi::IRHICommandList* cmd,
-    he::World& world,
-    he::SceneGraph& sceneGraph,
-    const CameraData& camera)
+void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& camera)
 {
-    sceneGraph.UpdateTransforms();
+    // 【第③段第 4 批】`sceneGraph.UpdateTransforms()` 已搬到装配器（它必须在**取快照之前**跑；
+    // 旧代码在渲染期刷新世界矩阵，而快照在它之前构建 ⇒ 同帧改脏的变换会让快照旧一帧）。
 
     float4x4 viewProj = camera.GetViewProjMatrix();
     u32 drawCount = 0;
@@ -1053,7 +985,7 @@ void ForwardPipeline::RenderScene(
     framePC.iblIntensity  = m_GI ? m_GI->GetSettings().intensity : 1.0f;
 
     // 收集光源（阴影数据由 ShadowSystem 管理，此处仅收集光照）
-    CollectLights(framePC, world, sceneGraph, camera);
+    CollectLights(framePC);
 
     // Forward+: 设置 Cluster 参数（与 ForwardPlus_LightCull pass 共享 m_ClusteredShading 状态）
     if (m_UseForwardPlus && m_ClusteredShading.enabled) {
@@ -1111,11 +1043,11 @@ void ForwardPipeline::RenderScene(
     m_InstanceCuller.BeginInstancesFrame(m_Device);   // 帧边界：推进退役队列 + 回收上帧未见的条目
     {
         const u32 frameSlot = m_CurrentFrameSlot % rhi::kMaxFramesInFlight;
-        for (const SnapshotInstance& si : m_Snapshot.instances) {
+        for (const SnapshotInstance& si : FrameSnap().instances) {
             if (si.transformCount == 0u) continue;   // 无实例：跳过（旧路径同样跳过）
             // 变换切片越界保护：快照损坏时宁可少画，也不要读越界内存
             if (static_cast<usize>(si.transformOffset) + si.transformCount >
-                m_Snapshot.instanceTransforms.size()) continue;
+                FrameSnap().instanceTransforms.size()) continue;
             const MeshRegistryEntry* me = m_MeshRegistry.Find(si.meshIndex);
             if (!me || !me->vertexBuffer || !me->indexBuffer) continue;
 
@@ -1132,7 +1064,7 @@ void ForwardPipeline::RenderScene(
             const u32 count = si.transformCount;
             // 实例变换上传（容量够且版本未变 ⇒ 直接复用句柄；扩容时旧缓冲走有界退役）
             const u32 instHandle = m_InstanceCuller.UploadInstanceTransforms(
-                m_Device, si.meshIndex, m_Snapshot.instanceTransforms.data() + si.transformOffset,
+                m_Device, si.meshIndex, FrameSnap().instanceTransforms.data() + si.transformOffset,
                 count, si.transformVersion, si.sourceEntity);
             if (instHandle == 0) continue;
             InstanceCuller::InstanceState* st = m_InstanceCuller.FindInstanceState(si.meshIndex);
@@ -1209,15 +1141,15 @@ void ForwardPipeline::RenderScene(
     // （SSBO/容量/退役队列/句柄）在渲染侧的 `SkinnedMeshBuffers` 里，按 `meshIndex` 索引。
     // ============================================================
     m_SkinnedBuffers.BeginFrame(m_Device);   // 帧边界：推进退役队列 + 回收上帧未见的条目
-    for (const SnapshotDrawItem& it : m_Snapshot.draws) {
+    for (const SnapshotDrawItem& it : FrameSnap().draws) {
         if (it.meshClass != SnapshotMeshClass::Skeletal) continue;
         if (!it.bHasSkeleton || it.skinMatrixCount == 0u) continue;   // 旧判据：skeleton 已加载且矩阵非空
         const MeshRegistryEntry* me = m_MeshRegistry.Find(it.meshIndex);
         if (!me || !me->vertexBuffer || !me->indexBuffer) continue;
         // 矩阵切片越界保护：快照损坏时宁可少画，也不要读越界内存
-        if (static_cast<usize>(it.skinMatrixOffset) + it.skinMatrixCount > m_Snapshot.skinMatrices.size())
+        if (static_cast<usize>(it.skinMatrixOffset) + it.skinMatrixCount > FrameSnap().skinMatrices.size())
             continue;
-        const float4x4* skinMats = m_Snapshot.skinMatrices.data() + it.skinMatrixOffset;
+        const float4x4* skinMats = FrameSnap().skinMatrices.data() + it.skinMatrixOffset;
 
         // 骨骼矩阵上传：版本未变且容量够 → 直接复用句柄；容量不够 → 扩建 + 旧缓冲延迟释放
         //（禁止每帧重建缓冲：SSBO 数组容量有限，重建会不断消耗 bindless 槽位）
