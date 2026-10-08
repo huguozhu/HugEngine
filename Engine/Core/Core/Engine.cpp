@@ -2,6 +2,8 @@
 #include "Core/Log.h"
 #include "Core/CVar.h"
 
+#include <cstdlib>   // std::getenv（HE_RENDER_THREADING_MODE 覆盖）
+
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -34,6 +36,26 @@ void Engine::Initialize() {
     // 物理光照单位开关（默认关闭：所有光源走传统 intensity 模式）
     if (auto* cvar = FindCVar("r.Light.PhysicalUnits"))
         cvar->SetFromString(m_Config.usePhysicalLights ? "true" : "false");
+
+    // 2.6 渲染线程模式（阶段 0 T0.5）：先按 EngineConfig 落地到进程级，再允许环境变量覆盖 ——
+    //     验收需要在同一台机器上反复切换三种模式做对照，而样例到目前为止没有统一的配置解析入口
+    //     （T2.4 会把 cfg 键接上）。**解析失败只告警、保持原模式**，绝不静默退回，否则
+    //     "以为开了多线程"的实测数据会失去意义。
+    {
+        RenderThreadingMode mode = m_Config.renderThreadingMode;
+        if (const char* env = std::getenv("HE_RENDER_THREADING_MODE")) {
+            if (auto parsed = ParseRenderThreadingMode(env)) {
+                mode = *parsed;
+            } else {
+                HE_CORE_WARN("HE_RENDER_THREADING_MODE=\"{}\" 不是合法模式，保持 {}（合法值：0/1/2 "
+                             "或 single-threaded / game+render / game+render+rhi）",
+                             env, RenderThreadingModeName(mode));
+            }
+        }
+        SetRenderThreadingMode(mode);
+        HE_CORE_INFO("渲染线程模式 = {}（{}），自旋等待 {} us", RenderThreadingModeName(mode),
+                     static_cast<int>(mode), m_Config.renderThreadSpinWaitUs);
+    }
 
     // 3. Job system
     JobSystem::Initialize(m_Config.jobThreads);

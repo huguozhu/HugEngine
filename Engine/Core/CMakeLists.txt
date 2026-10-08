@@ -6,6 +6,7 @@ add_library(HugEngineCore STATIC)
 set(CORE_SOURCES
     Core/Engine.cpp
     Core/Engine.h
+    Core/RenderThreadingMode.h
     Core/Log.cpp
     Core/Log.h
     Core/CrashHandler.cpp

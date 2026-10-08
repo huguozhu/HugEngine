@@ -14,6 +14,8 @@ add_executable(HugEngineTests
     # 渲染线程化方案 T0.1：线程归属（`RHI/ThreadAffinity.h`，头文件实现）的三态断言——
     # "未 Claim 不设限 / Claim 后只有认领线程放行 / Release 后重新不设限"。
     TestThreadAffinity.cpp
+    # 阶段 0 T0.5：三态渲染线程模式（默认单线程 / 判据真值表 / 解析口径 / 非法输入不静默退回）。
+    TestRenderThreadingMode.cpp
     # 开关路径的钉子：`HE_DISABLE_THREAD_ASSERT` 必须在包含头文件之前定义，故单独一个 TU。
     TestThreadAffinityDisabled.cpp
     TestGameplayComponents.cpp
