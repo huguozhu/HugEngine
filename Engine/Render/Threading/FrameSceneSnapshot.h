@@ -159,10 +159,13 @@ struct FrameSceneSnapshot {
     }
 
     /// 预留容量（首帧/场景规模变化时调用一次，之后每帧 `Clear()` 复用）
-    void Reserve(u32 maxDraws, u32 maxLights, u32 maxSkinMatrices = 0) {
+    /// 【为什么要预留粒子】稳态下每帧只做 `Clear()` + 填充，**不允许在帧内分配**（帧内分配会引入
+    /// 不可预期的耗时与锁，与"帧内不做同步等待"同一条纪律）。粒子数组此前漏了预留，见下方重载。
+    void Reserve(u32 maxDraws, u32 maxLights, u32 maxSkinMatrices = 0, u32 maxParticles = 0) {
         draws.reserve(maxDraws);
         lights.reserve(maxLights);
         skinMatrices.reserve(maxSkinMatrices);
+        particles.reserve(maxParticles);
     }
 };
 
