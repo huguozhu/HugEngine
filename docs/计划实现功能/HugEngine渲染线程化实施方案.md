@@ -917,6 +917,30 @@ private:
     > `HasGeometryChanged`/`HashGeometry`/`CreateVertexPullBuffer` 等，以及一条**全仓库无调用点**的
     > 顶点拉取死路径）。它属 §14.5 给 E-3② 定的第①类（与 E-4 口径统一一起做），且与第③段同源
     > （`RTPass::BuildAS(world, sg)` 本身也是 B1 的收敛对象）—— 故并入第③段处理，本段不单独动它。
+  - **第③段（分批进行中，2026-10-09）** —— 目标：`--world-deps` 渲染期 **76 → 0**
+    - **第 1 批（已提交）**：`GBufferRenderer` 家族（接口 + CPU/GPU 策略 + 实现）去掉 `World&`/`SceneGraph&`
+      —— 第①②段之后它们体内已不再使用世界；`GPUScene::Collect(world, sg, camera)` 过渡重载**删除**，
+      两条管线改为直接 `CollectFromSnapshot(m_Snapshot)`（本帧本就有快照 ⇒ 省掉每帧一次重复的物体收集，
+      口径还更一致：贴花排除已由 `BuildObjects` 烘进快照）。⇒ **B1 76 → 69**（加载期 13 → 11）。
+    - **同批顺带修掉一处 B1 量不到的渲染期世界读**：`SkyboxPass::Update(ctx)` 原先
+      `ctx.world->ForEach<PhysicalSkyComponent / SkyboxComponent>` 并**缓存组件指针**
+      （`m_CachedSkybox` / `m_CachedPhysSky`）。B1 只统计 `World&`/`SceneGraph&` **引用**，
+      经 `SubsystemContext::world` 指针进入的这类读取它一条都量不到 —— 而它们同样是换线程即竞争。
+      现已改为只读快照：`SkyboxPass` 缓存值 + RHI 资源指针（cubemap/sampler/intensity）。
+      为此快照新增 `SnapshotPhysicalSky`（intensity/sunDirection/turbidity/groundAlbedo/sunIntensity，
+      口径 = 第一个启用的组件，与 `he::GetPhysicalSkySun` 逐条一致）与 `SnapshotSkybox::intensity`。
+      > **由此登记一类"B1 盲区"**（后续批次逐个收）：`SubsystemContext::world/sceneGraph`、
+      > `GIProviderContext::world/sceneGraph`（`GI/IGIProvider.h`）、`he::SyncPhysicalSkyToSun(world)`
+      > （三条管线每帧调用，且它**写世界**）。⇒ **B1 = 0 不等于"渲染期不读世界"**，真实判据要把
+      > 这些指针通路一并收掉，否则 T2.4 起线程后它们就是数据竞争。
+    - **判据（第 1 批实测）**：单测 398 例 / 71832 断言；`06.GILab` 冒烟（`HE_LUMEN_PROBE_FILTER=off`）
+      同二进制双跑 **4630 像素**、与②的二进制对比 **15 像素 / maxULP=1**（仅在 Lumen 探针类目标上）
+      ⇒ 远低于该次同二进制底噪，无可测差异；四项闸门：B1 **69**（基线随之下调）、组件指针 13、
+      帧内 RHI 380、持有者 277。
+      > **底噪的重要修正（务必按此判据）**：同一二进制两趟的差异**是间歇的** —— 本会话前几对
+      > （inst5/6、inst7/8、inst9/10）为 **0 像素**，而 inst11/12 为 **4630 像素**，
+      > 与 §9 T1.3a 记录的 ≈4.5k 一致。⇒ **任何一次"0 像素"都不构成"判据已通过"的证据**，
+      > 必须**成对**给出（同批二进制双跑 + 改动前后对比），并允许"改动前后"落在同一次底噪之内。
 - [x] T2.1 `RenderThread` 实现（帧节奏 + 休眠策略）—— ✅ 完成（真起线程 + 归属判断 + 停止排空；4 例单测。cv 唤醒并入 T2.6）
 - [ ] T2.2 设备与交换链归渲染线程（Acquire/Present 迁移）
 - [ ] T2.3 `ResourceCreationService`（步 1 同步转发）
@@ -1425,20 +1449,22 @@ python Tools\check_threading.py --world-deps --mesh-ptrs --handles --gate
 `docs/计划实现功能/占位.md`，不要动它）。
 
 **四项闸门（都在基线，只允许下降）**：帧内同步 RHI 调用 **380**（= 376 + 4 处**归属漂移**，非新增
-调用；见 §9 T1.5 第①段口径说明一）｜附录 B1 世界依赖 渲染期 **76** / 加载期 13
-（80 → 78 是行合并少计一行、78 → 76 是 `Prepare` 的声明 + 定义，见 §9）｜
+调用；见 §9 T1.5 第①段口径说明一）｜附录 B1 世界依赖 渲染期 **69** / 加载期 11
+（80 → 76 见 §9 第②段、76 → 69 见 §9 第③段第 1 批）｜
 组件指针依赖 渲染期 **13** / 加载期 0（**18 → 13**，只剩 `RTPass`）｜T0.7 资源持有者 **277** / 75 文件。
 复测：`python Tools/check_threading.py --world-deps --mesh-ptrs --handles --gate`
 （注意 `--gate` 的退出码目前恒为 1：`帧内同步 RHI = 380 > 0` 是**阶段 2** 的退出条件，
 四项**基线**本身都已满足。）
 
 **验收**：单测 **398 例 / 71832 断言全通过**；`acceptance_sweep.ps1 -OnlyNanite` **PASS** 且两类
-pass 指纹（`1C15AB72E688B530` / `750CC247BF8B9C3D`）未变；`06.GILab` 冒烟在
-`HE_LUMEN_PROBE_FILTER=off` 下**同二进制双跑 = 0 像素**（逐位一致），且第②段改动后与第①段的二进制
-**逐位对比同为 0 像素** —— 该环境变量是**必须**的：默认滤波下同一二进制两趟差 **≈ 2.25M 像素**
-（Lumen 屏幕探针的逐趟不确定性），会把判据淹没。`02.Cube`（唯一含实例化网格的样例）双管线实跑：
-GPU 剔除读回与 CPU 复算逐帧相等、实例 SSBO 只建一次后原地复用、Deferred 比 Forward 少 1 条
-（贴花卡片被正确排除）。
+pass 指纹（`1C15AB72E688B530` / `750CC247BF8B9C3D`）未变；`06.GILab` 冒烟必须带
+`HE_LUMEN_PROBE_FILTER=off`（默认滤波下同一二进制两趟差 **≈ 2.25M 像素**，判据会被淹没）。
+**底噪是间歇的**：关掉滤波后同一二进制两趟本会话实测 **0 像素**（inst5/6、7/8、9/10）
+与 **4630 像素**（inst11/12）都出现过 —— 因此判据必须**成对**给出
+（同批二进制双跑 + 改动前后对比），单次 0 像素不构成证据；至今各步的"改动前后"对比分别为
+第①段 0、第②段 0、第③段第 1 批 15 像素（maxULP=1，均在 Lumen 探针类目标上）⇒ 均落于同批底噪内。
+`02.Cube`（唯一含实例化网格的样例）双管线实跑：GPU 剔除读回与 CPU 复算逐帧相等、实例 SSBO
+只建一次后原地复用、Deferred 比 Forward 少 1 条（贴花卡片被正确排除）。
 
 **已完成**：阶段 0 全部（T0.1–T0.7 + 两条退出判据）；阶段 1 的快照契约、光源/物体/环境/骨骼/粒子/
 天空盒/材质/贴花收集、三管线消费（光源 + `GPUScene`）、E-1 注册表、E-2① 注册点（三管线对称）、E-2② 骨骼
