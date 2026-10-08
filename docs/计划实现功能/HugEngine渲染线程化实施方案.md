@@ -602,6 +602,16 @@ private:
     根因与画质线登记的「Lumen 屏幕探针逐趟不确定」同源（根因已定位为 mesh 级 SDF 泛洪的**就地**
     读-写竞争；修复曾以 `f6566b6` 提交后按要求回退，补丁留在 `build/verify/jfa_only.patch`）。
     **在此之前，迁移类改动一律用"参考实现 + 逐位比较"的单元级判据**，全帧转储只用于粗筛并如实标注噪声。
+  - **T1.3b-1 已完成（口径开关 + 三口径等价性，2026-09-24）**：`SceneSnapshotBuilder` 支持
+    `RectLight`（`directionType.w=3`、`coneAngles` 复用为宽×高）与四个口径开关
+    （`includeRectLights` / `pointLightWritesDirection` / `normalizeSpotDirection` / `writeShadowRadius`），
+    默认值 = Deferred 现状。**三条管线的光源口径共有 4 处历史漂移**（Rect 光、点光 `directionType.xyz`、
+    聚光归一化、`shadowRadius`），迁移先逐条保持，统一另立改动。
+    等价性：把 Deferred 与 Forward 的收集逻辑**逐行转写**为两份参考实现，场景覆盖三类光源 + Rect +
+    色温 + 物理照度/光强 + 关闭 + 超上限，在物理开关两态下**三口径全部逐位一致**（376 例 / 71647 断言）。
+  - **T1.3b-2 待做**：`ForwardPipeline::CollectLights` / `PathTracingPipeline::CollectLights` 的收集块
+    替换为收集器调用（选项与参考实现已就绪）。Forward 的"无光源补默认方向光"是**策略**、
+    `pc.atmosphere`（读物理天空组件）是**尚未快照化的世界读**，两者都保留在管线内（后者随 T1.4 处理）。
   - **T1.3b 待做**：Forward / PathTracing 的光源收集同样改走快照（各自带历史口径开关）；
     `GPUScene::Collect` 改消费快照（依赖 T1.2b 的物体收集）。
 - [ ] T1.4 骨骼/材质/Decal/粒子快照化
