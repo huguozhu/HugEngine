@@ -941,6 +941,42 @@ private:
       > （inst5/6、inst7/8、inst9/10）为 **0 像素**，而 inst11/12 为 **4630 像素**，
       > 与 §9 T1.3a 记录的 ≈4.5k 一致。⇒ **任何一次"0 像素"都不构成"判据已通过"的证据**，
       > 必须**成对**给出（同批二进制双跑 + 改动前后对比），并允许"改动前后"落在同一次底噪之内。
+    - **第 2 批设计（已查清，零决策）**：阴影系统 + **样例→管线的快照交接**（二者必须同批做）。
+      - **为什么必须同批**：Forward 路径的阴影收集由**样例**发起 —— `02.Cube:1252`、`03.Sponza-Forward:689`、
+        `06.GILab:983`、`07.Nanite:1077`、`07.AISamples:190` 各自构造 `shadowCtx` 调
+        `shadowSys->Update(shadowCtx)`，**都在 `pipeline.Render(...)` 之前**；而当前快照是管线在
+        `Render` 内部建的 ⇒ 样例拿不到。故必须让样例在渲染前**先建快照**（这正是 T2.4 的形态）。
+      - **接口形态（建议）**：`ForwardPipeline::BuildFrameSnapshot(world, sg, camera)` +
+        `GetFrameSnapshot()` + `GetMeshRegistry()`；`Render(cmd, const FrameSceneSnapshot&, camera, dt)`
+        （不再自己建快照）。`DeferredPipeline`/`PathTracingPipeline` 同形。样例每帧：
+        `pipeline.BuildFrameSnapshot(...)` → 填 `shadowCtx.snapshot/ meshRegistry` → `shadowSys->Update(...)`
+        → `pipeline.Render(cmd, pipeline.GetFrameSnapshot(), camera, dt)`。
+      - **快照新增**：`SnapshotDrawItem::bShadowCaster`（口径 = 组件类属**精确** `MeshComponent`/`Cube`/`Sphere`
+        且 `castShadow == true`；`if constexpr` 在 `CollectObjectItem` 里判定，`SplineMesh` 派生但走精确类型桶
+        故天然排除）与 `std::vector<SnapshotShadowLight> shadowLights`（只收 `enabled && castShadow`，
+        按 方向光→点光→聚光→面光 分类型、同类型按实体顺序 —— 各技术的过滤只认自己的类型，故跨类型顺序无关）。
+      - **`SnapshotShadowLight` 字段（四个技术的 `CollectLights` 实测所需，一处不漏）**：
+        `type`（`he::LightType`）、`direction`（方向光/聚光方向、面光法线，**不归一化**：CSM 与 Spot 在
+        消费侧 `glm::normalize`、Rect 也一样，照抄原口径）、`position`（`sg.GetWorldPosition(e)`，方向光为 0）、
+        `range`、`outerConeAngle`（Spot）、`softness`（Rect）、`shadowBias`/`shadowNormalBias`/`shadowStrength`、
+        `sourceEntity`。`outEntities` 用 `he::Entity{(EntityID)sourceEntity}` 还原（`Entity` 就是 `{u64 id}`）。
+      - **`IShadowTechnique` 新签名**：`CollectLights(const FrameSceneSnapshot&, const CameraData&, out, entities)`、
+        `Render(cmd, const FrameSceneSnapshot&, const MeshRegistry&, shadowData, start)`。**技术顺序与
+        `m_PerTechniqueCounts` 的编排不变**（`GPUShadowData` 的下标即 shader 的 `shadowIndex`，
+        由 `ShadowSystem::GetShadowIndex` 的 Entity→下标映射决定，不能动）。
+      - **阴影网格遍历**（四个技术的 `rm` lambda）：改为遍历 `snapshot.draws` 取 `bShadowCaster`，
+        顶点/索引缓冲与索引数从 `MeshRegistry::Find(item.meshIndex)` 取 —— 顺序与旧的
+        `Mesh→Cube→Sphere` 完全一致（快照的枚举顺序就是 Mesh→Cube→Sphere→…，过滤后相对顺序不变）。
+      - **`SubsystemContext` 新增 `const MeshRegistry* meshRegistry`**（前向声明即可）；
+        `ShadowSystem::Update` 改读 `ctx.snapshot`（缺省直接返回 = 本次不收集），
+        `ShadowSystem` 缓存本帧快照指针与注册表供 `Render` 用。
+      - **顺带登记两个既有问题**（本批只记录，不改行为）：
+        ① `SceneGraph::UpdateTransforms()` 目前**只在渲染期的 `ForwardPipeline::RenderScene` 里调用一次**
+        （`SceneGraph.cpp:66` 只重算 `dirty` 节点），而快照在它**之前**构建 ⇒ 变换在同一帧内被改脏时，
+        快照里的世界矩阵比渲染期看到的**旧一帧**。当前样例无此情形（冒烟逐位一致），但换线程后必须
+        把它移到游戏线程、且在构建快照**之前**；② Forward 路径的 `ShadowSystem::Update` **只由样例调用**，
+        管线自身从不调用（`ForwardPipeline.cpp` 只调 `Render`）⇒ 若样例不调，`HasActiveShadows()` 恒 false、
+        阴影整条链静默不工作（Deferred 路径由帧图自己调，正常）。
 - [x] T2.1 `RenderThread` 实现（帧节奏 + 休眠策略）—— ✅ 完成（真起线程 + 归属判断 + 停止排空；4 例单测。cv 唤醒并入 T2.6）
 - [ ] T2.2 设备与交换链归渲染线程（Acquire/Present 迁移）
 - [ ] T2.3 `ResourceCreationService`（步 1 同步转发）
