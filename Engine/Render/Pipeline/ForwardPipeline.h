@@ -168,6 +168,8 @@ private:
     // 【为什么每帧刷新】骨骼缓冲会重建（N 帧延迟队列后新建）⇒ 只登记一次会留下过期指针；
     // `Register` 同 key = 更新（索引不变），因此每帧刷新廉价且安全。帧内只读。
     MeshRegistry                     m_MeshRegistry;
+    // 快照容量是否已按实际规模预留过一次（自校准；见 ForwardPipeline.cpp 里的说明）
+    bool                             m_SnapshotReserved = false;
     /// GI 分层合成参数 UBO（每飞行帧一份，与 Deferred 的 LightingPass 同结构同语义）
     std::unique_ptr<rhi::IRHIBuffer> m_GIBuffers[MAX_FRAMES_IN_FLIGHT];
     std::unique_ptr<rhi::IRHIBuffer> m_ObjectBuffers[MAX_FRAMES_IN_FLIGHT];

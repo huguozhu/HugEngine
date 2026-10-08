@@ -936,6 +936,18 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
     // 本步只**构建**、尚无消费者读 `draws`，渲染结果不变；代价是每帧一次组件遍历（与既有遍历同量级）。
     SceneSnapshotBuilder::BuildObjects(world, sg, camera, {}, nullptr, m_Snapshot);
 
+    // 首帧构建之后按**实际规模自校准**预留一次容量：稳态下快照数组不再重分配。
+    // 【为什么】`Reserve` 之前从未被调用 ⇒ 头几帧靠 vector 反复扩容；而"帧内不做分配"与
+    // "帧内不做同步等待"是方案里的同一条纪律（分配会引入不可预期的耗时与锁竞争）。
+    // 乘 2 + 常数余量：留出场景增长的余量；超出后仍会自然扩容（正确性不受影响）。
+    if (!m_SnapshotReserved) {
+        m_Snapshot.Reserve(static_cast<u32>(m_Snapshot.draws.size()) * 2u + 64u,
+                           static_cast<u32>(m_Snapshot.lights.size()) * 2u + 64u,
+                           static_cast<u32>(m_Snapshot.skinMatrices.size()) * 2u + 256u,
+                           static_cast<u32>(m_Snapshot.particles.size()) * 2u + 8u);
+        m_SnapshotReserved = true;
+    }
+
     // RSM 固定光锥必须**先**刷新（任务 34）：UBO（FillGIBlendUBO）与 frame graph 的
     // RSM pass 注册/参数两处消费者都读它，且两者都在下面几步之内。
     RefreshRSMFrustum(world, camera);
