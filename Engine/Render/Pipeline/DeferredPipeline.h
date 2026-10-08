@@ -95,7 +95,7 @@ public:
 
     // ── 快照交接（第③段：帧入口收快照）──
     FrameSnapshotAssembler& GetFrameAssembler() override { return m_Assembler; }
-    const FrameSceneSnapshot& GetFrameSnapshot() const override { return m_Snapshot; }
+    const FrameSceneSnapshot& GetFrameSnapshot() const override { return SnapBuf(); }
     const MeshRegistry& GetMeshRegistry() const override { return m_MeshRegistry; }
 
     // AsyncCompute: 在 Graphics Submit 之后调用，提交 Compute 工作
@@ -230,7 +230,15 @@ private:
     // 阶段 1 T1.3a：本帧光源的**快照**（游戏线程侧收集出来的不可变输入）。
     // 【为什么是成员而不是 `CollectLights` 里的局部变量】帧图的 lambda 在本函数返回**之后**才执行，
     // 局部变量的生命期不够 —— 这一条在画质阶段 0 的 TAA 抖动改动里踩过一次（`m_FrameCamera` 同理）。
+    /// 本帧快照（装配输出 + `Render` 消费的那一份）
+    /// 【为什么暂时只有一份】按飞行帧分流（每槽一份）已试过，但在**同步执行**的当下它改变了
+    /// 消费者的取值口径（实测 GI 探针转储大幅变化）⇒ 先退回单份，等 T2.2 真正异步执行时
+    /// 再连同"渲染线程自己持有命令缓冲"一起做（那时才真正需要多份）。按值交接本身已满足铁律 2：
+    /// 载荷按值携带"指针 + 相机 + 时长"，不再按引用捕获游戏线程的栈变量。
     FrameSceneSnapshot m_Snapshot;
+    [[nodiscard]] FrameSceneSnapshot&       SnapBuf()       { return m_Snapshot; }
+    [[nodiscard]] const FrameSceneSnapshot& SnapBuf() const { return m_Snapshot; }
+
 
     // 阶段 1 附录 E（E-2①）：网格注册表（与 ForwardPipeline 对称）。
     // 【为什么每帧刷新】骨骼缓冲会重建（N 帧延迟队列后新建）⇒ 只登记一次会留下过期指针；

@@ -136,7 +136,7 @@ public:
     // ── 快照交接（样例 → 管线）──
     // ── 快照交接（第③段：帧入口收快照）──
     FrameSnapshotAssembler& GetFrameAssembler() override { return m_Assembler; }
-    const FrameSceneSnapshot& GetFrameSnapshot() const override { return m_Snapshot; }
+    const FrameSceneSnapshot& GetFrameSnapshot() const override { return SnapBuf(); }
     const MeshRegistry& GetMeshRegistry() const override { return m_MeshRegistry; }
 
 private:
@@ -166,7 +166,15 @@ private:
     std::unique_ptr<rhi::IRHIBuffer> m_LightBuffers[MAX_FRAMES_IN_FLIGHT];
     // 阶段 1 T1.3b：本帧光源的**快照**（游戏线程侧收集的不可变输入）。
     // 必须是成员：帧图 lambda 在 `CollectLights` 返回之后才执行，局部变量会悬垂。
-    FrameSceneSnapshot               m_Snapshot;
+    /// 本帧快照（装配输出 + `Render` 消费的那一份）
+    /// 【为什么暂时只有一份】按飞行帧分流（每槽一份）已试过，但在**同步执行**的当下它改变了
+    /// 消费者的取值口径（实测 GI 探针转储大幅变化）⇒ 先退回单份，等 T2.2 真正异步执行时
+    /// 再连同"渲染线程自己持有命令缓冲"一起做（那时才真正需要多份）。按值交接本身已满足铁律 2：
+    /// 载荷按值携带"指针 + 相机 + 时长"，不再按引用捕获游戏线程的栈变量。
+    FrameSceneSnapshot m_Snapshot;
+    [[nodiscard]] FrameSceneSnapshot&       SnapBuf()       { return m_Snapshot; }
+    [[nodiscard]] const FrameSceneSnapshot& SnapBuf() const { return m_Snapshot; }
+
 
     // 阶段 1 附录 E（E-2）：网格注册表。
     // 【为什么每帧刷新】骨骼缓冲会重建（N 帧延迟队列后新建）⇒ 只登记一次会留下过期指针；

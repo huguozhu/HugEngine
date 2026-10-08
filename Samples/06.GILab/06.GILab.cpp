@@ -872,8 +872,10 @@ int main() {
     // 【阶段 0 的语义】`RenderThread` 是**壳**：`SubmitAndPump` 在调用线程上立即执行命令，
     // 因此帧序、录制顺序与结果与直接调用逐像素一致（判据即 `cmp_dumps` 前后相同）。
     // 三态模式（T0.5）决定是否走队列：`SingleThreaded` 走旧路径，另外两种模式走队列。
-    // 【已知并记录的偏离】阶段 0 的命令载荷仍按引用捕获；铁律 2 要求按值捕获，这要等
-    // 阶段 1 的 `FrameSceneSnapshot` 把渲染输入变成不可变数据后才能真正满足（T1.2/T2.4）。
+    // 【T2.4 已落地：载荷按值捕获】命令载荷现在只携带"本帧渲染输入"的**值**（管线指针 + 本帧槽位
+    // 快照指针 + 命令缓冲 + 相机/时长的值拷贝），不再按引用捕获游戏线程的栈变量 —— 铁律 2 由此满足。
+    // 剩下的"真正异步"（渲染线程自己持有命令缓冲、自己 Submit/Present）是 T2.2，它把
+    // `SubmitAndPump` 换成"只发布"、由渲染线程的循环 Pump。
     render::RenderCommandQueue renderQueue(rhi::kMaxFramesInFlight);
     render::RenderThread       renderThread(renderQueue);
     render::FrameScheduler     frameScheduler(renderQueue, renderThread);
@@ -1007,11 +1009,29 @@ int main() {
         {
             const auto t0 = std::chrono::steady_clock::now();
             if (useRenderQueue) {
-                // 阶段 0：入队 → 发布（含背压语义）→ 壳在本线程立即执行并回收票据。
+                // 【T2.4：载荷**按值**捕获（铁律 2）】此前这里是 `[&]` 按引用捕获 `curPipeline` /
+                // `cmdList` / `camCtrl` —— 队列一旦真正异步执行，那些引用随时可能被游戏线程改写。
+                // 现在把整帧渲染输入收进一个 POD 载荷按值交接：
+                //   · `pipeline`：样例生命周期内稳定的管线指针；
+                //   · `snapshot`：指向管线**本帧槽位**的快照（三槽轮转 + 队列背压 ⇒ 不会被提前复用）；
+                //   · `camera` / `deltaTime`：按值拷贝（不可变数据）；
+                //   · `cmd`：本帧命令缓冲（T2.2 起由渲染线程持有，届时这里只留帧槽位）。
+                struct FrameRenderPayload {
+                    render::IRenderPipeline*          pipeline = nullptr;
+                    const render::FrameSceneSnapshot* snapshot = nullptr;
+                    rhi::IRHICommandList*             cmd      = nullptr;
+                    render::CameraData                camera{};
+                    float                             deltaTime = 0.0f;
+                };
+                const FrameRenderPayload payload{
+                    curPipeline, &curPipeline->GetFrameSnapshot(), cmdList.get(),
+                    camCtrl.GetCamera(), deltaTime
+                };
+                // 阶段 0/T2.4：入队 → 发布（含背压语义）→ 壳在本线程立即执行并回收票据。
                 // 阶段 2 起把 `SubmitAndPump` 换成"只提交"，由渲染线程的循环去 Pump。
                 renderQueue.BeginFrame();
-                renderQueue.Enqueue([&](render::RenderThreadContext&) {
-                    curPipeline->Render(cmdList.get(), curPipeline->GetFrameSnapshot(), camCtrl.GetCamera());
+                renderQueue.Enqueue([payload](render::RenderThreadContext&) {
+                    payload.pipeline->Render(payload.cmd, *payload.snapshot, payload.camera, payload.deltaTime);
                 });
                 frameScheduler.SubmitAndPump();
             } else {
