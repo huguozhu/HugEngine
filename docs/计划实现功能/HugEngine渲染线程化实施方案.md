@@ -336,7 +336,7 @@ private:
 | **T0.2** | 清点并登记"帧内同步 RHI 调用"（上传 / 读回 / 等待型提交），产出清单（文件:行号 + 所属阶段） | 只读盘点，不改代码 | 清单里每条都标注"迁到渲染线程 / 改为异步 / 保留（加载期）" |
 | **T0.3** | `RenderCommandQueue` + `RenderThread` **壳实现**：游戏线程入队，主线程（当前线程）消费——**行为完全等价于现在** | `Engine/Render/Threading/`（新增） | 样例帧序与改前一致；`cmp_dumps` 前后 dump 逐像素相同 |
 | **T0.4** | 帧票据与背压骨架（`FrameTicket` + 在飞帧计数），上限 `kMaxFramesInFlight` | 同上 | 人为把上限设为 1 时能观察到游戏线程阻塞（可测） |
-| **T0.5** | `EngineConfig` 新增 `enableRenderThread`（默认 **false**）与 `renderThreadSpinWaitUs` | `Engine/Core/Core/Engine.h` | 编译期与运行期开关均可切换；关闭时走旧路径 |
+| **T0.5** | `EngineConfig` 新增**三态渲染线程模式** `RenderThreadingMode`（`SingleThreaded` 默认 / `RenderThread` / `RenderThreadAndRHI`，取代原 `enableRenderThread` 布尔 —— 见下方说明）与 `renderThreadSpinWaitUs`；运行期可切换（`SetRenderThreadingMode`）+ `HE_RENDER_THREADING_MODE` 覆盖 | `Engine/Core/Core/RenderThreadingMode.h`（新增）、`Engine/Core/Core/Engine.{h,cpp}` | 编译期与运行期开关均可切换；关闭时走旧路径 |
 | **T0.6** | **（为 §12 预埋，可选但强烈建议）** 定义 RHI 命令流的**记录端契约**与 `RHICommand` 载荷形态（类型擦除 + 内联参数），暂不改变执行方式 | `Engine/RHI/RHI/RHICommandList.h`（新增） | 契约评审通过；本轮不接入生产路径，只落头文件与单测 |
 | **T0.7** | **（为 §12 预埋，可选但强烈建议）** 资源句柄化：新增 `RHIBufferHandle` / `RHITextureHandle`（含 generation），并让新代码优先用句柄；`unique_ptr<IRHIBuffer>` 保留为兼容层 | `Engine/RHI/RHI/RHI.h`、`Engine/RHI/RHI/RHIHandles.h`（新增） | 新代码不再新增 `unique_ptr<IRHIBuffer>` 成员（grep 断言）；旧代码可渐进迁移 |
 
@@ -440,7 +440,13 @@ private:
 | **R6 ImGui 竞态** | 编辑器偶发崩溃/花屏 | 阶段 4 才动 UI；期间 UI 与场景同在渲染线程录制 | 编辑器单独走旧路径 |
 | **R7 范围蔓延**（顺手加 RHI 线程/多帧并行） | 阶段 2 迟迟不收敛 | **本文 §1.4 明确不做**；任何扩展先开新文档 | — |
 
-**总开关**：`EngineConfig::enableRenderThread = false` 必须始终可用，且与 `true` 路径共享同一套快照与命令队列代码（差异只在"谁来消费"）。
+**总开关**：`EngineConfig::renderThreadingMode` 必须始终可回退到 `RenderThreadingMode::SingleThreaded`（默认值），
+且三种模式共享同一套快照与命令队列代码（差异只在"谁来消费"）。
+> **实现口径变更（2026-09-24，T0.5 落地时）**：原方案写的是布尔 `enableRenderThread`；实施时改为**三态参数**
+> `RenderThreadingMode{SingleThreaded, RenderThread, RenderThreadAndRHI}`。理由：该参数同时决定 §12 附录 C 的
+> 三线程升级路径，一次定清可以避免以后再改配置语义；且"关 = 就地执行 / 开 = 另一根线程执行"这种两段式开关
+> 本就在 §12.8 的 A2 里要再引一个 `enableRHIThread`，改成三态后单参数即可覆盖三种形态。
+> 运行期入口：`SetRenderThreadingMode()` / 环境变量 `HE_RENDER_THREADING_MODE`（`0|1|2` 或名称；非法值只告警、保持原模式，不静默退回）。
 
 ---
 
@@ -474,7 +480,17 @@ private:
 - [ ] T0.2 帧内同步 RHI 调用清点清单
 - [ ] T0.3 `RenderCommandQueue` + `RenderThread` 壳实现（行为等价）
 - [ ] T0.4 帧票据与背压骨架
-- [ ] T0.5 `EngineConfig::enableRenderThread` / `renderThreadSpinWaitUs`
+- [x] T0.5 `EngineConfig::enableRenderThread` / `renderThreadSpinWaitUs`
+  - **实施口径**：改为三态参数 `RenderThreadingMode{SingleThreaded=0, RenderThread=1, RenderThreadAndRHI=2}`
+    （单线程渲染 / 游戏线程+渲染线程 / 游戏线程+渲染线程+RHI 线程），默认 `SingleThreaded`；
+    `EngineConfig::renderThreadingMode` + `renderThreadSpinWaitUs`（默认 0 = 不自旋，空闲不烧核），
+    并提供 `UsesRenderThread()` / `UsesRHIThread()` 判据。
+  - 落地：`Engine/Core/Core/RenderThreadingMode.h`（枚举 + 规范名 + 解析 + 进程级读写）、
+    `Engine/Core/Core/Engine.{h,cpp}`（配置字段 + `Initialize` 落地 + 环境变量覆盖 + 非法值告警）。
+  - 实测（2026-09-24）：单测 **341 例 / 71345 断言全通过**（新增 6 例：默认值、三态×判据真值表、
+    规范名、解析（数字/名称/别名/大小写）、非法输入必须 `nullopt`、进程级读写一致性）；
+    `06.GILab` 实跑三种配置的日志分别为 `渲染线程模式 = game+render+rhi（2）`、
+    非法值 `triple` → 告警并保持 `single-threaded`、不设环境变量 → `single-threaded（0）`，28 个转储正常。
 - [ ] T0.6 **（预埋，见 §12）** RHI 命令流记录端契约 + `RHICommand` 载荷形态
 - [ ] T0.7 **（预埋，见 §12）** 资源句柄化（`RHIBufferHandle` / `RHITextureHandle` + generation）
 - [ ] T1.1 `FrameSceneSnapshot` 定义（与 `ShaderTypes.slang` 对齐 + `static_assert`）
