@@ -1592,7 +1592,9 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
         deferredPipeline.GetProfilerPanel().Draw();
 
         // ---- 命令 2：ImGui 录制 + 调试绘制 + Submit + 探测读回 + Present ----
-        auto recordUiAndPresent = [&]() {
+        // 【按值携带】帧号与转储判定由游戏线程算好后**按值**传进来（绝不读外层可变变量 ——
+        // 命令可能在渲染线程执行，读外层变量会拿到下一帧已改写的值）。
+        auto recordUiAndPresent = [&](u64 renderFrameIndex, bool dumpThisFrame) {
             // --- ImGui（LOAD 保留 ToneMap 输出）---
             cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
                 rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
@@ -1624,7 +1626,7 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
             // 目标分三类：
             //   hdr / albedo  —— 合成结果与接收端反照率（做差 + 除 albedo 后即得 E/π）
             //   provN_raw/final —— 各有效 Provider 的原始输出 / 降噪后输出（定位"某源为 0"发生在哪一级）
-            if (g_DumpGI && !g_DumpDone && frameIndex >= g_DumpFrame) {
+            if (dumpThisFrame) {
                 auto addTarget = [&](const String& name, rhi::IRHITexture* tex) {
                     if (!tex) return;
                     // 【2026-09-24 诊断】按纹理**实际格式**算 bytes/px：此前写死 8 B（RGBA16F），
@@ -1861,52 +1863,61 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
             // 垂直同步必须与创建时一致：只改 SwapChainDesc 而这里仍传 true，帧率照样被锁在刷新率
             // （步骤 37 第一次测就是这么被误导的：pass 合计 14 ms 却只有 19 fps）。
             swapchain->Present(!noVsync);
-            frameIndex++;
-
-            // 【步骤 37 / L6 帧时判据】周期性打印**真实墙钟帧率**与 CPU 侧耗时。
-            // 只在 `HE_NO_VSYNC=1` 时帧率才有判据意义（vsync 打开时它恒等于刷新率，会被误读成"达标"）。
-            {
-                const double cpuMs = std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - cpuT0).count();
-                static double s_accMs = 0.0;
-                static double s_accCpuMs = 0.0;
-                static u32    s_n = 0;
-                s_accMs += (double)deltaTime * 1000.0;
-                s_accCpuMs += cpuMs;
-                ++s_n;
-                // 【测量确定性】转储/读数之前先把在飞的"命令 2"等掉：流水线化后它可能还没做完，
-                // 否则读回的是"少一帧"的状态（表现为转储差异与 pass/VUID 计数偏移）。
-                if (useRenderQueue && lastAsyncFrame != UINT64_MAX) {
-                    // 【必须有超时】这是诊断/转储路径，不是背压点：无界等待会在"该帧因故未被回收"时
-                    // 永久挂住（实测出现过一次 300 秒未退出）。超时只告警、继续转储。
-                    if (!renderQueue.WaitFrameRetired(lastAsyncFrame, 5000u))
-                        HE_CORE_WARN("06.GILab：转储前等待在飞渲染命令超时（帧 {}）", lastAsyncFrame);
-                    lastAsyncFrame = UINT64_MAX;
-                }
-                if (g_DumpGI && s_n >= 120u) {
-                    const double wallMs = s_accMs / (double)s_n;
-                    const double cm     = s_accCpuMs / (double)s_n;
-                    const double pm     = s_accPipelineMs / (double)s_n;
-                    // 步骤 37：管线 CPU 侧的三段分解（重建帧图 / 编译 / 执行）——判断该修哪一段
-                    double bMs = 0.0, cMs = 0.0, eMs = 0.0;
-                    if (auto* dp = dynamic_cast<render::DeferredPipeline*>(curPipeline)) {
-                        bMs = dp->GetCpuBuildMs(); cMs = dp->GetCpuCompileMs(); eMs = dp->GetCpuExecMs();
-                    }
-                    HE_CORE_INFO("帧率读数（步骤 37）: 最近 {} 帧 墙钟 {:.3f} ms ⇒ {:.1f} fps；CPU 侧 {:.3f} ms"
-                                 "（{:.0f}% 的帧时，其中管线 Render {:.3f} ms / 其余 {:.3f} ms）⇒ 受限方 = {}"
-                                 "（vsync {}；pass 合计见【帧预算】行）",
-                                 s_n, wallMs, wallMs > 0.0 ? 1000.0 / wallMs : 0.0, cm,
-                                 wallMs > 0.0 ? 100.0 * cm / wallMs : 0.0, pm, cm - pm,
-                                 cm > wallMs * 0.8 ? "CPU" : "GPU/呈现",
-                                 noVsync ? "关" : "开（帧率被锁刷新率，不作判据）");
-                    HE_CORE_INFO("   管线 CPU 分解（上一帧）: 重建帧图 {:.3f} ms / 编译 {:.3f} ms / 执行(录制+提交) {:.3f} ms",
-                                 bMs, cMs, eMs);
-                    s_accMs = 0.0; s_accCpuMs = 0.0; s_accPipelineMs = 0.0;
-                    s_n = 0;
-                }
-            }        };
+        };
         // 命令 2 只发布：游戏线程随即进入下一帧的准备（与渲染线程重叠）
-        submitRender(recordUiAndPresent, /*waitForCompletion=*/false);
+        // ---- 游戏线程记账（这些是游戏线程自己的循环状态，**不能**放进渲染命令）----
+        // 【顺序很关键】先冻结本帧命令该看到的帧号（原判定发生在命令里、`frameIndex++` **之前**），
+        // 再自增；写反会让转储/读数早一帧。
+        const u64  renderFrameIndex = frameIndex;
+        const bool dumpNow = (g_DumpGI && !g_DumpDone && renderFrameIndex >= g_DumpFrame);
+        frameIndex++;
+
+        // 【步骤 37 / L6 帧时判据】周期性打印**真实墙钟帧率**与 CPU 侧耗时。
+        // 只在 `HE_NO_VSYNC=1` 时帧率才有判据意义（vsync 打开时它恒等于刷新率，会被误读成"达标"）。
+        {
+            const double cpuMs = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - cpuT0).count();
+            static double s_accMs = 0.0;
+            static double s_accCpuMs = 0.0;
+            static u32    s_n = 0;
+            s_accMs += (double)deltaTime * 1000.0;
+            s_accCpuMs += cpuMs;
+            ++s_n;
+            // 【测量确定性】转储/读数之前先把在飞的"命令 2"等掉：流水线化后它可能还没做完，
+            // 否则读回的是"少一帧"的状态（表现为转储差异与 pass/VUID 计数偏移）。
+            if (useRenderQueue && lastAsyncFrame != UINT64_MAX) {
+                // 【必须有超时】这是诊断/转储路径，不是背压点：无界等待会在"该帧因故未被回收"时
+                // 永久挂住（实测出现过一次 300 秒未退出）。超时只告警、继续转储。
+                if (!renderQueue.WaitFrameRetired(lastAsyncFrame, 5000u))
+                    HE_CORE_WARN("06.GILab：转储前等待在飞渲染命令超时（帧 {}）", lastAsyncFrame);
+                lastAsyncFrame = UINT64_MAX;
+            }
+            if (g_DumpGI && s_n >= 120u) {
+                const double wallMs = s_accMs / (double)s_n;
+                const double cm     = s_accCpuMs / (double)s_n;
+                const double pm     = s_accPipelineMs / (double)s_n;
+                // 步骤 37：管线 CPU 侧的三段分解（重建帧图 / 编译 / 执行）——判断该修哪一段
+                double bMs = 0.0, cMs = 0.0, eMs = 0.0;
+                if (auto* dp = dynamic_cast<render::DeferredPipeline*>(curPipeline)) {
+                    bMs = dp->GetCpuBuildMs(); cMs = dp->GetCpuCompileMs(); eMs = dp->GetCpuExecMs();
+                }
+                HE_CORE_INFO("帧率读数（步骤 37）: 最近 {} 帧 墙钟 {:.3f} ms ⇒ {:.1f} fps；CPU 侧 {:.3f} ms"
+                             "（{:.0f}% 的帧时，其中管线 Render {:.3f} ms / 其余 {:.3f} ms）⇒ 受限方 = {}"
+                             "（vsync {}；pass 合计见【帧预算】行）",
+                             s_n, wallMs, wallMs > 0.0 ? 1000.0 / wallMs : 0.0, cm,
+                             wallMs > 0.0 ? 100.0 * cm / wallMs : 0.0, pm, cm - pm,
+                             cm > wallMs * 0.8 ? "CPU" : "GPU/呈现",
+                             noVsync ? "关" : "开（帧率被锁刷新率，不作判据）");
+                HE_CORE_INFO("   管线 CPU 分解（上一帧）: 重建帧图 {:.3f} ms / 编译 {:.3f} ms / 执行(录制+提交) {:.3f} ms",
+                             bMs, cMs, eMs);
+                s_accMs = 0.0; s_accCpuMs = 0.0; s_accPipelineMs = 0.0;
+                s_n = 0;
+            }
+        }
+        // ---- 入队命令 2（**按值捕获**帧号与转储判定：命令可能在渲染线程执行）----
+        submitRender([&, renderFrameIndex, dumpNow]() {
+            recordUiAndPresent(renderFrameIndex, dumpNow);
+        }, /*waitForCompletion=*/false);
 
 
     }
