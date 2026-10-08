@@ -627,6 +627,25 @@ private:
     **已知限制**：索引复用后旧索引会指向新条目 ⇒ 将来把条目换成带 generation 的 `RHIBufferHandle`
     （与 §12 A-3 对齐）。单测 4 例；实测 **388 例 / 71729 断言全通过**。
     下一步 **E-2**：骨骼上传改遍历快照的骨骼条目 + 用 `meshIndex` 从注册表取缓冲。
+  - **E-2 已完成（2026-09-24）**：
+    - 前置：`MeshComponent::meshIndex` 字段（注册时回填）；`CollectObjectItem` 透传它（+ 断言钉子）；
+      `MeshRegistryEntry::skinMatrixBuffer`（骨骼上传的**写入目标**，只登记顶点/索引缓冲不够）；
+      注册改为**每帧刷新**（骨骼缓冲会重建 ⇒ 一次性注册会留过期指针；`Register` 同 key = 更新、索引不变）
+      + 语义钉子测试；`SnapshotDrawItem::sourceEntity`（逐实体状态机的对齐依据）。
+    - 本体：`ForwardPipeline` 的骨骼循环按 `sourceEntity` 取 `m_Snapshot.skinMatrices` 切片作为**矩阵来源**，
+      三处使用点改用该切片、边界显式退回组件；**缓冲生命周期（脏标记/容量/扩建/bindless/退役队列）
+      完全不动**（属渲染侧资源管理，将来归 T2.3）。
+    - 为让快照在骨骼循环之前完整，`ForwardPipeline::Render` 增加了 `BuildObjects` 调用。
+    - 判据说明（如实）：该路径**没有转储 harness**（`03.Sponza-Forward` 无 dump 脚本），因此是
+      「编译 + 单测 + 同帧同源论证」；`BuildObjects` 先于该循环、中间无游戏 tick ⇒ 数据逐位相同。
+  - **E-3 已做一半（2026-09-24）**：① 把「组件 → `PBRMaterial`」10 项映射从 `SceneRenderer::Prepare`
+    抽成 `SceneSnapshotBuilder::MakePBRMaterial`（**唯一实现**，两侧共用，避免将来漂移），并加**逐字段
+    参考比对**测试（旧映射逐行转写）；② `CollectObjectItem` 用 `if constexpr (is_base_of_v<MeshComponent,…>)`
+    在**收集侧**调用 `FillObjectData(item.object, MakePBRMaterial(comp))` —— 材质字段在收集侧算完，
+    渲染侧因此不必拿 `MeshComponent*`，也不必把 5 条纹理路径搬进快照。
+    **E-3 后半待做**：`SceneRenderer::Prepare` 改为消费快照（`entry` 去掉 `MeshComponent*`、材质取
+    `item.object`、`DrawItem` 用 `meshIndex` 从注册表取缓冲；**剔除仍留渲染线程**），判据为
+    逐字段/逐位 + `06.GILab` 28 个转储粗筛。
   - **T1.2b 待做**：物体收集（`GPUScene::Collect` 的遍历 + 材质参数 + 间接绘制参数），
     以及本任务退出判据要求的"与旧路径并行跑一帧、逐字段比对（`HE_SNAPSHOT_VERIFY`）" ——
     该判据在 T1.3 让管线消费快照时最自然（可直接对比 UBO/SSBO 字节）。
