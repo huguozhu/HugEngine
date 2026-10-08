@@ -93,6 +93,31 @@ TEST_CASE("MeshRegistry：注销后旧索引解析为空，且索引可被复用
     CHECK(reg.Find(ia) != nullptr);
 }
 
+TEST_CASE("MeshRegistry：每帧刷新语义（骨骼缓冲重建时同 key 更新，索引不变）") {
+    // E-2② 依赖这条语义：骨骼缓冲会被重建（RetireBoneBuffer 走 N 帧延迟队列后新建），
+    // 注册方因此每帧用同一个 key 调 Register 刷新条目 —— 索引必须保持稳定，
+    // 否则快照里的 meshIndex 会在缓冲重建的当帧失效。
+    MeshRegistry reg;
+    int key = 0;
+
+    MeshRegistryEntry e;
+    e.vertexBuffer     = FakeBuffer(0x1000);
+    e.skinMatrixBuffer = FakeBuffer(0x2000);
+    e.indexCount       = 24;
+    const u32 first = reg.Register(&key, e);
+
+    // 模拟"缓冲重建"：同一 key、新的骨骼缓冲指针
+    e.skinMatrixBuffer = FakeBuffer(0x3000);
+    const u32 second = reg.Register(&key, e);
+
+    CHECK(second == first);                       // 索引稳定 ⇒ 快照里的 meshIndex 继续有效
+    CHECK(reg.Count() == 1u);                     // 重复注册不新增条目
+    const auto* r = reg.Find(first);
+    REQUIRE(r != nullptr);
+    CHECK(r->skinMatrixBuffer == FakeBuffer(0x3000));   // 指向新缓冲，不是过期指针
+    CHECK(r->vertexBuffer == e.vertexBuffer);           // 其它字段照旧
+}
+
 TEST_CASE("MeshRegistry：Clear 复位（保留哨兵）") {
     MeshRegistry reg;
     int key = 0;
