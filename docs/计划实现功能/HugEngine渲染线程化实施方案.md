@@ -1045,6 +1045,29 @@ private:
       完全相同（**矩阵走快照、缓冲生命周期留渲染侧**，按 `meshIndex` 索引；注意
       `MeshRegistryEntry::skinMatrixBuffer` 现在指向组件缓冲，迁移后应指向渲染侧表里的那份）。
       连同上面第 1 条的 `FrameSnapshotAssembler` 设计一起做，才是"帧入口收快照"的完整落地。
+    - **第 5 批之一（已提交）**：把**骨骼缓冲状态搬离组件** —— 这是"管线帧入口收快照"的最后一块
+      前置（`ForwardPipeline::RenderScene` 的骨骼循环正是靠它才必须收 `World&`）。
+      · 新增 `render::SkinnedMeshBuffers`（`Engine/Render/Pipeline/`）：逐 `meshIndex` 的骨骼 SSBO、
+        容量、退役队列、已上传版本、`ownerEntity`；`BeginFrame` 推进退役 + 回收上帧未见的条目；
+        `Upload(device, meshIndex, ownerEntity, mats, count, version)` —— 与第①段的
+        `InstanceCuller::InstanceState` **同构**（这个仓库"逐网格 GPU 缓冲状态搬离组件"的标准做法）。
+      · 组件侧只留数据源：`SkeletalMeshComponent` 去掉 `boneBuffer`/`boneBufferCapacity`/
+        `bBonesDirty`/`boneSSBOHandle`/`retiredBoneBuffers`/`AdvanceRetireQueue`/`RetireBoneBuffer`，
+        改为 `u32 boneMatrixVersion`（`SkeletalMeshSystem` 每次重算骨骼矩阵 `++`）。
+      · 快照条目新增 `skinMatrixVersion` 与 `bHasSkeleton`（= 旧骨骼循环的 `sm.skeleton` 判据），
+        由 `AppendSkinMatrices` 一次取齐；Forward 的骨骼循环改为遍历 `meshClass == Skeletal` 的条目
+        （矩阵取扁平切片、缓冲按 `meshIndex` 查注册表、SSBO 由状态表管理）⇒ **循环内不再有任何世界访问**。
+      · `MeshRegistryEntry::skinMatrixBuffer` 删除（write-only 字段、只有测试读它，且它指向的组件缓冲
+        已不存在）。
+      · 判据：单测 **398 例 / 71841 断言**；`02.Cube`（唯一含骨骼网格的样例）首帧统计与上一批二进制
+        **完全一致**（`RenderScene: 25 draws, 8150 tris, 4 lights` —— 该计数含每帧的骨骼绘制 +1）、
+        阴影级联 0 绘制物体数 12 一致、`VUID=0`；`06.GILab` 冒烟同批双跑 **4539 像素**、
+        与上一批二进制对比 **0 像素**（28 个转储目标逐位一致）。
+      > **帧内同步 RHI 调用 380 → 383 又是归属漂移**（与第①段同款）：这 3 处
+      > （`CreateBuffer` / `Map` / `desc.initialData`）是从 `ForwardPipeline.cpp` 原地搬过来的
+      > 同一批调用，新文件里启发式的"所属函数名"落到 `BeginFrame`，而不再落到名字含 `Upload`
+      > 的函数上。调用点一个没变。**附录 B1 不变（43）**——本批消除的是 B1 量不到的
+      > **函数体内**世界依赖，正是它让下一批的签名改动能真的落地。
 - [x] T2.1 `RenderThread` 实现（帧节奏 + 休眠策略）—— ✅ 完成（真起线程 + 归属判断 + 停止排空；4 例单测。cv 唤醒并入 T2.6）
 - [ ] T2.2 设备与交换链归渲染线程（Acquire/Present 迁移）
 - [ ] T2.3 `ResourceCreationService`（步 1 同步转发）
