@@ -1015,7 +1015,78 @@ python Tools\check_threading.py --gate           # 闸门：帧内命中 > 0 时
 
 ---
 
-> **文档版本**：v1.2（2026-09-24）
+---
+
+## 14. 附录 E：mesh 注册表设计草案（T1.2c / T1.4 骨骼消费侧的前置）
+
+> **为什么单独一节**：T1.2c（材质参数快照化）与骨骼消费侧都卡在同一件事上 —— 渲染侧目前通过
+> **`MeshComponent*` 指针**拿到顶点/索引缓冲与材质数据（`SceneRenderer::Prepare` 的 `DrawItem`、
+> `ForwardPipeline` 的骨骼上传），而**快照不允许带指针**（§4.2 的硬约束）。本节把这块的设计一次定清，
+> 后续按它实施即可；实施前**不需要**再改口径。
+
+### 14.1 目标与边界
+
+- **目标**：让"快照里的 `meshIndex`"成为渲染侧取网格资源的唯一入口 ⇒ 删除渲染期对
+  `MeshComponent*` 的依赖（这正是附录 B1 里 82 处的**主要来源**）。
+- **不做**：不改顶点布局、不改绘制路径的绑定顺序、不改实例化/蒙皮的数据来源（它们已经索引化或另有入口）。
+
+### 14.2 API 草案
+
+```cpp
+// Engine/Render/Threading/MeshRegistry.h —— 渲染侧网格注册表（阶段 1）
+namespace he::render {
+
+/// 一条网格记录（只存**渲染侧可达**的值；不持有组件所有权）
+struct MeshRegistryEntry {
+    rhi::IRHIBuffer* vertexBuffer = nullptr;   // 顶点缓冲（所有权仍在组件/资产，注册表只借指针）
+    rhi::IRHIBuffer* indexBuffer  = nullptr;
+    u32  indexCount = 0;                       // 索引数（间接绘制参数的兜底来源）
+    u32  materialID = 0;                       // bindless 纹理基索引（与组件同源）
+    bool instanced  = false;                   // 实例化网格：顶点由实例路径提供
+};
+
+class MeshRegistry {
+public:
+    /// 注册或**更新**（同一 key 重复注册 = 更新，用于组件重建缓冲的场景）；返回从 1 起的 meshIndex
+    u32  Register(const void* key, const MeshRegistryEntry& entry);
+    /// 注销：索引回到空闲表，且**旧 meshIndex 从此解析为 nullptr**（悬挂引用立刻可见，而不是指错资源）
+    void Unregister(const void* key);
+    [[nodiscard]] const MeshRegistryEntry* Find(u32 meshIndex) const;   // 越界/已注销 ⇒ nullptr
+    [[nodiscard]] u32 Count() const;
+    void Clear();
+};
+
+} // namespace he::render
+```
+
+### 14.3 生命周期规则（必须遵守，否则又是一类悬挂）
+
+1. **谁注册**：持有组件/资产的一侧（加载期或组件创建时）；`key` 用组件地址，注册表**只借不拥有**缓冲。
+2. **禁止帧内注销**：注销要在"确认渲染侧不再引用该索引"之后（沿用 `FrameRetireQueue` 的 N 帧延迟思路）；
+   帧内注销会让当帧已录制的绘制指到空记录 ⇒ 与"快照按帧轮换"同一类问题。
+3. **索引从 1 起**，0 保留为"未注册"哨兵（与 `RHIBufferHandle` 的约定一致）。
+4. 与 **T0.7 句柄化**的关系：注册表内部将来换成 `RHIBufferHandle`（而不是裸 `IRHIBuffer*`），
+   这样缓冲释放后的悬挂引用由**代次**检出；本阶段的裸指针版本是过渡（已在注释里标明）。
+
+### 14.4 两个首个消费者（实施顺序）
+
+| 步骤 | 内容 | 判据 |
+|---|---|---|
+| **E-1** | **骨骼上传**（`ForwardPipeline` 里把 `sm.boneMatrices` 写进 `sm.boneBuffer` 的那段）改为：遍历快照的骨骼条目（`skinMatrixOffset/Count`），用 `meshIndex` 从注册表取骨骼缓冲 | 与旧实现**逐位一致**（旧实现逐行转写为参考实现 + `memcmp`） |
+| **E-2** | **`SceneRenderer::Prepare`** 的材质填充：材质输入改为"收集侧跑 `FillObjectData` 并把结果放进 `SnapshotDrawItem::object`"（§9 T1.2c 已定），`DrawItem` 不再携带 `MeshComponent*`；**视锥剔除仍在渲染线程**（它只需要快照里的世界 AABB） | 同上；并核对 `06.GILab` 的 28 个转储目标 |
+| **E-3** | **第 5 处口径漂移的裁决**：`SceneRenderer` 收集 `SplineMeshComponent` 而 `GPUScene`/`BuildObjects` 不收集 —— 二者必须取其一（建议**统一为收集**，并在提交里给出前后对比） | 提交里写明"修正"还是"改版"及其依据 |
+
+### 14.5 判据与闸门
+
+- 注册表本体：单测覆盖"注册/更新/注销/复用/越界与已注销返回 nullptr"（与 `TestRHIHandles.cpp` 同款）。
+- 两个消费者：沿用本方案统一判据 —— **旧实现逐行转写为参考实现 + 逐位比较**（全帧转储只做粗筛）。
+- **B1 计数必须下降**：`Tools/check_threading.py --world-deps` 每完成一步就复测并把基线手动下调
+  （当前 82；E-1/E-2 预期各降若干处）。
+
+---
+
+> **文档版本**：v1.3（2026-09-24）
 > **性质**：实施计划（**已开工**）。开工后每完成一个任务，回到 §9 勾选并在 §6 记录实测数字。
 > **v1.1 变更**：新增 §12 附录 C「升级到 UE 三线程模型的增量路径」；阶段 0 增加预埋任务 **T0.6（RHI 命令流契约）** 与 **T0.7（资源句柄化）**，二者是 §12 所列升级路径的前置条件。
 > **v1.2 变更**：T0.5 的开关改为**三态** `RenderThreadingMode`（单线程 / 游戏+渲染 / 游戏+渲染+RHI，见 §5 与 §7 的口径说明）；新增 §13 附录 D「阶段 0 T0.2 帧内同步 RHI 调用清单」与配套脚本 `Tools/check_threading.py`（含 `--gate` 闸门模式）。
+> **v1.3 变更**：新增 §14 附录 E「mesh 注册表设计草案」（T1.2c 与 T1.4 骨骼消费侧的前置：API、生命周期规则、两个首个消费者、第 5 处口径漂移的裁决与判据）；§6 增补"阶段 0/1 累计实测"与端到端绿灯复核记录。
