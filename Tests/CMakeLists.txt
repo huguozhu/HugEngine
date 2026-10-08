@@ -16,6 +16,12 @@ add_executable(HugEngineTests
     TestThreadAffinity.cpp
     # 阶段 0 T0.5：三态渲染线程模式（默认单线程 / 判据真值表 / 解析口径 / 非法输入不静默退回）。
     TestRenderThreadingMode.cpp
+    # 阶段 0 T0.3/T0.4：命令队列、渲染线程壳、帧票据与背压。这三个 .cpp 是 **RHI-free** 的，
+    # 直接编译进测试目标（与 NaniteUpload.cpp 同一手法）—— 一旦有人把 RHI 依赖塞进
+    # Engine/Render/Threading/*，本目标会立刻编译失败。
+    TestRenderCommandQueue.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Render/Threading/RenderCommandQueue.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Render/Threading/RenderThread.cpp
     # 开关路径的钉子：`HE_DISABLE_THREAD_ASSERT` 必须在包含头文件之前定义，故单独一个 TU。
     TestThreadAffinityDisabled.cpp
     TestGameplayComponents.cpp

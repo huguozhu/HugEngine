@@ -217,6 +217,15 @@ set(RENDER_SOURCES
     Nanite/NaniteStream.cpp
     Nanite/NaniteRenderer.h
     Nanite/NaniteRenderer.cpp
+    # 渲染线程化（方案 B 阶段 0：T0.3 队列壳 + T0.4 帧票据/背压）。
+    # 【为什么这一组保持 RHI-free】阶段 0 不起线程，队列/线程壳只做"交接 + 帧票据 + 背压"，
+    # 因此它们不依赖 RHI，单测可以直接编译这几个 .cpp（与 NaniteUpload.cpp 同一手法）；
+    # 这也是一条钉子：T2.6 之前不允许把 RHI 依赖塞进这一组文件。
+    Threading/RenderThreadContext.h
+    Threading/RenderCommandQueue.h
+    Threading/RenderCommandQueue.cpp
+    Threading/RenderThread.h
+    Threading/RenderThread.cpp
 )
 
 target_sources(HugEngineRender PRIVATE ${RENDER_SOURCES})
