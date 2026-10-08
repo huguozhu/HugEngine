@@ -1342,11 +1342,17 @@ pass 指纹（`1C15AB72E688B530` / `750CC247BF8B9C3D`）未变；`06.GILab` 冒�
 - 现状：`GBufferRenderer_CPU.cpp:131` 与 `GBufferRenderer_GPU.cpp:147` 各有一处
   `world.ForEach<InstancedMeshComponent>`，其中 `ctx.instanceCuller->UploadInstanceTransforms(ctx.device, im)`
   （`InstanceCuller.h:77`）**吃组件**、内部读它的实例变换 ⇒ 这是实例路径脱离 ECS 的唯一障碍。
-- 做法：给 `InstanceCuller` 加**重载** `u32 UploadInstanceTransforms(device, const float4x4* transforms, u32 count)`
-  （原重载内部转发到它，两条路径共用一份缓冲逻辑）；快照新增
-  `std::vector<SnapshotInstance>`（`{ u32 meshIndex; u32 instanceCount; std::vector<float4x4> transforms; }`
-  或扁平数组 + 偏移，与 `skinMatrices` 同款）与 `SceneSnapshotBuilder::BuildInstances(world, out)`；
-  两处调用改为从快照取（对象条目查找**已**改成 `meshIndex` 优先，见 `8a71949`）。
+- **⚠️ 2026-09-24 复核后的修正（比原先预估更深一层）**：该函数不只"读"组件 —— 它还**改组件的 GPU 缓冲状态**：
+  `InstanceCuller.cpp:120-137` 里 `im.AdvanceRetireQueue()`、`im.instanceBuffer / instanceBufferCapacity /
+  bTransformsDirty / instanceTransforms` 都是**组件上的成员**。⇒ 只加一个"吃 `(const float4x4*, u32)` 的重载
+  **不够**，必须把**逐网格的实例缓冲状态**（缓冲、容量、脏标记、退役队列）从组件搬到渲染侧的一张表里
+  （与骨骼缓冲 E-2② 的处理同款：**矩阵数据走快照、缓冲生命周期留渲染侧**，并按 `meshIndex` 索引）。
+  组件侧只保留 `instanceTransforms`（CPU 数据源）+ 一个"数据变了"的标志。
+- 做法：快照新增 `SnapshotInstance{ u32 meshIndex; std::vector<float4x4> transforms; }`（或扁平数组 + 偏移，
+  与 `skinMatrices` 同款）与 `SceneSnapshotBuilder::BuildInstances(world, out)`；`InstanceCuller` 新增
+  "按 meshIndex 管理缓冲"的状态表 + `UploadInstanceTransforms(const float4x4*, u32 count, u32 meshIndex)`
+  重载（原重载内部转发，保持两条路径共用一份缓冲逻辑）；两处调用改从快照取（对象条目查找**已**改成
+  `meshIndex` 优先，见 `8a71949`）。
 
 **第 ② 段：`SceneRenderer::Prepare` 收快照，`DrawItem` 去指针**
 - 快照已具备：`meshIndex`（→ `MeshRegistry::Find` 取顶点/索引缓冲）、材质字段（收集侧算好）、
