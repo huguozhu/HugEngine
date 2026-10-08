@@ -20,6 +20,8 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "Pipeline/MeshBatcher.h"
 // 阶段 1 T1.3a：光源走快照（`FrameSceneSnapshot`）而不是直接遍历 ECS。
 #include "Threading/FrameSceneSnapshot.h"
+// 阶段 1 附录 E：meshIndex → 渲染侧资源 的注册表（与 Forward 对称；E-3 的消费者需要它）
+#include "Threading/MeshRegistry.h"
 
 #include "Pipeline/GBufferRenderer.h"
 #include "Pipeline/DecalPass.h"   // 任务 24：GBuffer 投影贴花
@@ -214,6 +216,11 @@ private:
     // 【为什么是成员而不是 `CollectLights` 里的局部变量】帧图的 lambda 在本函数返回**之后**才执行，
     // 局部变量的生命期不够 —— 这一条在画质阶段 0 的 TAA 抖动改动里踩过一次（`m_FrameCamera` 同理）。
     FrameSceneSnapshot m_Snapshot;
+
+    // 阶段 1 附录 E（E-2①）：网格注册表（与 ForwardPipeline 对称）。
+    // 【为什么每帧刷新】骨骼缓冲会重建（N 帧延迟队列后新建）⇒ 只登记一次会留下过期指针；
+    // `Register` 同 key = 更新（索引不变），因此每帧刷新廉价且安全。帧内只读。
+    MeshRegistry       m_MeshRegistry;
 
     // 子系统
     std::unique_ptr<IShadowSystem>       m_ShadowSystem;

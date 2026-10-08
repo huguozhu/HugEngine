@@ -1,4 +1,6 @@
 #include "Pipeline/DeferredPipeline.h"
+// 阶段 1 附录 E（E-2①）：注册点要读骨骼网格的缓冲与材质字段
+#include "Scene/SkeletalMeshComponent.h"
 #include "GI/GI_IBL.h"
 #include "GI/GI_RSM.h"
 #include "GI/GITypes.h"   // GIRegistry（可用性与降级）
@@ -696,6 +698,21 @@ void DeferredPipeline::OnResize(u32 w, u32 h) {
 void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
                                he::SceneGraph& sg, const CameraData& camera,
                                float deltaTime) {
+    // 阶段 1 附录 E（E-2①，与 ForwardPipeline 对称）：把网格资源登记/更新进注册表并回填
+    // `meshIndex`。每帧刷新是必需的（骨骼缓冲会重建 ⇒ 一次性注册会留过期指针）；
+    // 必须在构建快照之前（`SnapshotDrawItem::meshIndex` 直接取组件字段）。
+    world.ForEach<he::SkeletalMeshComponent>([&](he::Entity, he::SkeletalMeshComponent& sm) {
+        if (sm.GetIndexCount() == 0u) return;                  // 与收集口径一致：无索引不登记
+        MeshRegistryEntry entry;
+        entry.vertexBuffer     = sm.GetVertexBuffer().get();   // 只借指针，所有权仍在组件
+        entry.indexBuffer      = sm.GetIndexBuffer().get();
+        entry.skinMatrixBuffer = sm.boneBuffer.get();          // 骨骼上传的写入目标（可能每帧重建）
+        entry.indexCount       = sm.GetIndexCount();
+        entry.materialID       = sm.materialID;
+        entry.instanced        = true;                         // 骨骼网格：顶点由蒙皮路径提供
+        sm.meshIndex           = m_MeshRegistry.Register(&sm, entry);
+    });
+
     // ============================================================
     // AsyncCompute: RenderGraph 多阶段提交
     //
