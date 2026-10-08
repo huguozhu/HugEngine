@@ -669,6 +669,12 @@ private:
     单测 1 例；实测 **384 例 / 71701 断言全通过**；`02.Cube` / `04.Sponza-Deferred` 编译通过。
     **消费侧未做**：`DispatchCompute` 仍从 `CompState::comp` 取位置与参数，下一步改从快照取
     （对外接口只需多两个入参，之后 `CompState` 不必在帧内读组件指针）。
+  - **粒子消费侧闭环（2026-09-24）**：`DispatchCompute` 增加 `params` / `emitPosition` 两个入参，
+    emit 分支里约 15 处 `comp->GetParam()` / `comp->GetWorldEmitPosition()` 改为用入参；
+    `DeferredPipeline` / `PathTracingPipeline` 的模拟循环改为"先 `BuildParticles` → 遍历
+    `m_Snapshot.particles` 按 `rendererId` 派发"。**帧内模拟路径不再读 `ParticleComponent`**
+    （`CompState::comp` 仍在，但只被绘制路径的加载期语义数据使用）。
+    实测：单测 384 例 / 71703 断言；5 个目标编译通过；冒烟 4615 像素（底噪 4539）⇒ 无连带回归。
     > 查清：emit 分支每帧读**约 15 个字段**（`ParticleComponent::GetParam()` 的方向/形状/速度/寿命/
     > 尺寸/纹理行列……），只搬"位置"不够 ⇒ 快照条目已改为**整份携带 `ParticleSystemParam`**，
     > 消费侧切换因此降为机械替换（实测单测 384 例 / 71703 断言）。
