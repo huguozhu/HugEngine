@@ -1302,6 +1302,14 @@ private:
         `ShadowSystem::m_CachedSnapshot` 与帧图构建期读到的快照指针）；
     (b) 再多槽快照 + 队列在飞流水线（去掉每帧等待）；
     (c) 然后才测模式 0/1 的帧时间，并继续迁移 `02.Cube` / `07.Nanite`。
+
+  · **步骤 (a) 的第一项已落地（已提交）**：`IShadowSystem::SetFrameSnapshot(snapshot, registry)`
+    （默认空实现）+ `ShadowSystem` 实现，由两个帧图在**注册 Shadow pass 之前无条件调用**
+    （Forward 用 `SnapBuf()`、Deferred 用 `FrameSnap()`）。原先快照指针只在 `Update` 里缓存 ⇒
+    "本帧没调 Update 却调了 Render"会用到**上一帧**的指针（单份快照时被掩盖，多槽时就会读到别的槽位
+    —— 第 10 轮多槽回归的机制类）。现在绑定与是否 Update 无关、每帧必然发生。
+    **判据**：单测 399 例 / 71850 断言；四项闸门不变；06.GILab 冒烟模式 0 与已验收二进制 **0 像素**、
+    模式 1 与模式 0 **0 像素**（判据保持）。
   · **教训**：读数前必须先确认渲染线程模式 —— 模式 0（SingleThreaded）时队列不参与、渲染线程空转，
     第一次测量因此"什么都没测到"。
 - [ ] T2.4 样例循环改造（7 个样例）
