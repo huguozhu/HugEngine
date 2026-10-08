@@ -483,8 +483,24 @@ private:
     与最集中的文件（方向与量级已按文件聚合排序）。
   - 配套脚本 `Tools/check_threading.py`（`--detail` 明细、`--root` 换目录、`--gate` 闸门），
     是附录 B 各阶段退出判据的可执行版本。
-- [ ] T0.3 `RenderCommandQueue` + `RenderThread` 壳实现（行为等价）
-- [ ] T0.4 帧票据与背压骨架
+- [x] T0.3 `RenderCommandQueue` + `RenderThread` 壳实现（行为等价）
+  - 落地：`Engine/Render/Threading/{RenderThreadContext.h, RenderCommandQueue.h/.cpp, RenderThread.h/.cpp}`
+    （**RHI-free**，单测直接编译这几个 .cpp）+ `Samples/06.GILab` 接线 —— 模式 ≠ 单线程时，每帧的
+    `curPipeline->Render(...)` 经 `BeginFrame/Enqueue/Publish` 交给 `FrameScheduler::SubmitAndPump()`
+    在**调用线程**上消费；单线程模式走旧路径，两条路径共用同一份渲染代码。
+  - 判据实测（2026-09-24）：关掉已知噪声源（`HE_LUMEN_PROBE_FILTER=off`）后，单线程与壳模式两次运行的
+    **28 个转储目标全部逐位相同（`total differing pixels = 0`）**；默认滤波下差异**仅**出现在已知的
+    Lumen 屏幕探针家族（`lumen_irradiance` + 4×`prov6_*` + `hdr`），与本次改动无关。
+  - 遗留：其余 6 个样例与编辑器的接线随 **T2.4**（同源改造：循环体 → 投递 + `SubmitFrame`）。
+  - 已知并记录的偏离：阶段 0 的命令载荷仍按**引用**捕获，铁律 2 要求的"按值捕获"要等阶段 1 的
+    `FrameSceneSnapshot` 把渲染输入变成不可变数据后才能真正满足（T1.2/T2.4）。
+- [x] T0.4 帧票据与背压骨架
+  - 落地：`FrameTicket`（帧号 + 槽位）、在飞计数（发布计入 / `RetireFrame` 递减并唤醒）、
+    背压两种语义 —— `SubmitFrameBlocking`（游戏线程**唯一**允许的等待点）与 `TrySubmitFrame`
+    （在飞满时拒绝并把该帧计入丢弃数）；观测项：已发布 / 已回收 / 丢弃 / 背压等待次数。
+  - 判据实测（2026-09-24）：单测把上限设为 1 ⇒ 第 2 次非阻塞提交被拒且 `DroppedFrameCount()==1`；
+    **阻塞提交在子线程上确实等到 `RetireFrame` 才返回**（轮询观测 + 背压等待计数 = 1），
+    即 T0.4 要求的"人为把上限设为 1 时能观察到游戏线程阻塞"有可测形态。
 - [x] T0.5 `EngineConfig::enableRenderThread` / `renderThreadSpinWaitUs`
   - **实施口径**：改为三态参数 `RenderThreadingMode{SingleThreaded=0, RenderThread=1, RenderThreadAndRHI=2}`
     （单线程渲染 / 游戏线程+渲染线程 / 游戏线程+渲染线程+RHI 线程），默认 `SingleThreaded`；
