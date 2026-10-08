@@ -655,6 +655,12 @@ private:
     （PathTracing 不使用空中透视）。单测 1 例 3 子用例；实测 **382 例 / 71681 断言全通过**；
     `06.GILab` 冒烟与上一提交逐位对比 4554 像素（噪声底噪 4539）⇒ 无可测差异。
     **未做**：骨骼矩阵 / 材质参数（T1.2c）/ Decal / 粒子的快照化。
+  - **骨骼矩阵进快照（2026-09-24）**：`SnapshotDrawItem` 增加 `skinMatrixOffset`/`skinMatrixCount`，
+    `SceneSnapshotBuilder::AppendSkinMatrices` 把 `SkeletalMeshComponent::boneMatrices` 追加进
+    `FrameSceneSnapshot::skinMatrices` 扁平数组（条目只记切片），`BuildObjects` 在骨骼网格支调用。
+    单测 1 例（两段互不覆盖 / 共享数组内容 / 无骨骼不污染）；实测 **383 例 / 71691 断言全通过**。
+    **消费侧未做**：把骨骼矩阵写进 `boneBuffer` 的那段遍历仍读组件 —— 它依赖"组件 → 缓冲"的指针映射
+    即 T1.2c 待定的 **mesh 注册表**，两者一并做（届时快照已是现成数据源）。
 - [ ] T1.5 渲染期移除 World/SceneGraph 引用（grep 断言）
   - **闸门与基线已就位（2026-09-24）**：`Tools/check_threading.py --world-deps` 统计 `Engine/Render/`
     内 `World&` / `SceneGraph&` 的出现处，按**所属函数名**分"渲染期 / 加载期"（与调用点清点同一份
