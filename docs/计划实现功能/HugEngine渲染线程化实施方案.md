@@ -1123,6 +1123,36 @@ private:
       > 无法脱离组件构建；另需把 `m_BLASMap` 的键从 `MeshComponent*` 换成 `meshIndex`、
       > `HashGeometry`/`HasGeometryChanged` 改吃注册表条目、`CollectMeshList` 改为按
       > `SnapshotMeshClass ∈ {Base, Cube, Sphere}` 过滤快照，并删掉那条**无调用点**的顶点拉取死路径。
+    - **第 5 批（已提交）**：**`RTPass` 改吃快照 + 网格注册表** ⇒ **B1 24 → 17**，且
+      **组件指针依赖 渲染期 13 → 0（E-3 的收敛目标达成）**。
+      · 收集集用 `SnapshotMeshClass ∈ {Base, Cube, Sphere}` 表达（与旧实现遍历
+        `MeshComponent`/`Cube`/`Sphere` 的精确类型范围**与顺序**逐条一致）；世界矩阵直接取
+        快照条目的 `object.worldMatrix`（不再经 `SceneGraph::GetWorldMatrix`）。
+      · **BLAS 缓存键从 `MeshComponent*` 换成 `meshIndex`**；`HashGeometry`/`HasGeometryChanged`
+        改吃 `MeshRegistryEntry`（顶点数 + 索引数 + 两个缓冲的设备地址 —— 与旧哈希同口径）。
+      · `BuildSceneMaterialTexture`（11 行 × N 列材质纹理 + 三角形法线/UV 纹理）改为从快照与
+        注册表取值：材质字段取 `GPUObjectData`（收集侧 `MakePBRMaterial` + `FillObjectData` 算好，
+        与 GBuffer 路径同源，含 `textureMask`），三角形属性从注册表缓冲读。
+      · **快照新增 `SnapshotRTMaterial`**（RT/PT 专用补充）：贴图均值回落
+        （`hasMaterialAvg`/`baseColorAvg`/`metallicAvg`/`roughnessAvg`）、`ior`/`transmission`、
+        `attenuationColor`/`attenuationDistance`。这批字段**不在** `GPUObjectData` 里，缺了它们
+        RT 材质纹理无法脱离组件构建；只对 RT 可见子集填。
+      · 删除一条**无调用点**的死路径（`CreateVertexPullBuffer` + `UpdateVertexDataDescriptorSet`
+        + `RTVertexPacked`）：它把 VB/IB 打包成 32B 布局绑到 set=1，而 PT 早已改用材质纹理的法线/UV
+        查询三角形属性（`ClosestHit` 里访问 `StructuredBuffer` 已知 GPU fault）。它此前还虚增了
+        帧内同步 RHI 计数（378 而非 384）。
+      · 判据：单测 398 例 / 71841 断言；`04.Sponza-Deferred` 与 `05.Sponza-PathTracing` 各跑 20 秒
+        无 VUID、无 ERROR；`06.GILab` 冒烟同批双跑 **4539 像素**、与上一批二进制对比 **0 像素**
+        （28 个目标逐位一致）。
+      > **一条教训（已入 §9 纪律）**：上一批用脚本替换基线注释块时，替换区间跨到了
+      > `MESH_PTR_BASELINE`，把中间的 `MESH_PTR_PATTERN` 定义一起删掉了 —— `--mesh-ptrs` 会
+      > `NameError` 崩掉，而当时只跑了 `--world-deps --gate` 所以没暴露。**复测四项闸门必须带全
+      > 四个开关**，不能只看自己关心的那一个。
+      > **剩余 17 = 纯帧入口签名**：`DeferredPipeline.h` 4、`PathTracingPipeline.h` 4、
+      > `DeferredPipeline_FrameGraph.cpp` 2、`PathTracingPipeline.cpp` 2、`ForwardPipeline.{h,cpp}`
+      > 各 2、`IRenderPipeline.h` 1 —— 即 `Render`/`BuildFrameGraph` 的 `World&`/`SceneGraph&`
+      > 与接口声明本身。下一批一次改完即 **B1 = 0**：接口强制三条管线同批，而各管线的内部 helper
+      > 与前置依赖（装配器、光源收集、阴影下标解析、MeshBatcher、RTPass）都已在本轮备齐。
 - [x] T2.1 `RenderThread` 实现（帧节奏 + 休眠策略）—— ✅ 完成（真起线程 + 归属判断 + 停止排空；4 例单测。cv 唤醒并入 T2.6）
 - [ ] T2.2 设备与交换链归渲染线程（Acquire/Present 迁移）
 - [ ] T2.3 `ResourceCreationService`（步 1 同步转发）
