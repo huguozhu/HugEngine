@@ -11,6 +11,8 @@
 #include "Core/Engine.h"
 #include "Platform/Window.h"
 #include "RHI/RHI.h"
+#include "RHI/ThreadAffinity.h"      // T2.4：渲染线程启动/停止钩子认领与撤销 RHI 归属
+#include "Threading/RenderThread.h"  // T2.4：命令队列 + 渲染线程（严格握手）
 #include "Pipeline/ForwardPipeline.h"
 #include "Pipeline/CameraController.h"
 #include "Pipeline/RTPass.h"
@@ -581,14 +583,44 @@ int main() {
     // ============================================================
     // 9. 窗口调整回调
     // ============================================================
+    // 【T2.4】回调跑在游戏线程，而里面全是 RHI（交换链 Resize / SetSwapChain / 管线 OnResize）
+    // ⇒ 只置标志，真正落地放到渲染命令里（与"控件请求切换管线"同一处理方式）。
+    u32 g_PendingResizeW = 0, g_PendingResizeH = 0;
     engine.GetWindow()->SetResizeCallback([&](u32 w, u32 h) {
         // 窗口最小化时尺寸为 0，跳过所有重建（恢复时 GLFW 会再次回调）
         if (w == 0 || h == 0) return;
-        swapchain->Resize(w, h);
-        cmdList->SetSwapChain(swapchain.get());
-        pipeline.OnResize(w, h);
-        camCtrl.SetAspectRatio(static_cast<float>(w), static_cast<float>(h));
+        g_PendingResizeW = w;
+        g_PendingResizeH = h;
     });
+
+    // ============================================================
+    // 9.5 渲染线程化（T2.4）：整帧 RHI 交给渲染线程，游戏线程只做输入/相机/装配快照/UI
+    //   一帧两条命令：① Acquire + 录制（3D + 打开 ImGui 的 RP）；② ImGui 的**录制**（draw data）
+    //   + End + Submit + Present。控件（CPU 侧）留在游戏线程、位于两条命令之间 —— 帧内顺序与改动前一致。
+    // ============================================================
+    render::RenderCommandQueue renderQueue(rhi::kMaxFramesInFlight);
+    render::RenderThread       renderThread(renderQueue);
+    render::FrameScheduler     frameScheduler(renderQueue, renderThread);
+    const bool                 useRenderQueue = he::UsesRenderThread();
+    const bool                 forceShell = std::getenv("HE_RENDER_THREAD_FORCE_SHELL") != nullptr;
+    if (useRenderQueue && !forceShell) {
+        renderThread.SetSpinWaitUs(50);
+        renderThread.SetThreadStartHook([] { he::rhi::GetThreadAffinity().Claim(); });
+        renderThread.SetThreadStopHook([] { he::rhi::GetThreadAffinity().Release(); });
+        HE_CORE_INFO("03.Sponza-Forward：已起真渲染线程（整帧 RHI 归它；游戏线程按帧严格握手等待）");
+        renderThread.Start();
+    }
+    auto submitRender = [&](auto&& fn) {
+        if (useRenderQueue) {
+            renderQueue.BeginFrame();
+            renderQueue.Enqueue([&](render::RenderThreadContext&) { fn(); });
+            bool timedOut = false;
+            frameScheduler.SubmitAndWait(timedOut);
+            if (timedOut) HE_CORE_WARN("03.Sponza-Forward：等待本帧渲染命令完成超时");
+        } else {
+            fn();
+        }
+    };
 
     // ============================================================
     // 10. 主渲染循环
@@ -607,175 +639,139 @@ int main() {
 
         engine.GetWindow()->PollEvents();
 
-        if (!swapchain->AcquireNextImage())
-            continue;
+        bool frameAborted = false;   // 渲染命令里 Acquire 失败时置位
 
-        // --- 相机控制 ---
-        {
-            // 右键拖拽旋转
-            bool mouseDown = glfwGetMouseButton(glfwWin, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
+        // ---- 命令 1：Acquire + 录制（3D + 打开 ImGui 的 RP）----
+        auto recordScene = [&]() {
+            if (!swapchain->AcquireNextImage()) {
+                frameAborted = true;   // 命令可能在渲染线程跑 ⇒ 用标志代替 while 的 continue
+                return;
+            }
+            // 窗口尺寸变化的落地（回调只置了标志）
+            if (g_PendingResizeW != 0u && g_PendingResizeH != 0u) {
+                const u32 rw = g_PendingResizeW, rh = g_PendingResizeH;
+                g_PendingResizeW = g_PendingResizeH = 0u;
+                swapchain->Resize(rw, rh);
+                cmdList->SetSwapChain(swapchain.get());
+                pipeline.OnResize(rw, rh);
+            }
+            cmdList->Begin();
 
-            if (mouseDown && !rightMouseDown) {
-                rightMouseDown = true;
-                glfwGetCursorPos(glfwWin, &lastMouseX, &lastMouseY);
-                glfwSetInputMode(glfwWin, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-            } else if (!mouseDown && rightMouseDown) {
-                rightMouseDown = false;
-                glfwSetInputMode(glfwWin, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-            } else if (mouseDown && rightMouseDown) {
-                double cx, cy;
-                glfwGetCursorPos(glfwWin, &cx, &cy);
-                float dx = static_cast<float>(cx - lastMouseX);
-                float dy = static_cast<float>(cy - lastMouseY);
-                lastMouseX = cx;
-                lastMouseY = cy;
+            // 帧首推进槽位，确保 Shadow 和 Scene 使用同一帧缓冲区
+            pipeline.NextFrame();
 
-                camCtrl.Rotate(dx * 0.003f, -dy * 0.003f);
+            // Transform 动画更新（驱动 AnimationComponent → TransformComponent）
+            world.ForEach<he::AnimationComponent>([&](he::Entity e, he::AnimationComponent& anim) {
+                auto* tf = world.GetComponent<TransformComponent>(e);
+                if (tf) anim.Update(deltaTime, tf);
+            });
+
+            // 阴影子系统：CPU 端数据收集（GPU 渲染已迁移到 RenderGraph 的 ShadowCSM Pass）
+            {
+                auto* shadowSys = pipeline.GetShadowSystem();
+                shadowSys->SetRenderResources(
+                    pipeline.GetCurrentShadowObjectBuffer(),  // 阴影专用 Object Buffer
+                    pipeline.GetCurrentShadowBuffer(),
+                    pipeline.GetCurrentDescSet());
+
+                render::SubsystemContext shadowCtx;
+                shadowCtx.world       = &world;
+                shadowCtx.sceneGraph  = &sceneGraph;
+                shadowCtx.camera      = &camCtrl.GetCamera();
+                // 【阶段 1 §15.1 第③段第 2 批】渲染输入先取成快照：阴影收集要知道"哪些网格投射阴影"，
+                // 顶点/索引缓冲改为按 meshIndex 从注册表取（渲染期不再遍历世界）。
+                pipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, camCtrl.GetCamera());
+                shadowCtx.snapshot     = &pipeline.GetFrameSnapshot();
+                shadowCtx.meshRegistry = &pipeline.GetMeshRegistry();
+                shadowSys->Update(shadowCtx);
+                pipeline.GetFrameAssembler().ResolveLightShadowIndices(
+                    [&](he::Entity le) { return shadowSys->GetShadowIndex(le); });
+                pipeline.GetFrameAssembler().ReserveOnce();
+                // Render() 已迁移到 BuildFrameGraph 的 ShadowCSM Pass
             }
 
-            // T 键切换动画/手动相机模式
-            static bool tWasDown = false;
-            bool tDown = glfwGetKey(glfwWin, GLFW_KEY_T) == GLFW_PRESS;
-            if (tDown && !tWasDown) animCameraMode = !animCameraMode;
-            tWasDown = tDown;
+            // --- RenderGraph 全 Pass 编排（Shadow→IBL→RSM→HDR→Skybox→ToneMap）---
+            pipeline.Render(cmdList.get(), pipeline.GetFrameSnapshot(), camCtrl.GetCamera());
 
-            // 动画相机模式：动画播放时从 AnimationComponent 同步位置
-            if (animCameraMode && camAnim->playing) {
-                auto* camTf = world.GetComponent<TransformComponent>(camAnimEntity);
-                if (camTf) {
-                    camCtrl.SetPosition(camTf->position);
-                    float3 toOrigin = glm::normalize(float3(0, 200, 0) - camTf->position);
-                    camCtrl.SetOrientationFromForward(toOrigin);
+            // --- ToneMap + ImGui / RT 路径分支 ---
+            if (renderMode == 1 && rtPass.IsValid()) {
+                // ============================================================
+                // RT 路径：光追直写 BackBuffer（覆盖 pipeline.Render 的光栅化输出）
+                // ============================================================
+                // a) 构建/更新 AS（仅几何变更时重建 BLAS，每帧重建 TLAS）
+                rtPass.BuildAS(cmdList.get(), pipeline.GetFrameSnapshot(), pipeline.GetMeshRegistry());
+
+                // b1) 填充光源 UB（材质纹理为静态，创建时已初始化）
+                rtPass.UpdateLightBuffer(
+                    pipeline.GetCurrentLightBuffer());
+
+                // b2) 更新 RT 描述符集（set0: TLAS + BackBuffer, set1: 材质 UB）
+                rtPass.UpdateRTDescriptorSet(device.get(),
+                    swapchain->GetCurrentBackBufferView(),
+                    pipeline.GetCurrentObjectBuffer());
+
+                // c) Push Constants：相机数据 + 多采样参数
+                struct RTPushConstant {
+                    float4x4 invViewProj;
+                    float4   camPosNearFar;   // xyz=camera pos, w=near
+                    u32      sampleCount;
+                    u32      frameIndex;
+                    u32      _pad0;
+                    u32      _pad1;
+                };
+                RTPushConstant rtPC;
+                const auto& camData = camCtrl.GetCamera();
+                rtPC.invViewProj = glm::inverse(camData.GetViewProjMatrix());
+                rtPC.camPosNearFar = float4(camData.position.x, camData.position.y,
+                                            camData.position.z, camData.nearPlane);
+                rtPC.sampleCount = (u32)rtSampleCount;
+                rtPC.frameIndex  = (u32)(frameIndex % 1000000);
+
+                // d) BackBuffer 屏障：→ RT 可写
+                cmdList->PipelineBarrier(
+                    rhi::PipelineStage::BottomOfPipe,
+                    rhi::PipelineStage::RayTracingShader,
+                    rhi::ResourceState::Undefined,
+                    rhi::ResourceState::UnorderedAccess);
+
+                // e) 绑定 RT 管线 + 描述符集 + Push Constants → 发射光线
+                rtPass.BindPipeline(cmdList.get());
+                rtPass.BindDescriptorSets(cmdList.get());
+                cmdList->SetPushConstants(0, sizeof(RTPushConstant), &rtPC);
+                rtPass.TraceRays(cmdList.get(),
+                    swapchain->GetWidth(), swapchain->GetHeight());
+
+                // f) BackBuffer 屏障：RT 写完 → RenderTarget（准备 ImGui 叠加）
+                cmdList->PipelineBarrier(
+                    rhi::PipelineStage::RayTracingShader,
+                    rhi::PipelineStage::ColorAttachmentOutput,
+                    rhi::ResourceState::UnorderedAccess,
+                    rhi::ResourceState::RenderTarget);
+
+                // g) 设置光栅化 PSO 以初始化 m_CurrentRenderPass（BeginRenderPass 需要）
+                cmdList->SetPipeline(pipeline.GetPipelineState());
+
+                // h) 打开 ImGui RP（LoadOp::Load 保留 RT 输出 → ImGui 叠加在上面）
+                cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
+                    rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
+            } else {
+                // ============================================================
+                // 光栅化路径（原有逻辑不变）
+                // ============================================================
+                if (!pipeline.UseRenderGraph()) {
+                    cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
+                    pipeline.RenderToneMapPass(cmdList.get());
+                }
+                // RG 模式下 ToneMap 已关闭 RP，ImGui 需自行开 RP（LOAD 保留 ToneMap 输出）
+                if (pipeline.UseRenderGraph()) {
+                    cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
+                        rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
                 }
             }
 
-            // 键盘移动
-            render::CameraController::MoveInput moveIn;
-            moveIn.forward  = glfwGetKey(glfwWin, GLFW_KEY_W) == GLFW_PRESS;
-            moveIn.backward = glfwGetKey(glfwWin, GLFW_KEY_S) == GLFW_PRESS;
-            moveIn.left     = glfwGetKey(glfwWin, GLFW_KEY_A) == GLFW_PRESS;
-            moveIn.right    = glfwGetKey(glfwWin, GLFW_KEY_D) == GLFW_PRESS;
-            moveIn.up       = glfwGetKey(glfwWin, GLFW_KEY_E) == GLFW_PRESS;
-            moveIn.down     = glfwGetKey(glfwWin, GLFW_KEY_Q) == GLFW_PRESS;
-            moveIn.sprint   = glfwGetKey(glfwWin, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
-
-            camCtrl.Update(deltaTime, moveIn);
-        }
-
-        // --- 渲染 ---
-        cmdList->Begin();
-
-        // 帧首推进槽位，确保 Shadow 和 Scene 使用同一帧缓冲区
-        pipeline.NextFrame();
-
-        // Transform 动画更新（驱动 AnimationComponent → TransformComponent）
-        world.ForEach<he::AnimationComponent>([&](he::Entity e, he::AnimationComponent& anim) {
-            auto* tf = world.GetComponent<TransformComponent>(e);
-            if (tf) anim.Update(deltaTime, tf);
-        });
-
-        // 阴影子系统：CPU 端数据收集（GPU 渲染已迁移到 RenderGraph 的 ShadowCSM Pass）
-        {
-            auto* shadowSys = pipeline.GetShadowSystem();
-            shadowSys->SetRenderResources(
-                pipeline.GetCurrentShadowObjectBuffer(),  // 阴影专用 Object Buffer
-                pipeline.GetCurrentShadowBuffer(),
-                pipeline.GetCurrentDescSet());
-
-            render::SubsystemContext shadowCtx;
-            shadowCtx.world       = &world;
-            shadowCtx.sceneGraph  = &sceneGraph;
-            shadowCtx.camera      = &camCtrl.GetCamera();
-            // 【阶段 1 §15.1 第③段第 2 批】渲染输入先取成快照：阴影收集要知道"哪些网格投射阴影"，
-            // 顶点/索引缓冲改为按 meshIndex 从注册表取（渲染期不再遍历世界）。
-            pipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, camCtrl.GetCamera());
-            shadowCtx.snapshot     = &pipeline.GetFrameSnapshot();
-            shadowCtx.meshRegistry = &pipeline.GetMeshRegistry();
-            shadowSys->Update(shadowCtx);
-            pipeline.GetFrameAssembler().ResolveLightShadowIndices(
-                [&](he::Entity le) { return shadowSys->GetShadowIndex(le); });
-            pipeline.GetFrameAssembler().ReserveOnce();
-            // Render() 已迁移到 BuildFrameGraph 的 ShadowCSM Pass
-        }
-
-        // --- RenderGraph 全 Pass 编排（Shadow→IBL→RSM→HDR→Skybox→ToneMap）---
-        pipeline.Render(cmdList.get(), pipeline.GetFrameSnapshot(), camCtrl.GetCamera());
-
-        // --- ToneMap + ImGui / RT 路径分支 ---
-        if (renderMode == 1 && rtPass.IsValid()) {
-            // ============================================================
-            // RT 路径：光追直写 BackBuffer（覆盖 pipeline.Render 的光栅化输出）
-            // ============================================================
-            // a) 构建/更新 AS（仅几何变更时重建 BLAS，每帧重建 TLAS）
-            rtPass.BuildAS(cmdList.get(), pipeline.GetFrameSnapshot(), pipeline.GetMeshRegistry());
-
-            // b1) 填充光源 UB（材质纹理为静态，创建时已初始化）
-            rtPass.UpdateLightBuffer(
-                pipeline.GetCurrentLightBuffer());
-
-            // b2) 更新 RT 描述符集（set0: TLAS + BackBuffer, set1: 材质 UB）
-            rtPass.UpdateRTDescriptorSet(device.get(),
-                swapchain->GetCurrentBackBufferView(),
-                pipeline.GetCurrentObjectBuffer());
-
-            // c) Push Constants：相机数据 + 多采样参数
-            struct RTPushConstant {
-                float4x4 invViewProj;
-                float4   camPosNearFar;   // xyz=camera pos, w=near
-                u32      sampleCount;
-                u32      frameIndex;
-                u32      _pad0;
-                u32      _pad1;
-            };
-            RTPushConstant rtPC;
-            const auto& camData = camCtrl.GetCamera();
-            rtPC.invViewProj = glm::inverse(camData.GetViewProjMatrix());
-            rtPC.camPosNearFar = float4(camData.position.x, camData.position.y,
-                                        camData.position.z, camData.nearPlane);
-            rtPC.sampleCount = (u32)rtSampleCount;
-            rtPC.frameIndex  = (u32)(frameIndex % 1000000);
-
-            // d) BackBuffer 屏障：→ RT 可写
-            cmdList->PipelineBarrier(
-                rhi::PipelineStage::BottomOfPipe,
-                rhi::PipelineStage::RayTracingShader,
-                rhi::ResourceState::Undefined,
-                rhi::ResourceState::UnorderedAccess);
-
-            // e) 绑定 RT 管线 + 描述符集 + Push Constants → 发射光线
-            rtPass.BindPipeline(cmdList.get());
-            rtPass.BindDescriptorSets(cmdList.get());
-            cmdList->SetPushConstants(0, sizeof(RTPushConstant), &rtPC);
-            rtPass.TraceRays(cmdList.get(),
-                swapchain->GetWidth(), swapchain->GetHeight());
-
-            // f) BackBuffer 屏障：RT 写完 → RenderTarget（准备 ImGui 叠加）
-            cmdList->PipelineBarrier(
-                rhi::PipelineStage::RayTracingShader,
-                rhi::PipelineStage::ColorAttachmentOutput,
-                rhi::ResourceState::UnorderedAccess,
-                rhi::ResourceState::RenderTarget);
-
-            // g) 设置光栅化 PSO 以初始化 m_CurrentRenderPass（BeginRenderPass 需要）
-            cmdList->SetPipeline(pipeline.GetPipelineState());
-
-            // h) 打开 ImGui RP（LoadOp::Load 保留 RT 输出 → ImGui 叠加在上面）
-            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
-                rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
-        } else {
-            // ============================================================
-            // 光栅化路径（原有逻辑不变）
-            // ============================================================
-            if (!pipeline.UseRenderGraph()) {
-                cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM);
-                pipeline.RenderToneMapPass(cmdList.get());
-            }
-            // RG 模式下 ToneMap 已关闭 RP，ImGui 需自行开 RP（LOAD 保留 ToneMap 输出）
-            if (pipeline.UseRenderGraph()) {
-                cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
-                    rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
-            }
-        }
+        };
+        submitRender(recordScene);
+        if (frameAborted) continue;   // Acquire 失败：跳过本帧剩余部分
 
         imgui.BeginFrame();
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
@@ -983,16 +979,24 @@ int main() {
                 meshCount, dirLightCount, 1);
         }
         ImGui::End();
-        imgui.EndFrame(cmdList.get());
-        cmdList->EndRenderPass();  // 关闭 ImGui RP
-        cmdList->End();
+        // ---- 命令 2：ImGui 录制 + End + Submit + Present ----
+        auto recordUiAndPresent = [&]() {
+            imgui.EndFrame(cmdList.get());
+            cmdList->EndRenderPass();  // 关闭 ImGui RP
+            cmdList->End();
 
-        device->Submit(cmdList.get());
-        swapchain->Present(true);
-        frameIndex++;
+            device->Submit(cmdList.get());
+            swapchain->Present(true);
+            frameIndex++;        };
+        submitRender(recordUiAndPresent);
+
     }
 
     // 清理
+    // 【T2.4】退出前停渲染线程并撤销 RHI 归属：收尾的 WaitIdle/设备销毁仍在游戏线程
+    renderThread.Stop();
+    he::rhi::GetThreadAffinity().Release();
+
     imgui.Shutdown();
     device->WaitIdle();
 
