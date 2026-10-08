@@ -609,9 +609,14 @@ private:
     聚光归一化、`shadowRadius`），迁移先逐条保持，统一另立改动。
     等价性：把 Deferred 与 Forward 的收集逻辑**逐行转写**为两份参考实现，场景覆盖三类光源 + Rect +
     色温 + 物理照度/光强 + 关闭 + 超上限，在物理开关两态下**三口径全部逐位一致**（376 例 / 71647 断言）。
-  - **T1.3b-2 待做**：`ForwardPipeline::CollectLights` / `PathTracingPipeline::CollectLights` 的收集块
-    替换为收集器调用（选项与参考实现已就绪）。Forward 的"无光源补默认方向光"是**策略**、
-    `pc.atmosphere`（读物理天空组件）是**尚未快照化的世界读**，两者都保留在管线内（后者随 T1.4 处理）。
+  - **T1.3b-2 已完成（Forward / PathTracing 接线，2026-09-24）**：两条管线的 `CollectLights` 都改走
+    `SceneSnapshotBuilder`（Forward 显式打开三处历史口径开关；PathTracing `writeShadowRadius=true`
+    且不设阴影解析器 ⇒ `shadowIndex` 恒 -1），各新增 `m_LightSnapshot` 成员。**至此三条管线的光源
+    收集全部集中到一处**。Forward 的 `pc.atmosphere`（读物理天空组件，待 T1.4 快照化）与"无光源补
+    默认方向光"（策略）保留在管线内。
+    实测：三管线样例（03/05/06）编译通过；Deferred 冒烟与 T1.3a 之后逐位对比 = 4539 像素 = 该构建
+    同二进制两趟的噪声底噪 ⇒ 无新差异。**未做**：03/05 的实跑（缺转储对照 harness，已记为待办）。
+  - **T1.3b-3 待做**：`GPUScene::Collect` 改消费快照（依赖 T1.2b 的物体收集）。
   - **T1.3b 待做**：Forward / PathTracing 的光源收集同样改走快照（各自带历史口径开关）；
     `GPUScene::Collect` 改消费快照（依赖 T1.2b 的物体收集）。
 - [ ] T1.4 骨骼/材质/Decal/粒子快照化
