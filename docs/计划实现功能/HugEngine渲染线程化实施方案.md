@@ -746,6 +746,19 @@ private:
   - **T1.3b 待做**：Forward / PathTracing 的光源收集同样改走快照（各自带历史口径开关）；
     `GPUScene::Collect` 改消费快照（依赖 T1.2b 的物体收集）。
 - [ ] T1.4 骨骼/材质/Decal/粒子快照化 —— 🟡 骨骼 ✅ / 材质 ✅ / 粒子 ✅ / 环境 ✅ / 天空盒 ✅ / **Decal ⬜ 未做**
+  - **Decal 快照化规格（2026-09-24 已从代码读全，可直接照做）**：`DecalPass::Render` 的签名是
+    `(cmd, he::World&, he::SceneGraph&, const CameraData&, GBufferRenderer&)`，世界用在**两个**
+    `world.ForEach<DecalComponent>`：`:207`（判空：`opacity > 0`）与 `:244`（逐贴花绘制）。
+    ⇒ 新增 `SnapshotDecal`：`worldMatrix`（取代 `sg.GetWorldMatrix(e)`，见 `:249`）、`size`（`:247/:272`）、
+    `projectionDepth`（`:273`）、`rotation`（`:257`）、`baseColorFactor`（`:274`）、`metallicFactor`（`:275`）、
+    `roughnessFactor`（`:277`）、`opacity`（`:208/:245/:274`）、`materialID`（`:276/:278`）、
+    `hasBaseColorTexture`（由 `!d.baseColorTexture.empty()` 预先算好，见 `:276`）；
+    `FrameSceneSnapshot::decals` + `SceneSnapshotBuilder::BuildDecals(world, sg, out)`。
+    **注意**：Deferred 的物体收集 `excludeDecals`（贴花卡片不进 `draws`）⇒ 贴花矩阵必须由本数组单独携带。
+    消费侧 `Render(cmd, const FrameSceneSnapshot&, const CameraData&, GBufferRenderer&)`，`hasDecal` 改
+    `!snapshot.decals.empty()`；**调用点需一并改**（`grep` 定位，可能在 06.GILab 或 Deferred 帧图），
+    且 `BuildDecals` 要在其之前。预期 **B1 渲染期 81 → 79**；判据 = 构建 + 单测 + `06.GILab` 冒烟逐位
+    （含同二进制双跑对照）。
   - **起点（环境参数，2026-09-24）**：新增 `FrameSceneSnapshot::atmosphere`（xyz = 太阳方向、
     w = 浑浊度，与两个 PushConstant 的 `atmosphere` 逐字段一致）与
     `SceneSnapshotBuilder::BuildEnvironment`（找不到/未启用物理天空时复位为关闭，与旧行为逐字段一致）；
