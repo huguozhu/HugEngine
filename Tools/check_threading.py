@@ -25,7 +25,8 @@
     python Tools/check_threading.py --detail        # 附每条 file:line + 所属函数
     python Tools/check_threading.py --root Samples  # 换目录（附录 B 的 B2 查样例）
     python Tools/check_threading.py --handles       # 附带 T0.7 的资源持有者统计（基线即上限）
-    python Tools/check_threading.py --gate          # 闸门模式：帧内命中非 0（或持有者超基线）返回 1
+    python Tools/check_threading.py --world-deps     # 附带附录 B1 的世界依赖统计（阶段 1 退出目标 = 0）
+    python Tools/check_threading.py --gate          # 闸门模式：帧内命中非 0（或持有者/世界依赖超基线）返回 1
 """
 import argparse
 import os
@@ -59,6 +60,17 @@ HOLDER_PATTERN = re.compile(r"unique_ptr<\s*(?:rhi::)?IRHI(?:Buffer|Texture)")
 HOLDER_BASELINE = 277
 HOLDER_ROOTS = ("Engine", "Samples")
 HOLDER_EXTS = (".h", ".hpp", ".cpp")
+
+# --- 附录 B1 的 grep 闸门：`Engine/Render/` 里的"渲染期世界依赖" ---
+# 判据（方案 §5 阶段 1 T1.5 / 附录 B1）：渲染期函数签名不再出现 `he::World&` / `SceneGraph&`，
+# 阶段 1 退出时应为 **0**（加载期例外逐个白名单）。
+# 统计口径与调用点清点一致：只看代码行（跳过注释），按**所属函数名**判帧内/加载期。
+# 迁移期间它是**上限**（只允许下降），因此基线随每次收敛手动下调。
+# 【口径注意】同一函数的**声明与定义各算一处**（头文件 + .cpp），所以这个数大于"函数个数"；
+# 作为闸门它只需要前后一致、单调下降即可。
+WORLD_DEP_PATTERN = re.compile(r"\b(?:he::)?(?:World|SceneGraph)\s*&")
+WORLD_DEP_ROOTS = ("Engine/Render",)
+WORLD_DEP_BASELINE = 86        # 2026-09-24 实测（阶段 1 退出目标 = 0）
 
 LOAD_TIME_WHITELIST = ("Initialize", "Init", "Shutdown", "Resize", "Load", "Upload",
                        "Setup", "Construct", "OnCreate")
@@ -142,6 +154,46 @@ def count_resource_holders(repo_root):
     return total, per_file
 
 
+def count_world_deps(repo_root):
+    """统计 `Engine/Render/` 里的世界依赖（`World&` / `SceneGraph&`）：返回 (帧内, 加载期, 明细)。
+
+    为什么按"所属函数名"再分一次：方案允许**加载期**（Initialize/OnResize/加载器）访问世界，
+    要收敛的是**渲染期**。分类口径与调用点清点完全一致（同一份白名单），避免两套口径。
+    """
+    frame_total = 0
+    load_total = 0
+    per_file = {}
+    for root_name in WORLD_DEP_ROOTS:
+        root_path = os.path.join(repo_root, root_name)
+        if not os.path.isdir(root_path):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(root_path):
+            for fn in sorted(filenames):
+                if not fn.endswith(HOLDER_EXTS):
+                    continue
+                full = os.path.join(dirpath, fn)
+                try:
+                    with open(full, "r", encoding="utf-8", errors="replace") as fh:
+                        lines = fh.read().splitlines()
+                except OSError:
+                    continue
+                for idx, raw in enumerate(lines):
+                    stripped = raw.strip()
+                    if not stripped or stripped.startswith(("//", "*", "/*")):
+                        continue
+                    if not WORLD_DEP_PATTERN.search(raw):
+                        continue
+                    func = enclosing_function(lines, idx)
+                    rel = os.path.relpath(full, repo_root).replace("\\", "/")
+                    if is_load_time(func):
+                        load_total += 1
+                        per_file.setdefault(rel, {"帧内": 0, "加载期": 0})["加载期"] += 1
+                    else:
+                        frame_total += 1
+                        per_file.setdefault(rel, {"帧内": 0, "加载期": 0})["帧内"] += 1
+    return frame_total, load_total, per_file
+
+
 def main():
     ap = argparse.ArgumentParser(description="渲染线程化方案：跨线程调用点清点 / 闸门")
     ap.add_argument("--root", default="Engine/Render", help="扫描目录（默认 Engine/Render）")
@@ -151,6 +203,8 @@ def main():
                     help="闸门模式：帧内命中 > 0（或资源持有者超过基线）时退出码 1")
     ap.add_argument("--handles", action="store_true",
                     help="附带 T0.7 的资源持有者统计（`unique_ptr<IRHIBuffer/IRHITexture>`）")
+    ap.add_argument("--world-deps", action="store_true",
+                    help="附带附录 B1 的世界依赖统计（Engine/Render 内的 World& / SceneGraph&）")
     args = ap.parse_args()
 
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -207,7 +261,21 @@ def main():
             for path, count in sorted(per_file.items(), key=lambda kv: -kv[1])[:10]:
                 print("  %-70s %d" % (path, count))
 
-    if args.gate and (total_frame > 0 or holders_over):
+    world_deps_over = False
+    if args.world_deps:
+        frame_total, load_total, per_file = count_world_deps(repo_root)
+        print("\n=== 附录 B1 世界依赖（Engine/Render 内的 World& / SceneGraph&）===")
+        print("渲染期 %d 处 / 加载期 %d 处；基线 %d（阶段 1 退出目标 = 0，迁移期只允许下降）"
+              % (frame_total, load_total, WORLD_DEP_BASELINE))
+        if frame_total > WORLD_DEP_BASELINE:
+            world_deps_over = True
+        print("渲染期命中最多的文件（这些就是 T1.4/T1.5 要收敛的对象）：")
+        ranked = sorted(((p, c["帧内"]) for p, c in per_file.items() if c["帧内"] > 0),
+                        key=lambda kv: -kv[1])[:12]
+        for path, count in ranked:
+            print("  %-70s %d" % (path, count))
+
+    if args.gate and (total_frame > 0 or holders_over or world_deps_over):
         return 1
     return 0
 
