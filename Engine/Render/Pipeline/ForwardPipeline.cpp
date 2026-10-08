@@ -1,5 +1,7 @@
 #include "Pipeline/ForwardPipeline.h"
 #include "Pipeline/PhysicalLight.h"  // render::KelvinToRGB
+// 阶段 1 T1.3b：光源收集集中到快照构造器（本文件不再自己遍历 ECS 光源组件）
+#include "Threading/SceneSnapshotBuilder.h"
 
 // 物理光照单位全局开关定义（声明见 PhysicalLight.h；EngineConfig::usePhysicalLights 启动时桥接）
 namespace he::render {
@@ -556,72 +558,33 @@ void ForwardPipeline::CollectLights(
     he::GetPhysicalSkySun(world, atmSunDir, atmTurbidity);
     pc.atmosphere = float4(atmSunDir, atmTurbidity);
 
-    auto collectLight = [&](he::Entity e, he::LightComponent& lc) {
-        if (!lc.enabled) return;
-        u32 i = pc.lightCount;
-        if (i >= MAX_LIGHTS) return;
-
-        // 色温 → RGB（叠加到 color 滤镜色）
-        float3 lightColor = lc.color;
-        if (lc.colorTemperature > 0.0f) lightColor *= render::KelvinToRGB(lc.colorTemperature);
-
-        GPULight gl{};
-        gl.colorIntensity  = float4(lightColor, lc.intensity);
-        gl.shadowIndex     = m_ShadowSystem->GetShadowIndex(e);
-
-        switch (lc.type) {
-        case he::LightType::Directional: {
-            auto* dl = static_cast<he::DirectionalLight*>(&lc);
-            gl.directionType = float4(dl->direction, 0.0f);
-            gl.positionRange = float4(0, 0, 0, 0);
-            if (IsPhysicalLightEnabled(lc.illuminance)) {   // 物理模式（需全局开关）：照度 lux → 换算到渲染强度
-                gl.colorIntensity.w = lc.illuminance * kPhysicalLightExposure;
-                gl.positionRange.w   = -1.0f;
-            }
-            break;
-        }
-        case he::LightType::Point: {
-            auto* pl = static_cast<he::PointLight*>(&lc);
-            float3 pos = sg.GetWorldPosition(e);
-            gl.positionRange = float4(pos, pl->range);
-            gl.directionType = float4(0, -1, 0, 1.0f);
-            if (IsPhysicalLightEnabled(lc.luminousIntensity)) {   // 物理模式（需全局开关）：发光强度 cd → 换算到渲染强度
-                gl.colorIntensity.w = lc.luminousIntensity * kPhysicalLightExposure;
-                gl.positionRange.w   = -(pl->range);
-            }
-            break;
-        }
-        case he::LightType::Spot: {
-            auto* sl = static_cast<he::SpotLight*>(&lc);
-            float3 pos = sg.GetWorldPosition(e);
-            float r = IsPhysicalLightEnabled(lc.luminousIntensity) ? -(sl->range) : sl->range;
-            gl.positionRange = float4(pos, r);
-            gl.directionType = float4(sl->direction, 2.0f);
-            gl.coneAngles   = float2(sl->innerConeAngle, sl->outerConeAngle);
-            if (IsPhysicalLightEnabled(lc.luminousIntensity)) gl.colorIntensity.w = lc.luminousIntensity * kPhysicalLightExposure;
-            break;
-        }
-        case he::LightType::Rect: {
-            auto* rl = static_cast<he::RectLight*>(&lc);
-            float3 pos = sg.GetWorldPosition(e);
-            gl.positionRange = float4(pos, rl->range);
-            gl.directionType = float4(rl->normal, 3.0f);   // w=3 标记 Rect 类型；xyz=发光面法线
-            gl.coneAngles   = float2(rl->width, rl->height); // 复用：x=宽度, y=高度
-            if (IsPhysicalLightEnabled(lc.luminousIntensity)) gl.colorIntensity.w = lc.luminousIntensity * kPhysicalLightExposure;
-            break;
-        }
-        }
-
-        GPULight* lights = static_cast<GPULight*>(m_LightBuffers[m_CurrentFrameSlot]->Map());
-        if (lights) lights[i] = gl;
-        m_LightBuffers[m_CurrentFrameSlot]->Unmap();
-        pc.lightCount++;
+    // 阶段 1 T1.3b：光源收集集中到 `SceneSnapshotBuilder`，但**保持 Forward 的历史口径** ——
+    // 收集 Rect 光、点光写 (0,-1,0)、聚光不归一化。迁移只搬位置、不改口径；四处口径差异与统一计划
+    // 见 `SceneSnapshotBuilder.h` 的登记（默认值 = Deferred 现状，故这里必须把 Forward 关掉的两项打开、
+    // 把只有 Deferred 才做的归一化关掉）。
+    SceneSnapshotResolvers resolvers;
+    resolvers.physicalUnitsEnabled = cvLightPhysicalUnits.Get();
+    resolvers.shadowIndex = [this](he::Entity e) -> i32 {
+        return m_ShadowSystem ? m_ShadowSystem->GetShadowIndex(e) : -1;   // 空指针防护（口径不变）
     };
 
-    world.ForEach<he::DirectionalLight>(collectLight);
-    world.ForEach<he::PointLight>(collectLight);
-    world.ForEach<he::SpotLight>(collectLight);
-    world.ForEach<he::RectLight>(collectLight);
+    SceneSnapshotLightOptions options;
+    options.includeRectLights         = true;
+    options.pointLightWritesDirection = true;
+    options.normalizeSpotDirection    = false;
+
+    m_LightSnapshot.Clear();
+    const u32 lightCount = SceneSnapshotBuilder::BuildLights(world, sg, resolvers, m_LightSnapshot, options);
+    pc.lightCount = lightCount;
+
+    // 一次性上传（旧实现是每个光源 Map/Unmap 一次，写入内容相同）
+    {
+        GPULight* lights = static_cast<GPULight*>(m_LightBuffers[m_CurrentFrameSlot]->Map());
+        if (lights) {
+            for (u32 i = 0; i < lightCount; ++i) lights[i] = m_LightSnapshot.lights[i].ToGpu();
+        }
+        m_LightBuffers[m_CurrentFrameSlot]->Unmap();
+    }
 
     // 无光源时提供默认方向光
     if (pc.lightCount == 0) {

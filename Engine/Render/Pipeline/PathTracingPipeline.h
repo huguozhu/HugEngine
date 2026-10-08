@@ -13,6 +13,8 @@
 #include "PostProcess/PTAtrousPass.h"  // A-Trous 空间滤波（时域降噪之后）
 #include "RHI/RHI.h"
 #include "RenderGraph.h"
+// 阶段 1 T1.3b：光源走快照（`FrameSceneSnapshot`）而不是直接遍历 ECS。
+#include "Threading/FrameSceneSnapshot.h"
 #include <memory>
 
 namespace he::render {
@@ -130,6 +132,9 @@ private:
 
     // ── 三缓冲光源 SSBO ──
     std::unique_ptr<rhi::IRHIBuffer> m_LightBuffers[MAX_FRAMES_IN_FLIGHT];
+    // 阶段 1 T1.3b：本帧光源的**快照**（游戏线程侧收集的不可变输入）。
+    // 必须是成员：帧图 lambda 在 `CollectLights` 返回之后才执行，局部变量会悬垂。
+    FrameSceneSnapshot               m_LightSnapshot;
     u32 m_CurrentFrameSlot = 0;
 
     // 相机矩阵缓存（velocity 计算用）

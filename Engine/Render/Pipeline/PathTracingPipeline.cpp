@@ -12,6 +12,8 @@
 #include "Pipeline/PathTracingPipeline.h"
 #include "Pipeline/PTQualityCVars.h"
 #include "Pipeline/PhysicalLight.h"
+// 阶段 1 T1.3b：光源收集集中到快照构造器（本文件不再自己遍历 ECS 光源组件）
+#include "Threading/SceneSnapshotBuilder.h"
 #include "RT/ReSTIRPass.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
@@ -280,68 +282,25 @@ void PathTracingPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
 void PathTracingPipeline::CollectLights(he::World& world, he::SceneGraph& sg,
                                         const CameraData& camera, u32& outLightCount) {
     (void)camera;
-    outLightCount = 0;
-    u32 lightCount = 0;
+    // 阶段 1 T1.3b：收集集中到 `SceneSnapshotBuilder`，并**保持 PathTracing 的历史口径**：
+    // 与 Deferred 相同（不收集 Rect、点光 xyz=0、聚光归一化），但 `shadowIndex` 恒 -1
+    // （PT 的阴影包含在路径里、没有传统阴影系统）且写 `shadowRadius`。
+    SceneSnapshotResolvers resolvers;
+    resolvers.physicalUnitsEnabled = cvLightPhysicalUnits.Get();
+    // 故意不设置 shadowIndex 解析器 ⇒ 收集器填 -1，与旧行为一致
 
-    auto cl = [&](he::Entity e, he::LightComponent& lc) {
-        if (lightCount >= MAX_LIGHTS || !lc.enabled) return;
-        GPULight gl{};
-        gl.shadowIndex = -1;  // PT 无传统阴影系统（阴影包含在路径中）
-        gl.shadowRadius = lc.shadowRadius;
+    SceneSnapshotLightOptions options;
+    options.writeShadowRadius = true;
 
-        // 色温 → RGB 颜色（叠加到 color 滤镜色上）
-        float3 lightColor = lc.color;
-        if (lc.colorTemperature > 0.0f) {
-            lightColor *= render::KelvinToRGB(lc.colorTemperature);
-        }
-        gl.colorIntensity = float4(lightColor, lc.intensity);
+    m_LightSnapshot.Clear();
+    outLightCount = SceneSnapshotBuilder::BuildLights(world, sg, resolvers, m_LightSnapshot, options);
+    if (outLightCount == 0u) return;
 
-        // 物理光源模式（luminousIntensity>0 或 illuminance>0 时启用）
-        // positionRange.w < 0 标记物理模式（shader 用 abs() 获取实际范围值）
-        switch (lc.type) {
-        case LightType::Directional: {
-            auto* dl = static_cast<DirectionalLight*>(&lc);
-            gl.directionType = float4(dl->direction, 0.0f);
-            if (IsPhysicalLightEnabled(lc.illuminance)) {   // 物理模式需全局开关 r.Light.PhysicalUnits
-                gl.colorIntensity.w = lc.illuminance * kPhysicalLightExposure;
-                gl.positionRange.w   = -1.0f;
-            }
-            break;
-        }
-        case LightType::Point: {
-            auto* pl = static_cast<PointLight*>(&lc);
-            gl.positionRange = float4(sg.GetWorldPosition(e), pl->range);
-            gl.directionType.w = 1.0f;
-            if (IsPhysicalLightEnabled(lc.luminousIntensity)) {
-                gl.colorIntensity.w = lc.luminousIntensity * kPhysicalLightExposure;
-                gl.positionRange.w   = -(pl->range);
-            }
-            break;
-        }
-        case LightType::Spot: {
-            auto* sl = static_cast<SpotLight*>(&lc);
-            float r = IsPhysicalLightEnabled(lc.luminousIntensity) ? -(sl->range) : sl->range;
-            gl.positionRange = float4(sg.GetWorldPosition(e), r);
-            gl.directionType = float4(glm::normalize(sl->direction), 2.0f);
-            gl.coneAngles = float2(sl->innerConeAngle, sl->outerConeAngle);
-            if (IsPhysicalLightEnabled(lc.luminousIntensity)) {
-                gl.colorIntensity.w = lc.luminousIntensity * kPhysicalLightExposure;
-            }
-            break;
-        }
-        default: break;
-        }
-
-        auto* lights = static_cast<GPULight*>(m_LightBuffers[m_CurrentFrameSlot]->Map());
-        if (lights) lights[lightCount] = gl;
-        m_LightBuffers[m_CurrentFrameSlot]->Unmap();
-        lightCount++;
-    };
-
-    world.ForEach<DirectionalLight>(cl);
-    world.ForEach<PointLight>(cl);
-    world.ForEach<SpotLight>(cl);
-    outLightCount = lightCount;
+    // 一次性上传（旧实现是每个光源 Map/Unmap 一次，写入内容相同）
+    auto* lights = static_cast<GPULight*>(m_LightBuffers[m_CurrentFrameSlot]->Map());
+    if (!lights) return;
+    for (u32 i = 0; i < outLightCount; ++i) lights[i] = m_LightSnapshot.lights[i].ToGpu();
+    m_LightBuffers[m_CurrentFrameSlot]->Unmap();
 }
 
 // ============================================================

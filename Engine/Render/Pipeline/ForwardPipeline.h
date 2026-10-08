@@ -12,6 +12,8 @@
 #include "Pipeline/MeshBatcher.h"
 #include "Pipeline/InstanceCuller.h"   // 任务 25：逐实例 GPU 视锥剔除
 #include "AntiAliasing/AntiAliasing.h"
+// 阶段 1 T1.3b：光源走快照（`FrameSceneSnapshot`）而不是直接遍历 ECS。
+#include "Threading/FrameSceneSnapshot.h"
 #include "Profiler/ProfilerManager.h"
 
 namespace he::render { class GI_IBL; }
@@ -156,6 +158,9 @@ private:
     rhi::DescriptorSetLayoutHandle m_PerFrameLayout = rhi::kInvalidLayout;  // set=0: per-frame + bindless
     rhi::DescriptorSetHandle       m_DescSets[MAX_FRAMES_IN_FLIGHT] = {};   // set=0 三缓冲
     std::unique_ptr<rhi::IRHIBuffer> m_LightBuffers[MAX_FRAMES_IN_FLIGHT];
+    // 阶段 1 T1.3b：本帧光源的**快照**（游戏线程侧收集的不可变输入）。
+    // 必须是成员：帧图 lambda 在 `CollectLights` 返回之后才执行，局部变量会悬垂。
+    FrameSceneSnapshot               m_LightSnapshot;
     /// GI 分层合成参数 UBO（每飞行帧一份，与 Deferred 的 LightingPass 同结构同语义）
     std::unique_ptr<rhi::IRHIBuffer> m_GIBuffers[MAX_FRAMES_IN_FLIGHT];
     std::unique_ptr<rhi::IRHIBuffer> m_ObjectBuffers[MAX_FRAMES_IN_FLIGHT];
