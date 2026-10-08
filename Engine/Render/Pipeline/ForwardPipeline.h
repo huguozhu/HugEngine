@@ -14,6 +14,8 @@
 #include "AntiAliasing/AntiAliasing.h"
 // 阶段 1 T1.3b：光源走快照（`FrameSceneSnapshot`）而不是直接遍历 ECS。
 #include "Threading/FrameSceneSnapshot.h"
+// 阶段 1 附录 E：meshIndex → 渲染侧资源 的注册表（快照不带指针的前提）
+#include "Threading/MeshRegistry.h"
 #include "Profiler/ProfilerManager.h"
 
 namespace he::render { class GI_IBL; }
@@ -161,6 +163,12 @@ private:
     // 阶段 1 T1.3b：本帧光源的**快照**（游戏线程侧收集的不可变输入）。
     // 必须是成员：帧图 lambda 在 `CollectLights` 返回之后才执行，局部变量会悬垂。
     FrameSceneSnapshot               m_Snapshot;
+
+    // 阶段 1 附录 E（E-2）：网格注册表 + 一次性注册守卫。
+    // 【为什么由管线持有】它是渲染侧资源（顶点/索引缓冲指针）的索引表；注册在**加载期语义**的时刻做一次
+    // （首次 Render，且在构建快照之前），之后帧内只读 —— 与快照同一条纪律。
+    MeshRegistry                     m_MeshRegistry;
+    bool                             m_MeshRegistryReady = false;
     /// GI 分层合成参数 UBO（每飞行帧一份，与 Deferred 的 LightingPass 同结构同语义）
     std::unique_ptr<rhi::IRHIBuffer> m_GIBuffers[MAX_FRAMES_IN_FLIGHT];
     std::unique_ptr<rhi::IRHIBuffer> m_ObjectBuffers[MAX_FRAMES_IN_FLIGHT];

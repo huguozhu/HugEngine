@@ -913,6 +913,24 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
                               he::SceneGraph& sg, const CameraData& camera,
                               float deltaTime)
 {
+    // 阶段 1 附录 E（E-2 第①步）：**一次性**把网格资源登记进注册表，并回填 `meshIndex`。
+    // 放在这里是因为它必须在"首次构建快照"之前完成（快照的 `SnapshotDrawItem::meshIndex` 直接取组件字段），
+    // 而管线拿到 `world` 的第一个时机就是 `Render`。注册只在首帧发生一次（守卫），之后帧内只读。
+    // 目前只登记骨骼网格（E-2 的消费者）；其它类型随各自消费者接入时再登记。
+    if (!m_MeshRegistryReady) {
+        world.ForEach<he::SkeletalMeshComponent>([&](he::Entity, he::SkeletalMeshComponent& sm) {
+            if (sm.GetIndexCount() == 0u) return;              // 与收集口径一致：无索引不登记
+            MeshRegistryEntry entry;
+            entry.vertexBuffer = sm.GetVertexBuffer().get();   // 只借指针，所有权仍在组件
+            entry.indexBuffer  = sm.GetIndexBuffer().get();
+            entry.indexCount   = sm.GetIndexCount();
+            entry.materialID   = sm.materialID;
+            entry.instanced    = true;                         // 骨骼网格：顶点由蒙皮路径提供
+            sm.meshIndex       = m_MeshRegistry.Register(&sm, entry);
+        });
+        m_MeshRegistryReady = true;
+    }
+
     // RSM 固定光锥必须**先**刷新（任务 34）：UBO（FillGIBlendUBO）与 frame graph 的
     // RSM pass 注册/参数两处消费者都读它，且两者都在下面几步之内。
     RefreshRSMFrustum(world, camera);
