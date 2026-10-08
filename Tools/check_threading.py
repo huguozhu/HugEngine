@@ -73,10 +73,10 @@ WORLD_DEP_ROOTS = ("Engine/Render",)
 # 【白名单】快照层（`Engine/Render/Threading/`）是渲染侧**唯一**允许读世界的代码 —— 它就是干这个的：
 # 在游戏线程把渲染输入取齐成不可变快照。把它的命中排除在外，度量才对准"渲染期泄漏"。
 WORLD_DEP_WHITELIST_PATHS = ("Engine/Render/Threading/",)
-WORLD_DEP_BASELINE = 69        # 2026-10-09 实测（第③段第 1 批后：GBufferRenderer 家族 6 处
-                               # + `GPUScene::Collect` 过渡重载 2 处去掉 —— 前者不再需要 world/sg，
-                               # 后者改由调用方直接消费自己的快照。阶段 1 退出目标 = 0；
-                               # 注：该脚本按行计数，参数行合并/拆分会造成 ±1 的行计数效应）
+WORLD_DEP_BASELINE = 51        # 2026-10-09 实测（第③段第 2 批后：四个阴影技术 + `IShadowTechnique`
+                               # + `ShadowSystem` 的收集/绘制全部改吃快照 —— 技术侧不再收
+                               # `he::World&`/`he::SceneGraph&`，网格与光源一律来自快照 + 网格注册表。
+                               # 阶段 1 退出目标 = 0；注：该脚本按行计数，参数行合并/拆分会有 ±1 效应）
 
 # --- 附录 E 的度量：渲染侧的**组件指针依赖**（`MeshComponent*` 等）---
 # 【为什么需要第二项】B1 统计的是签名里的 `World&` / `SceneGraph&`，量不出 E-1/E-2/E-3 消除的东西 ——

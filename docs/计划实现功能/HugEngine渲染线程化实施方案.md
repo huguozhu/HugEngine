@@ -977,6 +977,31 @@ private:
         把它移到游戏线程、且在构建快照**之前**；② Forward 路径的 `ShadowSystem::Update` **只由样例调用**，
         管线自身从不调用（`ForwardPipeline.cpp` 只调 `Render`）⇒ 若样例不调，`HasActiveShadows()` 恒 false、
         阴影整条链静默不工作（Deferred 路径由帧图自己调，正常）。
+    - **第 2 批（已提交）**：按上面的规格落地 —— 阴影系统全链路改吃快照 + **样例先建快照**。
+      · 快照新增 `SnapshotShadowLight`（四个技术实际用到的字段一处不漏）与 `shadowLights`、
+        `SnapshotDrawItem::bShadowCaster`（口径 = 精确 `MeshComponent`/`Cube`/`Sphere` 且 `castShadow`）、
+        `SceneSnapshotBuilder::BuildShadowLights`；
+      · `IShadowTechnique` 与四个技术的 `CollectLights`/`Render` 改收
+        `(snapshot, camera)` / `(cmd, snapshot, registry, data, start)`，网格遍历改为
+        `snapshot.draws` 过滤 `bShadowCaster` + 按 `meshIndex` 查注册表；技术顺序与
+        `m_PerTechniqueCounts` 编排未动（`GPUShadowData` 下标 = shader 的 `shadowIndex`）；
+      · `SubsystemContext` 新增 `snapshot` / `meshRegistry`；`ShadowSystem::Update` 改读
+        `ctx.snapshot`（缺省直接返回），`Render` 用缓存的快照 + 注册表；
+      · `ForwardPipeline::BuildFrameSnapshot`（**幂等**，`NextFrame()` 复位）+ `GetFrameSnapshot` /
+        `GetMeshRegistry`；`BuildEnvironment` 从 `CollectLights` 移进快照构建（`SkyboxPass` 也要
+        `physicalSky`，且必须在帧图构建之前）；5 个样例改为**先 `BuildFrameSnapshot` → 再阴影收集**，
+        并把 `shadowCtx.snapshot` / `meshRegistry` 指向它（这正是 T2.4 的形态；第③段第 3 批会把
+        `Render` 也改成收快照、样例不再让管线自建）。
+      · **本批引入并当场修掉的一个回归**：Deferred 的快照构建漏了 `BuildShadowLights`
+        ⇒ `shadowLights` 为空 ⇒ `HasActiveShadows()` 恒 false ⇒ **Deferred 阴影静默消失**。
+        它由"检查 Deferred 路径是否真的画了阴影"（对照 `[CSMTechnique] Cascade0 绘制物体数`）发现，
+        而不是靠像素对比（该量在 06.GILab 的 HDR 里占比很小）—— 这条经验值得留住：
+        **迁移后要找一个"语义计数"型的证据**，不能只依赖像素对比。
+      · 判据：单测 398 例 / 71832 断言；**06.GILab（Deferred）阴影级联 0 的绘制物体数
+        `103`（新旧二进制完全相同）** —— 比"像素无差异"强得多的等价性证据；`02.Cube`（Forward，
+        走样例驱动的阴影收集）同样出现该诊断且 `VUID=0`；冒烟同批双跑 **299 像素**、
+        与第 1 批二进制对比 **314 像素**（`hdr` 仅 4 像素 / maxULP=1）⇒ 落在同批底噪内；
+        四项闸门：B1 **69 → 51**（基线随之下调）、组件指针 13、帧内 RHI 380、持有者 277。
 - [x] T2.1 `RenderThread` 实现（帧节奏 + 休眠策略）—— ✅ 完成（真起线程 + 归属判断 + 停止排空；4 例单测。cv 唤醒并入 T2.6）
 - [ ] T2.2 设备与交换链归渲染线程（Acquire/Present 迁移）
 - [ ] T2.3 `ResourceCreationService`（步 1 同步转发）
