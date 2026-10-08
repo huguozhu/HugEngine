@@ -162,6 +162,16 @@ public:
 
     // ── 粒子发射器（T1.4）────────────────────────────────────────
 
+    // ── 材质（T1.4/T1.5：让 bindless 上传不再读 ECS）──────────────
+
+    /// 收集 bindless 材质数组：按 `materialID` 去重后摊平成 `GPUMaterialData`，并按
+    /// `materialID >> 2` 作槽位补齐空槽（空槽值初始化 = 全 0），保证 shader 侧的索引对齐。
+    /// 【口径来源】原先是 `ForwardPipeline::UploadMaterialBindless` 里的 collect+去重+补槽逻辑
+    /// （`MeshComponent / Cube / Sphere / Instanced / Skeletal / Spline` 都收集）；搬到这里后
+    /// **渲染侧不再为了材质遍历世界**。每次调用会清空重填（逐帧复用安全）。
+    /// @return 材质槽位数（= 上传时的 buffer 元素数）
+    static u32 BuildMaterials(he::World& world, FrameSceneSnapshot& out);
+
     // ── 天空盒（T1.4：渲染期不再读 SkyboxComponent）──────────────
 
     /// 收集天空盒（IBL 天空源）：取"启用且真的有 cubemap"的组件。

@@ -210,6 +210,36 @@ bool SceneSnapshotBuilder::BuildEnvironment(he::World& world, FrameSceneSnapshot
     return found;
 }
 
+u32 SceneSnapshotBuilder::BuildMaterials(he::World& world, FrameSceneSnapshot& out) {
+    out.materials.clear();
+
+    // 按 materialID 去重（同一 materialID 的多个物体共享一份材质数据），逻辑与原
+    // `ForwardPipeline::UploadMaterialBindless` 的收集段逐条一致（含"收集哪些组件类型"）。
+    std::unordered_map<u32, GPUMaterialData> uniqueMat;
+    auto collect = [&](he::MeshComponent& m) {
+        if (uniqueMat.count(m.materialID)) return;          // 已收集过该材质，跳过
+        GPUMaterialData g;
+        FillMaterialData(g, MakePBRMaterial(m));            // 映射走唯一实现（E-3①）
+        uniqueMat[m.materialID] = g;
+    };
+    world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent& m) { collect(m); });
+    world.ForEach<he::CubeComponent>([&](he::Entity, he::CubeComponent& c) { collect(c); });
+    world.ForEach<he::SphereComponent>([&](he::Entity, he::SphereComponent& s) { collect(s); });
+    world.ForEach<he::InstancedMeshComponent>([&](he::Entity, he::InstancedMeshComponent& im) { collect(im); });
+    world.ForEach<he::SkeletalMeshComponent>([&](he::Entity, he::SkeletalMeshComponent& sm) { collect(sm); });
+    world.ForEach<he::SplineMeshComponent>([&](he::Entity, he::SplineMeshComponent& spl) { collect(spl); });
+
+    if (uniqueMat.empty()) return 0u;                       // 场景无材质：留空数组（上传侧据此跳过）
+
+    // materialID 是纹理基索引（每材质占 4 个纹理槽），材质数据索引 = materialID >> 2
+    u32 maxSlot = 0;
+    for (const auto& kv : uniqueMat) maxSlot = std::max(maxSlot, kv.first >> 2);
+    // 空槽位填默认 GPUMaterialData{}（值初始化 = 全 0），保证 buffer 内索引与 materialID>>2 对齐
+    out.materials.assign(static_cast<usize>(maxSlot) + 1u, GPUMaterialData{});
+    for (const auto& kv : uniqueMat) out.materials[kv.first >> 2] = kv.second;
+    return static_cast<u32>(out.materials.size());
+}
+
 bool SceneSnapshotBuilder::BuildSkybox(he::World& world, FrameSceneSnapshot& out) {
     out.skybox = SnapshotSkybox{};          // 逐帧复位：上一帧的天空盒不得残留
     // 与原先帧图里的 `world.ForEach<SkyboxComponent>` 循环逐条一致（逐个赋值 ⇒ 后者覆盖前者）。

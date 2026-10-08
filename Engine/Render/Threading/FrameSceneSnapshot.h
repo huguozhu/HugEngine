@@ -3,6 +3,8 @@
 #include "Core/Types.h"
 #include "Math/Math.h"
 #include "Pipeline/Camera.h"
+// 材质（`GPUMaterialData`）：快照按 materialID 去重后携带，渲染期因此不必再遍历组件取材质
+#include "Pipeline/Material.h"
 // 粒子参数（`ParticleSystemParam`）：粒子发射器快照条目要按值携带它
 #include "Scene/ParticleComponent.h"
 
@@ -149,6 +151,11 @@ struct FrameSceneSnapshot {
 
     /// 天空盒（IBL 天空源）：渲染期读它的**唯一**入口，替代原先在帧图里 `world.ForEach<SkyboxComponent>`。
     SnapshotSkybox skybox{};
+
+    /// bindless 材质 SSBO 的内容：按 `materialID >> 2` 作槽位、已去重、已补齐空槽（值初始化）。
+    /// 【为什么要进快照】`UploadMaterialBindless` 原先自己遍历组件收集材质 —— 那是"渲染期读 ECS"的一处；
+    /// 搬进快照后，该函数不再需要 `World&`（B1 因此下降），且材质收集与物体收集共用同一份口径。
+    std::vector<GPUMaterialData> materials;
 
     std::vector<SnapshotDrawItem> draws;
     std::vector<SnapshotLight>    lights;
