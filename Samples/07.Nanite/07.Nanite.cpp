@@ -13,6 +13,8 @@
 #include <chrono>   // 步骤 37：CPU 侧帧时（判定 CPU 受限还是 GPU 受限）
 #include "Platform/Window.h"
 #include "RHI/RHI.h"
+#include "RHI/ThreadAffinity.h"      // T2.4：渲染线程启动/停止钩子认领与撤销 RHI 归属
+#include "Threading/RenderThread.h"  // T2.4：命令队列 + 渲染线程（严格握手）
 #include "Pipeline/DeferredPipeline.h"
 #include "Pipeline/ForwardPipeline.h"
 #include "Pipeline/IRenderPipeline.h"
@@ -961,13 +963,13 @@ int main() {
     // ============================================================
     // 10. 窗口调整回调
     // ============================================================
+    // 【T2.4】回调跑在游戏线程，而里面是 RHI（Resize/SetSwapChain/OnResize）⇒ 只置标志，
+    // 真正落地放到渲染命令里。
+    u32 g_PendingResizeW = 0, g_PendingResizeH = 0;
     engine.GetWindow()->SetResizeCallback([&](u32 w, u32 h) {
         if (w == 0 || h == 0) return;
-        swapchain->Resize(w, h);
-        cmdList->SetSwapChain(swapchain.get());
-        deferredPipeline.OnResize(w, h);
-        forwardPipeline.OnResize(w, h);
-        camCtrl.SetAspectRatio(static_cast<float>(w), static_cast<float>(h));
+        g_PendingResizeW = w;
+        g_PendingResizeH = h;
     });
 
     // ============================================================
@@ -976,6 +978,39 @@ int main() {
     HE_CORE_INFO("07.Nanite (Cornell Box) 启动 — WASD=移动, 右键拖拽=旋转, Shift=加速, E/Q=升降");
     u64 frameIndex = 0;
     f64 lastTime   = glfwGetTime();
+
+    // ============================================================
+    // 渲染线程化（T2.4）：一帧两条命令 —— ① Acquire + 录制（管线 + 打开 ImGui 的 RP）；
+    // ② ImGui 的**录制**（draw data）+ End + Submit +（测试用途的）WaitIdle/读数 + Present。
+    // 控件与读数消费留在游戏线程、位于两条命令之间 ⇒ 帧内顺序与改动前一致。
+    // 【起线程按需】当前流水线深度只有 1（命令 1 需握手）⇒ 轻帧样例在模式 1 下会明显变慢，
+    // 故与其余未实测样例一致：`HE_RENDER_THREAD_STRICT=1` 且模式 ≥1 时才起真渲染线程。
+    // ============================================================
+    render::RenderCommandQueue renderQueue(rhi::kMaxFramesInFlight);
+    render::RenderThread       renderThread(renderQueue);
+    render::FrameScheduler     frameScheduler(renderQueue, renderThread);
+    const bool                 useRenderQueue = he::UsesRenderThread();
+    const bool                 startRenderThread = std::getenv("HE_RENDER_THREAD_STRICT") != nullptr;
+    if (useRenderQueue && startRenderThread) {
+        renderThread.SetSpinWaitUs(50);
+        renderThread.SetThreadStartHook([] { he::rhi::GetThreadAffinity().Claim(); });
+        renderThread.SetThreadStopHook([] { he::rhi::GetThreadAffinity().Release(); });
+        HE_CORE_INFO("07.Nanite：已起真渲染线程（整帧 RHI 归它；游戏线程按帧严格握手等待）");
+        renderThread.Start();
+    }
+    auto submitRender = [&](auto&& fn) {
+        if (useRenderQueue) {
+            renderQueue.BeginFrame();
+            renderQueue.Enqueue([&](render::RenderThreadContext&) { fn(); });
+            bool timedOut = false;
+            frameScheduler.SubmitAndWait(timedOut);
+            if (timedOut) HE_CORE_WARN("07.Nanite：等待本帧渲染命令完成超时");
+        } else {
+            fn();
+        }
+    };
+    // 控件里请求的管线切换（含 RHI）延迟到渲染命令里做
+    bool g_PendingPipelineSwitch = false;
 
     while (!engine.GetWindow()->ShouldClose()) {
         f64 now       = glfwGetTime();
@@ -987,8 +1022,10 @@ int main() {
 
         engine.GetWindow()->PollEvents();
 
-        if (!swapchain->AcquireNextImage())
-            continue;
+        bool frameAborted = false;   // 渲染命令里 Acquire 失败时置位
+        // 管线 CPU 侧耗时累计（命令 1 累加、命令 2 的帧率读数消费 ⇒ 提到帧体层级）
+        static double s_accPipelineMs = 0.0;
+
 
         // --- 相机控制 ---
         {
@@ -1044,83 +1081,105 @@ int main() {
         });
 
         // --- 渲染（按选择的管线执行；各管线均通过 RenderGraph 自动编排）---
-        cmdList->Begin();
-        switch (g_PipelineMode) {
-        case 0:  // Forward
-            curPipeline = &forwardPipeline;
-            break;
-        default: // Deferred（含光追源：RT 已归入 GI 层栈，无需独立管线）
-            curPipeline = &deferredPipeline;
-            break;
-        }
-        curPipeline->NextFrame();
-        // 【阶段 1 §15.1 第③段：帧入口收快照】装配在游戏线程统一经接口完成（每帧幂等）
-        curPipeline->GetFrameAssembler().AssembleScene(world, sceneGraph, camCtrl.GetCamera());
-        // --- Forward 的阴影系统必须由**调用方**驱动（任务 34 / §9.2-AD）---
-        // `ShadowSystem` 不像 GI 子系统那样自己从帧图拿数据：它要靠调用方先
-        // `SetRenderResources`（对象/阴影缓冲 + 描述符集）再 `Update`（收集投影光源、拟合 CSM），
-        // 之后 `HasActiveShadows()` 才为真。02.Cube / 03.Sponza-Forward / AISamples 都这么做，
-        // **07.Nanite 此前漏了** ⇒ Forward 模式下 `Shadow` 与 `RSM_Generate` 两个 pass 都不注册：
-        // 画面**没有阴影**，RSM 源恒为 0（而"层栈改变画面 / 多源不变亮 / 双源等于加权平均"
-        // 三条判据在"某个源恒为 0"时全部成立，看不出这件事）。
-        // 位置：必须在 NextFrame 之后（阴影缓冲按飞行帧轮换）且在本帧 Render 之前（帧图按
-        // `HasActiveShadows()` 门控）。Deferred 侧由管线内部自己驱动，这里只处理 Forward。
-        if (g_PipelineMode == 0) {
-            if (auto* shadowSys = forwardPipeline.GetShadowSystem()) {
-                shadowSys->SetRenderResources(forwardPipeline.GetCurrentShadowObjectBuffer(),
-                                              forwardPipeline.GetCurrentShadowBuffer(),
-                                              forwardPipeline.GetCurrentDescSet());
-                render::SubsystemContext shadowCtx;
-                shadowCtx.camera     = &camCtrl.GetCamera();
-                // 物理天空的太阳方向先同步到方向光：阴影与光照必须同向（02.Cube 同款做法）
-                he::SyncPhysicalSkyToSun(world);
-                // 【阶段 1 §15.1 第③段第 2 批】渲染输入先取成快照（阴影收集要吃它；
-                // 顺序：世界同步 → 快照 → 阴影收集）
-                forwardPipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, camCtrl.GetCamera());
-                shadowCtx.snapshot     = &forwardPipeline.GetFrameSnapshot();
-                shadowCtx.meshRegistry = &forwardPipeline.GetMeshRegistry();
-                shadowSys->Update(shadowCtx);
-                forwardPipeline.GetFrameAssembler().ResolveLightShadowIndices(
-                    [&](he::Entity le) { return shadowSys->GetShadowIndex(le); });
-                forwardPipeline.GetFrameAssembler().ReserveOnce();
+        // ---- 命令 1：Acquire + 录制（管线 + 打开 ImGui 的 RP）----
+        auto recordScene = [&]() {
+            if (!swapchain->AcquireNextImage()) {
+                frameAborted = true;   // 命令可能在渲染线程跑 ⇒ 用标志代替 while 的 continue
+                return;
             }
-        }
-        // 帧边界应用延迟的半分辨率纹理重建（先等待 GPU 空闲，避免销毁正在使用的纹理）
-        if (g_PendingHalfResApply) {
-            device->WaitIdle();
-            if (auto* dpApply = dynamic_cast<render::DeferredPipeline*>(curPipeline)) {
-                dpApply->GetSSGI()->OnResize(swapchain->GetWidth(), swapchain->GetHeight());
-                dpApply->GetSSR()->OnResize(swapchain->GetWidth(), swapchain->GetHeight());
-                dpApply->GetSSAO().OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+            // 窗口尺寸变化 + 控件请求的管线切换（都是 RHI）在这里落地
+            if (g_PendingResizeW != 0u && g_PendingResizeH != 0u) {
+                const u32 rw = g_PendingResizeW, rh = g_PendingResizeH;
+                g_PendingResizeW = g_PendingResizeH = 0u;
+                swapchain->Resize(rw, rh);
+                cmdList->SetSwapChain(swapchain.get());
+                forwardPipeline.OnResize(rw, rh);
+                deferredPipeline.OnResize(rw, rh);
             }
-            g_PendingHalfResApply = false;
-        }
-        // 【步骤 37】管线 CPU 侧耗时（重建帧图 + 录制 + 提交）与"其余 CPU"分开计：
-        // 整帧 CPU 受限时，先要知道这 50 ms 是花在管线里还是花在样例/ImGui 里，否则优化对象会选错。
-        static double s_accPipelineMs = 0.0;
-        {
-            const auto t0 = std::chrono::steady_clock::now();
-            curPipeline->Render(cmdList.get(), curPipeline->GetFrameSnapshot(), camCtrl.GetCamera());
-            s_accPipelineMs += std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - t0).count();
-        }
+            if (g_PendingPipelineSwitch) {
+                g_PendingPipelineSwitch = false;
+                curPipeline->SetSwapChain(swapchain.get());
+            }
+            cmdList->Begin();
+            switch (g_PipelineMode) {
+            case 0:  // Forward
+                curPipeline = &forwardPipeline;
+                break;
+            default: // Deferred（含光追源：RT 已归入 GI 层栈，无需独立管线）
+                curPipeline = &deferredPipeline;
+                break;
+            }
+            curPipeline->NextFrame();
+            // 【阶段 1 §15.1 第③段：帧入口收快照】装配在游戏线程统一经接口完成（每帧幂等）
+            curPipeline->GetFrameAssembler().AssembleScene(world, sceneGraph, camCtrl.GetCamera());
+            // --- Forward 的阴影系统必须由**调用方**驱动（任务 34 / §9.2-AD）---
+            // `ShadowSystem` 不像 GI 子系统那样自己从帧图拿数据：它要靠调用方先
+            // `SetRenderResources`（对象/阴影缓冲 + 描述符集）再 `Update`（收集投影光源、拟合 CSM），
+            // 之后 `HasActiveShadows()` 才为真。02.Cube / 03.Sponza-Forward / AISamples 都这么做，
+            // **07.Nanite 此前漏了** ⇒ Forward 模式下 `Shadow` 与 `RSM_Generate` 两个 pass 都不注册：
+            // 画面**没有阴影**，RSM 源恒为 0（而"层栈改变画面 / 多源不变亮 / 双源等于加权平均"
+            // 三条判据在"某个源恒为 0"时全部成立，看不出这件事）。
+            // 位置：必须在 NextFrame 之后（阴影缓冲按飞行帧轮换）且在本帧 Render 之前（帧图按
+            // `HasActiveShadows()` 门控）。Deferred 侧由管线内部自己驱动，这里只处理 Forward。
+            if (g_PipelineMode == 0) {
+                if (auto* shadowSys = forwardPipeline.GetShadowSystem()) {
+                    shadowSys->SetRenderResources(forwardPipeline.GetCurrentShadowObjectBuffer(),
+                                                  forwardPipeline.GetCurrentShadowBuffer(),
+                                                  forwardPipeline.GetCurrentDescSet());
+                    render::SubsystemContext shadowCtx;
+                    shadowCtx.camera     = &camCtrl.GetCamera();
+                    // 物理天空的太阳方向先同步到方向光：阴影与光照必须同向（02.Cube 同款做法）
+                    he::SyncPhysicalSkyToSun(world);
+                    // 【阶段 1 §15.1 第③段第 2 批】渲染输入先取成快照（阴影收集要吃它；
+                    // 顺序：世界同步 → 快照 → 阴影收集）
+                    forwardPipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, camCtrl.GetCamera());
+                    shadowCtx.snapshot     = &forwardPipeline.GetFrameSnapshot();
+                    shadowCtx.meshRegistry = &forwardPipeline.GetMeshRegistry();
+                    shadowSys->Update(shadowCtx);
+                    forwardPipeline.GetFrameAssembler().ResolveLightShadowIndices(
+                        [&](he::Entity le) { return shadowSys->GetShadowIndex(le); });
+                    forwardPipeline.GetFrameAssembler().ReserveOnce();
+                }
+            }
+            // 帧边界应用延迟的半分辨率纹理重建（先等待 GPU 空闲，避免销毁正在使用的纹理）
+            if (g_PendingHalfResApply) {
+                device->WaitIdle();
+                if (auto* dpApply = dynamic_cast<render::DeferredPipeline*>(curPipeline)) {
+                    dpApply->GetSSGI()->OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+                    dpApply->GetSSR()->OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+                    dpApply->GetSSAO().OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+                }
+                g_PendingHalfResApply = false;
+            }
+            // 【步骤 37】管线 CPU 侧耗时（重建帧图 + 录制 + 提交）与"其余 CPU"分开计：
+            // 整帧 CPU 受限时，先要知道这 50 ms 是花在管线里还是花在样例/ImGui 里，否则优化对象会选错。
+            {
+                const auto t0 = std::chrono::steady_clock::now();
+                curPipeline->Render(cmdList.get(), curPipeline->GetFrameSnapshot(), camCtrl.GetCamera());
+                s_accPipelineMs += std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - t0).count();
+            }
 
-        // --- 崩溃处理器自检（Wave 0.8）---
-        // 设置环境变量 HE_CRASH_TEST=1 启动，会在第 3 帧主动解引用空指针，
-        // 用于验证崩溃处理器能否打出完整调用栈（默认关闭，不影响正常使用）。
-        // 放在 Render 之后是为了让调用栈具备真实深度。
-        if (std::getenv("HE_CRASH_TEST")) {
-            static int s_CrashTestFrame = 0;
-            if (++s_CrashTestFrame == 3) {
-                HE_CORE_ERROR("HE_CRASH_TEST=1：主动触发崩溃，用于验证崩溃处理器");
-                volatile int* nullPtr = nullptr;   // volatile 保证编译器不优化掉这次写入
-                *nullPtr = 1;
+            // --- 崩溃处理器自检（Wave 0.8）---
+            // 设置环境变量 HE_CRASH_TEST=1 启动，会在第 3 帧主动解引用空指针，
+            // 用于验证崩溃处理器能否打出完整调用栈（默认关闭，不影响正常使用）。
+            // 放在 Render 之后是为了让调用栈具备真实深度。
+            if (std::getenv("HE_CRASH_TEST")) {
+                static int s_CrashTestFrame = 0;
+                if (++s_CrashTestFrame == 3) {
+                    HE_CORE_ERROR("HE_CRASH_TEST=1：主动触发崩溃，用于验证崩溃处理器");
+                    volatile int* nullPtr = nullptr;   // volatile 保证编译器不优化掉这次写入
+                    *nullPtr = 1;
+                }
             }
-        }
 
-        // --- ImGui（LOAD 保留 ToneMap 输出）---
-        cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
-            rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
+            // --- ImGui（LOAD 保留 ToneMap 输出）---
+            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
+                rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
+
+        };
+        submitRender(recordScene);
+        if (frameAborted) continue;
 
         imgui.BeginFrame();
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
@@ -1282,7 +1341,9 @@ int main() {
                     // 切换管线：确保交换链与视口尺寸同步
                     curPipeline = (g_PipelineMode == 0) ? static_cast<render::IRenderPipeline*>(&forwardPipeline)
                                                         : static_cast<render::IRenderPipeline*>(&deferredPipeline);
-                    curPipeline->SetSwapChain(swapchain.get());
+                    // 【T2.4】`SetSwapChain` 是 RHI ⇒ 不能在这里做（控件跑在游戏线程），
+            // 改为置标志、由下一条渲染命令在渲染线程执行。
+            g_PendingPipelineSwitch = true;
                     curPipeline->OnResize(swapchain->GetWidth(), swapchain->GetHeight());
                 }
             }
@@ -1803,357 +1864,361 @@ int main() {
             deferredPipeline.GetProfilerPanel().Toggle();
         deferredPipeline.GetProfilerPanel().Draw();
 
-        imgui.EndFrame(cmdList.get());
-        cmdList->EndRenderPass();
+        // ---- 命令 2：ImGui 录制 + End + Submit + 读数 + Present ----
+        auto recordUiAndPresent = [&]() {
+            imgui.EndFrame(cmdList.get());
+            cmdList->EndRenderPass();
 
-        // ── 白炉探针：把 HDR 目标上的两个像素拷进 host 可见缓冲 ──
-        // 必须在 render pass 之外录制（拷贝不能在 pass 内），因此放在 EndRenderPass 之后、End 之前
-        const bool probeThisFrame = g_ProbeEnabled && (frameIndex % (u64)std::max(1, g_ProbeInterval) == 0);
-        if (probeThisFrame && probeBuffer) {
-            // 白炉探针也要按**当前管线**取 HDR：Forward 有自己的一张（任务 26 起层栈归一化
-            // 也在 Forward 生效，白炉判据必须能覆盖它）
-            rhi::IRHITexture* hdr = (g_PipelineMode == 0)
-                ? forwardPipeline.GetHDRTarget()
-                : deferredPipeline.GetLighting().GetHDRTarget();
-            if (hdr) {
-                const u32 pw = swapchain->GetWidth(), ph = swapchain->GetHeight();
-                const u32 cx = pw / 2,           cy = ph / 2;            // 中心（物体所在）
-                const u32 bx = pw / 10,          by = ph / 10;           // 背景取样点
-                // RGBA16_FLOAT：每像素 8 字节 → 第二个像素偏移 16 字节
-                cmdList->CopyTextureToBuffer(hdr, probeBuffer.get(), cx, cy, 1, 1, 0);
-                cmdList->CopyTextureToBuffer(hdr, probeBuffer.get(), bx, by, 1, 1, 16);
-            }
-        }
-
-        // ── GI 频谱采样：把若干张纹理整幅拷进 host 可见缓冲（仅测试路径）──
-        // 同样必须在 render pass 之外录制；缓冲在采样帧才创建，尺寸取自纹理本身
-        // 目标分三类：
-        //   hdr / albedo  —— 合成结果与接收端反照率（做差 + 除 albedo 后即得 E/π）
-        //   provN_raw/final —— 各有效 Provider 的原始输出 / 降噪后输出（定位"某源为 0"发生在哪一级）
-        if (g_DumpGI && !g_DumpDone && frameIndex >= g_DumpFrame) {
-            auto addTarget = [&](const String& name, rhi::IRHITexture* tex) {
-                if (!tex) return;
-                DumpTarget t;
-                t.name = name;
-                t.tex  = tex;
-                t.w    = tex->GetWidth();
-                t.h    = tex->GetHeight();
-                rhi::BufferDesc dd;                             // 宽×高×8 B（RGBA16F）
-                dd.size      = (usize)t.w * t.h * 8;
-                dd.usage     = rhi::BufferUsage::Storage;       // 该路径恒定带 TRANSFER_DST，可作拷贝目标
-                dd.cpuAccess = true;                            // 需要 Map 读回
-                t.buf = device->CreateBuffer(dd);
-                if (!t.buf) { HE_CORE_ERROR("[GI采样] 读回缓冲创建失败: {}（{}x{}）", name, t.w, t.h); return; }
-                // x=y=0 且取满宽高 ⇒ bufferRowLength=0 的紧密排布正好等于线性落盘布局
-                cmdList->CopyTextureToBuffer(tex, t.buf.get(), 0, 0, t.w, t.h, 0);
-                g_DumpTargets.push_back(std::move(t));
-            };
-            // HDR 取**当前管线**的那张（任务 26）：Forward 没有 GBuffer / Provider 输出，
-            // 但它的 HDR 目标就是层栈归一化的产物 —— 这正是 Forward 侧唯一可读的判据出口。
-            // 此前这里无条件取 deferredPipeline 的 HDR，于是 `pipeline_mode=0` 下落盘的
-            // 根本不是 Forward 的画面（文档 §11.3 早就把这点写成了注意事项，任务 26 修掉）。
-            const bool forwardMode = (g_PipelineMode == 0);
-            addTarget("hdr", forwardMode ? forwardPipeline.GetHDRTarget()
-                                         : deferredPipeline.GetLighting().GetHDRTarget());
-            if (!forwardMode) {
-            if (auto* gb = deferredPipeline.GetGBuffer()) {
-                addTarget("albedo", gb->GetAlbedo());
-                // GBuffer 的世界坐标/法线：屏幕空间 GI pass 的**输入**。少了它们，
-                // "某个源的输出纹理对不对"就只能靠形状相关性猜；有了它们才能把那个 pass
-                // 的公式在 CPU 上原样重算一遍做逐像素对照（任务 30 就是这么定位 RSM 链路的）。
-                addTarget("gb_worldpos", gb->GetWorldPos());
-                addTarget("gb_normal",   gb->GetNormal());
-                // 光照图键（任务 31）：MRT7 = (uv0.x, uv0.y, objectIndex, 0)。烘焙光照图的
-                // 前置条件就是"逐像素能反查页号与页内坐标"，这个转储是那条性质的唯一直接证据。
-                addTarget("gb_lightmapkey", gb->GetLightmapKey());
-            }
-            // 共享的前帧 HDR 辐射度（DDGI 探针 / SSGI 入射辐射度的共同输入）：
-            // 它是 GI 源吃进去的东西，出问题时第一个要看的中间量
-            addTarget("radiance", deferredPipeline.GetRadianceHistory().GetTexture());
-            // IBL 辐照度：DDGI 探针更新的**唯一**辐射度回退来源（GI_DDGI::SetIBL）。
-            // 若它为空/未绑定，DDGI 会静默退化为 DDGI.comp.slang 的硬编码兜底常数。
-            if (auto* giIBL = dynamic_cast<render::GI_IBL*>(deferredPipeline.GetGI()))
-                addTarget("ibl_irr", giIBL->GetIrradianceMap());
-            const auto& providers = deferredPipeline.GetGIProviders();
-            for (size_t i = 0; i < providers.size(); ++i) {
-                auto* p = providers[i].get();
-                // 【步骤 35】判据从 `IsValid()`（"pass 对象在"）换成 `ProducedThisFrame()`（"本帧真的跑了"）：
-                // Lumen/RTAO 这些源即使没进任何层栈，`IsValid()` 也为真，于是 `provN_*` 会落到
-                // 上一帧或从未使用的纹理上 —— 转储看起来"有内容"，实际是假读数。
-                if (!p || !p->ProducedThisFrame()) continue;
-                const String pre = "prov" + std::to_string(i) + "_";
-                addTarget(pre + "raw",   p->GetDiffuseOutput());
-                addTarget(pre + "final", p->GetFinalDiffuseOutput());
-                // 镜面通道与 AO 通道的输出也必须能落盘：只看得见漫反射输出的话，
-                // 「SSR/SSAO 是否真的产出了东西」就无从做纹理级对照（§9.2-B/C/E 都属这一类）。
-                // 名称带通道后缀，避免与漫反射的 raw/final 混淆；不存在该通道输出时自动跳过。
-                addTarget(pre + "spec_raw",   p->GetSpecularOutput());
-                addTarget(pre + "spec_final", p->GetFinalSpecularOutput());
-                addTarget(pre + "ao_raw",     p->GetAOOutput());
-                addTarget(pre + "ao_final",   p->GetFinalAOOutput());
-                // 步骤 12（L1 退出判据）：逐像素 SDF 追踪可视化。名字**稳定**（不依赖注册顺序），
-                // 因为它是后面所有阶段（Screen Probe / Surface Cache）的公共"几何是否靠谱"凭据。
-                if (auto* lp = dynamic_cast<render::LumenProvider*>(p)) {
-                    addTarget("lumen_sdf_trace", lp->GetSDFDebugTexture());
-                    // 步骤 37：把"逐像素入射辐照度"也落盘。它是 Lumen 的中间层，此前只有 CPU 侧
-                    // 统计（均值/覆盖）可看；当"统计正常但输出为黑"时，必须能直接看到这张纹理本身
-                    // 到底有没有内容，否则只能在"没画"和"画了但采样到空"之间猜。
-                    addTarget("lumen_irradiance", lp->GetIrradianceTexture());
-                    // 步骤 13（L2 的输入）：卡片覆盖率可视化（上半 = 代表 mesh 的 6 个投影面，下半 = 逐 mesh 覆盖条）
-                    addTarget("lumen_card_coverage", lp->GetCardCoverageTexture());
-                    addTarget("lumen_sc_atlas_albedo", lp->GetCardAtlasAlbedo());   // 步骤 15：Card 捕获的 albedo atlas
-                }
-            }
-            }   // if (!forwardMode)
-            // RSM 链路的逐级中间量（任务 30）：位置 / 编码法线 / VPL 辐射度 / 间接光输出。
-            // 该链路的典型失效是"pass 在跑、成本在付、画面里什么都没有"（§9.2-AA），
-            // 只看最终 HDR 无法分辨是"没产出"还是"产出被合成丢掉"——所以四级都落盘。
-            // 两条管线各有自己的 GI_RSM 实例（同样是"同一个着色器、各自的光源视锥"），
-            // 故这里按当前管线取，才能对照两个视锥各自的产出。
-            if (auto* rsm = forwardMode ? forwardPipeline.GetRSM() : deferredPipeline.GetRSM()) {
-                addTarget("rsm_pos", rsm->GetRSMPositionMap());
-                addTarget("rsm_nrm", rsm->GetRSMFluxMap());
-                addTarget("rsm_rad", rsm->GetRSMRadianceMap());
-            }
-            if (!forwardMode) addTarget("rsm_indirect", deferredPipeline.GetRSMIndirect().GetOutput());
-            // SSR 的输出单独给一个稳定名字（任务 32）：它的 provider 输出名是 `provN_spec_raw`，
-            // 而 N 取决于哪些 provider 有效 —— 判据不该依赖注册顺序。
-            if (!forwardMode) {
-                if (auto* ssr = deferredPipeline.GetSSR())
-                    addTarget("ssr", ssr->GetIndirectSpecularTexture());
-            }
-            if (!g_DumpTargets.empty()) {
-                g_DumpDone = true;   // 已录制；实际读取放在 Submit 之后
-            } else {
-                g_DumpGI = false;
-                HE_CORE_WARN("[GI采样] 没有可用目标（HDR 未创建？），本次跳过");
-            }
-        }
-
-        cmdList->End();
-
-        device->Submit(cmdList.get());
-        deferredPipeline.FlushComputeWork();  // AsyncCompute: Graphics Submit 之后提交 Compute 工作
-
-        // ── 白炉探针：等 GPU 完成后读回（half → float），算亮度比并打日志 ──
-        if (probeThisFrame && probeBuffer) {
-            device->WaitIdle();   // 测试用途，允许停顿
-            const auto* texels = static_cast<const uint16_t*>(probeBuffer->Map());
-            if (texels) {
-                for (int i = 0; i < 3; ++i) {
-                    g_ProbeCenter[i] = glm::unpackHalf1x16(texels[i]);          // 像素 0：中心
-                    g_ProbeBg[i]     = glm::unpackHalf1x16(texels[8 + i]);      // 像素 1：背景（16B 偏移 = 8 个 half）
-                }
-                const float lumCenter = 0.2126f * g_ProbeCenter[0] + 0.7152f * g_ProbeCenter[1] + 0.0722f * g_ProbeCenter[2];
-                const float lumBg     = 0.2126f * g_ProbeBg[0]     + 0.7152f * g_ProbeBg[1]     + 0.0722f * g_ProbeBg[2];
-                g_ProbeLumCenter = lumCenter;
-                g_ProbeRatio = (lumBg > 1e-6f) ? (lumCenter / lumBg) : 0.0f;
-                HE_CORE_INFO("[白炉探针] 中心 RGB=({:.4f},{:.4f},{:.4f}) 背景 RGB=({:.4f},{:.4f},{:.4f}) "
-                             "亮度 中心={:.4f} 背景={:.4f} 比值={:.4f} 白炉={}",
-                             g_ProbeCenter[0], g_ProbeCenter[1], g_ProbeCenter[2],
-                             g_ProbeBg[0], g_ProbeBg[1], g_ProbeBg[2],
-                             lumCenter, lumBg, g_ProbeRatio,
-                             g_FurnaceMode ? "ON" : "off");
-                probeBuffer->Unmap();
-            }
-        }
-
-        // ── GI 频谱采样：等 GPU 完成后原样落盘（RGBA16F 原始像素、无文件头、行紧密排布）──
-        if (g_DumpDone && !g_DumpWritten) {
-            device->WaitIdle();   // 测试用途，允许停顿
-
-            // ── Nanite（§14.8 任务 3）：dump 帧打印**恰好一行**真实 GPU 读回 ──
-            // 同步已在上一行的 `WaitIdle()` 完成（与白炉探针/落盘同一套做法，不新造同步机制）；
-            // 关闭档下模块自身会直接返回（不打印），保证关闭档日志与基线一致。
-            if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
-                dpNanite->GetNanite().LogFakePipelineReadback();
-            // ── Nanite（§14.8 任务 15）：dump 帧打印**恰好一行**三阶段剔除的
-            //    GPU/CPU 逐项对照（三阶段读数 + Hi-Z 档位 + 可见簇集合差 + LOD 级分布 +
-            //    被遮挡簇的选层分布 + 实例剔除一致性）──
-            // 同步同样依赖上面的 `WaitIdle()`；关闭档下模块内部直接返回、不打印。
-            if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
-                dpNanite->GetNanite().LogCull3Readback();
-            // ── Nanite（§14.8 任务 16）：dump 帧打印**恰好一行**"可见簇 → 间接绘制"的接线读数
-            //    （`visible/indirect_count/draws/rasterized` 四个独立来源的真实 GPU 读回；
-            //    默认档要求 V==C==D==R、empty_draws=0、mismatch=0）──
-            // 同步同样依赖上面的 `WaitIdle()`；关闭档下模块内部直接返回、不打印。
-            if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
-                dpNanite->GetNanite().LogVisibleWiringReadback();
-            // ── Nanite（§14.8 任务 6）：mesh PSO 通道的**恰好一行**真实 GPU 读回 ──
-            // 同步同样已在上一行的 `WaitIdle()` 完成；`nanite_mesh_test=0`（默认）时模块内部
-            // 直接返回、不打印，因此不改变任何既有档位的日志。
-            if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
-                dpNanite->GetNanite().LogMeshTestReadback();
-
-            // ── Nanite（§14.8 任务 18）：软光栅的**恰好一行**真实 GPU 读回 ──
-            // 字段：clusters/soft/skipped_big/triangles/pixels_written/degenerate/
-            //       neutral_material_pixels/depth_written/depth_storage_image_supported/…
-            // 同步已在上面几行的 `WaitIdle()` 完成；`nanite_soft_raster=0` 或模块关闭时
-            // 模块内部直接返回、不打印，因此不改变任何既有档位的日志。
-            if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
-                dpNanite->GetNanite().LogSoftRasterReadback();
-
-            // ── Nanite（§14.8 任务 22）：硬光栅（mesh shader 分流）的**恰好一行**真实 GPU 读回 ──
-            // 字段：clusters/prims/pixels/fallback_pixels（硬光栅侧）+ soft_clusters/soft_pixels/
-            //       skipped_big（同一帧的软光栅侧对照）+ hard_share_permille/soft_share_permille
-            //       （"软硬占比"，按像素算的千分比）。
-            // 【为什么单起一行】判据 ⑧a 按**字段名**读上面那条 `soft_raster` 行，改它的字段会
-            // 直接判红；软硬占比由两条行并列读出。
-            // 同步同样依赖上面的 `WaitIdle()`；`nanite_hard_raster=0`（默认）时模块内部直接返回、
-            // 不打印，因此不改变任何既有档位的日志。
-            if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
-                dpNanite->GetNanite().LogHardRasterReadback();
-
-            // ── Nanite（§14.8 任务 23）：可见簇的**簇大小分布**（五桶）的**恰好一行**真实 GPU 读回 ──
-            // 字段：buckets=[1-4, 5-8, 9-16, 17-32, 33-64] + total（五桶之和）+ clusters（分流两侧合计）
-            //       + visible（剔除链的可见簇数）+ sum_eq_clusters / sum_eq_visible（两条不变式的判定位）。
-            // 【为什么与上面那条软光栅行**同门控**】桶计数就写在软光栅**第 1 趟**里、用同一个读数缓冲
-            //   ⇒ 两行必须同生同灭（`nanite_soft_raster=0` 或模块关闭时都不打印，既有档位的日志逐字不变）。
-            // 同步同样依赖上面的 `WaitIdle()`。
-            if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
-                dpNanite->GetNanite().LogSizeDistReadback();
-
-            // ── Nanite（§14.8 任务 24）：LOD 流式（反馈 + 页池）的**恰好一行**读数 ──
-            // 字段：pages_total/resident/pool/uploads_this_frame/evicted/page_misses/
-            //       pages_requested/stream=on|off/reason=… + 池内存足迹与累计请求数。
-            // 【门控】`nanite_streaming=0`（默认）时模块内部直接返回、不打印 ⇒ 关闭档与既有档位的
-            //   日志逐字不变。`page_misses` / `pages_requested` 是**真实 GPU 读回**（软光栅读数
-            //   缓冲的第 20/21 槽，由软光栅第 1 趟原子累加，且写入发生在同一帧清零之后）。
-            // 同步同样依赖上面的 `WaitIdle()`。
-            if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
-                dpNanite->GetNanite().LogStreamReadback();
-
-            // ── Nanite（§14.8 任务 25）：Material Bin 的**恰好一行**读数 ──
-            // 字段：descriptor_switches（本帧材质切换导致的描述符集切换次数，结构上是 0～1）/
-            //       material_switches（相邻处理的簇换材质的次数；顺序 = GPU 可见簇列表槽位顺序）/
-            //       material_switches_bin（若按 bin 顺序遍历的同一个数 —— 收益证据）/
-            //       material_switches_asset_order（资产自然顺序下的同一个数，与单测同口径）/
-            //       clusters_per_material=[distinct max min mean]（资产侧分布摘要）。
-            // 【门控】`nanite_material_bin=0`（默认）时模块内部直接返回、一个字符都不打印
-            //   ⇒ 关闭档与既有档位的日志逐字不变（这是本仓库"默认关闭时不打印"的纪律）。
-            // 【本行不新增 GPU 资源】bin 是上传期建一次的 CPU `u32[]`，其余读数全部来自既有缓冲。
-            // 同步同样依赖上面的 `WaitIdle()`。
-            if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
-                dpNanite->GetNanite().LogMaterialBinReadback();
-
-            // ── Nanite（§14.8 任务 26）：**屏幕可视化**的**恰好一行**读数 ──
-            // 字段：mode / name（1=可见簇数 2=软硬光栅占比 3=LOD 层级 4=BVH 深度）/
-            //       px_nonzero / px_nonzero_permille / distinct_vals（"不是黑屏"的三条判据）/
-            //       panelA=[sum max nonzero] panelB=[sum max nonzero] / tiled / visible / offscreen /
-            //       hard_share_clusters_permille（模式 2）/ mean_lod_milli（模式 3）/ max_bvh_depth（模式 4）。
-            // 【门控】`nanite_debug_view=0`（默认）时模块内部直接返回：不 Map 目标、一个字符都不打印
-            //   ⇒ 关闭档与既有档位的日志逐字不变。目标本身在默认档**根本不会被创建**。
-            // 同步同样依赖上面的 `WaitIdle()`（`CopyTextureToBuffer` 已把目标拷进 host 可见缓冲）。
-            if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
-                dpNanite->GetNanite().LogDebugViewReadback();
-
-            // ── 【§14.8 任务 23】整帧预算 + "分流 × 帧时"的 perf 行（同一个 `LogFrameBudget`）──
-            // 【为什么这里必须补一次 `LogFrameBudget()` 调用】它原本**只**在 Lumen 段
-            //   （`Lumen_SDF_Build` 的 pass 体内）被调用，而 07.Nanite 的 cfg 没有请求 Lumen 源
-            //   （`gi_blend_diffuse_lumen=0`）⇒ 那个 pass 根本不注册 ⇒ 【帧预算】行永远不会打印
-            //   （上面"帧率读数"行里写的"pass 合计见【帧预算】行"因此一直指不到东西）。
-            //   【为什么放在 dump 帧、`WaitIdle()` 之后】每档只付一次调用；且 perf 行里的分流计数
-            //   与上面几行读数**同一帧同一份**（全都在这一个 `WaitIdle()` 之后读回）。
-            //   **帧时不是新测的**：就是 `LogFrameBudget()` 自己算出的"各 pass 合计"，
-            //   与它打印的【帧预算】行逐位相同（任务 23 的"同一帧、同一来源"口径）。
-            // 【门控】只在 Nanite 模块开启且 `HE_CPU_PASSES` 打开时调用
-            //   （模块内部还会再查一次 `HE_CPU_PASSES`）⇒ 关闭档与既有档位的日志逐字不变。
-            // 【已知的良性重复】若该 cfg 将来请求了 Lumen 源（`gi_blend_diffuse_lumen != 0`），
-            //    Lumen 段那一处也会按它自己的 120 帧节拍打印【帧预算】 ⇒ 本档会各出现两行。
-            //    两行的 `total` 同源同公式，只是采样帧不同；当前 cfg 未请求 Lumen，故不会发生。
-            if (std::getenv("HE_CPU_PASSES") != nullptr) {
-                if (auto* dpBudget = dynamic_cast<render::DeferredPipeline*>(curPipeline)) {
-                    if (dpBudget->GetNanite().GetSettings().enabled) dpBudget->LogFrameBudget();
+            // ── 白炉探针：把 HDR 目标上的两个像素拷进 host 可见缓冲 ──
+            // 必须在 render pass 之外录制（拷贝不能在 pass 内），因此放在 EndRenderPass 之后、End 之前
+            const bool probeThisFrame = g_ProbeEnabled && (frameIndex % (u64)std::max(1, g_ProbeInterval) == 0);
+            if (probeThisFrame && probeBuffer) {
+                // 白炉探针也要按**当前管线**取 HDR：Forward 有自己的一张（任务 26 起层栈归一化
+                // 也在 Forward 生效，白炉判据必须能覆盖它）
+                rhi::IRHITexture* hdr = (g_PipelineMode == 0)
+                    ? forwardPipeline.GetHDRTarget()
+                    : deferredPipeline.GetLighting().GetHDRTarget();
+                if (hdr) {
+                    const u32 pw = swapchain->GetWidth(), ph = swapchain->GetHeight();
+                    const u32 cx = pw / 2,           cy = ph / 2;            // 中心（物体所在）
+                    const u32 bx = pw / 10,          by = ph / 10;           // 背景取样点
+                    // RGBA16_FLOAT：每像素 8 字节 → 第二个像素偏移 16 字节
+                    cmdList->CopyTextureToBuffer(hdr, probeBuffer.get(), cx, cy, 1, 1, 0);
+                    cmdList->CopyTextureToBuffer(hdr, probeBuffer.get(), bx, by, 1, 1, 16);
                 }
             }
 
-            const String dir  = "build/verify/";
-            const String base = dir + "gi_" + g_DumpTag;
-            std::filesystem::create_directories(dir);
-            std::ofstream meta(base + "_meta.txt");
-            for (auto& t : g_DumpTargets) {                        // 逐目标写：像素直落，无头
-                const usize bytes = (usize)t.w * t.h * 8;
-                const void* p = t.buf ? t.buf->Map() : nullptr;
-                if (p) {
-                    std::ofstream f(base + "_" + t.name + ".f16", std::ios::binary);
-                    f.write(static_cast<const char*>(p), (std::streamsize)bytes);
-                    t.buf->Unmap();
-                    meta << t.name << " " << t.w << " " << t.h << " RGBA16F\n";
-                    HE_CORE_INFO("[GI采样] {}_{}.f16  {}x{}  {} B", base, t.name, t.w, t.h, bytes);
+            // ── GI 频谱采样：把若干张纹理整幅拷进 host 可见缓冲（仅测试路径）──
+            // 同样必须在 render pass 之外录制；缓冲在采样帧才创建，尺寸取自纹理本身
+            // 目标分三类：
+            //   hdr / albedo  —— 合成结果与接收端反照率（做差 + 除 albedo 后即得 E/π）
+            //   provN_raw/final —— 各有效 Provider 的原始输出 / 降噪后输出（定位"某源为 0"发生在哪一级）
+            if (g_DumpGI && !g_DumpDone && frameIndex >= g_DumpFrame) {
+                auto addTarget = [&](const String& name, rhi::IRHITexture* tex) {
+                    if (!tex) return;
+                    DumpTarget t;
+                    t.name = name;
+                    t.tex  = tex;
+                    t.w    = tex->GetWidth();
+                    t.h    = tex->GetHeight();
+                    rhi::BufferDesc dd;                             // 宽×高×8 B（RGBA16F）
+                    dd.size      = (usize)t.w * t.h * 8;
+                    dd.usage     = rhi::BufferUsage::Storage;       // 该路径恒定带 TRANSFER_DST，可作拷贝目标
+                    dd.cpuAccess = true;                            // 需要 Map 读回
+                    t.buf = device->CreateBuffer(dd);
+                    if (!t.buf) { HE_CORE_ERROR("[GI采样] 读回缓冲创建失败: {}（{}x{}）", name, t.w, t.h); return; }
+                    // x=y=0 且取满宽高 ⇒ bufferRowLength=0 的紧密排布正好等于线性落盘布局
+                    cmdList->CopyTextureToBuffer(tex, t.buf.get(), 0, 0, t.w, t.h, 0);
+                    g_DumpTargets.push_back(std::move(t));
+                };
+                // HDR 取**当前管线**的那张（任务 26）：Forward 没有 GBuffer / Provider 输出，
+                // 但它的 HDR 目标就是层栈归一化的产物 —— 这正是 Forward 侧唯一可读的判据出口。
+                // 此前这里无条件取 deferredPipeline 的 HDR，于是 `pipeline_mode=0` 下落盘的
+                // 根本不是 Forward 的画面（文档 §11.3 早就把这点写成了注意事项，任务 26 修掉）。
+                const bool forwardMode = (g_PipelineMode == 0);
+                addTarget("hdr", forwardMode ? forwardPipeline.GetHDRTarget()
+                                             : deferredPipeline.GetLighting().GetHDRTarget());
+                if (!forwardMode) {
+                if (auto* gb = deferredPipeline.GetGBuffer()) {
+                    addTarget("albedo", gb->GetAlbedo());
+                    // GBuffer 的世界坐标/法线：屏幕空间 GI pass 的**输入**。少了它们，
+                    // "某个源的输出纹理对不对"就只能靠形状相关性猜；有了它们才能把那个 pass
+                    // 的公式在 CPU 上原样重算一遍做逐像素对照（任务 30 就是这么定位 RSM 链路的）。
+                    addTarget("gb_worldpos", gb->GetWorldPos());
+                    addTarget("gb_normal",   gb->GetNormal());
+                    // 光照图键（任务 31）：MRT7 = (uv0.x, uv0.y, objectIndex, 0)。烘焙光照图的
+                    // 前置条件就是"逐像素能反查页号与页内坐标"，这个转储是那条性质的唯一直接证据。
+                    addTarget("gb_lightmapkey", gb->GetLightmapKey());
+                }
+                // 共享的前帧 HDR 辐射度（DDGI 探针 / SSGI 入射辐射度的共同输入）：
+                // 它是 GI 源吃进去的东西，出问题时第一个要看的中间量
+                addTarget("radiance", deferredPipeline.GetRadianceHistory().GetTexture());
+                // IBL 辐照度：DDGI 探针更新的**唯一**辐射度回退来源（GI_DDGI::SetIBL）。
+                // 若它为空/未绑定，DDGI 会静默退化为 DDGI.comp.slang 的硬编码兜底常数。
+                if (auto* giIBL = dynamic_cast<render::GI_IBL*>(deferredPipeline.GetGI()))
+                    addTarget("ibl_irr", giIBL->GetIrradianceMap());
+                const auto& providers = deferredPipeline.GetGIProviders();
+                for (size_t i = 0; i < providers.size(); ++i) {
+                    auto* p = providers[i].get();
+                    // 【步骤 35】判据从 `IsValid()`（"pass 对象在"）换成 `ProducedThisFrame()`（"本帧真的跑了"）：
+                    // Lumen/RTAO 这些源即使没进任何层栈，`IsValid()` 也为真，于是 `provN_*` 会落到
+                    // 上一帧或从未使用的纹理上 —— 转储看起来"有内容"，实际是假读数。
+                    if (!p || !p->ProducedThisFrame()) continue;
+                    const String pre = "prov" + std::to_string(i) + "_";
+                    addTarget(pre + "raw",   p->GetDiffuseOutput());
+                    addTarget(pre + "final", p->GetFinalDiffuseOutput());
+                    // 镜面通道与 AO 通道的输出也必须能落盘：只看得见漫反射输出的话，
+                    // 「SSR/SSAO 是否真的产出了东西」就无从做纹理级对照（§9.2-B/C/E 都属这一类）。
+                    // 名称带通道后缀，避免与漫反射的 raw/final 混淆；不存在该通道输出时自动跳过。
+                    addTarget(pre + "spec_raw",   p->GetSpecularOutput());
+                    addTarget(pre + "spec_final", p->GetFinalSpecularOutput());
+                    addTarget(pre + "ao_raw",     p->GetAOOutput());
+                    addTarget(pre + "ao_final",   p->GetFinalAOOutput());
+                    // 步骤 12（L1 退出判据）：逐像素 SDF 追踪可视化。名字**稳定**（不依赖注册顺序），
+                    // 因为它是后面所有阶段（Screen Probe / Surface Cache）的公共"几何是否靠谱"凭据。
+                    if (auto* lp = dynamic_cast<render::LumenProvider*>(p)) {
+                        addTarget("lumen_sdf_trace", lp->GetSDFDebugTexture());
+                        // 步骤 37：把"逐像素入射辐照度"也落盘。它是 Lumen 的中间层，此前只有 CPU 侧
+                        // 统计（均值/覆盖）可看；当"统计正常但输出为黑"时，必须能直接看到这张纹理本身
+                        // 到底有没有内容，否则只能在"没画"和"画了但采样到空"之间猜。
+                        addTarget("lumen_irradiance", lp->GetIrradianceTexture());
+                        // 步骤 13（L2 的输入）：卡片覆盖率可视化（上半 = 代表 mesh 的 6 个投影面，下半 = 逐 mesh 覆盖条）
+                        addTarget("lumen_card_coverage", lp->GetCardCoverageTexture());
+                        addTarget("lumen_sc_atlas_albedo", lp->GetCardAtlasAlbedo());   // 步骤 15：Card 捕获的 albedo atlas
+                    }
+                }
+                }   // if (!forwardMode)
+                // RSM 链路的逐级中间量（任务 30）：位置 / 编码法线 / VPL 辐射度 / 间接光输出。
+                // 该链路的典型失效是"pass 在跑、成本在付、画面里什么都没有"（§9.2-AA），
+                // 只看最终 HDR 无法分辨是"没产出"还是"产出被合成丢掉"——所以四级都落盘。
+                // 两条管线各有自己的 GI_RSM 实例（同样是"同一个着色器、各自的光源视锥"），
+                // 故这里按当前管线取，才能对照两个视锥各自的产出。
+                if (auto* rsm = forwardMode ? forwardPipeline.GetRSM() : deferredPipeline.GetRSM()) {
+                    addTarget("rsm_pos", rsm->GetRSMPositionMap());
+                    addTarget("rsm_nrm", rsm->GetRSMFluxMap());
+                    addTarget("rsm_rad", rsm->GetRSMRadianceMap());
+                }
+                if (!forwardMode) addTarget("rsm_indirect", deferredPipeline.GetRSMIndirect().GetOutput());
+                // SSR 的输出单独给一个稳定名字（任务 32）：它的 provider 输出名是 `provN_spec_raw`，
+                // 而 N 取决于哪些 provider 有效 —— 判据不该依赖注册顺序。
+                if (!forwardMode) {
+                    if (auto* ssr = deferredPipeline.GetSSR())
+                        addTarget("ssr", ssr->GetIndirectSpecularTexture());
+                }
+                if (!g_DumpTargets.empty()) {
+                    g_DumpDone = true;   // 已录制；实际读取放在 Submit 之后
                 } else {
-                    HE_CORE_ERROR("[GI采样] 映射失败: {}_{}", base, t.name);
+                    g_DumpGI = false;
+                    HE_CORE_WARN("[GI采样] 没有可用目标（HDR 未创建？），本次跳过");
                 }
             }
-            HE_CORE_INFO("[GI采样] 共落盘 {} 个目标，请求退出", g_DumpTargets.size());
-            // 相机参数一并落盘：解析对照（平面镜的镜像点投影到屏幕）需要那套**渲染这一帧时**
-            // 的相机参数，否则判据只能靠硬编码 —— 而硬编码的相机参数一旦被 cfg 改动就失效。
+
+            cmdList->End();
+
+            device->Submit(cmdList.get());
+            deferredPipeline.FlushComputeWork();  // AsyncCompute: Graphics Submit 之后提交 Compute 工作
+
+            // ── 白炉探针：等 GPU 完成后读回（half → float），算亮度比并打日志 ──
+            if (probeThisFrame && probeBuffer) {
+                device->WaitIdle();   // 测试用途，允许停顿
+                const auto* texels = static_cast<const uint16_t*>(probeBuffer->Map());
+                if (texels) {
+                    for (int i = 0; i < 3; ++i) {
+                        g_ProbeCenter[i] = glm::unpackHalf1x16(texels[i]);          // 像素 0：中心
+                        g_ProbeBg[i]     = glm::unpackHalf1x16(texels[8 + i]);      // 像素 1：背景（16B 偏移 = 8 个 half）
+                    }
+                    const float lumCenter = 0.2126f * g_ProbeCenter[0] + 0.7152f * g_ProbeCenter[1] + 0.0722f * g_ProbeCenter[2];
+                    const float lumBg     = 0.2126f * g_ProbeBg[0]     + 0.7152f * g_ProbeBg[1]     + 0.0722f * g_ProbeBg[2];
+                    g_ProbeLumCenter = lumCenter;
+                    g_ProbeRatio = (lumBg > 1e-6f) ? (lumCenter / lumBg) : 0.0f;
+                    HE_CORE_INFO("[白炉探针] 中心 RGB=({:.4f},{:.4f},{:.4f}) 背景 RGB=({:.4f},{:.4f},{:.4f}) "
+                                 "亮度 中心={:.4f} 背景={:.4f} 比值={:.4f} 白炉={}",
+                                 g_ProbeCenter[0], g_ProbeCenter[1], g_ProbeCenter[2],
+                                 g_ProbeBg[0], g_ProbeBg[1], g_ProbeBg[2],
+                                 lumCenter, lumBg, g_ProbeRatio,
+                                 g_FurnaceMode ? "ON" : "off");
+                    probeBuffer->Unmap();
+                }
+            }
+
+            // ── GI 频谱采样：等 GPU 完成后原样落盘（RGBA16F 原始像素、无文件头、行紧密排布）──
+            if (g_DumpDone && !g_DumpWritten) {
+                device->WaitIdle();   // 测试用途，允许停顿
+
+                // ── Nanite（§14.8 任务 3）：dump 帧打印**恰好一行**真实 GPU 读回 ──
+                // 同步已在上一行的 `WaitIdle()` 完成（与白炉探针/落盘同一套做法，不新造同步机制）；
+                // 关闭档下模块自身会直接返回（不打印），保证关闭档日志与基线一致。
+                if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
+                    dpNanite->GetNanite().LogFakePipelineReadback();
+                // ── Nanite（§14.8 任务 15）：dump 帧打印**恰好一行**三阶段剔除的
+                //    GPU/CPU 逐项对照（三阶段读数 + Hi-Z 档位 + 可见簇集合差 + LOD 级分布 +
+                //    被遮挡簇的选层分布 + 实例剔除一致性）──
+                // 同步同样依赖上面的 `WaitIdle()`；关闭档下模块内部直接返回、不打印。
+                if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
+                    dpNanite->GetNanite().LogCull3Readback();
+                // ── Nanite（§14.8 任务 16）：dump 帧打印**恰好一行**"可见簇 → 间接绘制"的接线读数
+                //    （`visible/indirect_count/draws/rasterized` 四个独立来源的真实 GPU 读回；
+                //    默认档要求 V==C==D==R、empty_draws=0、mismatch=0）──
+                // 同步同样依赖上面的 `WaitIdle()`；关闭档下模块内部直接返回、不打印。
+                if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
+                    dpNanite->GetNanite().LogVisibleWiringReadback();
+                // ── Nanite（§14.8 任务 6）：mesh PSO 通道的**恰好一行**真实 GPU 读回 ──
+                // 同步同样已在上一行的 `WaitIdle()` 完成；`nanite_mesh_test=0`（默认）时模块内部
+                // 直接返回、不打印，因此不改变任何既有档位的日志。
+                if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
+                    dpNanite->GetNanite().LogMeshTestReadback();
+
+                // ── Nanite（§14.8 任务 18）：软光栅的**恰好一行**真实 GPU 读回 ──
+                // 字段：clusters/soft/skipped_big/triangles/pixels_written/degenerate/
+                //       neutral_material_pixels/depth_written/depth_storage_image_supported/…
+                // 同步已在上面几行的 `WaitIdle()` 完成；`nanite_soft_raster=0` 或模块关闭时
+                // 模块内部直接返回、不打印，因此不改变任何既有档位的日志。
+                if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
+                    dpNanite->GetNanite().LogSoftRasterReadback();
+
+                // ── Nanite（§14.8 任务 22）：硬光栅（mesh shader 分流）的**恰好一行**真实 GPU 读回 ──
+                // 字段：clusters/prims/pixels/fallback_pixels（硬光栅侧）+ soft_clusters/soft_pixels/
+                //       skipped_big（同一帧的软光栅侧对照）+ hard_share_permille/soft_share_permille
+                //       （"软硬占比"，按像素算的千分比）。
+                // 【为什么单起一行】判据 ⑧a 按**字段名**读上面那条 `soft_raster` 行，改它的字段会
+                // 直接判红；软硬占比由两条行并列读出。
+                // 同步同样依赖上面的 `WaitIdle()`；`nanite_hard_raster=0`（默认）时模块内部直接返回、
+                // 不打印，因此不改变任何既有档位的日志。
+                if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
+                    dpNanite->GetNanite().LogHardRasterReadback();
+
+                // ── Nanite（§14.8 任务 23）：可见簇的**簇大小分布**（五桶）的**恰好一行**真实 GPU 读回 ──
+                // 字段：buckets=[1-4, 5-8, 9-16, 17-32, 33-64] + total（五桶之和）+ clusters（分流两侧合计）
+                //       + visible（剔除链的可见簇数）+ sum_eq_clusters / sum_eq_visible（两条不变式的判定位）。
+                // 【为什么与上面那条软光栅行**同门控**】桶计数就写在软光栅**第 1 趟**里、用同一个读数缓冲
+                //   ⇒ 两行必须同生同灭（`nanite_soft_raster=0` 或模块关闭时都不打印，既有档位的日志逐字不变）。
+                // 同步同样依赖上面的 `WaitIdle()`。
+                if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
+                    dpNanite->GetNanite().LogSizeDistReadback();
+
+                // ── Nanite（§14.8 任务 24）：LOD 流式（反馈 + 页池）的**恰好一行**读数 ──
+                // 字段：pages_total/resident/pool/uploads_this_frame/evicted/page_misses/
+                //       pages_requested/stream=on|off/reason=… + 池内存足迹与累计请求数。
+                // 【门控】`nanite_streaming=0`（默认）时模块内部直接返回、不打印 ⇒ 关闭档与既有档位的
+                //   日志逐字不变。`page_misses` / `pages_requested` 是**真实 GPU 读回**（软光栅读数
+                //   缓冲的第 20/21 槽，由软光栅第 1 趟原子累加，且写入发生在同一帧清零之后）。
+                // 同步同样依赖上面的 `WaitIdle()`。
+                if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
+                    dpNanite->GetNanite().LogStreamReadback();
+
+                // ── Nanite（§14.8 任务 25）：Material Bin 的**恰好一行**读数 ──
+                // 字段：descriptor_switches（本帧材质切换导致的描述符集切换次数，结构上是 0～1）/
+                //       material_switches（相邻处理的簇换材质的次数；顺序 = GPU 可见簇列表槽位顺序）/
+                //       material_switches_bin（若按 bin 顺序遍历的同一个数 —— 收益证据）/
+                //       material_switches_asset_order（资产自然顺序下的同一个数，与单测同口径）/
+                //       clusters_per_material=[distinct max min mean]（资产侧分布摘要）。
+                // 【门控】`nanite_material_bin=0`（默认）时模块内部直接返回、一个字符都不打印
+                //   ⇒ 关闭档与既有档位的日志逐字不变（这是本仓库"默认关闭时不打印"的纪律）。
+                // 【本行不新增 GPU 资源】bin 是上传期建一次的 CPU `u32[]`，其余读数全部来自既有缓冲。
+                // 同步同样依赖上面的 `WaitIdle()`。
+                if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
+                    dpNanite->GetNanite().LogMaterialBinReadback();
+
+                // ── Nanite（§14.8 任务 26）：**屏幕可视化**的**恰好一行**读数 ──
+                // 字段：mode / name（1=可见簇数 2=软硬光栅占比 3=LOD 层级 4=BVH 深度）/
+                //       px_nonzero / px_nonzero_permille / distinct_vals（"不是黑屏"的三条判据）/
+                //       panelA=[sum max nonzero] panelB=[sum max nonzero] / tiled / visible / offscreen /
+                //       hard_share_clusters_permille（模式 2）/ mean_lod_milli（模式 3）/ max_bvh_depth（模式 4）。
+                // 【门控】`nanite_debug_view=0`（默认）时模块内部直接返回：不 Map 目标、一个字符都不打印
+                //   ⇒ 关闭档与既有档位的日志逐字不变。目标本身在默认档**根本不会被创建**。
+                // 同步同样依赖上面的 `WaitIdle()`（`CopyTextureToBuffer` 已把目标拷进 host 可见缓冲）。
+                if (auto* dpNanite = dynamic_cast<render::DeferredPipeline*>(curPipeline))
+                    dpNanite->GetNanite().LogDebugViewReadback();
+
+                // ── 【§14.8 任务 23】整帧预算 + "分流 × 帧时"的 perf 行（同一个 `LogFrameBudget`）──
+                // 【为什么这里必须补一次 `LogFrameBudget()` 调用】它原本**只**在 Lumen 段
+                //   （`Lumen_SDF_Build` 的 pass 体内）被调用，而 07.Nanite 的 cfg 没有请求 Lumen 源
+                //   （`gi_blend_diffuse_lumen=0`）⇒ 那个 pass 根本不注册 ⇒ 【帧预算】行永远不会打印
+                //   （上面"帧率读数"行里写的"pass 合计见【帧预算】行"因此一直指不到东西）。
+                //   【为什么放在 dump 帧、`WaitIdle()` 之后】每档只付一次调用；且 perf 行里的分流计数
+                //   与上面几行读数**同一帧同一份**（全都在这一个 `WaitIdle()` 之后读回）。
+                //   **帧时不是新测的**：就是 `LogFrameBudget()` 自己算出的"各 pass 合计"，
+                //   与它打印的【帧预算】行逐位相同（任务 23 的"同一帧、同一来源"口径）。
+                // 【门控】只在 Nanite 模块开启且 `HE_CPU_PASSES` 打开时调用
+                //   （模块内部还会再查一次 `HE_CPU_PASSES`）⇒ 关闭档与既有档位的日志逐字不变。
+                // 【已知的良性重复】若该 cfg 将来请求了 Lumen 源（`gi_blend_diffuse_lumen != 0`），
+                //    Lumen 段那一处也会按它自己的 120 帧节拍打印【帧预算】 ⇒ 本档会各出现两行。
+                //    两行的 `total` 同源同公式，只是采样帧不同；当前 cfg 未请求 Lumen，故不会发生。
+                if (std::getenv("HE_CPU_PASSES") != nullptr) {
+                    if (auto* dpBudget = dynamic_cast<render::DeferredPipeline*>(curPipeline)) {
+                        if (dpBudget->GetNanite().GetSettings().enabled) dpBudget->LogFrameBudget();
+                    }
+                }
+
+                const String dir  = "build/verify/";
+                const String base = dir + "gi_" + g_DumpTag;
+                std::filesystem::create_directories(dir);
+                std::ofstream meta(base + "_meta.txt");
+                for (auto& t : g_DumpTargets) {                        // 逐目标写：像素直落，无头
+                    const usize bytes = (usize)t.w * t.h * 8;
+                    const void* p = t.buf ? t.buf->Map() : nullptr;
+                    if (p) {
+                        std::ofstream f(base + "_" + t.name + ".f16", std::ios::binary);
+                        f.write(static_cast<const char*>(p), (std::streamsize)bytes);
+                        t.buf->Unmap();
+                        meta << t.name << " " << t.w << " " << t.h << " RGBA16F\n";
+                        HE_CORE_INFO("[GI采样] {}_{}.f16  {}x{}  {} B", base, t.name, t.w, t.h, bytes);
+                    } else {
+                        HE_CORE_ERROR("[GI采样] 映射失败: {}_{}", base, t.name);
+                    }
+                }
+                HE_CORE_INFO("[GI采样] 共落盘 {} 个目标，请求退出", g_DumpTargets.size());
+                // 相机参数一并落盘：解析对照（平面镜的镜像点投影到屏幕）需要那套**渲染这一帧时**
+                // 的相机参数，否则判据只能靠硬编码 —— 而硬编码的相机参数一旦被 cfg 改动就失效。
+                {
+                    const render::CameraData& cam = camCtrl.GetCamera();
+                    std::ofstream cm(base + "_camera.txt");
+                    cm << "pos "     << cam.position.x << " " << cam.position.y << " " << cam.position.z << "\n";
+                    cm << "forward " << cam.forward.x  << " " << cam.forward.y  << " " << cam.forward.z  << "\n";
+                    cm << "up "      << cam.up.x       << " " << cam.up.y       << " " << cam.up.z       << "\n";
+                    cm << "fov "     << cam.fov        << "\n";
+                    cm << "near "    << cam.nearPlane  << "\n";
+                    cm << "far "     << cam.farPlane   << "\n";
+                    cm << "aspect "  << cam.aspectRatio << "\n";
+                }
+                // 平面镜测试台的几何（任务 32）：与场景搭建同源，判据据此做解析镜像计算
+                if (g_MirrorRig.valid) {
+                    std::ofstream mr(base + "_mirror.txt");
+                    mr << "plane "  << g_MirrorRig.planeNormal.x << " " << g_MirrorRig.planeNormal.y << " "
+                                    << g_MirrorRig.planeNormal.z << " " << g_MirrorRig.planeOffset << "\n";
+                    mr << "slab "   << g_MirrorRig.slabCenter.x << " " << g_MirrorRig.slabCenter.y << " "
+                                    << g_MirrorRig.slabCenter.z << " " << g_MirrorRig.slabHalf.x << " "
+                                    << g_MirrorRig.slabHalf.y << " " << g_MirrorRig.slabHalf.z << "\n";
+                    mr << "red "    << g_MirrorRig.boxRed.x << " " << g_MirrorRig.boxRed.y << " "
+                                    << g_MirrorRig.boxRed.z << " " << g_MirrorRig.halfRed << "\n";
+                    mr << "green "  << g_MirrorRig.boxGreen.x << " " << g_MirrorRig.boxGreen.y << " "
+                                    << g_MirrorRig.boxGreen.z << " " << g_MirrorRig.halfGreen << "\n";
+                }
+                g_DumpWritten = true;
+                // 采样完成即请求关窗：让脚本无需超时等待，也保证退出前正常走完清理与保存流程
+                glfwSetWindowShouldClose(engine.GetWindow()->GetNativeHandle(), GLFW_TRUE);
+            }
+
+            // 垂直同步必须与创建时一致：只改 SwapChainDesc 而这里仍传 true，帧率照样被锁在刷新率
+            // （步骤 37 第一次测就是这么被误导的：pass 合计 14 ms 却只有 19 fps）。
+            swapchain->Present(!noVsync);
+            frameIndex++;
+
+            // 【步骤 37 / L6 帧时判据】周期性打印**真实墙钟帧率**与 CPU 侧耗时。
+            // 只在 `HE_NO_VSYNC=1` 时帧率才有判据意义（vsync 打开时它恒等于刷新率，会被误读成"达标"）。
             {
-                const render::CameraData& cam = camCtrl.GetCamera();
-                std::ofstream cm(base + "_camera.txt");
-                cm << "pos "     << cam.position.x << " " << cam.position.y << " " << cam.position.z << "\n";
-                cm << "forward " << cam.forward.x  << " " << cam.forward.y  << " " << cam.forward.z  << "\n";
-                cm << "up "      << cam.up.x       << " " << cam.up.y       << " " << cam.up.z       << "\n";
-                cm << "fov "     << cam.fov        << "\n";
-                cm << "near "    << cam.nearPlane  << "\n";
-                cm << "far "     << cam.farPlane   << "\n";
-                cm << "aspect "  << cam.aspectRatio << "\n";
-            }
-            // 平面镜测试台的几何（任务 32）：与场景搭建同源，判据据此做解析镜像计算
-            if (g_MirrorRig.valid) {
-                std::ofstream mr(base + "_mirror.txt");
-                mr << "plane "  << g_MirrorRig.planeNormal.x << " " << g_MirrorRig.planeNormal.y << " "
-                                << g_MirrorRig.planeNormal.z << " " << g_MirrorRig.planeOffset << "\n";
-                mr << "slab "   << g_MirrorRig.slabCenter.x << " " << g_MirrorRig.slabCenter.y << " "
-                                << g_MirrorRig.slabCenter.z << " " << g_MirrorRig.slabHalf.x << " "
-                                << g_MirrorRig.slabHalf.y << " " << g_MirrorRig.slabHalf.z << "\n";
-                mr << "red "    << g_MirrorRig.boxRed.x << " " << g_MirrorRig.boxRed.y << " "
-                                << g_MirrorRig.boxRed.z << " " << g_MirrorRig.halfRed << "\n";
-                mr << "green "  << g_MirrorRig.boxGreen.x << " " << g_MirrorRig.boxGreen.y << " "
-                                << g_MirrorRig.boxGreen.z << " " << g_MirrorRig.halfGreen << "\n";
-            }
-            g_DumpWritten = true;
-            // 采样完成即请求关窗：让脚本无需超时等待，也保证退出前正常走完清理与保存流程
-            glfwSetWindowShouldClose(engine.GetWindow()->GetNativeHandle(), GLFW_TRUE);
-        }
-
-        // 垂直同步必须与创建时一致：只改 SwapChainDesc 而这里仍传 true，帧率照样被锁在刷新率
-        // （步骤 37 第一次测就是这么被误导的：pass 合计 14 ms 却只有 19 fps）。
-        swapchain->Present(!noVsync);
-        frameIndex++;
-
-        // 【步骤 37 / L6 帧时判据】周期性打印**真实墙钟帧率**与 CPU 侧耗时。
-        // 只在 `HE_NO_VSYNC=1` 时帧率才有判据意义（vsync 打开时它恒等于刷新率，会被误读成"达标"）。
-        {
-            const double cpuMs = std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - cpuT0).count();
-            static double s_accMs = 0.0;
-            static double s_accCpuMs = 0.0;
-            static u32    s_n = 0;
-            s_accMs += (double)deltaTime * 1000.0;
-            s_accCpuMs += cpuMs;
-            ++s_n;
-            if (g_DumpGI && s_n >= 120u) {
-                const double wallMs = s_accMs / (double)s_n;
-                const double cm     = s_accCpuMs / (double)s_n;
-                const double pm     = s_accPipelineMs / (double)s_n;
-                // 步骤 37：管线 CPU 侧的三段分解（重建帧图 / 编译 / 执行）——判断该修哪一段
-                double bMs = 0.0, cMs = 0.0, eMs = 0.0;
-                if (auto* dp = dynamic_cast<render::DeferredPipeline*>(curPipeline)) {
-                    bMs = dp->GetCpuBuildMs(); cMs = dp->GetCpuCompileMs(); eMs = dp->GetCpuExecMs();
+                const double cpuMs = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - cpuT0).count();
+                static double s_accMs = 0.0;
+                static double s_accCpuMs = 0.0;
+                static u32    s_n = 0;
+                s_accMs += (double)deltaTime * 1000.0;
+                s_accCpuMs += cpuMs;
+                ++s_n;
+                if (g_DumpGI && s_n >= 120u) {
+                    const double wallMs = s_accMs / (double)s_n;
+                    const double cm     = s_accCpuMs / (double)s_n;
+                    const double pm     = s_accPipelineMs / (double)s_n;
+                    // 步骤 37：管线 CPU 侧的三段分解（重建帧图 / 编译 / 执行）——判断该修哪一段
+                    double bMs = 0.0, cMs = 0.0, eMs = 0.0;
+                    if (auto* dp = dynamic_cast<render::DeferredPipeline*>(curPipeline)) {
+                        bMs = dp->GetCpuBuildMs(); cMs = dp->GetCpuCompileMs(); eMs = dp->GetCpuExecMs();
+                    }
+                    HE_CORE_INFO("帧率读数（步骤 37）: 最近 {} 帧 墙钟 {:.3f} ms ⇒ {:.1f} fps；CPU 侧 {:.3f} ms"
+                                 "（{:.0f}% 的帧时，其中管线 Render {:.3f} ms / 其余 {:.3f} ms）⇒ 受限方 = {}"
+                                 "（vsync {}；pass 合计见【帧预算】行）",
+                                 s_n, wallMs, wallMs > 0.0 ? 1000.0 / wallMs : 0.0, cm,
+                                 wallMs > 0.0 ? 100.0 * cm / wallMs : 0.0, pm, cm - pm,
+                                 cm > wallMs * 0.8 ? "CPU" : "GPU/呈现",
+                                 noVsync ? "关" : "开（帧率被锁刷新率，不作判据）");
+                    HE_CORE_INFO("   管线 CPU 分解（上一帧）: 重建帧图 {:.3f} ms / 编译 {:.3f} ms / 执行(录制+提交) {:.3f} ms",
+                                 bMs, cMs, eMs);
+                    s_accMs = 0.0; s_accCpuMs = 0.0; s_accPipelineMs = 0.0;
+                    s_n = 0;
                 }
-                HE_CORE_INFO("帧率读数（步骤 37）: 最近 {} 帧 墙钟 {:.3f} ms ⇒ {:.1f} fps；CPU 侧 {:.3f} ms"
-                             "（{:.0f}% 的帧时，其中管线 Render {:.3f} ms / 其余 {:.3f} ms）⇒ 受限方 = {}"
-                             "（vsync {}；pass 合计见【帧预算】行）",
-                             s_n, wallMs, wallMs > 0.0 ? 1000.0 / wallMs : 0.0, cm,
-                             wallMs > 0.0 ? 100.0 * cm / wallMs : 0.0, pm, cm - pm,
-                             cm > wallMs * 0.8 ? "CPU" : "GPU/呈现",
-                             noVsync ? "关" : "开（帧率被锁刷新率，不作判据）");
-                HE_CORE_INFO("   管线 CPU 分解（上一帧）: 重建帧图 {:.3f} ms / 编译 {:.3f} ms / 执行(录制+提交) {:.3f} ms",
-                             bMs, cMs, eMs);
-                s_accMs = 0.0; s_accCpuMs = 0.0; s_accPipelineMs = 0.0;
-                s_n = 0;
-            }
-        }
+            }        };
+        submitRender(recordUiAndPresent);
+
     }
 
     // 清理
@@ -2163,6 +2228,10 @@ int main() {
         ImGui::SaveIniSettingsToDisk(ImGui::GetIO().IniFilename);
         HE_CORE_INFO("面板布局已保存: {}", ImGui::GetIO().IniFilename);
     }
+    // 【T2.4】退出前停渲染线程并撤销 RHI 归属
+    renderThread.Stop();
+    he::rhi::GetThreadAffinity().Release();
+
     imgui.Shutdown();
     device->WaitIdle();
     deferredPipeline.Shutdown();
