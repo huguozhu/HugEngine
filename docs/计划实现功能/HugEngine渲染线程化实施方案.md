@@ -1248,6 +1248,19 @@ private:
     与 06.GILab 同形（后者有转储逐位一致证据）"作为本样例的证据。）
   · **T2.4 剩余**：`02.Cube` / `03.Sponza-Forward` / `04.Sponza-Deferred` / `05.Sponza-PathTracing` /
     `07.Nanite` 共 5 个样例（形状相同，各自还需按上面的教训先枚举全部 RHI 调用点）。
+
+- **T2.4 扩展到 `03.Sponza-Forward`（已提交，进度 3/7）**：同形改造（两条命令 + 真渲染线程）；
+  按上一轮教训先枚举了全部 RHI 调用点，因此没有漏掉**窗口回调**里的整串 RHI
+  （`swapchain->Resize`/`cmdList->SetSwapChain`/`pipeline.OnResize`）—— 改为回调只置尺寸标志、
+  由渲染命令落地。
+  · **判据**：模式 0/模式 1 各 30 秒，`VUID 0`；模式 1 日志中 `[CSMTechnique] Cascade0 绘制物体数: 104`
+    出现在"已起真渲染线程"之后 ⇒ 帧由渲染线程录制与提交。
+  · **发现一处既有条件（与本批无关）**：两种模式下各有 1 条同源断言
+    `VulkanCommandList.cpp:197` = `BeginSecondary`（RenderGraph 的 worker/secondary 并行录制路径）。
+    它在**模式 0**（本批改动完全不起作用）同样出现 ⇒ 既有；`06.GILab` 不用 secondary 录制故无此断言。
+    **待办**：secondary/并行录制的归属问题（要么归到渲染线程，要么给它自己的归属语义）——
+    这条会挡在"模式 1 全样例零断言"之前。
+  · **T2.4 剩余**：`02.Cube` / `04.Sponza-Deferred` / `05.Sponza-PathTracing` / `07.Nanite` 共 4 个样例。
   · **教训**：读数前必须先确认渲染线程模式 —— 模式 0（SingleThreaded）时队列不参与、渲染线程空转，
     第一次测量因此"什么都没测到"。
 - [ ] T2.4 样例循环改造（7 个样例）
