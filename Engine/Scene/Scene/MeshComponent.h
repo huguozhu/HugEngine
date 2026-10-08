@@ -65,6 +65,13 @@ public:
     bool   hasMaterialAvg = false;          // 上面三项是否有效
     u32    materialID        = 0;                // Bindless 纹理数组基索引
 
+    /// 渲染侧 **mesh 注册表索引**（方案 §14 附录 E / E-2 的前置字段）。
+    /// 【为什么放在组件上】快照里不允许带指针（§4.2），所以 `SnapshotDrawItem` 只能带 `meshIndex`；
+    /// 而"组件 → 顶点/索引缓冲"的映射必须由渲染侧注册表承担。索引在**加载期注册时**回填
+    /// （`MeshRegistry::Register` 的返回值），0 表示未注册。与 `materialID`、
+    /// `ParticleComponent::rendererId` 同类（渲染侧索引落在组件上，已有先例）。
+    u32    meshIndex         = 0;
+
     // --- Disney principled BSDF / 折射扩展参数 ---
     // 默认值还原 glTF metallic-roughness 的行为（等价于「没有扩展」），
     // 由 glTF 的 KHR_materials_* 扩展填充；光栅化侧打包成 GPUObjectData 的
