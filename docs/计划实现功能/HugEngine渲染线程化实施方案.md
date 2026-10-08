@@ -1199,6 +1199,28 @@ private:
   真线程模式 2s 内完成并确认已退休）；四项闸门不变；06.GILab 冒烟改动前后 15 像素
   （5 个 Lumen 探针目标各 3 像素、maxULP=1、meanAbs=1.1e-11 —— 最小可能的浮点噪声），
   同批双跑底噪 4554 像素 ⇒ 本批只加原语、未改渲染路径。
+
+- **步骤 (b) 的一次尝试与回退（本轮，未落地代码）**：把 `06.GILab` 一帧的全部 RHI 调用
+  （Acquire → 录制 → ImGui 录制 → 调试绘制 → End → Submit → 探测读回 → Present）抽成一个
+  `renderFrame` lambda，模式 0 直接调用、模式 1/2 经队列 + `SubmitAndWait` 严格握手；ImGui 控件
+  （CPU 侧）留在游戏线程、`imgui.EndFrame(cmdList)` 移入命令。**它能编译**，但实测改变了语义，
+  故**回退**（工作区与判据恢复到本轮之前：回退后重建对比 98 像素 ≈ 底噪）。
+  · **证据 1（顺序语义）**：严格路径（mode 1 + 真线程）与默认路径的转储差 **37,190,248 像素**
+    （`lumen_irradiance`/`prov6_*` maxRel 7364、`hdr` 6.15M）——探针是时域累积，任何"早一帧/晚一帧"
+    都会放大成这种量级。
+  · **原因**：该形状把**控件树挪到了管线渲染之前**，而面板里有大量"每帧写管线/GI 设置"的代码
+    （如环境强度/档位），原先写在渲染之后 ⇒ 设置下一帧才生效，现在同一帧就生效 ⇒ 时域结果整体
+    平移一帧。
+  · **证据 2（teardown 归属）**：严格路径唯一断言 = `VulkanDevice.cpp:331`（"设备销毁只在拥有线程"）
+    ⇒ 退出路径的 `device->WaitIdle()` / `Shutdown()` 仍在游戏线程，而归属已认领给渲染线程；
+    **`RenderThread::Stop()` 侧还没有对应的 Release**（步骤 (a) 只做了认领）。
+  · **修正后的形状（下一步照此做）**：一帧**两条命令**，以保持原有顺序不变 ——
+    ① `[Acquire + cmdList->Begin + 管线 Render]` → 握手；
+    ② 游戏线程建 UI（控件写在渲染之后，与今天一致）；
+    ③ `[ImGui BeginRenderPass + imgui.EndFrame(cmdList) + EndRenderPass + 调试绘制 + End + Submit +
+    探测读回 + Present]` → 握手。
+    另外给 `RenderThread` 补一个 **stop 钩子/Release**（或在样例退出前 `Release()` 再 `Stop()`），
+    使 teardown 合法。
   · **教训**：读数前必须先确认渲染线程模式 —— 模式 0（SingleThreaded）时队列不参与、渲染线程空转，
     第一次测量因此"什么都没测到"。
 - [ ] T2.4 样例循环改造（7 个样例）
