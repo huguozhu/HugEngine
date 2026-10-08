@@ -881,7 +881,11 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
     render::RenderCommandQueue renderQueue(rhi::kMaxFramesInFlight);
     render::RenderThread       renderThread(renderQueue);
     render::FrameScheduler     frameScheduler(renderQueue, renderThread);
-    const bool                 useRenderQueue = he::UsesRenderThread();
+    // 【运行时可切换】不再是启动时锁存的常量：下拉选择模式后，在**帧首**统一生效
+    // （切到 0 要排空并停线程、切到 ≥1 要起线程并认领 RHI 归属）。
+    bool useRenderQueue = he::UsesRenderThread();
+    // 下拉菜单绑定的目标模式（初值 = 实际生效的模式，取自配置/环境变量）
+    int  g_UiThreadingMode = static_cast<int>(he::GetRenderThreadingMode());
     // 【T2.2 读数开关，默认关闭】`HE_RENDER_THREAD_STRICT=1` 时**真的起渲染线程**。
     // 现在样例里仍有大量游戏线程直接调 RHI 的地方（acquire / 录制 / Submit / Present / WaitIdle），
     // 而 RHI 侧对"拥有线程"有断言（`HE_ASSERT_RENDER_THREAD`）⇒ 打开本开关就能**实测**出
@@ -892,14 +896,25 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
     // 判据：模式 0 与模式 1 的转储逐位一致（实测 0 像素）、无归属断言、帧时间不退化。
     // `HE_RENDER_THREAD_FORCE_SHELL=1` 可强制退回壳模式（对照实验用）。
     const bool forceShell = std::getenv("HE_RENDER_THREAD_FORCE_SHELL") != nullptr;
-    if (useRenderQueue && !forceShell) {
-        renderThread.SetSpinWaitUs(50);
-        // RHI 归属：启动时认领给渲染线程、停止时撤销（认领必须在新线程里做 ⇒ 走启动钩子）
-        renderThread.SetThreadStartHook([] { he::rhi::GetThreadAffinity().Claim(); });
-        renderThread.SetThreadStopHook([] { he::rhi::GetThreadAffinity().Release(); });
-        HE_CORE_INFO("06.GILab：已起真渲染线程（整帧 RHI 归它；游戏线程按帧严格握手等待）");
-        renderThread.Start();
-    }
+    // 【统一切换入口】`mode` 为下拉选择的目标模式；`forceShell` 仅用于对照实验（强制壳模式）
+    auto applyThreadingMode = [&](he::RenderThreadingMode mode) {
+        const bool wantThread = (mode != he::RenderThreadingMode::SingleThreaded) && !forceShell;
+        if (wantThread && !renderThread.IsRunning()) {
+            renderThread.SetSpinWaitUs(50);
+            // RHI 归属：启动时认领给渲染线程、停止时撤销（认领必须在新线程里做 ⇒ 走启动钩子）
+            renderThread.SetThreadStartHook([] { he::rhi::GetThreadAffinity().Claim(); });
+            renderThread.SetThreadStopHook([] { he::rhi::GetThreadAffinity().Release(); });
+            renderThread.Start();
+            HE_CORE_INFO("06.GILab：已起真渲染线程（模式 = {}；整帧 RHI 归它）", he::RenderThreadingModeName(mode));
+        } else if (!wantThread && renderThread.IsRunning()) {
+            // Stop 会排空队列并触发停止钩子（撤销归属）；顺序很关键：先停线程再改模式
+            renderThread.Stop();
+            HE_CORE_INFO("06.GILab：已停渲染线程（模式 = {}；帧渲染回到游戏线程）", he::RenderThreadingModeName(mode));
+        }
+        he::SetRenderThreadingMode(mode);
+        useRenderQueue = he::UsesRenderThread();
+    };
+    applyThreadingMode(he::GetRenderThreadingMode());   // 启动时按配置/环境变量生效一次
 
     while (!engine.GetWindow()->ShouldClose()) {
         f64 now       = glfwGetTime();
@@ -910,6 +925,11 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
         const auto cpuT0 = std::chrono::steady_clock::now();
 
         engine.GetWindow()->PollEvents();
+
+        // 【帧首落地】下拉选择与当前生效模式不一致时，在这里统一切换（下一帧命令即按新模式走）
+        if (g_UiThreadingMode != static_cast<int>(he::GetRenderThreadingMode())) {
+            applyThreadingMode(static_cast<he::RenderThreadingMode>(g_UiThreadingMode));
+        }
 
         bool frameAborted = false;   // 渲染命令里 Acquire 失败时置位（命令可能在别的线程跑）
         // 管线 CPU 侧耗时累计（命令 1 里累加、命令 2 的帧率读数里消费 ⇒ 提到帧体层级）
@@ -1127,7 +1147,22 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
 
             // 相机
             ImGui::SeparatorText("相机");
-            ImGui::DragFloat3("位置##Camera", &camCtrl.GetCamera().position[0], 5.0f);
+            // ---- 渲染线程模式（T2.4/T2.2）----
+        {
+            static const char* kModeItems[] = {
+                "0  单线程（收集/录制/提交/呈现都在游戏线程）",
+                "1  游戏线程 + 渲染线程（整帧 RHI 归渲染线程）",
+            };
+            int sel = g_UiThreadingMode;
+            ImGui::SetNextItemWidth(360.0f);
+            if (ImGui::Combo("渲染线程模式##threading", &sel, kModeItems, IM_ARRAYSIZE(kModeItems))) {
+                g_UiThreadingMode = sel;   // 帧首统一生效（切换需要排空并停/起渲染线程）
+            }
+            ImGui::TextDisabled("当前生效：%s；模式 2（+RHI 线程）未实现；切换在下一帧帧首生效",
+                                he::RenderThreadingModeName(he::GetRenderThreadingMode()));
+        }
+
+        ImGui::DragFloat3("位置##Camera", &camCtrl.GetCamera().position[0], 5.0f);
             float yawDeg   = glm::degrees(camCtrl.GetYaw());
             float pitchDeg = glm::degrees(camCtrl.GetPitch());
             if (ImGui::SliderFloat("Yaw", &yawDeg, -180.0f, 180.0f, "%.1f°"))
@@ -1975,7 +2010,7 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
 
     // 【T2.2】退出前先停渲染线程并撤销 RHI 归属认领：收尾期的 `WaitIdle`/设备销毁仍在游戏线程，
     // 而归属已（在严格模式下）认领给渲染线程 ⇒ 不撤销就会撞归属断言。
-    renderThread.Stop();
+    if (renderThread.IsRunning()) renderThread.Stop();   // 可能已被下拉切回单线程
     he::rhi::GetThreadAffinity().Release();
 
     // 清理
