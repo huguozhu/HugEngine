@@ -149,7 +149,11 @@ void GBufferRenderer_GPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
             u32 objIndex = 0;
             bool found = false;
             for (auto& di : drawItems) {
-                if (di.mesh == static_cast<he::MeshComponent*>(&im)) { objIndex = di.objectIndex; found = true; break; }
+                // E-3②：优先按 meshIndex（整数）对齐对象条目；未注册（0）时兜底地址比较
+                if ((im.meshIndex != 0u && im.meshIndex == di.meshIndex) ||
+                    (im.meshIndex == 0u && di.mesh == static_cast<he::MeshComponent*>(&im))) {
+                    objIndex = di.objectIndex; found = true; break;
+                }
             }
             if (!found) return;
 
