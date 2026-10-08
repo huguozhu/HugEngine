@@ -1209,6 +1209,16 @@ python Tools\check_threading.py --world-deps --handles --gate
   **实测基线：渲染期 20 处 / 加载期 4 处**，命中清单（= E-3 后半的收敛对象）：
   `Pipeline/RTPass.cpp`(9)、`SceneRenderer.cpp`(4)、`Pipeline/RTPass.h`(4)、`SceneRenderer.h`(1)、
   `Pipeline/ForwardPipeline.{h,cpp}`(各 1)。**E-3 每推进一步就复测并把 `MESH_PTR_BASELINE` 下调。**
+  > **20 处的分类与替代方案（2026-09-24 逐条查清；没有"顺手能啃掉"的边角，都是结构性的）**：
+  > ① **RT 的 BLAS 缓存**（`RTPass.h:177/183` 等 4 处 + `.cpp` 9 处）：`unordered_map<MeshComponent*, BLASEntry>`
+  > —— 按组件地址做键 ⇒ 换成**按 `meshIndex`（或 `sourceEntity`）为键**，并在 E-4 的口径统一后重建缓存；
+  > ② **绘制辅助函数与查找**（`ForwardPipeline.h:137` `DrawMesh(cmd, MeshComponent*, …)`、
+  > `.cpp:1372` 定义、`.cpp:1112/1240` 用组件地址反查 `DrawItem`）—— 换成按 `meshIndex`/`sourceEntity`
+  > 查找，`DrawMesh` 的入参改成 `meshIndex` + 从注册表取缓冲；
+  > ③ **`SceneRenderer` 的 `Entry`/`DrawItem`**（`.cpp` 4 处 + `.h` 1 处）—— 见 E-3 配方：
+  > `Entry` 不再需要组件指针，`DrawItem` 用 `meshIndex`。
+  > 建议顺序：③（E-3 配方已就绪）→ ②（顺带把 `sourceEntity` 用起来）→ ①（涉及 RT 缓存重建，
+  > 与 E-4 口径统一一起做）。
 
 ---
 
