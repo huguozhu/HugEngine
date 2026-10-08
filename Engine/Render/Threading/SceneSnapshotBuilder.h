@@ -150,6 +150,20 @@ public:
         // 但走的是自己的类别分支 ⇒ 与旧阴影路径"只枚举 Mesh/Cube/Sphere"的口径一致）
         if constexpr (std::is_base_of_v<he::MeshComponent, TComponent>) {
             item.castsShadow = comp.castShadow;
+            // RT/PT 专用材质补充（第③段第 5 批）：只对 RT 可见子集有意义 —— 其它类别不进 BLAS，
+            // 留默认值即可（消费侧 `RTPass` 也只遍历 Base/Cube/Sphere）。
+            if constexpr (std::is_same_v<TComponent, he::MeshComponent> ||
+                          std::is_same_v<TComponent, he::CubeComponent> ||
+                          std::is_same_v<TComponent, he::SphereComponent>) {
+                item.rtMaterial.hasMaterialAvg      = comp.hasMaterialAvg;
+                item.rtMaterial.baseColorAvg        = comp.baseColorAvg;
+                item.rtMaterial.metallicAvg         = comp.metallicAvg;
+                item.rtMaterial.roughnessAvg        = comp.roughnessAvg;
+                item.rtMaterial.ior                 = comp.ior;
+                item.rtMaterial.transmission        = comp.transmission;
+                item.rtMaterial.attenuationColor    = comp.attenuationColor;
+                item.rtMaterial.attenuationDistance = comp.attenuationDistance;
+            }
         }
         item.bShadowCaster = item.castsShadow &&
             (item.meshClass == SnapshotMeshClass::Base ||

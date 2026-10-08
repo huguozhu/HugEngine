@@ -349,12 +349,12 @@ void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     if (m_RTEnabled && m_RTPass && GetRTPass() && GetRTPass()->IsValid()) {
         rg.AddPass("AS_Build", {}, {},
             [this, &world, &sg](rhi::IRHICommandList* c) {
-                GetRTPass()->BuildAS(c, world, sg);
+                GetRTPass()->BuildAS(c, FrameSnap(), m_MeshRegistry);
             });
 
         // 场景材质纹理（11×N + 法线/UV 纹理，PT ClosestHit 用）：首帧延迟构建一次
         if (!m_SceneMaterialBuilt) {
-            if (GetRTPass()->BuildSceneMaterialTexture(m_Device, world)) {
+            if (GetRTPass()->BuildSceneMaterialTexture(m_Device, FrameSnap(), m_MeshRegistry)) {
                 m_SceneMaterialBuilt = true;
             } else {
                 HE_CORE_WARN("PathTracingPipeline: 场景材质纹理构建失败，PT 材质查询不可用");

@@ -489,7 +489,7 @@ int main() {
             rtLayouts, pcRange);
 
         // 5.5.6 创建 RT 资源（材质纹理 + 光源 UB）
-        rtPass.CreateMaterialTexture(device.get(), 256, world);
+        rtPass.CreateMaterialTexture(device.get(), 256, pipeline.GetFrameSnapshot());
         rtPass.CreateLightBuffer(device.get(), 8);
 
         // 注册 RT set=0 到 bindless 堆（Callable shader 需要 bindless 纹理；RT set 无 SSBO 数组，bufferBinding=0）
@@ -707,7 +707,7 @@ int main() {
             // RT 路径：光追直写 BackBuffer（覆盖 pipeline.Render 的光栅化输出）
             // ============================================================
             // a) 构建/更新 AS（仅几何变更时重建 BLAS，每帧重建 TLAS）
-            rtPass.BuildAS(cmdList.get(), world, sceneGraph);
+            rtPass.BuildAS(cmdList.get(), pipeline.GetFrameSnapshot(), pipeline.GetMeshRegistry());
 
             // b1) 填充光源 UB（材质纹理为静态，创建时已初始化）
             rtPass.UpdateLightBuffer(

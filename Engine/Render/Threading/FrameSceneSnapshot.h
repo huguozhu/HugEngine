@@ -61,6 +61,24 @@ enum class SnapshotMeshClass : u8 {
     Skeletal,
 };
 
+/// RT/PT 专用材质补充（阶段 1 §15.1 第③段第 5 批）
+///
+/// 【为什么单独一组字段】`RTPass::BuildSceneMaterialTexture` 原先直接读 `MeshComponent` 的一批
+/// 字段：贴图均值回落（采样到真实贴图前用"贴图均值 × 因子"）、介质吸收（Beer-Lambert）、
+/// IOR/透射。它们**不在** `GPUObjectData` 里（那是光栅化路径的打包），而 RT 材质纹理必须有
+/// 这些值才能脱离组件构建。只对 RT 可见子集（`SnapshotMeshClass::Base`/`Cube`/`Sphere`）填。
+struct SnapshotRTMaterial {
+    /// 是否已有贴图均值统计（`MeshComponent::hasMaterialAvg`）
+    bool   hasMaterialAvg = false;
+    float3 baseColorAvg{0.0f};       ///< 贴图 baseColor 均值（无贴图/无统计时消费侧回落到因子）
+    float  metallicAvg  = 0.0f;
+    float  roughnessAvg = 0.0f;
+    float  ior          = 1.5f;      ///< 折射率（介质/透射用）
+    float  transmission = 0.0f;      ///< 透射（>0 时 PT 走折射/介质分支）
+    float3 attenuationColor{1.0f};   ///< 介质吸收色（Beer-Lambert）
+    float  attenuationDistance = 0.0f;   ///< 介质吸收距离（<=0 = 不衰减）
+};
+
 /// 单个可见物体的渲染输入（与 ECS 完全解耦：只有值，没有指针）
 struct SnapshotDrawItem {
     /// 世界矩阵 + 材质参数 + 世界 AABB（与着色器逐字段一致，可直接 memcpy 进对象 SSBO）
@@ -87,6 +105,8 @@ struct SnapshotDrawItem {
     SnapshotMeshClass meshClass = SnapshotMeshClass::Base;
     /// 组件的 `castShadow` 标志（阴影技术的口径里要用；与 `bShadowCaster` 的区别是后者已含"类别"过滤）
     bool castsShadow = false;
+    /// RT/PT 专用材质补充（只对 RT 可见子集 `Base`/`Cube`/`Sphere` 填，见 `SnapshotRTMaterial`）
+    SnapshotRTMaterial rtMaterial;
     /// 场景物体唯一 ID（调试、剔除统计、与 GPU Culling 的 objectID 对应）
     u32 objectID = 0;
     /// **来源实体 id**（`he::Entity::id`）。渲染侧仍有少量"逐实体"的状态机（骨骼缓冲的

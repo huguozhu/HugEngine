@@ -706,12 +706,12 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             rg.AddPass("AS_Build", {}, {},
                 [this, &world, &sg](rhi::IRHICommandList* c) {
                     m_GITimer.Begin(c, GITimer::kCommonItemIdx);
-                    m_RTPass->BuildAS(c, world, sg);
+                    m_RTPass->BuildAS(c, FrameSnap(), m_MeshRegistry);
                     m_GITimer.End(c, GITimer::kCommonItemIdx);
                 });
             // 场景材质纹理（ClosestHit 材质查询）：首帧延迟构建一次（CPU 侧）
             if (!m_SceneMaterialBuilt) {
-                if (m_RTPass->BuildSceneMaterialTexture(m_Device, world)) {
+                if (m_RTPass->BuildSceneMaterialTexture(m_Device, FrameSnap(), m_MeshRegistry)) {
                     m_SceneMaterialBuilt = true;
                 } else {
                     HE_CORE_WARN("DeferredPipeline: 场景材质纹理构建失败，RT 材质查询不可用");

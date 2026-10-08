@@ -1,7 +1,9 @@
 #pragma once
 
 #include "RHI/RHI.h"
-#include "Scene/MeshComponent.h"
+#include "Scene/MeshComponent.h"   // StaticVertex（顶点布局；本类不再按组件指针寻址）
+#include "Threading/FrameSceneSnapshot.h"   // 第③段第 5 批：改吃快照
+#include "Threading/MeshRegistry.h"
 #include "Scene/Transform.h"
 #include "Core/Types.h"
 
@@ -18,7 +20,7 @@ namespace he::render {
 // RTPass — Ray Tracing Pass 管理器
 //
 // 职责：
-//   1. 为每个 MeshComponent 创建/更新 BLAS
+//   1. 为本帧快照里的 RT 可见网格（Base/Cube/Sphere）创建/更新 BLAS
 //   2. 每帧构建 TLAS（收集所有 Mesh 的 world transform）
 //   3. 管理 RT Pipeline State + SBT
 //   4. 提供便捷的 TraceRays 调度接口
@@ -26,7 +28,7 @@ namespace he::render {
 // 用法：
 //   RTPass rt;
 //   rt.Initialize(device);
-//   rt.BuildAS(cmd, world, sg);        // 构建/更新 BLAS + TLAS
+//   rt.BuildAS(cmd, snapshot, registry);   // 构建/更新 BLAS + TLAS（第③段第 5 批：改吃快照）
 //   rt.BindPipeline(cmd);              // 绑定 RT PSO
 //   rt.TraceRays(cmd, sbt, w, h);      // 发射光线
 // ============================================================
@@ -52,8 +54,14 @@ public:
     void Shutdown();
 
     // 每帧调用：构建/更新 BLAS（仅当几何变更时） + 构建 TLAS
-    void BuildAS(rhi::IRHICommandList* cmd,
-                 he::World& world, he::SceneGraph& sg);
+    /// 构建/更新 BLAS + TLAS（阶段 1 §15.1 第③段第 5 批：**改吃快照 + 网格注册表**）
+    /// 【收集集】`SnapshotMeshClass ∈ {Base, Cube, Sphere}` —— 与旧实现遍历
+    /// `MeshComponent`/`Cube`/`Sphere` 的**精确类型**范围逐条一致、顺序一致。
+    /// 【世界矩阵】取快照条目的 `object.worldMatrix`（不再经 `SceneGraph::GetWorldMatrix`）。
+    /// 【几何】顶点/索引缓冲与顶点/索引数按 `meshIndex` 从注册表取；BLAS 缓存键也换成 `meshIndex`
+    ///（组件指针不再参与，组件指针闸门因此归零）。
+    void BuildAS(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snapshot,
+                 const MeshRegistry& registry);
 
     // 绑定 RT 管线
     void BindPipeline(rhi::IRHICommandList* cmd);
@@ -67,8 +75,9 @@ public:
                                rhi::IRHIBuffer* objectDataBuffer);
 
     // 创建材质纹理（1×N RGBA32F），从 World MeshComponent 读取 baseColorFactor
+    /// 材质纹理（3×N RGBA32F）：材质字段取快照条目的 `object`（与 GBuffer 路径同源）
     bool CreateMaterialTexture(rhi::IRHIDevice* device, u32 maxInstances,
-                               he::World& world);
+                               const FrameSceneSnapshot& snapshot);
 
     // 构建场景材质 + 三角形法线纹理（反射/GI ClosestHit 用）
     // 材质纹理 3×N RGBA32F：row0=albedo.rgb+metallic, row1=roughness+ao,
@@ -79,7 +88,11 @@ public:
     // 注意：必须用纹理而非 SSBO——已知 slangc 在 ClosestHitKHR 中访问
     // StructuredBuffer 会 GPU fault（见文档 P0 节）；且不依赖 position_fetch
     //（GTX 1070 等设备不支持 VK_KHR_ray_tracing_position_fetch）。
-    bool BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world);
+    /// 场景材质纹理（11×N RGBA32F）+ 三角形法线/UV 纹理：
+    /// 材质字段取自快照（含 `SnapshotRTMaterial` 的均值回落/介质/透射），三角形属性从注册表的
+    /// 顶点/索引缓冲读 ⇒ 不再需要 `World`
+    bool BuildSceneMaterialTexture(rhi::IRHIDevice* device, const FrameSceneSnapshot& snapshot,
+                                   const MeshRegistry& registry);
     rhi::IRHITexture* GetSceneMaterialTexture() const { return m_SceneMaterialTex.get(); }
     rhi::IRHITexture* GetSceneTriangleNormals() const { return m_SceneTriangleNormals.get(); }
     /// 三角形顶点 UV 纹理（每三角形 3 条，布局与法线纹理一致）：PT 的 ClosestHit 靠它插值出
@@ -91,13 +104,8 @@ public:
     void UpdateLightBuffer(rhi::IRHIBuffer* lightBuffer);
 
     // 更新 set=1 的顶点/索引 SSBO 绑定（Phase 4 顶点拉取）
-    // 传入当前帧需要拉取顶点的 MeshComponent（通常取第一个有效 mesh）
-    // 内部自动处理 GLM 对齐→GPU 标量布局的转换
-    void UpdateVertexDataDescriptorSet(rhi::IRHIDevice* device,
-                                       he::MeshComponent* mesh);
-
+    
     // 创建顶点拉取专用缓冲（GPU 标量布局，32B/顶点）
-    bool CreateVertexPullBuffer(rhi::IRHIDevice* device, he::MeshComponent* mesh);
 
     // Phase 4.2: Bindless 纹理支持
     // 注册纹理到 bindless 数组，返回索引（MaterialData 中的纹理 ID）
@@ -159,8 +167,8 @@ public:
     int ReloadShader(StringView shaderName, const std::vector<u32>& newSpirv);
 
 private:
-    // 检查几何是否变更（用于增量更新 BLAS）
-    bool HasGeometryChanged(he::MeshComponent* mesh);
+    // 检查几何是否变更（用于增量更新 BLAS）。键为 `meshIndex`、几何描述取自注册表条目
+    bool HasGeometryChanged(u32 meshIndex, const MeshRegistryEntry& entry);
 
     rhi::IRHIDevice* m_Device = nullptr;
 
@@ -174,13 +182,13 @@ private:
     std::unique_ptr<rhi::IRHIBuffer> m_TLASScratch;
     std::unique_ptr<rhi::IRHIBuffer> m_TLASInstanceBuffer;
 
-    // BLAS 映射: MeshComponent* → BLAS
+    // BLAS 映射: meshIndex → BLAS（第③段第 5 批：键从组件指针换成整数索引）
     struct BLASEntry {
         std::unique_ptr<rhi::IRHIAccelerationStructure> blas;
         std::unique_ptr<rhi::IRHIBuffer> scratchBuffer;
         u64 geometryHash = 0;  // 用于检测几何变更
     };
-    std::unordered_map<he::MeshComponent*, BLASEntry> m_BLASMap;
+    std::unordered_map<u32, BLASEntry> m_BLASMap;
 
     // 着色器字节码（热重载用）
     std::vector<rhi::ShaderBytecode> m_Shaders;

@@ -270,37 +270,35 @@ void RTPass::Shutdown() {
 // AS 构建
 // ============================================================
 
-static u64 HashGeometry(he::MeshComponent* mesh) {
-    // 简单 hash：顶点数 + 索引数 + 缓冲地址
-    u64 h = mesh->GetVertexCount();
-    h = h * 31 + mesh->GetIndexCount();
-    if (mesh->GetVertexBuffer())
-        h = h * 31 + mesh->GetVertexBuffer()->GetDeviceAddress();
-    if (mesh->GetIndexBuffer())
-        h = h * 31 + mesh->GetIndexBuffer()->GetDeviceAddress();
+// 【第③段第 5 批】几何哈希改吃**注册表条目**（顶点/索引数与缓冲设备地址）：
+// 与旧实现同口径（顶点数 + 索引数 + 两个缓冲的设备地址），只是数据来源从组件换成注册表。
+static u64 HashGeometry(const MeshRegistryEntry& e) {
+    u64 h = e.vertexCount;
+    h = h * 31 + e.indexCount;
+    if (e.vertexBuffer) h = h * 31 + e.vertexBuffer->GetDeviceAddress();
+    if (e.indexBuffer)  h = h * 31 + e.indexBuffer->GetDeviceAddress();
     return h;
 }
 
-bool RTPass::HasGeometryChanged(he::MeshComponent* mesh) {
-    auto it = m_BLASMap.find(mesh);
+bool RTPass::HasGeometryChanged(u32 meshIndex, const MeshRegistryEntry& entry) {
+    auto it = m_BLASMap.find(meshIndex);
     if (it == m_BLASMap.end()) return true;
-    return it->second.geometryHash != HashGeometry(mesh);
+    return it->second.geometryHash != HashGeometry(entry);
 }
 
-// 收集场景中所有可渲染网格（MeshComponent 及其派生类型 Cube/Sphere，
-// 与 SceneRenderer 的收集方式保持一致——ECS 按精确类型分桶存储）
-// 同时保存 Entity 以便获取世界变换矩阵
-static void CollectMeshList(he::World& world,
-                            std::vector<std::pair<he::Entity, he::MeshComponent*>>& out) {
-    world.ForEach<he::MeshComponent>([&](he::Entity e, he::MeshComponent& m) {
-        if (m.GetIndexCount() > 0) out.emplace_back(e, &m);
-    });
-    world.ForEach<he::CubeComponent>([&](he::Entity e, he::CubeComponent& c) {
-        if (c.GetIndexCount() > 0) out.emplace_back(e, static_cast<he::MeshComponent*>(&c));
-    });
-    world.ForEach<he::SphereComponent>([&](he::Entity e, he::SphereComponent& s) {
-        if (s.GetIndexCount() > 0) out.emplace_back(e, static_cast<he::MeshComponent*>(&s));
-    });
+// 收集本帧 **RT 可见**网格（`Base`/`Cube`/`Sphere`）——与旧实现遍历
+// `MeshComponent`/`Cube`/`Sphere` 的精确类型范围**逐条一致**（顺序也一致：快照按
+// Mesh → Cube → Sphere → … 枚举）。返回的是指向快照条目的指针（调用期间快照不变 ⇒ 稳定）。
+static void CollectMeshList(const FrameSceneSnapshot& snapshot,
+                            const MeshRegistry& registry,
+                            std::vector<const SnapshotDrawItem*>& out) {
+    for (const SnapshotDrawItem& it : snapshot.draws) {
+        if (it.meshClass != SnapshotMeshClass::Base &&
+            it.meshClass != SnapshotMeshClass::Cube &&
+            it.meshClass != SnapshotMeshClass::Sphere) continue;
+        if (!registry.Find(it.meshIndex)) continue;   // 未注册（无索引缓冲）⇒ 与旧口径一致地跳过
+        out.push_back(&it);
+    }
 }
 
 // float4x4 → float3x4 行主序变换（Vulkan VkTransformMatrixKHR 格式）
@@ -315,45 +313,39 @@ static float3x4 ToTransformMatrix(const float4x4& m) {
     return t;
 }
 
-void RTPass::BuildAS(rhi::IRHICommandList* cmd,
-                      he::World& world, he::SceneGraph& sg) {
+void RTPass::BuildAS(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snapshot,
+                     const MeshRegistry& registry) {
     if (!m_Initialized) return;
 
-    // ── 阶段 1: 构建/更新 BLAS ──
-    std::vector<std::pair<he::Entity, he::MeshComponent*>> meshList;
-    CollectMeshList(world, meshList);
+    std::vector<const SnapshotDrawItem*> meshList;
+    CollectMeshList(snapshot, registry, meshList);
 
+    // ── 阶段 1: 构建/更新 BLAS（按 meshIndex 缓存）──
     u32 blasIdx = 0;
-    for (auto& [entity, meshPtr] : meshList) {
-        (void)entity;
-        he::MeshComponent& mesh = *meshPtr;
-        auto* vb = mesh.GetVertexBuffer().get();
-        auto* ib = mesh.GetIndexBuffer().get();
-        if (!vb || !ib) continue;
+    for (const SnapshotDrawItem* item : meshList) {
+        const MeshRegistryEntry* me = registry.Find(item->meshIndex);
+        if (!me || !me->vertexBuffer || !me->indexBuffer) continue;
 
-        bool needsBuild = HasGeometryChanged(&mesh);
-        if (!needsBuild) continue;  // 几何未变，跳过此网格 BLAS 重建
+        if (!HasGeometryChanged(item->meshIndex, *me)) continue;   // 几何未变，跳过重建
 
-        // 创建或复用 BLAS entry
-        auto& entry = m_BLASMap[&mesh];
+        // 创建或复用 BLAS entry（键 = meshIndex：组件指针不参与）
+        auto& entry = m_BLASMap[item->meshIndex];
 
         rhi::BLASBuildDesc blasDesc;
         blasDesc.flags = rhi::ASBuildFlags::PreferFastTrace;
         rhi::RTGeometryDesc geo;
         geo.type         = rhi::RTGeometryType::Triangles;
-        geo.vertexBuffer = vb;
+        geo.vertexBuffer = me->vertexBuffer;
         geo.vertexFormat = rhi::Format::RGB32_FLOAT;
         geo.vertexStride = sizeof(he::StaticVertex);
-        geo.maxVertex    = mesh.GetVertexCount();
-        geo.indexBuffer  = ib;
+        geo.maxVertex    = me->vertexCount;
+        geo.indexBuffer  = me->indexBuffer;
         geo.indexFormat  = rhi::Format::R32_UINT;
-        geo.maxPrimitiveCount = mesh.GetIndexCount() / 3;
+        geo.maxPrimitiveCount = me->indexCount / 3;
         blasDesc.geometries.push_back(geo);
 
-        // 查询构建所需大小
         rhi::ASBuildSizes sizes = m_Device->GetBLASBuildSizes(blasDesc);
 
-        // 创建 BLAS（或复用已有 + resize）
         if (!entry.blas) {
             entry.blas = m_Device->CreateBLAS(blasDesc);
         }
@@ -366,14 +358,11 @@ void RTPass::BuildAS(rhi::IRHICommandList* cmd,
             entry.scratchBuffer = m_Device->CreateBuffer(sb);
         }
 
-        // 构建 BLAS
         cmd->BuildBLAS(entry.blas.get(), entry.scratchBuffer.get(), blasDesc, false);
 
-        // 记录 hash
-        entry.geometryHash = HashGeometry(&mesh);
+        entry.geometryHash = HashGeometry(*me);
         HE_CORE_INFO("RTPass: BLAS 构建 (mesh#{}, vertices={}, triangles={}, size={}KB)",
-                     blasIdx++, mesh.GetVertexCount(),
-                     mesh.GetIndexCount() / 3,
+                     blasIdx++, me->vertexCount, me->indexCount / 3,
                      sizes.accelerationStructureSize / 1024);
     }
 
@@ -381,34 +370,27 @@ void RTPass::BuildAS(rhi::IRHICommandList* cmd,
     std::vector<rhi::TLASInstanceDesc> instances;
     u32 instanceID = 0;
 
-    for (auto& [entity, meshPtr] : meshList) {
-        he::MeshComponent& mesh = *meshPtr;
-        auto it = m_BLASMap.find(&mesh);
+    for (const SnapshotDrawItem* item : meshList) {
+        auto it = m_BLASMap.find(item->meshIndex);
         if (it == m_BLASMap.end()) continue;
 
-        // 获取世界变换矩阵（通过 SceneGraph）
-        float4x4 worldMatrix = sg.GetWorldMatrix(entity);
-
+        // 世界矩阵直接取快照（旧实现走 `sg.GetWorldMatrix(entity)`，同一份数据）
         rhi::TLASInstanceDesc inst;
-        inst.transform   = ToTransformMatrix(worldMatrix);
-        inst.instanceID  = instanceID++;      // 实例自定义 ID
-        inst.instanceMask = 0xFF;             // 所有光线可见
-        inst.sbtOffset   = 0;                // 命中组索引（简单场景：0）
-        inst.flags       = 0;                // VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR
-        inst.blasAddress = it->second.blas->GetDeviceAddress();
+        inst.transform    = ToTransformMatrix(item->object.worldMatrix);
+        inst.instanceID   = instanceID++;      // 实例自定义 ID（与材质纹理列索引一致）
+        inst.instanceMask = 0xFF;              // 所有光线可见
+        inst.sbtOffset    = 0;                 // 命中组索引（简单场景：0）
+        inst.flags        = 0;
+        inst.blasAddress  = it->second.blas->GetDeviceAddress();
         instances.push_back(inst);
     }
 
     if (!instances.empty()) {
-        // 上传实例数据到 GPU
         void* mapped = m_TLASInstanceBuffer->Map();
-        std::memcpy(mapped, instances.data(),
-                     instances.size() * sizeof(rhi::TLASInstanceDesc));
+        std::memcpy(mapped, instances.data(), instances.size() * sizeof(rhi::TLASInstanceDesc));
         m_TLASInstanceBuffer->Unmap();
 
-        // 构建 TLAS
-        cmd->BuildTLAS(m_TLAS.get(), m_TLASScratch.get(),
-                       m_TLASInstanceBuffer.get(),
+        cmd->BuildTLAS(m_TLAS.get(), m_TLASScratch.get(), m_TLASInstanceBuffer.get(),
                        static_cast<u32>(instances.size()), false);
 
         HE_CORE_INFO("RTPass: TLAS 构建 ({} instances)", instances.size());
@@ -462,38 +444,39 @@ void RTPass::UpdateRTDescriptorSet(rhi::IRHIDevice* device,
 // Row 1: metallic, roughness, ao, alphaCutoff (RGBA)
 // Row 2: materialID (uint as float), materialFlags (uint as float), 0, 0 (RGBA)
 bool RTPass::CreateMaterialTexture(rhi::IRHIDevice* device, u32 maxInstances,
-                                    he::World& world) {
+                                    const FrameSceneSnapshot& snapshot) {
     if (!device || maxInstances == 0) return false;
     m_MaterialInstanceCount = std::min(maxInstances, 256u);
 
     // 3 行 × N 列，默认白色兜底
     std::vector<float> texData(m_MaterialInstanceCount * 4 * 3, 1.0f);
 
-    // 从 MeshComponent 收集 PBR 材质数据（按 TLAS 实例顺序）
+    // 材质字段取自快照条目的 `GPUObjectData`（收集侧用 `MakePBRMaterial` + `FillObjectData` 算好，
+    // 与 GBuffer 路径**同源**）；列索引与 `BuildAS` 的 TLAS 实例顺序一致。
     u32 idx = 0;
-    world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent& mesh) {
-        if (mesh.GetIndexCount() == 0) return;
-        if (idx >= m_MaterialInstanceCount) return;
-        // Row 0: baseColorFactor
+    for (const SnapshotDrawItem& it : snapshot.draws) {
+        if (it.meshClass != SnapshotMeshClass::Base &&
+            it.meshClass != SnapshotMeshClass::Cube &&
+            it.meshClass != SnapshotMeshClass::Sphere) continue;
+        if (idx >= m_MaterialInstanceCount) break;
+        const GPUObjectData& o = it.object;
         float* row0 = &texData[idx * 4];
-        row0[0] = mesh.baseColorFactor.x;
-        row0[1] = mesh.baseColorFactor.y;
-        row0[2] = mesh.baseColorFactor.z;
-        row0[3] = mesh.baseColorFactor.w;
-        // Row 1: metallic, roughness, ao, alphaCutoff
+        row0[0] = o.baseColorFactor.x;
+        row0[1] = o.baseColorFactor.y;
+        row0[2] = o.baseColorFactor.z;
+        row0[3] = o.baseColorFactor.w;
         float* row1 = &texData[m_MaterialInstanceCount * 4 + idx * 4];
-        row1[0] = mesh.metallicFactor;
-        row1[1] = mesh.roughnessFactor;
-        row1[2] = mesh.aoFactor;
-        row1[3] = mesh.alphaCutoff;
-        // Row 2: materialID (uint→float 值转换，避免 denormal flush-to-zero)
+        row1[0] = o.metallicFactor;
+        row1[1] = o.roughnessFactor;
+        row1[2] = o.aoFactor;
+        row1[3] = o.alphaCutoff;
         float* row2 = &texData[m_MaterialInstanceCount * 4 * 2 + idx * 4];
-        row2[0] = static_cast<float>(mesh.materialID);
+        row2[0] = static_cast<float>(o.materialID);   // uint→float 值转换（避免 denormal flush-to-zero）
         row2[1] = 0.0f;
         row2[2] = 0.0f;
         row2[3] = 0.0f;
         idx++;
-    });
+    }
 
     rhi::TextureDesc texDesc;
     texDesc.format = rhi::Format::RGBA32_FLOAT;
@@ -524,12 +507,13 @@ bool RTPass::CreateMaterialTexture(rhi::IRHIDevice* device, u32 maxInstances,
 // 行 4~7 与 Material.h 的 disneyA/disneyB/disneyC 打包逐字段一致，
 // 供路径追踪的 PathPayload（PT 任务 1 / 4）带上完整 Disney 参数与介质参数。
 // ============================================================
-bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world) {
+bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, const FrameSceneSnapshot& snapshot,
+                                       const MeshRegistry& registry) {
     if (!device) return false;
 
-    // 收集可渲染网格（与 BuildAS 的实例顺序一致）
-    std::vector<std::pair<he::Entity, he::MeshComponent*>> meshList;
-    CollectMeshList(world, meshList);
+    // 收集 RT 可见网格（与 BuildAS 的实例顺序一致；第③段第 5 批：改从快照 + 注册表取）
+    std::vector<const SnapshotDrawItem*> meshList;
+    CollectMeshList(snapshot, registry, meshList);
     if (meshList.empty()) {
         HE_CORE_WARN("RTPass: BuildSceneMaterialTexture — 场景无网格，跳过");
         return false;
@@ -537,7 +521,10 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world
 
     u32 n = (u32)meshList.size();
     u64 totalTris = 0;
-    for (auto& [e, m] : meshList) totalTris += m->GetIndexCount() / 3;
+    for (const SnapshotDrawItem* d : meshList) {
+        const MeshRegistryEntry* re = registry.Find(d->meshIndex);
+        if (re) totalTris += re->indexCount / 3;
+    }
 
     // ── 材质纹理数据（11 行 × N 列）──
     // row0=albedo.rgb+metallic, row1=roughness+ao,
@@ -567,8 +554,11 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world
 
     u64 triFlat = 0;  // 跨实例的扁平三角形索引
     for (u32 i = 0; i < n; ++i) {
-        he::MeshComponent& m = *meshList[i].second;
-        u32 triCount = m.GetIndexCount() / 3;
+        const SnapshotDrawItem& item = *meshList[i];
+        const SnapshotRTMaterial& rt = item.rtMaterial;
+        const GPUObjectData& obj = item.object;
+        const MeshRegistryEntry* me = registry.Find(item.meshIndex);
+        u32 triCount = me ? me->indexCount / 3 : 0u;
 
         // 材质纹理：4 行基础 PBR + Disney/介质 4 行 + 贴图索引/因子 3 行
         // 没有均值时退回因子（与光栅化的因子语义一致）。
@@ -577,13 +567,13 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world
         // （PT 任务 5 起 PT 会真正采样贴图，此时用 row9/row10 的因子；row0/row1 的均值
         //   只在没有贴图/贴图未注册时作为回落。）
         float* row0 = &matData[i * 4];
-        row0[0] = m.hasMaterialAvg ? m.baseColorAvg.r : m.baseColorFactor.r;
-        row0[1] = m.hasMaterialAvg ? m.baseColorAvg.g : m.baseColorFactor.g;
-        row0[2] = m.hasMaterialAvg ? m.baseColorAvg.b : m.baseColorFactor.b;
-        row0[3] = m.hasMaterialAvg ? m.metallicAvg  : m.metallicFactor;
+        row0[0] = rt.hasMaterialAvg ? rt.baseColorAvg.x : obj.baseColorFactor.x;
+        row0[1] = rt.hasMaterialAvg ? rt.baseColorAvg.y : obj.baseColorFactor.y;
+        row0[2] = rt.hasMaterialAvg ? rt.baseColorAvg.z : obj.baseColorFactor.z;
+        row0[3] = rt.hasMaterialAvg ? rt.metallicAvg  : obj.metallicFactor;
         float* row1 = &matData[n * 4 + i * 4];
-        row1[0] = m.hasMaterialAvg ? m.roughnessAvg : m.roughnessFactor;
-        row1[1] = m.aoFactor;
+        row1[0] = rt.hasMaterialAvg ? rt.roughnessAvg : obj.roughnessFactor;
+        row1[1] = obj.aoFactor;
         row1[2] = 0.0f;
         row1[3] = 0.0f;
         float* row2 = &matData[n * 8 + i * 4];
@@ -592,17 +582,22 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world
         row2[2] = float(normTexWidth);     // 法线纹理宽度（shader 用 lin%W 计算坐标）
         row2[3] = 0.0f;
         float* row3 = &matData[n * 12 + i * 4];
-        row3[0] = m.emissiveFactor.r;
-        row3[1] = m.emissiveFactor.g;
-        row3[2] = m.emissiveFactor.b;
+        row3[0] = obj.emissiveFactor.x;
+        row3[1] = obj.emissiveFactor.y;
+        row3[2] = obj.emissiveFactor.z;
         row3[3] = 0.0f;
         // Disney 参数（统一走 RT/PTMaterialParams.h 的打包规则：
         // 与 Material.h 的 disneyA/disneyB/disneyC、PT 载荷逐字段同源）
-        const PTMaterialParams disney = PackDisneyParams(
-            m.anisotropic, m.subsurface, m.specular, m.sheen,
-            m.clearcoat, m.clearcoatGloss,
-            m.specularTint.r, m.specularTint.g, m.specularTint.b,
-            m.ior, m.transmission);
+        // Disney 参数与介质参数：`GPUObjectData` 里的 disneyA/B/C 与 dielectricF0 是收集侧用
+        // 同一个 `PackDisneyParams` 打包的（与 Material.h 逐字段同源）⇒ 这里直接取快照打包值；
+        // `ior` / `transmission` 不在 GPUObjectData 里，取 `SnapshotRTMaterial`（同一批字段）。
+        const PTMaterialParams disney = [&] {
+            PTMaterialParams p{};
+            p.disneyA = obj.disneyA;
+            p.disneyB = obj.disneyB;
+            p.surfaceParams = float4(obj.disneyC, obj.dielectricF0, rt.ior, rt.transmission);
+            return p;
+        }();
         float* row4 = &matData[n * 16 + i * 4];
         row4[0] = disney.disneyA.x;
         row4[1] = disney.disneyA.y;
@@ -617,45 +612,43 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, he::World& world
         row6[0] = disney.surfaceParams.x;   // disneyC = specularTint.b
         row6[1] = disney.surfaceParams.y;   // dielectricF0（由 IOR 推导）
         row6[2] = disney.surfaceParams.z;   // ior
-        row6[3] = m.transmission;           // 透射（>0 时 PT 走折射/介质分支）
+        row6[3] = rt.transmission;          // 透射（>0 时 PT 走折射/介质分支）
         // 介质吸收系数 σ_t：Beer-Lambert 透射率 = exp(-σ_t · d)
         //   σ_t = -ln(attenuationColor) / attenuationDistance（逐通道）
         // attenuationDistance<=0（glTF 的 +inf）或颜色为 1（不吸收）时为 0 = 不衰减
         float* row7 = &matData[n * 28 + i * 4];
         row7[0] = row7[1] = row7[2] = row7[3] = 0.0f;
-        if (m.attenuationDistance > 0.0f) {
-            const float inv = 1.0f / m.attenuationDistance;
-            row7[0] = -std::log(std::max(m.attenuationColor.r, 1e-6f)) * inv;
-            row7[1] = -std::log(std::max(m.attenuationColor.g, 1e-6f)) * inv;
-            row7[2] = -std::log(std::max(m.attenuationColor.b, 1e-6f)) * inv;
+        if (rt.attenuationDistance > 0.0f) {
+            const float inv = 1.0f / rt.attenuationDistance;
+            row7[0] = -std::log(std::max(rt.attenuationColor.x, 1e-6f)) * inv;
+            row7[1] = -std::log(std::max(rt.attenuationColor.y, 1e-6f)) * inv;
+            row7[2] = -std::log(std::max(rt.attenuationColor.z, 1e-6f)) * inv;
         }
         // row8：bindless 贴图基索引 + 纹理存在位掩码（与光栅化路径同一套规则：
         //   Material.h::ComputeMaterialTextureMask / kGPUMaterialTexMask_*）
         //   textureMask 的位序必须与 kGPUMaterialTexSlot_* 一致（BaseColor=0, Normal=1,
         //   MetallicRough=2, Occlusion=3），采样时用 texBase + 槽号。
-        u32 texMask = 0;
-        if (!m.baseColorTexture.empty())         texMask |= (1u << 0);
-        if (!m.normalTexture.empty())            texMask |= (1u << 1);
-        if (!m.metallicRoughnessTexture.empty()) texMask |= (1u << 2);
-        if (!m.occlusionTexture.empty())         texMask |= (1u << 3);
+        // 纹理存在位掩码：直接取快照（收集侧 `MakePBRMaterial` + `FillObjectData` 已按同一套位序
+        // 压好 —— bit0=BaseColor / bit1=Normal / bit2=MetallicRough / bit3=Occlusion）
+        const u32 texMask = obj.textureMask;
         float* row8 = &matData[n * 32 + i * 4];
-        row8[0] = static_cast<float>(m.materialID);   // 整数按 float 存（< 2^24 无精度损失）
+        row8[0] = static_cast<float>(obj.materialID);   // 整数按 float 存（< 2^24 无精度损失）
         row8[1] = static_cast<float>(texMask);
         row8[2] = 0.0f;
         row8[3] = 0.0f;
         // row9 / row10：材质因子（采样到真实贴图时用 factor × texture）
         float* row9 = &matData[n * 36 + i * 4];
-        row9[0] = m.baseColorFactor.r;
-        row9[1] = m.baseColorFactor.g;
-        row9[2] = m.baseColorFactor.b;
-        row9[3] = m.metallicFactor;
+        row9[0] = obj.baseColorFactor.x;
+        row9[1] = obj.baseColorFactor.y;
+        row9[2] = obj.baseColorFactor.z;
+        row9[3] = obj.metallicFactor;
         float* row10 = &matData[n * 40 + i * 4];
-        row10[0] = m.roughnessFactor;
+        row10[0] = obj.roughnessFactor;
         row10[1] = row10[2] = row10[3] = 0.0f;
 
         // 读取顶点/索引缓冲 → 每三角形 3 条顶点法线 + 3 条 UV
-        auto* vb = m.GetVertexBuffer().get();
-        auto* ib = m.GetIndexBuffer().get();
+        auto* vb = me ? me->vertexBuffer : nullptr;
+        auto* ib = me ? me->indexBuffer : nullptr;
         if (!vb || !ib || triCount == 0) { triFlat += triCount; continue; }
         const u8* vdata = static_cast<const u8*>(vb->Map());
         const u32* idata = static_cast<const u32*>(ib->Map());
@@ -786,139 +779,21 @@ void RTPass::UpdateLightBuffer(rhi::IRHIBuffer* lightBuffer) {
 // Phase 4: 顶点拉取 — GPU 标量布局 SSBO
 // ============================================================
 
-// GPU 端顶点布局（标量布局：紧密打包 32 字节）
-// 与 C++ StaticVertex(GLM 对齐 40B) 不同，需要解包转换
-struct RTVertexPacked {
-    float position[3];   // offset 0,  12 字节
-    float normal[3];     // offset 12, 12 字节
-    float uv[2];         // offset 24, 8 字节
-};
-static_assert(sizeof(RTVertexPacked) == 32,
-              "RTVertexPacked must be 32 bytes (GPU scalar layout)");
-
 // C++ StaticVertex 布局检测
 // 不启用 GLM_FORCE_DEFAULT_ALIGNED_GENTYPES：32 字节（与 GPU 标量一致）
 // 启用后 GLM vec3→16B 且 struct 对齐至 16B：48 字节（需解包）
+// 【第③段第 5 批】这里原先还有 `RTVertexPacked`（GPU 标量布局 32B）与它的尺寸断言，随"顶点拉取"
+// 死路径一起删除（见下）。保留 `StaticVertex` 的断言：`BuildAS` 的 `geo.vertexStride` 与
+// `BuildSceneMaterialTexture` 的 `offsetof` 取法都依赖它的实际大小。
 static_assert(sizeof(he::StaticVertex) == 32 || sizeof(he::StaticVertex) == 48,
               "Unexpected StaticVertex size — expected 32 or 48");
 
-bool RTPass::CreateVertexPullBuffer(rhi::IRHIDevice* device,
-                                     he::MeshComponent* mesh) {
-    if (!device || !mesh) return false;
-
-    u32 vertexCount = mesh->GetVertexCount();
-    if (vertexCount == 0) {
-        HE_CORE_WARN("RTPass::CreateVertexPullBuffer: mesh has 0 vertices");
-        return false;
-    }
-
-    auto* srcBuf = mesh->GetVertexBuffer().get();
-    if (!srcBuf) {
-        HE_CORE_WARN("RTPass::CreateVertexPullBuffer: mesh has no vertex buffer");
-        return false;
-    }
-
-    u64 srcSize = srcBuf->GetSize();
-    u64 expectedSize = vertexCount * sizeof(he::StaticVertex);
-    if (srcSize < expectedSize) {
-        HE_CORE_ERROR("RTPass::CreateVertexPullBuffer: buffer size mismatch "
-                      "(expected={}, actual={})", expectedSize, srcSize);
-        return false;
-    }
-
-    const u8* src = static_cast<const u8*>(srcBuf->Map());
-    if (!src) {
-        HE_CORE_ERROR("RTPass::CreateVertexPullBuffer: Map() failed (nullptr)");
-        return false;
-    }
-
-    constexpr u32 GPU_STRIDE = sizeof(RTVertexPacked);       // 32 字节
-    constexpr u32 CPU_STRIDE = sizeof(he::StaticVertex);     // 32 或 48 字节
-
-    std::vector<RTVertexPacked> packed(vertexCount);
-
-    if constexpr (CPU_STRIDE == GPU_STRIDE) {
-        // CPU 与 GPU 布局一致（32 字节），直接拷贝
-        std::memcpy(packed.data(), src, srcSize);
-        HE_CORE_INFO("RTPass: 顶点布局一致 ({}B)，直接复用原始缓冲", CPU_STRIDE);
-    } else {
-        // GLM 对齐布局（48 字节）：GLM vec3 含 4B 尾部+8B 尾部 struct padding
-        // 每顶点内偏移: pos(0), normal(16), uv(32) — 与 32B 布局一致，仅 stride 不同
-        for (u32 i = 0; i < vertexCount; i++) {
-            const float* v = reinterpret_cast<const float*>(src + i * CPU_STRIDE);
-            packed[i].position[0] = v[0];  // pos.x
-            packed[i].position[1] = v[1];  // pos.y
-            packed[i].position[2] = v[2];  // pos.z
-            packed[i].normal[0]   = v[4];  // normal.x (v[3]=pos.w padding)
-            packed[i].normal[1]   = v[5];  // normal.y
-            packed[i].normal[2]   = v[6];  // normal.z
-            packed[i].uv[0]       = v[8];  // uv.x (v[7]=normal.w padding)
-            packed[i].uv[1]       = v[9];  // uv.y
-        }
-        HE_CORE_INFO("RTPass: 顶点布局解包 (CPU={}B → GPU={}B)", CPU_STRIDE, GPU_STRIDE);
-    }
-    srcBuf->Unmap();
-
-    // 上传顶点数据到 GPU
-    rhi::BufferDesc vbDesc;
-    vbDesc.size        = vertexCount * GPU_STRIDE;
-    vbDesc.usage       = rhi::BufferUsage::Storage;
-    vbDesc.initialData = packed.data();
-    m_VertexPullBuffer = device->CreateBuffer(vbDesc);
-
-    if (!m_VertexPullBuffer) {
-        HE_CORE_ERROR("RTPass::CreateVertexPullBuffer: GPU vertex buffer creation failed (size={})",
-                      vbDesc.size);
-        return false;
-    }
-
-    // 索引缓冲直接拷贝（uint32，无布局差异），创建独立 SSBO 避免修改源缓冲的 usage
-    auto* idxBuf = mesh->GetIndexBuffer().get();
-    if (idxBuf) {
-        u32 idxCount = mesh->GetIndexCount();
-        u64 idxSize = idxCount * sizeof(u32);
-        const u8* idxSrc = static_cast<const u8*>(idxBuf->Map());
-        if (idxSrc) {
-            rhi::BufferDesc ibDesc;
-            ibDesc.size        = idxSize;
-            ibDesc.usage       = rhi::BufferUsage::Storage;
-            ibDesc.initialData = idxSrc;
-            m_IndexPullBuffer = device->CreateBuffer(ibDesc);
-            idxBuf->Unmap();
-
-            if (!m_IndexPullBuffer)
-                HE_CORE_WARN("RTPass::CreateVertexPullBuffer: GPU index buffer creation failed");
-        }
-    }
-
-    HE_CORE_INFO("RTPass: 顶点拉取缓冲创建成功 ({} vertices, CPU={}B→GPU={}B, total={}KB)",
-                 vertexCount, CPU_STRIDE, GPU_STRIDE,
-                 static_cast<u32>(vbDesc.size) / 1024);
-    return true;
-}
-
-void RTPass::UpdateVertexDataDescriptorSet(rhi::IRHIDevice* device,
-                                             he::MeshComponent* mesh) {
-    if (!device || !mesh) return;
-    if (m_DescSet1 == rhi::kInvalidSet) return;
-
-    // 首次调用时创建顶点拉取缓冲（含顶点+索引）
-    if (!m_VertexPullBuffer) {
-        CreateVertexPullBuffer(device, mesh);
-    }
-
-    // binding 2: StructuredBuffer<GPUVertex> — 顶点数据（GPU 标量布局）
-    if (m_VertexPullBuffer) {
-        device->UpdateDescriptorSet(m_DescSet1, 2,
-            rhi::DescriptorType::StorageBuffer, m_VertexPullBuffer.get());
-    }
-
-    // binding 3: ByteAddressBuffer — 索引数据（独立 SSBO 拷贝）
-    if (m_IndexPullBuffer) {
-        device->UpdateDescriptorSet(m_DescSet1, 3,
-            rhi::DescriptorType::StorageBuffer, m_IndexPullBuffer.get());
-    }
-}
+// 【第③段第 5 批】原先这里还有一条"顶点拉取"路径（`CreateVertexPullBuffer` +
+// `UpdateVertexDataDescriptorSet`，把 VB/IB 打包成 32B 布局再绑到 set=1 的 binding 2/3）——
+// 它**没有任何调用点**（PT 早就改用 `BuildSceneMaterialTexture` 的法线/UV 纹理查询三角形属性，
+// 因为 ClosestHit 里访问 StructuredBuffer 已知 GPU fault），故连同 `RTVertexPacked`
+// 与顶点拉取布局断言一起删除：留着只会让"渲染期持有组件指针"的清单多两处死代码。
+// 若将来确实需要顶点拉取，正确形态是从**快照 + 网格注册表**取缓冲（本文件其它部分已改完）。
 
 // ============================================================
 // Phase 4.2: Bindless 纹理管理
