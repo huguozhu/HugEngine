@@ -707,19 +707,20 @@ void ForwardPipeline::EndHDRPass(rhi::IRHICommandList* cmd) {
 void ForwardPipeline::PrepareGI(rhi::IRHICommandList* cmd, he::World& world, he::SceneGraph& sg) {
     if (!m_GI || !m_GI->IsEnabled()) return;
 
-    // 查找启用的 SkyboxComponent → 设置 Skybox Cubemap
-    world.ForEach<he::SkyboxComponent>([&](he::Entity, he::SkyboxComponent& sc) {
-        if (sc.enabled && sc.GetCubemap()) {
-            auto* giIBL = dynamic_cast<GI_IBL*>(m_GI.get());
-            if (giIBL) {
-                giIBL->SetIBLSkybox(sc.GetCubemap(), sc.GetCubemapSampler());
-                // 若 IBL 脏 → 生成辐照度/预滤波/BRDF LUT
-                giIBL->Render(cmd);
-                // 更新 PBR 描述符集绑定到新生成的 IBL 纹理
-                UpdateIBLBindings(giIBL);
-            }
+    // 天空盒（IBL 天空源）：走快照（T1.4），本函数不再 `world.ForEach<SkyboxComponent>`。
+    // 【口径】快照里"启用且真的有 cubemap"的组件只有一个（收集时后者覆盖前者），因此下面的
+    // `giIBL->Render(cmd)` 只跑一次 —— 旧实现在多天空盒时会按组件个数重复烘焙，那属于退化场景。
+    if (m_Snapshot.skybox.enabled) {
+        auto* giIBL = dynamic_cast<GI_IBL*>(m_GI.get());
+        if (giIBL) {
+            giIBL->SetIBLSkybox(const_cast<rhi::IRHITexture*>(m_Snapshot.skybox.cubemap),
+                                const_cast<rhi::IRHISampler*>(m_Snapshot.skybox.sampler));
+            // 若 IBL 脏 → 生成辐照度/预滤波/BRDF LUT
+            giIBL->Render(cmd);
+            // 更新 PBR 描述符集绑定到新生成的 IBL 纹理
+            UpdateIBLBindings(giIBL);
         }
-    });
+    }
 
     // RSM 渲染（非 RG 路径）：与 RG 路径读**同一份**按场景包围盒拟合的固定光锥（本帧 Render
     // 开头的 RefreshRSMFrustum 已算好）。此前这里读 CSM 级联 0 的 VP —— 它拟合相机视锥，
@@ -918,6 +919,9 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
     // 每帧刷新：骨骼缓冲会被重建（`RetireBoneBuffer` 走 N 帧延迟队列后新建）⇒ 只登记一次会留过期指针；
     // `Register` 同 key = 更新、索引不变，因此廉价且安全。必须在构建快照之前（`meshIndex` 取组件字段）。
     SceneSnapshotBuilder::RegisterMeshes(world, m_MeshRegistry);
+    // 天空盒（T1.4）：必须在**帧图构建之前**收集 —— 帧图里的 IBL pass 在"注册 pass"阶段就会读
+    // `m_Snapshot.skybox`（见 ForwardPipeline_FrameGraph.cpp 的 Pass 1），晚一步就会用上一帧的天空盒。
+    SceneSnapshotBuilder::BuildSkybox(world, m_Snapshot);
 
     // 阶段 1 附录 E（E-2②）：构建**完整**快照（物体 + 蒙皮矩阵）。
     // 【为什么需要】骨骼上传（下面 11xx 行）要按 `sourceEntity` 找回逐实体状态、并从

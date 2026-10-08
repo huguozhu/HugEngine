@@ -106,11 +106,12 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     // ——证明配置与 UBO 都是通的，是这两个源的贡献本身为 0。
     auto* giIBL = dynamic_cast<GI_IBL*>(m_GI.get());
     if (giIBL && giIBL->IsEnabled()) {
-        world.ForEach<he::SkyboxComponent>([&](he::Entity, he::SkyboxComponent& sc) {
-            if (sc.enabled && sc.GetCubemap()) {
-                giIBL->SetIBLSkybox(sc.GetCubemap(), sc.GetCubemapSampler());
-            }
-        });
+        // 天空盒走快照（T1.4；`Render` 已在**帧图构建之前**收集好）。口径与旧循环一致：
+        // "启用且真的有 cubemap"才设置；一个都没有时保持 GI 内部上一次的绑定（与旧行为相同）。
+        if (m_Snapshot.skybox.enabled) {
+            giIBL->SetIBLSkybox(const_cast<rhi::IRHITexture*>(m_Snapshot.skybox.cubemap),
+                                const_cast<rhi::IRHISampler*>(m_Snapshot.skybox.sampler));
+        }
     }
     bool iblNeedsUpdate = false;
     if (giIBL && giIBL->IsDirty()) {
