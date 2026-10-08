@@ -209,7 +209,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
     // ── Shadow Pass（使用光源 VP 矩阵渲染 CSM + Spot shadow maps）──
     // 必须在 GBuffer 之前完成，确保阴影贴图在 Lighting Pass 中可采样
     {
-        u32 slot = m_CurrentFrameSlot;
+        u32 slot = RenderFrameSlot();
         // 设置阴影渲染资源：Object Buffer + ShadowData Buffer + DescriptorSet
         m_ShadowSystem->SetRenderResources(
             m_ShadowObjBuffers[slot].get(),
@@ -260,7 +260,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
 
     rg.AddPass("Shadow", {}, std::move(shadowWrites),
             [this](rhi::IRHICommandList* c) {
-                u32 slot = m_CurrentFrameSlot;
+                u32 slot = RenderFrameSlot();
                 // 切换到阴影专用 Object Buffer（binding 2），渲染完成后恢复
                 m_Device->UpdateDescriptorSet(m_GBuffer->GetDescriptorSet(), rhi::kBindingObjectData,
                     rhi::DescriptorType::StorageBuffer,
@@ -369,10 +369,10 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
             }
 
             // 更新每帧动态参数
-            m_GBuffer->SetObjectBuffer(m_ObjectBuffers[m_CurrentFrameSlot].get());
+            m_GBuffer->SetObjectBuffer(m_ObjectBuffers[RenderFrameSlot()].get());
             m_GBuffer->SetPrevViewProj(m_PrevViewProj);
             // 任务 25：逐实例剔除器 + 当前飞行帧槽位（可见列表/间接命令按槽位分开）
-            m_GBuffer->SetInstanceCuller(&m_InstanceCuller, m_CurrentFrameSlot);
+            m_GBuffer->SetInstanceCuller(&m_InstanceCuller, RenderFrameSlot());
 
             // ── DGC 模式上下文注入（通过 RHI 统一接口）──
             m_DGCEnabled = (cvDGC_Enable != 0)
@@ -606,7 +606,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
                                 m_ShadowSystem->GetShadowSampler(),
                                 rhi::kInvalidSet);
         // 通量计算要读方向光的颜色/强度：本帧的光源缓冲（上面已收集，见 §9.2-AA）
-        m_RSM->SetLightBuffer(m_LightBuffers[m_CurrentFrameSlot].get());
+        m_RSM->SetLightBuffer(m_LightBuffers[RenderFrameSlot()].get());
         // ── RSM pass：遍历 Provider 注册（Wave 2 推广）──
         // Provider 自报「是否需要本帧的 pass」（层栈含 RSM ∧ 源有效），
         // 帧图只负责按注册顺序建 pass 并注入执行上下文。
@@ -736,7 +736,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
                         RTExecuteContext tctx{};
                         tctx.cameraPos            = camPos;
                         tctx.frameIndex           = m_DiagFrameCounter;
-                        tctx.lightBuffer          = m_LightBuffers[m_CurrentFrameSlot].get();
+                        tctx.lightBuffer          = m_LightBuffers[RenderFrameSlot()].get();
                         tctx.lightCount           = lightCount;
                         tctx.sceneMaterialTex     = m_RTPass->GetSceneMaterialTexture();
                         tctx.sceneTriangleNormals = m_RTPass->GetSceneTriangleNormals();
@@ -987,7 +987,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
                 lp0->SetRTInputs(m_RTPass ? m_RTPass->GetTLAS() : nullptr,
                                  m_RTPass ? m_RTPass->GetSceneMaterialTexture() : nullptr,
                                  m_RTPass ? m_RTPass->GetSceneTriangleNormals() : nullptr,
-                                 m_LightBuffers[m_CurrentFrameSlot].get(), ffpc.lightCount);
+                                 m_LightBuffers[RenderFrameSlot()].get(), ffpc.lightCount);
             }
 
             rhi::IRHITexture* out = prov->GetDiffuseOutput();
@@ -1191,7 +1191,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
         // DDGI 的光追 march 也要用它们）。此处不再重复注册，否则同一帧会构建两次 TLAS。
 
         const GIProviderContext rtCtx = MakeGIContext(&camera, m_GIConfig.furnaceMode,
-                                                m_LightBuffers[m_CurrentFrameSlot].get(), rtfpc.lightCount,
+                                                m_LightBuffers[RenderFrameSlot()].get(), rtfpc.lightCount,
                                                 m_RTPass->GetTLAS());
 
         for (auto& prov : m_GIProviders) {
@@ -1428,11 +1428,11 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
             if (m_ClusteredShading.enabled && fpc.lightCount > 0) {
                 m_CachedLights.resize(fpc.lightCount);
                 auto* gpuLights = static_cast<const GPULight*>(
-                    m_LightBuffers[m_CurrentFrameSlot]->Map());
+                    m_LightBuffers[RenderFrameSlot()]->Map());
                 if (gpuLights) {
                     memcpy(m_CachedLights.data(), gpuLights, fpc.lightCount * sizeof(GPULight));
                 }
-                m_LightBuffers[m_CurrentFrameSlot]->Unmap();
+                m_LightBuffers[RenderFrameSlot()]->Unmap();
             }
 
             // 委托 LightingPass 执行完整光照（M1.1：LightingInputs 打包输入）
@@ -1457,8 +1457,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
             in.csmShadow1 = shadowMap(1);
             in.csmShadow2 = shadowMap(2);
             in.spotShadow = shadowMap(4);
-            in.lightBuffer  = m_LightBuffers[m_CurrentFrameSlot].get();
-            in.shadowBuffer = m_ShadowBuffers[m_CurrentFrameSlot].get();
+            in.lightBuffer  = m_LightBuffers[RenderFrameSlot()].get();
+            in.shadowBuffer = m_ShadowBuffers[RenderFrameSlot()].get();
             in.ssaoTex    = m_SSAO.GetAOTexture();
             // 屏幕空间源的最终输出由 Provider 给出（已封装「有降噪取降噪、halfRes 取原始」
             // 的选择），帧图不再重复判断 halfRes——避免两处逻辑不一致。
@@ -1527,7 +1527,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
             if (rtAOTex)        in.rtAO         = rtAOTex;
             if (rtReflectionTex) in.rtReflection = rtReflectionTex;
             in.lightCount   = fpc.lightCount;
-            in.frameSlot = m_CurrentFrameSlot;   // 每飞行帧一份描述符集/UBO（§9.2-J）
+            in.frameSlot = RenderFrameSlot();   // 每飞行帧一份描述符集/UBO（§9.2-J）
             in.width = w;
             in.height = h;
             m_Lighting.Render(c, in);

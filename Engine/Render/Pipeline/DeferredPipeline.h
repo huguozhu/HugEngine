@@ -246,6 +246,9 @@ private:
     u32                m_SnapshotSlot = 0;
     [[nodiscard]] FrameSceneSnapshot&       SnapBuf()       { return m_Snapshots[m_SnapshotSlot]; }
     [[nodiscard]] const FrameSceneSnapshot& SnapBuf() const { return m_Snapshots[m_SnapshotSlot]; }
+    /// 渲染期该用的帧槽位：优先取"本次命令携带的快照里的帧槽位"（随命令冻结），
+    /// 回退到 `m_CurrentFrameSlot`（游戏线程上下文，例如公开的 `GetCurrent*()`）。
+    [[nodiscard]] u32 RenderFrameSlot() const { return m_FrameSnapshot ? m_FrameSnapshot->frameSlot : m_CurrentFrameSlot; }
 
 
     // 阶段 1 附录 E（E-2①）：网格注册表（与 ForwardPipeline 对称）。

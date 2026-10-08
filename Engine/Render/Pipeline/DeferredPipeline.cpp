@@ -648,6 +648,7 @@ void DeferredPipeline::NextFrame() {
     // 【T2.4 步骤 (b)】推进快照槽位：命令载荷指向的快照在其被消费完之前不会被复用
     m_SnapshotSlot = (m_SnapshotSlot + 1u) % MAX_FRAMES_IN_FLIGHT;
     m_Assembler.Bind(&SnapBuf(), &m_MeshRegistry);
+    m_Assembler.SetFrameSlot(RenderFrameSlot());   // 随快照冻结给渲染命令
     // 【必须每帧复位】`AssembleScene` 靠 `m_Assembled` 做"每帧只装配一次"的幂等；不复位就会
     // **只在第一帧装配**（静态场景看不出来，但动态场景会冻结，且多槽快照下其它槽永远为空）。
     m_Assembler.BeginFrame();
@@ -724,7 +725,7 @@ GIProviderContext DeferredPipeline::MakeGIContext(const CameraData* cam, bool fu
     //（唯一读它们的 RSM 已改吃快照 + 网格注册表）。
     GIProviderContext ctx{};
     ctx.camera       = cam;
-    ctx.frameIndex   = m_CurrentFrameSlot;
+    ctx.frameIndex   = RenderFrameSlot();
     ctx.furnace      = furnace;
     ctx.lightBuffer  = lightBuffer;
     ctx.lightCount   = lightCount;
@@ -881,12 +882,12 @@ void DeferredPipeline::CollectLights(PushConstantData& pc) {
     if (count == 0u) return;
 
     // 上传：一次 Map/Unmap 写完整段（旧实现是每个光源 Map/Unmap 一次，行为相同但更费）
-    auto* lights = static_cast<GPULight*>(m_LightBuffers[m_CurrentFrameSlot]->Map());
+    auto* lights = static_cast<GPULight*>(m_LightBuffers[RenderFrameSlot()]->Map());
     if (!lights) return;
     for (u32 i = 0; i < count; ++i) {
         lights[i] = FrameSnap().lights[i].ToGpu();
     }
-    m_LightBuffers[m_CurrentFrameSlot]->Unmap();
+    m_LightBuffers[RenderFrameSlot()]->Unmap();
 }
 
 void DeferredPipeline::UpdateIBLBindings(GI_IBL* gi) {

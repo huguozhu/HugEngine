@@ -211,6 +211,7 @@ void PathTracingPipeline::NextFrame() {
     // 【T2.4 步骤 (b)】推进快照槽位：命令载荷指向的快照在其被消费完之前不会被复用
     m_SnapshotSlot = (m_SnapshotSlot + 1u) % MAX_FRAMES_IN_FLIGHT;
     m_Assembler.Bind(&SnapBuf(), &m_MeshRegistry);
+    m_Assembler.SetFrameSlot(RenderFrameSlot());   // 随快照冻结给渲染命令
     // 【必须每帧复位】`AssembleScene` 靠 `m_Assembled` 做"每帧只装配一次"的幂等；不复位就会
     // **只在第一帧装配**（静态场景看不出来，但动态场景会冻结，且多槽快照下其它槽永远为空）。
     m_Assembler.BeginFrame();
@@ -318,10 +319,10 @@ void PathTracingPipeline::CollectLights(u32& outLightCount) {
     if (outLightCount == 0u) return;
 
     // 一次性上传（旧实现是每个光源 Map/Unmap 一次，写入内容相同）
-    auto* lights = static_cast<GPULight*>(m_LightBuffers[m_CurrentFrameSlot]->Map());
+    auto* lights = static_cast<GPULight*>(m_LightBuffers[RenderFrameSlot()]->Map());
     if (!lights) return;
     for (u32 i = 0; i < outLightCount; ++i) lights[i] = FrameSnap().lights[i].ToGpu();
-    m_LightBuffers[m_CurrentFrameSlot]->Unmap();
+    m_LightBuffers[RenderFrameSlot()]->Unmap();
 }
 
 // ============================================================
@@ -425,7 +426,7 @@ void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& cam
                 ctx.sampleCount  = std::clamp((u32)cvPTSampleCount.Get(), 1u, 8u);
                 ctx.skyIntensity = std::max(cvPTSkyIntensity.Get(), 0.0f);
                 ctx.flags        = ptFlags;
-                ctx.lightBuffer  = m_LightBuffers[m_CurrentFrameSlot].get();
+                ctx.lightBuffer  = m_LightBuffers[RenderFrameSlot()].get();
                 ctx.lightCount   = lightCount;
                 ctx.finalReservoir = useReSTIR && m_ReSTIR ? m_ReSTIR->GetFinalReservoir() : nullptr;
                 ctx.sceneMaterialTex = GetRTPass()->GetSceneMaterialTexture();
@@ -478,7 +479,7 @@ void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& cam
                 ctx.invViewProj  = glm::inverse(camera.GetViewProjMatrix());
                 ctx.cameraPos    = camera.position;
                 ctx.frameIndex   = m_FrameIndex;
-                ctx.lightBuffer  = m_LightBuffers[m_CurrentFrameSlot].get();
+                ctx.lightBuffer  = m_LightBuffers[RenderFrameSlot()].get();
                 ctx.lightCount   = lightCount;
                 ctx.historyValid = reservoirReady;
                 ctx.ptDepth      = ptDepth;

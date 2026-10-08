@@ -536,6 +536,7 @@ void ForwardPipeline::NextFrame() {
     // 【T2.4 步骤 (b)】推进快照槽位：命令载荷指向的快照在其被消费完之前不会被复用
     m_SnapshotSlot = (m_SnapshotSlot + 1u) % MAX_FRAMES_IN_FLIGHT;
     m_Assembler.Bind(&SnapBuf(), &m_MeshRegistry);
+    m_Assembler.SetFrameSlot(RenderFrameSlot());   // 随快照冻结给渲染命令
     // 推进三缓冲槽位（帧首调用，确保 Shadow 和 Scene 使用同一帧的缓冲区）
     m_CurrentFrameSlot = (m_CurrentFrameSlot + 1) % MAX_FRAMES_IN_FLIGHT;
 
@@ -581,11 +582,11 @@ void ForwardPipeline::CollectLights(PushConstantData& pc)
 
     // 一次性上传（旧实现是每个光源 Map/Unmap 一次，写入内容相同）
     {
-        GPULight* lights = static_cast<GPULight*>(m_LightBuffers[m_CurrentFrameSlot]->Map());
+        GPULight* lights = static_cast<GPULight*>(m_LightBuffers[RenderFrameSlot()]->Map());
         if (lights) {
             for (u32 i = 0; i < lightCount; ++i) lights[i] = FrameSnap().lights[i].ToGpu();
         }
-        m_LightBuffers[m_CurrentFrameSlot]->Unmap();
+        m_LightBuffers[RenderFrameSlot()]->Unmap();
     }
 
     // 无光源时提供默认方向光
@@ -595,9 +596,9 @@ void ForwardPipeline::CollectLights(PushConstantData& pc)
         gl.colorIntensity = float4(1.0f, 0.95f, 0.85f, 5.0f);
         gl.directionType  = float4(0.5f, -1.0f, 1.0f, 0.0f);
         gl.shadowIndex    = -1;
-        GPULight* lights = static_cast<GPULight*>(m_LightBuffers[m_CurrentFrameSlot]->Map());
+        GPULight* lights = static_cast<GPULight*>(m_LightBuffers[RenderFrameSlot()]->Map());
         if (lights) lights[0] = gl;
-        m_LightBuffers[m_CurrentFrameSlot]->Unmap();
+        m_LightBuffers[RenderFrameSlot()]->Unmap();
     }
 }
 
@@ -696,7 +697,7 @@ void ForwardPipeline::PrepareGI(rhi::IRHICommandList* cmd) {
     if (m_RSMFrustumValid && m_RSM) {
         m_RSM->SetLightViewProj(m_RSMLightViewProj, m_RSM->GetRSMPositionMap()->GetWidth(),
                                 m_ShadowSystem->GetShadowSampler(),
-                                m_DescSets[m_CurrentFrameSlot]);
+                                m_DescSets[RenderFrameSlot()]);
         // 通量计算要读方向光的颜色/强度（§9.2-AA：不绑光源缓冲就会读到对象缓冲）
         m_RSM->SetLightBuffer(GetCurrentLightBuffer());
         // 从光源 POV 渲染几何体 → RSM 纹理（使用 RSM 自有的独立深度缓冲）
@@ -828,7 +829,7 @@ void ForwardPipeline::RefreshRSMFrustum(const CameraData& camera) {
 }
 
 void ForwardPipeline::FillGIBlendUBO() {
-    if (!m_GIBuffers[m_CurrentFrameSlot]) return;
+    if (!m_GIBuffers[RenderFrameSlot()]) return;
     // 与 Deferred 帧图里那段 fillSlots **同构**：逐通道把层栈的源写进 UBO 槽位，
     // 置信度掩码由 GIChannelBlendData::Add 统一推导（前向没有屏幕空间源 ⇒ 掩码全 None）。
     GIBlendParams bp{};
@@ -862,10 +863,10 @@ void ForwardPipeline::FillGIBlendUBO() {
     // 未初始化的 RSM 纹理 —— 那是静默的（画面只是偏暗）且随显存布局不可复现（§9.2-T）。
     bp.rsmValid = (m_RSMFrustumValid && m_RSMDirLightValid) ? 1.0f : 0.0f;
 
-    void* mapped = m_GIBuffers[m_CurrentFrameSlot]->Map();
+    void* mapped = m_GIBuffers[RenderFrameSlot()]->Map();
     if (mapped) {
         std::memcpy(mapped, &bp, sizeof(GIBlendParams));
-        m_GIBuffers[m_CurrentFrameSlot]->Unmap();
+        m_GIBuffers[RenderFrameSlot()]->Unmap();
     }
 }
 
@@ -898,7 +899,7 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, const FrameSceneSnapshot
     m_ToneMap->SetHDREnabled(swapFmt == rhi::Format::A2B10G10R10_UNORM_PACK32);
     // 【第③段第 4 批】`SyncPhysicalSkyToSun` 已搬进快照装配器（必须在收集之前、且聚合在一处）
     if (m_ShadowSystem && m_ShadowSystem->HasActiveShadows()) {
-        u32 slot = m_CurrentFrameSlot;
+        u32 slot = RenderFrameSlot();
         // 切换 binding 2 到阴影 Object Buffer（仅更新 set=0 per-frame 集）
         m_Device->UpdateDescriptorSet(m_DescSets[slot], rhi::kBindingObjectData,
             rhi::DescriptorType::StorageBuffer, m_ShadowObjBuffers[slot].get());
@@ -1016,7 +1017,7 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
 
     // SceneRenderer 准备所有 draw items（阶段 1 §15.1 第②段：改吃快照，不再遍历世界）
     auto allDrawItems = m_SceneRenderer->Prepare(FrameSnap(), camera,
-                                                 m_ObjectBuffers[m_CurrentFrameSlot].get());
+                                                 m_ObjectBuffers[RenderFrameSlot()].get());
 
     // GPU 剔除后过滤：构建可见 draw 列表
     std::vector<DrawItem> filteredItems;
@@ -1041,7 +1042,7 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
     // ============================================================
     m_InstanceCuller.BeginInstancesFrame(m_Device);   // 帧边界：推进退役队列 + 回收上帧未见的条目
     {
-        const u32 frameSlot = m_CurrentFrameSlot % rhi::kMaxFramesInFlight;
+        const u32 frameSlot = RenderFrameSlot() % rhi::kMaxFramesInFlight;
         for (const SnapshotInstance& si : FrameSnap().instances) {
             if (si.transformCount == 0u) continue;   // 无实例：跳过（旧路径同样跳过）
             // 变换切片越界保护：快照损坏时宁可少画，也不要读越界内存
@@ -1102,7 +1103,7 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
                     count, frameSlot, si.localBoundsMin, si.localBoundsMax, framePC.viewProjMatrix);
 
                 pc.instanceVisibleHandle = m_InstanceCuller.GetVisibleIndicesHandle(frameSlot);
-                cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[m_CurrentFrameSlot]);
+                cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[RenderFrameSlot()]);
                 cmd->SetDrawDebugLabel("Forward InstancedMesh (逐实例剔除)");
                 cmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
                 cmd->SetVertexBuffer(me->vertexBuffer, 0);
@@ -1120,7 +1121,7 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
             }
 
             pc.instanceVisibleHandle = 0;
-            cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[m_CurrentFrameSlot]);
+            cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[RenderFrameSlot()]);
             cmd->SetDrawDebugLabel("Forward InstancedMesh");
             cmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
             cmd->SetVertexBuffer(me->vertexBuffer, 0);
@@ -1171,7 +1172,7 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
         pc.useInstanceID     = 3;
         pc.instanceSSBOHandle = boneHandle;
         cmd->SetPipeline(m_PBR_Skinned_PSO.get());
-        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[m_CurrentFrameSlot]);
+        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[RenderFrameSlot()]);
         cmd->SetDrawDebugLabel("Forward SkeletalMesh");
         cmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
         cmd->SetVertexBuffer(me->vertexBuffer, 0);
@@ -1209,7 +1210,7 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
                     if (di.bInstanced) continue;   // 实例化网格由专用 Pass 绘制
                     PushConstantData pc = framePC;
                     pc.objectIndex = di.objectIndex;
-                    secCmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[m_CurrentFrameSlot]);  // set=0: per-frame + bindless
+                    secCmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[RenderFrameSlot()]);  // set=0: per-frame + bindless
                     // 不再需要 bind set=1 — 纹理采样通过 bindless u_Textures[] 访问
                     // DrawCall 调试 marker：标记当前绘制的物体（RenderDoc 定位用，每线程独立 CB 安全）
                     char label[64];
@@ -1241,7 +1242,7 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
             cmd->SetVertexBuffer(m_MeshBatcher.GetVertexBuffer(), 0);
             cmd->SetIndexBuffer(m_MeshBatcher.GetIndexBuffer(), 0);
             framePC.useInstanceID = 1;  // SV_InstanceID 模式
-            cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[m_CurrentFrameSlot]);
+            cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[RenderFrameSlot()]);
             cmd->SetPushConstants(0, sizeof(PushConstantData), &framePC);
             // DrawCall 调试 marker（RenderDoc 定位用）
             char label[64];
@@ -1256,7 +1257,7 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
                 if (di.bInstanced) continue;   // 实例化网格由专用 Pass 绘制
                 PushConstantData pc = framePC;
                 pc.objectIndex = di.objectIndex;
-                cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[m_CurrentFrameSlot]);
+                cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[RenderFrameSlot()]);
                 // DrawCall 调试 marker：标记当前绘制的物体（RenderDoc 定位用）
                 char label[64];
                 snprintf(label, sizeof(label), "Forward Obj#%u", di.objectIndex);

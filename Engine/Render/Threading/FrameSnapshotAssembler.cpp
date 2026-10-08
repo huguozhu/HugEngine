@@ -29,6 +29,7 @@ void FrameSnapshotAssembler::AssembleScene(he::World& world, he::SceneGraph& sg,
     }
     if (m_Assembled) return;   // 本帧已装配过（样例为了阴影收集先调过一次）
     m_Assembled = true;
+    m_Out->frameSlot = m_FrameSlot;   // 帧槽位随快照走（渲染期取每帧资源用）
     FrameSceneSnapshot& out = *m_Out;
 
     // 0) 收集之前的**世界写**必须先做，否则快照里是"上一状态"的数据：

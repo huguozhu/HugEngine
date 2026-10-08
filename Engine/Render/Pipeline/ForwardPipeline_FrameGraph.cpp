@@ -84,7 +84,7 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera)
             [this](rhi::IRHICommandList* c) {
                 // 切换描述符集 binding 2 到阴影专用 Object Buffer
                 // （仅更新 set=0 per-frame 集，per-mesh set=1 不包含 buffer 绑定）
-                u32 slot = m_CurrentFrameSlot;
+                u32 slot = RenderFrameSlot();
                 m_Device->UpdateDescriptorSet(m_DescSets[slot], rhi::kBindingObjectData,
                     rhi::DescriptorType::StorageBuffer,
                     m_ShadowObjBuffers[slot].get());
@@ -153,7 +153,7 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera)
                 m_RSM->SetLightViewProj(lightVP,
                     m_RSM->GetRSMPositionMap()->GetWidth(),
                     m_ShadowSystem->GetShadowSampler(),
-                    m_DescSets[m_CurrentFrameSlot]);
+                    m_DescSets[RenderFrameSlot()]);
                 // 通量要读方向光的颜色/强度：不绑光源缓冲就会读到对象缓冲（§9.2-AA ①）。
                 // 这条此前只加在 PrepareGI（非 RG 路径）里，RG 路径漏了 —— 同一个坑两处。
                 m_RSM->SetLightBuffer(GetCurrentLightBuffer());
@@ -174,12 +174,12 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera)
                 // 缓存光源到 CPU（供 Cluster 剔除使用）
                 m_CachedLights.resize(pc.lightCount);
                 auto* gpuLights = static_cast<const GPULight*>(
-                    m_LightBuffers[m_CurrentFrameSlot]->Map());
+                    m_LightBuffers[RenderFrameSlot()]->Map());
                 if (gpuLights && pc.lightCount > 0) {
                     memcpy(m_CachedLights.data(), gpuLights,
                            pc.lightCount * sizeof(GPULight));
                 }
-                m_LightBuffers[m_CurrentFrameSlot]->Unmap();
+                m_LightBuffers[RenderFrameSlot()]->Unmap();
 
                 // 构建 Cluster AABB + CPU 端光源剔除
                 float4x4 invVP = glm::inverse(camera.GetViewProjMatrix());

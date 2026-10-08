@@ -159,6 +159,9 @@ private:
     u32                m_SnapshotSlot = 0;
     [[nodiscard]] FrameSceneSnapshot&       SnapBuf()       { return m_Snapshots[m_SnapshotSlot]; }
     [[nodiscard]] const FrameSceneSnapshot& SnapBuf() const { return m_Snapshots[m_SnapshotSlot]; }
+    /// 渲染期该用的帧槽位：优先取"本次命令携带的快照里的帧槽位"（随命令冻结），
+    /// 回退到 `m_CurrentFrameSlot`（游戏线程上下文，例如公开的 `GetCurrent*()`）。
+    [[nodiscard]] u32 RenderFrameSlot() const { return m_FrameSnapshot ? m_FrameSnapshot->frameSlot : m_CurrentFrameSlot; }
 
     /// 本帧快照装配器 + 帧快照指针（第③段第 4 批，与 Forward/Deferred 同构）
     FrameSnapshotAssembler           m_Assembler;

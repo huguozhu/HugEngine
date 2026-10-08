@@ -67,6 +67,10 @@ public:
     [[nodiscard]] FrameSnapshotAssemblySettings&       Settings()       { return m_Settings; }
     [[nodiscard]] const FrameSnapshotAssemblySettings& Settings() const { return m_Settings; }
 
+    /// 设置**本帧的管线帧槽位**：它随快照一起交给渲染命令，渲染期据此取每帧资源
+    /// （描述符集/光源缓冲/UBO），从而与游戏线程并行推进的 `m_CurrentFrameSlot` 解耦。
+    void SetFrameSlot(u32 slot) { m_FrameSlot = slot; }
+
     /// 绑定输出快照与网格注册表（管线 `Initialize` 时调用一次）
     void Bind(FrameSceneSnapshot* out, MeshRegistry* registry) { m_Out = out; m_Registry = registry; }
 
@@ -96,6 +100,7 @@ private:
     MeshRegistry*       m_Registry = nullptr;
     bool                m_Reserved = false;
     bool                m_Assembled = false;   // 本帧是否已装配（`BeginFrame` 复位）
+    u32                 m_FrameSlot = 0;       // 本帧的管线帧槽位（见 `SetFrameSlot`）
 };
 
 } // namespace he::render
