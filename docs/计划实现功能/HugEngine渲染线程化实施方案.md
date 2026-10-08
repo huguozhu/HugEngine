@@ -1083,8 +1083,21 @@ public:
 | **E-2** | **`SceneRenderer::Prepare`** 的材质填充：材质输入改为"收集侧跑 `FillObjectData` 并把结果放进 `SnapshotDrawItem::object`"（§9 T1.2c 已定），`DrawItem` 不再携带 `MeshComponent*`；**视锥剔除仍在渲染线程**（它只需要快照里的世界 AABB） | 同上；并核对 `06.GILab` 的 28 个转储目标 |
 | **E-3** | **第 5 处口径漂移的裁决**：`SceneRenderer` 收集 `SplineMeshComponent` 而 `GPUScene`/`BuildObjects` 不收集 —— 二者必须取其一（建议**统一为收集**，并在提交里给出前后对比） | 提交里写明"修正"还是"改版"及其依据 |
 
-### 14.5 判据与闸门
+**注册所有权（E-2 开工前必须先定 —— 已定，避免下一轮再决策）**：注册表由**创建/替换网格缓冲的那一侧**
+填充，即 `MeshComponent::SetMeshData` 的调用点（资产加载器 / 样例的加载期），**不在渲染帧内**注册；
+组件销毁时在同一处注销（且必须帧外，见 §14.3 第 2 条）。渲染侧只做 `Find`。
+这样"谁创建谁注册"与缓冲所有权一致，也保证注册表在帧内**只读**（与快照同一条纪律）。
 
+**E-2 的具体步骤（建议按此顺序，每步单独提交 + 逐位判据）**：
+1. 给 `ForwardPipeline` 加 `MeshRegistry m_MeshRegistry;`（成员）与最小注册点：**加载期**遍历一次
+   `SkeletalMeshComponent`，用组件地址作 key 注册其顶点/索引缓冲与 `indexCount`；
+2. 骨骼上传改为：遍历快照里 `skinMatrixCount > 0` 的条目 → `Find(item.meshIndex)` 取缓冲 →
+   写入 `skinMatrices[offset, offset+count)`；旧实现（遍历组件 + `sm.boneBuffer`）逐行转写为参考实现
+   做 `memcmp` 逐位比较；
+3. 完成 E-2 后复测 `--world-deps`（预期 `ForwardPipeline.cpp` 的 7 处与 `.h` 的 12 处各降若干），
+   并把 `WORLD_DEP_BASELINE` 手动下调到新值。
+
+### 14.5 判据与闸门
 - 注册表本体：单测覆盖"注册/更新/注销/复用/越界与已注销返回 nullptr"（与 `TestRHIHandles.cpp` 同款）。
 - 两个消费者：沿用本方案统一判据 —— **旧实现逐行转写为参考实现 + 逐位比较**（全帧转储只做粗筛）。
 - **B1 计数必须下降**：`Tools/check_threading.py --world-deps` 每完成一步就复测并把基线手动下调
