@@ -1,4 +1,6 @@
 #include "Pipeline/DeferredPipeline.h"
+// 阶段 1 T1.4：环境参数（太阳方向 + 浑浊度）走快照，本文件不再直接读世界
+#include "Threading/SceneSnapshotBuilder.h"
 #include "GI/GI_IBL.h"
 #include "GI/GI_RSM.h"
 #include "GI/RSMFrustum.h"   // RSM 光源视锥拟合 + VPL 采样缩放（任务 30 / §9.2-AA）
@@ -1320,11 +1322,10 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
 
     // Lighting Pass (全屏 PBR + 降噪后 SSGI/SSR/DDGI 读取，委托给 LightingPass 共享组件)
 
-    // 空中透视参数：从物理天空组件读取太阳方向 + 浑浊度（无物理天空时保持 0=关闭）
-    float3 atmSunDir = float3(0, 1, 0);
-    float atmTurbidity = 0.0f;
-    he::GetPhysicalSkySun(world, atmSunDir, atmTurbidity);   // 无条件更新，天空移除时复位浑浊度=0（与 Forward 一致）
-    m_Lighting.SetAtmosphere(atmSunDir, atmTurbidity);
+    // 空中透视参数（太阳方向 + 浑浊度）：**走快照**（T1.4），此处不再直接读世界 ——
+    // 与 Forward 共用同一份口径（`BuildEnvironment` 在找不到/未启用物理天空时复位为"关闭"）。
+    SceneSnapshotBuilder::BuildEnvironment(world, m_LightSnapshot);
+    m_Lighting.SetAtmosphere(float3(m_LightSnapshot.atmosphere), m_LightSnapshot.atmosphere.w);
 
     // ── 低频环境源（IBL）烘焙：遍历 Provider ──
     // IBL 无独立 offscreen pass，其辐照度/预滤波贴图由天空盒烘焙而来（脏时重建）；
