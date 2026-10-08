@@ -10,6 +10,8 @@
 //   3. FXAA → BackBuffer 前通过 ToneMap PreBind 保证 RP 兼容。
 // ============================================================
 #include "Pipeline/PathTracingPipeline.h"
+// 阶段 1 附录 E（E-2①）：注册点要读骨骼网格的缓冲与材质字段
+#include "Scene/SkeletalMeshComponent.h"
 #include "Pipeline/PTQualityCVars.h"
 #include "Pipeline/PhysicalLight.h"
 // 阶段 1 T1.3b：光源收集集中到快照构造器（本文件不再自己遍历 ECS 光源组件）
@@ -254,6 +256,20 @@ void PathTracingPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
     // 时域降噪混合因子（CVar 热更新）
     if (m_PTDenoiser)
         m_PTDenoiser->SetTemporalBlend(std::clamp(cvPTDenoiseBlend.Get(), 0.0f, 1.0f));
+
+    // 阶段 1 附录 E（E-2①，三管线对称）：登记/更新网格资源并回填 `meshIndex`。
+    // 每帧刷新（骨骼缓冲会重建 ⇒ 一次性注册会留过期指针；Register 同 key = 更新、索引不变）。
+    world.ForEach<he::SkeletalMeshComponent>([&](he::Entity, he::SkeletalMeshComponent& sm) {
+        if (sm.GetIndexCount() == 0u) return;                  // 与收集口径一致：无索引不登记
+        MeshRegistryEntry entry;
+        entry.vertexBuffer     = sm.GetVertexBuffer().get();   // 只借指针，所有权仍在组件
+        entry.indexBuffer      = sm.GetIndexBuffer().get();
+        entry.skinMatrixBuffer = sm.boneBuffer.get();
+        entry.indexCount       = sm.GetIndexCount();
+        entry.materialID       = sm.materialID;
+        entry.instanced        = true;
+        sm.meshIndex           = m_MeshRegistry.Register(&sm, entry);
+    });
 
     // ── 粒子模拟 (Compute，在 RenderGraph 之前) ──
     float4x4 viewProj = camera.GetViewProjMatrix();

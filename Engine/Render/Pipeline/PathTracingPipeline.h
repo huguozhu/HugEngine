@@ -15,6 +15,8 @@
 #include "RenderGraph.h"
 // 阶段 1 T1.3b：光源走快照（`FrameSceneSnapshot`）而不是直接遍历 ECS。
 #include "Threading/FrameSceneSnapshot.h"
+// 阶段 1 附录 E（E-2①）：网格注册表（三管线对称）
+#include "Threading/MeshRegistry.h"
 #include <memory>
 
 namespace he::render {
@@ -135,6 +137,10 @@ private:
     // 阶段 1 T1.3b：本帧光源的**快照**（游戏线程侧收集的不可变输入）。
     // 必须是成员：帧图 lambda 在 `CollectLights` 返回之后才执行，局部变量会悬垂。
     FrameSceneSnapshot               m_Snapshot;
+    // 阶段 1 附录 E（E-2①，三管线对称）：网格注册表。
+    // 【PT 为何也需要】`RTPass` 的 BLAS 缓存目前以 `MeshComponent*` 为键（组件指针闸门 ① 类），
+    // 后续改成按 `meshIndex` 索引时必须有这张表；先按对称性把注册与回填做上。
+    MeshRegistry                     m_MeshRegistry;
     u32 m_CurrentFrameSlot = 0;
 
     // 相机矩阵缓存（velocity 计算用）
