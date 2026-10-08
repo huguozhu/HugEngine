@@ -18,6 +18,8 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "Pipeline/GPUCulling.h"
 #include "Pipeline/GPUScene.h"
 #include "Pipeline/MeshBatcher.h"
+// 阶段 1 T1.3a：光源走快照（`FrameSceneSnapshot`）而不是直接遍历 ECS。
+#include "Threading/FrameSceneSnapshot.h"
 
 #include "Pipeline/GBufferRenderer.h"
 #include "Pipeline/DecalPass.h"   // 任务 24：GBuffer 投影贴花
@@ -207,6 +209,11 @@ private:
     std::unique_ptr<rhi::IRHIBuffer> m_ShadowBuffers[MAX_FRAMES_IN_FLIGHT];
     std::unique_ptr<rhi::IRHIBuffer> m_ShadowObjBuffers[MAX_FRAMES_IN_FLIGHT];
     u32 m_CurrentFrameSlot = 0;
+
+    // 阶段 1 T1.3a：本帧光源的**快照**（游戏线程侧收集出来的不可变输入）。
+    // 【为什么是成员而不是 `CollectLights` 里的局部变量】帧图的 lambda 在本函数返回**之后**才执行，
+    // 局部变量的生命期不够 —— 这一条在画质阶段 0 的 TAA 抖动改动里踩过一次（`m_FrameCamera` 同理）。
+    FrameSceneSnapshot m_LightSnapshot;
 
     // 子系统
     std::unique_ptr<IShadowSystem>       m_ShadowSystem;

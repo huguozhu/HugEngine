@@ -40,6 +40,106 @@ struct LightWorld {
     }
 };
 
+/// 迁移参考实现：**逐行转写改动前 `DeferredPipeline::CollectLights` 的内联逻辑**
+/// （含点光 `directionType.xyz = 0`、聚光方向归一化、色温、物理模式负标记、`MAX_LIGHTS` 截断）。
+/// 为什么把旧逻辑抄进测试：迁移类改动的判据就是"新实现与旧行为逐字段一致"，
+/// 而全帧转储对比在当前构建下**已经不可判定**（同一二进制两趟就差约 4.5k 像素，ULP 级噪声）。
+/// 参考实现是确定性的、可逐位比较的，能把"迁移"与"口径变更"分开验证。
+u32 ReferenceCollectLights(World& world, SceneGraph& sg, bool physicalUnits,
+                           const std::function<i32(Entity)>& shadowResolver,
+                           std::vector<GPULight>& out) {
+    out.clear();
+    auto cl = [&](Entity e, LightComponent& lc) {
+        u32 i = static_cast<u32>(out.size());
+        // 旧代码用的是 `MAX_LIGHTS`（`Pipeline/Material.h` 里的别名，= `kGPUMaxLights`）；
+        // 这里直接用共享常量，避免为一个常量拖进整个 Material.h
+        if (i >= kGPUMaxLights || !lc.enabled) return;          // 旧代码：先判上限与开关
+        GPULight gl{};
+
+        float3 lightColor = lc.color;
+        if (lc.colorTemperature > 0.0f) lightColor *= render::KelvinToRGB(lc.colorTemperature);
+
+        gl.colorIntensity = float4(lightColor, lc.intensity);
+        gl.shadowIndex    = shadowResolver ? shadowResolver(e) : -1;
+
+        switch (lc.type) {
+        case he::LightType::Directional: {
+            auto* dl = static_cast<he::DirectionalLight*>(&lc);
+            gl.directionType = float4(dl->direction, 0.0f);
+            if (render::IsPhysicalLightEnabled(physicalUnits, lc.illuminance)) {
+                gl.colorIntensity.w = lc.illuminance * render::kPhysicalLightExposure;
+                gl.positionRange.w  = -1.0f;
+            }
+            break;
+        }
+        case he::LightType::Point: {
+            auto* pl = static_cast<he::PointLight*>(&lc);
+            gl.positionRange   = float4(sg.GetWorldPosition(e), pl->range);
+            gl.directionType.w = 1.0f;                          // 旧代码只写 w（xyz 保持 0）
+            if (render::IsPhysicalLightEnabled(physicalUnits, lc.luminousIntensity)) {
+                gl.colorIntensity.w = lc.luminousIntensity * render::kPhysicalLightExposure;
+                gl.positionRange.w  = -(pl->range);
+            }
+            break;
+        }
+        case he::LightType::Spot: {
+            auto* sl = static_cast<he::SpotLight*>(&lc);
+            const float r = render::IsPhysicalLightEnabled(physicalUnits, lc.luminousIntensity)
+                          ? -(sl->range) : sl->range;
+            gl.positionRange = float4(sg.GetWorldPosition(e), r);
+            gl.directionType = float4(glm::normalize(sl->direction), 2.0f);
+            gl.coneAngles    = float2(sl->innerConeAngle, sl->outerConeAngle);
+            if (render::IsPhysicalLightEnabled(physicalUnits, lc.luminousIntensity)) {
+                gl.colorIntensity.w = lc.luminousIntensity * render::kPhysicalLightExposure;
+            }
+            break;
+        }
+        default: break;
+        }
+        out.push_back(gl);
+    };
+    world.ForEach<he::DirectionalLight>(cl);
+    world.ForEach<he::PointLight>(cl);
+    world.ForEach<he::SpotLight>(cl);
+    return static_cast<u32>(out.size());
+}
+
+/// 建一个覆盖全部分支的场景：方向光（色温 + 物理照度）、点光 ×2（含物理光强）、聚光、
+/// 关闭的光源、以及超出上限的补光
+void BuildRichLightScene(LightWorld& lw) {
+    const Entity de = lw.AddEntity("dir", float3(0.0f));
+    auto* dl = lw.world.AddComponent<DirectionalLight>(de);
+    dl->direction        = float3(0.2f, -1.0f, 0.1f);
+    dl->color            = float3(1.0f, 0.95f, 0.9f);
+    dl->intensity        = 3.5f;
+    dl->colorTemperature = 5000.0f;
+    dl->illuminance      = 90000.0f;          // 走物理模式
+
+    for (int i = 0; i < 2; ++i) {
+        const Entity pe = lw.AddEntity("point", float3(1.0f + i, 2.0f, 3.0f));
+        auto* pl = lw.world.AddComponent<PointLight>(pe);
+        pl->color             = float3(0.8f, 0.7f, 0.6f);
+        pl->intensity         = 5.0f + static_cast<float>(i);
+        pl->range             = 10.0f + static_cast<float>(i);
+        pl->luminousIntensity = (i == 1) ? 400.0f : 0.0f;   // 只让第二个走物理模式
+    }
+
+    const Entity se = lw.AddEntity("spot", float3(-2.0f, 5.0f, 1.0f));
+    auto* sl = lw.world.AddComponent<SpotLight>(se);
+    sl->direction      = float3(0.0f, -2.0f, 0.5f);   // 未归一化
+    sl->range          = 7.0f;
+    sl->innerConeAngle = 0.2f;
+    sl->outerConeAngle = 0.45f;
+
+    const Entity offE = lw.AddEntity("off", float3(0.0f));
+    lw.world.AddComponent<PointLight>(offE)->enabled = false;
+
+    for (u32 k = 0; k < kGPUMaxLights + 2u; ++k) {    // 触发截断
+        const Entity e = lw.AddEntity("fill", float3(static_cast<float>(k), 0.0f, 0.0f));
+        lw.world.AddComponent<PointLight>(e)->range = 3.0f;
+    }
+}
+
 } // namespace
 
 TEST_CASE("SceneSnapshotBuilder：空世界不产出光源") {
@@ -191,6 +291,65 @@ TEST_CASE("SceneSnapshotBuilder：超过上限时按 kGPUMaxLights 截断") {
     CHECK(n == kGPUMaxLights);
     CHECK(snap.lights.size() == kGPUMaxLights);
     CHECK(snap.lights.back().positionRange.w == static_cast<float>(kGPUMaxLights));   // 取前 N 个
+}
+
+TEST_CASE("SceneSnapshotBuilder：口径开关（点光方向 / 聚光归一化）可显式切换") {
+    LightWorld lw;
+    const Entity pe = lw.AddEntity("point", float3(0.0f, 0.0f, 0.0f));
+    const Entity se = lw.AddEntity("spot", float3(0.0f, 0.0f, 0.0f));
+    lw.world.AddComponent<PointLight>(pe);
+    auto* sl = lw.world.AddComponent<SpotLight>(se);
+    sl->direction = float3(0.0f, 0.0f, 5.0f);          // 未归一化
+
+    SUBCASE("默认 = Deferred 口径：点光 xyz 留 0、聚光归一化") {
+        FrameSceneSnapshot snap;
+        REQUIRE(SceneSnapshotBuilder::BuildLights(lw.world, lw.sg, {}, snap) == 2u);
+        CHECK(snap.lights[0].directionType.x == 0.0f);       // 点光 xyz 留 0
+        CHECK(snap.lights[0].directionType.y == 0.0f);
+        CHECK(snap.lights[1].directionType.z == doctest::Approx(1.0f));   // 归一化
+    }
+
+    SUBCASE("Forward 历史口径：点光写 (0,-1,0)、聚光不归一化") {
+        SceneSnapshotLightOptions options;
+        options.pointLightWritesDirection = true;
+        options.normalizeSpotDirection    = false;
+
+        FrameSceneSnapshot snap;
+        REQUIRE(SceneSnapshotBuilder::BuildLights(lw.world, lw.sg, {}, snap, options) == 2u);
+        CHECK(snap.lights[0].directionType.y == -1.0f);
+        CHECK(snap.lights[1].directionType.z == doctest::Approx(5.0f));   // 保持原值
+    }
+}
+
+TEST_CASE("SceneSnapshotBuilder：与改动前 CollectLights 逐字段一致（迁移钉子）") {
+    LightWorld lw;
+    BuildRichLightScene(lw);
+
+    // 阴影索引解析器：给每个实体一个可区分且确定的值
+    auto resolver = [](he::Entity e) -> i32 { return static_cast<i32>(e.id % 4u) - 1; };
+
+    for (int physical = 0; physical < 2; ++physical) {
+        SceneSnapshotResolvers resolvers;
+        resolvers.physicalUnitsEnabled = (physical != 0);
+        resolvers.shadowIndex          = resolver;
+
+        FrameSceneSnapshot snap;
+        const u32 newCount = SceneSnapshotBuilder::BuildLights(lw.world, lw.sg, resolvers, snap);
+
+        std::vector<GPULight> reference;
+        const u32 refCount = ReferenceCollectLights(lw.world, lw.sg, resolvers.physicalUnitsEnabled,
+                                                   resolver, reference);
+
+        REQUIRE(newCount == refCount);
+        REQUIRE(snap.lights.size() == reference.size());
+        REQUIRE(!reference.empty());
+
+        // 逐元素整块逐位比较（GPULight 与 SnapshotLight 布局一致已由头文件 static_assert 保证）
+        for (usize i = 0; i < reference.size(); ++i) {
+            const GPULight gpu = snap.lights[i].ToGpu();
+            CHECK(std::memcmp(&gpu, &reference[i], sizeof(GPULight)) == 0);
+        }
+    }
 }
 
 TEST_CASE("SceneSnapshotBuilder：逐帧复用不残留上一帧光源") {

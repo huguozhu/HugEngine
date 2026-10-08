@@ -11,7 +11,8 @@ namespace he::render {
 
 u32 SceneSnapshotBuilder::BuildLights(he::World& world, he::SceneGraph& sg,
                                      const SceneSnapshotResolvers& resolvers,
-                                     FrameSceneSnapshot& out) {
+                                     FrameSceneSnapshot& out,
+                                     const SceneSnapshotLightOptions& options) {
     out.lights.clear();
 
     const bool physicalUnits = resolvers.physicalUnitsEnabled;
@@ -48,7 +49,10 @@ u32 SceneSnapshotBuilder::BuildLights(he::World& world, he::SceneGraph& sg,
         case he::LightType::Point: {
             auto* pl = static_cast<he::PointLight*>(&lc);
             light.positionRange = float4(sg.GetWorldPosition(e), pl->range);
-            light.directionType = float4(0.0f, -1.0f, 0.0f, 1.0f);   // xyz 未用，w 区分类型
+            // xyz 口径按选项（默认 0 = Deferred 现行行为）；w 才是着色器用来区分类型的字段
+            light.directionType = options.pointLightWritesDirection
+                                ? float4(0.0f, -1.0f, 0.0f, 1.0f)
+                                : float4(0.0f, 0.0f, 0.0f, 1.0f);
             if (IsPhysicalLightEnabled(physicalUnits, lc.luminousIntensity)) {
                 light.colorIntensity.w = lc.luminousIntensity * kPhysicalLightExposure;
                 light.positionRange.w  = -(pl->range);               // 负范围 = 物理模式标记
@@ -59,8 +63,10 @@ u32 SceneSnapshotBuilder::BuildLights(he::World& world, he::SceneGraph& sg,
             auto* sl = static_cast<he::SpotLight*>(&lc);
             const bool physical = IsPhysicalLightEnabled(physicalUnits, lc.luminousIntensity);
             light.positionRange = float4(sg.GetWorldPosition(e), physical ? -(sl->range) : sl->range);
-            // 归一化：与 Deferred 口径一致（Forward 未归一化，属已登记漂移，见头文件说明）
-            light.directionType = float4(glm::normalize(sl->direction), 2.0f);
+            // 归一化口径按选项（默认归一化 = Deferred 口径；Forward 未归一化，属已登记漂移）
+            light.directionType = options.normalizeSpotDirection
+                                ? float4(glm::normalize(sl->direction), 2.0f)
+                                : float4(sl->direction, 2.0f);
             light.coneAngles    = float2(sl->innerConeAngle, sl->outerConeAngle);
             if (physical) {
                 light.colorIntensity.w = lc.luminousIntensity * kPhysicalLightExposure;

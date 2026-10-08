@@ -38,14 +38,27 @@ struct SceneSnapshotResolvers {
     std::function<i32(he::Entity)> shadowIndex;
 };
 
+/// 光源收集的**口径开关**：默认值是 Deferred 管线的现行行为（= 逐像素基线）。
+/// 【为什么要有它】两条管线在历史上出现了漂移（见文件头说明），而 T1.3 的迁移必须**先保持各管线
+/// 逐像素一致**、再单独决定"统一成哪一个"。把差异做成显式开关，而不是让某条管线悄悄跟着另一条变：
+/// 这样"迁移"与"口径变更"是两次可分别验证、可分别回退的改动。
+struct SceneSnapshotLightOptions {
+    /// 点光的 `directionType.xyz` 是否写 (0,-1,0)：Deferred 不写（保持 0），Forward 写。
+    /// 着色器对点光只用 `directionType.w`，但实测两者会产生可测量的差异 ⇒ 默认按 Deferred 口径。
+    bool pointLightWritesDirection = false;
+    /// 聚光方向是否归一化：Deferred 归一化，Forward 不归一化。默认按 Deferred 口径（更正确）。
+    bool normalizeSpotDirection = true;
+};
+
 class SceneSnapshotBuilder {
 public:
     /// 收集光源到快照，返回实际收集数（按 `kGPUMaxLights` 截断）。
     /// 口径与 `CollectLights` 逐字段对齐：遍历顺序（方向光 → 点光 → 聚光，同一组件类型按实体顺序）、
-    /// 色温叠加、物理模式的**负范围标记**、聚光的锥角与归一化方向、阴影索引解析。
+    /// 色温叠加、物理模式的**负范围标记**、聚光的锥角与（默认归一化的）方向、阴影索引解析。
     static u32 BuildLights(he::World& world, he::SceneGraph& sg,
                            const SceneSnapshotResolvers& resolvers,
-                           FrameSceneSnapshot& out);
+                           FrameSceneSnapshot& out,
+                           const SceneSnapshotLightOptions& options = {});
 };
 
 } // namespace he::render
