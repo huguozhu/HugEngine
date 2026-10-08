@@ -1128,6 +1128,29 @@ for (const SnapshotDrawItem& item : m_Snapshot.draws) {
 > 判据：把"遍历组件 + `sm.boneBuffer`"的旧实现**逐行转写**成参考实现，与上面①②的结果做 `memcmp`
 > 逐位比较（全帧转储只作粗筛，原因见 §9 T1.3a 的噪声底噪记录）。
 
+### 14.6 会话交接点（2026-09-24，`multi_thread` 分支，56 条提交未推送）
+
+**当前绿灯状态（已复测）**：单测 **388 例 / 71730 断言全通过**；两项闸门都在基线
+（B1 渲染期 **82** / 加载期 15；资源持有者 **277** / 76 文件）；`acceptance_sweep.ps1 -OnlyNanite`
+此前 **PASS**（指纹 `1C15AB72E688B530` / `750CC247BF8B9C3D` 未变）。
+
+**已就绪、可直接开工的下一步（E-2②）**：所有前置都已落地 ——
+`MeshComponent::meshIndex`（字段）、`SceneSnapshotBuilder::CollectObjectItem` 的透传 + 断言、
+`ForwardPipeline` 的 `MeshRegistry` 成员与首帧注册点、附录 E §14.4 的代码骨架与判据。
+**唯一待做**：把骨骼上传从"遍历组件 + `sm.boneBuffer`"换成"遍历 `m_Snapshot.draws` 的
+`skinMatrixCount > 0` 条目 + `m_MeshRegistry.Find(item.meshIndex)`"，并配一份逐行转写的参考实现
+做 `memcmp` 逐位比较；完成后复测 `--world-deps` 并手动下调 `WORLD_DEP_BASELINE`。
+
+**开工前建议的三条命令**（顺序固定，避免踩本会话踩过的坑）：
+```powershell
+# 1) 确认没有并发构建（否则会出现"假挂死"）
+Get-Process cl,MSBuild -ErrorAction SilentlyContinue
+# 2) 后台构建（前台会被 600s 上限截断并留下孤儿 cl，让后续构建看起来卡死）
+cmd /c "cmake --build build --config Release --target HugEngineTests 06.GILab 03.Sponza-Forward > build\verify\b.log 2>&1"
+# 3) 两项闸门 + 单测
+python Tools\check_threading.py --world-deps --handles --gate
+```
+
 ### 14.5 判据与闸门
 - 注册表本体：单测覆盖"注册/更新/注销/复用/越界与已注销返回 nullptr"（与 `TestRHIHandles.cpp` 同款）。
 - 两个消费者：沿用本方案统一判据 —— **旧实现逐行转写为参考实现 + 逐位比较**（全帧转储只做粗筛）。
