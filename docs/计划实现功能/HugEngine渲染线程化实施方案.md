@@ -1182,27 +1182,38 @@ for (const SnapshotDrawItem& item : m_Snapshot.draws) {
 > 判据：把"遍历组件 + `sm.boneBuffer`"的旧实现**逐行转写**成参考实现，与上面①②的结果做 `memcmp`
 > 逐位比较（全帧转储只作粗筛，原因见 §9 T1.3a 的噪声底噪记录）。
 
-### 14.6 会话交接点（2026-09-24，`multi_thread` 分支，56 条提交未推送）
+### 14.6 会话交接点（2026-09-24 更新，`multi_thread` 分支，81 条提交未推送）
 
-**当前绿灯状态（已复测）**：单测 **388 例 / 71730 断言全通过**；两项闸门都在基线
-（B1 渲染期 **82** / 加载期 15；资源持有者 **277** / 76 文件）；`acceptance_sweep.ps1 -OnlyNanite`
-此前 **PASS**（指纹 `1C15AB72E688B530` / `750CC247BF8B9C3D` 未变）。
+**当前绿灯状态（最近一次复测）**：单测 **390 例 / 71750 断言全通过**；四项闸门**都在基线**
+（帧内同步 RHI 调用 376 / B1 世界依赖渲染期 **82** / 组件指针渲染期 **20** / 资源持有者 277）；
+`acceptance_sweep.ps1 -OnlyNanite` **PASS** 且两类指纹（`1C15AB72E688B530` / `750CC247BF8B9C3D`）
+未变；`06.GILab` 冒烟在 Forward/Deferred 双管线完整快照之后 = **0 像素差异**。
 
-**已就绪、可直接开工的下一步（E-2②）**：所有前置都已落地 ——
-`MeshComponent::meshIndex`（字段）、`SceneSnapshotBuilder::CollectObjectItem` 的透传 + 断言、
-`ForwardPipeline` 的 `MeshRegistry` 成员与首帧注册点、附录 E §14.4 的代码骨架与判据。
-**唯一待做**：把骨骼上传从"遍历组件 + `sm.boneBuffer`"换成"遍历 `m_Snapshot.draws` 的
-`skinMatrixCount > 0` 条目 + `m_MeshRegistry.Find(item.meshIndex)`"，并配一份逐行转写的参考实现
-做 `memcmp` 逐位比较；完成后复测 `--world-deps` 并手动下调 `WORLD_DEP_BASELINE`。
+**已完成的阶段 1 工作**（详见 §9）：快照契约、光源/物体/环境/骨骼/粒子收集、三管线消费、
+E-1 注册表本体、E-2① 注册点（**三条管线对称**）、E-2② 骨骼矩阵走快照、E-3① 材质映射唯一化、
+E-3② 前半（收集侧算材质）、E-4 样条网格口径统一、快照稳态零分配（两处补漏）、
+Forward/Deferred 完整快照 + 自校准容量预留。
 
-**开工前建议的三条命令**（顺序固定，避免踩本会话踩过的坑）：
+**下一步（E-3② 后半，按 §14.5 的三类清单做）**：
+1. 删掉 `SceneRenderer::DrawItem::mesh`（组件指针闸门的核心），消费者改用 `meshIndex`：
+   顶点/索引缓冲从各管线自己的 `MeshRegistry::Find` 取（三条管线的注册已就绪）；
+   视锥剔除继续用快照的世界 AABB 在渲染线程做。
+2. Forward 的两处"地址反查对象条目"已有整数优先版（`meshIndex`），删字段后把兜底分支一并去掉。
+3. `RTPass` 的 BLAS 缓存键从 `MeshComponent*` 换成 `meshIndex`（13 处），并处理缓存重建。
+4. 每步完成后复测 `python Tools/check_threading.py --mesh-ptrs` 并把 `MESH_PTR_BASELINE` 下调
+   （当前 20 → 目标 0）。
+
+**再之后**：T1.5（三条管线的帧入口签名从 `(world, sg, camera)` 改为收 `const FrameSceneSnapshot&`，
+样例在游戏线程构建快照）⇒ B1 从 82 开始下降；然后进入阶段 2（真线程 + 设备/交换链迁移 + 样例循环）。
+
+**开工前的固定命令（顺序不可省）**：
 ```powershell
 # 1) 确认没有并发构建（否则会出现"假挂死"）
 Get-Process cl,MSBuild -ErrorAction SilentlyContinue
 # 2) 后台构建（前台会被 600s 上限截断并留下孤儿 cl，让后续构建看起来卡死）
 cmd /c "cmake --build build --config Release --target HugEngineTests 06.GILab 03.Sponza-Forward > build\verify\b.log 2>&1"
-# 3) 两项闸门 + 单测
-python Tools\check_threading.py --world-deps --handles --gate
+# 3) 看退出码与 error C/error LNK —— 确认全绿之后再单独执行提交（不要把构建与提交串成一条命令）
+python Tools\check_threading.py --world-deps --mesh-ptrs --handles --gate
 ```
 
 ### 14.5 判据与闸门
