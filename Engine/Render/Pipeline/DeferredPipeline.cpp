@@ -707,6 +707,8 @@ void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
     // 按实际规模**自校准**预留一次容量 —— 稳态下快照数组不再重分配（"帧内不做分配"与
     // "帧内不做同步等待"同一条纪律）。骨骼上传/材质消费将来都要从这份快照取。
     SceneSnapshotBuilder::BuildObjects(world, sg, camera, {}, nullptr, m_Snapshot);
+    // 贴花（T1.4）：`DecalPass` 已改读快照，必须在帧图**执行**之前收集好
+    SceneSnapshotBuilder::BuildDecals(world, sg, m_Snapshot);
     if (!m_SnapshotReserved) {
         m_Snapshot.Reserve(static_cast<u32>(m_Snapshot.draws.size()) * 2u + 64u,
                            static_cast<u32>(m_Snapshot.lights.size()) * 2u + 64u,

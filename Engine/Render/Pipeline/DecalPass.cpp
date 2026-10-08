@@ -196,17 +196,18 @@ void DecalPass::OnResize(u32 width, u32 height) {
     // 纹理与 PSO 都不依赖尺寸（屏幕尺寸走 push constant），无需重建
 }
 
-void DecalPass::Render(rhi::IRHICommandList* cmd, he::World& world, he::SceneGraph& sg,
+void DecalPass::Render(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snapshot,
                        const CameraData& camera, GBufferRenderer& gb) {
     m_LastDecalCount = 0;
     if (!cmd || !m_PSO || !m_CubeVB || !m_CubeIB || !m_Set) return;
     if (m_Width == 0 || m_Height == 0) return;
 
-    // 贴花是否为空：空则完全不录 pass（避免每帧一个空 render pass）
+    // 贴花是否为空：空则完全不录 pass（避免每帧一个空 render pass）。
+    // 口径不变：原先是 `world.ForEach<DecalComponent>` 里判 `opacity > 0`，现在遍历快照数组。
     bool hasDecal = false;
-    world.ForEach<he::DecalComponent>([&](he::Entity, he::DecalComponent& d) {
-        if (d.opacity > 0.0f) hasDecal = true;
-    });
+    for (const SnapshotDecal& d : snapshot.decals) {
+        if (d.opacity > 0.0f) { hasDecal = true; break; }
+    }
     if (!hasDecal) return;
 
     // 1. 绑定 GBuffer 的世界坐标/深度（每帧写一次，尺寸变化后指针也会变）
@@ -241,12 +242,12 @@ void DecalPass::Render(rhi::IRHICommandList* cmd, he::World& world, he::SceneGra
 
     // 3. 逐贴花绘制
     const float4x4 viewProj = camera.GetViewProjMatrix();
-    world.ForEach<he::DecalComponent>([&](he::Entity e, he::DecalComponent& d) {
+    for (const SnapshotDecal& d : snapshot.decals) {
         const float alpha = std::clamp(d.opacity, 0.0f, 1.0f);
-        if (alpha <= 0.0f) return;
-        if (d.size.x <= 0.0f || d.size.y <= 0.0f) return;
+        if (alpha <= 0.0f) continue;                        // 原为 lambda 的 return，循环里必须 continue
+        if (d.size.x <= 0.0f || d.size.y <= 0.0f) continue;
 
-        const float4x4 wm = sg.GetWorldMatrix(e);
+        const float4x4 wm = d.worldMatrix;                  // 快照里按值携带（原 sg.GetWorldMatrix(e)）
 
         // 旋转基：从世界矩阵取列并归一化（贴花尺寸来自组件自身，不乘 Transform 缩放）
         float3 r0 = NormalizedColumn(wm, 0);
@@ -273,7 +274,7 @@ void DecalPass::Render(rhi::IRHICommandList* cmd, he::World& world, he::SceneGra
                                  std::max(d.projectionDepth, 0.01f) * 0.5f, 0.0f);
         pcs.colorOpacity = float4(d.baseColorFactor.x, d.baseColorFactor.y, d.baseColorFactor.z, alpha);
         pcs.normalMetal  = float4(r2, d.metallicFactor);   // 投影方向 = 贴花局部 +Z 的世界方向
-        const bool hasTex = !d.baseColorTexture.empty() && d.materialID > 0;
+        const bool hasTex = d.hasBaseColorTexture && d.materialID > 0;   // 原判 baseColorTexture.empty()
         pcs.params       = float4(d.roughnessFactor,
                                   hasTex ? (float)d.materialID : 0.0f,
                                   m_Width  > 0 ? 1.0f / (float)m_Width  : 0.0f,
@@ -299,7 +300,7 @@ void DecalPass::Render(rhi::IRHICommandList* cmd, he::World& world, he::SceneGra
                          hasTex ? "有贴花纹理" : "纯色贴花");
         }
         ++m_LastDecalCount;
-    });
+    }
 
     cmd->EndOffscreenPass();
     ++m_FrameCount;

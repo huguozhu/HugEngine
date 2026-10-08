@@ -23,12 +23,9 @@
 //   · 逐贴花一次 DrawIndexed（36 索引的盒子），贴花数量通常是几十个量级，不做实例化。
 // ============================================================
 
-namespace he {
-class World;
-class SceneGraph;
-} // namespace he
-
 namespace he::render {
+
+struct FrameSceneSnapshot;   // 贴花数据来自快照（引用参数只需前置声明）
 
 class GBufferRenderer;
 struct CameraData;   // Pipeline/Camera.h
@@ -65,7 +62,9 @@ public:
 
     /// 执行投影 Pass（须在 GBuffer 之后、Lighting 之前调用）
     /// @param gb GBuffer 渲染器（提供 MRT 视图与 worldPos/depth 采样源）
-    void Render(rhi::IRHICommandList* cmd, he::World& world, he::SceneGraph& sg,
+    /// 【阶段 1 T1.4】贴花数据来自**快照**（`FrameSceneSnapshot::decals`）⇒ 本 Pass 不再读 ECS：
+    /// 签名去掉 `he::World&` / `he::SceneGraph&`（附录 B1 因此下降）。
+    void Render(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snapshot,
                 const CameraData& camera, GBufferRenderer& gb);
 
     /// 上一帧实际绘制的贴花数（调试/判据）

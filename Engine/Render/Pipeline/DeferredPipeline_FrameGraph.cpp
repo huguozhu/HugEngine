@@ -440,7 +440,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             {{gbWorldPos, ResourceAccess::Read}, {gbDepth, ResourceAccess::Read}},
             {{gbA, ResourceAccess::Write}, {gbB, ResourceAccess::Write}},
             [&](rhi::IRHICommandList* c) {
-                m_DecalPass.Render(c, world, sg, camera, *m_GBuffer);
+                // 贴花数据来自快照（T1.4）：本 Pass 不再读 world/sg
+                m_DecalPass.Render(c, m_Snapshot, camera, *m_GBuffer);
             });
     }
 
