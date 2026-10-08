@@ -292,14 +292,14 @@ void PathTracingPipeline::CollectLights(he::World& world, he::SceneGraph& sg,
     SceneSnapshotLightOptions options;
     options.writeShadowRadius = true;
 
-    m_LightSnapshot.Clear();
-    outLightCount = SceneSnapshotBuilder::BuildLights(world, sg, resolvers, m_LightSnapshot, options);
+    m_Snapshot.Clear();
+    outLightCount = SceneSnapshotBuilder::BuildLights(world, sg, resolvers, m_Snapshot, options);
     if (outLightCount == 0u) return;
 
     // 一次性上传（旧实现是每个光源 Map/Unmap 一次，写入内容相同）
     auto* lights = static_cast<GPULight*>(m_LightBuffers[m_CurrentFrameSlot]->Map());
     if (!lights) return;
-    for (u32 i = 0; i < outLightCount; ++i) lights[i] = m_LightSnapshot.lights[i].ToGpu();
+    for (u32 i = 0; i < outLightCount; ++i) lights[i] = m_Snapshot.lights[i].ToGpu();
     m_LightBuffers[m_CurrentFrameSlot]->Unmap();
 }
 

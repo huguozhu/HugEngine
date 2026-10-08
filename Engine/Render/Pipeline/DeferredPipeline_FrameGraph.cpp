@@ -1324,8 +1324,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
 
     // 空中透视参数（太阳方向 + 浑浊度）：**走快照**（T1.4），此处不再直接读世界 ——
     // 与 Forward 共用同一份口径（`BuildEnvironment` 在找不到/未启用物理天空时复位为"关闭"）。
-    SceneSnapshotBuilder::BuildEnvironment(world, m_LightSnapshot);
-    m_Lighting.SetAtmosphere(float3(m_LightSnapshot.atmosphere), m_LightSnapshot.atmosphere.w);
+    SceneSnapshotBuilder::BuildEnvironment(world, m_Snapshot);
+    m_Lighting.SetAtmosphere(float3(m_Snapshot.atmosphere), m_Snapshot.atmosphere.w);
 
     // ── 低频环境源（IBL）烘焙：遍历 Provider ──
     // IBL 无独立 offscreen pass，其辐照度/预滤波贴图由天空盒烘焙而来（脏时重建）；

@@ -823,8 +823,8 @@ void DeferredPipeline::CollectLights(PushConstantData& pc, he::World& world,
         return m_ShadowSystem ? m_ShadowSystem->GetShadowIndex(e) : -1;
     };
 
-    m_LightSnapshot.Clear();
-    const u32 count = SceneSnapshotBuilder::BuildLights(world, sg, resolvers, m_LightSnapshot);
+    m_Snapshot.Clear();
+    const u32 count = SceneSnapshotBuilder::BuildLights(world, sg, resolvers, m_Snapshot);
     pc.lightCount = count;
     if (count == 0u) return;
 
@@ -832,7 +832,7 @@ void DeferredPipeline::CollectLights(PushConstantData& pc, he::World& world,
     auto* lights = static_cast<GPULight*>(m_LightBuffers[m_CurrentFrameSlot]->Map());
     if (!lights) return;
     for (u32 i = 0; i < count; ++i) {
-        lights[i] = m_LightSnapshot.lights[i].ToGpu();
+        lights[i] = m_Snapshot.lights[i].ToGpu();
     }
     m_LightBuffers[m_CurrentFrameSlot]->Unmap();
 }

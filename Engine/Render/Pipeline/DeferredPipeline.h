@@ -213,7 +213,7 @@ private:
     // 阶段 1 T1.3a：本帧光源的**快照**（游戏线程侧收集出来的不可变输入）。
     // 【为什么是成员而不是 `CollectLights` 里的局部变量】帧图的 lambda 在本函数返回**之后**才执行，
     // 局部变量的生命期不够 —— 这一条在画质阶段 0 的 TAA 抖动改动里踩过一次（`m_FrameCamera` 同理）。
-    FrameSceneSnapshot m_LightSnapshot;
+    FrameSceneSnapshot m_Snapshot;
 
     // 子系统
     std::unique_ptr<IShadowSystem>       m_ShadowSystem;

@@ -554,8 +554,8 @@ void ForwardPipeline::CollectLights(
 
     // 空中透视参数（太阳方向 + 浑浊度）：**走快照**（T1.4），本函数不再直接读世界。
     // 收集器在找不到启用的物理天空时会复位为"关闭"（方向 (0,1,0)、浑浊度 0），与旧行为一致。
-    SceneSnapshotBuilder::BuildEnvironment(world, m_LightSnapshot);
-    pc.atmosphere = m_LightSnapshot.atmosphere;
+    SceneSnapshotBuilder::BuildEnvironment(world, m_Snapshot);
+    pc.atmosphere = m_Snapshot.atmosphere;
 
     // 阶段 1 T1.3b：光源收集集中到 `SceneSnapshotBuilder`，但**保持 Forward 的历史口径** ——
     // 收集 Rect 光、点光写 (0,-1,0)、聚光不归一化。迁移只搬位置、不改口径；四处口径差异与统一计划
@@ -572,15 +572,15 @@ void ForwardPipeline::CollectLights(
     options.pointLightWritesDirection = true;
     options.normalizeSpotDirection    = false;
 
-    m_LightSnapshot.Clear();
-    const u32 lightCount = SceneSnapshotBuilder::BuildLights(world, sg, resolvers, m_LightSnapshot, options);
+    m_Snapshot.Clear();
+    const u32 lightCount = SceneSnapshotBuilder::BuildLights(world, sg, resolvers, m_Snapshot, options);
     pc.lightCount = lightCount;
 
     // 一次性上传（旧实现是每个光源 Map/Unmap 一次，写入内容相同）
     {
         GPULight* lights = static_cast<GPULight*>(m_LightBuffers[m_CurrentFrameSlot]->Map());
         if (lights) {
-            for (u32 i = 0; i < lightCount; ++i) lights[i] = m_LightSnapshot.lights[i].ToGpu();
+            for (u32 i = 0; i < lightCount; ++i) lights[i] = m_Snapshot.lights[i].ToGpu();
         }
         m_LightBuffers[m_CurrentFrameSlot]->Unmap();
     }
