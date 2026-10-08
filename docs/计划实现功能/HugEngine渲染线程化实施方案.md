@@ -620,6 +620,13 @@ private:
     `FillObjectData`（纯计算），把**算好的 `GPUObjectData` 字段**放进快照（`SnapshotDrawItem::object`
     生来就是这个用途），而不是把字符串搬进快照。
     结论：T1.2c 应先定 **mesh 注册表**，再谈材质快照化；在此之前 `SceneRenderer` 保持现状。
+  - **E-1 已完成（mesh 注册表本体，2026-09-24）**：`Engine/Render/Threading/MeshRegistry.h`
+    （头文件实现）—— `MeshRegistryEntry` + `Register`（同 key 重复=更新，索引不变）/`Unregister`
+    （幂等、索引复用、旧索引解析为 nullptr）/`Find`（越界/已注销 ⇒ nullptr）/`Count`/`Clear`，
+    索引从 1 起（0 为哨兵）。头文件写明"只借不拥有""**禁止帧内注销**"两条纪律，并显式记录
+    **已知限制**：索引复用后旧索引会指向新条目 ⇒ 将来把条目换成带 generation 的 `RHIBufferHandle`
+    （与 §12 A-3 对齐）。单测 4 例；实测 **388 例 / 71729 断言全通过**。
+    下一步 **E-2**：骨骼上传改遍历快照的骨骼条目 + 用 `meshIndex` 从注册表取缓冲。
   - **T1.2b 待做**：物体收集（`GPUScene::Collect` 的遍历 + 材质参数 + 间接绘制参数），
     以及本任务退出判据要求的"与旧路径并行跑一帧、逐字段比对（`HE_SNAPSHOT_VERIFY`）" ——
     该判据在 T1.3 让管线消费快照时最自然（可直接对比 UBO/SSBO 字节）。
