@@ -75,6 +75,13 @@ WORLD_DEP_ROOTS = ("Engine/Render",)
 WORLD_DEP_WHITELIST_PATHS = ("Engine/Render/Threading/",)
 WORLD_DEP_BASELINE = 82        # 2026-09-24 实测（已排除快照层白名单；阶段 1 退出目标 = 0）
 
+# --- 附录 E 的度量：渲染侧的**组件指针依赖**（`MeshComponent*` 等）---
+# 【为什么需要第二项】B1 统计的是签名里的 `World&` / `SceneGraph&`，量不出 E-1/E-2/E-3 消除的东西 ——
+# 它们的产物是"渲染侧不再持有 `MeshComponent*`"（快照只带 `meshIndex`）。这两项是**不同度量**，
+# 已在方案 §14.5 里写明；本项让 E-3 的收敛可量化。
+MESH_PTR_PATTERN = re.compile(r"\b(?:he::)?(?:Mesh|SkeletalMesh|InstancedMesh|SplineMesh|Decal)Component\s*\*")
+MESH_PTR_BASELINE = 20         # 2026-09-24 实测（渲染期 20 / 加载期 4；只允许下降，E-3 收敛到 0）
+
 LOAD_TIME_WHITELIST = ("Initialize", "Init", "Shutdown", "Resize", "Load", "Upload",
                        "Setup", "Construct", "OnCreate")
 
@@ -199,6 +206,47 @@ def count_world_deps(repo_root):
     return frame_total, load_total, per_file
 
 
+def count_mesh_pointers(repo_root):
+    """统计 `Engine/Render/`（排除快照层）里的**组件指针依赖**：返回 (帧内, 加载期, 明细)。
+
+    与 B1 同一套分类口径（所属函数名 + 同一份白名单），保证两项闸门可比。
+    """
+    frame_total = 0
+    load_total = 0
+    per_file = {}
+    for root_name in WORLD_DEP_ROOTS:
+        root_path = os.path.join(repo_root, root_name)
+        if not os.path.isdir(root_path):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(root_path):
+            for fn in sorted(filenames):
+                if not fn.endswith(HOLDER_EXTS):
+                    continue
+                full = os.path.join(dirpath, fn)
+                rel = os.path.relpath(full, repo_root).replace("\\", "/")
+                if any(rel.startswith(w) for w in WORLD_DEP_WHITELIST_PATHS):
+                    continue
+                try:
+                    with open(full, "r", encoding="utf-8", errors="replace") as fh:
+                        lines = fh.read().splitlines()
+                except OSError:
+                    continue
+                for idx, raw in enumerate(lines):
+                    stripped = raw.strip()
+                    if not stripped or stripped.startswith(("//", "*", "/*")):
+                        continue
+                    if not MESH_PTR_PATTERN.search(raw):
+                        continue
+                    func = enclosing_function(lines, idx)
+                    if is_load_time(func):
+                        load_total += 1
+                        per_file.setdefault(rel, {"帧内": 0, "加载期": 0})["加载期"] += 1
+                    else:
+                        frame_total += 1
+                        per_file.setdefault(rel, {"帧内": 0, "加载期": 0})["帧内"] += 1
+    return frame_total, load_total, per_file
+
+
 def main():
     ap = argparse.ArgumentParser(description="渲染线程化方案：跨线程调用点清点 / 闸门")
     ap.add_argument("--root", default="Engine/Render", help="扫描目录（默认 Engine/Render）")
@@ -210,6 +258,8 @@ def main():
                     help="附带 T0.7 的资源持有者统计（`unique_ptr<IRHIBuffer/IRHITexture>`）")
     ap.add_argument("--world-deps", action="store_true",
                     help="附带附录 B1 的世界依赖统计（Engine/Render 内的 World& / SceneGraph&）")
+    ap.add_argument("--mesh-ptrs", action="store_true",
+                    help="附带附录 E 的组件指针依赖统计（Engine/Render 内的 *Component*）")
     args = ap.parse_args()
 
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -280,7 +330,19 @@ def main():
         for path, count in ranked:
             print("  %-70s %d" % (path, count))
 
-    if args.gate and (total_frame > 0 or holders_over or world_deps_over):
+    mesh_ptr_over = False
+    if args.mesh_ptrs:
+        mf, ml, mper = count_mesh_pointers(repo_root)
+        print("\n=== 附录 E 组件指针依赖（Engine/Render 内的 *Component*）===")
+        print("渲染期 %d 处 / 加载期 %d 处；基线 %d（E-3 的收敛目标：渲染期不再持有组件指针）"
+              % (mf, ml, MESH_PTR_BASELINE))
+        if mf > MESH_PTR_BASELINE:
+            mesh_ptr_over = True
+        for path, c in sorted(((p, c["帧内"]) for p, c in mper.items() if c["帧内"] > 0),
+                              key=lambda kv: -kv[1])[:12]:
+            print("  %-70s %d" % (path, c))
+
+    if args.gate and (total_frame > 0 or holders_over or world_deps_over or mesh_ptr_over):
         return 1
     return 0
 
