@@ -5,6 +5,7 @@
 #include "Threading/FrameSceneSnapshot.h"
 
 #include <functional>
+#include <type_traits>   // if constexpr + is_base_of（E-3：只对真正的网格组件算材质）
 
 namespace he {
 class World;
@@ -111,6 +112,15 @@ public:
         // 0 = 未注册 ⇒ 消费侧 `Find(0)` 返回空并跳过（可见化，而不是指错资源）。
         item.meshIndex         = comp.meshIndex;
         item.objectID          = objectID;
+
+        // 材质参数（E-3）：**在收集侧就算完** —— 复用 `MakePBRMaterial` + `FillObjectData`（纯计算），
+        // 把结果直接放进 `item.object`。这样渲染侧消费快照时不必再拿 `MeshComponent*`，
+        // 也不必把 5 条纹理路径字符串搬进快照。
+        // `if constexpr` 保护：模板会被非网格组件（以及单测里的假类型）实例化，那些类型没有材质字段；
+        // 真正的网格组件（`MeshComponent` 及其派生 Cube/Sphere/Billboard/Decal/…）都会走这一支。
+        if constexpr (std::is_base_of_v<he::MeshComponent, TComponent>) {
+            FillObjectData(item.object, MakePBRMaterial(comp));
+        }
         item.visibilityFlags   = 1u;                 // 与 `FillObj` 一致（"可见"，剔除在渲染线程做）
         // meshIndex / indexCount / firstIndex / vertexOffset 由 MeshBatcher 在 Prepare 阶段填充
         // 上一帧世界矩阵：按**下标**对齐（与 GPUScene 的 `m_CachedMatrices[idx]` 同一假设）。
