@@ -134,10 +134,6 @@ public:
 private:
     void CollectLights(PushConstantData& pc, he::World& world, he::SceneGraph& sg, const CameraData& camera);
     void UploadMaterialBindless(he::World& world);  // 去重收集场景材质 → 写入 bindless 材质 SSBO 并注册（须在 heap->Flush() 前调用）
-    void DrawMesh(rhi::IRHICommandList* cmd, he::MeshComponent* mesh,
-                  const float4x4& worldMatrix, const float4x4& viewProjMatrix,
-                  const PBRMaterial& material, const CameraData& camera,
-                  const PushConstantData& lighting);
     void UploadLightBuffer();
     void UpdateIBLBindings(GI_IBL* gi);
     void UpdateRSMBindings();

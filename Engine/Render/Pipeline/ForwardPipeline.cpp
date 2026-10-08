@@ -1383,25 +1383,4 @@ void ForwardPipeline::RenderScene(
 void ForwardPipeline::EndFrame(rhi::IRHICommandList* /*cmd*/) {
 }
 
-void ForwardPipeline::DrawMesh(
-    rhi::IRHICommandList* cmd,
-    he::MeshComponent* mesh,
-    const float4x4& /*worldMatrix*/,
-    const float4x4& /*viewProjMatrix*/,
-    const PBRMaterial& /*material*/,
-    const CameraData& /*camera*/,
-    const PushConstantData& framePC)
-{
-    if (!mesh || mesh->GetIndexCount() == 0) return;
-
-    // DrawCall 调试 marker（RenderDoc 定位用）
-    char label[64];
-    snprintf(label, sizeof(label), "Forward Mesh Obj#%u", framePC.objectIndex);
-    cmd->SetDrawDebugLabel(label);
-    cmd->SetPushConstants(0, sizeof(PushConstantData), &framePC);
-    cmd->SetVertexBuffer(mesh->GetVertexBuffer().get(), 0);
-    cmd->SetIndexBuffer(mesh->GetIndexBuffer().get());
-    cmd->DrawIndexed(mesh->GetIndexCount());
-}
-
 } // namespace he::render
