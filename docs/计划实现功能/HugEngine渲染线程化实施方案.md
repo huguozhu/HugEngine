@@ -745,7 +745,8 @@ private:
     > 比较，并用冒烟转储粗筛。后续所有迁移沿用此法。
   - **T1.3b 待做**：Forward / PathTracing 的光源收集同样改走快照（各自带历史口径开关）；
     `GPUScene::Collect` 改消费快照（依赖 T1.2b 的物体收集）。
-- [ ] T1.4 骨骼/材质/Decal/粒子快照化 —— 🟡 骨骼 ✅ / 材质 ✅ / 粒子 ✅ / 环境 ✅ / 天空盒 ✅ / **Decal ⬜ 未做**
+- [x] T1.4 骨骼/材质/Decal/粒子快照化 —— ✅ 完成（骨骼 / 材质 / 粒子 / 环境 / 天空盒 / **Decal** 全部进快照；
+  各消费侧均已切换：粒子模拟、骨骼上传、bindless 材质上传、`DecalPass`。至此"渲染期读 ECS 取数据"的部分收口）
   - **Decal 快照化规格（2026-09-24 已从代码读全，可直接照做）**：`DecalPass::Render` 的签名是
     `(cmd, he::World&, he::SceneGraph&, const CameraData&, GBufferRenderer&)`，世界用在**两个**
     `world.ForEach<DecalComponent>`：`:207`（判空：`opacity > 0`）与 `:244`（逐贴花绘制）。
