@@ -183,6 +183,7 @@ u32 SceneSnapshotBuilder::BuildParticles(he::World& world, FrameSceneSnapshot& o
     world.ForEach<he::ParticleComponent>([&](he::Entity, he::ParticleComponent& pc) {
         SnapshotParticleEmitter emitter;
         emitter.rendererId   = pc.rendererId;             // 由注册方回填（见组件上的字段注释）
+        emitter.params       = pc.GetParam();             // 发射/模拟参数整份按值带走（帧内不再读组件）
         emitter.emitPosition = pc.GetWorldEmitPosition();
         out.particles.push_back(emitter);
     });

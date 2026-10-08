@@ -682,11 +682,16 @@ TEST_CASE("SceneSnapshotBuilder：粒子发射器进快照（T1.4）") {
     auto* pc1 = lw.world.AddComponent<he::ParticleComponent>(e1);
     pc0->rendererId = 7u;                 // 注册方回填的索引
     pc1->rendererId = 9u;
+    pc0->GetParam().minLifeTime = 1.25f;  // 参数也要进快照（消费侧据它填 emit UBO）
+    pc0->GetParam().maxSize     = 3.5f;
 
     CHECK(SceneSnapshotBuilder::BuildParticles(lw.world, snap) == 2u);
     REQUIRE(snap.particles.size() == 2u);
     CHECK(snap.particles[0].rendererId == 7u);
     CHECK(snap.particles[1].rendererId == 9u);
+    // 参数整份带走：与组件当前值一致（消费侧据此填 emit UBO，不必再读组件）
+    CHECK(snap.particles[0].params.minLifeTime == doctest::Approx(1.25f));
+    CHECK(snap.particles[0].params.maxSize == doctest::Approx(3.5f));
     // 发射位置取组件的世界空间值（组件受 Entity 变换影响，这里只核对与访问器一致）
     CHECK(snap.particles[0].emitPosition.x == doctest::Approx(pc0->GetWorldEmitPosition().x));
     CHECK(snap.particles[1].emitPosition.z == doctest::Approx(pc1->GetWorldEmitPosition().z));

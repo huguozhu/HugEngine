@@ -3,6 +3,8 @@
 #include "Core/Types.h"
 #include "Math/Math.h"
 #include "Pipeline/Camera.h"
+// 粒子参数（`ParticleSystemParam`）：粒子发射器快照条目要按值携带它
+#include "Scene/ParticleComponent.h"
 
 #include <cstddef>     // offsetof
 #include <cstring>
@@ -105,12 +107,14 @@ static_assert(offsetof(SnapshotLight, shadowIndex)    == offsetof(GPULight, shad
 static_assert(offsetof(SnapshotLight, shadowRadius)   == offsetof(GPULight, shadowRadius),   "shadowRadius 偏移漂移");
 static_assert(std::is_trivially_copyable_v<SnapshotLight>, "SnapshotLight 必须可平凡拷贝");
 
-/// 粒子发射器条目（T1.4）：`rendererId` = 渲染器注册时分配的索引（组件上的 `rendererId`），
-/// `emitPosition` = 本帧发射原点（世界空间）。渲染侧只按 id 驱动**自己**的缓冲，
-/// 因此不必再缓存 `ParticleComponent*`（粒子模拟/绘制本来就是索引化的）。
+/// 粒子发射器条目（T1.4）：渲染侧只按 id 驱动**自己**的缓冲，因此不必再缓存 `ParticleComponent*`。
+/// 【为什么连参数一起收】渲染器的发射路径原本每帧从组件读**约 15 个字段**（方向/形状/速度/寿命/
+/// 尺寸/纹理行列…，见 `ParticleRenderer::DispatchCompute` 的 emit 分支），只搬"位置"不足以让消费侧
+/// 停止读组件；把 `ParticleSystemParam` 整份按值带进快照后，这一步才是机械替换。
 struct SnapshotParticleEmitter {
-    u32    rendererId   = 0;
-    float3 emitPosition{0.0f};
+    u32                     rendererId   = 0;   // 渲染器注册时分配的索引（组件上的 `rendererId`）
+    he::ParticleSystemParam params{};           // 发射/模拟参数（按值拷贝，交接后只读）
+    float3                  emitPosition{0.0f}; // 本帧发射原点（世界空间）
 };
 
 /// 一帧的完整渲染输入。游戏线程在 tick 结束后构造，交接后**只读**（铁律 2）。
