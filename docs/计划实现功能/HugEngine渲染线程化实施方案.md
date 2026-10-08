@@ -464,7 +464,13 @@ private:
 > `07.Nanite` / `03.Sponza-Forward` / `05.Sponza-PathTracing` / `02.Cube` / `04.Sponza-Deferred`）
 > 全部编译通过；单测 **384 例 / 71703 断言**；两项闸门都在基线（B1 渲染期 82、持有者 277）；
 > `acceptance_sweep.ps1 -OnlyNanite` **PASS**（两类 pass 指纹 `1C15AB72E688B530` / `750CC247BF8B9C3D`
-> 未变，CULL DIFF / PIC CMP / TAKEOVER CMP 全过）⇒ 阶段 0 与本阶段改动**未破坏既有验收**。
+> 未变，CULL DIFF / PIC CMP / TAKEOVER CMP 全过，`nanite_leak=0`）⇒ 阶段 0 与本阶段改动**未破坏既有验收**。
+>
+> **第二次端到端复核（2026-09-24，E-2② + E-3 半程之后）**：7 个目标全部编译通过；单测
+> **390 例 / 71750 断言**；两项闸门仍在基线（B1 渲染期 82 / 持有者 277）；
+> `acceptance_sweep.ps1 -OnlyNanite` **PASS** 且两类指纹**完全未变**；`06.GILab` 冒烟与
+> E-2② 之前的转储逐位对比 = **4539 像素**（与同二进制噪声底噪同量级）⇒ 骨骼矩阵改走快照、
+> 材质映射唯一化、收集侧算材质这三项改动**均无可测回归**。
 
 ---
 
