@@ -1235,6 +1235,19 @@ private:
     **帧时间 448.9 → 454.2 ms/帧 = +1.18%**（在"不退化 >3%"预算内）；
     单测 399 例 / 71850 断言；四项闸门：帧内 RHI 378、B1 0/0、组件指针 0/0、持有者 277。
   · **未做**：其余 6 个样例与编辑器的同源改造（T2.4 收尾）；模式 2（三线程/RHI 线程）不在本轮范围。
+
+- **T2.4 扩展到 `07.AISamples`（已提交）**：同一"两条命令 + 真渲染线程"形状（帧前准备留在游戏线程；
+  ① `[Acquire + cmdList->Begin + 管线 Render + BackBuffer pass 开始]`；② `[imgui.EndFrame + EndDebugLabel
+  + EndRenderPass + End + Submit + Present]`；控件仍在两条命令之间）。
+  · **踩到并修掉一处搬迁遗漏**：样例在 `PollEvents()` 之后还有一句**独立**的 `AcquireNextImage`
+    （位于替换区间之外）⇒ 迁移后变成"游戏线程与渲染命令各 acquire 一次"，模式 1 下触发
+    `VulkanSwapChain.cpp:232` 的归属断言。**教训**：搬迁前先枚举该样例**全部**同类调用点
+    （`Acquire/Present/Submit/Begin/End/WaitIdle`），不要只处理"结构最像参照样例"的那一段。
+  · **判据**：模式 0 与模式 1 各跑 45 秒，**断言 0、VUID 0**；日志显示 `ForwardPipeline::RenderScene`
+    出现在"已起真渲染线程"之后 ⇒ 帧确实由渲染线程执行。（07.AISamples 无转储机制，故以"无归属违规 +
+    与 06.GILab 同形（后者有转储逐位一致证据）"作为本样例的证据。）
+  · **T2.4 剩余**：`02.Cube` / `03.Sponza-Forward` / `04.Sponza-Deferred` / `05.Sponza-PathTracing` /
+    `07.Nanite` 共 5 个样例（形状相同，各自还需按上面的教训先枚举全部 RHI 调用点）。
   · **教训**：读数前必须先确认渲染线程模式 —— 模式 0（SingleThreaded）时队列不参与、渲染线程空转，
     第一次测量因此"什么都没测到"。
 - [ ] T2.4 样例循环改造（7 个样例）
