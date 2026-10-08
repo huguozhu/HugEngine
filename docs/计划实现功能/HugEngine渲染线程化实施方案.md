@@ -512,7 +512,17 @@ private:
     规范名、解析（数字/名称/别名/大小写）、非法输入必须 `nullopt`、进程级读写一致性）；
     `06.GILab` 实跑三种配置的日志分别为 `渲染线程模式 = game+render+rhi（2）`、
     非法值 `triple` → 告警并保持 `single-threaded`、不设环境变量 → `single-threaded（0）`，28 个转储正常。
-- [ ] T0.6 **（预埋，见 §12）** RHI 命令流记录端契约 + `RHICommand` 载荷形态
+- [x] T0.6 **（预埋，见 §12）** RHI 命令流记录端契约 + `RHICommand` 载荷形态
+  - 落地：`Engine/RHI/RHI/RHICommandList.h`（头文件实现，**不接入生产路径**）：
+    `RHICommand`（类型擦除 + 64B 内联载荷 + arena 偏移）、`RHICommandType`（骨架代表值）、
+    `RHICommandList`（`Enqueue` / `EnqueueArena` / `AllocArena` / `MarkSubmitBoundary` / `Reset`
+    + 执行端读取用的 `PayloadAt` / `ArenaPayloadAt`，不匹配返回 nullptr 以便容错）。
+  - 7 例单测：内联按值拷贝与读回、64B 边界、错类型/越界读取为 nullptr、arena 不重叠与偏移读回、
+    **子对齐载荷的绝对地址对齐**、提交边界、`Reset` 复用不残留。
+  - 实测（2026-09-24）：单测 **356 例 / 71443 断言全通过**（改前 349 / 71383）。
+  - 【单测当场抓到的契约缺陷】初版用 `std::vector<u8>` 存 arena、只对齐**偏移量** ⇒ 绝对地址不保证
+    对齐（64B 用例量到 48）。已改为**固定容量、64B 对齐的块**（对齐建立在绝对地址上；容量耗尽即断言，
+    可增长块分配器随 §12 的 A-1 落地）。
 - [ ] T0.7 **（预埋，见 §12）** 资源句柄化（`RHIBufferHandle` / `RHITextureHandle` + generation）
 - [ ] T1.1 `FrameSceneSnapshot` 定义（与 `ShaderTypes.slang` 对齐 + `static_assert`）
 - [ ] T1.2 `SceneSnapshotBuilder`（集中现有 Collect 遍历）
