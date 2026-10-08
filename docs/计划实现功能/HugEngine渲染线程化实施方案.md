@@ -572,6 +572,22 @@ private:
   - 实现细节留痕：`ShaderTypes.slang` 必须在 `he::render` 命名空间内包含（与
     `Pipeline/Material.h` 同一用法），否则 `float4` / `float4x4` 在全局作用域不可见。
 - [ ] T1.2 `SceneSnapshotBuilder`（集中现有 Collect 遍历）
+  - **T1.2a 已完成（光源，2026-09-24）**：`Engine/Render/Threading/SceneSnapshotBuilder.{h,cpp}` ——
+    `BuildLights(world, sg, resolvers, snapshot)`，口径与 `CollectLights` 逐字段对齐
+    （遍历顺序 方向光→点光→聚光、关闭跳过、`kGPUMaxLights` 截断、色温叠加、物理模式**负范围/`-1` 标记**、
+    聚光归一化方向 + 内外锥角、阴影索引，且"未知类型也落一条"的旧行为一并保留）。
+    新增 `SceneSnapshotResolvers`（全局物理光开关 + 阴影索引回调），使快照层**不读全局 CVar、
+    不反向依赖阴影系统**，收集逻辑成为纯函数、可单测；`PhysicalLight.h` 的物理光判据拆出
+    "全局开关"重载，保证唯一判据。
+    单测 8 例，实测 **374 例 / 71574 断言全通过**。
+  - **T1.2b 待做**：物体收集（`GPUScene::Collect` 的遍历 + 材质参数 + 间接绘制参数），
+    以及本任务退出判据要求的"与旧路径并行跑一帧、逐字段比对（`HE_SNAPSHOT_VERIFY`）" ——
+    该判据在 T1.3 让管线消费快照时最自然（可直接对比 UBO/SSBO 字节）。
+  - **顺带发现的三处口径问题**（已登记，不在本任务内改）：
+    ① 聚光方向：Deferred 归一化、Forward 不归一化；
+    ② 点光 `directionType.xyz`：Forward 写 (0,-1,0)、Deferred 留 0；
+    ③ `PhysicalLight.h::KelvinToRGB` 的二次近似在 6500K 给出 (1, 0.46, 0)、2000K 给出 (1,0,1)，
+       与黑体常识不符，疑似系数抄错（仅 `colorTemperature > 0` 时生效）——建议单独立项核查。
 - [ ] T1.3 `CollectLights` / `GPUScene::Collect` 改消费快照
 - [ ] T1.4 骨骼/材质/Decal/粒子快照化
 - [ ] T1.5 渲染期移除 World/SceneGraph 引用（grep 断言）
