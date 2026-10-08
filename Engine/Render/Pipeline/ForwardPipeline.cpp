@@ -1109,7 +1109,9 @@ void ForwardPipeline::RenderScene(
         u32 objIndex = 0;
         bool found = false;
         for (auto& di : filteredItems) {
-            if (di.mesh == static_cast<he::MeshComponent*>(&im)) { objIndex = di.objectIndex; found = true; break; }
+            // E-3：优先按 meshIndex 对齐对象条目（整数比较，不再依赖组件地址）；未注册（0）时兜底走地址比较
+        if ((im.meshIndex != 0u && im.meshIndex == di.meshIndex) ||
+            (im.meshIndex == 0u && di.mesh == static_cast<he::MeshComponent*>(&im))) { objIndex = di.objectIndex; found = true; break; }
         }
         if (!found) return;
 
@@ -1237,7 +1239,9 @@ void ForwardPipeline::RenderScene(
         u32 objIndex = 0;
         bool found = false;
         for (auto& di : filteredItems) {
-            if (di.mesh == static_cast<he::MeshComponent*>(&sm)) { objIndex = di.objectIndex; found = true; break; }
+            // E-3：同实例化分支 —— 优先 meshIndex，未注册时兜底地址比较
+        if ((sm.meshIndex != 0u && sm.meshIndex == di.meshIndex) ||
+            (sm.meshIndex == 0u && di.mesh == static_cast<he::MeshComponent*>(&sm))) { objIndex = di.objectIndex; found = true; break; }
         }
         if (!found) return;
 
