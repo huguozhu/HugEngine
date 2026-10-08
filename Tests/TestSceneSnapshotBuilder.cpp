@@ -16,6 +16,7 @@
 #include "Pipeline/PhysicalLight.h"   // kPhysicalLightExposure（与收集口径同源）
 #include "Scene/LightComponent.h"
 #include "Scene/PhysicalSkyComponent.h"   // 环境（太阳方向/浑浊度）进快照的用例
+#include "Scene/ParticleComponent.h"      // 粒子发射器进快照的用例
 #include "Scene/SkeletalMeshComponent.h"  // 蒙皮矩阵进快照的用例
 #include "Scene/SceneGraph.h"
 #include "Scene/Transform.h"
@@ -666,6 +667,34 @@ TEST_CASE("SceneSnapshotBuilder：骨骼矩阵进快照的扁平数组（T1.4）
     SceneSnapshotBuilder::AppendSkinMatrices(c, empty, snap2);
     CHECK(c.skinMatrixCount == 0u);
     CHECK(snap2.skinMatrices.empty());
+}
+
+TEST_CASE("SceneSnapshotBuilder：粒子发射器进快照（T1.4）") {
+    LightWorld lw;
+    FrameSceneSnapshot snap;
+
+    CHECK(SceneSnapshotBuilder::BuildParticles(lw.world, snap) == 0u);
+    CHECK(snap.particles.empty());
+
+    const Entity e0 = lw.AddEntity("ps0", float3(1.0f, 2.0f, 3.0f));
+    const Entity e1 = lw.AddEntity("ps1", float3(-4.0f, 5.0f, -6.0f));
+    auto* pc0 = lw.world.AddComponent<he::ParticleComponent>(e0);
+    auto* pc1 = lw.world.AddComponent<he::ParticleComponent>(e1);
+    pc0->rendererId = 7u;                 // 注册方回填的索引
+    pc1->rendererId = 9u;
+
+    CHECK(SceneSnapshotBuilder::BuildParticles(lw.world, snap) == 2u);
+    REQUIRE(snap.particles.size() == 2u);
+    CHECK(snap.particles[0].rendererId == 7u);
+    CHECK(snap.particles[1].rendererId == 9u);
+    // 发射位置取组件的世界空间值（组件受 Entity 变换影响，这里只核对与访问器一致）
+    CHECK(snap.particles[0].emitPosition.x == doctest::Approx(pc0->GetWorldEmitPosition().x));
+    CHECK(snap.particles[1].emitPosition.z == doctest::Approx(pc1->GetWorldEmitPosition().z));
+
+    // 逐帧复用：再次收集必须清空重填，不累加
+    CHECK(SceneSnapshotBuilder::BuildParticles(lw.world, snap) == 2u);
+    snap.Clear();
+    CHECK(snap.particles.empty());
 }
 
 TEST_CASE("SceneSnapshotBuilder：逐帧复用不残留上一帧光源") {

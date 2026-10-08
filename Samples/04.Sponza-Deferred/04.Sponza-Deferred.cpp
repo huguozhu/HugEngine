@@ -465,6 +465,7 @@ int main() {
 
         // 注册到渲染管线
         u32 pid = pipeline.GetParticleRenderer().RegisterComponent(pc, device.get());
+        pc->rendererId = pid;   // 阶段 1 T1.4：回填索引，供快照收集器产出 {id, 发射位置}
         pipeline.AddParticleComponent(pid);
 
         HE_CORE_INFO("粒子系统已注册: id={} maxParticles={}", pid, pc->GetMaxParticles());

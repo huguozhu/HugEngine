@@ -133,6 +133,16 @@ public:
     static void AppendSkinMatrices(SnapshotDrawItem& item, const he::SkeletalMeshComponent& comp,
                                    FrameSceneSnapshot& out);
 
+    // ── 粒子发射器（T1.4）────────────────────────────────────────
+
+    /// 收集粒子发射器列表（`{rendererId, 发射位置}`）。
+    /// 【为什么只需要这两个字段】粒子模拟与绘制早就按 id 索引驱动渲染器自有缓冲
+    /// （`ParticleRenderer::DispatchCompute(cmd, id, dt, viewProj)`），渲染期唯一读组件的地方是
+    /// "发射位置"（`CompState` 里缓存了 `ParticleComponent*`）。把 `{id, 位置}` 放进快照后，
+    /// 渲染侧不再需要组件指针。
+    /// @return 发射器数量
+    static u32 BuildParticles(he::World& world, FrameSceneSnapshot& out);
+
     // ── 环境（T1.4 起）────────────────────────────────────────────
 
     /// 收集"空中透视"参数（太阳方向 + 浑浊度）到快照。

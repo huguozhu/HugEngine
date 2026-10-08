@@ -7,6 +7,7 @@
 #include "Scene/InstancedMeshComponent.h"
 #include "Scene/LightComponent.h"
 #include "Scene/MeshComponent.h"
+#include "Scene/ParticleComponent.h"      // 粒子发射器进快照（T1.4）
 #include "Scene/PhysicalSkyComponent.h"   // GetPhysicalSkySun（T1.4：环境参数进快照）
 #include "Scene/SceneGraph.h"
 #include "Scene/SkeletalMeshComponent.h"
@@ -168,14 +169,24 @@ void SceneSnapshotBuilder::AppendSkinMatrices(SnapshotDrawItem& item, const he::
     out.skinMatrices.insert(out.skinMatrices.end(), comp.boneMatrices.begin(), comp.boneMatrices.end());
 }
 
-bool SceneSnapshotBuilder::BuildEnvironment(he::World& world, FrameSceneSnapshot& out) {
-    // 与两处旧调用点逐字段一致：找不到/未启用物理天空时，方向保持 (0,1,0)、浑浊度归 0
+bool SceneSnapshotBuilder::BuildEnvironment(he::World& world, FrameSceneSnapshot& out) {    // 与两处旧调用点逐字段一致：找不到/未启用物理天空时，方向保持 (0,1,0)、浑浊度归 0
     // （Forward 的注释写明"天空移除时复位浑浊度=0"）。
     float3 sunDir    = float3(0.0f, 1.0f, 0.0f);
     float  turbidity = 0.0f;
     const bool found = he::GetPhysicalSkySun(world, sunDir, turbidity);
     out.atmosphere = float4(sunDir, turbidity);
     return found;
+}
+
+u32 SceneSnapshotBuilder::BuildParticles(he::World& world, FrameSceneSnapshot& out) {
+    out.particles.clear();
+    world.ForEach<he::ParticleComponent>([&](he::Entity, he::ParticleComponent& pc) {
+        SnapshotParticleEmitter emitter;
+        emitter.rendererId   = pc.rendererId;             // 由注册方回填（见组件上的字段注释）
+        emitter.emitPosition = pc.GetWorldEmitPosition();
+        out.particles.push_back(emitter);
+    });
+    return static_cast<u32>(out.particles.size());
 }
 
 } // namespace he::render

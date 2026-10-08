@@ -800,6 +800,7 @@ int main() {
 
         // 注册到延迟渲染管线（光追已并入 Deferred，不再需要独立的混合 RT 管线）与全路径追踪管线
         u32 pid = deferredPipeline.GetParticleRenderer().RegisterComponent(pc, device.get());
+        pc->rendererId = pid;   // 阶段 1 T1.4：回填索引，供快照收集器产出 {id, 发射位置}
         deferredPipeline.AddParticleComponent(pid);
         u32 ptPid = pathTracingPipeline.GetParticleRenderer().RegisterComponent(pc, device.get());
         pathTracingPipeline.AddParticleComponent(ptPid);

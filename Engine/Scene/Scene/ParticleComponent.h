@@ -251,6 +251,12 @@ public:
     // 获取发射位置 (世界空间)
     float3 GetWorldEmitPosition() const;
 
+    /// 渲染器注册后由**调用方**回填的索引（`ParticleRenderer::RegisterComponent` 的返回值）。
+    /// 【为什么放在组件上】id 原本只存在于样例的局部变量里，导致"从世界收集发射器列表"这件事
+    /// 无法独立完成（收集器拿不到 id）。回填后，快照构造器就能按组件遍历产出 `{id, 发射位置}`，
+    /// 渲染侧不必再持有 `ParticleComponent*`。与 `MeshComponent::materialID` 同类（渲染侧索引）。
+    u32 rendererId = 0;
+
     // 状态查询
     float GetElapsedTime() const { return m_Elapsed; }
     u32   GetEmitCount()   const { return m_EmitCount; }

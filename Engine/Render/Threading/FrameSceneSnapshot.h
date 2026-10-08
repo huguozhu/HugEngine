@@ -105,6 +105,14 @@ static_assert(offsetof(SnapshotLight, shadowIndex)    == offsetof(GPULight, shad
 static_assert(offsetof(SnapshotLight, shadowRadius)   == offsetof(GPULight, shadowRadius),   "shadowRadius 偏移漂移");
 static_assert(std::is_trivially_copyable_v<SnapshotLight>, "SnapshotLight 必须可平凡拷贝");
 
+/// 粒子发射器条目（T1.4）：`rendererId` = 渲染器注册时分配的索引（组件上的 `rendererId`），
+/// `emitPosition` = 本帧发射原点（世界空间）。渲染侧只按 id 驱动**自己**的缓冲，
+/// 因此不必再缓存 `ParticleComponent*`（粒子模拟/绘制本来就是索引化的）。
+struct SnapshotParticleEmitter {
+    u32    rendererId   = 0;
+    float3 emitPosition{0.0f};
+};
+
 /// 一帧的完整渲染输入。游戏线程在 tick 结束后构造，交接后**只读**（铁律 2）。
 struct FrameSceneSnapshot {
     u64        frameIndex = 0;              // 与 CommandQueue 的帧号对应（对账用）
@@ -121,6 +129,8 @@ struct FrameSceneSnapshot {
 
     std::vector<SnapshotDrawItem> draws;
     std::vector<SnapshotLight>    lights;
+    /// 粒子发射器（渲染侧按 `rendererId` 驱动自己的缓冲；见 `SnapshotParticleEmitter`）
+    std::vector<SnapshotParticleEmitter> particles;
     /// 骨骼矩阵（扁平数组：`boneOffset..boneOffset+boneCount` 属于某个 draw，
     /// 这样快照里不需要任何指针/容器嵌套，渲染线程按偏移切片即可）
     std::vector<float4x4>         skinMatrices;
@@ -135,6 +145,7 @@ struct FrameSceneSnapshot {
     void Clear() {
         draws.clear();
         lights.clear();
+        particles.clear();
         skinMatrices.clear();
     }
 
