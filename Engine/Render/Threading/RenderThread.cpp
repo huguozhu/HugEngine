@@ -55,6 +55,8 @@ void RenderThread::Stop() {
     if (m_Thread.joinable()) m_Thread.join();
     m_Running.store(false, std::memory_order_release);
     s_RenderThreadHash.store(0, std::memory_order_release);         // 回到壳语义
+    // 停止钩子：线程已结束 ⇒ 由调用线程撤销归属认领（否则收尾期的设备销毁/WaitIdle 会违规）
+    if (m_StopHook) m_StopHook();
 }
 
 bool RenderThread::PumpOnce() {

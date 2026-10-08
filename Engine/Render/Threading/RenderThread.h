@@ -46,6 +46,11 @@ public:
     /// `GetThreadAffinity().Claim()`）。这也是将来 T2.6 初始化 `RenderThreadContext` 的挂点。
     void SetThreadStartHook(std::function<void()> hook) { m_StartHook = std::move(hook); }
 
+    /// 线程停止钩子（T2.2）：在渲染线程**结束之后**（`Stop()` 里 join 之后）由调用线程执行一次。
+    /// 与启动钩子对称：启动时认领 RHI 归属、停止时撤销（恢复"未 Claim ⇒ 不设限"的语义），
+    /// 否则设备销毁/`WaitIdle` 这些仍在游戏线程做的收尾动作会撞上归属断言。
+    void SetThreadStopHook(std::function<void()> hook) { m_StopHook = std::move(hook); }
+
     /// 取出并执行**一帧**待处理命令；没有待处理帧时返回 false
     bool PumpOnce();
 
@@ -71,6 +76,7 @@ private:
     u64                 m_ExecutedFrames   = 0;   // 仅渲染线程写（x64 上 u64 读写原子，统计用）
     u64                 m_ExecutedCommands = 0;
     std::function<void()> m_StartHook;   // 渲染线程启动钩子（T2.2：由调用方注入 RHI 归属认领）
+    std::function<void()> m_StopHook;    // 渲染线程停止钩子（T2.2：撤销归属认领）
 
     /// 渲染线程 id 的哈希 + 1（0 = 无渲染线程/壳模式）。用哈希而不是 `atomic<thread::id>`：
     /// `std::thread::id` 的比较需要读一致快照，哈希成 `size_t` 后可用普通原子量。
