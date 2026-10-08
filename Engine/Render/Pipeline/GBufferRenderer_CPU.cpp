@@ -22,7 +22,6 @@ void GBufferRenderer_CPU::Shutdown() {
 
 void GBufferRenderer_CPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
                                   const FrameSceneSnapshot& snapshot,
-                                  he::World& world, he::SceneGraph& sg,
                                   const CameraData& camera) {
     u32 w = ctx.width, h = ctx.height;
 

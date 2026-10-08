@@ -122,7 +122,9 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     // exposureBias 叠加到 AutoExposure 输出（在 ToneMap Pass 前处理）
 
     // GPUScene 收集 → [GPU 模式: 填充 IndirectDraw 参数] → 上传
-    m_GPUScene.Collect(world, sg, camera);
+    // 【第③段】GPUScene 不再自建快照：直接消费管线本帧的快照（口径相同 —— 贴花排除已由
+    // `BuildObjects` 的 `excludeDecals` 烘进快照），顺带省掉每帧一次重复的物体收集。
+    m_GPUScene.CollectFromSnapshot(m_Snapshot);
     // MeshBatcher 的构建条件有三条：① GPU 模式要靠它填 IndirectDraw 参数；
     // ② **Lumen 的 Mesh SDF 构建需要这份 CPU 侧几何**（步骤 8）——CPU GBuffer 模式下
     //    绘制不走它，但 SDF 仍然要有几何输入，否则距离场队列为空（实测就是这么发现的）；
@@ -390,7 +392,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 m_GBuffer->ClearDGCContext();
             }
 
-            m_GBuffer->Render(c, m_Snapshot, world, sg, camera);
+            m_GBuffer->Render(c, m_Snapshot, camera);
         });
 
     // ════════════════════════════════════════════════════════════════════
@@ -1546,6 +1548,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             if (m_GIConfig.furnaceMode) return;   // 白炉模式：不画天空（见上）
             SubsystemContext sctx;
             sctx.world = &world;
+            // 【第③段】天空盒数据改从快照取（`SkyboxPass::Update` 只读 ctx.snapshot）
+            sctx.snapshot = &m_Snapshot;
             // 天空盒属于主视图：必须与几何用**同一份带抖动的投影**，否则天空与几何相差一个
             // 亚像素相位，TAA 会在天地交界处反复混出不存在的边缘（见帧首的抖动说明）。
             sctx.camera = &camera;

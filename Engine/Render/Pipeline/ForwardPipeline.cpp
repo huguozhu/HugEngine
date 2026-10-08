@@ -740,6 +740,8 @@ void ForwardPipeline::RenderSkybox(rhi::IRHICommandList* cmd, he::World& world,
     SubsystemContext ctx;
     ctx.world = &world;
     ctx.camera = &camera;
+    // 【第③段】天空盒数据改从快照取（`SkyboxPass::Update` 只读 ctx.snapshot）
+    ctx.snapshot = &m_Snapshot;
     m_Skybox->Update(ctx);
     m_Skybox->Render(cmd);
 }
@@ -991,7 +993,8 @@ void ForwardPipeline::RunGPUCulling(
     m_GPUCulling.Readback(m_Device, m_GPUVisibleIndices);
 
     // 2) 收集场景对象 → GPUScene SSBO
-    m_GPUScene.Collect(world, sceneGraph, camera);
+    // 【第③段】GPUScene 不再自建快照：直接消费本帧快照（物体收集口径已由 `BuildObjects` 决定）
+    m_GPUScene.CollectFromSnapshot(m_Snapshot);
     // FillGPUScene 必须在 Collect 之后、Upload 之前（与 Deferred 一致）
     if (!m_BatchBuilt) { m_MeshBatcher.Build(world); m_BatchBuilt = true; }
     m_MeshBatcher.FillGPUScene(m_GPUScene);

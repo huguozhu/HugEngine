@@ -22,7 +22,6 @@ void GBufferRenderer_GPU::Shutdown() {}
 
 void GBufferRenderer_GPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
                                   const FrameSceneSnapshot& snapshot,
-                                  he::World& world, he::SceneGraph& sg,
                                   const CameraData& camera) {
     // MeshBatcher::Build + FillGPUScene 已在 BuildFrameGraph 中完成（Upload 之前）
     // 上传 ObjectBuffer 并获取 DrawItem 列表（GPU 路径用不到但 CPU 回退需要）

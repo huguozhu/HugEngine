@@ -96,15 +96,17 @@ void SkyboxPass::SetColorLoadOp(rhi::LoadOp op){
 void SkyboxPass::PreBind(rhi::IRHICommandList* cmd) const {
     if(!m_Ready)return;
     // 物理天空优先于 Cubemap
-    cmd->SetPipeline(m_CachedPhysSky ? m_PS_PSO.get() : m_PSO.get());
+    cmd->SetPipeline(m_PhysSky.enabled ? m_PS_PSO.get() : m_PSO.get());
 }
 
 void SkyboxPass::Shutdown(){
     if(m_Device&&m_DescLayout!=rhi::kInvalidLayout)m_Device->DestroyDescriptorSetLayout(m_DescLayout);
     m_PSO.reset();
     m_PS_PSO.reset();
-    m_CachedSkybox=nullptr;
-    m_CachedPhysSky=nullptr;
+    m_CachedCubemap=nullptr;
+    m_CachedSampler=nullptr;
+    m_CachedSkyboxIntensity=0.0f;
+    m_PhysSky=SnapshotPhysicalSky{};
     m_Device=nullptr;
     m_Ready=false;
 }
@@ -115,50 +117,54 @@ void SkyboxPass::Update(const SubsystemContext& ctx){
     // 缓存相机数据
     if(ctx.camera){m_CachedCamera=*ctx.camera;m_HasCamera=true;}else{m_HasCamera=false;}
 
-    // 查找物理天空组件（优先级高于 Cubemap）
-    if(!ctx.world)return;
-    const he::PhysicalSkyComponent* foundSky=nullptr;
-    ctx.world->ForEach<he::PhysicalSkyComponent>([&](he::Entity,he::PhysicalSkyComponent& ps){
-        if(ps.enabled)foundSky=&ps;
-    });
-    m_CachedPhysSky=foundSky;
+    // 【阶段 1 §15.1 第③段】渲染输入一律来自快照：不再遍历 World、不再缓存组件指针。
+    // 收集侧（`SceneSnapshotBuilder::BuildSkybox` / `BuildEnvironment`）已按与原先**逐条一致**的
+    // 口径填好"启用且真有 cubemap"的天空盒与"第一个启用"的物理天空整份参数。
+    if(!ctx.snapshot)return;
+    m_PhysSky = ctx.snapshot->physicalSky;
 
-    // 查找启用且有效的 SkyboxComponent（物理天空不存在时回退）
-    const he::SkyboxComponent* found=nullptr;
-    ctx.world->ForEach<he::SkyboxComponent>([&](he::Entity,he::SkyboxComponent& sc){
-        if(sc.enabled&&sc.GetCubemap())found=&sc;
-    });
-    if(!found){m_CachedSkybox=nullptr;return;}
-
-    if(found!=m_CachedSkybox){
-        m_CachedSkybox=found;
+    // 天空盒 cubemap（物理天空不存在时的回退；快照的 `enabled` 已含"启用且真有 cubemap"）
+    if(!ctx.snapshot->skybox.enabled || !ctx.snapshot->skybox.cubemap){
+        m_CachedCubemap=nullptr;
+        m_CachedSampler=nullptr;
+        m_CachedSkyboxIntensity=0.0f;
+        return;
+    }
+    const rhi::IRHITexture* cubemap = ctx.snapshot->skybox.cubemap;
+    rhi::IRHISampler*       sampler = const_cast<rhi::IRHISampler*>(ctx.snapshot->skybox.sampler);
+    m_CachedSkyboxIntensity = ctx.snapshot->skybox.intensity;
+    if(cubemap!=m_CachedCubemap || sampler!=m_CachedSampler){
+        m_CachedCubemap=cubemap;
+        m_CachedSampler=sampler;
+        // 快照携带 `const` 资源指针（快照只读），绑定描述符集需要非 const 视图 ⇒ const_cast。
+        // 资源所有权仍在资源层，这里只借用（与 Forward/Deferred 的 IBL 天空绑定同款做法）。
         m_Device->UpdateDescriptorSet(m_DescSet,kSkyboxBindCubemap,
             rhi::DescriptorType::CombinedImageSampler,
-            found->GetCubemap(),found->GetCubemapSampler());
+            const_cast<rhi::IRHITexture*>(cubemap), sampler);
     }
 }
 
 void SkyboxPass::Render(rhi::IRHICommandList* cmd){
-    if(!m_Ready||!m_Enabled||(!m_CachedSkybox&&!m_CachedPhysSky)||!m_HasCamera)return;
+    if(!m_Ready||!m_Enabled||(!m_CachedCubemap&&!m_PhysSky.enabled)||!m_HasCamera)return;
 
     // 计算相机原点旋转视图的逆 ViewProj（去除平移影响，天空盒无限远）
     float4x4 viewRot=glm::lookAtRH(float3(0),m_CachedCamera.forward,m_CachedCamera.up);
     float4x4 invVP=glm::inverse(m_CachedCamera.GetProjMatrix()*viewRot);
 
     // 物理天空：解析 Preetham 模型（无纹理绑定，推入天空参数）
-    if(m_CachedPhysSky){
+    if(m_PhysSky.enabled){
         // 注意：Slang push constant 用 std430 布局，float3 对齐到 16 字节，
         // 故 intensity 后需补 3 个 float 的 padding，让 sunDir 落在 offset 80（与 shader 一致）
         struct alignas(16){float4x4 invVP;float intensity;float _pad0[3];float sunDir[3];float turbidity;float groundAlbedo;float sunIntensity;float _pad;}pc;
         pc.invVP=invVP;
-        pc.intensity=m_CachedPhysSky->intensity;
+        pc.intensity=m_PhysSky.intensity;
         pc._pad0[0]=pc._pad0[1]=pc._pad0[2]=0.0f;
-        pc.sunDir[0]=m_CachedPhysSky->sunDirection.x;
-        pc.sunDir[1]=m_CachedPhysSky->sunDirection.y;
-        pc.sunDir[2]=m_CachedPhysSky->sunDirection.z;
-        pc.turbidity=m_CachedPhysSky->turbidity;
-        pc.groundAlbedo=m_CachedPhysSky->groundAlbedo;
-        pc.sunIntensity=m_CachedPhysSky->sunIntensity;
+        pc.sunDir[0]=m_PhysSky.sunDirection.x;
+        pc.sunDir[1]=m_PhysSky.sunDirection.y;
+        pc.sunDir[2]=m_PhysSky.sunDirection.z;
+        pc.turbidity=m_PhysSky.turbidity;
+        pc.groundAlbedo=m_PhysSky.groundAlbedo;
+        pc.sunIntensity=m_PhysSky.sunIntensity;
         pc._pad=0.0f;
         cmd->SetPipeline(m_PS_PSO.get());
         cmd->SetPushConstants(0,sizeof(pc),&pc);
@@ -168,7 +174,7 @@ void SkyboxPass::Render(rhi::IRHICommandList* cmd){
 
     struct alignas(16){float4x4 invVP;float intensity;float _pad[7];}pc;
     pc.invVP=invVP;
-    pc.intensity=m_CachedSkybox->intensity;
+    pc.intensity=m_CachedSkyboxIntensity;
 
     cmd->SetPipeline(m_PSO.get());
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_DescSet);

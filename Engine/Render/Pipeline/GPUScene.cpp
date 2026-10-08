@@ -51,16 +51,8 @@ static void FillObj(GPUSceneObject& o, const float4x4& wm, const AABB& b, u32 id
     // 由 MeshBatcher 填充;
 }
 
-void GPUScene::Collect(World& world, SceneGraph& sg, const CameraData& camera) {
-    // 阶段 1 T1.3b-3：**收集口径已集中到 `SceneSnapshotBuilder`**，本函数只做两件事：
-    // 构建快照（过渡期仍在管线里做）→ 转发给 `CollectFromSnapshot`。
-    // 这里用局部快照是安全的：`CollectFromSnapshot` 在本函数内同步消费完，不像帧图那样延后执行。
-    FrameSceneSnapshot snapshot;
-    SceneSnapshotObjectOptions options;
-    options.excludeDecals = m_ExcludeDecals;   // 与既有口径一致（Deferred 排除贴花）
-    SceneSnapshotBuilder::BuildObjects(world, sg, camera, options, nullptr, snapshot);
-    CollectFromSnapshot(snapshot);
-}
+// 阶段 1 第③段：`Collect(world, sg, camera)` 过渡重载已删除 —— 调用方直接消费自己的快照。
+// 收集口径的唯一实现仍在 `SceneSnapshotBuilder::BuildObjects`。
 
 void GPUScene::CollectFromSnapshot(const FrameSceneSnapshot& snapshot) {
     m_DirtyIndices.clear();

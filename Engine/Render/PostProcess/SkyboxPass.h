@@ -1,6 +1,8 @@
 #pragma once
 
 #include "Subsystem/RenderSubsystem.h"
+// 阶段 1 §15.1 第③段：本 Pass 改从快照取天空数据（不再遍历 World / 不再缓存组件指针）
+#include "Threading/FrameSceneSnapshot.h"
 #include "RHI/RHI.h"
 #include "RHI/Shader.h"
 #include <memory>
@@ -12,7 +14,10 @@ namespace he::render {
 // ============================================================================
 // SkyboxPass — 天空盒渲染（全屏三角形，depth=Equal，无 VB/IB）
 //
-// 遍历 World 找到 SkyboxComponent → 绑定 Cubemap → 逆 ViewProj 采样
+// 【阶段 1 §15.1 第③段】原先在 `Update(ctx)` 里遍历 World 找 `SkyboxComponent` /
+// `PhysicalSkyComponent` 并**缓存组件指针** —— 那是渲染期读 ECS（换线程即竞争）。
+// 现在只读 `SubsystemContext::snapshot` 里的 `skybox` / `physicalSky`（收集侧已按同一口径填好），
+// 缓存的是**值 + RHI 资源指针**（cubemap/sampler），组件指针一个都不留。
 // ============================================================================
 class SkyboxPass : public IRenderSubsystem {
 public:
@@ -48,8 +53,12 @@ private:
     rhi::ShaderBytecode m_PS_FS;
     std::unique_ptr<rhi::IRHIPipelineState> m_PS_PSO;
 
-    const he::SkyboxComponent* m_CachedSkybox=nullptr;
-    const he::PhysicalSkyComponent* m_CachedPhysSky=nullptr;
+    // 天空盒 cubemap（值缓存：只用于"换了一张就更新描述符集"的判据；所有权在资源层）
+    const rhi::IRHITexture* m_CachedCubemap = nullptr;
+    rhi::IRHISampler*       m_CachedSampler = nullptr;
+    float                   m_CachedSkyboxIntensity = 0.0f;
+    // 物理天空参数（按值缓存，来自快照；不再是组件指针）
+    SnapshotPhysicalSky m_PhysSky{};
     CameraData m_CachedCamera{};
     bool m_HasCamera=false;
     bool m_Ready=false;

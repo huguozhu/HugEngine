@@ -105,11 +105,9 @@ public:
     virtual void Shutdown() = 0;
 
     /// 执行 GBuffer 渲染（BeginOffscreenPassMRT → 绘制 → EndOffscreenPass）
-    /// 【为什么收快照】阶段 1 第①段起，实例化网格的数据（实例变换/开关/版本号）来自快照；
-    /// 渲染期因此不再遍历世界去读 `InstancedMeshComponent`（附录 B1 与附录 E 两项闸门的收敛对象）。
+    /// 【第③段】`World&` / `SceneGraph&` 已去掉：实例化数据与物体条目都来自快照。
     virtual void Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
                         const FrameSceneSnapshot& snapshot,
-                        he::World& world, he::SceneGraph& sg,
                         const CameraData& camera) = 0;
 };
 
@@ -151,7 +149,7 @@ public:
     // ── 渲染 ──
     // 执行 GBuffer 渲染（委托给 IGBufferRenderer::Render）
     void Render(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snapshot,
-                he::World& world, he::SceneGraph& sg, const CameraData& camera);
+                const CameraData& camera);
 
     // ── 每帧动态参数设置（在 Render 之前调用）──
     void SetObjectBuffer(rhi::IRHIBuffer* objBuf)  { m_Ctx.objectBuffer = objBuf; }

@@ -19,6 +19,7 @@ namespace he {
 namespace he::render {
 
 class RenderGraphBuilder; // Frame Graph 桥梁（Phase 2）
+struct FrameSceneSnapshot;  // 阶段 1 §15.1 第③段：子系统改从快照取渲染输入
 
 // ============================================================================
 // SubsystemContext — 渲染子系统每帧上下文
@@ -32,6 +33,9 @@ struct SubsystemContext {
     const CameraData* camera      = nullptr;  // 当前帧相机
     u32               viewportWidth  = 0;     // 视口宽度
     u32               viewportHeight = 0;     // 视口高度
+    /// 本帧**不可变渲染输入**（阶段 1 §15.1 第③段）：子系统应优先读它，`world`/`sceneGraph`
+    /// 是过渡期保留给尚未快照化的子系统（如阴影系统）的入口，快照化完成后应一并删除。
+    const FrameSceneSnapshot* snapshot = nullptr;
 };
 
 // ============================================================================

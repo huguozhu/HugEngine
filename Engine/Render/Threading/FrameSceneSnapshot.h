@@ -129,6 +129,9 @@ struct SnapshotSkybox {
     const rhi::IRHITexture* cubemap = nullptr;
     const rhi::IRHISampler* sampler = nullptr;
     bool                    enabled = false;   // 找到"启用且真的有 cubemap"的天空盒组件时为真
+    /// 天空盒亮度倍率（`SkyboxComponent::intensity`）：`SkyboxPass` 的 push constant 要用它
+    ///（阶段 1 §15.1 第③段 —— 该 Pass 改为只读快照，组件字段必须随快照一起走）
+    float                   intensity = 1.0f;
 };
 
 /// 贴花条目（T1.4）：`DecalPass` 原先遍历 `DecalComponent` 两次（判空 + 逐贴花绘制），并按
@@ -185,6 +188,20 @@ struct SnapshotInstance {
     u64  sourceEntity = 0;
 };
 
+/// 物理天空（Preetham 解析模型）参数：`SkyboxPass` 渲染期读它的**唯一**入口，
+/// 替代原先在 `SkyboxPass::Update(ctx)` 里的 `ctx.world->ForEach<PhysicalSkyComponent>`。
+/// 【为什么整份按值带走】该 Pass 要用 intensity / sunDirection / turbidity / groundAlbedo /
+/// sunIntensity 五个字段填 push constant —— 只带 `atmosphere` 里的"太阳方向 + 浑浊度"不够。
+/// 【口径】取**第一个启用**的组件（与 `he::GetPhysicalSkySun` 逐条一致）。
+struct SnapshotPhysicalSky {
+    bool   enabled      = false;                  // 是否找到启用且可用的物理天空
+    float3 sunDirection{0.0f, 1.0f, 0.0f};        // 世界空间太阳方向
+    float  turbidity    = 0.0f;                   // 大气浑浊度
+    float  groundAlbedo = 0.0f;                   // 地面反照率
+    float  intensity    = 0.0f;                   // 天空整体亮度倍率
+    float  sunIntensity = 0.0f;                   // 太阳盘亮度倍率
+};
+
 /// 一帧的完整渲染输入。游戏线程在 tick 结束后构造，交接后**只读**（铁律 2）。
 struct FrameSceneSnapshot {
     u64        frameIndex = 0;              // 与 CommandQueue 的帧号对应（对账用）
@@ -197,6 +214,10 @@ struct FrameSceneSnapshot {
     /// 空中透视（大气）参数：xyz = 太阳方向（指向太阳），w = 浑浊度（0 = 关闭）。    /// 与 `PushConstantData::atmosphere` / `DeferredLightingPushConstant::atmosphere` 逐字段一致；
     /// 由游戏线程从物理天空组件取（T1.4），渲染期因此不必再读世界。
     float4     atmosphere{0.0f, 1.0f, 0.0f, 0.0f};
+
+    /// 物理天空（Preetham）参数的完整副本：`SkyboxPass` 渲染期的唯一入口（天空盒 Pass 与
+    /// 光照用的 `atmosphere` 是两个消费者，前者还要 intensity/groundAlbedo/sunIntensity）
+    SnapshotPhysicalSky physicalSky{};
 
     /// 天空盒（IBL 天空源）：渲染期读它的**唯一**入口，替代原先在帧图里 `world.ForEach<SkyboxComponent>`。
     SnapshotSkybox skybox{};

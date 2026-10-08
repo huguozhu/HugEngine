@@ -213,6 +213,20 @@ bool SceneSnapshotBuilder::BuildEnvironment(he::World& world, FrameSceneSnapshot
     float  turbidity = 0.0f;
     const bool found = he::GetPhysicalSkySun(world, sunDir, turbidity);
     out.atmosphere = float4(sunDir, turbidity);
+
+    // 物理天空的**整份参数**（`SkyboxPass` 要用 intensity/groundAlbedo/sunIntensity 等）：
+    // 口径与上面完全一致 —— 取**第一个启用**的组件（`GetPhysicalSkySun` 的同一规则），
+    // 找不到时整份复位为"关闭"（否则上一帧的参数会残留在快照里）。
+    out.physicalSky = SnapshotPhysicalSky{};
+    world.ForEach<he::PhysicalSkyComponent>([&](he::Entity, he::PhysicalSkyComponent& ps) {
+        if (!ps.enabled || out.physicalSky.enabled) return;   // 只认第一个启用的
+        out.physicalSky.enabled      = true;
+        out.physicalSky.sunDirection = ps.sunDirection;
+        out.physicalSky.turbidity    = ps.turbidity;
+        out.physicalSky.groundAlbedo = ps.groundAlbedo;
+        out.physicalSky.intensity    = ps.intensity;
+        out.physicalSky.sunIntensity = ps.sunIntensity;
+    });
     return found;
 }
 
@@ -273,6 +287,7 @@ bool SceneSnapshotBuilder::BuildSkybox(he::World& world, FrameSceneSnapshot& out
             out.skybox.cubemap = sc.GetCubemap();
             out.skybox.sampler = sc.GetCubemapSampler();
             out.skybox.enabled = true;
+            out.skybox.intensity = sc.intensity;   // 第③段：`SkyboxPass` 的 push constant 要用它
         }
     });
     return out.skybox.enabled;
