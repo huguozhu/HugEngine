@@ -360,7 +360,7 @@ private:
 | **T1.2** | 游戏线程侧新增 `SceneSnapshotBuilder::Build(world, sg, camera) → snapshot`（把现在散在 `CollectLights`/`GPUScene::Collect` 里的遍历集中到这里） | `Engine/Render/Threading/SceneSnapshotBuilder.{h,cpp}` | 与旧路径**并行跑一帧双份**，逐字段比对一致（临时 `HE_SNAPSHOT_VERIFY` 开关） |
 | **T1.3** | `CollectLights` / `GPUScene::Collect` 改为**消费快照**（保留旧签名做过渡，内部转发到快照实现） | `DeferredPipeline.cpp:810`、`ForwardPipeline.cpp:545`、`GPUScene.cpp:52` | 三条管线（Forward / Deferred / PathTracing）渲染输出与改前**逐像素一致**（`cmp_dumps.py`） |
 | **T1.4** | 骨骼矩阵、材质快照、Decal/粒子等其余渲染输入的快照化 | `SceneRenderer.*`、各 Pass | 同上 |
-| **T1.5** | 移除渲染期对 World 的引用（保留加载期一次性访问） | `Engine/Render/` | **附录 B 的 grep 断言通过**：渲染期函数签名不再出现 `he::World&` / `SceneGraph&` |
+| **T1.5** | 移除渲染期对 World 的引用（保留加载期一次性访问） | `Engine/Render/` | **附录 B 的 grep 断言通过**：渲染期函数签名不再出现 `he::World&` / `SceneGraph&` ✅ 已完成（2026-10-09）：附录 B1 渲染期 0 / 加载期 0（80 → 0）、组件指针 0/0 |
 
 **退出判据**：全部样例在开关两种状态下输出一致；`Engine/Render/` 渲染期无 World 依赖；Lumen/Nanite 的流式路径有明确"谁在何时读世界"的记录。
 
@@ -371,9 +371,9 @@ private:
 | 任务 | 内容 | 主要文件 | 判据 |
 |---|---|---|---|
 | **T2.1** | `RenderThread` 实现（线程主体、命令循环、帧节奏、休眠策略：空闲时条件变量等待 + 可配的自旋窗口） | `Engine/Render/Threading/RenderThread.cpp` | 空闲帧 CPU 占用 < 1%（不得自旋烧核） |
-| **T2.2** | 设备与交换链**改由渲染线程创建/持有**；`AcquireNextImage` / `Present` 迁入渲染线程 | `VulkanDevice.cpp`、`VulkanSwapChain.*`、样例循环 | 样例里不再出现交换链调用；`HE_ASSERT_RENDER_THREAD` 无触发 |
+| **T2.2** | 设备与交换链**改由渲染线程创建/持有**；`AcquireNextImage` / `Present` 迁入渲染线程 | `VulkanDevice.cpp`、`VulkanSwapChain.*`、样例循环 | 样例里不再出现交换链调用；`HE_ASSERT_RENDER_THREAD` 无触发 ✅ 已完成（2026-10-09）：整帧 RHI（Acquire/录制/Submit/读回/Present）归渲染线程；模式 0/1 转储逐位一致、归属断言 0 |
 | **T2.3** | 管线 `Initialize/Shutdown`、`OnResize`、资源创建走 `ResourceCreationService`（步 1 同步转发） | 三条管线、`Engine/Render/Threading/ResourceCreationService.*` | 加载期与 resize 正常；帧循环内无同步创建（grep 断言） |
-| **T2.4** | 样例循环改造：`PollEvents` + tick + `SubmitFrame` + ImGui CPU 侧；删除主线程的渲染与提交代码 | `Samples/01~07` | 全部样例可运行；帧时间不退化 |
+| **T2.4** | 样例循环改造：`PollEvents` + tick + `SubmitFrame` + ImGui CPU 侧；删除主线程的渲染与提交代码 | `Samples/01~07` | 全部样例可运行；帧时间不退化 ✅ 已完成（2026-10-09）：7/7 样例（02/03/04/05/06.GILab/07.Nanite/07.AISamples），按值载荷 |
 | **T2.5** | 编辑器改造：`EditorApp` 主循环同样改为投递；ImGui 后端录制先保持"渲染线程内录制" | `Samples/Editor/EditorApp.cpp` | 编辑器可用；UI 与场景仍在同一 RenderPass（阶段 4 再解） |
 | **T2.6** | 关键：**渲染线程的 RHI 调用改用"记录 → 执行"两段式**（为将来加 RHI 线程留口）——至少把 `Submit` 与资源创建收口到 `RenderThreadContext` 的两个方法 | `Engine/Render/Threading/RenderThreadContext.h` | 记录/执行边界在代码上可见（`RenderThreadContext` 是唯一 RHI 出口） |
 
@@ -841,7 +841,7 @@ private:
     > 查清：emit 分支每帧读**约 15 个字段**（`ParticleComponent::GetParam()` 的方向/形状/速度/寿命/
     > 尺寸/纹理行列……），只搬"位置"不够 ⇒ 快照条目已改为**整份携带 `ParticleSystemParam`**，
     > 消费侧切换因此降为机械替换（实测单测 384 例 / 71703 断言）。
-- [ ] T1.5 渲染期移除 World/SceneGraph 引用（grep 断言）
+- [x] T1.5 渲染期移除 World/SceneGraph 引用（grep 断言）—— ✅ 完成（2026-10-09）：附录 B1 世界依赖**渲染期 0 / 加载期 0**（80 → 0）、组件指针 0/0；`python Tools/check_threading.py --world-deps --mesh-ptrs --handles --gate` 复测通过
   - **闸门与基线已就位（2026-09-24）**：`Tools/check_threading.py --world-deps` 统计 `Engine/Render/`
     内 `World&` / `SceneGraph&` 的出现处，按**所属函数名**分"渲染期 / 加载期"（与调用点清点同一份
     白名单；快照层 `Engine/Render/Threading/` 在**白名单内** —— 它是渲染侧唯一允许读世界的地方）。
@@ -1165,7 +1165,7 @@ private:
       > 与接口声明本身。下一批一次改完即 **B1 = 0**：接口强制三条管线同批，而各管线的内部 helper
       > 与前置依赖（装配器、光源收集、阴影下标解析、MeshBatcher、RTPass）都已在本轮备齐。
 - [x] T2.1 `RenderThread` 实现（帧节奏 + 休眠策略）—— ✅ 完成（真起线程 + 归属判断 + 停止排空；4 例单测。cv 唤醒并入 T2.6）
-- [ ] T2.2 设备与交换链归渲染线程（Acquire/Present 迁移）
+- [x] T2.2 设备与交换链归渲染线程（Acquire/Present 迁移）—— ✅ 完成（2026-10-09）：Acquire / 录制 / ImGui 录制 / Submit / 探测读回 / Present 全在渲染线程（一帧两条命令）；06.GILab 模式 0/1 转储逐位一致、归属断言 0
 - [ ] T2.3 `ResourceCreationService`（步 1 同步转发）
 - [x] **T2.4 之一（已提交）**： 6.GILab 的渲染命令载荷改为**按值捕获**（此前 `[&]` 按引用捕获
   `curPipeline`/`cmdList`/`camCtrl` ⇒ 真正异步时随时被游戏线程改写）。现在整帧渲染输入收进
@@ -1474,14 +1474,14 @@ private:
     模式 1 与模式 0 为 4539（= 已知间歇底噪）、模式 1 断言 0。
   · **教训**：读数前必须先确认渲染线程模式 —— 模式 0（SingleThreaded）时队列不参与、渲染线程空转，
     第一次测量因此"什么都没测到"。
-- [ ] T2.4 样例循环改造（7 个样例）
+- [x] T2.4 样例循环改造（7 个样例）—— ✅ 完成（2026-10-09）：02.Cube / 03.Sponza-Forward / 04.Sponza-Deferred / 05.Sponza-PathTracing / 06.GILab / 07.Nanite / 07.AISamples；按值载荷（修掉 06.GILab 按引用捕获）；实现细节与完整时序见 15 文档 §13–§21
 - [ ] T2.5 编辑器主循环改造
 - [ ] T2.6 `RenderThreadContext`：RHI 唯一出口（记录/执行分离）
 - [ ] T3.1 `ParallelRecordHelper` 抽取
 - [ ] T3.2 Deferred 接入并行录制
 - [ ] T3.3 PathTracing / Nanite 并行录制评估
 - [ ] T3.4 分块策略与 worker 数调优
-- [ ] T4.1 ImGui 后端录制归属
+- [ ] T4.1 ImGui 后端录制归属 —— ⚠ **样例侧已实现**（`imgui.EndFrame(cmdList)` 已在命令 2 内、由渲染线程执行）；**编辑器侧待 T2.5**
 - [ ] T4.2 消除 ImGui 专用 RHI 后门
 - [ ] T4.3 面板改读快照
 - [ ] T4.4 热重载 PSO 替换改渲染线程执行
