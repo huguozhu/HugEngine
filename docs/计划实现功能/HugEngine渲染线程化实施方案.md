@@ -661,6 +661,14 @@ private:
     单测 1 例（两段互不覆盖 / 共享数组内容 / 无骨骼不污染）；实测 **383 例 / 71691 断言全通过**。
     **消费侧未做**：把骨骼矩阵写进 `boneBuffer` 的那段遍历仍读组件 —— 它依赖"组件 → 缓冲"的指针映射
     即 T1.2c 待定的 **mesh 注册表**，两者一并做（届时快照已是现成数据源）。
+  - **粒子发射器进快照（2026-09-24）**：`ParticleComponent` 增加 `rendererId`（注册方回填；
+    两个注册粒子的样例已补），`FrameSceneSnapshot` 新增 `SnapshotParticleEmitter{rendererId,
+    emitPosition}` 与 `particles`，`SceneSnapshotBuilder::BuildParticles` 按组件收集。
+    **只需这两个字段**：粒子模拟/绘制早就按 id 索引驱动渲染器自有缓冲（`DispatchCompute(cmd, id, dt,
+    viewProj)`），渲染期唯一读组件的地方就是"发射位置"。
+    单测 1 例；实测 **384 例 / 71701 断言全通过**；`02.Cube` / `04.Sponza-Deferred` 编译通过。
+    **消费侧未做**：`DispatchCompute` 仍从 `CompState::comp` 取位置，下一步改从快照取
+    （对外接口不变，之后 `CompState` 不必缓存组件指针）。
 - [ ] T1.5 渲染期移除 World/SceneGraph 引用（grep 断言）
   - **闸门与基线已就位（2026-09-24）**：`Tools/check_threading.py --world-deps` 统计 `Engine/Render/`
     内 `World&` / `SceneGraph&` 的出现处，按**所属函数名**分"渲染期 / 加载期"（与调用点清点同一份
