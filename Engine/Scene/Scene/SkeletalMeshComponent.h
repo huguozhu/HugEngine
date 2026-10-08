@@ -2,9 +2,8 @@
 
 #include "Scene/MeshComponent.h"
 #include "Scene/SkeletonAsset.h"
-#include "RHI/FrameRetireQueue.h"
 
-#include <memory>
+#include <vector>
 
 // ============================================================
 // SkeletalMeshComponent — 骨骼网格（对应 UE5 USkeletalMeshComponent）
@@ -12,7 +11,9 @@
 // GPU 蒙皮管线（Phase C C1b）：
 //   1. SkeletalMeshSystem::Update 每帧推进剪辑时间 → 采样关节 TRS
 //      → 层级合成世界矩阵 → 蒙皮矩阵 = world × inverseBind
-//   2. 骨骼矩阵写入 SSBO（bindless 注册，useInstanceID=3 模式）
+//   2. 骨骼矩阵写入 SSBO（bindless 注册，useInstanceID=3 模式）；
+//      【阶段 1 §15.1 第③段】该 SSBO 的**生命周期在渲染侧**（`render::SkinnedMeshBuffers`），
+//      组件只提供矩阵数据与版本号
 //   3. 顶点着色器按 JOINTS/WEIGHTS 加权 4 个骨骼矩阵完成蒙皮
 //
 // 网格数据来自 SkeletonAsset（glTFLoader 解析的蒙皮顶点/索引）。
@@ -83,26 +84,20 @@ public:
     float crossFadeTime     = 0.0f;   // 已经历时间（秒）
     float crossFadeDuration = 0.0f;   // 总时长（≤0 = 立即完成）
 
-    // --- GPU 侧状态（ForwardPipeline 管理，勿手动改）---
-    bool  bBonesDirty = false;              // 骨骼矩阵已更新，待上传
-    u32   boneSSBOHandle = 0;               // bindless SSBO 句柄（容量不变则句柄不变）
-    u32   boneBufferCapacity = 0;           // 已分配缓冲可容纳的矩阵数
-    std::unique_ptr<rhi::IRHIBuffer> boneBuffer;   // 骨骼矩阵缓冲（随组件存活）
-    // 退役缓冲（任务 23：**有界** N 帧延迟释放，替代原来的无界 vector 保活）
-    rhi::FrameRetireQueue<std::unique_ptr<rhi::IRHIBuffer>> retiredBoneBuffers;
-
-    /// 帧边界推进退役队列（ForwardPipeline 每帧调用一次）
-    void AdvanceRetireQueue() { retiredBoneBuffers.Advance(); }
-
-    /// 退役当前骨骼缓冲（扩容重建时调用；旧缓冲 N 帧后释放）
-    void RetireBoneBuffer() {
-        if (!boneBuffer) return;
-        retiredBoneBuffers.Retire(std::move(boneBuffer));
-    }
-
-    // --- 关节矩阵缓存（SkeletalMeshSystem 计算）---
-    std::vector<float4x4> jointWorldMatrices;   // 世界矩阵（调试/层级用）
+    // --- 骨骼矩阵（CPU 数据源）+ 版本号 ---
+    // 【阶段 1 §15.1 第③段】逐网格的 GPU 缓冲状态（缓冲 / 容量 / 脏标记 / bindless 句柄 /
+    // 退役队列）**已从组件搬到渲染侧** `render::SkinnedMeshBuffers`（按 `meshIndex` 索引）：
+    // 只要它们还在组件上，骨骼上传就必须在渲染期遍历世界（B1 与组件指针两项闸门都降不下来）。
+    // 组件侧只留**数据源**与"数据变了"的版本号 —— 与第①段的实例缓冲处理完全同款。
     std::vector<float4x4> boneMatrices;         // 蒙皮矩阵 = world × inverseBind（GPU SSBO 数据）
+
+    /// 骨骼矩阵版本号：动画系统每次重算骨骼矩阵时 +1（原 `bBonesDirty` 的替代）。
+    /// 【为什么用版本号】缓冲状态在渲染侧，渲染侧不该回读组件上的标志位；快照把版本号按值带走，
+    /// 渲染侧比较"本帧版本 ≠ 上次上传的版本"决定是否重传 —— 跨帧幂等，适合另一根线程。
+    u32 boneMatrixVersion = 0;
+
+    // --- 关节矩阵缓存（SkeletalMeshSystem 计算，调试/层级用）---
+    std::vector<float4x4> jointWorldMatrices;   // 世界矩阵
 };
 
 } // namespace he

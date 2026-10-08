@@ -433,7 +433,7 @@ void SkeletalMeshSystem::Update(World& world, f32 dt) {
                 ComputeSkinMatricesBlended(*sm.skeleton, sm.blendLayers, sm.blendLayerCount,
                                            sm.boneMatrices, &sm.jointWorldMatrices);
             }
-            sm.bBonesDirty = true;
+            ++sm.boneMatrixVersion;
             return;
         }
 
@@ -462,7 +462,7 @@ void SkeletalMeshSystem::Update(World& world, f32 dt) {
             ComputeSkinMatrices(*sm.skeleton, sm.currentClip, sm.clipTime,
                                 sm.boneMatrices, &sm.jointWorldMatrices);
         }
-        sm.bBonesDirty = true;   // 渲染管线下一帧上传骨骼 SSBO
+        ++sm.boneMatrixVersion;   // 渲染管线下一帧上传骨骼 SSBO
     });
 }
 

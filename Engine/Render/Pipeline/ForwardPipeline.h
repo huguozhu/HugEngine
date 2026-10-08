@@ -11,6 +11,7 @@
 #include "Pipeline/GPUScene.h"
 #include "Pipeline/MeshBatcher.h"
 #include "Pipeline/InstanceCuller.h"   // 任务 25：逐实例 GPU 视锥剔除
+#include "Pipeline/SkinnedMeshBuffers.h"   // 第③段：骨骼矩阵缓冲的渲染侧状态表
 #include "AntiAliasing/AntiAliasing.h"
 // 阶段 1 T1.3b：光源走快照（`FrameSceneSnapshot`）而不是直接遍历 ECS。
 #include "Threading/FrameSceneSnapshot.h"
@@ -245,6 +246,8 @@ private:
 
     // 任务 25：逐实例 GPU 视锥剔除（实例化网格的可见列表 + 间接命令）
     InstanceCuller m_InstanceCuller;
+    /// 骨骼矩阵缓冲的渲染侧状态（第③段：与实例缓冲同款，按 `meshIndex` 索引；组件只留数据源）
+    SkinnedMeshBuffers m_SkinnedBuffers;
     u32 m_LastCulledInstanceMeshes = 0;   // 走逐实例剔除的实例化网格数
     u32 m_LastVisibleInstances     = 0;   // 剔除后可见实例数（读回，滞后一帧）
     u32 m_LastTotalInstances       = 0;   // 剔除前实例总数

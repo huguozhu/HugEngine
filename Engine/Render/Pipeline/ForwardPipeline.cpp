@@ -484,6 +484,7 @@ int ForwardPipeline::ReloadShader(StringView shaderName,
 
 void ForwardPipeline::Shutdown() {
     m_InstanceCuller.Shutdown();   // 任务 25：逐实例剔除（须在设备有效时释放 bindless 槽位）
+    m_SkinnedBuffers.Shutdown(m_Device);   // 第③段：骨骼矩阵缓冲（同上，须在设备有效时释放槽位）
     if (m_Device) {
         m_Device->DestroyDescriptorSetLayout(m_PerFrameLayout);
     }
@@ -1199,86 +1200,55 @@ void ForwardPipeline::RenderScene(
     }
 
     // ============================================================
-    // 骨骼蒙皮 Pass（Phase C C1b）：骨骼矩阵 SSBO 上传（脏标记）
+    // 骨骼蒙皮 Pass（Phase C C1b）：骨骼矩阵 SSBO 上传（版本号判据）
     // → 蒙皮 PSO + useInstanceID=3 绘制（顶点着色器按权重混合 4 骨骼矩阵）
     // MVP 限制：Forward 非 GPU-Culling 路径；Deferred/间接路径后续扩展。
+    //
+    // 【阶段 1 §15.1 第③段】本循环**不再遍历世界**：骨骼网格条目、矩阵数据（扁平切片）、
+    // 版本号都来自快照；顶点/索引缓冲按 `meshIndex` 查 `MeshRegistry`；逐网格的缓冲状态
+    // （SSBO/容量/退役队列/句柄）在渲染侧的 `SkinnedMeshBuffers` 里，按 `meshIndex` 索引。
     // ============================================================
-    world.ForEach<he::SkeletalMeshComponent>([&](he::Entity, he::SkeletalMeshComponent& sm) {
-        // 任务 23：帧边界推进退役队列（有界释放）
-        sm.AdvanceRetireQueue();
-        if (!sm.skeleton || sm.GetIndexCount() == 0 || sm.boneMatrices.empty()) return;
+    m_SkinnedBuffers.BeginFrame(m_Device);   // 帧边界：推进退役队列 + 回收上帧未见的条目
+    for (const SnapshotDrawItem& it : m_Snapshot.draws) {
+        if (it.meshClass != SnapshotMeshClass::Skeletal) continue;
+        if (!it.bHasSkeleton || it.skinMatrixCount == 0u) continue;   // 旧判据：skeleton 已加载且矩阵非空
+        const MeshRegistryEntry* me = m_MeshRegistry.Find(it.meshIndex);
+        if (!me || !me->vertexBuffer || !me->indexBuffer) continue;
+        // 矩阵切片越界保护：快照损坏时宁可少画，也不要读越界内存
+        if (static_cast<usize>(it.skinMatrixOffset) + it.skinMatrixCount > m_Snapshot.skinMatrices.size())
+            continue;
+        const float4x4* skinMats = m_Snapshot.skinMatrices.data() + it.skinMatrixOffset;
 
-        // 阶段 1 附录 E（E-2②）：**矩阵数据**改从快照取，**生命周期**（脏标记/容量/退役队列/缓冲创建）
-        // 仍留在渲染侧 —— 后者是渲染侧资源管理，将来归 T2.3 的 ResourceCreationService。
-        // 逐实体对齐：快照条目带 `sourceEntity`（= 本组件实体 id），据此找回该实体的条目与矩阵切片。
-        // 同一帧内 `BuildObjects` 先于本循环执行，且中间没有游戏 tick ⇒ 快照里的矩阵与组件当前值相同。
-        const SnapshotDrawItem* snapItem = nullptr;
-        for (const SnapshotDrawItem& d : m_Snapshot.draws) {
-            if (d.sourceEntity == sm.GetEntity().id) { snapItem = &d; break; }
-        }
-        u32             skinCount = 0;
-        const float4x4* skinMats  = nullptr;
-        if (snapItem && snapItem->skinMatrixCount > 0u &&
-            static_cast<usize>(snapItem->skinMatrixOffset) + snapItem->skinMatrixCount <=
-                m_Snapshot.skinMatrices.size()) {
-            skinMats  = m_Snapshot.skinMatrices.data() + snapItem->skinMatrixOffset;
-            skinCount = snapItem->skinMatrixCount;
-        }
-        // 快照里没有对应条目时退回组件数据（首帧/未注册/组件与快照口径不一致等边界情况）
-        const float4x4* skinSrc = skinCount ? skinMats : sm.boneMatrices.data();
-
-        // 骨骼矩阵上传：容量够 → Map 原地更新（句柄不变）；容量不够 → 扩建 + 旧缓冲延迟释放
+        // 骨骼矩阵上传：版本未变且容量够 → 直接复用句柄；容量不够 → 扩建 + 旧缓冲延迟释放
         //（禁止每帧重建缓冲：SSBO 数组容量有限，重建会不断消耗 bindless 槽位）
-        const u32 needCount = skinCount ? skinCount : (u32)sm.boneMatrices.size();   // E-2②：优先快照切片
-        if (sm.bBonesDirty || !sm.boneBuffer) {
-            if (!sm.boneBuffer || sm.boneBufferCapacity < needCount) {
-                rhi::BufferDesc desc;
-                desc.size        = sizeof(float4x4) * needCount;
-                desc.usage       = rhi::BufferUsage::Storage;
-                desc.initialData = skinSrc;   // E-2②：快照切片（或组件兜底）
-                desc.cpuAccess   = true;
-                if (sm.boneBuffer) {
-                    m_Device->GetBindlessHeap()->ReleaseBuffer(sm.boneSSBOHandle);
-                    sm.RetireBoneBuffer();
-                }
-                sm.boneBuffer = m_Device->CreateBuffer(desc);
-                sm.boneBufferCapacity = needCount;
-                sm.boneSSBOHandle = m_Device->GetBindlessHeap()->RegisterBuffer(sm.boneBuffer.get());
-            } else {
-                // 复用缓冲：重映射写入最新骨骼矩阵（与 GPUScene::Upload 同一模式）
-                void* mapped = sm.boneBuffer->Map();
-                if (mapped) {
-                    std::memcpy(mapped, skinSrc, sizeof(float4x4) * needCount);   // E-2②：同上
-                    sm.boneBuffer->Unmap();
-                }
-            }
-            sm.bBonesDirty = false;
-        }
+        const u32 boneHandle = m_SkinnedBuffers.Upload(m_Device, it.meshIndex, it.sourceEntity,
+                                                       skinMats, it.skinMatrixCount,
+                                                       it.skinMatrixVersion);
+        if (boneHandle == 0) continue;
 
         // 定位对象条目（objectIndex → 材质数据）：按 meshIndex（整数）对齐
-        //（第②段：`DrawItem` 已无组件指针，兜底的地址比较随之删除）
         u32 objIndex = 0;
         bool found = false;
         for (auto& di : filteredItems) {
-            if (sm.meshIndex != 0u && sm.meshIndex == di.meshIndex) { objIndex = di.objectIndex; found = true; break; }
+            if (it.meshIndex != 0u && it.meshIndex == di.meshIndex) { objIndex = di.objectIndex; found = true; break; }
         }
-        if (!found) return;
+        if (!found) continue;
 
         // 蒙皮绘制（模式 3）
         PushConstantData pc = framePC;
         pc.objectIndex       = objIndex;
         pc.useInstanceID     = 3;
-        pc.instanceSSBOHandle = sm.boneSSBOHandle;
+        pc.instanceSSBOHandle = boneHandle;
         cmd->SetPipeline(m_PBR_Skinned_PSO.get());
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[m_CurrentFrameSlot]);
         cmd->SetDrawDebugLabel("Forward SkeletalMesh");
         cmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
-        cmd->SetVertexBuffer(sm.GetVertexBuffer().get(), 0);
-        cmd->SetIndexBuffer(sm.GetIndexBuffer().get());
-        cmd->DrawIndexed(sm.GetIndexCount());
+        cmd->SetVertexBuffer(me->vertexBuffer, 0);
+        cmd->SetIndexBuffer(me->indexBuffer);
+        cmd->DrawIndexed(me->indexCount);
         cmd->SetPipeline(m_PBR_PSO.get());   // 恢复主 PSO
         ++drawCount;
-    });
+    }
 
     // 推送 bindless 纹理到全部已注册描述符集（Flush 自动遍历全部 set）
     m_Device->GetBindlessHeap()->Flush();

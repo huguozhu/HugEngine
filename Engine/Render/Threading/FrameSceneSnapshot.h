@@ -111,6 +111,12 @@ struct SnapshotDrawItem {
     /// 这也是 §4.2 里 `skinMatrices` 的设计意图（替代"读组件拿骨骼矩阵"）。
     u32 skinMatrixOffset = 0;
     u32 skinMatrixCount  = 0;
+    /// 骨骼矩阵**版本号**（`SkeletalMeshComponent::boneMatrixVersion`）：渲染侧据此判断要不要重传
+    /// 骨骼 SSBO（缓冲状态在渲染侧 `SkinnedMeshBuffers` 里，与第①段的实例缓冲同款）
+    u32 skinMatrixVersion = 0;
+    /// 骨架已加载（`SkeletalMeshComponent::skeleton != nullptr`）：旧骨骼循环的 `sm.skeleton` 判据；
+    /// 未加载骨架的骨骼组件不进蒙皮 Pass（与旧行为一致）
+    bool bHasSkeleton = false;
 };
 
 // 【布局钉子】物体数据必须能整块拷贝、且 16B 对齐（std430 要求）

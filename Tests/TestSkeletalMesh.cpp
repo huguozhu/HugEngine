@@ -198,7 +198,8 @@ TEST_CASE("SkeletalMeshComponent 播放推进/循环/播完停止") {
     CHECK(sm->currentClip == 0);
     SkeletalMeshSystem::Update(world, 0.6f);
     CHECK(sm->clipTime == doctest::Approx(0.6f).epsilon(0.001));
-    CHECK(sm->bBonesDirty == true);
+    // 第③段：脏标记换成版本号（缓冲状态搬到渲染侧 `SkinnedMeshBuffers`，渲染侧比版本号决定重传）
+    CHECK(sm->boneMatrixVersion == 1u);
     CHECK(sm->boneMatrices.size() == 2);
     SkeletalMeshSystem::Update(world, 0.6f);   // 累计 1.2 → 回绕 0.2
     CHECK(sm->clipTime == doctest::Approx(0.2f).epsilon(0.01));

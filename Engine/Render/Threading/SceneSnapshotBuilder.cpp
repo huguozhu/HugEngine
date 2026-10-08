@@ -179,8 +179,12 @@ u32 SceneSnapshotBuilder::BuildObjects(he::World& world, he::SceneGraph& sg, con
 
 void SceneSnapshotBuilder::AppendSkinMatrices(SnapshotDrawItem& item, const he::SkeletalMeshComponent& comp,
                                              FrameSceneSnapshot& out) {
-    item.skinMatrixOffset = static_cast<u32>(out.skinMatrices.size());
-    item.skinMatrixCount  = static_cast<u32>(comp.boneMatrices.size());
+    item.skinMatrixOffset  = static_cast<u32>(out.skinMatrices.size());
+    item.skinMatrixCount   = static_cast<u32>(comp.boneMatrices.size());
+    // 版本号 + "骨架已加载"标记：前者是渲染侧"要不要重传骨骼 SSBO"的判据，后者是旧骨骼循环
+    // `sm.skeleton` 判据的等价物（两者都必须在收集侧取，渲染侧已不持有组件）
+    item.skinMatrixVersion = comp.boneMatrixVersion;
+    item.bHasSkeleton      = (comp.skeleton != nullptr);
     out.skinMatrices.insert(out.skinMatrices.end(), comp.boneMatrices.begin(), comp.boneMatrices.end());
 }
 
@@ -296,12 +300,13 @@ bool SceneSnapshotBuilder::BuildSkybox(he::World& world, FrameSceneSnapshot& out
 u32 SceneSnapshotBuilder::RegisterMeshes(he::World& world, MeshRegistry& registry) {    u32 count = 0;
     // 登记一个网格组件：缓冲只借指针（所有权在组件）、回填注册表索引。
     // `instanced=true` 的形态（实例化/骨骼）顶点由各自专用路径提供，绘制循环会跳过普通绘制。
-    auto add = [&](auto& comp, bool instanced, rhi::IRHIBuffer* skinBuffer = nullptr) {
+    // 【第③段】`skinMatrixBuffer` 字段已删除：骨骼矩阵缓冲的生命周期搬到渲染侧
+    // （`SkinnedMeshBuffers`，按 meshIndex 索引），注册表不再登记它。
+    auto add = [&](auto& comp, bool instanced) {
         if (comp.GetIndexCount() == 0u) return;                // 与收集口径一致：无索引不登记
         MeshRegistryEntry entry;
         entry.vertexBuffer     = comp.GetVertexBuffer().get();
         entry.indexBuffer      = comp.GetIndexBuffer().get();
-        entry.skinMatrixBuffer = skinBuffer;                   // 仅骨骼网格非空（骨骼上传的写入目标）
         entry.indexCount       = comp.GetIndexCount();
         entry.materialID       = comp.materialID;
         entry.instanced        = instanced;
@@ -319,10 +324,9 @@ u32 SceneSnapshotBuilder::RegisterMeshes(he::World& world, MeshRegistry& registr
     world.ForEach<DecalComponent>([&](he::Entity, DecalComponent& c) { add(c, false); });
     world.ForEach<SplineMeshComponent>([&](he::Entity, SplineMeshComponent& c) { add(c, false); });
     world.ForEach<InstancedMeshComponent>([&](he::Entity, InstancedMeshComponent& c) { add(c, true); });
-    // 骨骼网格：除上述字段外还要登记**骨骼缓冲**（骨骼上传的写入目标，会重建 ⇒ 每帧刷新正为此刻）
-    world.ForEach<SkeletalMeshComponent>([&](he::Entity, SkeletalMeshComponent& sm) {
-        add(sm, true, sm.boneBuffer.get());
-    });
+    // 骨骼网格：顶点由蒙皮 Pass 提供（`instanced=true`）。骨骼矩阵缓冲不再是注册表的事
+    //（生命周期在渲染侧 `SkinnedMeshBuffers`）。
+    world.ForEach<SkeletalMeshComponent>([&](he::Entity, SkeletalMeshComponent& sm) { add(sm, true); });
     return count;
 }
 

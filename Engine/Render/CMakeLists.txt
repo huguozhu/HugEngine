@@ -49,6 +49,9 @@ set(RENDER_SOURCES
     Pipeline/DecalPass.cpp
     Pipeline/InstanceCuller.h
     Pipeline/InstanceCuller.cpp
+    # 阶段 1 §15.1 第③段：骨骼矩阵缓冲的渲染侧状态表（与实例缓冲同款）
+    Pipeline/SkinnedMeshBuffers.h
+    Pipeline/SkinnedMeshBuffers.cpp
     Pipeline/GPUWorkGraph.h
     Pipeline/GPUWorkGraph.cpp
     Pipeline/Material.h
