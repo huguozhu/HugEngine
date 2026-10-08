@@ -1097,6 +1097,32 @@ private:
       > 三条管线与 `RTPass` 就必须同批改完**（接口强制）—— 这正是本批先把"装配器 + 各 helper 去世界"
       > 做完、把入口签名留到最后的原因：那一改要一次覆盖 Deferred/PathTracing 的
       > `BuildFrameGraph`/`CollectLights` 与 `RTPass::BuildAS`（后者还要一并收掉它剩下的 13 处组件指针）。
+    - **第 4 批之二（已提交）**：**Deferred 与 PathTracing 也统一走装配器** ⇒ 三条管线的光源收集与
+      场景收集全部离开渲染期，**B1 27 → 24**。
+      · Deferred：口径 = 排除贴花卡片（`DecalPass` 投影）、构建贴花与粒子数组；`CollectLights`
+        改为只**消费**快照，并在与旧实现**同一时机**（阴影收集之后、消费之前）用不收世界的
+        `ResolveLightShadowIndices` 解析光源 `shadowIndex` —— 时机不变是刻意的：旧代码正是在
+        `CollectLights` 里调 `BuildLights` 传 resolver。帧图里重复的天空盒/环境收集随之删除
+        （装配器已收），`SyncPhysicalSkyToSun` 也从帧图移到装配器。
+      · PathTracing：口径 = 构建粒子、光源写 `shadowRadius`、**不设** shadowIndex 解析器
+        （收集器填 -1，与旧行为一致：PT 的阴影包含在路径里）。
+      · 两条管线都加上与 Forward 同构的 `m_Assembler` / `m_FrameSnapshot` / `FrameSnap()`，
+        快照访问统一走 `FrameSnap()`。
+      · 判据：单测 398 例 / 71841 断言；`04.Sponza-Deferred` 与 `05.Sponza-PathTracing` 各跑 22 秒
+        **无 VUID、无 ERROR**（这两条路径本批改动最直接）；`06.GILab` 冒烟同批双跑 **4539 像素**，
+        与上一批二进制对比的差异**全部**落在 `hdr`(719 px/maxULP 21/meanAbs 5.91e-08) 与
+        `lumen_irradiance`/`prov6_*`(764 px/maxULP 552/meanAbs 2.56e-07) —— 即 §9 T1.3a 记录的
+        **噪声签名本身**（同批双跑的底噪也是 4539）。
+      > **剩余 24 = 帧入口签名 + `RTPass`**：`DeferredPipeline.h` 4、`PathTracingPipeline.h` 4、
+      > `RTPass.h` 3 + `.cpp` 4、`DeferredPipeline_FrameGraph.cpp` 2、`PathTracingPipeline.cpp` 2、
+      > `ForwardPipeline.{h,cpp}` 各 2、`IRenderPipeline.h` 1。
+      > **下一步必须先做 `RTPass`**（它同时也是"组件指针 13 处"闸门的最后持有者）。已查清它需要
+      > 快照补齐一批 **RT 专用材质字段**：贴图均值回落（`hasMaterialAvg`/`baseColorAvg`/
+      > `metallicAvg`/`roughnessAvg`）、`ior`/`transmission`、`attenuationColor`/`attenuationDistance`
+      > —— 否则 `BuildSceneMaterialTexture`（11 行 × N 列的 RT 材质纹理 + 三角形法线/UV 纹理）
+      > 无法脱离组件构建；另需把 `m_BLASMap` 的键从 `MeshComponent*` 换成 `meshIndex`、
+      > `HashGeometry`/`HasGeometryChanged` 改吃注册表条目、`CollectMeshList` 改为按
+      > `SnapshotMeshClass ∈ {Base, Cube, Sphere}` 过滤快照，并删掉那条**无调用点**的顶点拉取死路径。
 - [x] T2.1 `RenderThread` 实现（帧节奏 + 休眠策略）—— ✅ 完成（真起线程 + 归属判断 + 停止排空；4 例单测。cv 唤醒并入 T2.6）
 - [ ] T2.2 设备与交换链归渲染线程（Acquire/Present 迁移）
 - [ ] T2.3 `ResourceCreationService`（步 1 同步转发）

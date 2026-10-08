@@ -73,19 +73,13 @@ WORLD_DEP_ROOTS = ("Engine/Render",)
 # 【白名单】快照层（`Engine/Render/Threading/`）是渲染侧**唯一**允许读世界的代码 —— 它就是干这个的：
 # 在游戏线程把渲染输入取齐成不可变快照。把它的命中排除在外，度量才对准"渲染期泄漏"。
 WORLD_DEP_WHITELIST_PATHS = ("Engine/Render/Threading/",)
-WORLD_DEP_BASELINE = 27        # 2026-10-09 实测（第③段第 4 批之一：新增白名单层的
-                               # `FrameSnapshotAssembler` 承载"取齐渲染输入"，Forward 的
-                               # CollectLights/RenderScene/RunGPUCulling/BuildFrameGraph/
-                               # RefreshRSMFrustum 全部去 world/sg、`MeshBatcher::Build` 改吃快照。
-                               # 剩余 27 集中在 Deferred/PathTracing 入口、RTPass 与两条管线的
-                               # 帧入口签名本身（`IRenderPipeline::Render` 一变，三者必须同批改）。
+WORLD_DEP_BASELINE = 24        # 2026-10-09 实测（第③段第 4 批之二：Deferred 与 PathTracing 也
+                               # 统一走 `FrameSnapshotAssembler`，各自的 `CollectLights` 改为只消费快照
+                               # ⇒ 三条管线的光源收集都离开渲染期）。剩余 24 全是"帧入口签名 + RTPass"：
+                               # DeferredPipeline.h 4、PathTracingPipeline.h 4、RTPass.h 3 + .cpp 4、
+                               # DeferredPipeline_FrameGraph.cpp 2、PathTracingPipeline.cpp 2、
+                               # ForwardPipeline.{h,cpp} 各 2、IRenderPipeline.h 1。
                                # 阶段 1 退出目标 = 0；注：按行计数，参数行合并/拆分会有 ±1 效应）
-
-# --- 附录 E 的度量：渲染侧的**组件指针依赖**（`MeshComponent*` 等）---
-# 【为什么需要第二项】B1 统计的是签名里的 `World&` / `SceneGraph&`，量不出 E-1/E-2/E-3 消除的东西 ——
-# 它们的产物是"渲染侧不再持有 `MeshComponent*`"（快照只带 `meshIndex`）。这两项是**不同度量**，
-# 已在方案 §14.5 里写明；本项让 E-3 的收敛可量化。
-MESH_PTR_PATTERN = re.compile(r"\b(?:he::)?(?:Mesh|SkeletalMesh|InstancedMesh|SplineMesh|Decal)Component\s*\*")
 MESH_PTR_BASELINE = 13         # 2026-10-09 实测（第②段后：`SceneRenderer.{h,cpp}` 的 1+4 处已清除
                                # —— `DrawItem::mesh` 字段与其地址兜底分支全部删除；剩下的是
                                # `Pipeline/RTPass.{h,cpp}` 的 4+9 处：BLAS 缓存键 `MeshComponent*`、
