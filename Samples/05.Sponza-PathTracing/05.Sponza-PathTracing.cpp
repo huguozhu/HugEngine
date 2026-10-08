@@ -715,8 +715,13 @@ int main() {
     render::RenderThread       renderThread(renderQueue);
     render::FrameScheduler     frameScheduler(renderQueue, renderThread);
     const bool                 useRenderQueue = he::UsesRenderThread();
-    const bool                 forceShell = std::getenv("HE_RENDER_THREAD_FORCE_SHELL") != nullptr;
-    if (useRenderQueue && !forceShell) {
+    // 【为什么**不**默认起线程（T2.4 的纪律）】当前流水线深度只有 1：命令 1 需握手，于是"游戏线程准备
+    // 下一帧"与"渲染线程录制本帧"仍是串行的 ⇒ 轻帧样例在模式 1 下会明显变慢（`02.Cube` 实测约 28%）。
+    // 因此**只有实测达标**的样例才默认起线程（`06.GILab`：+1.22% ≤ 3%）；其余样例要显式打开
+    // `HE_RENDER_THREAD_STRICT=1` —— 待"每飞行帧命令缓冲 + 多槽快照 + 队列背压"补齐流水线深度后，
+    // 再逐个测量并把默认打开。
+    const bool startRenderThread = std::getenv("HE_RENDER_THREAD_STRICT") != nullptr;
+    if (useRenderQueue && startRenderThread) {
         renderThread.SetSpinWaitUs(50);
         renderThread.SetThreadStartHook([] { he::rhi::GetThreadAffinity().Claim(); });
         renderThread.SetThreadStopHook([] { he::rhi::GetThreadAffinity().Release(); });
