@@ -15,6 +15,8 @@
 #include "Pipeline/GPUScene.h"        // GPUSceneObject + MakeObjectRecord（只用到静态转换，不需要链接 RHI）
 #include "Pipeline/PhysicalLight.h"   // kPhysicalLightExposure（与收集口径同源）
 #include "Scene/LightComponent.h"
+#include "Scene/MeshComponent.h"          // E-3：MakePBRMaterial 的输入类型
+#include "Pipeline/Material.h"            // PBRMaterial / GetDefaultMaterial（参考实现用）
 #include "Scene/PhysicalSkyComponent.h"   // 环境（太阳方向/浑浊度）进快照的用例
 #include "Scene/ParticleComponent.h"      // 粒子发射器进快照的用例
 #include "Scene/SkeletalMeshComponent.h"  // 蒙皮矩阵进快照的用例
@@ -705,6 +707,61 @@ TEST_CASE("SceneSnapshotBuilder：粒子发射器进快照（T1.4）") {
     CHECK(SceneSnapshotBuilder::BuildParticles(lw.world, snap) == 2u);
     snap.Clear();
     CHECK(snap.particles.empty());
+}
+
+TEST_CASE("E-3：MakePBRMaterial 与旧的内联映射逐字段一致") {
+    // 判据：把原先内联在 `SceneRenderer::Prepare`（SceneRenderer.cpp:110-125）的映射**逐行转写**成
+    // 下面的参考实现，然后逐字段比对。字符串字段不能 memcmp（SSO/堆指针），故按字段比较 —— 这是
+    // 本方案对"含字符串的结构体"的标准做法，已在多处沿用。
+    he::MeshComponent comp;
+    comp.baseColorFactor         = float4(0.11f, 0.22f, 0.33f, 0.44f);
+    comp.emissiveFactor          = float3(0.51f, 0.52f, 0.53f);
+    comp.metallicFactor          = 0.61f;
+    comp.roughnessFactor         = 0.71f;
+    comp.aoFactor                = 0.81f;
+    comp.alphaCutoff             = 0.25f;
+    comp.alphaMode               = 1u;          // MASK
+    comp.doubleSided             = true;
+    comp.unlit                   = true;
+    comp.baseColorTexture        = "Textures/base.png";
+    comp.normalTexture           = "Textures/normal.png";
+    comp.metallicRoughnessTexture = "Textures/mr.png";
+    comp.occlusionTexture        = "Textures/ao.png";
+    comp.emissiveTexture         = "Textures/emissive.png";
+
+    // ── 参考实现：逐行转写旧的内联映射（不调用被测函数）──
+    PBRMaterial ref = GetDefaultMaterial();
+    ref.baseColorFactor = comp.baseColorFactor;
+    ref.emissiveFactor  = comp.emissiveFactor;
+    ref.metallicFactor  = comp.metallicFactor;
+    ref.roughnessFactor = comp.roughnessFactor;
+    ref.aoFactor        = comp.aoFactor;
+    ref.alphaCutoff     = comp.alphaCutoff;
+    ref.alphaMode       = static_cast<AlphaMode>(comp.alphaMode);
+    ref.doubleSided     = comp.doubleSided;
+    ref.unlit           = comp.unlit;
+    ref.baseColorTexture         = comp.baseColorTexture;
+    ref.normalTexture            = comp.normalTexture;
+    ref.metallicRoughnessTexture = comp.metallicRoughnessTexture;
+    ref.occlusionTexture         = comp.occlusionTexture;
+    ref.emissiveTexture          = comp.emissiveTexture;
+
+    const PBRMaterial got = SceneSnapshotBuilder::MakePBRMaterial(comp);
+
+    CHECK(got.baseColorFactor == ref.baseColorFactor);
+    CHECK(got.emissiveFactor == ref.emissiveFactor);
+    CHECK(got.metallicFactor == doctest::Approx(ref.metallicFactor));
+    CHECK(got.roughnessFactor == doctest::Approx(ref.roughnessFactor));
+    CHECK(got.aoFactor == doctest::Approx(ref.aoFactor));
+    CHECK(got.alphaCutoff == doctest::Approx(ref.alphaCutoff));
+    CHECK(got.alphaMode == ref.alphaMode);
+    CHECK(got.doubleSided == ref.doubleSided);
+    CHECK(got.unlit == ref.unlit);
+    CHECK(got.baseColorTexture == ref.baseColorTexture);
+    CHECK(got.normalTexture == ref.normalTexture);
+    CHECK(got.metallicRoughnessTexture == ref.metallicRoughnessTexture);
+    CHECK(got.occlusionTexture == ref.occlusionTexture);
+    CHECK(got.emissiveTexture == ref.emissiveTexture);
 }
 
 TEST_CASE("SceneSnapshotBuilder：逐帧复用不残留上一帧光源") {
