@@ -25,8 +25,15 @@ namespace he::render {
 extern he::CVar<bool> cvLightPhysicalUnits;
 
 /// 物理模式是否生效：全局开关打开 且 光源设置了物理量
+/// 【为什么拆成两个重载】快照收集（`SceneSnapshotBuilder`）不直接读全局 CVar：调用方把全局开关
+/// 解析成一个 `bool` 传进来，收集逻辑本身变成纯函数、可单测，渲染线程也只需解析一次。
+/// 本重载是唯一判据，下面读 CVar 的那个转发到它，避免两处判据漂移。
+inline bool IsPhysicalLightEnabled(bool globalEnabled, float physicalValue) {
+    return globalEnabled && physicalValue > 0.0f;
+}
+
 inline bool IsPhysicalLightEnabled(float physicalValue) {
-    return cvLightPhysicalUnits.Get() && physicalValue > 0.0f;
+    return IsPhysicalLightEnabled(cvLightPhysicalUnits.Get(), physicalValue);
 }
 
 // ============================================================
