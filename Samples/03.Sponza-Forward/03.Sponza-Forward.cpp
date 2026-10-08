@@ -644,6 +644,62 @@ int main() {
 
         engine.GetWindow()->PollEvents();
 
+        // --- 相机控制（鼠标右键拖拽旋转 / WASD+EQ 移动 / Shift 加速 / T 切换相机动画）---
+        // 【回归修复】这段在把帧体拆成两条渲染命令时被整段丢失（与 06.GILab 同一处错误），
+        // 导致鼠标与键盘都无法操作相机。它属于游戏线程的帧前准备，必须在装配快照之前执行。
+        // --- 相机控制 ---
+        {
+            // 右键拖拽旋转
+            bool mouseDown = glfwGetMouseButton(glfwWin, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
+
+            if (mouseDown && !rightMouseDown) {
+                rightMouseDown = true;
+                glfwGetCursorPos(glfwWin, &lastMouseX, &lastMouseY);
+                glfwSetInputMode(glfwWin, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+            } else if (!mouseDown && rightMouseDown) {
+                rightMouseDown = false;
+                glfwSetInputMode(glfwWin, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+            } else if (mouseDown && rightMouseDown) {
+                double cx, cy;
+                glfwGetCursorPos(glfwWin, &cx, &cy);
+                float dx = static_cast<float>(cx - lastMouseX);
+                float dy = static_cast<float>(cy - lastMouseY);
+                lastMouseX = cx;
+                lastMouseY = cy;
+
+                camCtrl.Rotate(dx * 0.003f, -dy * 0.003f);
+            }
+
+            // T 键切换动画/手动相机模式
+            static bool tWasDown = false;
+            bool tDown = glfwGetKey(glfwWin, GLFW_KEY_T) == GLFW_PRESS;
+            if (tDown && !tWasDown) animCameraMode = !animCameraMode;
+            tWasDown = tDown;
+
+            // 动画相机模式：动画播放时从 AnimationComponent 同步位置
+            if (animCameraMode && camAnim->playing) {
+                auto* camTf = world.GetComponent<TransformComponent>(camAnimEntity);
+                if (camTf) {
+                    camCtrl.SetPosition(camTf->position);
+                    float3 toOrigin = glm::normalize(float3(0, 200, 0) - camTf->position);
+                    camCtrl.SetOrientationFromForward(toOrigin);
+                }
+            }
+
+            // 键盘移动
+            render::CameraController::MoveInput moveIn;
+            moveIn.forward  = glfwGetKey(glfwWin, GLFW_KEY_W) == GLFW_PRESS;
+            moveIn.backward = glfwGetKey(glfwWin, GLFW_KEY_S) == GLFW_PRESS;
+            moveIn.left     = glfwGetKey(glfwWin, GLFW_KEY_A) == GLFW_PRESS;
+            moveIn.right    = glfwGetKey(glfwWin, GLFW_KEY_D) == GLFW_PRESS;
+            moveIn.up       = glfwGetKey(glfwWin, GLFW_KEY_E) == GLFW_PRESS;
+            moveIn.down     = glfwGetKey(glfwWin, GLFW_KEY_Q) == GLFW_PRESS;
+            moveIn.sprint   = glfwGetKey(glfwWin, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
+
+            camCtrl.Update(deltaTime, moveIn);
+        }
+
+
         bool frameAborted = false;   // 渲染命令里 Acquire 失败时置位
 
         // ---- 命令 1：Acquire + 录制（3D + 打开 ImGui 的 RP）----
