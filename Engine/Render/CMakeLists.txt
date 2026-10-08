@@ -224,6 +224,7 @@ set(RENDER_SOURCES
     Threading/RenderThreadContext.h
     # 阶段 1 T1.1：游戏线程产出的不可变渲染输入（与 ShaderTypes.slang 布局一致）。
     Threading/FrameSceneSnapshot.h
+    Threading/MeshRegistry.h
     Threading/SceneSnapshotBuilder.h
     Threading/SceneSnapshotBuilder.cpp
     Threading/RenderCommandQueue.h
