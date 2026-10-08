@@ -580,6 +580,15 @@ private:
     不反向依赖阴影系统**，收集逻辑成为纯函数、可单测；`PhysicalLight.h` 的物理光判据拆出
     "全局开关"重载，保证唯一判据。
     单测 8 例，实测 **374 例 / 71574 断言全通过**。
+  - **T1.2b 已完成（物体收集，2026-09-24）**：`SceneSnapshotBuilder::BuildObjects` 集中
+    `GPUScene::Collect` 的首次全量遍历（组件类型顺序、无索引跳过、贴花排除开关、广告牌/文字的
+    相机对齐矩阵、世界 AABB、`objectID`、`visibilityFlags`，与 `FillObj` 逐字段对齐）；
+    单组件映射抽成模板 `CollectObjectItem<TComponent>` 以便单测（组件存储按精确类型分桶，
+    假组件无法进入遍历）。`SnapshotDrawItem` 增加 `materialIndex`（≠ `object.materialID`）。
+    实测：单测 **379 例 / 71666 断言全通过**。
+  - **T1.2c 待做**：材质参数（`GPUObjectData` 的非矩阵/非 AABB 字段）目前仍由 `SceneRenderer`
+    的 `FillObjectData(PBRMaterial)` 在**带视锥剔除的渲染侧遍历**里填 —— 需要把"剔除留在渲染线程、
+    只快照化输入"一并设计；`meshIndex`/间接绘制三元组由 MeshBatcher 在 Prepare 阶段填。
   - **T1.2b 待做**：物体收集（`GPUScene::Collect` 的遍历 + 材质参数 + 间接绘制参数），
     以及本任务退出判据要求的"与旧路径并行跑一帧、逐字段比对（`HE_SNAPSHOT_VERIFY`）" ——
     该判据在 T1.3 让管线消费快照时最自然（可直接对比 UBO/SSBO 字节）。
