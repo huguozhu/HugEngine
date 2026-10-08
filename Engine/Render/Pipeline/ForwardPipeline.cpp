@@ -609,22 +609,9 @@ void ForwardPipeline::UploadMaterialBindless(he::World& world) {
     std::unordered_map<u32, GPUMaterialData> uniqueMat;
     auto collect = [&](he::Entity, he::MeshComponent& m) {
         if (uniqueMat.count(m.materialID)) return;  // 已收集过该材质，跳过
-        PBRMaterial mat = GetDefaultMaterial();
-        mat.baseColorFactor = m.baseColorFactor;
-        mat.emissiveFactor  = m.emissiveFactor;
-        mat.metallicFactor  = m.metallicFactor;
-        mat.roughnessFactor = m.roughnessFactor;
-        mat.aoFactor        = m.aoFactor;
-        mat.alphaCutoff     = m.alphaCutoff;
-        mat.alphaMode       = static_cast<AlphaMode>(m.alphaMode);
-        mat.doubleSided     = m.doubleSided;
-        mat.unlit           = m.unlit;
-        // 纹理路径 → textureMask（无纹理槽 shader 不采样，避免占位纹理污染）
-        mat.baseColorTexture         = m.baseColorTexture;
-        mat.normalTexture            = m.normalTexture;
-        mat.metallicRoughnessTexture = m.metallicRoughnessTexture;
-        mat.occlusionTexture         = m.occlusionTexture;
-        mat.emissiveTexture          = m.emissiveTexture;
+        // 材质映射走**唯一实现**（E-3①）：原先这里手抄了第二份「组件 → PBRMaterial」映射，
+        // 与 `SceneSnapshotBuilder::MakePBRMaterial` 重复 —— 两份口径迟早漂移（本方案已登记过 5 处同类）。
+        const PBRMaterial mat = SceneSnapshotBuilder::MakePBRMaterial(m);
         GPUMaterialData g;
         FillMaterialData(g, mat);                    // 摊平成 GPUMaterialData（bindless 材质 SSBO 元素）
         uniqueMat[m.materialID] = g;
