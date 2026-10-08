@@ -15,6 +15,7 @@ set(RHI_SOURCES
     RHI/SwapChain.h
     RHI/ThreadAffinity.h
     RHI/RHICommandList.h
+    RHI/RHIHandles.h
     RHI/QueryPool.h
     RHI/MeshShader.h
     RHI/RayTracing.h

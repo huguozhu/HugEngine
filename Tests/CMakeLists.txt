@@ -25,6 +25,8 @@ add_executable(HugEngineTests
     # 阶段 0 T0.6：RHI 命令流记录端契约（`RHI/RHICommandList.h` 是纯头文件实现，
     # 只需包含路径，不链接 HugEngineRHI）。
     TestRHICommandList.cpp
+    # 阶段 0 T0.7：资源句柄与句柄表（generation 校验）。同样是纯头文件实现，不链接 HugEngineRHI。
+    TestRHIHandles.cpp
     # 开关路径的钉子：`HE_DISABLE_THREAD_ASSERT` 必须在包含头文件之前定义，故单独一个 TU。
     TestThreadAffinityDisabled.cpp
     TestGameplayComponents.cpp
