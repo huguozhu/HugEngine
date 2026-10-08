@@ -652,6 +652,18 @@ private:
     **E-3 后半待做**：`SceneRenderer::Prepare` 改为消费快照（`entry` 去掉 `MeshComponent*`、材质取
     `item.object`、`DrawItem` 用 `meshIndex` 从注册表取缓冲；**剔除仍留渲染线程**），判据为
     逐字段/逐位 + `06.GILab` 28 个转储粗筛。
+  - **E-4 已完成（口径统一为"修正"，2026-09-24，用户裁决 A）**：`SplineMeshComponent` 纳入
+    `SceneSnapshotBuilder::BuildObjects`（→ `GPUScene` → GPU 剔除/间接绘制），**插入位置与
+    `SceneRenderer::Prepare` 严格一致**（Decal 之后、实例化之前）。原漂移的两个后果：
+    ① `FillGPUScene` 按枚举顺序对齐 ⇒ 一边多一类/一边少一类会让**后续类型的 `objectIndex` 全部错位**
+    （致命）；② GPU 剔除覆盖不到样条网格。
+    **判据（如实）**：当前样例无样条网格 ⇒ 无法前后逐位对比；依据是"两处收集口径必须一致"这一硬约束。
+    **欠账**：一旦有样条网格内容，补一次逐位/逐像素复核（已在此处登记）。
+    回归检查：`06.GILab` 冒烟 4539 像素（底噪同量级）；单测 390 例 / 71750 断言。
+  - **E-3 附加进展（2026-09-24）**：`DrawItem` 增加 `meshIndex`（组件透传），Forward 的两处
+    "用组件地址反查对象条目"改为**优先整数 `meshIndex`**、未注册时兜底地址比较。
+    **闸门诚实说明**：`--mesh-ptrs` 仍为渲染期 20 处 —— 兜底分支仍有 `static_cast<MeshComponent*>`；
+    该度量只在**删掉 `DrawItem::mesh` 字段本身**时才会下降（这正是 E-3 后半的工作）。
   - **T1.2b 待做**：物体收集（`GPUScene::Collect` 的遍历 + 材质参数 + 间接绘制参数），
     以及本任务退出判据要求的"与旧路径并行跑一帧、逐字段比对（`HE_SNAPSHOT_VERIFY`）" ——
     该判据在 T1.3 让管线消费快照时最自然（可直接对比 UBO/SSBO 字节）。
