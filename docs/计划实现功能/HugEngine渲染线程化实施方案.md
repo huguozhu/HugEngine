@@ -1083,6 +1083,23 @@ public:
 | **E-2** | **`SceneRenderer::Prepare`** 的材质填充：材质输入改为"收集侧跑 `FillObjectData` 并把结果放进 `SnapshotDrawItem::object`"（§9 T1.2c 已定），`DrawItem` 不再携带 `MeshComponent*`；**视锥剔除仍在渲染线程**（它只需要快照里的世界 AABB） | 同上；并核对 `06.GILab` 的 28 个转储目标 |
 | **E-3** | **第 5 处口径漂移的裁决**：`SceneRenderer` 收集 `SplineMeshComponent` 而 `GPUScene`/`BuildObjects` 不收集 —— 二者必须取其一（建议**统一为收集**，并在提交里给出前后对比） | 提交里写明"修正"还是"改版"及其依据 |
 
+**E-3 配方（已查清，照做即可；2026-09-24）**：
+
+- 可复用的现成件（都在 `Engine/Render/Pipeline/Material.h`，全部 `inline`）：
+  `PBRMaterial`（:77）、`GetDefaultMaterial()`（:109）、`FillObjectData(GPUObjectData&, const PBRMaterial&)`（:129）。
+- 现在要抽出来的映射在 `Engine/Render/SceneRenderer.cpp:110-125`（组件字段 → `PBRMaterial` 的
+  10 项：`baseColorFactor / emissiveFactor / metallicFactor / roughnessFactor / aoFactor /
+  alphaCutoff / alphaMode / doubleSided / unlit / 5 条纹理路径`）。
+- **落点**：把该映射做成 `SceneSnapshotBuilder::MakePBRMaterial(const he::MeshComponent&)`
+  （`static`，实现在 builder 的 .cpp 里；`SceneRenderer` 改为调用它 ⇒ 只有一份口径）。
+  `CollectObjectItem` 在填完 `materialID` 后调用它并 `FillObjectData(item.object, mat)` ——
+  **在收集侧把材质算完**（纯计算），快照因此不必携带纹理路径字符串。
+- `SceneRenderer::Prepare` 改为消费快照（`entry` 不再需要 `MeshComponent*`）：
+  剔除仍用快照的世界 AABB 在渲染线程做；`DrawItem` 里的网格引用换成 `meshIndex`
+  （顶点/索引缓冲从 `MeshRegistry::Find` 取，E-1/E-2 已就绪）。
+- 判据：① `FillObjectData` 的输出与旧路径**逐位**比较（把 `SceneRenderer.cpp:110-125` 的映射
+  逐行转写为参考实现 + `memcmp`）；② `06.GILab` 的 28 个转储目标粗筛（噪声底噪 ≈4.5k 像素）。
+
 **注册所有权（E-2 开工前必须先定 —— 已定，避免下一轮再决策）**：注册表由**创建/替换网格缓冲的那一侧**
 填充，即 `MeshComponent::SetMeshData` 的调用点（资产加载器 / 样例的加载期），**不在渲染帧内**注册；
 组件销毁时在同一处注销（且必须帧外，见 §14.3 第 2 条）。渲染侧只做 `Find`。
