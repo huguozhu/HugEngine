@@ -131,6 +131,17 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     // 逐实例剔除（任务 25）：可见列表 + compute PSO（实例化网格在 GBuffer 里也要走剔除）
     m_InstanceCuller.Initialize(device);
 
+    // --- 快照装配器（第③段第 4 批）：配置本管线的口径（贴花改由 `DecalPass` 投影 ⇒ 排除贴花卡片）---
+    {
+        m_Assembler.Bind(&m_Snapshot, &m_MeshRegistry);
+        FrameSnapshotAssemblySettings as;
+        as.objectOptions.excludeDecals = m_ExcludeDecalCards;   // 每帧在 Render 里再同步一次
+        as.buildDecals                 = true;                  // DecalPass 读快照
+        as.buildParticles              = true;                  // 粒子模拟读快照
+        as.lightOptions.includeRectLights = false;              // Deferred 口径：不收 Rect 光（默认值同）
+        m_Assembler.Configure(as);
+    }
+
     // 前帧 HDR 辐射度：GI 源共享的一份（DDGI 探针、SSGI 的入射辐射度都用它）。
     // 必须在各 GI 源 Initialize 之前建好并注入，使它们在 Initialize 阶段即可绑到有效纹理。
     m_RadianceHistory.Initialize(device, m_Width, m_Height);
@@ -711,7 +722,7 @@ GIProviderContext DeferredPipeline::MakeGIContext(const CameraData* cam, bool fu
     ctx.lightBuffer  = lightBuffer;
     ctx.lightCount   = lightCount;
     ctx.tlas         = tlas;
-    ctx.snapshot     = &m_Snapshot;
+    ctx.snapshot     = &FrameSnap();
     ctx.meshRegistry = &m_MeshRegistry;
     return ctx;
 }
@@ -719,38 +730,21 @@ GIProviderContext DeferredPipeline::MakeGIContext(const CameraData* cam, bool fu
 void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
                                he::SceneGraph& sg, const CameraData& camera,
                                float deltaTime) {
-    // 阶段 1 附录 E（E-2①）：登记/更新**全部**网格资源并回填 `meshIndex`（唯一实现在
-    // `SceneSnapshotBuilder::RegisterMeshes`，三条管线共用 —— 原先各抄一份只登记骨骼网格）。
-    // 每帧刷新是必需的（骨骼缓冲会重建 ⇒ 一次性注册会留过期指针）；必须在构建快照之前。
-    SceneSnapshotBuilder::RegisterMeshes(world, m_MeshRegistry);
-
-    // 阶段 1 附录 E（E-2②/Deferred 侧，与 ForwardPipeline 对称）：构建**完整**快照并在首帧后
-    // 按实际规模**自校准**预留一次容量 —— 稳态下快照数组不再重分配（"帧内不做分配"与
-    // "帧内不做同步等待"同一条纪律）。骨骼上传/材质消费将来都要从这份快照取。
-    // 【第②段：贴花口径必须在这里烘进快照】GBuffer 消费侧原先靠 `Prepare(..., excludeDecals=true)`
-    // 排除贴花卡片（改由 `DecalPass` 投影）；`Prepare` 改吃快照后，这个口径只能由收集侧决定 ——
-    // 否则贴花卡片会**既被投影又被当普通网格画进 GBuffer**，而且会与 `GPUScene`/`MeshBatcher`
-    // 的收集集合错位（三者的 objectIndex 按顺序对齐）。
-    SceneSnapshotObjectOptions objOptions;
-    objOptions.excludeDecals = m_ExcludeDecalCards;
-    SceneSnapshotBuilder::BuildObjects(world, sg, camera, objOptions, nullptr, m_Snapshot);
-    // 实例化网格（阶段 1 第①段 / §15.1）：实例变换按值进快照，渲染侧因此不再读 InstancedMeshComponent。
-    // 必须在 `RegisterMeshes`（回填 meshIndex）之后、帧图**执行**之前。
-    SceneSnapshotBuilder::BuildInstances(world, m_Snapshot);
-    // 阴影投射光源（第③段第 2 批）：帧图里的 `m_ShadowSystem->Update(sctx)` 改吃快照，
-    // 因此这里必须收齐 —— 否则 Deferred 的阴影会静默消失（`HasActiveShadows()` 恒 false）。
-    SceneSnapshotBuilder::BuildShadowLights(world, sg, m_Snapshot);
-    // 贴花（T1.4）：`DecalPass` 已改读快照，必须在帧图**执行**之前收集好
-    SceneSnapshotBuilder::BuildDecals(world, sg, m_Snapshot);
-    if (!m_SnapshotReserved) {
-        m_Snapshot.Reserve(static_cast<u32>(m_Snapshot.draws.size()) * 2u + 64u,
-                           static_cast<u32>(m_Snapshot.lights.size()) * 2u + 64u,
-                           static_cast<u32>(m_Snapshot.skinMatrices.size()) * 2u + 256u,
-                           static_cast<u32>(m_Snapshot.particles.size()) * 2u + 8u,
-                           static_cast<u32>(m_Snapshot.instances.size()) * 2u + 8u,
-                           static_cast<u32>(m_Snapshot.instanceTransforms.size()) * 2u + 1024u);
-        m_SnapshotReserved = true;
-    }
+    // 【阶段 1 §15.1 第③段第 4 批：装配搬到白名单层】
+    // 三条管线现在共用同一个 `FrameSnapshotAssembler`（Engine/Render/Threading/）：本管线只配置
+    // **口径**（贴花是否排除、要构建哪些数组），取齐渲染输入（含两处必须在收集之前的世界写：
+    // 物理天空→方向光同步、世界矩阵刷新）由装配器执行。这里只需保证"本帧已装配"。
+    //
+    // 【贴花口径必须烘进快照】GBuffer 消费侧靠 `Prepare(..., excludeDecals=true)` 排除贴花卡片
+    //（改由 `DecalPass` 投影）；`Prepare` 改吃快照后，这个口径只能由收集侧决定 —— 否则贴花卡片会
+    // 既被投影又被当普通网格画进 GBuffer，并与 `GPUScene`/`MeshBatcher` 的收集集错位。
+    // 【阴影投射光源必须在帧图**执行**之前收齐】帧图里的 `m_ShadowSystem->Update(sctx)` 改吃快照，
+    // 否则 Deferred 的阴影会静默消失（`HasActiveShadows()` 恒 false）。
+    m_Assembler.Settings().objectOptions.excludeDecals = m_ExcludeDecalCards;
+    m_Assembler.Settings().physicalUnitsEnabled = cvLightPhysicalUnits.Get();
+    if (!m_Assembler.AssembledThisFrame()) m_Assembler.AssembleScene(world, sg, camera);
+    m_FrameSnapshot = &m_Snapshot;
+    m_Assembler.ReserveOnce();   // 首帧按实际规模自校准预留一次（幂等）
 
     // ============================================================
     // AsyncCompute: RenderGraph 多阶段提交
@@ -827,9 +821,9 @@ void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
 
     // ── 粒子模拟 (Compute，在 RenderGraph 之前) ──
     float4x4 viewProj = camera.GetViewProjMatrix();
-    // T1.4：发射器列表与参数都从**快照**取（不再遍历 ECS 组件、也不依赖管线自持的 id 列表）
-    SceneSnapshotBuilder::BuildParticles(world, m_Snapshot);
-    for (const SnapshotParticleEmitter& emitter : m_Snapshot.particles) {
+    // T1.4：发射器列表与参数都从**快照**取（不再遍历 ECS 组件、也不依赖管线自持的 id 列表）；
+    // 第③段第 4 批起由装配器统一收集（`buildParticles = true`）
+    for (const SnapshotParticleEmitter& emitter : FrameSnap().particles) {
         m_ParticleRenderer.DispatchCompute(cmd, emitter.rendererId, deltaTime, viewProj,
                                            emitter.params, emitter.emitPosition);
     }
@@ -868,25 +862,18 @@ void DeferredPipeline::FlushComputeWork() {
 
 // BuildFrameGraph 实现位于 DeferredPipeline_FrameGraph.cpp
 
-void DeferredPipeline::CollectLights(PushConstantData& pc, he::World& world,
-                                      he::SceneGraph& sg, const CameraData& camera) {
-    (void)camera;   // 光源收集用不到相机（广告牌才需要）；签名保留以兼容既有调用点
-
-    // 阶段 1 T1.3a：收集口径集中到 `SceneSnapshotBuilder`（原来 Deferred/Forward/PathTracing 各一份，
-    // 且已出现"聚光方向是否归一化""点光 directionType.xyz"两处漂移）。这里只负责两件事：
-    //   ① 把**外部状态**解析成收集器的输入（物理光全局开关、阴影索引解析）；
+void DeferredPipeline::CollectLights(PushConstantData& pc) {
+    // 【第③段第 4 批】收集已交给 `FrameSnapshotAssembler`（口径由 Initialize 配置）⇒ 本函数只：
+    //   ① 在与旧实现**同一时机**解析光源的阴影下标（阴影收集之后、消费之前 —— 旧代码正是在
+    //      本函数里调 `BuildLights` 传 resolver，时机一致）；
     //   ② 把收集结果上传进本帧槽位的光源 SSBO。
-    SceneSnapshotResolvers resolvers;
-    resolvers.physicalUnitsEnabled = cvLightPhysicalUnits.Get();
-    resolvers.shadowIndex = [this](he::Entity e) -> i32 {
+    // 【不要在这里 `FrameSnap().Clear()`（第①段修正）】快照在同一帧内分步构建、分步消费：
+    // 物体/实例/材质/贴花在 `Render()` 开头填好，帧图稍后（含 GBuffer 的实例化绘制）才读它们。
+    m_Assembler.ResolveLightShadowIndices([this](he::Entity e) -> i32 {
         return m_ShadowSystem ? m_ShadowSystem->GetShadowIndex(e) : -1;
-    };
+    });
 
-    // 【不要在收集光源时 `m_Snapshot.Clear()`（阶段 1 第①段修正，与 Forward 对称）】
-    // 快照在同一帧内分步构建、分步消费：物体/实例/材质/贴花在 `Render()` 开头填好，帧图稍后
-    // （含 GBuffer 的实例化绘制）才读它们。`Clear()` 会把 `draws`/`instances` 一起抹掉 ——
-    // 实例化没有兜底，表现为"实例一个都不画"。`BuildLights` 自己会 `out.lights.clear()`。
-    const u32 count = SceneSnapshotBuilder::BuildLights(world, sg, resolvers, m_Snapshot);
+    const u32 count = static_cast<u32>(FrameSnap().lights.size());
     pc.lightCount = count;
     if (count == 0u) return;
 
@@ -894,7 +881,7 @@ void DeferredPipeline::CollectLights(PushConstantData& pc, he::World& world,
     auto* lights = static_cast<GPULight*>(m_LightBuffers[m_CurrentFrameSlot]->Map());
     if (!lights) return;
     for (u32 i = 0; i < count; ++i) {
-        lights[i] = m_Snapshot.lights[i].ToGpu();
+        lights[i] = FrameSnap().lights[i].ToGpu();
     }
     m_LightBuffers[m_CurrentFrameSlot]->Unmap();
 }

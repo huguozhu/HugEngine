@@ -58,7 +58,7 @@ static constexpr he::u32 kLumenDebugTimerIdx    = 28u;   // 其中：SDF 逐像�
 
 void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                                         he::SceneGraph& sg, const CameraData& cameraIn) {
-    he::SyncPhysicalSkyToSun(world);  // 物理天空太阳→方向光同步（阴影/光照收集前）
+    // 【第③段第 4 批】`SyncPhysicalSkyToSun` 已搬进快照装配器（必须在收集之前、且聚合在一处）
     if (m_SwapChain) rg.SetSwapChain(m_SwapChain);
     u32 w = m_Width, h = m_Height;
     // 交换链颜色格式（SDR=BGRA8，HDR=A2B10G10R10），同步到 ToneMap 输出格式与 HDR 开关
@@ -124,7 +124,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     // GPUScene 收集 → [GPU 模式: 填充 IndirectDraw 参数] → 上传
     // 【第③段】GPUScene 不再自建快照：直接消费管线本帧的快照（口径相同 —— 贴花排除已由
     // `BuildObjects` 的 `excludeDecals` 烘进快照），顺带省掉每帧一次重复的物体收集。
-    m_GPUScene.CollectFromSnapshot(m_Snapshot);
+    m_GPUScene.CollectFromSnapshot(FrameSnap());
     // MeshBatcher 的构建条件有三条：① GPU 模式要靠它填 IndirectDraw 参数；
     // ② **Lumen 的 Mesh SDF 构建需要这份 CPU 侧几何**（步骤 8）——CPU GBuffer 模式下
     //    绘制不走它，但 SDF 仍然要有几何输入，否则距离场队列为空（实测就是这么发现的）；
@@ -134,10 +134,10 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                                  || m_GIConfig.specular.Has(GISourceId::Lumen);
     const bool naniteNeedsGeometry = m_Nanite.GetSettings().enabled && m_Nanite.IsReady();
     if (m_GBuffer->GetMode() == GBufferRenderer::Mode::GPU) {
-        if (!m_BatchBuilt) { m_MeshBatcher.Build(m_Snapshot, m_MeshRegistry, m_ExcludeDecalCards); m_BatchBuilt = true; }
+        if (!m_BatchBuilt) { m_MeshBatcher.Build(FrameSnap(), m_MeshRegistry, m_ExcludeDecalCards); m_BatchBuilt = true; }
         m_MeshBatcher.FillGPUScene(m_GPUScene);  // 在 Upload 前写入 draw 参数
     } else if ((lumenNeedsGeometry || naniteNeedsGeometry) && !m_BatchBuilt) {
-        m_MeshBatcher.Build(m_Snapshot, m_MeshRegistry, m_ExcludeDecalCards);   // 供 Lumen 的 SDF / Nanite 的资产使用
+        m_MeshBatcher.Build(FrameSnap(), m_MeshRegistry, m_ExcludeDecalCards);   // 供 Lumen 的 SDF / Nanite 的资产使用
         m_BatchBuilt = true;
     }
     m_GPUScene.Upload(m_Device);
@@ -224,7 +224,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         sctx.sceneGraph  = &sg;
         // 【第③段第 2 批】阴影收集改吃快照（`shadowLights` 已由 BuildObjects/BuildShadowLights 取齐）；
         // 网格注册表供各技术按 meshIndex 取顶点/索引缓冲。
-        sctx.snapshot    = &m_Snapshot;
+        sctx.snapshot    = m_FrameSnapshot;
         sctx.meshRegistry = &m_MeshRegistry;
         // 【阴影用未抖动的相机（cameraIn）】CSM 的级联拟合由相机视锥推级联包围盒；若这里用带
         //   TAA 抖动的相机，级联会逐帧亚像素摆动 ⇒ 阴影贴图 texel 对齐抖动 ⇒ TAA 反而把阴影
@@ -396,7 +396,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 m_GBuffer->ClearDGCContext();
             }
 
-            m_GBuffer->Render(c, m_Snapshot, camera);
+            m_GBuffer->Render(c, FrameSnap(), camera);
         });
 
     // ════════════════════════════════════════════════════════════════════
@@ -447,7 +447,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             {{gbA, ResourceAccess::Write}, {gbB, ResourceAccess::Write}},
             [&](rhi::IRHICommandList* c) {
                 // 贴花数据来自快照（T1.4）：本 Pass 不再读 world/sg
-                m_DecalPass.Render(c, m_Snapshot, camera, *m_GBuffer);
+                m_DecalPass.Render(c, FrameSnap(), camera, *m_GBuffer);
             });
     }
 
@@ -560,7 +560,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     //   按值捕获同一份结果，不再自己再收一遍。
     // ============================================================
     PushConstantData fpc{};
-    CollectLights(fpc, world, sg, camera);
+    CollectLights(fpc);
 
     // ============================================================
     // RSM 渲染（两个独立消费方，见下方 rsmNeeded）
@@ -987,7 +987,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             //（TLAS 已在 DDGI 段之前构建；此处只传句柄，不重复构建）。
             if (auto* lp0 = dynamic_cast<LumenProvider*>(prov.get())) {
                 PushConstantData ffpc{};
-                CollectLights(ffpc, world, sg, camera);
+                CollectLights(ffpc);
                 lp0->SetRTInputs(m_RTPass ? m_RTPass->GetTLAS() : nullptr,
                                  m_RTPass ? m_RTPass->GetSceneMaterialTexture() : nullptr,
                                  m_RTPass ? m_RTPass->GetSceneTriangleNormals() : nullptr,
@@ -1189,7 +1189,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
     if (m_RTEnabled && m_GIConfig.AnyRTSource() && m_RTPass) {
         // RT 效果需要光源数据（与本帧帧首那次同源；Lighting 的那份按值捕获复用）
         PushConstantData rtfpc{};
-        CollectLights(rtfpc, world, sg, camera);
+        CollectLights(rtfpc);
 
         // 加速结构（TLAS）与场景材质纹理已在 **DDGI 段之前**注册/构建（见那里的说明：
         // DDGI 的光追 march 也要用它们）。此处不再重复注册，否则同一帧会构建两次 TLAS。
@@ -1318,10 +1318,9 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
         auto* giIBL = dynamic_cast<GI_IBL*>(m_GI.get());
         if (giIBL) {
             // 阶段 1 T1.4：天空盒也走快照（本文件不再 `world.ForEach<SkyboxComponent>`）
-            SceneSnapshotBuilder::BuildSkybox(world, m_Snapshot);
-            if (m_Snapshot.skybox.enabled) {
-                giIBL->SetIBLSkybox(const_cast<rhi::IRHITexture*>(m_Snapshot.skybox.cubemap),
-                                    const_cast<rhi::IRHISampler*>(m_Snapshot.skybox.sampler));
+                if (FrameSnap().skybox.enabled) {
+                giIBL->SetIBLSkybox(const_cast<rhi::IRHITexture*>(FrameSnap().skybox.cubemap),
+                                    const_cast<rhi::IRHISampler*>(FrameSnap().skybox.sampler));
             }
         }
     }
@@ -1330,8 +1329,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
 
     // 空中透视参数（太阳方向 + 浑浊度）：**走快照**（T1.4），此处不再直接读世界 ——
     // 与 Forward 共用同一份口径（`BuildEnvironment` 在找不到/未启用物理天空时复位为"关闭"）。
-    SceneSnapshotBuilder::BuildEnvironment(world, m_Snapshot);
-    m_Lighting.SetAtmosphere(float3(m_Snapshot.atmosphere), m_Snapshot.atmosphere.w);
+    m_Lighting.SetAtmosphere(float3(FrameSnap().atmosphere), FrameSnap().atmosphere.w);
 
     // ── 低频环境源（IBL）烘焙：遍历 Provider ──
     // IBL 无独立 offscreen pass，其辐照度/预滤波贴图由天空盒烘焙而来（脏时重建）；
@@ -1551,7 +1549,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
             SubsystemContext sctx;
             sctx.world = &world;
             // 【第③段】天空盒数据改从快照取（`SkyboxPass::Update` 只读 ctx.snapshot）
-            sctx.snapshot = &m_Snapshot;
+            sctx.snapshot = m_FrameSnapshot;
             // 天空盒属于主视图：必须与几何用**同一份带抖动的投影**，否则天空与几何相差一个
             // 亚像素相位，TAA 会在天地交界处反复混出不存在的边缘（见帧首的抖动说明）。
             sctx.camera = &camera;

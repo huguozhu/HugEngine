@@ -103,6 +103,17 @@ bool PathTracingPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 hei
             }
         }
     }
+
+    // --- 快照装配器（第③段第 4 批）：配置本管线的口径 ---
+    {
+        m_Assembler.Bind(&m_Snapshot, &m_MeshRegistry);
+        FrameSnapshotAssemblySettings as;
+        as.buildParticles = true;                       // 粒子模拟读快照
+        as.buildDecals    = false;                      // PT 不走 DecalPass
+        as.lightOptions.writeShadowRadius = true;       // PT 口径：写 shadowRadius（阴影在路径里，无阴影系统）
+        as.lightOptions.includeRectLights = false;      // 与 Deferred 同（默认值同）
+        m_Assembler.Configure(as);
+    }
     if (m_RTEnabled) {
         // 全路径追踪 Pass（全分辨率，4 输出 UAV）
         m_PT = std::make_unique<PTPass>();
@@ -247,7 +258,6 @@ i32  PathTracingPipeline::GetPTMaxBounces() const { return cvPTMaxBounces.Get();
 void PathTracingPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
                                  he::SceneGraph& sg, const CameraData& camera,
                                  float deltaTime) {
-    he::SyncPhysicalSkyToSun(world);  // 物理天空太阳→方向光同步（阴影/光照收集前）
     if (!m_SwapChain || !m_Device) {
         HE_CORE_ERROR("PathTracingPipeline::Render: SwapChain 或 Device 未设置");
         return;
@@ -257,15 +267,19 @@ void PathTracingPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
     if (m_PTDenoiser)
         m_PTDenoiser->SetTemporalBlend(std::clamp(cvPTDenoiseBlend.Get(), 0.0f, 1.0f));
 
-    // 阶段 1 附录 E（E-2①）：登记/更新**全部**网格资源并回填 `meshIndex`（唯一实现在
-    // `SceneSnapshotBuilder::RegisterMeshes`，三条管线共用）。每帧刷新 ⇒ 骨骼缓冲重建也不会留过期指针。
-    SceneSnapshotBuilder::RegisterMeshes(world, m_MeshRegistry);
+    // 【阶段 1 §15.1 第③段第 4 批：装配搬到白名单层】三条管线共用 `FrameSnapshotAssembler`：
+    // 本管线只配置口径（PT 的光源口径要写 shadowRadius、粒子要收集），取齐渲染输入（含两处
+    // 必须在收集之前的世界写：物理天空→方向光同步、世界矩阵刷新）由装配器执行。
+    m_Assembler.Settings().physicalUnitsEnabled = cvLightPhysicalUnits.Get();
+    if (!m_Assembler.AssembledThisFrame()) m_Assembler.AssembleScene(world, sg, camera);
+    m_FrameSnapshot = m_FrameSnapshot;
+    m_Assembler.ReserveOnce();
 
     // ── 粒子模拟 (Compute，在 RenderGraph 之前) ──
     float4x4 viewProj = camera.GetViewProjMatrix();
-    // T1.4：发射器列表与参数都从**快照**取（不再遍历 ECS 组件、也不依赖管线自持的 id 列表）
-    SceneSnapshotBuilder::BuildParticles(world, m_Snapshot);
-    for (const SnapshotParticleEmitter& emitter : m_Snapshot.particles) {
+    // T1.4：发射器列表与参数都从**快照**取（不再遍历 ECS 组件、也不依赖管线自持的 id 列表）；
+    // 第③段第 4 批起由装配器统一收集（`buildParticles = true`）
+    for (const SnapshotParticleEmitter& emitter : FrameSnap().particles) {
         m_ParticleRenderer.DispatchCompute(cmd, emitter.rendererId, deltaTime, viewProj,
                                            emitter.params, emitter.emitPosition);
     }
@@ -288,29 +302,17 @@ void PathTracingPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
 // CollectLights — 收集场景光源数据到当前帧槽位 SSBO
 //（复制 HybridRTPipeline 实现：色温 + 物理光源模式）
 // ============================================================
-void PathTracingPipeline::CollectLights(he::World& world, he::SceneGraph& sg,
-                                        const CameraData& camera, u32& outLightCount) {
-    (void)camera;
-    // 阶段 1 T1.3b：收集集中到 `SceneSnapshotBuilder`，并**保持 PathTracing 的历史口径**：
-    // 与 Deferred 相同（不收集 Rect、点光 xyz=0、聚光归一化），但 `shadowIndex` 恒 -1
-    // （PT 的阴影包含在路径里、没有传统阴影系统）且写 `shadowRadius`。
-    SceneSnapshotResolvers resolvers;
-    resolvers.physicalUnitsEnabled = cvLightPhysicalUnits.Get();
-    // 故意不设置 shadowIndex 解析器 ⇒ 收集器填 -1，与旧行为一致
-
-    SceneSnapshotLightOptions options;
-    options.writeShadowRadius = true;
-
-    // 【不要在收集光源时 `m_Snapshot.Clear()`（阶段 1 第①段修正，与 Forward/Deferred 对称）】
-    // 快照在同一帧内分步构建、分步消费；`Clear()` 会连带抹掉本帧已填好的物体/实例/粒子数组，
-    // 而它们在本函数之后还要被消费。`BuildLights` 自己会 `out.lights.clear()`，故这里无需清理。
-    outLightCount = SceneSnapshotBuilder::BuildLights(world, sg, resolvers, m_Snapshot, options);
+void PathTracingPipeline::CollectLights(u32& outLightCount) {
+    // 【第③段第 4 批】收集已交给 `FrameSnapshotAssembler`（口径里已按 PT 的要求设 `writeShadowRadius`
+    // 且**不设** shadowIndex 解析器 ⇒ 收集器填 -1，与旧行为一致：PT 的阴影包含在路径里）。
+    // 本函数只把结果上传进本帧槽位的光源 SSBO。
+    outLightCount = static_cast<u32>(FrameSnap().lights.size());
     if (outLightCount == 0u) return;
 
     // 一次性上传（旧实现是每个光源 Map/Unmap 一次，写入内容相同）
     auto* lights = static_cast<GPULight*>(m_LightBuffers[m_CurrentFrameSlot]->Map());
     if (!lights) return;
-    for (u32 i = 0; i < outLightCount; ++i) lights[i] = m_Snapshot.lights[i].ToGpu();
+    for (u32 i = 0; i < outLightCount; ++i) lights[i] = FrameSnap().lights[i].ToGpu();
     m_LightBuffers[m_CurrentFrameSlot]->Unmap();
 }
 
@@ -366,7 +368,7 @@ void PathTracingPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
 
     // ── 收集光源（PT 与 ReSTIR 共用当前帧槽位数据）──
     u32 lightCount = 0;
-    CollectLights(world, sg, camera, lightCount);
+    CollectLights(lightCount);
 
     // ── ReSTIR 蓄水池可用判定：首帧无历史；光源数变化 → 历史失效 ──
     bool reservoirReady = false;

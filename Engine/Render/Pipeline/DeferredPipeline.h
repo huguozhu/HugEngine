@@ -20,6 +20,8 @@ namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer;
 #include "Pipeline/MeshBatcher.h"
 // 阶段 1 T1.3a：光源走快照（`FrameSceneSnapshot`）而不是直接遍历 ECS。
 #include "Threading/FrameSceneSnapshot.h"
+// 第③段第 4 批：快照装配器（白名单层读世界；管线只配置口径）
+#include "Threading/FrameSnapshotAssembler.h"
 // 阶段 1 附录 E：meshIndex → 渲染侧资源 的注册表（与 Forward 对称；E-3 的消费者需要它）
 #include "Threading/MeshRegistry.h"
 
@@ -184,8 +186,7 @@ public:
 private:
     void BuildFrameGraph(RenderGraph& rg, he::World& world,
                          he::SceneGraph& sg, const CameraData& camera);
-    void CollectLights(PushConstantData& pc, he::World& world,
-                       he::SceneGraph& sg, const CameraData& camera);
+    void CollectLights(PushConstantData& pc);
     void UpdateIBLBindings(GI_IBL* gi);
     void UpdateRSMBindings();
 
@@ -275,6 +276,10 @@ private:
     GIRadianceHistory m_RadianceHistory;
     GIConfig m_GIConfig;   // GI 配置（M2 档位/通道/强度 → P3 源层栈单一数据源）
     std::vector<std::unique_ptr<IGIProvider>> m_GIProviders;   // 已注册的 GI 源（P4）
+    /// 本帧快照装配器 + 帧快照指针（第③段第 4 批，与 Forward 同构）
+    FrameSnapshotAssembler     m_Assembler;
+    const FrameSceneSnapshot*  m_FrameSnapshot = nullptr;
+    [[nodiscard]] const FrameSceneSnapshot& FrameSnap() const { return *m_FrameSnapshot; }
     /// 各源 GPU 耗时读数（任务 29 / §9.2-Z）：帧图在 Provider 的主 pass 前后打时间戳，
     /// 在**该飞行帧槽位下一次被复用时**读回并写进源自己的 GIDebugData。
     GITimer m_GITimer;
