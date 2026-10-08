@@ -638,10 +638,18 @@ private:
   - **T1.3b 待做**：Forward / PathTracing 的光源收集同样改走快照（各自带历史口径开关）；
     `GPUScene::Collect` 改消费快照（依赖 T1.2b 的物体收集）。
 - [ ] T1.4 骨骼/材质/Decal/粒子快照化
+  - **起点（环境参数，2026-09-24）**：新增 `FrameSceneSnapshot::atmosphere`（xyz = 太阳方向、
+    w = 浑浊度，与两个 PushConstant 的 `atmosphere` 逐字段一致）与
+    `SceneSnapshotBuilder::BuildEnvironment`（找不到/未启用物理天空时复位为关闭，与旧行为逐字段一致）；
+    `ForwardPipeline` 已改用它 ⇒ 该管线不再直接读世界。单测 1 例 3 子用例；
+    实测 **382 例 / 71681 断言全通过**。
+    **未做**：`DeferredPipeline_FrameGraph.cpp:1326` 的同一处调用（在帧图 lambda 的另一分支里，
+    需单独核对执行时机），以及骨骼矩阵 / 材质参数（T1.2c）/ Decal / 粒子的快照化。
 - [ ] T1.5 渲染期移除 World/SceneGraph 引用（grep 断言）
   - **闸门与基线已就位（2026-09-24）**：`Tools/check_threading.py --world-deps` 统计 `Engine/Render/`
     内 `World&` / `SceneGraph&` 的出现处，按**所属函数名**分"渲染期 / 加载期"（与调用点清点同一份
-    白名单）。**实测：渲染期 86 处 / 加载期 15 处**（阶段 1 退出目标 = 渲染期 **0**）。
+    白名单；快照层 `Engine/Render/Threading/` 在**白名单内** —— 它是渲染侧唯一允许读世界的地方）。
+    **实测：渲染期 82 处 / 加载期 15 处**（阶段 1 退出目标 = 渲染期 **0**）。
     > 口径说明：同一函数的**声明与定义各算一处**（.h + .cpp），故数值大于函数个数；作为闸门只需
     > 前后一致、单调下降。迁移期它是**上限**（`--gate` 超基线即失败），随每次收敛手动下调。
   - 渲染期命中最多的文件（= T1.4/T1.5 的收敛对象）：`Pipeline/ForwardPipeline.h`(12)、

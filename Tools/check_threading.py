@@ -70,7 +70,10 @@ HOLDER_EXTS = (".h", ".hpp", ".cpp")
 # 作为闸门它只需要前后一致、单调下降即可。
 WORLD_DEP_PATTERN = re.compile(r"\b(?:he::)?(?:World|SceneGraph)\s*&")
 WORLD_DEP_ROOTS = ("Engine/Render",)
-WORLD_DEP_BASELINE = 86        # 2026-09-24 实测（阶段 1 退出目标 = 0）
+# 【白名单】快照层（`Engine/Render/Threading/`）是渲染侧**唯一**允许读世界的代码 —— 它就是干这个的：
+# 在游戏线程把渲染输入取齐成不可变快照。把它的命中排除在外，度量才对准"渲染期泄漏"。
+WORLD_DEP_WHITELIST_PATHS = ("Engine/Render/Threading/",)
+WORLD_DEP_BASELINE = 82        # 2026-09-24 实测（已排除快照层白名单；阶段 1 退出目标 = 0）
 
 LOAD_TIME_WHITELIST = ("Initialize", "Init", "Shutdown", "Resize", "Load", "Upload",
                        "Setup", "Construct", "OnCreate")
@@ -172,6 +175,9 @@ def count_world_deps(repo_root):
                 if not fn.endswith(HOLDER_EXTS):
                     continue
                 full = os.path.join(dirpath, fn)
+                rel = os.path.relpath(full, repo_root).replace("\\", "/")
+                if any(rel.startswith(w) for w in WORLD_DEP_WHITELIST_PATHS):
+                    continue                       # 快照层：渲染侧唯一允许读世界的地方（见常量处说明）
                 try:
                     with open(full, "r", encoding="utf-8", errors="replace") as fh:
                         lines = fh.read().splitlines()
@@ -184,7 +190,6 @@ def count_world_deps(repo_root):
                     if not WORLD_DEP_PATTERN.search(raw):
                         continue
                     func = enclosing_function(lines, idx)
-                    rel = os.path.relpath(full, repo_root).replace("\\", "/")
                     if is_load_time(func):
                         load_total += 1
                         per_file.setdefault(rel, {"帧内": 0, "加载期": 0})["加载期"] += 1
