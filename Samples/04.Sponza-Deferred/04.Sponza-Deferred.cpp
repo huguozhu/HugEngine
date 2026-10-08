@@ -9,6 +9,8 @@
 #include "Core/Engine.h"
 #include "Platform/Window.h"
 #include "RHI/RHI.h"
+#include "RHI/ThreadAffinity.h"      // T2.4：渲染线程启动/停止钩子认领与撤销 RHI 归属
+#include "Threading/RenderThread.h"  // T2.4：命令队列 + 渲染线程（严格握手）
 #include "Pipeline/DeferredPipeline.h"
 #include "Pipeline/CameraController.h"
 #include "Pipeline/PhysicalCamera.h"
@@ -606,12 +608,13 @@ int main() {
     // ============================================================
     // 10. 窗口调整回调
     // ============================================================
+    // 【T2.4】回调跑在游戏线程，而里面是 RHI（Resize/SetSwapChain/OnResize）⇒ 只置标志，
+    // 真正落地放到渲染命令里。
+    u32 g_PendingResizeW = 0, g_PendingResizeH = 0;
     engine.GetWindow()->SetResizeCallback([&](u32 w, u32 h) {
         if (w == 0 || h == 0) return;
-        swapchain->Resize(w, h);
-        cmdList->SetSwapChain(swapchain.get());
-        pipeline.OnResize(w, h);
-        camCtrl.SetAspectRatio(static_cast<float>(w), static_cast<float>(h));
+        g_PendingResizeW = w;
+        g_PendingResizeH = h;
     });
 
     // ============================================================
@@ -621,6 +624,35 @@ int main() {
     u64 frameIndex = 0;
     f64 lastTime   = glfwGetTime();
 
+    // ============================================================
+    // 渲染线程化（T2.4）：一帧两条命令 —— ① Acquire + 录制（管线 + 打开 ImGui 的 RP）；
+    // ② ImGui 的**录制**（draw data）+ End + Submit + AsyncCompute 提交 + Present。
+    // 控件（CPU 侧）留在游戏线程、位于两条命令之间 ⇒ 帧内顺序与改动前一致。
+    // ============================================================
+    render::RenderCommandQueue renderQueue(rhi::kMaxFramesInFlight);
+    render::RenderThread       renderThread(renderQueue);
+    render::FrameScheduler     frameScheduler(renderQueue, renderThread);
+    const bool                 useRenderQueue = he::UsesRenderThread();
+    const bool                 forceShell = std::getenv("HE_RENDER_THREAD_FORCE_SHELL") != nullptr;
+    if (useRenderQueue && !forceShell) {
+        renderThread.SetSpinWaitUs(50);
+        renderThread.SetThreadStartHook([] { he::rhi::GetThreadAffinity().Claim(); });
+        renderThread.SetThreadStopHook([] { he::rhi::GetThreadAffinity().Release(); });
+        HE_CORE_INFO("04.Sponza-Deferred：已起真渲染线程（整帧 RHI 归它；游戏线程按帧严格握手等待）");
+        renderThread.Start();
+    }
+    auto submitRender = [&](auto&& fn) {
+        if (useRenderQueue) {
+            renderQueue.BeginFrame();
+            renderQueue.Enqueue([&](render::RenderThreadContext&) { fn(); });
+            bool timedOut = false;
+            frameScheduler.SubmitAndWait(timedOut);
+            if (timedOut) HE_CORE_WARN("04.Sponza-Deferred：等待本帧渲染命令完成超时");
+        } else {
+            fn();
+        }
+    };
+
     while (!engine.GetWindow()->ShouldClose()) {
         f64 now       = glfwGetTime();
         f32 deltaTime = static_cast<f32>(now - lastTime);
@@ -628,72 +660,35 @@ int main() {
 
         engine.GetWindow()->PollEvents();
 
-        if (!swapchain->AcquireNextImage())
-            continue;
+        bool frameAborted = false;   // 渲染命令里 Acquire 失败时置位
 
-        // --- 相机控制 ---
-        {
-            bool mouseDown = glfwGetMouseButton(glfwWin, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
-            if (mouseDown && !rightMouseDown) {
-                rightMouseDown = true;
-                glfwGetCursorPos(glfwWin, &lastMouseX, &lastMouseY);
-                glfwSetInputMode(glfwWin, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-            } else if (!mouseDown && rightMouseDown) {
-                rightMouseDown = false;
-                glfwSetInputMode(glfwWin, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-            } else if (mouseDown && rightMouseDown) {
-                double cx, cy;
-                glfwGetCursorPos(glfwWin, &cx, &cy);
-                float dx = static_cast<float>(cx - lastMouseX);
-                float dy = static_cast<float>(cy - lastMouseY);
-                lastMouseX = cx;
-                lastMouseY = cy;
-                camCtrl.Rotate(dx * 0.003f, -dy * 0.003f);
+        // ---- 命令 1：Acquire + 录制（管线 + 打开 ImGui 的 RP）----
+        auto recordScene = [&]() {
+            if (!swapchain->AcquireNextImage()) {
+                frameAborted = true;   // 命令可能在渲染线程跑 ⇒ 用标志代替 while 的 continue
+                return;
             }
-
-            // T 键切换动画/手动相机模式
-            static bool tWasDown = false;
-            bool tDown = glfwGetKey(glfwWin, GLFW_KEY_T) == GLFW_PRESS;
-            if (tDown && !tWasDown) animCameraMode = !animCameraMode;
-            tWasDown = tDown;
-
-            // 动画相机模式：动画播放时同步 AnimationComponent 的位置
-            if (animCameraMode && camAnim->playing) {
-                auto* camTf = world.GetComponent<TransformComponent>(camAnimEntity);
-                if (camTf) {
-                    camCtrl.SetPosition(camTf->position);
-                    float3 toOrigin = glm::normalize(float3(0, 200, 0) - camTf->position);
-                    camCtrl.SetOrientationFromForward(toOrigin);
-                }
+            // 窗口尺寸变化的落地（回调只置了标志）
+            if (g_PendingResizeW != 0u && g_PendingResizeH != 0u) {
+                const u32 rw = g_PendingResizeW, rh = g_PendingResizeH;
+                g_PendingResizeW = g_PendingResizeH = 0u;
+                swapchain->Resize(rw, rh);
+                cmdList->SetSwapChain(swapchain.get());
+                pipeline.OnResize(rw, rh);
             }
+            cmdList->Begin();
+            pipeline.NextFrame();
+            // 【第③段：帧入口收快照】装配由样例在游戏线程驱动（管线只配置口径）
+            pipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, camCtrl.GetCamera());
+            pipeline.Render(cmdList.get(), pipeline.GetFrameSnapshot(), camCtrl.GetCamera());
 
-            render::CameraController::MoveInput moveIn;
-            moveIn.forward  = glfwGetKey(glfwWin, GLFW_KEY_W) == GLFW_PRESS;
-            moveIn.backward = glfwGetKey(glfwWin, GLFW_KEY_S) == GLFW_PRESS;
-            moveIn.left     = glfwGetKey(glfwWin, GLFW_KEY_A) == GLFW_PRESS;
-            moveIn.right    = glfwGetKey(glfwWin, GLFW_KEY_D) == GLFW_PRESS;
-            moveIn.up       = glfwGetKey(glfwWin, GLFW_KEY_E) == GLFW_PRESS;
-            moveIn.down     = glfwGetKey(glfwWin, GLFW_KEY_Q) == GLFW_PRESS;
-            moveIn.sprint   = glfwGetKey(glfwWin, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
-            camCtrl.Update(deltaTime, moveIn);
-        }
+            // --- ImGui（LOAD 保留 ToneMap 输出）---
+            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
+                rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
 
-        // Transform 动画更新（驱动 AnimationComponent → TransformComponent）
-        world.ForEach<he::AnimationComponent>([&](he::Entity e, he::AnimationComponent& anim) {
-            auto* tf = world.GetComponent<TransformComponent>(e);
-            if (tf) anim.Update(deltaTime, tf);
-        });
-
-        // --- 渲染（DeferredPipeline 通过 RenderGraph 全自动编排）---
-        cmdList->Begin();
-        pipeline.NextFrame();
-        // 【第③段：帧入口收快照】装配由样例在游戏线程驱动（管线只配置口径）
-        pipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, camCtrl.GetCamera());
-        pipeline.Render(cmdList.get(), pipeline.GetFrameSnapshot(), camCtrl.GetCamera());
-
-        // --- ImGui（LOAD 保留 ToneMap 输出）---
-        cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
-            rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
+        };
+        submitRender(recordScene);
+        if (frameAborted) continue;   // Acquire 失败：跳过本帧剩余部分
 
         imgui.BeginFrame();
         ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
@@ -1137,17 +1132,25 @@ int main() {
             pipeline.GetProfilerPanel().Toggle();
         pipeline.GetProfilerPanel().Draw();
 
-        imgui.EndFrame(cmdList.get());
-        cmdList->EndRenderPass();
-        cmdList->End();
+        // ---- 命令 2：ImGui 录制 + End + Submit + AsyncCompute + Present ----
+        auto recordUiAndPresent = [&]() {
+            imgui.EndFrame(cmdList.get());
+            cmdList->EndRenderPass();
+            cmdList->End();
 
-        device->Submit(cmdList.get());
-        pipeline.FlushComputeWork();  // AsyncCompute: Graphics Submit 之后提交 Compute 工作
-        swapchain->Present(true);
-        frameIndex++;
+            device->Submit(cmdList.get());
+            pipeline.FlushComputeWork();  // AsyncCompute: Graphics Submit 之后提交 Compute 工作
+            swapchain->Present(true);
+            frameIndex++;        };
+        submitRender(recordUiAndPresent);
+
     }
 
     // 清理
+    // 【T2.4】退出前停渲染线程并撤销 RHI 归属：收尾的 WaitIdle/设备销毁仍在游戏线程
+    renderThread.Stop();
+    he::rhi::GetThreadAffinity().Release();
+
     imgui.Shutdown();
     device->WaitIdle();
     pipeline.Shutdown();
