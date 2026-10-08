@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Scene/Entity.h"   // he::Entity（按值出现在下面的解析器签名里，需要完整类型）
+#include "Pipeline/Material.h"   // PBRMaterial / GetDefaultMaterial（E-3：材质映射的唯一实现）
 #include "Threading/FrameSceneSnapshot.h"
 
 #include <functional>
@@ -9,6 +10,7 @@ namespace he {
 class World;
 class SceneGraph;
 class SkeletalMeshComponent;   // 蒙皮矩阵的收集入口（实现里才需要完整类型）
+class MeshComponent;           // E-3：材质映射的输入（实现里才需要完整类型）
 } // namespace he
 
 // ============================================================
@@ -137,6 +139,12 @@ public:
     /// 扁平数组、还要回填条目的切片 ⇒ 分成两步，且这一步可以单独单测（不需要网格索引数据）。
     static void AppendSkinMatrices(SnapshotDrawItem& item, const he::SkeletalMeshComponent& comp,
                                    FrameSceneSnapshot& out);
+
+    // ── 材质映射（E-3）────────────────────────────────────────────
+
+    /// 组件 → `PBRMaterial` 的**唯一实现**（原先内联在 `SceneRenderer::Prepare` 里）。
+    /// 抽出来的目的：让"收集侧算材质"（E-3 的目标）与渲染侧共用一份口径，避免各自漂移。
+    static PBRMaterial MakePBRMaterial(const he::MeshComponent& comp);
 
     // ── 粒子发射器（T1.4）────────────────────────────────────────
 

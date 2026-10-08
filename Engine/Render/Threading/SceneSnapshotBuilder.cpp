@@ -169,6 +169,29 @@ void SceneSnapshotBuilder::AppendSkinMatrices(SnapshotDrawItem& item, const he::
     out.skinMatrices.insert(out.skinMatrices.end(), comp.boneMatrices.begin(), comp.boneMatrices.end());
 }
 
+PBRMaterial SceneSnapshotBuilder::MakePBRMaterial(const he::MeshComponent& comp) {
+    // 【唯一实现】这段映射原先内联在 `SceneRenderer::Prepare` 里（E-3 之前）；抽到这里是为了让
+    // "收集侧算材质"与"渲染侧算材质"共用一份口径 —— 否则两边会各自漂移（本方案已登记过 5 处同类漂移）。
+    // 逐字段与 `SceneRenderer.cpp:110-125` 保持一致（含"不设置 disney 等扩展参数"这一点）。
+    PBRMaterial mat = GetDefaultMaterial();
+    mat.baseColorFactor = comp.baseColorFactor;
+    mat.emissiveFactor  = comp.emissiveFactor;
+    mat.metallicFactor  = comp.metallicFactor;
+    mat.roughnessFactor = comp.roughnessFactor;
+    mat.aoFactor        = comp.aoFactor;
+    mat.alphaCutoff     = comp.alphaCutoff;
+    mat.alphaMode       = static_cast<AlphaMode>(comp.alphaMode);
+    mat.doubleSided     = comp.doubleSided;
+    mat.unlit           = comp.unlit;
+    // 纹理路径 → textureMask（无纹理槽 shader 不采样，避免占位纹理污染）
+    mat.baseColorTexture         = comp.baseColorTexture;
+    mat.normalTexture            = comp.normalTexture;
+    mat.metallicRoughnessTexture = comp.metallicRoughnessTexture;
+    mat.occlusionTexture         = comp.occlusionTexture;
+    mat.emissiveTexture          = comp.emissiveTexture;
+    return mat;
+}
+
 bool SceneSnapshotBuilder::BuildEnvironment(he::World& world, FrameSceneSnapshot& out) {    // 与两处旧调用点逐字段一致：找不到/未启用物理天空时，方向保持 (0,1,0)、浑浊度归 0
     // （Forward 的注释写明"天空移除时复位浑浊度=0"）。
     float3 sunDir    = float3(0.0f, 1.0f, 0.0f);

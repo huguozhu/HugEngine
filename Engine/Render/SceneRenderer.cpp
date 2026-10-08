@@ -1,4 +1,6 @@
 #include "SceneRenderer.h"
+// E-3：材质映射的唯一实现（`SceneSnapshotBuilder::MakePBRMaterial`）
+#include "Threading/SceneSnapshotBuilder.h"
 #include "Scene/World.h"
 #include "Scene/SceneGraph.h"
 #include "Scene/MeshComponent.h"
@@ -106,23 +108,8 @@ std::vector<DrawItem> SceneRenderer::Prepare(he::World& world, he::SceneGraph& s
         u32 ei = visibleIdx[vi];
         auto& e = entries[ei];
 
-        // 材质数据
-        PBRMaterial mat = GetDefaultMaterial();
-        mat.baseColorFactor = e.mesh->baseColorFactor;
-        mat.emissiveFactor  = e.mesh->emissiveFactor;
-        mat.metallicFactor  = e.mesh->metallicFactor;
-        mat.roughnessFactor = e.mesh->roughnessFactor;
-        mat.aoFactor        = e.mesh->aoFactor;
-        mat.alphaCutoff     = e.mesh->alphaCutoff;
-        mat.alphaMode       = static_cast<AlphaMode>(e.mesh->alphaMode);
-        mat.doubleSided     = e.mesh->doubleSided;
-        mat.unlit           = e.mesh->unlit;
-        // 纹理路径 → textureMask（无纹理槽 shader 不采样，避免占位纹理污染）
-        mat.baseColorTexture         = e.mesh->baseColorTexture;
-        mat.normalTexture            = e.mesh->normalTexture;
-        mat.metallicRoughnessTexture = e.mesh->metallicRoughnessTexture;
-        mat.occlusionTexture         = e.mesh->occlusionTexture;
-        mat.emissiveTexture          = e.mesh->emissiveTexture;
+        // 材质数据（E-3：映射已抽到 `SceneSnapshotBuilder::MakePBRMaterial`，两侧共用一份口径）
+        const PBRMaterial mat = SceneSnapshotBuilder::MakePBRMaterial(*e.mesh);
 
         GPUObjectData& obj = objData[vi];
         obj.worldMatrix = e.worldMatrix;
