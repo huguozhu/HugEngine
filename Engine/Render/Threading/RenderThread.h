@@ -90,6 +90,14 @@ public:
     /// 返回该帧号。
     u64 SubmitAndPump();
 
+    /// **严格握手提交（T2.2 步骤 (c)）**：阻塞提交一帧后，等它**真正被消费完**（含呈现）再返回。
+    /// 真线程模式：不在调用线程执行，由渲染线程执行并回收 ⇒ 这里等 `WaitFrameRetired`。
+    /// 壳模式：`PumpOnce` 就地执行并回收 ⇒ 立刻满足。
+    /// 【为什么要它】"把每帧 RHI 调用搬进渲染命令"要逐项验证（每搬一项转储都应逐位一致），
+    /// 严格握手让每帧串行，从而把"执行位置搬了但语义没变"这件事单独测出来。
+    /// @return 该帧号；`timedOut` 置位表示等待超时（调用方据此告警，不静默继续）
+    u64 SubmitAndWait(bool& timedOut, u32 timeoutMs = 0u);
+
     /// 非阻塞提交（在飞满时返回 false 并丢弃本帧），同样立即执行并回收。
     [[nodiscard]] bool TrySubmitAndPump();
 

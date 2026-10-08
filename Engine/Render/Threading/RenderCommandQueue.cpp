@@ -103,11 +103,27 @@ bool RenderCommandQueue::WaitConsumeFrame(RenderFrameCommands& out, u32 timeoutM
 void RenderCommandQueue::RetireFrame(const FrameTicket& ticket) {
     {
         std::lock_guard<std::mutex> lock(m_Mutex);
-        (void)ticket;                       // 阶段 0 不做逐票校验；帧序号校验留给 T2.6 的 fence 对账
         if (m_InFlight > 0u) --m_InFlight;
         ++m_Retired;
+        // 【T2.2 步骤 (c)】记住"已退休到的帧号"：帧按 FIFO 消费 ⇒ 退休也有序，
+        // 于是"某帧是否做完"可以只用一个上界判断（供 WaitFrameRetired 的严格握手）。
+        if (m_Retired == 1u || ticket.frameIndex > m_LastRetiredFrame)
+            m_LastRetiredFrame = ticket.frameIndex;
     }
-    m_Cv.notify_all();                      // 唤醒被背压阻塞的游戏线程
+    m_Cv.notify_all();                      // 唤醒被背压阻塞的游戏线程 + 等本帧做完的调用方
+}
+
+bool RenderCommandQueue::WaitFrameRetired(u64 frameIndex, u32 timeoutMs) {
+    std::unique_lock<std::mutex> lock(m_Mutex);
+    auto done = [this, frameIndex] {
+        return m_Retired > 0u && frameIndex <= m_LastRetiredFrame;
+    };
+    if (done()) return true;                // 已经做完（常见：壳模式就地执行）
+    if (timeoutMs == 0u) {
+        m_Cv.wait(lock, done);              // 无限等待（严格握手的正常路径）
+        return true;
+    }
+    return m_Cv.wait_for(lock, std::chrono::milliseconds(timeoutMs), done);
 }
 
 u32 RenderCommandQueue::InFlightFrameCount() const {

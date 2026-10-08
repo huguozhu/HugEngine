@@ -89,6 +89,14 @@ u64 FrameScheduler::SubmitAndPump() {
     return ticket.frameIndex;
 }
 
+u64 FrameScheduler::SubmitAndWait(bool& timedOut, u32 timeoutMs) {
+    const FrameTicket ticket = m_Queue.SubmitFrameBlocking();
+    // 壳模式：就地执行并回收（语义与 SubmitAndPump 一致）
+    if (!m_RenderThread.IsRunning()) m_RenderThread.PumpOnce();
+    timedOut = !m_Queue.WaitFrameRetired(ticket.frameIndex, timeoutMs);
+    return ticket.frameIndex;
+}
+
 bool FrameScheduler::TrySubmitAndPump() {
     FrameTicket ticket{};
     if (!m_Queue.TrySubmitFrame(ticket)) return false;

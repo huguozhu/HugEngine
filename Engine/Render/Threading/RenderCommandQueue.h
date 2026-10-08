@@ -79,6 +79,16 @@ public:
     /// 消费完一帧后回收票据（在飞帧数减一，唤醒可能被背压阻塞的游戏线程）
     void RetireFrame(const FrameTicket& ticket);
 
+    /// **等待指定帧被消费（回收）**：阻塞直到 `frameIndex` 已被 `RetireFrame`，或超时。
+    /// 【用途（T2.2 步骤 (c)）】严格握手：游戏线程发布本帧后等它真正做完（含呈现），
+    /// 才继续下一帧的采集/装配 —— 这样"把每帧 RHI 调用搬进渲染命令"的改造可以**逐项验证**
+    /// （每搬一项，转储都应保持逐位一致），而不必先实现完整的帧流水线。
+    /// 【与 `SubmitFrameBlocking` 的区别】后者只保证"在飞帧数 < 上限"（背压），
+    /// 不保证**本帧**已执行完 —— 严格握手必须用本函数。
+    /// @param timeoutMs 0 = 无限等待
+    /// @return 是否已确认该帧被回收
+    [[nodiscard]] bool WaitFrameRetired(u64 frameIndex, u32 timeoutMs = 0u);
+
     // --- 观测 ---
 
     [[nodiscard]] u32  InFlightFrameCount() const;
@@ -117,6 +127,8 @@ private:
     u32 m_InFlight          = 0;   // 已发布但未 Retire 的帧数
     u64 m_Published         = 0;
     u64 m_Retired           = 0;
+    /// 已退休到的帧号（帧按 FIFO 消费 ⇒ 退休也有序）。供严格握手 `WaitFrameRetired` 判断。
+    u64 m_LastRetiredFrame  = 0;
     u64 m_Dropped           = 0;
     u64 m_BackpressureWaits = 0;
 };

@@ -122,3 +122,37 @@ TEST_CASE("RenderThread(T2.1)：未启动时仍是壳语义（就地执行，IsC
     CHECK(rt.ExecutedFrameCount() == 1u);
     CHECK_FALSE(rt.PumpOnce());                       // 没有待处理帧
 }
+
+TEST_CASE("严格握手（T2.2）：SubmitAndWait 只在帧真正被消费完后返回") {
+    // 【它测什么】`WaitFrameRetired` 是"把每帧 RHI 调用搬进渲染命令"时逐项验证的前提：
+    // 游戏线程发布后必须等到本帧（含呈现）做完，否则下一帧的采集会与渲染线程并发改写共享状态。
+    RenderCommandQueue queue(2);
+    RenderThread       rt(queue);
+    FrameScheduler     sched(queue, rt);
+
+    // 壳模式：就地执行并回收 ⇒ 立刻满足
+    bool timedOut = true;
+    queue.BeginFrame();
+    queue.Enqueue([](RenderThreadContext&) {});
+    const u64 f0 = sched.SubmitAndWait(timedOut, 200u);
+    CHECK_FALSE(timedOut);
+    CHECK(queue.WaitFrameRetired(f0, 10u));
+    CHECK(queue.InFlightFrameCount() == 0u);
+
+    // 未发布的帧号：等待应超时（不静默返回成功）
+    bool timedOut2 = false;
+    CHECK_FALSE(queue.WaitFrameRetired(999u, 20u));
+    timedOut2 = true;   // 位点仅用于说明"超时路径不会阻塞"
+
+    // 真线程模式：发布后由渲染线程执行，握手必须真的等到回收
+    REQUIRE(rt.Start());
+    queue.BeginFrame();
+    queue.Enqueue([](RenderThreadContext&) {});
+    bool timedOut3 = true;
+    const u64 f1 = sched.SubmitAndWait(timedOut3, 2000u);
+    CHECK_FALSE(timedOut3);                       // 2s 内必须做完
+    CHECK(queue.WaitFrameRetired(f1, 0u));        // 已退休 ⇒ 立即返回
+    CHECK(rt.ExecutedFrameCount() >= 1u);
+    rt.Stop();
+    CHECK(queue.InFlightFrameCount() == 0u);
+}
