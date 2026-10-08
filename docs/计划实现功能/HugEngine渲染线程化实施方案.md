@@ -477,7 +477,12 @@ private:
   - 实测（2026-09-24，multi_thread 分支）：单测 **334 例 / 71303 断言全通过**（含新增的
     `TestThreadAffinity.cpp` 三态用例与 `TestThreadAffinityDisabled.cpp` 关闭路径用例）；
     `06.GILab` 实跑 120 帧零断言触发、28 个转储正常、`vuid_lines=42` 无新增。
-- [ ] T0.2 帧内同步 RHI 调用清点清单
+- [x] T0.2 帧内同步 RHI 调用清点清单
+  - 产出 **§13 附录 D**：`Engine/Render` 帧内 **376** 处 / 加载期 247 处，`Samples` 帧内 **127** 处；
+    按 `SWAPCHAIN / WAIT / CREATE / MAP / UPLOAD_DESC` 分类，每类给出处置与所属阶段、代表 `file:line`
+    与最集中的文件（方向与量级已按文件聚合排序）。
+  - 配套脚本 `Tools/check_threading.py`（`--detail` 明细、`--root` 换目录、`--gate` 闸门），
+    是附录 B 各阶段退出判据的可执行版本。
 - [ ] T0.3 `RenderCommandQueue` + `RenderThread` 壳实现（行为等价）
 - [ ] T0.4 帧票据与背压骨架
 - [x] T0.5 `EngineConfig::enableRenderThread` / `renderThreadSpinWaitUs`
@@ -724,6 +729,85 @@ private:
 
 ---
 
-> **文档版本**：v1.1（2026-09-22）
-> **性质**：实施计划（未开工）。开工后每完成一个任务，请回到 §9 勾选并在 §6 记录实测数字。
+## 13. 附录 D：阶段 0 T0.2 帧内同步 RHI 调用清单
+
+> **性质**：阶段 0 T0.2 的产出（**只读盘点，不改代码**）。这张清单是阶段 2（T2.2/T2.3/T2.6）的派工单，
+> 也是附录 B 各阶段退出闸门的可执行版本。
+
+### 13.1 怎么复现
+
+```powershell
+python Tools\check_threading.py                  # 汇总（Engine/Render）
+python Tools\check_threading.py --detail         # 附每条 file:line + 所属函数
+python Tools\check_threading.py --root Samples   # 样例侧（附录 B 的 B2 口径）
+python Tools\check_threading.py --gate           # 闸门：帧内命中 > 0 时退出码 1（各阶段退出用）
+```
+
+### 13.2 判定口径（刻意保守）
+
+- **类别**：`SWAPCHAIN`（拿图/呈现）、`WAIT`（等待型提交 / 空闲等待）、`CREATE`（设备调用形态
+  `x->Create*()`，含 `CreateTransient*`）、`MAP`（映射缓冲访问：直写上传或 GPU→CPU 读回）、
+  `UPLOAD_DESC`（`desc.initialData` 创建期上传）。
+- **帧内 vs 加载期**：取该行**所属函数名**，含 `Initialize / Init / Shutdown / Resize / Load / Upload /
+  Setup / Construct / OnCreate` 之一 ⇒ 加载期，其余一律帧内。白名单**故意不含 `Build` / `Create`**：
+  `BuildFrameGraph` 这类名字里有 Build 的函数**每帧都跑**，含进去会把真正的帧内创建藏起来。
+- **已知两类噪声**（清单用于排序与派工，不当作证明）：
+  1. **辅助函数误判为帧内**：如 `AA_TAA::CreateHistoryTextures` 只在 `Initialize` 里被调用，但函数名
+     不含白名单词 ⇒ 记成帧内（保守方向：多报，不会漏报）；
+  2. **头文件声明/文件作用域**：如 `RenderGraph.h` 内的声明行记为 `<文件作用域>` ⇒ 记成帧内。
+  反向的漏报风险同样存在（多行函数签名会让"所属函数"退化成上一个可识别的函数名）。
+
+### 13.3 清点结果（2026-09-24，multi_thread 分支）
+
+`Engine/Render`（196 个文件）：
+
+| 类别 | 帧内 | 加载期 | 处置（方案对应任务） |
+|---|---|---|---|
+| `SWAPCHAIN` | **0** | 0 | 交换链调用全在样例侧 ⇒ 见下表 + C2 |
+| `WAIT` | **2** | 2 | 阶段 2：只允许渲染线程，帧内禁止（铁律 3）；加载期保留 |
+| `CREATE` | **211** | 209 | 阶段 2 T2.3：帧内改走 `ResourceCreationService`（步 1 同步转发，仅限加载/重建） |
+| `MAP` | **142** | 22 | 阶段 2 T2.6：读回改"登记 + N 帧后取值"（`FrameRetireQueue`）；直写改入队拷贝（铁律 2） |
+| `UPLOAD_DESC` | **21** | 14 | 阶段 2 T2.3：创建期上传经创建服务在渲染线程执行 |
+| **合计** | **376** | 247 | 阶段 2 退出时帧内必须为 0（加载期用例保留但需经创建服务） |
+
+`Samples`（7 个样例 + 编辑器）：
+
+| 类别 | 帧内 | 加载期 | 说明 |
+|---|---|---|---|
+| `SWAPCHAIN` | **18** | 0 | 与 C2 一致：`AcquireNextImage` / `Present` 全在样例主循环，T2.2 整体迁入渲染线程 |
+| `WAIT` | **15** | 1 | 样例里的等待型提交，随 T2.4 的循环改造一起收口 |
+| `CREATE` | **66** | 2 | 样例侧资源创建（多为加载期语义，但因函数名未命中白名单而记帧内） |
+| `MAP` | **6** | 0 | — |
+| `UPLOAD_DESC` | **22** | 0 | — |
+| **合计** | **127** | 3 | 附录 B 的 **B2**：阶段 2 后样例侧这些调用应为 0 |
+
+### 13.4 代表点与优先级（帧内命中按文件聚合）
+
+| 类别 | 最集中的文件（帧内命中数） | 已核对的具体点 |
+|---|---|---|
+| `CREATE` | `Lumen/LumenScene_SurfaceCache.cpp×32`、`Nanite/NaniteRaster.cpp×26`、`Lumen/LumenSDF.cpp×18`、`Pipeline/ParticleRenderer.cpp×17`、`Pipeline/RTPass.cpp×12`、`Pipeline/LightingPass.cpp×11` | `RenderGraph.cpp:441/447` —— 帧图 `Execute` 内瞬态分配失败时**直接调用 `device->CreateTexture/CreateBuffer`**；`AA_FXAA.cpp:114`、`AA_SMAA.cpp:285` 等 PSO 辅助函数 |
+| `MAP` | `Pipeline/ParticleRenderer.cpp×20`、`Lumen/LumenScene_SurfaceCache.cpp×18`、`Nanite/NaniteRenderer.cpp×15`、`Nanite/NaniteRaster.cpp×13`、`Nanite/NaniteCull.cpp×12`、`Lumen/LumenSDF.cpp×9` | `SceneRenderer.cpp:102`（对象数据直写）、`AA_TAA.cpp:198`（TAA 常量直写）、`DDGITracePass.cpp:152`/`GI_RSM.cpp:201`（GI 常量直写）、`NaniteRenderer.cpp:736` 起（GPU 计数读回） |
+| `UPLOAD_DESC` | `Pipeline/RTPass.cpp×6`、`Lumen/LumenScene_SurfaceCache.cpp×3`、`Nanite/NaniteStream.cpp×3`、`Pipeline/LightingPass.cpp×3` | `LumenSDF.cpp:2249`、`NaniteRaster.cpp:145`（dummy VB 零填充） |
+| `WAIT` | `Lumen/LumenScene_Irradiance.cpp:166`、`Nanite/NaniteStream.cpp:388` | 两处都在帧内路径上 ⇒ 阶段 2 起必须改造（铁律 3） |
+
+**结论**：阶段 2 的主要工作量集中在 **Lumen 表面缓存 / Nanite（光栅、剔除、流式）/ 粒子 / RT**，以及
+**帧图 `Execute` 的兜底创建路径**；这三块正好也是《Lumen设计与实现》里 CPU 录制耗时的大头，
+因此 T2.3 与 T3.2 应当合起来排期，避免"先搬到渲染线程、再为并行录制改一遍"。
+
+### 13.5 作为闸门
+
+阶段退出时用 `--gate`：帧内命中非 0 即失败。各阶段期望：
+
+| 阶段 | 期望 |
+|---|---|
+| 阶段 0（本阶段） | 只登记、不设闸门（本附录即产出） |
+| 阶段 1 | `Engine/Render` 渲染期不再出现 `he::World&` / `SceneGraph&`（附录 B 的 B1，另行纳入脚本） |
+| 阶段 2 | `--root Engine/Render --gate` 与 `--root Samples --gate` 均通过（帧内为 0） |
+| 阶段 3/4 | 保持为 0，且 `WAIT` 帧内不得回升（铁律 3） |
+
+---
+
+> **文档版本**：v1.2（2026-09-24）
+> **性质**：实施计划（**已开工**）。开工后每完成一个任务，回到 §9 勾选并在 §6 记录实测数字。
 > **v1.1 变更**：新增 §12 附录 C「升级到 UE 三线程模型的增量路径」；阶段 0 增加预埋任务 **T0.6（RHI 命令流契约）** 与 **T0.7（资源句柄化）**，二者是 §12 所列升级路径的前置条件。
+> **v1.2 变更**：T0.5 的开关改为**三态** `RenderThreadingMode`（单线程 / 游戏+渲染 / 游戏+渲染+RHI，见 §5 与 §7 的口径说明）；新增 §13 附录 D「阶段 0 T0.2 帧内同步 RHI 调用清单」与配套脚本 `Tools/check_threading.py`（含 `--gate` 闸门模式）。
