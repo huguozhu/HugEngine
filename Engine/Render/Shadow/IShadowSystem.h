@@ -33,6 +33,15 @@ public:
     // ---- 每帧注入 ----
 
     virtual void NextFrame() = 0;
+
+    /// 【T2.4 / 多槽快照的前置】把**本帧**快照交给阴影系统（在帧图构建期、`Render` 之前调用）。
+    /// 【为什么要它】阴影的收集（`Update`）与绘制（`Render`）分别在两处：原先快照指针只在 `Update`
+    /// 里缓存，于是"本帧没调 Update 却调了 Render"就会用到**上一帧**的指针 —— 单份快照时代这只是
+    /// "读到当前数据"，**多飞行帧快照**时代却会读到别的槽位（这正是第 10 轮多槽试验回归的机制类）。
+    /// 现在由管线每帧**无条件**绑一次（与是否 Update 无关）⇒ 指针永远是本帧那一份。
+    virtual void SetFrameSnapshot(const FrameSceneSnapshot& snapshot, const MeshRegistry& registry) {
+        (void)snapshot; (void)registry;
+    }
     virtual void SetRenderResources(rhi::IRHIBuffer* objBuf,
                                      rhi::IRHIBuffer* shadowBuf,
                                      rhi::DescriptorSetHandle descSet) = 0;

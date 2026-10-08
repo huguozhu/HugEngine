@@ -31,6 +31,8 @@ public:
     bool Initialize(rhi::IRHIDevice* device,u32 width,u32 height)override;
     void Shutdown()override;
     void Update(const SubsystemContext& ctx)override;
+    /// 见 `IShadowSystem::SetFrameSnapshot`：管线每帧无条件绑定本帧快照
+    void SetFrameSnapshot(const FrameSceneSnapshot& snapshot, const MeshRegistry& registry)override;
     void Render(rhi::IRHICommandList* cmdList)override;
     void Bind(rhi::IRHICommandList* cmdList)const override;
     void OnResize(u32 width,u32 height)override;

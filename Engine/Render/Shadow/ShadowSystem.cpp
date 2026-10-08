@@ -97,6 +97,12 @@ void ShadowSystem::Update(const SubsystemContext& ctx){
 // Render — 用 Update 中缓存的数据分别渲染每个 Technique
 // ============================================================================
 
+void ShadowSystem::SetFrameSnapshot(const FrameSceneSnapshot& snapshot, const MeshRegistry& registry){
+    // 本帧快照与网格注册表：每帧无条件覆盖（与 Update 是否被调用无关）⇒ 不会留上一帧/上一槽的指针
+    m_CachedSnapshot = &snapshot;
+    m_CachedRegistry = &registry;
+}
+
 void ShadowSystem::Render(rhi::IRHICommandList* cmd){
     if(!m_Ready||!m_Enabled||!m_ActiveCount)return;
     if(!m_CachedSnapshot||!m_CachedRegistry)return;

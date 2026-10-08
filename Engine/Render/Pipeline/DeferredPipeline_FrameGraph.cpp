@@ -255,7 +255,10 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
         shadowWrites.push_back(RG_WRITE(gbDepth));
         shadowWrites.push_back(RG_WRITE(gbWorldPos));
 
-        rg.AddPass("Shadow", {}, std::move(shadowWrites),
+        // 【T2.4】无条件绑定本帧快照（见 IShadowSystem::SetFrameSnapshot 的说明）
+    if (m_ShadowSystem) m_ShadowSystem->SetFrameSnapshot(FrameSnap(), m_MeshRegistry);
+
+    rg.AddPass("Shadow", {}, std::move(shadowWrites),
             [this](rhi::IRHICommandList* c) {
                 u32 slot = m_CurrentFrameSlot;
                 // 切换到阴影专用 Object Buffer（binding 2），渲染完成后恢复

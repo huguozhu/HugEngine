@@ -76,7 +76,11 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera)
         // WAW 依赖：声明写入 hdrDepth 确保 Shadow → FullScene 的执行顺序
         shadowWrites.push_back(RG_WRITE(hdrDepth));
 
-        rg.AddPass("Shadow", {}, std::move(shadowWrites),
+        // 【T2.4】无条件把**本帧**快照交给阴影系统（不依赖"样例是否调过 Update"）⇒ `Render` 里
+    // 用的永远是本帧那一份（多飞行帧快照的前提）
+    if (m_ShadowSystem) m_ShadowSystem->SetFrameSnapshot(SnapBuf(), m_MeshRegistry);
+
+    rg.AddPass("Shadow", {}, std::move(shadowWrites),
             [this](rhi::IRHICommandList* c) {
                 // 切换描述符集 binding 2 到阴影专用 Object Buffer
                 // （仅更新 set=0 per-frame 集，per-mesh set=1 不包含 buffer 绑定）
