@@ -21,7 +21,6 @@ he::CVar<bool> cvLightPhysicalUnits("r.Light.PhysicalUnits", false,
 #include "SceneRenderer.h"
 #include "Scene/CubeComponent.h"
 #include "Scene/SphereComponent.h"
-#include "Scene/InstancedMeshComponent.h"
 #include "Scene/SkeletalMeshComponent.h"
 #include "Scene/SplineMeshComponent.h"
 #include "Scene/SkyboxComponent.h"
@@ -572,7 +571,12 @@ void ForwardPipeline::CollectLights(
     options.pointLightWritesDirection = true;
     options.normalizeSpotDirection    = false;
 
-    m_Snapshot.Clear();
+    // 【不要在收集光源时 `m_Snapshot.Clear()`（阶段 1 第①段修正）】
+    // 快照在同一帧内是**分步构建、分步消费**的：`BuildObjects`/`BuildInstances`/`BuildMaterials`
+    // 在本函数**之前**就已填好，而 `RenderScene` 的实例化与蒙皮循环在本函数**之后**才读它们。
+    // 旧代码在这里调 `Clear()`（当时的用意是"重建光源数组"），会把 `draws`/`skinMatrices`/
+    // `instances` 一起抹掉 —— 蒙皮有"退回组件"的兜底所以一直没暴露，实例化没有兜底，
+    // 直接表现为"实例一个都不画"。`BuildLights` 自己会 `out.lights.clear()`，故这里无需清理。
     const u32 lightCount = SceneSnapshotBuilder::BuildLights(world, sg, resolvers, m_Snapshot, options);
     pc.lightCount = lightCount;
 
@@ -897,6 +901,10 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
     // 本步只**构建**、尚无消费者读 `draws`，渲染结果不变；代价是每帧一次组件遍历（与既有遍历同量级）。
     SceneSnapshotBuilder::BuildObjects(world, sg, camera, {}, nullptr, m_Snapshot);
 
+    // 实例化网格（阶段 1 第①段 / §15.1）：实例变换按值进快照，渲染侧因此不再读 InstancedMeshComponent。
+    // 必须在 `RegisterMeshes`（回填 meshIndex）之后 —— 否则条目带的是"未注册"。
+    SceneSnapshotBuilder::BuildInstances(world, m_Snapshot);
+
     // 首帧构建之后按**实际规模自校准**预留一次容量：稳态下快照数组不再重分配。
     // 【为什么】`Reserve` 之前从未被调用 ⇒ 头几帧靠 vector 反复扩容；而"帧内不做分配"与
     // "帧内不做同步等待"是方案里的同一条纪律（分配会引入不可预期的耗时与锁竞争）。
@@ -905,7 +913,9 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
         m_Snapshot.Reserve(static_cast<u32>(m_Snapshot.draws.size()) * 2u + 64u,
                            static_cast<u32>(m_Snapshot.lights.size()) * 2u + 64u,
                            static_cast<u32>(m_Snapshot.skinMatrices.size()) * 2u + 256u,
-                           static_cast<u32>(m_Snapshot.particles.size()) * 2u + 8u);
+                           static_cast<u32>(m_Snapshot.particles.size()) * 2u + 8u,
+                           static_cast<u32>(m_Snapshot.instances.size()) * 2u + 8u,
+                           static_cast<u32>(m_Snapshot.instanceTransforms.size()) * 2u + 1024u);
         m_SnapshotReserved = true;
     }
 
@@ -1066,90 +1076,105 @@ void ForwardPipeline::RenderScene(
     UploadMaterialBindless();
 
     // ============================================================
-    // 实例化网格 Pass（B1）：脏标记 → 重建实例变换 SSBO → 注册 bindless
+    // 实例化网格 Pass（B1）：实例变换 → 实例 SSBO → 注册 bindless
     // 须在 Flush 之前注册（Flush 才把新 SSBO 句柄推送进描述符集）；
     // useInstanceID=2 模式，单次 DrawIndexed 渲染 N 个实例。
     // MVP 限制：Forward 非 GPU-Culling 路径；Deferred/间接路径后续扩展。
+    //
+    // 【阶段 1 第①段 / §15.1】数据来源改为**快照**：实例变换/开关/版本号按值带走，
+    // 顶点索引缓冲按 `meshIndex` 去注册表取，逐网格缓冲状态在 `InstanceCuller` 的实例状态表里
+    // ——渲染期因此不再遍历世界、也不再读 `InstancedMeshComponent`。
     // ============================================================
-    world.ForEach<he::InstancedMeshComponent>([&](he::Entity, he::InstancedMeshComponent& im) {
-        const u32 count = im.GetInstanceCount();
-        // 任务 23/25：实例变换上传（容量够就原地复用；退役队列有界延迟释放）
-        // —— 与 Deferred 的 GBuffer 路径共用同一份逻辑（InstanceCuller::UploadInstanceTransforms）
-        const u32 instHandle = m_InstanceCuller.UploadInstanceTransforms(m_Device, im);
-        if (count == 0 || im.GetIndexCount() == 0 || instHandle == 0) return;
-
-        // 定位该组件的对象条目（objectIndex → 材质数据）
-        u32 objIndex = 0;
-        bool found = false;
-        for (auto& di : filteredItems) {
-            // E-3：优先按 meshIndex 对齐对象条目（整数比较，不再依赖组件地址）；未注册（0）时兜底走地址比较
-        if ((im.meshIndex != 0u && im.meshIndex == di.meshIndex) ||
-            (im.meshIndex == 0u && di.mesh == static_cast<he::MeshComponent*>(&im))) { objIndex = di.objectIndex; found = true; break; }
-        }
-        if (!found) return;
-
-        // 实例化绘制（模式 2：VS 按 SV_InstanceID 取实例变换）
-        PushConstantData pc = framePC;
-        pc.objectIndex       = objIndex;
-        pc.useInstanceID     = 2;
-        pc.instanceSSBOHandle = im.instanceSSBOHandle;
-
-        // ── 任务 25：逐实例 GPU 视锥剔除 ──
-        // 开了 enableFrustumCull 就先把"每个实例的世界 AABB"过一遍六平面测试：
-        // 通过者压缩进可见列表，命令里的 instanceCount 由 GPU 原子累加；
-        // 绘制改成 DrawIndexedIndirect，顶点着色器按可见列表取实例变换。
-        // 关掉时保持原路径（整批实例一次 DrawIndexed），便于 A/B 对比。
-        bool useCull = im.enableFrustumCull && m_InstanceCuller.GetPSO() != nullptr;
+    m_InstanceCuller.BeginInstancesFrame(m_Device);   // 帧边界：推进退役队列 + 回收上帧未见的条目
+    {
         const u32 frameSlot = m_CurrentFrameSlot % rhi::kMaxFramesInFlight;
-        if (useCull) {
-            if (!im.instanceCullCmd[frameSlot]) {   // 命令缓冲按飞行帧存活（每帧都要一份）
-                im.instanceCullCmd[frameSlot] = m_InstanceCuller.CreateCommandBuffer(
-                    im.GetIndexCount(), 0, 0);
-                if (im.instanceCullCmd[frameSlot]) {
-                    im.instanceCullCmdHandle[frameSlot] =
-                        m_Device->GetBindlessHeap()->RegisterBuffer(im.instanceCullCmd[frameSlot].get());
+        for (const SnapshotInstance& si : m_Snapshot.instances) {
+            if (si.transformCount == 0u) continue;   // 无实例：跳过（旧路径同样跳过）
+            // 变换切片越界保护：快照损坏时宁可少画，也不要读越界内存
+            if (static_cast<usize>(si.transformOffset) + si.transformCount >
+                m_Snapshot.instanceTransforms.size()) continue;
+            const MeshRegistryEntry* me = m_MeshRegistry.Find(si.meshIndex);
+            if (!me || !me->vertexBuffer || !me->indexBuffer) continue;
+
+            // 定位该条目的对象条目（objectIndex → 材质数据）：按 meshIndex（整数）对齐
+            u32 objIndex = 0;
+            bool found = false;
+            for (auto& di : filteredItems) {
+                if (si.meshIndex != 0u && si.meshIndex == di.meshIndex) {
+                    objIndex = di.objectIndex; found = true; break;
                 }
             }
-            if (!im.instanceCullCmd[frameSlot] || im.instanceCullCmdHandle[frameSlot] == 0) {
-                useCull = false;   // 命令缓冲创建失败：安全回退整批绘制
+            if (!found) continue;
+
+            const u32 count = si.transformCount;
+            // 实例变换上传（容量够且版本未变 ⇒ 直接复用句柄；扩容时旧缓冲走有界退役）
+            const u32 instHandle = m_InstanceCuller.UploadInstanceTransforms(
+                m_Device, si.meshIndex, m_Snapshot.instanceTransforms.data() + si.transformOffset,
+                count, si.transformVersion, si.sourceEntity);
+            if (instHandle == 0) continue;
+            InstanceCuller::InstanceState* st = m_InstanceCuller.FindInstanceState(si.meshIndex);
+            if (!st) continue;
+
+            // 实例化绘制（模式 2：VS 按 SV_InstanceID 取实例变换）
+            PushConstantData pc = framePC;
+            pc.objectIndex        = objIndex;
+            pc.useInstanceID      = 2;
+            pc.instanceSSBOHandle = instHandle;
+
+            // ── 任务 25：逐实例 GPU 视锥剔除 ──
+            // 开了 enableFrustumCull 就先把"每个实例的世界 AABB"过一遍六平面测试：
+            // 通过者压缩进可见列表，命令里的 instanceCount 由 GPU 原子累加；
+            // 绘制改成 DrawIndexedIndirect，顶点着色器按可见列表取实例变换。
+            // 关掉时保持原路径（整批实例一次 DrawIndexed），便于 A/B 对比。
+            bool useCull = si.enableFrustumCull && m_InstanceCuller.GetPSO() != nullptr;
+            if (useCull) {
+                if (!st->cullCmd[frameSlot]) {   // 命令缓冲按飞行帧存活（每帧都要一份）
+                    st->cullCmd[frameSlot] = m_InstanceCuller.CreateCommandBuffer(me->indexCount, 0, 0);
+                    if (st->cullCmd[frameSlot]) {
+                        st->cullCmdHandle[frameSlot] =
+                            m_Device->GetBindlessHeap()->RegisterBuffer(st->cullCmd[frameSlot].get());
+                    }
+                }
+                if (!st->cullCmd[frameSlot] || st->cullCmdHandle[frameSlot] == 0) {
+                    useCull = false;   // 命令缓冲创建失败：安全回退整批绘制
+                }
             }
-        }
 
-        if (useCull) {
-            // 实例网格的局部包围盒（内置立方体 = ±0.5；glTF 资产走组件包围盒）
-            const AABB lb = im.GetBounds();
-            const u32 prevVisible = m_InstanceCuller.Cull(
-                cmd, im.instanceBuffer.get(), im.instanceSSBOHandle,
-                im.instanceCullCmd[frameSlot].get(), im.instanceCullCmdHandle[frameSlot],
-                count, frameSlot, lb.min, lb.max, framePC.viewProjMatrix);
+            if (useCull) {
+                // 实例网格的局部包围盒（快照按网格烤好：内置立方体 = ±0.5；glTF 资产走组件包围盒）
+                const u32 prevVisible = m_InstanceCuller.Cull(
+                    cmd, st->buffer.get(), st->ssboHandle,
+                    st->cullCmd[frameSlot].get(), st->cullCmdHandle[frameSlot],
+                    count, frameSlot, si.localBoundsMin, si.localBoundsMax, framePC.viewProjMatrix);
 
-            pc.instanceVisibleHandle = m_InstanceCuller.GetVisibleIndicesHandle(frameSlot);
+                pc.instanceVisibleHandle = m_InstanceCuller.GetVisibleIndicesHandle(frameSlot);
+                cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[m_CurrentFrameSlot]);
+                cmd->SetDrawDebugLabel("Forward InstancedMesh (逐实例剔除)");
+                cmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
+                cmd->SetVertexBuffer(me->vertexBuffer, 0);
+                cmd->SetIndexBuffer(me->indexBuffer);
+                // 一条命令、stride 20（VkDrawIndexedIndirectCommand）：instanceCount 由 cull 写入
+                cmd->DrawIndexedIndirect(st->cullCmd[frameSlot].get(), 0, 1,
+                                         sizeof(InstanceIndirectCommand));
+                // 读回统计（上一帧 GPU 写入的值；仅用于面板/日志）
+                st->visibleInstanceCount = prevVisible;
+                drawCount += prevVisible;
+                ++culledInstanceMeshes;
+                culledInstances += prevVisible;
+                totalInstances += count;
+                continue;
+            }
+
+            pc.instanceVisibleHandle = 0;
             cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[m_CurrentFrameSlot]);
-            cmd->SetDrawDebugLabel("Forward InstancedMesh (逐实例剔除)");
+            cmd->SetDrawDebugLabel("Forward InstancedMesh");
             cmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
-            cmd->SetVertexBuffer(im.GetVertexBuffer().get(), 0);
-            cmd->SetIndexBuffer(im.GetIndexBuffer().get());
-            // 一条命令、stride 20（VkDrawIndexedIndirectCommand）：instanceCount 由 cull 写入
-            cmd->DrawIndexedIndirect(im.instanceCullCmd[frameSlot].get(), 0, 1,
-                                     sizeof(InstanceIndirectCommand));
-            // 读回统计（上一帧 GPU 写入的值；仅用于面板/日志）
-            im.visibleInstanceCount = prevVisible;
-            drawCount += prevVisible;
-            ++culledInstanceMeshes;
-            culledInstances += prevVisible;
-            totalInstances += count;
-            return;
+            cmd->SetVertexBuffer(me->vertexBuffer, 0);
+            cmd->SetIndexBuffer(me->indexBuffer);
+            cmd->DrawIndexed(me->indexCount, count);
+            drawCount += count;   // 实例计入绘制统计
         }
-
-        pc.instanceVisibleHandle = 0;
-        cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSets[m_CurrentFrameSlot]);
-        cmd->SetDrawDebugLabel("Forward InstancedMesh");
-        cmd->SetPushConstants(0, sizeof(PushConstantData), &pc);
-        cmd->SetVertexBuffer(im.GetVertexBuffer().get(), 0);
-        cmd->SetIndexBuffer(im.GetIndexBuffer().get());
-        cmd->DrawIndexed(im.GetIndexCount(), count);
-        drawCount += count;   // 实例计入绘制统计
-    });
+    }
 
     // ============================================================
     // 骨骼蒙皮 Pass（Phase C C1b）：骨骼矩阵 SSBO 上传（脏标记）

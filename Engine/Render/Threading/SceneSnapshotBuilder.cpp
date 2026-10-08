@@ -305,6 +305,33 @@ u32 SceneSnapshotBuilder::RegisterMeshes(he::World& world, MeshRegistry& registr
     return count;
 }
 
+u32 SceneSnapshotBuilder::BuildInstances(he::World& world, FrameSceneSnapshot& out) {
+    out.instances.clear();
+    out.instanceTransforms.clear();
+
+    world.ForEach<InstancedMeshComponent>([&](he::Entity e, InstancedMeshComponent& im) {
+        SnapshotInstance item;
+        // `meshIndex` 由 `RegisterMeshes` 回填（调用方必须先注册）；0 = 未注册，
+        // 消费侧 `MeshRegistry::Find(0)` 返回空并跳过 —— 可见化，而不是指错资源。
+        item.meshIndex        = im.meshIndex;
+        item.transformOffset  = static_cast<u32>(out.instanceTransforms.size());
+        item.transformCount   = static_cast<u32>(im.instanceTransforms.size());
+        item.transformVersion = im.instanceTransformVersion;
+        item.enableFrustumCull = im.enableFrustumCull;
+        // 局部包围盒（逐实例剔除 shader 的输入）：数据源是网格几何，与实例变换无关，
+        // 因此可以按网格烤进快照 —— 渲染侧不必再去问组件。
+        const he::AABB lb = im.GetBounds();
+        item.localBoundsMin = lb.min;
+        item.localBoundsMax = lb.max;
+        item.sourceEntity   = e.id;   // 渲染侧状态表识别"索引复用后的新网格"用
+
+        out.instanceTransforms.insert(out.instanceTransforms.end(),
+                                      im.instanceTransforms.begin(), im.instanceTransforms.end());
+        out.instances.push_back(item);
+    });
+    return static_cast<u32>(out.instances.size());
+}
+
 u32 SceneSnapshotBuilder::BuildParticles(he::World& world, FrameSceneSnapshot& out) {
     out.particles.clear();
     world.ForEach<he::ParticleComponent>([&](he::Entity, he::ParticleComponent& pc) {

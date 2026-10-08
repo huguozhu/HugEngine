@@ -20,9 +20,12 @@
 #include "Scene/PhysicalSkyComponent.h"   // 环境（太阳方向/浑浊度）进快照的用例
 #include "Scene/ParticleComponent.h"      // 粒子发射器进快照的用例
 #include "Scene/SkeletalMeshComponent.h"  // 蒙皮矩阵进快照的用例
+#include "Scene/InstancedMeshComponent.h" // 阶段 1 第①段：实例化网格进快照的用例
 #include "Scene/SceneGraph.h"
 #include "Scene/Transform.h"
 #include "Scene/World.h"
+
+#include <cstring>   // memcmp（实例变换切片的"逐位一致"判据）
 
 #include <doctest/doctest.h>
 
@@ -674,6 +677,66 @@ TEST_CASE("SceneSnapshotBuilder：骨骼矩阵进快照的扁平数组（T1.4）
     SceneSnapshotBuilder::AppendSkinMatrices(c, empty, snap2);
     CHECK(c.skinMatrixCount == 0u);
     CHECK(snap2.skinMatrices.empty());
+}
+
+TEST_CASE("SceneSnapshotBuilder：实例化网格进快照（阶段 1 第①段）") {
+    LightWorld lw;
+    FrameSceneSnapshot snap;
+
+    // 空世界：0 条
+    CHECK(SceneSnapshotBuilder::BuildInstances(lw.world, snap) == 0u);
+    CHECK(snap.instances.empty());
+
+    const Entity e0 = lw.AddEntity("im0", float3(1.0f, 0.0f, 0.0f));
+    const Entity e1 = lw.AddEntity("im1", float3(-2.0f, 0.0f, 0.0f));
+    auto* im0 = lw.world.AddComponent<he::InstancedMeshComponent>(e0);
+    auto* im1 = lw.world.AddComponent<he::InstancedMeshComponent>(e1);
+    // `meshIndex` 平时由 `RegisterMeshes` 回填；本用例直接给值，把"遍历 + 切片 + 版本号"这段
+    // 单独钉住（注册表语义另有 TestMeshRegistry.cpp 覆盖）
+    im0->meshIndex = 5u;
+    im1->meshIndex = 6u;
+    im0->enableFrustumCull = true;
+
+    std::vector<float4x4> a;
+    for (int i = 0; i < 3; ++i) { float4x4 m(1.0f); m[3].x = (float)i;        a.push_back(m); }
+    std::vector<float4x4> b;
+    for (int i = 0; i < 2; ++i) { float4x4 m(1.0f); m[3].x = 100.0f + (float)i; b.push_back(m); }
+    im0->SetInstanceTransforms(a);   // 版本号 → 1
+    im1->SetInstanceTransforms(b);
+
+    CHECK(SceneSnapshotBuilder::BuildInstances(lw.world, snap) == 2u);
+    REQUIRE(snap.instances.size() == 2u);
+    REQUIRE(snap.instanceTransforms.size() == 5u);
+
+    // 切片：两段紧接、不覆盖（与 skinMatrices 同款；快照里不放容器嵌套）
+    CHECK(snap.instances[0].transformOffset == 0u);
+    CHECK(snap.instances[0].transformCount == 3u);
+    CHECK(snap.instances[0].meshIndex == 5u);
+    CHECK(snap.instances[0].transformVersion == 1u);
+    CHECK(snap.instances[0].enableFrustumCull == true);
+    CHECK(snap.instances[0].sourceEntity == e0.id);   // 渲染侧状态表识别索引复用用
+    CHECK(snap.instances[1].transformOffset == 3u);
+    CHECK(snap.instances[1].transformCount == 2u);
+    CHECK(snap.instances[1].transformVersion == 1u);
+    CHECK(snap.instances[1].enableFrustumCull == false);
+    // 局部包围盒（逐实例剔除 shader 的输入）：内置单位立方体 = ±0.5
+    CHECK(snap.instances[0].localBoundsMin.x == doctest::Approx(-0.5f));
+    CHECK(snap.instances[0].localBoundsMax.y == doctest::Approx(0.5f));
+
+    // 【迁移判据：逐位一致】快照切片必须与组件里的数组**完全相同** ——
+    // 这一步只搬"数据从哪里来"，不许改任何一个矩阵（搬家不改数）
+    CHECK(std::memcmp(snap.instanceTransforms.data(), a.data(),
+                      a.size() * sizeof(float4x4)) == 0);
+    CHECK(std::memcmp(snap.instanceTransforms.data() + 3, b.data(),
+                      b.size() * sizeof(float4x4)) == 0);
+
+    // 清空实例的组件**仍要落条目**（渲染侧靠"本帧又见到这个 meshIndex"回收缓冲与 bindless 槽位），
+    // 且版本号递增 ⇒ 渲染侧据此重传（否则会继续按旧变换画出上一帧的实例）
+    im0->SetInstanceTransforms({});
+    CHECK(SceneSnapshotBuilder::BuildInstances(lw.world, snap) == 2u);
+    CHECK(snap.instances[0].transformCount == 0u);
+    CHECK(snap.instances[0].transformVersion == 2u);
+    CHECK(snap.instanceTransforms.size() == 2u);   // 只剩 im1 的两个
 }
 
 TEST_CASE("SceneSnapshotBuilder：粒子发射器进快照（T1.4）") {

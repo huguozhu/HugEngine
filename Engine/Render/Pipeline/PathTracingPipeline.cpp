@@ -301,7 +301,9 @@ void PathTracingPipeline::CollectLights(he::World& world, he::SceneGraph& sg,
     SceneSnapshotLightOptions options;
     options.writeShadowRadius = true;
 
-    m_Snapshot.Clear();
+    // 【不要在收集光源时 `m_Snapshot.Clear()`（阶段 1 第①段修正，与 Forward/Deferred 对称）】
+    // 快照在同一帧内分步构建、分步消费；`Clear()` 会连带抹掉本帧已填好的物体/实例/粒子数组，
+    // 而它们在本函数之后还要被消费。`BuildLights` 自己会 `out.lights.clear()`，故这里无需清理。
     outLightCount = SceneSnapshotBuilder::BuildLights(world, sg, resolvers, m_Snapshot, options);
     if (outLightCount == 0u) return;
 

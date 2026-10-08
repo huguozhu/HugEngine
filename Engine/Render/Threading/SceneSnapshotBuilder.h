@@ -189,6 +189,18 @@ public:
     /// @return 是否找到可用天空盒
     static bool BuildSkybox(he::World& world, FrameSceneSnapshot& out);
 
+    // ── 实例化网格（阶段 1 第①段 / §15.1）────────────────────────
+
+    /// 收集实例化网格：把**实例变换**（扁平数组 + 切片）与绘制所需的开关/局部 AABB/版本号
+    /// 按值带进快照，渲染侧因此不必再遍历 `InstancedMeshComponent`。
+    /// 【必须包含实例数为 0 的组件】渲染侧靠"本帧又见到这个 meshIndex"回收已销毁组件留下的
+    /// 缓冲与 bindless 槽位（见 `InstanceCuller::BeginInstancesFrame`）；只收集非空组件会让
+    /// 空的（或刚被清空的）组件的状态悬挂。
+    /// 【调用顺序】必须在 `RegisterMeshes`（回填 `meshIndex`）之后 —— 否则条目带的是 0（未注册）。
+    /// 每次调用清空重填（逐帧复用安全）。
+    /// @return 条目数（= 世界里的实例化网格组件数）
+    static u32 BuildInstances(he::World& world, FrameSceneSnapshot& out);
+
     // ── 网格注册（附录 E / E-2①，唯一实现）──────────────────────
 
     /// 把世界中**所有**可绘制网格组件登记/更新进注册表，并回填组件上的 `meshIndex`。

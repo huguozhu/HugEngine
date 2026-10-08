@@ -81,7 +81,8 @@ TEST_CASE("FrameSceneSnapshot：整份移动后内容不丢（交接语义）") 
 
 TEST_CASE("FrameSceneSnapshot：Clear 保留容量，可逐帧复用") {
     FrameSceneSnapshot snap;
-    snap.Reserve(64u, 16u, 8u);
+    // 阶段 1 第①段：实例条目与实例变换也参与预留（万级 float4x4 逐帧重分配代价明显）
+    snap.Reserve(64u, 16u, 8u, 4u, 2u, 128u);
 
     for (int frame = 0; frame < 3; ++frame) {
         snap.Clear();                                  // 每帧开头复用
@@ -89,12 +90,18 @@ TEST_CASE("FrameSceneSnapshot：Clear 保留容量，可逐帧复用") {
         for (u32 i = 0; i < 64u; ++i) snap.draws.push_back(SnapshotDrawItem{});
         for (u32 i = 0; i < 16u; ++i) snap.lights.push_back(SnapshotLight{});
         for (u32 i = 0; i < 8u; ++i)  snap.skinMatrices.push_back(float4x4(1.0f));
+        snap.instances.push_back(SnapshotInstance{});
+        snap.instanceTransforms.push_back(float4x4(1.0f));
         CHECK(snap.draws.size() == 64u);
     }
     CHECK(snap.draws.capacity() >= 64u);               // 容量保留（没有反复分配）
+    CHECK(snap.instanceTransforms.capacity() >= 128u);
     snap.Clear();
     CHECK(snap.draws.empty());
     CHECK(snap.draws.capacity() >= 64u);
+    CHECK(snap.instances.empty());
+    CHECK(snap.instanceTransforms.empty());
+    CHECK(snap.instanceTransforms.capacity() >= 128u);
     CHECK(snap.IsEmpty());
 }
 
@@ -112,4 +119,32 @@ TEST_CASE("FrameSceneSnapshot：元素可平凡拷贝（渲染线程整块上传
     CHECK(dst.object.boundsMin.y == -2.0f);
     CHECK(dst.prevWorldMatrix[1][1] == 3.0f);
     CHECK(std::memcmp(&src, &dst, sizeof(SnapshotDrawItem)) == 0);
+}
+
+TEST_CASE("FrameSceneSnapshot：实例条目是纯值类型（阶段 1 第①段）") {
+    // 快照硬约束：元素只能带值/索引，**不得带指针** —— 实例条目必须是可平凡拷贝的纯值，
+    // 否则"交接后只读"就无从谈起（渲染线程仍会顺着指针读世界）。
+    static_assert(std::is_trivially_copyable_v<SnapshotInstance>,
+                  "SnapshotInstance 必须是纯值类型（不含指针，可平凡拷贝）");
+
+    SnapshotInstance src;
+    src.meshIndex        = 7u;
+    src.transformOffset  = 128u;
+    src.transformCount   = 10000u;
+    src.transformVersion = 3u;
+    src.enableFrustumCull = true;
+    src.localBoundsMin   = float3(-0.5f);
+    src.localBoundsMax   = float3(0.5f);
+    src.sourceEntity     = 42u;
+
+    SnapshotInstance dst;
+    std::memcpy(&dst, &src, sizeof(SnapshotInstance));
+    CHECK(dst.meshIndex == 7u);
+    CHECK(dst.transformOffset == 128u);
+    CHECK(dst.transformCount == 10000u);
+    CHECK(dst.transformVersion == 3u);
+    CHECK(dst.enableFrustumCull == true);
+    CHECK(dst.localBoundsMax.z == 0.5f);
+    CHECK(dst.sourceEntity == 42u);
+    CHECK(std::memcmp(&src, &dst, sizeof(SnapshotInstance)) == 0);
 }

@@ -15,6 +15,7 @@ public:
     bool Initialize(GBufferContext& ctx) override;
     void Shutdown() override;
     void Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
+                const FrameSceneSnapshot& snapshot,
                 he::World& world, he::SceneGraph& sg,
                 const CameraData& camera) override;
 };

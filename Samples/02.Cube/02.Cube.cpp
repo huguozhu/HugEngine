@@ -1126,10 +1126,15 @@ int main() {
 
                 static u32 s_UpdateCount = 0;
                 if (++s_UpdateCount % 300 == 0) {
+                    // 阶段 1 第①段（§15.1）：实例缓冲状态已从组件搬到渲染侧的状态表
+                    //（`InstanceCuller::InstanceState`），组件不再暴露句柄/容量/退役数 ⇒
+                    // 统计改为向**当前管线**的剔除器取只读快照（数值含义与原来逐字段一致）。
+                    const auto st = (cvPipelineMode.Get() == 0)
+                        ? forwardPipeline.GetInstanceCuller().GetInstanceStats(im->meshIndex)
+                        : deferredPipeline.GetInstanceCuller().GetInstanceStats(im->meshIndex);
                     HE_CORE_INFO("[任务 23] 实例变换已连续更新 {} 帧：SSBO 句柄 {}（容量 {}），"
                                  "退役缓冲 {}（原地复用，未新建）",
-                                 s_UpdateCount, im->instanceSSBOHandle,
-                                 im->GetInstanceBufferCapacity(), im->GetRetiredBufferCount());
+                                 s_UpdateCount, st.ssboHandle, st.capacity, st.retired);
                 }
             }
         }
@@ -1159,13 +1164,16 @@ int main() {
             static u32 s_LastLogged   = 0;
             if (++s_FrameCounter - s_LastLogged >= 300) {
                 s_LastLogged = s_FrameCounter;
-                // 统计直接从组件读（Forward 与 Deferred 两条路径共用同一套逐实例剔除机制）
+                // 统计走渲染侧状态表（阶段 1 第①段：组件不再保存可见实例数）
                 u32 meshCount = 0, total = 0, visible = 0;
                 world.ForEach<he::InstancedMeshComponent>([&](he::Entity, he::InstancedMeshComponent& im) {
                     if (im.GetInstanceCount() == 0 || !im.enableFrustumCull) return;
                     ++meshCount;
                     total   += im.GetInstanceCount();
-                    visible += im.visibleInstanceCount;
+                    const auto st = (cvPipelineMode.Get() == 0)
+                        ? forwardPipeline.GetInstanceCuller().GetInstanceStats(im.meshIndex)
+                        : deferredPipeline.GetInstanceCuller().GetInstanceStats(im.meshIndex);
+                    visible += st.visibleCount;
                 });
                 if (total > 0) {
                     // CPU 参考：同一视锥平面、同一"局部盒 8 角变换求世界 AABB"逻辑
@@ -1344,13 +1352,17 @@ int main() {
             // 任务 23：打开后每帧写 10000 个实例变换（验证 SSBO 原地复用、槽位不涨）
             ImGui::Checkbox("每帧更新实例变换 (任务 23)", &demoInstanceUpdate);
             ImGui::SameLine();
-            ImGui::TextDisabled("句柄 %u / 容量 %u / 退役 %u", im->instanceSSBOHandle,
-                                im->GetInstanceBufferCapacity(), im->GetRetiredBufferCount());
+            // 阶段 1 第①段（§15.1）：句柄/容量/退役数改由渲染侧状态表提供（组件上已无这些状态）
+            const auto instStats = (cvPipelineMode.Get() == 0)
+                ? forwardPipeline.GetInstanceCuller().GetInstanceStats(im->meshIndex)
+                : deferredPipeline.GetInstanceCuller().GetInstanceStats(im->meshIndex);
+            ImGui::TextDisabled("句柄 %u / 容量 %u / 退役 %u", instStats.ssboHandle,
+                                instStats.capacity, instStats.retired);
 
             // 任务 25：逐实例 GPU 视锥剔除开关与统计（可见实例数来自间接命令，滞后一帧）
             ImGui::Checkbox("逐实例 GPU 剔除 (任务 25)", &im->enableFrustumCull);
             ImGui::SameLine();
-            ImGui::TextDisabled("可见 %u / %u 实例", im->visibleInstanceCount, im->GetInstanceCount());
+            ImGui::TextDisabled("可见 %u / %u 实例", instStats.visibleCount, im->GetInstanceCount());
         }
 
         // 骨骼网格演示状态（C1c）

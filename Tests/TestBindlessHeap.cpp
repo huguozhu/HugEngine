@@ -14,6 +14,8 @@
 #include "Scene/TextRenderComponent.h"
 #include "Scene/InstancedMeshComponent.h"
 #include "Scene/SkeletalMeshComponent.h"
+// 阶段 1 第①段：实例缓冲的退役队列已从组件搬到渲染侧的实例状态表（只用其类型，不调用成员函数）
+#include "Pipeline/InstanceCuller.h"
 #include "RHI/BindlessSlotRing.h"
 #include "RHI/FrameRetireQueue.h"
 
@@ -221,41 +223,58 @@ TEST_CASE("TextRender 组件：高频重建纹理时退役有界、旧纹理真�
     CHECK(Queue::kSlots == rhi::kMaxFramesInFlight * 2);
 }
 
-TEST_CASE("InstancedMesh / SkeletalMesh 组件：缓冲退役有界、旧缓冲真的被释放") {
+TEST_CASE("SkeletalMesh 组件：骨骼缓冲退役有界、旧缓冲真的被释放") {
     using BufferQueue = FrameRetireQueue<std::unique_ptr<rhi::IRHIBuffer>>;
     World world;
 
-    Entity e1 = world.CreateEntity("IM");
-    auto* im = world.AddComponent<InstancedMeshComponent>(e1);
-    Entity e2 = world.CreateEntity("SM");
-    auto* sm = world.AddComponent<SkeletalMeshComponent>(e2);
-    REQUIRE(im != nullptr);
+    Entity e = world.CreateEntity("SM");
+    auto* sm = world.AddComponent<SkeletalMeshComponent>(e);
     REQUIRE(sm != nullptr);
 
     int alive = 0;
     u32 maxPending = 0;
     int maxAlive = 0;
     for (int i = 0; i < 50; ++i) {            // 模拟 50 次"扩容重建"
-        im->AdvanceRetireQueue();
         sm->AdvanceRetireQueue();
-        im->RetireInstanceBuffer();
         sm->RetireBoneBuffer();
-        im->instanceBuffer = std::make_unique<MockBuffer>(&alive);
-        sm->boneBuffer     = std::make_unique<MockBuffer>(&alive);
-        im->instanceBufferCapacity = 8;
-        sm->boneBufferCapacity     = 24;
-        im->instanceSSBOHandle = 3;
+        sm->boneBuffer         = std::make_unique<MockBuffer>(&alive);
+        sm->boneBufferCapacity = 24;
         sm->boneSSBOHandle     = 5;
-        maxPending = std::max(maxPending, im->GetRetiredBufferCount());
+        maxPending = std::max(maxPending, sm->retiredBoneBuffers.GetPendingCount());
         maxAlive   = std::max(maxAlive, alive);
     }
     CHECK(maxPending <= BufferQueue::kSlots);
-    CHECK(maxAlive <= (int)BufferQueue::kSlots * 2 + 2);      // 两个组件的当前 + 队列
-    im->retiredBuffers.FlushAll();                            // 立即释放（GPU 已 idle）
-    sm->retiredBoneBuffers.FlushAll();
-    CHECK(alive == 2);                                        // 各自只剩当前缓冲
-    CHECK(im->GetInstanceBufferCapacity() == 8);
+    CHECK(maxAlive <= (int)BufferQueue::kSlots + 1);          // 当前 + 队列
+    sm->retiredBoneBuffers.FlushAll();                        // 立即释放（GPU 已 idle）
+    CHECK(alive == 1);                                        // 只剩当前缓冲
     CHECK(sm->boneBufferCapacity == 24);
-    CHECK(im->instanceSSBOHandle == 3);                       // 复用容量时句柄保持不变
-    CHECK(sm->boneSSBOHandle == 5);
+    CHECK(sm->boneSSBOHandle == 5);                           // 复用容量时句柄保持不变
+}
+
+TEST_CASE("实例缓冲（渲染侧实例状态表）：退役有界、旧缓冲真的被释放") {
+    // 阶段 1 第①段（§15.1）：实例缓冲的退役队列原先挂在 `InstancedMeshComponent` 上，
+    // 现已搬到渲染侧的 `InstanceCuller::InstanceState`（按 meshIndex 索引的渲染资源）。
+    // 判据不变：**有界** N 帧延迟释放 + 旧缓冲真的被析构（不是无界保活）。
+    using BufferQueue = FrameRetireQueue<std::unique_ptr<rhi::IRHIBuffer>>;
+    he::render::InstanceCuller::InstanceState st;
+
+    int alive = 0;
+    u32 maxPending = 0;
+    int maxAlive = 0;
+    for (int i = 0; i < 50; ++i) {            // 模拟 50 次"扩容重建"
+        st.retired.Advance();                 // 帧边界推进（`BeginInstancesFrame` 每帧调用）
+        if (st.buffer) st.retired.Retire(std::move(st.buffer));   // 旧缓冲退役（原先：无界保活）
+        st.buffer     = std::make_unique<MockBuffer>(&alive);
+        st.capacity   = 8;
+        st.ssboHandle = 3;                    // 复用容量时句柄保持不变
+        maxPending = std::max(maxPending, st.retired.GetPendingCount());
+        maxAlive   = std::max(maxAlive, alive);
+    }
+    CHECK(maxPending <= BufferQueue::kSlots);                 // 待释放有界
+    CHECK(maxAlive <= (int)BufferQueue::kSlots + 1);          // 当前 + 队列
+    CHECK(alive > 1);                                         // 队列里还压着"保护期内"的旧缓冲
+    st.retired.FlushAll();                                    // 立即释放（GPU 已 idle）
+    CHECK(alive == 1);                                        // 只剩当前缓冲
+    CHECK(st.capacity == 8);
+    CHECK(st.ssboHandle == 3);
 }

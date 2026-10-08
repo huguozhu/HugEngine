@@ -1,8 +1,8 @@
 // Pipeline/GBufferRenderer_CPU.cpp — CPU Driven GBuffer 渲染
 // 从 DeferredPipeline::BuildFrameGraph 提取的逐对象绘制逻辑
 #include "Pipeline/GBufferRenderer_CPU.h"
-#include "Pipeline/InstanceCuller.h"   // 任务 25：逐实例剔除
-#include "Scene/InstancedMeshComponent.h"
+#include "Pipeline/InstanceCuller.h"   // 任务 25：逐实例剔除（状态表也在它这里）
+#include "Threading/MeshRegistry.h"    // 阶段 1 第①段：按 meshIndex 取顶点/索引缓冲
 #include "Scene/MeshComponent.h"
 #include "Scene/World.h"
 #include "Core/Log.h"
@@ -21,6 +21,7 @@ void GBufferRenderer_CPU::Shutdown() {
 }
 
 void GBufferRenderer_CPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
+                                  const FrameSceneSnapshot& snapshot,
                                   he::World& world, he::SceneGraph& sg,
                                   const CameraData& camera) {
     u32 w = ctx.width, h = ctx.height;
@@ -128,89 +129,102 @@ void GBufferRenderer_CPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
     // ── 实例化网格（任务 25）：逐实例剔除 + 间接绘制 ──
     // 与 Forward 路径同一套机制：本组件的实例变换过六平面测试 → 可见列表 + 命令计数 →
     // DrawIndexedIndirect + SV_InstanceID 查可见列表。
-    world.ForEach<he::InstancedMeshComponent>([&](he::Entity, he::InstancedMeshComponent& im) {
-        if (im.GetInstanceCount() == 0 || im.GetIndexCount() == 0) return;
-        // 定位对象条目（材质/世界变换），与 Forward 一致：一个对象条目服务 N 个实例
-        u32 objIndex = 0;
-        bool found = false;
-        for (auto& di : filteredItems) {
-            // E-3②：优先按 meshIndex（整数）对齐对象条目；未注册（0）时兜底地址比较
-            if ((im.meshIndex != 0u && im.meshIndex == di.meshIndex) ||
-                (im.meshIndex == 0u && di.mesh == static_cast<he::MeshComponent*>(&im))) {
-                objIndex = di.objectIndex; found = true; break;
-            }
-        }
-        if (!found) return;
+    // 【阶段 1 第①段 / §15.1】数据来源改为**快照**：实例变换/开关/版本号按值带走，顶点与索引缓冲
+    // 按 `meshIndex` 去注册表取，逐网格的 GPU 缓冲状态在 `InstanceCuller` 的实例状态表里 ——
+    // 渲染期因此不再遍历世界、也不再读 `InstancedMeshComponent`。
+    if (ctx.instanceCuller) {
+        ctx.instanceCuller->BeginInstancesFrame(ctx.device);   // 帧边界：推进退役队列 + 回收上帧未见的条目
+        const u32 slot = ctx.frameSlot % rhi::kMaxFramesInFlight;
 
-        const u32 count = im.GetInstanceCount();
-        const u32 slot  = ctx.frameSlot % rhi::kMaxFramesInFlight;
+        for (const SnapshotInstance& si : snapshot.instances) {
+            if (si.transformCount == 0u) continue;             // 无实例：跳过（旧路径同样跳过）
+            // 变换切片越界保护：快照损坏时宁可少画，也不要读越界内存
+            if (static_cast<usize>(si.transformOffset) + si.transformCount >
+                snapshot.instanceTransforms.size()) continue;
+            const MeshRegistryEntry* me = ctx.meshRegistry ? ctx.meshRegistry->Find(si.meshIndex) : nullptr;
+            if (!me || !me->vertexBuffer || !me->indexBuffer) continue;   // 未注册/已注销：跳过
 
-        // 实例变换上传（与 Forward 路径共用同一份逻辑）：容量够就原地复用
-        const u32 instHandle = ctx.instanceCuller
-                             ? ctx.instanceCuller->UploadInstanceTransforms(ctx.device, im)
-                             : 0;
-        if (instHandle == 0) return;
-
-        struct {
-            float4x4 viewProjMatrix;
-            float4x4 prevViewProjMatrix;
-            u32      objectIndex;
-            u32      useInstanceID;
-            u32      instanceSSBOHandle;
-            u32      instanceVisibleHandle;
-            u32      _pad[12];
-        } pc;
-        pc.viewProjMatrix        = jitteredVP;
-        pc.prevViewProjMatrix    = ctx.prevViewProj;
-        pc.objectIndex           = objIndex;
-        pc.useInstanceID         = 2;
-        pc.instanceSSBOHandle    = im.instanceSSBOHandle;
-        pc.instanceVisibleHandle = 0;
-
-        // 逐实例剔除（仅在开关打开 + 剔除器可用时；否则整批绘制，行为与原 MVP 一致）
-        bool useCull = im.enableFrustumCull && ctx.instanceCuller && ctx.instanceCuller->GetPSO();
-        if (useCull) {
-            if (!im.instanceCullCmd[slot]) {
-                im.instanceCullCmd[slot] = ctx.instanceCuller->CreateCommandBuffer(im.GetIndexCount(), 0, 0);
-                if (im.instanceCullCmd[slot]) {
-                    im.instanceCullCmdHandle[slot] =
-                        ctx.device->GetBindlessHeap()->RegisterBuffer(im.instanceCullCmd[slot].get());
+            // 定位对象条目（材质/世界变换），与 Forward 一致：一个对象条目服务 N 个实例
+            u32 objIndex = 0;
+            bool found = false;
+            for (auto& di : filteredItems) {
+                // E-3②：按 meshIndex（整数）对齐对象条目 —— 组件地址比较已随组件指针一起退出
+                if (si.meshIndex != 0u && si.meshIndex == di.meshIndex) {
+                    objIndex = di.objectIndex; found = true; break;
                 }
             }
-            if (!im.instanceCullCmd[slot] || im.instanceCullCmdHandle[slot] == 0) useCull = false;
-        }
-        if (useCull) {
-            const AABB lb = im.GetBounds();
-            const u32 prevVisible = ctx.instanceCuller->Cull(
-                cmd, im.instanceBuffer.get(), im.instanceSSBOHandle,
-                im.instanceCullCmd[slot].get(), im.instanceCullCmdHandle[slot],
-                count, slot, lb.min, lb.max, jitteredVP);
-            pc.instanceVisibleHandle = ctx.instanceCuller->GetVisibleIndicesHandle(slot);
-            // 首帧诊断：确认 Deferred 这条路径确实进来并拿到有效句柄
-            static bool s_DbgOnce = false;
-            if (!s_DbgOnce) {
-                s_DbgOnce = true;
-                HE_CORE_INFO("[任务 25] Deferred 实例化绘制首帧：实例 {}（对象 #{}），剔除槽 {}，"
-                             "实例 SSBO 句柄 {}，命令句柄 {}，可见列表句柄 {}，上次可见 {}",
-                             count, objIndex, slot, im.instanceSSBOHandle,
-                             im.instanceCullCmdHandle[slot], pc.instanceVisibleHandle, prevVisible);
-            }
-            cmd->SetDrawDebugLabel("GBuffer InstancedMesh (逐实例剔除)");
-            cmd->SetPushConstants(0, sizeof(pc), &pc);
-            cmd->SetVertexBuffer(im.GetVertexBuffer().get(), 0);
-            cmd->SetIndexBuffer(im.GetIndexBuffer().get());
-            cmd->DrawIndexedIndirect(im.instanceCullCmd[slot].get(), 0, 1,
-                                     sizeof(InstanceIndirectCommand));
-            im.visibleInstanceCount = prevVisible;
-            return;
-        }
+            if (!found) continue;
 
-        cmd->SetDrawDebugLabel("GBuffer InstancedMesh");
-        cmd->SetPushConstants(0, sizeof(pc), &pc);
-        cmd->SetVertexBuffer(im.GetVertexBuffer().get(), 0);
-        cmd->SetIndexBuffer(im.GetIndexBuffer().get());
-        cmd->DrawIndexed(im.GetIndexCount(), count);
-    });
+            const u32 count = si.transformCount;
+            // 实例变换上传（状态在渲染侧：容量够且版本未变 ⇒ 直接复用句柄）
+            const u32 instHandle = ctx.instanceCuller->UploadInstanceTransforms(
+                ctx.device, si.meshIndex,
+                snapshot.instanceTransforms.data() + si.transformOffset,
+                count, si.transformVersion, si.sourceEntity);
+            if (instHandle == 0) continue;
+            InstanceCuller::InstanceState* st = ctx.instanceCuller->FindInstanceState(si.meshIndex);
+            if (!st) continue;
+
+            struct {
+                float4x4 viewProjMatrix;
+                float4x4 prevViewProjMatrix;
+                u32      objectIndex;
+                u32      useInstanceID;
+                u32      instanceSSBOHandle;
+                u32      instanceVisibleHandle;
+                u32      _pad[12];
+            } pc;
+            pc.viewProjMatrix        = jitteredVP;
+            pc.prevViewProjMatrix    = ctx.prevViewProj;
+            pc.objectIndex           = objIndex;
+            pc.useInstanceID         = 2;
+            pc.instanceSSBOHandle    = instHandle;
+            pc.instanceVisibleHandle = 0;
+
+            // 逐实例剔除（仅在开关打开 + 剔除器可用时；否则整批绘制，行为与原 MVP 一致）
+            bool useCull = si.enableFrustumCull && ctx.instanceCuller->GetPSO();
+            if (useCull) {
+                if (!st->cullCmd[slot]) {
+                    st->cullCmd[slot] = ctx.instanceCuller->CreateCommandBuffer(me->indexCount, 0, 0);
+                    if (st->cullCmd[slot]) {
+                        st->cullCmdHandle[slot] =
+                            ctx.device->GetBindlessHeap()->RegisterBuffer(st->cullCmd[slot].get());
+                    }
+                }
+                if (!st->cullCmd[slot] || st->cullCmdHandle[slot] == 0) useCull = false;
+            }
+            if (useCull) {
+                const u32 prevVisible = ctx.instanceCuller->Cull(
+                    cmd, st->buffer.get(), st->ssboHandle,
+                    st->cullCmd[slot].get(), st->cullCmdHandle[slot],
+                    count, slot, si.localBoundsMin, si.localBoundsMax, jitteredVP);
+                pc.instanceVisibleHandle = ctx.instanceCuller->GetVisibleIndicesHandle(slot);
+                // 首帧诊断：确认 Deferred 这条路径确实进来并拿到有效句柄
+                static bool s_DbgOnce = false;
+                if (!s_DbgOnce) {
+                    s_DbgOnce = true;
+                    HE_CORE_INFO("[任务 25] Deferred 实例化绘制首帧：实例 {}（对象 #{}），剔除槽 {}，"
+                                 "实例 SSBO 句柄 {}，命令句柄 {}，可见列表句柄 {}，上次可见 {}",
+                                 count, objIndex, slot, st->ssboHandle,
+                                 st->cullCmdHandle[slot], pc.instanceVisibleHandle, prevVisible);
+                }
+                cmd->SetDrawDebugLabel("GBuffer InstancedMesh (逐实例剔除)");
+                cmd->SetPushConstants(0, sizeof(pc), &pc);
+                cmd->SetVertexBuffer(me->vertexBuffer, 0);
+                cmd->SetIndexBuffer(me->indexBuffer);
+                cmd->DrawIndexedIndirect(st->cullCmd[slot].get(), 0, 1,
+                                         sizeof(InstanceIndirectCommand));
+                st->visibleInstanceCount = prevVisible;
+                continue;
+            }
+
+            cmd->SetDrawDebugLabel("GBuffer InstancedMesh");
+            cmd->SetPushConstants(0, sizeof(pc), &pc);
+            cmd->SetVertexBuffer(me->vertexBuffer, 0);
+            cmd->SetIndexBuffer(me->indexBuffer);
+            cmd->DrawIndexed(me->indexCount, count);
+        }
+    }
 
     cmd->EndOffscreenPass();
 }

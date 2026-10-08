@@ -119,6 +119,8 @@ public:
     ClusteredShading&    GetClusteredShading()   { return m_ClusteredShading; }
     GPUCulling&          GetGPUCulling()         { return m_GPUCulling; }
     SceneRenderer&        GetSceneRenderer()       { return *m_SceneRenderer; }
+    /// 逐实例剔除器（阶段 1 第①段：实例缓冲状态表在它这里；样例据此读句柄/容量/退役/可见数）
+    InstanceCuller&       GetInstanceCuller()      { return m_InstanceCuller; }
     ParticleRenderer&     GetParticleRenderer()   { return m_ParticleRenderer; }
     void AddParticleComponent(u32 id)             { m_ParticleComponentIDs.push_back(id); }
     void SetSwapChain(rhi::IRHISwapChain* sc) override  { m_SwapChain = sc; }

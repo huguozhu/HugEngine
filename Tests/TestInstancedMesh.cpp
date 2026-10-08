@@ -2,10 +2,12 @@
 // Tests/TestInstancedMesh.cpp — Phase B1 InstancedMeshComponent 单元测试
 //
 // 覆盖（CPU 侧；GPU 实例化绘制由 02.Cube 万级实例冒烟验证）：
-//   内置单位立方体几何、实例变换设置/脏标记/计数、空变换容错。
-//   任务 25 追加：逐实例剔除的组件状态、间接命令结构布局（20 字节）、
+//   内置单位立方体几何、实例变换设置/版本号/计数、空变换容错。
+//   任务 25 追加：逐实例剔除的间接命令结构布局（20 字节）、
 //     push constant 布局（144 字节，与 InstancedCull.comp.slang 逐字段对齐），
 //     以及剔除数学本身（与 GPU 侧同一套公式，用 CPU 复算钉住行为）。
+//   阶段 1 第①段（§15.1）追加：逐网格的 GPU 缓冲状态已搬到渲染侧
+//     （`InstanceCuller::InstanceState`，按 meshIndex 索引），组件只留 CPU 数据源 + 版本号。
 // ============================================================
 
 #include "doctest.h"
@@ -17,6 +19,7 @@
 #include "Math/Geometry.h"
 
 #include <cstddef>
+#include <iterator>   // std::size
 
 using namespace he;
 
@@ -34,17 +37,17 @@ TEST_CASE("InstancedMeshComponent::OnCreate 生成单位立方体") {
     CHECK(b.max.x == doctest::Approx(0.5f));
 }
 
-TEST_CASE("InstancedMeshComponent 实例变换与脏标记") {
+TEST_CASE("InstancedMeshComponent 实例变换与版本号") {
     World world;
     Entity e = world.CreateEntity("Inst");
     world.AddComponent<TransformComponent>(e);
     auto* im = world.AddComponent<InstancedMeshComponent>(e);
 
-    // 初始无实例
+    // 初始无实例、版本号为 0
     CHECK(im->GetInstanceCount() == 0);
-    CHECK(im->bTransformsDirty == false);
+    CHECK(im->instanceTransformVersion == 0u);
 
-    // 设置 100 个实例：计数更新 + 置脏（渲染管线下一帧重建 GPU 缓冲）
+    // 设置 100 个实例：计数更新 + 版本号 +1（渲染侧按版本号决定要不要重传实例缓冲）
     std::vector<float4x4> xforms;
     for (int i = 0; i < 100; ++i) {
         float4x4 m(1.0f);
@@ -53,23 +56,27 @@ TEST_CASE("InstancedMeshComponent 实例变换与脏标记") {
     }
     im->SetInstanceTransforms(std::move(xforms));
     CHECK(im->GetInstanceCount() == 100);
-    CHECK(im->bTransformsDirty == true);
+    CHECK(im->instanceTransformVersion == 1u);
 
     // 变换数据保留（平移分量可读）
     CHECK(im->instanceTransforms[42][3].x == doctest::Approx(42.0f));
     CHECK(im->instanceTransforms[99][3].x == doctest::Approx(99.0f));
 
-    // 空变换：计数 0（渲染 Pass 跳过），不崩溃
+    // 空变换：计数 0（渲染 Pass 跳过），不崩溃；版本号仍递增（清空同样是一次数据变更，
+    // 渲染侧必须重传，否则会继续按旧变换画出上一帧的实例）
     im->SetInstanceTransforms({});
     CHECK(im->GetInstanceCount() == 0);
-    CHECK(im->bTransformsDirty == true);
+    CHECK(im->instanceTransformVersion == 2u);
 }
 
 // ============================================================
 // 任务 25：逐实例 GPU 视锥剔除
 // ============================================================
 
-TEST_CASE("逐实例剔除：组件状态与间接命令按飞行帧分槽") {
+TEST_CASE("逐实例剔除：缓冲状态在渲染侧（按 meshIndex 分槽）") {
+    // 【阶段 1 第①段】逐网格的实例缓冲状态（缓冲/容量/退役队列/命令缓冲/可见数）原先挂在
+    // `InstancedMeshComponent` 上；现在它们属于 `InstanceCuller::InstanceState`（渲染侧资源），
+    // 组件只保留 CPU 数据源与版本号 —— 本用例钉住这条边界。
     World world;
     Entity e = world.CreateEntity("Inst");
     world.AddComponent<TransformComponent>(e);
@@ -77,12 +84,16 @@ TEST_CASE("逐实例剔除：组件状态与间接命令按飞行帧分槽") {
 
     // 默认关（与原"整批绘制"行为一致，便于 A/B 对比）
     CHECK(im->enableFrustumCull == false);
-    // 命令缓冲每飞行帧一份（避免本帧 CPU 清零与上帧 GPU 间接绘制打架）
-    CHECK(std::size(im->instanceCullCmd) == rhi::kMaxFramesInFlight);
-    CHECK(im->instanceCullCmdHandle[0] == 0);
-    CHECK(im->visibleInstanceCount == 0);
     // 容量常量：可见列表上限
     CHECK(he::render::InstanceCuller::kMaxInstances == 100000u);
+
+    // 渲染侧状态：命令缓冲每飞行帧一份（避免本帧 CPU 清零与上帧 GPU 间接绘制打架）
+    he::render::InstanceCuller::InstanceState st;
+    CHECK(std::size(st.cullCmd) == rhi::kMaxFramesInFlight);
+    CHECK(st.cullCmdHandle[0] == 0);
+    CHECK(st.visibleInstanceCount == 0);
+    CHECK(st.hasUpload == false);       // 尚未上传过 ⇒ 首次必然重传
+    CHECK(st.uploadedVersion == 0u);
 }
 
 TEST_CASE("逐实例剔除：间接命令与 push constant 的布局与 shader 对齐") {

@@ -5,12 +5,17 @@
 #include "Pipeline/GPUCulling.h"
 #include "Pipeline/GPUScene.h"
 #include "SceneRenderer.h"
+// 阶段 1 第①段：GBuffer 绘制要读快照里的实例化网格条目（不再遍历世界）
+#include "Threading/FrameSceneSnapshot.h"
 #include "RenderGraph.h"
 #include "Math/Math.h"
 #include <vector>
 #include <memory>
 
 namespace he::render {
+
+// 网格注册表（只借指针：实例化绘制要按 meshIndex 取顶点/索引缓冲与索引数）
+class MeshRegistry;
 
 // GBuffer 附件布局常量
 constexpr u32 kGBufferAttachmentCount = 8;
@@ -67,6 +72,10 @@ struct GBufferContext {
     /// 当前飞行帧槽位（逐实例剔除的可见列表/命令按槽位分开）
     u32 frameSlot = 0;
 
+    /// 网格注册表（阶段 1 第①段 / 附录 E）：实例化绘制按 `meshIndex` 从这里取顶点/索引缓冲与
+    /// 索引数 —— 这是"渲染期不再持有组件指针"的落点。为空 = 跳过实例化绘制
+    const MeshRegistry* meshRegistry = nullptr;
+
     // 上一帧 ViewProj（velocity 计算用）
     float4x4 prevViewProj = float4x4(1.0f);
 
@@ -99,7 +108,10 @@ public:
     virtual void Shutdown() = 0;
 
     /// 执行 GBuffer 渲染（BeginOffscreenPassMRT → 绘制 → EndOffscreenPass）
+    /// 【为什么收快照】阶段 1 第①段起，实例化网格的数据（实例变换/开关/版本号）来自快照；
+    /// 渲染期因此不再遍历世界去读 `InstancedMeshComponent`（附录 B1 与附录 E 两项闸门的收敛对象）。
     virtual void Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
+                        const FrameSceneSnapshot& snapshot,
                         he::World& world, he::SceneGraph& sg,
                         const CameraData& camera) = 0;
 };
@@ -141,8 +153,8 @@ public:
 
     // ── 渲染 ──
     // 执行 GBuffer 渲染（委托给 IGBufferRenderer::Render）
-    void Render(rhi::IRHICommandList* cmd, he::World& world,
-                he::SceneGraph& sg, const CameraData& camera);
+    void Render(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snapshot,
+                he::World& world, he::SceneGraph& sg, const CameraData& camera);
 
     // ── 每帧动态参数设置（在 Render 之前调用）──
     void SetObjectBuffer(rhi::IRHIBuffer* objBuf)  { m_Ctx.objectBuffer = objBuf; }
@@ -152,6 +164,8 @@ public:
     void SetGPUScene(GPUScene* gs)                 { m_Ctx.gpuScene = gs; }
     void SetVisibleIndices(const std::vector<u32>* vi) { m_Ctx.gpuVisibleIndices = vi; }
     void SetMeshBatcher(MeshBatcher* mb)           { m_Ctx.meshBatcher = mb; }
+    /// 阶段 1 第①段：网格注册表（实例化绘制按 meshIndex 取缓冲与索引数，不再持有组件指针）
+    void SetMeshRegistry(const MeshRegistry* mr)    { m_Ctx.meshRegistry = mr; }
     /// 任务 24：贴花改由 DecalPass 投影 → GBuffer 绘制时排除贴花卡片
     void SetExcludeDecals(bool v)                  { m_Ctx.excludeDecals = v; }
     bool GetExcludeDecals() const                  { return m_Ctx.excludeDecals; }

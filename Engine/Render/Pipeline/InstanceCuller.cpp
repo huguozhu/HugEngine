@@ -1,9 +1,10 @@
 // ============================================================
 // InstanceCuller.cpp — 逐实例 GPU 视锥剔除（任务 25）
+// 阶段 1 第①段（§15.1）：逐网格实例缓冲的状态与生命周期从组件搬到本类（按 meshIndex 索引），
+// 实例变换数据由 `FrameSceneSnapshot` 按值送达 ⇒ 渲染期不再读 InstancedMeshComponent。
 // ============================================================
 
 #include "Pipeline/InstanceCuller.h"
-#include "Scene/InstancedMeshComponent.h"   // 实例变换上传（Forward/Deferred 共用）
 #include "Math/Geometry.h"   // Frustum::FromViewProj（六平面提取）
 #include "Core/Log.h"
 
@@ -84,7 +85,23 @@ void InstanceCuller::Shutdown() {
             }
             m_VisibleBuf[slot].reset();
         }
+        // 实例缓冲状态表：连同实例 SSBO / 命令缓冲的 bindless 槽位一并释放
+        // （设备仍然有效时才能回收槽位，因此这一步必须在 m_Device 置空之前）
+        for (auto& kv : m_Instances) {
+            InstanceState& st = kv.second;
+            if (st.ssboHandle != 0) m_Device->GetBindlessHeap()->ReleaseBuffer(st.ssboHandle);
+            for (u32 slot = 0; slot < rhi::kMaxFramesInFlight; ++slot) {
+                if (st.cullCmdHandle[slot] != 0) {
+                    m_Device->GetBindlessHeap()->ReleaseBuffer(st.cullCmdHandle[slot]);
+                    st.cullCmdHandle[slot] = 0;
+                }
+                st.cullCmd[slot].reset();
+            }
+            st.retired.FlushAll();   // 设备即将销毁：不再需要 N 帧延迟
+            st.buffer.reset();
+        }
     }
+    m_Instances.clear();
     if (m_Device && m_Layout != rhi::kInvalidLayout) m_Device->DestroyDescriptorSetLayout(m_Layout);
     m_Layout = rhi::kInvalidLayout;
     m_Set    = rhi::kInvalidSet;
@@ -117,43 +134,122 @@ std::unique_ptr<rhi::IRHIBuffer> InstanceCuller::CreateCommandBuffer(u32 indexCo
     return buf;
 }
 
-u32 InstanceCuller::UploadInstanceTransforms(rhi::IRHIDevice* device, he::InstancedMeshComponent& im) {
-    if (!device) return 0;
+void InstanceCuller::BeginInstancesFrame(rhi::IRHIDevice* device) {
+    for (auto it = m_Instances.begin(); it != m_Instances.end(); ) {
+        InstanceState& st = it->second;
 
-    // 帧边界推进退役队列（有界释放；先推进本帧再入队本帧退役的资源）
-    im.AdvanceRetireQueue();
-
-    const u32 count = im.GetInstanceCount();
-    if (count == 0 || im.GetIndexCount() == 0) return 0;
-
-    if (im.bTransformsDirty || !im.instanceBuffer) {
-        const bool needGrow = (!im.instanceBuffer || im.instanceBufferCapacity < count);
-        if (needGrow) {
-            rhi::BufferDesc desc;
-            desc.size        = sizeof(float4x4) * count;
-            desc.usage       = rhi::BufferUsage::Storage;
-            desc.initialData = im.instanceTransforms.data();
-            desc.cpuAccess   = true;
-            // 旧缓冲退役（N 帧延迟释放）+ 释放旧 bindless 槽位（任务 23 的槽位回收）
-            if (im.instanceBuffer) {
-                device->GetBindlessHeap()->ReleaseBuffer(im.instanceSSBOHandle);
-                im.RetireInstanceBuffer();
+        // 「上一帧起就没再出现」⇒ 组件已销毁（或该索引不再使用）：整条状态连同 GPU 资源回收。
+        // 【为什么以"上一帧"为准】快照每帧都包含全部实例化组件，本帧刚创建的条目会被
+        // UploadInstanceTransforms 置为 seenThisFrame；若以"本帧未见"为准，就会把
+        // "本帧还没轮到绘制"的条目误回收（顺序依赖、且渲染线程下不可复现）。
+        if (!st.seenLastFrame) {
+            if (device) {
+                if (st.ssboHandle != 0) device->GetBindlessHeap()->ReleaseBuffer(st.ssboHandle);
+                for (u32 slot = 0; slot < rhi::kMaxFramesInFlight; ++slot) {
+                    if (st.cullCmdHandle[slot] != 0) {
+                        device->GetBindlessHeap()->ReleaseBuffer(st.cullCmdHandle[slot]);
+                    }
+                }
             }
-            im.instanceBuffer = device->CreateBuffer(desc);
-            if (!im.instanceBuffer) return 0;
-            im.instanceBufferCapacity = count;
-            im.instanceSSBOHandle = device->GetBindlessHeap()->RegisterBuffer(im.instanceBuffer.get());
-        } else {
-            // 复用缓冲：Map 原地写入最新变换（容量可能大于实例数，只写前 count 个）
-            void* mapped = im.instanceBuffer->Map();
-            if (mapped) {
-                std::memcpy(mapped, im.instanceTransforms.data(), sizeof(float4x4) * count);
-                im.instanceBuffer->Unmap();
-            }
+            st.retired.FlushAll();
+            it = m_Instances.erase(it);
+            continue;
         }
-        im.bTransformsDirty = false;
+
+        // 帧边界推进退役队列（有界释放；先推进本帧再入队本帧退役的资源 —— 与原实现同序）
+        st.retired.Advance();
+        st.seenLastFrame = st.seenThisFrame;
+        st.seenThisFrame = false;
+        ++it;
     }
-    return im.instanceSSBOHandle;
+}
+
+u32 InstanceCuller::UploadInstanceTransforms(rhi::IRHIDevice* device, u32 meshIndex,
+                                             const float4x4* transforms, u32 count,
+                                             u32 transformVersion, u64 ownerEntity) {
+    if (!device || meshIndex == 0u) return 0;      // 0 = 未注册（与注册表的哨兵口径一致）
+    if (count == 0u || !transforms) return 0;
+
+    // 首次出现即建条目（两个 seen 都置真：本帧已见 ⇒ 下一帧的回收判定不该把它算作"未见"）
+    auto [it, inserted] = m_Instances.try_emplace(meshIndex);
+    InstanceState& st = it->second;
+    if (inserted) {
+        st.ownerEntity   = ownerEntity;
+        st.seenThisFrame = true;
+        st.seenLastFrame = true;
+    }
+    st.seenThisFrame = true;
+
+    // 索引复用识别：同一个 meshIndex 换了来源实体 ⇒ 这是**另一个网格**，上一份缓冲的内容与
+    // 版本号都不可信（旧的 `uploadedVersion` 可能恰好等于新组件的版本号 ⇒ 漏传 ⇒ 画出上一个组件的
+    // 实例）。直接丢弃旧缓冲并强制重传：旧缓冲已不被任何在飞帧引用（本索引换了主人），无需延迟释放。
+    if (st.ownerEntity != ownerEntity) {
+        if (st.ssboHandle != 0) device->GetBindlessHeap()->ReleaseBuffer(st.ssboHandle);
+        st.retired.FlushAll();
+        st.buffer.reset();
+        st.ssboHandle      = 0;
+        st.capacity        = 0;
+        st.hasUpload       = false;
+        st.uploadedVersion = 0;
+        st.lastCount       = 0;
+        st.ownerEntity     = ownerEntity;
+    }
+
+    // 版本号没变 ⇒ 数据就是上次上传的那一份，不需要重传（跨帧幂等：同一帧被消费多次也不会重复上传）
+    if (st.hasUpload && st.uploadedVersion == transformVersion) return st.ssboHandle;
+
+    const bool needGrow = (!st.buffer || st.capacity < count);
+    if (needGrow) {
+        rhi::BufferDesc desc;
+        desc.size        = sizeof(float4x4) * count;
+        desc.usage       = rhi::BufferUsage::Storage;
+        desc.initialData = transforms;
+        desc.cpuAccess   = true;
+        // 旧缓冲退役（N 帧延迟释放）+ 释放旧 bindless 槽位（任务 23 的槽位回收）
+        if (st.buffer) {
+            device->GetBindlessHeap()->ReleaseBuffer(st.ssboHandle);
+            st.retired.Retire(std::move(st.buffer));
+        }
+        st.buffer = device->CreateBuffer(desc);
+        if (!st.buffer) {
+            st.ssboHandle = 0;
+            st.capacity   = 0;
+            st.hasUpload  = false;
+            return 0;
+        }
+        st.capacity   = count;
+        st.ssboHandle = device->GetBindlessHeap()->RegisterBuffer(st.buffer.get());
+    } else {
+        // 复用缓冲：Map 原地写入最新变换（容量可能大于实例数，只写前 count 个）
+        void* mapped = st.buffer->Map();
+        if (mapped) {
+            std::memcpy(mapped, transforms, sizeof(float4x4) * count);
+            st.buffer->Unmap();
+        }
+    }
+    st.uploadedVersion = transformVersion;
+    st.hasUpload       = true;
+    st.lastCount       = count;
+    return st.ssboHandle;
+}
+
+InstanceCuller::InstanceState* InstanceCuller::FindInstanceState(u32 meshIndex) {
+    auto it = m_Instances.find(meshIndex);
+    return it == m_Instances.end() ? nullptr : &it->second;
+}
+
+InstanceCuller::InstanceStats InstanceCuller::GetInstanceStats(u32 meshIndex) const {
+    InstanceStats out;
+    auto it = m_Instances.find(meshIndex);
+    if (it == m_Instances.end()) return out;
+    const InstanceState& st = it->second;
+    out.valid        = st.hasUpload;
+    out.ssboHandle   = st.ssboHandle;
+    out.capacity     = st.capacity;
+    out.retired      = st.retired.GetPendingCount();
+    out.visibleCount = st.visibleInstanceCount;
+    out.count        = st.lastCount;
+    return out;
 }
 
 u32 InstanceCuller::Cull(rhi::IRHICommandList* cmd,

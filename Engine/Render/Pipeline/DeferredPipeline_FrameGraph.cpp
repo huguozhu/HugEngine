@@ -390,7 +390,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, he::World& world,
                 m_GBuffer->ClearDGCContext();
             }
 
-            m_GBuffer->Render(c, world, sg, camera);
+            m_GBuffer->Render(c, m_Snapshot, world, sg, camera);
         });
 
     // ════════════════════════════════════════════════════════════════════

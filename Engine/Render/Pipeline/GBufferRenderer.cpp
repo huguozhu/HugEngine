@@ -121,10 +121,10 @@ GBufferRenderer::Handles GBufferRenderer::ImportToRenderGraph(RenderGraph& rg) {
     return h;
 }
 
-void GBufferRenderer::Render(rhi::IRHICommandList* cmd, he::World& world,
-                              he::SceneGraph& sg, const CameraData& camera) {
+void GBufferRenderer::Render(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snapshot,
+                              he::World& world, he::SceneGraph& sg, const CameraData& camera) {
     if (m_Renderer) {
-        m_Renderer->Render(cmd, m_Ctx, world, sg, camera);
+        m_Renderer->Render(cmd, m_Ctx, snapshot, world, sg, camera);
     }
 }
 

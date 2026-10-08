@@ -153,6 +153,33 @@ struct SnapshotParticleEmitter {
     float3                  emitPosition{0.0f}; // 本帧发射原点（世界空间）
 };
 
+/// 实例化网格条目（阶段 1 第①段 / §15.1）：把"实例变换"与绘制所需的值按值带进快照，
+/// 渲染侧因此不必再遍历 `InstancedMeshComponent`（B1 与组件指针两项闸门的收敛对象）。
+/// 【为什么缓冲状态不在这里】逐网格的 GPU 实例缓冲（实例 SSBO、容量、退役队列、逐实例剔除的
+/// 命令缓冲）是**渲染侧资源**，其生命周期留在渲染侧的状态表里（按 `meshIndex` 索引，见
+/// `InstanceCuller::InstanceState`）—— 与骨骼缓冲 E-2② 同一处理原则：
+/// **矩阵数据走快照、缓冲生命周期留渲染侧**。
+struct SnapshotInstance {
+    /// 渲染侧网格注册表索引：顶点/索引缓冲与索引数都据此去注册表查（是索引，不是指针）
+    u32  meshIndex = 0;
+    /// 实例变换在 `FrameSceneSnapshot::instanceTransforms` 里的切片（与 `skinMatrices` 同款：
+    /// 快照里不放容器嵌套，渲染线程按 `[offset, offset+count)` 切片即可）
+    u32  transformOffset = 0;
+    u32  transformCount  = 0;
+    /// 组件侧的**变换版本号**（`InstancedMeshComponent::instanceTransformVersion`）。
+    /// 【为什么要它】缓冲状态搬到渲染侧之后，渲染侧不能再回读组件上的脏标记；它只比较
+    /// "本帧版本 ≠ 上次上传的版本"来决定要不要重传 —— 这个判据跨帧幂等，适合另一根线程。
+    u32  transformVersion = 0;
+    /// 逐实例视锥剔除开关（原组件字段 `enableFrustumCull`）
+    bool enableFrustumCull = false;
+    /// 网格**局部** AABB（逐实例剔除 shader 的输入；原渲染期读 `组件.GetBounds()`）
+    float3 localBoundsMin{0.0f};
+    float3 localBoundsMax{0.0f};
+    /// 来源实体 id：渲染侧状态表据此识别"注册表索引被回收后复用给了新网格"
+    /// （换了主人就必须丢弃旧缓冲并强制重传，否则会画出上一个组件的实例）
+    u64  sourceEntity = 0;
+};
+
 /// 一帧的完整渲染输入。游戏线程在 tick 结束后构造，交接后**只读**（铁律 2）。
 struct FrameSceneSnapshot {
     u64        frameIndex = 0;              // 与 CommandQueue 的帧号对应（对账用）
@@ -185,6 +212,13 @@ struct FrameSceneSnapshot {
     /// 这样快照里不需要任何指针/容器嵌套，渲染线程按偏移切片即可）
     std::vector<float4x4>         skinMatrices;
 
+    /// 实例化网格条目（阶段 1 第①段）：每个 `InstancedMeshComponent` 一条，
+    /// **包括实例数为 0 的组件** —— 渲染侧靠"本帧又见到这个 meshIndex"来推进退役队列并回收
+    /// 已销毁组件留下的缓冲（见 `InstanceCuller::BeginInstancesFrame`），漏掉空组件会让它的状态悬挂。
+    std::vector<SnapshotInstance> instances;
+    /// 实例变换的扁平数组（`SnapshotInstance::transformOffset` 切片；与 `skinMatrices` 同款）
+    std::vector<float4x4>         instanceTransforms;
+
     /// 世界版本号（游戏线程每次结构性改动 +1）：渲染线程可据此判断"快照是否落后于世界"，
     /// 流式/缓存类模块（Lumen 表面缓存、Nanite 页表）用它做失效判断，避免又去读世界。
     u64 sourceWorldVersion = 0;
@@ -197,16 +231,23 @@ struct FrameSceneSnapshot {
         lights.clear();
         particles.clear();
         skinMatrices.clear();
+        instances.clear();
+        instanceTransforms.clear();
     }
 
     /// 预留容量（首帧/场景规模变化时调用一次，之后每帧 `Clear()` 复用）
     /// 【为什么要预留粒子】稳态下每帧只做 `Clear()` + 填充，**不允许在帧内分配**（帧内分配会引入
     /// 不可预期的耗时与锁，与"帧内不做同步等待"同一条纪律）。粒子数组此前漏了预留，见下方重载。
-    void Reserve(u32 maxDraws, u32 maxLights, u32 maxSkinMatrices = 0, u32 maxParticles = 0) {
+    /// 【实例数组的预留】实例变换是万级 `float4x4`（10000 实例 = 640KB）⇒ 逐帧重新分配代价明显，
+    /// 调用方按首帧的实际规模自校准一次（与 `draws`/`skinMatrices` 同款做法）。
+    void Reserve(u32 maxDraws, u32 maxLights, u32 maxSkinMatrices = 0, u32 maxParticles = 0,
+                 u32 maxInstances = 0, u32 maxInstanceTransforms = 0) {
         draws.reserve(maxDraws);
         lights.reserve(maxLights);
         skinMatrices.reserve(maxSkinMatrices);
         particles.reserve(maxParticles);
+        instances.reserve(maxInstances);
+        instanceTransforms.reserve(maxInstanceTransforms);
     }
 };
 

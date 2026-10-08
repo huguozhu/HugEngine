@@ -41,7 +41,9 @@ void InstancedMeshComponent::OnCreate() {
 
 void InstancedMeshComponent::SetInstanceTransforms(std::vector<float4x4> transforms) {
     instanceTransforms = std::move(transforms);
-    bTransformsDirty = true;   // 渲染管线下一帧重建 GPU 实例缓冲
+    // 递增版本号：渲染侧（另一根线程）按快照里的版本号判断"要不要重传实例缓冲"，
+    // 因此这里不再需要任何跨线程可见的脏标记（原来的 `bTransformsDirty` 已随缓冲状态搬走）
+    ++instanceTransformVersion;
 }
 
 } // namespace he

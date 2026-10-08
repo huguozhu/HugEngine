@@ -120,6 +120,8 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     m_GBuffer->SetGPUScene(&m_GPUScene);
     m_GBuffer->SetVisibleIndices(&m_GPUVisibleIndices);
     m_GBuffer->SetMeshBatcher(&m_MeshBatcher);
+    // 阶段 1 第①段：实例化绘制按 `meshIndex` 从注册表取顶点/索引缓冲（渲染期不再持有组件指针）
+    m_GBuffer->SetMeshRegistry(&m_MeshRegistry);
     m_GBuffer->SetExcludeDecals(m_ExcludeDecalCards);
 
     // GBuffer 投影贴花 Pass（任务 24）：盒子几何 + PSO + 描述符集（读 worldPos/depth 采样）
@@ -707,13 +709,18 @@ void DeferredPipeline::Render(rhi::IRHICommandList* cmd, he::World& world,
     // 按实际规模**自校准**预留一次容量 —— 稳态下快照数组不再重分配（"帧内不做分配"与
     // "帧内不做同步等待"同一条纪律）。骨骼上传/材质消费将来都要从这份快照取。
     SceneSnapshotBuilder::BuildObjects(world, sg, camera, {}, nullptr, m_Snapshot);
+    // 实例化网格（阶段 1 第①段 / §15.1）：实例变换按值进快照，渲染侧因此不再读 InstancedMeshComponent。
+    // 必须在 `RegisterMeshes`（回填 meshIndex）之后、帧图**执行**之前。
+    SceneSnapshotBuilder::BuildInstances(world, m_Snapshot);
     // 贴花（T1.4）：`DecalPass` 已改读快照，必须在帧图**执行**之前收集好
     SceneSnapshotBuilder::BuildDecals(world, sg, m_Snapshot);
     if (!m_SnapshotReserved) {
         m_Snapshot.Reserve(static_cast<u32>(m_Snapshot.draws.size()) * 2u + 64u,
                            static_cast<u32>(m_Snapshot.lights.size()) * 2u + 64u,
                            static_cast<u32>(m_Snapshot.skinMatrices.size()) * 2u + 256u,
-                           static_cast<u32>(m_Snapshot.particles.size()) * 2u + 8u);
+                           static_cast<u32>(m_Snapshot.particles.size()) * 2u + 8u,
+                           static_cast<u32>(m_Snapshot.instances.size()) * 2u + 8u,
+                           static_cast<u32>(m_Snapshot.instanceTransforms.size()) * 2u + 1024u);
         m_SnapshotReserved = true;
     }
 
@@ -847,7 +854,10 @@ void DeferredPipeline::CollectLights(PushConstantData& pc, he::World& world,
         return m_ShadowSystem ? m_ShadowSystem->GetShadowIndex(e) : -1;
     };
 
-    m_Snapshot.Clear();
+    // 【不要在收集光源时 `m_Snapshot.Clear()`（阶段 1 第①段修正，与 Forward 对称）】
+    // 快照在同一帧内分步构建、分步消费：物体/实例/材质/贴花在 `Render()` 开头填好，帧图稍后
+    // （含 GBuffer 的实例化绘制）才读它们。`Clear()` 会把 `draws`/`instances` 一起抹掉 ——
+    // 实例化没有兜底，表现为"实例一个都不画"。`BuildLights` 自己会 `out.lights.clear()`。
     const u32 count = SceneSnapshotBuilder::BuildLights(world, sg, resolvers, m_Snapshot);
     pc.lightCount = count;
     if (count == 0u) return;
