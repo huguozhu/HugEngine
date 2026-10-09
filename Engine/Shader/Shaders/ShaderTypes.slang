@@ -256,7 +256,7 @@ GPU_STRUCT GPULight {
 // --- GPUShadowData: 阴影数据（256 字节，std430 布局）---
 GPU_STRUCT GPUShadowData {
     float4x4 lightViewProj[3];  // [0..192] CSM 级联矩阵（光源 VP，非 Camera VP）
-    float4   shadowParams;      // [192..208] x=bias, y=normalBias, z=strength, w=类型(0=Dir,1=Point,2=Spot)
+    float4   shadowParams;      // [192..208] x=bias, y=normalBias, z=strength, w=类型(0=Dir,1=Point,2=Spot,3=Rect)
     float4   splitDistances;    // [208..224] CSM 分割点 (Spot: xyz=方向, w=外锥角)
     float4   cameraForward;     // [224..240] 相机前向（CSM 级联选择用）
     float4   pointLightData;    // [240..256] xyz=光源世界位置, w=范围

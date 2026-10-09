@@ -152,8 +152,12 @@ float3 ShadeWithLight(GPULight light, float3 worldPos, float3 N, float3 V,
                           u_ShadowMap0, u_ShadowMap1, u_ShadowMap2,
                           u_ShadowSampler),
                           sm.shadowParams.z);
-        } else if (sm.shadowParams.w > 1.5f) {
-            // 聚光灯阴影：透视投影到 2D 阴影贴图
+        } else if (sm.shadowParams.w > 1.5f && sm.shadowParams.w < 2.5f) {
+            // 聚光灯阴影（`w == 2`）：透视投影到 2D 阴影贴图
+            // 【条件必须排他】`shadowParams.w` 的编码是 0=CSM / 1=Point / 2=Spot / 3=Rect
+            // （见各技术的 `sd.shadowParams=float4(...,N)`）。此前只写 `w > 1.5f`，于是
+            // 3=Rect 也命中本分支，下面的矩形分支（`w > 2.5f`）**永不可达** —— 矩形光会拿
+            // `u_SpotShadowMap` 按 3×3 核采样。加上上界后两条分支才互斥。
             float4 spotClip = mul(sm.lightViewProj[0], float4(worldPos + N * sm.shadowParams.y, 1.0));
             float3 spotNdc = spotClip.xyz / spotClip.w;
             float2 spotUv = float2(spotNdc.x * 0.5 + 0.5, 0.5 - spotNdc.y * 0.5);
