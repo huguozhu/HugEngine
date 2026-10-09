@@ -84,11 +84,40 @@ void ShadowSystem::Update(const SubsystemContext& ctx){
         m_PerTechniqueCounts.push_back(n);
     }
 
+    // 【容量钳制（必修）】阴影 SSBO 的容量是 `MAX_SHADOWS` 条（`Pipeline/Material.h` 的
+    // `MAX_SHADOWS = kGPUMaxShadows`，默认 4），而**每个技术各自**最多收 `MAX_SHADOWS` 条
+    // （见各技术的 `if(out.size()-start>=MAX_SHADOWS)break;`）⇒ 四个技术合计可达 4×容量。
+    // 不钳制会有两处越界：① 本函数末尾的整段拷贝写越界（映射缓冲最多溢出 3×256 B）；
+    // ② `GetShadowIndex` 用 `m_AllEntities` 的下标当 shader 的 `shadowIndex`，超容量的光源
+    // 会让着色器的 `u_ShadowData[idx]`（固定 4 元素数组）越界读。
+    // 截断策略：从**最后一个**技术开始扣，保证 `m_PerTechniqueCounts` 的前缀和仍与
+    // `m_AllShadowData` 的分段一一对应（`Render` 的逐技术 offset 依赖这个不变量）。
+    if(m_AllShadowData.size()>MAX_SHADOWS){
+        u32 over=static_cast<u32>(m_AllShadowData.size())-MAX_SHADOWS;
+        for(usize t=m_PerTechniqueCounts.size();t-->0&&over>0;){
+            u32&n=m_PerTechniqueCounts[t];
+            const u32 take=(n<over)?n:over;
+            n-=take;
+            over-=take;
+        }
+        m_AllShadowData.resize(MAX_SHADOWS);
+        m_AllEntities.resize(MAX_SHADOWS);
+        // 只提醒一次：这是"投影光源总数超过容量"的配置问题，不该每帧刷屏
+        static bool s_warnedOverCapacity=false;
+        if(!s_warnedOverCapacity){
+            s_warnedOverCapacity=true;
+            HE_CORE_WARN("ShadowSystem: 投影光源数超过阴影容量（上限 {}），已截断；"
+                         "请减少投影光源数或提高 kGPUMaxShadows",MAX_SHADOWS);
+        }
+    }
+
     m_ActiveCount=(u32)m_AllShadowData.size();
 
     if(m_ActiveCount>0&&m_ExternalShadowBuffer){
         auto*dst=static_cast<GPUShadowData*>(m_ExternalShadowBuffer->Map());
-        for(u32 i=0;i<m_ActiveCount;++i)dst[i]=m_AllShadowData[i];
+        // 防御性再夹一次：即便上面的钳制被将来的改动绕过，也不会写越界
+        const u32 n=(m_ActiveCount<MAX_SHADOWS)?m_ActiveCount:MAX_SHADOWS;
+        for(u32 i=0;i<n;++i)dst[i]=m_AllShadowData[i];
         m_ExternalShadowBuffer->Unmap();
     }
 }
