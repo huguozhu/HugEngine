@@ -74,6 +74,13 @@ public:
     // ForwardPipeline 特有方法（命令式，保留兼容）
     void BeginFrame(rhi::IRHICommandList* cmd, u32 width, u32 height);
     void RenderScene(rhi::IRHICommandList* cmd, const CameraData& camera);
+    /// 【直连路径的装配步骤】按 `IRenderPipeline` 的顺序契约装配本帧快照，并把它记为"本帧快照"
+    /// （`RenderScene` 的各个 helper 都经 `FrameSnap()` 读它，而 `m_FrameSnapshot` 只在
+    /// `Render()` 入口赋值 ⇒ 直接调 `RenderScene` 的调用方必须先走这一步，否则空快照解引用）。
+    /// 用途：示例编辑器要"直接画进 backbuffer、不走 HDR/后处理"。
+    /// 顺序：`NextFrame()` → 本方法 → `RenderScene(cmd, camera)`；本方法**不做**阴影收集与后处理，
+    /// 完整管线请用 `Render(cmd, GetFrameSnapshot(), camera, dt)`。
+    void AssembleForDirectRender(he::World& world, he::SceneGraph& sg, const CameraData& camera);
     /// GPU 视锥剔除：收集场景对象 → 上传 GPUScene SSBO → 读回上帧可见性 → Dispatch Compute。
     /// **必须在任何 render pass 之外调用**：vkCmdDispatch 不允许出现在 render pass 内部
     /// （VUID-vkCmdDispatch-None-10672），且它会采样 HDR 深度 —— 那正是本帧 Scene pass 的

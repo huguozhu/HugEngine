@@ -965,6 +965,17 @@ void ForwardPipeline::RunGPUCulling(rhi::IRHICommandList* cmd, const CameraData&
     cmd->SetPipeline(m_PBR_PSO.get());
 }
 
+// 【直连路径的装配步骤】见头文件说明：`RenderScene` 的 helper 全经 `FrameSnap()` 读本帧快照，
+// 而该指针只在 `Render()` 入口赋值。示例编辑器要"直接画进 backbuffer、不走 HDR/后处理"，
+// 于是它必须自己做这一步，否则 `CollectLights` 一读 `FrameSnap().atmosphere` 就空指针。
+// 这里只做装配与记指针，与 `Render()` 开头的口径一致（阴影收集/后处理交给完整路径）。
+void ForwardPipeline::AssembleForDirectRender(he::World& world, he::SceneGraph& sg,
+                                              const CameraData& camera)
+{
+    m_Assembler.AssembleScene(world, sg, camera);
+    m_FrameSnapshot = &GetFrameSnapshot();
+}
+
 void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& camera)
 {
     // 【第③段第 4 批】`sceneGraph.UpdateTransforms()` 已搬到装配器（它必须在**取快照之前**跑；

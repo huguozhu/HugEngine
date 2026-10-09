@@ -49,10 +49,11 @@ void ViewportPanel::Render(rhi::IRHICommandList* cmdList) {
 
     // 绑定 PBR PSO（Editor 直接渲染到 backbuffer，不走 BeginHDRPass）
     cmdList->SetPipeline(m_Pipeline->GetPipelineState());
-    m_Pipeline->RenderScene(cmdList,
-        *m_Ctx->GetWorld(),
-        *m_Ctx->GetSceneGraph(),
-        m_CamCtrl.GetCamera());
+    // `RenderScene` 只消费帧快照（自阶段 1 §15.1 第③段起不再收 World/SceneGraph），
+    // 故直连路径必须先按顺序契约装配快照并记指针，否则空快照解引用。
+    m_Pipeline->AssembleForDirectRender(*m_Ctx->GetWorld(), *m_Ctx->GetSceneGraph(),
+                                        m_CamCtrl.GetCamera());
+    m_Pipeline->RenderScene(cmdList, m_CamCtrl.GetCamera());
 }
 
 void ViewportPanel::FocusOn(const float3& worldPos) {
@@ -65,10 +66,9 @@ void ViewportPanel::FocusOn(const float3& worldPos) {
 
 void ViewportPanel::RenderGameView(rhi::IRHICommandList* cmdList) {
     if (!m_Ctx || !m_Pipeline) return;
-    m_Pipeline->RenderScene(cmdList,
-        *m_Ctx->GetWorld(),
-        *m_Ctx->GetSceneGraph(),
-        m_CamCtrl.GetCamera());
+    m_Pipeline->AssembleForDirectRender(*m_Ctx->GetWorld(), *m_Ctx->GetSceneGraph(),
+                                        m_CamCtrl.GetCamera());
+    m_Pipeline->RenderScene(cmdList, m_CamCtrl.GetCamera());
 }
 
 void ViewportPanel::RenderGizmoOverlay() {
