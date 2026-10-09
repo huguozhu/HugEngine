@@ -1131,9 +1131,17 @@ void LumenScene::RunFeedback(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbWorl
         return;   // 本帧只建资源；下一帧开始派发（"新建资源当帧使用"的教训见 §附二十）
     }
 
-    // 【步骤 37】临时诊断：单缓冲（把双缓冲回退），用于判定"黑辐照度"是否由双缓冲引入。
-    const u32 writeSlot = 0u;
-    const u32 readSlot  = 0u;
+    // 【双缓冲：恢复乒乓（步骤 37 的诊断一直没收回）】
+    // 步骤 37 为了判定"黑辐照度是否由双缓冲引入"，把这里硬编码成 `writeSlot = readSlot = 0`
+    // 退回单缓冲；但**此后一直没恢复** ⇒ CPU 每帧读的正是 GPU 当帧在写的那个槽，
+    // `LumenScene.h` 记录的"CPU 逐元素读 GPU 正在写的槽位"这条数据竞争仍然存在，
+    // `kFeedbackSlots = 2` 与第二份 `m_ReqBuf`/`m_ReqMapped` 成为死结构。
+    // 现在恢复乒乓：GPU 写**本帧**槽，CPU 读**上一帧**写过的另一槽
+    // （两槽时 `(f+1)%2 ≡ (f-1)%2`，与下面"先处理上一帧的结果"的顺序一致）。
+    // 需要复现步骤 37 那次单缓冲对照实验时，用 `HE_LUMEN_SINGLE_FEEDBACK=1` 退回。
+    static const bool s_singleFeedbackSlot = (std::getenv("HE_LUMEN_SINGLE_FEEDBACK") != nullptr);
+    const u32 writeSlot = s_singleFeedbackSlot ? 0u : (m_FeedbackFrame % kFeedbackSlots);
+    const u32 readSlot  = s_singleFeedbackSlot ? 0u : ((m_FeedbackFrame + 1u) % kFeedbackSlots);
     m_Device->UpdateDescriptorSet(m_FeedbackSet, 3, rhi::DescriptorType::StorageBuffer,
                                   m_ReqBuf[writeSlot].get());
     // 【验收用】合成漫游：静态相机下把"需要的页"人为轮换，用来把 LRU 淘汰路径压出来。
