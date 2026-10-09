@@ -89,10 +89,14 @@ public:
 
     /// 步骤 12：逐像素 SDF 追踪可视化（帧图的 SDF compute pass 每帧调用；相机参数由 Provider 传入）。
     ///
-    /// 【步骤 37：默认关掉】它是一张**只给工具看**的调试纹理（`lumen_sdf_trace` 转储、L1 验收用），
-    /// 却每帧都在全屏跑一次 sphere tracing —— 实测稳态占 1.67 ms，是 Lumen 计算 pass（4.9 ms）的 34%。
-    /// 关掉它**不影响画面**（它不是 GI 输出，没有任何 pass 采样它）。需要转储时用
-    /// `HE_LUMEN_SDF_DEBUG=1` 打开（`build/verify/lumen_smoke.ps1` 已经这么设）。
+    /// 【默认**开**着（与本节旧注释相反，2026-10 复核纠正）】它是一张**只给工具看**的调试纹理
+    /// （`lumen_sdf_trace` 转储、L1 验收用），却每帧都在全屏跑一次 sphere tracing ——
+    /// 实测稳态占 1.67 ms，是 Lumen 计算 pass（4.9 ms）的 34%。关掉它**不影响画面**
+    /// （它不是 GI 输出，没有任何 pass 采样它）。
+    /// 【关掉的正确做法】`HE_LUMEN_SDF_DISABLE_DEBUG=1`（见 `LumenScene.cpp` 的构造函数与
+    /// `m_SdfDebugView` 的声明）：默认值取"环境变量**不存在**"，所以不设就是开。
+    /// 旧注释写的 `HE_LUMEN_SDF_DEBUG=1`（打开）与 `build/verify/lumen_smoke.ps1` 都**不存在**
+    /// —— 前者全仓无 `getenv`，后者不在仓库（`build/` 不受版本控制）。
     void RunSDFDebug(rhi::IRHICommandList* cmd, const float3& camPos, const float3& forward,
                      const float3& right, const float3& up, float tanHalfFov, float aspect) {
         if (!m_SdfDebugView) return;
