@@ -8,6 +8,7 @@
 // 全部用 Load() 整数取像素（无采样器）。
 
 #include "ShaderTypes.slang"
+#include "MathCommon.slang"   // Luminance / sRGB 传递函数（唯一出处）
 
 [[vk::binding(0, 0)]] Texture2D<float4> g_Color;    // 时域降噪后 HDR
 [[vk::binding(1, 0)]] Texture2D<float>  g_Depth;    // 线性视图深度（米）
@@ -24,8 +25,6 @@ struct AtrousPC {
     float pad1, pad2;
 };
 [[vk::push_constant]] AtrousPC g_PC;
-
-float Luminance(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 
 [numthreads(8, 8, 1)]
 void main(uint3 idx : SV_DispatchThreadID) {

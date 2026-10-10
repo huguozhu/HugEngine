@@ -2,6 +2,7 @@
 // 输入全屏 HDR → 组内 parallel reduction → 256 个 partial sum 写入 SSBO
 // CPU 端 map SSBO 取平均 + 时间混合
 
+#include "MathCommon.slang"   // Luminance / sRGB 传递函数（唯一出处）
 [[vk::binding(0, 0)]] Texture2D<float4>              u_HDR;
 [[vk::binding(0, 0)]] SamplerState                     u_HDRSampler;
 [[vk::binding(1, 0)]] RWStructuredBuffer<float>        u_Result;  // 256 floats
@@ -14,8 +15,6 @@
 };
 
 groupshared float g_Sum[256];
-
-float Luminance(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 
 [numthreads(16, 16, 1)]
 void main(uint3 dtid : SV_DispatchThreadID, uint gi : SV_GroupIndex, uint3 gid : SV_GroupID) {
