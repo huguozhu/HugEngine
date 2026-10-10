@@ -17,7 +17,7 @@
 };
 
 // 整数哈希（噪声用，可复现）
-uint Hash(uint s) {
+uint AITexHash(uint s) {
     s ^= s >> 16; s *= 0x7feb352du;
     s ^= s >> 15; s *= 0x846ca68bu;
     s ^= s >> 16;
@@ -42,7 +42,7 @@ void main(uint3 id : SV_DispatchThreadID) {
         c = on ? colorA : colorB;
     } else if (pattern == 3) {
         // noise：灰度随机（colorA 亮度基底混合 30%）
-        uint r = Hash(y * width + x + seed);
+        uint r = AITexHash(y * width + x + seed);
         float n = float(r & 255) / 255.0;
         c = float4(float3(n) * 0.7 + colorA.rgb * 0.3, 1.0);
     }

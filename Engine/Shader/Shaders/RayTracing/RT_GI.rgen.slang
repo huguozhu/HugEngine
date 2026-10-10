@@ -27,7 +27,7 @@
 // === Push Constant ===
 [[vk::push_constant]] RTRayEffectPushConstant g_PC;
 
-#include "RT_Common.slang"   // Hash / Rand / ReconstructWorldPos（唯一出处）
+#include "RT_Common.slang"   // Hash / RandHash / ReconstructWorldPosFromIndex（唯一出处）
 // === Payload（与 ClosestHit/Miss 共享）===
 #include "RTPayloads.slang"   // ShadowPayload / RayPayload / GIPayload / ReflectionPayload（唯一出处）
 
@@ -50,14 +50,14 @@ void main() {
     float4 gbB = g_NormalRough.Load(int3(idx, 0));
     float3 N = normalize(gbB.xyz * 2.0 - 1.0);
 
-    float3 worldPos = ReconstructWorldPos(idx, depth);
+    float3 worldPos = ReconstructWorldPosFromIndex(idx, depth);
 
     uint n = max(1u, min(g_PC.sampleCount, 8u));
     float3 radiance = float3(0, 0, 0);
     uint valid = 0;
 
     for (uint s = 0; s < n; s++) {
-        float2 u = float2(Rand(idx, g_PC.frameIndex, s * 2), Rand(idx, g_PC.frameIndex, s * 2 + 1));
+        float2 u = float2(RandHash(idx, g_PC.frameIndex, s * 2), RandHash(idx, g_PC.frameIndex, s * 2 + 1));
         float3 dir = CosineSampleHemisphere(N, u);
 
         RayDesc ray;

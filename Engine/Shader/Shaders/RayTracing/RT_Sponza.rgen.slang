@@ -16,7 +16,7 @@ struct RTPushConstant {
 #include "RTPayloads.slang"   // ShadowPayload / RayPayload / GIPayload / ReflectionPayload（唯一出处）
 
 // 分层抖动：将像素划分为 √N × √N 网格，每个采样取一个子格中心
-float2 StratifiedJitter(uint sampleIdx, uint sampleCount) {
+float2 StratifiedJitterLCG(uint sampleIdx, uint sampleCount) {
     uint gridSize = uint(ceil(sqrt(float(sampleCount))));
     uint sx = sampleIdx % gridSize;
     uint sy = sampleIdx / gridSize;
@@ -37,7 +37,7 @@ void main() {
 
     float3 color = float3(0, 0, 0);
     for (uint s = 0; s < n; s++) {
-        float2 jitter = StratifiedJitter(s, n);
+        float2 jitter = StratifiedJitterLCG(s, n);
         float2 uv = (float2(idx) + jitter) / float2(dim);
 
         float4 ndc = float4(uv * 2.0 - 1.0, 0.5, 1.0);

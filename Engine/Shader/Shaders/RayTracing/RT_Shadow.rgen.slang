@@ -39,7 +39,7 @@ struct ShadowLight {
 // === Push Constant（共享结构，见 ShaderTypes.slang）===
 [[vk::push_constant]] RTShadowPushConstant g_PC;
 
-#include "RT_Common.slang"   // Hash / Rand / ReconstructWorldPos（唯一出处）
+#include "RT_Common.slang"   // Hash / RandHash / ReconstructWorldPosFromIndex（唯一出处）
 // === Payload（与 AnyHit/Miss 共享）===
 #include "RTPayloads.slang"   // ShadowPayload / RayPayload / GIPayload / ReflectionPayload（唯一出处）
 
@@ -74,8 +74,8 @@ float TraceShadowRaySoft(float3 worldPos, float3 N, ShadowLight light, uint spp)
             float3 up = abs(L.y) < 0.999 ? float3(0, 1, 0) : float3(1, 0, 0);
             float3 T  = normalize(cross(up, L));
             float3 B  = cross(L, T);
-            float  ang = light.radius.x * sqrt(Rand(idx, g_PC.frameIdx, s * 2));
-            float  phi = 6.2831853 * Rand(idx, g_PC.frameIdx, s * 2 + 1);
+            float  ang = light.radius.x * sqrt(RandHash(idx, g_PC.frameIdx, s * 2));
+            float  phi = 6.2831853 * RandHash(idx, g_PC.frameIdx, s * 2 + 1);
             dir = normalize(L + (T * cos(phi) + B * sin(phi)) * tan(ang));
         } else {
             // 点/聚光：面向 shade point 的圆盘上采样发射点（半径 radius.x）
@@ -83,8 +83,8 @@ float TraceShadowRaySoft(float3 worldPos, float3 N, ShadowLight light, uint spp)
             float3 up  = abs(toL.y) < 0.999 ? float3(0, 1, 0) : float3(1, 0, 0);
             float3 T   = normalize(cross(up, toL));
             float3 B   = cross(toL, T);
-            float  r   = light.radius.x * sqrt(Rand(idx, g_PC.frameIdx, s * 2));
-            float  phi = 6.2831853 * Rand(idx, g_PC.frameIdx, s * 2 + 1);
+            float  r   = light.radius.x * sqrt(RandHash(idx, g_PC.frameIdx, s * 2));
+            float  phi = 6.2831853 * RandHash(idx, g_PC.frameIdx, s * 2 + 1);
             float3 offset = (T * cos(phi) + B * sin(phi)) * r;
             float3 lp     = light.pos_type.xyz + offset;  // 采样后的光源发射点
             float3 toP    = lp - worldPos;
@@ -138,7 +138,7 @@ void main() {
     }
 
     // ── 重建世界坐标 ──
-    float3 worldPos = ReconstructWorldPos(idx, depth);
+    float3 worldPos = ReconstructWorldPosFromIndex(idx, depth);
 
     // ── 超出最大阴影距离 → 完全照亮 ──
     if (distance(worldPos, g_PC.cameraPos.xyz) > g_PC.maxShadowDist) {

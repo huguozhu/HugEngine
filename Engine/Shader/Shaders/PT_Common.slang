@@ -54,19 +54,19 @@ float SampleBlueNoise1(uint2 idx, uint frame, uint offset) {
     return g_BlueNoise.Load(int4(idx.x & 127u, idx.y & 127u, z, 0)).r;
 }
 
-float Rand(uint2 idx, uint frame, uint s) {
+float RandBlueNoise(uint2 idx, uint frame, uint s) {
     return SampleBlueNoise1(idx, frame, s);
 }
 
 uint RandInt(uint2 idx, uint frame, uint s, uint n) {
-    // 用 g 通道 + 额外空间偏移，避免与 Rand 同层同坐标（降低相关性）
+    // 用 g 通道 + 额外空间偏移，避免与 RandBlueNoise 同层同坐标（降低相关性）
     uint z = (frame + s * 29u) % 64u;
     float v = g_BlueNoise.Load(int4((idx.x + 37u) & 127u, (idx.y + 61u) & 127u, z, 0)).g;
     return uint(v * float(max(n, 1u))) % max(n, 1u);
 }
 
 // 分层抖动：将像素划分为 √N × √N 网格，每个采样取一个子格中心（STBN 偏移）
-float2 StratifiedJitter(uint sampleIdx, uint sampleCount, uint frameIndex) {
+float2 StratifiedJitterBlueNoise(uint sampleIdx, uint sampleCount, uint frameIndex) {
     uint gridSize = uint(ceil(sqrt(float(sampleCount))));
     uint sx = sampleIdx % gridSize;
     uint sy = sampleIdx / gridSize;
@@ -345,7 +345,7 @@ float2 TransformWorldToUV(float3 worldPos, float4x4 viewProj) {
 }
 
 // 线性视图深度 → 世界坐标（透视相机：cameraPos + 反投影方向 * depth）
-float3 ReconstructWorldPos(float2 uv, float depth, float4x4 invViewProj, float3 cameraPos) {
+float3 ReconstructWorldPosFromUV(float2 uv, float depth, float4x4 invViewProj, float3 cameraPos) {
     float2 ndc = uv * 2.0 - 1.0;
     ndc.y = -ndc.y;  // Vulkan NDC y 翻转
     float4 clipPos = float4(ndc, 1.0, 1.0);

@@ -19,7 +19,7 @@
 // === Push Constant（共享结构，见 ShaderTypes.slang）===
 [[vk::push_constant]] RTRayEffectPushConstant g_PC;
 
-#include "RT_Common.slang"   // Hash / Rand / ReconstructWorldPos（唯一出处）
+#include "RT_Common.slang"   // Hash / RandHash / ReconstructWorldPosFromIndex（唯一出处）
 // === Payload（与 ClosestHit/Miss 共享）===
 #include "RTPayloads.slang"   // ShadowPayload / RayPayload / GIPayload / ReflectionPayload（唯一出处）
 
@@ -51,13 +51,13 @@ void main() {
     }
 
     // ── 重建世界坐标 + 视线方向 ──
-    float3 worldPos = ReconstructWorldPos(idx, depth);
+    float3 worldPos = ReconstructWorldPosFromIndex(idx, depth);
     float3 V = normalize(g_PC.cameraPos.xyz - worldPos);
 
     // ── 反射方向：粗糙度 > 阈值时 GGX 重要性采样，否则镜面 ──
     float3 R = reflect(-V, N);
     if (roughness > 0.02) {
-        float2 u = float2(Rand(idx, g_PC.frameIndex, 0), Rand(idx, g_PC.frameIndex, 1));
+        float2 u = float2(RandHash(idx, g_PC.frameIndex, 0), RandHash(idx, g_PC.frameIndex, 1));
         float3 H = SampleGgxHalf(N, roughness, u, 1e-4);   // 沿用原 alpha 下限 1e-4
         R = reflect(-V, H);
         if (dot(R, N) < 0.0) R = reflect(-V, N);  // 回退镜面，避免射入表面内

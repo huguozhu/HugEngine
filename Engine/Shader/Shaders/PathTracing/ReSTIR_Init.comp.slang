@@ -9,7 +9,7 @@
 // 目标函数使用 PT 输出的真实 albedo/metallic（第 5 UAV），
 // 使 WRS 的 p̂ 与最终着色权重一致 → 降低有色物体的直接光噪声。
 
-#include "PT_Common.slang"  // Rand/RandInt/SampleLight/ReconstructWorldPos
+#include "PT_Common.slang"  // RandBlueNoise/RandInt/SampleLight/ReconstructWorldPosFromUV
 
 // === set=0 资源 ===
 [[vk::binding(0, 0)]] Texture2D<float>  g_Depth;    // ptDepth：线性视图深度（miss=-1000）
@@ -17,7 +17,7 @@
 [[vk::binding(2, 0)]] StructuredBuffer<GPULight> g_Lights;   // 光源 SSBO
 [[vk::binding(3, 0)]] RWStructuredBuffer<PTReservoir> g_Initial;  // InitialReservoir
 [[vk::binding(4, 0)]] Texture2D<float4> g_AlbedoMetallic;  // PT 第 5 UAV: albedo(rgb)+metallic(a)
-[[vk::binding(5, 0)]] Texture3D<float4> g_BlueNoise;       // STBN 时空蓝噪声（Load 采样，Rand/RandInt 用）
+[[vk::binding(5, 0)]] Texture3D<float4> g_BlueNoise;       // STBN 时空蓝噪声（Load 采样，RandBlueNoise/RandInt 用）
 
 // === Push Constant（128B，见 ShaderTypes.slang）===
 [[vk::push_constant]] ReSTIRPushConstant g_PC;
@@ -41,7 +41,7 @@ void main(uint3 idx : SV_DispatchThreadID) {
 
     // ── 重建世界坐标 + 材质数据 ──
     float2 uv = (float2(p) + 0.5) / float2(g_PC.dispatchDimX, g_PC.dispatchDimY);
-    float3 worldPos = ReconstructWorldPos(uv, -depth, g_PC.invViewProj, g_PC.cameraPos.xyz);
+    float3 worldPos = ReconstructWorldPosFromUV(uv, -depth, g_PC.invViewProj, g_PC.cameraPos.xyz);
     float4 nb = g_Normal.Load(int3(p, 0));
     float3 N = normalize(nb.xyz * 2.0 - 1.0);
     float  roughness = nb.a;
@@ -74,7 +74,7 @@ void main(uint3 idx : SV_DispatchThreadID) {
         r.weightSum += pHat;
         r.M++;
         // WRS：以 p̂/weightSum 概率替换当前选中样本
-        if (Rand(p, g_PC.frameIndex, i + 1000u) * r.weightSum < pHat) {
+        if (RandBlueNoise(p, g_PC.frameIndex, i + 1000u) * r.weightSum < pHat) {
             r.lightIndex = li;
             r.W = pHat;
             r.lightPos = float4(lightPos, 0.0);

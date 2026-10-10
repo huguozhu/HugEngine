@@ -13,22 +13,22 @@
 };
 
 // 感知亮度（BT.709）
-float Luma(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
+float LumaBT709(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 
 float4 fragmentMain(VSOutput input) : SV_Target0 {
     float2 uv  = input.uv;
     float2 step = invScreenSize;
 
     // 采样十字邻域
-    float c  = Luma(u_Input.Sample(u_Sampler, uv).rgb);
-    float l  = Luma(u_Input.Sample(u_Sampler, uv + float2(-1,  0) * step).rgb);
-    float r  = Luma(u_Input.Sample(u_Sampler, uv + float2( 1,  0) * step).rgb);
-    float t  = Luma(u_Input.Sample(u_Sampler, uv + float2( 0, -1) * step).rgb);
-    float b  = Luma(u_Input.Sample(u_Sampler, uv + float2( 0,  1) * step).rgb);
-    float tl = Luma(u_Input.Sample(u_Sampler, uv + float2(-1, -1) * step).rgb);
-    float tr = Luma(u_Input.Sample(u_Sampler, uv + float2( 1, -1) * step).rgb);
-    float bl = Luma(u_Input.Sample(u_Sampler, uv + float2(-1,  1) * step).rgb);
-    float br = Luma(u_Input.Sample(u_Sampler, uv + float2( 1,  1) * step).rgb);
+    float c  = LumaBT709(u_Input.Sample(u_Sampler, uv).rgb);
+    float l  = LumaBT709(u_Input.Sample(u_Sampler, uv + float2(-1,  0) * step).rgb);
+    float r  = LumaBT709(u_Input.Sample(u_Sampler, uv + float2( 1,  0) * step).rgb);
+    float t  = LumaBT709(u_Input.Sample(u_Sampler, uv + float2( 0, -1) * step).rgb);
+    float b  = LumaBT709(u_Input.Sample(u_Sampler, uv + float2( 0,  1) * step).rgb);
+    float tl = LumaBT709(u_Input.Sample(u_Sampler, uv + float2(-1, -1) * step).rgb);
+    float tr = LumaBT709(u_Input.Sample(u_Sampler, uv + float2( 1, -1) * step).rgb);
+    float bl = LumaBT709(u_Input.Sample(u_Sampler, uv + float2(-1,  1) * step).rgb);
+    float br = LumaBT709(u_Input.Sample(u_Sampler, uv + float2( 1,  1) * step).rgb);
 
     // 水平梯度（沿 X 轴变化）
     float hEdge  = abs(l - c) * 2.0 + abs(r - c) * 2.0

@@ -5,7 +5,7 @@
 //   3. 对中心像素重新评估邻域样本的目标函数 → WRS 合并
 //   4. 输出 FinalReservoir（PT_RayGen 下帧读取）
 
-#include "PT_Common.slang"  // Rand/SampleLight/ReconstructWorldPos
+#include "PT_Common.slang"  // RandBlueNoise/SampleLight/ReconstructWorldPosFromUV
 
 // === set=0 资源 ===
 [[vk::binding(0, 0)]] Texture2D<float>  g_Depth;       // ptDepth：线性视图深度
@@ -14,7 +14,7 @@
 [[vk::binding(3, 0)]] RWStructuredBuffer<PTReservoir> g_Final;    // FinalReservoir（本帧）
 [[vk::binding(4, 0)]] StructuredBuffer<GPULight> g_Lights;        // 光源 SSBO
 [[vk::binding(5, 0)]] Texture2D<float4> g_AlbedoMetallic;  // PT 第 5 UAV: albedo(rgb)+metallic(a)
-[[vk::binding(6, 0)]] Texture3D<float4> g_BlueNoise;       // STBN 时空蓝噪声（Load 采样，Rand 用）
+[[vk::binding(6, 0)]] Texture3D<float4> g_BlueNoise;       // STBN 时空蓝噪声（Load 采样，RandBlueNoise 用）
 
 // === Push Constant ===
 [[vk::push_constant]] ReSTIRPushConstant g_PC;
@@ -41,7 +41,7 @@ void main(uint3 idx : SV_DispatchThreadID) {
     if (depth < -0.01) {
         // 有效像素：重建世界坐标（天空像素在 Temporal 已直出空蓄水池）
         float2 uv = (float2(p) + 0.5) / float2(g_PC.dispatchDimX, g_PC.dispatchDimY);
-        float3 centerPos = ReconstructWorldPos(uv, -depth, g_PC.invViewProj, g_PC.cameraPos.xyz);
+        float3 centerPos = ReconstructWorldPosFromUV(uv, -depth, g_PC.invViewProj, g_PC.cameraPos.xyz);
         float4 nb = g_Normal.Load(int3(p, 0));
         float3 centerN = normalize(nb.xyz * 2.0 - 1.0);
         float  roughness = nb.a;
@@ -52,8 +52,8 @@ void main(uint3 idx : SV_DispatchThreadID) {
         int radius = max(1, int(g_PC.spatialRadius));
 
         for (uint i = 0; i < samples; i++) {
-            float2 off = float2(Rand(p, g_PC.frameIndex, i * 2 + 5),
-                                Rand(p, g_PC.frameIndex, i * 2 + 6)) * 2.0 - 1.0;
+            float2 off = float2(RandBlueNoise(p, g_PC.frameIndex, i * 2 + 5),
+                                RandBlueNoise(p, g_PC.frameIndex, i * 2 + 6)) * 2.0 - 1.0;
             int2 nbrIdx = int2(p) + int2(off * float(radius));
             if (nbrIdx.x < 0 || nbrIdx.x >= int(g_PC.dispatchDimX) ||
                 nbrIdx.y < 0 || nbrIdx.y >= int(g_PC.dispatchDimY))
@@ -66,7 +66,7 @@ void main(uint3 idx : SV_DispatchThreadID) {
             float nbrDepth = g_Depth.Load(int3(nbrIdx, 0)).r;
             if (nbrDepth < -0.01) continue;
             float2 nbrUv = (float2(nbrIdx) + 0.5) / float2(g_PC.dispatchDimX, g_PC.dispatchDimY);
-            float3 nbrPos = ReconstructWorldPos(nbrUv, -nbrDepth, g_PC.invViewProj, g_PC.cameraPos.xyz);
+            float3 nbrPos = ReconstructWorldPosFromUV(nbrUv, -nbrDepth, g_PC.invViewProj, g_PC.cameraPos.xyz);
             float3 nbrN = normalize(g_Normal.Load(int3(nbrIdx, 0)).xyz * 2.0 - 1.0);
             if (distance(centerPos, nbrPos) > 1.0) continue;   // 1m 位置容差
             if (dot(centerN, nbrN) < 0.9) continue;            // 法线朝向容差
@@ -79,7 +79,7 @@ void main(uint3 idx : SV_DispatchThreadID) {
 
             // WRS 合并
             float totalW = center.weightSum + pHat;
-            if (Rand(p, g_PC.frameIndex, i + 50u) * totalW < pHat) {
+            if (RandBlueNoise(p, g_PC.frameIndex, i + 50u) * totalW < pHat) {
                 // 选中邻域样本
                 center.lightIndex = nbr.lightIndex;
                 center.lightPos   = nbr.lightPos;

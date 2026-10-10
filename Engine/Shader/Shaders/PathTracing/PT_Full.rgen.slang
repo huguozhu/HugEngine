@@ -16,7 +16,7 @@
 // 被遮挡），miss 由 PT_Full.rmiss 写 a=-1 = 未遮挡。
 
 // STBN 时空蓝噪声（Load 采样）：必须先于 PT_Common.slang 解析，
-// 其随机函数体引用本全局（Rand/RandInt/StratifiedJitter）。
+// 其随机函数体引用本全局（RandBlueNoise/RandInt/StratifiedJitterBlueNoise）。
 [[vk::binding(10, 0)]] Texture3D<float4> g_BlueNoise;
 
 #include "PT_Common.slang"  // PathPayload + 随机数 + BSDF 采样 + SampleLight
@@ -91,7 +91,7 @@ void main() {
 
     for (uint s = 0; s < spp; s++) {
         // ── 相机光线（分层抖动）──
-        float2 jitter = StratifiedJitter(s, spp, g_PC.frameIndex);
+        float2 jitter = StratifiedJitterBlueNoise(s, spp, g_PC.frameIndex);
         float2 uv = (float2(idx) + jitter) / float2(dim);
         float2 ndc = uv * 2.0 - 1.0;
         ndc.y = -ndc.y;  // Vulkan NDC y 翻转
@@ -229,15 +229,15 @@ void main() {
             // ── 俄罗斯轮盘赌终止（bounce > 2 后按 throughput 概率终止）──
             if ((g_PC.flags & PT_FLAG_ROULETTE) != 0u) {
                 float survival = min(max(throughput.x, max(throughput.y, throughput.z)), 1.0);
-                if (bounce > 2 && Rand(idx, g_PC.frameIndex, s * 97 + bounce * 13) > survival)
+                if (bounce > 2 && RandBlueNoise(idx, g_PC.frameIndex, s * 97 + bounce * 13) > survival)
                     break;
                 throughput /= max(survival, 1e-3);
             }
 
             // ── BSDF 采样 → 下一根光线 ──
-            float2 uLobe = float2(Rand(idx, g_PC.frameIndex, s * 17 + bounce * 7 + 1), 0.0);
-            float2 uDir  = float2(Rand(idx, g_PC.frameIndex, s * 23 + bounce * 11 + 3),
-                                  Rand(idx, g_PC.frameIndex, s * 23 + bounce * 11 + 4));
+            float2 uLobe = float2(RandBlueNoise(idx, g_PC.frameIndex, s * 17 + bounce * 7 + 1), 0.0);
+            float2 uDir  = float2(RandBlueNoise(idx, g_PC.frameIndex, s * 23 + bounce * 11 + 3),
+                                  RandBlueNoise(idx, g_PC.frameIndex, s * 23 + bounce * 11 + 4));
             float pdf;
             float3 deltaWeight = float3(0.0);
             bool   isDelta     = false;

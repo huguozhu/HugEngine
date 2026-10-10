@@ -12,7 +12,7 @@
 };
 
 // RGB → 感知亮度
-float Luma(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }
+float LumaBT601(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }
 
 float4 fragmentMain(VSOutput input) : SV_Target0 {
     float2 uv = input.uv;
@@ -30,9 +30,9 @@ float4 fragmentMain(VSOutput input) : SV_Target0 {
     float3 c22 = u_Input.Sample(u_Sampler, uv + float2( 1, 1)*step).rgb;
 
     // 计算亮度
-    float l00=Luma(c00),l10=Luma(c10),l20=Luma(c20);
-    float l01=Luma(c01),l11=Luma(c11),l21=Luma(c21);
-    float l02=Luma(c02),l12=Luma(c12),l22=Luma(c22);
+    float l00=LumaBT601(c00),l10=LumaBT601(c10),l20=LumaBT601(c20);
+    float l01=LumaBT601(c01),l11=LumaBT601(c11),l21=LumaBT601(c21);
+    float l02=LumaBT601(c02),l12=LumaBT601(c12),l22=LumaBT601(c22);
 
     // 边缘检测：水平和垂直梯度
     float hGrad = abs(l01+l21-2*l11) * 0.5 + abs(l00+l20-2*l10)*0.25 + abs(l02+l22-2*l12)*0.25;
