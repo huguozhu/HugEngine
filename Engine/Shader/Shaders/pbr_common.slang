@@ -1,12 +1,19 @@
 // ============================================================
-// pbr_common.slang — PBR BRDF 函数库
+// pbr_common.slang — PBR BRDF 函数库（**零绑定**）
 //
-// Cook-Torrance 微面元镜面 BRDF + Lambertian 漫反射
+// Cook-Torrance 微面元镜面 BRDF + Lambertian 漫反射 + PCF/点光阴影采样。
+//
+// 【为什么零绑定很重要】本文件此前 include `common.slang`（那个头声明了 set-0 的 bindless
+// 数组 u_Textures/u_Samplers/u_Materials），于是任何"对描述符布局敏感"的阶段（RT 各阶段、
+// Lumen）都无法引用 BRDF —— 这正是 `RT_HitCommon.slang` 当年自带一套朗伯求值而不用
+// `PBR_BRDF` 的原因之一。现在只依赖 `MathCommon`（常数）与 `ShaderTypes`（GPU 结构体），
+// 两者都不声明绑定 ⇒ RT / Lumen / IBL 都能安全 include。
+// 需要 bindless 数组的文件请自行 `#include "common.slang"`。
 // ============================================================
 #ifndef HUGENGINE_PBR_COMMON_SLANG
 #define HUGENGINE_PBR_COMMON_SLANG
 
-#include "common.slang"
+#include "MathCommon.slang"   // HE_PI / HE_EPSILON（纯常数，无绑定）
 #include "ShaderTypes.slang"  // GPU struct 共享定义（GPULight, GPUShadowData 等）
 
 // ============================================================
@@ -54,8 +61,23 @@ float G_SchlickGGX(float NdotV, float roughness) {
     return NdotV / (NdotV * (1.0 - k) + k);
 }
 
-float G_Smith(float NdotV, float NdotL, float roughness) {
+// 【两套 Smith 的 k 不可混用】本函数用 Karis/UE4 的**直接光**惯例 k = (roughness+1)²/8；
+// IBL 烘焙端用的是另一套 k = α/2（见下方 G_Smith_IBL，split-sum 的 LUT 必须与预滤波同族）。
+// 两者名字里已带 _Direct / _IBL 后缀，避免再次出现"同名不同 k"。
+float G_Smith_Direct(float NdotV, float NdotL, float roughness) {
     return G_SchlickGGX(NdotV, roughness) * G_SchlickGGX(NdotL, roughness);
+}
+
+// IBL 端的 Smith-GGX：k = α/2（α = roughness²），与 `IBL_BRDF_LUT.frag` 的积分同族。
+// 移自 `GI/IBL_BRDF_LUT.frag.slang`（原先该文件自带一份同名 G_Smith，与上面的直接光版冲突）。
+// 【历史】2026-09 画质阶段 0 修过一次：原式 `k = a * a * 0.5` 展开是 roughness⁴/2，比 IBL 惯例
+//   多平方了一次 ⇒ 间接高光偏亮（roughness 0.5 / NdotV 0.5 处 A、B 分别偏大 16.6% 与 27.0%）。
+float G_Smith_IBL(float NdotV, float NdotL, float roughness) {
+    float a = roughness * roughness;   // α（Disney/GGX 的 α = roughness²）
+    float k = a * 0.5;                 // IBL 简化 k = α/2
+    float G1V = NdotV / (NdotV * (1.0 - k) + k);
+    float G1L = NdotL / (NdotL * (1.0 - k) + k);
+    return G1V * G1L;
 }
 
 // ============================================================
@@ -187,7 +209,7 @@ float3 PBR_BRDF(float3 albedo, float metallic, float roughness,
     float D = (anisotropic > 0.0)
             ? D_GGX_aniso(NdotH, HdotT, HdotB, alpha / aspect, alpha * aspect)
             : D_GGX(NdotH, roughness);
-    float  G = G_Smith(NdotV, NdotL, roughness);
+    float  G = G_Smith_Direct(NdotV, NdotL, roughness);
 
     float3 specularBRDF = (D * G * F) / max(4.0 * NdotV * NdotL, HE_EPSILON);
 
@@ -215,7 +237,7 @@ float3 PBR_BRDF(float3 albedo, float metallic, float roughness,
     // clearcoat：第二层镜面（IOR 1.5，GGX），按 clearcoat 强度混合
     float Fcc = 0.04 + 0.96 * pow(1.0 - HdotV, 5.0);   // 清漆层菲涅尔（IOR 1.5 → F0=0.04）
     float Dcc = D_GGX(NdotH, clearcoatGloss);           // 内部 alpha = clearcoatGloss²
-    float Gcc = G_Smith(NdotV, NdotL, clearcoatGloss);
+    float Gcc = G_Smith_Direct(NdotV, NdotL, clearcoatGloss);
     float3 clearcoatLobe = (Dcc * Gcc) / max(4.0 * NdotV * NdotL, HE_EPSILON);   // 不含 Fcc（Fcc 在下方混合时应用一次）
     baseBRDF = lerp(baseBRDF, (1.0 - Fcc) * baseBRDF + Fcc * clearcoatLobe, clearcoat);
 

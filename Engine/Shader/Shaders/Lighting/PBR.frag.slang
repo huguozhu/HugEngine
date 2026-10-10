@@ -5,6 +5,8 @@
 // ============================================================
 
 #include "ShaderTypes.slang"   // IndirectCmd / GPUSceneObject / LightUB 等共享契约结构体
+#include "common.slang"        // bindless 数组 u_Textures/u_Samplers/u_Materials + ACESFilm
+                               // （pbr_common 已改为**零绑定**，不再传递引入这些绑定）
 #include "pbr_common.slang"
 #include "Atmosphere.slang"  // 空中透视（大气消光 + 入射散射）
 
