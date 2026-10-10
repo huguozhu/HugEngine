@@ -4,20 +4,13 @@
 //   `CameraData::jitterNdc` 施加）。这样速度矢量 = (本帧含抖动 NDC) − (上帧含抖动 NDC)，
 //   TAA resolve 用 `historyUV = uv − velocity` 正好落到"同一世界点在上帧被采样到的那个
 //   亚像素位置"，无需在 resolve 里再补一个 jitter 项（见 GBuffer.frag.slang 的说明）。
+#include "MeshVS.slang"   // GBufferVSOutput / PBRVSOutput / RSMVSOutput（接口唯一出处）
 #include "common.slang"
 
 struct VSInput {
     [[vk::location(0)]] float3 positionOS;
     [[vk::location(1)]] float3 normalOS;
     [[vk::location(2)]] float2 uv;
-};
-
-struct VSOutput {
-    float4 position              : SV_Position;
-    [[vk::location(0)]] float3 worldPos;
-    [[vk::location(1)]] float3 worldNormal;
-    [[vk::location(2)]] float2 uv;
-    [[vk::location(3)]] float4 prevClipPos;   // 上一帧裁剪空间位置（含上帧抖动）→ velocity 计算
 };
 
 // GPUObjectData 定义来自 ShaderTypes.slang（C++/Slang 共享）
@@ -40,7 +33,7 @@ struct VSOutput {
     uint     _pad[12];               // 填充到 192B
 };
 
-VSOutput vertexMain(VSInput input, uint instanceID : SV_InstanceID) {
+GBufferVSOutput vertexMain(VSInput input, uint instanceID : SV_InstanceID) {
     // 对象/材质条目：GPU Driven 模式（1）用 SV_InstanceID 当对象下标；
     // 实例化网格（2）是"一个对象条目 + N 个实例"——对象下标仍取 push constant 的 objectIndex，
     // 只有世界矩阵来自实例 SSBO（这一点与 PBR.vert 的语义必须一致，否则会越界读到别的物体）。
@@ -56,7 +49,7 @@ VSOutput vertexMain(VSInput input, uint instanceID : SV_InstanceID) {
     }
     float4 worldPos = mul(worldMatrix, float4(input.positionOS, 1.0));
 
-    VSOutput output;
+    GBufferVSOutput output;
     output.position    = mul(viewProjMatrix, worldPos);      // 含当前帧抖动
     output.prevClipPos = mul(prevViewProjMatrix, worldPos);  // 含上帧抖动；两者相减即"含抖动的真实位移"
     output.worldPos    = worldPos.xyz;

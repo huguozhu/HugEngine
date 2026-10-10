@@ -3,6 +3,7 @@
 // per-object 数据从 Storage Buffer 读取
 // ============================================================
 
+#include "MeshVS.slang"   // GBufferVSOutput / PBRVSOutput / RSMVSOutput（接口唯一出处）
 #include "ShaderTypes.slang"  // GPUObjectData 共享定义
 layout(location = 0) in float3 inPosition;
 layout(location = 1) in float3 inNormal;
@@ -46,16 +47,8 @@ layout(location = 4) in float4 inWeights;   // 权重 ×4
     uint     instancePad[2];
 };
 
-struct VSOutput {
-    float4 position      : SV_Position;
-    [[vk::location(0)]] float3 worldPos;
-    [[vk::location(1)]] float3 worldNormal;
-    [[vk::location(2)]] float2 uv;
-    [[vk::location(3)]] nointerpolation uint objectIndex;  // 传递到 FS
-};
-
-VSOutput vertexMain(uint instanceID : SV_InstanceID) {
-    VSOutput output;
+PBRVSOutput vertexMain(uint instanceID : SV_InstanceID) {
+    PBRVSOutput output;
     uint objIdx = objectIndex;
     GPUObjectData obj = u_Objects[objIdx];
     float4x4 worldMatrix = obj.worldMatrix;

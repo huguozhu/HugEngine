@@ -18,6 +18,7 @@
 //   E/π = Σ L_v · A · cosθ_s · cosθ_r / (π d²)（见着色器约定），因此把 1/π 放在生成端，
 //   消费端只乘"每个采样点代表的世界面积 / π"这一个由光锥尺度推出的常量。
 // ============================================================
+#include "MeshVS.slang"   // GBufferVSOutput / PBRVSOutput / RSMVSOutput（接口唯一出处）
 #include "common.slang"  // HE_PI + ShaderTypes.slang（GPULight 共享定义）
 
 // 【为什么 albedo 走 push constant 而不是 u_Objects[objectIndex].baseColorFactor】
@@ -26,11 +27,6 @@
 //   从对象缓冲读材质字段会读到没被填过的槽（baseColorFactor = 0），实测只有 3% 的 texel
 //   有非零辐射度（其余是被清成 0 的 albedo），而 pass 成本照付：§9.2-AA 同一族的第五例。
 //   albedo 是**逐物体常量**，本来就该随 push constant 走（VS/FS 都能读）。
-struct VSOutput {
-    float4 position              : SV_Position;
-    [[vk::location(0)]] float3 worldPos;
-    [[vk::location(1)]] float3 worldNormal;
-};
 
 struct FSOutput {
     [[vk::location(0)]] float4 posAndUnused    : SV_Target0;
@@ -50,7 +46,7 @@ struct FSOutput {
     float4   vplAlbedo;    // 该 draw 的 VPL 漫反射率（见文件头：不能从对象缓冲读）
 };
 
-FSOutput fragmentMain(VSOutput input) {
+FSOutput fragmentMain(RSMVSOutput input) {
     FSOutput output;
 
     // MRT 0: 世界空间位置

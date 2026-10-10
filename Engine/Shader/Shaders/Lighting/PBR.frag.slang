@@ -4,19 +4,12 @@
 // 通过 push constant useClustered 运行时切换
 // ============================================================
 
+#include "MeshVS.slang"   // GBufferVSOutput / PBRVSOutput / RSMVSOutput（接口唯一出处）
 #include "ShaderTypes.slang"   // IndirectCmd / GPUSceneObject / LightUB 等共享契约结构体
 #include "common.slang"        // bindless 数组 u_Textures/u_Samplers/u_Materials + ACESFilm
                                // （pbr_common 已改为**零绑定**，不再传递引入这些绑定）
 #include "pbr_common.slang"
 #include "Atmosphere.slang"  // 空中透视（大气消光 + 入射散射）
-
-struct FSInput {
-    float4 position : SV_Position;
-    [[vk::location(0)]] float3 worldPos;
-    [[vk::location(1)]] float3 worldNormal;
-    [[vk::location(2)]] float2 uv;
-    [[vk::location(3)]] nointerpolation uint objectIndex;  // 从 VS 传入
-};
 
 // GPUObjectData 定义来自 ShaderTypes.slang（C++/Slang 共享）
 
@@ -271,7 +264,7 @@ float3 FwdSpecularSource(uint id, float3 F, float2 envBRDF, float3 prefilteredCo
     return float3(0.0);
 }
 
-float4 fragmentMain(FSInput input) : SV_Target0 {
+float4 fragmentMain(PBRVSOutput input) : SV_Target0 {
     GPUObjectData obj = u_Objects[input.objectIndex];
 
     uint texBase = obj.materialID;

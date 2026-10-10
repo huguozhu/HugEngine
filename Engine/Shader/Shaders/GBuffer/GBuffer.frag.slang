@@ -13,15 +13,8 @@
 // 已有的 worldPos 做不到这件事（同一个世界位置可能对应多个 UV），而 UV0 与 objectIndex
 // 合起来就是键：页号 = objectIndex，页内坐标 = uv0。这就是任务 18 记下的前置条件 ①。
 
+#include "MeshVS.slang"   // GBufferVSOutput / PBRVSOutput / RSMVSOutput（接口唯一出处）
 #include "common.slang"
-
-struct VSOutput {
-    float4 position              : SV_Position;
-    [[vk::location(0)]] float3 worldPos;
-    [[vk::location(1)]] float3 worldNormal;
-    [[vk::location(2)]] float2 uv;
-    [[vk::location(3)]] float4 prevClipPos;
-};
 
 // GPUObjectData 定义来自 ShaderTypes.slang（C++/Slang 共享）
 
@@ -50,7 +43,7 @@ struct FSOutput {
     [[vk::location(7)]] float4 lightmapKey      : SV_Target7;
 };
 
-FSOutput fragmentMain(VSOutput input) {
+FSOutput fragmentMain(GBufferVSOutput input) {
     GPUObjectData obj = u_Objects[objectIndex];
 
     // ── MRT 0-2：PBR 材质（bindless 纹理数组采样，按 textureMask 判断槽有无纹理） ──
