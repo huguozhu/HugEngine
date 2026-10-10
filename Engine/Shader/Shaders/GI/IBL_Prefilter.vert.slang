@@ -8,12 +8,9 @@
     float4x4 invViewProj;
 };
 
-struct VSOutput {
-    float4 position            : SV_Position;
-    [[vk::location(0)]] float3 worldDir;
-};
+#include "FullscreenVS.slang"   // VSOutputWorldDir / VSOutputWorldDir（接口唯一出处）
 
-VSOutput vertexMain(uint vid : SV_VertexID) {
+VSOutputWorldDir vertexMain(uint vid : SV_VertexID) {
     float2 clipPos[3] = {
         float2(-1.0, -1.0),
         float2( 3.0, -1.0),
@@ -21,7 +18,7 @@ VSOutput vertexMain(uint vid : SV_VertexID) {
     };
     float2 pos = clipPos[vid];
 
-    VSOutput output;
+    VSOutputWorldDir output;
     output.position = float4(pos.x, pos.y, 1.0, 1.0);
 
     float4 worldPos = mul(invViewProj, float4(pos.x, pos.y, 1.0, 1.0));

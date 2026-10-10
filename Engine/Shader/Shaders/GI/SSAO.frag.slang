@@ -1,8 +1,5 @@
 // SSAO.frag.slang — 屏幕空间环境光遮蔽
-struct VSOutput {
-    float4 position : SV_Position;
-    [[vk::location(0)]] float2 uv;
-};
+#include "FullscreenVS.slang"   // VSOutput / VSOutputWorldDir（接口唯一出处）
 
 [[vk::binding(0, 0)]] Texture2D<float>  u_Depth;
 [[vk::binding(1, 0)]] Texture2D<float4> u_Normal;

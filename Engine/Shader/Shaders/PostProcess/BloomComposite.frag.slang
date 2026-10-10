@@ -1,10 +1,7 @@
 // BloomComposite.frag.slang — Bloom 合成（上采样 + 叠加回原始 HDR）
 // 输入：全分辨率 HDR + 半分辨率模糊 Bloom → 输出：全分辨率 HDR+Bloom
 
-struct VSOutput {
-    float4 position : SV_Position;
-    [[vk::location(0)]] float2 uv;
-};
+#include "FullscreenVS.slang"   // VSOutput / VSOutputWorldDir（接口唯一出处）
 
 [[vk::binding(0, 0)]] Texture2D<float4> u_HDR;
 [[vk::binding(0, 0)]] SamplerState      u_HDRSampler;

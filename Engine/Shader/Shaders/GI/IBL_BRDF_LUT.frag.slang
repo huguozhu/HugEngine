@@ -7,10 +7,7 @@
 // 输出 R=scale(DFG1), G=bias(DFG2), B=0, A=1
 // ============================================================
 
-struct VSOutput {
-    float4 position          : SV_Position;
-    [[vk::location(0)]] float2 uv;
-};
+#include "FullscreenVS.slang"   // VSOutput / VSOutputWorldDir（接口唯一出处）
 
 static const uint SAMPLE_COUNT = 256;
 

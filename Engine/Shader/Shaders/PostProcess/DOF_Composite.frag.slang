@@ -1,9 +1,6 @@
 // DOF_Composite.frag.slang — 景深合成（CoC 驱动的 lerp 混合）
 
-struct VSOutput {
-    float4 position : SV_Position;
-    [[vk::location(0)]] float2 uv;
-};
+#include "FullscreenVS.slang"   // VSOutput / VSOutputWorldDir（接口唯一出处）
 
 [[vk::binding(0, 0)]] Texture2D<float4> u_Sharp;      // 原始清晰 HDR
 [[vk::binding(0, 0)]] SamplerState      u_SharpSampler;

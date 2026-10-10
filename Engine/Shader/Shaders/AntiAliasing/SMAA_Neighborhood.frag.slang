@@ -1,10 +1,7 @@
 // SMAA_Neighborhood.frag.slang — SMAA 邻域混合 Pass
 // 读取原始 LDR 颜色 + 混合权重，4 方向邻域加权混合 → 输出抗锯齿结果
 
-struct VSOutput {
-    float4 position : SV_Position;
-    [[vk::location(0)]] float2 uv;
-};
+#include "FullscreenVS.slang"   // VSOutput / VSOutputWorldDir（接口唯一出处）
 
 [[vk::binding(0, 0)]] Texture2D<float4> u_Input;       // 原始 LDR 颜色（Linear 采样）
 [[vk::binding(0, 0)]] SamplerState      u_InputSampler;

@@ -14,7 +14,7 @@
 //   · 源 alpha < 0 ⇒ 无效样本，不参与加权平均；
 //   · 邻域内全无有效样本 ⇒ 输出 alpha = -1（合成端跳过本源的这一条，且不计入归一化分母）。
 // 少了任何一半，半分辨率路径上的"本条无数据"就会在升采样这一步丢失。
-struct VSOutput { float4 p:SV_Position; [[vk::location(0)]] float2 uv; };
+#include "FullscreenVS.slang"   // VSOutput / VSOutputWorldDir（接口唯一出处）
 
 [[vk::binding(0,0)]] Texture2D<float4> u_Input;      // 信号分辨率的降噪结果
 [[vk::binding(1,0)]] Texture2D<float>  u_Depth;       // GBuffer 深度（目标/全分辨率）

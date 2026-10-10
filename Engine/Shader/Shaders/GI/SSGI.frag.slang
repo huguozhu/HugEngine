@@ -28,7 +28,7 @@
 //   · 距离衰减项已删除：它此前用的是 |sDir|²，量纲不对；正确的距离项需要采样点与
 //     几何的**实际**距离，而本方案只在固定半径处取一个样本，没有这个信息。固定半径
 //     采样对 L 的估计偏差是本方案的已知近似，不靠一个经验衰减项来掩盖。
-struct VSOutput { float4 p:SV_Position; [[vk::location(0)]] float2 uv; };
+#include "FullscreenVS.slang"   // VSOutput / VSOutputWorldDir（接口唯一出处）
 
 [[vk::binding(0,0)]] Texture2D<float>  u_Depth;
 [[vk::binding(1,0)]] Texture2D<float4> u_Normal;

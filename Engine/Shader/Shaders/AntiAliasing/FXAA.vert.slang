@@ -1,8 +1,5 @@
 // FXAA.vert.slang — 全屏三角形
-struct VSOutput {
-    float4 position : SV_Position;
-    [[vk::location(0)]] float2 uv;
-};
+#include "FullscreenVS.slang"   // VSOutput / VSOutputWorldDir（接口唯一出处）
 
 VSOutput vertexMain(uint vid : SV_VertexID) {
     float2 pos[3] = { float2(-1,-1), float2(3,-1), float2(-1,3) };

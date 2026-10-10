@@ -28,7 +28,7 @@
 // 【天空像素写 0】这是与 SSGI 相同的约定：天空像素没有接收面，写 0 之后双线性升采样会在
 // 物体轮廓处混入一点 0（一圈很细的偏暗）。若改成"不写"，插值到的就是上一步的垃圾值。
 // 这个代价与收益一起由 A/B 读数判定（轮廓一圈的占比是可见的）。
-struct VSOutput { float4 p:SV_Position; [[vk::location(0)]] float2 uv; };
+#include "FullscreenVS.slang"   // VSOutput / VSOutputWorldDir（接口唯一出处）
 
 [[vk::binding(0,0)]] Texture2D<float>   u_Depth;          // GBuffer 深度
 [[vk::binding(1,0)]] Texture2D<float4>  u_WorldPos;       // GBuffer MRT4：世界坐标

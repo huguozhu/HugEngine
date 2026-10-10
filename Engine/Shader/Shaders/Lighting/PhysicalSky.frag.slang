@@ -3,10 +3,7 @@
 
 static const float SKY_PI = 3.14159265359;
 
-struct VSOutput {
-    float4 position : SV_Position;
-    [[vk::location(0)]] float3 worldDir;
-};
+#include "FullscreenVS.slang"   // VSOutputWorldDir / VSOutputWorldDir（接口唯一出处）
 
 [[vk::push_constant]] cbuffer PhysicalSkyPC {
     float4x4 invViewProjMatrix;  // [0..64]（VS 使用，与 Skybox.vert 对齐）
@@ -25,7 +22,7 @@ float Perez(float A, float B, float C, float D, float E, float cosTheta, float g
     return t * (1.0 + C * exp(D * gamma) + E * cosGamma * cosGamma);
 }
 
-float4 fragmentMain(VSOutput input) : SV_Target0 {
+float4 fragmentMain(VSOutputWorldDir input) : SV_Target0 {
     float3 dir = normalize(input.worldDir);
     float3 sun = normalize(sunDirection);
 

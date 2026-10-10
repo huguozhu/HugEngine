@@ -4,10 +4,7 @@
 // 全屏三角形，输出 UV 坐标（Vulkan NDC → [0,1] UV）。
 // ============================================================
 
-struct VSOutput {
-    float4 position          : SV_Position;
-    [[vk::location(0)]] float2 uv;
-};
+#include "FullscreenVS.slang"   // VSOutput / VSOutputWorldDir（接口唯一出处）
 
 VSOutput vertexMain(uint vid : SV_VertexID) {
     float2 clipPos[3] = {

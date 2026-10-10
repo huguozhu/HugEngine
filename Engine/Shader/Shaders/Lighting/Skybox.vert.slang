@@ -12,12 +12,9 @@
     float3   _pad;
 };
 
-struct VSOutput {
-    float4 position      : SV_Position;
-    [[vk::location(0)]] float3 worldDir;  // 世界空间采样方向
-};
+#include "FullscreenVS.slang"   // VSOutputWorldDir / VSOutputWorldDir（接口唯一出处）
 
-VSOutput vertexMain(uint vid : SV_VertexID) {
+VSOutputWorldDir vertexMain(uint vid : SV_VertexID) {
     // 全屏三角形（3 顶点覆盖整个屏幕）
     float2 clipPos[3] = {
         float2(-1.0, -1.0),
@@ -26,7 +23,7 @@ VSOutput vertexMain(uint vid : SV_VertexID) {
     };
     float2 pos = clipPos[vid];
 
-    VSOutput output;
+    VSOutputWorldDir output;
     // NDC 输出：xy=屏幕位置, z=1.0=远平面, w=1.0
     // 深度测试 EQUAL 配合深度缓冲清空值 1.0，仅在无几何体像素绘制
     output.position = float4(pos.x, pos.y, 1.0, 1.0);

@@ -18,7 +18,7 @@
 // 现在先把射线投影成屏幕段 s0→s1，再在其上做 DDA。
 //
 // u_UseHiZ=0 时回退线性 march（Hi-Z 金字塔不可用时）。
-struct VSOutput { float4 p:SV_Position; [[vk::location(0)]] float2 uv; };
+#include "FullscreenVS.slang"   // VSOutput / VSOutputWorldDir（接口唯一出处）
 
 [[vk::binding(0,0)]] Texture2D<float>  u_Depth;
 [[vk::binding(1,0)]] Texture2D<float4> u_Normal;

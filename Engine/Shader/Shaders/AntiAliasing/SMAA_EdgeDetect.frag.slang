@@ -2,10 +2,7 @@
 // 基于亮度梯度的边缘检测，输出 R8 编码的边缘类型
 //   R=0: 非边缘, R=0.5: 水平边缘, R=1.0: 垂直边缘
 
-struct VSOutput {
-    float4 position : SV_Position;
-    [[vk::location(0)]] float2 uv;
-};
+#include "FullscreenVS.slang"   // VSOutput / VSOutputWorldDir（接口唯一出处）
 
 [[vk::binding(0, 0)]] Texture2D<float4> u_Input;
 [[vk::binding(0, 0)]] SamplerState      u_Sampler;

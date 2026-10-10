@@ -2,10 +2,7 @@
 // 算法：重投影 → disocclusion 检测 → 邻域 AABB 裁剪 → 混合
 #include "common.slang"
 
-struct VSOutput {
-    float4 position          : SV_Position;
-    [[vk::location(0)]] float2 uv;
-};
+#include "FullscreenVS.slang"   // VSOutput / VSOutputWorldDir（接口唯一出处）
 
 // ── 输入纹理（set=0） ──
 [[vk::binding(0, 0)]] Texture2D<float4> u_CurrentColor;

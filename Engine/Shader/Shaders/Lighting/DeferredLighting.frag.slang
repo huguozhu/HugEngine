@@ -10,10 +10,7 @@
 #include "RT_DDGI.slang"  // DDGI 探针查询共享库（EvalDDGI_SH + SampleDDGI）
 #include "Atmosphere.slang"  // 空中透视（大气消光 + 入射散射）
 
-struct VSOutput {
-    float4 position          : SV_Position;
-    [[vk::location(0)]] float2 uv;
-};
+#include "FullscreenVS.slang"   // VSOutput / VSOutputWorldDir（接口唯一出处）
 
 // GBuffer 纹理
 [[vk::binding(kGPUBinding_GBufferA, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferA;  // albedo.rgb + metallic

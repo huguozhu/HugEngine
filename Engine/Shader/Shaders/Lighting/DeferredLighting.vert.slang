@@ -1,10 +1,7 @@
 // DeferredLighting.vert — 全屏三角形延迟光照顶点着色器
 // SV_VertexID 驱动，无需 VB/IB
 
-struct VSOutput {
-    float4 position          : SV_Position;
-    [[vk::location(0)]] float2 uv;
-};
+#include "FullscreenVS.slang"   // VSOutput / VSOutputWorldDir（接口唯一出处）
 
 VSOutput vertexMain(uint vid : SV_VertexID) {
     float2 clipPos = float2(

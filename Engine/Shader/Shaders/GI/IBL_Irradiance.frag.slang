@@ -5,10 +5,7 @@
 // 每个 pixel 输出当前面方向上的半球积分结果。
 // ============================================================
 
-struct VSOutput {
-    float4 position            : SV_Position;
-    [[vk::location(0)]] float3 worldDir;
-};
+#include "FullscreenVS.slang"   // VSOutputWorldDir / VSOutputWorldDir（接口唯一出处）
 
 [[vk::binding(0, 0)]] TextureCube<float4> u_SkyboxTexture;
 [[vk::binding(0, 0)]] SamplerState       u_SkyboxSampler;
@@ -16,7 +13,7 @@ struct VSOutput {
 // 半球均匀采样步长（32×32 辐照度图，16 采样点足矣）
 static const float SAMPLE_DELTA = 0.05;
 
-float4 fragmentMain(VSOutput input) : SV_Target0 {
+float4 fragmentMain(VSOutputWorldDir input) : SV_Target0 {
     float3 N = normalize(input.worldDir);  // 当前面像素对应的世界方向（法线）
 
     // 构建切线空间基（绕 N 的半球采样）

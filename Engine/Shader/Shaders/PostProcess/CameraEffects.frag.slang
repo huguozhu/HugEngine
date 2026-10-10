@@ -1,10 +1,7 @@
 // CameraEffects.frag.slang — 镜头后处理（胶片颗粒/晕影/色差/镜头畸变）
 // 输入 LDR BGRA8 → 输出 LDR BGRA8
 
-struct VSOutput {
-    float4 position : SV_Position;
-    [[vk::location(0)]] float2 uv;
-};
+#include "FullscreenVS.slang"   // VSOutput / VSOutputWorldDir（接口唯一出处）
 
 [[vk::binding(0, 0)]] Texture2D<float4> u_Input;
 [[vk::binding(0, 0)]] SamplerState      u_Sampler;

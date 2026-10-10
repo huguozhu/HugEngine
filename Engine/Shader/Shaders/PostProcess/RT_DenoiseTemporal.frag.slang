@@ -2,10 +2,7 @@
 // 用途：对所有 RT 效果输出（阴影/反射/AO/GI）做时域重投影累积，抑制单帧噪声。
 // 算法：GBuffer Velocity 重投影历史帧 → 深度/法线去遮挡检测 → 自适应混合。
 // 支持任意通道格式（R16/R8 取 .r 通道，RGBA16 全通道），通过 float4 统一处理。
-struct VSOutput {
-    float4 position          : SV_Position;
-    [[vk::location(0)]] float2 uv;
-};
+#include "FullscreenVS.slang"   // VSOutput / VSOutputWorldDir（接口唯一出处）
 
 // ── 输入纹理（set=0，CombinedImageSampler）──
 [[vk::binding(0, 0)]] Texture2D<float4> u_NoisyColor;  // 当前帧噪声 RT 输出

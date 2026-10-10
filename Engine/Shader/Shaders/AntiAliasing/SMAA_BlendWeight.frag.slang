@@ -2,10 +2,7 @@
 // 沿边缘方向搜索端点距离 → 解析计算混合权重 → 输出 RGBA8 四方向权重
 //   R=左, G=右, B=上, A=下
 
-struct VSOutput {
-    float4 position : SV_Position;
-    [[vk::location(0)]] float2 uv;
-};
+#include "FullscreenVS.slang"   // VSOutput / VSOutputWorldDir（接口唯一出处）
 
 [[vk::binding(0, 0)]] Texture2D<float4> u_EdgeTex;    // R8 边缘类型（Point 采样）
 [[vk::binding(0, 0)]] SamplerState      u_EdgeSampler; // Nearest-neighbor

@@ -1,8 +1,5 @@
 // SSAO_Blur.frag.slang — SSAO 模糊（4×4 box, depth-aware）
-struct VSOutput {
-    float4 position : SV_Position;
-    [[vk::location(0)]] float2 uv;
-};
+#include "FullscreenVS.slang"   // VSOutput / VSOutputWorldDir（接口唯一出处）
 
 [[vk::binding(0, 0)]] Texture2D<float4> u_AOTex;
 [[vk::binding(0, 0)]] SamplerState      u_Sampler;

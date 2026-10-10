@@ -1,10 +1,7 @@
 // GaussianBlur.frag.slang — 7×7 可分离高斯模糊（sigma=1.0）
 // 用于 Bloom 后处理链路：BrightPass → GaussianBlur → Composite
 
-struct VSOutput {
-    float4 position : SV_Position;
-    [[vk::location(0)]] float2 uv;
-};
+#include "FullscreenVS.slang"   // VSOutput / VSOutputWorldDir（接口唯一出处）
 
 [[vk::binding(0, 0)]] Texture2D<float4> u_Input;
 [[vk::binding(0, 0)]] SamplerState      u_Sampler;

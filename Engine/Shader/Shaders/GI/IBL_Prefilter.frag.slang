@@ -6,10 +6,7 @@
 // 每个 mip level 对应不同的 roughness（采样方向更分散）。
 // ============================================================
 
-struct VSOutput {
-    float4 position            : SV_Position;
-    [[vk::location(0)]] float3 worldDir;
-};
+#include "FullscreenVS.slang"   // VSOutputWorldDir / VSOutputWorldDir（接口唯一出处）
 
 [[vk::binding(0, 0)]] TextureCube<float4> u_SkyboxTexture;
 [[vk::binding(0, 0)]] SamplerState       u_SkyboxSampler;
@@ -44,7 +41,7 @@ float3 ImportanceSampleGGX(float2 Xi, float3 N, float roughness) {
     return T * H.x + B * H.y + N * H.z;
 }
 
-float4 fragmentMain(VSOutput input) : SV_Target0 {
+float4 fragmentMain(VSOutputWorldDir input) : SV_Target0 {
     float3 N = normalize(input.worldDir);
     float3 V = N;  // 对于 cubemap: viewing direction = reflection direction = normal
 

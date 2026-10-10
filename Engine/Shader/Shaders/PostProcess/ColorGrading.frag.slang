@@ -2,10 +2,7 @@
 // 输入 LDR BGRA8 → 输出 LDR BGRA8
 
 #include "MathCommon.slang"   // Luminance / sRGB 传递函数（唯一出处）
-struct VSOutput {
-    float4 position : SV_Position;
-    [[vk::location(0)]] float2 uv;
-};
+#include "FullscreenVS.slang"   // VSOutput / VSOutputWorldDir（接口唯一出处）
 
 [[vk::binding(0, 0)]] Texture2D<float4> u_Input;
 [[vk::binding(0, 0)]] SamplerState      u_Sampler;

@@ -1,10 +1,7 @@
 // TAA_Resolve.vert — TAA 全屏三角形顶点着色器（无 VB/IB）
 // 3 顶点通过 SV_VertexID 生成，覆盖 [0,1] UV 全屏
 
-struct VSOutput {
-    float4 position          : SV_Position;
-    [[vk::location(0)]] float2 uv;
-};
+#include "FullscreenVS.slang"   // VSOutput / VSOutputWorldDir（接口唯一出处）
 
 VSOutput vertexMain(uint vid : SV_VertexID) {
     VSOutput o;

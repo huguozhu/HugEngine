@@ -1,10 +1,7 @@
 // MotionBlur.frag.slang — 运动模糊（velocity-based 方向采样）
 // 沿屏幕空间速度向量采样 N 次取平均
 
-struct VSOutput {
-    float4 position : SV_Position;
-    [[vk::location(0)]] float2 uv;
-};
+#include "FullscreenVS.slang"   // VSOutput / VSOutputWorldDir（接口唯一出处）
 
 [[vk::binding(0, 0)]] Texture2D<float4> u_HDR;
 [[vk::binding(0, 0)]] SamplerState      u_HDRSampler;

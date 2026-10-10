@@ -9,7 +9,7 @@
 // 像素原样透出，而 `center` 的 alpha 也是 1.0，等于伪造有效性。
 //
 // 注：SSGI 的输出 alpha 恒为 +1（无负值语义），故本改动对 SSGI 行为等价。
-struct VSOutput { float4 p:SV_Position; [[vk::location(0)]] float2 uv; };
+#include "FullscreenVS.slang"   // VSOutput / VSOutputWorldDir（接口唯一出处）
 
 [[vk::binding(0,0)]] Texture2D<float4> u_Input;      // SSGI/SSR 输出
 [[vk::binding(1,0)]] Texture2D<float>  u_Depth;       // GBuffer 深度
