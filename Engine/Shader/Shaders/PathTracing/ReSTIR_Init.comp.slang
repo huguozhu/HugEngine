@@ -22,31 +22,10 @@
 // === Push Constant（128B，见 ShaderTypes.slang）===
 [[vk::push_constant]] ReSTIRPushConstant g_PC;
 
+
+#include "PathTracing/ReSTIR_Common.slang"   // EmptyReservoir / EvaluateTarget（唯一出处）
 // 引擎最大光源数（kGPUMaxLights）
 #define RESTIR_MAX_LIGHTS 8u
-
-// 空蓄水池（miss 像素 / 无有效候选）
-PTReservoir EmptyReservoir() {
-    PTReservoir r;
-    r.lightIndex = 0xFFFFFFFFu;
-    r.weightSum  = 0.0;
-    r.M          = 0u;
-    r.W          = 0.0;
-    r.lightPos   = float4(0, 0, 0, 0);
-    return r;
-}
-
-// 目标函数：p̂ = luminance(brdf·Li) / p_src（含真实 albedo/metallic）
-float EvaluateTarget(float3 P, float3 N, float3 V, float roughness,
-                     float3 albedo, float metallic,
-                     uint lightIndex, out float3 lightPos) {
-    uint li = min(lightIndex, g_PC.lightCount > 0 ? g_PC.lightCount - 1u : 0u);
-    float3 L; float3 Li; float lightPdf;
-    if (!SampleLight(g_Lights[li], P, lightPos, L, Li, lightPdf)) return 0.0;
-    if (dot(N, L) <= 0.0) return 0.0;
-    float3 f = PBR_BRDF(albedo, metallic, roughness, N, V, L) * Li;
-    return Luminance(f) / max(lightPdf, 1e-6);
-}
 
 [numthreads(8, 8, 1)]
 void main(uint3 idx : SV_DispatchThreadID) {

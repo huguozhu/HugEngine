@@ -19,28 +19,8 @@
 // === Push Constant ===
 [[vk::push_constant]] ReSTIRPushConstant g_PC;
 
-PTReservoir EmptyReservoir() {
-    PTReservoir r;
-    r.lightIndex = 0xFFFFFFFFu;
-    r.weightSum  = 0.0;
-    r.M          = 0u;
-    r.W          = 0.0;
-    r.lightPos   = float4(0, 0, 0, 0);
-    return r;
-}
 
-// 目标函数（与 Init/Temporal 一致）：p̂ = luminance(brdf·Li) / p_src（含真实 albedo/metallic）
-float EvaluateTarget(float3 P, float3 N, float3 V, float roughness,
-                     float3 albedo, float metallic,
-                     uint lightIndex, out float3 lightPos) {
-    uint li = min(lightIndex, g_PC.lightCount > 0 ? g_PC.lightCount - 1u : 0u);  // 越界防护
-    float3 L; float3 Li; float lightPdf;
-    if (!SampleLight(g_Lights[li], P, lightPos, L, Li, lightPdf)) return 0.0;
-    if (dot(N, L) <= 0.0) return 0.0;
-    float3 f = PBR_BRDF(albedo, metallic, roughness, N, V, L) * Li;
-    return Luminance(f) / max(lightPdf, 1e-6);
-}
-
+#include "PathTracing/ReSTIR_Common.slang"   // EmptyReservoir / EvaluateTarget（唯一出处）
 [numthreads(8, 8, 1)]
 void main(uint3 idx : SV_DispatchThreadID) {
     uint2 p = idx.xy;
