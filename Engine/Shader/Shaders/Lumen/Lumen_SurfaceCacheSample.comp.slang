@@ -8,6 +8,7 @@
 //   4. 同时采一次同像素的 **GBuffer albedo** 写到另一个缓冲，供 CPU 做"同一几何上材质是否一致"的对照。//
 // 【为什么这一步能把 L2 和 L3 连起来】命中点材质不再来自屏幕（GBuffer），而是来自 atlas ——
 // 这正是"Surface Cache 可被后续阶段当作命中点材质源"（步骤 19 的判据）兑现的地方。
+#include "Lumen/LumenCommon.slang"   // SampleLayer / FieldValue / WorldToClip（唯一出处）
 #include "Lumen/SurfaceCache.slang"
 
 struct ShadeCard {          // 与 C++ 的 ShadeCard 逐字段一致（32 B）
@@ -40,11 +41,6 @@ struct ShadeCard {          // 与 C++ 的 ShadeCard 逐字段一致（32 B）
     float4 vp3;
     float4 atlasParams;  // x = 目标页边长(texel), y = atlas 边长(texel), z = 中性值, w = 未用
 };
-
-float4 WorldToClip(float3 p) {
-    return float4(dot(vp0.xyz, p) + vp0.w, dot(vp1.xyz, p) + vp1.w,
-                  dot(vp2.xyz, p) + vp2.w, dot(vp3.xyz, p) + vp3.w);
-}
 
 // 从 VP 反求相机位置（标准透视：P 的第 0/1 行只有对角元、第 3 行为 (0,0,-1,0)）：
 //   VP 第 i 行 .xyz = P_ii · V 第 i 行 .xyz（i=0,1），VP 第 3 行 .xyz = -V 第 2 行 .xyz
@@ -137,7 +133,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     // 做一致性判定，容差随视距缩放（场景尺度 2730，固定容差会把相距十几单位的不同表面判成同一表面）。
     float3 gbAlbedo = float3(0.0, 0.0, 0.0);
     bool   gbValid  = false;
-    const float4 clip = WorldToClip(p);
+    const float4 clip = WorldToClip(vp0, vp1, vp2, vp3, p);
     if (clip.w > 0.0) {
         const float2 ndc = clip.xy / clip.w;
         const float2 uv  = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);

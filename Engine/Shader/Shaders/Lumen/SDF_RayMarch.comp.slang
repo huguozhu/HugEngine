@@ -28,7 +28,7 @@
 };
 
 /// 层内采样：返回 (值, 是否在层内)
-float2 SampleLayer(Texture3D<float> tex, SamplerState smp, float4 ov, uint3 res, float3 p) {
+float2 SampleLayerSDF(Texture3D<float> tex, SamplerState smp, float4 ov, uint3 res, float3 p) {
     const float3 local = (p - ov.xyz) / ov.w;
     const bool inside = all(local >= 0.0) && all(local <= float3(res));
     const float v = tex.SampleLevel(smp, (local + 0.5) / float3(res), 0);
@@ -62,8 +62,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
     for (uint s = 0; s < maxSteps; ++s) {
         steps = s + 1;
         const float3 p = ro + rd * t;
-        const float2 a = SampleLayer(u_Field,  u_FieldSampler,  originVoxel,  grid.xyz,  p);
-        const float2 b = SampleLayer(u_Field1, u_FieldSampler1, originVoxel1, grid1.xyz, p);
+        const float2 a = SampleLayerSDF(u_Field,  u_FieldSampler,  originVoxel,  grid.xyz,  p);
+        const float2 b = SampleLayerSDF(u_Field1, u_FieldSampler1, originVoxel1, grid1.xyz, p);
         if (a.y < 0.5 && b.y < 0.5) break;               // 出所有层：本版按未命中处理
         const float d = min(a.y > 0.5 ? a.x : 1e30, b.y > 0.5 ? b.x : 1e30);
         if (d < minD) { minD = d; tMinD = t; }   // 诊断用：记录沿途最小场值
@@ -89,14 +89,14 @@ void main(uint3 tid : SV_DispatchThreadID) {
         const float3 p = ro + rd * t;
         const float h  = originVoxel.w;             // 一个体素的差分步长（取近层）
         // 梯度也用两层取最小（与步进同源，避免法线与命中面不一致）
-        const float f0 = min(SampleLayer(u_Field,  u_FieldSampler,  originVoxel,  grid.xyz,  p).x,
-                             SampleLayer(u_Field1, u_FieldSampler1, originVoxel1, grid1.xyz, p).x);
-        N = float3(min(SampleLayer(u_Field, u_FieldSampler, originVoxel, grid.xyz, p + float3(h,0,0)).x,
-                       SampleLayer(u_Field1, u_FieldSampler1, originVoxel1, grid1.xyz, p + float3(h,0,0)).x) - f0,
-                   min(SampleLayer(u_Field, u_FieldSampler, originVoxel, grid.xyz, p + float3(0,h,0)).x,
-                       SampleLayer(u_Field1, u_FieldSampler1, originVoxel1, grid1.xyz, p + float3(0,h,0)).x) - f0,
-                   min(SampleLayer(u_Field, u_FieldSampler, originVoxel, grid.xyz, p + float3(0,0,h)).x,
-                       SampleLayer(u_Field1, u_FieldSampler1, originVoxel1, grid1.xyz, p + float3(0,0,h)).x) - f0);
+        const float f0 = min(SampleLayerSDF(u_Field,  u_FieldSampler,  originVoxel,  grid.xyz,  p).x,
+                             SampleLayerSDF(u_Field1, u_FieldSampler1, originVoxel1, grid1.xyz, p).x);
+        N = float3(min(SampleLayerSDF(u_Field, u_FieldSampler, originVoxel, grid.xyz, p + float3(h,0,0)).x,
+                       SampleLayerSDF(u_Field1, u_FieldSampler1, originVoxel1, grid1.xyz, p + float3(h,0,0)).x) - f0,
+                   min(SampleLayerSDF(u_Field, u_FieldSampler, originVoxel, grid.xyz, p + float3(0,h,0)).x,
+                       SampleLayerSDF(u_Field1, u_FieldSampler1, originVoxel1, grid1.xyz, p + float3(0,h,0)).x) - f0,
+                   min(SampleLayerSDF(u_Field, u_FieldSampler, originVoxel, grid.xyz, p + float3(0,0,h)).x,
+                       SampleLayerSDF(u_Field1, u_FieldSampler1, originVoxel1, grid1.xyz, p + float3(0,0,h)).x) - f0);
         const float len = length(N);
         N = (len > 1e-6) ? (N / len) : float3(0.0, 1.0, 0.0);
         nd = dot(N, rd);

@@ -7,6 +7,7 @@
 // 【采样模式】步骤 21 用的是 GGX 半向量采样（mode 0）；步骤 23 起默认切到**均匀半球采样**（mode 1,
 // 见 `ScreenProbeSampling.slang` 的解释：均匀 pdf 让白炉下 SH 的 0 阶项有解析值 √π，验收可钉死）。
 // 方向与随机数由共享头提供 ⇒ 追踪与投影**必然**用同一组方向（否则投影积的是另一组方向，最难查）。
+#include "Lumen/LumenCommon.slang"   // SampleLayer / FieldValue / WorldToClip（唯一出处）
 #include "Lumen/ScreenProbe.slang"
 #include "Lumen/ScreenProbeSampling.slang"
 
@@ -27,20 +28,6 @@
     uint4  grid1;         // 远层分辨率
     float4 marchParams;   // x = 最大步数, y = eps, z = 最大距离, w = 未用
 };
-
-float2 SampleLayer(Texture3D<float> tex, SamplerState smp, float4 ov, uint3 res, float3 p) {
-    if (ov.w <= 0.0) return float2(0.0, 0.0);
-    const float3 local = (p - ov.xyz) / ov.w;
-    const bool inside = all(local >= 0.0) && all(local <= float3(res));
-    return float2(tex.SampleLevel(smp, (local + 0.5) / float3(res), 0), inside ? 1.0 : 0.0);
-}
-
-float FieldValue(float3 p, out bool insideAny) {
-    const float2 a = SampleLayer(u_Field,  u_FieldSampler,  originVoxel0, grid0.xyz, p);
-    const float2 b = SampleLayer(u_Field1, u_FieldSampler1, originVoxel1, grid1.xyz, p);
-    insideAny = (a.y > 0.5) || (b.y > 0.5);
-    return min(a.y > 0.5 ? a.x : 1e30, b.y > 0.5 ? b.x : 1e30);
-}
 
 [numthreads(64, 1, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {
@@ -78,7 +65,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     for (uint s = 0; s < maxSteps; ++s) {
         const float3 p = ro + rd * t;
         bool inside = false;
-        const float d = FieldValue(p, inside);
+        const float d = FieldValue(u_Field, u_FieldSampler, u_Field1, u_FieldSampler1, p, originVoxel0, grid0.xyz, originVoxel1, grid1.xyz, inside);
         if (!inside) break;
         if (advanced && d < eps) { hit = true; break; }
         t += max(d * 0.25, eps * 0.02);

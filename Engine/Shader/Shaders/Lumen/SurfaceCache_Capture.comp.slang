@@ -14,6 +14,7 @@
 //
 // 【定步长而非 sphere tracing】这里只要"这条轴上的第一个表面"，固定步长实现简单、步数天然有界
 // （AABB 厚度 / 步长）；命中判据仍用 |d| < eps。
+#include "Lumen/LumenCommon.slang"   // SampleLayer / FieldValue / WorldToClip（唯一出处）
 [[vk::binding(0, 0)]] Texture3D<float>        u_Field;      // 近层
 [[vk::binding(0, 0)]] SamplerState            u_FieldSampler;
 [[vk::binding(6, 0)]] Texture3D<float>        u_Field1;     // 远层
@@ -44,27 +45,6 @@ struct CaptureFrame {       // 每帧常量（与 C++ 的 CaptureFrame 逐字段
     float4 marchParams;     // x = 步数, y = eps（世界单位）, z = 步长, w = 未用
 };
 
-float2 SampleLayer(Texture3D<float> tex, SamplerState smp, float4 ov, uint3 res, float3 p) {
-    if (ov.w <= 0.0) return float2(0.0, 0.0);
-    const float3 local = (p - ov.xyz) / ov.w;
-    const bool inside = all(local >= 0.0) && all(local <= float3(res));
-    return float2(tex.SampleLevel(smp, (local + 0.5) / float3(res), 0), inside ? 1.0 : 0.0);
-}
-
-float FieldValue(float3 p, out bool insideAny) {
-    const float2 a = SampleLayer(u_Field,  u_FieldSampler,  u_Frame[0].originVoxel0, u_Frame[0].grid0.xyz, p);
-    const float2 b = SampleLayer(u_Field1, u_FieldSampler1, u_Frame[0].originVoxel1, u_Frame[0].grid1.xyz, p);
-    insideAny = (a.y > 0.5) || (b.y > 0.5);
-    return min(a.y > 0.5 ? a.x : 1e30, b.y > 0.5 ? b.x : 1e30);
-}
-
-float4 WorldToClip(float3 p) {
-    return float4(dot(u_Frame[0].vp0.xyz, p) + u_Frame[0].vp0.w,
-                  dot(u_Frame[0].vp1.xyz, p) + u_Frame[0].vp1.w,
-                  dot(u_Frame[0].vp2.xyz, p) + u_Frame[0].vp2.w,
-                  dot(u_Frame[0].vp3.xyz, p) + u_Frame[0].vp3.w);
-}
-
 [numthreads(16, 16, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {
     // 【诊断】把 push constant 实际收到的值回报给 CPU（4..7 号槽）：验证"常量是否到达"
@@ -91,7 +71,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
             for (uint s = 0; s < steps; ++s) {
                 const float3 q = planeP + axis.xyz * t;
                 bool inside = false;
-                const float d = FieldValue(q, inside);
+                const float d = FieldValue(u_Field, u_FieldSampler, u_Field1, u_FieldSampler1, q, u_Frame[0].originVoxel0, u_Frame[0].grid0.xyz, u_Frame[0].originVoxel1, u_Frame[0].grid1.xyz, inside);
                 if (!inside) { t += marchParams.z; continue; }
                 if (d < marchParams.y) { hitP = q; hit = true; break; }
                 t += marchParams.z;
@@ -102,7 +82,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
             float4 normal = float4(0.0, 0.0, 0.0, 0.0);
             bool written = false;
             if (hit) {
-                const float4 clip = WorldToClip(hitP);
+                const float4 clip = WorldToClip(u_Frame[0].vp0, u_Frame[0].vp1, u_Frame[0].vp2, u_Frame[0].vp3, hitP);
                 if (clip.w > 0.0) {
                     const float2 ndc = clip.xy / clip.w;
                     const float2 uv  = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);

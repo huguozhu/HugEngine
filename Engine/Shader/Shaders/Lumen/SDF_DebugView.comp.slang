@@ -40,7 +40,7 @@
 };
 
 /// 层内采样：返回 (值, 是否在层内)。与 SDF_RayMarch.comp.slang 同源，保证两处语义一致。
-float2 SampleLayer(Texture3D<float> tex, SamplerState smp, float4 ov, uint3 res, float3 p) {
+float2 SampleLayerSDF(Texture3D<float> tex, SamplerState smp, float4 ov, uint3 res, float3 p) {
     if (ov.w <= 0.0) return float2(0.0, 0.0);   // 该层不存在（只开一层）：直接判"不在域内"
     const float3 local = (p - ov.xyz) / ov.w;
     const bool inside = all(local >= 0.0) && all(local <= float3(res));
@@ -78,8 +78,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
     for (uint s = 0; s < maxSteps; ++s) {
         steps = s + 1;
         const float3 p = ro + rd * t;
-        const float2 a = SampleLayer(u_Field,  u_FieldSampler,  originVoxel0, grid0.xyz, p);
-        const float2 b = SampleLayer(u_Field1, u_FieldSampler1, originVoxel1, grid1.xyz, p);
+        const float2 a = SampleLayerSDF(u_Field,  u_FieldSampler,  originVoxel0, grid0.xyz, p);
+        const float2 b = SampleLayerSDF(u_Field1, u_FieldSampler1, originVoxel1, grid1.xyz, p);
         if (a.y < 0.5 && b.y < 0.5) break;                      // 出所有层：按未命中处理
         const float d = min(a.y > 0.5 ? a.x : 1e30, b.y > 0.5 ? b.x : 1e30);
         lastD = d;
@@ -111,8 +111,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
         for (uint i = 0u; i < 64u; ++i) {
             const float ts = maxDist * (float)i / 64.0;
             const float3 pp = ro + rdp * ts;
-            const float2 a2 = SampleLayer(u_Field,  u_FieldSampler,  originVoxel0, grid0.xyz, pp);
-            const float2 b2 = SampleLayer(u_Field1, u_FieldSampler1, originVoxel1, grid1.xyz, pp);
+            const float2 a2 = SampleLayerSDF(u_Field,  u_FieldSampler,  originVoxel0, grid0.xyz, pp);
+            const float2 b2 = SampleLayerSDF(u_Field1, u_FieldSampler1, originVoxel1, grid1.xyz, pp);
             u_Probe[i] = float4(ts, a2.y > 0.5 ? a2.x : -1.0, b2.y > 0.5 ? b2.x : -1.0, 0.0);
         }
     }
