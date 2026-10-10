@@ -283,6 +283,9 @@ if(SLANGC)
         # ReSTIR DI 三 pass 的共用件（空蓄水池 / 目标函数）——依赖包含者声明的 g_Lights/g_PC，
         # 故不能放进被广泛 include 的 PT_Common.slang。
         "${SHADER_DIR}/PathTracing/ReSTIR_Common.slang"
+        # 全屏三角形 pass 的共享**接口结构体**（VSOutput / VSOutputWorldDir）。只共享接口，
+        # 不共享顶点逻辑：14 个全屏 VS 实测有 13 种不同实现（UV 朝向/深度 z 各 pass 不同）。
+        "${SHADER_DIR}/FullscreenVS.slang"
         "${SHADER_DIR}/Particles/ParticleTypes.slang"
         "${SHADER_DIR}/Lumen/SurfaceCache.slang"
         "${SHADER_DIR}/Lumen/ScreenProbe.slang"
