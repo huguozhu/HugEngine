@@ -1,5 +1,5 @@
 // RT_Sponza.rmiss.slang — 天空渐变背景
-struct RayPayload { float3 color; float hitT; };
+#include "RTPayloads.slang"   // ShadowPayload / RayPayload / GIPayload / ReflectionPayload（唯一出处）
 
 [shader("miss")]
 void main(inout RayPayload payload) {

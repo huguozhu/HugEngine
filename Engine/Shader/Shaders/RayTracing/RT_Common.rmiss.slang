@@ -6,9 +6,7 @@
 //   AO:         未命中 → payload.blocked = false（未遮蔽）
 //   Reflection: 未命中 → 回退到 IBL / 天空（使用专用 Miss 如 RT_Sponza.rmiss）
 
-struct ShadowPayload {
-    bool blocked;  // true=被遮挡, false=可见
-};
+#include "RTPayloads.slang"   // ShadowPayload / RayPayload / GIPayload / ReflectionPayload（唯一出处）
 
 [shader("miss")]
 void main(inout ShadowPayload payload) {

@@ -8,9 +8,7 @@
 //
 // 使用 RAY_FLAG_SKIP_CLOSEST_HIT_SHADER 可跳过此着色器，仅用 AnyHit 或 miss/hit 检测
 
-struct ShadowPayload {
-    bool blocked;  // true=被遮挡, false=可见
-};
+#include "RTPayloads.slang"   // ShadowPayload / RayPayload / GIPayload / ReflectionPayload（唯一出处）
 
 [shader("closesthit")]
 void main(inout ShadowPayload payload) {

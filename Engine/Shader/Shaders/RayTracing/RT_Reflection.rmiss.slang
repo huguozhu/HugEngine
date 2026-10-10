@@ -3,9 +3,7 @@
 // 未命中 → 回退到程序化天空色（水平线渐变，按射线方向插值）。
 // 对镜面反射，天空反射是正确的结果；对粗糙反射，作为环境回退。
 
-struct ReflectionPayload {
-    float4 colorT;  // rgb=反射颜色, a=命中距离
-};
+#include "RTPayloads.slang"   // ShadowPayload / RayPayload / GIPayload / ReflectionPayload（唯一出处）
 
 [shader("miss")]
 void main(inout ReflectionPayload payload) {

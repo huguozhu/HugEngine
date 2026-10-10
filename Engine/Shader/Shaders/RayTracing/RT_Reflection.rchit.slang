@@ -10,9 +10,7 @@
 
 #include "RT_HitCommon.slang"  // 材质纹理 + 光源 cbuffer + EvaluateHitRadiance
 
-struct ReflectionPayload {
-    float4 colorT;  // rgb=反射颜色, a=命中距离
-};
+#include "RTPayloads.slang"   // ShadowPayload / RayPayload / GIPayload / ReflectionPayload（唯一出处）
 
 [[vk::push_constant]] RTRayEffectPushConstant g_PC;
 

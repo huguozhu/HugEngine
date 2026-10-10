@@ -27,12 +27,9 @@
 // === Push Constant ===
 [[vk::push_constant]] RTRayEffectPushConstant g_PC;
 
-
 #include "RT_Common.slang"   // Hash / Rand / ReconstructWorldPos（唯一出处）
 // === Payload（与 ClosestHit/Miss 共享）===
-struct GIPayload {
-    float4 radianceT;  // rgb=辐射度, a=命中距离（-1=未命中）
-};
+#include "RTPayloads.slang"   // ShadowPayload / RayPayload / GIPayload / ReflectionPayload（唯一出处）
 
 // ============================================================
 // 工具函数

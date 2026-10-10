@@ -7,11 +7,7 @@
 // 使用 -force-glsl-scalar-layout 确保 GPUVertex 布局为紧密打包 (32 字节)
 // 对应 C++ 端的 RTVertexPacked 结构体
 
-// GPU 端顶点结构（标量布局：position=12B, normal=12B, uv=8B，共 32B）
-struct RayPayload {
-    float3 color;
-    float  hitT;
-};
+#include "RTPayloads.slang"   // ShadowPayload / RayPayload / GIPayload / ReflectionPayload（唯一出处）
 #include "ShaderTypes.slang"   // IndirectCmd / GPUSceneObject / LightUB 等共享契约结构体
 struct GPUVertex {
     float3 position;    // offset 0,  12 字节

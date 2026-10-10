@@ -40,9 +40,7 @@
 [[vk::push_constant]] RTRayEffectPushConstant g_PC;
 
 // === Payload（与 RT_GI.rchit / RT_GI.rmiss 共享）===
-struct GIPayload {
-    float4 radianceT;   // rgb=辐射度, a=命中距离（-1=未命中）
-};
+#include "RTPayloads.slang"   // ShadowPayload / RayPayload / GIPayload / ReflectionPayload（唯一出处）
 
 // Fibonacci 球面方向来自 "SHCommon.slang"。
 // 【为什么不再自带一份】本文件此前与 `DDGI.comp.slang` 各有一份逐字相同的实现，靠注释要求

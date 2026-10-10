@@ -9,9 +9,7 @@
 // 注意：不能用 ClosestHit 置 blocked 配合 SKIP_CLOSEST_HIT——
 // 那会导致 payload 永不置位、阴影恒为 1.0（无阴影）。这是旧版 bug 根源。
 
-struct ShadowPayload {
-    bool blocked;  // true=被遮挡, false=可见
-};
+#include "RTPayloads.slang"   // ShadowPayload / RayPayload / GIPayload / ReflectionPayload（唯一出处）
 
 [shader("anyhit")]
 void main(inout ShadowPayload payload, in BuiltInTriangleIntersectionAttributes attr) {

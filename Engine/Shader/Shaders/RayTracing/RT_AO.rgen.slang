@@ -19,12 +19,9 @@
 // === Push Constant ===
 [[vk::push_constant]] RTRayEffectPushConstant g_PC;
 
-
 #include "RT_Common.slang"   // Hash / Rand / ReconstructWorldPos（唯一出处）
 // === Payload（与 RT_Shadow.rahit / RT_Common.rmiss 一致）===
-struct ShadowPayload {
-    bool blocked;  // true=被遮挡, false=可见
-};
+#include "RTPayloads.slang"   // ShadowPayload / RayPayload / GIPayload / ReflectionPayload（唯一出处）
 
 // ============================================================
 // 工具函数

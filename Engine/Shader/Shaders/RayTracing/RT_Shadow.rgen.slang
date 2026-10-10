@@ -39,12 +39,9 @@ struct ShadowLight {
 // === Push Constant（共享结构，见 ShaderTypes.slang）===
 [[vk::push_constant]] RTShadowPushConstant g_PC;
 
-
 #include "RT_Common.slang"   // Hash / Rand / ReconstructWorldPos（唯一出处）
 // === Payload（与 AnyHit/Miss 共享）===
-struct ShadowPayload {
-    bool blocked;  // true=被遮挡, false=可见
-};
+#include "RTPayloads.slang"   // ShadowPayload / RayPayload / GIPayload / ReflectionPayload（唯一出处）
 
 // 软阴影：面光源采样（在光源面上采样 spp 个发射点，发射 spp 条射线取平均）。
 // spp<=1 且 radius.x=0 时退化为硬阴影（单条精确射线，与旧版行为一致）。

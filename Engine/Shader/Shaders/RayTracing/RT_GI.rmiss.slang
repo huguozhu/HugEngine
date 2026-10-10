@@ -2,9 +2,7 @@
 //
 // 未命中 → 回退到程序化天空色（天光作为远距离间接漫反射来源）。
 
-struct GIPayload {
-    float4 radianceT;  // rgb=辐射度, a=命中距离
-};
+#include "RTPayloads.slang"   // ShadowPayload / RayPayload / GIPayload / ReflectionPayload（唯一出处）
 
 [shader("miss")]
 void main(inout GIPayload payload) {

@@ -13,10 +13,7 @@ struct RTPushConstant {
 [[vk::binding(0, 0)]] RaytracingAccelerationStructure g_TLAS;
 [[vk::binding(1, 0)]] RWTexture2D<float4> g_Output;
 
-struct RayPayload {
-    float3 color;
-    float  hitT;
-};
+#include "RTPayloads.slang"   // ShadowPayload / RayPayload / GIPayload / ReflectionPayload（唯一出处）
 
 // 分层抖动：将像素划分为 √N × √N 网格，每个采样取一个子格中心
 float2 StratifiedJitter(uint sampleIdx, uint sampleCount) {

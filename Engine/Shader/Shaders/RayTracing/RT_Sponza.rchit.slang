@@ -1,9 +1,6 @@
 // RT_Sponza.rchit.slang — Phase 5: Callable bindless PBR + 平滑 Triplanar + 天空光照
 
-struct RayPayload {
-    float3 color;
-    float  hitT;
-};
+#include "RTPayloads.slang"   // ShadowPayload / RayPayload / GIPayload / ReflectionPayload（唯一出处）
 #include "ShaderTypes.slang"   // IndirectCmd / GPUSceneObject / LightUB 等共享契约结构体
 [[vk::binding(0, 1)]] Texture2D<float4> u_MatTex;
 
