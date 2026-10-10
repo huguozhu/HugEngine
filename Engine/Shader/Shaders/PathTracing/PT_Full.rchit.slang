@@ -11,6 +11,7 @@
 // 绑定为 4/5/6，而 PTPass set0 布局为 b5=光源 SSBO(RayGen)/b6=材质/b7=法线，
 // 无法直接 include）。
 
+#include "HitCommon.slang"   // LoadHitNormal / SampleMaterialColor（零绑定，资源作参数）
 #include "PT_Common.slang"  // PathPayload + 随机数（SampleSky 等）
 
 // === 材质资源（set=0, ClosestHit 阶段）===
@@ -49,10 +50,10 @@
 #define PT_FLAG_TEXTURES (1u << 4)   // 采样材质贴图（r.PT.Textures；关闭 = 只用均值/因子）
 
 // ============================================================
-// LoadHitMaterial — 按 TLAS 实例 ID 查询命中材质（11×N 纹理）
+// LoadPTMaterial — 按 TLAS 实例 ID 查询命中材质（11×N 纹理）
 // 同时取出 bindless 贴图基索引与纹理存在位掩码（row8）
 // ============================================================
-void LoadHitMaterial(uint instanceID,
+void LoadPTMaterial(uint instanceID,
                      out float3 albedo,
                      out float metallic,
                      out float roughness,
@@ -97,30 +98,6 @@ float2 LoadHitUV(uint instanceID, uint primId, float2 bary) {
 }
 
 // ============================================================
-// LoadHitNormal — 按实例 + 三角形 + 重心坐标查询平滑法线
-// 重心坐标来自 closesthit 的 BuiltInTriangleIntersectionAttributes
-// ============================================================
-float3 LoadHitNormal(uint instanceID, uint primId, float2 bary) {
-    float4 row2 = g_SceneMaterials.Load(int3(instanceID, 2, 0));
-    uint linBase = uint(row2.x);      // 本实例法线数组线性起始
-    uint texW    = uint(row2.z);      // 法线纹理宽度（lin%W → 列）
-
-    float3 n0 = g_TriangleNormals.Load(int3((linBase + primId * 3 + 0) % texW,
-                                             (linBase + primId * 3 + 0) / texW, 0)).xyz;
-    float3 n1 = g_TriangleNormals.Load(int3((linBase + primId * 3 + 1) % texW,
-                                             (linBase + primId * 3 + 1) / texW, 0)).xyz;
-    float3 n2 = g_TriangleNormals.Load(int3((linBase + primId * 3 + 2) % texW,
-                                             (linBase + primId * 3 + 2) / texW, 0)).xyz;
-
-    // 重心插值（顶点 0 权重 = 1 - x - y）
-    float3 N = normalize(n0 * (1.0 - bary.x - bary.y) + n1 * bary.x + n2 * bary.y);
-
-    // 确保法线朝向光线入射方向（背面命中 → 翻转）
-    if (dot(N, -WorldRayDirection()) < 0.0) N = -N;
-    return N;
-}
-
-// ============================================================
 // 主入口：ClosestHit
 // ============================================================
 [shader("closesthit")]
@@ -131,9 +108,9 @@ void main(inout PathPayload payload, in BuiltInTriangleIntersectionAttributes at
     float3 albedo; float metallic; float roughness; float3 emissive;
     float4 disneyA; float4 disneyB; float4 surfaceParams; float4 volumeParams;
     uint   texBase, texMask;
-    LoadHitMaterial(instanceID, albedo, metallic, roughness, emissive,
+    LoadPTMaterial(instanceID, albedo, metallic, roughness, emissive,
                     disneyA, disneyB, surfaceParams, volumeParams, texBase, texMask);
-    float3 N = LoadHitNormal(instanceID, primId, attr.barycentrics);
+    float3 N = LoadHitNormal(g_SceneMaterials, g_TriangleNormals, instanceID, primId, attr.barycentrics);
 
     // ── 贴图采样（PT 贴图落地）──
     // 与光栅化路径同一套约定：slot = texBase + kGPUMaterialTexSlot_*，按 textureMask 判据；

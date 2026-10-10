@@ -26,18 +26,8 @@
 [[vk::binding(0, 2)]] SamplerState u_Sampler;
 
 // ============================================================
-// 辅助函数
+// （原 SampleMaterialColor 为死代码：本 pass 直接用 matData.rgb + 伪随机兜底，未调用它，已删除）
 // ============================================================
-
-// 从材质数据解析基础色：RGB=固有色, A=纹理索引+1
-float3 SampleMaterialColor(float4 matData, float2 uv) {
-    uint texId = uint(matData.w + 0.5);
-    if (texId > 0) {
-        uint idx = NonUniformResourceIndex(texId - 1);
-        return u_Textures[idx].Sample(u_Sampler, uv).rgb;
-    }
-    return matData.rgb;
-}
 
 // ============================================================
 // 主入口：使用 position_fetch 的 ClosestHit

@@ -7,6 +7,7 @@
 // 使用 -force-glsl-scalar-layout 确保 GPUVertex 布局为紧密打包 (32 字节)
 // 对应 C++ 端的 RTVertexPacked 结构体
 
+#include "HitCommon.slang"   // LoadHitNormal / SampleMaterialColor（零绑定，资源作参数）
 #include "RTPayloads.slang"   // ShadowPayload / RayPayload / GIPayload / ReflectionPayload（唯一出处）
 #include "ShaderTypes.slang"   // IndirectCmd / GPUSceneObject / LightUB 等共享契约结构体
 struct GPUVertex {
@@ -62,17 +63,6 @@ float3 ComputeBarycentrics(float3 P, float3 v0, float3 v1, float3 v2) {
     return float3(w0, w1, w2);
 }
 
-// 从材料数据解析基础色：RGB=固有色, A=纹理索引+1
-float3 SampleMaterialColor(float4 matData, float2 uv) {
-    uint texId = uint(matData.w + 0.5);  // 四舍五入
-    if (texId > 0) {
-        // 有 bindless 纹理：使用 UV 采样
-        uint idx = NonUniformResourceIndex(texId - 1);
-        return u_Textures[idx].Sample(u_Sampler, uv).rgb;
-    }
-    // 无 bindless 纹理：使用材质固有色
-    return matData.rgb;
-}
 
 // ============================================================
 // 主入口：ClosestHit 着色器
@@ -99,7 +89,7 @@ void main(inout RayPayload payload) {
 
     // ── 步骤 4: 材质色（bindless 纹理优先，回落固有色）──
     float4 matData = u_MatTex.Load(int3(instanceID, 0, 0));
-    float3 bc = SampleMaterialColor(matData, uv);
+    float3 bc = SampleMaterialColor(u_Textures, u_Sampler, matData, uv);
 
     // 兜底：材质色接近黑色（未设置）时使用伪随机色
     if (dot(bc, float3(0.3, 0.59, 0.11)) < 0.01) {
