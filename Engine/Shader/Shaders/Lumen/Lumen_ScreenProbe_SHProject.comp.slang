@@ -59,7 +59,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     for (uint r = 0u; r < N; ++r) {
         const uint flat = tid.x * N + r;
         const float2 u = ProbeRayRandom(probeKey * N + r, dims.z);
-        const float3 d = (mode.x == 0u) ? SampleGgxDirection(n, roughness, u)
+        const float3 d = (mode.x == 0u) ? SampleGgxReflection(n, roughness, u, 0.002)
                                         : SampleUniformHemisphere(n, u);
         // 白炉：辐射度恒为 1（不看 atlas）⇒ l0 必须等于 √π，与方向/采样数无关
         // 非白炉：只剩"这条光线有没有打到几何"这一道门。**不**再按"页是否命中"过滤 ——

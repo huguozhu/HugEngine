@@ -16,7 +16,7 @@
 
 #include "ShaderTypes.slang"   // PTPushConstant / PTReservoir / GPULight
 #include "Sampling.slang"       // CosineSampleHemisphere（PT/RT 共用）
-#include "pbr_common.slang"    // D_GGX / F_Schlick / PBR_BRDF（含 common.slang）
+#include "pbr_common.slang"    // D_GGX / F_Schlick / PBR_BRDF（零绑定）
 
 // ============================================================
 // PathPayload — 路径追踪载荷（rchit/rmiss 必须逐字节一致）
@@ -39,7 +39,6 @@ struct PathPayload {
     float4 surfaceParams;   // 80 x=disneyC(specularTint.b), y=dielectricF0, z=ior, w=transmission
     float4 volumeParams;    // 96 x/y/z=σ_t（Beer-Lambert 吸收系数）, w 预留（材质纹理 row7）
 };
-
 
 // ============================================================
 // 随机数工具（确定性，像素索引 + 帧号 + 样本号）
@@ -79,20 +78,6 @@ float2 StratifiedJitter(uint sampleIdx, uint sampleCount, uint frameIndex) {
 // ============================================================
 // 方向采样
 // ============================================================
-
-// GGX 半向量重要性采样（绕法线 N），pdf_H = D_GGX(NdotH) * NdotH
-float3 SampleGGXHalf(float3 N, float roughness, float2 u, out float NdotH) {
-    float alpha = max(roughness * roughness, 0.001);
-    float cosTheta = sqrt((1.0 - u.y) / (1.0 + (alpha * alpha - 1.0) * u.y));
-    float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
-    float phi = 6.2831853 * u.x;
-    float3 H = float3(sinTheta * cos(phi), sinTheta * sin(phi), cosTheta);
-    float3 Up = abs(N.z) < 0.999 ? float3(0, 0, 1) : float3(1, 0, 0);
-    float3 T = normalize(cross(Up, N));
-    float3 B = cross(N, T);
-    NdotH = cosTheta;
-    return normalize(H.x * T + H.y * B + H.z * N);
-}
 
 // ============================================================
 // BSDF 参数 — 与 pbr_common.PBR_BRDF 的参数一一对应
@@ -149,22 +134,6 @@ void BSDFLobeProbabilities(PTBSDFParams m, out float pDiff, out float pSpec, out
     pClearcoat = cc;
 }
 
-// 各向异性 GGX 半向量采样（NDF 采样，参数为各向异性 alpha）。
-// 用「方向相关 alpha」把各向同性公式推广到椭圆分布：
-//   a²(φ) = ax²cos²φ + ay²sin²φ
-// 与之配对的 pdf 由 BSDFPdf 用同一组 (ax, ay) 经 D_GGX_aniso 计算。
-// aniso=0（默认材质）时走 SampleGGXHalf，采样、pdf 与旧实现逐位一致。
-float3 SampleGGXHalfAniso(float3 N, float3 T, float3 B,
-                          float ax, float ay, float2 u, out float NdotH) {
-    float phi    = 6.2831853 * u.x;
-    float cosPhi = cos(phi), sinPhi = sin(phi);
-    float a2     = ax * ax * cosPhi * cosPhi + ay * ay * sinPhi * sinPhi;
-    float cosTheta = sqrt((1.0 - u.y) / max(1.0 + (a2 - 1.0) * u.y, 1e-6));
-    float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
-    NdotH = cosTheta;
-    return normalize(sinTheta * cosPhi * T + sinTheta * sinPhi * B + cosTheta * N);
-}
-
 // 混合 pdf（三瓣之和）— 采样与 MIS 共用同一函数，保证权重与采样策略一致
 float BSDFPdf(PTBSDFParams m, float3 N, float3 V, float3 L) {
     float pDiff, pSpec, pCc;
@@ -196,12 +165,6 @@ float BSDFPdf(PTBSDFParams m, float3 N, float3 V, float3 L) {
 // ============================================================
 // 电介质界面 / 参与介质（PT 任务 4：glTF transmission + volume）
 // ============================================================
-
-// 电介质菲涅尔反射率（Schlick 近似，f0 为垂直入射反射率）
-float FresnelDielectric(float cosTheta, float f0) {
-    float c = saturate(cosTheta);
-    return f0 + (1.0 - f0) * pow(1.0 - c, 5.0);
-}
 
 // Snell 折射：I 为入射方向（指向表面，已归一化），N 为朝向入射侧的法线，
 // eta = n1/n2（空气→介质时 = 1/ior）。返回 false = 全内反射（TIR）。
@@ -249,7 +212,7 @@ float3 SampleBSDF(PTBSDFParams m, float3 N, float3 V,
     const float t = saturate(m.surface.w);
     if (t > 0.0) {
         float NdotV = max(dot(N, V), 1e-4);
-        float F = FresnelDielectric(NdotV, m.surface.y);
+        float F = F_Schlick(float3(m.surface.y), NdotV).x;   // 原 FresnelDielectric（与 F_Schlick 同公式，已去重）
         float pRefl = t * F;
         float pRefr = t * (1.0 - F);
         if (uLobe.x < pRefl) {
@@ -297,13 +260,13 @@ float3 SampleBSDF(PTBSDFParams m, float3 N, float3 V,
         // 基础镜面：GGX 半向量 → 反射方向
         float NdotH;
         float3 H = (m.disneyA.x > 0.0)
-                 ? SampleGGXHalfAniso(N, T, B, ax, ay, uDir, NdotH)
-                 : SampleGGXHalf(N, m.roughness, uDir, NdotH);
+                 ? SampleGgxHalfAniso(N, T, B, ax, ay, uDir, NdotH)
+                 : SampleGgxHalf(N, m.roughness, uDir, 0.001, NdotH);
         wi = normalize(reflect(-V, H));
     } else {
         // 清漆层：GGX 半向量（粗糙度由 clearcoatGloss 给出，与求值的 D_GGX 同参）
         float NdotH;
-        float3 H = SampleGGXHalf(N, m.disneyB.y, uDir, NdotH);
+        float3 H = SampleGgxHalf(N, m.disneyB.y, uDir, 0.001, NdotH);
         wi = normalize(reflect(-V, H));
     }
 

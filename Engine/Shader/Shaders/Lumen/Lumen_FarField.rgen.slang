@@ -47,7 +47,7 @@ void main() {
     // 与追踪 pass 完全相同的"探针身份 → 随机流"编号（不能跟槽位走，见 ScreenProbe_Trace 的说明）
     const uint  probeKey = probe.meta.y * 4u + probe.meta.w;
     const float2 u = ProbeRayRandom(probeKey * N + rayIndex, g_Params.dims.z);
-    const float3 rd = (g_Params.dims.w == 0u) ? SampleGgxDirection(n, roughness, u)
+    const float3 rd = (g_Params.dims.w == 0u) ? SampleGgxReflection(n, roughness, u, 0.002)
                                              : SampleUniformHemisphere(n, u);
 
     RayDesc ray;

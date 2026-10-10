@@ -64,7 +64,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     const uint  probeKey = probe.meta.y * 4u + probe.meta.w;
     const float2 u = ProbeRayRandom(probeKey * dims.y + rayIndex, dims.z);
     // 采样模式：w = 0 → GGX（步骤 21 原样）；w = 1 → 均匀半球（步骤 23 起的默认，SH 0 阶项有解析值）
-    const float3 rd = (dims.w == 0u) ? SampleGgxDirection(n, roughness, u)
+    const float3 rd = (dims.w == 0u) ? SampleGgxReflection(n, roughness, u, 0.002)
                                      : SampleUniformHemisphere(n, u);
     const float  nd = dot(rd, n);
 

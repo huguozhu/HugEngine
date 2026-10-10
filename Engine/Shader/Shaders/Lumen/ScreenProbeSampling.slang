@@ -17,6 +17,7 @@
 #ifndef HUGENGINE_SCREEN_PROBE_SAMPLING
 #define HUGENGINE_SCREEN_PROBE_SAMPLING
 
+#include "Sampling.slang"   // SampleGgxReflection（GGX 反射方向，唯一出处）
 #include "SHCommon.slang"   // 4 系数 SH 的基函数 / 重建（唯一出处；本文件不再自带常数）
 
 // 确定性的低差异随机（PCG 变体）：同一 (探针, 光线, 帧) 恒得同一方向 ⇒ 可复现（背靠背读数一致的前提）
@@ -31,18 +32,6 @@ float U01(uint seed) { return (float)(Pcg(seed) & 0x00FFFFFFu) / 16777216.0; }
 void BuildBasis(float3 n, out float3 t, out float3 b) {
     t = normalize(abs(n.z) < 0.999 ? cross(float3(0.0, 0.0, 1.0), n) : cross(float3(1.0, 0.0, 0.0), n));
     b = cross(n, t);
-}
-
-/// 以 n 为 Z 轴的 GGX 半向量采样，再镜面反射得到出射方向（V = n）
-float3 SampleGgxDirection(float3 n, float roughness, float2 u) {
-    const float a = max(0.002, roughness * roughness);
-    const float phi = 6.28318530718 * u.x;
-    const float cosTheta = sqrt((1.0 - u.y) / max(1e-6, 1.0 + (a * a - 1.0) * u.y));
-    const float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
-    float3 t, b;
-    BuildBasis(n, t, b);
-    const float3 h = t * (sinTheta * cos(phi)) + b * (sinTheta * sin(phi)) + n * cosTheta;
-    return normalize(reflect(-n, h));
 }
 
 /// 以 n 为 Z 轴的**均匀半球**采样（pdf = 1/(2π)）：cosθ = u.y 均匀 ⇒ 面积均匀

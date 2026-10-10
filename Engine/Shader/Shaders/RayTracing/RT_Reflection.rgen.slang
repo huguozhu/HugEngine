@@ -7,6 +7,7 @@
 //
 // 输出由 LightingPass 在 rtSpecularSource=1 时采样（u_RT_Reflection）。
 
+#include "Sampling.slang"   // SampleGgxHalf（GGX 半向量，唯一出处）
 #include "ShaderTypes.slang"  // RTRayEffectPushConstant（C++/Slang 共享布局）
 
 // === RayGen 资源 (set=0) ===
@@ -25,20 +26,6 @@
 // ============================================================
 // 工具函数
 // ============================================================
-
-// GGX 微表面法线重要性采样（半向量 H，用于粗糙反射）
-float3 SampleGGX(float3 N, float roughness, float2 u) {
-    float a = max(roughness * roughness, 1e-4);
-    float phi = 2.0 * 3.14159265 * u.x;
-    float cosTheta = sqrt((1.0 - u.y) / (1.0 + (a * a - 1.0) * u.y));
-    float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
-    float3 H = float3(sinTheta * cos(phi), sinTheta * sin(phi), cosTheta);
-    // 变换到 N 的正切空间
-    float3 Up = abs(N.z) < 0.999 ? float3(0, 0, 1) : float3(1, 0, 0);
-    float3 T = normalize(cross(Up, N));
-    float3 B = cross(N, T);
-    return normalize(H.x * T + H.y * B + H.z * N);
-}
 
 // ============================================================
 // 主入口：RayGen 着色器
@@ -71,7 +58,7 @@ void main() {
     float3 R = reflect(-V, N);
     if (roughness > 0.02) {
         float2 u = float2(Rand(idx, g_PC.frameIndex, 0), Rand(idx, g_PC.frameIndex, 1));
-        float3 H = SampleGGX(N, roughness, u);
+        float3 H = SampleGgxHalf(N, roughness, u, 1e-4);   // 沿用原 alpha 下限 1e-4
         R = reflect(-V, H);
         if (dot(R, N) < 0.0) R = reflect(-V, N);  // 回退镜面，避免射入表面内
     }
