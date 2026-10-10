@@ -1,4 +1,7 @@
-// ScreenProbeSampling.slang — 探针半球采样与 SH 基（步骤 21 / 23 共享，**Slang 专用**）
+// ScreenProbeSampling.slang — 探针半球采样（步骤 21 / 23 共享，**Slang 专用**）
+//
+// 【SH 基与重建不在这里】4 系数球谐的基函数、Lambert 卷积重建、白炉判据说明统一在
+// `SHCommon.slang`（GI / RT / Lumen 三处共用同一份）。本文件只负责"方向怎么取"。
 //
 // 【为什么必须共享】步骤 23 的 SH 投影要把"每探针 traceRep 条光线"投成系数，而光线只有方向和
 // 结果缓冲（没有方向缓冲）。若两个 pass 各写一份采样代码，任何一处改动都会让"投影用的方向"与
@@ -13,6 +16,8 @@
 //       （余弦采样虽方差更低，但权重是 π/cosθ，白炉下 0 阶项不再有解析值。）
 #ifndef HUGENGINE_SCREEN_PROBE_SAMPLING
 #define HUGENGINE_SCREEN_PROBE_SAMPLING
+
+#include "SHCommon.slang"   // 4 系数 SH 的基函数 / 重建（唯一出处；本文件不再自带常数）
 
 // 确定性的低差异随机（PCG 变体）：同一 (探针, 光线, 帧) 恒得同一方向 ⇒ 可复现（背靠背读数一致的前提）
 uint Pcg(uint v) {
@@ -56,26 +61,9 @@ float2 ProbeRayRandom(uint rayFlatIndex, uint frameSeed) {
                   U01(rayFlatIndex * 7u + frameSeed * 6271u + 5u));
 }
 
-// ── 二阶（4 系数）SH 基：Y00 常数 + 3 个线性项 ──
-// 常数与 Ramamoorthi & Hanrahan 的约定一致（Y00 = 0.5·√(1/π)、Y1 = 0.5·√(3/π)）。
-static const float kSH_Y00 = 0.2820947918;   // 0.5·sqrt(1/π)
-static const float kSH_Y1  = 0.4886025119;   // 0.5·sqrt(3/π)
-
-/// 第 i 个（0..3）基函数在方向 d 上的值
-float SHBasis(uint i, float3 d) {
-    if (i == 0u) return kSH_Y00;
-    if (i == 1u) return kSH_Y1 * d.y;
-    if (i == 2u) return kSH_Y1 * d.z;
-    return kSH_Y1 * d.x;
-}
-
-/// 由**辐射度**的 4 系数重建**辐照度**：E(n) = π·l0·Y00 + (2π/3)·(l1·Y1(n) + l2·Y2(n) + l3·Y3(n))
-/// （Â0 = π、Â1 = 2π/3 是"clamped cosine 卷积"的解析系数；白炉下它给出 E ≡ π）
-float3 SHRadianceToIrradiance(float3 l0, float3 l1, float3 l2, float3 l3, float3 n) {
-    const float A0 = 3.14159265359;
-    const float A1 = 2.09439510239;   // 2π/3
-    return l0 * (A0 * kSH_Y00)
-         + (l1 * (kSH_Y1 * n.y) + l2 * (kSH_Y1 * n.z) + l3 * (kSH_Y1 * n.x)) * A1;
-}
+// ── 二阶（4 系数）SH：基函数与辐照度重建都在 "SHCommon.slang" ──
+// 本文件此前自带 kSH_Y00 / kSH_Y1 / SHBasis / SHRadianceToIrradiance 一份拷贝，
+// 与 `GI/DDGI.comp.slang`、`RT_DDGI.slang` 重复；现统一到 SHCommon，改约定只需改一处。
+// 使用方照旧 include 本文件即可（SHCommon 在本文件里已被 include）。
 
 #endif // HUGENGINE_SCREEN_PROBE_SAMPLING

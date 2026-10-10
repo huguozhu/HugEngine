@@ -22,6 +22,7 @@
 
 #include "ShaderTypes.slang"   // RTRayEffectPushConstant
 #include "RT_HitCommon.slang"  // 命中点材质/光源查询（rchit 用）
+#include "SHCommon.slang"      // Fibonacci 采样方向（与 DDGI.comp 共用同一份，见下）
 
 // === 绑定（set0）===
 [[vk::binding(0, 0)]] RaytracingAccelerationStructure g_TLAS;
@@ -43,13 +44,10 @@ struct GIPayload {
     float4 radianceT;   // rgb=辐射度, a=命中距离（-1=未命中）
 };
 
-// Fibonacci 球面方向：必须与 DDGI.comp.slang 的 FibonacciSphere 逐位一致，
-// 否则本 pass 算出的方向与被替换掉的那条路径不是同一个采样点。
-float3 FibonacciSphere(int i, int n) {
-    float phi   = acos(1.0 - 2.0 * (float(i) + 0.5) / float(n));
-    float theta = 3.14159265359 * (1.0 + sqrt(5.0)) * float(i);
-    return float3(sin(phi) * cos(theta), cos(phi), sin(phi) * sin(theta));
-}
+// Fibonacci 球面方向来自 "SHCommon.slang"。
+// 【为什么不再自带一份】本文件此前与 `DDGI.comp.slang` 各有一份逐字相同的实现，靠注释要求
+// "必须逐位一致，否则本 pass 算出的方向与被替换掉的那条路径不是同一个采样点"。现在两份合一，
+// 这条不变量由构造保证（改采样方向不会再出现"只改了一边"）。
 
 [shader("raygeneration")]
 void main() {

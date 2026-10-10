@@ -7,6 +7,7 @@
 
 #include "ShaderTypes.slang"  // GPU 常量 (kGPU*) + 结构体
 #include "Lumen/ScreenProbe.slang"   // 步骤 31：Screen Probe 的共享布局（与 Lumen 侧逐字段一致）
+#include "SHCommon.slang"    // 球谐共享实现：基函数 / 采样方向 / 重建（本文件不再自带 SH 常数）
 
 // GBuffer 输入（只读，CombinedImageSampler）
 [[vk::binding(kGPUBinding_GBufferA, kGPUDescSet_PerFrame)]] Texture2D<float4> u_GBufferA;
@@ -57,30 +58,10 @@
 // 每探针 float4 数量（与 C++ kFloats4PerProbe 保持一致）
 static const uint kStride = 4;   // 步骤 30：每探针 4 个 SH 系数（16 → 4）
 
-// ---- SH 基函数常量 ----
-static const float kSH_Y00 = 0.28209479177387814;  // l=0: sqrt(1/(4π))
-
-// Band 1 (l=1): 3 个系数
-float3 SH_Band1(float3 dir) {
-    return dir * 0.4886025119029199;  // sqrt(3/(4π))
-}
-
-// Band 2 (l=2) 在步骤 30 被移除：二阶 4 系数即可（§7 Radiance Cache 的表示）。
-// 保留说明是为了让"为什么少了一档"这件事在代码里可见，而不是看起来像漏写。
-
-// 将方向 dir 投影为 **4** 个 SH 系数（bands 0/1）
-void SHBasis(float3 dir, out float sh[4]) {
-    sh[0] = kSH_Y00;                                    // l=0,m=0
-    float3 b1 = SH_Band1(dir);
-    sh[1] = b1.y; sh[2] = b1.z; sh[3] = b1.x;          // l=1: m=-1,0,1
-}
-
-// Fibonacci 球面：均匀分布在单位球面上的第 i 个方向（共 n 个）
-float3 FibonacciSphere(int i, int n) {
-    float phi   = acos(1.0 - 2.0 * (float(i) + 0.5) / float(n));
-    float theta = 3.14159265359 * (1.0 + sqrt(5.0)) * float(i);
-    return float3(sin(phi) * cos(theta), cos(phi), sin(phi) * sin(theta));
-}
+// SH 基函数 / 采样方向 / 重建公式全部在 "SHCommon.slang"（共享实现，唯一出处）。
+// 本文件此前自带一份 kSH_Y00 / SH_Band1 / SHBasis / FibonacciSphere，与
+// `RT_DDGI.slang`、`Lumen/ScreenProbeSampling.slang`、`RayTracing/DDGI_Trace.rgen.slang`
+// 各处重复 —— 已全部收敛到 SHCommon，改约定只需改一处。
 
 // 写入 SH 系数到探针缓冲（4 个系数，各占一个 float4 的 .rgb；其余槽位清零）
 void WriteSH(uint probeIndex, float4 sh[4]) {
@@ -130,16 +111,17 @@ uint FetchScreenProbe(float3 probePos) {
     return idx;
 }
 
-// 用 Screen Probe 的 4 系数**辐射度** SH 在方向 dir 上求值（L(d) = Σ l_i Y_i(d)），
-// 再乘"单侧→整球"的对称外推系数。负值截断：SH 带限表示会有振铃，负辐射度没有物理意义。
+// 用 Screen Probe 的 4 系数**辐射度** SH 在方向 dir 上求值（L(d) = Σ l_i Y_i(d)，共享实现见
+// SHCommon.slang），再乘"单侧→整球"的对称外推系数。负值截断：SH 带限表示会有振铃，
+// 负辐射度没有物理意义。
 float3 EvalScreenProbeRadiance(uint idx, float3 dir) {
     const ScreenProbe sp = u_ScreenProbes[idx];
-    float3 l0 = float3(sp.shR.x, sp.shG.x, sp.shB.x);
-    float3 l1 = float3(sp.shR.y, sp.shG.y, sp.shB.y);
-    float3 l2 = float3(sp.shR.z, sp.shG.z, sp.shB.z);
-    float3 l3 = float3(sp.shR.w, sp.shG.w, sp.shB.w);
-    const float A0 = 0.2820947918, A1 = 0.4886025119;
-    float3 r = l0 * A0 + (l1 * dir.y + l2 * dir.z + l3 * dir.x) * A1;
+    // 通道主序布局：shR/shG/shB 每个通道 4 个系数
+    const float3 l0 = float3(sp.shR.x, sp.shG.x, sp.shB.x);
+    const float3 l1 = float3(sp.shR.y, sp.shG.y, sp.shB.y);
+    const float3 l2 = float3(sp.shR.z, sp.shG.z, sp.shB.z);
+    const float3 l3 = float3(sp.shR.w, sp.shG.w, sp.shB.w);
+    const float3 r  = SHEvalRadiance(l0, l1, l2, l3, dir);
     return max(r, 0.0) * u_ScreenProbeFlags.z;
 }
 [numthreads(64, 1, 1)]
