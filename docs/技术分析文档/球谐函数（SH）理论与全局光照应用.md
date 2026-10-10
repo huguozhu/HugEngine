@@ -139,54 +139,36 @@ K_l^{0}\,P_l^{0}(\cos\theta) & m = 0\\[2pt]
 | 7 | 2 | 1 | $Y_{2,1} = \sqrt{\frac{15}{4\pi}}\,xz$ | 1.0925484306 |
 | 8 | 2 | 2 | $Y_{2,2} = \sqrt{\frac{15}{16\pi}}\,(x^2-y^2)$ | 0.5462742153 |
 
-**怎么直观理解这些基函数**
-**工程对照**：这两组常数在代码里就是上面两行。DDGI 的投影端（`GI/DDGI.comp.slang:59-77`）
-与 Lumen 的共享库（`Lumen/ScreenProbeSampling.slang:66-78`）是**同一套约定的两份镜像**：
+**怎么直观理解这些基函数**：
+
+**工程对照**：这两组常数在代码里就是上面两行。投影端（DDGI）与评估端（RT / Lumen）现在 include **同一个文件** `SHCommon.slang` ——
+不再各持一份拷贝。下面是该文件里的常数与两个 `SHBasis` 重载（数组版给投影循环用，标量版给逐项求值用）：
 
 ```hlsl
-// Engine/Shader/Shaders/GI/DDGI.comp.slang:61-77
-static const float kSH_Y00 = 0.28209479177387814;  // l=0: sqrt(1/(4π))
-
-// Band 1 (l=1): 3 个系数
-float3 SH_Band1(float3 dir) {
-    return dir * 0.4886025119029199;  // sqrt(3/(4π))
-}
-
-// Band 2 (l=2) 在步骤 30 被移除：二阶 4 系数即可（§7 Radiance Cache 的表示）。
-// 保留说明是为了让"为什么少了一档"这件事在代码里可见，而不是看起来像漏写。
-
-// 将方向 dir 投影为 **4** 个 SH 系数（bands 0/1）
-void SHBasis(float3 dir, out float sh[4]) {
-    sh[0] = kSH_Y00;                                    // l=0,m=0
-    float3 b1 = SH_Band1(dir);
-    sh[1] = b1.y; sh[2] = b1.z; sh[3] = b1.x;          // l=1: m=-1,0,1
-}
-
-```
-
-```hlsl
-// Engine/Shader/Shaders/Lumen/ScreenProbeSampling.slang:66-78
+// Engine/Shader/Shaders/SHCommon.slang:39-40,57-70
+static const float kSH_Y00 = 0.28209479177387814;   // 0.5·√(1/π)
+static const float kSH_Y1  = 0.4886025119029199;    // 0.5·√(3/π)
+// ...
+// 第 i 个基函数在方向 d 上的值（i ∈ [0,4)）。d 必须是**单位向量**。
+float SHBasis(uint i, float3 d) {
     if (i == 0u) return kSH_Y00;
-    if (i == 1u) return kSH_Y1 * d.y;
-    if (i == 2u) return kSH_Y1 * d.z;
-    return kSH_Y1 * d.x;
+    if (i == 1u) return kSH_Y1 * d.y;   // m = -1
+    if (i == 2u) return kSH_Y1 * d.z;   // m =  0
+    return kSH_Y1 * d.x;                // m = +1（i == 3）
 }
 
-/// 由**辐射度**的 4 系数重建**辐照度**：E(n) = π·l0·Y00 + (2π/3)·(l1·Y1(n) + l2·Y2(n) + l3·Y3(n))
-/// （Â0 = π、Â1 = 2π/3 是"clamped cosine 卷积"的解析系数；白炉下它给出 E ≡ π）
-float3 SHRadianceToIrradiance(float3 l0, float3 l1, float3 l2, float3 l3, float3 n) {
-    const float A0 = 3.14159265359;
-    const float A1 = 2.09439510239;   // 2π/3
-    return l0 * (A0 * kSH_Y00)
-         + (l1 * (kSH_Y1 * n.y) + l2 * (kSH_Y1 * n.z) + l3 * (kSH_Y1 * n.x)) * A1;
+// 一次取齐 4 个基函数值（投影端累加用：sh[j] += L·basis[j]），避免在投影循环里逐次分支。
+void SHBasis(float3 d, out float basis[4]) {
+    basis[0] = kSH_Y00;
+    const float3 b1 = d * kSH_Y1;
+    basis[1] = b1.y; basis[2] = b1.z; basis[3] = b1.x;   // l=1: m=-1,0,1
+}
 ```
 
 **注意两处细节**：① 基函数里**没有任何三角函数**——$l\le1$ 的 $\cos\phi$/$\sin\phi$ 已经在
 "实数化 + 用 $(x,y,z)$ 表示"时被吸收掉了，这就是它能便宜到四次乘加的原因；
 ② 两侧都把方向当**单位向量**用（`d.y`/`d.z`/`d.x` 直接当基函数值），所以调用方必须保证 $|\omega|=1$。
 ③ **轴序**：`SHBasis` 里 `i==3` 返回的是 `d.x` ⇒ $l=1$ 三项的顺序是 $(y,z,x)$，与 §3.6 的约定一致（此处最容易抄错，见 §7.1）。
-
-：
 
 - $Y_{00}$ 是**常数**（均匀的"底噪"）——它捕获球面函数的平均值；
 - $l=1$ 的三个代表**沿三个轴的一阶变化**（像球面的"梯度"），能表达"某个方向更亮"；
@@ -208,14 +190,14 @@ $$\int_\Omega Y_{00}\,\mathrm d\omega = Y_{00}\cdot 4\pi = \sqrt{\pi}\approx1.77
   **前三个带（$l\le2$，9 个系数）即可复原约 99% 的辐照度**；$l\ge3$ 的贡献更小。
 - **工程上更省**：探针数量巨大（DDGI 网格可达上千颗），每颗多存 5 个 float4 会直接吃掉显存与带宽。
 - **实测结论**：工程里探针的"格子感"主要来自**探针网格分辨率**而不是 SH 阶数
-  （`RT_DDGI.slang:57-65` 记录了两轮实测：换插值权重无效，把最长轴格数 16→24/32 才把幅度调制
+  （`RT_DDGI.slang:44-52` 记录了两轮实测：换插值权重无效，把最长轴格数 16→24/32 才把幅度调制
   从 35.67% 降到 22.42%/20.11%）。
 
 于是工程的选择是：**$l\le1$（4 个系数）+ 提高网格分辨率**，而不是"$l\le2$ + 稀疏网格"。
 
 ### 3.6 轴序与符号约定（最容易错的地方）
 
-工程约定（`LumenSH.h:7-10`、`DDGI.comp.slang:73-76` 两侧一致）：
+工程约定（Slang 侧 `SHCommon.slang:60-62` 与 C++ 镜像 `LumenSH.h:9` 一致）：
 
 $$Y_{1,-1}\propto y,\qquad Y_{1,0}\propto z,\qquad Y_{1,1}\propto x$$
 
@@ -233,7 +215,7 @@ $$f_{lm} = \int_\Omega f(\omega)\,Y_{lm}(\omega)\,\mathrm d\omega$$
 **工程对照**：两套实现都把"投影"写成**累加 + 乘权重**，区别只在采样域与权重常数：
 
 ```hlsl
-// Engine/Shader/Shaders/GI/DDGI.comp.slang:253-267
+// Engine/Shader/Shaders/GI/DDGI.comp.slang:235-250
     // SH 投影
     float basis[4];
     SHBasis(dir, basis);
@@ -249,6 +231,7 @@ if (validSamples > 0.0) {
     for (int j = 0; j < 4; j++) {
         sh[j].rgb *= scale;
     }
+} else {
 ```
 
 ```hlsl
@@ -281,12 +264,11 @@ $$f(\omega)\approx f_{00}Y_{00} + f_{1,-1}Y_{1,-1}(\omega) + f_{1,0}Y_{1,0}(\ome
 **工程对照**：重建就是"逐带求和"，$Y_{lm}(\omega)$ 的角度部分直接写成 `dir.x/y/z`：
 
 ```hlsl
-// Engine/Shader/Shaders/RT_DDGI.slang:31-35
-float3 EvalDDGI_SH(float4 sh[4], float3 dir) {
-    float3 result = sh[0].rgb * kDDGI_SH_A0;                 // l=0, m=0
-    result += sh[1].rgb * dir.y * kDDGI_SH_A1;               // l=1, m=-1
-    result += sh[2].rgb * dir.z * kDDGI_SH_A1;               // l=1, m=0
-    result += sh[3].rgb * dir.x * kDDGI_SH_A1;               // l=1, m=1
+// Engine/Shader/Shaders/SHCommon.slang:74-77
+// 由 4 系数**辐射度** SH 在方向 d 上求值（**不做**余弦卷积）⇒ 结果仍是辐射度 L(d)。
+float3 SHEvalRadiance(float3 l0, float3 l1, float3 l2, float3 l3, float3 d) {
+    return l0 * kSH_Y00 + (l1 * d.y + l2 * d.z + l3 * d.x) * kSH_Y1;
+}
 ```
 
 > **注意它不是"原样重建"**：常数 `kDDGI_SH_A0/A1` 已经把 §5 的 Lambert 卷积 $\hat A_l$ 乘进去了
@@ -298,7 +280,7 @@ float3 EvalDDGI_SH(float4 sh[4], float3 dir) {
 | 后果 | 说明 |
 |---|---|
 | **细节丢失** | 高频方向结构（小光源、锐利明暗）被抹成低频 |
-| **振铃 / 负值** | 截断的吉布斯现象会让重建出现负值（"负光照"），工程里通常直接钳到 0：`return max(result, 0.0)`（`RT_DDGI.slang:38`） |
+| **振铃 / 负值** | 截断的吉布斯现象会让重建出现负值（"负光照"），工程里通常直接钳到 0：`return max(result, 0.0)`（`RT_DDGI.slang:25`） |
 
 工程注释里提到：若振铃明显，可改用 **SH 窗口化**（如 Hanning 窗）在截断处平滑衰减系数。
 
@@ -306,10 +288,10 @@ float3 EvalDDGI_SH(float4 sh[4], float3 dir) {
 带的阶数越低，截断越狠）：
 
 ```hlsl
-// Engine/Shader/Shaders/RT_DDGI.slang:36-38
+// Engine/Shader/Shaders/RT_DDGI.slang:23-25
 // 负值截断：辐照度物理上非负；SH 表示余弦波瓣时仍可能有轻微振铃（二阶更明显），
 // 截断避免负辐照度进入画面。若后续振铃明显，可改为 SH 窗口化（如 Hanning）平滑抑制。
-return max(result, 0.0);
+return max(e, 0.0);
 ```
 
 ### 4.4 卷积定理（zonal 核）—— 这条是 Lambert 卷积的理论基础
@@ -325,26 +307,23 @@ $$(f * g)(n) = \int_\Omega f(\omega)\,g(n\cdot\omega)\,\mathrm d\omega = \sum_{l
 它把"能做什么/不能做什么"讲得比多数论文摘要还清楚：
 
 ```hlsl
-// Engine/Shader/Shaders/RT_DDGI.slang:17-26
-// ── Lambert 余弦波瓣的 SH 卷积系数（M5.3）──
-// 探针投影得到的是**辐射度** SH（L_lm = 4π/N·Σ L·Y，不含 cos）；
-// 要得到「辐照度」E(n) = ∫L(ω)·max(0, n·ω)dω，必须在**评估端**乘 SH 卷积系数：
-//     E(n) = Σ_l A_l · L_lm · Y_lm(n)
-//   A_0 = π,  A_1 = 2π/3,  A_2 = π/4      (Ramamoorthi & Hanrahan 2001)
-// 注意：不能在「投影时乘 cos」——cos 依赖评估方向（法线），而探针存储时方向未知；
-//       卷积只能在评估端以与 n 无关的 A_l 形式应用。
-// 下方常量即 A_l 与各 Y_lm 归一化常数的乘积：
+// Engine/Shader/Shaders/RT_DDGI.slang:17-20
+// 在方向 dir 处评估 **4** 系数 SH 的辐照度（bands 0/1，含 Lambert 卷积 Â_l）。
+// 【为什么卷积在评估端】探针里存的是**辐射度** SH（投影时不乘 cos）：cos 依赖评估方向
+// （法线），而探针存储时该方向未知 —— 卷积只能在这里以与 n 无关的 Â_l 形式施加。
+// 常数与重建式都在 `SHCommon.slang`（本文件此前自带一份 kDDGI_SH_A0/A1，已收敛到那里）。
 ```
 
 对应的评估实现（Lumen 侧的同一件事）：
 
 ```hlsl
-// Engine/Shader/Shaders/Lumen/ScreenProbeSampling.slang:74-81
+// Engine/Shader/Shaders/SHCommon.slang:79-85
+// 由 4 系数**辐射度** SH 重建**辐照度**（施加 clamped-cosine 卷积 Â_l）。白炉下返回 π。
+// 【为什么不做负值截断】截断与否是调用方的语义选择，不属共享实现：DDGI 探针求值需要截断
+//（负辐照度无物理意义），而 Lumen 的诊断路径要保留原值才能统计偏差。
 float3 SHRadianceToIrradiance(float3 l0, float3 l1, float3 l2, float3 l3, float3 n) {
-    const float A0 = 3.14159265359;
-    const float A1 = 2.09439510239;   // 2π/3
-    return l0 * (A0 * kSH_Y00)
-         + (l1 * (kSH_Y1 * n.y) + l2 * (kSH_Y1 * n.z) + l3 * (kSH_Y1 * n.x)) * A1;
+    return l0 * kSH_A0Y00
+         + (l1 * n.y + l2 * n.z + l3 * n.x) * kSH_A1Y1;
 }
 ```
 
@@ -381,7 +360,7 @@ $$\hat A_l = 2\pi\int_{0}^{1} t\,P_l(t)\,\mathrm dt$$
 | 3 | 奇函数在 $[0,1]$ 上的加权积分为 0 | **0** | 0 |
 | 4 | $-\pi/24$ | $-0.1308997$ | 负值（高阶会反号） |
 
-**前三个常数就是工程里的 `kDDGI_SH_A0/A1`**（`RT_DDGI.slang:21` 引 Ramamoorthi & Hanrahan 2001）：
+**前三个常数就是工程里的 `kSH_A0` / `kSH_A1`**（`SHCommon.slang:43-45`，注释里引了 Ramamoorthi & Hanrahan 2001）：
 $A_0=\pi$、$A_1=2\pi/3$（工程的 band-2 已移除，但注释保留了 $A_2=\pi/4$）。
 
 于是辐照度的 SH 重建式（$L$ 为**辐射度** SH 系数）：
@@ -391,24 +370,32 @@ $$\boxed{\;E(n) = \sum_{l,m} \hat A_l\,L_{lm}\,Y_{lm}(n)\;}$$
 **工程对照**：这三个常数在代码里就是一行注释加一行定义：
 
 ```hlsl
-// Engine/Shader/Shaders/RT_DDGI.slang:19-21
-//   A_0 = π,  A_1 = 2π/3,  A_2 = π/4      (Ramamoorthi & Hanrahan 2001)
+// Engine/Shader/Shaders/SHCommon.slang:42-45
+// ---- Lambert 余弦卷积系数 Â_l = 2π·∫₀¹ t·P_l(t)dt ----
+static const float kSH_A0 = 3.14159265358979323846;   // π
+static const float kSH_A1 = 2.09439510239319549231;   // 2π/3
+static const float kSH_A2 = 0.78539816339744830961;   // π/4（band 2 已移除，保留备查）
 ```
 
 Lumen 侧把 $A_0$/$A_1$ 写成显式常量并在重建式里用：
 
 ```hlsl
-// Engine/Shader/Shaders/Lumen/ScreenProbeSampling.slang:75-77
-const float A0 = 3.14159265359;
-const float A1 = 2.09439510239;   // 2π/3
+// Engine/Shader/Shaders/SHCommon.slang:47-53
+// ---- 预乘形式：Â_l 与 Y_lm 归一化常数的乘积（评估端最省算力）----
+//   kSH_A0Y00 = Â0·Y00 = π·√(1/4π) = √π/2 ≈ 0.8862269255
+//   kSH_A1Y1  = Â1·Y1  = (2π/3)·√(3/4π)      ≈ 1.0233267079
+static const float kSH_A0Y00 = 0.8862269254527580;
+static const float kSH_A1Y1  = 1.0233267079464886;
+
+static const uint kSHCoeffCount = 4;   // l ≤ 1 ⇒ (1+1)² = 4 个系数
 ```
 
-（`2.09439510239` 就是 $2\pi/3$；`RT_DDGI.slang:27` 另有一条注释说明 band-2 的 $A_2$
+（`kSH_A1 = 2.09439510239319549231` 就是 $2\pi/3$；`SHCommon.slang:20-22` 另有注释说明 band-2 的 $A_2$
 与 5 个 $l=2$ 项是**一起移除**的——"只改一边会让少的那一档变成静默偏移"。）
 
 ### 5.3 为什么"不能在投影端乘 cos"
 
-`RT_DDGI.slang:22-23` 明确写了这条：
+`RT_DDGI.slang:18-19` 明确写了这条：
 
 > 不能在「投影时乘 cos」——cos 依赖评估方向（法线），而探针存储时方向未知；
 > 卷积只能在评估端以与 n 无关的 $A_l$ 形式应用。
@@ -427,14 +414,14 @@ $$\hat A_0\cdot Y_{00} = \pi\cdot\sqrt{\tfrac{1}{4\pi}} = \frac{\sqrt\pi}{2} = 0
 
 $$\hat A_1\cdot Y_{1} = \frac{2\pi}{3}\cdot\sqrt{\tfrac{3}{4\pi}} = 1.0233267079464886$$
 
-对应 `RT_DDGI.slang:25-26` 的 `kDDGI_SH_A0` / `kDDGI_SH_A1`。评估实现见 §4.2 的代码块（`RT_DDGI.slang:31-35` 的 `EvalDDGI_SH`）——它就是把这两个常数直接乘在基函数上，于是四次乘加即得辐照度。
+对应 `SHCommon.slang:50-51` 的 `kSH_A0Y00` / `kSH_A1Y1`。评估实现见 `RT_DDGI.slang:21-26` 的 `EvalDDGI_SH`（内部调用共享的 `SHRadianceToIrradiance`）——它就是把这两个常数直接乘在基函数上，于是四次乘加即得辐照度。
 
 > **精度说明**：解析值与源码里的十进制常量在末位差 1~3 ulp——
 > $\hat A_0Y_{00}$ 解析为 `0.8862269254527579`、代码写 `...580`；
 > $\hat A_1Y_1$ 解析为 `1.0233267079464883`、代码写 `...886`。
 > 这是十进制常量的正常舍入，**不是约定差异**；核对常数时不要因末位不同就以为用错了公式。
 
-（`RT_DDGI.slang:31-39`；代码已在 §4.2 引用。）
+（`RT_DDGI.slang:21-26`；共享实现见 §4.2 的代码块。）
 
 ### 5.5 白炉解析判据（工程用它做验收）
 
@@ -531,7 +518,7 @@ radiance += SampleDDGI(worldPos, dir) * (1.0 / 3.14159265);
 | 采样方向 | Fibonacci 球面 32 条（`FibonacciSphere`） | 近似**整球均匀**采样，pdf $=1/4\pi$ |
 | 投影基 | `SHBasis(dir, basis)`：$[Y_{00},\ Y_1 y,\ Y_1 z,\ Y_1 x]$ | §3.3 的 $i=0..3$ |
 | 累加 | `sh[j].rgb += radiance * basis[j]` | 蒙特卡洛估计分子 |
-| 归一化 | `scale = 4π / validSamples * intensity`（`DDGI.comp.slang:264`） | $L_{lm}\approx\frac{4\pi}{N}\sum_j L_jY_{lm}(\omega_j)$ |
+| 归一化 | `scale = 4π / validSamples * intensity`（`DDGI.comp.slang:246`） | $L_{lm}\approx\frac{4\pi}{N}\sum_j L_jY_{lm}(\omega_j)$ |
 | 时域 | 与历史 SH 逐系数 `lerp`（`:273-279`） | 降低方差、加速收敛 |
 | 评估 | `EvalDDGI_SH`：预乘常数 × 基函数，再钳负 | §5.4 |
 | 空间重建 | 8 邻域**三线性插值**（`SampleDDGI`） | 探针之间的空间插值（SH 之外的另一层近似） |
@@ -556,11 +543,13 @@ $$L_{lm}\approx\frac{1}{N}\sum_j\frac{L_jY_{lm}(\omega_j)}{p(\omega_j)}
 
 | 约定 | 工程值 | 出处 |
 |---|---|---|
-| $Y_{00}$ | 0.28209479177387814 | `DDGI.comp.slang:61`、`LumenSH.h:20` |
-| $Y_{1}$（$l=1$ 归一化） | 0.48860251190291992 | `DDGI.comp.slang:65`、`LumenSH.h:22` |
-| $l=1$ 轴序 | $(y,z,x)$ 对应 $m=(-1,0,1)$ | `DDGI.comp.slang:75`、`LumenSH.h:9` |
-| $\hat A_0,\hat A_1$ | $\pi$、$2\pi/3$ | `RT_DDGI.slang:21`、`LumenSH.h:39-40` |
+| $Y_{00}$ | 0.28209479177387814 | `SHCommon.slang:39`、`LumenSH.h:20` |
+| $Y_{1}$（$l=1$ 归一化） | 0.48860251190291992 | `SHCommon.slang:40`、`LumenSH.h:22` |
+| $l=1$ 轴序 | $(y,z,x)$ 对应 $m=(-1,0,1)$ | `SHCommon.slang:60-62`、`LumenSH.h:9` |
+| $\hat A_0,\hat A_1$ | $\pi$、$2\pi/3$ | `SHCommon.slang:43-44`、`LumenSH.h:39-40` |
 | 探针存储 | 每探针 4 × `float4`，RGB 存系数、A 闲置 | `GI_DDGI.h` 的 `kFloats4PerProbe = 4`、`RT_DDGI.slang:11` |
+
+（这些常数的**唯一出处**、以及它们在 2026-10-10 如何从 4 处拷贝收敛到 1 处，见 §6.5。）
 
 ### 6.4 数据流小结
 
@@ -575,6 +564,45 @@ $$L_{lm}\approx\frac{1}{N}\sum_j\frac{L_jY_{lm}(\omega_j)}{p(\omega_j)}
    ↓ 评估（Lambert 卷积）    E(n) = Σ Â_l · L_lm · Y_lm(n)，再 max(·,0)
    ↓ 乘 albedo/π → L_o       合成端（三通道归一化加权）
 ```
+
+### 6.5 共享实现：常数与公式的**唯一出处**（SHCommon.slang）
+
+**收敛前后**：同一组 SH 常数与重建公式此前散在 4 个着色器里，各有各的写法与精度 ——
+
+| 原位置 | 原来定义了什么 |
+|---|---|
+| `GI/DDGI.comp.slang` | `kSH_Y00`、`SH_Band1`、`SHBasis(float3,out float[4])`、`FibonacciSphere`，另有一处把 $Y_{00}/Y_1$ **命名成 `A0/A1`** 的局部常量 |
+| `RT_DDGI.slang` | `kDDGI_SH_Y00`、`kDDGI_SH_B1`、预乘 `kDDGI_SH_A0/A1`、`EvalDDGI_SH` 的求值式 |
+| `Lumen/ScreenProbeSampling.slang` | `kSH_Y00`、`kSH_Y1`、`SHBasis(uint,float3)`、`SHRadianceToIrradiance` |
+| `RayTracing/DDGI_Trace.rgen.slang` | `FibonacciSphere`（注释要求"必须与 DDGI.comp 逐位一致"） |
+
+现在**只剩一处**：
+
+| 内容 | 位置 |
+|---|---|
+| 基函数常数 $Y_{00},Y_1$、卷积系数 $\hat A_l$、预乘常数 $\hat A_lY_{lm}$、系数个数 | `SHCommon.slang:38-53` |
+| `SHBasis(uint,float3)` 与 `SHBasis(float3, out float[4])` 两个重载 | `SHCommon.slang:57-70` |
+| `SHEvalRadiance`（辐射度求值）/ `SHRadianceToIrradiance`（辐照度重建，不做钳负） | `SHCommon.slang:74-85` |
+| `FibonacciSphere`（投影采样方向；投影端与光追端共用同一份） | `SHCommon.slang:94-98` |
+| 约定、轴序、"为什么卷积在评估端"、"两种存储布局"、"白炉判据" | `SHCommon.slang:1-34`（文件头） |
+
+**为什么要合**：这组常数构成"**投影端与评估端必须同约定**"的不变量（阶数、轴序、卷积系数、
+采样方向四项）。分散时只能靠注释要求"两份拷贝逐位一致"，任何一次改动都可能只改一半 ——
+与"绑定号无自动对账"是同一类问题（《04.功能缺口与对标分析》§16）。合并后该不变量的表述变成
+"改这里等于同时改所有使用者"。
+
+**构建侧**：`SHCommon.slang` 已登记进 `Engine/Shader/CMakeLists.txt` 的 `SLANG_INCLUDES`
+（同时补上此前**漏登记**的 `Lumen/ScreenProbeSampling.slang` 与 `Lumen/LumenFarField.slang` ——
+漏登记的后果是改这两个文件不会触发重编）。登记后改 SHCommon 会触发**全部着色器重编**：
+实测 146 个 `.spv.h` 重新生成、构建 0 错误。这正是"共享契约变更必须所有使用者一起重编"的
+正确代价。
+
+**数值影响（实测，非估计）**：字面量统一为完整精度后，与原 10 位截断形式在 **fp32 下舍入到
+同一个 float**（差值 ~2.6e-11，远小于该量级的 fp32 间隔 3e-8）⇒ **常数本身零变化**。评估式的
+结合顺序由"逐项乘 $\hat A_1Y_1$ 再相加"改为"$(\sum_i l_i y_i)\cdot\hat A_1Y_1$"，100 万组随机输入的
+对比结果是：相对偏差**均值 < 1 ulp、最大 12 ulp**（与旧 DDGI 形式 49% 逐位相同、与旧 Lumen
+形式 36% 逐位相同）；白炉判据 $E\equiv\pi$ 仍在 1 ulp 内。也就是说：这次重构在画面上不可见，
+而 §7.7 的验收判据全部照旧可用。
 
 ---
 
@@ -637,7 +665,7 @@ $$f_{lm}\approx\frac{1}{N}\sum_{j=1}^{N}\frac{f(\omega_j)Y_{lm}(\omega_j)}{p(\om
 |---|---|---|
 | 每探针 | 4 × `float4` = 64 B（RGB 用、A 闲置） | 打包成 4×11 bit 定点、或 fp16 ⇒ 显存/带宽减半以上 |
 | 精度 | 当前 fp32 | 定点压缩会引入量化误差，需重新标定白炉判据 |
-| 布局 | `StructuredBuffer<float4>`，探针索引 × 4 | 保持**同一次改动里同时改投影端与评估端**（`RT_DDGI.slang:27-28` 的警告） |
+| 布局 | `StructuredBuffer<float4>`，探针索引 × 4 | 保持**同一次改动里同时改投影端与评估端**（`SHCommon.slang:20-22` 的警告） |
 
 ### 7.7 验收方法（可复现）
 
@@ -645,7 +673,6 @@ $$f_{lm}\approx\frac{1}{N}\sum_{j=1}^{N}\frac{f(\omega_j)Y_{lm}(\omega_j)}{p(\om
    且 $E(n)\equiv\pi$，与方向/采样数无关 —— 可用 CPU 镜像断言（`LumenSH.h` 的做法）；
 2. **常量核对**：$\hat A_0Y_{00} = \sqrt\pi/2 = 0.8862269254527580$、
    $\hat A_1Y_1 = 1.0233267079464886$，与代码常量逐位比对；
-3. **端到端**：探针 SH 在整个球面/半球上的平均应当等于输入辐射度的平均（`Σ L` 与 `l_0` 的关系可解析验算）；
 3. **端到端**：探针 SH 在整个球面/半球上的平均应当等于输入辐射度的平均（`Σ L` 与 `l_0` 的关系可解析验算）。
    工程里更硬的做法是**同帧算两份**：SH 重建的 $E$ 与"逐光线 cos 加权求和"的参考 $E$ 各写一个缓冲，
    差值就是"SH 带限 + 有限采样"的误差（不是猜的）：
