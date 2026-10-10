@@ -273,6 +273,16 @@ if(SLANGC)
         # 与 Fibonacci 采样方向。改它会触发全量重编 —— 这正是"SH 约定变更必须所有使用者一起
         # 重编"的正确代价（此前同一组常数散在 4 个文件里，只改一处就是静默不一致）。
         "${SHADER_DIR}/SHCommon.slang"
+        # 纯数学/颜色工具（PI、sRGB、Luminance、ACES、PQ、BT.709→2020）——**零绑定**，
+        # 任何 pass 都可安全引用，不必为此继承 common.slang 的 bindless 描述符布局。
+        "${SHADER_DIR}/MathCommon.slang"
+        # 采样工具（余弦半球采样、Hammersley 低差异序列）——PT 与 RT 共用。
+        "${SHADER_DIR}/Sampling.slang"
+        # RT pass 共用小工具（Hash / Rand / 深度→世界坐标）——此前 4 个 rgen 各抄一份。
+        "${SHADER_DIR}/RT_Common.slang"
+        # ReSTIR DI 三 pass 的共用件（空蓄水池 / 目标函数）——依赖包含者声明的 g_Lights/g_PC，
+        # 故不能放进被广泛 include 的 PT_Common.slang。
+        "${SHADER_DIR}/PathTracing/ReSTIR_Common.slang"
         "${SHADER_DIR}/Particles/ParticleTypes.slang"
         "${SHADER_DIR}/Lumen/SurfaceCache.slang"
         "${SHADER_DIR}/Lumen/ScreenProbe.slang"
