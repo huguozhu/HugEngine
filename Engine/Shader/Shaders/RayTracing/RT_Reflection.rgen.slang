@@ -18,6 +18,8 @@
 // === Push Constant（共享结构，见 ShaderTypes.slang）===
 [[vk::push_constant]] RTRayEffectPushConstant g_PC;
 
+
+#include "RT_Common.slang"   // Hash / Rand / ReconstructWorldPos（唯一出处）
 // === Payload（与 ClosestHit/Miss 共享）===
 struct ReflectionPayload {
     float4 colorT;  // rgb=反射颜色, a=命中距离（-1=未命中）
@@ -26,22 +28,6 @@ struct ReflectionPayload {
 // ============================================================
 // 工具函数
 // ============================================================
-
-// 简单整数哈希（PCG 风格）
-uint Hash(uint x) {
-    x = (x ^ 61u) ^ (x >> 16u);
-    x *= 9u;
-    x ^= x >> 4u;
-    x *= 0x27d4eb2du;
-    x ^= x >> 15u;
-    return x;
-}
-
-// 确定性随机数（像素坐标 + 帧索引 + 采样号 → [0,1)）
-float Rand(uint2 idx, uint frame, uint s) {
-    uint seed = idx.x * 1973u + idx.y * 9277u + frame * 26699u + s * 479u;
-    return float(Hash(seed) & 0xFFFFu) / 65536.0;
-}
 
 // GGX 微表面法线重要性采样（半向量 H，用于粗糙反射）
 float3 SampleGGX(float3 N, float roughness, float2 u) {
@@ -55,16 +41,6 @@ float3 SampleGGX(float3 N, float roughness, float2 u) {
     float3 T = normalize(cross(Up, N));
     float3 B = cross(N, T);
     return normalize(H.x * T + H.y * B + H.z * N);
-}
-
-// 从深度和 UV 重建世界坐标（Vulkan NDC y 翻转，与 RT_Sponza 一致）
-float3 ReconstructWorldPos(uint2 idx, float depth) {
-    float2 uv = (float2(idx) + 0.5) / float2(g_PC.dispatchDimX, g_PC.dispatchDimY);
-    float2 ndc = uv * 2.0 - 1.0;
-    ndc.y = -ndc.y;
-    float4 clipPos = float4(ndc, depth, 1.0);
-    float4 worldPos4 = mul(g_PC.invViewProj, clipPos);
-    return worldPos4.xyz / worldPos4.w;
 }
 
 // ============================================================

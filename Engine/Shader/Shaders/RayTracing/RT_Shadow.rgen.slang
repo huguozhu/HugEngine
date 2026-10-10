@@ -39,38 +39,12 @@ struct ShadowLight {
 // === Push Constant（共享结构，见 ShaderTypes.slang）===
 [[vk::push_constant]] RTShadowPushConstant g_PC;
 
+
+#include "RT_Common.slang"   // Hash / Rand / ReconstructWorldPos（唯一出处）
 // === Payload（与 AnyHit/Miss 共享）===
 struct ShadowPayload {
     bool blocked;  // true=被遮挡, false=可见
 };
-
-// === 随机数工具（与 RT_AO/RT_GI 等共享同款实现，供软阴影面光源采样使用）===
-uint Hash(uint x) {
-    x = (x ^ 61u) ^ (x >> 16u);
-    x *= 9u;
-    x ^= x >> 4u;
-    x *= 0x27d4eb2du;
-    x ^= x >> 15u;
-    return x;
-}
-
-// 基于像素索引 + 帧号 + 样本号的确定性随机数（[0,1)）
-float Rand(uint2 idx, uint frame, uint s) {
-    uint seed = idx.x * 1973u + idx.y * 9277u + frame * 26699u + s * 479u;
-    return float(Hash(seed) & 0xFFFFu) / 65536.0;
-}
-
-// 从深度和 UV 重建世界坐标
-// 注意：Vulkan 像素坐标 y 向下，而相机 ViewProj 为 GLM 约定（y 向上），
-// 必须先翻转 NDC y（与 RT_Sponza.rgen 一致），否则重建结果上下颠倒。
-float3 ReconstructWorldPos(uint2 idx, float depth) {
-    float2 uv = (float2(idx) + 0.5) / float2(g_PC.dispatchDimX, g_PC.dispatchDimY);
-    float2 ndc = uv * 2.0 - 1.0;
-    ndc.y = -ndc.y;  // Vulkan NDC y 翻转
-    float4 clipPos = float4(ndc, depth, 1.0);
-    float4 worldPos4 = mul(g_PC.invViewProj, clipPos);
-    return worldPos4.xyz / worldPos4.w;
-}
 
 // 软阴影：面光源采样（在光源面上采样 spp 个发射点，发射 spp 条射线取平均）。
 // spp<=1 且 radius.x=0 时退化为硬阴影（单条精确射线，与旧版行为一致）。

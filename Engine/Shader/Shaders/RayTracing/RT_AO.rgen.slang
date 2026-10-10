@@ -19,6 +19,8 @@
 // === Push Constant ===
 [[vk::push_constant]] RTRayEffectPushConstant g_PC;
 
+
+#include "RT_Common.slang"   // Hash / Rand / ReconstructWorldPos（唯一出处）
 // === Payload（与 RT_Shadow.rahit / RT_Common.rmiss 一致）===
 struct ShadowPayload {
     bool blocked;  // true=被遮挡, false=可见
@@ -27,43 +29,6 @@ struct ShadowPayload {
 // ============================================================
 // 工具函数
 // ============================================================
-
-uint Hash(uint x) {
-    x = (x ^ 61u) ^ (x >> 16u);
-    x *= 9u;
-    x ^= x >> 4u;
-    x *= 0x27d4eb2du;
-    x ^= x >> 15u;
-    return x;
-}
-
-float Rand(uint2 idx, uint frame, uint s) {
-    uint seed = idx.x * 1973u + idx.y * 9277u + frame * 26699u + s * 479u;
-    return float(Hash(seed) & 0xFFFFu) / 65536.0;
-}
-
-// 余弦权重半球采样（绕法线 N）
-float3 CosineSampleHemisphere(float3 N, float2 u) {
-    float phi = 2.0 * 3.14159265 * u.x;
-    float r = sqrt(u.y);
-    float x = r * cos(phi);
-    float y = r * sin(phi);
-    float z = sqrt(max(0.0, 1.0 - u.y));
-    float3 Up = abs(N.z) < 0.999 ? float3(0, 0, 1) : float3(1, 0, 0);
-    float3 T = normalize(cross(Up, N));
-    float3 B = cross(N, T);
-    return normalize(x * T + y * B + z * N);
-}
-
-// 从深度和 UV 重建世界坐标（Vulkan NDC y 翻转）
-float3 ReconstructWorldPos(uint2 idx, float depth) {
-    float2 uv = (float2(idx) + 0.5) / float2(g_PC.dispatchDimX, g_PC.dispatchDimY);
-    float2 ndc = uv * 2.0 - 1.0;
-    ndc.y = -ndc.y;
-    float4 clipPos = float4(ndc, depth, 1.0);
-    float4 worldPos4 = mul(g_PC.invViewProj, clipPos);
-    return worldPos4.xyz / worldPos4.w;
-}
 
 // ============================================================
 // 主入口：RayGen 着色器
