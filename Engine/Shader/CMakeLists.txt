@@ -288,6 +288,10 @@ if(SLANGC)
         "${SHADER_DIR}/FullscreenVS.slang"
         # 网格（非全屏）pass 的 VS↔FS 接口结构体（GBuffer / PBR / RSM）——此前 6 处各抄一份。
         "${SHADER_DIR}/MeshVS.slang"
+        # 命中点查询辅助（LoadHitNormal / SampleMaterialColor）——零绑定，资源作参数传入。
+        "${SHADER_DIR}/HitCommon.slang"
+        # Lumen 探针/表面缓存公共工具（SampleLayer / FieldValue / WorldToClip）。
+        "${SHADER_DIR}/Lumen/LumenCommon.slang"
         # RT payload 结构体（ShadowPayload / RayPayload / GIPayload / ReflectionPayload）——
         # 此前在 rgen/rchit/rmiss 里各抄一份（共 18 处），必须逐字段一致，故收敛到一处。
         "${SHADER_DIR}/RTPayloads.slang"
