@@ -15,6 +15,7 @@
 #define HUGENGINE_PT_COMMON_SLANG
 
 #include "ShaderTypes.slang"   // PTPushConstant / PTReservoir / GPULight
+#include "Sampling.slang"       // CosineSampleHemisphere（PT/RT 共用）
 #include "pbr_common.slang"    // D_GGX / F_Schlick / PBR_BRDF（含 common.slang）
 
 // ============================================================
@@ -78,19 +79,6 @@ float2 StratifiedJitter(uint sampleIdx, uint sampleCount, uint frameIndex) {
 // ============================================================
 // 方向采样
 // ============================================================
-
-// 余弦权重半球采样（绕法线 N），pdf = NdotL / PI
-float3 CosineSampleHemisphere(float3 N, float2 u) {
-    float phi = 2.0 * 3.14159265 * u.x;
-    float r = sqrt(u.y);
-    float x = r * cos(phi);
-    float y = r * sin(phi);
-    float z = sqrt(max(0.0, 1.0 - u.y));
-    float3 Up = abs(N.z) < 0.999 ? float3(0, 0, 1) : float3(1, 0, 0);
-    float3 T = normalize(cross(Up, N));
-    float3 B = cross(N, T);
-    return normalize(x * T + y * B + z * N);
-}
 
 // GGX 半向量重要性采样（绕法线 N），pdf_H = D_GGX(NdotH) * NdotH
 float3 SampleGGXHalf(float3 N, float roughness, float2 u, out float NdotH) {
