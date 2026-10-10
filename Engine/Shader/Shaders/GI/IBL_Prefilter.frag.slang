@@ -20,27 +20,6 @@
 // 样本数（重要性采样）
 static const uint SAMPLE_COUNT = 256;
 
-// GGX 重要性采样（UE4 方法）
-float3 ImportanceSampleGGX(float2 Xi, float3 N, float roughness) {
-    float a = roughness * roughness;
-
-    float phi      = 2.0 * 3.14159265 * Xi.x;
-    float cosTheta = sqrt((1.0 - Xi.y) / (1.0 + (a * a - 1.0) * Xi.y));
-    float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
-
-    // 切线空间 → 世界空间
-    float3 H;
-    H.x = cos(phi) * sinTheta;
-    H.y = sin(phi) * sinTheta;
-    H.z = cosTheta;
-
-    float3 up = abs(N.y) < 0.999 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
-    float3 T = normalize(cross(up, N));
-    float3 B = cross(N, T);
-
-    return T * H.x + B * H.y + N * H.z;
-}
-
 float4 fragmentMain(VSOutputWorldDir input) : SV_Target0 {
     float3 N = normalize(input.worldDir);
     float3 V = N;  // 对于 cubemap: viewing direction = reflection direction = normal
@@ -50,7 +29,7 @@ float4 fragmentMain(VSOutputWorldDir input) : SV_Target0 {
 
     for (uint i = 0; i < SAMPLE_COUNT; i++) {
         float2 Xi = Hammersley(i, SAMPLE_COUNT);
-        float3 H  = ImportanceSampleGGX(Xi, N, roughness);
+        float3 H  = SampleGgxHalf(N, roughness, Xi, 0.0);   // 共享采样器（原本地 ImportanceSampleGGX）
         float3 L  = normalize(2.0 * dot(V, H) * H - V);  // 反射方向
 
         float NdotL = max(dot(N, L), 0.0);

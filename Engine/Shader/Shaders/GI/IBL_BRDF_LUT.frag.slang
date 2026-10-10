@@ -12,24 +12,6 @@
 
 static const uint SAMPLE_COUNT = 256;
 
-float3 ImportanceSampleGGX(float2 Xi, float roughness, float3 N) {
-    float a = roughness * roughness;
-    float phi      = 2.0 * 3.14159265 * Xi.x;
-    float cosTheta = sqrt((1.0 - Xi.y) / (1.0 + (a * a - 1.0) * Xi.y));
-    float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
-
-    float3 H;
-    H.x = cos(phi) * sinTheta;
-    H.y = sin(phi) * sinTheta;
-    H.z = cosTheta;
-
-    float3 up = abs(N.y) < 0.999 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
-    float3 T = normalize(cross(up, N));
-    float3 B = cross(N, T);
-
-    return T * H.x + B * H.y + N * H.z;
-}
-
 float2 IntegrateBRDF(float NdotV, float roughness) {
     float3 V;
     V.x = sqrt(1.0 - NdotV * NdotV);
@@ -42,11 +24,13 @@ float2 IntegrateBRDF(float NdotV, float roughness) {
 
     for (uint i = 0; i < SAMPLE_COUNT; i++) {
         float2 Xi   = Hammersley(i, SAMPLE_COUNT);
-        float3 H    = ImportanceSampleGGX(Xi, roughness, N);
+        // GGX 半向量：共享采样器（原本地 ImportanceSampleGGX）；IBL 端 alpha 无下限 ⇒ minAlpha = 0
+        float NdotH_raw;
+        float3 H    = SampleGgxHalf(N, roughness, Xi, 0.0, NdotH_raw);
         float3 L    = normalize(2.0 * dot(V, H) * H - V);
 
         float NdotL = max(L.z, 0.0);
-        float NdotH = max(H.z, 0.0);
+        float NdotH = max(NdotH_raw, 0.0);
         float VdotH = max(dot(V, H), 0.0);
 
         if (NdotL > 0.0) {

@@ -47,10 +47,12 @@ float RadicalInverse_VdC(uint bits) {
 // 切线基**（`abs(N.z) < 0.999` 取 (0,0,1) 参考轴），只有 alpha 下限与返回值不同 ⇒ 现在合并为
 // 下面 4 个入口，下限作为参数保留（各调用点原值不变，故数值逐位一致）。
 //
-// 【与 IBL 烘焙端的区别（不要互相替换）】`GI/IBL_BRDF_LUT.frag.slang` 与
-// `GI/IBL_Prefilter.frag.slang` 各自实现的 `ImportanceSampleGGX` 用的是**y 参考轴**
-// （`abs(N.y) < 0.999` ⇒ up=(0,1,0)）的基：分布相同，但给定 u 得到的朝向不同 ⇒ 替换会改变
-// 烘焙结果。合并它们需要先决定"是否接受 IBL LUT/预滤波重新烘焙"，故本轮不做。
+// 【IBL 烘焙端也已并入】`GI/IBL_BRDF_LUT.frag.slang` 与 `GI/IBL_Prefilter.frag.slang` 原先
+// 各自有一份 `ImportanceSampleGGX`，用的是 **y 参考轴**（`abs(N.y) < 0.999` ⇒ up=(0,1,0)）的基，
+// 与其它路径的 **z 参考轴**不同。两处已删除、改用本文件的 `SampleGgxHalf`：
+//   · 分布不变（GGX 各向同性 ⇒ 绕法线旋转不改变积分期望，估计量仍无偏）
+//   · 但**给定 u 得到的朝向变了** ⇒ LUT/预滤波的烘焙结果按 MC 噪声量级变化 ⇒ **需重新烘焙**
+// 调用点传 `minAlpha = 0.0` 以沿用 IBL 端"alpha 无下限"的原行为。
 // ============================================================
 
 // GGX 半向量采样（绕 N，z 参考轴基）。minAlpha = alpha 下限（各调用点沿用各自历史值）。
