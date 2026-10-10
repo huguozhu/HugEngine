@@ -286,6 +286,8 @@ if(SLANGC)
         # 全屏三角形 pass 的共享**接口结构体**（VSOutput / VSOutputWorldDir）。只共享接口，
         # 不共享顶点逻辑：14 个全屏 VS 实测有 13 种不同实现（UV 朝向/深度 z 各 pass 不同）。
         "${SHADER_DIR}/FullscreenVS.slang"
+        # 网格（非全屏）pass 的 VS↔FS 接口结构体（GBuffer / PBR / RSM）——此前 6 处各抄一份。
+        "${SHADER_DIR}/MeshVS.slang"
         # RT payload 结构体（ShadowPayload / RayPayload / GIPayload / ReflectionPayload）——
         # 此前在 rgen/rchit/rmiss 里各抄一份（共 18 处），必须逐字段一致，故收敛到一处。
         "${SHADER_DIR}/RTPayloads.slang"
