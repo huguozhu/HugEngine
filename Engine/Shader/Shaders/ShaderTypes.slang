@@ -450,6 +450,90 @@ GPU_STRUCT ReSTIRPushConstant {
 };                                  // 共 128B（alignas(16) 后 128B）
 
 // ---- 清理宏 ----
+// ============================================================
+// 共享 GPU 结构体（原先在各 pass 里各写一份 —— 2026-10-10 收敛到此处）
+//
+// 【为什么放这里】本文件是 C++ 与 Slang 唯一的共享契约头：C++ 端 `GPU_STRUCT` 展开为
+// `struct alignas(16)`、`GPU_UINT` 展开为 `uint32_t`；Slang 端展开为原生类型。因此在这里写
+// 一次，两种语言各自得到同一份定义，且 C++ 侧的 `static_assert(sizeof(...))` 会持续钉住布局。
+//
+// 【何时用 GPU_STRUCT、何时用普通 struct】这条很关键：
+//   · 大小已是 16 的整数倍（128 / 48 / 32）⇒ 用 `GPU_STRUCT`（C++ 端加 alignas(16)，
+//     在 SSBO/UBO 里与 Slang 的 std430 对齐一致）
+//   · 大小**不是** 16 的倍数（20 / 8）⇒ 必须用**普通 `struct`**：`GPU_STRUCT` 的 alignas(16)
+//     会把它们撑到 32 / 16 字节，直接破坏与 Vulkan 的二进制契约。
+// ============================================================
+
+// --- 间接绘制命令（20 B）---
+// 必须与 `VkDrawIndexedIndirectCommand` **二进制兼容**（5×4 = 20 B，字段顺序
+// indexCount / instanceCount / firstIndex / vertexOffset / firstInstance）；C++ 侧对应
+// `IndirectDrawCommand`（`Culling/InstancedCull` 一带）与
+// `NaniteIndirectCommand`（`Engine/Render/Nanite/NaniteTypes.h`，带逐字段 offsetof 断言），
+// 以及各处直接用 `VkDrawIndexedIndirectCommand` 的路径。此前 6 个 Slang 文件各写一份。
+struct IndirectCmd {
+    GPU_UINT indexCount;      // 偏移 0
+    GPU_UINT instanceCount;   // 偏移 4
+    GPU_UINT firstIndex;      // 偏移 8
+    GPU_INT  vertexOffset;    // 偏移 12（**有符号**，与 Vulkan 一致）
+    GPU_UINT firstInstance;   // 偏移 16
+};
+
+// --- GPU 场景物体（128 B，std430）---
+// C++ 侧原在 `Engine/Render/Pipeline/GPUScene.h` 重复定义一份（并在那里 static_assert 128）。
+// 现由本文件提供唯一定义，GPUScene.h 用 `using GPUSceneObject = ::GPUSceneObject;` 别名接续。
+GPU_STRUCT GPUSceneObject {
+    float4x4 localToWorld;      // [0..64)
+    float4   boundsMin;         // [64..80)
+    float4   boundsMax;         // [80..96)
+    GPU_UINT meshIndex;         // [96]
+    GPU_UINT materialIndex;     // [100]
+    GPU_UINT objectID;          // [104]
+    GPU_UINT visibilityFlags;   // [108]
+    GPU_UINT indexCount;        // [112] IndirectDraw 参数
+    GPU_UINT firstIndex;        // [116] IndirectDraw 参数
+    GPU_INT  vertexOffset;      // [120] IndirectDraw 参数
+    GPU_UINT _pad;              // [124..128)（C++ 侧曾是 `_pad[1]`，布局相同，统一为标量）
+};
+
+// --- RT 命中点光源 UBO（32 B = 2×float4）---
+// binding 1 的命中点光源 UBO（顶点拉取 / Sponza 路径）。
+// 与 `RTPass::UpdateLightBuffer` 的写入端逐字段一致（那边按 `i * 32` 步长 memcpy 两个 float4）。
+// ⚠ 注意与 `RT_HitCommon.slang` 的 `RTHitLight`（48 B = 3×float4）**不是**同一个结构体：
+//   后者服务 RTEffectPass 的 GI/反射 ClosestHit 路径，前者服务 Sponza/顶点拉取路径。
+struct LightUB {
+    float4 ci;   // rgb=颜色, w=强度
+    float4 dt;   // xyz=方向, w=类型（0=Dir,1=Point,2=Spot）
+};
+
+// --- Bindless 调用数据（48 B）---
+// `RT_Bindless.rcall.slang` 与 `RT_Sponza.rchit.slang` 之间传递，纯 Slang 内部使用。
+GPU_STRUCT BindlessCallData {
+    GPU_UINT materialID;
+    float2   uv;
+    float3   albedo;
+    float3   normal;
+    float    metallic;
+    float    roughness;
+    float    ao;
+};
+
+// --- LightGrid（8 B）---
+// Clustered Shading / Forward+ 的 LightGrid：每 cluster 只迭代影响它的光源
+// （配 LightIndexList 使用）。C++ 侧原在 `ClusteredShading.h` 作为嵌套结构体重复定义，
+// 现改为别名引用本定义。
+struct LightGridCell {
+    GPU_UINT offset;   // 在 LightIndexList 中的起始偏移
+    GPU_UINT count;    // 影响该 cluster 的光源数量
+};
+
+// --- Nanite 簇引用（8 B）---
+// `Nanite_ClusterBVH.comp.slang` ↔ `Nanite_SoftRasterCommon.slang` 共用；纯 Slang。
+// 与 C++ 侧 `NaniteVisibleClusterRef` 逐字段一致（8 B）。
+struct ClusterRef {
+    GPU_UINT instance;
+    GPU_UINT cluster;
+};
+
 #undef GPU_UINT
 #undef GPU_INT
 #undef GPU_STRUCT

@@ -5,12 +5,7 @@
 //   - 输出为紧凑的候选索引数组（u32[]），而非 IndirectDrawCommand
 //   - 由两阶段模式调用，Phase 2 对候选做精筛
 
-struct GPUSceneObject {
-    float4x4 localToWorld; float4 boundsMin, boundsMax;
-    uint meshIndex, materialIndex, objectID, visibilityFlags;
-    uint indexCount, firstIndex; int vertexOffset; uint _pad1;
-};
-
+#include "ShaderTypes.slang"   // IndirectCmd / GPUSceneObject / LightUB 等共享契约结构体
 [[vk::binding(0, 0)]] StructuredBuffer<GPUSceneObject> u_SceneObjects;
 [[vk::binding(1, 0)]] RWStructuredBuffer<uint> u_CandidateIndices;  // 候选索引数组
 [[vk::binding(2, 0)]] RWStructuredBuffer<uint> u_CandidateCount;    // 候选数量

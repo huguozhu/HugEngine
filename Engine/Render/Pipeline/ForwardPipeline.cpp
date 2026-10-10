@@ -152,7 +152,7 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
     // --- Forward+ LightGrid / LightIndexList 初始占位缓冲区 ---
     {
         rhi::BufferDesc gridDesc;
-        gridDesc.size  = sizeof(ClusteredShading::LightGridCell) * 64;
+        gridDesc.size  = sizeof(LightGridCell) * 64;
         gridDesc.usage = rhi::BufferUsage::Storage;
         gridDesc.cpuAccess = true;
         m_LightGridBuffer = device->CreateBuffer(gridDesc);

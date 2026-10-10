@@ -8,17 +8,8 @@
 // u_Materials 绑定）后，按 textureMask 判断各槽有无真实纹理再采样
 // （与 PBR.frag/GBuffer.frag 的 kGPUMaterialTexMask_* 一致）。
 
+#include "ShaderTypes.slang"   // IndirectCmd / GPUSceneObject / LightUB 等共享契约结构体
 #include "common.slang"
-
-struct BindlessCallData {
-    uint  materialID;
-    float2 uv;
-    float3 albedo;
-    float3 normal;
-    float  metallic;
-    float  roughness;
-    float  ao;
-};
 
 [shader("callable")]
 void main(inout BindlessCallData data) {

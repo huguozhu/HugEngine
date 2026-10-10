@@ -34,10 +34,8 @@ public:
     };
 
     // LightGrid: 每个 cluster 的光源列表（offset + count）
-    struct LightGridCell {
-        u32 offset;   // 在 LightIndexList 中的起始偏移
-        u32 count;    // 影响该 cluster 的光源数量
-    };
+    // 定义已收敛到 `ShaderTypes.slang`（C++/Slang 共享契约头，`Material.h` 在本命名空间内
+    // include 它），故 `LightGridCell` 直接可见，无需再写一份嵌套定义。
 
     ClusteredShading() = default;
 

@@ -11,13 +11,14 @@
 //   HitTriangleVertexPosition(0/1/2)    — Slang 包装函数
 //   HitTriangleBarycentrics()           — 重心坐标
 
-struct RayPayload { float3 color; float hitT; };
-
 // === set=1 (ClosestHit 资源) ===
+struct RayPayload {
+    float3 color;
+    float  hitT;
+};
+#include "ShaderTypes.slang"   // IndirectCmd / GPUSceneObject / LightUB 等共享契约结构体
 [[vk::binding(0, 1)]] Texture2D<float4> u_MatTex;  // 材质纹理 (3×N RGBA32F)
 
-// 光源 Uniform Buffer
-struct LightUB { float4 ci; float4 dt; };
 [[vk::binding(1, 1)]] cbuffer LightCB {
     LightUB u_Lights[8];
     uint    u_LightCount;

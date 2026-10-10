@@ -18,20 +18,12 @@
 // ============================================================
 
 // 假簇条目（与 NaniteFakeCluster 一致：4×u32 = 16 B）
+#include "ShaderTypes.slang"   // IndirectCmd / GPUSceneObject / LightUB 等共享契约结构体
 struct FakeCluster {
     uint clusterId;        // 簇编号（假数据 = 顺序编号）
     uint instanceId;       // 所属实例（任务 3 固定为 0，即"1 个实例"）
     uint triangleCount;    // 该簇的三角形数（假数据固定 1）
     uint _pad;             // 对齐填充：保持 16 B（便于 CPU 侧按 4 字节对齐读回）
-};
-
-// 间接绘制命令（必须与 VkDrawIndexedIndirectCommand 二进制兼容：5×4 = 20 B）
-struct IndirectCmd {
-    uint indexCount;
-    uint instanceCount;
-    uint firstIndex;
-    int  vertexOffset;
-    uint firstInstance;
 };
 
 // 显式描述符绑定（set=0）：0=假簇输入（只读）、1=间接命令（读写）、2=命令条数（读写）

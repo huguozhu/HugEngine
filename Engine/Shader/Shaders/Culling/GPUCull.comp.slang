@@ -1,12 +1,6 @@
 // GPUCull.comp.slang — GPU Frustum + Hi-Z Culling → IndirectDrawCommand
 
-struct GPUSceneObject {
-    float4x4 localToWorld; float4 boundsMin, boundsMax;
-    uint meshIndex, materialIndex, objectID, visibilityFlags;
-    uint indexCount, firstIndex; int vertexOffset; uint _pad1;
-};
-
-struct IndirectCmd { uint indexCount; uint instanceCount; uint firstIndex; int vertexOffset; uint firstInstance; };
+#include "ShaderTypes.slang"   // IndirectCmd / GPUSceneObject / LightUB 等共享契约结构体
 
 [[vk::binding(0, 0)]] StructuredBuffer<GPUSceneObject> u_SceneObjects;
 [[vk::binding(1, 0)]] RWStructuredBuffer<IndirectCmd> u_IndirectCommands;

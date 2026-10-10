@@ -4,6 +4,7 @@
 // 通过 push constant useClustered 运行时切换
 // ============================================================
 
+#include "ShaderTypes.slang"   // IndirectCmd / GPUSceneObject / LightUB 等共享契约结构体
 #include "pbr_common.slang"
 #include "Atmosphere.slang"  // 空中透视（大气消光 + 入射散射）
 
@@ -54,8 +55,6 @@ struct FSInput {
 [[vk::binding(kGPUBinding_RectShadow, kGPUDescSet_PerFrame)]] Texture2D<float> u_RectShadowMap;   // 矩形面光阴影贴图（独立 binding）
 [[vk::binding(kGPUBinding_RectShadow, kGPUDescSet_PerFrame)]] SamplerState u_RectShadowSampler;
 
-// Forward+ LightGrid 和 LightIndexList（Cluster 光源剔除结果）
-struct LightGridCell { uint offset; uint count; };
 [[vk::binding(kGPUBinding_LightGrid, kGPUDescSet_PerFrame)]]  StructuredBuffer<LightGridCell> u_LightGrid;
 [[vk::binding(kGPUBinding_LightIndexList, kGPUDescSet_PerFrame)]]  StructuredBuffer<uint>          u_LightIndexList;
 

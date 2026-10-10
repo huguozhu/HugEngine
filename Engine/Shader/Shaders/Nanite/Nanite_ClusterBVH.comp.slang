@@ -101,6 +101,7 @@
 //   link.y = 内部节点右孩子下标 / 叶子为 kNoChild
 //   link.z = 内部节点 2 / 叶子簇数（≥1）
 //   link.w = 位标志：bit0 = 1 表示叶子
+#include "ShaderTypes.slang"   // IndirectCmd / GPUSceneObject / LightUB 等共享契约结构体
 struct BVHNode {
     float4 centerRadius;   // 偏移 0：xyz = 网格空间包围球心；w = 半径
     uint4  link;           // 偏移 16：(left, right, count, flags)
@@ -109,12 +110,6 @@ struct BVHNode {
 // 每簇包围球（网格空间；与 NaniteClusterSphere 一致：3×float + radius = 16B）
 struct ClusterSphere {
     float4 centerRadius;   // xyz = 网格空间球心；w = 半径（≥ 0）
-};
-
-// 一条可见簇引用（8B；与 NaniteVisibleClusterRef 一致）
-struct ClusterRef {
-    uint instance;
-    uint cluster;
 };
 
 // 【任务 15】每簇 LOD 元数据（16B；与 NaniteClusterLODInfo 逐字段一致）
@@ -137,16 +132,6 @@ struct ClusterDrawRange {
     uint indexCount;
     int  vertexOffset;
     uint _pad;
-};
-
-// 【任务 16】间接绘制命令（20B；必须与 VkDrawIndexedIndirectCommand 二进制兼容：
-//   5×u32 = 20B，顺序 indexCount/instanceCount/firstIndex/vertexOffset/firstInstance）
-struct IndirectCmd {
-    uint indexCount;
-    uint instanceCount;
-    uint firstIndex;
-    int  vertexOffset;
-    uint firstInstance;
 };
 
 // GPUSceneObject（128B）的 Slang 镜像：字段顺序/类型必须与 NaniteInstanceGpuObject 一致。

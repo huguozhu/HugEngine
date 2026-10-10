@@ -190,9 +190,9 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera)
                 // 上传 LightGrid 到 GPU（binding 7）
                 auto& grid = m_ClusteredShading.GetLightGrid();
                 if (!m_LightGridBuffer ||
-                    m_LightGridBuffer->GetSize() < grid.size() * sizeof(ClusteredShading::LightGridCell)) {
+                    m_LightGridBuffer->GetSize() < grid.size() * sizeof(LightGridCell)) {
                     rhi::BufferDesc d;
-                    d.size = grid.size() * sizeof(ClusteredShading::LightGridCell);
+                    d.size = grid.size() * sizeof(LightGridCell);
                     d.usage = rhi::BufferUsage::Storage;
                     d.cpuAccess = true;
                     m_LightGridBuffer = m_Device->CreateBuffer(d);
@@ -200,7 +200,7 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera)
                 void* mappedGrid = m_LightGridBuffer->Map();
                 if (mappedGrid && !grid.empty()) {
                     memcpy(mappedGrid, grid.data(),
-                           grid.size() * sizeof(ClusteredShading::LightGridCell));
+                           grid.size() * sizeof(LightGridCell));
                 }
                 m_LightGridBuffer->Unmap();
 

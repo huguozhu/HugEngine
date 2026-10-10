@@ -7,9 +7,12 @@
 // 使用 -force-glsl-scalar-layout 确保 GPUVertex 布局为紧密打包 (32 字节)
 // 对应 C++ 端的 RTVertexPacked 结构体
 
-struct RayPayload { float3 color; float hitT; };
-
 // GPU 端顶点结构（标量布局：position=12B, normal=12B, uv=8B，共 32B）
+struct RayPayload {
+    float3 color;
+    float  hitT;
+};
+#include "ShaderTypes.slang"   // IndirectCmd / GPUSceneObject / LightUB 等共享契约结构体
 struct GPUVertex {
     float3 position;    // offset 0,  12 字节
     float3 normal;      // offset 12, 12 字节
@@ -22,8 +25,6 @@ struct GPUVertex {
 //   A   = bindless 纹理索引 + 1 (0 = 无纹理, >=1 = 纹理索引-1)
 [[vk::binding(0, 1)]] Texture2D<float4> u_MatTex;
 
-// binding 1: 光源 Uniform Buffer
-struct LightUB { float4 ci; float4 dt; };
 [[vk::binding(1, 1)]] cbuffer LightCB { LightUB u_Lights[8]; uint u_LightCount; uint u_Pad[3]; };
 
 // binding 2: 顶点缓冲 → StructuredBuffer<GPUVertex>

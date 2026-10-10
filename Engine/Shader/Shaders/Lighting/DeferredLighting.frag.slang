@@ -1,5 +1,6 @@
 // DeferredLighting.frag — 延迟光照全屏片段着色器
 // 读取 GBuffer MRT + Shadow/IBL/RSM 纹理，逐光源 PBR + 间接光
+#include "ShaderTypes.slang"   // IndirectCmd / GPUSceneObject / LightUB 等共享契约结构体
 #include "pbr_common.slang"
 // DDGI 探针网格参数（由 GI_DDGI 每帧上传，替代 RT_DDGI.slang 硬编码常量；
 // 布局与 GI_DDGI.h 的 ProbeGridUniform 前两个 float4 一致）
@@ -62,8 +63,6 @@
 [[vk::binding(kGPUBinding_RT_AO, kGPUDescSet_PerFrame)]] Texture2D<float>  u_RT_AO;          // RT 环境光遮蔽（0=全遮蔽, 1=无遮蔽）
 [[vk::binding(kGPUBinding_RT_GI, kGPUDescSet_PerFrame)]] Texture2D<float4> u_RT_GI;          // RT 间接漫反射（rgb=间接光, a=有效标记）
 
-// Clustered Shading: LightGrid + LightIndexList（每 cluster 只迭代影响它的光源）
-struct LightGridCell { uint offset; uint count; };
 [[vk::binding(kGPUBinding_LightGrid, kGPUDescSet_PerFrame)]]  StructuredBuffer<LightGridCell> u_LightGrid;       // 每 cluster 的光源列表头
 [[vk::binding(kGPUBinding_LightIndexList, kGPUDescSet_PerFrame)]]  StructuredBuffer<uint>          u_LightIndexList;  // 扁平光源索引数组
 

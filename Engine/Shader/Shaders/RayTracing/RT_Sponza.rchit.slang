@@ -1,20 +1,12 @@
 // RT_Sponza.rchit.slang — Phase 5: Callable bindless PBR + 平滑 Triplanar + 天空光照
 
-struct RayPayload { float3 color; float hitT; };
-
-struct BindlessCallData {
-    uint  materialID;
-    float2 uv;
-    float3 albedo;
-    float3 normal;
-    float  metallic;
-    float  roughness;
-    float  ao;
+struct RayPayload {
+    float3 color;
+    float  hitT;
 };
-
+#include "ShaderTypes.slang"   // IndirectCmd / GPUSceneObject / LightUB 等共享契约结构体
 [[vk::binding(0, 1)]] Texture2D<float4> u_MatTex;
 
-struct LightUB { float4 ci; float4 dt; };
 [[vk::binding(1, 1)]] cbuffer LightUB { LightUB u_Lights[8]; uint u_LightCount; uint u_Pad[3]; };
 
 // Triplanar UV — 平滑轴混合

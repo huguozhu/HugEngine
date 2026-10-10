@@ -17,15 +17,8 @@
 //   同队列顺序执行 + 一次全局屏障保证 draw A 读到的就是 cull A 写的内容，因此列表可全局共用一份。
 // ============================================================
 
-struct IndirectCmd {
-    uint indexCount;
-    uint instanceCount;
-    uint firstIndex;
-    int  vertexOffset;
-    uint firstInstance;
-};
-
 // bindless SSBO 数组（binding 30，与引擎其它 shader 一致），全部按 push constant 里的句柄索引
+#include "ShaderTypes.slang"   // IndirectCmd / GPUSceneObject / LightUB 等共享契约结构体
 [[vk::binding(30, 0)]] StructuredBuffer<float4x4>   u_Instances[];
 [[vk::binding(30, 0)]] RWStructuredBuffer<uint>     u_VisibleIndices[];
 [[vk::binding(30, 0)]] RWStructuredBuffer<IndirectCmd> u_Commands[];

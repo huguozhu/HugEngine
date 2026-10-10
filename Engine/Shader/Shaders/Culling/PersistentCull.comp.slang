@@ -4,6 +4,7 @@
 //   PTG_PERSISTENT=1: 持久化线程组，Dispatch 一次后 spin-wait 等待每帧信号
 //   PTG_PERSISTENT=0: 每帧 Dispatch，处理完成后退出（与普通 GPUCull 相同）
 
+#include "ShaderTypes.slang"   // IndirectCmd / GPUSceneObject / LightUB 等共享契约结构体
 #ifndef PTG_PERSISTENT
 #define PTG_PERSISTENT 0
 #endif
@@ -19,19 +20,6 @@ struct PTGParams {
     uint     objectCount;      // [168]     场景物体总数
     uint     hizMipCount;      // [172]     Hi-Z mip 级数（0=禁用遮挡剔除）
     uint     frameIndex;       // [176]     帧索引（0xFFFFFFFF=退出持久化模式）
-};
-
-// 场景物体数据（256 字节，与现有 GPUSceneObject 一致）
-struct GPUSceneObject {
-    float4x4 localToWorld; float4 boundsMin, boundsMax;
-    uint meshIndex, materialIndex, objectID, visibilityFlags;
-    uint indexCount, firstIndex; int vertexOffset; uint _pad1;
-};
-
-// 间接绘制命令（与现有 IndirectDrawCommand 一致）
-struct IndirectCmd {
-    uint indexCount; uint instanceCount; uint firstIndex;
-    int vertexOffset; uint firstInstance;
 };
 
 [[vk::binding(0, 0)]] ConstantBuffer<PTGParams>         u_PTGParams;

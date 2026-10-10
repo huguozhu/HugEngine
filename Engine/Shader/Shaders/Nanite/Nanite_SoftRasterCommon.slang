@@ -35,15 +35,10 @@
 //   不引用 GI/Lumen/GPUCulling。
 // ============================================================
 
+#include "ShaderTypes.slang"   // IndirectCmd / GPUSceneObject / LightUB 等共享契约结构体
 #pragma once
 
 #include "NaniteTypes.slang"
-
-// 一条可见簇引用（8B；与 `NaniteVisibleClusterRef` 逐字段一致）
-struct ClusterRef {
-    uint instance;
-    uint cluster;
-};
 
 // 实例表：GPUSceneObject（128B）契约的镜像。软光栅只用 `ltw3.xyz`（列主序平移）。
 struct InstanceObject {

@@ -3,13 +3,7 @@
 //
 // Dispatch: (candidateCount + 63) / 64, 1, 1
 
-struct GPUSceneObject {
-    float4x4 localToWorld; float4 boundsMin, boundsMax;
-    uint meshIndex, materialIndex, objectID, visibilityFlags;
-    uint indexCount, firstIndex; int vertexOffset; uint _pad1;
-};
-
-struct IndirectCmd { uint indexCount; uint instanceCount; uint firstIndex; int vertexOffset; uint firstInstance; };
+#include "ShaderTypes.slang"   // IndirectCmd / GPUSceneObject / LightUB 等共享契约结构体
 
 [[vk::binding(0, 0)]] StructuredBuffer<GPUSceneObject> u_SceneObjects;  // 场景物体 SSBO
 [[vk::binding(1, 0)]] StructuredBuffer<uint> u_Candidates;              // Phase 1 候选索引

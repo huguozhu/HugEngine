@@ -24,20 +24,9 @@ namespace he { class World; class SceneGraph; }
 
 namespace he::render {
 
-// GPU 端场景物体数据（std430 布局，与 GPUCull.comp.slang 保持一致）
-struct GPUSceneObject {
-    float4x4 localToWorld;   // [0..64]
-    float4   boundsMin;      // [64..80]
-    float4   boundsMax;      // [80..96]
-    u32      meshIndex;      // [96]
-    u32      materialIndex;  // [100]
-    u32      objectID;       // [104]
-    u32      visibilityFlags;// [108]
-    u32      indexCount;     // [112] IndirectDraw 参数
-    u32      firstIndex;     // [116] IndirectDraw 参数
-    i32      vertexOffset;   // [120] IndirectDraw 参数
-    u32      _pad[1];        // [124..128]
-};
+// GPU 端场景物体数据（std430 布局）——**定义已收敛到 `ShaderTypes.slang`**（C++/Slang 唯一
+// 共享契约头）。`Material.h` 在 `namespace he::render` 内 include 它，故 `GPUSceneObject`
+// 在本命名空间直接可见，无需再写一份（原先这里的重复定义 + 128B 断言已随之收敛）。
 
 static_assert(sizeof(GPUSceneObject) == 128, "GPUSceneObject must match shader std430 layout (128 bytes)");
 
