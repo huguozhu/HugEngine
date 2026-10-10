@@ -11,7 +11,7 @@
 [[vk::binding(0, 0)]] SamplerState u_HDRSampler;  // 同 binding = CombinedImageSampler
 
 struct FSInput {
-    float2 uv : TEXCOORD0;
+    [[vk::location(0)]] float2 uv;   // 与 FullscreenVS.VSOutput 的 location 0 对应（TEXCOORD0 在 Vulkan 里同义）
 };
 
 // ACESFilm 定义在 common.slang 中，此处直接使用
