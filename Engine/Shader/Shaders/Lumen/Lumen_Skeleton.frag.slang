@@ -11,16 +11,12 @@
 // RenderPass 不符 → 验证层报 VUID-VkFramebufferCreateInfo-attachmentCount-00876，实测直接
 // 在驱动里访问违例崩溃。所以骨架阶段也必须有一条自己的单附件全屏 pass。
 
-struct VSOutput {
-    float4 position : SV_Position;
-    float2 uv       : TEXCOORD0;
-};
-
 // 输出常量值：白炉 = (1, alpha=1)（源自身的标度读数）；常态 = (0, alpha=-1)。
 // 【alpha = -1 的含义】沿用框架既有的有效性约定（`alpha < 0` ⇒ 本条无数据，合成端 skip）：
 // 骨架阶段 Lumen 还没有真实内容，若让它以"有效的零值"参与归一化，会平白稀释同通道其它源
 // （`num/den` 里 den 变大）——画面变暗却说不出原因。标成无效后，开/关 Lumen 的画面完全一致，
 // 而归一化的有效性契约本身正是《Lumen设计与实现》§10 的 11.3 要做的框架级工作。
+#include "FullscreenVS.slang"   // VSOutput（position + uv@0；原先本地用 TEXCOORD0 写，语义等价）
 [[vk::push_constant]] cbuffer SkeletonPC {
     float2 u_ValueAlpha;   // x = 输出值, y = alpha（<0 表示无数据）
 };

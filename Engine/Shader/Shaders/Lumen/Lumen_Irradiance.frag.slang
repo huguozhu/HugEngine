@@ -8,11 +8,8 @@
 // 【白炉怎么办】白炉验收要求 Lumen 输出恒为 1.0（读"源自身的标度"）。白炉下 Provider 直接走
 // 常量骨架 pass（`u_ValueAlpha = (1,1)`），不经过这里 —— 这样白炉读数与步骤 24 的内容解耦，
 // 不会因为辐照度算错就悄悄改变白炉结果。
-struct VSOutput {
-    float4 position : SV_Position;
-    float2 uv       : TEXCOORD0;
-};
 
+#include "FullscreenVS.slang"   // VSOutput（position + uv@0；原先本地用 TEXCOORD0 写，语义等价）
 [[vk::binding(0, 0)]] Texture2D<float4> u_Irradiance;   // 屏幕尺寸 RGBA16F（w = 有效）
 [[vk::binding(0, 0)]] SamplerState      u_IrradianceSampler;
 

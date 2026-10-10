@@ -4,11 +4,7 @@
 // 使用 SV_VertexID 生成覆盖整个屏幕的三角形
 // ============================================================
 
-struct VSOutput {
-    float4 position : SV_Position;
-    float2 uv       : TEXCOORD0;
-};
-
+#include "FullscreenVS.slang"   // VSOutput（position + uv@0；原先本地用 TEXCOORD0 写，语义等价）
 VSOutput vertexMain(uint vid : SV_VertexID) {
     VSOutput output;
     // 全屏三角形：3 个顶点覆盖整个 NDC 空间
