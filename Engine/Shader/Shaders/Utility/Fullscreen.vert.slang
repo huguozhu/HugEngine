@@ -1,10 +1,6 @@
 // Fullscreen.vert.slang — 全屏三角形顶点着色器（无顶点缓冲，用 SV_VertexID 生成）
 
-struct VSOutput
-{
-    float4 position : SV_POSITION;
-    float2 uv       : TEXCOORD0;
-};
+#include "FullscreenVS.slang"   // VSOutput（position + uv@0；原先本地用 TEXCOORD0 写，语义等价）
 
 VSOutput vertexMain(uint vertexID : SV_VertexID)
 {
