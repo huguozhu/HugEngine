@@ -269,9 +269,15 @@ if(SLANGC)
         "${SHADER_DIR}/PT_Common.slang"
         "${SHADER_DIR}/RT_DDGI.slang"
         "${SHADER_DIR}/RT_HitCommon.slang"
+        # 球谐共享实现（l ≤ 1 的 4 系数）：GI / RT / Lumen 三处共用的基函数、Lambert 卷积重建
+        # 与 Fibonacci 采样方向。改它会触发全量重编 —— 这正是"SH 约定变更必须所有使用者一起
+        # 重编"的正确代价（此前同一组常数散在 4 个文件里，只改一处就是静默不一致）。
+        "${SHADER_DIR}/SHCommon.slang"
         "${SHADER_DIR}/Particles/ParticleTypes.slang"
         "${SHADER_DIR}/Lumen/SurfaceCache.slang"
         "${SHADER_DIR}/Lumen/ScreenProbe.slang"
+        "${SHADER_DIR}/Lumen/ScreenProbeSampling.slang"   # 探针半球采样（步骤 21/23 共用）
+        "${SHADER_DIR}/Lumen/LumenFarField.slang"         # 远场 SDF 追踪共享库
         # Nanite（虚拟几何模块）——§14.8 任务 18 起**正式收纳**：C++/Slang 共享的二进制契约与
         # 量化公式（`Engine/Render/Nanite/NaniteTypes.h` 的镜像），以及软光栅两趟共用的
         # 绑定/参数/光栅化内联函数。改这两个文件会触发所有 shader 重编（这是"契约改动必须
