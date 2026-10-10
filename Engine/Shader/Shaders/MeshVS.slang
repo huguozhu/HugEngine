@@ -37,4 +37,10 @@ struct RSMVSOutput {
     [[vk::location(1)]] float3 worldNormal;
 };
 
+// 仅输出裁剪空间位置（深度类 pass：阴影 / 贴花投影 / 调试三角形）。
+// 此前这 3 个文件各自声明同名同形的 `struct VSOutput { float4 position : SV_Position; }`。
+struct PositionOnlyVSOutput {
+    float4 position : SV_Position;
+};
+
 #endif // HUGENGINE_MESH_VS_SLANG

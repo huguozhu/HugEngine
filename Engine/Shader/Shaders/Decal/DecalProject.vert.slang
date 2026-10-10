@@ -8,14 +8,11 @@
 // 顶点输入 = 单位立方体 [-0.5, 0.5]^3（DecalPass 程序化生成，无 UV：UV 由世界坐标反算）
 // ============================================================
 
+#include "MeshVS.slang"   // PositionOnlyVSOutput（同形状深度类 pass 接口唯一出处）
 #include "common.slang"
 
 struct VSInput {
     [[vk::location(0)]] float3 position;
-};
-
-struct VSOutput {
-    float4 position : SV_Position;
 };
 
 // 每个贴花一次 DrawIndexed，逐贴花参数走 push constant（240 字节，见 DecalPass.h 的同名结构）
@@ -38,13 +35,13 @@ struct VSOutput {
     uint     _pad2;
 };
 
-VSOutput vertexMain(VSInput input) {
+PositionOnlyVSOutput vertexMain(VSInput input) {
     // 单位盒顶点 → 贴花体积（乘半尺寸）→ 世界空间 → 裁剪空间
     float3 lp = input.position * halfExtents.xyz;
     float3 wp = decalOrigin.xyz +
         float3(dot(rotRow0.xyz, lp), dot(rotRow1.xyz, lp), dot(rotRow2.xyz, lp));
 
-    VSOutput output;
+    PositionOnlyVSOutput output;
     output.position = mul(viewProj, float4(wp, 1.0));
     return output;
 }

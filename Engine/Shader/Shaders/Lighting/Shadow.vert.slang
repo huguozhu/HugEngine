@@ -5,6 +5,7 @@
 // 与主 PBR 管线共用相同的顶点缓冲格式。
 // ============================================================
 
+#include "MeshVS.slang"   // PositionOnlyVSOutput（同形状深度类 pass 接口唯一出处）
 #include "ShaderTypes.slang"  // GPUObjectData / ShadowPushConstant 共享定义
 
 layout(location = 0) in float3 inPosition;
@@ -24,12 +25,8 @@ layout(location = 0) in float3 inPosition;
     uint     _pad[3];
 };
 
-struct VSOutput {
-    float4 position : SV_Position;
-};
-
-VSOutput vertexMain() {
-    VSOutput output;
+PositionOnlyVSOutput vertexMain() {
+    PositionOnlyVSOutput output;
     GPUObjectData obj = u_Objects[objectIndex];
     float4 worldPos = mul(obj.worldMatrix, float4(inPosition, 1.0));
     output.position = mul(lightViewProj, worldPos);
