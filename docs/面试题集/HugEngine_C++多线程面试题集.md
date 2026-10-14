@@ -6,6 +6,50 @@
 
 ---
 
+<!-- TOC: auto-generated -->
+
+## 目录
+
+- [一、C++ 内存模型与原子操作（5 题）](#一、c-内存模型与原子操作5-题)
+  - [题 1：C++11 内存模型的 Happens-Before 关系](#题-1c11-内存模型的-happens-before-关系)
+  - [题 2：memory_order 在 GPU 资源池中的应用](#题-2memory_order-在-gpu-资源池中的应用)
+  - [题 3：Data Race 在图形引擎中的实际案例](#题-3data-race-在图形引擎中的实际案例)
+  - [题 4：CPU Cache 一致性与 False Sharing](#题-4cpu-cache-一致性与-false-sharing)
+  - [题 5：Release-Acquire 在双缓冲交换中的应用](#题-5release-acquire-在双缓冲交换中的应用)
+- [二、线程管理与同步原语（6 题）](#二、线程管理与同步原语6-题)
+  - [题 6：std::mutex 与读写锁在渲染管线中的应用](#题-6stdmutex-与读写锁在渲染管线中的应用)
+  - [题 7：条件变量实现生产者-消费者模式](#题-7条件变量实现生产者-消费者模式)
+  - [题 8：线程池与 Job System 设计](#题-8线程池与-job-system-设计)
+  - [题 9：std::future 与 std::promise 的正确使用](#题-9stdfuture-与-stdpromise-的正确使用)
+  - [题 10：线程局部存储（thread_local）的陷阱](#题-10线程局部存储thread_local的陷阱)
+  - [题 11：自旋锁 vs 互斥锁的适用场景](#题-11自旋锁-vs-互斥锁的适用场景)
+- [三、Job System 与 Task Graph（5 题）](#三、job-system-与-task-graph5-题)
+  - [题 12：Task Graph 的依赖管理与拓扑排序](#题-12task-graph-的依赖管理与拓扑排序)
+  - [题 13：Job System 的 Fork-Join 模式](#题-13job-system-的-fork-join-模式)
+  - [题 14：无锁任务队列的 CAS 操作](#题-14无锁任务队列的-cas-操作)
+  - [题 15：ParallelFor 的实现与粒度控制](#题-15parallelfor-的实现与粒度控制)
+  - [题 16：任务优先级与 QoS 调度](#题-16任务优先级与-qos-调度)
+- [四、无锁数据结构（4 题）](#四、无锁数据结构4-题)
+  - [题 17：无锁 SPSC 环形缓冲区](#题-17无锁-spsc-环形缓冲区)
+  - [题 18：无锁链表的 Hazard Pointer](#题-18无锁链表的-hazard-pointer)
+  - [题 19：Lock-Free Stack 与 Treiber Stack](#题-19lock-free-stack-与-treiber-stack)
+  - [题 20：无锁哈希表在 GPU 资源管理中的应用](#题-20无锁哈希表在-gpu-资源管理中的应用)
+- [五、GPU/CPU 并行与异步（4 题）](#五、gpucpu-并行与异步4-题)
+  - [题 21：CPU-GPU 同步的 Fence 机制](#题-21cpu-gpu-同步的-fence-机制)
+  - [题 22：多线程 CommandBuffer Recording](#题-22多线程-commandbuffer-recording)
+  - [题 23：Staging Buffer 的异步上传](#题-23staging-buffer-的异步上传)
+  - [题 24：多帧飞行（Frames in Flight）的资源管理](#题-24多帧飞行frames-in-flight的资源管理)
+- [六、并发调试与性能优化（3 题）](#六、并发调试与性能优化3-题)
+  - [题 25：Thread Sanitizer（TSAN）在图形引擎中的应用](#题-25thread-sanitizertsan在图形引擎中的应用)
+  - [题 26：死锁检测与 Lock Hierarchy](#题-26死锁检测与-lock-hierarchy)
+  - [题 27：Cache-Friendly 多线程数据结构](#题-27cache-friendly-多线程数据结构)
+- [七、图形引擎中的实际应用（3 题）](#七、图形引擎中的实际应用3-题)
+  - [题 28：Shader 编译的多线程流水线](#题-28shader-编译的多线程流水线)
+  - [题 29：多线程可见性裁剪（SceneGraph Traversal）](#题-29多线程可见性裁剪scenegraph-traversal)
+  - [题 30：Lock-Free 的 GPU 资源句柄分配](#题-30lock-free-的-gpu-资源句柄分配)
+- [附录：题目分类与难度分布](#附录题目分类与难度分布)
+
+---
 ## 一、C++ 内存模型与原子操作（5 题）
 
 ### 题 1：C++11 内存模型的 Happens-Before 关系

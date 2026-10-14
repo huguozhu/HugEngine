@@ -4,6 +4,34 @@ Vulkan 极其冗长，画一个三角形可能需要 1000+ 行初始化代码。
 
 ---
 
+<!-- TOC: auto-generated -->
+
+## 目录
+
+- [一、一次性初始化（启动时）](#一、一次性初始化启动时)
+  - [1. 创建实例 — vkCreateInstance](#1-创建实例-—-vkcreateinstance)
+  - [2. 选取物理设备 — vkEnumeratePhysicalDevices](#2-选取物理设备-—-vkenumeratephysicaldevices)
+  - [3. 创建逻辑设备 + 队列 — vkCreateDevice](#3-创建逻辑设备-队列-—-vkcreatedevice)
+  - [4. 创建 Surface + Swapchain — vkCreateSwapchainKHR](#4-创建-surface-swapchain-—-vkcreateswapchainkhr)
+  - [5. 创建 RenderPass — vkCreateRenderPass](#5-创建-renderpass-—-vkcreaterenderpass)
+  - [6. 创建 Framebuffer — vkCreateFramebuffer](#6-创建-framebuffer-—-vkcreateframebuffer)
+  - [7. 创建描述符集布局 + 管线布局](#7-创建描述符集布局-管线布局)
+  - [8. 加载 Shader + 创建 Pipeline — vkCreateGraphicsPipelines](#8-加载-shader-创建-pipeline-—-vkcreategraphicspipelines)
+  - [9. 创建顶点/索引缓冲区 + 分配内存](#9-创建顶点索引缓冲区-分配内存)
+  - [10. 创建 Uniform Buffer + 描述符池 + 描述符集](#10-创建-uniform-buffer-描述符池-描述符集)
+  - [11. 创建同步原语](#11-创建同步原语)
+  - [12. 创建命令池 + 命令缓冲区](#12-创建命令池-命令缓冲区)
+- [二、每帧渲染循环](#二、每帧渲染循环)
+  - [Step 1: 等待上一帧完成](#step-1-等待上一帧完成)
+  - [Step 2: 从 Swapchain 获取图像](#step-2-从-swapchain-获取图像)
+  - [Step 3: 更新 Uniform Buffer（MVP 矩阵等）](#step-3-更新-uniform-buffermvp-矩阵等)
+  - [Step 4: 录制命令缓冲区](#step-4-录制命令缓冲区)
+  - [Step 5: 提交到队列](#step-5-提交到队列)
+  - [Step 6: 呈现](#step-6-呈现)
+- [三、流程总览图](#三、流程总览图)
+- [四、与 D3D12 / Metal 的关键差异](#四、与-d3d12-metal-的关键差异)
+
+---
 ## 一、一次性初始化（启动时）
 
 ### 1. 创建实例 — `vkCreateInstance`

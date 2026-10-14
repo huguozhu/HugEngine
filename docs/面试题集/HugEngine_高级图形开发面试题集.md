@@ -6,6 +6,52 @@
 
 ---
 
+<!-- TOC: auto-generated -->
+
+## 目录
+
+- [一、RHI 抽象层设计（5 题）](#一、rhi-抽象层设计5-题)
+  - [题 1：RHI 抽象层的核心价值](#题-1rhi-抽象层的核心价值)
+  - [题 2：Vulkan 资源生命周期与延迟销毁](#题-2vulkan-资源生命周期与延迟销毁)
+  - [题 3：AsyncCompute 队列调度](#题-3asynccompute-队列调度)
+  - [题 4：Descriptor Set 管理与 Bindless 资源](#题-4descriptor-set-管理与-bindless-资源)
+  - [题 5：Per-Mip ImageView 与 Hi-Z 构建](#题-5per-mip-imageview-与-hi-z-构建)
+- [二、RenderGraph 架构（4 题）](#二、rendergraph-架构4-题)
+  - [题 6：RenderGraph 的 Pass 依赖分析](#题-6rendergraph-的-pass-依赖分析)
+  - [题 7：自动 Barrier 推导](#题-7自动-barrier-推导)
+  - [题 8：资源别名与内存节省](#题-8资源别名与内存节省)
+  - [题 9：Pass 裁剪（Dead Pass Elimination）](#题-9pass-裁剪dead-pass-elimination)
+- [三、PSO 与 Shader 编译管线（4 题）](#三、pso-与-shader-编译管线4-题)
+  - [题 10：VkPipelineCache 持久化机制](#题-10vkpipelinecache-持久化机制)
+  - [题 11：PSO 哈希与缓存去重](#题-11pso-哈希与缓存去重)
+  - [题 12：PSO 预热（Precompilation）](#题-12pso-预热precompilation)
+  - [题 13：PSO 创建限流](#题-13pso-创建限流)
+- [四、GPU 内存管理（3 题）](#四、gpu-内存管理3-题)
+  - [题 14：Transient Resource Allocator 原理](#题-14transient-resource-allocator-原理)
+  - [题 15：VMA 与显存分配策略](#题-15vma-与显存分配策略)
+  - [题 16：VulkanPlacedTexture vs VulkanTexture](#题-16vulkanplacedtexture-vs-vulkantexture)
+- [五、延迟渲染管线（3 题）](#五、延迟渲染管线3-题)
+  - [题 17：GBuffer 布局与带宽优化](#题-17gbuffer-布局与带宽优化)
+  - [题 18：Clustered Shading 与光照管理](#题-18clustered-shading-与光照管理)
+  - [题 19：GPU Driven 渲染管线](#题-19gpu-driven-渲染管线)
+- [六、现代 GPU 特性（4 题）](#六、现代-gpu-特性4-题)
+  - [题 20：Mesh Shader 与传统 Vertex Shader 的区别](#题-20mesh-shader-与传统-vertex-shader-的区别)
+  - [题 21：Ray Tracing 管线与 SBT](#题-21ray-tracing-管线与-sbt)
+  - [题 22：Bindless 资源与 GPU Work Graph](#题-22bindless-资源与-gpu-work-graph)
+  - [题 23：Timeline Semaphore 与跨队列同步](#题-23timeline-semaphore-与跨队列同步)
+- [七、全局光照（3 题）](#七、全局光照3-题)
+  - [题 24：DDGI（Dynamic Diffuse Global Illumination）](#题-24ddgidynamic-diffuse-global-illumination)
+  - [题 25：SSR/SSGI 的屏幕空间局限与解决方案](#题-25ssrssgi-的屏幕空间局限与解决方案)
+  - [题 26：IBL（Image-Based Lighting）与 Cubemap 渲染](#题-26iblimage-based-lighting与-cubemap-渲染)
+- [八、后处理与抗锯齿（2 题）](#八、后处理与抗锯齿2-题)
+  - [题 27：TAA（Temporal Anti-Aliasing）的时序混合](#题-27taatemporal-anti-aliasing的时序混合)
+  - [题 28：AutoExposure 的亮度直方图](#题-28autoexposure-的亮度直方图)
+- [九、性能分析与调试（2 题）](#九、性能分析与调试2-题)
+  - [题 29：GPU Profiler 与 RenderDoc 集成](#题-29gpu-profiler-与-renderdoc-集成)
+  - [题 30：Shader 热重载系统](#题-30shader-热重载系统)
+- [附录：题目分类与难度分布](#附录题目分类与难度分布)
+
+---
 ## 一、RHI 抽象层设计（5 题）
 
 ### 题 1：RHI 抽象层的核心价值
