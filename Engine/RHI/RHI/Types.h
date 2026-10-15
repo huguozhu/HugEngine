@@ -27,6 +27,12 @@ constexpr u32 kDescSetBindless = 2;  // set=2: 无绑定资源（TLAS 等）
 
 // 共享 Descriptor Binding 常量（与 ShaderTypes: kGPUBinding_* 一致）
 constexpr u32 kBindingObjectData       = 2;   // Object SSBO（GBuffer / Shadow Pass 共用）
+// 阴影 pass 专用对象数据 SSBO：只出现在 **ShadowSystem 自持的阴影布局**里（与主管线布局无关）。
+// 【为什么阴影要单独一份】阴影 pass 的 `objectIndex` 按"全部投影物体"编号，而场景绘制按
+// "视锥剔除后可见列表"编号 —— 两套编号不同；且"录制中途改写主管线 binding 2"对 GPU 无效
+// （GPU 只看到提交前的最终描述符状态，阴影 pass 会去读场景缓冲 ⇒ 索引错位、读到未写入的尾部）。
+// 详见 ShadowSystem.h 的说明。对应 ShaderTypes: kGPUBinding_ShadowObjects。
+constexpr u32 kBindingShadowObjects     = 26;
 constexpr u32 kBindingBindlessTextures = 5;   // Bindless 纹理数组（SampledImage）
 constexpr u32 kBindingBindlessSamplers = 6;   // Bindless 采样器数组（Sampler）
 constexpr u32 kBindingBindlessSSBO    = 30;  // Bindless SSBO 数组（StorageBuffer，binding 号最大以承载 VARIABLE_COUNT）

@@ -47,7 +47,11 @@ bool PointShadowTechnique::Initialize(rhi::IRHIDevice* device){
     // （03.Sponza-Forward 5 条、04.Sponza-Deferred 6 条 vkCmdDraw-None-09600）。
     d.arrayLayers=rhi::kCubemapFaceCount;
     d.usage=rhi::TextureUsage::DepthStencil|rhi::TextureUsage::ShaderResource|rhi::TextureUsage::Cubemap;
-    m_PointShadowMap=device->CreateTexture(d);
+    // 每个飞行帧各一份（理由见头文件）：512²×6×4B = 6.3 MB/份，三份合计约 19 MB
+    for(u32 i=0;i<MAX_FRAMES_IN_FLIGHT;++i){
+        m_PointShadowMap[i]=device->CreateTexture(d);
+        if(!m_PointShadowMap[i])return false;   // 显存不足就明确失败，不留"只建了前几份"的半状态
+    }
     rhi::SamplerDesc sd;
     sd.minFilter=rhi::FilterMode::Linear;
     sd.magFilter=rhi::FilterMode::Linear;
@@ -78,7 +82,10 @@ void PointShadowTechnique::CreatePSO(rhi::DescriptorSetLayoutHandle layout){
     HE_ASSERT(m_ShadowPSO,"PointShadowTechnique: PSO failed");
 }
 
-void PointShadowTechnique::Shutdown(){m_PointShadowMap.reset();m_PointShadowSampler.reset();m_ShadowPSO.reset();}
+void PointShadowTechnique::Shutdown(){
+    for(auto& m:m_PointShadowMap)m.reset();
+    m_PointShadowSampler.reset();m_ShadowPSO.reset();
+}
 void PointShadowTechnique::SetRenderResources(rhi::IRHIBuffer* ob,rhi::DescriptorSetHandle ds){m_ExternalObjectBuffer=ob;m_ExternalDescSet=ds;}
 
 u32 PointShadowTechnique::CollectLights(const FrameSceneSnapshot& snapshot,const CameraData&,
@@ -99,20 +106,22 @@ u32 PointShadowTechnique::CollectLights(const FrameSceneSnapshot& snapshot,const
 void PointShadowTechnique::Render(rhi::IRHICommandList* cmd,const FrameSceneSnapshot& snapshot,
                                    const MeshRegistry& registry,
                                    const std::vector<GPUShadowData>& sd,u32 start){
-    if(!m_PointShadowMap||!m_ExternalObjectBuffer||m_ExternalDescSet==rhi::kInvalidSet)return;
+    // 本帧只操作**本飞行帧槽位**那一份立方体（逐帧重画 ⇒ 必须分份，理由见头文件）
+    auto* cube=m_PointShadowMap[m_FrameSlot].get();
+    if(!cube||!m_ExternalObjectBuffer||m_ExternalDescSet==rhi::kInvalidSet)return;
     // 进入面循环前先把整张 cubemap 置为可采样：光照 pass 可能在首帧就采样它，
     // 而那时 6 个面都还没渲染过（层布局是 UNDEFINED）→ 校验层在提交时报
     //   "expects VkImage … (arrayLayer = n) to be in layout DEPTH_STENCIL_READ_ONLY_OPTIMAL"
     // 这一次转换覆盖全部 6 层，等价于给深度图一个确定的初始布局。
     cmd->PipelineBarrier(rhi::PipelineStage::BottomOfPipe,rhi::PipelineStage::LateFragmentTests,
-        rhi::ResourceState::Undefined,rhi::ResourceState::DepthStencilRead,m_PointShadowMap.get());
+        rhi::ResourceState::Undefined,rhi::ResourceState::DepthStencilRead,cube);
     for(u32 li=start;li<(u32)sd.size()&&li-start<MAX_SHADOWS;++li){
         float3 lp(sd[li].pointLightData);
         float rng=sd[li].pointLightData.w;
         float4x4 proj=glm::perspectiveRH_ZO(glm::radians(90.f),1.f,.1f,rng);
         for(u32 face=0;face<6;++face){
             float4x4 view=glm::lookAtRH(lp,lp+kCubeFaces[face].dir,kCubeFaces[face].up);
-            void*fv=m_PointShadowMap->GetNativeHandle(face);
+            void*fv=cube->GetNativeHandle(face);
             if(!fv)continue;
             rhi::ClearValue cv{};cv.depth=1.f;
             cmd->SetPipeline(m_ShadowPSO.get());
@@ -145,7 +154,7 @@ void PointShadowTechnique::Render(rhi::IRHICommandList* cmd,const FrameSceneSnap
             }
             cmd->EndOffscreenPass();
             cmd->PipelineBarrier(rhi::PipelineStage::LateFragmentTests,rhi::PipelineStage::FragmentShader,
-                rhi::ResourceState::DepthStencilRead,rhi::ResourceState::ShaderResource,m_PointShadowMap.get());
+                rhi::ResourceState::DepthStencilRead,rhi::ResourceState::ShaderResource,cube);
         }
     }
 }

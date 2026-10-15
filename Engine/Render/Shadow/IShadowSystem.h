@@ -50,18 +50,23 @@ public:
 
     /// 阴影贴图数量（CSM=3 级联，RT=0 或 1 个 Atlas）
     virtual u32 GetShadowMapCount() const = 0;
-    /// 获取第 i 张阴影贴图（i ∈ [0, GetShadowMapCount())）
+    /// 获取第 i 张阴影贴图（i ∈ [0, GetShadowMapCount())）—— **当前飞行帧槽位**
     virtual rhi::IRHITexture* GetShadowMap(u32 index) const = 0;
+    /// 获取**指定飞行帧槽位**的第 i 张（初始化绑定用，见 IShadowTechnique::GetShadowMapAt）
+    virtual rhi::IRHITexture* GetShadowMapAt(u32 slot, u32 index) const = 0;
     /// 阴影贴图采样器
     virtual rhi::IRHISampler* GetShadowSampler() const = 0;
 
     // ---- 点光源阴影（可选覆写，默认 nullptr） ----
+    // `slot` = 飞行帧槽位：点光立方体阴影图逐帧重画，必须按槽位取用（详见 IShadowTechnique::SetFrameSlot）
 
-    virtual rhi::IRHITexture* GetPointShadowMap() const { return nullptr; }
+    virtual rhi::IRHITexture* GetPointShadowMap(u32 /*slot*/) const { return nullptr; }
     virtual rhi::IRHISampler* GetPointShadowSampler() const { return nullptr; }
     virtual rhi::IRHITexture* GetSpotShadowMap() const { return nullptr; }
+    virtual rhi::IRHITexture* GetSpotShadowMapAt(u32 /*slot*/) const { return nullptr; }
     virtual rhi::IRHISampler* GetSpotShadowSampler() const { return nullptr; }
     virtual rhi::IRHITexture* GetRectShadowMap() const { return nullptr; }
+    virtual rhi::IRHITexture* GetRectShadowMapAt(u32 /*slot*/) const { return nullptr; }
     virtual rhi::IRHISampler* GetRectShadowSampler() const { return nullptr; }
 
     // ---- 光源 → 阴影数据索引 ----
@@ -69,9 +74,9 @@ public:
     /// 返回光源在阴影 SSBO 中的索引，-1 表示不投射阴影
     virtual i32 GetShadowIndex(Entity light) const = 0;
 
-    // ---- PSO 创建（ForwardPipeline 创建主布局后调用） ----
+    // ---- PSO 创建（由 ShadowSystem 用**自持的阴影布局**创建；不需要调用方传布局） ----
 
-    virtual void CreateShadowPSO(rhi::DescriptorSetLayoutHandle layout) = 0;
+    virtual void CreateShadowPSO() = 0;
 
     // ---- 状态查询 ----
 

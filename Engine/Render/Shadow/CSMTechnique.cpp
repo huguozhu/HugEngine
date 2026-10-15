@@ -76,16 +76,20 @@ bool CSMTechnique::Initialize(rhi::IRHIDevice* device){
     m_ShadowFS.stage=rhi::ShaderStage::Pixel;
     m_ShadowFS.spirv=k_Shadow_frag_spv;
     m_ShadowFS.entryPoint="main";
-    for(u32 c=0;c<CASCADE_COUNT;++c){
-        rhi::TextureDesc d;
-        d.format=rhi::Format::D32_FLOAT;
-        d.width=m_ShadowMapSize;
-        d.height=m_ShadowMapSize;
-        d.depth=1;
-        d.mipLevels=1;
-        d.arrayLayers=1;
-        d.usage=rhi::TextureUsage::DepthStencil|rhi::TextureUsage::ShaderResource;
-        m_ShadowMaps[c]=device->CreateTexture(d);
+    // 每个飞行帧 × 每个级联各一张：阴影贴图每帧清空重画且同帧被采样，单份会被在飞帧采到中间态
+    //（代价：2048² D32 ≈ 16.8 MB/张 ⇒ 3 级联 × 3 飞行帧 ≈ 151 MB）
+    for(u32 s=0;s<MAX_FRAMES_IN_FLIGHT;++s){
+        for(u32 c=0;c<CASCADE_COUNT;++c){
+            rhi::TextureDesc d;
+            d.format=rhi::Format::D32_FLOAT;
+            d.width=m_ShadowMapSize;
+            d.height=m_ShadowMapSize;
+            d.depth=1;
+            d.mipLevels=1;
+            d.arrayLayers=1;
+            d.usage=rhi::TextureUsage::DepthStencil|rhi::TextureUsage::ShaderResource;
+            m_ShadowMaps[s][c]=device->CreateTexture(d);
+        }
     }
     rhi::SamplerDesc sd;
     sd.minFilter=rhi::FilterMode::Linear;
@@ -117,7 +121,11 @@ void CSMTechnique::CreatePSO(rhi::DescriptorSetLayoutHandle layout){
     HE_ASSERT(m_ShadowPSO,"CSMTechnique: PSO failed");
 }
 
-void CSMTechnique::Shutdown(){for(u32 c=0;c<CASCADE_COUNT;++c)m_ShadowMaps[c].reset();m_ShadowSampler.reset();m_ShadowPSO.reset();}
+void CSMTechnique::Shutdown(){
+    for(u32 s=0;s<MAX_FRAMES_IN_FLIGHT;++s)
+        for(u32 c=0;c<CASCADE_COUNT;++c)m_ShadowMaps[s][c].reset();
+    m_ShadowSampler.reset();m_ShadowPSO.reset();
+}
 void CSMTechnique::SetRenderResources(rhi::IRHIBuffer* ob,rhi::DescriptorSetHandle ds){m_ExternalObjectBuffer=ob;m_ExternalDescSet=ds;}
 
 u32 CSMTechnique::CollectLights(const FrameSceneSnapshot& snapshot,const CameraData& cam,
@@ -154,13 +162,13 @@ void CSMTechnique::Render(rhi::IRHICommandList* cmd,const FrameSceneSnapshot& sn
     for(u32 c=0;c<CASCADE_COUNT;++c)RenderCascade(cmd,c,snapshot,registry,sd[start]);
     for(u32 c=0;c<CASCADE_COUNT;++c)
         cmd->PipelineBarrier(rhi::PipelineStage::LateFragmentTests,rhi::PipelineStage::FragmentShader,
-            rhi::ResourceState::DepthStencilRead,rhi::ResourceState::ShaderResource,m_ShadowMaps[c].get());
+            rhi::ResourceState::DepthStencilRead,rhi::ResourceState::ShaderResource,m_ShadowMaps[m_FrameSlot][c].get());
 }
 
 void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,const FrameSceneSnapshot& snapshot,
                                   const MeshRegistry& registry,const GPUShadowData& sd){
     m_LightVPs[ci] = sd.lightViewProj[ci];  // 缓存供 RSM 查询
-    void*dv=m_ShadowMaps[ci]->GetNativeHandle();
+    void*dv=m_ShadowMaps[m_FrameSlot][ci]->GetNativeHandle();
     if(!dv)return;
     rhi::ClearValue cv{};cv.depth=1.f;
     // pass 级调试标记：RenderDoc 中可识别阴影级联 pass
@@ -206,6 +214,9 @@ void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,const FrameSce
     cmd->EndOffscreenPass();
 }
 
-rhi::IRHITexture* CSMTechnique::GetShadowMap(u32 i)const{return i<CASCADE_COUNT?m_ShadowMaps[i].get():nullptr;}
+rhi::IRHITexture* CSMTechnique::GetShadowMap(u32 i)const{return m_ShadowMaps[m_FrameSlot][(i<CASCADE_COUNT)?i:0].get();}
+rhi::IRHITexture* CSMTechnique::GetShadowMapAt(u32 slot,u32 i)const{
+    return m_ShadowMaps[(slot<MAX_FRAMES_IN_FLIGHT)?slot:0u][(i<CASCADE_COUNT)?i:0].get();
+}
 
 } // namespace he::render

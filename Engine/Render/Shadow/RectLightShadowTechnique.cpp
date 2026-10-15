@@ -28,6 +28,7 @@ bool RectLightShadowTechnique::Initialize(rhi::IRHIDevice* device){
     m_ShadowFS.spirv=k_Shadow_frag_spv;
     m_ShadowFS.entryPoint="main";
 
+    // 每个飞行帧各一张（每帧清空重画 ⇒ 必须分份，理由见头文件）
     rhi::TextureDesc d;
     d.format=rhi::Format::D32_FLOAT;
     d.width=m_MapSize;
@@ -36,7 +37,7 @@ bool RectLightShadowTechnique::Initialize(rhi::IRHIDevice* device){
     d.mipLevels=1;
     d.arrayLayers=1;
     d.usage=rhi::TextureUsage::DepthStencil|rhi::TextureUsage::ShaderResource;
-    m_RectShadowMap=device->CreateTexture(d);
+    for(u32 i=0;i<MAX_FRAMES_IN_FLIGHT;++i)m_RectShadowMap[i]=device->CreateTexture(d);
 
     rhi::SamplerDesc sd;
     sd.minFilter=rhi::FilterMode::Linear;
@@ -71,7 +72,7 @@ void RectLightShadowTechnique::CreatePSO(rhi::DescriptorSetLayoutHandle layout){
 }
 
 void RectLightShadowTechnique::Shutdown(){
-    m_RectShadowMap.reset();
+    for(auto& m:m_RectShadowMap)m.reset();
     m_RectShadowSampler.reset();
     m_ShadowPSO.reset();
     m_Device=nullptr;
@@ -115,7 +116,7 @@ u32 RectLightShadowTechnique::CollectLights(const FrameSceneSnapshot& snapshot,c
 void RectLightShadowTechnique::Render(rhi::IRHICommandList* cmd,const FrameSceneSnapshot& snapshot,
                                        const MeshRegistry& registry,
                                        const std::vector<GPUShadowData>& sd,u32 start){
-    if(!m_RectShadowMap||!m_ExternalObjectBuffer||m_ExternalDescSet==rhi::kInvalidSet)return;
+    if(!m_RectShadowMap[m_FrameSlot]||!m_ExternalObjectBuffer||m_ExternalDescSet==rhi::kInvalidSet)return;
     for(u32 li=start;li<(u32)sd.size()&&li-start<MAX_SHADOWS;++li){
         const auto& sm=sd[li];
         float3 lp(sm.pointLightData.x,sm.pointLightData.y,sm.pointLightData.z);
@@ -126,7 +127,7 @@ void RectLightShadowTechnique::Render(rhi::IRHICommandList* cmd,const FrameScene
         float4x4 vp=sm.lightViewProj[0];
 
         rhi::ClearValue cv{};cv.depth=1.f;
-        void* depthView=m_RectShadowMap->GetNativeHandle();
+        void* depthView=m_RectShadowMap[m_FrameSlot]->GetNativeHandle();
         cmd->SetPipeline(m_ShadowPSO.get());
         cmd->BeginOffscreenPass(nullptr,depthView,m_MapSize,m_MapSize,&cv);
         cmd->SetPipeline(m_ShadowPSO.get());
@@ -155,7 +156,7 @@ void RectLightShadowTechnique::Render(rhi::IRHICommandList* cmd,const FrameScene
         // 若声明为 DepthStencilWrite 会给出错误的 oldLayout
         //（VUID-VkImageMemoryBarrier-oldLayout-01197，实测每帧触发）
         cmd->PipelineBarrier(rhi::PipelineStage::LateFragmentTests,rhi::PipelineStage::FragmentShader,
-            rhi::ResourceState::DepthStencilRead,rhi::ResourceState::DepthStencilRead,m_RectShadowMap.get());
+            rhi::ResourceState::DepthStencilRead,rhi::ResourceState::DepthStencilRead,m_RectShadowMap[m_FrameSlot].get());
     }
 }
 

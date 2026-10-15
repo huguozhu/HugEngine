@@ -123,8 +123,8 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
     };
     m_PerFrameLayout = device->CreateDescriptorSetLayout(perFrameLayoutDesc);
 
-    // 用 per-frame 布局创建 Shadow PSO（阴影通道不需要 per-mesh 纹理绑定）
-    m_ShadowSystem->CreateShadowPSO(m_PerFrameLayout);
+    // 用**阴影自持布局**创建 Shadow PSO（阴影通道只需要对象数据一个绑定，见 ShadowSystem.h）
+    m_ShadowSystem->CreateShadowPSO();
 
     // --- 创建三缓冲 Storage Buffers（Phase 1 多线程渲染）---
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
@@ -208,11 +208,11 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
                                     m_LightGridBuffer.get());
         device->UpdateDescriptorSet(set, rhi::kBindingLightIndexList, rhi::DescriptorType::StorageBuffer,
                                     m_LightIndexListBuffer.get());
-        // CSM: 绑定 3 级联阴影贴图（来自 ShadowSystem）
+        // CSM: 绑定 3 级联阴影贴图（来自 ShadowSystem）—— 按**本槽位**取，贴图是逐飞行帧分份的
         for (u32 c = 0; c < CASCADE_COUNT; ++c) {
             u32 binding = (c == 0) ? 4u : (c == 1 ? 10u : 11u);
             device->UpdateDescriptorSet(set, binding, rhi::DescriptorType::CombinedImageSampler,
-                m_ShadowSystem->GetShadowMap(c), m_ShadowSystem->GetShadowSampler());
+                m_ShadowSystem->GetShadowMapAt(i, c), m_ShadowSystem->GetShadowSampler());
         }
         // 绑定 5-6: bindless 占位符（bindless 堆在渲染时更新）
         {
@@ -225,12 +225,12 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
         }
         // 绑定 9: 点光源阴影 Cubemap（来自 ShadowSystem）
         device->UpdateDescriptorSet(set, kGPUBinding_PointShadow, rhi::DescriptorType::CombinedImageSampler,
-            m_ShadowSystem->GetPointShadowMap(), m_ShadowSystem->GetPointShadowSampler());
+            m_ShadowSystem->GetPointShadowMap(i), m_ShadowSystem->GetPointShadowSampler());
         // 绑定 12-14: IBL 纹理占位（GI_IBL 生成后通过 UpdateIBLBindings 替换）
         device->UpdateDescriptorSet(set, kGPUBinding_IrradianceMap, rhi::DescriptorType::CombinedImageSampler,
-            m_ShadowSystem->GetPointShadowMap(), m_ShadowSystem->GetPointShadowSampler());
+            m_ShadowSystem->GetPointShadowMap(i), m_ShadowSystem->GetPointShadowSampler());
         device->UpdateDescriptorSet(set, kGPUBinding_PrefilterMap, rhi::DescriptorType::CombinedImageSampler,
-            m_ShadowSystem->GetPointShadowMap(), m_ShadowSystem->GetPointShadowSampler());
+            m_ShadowSystem->GetPointShadowMap(i), m_ShadowSystem->GetPointShadowSampler());
         device->UpdateDescriptorSet(set, kGPUBinding_BRDF_LUT, rhi::DescriptorType::CombinedImageSampler,
             m_BindlessPlaceholder.get(), m_BindlessSampler.get());
         // 绑定 15-17: RSM 纹理占位（GI_RSM 渲染后替换）
@@ -243,10 +243,10 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
             m_BindlessPlaceholder.get(), m_BindlessSampler.get());
         // 绑定 24: 聚光灯 2D 阴影贴图（来自 ShadowSystem，原 9 与点光冲突）
         device->UpdateDescriptorSet(set, kGPUBinding_SpotShadow, rhi::DescriptorType::CombinedImageSampler,
-            m_ShadowSystem->GetSpotShadowMap(), m_ShadowSystem->GetSpotShadowSampler());
+            m_ShadowSystem->GetSpotShadowMapAt(i), m_ShadowSystem->GetSpotShadowSampler());
         // 绑定 25: 矩形面光 2D 阴影贴图（来自 ShadowSystem）
         device->UpdateDescriptorSet(set, kGPUBinding_RectShadow, rhi::DescriptorType::CombinedImageSampler,
-            m_ShadowSystem->GetRectShadowMap(), m_ShadowSystem->GetRectShadowSampler());
+            m_ShadowSystem->GetRectShadowMapAt(i), m_ShadowSystem->GetRectShadowSampler());
         m_DescSets[i] = set;
     }
     // --- GI 分层合成参数 UBO（每飞行帧一份，任务 26）---
@@ -900,16 +900,11 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, const FrameSceneSnapshot
     m_ToneMap->SetHDREnabled(swapFmt == rhi::Format::A2B10G10R10_UNORM_PACK32);
     // 【第③段第 4 批】`SyncPhysicalSkyToSun` 已搬进快照装配器（必须在收集之前、且聚合在一处）
     if (m_ShadowSystem && m_ShadowSystem->HasActiveShadows()) {
-        u32 slot = RenderFrameSlot();
-        // 切换 binding 2 到阴影 Object Buffer（仅更新 set=0 per-frame 集）
-        m_Device->UpdateDescriptorSet(m_DescSets[slot], rhi::kBindingObjectData,
-            rhi::DescriptorType::StorageBuffer, m_ShadowObjBuffers[slot].get());
-
+        // 【不再在录制中途改写 binding 2】阴影 pass 现在读常驻的 binding 26（阴影专用对象数据）。
+        // 旧写法"换成阴影缓冲 → 渲染 → 换回场景缓冲"对 GPU 是**无效**的：两次更新都在提交之前完成，
+        // GPU 执行整条命令缓冲时只会看到最终状态 ⇒ 阴影 pass 实际读到场景缓冲，而它的 objectIndex
+        // 按"全部投影物体"编号、场景缓冲按"剔除后可见列表"编号 ⇒ 索引错位（还会读到未写入的尾部）。
         m_ShadowSystem->Render(cmd);
-
-        // 恢复 binding 2
-        m_Device->UpdateDescriptorSet(m_DescSets[slot], rhi::kBindingObjectData,
-            rhi::DescriptorType::StorageBuffer, m_ObjectBuffers[slot].get());
     }
     PrepareGI(cmd);
     // GPU 视锥剔除：必须在 render pass 之外（BeginHDRPass 会 Begin 本帧的 HDR pass）

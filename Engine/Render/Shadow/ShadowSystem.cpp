@@ -12,6 +12,17 @@ bool ShadowSystem::Initialize(rhi::IRHIDevice* device,u32,u32){
     m_Device=device;
     HE_ASSERT(m_Device,"ShadowSystem: null device");
 
+    // 阴影 pass 专用布局：只要对象数据一个 SSBO（理由见头文件）
+    {
+        rhi::DescriptorSetLayoutDesc shadowLayoutDesc;
+        shadowLayoutDesc.bindings = {
+            { rhi::kBindingShadowObjects, rhi::DescriptorType::StorageBuffer, 1, rhi::kStageMaskVertex },
+        };
+        m_ShadowObjLayout = device->CreateDescriptorSetLayout(shadowLayoutDesc);
+        for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i)
+            m_ShadowObjSets[i] = device->AllocateDescriptorSet(m_ShadowObjLayout);
+    }
+
     // 注册默认技术
     auto csm=std::make_unique<CSMTechnique>();
     csm->Initialize(device);
@@ -34,17 +45,24 @@ bool ShadowSystem::Initialize(rhi::IRHIDevice* device,u32,u32){
     return true;
 }
 
-void ShadowSystem::CreateShadowPSO(rhi::DescriptorSetLayoutHandle layout){
+void ShadowSystem::CreateShadowPSO(){
     for(auto& t:m_Techniques){
-        // 每个 Technique 创建自己的 PSO
-        if(auto* csm=dynamic_cast<CSMTechnique*>(t.get())) csm->CreatePSO(layout);
-        if(auto* pt=dynamic_cast<PointShadowTechnique*>(t.get())) pt->CreatePSO(layout);
-        if(auto* spot=dynamic_cast<SpotShadowTechnique*>(t.get())) spot->CreatePSO(layout);
-        if(auto* rect=dynamic_cast<RectLightShadowTechnique*>(t.get())) rect->CreatePSO(layout);
+        // 每个 Technique 创建自己的 PSO —— 统一用**阴影自持布局**（见头文件：不能复用主管线布局，
+        // 否则阴影 pass 会去读主管线的场景对象缓冲）
+        if(auto* csm=dynamic_cast<CSMTechnique*>(t.get())) csm->CreatePSO(m_ShadowObjLayout);
+        if(auto* pt=dynamic_cast<PointShadowTechnique*>(t.get())) pt->CreatePSO(m_ShadowObjLayout);
+        if(auto* spot=dynamic_cast<SpotShadowTechnique*>(t.get())) spot->CreatePSO(m_ShadowObjLayout);
+        if(auto* rect=dynamic_cast<RectLightShadowTechnique*>(t.get())) rect->CreatePSO(m_ShadowObjLayout);
     }
 }
 
 void ShadowSystem::Shutdown(){
+    // 阴影自持布局（描述符集由设备统一回收，与管线的 m_DescSets 同样处置）
+    if(m_Device&&m_ShadowObjLayout!=rhi::kInvalidLayout){
+        m_Device->DestroyDescriptorSetLayout(m_ShadowObjLayout);
+        m_ShadowObjLayout=rhi::kInvalidLayout;
+    }
+    for(auto& s:m_ShadowObjBuffers)s=nullptr;
     for(auto& t:m_Techniques)t->Shutdown();
     m_Techniques.clear();
     m_Device=nullptr;
@@ -52,13 +70,28 @@ void ShadowSystem::Shutdown(){
     HE_CORE_INFO("ShadowSystem shutdown");
 }
 
-void ShadowSystem::NextFrame(){m_CurrentFrameSlot=(m_CurrentFrameSlot+1)%MAX_FRAMES_IN_FLIGHT;}
+void ShadowSystem::NextFrame(){
+    m_CurrentFrameSlot=(m_CurrentFrameSlot+1)%MAX_FRAMES_IN_FLIGHT;
+    // 帧边界统一把槽位下发给各技术：持有**逐帧重画**资源的技术（点光立方体、CSM/Spot/Rect 贴图）
+    // 必须按飞行帧分份，否则上一帧仍在执行的命令会采到"正在清空重画"的中间态。
+    // 放在这里（而不是 Render）是为了让 `GetShadowMap*` 在**任何时刻**（含帧图构建期）都指向本帧槽位。
+    for(auto& t:m_Techniques)t->SetFrameSlot(m_CurrentFrameSlot);
+}
 void ShadowSystem::Bind(rhi::IRHICommandList*)const{}
 void ShadowSystem::OnResize(u32,u32){}
 
-void ShadowSystem::SetRenderResources(rhi::IRHIBuffer* objBuf,rhi::IRHIBuffer* shadowBuf,rhi::DescriptorSetHandle descSet){
+void ShadowSystem::SetRenderResources(rhi::IRHIBuffer* objBuf,rhi::IRHIBuffer* shadowBuf,rhi::DescriptorSetHandle){
     m_ExternalShadowBuffer=shadowBuf;
-    for(auto& t:m_Techniques)t->SetRenderResources(objBuf,descSet);
+    // 阴影对象缓冲按飞行帧缓存：只在指针真的变化时更新**本槽位**那一份描述符集（每帧零写入；
+    // 也绝不改写别的、可能正在被 GPU 读取的槽位）。descSet 参数已废弃：阴影 pass 用自持的集。
+    const u32 slot=m_CurrentFrameSlot%MAX_FRAMES_IN_FLIGHT;
+    if(m_ShadowObjBuffers[slot]!=objBuf){
+        m_ShadowObjBuffers[slot]=objBuf;
+        if(objBuf&&m_ShadowObjSets[slot]!=rhi::kInvalidSet)
+            m_Device->UpdateDescriptorSet(m_ShadowObjSets[slot],rhi::kBindingShadowObjects,
+                rhi::DescriptorType::StorageBuffer,objBuf);
+    }
+    for(auto& t:m_Techniques)t->SetRenderResources(objBuf,m_ShadowObjSets[slot]);
 }
 
 // ============================================================================
@@ -161,6 +194,16 @@ rhi::IRHITexture* ShadowSystem::GetShadowMap(u32 i)const{
     return nullptr;
 }
 
+rhi::IRHITexture* ShadowSystem::GetShadowMapAt(u32 slot,u32 i)const{
+    u32 off=0;
+    for(auto& t:m_Techniques){
+        u32 n=t->GetShadowMapCount();
+        if(i<off+n)return t->GetShadowMapAt(slot,i-off);
+        off+=n;
+    }
+    return nullptr;
+}
+
 // 本帧该阴影图是否真的被写入过。
 // 每个 Technique 的 Render 只遍历「自己 CollectLights 收集到的那一段」，
 // 因此「该技术本帧收集到光源数 > 0」就是「它的图本帧被写过」的充要条件。
@@ -182,8 +225,8 @@ rhi::IRHISampler* ShadowSystem::GetShadowSampler()const{
     return nullptr;
 }
 
-rhi::IRHITexture* ShadowSystem::GetPointShadowMap()const{
-    for(auto& t:m_Techniques)if(auto*m=t->GetPointShadowMap())return m;
+rhi::IRHITexture* ShadowSystem::GetPointShadowMap(u32 slot)const{
+    for(auto& t:m_Techniques)if(auto*m=t->GetPointShadowMap(slot))return m;
     return nullptr;
 }
 
@@ -197,6 +240,11 @@ rhi::IRHITexture* ShadowSystem::GetSpotShadowMap()const{
     return nullptr;
 }
 
+rhi::IRHITexture* ShadowSystem::GetSpotShadowMapAt(u32 slot)const{
+    for(auto& t:m_Techniques)if(auto*s=dynamic_cast<SpotShadowTechnique*>(t.get()))return s->GetShadowMapAt(slot,0);
+    return nullptr;
+}
+
 rhi::IRHISampler* ShadowSystem::GetSpotShadowSampler()const{
     for(auto& t:m_Techniques)if(auto*s=dynamic_cast<SpotShadowTechnique*>(t.get()))return s->GetShadowSampler();
     return nullptr;
@@ -204,6 +252,11 @@ rhi::IRHISampler* ShadowSystem::GetSpotShadowSampler()const{
 
 rhi::IRHITexture* ShadowSystem::GetRectShadowMap()const{
     for(auto& t:m_Techniques)if(auto*s=dynamic_cast<RectLightShadowTechnique*>(t.get()))return s->GetShadowMap(0);
+    return nullptr;
+}
+
+rhi::IRHITexture* ShadowSystem::GetRectShadowMapAt(u32 slot)const{
+    for(auto& t:m_Techniques)if(auto*s=dynamic_cast<RectLightShadowTechnique*>(t.get()))return s->GetShadowMapAt(slot,0);
     return nullptr;
 }
 

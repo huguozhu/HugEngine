@@ -28,7 +28,7 @@ bool SpotShadowTechnique::Initialize(rhi::IRHIDevice* device){
     m_ShadowFS.spirv=k_Shadow_frag_spv;
     m_ShadowFS.entryPoint="main";
 
-    // 单张 2D 深度纹理
+    // 每个飞行帧各一张 2D 深度纹理（每帧清空重画 ⇒ 必须分份，理由见头文件）
     rhi::TextureDesc d;
     d.format=rhi::Format::D32_FLOAT;
     d.width=m_MapSize;
@@ -37,7 +37,7 @@ bool SpotShadowTechnique::Initialize(rhi::IRHIDevice* device){
     d.mipLevels=1;
     d.arrayLayers=1;
     d.usage=rhi::TextureUsage::DepthStencil|rhi::TextureUsage::ShaderResource;
-    m_SpotShadowMap=device->CreateTexture(d);
+    for(u32 i=0;i<MAX_FRAMES_IN_FLIGHT;++i)m_SpotShadowMap[i]=device->CreateTexture(d);
 
     rhi::SamplerDesc sd;
     sd.minFilter=rhi::FilterMode::Linear;
@@ -72,7 +72,7 @@ void SpotShadowTechnique::CreatePSO(rhi::DescriptorSetLayoutHandle layout){
 }
 
 void SpotShadowTechnique::Shutdown(){
-    m_SpotShadowMap.reset();
+    for(auto& m:m_SpotShadowMap)m.reset();
     m_SpotShadowSampler.reset();
     m_ShadowPSO.reset();
     m_Device=nullptr;
@@ -111,7 +111,7 @@ u32 SpotShadowTechnique::CollectLights(const FrameSceneSnapshot& snapshot,const 
 void SpotShadowTechnique::Render(rhi::IRHICommandList* cmd,const FrameSceneSnapshot& snapshot,
                                    const MeshRegistry& registry,
                                    const std::vector<GPUShadowData>& sd,u32 start){
-    if(!m_SpotShadowMap||!m_ExternalObjectBuffer||m_ExternalDescSet==rhi::kInvalidSet)return;
+    if(!m_SpotShadowMap[m_FrameSlot]||!m_ExternalObjectBuffer||m_ExternalDescSet==rhi::kInvalidSet)return;
     for(u32 li=start;li<(u32)sd.size()&&li-start<MAX_SHADOWS;++li){
         const auto& sm=sd[li];
         float3 lp(sm.pointLightData.x,sm.pointLightData.y,sm.pointLightData.z);
@@ -126,7 +126,7 @@ void SpotShadowTechnique::Render(rhi::IRHICommandList* cmd,const FrameSceneSnaps
         float4x4 vp=proj*view;
 
         rhi::ClearValue cv{};cv.depth=1.f;
-        void* depthView=m_SpotShadowMap->GetNativeHandle();
+        void* depthView=m_SpotShadowMap[m_FrameSlot]->GetNativeHandle();
         cmd->SetPipeline(m_ShadowPSO.get());
         cmd->BeginOffscreenPass(nullptr,depthView,m_MapSize,m_MapSize,&cv);
         cmd->SetPipeline(m_ShadowPSO.get());
@@ -155,7 +155,7 @@ void SpotShadowTechnique::Render(rhi::IRHICommandList* cmd,const FrameSceneSnaps
         // depthAttach.finalLayout），故 srcState 必须是 DepthStencilRead
         //（声明 Write 会给出错误的 oldLayout：VUID-VkImageMemoryBarrier-oldLayout-01197）
         cmd->PipelineBarrier(rhi::PipelineStage::LateFragmentTests,rhi::PipelineStage::FragmentShader,
-            rhi::ResourceState::DepthStencilRead,rhi::ResourceState::DepthStencilRead,m_SpotShadowMap.get());
+            rhi::ResourceState::DepthStencilRead,rhi::ResourceState::DepthStencilRead,m_SpotShadowMap[m_FrameSlot].get());
     }
 }
 

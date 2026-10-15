@@ -67,8 +67,8 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera)
             if (csmMaps[c] != kInvalidHandle)
                 shadowWrites.push_back(RG_WRITE(csmMaps[c]));
 
-        // Point Shadow Cubemap
-        if (auto* ptTex = m_ShadowSystem->GetPointShadowMap()) {
+        // Point Shadow Cubemap（逐帧重画 ⇒ 按飞行帧槽位 Import，见 PointShadowTechnique）
+        if (auto* ptTex = m_ShadowSystem->GetPointShadowMap(RenderFrameSlot())) {
             auto ptHandle = rg.ImportTexture("PointShadow_CubeMap", ptTex);
             shadowWrites.push_back(RG_WRITE(ptHandle));
         }
@@ -82,19 +82,9 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera)
 
     rg.AddPass("Shadow", {}, std::move(shadowWrites),
             [this](rhi::IRHICommandList* c) {
-                // 切换描述符集 binding 2 到阴影专用 Object Buffer
-                // （仅更新 set=0 per-frame 集，per-mesh set=1 不包含 buffer 绑定）
-                u32 slot = RenderFrameSlot();
-                m_Device->UpdateDescriptorSet(m_DescSets[slot], rhi::kBindingObjectData,
-                    rhi::DescriptorType::StorageBuffer,
-                    m_ShadowObjBuffers[slot].get());
-
+                // 阴影 pass 读 ShadowSystem **自持**的绑定（binding 26，阴影专用对象数据），
+                // 不再在录制中途改写主管线 binding 2 —— 那对 GPU 无效（只见最终状态）且是隐患
                 m_ShadowSystem->Render(c);
-
-                // 恢复 binding 2 到场景 Object Buffer（FullScene 使用）
-                m_Device->UpdateDescriptorSet(m_DescSets[slot], rhi::kBindingObjectData,
-                    rhi::DescriptorType::StorageBuffer,
-                    m_ObjectBuffers[slot].get());
             });
     }
 

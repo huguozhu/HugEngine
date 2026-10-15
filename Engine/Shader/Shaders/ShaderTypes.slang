@@ -79,6 +79,11 @@ GPU_CONST(GPU_UINT kGPUBinding_GBufferG      = 29);  // GBuffer disneyB（clearc
 GPU_CONST(GPU_UINT kGPUBinding_SpotShadow    = 24); // 聚光灯阴影（原 9 与点光冲突，改独立 binding 24）
 GPU_CONST(GPU_UINT kGPUBinding_SpotShadow_DL = 9);  // 聚光灯阴影（Deferred Lighting set 专用：24 已被 RT 阴影遮罩占用）
 GPU_CONST(GPU_UINT kGPUBinding_RectShadow    = 25); // 矩形面光阴影（独立 binding）
+// 阴影专用对象数据 SSBO（26 在 Forward per-frame set 中空闲）：阴影 pass 的 `objectIndex` 按
+// "全部投影物体"编号，与场景绘制用的"视锥剔除后可见列表"编号**不是同一套** ⇒ 两者必须是两个
+// 同时绑定的 SSBO。靠 CPU 在录制中途把 binding 2 换来换去是无效的：GPU 执行时只看到提交前的
+// 最终描述符状态，于是阴影 pass 会去读场景缓冲、索引错位（读到别的物体的矩阵）。
+GPU_CONST(GPU_UINT kGPUBinding_ShadowObjects = 26); // 阴影专用 GPUObjectData[] SSBO
 GPU_CONST(GPU_UINT kGPUBinding_Lights_DL     = 17);  // GPULight[] SSBO
 GPU_CONST(GPU_UINT kGPUBinding_ShadowData_DL = 18);  // GPUShadowData[] SSBO
 GPU_CONST(GPU_UINT kGPUBinding_SSGI          = 19);  // SSGI 间接光照

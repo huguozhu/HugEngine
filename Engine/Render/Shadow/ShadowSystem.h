@@ -45,15 +45,18 @@ public:
     Mode GetMode()const override{return Mode::Traditional;}
     void NextFrame()override;
     void SetRenderResources(rhi::IRHIBuffer* objBuf,rhi::IRHIBuffer* shadowBuf,rhi::DescriptorSetHandle descSet)override;
-    void CreateShadowPSO(rhi::DescriptorSetLayoutHandle layout)override;
+    void CreateShadowPSO()override;
     u32 GetShadowMapCount()const override;
     rhi::IRHITexture* GetShadowMap(u32 i)const override;
+    rhi::IRHITexture* GetShadowMapAt(u32 slot,u32 i)const override;
     rhi::IRHISampler* GetShadowSampler()const override;
-    rhi::IRHITexture* GetPointShadowMap()const override;
+    rhi::IRHITexture* GetPointShadowMap(u32 slot)const override;
     rhi::IRHISampler* GetPointShadowSampler()const override;
-    rhi::IRHITexture* GetSpotShadowMap()const;    // 聚光灯 2D 阴影贴图
+    rhi::IRHITexture* GetSpotShadowMap()const;    // 聚光灯 2D 阴影贴图（当前飞行帧槽位）
+    rhi::IRHITexture* GetSpotShadowMapAt(u32 slot)const;
     rhi::IRHISampler* GetSpotShadowSampler()const;
-    rhi::IRHITexture* GetRectShadowMap()const;    // 矩形面光阴影贴图
+    rhi::IRHITexture* GetRectShadowMap()const;    // 矩形面光阴影贴图（当前飞行帧槽位）
+    rhi::IRHITexture* GetRectShadowMapAt(u32 slot)const;
     rhi::IRHISampler* GetRectShadowSampler()const;
     i32 GetShadowIndex(Entity light)const override;
     bool HasActiveShadows()const override{return m_ActiveCount>0;}
@@ -62,6 +65,22 @@ public:
 
 private:
     std::vector<std::unique_ptr<IShadowTechnique>> m_Techniques;
+
+    // ============================================================
+    // 阴影 pass 自持的对象数据绑定（独立布局 + 每飞行帧一份描述符集）
+    //
+    // 【为什么不能用主管线的 binding 2】阴影 pass 的 `objectIndex` 由各技术自己遍历
+    // `snapshot.draws` 里 `bShadowCaster` 的条目编号（= "全部投影物体"），而场景绘制用的
+    // `m_ObjectBuffers` 是 `SceneRenderer::Prepare` **视锥剔除后**的可见列表编号 —— 两套编号
+    // 不同。旧实现靠"渲染前把 binding 2 换成阴影缓冲、渲染后换回来"，但两次 `UpdateDescriptorSet`
+    // 都在提交之前完成，**GPU 执行整条命令缓冲时只会看到最终状态** ⇒ 阴影 pass 实际读的是场景
+    // 缓冲：索引错位（读到别的物体的矩阵），且下标超过可见数时读到的是**未写入的尾部**。
+    // 现在阴影 pass 用自己这一份常驻绑定（`kBindingShadowObjects`），与场景那份互不干扰；
+    // 且只在缓冲指针真的变化时更新本槽位的集 ⇒ **每帧零描述符写入**。
+    // ============================================================
+    rhi::DescriptorSetLayoutHandle m_ShadowObjLayout = rhi::kInvalidLayout;
+    rhi::DescriptorSetHandle       m_ShadowObjSets[MAX_FRAMES_IN_FLIGHT] = {};
+    rhi::IRHIBuffer*               m_ShadowObjBuffers[MAX_FRAMES_IN_FLIGHT] = {};   // 逐槽位缓存（脏判据）
 
     // ShadowData SSBO（三缓冲，ForwardPipeline 自有）
     rhi::IRHIBuffer* m_ExternalShadowBuffer=nullptr;

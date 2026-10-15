@@ -258,18 +258,9 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
 
     rg.AddPass("Shadow", {}, std::move(shadowWrites),
             [this](rhi::IRHICommandList* c) {
-                u32 slot = RenderFrameSlot();
-                // 切换到阴影专用 Object Buffer（binding 2），渲染完成后恢复
-                m_Device->UpdateDescriptorSet(m_GBuffer->GetDescriptorSet(), rhi::kBindingObjectData,
-                    rhi::DescriptorType::StorageBuffer,
-                    m_ShadowObjBuffers[slot].get());
-
+                // 阴影 pass 读 ShadowSystem **自持**的绑定（binding 26，阴影专用对象数据），
+                // 不再在录制中途改写 GBuffer 集的 binding 2 —— 那对 GPU 无效（只见最终状态）
                 m_ShadowSystem->Render(c);  // 使用光源 VP 矩阵渲染所有阴影贴图
-
-                // 恢复场景 Object Buffer 供后续 GBuffer pass 使用
-                m_Device->UpdateDescriptorSet(m_GBuffer->GetDescriptorSet(), rhi::kBindingObjectData,
-                    rhi::DescriptorType::StorageBuffer,
-                    m_ObjectBuffers[slot].get());
             });
     }
 

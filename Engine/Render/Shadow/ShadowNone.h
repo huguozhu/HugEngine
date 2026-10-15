@@ -22,10 +22,11 @@ public:
 
     u32 GetShadowMapCount() const override { return 0; }
     rhi::IRHITexture* GetShadowMap(u32) const override { return nullptr; }
+    rhi::IRHITexture* GetShadowMapAt(u32, u32) const override { return nullptr; }
     rhi::IRHISampler* GetShadowSampler() const override { return nullptr; }
 
     i32 GetShadowIndex(Entity) const override { return -1; }
-    void CreateShadowPSO(rhi::DescriptorSetLayoutHandle) override {}
+    void CreateShadowPSO() override {}
     bool HasActiveShadows() const override { return false; }
 
     // IRenderSubsystem（空实现）

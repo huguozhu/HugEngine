@@ -420,9 +420,9 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
 
     // GBuffer PSO + 描述符集 + DGC 初始化已在 GBufferRenderer::Initialize() 中完成
 
-    // 创建阴影 PSO（使用 GBuffer 的 descriptor set layout，
-    // 阴影 VS 仅使用 binding=2 GPUObjectData[]，与 GBuffer layout 兼容）
-    m_ShadowSystem->CreateShadowPSO(m_GBuffer->GetLayout());
+    // 创建阴影 PSO：由 ShadowSystem 用**自持的阴影布局**创建（阴影 VS 只读"阴影专用对象数据"，
+    // 不再与主管线 layout 共用 binding 2，理由见 ShadowSystem.h）
+    m_ShadowSystem->CreateShadowPSO();
 
     // ── DGC 初始化（通过 RHI 统一接口，后端透明）──
     if (device->GetCaps().supportsDGC) {

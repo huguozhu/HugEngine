@@ -25,6 +25,8 @@ public:
     bool Initialize(rhi::IRHIDevice* device)override;
     void Shutdown()override;
     void SetRenderResources(rhi::IRHIBuffer* objBuf,rhi::DescriptorSetHandle descSet)override;
+    // 逐帧资源按飞行帧槽位取用（见 IShadowTechnique::SetFrameSlot）
+    void SetFrameSlot(u32 slot)override{m_FrameSlot=(slot<MAX_FRAMES_IN_FLIGHT)?slot:0u;}
 
     u32 CollectLights(const FrameSceneSnapshot& snapshot,const CameraData& camera,
                       std::vector<GPUShadowData>& outData,
@@ -35,9 +37,12 @@ public:
                 const std::vector<GPUShadowData>& shadowData,u32 dataStartIndex)override;
 
     u32 GetShadowMapCount()const override{return 1;}
-    rhi::IRHITexture* GetShadowMap(u32)const override{return m_PointShadowMap.get();}
+    rhi::IRHITexture* GetShadowMap(u32)const override{return m_PointShadowMap[m_FrameSlot].get();}
     rhi::IRHISampler* GetShadowSampler()const override{return m_PointShadowSampler.get();}
-    rhi::IRHITexture* GetPointShadowMap()const override{return m_PointShadowMap.get();}
+    rhi::IRHITexture* GetPointShadowMap(u32 slot)const override{
+        return m_PointShadowMap[(slot<MAX_FRAMES_IN_FLIGHT)?slot:0u].get();}
+    rhi::IRHITexture* GetShadowMapAt(u32 slot,u32)const override{
+        return m_PointShadowMap[(slot<MAX_FRAMES_IN_FLIGHT)?slot:0u].get();}
     rhi::IRHISampler* GetPointShadowSampler()const override{return m_PointShadowSampler.get();}
 
     // PSO 延迟创建
@@ -46,9 +51,15 @@ public:
 private:
     rhi::ShaderBytecode m_ShadowVS,m_ShadowFS;
     std::unique_ptr<rhi::IRHIPipelineState> m_ShadowPSO;
-    std::unique_ptr<rhi::IRHITexture> m_PointShadowMap;
+    // 【为什么是数组】点光立方体阴影图每帧都要"清空 → 6 面重画"，而 GPU 最多落后 CPU 三个飞行帧：
+    // 只有一份时，第 N+1 帧的清空/重画会与第 N 帧"仍在执行的采样"重叠 ⇒ 采样读到被清掉（depth=1，
+    // 判据判成"照亮"）或被丢弃的深度 ⇒ 静态场景整幅明暗闪烁（实测 15 帧里 2 帧变暗到 68%~87%，
+    // 每帧 `WaitIdle` 后完全消失）。按飞行帧各持一份后，本帧只写本槽位、采样也只读本槽位；
+    // 槽位再次被复用时其 3 帧前的提交已完成（`VulkanCommandList::Begin` 会等该槽位栅栏）。
+    std::unique_ptr<rhi::IRHITexture> m_PointShadowMap[MAX_FRAMES_IN_FLIGHT];
     std::unique_ptr<rhi::IRHISampler> m_PointShadowSampler;
     u32 m_MapSize = kDefaultPointShadowSize;
+    u32 m_FrameSlot = 0;
 
     rhi::IRHIBuffer*        m_ExternalObjectBuffer=nullptr;
     rhi::DescriptorSetHandle m_ExternalDescSet=rhi::kInvalidSet;

@@ -36,7 +36,10 @@ public:
 
     u32 GetShadowMapCount()const override{return CASCADE_COUNT;}
     rhi::IRHITexture* GetShadowMap(u32 i)const override;
+    rhi::IRHITexture* GetShadowMapAt(u32 slot,u32 i)const override;
     rhi::IRHISampler* GetShadowSampler()const override{return m_ShadowSampler.get();}
+    // 逐帧重画的贴图按飞行帧槽位取用（见 IShadowTechnique::SetFrameSlot）
+    void SetFrameSlot(u32 slot)override{m_FrameSlot=(slot<MAX_FRAMES_IN_FLIGHT)?slot:0u;}
 
     // PSO 延迟创建
     void CreatePSO(rhi::DescriptorSetLayoutHandle layout);
@@ -55,9 +58,13 @@ private:
 
     rhi::ShaderBytecode m_ShadowVS,m_ShadowFS;
     std::unique_ptr<rhi::IRHIPipelineState> m_ShadowPSO;
-    std::unique_ptr<rhi::IRHITexture> m_ShadowMaps[CASCADE_COUNT];
+    // 【为什么是二维数组】级联贴图每帧"清空→重画"且同帧被采样，而 GPU 最多落后 CPU 三个飞行帧：
+    // 单份时第 N+1 帧的清空/重画会盖掉第 N 帧正在采样的内容（相机移动时表现为阴影闪动/丢失）。
+    // 按 [飞行帧][级联] 分份后本帧只写本槽位、采样也只读本槽位。
+    std::unique_ptr<rhi::IRHITexture> m_ShadowMaps[MAX_FRAMES_IN_FLIGHT][CASCADE_COUNT];
     std::unique_ptr<rhi::IRHISampler> m_ShadowSampler;
     u32 m_ShadowMapSize = kDefaultCSMShadowSize;
+    u32 m_FrameSlot = 0;
 
     rhi::IRHIBuffer*        m_ExternalObjectBuffer=nullptr;
     rhi::DescriptorSetHandle m_ExternalDescSet=rhi::kInvalidSet;
