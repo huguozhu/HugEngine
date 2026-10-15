@@ -26,7 +26,9 @@ bool ToneMapPass::Initialize(rhi::IRHIDevice* device,u32 width,u32 height){
         {0,rhi::DescriptorType::CombinedImageSampler,1,16},
     };
     m_DescLayout=device->CreateDescriptorSetLayout(layout);
-    m_DescSet=device->AllocateDescriptorSet(m_DescLayout);
+    // 输入集按飞行帧各一份：槽位轮换时"本帧只写本槽位的集"，不会改写帧在飞时正被读的那一份
+    for(u32 i=0;i<rhi::kMaxFramesInFlight;++i)
+        m_DescSet[i]=device->AllocateDescriptorSet(m_DescLayout);
 
     RecreatePSO();
 
@@ -69,12 +71,13 @@ void ToneMapPass::Shutdown(){
 }
 
 void ToneMapPass::SetInput(rhi::IRHITexture* hdr,rhi::IRHISampler* sampler){
-    if(hdr!=m_HDRTarget||sampler!=m_HDRSampler){
-        m_HDRTarget=hdr;
-        m_HDRSampler=sampler;
-        if(m_HDRTarget&&m_HDRSampler)
-            m_Device->UpdateDescriptorSet(m_DescSet,kToneMapBindInput,rhi::DescriptorType::CombinedImageSampler,m_HDRTarget,m_HDRSampler);
-    }
+    // 槽位模式（HDR 输入逐帧轮换）：本帧只写本槽位的集；旧模式：输入不变就不重写
+    const u32 slot = m_SlotAware ? m_Slot : 0u;
+    if(!m_SlotAware && hdr==m_HDRTarget[0] && sampler==m_HDRSampler) return;
+    m_HDRSampler=sampler;
+    m_HDRTarget[slot]=hdr;
+    if(hdr&&sampler)
+        m_Device->UpdateDescriptorSet(m_DescSet[slot],kToneMapBindInput,rhi::DescriptorType::CombinedImageSampler,hdr,sampler);
 }
 
 void ToneMapPass::Render(rhi::IRHICommandList* cmd){
@@ -82,7 +85,7 @@ void ToneMapPass::Render(rhi::IRHICommandList* cmd){
     cmd->SetPipeline(m_PSO.get());
     cmd->SetViewport({0,(float)m_Height,(float)m_Width,-(float)m_Height,0,1});
     cmd->SetScissor({0,0,m_Width,m_Height});
-    cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_DescSet);
+    cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_DescSet[m_SlotAware?m_Slot:0u]);
     struct { float exposure; float hdrEnabled; float whitePointNits; float _pad; } pc;
     pc.exposure = m_Exposure;
     pc.hdrEnabled = m_HDR;

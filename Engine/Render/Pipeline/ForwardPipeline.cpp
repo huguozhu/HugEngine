@@ -328,21 +328,24 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
     m_AntiAliasing->Initialize(device, m_HDRWidth, m_HDRHeight);
     HE_CORE_INFO("ForwardPipeline: AA initialized (None)");
 
-    // --- HDR 离屏渲染目标（RGBA16_FLOAT 颜色 + D32 深度）---
+    // --- HDR 离屏渲染目标（RGBA16_FLOAT 颜色 + D32 深度），**每飞行帧各一份**（理由见头文件）---
     {
         rhi::TextureDesc hdrColorDesc;
         hdrColorDesc.format = rhi::Format::RGBA16_FLOAT;
         hdrColorDesc.width  = m_HDRWidth;
         hdrColorDesc.height = m_HDRHeight;
         hdrColorDesc.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
-        m_HDRTarget = device->CreateTexture(hdrColorDesc);
 
         rhi::TextureDesc hdrDepthDesc;
         hdrDepthDesc.format = rhi::Format::D32_FLOAT;
         hdrDepthDesc.width  = m_HDRWidth;
         hdrDepthDesc.height = m_HDRHeight;
         hdrDepthDesc.usage  = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;  // GPU Culling 需要采样深度
-        m_HDRDepth = device->CreateTexture(hdrDepthDesc);
+
+        for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+            m_HDRTarget[i] = device->CreateTexture(hdrColorDesc);
+            m_HDRDepth[i]  = device->CreateTexture(hdrDepthDesc);
+        }
 
         rhi::SamplerDesc hdrSampDesc;
         hdrSampDesc.minFilter = rhi::FilterMode::Linear;
@@ -513,8 +516,10 @@ void ForwardPipeline::Shutdown() {
     m_PBR_PSO.reset();
     if (m_ToneMap) { m_ToneMap->Shutdown(); m_ToneMap.reset(); }
     if (m_Skybox)  { m_Skybox->Shutdown();  m_Skybox.reset(); }
-    m_HDRTarget.reset();
-    m_HDRDepth.reset();
+    for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        m_HDRTarget[i].reset();
+        m_HDRDepth[i].reset();
+    }
     m_HDRSampler.reset();
     m_SecRecordLists.clear();  // Phase 5-4 sec CB 录制池
 
@@ -643,8 +648,9 @@ void ForwardPipeline::BeginHDRPass(rhi::IRHICommandList* cmd, u32 width, u32 hei
 
     cmd->SetPipeline(m_PBR_PSO.get());
 
-    void* colorView = m_HDRTarget->GetNativeHandle();
-    void* depthView = m_HDRDepth->GetNativeHandle();
+    // 取**本飞行帧槽位**那一份颜色/深度（每帧清空+重画，见 m_HDRTarget 注释）
+    void* colorView = m_HDRTarget[RenderFrameSlot()]->GetNativeHandle();
+    void* depthView = m_HDRDepth[RenderFrameSlot()]->GetNativeHandle();
 
     rhi::ClearValue clear{};
     clear.depth = 1.0f;
@@ -668,7 +674,7 @@ void ForwardPipeline::EndHDRPass(rhi::IRHICommandList* cmd) {
         rhi::PipelineStage::FragmentShader,
         rhi::ResourceState::RenderTarget,
         rhi::ResourceState::ShaderResource,
-        m_HDRTarget.get());
+        m_HDRTarget[RenderFrameSlot()].get());
 
     // 预设 ToneMap PSO 为下一个 RenderPass 的初始管线（匹配 SwapChain 实际颜色格式：SDR=BGRA8，HDR=A2B10G10R10）
     if (m_ToneMap) m_ToneMap->PreBind(cmd);
@@ -751,7 +757,9 @@ void ForwardPipeline::RenderToneMapPass(rhi::IRHICommandList* cmd) {
     // pass 级调试标记：RenderDoc 中识别为「色调映射输出到屏幕」
     cmd->SetDrawDebugLabel("ToneMap -> BackBuffer");
     if (m_ToneMap) {
-        m_ToneMap->SetInput(m_HDRTarget.get(), m_HDRSampler.get());
+        // HDR 目标按飞行帧轮换 ⇒ 输入集也要按槽位（见 ToneMapPass::SetFrameSlot）
+        m_ToneMap->SetFrameSlot(RenderFrameSlot());
+        m_ToneMap->SetInput(m_HDRTarget[RenderFrameSlot()].get(), m_HDRSampler.get());
         m_ToneMap->Render(cmd);
     }
 }
@@ -761,21 +769,23 @@ void ForwardPipeline::ResizeHDRTarget(u32 width, u32 height) {
     m_HDRWidth  = width;
     m_HDRHeight = height;
 
-    // 重建 HDR 颜色纹理
+    // 重建 HDR 颜色/深度纹理（每飞行帧各一份）
     rhi::TextureDesc hdrColorDesc;
     hdrColorDesc.format = rhi::Format::RGBA16_FLOAT;
     hdrColorDesc.width  = m_HDRWidth;
     hdrColorDesc.height = m_HDRHeight;
     hdrColorDesc.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
-    m_HDRTarget = m_Device->CreateTexture(hdrColorDesc);
 
-    // 重建 HDR 深度纹理
     rhi::TextureDesc hdrDepthDesc;
     hdrDepthDesc.format = rhi::Format::D32_FLOAT;
     hdrDepthDesc.width  = m_HDRWidth;
     hdrDepthDesc.height = m_HDRHeight;
     hdrDepthDesc.usage  = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
-    m_HDRDepth = m_Device->CreateTexture(hdrDepthDesc);
+
+    for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        m_HDRTarget[i] = m_Device->CreateTexture(hdrColorDesc);
+        m_HDRDepth[i]  = m_Device->CreateTexture(hdrDepthDesc);
+    }
     // ToneMapPass 输入会自动通过每帧 SetInput 更新，无需手动更新描述符集
 }
 
@@ -917,7 +927,7 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, const FrameSceneSnapshot
 
     // AA Pass（FXAA 等在 HDR→ToneMap 之间或 ToneMap 之后）
     if (m_AntiAliasing && m_AntiAliasing->IsEnabled() && m_AntiAliasing->GetMode() != AAMode::None) {
-        m_AntiAliasing->SetInput(m_HDRTarget.get(), m_HDRSampler.get());
+        m_AntiAliasing->SetInput(m_HDRTarget[RenderFrameSlot()].get(), m_HDRSampler.get());
         m_AntiAliasing->Render(cmd);
     }
 }
@@ -953,7 +963,7 @@ void ForwardPipeline::RunGPUCulling(rhi::IRHICommandList* cmd, const CameraData&
 
     // 3) 绑定 GPUScene SSBO / HDR 深度 → Dispatch Compute
     m_GPUCulling.SetSceneBuffer(m_Device, m_GPUScene.GetObjectBuffer());
-    if (m_HDRDepth) m_GPUCulling.SetDepthTexture(m_Device, m_HDRDepth.get(),
+    if (m_HDRDepth[RenderFrameSlot()]) m_GPUCulling.SetDepthTexture(m_Device, m_HDRDepth[RenderFrameSlot()].get(),
                                                  m_HDRWidth, m_HDRHeight);
     m_GPUCulling.Dispatch(cmd, camera.GetViewProjMatrix(), m_GPUScene.GetObjectCount(),
                           m_HDRWidth, m_HDRHeight);

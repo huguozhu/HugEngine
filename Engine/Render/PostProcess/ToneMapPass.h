@@ -35,6 +35,12 @@ public:
     /// 每帧设置 HDR 输入纹理 + 采样器
     void SetInput(rhi::IRHITexture* hdrTarget, rhi::IRHISampler* sampler) override;
 
+    /// 设置当前**飞行帧槽位**（`[0, rhi::kMaxFramesInFlight)`）；调用顺序：SetFrameSlot → SetInput → Render。
+    /// 【为什么需要】HDR 输入按飞行帧轮换时（ForwardPipeline 的 HDR 目标每帧清空重画，必须分份），
+    /// 输入描述符集也必须按槽位分开：单份集被每帧重写会在"帧仍在飞"时改写 GPU 正在读的描述符
+    /// （未定义行为）。**不调用**则保持旧行为（输入指针不变就不重写），供 HDR 输入固定的管线使用。
+    void SetFrameSlot(u32 slot) { m_Slot = slot % rhi::kMaxFramesInFlight; m_SlotAware = true; }
+
     /// ToneMap 输出为 LDR sRGB（BGRA8_UNORM，匹配交换链）
     [[nodiscard]] rhi::Format GetOutputFormat() const override { return m_OutputFormat; }
 
@@ -58,9 +64,12 @@ private:
     rhi::ShaderBytecode m_VS, m_FS;
     std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
     rhi::DescriptorSetLayoutHandle m_DescLayout = rhi::kInvalidLayout;
-    rhi::DescriptorSetHandle       m_DescSet    = rhi::kInvalidSet;
-    rhi::IRHITexture*  m_HDRTarget  = nullptr;
+    // 输入集按飞行帧各一份（见 SetFrameSlot）
+    rhi::DescriptorSetHandle       m_DescSet[rhi::kMaxFramesInFlight] = {};
+    rhi::IRHITexture*  m_HDRTarget[rhi::kMaxFramesInFlight] = {};   // 逐槽位输入缓存（槽位模式下按槽位比较）
     rhi::IRHISampler*  m_HDRSampler = nullptr;
+    u32  m_Slot = 0;
+    bool m_SlotAware = false;   // false = 旧行为（输入不变不重写）
     float m_Exposure = 1.0f;
     rhi::Format m_OutputFormat = rhi::Format::BGRA8_UNORM;
     float m_HDR = 0.0f;                 // 1=HDR10 PQ，0=SDR sRGB

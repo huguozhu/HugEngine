@@ -123,8 +123,9 @@ public:
     // 阴影专用 Object Buffer（独立于场景 Object Buffer，避免 CPU 录制时覆盖）
     rhi::IRHIBuffer*         GetCurrentShadowObjectBuffer() { return m_ShadowObjBuffers[m_CurrentFrameSlot].get(); }
 
-    // HDR 纹理访问（供 ToneMapPass 使用）
-    rhi::IRHITexture* GetHDRTarget()  const { return m_HDRTarget.get(); }
+    // HDR 纹理访问（供 ToneMapPass / AA 使用）：取**当前飞行帧槽位**那一份
+    rhi::IRHITexture* GetHDRTarget()  const { return m_HDRTarget[m_CurrentFrameSlot].get(); }
+    rhi::IRHITexture* GetHDRDepth()   const { return m_HDRDepth[m_CurrentFrameSlot].get(); }
     rhi::IRHISampler* GetHDRSampler() const { return m_HDRSampler.get(); }
     GPUCulling& GetGPUCulling() { return m_GPUCulling; }
     SceneRenderer& GetSceneRenderer() { return *m_SceneRenderer; }
@@ -215,8 +216,13 @@ private:
     std::unique_ptr<rhi::IRHIBuffer> m_ShadowObjBuffers[MAX_FRAMES_IN_FLIGHT];  // 阴影专用 Object Buffer
     u32 m_CurrentFrameSlot = 0;
 
-    // HDR 离屏渲染
-    std::unique_ptr<rhi::IRHITexture> m_HDRTarget, m_HDRDepth;
+    // HDR 离屏渲染：颜色与深度都按**飞行帧**分份（与 m_LightBuffers / m_ObjectBuffers 同一惯例）
+    // 【为什么必须分份】两者都是"本帧清空 → 本帧重画 → 本帧采样"（ToneMap 采颜色、GPU Culling 采深度），
+    // 而 GPU 最多落后 CPU `MAX_FRAMES_IN_FLIGHT` 帧：只有一份时，第 N+1 帧的"清空+重画"会盖掉第 N 帧
+    // ToneMap 仍在采样的内容 —— 实测症状是**大片画面突然变成纯黑**（HDR 颜色 clear 值就是黑，实测
+    // 一次闪烁里 7.3 万像素从亮度 134 掉到 0），单帧 GPU 越重越容易命中（点光 6 个阴影 pass 一开必现）。
+    // 每槽一份后，本帧只读写本槽位，该槽位再次被复用时其 3 帧前的提交已完成（`Begin` 等过那个栅栏）。
+    std::unique_ptr<rhi::IRHITexture> m_HDRTarget[MAX_FRAMES_IN_FLIGHT], m_HDRDepth[MAX_FRAMES_IN_FLIGHT];
     std::unique_ptr<rhi::IRHISampler> m_HDRSampler;
     u32 m_HDRWidth = rhi::kDefaultBackBufferWidth, m_HDRHeight = rhi::kDefaultBackBufferHeight;
 
