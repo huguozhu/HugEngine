@@ -28,12 +28,14 @@
 #include "DeferredLighting.vert.spv.h"
 #include "DeferredLighting.frag.spv.h"
 
-// CVar: DGC 运行时开关（0=关闭，1=开启，默认关闭以保留传统 ExecuteIndirect 回退）
-// 在控制台输入 "r.DGC.Enable 1" 可动态启用
-static int32_t cvDGC_Enable = 0;
+// DGC 开关（编译期常量，默认 false 保留传统 ExecuteIndirect 回退）
+// 语义与落点详见 DeferredPipeline.cpp 的同名常量：true = GPU 生成绘制命令
+// （MeshBatcher/GBufferRenderer_GPU 产出命令序列 → ExecuteGeneratedCommands）。
+// 注意：`constexpr` ⇒ 编译期常量，未注册 CVar，控制台改不了；要切换请改初值重编译。
+constexpr bool kDGCEnable = false;
 
 // CVar: 瞬态资源路径验证开关（与 DeferredPipeline.cpp 中同步）
-static const char* kCVar_DGC_Enable_Name = "r.DGC.Enable";
+static const char* kDGCEnableName = "r.DGC.Enable";
 
 // CVar: GBuffer 投影贴花开关（任务 24，默认开启）。
 // 关闭后 Deferred 路径不再绘制贴花（贴花卡片已从 GBuffer 排除，见 DeferredPipeline::Initialize），
@@ -374,7 +376,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
             m_GBuffer->SetInstanceCuller(&m_InstanceCuller, RenderFrameSlot());
 
             // ── DGC 模式上下文注入（通过 RHI 统一接口）──
-            m_DGCEnabled = (cvDGC_Enable != 0)
+            m_DGCEnabled = kDGCEnable
                 && m_Device->IsDGCReady()
                 && m_GPUCulling.GetIndirectBuffer()
                 && m_GPUCulling.enabled;

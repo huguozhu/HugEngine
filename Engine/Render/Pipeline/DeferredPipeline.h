@@ -362,7 +362,6 @@ private:
     std::unique_ptr<DDGITracePass> m_DDGI_Trace;
     ProfilerManager m_Profiler;  // GPU 时间戳 Profiler
     ProfilerPanel   m_ProfilerPanel; // ImGui 可视化面板
-    std::unique_ptr<rhi::IRHIPipelineState> m_TransientTestPSO;  // 瞬态资源路径验证 PSO
     // GPL fast-link：持有限流器创建的 PSO，避免中途销毁
 	// （填充点见 DeferredPipeline.cpp 的 PSO 限流器；原先的变体演示已删除）
     std::vector<std::unique_ptr<rhi::IRHIPipelineState>> m_GPLVariantPSOs;

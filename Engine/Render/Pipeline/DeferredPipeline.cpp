@@ -27,11 +27,20 @@
 #include "Fullscreen.vert.spv.h"
 #include "FullscreenCopy.frag.spv.h"
 
-// DGC 开关（0=关闭，1=开启，默认关闭以保留传统 ExecuteIndirect 回退）
-// 注意：这是 static 编译期常量，**未注册到 CVar 系统**，控制台改不了；
-// "r.DGC.Enable" 仅作为日志/诊断用的名字存在，需改开关请直接改此初值并重新编译。
-static int32_t cvDGC_Enable = 0;
-static const char* kCVar_DGC_Enable_Name = "r.DGC.Enable";
+// ── DGC 开关（Device Generated Commands，VK_EXT_device_generated_commands）──
+// 语义：`true` = 让 **GPU 自己生成绘制命令**（GPU-driven 绘制）——GPU 侧的实例剔除与
+// MeshBatcher 产出命令序列，再经 `ExecuteGeneratedCommands()` 一次提交（含 pipeline/
+// 描述符等状态），而不是每条 draw 都用 `vkCmdDrawIndexedIndirect*` 提交参数。
+// 默认 false：保留传统 ExecuteIndirect 回退（DGC 属较新扩展，驱动覆盖有限）。
+//
+// 注意：这是 `constexpr` **编译期常量**，未注册 CVar，控制台/配置文件都改不了；
+// 要切换请改这里的初值并重新编译。`kDGCEnableName` 只是日志/诊断用的显示名。
+// 设备能力不满足时（`VulkanDGC::IsSupported()` 为假）`InitializeDGC()` 返回 false，
+// 整条 DGC 路径自动跳过（`IsDGCReady()` 为 false），不会出错。
+constexpr bool kDGCEnable = false;
+
+// 仅用于日志/诊断显示的名字（不是 CVar 注册名；本引擎未把它接入 CVar 系统）
+static const char* kDGCEnableName = "r.DGC.Enable";
 
 
 namespace he::render {
@@ -445,42 +454,6 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     m_ProfilerPanel.SetProfiler(&m_Profiler);  // 绑定 ImGui 面板到 Profiler 数据源
     // Lighting PSO + 描述符集已在 LightingPass::Initialize() 中创建
 
-    // ── 全屏拷贝 PSO 共用的 set0 布局 ──
-    // FullscreenCopy.frag 在 set0/binding0 声明了 u_InputTex 与 u_InputSampler，
-    // 管线布局必须声明对应的绑定。此前 TransientTest 的 PSO 完全没给
-    // 描述符集布局 ⇒ 校验层每帧报 VUID-VkGraphicsPipelineCreateInfo-layout-07988。
-    rhi::DescriptorSetLayoutHandle fullscreenCopyLayout = rhi::kInvalidLayout;
-    {
-        rhi::DescriptorSetLayoutDesc l;
-        l.bindings = {
-            { 0, rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskFragment },
-        };
-        fullscreenCopyLayout = device->CreateDescriptorSetLayout(l);
-    }
-
-    // 瞬态资源路径验证 PSO（全屏三角形 + 纹理拷贝，用于验证 Transient Allocator 端到端路径）
-    {
-        rhi::ShaderBytecode tVS, tFS;
-        tVS.stage = rhi::ShaderStage::Vertex;
-        tVS.spirv = k_Fullscreen_vert_spv;
-        tVS.entryPoint = "main";
-        tFS.stage = rhi::ShaderStage::Pixel;
-        tFS.spirv = k_FullscreenCopy_frag_spv;
-        tFS.entryPoint = "main";
-        rhi::PipelineStateDesc tDesc;
-        tDesc.vertexShader = &tVS;
-        tDesc.pixelShader = &tFS;
-        tDesc.topology = rhi::PrimitiveTopology::TriangleList;
-        tDesc.depthTest = false;
-        tDesc.depthWrite = false;
-        tDesc.colorAttachmentCount = 1;
-        tDesc.colorFormats[0] = rhi::Format::RGBA16_FLOAT;  // 匹配瞬态纹理格式
-        if (fullscreenCopyLayout != rhi::kInvalidLayout)
-            tDesc.descriptorSetLayouts = { fullscreenCopyLayout };
-        tDesc.debugName = "TransientTest";
-        m_TransientTestPSO = device->CreatePipelineState(tDesc);
-    }
-
     // GPU 粒子系统
     m_ParticleRenderer.Initialize(device);
     m_ParticleRenderer.SetSceneDepth(m_Lighting.GetHDRDepth(), m_Lighting.GetPointSampler());  // 软粒子深度纹理
@@ -536,7 +509,6 @@ void DeferredPipeline::Shutdown() {
     m_InstanceCuller.Shutdown();   // 任务 25：逐实例剔除
     if (m_GBuffer) m_GBuffer->Shutdown();
     m_Lighting.Shutdown();
-    m_TransientTestPSO.reset();
     m_GPLVariantPSOs.clear();
     for (auto& b : m_LightBuffers) b.reset();
     for (auto& b : m_ObjectBuffers) b.reset();
