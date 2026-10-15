@@ -720,12 +720,16 @@ void ForwardPipeline::UpdateRSMBindings() {
     rhi::IRHITexture* nrmMap  = m_RSM->GetRSMFluxMap();      // 任务 30 起只存编码法线
     rhi::IRHITexture* radMap  = m_RSM->GetRSMRadianceMap();  // VPL 出射辐射度
     rhi::IRHISampler* sampler = m_RSM->GetRSMSampler();
-    // RSM 绑定在 set=0（per-frame），只需更新共享描述符集
-    for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        m_Device->UpdateDescriptorSet(m_DescSets[i], kGPUBinding_RSMPosition, rhi::DescriptorType::CombinedImageSampler, posMap, sampler);
-        m_Device->UpdateDescriptorSet(m_DescSets[i], kGPUBinding_RSMFlux, rhi::DescriptorType::CombinedImageSampler, nrmMap, sampler);
-        m_Device->UpdateDescriptorSet(m_DescSets[i], kGPUBinding_RSMRadiance, rhi::DescriptorType::CombinedImageSampler, radMap, sampler);
-    }
+    // 【只更新**本飞行帧槽位**那一份，且只在源纹理真的换了时更新】
+    // 旧写法遍历全部 3 个 set：那些 set 可能正被在飞帧读取，而"帧在飞时改写描述符集"是未定义
+    // 行为（文档里记过的 Lumen 同类坑）；RSM 三张图每帧重画但对象指针不变 ⇒ 绝大多数帧是空操作。
+    const u32 slot = RenderFrameSlot();
+    GIBindingCache& c = m_GIBindingCache[slot];
+    if (c.rsmPos == posMap && c.rsmFlux == nrmMap && c.rsmRad == radMap) return;
+    c.rsmPos = posMap; c.rsmFlux = nrmMap; c.rsmRad = radMap;
+    m_Device->UpdateDescriptorSet(m_DescSets[slot], kGPUBinding_RSMPosition, rhi::DescriptorType::CombinedImageSampler, posMap, sampler);
+    m_Device->UpdateDescriptorSet(m_DescSets[slot], kGPUBinding_RSMFlux, rhi::DescriptorType::CombinedImageSampler, nrmMap, sampler);
+    m_Device->UpdateDescriptorSet(m_DescSets[slot], kGPUBinding_RSMRadiance, rhi::DescriptorType::CombinedImageSampler, radMap, sampler);
 }
 
 void ForwardPipeline::UpdateIBLBindings(GI_IBL* gi) {
@@ -734,12 +738,14 @@ void ForwardPipeline::UpdateIBLBindings(GI_IBL* gi) {
     rhi::IRHITexture* lut    = gi->GetBRDF_LUT();
     rhi::IRHISampler* sampler = gi->GetIBLSampler();
 
-    // IBL 绑定在 set=0（per-frame），只需更新共享描述符集
-    for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        m_Device->UpdateDescriptorSet(m_DescSets[i], kGPUBinding_IrradianceMap, rhi::DescriptorType::CombinedImageSampler, irr, sampler);
-        m_Device->UpdateDescriptorSet(m_DescSets[i], kGPUBinding_PrefilterMap, rhi::DescriptorType::CombinedImageSampler, pref, sampler);
-        m_Device->UpdateDescriptorSet(m_DescSets[i], kGPUBinding_BRDF_LUT, rhi::DescriptorType::CombinedImageSampler, lut, sampler);
-    }
+    // 同 UpdateRSMBindings：只更新本槽位、且只在源纹理真的换了时更新（IBL 只在脏时重烘）
+    const u32 slot = RenderFrameSlot();
+    GIBindingCache& c = m_GIBindingCache[slot];
+    if (c.irr == irr && c.pref == pref && c.lut == lut) return;
+    c.irr = irr; c.pref = pref; c.lut = lut;
+    m_Device->UpdateDescriptorSet(m_DescSets[slot], kGPUBinding_IrradianceMap, rhi::DescriptorType::CombinedImageSampler, irr, sampler);
+    m_Device->UpdateDescriptorSet(m_DescSets[slot], kGPUBinding_PrefilterMap, rhi::DescriptorType::CombinedImageSampler, pref, sampler);
+    m_Device->UpdateDescriptorSet(m_DescSets[slot], kGPUBinding_BRDF_LUT, rhi::DescriptorType::CombinedImageSampler, lut, sampler);
 }
 
 void ForwardPipeline::RenderSkybox(rhi::IRHICommandList* cmd, const CameraData& camera) {

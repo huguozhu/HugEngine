@@ -171,6 +171,14 @@ private:
 
     rhi::DescriptorSetLayoutHandle m_PerFrameLayout = rhi::kInvalidLayout;  // set=0: per-frame + bindless
     rhi::DescriptorSetHandle       m_DescSets[MAX_FRAMES_IN_FLIGHT] = {};   // set=0 三缓冲
+    /// IBL / RSM 描述符绑定缓存（逐飞行帧）：只在源纹理真的换了时更新**本槽位**的集。
+    /// 【为什么不能每帧重写全部槽位】别的槽位可能正被在飞帧读取，而"帧在飞时改写描述符集"属
+    /// 未定义行为（文档里记过的 Lumen 同类坑）；且稳态下源纹理指针不变 ⇒ 稳态零写入。
+    struct GIBindingCache {
+        rhi::IRHITexture* irr = nullptr; rhi::IRHITexture* pref = nullptr; rhi::IRHITexture* lut = nullptr;
+        rhi::IRHITexture* rsmPos = nullptr; rhi::IRHITexture* rsmFlux = nullptr; rhi::IRHITexture* rsmRad = nullptr;
+    };
+    GIBindingCache m_GIBindingCache[MAX_FRAMES_IN_FLIGHT];
     std::unique_ptr<rhi::IRHIBuffer> m_LightBuffers[MAX_FRAMES_IN_FLIGHT];
     // 阶段 1 T1.3b：本帧光源的**快照**（游戏线程侧收集的不可变输入）。
     // 必须是成员：帧图 lambda 在 `CollectLights` 返回之后才执行，局部变量会悬垂。
