@@ -36,6 +36,9 @@ add_executable(HugEngineTests
     # 阶段 1 T1.2a：光源收集（快照口径）。`SceneSnapshotBuilder.cpp` 是 RHI-free 的（只依赖 Scene 与
     # PhysicalLight 的纯函数），直接编译进测试目标 —— 一旦收集逻辑引入 RHI 依赖，本目标立刻编译失败。
     TestSceneSnapshotBuilder.cpp
+    # 多线程渲染优化方案 §2.1：确定性写回（`Render/Threading/ParallelCollect.h`，头文件实现、RHI-free）。
+    # 判据 = "并行与串行逐元素一致" + "同输入多次运行逐元素相同"，即该方案后续两项改进的基线。
+    TestParallelCollect.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Render/Threading/SceneSnapshotBuilder.cpp
     # 开关路径的钉子：`HE_DISABLE_THREAD_ASSERT` 必须在包含头文件之前定义，故单独一个 TU。
     TestThreadAffinityDisabled.cpp

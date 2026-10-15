@@ -11,8 +11,10 @@
 #include "SceneRenderer.h"
 #include "Math/Geometry.h"        // he::AABB（从快照的 world AABB 还原）+ Frustum
 #include "Threading/JobSystem.h"
+#include "Threading/ParallelCollect.h"   // 确定性紧凑化（并行标记 + 分块前缀和）
+#include "Threading/CpuSections.h"       // HE_CPU_PASSES：剔除/上传两段的读数
 #include "Core/Log.h"
-#include <mutex>
+// `#include <mutex>` 已移除：确定性写回后不再需要锁（见 Step 1 的说明）
 
 namespace he::render {
 
@@ -26,35 +28,38 @@ std::vector<DrawItem> SceneRenderer::Prepare(const FrameSceneSnapshot& snapshot,
     const u32 total = static_cast<u32>(snapshot.draws.size());
     if (total == 0) return result;
 
-    // ---- Step 1: 并行视锥剔除（世界 AABB 由收集侧算好，见 `CollectObjectItem`）----
+    // ---- Step 1: 并行视锥剔除 + **确定性**紧凑化（世界 AABB 由收集侧算好，见 `CollectObjectItem`）----
+    // 【为什么要确定性】旧写法是"加锁把各 chunk 的本地向量 append 到全局"，输出顺序 = 线程完成序
+    // ⇒ 同一输入两次运行的可见列表顺序都可能不同：下游 TAA / 时域降噪的历史对应被打乱、A/B 读数
+    // 不可重复、MTCR 分块的内容也随之漂移。现改成两步：并行标记（无锁）→ 按下标升序紧凑化。
     Frustum frustum = camera.GetFrustum();
-    std::mutex mtx;
-    std::vector<u32> visibleIdx;
-    visibleIdx.reserve(total);
+    std::vector<u8> hit(total, 0u);
+    std::vector<u32> visibleIdx(total);
+    u32 visibleCount = 0;
 
-    if (enableFrustumCull) {
-        JobSystem::Instance().ParallelForChunked(total, 64, [&](u32 start, u32 end) {
-            std::vector<u32> local;
-            local.reserve(end - start);
-            for (u32 i = start; i < end; ++i) {
-                const SnapshotDrawItem& item = snapshot.draws[i];
-                // GPUObjectData 里的 AABB 是 float4（std430 布局），这里还原成 float3 做盒测试
-                const he::AABB worldBounds{float3(item.object.boundsMin), float3(item.object.boundsMax)};
-                if (!worldBounds.IsValid() || frustum.Intersects(worldBounds))
-                    local.push_back(i);
-            }
-            if (!local.empty()) { std::lock_guard<std::mutex> lk(mtx); visibleIdx.insert(visibleIdx.end(), local.begin(), local.end()); }
-        });
-    } else {
-        for (u32 i = 0; i < total; ++i)
-            visibleIdx.push_back(i);
+    {
+        CpuScope cullScope(CpuSection::Cull);   // 【读数】剔除段 = 标记 + 确定性紧凑化
+        if (enableFrustumCull) {
+            JobSystem::Instance().ParallelForChunked(total, kCollectChunkSize, [&](u32 start, u32 end) {
+                for (u32 i = start; i < end; ++i) {
+                    const SnapshotDrawItem& item = snapshot.draws[i];
+                    // GPUObjectData 里的 AABB 是 float4（std430 布局），这里还原成 float3 做盒测试
+                    const he::AABB worldBounds{float3(item.object.boundsMin), float3(item.object.boundsMax)};
+                    if (!worldBounds.IsValid() || frustum.Intersects(worldBounds)) hit[i] = 1u;
+                }
+            });
+        } else {
+            std::fill(hit.begin(), hit.end(), static_cast<u8>(1u));
+        }
+        visibleCount = CompactHits(hit, visibleIdx);
     }
 
-    u32 visibleCount = static_cast<u32>(visibleIdx.size());
     if (visibleCount == 0) return result;
     if (visibleCount > MAX_OBJECTS) visibleCount = MAX_OBJECTS;
 
     // ---- Step 2: 上传 GPUObjectData + 构建 DrawList ----
+    // 【读数】上传段：Map + 逐条写回 + Unmap（多线程优化方案 §2.3 的目标段）
+    CpuScope uploadScope(CpuSection::Upload);
     auto* objData = static_cast<GPUObjectData*>(objectBuffer->Map());
     if (!objData) return result;      // 映射失败：返回空列表（调用方跳过绘制），不写野指针
     result.reserve(visibleCount);
