@@ -33,8 +33,6 @@
 static int32_t cvDGC_Enable = 0;
 static const char* kCVar_DGC_Enable_Name = "r.DGC.Enable";
 
-// 瞬态资源路径验证开关（0=关闭，1=开启，默认关闭）；同为编译期常量，未注册 CVar
-static int32_t cvTransientTest = 0;
 
 namespace he::render {
 
