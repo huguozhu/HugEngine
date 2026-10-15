@@ -27,3 +27,16 @@ DDGI(diffuse):物理量是探针位置处的入射辐照度,“动态漫反射�
 
 技术名词：
     1. Fibonacci球面:一种在球面上均匀（近似均匀）分布大量点的采样方法。
+	
+	
+	
+技术名词：
+	1. 多线程命令录制MTCR：在子线程把每个Draw命令录制到Secondary Command Buffer（次级命令缓冲）,然后在线程用Primary Command Buffer（主命令缓冲）通过 vkCmdExecuteCommands 调用执行。
+	2. SyncCompute：把"计算不依赖图形、图形也不依赖计算"的阶段（降噪、GPU culling、部分后处理）⇒ 全部塞进图形队列会串行执行(即通过多个CommandList执行整个渲染帧过程)
+		a. 帧图在录制阶段调用它：把可并行的计算 pass 挑出来、在计算队列上单独提交，并与图形队列插信号/等待
+		b. 简单双命令列表方案：
+			- computeCmd: 收集所有可异步执行的 Compute Pass（仅读上帧数据）
+			- mainCmd:   收集所有 Graphics Pass + 不可异步的 Compute Pass
+	3. JobSystem:用于在CPU多线程处理任务，在引擎中用于2种情况：
+		a. SceneRenderer.cpp:36 并行剔除
+		b. ForwardPipeline.cpp:1241 MTCR 派发
