@@ -36,17 +36,6 @@ static const char* kCVar_DGC_Enable_Name = "r.DGC.Enable";
 // 瞬态资源路径验证开关（0=关闭，1=开启，默认关闭）；同为编译期常量，未注册 CVar
 static int32_t cvTransientTest = 0;
 
-// GPL 变体演示开关（0=关闭，1=开启，默认关闭）；同为编译期常量，未注册 CVar
-// 设为 1 重新编译启用：初始化时生成 N 个仅 blend 状态不同的变体 PSO，
-// 经限流器逐帧 fast-link 创建，验证 GPL 四段库缓存与限流协同工作。
-static int32_t cvGPLVariantTest = 0;
-static int32_t cvGPLVariantCount = 16;  // 变体数量 N
-
-// 变体演示用的全屏三角形 VS + 全屏复制 FS（SPIR-V 头内联字节码）
-// 位于全局命名空间，故使用完整限定名 he::rhi::ShaderBytecode
-static he::rhi::ShaderBytecode g_VariantVS;
-static he::rhi::ShaderBytecode g_VariantFS;
-
 namespace he::render {
 
 bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
@@ -460,7 +449,7 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
 
     // ── 全屏拷贝 PSO 共用的 set0 布局 ──
     // FullscreenCopy.frag 在 set0/binding0 声明了 u_InputTex 与 u_InputSampler，
-    // 管线布局必须声明对应的绑定。此前 TransientTest 与 GPL 变体演示两个 PSO 完全没给
+    // 管线布局必须声明对应的绑定。此前 TransientTest 的 PSO 完全没给
     // 描述符集布局 ⇒ 校验层每帧报 VUID-VkGraphicsPipelineCreateInfo-layout-07988。
     rhi::DescriptorSetLayoutHandle fullscreenCopyLayout = rhi::kInvalidLayout;
     {
@@ -504,41 +493,6 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     // 导致 02.Cube 启动随机崩溃。预编译是纯优化（PSO 缓存已按 hash 去重，
     // 禁用后 PSO 仅在首次使用时惰性编译），故本机禁用。稳定驱动上可恢复。
     // device->StartPSOPrecompile();
-
-    // ── GPL 变体演示（cvGPLVariantTest=1 且设备支持 GPL 时启用）──
-    if (cvGPLVariantTest && device->GetCaps().supportsGraphicsPipelineLibrary) {
-        g_VariantVS.stage = rhi::ShaderStage::Vertex;
-        g_VariantVS.spirv = k_Fullscreen_vert_spv;
-        g_VariantFS.stage = rhi::ShaderStage::Pixel;
-        g_VariantFS.spirv = k_FullscreenCopy_frag_spv;
-
-        rhi::PipelineStateDesc base;
-        base.bindPoint        = rhi::PipelineBindPoint::Graphics;
-        base.vertexShader     = &g_VariantVS;
-        base.pixelShader      = &g_VariantFS;
-        base.vertexLayout.stride = 0;              // 全屏三角形（SV_VertexID），无顶点输入
-        base.colorAttachmentCount = 1;
-        base.colorFormats[0]  = rhi::Format::RGBA16_FLOAT;
-        base.depthFormat      = rhi::Format::Unknown;  // 无深度
-        base.depthTest        = false;
-        base.depthWrite       = false;
-        base.sampleCount      = 1;
-        // 与 TransientTest 共用同一份 set0 布局（同为 FullscreenCopy 着色器）
-        if (fullscreenCopyLayout != rhi::kInvalidLayout)
-            base.descriptorSetLayouts = { fullscreenCopyLayout };
-
-        for (int32_t i = 0; i < cvGPLVariantCount; ++i) {
-            // 变体维度：仅 blend 状态不同（改变 fragment-output 段，其余 3 段共享）
-            base.colorBlend[0].blendEnable         = true;
-            base.colorBlend[0].srcColorBlendFactor =
-                static_cast<rhi::BlendFactor>(i % 10);
-            base.colorBlend[0].dstColorBlendFactor =
-                static_cast<rhi::BlendFactor>((i / 10) % 10);
-            device->EnqueuePSOCreate(base);
-        }
-        HE_CORE_INFO("DeferredPipeline: GPL 变体演示 — 已入队 {} 个变体 PSO",
-                     cvGPLVariantCount);
-    }
 
     // ── Nanite 模块（§14.8 任务 1 / N0）──
     // 放在 m_Ready 之前：模块不依赖任何 GI/Lumen/GBuffer 的运行时状态（§14.3 依赖禁令），
@@ -675,7 +629,7 @@ void DeferredPipeline::NextFrame() {
         }
     }
 
-    // PSO 限流器：每帧最多创建 3 个排队 PSO（变体演示 / 未来材质变体系统）
+    // PSO 限流器：每帧最多创建 3 个排队 PSO（供未来材质变体系统与 GPL fast-link 使用）
     static constexpr u32 kMaxPSOCreatesPerFrame = 3;
     if (m_Device->GetPendingPSOCreateCount() > 0) {
         auto created = m_Device->ProcessPSOCreateQueue(kMaxPSOCreatesPerFrame);
