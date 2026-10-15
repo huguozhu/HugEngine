@@ -194,7 +194,12 @@ VulkanCommandList::~VulkanCommandList() {
 // ============================================================
 
 void VulkanCommandList::BeginSecondary(IRHIPipelineState* pso) {
-    HE_ASSERT_RENDER_THREAD();   // T0.1：录制（含 worker 的 secondary）只允许在拥有线程上发起
+    // 【MTCR】这里是**唯一**允许非拥有线程发起的录制入口：次级列表按设计由 JobSystem worker
+    // 独占（每条列表自带 VkCommandPool 与 3 个 sec CB，同一时刻只有一条线程录它），故改用两级
+    // 归属里的"录制者"断言 —— worker 必须在任务体开头构造 `rhi::SecondaryRecordScope` 才放行。
+    // 提交侧（Submit / Present / AcquireNextImage / 主列表 Begin-End / 设备销毁）仍只有拥有线程，
+    // 边界见 `RHI/ThreadAffinity.h` 文件头。
+    HE_ASSERT_RECORD_THREAD();
     u32 idx = m_SecSlot % kMaxSecondaryCBs;
 
     auto* vkPSO = static_cast<VulkanPipelineState*>(pso);
@@ -288,11 +293,13 @@ void VulkanCommandList::BeginLightweight() {
 }
 
 void VulkanCommandList::End() {
-    HE_ASSERT_RENDER_THREAD();   // T0.1：录制结束（与 Begin 配对，同样受归属约束）
+    // 次级列表走 MTCR 的"录制者"断言（与 BeginSecondary 配对）；主列表仍是拥有线程独占。
     if (m_SecondaryPool) {
+        HE_ASSERT_RECORD_THREAD();
         vkEndCommandBuffer(m_SecCmdBuffers[m_SecActive]);
         ++m_SecSlot;
     } else {
+        HE_ASSERT_RENDER_THREAD();   // T0.1：录制结束（与 Begin 配对，同样受归属约束）
         vkEndCommandBuffer(m_CmdBuffers[m_FrameIndex]);
     }
     m_IsRecording = false;
