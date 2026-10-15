@@ -54,6 +54,30 @@ public:
     template<typename T>
     void ForEach(std::function<void(Entity, T&)> callback);
 
+    // ---- 只读分块访问（并行遍历专用，多线程渲染优化方案 §2.2）----
+    // 【为什么不复用 `ForEach`】`ForEach` 内部的 `GetBucket()` 在桶缺失时会**插入**新桶（非只读 ✗），
+    // 而且回调顺序即遍历顺序、无法分块。并行收集需要"按索引随机访问 + 绝不写入 World"，故另开
+    // 这两个 const 接口：**不插入任何桶**（缺失即返回 0 / nullptr）。
+    // 【只读约定】并行遍历期间调用方**不得写入**组件：既有组件的访问器（`GetBounds`/`GetIndexCount`/…）
+    // 都不是 const 的，把它们改成 const 会外溢到几十个组件类，这里以文档约定代替 const 正确性。
+
+    /// 该类型当前的组件条目数（不含惰性插入）
+    template<typename T>
+    u32 GetComponentCount() const {
+        auto it = m_Store.find(std::type_index(typeid(T)));
+        return (it == m_Store.end()) ? 0u : static_cast<u32>(it->second.size());
+    }
+
+    /// 第 `index` 条的组件指针（越界/无该类型 ⇒ nullptr），并回填其来源实体
+    template<typename T>
+    T* GetComponentAt(u32 index, Entity& outEntity) const {
+        auto it = m_Store.find(std::type_index(typeid(T)));
+        if (it == m_Store.end() || index >= it->second.size()) return nullptr;
+        const ComponentEntry& entry = it->second[index];
+        outEntity = Entity{entry.entityID};
+        return static_cast<T*>(entry.ptr.get());
+    }
+
     usize GetEntityCount() const { return m_Entities.size(); }
 
     /// 查找主相机组件：返回第一个 isMain==true 的 CameraComponent。

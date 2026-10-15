@@ -397,6 +397,12 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
         s.lightOptions.normalizeSpotDirection    = false;
         s.objectOptions.excludeDecals            = false;
         s.buildMaterials                         = true;   // UploadMaterialBindless 读快照
+        // 【诊断】HE_BUILD_PARALLEL_MIN=<n>：覆盖"并行快照构建"的阈值，便于对同一帧做
+        // "并行 vs 串行"的 §11.3 分解读数对比（默认 1024 ⇒ 小场景走串行）。只影响派发阈值。
+        if (const char* minItems = std::getenv("HE_BUILD_PARALLEL_MIN")) {
+            const int v = std::atoi(minItems);
+            if (v >= 0) s.objectOptions.parallelMinItems = static_cast<u32>(v);
+        }
         m_Assembler.Configure(s);
     }
 

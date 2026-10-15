@@ -3,6 +3,9 @@
 #include "Threading/MeshRegistry.h"
 
 #include "Pipeline/PhysicalLight.h"   // KelvinToRGB / kPhysicalLightExposure（纯函数，无 RHI 依赖）
+#include "Threading/CpuSections.h"    // HE_CPU_PASSES 逐项分解（BuildObjects 一列）
+#include "Threading/JobSystem.h"      // §2.2：按组件类型分块并行
+#include "Threading/ParallelCollect.h" // §2.1/§2.2：确定性紧凑化（标记 + 分块前缀和）
 #include "Scene/BillboardComponent.h"
 #include "Scene/CubeComponent.h"
 #include "Scene/DecalComponent.h"
@@ -125,63 +128,142 @@ u32 SceneSnapshotBuilder::BuildLights(he::World& world, he::SceneGraph& sg,
     return static_cast<u32>(out.lights.size());
 }
 
+// ============================================================
+// §2.2 并行快照构建：按组件类型分块并行 + 确定性合并
+//
+// 【为什么要确定性】并行收集若按"块完成序"追加，输出顺序随线程调度变化 ⇒ `objectID`（= 收集序号）
+// 与 `prevWorldMatrix`（按 `objectID` 对齐上一帧）都会漂移，进而打乱 TAA / 运动矢量与下游
+// `meshIndex` 对齐。故走"标记 → 紧凑化 → 按块序合并"，输出与串行遍历**逐元素一致**。
+//
+// 【为什么按类型分别并行】串行遍历的顺序是"类型序（Mesh→Cube→Sphere→…→Skeletal）+ 类型内桶序"。
+// 类型之间是严格串行的（各类型占一段连续下标），只有类型内部可以并行 ⇒ 并行粒度取"一个类型"。
+// ============================================================
+template <typename TComponent, typename MakeMatrixFn>
+void SceneSnapshotBuilder::CollectType(he::World& world, const SceneSnapshotObjectOptions& options,
+                                       MakeMatrixFn&& makeMatrix, bool bInstanced, bool bSkeletal,
+                                       const FrameSceneSnapshot* prev, FrameSceneSnapshot& out) {
+    const u32 count = world.GetComponentCount<TComponent>();
+    if (count == 0u) return;
+
+    // ---- 小规模：串行（并行只在条目多到值得派发时才开；这也是"与旧路径逐元素一致"的基准）----
+    if (count < options.parallelMinItems) {
+        for (u32 i = 0; i < count; ++i) {
+            he::Entity e{};
+            TComponent* comp = world.GetComponentAt<TComponent>(i, e);
+            if (!comp) continue;
+            const u32 id     = static_cast<u32>(out.draws.size());
+            const u32 before = id;
+            CollectObjectItem(e, *comp, makeMatrix(e, *comp), id, prev, out, bInstanced);
+            // 【必须 if constexpr】否则为非骨骼类型（如 MeshComponent）实例化时也会编译这条调用
+            if constexpr (std::is_same_v<TComponent, he::SkeletalMeshComponent>) {
+                if (bSkeletal && out.draws.size() > before) {
+                    AppendSkinMatrices(out.draws.back(), *comp, out);
+                }
+            }
+        }
+        return;
+    }
+
+    // ---- 大规模：① 并行标记"该条目会不会产出" ----
+    // 产出判据与 `CollectObjectItem` 的提前返回**同源**（无索引的组件不进列表）。
+    std::vector<u8> hit(count, 0u);
+    JobSystem::Instance().ParallelForChunked(count, kCollectChunkSize, [&](u32 start, u32 end) {
+        for (u32 i = start; i < end; ++i) {
+            he::Entity e{};
+            TComponent* comp = world.GetComponentAt<TComponent>(i, e);
+            if (comp && comp->GetIndexCount() != 0u) hit[i] = 1u;
+        }
+    });
+
+    // ---- ② 确定性紧凑化：每个产出条目拿到唯一且确定的 rank（= 类型内的最终序号）----
+    std::vector<u32> rank(count);
+    const u32 produced = CompactHits(hit, rank);
+    if (produced == 0u) return;
+
+    // 该类型的条目在全局 `draws` 里的起点（类型之间串行 ⇒ 这个基址在合并完成前不会变）
+    const u32 typeBase = static_cast<u32>(out.draws.size());
+
+    // ---- ③ 并行收集：每条目写**自己的本地缓冲**；objectID 直接给全局值 ----
+    // 给全局值是为了让 `prevWorldMatrix`（按 objectID 对齐上一帧）语义与串行完全一致。
+    const u32 numChunks = (count + kCollectChunkSize - 1u) / kCollectChunkSize;
+    std::vector<ObjectCollectChunk> chunks(numChunks);
+    JobSystem::Instance().ParallelForChunked(count, kCollectChunkSize, [&](u32 start, u32 end) {
+        ObjectCollectChunk& local = chunks[start / kCollectChunkSize];
+        for (u32 i = start; i < end; ++i) {
+            if (hit[i] == 0u) continue;
+            he::Entity e{};
+            TComponent* comp = world.GetComponentAt<TComponent>(i, e);
+            if (!comp) continue;
+            const u32 globalId = typeBase + rank[i];
+            const u32 before   = static_cast<u32>(local.draws.size());
+            CollectObjectItem(e, *comp, makeMatrix(e, *comp), globalId, prev, local, bInstanced);
+            if constexpr (std::is_same_v<TComponent, he::SkeletalMeshComponent>) {
+                if (bSkeletal && local.draws.size() > before) {
+                    AppendSkinMatrices(local.draws.back(), *comp, local);
+                }
+            }
+        }
+    });
+
+    // ---- ④ 按块序（= 桶序）合并 ⇒ 与串行输出逐元素一致 ----
+    out.draws.reserve(out.draws.size() + produced);
+    for (u32 c = 0; c < numChunks; ++c) {
+        ObjectCollectChunk& local = chunks[c];
+        // 蒙皮偏移在本地缓冲里是"块内下标"，合并时平移到全局数组的位置
+        const u32 skinBase = static_cast<u32>(out.skinMatrices.size());
+        for (SnapshotDrawItem& item : local.draws) {
+            if (item.skinMatrixCount > 0u) item.skinMatrixOffset += skinBase;
+            out.draws.push_back(item);   // objectID 已在收集期填成全局值
+        }
+        out.skinMatrices.insert(out.skinMatrices.end(),
+                                local.skinMatrices.begin(), local.skinMatrices.end());
+    }
+}
+
 u32 SceneSnapshotBuilder::BuildObjects(he::World& world, he::SceneGraph& sg, const CameraData& camera,
                                        const SceneSnapshotObjectOptions& options,
                                        const FrameSceneSnapshot* prev, FrameSceneSnapshot& out) {
+    // 【读数】多线程渲染优化方案 §4 要求逐项分解里有一列 BuildObjects（开关 HE_CPU_PASSES）
+    CpuScope buildScope(CpuSection::SnapshotBuild);
     out.draws.clear();
 
     // 与 `GPUScene::Collect` 的**首次全量**分支逐条对齐：组件类型顺序、无索引跳过、
     // 贴花是否排除、广告牌/文字的相机对齐矩阵、世界 AABB、objectID = 收集序号。
     // 【为什么按精确类型遍历】组件存储是 `unordered_map<type_index, bucket>`（见 `Scene/World.h`），
     // `ForEach<T>` 只匹配**精确类型**；因此这里的类型清单必须与旧路径完全一致，否则收集集合会变。
-    const auto addPlain = [&](he::Entity e, auto& comp) {
-        const u32 id = static_cast<u32>(out.draws.size());
-        CollectObjectItem(e, comp, sg.GetWorldMatrix(e), id, prev, out);
-    };
-
+    // 【顺序纪律（§2.2 并行后更要紧）】类型清单与相对顺序决定 `objectID` 的分段 ⇒
+    // 任何插入/删除都必须同时改 `SceneRenderer::Prepare` 的口径说明（那边按同一顺序收集）。
+    const auto plainMatrix = [&](he::Entity e, auto&) { return sg.GetWorldMatrix(e); };
     // 广告牌 / 3D 文字：矩阵对齐相机（每帧随相机变化；这也是"收集必须发生在有相机的帧里"的原因）
-    const auto addBillboard = [&](he::Entity e, auto& comp) {
+    const auto billboardMatrix = [&](he::Entity e, auto& comp) {
         const float4x4 base = sg.GetWorldMatrix(e);
-        const float4x4 wm = BillboardComponent::MakeBillboardMatrix(
+        return BillboardComponent::MakeBillboardMatrix(
             float3(base[3]), camera.forward, camera.up, comp.size);
-        const u32 id = static_cast<u32>(out.draws.size());
-        CollectObjectItem(e, comp, wm, id, prev, out);
     };
 
-    world.ForEach<MeshComponent>([&](he::Entity e, MeshComponent& mc) { addPlain(e, mc); });
-    world.ForEach<CubeComponent>([&](he::Entity e, CubeComponent& cc) { addPlain(e, cc); });
-    world.ForEach<SphereComponent>([&](he::Entity e, SphereComponent& sc) { addPlain(e, sc); });
-    world.ForEach<BillboardComponent>([&](he::Entity e, BillboardComponent& bb) { addBillboard(e, bb); });
-    world.ForEach<TextRenderComponent>([&](he::Entity e, TextRenderComponent& tr) { addBillboard(e, tr); });
+    CollectType<MeshComponent>(world, options, plainMatrix, false, false, prev, out);
+    CollectType<CubeComponent>(world, options, plainMatrix, false, false, prev, out);
+    CollectType<SphereComponent>(world, options, plainMatrix, false, false, prev, out);
+    CollectType<BillboardComponent>(world, options, billboardMatrix, false, false, prev, out);
+    CollectType<TextRenderComponent>(world, options, billboardMatrix, false, false, prev, out);
     if (!options.excludeDecals) {
-        world.ForEach<DecalComponent>([&](he::Entity e, DecalComponent& dc) { addPlain(e, dc); });
+        CollectType<DecalComponent>(world, options, plainMatrix, false, false, prev, out);
     }
     // 样条网格（附录 E / E-4 口径修正）：`SceneRenderer::Prepare` 一直会收集它，而这里原先漏了 ——
     // 两处枚举顺序不一致会让 `objectIndex` 错位（`FillGPUScene` 按顺序对齐），且 GPU 剔除/间接绘制
     // 会漏掉样条网格。**插入位置必须与 `SceneRenderer::Prepare` 一致**：Decal 之后、实例化之前。
-    // 说明：当前样例中没有样条网格，无法做前后对比验证，本修正依据是"两处口径必须一致"这一硬约束。
-    world.ForEach<SplineMeshComponent>([&](he::Entity e, SplineMeshComponent& spl) { addPlain(e, spl); });
+    CollectType<SplineMeshComponent>(world, options, plainMatrix, false, false, prev, out);
     // 实例化网格：只登记对象条目（材质/世界变换），顶点由实例化 Pass 提供 ⇒ bInstanced=true
-    world.ForEach<InstancedMeshComponent>([&](he::Entity e, InstancedMeshComponent& im) {
-        const u32 id = static_cast<u32>(out.draws.size());
-        CollectObjectItem(e, im, sg.GetWorldMatrix(e), id, prev, out, /*bInstanced=*/true);
-    });
-    // 骨骼网格：除对象条目外，还要把**蒙皮矩阵**追加进快照的扁平数组（T1.4）；
-    // 顶点由蒙皮 Pass 提供 ⇒ bInstanced=true
-    world.ForEach<SkeletalMeshComponent>([&](he::Entity e, SkeletalMeshComponent& sm) {
-        const u32 before = static_cast<u32>(out.draws.size());
-        const u32 id     = before;
-        CollectObjectItem(e, sm, sg.GetWorldMatrix(e), id, prev, out, /*bInstanced=*/true);
-        if (out.draws.size() > before) {
-            AppendSkinMatrices(out.draws.back(), sm, out);
-        }
-    });
+    CollectType<InstancedMeshComponent>(world, options, plainMatrix, true, false, prev, out);
+    // 骨骼网格：除对象条目外，还要把**蒙皮矩阵**追加进快照的扁平数组（T1.4）
+    CollectType<SkeletalMeshComponent>(world, options, plainMatrix, true, true, prev, out);
 
     return static_cast<u32>(out.draws.size());
 }
 
+template <typename TSink>
 void SceneSnapshotBuilder::AppendSkinMatrices(SnapshotDrawItem& item, const he::SkeletalMeshComponent& comp,
-                                             FrameSceneSnapshot& out) {
+                                             TSink& out) {
     item.skinMatrixOffset  = static_cast<u32>(out.skinMatrices.size());
     item.skinMatrixCount   = static_cast<u32>(comp.boneMatrices.size());
     // 版本号 + "骨架已加载"标记：前者是渲染侧"要不要重传骨骼 SSBO"的判据，后者是旧骨骼循环
@@ -190,6 +272,14 @@ void SceneSnapshotBuilder::AppendSkinMatrices(SnapshotDrawItem& item, const he::
     item.bHasSkeleton      = (comp.skeleton != nullptr);
     out.skinMatrices.insert(out.skinMatrices.end(), comp.boneMatrices.begin(), comp.boneMatrices.end());
 }
+
+// 定义在本 TU（模板只需在本 TU 内可见），其它 TU 用显式实例化拿到符号：
+//   · `FrameSceneSnapshot` —— 串行路径与单测
+//   · `ObjectCollectChunk` —— 并行路径的每块本地缓冲
+template void SceneSnapshotBuilder::AppendSkinMatrices<FrameSceneSnapshot>(
+    SnapshotDrawItem&, const he::SkeletalMeshComponent&, FrameSceneSnapshot&);
+template void SceneSnapshotBuilder::AppendSkinMatrices<ObjectCollectChunk>(
+    SnapshotDrawItem&, const he::SkeletalMeshComponent&, ObjectCollectChunk&);
 
 PBRMaterial SceneSnapshotBuilder::MakePBRMaterial(const he::MeshComponent& comp) {
     // 【唯一实现】这段映射原先内联在 `SceneRenderer::Prepare` 里（E-3 之前）；抽到这里是为了让

@@ -25,7 +25,9 @@
 #include "Scene/SceneGraph.h"
 #include "Scene/Transform.h"
 #include "Scene/World.h"
+#include "Threading/JobSystem.h"   // §2.2：并行 BuildObjects 用例需要真实的 worker 池
 
+#include <chrono>    // §2.2：串行/并行耗时的读数（只打印，不断言）
 #include <cstring>   // memcmp（实例变换切片的"逐位一致"判据）
 
 #include <doctest/doctest.h>
@@ -598,8 +600,75 @@ TEST_CASE("SceneSnapshotBuilder：实例化/骨骼网格在快照里带 bInstanc
     CHECK(snap2.draws[0].bShadowCaster == false);
 }
 
-TEST_CASE("GPUScene::MakeObjectRecord：与旧 FillObj 逐位一致（迁移钉子）") {
-    // 旧 `FillObj(o, wm, b, idx)` 的逐行转写（`GPUScene.cpp` 里那份已被快照取代）
+// ============================================================
+// 多线程渲染优化方案 §2.2：并行 `BuildObjects`
+//   判据（文档 §4）：① 串行 / 并行结果**逐元素一致** ② 同输入多次并行运行**逐元素一致**
+//   用真实 `BuildObjects`（不是重写的参考实现）+ 阈值开关强制走两条路径，覆盖到
+//   objectID / prevWorldMatrix / 网格类别 / 世界 AABB / bShadowCaster 这些"顺序敏感"的字段。
+// ============================================================
+TEST_CASE("BuildObjects：并行与串行逐元素一致（§2.2 判据）") {
+    constexpr u32 kCount = 2000u;   // 必须大于并行阈值，才会真正走并行分支
+
+    // 【必须初始化 JobSystem】并行分支内部走 `JobSystem::Instance().ParallelForChunked`，
+    // 单测进程里默认没有实例（引擎侧由 Application 初始化）⇒ 不初始化会解引用空单例。
+    struct Guard {
+        Guard()  { JobSystem::Initialize(); }
+        ~Guard() { JobSystem::Shutdown(); }
+    } guard;
+
+    LightWorld lw;
+    for (u32 i = 0; i < kCount; ++i) {
+        const Entity e = lw.AddEntity("c", float3(static_cast<f32>(i % 50u), 0.0f,
+                                                  static_cast<f32>(i / 50u)));
+        lw.world.AddComponent<he::CubeComponent>(e);
+    }
+
+    SceneSnapshotObjectOptions serialOpts;    // 阈值拉到最大 ⇒ 强制串行
+    serialOpts.parallelMinItems = 0xFFFFFFFFu;
+    SceneSnapshotObjectOptions parallelOpts;  // 阈值压到 8 ⇒ 强制并行
+    parallelOpts.parallelMinItems = 8u;
+
+    FrameSceneSnapshot a;
+    FrameSceneSnapshot b;
+    // 顺带记录两条路径的耗时（只打印不断言：绝对量取决于机器与 Debug/Release，断言会变成 CI 抖动源）
+    const auto t0 = std::chrono::steady_clock::now();
+    REQUIRE(SceneSnapshotBuilder::BuildObjects(lw.world, lw.sg, CameraData{}, serialOpts, nullptr, a) == kCount);
+    const auto t1 = std::chrono::steady_clock::now();
+    REQUIRE(SceneSnapshotBuilder::BuildObjects(lw.world, lw.sg, CameraData{}, parallelOpts, nullptr, b) == kCount);
+    const auto t2 = std::chrono::steady_clock::now();
+    const double serialMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    const double parallelMs = std::chrono::duration<double, std::milli>(t2 - t1).count();
+    MESSAGE("BuildObjects " << kCount << " 个立方体：串行 " << serialMs << " ms，并行 " << parallelMs
+            << " ms（加速比 " << (serialMs / parallelMs) << "×，Debug 构建、含首次分配的偏差）");
+
+    for (u32 i = 0; i < kCount; ++i) {
+        const SnapshotDrawItem& x = a.draws[i];
+        const SnapshotDrawItem& y = b.draws[i];
+        REQUIRE(x.objectID == y.objectID);       // objectID = 收集序号（顺序敏感的定案处）
+        CHECK(x.sourceEntity == y.sourceEntity);
+        CHECK(x.meshIndex == y.meshIndex);
+        CHECK(x.meshClass == y.meshClass);
+        CHECK(x.bInstanced == y.bInstanced);
+        CHECK(x.bShadowCaster == y.bShadowCaster);
+        CHECK(std::memcmp(&x.object, &y.object, sizeof(GPUObjectData)) == 0);
+        CHECK(std::memcmp(&x.prevWorldMatrix, &y.prevWorldMatrix, sizeof(float4x4)) == 0);
+    }
+    CHECK(a.skinMatrices.size() == b.skinMatrices.size());
+
+    // 多次并行运行之间也必须逐元素一致（顺序不随线程调度变化）
+    for (int rep = 0; rep < 3; ++rep) {
+        FrameSceneSnapshot c;
+        REQUIRE(SceneSnapshotBuilder::BuildObjects(lw.world, lw.sg, CameraData{}, parallelOpts, nullptr, c) == kCount);
+        REQUIRE(c.draws.size() == b.draws.size());
+        bool same = true;
+        for (usize i = 0; same && i < c.draws.size(); ++i) {
+            same = std::memcmp(&c.draws[i], &b.draws[i], sizeof(SnapshotDrawItem)) == 0;
+        }
+        CHECK(same);
+    }
+}
+
+TEST_CASE("GPUScene::MakeObjectRecord：与旧 FillObj 逐位一致（迁移钉子）") {    // 旧 `FillObj(o, wm, b, idx)` 的逐行转写（`GPUScene.cpp` 里那份已被快照取代）
     auto fillObjReference = [](GPUSceneObject& o, const float4x4& wm, const he::AABB& b, u32 idx) {
         o.localToWorld = wm;
         o.boundsMin = float4(b.min, 0);

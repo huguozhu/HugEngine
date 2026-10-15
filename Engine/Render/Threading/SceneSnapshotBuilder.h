@@ -79,6 +79,19 @@ struct SceneSnapshotObjectOptions {
     /// 是否排除贴花（Deferred 用 `DecalPass` 把贴花投影进 GBuffer ⇒ 它不进场景物体列表；
     /// 其它管线按组件收集）。默认 false = 包含。
     bool excludeDecals = false;
+    /// 单个组件类型**低于该条目数就走串行**（小场景并行反而更慢：任务派发 + 等待 > 收益）。
+    /// 与 `Threading/ParallelCollect.h` 的 `kCollectMinParallelItems` 同值；测试会把它设成 0
+    /// 以强制走并行路径，用来验证"串行 / 并行结果逐元素一致"。
+    u32 parallelMinItems = 1024;
+};
+
+/// 分块并行收集的**本地缓冲**：只含 `CollectObjectItem` / `AppendSkinMatrices` 真正写到的两个数组。
+/// 【为什么不用 `FrameSceneSnapshot`】它带有十几个数组与指针，按块建立代价过高；这里用 duck typing
+/// （两个模板函数都只要求 `draws` 与 `skinMatrices` 两个成员）⇒ 串行路径传 `FrameSceneSnapshot`、
+/// 并行路径传本结构，走的是**同一份映射代码**（口径不会漂移）。
+struct ObjectCollectChunk {
+    std::vector<SnapshotDrawItem> draws;
+    std::vector<float4x4>         skinMatrices;
 };
 
 class SceneSnapshotBuilder {
@@ -104,10 +117,10 @@ public:
     /// @param objectID    收集序号（= 在 `out.draws` 里的下标，与旧路径一致）
     /// @param prev        上一帧快照（可为空）：用于取 `prevWorldMatrix`（TAA/运动矢量需要）
     /// @param bInstanced  实例化/骨骼网格（顶点由专用路径提供，普通绘制循环跳过）
-    template <typename TComponent>
+    template <typename TComponent, typename TSink>
     static void CollectObjectItem(he::Entity entity, TComponent& comp, const float4x4& worldMatrix,
                                   u32 objectID, const FrameSceneSnapshot* prev,
-                                  FrameSceneSnapshot& out, bool bInstanced = false) {
+                                  TSink& out, bool bInstanced = false) {
         if (comp.GetIndexCount() == 0u) return;      // 旧路径：无索引的组件不进场景物体列表
 
         SnapshotDrawItem item{};
@@ -187,6 +200,17 @@ public:
                             const SceneSnapshotObjectOptions& options,
                             const FrameSceneSnapshot* prev, FrameSceneSnapshot& out);
 
+    // ── 物体收集的内部骨架（多线程渲染优化方案 §2.2）────────────────
+
+    /// 收集**单一组件类型**的全部条目：按桶下标并行分块、每块写自己的本地缓冲，最后按**块序**
+    /// （= 桶序）确定性合并 ⇒ 输出顺序与串行遍历逐元素一致（小规模直接走串行，见 options）。
+    /// @param makeMatrix 由调用方给出该类型的"世界矩阵怎么算"（普通 = `sg.GetWorldMatrix(e)`；
+    ///                   广告牌/文字 = 对齐相机；两者之外还有 bInstanced / bSkeletal 两种收尾）
+    template <typename TComponent, typename MakeMatrixFn>
+    static void CollectType(he::World& world, const SceneSnapshotObjectOptions& options,
+                            MakeMatrixFn&& makeMatrix, bool bInstanced, bool bSkeletal,
+                            const FrameSceneSnapshot* prev, FrameSceneSnapshot& out);
+
     // ── 蒙皮（T1.4：骨骼矩阵）────────────────────────────────────
 
     /// 把骨骼网格的**蒙皮矩阵**追加到快照的扁平数组，并给该 draw item 记下切片。
@@ -194,8 +218,10 @@ public:
     /// 需要的形态）；渲染侧因此不必再遍历组件去取它。
     /// 【为什么单列一个函数】`CollectObjectItem` 是"单组件 → 单条目"的纯映射，而蒙皮要写**共享的**
     /// 扁平数组、还要回填条目的切片 ⇒ 分成两步，且这一步可以单独单测（不需要网格索引数据）。
+    /// 【sink 是模板】串行路径写 `FrameSceneSnapshot`、并行路径写 `ObjectCollectChunk`（见上）。
+    template <typename TSink>
     static void AppendSkinMatrices(SnapshotDrawItem& item, const he::SkeletalMeshComponent& comp,
-                                   FrameSceneSnapshot& out);
+                                   TSink& out);
 
     // ── 材质映射（E-3）────────────────────────────────────────────
 
