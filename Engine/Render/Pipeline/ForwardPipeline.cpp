@@ -28,6 +28,7 @@ he::CVar<bool> cvLightPhysicalUnits("r.Light.PhysicalUnits", false,
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include "Threading/JobSystem.h"
+#include "RHI/ThreadAffinity.h"   // MTCR：worker 录制次级命令缓冲需声明录制者角色（两级归属）
 #include "PBR.vert.spv.h"
 #include "PBR.frag.spv.h"
 #include "GBuffer.mesh.spv.h"
@@ -1207,6 +1208,11 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
         tasks.reserve(numThreads);
         for (u32 t = 0; t < numThreads; ++t) {
             tasks.push_back([&, t]() {
+                // 【MTCR 两级归属】worker 必须先声明"我是次级命令缓冲录制者"：`BeginSecondary`
+                // 与 `End` 上的是 HE_ASSERT_RECORD_THREAD（允许拥有线程或已声明的录制者），
+                // 不声明的线程照样命中断言。作用域结束自动撤销，worker 被复用时不残留角色。
+                rhi::SecondaryRecordScope recordScope;
+
                 u32 start = t * chunkSize;
                 u32 end   = std::min(start + chunkSize, totalDraws);
                 if (start >= end) return;
