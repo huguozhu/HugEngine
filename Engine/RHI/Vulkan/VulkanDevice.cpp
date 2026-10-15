@@ -144,6 +144,10 @@ void VulkanDevice::FindQueueFamilies() {
 // 调用点写法完全不变（`device->GetCaps().supportsX` / `auto caps = device->GetCaps();` 都可用 ✓）。
 const DeviceCaps& VulkanDevice::GetCaps() const {
     if (!m_CapsCacheValid) {
+        // 正常情况下 Initialize 末尾已固化（见 VulkanDevice.cpp 的步骤 12）⇒ 走不到这里。
+        // 走到这里说明有人把某个能力探测挪到了初始化之后 ✗：先给出明确告警（含一次查询结果），
+        // 再把快照钉住 —— 至少让这种"晚到"不再静默 ✗。
+        HE_CORE_WARN("GetCaps(): 设备能力快照在初始化之后才首次填充 —— 请检查是否有能力探测被挪晚 ✗");
         m_CapsCache      = QueryCaps();
         m_CapsCacheValid = true;
     }
@@ -161,7 +165,7 @@ DeviceCaps VulkanDevice::QueryCaps() const {
     caps.maxSamplerAnisotropy = static_cast<u32>(props.limits.maxSamplerAnisotropy);
 
     // Ray Tracing
-    caps.supportsRayTracing       = m_SupportsRT;
+    caps.supportsRayTracing       = m_CapsCache.supportsRayTracing;
     caps.supportsVRS              = false;
     caps.maxRayRecursionDepth     = m_MaxRayRecursionDepth;
     caps.shaderGroupHandleSize    = m_ShaderGroupHandleSize;
@@ -173,7 +177,7 @@ DeviceCaps VulkanDevice::QueryCaps() const {
     caps.minASScratchAlignment    = m_MinASScratchAlignment;
 
     // Mesh Shader
-    caps.supportsMeshShaders        = m_SupportsMesh;
+    caps.supportsMeshShaders        = m_CapsCache.supportsMeshShaders;
     caps.maxMeshWorkGroupInvocations = m_MaxMeshWorkGroupInvocations;
     caps.maxMeshOutputVertices       = m_MaxMeshOutputVertices;
     caps.maxMeshOutputPrimitives     = m_MaxMeshOutputPrimitives;
@@ -191,10 +195,10 @@ DeviceCaps VulkanDevice::QueryCaps() const {
         : 0u;
 
     // DGC
-    caps.supportsDGC = m_SupportsDGC;
+    caps.supportsDGC = m_CapsCache.supportsDGC;
 
     // GPL（VK_EXT_graphics_pipeline_library fast-link）
-    caps.supportsGraphicsPipelineLibrary = m_SupportsGPL;
+    caps.supportsGraphicsPipelineLibrary = m_CapsCache.supportsGraphicsPipelineLibrary;
 
     return caps;
 }
@@ -328,6 +332,20 @@ void VulkanDevice::Initialize(const DeviceInitDesc& desc) {
 
     // 11. 初始化 PipelineLibraryCache（GPL 四段库缓存）
     m_PipelineLibraryCache.Initialize(m_Device, m_PipelineCache, &m_DeferredDestroy);
+
+    // 12. 固化设备能力快照（GetCaps 的缓存）
+    //
+    // 【为什么必须在这里显式填】`GetCaps()` 已改为"首次调用时缓存、之后只返回引用"——
+    // 若缓存被**过早**填充（早于上面任一能力探测 ✗），就会把探测前的默认值固化下来，
+    // 而且**再也不会更新**（静默失效，比慢更难查 ✗）。故在初始化**末尾**（所有探测都已完成）
+    // 主动固化一次，此后 `GetCaps()` 是纯返回、且不存在过期窗口 ✓。
+    // 探测点分布在 CreateLogicalDevice / VulkanDevice_GPL.cpp / VulkanDevice_MeshShader.cpp /
+    // VulkanRT.cpp，全部在本次调用之前完成 ✓。
+    m_CapsCache      = QueryCaps();
+    m_CapsCacheValid = true;
+    HE_CORE_INFO("设备能力已固化（GetCaps 缓存生效）：RT={} MeshShader={} GPL={} DGC={}",
+                 m_CapsCache.supportsRayTracing ? 1 : 0, m_CapsCache.supportsMeshShaders ? 1 : 0, m_CapsCache.supportsGraphicsPipelineLibrary ? 1 : 0,
+                 m_CapsCache.supportsDGC ? 1 : 0);
 
     HE_CORE_INFO("Vulkan device fully initialized");
 }
@@ -490,7 +508,7 @@ void VulkanDevice::CreateLogicalDevice() {
     posFetchFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_POSITION_FETCH_FEATURES_KHR;
     posFetchFeature.rayTracingPositionFetch = VK_TRUE;
 
-    if (m_SupportsRT) {
+    if (m_CapsCache.supportsRayTracing) {
         deviceExtensions.push_back(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
         deviceExtensions.push_back(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
         deviceExtensions.push_back(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
@@ -508,7 +526,7 @@ void VulkanDevice::CreateLogicalDevice() {
     meshFeature.taskShader = VK_TRUE;
     meshFeature.meshShader = VK_TRUE;
 
-    if (m_SupportsMesh) {
+    if (m_CapsCache.supportsMeshShaders) {
         deviceExtensions.push_back(VK_EXT_MESH_SHADER_EXTENSION_NAME);
         HE_CORE_INFO("Mesh Shader 扩展已启用: VK_EXT_mesh_shader");
     }
@@ -547,7 +565,7 @@ void VulkanDevice::CreateLogicalDevice() {
     dgcFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_GENERATED_COMMANDS_FEATURES_EXT;
     dgcFeature.deviceGeneratedCommands = VK_TRUE;
 
-    if (m_SupportsDGC) {
+    if (m_CapsCache.supportsDGC) {
         // VK_EXT_device_generated_commands **要求**同时启用 VK_KHR_maintenance5
         // （此前只推了自己 → vkCreateDevice 报
         //   VUID-vkCreateDevice-ppEnabledExtensionNames-01387：缺少依赖扩展）
@@ -561,7 +579,7 @@ void VulkanDevice::CreateLogicalDevice() {
     gplFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT;
     gplFeature.graphicsPipelineLibrary = VK_TRUE;
 
-    if (m_SupportsGPL) {
+    if (m_CapsCache.supportsGraphicsPipelineLibrary) {
         deviceExtensions.push_back(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);      // 依赖扩展
         deviceExtensions.push_back(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);
         HE_CORE_INFO("Graphics Pipeline Library 扩展已启用");
@@ -654,14 +672,14 @@ void VulkanDevice::CreateLogicalDevice() {
     void** ppNext = &vulkan11Features.pNext;
     *ppNext = &vulkan12Features; ppNext = &vulkan12Features.pNext;
     *ppNext = &vulkan13Features; ppNext = &vulkan13Features.pNext;
-    if (m_SupportsRT) {
+    if (m_CapsCache.supportsRayTracing) {
         *ppNext = &asFeature; ppNext = &asFeature.pNext;
         *ppNext = &rtPipelineFeature; ppNext = &rtPipelineFeature.pNext;
         if (m_SupportsRTPositionFetch) {
             *ppNext = &posFetchFeature; ppNext = &posFetchFeature.pNext;
         }
     }
-    if (m_SupportsMesh) {
+    if (m_CapsCache.supportsMeshShaders) {
         *ppNext = &meshFeature; ppNext = &meshFeature.pNext;
     }
     // Compute Shader Derivatives（粒子系统 SSAO 等 Compute Shader 中使用 ddx/ddy）
@@ -685,7 +703,7 @@ void VulkanDevice::CreateLogicalDevice() {
         }
     }
 
-    if (m_SupportsDGC) {
+    if (m_CapsCache.supportsDGC) {
         *ppNext = &dgcFeature; ppNext = &dgcFeature.pNext;
     }
     if (m_SupportsMaintenance7) {
@@ -694,7 +712,7 @@ void VulkanDevice::CreateLogicalDevice() {
     if (m_SupportsVertexAttributeRobustness) {
         *ppNext = &vertexAttrRobustnessFeature; ppNext = &vertexAttrRobustnessFeature.pNext;
     }
-    if (m_SupportsGPL) {
+    if (m_CapsCache.supportsGraphicsPipelineLibrary) {
         *ppNext = &gplFeature; ppNext = &gplFeature.pNext;
     }
     if (hasDerivatives) {
@@ -1018,7 +1036,7 @@ float VulkanDevice::GetTimestampPeriod() {
 // ============================================================
 
 bool VulkanDevice::InitializeDGC(IRHIPipelineState* pso, u32 maxSequences, u32 maxDraws) {
-    if (!m_SupportsDGC || !pso) return false;
+    if (!m_CapsCache.supportsDGC || !pso) return false;
     auto* vkPSO = static_cast<VulkanPipelineState*>(pso);
     return m_DGC.Initialize(m_Device, m_Physical, vkPSO->GetPipeline(),
                             maxSequences, maxDraws, m_DGCFuncs);

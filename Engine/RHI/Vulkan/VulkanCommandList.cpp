@@ -442,7 +442,7 @@ void VulkanCommandList::DrawIndexedIndirectCount(rhi::IRHIBuffer* buffer, u64 of
 // ============================================================
 void VulkanCommandList::ExecuteGeneratedCommands(const DGCExecuteDesc& desc) {
     EmitDrawLabel();  // 自动插入 DrawCall 级调试 marker（若已设置）
-    if (!m_VulkanDevice || !m_VulkanDevice->SupportsDGC()) {
+    if (!m_VulkanDevice || !m_VulkanDevice->GetCaps().supportsDGC) {
         HE_CORE_WARN("ExecuteGeneratedCommands: 设备不支持 DGC");
         return;
     }

@@ -732,7 +732,7 @@ std::unique_ptr<IRHIPipelineState> CreateVulkanPipeline(
     // ── GPL fast-link 分支（支持 GPL 时优先；任一段创建或 link 失败则回退单片路径）──
     // INDIRECT_BINDABLE（DGC 执行集的 initialPipeline）不走 GPL：该标志只能经
     // VkPipelineCreateFlags2CreateInfo 传给 vkCreateGraphicsPipelines，而 GPL link 路径不接受它。
-    if (!desc.indirectBindable && vulkanDevice && vulkanDevice->SupportsGraphicsPipelineLibrary()) {
+    if (!desc.indirectBindable && vulkanDevice && vulkanDevice->GetCaps().supportsGraphicsPipelineLibrary) {
         u64 hVI = HashPipelinePart(desc, PipelinePartKind::VertexInput);
         u64 hPR = HashPipelinePart(desc, PipelinePartKind::PreRaster);
         u64 hFS = HashPipelinePart(desc, PipelinePartKind::FragmentShader);

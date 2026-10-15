@@ -15,7 +15,7 @@
 namespace he::rhi {
 
 void VulkanDevice::QueryGPLCapabilities() {
-    m_SupportsGPL = false;
+    m_CapsCache.supportsGraphicsPipelineLibrary = false;
     m_SupportsGPLFastLinking = false;
 
     // 1. 检查设备扩展是否可用
@@ -47,7 +47,7 @@ void VulkanDevice::QueryGPLCapabilities() {
         HE_CORE_INFO("Graphics Pipeline Library: feature 不可用");
         return;
     }
-    m_SupportsGPL = true;
+    m_CapsCache.supportsGraphicsPipelineLibrary = true;
 
     // 3. 查询 properties（graphicsPipelineLibraryFastLinking 在 Properties 结构）
     VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT gplProps{};

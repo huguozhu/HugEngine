@@ -107,7 +107,7 @@ VulkanRTPipelineState::~VulkanRTPipelineState() {
 // VulkanDevice::LoadRTFunctions — 加载 RT 扩展函数指针
 // ============================================================
 void VulkanDevice::LoadRTFunctions() {
-    if (!m_SupportsRT) return;
+    if (!m_CapsCache.supportsRayTracing) return;
 
     m_RT.createAS              = reinterpret_cast<PFN_vkCreateAccelerationStructureKHR>(
         vkGetDeviceProcAddr(m_Device, "vkCreateAccelerationStructureKHR"));
@@ -208,8 +208,8 @@ void VulkanDevice::QueryRTCapabilities() {
                      m_SupportsVertexAttributeRobustness);
     }
 
-    m_SupportsRT = hasAS && hasRTP;
-    if (!m_SupportsRT) {
+    m_CapsCache.supportsRayTracing = hasAS && hasRTP;
+    if (!m_CapsCache.supportsRayTracing) {
         HE_CORE_INFO("Ray Tracing: 不支持（缺少 VK_KHR_acceleration_structure 或 VK_KHR_ray_tracing_pipeline）");
         return;
     }
@@ -253,7 +253,7 @@ void VulkanDevice::QueryRTCapabilities() {
 // ============================================================
 std::unique_ptr<IRHIAccelerationStructure>
 VulkanDevice::CreateBLAS(const BLASBuildDesc& desc) {
-    if (!m_SupportsRT) {
+    if (!m_CapsCache.supportsRayTracing) {
         HE_CORE_ERROR("CreateBLAS: 设备不支持 Ray Tracing");
         return nullptr;
     }
@@ -278,7 +278,7 @@ VulkanDevice::CreateBLAS(const BLASBuildDesc& desc) {
 // ============================================================
 std::unique_ptr<IRHIAccelerationStructure>
 VulkanDevice::CreateTLAS(const TLASBuildDesc& desc) {
-    if (!m_SupportsRT) {
+    if (!m_CapsCache.supportsRayTracing) {
         HE_CORE_ERROR("CreateTLAS: 设备不支持 Ray Tracing");
         return nullptr;
     }
@@ -300,7 +300,7 @@ VulkanDevice::CreateTLAS(const TLASBuildDesc& desc) {
 // VulkanDevice::GetBLASBuildSizes
 // ============================================================
 ASBuildSizes VulkanDevice::GetBLASBuildSizes(const BLASBuildDesc& desc) {
-    if (!m_SupportsRT || !m_RT.getASBuildSizes) return ASBuildSizes{};
+    if (!m_CapsCache.supportsRayTracing || !m_RT.getASBuildSizes) return ASBuildSizes{};
 
     std::vector<VkAccelerationStructureGeometryKHR> vkGeometries;
     std::vector<u32> maxPrimCounts;
@@ -343,7 +343,7 @@ ASBuildSizes VulkanDevice::GetBLASBuildSizes(const BLASBuildDesc& desc) {
 // VulkanDevice::GetTLASBuildSizes
 // ============================================================
 ASBuildSizes VulkanDevice::GetTLASBuildSizes(u32 maxInstanceCount) {
-    if (!m_SupportsRT || !m_RT.getASBuildSizes) return ASBuildSizes{};
+    if (!m_CapsCache.supportsRayTracing || !m_RT.getASBuildSizes) return ASBuildSizes{};
 
     VkAccelerationStructureGeometryKHR tlasGeo{};
     tlasGeo.sType        = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
@@ -379,7 +379,7 @@ ASBuildSizes VulkanDevice::GetTLASBuildSizes(u32 maxInstanceCount) {
 // ============================================================
 std::unique_ptr<IRHIRayTracingPipelineState>
 VulkanDevice::CreateRTPipelineState(const RTPipelineStateDesc& desc) {
-    if (!m_SupportsRT || !m_RT.createRTPipelines) {
+    if (!m_CapsCache.supportsRayTracing || !m_RT.createRTPipelines) {
         HE_CORE_ERROR("CreateRTPipelineState: 设备不支持 Ray Tracing");
         return nullptr;
     }

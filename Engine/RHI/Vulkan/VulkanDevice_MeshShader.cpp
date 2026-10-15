@@ -36,8 +36,8 @@ void VulkanDevice::QueryMeshCapabilities() {
         }
     }
 
-    m_SupportsMesh = hasMesh;
-    if (!m_SupportsMesh) {
+    m_CapsCache.supportsMeshShaders = hasMesh;
+    if (!m_CapsCache.supportsMeshShaders) {
         HE_CORE_INFO("Mesh Shader: 不支持（缺少 VK_EXT_mesh_shader）");
         return;
     }
@@ -75,7 +75,7 @@ void VulkanDevice::QueryMeshCapabilities() {
 // ============================================================
 
 void VulkanDevice::LoadMeshFunctions() {
-    if (!m_SupportsMesh) return;
+    if (!m_CapsCache.supportsMeshShaders) return;
 
     m_CmdDrawMeshTasks = reinterpret_cast<PFN_vkCmdDrawMeshTasksEXT>(
         vkGetDeviceProcAddr(m_Device, "vkCmdDrawMeshTasksEXT"));
@@ -97,8 +97,8 @@ void VulkanDevice::LoadMeshFunctions() {
 // ============================================================
 
 void VulkanDevice::QueryDGCCapabilities() {
-    m_SupportsDGC = VulkanDGC::IsSupported(m_Physical);
-    if (!m_SupportsDGC) {
+    m_CapsCache.supportsDGC = VulkanDGC::IsSupported(m_Physical);
+    if (!m_CapsCache.supportsDGC) {
         HE_CORE_INFO("Device Generated Commands: 不支持（缺少 VK_EXT_device_generated_commands）");
         return;
     }
@@ -125,7 +125,7 @@ void VulkanDevice::QueryDGCCapabilities() {
 }
 
 void VulkanDevice::LoadDGCFunctions() {
-    if (!m_SupportsDGC) return;
+    if (!m_CapsCache.supportsDGC) return;
 
     m_DGCFuncs.vkCreateIndirectCommandsLayoutEXT =
         reinterpret_cast<PFN_vkCreateIndirectCommandsLayoutEXT>(
