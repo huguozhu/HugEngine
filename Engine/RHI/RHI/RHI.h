@@ -37,7 +37,9 @@ public:
     virtual void Shutdown();
 
     virtual Backend    GetBackend() const = 0;
-    virtual DeviceCaps GetCaps()    const = 0;
+    /// 设备能力查询。**返回只读引用**：实现方须在内部缓存一次结果（原先按值返回 ⇒
+    /// 每次调用都拷贝整个结构体；Vulkan 实现里还会重复驱动查询）。
+    virtual const DeviceCaps& GetCaps() const = 0;
 
     // --- 格式能力查询（§14.8 任务 18 新增；最小扩展，性质同任务 3/6/12 的 RHI 补充）---
     // 该格式能否作为**存储图像**（UAV / `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT`）被着色器读写。

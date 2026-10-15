@@ -135,7 +135,23 @@ void VulkanDevice::FindQueueFamilies() {
 // ============================================================
 // GetCaps — 查询设备能力
 // ============================================================
-DeviceCaps VulkanDevice::GetCaps() const {
+// GetCaps — 返回**缓存**的设备能力
+//
+// 【为什么缓存】原先这个函数每次都执行一遍完整查询：内部会调用
+// `vkGetPhysicalDeviceProperties`（驱动查询 ✗）并按值返回整个 `DeviceCaps`（拷贝 ✗），
+// 而全引擎有 20+ 个调用点（渲染管线门控、Nanite、RTPass、编辑器等）。
+// 设备能力在创建后不再变化 ⇒ 只查询一次、之后返回只读引用。
+// 调用点写法完全不变（`device->GetCaps().supportsX` / `auto caps = device->GetCaps();` 都可用 ✓）。
+const DeviceCaps& VulkanDevice::GetCaps() const {
+    if (!m_CapsCacheValid) {
+        m_CapsCache      = QueryCaps();
+        m_CapsCacheValid = true;
+    }
+    return m_CapsCache;
+}
+
+// QueryCaps — 原先的 GetCaps 实现（逐项查询；只在首次 GetCaps 时执行一次）
+DeviceCaps VulkanDevice::QueryCaps() const {
     DeviceCaps caps;
     caps.maxBindlessResources = kDefaultMaxBindlessResources;  // 引擎默认 Bindless 上限
     caps.maxPushConstantsSize = kMaxPushConstantSize;  // 引擎全局 Push Constant 上限

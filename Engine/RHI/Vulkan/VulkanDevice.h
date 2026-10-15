@@ -49,7 +49,13 @@ class VulkanDevice final : public IRHIDevice {
 public:
     ~VulkanDevice() override;
     Backend    GetBackend() const override { return Backend::Vulkan; }
-    DeviceCaps GetCaps()    const override;
+    const DeviceCaps& GetCaps() const override;
+    // ── GetCaps 的缓存（实现细节）──
+    // 能力在设备创建后不再变化，故只查询一次；`QueryCaps()` 是原先的查询实现。
+    // 【线程安全】只在设备初始化完成前（单线程阶段）可能首次填充 ✓。
+    DeviceCaps QueryCaps() const;
+    mutable DeviceCaps m_CapsCache{};
+    mutable bool       m_CapsCacheValid = false;
 
     // 【§14.8 任务 18】该格式能否作为**存储图像**（UAV）。实现 = `vkGetPhysicalDeviceFormatProperties`
     //   查 `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT`；查询结果按格式缓存（见 .cpp 的成员）。
