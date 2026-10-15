@@ -28,6 +28,7 @@ he::CVar<bool> cvLightPhysicalUnits("r.Light.PhysicalUnits", false,
 #include "Core/Log.h"
 #include "Core/Assert.h"
 #include "Threading/JobSystem.h"
+#include "Threading/CpuSections.h"   // HE_CPU_PASSES：逐项 CPU 分解（MTCR / 录制总计）
 #include "RHI/ThreadAffinity.h"   // MTCR：worker 录制次级命令缓冲需声明录制者角色（两级归属）
 #include "PBR.vert.spv.h"
 #include "PBR.frag.spv.h"
@@ -539,6 +540,8 @@ void ForwardPipeline::Shutdown() {
 }
 
 void ForwardPipeline::NextFrame() {
+    // 【读数】帧边界：攒够 120 帧打印一次 CPU 分解（HE_CPU_PASSES=1）
+    CpuSections::Frame();
     // 【T2.4 步骤 (b)】推进快照槽位：命令载荷指向的快照在其被消费完之前不会被复用
     m_SnapshotSlot = (m_SnapshotSlot + 1u) % MAX_FRAMES_IN_FLIGHT;
     m_Assembler.Bind(&SnapBuf(), &m_MeshRegistry);
@@ -890,6 +893,7 @@ void ForwardPipeline::FillGIBlendUBO() {
 void ForwardPipeline::Render(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snapshot,
                               const CameraData& camera, float deltaTime)
 {
+    CpuScope recordScope(CpuSection::RecordTotal);   // 【读数】整帧 CPU 录制总时长
     // 【阶段 1 §15.1 第③段：帧入口收快照】
     // 本函数与其全部 helper **不再读世界**：渲染输入（物体/实例/蒙皮/光源/天空盒/材质）都来自
     // 参数快照，而快照由样例在游戏线程经 `GetFrameAssembler().AssembleScene(...)` 装配
@@ -1212,6 +1216,7 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
     // 录制绘制命令（ForwardPipeline 特有：PBR PSO + bindless 描述符集）
     // ============================================================
     if (m_MultiThreadRecord && !m_SecRecordLists.empty() && totalDraws > 0) {
+        CpuScope mtcrScope(CpuSection::Mtcr);   // 【读数】并行录制 + 次级命令缓冲执行
         u32 numThreads = std::min((u32)m_SecRecordLists.size(), totalDraws);
         u32 chunkSize  = (totalDraws + numThreads - 1) / numThreads;
 
