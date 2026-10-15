@@ -23,7 +23,9 @@ JobSystem::JobSystem(u32 threadCount)
     // 争抢（轻度过订阅）。故预留 2 个逻辑核给这两条；`max(1, …)` 保证 ≤2 逻辑核的机器仍有 1 个
     // worker（此时无法预留，属硬件限制）。
     : m_ThreadCount(threadCount > 0 ? threadCount
-                                    : std::max(1u, std::thread::hardware_concurrency() - 2u)) {
+                                    : std::max(1u, (std::thread::hardware_concurrency() > 2u)
+                                                       ? (std::thread::hardware_concurrency() - 2u)
+                                                       : 1u)) {
     m_Taskflow = std::make_unique<tf::Taskflow>("HugEngine");
     m_Executor = std::make_unique<tf::Executor>(m_ThreadCount);
 
