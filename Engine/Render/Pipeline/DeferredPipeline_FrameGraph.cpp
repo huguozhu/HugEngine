@@ -34,9 +34,6 @@
 // 注意：`constexpr` ⇒ 编译期常量，未注册 CVar，控制台改不了；要切换请改初值重编译。
 constexpr bool kDGCEnable = false;
 
-// CVar: 瞬态资源路径验证开关（与 DeferredPipeline.cpp 中同步）
-static const char* kDGCEnableName = "r.DGC.Enable";
-
 // CVar: GBuffer 投影贴花开关（任务 24，默认开启）。
 // 关闭后 Deferred 路径不再绘制贴花（贴花卡片已从 GBuffer 排除，见 DeferredPipeline::Initialize），
 // 想要对比"投射片 vs 投影"可以切到 Forward 路径（Forward 用卡片）。

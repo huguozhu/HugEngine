@@ -34,13 +34,11 @@
 // 默认 false：保留传统 ExecuteIndirect 回退（DGC 属较新扩展，驱动覆盖有限）。
 //
 // 注意：这是 `constexpr` **编译期常量**，未注册 CVar，控制台/配置文件都改不了；
-// 要切换请改这里的初值并重新编译。`kDGCEnableName` 只是日志/诊断用的显示名。
+// 要切换请改这里的初值并重新编译。
 // 设备能力不满足时（`VulkanDGC::IsSupported()` 为假）`InitializeDGC()` 返回 false，
 // 整条 DGC 路径自动跳过（`IsDGCReady()` 为 false），不会出错。
 constexpr bool kDGCEnable = false;
 
-// 仅用于日志/诊断显示的名字（不是 CVar 注册名；本引擎未把它接入 CVar 系统）
-static const char* kDGCEnableName = "r.DGC.Enable";
 
 
 namespace he::render {
