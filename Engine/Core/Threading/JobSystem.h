@@ -24,7 +24,9 @@ public:
 
     // Global singleton
     static JobSystem& Instance();
-    static void Initialize(u32 threadCount = 0);  // 0 = auto-detect
+    /// 初始化单例。`threadCount = 0`（默认）= **自动**：按 CPU 支持的逻辑核数
+    /// （`std::thread::hardware_concurrency()`，下限 1）。显式传值仅供工具/测试使用。
+    static void Initialize(u32 threadCount = 0);
     static void Shutdown();
 
     // --- Fire-and-forget ---

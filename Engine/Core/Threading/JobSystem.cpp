@@ -10,11 +10,20 @@ namespace he {
 std::unique_ptr<JobSystem> JobSystem::s_Instance;
 
 JobSystem::JobSystem()
-    : JobSystem(std::thread::hardware_concurrency()) {
+    : JobSystem(0) {
 }
 
 JobSystem::JobSystem(u32 threadCount)
-    : m_ThreadCount(threadCount > 0 ? threadCount : 1) {
+    // threadCount == 0（默认）⇒ 自动：取设备 CPU 支持的逻辑核数（下限 1）。
+    // 【为什么不再由 EngineConfig 指定】原先 `EngineConfig::jobThreads` 默认 8，与机器的实际
+    // 核数无关：核少的机器过订阅、核多的机器用不满；而头文件里 `Initialize(0)` 号称
+    // "auto-detect"，实现却把它当成 **1 线程**（口径不一致）。现在只有一条规则：按 CPU 支持
+    // 的核数派生；需要特殊线程数的工具/测试仍可显式传值。
+    // 【为什么 -2】引擎还有**主线程**与**渲染线程**两条常驻线程：worker 取满全部逻辑核会与它们
+    // 争抢（轻度过订阅）。故预留 2 个逻辑核给这两条；`max(1, …)` 保证 ≤2 逻辑核的机器仍有 1 个
+    // worker（此时无法预留，属硬件限制）。
+    : m_ThreadCount(threadCount > 0 ? threadCount
+                                    : std::max(1u, std::thread::hardware_concurrency() - 2u)) {
     m_Taskflow = std::make_unique<tf::Taskflow>("HugEngine");
     m_Executor = std::make_unique<tf::Executor>(m_ThreadCount);
 

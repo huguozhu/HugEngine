@@ -58,7 +58,9 @@ void Engine::Initialize() {
     }
 
     // 3. Job system
-    JobSystem::Initialize(m_Config.jobThreads);
+    // 线程数不再由配置决定：JobSystem 内部按 CPU 支持的逻辑核数推导
+    // （std::thread::hardware_concurrency，见 JobSystem::JobSystem(u32)）
+    JobSystem::Initialize();
 
     // 4. Window
     WindowDesc wdesc;
