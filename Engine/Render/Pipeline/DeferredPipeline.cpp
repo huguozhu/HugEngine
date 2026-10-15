@@ -456,7 +456,11 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     m_ParticleRenderer.Initialize(device);
     m_ParticleRenderer.SetSceneDepth(m_Lighting.GetHDRDepth(), m_Lighting.GetPointSampler());  // 软粒子深度纹理
 
-    // 启动 PSO 后台预热（所有子系统已调用 PrecompileQueuePSO 注册 PSO 变体）
+    // 启动 PSO 后台预热（目前**只有 SSAO** 调用了 PrecompileQueuePSO 注册变体：
+    // SSAO.cpp:144/167/196 的三个变体；原文写"所有子系统已调用"与事实不符，故改准）
+    // 另注：worker 用 setLayoutCount = 0 建简化管线，与真实（带描述符布局的）PSO 不会命中同一
+    // 缓存条目 ⇒ 即便恢复本调用，对真实管线的预热收益也有限（详见
+    // docs/HugEngine引擎介绍/15.多线程架构与渲染实现分析.md 的 §7.1）
     // 注意：本机（Intel Arc B370 + 该版驱动）预编译 worker 线程会在
     // igc-default64.dll 内随机 SIGSEGV（约 50% 概率，见 gdb 栈：线程 27 编译器崩溃），
     // 导致 02.Cube 启动随机崩溃。预编译是纯优化（PSO 缓存已按 hash 去重，
