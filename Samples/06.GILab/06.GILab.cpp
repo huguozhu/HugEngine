@@ -910,31 +910,49 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
     // 【模式 2】RHI 线程（三线程形态）：渲染线程的 Submit/Present 被路由到它，由它真正提交/呈现
     he::render::RHIThread rhiThread;
     // 【统一切换入口】`mode` 为下拉选择的目标模式；`forceShell` 仅用于对照实验（强制壳模式）
+    // 【为什么按"先停后起、停 RHI 先于渲染、起渲染先于 RHI"】任意两种模式之间切换都必须走这条路：
+    //   · 停：RHI 线程先排空（它可能持有未提交的命令），否则渲染线程退出时还有路由在飞；
+    //   · 起：渲染线程先起来（录制者），RHI 线程随后装路由（提交者）—— 反过来会让首帧的提交
+    //     先路由到一个还没起来的线程（`RouteSubmit` 会退回就地执行，虽不丢命令但语义不清）。
     auto applyThreadingMode = [&](he::RenderThreadingMode mode) {
-        const bool wantThread = (mode != he::RenderThreadingMode::SingleThreaded) && !forceShell;
+        const bool wantRender = (mode != he::RenderThreadingMode::SingleThreaded) && !forceShell;
         const bool wantRhi    = (mode == he::RenderThreadingMode::RenderThreadAndRHI) && !forceShell;
-        if (wantThread && !renderThread.IsRunning()) {
+
+        // ① 先改模式（线程启停期间日志/`UsesRenderThread()` 与目标一致）
+        he::SetRenderThreadingMode(mode);
+        useRenderQueue = he::UsesRenderThread();
+
+        // ② 【切模式前必须等渲染队列排空】命令 2 是"只发布不等待"（`submitRender(..., false)`）⇒
+        // 上一帧可能还在渲染线程上执行（正在 Acquire/Present）。此时停线程或换路由会让呈现落到
+        // 错误的线程上（实测切换瞬间命中 VUID-vkAcquireNextImageKHR-semaphore-01286 / -surface-07783）。
+        while (renderQueue.InFlightFrameCount() > 0u) {
+            std::this_thread::yield();   // 帧在飞数极小（≤ kMaxFramesInFlight），短自旋足够
+        }
+
+        // ③ 停：RHI 线程 → 渲染线程
+        if (rhiThread.IsRunning() && !wantRhi) rhiThread.Stop();
+        if (renderThread.IsRunning() && !wantRender) {
+            renderThread.Stop();   // Stop 会排空队列并触发停止钩子（撤销 RHI 归属）
+            HE_CORE_INFO("06.GILab：已停渲染线程（模式 = {}；帧渲染回到游戏线程）",
+                         he::RenderThreadingModeName(mode));
+        }
+
+        // ③ 起：渲染线程 → RHI 线程
+        if (wantRender && !renderThread.IsRunning()) {
             renderThread.SetSpinWaitUs(50);
             // RHI 归属：启动时认领给渲染线程、停止时撤销（认领必须在新线程里做 ⇒ 走启动钩子）
             renderThread.SetThreadStartHook([] { he::rhi::GetThreadAffinity().Claim(); });
             renderThread.SetThreadStopHook([] { he::rhi::GetThreadAffinity().Release(); });
             renderThread.Start();
             HE_CORE_INFO("06.GILab：已起真渲染线程（模式 = {}；录制归它）", he::RenderThreadingModeName(mode));
-        } else if (!wantThread && renderThread.IsRunning()) {
-            // 先停 RHI 线程（排空提交）再停渲染线程：避免渲染线程退出过程中还有路由在飞
-            if (rhiThread.IsRunning()) rhiThread.Stop();
-            // Stop 会排空队列并触发停止钩子（撤销归属）；顺序很关键：先停线程再改模式
-            renderThread.Stop();
-            HE_CORE_INFO("06.GILab：已停渲染线程（模式 = {}；帧渲染回到游戏线程）", he::RenderThreadingModeName(mode));
         }
-        // 模式 2：RHI 线程接管 Submit/Present（唯一提交者）；必须在渲染线程起来之后再装路由
         if (wantRhi && !rhiThread.IsRunning()) {
-            rhiThread.Start(device.get());
-        } else if (!wantRhi && rhiThread.IsRunning()) {
-            rhiThread.Stop();
+            rhiThread.Start(device.get());   // 内部装路由：此后 Submit/Present 走 RHI 线程
         }
-        he::SetRenderThreadingMode(mode);
-        useRenderQueue = he::UsesRenderThread();
+        HE_CORE_INFO("06.GILab：线程模式已生效 = {}（渲染线程 {} / RHI 线程 {}）",
+                     he::RenderThreadingModeName(mode),
+                     renderThread.IsRunning() ? "on" : "off",
+                     rhiThread.IsRunning() ? "on" : "off");
     };
     applyThreadingMode(he::GetRenderThreadingMode());   // 启动时按配置/环境变量生效一次
 
@@ -949,6 +967,19 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
         engine.GetWindow()->PollEvents();
 
         // 【帧首落地】下拉选择与当前生效模式不一致时，在这里统一切换（下一帧命令即按新模式走）
+        // 【自动化验证钩子】`HE_THREADING_MODE_CYCLE=<N>`：每 N 帧按 0→1→2→0 轮换一次模式，
+        // 用来在无人值守下验证"三种模式任意切换"（默认关 ⇒ 不影响正常使用）。
+        if (const char* cycleEnv = std::getenv("HE_THREADING_MODE_CYCLE")) {
+            const int period = std::max(1, std::atoi(cycleEnv));
+            if (frameIndex % (u64)period == 0ull && frameIndex > 0ull) {
+                static u64 s_LastCycleFrame = ~0ull;
+                if (s_LastCycleFrame != frameIndex) {
+                    s_LastCycleFrame = frameIndex;
+                    g_UiThreadingMode = (g_UiThreadingMode + 1) % 3;
+                    HE_CORE_INFO("06.GILab：[自动轮换] 第 {} 帧切到模式 {}", frameIndex, g_UiThreadingMode);
+                }
+            }
+        }
         if (g_UiThreadingMode != static_cast<int>(he::GetRenderThreadingMode())) {
             applyThreadingMode(static_cast<he::RenderThreadingMode>(g_UiThreadingMode));
         }
@@ -1174,13 +1205,14 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
             static const char* kModeItems[] = {
                 "0  单线程（收集/录制/提交/呈现都在游戏线程）",
                 "1  游戏线程 + 渲染线程（整帧 RHI 归渲染线程）",
+                "2  游戏线程 + 渲染线程 + RHI 线程（RHI 线程 = 唯一提交者）",
             };
             int sel = g_UiThreadingMode;
             ImGui::SetNextItemWidth(360.0f);
             if (ImGui::Combo("渲染线程模式##threading", &sel, kModeItems, IM_ARRAYSIZE(kModeItems))) {
-                g_UiThreadingMode = sel;   // 帧首统一生效（切换需要排空并停/起渲染线程）
+                g_UiThreadingMode = sel;   // 帧首统一生效（切换需要排空并停/起线程）
             }
-            ImGui::TextDisabled("当前生效：%s；模式 2（+RHI 线程）未实现；切换在下一帧帧首生效",
+            ImGui::TextDisabled("当前生效：%s；三种模式可任意切换，切换在下一帧帧首生效",
                                 he::RenderThreadingModeName(he::GetRenderThreadingMode()));
         }
 
