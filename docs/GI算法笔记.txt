@@ -40,3 +40,4 @@ DDGI(diffuse):物理量是探针位置处的入射辐照度,“动态漫反射�
 	3. JobSystem:用于在CPU多线程处理任务，在引擎中用于2种情况：
 		a. SceneRenderer.cpp:36 并行剔除
 		b. ForwardPipeline.cpp:1241 MTCR 派发
+	4. PSO 预编译 worker
