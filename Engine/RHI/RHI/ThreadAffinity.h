@@ -53,7 +53,10 @@ public:
     }
 
     /// 释放：注销拥有线程（设备销毁处调用）。释放后断言重新回到"永不触发"。
-    void Release() { m_Claimed.store(false, std::memory_order_release); }
+    void Release() {
+        m_Claimed.store(false, std::memory_order_release);
+        m_SubmitterSet.store(false, std::memory_order_release);
+    }
 
     [[nodiscard]] bool IsClaimed() const { return m_Claimed.load(std::memory_order_acquire); }
 
@@ -61,6 +64,28 @@ public:
     [[nodiscard]] bool IsOwner() const {
         if (!m_Claimed.load(std::memory_order_acquire)) return true;
         return m_Owner.load(std::memory_order_acquire) == std::this_thread::get_id();
+    }
+
+    // --- 提交者角色（**模式 2 / 三线程**：RHI 线程是唯一提交者）---
+    // 【为什么单独一个角色而不是把拥有权搬过去】模式 2 里两根线程都要"碰 RHI"，但入口不同：
+    //   渲染线程 = 录制（Begin/End/BeginRenderPass/Draw…）+ 资源创建 ⇒ 仍是 **owner**；
+    //   RHI 线程 = Submit / Present / fence 等待 ⇒ 只需要 **submitter**。
+    // 把拥有权整体搬走会让录制断言全线误报，所以按"能力"拆角色，而不是按"线程"搬所有权。
+
+    /// 把当前线程登记为**提交者**（模式 2 起 RHI 线程在自己线程入口调用一次）
+    void SetSubmitter() {
+        m_Submitter.store(std::this_thread::get_id(), std::memory_order_release);
+        m_SubmitterSet.store(true, std::memory_order_release);
+    }
+    /// 注销提交者角色（RHI 线程退出时调用）
+    void ClearSubmitter() { m_SubmitterSet.store(false, std::memory_order_release); }
+    [[nodiscard]] bool HasSubmitter() const { return m_SubmitterSet.load(std::memory_order_acquire); }
+    /// 当前线程是否有权提交/呈现：拥有线程（模式 0/1）**或**已登记的提交者线程（模式 2）
+    [[nodiscard]] bool IsSubmitter() const {
+        if (!m_Claimed.load(std::memory_order_acquire)) return true;   // 未 Claim 不设限
+        if (m_Owner.load(std::memory_order_acquire) == std::this_thread::get_id()) return true;
+        if (!m_SubmitterSet.load(std::memory_order_acquire)) return false;
+        return m_Submitter.load(std::memory_order_acquire) == std::this_thread::get_id();
     }
 
     // --- 录制者角色（次级命令缓冲，MTCR 专用）---
@@ -83,7 +108,9 @@ private:
     }
 
     std::atomic<std::thread::id> m_Owner{};
+    std::atomic<std::thread::id> m_Submitter{};
     std::atomic<bool>            m_Claimed{false};
+    std::atomic<bool>            m_SubmitterSet{false};
 };
 
 /// 进程级唯一实例（函数内静态：C++11 起初始化线程安全，无需在初始化顺序上操心）
@@ -117,6 +144,7 @@ public:
 #ifdef HE_DISABLE_THREAD_ASSERT
     #define HE_ASSERT_RENDER_THREAD() ((void)0)
     #define HE_ASSERT_RECORD_THREAD() ((void)0)
+    #define HE_ASSERT_SUBMIT_THREAD() ((void)0)
 #else
     #define HE_ASSERT_RENDER_THREAD()                                                      \
         do {                                                                               \
@@ -135,6 +163,16 @@ public:
                 !::he::rhi::GetThreadAffinity().IsRecorder()) {                            \
                 ::he::AssertFailure("HE_ASSERT_RECORD_THREAD", __FILE__, __LINE__,         \
                                     "次级命令缓冲录制必须在拥有线程或已声明的录制者线程上发起"); \
+            }                                                                              \
+        } while (0)
+
+    // 提交/呈现专用（**模式 2**：RHI 线程是唯一提交者）：拥有线程，或已登记的提交者线程。
+    // 模式 0/1 下没有提交者角色 ⇒ 退化成"只有拥有线程"，与改造前完全一致 ✓
+    #define HE_ASSERT_SUBMIT_THREAD()                                                      \
+        do {                                                                               \
+            if (!::he::rhi::GetThreadAffinity().IsSubmitter()) {                           \
+                ::he::AssertFailure("HE_ASSERT_SUBMIT_THREAD", __FILE__, __LINE__,         \
+                                    "Submit/Present 必须在拥有线程或已登记的提交者线程上调用"); \
             }                                                                              \
         } while (0)
 #endif

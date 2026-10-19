@@ -29,6 +29,9 @@ public:
     u32  GetHeight() const override { return m_Height; }
     bool AcquireNextImage() override;
     void Present(bool vsync) override;
+    /// 【绕过路由】真正呈现（模式 2 由 RHI 线程经 `IRHIDevice::ExecutePresent` 调用）。
+    /// imageIndex / waitSemaphore 由渲染线程在 `Present` 时捕获 —— RHI 线程不再读交换链状态。
+    void PresentNow(u32 imageIndex, void* waitSemaphore, bool vsync);
 
     VkSwapchainKHR GetHandle()                const { return m_Swapchain; }
     VkFormat       GetVkFormat()              const { return m_Format; }

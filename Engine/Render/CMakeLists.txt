@@ -237,6 +237,9 @@ set(RENDER_SOURCES
     Threading/RenderCommandQueue.cpp
     Threading/RenderThread.h
     Threading/RenderThread.cpp
+    # 模式 2（三线程）：RHI 线程 = 唯一提交者（ISubmitRouter 实现 + 线程本体）
+    Threading/RHIThread.h
+    Threading/RHIThread.cpp
 )
 
 target_sources(HugEngineRender PRIVATE ${RENDER_SOURCES})

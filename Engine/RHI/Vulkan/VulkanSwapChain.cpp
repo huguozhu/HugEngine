@@ -3,6 +3,7 @@
 // 负责 SwapChain 创建/销毁、窗口缩放、图像获取与呈现
 // ============================================================
 #include "VulkanSwapChain.h"
+#include "RHI/RHI.h"                    // he::rhi::GetDevice()：查询提交路由（模式 2）
 #include "RHI/TextureLayoutTracker.h"   // 呈现后记录 PRESENT_SRC 布局（见 Present）
 #include "RHI/ThreadAffinity.h"         // T0.1：交换链操作只允许在拥有线程（渲染线程）
 #include "Core/Log.h"
@@ -229,6 +230,13 @@ void VulkanSwapChain::Resize(u32 width, u32 height) {
 }
 
 bool VulkanSwapChain::AcquireNextImage() {
+    // 【模式 2 / A-4】acquire 之前先把 RHI 线程上排队的提交/呈现**排空**：
+    // 图像复用判定与 acquire 槽位记账都建立在"上一帧的 present 已真正执行"之上，而模式 2 里
+    // present 是异步的 ⇒ 不排空就会在 present 尚未落地时复用 acquire 信号量/图像（实测命中
+    // VUID-vkAcquireNextImageKHR-semaphore-01779 / -01286 / -surface-07783）。
+    if (auto* dev = he::rhi::GetDevice(); dev != nullptr) {
+        if (auto* router = dev->GetSubmitRouter(); router != nullptr) router->FlushAndWait();
+    }
     HE_ASSERT_RENDER_THREAD();   // T0.1：交换链图像获取只允许在拥有线程（渲染线程）
 
     // 窗口最小化时跳过图像获取
@@ -261,17 +269,33 @@ bool VulkanSwapChain::AcquireNextImage() {
     return result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR;
 }
 
-void VulkanSwapChain::Present(bool /*vsync*/) {
-    HE_ASSERT_RENDER_THREAD();   // T0.1：呈现只允许在拥有线程（渲染线程）
+void VulkanSwapChain::Present(bool vsync) {
+    // 参数必须在**渲染线程**上捕获（见 SubmitRouter.h 的说明）
+    const u32         imageIndex = m_CurrentImage;
+    const VkSemaphore waitSem    = GetRenderCompleteSemaphore();
+    // 模式 2：交给提交路由（RHI 线程稍后呈现）；未注入路由时与改造前完全一致
+    if (auto* dev = he::rhi::GetDevice(); dev != nullptr) {
+        if (auto* router = dev->GetSubmitRouter();
+            router != nullptr && router->RoutePresent(this, imageIndex,
+                                                      reinterpret_cast<void*>(waitSem), vsync))
+            return;
+    }
+    PresentNow(imageIndex, reinterpret_cast<void*>(waitSem), vsync);
+}
 
-    // 用"当前图像自己的" render-complete 信号量：同一图像再次被 acquire 蕴含上次 present
+void VulkanSwapChain::PresentNow(u32 imageIndex, void* waitSemaphore, bool /*vsync*/) {
+    // 拥有线程（模式 0/1）或已登记的提交者（模式 2 的 RHI 线程）
+    HE_ASSERT_SUBMIT_THREAD();
+    if (imageIndex >= m_ImageViews.size()) return;
+
+    // 用"该图像自己的" render-complete 信号量：同一图像再次被 acquire 蕴含上次 present
     // 已完成，因此不会出现"信号量仍有未完成操作"（详见头文件成员注释）
-    VkSemaphore waitSem = GetRenderCompleteSemaphore();
+    VkSemaphore waitSem = reinterpret_cast<VkSemaphore>(waitSemaphore);
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     presentInfo.swapchainCount  = 1;
     presentInfo.pSwapchains     = &m_Swapchain;
-    presentInfo.pImageIndices   = &m_CurrentImage;
+    presentInfo.pImageIndices   = &imageIndex;
     presentInfo.waitSemaphoreCount = waitSem ? 1u : 0u;
     presentInfo.pWaitSemaphores    = waitSem ? &waitSem : nullptr;
 
@@ -281,9 +305,8 @@ void VulkanSwapChain::Present(bool /*vsync*/) {
     // 否则下一帧 RenderGraph 对导入的后备缓冲会沿用上一帧记录的"颜色附件"状态
     // 去发 barrier，而图像实际停在 PRESENT_SRC —— 校验层每帧报一次
     // VUID-VkImageMemoryBarrier-oldLayout-01197。
-    if ((presentResult == VK_SUCCESS || presentResult == VK_SUBOPTIMAL_KHR)
-        && m_CurrentImage < m_ImageViews.size()) {
-        TrackTextureLayout(reinterpret_cast<void*>(m_ImageViews[m_CurrentImage]),
+    if (presentResult == VK_SUCCESS || presentResult == VK_SUBOPTIMAL_KHR) {
+        TrackTextureLayout(reinterpret_cast<void*>(m_ImageViews[imageIndex]),
                            ResourceState::Present);
     }
 }

@@ -102,6 +102,13 @@ public:
     void WaitIdle() override;
     void Submit(IRHICommandList* cmdList) override;
 
+    // --- 提交路由（模式 2：RHI 线程是唯一提交者，见 RHI/SubmitRouter.h）---
+    void SetSubmitRouter(ISubmitRouter* router) override;
+    ISubmitRouter* GetSubmitRouter() const override { return m_SubmitRouter; }
+    void ExecuteSubmit(IRHICommandList* cmdList) override;      // 仅 RHI 线程
+    void ExecutePresent(IRHISwapChain* swapChain, u32 imageIndex, void* waitSemaphore,
+                        bool vsync) override;   // 仅 RHI 线程
+
     // 多队列支持
     bool HasAsyncComputeQueue() const override;
     u32  GetQueueFamily(QueueType queue) const override;
@@ -302,6 +309,8 @@ private:
     VkInstance       m_Instance       = VK_NULL_HANDLE;
     VkPhysicalDevice m_Physical        = VK_NULL_HANDLE;
     VkDevice         m_Device          = VK_NULL_HANDLE;
+    /// 提交路由（模式 2）：非空时 `Submit`/`Present` 交给它，由 RHI 线程真正提交（见 SubmitRouter.h）
+    ISubmitRouter*   m_SubmitRouter    = nullptr;
     VkPipelineCache  m_PipelineCache   = VK_NULL_HANDLE;  // 持久化 PSO 编译缓存（磁盘 + GPU 驱动）
 
     // ============================================================

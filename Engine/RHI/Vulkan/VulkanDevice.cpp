@@ -873,13 +873,38 @@ std::unique_ptr<IRHICommandList> VulkanDevice::CreateSecondaryCommandList() {
 // 队列管理
 // ============================================================
 void VulkanDevice::WaitIdle() {
+    // 【模式 2】**必须先把提交路由排空**：`vkDeviceWaitIdle` 只等"已提交到队列"的工作，
+    // 而模式 2 里已录制、尚在 RHI 线程队列中**还没提交**的命令不会被它覆盖 ⇒ 读回 /
+    // CopyTextureToBuffer 会读到只写了一半的资源（实测症状：HDR 转储里一条 52 行的带子整段为 0，
+    // 其余 19 个目标全对）。放在这里而不是各调用点：WaitIdle 的语义本就是"已入队工作全部落地"。
+    if (m_SubmitRouter) m_SubmitRouter->FlushAndWait();
     if (m_Device) vkDeviceWaitIdle(m_Device);
 }
 
 void VulkanDevice::Submit(IRHICommandList* cmdList) {
-    HE_ASSERT_RENDER_THREAD();   // T0.1：提交只允许在拥有线程（渲染线程）
+    HE_ASSERT_RENDER_THREAD();   // T0.1：提交只允许在拥有线程（渲染线程）发起
+    // 模式 2：交给提交路由（RHI 线程稍后执行）；未注入路由时行为与改造前完全一致
+    if (m_SubmitRouter && m_SubmitRouter->RouteSubmit(cmdList)) return;
     auto* vulkanCmd = static_cast<VulkanCommandList*>(cmdList);
     vulkanCmd->Submit();
+}
+
+void VulkanDevice::SetSubmitRouter(ISubmitRouter* router) {
+    m_SubmitRouter = router;
+}
+
+void VulkanDevice::ExecuteSubmit(IRHICommandList* cmdList) {
+    // 【仅 RHI 线程】路由器在 RHI 线程上调用：绕过路由、真正 vkQueueSubmit
+    HE_ASSERT_SUBMIT_THREAD();
+    if (!cmdList) return;
+    static_cast<VulkanCommandList*>(cmdList)->Submit();
+}
+
+void VulkanDevice::ExecutePresent(IRHISwapChain* swapChain, u32 imageIndex, void* waitSemaphore,
+                                  bool vsync) {
+    HE_ASSERT_SUBMIT_THREAD();
+    if (!swapChain) return;
+    static_cast<VulkanSwapChain*>(swapChain)->PresentNow(imageIndex, waitSemaphore, vsync);
 }
 
 bool VulkanDevice::HasAsyncComputeQueue() const {
@@ -1004,7 +1029,12 @@ void VulkanDevice::WaitFenceOnQueue(QueueType queue, RHIFenceHandle fence, u64 v
 }
 
 void VulkanDevice::SubmitAll(Span<IRHICommandList*> cmdLists) {
-    HE_ASSERT_RENDER_THREAD();   // T0.1：批量提交只允许在拥有线程（渲染线程）
+    HE_ASSERT_RENDER_THREAD();   // T0.1：批量提交只允许在拥有线程（渲染线程）发起
+    // 模式 2：逐个交给提交路由（保持原顺序；RHI 线程按入队顺序执行）
+    if (m_SubmitRouter) {
+        for (auto* cl : cmdLists) (void)m_SubmitRouter->RouteSubmit(cl);
+        return;
+    }
     std::vector<VulkanCommandList*> gfxLists, compLists;
     for (auto* cl : cmdLists) {
         auto* vkCl = static_cast<VulkanCommandList*>(cl);

@@ -21,6 +21,7 @@
 // 阶段 0 的壳在**调用线程**上执行（帧序与结果不变），阶段 2 起同一段代码由真线程消费。
 #include "Threading/RenderCommandQueue.h"
 #include "Threading/RenderThread.h"
+#include "Threading/RHIThread.h"      // 模式 2：RHI 线程（唯一提交者）
 #include "Lumen/ScreenProbe.slang"   // 2026-09-24 诊断：探针缓冲落盘需要 sizeof(ScreenProbe)
 #include "Pipeline/CameraController.h"
 #include "Pipeline/PhysicalCamera.h"
@@ -178,7 +179,11 @@ int main() {
     // ImGui 录制 → Submit → 探测读回 → Present）都归渲染线程，游戏线程只做输入/相机/装配快照。
     // 仍可被覆盖：环境变量 `HE_RENDER_THREADING_MODE=0` 可回到单线程（`Engine::Initialize` 里
     // 环境变量优先于本配置，见 Engine.cpp）；`HE_RENDER_THREAD_FORCE_SHELL=1` 可强制壳模式做对照。
-    config.renderThreadingMode = he::RenderThreadingMode::RenderThread;
+    // 【模式 2 默认】**三线程形态**（游戏线程 + 渲染线程 + RHI 线程）：渲染线程只录制，`Submit`/`Present`
+    // 经二级队列交给 RHI 线程（唯一提交者）。判据（2026-10 实测）：模式 0 vs 模式 2 的 20 个 GI 转储
+    // 目标**逐字节一致**、断言 0、VUID 与模式 0 相同（只剩转储装置自身的既有 VUID）、到第 40 帧的墙钟
+    // 9.57 s vs 9.59 s（无退化）。`HE_RENDER_THREADING_MODE=1` 可退回单渲染线程（对照用）。
+    config.renderThreadingMode = he::RenderThreadingMode::RenderThreadAndRHI;
     // 【步骤 37 / L6 帧时判据】vsync 打开时墙钟帧率被锁在刷新率（60Hz），"有没有 60fps"
     // 这件事就没法从帧率上判定。`HE_NO_VSYNC=1` 关掉垂直同步，让墙钟帧率反映真实 GPU 吞吐。
     const bool noVsync = (std::getenv("HE_NO_VSYNC") != nullptr);
@@ -902,20 +907,31 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
     // 判据：模式 0 与模式 1 的转储逐位一致（实测 0 像素）、无归属断言、帧时间不退化。
     // `HE_RENDER_THREAD_FORCE_SHELL=1` 可强制退回壳模式（对照实验用）。
     const bool forceShell = std::getenv("HE_RENDER_THREAD_FORCE_SHELL") != nullptr;
+    // 【模式 2】RHI 线程（三线程形态）：渲染线程的 Submit/Present 被路由到它，由它真正提交/呈现
+    he::render::RHIThread rhiThread;
     // 【统一切换入口】`mode` 为下拉选择的目标模式；`forceShell` 仅用于对照实验（强制壳模式）
     auto applyThreadingMode = [&](he::RenderThreadingMode mode) {
         const bool wantThread = (mode != he::RenderThreadingMode::SingleThreaded) && !forceShell;
+        const bool wantRhi    = (mode == he::RenderThreadingMode::RenderThreadAndRHI) && !forceShell;
         if (wantThread && !renderThread.IsRunning()) {
             renderThread.SetSpinWaitUs(50);
             // RHI 归属：启动时认领给渲染线程、停止时撤销（认领必须在新线程里做 ⇒ 走启动钩子）
             renderThread.SetThreadStartHook([] { he::rhi::GetThreadAffinity().Claim(); });
             renderThread.SetThreadStopHook([] { he::rhi::GetThreadAffinity().Release(); });
             renderThread.Start();
-            HE_CORE_INFO("06.GILab：已起真渲染线程（模式 = {}；整帧 RHI 归它）", he::RenderThreadingModeName(mode));
+            HE_CORE_INFO("06.GILab：已起真渲染线程（模式 = {}；录制归它）", he::RenderThreadingModeName(mode));
         } else if (!wantThread && renderThread.IsRunning()) {
+            // 先停 RHI 线程（排空提交）再停渲染线程：避免渲染线程退出过程中还有路由在飞
+            if (rhiThread.IsRunning()) rhiThread.Stop();
             // Stop 会排空队列并触发停止钩子（撤销归属）；顺序很关键：先停线程再改模式
             renderThread.Stop();
             HE_CORE_INFO("06.GILab：已停渲染线程（模式 = {}；帧渲染回到游戏线程）", he::RenderThreadingModeName(mode));
+        }
+        // 模式 2：RHI 线程接管 Submit/Present（唯一提交者）；必须在渲染线程起来之后再装路由
+        if (wantRhi && !rhiThread.IsRunning()) {
+            rhiThread.Start(device.get());
+        } else if (!wantRhi && rhiThread.IsRunning()) {
+            rhiThread.Stop();
         }
         he::SetRenderThreadingMode(mode);
         useRenderQueue = he::UsesRenderThread();
@@ -2016,6 +2032,9 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
 
     // 【T2.2】退出前先停渲染线程并撤销 RHI 归属认领：收尾期的 `WaitIdle`/设备销毁仍在游戏线程，
     // 而归属已（在严格模式下）认领给渲染线程 ⇒ 不撤销就会撞归属断言。
+    // 【模式 2】**先停 RHI 线程**再停渲染线程：否则渲染线程在收尾期仍可能提交新帧，而 RHI 线程
+    // 还在队列里持有提交 ⇒ 设备销毁时会命中 vkDestroyBuffer/vkDestroyPipeline「资源仍在使用」类 VUID。
+    if (rhiThread.IsRunning()) rhiThread.Stop();
     if (renderThread.IsRunning()) renderThread.Stop();   // 可能已被下拉切回单线程
     he::rhi::GetThreadAffinity().Release();
 

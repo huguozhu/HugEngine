@@ -9,6 +9,7 @@
 #include "RHI/RayTracing.h"
 #include "RHI/MeshShader.h"
 #include "RHI/Bindless.h"
+#include "RHI/SubmitRouter.h"   // 提交路由（模式 2：RHI 线程唯一提交者）
 #include "Core/Types.h"
 
 #include <memory>
@@ -173,6 +174,16 @@ public:
     // --- Commands ---
     virtual void Submit(IRHICommandList* cmdList) = 0;
     virtual void WaitIdle() = 0;
+
+    // === 提交路由（模式 2：RHI 线程是唯一提交者，见 SubmitRouter.h）===
+    // 默认实现 = 不路由（模式 0/1 行为不变）；Vulkan 后端覆写。
+    virtual void SetSubmitRouter(ISubmitRouter* /*router*/) {}
+    virtual ISubmitRouter* GetSubmitRouter() const { return nullptr; }
+    /// 【仅 RHI 线程】绕过路由真正提交（由路由器在 RHI 线程上调用；断言提交者角色）
+    virtual void ExecuteSubmit(IRHICommandList* /*cmdList*/) {}
+    /// 【仅 RHI 线程】绕过路由真正呈现（imageIndex / waitSemaphore 由渲染线程在入队时捕获）
+    virtual void ExecutePresent(IRHISwapChain* /*swapChain*/, u32 /*imageIndex*/,
+                                void* /*waitSemaphore*/, bool /*vsync*/) {}
 
     // === 多队列支持 ===
 

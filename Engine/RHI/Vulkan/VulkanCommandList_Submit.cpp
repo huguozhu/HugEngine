@@ -146,7 +146,8 @@ void VulkanCommandList::SetTimelineWait(RHIFenceHandle fence, u64 value) {
 // ============================================================
 
 void VulkanCommandList::Submit() {
-    HE_ASSERT_RENDER_THREAD();   // T0.1：命令列表提交只允许在拥有线程（渲染线程）
+    // T0.1 + 模式 2：提交只允许在拥有线程（模式 0/1）或已登记的提交者线程（RHI 线程）上发起
+    HE_ASSERT_SUBMIT_THREAD();
 
     // 等待 SwapChain 图像可用
     VkSemaphore waitSem   = VK_NULL_HANDLE;
