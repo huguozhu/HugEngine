@@ -36,7 +36,7 @@ public:
     void SetInputs(rhi::IRHITexture* color, rhi::IRHITexture* depth, rhi::IRHITexture* normal);
 
     /// 【必须在 BeginOffscreenPass 之前调用】绑定本 Pass 的管线（理由同 `Denoiser::PreBind`）
-    void PreBind(rhi::IRHICommandList* cmd) const { if (m_Ready) cmd->SetPipeline(m_PSO.get()); }
+    void PreBind(rhi::IRHICommandList* cmd) const { if (m_Ready) cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO)); }
 
     /// 执行重建升采样（调用方已 BeginOffscreenPass 之后调用）
     void Render(rhi::IRHICommandList* cmd);
@@ -57,11 +57,11 @@ private:
     u32 m_Width = 0, m_Height = 0;
     bool m_Ready = false;
 
-    std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
+    rhi::RHIPipelineStateHandle m_PSO{};   // A-3：句柄持有
     std::unique_ptr<rhi::IRHITexture>       m_Output;
     // 线性采样：2× 升采样时 3×3 源邻域的采样点正好落在源纹素中心，线性=精确取值，
     // 同时对将来非整数倍率（1.5×/低分辨率探针）不会退化成块状复制
-    std::unique_ptr<rhi::IRHISampler>       m_Sampler;
+    rhi::RHISamplerHandle       m_Sampler{};   // A-3：句柄持有
     rhi::DescriptorSetLayoutHandle m_Layout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_Set    = rhi::kInvalidSet;
 

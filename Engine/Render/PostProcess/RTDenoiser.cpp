@@ -109,8 +109,8 @@ void RTDenoiser::CreatePSO() {
     desc.pushConstantRanges  = {pc};
     desc.descriptorSetLayouts = {m_Layout};
     desc.debugName           = m_Cfg.debugName;
-    m_PSO = m_Device->CreatePipelineState(desc);
-    HE_ASSERT(m_PSO, "RTDenoiser PSO 创建失败");
+    m_PSO = m_Device->CreatePipelineStateHandle(desc);
+    HE_ASSERT(m_PSO.IsValid(), "RTDenoiser PSO 创建失败");
 }
 
 // ============================================================
@@ -122,7 +122,7 @@ void RTDenoiser::Shutdown() {
         m_Device->DestroyDescriptorSetLayout(m_Layout);
         m_Layout = rhi::kInvalidLayout;
     }
-    m_PSO.reset();
+    m_Device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};
     m_OwnedHistory.reset();
     m_OwnedOutput.reset();
     m_History = nullptr;   // 池中的纹理由池持有，这里只断开引用
@@ -179,7 +179,7 @@ void RTDenoiser::SetInputs(rhi::IRHITexture* noisyColor, rhi::IRHITexture* depth
 // ============================================================
 void RTDenoiser::PreBind(rhi::IRHICommandList* cmd) {
     if (!m_Ready || !cmd) return;
-    cmd->SetPipeline(m_PSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
     cmd->SetViewport({0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1});
     cmd->SetScissor({0, 0, m_Width, m_Height});
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);

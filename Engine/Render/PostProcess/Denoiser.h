@@ -39,14 +39,14 @@ public:
     u32 GetWidth()  const { return m_Width; }
     u32 GetHeight() const { return m_Height; }
     bool IsReady() const { return m_Ready; }
-    void PreBind(rhi::IRHICommandList* cmd) const { if(m_Ready) cmd->SetPipeline(m_PSO.get()); }
+    void PreBind(rhi::IRHICommandList* cmd) const { if(m_Ready) cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO)); }
 
 private:
     rhi::IRHIDevice* m_Device = nullptr;
     u32 m_Width=0, m_Height=0; bool m_Ready=false;
-    std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
+    rhi::RHIPipelineStateHandle m_PSO{};   // A-3：句柄持有
     std::unique_ptr<rhi::IRHITexture> m_Denoised;
-    std::unique_ptr<rhi::IRHISampler> m_Sampler;
+    rhi::RHISamplerHandle m_Sampler{};   // A-3：句柄持有
     rhi::DescriptorSetLayoutHandle m_Layout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_Set    = rhi::kInvalidSet;
     rhi::IRHITexture* m_Input=nullptr,*m_Depth=nullptr,*m_Normal=nullptr;

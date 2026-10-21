@@ -45,13 +45,13 @@ private:
     void CreatePSOs();
 
     rhi::ShaderBytecode m_VS,m_FS;
-    std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
+    rhi::RHIPipelineStateHandle m_PSO{};   // A-3：句柄持有
     rhi::DescriptorSetLayoutHandle m_DescLayout=rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_DescSet=rhi::kInvalidSet;
 
     // 物理天空（Preetham 解析模型，优先级高于 Cubemap）
     rhi::ShaderBytecode m_PS_FS;
-    std::unique_ptr<rhi::IRHIPipelineState> m_PS_PSO;
+    rhi::RHIPipelineStateHandle m_PS_PSO{};   // A-3：句柄持有
 
     // 天空盒 cubemap（值缓存：只用于"换了一张就更新描述符集"的判据；所有权在资源层）
     const rhi::IRHITexture* m_CachedCubemap = nullptr;

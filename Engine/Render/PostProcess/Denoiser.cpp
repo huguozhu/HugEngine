@@ -37,18 +37,18 @@ bool Denoiser::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     d.colorAttachmentCount=1;
     d.colorFormats[0]=rhi::Format::RGBA16_FLOAT;
     d.descriptorSetLayouts={m_Layout}; d.debugName="Denoise";
-    m_PSO=device->CreatePipelineState(d);
+    m_PSO=device->CreatePipelineStateHandle(d);
 
     rhi::SamplerDesc sd;
     sd.minFilter=sd.magFilter=rhi::FilterMode::Nearest;
     sd.addressU=sd.addressV=rhi::AddressMode::ClampToEdge;
-    m_Sampler=device->CreateSampler(sd);
+    m_Sampler=device->CreateSamplerHandle(sd);
     OnResize(width,height);
     m_Ready=true;
     HE_CORE_INFO("Denoiser initialized");
     return true;
 }
-void Denoiser::Shutdown(){m_PSO.reset();if(m_Device&&m_Layout)m_Device->DestroyDescriptorSetLayout(m_Layout);m_Denoised.reset();m_Sampler.reset();m_Device=nullptr;m_Ready=false;}
+void Denoiser::Shutdown(){m_Device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};if(m_Device&&m_Layout)m_Device->DestroyDescriptorSetLayout(m_Layout);m_Denoised.reset();m_Device->DestroySamplerHandle(m_Sampler); m_Sampler = {};m_Device=nullptr;m_Ready=false;}
 void Denoiser::OnResize(u32 w,u32 h){m_Width=w;m_Height=h;
     rhi::TextureDesc td;
     td.format=rhi::Format::RGBA16_FLOAT;
@@ -63,12 +63,12 @@ void Denoiser::SetInputs(rhi::IRHITexture* color, rhi::IRHITexture* depth, rhi::
     m_Input=color;
     m_Depth=depth;
     m_Normal=normal;
-    if(color) m_Device->UpdateDescriptorSet(m_Set,kDenoiseBindColor,rhi::DescriptorType::CombinedImageSampler,color,m_Sampler.get());
-    if(depth) m_Device->UpdateDescriptorSet(m_Set,kDenoiseBindDepth,rhi::DescriptorType::CombinedImageSampler,depth,m_Sampler.get());
-    if(normal)m_Device->UpdateDescriptorSet(m_Set,kDenoiseBindNormal,rhi::DescriptorType::CombinedImageSampler,normal,m_Sampler.get());
+    if(color) m_Device->UpdateDescriptorSet(m_Set,kDenoiseBindColor,rhi::DescriptorType::CombinedImageSampler,color,m_Device->ResolveSampler(m_Sampler));
+    if(depth) m_Device->UpdateDescriptorSet(m_Set,kDenoiseBindDepth,rhi::DescriptorType::CombinedImageSampler,depth,m_Device->ResolveSampler(m_Sampler));
+    if(normal)m_Device->UpdateDescriptorSet(m_Set,kDenoiseBindNormal,rhi::DescriptorType::CombinedImageSampler,normal,m_Device->ResolveSampler(m_Sampler));
 }
 void Denoiser::Render(rhi::IRHICommandList* cmd){
-    cmd->SetPipeline(m_PSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_Set);
     cmd->SetViewport({0,(float)m_Height,(float)m_Width,-(float)m_Height,0,1}); cmd->SetScissor({0,0,m_Width,m_Height});
     struct{float2 ts; float dS; float nS;}pc;

@@ -61,8 +61,8 @@ void SkyboxPass::CreatePSOs(){
     d.colorLoadOp=m_ColorLoadOp;
     d.depthLoadOp=rhi::LoadOp::Load;  // 保留深度（Deferred 用独立 render pass，depth=Equal 需读 GBuffer 深度）
     d.pushConstantRanges={pcr};d.descriptorSetLayouts={m_DescLayout};d.debugName="Skybox";
-    m_PSO=m_Device->CreatePipelineState(d);
-    HE_ASSERT(m_PSO,"SkyboxPass: PSO failed");
+    m_PSO=m_Device->CreatePipelineStateHandle(d);
+    HE_ASSERT(m_PSO.IsValid(),"SkyboxPass: PSO failed");
 
     // 物理天空 PSO（Preetham 解析模型）
     // push constant 布局：invVP(64) + intensity(4) + pad(12) + sunDir(12) + turbidity/groundAlbedo/sunIntensity/pad(16) = 108，alignas(16) 对齐到 112
@@ -83,8 +83,8 @@ void SkyboxPass::CreatePSOs(){
     d2.colorLoadOp=m_ColorLoadOp;
     d2.depthLoadOp=rhi::LoadOp::Load;  // 保留深度
     d2.pushConstantRanges={pcr2};d2.descriptorSetLayouts={m_DescLayout};d2.debugName="PhysicalSky";
-    m_PS_PSO=m_Device->CreatePipelineState(d2);
-    HE_ASSERT(m_PS_PSO,"SkyboxPass: PhysicalSky PSO failed");
+    m_PS_PSO=m_Device->CreatePipelineStateHandle(d2);
+    HE_ASSERT(m_PS_PSO.IsValid(),"SkyboxPass: PhysicalSky PSO failed");
 }
 
 void SkyboxPass::SetColorLoadOp(rhi::LoadOp op){
@@ -96,13 +96,13 @@ void SkyboxPass::SetColorLoadOp(rhi::LoadOp op){
 void SkyboxPass::PreBind(rhi::IRHICommandList* cmd) const {
     if(!m_Ready)return;
     // 物理天空优先于 Cubemap
-    cmd->SetPipeline(m_PhysSky.enabled ? m_PS_PSO.get() : m_PSO.get());
+    cmd->SetPipeline(m_PhysSky.enabled ? m_Device->ResolvePipelineState(m_PS_PSO) : m_Device->ResolvePipelineState(m_PSO));
 }
 
 void SkyboxPass::Shutdown(){
     if(m_Device&&m_DescLayout!=rhi::kInvalidLayout)m_Device->DestroyDescriptorSetLayout(m_DescLayout);
-    m_PSO.reset();
-    m_PS_PSO.reset();
+    m_Device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};
+    m_Device->DestroyPipelineStateHandle(m_PS_PSO); m_PS_PSO = {};
     m_CachedCubemap=nullptr;
     m_CachedSampler=nullptr;
     m_CachedSkyboxIntensity=0.0f;
@@ -164,7 +164,7 @@ void SkyboxPass::Render(rhi::IRHICommandList* cmd){
         pc.groundAlbedo=m_PhysSky.groundAlbedo;
         pc.sunIntensity=m_PhysSky.sunIntensity;
         pc._pad=0.0f;
-        cmd->SetPipeline(m_PS_PSO.get());
+        cmd->SetPipeline(m_Device->ResolvePipelineState(m_PS_PSO));
         cmd->SetPushConstants(0,sizeof(pc),&pc);
         cmd->Draw(3);
         return;
@@ -174,7 +174,7 @@ void SkyboxPass::Render(rhi::IRHICommandList* cmd){
     pc.invVP=invVP;
     pc.intensity=m_CachedSkyboxIntensity;
 
-    cmd->SetPipeline(m_PSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_DescSet);
     cmd->SetPushConstants(0,96,&pc);
     cmd->Draw(3);

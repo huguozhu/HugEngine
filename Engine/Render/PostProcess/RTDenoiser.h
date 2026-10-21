@@ -97,7 +97,7 @@ private:
     std::unique_ptr<rhi::IRHISampler> m_PointSampler;
 
     // PSO + 描述符
-    std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
+    rhi::RHIPipelineStateHandle m_PSO{};   // A-3：句柄持有
     rhi::DescriptorSetLayoutHandle m_Layout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_Set    = rhi::kInvalidSet;
 
