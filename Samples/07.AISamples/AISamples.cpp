@@ -249,7 +249,7 @@ int main() {
                 frameAborted = true;   // 命令可能在渲染线程跑 ⇒ 用标志代替 while 的 continue
                 return;
             }
-            cmdList->Begin();
+            framePresenter.BeginRecording(device.get(), cmdList.get());   // L4-2
             if (needs3D) {
                 pipeline.Render(cmdList.get(), pipeline.GetFrameSnapshot(), frameCamera);
                 // pass 级调试标记：BackBuffer 合成（ToneMap + ImGui），RenderDoc 可识别
@@ -298,8 +298,7 @@ int main() {
             imgui.EndFrame(cmdList.get());
             cmdList->EndDebugLabel();   // 闭合 BackBuffer pass 级标记
             cmdList->EndRenderPass();
-            cmdList->End();
-            device->Submit(cmdList.get());
+            framePresenter.EndRecording();   // L4-2：End + Submit 收口
             framePresenter.EndFrame(true);
         };
         submitRender(recordUiAndPresent);

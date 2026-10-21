@@ -819,7 +819,7 @@ int main() {
                 deferredPipeline.OnResize(rw, rh);
                 pathTracingPipeline.OnResize(rw, rh);
             }
-            cmdList->Begin();
+            framePresenter.BeginRecording(device.get(), cmdList.get());   // L4-2
             if (g_UseDeferred) {
                 deferredPipeline.NextFrame();
                 deferredPipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, camCtrl.GetCamera());
@@ -1051,9 +1051,7 @@ int main() {
         auto recordUiAndPresent = [&]() {
             imgui.EndFrame(cmdList.get());
             cmdList->EndRenderPass();
-            cmdList->End();
-
-            device->Submit(cmdList.get());
+            framePresenter.EndRecording();   // L4-2：End + Submit 收口
 
             // ── PT 参考图落盘：等 GPU 完成后原样写文件（原始像素、无文件头）──
             if (g_DumpDone && !g_DumpWritten) {

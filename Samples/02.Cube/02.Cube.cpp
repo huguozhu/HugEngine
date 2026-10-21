@@ -1289,7 +1289,7 @@ int main() {
                 deferredPipeline.OnResize(rw, rh);
                 pathTracingPipeline.OnResize(rw, rh);
             }
-            cmdList->Begin();
+            framePresenter.BeginRecording(device.get(), cmdList.get());   // L4-2
 
             // --- Forward 模式 ---
             if (cvPipelineMode.Get() == 0) {
@@ -1759,9 +1759,7 @@ int main() {
             imgui.EndFrame(cmdList.get());
             cmdList->EndDebugLabel();  // 闭合 BackBuffer pass 级标记
             cmdList->EndRenderPass();  // 关闭 ImGui RP（RG 和 non-RG 都需要）
-            cmdList->End();
-
-            device->Submit(cmdList.get());
+            framePresenter.EndRecording();   // L4-2：End + Submit 收口
             framePresenter.EndFrame(true);
             frameIndex++;
 

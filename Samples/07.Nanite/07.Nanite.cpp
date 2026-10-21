@@ -1104,7 +1104,7 @@ int main() {
                 g_PendingPipelineSwitch = false;
                 curPipeline->SetSwapChain(swapchain.get());
             }
-            cmdList->Begin();
+            framePresenter.BeginRecording(device.get(), cmdList.get());   // L4-2
             switch (g_PipelineMode) {
             case 0:  // Forward
                 curPipeline = &forwardPipeline;
@@ -1997,9 +1997,7 @@ int main() {
                 }
             }
 
-            cmdList->End();
-
-            device->Submit(cmdList.get());
+            framePresenter.EndRecording();   // L4-2：End + Submit 收口
             deferredPipeline.FlushComputeWork();  // AsyncCompute: Graphics Submit 之后提交 Compute 工作
 
             // ── 白炉探针：等 GPU 完成后读回（half → float），算亮度比并打日志 ──

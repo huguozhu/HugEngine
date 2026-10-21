@@ -200,7 +200,7 @@ int main() {
         u32 w = swapchain->GetWidth();
         u32 h = swapchain->GetHeight();
 
-        cmdList->Begin();
+        framePresenter.BeginRecording(device.get(), cmdList.get());   // L4-2
 
         // ── RT 调度 + 直接渲染到 BackBuffer ──
         if (renderMode == 1 && rtSupported && rtPSO) {
@@ -280,9 +280,7 @@ int main() {
         imgui.EndFrame(cmdList.get());
 
         cmdList->EndRenderPass();
-        cmdList->End();
-
-        device->Submit(cmdList.get());
+        framePresenter.EndRecording();   // L4-2：End + Submit 收口
         framePresenter.EndFrame(true);
         frameIndex++;
     }

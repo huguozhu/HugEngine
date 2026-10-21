@@ -736,7 +736,7 @@ int main() {
                 cmdList->SetSwapChain(swapchain.get());
                 pipeline.OnResize(rw, rh);
             }
-            cmdList->Begin();
+            framePresenter.BeginRecording(device.get(), cmdList.get());   // L4-2
             pipeline.NextFrame();
             // 【第③段：帧入口收快照】装配由样例在游戏线程驱动（管线只配置口径）
             pipeline.GetFrameAssembler().AssembleScene(world, sceneGraph, camCtrl.GetCamera());
@@ -1196,9 +1196,7 @@ int main() {
         auto recordUiAndPresent = [&]() {
             imgui.EndFrame(cmdList.get());
             cmdList->EndRenderPass();
-            cmdList->End();
-
-            device->Submit(cmdList.get());
+            framePresenter.EndRecording();   // L4-2：End + Submit 收口
             pipeline.FlushComputeWork();  // AsyncCompute: Graphics Submit 之后提交 Compute 工作
             framePresenter.EndFrame(true);
             frameIndex++;        };

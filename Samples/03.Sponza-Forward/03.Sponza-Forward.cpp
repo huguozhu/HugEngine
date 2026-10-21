@@ -720,7 +720,7 @@ int main() {
                 cmdList->SetSwapChain(swapchain.get());
                 pipeline.OnResize(rw, rh);
             }
-            cmdList->Begin();
+            framePresenter.BeginRecording(device.get(), cmdList.get());   // L4-2
 
             // 帧首推进槽位，确保 Shadow 和 Scene 使用同一帧缓冲区
             pipeline.NextFrame();
@@ -1048,9 +1048,7 @@ int main() {
         auto recordUiAndPresent = [&]() {
             imgui.EndFrame(cmdList.get());
             cmdList->EndRenderPass();  // 关闭 ImGui RP
-            cmdList->End();
-
-            device->Submit(cmdList.get());
+            framePresenter.EndRecording();   // L4-2：End + Submit 收口
             framePresenter.EndFrame(true);
             frameIndex++;        };
         submitRender(recordUiAndPresent);
