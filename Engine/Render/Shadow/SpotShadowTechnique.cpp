@@ -37,13 +37,16 @@ bool SpotShadowTechnique::Initialize(rhi::IRHIDevice* device){
     d.mipLevels=1;
     d.arrayLayers=1;
     d.usage=rhi::TextureUsage::DepthStencil|rhi::TextureUsage::ShaderResource;
-    for(u32 i=0;i<MAX_FRAMES_IN_FLIGHT;++i)m_SpotShadowMap[i]=device->CreateTexture(d);
+    for(u32 i=0;i<MAX_FRAMES_IN_FLIGHT;++i){   // A-3：逐槽位句柄创建
+        m_SpotShadowMap[i]=device->CreateTextureHandle(d);
+        HE_ASSERT(m_SpotShadowMap[i].IsValid(),"SpotShadowTechnique: 阴影贴图句柄创建失败");
+    }
 
     rhi::SamplerDesc sd;
     sd.minFilter=rhi::FilterMode::Linear;
     sd.magFilter=rhi::FilterMode::Linear;
     sd.addressU=sd.addressV=rhi::AddressMode::ClampToEdge;
-    m_SpotShadowSampler=device->CreateSampler(sd);
+    m_SpotShadowSampler=device->CreateSamplerHandle(sd);
 
     HE_CORE_INFO("SpotShadowTechnique init ({}×{})", m_MapSize, m_MapSize);
     return true;
@@ -67,14 +70,16 @@ void SpotShadowTechnique::CreatePSO(rhi::DescriptorSetLayoutHandle layout){
     d.depthFormat=rhi::Format::D32_FLOAT;
     d.colorAttachmentCount=0;
     d.pushConstantRanges={pcr};d.descriptorSetLayouts={layout};d.debugName="SpotDepth";
-    m_ShadowPSO=m_Device->CreatePipelineState(d);
-    HE_ASSERT(m_ShadowPSO,"SpotShadowTechnique: PSO failed");
+    m_ShadowPSO=m_Device->CreatePipelineStateHandle(d);   // A-3
+    HE_ASSERT(m_ShadowPSO.IsValid(),"SpotShadowTechnique: PSO 句柄创建失败");
 }
 
 void SpotShadowTechnique::Shutdown(){
-    for(auto& m:m_SpotShadowMap)m.reset();
-    m_SpotShadowSampler.reset();
-    m_ShadowPSO.reset();
+    for(auto& h:m_SpotShadowMap){   // A-3：贴图句柄化后必须显式销毁
+        m_Device->DestroyTextureHandle(h); h = {};
+    }
+    m_Device->DestroySamplerHandle(m_SpotShadowSampler); m_SpotShadowSampler = {};
+    m_Device->DestroyPipelineStateHandle(m_ShadowPSO); m_ShadowPSO = {};
     m_Device=nullptr;
 }
 
@@ -111,7 +116,7 @@ u32 SpotShadowTechnique::CollectLights(const FrameSceneSnapshot& snapshot,const 
 void SpotShadowTechnique::Render(rhi::IRHICommandList* cmd,const FrameSceneSnapshot& snapshot,
                                    const MeshRegistry& registry,
                                    const std::vector<GPUShadowData>& sd,u32 start){
-    if(!m_SpotShadowMap[m_FrameSlot]||!m_ExternalObjectBuffer||m_ExternalDescSet==rhi::kInvalidSet)return;
+    if(!m_SpotShadowMap[m_FrameSlot].IsValid()||!m_ExternalObjectBuffer||m_ExternalDescSet==rhi::kInvalidSet)return;
     for(u32 li=start;li<(u32)sd.size()&&li-start<MAX_SHADOWS;++li){
         const auto& sm=sd[li];
         float3 lp(sm.pointLightData.x,sm.pointLightData.y,sm.pointLightData.z);
@@ -126,10 +131,10 @@ void SpotShadowTechnique::Render(rhi::IRHICommandList* cmd,const FrameSceneSnaps
         float4x4 vp=proj*view;
 
         rhi::ClearValue cv{};cv.depth=1.f;
-        void* depthView=m_SpotShadowMap[m_FrameSlot]->GetNativeHandle();
-        cmd->SetPipeline(m_ShadowPSO.get());
+        void* depthView=m_Device->ResolveTexture(m_SpotShadowMap[m_FrameSlot])->GetNativeHandle();
+        cmd->SetPipeline(m_Device->ResolvePipelineState(m_ShadowPSO));
         cmd->BeginOffscreenPass(nullptr,depthView,m_MapSize,m_MapSize,&cv);
-        cmd->SetPipeline(m_ShadowPSO.get());
+        cmd->SetPipeline(m_Device->ResolvePipelineState(m_ShadowPSO));
         cmd->SetViewport({0,(float)m_MapSize,(float)m_MapSize,-(float)m_MapSize,0,1});
         cmd->SetScissor({0,0,m_MapSize,m_MapSize});
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_ExternalDescSet);
@@ -155,7 +160,7 @@ void SpotShadowTechnique::Render(rhi::IRHICommandList* cmd,const FrameSceneSnaps
         // depthAttach.finalLayout），故 srcState 必须是 DepthStencilRead
         //（声明 Write 会给出错误的 oldLayout：VUID-VkImageMemoryBarrier-oldLayout-01197）
         cmd->PipelineBarrier(rhi::PipelineStage::LateFragmentTests,rhi::PipelineStage::FragmentShader,
-            rhi::ResourceState::DepthStencilRead,rhi::ResourceState::DepthStencilRead,m_SpotShadowMap[m_FrameSlot].get());
+            rhi::ResourceState::DepthStencilRead,rhi::ResourceState::DepthStencilRead,m_Device->ResolveTexture(m_SpotShadowMap[m_FrameSlot]));
     }
 }
 
