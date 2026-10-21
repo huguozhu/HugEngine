@@ -22,6 +22,7 @@
 #include "Threading/RenderCommandQueue.h"
 #include "Threading/RenderThread.h"
 #include "Threading/RHIThread.h"      // 模式 2：RHI 线程（唯一提交者）
+#include <atomic>                     // P1：诊断读回的 timeline 屏障（跨线程传递句柄/值）
 #include "Lumen/ScreenProbe.slang"   // 2026-09-24 诊断：探针缓冲落盘需要 sizeof(ScreenProbe)
 #include "Pipeline/CameraController.h"
 #include "Pipeline/PhysicalCamera.h"
@@ -559,6 +560,11 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
     const u64    g_DumpFrame  = dumpFrameEnv ? (u64)std::max(1, std::atoi(dumpFrameEnv)) : 60ull;
     bool g_DumpDone    = false;   // 已录制拷贝（防止重复录制）
     bool g_DumpWritten = false;   // 已落盘（防止每帧重复写文件）
+    // 【P1 / A-5 收尾】诊断读回不再用**设备级** `WaitIdle`：录制侧给本帧挂一个 timeline 信号，
+    // 读取侧只等**那一次提交**完成即可。句柄与值跨线程传递（创建/信号在拥有线程上做，
+    // `WaitForFence` 本身没有归属断言，游戏线程可以等）。
+    std::atomic<he::rhi::RHIFenceHandle> g_DumpFence{he::rhi::kInvalidFence};
+    std::atomic<u64>                    g_DumpFenceValue{0};
     // 采样目标列表：每项一张纹理 + 一条读回缓冲（尺寸各自取自纹理本身，故可混放不同分辨率）
     struct DumpTarget {
         String                          name;
@@ -1911,6 +1917,13 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
                 }
                 if (!g_DumpTargets.empty()) {
                     g_DumpDone = true;   // 已录制；实际读取放在 Submit 之后
+                    // 【P1/A-5】给本帧挂 timeline 信号：读取侧只等这一次提交（见落盘处的 WaitForFence）
+                    if (g_DumpFence.load() == he::rhi::kInvalidFence) {
+                        g_DumpFence.store(device->CreateFence());   // 拥有线程（渲染线程）上创建
+                    }
+                    const u64 fv = g_DumpFenceValue.load() + 1ull;
+                    g_DumpFenceValue.store(fv);
+                    cmdList->SetTimelineSignal(g_DumpFence.load(), fv);
                 } else {
                     g_DumpGI = false;
                     HE_CORE_WARN("[GI采样] 没有可用目标（HDR 未创建？），本次跳过");
@@ -1947,7 +1960,15 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
 
             // ── GI 频谱采样：等 GPU 完成后原样落盘（RGBA16F 原始像素、无文件头、行紧密排布）──
             if (g_DumpDone && !g_DumpWritten) {
-                device->WaitIdle();   // 测试用途，允许停顿
+                // 【P1/A-5】只等本帧那次提交：先让 RHI 线程把已排队的提交落地（模式 2），
+                // 再等 timeline 到本帧的值；不再做设备级 `vkDeviceWaitIdle`。
+                if (auto* router = device->GetSubmitRouter(); router != nullptr) router->FlushAndWait();
+                const auto fenceH = g_DumpFence.load();
+                if (fenceH != he::rhi::kInvalidFence) {
+                    device->WaitForFence(fenceH, g_DumpFenceValue.load(), UINT64_MAX);
+                } else {
+                    device->WaitIdle();   // 兜底（理论上不会走到：录制时就建了）
+                }
                 const String dir  = "build/verify/";
                 const String base = dir + "gi_" + g_DumpTag;
                 std::filesystem::create_directories(dir);
