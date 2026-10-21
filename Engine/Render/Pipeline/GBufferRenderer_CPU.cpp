@@ -1,6 +1,8 @@
 // Pipeline/GBufferRenderer_CPU.cpp — CPU Driven GBuffer 渲染
 // 从 DeferredPipeline::BuildFrameGraph 提取的逐对象绘制逻辑
 #include "Pipeline/GBufferRenderer_CPU.h"
+#include "Pipeline/ParallelRecordHelper.h"   // T3.2：GBuffer 的并行录制骨架
+#include "Threading/JobSystem.h"             // T3.2：按线程数建录制池
 #include "Pipeline/InstanceCuller.h"   // 任务 25：逐实例剔除（状态表也在它这里）
 #include "Threading/MeshRegistry.h"    // 阶段 1 第①段：按 meshIndex 取顶点/索引缓冲
 #include "Scene/MeshComponent.h"
@@ -8,6 +10,7 @@
 #include "Core/Log.h"
 #include <unordered_set>
 #include <cstdio>
+#include <algorithm>   // T3.2：std::min/std::max
 
 namespace he::render {
 
@@ -57,7 +60,8 @@ void GBufferRenderer_CPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
                     ctx.gbC->GetNativeHandle(), ctx.gbVel->GetNativeHandle(),
                     ctx.gbWorldPos->GetNativeHandle(), ctx.gbDisneyA->GetNativeHandle(),
                     ctx.gbDisneyB->GetNativeHandle(), ctx.gbLightmapKey->GetNativeHandle() };
-    cmd->BeginOffscreenPassMRT(cv, 8, ctx.gbDepth->GetNativeHandle(), w, h, clears, false);
+    // T3.2：本 pass 内会 ExecuteSecondary（并行录制）⇒ 必须允许 INLINE_AND_SECONDARY
+    cmd->BeginOffscreenPassMRT(cv, 8, ctx.gbDepth->GetNativeHandle(), w, h, clears, /*allowSecondary=*/true);
     cmd->SetViewport({0, (float)h, (float)w, -(float)h, 0, 1});
     cmd->SetScissor({0, 0, w, h});
 
@@ -98,9 +102,8 @@ void GBufferRenderer_CPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
 
     // 逐对象绘制（push constant objectIndex 模式）
     float4x4 jitteredVP = camera.GetViewProjMatrix();
-    for (auto& di : filteredItems) {
-        // 任务 25：实例化网格由下面专门的实例化绘制段处理（SV_InstanceID 取实例变换）
-        if (di.bInstanced) continue;
+    // 【单个 draw 的录制】串行与并行两条路径共用同一份，保证两种模式录出来的命令逐条一致。
+    const auto recordOne = [&](rhi::IRHICommandList* c, const DrawItem& di) {
         struct {
             float4x4 viewProjMatrix;
             float4x4 prevViewProjMatrix;
@@ -119,14 +122,47 @@ void GBufferRenderer_CPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
         // DrawCall 调试 marker：标记当前绘制的物体（RenderDoc 定位用）
         char label[64];
         snprintf(label, sizeof(label), "GBuffer Obj#%u", di.objectIndex);
-        cmd->SetDrawDebugLabel(label);
-        cmd->SetPushConstants(0, sizeof(pc), &pc);
+        c->SetDrawDebugLabel(label);
+        c->SetPushConstants(0, sizeof(pc), &pc);
         // 顶点/索引缓冲按 `meshIndex` 从注册表取（第②段：`DrawItem` 不再持有组件指针）
         const MeshRegistryEntry* me = ctx.meshRegistry ? ctx.meshRegistry->Find(di.meshIndex) : nullptr;
-        if (!me || !me->vertexBuffer || !me->indexBuffer) continue;
-        cmd->SetVertexBuffer(me->vertexBuffer, 0);
-        cmd->SetIndexBuffer(me->indexBuffer);
-        cmd->DrawIndexed(me->indexCount);
+        if (!me || !me->vertexBuffer || !me->indexBuffer) return;
+        c->SetVertexBuffer(me->vertexBuffer, 0);
+        c->SetIndexBuffer(me->indexBuffer);
+        c->DrawIndexed(me->indexCount);
+    };
+
+    // 【T3.2】CPU 路径的逐对象绘制改**并行录制**：池 / 分块 / 归属声明 / 按块序合并都在
+    // `ParallelRecordHelper` 里；这里只提供"一块怎么录"。
+    // 注意两点：① 次级列表**不继承**主列表的绑定 ⇒ 每块自己绑 per-frame 描述符集 + viewport/scissor；
+    // ② 分块是 `filteredItems` 的连续升序区间 ⇒ 绘制顺序与串行完全一致（可逐位复现）。
+    // 【T3.2】录制池是文件级单例：一个进程只有一套 GBuffer 次级列表池。
+    // （`GBufferRenderer_CPU` 是独立于 `GBufferRenderer` 的类，故不挂在类成员上。）
+    static ParallelRecordHelper s_ParallelRecorder;
+    if (ctx.pso && !s_ParallelRecorder.IsReady()) {
+        const u32 n = std::min<u32>(8u, std::max<u32>(1u, JobSystem::Instance().GetThreadCount()));
+        s_ParallelRecorder.Initialize(ctx.device, n, "GBufferSecRecord");
+    }
+    if (ctx.pso && s_ParallelRecorder.IsReady() && !filteredItems.empty()) {
+        s_ParallelRecorder.Record(cmd, static_cast<u32>(filteredItems.size()), ctx.pso,
+            [&](rhi::IRHICommandList& secRef, u32 start, u32 end) {
+                auto& s = secRef;
+                s.BindDescriptorSet(rhi::kDescSetPerFrame, ctx.descSet);
+                s.SetViewport({0, (float)h, (float)w, -(float)h, 0, 1});
+                s.SetScissor({0, 0, w, h});
+                for (u32 i = start; i < end; ++i) {
+                    const DrawItem& di = filteredItems[i];
+                    // 任务 25：实例化网格由下面专门的实例化绘制段处理（SV_InstanceID 取实例变换）
+                    if (di.bInstanced) continue;
+                    recordOne(&s, di);
+                }
+            });
+    } else {
+        for (auto& di : filteredItems) {
+            // 任务 25：实例化网格由下面专门的实例化绘制段处理
+            if (di.bInstanced) continue;
+            recordOne(cmd, di);
+        }
     }
 
     // ── 实例化网格（任务 25）：逐实例剔除 + 间接绘制 ──
