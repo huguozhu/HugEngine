@@ -15,6 +15,9 @@ set(RHI_SOURCES
     RHI/SwapChain.h
     RHI/ThreadAffinity.h
     RHI/RHICommandList.h
+    # A-1 翻译层（命令流 -> RHI 调用；只在 RHI 线程上调用）
+    RHI/RHICommandReplay.h
+    RHI/RHICommandReplay.cpp
     RHI/RHIHandles.h
     RHI/QueryPool.h
     RHI/MeshShader.h

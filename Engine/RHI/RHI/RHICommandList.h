@@ -39,8 +39,7 @@ inline constexpr u32 kInlinePayloadBytes = 64;
 inline constexpr u64 kDefaultArenaCapacityBytes = 1u << 20;
 inline constexpr u64 kArenaBlockAlignment       = 64;
 
-/// 命令类型。**这里只登记骨架用到的代表值**：真正的完整清单随 §12 的 A-1（命令流落地）一次定稿，
-/// 现在多写类型只会变成"没人用的枚举"。
+/// 命令类型（§12 的 A-1 落地时定稿的完整清单；只登记**有真实调用者**的类型）
 enum class RHICommandType : u32 {
     Invalid           = 0,
     SetPipeline       = 1,
@@ -50,6 +49,11 @@ enum class RHICommandType : u32 {
     PipelineBarrier   = 5,
     CopyBuffer        = 6,
     MarkSubmitBoundary = 7,
+    // A-1 试点（Forward 的 draw 录制）需要的四类
+    SetPushConstants   = 8,
+    SetVertexBuffer    = 9,
+    SetIndexBuffer     = 10,
+    SetDrawDebugLabel  = 11,
 };
 
 /// 一条命令的载荷：类型擦除 + **内联存储**。
@@ -62,6 +66,33 @@ struct RHICommand {
     u64            arenaSize    = 0;    // 走 arena 时的字节数
     alignas(16) u8 inlinePayload[kInlinePayloadBytes] = {};
 };
+
+// --- 各类命令的载荷（POD，全部 ≤ kInlinePayloadBytes；push constants 走 arena）---
+// 【为什么参数用 void*/u64】本头文件刻意 **RHI-free**（单测直接编译它，见 Tests/TestRHICommandList.cpp），
+// 所以不能出现 IRHIPipelineState / IRHIBuffer / DescriptorSetHandle 这些具体类型；执行端按约定还原。
+
+/// `SetPipeline`：PSO 指针
+struct RHICommandSetPipeline { void* pso = nullptr; };
+/// `SetDescriptorSet`：set 索引 + 描述符集句柄（`DescriptorSetHandle` 是 u64）
+struct RHICommandSetDescriptorSet { u32 set = 0; u32 pad = 0; u64 handle = 0; };
+/// `SetPushConstants` 的**内联头**：实际字节在 arena（`ArenaRawAt(offset, size)`）
+struct RHICommandSetPushConstants { u64 arenaOffset = 0; u32 size = 0; u32 pad = 0; };
+/// `SetVertexBuffer`：缓冲 + 槽位
+struct RHICommandSetVertexBuffer { void* buffer = nullptr; u32 slot = 0; u32 pad = 0; };
+/// `SetIndexBuffer`：缓冲 + 偏移
+struct RHICommandSetIndexBuffer { void* buffer = nullptr; u32 offset = 0; u32 pad = 0; };
+/// `DrawIndexed`
+struct RHICommandDrawIndexed { u32 indexCount = 0; u32 startIndex = 0; i32 baseVertex = 0; u32 pad = 0; };
+/// `SetDrawDebugLabel`：内联短文本（超长截断，不足补 0）
+struct RHICommandSetDebugLabel { char text[56] = {}; };
+
+static_assert(sizeof(RHICommandSetPipeline)      <= kInlinePayloadBytes, "载荷超过内联上限");
+static_assert(sizeof(RHICommandSetDescriptorSet) <= kInlinePayloadBytes, "载荷超过内联上限");
+static_assert(sizeof(RHICommandSetPushConstants) <= kInlinePayloadBytes, "载荷超过内联上限");
+static_assert(sizeof(RHICommandSetVertexBuffer)  <= kInlinePayloadBytes, "载荷超过内联上限");
+static_assert(sizeof(RHICommandSetIndexBuffer)   <= kInlinePayloadBytes, "载荷超过内联上限");
+static_assert(sizeof(RHICommandDrawIndexed)      <= kInlinePayloadBytes, "载荷超过内联上限");
+static_assert(sizeof(RHICommandSetDebugLabel)    <= kInlinePayloadBytes, "载荷超过内联上限");
 
 /// 命令列表：命令数组 + 参数 arena。记录端写，执行端读；交接后只读（铁律 2）。
 class RHICommandList {
@@ -154,6 +185,13 @@ public:
         if (cmd.payloadSize != 0u || cmd.arenaSize != sizeof(TPayload)) return nullptr;
         if (cmd.arenaOffset + cmd.arenaSize > m_ArenaUsed) return nullptr;
         return reinterpret_cast<const TPayload*>(m_Arena + cmd.arenaOffset);
+    }
+
+    /// 按字节读回 arena 载荷（执行端用）：给"载荷是任意字节块"的命令（如 push constants）。
+    /// 越界返回 nullptr（与 `ArenaPayloadAt` 同样的容错约定：执行端不允许对损坏的命令流 abort）。
+    [[nodiscard]] const u8* ArenaRawAt(u64 offset, u64 size) const {
+        if (size == 0u || offset > m_ArenaUsed || offset + size > m_ArenaUsed) return nullptr;
+        return m_Arena + offset;
     }
 
     /// 复用本列表（下一帧重新记录）：清空命令、把 arena 已用长度归零，**保留容量与块地址**
