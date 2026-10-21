@@ -602,9 +602,9 @@ private:
 |---|---|---|---|
 | **P0** | **深度 >= 2**：每飞行帧命令缓冲 + 去掉命令 1 的每帧握手（改成队列背压）+ 06.GILab 的 `NextFrame`/装配/阴影驱动搬进命令 | 三线程已就位，"提交不再阻塞录制"这一收益**只有去掉握手才拿得到**；这也是轻帧样例（02.Cube）帧时间不达标的解法 | 模式 0/1/2 转储逐位一致；模式 2 vs 0/1 的**游戏线程等待时间**下降、帧时间不退化 >3% |
 | **P0（并行）** | **T5.1 Profiler 三段计时**（游戏 / 渲染 / 等待） | P0 的收益没有读数就判不了；代价很小 | Stats 面板出现三段；读数与墙钟一致 |
-| **P1** | **A-5 读回的正式命令化**（`FrameRetireQueue` 登记 + N 帧后取值） | 现在读回靠 `WaitIdle` 排空路由 = 每帧一次线程同步，是三线程带来的**新增开销**；不修它会掩盖 P0 的收益 | 读回路径不再调用 `WaitIdle`（grep 断言）；转储仍 20/20 一致 |
+| **P1** | **A-5 读回的正式命令化** | ⚠ 先按实测修正了口径：06 里 `WaitIdle` 只出现在**诊断路径**，稳态帧循环没有读回 ⇒ 收益低，按"清理项"做。**✅ 已完成**：dump 读回改成 **timeline fence**——录制侧给本帧挂 `SetTimelineSignal`（句柄在拥有线程上创建），读取侧 `router->FlushAndWait()`（模式 2 让 RHI 线程先提交）+ `WaitForFence`（只等那一次提交），不再设备级 `vkDeviceWaitIdle` | 转储 20/20 逐字节一致、无新增 VUID ✓ |
 | **P2** | **T2.6 + A-1 合并**：`RenderThreadContext` 从"RHI 唯一出口"升级为"**只吐命令流**" | A-1 是 T2.6 的完成形态；`RHICommand` 契约已在 T0.6 预埋，越晚做代价越高 | `RenderThreadContext` 不再暴露 device（grep 断言）；三模式转储一致 |
-| **P3** | **T2.3 + T3.1 + T3.2**：资源创建同步转发 + 抽 `ParallelRecordHelper` + Deferred 接入并行录制 | 文档原话"T2.3 与 T3.2 应合起来排期"（避免先搬线程再为并行录制改一遍）；T3.1 先抽公共件 | T3.2 录制耗时下降、输出逐像素一致 |
+| **P3** | **T3.1 + T3.2**（✅ 已完成）+ **T2.3**（推迟到 A-3）：抽 `ParallelRecordHelper` + Deferred 接入并行录制 | 文档原话"T2.3 与 T3.2 应合起来排期"（避免先搬线程再为并行录制改一遍）；T3.1 先抽公共件 | T3.2 录制耗时下降、输出逐像素一致 |
 | **P4** | **T3.3 / T3.4**：PT/Nanite 并行录制评估、分块与 worker 数调优 | 依赖 T3.1 的公共件；Nanite 可能"评估后不做"，允许只记结论 | 结论在案；小场景（draw < 64）不退化 |
 | **P5** | **T2.5 + T4.1~T4.4**：编辑器主循环 + ImGui 归属 / 去后门 / 面板只读快照 / 热重载替换 | 编辑器侧是三线程之外的最后一块；样例侧 T4.1 已完成 | 编辑器 UI 正常、无跨线程读 ECS、后门接口从 `IRHIDevice` 移除 |
 | **P6** | **T5.2 / T5.3**：背压参数调优、资源创建异步化（可选） | 调优必须在 P0/P1 有读数之后 | 稳态帧率不低于改前、空闲 CPU < 1% |
@@ -1199,7 +1199,10 @@ private:
       > 与前置依赖（装配器、光源收集、阴影下标解析、MeshBatcher、RTPass）都已在本轮备齐。
 - [x] T2.1 `RenderThread` 实现（帧节奏 + 休眠策略）—— ✅ 完成（真起线程 + 归属判断 + 停止排空；4 例单测。cv 唤醒并入 T2.6）
 - [x] T2.2 设备与交换链归渲染线程（Acquire/Present 迁移）—— ✅ 完成（2026-10-09）：Acquire / 录制 / ImGui 录制 / Submit / 探测读回 / Present 全在渲染线程（一帧两条命令）；06.GILab 模式 0/1 转储逐位一致、归属断言 0
-- [ ] T2.3 `ResourceCreationService`（步 1 同步转发）
+- [ ] T2.3 `ResourceCreationService`（步 1 同步转发）—— **推迟到 A-3（P7）**：核实结果是当前**没有消费者**
+  —— `ForwardPipeline` 的所有创建点都在 `Initialize`/`Resize`/`UploadMaterialBindless` 扩容路径上，而
+  模式 1/2 的 **owner 就是渲染线程**（创建本来就在它上面，合法）。只有在 A-3 把创建挪去 RHI 线程之后，
+  "渲染线程请求创建 → 拥有线程执行"才有意义 ⇒ 现在实现只会是死代码。
 - [x] **T2.4 之一（已提交）**： 6.GILab 的渲染命令载荷改为**按值捕获**（此前 `[&]` 按引用捕获
   `curPipeline`/`cmdList`/`camCtrl` ⇒ 真正异步时随时被游戏线程改写）。现在整帧渲染输入收进
   POD 载荷按值交接：管线指针 + 本帧快照指针 + 命令缓冲 + 相机/时长的值拷贝。
@@ -1516,9 +1519,14 @@ private:
 - [ ] T2.6 `RenderThreadContext`：RHI 唯一出口（记录/执行分离）—— 与 A-1 合并做（见 §8.1 的 P2）
 - [ ] A-1 `RHI` 命令流（渲染线程只 append 纯数据载荷、零 API 调用）
 - [ ] A-3 资源创建命令化 + 句柄化（面最大，按 §12.9 分批）
-- [ ] A-5 收尾：ImGui / PSO / 读回的正式命令化（当前靠 `WaitIdle` 先排空路由过渡）
-- [ ] T3.1 `ParallelRecordHelper` 抽取
-- [ ] T3.2 Deferred 接入并行录制
+- [x] A-5（**读回部分**）—— ✅ 完成：06 的 dump 读回改为 timeline fence（`SetTimelineSignal` +
+  `FlushAndWait` + `WaitForFence`），去掉设备级 `WaitIdle`；判据 = 20/20 逐字节一致、无新增 VUID
+- [ ] A-5（ImGui / PSO 部分）：ImGui 原生句柄与 PSO 创建仍是"直接调用"，未做命令化
+- [x] T3.1 `ParallelRecordHelper` 抽取 —— ✅ 完成（`5ba4705`）：池 + 分块 + 归属声明 + 按块序合并抽成
+  `Pipeline/ParallelRecordHelper`，Forward 改用它；判据 = 冻结配置 A/B 逐字节一致
+- [x] T3.2 Deferred 接入并行录制 —— ✅ 完成（`ac496e2`）：GBuffer CPU 路径改并行录制；踩出两处必要修正
+  （次级列表不继承绑定 ⇒ 每块自己绑描述符集；GBuffer 的 pass 必须 `allowSecondary=true`，否则命中
+  `vkCmdExecuteCommands-contents-09680`）；判据 = 20/20 逐字节一致 + 无新增 VUID
 - [ ] T3.3 PathTracing / Nanite 并行录制评估
 - [ ] T3.4 分块策略与 worker 数调优
 - [ ] T4.1 ImGui 后端录制归属 —— ⚠ **样例侧已实现**（`imgui.EndFrame(cmdList)` 已在命令 2 内、由渲染线程执行）；**编辑器侧待 T2.5**
