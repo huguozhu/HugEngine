@@ -75,11 +75,14 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
 
     // 三缓冲
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        m_LightBuffers[i]      = device->CreateBuffer({sizeof(GPULight) * MAX_LIGHTS, rhi::BufferUsage::Storage});
+        m_LightBuffers[i]      = device->CreateBufferHandle({sizeof(GPULight) * MAX_LIGHTS, rhi::BufferUsage::Storage});   // A-3
+        HE_ASSERT(m_LightBuffers[i].IsValid(), "DeferredPipeline: 光源缓冲句柄创建失败");
         m_ObjectBuffers[i]     = device->CreateBufferHandle({sizeof(GPUObjectData) * MAX_OBJECTS, rhi::BufferUsage::Storage});   // A-3
         HE_ASSERT(m_ObjectBuffers[i].IsValid(), "DeferredPipeline: 对象缓冲句柄创建失败");
-        m_ShadowBuffers[i]     = device->CreateBuffer({sizeof(GPUShadowData) * MAX_SHADOWS, rhi::BufferUsage::Storage});
-        m_ShadowObjBuffers[i]  = device->CreateBuffer({sizeof(GPUObjectData) * MAX_OBJECTS, rhi::BufferUsage::Storage});
+        m_ShadowBuffers[i]     = device->CreateBufferHandle({sizeof(GPUShadowData) * MAX_SHADOWS, rhi::BufferUsage::Storage});   // A-3
+        HE_ASSERT(m_ShadowBuffers[i].IsValid(), "DeferredPipeline: 阴影缓冲句柄创建失败");
+        m_ShadowObjBuffers[i]  = device->CreateBufferHandle({sizeof(GPUObjectData) * MAX_OBJECTS, rhi::BufferUsage::Storage});   // A-3
+        HE_ASSERT(m_ShadowObjBuffers[i].IsValid(), "DeferredPipeline: 阴影对象缓冲句柄创建失败");
     }
 
     // 子系统（IBL/RSM 可选，初始化失败不影响核心渲染）
@@ -513,13 +516,22 @@ void DeferredPipeline::Shutdown() {
     if (m_GBuffer) m_GBuffer->Shutdown();
     m_Lighting.Shutdown();
     m_GPLVariantPSOs.clear();
-    for (auto& b : m_LightBuffers) b.reset();
+    for (auto& h : m_LightBuffers) {   // A-3：句柄销毁
+        m_Device->DestroyBufferHandle(h);
+        h = {};
+    }
     for (auto& h : m_ObjectBuffers) {   // A-3：句柄销毁（代次前进 ⇒ 旧句柄失效）
         m_Device->DestroyBufferHandle(h);
         h = {};
     }
-    for (auto& b : m_ShadowBuffers) b.reset();
-    for (auto& b : m_ShadowObjBuffers) b.reset();
+    for (auto& h : m_ShadowBuffers) {  // A-3
+        m_Device->DestroyBufferHandle(h);
+        h = {};
+    }
+    for (auto& h : m_ShadowObjBuffers) {   // A-3
+        m_Device->DestroyBufferHandle(h);
+        h = {};
+    }
     if (m_GPUCulling.usePTG) {
         m_GPUCulling.ShutdownPTG(m_Device);
     }
@@ -812,12 +824,13 @@ void DeferredPipeline::CollectLights(PushConstantData& pc) {
     if (count == 0u) return;
 
     // 上传：一次 Map/Unmap 写完整段（旧实现是每个光源 Map/Unmap 一次，行为相同但更费）
-    auto* lights = static_cast<GPULight*>(m_LightBuffers[RenderFrameSlot()]->Map());
+    auto* lb     = m_Device->ResolveBuffer(m_LightBuffers[RenderFrameSlot()]);
+    auto* lights = lb ? static_cast<GPULight*>(lb->Map()) : nullptr;
     if (!lights) return;
     for (u32 i = 0; i < count; ++i) {
         lights[i] = FrameSnap().lights[i].ToGpu();
     }
-    m_LightBuffers[RenderFrameSlot()]->Unmap();
+    if (auto* lbu = m_Device->ResolveBuffer(m_LightBuffers[RenderFrameSlot()])) lbu->Unmap();
 }
 
 void DeferredPipeline::UpdateIBLBindings(GI_IBL* gi) {

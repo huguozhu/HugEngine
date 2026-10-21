@@ -189,8 +189,13 @@ public:
     rhi::IRHIBuffer* GetCurrentObjectBuffer()  {
         return m_Device ? m_Device->ResolveBuffer(m_ObjectBuffers[m_CurrentFrameSlot]) : nullptr;
     }
-    rhi::IRHIBuffer* GetCurrentShadowBuffer()  { return m_ShadowBuffers[m_CurrentFrameSlot].get(); }
-    rhi::IRHIBuffer* GetCurrentShadowObjBuffer(){ return m_ShadowObjBuffers[m_CurrentFrameSlot].get(); }
+    /// A-3：句柄按需解析（代次过期 ⇒ nullptr）
+    rhi::IRHIBuffer* GetCurrentShadowBuffer() {
+        return m_Device ? m_Device->ResolveBuffer(m_ShadowBuffers[m_CurrentFrameSlot]) : nullptr;
+    }
+    rhi::IRHIBuffer* GetCurrentShadowObjBuffer() {
+        return m_Device ? m_Device->ResolveBuffer(m_ShadowObjBuffers[m_CurrentFrameSlot]) : nullptr;
+    }
 
 private:
     void BuildFrameGraph(RenderGraph& rg, const CameraData& camera);
@@ -224,10 +229,10 @@ private:
     PostProcessChain m_PostProcess;
 
     // 三缓冲
-    std::unique_ptr<rhi::IRHIBuffer> m_LightBuffers[MAX_FRAMES_IN_FLIGHT];
+    rhi::RHIBufferHandle m_LightBuffers[MAX_FRAMES_IN_FLIGHT]{};    // A-3：句柄持有
     rhi::RHIBufferHandle m_ObjectBuffers[MAX_FRAMES_IN_FLIGHT]{};   // A-3：句柄持有
-    std::unique_ptr<rhi::IRHIBuffer> m_ShadowBuffers[MAX_FRAMES_IN_FLIGHT];
-    std::unique_ptr<rhi::IRHIBuffer> m_ShadowObjBuffers[MAX_FRAMES_IN_FLIGHT];
+    rhi::RHIBufferHandle m_ShadowBuffers[MAX_FRAMES_IN_FLIGHT]{};    // A-3：句柄持有
+    rhi::RHIBufferHandle m_ShadowObjBuffers[MAX_FRAMES_IN_FLIGHT]{}; // A-3：句柄持有
     u32 m_CurrentFrameSlot = 0;
 
     // 阶段 1 T1.3a：本帧光源的**快照**（游戏线程侧收集出来的不可变输入）。
@@ -269,8 +274,8 @@ private:
 
     // Clustered Shading
     ClusteredShading m_ClusteredShading;
-    std::unique_ptr<rhi::IRHIBuffer> m_LightGridBuffer;       // binding 7
-    std::unique_ptr<rhi::IRHIBuffer> m_LightIndexListBuffer;  // binding 8
+    rhi::RHIBufferHandle m_LightGridBuffer{};       // A-3：binding 7
+    rhi::RHIBufferHandle m_LightIndexListBuffer{};  // A-3：binding 8
     std::vector<GPULight> m_CachedLights;  // CPU 端缓存，避免 culling 时重复 Map
 
     // GPU Culling
