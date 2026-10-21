@@ -85,6 +85,9 @@ static void ExtractFrustumPlanes(const float4x4& vp, float4 planes[6]) {
 // ============================================================
 
 bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
+    // A-3：句柄解析依赖设备指针 —— 原来要到函数末尾（单相初始化之后）才赋值，
+    // 早段创建缓冲后立刻 ResolveBuffer 会拿到 nullptr（这正是上一批 Initialize 崩溃的原因）。
+    m_Device = device;
     // ── 单阶段/Phase 1 PSO ──
     m_CS.stage      = rhi::ShaderStage::Compute;
     m_CS.spirv      = k_GPUCull_comp_spv;
@@ -107,19 +110,23 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
         d.size = sizeof(IndirectDrawCommand) * kMaxObjects;
         d.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::Indirect;
         d.cpuAccess = true;
-        m_IndirectCmdBuf = device->CreateBuffer(d);
-        device->UpdateDescriptorSet(m_DescSet, kCullBindIndirectCmds, rhi::DescriptorType::StorageBuffer, m_IndirectCmdBuf.get());
+        m_IndirectCmdBuf = device->CreateBufferHandle(d);   // A-3
+        HE_ASSERT(m_IndirectCmdBuf.IsValid(), "GPUCulling: 间接命令缓冲句柄创建失败");
+        device->UpdateDescriptorSet(m_DescSet, kCullBindIndirectCmds, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_IndirectCmdBuf));
     }
     {
         rhi::BufferDesc d;
         d.size = sizeof(u32) * 4;
         d.usage = rhi::BufferUsage::Storage;
         d.cpuAccess = true;
-        m_DrawCountBuf = device->CreateBuffer(d);
+        m_DrawCountBuf = device->CreateBufferHandle(d);   // A-3
+        HE_ASSERT(m_DrawCountBuf.IsValid(), "GPUCulling: 绘制计数缓冲句柄创建失败");
         // 零初始化：首帧 Readback 读到 count=0 → 安全回退 CPU 路径
-        u32* pCount = static_cast<u32*>(m_DrawCountBuf->Map());
-        if (pCount) { *pCount = 0; m_DrawCountBuf->Unmap(); }
-        device->UpdateDescriptorSet(m_DescSet, kCullBindDrawCount, rhi::DescriptorType::StorageBuffer, m_DrawCountBuf.get());
+        auto* dcB    = m_Device->ResolveBuffer(m_DrawCountBuf);
+        HE_ASSERT(dcB, "GPUCulling: 绘制计数缓冲句柄解析失败");
+        u32*  pCount = dcB ? static_cast<u32*>(dcB->Map()) : nullptr;
+        if (pCount) { *pCount = 0; if (auto* ub = m_Device->ResolveBuffer(m_DrawCountBuf)) ub->Unmap(); }
+        device->UpdateDescriptorSet(m_DescSet, kCullBindDrawCount, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_DrawCountBuf));
     }
 
     // Push constants: 6 planes + float4x4 VP + float2 screen + 2 uint
@@ -161,16 +168,18 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
         d.size = sizeof(u32) * kMaxObjects;
         d.usage = rhi::BufferUsage::Storage;
         d.cpuAccess = true;
-        m_CandidateBuf = device->CreateBuffer(d);
-        device->UpdateDescriptorSet(m_Phase1Set, kPhase1BindCandidates, rhi::DescriptorType::StorageBuffer, m_CandidateBuf.get());
+        m_CandidateBuf = device->CreateBufferHandle(d);   // A-3
+        HE_ASSERT(m_CandidateBuf.IsValid(), "GPUCulling: 候选列表缓冲句柄创建失败");
+        device->UpdateDescriptorSet(m_Phase1Set, kPhase1BindCandidates, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_CandidateBuf));
     }
     {
         rhi::BufferDesc d;
         d.size = sizeof(u32) * 4;
         d.usage = rhi::BufferUsage::Storage;
         d.cpuAccess = true;
-        m_CandidateCountBuf = device->CreateBuffer(d);
-        device->UpdateDescriptorSet(m_Phase1Set, kPhase1BindCandidateCount, rhi::DescriptorType::StorageBuffer, m_CandidateCountBuf.get());
+        m_CandidateCountBuf = device->CreateBufferHandle(d);   // A-3
+        HE_ASSERT(m_CandidateCountBuf.IsValid(), "GPUCulling: 候选计数缓冲句柄创建失败");
+        device->UpdateDescriptorSet(m_Phase1Set, kPhase1BindCandidateCount, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_CandidateCountBuf));
     }
 
     // ── Phase 2 PSO（5 个 binding）──
@@ -190,9 +199,9 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
     m_Phase2Set    = device->AllocateDescriptorSet(m_Phase2Layout);
 
     // Phase 2 固定绑定（不变的生命周期）
-    device->UpdateDescriptorSet(m_Phase2Set, kPhase2BindCandidates, rhi::DescriptorType::StorageBuffer, m_CandidateBuf.get());
-    device->UpdateDescriptorSet(m_Phase2Set, kPhase2BindDrawCount, rhi::DescriptorType::StorageBuffer, m_DrawCountBuf.get());
-    device->UpdateDescriptorSet(m_Phase2Set, kPhase2BindIndirectCmds, rhi::DescriptorType::StorageBuffer, m_IndirectCmdBuf.get());
+    device->UpdateDescriptorSet(m_Phase2Set, kPhase2BindCandidates, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_CandidateBuf));
+    device->UpdateDescriptorSet(m_Phase2Set, kPhase2BindDrawCount, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_DrawCountBuf));
+    device->UpdateDescriptorSet(m_Phase2Set, kPhase2BindIndirectCmds, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_IndirectCmdBuf));
     // binding 0 和 3 由 SetSceneBuffer / SetDepthTexture 设置
 
     // Phase 2 push constants: float4x4 vp + float2 screenSize + uint mips + uint count
@@ -278,12 +287,12 @@ void GPUCulling::Shutdown(rhi::IRHIDevice* device) {
         ShutdownPTG(device);
     }
 
-    m_CandidateBuf.reset();
-    m_CandidateCountBuf.reset();
+    m_Device->DestroyBufferHandle(m_CandidateBuf); m_CandidateBuf = {};
+    m_Device->DestroyBufferHandle(m_CandidateCountBuf); m_CandidateCountBuf = {};
     m_Device->DestroyPipelineStateHandle(m_Phase1PSO); m_Phase1PSO = {};
     m_Device->DestroyPipelineStateHandle(m_Phase2PSO); m_Phase2PSO = {};
-    m_IndirectCmdBuf.reset();
-    m_DrawCountBuf.reset();
+    m_Device->DestroyBufferHandle(m_IndirectCmdBuf); m_IndirectCmdBuf = {};
+    m_Device->DestroyBufferHandle(m_DrawCountBuf); m_DrawCountBuf = {};
     m_Device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};
     m_Device->DestroyTextureHandle(m_HiZTexture); m_HiZTexture = {};
     m_Device->DestroySamplerHandle(m_HiZSampler);
@@ -456,10 +465,12 @@ void GPUCulling::DispatchPhase1(rhi::IRHICommandList* cmd, const float4x4& viewP
     pc.count = objectCount;
 
     // 清零候选计数
-    void* countPtr = m_CandidateCountBuf->Map();
+    auto* ccB      = m_Device->ResolveBuffer(m_CandidateCountBuf);
+    HE_ASSERT(ccB, "GPUCulling: 候选计数缓冲句柄解析失败");
+    void* countPtr = ccB ? ccB->Map() : nullptr;
     if (countPtr) {
         std::memset(countPtr, 0, sizeof(u32) * 4);
-        m_CandidateCountBuf->Unmap();
+        if (auto* ub = m_Device->ResolveBuffer(m_CandidateCountBuf)) ub->Unmap();
     }
 
     cmd->SetPipeline(m_Device->ResolvePipelineState(m_Phase1PSO));
@@ -557,10 +568,12 @@ void GPUCulling::DispatchPhase2(rhi::IRHICommandList* cmd, u32 screenW, u32 scre
     if (!m_Initialized || !enabled || candidateCount == 0) return;
 
     // 清零 DrawCount
-    void* dcPtr = m_DrawCountBuf->Map();
+    auto* dcB   = m_Device->ResolveBuffer(m_DrawCountBuf);
+    HE_ASSERT(dcB, "GPUCulling: 绘制计数缓冲句柄解析失败");
+    void* dcPtr = dcB ? dcB->Map() : nullptr;
     if (dcPtr) {
         std::memset(dcPtr, 0, sizeof(u32) * 4);
-        m_DrawCountBuf->Unmap();
+        if (auto* ub = m_Device->ResolveBuffer(m_DrawCountBuf)) ub->Unmap();
     }
 
     // Push constants
@@ -592,11 +605,13 @@ void GPUCulling::DispatchPhase2(rhi::IRHICommandList* cmd, u32 screenW, u32 scre
 // ============================================================
 
 u32 GPUCulling::GetPhase1CandidateCount() const {
-    if (!m_Initialized || !m_CandidateCountBuf) return 0;
-    void* ptr = m_CandidateCountBuf->Map();
+    if (!m_Initialized || !m_CandidateCountBuf.IsValid()) return 0;
+    auto* ccB = m_Device->ResolveBuffer(m_CandidateCountBuf);
+    HE_ASSERT(ccB, "GPUCulling: 候选计数缓冲句柄解析失败");
+    void* ptr = ccB ? ccB->Map() : nullptr;
     if (!ptr) return 0;
     u32 count = *static_cast<const u32*>(ptr);
-    m_CandidateCountBuf->Unmap();
+    if (auto* ub = m_Device->ResolveBuffer(m_CandidateCountBuf)) ub->Unmap();
     return count;
 }
 
@@ -611,19 +626,23 @@ void GPUCulling::Readback(rhi::IRHIDevice* device,
     if (!m_Initialized || !enabled) return;
 
     u32 count = 0;
-    void* dc = m_DrawCountBuf->Map();
-    if (dc) { count = *static_cast<u32*>(dc); m_DrawCountBuf->Unmap(); }
+    auto* dcBb = m_Device->ResolveBuffer(m_DrawCountBuf);
+    HE_ASSERT(dcBb, "GPUCulling: 绘制计数缓冲句柄解析失败");
+    void* dc   = dcBb ? dcBb->Map() : nullptr;
+    if (dc) { count = *static_cast<u32*>(dc); if (auto* ub = m_Device->ResolveBuffer(m_DrawCountBuf)) ub->Unmap(); }
 
     if (count == 0) { m_LastVisibleCount = 0; return; }
     if (count > kMaxObjects) count = kMaxObjects;
 
     outVisibleIndices.resize(count);
-    void* vi = m_IndirectCmdBuf->Map();
+    auto* icB = m_Device->ResolveBuffer(m_IndirectCmdBuf);
+    HE_ASSERT(icB, "GPUCulling: 间接命令缓冲句柄解析失败");
+    void* vi  = icB ? icB->Map() : nullptr;
     if (vi) {
         auto* cmds = static_cast<IndirectDrawCommand*>(vi);
         for (u32 i = 0; i < count; ++i)
             outVisibleIndices[i] = cmds[i].firstInstance;
-        m_IndirectCmdBuf->Unmap();
+        if (auto* ub = m_Device->ResolveBuffer(m_IndirectCmdBuf)) ub->Unmap();
     }
 
     m_LastVisibleCount = count;
@@ -677,9 +696,9 @@ bool GPUCulling::InitializePTG(rhi::IRHIDevice* device) {
     // binding 1 (SceneObjects) 由 SetSceneBuffer 设置
     // binding 2 (HiZDepth) 由 SetDepthTexture 设置
     // binding 3 (IndirectCmds) 由 Initialize 中 m_IndirectCmdBuf 设置
-    device->UpdateDescriptorSet(m_PTGSet, 3, rhi::DescriptorType::StorageBuffer, m_IndirectCmdBuf.get());
+    device->UpdateDescriptorSet(m_PTGSet, 3, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_IndirectCmdBuf));
     // binding 4 (DrawCount) 由 Initialize 中 m_DrawCountBuf 设置
-    device->UpdateDescriptorSet(m_PTGSet, 4, rhi::DescriptorType::StorageBuffer, m_DrawCountBuf.get());
+    device->UpdateDescriptorSet(m_PTGSet, 4, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_DrawCountBuf));
 
     // 5. 创建 PTG PSO（无 push constants，全部通过描述符传递）
     rhi::PipelineStateDesc ptgDesc;

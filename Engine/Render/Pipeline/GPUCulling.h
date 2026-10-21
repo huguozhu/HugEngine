@@ -87,8 +87,13 @@ public:
     void Readback(rhi::IRHIDevice* device, std::vector<u32>& outVisibleIndices);
 
     u32 GetLastVisibleCount() const { return m_LastVisibleCount; }
-    rhi::IRHIBuffer* GetIndirectBuffer() const { return m_IndirectCmdBuf.get(); }
-    rhi::IRHIBuffer* GetDrawCountBuffer() const { return m_DrawCountBuf.get(); }
+    /// A-3：句柄按需解析（代次过期 ⇒ nullptr）
+    rhi::IRHIBuffer* GetIndirectBuffer() const {
+        return m_Device ? m_Device->ResolveBuffer(m_IndirectCmdBuf) : nullptr;
+    }
+    rhi::IRHIBuffer* GetDrawCountBuffer() const {
+        return m_Device ? m_Device->ResolveBuffer(m_DrawCountBuf) : nullptr;
+    }
     rhi::DescriptorSetHandle GetPhase2Set() const { return m_Phase2Set; }
     // Phase 2 描述符集绑定号（供外部引用——如 DeferredPipeline_FrameGraph 每帧更新 Hi-Z 绑定）
     static constexpr u32 kPhase2BindHiZ = 3;
@@ -107,12 +112,12 @@ private:
     rhi::DescriptorSetHandle       m_DescSet    = rhi::kInvalidSet;
 
     // GPU 缓冲（单阶段 & Phase 2 共用）
-    std::unique_ptr<rhi::IRHIBuffer> m_IndirectCmdBuf;     // IndirectDrawCommand[]
-    std::unique_ptr<rhi::IRHIBuffer> m_DrawCountBuf;
+    rhi::RHIBufferHandle m_IndirectCmdBuf{};     // A-3：IndirectDrawCommand[]
+    rhi::RHIBufferHandle m_DrawCountBuf{};
 
     // Phase 1 专用资源
-    std::unique_ptr<rhi::IRHIBuffer> m_CandidateBuf;       // Phase 1 → Phase 2 候选列表（u32[]）
-    std::unique_ptr<rhi::IRHIBuffer> m_CandidateCountBuf;  // 候选数量
+    rhi::RHIBufferHandle m_CandidateBuf{};       // A-3：Phase 1 → Phase 2 候选列表（u32[]）
+    rhi::RHIBufferHandle m_CandidateCountBuf{};  // A-3：候选数量
 
     // Phase 1 PSO（裁剪后输出候选索引）
     rhi::ShaderBytecode m_Phase1CS;
