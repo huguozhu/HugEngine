@@ -616,6 +616,47 @@ private:
 
 ---
 
+### 12.11 A-1 落地设计：必须是 **pass 级**，不是 draw 级
+
+> 本节记录 2026-10 试点时的结论。契约与翻译层已落地（`RHI/RHICommandList.h` 的类型/载荷、
+> `RHI/RHICommandReplay.{h,cpp}`），但接线的粒度推翻了原设想。
+
+**为什么 draw 级试点不成立**（三条都来自代码事实）：
+
+1. 引擎里**所有逐 draw 录制都发生在 render pass 内**（`BeginOffscreenPassMRT` / `BeginRenderPass` 之后）。
+   而 secondary 命令缓冲**不能被 RHI 线程"回放"**——它已经是录制好的命令缓冲，`ExecuteSecondary`
+   必须在拥有线程上调用。⇒ 把 draw 记进命令流、再由 RHI 线程翻译，只能落到 **primary 列表**上。
+2. primary 列表上的逐 draw 录制只存在于 **MTCR 关闭的串行路径**（`m_MultiThreadRecord == false`）。
+   正常运行时 MTCR 默认开 ⇒ 该路径**不被转储覆盖**，用它当试点等于"改了一条没有判据的代码"。
+3. GBuffer 也一样：CPU 路径刚接并行录制（T3.2）⇒ 逐 draw 进 secondary；GPU 路径是 indirect。
+
+**结论**：A-1 的最小可验证单元是 **pass 级**——把"一个 pass 的完整内容"命令化：
+
+| 需要新增/使用的命令 | 说明 |
+|---|---|
+| `BeginPass` / `EndPass`（新） | 携带 pass 描述（附件/清屏/视口/`allowSecondary`），执行端据此开/关 pass |
+| 现有 `SetPipeline` / `SetDescriptorSet` / `SetPushConstants` / `SetVertexBuffer` / `SetIndexBuffer` / `DrawIndexed` | pass 内的绘制序列（已落地 ✓） |
+| 现有 `PipelineBarrier` / `CopyBuffer` | pass 之间/之外的资源转换与拷贝 |
+| 现有 `MarkSubmitBoundary` | 一帧的提交边界（RHI 线程在此之后提交） |
+
+**执行端模型**：RHI 线程按 `MarkSubmitBoundary` 切帧，顺序翻译；遇到 `BeginPass` 就开 pass、
+后续 draw 直接录进 primary（**一次翻译、零往返**），`EndPass` 关闭。这样"渲染线程零 Vulkan 调用"才成立，
+且 secondary 并行录制（MTCR）保持现状——它本就发生在 RHI 拥有线程之外、由 `RecordThread` 授权。
+
+**改动面（6 处）**：`ISubmitRouter::RouteSubmit` / `IRHIDevice::Submit`+`ExecuteSubmit`（加
+`RHICommandList* stream = nullptr`，不破坏样例调用点）→ `VulkanDevice` 透传 → `RHIThread` 在
+`ExecuteSubmit` 之前 `ReplayCommandStream` → `ForwardPipeline`（或 GBuffer）的 **pass 函数整体**改成 append →
+判据。
+
+**判据**：模式 0/1/2 转储 **20/20 逐字节一致**（冻结配置 A/B）、0 新增 VUID、断言 0；外加
+**grep 断言**：渲染线程调用的 pass 函数体内不再出现 `cmd->vkCmd*` 风格的绑定/绘制调用（只剩 append）。
+
+**已知风险**：pass 描述里含附件句柄与清屏值（须能进命令流）、barrier 的"谁等谁"语义在延迟翻译后
+仍要对（现有 `m_ResourceStates` 记账发生在录制期 ⇒ 需要把它一起搬进命令流或改为执行期推导）、
+延迟销毁队列的时序。
+
+---
+
 ## 9. 附录 A：任务总表（可勾选）
 
 - [x] T0.1 线程归属断言（`ThreadAffinity` + `HE_ASSERT_RENDER_THREAD`）
