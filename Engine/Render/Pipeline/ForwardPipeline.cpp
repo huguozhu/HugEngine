@@ -138,18 +138,21 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
         rhi::BufferDesc lightBufDesc;
         lightBufDesc.size  = sizeof(GPULight) * MAX_LIGHTS;
         lightBufDesc.usage = rhi::BufferUsage::Storage;
-        m_LightBuffers[i] = device->CreateBuffer(lightBufDesc);
+        m_LightBuffers[i] = device->CreateBufferHandle(lightBufDesc);   // A-3
+        HE_ASSERT(m_LightBuffers[i].IsValid(), "ForwardPipeline: 光源缓冲句柄创建失败");
 
         rhi::BufferDesc shadowBufDesc;
         shadowBufDesc.size  = sizeof(GPUShadowData) * MAX_SHADOWS;
         shadowBufDesc.usage = rhi::BufferUsage::Storage;
-        m_ShadowBuffers[i] = device->CreateBuffer(shadowBufDesc);
+        m_ShadowBuffers[i] = device->CreateBufferHandle(shadowBufDesc); // A-3
+        HE_ASSERT(m_ShadowBuffers[i].IsValid(), "ForwardPipeline: 阴影缓冲句柄创建失败");
 
         // 阴影专用 Object Buffer（独立于场景，避免 CPU 录制覆盖）
         rhi::BufferDesc shadowObjDesc;
         shadowObjDesc.size  = sizeof(GPUObjectData) * MAX_OBJECTS;
         shadowObjDesc.usage = rhi::BufferUsage::Storage;
-        m_ShadowObjBuffers[i] = device->CreateBuffer(shadowObjDesc);
+        m_ShadowObjBuffers[i] = device->CreateBufferHandle(shadowObjDesc);  // A-3
+        HE_ASSERT(m_ShadowObjBuffers[i].IsValid(), "ForwardPipeline: 阴影对象缓冲句柄创建失败");
     }
 
     // --- Forward+ LightGrid / LightIndexList 初始占位缓冲区 ---
@@ -200,11 +203,11 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
         rhi::DescriptorSetHandle set = device->AllocateDescriptorSet(m_PerFrameLayout);
         device->UpdateDescriptorSet(set, kGPUBinding_GBufferB, rhi::DescriptorType::StorageBuffer,
-                                    m_LightBuffers[i].get());
+                                    device->ResolveBuffer(m_LightBuffers[i]));
         device->UpdateDescriptorSet(set, rhi::kBindingObjectData, rhi::DescriptorType::StorageBuffer,
                                     device->ResolveBuffer(m_ObjectBuffers[i]));
         device->UpdateDescriptorSet(set, kGPUBinding_Depth, rhi::DescriptorType::StorageBuffer,
-                                    m_ShadowBuffers[i].get());
+                                    device->ResolveBuffer(m_ShadowBuffers[i]));
         // Forward+: LightGrid / LightIndexList 初始占位
         device->UpdateDescriptorSet(set, rhi::kBindingLightGrid, rhi::DescriptorType::StorageBuffer,
                                     m_LightGridBuffer.get());
@@ -513,10 +516,14 @@ void ForwardPipeline::Shutdown() {
         m_Device->DestroyDescriptorSetLayout(m_PerFrameLayout);
     }
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        m_LightBuffers[i].reset();
+        m_Device->DestroyBufferHandle(m_LightBuffers[i]);
+        m_LightBuffers[i] = {};
         m_Device->DestroyBufferHandle(m_ObjectBuffers[i]);
         m_ObjectBuffers[i] = {};
-        m_ShadowBuffers[i].reset();
+        m_Device->DestroyBufferHandle(m_ShadowBuffers[i]);
+        m_ShadowBuffers[i] = {};
+        m_Device->DestroyBufferHandle(m_ShadowObjBuffers[i]);
+        m_ShadowObjBuffers[i] = {};
     }
     m_LightGridBuffer.reset();         // Forward+ LightGrid
     m_LightIndexListBuffer.reset();    // Forward+ LightIndexList
@@ -597,11 +604,11 @@ void ForwardPipeline::CollectLights(PushConstantData& pc)
 
     // 一次性上传（旧实现是每个光源 Map/Unmap 一次，写入内容相同）
     {
-        GPULight* lights = static_cast<GPULight*>(m_LightBuffers[RenderFrameSlot()]->Map());
+        GPULight* lights = static_cast<GPULight*>(m_Device->ResolveBuffer(m_LightBuffers[RenderFrameSlot()])->Map());
         if (lights) {
             for (u32 i = 0; i < lightCount; ++i) lights[i] = FrameSnap().lights[i].ToGpu();
         }
-        m_LightBuffers[RenderFrameSlot()]->Unmap();
+        if (auto* lbu = m_Device->ResolveBuffer(m_LightBuffers[RenderFrameSlot()])) lbu->Unmap();
     }
 
     // 无光源时提供默认方向光
@@ -611,9 +618,9 @@ void ForwardPipeline::CollectLights(PushConstantData& pc)
         gl.colorIntensity = float4(1.0f, 0.95f, 0.85f, 5.0f);
         gl.directionType  = float4(0.5f, -1.0f, 1.0f, 0.0f);
         gl.shadowIndex    = -1;
-        GPULight* lights = static_cast<GPULight*>(m_LightBuffers[RenderFrameSlot()]->Map());
+        GPULight* lights = static_cast<GPULight*>(m_Device->ResolveBuffer(m_LightBuffers[RenderFrameSlot()])->Map());
         if (lights) lights[0] = gl;
-        m_LightBuffers[RenderFrameSlot()]->Unmap();
+        if (auto* lbu = m_Device->ResolveBuffer(m_LightBuffers[RenderFrameSlot()])) lbu->Unmap();
     }
 }
 

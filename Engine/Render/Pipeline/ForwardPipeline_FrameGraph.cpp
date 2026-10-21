@@ -166,12 +166,12 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera)
                 // 缓存光源到 CPU（供 Cluster 剔除使用）
                 m_CachedLights.resize(pc.lightCount);
                 auto* gpuLights = static_cast<const GPULight*>(
-                    m_LightBuffers[RenderFrameSlot()]->Map());
+                    m_Device->ResolveBuffer(m_LightBuffers[RenderFrameSlot()])->Map());
                 if (gpuLights && pc.lightCount > 0) {
                     memcpy(m_CachedLights.data(), gpuLights,
                            pc.lightCount * sizeof(GPULight));
                 }
-                m_LightBuffers[RenderFrameSlot()]->Unmap();
+                if (auto* lbu = m_Device->ResolveBuffer(m_LightBuffers[RenderFrameSlot()])) lbu->Unmap();
 
                 // 构建 Cluster AABB + CPU 端光源剔除
                 float4x4 invVP = glm::inverse(camera.GetViewProjMatrix());

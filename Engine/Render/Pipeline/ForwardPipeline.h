@@ -121,11 +121,18 @@ public:
     rhi::IRHIBuffer*         GetCurrentObjectBuffer() {
         return m_Device ? m_Device->ResolveBuffer(m_ObjectBuffers[m_CurrentFrameSlot]) : nullptr;
     }
-    rhi::IRHIBuffer*         GetCurrentShadowBuffer() { return m_ShadowBuffers[m_CurrentFrameSlot].get(); }
-    rhi::IRHIBuffer*         GetCurrentLightBuffer()  { return m_LightBuffers[m_CurrentFrameSlot].get(); }
+    // A-3：句柄按需解析（代次过期 ⇒ nullptr，错用立刻暴露）
+    rhi::IRHIBuffer*         GetCurrentShadowBuffer() {
+        return m_Device ? m_Device->ResolveBuffer(m_ShadowBuffers[m_CurrentFrameSlot]) : nullptr;
+    }
+    rhi::IRHIBuffer*         GetCurrentLightBuffer() {
+        return m_Device ? m_Device->ResolveBuffer(m_LightBuffers[m_CurrentFrameSlot]) : nullptr;
+    }
     rhi::DescriptorSetHandle GetCurrentDescSet()      { return m_DescSets[m_CurrentFrameSlot]; }
     // 阴影专用 Object Buffer（独立于场景 Object Buffer，避免 CPU 录制时覆盖）
-    rhi::IRHIBuffer*         GetCurrentShadowObjectBuffer() { return m_ShadowObjBuffers[m_CurrentFrameSlot].get(); }
+    rhi::IRHIBuffer*         GetCurrentShadowObjectBuffer() {
+        return m_Device ? m_Device->ResolveBuffer(m_ShadowObjBuffers[m_CurrentFrameSlot]) : nullptr;
+    }
 
     // HDR 纹理访问（供 ToneMapPass / AA 使用）：取**当前飞行帧槽位**那一份
     rhi::IRHITexture* GetHDRTarget()  const { return m_HDRTarget[m_CurrentFrameSlot].get(); }
@@ -183,7 +190,7 @@ private:
         rhi::IRHITexture* rsmPos = nullptr; rhi::IRHITexture* rsmFlux = nullptr; rhi::IRHITexture* rsmRad = nullptr;
     };
     GIBindingCache m_GIBindingCache[MAX_FRAMES_IN_FLIGHT];
-    std::unique_ptr<rhi::IRHIBuffer> m_LightBuffers[MAX_FRAMES_IN_FLIGHT];
+    rhi::RHIBufferHandle m_LightBuffers[MAX_FRAMES_IN_FLIGHT]{};    // A-3：句柄持有
     // 阶段 1 T1.3b：本帧光源的**快照**（游戏线程侧收集的不可变输入）。
     // 必须是成员：帧图 lambda 在 `CollectLights` 返回之后才执行，局部变量会悬垂。
     /// 本帧快照（装配输出 + `Render` 消费的那一份）
@@ -225,8 +232,8 @@ private:
     std::unique_ptr<rhi::IRHIBuffer> m_GIBuffers[MAX_FRAMES_IN_FLIGHT];
     /// A-3 第一批：对象缓冲改成**句柄**（所有权在设备的资源表里，代次可检出悬挂引用）
     rhi::RHIBufferHandle m_ObjectBuffers[MAX_FRAMES_IN_FLIGHT]{};
-    std::unique_ptr<rhi::IRHIBuffer> m_ShadowBuffers[MAX_FRAMES_IN_FLIGHT];
-    std::unique_ptr<rhi::IRHIBuffer> m_ShadowObjBuffers[MAX_FRAMES_IN_FLIGHT];  // 阴影专用 Object Buffer
+    rhi::RHIBufferHandle m_ShadowBuffers[MAX_FRAMES_IN_FLIGHT]{};    // A-3：句柄持有
+    rhi::RHIBufferHandle m_ShadowObjBuffers[MAX_FRAMES_IN_FLIGHT]{}; // A-3：阴影专用 Object Buffer（句柄）
     u32 m_CurrentFrameSlot = 0;
 
     // HDR 离屏渲染：颜色与深度都按**飞行帧**分份（与 m_LightBuffers / m_ObjectBuffers 同一惯例）
