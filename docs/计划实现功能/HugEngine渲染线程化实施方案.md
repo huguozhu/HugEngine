@@ -698,6 +698,30 @@ private:
 持有者需要按模块分批（每批都要 A/B），更适合作为并行长期路线。两者在 L4-3 汇合（那时帧外壳的
 资源创建才真正需要句柄）。
 
+**L4-3 的可行性结论（2026-10，做完 L4-1/L4-2 之后）——它是 all-or-nothing**
+
+L4-3 的正确形态是：**RHI 线程**执行 `BeginCommandBuffer → 翻译整帧命令流 → EndCommandBuffer →
+Submit → Present`，渲染线程只 append。由此推出一个硬约束：
+
+> **同一张命令缓冲不能既由渲染线程录制、又由 RHI 线程录制。**
+
+因为 `vkCmd*` 必须落在 `Begin` 与 `End` 之间，而 `End` 之后**只允许** `EndCommandBuffer` 一次；
+把"部分 pass 命令化、其余留给渲染线程直录"混在一起，必然出现"渲染线程在 RHI 线程的 Begin/End
+之间插命令"的竞态 ⇒ 非法。⇒ **L4-3 没有增量做法**：要么整帧全部变成 append（渲染线程零 Vulkan 调用
+成立），要么维持现状。
+
+代价量化（按现有代码）：`Deferred` 路径的 `RenderGraph` 各 pass（GBuffer/Lighting/SSR/SSAO/GI 合成）、
+`Forward` 路径的 HDR pass 内 10 个调用点、阴影三种技术、后处理链、`FlushComputeWork`、以及
+`RenderGraph::Execute` 自身对 `IRHICommandList*` 的贯穿 —— 粗略 50+ 个录制点，且每个都要先有
+`BeginPass`/`EndPass`/`ExecuteSecondary`/`ExecuteIndirect` 等命令形态（L3 里已部分备好）。
+
+**结论与建议**：
+- L4-1/L4-2 已经把"帧外壳"收口到 `FramePresenter`（acquire/present/Begin/End/Submit 都在一处），
+  这是 L4-3 的**必要前置且已完成**；
+- L4-3 本身应作为**独立项目**排期（预计数周），不适合与 A-3 混在做增量批次里；
+- 在 L4-3 之前，最有价值的增量工作是继续 **A-3 的 180 处持有者**（每批 1 次 A/B、可随时停下），
+  因为它同时降低 L4-3 的难度（帧内创建不再需要跨线程句柄往返）。
+
 #### L3 执行清单（Forward 非 RG 路径，按调用点）
 
 选 Forward 的 HDR pass 作首个 L3 试点：它的结果**在转储里可见**（`hdr.f16` 是 20 个目标之一），
