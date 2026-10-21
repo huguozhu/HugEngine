@@ -35,20 +35,22 @@ public:
                 const std::vector<GPUShadowData>& shadowData,u32 dataStartIndex)override;
 
     u32 GetShadowMapCount()const override{return 1;}
-    rhi::IRHITexture* GetShadowMap(u32)const override{return m_RectShadowMap[m_FrameSlot].get();}
-    rhi::IRHITexture* GetShadowMapAt(u32 slot,u32)const override{
-        return m_RectShadowMap[(slot<MAX_FRAMES_IN_FLIGHT)?slot:0u].get();}
-    rhi::IRHISampler* GetShadowSampler()const override{return m_RectShadowSampler.get();}
+    rhi::IRHITexture* GetShadowMap(u32)const override{   // A-3：句柄按需解析
+        return m_Device?m_Device->ResolveTexture(m_RectShadowMap[m_FrameSlot]):nullptr;}
+    rhi::IRHITexture* GetShadowMapAt(u32 slot,u32)const override{   // A-3
+        return m_Device?m_Device->ResolveTexture(m_RectShadowMap[(slot<MAX_FRAMES_IN_FLIGHT)?slot:0u]):nullptr;}
+    rhi::IRHISampler* GetShadowSampler()const override{   // A-3
+        return m_Device?m_Device->ResolveSampler(m_RectShadowSampler):nullptr;}
     void SetFrameSlot(u32 slot)override{m_FrameSlot=(slot<MAX_FRAMES_IN_FLIGHT)?slot:0u;}
 
     void CreatePSO(rhi::DescriptorSetLayoutHandle layout);
 
 private:
     rhi::ShaderBytecode m_ShadowVS,m_ShadowFS;
-    std::unique_ptr<rhi::IRHIPipelineState> m_ShadowPSO;
+    rhi::RHIPipelineStateHandle m_ShadowPSO{};   // A-3：句柄持有
     // 每飞行帧各一张（每帧清空重画 ⇒ 单份会被在飞帧采到中间态）
-    std::unique_ptr<rhi::IRHITexture> m_RectShadowMap[MAX_FRAMES_IN_FLIGHT];
-    std::unique_ptr<rhi::IRHISampler> m_RectShadowSampler;
+    rhi::RHITextureHandle m_RectShadowMap[MAX_FRAMES_IN_FLIGHT]{};   // A-3：句柄持有
+    rhi::RHISamplerHandle m_RectShadowSampler{};   // A-3：句柄持有
     u32 m_MapSize = kDefaultRectShadowSize;
     u32 m_FrameSlot = 0;
 

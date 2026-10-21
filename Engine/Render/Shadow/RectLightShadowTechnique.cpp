@@ -37,13 +37,16 @@ bool RectLightShadowTechnique::Initialize(rhi::IRHIDevice* device){
     d.mipLevels=1;
     d.arrayLayers=1;
     d.usage=rhi::TextureUsage::DepthStencil|rhi::TextureUsage::ShaderResource;
-    for(u32 i=0;i<MAX_FRAMES_IN_FLIGHT;++i)m_RectShadowMap[i]=device->CreateTexture(d);
+    for(u32 i=0;i<MAX_FRAMES_IN_FLIGHT;++i){   // A-3：逐槽位句柄创建
+        m_RectShadowMap[i]=device->CreateTextureHandle(d);
+        HE_ASSERT(m_RectShadowMap[i].IsValid(),"RectLightShadowTechnique: 阴影贴图句柄创建失败");
+    }
 
     rhi::SamplerDesc sd;
     sd.minFilter=rhi::FilterMode::Linear;
     sd.magFilter=rhi::FilterMode::Linear;
     sd.addressU=sd.addressV=rhi::AddressMode::ClampToEdge;
-    m_RectShadowSampler=device->CreateSampler(sd);
+    m_RectShadowSampler=device->CreateSamplerHandle(sd);
 
     HE_CORE_INFO("RectLightShadowTechnique init ({}×{})", m_MapSize, m_MapSize);
     return true;
@@ -67,14 +70,16 @@ void RectLightShadowTechnique::CreatePSO(rhi::DescriptorSetLayoutHandle layout){
     d.depthFormat=rhi::Format::D32_FLOAT;
     d.colorAttachmentCount=0;
     d.pushConstantRanges={pcr};d.descriptorSetLayouts={layout};d.debugName="RectDepth";
-    m_ShadowPSO=m_Device->CreatePipelineState(d);
-    HE_ASSERT(m_ShadowPSO,"RectLightShadowTechnique: PSO failed");
+    m_ShadowPSO=m_Device->CreatePipelineStateHandle(d);   // A-3
+    HE_ASSERT(m_ShadowPSO.IsValid(),"RectLightShadowTechnique: PSO 句柄创建失败");
 }
 
 void RectLightShadowTechnique::Shutdown(){
-    for(auto& m:m_RectShadowMap)m.reset();
-    m_RectShadowSampler.reset();
-    m_ShadowPSO.reset();
+    for(auto& h:m_RectShadowMap){   // A-3：贴图句柄化后必须显式销毁
+        m_Device->DestroyTextureHandle(h); h = {};
+    }
+    m_Device->DestroySamplerHandle(m_RectShadowSampler); m_RectShadowSampler = {};
+    m_Device->DestroyPipelineStateHandle(m_ShadowPSO); m_ShadowPSO = {};
     m_Device=nullptr;
 }
 
@@ -116,7 +121,7 @@ u32 RectLightShadowTechnique::CollectLights(const FrameSceneSnapshot& snapshot,c
 void RectLightShadowTechnique::Render(rhi::IRHICommandList* cmd,const FrameSceneSnapshot& snapshot,
                                        const MeshRegistry& registry,
                                        const std::vector<GPUShadowData>& sd,u32 start){
-    if(!m_RectShadowMap[m_FrameSlot]||!m_ExternalObjectBuffer||m_ExternalDescSet==rhi::kInvalidSet)return;
+    if(!m_RectShadowMap[m_FrameSlot].IsValid()||!m_ExternalObjectBuffer||m_ExternalDescSet==rhi::kInvalidSet)return;
     for(u32 li=start;li<(u32)sd.size()&&li-start<MAX_SHADOWS;++li){
         const auto& sm=sd[li];
         float3 lp(sm.pointLightData.x,sm.pointLightData.y,sm.pointLightData.z);
@@ -127,10 +132,10 @@ void RectLightShadowTechnique::Render(rhi::IRHICommandList* cmd,const FrameScene
         float4x4 vp=sm.lightViewProj[0];
 
         rhi::ClearValue cv{};cv.depth=1.f;
-        void* depthView=m_RectShadowMap[m_FrameSlot]->GetNativeHandle();
-        cmd->SetPipeline(m_ShadowPSO.get());
+        void* depthView=m_Device->ResolveTexture(m_RectShadowMap[m_FrameSlot])->GetNativeHandle();
+        cmd->SetPipeline(m_Device->ResolvePipelineState(m_ShadowPSO));
         cmd->BeginOffscreenPass(nullptr,depthView,m_MapSize,m_MapSize,&cv);
-        cmd->SetPipeline(m_ShadowPSO.get());
+        cmd->SetPipeline(m_Device->ResolvePipelineState(m_ShadowPSO));
         cmd->SetViewport({0,(float)m_MapSize,(float)m_MapSize,-(float)m_MapSize,0,1});
         cmd->SetScissor({0,0,m_MapSize,m_MapSize});
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_ExternalDescSet);
@@ -156,7 +161,7 @@ void RectLightShadowTechnique::Render(rhi::IRHICommandList* cmd,const FrameScene
         // 若声明为 DepthStencilWrite 会给出错误的 oldLayout
         //（VUID-VkImageMemoryBarrier-oldLayout-01197，实测每帧触发）
         cmd->PipelineBarrier(rhi::PipelineStage::LateFragmentTests,rhi::PipelineStage::FragmentShader,
-            rhi::ResourceState::DepthStencilRead,rhi::ResourceState::DepthStencilRead,m_RectShadowMap[m_FrameSlot].get());
+            rhi::ResourceState::DepthStencilRead,rhi::ResourceState::DepthStencilRead,m_Device->ResolveTexture(m_RectShadowMap[m_FrameSlot]));
     }
 }
 
