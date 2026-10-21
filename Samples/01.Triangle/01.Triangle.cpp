@@ -11,6 +11,7 @@
 #include "Core/Engine.h"
 #include "Platform/Window.h"
 #include "RHI/RHI.h"
+#include "RHI/FramePresenter.h"   // L4-1：帧外壳（acquire/present）收口
 #include "Editor/ImGuiIntegration.h"
 #include "Triangle.vert.spv.h"
 #include "Triangle.frag.spv.h"
@@ -189,9 +190,12 @@ int main() {
     HE_CORE_INFO("01.Triangle started — ImGui 切换渲染模式");
     u64 frameIndex = 0;
 
+    // L4-1：帧外壳的 acquire/present 收口（L4-3 把整帧变成命令流时只改这里）
+    rhi::FramePresenter framePresenter(swapchain.get());
+
     while (!engine.GetWindow()->ShouldClose()) {
         engine.GetWindow()->PollEvents();
-        if (!swapchain->AcquireNextImage()) continue;
+        if (!framePresenter.BeginFrame()) continue;
 
         u32 w = swapchain->GetWidth();
         u32 h = swapchain->GetHeight();
@@ -279,7 +283,7 @@ int main() {
         cmdList->End();
 
         device->Submit(cmdList.get());
-        swapchain->Present(true);
+        framePresenter.EndFrame(true);
         frameIndex++;
     }
 

@@ -13,6 +13,7 @@
 #include <chrono>   // 步骤 37：CPU 侧帧时（判定 CPU 受限还是 GPU 受限）
 #include "Platform/Window.h"
 #include "RHI/RHI.h"
+#include "RHI/FramePresenter.h"   // L4-1：帧外壳（acquire/present）收口
 #include "RHI/ThreadAffinity.h"      // T2.4：渲染线程启动/停止钩子认领与撤销 RHI 归属
 #include "Threading/RenderThread.h"  // T2.4：命令队列 + 渲染线程（严格握手）
 #include "Pipeline/DeferredPipeline.h"
@@ -1012,6 +1013,9 @@ int main() {
     // 控件里请求的管线切换（含 RHI）延迟到渲染命令里做
     bool g_PendingPipelineSwitch = false;
 
+    // L4-1：帧外壳的 acquire/present 收口（L4-3 把整帧变成命令流时只改这里）
+    rhi::FramePresenter framePresenter(swapchain.get());
+
     while (!engine.GetWindow()->ShouldClose()) {
         f64 now       = glfwGetTime();
         f32 deltaTime = static_cast<f32>(now - lastTime);
@@ -1083,7 +1087,7 @@ int main() {
         // --- 渲染（按选择的管线执行；各管线均通过 RenderGraph 自动编排）---
         // ---- 命令 1：Acquire + 录制（管线 + 打开 ImGui 的 RP）----
         auto recordScene = [&]() {
-            if (!swapchain->AcquireNextImage()) {
+            if (!framePresenter.BeginFrame()) {
                 frameAborted = true;   // 命令可能在渲染线程跑 ⇒ 用标志代替 while 的 continue
                 return;
             }
@@ -2181,7 +2185,7 @@ int main() {
 
             // 垂直同步必须与创建时一致：只改 SwapChainDesc 而这里仍传 true，帧率照样被锁在刷新率
             // （步骤 37 第一次测就是这么被误导的：pass 合计 14 ms 却只有 19 fps）。
-            swapchain->Present(!noVsync);
+            framePresenter.EndFrame(!noVsync);
             frameIndex++;
 
             // 【步骤 37 / L6 帧时判据】周期性打印**真实墙钟帧率**与 CPU 侧耗时。

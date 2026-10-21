@@ -9,6 +9,7 @@
 #include "Core/Engine.h"
 #include "Platform/Window.h"
 #include "RHI/RHI.h"
+#include "RHI/FramePresenter.h"   // L4-1：帧外壳（acquire/present）收口
 #include "RHI/ThreadAffinity.h"      // T2.4：渲染线程启动/停止钩子认领与撤销 RHI 归属
 #include "Threading/RenderThread.h"  // T2.4：命令队列 + 渲染线程（严格握手）
 #include "Pipeline/DeferredPipeline.h"
@@ -658,6 +659,9 @@ int main() {
         }
     };
 
+    // L4-1：帧外壳的 acquire/present 收口（L4-3 把整帧变成命令流时只改这里）
+    rhi::FramePresenter framePresenter(swapchain.get());
+
     while (!engine.GetWindow()->ShouldClose()) {
         f64 now       = glfwGetTime();
         f32 deltaTime = static_cast<f32>(now - lastTime);
@@ -720,7 +724,7 @@ int main() {
 
         // ---- 命令 1：Acquire + 录制（管线 + 打开 ImGui 的 RP）----
         auto recordScene = [&]() {
-            if (!swapchain->AcquireNextImage()) {
+            if (!framePresenter.BeginFrame()) {
                 frameAborted = true;   // 命令可能在渲染线程跑 ⇒ 用标志代替 while 的 continue
                 return;
             }
@@ -1196,7 +1200,7 @@ int main() {
 
             device->Submit(cmdList.get());
             pipeline.FlushComputeWork();  // AsyncCompute: Graphics Submit 之后提交 Compute 工作
-            swapchain->Present(true);
+            framePresenter.EndFrame(true);
             frameIndex++;        };
         submitRender(recordUiAndPresent);
 

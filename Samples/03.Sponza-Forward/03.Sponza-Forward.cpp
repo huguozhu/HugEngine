@@ -11,6 +11,7 @@
 #include "Core/Engine.h"
 #include "Platform/Window.h"
 #include "RHI/RHI.h"
+#include "RHI/FramePresenter.h"   // L4-1：帧外壳（acquire/present）收口
 #include "RHI/ThreadAffinity.h"      // T2.4：渲染线程启动/停止钩子认领与撤销 RHI 归属
 #include "Threading/RenderThread.h"  // T2.4：命令队列 + 渲染线程（严格握手）
 #include "Pipeline/ForwardPipeline.h"
@@ -637,6 +638,9 @@ int main() {
     int  renderMode  = 0;  // 默认光栅化渲染（ForwardPipeline），按 T 切换 RT 模式
     int  rtSampleCount = 1;                   // RT 每像素采样数（1-16）
 
+    // L4-1：帧外壳的 acquire/present 收口（L4-3 把整帧变成命令流时只改这里）
+    rhi::FramePresenter framePresenter(swapchain.get());
+
     while (!engine.GetWindow()->ShouldClose()) {
         f64 now       = glfwGetTime();
         f32 deltaTime = static_cast<f32>(now - lastTime);
@@ -704,7 +708,7 @@ int main() {
 
         // ---- 命令 1：Acquire + 录制（3D + 打开 ImGui 的 RP）----
         auto recordScene = [&]() {
-            if (!swapchain->AcquireNextImage()) {
+            if (!framePresenter.BeginFrame()) {
                 frameAborted = true;   // 命令可能在渲染线程跑 ⇒ 用标志代替 while 的 continue
                 return;
             }
@@ -1047,7 +1051,7 @@ int main() {
             cmdList->End();
 
             device->Submit(cmdList.get());
-            swapchain->Present(true);
+            framePresenter.EndFrame(true);
             frameIndex++;        };
         submitRender(recordUiAndPresent);
 
