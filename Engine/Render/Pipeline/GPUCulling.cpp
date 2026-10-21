@@ -245,7 +245,7 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
         sd.addressU = sd.addressV = rhi::AddressMode::ClampToEdge;
         sd.minLod = 0;
         sd.maxLod = (float)kHiZMips;
-        m_HiZSampler = device->CreateSampler(sd);
+        m_HiZSampler = device->CreateSamplerHandle(sd);   // A-3
     }
 
     m_Device = device;
@@ -285,8 +285,9 @@ void GPUCulling::Shutdown(rhi::IRHIDevice* device) {
     m_IndirectCmdBuf.reset();
     m_DrawCountBuf.reset();
     m_Device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};
-    m_HiZTexture.reset();
-    m_HiZSampler.reset();
+    m_Device->DestroyTextureHandle(m_HiZTexture); m_HiZTexture = {};
+    m_Device->DestroySamplerHandle(m_HiZSampler);
+    m_HiZSampler = {};
     m_Device->DestroyPipelineStateHandle(m_HiZ_PSO); m_HiZ_PSO = {};
 
     // PTG 资源清理
@@ -344,23 +345,27 @@ void GPUCulling::SetDepthTexture(rhi::IRHIDevice* device, rhi::IRHITexture* dept
 
     // 单阶段/Phase 1: 绑定上帧深度
     device->UpdateDescriptorSet(m_DescSet, kCullBindDepth, rhi::DescriptorType::CombinedImageSampler,
-                                depthTex, m_HiZSampler.get());
+                                depthTex, m_Device->ResolveSampler(m_HiZSampler));
     device->UpdateDescriptorSet(m_Phase1Set, 3, rhi::DescriptorType::CombinedImageSampler,
-                                depthTex, m_HiZSampler.get());
+                                depthTex, m_Device->ResolveSampler(m_HiZSampler));
 
     // Phase 2: 绑定当前帧深度（GBuffer 之后由外部更新）
     device->UpdateDescriptorSet(m_Phase2Set, kPhase2BindHiZ, rhi::DescriptorType::CombinedImageSampler,
-                                depthTex, m_HiZSampler.get());
+                                depthTex, m_Device->ResolveSampler(m_HiZSampler));
 
     // PTG: 绑定深度纹理（与单阶段共用上帧深度）
     if (m_PTGActive) {
         device->UpdateDescriptorSet(m_PTGSet, 2, rhi::DescriptorType::CombinedImageSampler,
-                                    depthTex, m_HiZSampler.get());
+                                    depthTex, m_Device->ResolveSampler(m_HiZSampler));
     }
 
     // ── 创建/重建 Hi-Z 纹理 ──
-    if (!m_HiZTexture || m_HiZTexture->GetWidth() != width || m_HiZTexture->GetHeight() != height) {
-        m_HiZTexture.reset();
+    // A-3：先判句柄有效（过期 ⇒ 视为需要重建），再比较尺寸
+    if (!m_HiZTexture.IsValid() ||
+        m_Device->ResolveTexture(m_HiZTexture)->GetWidth()  != width ||
+        m_Device->ResolveTexture(m_HiZTexture)->GetHeight() != height) {
+        m_Device->DestroyTextureHandle(m_HiZTexture);
+        m_HiZTexture = {};
 
         rhi::TextureDesc hizDesc;
         hizDesc.format = rhi::Format::R32_FLOAT;
@@ -368,7 +373,8 @@ void GPUCulling::SetDepthTexture(rhi::IRHIDevice* device, rhi::IRHITexture* dept
         hizDesc.height = height;
         hizDesc.mipLevels = kHiZMips;
         hizDesc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::UnorderedAccess;
-        m_HiZTexture = device->CreateTexture(hizDesc);
+        m_HiZTexture = device->CreateTextureHandle(hizDesc);   // A-3
+        HE_ASSERT(m_HiZTexture.IsValid(), "GPUCulling: Hi-Z 纹理句柄创建失败");
         HE_CORE_INFO("GPUCulling: Hi-Z texture created ({}x{}×{} mips)", width, height, kHiZMips);
 
         // 创建每 mip 的 storage/sampled 视图（供未来金字塔构建使用）
@@ -381,8 +387,8 @@ void GPUCulling::SetDepthTexture(rhi::IRHIDevice* device, rhi::IRHITexture* dept
                 device->DestroyTextureMipView(m_MipViews[i].sampledView);
                 m_MipViews[i].sampledView = nullptr;
             }
-            m_MipViews[i].storageView = device->CreateTextureMipStorageView(m_HiZTexture.get(), i);
-            m_MipViews[i].sampledView = device->CreateTextureMipSampledView(m_HiZTexture.get(), i);
+            m_MipViews[i].storageView = device->CreateTextureMipStorageView(m_Device->ResolveTexture(m_HiZTexture), i);
+            m_MipViews[i].sampledView = device->CreateTextureMipSampledView(m_Device->ResolveTexture(m_HiZTexture), i);
         }
     }
 }
@@ -476,7 +482,7 @@ void GPUCulling::DispatchPhase1(rhi::IRHICommandList* cmd, const float4x4& viewP
 // ============================================================
 
 void GPUCulling::BuildHiZPyramid(rhi::IRHICommandList* cmd, u32 screenW, u32 screenH) {
-    if (!m_Initialized || !m_DepthInput || !m_HiZTexture) return;
+    if (!m_Initialized || !m_DepthInput || !m_HiZTexture.IsValid()) return;
     if (screenW < 2 || screenH < 2) { m_HiZMipCount = 1; return; }
 
     // 计算需要的 mip 级数（最小 1×1）
@@ -499,12 +505,12 @@ void GPUCulling::BuildHiZPyramid(rhi::IRHICommandList* cmd, u32 screenW, u32 scr
             // 第一级：从原始深度纹理下采样到 Hi-Z mip 1
             m_Device->UpdateDescriptorSet(m_HiZSet, 0,
                 rhi::DescriptorType::CombinedImageSampler,
-                m_DepthInput, m_HiZSampler.get());
+                m_DepthInput, m_Device->ResolveSampler(m_HiZSampler));
         } else {
             // 后续级：从 Hi-Z mip N 下采样到 mip N+1
             m_Device->UpdateDescriptorSet(m_HiZSet, 0,
                 rhi::DescriptorType::CombinedImageSampler,
-                m_HiZTexture.get(), m_HiZSampler.get());
+                m_Device->ResolveTexture(m_HiZTexture), m_Device->ResolveSampler(m_HiZSampler));
         }
         // 目标：Hi-Z mip N+1 的存储图像视图
         m_Device->UpdateDescriptorSetWithImageView(m_HiZSet, 1,
@@ -539,7 +545,7 @@ void GPUCulling::BuildHiZPyramid(rhi::IRHICommandList* cmd, u32 screenW, u32 scr
     // 金字塔构建完成后，将 Phase 2 的深度绑定切换为 Hi-Z 纹理
     m_Device->UpdateDescriptorSet(m_Phase2Set, kPhase2BindHiZ,
         rhi::DescriptorType::CombinedImageSampler,
-        m_HiZTexture.get(), m_HiZSampler.get());
+        m_Device->ResolveTexture(m_HiZTexture), m_Device->ResolveSampler(m_HiZSampler));
 }
 
 // ============================================================

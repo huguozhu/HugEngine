@@ -92,9 +92,9 @@ public:
     rhi::DescriptorSetHandle GetPhase2Set() const { return m_Phase2Set; }
     // Phase 2 描述符集绑定号（供外部引用——如 DeferredPipeline_FrameGraph 每帧更新 Hi-Z 绑定）
     static constexpr u32 kPhase2BindHiZ = 3;
-    rhi::IRHISampler* GetHiZSampler() const { return m_HiZSampler.get(); }
+    rhi::IRHISampler* GetHiZSampler() const { return m_Device ? m_Device->ResolveSampler(m_HiZSampler) : nullptr; }
     /// Hi-Z 深度金字塔纹理（供 SSR 层次追踪复用）
-    rhi::IRHITexture* GetHiZTexture() const { return m_HiZTexture.get(); }
+    rhi::IRHITexture* GetHiZTexture() const { return m_Device ? m_Device->ResolveTexture(m_HiZTexture) : nullptr; }
 
 private:
     bool m_Initialized = false;
@@ -128,8 +128,8 @@ private:
 
     // Hi-Z 金字塔
     static constexpr u32 kHiZMips = 8;  // 最多 8 级（最大支持 256×256 以上的分辨率）
-    std::unique_ptr<rhi::IRHITexture> m_HiZTexture;      // 完整 Hi-Z 深度金字塔（ShaderResource | UnorderedAccess）
-    std::unique_ptr<rhi::IRHISampler> m_HiZSampler;      // 点采样器
+    rhi::RHITextureHandle m_HiZTexture{};      // A-3：完整 Hi-Z 深度金字塔（ShaderResource | UnorderedAccess）
+    rhi::RHISamplerHandle m_HiZSampler{};      // A-3：点采样器
     rhi::RHIPipelineStateHandle m_HiZ_PSO{};   // A-3：句柄持有   // HiZDownsample PSO
     rhi::DescriptorSetLayoutHandle m_HiZLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_HiZSet    = rhi::kInvalidSet;  // 单 set，每次 dispatch 前更新
