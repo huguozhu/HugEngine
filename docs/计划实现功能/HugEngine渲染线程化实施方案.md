@@ -672,6 +672,30 @@ private:
 结论：**P2 的"零 Vulkan 调用"目标在 L3+L4 都完成前不应声称达成**；本阶段的合法成果是 L1+L2（已落地并
 按"行为中立"验收），以及 L3/L4 的设计与判据。
 
+#### L3 执行清单（Forward 非 RG 路径，按调用点）
+
+选 Forward 的 HDR pass 作首个 L3 试点：它的结果**在转储里可见**（`hdr.f16` 是 20 个目标之一），
+且这条路径不走 RenderGraph（不需要改 RG 的 `Execute` 签名）。需要 commandize 的调用点：
+
+| # | 调用点 | 现状 | 要 append 的命令 |
+|---|---|---|---|
+| 1 | `ForwardPipeline::BeginHDRPass` | `cmd->BeginRenderPass(desc)`（2 附件 + 清屏 + w/h） | `BeginPass`（新；附件/清屏值进 arena） |
+| 2 | `PrepareGI` → `GI_IBL::Render` / RSM | 若干 `SetPipeline`/`BindDescriptorSet`/`Draw` | 已有类型 + `SetVertexBuffer`/`SetIndexBuffer`/`DrawIndexed` |
+| 3 | `RenderSkybox` → `SkyboxPass::Render` | 1 次全屏 draw（`BindDescriptorSet` + `Draw`） | 同上 |
+| 4 | `RenderScene`（MTCR 分支） | `ExecuteSecondary` × N（次级列表由 worker 录制） | `ExecuteSecondary`（新；载荷 = 列表指针） |
+| 5 | `RenderScene`（indirect 分支） | `SetVertexBuffer`/`SetIndexBuffer`/`BindDescriptorSet` + `ExecuteIndirect` | 已有类型 + `ExecuteIndirect`（新） |
+| 6 | `RenderScene`（实例化段） | 同 5，`DrawIndexed(count)` 带实例数 | `DrawIndexed` 载荷加 `instanceCount` |
+| 7 | `EndHDRPass` | `cmd->EndRenderPass()` + 屏障 | `EndPass` + 现有 `PipelineBarrier` |
+| 8 | `RenderToneMapPass` | 一次 pass + 1 draw | 同 1/3 |
+| 9 | AA（`m_AntiAliasing->SetInput` + `Render`） | 一次 pass + 1 draw | 同 1/3 |
+| 10 | 帧外壳（`Begin/End`、`Acquire`、`Submit`、`Present`） | —— | **属 L4**，不在本试点范围 |
+
+新增命令类型共 **4 个**：`BeginPass`、`EndPass`、`ExecuteSecondary`、`ExecuteIndirect`（+ `DrawIndexed`
+载荷补 `instanceCount`），全部 ≤64B 或走 arena；翻译层各加一个 `case`。
+
+**判据**：模式 0/1/2 冻结配置 A/B **20/20 逐字节一致**（`hdr.f16` 必须一致，否则说明 pass 描述有偏差）、
+0 新增 VUID、断言 0；外加 grep 断言：上表 1~9 号函数体内不再出现 `cmd->` 的 pass/绑定/绘制调用。
+
 ---
 
 ## 9. 附录 A：任务总表（可勾选）
