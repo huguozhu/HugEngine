@@ -23,7 +23,7 @@ public:
 
     rhi::IRHITexture* GetOutput()        const { return m_Output.get(); }
     rhi::IRHISampler* GetOutputSampler() const { return m_OutSampler.get(); }
-    void PreBind(rhi::IRHICommandList* cmd) const { if (m_Ready) cmd->SetPipeline(m_PSO.get()); }
+    void PreBind(rhi::IRHICommandList* cmd) const { if (m_Ready) cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO)); }
 
 private:
     rhi::IRHIDevice* m_Device  = nullptr;
@@ -31,7 +31,7 @@ private:
     u32 m_Height = 0;
     bool m_Ready = false;
 
-    std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
+    rhi::RHIPipelineStateHandle m_PSO{};   // A-3：句柄持有
     std::unique_ptr<rhi::IRHITexture> m_Output;
     std::unique_ptr<rhi::IRHISampler> m_OutSampler;
     rhi::DescriptorSetLayoutHandle m_Layout = rhi::kInvalidLayout;

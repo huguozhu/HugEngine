@@ -43,8 +43,8 @@ bool AutoExposurePass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     d.bindPoint = rhi::PipelineBindPoint::Compute;
     d.computeShader = &m_CS;
     d.pushConstantRanges = {pc}; d.descriptorSetLayouts = {m_Layout}; d.debugName = "AutoExposure";
-    m_PSO = device->CreatePipelineState(d);
-    HE_ASSERT(m_PSO, "AutoExposurePass: PSO failed");
+    m_PSO = device->CreatePipelineStateHandle(d);
+    HE_ASSERT(m_PSO.IsValid(), "AutoExposurePass: PSO failed");
 
     // SSBO: 256 个 partial sum（16×16 组 × 256 线程/组 → 256 组）
     {
@@ -61,7 +61,7 @@ bool AutoExposurePass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
 }
 
 void AutoExposurePass::Shutdown() {
-    m_PSO.reset();
+    m_Device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};
     m_ResultBuf.reset();
     if (m_Device && m_Layout != rhi::kInvalidLayout) m_Device->DestroyDescriptorSetLayout(m_Layout);
     m_Device = nullptr;
@@ -93,7 +93,7 @@ void AutoExposurePass::Render(rhi::IRHICommandList* cmd) {
     pc.deltaTime    = kDefaultDeltaTime;
     pc.totalPixels  = m_Width * m_Height;
 
-    cmd->SetPipeline(m_PSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     cmd->Dispatch(16, rhi::kStageMaskFragment, 1);  // 256 组

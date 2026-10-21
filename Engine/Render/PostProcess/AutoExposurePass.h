@@ -47,7 +47,7 @@ private:
     float m_PrevLogLum = -2.47f;  // 历史平均对数亮度
 
     rhi::ShaderBytecode m_CS;
-    std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
+    rhi::RHIPipelineStateHandle m_PSO{};   // A-3：句柄持有
     rhi::DescriptorSetLayoutHandle m_Layout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_Set    = rhi::kInvalidSet;
     std::unique_ptr<rhi::IRHIBuffer> m_ResultBuf;  // 256 floats

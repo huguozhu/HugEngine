@@ -21,7 +21,7 @@ public:
 
     rhi::IRHITexture* GetOutput() const { return m_Output.get(); }
     rhi::IRHISampler* GetOutputSampler() const { return m_OutSampler.get(); }
-    void PreBind(rhi::IRHICommandList* cmd) const { if (m_Ready) cmd->SetPipeline(m_PSO.get()); }
+    void PreBind(rhi::IRHICommandList* cmd) const { if (m_Ready) cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO)); }
 
     // 参数
     float GetSaturation() const { return m_Saturation; }
@@ -36,7 +36,7 @@ private:
     float m_Contrast   = 1.0f;
     float m_Vibrance   = 0.0f;
 
-    std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
+    rhi::RHIPipelineStateHandle m_PSO{};   // A-3：句柄持有
     std::unique_ptr<rhi::IRHITexture> m_Output;
     std::unique_ptr<rhi::IRHISampler> m_OutSampler;
     rhi::DescriptorSetLayoutHandle m_Layout = rhi::kInvalidLayout;

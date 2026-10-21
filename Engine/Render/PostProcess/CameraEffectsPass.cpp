@@ -42,8 +42,8 @@ bool CameraEffectsPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 heigh
     d.colorAttachmentCount = 1;
     d.colorFormats[0] = rhi::Format::BGRA8_UNORM;
     d.pushConstantRanges = {pc}; d.descriptorSetLayouts = {m_Layout}; d.debugName = "CameraEffects";
-    m_PSO = device->CreatePipelineState(d);
-    HE_ASSERT(m_PSO, "CameraEffectsPass: PSO failed");
+    m_PSO = device->CreatePipelineStateHandle(d);
+    HE_ASSERT(m_PSO.IsValid(), "CameraEffectsPass: PSO failed");
 
     rhi::TextureDesc td;
     td.format = rhi::Format::BGRA8_UNORM;
@@ -62,7 +62,7 @@ bool CameraEffectsPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 heigh
 }
 
 void CameraEffectsPass::Shutdown() {
-    m_PSO.reset();
+    m_Device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};
     m_Output.reset();
     m_OutSampler.reset();
     if (m_Device && m_Layout != rhi::kInvalidLayout) m_Device->DestroyDescriptorSetLayout(m_Layout);
@@ -102,7 +102,7 @@ void CameraEffectsPass::Render(rhi::IRHICommandList* cmd) {
     pc.distortion = m_Distortion;
     pc.time = m_Time;
 
-    cmd->SetPipeline(m_PSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
     cmd->SetViewport({0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1});
     cmd->SetScissor({0, 0, m_Width, m_Height});

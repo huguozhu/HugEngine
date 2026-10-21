@@ -48,8 +48,8 @@ bool MotionBlurPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) 
     d.colorFormats[0] = rhi::Format::RGBA16_FLOAT;
     d.pushConstantRanges = {pc}; d.descriptorSetLayouts = {m_Layout};
     d.debugName = "MotionBlur";
-    m_PSO = device->CreatePipelineState(d);
-    HE_ASSERT(m_PSO, "MotionBlurPass: PSO failed");
+    m_PSO = device->CreatePipelineStateHandle(d);
+    HE_ASSERT(m_PSO.IsValid(), "MotionBlurPass: PSO failed");
 
     rhi::TextureDesc td;
     td.format = rhi::Format::RGBA16_FLOAT;
@@ -70,7 +70,7 @@ bool MotionBlurPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) 
 
 void MotionBlurPass::Shutdown() {
     if (!m_Ready) return;
-    m_PSO.reset();
+    m_Device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};
     m_Output.reset();
     m_OutSampler.reset();
     if (m_Device && m_Layout != rhi::kInvalidLayout) m_Device->DestroyDescriptorSetLayout(m_Layout);
@@ -111,7 +111,7 @@ void MotionBlurPass::Render(rhi::IRHICommandList* cmd) {
     pc.intensity  = m_Intensity;
     pc.samples    = kDefaultSamples;
 
-    cmd->SetPipeline(m_PSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
     cmd->SetViewport({0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1});
     cmd->SetScissor({0, 0, m_Width, m_Height});

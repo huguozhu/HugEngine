@@ -54,8 +54,8 @@ bool GaussianBlurPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     psoDesc.descriptorSetLayouts = {m_Layout};
     psoDesc.debugName           = "GaussianBlur";
 
-    m_PSO = device->CreatePipelineState(psoDesc);
-    HE_ASSERT(m_PSO, "GaussianBlurPass: PSO 创建失败");
+    m_PSO = device->CreatePipelineStateHandle(psoDesc);
+    HE_ASSERT(m_PSO.IsValid(), "GaussianBlurPass: PSO 创建失败");
 
     // 输出纹理（半分辨率，HDR 格式）
     {
@@ -81,7 +81,7 @@ bool GaussianBlurPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
 }
 
 void GaussianBlurPass::Shutdown() {
-    m_PSO.reset();
+    m_Device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};
     m_Output.reset();
     m_OutSampler.reset();
     if (m_Device && m_Layout != rhi::kInvalidLayout) {
@@ -116,7 +116,7 @@ void GaussianBlurPass::SetInput(rhi::IRHITexture* color, rhi::IRHISampler* sampl
 void GaussianBlurPass::Render(rhi::IRHICommandList* cmd) {
     if (!m_Ready || !m_Input) return;
 
-    cmd->SetPipeline(m_PSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
     cmd->SetViewport({0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1});
     cmd->SetScissor({0, 0, m_Width, m_Height});

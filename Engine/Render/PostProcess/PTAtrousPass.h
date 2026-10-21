@@ -54,7 +54,7 @@ private:
     bool m_Ready = false;
 
     std::unique_ptr<rhi::IRHITexture> m_Output;   // 空间滤波结果
-    std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
+    rhi::RHIPipelineStateHandle m_PSO{};   // A-3：句柄持有
     rhi::DescriptorSetLayoutHandle m_Layout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_Set    = rhi::kInvalidSet;
 

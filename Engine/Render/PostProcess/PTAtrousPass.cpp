@@ -61,8 +61,8 @@ bool PTAtrousPass::Initialize(rhi::IRHIDevice* device, const Config& cfg) {
     d.pushConstantRanges = {pc};
     d.descriptorSetLayouts = {m_Layout};
     d.debugName = "PTAtrous";
-    m_PSO = device->CreatePipelineState(d);
-    if (!m_PSO) { HE_CORE_ERROR("PTAtrousPass: compute PSO 创建失败"); return false; }
+    m_PSO = device->CreatePipelineStateHandle(d);
+    if (!m_PSO.IsValid()) { HE_CORE_ERROR("PTAtrousPass: compute PSO 创建失败"); return false; }
 
     CreateTextures(m_Width, m_Height);
     m_Ready = true;
@@ -82,7 +82,7 @@ void PTAtrousPass::CreateTextures(u32 w, u32 h) {
 
 void PTAtrousPass::Shutdown() {
     m_Output.reset();
-    m_PSO.reset();
+    m_Device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};
     if (m_Device && m_Set != rhi::kInvalidSet) m_Set = rhi::kInvalidSet;
     if (m_Device && m_Layout != rhi::kInvalidLayout) {
         m_Device->DestroyDescriptorSetLayout(m_Layout);
@@ -134,7 +134,7 @@ void PTAtrousPass::Render(rhi::IRHICommandList* cmd) {
     pc.clampThreshold  = m_Cfg.clampThreshold;
     pc.pad1 = pc.pad2 = 0.0f;
 
-    cmd->SetPipeline(m_PSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     cmd->Dispatch((m_Width + 7) / 8, (m_Height + 7) / 8, 1);

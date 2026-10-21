@@ -28,7 +28,7 @@ public:
 private:
     float m_Intensity = 0.5f;
 
-    std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
+    rhi::RHIPipelineStateHandle m_PSO{};   // A-3：句柄持有
     std::unique_ptr<rhi::IRHITexture> m_Output;
     std::unique_ptr<rhi::IRHISampler> m_OutSampler;
     rhi::DescriptorSetLayoutHandle m_Layout = rhi::kInvalidLayout;
