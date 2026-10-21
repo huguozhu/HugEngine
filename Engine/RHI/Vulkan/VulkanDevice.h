@@ -69,6 +69,14 @@ public:
     std::unique_ptr<IRHICommandList>  CreateSecondaryCommandList() override;
     std::unique_ptr<IRHIBuffer>       CreateBuffer(const BufferDesc& desc) override;
     std::unique_ptr<IRHITexture>      CreateTexture(const TextureDesc& desc) override;
+
+    // A-3：句柄式资源（登记进设备资源表；销毁时移除 ⇒ 旧句柄靠代次失效）
+    RHIBufferHandle  CreateBufferHandle(const BufferDesc& desc) override;
+    RHITextureHandle CreateTextureHandle(const TextureDesc& desc) override;
+    IRHIBuffer*      ResolveBuffer(RHIBufferHandle handle) const override;
+    IRHITexture*     ResolveTexture(RHITextureHandle handle) const override;
+    void             DestroyBufferHandle(RHIBufferHandle handle) override;
+    void             DestroyTextureHandle(RHITextureHandle handle) override;
     std::unique_ptr<IRHISampler>      CreateSampler(const SamplerDesc& desc) override;
     std::unique_ptr<IRHIPipelineState> CreatePipelineState(const PipelineStateDesc& desc) override;
 
@@ -424,6 +432,13 @@ private:
         std::shared_ptr<u32> refCount;  // 共享引用计数（VulkanPipelineState 持有）
     };
     std::unordered_map<uint64_t, PSOCacheEntryInternal> m_PSOCache;
+    // --- A-3：句柄资源表 + 句柄 ⇒ 所有权 ---
+    // 表只存裸指针（代次校验在表里），所有权放在 map 里、键是 `index | generation<<32`
+    // （槽位复用后代次不同 ⇒ 键不同，旧句柄查不到任何所有权）。
+    RHIBufferTable  m_BufferTable;
+    RHITextureTable m_TextureTable;
+    std::unordered_map<u64, std::unique_ptr<IRHIBuffer>>  m_HandleBuffers;
+    std::unordered_map<u64, std::unique_ptr<IRHITexture>> m_HandleTextures;
     u64 m_CurrentFrame = 0;  // 递增帧计数器（PSO 缓存 LRU + 延迟销毁去重）
     u64 m_LastDeferredAdvanceFrame = UINT64_MAX;  // 上一次延迟销毁的帧 ID
 

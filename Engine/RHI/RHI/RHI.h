@@ -1,6 +1,7 @@
 #pragma once
 
 #include "RHI/Types.h"
+#include "RHI/RHIHandles.h"   // A-3：句柄式资源（带代次校验）
 #include "RHI/SwapChain.h"
 #include "RHI/CommandList.h"
 #include "RHI/Buffer.h"
@@ -57,6 +58,18 @@ public:
     virtual std::unique_ptr<IRHICommandList>    CreateSecondaryCommandList() = 0;
     virtual std::unique_ptr<IRHIBuffer>         CreateBuffer(const BufferDesc& desc) = 0;
     virtual std::unique_ptr<IRHITexture>        CreateTexture(const TextureDesc& desc) = 0;
+
+    // === A-3：句柄式创建/解析/销毁（与上面的 unique_ptr 版**并存**，迁移期两套都可用）===
+    // 【为什么并存】`unique_ptr` 版把"所有权"和"句柄"绑在一起，迁移期逐个持有者替换；
+    // 句柄版让资源登记进设备资源表，用**代次**检出悬挂引用（见 RHIHandles.h）。
+    // 默认实现 = 该后端不支持（返回无效句柄 / nullptr），避免其它后端被迫改动。
+    virtual RHIBufferHandle  CreateBufferHandle(const BufferDesc& /*desc*/) { return {}; }
+    virtual RHITextureHandle CreateTextureHandle(const TextureDesc& /*desc*/) { return {}; }
+    virtual IRHIBuffer*      ResolveBuffer(RHIBufferHandle /*handle*/) const { return nullptr; }
+    virtual IRHITexture*     ResolveTexture(RHITextureHandle /*handle*/) const { return nullptr; }
+    /// 按句柄销毁：从资源表移除 ⇒ 代次前进，该句柄与所有更早的句柄一律解析为 nullptr（幂等）
+    virtual void DestroyBufferHandle(RHIBufferHandle /*handle*/) {}
+    virtual void DestroyTextureHandle(RHITextureHandle /*handle*/) {}
     virtual std::unique_ptr<IRHISampler>        CreateSampler(const SamplerDesc& desc) = 0;
     virtual std::unique_ptr<IRHIPipelineState>  CreatePipelineState(const PipelineStateDesc& desc) = 0;
 

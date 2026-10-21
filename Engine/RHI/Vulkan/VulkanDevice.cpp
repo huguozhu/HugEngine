@@ -876,6 +876,55 @@ std::unique_ptr<IRHICommandList> VulkanDevice::CreateSecondaryCommandList() {
 // ============================================================
 // 队列管理
 // ============================================================
+// ============================================================
+// A-3：句柄式资源
+// ============================================================
+namespace {
+inline u64 HandleKey(u32 index, u32 generation) {
+    return static_cast<u64>(index) | (static_cast<u64>(generation) << 32);
+}
+} // namespace
+
+RHIBufferHandle VulkanDevice::CreateBufferHandle(const BufferDesc& desc) {
+    auto buf = CreateBuffer(desc);
+    if (!buf) return {};
+    const RHIBufferHandle h = m_BufferTable.Add(buf.get());
+    m_HandleBuffers[HandleKey(h.index, h.generation)] = std::move(buf);
+    return h;
+}
+
+RHITextureHandle VulkanDevice::CreateTextureHandle(const TextureDesc& desc) {
+    auto tex = CreateTexture(desc);
+    if (!tex) return {};
+    const RHITextureHandle h = m_TextureTable.Add(tex.get());
+    m_HandleTextures[HandleKey(h.index, h.generation)] = std::move(tex);
+    return h;
+}
+
+IRHIBuffer* VulkanDevice::ResolveBuffer(RHIBufferHandle handle) const {
+    return m_BufferTable.Get(handle);   // 代次过期 ⇒ nullptr
+}
+
+IRHITexture* VulkanDevice::ResolveTexture(RHITextureHandle handle) const {
+    return m_TextureTable.Get(handle);
+}
+
+void VulkanDevice::DestroyBufferHandle(RHIBufferHandle handle) {
+    if (!handle.IsValid()) return;
+    auto it = m_HandleBuffers.find(HandleKey(handle.index, handle.generation));
+    if (it == m_HandleBuffers.end()) return;   // 已销毁 / 代次过期：幂等
+    m_BufferTable.Remove(handle);              // 表内代次前进 ⇒ 旧句柄全部失效
+    m_HandleBuffers.erase(it);                 // unique_ptr 析构 ⇒ 真正销毁后端资源
+}
+
+void VulkanDevice::DestroyTextureHandle(RHITextureHandle handle) {
+    if (!handle.IsValid()) return;
+    auto it = m_HandleTextures.find(HandleKey(handle.index, handle.generation));
+    if (it == m_HandleTextures.end()) return;
+    m_TextureTable.Remove(handle);
+    m_HandleTextures.erase(it);
+}
+
 void VulkanDevice::WaitIdle() {
     // 【模式 2】**必须先把提交路由排空**：`vkDeviceWaitIdle` 只等"已提交到队列"的工作，
     // 而模式 2 里已录制、尚在 RHI 线程队列中**还没提交**的命令不会被它覆盖 ⇒ 读回 /
