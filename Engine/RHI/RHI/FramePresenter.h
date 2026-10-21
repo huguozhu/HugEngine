@@ -45,10 +45,28 @@ public:
         return m_SwapChain ? m_SwapChain->GetCurrentBackBufferIndex() : 0u;
     }
 
+    /// L4-2：开始录制本帧的命令缓冲（不取得所有权，只借用）。
+    void BeginRecording(IRHIDevice* device, IRHICommandList* cmdList) {
+        m_Device      = device;
+        m_CommandList = cmdList;
+        if (m_CommandList) m_CommandList->Begin();
+    }
+
+    /// L4-2：结束录制并提交。**present 不在这里**（EndFrame 负责），两者之间可能还夹着
+    /// FlushComputeWork() 之类的逻辑，收口时不能把它挤掉。
+    void EndRecording() {
+        if (!m_CommandList) return;
+        m_CommandList->End();
+        if (m_Device) m_Device->Submit(m_CommandList);
+        m_CommandList = nullptr;
+    }
+
     [[nodiscard]] bool IsValid() const { return m_SwapChain != nullptr; }
 
 private:
-    IRHISwapChain* m_SwapChain = nullptr;
+    IRHISwapChain* m_SwapChain = nullptr;
+    IRHIDevice*       m_Device      = nullptr;   // L4-2：仅借用
+    IRHICommandList*  m_CommandList = nullptr;   // L4-2：仅借用（EndRecording 后清空）
 };
 
 } // namespace he::rhi
