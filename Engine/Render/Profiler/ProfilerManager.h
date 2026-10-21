@@ -1,6 +1,7 @@
 #pragma once
 
 #include "RHI/RHI.h"
+#include "RHI/Types.h"   // kMaxFramesInFlight
 #include "RHI/CommandList.h"
 #include "RHI/QueryPool.h"
 #include "Core/Types.h"
@@ -155,7 +156,9 @@ private:
 
     rhi::IRHIDevice* m_Device = nullptr;
     u32 m_MaxPasses = 0;
-    u32 m_MaxFramesInFlight = 3;
+    // 默认值派生自 RHI 的飞行帧数（Initialize 时仍会被调用方传入的实际值覆盖）；
+    // 不要在这里写独立的数字，否则与 kMaxFramesInFlight 漂移后会出现读数错位。
+    u32 m_MaxFramesInFlight = rhi::kMaxFramesInFlight;
     u32 m_FrameIndex = 0;
     float m_TimestampPeriod = 0.0f;   // 时间戳单位（ns → ms 转换因数）
     bool  m_Enabled = true;

@@ -9,6 +9,7 @@
 #include <vulkan/vulkan.h>
 
 #include "RHI/SwapChain.h"
+#include "RHI/Types.h"   // kMaxFramesInFlight（kAcquireSlots 的派生来源）
 
 #include <vector>
 
@@ -88,7 +89,12 @@ private:
     //    vkAcquireNextImageKHR。因此复用槽位前还必须等 SetAcquireConsumedFence 登记进来的
     //    **提交栅栏**（提交才是真正等待该信号量的那一方）。缺这一等会偶发卡死：
     //    实测 24 次启动中有 1 次在第 42 帧挂住并报该 VUID（见 GI 文档 §10.1 第 2 项）。
-    static constexpr u32 kAcquireSlots = 3;   // 与 RHI 的飞行帧数（kMaxFramesInFlight）一致
+    // 派生自 RHI 的飞行帧数（**不要在这里写独立数字**）：m_AcquireSlot 每调用一次
+    // AcquireNextImage 推进一格 ⇒ 等价于"每在飞帧一格"，故环长必须 ≥ kMaxFramesInFlight，
+    // 否则每次 acquire 都可能阻塞等上一轮提交完成 ⇒ 退化成静默节流（在飞帧数被压到环长）。
+    static constexpr u32 kAcquireSlots = rhi::kMaxFramesInFlight;
+    static_assert(kAcquireSlots >= rhi::kMaxFramesInFlight,
+                  "acquire 槽位少于在飞帧数 ⇒ 会退化成阻塞式节流");
     VkSemaphore      m_AcquireSemaphores[kAcquireSlots] = {};
     VkFence          m_AcquireFences[kAcquireSlots]     = {};
     // 每个槽位最近一次"等待过该槽位 acquire 信号量"的提交栅栏（提交方在提交后登记）
@@ -101,6 +107,11 @@ public:
     /// 复用该槽位前会等这个栅栏，从而保证信号量不再处于已发信号未被等待的状态。
     /// 只等待、不重置：这个栅栏由命令列表拥有并自行重置。
     void SetAcquireConsumedFence(VkFence fence) { m_AcquireConsumedFences[m_AcquireSlot] = fence; }
+
+    /// 交换链的**实际**图像数（= max(kSwapchainImageCount, caps.minImageCount)，可能大于 3）
+    /// 【为什么要它】命令列表据此建立逐图像的视图表；写死 kSwapchainImageCount 会在实际
+    /// 图像数更大时少建视图，导致超出部分无法参与附件/布局追踪。
+    [[nodiscard]] u32 GetImageCount() const { return m_ImageCount; }
 
 private:
 

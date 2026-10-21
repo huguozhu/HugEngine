@@ -42,6 +42,10 @@ enum MaterialFlags : u32 {
 static constexpr u32 MAX_LIGHTS           = kGPUMaxLights;
 static constexpr u32 MAX_SHADOWS          = kGPUMaxShadows;
 static constexpr u32 MAX_FRAMES_IN_FLIGHT = rhi::kMaxFramesInFlight;
+// 着色器侧 kGPUMaxFramesInFlight 与 C++ 的 kMaxFramesInFlight 必须一致：
+// 它是 shader 里逐帧数组（如 u_PerFrame[...]）的维度来源，两侧不一致会静默越界/错位。
+static_assert(MAX_FRAMES_IN_FLIGHT == kGPUMaxFramesInFlight,
+              "C++ kMaxFramesInFlight 与 ShaderTypes.slang 的 kGPUMaxFramesInFlight 不一致");
 static constexpr u32 MAX_OBJECTS          = kGPUMaxObjects;
 static constexpr u32 kMaxGPUObjects       = kGPUMaxGPUObjects;
 static constexpr u32 CASCADE_COUNT        = kGPUCascadeCount;
