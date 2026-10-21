@@ -117,7 +117,10 @@ public:
     void RenderToneMapPass(rhi::IRHICommandList* cmd);
     void RenderSkybox(rhi::IRHICommandList* cmd, const CameraData& camera);
 
-    rhi::IRHIBuffer*         GetCurrentObjectBuffer() { return m_ObjectBuffers[m_CurrentFrameSlot].get(); }
+    /// A-3：持**句柄**、按需解析成指针（代次过期会解析为 nullptr ⇒ 错用立刻暴露为空指针）
+    rhi::IRHIBuffer*         GetCurrentObjectBuffer() {
+        return m_Device ? m_Device->ResolveBuffer(m_ObjectBuffers[m_CurrentFrameSlot]) : nullptr;
+    }
     rhi::IRHIBuffer*         GetCurrentShadowBuffer() { return m_ShadowBuffers[m_CurrentFrameSlot].get(); }
     rhi::IRHIBuffer*         GetCurrentLightBuffer()  { return m_LightBuffers[m_CurrentFrameSlot].get(); }
     rhi::DescriptorSetHandle GetCurrentDescSet()      { return m_DescSets[m_CurrentFrameSlot]; }
@@ -220,7 +223,8 @@ private:
     bool                             m_SnapshotReserved = false;
     /// GI 分层合成参数 UBO（每飞行帧一份，与 Deferred 的 LightingPass 同结构同语义）
     std::unique_ptr<rhi::IRHIBuffer> m_GIBuffers[MAX_FRAMES_IN_FLIGHT];
-    std::unique_ptr<rhi::IRHIBuffer> m_ObjectBuffers[MAX_FRAMES_IN_FLIGHT];
+    /// A-3 第一批：对象缓冲改成**句柄**（所有权在设备的资源表里，代次可检出悬挂引用）
+    rhi::RHIBufferHandle m_ObjectBuffers[MAX_FRAMES_IN_FLIGHT]{};
     std::unique_ptr<rhi::IRHIBuffer> m_ShadowBuffers[MAX_FRAMES_IN_FLIGHT];
     std::unique_ptr<rhi::IRHIBuffer> m_ShadowObjBuffers[MAX_FRAMES_IN_FLIGHT];  // 阴影专用 Object Buffer
     u32 m_CurrentFrameSlot = 0;

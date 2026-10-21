@@ -132,7 +132,8 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
         rhi::BufferDesc objBufDesc;
         objBufDesc.size  = sizeof(GPUObjectData) * MAX_OBJECTS;
         objBufDesc.usage = rhi::BufferUsage::Storage;
-        m_ObjectBuffers[i] = device->CreateBuffer(objBufDesc);
+        m_ObjectBuffers[i] = device->CreateBufferHandle(objBufDesc);   // A-3：句柄式创建
+        HE_ASSERT(m_ObjectBuffers[i].IsValid(), "ForwardPipeline: 对象缓冲句柄创建失败");
 
         rhi::BufferDesc lightBufDesc;
         lightBufDesc.size  = sizeof(GPULight) * MAX_LIGHTS;
@@ -201,7 +202,7 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
         device->UpdateDescriptorSet(set, kGPUBinding_GBufferB, rhi::DescriptorType::StorageBuffer,
                                     m_LightBuffers[i].get());
         device->UpdateDescriptorSet(set, rhi::kBindingObjectData, rhi::DescriptorType::StorageBuffer,
-                                    m_ObjectBuffers[i].get());
+                                    device->ResolveBuffer(m_ObjectBuffers[i]));
         device->UpdateDescriptorSet(set, kGPUBinding_Depth, rhi::DescriptorType::StorageBuffer,
                                     m_ShadowBuffers[i].get());
         // Forward+: LightGrid / LightIndexList 初始占位
@@ -513,7 +514,8 @@ void ForwardPipeline::Shutdown() {
     }
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
         m_LightBuffers[i].reset();
-        m_ObjectBuffers[i].reset();
+        m_Device->DestroyBufferHandle(m_ObjectBuffers[i]);
+        m_ObjectBuffers[i] = {};
         m_ShadowBuffers[i].reset();
     }
     m_LightGridBuffer.reset();         // Forward+ LightGrid
@@ -1048,7 +1050,7 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
 
     // SceneRenderer 准备所有 draw items（阶段 1 §15.1 第②段：改吃快照，不再遍历世界）
     auto allDrawItems = m_SceneRenderer->Prepare(FrameSnap(), camera,
-                                                 m_ObjectBuffers[RenderFrameSlot()].get());
+                                                 m_Device->ResolveBuffer(m_ObjectBuffers[RenderFrameSlot()]));
 
     // GPU 剔除后过滤：构建可见 draw 列表
     std::vector<DrawItem> filteredItems;
