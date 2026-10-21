@@ -33,16 +33,16 @@ bool GBufferRenderer::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
     m_Ctx.device    = device;
     m_Ctx.width     = width;
     m_Ctx.height    = height;
-    m_Ctx.gbA       = m_A.get();
-    m_Ctx.gbB       = m_B.get();
-    m_Ctx.gbC       = m_C.get();
-    m_Ctx.gbVel     = m_D.get();
-    m_Ctx.gbDepth   = m_Depth.get();
-    m_Ctx.gbWorldPos = m_E.get();
-    m_Ctx.gbDisneyA = m_F.get();
-    m_Ctx.gbDisneyB = m_G.get();
-    m_Ctx.gbLightmapKey = m_H.get();
-    m_Ctx.pso       = m_PSO.get();
+    m_Ctx.gbA       = m_Ctx.device->ResolveTexture(m_A);
+    m_Ctx.gbB       = m_Ctx.device->ResolveTexture(m_B);
+    m_Ctx.gbC       = m_Ctx.device->ResolveTexture(m_C);
+    m_Ctx.gbVel     = m_Ctx.device->ResolveTexture(m_D);
+    m_Ctx.gbDepth   = m_Ctx.device->ResolveTexture(m_Depth);
+    m_Ctx.gbWorldPos = m_Ctx.device->ResolveTexture(m_E);
+    m_Ctx.gbDisneyA = m_Ctx.device->ResolveTexture(m_F);
+    m_Ctx.gbDisneyB = m_Ctx.device->ResolveTexture(m_G);
+    m_Ctx.gbLightmapKey = m_Ctx.device->ResolveTexture(m_H);
+    m_Ctx.pso       = m_Ctx.device->ResolvePipelineState(m_PSO);
     m_Ctx.descSet   = m_Set;
 
     // ── 5. 创建策略模式渲染器 ──
@@ -70,16 +70,16 @@ void GBufferRenderer::Shutdown() {
     }
 
     // 销毁 PSO + 纹理
-    m_PSO.reset();
-    m_Depth.reset();
-    m_H.reset();
-    m_G.reset();
-    m_F.reset();
-    m_E.reset();
-    m_D.reset();
-    m_C.reset();
-    m_B.reset();
-    m_A.reset();
+    m_Ctx.device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};
+    m_Ctx.device->DestroyTextureHandle(m_Depth); m_Depth = {};
+    m_Ctx.device->DestroyTextureHandle(m_H); m_H = {};
+    m_Ctx.device->DestroyTextureHandle(m_G); m_G = {};
+    m_Ctx.device->DestroyTextureHandle(m_F); m_F = {};
+    m_Ctx.device->DestroyTextureHandle(m_E); m_E = {};
+    m_Ctx.device->DestroyTextureHandle(m_D); m_D = {};
+    m_Ctx.device->DestroyTextureHandle(m_C); m_C = {};
+    m_Ctx.device->DestroyTextureHandle(m_B); m_B = {};
+    m_Ctx.device->DestroyTextureHandle(m_A); m_A = {};
 
     m_Ctx.device = nullptr;
     m_Width = m_Height = 0;
@@ -96,28 +96,28 @@ void GBufferRenderer::OnResize(u32 width, u32 height) {
     // 更新 GBufferContext 中的裸指针
     m_Ctx.width     = width;
     m_Ctx.height    = height;
-    m_Ctx.gbA       = m_A.get();
-    m_Ctx.gbB       = m_B.get();
-    m_Ctx.gbC       = m_C.get();
-    m_Ctx.gbVel     = m_D.get();
-    m_Ctx.gbDepth   = m_Depth.get();
-    m_Ctx.gbWorldPos = m_E.get();
-    m_Ctx.gbDisneyA = m_F.get();
-    m_Ctx.gbDisneyB = m_G.get();
-    m_Ctx.gbLightmapKey = m_H.get();
+    m_Ctx.gbA       = m_Ctx.device->ResolveTexture(m_A);
+    m_Ctx.gbB       = m_Ctx.device->ResolveTexture(m_B);
+    m_Ctx.gbC       = m_Ctx.device->ResolveTexture(m_C);
+    m_Ctx.gbVel     = m_Ctx.device->ResolveTexture(m_D);
+    m_Ctx.gbDepth   = m_Ctx.device->ResolveTexture(m_Depth);
+    m_Ctx.gbWorldPos = m_Ctx.device->ResolveTexture(m_E);
+    m_Ctx.gbDisneyA = m_Ctx.device->ResolveTexture(m_F);
+    m_Ctx.gbDisneyB = m_Ctx.device->ResolveTexture(m_G);
+    m_Ctx.gbLightmapKey = m_Ctx.device->ResolveTexture(m_H);
 }
 
 GBufferRenderer::Handles GBufferRenderer::ImportToRenderGraph(RenderGraph& rg) {
     Handles h;
-    h.albedo   = rg.ImportTexture("GB_A",        m_A.get());
-    h.normal   = rg.ImportTexture("GB_B",        m_B.get());
-    h.emissive  = rg.ImportTexture("GB_C",        m_C.get());
-    h.velocity = rg.ImportTexture("GB_Vel",      m_D.get());
-    h.worldPos = rg.ImportTexture("GB_WorldPos", m_E.get());
-    h.disneyA  = rg.ImportTexture("GB_DisneyA",  m_F.get());
-    h.disneyB  = rg.ImportTexture("GB_DisneyB",  m_G.get());
-    h.lightmapKey = rg.ImportTexture("GB_LightmapKey", m_H.get());
-    h.depth    = rg.ImportTexture("GB_Depth",    m_Depth.get());
+    h.albedo   = rg.ImportTexture("GB_A",        m_Ctx.device->ResolveTexture(m_A));
+    h.normal   = rg.ImportTexture("GB_B",        m_Ctx.device->ResolveTexture(m_B));
+    h.emissive  = rg.ImportTexture("GB_C",        m_Ctx.device->ResolveTexture(m_C));
+    h.velocity = rg.ImportTexture("GB_Vel",      m_Ctx.device->ResolveTexture(m_D));
+    h.worldPos = rg.ImportTexture("GB_WorldPos", m_Ctx.device->ResolveTexture(m_E));
+    h.disneyA  = rg.ImportTexture("GB_DisneyA",  m_Ctx.device->ResolveTexture(m_F));
+    h.disneyB  = rg.ImportTexture("GB_DisneyB",  m_Ctx.device->ResolveTexture(m_G));
+    h.lightmapKey = rg.ImportTexture("GB_LightmapKey", m_Ctx.device->ResolveTexture(m_H));
+    h.depth    = rg.ImportTexture("GB_Depth",    m_Ctx.device->ResolveTexture(m_Depth));
     return h;
 }
 
@@ -162,7 +162,9 @@ void GBufferRenderer::CreateTextures(rhi::IRHIDevice* device) {
         d.height = m_Height;
         d.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource
                  | rhi::TextureUsage::UnorderedAccess;
-        return device->CreateTexture(d);
+        auto h = device->CreateTextureHandle(d);   // A-3
+        HE_ASSERT(h.IsValid(), "GBufferRenderer: GBuffer 纹理句柄创建失败");
+        return h;
     };
     m_A = createRGBA16F();  // Albedo.rgb + Metallic.a
     m_B = createRGBA16F();  // Normal.xyz + Roughness.a
@@ -180,7 +182,7 @@ void GBufferRenderer::CreateTextures(rhi::IRHIDevice* device) {
         d.height = m_Height;
         d.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource
                  | rhi::TextureUsage::UnorderedAccess;
-        m_D = device->CreateTexture(d);
+        m_D = device->CreateTextureHandle(d);   // A-3
     }
 
     // GBuffer Depth: D32_FLOAT（DepthStencil + ShaderResource）
@@ -193,7 +195,7 @@ void GBufferRenderer::CreateTextures(rhi::IRHIDevice* device) {
         d.width  = m_Width;
         d.height = m_Height;
         d.usage  = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
-        m_Depth = device->CreateTexture(d);
+        m_Depth = device->CreateTextureHandle(d);   // A-3
     }
 }
 
@@ -257,8 +259,8 @@ void GBufferRenderer::CreatePSO(rhi::IRHIDevice* device) {
     gbDesc.descriptorSetLayouts = {m_Layout};
     gbDesc.debugName = "GBuffer";
 
-    m_PSO = device->CreatePipelineState(gbDesc);
-    HE_ASSERT(m_PSO, "GBufferRenderer: PSO 创建失败");
+    m_PSO = device->CreatePipelineStateHandle(gbDesc);   // A-3
+    HE_ASSERT(m_PSO.IsValid(), "GBufferRenderer: PSO 句柄创建失败");
 }
 
 void GBufferRenderer::CreateDescriptorSet(rhi::IRHIDevice* device) {

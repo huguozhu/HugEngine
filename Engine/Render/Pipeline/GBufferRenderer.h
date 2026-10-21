@@ -175,19 +175,19 @@ public:
     GBufferContext& GetContext() { return m_Ctx; }
 
     // ── 纹理访问器（供 Lighting / PostProcess 使用）──
-    rhi::IRHITexture* GetAlbedo()   const { return m_A.get(); }
-    rhi::IRHITexture* GetNormal()   const { return m_B.get(); }
-    rhi::IRHITexture* GetEmissive() const { return m_C.get(); }
-    rhi::IRHITexture* GetVelocity() const { return m_D.get(); }
-    rhi::IRHITexture* GetWorldPos() const { return m_E.get(); }
-    rhi::IRHITexture* GetDisneyA()  const { return m_F.get(); }
-    rhi::IRHITexture* GetDisneyB()  const { return m_G.get(); }
+    rhi::IRHITexture* GetAlbedo()   const { return m_Ctx.device->ResolveTexture(m_A); }
+    rhi::IRHITexture* GetNormal()   const { return m_Ctx.device->ResolveTexture(m_B); }
+    rhi::IRHITexture* GetEmissive() const { return m_Ctx.device->ResolveTexture(m_C); }
+    rhi::IRHITexture* GetVelocity() const { return m_Ctx.device->ResolveTexture(m_D); }
+    rhi::IRHITexture* GetWorldPos() const { return m_Ctx.device->ResolveTexture(m_E); }
+    rhi::IRHITexture* GetDisneyA()  const { return m_Ctx.device->ResolveTexture(m_F); }
+    rhi::IRHITexture* GetDisneyB()  const { return m_Ctx.device->ResolveTexture(m_G); }
     /// 光照图键（任务 31）：uv0.xy + objectIndex。Deferred Lighting 用它查烘焙光照图
-    rhi::IRHITexture* GetLightmapKey() const { return m_H.get(); }
-    rhi::IRHITexture* GetDepth()    const { return m_Depth.get(); }
+    rhi::IRHITexture* GetLightmapKey() const { return m_Ctx.device->ResolveTexture(m_H); }
+    rhi::IRHITexture* GetDepth()    const { return m_Ctx.device->ResolveTexture(m_Depth); }
 
     // ── 描述符集访问器 ──
-    rhi::IRHIPipelineState*       GetPSO()           const { return m_PSO.get(); }
+    rhi::IRHIPipelineState*       GetPSO()           const { return m_Ctx.device->ResolvePipelineState(m_PSO); }
     rhi::DescriptorSetLayoutHandle GetLayout()       const { return m_Layout; }
     rhi::DescriptorSetHandle       GetDescriptorSet() const { return m_Set; }
 
@@ -197,18 +197,18 @@ private:
     void CreateDescriptorSet(rhi::IRHIDevice* device);
 
     // ── 纹理所有权 ──
-    std::unique_ptr<rhi::IRHITexture> m_A;       // GBufferA: albedo.rgb + metallic.a
-    std::unique_ptr<rhi::IRHITexture> m_B;       // GBufferB: normal.xyz + roughness.a
-    std::unique_ptr<rhi::IRHITexture> m_C;       // GBufferC: emissive.rgb + ao.a
-    std::unique_ptr<rhi::IRHITexture> m_D;       // GBufferD: velocity.xy (RG16_FLOAT)
-    std::unique_ptr<rhi::IRHITexture> m_E;       // GBufferE: worldPos.xyz
-    std::unique_ptr<rhi::IRHITexture> m_F;       // GBufferF: disneyA（anisotropic/subsurface/specular/sheen）
-    std::unique_ptr<rhi::IRHITexture> m_G;       // GBufferG: disneyB（clearcoat/clearcoatGloss/specularTint.rg）
-    std::unique_ptr<rhi::IRHITexture> m_H;       // GBufferH: 光照图键（uv0.xy + objectIndex，任务 31）
-    std::unique_ptr<rhi::IRHITexture> m_Depth;   // 深度缓冲 (D32_FLOAT)
+    rhi::RHITextureHandle m_A{};   // A-3：句柄持有       // GBufferA: albedo.rgb + metallic.a
+    rhi::RHITextureHandle m_B{};   // A-3：句柄持有       // GBufferB: normal.xyz + roughness.a
+    rhi::RHITextureHandle m_C{};   // A-3：句柄持有       // GBufferC: emissive.rgb + ao.a
+    rhi::RHITextureHandle m_D{};   // A-3：句柄持有       // GBufferD: velocity.xy (RG16_FLOAT)
+    rhi::RHITextureHandle m_E{};   // A-3：句柄持有       // GBufferE: worldPos.xyz
+    rhi::RHITextureHandle m_F{};   // A-3：句柄持有       // GBufferF: disneyA（anisotropic/subsurface/specular/sheen）
+    rhi::RHITextureHandle m_G{};   // A-3：句柄持有       // GBufferG: disneyB（clearcoat/clearcoatGloss/specularTint.rg）
+    rhi::RHITextureHandle m_H{};   // A-3：句柄持有       // GBufferH: 光照图键（uv0.xy + objectIndex，任务 31）
+    rhi::RHITextureHandle m_Depth{};   // A-3：深度缓冲 (D32_FLOAT)
 
     // ── PSO + 描述符集 ──
-    std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
+    rhi::RHIPipelineStateHandle m_PSO{};   // A-3：句柄持有
     rhi::DescriptorSetLayoutHandle m_Layout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_Set    = rhi::kInvalidSet;
 
