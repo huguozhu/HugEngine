@@ -55,14 +55,19 @@ public:
     /// 设置 HDR 参考白点（尼特）
     void SetWhitePointNits(float w) { m_WhitePointNits = w; }
     /// 预设 PSO 为下一个 RenderPass 的初始管线
-    void PreBind(rhi::IRHICommandList* cmd) { if (m_Ready) cmd->SetPipeline(m_PSO.get()); }
-    rhi::IRHIPipelineState* GetPSO() const { return m_PSO.get(); }
+    // A-3：PSO 持句柄、按需解析（代次过期 ⇒ nullptr）
+    void PreBind(rhi::IRHICommandList* cmd) {
+        if (m_Ready && m_Device) cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
+    }
+    rhi::IRHIPipelineState* GetPSO() const {
+        return m_Device ? m_Device->ResolvePipelineState(m_PSO) : nullptr;
+    }
 
 private:
     void RecreatePSO();
 
     rhi::ShaderBytecode m_VS, m_FS;
-    std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
+    rhi::RHIPipelineStateHandle m_PSO{};   // A-3：句柄持有
     rhi::DescriptorSetLayoutHandle m_DescLayout = rhi::kInvalidLayout;
     // 输入集按飞行帧各一份（见 SetFrameSlot）
     rhi::DescriptorSetHandle       m_DescSet[rhi::kMaxFramesInFlight] = {};

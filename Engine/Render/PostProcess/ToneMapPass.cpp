@@ -53,8 +53,8 @@ void ToneMapPass::RecreatePSO(){
     // Vertex|Fragment;
     d.pushConstantRanges={pcr};
     d.descriptorSetLayouts={m_DescLayout};d.debugName="ToneMap";
-    m_PSO=m_Device->CreatePipelineState(d);
-    HE_ASSERT(m_PSO,"ToneMapPass: PSO failed");
+    m_PSO = m_Device->CreatePipelineStateHandle(d);   // A-3
+    HE_ASSERT(m_PSO.IsValid(), "ToneMapPass: PSO 句柄创建失败");
 }
 
 void ToneMapPass::SetOutputFormat(rhi::Format f){
@@ -65,7 +65,8 @@ void ToneMapPass::SetOutputFormat(rhi::Format f){
 
 void ToneMapPass::Shutdown(){
     if(m_Device&&m_DescLayout!=rhi::kInvalidLayout)m_Device->DestroyDescriptorSetLayout(m_DescLayout);
-    m_PSO.reset();
+    m_Device->DestroyPipelineStateHandle(m_PSO);
+    m_PSO = {};
     m_Device=nullptr;
     m_Ready=false;
 }
@@ -82,7 +83,7 @@ void ToneMapPass::SetInput(rhi::IRHITexture* hdr,rhi::IRHISampler* sampler){
 
 void ToneMapPass::Render(rhi::IRHICommandList* cmd){
     if(!m_Ready||!m_Enabled)return;
-    cmd->SetPipeline(m_PSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
     cmd->SetViewport({0,(float)m_Height,(float)m_Width,-(float)m_Height,0,1});
     cmd->SetScissor({0,0,m_Width,m_Height});
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_DescSet[m_SlotAware?m_Slot:0u]);
