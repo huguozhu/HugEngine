@@ -358,7 +358,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
             }
 
             // 更新每帧动态参数
-            m_GBuffer->SetObjectBuffer(m_ObjectBuffers[RenderFrameSlot()].get());
+            m_GBuffer->SetObjectBuffer(m_Device->ResolveBuffer(m_ObjectBuffers[RenderFrameSlot()]));
             m_GBuffer->SetPrevViewProj(m_PrevViewProj);
             // 任务 25：逐实例剔除器 + 当前飞行帧槽位（可见列表/间接命令按槽位分开）
             m_GBuffer->SetInstanceCuller(&m_InstanceCuller, RenderFrameSlot());

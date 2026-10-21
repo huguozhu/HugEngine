@@ -185,7 +185,10 @@ public:
     bool IsMSAAEnabled() const                 { return m_PostProcess.IsMSAAEnabled(); }
     AA_MSAA* GetMSAA()                         { return m_PostProcess.GetMSAA(); }
 
-    rhi::IRHIBuffer* GetCurrentObjectBuffer()  { return m_ObjectBuffers[m_CurrentFrameSlot].get(); }
+    /// A-3：句柄按需解析（代次过期 ⇒ nullptr）
+    rhi::IRHIBuffer* GetCurrentObjectBuffer()  {
+        return m_Device ? m_Device->ResolveBuffer(m_ObjectBuffers[m_CurrentFrameSlot]) : nullptr;
+    }
     rhi::IRHIBuffer* GetCurrentShadowBuffer()  { return m_ShadowBuffers[m_CurrentFrameSlot].get(); }
     rhi::IRHIBuffer* GetCurrentShadowObjBuffer(){ return m_ShadowObjBuffers[m_CurrentFrameSlot].get(); }
 
@@ -222,7 +225,7 @@ private:
 
     // 三缓冲
     std::unique_ptr<rhi::IRHIBuffer> m_LightBuffers[MAX_FRAMES_IN_FLIGHT];
-    std::unique_ptr<rhi::IRHIBuffer> m_ObjectBuffers[MAX_FRAMES_IN_FLIGHT];
+    rhi::RHIBufferHandle m_ObjectBuffers[MAX_FRAMES_IN_FLIGHT]{};   // A-3：句柄持有
     std::unique_ptr<rhi::IRHIBuffer> m_ShadowBuffers[MAX_FRAMES_IN_FLIGHT];
     std::unique_ptr<rhi::IRHIBuffer> m_ShadowObjBuffers[MAX_FRAMES_IN_FLIGHT];
     u32 m_CurrentFrameSlot = 0;

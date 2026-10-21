@@ -393,6 +393,13 @@ void VulkanDevice::Shutdown() {
     m_DeferredDestroy.FlushAll();
 
     // 4. 销毁 VMA 分配器（在清理 Vulkan 资源之前）
+    // A-3：句柄资源的所有权在设备侧 map 里 —— 必须在销毁分配器**之前**释放，
+    // 否则它们的 unique_ptr 会在分配器已销毁后再去 free（VMA 退出时会报「有分配未释放」）。
+    m_HandleBuffers.clear();
+    m_HandleTextures.clear();
+    m_BufferTable = {};
+    m_TextureTable = {};
+
     if (m_VmaAllocator) { vmaDestroyAllocator(m_VmaAllocator); m_VmaAllocator = VK_NULL_HANDLE; }
 
     // 跳过已由 DestroyDescriptorSetLayout 提前销毁的 layout（避免双重销毁）

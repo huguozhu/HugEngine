@@ -76,7 +76,8 @@ bool DeferredPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height
     // 三缓冲
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
         m_LightBuffers[i]      = device->CreateBuffer({sizeof(GPULight) * MAX_LIGHTS, rhi::BufferUsage::Storage});
-        m_ObjectBuffers[i]     = device->CreateBuffer({sizeof(GPUObjectData) * MAX_OBJECTS, rhi::BufferUsage::Storage});
+        m_ObjectBuffers[i]     = device->CreateBufferHandle({sizeof(GPUObjectData) * MAX_OBJECTS, rhi::BufferUsage::Storage});   // A-3
+        HE_ASSERT(m_ObjectBuffers[i].IsValid(), "DeferredPipeline: 对象缓冲句柄创建失败");
         m_ShadowBuffers[i]     = device->CreateBuffer({sizeof(GPUShadowData) * MAX_SHADOWS, rhi::BufferUsage::Storage});
         m_ShadowObjBuffers[i]  = device->CreateBuffer({sizeof(GPUObjectData) * MAX_OBJECTS, rhi::BufferUsage::Storage});
     }
@@ -513,7 +514,10 @@ void DeferredPipeline::Shutdown() {
     m_Lighting.Shutdown();
     m_GPLVariantPSOs.clear();
     for (auto& b : m_LightBuffers) b.reset();
-    for (auto& b : m_ObjectBuffers) b.reset();
+    for (auto& h : m_ObjectBuffers) {   // A-3：句柄销毁（代次前进 ⇒ 旧句柄失效）
+        m_Device->DestroyBufferHandle(h);
+        h = {};
+    }
     for (auto& b : m_ShadowBuffers) b.reset();
     for (auto& b : m_ShadowObjBuffers) b.reset();
     if (m_GPUCulling.usePTG) {
