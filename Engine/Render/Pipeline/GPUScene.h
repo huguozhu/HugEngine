@@ -70,7 +70,10 @@ public:
     void Upload(rhi::IRHIDevice* device);
 
     // GPU 缓冲访问
-    rhi::IRHIBuffer* GetObjectBuffer() const { return m_ObjectSSBO.get(); }
+    /// A-3：句柄按需解析（代次过期 ⇒ nullptr）
+    rhi::IRHIBuffer* GetObjectBuffer() const {
+        return m_Device ? m_Device->ResolveBuffer(m_ObjectSSBO) : nullptr;
+    }
     u32              GetObjectCount() const { return m_ObjectCount; }
 
     const std::vector<GPUSceneObject>& GetObjects() const { return m_Objects; }
@@ -79,7 +82,8 @@ private:
     std::vector<GPUSceneObject> m_Objects;
     std::vector<float4x4> m_CachedMatrices;  // 上帧的 localToWorld（检测变化）
     std::vector<u32>      m_DirtyIndices;    // 需要上传的对象索引
-    std::unique_ptr<rhi::IRHIBuffer> m_ObjectSSBO;
+    rhi::RHIBufferHandle m_ObjectSSBO{};        // A-3：句柄持有
+    rhi::IRHIDevice*    m_Device = nullptr;     // A-3：仅借用（Initialize 设置、Shutdown 清空）
     u32 m_ObjectCount = 0;
     bool m_Initialized = false;
     bool m_ExcludeDecals = false;   // 任务 24：贴花由 DecalPass 投影，不进场景物体列表

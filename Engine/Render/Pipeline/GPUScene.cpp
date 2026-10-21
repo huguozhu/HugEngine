@@ -14,6 +14,7 @@
 #include "Scene/InstancedMeshComponent.h"
 #include "Scene/SkeletalMeshComponent.h"
 #include "Core/Log.h"
+#include "Core/Assert.h"   // HE_ASSERT
 #include <cstring>
 
 namespace he::render {
@@ -23,7 +24,9 @@ bool GPUScene::Initialize(rhi::IRHIDevice* device) {
     desc.size  = sizeof(GPUSceneObject) * kMaxObjects;
     desc.usage = rhi::BufferUsage::Storage;
     desc.cpuAccess = true;
-    m_ObjectSSBO = device->CreateBuffer(desc);
+    m_Device     = device;                              // A-3：解析句柄用
+    m_ObjectSSBO = device->CreateBufferHandle(desc);    // A-3
+    HE_ASSERT(m_ObjectSSBO.IsValid(), "GPUScene: 对象 SSBO 句柄创建失败");
 
     m_Initialized = true;
     HE_CORE_INFO("GPUScene initialized (max {} objects, {} KB)", kMaxObjects,
@@ -32,7 +35,9 @@ bool GPUScene::Initialize(rhi::IRHIDevice* device) {
 }
 
 void GPUScene::Shutdown() {
-    m_ObjectSSBO.reset();
+    m_Device->DestroyBufferHandle(m_ObjectSSBO);
+    m_ObjectSSBO = {};
+    m_Device     = nullptr;
     m_Objects.clear();
     m_ObjectCount = 0;
     m_Initialized = false;
@@ -86,12 +91,13 @@ void GPUScene::CollectFromSnapshot(const FrameSceneSnapshot& snapshot) {
 
 void GPUScene::Upload(rhi::IRHIDevice* device) {
     if (m_DirtyIndices.empty()) return;
-    void* mapped=m_ObjectSSBO->Map();
+    auto* ssbo   = device->ResolveBuffer(m_ObjectSSBO);   // A-3：按句柄解析
+    void* mapped = ssbo ? ssbo->Map() : nullptr;
     if (!mapped) return;
     u8* base=static_cast<u8*>(mapped);
     for (u32 idx : m_DirtyIndices)
         memcpy(base+idx*sizeof(GPUSceneObject), &m_Objects[idx], sizeof(GPUSceneObject));
-    m_ObjectSSBO->Unmap();
+    if (auto* ssbo = device->ResolveBuffer(m_ObjectSSBO)) ssbo->Unmap();
 }
 
 } // namespace he::render
