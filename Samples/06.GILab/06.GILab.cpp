@@ -11,6 +11,7 @@
 #include <chrono>   // 步骤 37：CPU 侧帧时（判定 CPU 受限还是 GPU 受限）
 #include "Platform/Window.h"
 #include "RHI/RHI.h"
+#include "RHI/FramePresenter.h"   // L4-1：帧外壳（acquire/present）收口
 #include "RHI/ThreadAffinity.h"   // T2.2：渲染线程启动钩子里认领 RHI 归属（GetThreadAffinity）
 #include "Pipeline/DeferredPipeline.h"
 #include "Pipeline/ForwardPipeline.h"
@@ -962,6 +963,9 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
     };
     applyThreadingMode(he::GetRenderThreadingMode());   // 启动时按配置/环境变量生效一次
 
+    // L4-1：帧外壳的 acquire/present 收口（L4-3 把整帧变成命令流时只改这里）
+    rhi::FramePresenter framePresenter(swapchain.get());
+
     while (!engine.GetWindow()->ShouldClose()) {
         f64 now       = glfwGetTime();
         f32 deltaTime = static_cast<f32>(now - lastTime);
@@ -1081,7 +1085,7 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
         // --- 渲染（按选择的管线执行；各管线均通过 RenderGraph 自动编排）---
         // ---- 命令 1：Acquire + 录制（管线）----
         auto recordScene = [&]() {
-            if (!swapchain->AcquireNextImage()) {
+            if (!framePresenter.BeginFrame()) {
                 HE_CORE_WARN("06.GILab：AcquireNextImage 失败，跳过本帧剩余部分");
                 frameAborted = true;   // 命令可能在渲染线程跑 ⇒ 用标志代替 while 的 continue
                 return;
@@ -2023,7 +2027,7 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
 
             // 垂直同步必须与创建时一致：只改 SwapChainDesc 而这里仍传 true，帧率照样被锁在刷新率
             // （步骤 37 第一次测就是这么被误导的：pass 合计 14 ms 却只有 19 fps）。
-            swapchain->Present(!noVsync);
+            framePresenter.EndFrame(!noVsync);
         };
         // 命令 2 只发布：游戏线程随即进入下一帧的准备（与渲染线程重叠）
         // ---- 游戏线程记账（这些是游戏线程自己的循环状态，**不能**放进渲染命令）----
