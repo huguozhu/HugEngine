@@ -73,21 +73,21 @@ public:
     u64 GetFrameCount() const { return m_FrameCount; }
 
     /// PSO（供测试/调试查询）
-    rhi::IRHIPipelineState* GetPSO() const { return m_PSO.get(); }
+    rhi::IRHIPipelineState* GetPSO() const { return m_Device->ResolvePipelineState(m_PSO); }
 
 private:
     rhi::IRHIDevice* m_Device = nullptr;
     u32 m_Width  = 0;
     u32 m_Height = 0;
 
-    std::unique_ptr<rhi::IRHIBuffer> m_CubeVB;   // 单位立方体（36 顶点 / 36 索引）
-    std::unique_ptr<rhi::IRHIBuffer> m_CubeIB;
+    rhi::RHIBufferHandle m_CubeVB{};   // A-3：单位立方体（36 顶点 / 36 索引）
+    rhi::RHIBufferHandle m_CubeIB{};   // A-3
 
     rhi::DescriptorSetLayoutHandle m_Layout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_Set    = rhi::kInvalidSet;
-    std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
+    rhi::RHIPipelineStateHandle m_PSO{};   // A-3
 
-    std::unique_ptr<rhi::IRHISampler> m_PointSampler;
+    rhi::RHISamplerHandle m_PointSampler{};   // A-3
 
     u32 m_LastDecalCount = 0;
     u64 m_FrameCount     = 0;

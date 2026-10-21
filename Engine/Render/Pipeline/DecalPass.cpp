@@ -73,20 +73,20 @@ bool DecalPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     vbDesc.usage       = rhi::BufferUsage::Vertex;
     vbDesc.initialData = verts.data();
     vbDesc.stride      = sizeof(float3);
-    m_CubeVB = m_Device->CreateBuffer(vbDesc);
+    m_CubeVB = m_Device->CreateBufferHandle(vbDesc);   // A-3
 
     rhi::BufferDesc ibDesc;
     ibDesc.size        = indices.size() * sizeof(u32);
     ibDesc.usage       = rhi::BufferUsage::Index;
     ibDesc.initialData = indices.data();
     ibDesc.stride      = sizeof(u32);
-    m_CubeIB = m_Device->CreateBuffer(ibDesc);
+    m_CubeIB = m_Device->CreateBufferHandle(ibDesc);   // A-3
 
     // ── 2. 点采样器（GBuffer 世界坐标/深度逐像素精确取值，不做插值）──
     rhi::SamplerDesc sd;
     sd.minFilter = sd.magFilter = sd.mipFilter = rhi::FilterMode::Nearest;
     sd.addressU = sd.addressV = sd.addressW = rhi::AddressMode::ClampToEdge;
-    m_PointSampler = m_Device->CreateSampler(sd);
+    m_PointSampler = m_Device->CreateSamplerHandle(sd);   // A-3
 
     // ── 3. 描述符集布局：bindless 纹理/采样器/SSBO（common.slang 需要）+ GBuffer worldPos/depth ──
     rhi::DescriptorSetLayoutDesc layout;
@@ -165,8 +165,8 @@ bool DecalPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     desc.pushConstantRanges    = { pc };
     desc.descriptorSetLayouts  = { m_Layout };
     desc.debugName             = "DecalProject";
-    m_PSO = m_Device->CreatePipelineState(desc);
-    if (!m_PSO) {
+    m_PSO = m_Device->CreatePipelineStateHandle(desc);   // A-3
+    if (!m_PSO.IsValid()) {
         HE_CORE_ERROR("DecalPass: PSO 创建失败");
         return false;
     }
@@ -177,10 +177,10 @@ bool DecalPass::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
 }
 
 void DecalPass::Shutdown() {
-    m_PSO.reset();
-    m_PointSampler.reset();
-    m_CubeIB.reset();
-    m_CubeVB.reset();
+    m_Device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};
+    m_Device->DestroySamplerHandle(m_PointSampler); m_PointSampler = {};
+    m_Device->DestroyBufferHandle(m_CubeIB); m_CubeIB = {};
+    m_Device->DestroyBufferHandle(m_CubeVB); m_CubeVB = {};
     if (m_Device && m_Layout != rhi::kInvalidLayout) {
         m_Device->DestroyDescriptorSetLayout(m_Layout);
     }
@@ -199,7 +199,7 @@ void DecalPass::OnResize(u32 width, u32 height) {
 void DecalPass::Render(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snapshot,
                        const CameraData& camera, GBufferRenderer& gb) {
     m_LastDecalCount = 0;
-    if (!cmd || !m_PSO || !m_CubeVB || !m_CubeIB || !m_Set) return;
+    if (!cmd || !m_PSO.IsValid() || !m_CubeVB.IsValid() || !m_CubeIB.IsValid() || !m_Set) return;
     if (m_Width == 0 || m_Height == 0) return;
 
     // 贴花是否为空：空则完全不录 pass（避免每帧一个空 render pass）。
@@ -213,15 +213,15 @@ void DecalPass::Render(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snap
     // 1. 绑定 GBuffer 的世界坐标/深度（每帧写一次，尺寸变化后指针也会变）
     if (auto* device = m_Device) {
         device->UpdateDescriptorSet(m_Set, kDecalBindGBufferWorldPos,
-            rhi::DescriptorType::CombinedImageSampler, gb.GetWorldPos(), m_PointSampler.get());
+            rhi::DescriptorType::CombinedImageSampler, gb.GetWorldPos(), m_Device->ResolveSampler(m_PointSampler));
         device->UpdateDescriptorSet(m_Set, kDecalBindGBufferDepth,
-            rhi::DescriptorType::CombinedImageSampler, gb.GetDepth(), m_PointSampler.get());
+            rhi::DescriptorType::CombinedImageSampler, gb.GetDepth(), m_Device->ResolveSampler(m_PointSampler));
         device->UpdateDescriptorSet(m_Set, kDecalBindPointSampler,
-            rhi::DescriptorType::Sampler, nullptr, m_PointSampler.get());
+            rhi::DescriptorType::Sampler, nullptr, m_Device->ResolveSampler(m_PointSampler));
     }
 
     // 2. 起 render pass：SetPipeline 决定 render pass（Load 版本 + 8 附件 + 无深度）
-    cmd->SetPipeline(m_PSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
 
     void* colorViews[kGBufferAttachmentCount] = {
@@ -285,8 +285,8 @@ void DecalPass::Render(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snap
         snprintf(label, sizeof(label), "Decal Project #%u", m_LastDecalCount);
         cmd->SetDrawDebugLabel(label);
         cmd->SetPushConstants(0, sizeof(pcs), &pcs);
-        cmd->SetVertexBuffer(m_CubeVB.get(), 0);
-        cmd->SetIndexBuffer(m_CubeIB.get());
+        cmd->SetVertexBuffer(m_Device->ResolveBuffer(m_CubeVB), 0);
+        cmd->SetIndexBuffer(m_Device->ResolveBuffer(m_CubeIB));
         cmd->DrawIndexed(36, 1, 0, 0);
 
         // 首帧打印逐贴花参数：贴花盒必须**包住**要贴的表面，参数错位时这里是第一现场
