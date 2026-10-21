@@ -369,15 +369,13 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
         HE_CORE_INFO("ForwardPipeline: GI_RSM initialized");
     }
 
-    // --- Phase 5-4: 预分配 sec CB 录制池（每线程一个独立 sec CL）---
+    // --- Phase 5-4 / T3.1: 并行录制骨架（次级 CB 池，每线程一个独立 sec CL）---
     if (m_MultiThreadRecord) {
-        u32 threadCount = JobSystem::Instance().GetThreadCount();
-        u32 secCount = std::min(kMaxSecRecordLists, std::max(threadCount, 1u));
-        for (u32 i = 0; i < secCount; ++i) {
-            auto secCL = device->CreateSecondaryCommandList();
-            if (secCL) m_SecRecordLists.push_back(std::move(secCL));
+        const u32 threadCount = JobSystem::Instance().GetThreadCount();
+        const u32 secCount = std::min(kMaxSecRecordLists, std::max(threadCount, 1u));
+        if (m_ParallelRecorder.Initialize(device, secCount, "ForwardSecRecord")) {
+            HE_CORE_INFO("  Sec record pool: {} lists", m_ParallelRecorder.ListCount());
         }
-        HE_CORE_INFO("  Sec record pool: {} lists", m_SecRecordLists.size());
     }
 
     // --- GPU Culling ---
@@ -1221,28 +1219,15 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
     // ============================================================
     // 录制绘制命令（ForwardPipeline 特有：PBR PSO + bindless 描述符集）
     // ============================================================
-    if (m_MultiThreadRecord && !m_SecRecordLists.empty() && totalDraws > 0) {
+    if (m_MultiThreadRecord && m_ParallelRecorder.IsReady() && totalDraws > 0) {
         CpuScope mtcrScope(CpuSection::Mtcr);   // 【读数】并行录制 + 次级命令缓冲执行
-        u32 numThreads = std::min((u32)m_SecRecordLists.size(), totalDraws);
-        u32 chunkSize  = (totalDraws + numThreads - 1) / numThreads;
-
-        std::vector<std::function<void()>> tasks;
-        tasks.reserve(numThreads);
-        for (u32 t = 0; t < numThreads; ++t) {
-            tasks.push_back([&, t]() {
-                // 【MTCR 两级归属】worker 必须先声明"我是次级命令缓冲录制者"：`BeginSecondary`
-                // 与 `End` 上的是 HE_ASSERT_RECORD_THREAD（允许拥有线程或已声明的录制者），
-                // 不声明的线程照样命中断言。作用域结束自动撤销，worker 被复用时不残留角色。
-                rhi::SecondaryRecordScope recordScope;
-
-                u32 start = t * chunkSize;
-                u32 end   = std::min(start + chunkSize, totalDraws);
-                if (start >= end) return;
-
-                auto& secCmd = m_SecRecordLists[t];
-                secCmd->BeginSecondary(m_PBR_PSO.get());
-                secCmd->SetViewport({0, (float)m_HDRHeight, (float)m_HDRWidth, -(float)m_HDRHeight, 0, 1});
-                secCmd->SetScissor({0, 0, m_HDRWidth, m_HDRHeight});
+        // T3.1：池 / 分块 / 归属声明 / 按块序合并都在 ParallelRecordHelper 里；
+        // 这里只提供"一块怎么录"（viewport/scissor + 逐 draw 的绑定与绘制）。
+        m_ParallelRecorder.Record(cmd, totalDraws, m_PBR_PSO.get(),
+            [&](rhi::IRHICommandList& secCmdRef, u32 start, u32 end) {
+        auto* secCmd = &secCmdRef;
+        secCmd->SetViewport({0, (float)m_HDRHeight, (float)m_HDRWidth, -(float)m_HDRHeight, 0, 1});
+        secCmd->SetScissor({0, 0, m_HDRWidth, m_HDRHeight});
 
                 for (u32 i = start; i < end; ++i) {
                     auto& di = filteredItems[i];
@@ -1263,14 +1248,7 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
                     secCmd->SetIndexBuffer(me->indexBuffer);
                     secCmd->DrawIndexed(me->indexCount);
                 }
-                secCmd->End();
-            });
-        }
-        JobSystem::Instance().ParallelInvoke(tasks);
-        for (u32 t = 0; t < numThreads; ++t) {
-            if (t * chunkSize >= totalDraws) continue;
-            cmd->ExecuteSecondary(m_SecRecordLists[t].get());
-        }
+        });
         drawCount = totalDraws;
     } else {
         // ExecuteIndirect 路径（仅当 Batch 已构建且 GPU Culling 有结果）

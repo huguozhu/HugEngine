@@ -11,6 +11,7 @@
 #include "Pipeline/GPUScene.h"
 #include "Pipeline/MeshBatcher.h"
 #include "Pipeline/InstanceCuller.h"   // 任务 25：逐实例 GPU 视锥剔除
+#include "Pipeline/ParallelRecordHelper.h"   // T3.1：并行录制骨架（池 + 分块 + 合并）
 #include "Pipeline/SkinnedMeshBuffers.h"   // 第③段：骨骼矩阵缓冲的渲染侧状态表
 #include "AntiAliasing/AntiAliasing.h"
 // 阶段 1 T1.3b：光源走快照（`FrameSceneSnapshot`）而不是直接遍历 ECS。
@@ -250,6 +251,9 @@ private:
     // RenderGraph 模式（默认开启，声明式编排为正式路径；可经 SetUseRenderGraph 切回旧路径）
     bool m_UseRenderGraph = true;   // 启用 RenderGraph（含 GPU Profiler）
     std::vector<std::unique_ptr<rhi::IRHICommandList>> m_SecRecordLists;
+    /// T3.1：并行录制骨架（次级列表池 + 分块 + 归属声明 + 按块序 ExecuteSecondary 合并）。
+    /// `m_SecRecordLists` 保留为历史（已不再使用；清理由 Shutdown 负责）。
+    ParallelRecordHelper m_ParallelRecorder;
 
     // 着色器
     rhi::ShaderBytecode m_VS, m_FS;

@@ -240,6 +240,9 @@ set(RENDER_SOURCES
     # 模式 2（三线程）：RHI 线程 = 唯一提交者（ISubmitRouter 实现 + 线程本体）
     Threading/RHIThread.h
     Threading/RHIThread.cpp
+    # T3.1：并行命令录制的公共骨架（池 + 分块 + 归属声明 + 按块序合并）
+    Pipeline/ParallelRecordHelper.h
+    Pipeline/ParallelRecordHelper.cpp
 )
 
 target_sources(HugEngineRender PRIVATE ${RENDER_SOURCES})
