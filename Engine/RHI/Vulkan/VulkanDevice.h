@@ -100,12 +100,12 @@ public:
         CreateRTPipelineState(const RTPipelineStateDesc& desc) override;
 
     void WaitIdle() override;
-    void Submit(IRHICommandList* cmdList) override;
+    void Submit(IRHICommandList* cmdList, RHICommandList* stream = nullptr) override;
 
     // --- 提交路由（模式 2：RHI 线程是唯一提交者，见 RHI/SubmitRouter.h）---
     void SetSubmitRouter(ISubmitRouter* router) override;
     ISubmitRouter* GetSubmitRouter() const override { return m_SubmitRouter; }
-    void ExecuteSubmit(IRHICommandList* cmdList) override;      // 仅 RHI 线程
+    void ExecuteSubmit(IRHICommandList* cmdList, RHICommandList* stream) override;   // 仅 RHI 线程
     void ExecutePresent(IRHISwapChain* swapChain, u32 imageIndex, void* waitSemaphore,
                         bool vsync) override;   // 仅 RHI 线程
 

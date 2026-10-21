@@ -172,7 +172,9 @@ public:
     virtual void* GetImGuiCommandBuffer(IRHICommandList* cmd) const { return nullptr; }
 
     // --- Commands ---
-    virtual void Submit(IRHICommandList* cmdList) = 0;
+    /// `stream`（A-1，可选）：纯数据命令流，由执行端在提交前翻译进 `cmdList`。
+    /// 默认 `nullptr` ⇒ 现有调用点一行不改、行为不变。
+    virtual void Submit(IRHICommandList* cmdList, RHICommandList* stream = nullptr) = 0;
     virtual void WaitIdle() = 0;
 
     // === 提交路由（模式 2：RHI 线程是唯一提交者，见 SubmitRouter.h）===
@@ -180,7 +182,7 @@ public:
     virtual void SetSubmitRouter(ISubmitRouter* /*router*/) {}
     virtual ISubmitRouter* GetSubmitRouter() const { return nullptr; }
     /// 【仅 RHI 线程】绕过路由真正提交（由路由器在 RHI 线程上调用；断言提交者角色）
-    virtual void ExecuteSubmit(IRHICommandList* /*cmdList*/) {}
+    virtual void ExecuteSubmit(IRHICommandList* /*cmdList*/, RHICommandList* /*stream*/) {}
     /// 【仅 RHI 线程】绕过路由真正呈现（imageIndex / waitSemaphore 由渲染线程在入队时捕获）
     virtual void ExecutePresent(IRHISwapChain* /*swapChain*/, u32 /*imageIndex*/,
                                 void* /*waitSemaphore*/, bool /*vsync*/) {}

@@ -65,7 +65,7 @@ void RHIThread::ThreadMain() {
 
         switch (item.kind) {
         case Item::Kind::Submit:
-            if (m_Device && item.cmd) m_Device->ExecuteSubmit(item.cmd);
+            if (m_Device && item.cmd) m_Device->ExecuteSubmit(item.cmd, item.stream);
             m_Submitted.fetch_add(1, std::memory_order_acq_rel);
             break;
         case Item::Kind::Present:
@@ -97,7 +97,7 @@ void RHIThread::Push(Item item) {
     m_Cv.notify_one();
 }
 
-bool RHIThread::RouteSubmit(rhi::IRHICommandList* cmdList) {
+bool RHIThread::RouteSubmit(rhi::IRHICommandList* cmdList, rhi::RHICommandList* stream) {
     // 未运行 / 未就绪 ⇒ 返回 false 让调用方就地执行（不丢命令、不死等）
     if (!m_Running.load(std::memory_order_acquire) || !cmdList) return false;
 
@@ -114,8 +114,9 @@ bool RHIThread::RouteSubmit(rhi::IRHICommandList* cmdList) {
     }
 
     Item item;
-    item.kind = Item::Kind::Submit;
-    item.cmd  = cmdList;
+    item.kind   = Item::Kind::Submit;
+    item.cmd    = cmdList;
+    item.stream = stream;
     Push(std::move(item));
     return true;
 }

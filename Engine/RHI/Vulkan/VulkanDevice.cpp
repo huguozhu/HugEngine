@@ -1,3 +1,7 @@
+// A-1：命令流翻译层（ExecuteSubmit 在提交前把纯数据命令流翻译进主列表）
+#include "RHI/RHICommandList.h"
+#include "RHI/RHICommandReplay.h"
+
 #include "RHI/RHI.h"
 #include "RHI/SwapChain.h"
 #include "RHI/CommandList.h"
@@ -881,10 +885,10 @@ void VulkanDevice::WaitIdle() {
     if (m_Device) vkDeviceWaitIdle(m_Device);
 }
 
-void VulkanDevice::Submit(IRHICommandList* cmdList) {
+void VulkanDevice::Submit(IRHICommandList* cmdList, RHICommandList* stream) {
     HE_ASSERT_RENDER_THREAD();   // T0.1：提交只允许在拥有线程（渲染线程）发起
     // 模式 2：交给提交路由（RHI 线程稍后执行）；未注入路由时行为与改造前完全一致
-    if (m_SubmitRouter && m_SubmitRouter->RouteSubmit(cmdList)) return;
+    if (m_SubmitRouter && m_SubmitRouter->RouteSubmit(cmdList, stream)) return;
     auto* vulkanCmd = static_cast<VulkanCommandList*>(cmdList);
     vulkanCmd->Submit();
 }
@@ -893,10 +897,15 @@ void VulkanDevice::SetSubmitRouter(ISubmitRouter* router) {
     m_SubmitRouter = router;
 }
 
-void VulkanDevice::ExecuteSubmit(IRHICommandList* cmdList) {
-    // 【仅 RHI 线程】路由器在 RHI 线程上调用：绕过路由、真正 vkQueueSubmit
+void VulkanDevice::ExecuteSubmit(IRHICommandList* cmdList, RHICommandList* stream) {
+    // 【仅 RHI 线程】路由器在 RHI 线程上调用：**先翻译命令流、再真正 vkQueueSubmit**
     HE_ASSERT_SUBMIT_THREAD();
     if (!cmdList) return;
+    if (stream) {
+        // A-1：命令流里是渲染线程 append 的纯数据（绑定/绘制…），在这里一次顺序翻译进主列表；
+        // 未知类型/载荷不匹配会跳过（见 ReplayCommandStream 的容错约定）。
+        (void)ReplayCommandStream(*stream, *cmdList);
+    }
     static_cast<VulkanCommandList*>(cmdList)->Submit();
 }
 
@@ -1032,7 +1041,7 @@ void VulkanDevice::SubmitAll(Span<IRHICommandList*> cmdLists) {
     HE_ASSERT_RENDER_THREAD();   // T0.1：批量提交只允许在拥有线程（渲染线程）发起
     // 模式 2：逐个交给提交路由（保持原顺序；RHI 线程按入队顺序执行）
     if (m_SubmitRouter) {
-        for (auto* cl : cmdLists) (void)m_SubmitRouter->RouteSubmit(cl);
+        for (auto* cl : cmdLists) (void)m_SubmitRouter->RouteSubmit(cl, nullptr);
         return;
     }
     std::vector<VulkanCommandList*> gfxLists, compLists;

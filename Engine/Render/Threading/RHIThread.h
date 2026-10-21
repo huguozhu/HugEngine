@@ -42,7 +42,7 @@ public:
     [[nodiscard]] u64 SubmittedCount() const { return m_Submitted.load(std::memory_order_acquire); }
 
     // --- ISubmitRouter ---
-    bool RouteSubmit(rhi::IRHICommandList* cmdList) override;
+    bool RouteSubmit(rhi::IRHICommandList* cmdList, rhi::RHICommandList* stream) override;
     bool RoutePresent(rhi::IRHISwapChain* swapChain, u32 imageIndex, void* waitSemaphore,
                       bool vsync) override;
     void FlushAndWait() override;
@@ -52,6 +52,7 @@ private:
         enum class Kind { Submit, Present, Barrier };
         Kind                 kind      = Kind::Barrier;
         rhi::IRHICommandList* cmd       = nullptr;
+        rhi::RHICommandList*  stream    = nullptr;   // A-1：纯数据命令流（可为空）
         rhi::IRHISwapChain*   swapChain = nullptr;
         u32                   imageIndex = 0;      // 呈现用：渲染线程捕获
         void*                 waitSem    = nullptr; // 呈现用：渲染线程捕获（VkSemaphore 原样）

@@ -28,7 +28,8 @@ namespace he::rhi {
 
 class IRHICommandList;
 class IRHISwapChain;
-class IRHIDevice;   // 供 RHI 线程持有设备指针（不需要完整定义）
+class IRHIDevice;      // 供 RHI 线程持有设备指针（不需要完整定义）
+class RHICommandList;  // A-1：可选携带的纯数据命令流（见 RHI/RHICommandList.h）
 
 class ISubmitRouter {
 public:
@@ -37,7 +38,9 @@ public:
     /// 接管一次提交。返回 true 表示"已接管，调用方不要就地执行"。
     /// 【为什么返回 bool 而不是 void】模式切换的瞬间（渲染线程已发路由、RHI 线程尚未就绪）
     /// 需要能明确地退回"就地执行"，而不是把命令丢掉或死等。
-    virtual bool RouteSubmit(IRHICommandList* cmdList) = 0;
+    /// A-1：`stream` 非空时，RHI 线程必须在真正提交之前把它翻译进 `cmdList`
+    /// （`ReplayCommandStream`）——这就是"渲染线程只 append、零 Vulkan 调用"的落点。
+    virtual bool RouteSubmit(IRHICommandList* cmdList, RHICommandList* stream) = 0;
 
     /// 接管一次呈现（必须与同一帧的 `RouteSubmit` 保持先后顺序）。
     /// 【为什么 imageIndex / waitSemaphore 是**参数**】它们必须在**渲染线程**上捕获：RHI 线程执行
