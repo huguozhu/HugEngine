@@ -130,11 +130,11 @@ public:
     void Render(rhi::IRHICommandList* cmd, const LightingInputs& in);
 
     // ── 访问器 ──
-    rhi::IRHITexture*   GetHDRTarget()  const { return m_HDRTarget.get(); }
-    rhi::IRHITexture*   GetHDRDepth()   const { return m_HDRDepth.get(); }
-    rhi::IRHISampler*   GetHDRSampler() const { return m_HDRSampler.get(); }
-    rhi::IRHISampler*   GetPointSampler() const { return m_PointSampler.get(); }
-    rhi::IRHIPipelineState* GetPSO()     const { return m_PSO.get(); }
+    rhi::IRHITexture*   GetHDRTarget()  const { return m_Device->ResolveTexture(m_HDRTarget); }
+    rhi::IRHITexture*   GetHDRDepth()   const { return m_Device->ResolveTexture(m_HDRDepth); }
+    rhi::IRHISampler*   GetHDRSampler() const { return m_Device->ResolveSampler(m_HDRSampler); }
+    rhi::IRHISampler*   GetPointSampler() const { return m_Device->ResolveSampler(m_PointSampler); }
+    rhi::IRHIPipelineState* GetPSO()     const { return m_Device->ResolvePipelineState(m_PSO); }
     /// 取某飞行帧槽位的描述符集（默认第 0 份，供不需要区分的调用方/调试用）
     rhi::DescriptorSetHandle GetDescriptorSet(u32 slot = 0) const {
         return m_Sets[slot % rhi::kMaxFramesInFlight];
@@ -152,17 +152,17 @@ private:
     void CreatePSOAndDescriptorSet(rhi::IRHIDevice* device);
 
     // ── HDR 目标纹理 ──
-    std::unique_ptr<rhi::IRHITexture> m_HDRTarget, m_HDRDepth;
-    std::unique_ptr<rhi::IRHISampler> m_HDRSampler, m_PointSampler;
+    rhi::RHITextureHandle m_HDRTarget{}, m_HDRDepth{};   // A-3：句柄持有
+    rhi::RHISamplerHandle m_HDRSampler{}, m_PointSampler{};   // A-3：句柄持有
 
     rhi::IRHIDevice* m_Device = nullptr;
 
     // ── Lighting PSO + 描述符集（每飞行帧一份）──
-    std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
+    rhi::RHIPipelineStateHandle m_PSO{};   // A-3：句柄持有
     rhi::DescriptorSetLayoutHandle m_Layout = rhi::kInvalidLayout;
     /// 合成参数 UBO：**每飞行帧一份**（§9.2-J）。单份时本帧写入会覆盖仍在飞行的上一帧
     /// 所读的参数——此前靠"值变化小"掩盖。
-    std::unique_ptr<rhi::IRHIBuffer> m_BlendUBO[rhi::kMaxFramesInFlight];
+    rhi::RHIBufferHandle m_BlendUBO[rhi::kMaxFramesInFlight]{};   // A-3：句柄持有
     /// 每飞行帧一份描述符集：逐帧轮换的资源（光源/阴影/探针 SSBO 与上面的 UBO）各自绑进
     /// 自己槽位的集合，重绑不再跨帧。渲染时按 `LightingInputs::frameSlot` 取。
     rhi::DescriptorSetHandle       m_Sets[rhi::kMaxFramesInFlight] = {};
@@ -172,10 +172,10 @@ private:
     // 跳过会留下上一帧的绑定，于是本帧没有产出的纹理仍会被采样到（§9.2-T）。
     //   White：语义 1.0 —— 无遮挡/无遮蔽（阴影图、AO）
     //   Black：语义 0.0 —— 无贡献（间接光、反射、RSM 位置与通量）
-    std::unique_ptr<rhi::IRHITexture> m_PlaceholderWhite;
-    std::unique_ptr<rhi::IRHITexture> m_PlaceholderBlack;
-    std::unique_ptr<rhi::IRHITexture> m_PlaceholderCube;   // 黑色 Cubemap（IBL 无贡献）
-    std::unique_ptr<rhi::IRHISampler> m_PlaceholderSampler;
+    rhi::RHITextureHandle m_PlaceholderWhite{};   // A-3：句柄持有
+    rhi::RHITextureHandle m_PlaceholderBlack{};   // A-3：句柄持有
+    rhi::RHITextureHandle m_PlaceholderCube{};   // A-3：黑色 Cubemap（IBL 无贡献）
+    rhi::RHISamplerHandle m_PlaceholderSampler{};   // A-3：句柄持有
 
     u32 m_Width = 0, m_Height = 0;
     bool m_MSAAEnabled = false;  // 供外部 MSAA 覆盖（Init 前设置）
