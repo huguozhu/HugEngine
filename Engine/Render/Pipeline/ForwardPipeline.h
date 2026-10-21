@@ -135,8 +135,13 @@ public:
     }
 
     // HDR 纹理访问（供 ToneMapPass / AA 使用）：取**当前飞行帧槽位**那一份
-    rhi::IRHITexture* GetHDRTarget()  const { return m_HDRTarget[m_CurrentFrameSlot].get(); }
-    rhi::IRHITexture* GetHDRDepth()   const { return m_HDRDepth[m_CurrentFrameSlot].get(); }
+    // A-3：句柄按需解析（代次过期 ⇒ nullptr）
+    rhi::IRHITexture* GetHDRTarget()  const {
+        return m_Device ? m_Device->ResolveTexture(m_HDRTarget[m_CurrentFrameSlot]) : nullptr;
+    }
+    rhi::IRHITexture* GetHDRDepth()   const {
+        return m_Device ? m_Device->ResolveTexture(m_HDRDepth[m_CurrentFrameSlot]) : nullptr;
+    }
     rhi::IRHISampler* GetHDRSampler() const { return m_HDRSampler.get(); }
     GPUCulling& GetGPUCulling() { return m_GPUCulling; }
     SceneRenderer& GetSceneRenderer() { return *m_SceneRenderer; }
@@ -242,12 +247,13 @@ private:
     // ToneMap 仍在采样的内容 —— 实测症状是**大片画面突然变成纯黑**（HDR 颜色 clear 值就是黑，实测
     // 一次闪烁里 7.3 万像素从亮度 134 掉到 0），单帧 GPU 越重越容易命中（点光 6 个阴影 pass 一开必现）。
     // 每槽一份后，本帧只读写本槽位，该槽位再次被复用时其 3 帧前的提交已完成（`Begin` 等过那个栅栏）。
-    std::unique_ptr<rhi::IRHITexture> m_HDRTarget[MAX_FRAMES_IN_FLIGHT], m_HDRDepth[MAX_FRAMES_IN_FLIGHT];
+    rhi::RHITextureHandle m_HDRTarget[MAX_FRAMES_IN_FLIGHT]{};   // A-3：句柄持有
+    rhi::RHITextureHandle m_HDRDepth[MAX_FRAMES_IN_FLIGHT]{};    // A-3：句柄持有
     std::unique_ptr<rhi::IRHISampler> m_HDRSampler;
     u32 m_HDRWidth = rhi::kDefaultBackBufferWidth, m_HDRHeight = rhi::kDefaultBackBufferHeight;
 
     // Bindless 占位纹理/采样器
-    std::unique_ptr<rhi::IRHITexture> m_BindlessPlaceholder;
+    rhi::RHITextureHandle m_BindlessPlaceholder{};   // A-3：句柄持有
     std::unique_ptr<rhi::IRHISampler> m_BindlessSampler;
 
     // Bindless 材质 SSBO（per-material 材质数据，去重后写入单个 buffer，binding 30 = u_Materials[]）

@@ -45,8 +45,8 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera)
     u32 w = m_HDRWidth, h = m_HDRHeight;
     // HDR 颜色/深度按**飞行帧槽位**导入：两者每帧清空重画，单份会与在飞帧的 ToneMap 采样竞争
     // （实测症状：大片画面突然纯黑），详见 ForwardPipeline.h 里 m_HDRTarget 的说明
-    auto hdrColor = rg.ImportTexture("HDR_Color", m_HDRTarget[RenderFrameSlot()].get());
-    auto hdrDepth = rg.ImportTexture("HDR_Depth", m_HDRDepth[RenderFrameSlot()].get());
+    auto hdrColor = rg.ImportTexture("HDR_Color", m_Device->ResolveTexture(m_HDRTarget[RenderFrameSlot()]));
+    auto hdrDepth = rg.ImportTexture("HDR_Depth", m_Device->ResolveTexture(m_HDRDepth[RenderFrameSlot()]));
     auto backBuf  = rg.ImportBackBuffer();
 
     // --- Pass 0: Shadow — CSM 级联 + Point Cubemap 阴影贴图渲染 ---
@@ -261,7 +261,7 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera)
     rg.AddPass("ToneMap", {{hdrColor, ResourceAccess::Read}}, {{backBuf, ResourceAccess::Write}},
         [this, swapFmt](rhi::IRHICommandList* c) {
             m_ToneMap->SetFrameSlot(RenderFrameSlot());   // HDR 目标按槽位轮换，输入集同步分槽
-            m_ToneMap->SetInput(m_HDRTarget[RenderFrameSlot()].get(), m_HDRSampler.get());
+            m_ToneMap->SetInput(m_Device->ResolveTexture(m_HDRTarget[RenderFrameSlot()]), m_HDRSampler.get());
             m_ToneMap->PreBind(c);
             c->BeginRenderPass(1, swapFmt);
             m_ToneMap->Render(c);

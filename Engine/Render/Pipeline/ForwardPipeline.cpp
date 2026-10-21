@@ -179,7 +179,8 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
         texDesc.height      = 1;
         texDesc.usage       = rhi::TextureUsage::ShaderResource;
         texDesc.initialData = white4;
-        m_BindlessPlaceholder = device->CreateTexture(texDesc);
+        m_BindlessPlaceholder = device->CreateTextureHandle(texDesc);   // A-3
+        HE_ASSERT(m_BindlessPlaceholder.IsValid(), "ForwardPipeline: bindless 占位纹理句柄创建失败");
 
         rhi::SamplerDesc sampDesc;
         sampDesc.minFilter = rhi::FilterMode::Linear;
@@ -190,7 +191,7 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
 
         // 注册默认占位纹理到 bindless 堆（作为 null/无纹理 mesh 的回退）
         auto* heap = device->GetBindlessHeap();
-        heap->SetDefaultTexture(m_BindlessPlaceholder.get(), m_BindlessSampler.get());
+        heap->SetDefaultTexture(device->ResolveTexture(m_BindlessPlaceholder), m_BindlessSampler.get());
         // 预分配 materialID=0 的 4 个纹理槽位（BaseColor/Normal/MetallicRoughness/Occlusion），
         // 确保 materialID=0 的 mesh（如 02.Cube 中无纹理的立方体/球体）始终有有效纹理
         heap->RegisterTexture(nullptr, nullptr);
@@ -221,7 +222,7 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
         }
         // 绑定 5-6: bindless 占位符（bindless 堆在渲染时更新）
         {
-            rhi::IRHITexture* texPtrs[] = { m_BindlessPlaceholder.get() };
+            rhi::IRHITexture* texPtrs[] = { device->ResolveTexture(m_BindlessPlaceholder) };
             rhi::IRHISampler* sampPtrs[] = { m_BindlessSampler.get() };
             device->UpdateDescriptorSet(set, rhi::kBindingBindlessTextures, rhi::DescriptorType::SampledImage,
                 texPtrs, nullptr, 1);
@@ -237,15 +238,15 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
         device->UpdateDescriptorSet(set, kGPUBinding_PrefilterMap, rhi::DescriptorType::CombinedImageSampler,
             m_ShadowSystem->GetPointShadowMap(i), m_ShadowSystem->GetPointShadowSampler());
         device->UpdateDescriptorSet(set, kGPUBinding_BRDF_LUT, rhi::DescriptorType::CombinedImageSampler,
-            m_BindlessPlaceholder.get(), m_BindlessSampler.get());
+            device->ResolveTexture(m_BindlessPlaceholder), m_BindlessSampler.get());
         // 绑定 15-17: RSM 纹理占位（GI_RSM 渲染后替换）
         //   15=位置，16=编码法线，17=VPL 出射辐射度（任务 30 起一个附件一个量）
         device->UpdateDescriptorSet(set, kGPUBinding_RSMPosition, rhi::DescriptorType::CombinedImageSampler,
-            m_BindlessPlaceholder.get(), m_BindlessSampler.get());
+            device->ResolveTexture(m_BindlessPlaceholder), m_BindlessSampler.get());
         device->UpdateDescriptorSet(set, kGPUBinding_RSMFlux, rhi::DescriptorType::CombinedImageSampler,
-            m_BindlessPlaceholder.get(), m_BindlessSampler.get());
+            device->ResolveTexture(m_BindlessPlaceholder), m_BindlessSampler.get());
         device->UpdateDescriptorSet(set, kGPUBinding_RSMRadiance, rhi::DescriptorType::CombinedImageSampler,
-            m_BindlessPlaceholder.get(), m_BindlessSampler.get());
+            device->ResolveTexture(m_BindlessPlaceholder), m_BindlessSampler.get());
         // 绑定 24: 聚光灯 2D 阴影贴图（来自 ShadowSystem，原 9 与点光冲突）
         device->UpdateDescriptorSet(set, kGPUBinding_SpotShadow, rhi::DescriptorType::CombinedImageSampler,
             m_ShadowSystem->GetSpotShadowMapAt(i), m_ShadowSystem->GetSpotShadowSampler());
@@ -348,8 +349,10 @@ bool ForwardPipeline::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
         hdrDepthDesc.usage  = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;  // GPU Culling 需要采样深度
 
         for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-            m_HDRTarget[i] = device->CreateTexture(hdrColorDesc);
-            m_HDRDepth[i]  = device->CreateTexture(hdrDepthDesc);
+            m_HDRTarget[i] = device->CreateTextureHandle(hdrColorDesc);   // A-3
+            HE_ASSERT(m_HDRTarget[i].IsValid(), "ForwardPipeline: HDR 颜色目标句柄创建失败");
+            m_HDRDepth[i]  = device->CreateTextureHandle(hdrDepthDesc);  // A-3
+            HE_ASSERT(m_HDRDepth[i].IsValid(), "ForwardPipeline: HDR 深度目标句柄创建失败");
         }
 
         rhi::SamplerDesc hdrSampDesc;
@@ -531,8 +534,10 @@ void ForwardPipeline::Shutdown() {
     if (m_ToneMap) { m_ToneMap->Shutdown(); m_ToneMap.reset(); }
     if (m_Skybox)  { m_Skybox->Shutdown();  m_Skybox.reset(); }
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        m_HDRTarget[i].reset();
-        m_HDRDepth[i].reset();
+        m_Device->DestroyTextureHandle(m_HDRTarget[i]);
+        m_HDRTarget[i] = {};
+        m_Device->DestroyTextureHandle(m_HDRDepth[i]);
+        m_HDRDepth[i] = {};
     }
     m_HDRSampler.reset();
     m_SecRecordLists.clear();  // Phase 5-4 sec CB 录制池
@@ -671,8 +676,8 @@ void ForwardPipeline::BeginHDRPass(rhi::IRHICommandList* cmd, u32 width, u32 hei
     cmd->SetPipeline(m_PBR_PSO.get());
 
     // 取**本飞行帧槽位**那一份颜色/深度（每帧清空+重画，见 m_HDRTarget 注释）
-    void* colorView = m_HDRTarget[RenderFrameSlot()]->GetNativeHandle();
-    void* depthView = m_HDRDepth[RenderFrameSlot()]->GetNativeHandle();
+    void* colorView = m_Device->ResolveTexture(m_HDRTarget[RenderFrameSlot()])->GetNativeHandle();
+    void* depthView = m_Device->ResolveTexture(m_HDRDepth[RenderFrameSlot()])->GetNativeHandle();
 
     rhi::ClearValue clear{};
     clear.depth = 1.0f;
@@ -696,7 +701,7 @@ void ForwardPipeline::EndHDRPass(rhi::IRHICommandList* cmd) {
         rhi::PipelineStage::FragmentShader,
         rhi::ResourceState::RenderTarget,
         rhi::ResourceState::ShaderResource,
-        m_HDRTarget[RenderFrameSlot()].get());
+        m_Device->ResolveTexture(m_HDRTarget[RenderFrameSlot()]));
 
     // 预设 ToneMap PSO 为下一个 RenderPass 的初始管线（匹配 SwapChain 实际颜色格式：SDR=BGRA8，HDR=A2B10G10R10）
     if (m_ToneMap) m_ToneMap->PreBind(cmd);
@@ -787,7 +792,7 @@ void ForwardPipeline::RenderToneMapPass(rhi::IRHICommandList* cmd) {
     if (m_ToneMap) {
         // HDR 目标按飞行帧轮换 ⇒ 输入集也要按槽位（见 ToneMapPass::SetFrameSlot）
         m_ToneMap->SetFrameSlot(RenderFrameSlot());
-        m_ToneMap->SetInput(m_HDRTarget[RenderFrameSlot()].get(), m_HDRSampler.get());
+        m_ToneMap->SetInput(m_Device->ResolveTexture(m_HDRTarget[RenderFrameSlot()]), m_HDRSampler.get());
         m_ToneMap->Render(cmd);
     }
 }
@@ -811,8 +816,12 @@ void ForwardPipeline::ResizeHDRTarget(u32 width, u32 height) {
     hdrDepthDesc.usage  = rhi::TextureUsage::DepthStencil | rhi::TextureUsage::ShaderResource;
 
     for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        m_HDRTarget[i] = m_Device->CreateTexture(hdrColorDesc);
-        m_HDRDepth[i]  = m_Device->CreateTexture(hdrDepthDesc);
+        if (m_HDRTarget[i].IsValid()) { m_Device->DestroyTextureHandle(m_HDRTarget[i]); m_HDRTarget[i] = {}; }
+        m_HDRTarget[i] = m_Device->CreateTextureHandle(hdrColorDesc);   // A-3（resize 重建）
+        HE_ASSERT(m_HDRTarget[i].IsValid(), "ForwardPipeline: HDR 颜色目标（resize）句柄创建失败");
+        if (m_HDRDepth[i].IsValid()) { m_Device->DestroyTextureHandle(m_HDRDepth[i]); m_HDRDepth[i] = {}; }
+        m_HDRDepth[i]  = m_Device->CreateTextureHandle(hdrDepthDesc);  // A-3（resize 重建）
+        HE_ASSERT(m_HDRDepth[i].IsValid(), "ForwardPipeline: HDR 深度目标（resize）句柄创建失败");
     }
     // ToneMapPass 输入会自动通过每帧 SetInput 更新，无需手动更新描述符集
 }
@@ -956,7 +965,7 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, const FrameSceneSnapshot
 
     // AA Pass（FXAA 等在 HDR→ToneMap 之间或 ToneMap 之后）
     if (m_AntiAliasing && m_AntiAliasing->IsEnabled() && m_AntiAliasing->GetMode() != AAMode::None) {
-        m_AntiAliasing->SetInput(m_HDRTarget[RenderFrameSlot()].get(), m_HDRSampler.get());
+        m_AntiAliasing->SetInput(m_Device->ResolveTexture(m_HDRTarget[RenderFrameSlot()]), m_HDRSampler.get());
         m_AntiAliasing->Render(cmd);
     }
 }
@@ -992,7 +1001,7 @@ void ForwardPipeline::RunGPUCulling(rhi::IRHICommandList* cmd, const CameraData&
 
     // 3) 绑定 GPUScene SSBO / HDR 深度 → Dispatch Compute
     m_GPUCulling.SetSceneBuffer(m_Device, m_GPUScene.GetObjectBuffer());
-    if (m_HDRDepth[RenderFrameSlot()]) m_GPUCulling.SetDepthTexture(m_Device, m_HDRDepth[RenderFrameSlot()].get(),
+    if (m_HDRDepth[RenderFrameSlot()].IsValid()) m_GPUCulling.SetDepthTexture(m_Device, m_Device->ResolveTexture(m_HDRDepth[RenderFrameSlot()]),
                                                  m_HDRWidth, m_HDRHeight);
     m_GPUCulling.Dispatch(cmd, camera.GetViewProjMatrix(), m_GPUScene.GetObjectCount(),
                           m_HDRWidth, m_HDRHeight);
