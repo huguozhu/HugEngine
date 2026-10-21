@@ -292,7 +292,7 @@ void GPUCulling::Shutdown(rhi::IRHIDevice* device) {
 
     // PTG 资源清理
     m_Device->DestroyPipelineStateHandle(m_PTG_PSO); m_PTG_PSO = {};
-    m_PTGParamBuf.reset();
+    m_Device->DestroyBufferHandle(m_PTGParamBuf); m_PTGParamBuf = {};
     if (m_PTGLayout != rhi::kInvalidLayout && device) {
         device->DestroyDescriptorSetLayout(m_PTGLayout);
         m_PTGLayout = rhi::kInvalidLayout;
@@ -642,13 +642,16 @@ bool GPUCulling::InitializePTG(rhi::IRHIDevice* device) {
         paramDesc.size = sizeof(PTGParams);  // 192 字节
         paramDesc.usage = rhi::BufferUsage::Uniform;
         paramDesc.cpuAccess = true;  // 允许 CPU Map/Unmap
-        m_PTGParamBuf = device->CreateBuffer(paramDesc);
+        m_PTGParamBuf = device->CreateBufferHandle(paramDesc);   // A-3
+        HE_ASSERT(m_PTGParamBuf.IsValid(), "GPUCulling: PTG 参数缓冲句柄创建失败");
 
         // 清零初始化，确保 frameIndex = 0（PTG 等待帧索引 >= 1）
-        void* ptr = m_PTGParamBuf->Map();
+        auto* ptgB   = m_Device->ResolveBuffer(m_PTGParamBuf);
+        HE_ASSERT(ptgB, "GPUCulling: PTG 参数缓冲句柄解析失败（已销毁？）");
+        void* ptr    = ptgB ? ptgB->Map() : nullptr;
         if (ptr) {
             std::memset(ptr, 0, sizeof(PTGParams));
-            m_PTGParamBuf->Unmap();
+            if (auto* ptgu = m_Device->ResolveBuffer(m_PTGParamBuf)) ptgu->Unmap();
         }
     }
 
@@ -670,7 +673,7 @@ bool GPUCulling::InitializePTG(rhi::IRHIDevice* device) {
     m_PTGSet = device->AllocateDescriptorSet(m_PTGLayout);
 
     // 4. 绑定 PTG 参数缓冲（binding 0）
-    device->UpdateDescriptorSet(m_PTGSet, 0, rhi::DescriptorType::UniformBuffer, m_PTGParamBuf.get());
+    device->UpdateDescriptorSet(m_PTGSet, 0, rhi::DescriptorType::UniformBuffer, m_Device->ResolveBuffer(m_PTGParamBuf));
     // binding 1 (SceneObjects) 由 SetSceneBuffer 设置
     // binding 2 (HiZDepth) 由 SetDepthTexture 设置
     // binding 3 (IndirectCmds) 由 Initialize 中 m_IndirectCmdBuf 设置
@@ -715,7 +718,9 @@ void GPUCulling::SignalPTG(rhi::IRHICommandList* cmd, const float4x4& viewProj,
     ExtractFrustumPlanes(viewProj, planes);
 
     // 写入 PTGParams 到 Uniform Buffer
-    void* mapped = m_PTGParamBuf->Map();
+    auto* ptgB   = m_Device->ResolveBuffer(m_PTGParamBuf);
+    HE_ASSERT(ptgB, "GPUCulling: PTG 参数缓冲句柄解析失败（已销毁？）");
+    void* mapped = ptgB ? ptgB->Map() : nullptr;
     if (!mapped) return;
 
     auto* params = static_cast<PTGParams*>(mapped);
@@ -727,7 +732,7 @@ void GPUCulling::SignalPTG(rhi::IRHICommandList* cmd, const float4x4& viewProj,
     m_FrameIndex++;
     params->frameIndex = m_PTGFrameCounter++;
 
-    m_PTGParamBuf->Unmap();
+    if (auto* ptgu = m_Device->ResolveBuffer(m_PTGParamBuf)) ptgu->Unmap();
 
     // 每帧 Dispatch PTG shader（替代持久化 spin-wait）
     cmd->SetPipeline(m_Device->ResolvePipelineState(m_PTG_PSO));
@@ -752,11 +757,13 @@ void GPUCulling::ShutdownPTG(rhi::IRHIDevice* device) {
     if (!m_PTGActive || !device) return;
 
     // 1. 发送退出信号（frameIndex = 0xFFFFFFFF）
-    void* mapped = m_PTGParamBuf->Map();
+    auto* ptgB   = m_Device->ResolveBuffer(m_PTGParamBuf);
+    HE_ASSERT(ptgB, "GPUCulling: PTG 参数缓冲句柄解析失败（已销毁？）");
+    void* mapped = ptgB ? ptgB->Map() : nullptr;
     if (mapped) {
         auto* params = static_cast<PTGParams*>(mapped);
         params->frameIndex = 0xFFFFFFFF;
-        m_PTGParamBuf->Unmap();
+        if (auto* ptgu = m_Device->ResolveBuffer(m_PTGParamBuf)) ptgu->Unmap();
     }
 
     // 2. 等待 GPU 完成，确保 PTG 线程检测到退出信号并终止

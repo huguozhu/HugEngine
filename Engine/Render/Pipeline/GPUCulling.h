@@ -146,7 +146,7 @@ private:
     // PTG 资源
     rhi::ShaderBytecode m_PTGCS;
     rhi::RHIPipelineStateHandle m_PTG_PSO{};   // A-3：句柄持有
-    std::unique_ptr<rhi::IRHIBuffer> m_PTGParamBuf;       // 每帧参数 + 帧触发信号
+    rhi::RHIBufferHandle m_PTGParamBuf{};   // A-3：每帧参数 + 帧触发信号
     rhi::DescriptorSetLayoutHandle m_PTGLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_PTGSet    = rhi::kInvalidSet;
     bool m_PTGActive = false;
