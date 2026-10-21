@@ -639,15 +639,21 @@ void ForwardPipeline::UploadMaterialBindless() {
 
     const u32 newCount = (u32)data.size();
     // 材质数变化时重建 buffer；否则复用（场景材质集通常静态，RegisterBuffer 只在首次/材质数变化时调用）
-    if (!m_MaterialBuffer || newCount != m_MaterialCount) {
+    if (!m_MaterialBuffer.IsValid() || newCount != m_MaterialCount) {
         rhi::BufferDesc desc;
         desc.size        = sizeof(GPUMaterialData) * newCount;
         desc.usage       = rhi::BufferUsage::Storage;
         desc.initialData = data.data();
-        m_MaterialBuffer = m_Device->CreateBuffer(desc);
+        // 【A-3】帧内重建：先销毁旧句柄（代次前进 ⇒ 旧句柄即刻失效），再建新的
+        if (m_MaterialBuffer.IsValid()) {
+            m_Device->DestroyBufferHandle(m_MaterialBuffer);
+            m_MaterialBuffer = {};
+        }
+        m_MaterialBuffer = m_Device->CreateBufferHandle(desc);
+        HE_ASSERT(m_MaterialBuffer.IsValid(), "ForwardPipeline: 材质 SSBO 句柄创建失败");
         m_MaterialCount  = newCount;
         // 注册到 bindless 堆（binding 30 = u_Materials[]；当前仅 1 个材质 buffer → handle=0）
-        u32 handle = m_Device->GetBindlessHeap()->RegisterBuffer(m_MaterialBuffer.get());
+        u32 handle = m_Device->GetBindlessHeap()->RegisterBuffer(m_Device->ResolveBuffer(m_MaterialBuffer));
         HE_CORE_INFO("ForwardPipeline: 上传 {} 个材质到 bindless SSBO (handle={})", newCount, handle);
     }
 }

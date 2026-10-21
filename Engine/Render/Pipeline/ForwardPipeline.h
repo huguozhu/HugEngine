@@ -251,7 +251,10 @@ private:
     std::unique_ptr<rhi::IRHISampler> m_BindlessSampler;
 
     // Bindless 材质 SSBO（per-material 材质数据，去重后写入单个 buffer，binding 30 = u_Materials[]）
-    std::unique_ptr<rhi::IRHIBuffer> m_MaterialBuffer;  // 材质数据 SSBO（元素 = GPUMaterialData，按 materialID>>2 索引）
+    /// A-3：材质 SSBO 持句柄（元素 = GPUMaterialData，按 materialID>>2 索引）。
+    /// 注意：这条路径会在**帧内**因材质数变化而重建（`UploadMaterialBindless` 扩容）——
+    /// 重建时必须先销毁旧句柄再建新的，否则资源表里会堆积旧缓冲。
+    rhi::RHIBufferHandle m_MaterialBuffer{};
     u32 m_MaterialCount = 0;                            // 已注册材质数（buffer 内元素数）
     bool m_UseBindlessMaterial = false;  // 默认走内联路径（GPUObjectData 字段读材质参数）；验证 bindless 后切换
 
