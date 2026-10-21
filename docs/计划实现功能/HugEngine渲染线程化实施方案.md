@@ -655,6 +655,23 @@ private:
 仍要对（现有 `m_ResourceStates` 记账发生在录制期 ⇒ 需要把它一起搬进命令流或改为执行期推导）、
 延迟销毁队列的时序。
 
+**可达性（2026-10 追加，重要）**：即使 pass 级改造做完，也**到不了**"渲染线程零 Vulkan 调用"——
+因为帧的外壳仍是 API 调用：`VulkanCommandList::Begin/End`（命令缓冲生命周期）、
+`AcquireNextImage`、`Submit`（现在已交给 RHI 线程）、以及窗口 resize 时的重建。要把它们也命令化，
+等于把**整个帧**都变成命令流（交给 RHI 线程从头执行）——那时渲染线程才真的"只 append"。
+
+因此 A-1 的正确分层是：
+
+| 层 | 内容 | 现状 |
+|---|---|---|
+| L1 契约 + 翻译层 | `RHICommand`/`RHICommandList` + `ReplayCommandStream` | ✅ 已完成（`9a294e7`） |
+| L2 提交管道 | `Submit/RouteSubmit/ExecuteSubmit` 携带命令流，RHI 线程提交前翻译 | ✅ 已完成（`9afe25c`） |
+| L3 pass 级命令化 | `BeginPass`/`EndPass` + pass 内绘制序列进流 | ⬜ 未做（本文 §12.11 的 6 处改动） |
+| L4 帧级命令化 | 命令缓冲 Begin/End、Acquire、Present、重建也进流 ⇒ 渲染线程真正零 API | ⬜ 未做；这是"零 Vulkan 调用"的**必要条件**，也是 A-3 句柄化的直接消费者 |
+
+结论：**P2 的"零 Vulkan 调用"目标在 L3+L4 都完成前不应声称达成**；本阶段的合法成果是 L1+L2（已落地并
+按"行为中立"验收），以及 L3/L4 的设计与判据。
+
 ---
 
 ## 9. 附录 A：任务总表（可勾选）
