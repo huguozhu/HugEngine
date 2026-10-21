@@ -135,8 +135,8 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
     psoDesc.descriptorSetLayouts = {m_DescLayout};
     psoDesc.debugName = "GPUCull";
 
-    m_PSO = device->CreatePipelineState(psoDesc);
-    HE_ASSERT(m_PSO, "GPUCulling: Compute PSO creation failed");
+    m_PSO = device->CreatePipelineStateHandle(psoDesc);
+    HE_ASSERT(m_PSO.IsValid(), "GPUCulling: Compute PSO creation failed");
 
     // ── Phase 1 PSO（相同布局，不同 shader，输出候选索引）──
     m_Phase1CS.stage = rhi::ShaderStage::Compute;
@@ -152,8 +152,8 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
     p1Desc.pushConstantRanges = {pcRange};
     p1Desc.descriptorSetLayouts = {m_Phase1Layout};
     p1Desc.debugName = "GPUCull_Phase1";
-    m_Phase1PSO = device->CreatePipelineState(p1Desc);
-    HE_ASSERT(m_Phase1PSO, "GPUCulling: Phase 1 PSO creation failed");
+    m_Phase1PSO = device->CreatePipelineStateHandle(p1Desc);
+    HE_ASSERT(m_Phase1PSO.IsValid(), "GPUCulling: Phase 1 PSO creation failed");
 
     // Phase 1 候选缓冲
     {
@@ -207,8 +207,8 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
     p2Desc.pushConstantRanges = {p2PCR};
     p2Desc.descriptorSetLayouts = {m_Phase2Layout};
     p2Desc.debugName = "GPUCull_Phase2";
-    m_Phase2PSO = device->CreatePipelineState(p2Desc);
-    HE_ASSERT(m_Phase2PSO, "GPUCulling: Phase 2 PSO creation failed");
+    m_Phase2PSO = device->CreatePipelineStateHandle(p2Desc);
+    HE_ASSERT(m_Phase2PSO.IsValid(), "GPUCulling: Phase 2 PSO creation failed");
 
     // ── Hi-Z 下采样 PSO ──
     {
@@ -234,8 +234,8 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
         hizDesc.pushConstantRanges = {hizPCR};
         hizDesc.descriptorSetLayouts = {m_HiZLayout};
         hizDesc.debugName = "HiZDownsample";
-        m_HiZ_PSO = device->CreatePipelineState(hizDesc);
-        HE_ASSERT(m_HiZ_PSO, "GPUCulling: HiZDownsample PSO creation failed");
+        m_HiZ_PSO = device->CreatePipelineStateHandle(hizDesc);
+        HE_ASSERT(m_HiZ_PSO.IsValid(), "GPUCulling: HiZDownsample PSO creation failed");
     }
 
     // Hi-Z 采样器
@@ -280,17 +280,17 @@ void GPUCulling::Shutdown(rhi::IRHIDevice* device) {
 
     m_CandidateBuf.reset();
     m_CandidateCountBuf.reset();
-    m_Phase1PSO.reset();
-    m_Phase2PSO.reset();
+    m_Device->DestroyPipelineStateHandle(m_Phase1PSO); m_Phase1PSO = {};
+    m_Device->DestroyPipelineStateHandle(m_Phase2PSO); m_Phase2PSO = {};
     m_IndirectCmdBuf.reset();
     m_DrawCountBuf.reset();
-    m_PSO.reset();
+    m_Device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};
     m_HiZTexture.reset();
     m_HiZSampler.reset();
-    m_HiZ_PSO.reset();
+    m_Device->DestroyPipelineStateHandle(m_HiZ_PSO); m_HiZ_PSO = {};
 
     // PTG 资源清理
-    m_PTG_PSO.reset();
+    m_Device->DestroyPipelineStateHandle(m_PTG_PSO); m_PTG_PSO = {};
     m_PTGParamBuf.reset();
     if (m_PTGLayout != rhi::kInvalidLayout && device) {
         device->DestroyDescriptorSetLayout(m_PTGLayout);
@@ -412,7 +412,7 @@ void GPUCulling::Dispatch(rhi::IRHICommandList* cmd,
     pc.mips  = hizMips;
     pc.count = objectCount;
 
-    cmd->SetPipeline(m_PSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSet);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
 
@@ -456,7 +456,7 @@ void GPUCulling::DispatchPhase1(rhi::IRHICommandList* cmd, const float4x4& viewP
         m_CandidateCountBuf->Unmap();
     }
 
-    cmd->SetPipeline(m_Phase1PSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_Phase1PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Phase1Set);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
 
@@ -486,7 +486,7 @@ void GPUCulling::BuildHiZPyramid(rhi::IRHICommandList* cmd, u32 screenW, u32 scr
     if (mipCount > kHiZMips) mipCount = kHiZMips;
     m_HiZMipCount = mipCount;
 
-    cmd->SetPipeline(m_HiZ_PSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_HiZ_PSO));
 
     u32 srcW = screenW, srcH = screenH;
 
@@ -566,7 +566,7 @@ void GPUCulling::DispatchPhase2(rhi::IRHICommandList* cmd, u32 screenW, u32 scre
     m_FrameIndex++;
     pc.count = candidateCount;
 
-    cmd->SetPipeline(m_Phase2PSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_Phase2PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Phase2Set);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
 
@@ -679,8 +679,8 @@ bool GPUCulling::InitializePTG(rhi::IRHIDevice* device) {
     ptgDesc.pushConstantRanges = {};
     ptgDesc.descriptorSetLayouts = {m_PTGLayout};
     ptgDesc.debugName = "PersistentCull";
-    m_PTG_PSO = device->CreatePipelineState(ptgDesc);
-    HE_ASSERT(m_PTG_PSO, "GPUCulling: PersistentCull PSO creation failed");
+    m_PTG_PSO = device->CreatePipelineStateHandle(ptgDesc);
+    HE_ASSERT(m_PTG_PSO.IsValid(), "GPUCulling: PersistentCull PSO creation failed");
 
     // 6. PTG per-frame dispatch 模式：无需初始 Dispatch
     //   每帧由 SignalPTG 执行 vkCmdDispatch（通过 AsyncCompute 队列）
@@ -724,7 +724,7 @@ void GPUCulling::SignalPTG(rhi::IRHICommandList* cmd, const float4x4& viewProj,
     m_PTGParamBuf->Unmap();
 
     // 每帧 Dispatch PTG shader（替代持久化 spin-wait）
-    cmd->SetPipeline(m_PTG_PSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PTG_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_PTGSet);
     // Dispatch 调试 marker（RenderDoc 定位用）
     cmd->SetDrawDebugLabel("Cull PTG");

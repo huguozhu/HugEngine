@@ -102,7 +102,7 @@ private:
 
     // 单阶段/Phase 1 PSO
     rhi::ShaderBytecode m_CS;
-    std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
+    rhi::RHIPipelineStateHandle m_PSO{};   // A-3：句柄持有
     rhi::DescriptorSetLayoutHandle m_DescLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_DescSet    = rhi::kInvalidSet;
 
@@ -116,13 +116,13 @@ private:
 
     // Phase 1 PSO（裁剪后输出候选索引）
     rhi::ShaderBytecode m_Phase1CS;
-    std::unique_ptr<rhi::IRHIPipelineState> m_Phase1PSO;
+    rhi::RHIPipelineStateHandle m_Phase1PSO{};   // A-3：句柄持有
     rhi::DescriptorSetLayoutHandle m_Phase1Layout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_Phase1Set    = rhi::kInvalidSet;
 
     // Phase 2 PSO（精筛候选 → IndirectDraw）
     rhi::ShaderBytecode m_Phase2CS;
-    std::unique_ptr<rhi::IRHIPipelineState> m_Phase2PSO;
+    rhi::RHIPipelineStateHandle m_Phase2PSO{};   // A-3：句柄持有
     rhi::DescriptorSetLayoutHandle m_Phase2Layout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_Phase2Set    = rhi::kInvalidSet;
 
@@ -130,7 +130,7 @@ private:
     static constexpr u32 kHiZMips = 8;  // 最多 8 级（最大支持 256×256 以上的分辨率）
     std::unique_ptr<rhi::IRHITexture> m_HiZTexture;      // 完整 Hi-Z 深度金字塔（ShaderResource | UnorderedAccess）
     std::unique_ptr<rhi::IRHISampler> m_HiZSampler;      // 点采样器
-    std::unique_ptr<rhi::IRHIPipelineState> m_HiZ_PSO;   // HiZDownsample PSO
+    rhi::RHIPipelineStateHandle m_HiZ_PSO{};   // A-3：句柄持有   // HiZDownsample PSO
     rhi::DescriptorSetLayoutHandle m_HiZLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_HiZSet    = rhi::kInvalidSet;  // 单 set，每次 dispatch 前更新
     u32 m_HiZMipCount = 0;                 // 金字塔层数（0=禁用, 1=仅全分辨率, kHiZMips=完整）
@@ -145,7 +145,7 @@ private:
 
     // PTG 资源
     rhi::ShaderBytecode m_PTGCS;
-    std::unique_ptr<rhi::IRHIPipelineState> m_PTG_PSO;
+    rhi::RHIPipelineStateHandle m_PTG_PSO{};   // A-3：句柄持有
     std::unique_ptr<rhi::IRHIBuffer> m_PTGParamBuf;       // 每帧参数 + 帧触发信号
     rhi::DescriptorSetLayoutHandle m_PTGLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_PTGSet    = rhi::kInvalidSet;
