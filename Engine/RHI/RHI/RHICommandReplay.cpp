@@ -53,10 +53,24 @@ u32 ReplayCommandStream(const RHICommandList& stream, IRHICommandList& cmd) {
         case RHICommandType::DrawIndexed: {
             const auto* d = stream.PayloadAt<RHICommandDrawIndexed>(i);
             if (!d) break;
-            cmd.DrawIndexed(d->indexCount, d->startIndex, d->baseVertex);
+            if (d->instanceCount > 1u) {
+                cmd.DrawIndexed(d->indexCount, d->instanceCount);   // 实例化重载（SV_InstanceID）
+            } else {
+                cmd.DrawIndexed(d->indexCount, d->startIndex, d->baseVertex);
+            }
             ++replayed;
             break;
         }
+        case RHICommandType::ExecuteSecondary: {
+            const auto* d = stream.PayloadAt<RHICommandExecuteSecondary>(i);
+            if (!d || !d->secondary) break;
+            cmd.ExecuteSecondary(static_cast<IRHICommandList*>(d->secondary));
+            ++replayed;
+            break;
+        }
+        case RHICommandType::ExecuteIndirect:
+            // 间接绘制路径尚未接入 A-1（需要先确认 `IRHICommandList` 的间接调用接口形态）
+            break;
         case RHICommandType::SetDrawDebugLabel: {
             const auto* d = stream.PayloadAt<RHICommandSetDebugLabel>(i);
             if (!d) break;

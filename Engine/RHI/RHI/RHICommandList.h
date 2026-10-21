@@ -54,6 +54,8 @@ enum class RHICommandType : u32 {
     SetVertexBuffer    = 9,
     SetIndexBuffer     = 10,
     SetDrawDebugLabel  = 11,
+    ExecuteSecondary   = 12,   // 主列表执行一条已录好的次级列表（MTCR 合并点）
+    ExecuteIndirect    = 13,   // 间接绘制（GBuffer/Forward 的 indirect 分支）
 };
 
 /// 一条命令的载荷：类型擦除 + **内联存储**。
@@ -81,8 +83,16 @@ struct RHICommandSetPushConstants { u64 arenaOffset = 0; u32 size = 0; u32 pad =
 struct RHICommandSetVertexBuffer { void* buffer = nullptr; u32 slot = 0; u32 pad = 0; };
 /// `SetIndexBuffer`：缓冲 + 偏移
 struct RHICommandSetIndexBuffer { void* buffer = nullptr; u32 offset = 0; u32 pad = 0; };
-/// `DrawIndexed`
-struct RHICommandDrawIndexed { u32 indexCount = 0; u32 startIndex = 0; i32 baseVertex = 0; u32 pad = 0; };
+/// `DrawIndexed`（`instanceCount > 1` 时执行端走"实例化"重载）
+struct RHICommandDrawIndexed {
+    u32 indexCount = 0; u32 startIndex = 0; i32 baseVertex = 0; u32 instanceCount = 1;
+};
+/// `ExecuteSecondary`：要执行的次级列表（它已由录制者线程录好）
+struct RHICommandExecuteSecondary { void* secondary = nullptr; };
+/// `ExecuteIndirect`：间接参数缓冲 + 绘制条数/步长
+struct RHICommandExecuteIndirect {
+    void* argsBuffer = nullptr; u32 maxDrawCount = 0; u32 stride = 0; u32 pad = 0;
+};
 /// `SetDrawDebugLabel`：内联短文本（超长截断，不足补 0）
 struct RHICommandSetDebugLabel { char text[56] = {}; };
 
@@ -93,6 +103,8 @@ static_assert(sizeof(RHICommandSetVertexBuffer)  <= kInlinePayloadBytes, "载荷
 static_assert(sizeof(RHICommandSetIndexBuffer)   <= kInlinePayloadBytes, "载荷超过内联上限");
 static_assert(sizeof(RHICommandDrawIndexed)      <= kInlinePayloadBytes, "载荷超过内联上限");
 static_assert(sizeof(RHICommandSetDebugLabel)    <= kInlinePayloadBytes, "载荷超过内联上限");
+static_assert(sizeof(RHICommandExecuteSecondary) <= kInlinePayloadBytes, "载荷超过内联上限");
+static_assert(sizeof(RHICommandExecuteIndirect)  <= kInlinePayloadBytes, "载荷超过内联上限");
 
 /// 命令列表：命令数组 + 参数 arena。记录端写，执行端读；交接后只读（铁律 2）。
 class RHICommandList {
