@@ -672,6 +672,32 @@ private:
 结论：**P2 的"零 Vulkan 调用"目标在 L3+L4 都完成前不应声称达成**；本阶段的合法成果是 L1+L2（已落地并
 按"行为中立"验收），以及 L3/L4 的设计与判据。
 
+### 12.12 L4 盘点（2026-10）与分步计划
+
+**盘点一：剩余 `unique_ptr<IRHI*>` 持有者约 180 处**（`grep -c 'std::unique_ptr<rhi::IRHI'` 于
+`Engine/**/*.h`）。分布（按数量级）：Lumen 最多（`LumenScene.h` 单文件 40+），其次 Nanite
+（`NaniteCull/NaniteRaster/NaniteScene/NaniteStream`）、`RTPass.h`、`SSAO`、Shadow 三种技术、
+`GBufferRenderer.h`、`LightingPass.h`、`DecalPass.h`、`InstanceCuller` 等。
+
+⇒ **A-3 是长期路线**（与文档自估的 15~30 人日一致），**不应阻塞 L4**：L4 只依赖"帧外壳"的
+命令化，不依赖把全部资源改成句柄。
+
+**盘点二：`AcquireNextImage` / `Present` 的调用点集中在样例的渲染命令里**，7 个样例各一对、
+形状一致（`swapchain->AcquireNextImage()` → 录制 → `swapchain->Present(vsync)`），另有失败分支
+（`frameAborted` / `continue`）。
+
+**L4 分步（每步一提交、同一套判据）**：
+
+| 步 | 内容 | 判据 |
+|---|---|---|
+| **L4-1** | **把 acquire/present 收口到引擎侧**（样例不再直接持有 swapchain 的帧序操作）：新增一个 `IFramePresenter`（或 `RHI` 层的 `BeginFrame/EndFrame`），内部封装 `AcquireNextImage` + `Present` + 失败分支；7 个样例机械替换 | 20/20 转储一致、0 新 VUID、断言 0 |
+| **L4-2** | **命令缓冲生命周期收口**：`Begin/End` 从样例移到引擎（与 L4-1 同一入口），样例只调 `BeginFrame/Record/EndFrame` | 同上 |
+| **L4-3** | **整帧命令流**：L4-1/L4-2 之后，帧外壳的每个 API 都变成命令流里的一条（L1/L2 已就绪），RHI 线程自己 `Begin → 翻译 → End → Submit → Present` ⇒ **渲染线程真正零 Vulkan 调用** | 同上 + grep 断言"渲染线程路径不再出现 `vkCmd*`/`vkAcquire*`/`vkQueuePresent`" |
+
+**为什么先 L4-1 而不是继续 A-3**：L4-1 只动 14 个调用点、形状一致、判据现成；而 A-3 的 180 处
+持有者需要按模块分批（每批都要 A/B），更适合作为并行长期路线。两者在 L4-3 汇合（那时帧外壳的
+资源创建才真正需要句柄）。
+
 #### L3 执行清单（Forward 非 RG 路径，按调用点）
 
 选 Forward 的 HDR pass 作首个 L3 试点：它的结果**在转储里可见**（`hdr.f16` 是 20 个目标之一），
