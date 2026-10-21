@@ -330,7 +330,10 @@ void VulkanCommandList::SetScissor(const ScissorRect& sc) {
 void VulkanCommandList::SetSwapChain(IRHISwapChain* swapchain) {
     m_pSwapChain = static_cast<VulkanSwapChain*>(swapchain);
 
-    u32 count = kSwapchainImageCount;  // Triple buffering 图像数
+    // 用交换链的**实际**图像数（= max(kSwapchainImageCount, caps.minImageCount)）：
+    // 原先写死 kSwapchainImageCount，若实际图像数更大，m_SwapchainViews 会少建视图，
+    // 之后按 m_CurrentImage 索引时就越界。
+    u32 count = m_pSwapChain->GetImageCount();
     m_SwapchainViews.resize(count);
     for (u32 i = 0; i < count; ++i)
         m_SwapchainViews[i] = m_pSwapChain->GetImageView(i);
