@@ -49,14 +49,19 @@ bool PointShadowTechnique::Initialize(rhi::IRHIDevice* device){
     d.usage=rhi::TextureUsage::DepthStencil|rhi::TextureUsage::ShaderResource|rhi::TextureUsage::Cubemap;
     // 每个飞行帧各一份（理由见头文件）：512²×6×4B = 6.3 MB/份，三份合计约 19 MB
     for(u32 i=0;i<MAX_FRAMES_IN_FLIGHT;++i){
-        m_PointShadowMap[i]=device->CreateTexture(d);
-        if(!m_PointShadowMap[i])return false;   // 显存不足就明确失败，不留"只建了前几份"的半状态
+        m_PointShadowMap[i]=device->CreateTextureHandle(d);   // A-3
+        if(!m_PointShadowMap[i].IsValid()){
+            // 显存不足就明确失败。**句柄化后必须回收已创建的**：不再有 unique_ptr 帮忙析构，
+            // 否则资源表里会留下前几份（这正是"半状态"泄漏）。
+            for(u32 j=0;j<i;++j){ m_Device->DestroyTextureHandle(m_PointShadowMap[j]); m_PointShadowMap[j]={}; }
+            return false;
+        }
     }
     rhi::SamplerDesc sd;
     sd.minFilter=rhi::FilterMode::Linear;
     sd.magFilter=rhi::FilterMode::Linear;
     sd.addressU=sd.addressV=sd.addressW=rhi::AddressMode::ClampToEdge;
-    m_PointShadowSampler=device->CreateSampler(sd);
+    m_PointShadowSampler=device->CreateSamplerHandle(sd);
     return true;
 }
 
@@ -78,13 +83,16 @@ void PointShadowTechnique::CreatePSO(rhi::DescriptorSetLayoutHandle layout){
     d.depthFormat=rhi::Format::D32_FLOAT;
     d.colorAttachmentCount=0;
     d.pushConstantRanges={pcr};d.descriptorSetLayouts={layout};d.debugName="PointDepth";
-    m_ShadowPSO=m_Device->CreatePipelineState(d);
-    HE_ASSERT(m_ShadowPSO,"PointShadowTechnique: PSO failed");
+    m_ShadowPSO=m_Device->CreatePipelineStateHandle(d);   // A-3
+    HE_ASSERT(m_ShadowPSO.IsValid(),"PointShadowTechnique: PSO 句柄创建失败");
 }
 
 void PointShadowTechnique::Shutdown(){
-    for(auto& m:m_PointShadowMap)m.reset();
-    m_PointShadowSampler.reset();m_ShadowPSO.reset();
+    for(auto& h:m_PointShadowMap){   // A-3：贴图句柄化后必须显式销毁
+        m_Device->DestroyTextureHandle(h); h = {};
+    }
+    m_Device->DestroySamplerHandle(m_PointShadowSampler); m_PointShadowSampler = {};   // A-3
+    m_Device->DestroyPipelineStateHandle(m_ShadowPSO); m_ShadowPSO = {};
 }
 void PointShadowTechnique::SetRenderResources(rhi::IRHIBuffer* ob,rhi::DescriptorSetHandle ds){m_ExternalObjectBuffer=ob;m_ExternalDescSet=ds;}
 
@@ -107,7 +115,7 @@ void PointShadowTechnique::Render(rhi::IRHICommandList* cmd,const FrameSceneSnap
                                    const MeshRegistry& registry,
                                    const std::vector<GPUShadowData>& sd,u32 start){
     // 本帧只操作**本飞行帧槽位**那一份立方体（逐帧重画 ⇒ 必须分份，理由见头文件）
-    auto* cube=m_PointShadowMap[m_FrameSlot].get();
+    auto* cube=m_Device->ResolveTexture(m_PointShadowMap[m_FrameSlot]);   // A-3
     if(!cube||!m_ExternalObjectBuffer||m_ExternalDescSet==rhi::kInvalidSet)return;
     // 进入面循环前先把整张 cubemap 置为可采样：光照 pass 可能在首帧就采样它，
     // 而那时 6 个面都还没渲染过（层布局是 UNDEFINED）→ 校验层在提交时报
@@ -124,9 +132,9 @@ void PointShadowTechnique::Render(rhi::IRHICommandList* cmd,const FrameSceneSnap
             void*fv=cube->GetNativeHandle(face);
             if(!fv)continue;
             rhi::ClearValue cv{};cv.depth=1.f;
-            cmd->SetPipeline(m_ShadowPSO.get());
+            cmd->SetPipeline(m_Device->ResolvePipelineState(m_ShadowPSO));
             cmd->BeginOffscreenPass(nullptr,fv,m_MapSize,m_MapSize,&cv);
-            cmd->SetPipeline(m_ShadowPSO.get());
+            cmd->SetPipeline(m_Device->ResolvePipelineState(m_ShadowPSO));
             // 实验：点光 cubemap 渲染用正高度视口（去掉 y-flip）。
             // 排查：CSM 阴影在 shader 采样时用 uv.y=0.5-ndc.y*0.5 补偿了负高度视口的
             // y-flip；而点光 SamplePointShadow 用方向向量采样 cubemap 无补偿，
