@@ -104,10 +104,38 @@ private:
     u32               m_Live = 0;
 };
 
+/// 管线状态句柄（A-3 第二批）。语义与缓冲/纹理句柄一致：`index == 0` 无效，`generation` 做代次校验。
+struct RHIPipelineStateHandle {
+    u32 index      = 0;
+    u32 generation = 0;
+
+    [[nodiscard]] bool IsValid() const { return index != 0u; }
+    friend bool operator==(RHIPipelineStateHandle a, RHIPipelineStateHandle b) {
+        return a.index == b.index && a.generation == b.generation;
+    }
+    friend bool operator!=(RHIPipelineStateHandle a, RHIPipelineStateHandle b) { return !(a == b); }
+};
+
+/// 采样器句柄（A-3 第二批）
+struct RHISamplerHandle {
+    u32 index      = 0;
+    u32 generation = 0;
+
+    [[nodiscard]] bool IsValid() const { return index != 0u; }
+    friend bool operator==(RHISamplerHandle a, RHISamplerHandle b) {
+        return a.index == b.index && a.generation == b.generation;
+    }
+    friend bool operator!=(RHISamplerHandle a, RHISamplerHandle b) { return !(a == b); }
+};
+
 class IRHIBuffer;    // 前向声明：本头文件不依赖 Buffer.h / Texture.h 的实现细节
 class IRHITexture;
+class IRHIPipelineState;
+class IRHISampler;
 
 using RHIBufferTable  = RHIResourceTable<RHIBufferHandle, IRHIBuffer>;
 using RHITextureTable = RHIResourceTable<RHITextureHandle, IRHITexture>;
+using RHIPipelineStateTable = RHIResourceTable<RHIPipelineStateHandle, IRHIPipelineState>;
+using RHISamplerTable       = RHIResourceTable<RHISamplerHandle, IRHISampler>;
 
 } // namespace he::rhi

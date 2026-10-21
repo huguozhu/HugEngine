@@ -77,6 +77,14 @@ public:
     IRHITexture*     ResolveTexture(RHITextureHandle handle) const override;
     void             DestroyBufferHandle(RHIBufferHandle handle) override;
     void             DestroyTextureHandle(RHITextureHandle handle) override;
+
+    // A-3 第二批：PipelineState / Sampler
+    RHIPipelineStateHandle CreatePipelineStateHandle(const PipelineStateDesc& desc) override;
+    RHISamplerHandle       CreateSamplerHandle(const SamplerDesc& desc) override;
+    IRHIPipelineState*     ResolvePipelineState(RHIPipelineStateHandle handle) const override;
+    IRHISampler*           ResolveSampler(RHISamplerHandle handle) const override;
+    void                   DestroyPipelineStateHandle(RHIPipelineStateHandle handle) override;
+    void                   DestroySamplerHandle(RHISamplerHandle handle) override;
     std::unique_ptr<IRHISampler>      CreateSampler(const SamplerDesc& desc) override;
     std::unique_ptr<IRHIPipelineState> CreatePipelineState(const PipelineStateDesc& desc) override;
 
@@ -439,6 +447,11 @@ private:
     RHITextureTable m_TextureTable;
     std::unordered_map<u64, std::unique_ptr<IRHIBuffer>>  m_HandleBuffers;
     std::unordered_map<u64, std::unique_ptr<IRHITexture>> m_HandleTextures;
+    // A-3 第二批
+    RHIPipelineStateTable m_PipelineStateTable;
+    RHISamplerTable       m_SamplerTable;
+    std::unordered_map<u64, std::unique_ptr<IRHIPipelineState>> m_HandlePipelineStates;
+    std::unordered_map<u64, std::unique_ptr<IRHISampler>>       m_HandleSamplers;
     u64 m_CurrentFrame = 0;  // 递增帧计数器（PSO 缓存 LRU + 延迟销毁去重）
     u64 m_LastDeferredAdvanceFrame = UINT64_MAX;  // 上一次延迟销毁的帧 ID
 

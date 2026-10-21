@@ -397,6 +397,10 @@ void VulkanDevice::Shutdown() {
     // 否则它们的 unique_ptr 会在分配器已销毁后再去 free（VMA 退出时会报「有分配未释放」）。
     m_HandleBuffers.clear();
     m_HandleTextures.clear();
+    m_HandlePipelineStates.clear();
+    m_HandleSamplers.clear();
+    m_PipelineStateTable = {};
+    m_SamplerTable = {};
     m_BufferTable = {};
     m_TextureTable = {};
 
@@ -930,6 +934,47 @@ void VulkanDevice::DestroyTextureHandle(RHITextureHandle handle) {
     if (it == m_HandleTextures.end()) return;
     m_TextureTable.Remove(handle);
     m_HandleTextures.erase(it);
+}
+
+// --- A-3 第二批：PipelineState / Sampler ---
+RHIPipelineStateHandle VulkanDevice::CreatePipelineStateHandle(const PipelineStateDesc& desc) {
+    auto pso = CreatePipelineState(desc);
+    if (!pso) return {};
+    const RHIPipelineStateHandle h = m_PipelineStateTable.Add(pso.get());
+    m_HandlePipelineStates[HandleKey(h.index, h.generation)] = std::move(pso);
+    return h;
+}
+
+RHISamplerHandle VulkanDevice::CreateSamplerHandle(const SamplerDesc& desc) {
+    auto s = CreateSampler(desc);
+    if (!s) return {};
+    const RHISamplerHandle h = m_SamplerTable.Add(s.get());
+    m_HandleSamplers[HandleKey(h.index, h.generation)] = std::move(s);
+    return h;
+}
+
+IRHIPipelineState* VulkanDevice::ResolvePipelineState(RHIPipelineStateHandle handle) const {
+    return m_PipelineStateTable.Get(handle);
+}
+
+IRHISampler* VulkanDevice::ResolveSampler(RHISamplerHandle handle) const {
+    return m_SamplerTable.Get(handle);
+}
+
+void VulkanDevice::DestroyPipelineStateHandle(RHIPipelineStateHandle handle) {
+    if (!handle.IsValid()) return;
+    auto it = m_HandlePipelineStates.find(HandleKey(handle.index, handle.generation));
+    if (it == m_HandlePipelineStates.end()) return;
+    m_PipelineStateTable.Remove(handle);
+    m_HandlePipelineStates.erase(it);
+}
+
+void VulkanDevice::DestroySamplerHandle(RHISamplerHandle handle) {
+    if (!handle.IsValid()) return;
+    auto it = m_HandleSamplers.find(HandleKey(handle.index, handle.generation));
+    if (it == m_HandleSamplers.end()) return;
+    m_SamplerTable.Remove(handle);
+    m_HandleSamplers.erase(it);
 }
 
 void VulkanDevice::WaitIdle() {

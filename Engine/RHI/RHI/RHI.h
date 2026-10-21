@@ -70,6 +70,16 @@ public:
     /// 按句柄销毁：从资源表移除 ⇒ 代次前进，该句柄与所有更早的句柄一律解析为 nullptr（幂等）
     virtual void DestroyBufferHandle(RHIBufferHandle /*handle*/) {}
     virtual void DestroyTextureHandle(RHITextureHandle /*handle*/) {}
+
+    // --- A-3 第二批：PipelineState / Sampler（同样与 unique_ptr 版并存）---
+    // 【为什么 DescriptorSet 不在此列】它本来就是设备侧的 `u64` 句柄（`m_DescSets`），
+    // 已经具备"句柄 + 显式销毁"的语义，不需要再包一层。
+    virtual RHIPipelineStateHandle CreatePipelineStateHandle(const PipelineStateDesc& /*desc*/) { return {}; }
+    virtual RHISamplerHandle       CreateSamplerHandle(const SamplerDesc& /*desc*/) { return {}; }
+    virtual IRHIPipelineState*     ResolvePipelineState(RHIPipelineStateHandle /*handle*/) const { return nullptr; }
+    virtual IRHISampler*           ResolveSampler(RHISamplerHandle /*handle*/) const { return nullptr; }
+    virtual void DestroyPipelineStateHandle(RHIPipelineStateHandle /*handle*/) {}
+    virtual void DestroySamplerHandle(RHISamplerHandle /*handle*/) {}
     virtual std::unique_ptr<IRHISampler>        CreateSampler(const SamplerDesc& desc) = 0;
     virtual std::unique_ptr<IRHIPipelineState>  CreatePipelineState(const PipelineStateDesc& desc) = 0;
 
