@@ -37,7 +37,8 @@ public:
     u32 GetShadowMapCount()const override{return CASCADE_COUNT;}
     rhi::IRHITexture* GetShadowMap(u32 i)const override;
     rhi::IRHITexture* GetShadowMapAt(u32 slot,u32 i)const override;
-    rhi::IRHISampler* GetShadowSampler()const override{return m_ShadowSampler.get();}
+    rhi::IRHISampler* GetShadowSampler()const override{   // A-3
+        return m_Device?m_Device->ResolveSampler(m_ShadowSampler):nullptr;}
     // 逐帧重画的贴图按飞行帧槽位取用（见 IShadowTechnique::SetFrameSlot）
     void SetFrameSlot(u32 slot)override{m_FrameSlot=(slot<MAX_FRAMES_IN_FLIGHT)?slot:0u;}
 
@@ -45,7 +46,8 @@ public:
     void CreatePSO(rhi::DescriptorSetLayoutHandle layout);
 
     // 暴露 PSO（供 PointShadowTechnique 复用）
-    rhi::IRHIPipelineState* GetPSO()const{return m_ShadowPSO.get();}
+    rhi::IRHIPipelineState* GetPSO()const{   // A-3：PointShadowTechnique 复用本 PSO，按需解析
+        return m_Device?m_Device->ResolvePipelineState(m_ShadowPSO):nullptr;}
 
     // 获取 cascade i 的光源 VP 矩阵（供 RSM 等 GI 技术复用）
     float4x4 GetLightViewProj(u32 cascade) const { return (cascade < CASCADE_COUNT) ? m_LightVPs[cascade] : float4x4(1.0f); }
@@ -57,12 +59,12 @@ private:
     static float4x4 ComputeCascadeViewProj(const float3& ld,const CameraData& cam,float sn,float sf);
 
     rhi::ShaderBytecode m_ShadowVS,m_ShadowFS;
-    std::unique_ptr<rhi::IRHIPipelineState> m_ShadowPSO;
+    rhi::RHIPipelineStateHandle m_ShadowPSO{};   // A-3：句柄持有
     // 【为什么是二维数组】级联贴图每帧"清空→重画"且同帧被采样，而 GPU 最多落后 CPU 三个飞行帧：
     // 单份时第 N+1 帧的清空/重画会盖掉第 N 帧正在采样的内容（相机移动时表现为阴影闪动/丢失）。
     // 按 [飞行帧][级联] 分份后本帧只写本槽位、采样也只读本槽位。
-    std::unique_ptr<rhi::IRHITexture> m_ShadowMaps[MAX_FRAMES_IN_FLIGHT][CASCADE_COUNT];
-    std::unique_ptr<rhi::IRHISampler> m_ShadowSampler;
+    rhi::RHITextureHandle m_ShadowMaps[MAX_FRAMES_IN_FLIGHT][CASCADE_COUNT]{};   // A-3：句柄持有
+    rhi::RHISamplerHandle m_ShadowSampler{};   // A-3：句柄持有
     u32 m_ShadowMapSize = kDefaultCSMShadowSize;
     u32 m_FrameSlot = 0;
 

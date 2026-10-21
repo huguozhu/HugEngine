@@ -88,14 +88,15 @@ bool CSMTechnique::Initialize(rhi::IRHIDevice* device){
             d.mipLevels=1;
             d.arrayLayers=1;
             d.usage=rhi::TextureUsage::DepthStencil|rhi::TextureUsage::ShaderResource;
-            m_ShadowMaps[s][c]=device->CreateTexture(d);
+            m_ShadowMaps[s][c]=device->CreateTextureHandle(d);   // A-3
+            HE_ASSERT(m_ShadowMaps[s][c].IsValid(),"CSMTechnique: 阴影贴图句柄创建失败");
         }
     }
     rhi::SamplerDesc sd;
     sd.minFilter=rhi::FilterMode::Linear;
     sd.magFilter=rhi::FilterMode::Linear;
     sd.addressU=sd.addressV=sd.addressW=rhi::AddressMode::ClampToEdge;
-    m_ShadowSampler=device->CreateSampler(sd);
+    m_ShadowSampler=device->CreateSamplerHandle(sd);
     return true;
 }
 
@@ -117,14 +118,18 @@ void CSMTechnique::CreatePSO(rhi::DescriptorSetLayoutHandle layout){
     d.depthFormat=rhi::Format::D32_FLOAT;
     d.colorAttachmentCount=0;
     d.pushConstantRanges={pcr};d.descriptorSetLayouts={layout};d.debugName="CSMDepth";
-    m_ShadowPSO=m_Device->CreatePipelineState(d);
-    HE_ASSERT(m_ShadowPSO,"CSMTechnique: PSO failed");
+    m_ShadowPSO=m_Device->CreatePipelineStateHandle(d);   // A-3
+    HE_ASSERT(m_ShadowPSO.IsValid(),"CSMTechnique: PSO 句柄创建失败");
 }
 
 void CSMTechnique::Shutdown(){
     for(u32 s=0;s<MAX_FRAMES_IN_FLIGHT;++s)
-        for(u32 c=0;c<CASCADE_COUNT;++c)m_ShadowMaps[s][c].reset();
-    m_ShadowSampler.reset();m_ShadowPSO.reset();
+        for(u32 c=0;c<CASCADE_COUNT;++c){   // A-3：二维贴图句柄必须显式销毁
+            m_Device->DestroyTextureHandle(m_ShadowMaps[s][c]);
+            m_ShadowMaps[s][c] = {};
+        }
+    m_Device->DestroySamplerHandle(m_ShadowSampler); m_ShadowSampler = {};   // A-3
+    m_Device->DestroyPipelineStateHandle(m_ShadowPSO); m_ShadowPSO = {};
 }
 void CSMTechnique::SetRenderResources(rhi::IRHIBuffer* ob,rhi::DescriptorSetHandle ds){m_ExternalObjectBuffer=ob;m_ExternalDescSet=ds;}
 
@@ -162,22 +167,22 @@ void CSMTechnique::Render(rhi::IRHICommandList* cmd,const FrameSceneSnapshot& sn
     for(u32 c=0;c<CASCADE_COUNT;++c)RenderCascade(cmd,c,snapshot,registry,sd[start]);
     for(u32 c=0;c<CASCADE_COUNT;++c)
         cmd->PipelineBarrier(rhi::PipelineStage::LateFragmentTests,rhi::PipelineStage::FragmentShader,
-            rhi::ResourceState::DepthStencilRead,rhi::ResourceState::ShaderResource,m_ShadowMaps[m_FrameSlot][c].get());
+            rhi::ResourceState::DepthStencilRead,rhi::ResourceState::ShaderResource,m_Device->ResolveTexture(m_ShadowMaps[m_FrameSlot][c]));
 }
 
 void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,const FrameSceneSnapshot& snapshot,
                                   const MeshRegistry& registry,const GPUShadowData& sd){
     m_LightVPs[ci] = sd.lightViewProj[ci];  // 缓存供 RSM 查询
-    void*dv=m_ShadowMaps[m_FrameSlot][ci]->GetNativeHandle();
+    void*dv=m_Device->ResolveTexture(m_ShadowMaps[m_FrameSlot][ci])->GetNativeHandle();
     if(!dv)return;
     rhi::ClearValue cv{};cv.depth=1.f;
     // pass 级调试标记：RenderDoc 中可识别阴影级联 pass
     char passLabel[32];
     snprintf(passLabel,sizeof(passLabel),"CSM Shadow C%u",ci);
     cmd->SetDrawDebugLabel(passLabel);
-    cmd->SetPipeline(m_ShadowPSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_ShadowPSO));
     cmd->BeginOffscreenPass(nullptr,dv,m_ShadowMapSize,m_ShadowMapSize,&cv);
-    cmd->SetPipeline(m_ShadowPSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_ShadowPSO));
     cmd->SetViewport({0,(float)m_ShadowMapSize,(float)m_ShadowMapSize,-(float)m_ShadowMapSize,0,1});
     cmd->SetScissor({0,0,m_ShadowMapSize,m_ShadowMapSize});
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_ExternalDescSet);
@@ -214,9 +219,10 @@ void CSMTechnique::RenderCascade(rhi::IRHICommandList* cmd,u32 ci,const FrameSce
     cmd->EndOffscreenPass();
 }
 
-rhi::IRHITexture* CSMTechnique::GetShadowMap(u32 i)const{return m_ShadowMaps[m_FrameSlot][(i<CASCADE_COUNT)?i:0].get();}
-rhi::IRHITexture* CSMTechnique::GetShadowMapAt(u32 slot,u32 i)const{
-    return m_ShadowMaps[(slot<MAX_FRAMES_IN_FLIGHT)?slot:0u][(i<CASCADE_COUNT)?i:0].get();
+rhi::IRHITexture* CSMTechnique::GetShadowMap(u32 i)const{   // A-3：句柄按需解析
+    return m_Device?m_Device->ResolveTexture(m_ShadowMaps[m_FrameSlot][(i<CASCADE_COUNT)?i:0]):nullptr;}
+rhi::IRHITexture* CSMTechnique::GetShadowMapAt(u32 slot,u32 i)const{   // A-3
+    return m_Device?m_Device->ResolveTexture(m_ShadowMaps[(slot<MAX_FRAMES_IN_FLIGHT)?slot:0u][(i<CASCADE_COUNT)?i:0]):nullptr;
 }
 
 } // namespace he::render
