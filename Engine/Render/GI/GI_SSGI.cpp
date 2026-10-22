@@ -50,7 +50,7 @@ bool GI_SSGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     ubDesc.size      = 32 * sizeof(float4) + sizeof(float4) + 3 * sizeof(float4x4);
     ubDesc.usage     = rhi::BufferUsage::Uniform;
     ubDesc.cpuAccess = true;
-    m_UniformBuffer  = device->CreateBuffer(ubDesc);
+    m_UniformBuffer  = device->CreateBufferHandle(ubDesc);
 
     // 3. 创建描述符集（binding 0-2：深度/法线/反照率，binding 3：Uniform Buffer）
     rhi::DescriptorSetLayoutDesc layoutDesc;
@@ -66,7 +66,7 @@ bool GI_SSGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_DescSet    = device->AllocateDescriptorSet(m_DescLayout);
 
     // Uniform Buffer 固定绑定到参数 binding（每帧只更新内容，不重绑）
-    device->UpdateDescriptorSet(m_DescSet, kSSGIBindParams, rhi::DescriptorType::UniformBuffer, m_UniformBuffer.get());
+    device->UpdateDescriptorSet(m_DescSet, kSSGIBindParams, rhi::DescriptorType::UniformBuffer, m_Device->ResolveBuffer(m_UniformBuffer));
 
     // 4. 编译管线（顶点 = 全屏三角，像素 = SSGI 计算）
     rhi::ShaderBytecode vs, fs;
@@ -88,32 +88,32 @@ bool GI_SSGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     psoDesc.colorFormats[0]     = rhi::Format::RGBA16_FLOAT;
     psoDesc.descriptorSetLayouts = {m_DescLayout};
     psoDesc.debugName           = "SSGI";
-    m_PSO = device->CreatePipelineState(psoDesc);
+    m_PSO = device->CreatePipelineStateHandle(psoDesc);
 
     // 5. 创建点采样器（GBuffer 精确读取）
     rhi::SamplerDesc samplerDesc;
     samplerDesc.minFilter = samplerDesc.magFilter = rhi::FilterMode::Nearest;
     samplerDesc.addressU  = samplerDesc.addressV  = rhi::AddressMode::ClampToEdge;
-    m_PointSampler = device->CreateSampler(samplerDesc);
+    m_PointSampler = device->CreateSamplerHandle(samplerDesc);
 
     // 6. 创建输出纹理（halfRes 时降半，省约 3/4 像素着色）
     CreateOutputTex(halfResW(width), halfResH(height));
     // 前帧 HDR 辐射度（若已在 Initialize 之前注入则立刻绑定；否则首次 Render 时补绑）
     BindRadianceHistory();
     m_Ready = true;
-    HE_CORE_INFO("SSGI initialized ({}x{})", m_Output->GetWidth(), m_Output->GetHeight());
+    HE_CORE_INFO("SSGI initialized ({}x{})", m_Device->ResolveTexture(m_Output)->GetWidth(), m_Device->ResolveTexture(m_Output)->GetHeight());
     return true;
 }
 
 void GI_SSGI::Shutdown() {
-    m_PSO.reset();
-    m_UniformBuffer.reset();
+    m_Device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};
+    m_Device->DestroyBufferHandle(m_UniformBuffer); m_UniformBuffer = {};
     if (m_Device && m_DescLayout != rhi::kInvalidLayout) {
         m_Device->DestroyDescriptorSetLayout(m_DescLayout);
     }
-    m_Output.reset();
-    m_Sampler.reset();
-    m_PointSampler.reset();
+    m_Device->DestroyTextureHandle(m_Output); m_Output = {};
+    m_Device->DestroySamplerHandle(m_Sampler); m_Sampler = {};
+    m_Device->DestroySamplerHandle(m_PointSampler); m_PointSampler = {};
     m_Device = nullptr;
     m_Ready  = false;
 }
@@ -127,7 +127,7 @@ void GI_SSGI::OnResize(u32 w, u32 h) {
 void GI_SSGI::SyncOutputSize() {
     if (!m_Device || !m_Ready) return;
     const u32 w = halfResW(m_Width), h = halfResH(m_Height);
-    if (!m_Output || m_Output->GetWidth() != w || m_Output->GetHeight() != h) {
+    if (!m_Output.IsValid() || m_Device->ResolveTexture(m_Output)->GetWidth() != w || m_Device->ResolveTexture(m_Output)->GetHeight() != h) {
         CreateOutputTex(w, h);
     }
 }
@@ -139,13 +139,13 @@ void GI_SSGI::CreateOutputTex(u32 w, u32 h) {
     td.height    = h;
     td.mipLevels = 1;
     td.usage     = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
-    m_Output = m_Device->CreateTexture(td);
+    m_Output = m_Device->CreateTextureHandle(td);
 
     // 线性采样器：Lighting 阶段对 SSGI 结果做双线性上采样
     rhi::SamplerDesc samplerDesc;
     samplerDesc.minFilter = samplerDesc.magFilter = rhi::FilterMode::Linear;
     samplerDesc.addressU  = samplerDesc.addressV  = rhi::AddressMode::ClampToEdge;
-    m_Sampler = m_Device->CreateSampler(samplerDesc);
+    m_Sampler = m_Device->CreateSamplerHandle(samplerDesc);
 }
 
 void GI_SSGI::SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal, rhi::IRHITexture* albedo) {
@@ -155,15 +155,15 @@ void GI_SSGI::SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal, rhi::
     // 每帧纹理可能变化，动态更新描述符集绑定
     if (m_Depth) {
         m_Device->UpdateDescriptorSet(m_DescSet, kSSGIBindDepth, rhi::DescriptorType::CombinedImageSampler,
-            m_Depth, m_PointSampler.get());
+            m_Depth, m_Device->ResolveSampler(m_PointSampler));
     }
     if (m_Normal) {
         m_Device->UpdateDescriptorSet(m_DescSet, kSSGIBindNormal, rhi::DescriptorType::CombinedImageSampler,
-            m_Normal, m_PointSampler.get());
+            m_Normal, m_Device->ResolveSampler(m_PointSampler));
     }
     if (m_Albedo) {
         m_Device->UpdateDescriptorSet(m_DescSet, kSSGIBindAlbedo, rhi::DescriptorType::CombinedImageSampler,
-            m_Albedo, m_PointSampler.get());
+            m_Albedo, m_Device->ResolveSampler(m_PointSampler));
     }
 }
 
@@ -173,11 +173,11 @@ void GI_SSGI::Render(rhi::IRHICommandList* cmd) {
     }
 
     // 1. 绑定管线 + 描述符集，设置视口/裁剪
-    cmd->SetPipeline(m_PSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSet);
     // 视口用输出纹理实际尺寸（halfRes 时为半分辨率，与渲染目标一致）
-    u32 ow = m_Output->GetWidth();
-    u32 oh = m_Output->GetHeight();
+    u32 ow = m_Device->ResolveTexture(m_Output)->GetWidth();
+    u32 oh = m_Device->ResolveTexture(m_Output)->GetHeight();
     cmd->SetViewport({0, (float)oh, (float)ow, -(float)oh, 0, 1});
     cmd->SetScissor({0, 0, ow, oh});
 
@@ -219,10 +219,11 @@ void GI_SSGI::Render(rhi::IRHICommandList* cmd) {
     ub.proj    = proj;
     ub.view    = view;
 
-    void* mapped = m_UniformBuffer->Map();
+    auto* ubH = m_Device->ResolveBuffer(m_UniformBuffer);
+    void* mapped = ubH ? ubH->Map() : nullptr;
     if (mapped) {
         memcpy(mapped, &ub, sizeof(ub));
-        m_UniformBuffer->Unmap();
+        if (auto* ubu = m_Device->ResolveBuffer(m_UniformBuffer)) ubu->Unmap();
     }
 
     // 5. 绘制全屏三角（3 顶点覆盖全屏）

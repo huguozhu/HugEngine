@@ -31,7 +31,7 @@ public:
     void SetEnabled(bool e) override { m_Settings.enabled = e; }
 
     GIMode GetMode() const override { return GIMode::SSGI; }  // 暂用 SSGI mode
-    rhi::IRHITexture* GetIndirectSpecularTexture() const override { return m_Output.get(); }
+    rhi::IRHITexture* GetIndirectSpecularTexture() const override { return m_Device->ResolveTexture(m_Output); }
 
     /// 【步骤 34（11.3）】消费端（全分辨率）尺寸：半分辨率信号的升采样级以它为重建目标
     u32 GetFullWidth()  const { return m_Width; }
@@ -49,8 +49,8 @@ public:
     /// 焦距反算 fov）下 viewPos 重建与采样点投影同时错位（§9.2-E，SSGI 已修，此处是同类实例）。
     /// 传 nullptr 时退化为默认投影，保证独立运行该 pass 也不会拿到未初始化矩阵。
     void SetCamera(const CameraData* camera) { m_Camera = camera; }
-    rhi::IRHISampler* GetOutputSampler() const { return m_Sampler.get(); }
-    void PreBind(rhi::IRHICommandList* cmd) const { if (m_Ready) cmd->SetPipeline(m_PSO.get()); }
+    rhi::IRHISampler* GetOutputSampler() const { return m_Device->ResolveSampler(m_Sampler); }
+    void PreBind(rhi::IRHICommandList* cmd) const { if (m_Ready) cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO)); }
 
     float maxSteps   = 64;
     float stepSize   = 0.5f;
@@ -82,13 +82,13 @@ private:
     u32 m_Width = 0, m_Height = 0;
     bool m_Ready = false;
 
-    std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
+    rhi::RHIPipelineStateHandle m_PSO{};   // A-3
     rhi::DescriptorSetLayoutHandle m_DescLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_DescSet    = rhi::kInvalidSet;
 
-    std::unique_ptr<rhi::IRHITexture> m_Output;
-    std::unique_ptr<rhi::IRHISampler> m_Sampler;
-    std::unique_ptr<rhi::IRHISampler> m_PointSampler;
+    rhi::RHITextureHandle m_Output{};   // A-3
+    rhi::RHISamplerHandle m_Sampler{};   // A-3
+    rhi::RHISamplerHandle m_PointSampler{};   // A-3
 
     /// 矩阵 UBO（binding 3）：invProj（clip→view）+ proj（view→clip）
     ///
@@ -96,7 +96,7 @@ private:
     /// 恰好用满。此前只往 push constant 里传了**逆**矩阵，而 shader 还拿它当**正**投影
     /// 用（§9.2-B）——正投影无处安放正是该缺陷的成因。
     /// SSAO 早已采用「矩阵进 UBO」的同一做法（`SSAO.cpp` 的 projInv + proj）。
-    std::unique_ptr<rhi::IRHIBuffer> m_UniformBuffer;
+    rhi::RHIBufferHandle m_UniformBuffer{};   // A-3
 
     rhi::IRHITexture* m_Depth  = nullptr;
     rhi::IRHITexture* m_Albedo = nullptr;

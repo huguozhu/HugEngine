@@ -36,9 +36,9 @@ public:
     /// 目标尺寸变化（窗口 resize）时自动重建纹理，并递增 generation。
     void Capture(rhi::IRHICommandList* cmd, rhi::IRHITexture* hdr);
 
-    [[nodiscard]] rhi::IRHITexture* GetTexture() const { return m_Texture.get(); }
-    [[nodiscard]] rhi::IRHISampler* GetSampler() const { return m_Sampler.get(); }
-    [[nodiscard]] bool IsValid() const { return m_Texture != nullptr; }
+    [[nodiscard]] rhi::IRHITexture* GetTexture() const { return m_Device->ResolveTexture(m_Texture); }
+    [[nodiscard]] rhi::IRHISampler* GetSampler() const { return m_Device->ResolveSampler(m_Sampler); }
+    [[nodiscard]] bool IsValid() const { return m_Texture.IsValid(); }
 
     /// 纹理被（重新）创建过时递增。消费方把它缓存的代次与此比对，即可知道
     /// 是否需要重新绑定描述符——避免依赖「谁先 Initialize」这种脆弱假设。
@@ -49,9 +49,9 @@ private:
 
     rhi::IRHIDevice* m_Device = nullptr;
 
-    std::unique_ptr<rhi::IRHITexture>       m_Texture;
-    std::unique_ptr<rhi::IRHISampler>       m_Sampler;
-    std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
+    rhi::RHITextureHandle       m_Texture{};   // A-3
+    rhi::RHISamplerHandle       m_Sampler{};   // A-3
+    rhi::RHIPipelineStateHandle m_PSO{};   // A-3
 
     rhi::DescriptorSetLayoutHandle m_Layout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_Set    = rhi::kInvalidSet;   // set=0：下采样输入

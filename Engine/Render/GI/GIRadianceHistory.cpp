@@ -18,7 +18,7 @@ void GIRadianceHistory::CreateTexture(u32 width, u32 height, bool bumpGeneration
     td.height = (height / kDownsampleFactor > 0) ? height / kDownsampleFactor : 1;
     td.format = rhi::Format::RGBA16_FLOAT;
     td.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
-    m_Texture = m_Device->CreateTexture(td);
+    m_Texture = m_Device->CreateTextureHandle(td);
     if (bumpGeneration) ++m_Generation;
 }
 
@@ -30,7 +30,7 @@ bool GIRadianceHistory::Initialize(rhi::IRHIDevice* device, u32 width, u32 heigh
     rhi::SamplerDesc sd;
     sd.minFilter = sd.magFilter = rhi::FilterMode::Linear;
     sd.addressU  = sd.addressV  = rhi::AddressMode::ClampToEdge;
-    m_Sampler = device->CreateSampler(sd);
+    m_Sampler = device->CreateSamplerHandle(sd);
 
     // 下采样输入：全分辨率 HDR
     rhi::DescriptorSetLayoutDesc dl;
@@ -58,7 +58,7 @@ bool GIRadianceHistory::Initialize(rhi::IRHIDevice* device, u32 width, u32 heigh
     pd.colorFormats[0]      = rhi::Format::RGBA16_FLOAT;
     pd.descriptorSetLayouts = {m_Layout};
     pd.debugName            = "GIRadianceHistory_Downsample";
-    m_PSO = device->CreatePipelineState(pd);
+    m_PSO = device->CreatePipelineStateHandle(pd);
 
     // 立即建纹理（代次置 1），使消费方在 Initialize 阶段就能绑定到有效纹理；
     // 之后 Capture 只在源尺寸变化时重建。
@@ -66,47 +66,47 @@ bool GIRadianceHistory::Initialize(rhi::IRHIDevice* device, u32 width, u32 heigh
     m_SourceWidth  = width;
     m_SourceHeight = height;
 
-    if (!m_Texture || !m_PSO) {
+    if (!m_Texture.IsValid() || !m_PSO.IsValid()) {
         HE_CORE_ERROR("GIRadianceHistory: 初始化失败（纹理或 PSO 为空）");
         return false;
     }
     HE_CORE_INFO("GIRadianceHistory initialized (source {}x{} -> {}x{})",
-                 width, height, m_Texture->GetWidth(), m_Texture->GetHeight());
+                 width, height, m_Device->ResolveTexture(m_Texture)->GetWidth(), m_Device->ResolveTexture(m_Texture)->GetHeight());
     return true;
 }
 
 void GIRadianceHistory::Shutdown() {
     m_Set = rhi::kInvalidSet;
     m_Layout = rhi::kInvalidLayout;
-    m_PSO.reset();
-    m_Texture.reset();
-    m_Sampler.reset();
+    m_Device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};
+    m_Device->DestroyTextureHandle(m_Texture); m_Texture = {};
+    m_Device->DestroySamplerHandle(m_Sampler); m_Sampler = {};
     m_Device = nullptr;
     m_Generation = 0;
     m_SourceWidth = m_SourceHeight = 0;
 }
 
 void GIRadianceHistory::Capture(rhi::IRHICommandList* cmd, rhi::IRHITexture* hdr) {
-    if (!cmd || !hdr || !m_Device || !m_Texture || !m_PSO) return;
+    if (!cmd || !hdr || !m_Device || !m_Texture.IsValid() || !m_PSO.IsValid()) return;
 
     // 源尺寸变化（窗口 resize）→ 重建纹理并递增代次，消费方据此重绑描述符
     if (hdr->GetWidth() != m_SourceWidth || hdr->GetHeight() != m_SourceHeight) {
         CreateTexture(hdr->GetWidth(), hdr->GetHeight(), true);
         m_SourceWidth  = hdr->GetWidth();
         m_SourceHeight = hdr->GetHeight();
-        if (!m_Texture) return;
+        if (!m_Texture.IsValid()) return;
     }
 
-    const u32 tw = m_Texture->GetWidth();
-    const u32 th = m_Texture->GetHeight();
+    const u32 tw = m_Device->ResolveTexture(m_Texture)->GetWidth();
+    const u32 th = m_Device->ResolveTexture(m_Texture)->GetHeight();
 
     m_Device->UpdateDescriptorSet(m_Set, kRadianceBindInput,
-        rhi::DescriptorType::CombinedImageSampler, hdr, m_Sampler.get());
+        rhi::DescriptorType::CombinedImageSampler, hdr, m_Device->ResolveSampler(m_Sampler));
 
-    cmd->SetPipeline(m_PSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
     rhi::ClearValue clr{};
-    cmd->BeginOffscreenPass(m_Texture->GetNativeHandle(), nullptr, tw, th, &clr, false);
+    cmd->BeginOffscreenPass(m_Device->ResolveTexture(m_Texture)->GetNativeHandle(), nullptr, tw, th, &clr, false);
     cmd->SetViewport({0, (float)th, (float)tw, -(float)th, 0, 1});
     cmd->SetScissor({0, 0, tw, th});
     cmd->Draw(3);

@@ -56,9 +56,9 @@ bool GI_SSR::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     ubDesc.size      = sizeof(SSRMatrices);
     ubDesc.usage     = rhi::BufferUsage::Uniform;
     ubDesc.cpuAccess = true;
-    m_UniformBuffer  = device->CreateBuffer(ubDesc);
+    m_UniformBuffer  = device->CreateBufferHandle(ubDesc);
     device->UpdateDescriptorSet(m_DescSet, kSSRBindParams,
-        rhi::DescriptorType::UniformBuffer, m_UniformBuffer.get());
+        rhi::DescriptorType::UniformBuffer, m_Device->ResolveBuffer(m_UniformBuffer));
 
     rhi::ShaderBytecode vs, fs;
     vs.stage = rhi::ShaderStage::Vertex;
@@ -78,12 +78,12 @@ bool GI_SSR::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     d.colorFormats[0] = rhi::Format::RGBA16_FLOAT;
     d.descriptorSetLayouts = {m_DescLayout};
     d.debugName = "SSR";
-    m_PSO = device->CreatePipelineState(d);
+    m_PSO = device->CreatePipelineStateHandle(d);
 
     rhi::SamplerDesc sd;
     sd.minFilter = sd.magFilter = rhi::FilterMode::Nearest;
     sd.addressU = sd.addressV = rhi::AddressMode::ClampToEdge;
-    m_PointSampler = device->CreateSampler(sd);
+    m_PointSampler = device->CreateSamplerHandle(sd);
     CreateOutputTex(halfResW(width), halfResH(height));
     m_Ready = true;
     HE_CORE_INFO("GI_SSR initialized");
@@ -91,14 +91,14 @@ bool GI_SSR::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
 }
 
 void GI_SSR::Shutdown() {
-    m_PSO.reset();
-    m_UniformBuffer.reset();
+    m_Device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};
+    m_Device->DestroyBufferHandle(m_UniformBuffer); m_UniformBuffer = {};
     if (m_Device && m_DescLayout != rhi::kInvalidLayout) {
         m_Device->DestroyDescriptorSetLayout(m_DescLayout);
     }
-    m_Output.reset();
-    m_Sampler.reset();
-    m_PointSampler.reset();
+    m_Device->DestroyTextureHandle(m_Output); m_Output = {};
+    m_Device->DestroySamplerHandle(m_Sampler); m_Sampler = {};
+    m_Device->DestroySamplerHandle(m_PointSampler); m_PointSampler = {};
     m_Device = nullptr;
     m_Ready = false;
 }
@@ -112,7 +112,7 @@ void GI_SSR::OnResize(u32 w, u32 h) {
 void GI_SSR::SyncOutputSize() {
     if (!m_Device || !m_Ready) return;
     const u32 w = halfResW(m_Width), h = halfResH(m_Height);
-    if (!m_Output || m_Output->GetWidth() != w || m_Output->GetHeight() != h) {
+    if (!m_Output.IsValid() || m_Device->ResolveTexture(m_Output)->GetWidth() != w || m_Device->ResolveTexture(m_Output)->GetHeight() != h) {
         CreateOutputTex(w, h);
     }
 }
@@ -124,11 +124,11 @@ void GI_SSR::CreateOutputTex(u32 w, u32 h) {
     td.height = h;
     td.mipLevels = 1;
     td.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
-    m_Output = m_Device->CreateTexture(td);
+    m_Output = m_Device->CreateTextureHandle(td);
     rhi::SamplerDesc sd;
     sd.minFilter = sd.magFilter = rhi::FilterMode::Linear;
     sd.addressU = sd.addressV = rhi::AddressMode::ClampToEdge;
-    m_Sampler = m_Device->CreateSampler(sd);
+    m_Sampler = m_Device->CreateSamplerHandle(sd);
 }
 
 void GI_SSR::SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal, rhi::IRHITexture* albedo) {
@@ -137,13 +137,13 @@ void GI_SSR::SetInputs(rhi::IRHITexture* depth, rhi::IRHITexture* normal, rhi::I
     m_Albedo = albedo;
     // 每帧纹理可能变化，动态更新描述符集绑定
     if (m_Depth) {
-        m_Device->UpdateDescriptorSet(m_DescSet, kSSRBindDepth, rhi::DescriptorType::CombinedImageSampler, m_Depth, m_PointSampler.get());
+        m_Device->UpdateDescriptorSet(m_DescSet, kSSRBindDepth, rhi::DescriptorType::CombinedImageSampler, m_Depth, m_Device->ResolveSampler(m_PointSampler));
     }
     if (m_Normal) {
-        m_Device->UpdateDescriptorSet(m_DescSet, kSSRBindNormal, rhi::DescriptorType::CombinedImageSampler, m_Normal, m_PointSampler.get());
+        m_Device->UpdateDescriptorSet(m_DescSet, kSSRBindNormal, rhi::DescriptorType::CombinedImageSampler, m_Normal, m_Device->ResolveSampler(m_PointSampler));
     }
     if (m_Albedo) {
-        m_Device->UpdateDescriptorSet(m_DescSet, kSSRBindAlbedo, rhi::DescriptorType::CombinedImageSampler, m_Albedo, m_PointSampler.get());
+        m_Device->UpdateDescriptorSet(m_DescSet, kSSRBindAlbedo, rhi::DescriptorType::CombinedImageSampler, m_Albedo, m_Device->ResolveSampler(m_PointSampler));
     }
 }
 
@@ -160,10 +160,10 @@ void GI_SSR::Render(rhi::IRHICommandList* cmd) {
     if (!m_Ready || !m_Settings.enabled || !m_Depth || !m_Normal || !m_Albedo) {
         return;
     }
-    cmd->SetPipeline(m_PSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSet);
-    u32 ow = m_Output->GetWidth();
-    u32 oh = m_Output->GetHeight();
+    u32 ow = m_Device->ResolveTexture(m_Output)->GetWidth();
+    u32 oh = m_Device->ResolveTexture(m_Output)->GetHeight();
     cmd->SetViewport({0, (float)oh, (float)ow, -(float)oh, 0, 1});
     cmd->SetScissor({0, 0, ow, oh});
     // ── 矩阵上传（UBO binding 3）：**正/逆投影分开传** ──
@@ -183,10 +183,11 @@ void GI_SSR::Render(rhi::IRHICommandList* cmd) {
             mats.view = float4x4(1.0f);
         }
         mats.invProj = glm::inverse(mats.proj);
-        void* mapped = m_UniformBuffer->Map();
+        auto* ubH = m_Device->ResolveBuffer(m_UniformBuffer);
+    void* mapped = ubH ? ubH->Map() : nullptr;
         if (mapped) {
             std::memcpy(mapped, &mats, sizeof(mats));
-            m_UniformBuffer->Unmap();
+            if (auto* ubu = m_Device->ResolveBuffer(m_UniformBuffer)) ubu->Unmap();
         }
     }
 

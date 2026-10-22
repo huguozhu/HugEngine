@@ -33,7 +33,7 @@ public:
 
     // IGlobalIllumination
     GIMode GetMode() const override { return GIMode::SSGI; }
-    rhi::IRHITexture* GetIndirectDiffuseTexture() const override { return m_Output.get(); }
+    rhi::IRHITexture* GetIndirectDiffuseTexture() const override { return m_Device->ResolveTexture(m_Output); }
 
     /// 【步骤 34（11.3）】消费端（全分辨率）尺寸：半分辨率信号的升采样级以它为重建目标。
     /// 输出纹理尺寸是**信号**分辨率（halfRes 时降半），两者不能混用。
@@ -58,8 +58,8 @@ public:
     /// 白炉数值测试开关（帧图每帧给出）：白炉条件是「全白环境 + albedo = 1」，
     /// 本 pass 必须把自己也切到该条件，否则白炉判据只能靠短路、量纲错误永远抓不到。
     void SetFurnaceMode(bool on) { m_Furnace = on; }
-    rhi::IRHISampler* GetOutputSampler() const { return m_Sampler.get(); }
-    void PreBind(rhi::IRHICommandList* cmd) const { if (m_Ready) cmd->SetPipeline(m_PSO.get()); }
+    rhi::IRHISampler* GetOutputSampler() const { return m_Device->ResolveSampler(m_Sampler); }
+    void PreBind(rhi::IRHICommandList* cmd) const { if (m_Ready) cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO)); }
 
     float radius = 1.0f;
     int   sampleCount = 16;
@@ -76,16 +76,16 @@ private:
     u32 m_Width = 0, m_Height = 0;
     bool m_Ready = false;
 
-    std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
+    rhi::RHIPipelineStateHandle m_PSO{};   // A-3
     rhi::DescriptorSetLayoutHandle m_DescLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_DescSet    = rhi::kInvalidSet;
 
-    std::unique_ptr<rhi::IRHITexture> m_Output;
-    std::unique_ptr<rhi::IRHISampler> m_Sampler;
-    std::unique_ptr<rhi::IRHISampler> m_PointSampler;
+    rhi::RHITextureHandle m_Output{};   // A-3
+    rhi::RHISamplerHandle m_Sampler{};   // A-3
+    rhi::RHISamplerHandle m_PointSampler{};   // A-3
 
     // Uniform Buffer：存储采样内核 + 参数（绑定到 binding 3，替代 push constant）
-    std::unique_ptr<rhi::IRHIBuffer> m_UniformBuffer;
+    rhi::RHIBufferHandle m_UniformBuffer{};   // A-3
 
     rhi::IRHITexture* m_Depth   = nullptr;
     rhi::IRHITexture* m_Albedo  = nullptr;
