@@ -1243,7 +1243,9 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
     // ============================================================
     // 录制绘制命令（ForwardPipeline 特有：PBR PSO + bindless 描述符集）
     // ============================================================
-    if (m_MultiThreadRecord && m_ParallelRecorder.IsReady() && totalDraws > 0) {
+    // 【T3.4】叠加最小规模阈值：draw 数太少时并行的固定开销大于收益 ⇒ 回落串行路径
+    if (m_MultiThreadRecord && m_ParallelRecorder.IsReady() && totalDraws > 0
+        && ParallelRecordHelper::ShouldRecordParallel(totalDraws)) {
         CpuScope mtcrScope(CpuSection::Mtcr);   // 【读数】并行录制 + 次级命令缓冲执行
         // T3.1：池 / 分块 / 归属声明 / 按块序合并都在 ParallelRecordHelper 里；
         // 这里只提供"一块怎么录"（viewport/scissor + 逐 draw 的绑定与绘制）。

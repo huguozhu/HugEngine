@@ -142,7 +142,9 @@ void GBufferRenderer_CPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
         const u32 n = std::min<u32>(8u, std::max<u32>(1u, JobSystem::Instance().GetThreadCount()));
         m_ParallelRecorder.Initialize(ctx.device, n, "GBufferSecRecord");
     }
-    if (ctx.pso && m_ParallelRecorder.IsReady() && !filteredItems.empty()) {
+    // 【T3.4】draw 数低于阈值时串行更划算 ⇒ 走原有串行路径
+    if (ctx.pso && m_ParallelRecorder.IsReady() && !filteredItems.empty()
+        && ParallelRecordHelper::ShouldRecordParallel(static_cast<u32>(filteredItems.size()))) {
         m_ParallelRecorder.Record(cmd, static_cast<u32>(filteredItems.size()), ctx.pso,
             [&](rhi::IRHICommandList& secRef, u32 start, u32 end) {
                 auto& s = secRef;

@@ -51,6 +51,17 @@ public:
     [[nodiscard]] u32  ListCount() const { return static_cast<u32>(m_Lists.size()); }
     [[nodiscard]] bool IsReady()   const { return !m_Lists.empty(); }
 
+    /// 【T3.4】并行录制的最小规模阈值：低于它的 draw 数走串行更划算。
+    /// 依据：单条 draw 串行录制约 1–2 µs，而 `ParallelInvoke` 的唤醒 + 每块 `BeginSecondary/End`
+    /// 的固定开销在数十 µs 量级 ⇒ 64 条是"并行收益转正"的经验下界（06 的 Forward / Deferred
+    /// 都远超它，因此不影响现有判据场景）。
+    static constexpr u32 kMinDrawsForParallel = 64;
+
+    /// 【T3.4】调用方据此决定走并行还是串行（false 时请回落到原有的主列表直接录制路径）。
+    [[nodiscard]] static bool ShouldRecordParallel(u32 drawCount) {
+        return drawCount >= kMinDrawsForParallel;
+    }
+
     /// 并行录制 + 合并。`mainCmd` 是主线程列表（在其上 ExecuteSecondary）。
     /// @param drawCount 本帧要录制的 draw 数（0 或池未就绪时直接返回，调用方自行回退）
     void Record(rhi::IRHICommandList* mainCmd, u32 drawCount, rhi::IRHIPipelineState* pso,
