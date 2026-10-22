@@ -251,7 +251,7 @@ void ReSTIRPass::Execute(rhi::IRHICommandList* cmd, const ReSTIRDispatchContext&
         m_Device->UpdateDescriptorSet(m_Init.set, kReSTIRInitBindLights,
             rhi::DescriptorType::StorageBuffer, ctx.lightBuffer);
         m_Device->UpdateDescriptorSet(m_Init.set, kReSTIRInitBindInitial,
-            rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_Initial));
+            rhi::DescriptorType::StorageBuffer, ResB(m_Initial));
         m_Device->UpdateDescriptorSet(m_Init.set, kReSTIRInitBindAlbedoMetallic,
             rhi::DescriptorType::SampledImage, ctx.ptAlbedo, nullptr);
         if (ctx.blueNoise)
@@ -274,19 +274,19 @@ void ReSTIRPass::Execute(rhi::IRHICommandList* cmd, const ReSTIRDispatchContext&
         m_Device->UpdateDescriptorSet(m_Temporal.set, kReSTIRTemporalBindNormal,
             rhi::DescriptorType::SampledImage, ctx.ptNormal, nullptr);
         m_Device->UpdateDescriptorSet(m_Temporal.set, kReSTIRTemporalBindInitial,
-            rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_Initial));
+            rhi::DescriptorType::StorageBuffer, ResB(m_Initial));
         m_Device->UpdateDescriptorSet(m_Temporal.set, kReSTIRTemporalBindHistory,
-            rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_TemporalBuf[readSlot]));
+            rhi::DescriptorType::StorageBuffer, ResB(m_TemporalBuf[readSlot]));
         m_Device->UpdateDescriptorSet(m_Temporal.set, kReSTIRTemporalBindHistDepth,
-            rhi::DescriptorType::SampledImage, m_Device->ResolveTexture(m_HistDepth[readSlot]), nullptr);
+            rhi::DescriptorType::SampledImage, ResT(m_HistDepth[readSlot]), nullptr);
         m_Device->UpdateDescriptorSet(m_Temporal.set, kReSTIRTemporalBindHistNormal,
-            rhi::DescriptorType::SampledImage, m_Device->ResolveTexture(m_HistNormal[readSlot]), nullptr);
+            rhi::DescriptorType::SampledImage, ResT(m_HistNormal[readSlot]), nullptr);
         m_Device->UpdateDescriptorSet(m_Temporal.set, kReSTIRTemporalBindTemporal,
-            rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_TemporalBuf[writeSlot]));
+            rhi::DescriptorType::StorageBuffer, ResB(m_TemporalBuf[writeSlot]));
         m_Device->UpdateDescriptorSetWithImageView(m_Temporal.set, kReSTIRTemporalBindCurDepth,
-            rhi::DescriptorType::StorageImage, m_Device->ResolveTexture(m_HistDepth[writeSlot])->GetNativeHandle());
+            rhi::DescriptorType::StorageImage, ResT(m_HistDepth[writeSlot])->GetNativeHandle());
         m_Device->UpdateDescriptorSetWithImageView(m_Temporal.set, kReSTIRTemporalBindCurNormal,
-            rhi::DescriptorType::StorageImage, m_Device->ResolveTexture(m_HistNormal[writeSlot])->GetNativeHandle());
+            rhi::DescriptorType::StorageImage, ResT(m_HistNormal[writeSlot])->GetNativeHandle());
         m_Device->UpdateDescriptorSet(m_Temporal.set, kReSTIRTemporalBindLights,
             rhi::DescriptorType::StorageBuffer, ctx.lightBuffer);
         m_Device->UpdateDescriptorSet(m_Temporal.set, kReSTIRTemporalBindAlbedoMetallic,
@@ -309,9 +309,9 @@ void ReSTIRPass::Execute(rhi::IRHICommandList* cmd, const ReSTIRDispatchContext&
         m_Device->UpdateDescriptorSet(m_Spatial.set, kReSTIRSpatialBindNormal,
             rhi::DescriptorType::SampledImage, ctx.ptNormal, nullptr);
         m_Device->UpdateDescriptorSet(m_Spatial.set, kReSTIRSpatialBindTemporal,
-            rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_TemporalBuf[writeSlot]));
+            rhi::DescriptorType::StorageBuffer, ResB(m_TemporalBuf[writeSlot]));
         m_Device->UpdateDescriptorSet(m_Spatial.set, kReSTIRSpatialBindFinal,
-            rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_Final));
+            rhi::DescriptorType::StorageBuffer, ResB(m_Final));
         m_Device->UpdateDescriptorSet(m_Spatial.set, kReSTIRSpatialBindLights,
             rhi::DescriptorType::StorageBuffer, ctx.lightBuffer);
         m_Device->UpdateDescriptorSet(m_Spatial.set, kReSTIRSpatialBindAlbedoMetallic,

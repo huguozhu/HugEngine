@@ -218,11 +218,11 @@ void PTPass::PrepareOutputUAV(rhi::IRHICommandList* cmd) {
                 rhi::ResourceState::Undefined, rhi::ResourceState::UnorderedAccess, tex);
         }
     };
-    barrier(m_Device->ResolveTexture(m_HDR));
-    barrier(m_Device->ResolveTexture(m_Depth));
-    barrier(m_Device->ResolveTexture(m_Normal));
-    barrier(m_Device->ResolveTexture(m_Velocity));
-    barrier(m_Device->ResolveTexture(m_AlbedoMetallic));
+    barrier(ResT(m_HDR));
+    barrier(ResT(m_Depth));
+    barrier(ResT(m_Normal));
+    barrier(ResT(m_Velocity));
+    barrier(ResT(m_AlbedoMetallic));
     m_OutputWritten = true;
 }
 
@@ -240,15 +240,15 @@ void PTPass::Execute(rhi::IRHICommandList* cmd, rhi::IRHIAccelerationStructure* 
     m_Device->UpdateDescriptorSet(m_Set, kPTBindTLAS,
         rhi::DescriptorType::AccelerationStructure, tlas);
     m_Device->UpdateDescriptorSetWithImageView(m_Set, 1,
-        rhi::DescriptorType::StorageImage, m_Device->ResolveTexture(m_HDR)->GetNativeHandle());
+        rhi::DescriptorType::StorageImage, ResT(m_HDR)->GetNativeHandle());
     m_Device->UpdateDescriptorSetWithImageView(m_Set, 2,
-        rhi::DescriptorType::StorageImage, m_Device->ResolveTexture(m_Depth)->GetNativeHandle());
+        rhi::DescriptorType::StorageImage, ResT(m_Depth)->GetNativeHandle());
     m_Device->UpdateDescriptorSetWithImageView(m_Set, 3,
-        rhi::DescriptorType::StorageImage, m_Device->ResolveTexture(m_Normal)->GetNativeHandle());
+        rhi::DescriptorType::StorageImage, ResT(m_Normal)->GetNativeHandle());
     m_Device->UpdateDescriptorSetWithImageView(m_Set, 4,
-        rhi::DescriptorType::StorageImage, m_Device->ResolveTexture(m_Velocity)->GetNativeHandle());
+        rhi::DescriptorType::StorageImage, ResT(m_Velocity)->GetNativeHandle());
     m_Device->UpdateDescriptorSetWithImageView(m_Set, 9,
-        rhi::DescriptorType::StorageImage, m_Device->ResolveTexture(m_AlbedoMetallic)->GetNativeHandle());
+        rhi::DescriptorType::StorageImage, ResT(m_AlbedoMetallic)->GetNativeHandle());
     if (ctx.lightBuffer)
         m_Device->UpdateDescriptorSet(m_Set, kPTBindLights,
             rhi::DescriptorType::StorageBuffer, ctx.lightBuffer);

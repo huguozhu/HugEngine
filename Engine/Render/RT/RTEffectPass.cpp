@@ -96,10 +96,10 @@ void RTEffectPass::PrepareOutputUAV(rhi::IRHICommandList* cmd) {
     if (!m_Output.IsValid()) return;
     if (m_OutputWritten) {
         cmd->PipelineBarrier(rhi::PipelineStage::FragmentShader, rhi::PipelineStage::RayTracingShader,
-            rhi::ResourceState::ShaderResource, rhi::ResourceState::UnorderedAccess, m_Device->ResolveTexture(m_Output));
+            rhi::ResourceState::ShaderResource, rhi::ResourceState::UnorderedAccess, ResT(m_Output));
     } else {
         cmd->PipelineBarrier(rhi::PipelineStage::TopOfPipe, rhi::PipelineStage::RayTracingShader,
-            rhi::ResourceState::Undefined, rhi::ResourceState::UnorderedAccess, m_Device->ResolveTexture(m_Output));
+            rhi::ResourceState::Undefined, rhi::ResourceState::UnorderedAccess, ResT(m_Output));
     }
     m_OutputWritten = true;
 }
@@ -126,10 +126,10 @@ bool RTEffectPass::CreateHitLightUB(rhi::IRHIDevice* device) {
 void RTEffectPass::FillHitLightUB(const RTExecuteContext& ctx) {
     if (!m_LightUB.IsValid() || !ctx.lightBuffer) return;
 
-    auto* ubBuf   = m_Device->ResolveBuffer(m_LightUB);
+    auto* ubBuf   = ResB(m_LightUB);
     RTHitLightGPU* dst = ubBuf ? static_cast<RTHitLightGPU*>(ubBuf->Map()) : nullptr;
     const GPULight* src = static_cast<const GPULight*>(ctx.lightBuffer->Map());
-    if (!dst || !src) { if (dst) if (auto* ubu = m_Device->ResolveBuffer(m_LightUB)) ubu->Unmap(); if (src) ctx.lightBuffer->Unmap(); return; }
+    if (!dst || !src) { if (dst) if (auto* ubu = ResB(m_LightUB)) ubu->Unmap(); if (src) ctx.lightBuffer->Unmap(); return; }
 
     u32 count = 0;
     const u32 maxCount = std::min(ctx.lightCount, 16u);
@@ -144,7 +144,7 @@ void RTEffectPass::FillHitLightUB(const RTExecuteContext& ctx) {
     for (u32 i = count; i < 16; ++i)
         dst[i] = RTHitLightGPU{};
 
-    if (auto* ubu = m_Device->ResolveBuffer(m_LightUB)) ubu->Unmap();
+    if (auto* ubu = ResB(m_LightUB)) ubu->Unmap();
     ctx.lightBuffer->Unmap();
 }
 

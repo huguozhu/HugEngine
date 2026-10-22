@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Threading/RenderThreadContext.h"   // T2.6：帧上下文（唯一 RHI 出口）
+
 #include "RHI/RHI.h"
 #include "Scene/MeshComponent.h"   // StaticVertex（顶点布局；本类不再按组件指针寻址）
 #include "Threading/FrameSceneSnapshot.h"   // 第③段第 5 批：改吃快照
@@ -181,6 +183,29 @@ private:
     bool HasGeometryChanged(u32 meshIndex, const MeshRegistryEntry& entry);
 
     rhi::IRHIDevice* m_Device = nullptr;
+
+    /// 【T2.6】本帧的渲染线程上下文（可空；空时解析回退 `m_Device`）
+    const RenderThreadContext* m_FrameCtx = nullptr;
+
+public:
+    /// 【T2.6】设置本帧的渲染线程上下文（搬迁过渡期用）
+    void SetFrameContext(const RenderThreadContext* ctx) { m_FrameCtx = ctx; }
+
+private:
+    // 【T2.6】统一解析入口（回退分支直接调 m_Device->Resolve*，避免被批量替换成递归）
+    [[nodiscard]] rhi::IRHIBuffer* ResB(rhi::RHIBufferHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolveBuffer(h);
+        return m_Device ? m_Device->ResolveBuffer(h) : nullptr;
+    }
+    [[nodiscard]] rhi::IRHITexture* ResT(rhi::RHITextureHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolveTexture(h);
+        return m_Device ? m_Device->ResolveTexture(h) : nullptr;
+    }
+    [[nodiscard]] rhi::IRHIPipelineState* ResP(rhi::RHIPipelineStateHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolvePipelineState(h);
+        return m_Device ? m_Device->ResolvePipelineState(h) : nullptr;
+    }
+
 
     // RT Pipeline + SBT
     rhi::RHIRayTracingPipelineHandle m_RTPipeline{};   // A-3
