@@ -8,7 +8,6 @@
 
 #include "Core/Core.h"
 #include "Core/Engine.h"
-#include <chrono>   // 步骤 37：CPU 侧帧时（判定 CPU 受限还是 GPU 受限）
 #include "Platform/Window.h"
 #include "RHI/RHI.h"
 #include "RHI/FramePresenter.h"   // L4-1：帧外壳（acquire/present）收口
@@ -163,8 +162,7 @@ int main() {
     //   · `HE_RENDER_THREADING_MODE=0` ⇒ 单线程；`=1` ⇒ 游戏线程 + 渲染线程（两线程对照）；
     //   · `HE_RENDER_THREAD_FORCE_SHELL=1` ⇒ 壳模式（模式值不变、不起真线程，命令就地执行）。
     config.renderThreadingMode = he::RenderThreadingMode::RenderThreadAndRHI;
-    // 【步骤 37 / L6 帧时判据】vsync 打开时墙钟帧率被锁在刷新率（60Hz），"有没有 60fps"
-    // 这件事就没法从帧率上判定。`HE_NO_VSYNC=1` 关掉垂直同步，让墙钟帧率反映真实 GPU 吞吐。
+    // vsync 打开时墙钟帧率被锁在刷新率，`HE_NO_VSYNC=1` 可关掉垂直同步（用于观察真实 GPU 吞吐）
     const bool noVsync = (std::getenv("HE_NO_VSYNC") != nullptr);
     config.enableVSync  = !noVsync;
     config.logLevel     = LogLevel::Info;
@@ -875,9 +873,6 @@ int main() {
         f64 now       = glfwGetTime();
         f32 deltaTime = static_cast<f32>(now - lastTime);
         lastTime      = now;
-        // 【步骤 37】CPU 侧耗时：从帧首到 Present 之前。与墙钟帧时一起看才能判定"CPU 受限还是
-        // GPU 受限"—— 只看墙钟帧率会把"CPU 在重建帧图"误读成"GPU 太慢"，从而去优化错的对象。
-        const auto cpuT0 = std::chrono::steady_clock::now();
 
         engine.GetWindow()->PollEvents();
 
@@ -887,8 +882,6 @@ int main() {
         }
 
         bool frameAborted = false;   // 渲染命令里 Acquire 失败时置位（命令可能在别的线程跑）
-        // 管线 CPU 侧耗时累计（命令 1 里累加、命令 2 的帧率读数里消费 ⇒ 提到帧体层级）
-        static double s_accPipelineMs = 0.0;
 
         // 【T2.2 步骤 (b)】一帧两条命令的统一交接：模式 0 直接在本线程执行（此时本线程就是渲染
         // 线程）；模式 1/2 经队列 + **严格握手**（`SubmitAndWait`）⇒ 游戏线程在渲染线程工作期间
@@ -1043,17 +1036,10 @@ int main() {
                 }
                 g_PendingHalfResApply = false;
             }
-            // 【步骤 37】管线 CPU 侧耗时（重建帧图 + 录制 + 提交）与"其余 CPU"分开计：
-            // 整帧 CPU 受限时，先要知道这 50 ms 是花在管线里还是花在样例/ImGui 里，否则优化对象会选错。
-            {
-                const auto t0 = std::chrono::steady_clock::now();
-                // 【T2.2 步骤 (b)】管线渲染与其余 RHI 调用一起放进本帧的**第一条命令**，
-                // 不再单独经队列（一帧两条命令，见下面 submitRender 的两处调用）。
-                curPipeline->Render(cmdList.get(), curPipeline->GetFrameSnapshot(),
-                                     camCtrl.GetCamera(), deltaTime);
-                s_accPipelineMs += std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - t0).count();
-            }
+            // 【T2.2 步骤 (b)】管线渲染与其余 RHI 调用一起放进本帧的**第一条命令**，
+            // 不再单独经队列（一帧两条命令，见下面 submitRender 的两处调用）。
+            curPipeline->Render(cmdList.get(), curPipeline->GetFrameSnapshot(),
+                                 camCtrl.GetCamera(), deltaTime);
 
 
         };
@@ -1527,97 +1513,10 @@ int main() {
                 ImGui::Unindent(12.0f);
             }
 
-            // ---- 配置诊断（P0 · REDUNDANCY）----
-            // 本架构要求每个已启用的源都**整幅、每帧**产出完整通道缓冲（文档 §3.5），
-            // 故「启用一个没有增益的源」= 白付一份全量成本。这里把这类配置显式列出来。
-            // 只做提示与可证等价的去重，不改变渲染语义。
-            {
-                const std::vector<render::GIDiagnostic> diags = render::GIRegistry::Analyze(gc);
-
-                // 诊断配色（本面板此前只定义了 colOk / colBad）
-                const ImVec4 colWarn = ImVec4(1.0f, 0.75f, 0.25f, 1.0f);   // 提示：可优化但不影响正确性
-                const ImVec4 colDim  = ImVec4(0.65f, 0.65f, 0.65f, 1.0f);  // 信息：性能提示
-
-                // 先统计各类别次数（连按钮的可见性判断也要用，故放在 if/else 之外）
-                u32 nRedundant = 0, nDupEst = 0, nCorr = 0, nCost = 0;
-                for (const auto& e : diags) {
-                    switch (e.kind) {
-                    case render::GIDiagnosticKind::RedundantDuplicate:  nRedundant++; break;
-                    case render::GIDiagnosticKind::DuplicateEstimate:   nDupEst++;    break;
-                    case render::GIDiagnosticKind::CorrelatedEstimates: nCorr++;      break;
-                    case render::GIDiagnosticKind::MultiSourceCost:     nCost++;      break;
-                    default: break;
-                    }
-                }
-
-                ImGui::SeparatorText("配置诊断");
-                if (diags.empty()) {
-                    ImGui::TextColored(colOk, "无问题：当前层栈无冗余或重复估计");
-                } else {
-                    if (nRedundant > 0) {
-                        ImGui::TextColored(colBad, "严格冗余 ×%u（零增益，可安全去重）", nRedundant);
-                    }
-                    if (nDupEst > 0) {
-                        ImGui::TextColored(colWarn, "重复估计 ×%u（成本翻倍、归一化互相稀释）", nDupEst);
-                    }
-                    if (nCorr > 0) {
-                        ImGui::TextColored(colWarn, "相关估计 ×%u（非独立，归一化失去无偏性）", nCorr);
-                    }
-                    if (nCost > 0) {
-                        ImGui::TextColored(colDim, "多源通道 ×%u（每源各跑一遍整幅 pass）", nCost);
-                    }
-
-                    ImGui::Indent(12.0f);
-                    for (const auto& e : diags) {
-                        const bool bad  = (e.kind == render::GIDiagnosticKind::RedundantDuplicate);
-                        const bool warn = (e.kind == render::GIDiagnosticKind::DuplicateEstimate ||
-                                           e.kind == render::GIDiagnosticKind::CorrelatedEstimates);
-                        const ImVec4 col = bad ? colBad : (warn ? colWarn : colDim);
-                        ImGui::TextColored(col, "[%s] %s: %s%s%s",
-                            render::GIDiagnosticKindName(e.kind),
-                            render::GIChannelName(e.channel),
-                            e.a != render::GISourceId::None ? render::GISourceName(e.a) : "",
-                            e.b != render::GISourceId::None ? " + " : "",
-                            e.b != render::GISourceId::None ? render::GISourceName(e.b) : "");
-                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", e.detail);
-                    }
-                    ImGui::Unindent(12.0f);
-                }
-
-                // 只在确有严格冗余时才提供一键去重
-                if (nRedundant > 0) {
-                    if (ImGui::Button("去除严格冗余（保留 GTAO）")) {
-                        render::GIRegistry::DeduplicateRedundant(gc);
-                    }
-                    ImGui::SameLine();
-                    ImGui::TextColored(colDim, "可证与去重前逐像素等价");
-                }
-            }
         }
         ImGui::End();
 
-        // ---- 独立 GPU Profiler 面板：各 pass 的 GPU 耗时统计 ----
-        // 首次使用时默认摆放在 GI 面板下方（之后由 imgui.ini 恢复）
-        ImGui::SetNextWindowPos(ImVec2(560.0f, 720.0f), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(430.0f, 260.0f), ImGuiCond_FirstUseEver);
-        ImGui::Begin("GPU Profiler");
-        {
-            auto& pdata = deferredPipeline.GetProfiler().GetLastFrameData();
-            float totalMs = 0;
-            for (auto& p : pdata) {
-                if (p.gpuMs < 0) continue;  // 未使用
-                totalMs += p.gpuMs;
-                ImGui::Text("%-20s %6.2fms", p.name.c_str(), p.gpuMs);
-            }
-            ImGui::Separator();
-            ImGui::Text("Total GPU: %.2fms (%.0f FPS)", totalMs, totalMs > 0 ? 1000.0f / totalMs : 0);
-        }
         ImGui::End();
-
-        // GPU Profiler 面板（按 F1 切换）
-        if (ImGui::IsKeyPressed(ImGuiKey_F1))
-            deferredPipeline.GetProfilerPanel().Toggle();
-        deferredPipeline.GetProfilerPanel().Draw();
 
         // ---- 命令 2：ImGui 录制 + 调试绘制 + Submit + 探测读回 + Present ----
         // 【按值携带】帧号与转储判定由游戏线程算好后**按值**传进来（绝不读外层可变变量 ——
@@ -1900,48 +1799,16 @@ int main() {
         const bool dumpNow = (g_DumpGI && !g_DumpDone && renderFrameIndex >= g_DumpFrame);
         frameIndex++;
 
-        // 【步骤 37 / L6 帧时判据】周期性打印**真实墙钟帧率**与 CPU 侧耗时。
-        // 只在 `HE_NO_VSYNC=1` 时帧率才有判据意义（vsync 打开时它恒等于刷新率，会被误读成"达标"）。
-        {
-            const double cpuMs = std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - cpuT0).count();
-            static double s_accMs = 0.0;
-            static double s_accCpuMs = 0.0;
-            static u32    s_n = 0;
-            s_accMs += (double)deltaTime * 1000.0;
-            s_accCpuMs += cpuMs;
-            ++s_n;
-            // 【测量确定性】转储/读数之前先把在飞的"命令 2"等掉：流水线化后它可能还没做完，
-            // 否则读回的是"少一帧"的状态（表现为转储差异与 pass/VUID 计数偏移）。
-            if (useRenderQueue && lastAsyncFrame != UINT64_MAX) {
-                // 【必须有超时】这是诊断/转储路径，不是背压点：无界等待会在"该帧因故未被回收"时
-                // 永久挂住（实测出现过一次 300 秒未退出）。超时只告警、继续转储。
-                if (!renderQueue.WaitFrameRetired(lastAsyncFrame, 5000u))
-                    HE_CORE_WARN("06.GILab：转储前等待在飞渲染命令超时（帧 {}）", lastAsyncFrame);
-                lastAsyncFrame = UINT64_MAX;
-            }
-            if (g_DumpGI && s_n >= 120u) {
-                const double wallMs = s_accMs / (double)s_n;
-                const double cm     = s_accCpuMs / (double)s_n;
-                const double pm     = s_accPipelineMs / (double)s_n;
-                // 步骤 37：管线 CPU 侧的三段分解（重建帧图 / 编译 / 执行）——判断该修哪一段
-                double bMs = 0.0, cMs = 0.0, eMs = 0.0;
-                if (auto* dp = dynamic_cast<render::DeferredPipeline*>(curPipeline)) {
-                    bMs = dp->GetCpuBuildMs(); cMs = dp->GetCpuCompileMs(); eMs = dp->GetCpuExecMs();
-                }
-                HE_CORE_INFO("帧率读数（步骤 37）: 最近 {} 帧 墙钟 {:.3f} ms ⇒ {:.1f} fps；CPU 侧 {:.3f} ms"
-                             "（{:.0f}% 的帧时，其中管线 Render {:.3f} ms / 其余 {:.3f} ms）⇒ 受限方 = {}"
-                             "（vsync {}；pass 合计见【帧预算】行）",
-                             s_n, wallMs, wallMs > 0.0 ? 1000.0 / wallMs : 0.0, cm,
-                             wallMs > 0.0 ? 100.0 * cm / wallMs : 0.0, pm, cm - pm,
-                             cm > wallMs * 0.8 ? "CPU" : "GPU/呈现",
-                             noVsync ? "关" : "开（帧率被锁刷新率，不作判据）");
-                HE_CORE_INFO("   管线 CPU 分解（上一帧）: 重建帧图 {:.3f} ms / 编译 {:.3f} ms / 执行(录制+提交) {:.3f} ms",
-                             bMs, cMs, eMs);
-                s_accMs = 0.0; s_accCpuMs = 0.0; s_accPipelineMs = 0.0;
-                s_n = 0;
-            }
+        // 【测量确定性】转储/读数之前先把在飞的"命令 2"等掉：流水线化后它可能还没做完，
+        // 否则读回的是"少一帧"的状态（表现为转储差异与 pass/VUID 计数偏移）。
+        if (useRenderQueue && lastAsyncFrame != UINT64_MAX) {
+            // 【必须有超时】这是诊断/转储路径，不是背压点：无界等待会在"该帧因故未被回收"时
+            // 永久挂住（实测出现过一次 300 秒未退出）。超时只告警、继续转储。
+            if (!renderQueue.WaitFrameRetired(lastAsyncFrame, 5000u))
+                HE_CORE_WARN("06.GILab：转储前等待在飞渲染命令超时（帧 {}）", lastAsyncFrame);
+            lastAsyncFrame = UINT64_MAX;
         }
+
         // ---- 入队命令 2（**按值捕获**帧号与转储判定：命令可能在渲染线程执行）----
         submitRender([&, renderFrameIndex, dumpNow]() {
             recordUiAndPresent(renderFrameIndex, dumpNow);
