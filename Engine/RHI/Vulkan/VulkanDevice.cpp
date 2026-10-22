@@ -1480,9 +1480,32 @@ void VulkanDevice::EnqueuePSOCreate(const PipelineStateDesc& desc) {
     m_PendingCreates.push_back(desc);
 }
 
+// 【A-5】句柄版：先占位（资源表登记空载荷 + 句柄立即可返回），真正创建交给 ProcessPSOCreateQueue。
+// 调用方拿到的句柄在填充之前 ResolvePipelineState 返回 nullptr ⇒ 用 IsValid() 判断"还没就绪"即可。
+RHIPipelineStateHandle VulkanDevice::EnqueuePSOCreateHandle(const PipelineStateDesc& desc) {
+    const RHIPipelineStateHandle h = m_PipelineStateTable.Add(nullptr);   // 占位：载荷待填充
+    if (!h.IsValid()) return {};
+    m_PendingHandleCreates.emplace_back(h, desc);
+    return h;
+}
+
 std::vector<std::unique_ptr<IRHIPipelineState>> VulkanDevice::ProcessPSOCreateQueue(u32 maxPerFrame) {
     std::vector<std::unique_ptr<IRHIPipelineState>> created;
     u32 processed = 0;
+    // 先处理句柄版队列：创建成功后把对象放进 m_HandlePipelineStates，并填充占位句柄
+    while (processed < maxPerFrame && !m_PendingHandleCreates.empty()) {
+        auto& [handle, desc] = m_PendingHandleCreates.front();
+        auto pso = CreatePipelineState(desc);
+        if (pso) {
+            m_PipelineStateTable.Set(handle, pso.get());
+            m_HandlePipelineStates[HandleKey(handle.index, handle.generation)] = std::move(pso);
+        } else {
+            // 创建失败：回收占位句柄，避免资源表里留下永远为空的条目
+            m_PipelineStateTable.Remove(handle);
+        }
+        m_PendingHandleCreates.pop_front();
+        processed++;
+    }
     while (processed < maxPerFrame && !m_PendingCreates.empty()) {
         PipelineStateDesc desc = m_PendingCreates.front();
         m_PendingCreates.pop_front();
@@ -1494,7 +1517,7 @@ std::vector<std::unique_ptr<IRHIPipelineState>> VulkanDevice::ProcessPSOCreateQu
 }
 
 u32 VulkanDevice::GetPendingPSOCreateCount() const {
-    return static_cast<u32>(m_PendingCreates.size());
+    return static_cast<u32>(m_PendingCreates.size() + m_PendingHandleCreates.size());
 }
 
 std::unique_ptr<IRHITexture> VulkanDevice::CreateTexture(const TextureDesc& desc) {

@@ -69,6 +69,16 @@ public:
         return THandle{index, slot.generation};
     }
 
+    /// 【A-5】填充一个已登记的占位句柄：用于"先发句柄、后在拥有线程上建出资源"的异步创建。
+    /// 只对代次仍匹配的活槽位生效；返回是否填充成功。
+    bool Set(THandle handle, TResource* resource) {
+        if (handle.index == 0u || handle.index > m_Slots.size()) return false;
+        Slot& slot = m_Slots[handle.index - 1u];
+        if (slot.generation != handle.generation) return false;   // 句柄已失效
+        slot.resource = resource;
+        return true;
+    }
+
     /// 解析句柄：越界、代次过期（槽位已被回收复用）或槽位为空 ⇒ nullptr
     [[nodiscard]] TResource* Get(THandle handle) const {
         if (handle.index == 0u || handle.index > m_Slots.size()) return nullptr;
@@ -81,7 +91,8 @@ public:
     void Remove(THandle handle) {
         if (handle.index == 0u || handle.index > m_Slots.size()) return;
         Slot& slot = m_Slots[handle.index - 1u];
-        if (slot.generation != handle.generation || slot.resource == nullptr) return;   // 已失效：幂等
+        // 已失效则幂等返回；【A-5】resource 可能仍为空（异步创建的占位句柄尚未填充）也要能回收
+        if (slot.generation != handle.generation) return;
         slot.resource = nullptr;
         ++slot.generation;                    // 关键：代次前进 ⇒ 旧句柄解析为 nullptr
         if (slot.generation == 0u) slot.generation = 1u;   // 回绕保护（不做 2^32 次回收就不会碰到）

@@ -104,6 +104,8 @@ public:
     void EnqueuePSOCreate(const PipelineStateDesc& desc) override;
     std::vector<std::unique_ptr<IRHIPipelineState>> ProcessPSOCreateQueue(u32 maxPerFrame) override;
     u32 GetPendingPSOCreateCount() const override;
+    // 【A-5】句柄版：先发占位句柄，ProcessPSOCreateQueue 负责真正创建并填充
+    RHIPipelineStateHandle EnqueuePSOCreateHandle(const PipelineStateDesc& desc) override;
 
     // Ray Tracing 资源创建
     std::unique_ptr<IRHIAccelerationStructure>
@@ -351,6 +353,9 @@ private:
 
     // PSO 创建限流队列（主线程写入 → NextFrame 逐帧 drain）
     std::deque<PipelineStateDesc> m_PendingCreates;
+
+    // 【A-5】句柄版限流队列：条目 = (占位句柄, 描述符)，drain 时创建并以 Set 填充到资源表
+    std::deque<std::pair<RHIPipelineStateHandle, PipelineStateDesc>> m_PendingHandleCreates;
 
     // ============================================================
     // Graphics Pipeline Library — 四段库缓存 + fast-link

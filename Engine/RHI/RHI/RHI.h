@@ -119,6 +119,9 @@ public:
     virtual std::vector<std::unique_ptr<IRHIPipelineState>> ProcessPSOCreateQueue(u32 maxPerFrame) { return {}; }
     // 队列中待创建的 PSO 数量
     virtual u32 GetPendingPSOCreateCount() const { return 0; }
+    // 【A-5】句柄版异步 PSO 创建：立即返回一个"已登记、尚未就绪"的占位句柄，
+    // ProcessPSOCreateQueue 在拥有线程上真正创建后填充它。未实现该能力的后端返回空句柄。
+    virtual RHIPipelineStateHandle EnqueuePSOCreateHandle(const PipelineStateDesc& /*desc*/) { return {}; }
 
     // --- Ray Tracing 资源创建 ---
     virtual std::unique_ptr<IRHIAccelerationStructure>
