@@ -436,6 +436,7 @@ struct GILabUI {
 
     void DrawMainPanel();   // 主窗口：FPS / 管线信息 / 相机与曝光 / 场景与光源列表
     void DrawGIPanel();     // GI 控制台：管线与档位 / 层栈四通道 / 配置诊断已删 / Shadow
+    void DrawGIChannels();  // 层栈四通道（Diffuse/Specular/AO）+ Shadow
 };
 
 void GILabUI::DrawMainPanel() {
@@ -689,6 +690,19 @@ void GILabUI::DrawGIPanel() {
             }
         }
 
+        DrawGIChannels();   // 层栈四通道 + Shadow（实现见本函数之后）
+
+    }
+    ImGui::End();
+}
+
+// GI 通道 UI：层栈四通道（Diffuse/Specular/AO，含源勾选 + 权重 + 让位 + 合成方式）与 Shadow。
+// 依赖从 curPipeline / device 现算，因此可从 DrawGIPanel 里独立出来（原先 216 行内联在其中）。
+void GILabUI::DrawGIChannels() {
+    const u32  giCaps = curPipeline->GetGIPipelineCaps();
+    const bool rtOk   = device->GetCaps().supportsRayTracing;
+    render::GIConfig& gc = *curPipeline->GetGIConfig();
+
         // 当前管线可用的 GI 子系统（按管线类型获取，Forward 无屏幕空间/探针 GI）
         auto* dp = dynamic_cast<render::DeferredPipeline*>(curPipeline);
         auto* giSSGI = dp ? dp->GetSSGI() : nullptr;
@@ -905,10 +919,8 @@ void GILabUI::DrawGIPanel() {
             ImGui::TextColored(shOk ? colOk : colBad, shOk ? "[可用]" : "[不可用]");
             ImGui::Unindent(12.0f);
         }
-
-    }
-    ImGui::End();
 }
+
 
 
 int main() {
