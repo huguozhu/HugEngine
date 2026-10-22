@@ -72,7 +72,7 @@ bool LumenSDF::Initialize(rhi::IRHIDevice* device, const LumenSDFConfig& config)
     CreateGPUObjects();
     HE_CORE_INFO("LumenSDF: 初始化（分辨率 {}³，mesh 上限 {}，每 mesh 三角形上限 {}，每帧预算 {}）",
                  m_Config.resolution, m_Config.maxMeshes, m_Config.maxTrisPerMesh, m_Config.meshesPerFrame);
-    return m_PSO != nullptr;
+    return m_PSO.IsValid();
 }
 
 void LumenSDF::Shutdown() {
@@ -80,7 +80,7 @@ void LumenSDF::Shutdown() {
     m_ProbeDist.reset();
     m_Indices.reset();
     m_Positions.reset();
-    m_PSO.reset();
+    m_Device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};
     m_Device = nullptr;
     m_Phase = Phase::Idle;
     m_Done = false;
@@ -124,8 +124,8 @@ void LumenSDF::CreateGPUObjects() {
     pso.descriptorSetLayouts = {m_Layout};
     pso.pushConstantRanges   = {pcr};
     pso.debugName            = "Lumen_SDF_MeshScatter";
-    m_PSO = m_Device->CreatePipelineState(pso);
-    if (!m_PSO) HE_CORE_ERROR("LumenSDF: scatter 的 PSO 创建失败（Mesh SDF 不可用）");
+    m_PSO = m_Device->CreatePipelineStateHandle(pso);
+    if (!m_PSO.IsValid()) HE_CORE_ERROR("LumenSDF: scatter 的 PSO 创建失败（Mesh SDF 不可用）");
 
     // ── convert（u32 → R32F + 自检探针）──
     rhi::DescriptorSetLayoutDesc conv;
@@ -154,8 +154,8 @@ void LumenSDF::CreateGPUObjects() {
     cpso.descriptorSetLayouts = {m_ConvertLayout};
     cpso.pushConstantRanges   = {pcr};
     cpso.debugName            = "Lumen_SDF_MeshConvert";
-    m_ConvertPSO = m_Device->CreatePipelineState(cpso);
-    if (!m_ConvertPSO) HE_CORE_ERROR("LumenSDF: convert 的 PSO 创建失败");
+    m_ConvertPSO = m_Device->CreatePipelineStateHandle(cpso);
+    if (!m_ConvertPSO.IsValid()) HE_CORE_ERROR("LumenSDF: convert 的 PSO 创建失败");
 
     // ── 跳步洪泛（补全 scatter 留下的空洞）：与 scatter 共用绑定集与 push constant ──
     rhi::ShaderBytecode fcs;
@@ -169,8 +169,8 @@ void LumenSDF::CreateGPUObjects() {
     fpso.descriptorSetLayouts = {m_Layout};
     fpso.pushConstantRanges   = {pcr};
     fpso.debugName            = "Lumen_SDF_MeshFlood";
-    m_FloodPSO = m_Device->CreatePipelineState(fpso);
-    if (!m_FloodPSO) HE_CORE_ERROR("LumenSDF: flood 的 PSO 创建失败");
+    m_FloodPSO = m_Device->CreatePipelineStateHandle(fpso);
+    if (!m_FloodPSO.IsValid()) HE_CORE_ERROR("LumenSDF: flood 的 PSO 创建失败");
 
     // ── 带种子坐标的 JFA（真欧氏距离）：自己一套布局/集合（binding 0 = 距离、1 = 种子坐标）──
     rhi::DescriptorSetLayoutDesc seedLayout;
@@ -190,9 +190,9 @@ void LumenSDF::CreateGPUObjects() {
     spso.descriptorSetLayouts = {m_SeedFloodLayout};
     spso.pushConstantRanges   = {pcr};
     spso.debugName            = "Lumen_SDF_MeshFloodSeeds";
-    m_SeedFloodPSO = m_Device->CreatePipelineState(spso);
-    if (!m_SeedFloodPSO) HE_CORE_ERROR("LumenSDF: 带种子的 JFA PSO 创建失败");
-    if (!m_FloodPSO) HE_CORE_ERROR("LumenSDF: flood 的 PSO 创建失败");
+    m_SeedFloodPSO = m_Device->CreatePipelineStateHandle(spso);
+    if (!m_SeedFloodPSO.IsValid()) HE_CORE_ERROR("LumenSDF: 带种子的 JFA PSO 创建失败");
+    if (!m_FloodPSO.IsValid()) HE_CORE_ERROR("LumenSDF: flood 的 PSO 创建失败");
 }
 
 void LumenSDF::BuildQueue(const MeshBatcher& batcher) {
@@ -393,7 +393,7 @@ void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
     e.probeCount   = (entryIndex == m_ProbeMeshIndex) ? m_ProbeCount : 0u;
 
     // ── ① 清空 u32 场为 +inf：一维线性遍历，组数 = ceil(res³/64) ──
-    cmd->SetPipeline(m_PSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
     pc.meshIndex = 0u;   // scatter 的 mode：0 = 清空
     cmd->SetPushConstants(0, sizeof(pc), &pc);
@@ -413,7 +413,7 @@ void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
 
     // ── ②b 跳步洪泛：scatter 只写了表面附近的一条带，远处仍是 +inf（= 高估，会穿漏），
     //      按 res/2, res/4 … 1 逐级松弛补全全场 ──
-    cmd->SetPipeline(m_SeedFloodPSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_SeedFloodPSO));
     // 首次使用时一次性写好"距离 + 种子"两张纹理的描述符（此后不再改写，避免在飞行帧里改描述符集）
     if (!m_SeedSetBound) {
         m_Device->UpdateDescriptorSetWithImageView(m_SeedFloodSet, 0, rhi::DescriptorType::StorageImage,
@@ -459,7 +459,7 @@ void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
     m_Device->UpdateDescriptorSetWithImageView(convSet, 1, rhi::DescriptorType::StorageImage,
                                                e.field->GetNativeHandle());
     m_Device->UpdateDescriptorSet(convSet, 2, rhi::DescriptorType::StorageBuffer, m_ProbeDist.get());
-    cmd->SetPipeline(m_ConvertPSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_ConvertPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, convSet);
     pc.meshIndex = 0u;                              // convert 的 dims.w = 0 ⇒ 写自检探针
     pc.triCount  = entryIndex * m_ProbeCount;       // convert 用 ranges.x 传本 mesh 的探针段基址
@@ -474,7 +474,7 @@ void LumenSDF::BakeOne(rhi::IRHICommandList* cmd, u32 entryIndex) {
 }
 
 void LumenSDF::CreateGlobalGPUObjects() {
-    if (m_GlobalPSO) return;
+    if (m_GlobalPSO.IsValid()) return;
 
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = {
@@ -502,8 +502,8 @@ void LumenSDF::CreateGlobalGPUObjects() {
     pso.descriptorSetLayouts = {m_GlobalLayout};
     pso.pushConstantRanges   = {pcr};
     pso.debugName            = "Lumen_SDF_GlobalBuild";
-    m_GlobalPSO = m_Device->CreatePipelineState(pso);
-    if (!m_GlobalPSO) HE_CORE_ERROR("LumenSDF: Global SDF 的 PSO 创建失败");
+    m_GlobalPSO = m_Device->CreatePipelineStateHandle(pso);
+    if (!m_GlobalPSO.IsValid()) HE_CORE_ERROR("LumenSDF: Global SDF 的 PSO 创建失败");
 
     // 全局网格上的跳步洪泛：复用 SDF_MeshFlood 这个 shader（它本来就是"任意网格 + 步长"的参数化），
     // 但**管线布局必须用全局描述符集布局** —— 绑定的描述符集与 pipeline layout 不匹配会直接崩。
@@ -524,8 +524,8 @@ void LumenSDF::CreateGlobalGPUObjects() {
     fpso.descriptorSetLayouts = {m_GlobalLayout};
     fpso.pushConstantRanges   = {pcrFlood};
     fpso.debugName            = "Lumen_SDF_GlobalFlood";
-    m_GlobalFloodPSO = m_Device->CreatePipelineState(fpso);
-    if (!m_GlobalFloodPSO) HE_CORE_ERROR("LumenSDF: Global 洪泛的 PSO 创建失败");
+    m_GlobalFloodPSO = m_Device->CreatePipelineStateHandle(fpso);
+    if (!m_GlobalFloodPSO.IsValid()) HE_CORE_ERROR("LumenSDF: Global 洪泛的 PSO 创建失败");
 
     rhi::SamplerDesc sd;
     sd.minFilter = sd.magFilter = rhi::FilterMode::Nearest;   // 逐体素取值，不能线性插值
@@ -558,8 +558,8 @@ void LumenSDF::CreateGlobalGPUObjects() {
     ppso.descriptorSetLayouts = {m_GlobalLayout};
     ppso.pushConstantRanges   = {pcr};
     ppso.debugName            = "Lumen_SDF_LayerProbe";
-    m_LayerProbePSO = m_Device->CreatePipelineState(ppso);
-    if (!m_LayerProbePSO) HE_CORE_ERROR("LumenSDF: 层取样 pass 的 PSO 创建失败");
+    m_LayerProbePSO = m_Device->CreatePipelineStateHandle(ppso);
+    if (!m_LayerProbePSO.IsValid()) HE_CORE_ERROR("LumenSDF: 层取样 pass 的 PSO 创建失败");
 }
 
 void LumenSDF::SetupGlobalGrid() {
@@ -653,7 +653,7 @@ void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
         }
     }
 
-    if (!m_GlobalPSO || m_Entries.empty()) return;
+    if (!m_GlobalPSO.IsValid() || m_Entries.empty()) return;
     // 注入必须能真正采到 mesh 场：缺采样器时引擎会跳过整条描述符更新，而注入仍然照跑，
     // 于是 InterlockedMin 会把 0 写满每个 mesh 的 AABB（全局场在空旷处塌缩到 ≈0）。
     // 这类"跑得很正常、结果全错"的失败必须在入口拦下来。
@@ -735,7 +735,7 @@ void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
         pc.dimX = pc.dimY = pc.dimZ = layer.res;
         pc.probeStride = std::max(1u, layer.res / 4u);
 
-        cmd->SetPipeline(m_GlobalPSO.get());
+        cmd->SetPipeline(m_Device->ResolvePipelineState(m_GlobalPSO));
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, lset);
 
         // ① 清空为 +inf
@@ -767,7 +767,7 @@ void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
         // ③ 向量距离变换（与 mesh 层同一套算法，§附十四）：先立种子（注入过的体素以自己为最近种子），
         //    再按 res/2 … 1 逐级传播"种子坐标 + 种子自己的距离"。旧的"每跳加步长"版 fixpoint 是
         //    26 连通图的最短路径，恒高估约 8%（对 3000 单位就是 +200 以上）。
-        cmd->SetPipeline(m_SeedFloodPSO.get());
+        cmd->SetPipeline(m_Device->ResolvePipelineState(m_SeedFloodPSO));
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_GlobalSeedSets[L]);
         FloodPC fpc{};
         fpc.originX = layer.origin.x; fpc.originY = layer.origin.y; fpc.originZ = layer.origin.z;
@@ -794,7 +794,7 @@ void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
         }
 
         // ④ 独立取样：把该层场在探针坐标上的值写进探针缓冲（binding 2 已在预建阶段指向该层场）
-        cmd->SetPipeline(m_LayerProbePSO.get());
+        cmd->SetPipeline(m_Device->ResolvePipelineState(m_LayerProbePSO));
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, lset);
         pc.mode = 3u;   // 取样 pass 用自己的 push constant 语义：dims.w = 步长（下面用 FloodPC 传）
         {
@@ -808,7 +808,7 @@ void LumenSDF::BuildGlobalField(rhi::IRHICommandList* cmd) {
         }
 
         // ⑤ u32 → R32F（自检探针由上面的独立 pass 负责）
-        cmd->SetPipeline(m_GlobalPSO.get());
+        cmd->SetPipeline(m_Device->ResolvePipelineState(m_GlobalPSO));
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, lset);
         pc.mode = 2u;
         cmd->SetPushConstants(0, sizeof(pc), &pc);
@@ -1215,7 +1215,7 @@ inline float NextRand(u32& s) {
 } // namespace
 
 void LumenSDF::CreateMarchGPUObjects() {
-    if (m_MarchPSO) return;
+    if (m_MarchPSO.IsValid()) return;
 
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = {
@@ -1245,8 +1245,8 @@ void LumenSDF::CreateMarchGPUObjects() {
     pso.descriptorSetLayouts = {m_MarchLayout};
     pso.pushConstantRanges   = {pcr};
     pso.debugName            = "Lumen_SDF_RayMarch";
-    m_MarchPSO = m_Device->CreatePipelineState(pso);
-    if (!m_MarchPSO) HE_CORE_ERROR("LumenSDF: sphere tracing 的 PSO 创建失败");
+    m_MarchPSO = m_Device->CreatePipelineStateHandle(pso);
+    if (!m_MarchPSO.IsValid()) HE_CORE_ERROR("LumenSDF: sphere tracing 的 PSO 创建失败");
 
     // 线性 clamp 采样器：三线性插值由采样器完成（步进需要连续场，不能最近邻）。
     // 【注意】正常路径下它已在 CreateGlobalGPUObjects 里建好（注入必须先有它）；
@@ -1273,8 +1273,8 @@ void LumenSDF::CreateMarchGPUObjects() {
     dpso.descriptorSetLayouts = {m_DetailLayout};
     dpso.pushConstantRanges   = {pcr};
     dpso.debugName            = "Lumen_SDF_RayMarchDetail";
-    m_DetailPSO = m_Device->CreatePipelineState(dpso);
-    if (!m_DetailPSO) HE_CORE_ERROR("LumenSDF: 细节追踪的 PSO 创建失败");
+    m_DetailPSO = m_Device->CreatePipelineStateHandle(dpso);
+    if (!m_DetailPSO.IsValid()) HE_CORE_ERROR("LumenSDF: 细节追踪的 PSO 创建失败");
 }
 
 void LumenSDF::SetupMarchRays() {
@@ -1360,7 +1360,7 @@ void LumenSDF::SetupMarchRays() {
 }
 
 void LumenSDF::RunMarch(rhi::IRHICommandList* cmd) {
-    if (!m_MarchPSO || !GetGlobalField(0) || m_RayOriginCPU.empty()) return;
+    if (!m_MarchPSO.IsValid() || !GetGlobalField(0) || m_RayOriginCPU.empty()) return;
 
     m_Device->UpdateDescriptorSet(m_MarchSet, kMBindField,
         rhi::DescriptorType::CombinedImageSampler, GetGlobalField(0), m_LinearSampler.get());
@@ -1384,14 +1384,14 @@ void LumenSDF::RunMarch(rhi::IRHICommandList* cmd) {
                  (double)pc.origin1X, (double)pc.origin1Y, (double)pc.origin1Z, (double)pc.voxelSize1, pc.dim1X,
                  pc.rayCount, (double)pc.maxSteps, (double)pc.eps);
 
-    cmd->SetPipeline(m_MarchPSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_MarchPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_MarchSet);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     cmd->Dispatch((pc.rayCount + 63u) / 64u, 1, 1);
 }
 
 void LumenSDF::RunMarchDetail(rhi::IRHICommandList* cmd) {
-    if (!m_DetailPSO || m_Entries.empty() || m_RayOriginCPU.empty()) return;
+    if (!m_DetailPSO.IsValid() || m_Entries.empty() || m_RayOriginCPU.empty()) return;
 
     // 每帧先把细节命中缓冲重置为 +inf（位模式），再做逐 mesh 的 min 归约
     const u32 n = (u32)m_RayOriginCPU.size();
@@ -1418,7 +1418,7 @@ void LumenSDF::RunMarchDetail(rhi::IRHICommandList* cmd) {
         }
     }
 
-    cmd->SetPipeline(m_DetailPSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_DetailPSO));
 
     MarchPC pc{};
     pc.dimX = pc.dimY = pc.dimZ = 0;   // 每个 mesh 覆盖
@@ -1743,7 +1743,7 @@ constexpr u32 kDebugCountFrame = 60;
 void LumenSDF::CreateDebugGPUObjects() {
     if (m_ViewportW == 0 || m_ViewportH == 0) return;
 
-    if (!m_DebugPSO) {
+    if (!m_DebugPSO.IsValid()) {
         rhi::DescriptorSetLayoutDesc layout;
         layout.bindings = {
             {kDBindField,  rhi::DescriptorType::CombinedImageSampler, 1, rhi::kStageMaskCompute},
@@ -1771,8 +1771,8 @@ void LumenSDF::CreateDebugGPUObjects() {
         pso.descriptorSetLayouts = {m_DebugLayout};
         pso.pushConstantRanges   = {pcr};
         pso.debugName            = "Lumen_SDF_DebugView";
-        m_DebugPSO = m_Device->CreatePipelineState(pso);
-        if (!m_DebugPSO) {
+        m_DebugPSO = m_Device->CreatePipelineStateHandle(pso);
+        if (!m_DebugPSO.IsValid()) {
             HE_CORE_ERROR("LumenSDF: SDF 调试视图的 PSO 创建失败（步骤 12 的可视化不可用）");
             return;
         }
@@ -1829,7 +1829,7 @@ void LumenSDF::RunDebugView(rhi::IRHICommandList* cmd, const float3& camPos, con
     // 只在 SDF 构建完成后跑；没建完时视图没有意义（场还没注入）
     if (m_Phase != Phase::Done || !GetGlobalField(0)) return;
     CreateDebugGPUObjects();
-    if (!m_DebugPSO || !m_DebugTex || !m_DebugStats) return;
+    if (!m_DebugPSO.IsValid() || !m_DebugTex || !m_DebugStats) return;
     if (!m_LinearSampler) return;
 
     const bool countFrame = (++m_DebugFrames == kDebugCountFrame);
@@ -1863,7 +1863,7 @@ void LumenSDF::RunDebugView(rhi::IRHICommandList* cmd, const float3& camPos, con
         hasLayer1 ? m_GlobalLayers[1].field.get() : m_GlobalLayers[0].field.get(),
         m_LinearSampler.get());
 
-    cmd->SetPipeline(m_DebugPSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_DebugPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DebugSet);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     cmd->Dispatch((m_ViewportW + 7u) / 8u, (m_ViewportH + 7u) / 8u, 1);
@@ -1935,7 +1935,7 @@ void LumenSDF::RunMeshFieldProbe(rhi::IRHICommandList* cmd, const float3& camPos
     // 本探测用 1 条合成射线（相机 → 前向）单独跑**某一个** mesh 的细节追踪：
     // 命中距离 ≈ 该 mesh 场在起点处的值（第一步就命中 ⇒ 该 mesh 场在此处 ≈ 0 ⇒ 就是它毒化了全局场）。
     // 读回要等 3 帧（飞行帧），故每帧只查一个 mesh。
-    if (m_Entries.empty() || !m_DetailPSO || !m_RayOrigin || !m_RayDir || !m_RayT || !m_RayTMapped) return;
+    if (m_Entries.empty() || !m_DetailPSO.IsValid() || !m_RayOrigin || !m_RayDir || !m_RayT || !m_RayTMapped) return;
 
     if (m_MeshProbeIndex >= m_Entries.size()) {
         if (!m_MeshProbeReported) {
@@ -1980,7 +1980,7 @@ void LumenSDF::RunMeshFieldProbe(rhi::IRHICommandList* cmd, const float3& camPos
         pc.eps      = 0.25f * e.voxelSize;   // 与细节追踪同口径
         pc.maxDist  = m_Config.marchMaxDist;
 
-        cmd->SetPipeline(m_DetailPSO.get());
+        cmd->SetPipeline(m_Device->ResolvePipelineState(m_DetailPSO));
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DetailSet);
         cmd->SetPushConstants(0, sizeof(pc), &pc);
         cmd->Dispatch(1, 1, 1);

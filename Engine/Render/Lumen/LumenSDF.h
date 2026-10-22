@@ -274,11 +274,11 @@ private:
     LumenSDFConfig   m_Config;
 
     // GPU 对象
-    std::unique_ptr<rhi::IRHIPipelineState>   m_PSO;          // scatter 版：清空/scatter
+    rhi::RHIPipelineStateHandle   m_PSO{};   // A-3          // scatter 版：清空/scatter
     rhi::DescriptorSetLayoutHandle            m_Layout;
     rhi::DescriptorSetHandle                  m_Set;
-    std::unique_ptr<rhi::IRHIPipelineState>   m_ConvertPSO;   // u32 → R32F + 探针
-    std::unique_ptr<rhi::IRHIPipelineState>   m_FloodPSO;     // 跳步洪泛（补全 scatter 的空洞）
+    rhi::RHIPipelineStateHandle   m_ConvertPSO{};   // A-3   // u32 → R32F + 探针
+    rhi::RHIPipelineStateHandle   m_FloodPSO{};   // A-3     // 跳步洪泛（补全 scatter 的空洞）
     rhi::DescriptorSetLayoutHandle            m_ConvertLayout;
     rhi::DescriptorSetHandle                  m_ConvertSet;
     // 同上：转换 pass 的输出是**每 mesh 一张**纹理，共用一套描述符集会让写入落到同一张上
@@ -291,7 +291,7 @@ private:
     std::unique_ptr<rhi::IRHITexture>         m_MeshSeed;
     rhi::DescriptorSetLayoutHandle            m_SeedFloodLayout;
     rhi::DescriptorSetHandle                  m_SeedFloodSet;
-    std::unique_ptr<rhi::IRHIPipelineState>   m_SeedFloodPSO;
+    rhi::RHIPipelineStateHandle   m_SeedFloodPSO{};   // A-3
     bool                                      m_SeedSetBound = false;
     std::unique_ptr<rhi::IRHIBuffer>          m_Positions;   // float4（w 未用）
     std::unique_ptr<rhi::IRHIBuffer>          m_Indices;
@@ -340,9 +340,9 @@ private:
     std::vector<rhi::DescriptorSetHandle> m_GlobalLayerSets;    // 每层一套（clear/flood/convert/probe）
     std::vector<rhi::DescriptorSetHandle> m_GlobalInjectSets;   // 每 层×mesh 一套（注入）
     std::vector<rhi::DescriptorSetHandle> m_GlobalSeedSets;     // 每层一套（向量距离变换：距离 + 种子）
-    std::unique_ptr<rhi::IRHIPipelineState> m_GlobalPSO;
-    std::unique_ptr<rhi::IRHIPipelineState> m_GlobalFloodPSO;   // 全局网格上的跳步洪泛
-    std::unique_ptr<rhi::IRHIPipelineState> m_LayerProbePSO;    // 独立取样（把层场写进探针缓冲）
+    rhi::RHIPipelineStateHandle m_GlobalPSO{};   // A-3
+    rhi::RHIPipelineStateHandle m_GlobalFloodPSO{};   // A-3   // 全局网格上的跳步洪泛
+    rhi::RHIPipelineStateHandle m_LayerProbePSO{};   // A-3    // 独立取样（把层场写进探针缓冲）
     std::unique_ptr<rhi::IRHISampler>       m_NearestSampler;
     GlobalLayer m_GlobalLayers[kMaxGlobalLayers];
     u32 m_GlobalLayerCount = 0;
@@ -353,7 +353,7 @@ private:
     // ── sphere tracing（步骤 11）──
     rhi::DescriptorSetLayoutHandle m_MarchLayout;
     rhi::DescriptorSetHandle       m_MarchSet;
-    std::unique_ptr<rhi::IRHIPipelineState> m_MarchPSO;
+    rhi::RHIPipelineStateHandle m_MarchPSO{};   // A-3
     std::unique_ptr<rhi::IRHIBuffer> m_RayOrigin;
     std::unique_ptr<rhi::IRHIBuffer> m_RayDir;
     std::unique_ptr<rhi::IRHIBuffer> m_RayHit;      // CPU 可读
@@ -363,7 +363,7 @@ private:
     rhi::DescriptorSetHandle       m_DetailSet;
     // 每 mesh 一套细节追踪描述符集：**同一套集在一次提交里反复改写会变成别名**（所有 dispatch 都读最后一张场）
     std::vector<rhi::DescriptorSetHandle> m_DetailSets;
-    std::unique_ptr<rhi::IRHIPipelineState> m_DetailPSO;
+    rhi::RHIPipelineStateHandle m_DetailPSO{};   // A-3
     std::unique_ptr<rhi::IRHIBuffer> m_RayT;
     void* m_RayTMapped = nullptr;
     std::unique_ptr<rhi::IRHISampler> m_LinearSampler;
@@ -375,7 +375,7 @@ private:
     // ── SDF 追踪可视化（步骤 12）──
     rhi::DescriptorSetLayoutHandle m_DebugLayout;
     rhi::DescriptorSetHandle       m_DebugSet;
-    std::unique_ptr<rhi::IRHIPipelineState> m_DebugPSO;
+    rhi::RHIPipelineStateHandle m_DebugPSO{};   // A-3
     std::unique_ptr<rhi::IRHITexture>       m_DebugTex;      // RGBA16F，屏幕尺寸
     std::unique_ptr<rhi::IRHIBuffer>        m_DebugStats;    // CPU 可读（原子计数）
     std::unique_ptr<rhi::IRHIBuffer>        m_DebugProbe;    // CPU 可读（沿中心射线的场剖面）
