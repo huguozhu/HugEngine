@@ -237,8 +237,8 @@ void NaniteRaster::Shutdown() {
     m_WinnerID.reset();
     m_DepthKeyPixels        = 0u;
     m_DepthKeyZeroSrcPixels = 0u;
-    m_SoftStats.reset();
-    m_SoftStatsZeroSrc.reset();
+    m_Device->DestroyBufferHandle(m_SoftStats); m_SoftStats = {};
+    m_Device->DestroyBufferHandle(m_SoftStatsZeroSrc); m_SoftStatsZeroSrc = {};
 
     // ── 【§14.8 任务 22】硬光栅的懒建资源（未开启分流时它们是空的，这里自然是空操作）──
     m_Device->DestroyPipelineStateHandle(m_HardRasterPSO); m_HardRasterPSO = {};
@@ -892,19 +892,19 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
         d.size      = sizeof(u32) * kNaniteSoftStatsCapacity;
         d.usage     = rhi::BufferUsage::Storage;
         d.cpuAccess = true;   // dump 帧读回
-        m_SoftStats = m_Device->CreateBuffer(d);
-        if (!m_SoftStats) { HE_CORE_ERROR("NaniteRaster: 软光栅读数缓冲创建失败"); return false; }
+        m_SoftStats = m_Device->CreateBufferHandle(d);   // A-3
+        if (!m_SoftStats.IsValid()) { HE_CORE_ERROR("NaniteRaster: 软光栅读数缓冲创建失败"); return false; }
     }
-    if (!m_SoftStatsZeroSrc) {
+    if (!m_SoftStatsZeroSrc.IsValid()) {
         rhi::BufferDesc d;
         d.size      = sizeof(u32) * kNaniteSoftStatsCapacity;
         d.usage     = rhi::BufferUsage::TransferSrc;   // 只当拷贝源
         d.cpuAccess = true;
-        m_SoftStatsZeroSrc = m_Device->CreateBuffer(d);
-        if (!m_SoftStatsZeroSrc) { HE_CORE_ERROR("NaniteRaster: 软光栅读数清零源创建失败"); return false; }
-        if (void* p = m_SoftStatsZeroSrc->Map()) {
+        m_SoftStatsZeroSrc = m_Device->CreateBufferHandle(d);   // A-3
+        if (!m_SoftStatsZeroSrc.IsValid()) { HE_CORE_ERROR("NaniteRaster: 软光栅读数清零源创建失败"); return false; }
+        if (void* p = m_Device->ResolveBuffer(m_SoftStatsZeroSrc)->Map()) {
             std::memset(p, 0, sizeof(u32) * kNaniteSoftStatsCapacity);
-            m_SoftStatsZeroSrc->Unmap();
+            if (auto* zb = m_Device->ResolveBuffer(m_SoftStatsZeroSrc)) zb->Unmap();
         }
     }
 
@@ -980,8 +980,8 @@ void NaniteRaster::RecordDepthKeyClear(rhi::IRHICommandList* cmd) {
 }
 
 void NaniteRaster::RecordSoftStatsClear(rhi::IRHICommandList* cmd) {
-    if (!cmd || !m_SoftStats || !m_SoftStatsZeroSrc) return;
-    cmd->CopyBuffer(m_SoftStatsZeroSrc.get(), m_SoftStats.get(),
+    if (!cmd || !m_SoftStats.IsValid() || !m_SoftStatsZeroSrc.IsValid()) return;
+    cmd->CopyBuffer(m_Device->ResolveBuffer(m_SoftStatsZeroSrc), m_Device->ResolveBuffer(m_SoftStats),
                     (u64)kNaniteSoftStatsCapacity * sizeof(u32), 0, 0);
     cmd->PipelineBarrier(rhi::PipelineStage::Transfer, rhi::PipelineStage::ComputeShader,
                          rhi::ResourceState::CopyDst, rhi::ResourceState::UnorderedAccess);
@@ -1136,7 +1136,7 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
     rhi::IRHIBuffer* poolClusterSrc = streamOn ? asset.stream.poolClusters : asset.clusters;
     rhi::IRHIBuffer* poolVertexSrc  = streamOn ? asset.stream.poolVertices : asset.vertices;
     rhi::IRHIBuffer* poolTriSrc     = streamOn ? asset.stream.poolTriangles: asset.indices;
-    rhi::IRHIBuffer* feedbackSrc    = streamOn ? asset.stream.feedback     : m_SoftStats.get();
+    rhi::IRHIBuffer* feedbackSrc    = streamOn ? asset.stream.feedback     : m_Device->ResolveBuffer(m_SoftStats);
 
     // ── 【任务 24】push constant 的流式四个数**由绑定侧唯一决定** ──
     // 【为什么不在调用方填】`pagesEnabled` 必须与"0/1/2 号槽绑的是谁"逐位一致：两者由不同的
@@ -1169,7 +1169,7 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
         m_Device->UpdateDescriptorSet(set, 4, rhi::DescriptorType::StorageBuffer, visibleCount);
         m_Device->UpdateDescriptorSet(set, 5, rhi::DescriptorType::StorageBuffer, instances);
         m_Device->UpdateDescriptorSet(set, 6, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_DepthKey));
-        m_Device->UpdateDescriptorSet(set, 7, rhi::DescriptorType::StorageBuffer, m_SoftStats.get());
+        m_Device->UpdateDescriptorSet(set, 7, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_SoftStats));
         m_Device->UpdateDescriptorSet(set, 15, rhi::DescriptorType::StorageBuffer, clusterPageSrc);
         m_Device->UpdateDescriptorSet(set, 16, rhi::DescriptorType::StorageBuffer, pageTableSrc);
         m_Device->UpdateDescriptorSet(set, 17, rhi::DescriptorType::StorageBuffer, poolClusterSrc);
@@ -1200,7 +1200,7 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
                                                targets.lightmapKey->GetNativeHandle());
     m_Device->UpdateDescriptorSet(m_DepthResolveSet, 0, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_DepthKey));
     // 【P0 修复（§14.30）】读数缓冲：深度解析通道自己原子累加"真实写入深度的像素数"
-    m_Device->UpdateDescriptorSet(m_DepthResolveSet, 1, rhi::DescriptorType::StorageBuffer, m_SoftStats.get());
+    m_Device->UpdateDescriptorSet(m_DepthResolveSet, 1, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_SoftStats));
 
     // ── ① 清深度键 + 清读数（命令缓冲内拷贝，GPU 有序）──
     RecordDepthKeyClear(cmd);
@@ -1889,11 +1889,11 @@ void NaniteRaster::LogDebugViewReadback(u32 visible) {
 void NaniteRaster::ReadbackSoftStats(u32 (&out)[kNaniteSoftStatsCapacity]) {    // 【清零语义】缓冲不存在（软光栅未就绪）时全部写 0：调用方不必先自己清，
     //   也不会读到未初始化的栈内存（`size_dist` / `perf` 行在未就绪档下会打印全 0 而不是垃圾）。
     for (u32 i = 0u; i < kNaniteSoftStatsCapacity; ++i) out[i] = 0u;
-    if (!m_SoftStats) return;
+    if (!m_SoftStats.IsValid()) return;
     // 真实 GPU 读回（与其它读数同一约定：只 Map、不等待；调用方已 WaitIdle）
-    if (void* p = m_SoftStats->Map()) {
+    if (void* p = m_Device->ResolveBuffer(m_SoftStats)->Map()) {
         std::memcpy(out, p, sizeof(u32) * kNaniteSoftStatsCapacity);
-        m_SoftStats->Unmap();
+        if (auto* sb = m_Device->ResolveBuffer(m_SoftStats)) sb->Unmap();
     }
 }
 
@@ -1980,7 +1980,7 @@ void NaniteRaster::LogHardRasterReadback() {
 
 void NaniteRaster::LogSoftRasterReadback() {
     // 真实 GPU 读回（与其它读数同一约定：只 Map、不等待；调用方已 WaitIdle）
-    if (!m_SoftStats) return;
+    if (!m_SoftStats.IsValid()) return;
     u32 s[kNaniteSoftStatsCapacity] = {};
     ReadbackSoftStats(s);
     HE_CORE_INFO("[Nanite] soft_raster clusters={} soft={} skipped_big={} triangles={} pixels_written={} "

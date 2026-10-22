@@ -538,8 +538,8 @@ private:
     std::unique_ptr<rhi::IRHIBuffer> m_WinnerID;
 
     /// 读数缓冲（扁平 u32，`kNaniteSoftStatsCapacity` 条）+ 每帧清零用的常驻 0 源
-    std::unique_ptr<rhi::IRHIBuffer> m_SoftStats;
-    std::unique_ptr<rhi::IRHIBuffer> m_SoftStatsZeroSrc;
+    rhi::RHIBufferHandle m_SoftStats{};   // A-3
+    rhi::RHIBufferHandle m_SoftStatsZeroSrc{};   // A-3
 
     /// 上一次录制时记下的参数（dump 帧日志用：真实 GPU 读回 + CPU 侧真值对照）
     u32 m_SoftLastMaxTriangles  = 0u;
