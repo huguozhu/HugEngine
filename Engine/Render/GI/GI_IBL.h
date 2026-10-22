@@ -38,8 +38,8 @@ public:
 
     // ---- IGlobalIllumination 接口 ----
     [[nodiscard]] GIMode GetMode() const override { return GIMode::IBL; }
-    [[nodiscard]] rhi::IRHITexture* GetIndirectDiffuseTexture()  const override { return m_IrradianceMap.get(); }
-    [[nodiscard]] rhi::IRHITexture* GetIndirectSpecularTexture() const override { return m_PrefilterMap.get(); }
+    [[nodiscard]] rhi::IRHITexture* GetIndirectDiffuseTexture()  const override { return m_Device->ResolveTexture(m_IrradianceMap); }
+    [[nodiscard]] rhi::IRHITexture* GetIndirectSpecularTexture() const override { return m_Device->ResolveTexture(m_PrefilterMap); }
 
     // ---- 设置 Skybox Cubemap ----
     /// 设置输入天空盒 Cubemap + 采样器，标记脏状态触发重生成
@@ -47,10 +47,10 @@ public:
     bool IsDirty() const { return m_Dirty; }
 
     // ---- 访问 IBL 纹理（供 ForwardPipeline 绑定到 PBR 描述符集） ----
-    [[nodiscard]] rhi::IRHITexture* GetIrradianceMap() const { return m_IrradianceMap.get(); }
-    [[nodiscard]] rhi::IRHITexture* GetPrefilterMap()  const { return m_PrefilterMap.get(); }
-    [[nodiscard]] rhi::IRHITexture* GetBRDF_LUT()      const { return m_BRDF_LUT.get(); }
-    [[nodiscard]] rhi::IRHISampler* GetIBLSampler()    const { return m_IBLSampler.get(); }
+    [[nodiscard]] rhi::IRHITexture* GetIrradianceMap() const { return m_Device->ResolveTexture(m_IrradianceMap); }
+    [[nodiscard]] rhi::IRHITexture* GetPrefilterMap()  const { return m_Device->ResolveTexture(m_PrefilterMap); }
+    [[nodiscard]] rhi::IRHITexture* GetBRDF_LUT()      const { return m_Device->ResolveTexture(m_BRDF_LUT); }
+    [[nodiscard]] rhi::IRHISampler* GetIBLSampler()    const { return m_Device->ResolveSampler(m_IBLSampler); }
 
 private:
     // 渲染 6 个 Cubemap 面 + 指定 mip level
@@ -64,16 +64,16 @@ private:
     static float4x4 CubeFaceViewMatrix(u32 face);
 
     // GPU 资源
-    std::unique_ptr<rhi::IRHITexture> m_IrradianceMap;   // 32×32 RGBA16_FLOAT Cubemap
-    std::unique_ptr<rhi::IRHITexture> m_PrefilterMap;     // 128×128 RGBA16_FLOAT Cubemap (5 mips)
-    std::unique_ptr<rhi::IRHITexture> m_BRDF_LUT;         // 512×512 RG16_FLOAT 2D
+    rhi::RHITextureHandle m_IrradianceMap{};   // A-3：32×32 RGBA16_FLOAT Cubemap
+    rhi::RHITextureHandle m_PrefilterMap{};     // A-3：128×128 RGBA16_FLOAT Cubemap (5 mips)
+    rhi::RHITextureHandle m_BRDF_LUT{};         // A-3：512×512 RG16_FLOAT 2D
     std::vector<void*> m_CachedMipViews;                  // 逐 mip 面视图缓存（RHI 不透明句柄，延迟销毁用）
-    std::unique_ptr<rhi::IRHISampler> m_IBLSampler;       // 线性 Clamp 采样器（共享）
+    rhi::RHISamplerHandle m_IBLSampler{};       // A-3：线性 Clamp 采样器（共享）
 
     // PSO
-    std::unique_ptr<rhi::IRHIPipelineState> m_IrradiancePSO;
-    std::unique_ptr<rhi::IRHIPipelineState> m_PrefilterPSO;
-    std::unique_ptr<rhi::IRHIPipelineState> m_BRDF_LUT_PSO;
+    rhi::RHIPipelineStateHandle m_IrradiancePSO{};   // A-3
+    rhi::RHIPipelineStateHandle m_PrefilterPSO{};   // A-3
+    rhi::RHIPipelineStateHandle m_BRDF_LUT_PSO{};   // A-3
 
     // Descriptor Sets
     rhi::DescriptorSetLayoutHandle m_IrradianceLayout = rhi::kInvalidLayout;

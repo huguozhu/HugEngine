@@ -76,23 +76,23 @@ public:
                        const MeshRegistry& registry);
 
     // 纹理访问
-    rhi::IRHITexture* GetRSMPositionMap() const { return m_RSMPos.get(); }
+    rhi::IRHITexture* GetRSMPositionMap() const { return m_Device->ResolveTexture(m_RSMPos); }
     /// 法线图（历史名 `GetRSMFluxMap`：任务 30 之前这张图的 .a 存通量，现在只存编码法线）
-    rhi::IRHITexture* GetRSMFluxMap()     const { return m_RSMFlux.get(); }
+    rhi::IRHITexture* GetRSMFluxMap()     const { return m_Device->ResolveTexture(m_RSMFlux); }
     /// VPL 出射辐射度图（任务 30 新增；消费端不再需要"解包"法线与通量）
-    rhi::IRHITexture* GetRSMRadianceMap() const { return m_RSMRadiance.get(); }
-    rhi::IRHISampler* GetRSMSampler()     const { return m_RSMSampler.get(); }
+    rhi::IRHITexture* GetRSMRadianceMap() const { return m_Device->ResolveTexture(m_RSMRadiance); }
+    rhi::IRHISampler* GetRSMSampler()     const { return m_Device->ResolveSampler(m_RSMSampler); }
 
 private:
-    std::unique_ptr<rhi::IRHITexture> m_RSMPos;        // RGBA16_FLOAT worldPos
-    std::unique_ptr<rhi::IRHITexture> m_RSMFlux;       // RGBA16_FLOAT 编码法线
-    std::unique_ptr<rhi::IRHITexture> m_RSMRadiance;   // RGBA16_FLOAT VPL 出射辐射度
-    std::unique_ptr<rhi::IRHITexture> m_RSMDepth;  // D32_FLOAT 独立深度缓冲（不依赖 CSM ShadowMap）
+    rhi::RHITextureHandle m_RSMPos{};        // A-3：RGBA16_FLOAT worldPos
+    rhi::RHITextureHandle m_RSMFlux{};       // A-3：RGBA16_FLOAT 编码法线
+    rhi::RHITextureHandle m_RSMRadiance{};   // A-3：RGBA16_FLOAT VPL 出射辐射度
+    rhi::RHITextureHandle m_RSMDepth{};  // A-3：D32_FLOAT 独立深度缓冲（不依赖 CSM ShadowMap）
     /// 本 pass 自己的 GPUObjectData[]（每帧重写 worldMatrix；见 SetLightViewProj 的说明）
-    std::unique_ptr<rhi::IRHIBuffer>  m_ObjectBuf;
-    std::unique_ptr<rhi::IRHISampler> m_RSMSampler;
+    rhi::RHIBufferHandle  m_ObjectBuf{};   // A-3
+    rhi::RHISamplerHandle m_RSMSampler{};   // A-3
 
-    std::unique_ptr<rhi::IRHIPipelineState> m_RSMPSO;
+    rhi::RHIPipelineStateHandle m_RSMPSO{};   // A-3
     rhi::DescriptorSetLayoutHandle m_RSMLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_RSMSet    = rhi::kInvalidSet;
     void* m_ExternalDepthView = nullptr;  // 外部深度视图（保留兼容但不再用于 RSM）

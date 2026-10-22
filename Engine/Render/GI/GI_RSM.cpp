@@ -32,7 +32,7 @@ bool GI_RSM::Initialize(rhi::IRHIDevice* device, u32, u32) {
     posDesc.height    = m_RSMResolution;
     posDesc.mipLevels = 1;
     posDesc.usage     = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
-    m_RSMPos = device->CreateTexture(posDesc);
+    m_RSMPos = device->CreateTextureHandle(posDesc);
 
     rhi::TextureDesc fluxDesc;
     fluxDesc.format    = rhi::Format::RGBA16_FLOAT;
@@ -40,7 +40,7 @@ bool GI_RSM::Initialize(rhi::IRHIDevice* device, u32, u32) {
     fluxDesc.height    = m_RSMResolution;
     fluxDesc.mipLevels = 1;
     fluxDesc.usage     = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
-    m_RSMFlux = device->CreateTexture(fluxDesc);
+    m_RSMFlux = device->CreateTextureHandle(fluxDesc);
 
     // 第三个附件：VPL 出射辐射度（任务 30）。独立附件换来"一个附件一个量"——
     // 通量此前挤在法线图的 .a 通道里，消费端必须记住"rgb 是法线、a 才是通量"，
@@ -51,7 +51,7 @@ bool GI_RSM::Initialize(rhi::IRHIDevice* device, u32, u32) {
     radDesc.height    = m_RSMResolution;
     radDesc.mipLevels = 1;
     radDesc.usage     = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
-    m_RSMRadiance = device->CreateTexture(radDesc);
+    m_RSMRadiance = device->CreateTextureHandle(radDesc);
 
     // 独立深度缓冲（不再复用 CSM ShadowMap，避免布局冲突导致白屏）
     rhi::TextureDesc depthDesc;
@@ -60,22 +60,22 @@ bool GI_RSM::Initialize(rhi::IRHIDevice* device, u32, u32) {
     depthDesc.height    = m_RSMResolution;
     depthDesc.mipLevels = 1;
     depthDesc.usage     = rhi::TextureUsage::DepthStencil;  // 仅深度附件，无需采样
-    m_RSMDepth = device->CreateTexture(depthDesc);
+    m_RSMDepth = device->CreateTextureHandle(depthDesc);
 
     rhi::SamplerDesc sampDesc;
     sampDesc.minFilter = rhi::FilterMode::Linear;
     sampDesc.magFilter = rhi::FilterMode::Linear;
     sampDesc.addressU  = rhi::AddressMode::ClampToEdge;
     sampDesc.addressV  = rhi::AddressMode::ClampToEdge;
-    m_RSMSampler = device->CreateSampler(sampDesc);
+    m_RSMSampler = device->CreateSamplerHandle(sampDesc);
 
     // 本 pass 自己的物体缓冲（每帧重写 worldMatrix）。Storage 用法 + CPU 可写。
     rhi::BufferDesc objDesc;
     objDesc.size      = sizeof(GPUObjectData) * MAX_OBJECTS;
     objDesc.usage     = rhi::BufferUsage::Storage;
     objDesc.cpuAccess = true;
-    m_ObjectBuf = device->CreateBuffer(objDesc);
-    HE_ASSERT(m_ObjectBuf, "GI_RSM: failed to create RSM object buffer");
+    m_ObjectBuf = device->CreateBufferHandle(objDesc);
+    HE_ASSERT(m_ObjectBuf.IsValid(), "GI_RSM: failed to create RSM object buffer");
 
     // RSM PSO（三 MRT：位置 / 编码法线 / VPL 辐射度；深度附件为 RSM 自己的 D32）
     rhi::DescriptorSetLayoutDesc layout;
@@ -124,20 +124,21 @@ bool GI_RSM::Initialize(rhi::IRHIDevice* device, u32, u32) {
     psoDesc.descriptorSetLayouts = { m_RSMLayout };
     psoDesc.debugName            = "RSM_Generate";
 
-    m_RSMPSO = device->CreatePipelineState(psoDesc);
-    HE_ASSERT(m_RSMPSO, "GI_RSM: failed to create RSM PSO");
+    m_RSMPSO = device->CreatePipelineStateHandle(psoDesc);
+    HE_ASSERT(m_RSMPSO.IsValid(), "GI_RSM: failed to create RSM PSO");
 
     m_Ready = true;
     return true;
 }
 
 void GI_RSM::Shutdown() {
-    m_RSMPos.reset();
-    m_RSMFlux.reset();
-    m_RSMRadiance.reset();
-    m_RSMSampler.reset();
-    m_ObjectBuf.reset();
-    m_RSMPSO.reset();
+    m_Device->DestroyTextureHandle(m_RSMPos); m_RSMPos = {};
+    m_Device->DestroyTextureHandle(m_RSMFlux); m_RSMFlux = {};
+    m_Device->DestroyTextureHandle(m_RSMRadiance); m_RSMRadiance = {};
+    m_Device->DestroySamplerHandle(m_RSMSampler); m_RSMSampler = {};
+    m_Device->DestroyTextureHandle(m_RSMDepth); m_RSMDepth = {};   // A-3：原来漏了（靠 unique_ptr 析构）
+    m_Device->DestroyBufferHandle(m_ObjectBuf); m_ObjectBuf = {};
+    m_Device->DestroyPipelineStateHandle(m_RSMPSO); m_RSMPSO = {};
     m_Ready = false;
 }
 
@@ -156,13 +157,13 @@ void GI_RSM::SetLightViewProj(const float4x4& vp, u32 resolution,
 }
 
 void GI_RSM::Render(rhi::IRHICommandList* cmd) {
-    if (!m_Ready || !m_ObjectBuf || !m_RSMDepth) return;
+    if (!m_Ready || !m_ObjectBuf.IsValid() || !m_RSMDepth.IsValid()) return;
     // 实际渲染委托给 RenderRSMPass（由 ForwardPipeline 在 Render 中调用）
 }
 
 void GI_RSM::RenderRSMPass(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snapshot,
                             const MeshRegistry& registry) {
-    if (!m_Ready || !m_ObjectBuf || !m_RSMDepth) return;
+    if (!m_Ready || !m_ObjectBuf.IsValid() || !m_RSMDepth.IsValid()) return;
 
     // binding 1 = GPULight[]：**必须是光源缓冲**。此前这里绑的是对象缓冲
     // （与下一行的 binding 2 同一个），于是着色器读到的"光源"其实是 GPUObjectData[0]，
@@ -174,9 +175,9 @@ void GI_RSM::RenderRSMPass(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& 
     // binding 2 = **本 pass 自己的** GPUObjectData[]。见头文件：不能借用管线的相机可见列表
     // 对象缓冲（索引空间不同，会读到没填过的槽）。
     m_Device->UpdateDescriptorSet(m_RSMSet, kRSMBindObjects,
-        rhi::DescriptorType::StorageBuffer, m_ObjectBuf.get());
+        rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ObjectBuf));
 
-    cmd->SetPipeline(m_RSMPSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_RSMPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_RSMSet);
 
     // 【长度契约】colorCount(3) 个颜色项 + 末尾一个深度项 = 4 项，深度项在 clears[colorCount]。
@@ -188,12 +189,12 @@ void GI_RSM::RenderRSMPass(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& 
     clears[3].depth = 1.0f;   // 深度项：远平面（与 PSO 的 LessEqual + zero-to-one 约定配套）
 
     void* colorViews[3] = {
-        m_RSMPos->GetNativeHandle(),
-        m_RSMFlux->GetNativeHandle(),
-        m_RSMRadiance->GetNativeHandle()
+        m_Device->ResolveTexture(m_RSMPos)->GetNativeHandle(),
+        m_Device->ResolveTexture(m_RSMFlux)->GetNativeHandle(),
+        m_Device->ResolveTexture(m_RSMRadiance)->GetNativeHandle()
     };
 
-    cmd->BeginOffscreenPassMRT(colorViews, 3, m_RSMDepth->GetNativeHandle(),
+    cmd->BeginOffscreenPassMRT(colorViews, 3, m_Device->ResolveTexture(m_RSMDepth)->GetNativeHandle(),
                                m_RSMResolution, m_RSMResolution, clears, false);
     cmd->SetViewport({ 0, static_cast<float>(m_RSMResolution),
         static_cast<float>(m_RSMResolution), -static_cast<float>(m_RSMResolution),
@@ -201,7 +202,8 @@ void GI_RSM::RenderRSMPass(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& 
     cmd->SetScissor({ 0, 0, m_RSMResolution, m_RSMResolution });
 
     // 上传对象数据到 GPU（从光源 POV 不需要世界矩阵，直接用 objectIndex 索引）
-    auto* objData = static_cast<GPUObjectData*>(m_ObjectBuf->Map());
+    auto* objBuf  = m_Device->ResolveBuffer(m_ObjectBuf);   // A-3：句柄解析
+    auto* objData = objBuf ? static_cast<GPUObjectData*>(objBuf->Map()) : nullptr;
     u32 objectIndex = 0;
 
     // 【第③段第 3 批】遍历**快照**里的 `Base` 类条目 —— 旧实现是 `world.ForEach<he::MeshComponent>`，
@@ -241,7 +243,7 @@ void GI_RSM::RenderRSMPass(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& 
         objectIndex++;
     }
 
-    m_ObjectBuf->Unmap();
+    if (objBuf) objBuf->Unmap();
 
     cmd->EndOffscreenPass();
 
@@ -251,19 +253,19 @@ void GI_RSM::RenderRSMPass(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& 
         rhi::PipelineStage::FragmentShader,
         rhi::ResourceState::RenderTarget,
         rhi::ResourceState::ShaderResource,
-        m_RSMPos.get());
+        m_Device->ResolveTexture(m_RSMPos));
     cmd->PipelineBarrier(
         rhi::PipelineStage::ColorAttachmentOutput,
         rhi::PipelineStage::FragmentShader,
         rhi::ResourceState::RenderTarget,
         rhi::ResourceState::ShaderResource,
-        m_RSMFlux.get());
+        m_Device->ResolveTexture(m_RSMFlux));
     cmd->PipelineBarrier(
         rhi::PipelineStage::ColorAttachmentOutput,
         rhi::PipelineStage::FragmentShader,
         rhi::ResourceState::RenderTarget,
         rhi::ResourceState::ShaderResource,
-        m_RSMRadiance.get());
+        m_Device->ResolveTexture(m_RSMRadiance));
 }
 
 void GI_RSM::Bind(rhi::IRHICommandList* cmd) const {

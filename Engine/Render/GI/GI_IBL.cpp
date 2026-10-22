@@ -66,7 +66,7 @@ bool GI_IBL::Initialize(rhi::IRHIDevice* device, u32, u32) {
         desc.usage       = rhi::TextureUsage::RenderTarget
                          | rhi::TextureUsage::ShaderResource
                          | rhi::TextureUsage::Cubemap;
-        m_IrradianceMap = device->CreateTexture(desc);
+        m_IrradianceMap = device->CreateTextureHandle(desc);
         HE_CORE_INFO("  Irradiance Map: {}x{} Cubemap", kIrradianceRes, kIrradianceRes);
     }
 
@@ -81,7 +81,7 @@ bool GI_IBL::Initialize(rhi::IRHIDevice* device, u32, u32) {
         desc.usage       = rhi::TextureUsage::RenderTarget
                          | rhi::TextureUsage::ShaderResource
                          | rhi::TextureUsage::Cubemap;
-        m_PrefilterMap = device->CreateTexture(desc);
+        m_PrefilterMap = device->CreateTextureHandle(desc);
         HE_CORE_INFO("  Prefilter Map: {}x{} Cubemap ({} mips)", kPrefilterRes, kPrefilterRes, kPrefilterMips);
     }
 
@@ -94,7 +94,7 @@ bool GI_IBL::Initialize(rhi::IRHIDevice* device, u32, u32) {
         desc.mipLevels = 1;
         desc.usage     = rhi::TextureUsage::RenderTarget
                        | rhi::TextureUsage::ShaderResource;
-        m_BRDF_LUT = device->CreateTexture(desc);
+        m_BRDF_LUT = device->CreateTextureHandle(desc);
         HE_CORE_INFO("  BRDF LUT: {}x{}", kBRDF_LUT_Res, kBRDF_LUT_Res);
     }
 
@@ -109,7 +109,7 @@ bool GI_IBL::Initialize(rhi::IRHIDevice* device, u32, u32) {
         sampDesc.addressU  = rhi::AddressMode::ClampToEdge;
         sampDesc.addressV  = rhi::AddressMode::ClampToEdge;
         sampDesc.addressW  = rhi::AddressMode::ClampToEdge;
-        m_IBLSampler = device->CreateSampler(sampDesc);
+        m_IBLSampler = device->CreateSamplerHandle(sampDesc);
     }
 
     // --- 3. 创建 PSO ---
@@ -148,8 +148,8 @@ bool GI_IBL::Initialize(rhi::IRHIDevice* device, u32, u32) {
         psoDesc.descriptorSetLayouts = { m_IrradianceLayout };
         psoDesc.debugName            = "IBL_Irradiance";
 
-        m_IrradiancePSO = device->CreatePipelineState(psoDesc);
-        HE_ASSERT(m_IrradiancePSO, "GI_IBL: failed to create Irradiance PSO");
+        m_IrradiancePSO = device->CreatePipelineStateHandle(psoDesc);
+        HE_ASSERT(m_IrradiancePSO.IsValid(), "GI_IBL: failed to create Irradiance PSO");
 
         // 绑定 Skybox Cubemap 到描述符集（初始占位，SetSkyboxCubemap 时更新）
         m_IrradianceSet = device->AllocateDescriptorSet(m_IrradianceLayout);
@@ -184,8 +184,8 @@ bool GI_IBL::Initialize(rhi::IRHIDevice* device, u32, u32) {
         psoDesc.descriptorSetLayouts = { m_PrefilterLayout };
         psoDesc.debugName            = "IBL_Prefilter";
 
-        m_PrefilterPSO = device->CreatePipelineState(psoDesc);
-        HE_ASSERT(m_PrefilterPSO, "GI_IBL: failed to create Prefilter PSO");
+        m_PrefilterPSO = device->CreatePipelineStateHandle(psoDesc);
+        HE_ASSERT(m_PrefilterPSO.IsValid(), "GI_IBL: failed to create Prefilter PSO");
 
         m_PrefilterSet = device->AllocateDescriptorSet(m_PrefilterLayout);
     }
@@ -211,8 +211,8 @@ bool GI_IBL::Initialize(rhi::IRHIDevice* device, u32, u32) {
         psoDesc.depthFormat          = rhi::Format::Unknown;  // 无需深度
         psoDesc.debugName            = "IBL_BRDF_LUT";
 
-        m_BRDF_LUT_PSO = device->CreatePipelineState(psoDesc);
-        HE_ASSERT(m_BRDF_LUT_PSO, "GI_IBL: failed to create BRDF LUT PSO");
+        m_BRDF_LUT_PSO = device->CreatePipelineStateHandle(psoDesc);
+        HE_ASSERT(m_BRDF_LUT_PSO.IsValid(), "GI_IBL: failed to create BRDF LUT PSO");
     }
 
     m_Ready = true;
@@ -226,13 +226,13 @@ void GI_IBL::Shutdown() {
         for (auto& v : m_CachedMipViews) m_Device->DestroyTextureMipView(v);
         m_CachedMipViews.clear();
     }
-    m_IrradianceMap.reset();
-    m_PrefilterMap.reset();
-    m_BRDF_LUT.reset();
-    m_IBLSampler.reset();
-    m_IrradiancePSO.reset();
-    m_PrefilterPSO.reset();
-    m_BRDF_LUT_PSO.reset();
+    m_Device->DestroyTextureHandle(m_IrradianceMap); m_IrradianceMap = {};
+    m_Device->DestroyTextureHandle(m_PrefilterMap); m_PrefilterMap = {};
+    m_Device->DestroyTextureHandle(m_BRDF_LUT); m_BRDF_LUT = {};
+    m_Device->DestroySamplerHandle(m_IBLSampler); m_IBLSampler = {};
+    m_Device->DestroyPipelineStateHandle(m_IrradiancePSO); m_IrradiancePSO = {};
+    m_Device->DestroyPipelineStateHandle(m_PrefilterPSO); m_PrefilterPSO = {};
+    m_Device->DestroyPipelineStateHandle(m_BRDF_LUT_PSO); m_BRDF_LUT_PSO = {};
     m_Device = nullptr;
     m_Ready  = false;
     HE_CORE_INFO("GI_IBL::Shutdown");
@@ -275,11 +275,11 @@ void GI_IBL::Render(rhi::IRHICommandList* cmd) {
         // Push constants: invViewProj 每个面不同
         struct alignas(16) IBLPush { float4x4 invVP; float roughnessPad; float _pad[3]; } pc{};
 
-        cmd->SetPipeline(m_IrradiancePSO.get());
+        cmd->SetPipeline(m_Device->ResolvePipelineState(m_IrradiancePSO));
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_IrradianceSet);
 
         for (u32 face = 0; face < rhi::kCubemapFaceCount; ++face) {
-            void* faceView = m_IrradianceMap->GetNativeHandle(face);
+            void* faceView = m_Device->ResolveTexture(m_IrradianceMap)->GetNativeHandle(face);
             if (!faceView) continue;
 
             float4x4 view  = CubeFaceViewMatrix(face);
@@ -301,7 +301,7 @@ void GI_IBL::Render(rhi::IRHICommandList* cmd) {
             rhi::PipelineStage::FragmentShader,
             rhi::ResourceState::RenderTarget,
             rhi::ResourceState::ShaderResource,
-            m_IrradianceMap.get());
+            m_Device->ResolveTexture(m_IrradianceMap));
     }
 
     // --- Pass 2: 预滤波环境图（5 mip，roughness = mip / 4）---
@@ -313,7 +313,7 @@ void GI_IBL::Render(rhi::IRHICommandList* cmd) {
         m_CachedMipViews.clear();
 
         struct alignas(16) IBLPush { float4x4 invVP; float roughness; float _pad[3]; } pc{};
-        cmd->SetPipeline(m_PrefilterPSO.get());
+        cmd->SetPipeline(m_Device->ResolvePipelineState(m_PrefilterPSO));
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_PrefilterSet);
 
         for (u32 mip = 0; mip < kPrefilterMips; ++mip) {
@@ -322,7 +322,7 @@ void GI_IBL::Render(rhi::IRHICommandList* cmd) {
 
             for (u32 face = 0; face < rhi::kCubemapFaceCount; ++face) {
                 void* mipView = m_Device->CreateTextureMipStorageView(
-                    m_PrefilterMap.get(), mip, face);  // RHI 统一接口：逐面逐 mip 视图
+                    m_Device->ResolveTexture(m_PrefilterMap), mip, face);  // RHI 统一接口：逐面逐 mip 视图
                 m_CachedMipViews.push_back(mipView);
 
                 float4x4 view  = CubeFaceViewMatrix(face);
@@ -345,13 +345,13 @@ void GI_IBL::Render(rhi::IRHICommandList* cmd) {
             rhi::PipelineStage::FragmentShader,
             rhi::ResourceState::RenderTarget,
             rhi::ResourceState::ShaderResource,
-            m_PrefilterMap.get());
+            m_Device->ResolveTexture(m_PrefilterMap));
     }
 
     // --- Pass 3: BRDF LUT ---
     {
-        cmd->SetPipeline(m_BRDF_LUT_PSO.get());
-        void* colorView = m_BRDF_LUT->GetNativeHandle();
+        cmd->SetPipeline(m_Device->ResolvePipelineState(m_BRDF_LUT_PSO));
+        void* colorView = m_Device->ResolveTexture(m_BRDF_LUT)->GetNativeHandle();
         cmd->BeginOffscreenPass(colorView, nullptr, kBRDF_LUT_Res, kBRDF_LUT_Res, nullptr);
         cmd->SetViewport({ 0, static_cast<float>(kBRDF_LUT_Res),
             static_cast<float>(kBRDF_LUT_Res), -static_cast<float>(kBRDF_LUT_Res),
@@ -366,7 +366,7 @@ void GI_IBL::Render(rhi::IRHICommandList* cmd) {
             rhi::PipelineStage::FragmentShader,
             rhi::ResourceState::RenderTarget,
             rhi::ResourceState::ShaderResource,
-            m_BRDF_LUT.get());
+            m_Device->ResolveTexture(m_BRDF_LUT));
     }
 
     m_Dirty = false;
