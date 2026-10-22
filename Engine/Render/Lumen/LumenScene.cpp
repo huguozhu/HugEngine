@@ -112,7 +112,7 @@ void LumenScene::OnResize(u32 width, u32 height) {
 }
 
 void LumenScene::CreateSkeletonPipeline() {
-    if (!m_Device || m_SkeletonPSO) return;
+    if (!m_Device || m_SkeletonPSO.IsValid()) return;
 
     rhi::ShaderBytecode vs, fs;
     vs.stage      = rhi::ShaderStage::Vertex;
@@ -138,20 +138,20 @@ void LumenScene::CreateSkeletonPipeline() {
     d.colorFormats[0]      = rhi::Format::RGBA16_FLOAT;
     d.pushConstantRanges   = {pcr};
     d.debugName            = "Lumen_Skeleton";
-    m_SkeletonPSO = m_Device->CreatePipelineState(d);
-    HE_ASSERT(m_SkeletonPSO, "LumenScene: 骨架 pass 的 PSO 创建失败");
+    m_SkeletonPSO = m_Device->CreatePipelineStateHandle(d);   // A-3
+    HE_ASSERT(m_SkeletonPSO.IsValid(), "LumenScene: 骨架 pass 的 PSO 创建失败");
 }
 
 void LumenScene::DestroySkeletonPipeline() {
-    m_SkeletonPSO.reset();
+    m_Device->DestroyPipelineStateHandle(m_SkeletonPSO); m_SkeletonPSO = {};
 }
 
 void LumenScene::PreBind(rhi::IRHICommandList* cmd) {
-    if (cmd && m_SkeletonPSO) cmd->SetPipeline(m_SkeletonPSO.get());
+    if (cmd && m_SkeletonPSO.IsValid()) cmd->SetPipeline(m_Device->ResolvePipelineState(m_SkeletonPSO));
 }
 
 void LumenScene::DrawSkeleton(rhi::IRHICommandList* cmd, float value, float alpha) {
-    if (!cmd || !m_SkeletonPSO) return;
+    if (!cmd || !m_SkeletonPSO.IsValid()) return;
     const float pc[2] = { value, alpha };
     cmd->SetPushConstants(0, sizeof(pc), pc);
     cmd->Draw(3);

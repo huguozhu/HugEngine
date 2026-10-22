@@ -158,7 +158,7 @@ bool LumenScene::AllocatePhysicalPage(u32 logicalPage, u32 frame) {
     return true;
 }
 void LumenScene::CreatePageCheckGPUObjects() {
-    if (m_PageCheckPSO) return;
+    if (m_PageCheckPSO.IsValid()) return;
 
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = {
@@ -184,8 +184,8 @@ void LumenScene::CreatePageCheckGPUObjects() {
     pso.descriptorSetLayouts = {m_PageCheckLayout};
     pso.pushConstantRanges   = {pcr};
     pso.debugName            = "Lumen_SurfaceCache_PageCheck";
-    m_PageCheckPSO = m_Device->CreatePipelineState(pso);
-    if (!m_PageCheckPSO) HE_CORE_ERROR("LumenScene: 页表校验 PSO 创建失败");
+    m_PageCheckPSO = m_Device->CreatePipelineStateHandle(pso);   // A-3
+    if (!m_PageCheckPSO.IsValid()) HE_CORE_ERROR("LumenScene: 页表校验 PSO 创建失败");
 }
 
 void LumenScene::StepSurfaceCache(rhi::IRHICommandList* cmd) {
@@ -208,7 +208,7 @@ void LumenScene::StepSurfaceCache(rhi::IRHICommandList* cmd) {
                                       m_PageCheckOut.get());
         m_PageCheckBound = true;
     }
-    if (!m_PageCheckPSO) { m_PageCheckDone = true; return; }
+    if (!m_PageCheckPSO.IsValid()) { m_PageCheckDone = true; return; }
 
     // 发射一次（读回要等几帧，故每帧都发也无妨；只在未完成时进入本函数）
     // 【为什么要等几帧】缓冲在"页表建好那一帧"才创建，先等 3 帧让资源落地再 dispatch，
@@ -218,7 +218,7 @@ void LumenScene::StepSurfaceCache(rhi::IRHICommandList* cmd) {
     if (++m_PageCheckFrame < 4) return;
 
     struct { u32 x, y, z, w; } pc{ m_PageTable.Size(), 0u, 0u, 0u };
-    cmd->SetPipeline(m_PageCheckPSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PageCheckPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_PageCheckSet);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     cmd->Dispatch(1, 1, 1);

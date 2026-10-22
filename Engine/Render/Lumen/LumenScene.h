@@ -239,7 +239,7 @@ private:
     std::unique_ptr<rhi::IRHITexture> m_Output;   // 屏幕空间输出（与视口同尺寸）
     std::unique_ptr<rhi::IRHISampler> m_OutputSampler;
     // 占位 pass 的管线状态（单颜色附件 RGBA16F、无深度）。不随视口尺寸变化，只建一次。
-    std::unique_ptr<rhi::IRHIPipelineState> m_SkeletonPSO;
+    rhi::RHIPipelineStateHandle m_SkeletonPSO{};   // A-3
     // 逐 mesh 距离场（步骤 8）
     LumenSDF m_SDF;
     // ── Surface Cache 页表（步骤 14）──
@@ -250,7 +250,7 @@ private:
     void* m_PageCheckOutMapped = nullptr;                // 持久映射（与 SDF 探针缓冲同做法）
     rhi::DescriptorSetLayoutHandle    m_PageCheckLayout = 0;
     rhi::DescriptorSetHandle          m_PageCheckSet    = 0;
-    std::unique_ptr<rhi::IRHIPipelineState> m_PageCheckPSO;
+    rhi::RHIPipelineStateHandle m_PageCheckPSO{};   // A-3
     bool m_PageCheckBound = false;
     u32  m_PageCheckFrame = 0;
     bool m_PageCheckDone = false;
