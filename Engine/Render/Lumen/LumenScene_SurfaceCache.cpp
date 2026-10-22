@@ -244,7 +244,7 @@ void LumenScene::StepSurfaceCache(rhi::IRHICommandList* cmd) {
 // 步骤 15：Card 捕获（atlas = 8×8 页 × 64×64 texel = 512×512，共 3 张）
 // ============================================================
 void LumenScene::CreateCaptureGPUObjects() {
-    if (m_CapturePSO) return;
+    if (m_CapturePSO.IsValid()) return;
 
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = {
@@ -281,8 +281,8 @@ void LumenScene::CreateCaptureGPUObjects() {
     pso.descriptorSetLayouts = {m_CaptureLayout};
     pso.pushConstantRanges   = {pcr};
     pso.debugName            = "Lumen_SurfaceCache_Capture";
-    m_CapturePSO = m_Device->CreatePipelineState(pso);
-    if (!m_CapturePSO) HE_CORE_ERROR("LumenScene: Card 捕获 PSO 创建失败");
+    m_CapturePSO = m_Device->CreatePipelineStateHandle(pso);   // A-3
+    if (!m_CapturePSO.IsValid()) HE_CORE_ERROR("LumenScene: Card 捕获 PSO 创建失败");
 
     const auto makeAtlas = [&]() {
         rhi::TextureDesc td;
@@ -321,7 +321,7 @@ void LumenScene::RunCardCapture(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbA
     if (m_PageTable.Size() == 0 || !gbAlbedo || !gbNormal || !gbDepth) return;
     if (!m_CaptureBound) {
         CreateCaptureGPUObjects();
-        if (!m_CapturePSO || !m_AtlasAlbedo) return;
+        if (!m_CapturePSO.IsValid() || !m_AtlasAlbedo) return;
         // 【步骤 37】atlas 三张（albedo/normal/emissive）是自持存储图像，创建点没有命令列表，
         // 故在首次捕获（第一次写入）之前转换一次（理由见 LumenSDF::BakeOne 的同一处说明）。
         if (!m_AtlasImagesTransitioned) {
@@ -451,7 +451,7 @@ void LumenScene::RunCardCapture(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbA
         pc.axis        = float4(axis, 0.0f);
         pc.marchParams = float4(steps, eps, step, 0.0f);
 
-        cmd->SetPipeline(m_CapturePSO.get());
+        cmd->SetPipeline(m_Device->ResolvePipelineState(m_CapturePSO));
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_CaptureSet);
         cmd->SetPushConstants(0, sizeof(pc), &pc);
         cmd->Dispatch(1, 1, 1);
@@ -1050,7 +1050,7 @@ void LumenScene::RunProbePlacement(rhi::IRHICommandList* cmd, rhi::IRHITexture* 
 // 步骤 16：Feedback（缺失页检测）—— 16×16 分块 → 请求列表 → CPU 排序 → 写回页表
 // ============================================================
 void LumenScene::CreateFeedbackGPUObjects() {
-    if (m_FeedbackPSO) return;
+    if (m_FeedbackPSO.IsValid()) return;
 
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = {
@@ -1078,8 +1078,8 @@ void LumenScene::CreateFeedbackGPUObjects() {
     pso.descriptorSetLayouts = {m_FeedbackLayout};
     pso.pushConstantRanges   = {pcr};
     pso.debugName            = "Lumen_SurfaceCache_Feedback";
-    m_FeedbackPSO = m_Device->CreatePipelineState(pso);
-    if (!m_FeedbackPSO) HE_CORE_ERROR("LumenScene: Feedback PSO 创建失败");
+    m_FeedbackPSO = m_Device->CreatePipelineStateHandle(pso);   // A-3
+    if (!m_FeedbackPSO.IsValid()) HE_CORE_ERROR("LumenScene: Feedback PSO 创建失败");
 }
 
 void LumenScene::RunFeedback(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbWorldPos, const float3& camPos) {
@@ -1088,7 +1088,7 @@ void LumenScene::RunFeedback(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbWorl
     if (m_PageTable.Size() == 0) return;
 
     CreateFeedbackGPUObjects();
-    if (!m_FeedbackPSO) return;
+    if (!m_FeedbackPSO.IsValid()) return;
 
     if (!m_FeedbackBound) {
         // 卡片清单（与 shader 的 FeedbackCard 同布局：aabbLo(w=边长) + axisDirPage(重要性)）
@@ -1286,7 +1286,7 @@ void LumenScene::RunFeedback(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbWorl
 
     const u32 tilesX = (m_Width + 15u) / 16u;
     const u32 tilesY = (m_Height + 15u) / 16u;
-    cmd->SetPipeline(m_FeedbackPSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_FeedbackPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_FeedbackSet);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     cmd->Dispatch((tilesX + 7u) / 8u, (tilesY + 7u) / 8u, 1);

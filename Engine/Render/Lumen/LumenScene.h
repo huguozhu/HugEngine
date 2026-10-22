@@ -290,7 +290,7 @@ private:
     void* m_CaptureFrameMapped = nullptr;
     rhi::DescriptorSetLayoutHandle m_CaptureLayout = 0;
     rhi::DescriptorSetHandle       m_CaptureSet    = 0;
-    std::unique_ptr<rhi::IRHIPipelineState> m_CapturePSO;
+    rhi::RHIPipelineStateHandle m_CapturePSO{};   // A-3
     bool m_CaptureBound = false;
     u32  m_CardCaptureHits = 0, m_CardCaptureMisses = 0;
     u32  m_PagesCapturedTotal = 0;      // 累计捕获页数（收敛曲线）
@@ -319,7 +319,7 @@ private:
     void* m_ReqMapped[kFeedbackSlots] = {nullptr, nullptr};
     rhi::DescriptorSetLayoutHandle m_FeedbackLayout = 0;
     rhi::DescriptorSetHandle       m_FeedbackSet    = 0;
-    std::unique_ptr<rhi::IRHIPipelineState> m_FeedbackPSO;
+    rhi::RHIPipelineStateHandle m_FeedbackPSO{};   // A-3
     bool m_FeedbackBound = false;
     u32  m_FeedbackFrame = 0;
     u32  m_FeedbackRequests = 0, m_FeedbackTopOverlap = 0, m_FeedbackTopCount = 0;
