@@ -250,7 +250,7 @@ private:
     SurfaceCachePageTable m_PageTable;
     bool m_PageTableBuilt = false;
     std::unique_ptr<rhi::IRHIBuffer>  m_PageTableBuf;    // GPU 侧镜像（StructuredBuffer）
-    std::unique_ptr<rhi::IRHIBuffer>  m_PageCheckOut;    // GPU 校验和（CPU 可读）
+    rhi::RHIBufferHandle  m_PageCheckOut{};    // A-3：GPU 校验和（CPU 可读）
     void* m_PageCheckOutMapped = nullptr;                // 持久映射（与 SDF 探针缓冲同做法）
     rhi::DescriptorSetLayoutHandle    m_PageCheckLayout = 0;
     rhi::DescriptorSetHandle          m_PageCheckSet    = 0;
@@ -290,7 +290,7 @@ private:
     rhi::RHITextureHandle m_AtlasAlbedo{}, m_AtlasNormal{}, m_AtlasEmissive{};   // A-3
     std::unique_ptr<rhi::IRHIBuffer>  m_CaptureStats;
     void* m_CaptureStatsMapped = nullptr;
-    std::unique_ptr<rhi::IRHIBuffer>  m_CaptureFrameBuf;      // 每帧常量（push constant 只有 128B 上限）
+    rhi::RHIBufferHandle  m_CaptureFrameBuf{};      // A-3：每帧常量（push constant 只有 128B 上限）
     void* m_CaptureFrameMapped = nullptr;
     rhi::DescriptorSetLayoutHandle m_CaptureLayout = 0;
     rhi::DescriptorSetHandle       m_CaptureSet    = 0;
@@ -317,7 +317,7 @@ private:
     /// 读到的内容取决于 GPU 当时写到哪了（实测同一配置两次运行请求数 8103/8115 不同），
     /// 这是一个**数据竞争**：算法没错，但读数不确定、画面也就不可复现。
     static constexpr u32 kFeedbackSlots = 2;
-    std::unique_ptr<rhi::IRHIBuffer>  m_CardBuf, m_ReqCountBuf;
+    rhi::RHIBufferHandle  m_CardBuf{}, m_ReqCountBuf{};   // A-3
     std::unique_ptr<rhi::IRHIBuffer>  m_ReqBuf[kFeedbackSlots];
     void* m_ReqCountMapped = nullptr;
     void* m_ReqMapped[kFeedbackSlots] = {nullptr, nullptr};

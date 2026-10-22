@@ -198,14 +198,14 @@ void LumenScene::StepSurfaceCache(rhi::IRHICommandList* cmd) {
         ob.size      = sizeof(u32);
         ob.usage     = rhi::BufferUsage::Storage;
         ob.cpuAccess = true;
-        m_PageCheckOut = m_Device->CreateBuffer(ob);
+        m_PageCheckOut = m_Device->CreateBufferHandle(ob);   // A-3
         // 持久映射：探测器那套"创建即 Map、之后只读写指针"的做法实测可靠；临时 Map 读不到 GPU 的写入
-        m_PageCheckOutMapped = m_PageCheckOut->Map();
+        m_PageCheckOutMapped = m_Device->ResolveBuffer(m_PageCheckOut)->Map();
 
         m_Device->UpdateDescriptorSet(m_PageCheckSet, 0, rhi::DescriptorType::StorageBuffer,
                                       m_PageTableBuf.get());
         m_Device->UpdateDescriptorSet(m_PageCheckSet, 1, rhi::DescriptorType::StorageBuffer,
-                                      m_PageCheckOut.get());
+                                      m_Device->ResolveBuffer(m_PageCheckOut));
         m_PageCheckBound = true;
     }
     if (!m_PageCheckPSO.IsValid()) { m_PageCheckDone = true; return; }
@@ -309,10 +309,10 @@ void LumenScene::CreateCaptureGPUObjects() {
     fb.size      = 10u * 16u;
     fb.usage     = rhi::BufferUsage::Storage;
     fb.cpuAccess = true;
-    m_CaptureFrameBuf = m_Device->CreateBuffer(fb);
-    m_CaptureFrameMapped = m_CaptureFrameBuf->Map();
+    m_CaptureFrameBuf = m_Device->CreateBufferHandle(fb);   // A-3
+    m_CaptureFrameMapped = m_Device->ResolveBuffer(m_CaptureFrameBuf)->Map();
     m_Device->UpdateDescriptorSet(m_CaptureSet, 10, rhi::DescriptorType::StorageBuffer,
-                                  m_CaptureFrameBuf.get());
+                                  m_Device->ResolveBuffer(m_CaptureFrameBuf));
 }
 
 void LumenScene::RunCardCapture(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbAlbedo,
@@ -1111,12 +1111,12 @@ void LumenScene::RunFeedback(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbWorl
         cb.size        = gpuCards.size() * sizeof(FeedbackCard);
         cb.usage       = rhi::BufferUsage::Storage;
         cb.initialData = gpuCards.data();
-        m_CardBuf = m_Device->CreateBuffer(cb);
+        m_CardBuf = m_Device->CreateBufferHandle(cb);   // A-3
 
         rhi::BufferDesc rcb;
         rcb.size = sizeof(u32); rcb.usage = rhi::BufferUsage::Storage; rcb.cpuAccess = true;
-        m_ReqCountBuf = m_Device->CreateBuffer(rcb);
-        m_ReqCountMapped = m_ReqCountBuf->Map();
+        m_ReqCountBuf = m_Device->CreateBufferHandle(rcb);   // A-3
+        m_ReqCountMapped = m_Device->ResolveBuffer(m_ReqCountBuf)->Map();
 
         rhi::BufferDesc rb;
         rb.size = (usize)kMaxFeedbackTiles * sizeof(u32) * 2u;
@@ -1128,8 +1128,8 @@ void LumenScene::RunFeedback(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbWorl
 
         m_Device->UpdateDescriptorSet(m_FeedbackSet, 0, rhi::DescriptorType::CombinedImageSampler,
                                       gbWorldPos, m_SDF.GetLinearSampler());
-        m_Device->UpdateDescriptorSet(m_FeedbackSet, 1, rhi::DescriptorType::StorageBuffer, m_CardBuf.get());
-        m_Device->UpdateDescriptorSet(m_FeedbackSet, 2, rhi::DescriptorType::StorageBuffer, m_ReqCountBuf.get());
+        m_Device->UpdateDescriptorSet(m_FeedbackSet, 1, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_CardBuf));
+        m_Device->UpdateDescriptorSet(m_FeedbackSet, 2, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ReqCountBuf));
         m_Device->UpdateDescriptorSet(m_FeedbackSet, 3, rhi::DescriptorType::StorageBuffer, m_ReqBuf[0].get());
         m_FeedbackBound = true;
         return;   // 本帧只建资源；下一帧开始派发（"新建资源当帧使用"的教训见 §附二十）
