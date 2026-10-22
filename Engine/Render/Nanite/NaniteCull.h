@@ -253,8 +253,8 @@ public:
     void OnResize(u32 width, u32 height);
 
     [[nodiscard]] bool IsReady() const {
-        return m_Device != nullptr && m_PSO != nullptr && m_InstanceCullPSO != nullptr
-            && m_BVHPSO != nullptr;   // 【任务 14】BVH 遍历的 compute 管线也必须建成
+        return m_Device != nullptr && m_PSO.IsValid() && m_InstanceCullPSO.IsValid()
+            && m_BVHPSO.IsValid();   // 【任务 14】BVH 遍历的 compute 管线也必须建成
     }
 
     /// 设置本帧假簇数量（超上限钳制）。由 `NaniteRenderer::AddPasses` 从
@@ -513,7 +513,7 @@ private:
     rhi::ShaderBytecode m_CS;   // Nanite_Cull.comp.spv
     rhi::DescriptorSetLayoutHandle m_Layout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_Set    = rhi::kInvalidSet;
-    std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
+    rhi::RHIPipelineStateHandle m_PSO{};   // A-3
 
     // ============================================================
     // §14.8 任务 13：实例剔除自持资源与状态
@@ -535,7 +535,7 @@ private:
     rhi::ShaderBytecode m_InstanceCullCS;   // Nanite_InstanceCull.comp.spv
     rhi::DescriptorSetLayoutHandle m_InstanceCullLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_InstanceCullSet    = rhi::kInvalidSet;
-    std::unique_ptr<rhi::IRHIPipelineState> m_InstanceCullPSO;
+    rhi::RHIPipelineStateHandle m_InstanceCullPSO{};   // A-3
 
     // ── 帧状态（CPU 侧；`RecordInstanceCullPass` 用它们做参考剔除）──
     NaniteFrustumPlanes m_FrameFrustum{};      // 本帧视锥（由 viewProj 提取）
@@ -636,7 +636,7 @@ private:
     rhi::ShaderBytecode m_BVHCS;   // Nanite_ClusterBVH.comp.spv
     rhi::DescriptorSetLayoutHandle m_BVHLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_BVHSet    = rhi::kInvalidSet;
-    std::unique_ptr<rhi::IRHIPipelineState> m_BVHPSO;
+    rhi::RHIPipelineStateHandle m_BVHPSO{};   // A-3
 
     // ============================================================
     // §14.8 任务 15：模块自持的 Hi-Z 金字塔构建（复用既有纹理与口径；为什么自建见头注释）
@@ -656,7 +656,7 @@ private:
     /// **每个目标 mip 一个专属描述符集**：这是本实现正确的关键 —— 各集合的每个绑定每帧只写一次，
     ///   因此不受"GPU 在执行期读描述符、最后一次主机写生效"这条次序规则影响。
     rhi::DescriptorSetHandle m_HiZBuildSets[kNaniteHiZBuildMaxViews] = { rhi::kInvalidSet };
-    std::unique_ptr<rhi::IRHIPipelineState> m_HiZBuildPSO;
+    rhi::RHIPipelineStateHandle m_HiZBuildPSO{};   // A-3
 };
 
 } // namespace he::render

@@ -214,8 +214,8 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     desc.pushConstantRanges   = { pc };
     desc.descriptorSetLayouts = { m_Layout };
     desc.debugName            = "NaniteCull";
-    m_PSO = m_Device->CreatePipelineState(desc);
-    if (!m_PSO) { HE_CORE_ERROR("NaniteCull: compute PSO 创建失败"); return false; }
+    m_PSO = m_Device->CreatePipelineStateHandle(desc);   // A-3
+    if (!m_PSO.IsValid()) { HE_CORE_ERROR("NaniteCull: compute PSO 创建失败"); return false; }
 
     // ── 3b. 【任务 13】实例剔除：5 个显式 SSBO 绑定 + compute PSO ──
     // 与任务 3 同样**不走 bindless**：模块私有缓冲、生命周期清晰，显式绑定最简单也最稳。
@@ -250,8 +250,8 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         cullDesc.pushConstantRanges   = { cullPc };
         cullDesc.descriptorSetLayouts = { m_InstanceCullLayout };
         cullDesc.debugName            = "NaniteInstanceCull";
-        m_InstanceCullPSO = m_Device->CreatePipelineState(cullDesc);
-        if (!m_InstanceCullPSO) { HE_CORE_ERROR("NaniteCull: 实例剔除 compute PSO 创建失败"); return false; }
+        m_InstanceCullPSO = m_Device->CreatePipelineStateHandle(cullDesc);
+        if (!m_InstanceCullPSO.IsValid()) { HE_CORE_ERROR("NaniteCull: 实例剔除 compute PSO 创建失败"); return false; }
     }
 
     // ── 1c. 【任务 14】cluster BVH 的自持缓冲（与任务 3/13 的链完全独立）──
@@ -443,8 +443,8 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         bvhDesc.pushConstantRanges   = { bvhPc };
         bvhDesc.descriptorSetLayouts = { m_BVHLayout };
         bvhDesc.debugName            = "NaniteClusterBVH";
-        m_BVHPSO = m_Device->CreatePipelineState(bvhDesc);
-        if (!m_BVHPSO) { HE_CORE_ERROR("NaniteCull: cluster BVH compute PSO 创建失败"); return false; }
+        m_BVHPSO = m_Device->CreatePipelineStateHandle(bvhDesc);
+        if (!m_BVHPSO.IsValid()) { HE_CORE_ERROR("NaniteCull: cluster BVH compute PSO 创建失败"); return false; }
     }
 
     // ── 3d. 【任务 15】模块自持的 Hi-Z 金字塔构建：布局 + **每目标 mip 一个描述符集** + PSO ──
@@ -484,8 +484,8 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         hizDesc.pushConstantRanges   = { hizPc };
         hizDesc.descriptorSetLayouts = { m_HiZBuildLayout };
         hizDesc.debugName            = "NaniteHiZDownsample";
-        m_HiZBuildPSO = m_Device->CreatePipelineState(hizDesc);
-        if (!m_HiZBuildPSO) { HE_CORE_ERROR("NaniteCull: Hi-Z 下采样 compute PSO 创建失败"); return false; }
+        m_HiZBuildPSO = m_Device->CreatePipelineStateHandle(hizDesc);
+        if (!m_HiZBuildPSO.IsValid()) { HE_CORE_ERROR("NaniteCull: Hi-Z 下采样 compute PSO 创建失败"); return false; }
     }
 
     // 初始清零（**只在启动时**：此时还没有任何已提交的 GPU 工作 ⇒ 主机写安全）
@@ -522,9 +522,9 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
 }
 
 void NaniteCull::Shutdown() {
-    m_PSO.reset();
-    m_InstanceCullPSO.reset();
-    m_BVHPSO.reset();
+    m_Device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};
+    m_Device->DestroyPipelineStateHandle(m_InstanceCullPSO); m_InstanceCullPSO = {};
+    m_Device->DestroyPipelineStateHandle(m_BVHPSO); m_BVHPSO = {};
     if (m_Device && m_Layout != rhi::kInvalidLayout)
         m_Device->DestroyDescriptorSetLayout(m_Layout);
     if (m_Device && m_InstanceCullLayout != rhi::kInvalidLayout)
@@ -574,7 +574,7 @@ void NaniteCull::Shutdown() {
     }
     m_HiZViewOwner = nullptr;
     m_HiZViewCount = 0u;
-    m_HiZBuildPSO.reset();
+    m_Device->DestroyPipelineStateHandle(m_HiZBuildPSO); m_HiZBuildPSO = {};
     m_HiZPlaceholderTex.reset();
     m_HiZSampler.reset();
     m_BVHData = NaniteClusterBVH{};
@@ -676,14 +676,14 @@ void NaniteCull::RecordCullPass(rhi::IRHICommandList* cmd) {
                          rhi::ResourceState::CopyDst,
                          rhi::ResourceState::UnorderedAccess | rhi::ResourceState::IndirectArgument);
 
-    if (!m_PSO) return;
+    if (!m_PSO.IsValid()) return;
     if (m_FakeClusterCount == 0) return;   // 0 簇 ⇒ 不派发，计数保持 0（绘制端也会画 0 条）
 
     NaniteCullParams pc{};
     pc.clusterCount          = m_FakeClusterCount;
     pc.vertexCountPerCluster = kNaniteFakeClusterIndexCount;
 
-    cmd->SetPipeline(m_PSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
 
@@ -894,7 +894,7 @@ void NaniteCull::RecordInstanceCullPass(rhi::IRHICommandList* cmd) {
         if (index < m_CpuVisibleMask.size()) m_CpuVisibleMask[index] = 1u;
     }
 
-    if (!cmd || !m_InstanceCullPSO) return;
+    if (!cmd || !m_InstanceCullPSO.IsValid()) return;
 
     // ── 【本任务最关键的一处同步】可见计数的"每帧清零"必须**在命令缓冲内**完成（GPU 有序）──
     //
@@ -927,7 +927,7 @@ void NaniteCull::RecordInstanceCullPass(rhi::IRHICommandList* cmd) {
     std::memcpy(m_InstanceCullParams.planes, m_FrameFrustum.planes, sizeof(m_FrameFrustum.planes));
     m_InstanceCullParams.instanceCount = m_TestInstanceCount;
 
-    cmd->SetPipeline(m_InstanceCullPSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_InstanceCullPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_InstanceCullSet);
     cmd->SetPushConstants(0, sizeof(m_InstanceCullParams), &m_InstanceCullParams);
 
@@ -1200,7 +1200,7 @@ u32 NaniteCull::CountOccludedClustersByMip(
 // 口径与失败条件下的说明写在 `NaniteCull.h` 的同名声明里；这里只留与代码逐句对应的短注释。
 u32 NaniteCull::BuildHiZPyramid(rhi::IRHICommandList* cmd, rhi::IRHITexture* pyramid,
                                 rhi::IRHITexture* depth, u32 screenW, u32 screenH) {
-    if (!cmd || !pyramid || !depth || !m_HiZBuildPSO) return 0u;
+    if (!cmd || !pyramid || !depth || !m_HiZBuildPSO.IsValid()) return 0u;
     const u32 mipCount = NaniteHiZPyramidMipCount(screenW, screenH);
     if (mipCount < 2u) return 0u;   // 没有可写的目标层 ⇒ 关闭（shader 的遮挡测试也要求 ≥ 2）
 
@@ -1208,7 +1208,7 @@ u32 NaniteCull::BuildHiZPyramid(rhi::IRHICommandList* cmd, rhi::IRHITexture* pyr
     const u32 writable = (m_HiZViewCount < mipCount - 1u) ? m_HiZViewCount : (mipCount - 1u);
     if (writable == 0u) return 0u;
 
-    cmd->SetPipeline(m_HiZBuildPSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_HiZBuildPSO));
     u32 srcW = screenW;
     u32 srcH = screenH;
     for (u32 level = 0u; level < writable; ++level) {
@@ -1287,7 +1287,7 @@ void NaniteCull::RecordCullChainPass(rhi::IRHICommandList* cmd,
     //   只写 [0, 计数)，任何时刻读到的 (计数, 列表) 对都来自同一次派发，不会撕裂。
     RecordInstanceCullPass(cmd);
 
-    if (!m_BVHReady || !m_BVHPSO) return;
+    if (!m_BVHReady || !m_BVHPSO.IsValid()) return;
 
     // 本帧实例域：与 CPU 参考、与可见簇引用表的容量口径**同一个钳制**
     m_BVHInstanceDomain = (m_TestInstanceCount < kNaniteMaxBVHInstances)
@@ -1391,7 +1391,7 @@ void NaniteCull::RecordCullChainPass(rhi::IRHICommandList* cmd,
     pc.nodeCount       = (u32)m_BVHData.nodes.size();
     pc.visibleCapacity = kNaniteMaxVisibleClusterRefs;
 
-    cmd->SetPipeline(m_BVHPSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_BVHPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_BVHSet);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
 
