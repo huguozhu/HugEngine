@@ -12,7 +12,8 @@
 #include "RHI/RHI.h"
 #include "RHI/FramePresenter.h"   // L4-1：帧外壳（acquire/present）收口
 #include "Debug/FrameDumpRecorder.h"
-#include "Debug/PixelProbe.h"      // 白炉探针（像素数值读回）
+#include "Debug/PixelProbe.h"	// 白炉探针（像素数值读回）
+#include "CameraInput.h"   		// 样例共用：鼠标/键盘控制相机      
 #include "RHI/ThreadAffinity.h"   // T2.2：渲染线程启动钩子里认领 RHI 归属（GetThreadAffinity）
 #include "Pipeline/DeferredPipeline.h"
 #include "Pipeline/ForwardPipeline.h"
@@ -866,55 +867,21 @@ int main() {
         };
 
 
-        // --- 相机控制（鼠标右键拖拽旋转 / WASD+EQ 移动 / T 切换相机动画）---
-        // 【回归修复】这段在 `da57916`（把帧体拆成两条渲染命令）时被整段丢失，导致鼠标与键盘都无法
-        // 操作相机。它属于**游戏线程的帧前准备**（必须在装配快照之前更新相机），因此放在这里：
-        // acquire 已在命令 1 里、与输入无关，故输入直接前置即可。
-        // --- 相机控制 ---
-        {
-            bool mouseDown = glfwGetMouseButton(glfwWin, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
-            if (mouseDown && !rightMouseDown) {
-                rightMouseDown = true;
-                glfwGetCursorPos(glfwWin, &lastMouseX, &lastMouseY);
-                glfwSetInputMode(glfwWin, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-            } else if (!mouseDown && rightMouseDown) {
-                rightMouseDown = false;
-                glfwSetInputMode(glfwWin, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-            } else if (mouseDown && rightMouseDown) {
-                double cx, cy;
-                glfwGetCursorPos(glfwWin, &cx, &cy);
-                float dx = static_cast<float>(cx - lastMouseX);
-                float dy = static_cast<float>(cy - lastMouseY);
-                lastMouseX = cx;
-                lastMouseY = cy;
-                camCtrl.Rotate(dx * 0.003f, -dy * 0.003f);
+        // --- 相机控制（鼠标右键拖拽旋转 / WASD+EQ 移动 / T 切换动画相机）---
+        // 轮询与状态机统一在 Samples/Common/CameraInput.h（六个样例共用，手感一致）；
+        // 这里只保留样例自己的策略：T 键在"动画相机 / 手动相机"之间切换。
+        // 动画相机模式：先让 AnimationComponent 覆盖位置/朝向，再让输入叠加（与旧顺序一致）。
+        if (animCameraMode && camAnim->playing) {
+            if (auto* camTf = world.GetComponent<TransformComponent>(camAnimEntity)) {
+                camCtrl.SetPosition(camTf->position);
+                const float3 toOrigin = glm::normalize(float3(0, 200, 0) - camTf->position);
+                camCtrl.SetOrientationFromForward(toOrigin);
             }
-
-            // T 键切换动画/手动相机模式
-            static bool tWasDown = false;
-            bool tDown = glfwGetKey(glfwWin, GLFW_KEY_T) == GLFW_PRESS;
-            if (tDown && !tWasDown) animCameraMode = !animCameraMode;
-            tWasDown = tDown;
-
-            // 动画相机模式：动画播放时同步 AnimationComponent 的位置
-            if (animCameraMode && camAnim->playing) {
-                auto* camTf = world.GetComponent<TransformComponent>(camAnimEntity);
-                if (camTf) {
-                    camCtrl.SetPosition(camTf->position);
-                    float3 toOrigin = glm::normalize(float3(0, 200, 0) - camTf->position);
-                    camCtrl.SetOrientationFromForward(toOrigin);
-                }
-            }
-
-            render::CameraController::MoveInput moveIn;
-            moveIn.forward  = glfwGetKey(glfwWin, GLFW_KEY_W) == GLFW_PRESS;
-            moveIn.backward = glfwGetKey(glfwWin, GLFW_KEY_S) == GLFW_PRESS;
-            moveIn.left     = glfwGetKey(glfwWin, GLFW_KEY_A) == GLFW_PRESS;
-            moveIn.right    = glfwGetKey(glfwWin, GLFW_KEY_D) == GLFW_PRESS;
-            moveIn.up       = glfwGetKey(glfwWin, GLFW_KEY_E) == GLFW_PRESS;
-            moveIn.down     = glfwGetKey(glfwWin, GLFW_KEY_Q) == GLFW_PRESS;
-            moveIn.sprint   = glfwGetKey(glfwWin, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
-            camCtrl.Update(deltaTime, moveIn);
+        }
+        static he::samples::CameraInput camInput;   // 跨帧保存右键/光标/切换键状态
+        if (camInput.Update(glfwWin, camCtrl, deltaTime, {.toggleKey = GLFW_KEY_T})) {
+            animCameraMode = !animCameraMode;
+            camInput.Reset();   // 切回手动时丢弃过期的光标坐标，避免视角跳一下
         }
 
         // Transform 动画更新（驱动 AnimationComponent → TransformComponent）
