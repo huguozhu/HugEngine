@@ -64,7 +64,9 @@ public:
     void EndFrame() { m_HistorySlot ^= 1; }
 
     // ── 访问器 ──
-    rhi::IRHIBuffer* GetFinalReservoir() const { return m_Final.get(); }
+    rhi::IRHIBuffer* GetFinalReservoir() const {   // A-3：句柄按需解析
+        return m_Device ? m_Device->ResolveBuffer(m_Final) : nullptr;
+    }
     u32 GetWidth()  const { return m_Width; }
     u32 GetHeight() const { return m_Height; }
     bool IsValid()  const { return m_Ready; }
@@ -91,13 +93,13 @@ private:
     ComputePipe m_Spatial;   // 空间复用
 
     // 蓄水池 SSBO（PTReservoir × W×H，32B/个）
-    std::unique_ptr<rhi::IRHIBuffer> m_Initial;            // InitialReservoir
-    std::unique_ptr<rhi::IRHIBuffer> m_TemporalBuf[2];     // TemporalReservoir（双缓冲）
-    std::unique_ptr<rhi::IRHIBuffer> m_Final;              // FinalReservoir（PT 下帧读）
+    rhi::RHIBufferHandle m_Initial{};            // A-3：InitialReservoir
+    rhi::RHIBufferHandle m_TemporalBuf[2]{};     // A-3：TemporalReservoir（双缓冲）
+    rhi::RHIBufferHandle m_Final{};              // A-3：FinalReservoir（PT 下帧读）
 
     // 历史纹理（双缓冲：读 slot A / 写 slot B，EndFrame 交换）
-    std::unique_ptr<rhi::IRHITexture> m_HistDepth[2];      // 历史深度 R32_FLOAT
-    std::unique_ptr<rhi::IRHITexture> m_HistNormal[2];     // 历史法线 RGBA16_FLOAT
+    rhi::RHITextureHandle m_HistDepth[2]{};      // A-3：历史深度 R32_FLOAT
+    rhi::RHITextureHandle m_HistNormal[2]{};     // A-3：历史法线 RGBA16_FLOAT
     u32 m_HistorySlot = 0;
 };
 
