@@ -331,7 +331,7 @@ private:
     void* m_TileDevMapped = nullptr;
     rhi::DescriptorSetLayoutHandle m_ProbeLayout = 0;
     rhi::DescriptorSetHandle       m_ProbeSet    = 0;
-    std::unique_ptr<rhi::IRHIPipelineState> m_ProbePSO;
+    rhi::RHIPipelineStateHandle m_ProbePSO{};   // A-3
     bool m_ProbeBound = false;
     u32  m_ProbeFrame = 0;
     u32  m_ProbeCount = 0, m_ProbeTilesFlat = 0, m_ProbeTilesTotal = 0;
@@ -365,7 +365,7 @@ private:
     void* m_SHStatsMapped = nullptr;
     rhi::DescriptorSetLayoutHandle m_SHLayout = 0;
     rhi::DescriptorSetHandle       m_SHSet    = 0;
-    std::unique_ptr<rhi::IRHIPipelineState> m_SHPSO;
+    rhi::RHIPipelineStateHandle m_SHPSO{};   // A-3
     bool m_SHBound = false;
     u32  m_SHFrame = 0;
     u32  m_SHProbes = 0, m_SHRays = 0, m_SHIrradianceSamples = 0;

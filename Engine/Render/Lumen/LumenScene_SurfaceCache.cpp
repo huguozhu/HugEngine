@@ -912,7 +912,7 @@ void LumenScene::RunProbeTrace(rhi::IRHICommandList* cmd) {
 // "阈值 → 探针数"曲线（证明单调性，不必反复重跑）。
 // ============================================================
 void LumenScene::CreateProbeGPUObjects() {
-    if (m_ProbePSO) return;
+    if (m_ProbePSO.IsValid()) return;
 
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = {
@@ -942,8 +942,8 @@ void LumenScene::CreateProbeGPUObjects() {
     pso.descriptorSetLayouts = {m_ProbeLayout};
     pso.pushConstantRanges   = {pcr};
     pso.debugName            = "Lumen_ScreenProbe_Gather";
-    m_ProbePSO = m_Device->CreatePipelineState(pso);
-    if (!m_ProbePSO) HE_CORE_ERROR("LumenScene: Screen Probe 布置 PSO 创建失败");
+    m_ProbePSO = m_Device->CreatePipelineStateHandle(pso);   // A-3
+    if (!m_ProbePSO.IsValid()) HE_CORE_ERROR("LumenScene: Screen Probe 布置 PSO 创建失败");
 }
 
 void LumenScene::RunProbePlacement(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbNormal,
@@ -952,7 +952,7 @@ void LumenScene::RunProbePlacement(rhi::IRHICommandList* cmd, rhi::IRHITexture* 
 
     if (!m_ProbeBound) {
         CreateProbeGPUObjects();
-        if (!m_ProbePSO) return;
+        if (!m_ProbePSO.IsValid()) return;
         rhi::BufferDesc pb;
         pb.size = (usize)kMaxScreenProbes * sizeof(ScreenProbe);
         pb.usage = rhi::BufferUsage::Storage;
@@ -1039,7 +1039,7 @@ void LumenScene::RunProbePlacement(rhi::IRHICommandList* cmd, rhi::IRHITexture* 
     const u32 cellsY = (m_Height + 15u) / 16u;
     pc.x = m_Width; pc.y = m_Height; pc.z = kMaxScreenProbes; pc.w = cellsX * cellsY;
     pc.merge = float4(m_MergeNormalCos, 16.0f, 0.0f, 0.0f);
-    cmd->SetPipeline(m_ProbePSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_ProbePSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_ProbeSet);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     cmd->Dispatch((tilesX + 7u) / 8u, (tilesY + 7u) / 8u, 1);
@@ -1297,7 +1297,7 @@ void LumenScene::RunFeedback(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbWorl
 // 步骤 23：探针 SH 投影（4 系数 × RGB 写回 ScreenProbe）
 // ============================================================
 void LumenScene::CreateSHGPUObjects() {
-    if (m_SHPSO) return;
+    if (m_SHPSO.IsValid()) return;
 
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = {
@@ -1327,8 +1327,8 @@ void LumenScene::CreateSHGPUObjects() {
     pso.descriptorSetLayouts = {m_SHLayout};
     pso.pushConstantRanges   = {pcr};
     pso.debugName            = "Lumen_ScreenProbe_SHProject";
-    m_SHPSO = m_Device->CreatePipelineState(pso);
-    if (!m_SHPSO) HE_CORE_ERROR("LumenScene: 探针 SH 投影 PSO 创建失败");
+    m_SHPSO = m_Device->CreatePipelineStateHandle(pso);   // A-3
+    if (!m_SHPSO.IsValid()) HE_CORE_ERROR("LumenScene: 探针 SH 投影 PSO 创建失败");
 }
 
 void LumenScene::RunScreenProbeSHProject(rhi::IRHICommandList* cmd, bool furnace) {
@@ -1336,7 +1336,7 @@ void LumenScene::RunScreenProbeSHProject(rhi::IRHICommandList* cmd, bool furnace
 
     if (!m_SHBound) {
         CreateSHGPUObjects();
-        if (!m_SHPSO) return;
+        if (!m_SHPSO.IsValid()) return;
         rhi::BufferDesc ib;
         ib.size  = (usize)kMaxScreenProbes * sizeof(float4);
         ib.usage = rhi::BufferUsage::Storage; ib.cpuAccess = true;
@@ -1429,7 +1429,7 @@ void LumenScene::RunScreenProbeSHProject(rhi::IRHICommandList* cmd, bool furnace
     pc.w = furnace ? 1u : 0u;
     pc.mx = kSampleModeUniformHemisphere;
     ComputeBarrier(cmd);   // 等"着色 pass 写每光线辐射度"落地
-    cmd->SetPipeline(m_SHPSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_SHPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_SHSet);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     cmd->Dispatch((m_ProbeCount + 63u) / 64u, 1, 1);
