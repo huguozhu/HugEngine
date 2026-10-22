@@ -150,7 +150,7 @@ void AA_SMAA::Render(rhi::IRHICommandList* cmd) {
 
     // ── Pass 1: Edge Detection → m_EdgeTex ──
     {
-        cmd->SetPipeline(m_Device->ResolvePipelineState(m_EdgePSO));
+        cmd->SetPipeline(ResP(m_EdgePSO));
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_EdgeSet);
         cmd->SetViewport({0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1});
         cmd->SetScissor({0, 0, m_Width, m_Height});
@@ -165,7 +165,7 @@ void AA_SMAA::Render(rhi::IRHICommandList* cmd) {
         edgeClr.color[1] = 0.0f;
         edgeClr.color[2] = 0.0f;
         edgeClr.color[3] = 0.0f;
-        cmd->BeginOffscreenPass(m_Device->ResolveTexture(m_EdgeTex)->GetNativeHandle(), nullptr,
+        cmd->BeginOffscreenPass(ResT(m_EdgeTex)->GetNativeHandle(), nullptr,
             m_Width, m_Height, &edgeClr, false);
         cmd->Draw(3);  // 全屏三角形
         cmd->EndOffscreenPass();
@@ -177,16 +177,16 @@ void AA_SMAA::Render(rhi::IRHICommandList* cmd) {
         rhi::PipelineStage::FragmentShader,
         rhi::ResourceState::RenderTarget,
         rhi::ResourceState::ShaderResource,
-        m_Device->ResolveTexture(m_EdgeTex));
+        ResT(m_EdgeTex));
 
     // ── Pass 2: Blending Weight Calculation → m_BlendTex ──
     {
         // 更新描述符：binding 0 = 边缘纹理（Point 采样）
         m_Device->UpdateDescriptorSet(m_BlendSet, kSMAABlendBindInput,
             rhi::DescriptorType::CombinedImageSampler,
-            m_Device->ResolveTexture(m_EdgeTex), m_Device->ResolveSampler(m_PointSampler));
+            ResT(m_EdgeTex), m_Device->ResolveSampler(m_PointSampler));
 
-        cmd->SetPipeline(m_Device->ResolvePipelineState(m_BlendPSO));
+        cmd->SetPipeline(ResP(m_BlendPSO));
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_BlendSet);
         cmd->SetViewport({0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1});
         cmd->SetScissor({0, 0, m_Width, m_Height});
@@ -201,7 +201,7 @@ void AA_SMAA::Render(rhi::IRHICommandList* cmd) {
         blendClr.color[1] = 0.0f;
         blendClr.color[2] = 0.0f;
         blendClr.color[3] = 0.0f;
-        cmd->BeginOffscreenPass(m_Device->ResolveTexture(m_BlendTex)->GetNativeHandle(), nullptr,
+        cmd->BeginOffscreenPass(ResT(m_BlendTex)->GetNativeHandle(), nullptr,
             m_Width, m_Height, &blendClr, false);
         cmd->Draw(3);
         cmd->EndOffscreenPass();
@@ -213,7 +213,7 @@ void AA_SMAA::Render(rhi::IRHICommandList* cmd) {
         rhi::PipelineStage::FragmentShader,
         rhi::ResourceState::RenderTarget,
         rhi::ResourceState::ShaderResource,
-        m_Device->ResolveTexture(m_BlendTex));
+        ResT(m_BlendTex));
 }
 
 // ============================================================
@@ -231,9 +231,9 @@ void AA_SMAA::RenderFinalPass(rhi::IRHICommandList* cmd) {
     // binding 1 = 混合权重纹理（Point 采样）
     m_Device->UpdateDescriptorSet(m_NeighborSet, kSMAANeighborBindBlend,
         rhi::DescriptorType::CombinedImageSampler,
-        m_Device->ResolveTexture(m_BlendTex), m_Device->ResolveSampler(m_PointSampler));
+        ResT(m_BlendTex), m_Device->ResolveSampler(m_PointSampler));
 
-    cmd->SetPipeline(m_Device->ResolvePipelineState(m_NeighborPSO));
+    cmd->SetPipeline(ResP(m_NeighborPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_NeighborSet);
     cmd->SetViewport({0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1});
     cmd->SetScissor({0, 0, m_Width, m_Height});

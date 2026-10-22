@@ -49,7 +49,7 @@ bool AA_TAA::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
 
     // 绑定 uniform buffer 到描述符（内容每帧 Map/Unmap 更新）
     device->UpdateDescriptorSet(m_DescSet, kTAABindUniforms, rhi::DescriptorType::UniformBuffer,
-                                m_Device->ResolveBuffer(m_UniformBuffer));
+                                ResB(m_UniformBuffer));
 
     // 历史缓冲
     CreateHistoryTextures(width, height);
@@ -195,12 +195,12 @@ void AA_TAA::UpdateUniforms(const float4x4& prevViewProj,
     uniforms.blendFactor     = (m_FrameIndex <= 1) ? 1.0f : 0.1f; // 10% 当前帧加速收敛
     uniforms.unused          = 0.0f;
 
-    auto* ub     = m_Device->ResolveBuffer(m_UniformBuffer);
+    auto* ub     = ResB(m_UniformBuffer);
     HE_ASSERT(ub, "AA_TAA: TAA UBO 句柄解析失败");
     void* mapped = ub ? ub->Map() : nullptr;
     if (mapped) {
         memcpy(mapped, &uniforms, sizeof(uniforms));
-        if (auto* ubu = m_Device->ResolveBuffer(m_UniformBuffer)) ubu->Unmap();
+        if (auto* ubu = ResB(m_UniformBuffer)) ubu->Unmap();
     }
 }
 
@@ -222,7 +222,7 @@ void AA_TAA::OnBeginFrame() {
 }
 
 rhi::IRHITexture* AA_TAA::GetOutputTexture() const {
-    return m_Device->ResolveTexture(m_HistoryColor[m_HistoryRead]);
+    return ResT(m_HistoryColor[m_HistoryRead]);
 }
 
 rhi::IRHISampler* AA_TAA::GetOutputSampler() const {
@@ -234,9 +234,9 @@ void AA_TAA::Render(rhi::IRHICommandList* cmd) {
 
     // 更新 history 纹理绑定到当前 read buffer
     m_Device->UpdateDescriptorSet(m_DescSet, kTAABindHistoryColor, rhi::DescriptorType::CombinedImageSampler,
-                                  m_Device->ResolveTexture(m_HistoryColor[m_HistoryRead]), m_Device->ResolveSampler(m_HistorySampler));
+                                  ResT(m_HistoryColor[m_HistoryRead]), m_Device->ResolveSampler(m_HistorySampler));
 
-    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
+    cmd->SetPipeline(ResP(m_PSO));
     cmd->SetViewport({0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1});
     cmd->SetScissor({0, 0, m_Width, m_Height});
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSet);
@@ -246,7 +246,7 @@ void AA_TAA::Render(rhi::IRHICommandList* cmd) {
     cmd->SetPushConstants(0, sizeof(pc), &pc);
 
     // 在 render pass 内执行 TAA resolve 绘制（自拥有输出纹理，无深度）
-    cmd->BeginOffscreenPass(m_Device->ResolveTexture(m_HistoryColor[m_HistoryWrite])->GetNativeHandle(),
+    cmd->BeginOffscreenPass(ResT(m_HistoryColor[m_HistoryWrite])->GetNativeHandle(),
                             nullptr, m_Width, m_Height, nullptr, false);
     // 全屏三角形
     cmd->Draw(3);
