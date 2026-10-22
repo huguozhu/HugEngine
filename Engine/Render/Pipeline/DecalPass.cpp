@@ -221,7 +221,7 @@ void DecalPass::Render(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snap
     }
 
     // 2. 起 render pass：SetPipeline 决定 render pass（Load 版本 + 8 附件 + 无深度）
-    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
+    cmd->SetPipeline(ResP(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
 
     void* colorViews[kGBufferAttachmentCount] = {
@@ -285,8 +285,8 @@ void DecalPass::Render(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snap
         snprintf(label, sizeof(label), "Decal Project #%u", m_LastDecalCount);
         cmd->SetDrawDebugLabel(label);
         cmd->SetPushConstants(0, sizeof(pcs), &pcs);
-        cmd->SetVertexBuffer(m_Device->ResolveBuffer(m_CubeVB), 0);
-        cmd->SetIndexBuffer(m_Device->ResolveBuffer(m_CubeIB));
+        cmd->SetVertexBuffer(ResB(m_CubeVB), 0);
+        cmd->SetIndexBuffer(ResB(m_CubeIB));
         cmd->DrawIndexed(36, 1, 0, 0);
 
         // 首帧打印逐贴花参数：贴花盒必须**包住**要贴的表面，参数错位时这里是第一现场
