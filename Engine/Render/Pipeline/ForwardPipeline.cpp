@@ -611,11 +611,11 @@ void ForwardPipeline::CollectLights(PushConstantData& pc)
 
     // 一次性上传（旧实现是每个光源 Map/Unmap 一次，写入内容相同）
     {
-        GPULight* lights = static_cast<GPULight*>(m_Device->ResolveBuffer(m_LightBuffers[RenderFrameSlot()])->Map());
+        GPULight* lights = static_cast<GPULight*>(ResB(m_LightBuffers[RenderFrameSlot()])->Map());
         if (lights) {
             for (u32 i = 0; i < lightCount; ++i) lights[i] = FrameSnap().lights[i].ToGpu();
         }
-        if (auto* lbu = m_Device->ResolveBuffer(m_LightBuffers[RenderFrameSlot()])) lbu->Unmap();
+        if (auto* lbu = ResB(m_LightBuffers[RenderFrameSlot()])) lbu->Unmap();
     }
 
     // 无光源时提供默认方向光
@@ -625,9 +625,9 @@ void ForwardPipeline::CollectLights(PushConstantData& pc)
         gl.colorIntensity = float4(1.0f, 0.95f, 0.85f, 5.0f);
         gl.directionType  = float4(0.5f, -1.0f, 1.0f, 0.0f);
         gl.shadowIndex    = -1;
-        GPULight* lights = static_cast<GPULight*>(m_Device->ResolveBuffer(m_LightBuffers[RenderFrameSlot()])->Map());
+        GPULight* lights = static_cast<GPULight*>(ResB(m_LightBuffers[RenderFrameSlot()])->Map());
         if (lights) lights[0] = gl;
-        if (auto* lbu = m_Device->ResolveBuffer(m_LightBuffers[RenderFrameSlot()])) lbu->Unmap();
+        if (auto* lbu = ResB(m_LightBuffers[RenderFrameSlot()])) lbu->Unmap();
     }
 }
 
@@ -660,7 +660,7 @@ void ForwardPipeline::UploadMaterialBindless() {
         HE_ASSERT(m_MaterialBuffer.IsValid(), "ForwardPipeline: 材质 SSBO 句柄创建失败");
         m_MaterialCount  = newCount;
         // 注册到 bindless 堆（binding 30 = u_Materials[]；当前仅 1 个材质 buffer → handle=0）
-        u32 handle = m_Device->GetBindlessHeap()->RegisterBuffer(m_Device->ResolveBuffer(m_MaterialBuffer));
+        u32 handle = m_Device->GetBindlessHeap()->RegisterBuffer(ResB(m_MaterialBuffer));
         HE_CORE_INFO("ForwardPipeline: 上传 {} 个材质到 bindless SSBO (handle={})", newCount, handle);
     }
 }
@@ -678,8 +678,8 @@ void ForwardPipeline::BeginHDRPass(rhi::IRHICommandList* cmd, u32 width, u32 hei
     cmd->SetPipeline(m_PBR_PSO.get());
 
     // 取**本飞行帧槽位**那一份颜色/深度（每帧清空+重画，见 m_HDRTarget 注释）
-    void* colorView = m_Device->ResolveTexture(m_HDRTarget[RenderFrameSlot()])->GetNativeHandle();
-    void* depthView = m_Device->ResolveTexture(m_HDRDepth[RenderFrameSlot()])->GetNativeHandle();
+    void* colorView = ResT(m_HDRTarget[RenderFrameSlot()])->GetNativeHandle();
+    void* depthView = ResT(m_HDRDepth[RenderFrameSlot()])->GetNativeHandle();
 
     rhi::ClearValue clear{};
     clear.depth = 1.0f;
@@ -703,7 +703,7 @@ void ForwardPipeline::EndHDRPass(rhi::IRHICommandList* cmd) {
         rhi::PipelineStage::FragmentShader,
         rhi::ResourceState::RenderTarget,
         rhi::ResourceState::ShaderResource,
-        m_Device->ResolveTexture(m_HDRTarget[RenderFrameSlot()]));
+        ResT(m_HDRTarget[RenderFrameSlot()]));
 
     // 预设 ToneMap PSO 为下一个 RenderPass 的初始管线（匹配 SwapChain 实际颜色格式：SDR=BGRA8，HDR=A2B10G10R10）
     if (m_ToneMap) m_ToneMap->PreBind(cmd);
@@ -794,7 +794,7 @@ void ForwardPipeline::RenderToneMapPass(rhi::IRHICommandList* cmd) {
     if (m_ToneMap) {
         // HDR 目标按飞行帧轮换 ⇒ 输入集也要按槽位（见 ToneMapPass::SetFrameSlot）
         m_ToneMap->SetFrameSlot(RenderFrameSlot());
-        m_ToneMap->SetInput(m_Device->ResolveTexture(m_HDRTarget[RenderFrameSlot()]), m_HDRSampler.get());
+        m_ToneMap->SetInput(ResT(m_HDRTarget[RenderFrameSlot()]), m_HDRSampler.get());
         m_ToneMap->Render(cmd);
     }
 }
@@ -969,7 +969,7 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, const FrameSceneSnapshot
     if (m_AntiAliasing && m_AntiAliasing->IsEnabled() && m_AntiAliasing->GetMode() != AAMode::None) {
         // 【T2.6】有上下文时走上下文解析（唯一 RHI 出口），否则回退 m_Device
         rhi::IRHITexture* hdrTex = m_FrameCtx ? m_FrameCtx->ResolveTexture(m_HDRTarget[RenderFrameSlot()])
-                                              : m_Device->ResolveTexture(m_HDRTarget[RenderFrameSlot()]);
+                                              : ResT(m_HDRTarget[RenderFrameSlot()]);
         m_AntiAliasing->SetInput(hdrTex, m_HDRSampler.get());
         m_AntiAliasing->Render(cmd);
     }
@@ -1006,7 +1006,7 @@ void ForwardPipeline::RunGPUCulling(rhi::IRHICommandList* cmd, const CameraData&
 
     // 3) 绑定 GPUScene SSBO / HDR 深度 → Dispatch Compute
     m_GPUCulling.SetSceneBuffer(m_Device, m_GPUScene.GetObjectBuffer());
-    if (m_HDRDepth[RenderFrameSlot()].IsValid()) m_GPUCulling.SetDepthTexture(m_Device, m_Device->ResolveTexture(m_HDRDepth[RenderFrameSlot()]),
+    if (m_HDRDepth[RenderFrameSlot()].IsValid()) m_GPUCulling.SetDepthTexture(m_Device, ResT(m_HDRDepth[RenderFrameSlot()]),
                                                  m_HDRWidth, m_HDRHeight);
     m_GPUCulling.Dispatch(cmd, camera.GetViewProjMatrix(), m_GPUScene.GetObjectCount(),
                           m_HDRWidth, m_HDRHeight);
@@ -1077,7 +1077,7 @@ void ForwardPipeline::RenderScene(rhi::IRHICommandList* cmd, const CameraData& c
 
     // SceneRenderer 准备所有 draw items（阶段 1 §15.1 第②段：改吃快照，不再遍历世界）
     auto allDrawItems = m_SceneRenderer->Prepare(FrameSnap(), camera,
-                                                 m_Device->ResolveBuffer(m_ObjectBuffers[RenderFrameSlot()]));
+                                                 ResB(m_ObjectBuffers[RenderFrameSlot()]));
 
     // GPU 剔除后过滤：构建可见 draw 列表
     std::vector<DrawItem> filteredItems;
