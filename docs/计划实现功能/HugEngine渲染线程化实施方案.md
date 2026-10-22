@@ -2667,3 +2667,42 @@ T2.6 判为**部分完成**：出口已就位（19.1），搬迁按 19.3 的配�
 **已迁移（帧内路径）**：`ForwardPipeline`(13)、`DeferredPipeline`(2)、`GBufferRenderer`(41)、
 `LightingPass`(25)、`DecalPass`(3)、AA 三类(17)、阴影四技术(17)、GI 五组件(37) ⇒ **合计 155 处**。
 
+### 19.6 为什么 `m_Device` 回退必须保留（④ 的实证结论，2026-10-22）
+
+T2.6 最后一步（删除 helper 里的 `m_Device` 回退，使设备**只能**经上下文访问）已实测，结论是
+**不该做**，理由有调用栈为证：
+
+```
+#0 he::rhi::VulkanBuffer::GetHandle            VulkanResources.h:32
+#1 he::rhi::VulkanDevice::UpdateDescriptorSet VulkanDevice_Descriptors.cpp:203
+#2 he::render::LightingPass::CreatePSOAndDescriptorSet  LightingPass.cpp:309
+#3 he::render::LightingPass::Initialize        LightingPass.cpp:26
+#4 he::render::DeferredPipeline::Initialize    DeferredPipeline.cpp:74
+异常码 0xC0000005 EXCEPTION_ACCESS_VIOLATION
+```
+
+崩溃发生在 **`Initialize` → `CreatePSOAndDescriptorSet`**：那是**创建期**，此时
+
+* 渲染线程还没泵过任何一帧 ⇒ 线程局部上下文为空；
+* pass 自己的 `m_FrameCtx` 也还是空（没人调 `SetFrameContext`）。
+
+于是删掉回退后 `ResT(...)` 返回 `nullptr`，`UpdateDescriptorSet` 直接解引用空缓冲 ⇒ 崩溃。
+
+**结论**：`RenderThreadContext` 的定位应当被精确表述为
+
+> **帧内** RHI 调用（解析/提交）的唯一出口；**创建期**沿用 `Initialize(device)` 拿到的设备指针。
+
+这与 §19.5（`GI_IBL`/`GI_RSM`/`DDGITracePass` 等"创建期直连设备是正确的"）是同一个道理，
+只是这次是从失败方向验证的。
+
+**因此 T2.6 的最终形态是"上下文优先 + 设备回退"**：
+
+```cpp
+const RenderThreadContext* c = m_FrameCtx ? m_FrameCtx : GetFrameContext();
+if (c) return c->ResolveTexture(h);              // 帧内：走唯一出口
+return m_Device ? m_Device->ResolveTexture(h) : nullptr;   // 创建期：走设备（必需）
+```
+
+若将来真要删掉回退，前置条件是**先让创建也走命令流**（A-3 的 `EnqueuePSOCreateHandle` 那条路），
+即"创建期"这个概念本身消失。在那之前，回退分支是**架构上必需**的，不是遗留脏代码。
+
