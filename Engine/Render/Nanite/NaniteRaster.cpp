@@ -247,8 +247,8 @@ void NaniteRaster::Shutdown() {
     m_HardRasterLayout     = rhi::kInvalidLayout;
     m_HardRasterSet        = rhi::kInvalidSet;
     m_HardBindlessRegistered = false;
-    m_HardStats.reset();
-    m_HardStatsZeroSrc.reset();
+    m_Device->DestroyBufferHandle(m_HardStats); m_HardStats = {};
+    m_Device->DestroyBufferHandle(m_HardStatsZeroSrc); m_HardStatsZeroSrc = {};
     m_HardLastMaxTriangles     = 0u;
     m_HardLastVisibleCapacity  = 0u;
 
@@ -1367,18 +1367,18 @@ bool NaniteRaster::EnsureHardRasterResources(const GBufferTargets& targets) {
         d.size      = sizeof(u32) * kNaniteHardStatsCapacity;
         d.usage     = rhi::BufferUsage::Storage;
         d.cpuAccess = true;   // dump 帧读回
-        m_HardStats = m_Device->CreateBuffer(d);
-        if (!m_HardStats) { HE_CORE_ERROR("NaniteRaster: 硬光栅读数缓冲创建失败"); return false; }
+        m_HardStats = m_Device->CreateBufferHandle(d);
+        if (!m_HardStats.IsValid()) { HE_CORE_ERROR("NaniteRaster: 硬光栅读数缓冲创建失败"); return false; }
 
         rhi::BufferDesc z;
         z.size      = d.size;
         z.usage     = rhi::BufferUsage::TransferSrc;   // 只当拷贝源
         z.cpuAccess = true;
-        m_HardStatsZeroSrc = m_Device->CreateBuffer(z);
-        if (!m_HardStatsZeroSrc) { HE_CORE_ERROR("NaniteRaster: 硬光栅读数清零源创建失败"); return false; }
-        if (void* p = m_HardStatsZeroSrc->Map()) {
+        m_HardStatsZeroSrc = m_Device->CreateBufferHandle(z);
+        if (!m_HardStatsZeroSrc.IsValid()) { HE_CORE_ERROR("NaniteRaster: 硬光栅读数清零源创建失败"); return false; }
+        if (void* p = m_Device->ResolveBuffer(m_HardStatsZeroSrc)->Map()) {
             std::memset(p, 0, d.size);
-            m_HardStatsZeroSrc->Unmap();
+            if (auto* b = m_Device->ResolveBuffer(m_HardStatsZeroSrc)) b->Unmap();
         }
     }
 
@@ -1464,8 +1464,8 @@ bool NaniteRaster::EnsureHardRasterResources(const GBufferTargets& targets) {
 }
 
 void NaniteRaster::RecordHardStatsClear(rhi::IRHICommandList* cmd) {
-    if (!cmd || !m_HardStats || !m_HardStatsZeroSrc) return;
-    cmd->CopyBuffer(m_HardStatsZeroSrc.get(), m_HardStats.get(),
+    if (!cmd || !m_HardStats.IsValid() || !m_HardStatsZeroSrc.IsValid()) return;
+    cmd->CopyBuffer(m_Device->ResolveBuffer(m_HardStatsZeroSrc), m_Device->ResolveBuffer(m_HardStats),
                     (u64)kNaniteHardStatsCapacity * sizeof(u32), 0, 0);
     // 拷贝 → mesh/片元着色器的原子累加：显式内存屏障。
     // 【为什么 dstStage 必须显式写出 mesh 阶段】清 0 与 `InterlockedAdd` 之间必须有定义的顺序，
@@ -1533,7 +1533,7 @@ void NaniteRaster::RecordHardRasterPass(rhi::IRHICommandList* cmd,
                                       m_Device->ResolveBuffer(m_DepthKey));
     }
     m_Device->UpdateDescriptorSet(m_HardRasterSet, 7, rhi::DescriptorType::StorageBuffer,
-                                  m_HardStats.get());
+                                  m_Device->ResolveBuffer(m_HardStats));
     if (asset.materials) {
         m_Device->UpdateDescriptorSet(m_HardRasterSet, 12, rhi::DescriptorType::StorageBuffer,
                                       asset.materials);
@@ -1551,7 +1551,7 @@ void NaniteRaster::RecordHardRasterPass(rhi::IRHICommandList* cmd,
     m_Device->UpdateDescriptorSet(m_HardRasterSet, 19, rhi::DescriptorType::StorageBuffer,
                                   streamOn ? asset.stream.poolTriangles : asset.indices);
     m_Device->UpdateDescriptorSet(m_HardRasterSet, 20, rhi::DescriptorType::StorageBuffer,
-                                  streamOn ? asset.stream.feedback : m_HardStats.get());
+                                  streamOn ? asset.stream.feedback : m_Device->ResolveBuffer(m_HardStats));
 
     // ── ① 清读数（命令缓冲内拷贝；与软光栅的 `RecordSoftStatsClear` 同一惯例）──
     RecordHardStatsClear(cmd);
@@ -1900,10 +1900,10 @@ void NaniteRaster::ReadbackSoftStats(u32 (&out)[kNaniteSoftStatsCapacity]) {    
 void NaniteRaster::ReadbackHardStats(u32 (&out)[kNaniteHardStatsCapacity]) {
     // 与 `ReadbackSoftStats` 同款：缓冲不存在（`hardRaster=0` 或设备不支持）⇒ 全 0
     for (u32 i = 0u; i < kNaniteHardStatsCapacity; ++i) out[i] = 0u;
-    if (!m_HardStats) return;
-    if (void* p = m_HardStats->Map()) {
+    if (!m_HardStats.IsValid()) return;
+    if (void* p = m_Device->ResolveBuffer(m_HardStats)->Map()) {
         std::memcpy(out, p, sizeof(u32) * kNaniteHardStatsCapacity);
-        m_HardStats->Unmap();
+        if (auto* b = m_Device->ResolveBuffer(m_HardStats)) b->Unmap();
     }
 }
 
@@ -1912,7 +1912,7 @@ void NaniteRaster::LogHardRasterReadback() {
     //   （关闭档 / 设备不支持时一行都不打，日志与基线逐字一致）。
     //   而 `ReadbackHardStats` 本身对"缓冲不存在"是**清零**语义 —— 那是给任务 23 的 `perf` 行
     //   用的（基线档要打印 `hard_clusters=0` 而不是缺字段），两者的口径不要混。
-    if (!m_HardStats) return;
+    if (!m_HardStats.IsValid()) return;
     u32 hs[kNaniteHardStatsCapacity] = {};
     ReadbackHardStats(hs);
     // 软光栅侧的两个对照量（同一个缓冲、同一帧的读数）：用来算"软/硬占比"。

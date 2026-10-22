@@ -581,8 +581,8 @@ private:
     bool m_HardBindlessRegistered = false;
 
     /// 硬光栅读数缓冲（`kNaniteHardStatsCapacity` 条）+ 每帧清零用的常驻 0 源
-    std::unique_ptr<rhi::IRHIBuffer> m_HardStats;
-    std::unique_ptr<rhi::IRHIBuffer> m_HardStatsZeroSrc;
+    rhi::RHIBufferHandle m_HardStats{};   // A-3
+    rhi::RHIBufferHandle m_HardStatsZeroSrc{};   // A-3
 
     /// 上一次录制时记下的硬光栅参数（dump 帧日志用：真实 GPU 读回 + CPU 侧真值对照）
     u32 m_HardLastMaxTriangles = 0u;
