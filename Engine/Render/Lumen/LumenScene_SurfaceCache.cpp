@@ -549,7 +549,7 @@ void LumenScene::CreateShadeGPUObjects() {
 
 void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbAlbedo,
                                         rhi::IRHITexture* gbWorldPos, const float4x4& viewProj) {
-    if (!m_Device || !cmd || !m_ProbeCount || !m_RayHitPosBuf || !m_AtlasAlbedo.IsValid() || !gbAlbedo || !gbWorldPos) return;
+    if (!m_Device || !cmd || !m_ProbeCount || !m_RayHitPosBuf.IsValid() || !m_AtlasAlbedo.IsValid() || !gbAlbedo || !gbWorldPos) return;
     if (!m_PageTableBuf.IsValid()) return;
 
     // 步骤 28：把 §6 的组合状态在运行期说清楚（只报一次）。非法组合在 `Validate()` 里已经被拒；
@@ -598,7 +598,7 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
 
         const u32 maxRays = kMaxScreenProbes * 16u;
         rhi::BufferDesc ob; ob.size = (usize)maxRays * sizeof(float4); ob.usage = rhi::BufferUsage::Storage; ob.cpuAccess = true;
-        m_ShadeOutBuf = m_Device->CreateBuffer(ob);
+        m_ShadeOutBuf = m_Device->CreateBufferHandle(ob);   // A-3
         m_ShadeOutGbBuf = m_Device->CreateBuffer(ob);
         m_ShadeOutBestBuf = m_Device->CreateBuffer(ob);
 
@@ -626,8 +626,8 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
                                       m_Device->ResolveTexture(m_AtlasAlbedo), m_SDF.GetLinearSampler());
         m_Device->UpdateDescriptorSet(m_ShadeSet, 1, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ShadeCardsBuf));
         m_Device->UpdateDescriptorSet(m_ShadeSet, 2, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_PageTableBuf));
-        m_Device->UpdateDescriptorSet(m_ShadeSet, 3, rhi::DescriptorType::StorageBuffer, m_RayHitPosBuf.get());
-        m_Device->UpdateDescriptorSet(m_ShadeSet, 5, rhi::DescriptorType::StorageBuffer, m_ShadeOutBuf.get());
+        m_Device->UpdateDescriptorSet(m_ShadeSet, 3, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayHitPosBuf));
+        m_Device->UpdateDescriptorSet(m_ShadeSet, 5, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ShadeOutBuf));
         m_Device->UpdateDescriptorSet(m_ShadeSet, 6, rhi::DescriptorType::StorageBuffer, m_ShadeOutGbBuf.get());
         m_Device->UpdateDescriptorSet(m_ShadeSet, 7, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ShadeStatsBuf));
         m_Device->UpdateDescriptorSet(m_ShadeSet, 9, rhi::DescriptorType::StorageBuffer, m_ShadeOutBestBuf.get());
@@ -646,8 +646,8 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
         m_Device->UpdateDescriptorSet(m_ShadeSet, 10, rhi::DescriptorType::StorageBuffer, m_RayFadeBuf.get());
     if (m_DistBinBuf)
         m_Device->UpdateDescriptorSet(m_ShadeSet, 11, rhi::DescriptorType::StorageBuffer, m_DistBinBuf.get());
-    if (m_RayResultBuf)
-        m_Device->UpdateDescriptorSet(m_ShadeSet, 12, rhi::DescriptorType::StorageBuffer, m_RayResultBuf.get());
+    if (m_RayResultBuf.IsValid())
+        m_Device->UpdateDescriptorSet(m_ShadeSet, 12, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayResultBuf));
 
     const u32 total = m_ProbeCount * m_TraceConfig.traceRep;
 
@@ -667,7 +667,7 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
         // 每帧都做会白烧 CPU（每 40 帧一次足够支撑验收数值）。
         u32 samples = 0, samplesMulti = 0, bestSamples = 0;
         double sumDiff = 0.0, sumDiffMulti = 0.0, sumAtlas = 0.0, sumGb = 0.0, sumBest = 0.0;
-        void* pm = ((m_ShadeFrame % 40u) == 0u) ? m_ShadeOutBuf->Map() : nullptr;
+        void* pm = ((m_ShadeFrame % 40u) == 0u) ? m_Device->ResolveBuffer(m_ShadeOutBuf)->Map() : nullptr;
         if (pm) {
             const float4* a = static_cast<const float4*>(pm);
             if (void* pg = m_ShadeOutGbBuf->Map()) {
@@ -690,7 +690,7 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
                 }
                 m_ShadeOutGbBuf->Unmap();
             }
-            m_ShadeOutBuf->Unmap();
+            if (auto* sob = m_Device->ResolveBuffer(m_ShadeOutBuf)) sob->Unmap();
         }
         const u32 totalSamples = samples + samplesMulti;
         m_FadeBlendedRays = st[8];       // 步骤 27：真正发生了材质混合的射线数
@@ -834,8 +834,8 @@ void LumenScene::RunProbeTrace(rhi::IRHICommandList* cmd) {
         rhi::BufferDesc rb;
         rb.size  = (usize)kMaxScreenProbes * 16u * sizeof(float4);   // 最多 16 条光线/探针
         rb.usage = rhi::BufferUsage::Storage;
-        m_RayResultBuf = m_Device->CreateBuffer(rb);
-        m_RayHitPosBuf = m_Device->CreateBuffer(rb);
+        m_RayResultBuf = m_Device->CreateBufferHandle(rb);   // A-3
+        m_RayHitPosBuf = m_Device->CreateBufferHandle(rb);   // A-3
 
         rhi::BufferDesc sb;
         sb.size = sizeof(u32) * 4u; sb.usage = rhi::BufferUsage::Storage; sb.cpuAccess = true;
@@ -847,9 +847,9 @@ void LumenScene::RunProbeTrace(rhi::IRHICommandList* cmd) {
         m_Device->UpdateDescriptorSet(m_TraceSet, 6, rhi::DescriptorType::CombinedImageSampler,
                                       m_SDF.GetGlobalField(1), m_SDF.GetLinearSampler());
         m_Device->UpdateDescriptorSet(m_TraceSet, 1, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ProbeBuf));
-        m_Device->UpdateDescriptorSet(m_TraceSet, 2, rhi::DescriptorType::StorageBuffer, m_RayResultBuf.get());
+        m_Device->UpdateDescriptorSet(m_TraceSet, 2, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayResultBuf));
         m_Device->UpdateDescriptorSet(m_TraceSet, 3, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayStatsBuf));
-        m_Device->UpdateDescriptorSet(m_TraceSet, 4, rhi::DescriptorType::StorageBuffer, m_RayHitPosBuf.get());
+        m_Device->UpdateDescriptorSet(m_TraceSet, 4, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayHitPosBuf));
         m_TraceBound = true;
         return;   // 新建资源当帧不用
     }
@@ -1336,7 +1336,7 @@ void LumenScene::CreateSHGPUObjects() {
 }
 
 void LumenScene::RunScreenProbeSHProject(rhi::IRHICommandList* cmd, bool furnace) {
-    if (!m_Device || !cmd || !m_ProbeBuf.IsValid() || !m_ShadeOutBuf) return;
+    if (!m_Device || !cmd || !m_ProbeBuf.IsValid() || !m_ShadeOutBuf.IsValid()) return;
 
     if (!m_SHBound) {
         CreateSHGPUObjects();
@@ -1353,11 +1353,11 @@ void LumenScene::RunScreenProbeSHProject(rhi::IRHICommandList* cmd, bool furnace
         m_SHStatsMapped = m_Device->ResolveBuffer(m_SHStatsBuf)->Map();
 
         m_Device->UpdateDescriptorSet(m_SHSet, 0, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ProbeBuf));
-        m_Device->UpdateDescriptorSet(m_SHSet, 1, rhi::DescriptorType::StorageBuffer, m_ShadeOutBuf.get());
+        m_Device->UpdateDescriptorSet(m_SHSet, 1, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ShadeOutBuf));
         m_Device->UpdateDescriptorSet(m_SHSet, 2, rhi::DescriptorType::StorageBuffer, m_IrradShBuf.get());
         m_Device->UpdateDescriptorSet(m_SHSet, 3, rhi::DescriptorType::StorageBuffer, m_IrradRefBuf.get());
         m_Device->UpdateDescriptorSet(m_SHSet, 4, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_SHStatsBuf));
-        m_Device->UpdateDescriptorSet(m_SHSet, 5, rhi::DescriptorType::StorageBuffer, m_RayResultBuf.get());
+        m_Device->UpdateDescriptorSet(m_SHSet, 5, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayResultBuf));
         m_SHBound = true;
         return;   // 本帧只建资源；下一帧开始派发（"新建资源当帧使用"的教训见 §附二十）
     }

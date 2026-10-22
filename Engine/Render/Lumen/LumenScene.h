@@ -343,7 +343,7 @@ private:
     std::vector<float> m_ProbeTileDev;
     // ── 探针半球追踪（步骤 21）──
     LumenTraceConfig m_TraceConfig;
-    std::unique_ptr<rhi::IRHIBuffer> m_RayResultBuf;
+    rhi::RHIBufferHandle m_RayResultBuf{};   // A-3
     rhi::RHIBufferHandle m_RayStatsBuf{};   // A-3
     void* m_RayStatsMapped = nullptr;
     rhi::DescriptorSetLayoutHandle m_TraceLayout = 0;
@@ -353,7 +353,8 @@ private:
     u32  m_TraceFrame = 0;
     u32  m_ProbeRayHits = 0, m_ProbeRayMisses = 0, m_ProbeRaysTotal = 0, m_ProbeRayHemisphere = 0;
     // ── 命中点着色（步骤 22）──
-    std::unique_ptr<rhi::IRHIBuffer> m_RayHitPosBuf, m_ShadeOutBuf, m_ShadeOutGbBuf, m_ShadeOutBestBuf;
+    rhi::RHIBufferHandle m_RayHitPosBuf{}, m_ShadeOutBuf{};   // A-3
+    std::unique_ptr<rhi::IRHIBuffer> m_ShadeOutGbBuf, m_ShadeOutBestBuf;
     rhi::RHIBufferHandle m_ShadeCardsBuf{}, m_ShadeStatsBuf{};   // A-3
     void* m_ShadeStatsMapped = nullptr;
     rhi::DescriptorSetLayoutHandle m_ShadeLayout = 0;

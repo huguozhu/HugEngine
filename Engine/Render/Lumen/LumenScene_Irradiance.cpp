@@ -254,9 +254,9 @@ void LumenScene::LogMemoryUsage() const {
     items.push_back({"Lumen 输出 + 辐照度（2 × 屏幕 RGBA16F）", 2.0 * px * 8.0 / (1024.0 * 1024.0)});
     addBuf("卡片清单 / 页表镜像", m_Device->ResolveBuffer(m_ShadeCardsBuf));
     addBuf("页表镜像", m_Device->ResolveBuffer(m_PageTableBuf));
-    addBuf("命中点缓冲", m_RayHitPosBuf.get());
-    addBuf("光线结果缓冲", m_RayResultBuf.get());
-    addBuf("着色输出（atlas / GBuffer / 最优候选）", m_ShadeOutBuf.get());
+    addBuf("命中点缓冲", m_Device->ResolveBuffer(m_RayHitPosBuf));
+    addBuf("光线结果缓冲", m_Device->ResolveBuffer(m_RayResultBuf));
+    addBuf("着色输出（atlas / GBuffer / 最优候选）", m_Device->ResolveBuffer(m_ShadeOutBuf));
     addBuf("着色输出（GBuffer 对照）", m_ShadeOutGbBuf.get());
     addBuf("着色输出（最优候选）", m_ShadeOutBestBuf.get());
     addBuf("远场光追结果（2 × 光线）", m_FarField ? m_FarField->GetResultBuffer() : nullptr);
@@ -319,7 +319,7 @@ void LumenScene::CreateFarFieldCompareGPUObjects() {
     m_FarCmpHistMapped = m_FarCmpHistBuf->Map();
     m_FarFieldHist.assign(16u, 0u);
 
-    m_Device->UpdateDescriptorSet(m_FarCmpSet, 0, rhi::DescriptorType::StorageBuffer, m_RayResultBuf.get());
+    m_Device->UpdateDescriptorSet(m_FarCmpSet, 0, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayResultBuf));
     m_Device->UpdateDescriptorSet(m_FarCmpSet, 2, rhi::DescriptorType::StorageBuffer, m_FarCmpStatsBuf.get());
     m_Device->UpdateDescriptorSet(m_FarCmpSet, 3, rhi::DescriptorType::StorageBuffer, m_FarCmpHistBuf.get());
     if (!m_FarCmpPSO.IsValid()) HE_CORE_ERROR("LumenScene: 远场对照 PSO 创建失败");
@@ -348,8 +348,8 @@ void LumenScene::CreateFarFieldCompareGPUObjects() {
     mpso.pushConstantRanges   = {mpc};
     mpso.debugName            = "Lumen_FarFieldMerge";
     m_FarMergePSO = m_Device->CreatePipelineStateHandle(mpso);   // A-3
-    m_Device->UpdateDescriptorSet(m_FarMergeSet, 0, rhi::DescriptorType::StorageBuffer, m_RayResultBuf.get());
-    m_Device->UpdateDescriptorSet(m_FarMergeSet, 2, rhi::DescriptorType::StorageBuffer, m_RayHitPosBuf.get());
+    m_Device->UpdateDescriptorSet(m_FarMergeSet, 0, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayResultBuf));
+    m_Device->UpdateDescriptorSet(m_FarMergeSet, 2, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayHitPosBuf));
     m_Device->UpdateDescriptorSet(m_FarMergeSet, 4, rhi::DescriptorType::StorageBuffer, m_FarMergeStatsBuf.get());
     if (m_RayFadeBuf)   // 在着色 pass 的资源创建里已经建好（见 CreateShadeGPUObjects）
         m_Device->UpdateDescriptorSet(m_FarMergeSet, 3, rhi::DescriptorType::StorageBuffer, m_RayFadeBuf.get());
@@ -370,9 +370,9 @@ void LumenScene::RunFarFieldRT(rhi::IRHICommandList* cmd) {
         s_farLogged = true;
         HE_CORE_INFO("LumenScene 远场光追前置检查: device={} cmd={} probe={} tlas={} rayResult={} traceFrame={}",
                      (void*)m_Device, (void*)cmd, (void*)m_Device->ResolveBuffer(m_ProbeBuf), (void*)m_TLAS,
-                     (void*)m_RayResultBuf.get(), m_TraceFrame);
+                     (void*)m_Device->ResolveBuffer(m_RayResultBuf), m_TraceFrame);
     }
-    if (!m_Device || !cmd || !m_ProbeBuf.IsValid() || !m_TLAS || !m_RayResultBuf) return;
+    if (!m_Device || !cmd || !m_ProbeBuf.IsValid() || !m_TLAS || !m_RayResultBuf.IsValid()) return;
     if (m_TraceFrame == 0u) return;   // 还没追踪过 ⇒ 没有可比的光线
 
     if (!m_FarField) {
