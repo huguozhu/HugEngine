@@ -50,9 +50,9 @@ void LumenScene::TransitionStorageImagesOnce(rhi::IRHICommandList* cmd) {
     std::vector<rhi::IRHITexture*> images;
     m_SDF.CollectStorageImages(images);
     if (m_IrradianceTex.IsValid())   images.push_back(m_Device->ResolveTexture(m_IrradianceTex));
-    if (m_AtlasAlbedo)     images.push_back(m_AtlasAlbedo.get());
-    if (m_AtlasNormal)     images.push_back(m_AtlasNormal.get());
-    if (m_AtlasEmissive)   images.push_back(m_AtlasEmissive.get());
+    if (m_AtlasAlbedo.IsValid())     images.push_back(m_Device->ResolveTexture(m_AtlasAlbedo));
+    if (m_AtlasNormal.IsValid())     images.push_back(m_Device->ResolveTexture(m_AtlasNormal));
+    if (m_AtlasEmissive.IsValid())   images.push_back(m_Device->ResolveTexture(m_AtlasEmissive));
 
     for (rhi::IRHITexture* t : images) {
         if (!t) continue;
@@ -290,7 +290,9 @@ void LumenScene::CreateCaptureGPUObjects() {
         td.format = rhi::Format::RGBA16_FLOAT;
         td.usage  = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource |
                     rhi::TextureUsage::TransferSrc;
-        return m_Device->CreateTexture(td);
+        auto h = m_Device->CreateTextureHandle(td);   // A-3
+        HE_ASSERT(h.IsValid(), "LumenScene: Card atlas 纹理句柄创建失败");
+        return h;
     };
     m_AtlasAlbedo   = makeAtlas();
     m_AtlasNormal   = makeAtlas();
@@ -321,12 +323,14 @@ void LumenScene::RunCardCapture(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbA
     if (m_PageTable.Size() == 0 || !gbAlbedo || !gbNormal || !gbDepth) return;
     if (!m_CaptureBound) {
         CreateCaptureGPUObjects();
-        if (!m_CapturePSO.IsValid() || !m_AtlasAlbedo) return;
+        if (!m_CapturePSO.IsValid() || !m_AtlasAlbedo.IsValid()) return;
         // 【步骤 37】atlas 三张（albedo/normal/emissive）是自持存储图像，创建点没有命令列表，
         // 故在首次捕获（第一次写入）之前转换一次（理由见 LumenSDF::BakeOne 的同一处说明）。
         if (!m_AtlasImagesTransitioned) {
             m_AtlasImagesTransitioned = true;
-            for (rhi::IRHITexture* t : { m_AtlasAlbedo.get(), m_AtlasNormal.get(), m_AtlasEmissive.get() }) {
+            for (rhi::IRHITexture* t : { m_Device->ResolveTexture(m_AtlasAlbedo),
+                                m_Device->ResolveTexture(m_AtlasNormal),
+                                m_Device->ResolveTexture(m_AtlasEmissive) }) {
                 if (t) cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
                                             rhi::ResourceState::Undefined, rhi::ResourceState::UnorderedAccess, t);
             }
@@ -336,11 +340,11 @@ void LumenScene::RunCardCapture(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbA
         m_Device->UpdateDescriptorSet(m_CaptureSet, 6, rhi::DescriptorType::CombinedImageSampler,
                                       m_SDF.GetGlobalField(1), m_SDF.GetLinearSampler());
         m_Device->UpdateDescriptorSetWithImageView(m_CaptureSet, 1,
-            rhi::DescriptorType::StorageImage, m_AtlasAlbedo->GetNativeHandle());
+            rhi::DescriptorType::StorageImage, m_Device->ResolveTexture(m_AtlasAlbedo)->GetNativeHandle());
         m_Device->UpdateDescriptorSetWithImageView(m_CaptureSet, 7,
-            rhi::DescriptorType::StorageImage, m_AtlasNormal->GetNativeHandle());
+            rhi::DescriptorType::StorageImage, m_Device->ResolveTexture(m_AtlasNormal)->GetNativeHandle());
         m_Device->UpdateDescriptorSetWithImageView(m_CaptureSet, 8,
-            rhi::DescriptorType::StorageImage, m_AtlasEmissive->GetNativeHandle());
+            rhi::DescriptorType::StorageImage, m_Device->ResolveTexture(m_AtlasEmissive)->GetNativeHandle());
         m_Device->UpdateDescriptorSet(m_CaptureSet, 9, rhi::DescriptorType::StorageBuffer,
                                       m_CaptureStats.get());
         m_CaptureBound = true;
@@ -545,7 +549,7 @@ void LumenScene::CreateShadeGPUObjects() {
 
 void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbAlbedo,
                                         rhi::IRHITexture* gbWorldPos, const float4x4& viewProj) {
-    if (!m_Device || !cmd || !m_ProbeCount || !m_RayHitPosBuf || !m_AtlasAlbedo || !gbAlbedo || !gbWorldPos) return;
+    if (!m_Device || !cmd || !m_ProbeCount || !m_RayHitPosBuf || !m_AtlasAlbedo.IsValid() || !gbAlbedo || !gbWorldPos) return;
     if (!m_PageTableBuf) return;
 
     // 步骤 28：把 §6 的组合状态在运行期说清楚（只报一次）。非法组合在 `Validate()` 里已经被拒；
@@ -619,7 +623,7 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
         m_DistBinLum.assign(16u, 0u);
 
         m_Device->UpdateDescriptorSet(m_ShadeSet, 0, rhi::DescriptorType::CombinedImageSampler,
-                                      m_AtlasAlbedo.get(), m_SDF.GetLinearSampler());
+                                      m_Device->ResolveTexture(m_AtlasAlbedo), m_SDF.GetLinearSampler());
         m_Device->UpdateDescriptorSet(m_ShadeSet, 1, rhi::DescriptorType::StorageBuffer, m_ShadeCardsBuf.get());
         m_Device->UpdateDescriptorSet(m_ShadeSet, 2, rhi::DescriptorType::StorageBuffer, m_PageTableBuf.get());
         m_Device->UpdateDescriptorSet(m_ShadeSet, 3, rhi::DescriptorType::StorageBuffer, m_RayHitPosBuf.get());

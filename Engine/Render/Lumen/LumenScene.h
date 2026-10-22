@@ -217,8 +217,8 @@ public:
     [[nodiscard]] u32  GetFeedbackRequests() const { return m_FeedbackRequests; }
     [[nodiscard]] u32  GetFeedbackTopOverlap() const { return m_FeedbackTopOverlap; }
     [[nodiscard]] u32  GetFeedbackTopCount() const { return m_FeedbackTopCount; }
-    [[nodiscard]] rhi::IRHITexture* GetCardAtlasAlbedo()  const { return m_AtlasAlbedo.get(); }
-    [[nodiscard]] rhi::IRHITexture* GetCardAtlasNormal()  const { return m_AtlasNormal.get(); }
+    [[nodiscard]] rhi::IRHITexture* GetCardAtlasAlbedo()  const { return m_Device->ResolveTexture(m_AtlasAlbedo); }
+    [[nodiscard]] rhi::IRHITexture* GetCardAtlasNormal()  const { return m_Device->ResolveTexture(m_AtlasNormal); }
     [[nodiscard]] u32 GetCardCaptureHits() const { return m_CardCaptureHits; }
     [[nodiscard]] u32 GetCardCaptureMisses() const { return m_CardCaptureMisses; }
     [[nodiscard]] const SurfaceCachePageTable& GetPageTable() const { return m_PageTable; }
@@ -287,7 +287,7 @@ private:
     void SetSyntheticRoaming(bool on) { m_SyntheticRoaming = on; }
     [[nodiscard]] u32 GetEvictions() const { return m_Evictions; }
     [[nodiscard]] u32 GetAllocFailures() const { return m_AllocFailures; }
-    std::unique_ptr<rhi::IRHITexture> m_AtlasAlbedo, m_AtlasNormal, m_AtlasEmissive;
+    rhi::RHITextureHandle m_AtlasAlbedo{}, m_AtlasNormal{}, m_AtlasEmissive{};   // A-3
     std::unique_ptr<rhi::IRHIBuffer>  m_CaptureStats;
     void* m_CaptureStatsMapped = nullptr;
     std::unique_ptr<rhi::IRHIBuffer>  m_CaptureFrameBuf;      // 每帧常量（push constant 只有 128B 上限）
