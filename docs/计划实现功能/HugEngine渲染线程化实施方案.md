@@ -2522,3 +2522,46 @@ A-5（ImGui/PSO 命令化）、T2.6、T3.3/T3.4、T5.1~T5.3、L4-3。
 把相关 pass 的 shader 模块改成**成员持有**（`m_VS`/`m_FS` 而非局部变量），再接入异步创建。
 收益仅是"摊平首帧峰值"，成本是给所有 PSO 创建点加生命周期约束 ⇒ 暂不推进，记为独立小项目。
 
+## 17. 附录 F：T3.3 并行录制评估结论 + T3.4 分块策略现状（2026-10-22）
+
+### 17.1 现状：`ParallelRecordHelper` 在做什么
+
+| 环节 | 实现（`ParallelRecordHelper.cpp`） |
+|---|---|
+| 分块 | `numChunks = min(列表数, drawCount)`，`chunkSize = ceil(drawCount / numChunks)` ⇒ **按 draw 数均分** |
+| worker 数 | = 次级命令列表数（`Initialize(device, listCount, ...)` 建池时确定，`ForwardPipeline` 传固定值） |
+| 归属 | 每块在 `rhi::SecondaryRecordScope` 里录（两级归属：worker 必须显式声明自己是录制者） |
+| 并行 | `JobSystem::ParallelInvoke(tasks)` |
+| 合并 | 主线程按**块序** `ExecuteSecondary` ⇒ 绘制顺序确定、可逐位复现 |
+
+已接入：`ForwardPipeline`（T3.1，几十个 draw）、`GBufferRenderer_CPU`（T3.2，按对象）。
+
+### 17.2 T3.3：PathTracing / Nanite 不做并行录制（结论）
+
+| 管线 | draw 规模 | 结论 |
+|---|---|---|
+| PathTracing | **1 个全屏三角形**（+ 若干 compute dispatch） | **不做**。并行录制的收益来自"很多条 draw 分摊到多个 worker"；只有 1 条 draw 时，`BeginSecondary/End`、`ParallelInvoke`、按块合并全是纯开销 |
+| Nanite 光栅 | **1 条 `DrawIndexedIndirect`**（簇数由间接缓冲决定）+ 若干 compute | **不做**。理由同上：绘制调用只有一条。它的并行性已经在 shader 内部（mesh shader / 簇并行），不在"命令录制"这一层 |
+
+⇒ 这两个目标**评估后不做**，理由记录在案（文档要求的"逐项结论含不做的理由"已满足）。
+并行录制的正确目标始终是"**draw 数多且每条 draw 状态相近**"的通道：Forward 与 Deferred GBuffer。
+
+### 17.3 T3.4：分块策略与阈值（现状 + 待做）
+
+**现状问题**：`Record()` 没有任何最小规模阈值。调用方只判断了 `m_MultiThreadRecord && IsReady() && totalDraws > 0`
+⇒ 当 `drawCount` 很小时（例如 3 条 draw），仍然会走 `ParallelInvoke` + 3 条次级列表的
+`BeginSecondary/End` + 按块合并，比直接在主列表里录 3 条 draw **慢**。这正是 T3.4 要解决的"小场景不退化"。
+
+**待做（`kMinDrawsForParallel`）**：
+
+1. 在 `ParallelRecordHelper` 里加 `static constexpr u32 kMinDrawsForParallel = 64;` 与
+   `static bool ShouldRecordParallel(u32 drawCount) { return drawCount >= kMinDrawsForParallel; }`；
+2. 两个调用方（`ForwardPipeline` 与 `GBufferRenderer_CPU`）把条件改为
+   `... && ParallelRecordHelper::ShouldRecordParallel(totalDraws)`，否则走原有串行录制路径；
+3. 判据：`06.GILab` 转储 20/20 一致（阈值只影响**怎么录**，不影响录什么）；
+   小场景（draw < 64）A/B 时间不劣化；Sponza 大场景保持并行。
+
+**为什么用 64**：单条 draw 的串行录制约 1–2 µs 级，`ParallelInvoke` 的一次唤醒 + 每块
+`BeginSecondary/End` 的固定开销也在数十 µs 量级；64 条是"并行收益开始为正"的经验下界，
+且 06 的 Forward 与 Deferred 都远超它 ⇒ 阈值不会影响现有判据场景。
+
