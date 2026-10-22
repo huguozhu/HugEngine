@@ -20,7 +20,9 @@ bool GBufferRenderer_CPU::Initialize(GBufferContext& ctx) {
 }
 
 void GBufferRenderer_CPU::Shutdown() {
-    // CPU 模式无需额外清理（纹理/PSO 由 DeferredPipeline 管理）
+    // 纹理/PSO 由 DeferredPipeline 管理；这里只释放**自己持有**的次级命令缓冲池。
+    // 必须在设备销毁之前调用，否则列表析构会打到已销毁的设备上（见头文件说明）。
+    m_ParallelRecorder.Shutdown();
 }
 
 void GBufferRenderer_CPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
@@ -136,15 +138,12 @@ void GBufferRenderer_CPU::Render(rhi::IRHICommandList* cmd, GBufferContext& ctx,
     // `ParallelRecordHelper` 里；这里只提供"一块怎么录"。
     // 注意两点：① 次级列表**不继承**主列表的绑定 ⇒ 每块自己绑 per-frame 描述符集 + viewport/scissor；
     // ② 分块是 `filteredItems` 的连续升序区间 ⇒ 绘制顺序与串行完全一致（可逐位复现）。
-    // 【T3.2】录制池是文件级单例：一个进程只有一套 GBuffer 次级列表池。
-    // （`GBufferRenderer_CPU` 是独立于 `GBufferRenderer` 的类，故不挂在类成员上。）
-    static ParallelRecordHelper s_ParallelRecorder;
-    if (ctx.pso && !s_ParallelRecorder.IsReady()) {
+    if (ctx.pso && !m_ParallelRecorder.IsReady()) {
         const u32 n = std::min<u32>(8u, std::max<u32>(1u, JobSystem::Instance().GetThreadCount()));
-        s_ParallelRecorder.Initialize(ctx.device, n, "GBufferSecRecord");
+        m_ParallelRecorder.Initialize(ctx.device, n, "GBufferSecRecord");
     }
-    if (ctx.pso && s_ParallelRecorder.IsReady() && !filteredItems.empty()) {
-        s_ParallelRecorder.Record(cmd, static_cast<u32>(filteredItems.size()), ctx.pso,
+    if (ctx.pso && m_ParallelRecorder.IsReady() && !filteredItems.empty()) {
+        m_ParallelRecorder.Record(cmd, static_cast<u32>(filteredItems.size()), ctx.pso,
             [&](rhi::IRHICommandList& secRef, u32 start, u32 end) {
                 auto& s = secRef;
                 s.BindDescriptorSet(rhi::kDescSetPerFrame, ctx.descSet);
