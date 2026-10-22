@@ -1543,97 +1543,32 @@ int main() {
                 const bool forwardMode = (g_PipelineMode == 0);
                 addTarget("hdr", forwardMode ? forwardPipeline.GetHDRTarget()
                                              : deferredPipeline.GetLighting().GetHDRTarget());
-                if (!forwardMode) {
-                if (auto* gb = deferredPipeline.GetGBuffer()) {
-                    addTarget("albedo", gb->GetAlbedo());
-                    // GBuffer 的世界坐标/法线：屏幕空间 GI pass 的**输入**。少了它们，
-                    // "某个源的输出纹理对不对"就只能靠形状相关性猜；有了它们才能把那个 pass
-                    // 的公式在 CPU 上原样重算一遍做逐像素对照（任务 30 就是这么定位 RSM 链路的）。
-                    addTarget("gb_worldpos", gb->GetWorldPos());
-                    addTarget("gb_normal",   gb->GetNormal());
-                    // 光照图键（任务 31）：MRT7 = (uv0.x, uv0.y, objectIndex, 0)。烘焙光照图的
-                    // 前置条件就是"逐像素能反查页号与页内坐标"，这个转储是那条性质的唯一直接证据。
-                    addTarget("gb_lightmapkey", gb->GetLightmapKey());
-                }
-                // 共享的前帧 HDR 辐射度（DDGI 探针 / SSGI 入射辐射度的共同输入）：
-                // 它是 GI 源吃进去的东西，出问题时第一个要看的中间量
-                addTarget("radiance", deferredPipeline.GetRadianceHistory().GetTexture());
-                // IBL 辐照度：DDGI 探针更新的**唯一**辐射度回退来源（GI_DDGI::SetIBL）。
-                // 若它为空/未绑定，DDGI 会静默退化为 DDGI.comp.slang 的硬编码兜底常数。
-                if (auto* giIBL = dynamic_cast<render::GI_IBL*>(deferredPipeline.GetGI()))
-                    addTarget("ibl_irr", giIBL->GetIrradianceMap());
-                const auto& providers = deferredPipeline.GetGIProviders();
-                for (size_t i = 0; i < providers.size(); ++i) {
-                    auto* p = providers[i].get();
-                    // 【步骤 35】判据从 `IsValid()`（"pass 对象在"）换成 `ProducedThisFrame()`（"本帧真的跑了"）：
-                    // Lumen/RTAO 这些源即使没进任何层栈，`IsValid()` 也为真，于是 `provN_*` 会落到
-                    // 上一帧或从未使用的纹理上 —— 转储看起来"有内容"，实际是假读数。
-                    if (!p || !p->ProducedThisFrame()) continue;
-                    const String pre = "prov" + std::to_string(i) + "_";
-                    addTarget(pre + "raw",   p->GetDiffuseOutput());
-                    addTarget(pre + "final", p->GetFinalDiffuseOutput());
-                    // 镜面通道与 AO 通道的输出也必须能落盘：只看得见漫反射输出的话，
-                    // 「SSR/SSAO 是否真的产出了东西」就无从做纹理级对照（§9.2-B/C/E 都属这一类）。
-                    // 名称带通道后缀，避免与漫反射的 raw/final 混淆；不存在该通道输出时自动跳过。
-                    addTarget(pre + "spec_raw",   p->GetSpecularOutput());
-                    addTarget(pre + "spec_final", p->GetFinalSpecularOutput());
-                    addTarget(pre + "ao_raw",     p->GetAOOutput());
-                    addTarget(pre + "ao_final",   p->GetFinalAOOutput());
-                    // 步骤 12（L1 退出判据）：逐像素 SDF 追踪可视化。名字**稳定**（不依赖注册顺序），
-                    // 因为它是后面所有阶段（Screen Probe / Surface Cache）的公共"几何是否靠谱"凭据。
-                    if (auto* lp = dynamic_cast<render::LumenProvider*>(p)) {
-                        addTarget("lumen_sdf_trace", lp->GetSDFDebugTexture());
-                        // 步骤 37：把"逐像素入射辐照度"也落盘。它是 Lumen 的中间层，此前只有 CPU 侧
-                        // 统计（均值/覆盖）可看；当"统计正常但输出为黑"时，必须能直接看到这张纹理本身
-                        // 到底有没有内容，否则只能在"没画"和"画了但采样到空"之间猜。
-                        addTarget("lumen_irradiance", lp->GetIrradianceTexture());
-                        // 步骤 13（L2 的输入）：卡片覆盖率可视化（上半 = 代表 mesh 的 6 个投影面，下半 = 逐 mesh 覆盖条）
-                        addTarget("lumen_card_coverage", lp->GetCardCoverageTexture());
-                        addTarget("lumen_sc_atlas_albedo", lp->GetCardAtlasAlbedo());   // 步骤 15：Card 捕获的 albedo atlas
-                        // 【2026-09-24 诊断】探针级原始数据落盘（HE_DUMP_LUMEN_PROBES=1 才开）：
-                        //   probes  = 过滤后的探针（下游逐像素辐照度用的就是它）
-                        //   rawprobes = 追踪 + SH 投影后、未过滤的探针（区分"源头不同"还是"滤波不同"）
-                        //   cellmap = 单元 → 探针槽位（看槽位排列是否逐趟变化）
-                        // 落盘量：前 8192 个探针 × sizeof(ScreenProbe) + 单元数 × 4 B，量级 < 1 MB。
-                        if (giDump.IncludeBuffers()) {
-                            constexpr usize kDumpProbes = 8192;
-                            addBufferTarget("lumen_probes",    lp->GetProbeBuffer(),     kDumpProbes * sizeof(ScreenProbe));
-                            addBufferTarget("lumen_rawprobes", lp->GetRawProbeBuffer(),  kDumpProbes * sizeof(ScreenProbe));
-                            if (auto* cells = lp->GetCellProbeBuffer()) {
-                                addBufferTarget("lumen_cellmap", cells,
-                                                (usize)lp->GetScreenCellsX() * lp->GetScreenCellsY() * sizeof(u32));
-                            }
-                            // 两层全局 SDF 场：直接判定"场本身是否逐趟一致"（探针追踪的输入）
-                            addTarget("lumen_sdf_layer0", lp->GetGlobalSDFField(0));
-                            addTarget("lumen_sdf_layer1", lp->GetGlobalSDFField(1));
-                            // mesh 级距离场（前 4 个已建好的）：全局层是 min 归并 ⇒ 非最小项的 ULP 差异
-                            // 会被掩盖；原地洪泛（JFA）是否逐趟一致只能看这一层。
-                            for (u32 m = 0; m < 4u; ++m) {
-                                addTarget("lumen_meshfield" + std::to_string(m), lp->GetMeshSDFField(m));
-                            }
-                        }
-                    }
-                }
-                }   // if (!forwardMode)
-                // RSM 链路的逐级中间量（任务 30）：位置 / 编码法线 / VPL 辐射度 / 间接光输出。
-                // 该链路的典型失效是"pass 在跑、成本在付、画面里什么都没有"（§9.2-AA），
-                // 只看最终 HDR 无法分辨是"没产出"还是"产出被合成丢掉"——所以四级都落盘。
-                // 两条管线各有自己的 GI_RSM 实例（同样是"同一个着色器、各自的光源视锥"），
-                // 故这里按当前管线取，才能对照两个视锥各自的产出。
+                                  // RSM 链路的逐级中间量（任务 30）：按当前管线取（两管线各有自己的光源视锥）
                 if (auto* rsm = forwardMode ? forwardPipeline.GetRSM() : deferredPipeline.GetRSM()) {
                     addTarget("rsm_pos", rsm->GetRSMPositionMap());
                     addTarget("rsm_nrm", rsm->GetRSMFluxMap());
                     addTarget("rsm_rad", rsm->GetRSMRadianceMap());
                 }
-                if (!forwardMode) addTarget("rsm_indirect", deferredPipeline.GetRSMIndirect().GetOutput());
-                // SSR 的输出单独给一个稳定名字（任务 32）：它的 provider 输出名是 `provN_spec_raw`，
-                // 而 N 取决于哪些 provider 有效 —— 判据不该依赖注册顺序。
-                if (!forwardMode) {
-                    if (auto* ssr = deferredPipeline.GetSSR())
-                        addTarget("ssr", ssr->GetIndirectSpecularTexture());
+                // Deferred 侧清单（GBuffer / 前帧辐射度 / 各 Provider / Lumen / RSM 间接光 / SSR）
+                // 已下沉到管线 CollectDumpTargets()：判据定义的"真值"只有一份。
+                if (auto* dpDump = dynamic_cast<render::DeferredPipeline*>(curPipeline))
+                    dpDump->CollectDumpTargets(giDump, device.get(), cmdList.get());
+                // 探针级**缓冲**目标：需要 ScreenProbe 的尺寸（该类型只对本样例可见），故留在样例侧。
+                if (giDump.IncludeBuffers() && !forwardMode) {
+                    constexpr usize kDumpProbes = 8192;
+                    for (auto& prov : deferredPipeline.GetGIProviders()) {
+                        auto* lp = dynamic_cast<render::LumenProvider*>(prov.get());
+                        if (!lp || !lp->ProducedThisFrame()) continue;
+                        addBufferTarget("lumen_probes",    lp->GetProbeBuffer(),    kDumpProbes * sizeof(ScreenProbe));
+                        addBufferTarget("lumen_rawprobes", lp->GetRawProbeBuffer(), kDumpProbes * sizeof(ScreenProbe));
+                        if (auto* cells = lp->GetCellProbeBuffer()) {
+                            addBufferTarget("lumen_cellmap", cells,
+                                            (usize)lp->GetScreenCellsX() * lp->GetScreenCellsY() * sizeof(u32));
+                        }
+                        break;
+                    }
                 }
                 giDump.FinishRecording(device.get(), cmdList.get());   // 挂本帧 timeline 信号
-
             }
 
             framePresenter.EndRecording();   // L4-2：End + Submit 收口
