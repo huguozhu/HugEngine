@@ -13,7 +13,7 @@
 #include "RHI/FramePresenter.h"   // L4-1：帧外壳（acquire/present）收口
 #include "Debug/FrameDumpRecorder.h"
 #include "Debug/PixelProbe.h"	// 白炉探针（像素数值读回）
-#include "CameraInput.h"   		// 样例共用：鼠标/键盘控制相机      
+#include "CameraInput.h"   		// 样例共用：鼠标/键盘控制相机
 #include "RHI/ThreadAffinity.h"   // T2.2：渲染线程启动钩子里认领 RHI 归属（GetThreadAffinity）
 #include "Pipeline/DeferredPipeline.h"
 #include "Pipeline/ForwardPipeline.h"
@@ -1243,7 +1243,7 @@ int main() {
 
     int  g_PipelineMode = 1;                // 0=Forward / 1=Deferred
     bool g_PendingHalfResApply = false;     // 档位切换后延迟到帧边界重建半分辨率纹理
-    bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）⇒ 延迟到渲染命令里做            
+    bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）⇒ 延迟到渲染命令里做
     bool g_GISolo = true;                   // 只看 GI（关闭直接光）
     int  g_GIPreset = 1;                    // GI 质量档位（默认 Medium=1）
     render::IRenderPipeline* curPipeline = &deferredPipeline;
