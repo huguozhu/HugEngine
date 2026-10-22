@@ -1,6 +1,7 @@
 // Samples/Editor/EditorApp.cpp
 
 #include "EditorApp.h"
+#include "RHI/FramePresenter.h"   // 【T2.5】帧外壳收口
 #include "Core/Engine.h"
 #include "Platform/Window.h"
 #include "RHI/RHI.h"
@@ -368,11 +369,14 @@ void EditorApp::MainLoop() {
             }
         }
 
-        if (!m_SwapChain->AcquireNextImage())
+        // 【T2.5】acquire 由帧外壳收口（窗口最小化时返回 false ⇒ 跳过本帧）
+        if (!m_FramePresenter) m_FramePresenter = std::make_unique<he::rhi::FramePresenter>(m_SwapChain.get());
+        if (!m_FramePresenter->BeginFrame())
             continue;
 
         // --- 帧逻辑分叉：Play 模式用游戏渲染路径，Edit 模式用编辑器渲染路径 ---
-        m_CmdList->Begin();
+        // 【T2.5】录制登记给帧外壳（BeginRecording 内含 CmdList->Begin）
+        m_FramePresenter->BeginRecording(m_Device.get(), m_CmdList.get());
         m_CmdList->BeginRenderPass(1, rhi::Format::RGBA8_UNORM);
 
         m_Pipeline->NextFrame();
@@ -536,10 +540,10 @@ void EditorApp::MainLoop() {
         m_ImGui->EndFrame(m_CmdList.get());
 
         m_CmdList->EndRenderPass();
-        m_CmdList->End();
 
-        m_Device->Submit(m_CmdList.get());
-        m_SwapChain->Present(true);
+        // 【T2.5】End + Submit + Present 全部由帧外壳收口（L4-2 + L4-1）
+        m_FramePresenter->EndRecording();
+        m_FramePresenter->EndFrame(true);
     }
 }
 

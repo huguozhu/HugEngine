@@ -8,6 +8,7 @@
 // ============================================================
 
 #include "Core/Core.h"
+#include "RHI/FramePresenter.h"   // 【T2.5】帧外壳（unique_ptr 成员需要完整类型）
 #include "RHI/RHI.h"
 #include "RHI/Buffer.h"
 #include <memory>
@@ -78,6 +79,8 @@ private:
     std::unique_ptr<he::rhi::IRHIDevice>       m_Device;
     std::unique_ptr<he::rhi::IRHISwapChain>    m_SwapChain;
     std::unique_ptr<he::rhi::IRHICommandList>  m_CmdList;
+    // 【T2.5】帧外壳：acquire / present / 提交 统一走 FramePresenter（与 8 个样例一致）
+    std::unique_ptr<he::rhi::FramePresenter>   m_FramePresenter;
 
     // --- 引擎系统 ---
     std::unique_ptr<he::World>                  m_World;
