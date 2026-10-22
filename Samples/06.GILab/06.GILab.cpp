@@ -327,7 +327,8 @@ std::pair<rhi::IRHITexture*, rhi::IRHISampler*> TextureCache::Load(const String&
 // 【顺序】纹理注册必须在天空盒之后、渲染管线初始化之前：bindless 默认占位纹理要先就位。
 // ============================================================
 static bool BuildScene(World& world, SceneGraph& sceneGraph, rhi::IRHIDevice* device,
-                       const String& sponzaPath, Entity (&pointLightEntities)[2]) {
+                       const String& sponzaPath, Entity (&pointLightEntities)[2],
+                       TextureCache& texCache) {
     HE_CORE_INFO("加载 Sponza 场景: {}", sponzaPath);
     auto result = asset::LoadGLTF(world, sceneGraph, sponzaPath);
     if (!result.success) {
@@ -377,8 +378,8 @@ static bool BuildScene(World& world, SceneGraph& sceneGraph, rhi::IRHIDevice* de
     // 天空盒：HDR 等距柱状图 → 立方体贴图 → 场景实体
     CreateSkybox(world, sceneGraph, device, String(HUGE_CONTENT_DIR) + "Textures/skybox.hdr");
 
-    // 纹理：创建/去重/默认占位在 TextureCache；这里只按 glTF 的 uri 取并注册 bindless 槽
-    TextureCache texCache(device);
+    // 纹理：创建/去重/默认占位在 TextureCache（由调用方持有 —— 它必须活得比本函数久，
+    // 因为 bindless 堆持有这些纹理/采样器指针）；这里只按 glTF 的 uri 取并注册 bindless 槽
     texCache.CreateAndBindDefault();   // bindless 默认占位纹理（必须在注册材质纹理之前）
     const String sponzaDir = std::filesystem::path(sponzaPath).parent_path().string();
     auto loadTexture = [&](const String& uri) { return texCache.Load(sponzaDir, uri); };
@@ -1208,7 +1209,10 @@ int main() {
 
     const String sponzaPath = String(HUGE_CONTENT_DIR) + "gltf/Sponza/glTF/Sponza.gltf";
     Entity pointLightEntities[2];   // 面板编辑/配置序列化要按索引访问，故由 BuildScene 回传
-    if (!BuildScene(world, sceneGraph, device.get(), sponzaPath, pointLightEntities)) {
+    // 纹理缓存必须由 main 持有：bindless 堆会长期持有这些纹理/采样器指针，
+    // 若让缓存随 BuildScene 作用域析构，下一帧 Flush() 更新描述符集就是野指针（实测崩溃）。
+    TextureCache texCache(device.get());
+    if (!BuildScene(world, sceneGraph, device.get(), sponzaPath, pointLightEntities, texCache)) {
         return 1;
     }
 
@@ -1729,9 +1733,7 @@ int main() {
         // ---- 独立 GI 控制面板：渲染管线 → GI 质量档位 → GI 四通道（可用性 + 参数） ----
         // 与主面板分离，便于独立摆放/查看
         // 首次使用时默认摆放在主面板右侧（之后由 imgui.ini 恢复用户位置/大小）
-        uiDeps.DrawGIPanel();     // GI 控制台（实现见 main 之前）
-
-        ImGui::End();
+        uiDeps.DrawGIPanel();     // GI 控制台（实现见 main 之前；Begin/End 都在函数内）
 
         // ---- 命令 2：ImGui 录制 + 调试绘制 + Submit + 探测读回 + Present ----
         // 【按值携带】帧号与转储判定由游戏线程算好后**按值**传进来（绝不读外层可变变量 ——
