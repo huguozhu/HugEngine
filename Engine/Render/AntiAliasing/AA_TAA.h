@@ -91,10 +91,10 @@ private:
     bool m_Ready = false;
 
     // PSO + 描述符
-    std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
+    rhi::RHIPipelineStateHandle m_PSO{};   // A-3：句柄持有
     rhi::DescriptorSetLayoutHandle m_DescLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_DescSet    = rhi::kInvalidSet;
-    std::unique_ptr<rhi::IRHIBuffer> m_UniformBuffer;
+    rhi::RHIBufferHandle m_UniformBuffer{};   // A-3：句柄持有
 
     // 输入纹理（外部注入，不持有所有权）
     rhi::IRHITexture* m_InputColor      = nullptr;
@@ -103,9 +103,9 @@ private:
     rhi::IRHITexture* m_VelocityTexture = nullptr;
 
     // 历史缓冲（double-buffered，自拥有）
-    std::unique_ptr<rhi::IRHITexture> m_HistoryColor[2];
-    std::unique_ptr<rhi::IRHISampler> m_HistorySampler;   // 线性采样，用于历史颜色混合
-    std::unique_ptr<rhi::IRHISampler> m_PointSampler;     // 点采样，用于 current color / depth / normal / velocity
+    rhi::RHITextureHandle m_HistoryColor[2]{};   // A-3：句柄持有
+    rhi::RHISamplerHandle m_HistorySampler{};   // A-3：线性采样，用于历史颜色混合
+    rhi::RHISamplerHandle m_PointSampler{};     // A-3：点采样，用于 current color / depth / normal / velocity
     u32 m_HistoryRead  = 0;
     u32 m_HistoryWrite = 1;
 

@@ -45,11 +45,11 @@ bool AA_TAA::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_DescSet    = device->AllocateDescriptorSet(m_DescLayout);
 
     // Uniform buffer（144 bytes，每帧更新 prevViewProj + invCurrViewProj + resolution）
-    m_UniformBuffer = device->CreateBuffer({144, rhi::BufferUsage::Uniform});
+    m_UniformBuffer = device->CreateBufferHandle({144, rhi::BufferUsage::Uniform});   // A-3
 
     // 绑定 uniform buffer 到描述符（内容每帧 Map/Unmap 更新）
     device->UpdateDescriptorSet(m_DescSet, kTAABindUniforms, rhi::DescriptorType::UniformBuffer,
-                                m_UniformBuffer.get());
+                                m_Device->ResolveBuffer(m_UniformBuffer));
 
     // 历史缓冲
     CreateHistoryTextures(width, height);
@@ -69,18 +69,18 @@ void AA_TAA::CreateHistoryTextures(u32 w, u32 h) {
         d.width  = w;
         d.height = h;
         d.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
-        m_HistoryColor[i] = m_Device->CreateTexture(d);
+        m_HistoryColor[i] = m_Device->CreateTextureHandle(d);   // A-3
     }
     rhi::SamplerDesc sd;
     sd.minFilter = sd.magFilter = rhi::FilterMode::Linear;
     sd.addressU  = sd.addressV  = rhi::AddressMode::ClampToEdge;
-    m_HistorySampler = m_Device->CreateSampler(sd);
+    m_HistorySampler = m_Device->CreateSamplerHandle(sd);   // A-3
 
     // 点采样器：用于 current color、depth、normal、velocity 等不需要插值的纹理
     rhi::SamplerDesc psd;
     psd.minFilter = psd.magFilter = rhi::FilterMode::Nearest;
     psd.addressU  = psd.addressV  = rhi::AddressMode::ClampToEdge;
-    m_PointSampler = m_Device->CreateSampler(psd);
+    m_PointSampler = m_Device->CreateSamplerHandle(psd);   // A-3
 }
 
 void AA_TAA::CreatePSO() {
@@ -108,8 +108,8 @@ void AA_TAA::CreatePSO() {
     desc.pushConstantRanges  = {pc};
     desc.descriptorSetLayouts = {m_DescLayout};
     desc.debugName            = "AA_TAA";
-    m_PSO = m_Device->CreatePipelineState(desc);
-    HE_ASSERT(m_PSO, "AA_TAA: PSO creation failed");
+    m_PSO = m_Device->CreatePipelineStateHandle(desc);   // A-3
+    HE_ASSERT(m_PSO.IsValid(), "AA_TAA: PSO 句柄创建失败");
 }
 
 void AA_TAA::Shutdown() {
@@ -120,12 +120,12 @@ void AA_TAA::Shutdown() {
     if (m_Device && m_DescLayout != rhi::kInvalidLayout) {
         m_Device->DestroyDescriptorSetLayout(m_DescLayout);
     }
-    m_PSO.reset();
-    m_UniformBuffer.reset();
-    m_HistoryColor[0].reset();
-    m_HistoryColor[1].reset();
-    m_HistorySampler.reset();
-    m_PointSampler.reset();
+    m_Device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};
+    m_Device->DestroyBufferHandle(m_UniformBuffer); m_UniformBuffer = {};
+    m_Device->DestroyTextureHandle(m_HistoryColor[0]); m_HistoryColor[0] = {};
+    m_Device->DestroyTextureHandle(m_HistoryColor[1]); m_HistoryColor[1] = {};
+    m_Device->DestroySamplerHandle(m_HistorySampler); m_HistorySampler = {};
+    m_Device->DestroySamplerHandle(m_PointSampler); m_PointSampler = {};
     m_Device = nullptr;
     m_Ready  = false;
     HE_CORE_INFO("AA_TAA shutdown");
@@ -135,8 +135,8 @@ void AA_TAA::OnResize(u32 w, u32 h) {
     if (w == m_Width && h == m_Height) return;
     m_Width  = w;
     m_Height = h;
-    m_HistoryColor[0].reset();
-    m_HistoryColor[1].reset();
+    m_Device->DestroyTextureHandle(m_HistoryColor[0]); m_HistoryColor[0] = {};
+    m_Device->DestroyTextureHandle(m_HistoryColor[1]); m_HistoryColor[1] = {};
     CreateHistoryTextures(w, h);
     // 首帧使用当前帧 → 重设 read/write
     m_HistoryRead  = 0;
@@ -149,7 +149,7 @@ void AA_TAA::SetInput(rhi::IRHITexture* color, rhi::IRHISampler* /*sampler*/) {
     if (m_InputColor) {
         // CurrentColor 使用点采样（最近邻），避免对已抖动 HDR 颜色做线性插值模糊
         m_Device->UpdateDescriptorSet(m_DescSet, kTAABindCurrentColor, rhi::DescriptorType::CombinedImageSampler,
-                                      m_InputColor, m_PointSampler.get());
+                                      m_InputColor, m_Device->ResolveSampler(m_PointSampler));
     }
 }
 
@@ -163,7 +163,7 @@ void AA_TAA::SetGBufferInputs(rhi::IRHITexture* depth,
     // Depth/Normal/Velocity 使用点采样（最近邻），避免深度边界或法线方向因线性滤波失真
     auto bind = [&](u32 b, rhi::IRHITexture* t) {
         if (t) m_Device->UpdateDescriptorSet(m_DescSet, b, rhi::DescriptorType::CombinedImageSampler,
-                                             t, m_PointSampler.get());
+                                             t, m_Device->ResolveSampler(m_PointSampler));
     };
     bind(2, depth);
     bind(3, normal);
@@ -195,10 +195,12 @@ void AA_TAA::UpdateUniforms(const float4x4& prevViewProj,
     uniforms.blendFactor     = (m_FrameIndex <= 1) ? 1.0f : 0.1f; // 10% 当前帧加速收敛
     uniforms.unused          = 0.0f;
 
-    void* mapped = m_UniformBuffer->Map();
+    auto* ub     = m_Device->ResolveBuffer(m_UniformBuffer);
+    HE_ASSERT(ub, "AA_TAA: TAA UBO 句柄解析失败");
+    void* mapped = ub ? ub->Map() : nullptr;
     if (mapped) {
         memcpy(mapped, &uniforms, sizeof(uniforms));
-        m_UniformBuffer->Unmap();
+        if (auto* ubu = m_Device->ResolveBuffer(m_UniformBuffer)) ubu->Unmap();
     }
 }
 
@@ -220,11 +222,11 @@ void AA_TAA::OnBeginFrame() {
 }
 
 rhi::IRHITexture* AA_TAA::GetOutputTexture() const {
-    return m_HistoryColor[m_HistoryRead].get();
+    return m_Device->ResolveTexture(m_HistoryColor[m_HistoryRead]);
 }
 
 rhi::IRHISampler* AA_TAA::GetOutputSampler() const {
-    return m_HistorySampler.get();
+    return m_Device->ResolveSampler(m_HistorySampler);
 }
 
 void AA_TAA::Render(rhi::IRHICommandList* cmd) {
@@ -232,9 +234,9 @@ void AA_TAA::Render(rhi::IRHICommandList* cmd) {
 
     // 更新 history 纹理绑定到当前 read buffer
     m_Device->UpdateDescriptorSet(m_DescSet, kTAABindHistoryColor, rhi::DescriptorType::CombinedImageSampler,
-                                  m_HistoryColor[m_HistoryRead].get(), m_HistorySampler.get());
+                                  m_Device->ResolveTexture(m_HistoryColor[m_HistoryRead]), m_Device->ResolveSampler(m_HistorySampler));
 
-    cmd->SetPipeline(m_PSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
     cmd->SetViewport({0, (float)m_Height, (float)m_Width, -(float)m_Height, 0, 1});
     cmd->SetScissor({0, 0, m_Width, m_Height});
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSet);
@@ -244,7 +246,7 @@ void AA_TAA::Render(rhi::IRHICommandList* cmd) {
     cmd->SetPushConstants(0, sizeof(pc), &pc);
 
     // 在 render pass 内执行 TAA resolve 绘制（自拥有输出纹理，无深度）
-    cmd->BeginOffscreenPass(m_HistoryColor[m_HistoryWrite]->GetNativeHandle(),
+    cmd->BeginOffscreenPass(m_Device->ResolveTexture(m_HistoryColor[m_HistoryWrite])->GetNativeHandle(),
                             nullptr, m_Width, m_Height, nullptr, false);
     // 全屏三角形
     cmd->Draw(3);
