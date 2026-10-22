@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Threading/RenderThreadContext.h"   // T2.6：帧上下文（唯一 RHI 出口）
+
 // ============================================================
 // Nanite/NaniteRaster.h — 光栅端（消费计数 → 间接绘制链；任务 16 起消费**可见簇列表**）
 //
@@ -428,6 +430,28 @@ private:
     bool EnsureGBufferClearResources();
 
     rhi::IRHIDevice* m_Device = nullptr;
+
+    /// 【T2.6】本帧的渲染线程上下文（可空；空时解析回退 `m_Device`）
+    const RenderThreadContext* m_FrameCtx = nullptr;
+
+    /// 【T2.6】设置本帧的渲染线程上下文（搬迁过渡期用）
+    void SetFrameContext(const RenderThreadContext* ctx) { m_FrameCtx = ctx; }
+
+    // 【T2.6】统一解析入口。回退分支必须直接调 m_Device->Resolve*（不能被批量替换命中，
+    // 否则会变成无限递归——此前在 GBufferRenderer 上踩过栈溢出）。
+    [[nodiscard]] rhi::IRHIBuffer* ResB(rhi::RHIBufferHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolveBuffer(h);
+        return m_Device ? m_Device->ResolveBuffer(h) : nullptr;
+    }
+    [[nodiscard]] rhi::IRHITexture* ResT(rhi::RHITextureHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolveTexture(h);
+        return m_Device ? m_Device->ResolveTexture(h) : nullptr;
+    }
+    [[nodiscard]] rhi::IRHIPipelineState* ResP(rhi::RHIPipelineStateHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolvePipelineState(h);
+        return m_Device ? m_Device->ResolvePipelineState(h) : nullptr;
+    }
+
     u32 m_Width  = 0;
     u32 m_Height = 0;
 

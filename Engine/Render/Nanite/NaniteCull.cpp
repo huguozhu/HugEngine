@@ -195,9 +195,9 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     };
     m_Layout = m_Device->CreateDescriptorSetLayout(layout);
     m_Set    = m_Device->AllocateDescriptorSet(m_Layout);
-    m_Device->UpdateDescriptorSet(m_Set, 0, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_FakeClusterBuf));
-    m_Device->UpdateDescriptorSet(m_Set, 1, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_IndirectCmdBuf));
-    m_Device->UpdateDescriptorSet(m_Set, 2, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_CountBuf));
+    m_Device->UpdateDescriptorSet(m_Set, 0, rhi::DescriptorType::StorageBuffer, ResB(m_FakeClusterBuf));
+    m_Device->UpdateDescriptorSet(m_Set, 1, rhi::DescriptorType::StorageBuffer, ResB(m_IndirectCmdBuf));
+    m_Device->UpdateDescriptorSet(m_Set, 2, rhi::DescriptorType::StorageBuffer, ResB(m_CountBuf));
 
     // ── 3. compute PSO ──
     m_CS.stage      = rhi::ShaderStage::Compute;
@@ -230,11 +230,11 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         };
         m_InstanceCullLayout = m_Device->CreateDescriptorSetLayout(cullLayout);
         m_InstanceCullSet    = m_Device->AllocateDescriptorSet(m_InstanceCullLayout);
-        m_Device->UpdateDescriptorSet(m_InstanceCullSet, 0, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_InstanceBuf));
-        m_Device->UpdateDescriptorSet(m_InstanceCullSet, 1, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_InstanceSphereBuf));
-        m_Device->UpdateDescriptorSet(m_InstanceCullSet, 2, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_VisibleInstanceBuf));
-        m_Device->UpdateDescriptorSet(m_InstanceCullSet, 3, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_VisibleInstanceCountBuf));
-        m_Device->UpdateDescriptorSet(m_InstanceCullSet, 4, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_VisibleMaskBuf));
+        m_Device->UpdateDescriptorSet(m_InstanceCullSet, 0, rhi::DescriptorType::StorageBuffer, ResB(m_InstanceBuf));
+        m_Device->UpdateDescriptorSet(m_InstanceCullSet, 1, rhi::DescriptorType::StorageBuffer, ResB(m_InstanceSphereBuf));
+        m_Device->UpdateDescriptorSet(m_InstanceCullSet, 2, rhi::DescriptorType::StorageBuffer, ResB(m_VisibleInstanceBuf));
+        m_Device->UpdateDescriptorSet(m_InstanceCullSet, 3, rhi::DescriptorType::StorageBuffer, ResB(m_VisibleInstanceCountBuf));
+        m_Device->UpdateDescriptorSet(m_InstanceCullSet, 4, rhi::DescriptorType::StorageBuffer, ResB(m_VisibleMaskBuf));
 
         m_InstanceCullCS.stage      = rhi::ShaderStage::Compute;
         m_InstanceCullCS.spirv      = k_Nanite_InstanceCull_comp_spv;
@@ -381,23 +381,23 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         };
         m_BVHLayout = m_Device->CreateDescriptorSetLayout(bvhLayout);
         m_BVHSet    = m_Device->AllocateDescriptorSet(m_BVHLayout);
-        m_Device->UpdateDescriptorSet(m_BVHSet, 0, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_BVHNodeBuf));
-        m_Device->UpdateDescriptorSet(m_BVHSet, 1, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_BVHLeafBuf));
-        m_Device->UpdateDescriptorSet(m_BVHSet, 2, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_BVHSphereBuf));
-        m_Device->UpdateDescriptorSet(m_BVHSet, 3, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_InstanceBuf));
-        m_Device->UpdateDescriptorSet(m_BVHSet, 4, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_VisibleClusterBuf));
-        m_Device->UpdateDescriptorSet(m_BVHSet, 5, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_VisibleClusterCountBuf));
-        m_Device->UpdateDescriptorSet(m_BVHSet, 6, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_VisibleMaskBuf));
-        m_Device->UpdateDescriptorSet(m_BVHSet, 7, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_LODInfoBuf));
-        m_Device->UpdateDescriptorSet(m_BVHSet, 8, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ChainParamBuf));
-        m_Device->UpdateDescriptorSet(m_BVHSet, 9, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_CullStatsBuf));
+        m_Device->UpdateDescriptorSet(m_BVHSet, 0, rhi::DescriptorType::StorageBuffer, ResB(m_BVHNodeBuf));
+        m_Device->UpdateDescriptorSet(m_BVHSet, 1, rhi::DescriptorType::StorageBuffer, ResB(m_BVHLeafBuf));
+        m_Device->UpdateDescriptorSet(m_BVHSet, 2, rhi::DescriptorType::StorageBuffer, ResB(m_BVHSphereBuf));
+        m_Device->UpdateDescriptorSet(m_BVHSet, 3, rhi::DescriptorType::StorageBuffer, ResB(m_InstanceBuf));
+        m_Device->UpdateDescriptorSet(m_BVHSet, 4, rhi::DescriptorType::StorageBuffer, ResB(m_VisibleClusterBuf));
+        m_Device->UpdateDescriptorSet(m_BVHSet, 5, rhi::DescriptorType::StorageBuffer, ResB(m_VisibleClusterCountBuf));
+        m_Device->UpdateDescriptorSet(m_BVHSet, 6, rhi::DescriptorType::StorageBuffer, ResB(m_VisibleMaskBuf));
+        m_Device->UpdateDescriptorSet(m_BVHSet, 7, rhi::DescriptorType::StorageBuffer, ResB(m_LODInfoBuf));
+        m_Device->UpdateDescriptorSet(m_BVHSet, 8, rhi::DescriptorType::StorageBuffer, ResB(m_ChainParamBuf));
+        m_Device->UpdateDescriptorSet(m_BVHSet, 9, rhi::DescriptorType::StorageBuffer, ResB(m_CullStatsBuf));
         // 【任务 16】可见簇 → 间接绘制参数的三条绑定
         m_Device->UpdateDescriptorSet(m_BVHSet, 11, rhi::DescriptorType::StorageBuffer,
-                                      m_Device->ResolveBuffer(m_ClusterDrawRangeBuf));
+                                      ResB(m_ClusterDrawRangeBuf));
         m_Device->UpdateDescriptorSet(m_BVHSet, 12, rhi::DescriptorType::StorageBuffer,
-                                      m_Device->ResolveBuffer(m_IndirectDrawBuf));
+                                      ResB(m_IndirectDrawBuf));
         m_Device->UpdateDescriptorSet(m_BVHSet, 13, rhi::DescriptorType::StorageBuffer,
-                                      m_Device->ResolveBuffer(m_DrawCountBuf));
+                                      ResB(m_DrawCountBuf));
 
         // 【任务 15】Hi-Z 采样器（本类自建；口径与既有 Hi-Z 采样器一致：点采样 + ClampToEdge
         //   + mip 0..8）。**为什么不借用 GPUCulling 的采样器**：§14.3 禁止模块 include
@@ -426,7 +426,7 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
             m_HiZPlaceholderTex = m_Device->CreateTextureHandle(td);   // A-3
             if (!m_HiZPlaceholderTex.IsValid()) { HE_CORE_ERROR("NaniteCull: Hi-Z 占位纹理创建失败"); return false; }
             m_Device->UpdateDescriptorSet(m_BVHSet, 10, rhi::DescriptorType::CombinedImageSampler,
-                                          m_Device->ResolveTexture(m_HiZPlaceholderTex), m_Device->ResolveSampler(m_HiZSampler));
+                                          ResT(m_HiZPlaceholderTex), m_Device->ResolveSampler(m_HiZSampler));
         }
 
         m_BVHCS.stage      = rhi::ShaderStage::Compute;
@@ -494,11 +494,11 @@ bool NaniteCull::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     ResetInstanceCullBuffers();
 
     // 【任务 15】清零源恒为 0 + 哨兵源恒为 0xFF（只在这里写一次，之后只被 GPU 当 TRANSFER_SRC 读）
-    if (void* p = m_ClearZeroBuf.IsValid() ? m_Device->ResolveBuffer(m_ClearZeroBuf)->Map() : nullptr) {
+    if (void* p = m_ClearZeroBuf.IsValid() ? ResB(m_ClearZeroBuf)->Map() : nullptr) {
         auto* bytes = static_cast<u8*>(p);
         std::memset(bytes, 0x00, (size_t)kNaniteZeroSourceBytes);                          // 计数器清零源
         std::memset(bytes + kNaniteZeroSourceBytes, 0xFF, (size_t)kNaniteIndirectSentinelBytes);  // 命令哨兵源
-        if (auto* ub = m_Device->ResolveBuffer(m_ClearZeroBuf)) ub->Unmap();
+        if (auto* ub = ResB(m_ClearZeroBuf)) ub->Unmap();
     }
 
     HE_CORE_INFO("NaniteCull: 初始化完成（计数→间接绘制链；容量 {} 簇，当前 {} 簇）",
@@ -617,24 +617,24 @@ void NaniteCull::ResetFrameBuffers() {
     // 两帧原子累加叠加（任务 13 实测恰为 2 倍）。这里保留主机写只是因为"启动时还没有任何已提交的
     // GPU 工作"，主机写是安全的。
     // 计数清零：GPU 的 InterlockedAdd 从 0 开始，最终值 = 实际写入的命令条数
-    if (void* p = m_CountBuf.IsValid() ? m_Device->ResolveBuffer(m_CountBuf)->Map() : nullptr) {
+    if (void* p = m_CountBuf.IsValid() ? ResB(m_CountBuf)->Map() : nullptr) {
         *static_cast<u32*>(p) = 0u;
-        if (auto* ub = m_Device->ResolveBuffer(m_CountBuf)) ub->Unmap();
+        if (auto* ub = ResB(m_CountBuf)) ub->Unmap();
     }
     // 光栅化簇计数清零（绘制端每帧重新累加）
-    if (void* p = m_RasterCountBuf.IsValid() ? m_Device->ResolveBuffer(m_RasterCountBuf)->Map() : nullptr) {
+    if (void* p = m_RasterCountBuf.IsValid() ? ResB(m_RasterCountBuf)->Map() : nullptr) {
         *static_cast<u32*>(p) = 0u;
-        if (auto* ub = m_Device->ResolveBuffer(m_RasterCountBuf)) ub->Unmap();
+        if (auto* ub = ResB(m_RasterCountBuf)) ub->Unmap();
     }
     // 间接命令缓冲填哨兵：读回时"非哨兵且字段合法"的条目数即 GPU 真正写过的命令数
-    if (void* p = m_IndirectCmdBuf.IsValid() ? m_Device->ResolveBuffer(m_IndirectCmdBuf)->Map() : nullptr) {
+    if (void* p = m_IndirectCmdBuf.IsValid() ? ResB(m_IndirectCmdBuf)->Map() : nullptr) {
         std::memset(p, 0xFF, sizeof(NaniteIndirectCommand) * kNaniteMaxFakeClusters);
-        if (auto* ub = m_Device->ResolveBuffer(m_IndirectCmdBuf)) ub->Unmap();
+        if (auto* ub = ResB(m_IndirectCmdBuf)) ub->Unmap();
     }
 }
 
 void NaniteCull::UploadFakeClusters() {
-    void* p = m_FakeClusterBuf.IsValid() ? m_Device->ResolveBuffer(m_FakeClusterBuf)->Map() : nullptr;
+    void* p = m_FakeClusterBuf.IsValid() ? ResB(m_FakeClusterBuf)->Map() : nullptr;
     if (!p) return;
     auto* clusters = static_cast<NaniteFakeCluster*>(p);
     for (u32 i = 0; i < m_FakeClusterCount; ++i) {
@@ -643,7 +643,7 @@ void NaniteCull::UploadFakeClusters() {
         clusters[i].triangleCount = 1u;     // 每簇 1 个三角形
         clusters[i]._pad          = 0u;
     }
-    if (auto* ub = m_Device->ResolveBuffer(m_FakeClusterBuf)) ub->Unmap();
+    if (auto* ub = ResB(m_FakeClusterBuf)) ub->Unmap();
 }
 
 void NaniteCull::RecordCullPass(rhi::IRHICommandList* cmd) {
@@ -662,11 +662,11 @@ void NaniteCull::RecordCullPass(rhi::IRHICommandList* cmd) {
     if (!cmd || !m_ClearZeroBuf.IsValid()) return;   // 防御：Initialize 未成功时不发拷贝/屏障
 
     // ① 三个每帧重置（全部在命令缓冲内；源缓冲在 Initialize 里写好 0 / 0xFF）
-    cmd->CopyBuffer(m_Device->ResolveBuffer(m_ClearZeroBuf), m_Device->ResolveBuffer(m_CountBuf),
+    cmd->CopyBuffer(ResB(m_ClearZeroBuf), ResB(m_CountBuf),
                     sizeof(u32), kNaniteZeroSlotFakeCount, 0u);
-    cmd->CopyBuffer(m_Device->ResolveBuffer(m_ClearZeroBuf), m_Device->ResolveBuffer(m_RasterCountBuf),
+    cmd->CopyBuffer(ResB(m_ClearZeroBuf), ResB(m_RasterCountBuf),
                     sizeof(u32), kNaniteZeroSlotFakeRaster, 0u);
-    cmd->CopyBuffer(m_Device->ResolveBuffer(m_ClearZeroBuf), m_Device->ResolveBuffer(m_IndirectCmdBuf),
+    cmd->CopyBuffer(ResB(m_ClearZeroBuf), ResB(m_IndirectCmdBuf),
                     kNaniteIndirectSentinelBytes,
                     kNaniteZeroSourceBytes,   // 0xFF 段紧跟在 0 段之后
                     0u);
@@ -683,7 +683,7 @@ void NaniteCull::RecordCullPass(rhi::IRHICommandList* cmd) {
     pc.clusterCount          = m_FakeClusterCount;
     pc.vertexCountPerCluster = kNaniteFakeClusterIndexCount;
 
-    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
+    cmd->SetPipeline(ResP(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
 
@@ -828,36 +828,36 @@ void NaniteCull::ResetInstanceCullBuffers() {
     // 【只在 `Initialize` 调一次：这是**启动时的初值**，不是每帧的清零】
     // 每帧的清零必须走命令缓冲（见 `RecordInstanceCullPass` 里的 4B 拷贝），原因见那里的注释。
     // 可见计数清零：GPU 的 InterlockedAdd 从 0 开始，最终值 = 实际写入的可见实例数
-    if (void* p = m_VisibleInstanceCountBuf.IsValid() ? m_Device->ResolveBuffer(m_VisibleInstanceCountBuf)->Map() : nullptr) {
+    if (void* p = m_VisibleInstanceCountBuf.IsValid() ? ResB(m_VisibleInstanceCountBuf)->Map() : nullptr) {
         *static_cast<u32*>(p) = 0u;
-        if (auto* ub = m_Device->ResolveBuffer(m_VisibleInstanceCountBuf)) ub->Unmap();
+        if (auto* ub = ResB(m_VisibleInstanceCountBuf)) ub->Unmap();
     }
     // 可见列表填哨兵：让"未写过的槽位"在调试时一眼可辨。
     // 【注意】每帧**不再**重置列表：读回只取 `[0, 计数)`，而这些槽位必定由**同一次派发**写入
     //   （计数与列表写在同一个着色器里），因此列表不需要逐帧清 —— 这同时消掉了"主机 memset
     //   与 GPU 派发竞争"的隐患（清早了/清晚了都会让读回读到被抹掉的槽位）。
-    if (void* p = m_VisibleInstanceBuf.IsValid() ? m_Device->ResolveBuffer(m_VisibleInstanceBuf)->Map() : nullptr) {
+    if (void* p = m_VisibleInstanceBuf.IsValid() ? ResB(m_VisibleInstanceBuf)->Map() : nullptr) {
         std::memset(p, 0xFF, sizeof(u32) * kNaniteMaxTestInstances);
-        if (auto* ub = m_Device->ResolveBuffer(m_VisibleInstanceBuf)) ub->Unmap();
+        if (auto* ub = ResB(m_VisibleInstanceBuf)) ub->Unmap();
     }
     // 【任务 15】可见性掩码填哨兵（只在启动时；每帧 Phase 1 会对**每个**实例显式写 0/1 ⇒ 无需清零）
-    if (void* p = m_VisibleMaskBuf.IsValid() ? m_Device->ResolveBuffer(m_VisibleMaskBuf)->Map() : nullptr) {
+    if (void* p = m_VisibleMaskBuf.IsValid() ? ResB(m_VisibleMaskBuf)->Map() : nullptr) {
         std::memset(p, 0xFF, sizeof(u32) * kNaniteMaxTestInstances);
-        if (auto* ub = m_Device->ResolveBuffer(m_VisibleMaskBuf)) ub->Unmap();
+        if (auto* ub = ResB(m_VisibleMaskBuf)) ub->Unmap();
     }
 }
 
 void NaniteCull::UploadInstanceCullInputs() {
     if (m_TestInstanceCount > 0u) {
-        if (void* p = m_InstanceBuf.IsValid() ? m_Device->ResolveBuffer(m_InstanceBuf)->Map() : nullptr) {
+        if (void* p = m_InstanceBuf.IsValid() ? ResB(m_InstanceBuf)->Map() : nullptr) {
             std::memcpy(p, m_TestInstances.data(),
                         sizeof(NaniteInstanceGpuObject) * m_TestInstanceCount);
-            if (auto* ub = m_Device->ResolveBuffer(m_InstanceBuf)) ub->Unmap();
+            if (auto* ub = ResB(m_InstanceBuf)) ub->Unmap();
         }
-        if (void* p = m_InstanceSphereBuf.IsValid() ? m_Device->ResolveBuffer(m_InstanceSphereBuf)->Map() : nullptr) {
+        if (void* p = m_InstanceSphereBuf.IsValid() ? ResB(m_InstanceSphereBuf)->Map() : nullptr) {
             std::memcpy(p, m_TestSpheres.data(),
                         sizeof(NaniteInstanceSphere) * m_TestInstanceCount);
-            if (auto* ub = m_Device->ResolveBuffer(m_InstanceSphereBuf)) ub->Unmap();
+            if (auto* ub = ResB(m_InstanceSphereBuf)) ub->Unmap();
         }
     }
 }
@@ -911,7 +911,7 @@ void NaniteCull::RecordInstanceCullPass(rhi::IRHICommandList* cmd) {
     //   修法改掉（见 `RecordCullPass`）；本文件里剩下的每帧主机写只有"内容逐帧相同的输入表"。
     // 【为什么用拷贝而不是 `vkCmdFillBuffer`】RHI 目前只暴露 `CopyBuffer`（任务 12 已用它做上传），
     //   不为本任务扩 RHI 面；4B 拷贝的源缓冲常驻 0，语义与 fill 等价。
-    cmd->CopyBuffer(m_Device->ResolveBuffer(m_ClearZeroBuf), m_Device->ResolveBuffer(m_VisibleInstanceCountBuf),
+    cmd->CopyBuffer(ResB(m_ClearZeroBuf), ResB(m_VisibleInstanceCountBuf),
                     sizeof(u32), kNaniteZeroSlotVisibleInstances, 0u);
     // 拷贝写发生在 Transfer 阶段：到计算着色器读之间补一次**真实内存屏障**
     //（`PipelineBarrier` 无资源重载发的是 `VkMemoryBarrier`，不是仅执行依赖）
@@ -927,7 +927,7 @@ void NaniteCull::RecordInstanceCullPass(rhi::IRHICommandList* cmd) {
     std::memcpy(m_InstanceCullParams.planes, m_FrameFrustum.planes, sizeof(m_FrameFrustum.planes));
     m_InstanceCullParams.instanceCount = m_TestInstanceCount;
 
-    cmd->SetPipeline(m_Device->ResolvePipelineState(m_InstanceCullPSO));
+    cmd->SetPipeline(ResP(m_InstanceCullPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_InstanceCullSet);
     cmd->SetPushConstants(0, sizeof(m_InstanceCullParams), &m_InstanceCullParams);
 
@@ -1001,29 +1001,29 @@ bool NaniteCull::SetClusterBVH(std::span<const NaniteClusterRecord> clusters,
     // 【为什么这里是安全的主机写】本函数只在任务 12 的一次性启动路径上被调用，这些缓冲还从未
     //   被任何已提交的 GPU 工作引用 ⇒ 不存在"主机写 vs 派发"的竞争（与任务 13 的计数清零不同）。
     if (!built.nodes.empty()) {
-        if (void* p = m_Device->ResolveBuffer(m_BVHNodeBuf)->Map()) {
+        if (void* p = ResB(m_BVHNodeBuf)->Map()) {
             std::memcpy(p, built.nodes.data(), sizeof(NaniteBVHNode) * built.nodes.size());
-            if (auto* ub = m_Device->ResolveBuffer(m_BVHNodeBuf)) ub->Unmap();
+            if (auto* ub = ResB(m_BVHNodeBuf)) ub->Unmap();
         }
     }
     if (!built.leafClusterIndices.empty()) {
-        if (void* p = m_Device->ResolveBuffer(m_BVHLeafBuf)->Map()) {
+        if (void* p = ResB(m_BVHLeafBuf)->Map()) {
             std::memcpy(p, built.leafClusterIndices.data(),
                         sizeof(u32) * built.leafClusterIndices.size());
-            if (auto* ub = m_Device->ResolveBuffer(m_BVHLeafBuf)) ub->Unmap();
+            if (auto* ub = ResB(m_BVHLeafBuf)) ub->Unmap();
         }
     }
     if (!built.clusterSpheres.empty()) {
-        if (void* p = m_Device->ResolveBuffer(m_BVHSphereBuf)->Map()) {
+        if (void* p = ResB(m_BVHSphereBuf)->Map()) {
             std::memcpy(p, built.clusterSpheres.data(),
                         sizeof(NaniteClusterSphere) * built.clusterSpheres.size());
-            if (auto* ub = m_Device->ResolveBuffer(m_BVHSphereBuf)) ub->Unmap();
+            if (auto* ub = ResB(m_BVHSphereBuf)) ub->Unmap();
         }
     }
     if (!lodInfo.empty()) {
-        if (void* p = m_Device->ResolveBuffer(m_LODInfoBuf)->Map()) {
+        if (void* p = ResB(m_LODInfoBuf)->Map()) {
             std::memcpy(p, lodInfo.data(), sizeof(NaniteClusterLODInfo) * lodInfo.size());
-            if (auto* ub = m_Device->ResolveBuffer(m_LODInfoBuf)) ub->Unmap();
+            if (auto* ub = ResB(m_LODInfoBuf)) ub->Unmap();
         }
     }
 
@@ -1036,9 +1036,9 @@ bool NaniteCull::SetClusterBVH(std::span<const NaniteClusterRecord> clusters,
         drawRanges[i] = NaniteMakeClusterDrawRange(clusters[i]);
     }
     if (!drawRanges.empty()) {
-        if (void* p = m_Device->ResolveBuffer(m_ClusterDrawRangeBuf)->Map()) {
+        if (void* p = ResB(m_ClusterDrawRangeBuf)->Map()) {
             std::memcpy(p, drawRanges.data(), sizeof(NaniteClusterDrawRange) * drawRanges.size());
-            if (auto* ub = m_Device->ResolveBuffer(m_ClusterDrawRangeBuf)) ub->Unmap();
+            if (auto* ub = ResB(m_ClusterDrawRangeBuf)) ub->Unmap();
         }
     }
 
@@ -1208,7 +1208,7 @@ u32 NaniteCull::BuildHiZPyramid(rhi::IRHICommandList* cmd, rhi::IRHITexture* pyr
     const u32 writable = (m_HiZViewCount < mipCount - 1u) ? m_HiZViewCount : (mipCount - 1u);
     if (writable == 0u) return 0u;
 
-    cmd->SetPipeline(m_Device->ResolvePipelineState(m_HiZBuildPSO));
+    cmd->SetPipeline(ResP(m_HiZBuildPSO));
     u32 srcW = screenW;
     u32 srcH = screenH;
     for (u32 level = 0u; level < writable; ++level) {
@@ -1338,22 +1338,22 @@ void NaniteCull::RecordCullChainPass(rhi::IRHICommandList* cmd,
         m_FrameHiZMipCount = 0u;
         cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
                              rhi::ResourceState::Undefined, rhi::ResourceState::ShaderResource,
-                             m_Device->ResolveTexture(m_HiZPlaceholderTex));
+                             ResT(m_HiZPlaceholderTex));
         m_Device->UpdateDescriptorSet(m_BVHSet, 10, rhi::DescriptorType::CombinedImageSampler,
-                                      m_Device->ResolveTexture(m_HiZPlaceholderTex), m_Device->ResolveSampler(m_HiZSampler));
+                                      ResT(m_HiZPlaceholderTex), m_Device->ResolveSampler(m_HiZSampler));
     }
 
     // ── 【与任务 13 同一处修法】计数器的"每帧清零"必须在命令缓冲内完成（GPU 有序）──
     // 录制期的主机写会与派发竞争（CPU 领先 GPU ⇒ 两帧原子累加叠加，任务 13 实测恰为 2 倍）。
     // 本次：可见簇计数（4B）+ 三阶段读数整块（64B）+【任务 16】绘制计数（4B），
     // 都从同一个常驻 0 源缓冲拷贝。
-    cmd->CopyBuffer(m_Device->ResolveBuffer(m_ClearZeroBuf), m_Device->ResolveBuffer(m_VisibleClusterCountBuf),
+    cmd->CopyBuffer(ResB(m_ClearZeroBuf), ResB(m_VisibleClusterCountBuf),
                     sizeof(u32), kNaniteZeroSlotClusterCount, 0u);
-    cmd->CopyBuffer(m_Device->ResolveBuffer(m_ClearZeroBuf), m_Device->ResolveBuffer(m_CullStatsBuf),
+    cmd->CopyBuffer(ResB(m_ClearZeroBuf), ResB(m_CullStatsBuf),
                     kNaniteCullStatsBytes, kNaniteZeroSlotStats, 0u);
     // 【任务 16】绘制计数清零：它同时是"绘制端本帧要画的条数"与"命令条数"的载体，
     //   必须在本帧派发**之前**为 0（否则会残留上一帧的条数 ⇒ 空转/越界画旧命令）。
-    cmd->CopyBuffer(m_Device->ResolveBuffer(m_ClearZeroBuf), m_Device->ResolveBuffer(m_DrawCountBuf),
+    cmd->CopyBuffer(ResB(m_ClearZeroBuf), ResB(m_DrawCountBuf),
                     sizeof(u32), kNaniteZeroSlotDrawCount, 0u);
     cmd->PipelineBarrier(rhi::PipelineStage::Transfer,
                          rhi::PipelineStage::ComputeShader,
@@ -1376,9 +1376,9 @@ void NaniteCull::RecordCullChainPass(rhi::IRHICommandList* cmd,
     m_ChainParams._pad1        = m_FrameDrawCapacity;
     // 【P0 修复】Hi-Z 采样 UV 的 y 翻转（`misc.w`）：负高度视口下 `v = 0.5 - 0.5*ndc.y` 才是
     //   纹理行一致的写法；`false` 是给"历史镜像约定"的可复现 A/B 对照留的（默认 true）。
-    m_ChainParams.hizFlip       = hizFlipY ? 1u : 0u;    if (void* p = m_ChainParamBuf.IsValid() ? m_Device->ResolveBuffer(m_ChainParamBuf)->Map() : nullptr) {
+    m_ChainParams.hizFlip       = hizFlipY ? 1u : 0u;    if (void* p = m_ChainParamBuf.IsValid() ? ResB(m_ChainParamBuf)->Map() : nullptr) {
         std::memcpy(p, &m_ChainParams, sizeof(m_ChainParams));
-        if (auto* ub = m_Device->ResolveBuffer(m_ChainParamBuf)) ub->Unmap();
+        if (auto* ub = ResB(m_ChainParamBuf)) ub->Unmap();
     }
 
     if (m_BVHInstanceDomain == 0u) return;   // 0 实例 ⇒ 不派发；上面已把计数与读数清 0
@@ -1391,7 +1391,7 @@ void NaniteCull::RecordCullChainPass(rhi::IRHICommandList* cmd,
     pc.nodeCount       = (u32)m_BVHData.nodes.size();
     pc.visibleCapacity = kNaniteMaxVisibleClusterRefs;
 
-    cmd->SetPipeline(m_Device->ResolvePipelineState(m_BVHPSO));
+    cmd->SetPipeline(ResP(m_BVHPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_BVHSet);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
 

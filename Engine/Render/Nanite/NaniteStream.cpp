@@ -264,12 +264,12 @@ bool NaniteStream::CreateResources() {
     }
 
     // ── 7. 给光栅端的视图 ──
-    m_Views.clusterPage   = m_Device->ResolveBuffer(m_ClusterPage);
-    m_Views.pageTable     = m_Device->ResolveBuffer(m_PageTable);
-    m_Views.poolClusters  = m_Device->ResolveBuffer(m_PoolClusters);
-    m_Views.poolVertices  = m_Device->ResolveBuffer(m_PoolVertices);
-    m_Views.poolTriangles = m_Device->ResolveBuffer(m_PoolTriangles);
-    m_Views.feedback      = m_FeedbackRing.empty() ? nullptr : m_Device->ResolveBuffer(m_FeedbackRing[0]);
+    m_Views.clusterPage   = ResB(m_ClusterPage);
+    m_Views.pageTable     = ResB(m_PageTable);
+    m_Views.poolClusters  = ResB(m_PoolClusters);
+    m_Views.poolVertices  = ResB(m_PoolVertices);
+    m_Views.poolTriangles = ResB(m_PoolTriangles);
+    m_Views.feedback      = m_FeedbackRing.empty() ? nullptr : ResB(m_FeedbackRing[0]);
     m_Views.clusterStride  = ps.clusterStride;
     m_Views.vertexStride   = ps.vertexStride;
     m_Views.triangleStride = ps.triangleStride;
@@ -291,13 +291,13 @@ void NaniteStream::UploadPage(u32 page, u32 slot) {
     {
         const u32 begin = m_Plan.pageClusterBegin[page];
         const u32 count = m_Plan.pageClusterCount[page];
-        if (void* p = m_Device->ResolveBuffer(m_PoolClusters)->Map()) {
+        if (void* p = ResB(m_PoolClusters)->Map()) {
             NaniteClusterRecord* dst = static_cast<NaniteClusterRecord*>(p);
             for (u32 k = 0u; k < count; ++k) {
                 dst[(usize)slot * ps.clusterStride + k] =
                     m_Asset->clusters[m_CollectedClusterIndex[begin + k]];
             }
-            if (auto* b = m_Device->ResolveBuffer(m_PoolClusters)) b->Unmap();
+            if (auto* b = ResB(m_PoolClusters)) b->Unmap();
             ok = true;
         }
     }
@@ -308,22 +308,22 @@ void NaniteStream::UploadPage(u32 page, u32 slot) {
         const u32 vCount = m_Plan.pageVertexCount[page];
         const u32 tBegin = m_Plan.pageTriangleBegin[page];
         const u32 tCount = m_Plan.pageTriangleCount[page];
-        if (void* p = m_Device->ResolveBuffer(m_PoolVertices)->Map()) {
+        if (void* p = ResB(m_PoolVertices)->Map()) {
             NaniteVertex* dst = static_cast<NaniteVertex*>(p);
             std::memcpy(dst + (usize)slot * ps.vertexStride,
                         m_Asset->vertices.data() + vBegin,
                         (usize)vCount * sizeof(NaniteVertex));
-            if (auto* b = m_Device->ResolveBuffer(m_PoolVertices)) b->Unmap();
+            if (auto* b = ResB(m_PoolVertices)) b->Unmap();
             ok = true;
         }
         if (ok) {
             ok = false;
-            if (void* p = m_Device->ResolveBuffer(m_PoolTriangles)->Map()) {
+            if (void* p = ResB(m_PoolTriangles)->Map()) {
                 NanitePackedTriangle* dst = static_cast<NanitePackedTriangle*>(p);
                 std::memcpy(dst + (usize)slot * ps.triangleStride,
                             m_Asset->triangles.data() + tBegin,
                             (usize)tCount * sizeof(NanitePackedTriangle));
-                if (auto* b = m_Device->ResolveBuffer(m_PoolTriangles)) b->Unmap();
+                if (auto* b = ResB(m_PoolTriangles)) b->Unmap();
                 ok = true;
             }
         }
@@ -403,8 +403,8 @@ void NaniteStream::BeginFrame(u32 frameIndex) {
         const u32 ring = frameIndex % m_Config.feedbackLatency;
         // 【视图必须跟着本帧的环槽走】帧 N 的 GPU 请求要写进环槽 N % L，而 CPU 在帧 N+L 读它
         //   ⇒ "请求到驻留的延迟"就**恰好**是 `feedbackLatency`，不需要任何时间戳。
-        m_Views.feedback = m_Device->ResolveBuffer(m_FeedbackRing[ring]);
-        rhi::IRHIBuffer* buf = m_Device->ResolveBuffer(m_FeedbackRing[ring]);
+        m_Views.feedback = ResB(m_FeedbackRing[ring]);
+        rhi::IRHIBuffer* buf = ResB(m_FeedbackRing[ring]);
         if (void* p = buf->Map()) {
             const u32* w = static_cast<const u32*>(p);
             u32 count = w[kNanitePageFeedbackCountSlot];
@@ -459,10 +459,10 @@ void NaniteStream::BeginFrame(u32 frameIndex) {
 
     // ── ③ 重写页表（只在真的改过时；整表 = pageCount × 16B，Sponza 约 17 页 ⇒ 272B）──
     if (m_TableDirty != 0u) {
-        if (void* p = m_Device->ResolveBuffer(m_PageTable)->Map()) {
+        if (void* p = ResB(m_PageTable)->Map()) {
             std::memcpy(p, m_TableCPU.data(),
                         (usize)m_Plan.pageCount * sizeof(NanitePageTableEntry));
-            if (auto* b = m_Device->ResolveBuffer(m_PageTable)) b->Unmap();
+            if (auto* b = ResB(m_PageTable)) b->Unmap();
         }
         m_TableDirty = 0u;
     }
@@ -489,12 +489,12 @@ bool NaniteStream::PageTableSelfConsistent(u32& outResident, u32& outNonResident
 u32 NaniteStream::ReadbackGpuResidentPages() {
     if (!m_Ready || !m_PageTable.IsValid()) return 0u;
     u32 resident = 0u;
-    if (void* p = m_Device->ResolveBuffer(m_PageTable)->Map()) {
+    if (void* p = ResB(m_PageTable)->Map()) {
         const NanitePageTableEntry* table = static_cast<const NanitePageTableEntry*>(p);
         for (u32 page = 0u; page < m_Plan.pageCount; ++page) {
             if (table[page].resident != 0u) ++resident;
         }
-        if (auto* b = m_Device->ResolveBuffer(m_PageTable)) b->Unmap();
+        if (auto* b = ResB(m_PageTable)) b->Unmap();
     }
     return resident;
 }
