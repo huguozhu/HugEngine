@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Threading/RenderThreadContext.h"   // T2.6：帧上下文（唯一 RHI 出口）
+
 #include "Pipeline/Material.h"  // kMaxGPUObjects
 #include "RHI/RHI.h"
 #include "RHI/Shader.h"
@@ -104,6 +106,30 @@ public:
 private:
     bool m_Initialized = false;
     rhi::IRHIDevice* m_Device = nullptr;  // 缓存设备指针（描述符更新用）
+
+    /// 【T2.6】本帧的渲染线程上下文（可空；空时解析回退 `m_Device`）
+    const RenderThreadContext* m_FrameCtx = nullptr;
+
+public:
+    void SetFrameContext(const RenderThreadContext* ctx) { m_FrameCtx = ctx; }
+
+    [[nodiscard]] rhi::IRHIBuffer* ResB(rhi::RHIBufferHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolveBuffer(h);
+        return m_Device ? m_Device->ResolveBuffer(h) : nullptr;
+    }
+    [[nodiscard]] rhi::IRHITexture* ResT(rhi::RHITextureHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolveTexture(h);
+        return m_Device ? m_Device->ResolveTexture(h) : nullptr;
+    }
+    [[nodiscard]] rhi::IRHIPipelineState* ResP(rhi::RHIPipelineStateHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolvePipelineState(h);
+        return m_Device ? m_Device->ResolvePipelineState(h) : nullptr;
+    }
+    [[nodiscard]] rhi::IRHISampler* ResS(rhi::RHISamplerHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolveSampler(h);
+        return m_Device ? m_Device->ResolveSampler(h) : nullptr;
+    }
+
 
     // 单阶段/Phase 1 PSO
     rhi::ShaderBytecode m_CS;

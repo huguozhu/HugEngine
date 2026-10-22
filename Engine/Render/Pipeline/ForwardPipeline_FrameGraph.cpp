@@ -45,8 +45,8 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera)
     u32 w = m_HDRWidth, h = m_HDRHeight;
     // HDR 颜色/深度按**飞行帧槽位**导入：两者每帧清空重画，单份会与在飞帧的 ToneMap 采样竞争
     // （实测症状：大片画面突然纯黑），详见 ForwardPipeline.h 里 m_HDRTarget 的说明
-    auto hdrColor = rg.ImportTexture("HDR_Color", m_Device->ResolveTexture(m_HDRTarget[RenderFrameSlot()]));
-    auto hdrDepth = rg.ImportTexture("HDR_Depth", m_Device->ResolveTexture(m_HDRDepth[RenderFrameSlot()]));
+    auto hdrColor = rg.ImportTexture("HDR_Color", ResT(m_HDRTarget[RenderFrameSlot()]));
+    auto hdrDepth = rg.ImportTexture("HDR_Depth", ResT(m_HDRDepth[RenderFrameSlot()]));
     auto backBuf  = rg.ImportBackBuffer();
 
     // --- Pass 0: Shadow — CSM 级联 + Point Cubemap 阴影贴图渲染 ---
@@ -166,12 +166,12 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera)
                 // 缓存光源到 CPU（供 Cluster 剔除使用）
                 m_CachedLights.resize(pc.lightCount);
                 auto* gpuLights = static_cast<const GPULight*>(
-                    m_Device->ResolveBuffer(m_LightBuffers[RenderFrameSlot()])->Map());
+                    ResB(m_LightBuffers[RenderFrameSlot()])->Map());
                 if (gpuLights && pc.lightCount > 0) {
                     memcpy(m_CachedLights.data(), gpuLights,
                            pc.lightCount * sizeof(GPULight));
                 }
-                if (auto* lbu = m_Device->ResolveBuffer(m_LightBuffers[RenderFrameSlot()])) lbu->Unmap();
+                if (auto* lbu = ResB(m_LightBuffers[RenderFrameSlot()])) lbu->Unmap();
 
                 // 构建 Cluster AABB + CPU 端光源剔除
                 float4x4 invVP = glm::inverse(camera.GetViewProjMatrix());
@@ -261,7 +261,7 @@ void ForwardPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera)
     rg.AddPass("ToneMap", {{hdrColor, ResourceAccess::Read}}, {{backBuf, ResourceAccess::Write}},
         [this, swapFmt](rhi::IRHICommandList* c) {
             m_ToneMap->SetFrameSlot(RenderFrameSlot());   // HDR 目标按槽位轮换，输入集同步分槽
-            m_ToneMap->SetInput(m_Device->ResolveTexture(m_HDRTarget[RenderFrameSlot()]), m_HDRSampler.get());
+            m_ToneMap->SetInput(ResT(m_HDRTarget[RenderFrameSlot()]), m_HDRSampler.get());
             m_ToneMap->PreBind(c);
             c->BeginRenderPass(1, swapFmt);
             m_ToneMap->Render(c);

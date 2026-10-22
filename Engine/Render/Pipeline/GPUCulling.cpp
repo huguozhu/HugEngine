@@ -112,7 +112,7 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
         d.cpuAccess = true;
         m_IndirectCmdBuf = device->CreateBufferHandle(d);   // A-3
         HE_ASSERT(m_IndirectCmdBuf.IsValid(), "GPUCulling: 间接命令缓冲句柄创建失败");
-        device->UpdateDescriptorSet(m_DescSet, kCullBindIndirectCmds, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_IndirectCmdBuf));
+        device->UpdateDescriptorSet(m_DescSet, kCullBindIndirectCmds, rhi::DescriptorType::StorageBuffer, ResB(m_IndirectCmdBuf));
     }
     {
         rhi::BufferDesc d;
@@ -122,11 +122,11 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
         m_DrawCountBuf = device->CreateBufferHandle(d);   // A-3
         HE_ASSERT(m_DrawCountBuf.IsValid(), "GPUCulling: 绘制计数缓冲句柄创建失败");
         // 零初始化：首帧 Readback 读到 count=0 → 安全回退 CPU 路径
-        auto* dcB    = m_Device->ResolveBuffer(m_DrawCountBuf);
+        auto* dcB    = ResB(m_DrawCountBuf);
         HE_ASSERT(dcB, "GPUCulling: 绘制计数缓冲句柄解析失败");
         u32*  pCount = dcB ? static_cast<u32*>(dcB->Map()) : nullptr;
-        if (pCount) { *pCount = 0; if (auto* ub = m_Device->ResolveBuffer(m_DrawCountBuf)) ub->Unmap(); }
-        device->UpdateDescriptorSet(m_DescSet, kCullBindDrawCount, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_DrawCountBuf));
+        if (pCount) { *pCount = 0; if (auto* ub = ResB(m_DrawCountBuf)) ub->Unmap(); }
+        device->UpdateDescriptorSet(m_DescSet, kCullBindDrawCount, rhi::DescriptorType::StorageBuffer, ResB(m_DrawCountBuf));
     }
 
     // Push constants: 6 planes + float4x4 VP + float2 screen + 2 uint
@@ -170,7 +170,7 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
         d.cpuAccess = true;
         m_CandidateBuf = device->CreateBufferHandle(d);   // A-3
         HE_ASSERT(m_CandidateBuf.IsValid(), "GPUCulling: 候选列表缓冲句柄创建失败");
-        device->UpdateDescriptorSet(m_Phase1Set, kPhase1BindCandidates, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_CandidateBuf));
+        device->UpdateDescriptorSet(m_Phase1Set, kPhase1BindCandidates, rhi::DescriptorType::StorageBuffer, ResB(m_CandidateBuf));
     }
     {
         rhi::BufferDesc d;
@@ -179,7 +179,7 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
         d.cpuAccess = true;
         m_CandidateCountBuf = device->CreateBufferHandle(d);   // A-3
         HE_ASSERT(m_CandidateCountBuf.IsValid(), "GPUCulling: 候选计数缓冲句柄创建失败");
-        device->UpdateDescriptorSet(m_Phase1Set, kPhase1BindCandidateCount, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_CandidateCountBuf));
+        device->UpdateDescriptorSet(m_Phase1Set, kPhase1BindCandidateCount, rhi::DescriptorType::StorageBuffer, ResB(m_CandidateCountBuf));
     }
 
     // ── Phase 2 PSO（5 个 binding）──
@@ -199,9 +199,9 @@ bool GPUCulling::Initialize(rhi::IRHIDevice* device) {
     m_Phase2Set    = device->AllocateDescriptorSet(m_Phase2Layout);
 
     // Phase 2 固定绑定（不变的生命周期）
-    device->UpdateDescriptorSet(m_Phase2Set, kPhase2BindCandidates, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_CandidateBuf));
-    device->UpdateDescriptorSet(m_Phase2Set, kPhase2BindDrawCount, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_DrawCountBuf));
-    device->UpdateDescriptorSet(m_Phase2Set, kPhase2BindIndirectCmds, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_IndirectCmdBuf));
+    device->UpdateDescriptorSet(m_Phase2Set, kPhase2BindCandidates, rhi::DescriptorType::StorageBuffer, ResB(m_CandidateBuf));
+    device->UpdateDescriptorSet(m_Phase2Set, kPhase2BindDrawCount, rhi::DescriptorType::StorageBuffer, ResB(m_DrawCountBuf));
+    device->UpdateDescriptorSet(m_Phase2Set, kPhase2BindIndirectCmds, rhi::DescriptorType::StorageBuffer, ResB(m_IndirectCmdBuf));
     // binding 0 和 3 由 SetSceneBuffer / SetDepthTexture 设置
 
     // Phase 2 push constants: float4x4 vp + float2 screenSize + uint mips + uint count
@@ -354,25 +354,25 @@ void GPUCulling::SetDepthTexture(rhi::IRHIDevice* device, rhi::IRHITexture* dept
 
     // 单阶段/Phase 1: 绑定上帧深度
     device->UpdateDescriptorSet(m_DescSet, kCullBindDepth, rhi::DescriptorType::CombinedImageSampler,
-                                depthTex, m_Device->ResolveSampler(m_HiZSampler));
+                                depthTex, ResS(m_HiZSampler));
     device->UpdateDescriptorSet(m_Phase1Set, 3, rhi::DescriptorType::CombinedImageSampler,
-                                depthTex, m_Device->ResolveSampler(m_HiZSampler));
+                                depthTex, ResS(m_HiZSampler));
 
     // Phase 2: 绑定当前帧深度（GBuffer 之后由外部更新）
     device->UpdateDescriptorSet(m_Phase2Set, kPhase2BindHiZ, rhi::DescriptorType::CombinedImageSampler,
-                                depthTex, m_Device->ResolveSampler(m_HiZSampler));
+                                depthTex, ResS(m_HiZSampler));
 
     // PTG: 绑定深度纹理（与单阶段共用上帧深度）
     if (m_PTGActive) {
         device->UpdateDescriptorSet(m_PTGSet, 2, rhi::DescriptorType::CombinedImageSampler,
-                                    depthTex, m_Device->ResolveSampler(m_HiZSampler));
+                                    depthTex, ResS(m_HiZSampler));
     }
 
     // ── 创建/重建 Hi-Z 纹理 ──
     // A-3：先判句柄有效（过期 ⇒ 视为需要重建），再比较尺寸
     if (!m_HiZTexture.IsValid() ||
-        m_Device->ResolveTexture(m_HiZTexture)->GetWidth()  != width ||
-        m_Device->ResolveTexture(m_HiZTexture)->GetHeight() != height) {
+        ResT(m_HiZTexture)->GetWidth()  != width ||
+        ResT(m_HiZTexture)->GetHeight() != height) {
         m_Device->DestroyTextureHandle(m_HiZTexture);
         m_HiZTexture = {};
 
@@ -396,8 +396,8 @@ void GPUCulling::SetDepthTexture(rhi::IRHIDevice* device, rhi::IRHITexture* dept
                 device->DestroyTextureMipView(m_MipViews[i].sampledView);
                 m_MipViews[i].sampledView = nullptr;
             }
-            m_MipViews[i].storageView = device->CreateTextureMipStorageView(m_Device->ResolveTexture(m_HiZTexture), i);
-            m_MipViews[i].sampledView = device->CreateTextureMipSampledView(m_Device->ResolveTexture(m_HiZTexture), i);
+            m_MipViews[i].storageView = device->CreateTextureMipStorageView(ResT(m_HiZTexture), i);
+            m_MipViews[i].sampledView = device->CreateTextureMipSampledView(ResT(m_HiZTexture), i);
         }
     }
 }
@@ -427,7 +427,7 @@ void GPUCulling::Dispatch(rhi::IRHICommandList* cmd,
     pc.mips  = hizMips;
     pc.count = objectCount;
 
-    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
+    cmd->SetPipeline(ResP(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSet);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
 
@@ -465,15 +465,15 @@ void GPUCulling::DispatchPhase1(rhi::IRHICommandList* cmd, const float4x4& viewP
     pc.count = objectCount;
 
     // 清零候选计数
-    auto* ccB      = m_Device->ResolveBuffer(m_CandidateCountBuf);
+    auto* ccB      = ResB(m_CandidateCountBuf);
     HE_ASSERT(ccB, "GPUCulling: 候选计数缓冲句柄解析失败");
     void* countPtr = ccB ? ccB->Map() : nullptr;
     if (countPtr) {
         std::memset(countPtr, 0, sizeof(u32) * 4);
-        if (auto* ub = m_Device->ResolveBuffer(m_CandidateCountBuf)) ub->Unmap();
+        if (auto* ub = ResB(m_CandidateCountBuf)) ub->Unmap();
     }
 
-    cmd->SetPipeline(m_Device->ResolvePipelineState(m_Phase1PSO));
+    cmd->SetPipeline(ResP(m_Phase1PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Phase1Set);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
 
@@ -503,7 +503,7 @@ void GPUCulling::BuildHiZPyramid(rhi::IRHICommandList* cmd, u32 screenW, u32 scr
     if (mipCount > kHiZMips) mipCount = kHiZMips;
     m_HiZMipCount = mipCount;
 
-    cmd->SetPipeline(m_Device->ResolvePipelineState(m_HiZ_PSO));
+    cmd->SetPipeline(ResP(m_HiZ_PSO));
 
     u32 srcW = screenW, srcH = screenH;
 
@@ -516,12 +516,12 @@ void GPUCulling::BuildHiZPyramid(rhi::IRHICommandList* cmd, u32 screenW, u32 scr
             // 第一级：从原始深度纹理下采样到 Hi-Z mip 1
             m_Device->UpdateDescriptorSet(m_HiZSet, 0,
                 rhi::DescriptorType::CombinedImageSampler,
-                m_DepthInput, m_Device->ResolveSampler(m_HiZSampler));
+                m_DepthInput, ResS(m_HiZSampler));
         } else {
             // 后续级：从 Hi-Z mip N 下采样到 mip N+1
             m_Device->UpdateDescriptorSet(m_HiZSet, 0,
                 rhi::DescriptorType::CombinedImageSampler,
-                m_Device->ResolveTexture(m_HiZTexture), m_Device->ResolveSampler(m_HiZSampler));
+                ResT(m_HiZTexture), ResS(m_HiZSampler));
         }
         // 目标：Hi-Z mip N+1 的存储图像视图
         m_Device->UpdateDescriptorSetWithImageView(m_HiZSet, 1,
@@ -556,7 +556,7 @@ void GPUCulling::BuildHiZPyramid(rhi::IRHICommandList* cmd, u32 screenW, u32 scr
     // 金字塔构建完成后，将 Phase 2 的深度绑定切换为 Hi-Z 纹理
     m_Device->UpdateDescriptorSet(m_Phase2Set, kPhase2BindHiZ,
         rhi::DescriptorType::CombinedImageSampler,
-        m_Device->ResolveTexture(m_HiZTexture), m_Device->ResolveSampler(m_HiZSampler));
+        ResT(m_HiZTexture), ResS(m_HiZSampler));
 }
 
 // ============================================================
@@ -568,12 +568,12 @@ void GPUCulling::DispatchPhase2(rhi::IRHICommandList* cmd, u32 screenW, u32 scre
     if (!m_Initialized || !enabled || candidateCount == 0) return;
 
     // 清零 DrawCount
-    auto* dcB   = m_Device->ResolveBuffer(m_DrawCountBuf);
+    auto* dcB   = ResB(m_DrawCountBuf);
     HE_ASSERT(dcB, "GPUCulling: 绘制计数缓冲句柄解析失败");
     void* dcPtr = dcB ? dcB->Map() : nullptr;
     if (dcPtr) {
         std::memset(dcPtr, 0, sizeof(u32) * 4);
-        if (auto* ub = m_Device->ResolveBuffer(m_DrawCountBuf)) ub->Unmap();
+        if (auto* ub = ResB(m_DrawCountBuf)) ub->Unmap();
     }
 
     // Push constants
@@ -585,7 +585,7 @@ void GPUCulling::DispatchPhase2(rhi::IRHICommandList* cmd, u32 screenW, u32 scre
     m_FrameIndex++;
     pc.count = candidateCount;
 
-    cmd->SetPipeline(m_Device->ResolvePipelineState(m_Phase2PSO));
+    cmd->SetPipeline(ResP(m_Phase2PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Phase2Set);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
 
@@ -606,12 +606,12 @@ void GPUCulling::DispatchPhase2(rhi::IRHICommandList* cmd, u32 screenW, u32 scre
 
 u32 GPUCulling::GetPhase1CandidateCount() const {
     if (!m_Initialized || !m_CandidateCountBuf.IsValid()) return 0;
-    auto* ccB = m_Device->ResolveBuffer(m_CandidateCountBuf);
+    auto* ccB = ResB(m_CandidateCountBuf);
     HE_ASSERT(ccB, "GPUCulling: 候选计数缓冲句柄解析失败");
     void* ptr = ccB ? ccB->Map() : nullptr;
     if (!ptr) return 0;
     u32 count = *static_cast<const u32*>(ptr);
-    if (auto* ub = m_Device->ResolveBuffer(m_CandidateCountBuf)) ub->Unmap();
+    if (auto* ub = ResB(m_CandidateCountBuf)) ub->Unmap();
     return count;
 }
 
@@ -626,23 +626,23 @@ void GPUCulling::Readback(rhi::IRHIDevice* device,
     if (!m_Initialized || !enabled) return;
 
     u32 count = 0;
-    auto* dcBb = m_Device->ResolveBuffer(m_DrawCountBuf);
+    auto* dcBb = ResB(m_DrawCountBuf);
     HE_ASSERT(dcBb, "GPUCulling: 绘制计数缓冲句柄解析失败");
     void* dc   = dcBb ? dcBb->Map() : nullptr;
-    if (dc) { count = *static_cast<u32*>(dc); if (auto* ub = m_Device->ResolveBuffer(m_DrawCountBuf)) ub->Unmap(); }
+    if (dc) { count = *static_cast<u32*>(dc); if (auto* ub = ResB(m_DrawCountBuf)) ub->Unmap(); }
 
     if (count == 0) { m_LastVisibleCount = 0; return; }
     if (count > kMaxObjects) count = kMaxObjects;
 
     outVisibleIndices.resize(count);
-    auto* icB = m_Device->ResolveBuffer(m_IndirectCmdBuf);
+    auto* icB = ResB(m_IndirectCmdBuf);
     HE_ASSERT(icB, "GPUCulling: 间接命令缓冲句柄解析失败");
     void* vi  = icB ? icB->Map() : nullptr;
     if (vi) {
         auto* cmds = static_cast<IndirectDrawCommand*>(vi);
         for (u32 i = 0; i < count; ++i)
             outVisibleIndices[i] = cmds[i].firstInstance;
-        if (auto* ub = m_Device->ResolveBuffer(m_IndirectCmdBuf)) ub->Unmap();
+        if (auto* ub = ResB(m_IndirectCmdBuf)) ub->Unmap();
     }
 
     m_LastVisibleCount = count;
@@ -665,12 +665,12 @@ bool GPUCulling::InitializePTG(rhi::IRHIDevice* device) {
         HE_ASSERT(m_PTGParamBuf.IsValid(), "GPUCulling: PTG 参数缓冲句柄创建失败");
 
         // 清零初始化，确保 frameIndex = 0（PTG 等待帧索引 >= 1）
-        auto* ptgB   = m_Device->ResolveBuffer(m_PTGParamBuf);
+        auto* ptgB   = ResB(m_PTGParamBuf);
         HE_ASSERT(ptgB, "GPUCulling: PTG 参数缓冲句柄解析失败（已销毁？）");
         void* ptr    = ptgB ? ptgB->Map() : nullptr;
         if (ptr) {
             std::memset(ptr, 0, sizeof(PTGParams));
-            if (auto* ptgu = m_Device->ResolveBuffer(m_PTGParamBuf)) ptgu->Unmap();
+            if (auto* ptgu = ResB(m_PTGParamBuf)) ptgu->Unmap();
         }
     }
 
@@ -692,13 +692,13 @@ bool GPUCulling::InitializePTG(rhi::IRHIDevice* device) {
     m_PTGSet = device->AllocateDescriptorSet(m_PTGLayout);
 
     // 4. 绑定 PTG 参数缓冲（binding 0）
-    device->UpdateDescriptorSet(m_PTGSet, 0, rhi::DescriptorType::UniformBuffer, m_Device->ResolveBuffer(m_PTGParamBuf));
+    device->UpdateDescriptorSet(m_PTGSet, 0, rhi::DescriptorType::UniformBuffer, ResB(m_PTGParamBuf));
     // binding 1 (SceneObjects) 由 SetSceneBuffer 设置
     // binding 2 (HiZDepth) 由 SetDepthTexture 设置
     // binding 3 (IndirectCmds) 由 Initialize 中 m_IndirectCmdBuf 设置
-    device->UpdateDescriptorSet(m_PTGSet, 3, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_IndirectCmdBuf));
+    device->UpdateDescriptorSet(m_PTGSet, 3, rhi::DescriptorType::StorageBuffer, ResB(m_IndirectCmdBuf));
     // binding 4 (DrawCount) 由 Initialize 中 m_DrawCountBuf 设置
-    device->UpdateDescriptorSet(m_PTGSet, 4, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_DrawCountBuf));
+    device->UpdateDescriptorSet(m_PTGSet, 4, rhi::DescriptorType::StorageBuffer, ResB(m_DrawCountBuf));
 
     // 5. 创建 PTG PSO（无 push constants，全部通过描述符传递）
     rhi::PipelineStateDesc ptgDesc;
@@ -737,7 +737,7 @@ void GPUCulling::SignalPTG(rhi::IRHICommandList* cmd, const float4x4& viewProj,
     ExtractFrustumPlanes(viewProj, planes);
 
     // 写入 PTGParams 到 Uniform Buffer
-    auto* ptgB   = m_Device->ResolveBuffer(m_PTGParamBuf);
+    auto* ptgB   = ResB(m_PTGParamBuf);
     HE_ASSERT(ptgB, "GPUCulling: PTG 参数缓冲句柄解析失败（已销毁？）");
     void* mapped = ptgB ? ptgB->Map() : nullptr;
     if (!mapped) return;
@@ -751,10 +751,10 @@ void GPUCulling::SignalPTG(rhi::IRHICommandList* cmd, const float4x4& viewProj,
     m_FrameIndex++;
     params->frameIndex = m_PTGFrameCounter++;
 
-    if (auto* ptgu = m_Device->ResolveBuffer(m_PTGParamBuf)) ptgu->Unmap();
+    if (auto* ptgu = ResB(m_PTGParamBuf)) ptgu->Unmap();
 
     // 每帧 Dispatch PTG shader（替代持久化 spin-wait）
-    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PTG_PSO));
+    cmd->SetPipeline(ResP(m_PTG_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_PTGSet);
     // Dispatch 调试 marker（RenderDoc 定位用）
     cmd->SetDrawDebugLabel("Cull PTG");
@@ -776,13 +776,13 @@ void GPUCulling::ShutdownPTG(rhi::IRHIDevice* device) {
     if (!m_PTGActive || !device) return;
 
     // 1. 发送退出信号（frameIndex = 0xFFFFFFFF）
-    auto* ptgB   = m_Device->ResolveBuffer(m_PTGParamBuf);
+    auto* ptgB   = ResB(m_PTGParamBuf);
     HE_ASSERT(ptgB, "GPUCulling: PTG 参数缓冲句柄解析失败（已销毁？）");
     void* mapped = ptgB ? ptgB->Map() : nullptr;
     if (mapped) {
         auto* params = static_cast<PTGParams*>(mapped);
         params->frameIndex = 0xFFFFFFFF;
-        if (auto* ptgu = m_Device->ResolveBuffer(m_PTGParamBuf)) ptgu->Unmap();
+        if (auto* ptgu = ResB(m_PTGParamBuf)) ptgu->Unmap();
     }
 
     // 2. 等待 GPU 完成，确保 PTG 线程检测到退出信号并终止

@@ -210,8 +210,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
         u32 slot = RenderFrameSlot();
         // 设置阴影渲染资源：Object Buffer + ShadowData Buffer + DescriptorSet
         m_ShadowSystem->SetRenderResources(
-            m_Device->ResolveBuffer(m_ShadowObjBuffers[slot]),
-            m_Device->ResolveBuffer(m_ShadowBuffers[slot]),
+            ResB(m_ShadowObjBuffers[slot]),
+            ResB(m_ShadowBuffers[slot]),
             m_GBuffer->GetDescriptorSet());
 
         SubsystemContext sctx;
@@ -358,7 +358,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
             }
 
             // 更新每帧动态参数
-            m_GBuffer->SetObjectBuffer(m_Device->ResolveBuffer(m_ObjectBuffers[RenderFrameSlot()]));
+            m_GBuffer->SetObjectBuffer(ResB(m_ObjectBuffers[RenderFrameSlot()]));
             m_GBuffer->SetPrevViewProj(m_PrevViewProj);
             // 任务 25：逐实例剔除器 + 当前飞行帧槽位（可见列表/间接命令按槽位分开）
             m_GBuffer->SetInstanceCuller(&m_InstanceCuller, RenderFrameSlot());
@@ -595,7 +595,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
                                 m_ShadowSystem->GetShadowSampler(),
                                 rhi::kInvalidSet);
         // 通量计算要读方向光的颜色/强度：本帧的光源缓冲（上面已收集，见 §9.2-AA）
-        m_RSM->SetLightBuffer(m_Device->ResolveBuffer(m_LightBuffers[RenderFrameSlot()]));
+        m_RSM->SetLightBuffer(ResB(m_LightBuffers[RenderFrameSlot()]));
         // ── RSM pass：遍历 Provider 注册（Wave 2 推广）──
         // Provider 自报「是否需要本帧的 pass」（层栈含 RSM ∧ 源有效），
         // 帧图只负责按注册顺序建 pass 并注入执行上下文。
@@ -725,7 +725,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
                         RTExecuteContext tctx{};
                         tctx.cameraPos            = camPos;
                         tctx.frameIndex           = m_DiagFrameCounter;
-                        tctx.lightBuffer          = m_Device->ResolveBuffer(m_LightBuffers[RenderFrameSlot()]);
+                        tctx.lightBuffer          = ResB(m_LightBuffers[RenderFrameSlot()]);
                         tctx.lightCount           = lightCount;
                         tctx.sceneMaterialTex     = m_RTPass->GetSceneMaterialTexture();
                         tctx.sceneTriangleNormals = m_RTPass->GetSceneTriangleNormals();
@@ -976,7 +976,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
                 lp0->SetRTInputs(m_RTPass ? m_RTPass->GetTLAS() : nullptr,
                                  m_RTPass ? m_RTPass->GetSceneMaterialTexture() : nullptr,
                                  m_RTPass ? m_RTPass->GetSceneTriangleNormals() : nullptr,
-                                 m_Device->ResolveBuffer(m_LightBuffers[RenderFrameSlot()]), ffpc.lightCount);
+                                 ResB(m_LightBuffers[RenderFrameSlot()]), ffpc.lightCount);
             }
 
             rhi::IRHITexture* out = prov->GetDiffuseOutput();
@@ -1180,7 +1180,7 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
         // DDGI 的光追 march 也要用它们）。此处不再重复注册，否则同一帧会构建两次 TLAS。
 
         const GIProviderContext rtCtx = MakeGIContext(&camera, m_GIConfig.furnaceMode,
-                                                m_Device->ResolveBuffer(m_LightBuffers[RenderFrameSlot()]), rtfpc.lightCount,
+                                                ResB(m_LightBuffers[RenderFrameSlot()]), rtfpc.lightCount,
                                                 m_RTPass->GetTLAS());
 
         for (auto& prov : m_GIProviders) {
@@ -1417,11 +1417,11 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
             if (m_ClusteredShading.enabled && fpc.lightCount > 0) {
                 m_CachedLights.resize(fpc.lightCount);
                 auto* gpuLights = static_cast<const GPULight*>(
-                    m_Device->ResolveBuffer(m_LightBuffers[RenderFrameSlot()])->Map());
+                    ResB(m_LightBuffers[RenderFrameSlot()])->Map());
                 if (gpuLights) {
                     memcpy(m_CachedLights.data(), gpuLights, fpc.lightCount * sizeof(GPULight));
                 }
-                if (auto* lbu = m_Device->ResolveBuffer(m_LightBuffers[RenderFrameSlot()])) lbu->Unmap();
+                if (auto* lbu = ResB(m_LightBuffers[RenderFrameSlot()])) lbu->Unmap();
             }
 
             // 委托 LightingPass 执行完整光照（M1.1：LightingInputs 打包输入）
@@ -1446,8 +1446,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
             in.csmShadow1 = shadowMap(1);
             in.csmShadow2 = shadowMap(2);
             in.spotShadow = shadowMap(4);
-            in.lightBuffer  = m_Device->ResolveBuffer(m_LightBuffers[RenderFrameSlot()]);
-            in.shadowBuffer = m_Device->ResolveBuffer(m_ShadowBuffers[RenderFrameSlot()]);
+            in.lightBuffer  = ResB(m_LightBuffers[RenderFrameSlot()]);
+            in.shadowBuffer = ResB(m_ShadowBuffers[RenderFrameSlot()]);
             in.ssaoTex    = m_SSAO.GetAOTexture();
             // 屏幕空间源的最终输出由 Provider 给出（已封装「有降噪取降噪、halfRes 取原始」
             // 的选择），帧图不再重复判断 halfRes——避免两处逻辑不一致。
@@ -1479,8 +1479,8 @@ void DeferredPipeline::BuildFrameGraph(RenderGraph& rg, const CameraData& camera
             in.rsmIndirectTex = rsmPassRegistered ? rsmIndirectTex : nullptr;
             // overlay 与 Pass 门控同源（避免 pass 跳过但 shader 仍采样陈旧探针）
             in.clusteredShading     = &m_ClusteredShading;
-            in.lightGridBuffer      = m_Device->ResolveBuffer(m_LightGridBuffer);
-            in.lightIndexListBuffer = m_Device->ResolveBuffer(m_LightIndexListBuffer);
+            in.lightGridBuffer      = ResB(m_LightGridBuffer);
+            in.lightIndexListBuffer = ResB(m_LightIndexListBuffer);
             in.cachedLights         = &m_CachedLights;
             // RT 纹理暂未使用（保持 nullptr）
             in.cameraPos    = float4(camera.position, 0);
