@@ -149,7 +149,7 @@ void RTShadowPass::Execute(rhi::IRHICommandList* cmd,
         rhi::DescriptorType::AccelerationStructure, tlas);
     // StorageImage 用原生 ImageView 绑定（与 RTPass 的 backbuffer 模式一致）
     m_Device->UpdateDescriptorSetWithImageView(m_RayGenSet, 1,
-        rhi::DescriptorType::StorageImage, m_Device->ResolveTexture(m_Output)->GetNativeHandle());
+        rhi::DescriptorType::StorageImage, ResT(m_Output)->GetNativeHandle());
     if (ctx.gbDepth)
         m_Device->UpdateDescriptorSet(m_RayGenSet, kRTShadowBindDepth,
             rhi::DescriptorType::SampledImage, ctx.gbDepth, nullptr);
@@ -158,7 +158,7 @@ void RTShadowPass::Execute(rhi::IRHICommandList* cmd,
             rhi::DescriptorType::SampledImage, ctx.gbNormal, nullptr);
     if (m_LightUB.IsValid())
         m_Device->UpdateDescriptorSet(m_RayGenSet, kRTShadowBindParams,
-            rhi::DescriptorType::UniformBuffer, m_Device->ResolveBuffer(m_LightUB));
+            rhi::DescriptorType::UniformBuffer, ResB(m_LightUB));
 
     // ── 填充阴影光源数据（显式抽取 GPULight[] → ShadowLight[16]）──
     FillLightBuffer(ctx);
@@ -192,10 +192,10 @@ void RTShadowPass::Execute(rhi::IRHICommandList* cmd,
 void RTShadowPass::FillLightBuffer(const RTExecuteContext& ctx) {
     if (!m_LightUB.IsValid() || !ctx.lightBuffer) return;
 
-    auto* ubBuf    = m_Device->ResolveBuffer(m_LightUB);
+    auto* ubBuf    = ResB(m_LightUB);
     ShadowLightGPU* dst = ubBuf ? static_cast<ShadowLightGPU*>(ubBuf->Map()) : nullptr;
     const GPULight* src = static_cast<const GPULight*>(ctx.lightBuffer->Map());
-    if (!dst || !src) { if (dst) if (auto* ubu = m_Device->ResolveBuffer(m_LightUB)) ubu->Unmap(); if (src) ctx.lightBuffer->Unmap(); return; }
+    if (!dst || !src) { if (dst) if (auto* ubu = ResB(m_LightUB)) ubu->Unmap(); if (src) ctx.lightBuffer->Unmap(); return; }
 
     u32 count = 0;
     const u32 maxCount = std::min(ctx.lightCount, kShadowMaxLights);
@@ -209,7 +209,7 @@ void RTShadowPass::FillLightBuffer(const RTExecuteContext& ctx) {
         sl.radius.x = src[i].shadowRadius;  // 光源半径（软阴影）
     }
 
-    if (auto* ubu = m_Device->ResolveBuffer(m_LightUB)) ubu->Unmap();
+    if (auto* ubu = ResB(m_LightUB)) ubu->Unmap();
     ctx.lightBuffer->Unmap();
 }
 

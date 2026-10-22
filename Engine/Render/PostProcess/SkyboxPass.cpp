@@ -96,7 +96,7 @@ void SkyboxPass::SetColorLoadOp(rhi::LoadOp op){
 void SkyboxPass::PreBind(rhi::IRHICommandList* cmd) const {
     if(!m_Ready)return;
     // 物理天空优先于 Cubemap
-    cmd->SetPipeline(m_PhysSky.enabled ? m_Device->ResolvePipelineState(m_PS_PSO) : m_Device->ResolvePipelineState(m_PSO));
+    cmd->SetPipeline(m_PhysSky.enabled ? ResP(m_PS_PSO) : ResP(m_PSO));
 }
 
 void SkyboxPass::Shutdown(){
@@ -164,7 +164,7 @@ void SkyboxPass::Render(rhi::IRHICommandList* cmd){
         pc.groundAlbedo=m_PhysSky.groundAlbedo;
         pc.sunIntensity=m_PhysSky.sunIntensity;
         pc._pad=0.0f;
-        cmd->SetPipeline(m_Device->ResolvePipelineState(m_PS_PSO));
+        cmd->SetPipeline(ResP(m_PS_PSO));
         cmd->SetPushConstants(0,sizeof(pc),&pc);
         cmd->Draw(3);
         return;
@@ -174,7 +174,7 @@ void SkyboxPass::Render(rhi::IRHICommandList* cmd){
     pc.invVP=invVP;
     pc.intensity=m_CachedSkyboxIntensity;
 
-    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
+    cmd->SetPipeline(ResP(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_DescSet);
     cmd->SetPushConstants(0,96,&pc);
     cmd->Draw(3);

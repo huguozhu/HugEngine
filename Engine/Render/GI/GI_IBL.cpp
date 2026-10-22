@@ -275,11 +275,11 @@ void GI_IBL::Render(rhi::IRHICommandList* cmd) {
         // Push constants: invViewProj 每个面不同
         struct alignas(16) IBLPush { float4x4 invVP; float roughnessPad; float _pad[3]; } pc{};
 
-        cmd->SetPipeline(m_Device->ResolvePipelineState(m_IrradiancePSO));
+        cmd->SetPipeline(ResP(m_IrradiancePSO));
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_IrradianceSet);
 
         for (u32 face = 0; face < rhi::kCubemapFaceCount; ++face) {
-            void* faceView = m_Device->ResolveTexture(m_IrradianceMap)->GetNativeHandle(face);
+            void* faceView = ResT(m_IrradianceMap)->GetNativeHandle(face);
             if (!faceView) continue;
 
             float4x4 view  = CubeFaceViewMatrix(face);
@@ -301,7 +301,7 @@ void GI_IBL::Render(rhi::IRHICommandList* cmd) {
             rhi::PipelineStage::FragmentShader,
             rhi::ResourceState::RenderTarget,
             rhi::ResourceState::ShaderResource,
-            m_Device->ResolveTexture(m_IrradianceMap));
+            ResT(m_IrradianceMap));
     }
 
     // --- Pass 2: 预滤波环境图（5 mip，roughness = mip / 4）---
@@ -313,7 +313,7 @@ void GI_IBL::Render(rhi::IRHICommandList* cmd) {
         m_CachedMipViews.clear();
 
         struct alignas(16) IBLPush { float4x4 invVP; float roughness; float _pad[3]; } pc{};
-        cmd->SetPipeline(m_Device->ResolvePipelineState(m_PrefilterPSO));
+        cmd->SetPipeline(ResP(m_PrefilterPSO));
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_PrefilterSet);
 
         for (u32 mip = 0; mip < kPrefilterMips; ++mip) {
@@ -322,7 +322,7 @@ void GI_IBL::Render(rhi::IRHICommandList* cmd) {
 
             for (u32 face = 0; face < rhi::kCubemapFaceCount; ++face) {
                 void* mipView = m_Device->CreateTextureMipStorageView(
-                    m_Device->ResolveTexture(m_PrefilterMap), mip, face);  // RHI 统一接口：逐面逐 mip 视图
+                    ResT(m_PrefilterMap), mip, face);  // RHI 统一接口：逐面逐 mip 视图
                 m_CachedMipViews.push_back(mipView);
 
                 float4x4 view  = CubeFaceViewMatrix(face);
@@ -345,13 +345,13 @@ void GI_IBL::Render(rhi::IRHICommandList* cmd) {
             rhi::PipelineStage::FragmentShader,
             rhi::ResourceState::RenderTarget,
             rhi::ResourceState::ShaderResource,
-            m_Device->ResolveTexture(m_PrefilterMap));
+            ResT(m_PrefilterMap));
     }
 
     // --- Pass 3: BRDF LUT ---
     {
-        cmd->SetPipeline(m_Device->ResolvePipelineState(m_BRDF_LUT_PSO));
-        void* colorView = m_Device->ResolveTexture(m_BRDF_LUT)->GetNativeHandle();
+        cmd->SetPipeline(ResP(m_BRDF_LUT_PSO));
+        void* colorView = ResT(m_BRDF_LUT)->GetNativeHandle();
         cmd->BeginOffscreenPass(colorView, nullptr, kBRDF_LUT_Res, kBRDF_LUT_Res, nullptr);
         cmd->SetViewport({ 0, static_cast<float>(kBRDF_LUT_Res),
             static_cast<float>(kBRDF_LUT_Res), -static_cast<float>(kBRDF_LUT_Res),
@@ -366,7 +366,7 @@ void GI_IBL::Render(rhi::IRHICommandList* cmd) {
             rhi::PipelineStage::FragmentShader,
             rhi::ResourceState::RenderTarget,
             rhi::ResourceState::ShaderResource,
-            m_Device->ResolveTexture(m_BRDF_LUT));
+            ResT(m_BRDF_LUT));
     }
 
     m_Dirty = false;

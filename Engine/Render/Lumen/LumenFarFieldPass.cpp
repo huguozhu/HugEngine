@@ -119,7 +119,7 @@ u32 LumenFarFieldPass::Trace(rhi::IRHICommandList* cmd, rhi::IRHIAccelerationStr
                                       p.triangleNorms, nullptr);
     if (m_LightUB.IsValid())
         m_Device->UpdateDescriptorSet(m_RayGenSet, kBindLights, rhi::DescriptorType::UniformBuffer,
-                                      m_Device->ResolveBuffer(m_LightUB));
+                                      ResB(m_LightUB));
 
     // 参数 UBO（内容每帧变，绑定不变）
     FarFieldParams fp{};

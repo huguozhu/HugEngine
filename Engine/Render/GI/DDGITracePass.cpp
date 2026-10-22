@@ -140,7 +140,7 @@ void DDGITracePass::Execute(rhi::IRHICommandList* cmd,
             rhi::DescriptorType::SampledImage, ctx.sceneMaterialTex, nullptr);
     if (m_LightUB.IsValid())
         m_Device->UpdateDescriptorSet(m_RayGenSet, kBindLights,
-            rhi::DescriptorType::UniformBuffer, m_Device->ResolveBuffer(m_LightUB));
+            rhi::DescriptorType::UniformBuffer, ResB(m_LightUB));
     if (ctx.sceneTriangleNormals)
         m_Device->UpdateDescriptorSet(m_RayGenSet, kBindNormals,
             rhi::DescriptorType::SampledImage, ctx.sceneTriangleNormals, nullptr);

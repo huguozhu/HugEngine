@@ -138,7 +138,7 @@ void RTGIPass::Execute(rhi::IRHICommandList* cmd,
     m_Device->UpdateDescriptorSet(m_RayGenSet, kRTGIBindTLAS,
         rhi::DescriptorType::AccelerationStructure, tlas);
     m_Device->UpdateDescriptorSetWithImageView(m_RayGenSet, 1,
-        rhi::DescriptorType::StorageImage, m_Device->ResolveTexture(m_Output)->GetNativeHandle());
+        rhi::DescriptorType::StorageImage, ResT(m_Output)->GetNativeHandle());
     if (ctx.gbDepth)
         m_Device->UpdateDescriptorSet(m_RayGenSet, kRTGIBindDepth,
             rhi::DescriptorType::SampledImage, ctx.gbDepth, nullptr);
@@ -150,7 +150,7 @@ void RTGIPass::Execute(rhi::IRHICommandList* cmd,
             rhi::DescriptorType::SampledImage, ctx.sceneMaterialTex, nullptr);
     if (m_LightUB.IsValid())
         m_Device->UpdateDescriptorSet(m_RayGenSet, kRTGIBindLights,
-            rhi::DescriptorType::UniformBuffer, m_Device->ResolveBuffer(m_LightUB));
+            rhi::DescriptorType::UniformBuffer, ResB(m_LightUB));
     if (ctx.sceneTriangleNormals)
         m_Device->UpdateDescriptorSet(m_RayGenSet, kRTGIBindNormalTex,
             rhi::DescriptorType::SampledImage, ctx.sceneTriangleNormals, nullptr);

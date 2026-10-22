@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Threading/RenderThreadContext.h"   // T2.6：帧上下文（唯一 RHI 出口）
+
 #include "Subsystem/RenderSubsystem.h"
 // 阶段 1 §15.1 第③段：本 Pass 改从快照取天空数据（不再遍历 World / 不再缓存组件指针）
 #include "Threading/FrameSceneSnapshot.h"
@@ -20,6 +22,27 @@ namespace he::render {
 // 缓存的是**值 + RHI 资源指针**（cubemap/sampler），组件指针一个都不留。
 // ============================================================================
 class SkyboxPass : public IRenderSubsystem {
+
+    // ── 【T2.6】帧上下文与统一解析入口（m_Device 继承自基类）──
+    const RenderThreadContext* m_FrameCtx = nullptr;
+    void SetFrameContext(const RenderThreadContext* ctx) { m_FrameCtx = ctx; }
+    [[nodiscard]] rhi::IRHIBuffer* ResB(rhi::RHIBufferHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolveBuffer(h);
+        return m_Device ? m_Device->ResolveBuffer(h) : nullptr;
+    }
+    [[nodiscard]] rhi::IRHITexture* ResT(rhi::RHITextureHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolveTexture(h);
+        return m_Device ? m_Device->ResolveTexture(h) : nullptr;
+    }
+    [[nodiscard]] rhi::IRHIPipelineState* ResP(rhi::RHIPipelineStateHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolvePipelineState(h);
+        return m_Device ? m_Device->ResolvePipelineState(h) : nullptr;
+    }
+    [[nodiscard]] rhi::IRHISampler* ResS(rhi::RHISamplerHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolveSampler(h);
+        return m_Device ? m_Device->ResolveSampler(h) : nullptr;
+    }
+
 public:
     SkyboxPass()=default;
     ~SkyboxPass()override=default;

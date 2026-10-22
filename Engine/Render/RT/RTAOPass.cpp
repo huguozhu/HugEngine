@@ -123,7 +123,7 @@ void RTAOPass::Execute(rhi::IRHICommandList* cmd,
     m_Device->UpdateDescriptorSet(m_RayGenSet, kRTAOBindTLAS,
         rhi::DescriptorType::AccelerationStructure, tlas);
     m_Device->UpdateDescriptorSetWithImageView(m_RayGenSet, 1,
-        rhi::DescriptorType::StorageImage, m_Device->ResolveTexture(m_Output)->GetNativeHandle());
+        rhi::DescriptorType::StorageImage, ResT(m_Output)->GetNativeHandle());
     if (ctx.gbDepth)
         m_Device->UpdateDescriptorSet(m_RayGenSet, kRTAOBindDepth,
             rhi::DescriptorType::SampledImage, ctx.gbDepth, nullptr);

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Threading/RenderThreadContext.h"   // T2.6：帧上下文（唯一 RHI 出口）
+
 #include "RHI/RHI.h"
 #include "RHI/Buffer.h"
 #include "Math/Math.h"
@@ -19,6 +21,27 @@ namespace he::render {
 // 仅在 Skybox Cubemap 变化时重新生成（脏标记机制）。
 // ============================================================================
 class GI_IBL : public IGlobalIllumination {
+
+    // ── 【T2.6】帧上下文与统一解析入口（m_Device 继承自基类）──
+    const RenderThreadContext* m_FrameCtx = nullptr;
+    void SetFrameContext(const RenderThreadContext* ctx) { m_FrameCtx = ctx; }
+    [[nodiscard]] rhi::IRHIBuffer* ResB(rhi::RHIBufferHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolveBuffer(h);
+        return m_Device ? m_Device->ResolveBuffer(h) : nullptr;
+    }
+    [[nodiscard]] rhi::IRHITexture* ResT(rhi::RHITextureHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolveTexture(h);
+        return m_Device ? m_Device->ResolveTexture(h) : nullptr;
+    }
+    [[nodiscard]] rhi::IRHIPipelineState* ResP(rhi::RHIPipelineStateHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolvePipelineState(h);
+        return m_Device ? m_Device->ResolvePipelineState(h) : nullptr;
+    }
+    [[nodiscard]] rhi::IRHISampler* ResS(rhi::RHISamplerHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolveSampler(h);
+        return m_Device ? m_Device->ResolveSampler(h) : nullptr;
+    }
+
 public:
     GI_IBL()  = default;
     ~GI_IBL() override = default;

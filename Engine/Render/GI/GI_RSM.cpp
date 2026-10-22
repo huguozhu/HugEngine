@@ -175,9 +175,9 @@ void GI_RSM::RenderRSMPass(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& 
     // binding 2 = **本 pass 自己的** GPUObjectData[]。见头文件：不能借用管线的相机可见列表
     // 对象缓冲（索引空间不同，会读到没填过的槽）。
     m_Device->UpdateDescriptorSet(m_RSMSet, kRSMBindObjects,
-        rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ObjectBuf));
+        rhi::DescriptorType::StorageBuffer, ResB(m_ObjectBuf));
 
-    cmd->SetPipeline(m_Device->ResolvePipelineState(m_RSMPSO));
+    cmd->SetPipeline(ResP(m_RSMPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_RSMSet);
 
     // 【长度契约】colorCount(3) 个颜色项 + 末尾一个深度项 = 4 项，深度项在 clears[colorCount]。
@@ -189,12 +189,12 @@ void GI_RSM::RenderRSMPass(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& 
     clears[3].depth = 1.0f;   // 深度项：远平面（与 PSO 的 LessEqual + zero-to-one 约定配套）
 
     void* colorViews[3] = {
-        m_Device->ResolveTexture(m_RSMPos)->GetNativeHandle(),
-        m_Device->ResolveTexture(m_RSMFlux)->GetNativeHandle(),
-        m_Device->ResolveTexture(m_RSMRadiance)->GetNativeHandle()
+        ResT(m_RSMPos)->GetNativeHandle(),
+        ResT(m_RSMFlux)->GetNativeHandle(),
+        ResT(m_RSMRadiance)->GetNativeHandle()
     };
 
-    cmd->BeginOffscreenPassMRT(colorViews, 3, m_Device->ResolveTexture(m_RSMDepth)->GetNativeHandle(),
+    cmd->BeginOffscreenPassMRT(colorViews, 3, ResT(m_RSMDepth)->GetNativeHandle(),
                                m_RSMResolution, m_RSMResolution, clears, false);
     cmd->SetViewport({ 0, static_cast<float>(m_RSMResolution),
         static_cast<float>(m_RSMResolution), -static_cast<float>(m_RSMResolution),
@@ -202,7 +202,7 @@ void GI_RSM::RenderRSMPass(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& 
     cmd->SetScissor({ 0, 0, m_RSMResolution, m_RSMResolution });
 
     // 上传对象数据到 GPU（从光源 POV 不需要世界矩阵，直接用 objectIndex 索引）
-    auto* objBuf  = m_Device->ResolveBuffer(m_ObjectBuf);   // A-3：句柄解析
+    auto* objBuf  = ResB(m_ObjectBuf);   // A-3：句柄解析
     auto* objData = objBuf ? static_cast<GPUObjectData*>(objBuf->Map()) : nullptr;
     u32 objectIndex = 0;
 
@@ -253,19 +253,19 @@ void GI_RSM::RenderRSMPass(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& 
         rhi::PipelineStage::FragmentShader,
         rhi::ResourceState::RenderTarget,
         rhi::ResourceState::ShaderResource,
-        m_Device->ResolveTexture(m_RSMPos));
+        ResT(m_RSMPos));
     cmd->PipelineBarrier(
         rhi::PipelineStage::ColorAttachmentOutput,
         rhi::PipelineStage::FragmentShader,
         rhi::ResourceState::RenderTarget,
         rhi::ResourceState::ShaderResource,
-        m_Device->ResolveTexture(m_RSMFlux));
+        ResT(m_RSMFlux));
     cmd->PipelineBarrier(
         rhi::PipelineStage::ColorAttachmentOutput,
         rhi::PipelineStage::FragmentShader,
         rhi::ResourceState::RenderTarget,
         rhi::ResourceState::ShaderResource,
-        m_Device->ResolveTexture(m_RSMRadiance));
+        ResT(m_RSMRadiance));
 }
 
 void GI_RSM::Bind(rhi::IRHICommandList* cmd) const {

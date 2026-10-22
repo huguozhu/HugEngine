@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Threading/RenderThreadContext.h"   // T2.6：帧上下文（唯一 RHI 出口）
+
 #include "RHI/RHI.h"
 #include "PostProcess/LazyPostProcessPass.h"
 #include <memory>
@@ -10,6 +12,27 @@ namespace he::render {
 // MotionBlurPass — 速度向量方向采样运动模糊
 // ============================================================
 class MotionBlurPass : public LazyPostProcessPass {
+
+    // ── 【T2.6】帧上下文与统一解析入口（m_Device 继承自基类）──
+    const RenderThreadContext* m_FrameCtx = nullptr;
+    void SetFrameContext(const RenderThreadContext* ctx) { m_FrameCtx = ctx; }
+    [[nodiscard]] rhi::IRHIBuffer* ResB(rhi::RHIBufferHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolveBuffer(h);
+        return m_Device ? m_Device->ResolveBuffer(h) : nullptr;
+    }
+    [[nodiscard]] rhi::IRHITexture* ResT(rhi::RHITextureHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolveTexture(h);
+        return m_Device ? m_Device->ResolveTexture(h) : nullptr;
+    }
+    [[nodiscard]] rhi::IRHIPipelineState* ResP(rhi::RHIPipelineStateHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolvePipelineState(h);
+        return m_Device ? m_Device->ResolvePipelineState(h) : nullptr;
+    }
+    [[nodiscard]] rhi::IRHISampler* ResS(rhi::RHISamplerHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolveSampler(h);
+        return m_Device ? m_Device->ResolveSampler(h) : nullptr;
+    }
+
 public:
     static constexpr u32 kDefaultSamples = 12;  // 方向采样数
     bool Initialize(rhi::IRHIDevice* device, u32 width, u32 height) override;
