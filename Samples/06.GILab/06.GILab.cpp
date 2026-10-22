@@ -136,6 +136,187 @@ Entity CreateShapeEntity(World& world, SceneGraph& sg,
     return e;
 }
 
+// ============================================================
+// 天空盒：从等距柱状 HDR 生成 6 面立方体贴图，并注册为场景实体
+// 原先内联在 main() 里（79 行）—— 抽出来让 main 只保留流程骨架，也便于其它样例复用。
+// ============================================================
+static void CreateSkybox(World& world, SceneGraph& sceneGraph, rhi::IRHIDevice* device,
+                         const String& hdrPath) {
+{
+    String hdrPath = String(HUGE_CONTENT_DIR) + "Textures/skybox.hdr";
+    int hdrW, hdrH, hdrCh;
+    float* hdrData = stbi_loadf(hdrPath.c_str(), &hdrW, &hdrH, &hdrCh, 4);
+    if (!hdrData) {
+        HE_CORE_WARN("skybox.hdr 加载失败: {}", hdrPath);
+    } else {
+        HE_CORE_INFO("skybox.hdr: {}×{} ({} channels)", hdrW, hdrH, hdrCh);
+
+        const u32 faceSize = 512;
+        const u32 faceBytes = faceSize * faceSize * 4;
+        std::vector<u8> allFaces(faceBytes * 6);
+
+        struct { float3 dir; float3 up; float3 right; } faces[6] = {
+            {{ 1, 0, 0}, {0,-1, 0}, {0, 0,-1}},
+            {{-1, 0, 0}, {0,-1, 0}, {0, 0, 1}},
+            {{ 0, 1, 0}, {0, 0, 1}, {1, 0, 0}},
+            {{ 0,-1, 0}, {0, 0,-1}, {1, 0, 0}},
+            {{ 0, 0, 1}, {0,-1, 0}, {1, 0, 0}},
+            {{ 0, 0,-1}, {0,-1, 0}, {-1,0, 0}},
+        };
+
+        for (u32 f = 0; f < 6; ++f) {
+            u8* faceData = allFaces.data() + f * faceBytes;
+            for (u32 y = 0; y < faceSize; ++y) {
+                for (u32 x = 0; x < faceSize; ++x) {
+                    float u = (2.0f * x / faceSize) - 1.0f;
+                    float v = (2.0f * y / faceSize) - 1.0f;
+                    float3 dir = glm::normalize(
+                        faces[f].dir + faces[f].right * u + faces[f].up * v);
+                    float eqU = (std::atan2(dir.z, dir.x) / (2.0f * 3.14159265f)) + 0.5f;
+                    float eqV = (std::asin(glm::clamp(dir.y, -1.0f, 1.0f)) / 3.14159265f) + 0.5f;
+                    int px = static_cast<int>(eqU * hdrW) % hdrW;
+                    int py = static_cast<int>(eqV * hdrH) % hdrH;
+                    if (px < 0) px += hdrW;
+                    if (py < 0) py += hdrH;
+                    float* src = hdrData + (py * hdrW + px) * 4;
+                    auto tonemap = [](float c) {
+                        c = c / (1.0f + c);
+                        return static_cast<u8>(glm::clamp(c, 0.0f, 1.0f) * 255.0f);
+                    };
+                    usize idx = (y * faceSize + x) * 4;
+                    faceData[idx+0] = tonemap(src[0]);
+                    faceData[idx+1] = tonemap(src[1]);
+                    faceData[idx+2] = tonemap(src[2]);
+                    faceData[idx+3] = 255;
+                }
+            }
+        }
+        stbi_image_free(hdrData);
+
+        rhi::TextureDesc cmDesc;
+        cmDesc.format      = rhi::Format::RGBA8_UNORM;
+        cmDesc.width       = faceSize;
+        cmDesc.height      = faceSize;
+        cmDesc.mipLevels   = 1;
+        cmDesc.arrayLayers = 6;
+        cmDesc.usage       = rhi::TextureUsage::ShaderResource
+                           | rhi::TextureUsage::Cubemap
+                           | rhi::TextureUsage::TransferDst;
+        cmDesc.initialData = allFaces.data();
+        auto cubemap = device->CreateTexture(cmDesc);
+
+        rhi::SamplerDesc cmSamp;
+        cmSamp.minFilter  = rhi::FilterMode::Linear;
+        cmSamp.magFilter  = rhi::FilterMode::Linear;
+        cmSamp.addressU   = rhi::AddressMode::ClampToEdge;
+        cmSamp.addressV   = rhi::AddressMode::ClampToEdge;
+        cmSamp.addressW   = rhi::AddressMode::ClampToEdge;
+        auto cmSampler = device->CreateSampler(cmSamp);
+
+        Entity skyEntity = world.CreateEntity("Skybox");
+        world.AddComponent<TransformComponent>(skyEntity);
+        auto* skyComp = world.AddComponent<SkyboxComponent>(skyEntity);
+        skyComp->SetCubemap(std::move(cubemap), std::move(cmSampler));
+        sceneGraph.SetParent(skyEntity, Entity{kInvalidEntity});
+    }
+}
+}
+
+// ============================================================
+// TextureCache —— glTF 纹理 → RHI Texture/Sampler 的加载、去重、默认占位
+//
+// 原先内联在 main() 里：一个 g_TexCache 表 + 一个 loadTexture lambda（39 行）+ 一段 1x1 默认
+// 占位纹理的创建（19 行）。抽出来后 main 只剩"取纹理"的调用，纹理参数（RGBA8、mip 数、
+// Linear/Repeat、TransferSrc|TransferDst）也只有一处定义。
+//
+// 【去重】按**纹理全路径**缓存：同一张图被多个材质引用时只创建一次。
+// 【默认占位】bindless heap 必须在注册材质纹理**之前**拿到默认纹理，否则未贴图的材质槽无效。
+// ============================================================
+class TextureCache {
+public:
+    using Entry = std::pair<std::unique_ptr<rhi::IRHITexture>, std::unique_ptr<rhi::IRHISampler>>;
+
+    explicit TextureCache(rhi::IRHIDevice* device) : m_Device(device) {}
+
+    /// 创建 1x1 白色默认纹理并登记到 bindless heap；必须在注册材质纹理之前调用。
+    void CreateAndBindDefault();
+
+    /// 已缓存条目数（含默认占位纹理），仅用于日志。
+    [[nodiscard]] usize Count() const { return m_Cache.size(); }
+
+    /// 加载（或命中缓存返回）纹理与采样器；baseDir 为 glTF 所在目录，uri 为相对路径。
+    std::pair<rhi::IRHITexture*, rhi::IRHISampler*> Load(const String& baseDir, const String& uri);
+
+private:
+    rhi::IRHIDevice*                  m_Device = nullptr;
+    std::unordered_map<String, Entry> m_Cache;
+};
+
+void TextureCache::CreateAndBindDefault() {
+    u8 white[4] = {255, 255, 255, 255};
+    rhi::TextureDesc td;
+    td.format      = rhi::Format::RGBA8_UNORM;
+    td.width       = 1;
+    td.height      = 1;
+    td.mipLevels   = 1;
+    td.usage       = rhi::TextureUsage::ShaderResource;
+    td.initialData = white;
+    auto defaultTex = m_Device->CreateTexture(td);
+
+    rhi::SamplerDesc sd;
+    sd.minFilter = sd.magFilter = rhi::FilterMode::Linear;
+    sd.addressU  = sd.addressV  = rhi::AddressMode::Repeat;
+    auto defaultSamp = m_Device->CreateSampler(sd);
+
+    m_Device->GetBindlessHeap()->SetDefaultTexture(defaultTex.get(), defaultSamp.get());
+    m_Cache["__default__"] = {std::move(defaultTex), std::move(defaultSamp)};
+}
+
+std::pair<rhi::IRHITexture*, rhi::IRHISampler*> TextureCache::Load(const String& baseDir,
+                                                                  const String& uri) {
+    if (uri.empty()) return {nullptr, nullptr};
+
+    const String texPath = (std::filesystem::path(baseDir) / uri).string();
+    auto it = m_Cache.find(texPath);
+    if (it != m_Cache.end()) return {it->second.first.get(), it->second.second.get()};
+
+    int w = 0, h = 0, ch = 0;
+    u8* pixels = stbi_load(texPath.c_str(), &w, &h, &ch, 4);
+    if (!pixels) {
+        HE_CORE_WARN("纹理加载失败: {}", texPath);
+        return {nullptr, nullptr};
+    }
+
+    // mip 数：按最大边长逐次减半
+    u32 maxDim = static_cast<u32>(std::max(w, h));
+    u32 mipLevels = 1;
+    while (maxDim > 1) { maxDim >>= 1; ++mipLevels; }
+
+    rhi::TextureDesc td;
+    td.format      = rhi::Format::RGBA8_UNORM;
+    td.width       = static_cast<u32>(w);
+    td.height      = static_cast<u32>(h);
+    td.mipLevels   = mipLevels;
+    td.usage       = rhi::TextureUsage::ShaderResource
+                   | rhi::TextureUsage::TransferSrc
+                   | rhi::TextureUsage::TransferDst;
+    td.initialData = pixels;
+    auto tex = m_Device->CreateTexture(td);
+
+    rhi::SamplerDesc sd;
+    sd.minFilter = rhi::FilterMode::Linear;
+    sd.magFilter = rhi::FilterMode::Linear;
+    sd.mipFilter = rhi::FilterMode::Linear;
+    sd.maxLod    = static_cast<float>(mipLevels);
+    sd.addressU  = sd.addressV = rhi::AddressMode::Repeat;
+    auto samp = m_Device->CreateSampler(sd);
+
+    stbi_image_free(pixels);
+    auto inserted = m_Cache.emplace(texPath, std::make_pair(std::move(tex), std::move(samp))).first;
+    HE_CORE_INFO("GPU 纹理: {} ({}×{})", texPath, w, h);
+    return {inserted->second.first.get(), inserted->second.second.get()};
+}
+
 int main() {
     // ---- 0. 安装崩溃处理器（Wave 0.8 诊断基建） ----
     //    崩溃时打印"函数名 + 源文件:行号"的完整调用栈，并写出 minidump。
@@ -244,146 +425,15 @@ int main() {
         }
     }
 
-    // --- 天空盒 ---
-    {
-        String hdrPath = String(HUGE_CONTENT_DIR) + "Textures/skybox.hdr";
-        int hdrW, hdrH, hdrCh;
-        float* hdrData = stbi_loadf(hdrPath.c_str(), &hdrW, &hdrH, &hdrCh, 4);
-        if (!hdrData) {
-            HE_CORE_WARN("skybox.hdr 加载失败: {}", hdrPath);
-        } else {
-            HE_CORE_INFO("skybox.hdr: {}×{} ({} channels)", hdrW, hdrH, hdrCh);
-
-            const u32 faceSize = 512;
-            const u32 faceBytes = faceSize * faceSize * 4;
-            std::vector<u8> allFaces(faceBytes * 6);
-
-            struct { float3 dir; float3 up; float3 right; } faces[6] = {
-                {{ 1, 0, 0}, {0,-1, 0}, {0, 0,-1}},
-                {{-1, 0, 0}, {0,-1, 0}, {0, 0, 1}},
-                {{ 0, 1, 0}, {0, 0, 1}, {1, 0, 0}},
-                {{ 0,-1, 0}, {0, 0,-1}, {1, 0, 0}},
-                {{ 0, 0, 1}, {0,-1, 0}, {1, 0, 0}},
-                {{ 0, 0,-1}, {0,-1, 0}, {-1,0, 0}},
-            };
-
-            for (u32 f = 0; f < 6; ++f) {
-                u8* faceData = allFaces.data() + f * faceBytes;
-                for (u32 y = 0; y < faceSize; ++y) {
-                    for (u32 x = 0; x < faceSize; ++x) {
-                        float u = (2.0f * x / faceSize) - 1.0f;
-                        float v = (2.0f * y / faceSize) - 1.0f;
-                        float3 dir = glm::normalize(
-                            faces[f].dir + faces[f].right * u + faces[f].up * v);
-                        float eqU = (std::atan2(dir.z, dir.x) / (2.0f * 3.14159265f)) + 0.5f;
-                        float eqV = (std::asin(glm::clamp(dir.y, -1.0f, 1.0f)) / 3.14159265f) + 0.5f;
-                        int px = static_cast<int>(eqU * hdrW) % hdrW;
-                        int py = static_cast<int>(eqV * hdrH) % hdrH;
-                        if (px < 0) px += hdrW;
-                        if (py < 0) py += hdrH;
-                        float* src = hdrData + (py * hdrW + px) * 4;
-                        auto tonemap = [](float c) {
-                            c = c / (1.0f + c);
-                            return static_cast<u8>(glm::clamp(c, 0.0f, 1.0f) * 255.0f);
-                        };
-                        usize idx = (y * faceSize + x) * 4;
-                        faceData[idx+0] = tonemap(src[0]);
-                        faceData[idx+1] = tonemap(src[1]);
-                        faceData[idx+2] = tonemap(src[2]);
-                        faceData[idx+3] = 255;
-                    }
-                }
-            }
-            stbi_image_free(hdrData);
-
-            rhi::TextureDesc cmDesc;
-            cmDesc.format      = rhi::Format::RGBA8_UNORM;
-            cmDesc.width       = faceSize;
-            cmDesc.height      = faceSize;
-            cmDesc.mipLevels   = 1;
-            cmDesc.arrayLayers = 6;
-            cmDesc.usage       = rhi::TextureUsage::ShaderResource
-                               | rhi::TextureUsage::Cubemap
-                               | rhi::TextureUsage::TransferDst;
-            cmDesc.initialData = allFaces.data();
-            auto cubemap = device->CreateTexture(cmDesc);
-
-            rhi::SamplerDesc cmSamp;
-            cmSamp.minFilter  = rhi::FilterMode::Linear;
-            cmSamp.magFilter  = rhi::FilterMode::Linear;
-            cmSamp.addressU   = rhi::AddressMode::ClampToEdge;
-            cmSamp.addressV   = rhi::AddressMode::ClampToEdge;
-            cmSamp.addressW   = rhi::AddressMode::ClampToEdge;
-            auto cmSampler = device->CreateSampler(cmSamp);
-
-            Entity skyEntity = world.CreateEntity("Skybox");
-            world.AddComponent<TransformComponent>(skyEntity);
-            auto* skyComp = world.AddComponent<SkyboxComponent>(skyEntity);
-            skyComp->SetCubemap(std::move(cubemap), std::move(cmSampler));
-            sceneGraph.SetParent(skyEntity, Entity{kInvalidEntity});
-        }
-    }
+    // ---- 天空盒：HDR 等距柱状图 → 立方体贴图 → 场景实体（实现见 CreateSkybox）----
+    CreateSkybox(world, sceneGraph, device.get(), String(HUGE_CONTENT_DIR) + "Textures/skybox.hdr");
 
     // ---- 5. 加载 glTF 纹理 → RHI Texture → MeshComponent ----
-    std::unordered_map<String,
-        std::pair<std::unique_ptr<rhi::IRHITexture>,
-                  std::unique_ptr<rhi::IRHISampler>>> g_TexCache;
-
-    auto loadTexture = [&](const String& uri) -> std::pair<rhi::IRHITexture*, rhi::IRHISampler*> {
-        if (uri.empty()) return {nullptr, nullptr};
-        String texPath = (std::filesystem::path(sponzaPath).parent_path() / uri).string();
-        auto it = g_TexCache.find(texPath);
-        if (it == g_TexCache.end()) {
-            int w, h, ch;
-            u8* pixels = stbi_load(texPath.c_str(), &w, &h, &ch, 4);
-            if (!pixels) { HE_CORE_WARN("纹理加载失败: {}", texPath); return {nullptr, nullptr}; }
-            u32 maxDim = static_cast<u32>(std::max(w, h));
-            u32 mipLevels = 1;
-            while (maxDim > 1) { maxDim >>= 1; ++mipLevels; }
-
-            rhi::TextureDesc td;
-            td.format=rhi::Format::RGBA8_UNORM;
-            td.width=static_cast<u32>(w);
-            td.height=static_cast<u32>(h);
-            td.mipLevels = mipLevels;
-            td.usage=rhi::TextureUsage::ShaderResource
-                   | rhi::TextureUsage::TransferSrc
-                   | rhi::TextureUsage::TransferDst;
-            td.initialData=pixels;
-            auto t = device->CreateTexture(td);
-            rhi::SamplerDesc sd;
-            sd.minFilter=rhi::FilterMode::Linear;
-            sd.magFilter=rhi::FilterMode::Linear;
-            sd.mipFilter=rhi::FilterMode::Linear;
-            sd.maxLod = static_cast<float>(mipLevels);
-            sd.addressU=sd.addressV=rhi::AddressMode::Repeat;
-            auto s = device->CreateSampler(sd);
-            stbi_image_free(pixels);
-            it = g_TexCache.emplace(texPath, std::make_pair(std::move(t), std::move(s))).first;
-            HE_CORE_INFO("GPU 纹理: {} ({}×{})", texPath, w, h);
-        }
-        return {it->second.first.get(), it->second.second.get()};
-    };
-
-    {
-        // 创建 bindless 默认占位纹理（必须在注册材质纹理之前设置）
-        u8 white[4]={255,255,255,255};
-        rhi::TextureDesc td;
-        td.format=rhi::Format::RGBA8_UNORM;
-        td.width=1;
-        td.height=1;
-        td.mipLevels=1;
-        td.usage=rhi::TextureUsage::ShaderResource;
-        td.initialData=white;
-        auto defaultTex = device->CreateTexture(td);
-        rhi::SamplerDesc sd;
-        sd.minFilter=sd.magFilter=rhi::FilterMode::Linear;
-        sd.addressU=sd.addressV=rhi::AddressMode::Repeat;
-        auto defaultSamp = device->CreateSampler(sd);
-        device->GetBindlessHeap()->SetDefaultTexture(
-            defaultTex.get(), defaultSamp.get());
-        g_TexCache["__default__"] = {std::move(defaultTex), std::move(defaultSamp)};
-    }
+    // 纹理的创建/去重/绑定默认占位都在 TextureCache（见 main 之前）；这里只按 glTF 的 uri 取。
+    TextureCache texCache(device.get());
+    texCache.CreateAndBindDefault();   // bindless 默认占位纹理（必须在注册材质纹理之前）
+    const String sponzaDir = std::filesystem::path(sponzaPath).parent_path().string();
+    auto loadTexture = [&](const String& uri) { return texCache.Load(sponzaDir, uri); };
 
     {
         u32 texCount = 0;
@@ -402,7 +452,7 @@ int main() {
             mesh.materialID = matID;
             texCount++;
         });
-        HE_CORE_INFO("纹理加载 + bindless 注册完成: {} primitive, {} 张独立纹理", texCount, g_TexCache.size());
+        HE_CORE_INFO("纹理加载 + bindless 注册完成: {} primitive, {} 张独立纹理", texCount, texCache.Count());
     }
 
     // ---- 6. 初始化渲染管线（Forward / Deferred；光追经 GI 层栈的 RT 源启用） ----
