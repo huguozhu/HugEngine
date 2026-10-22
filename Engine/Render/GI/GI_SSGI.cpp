@@ -66,7 +66,7 @@ bool GI_SSGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     m_DescSet    = device->AllocateDescriptorSet(m_DescLayout);
 
     // Uniform Buffer 固定绑定到参数 binding（每帧只更新内容，不重绑）
-    device->UpdateDescriptorSet(m_DescSet, kSSGIBindParams, rhi::DescriptorType::UniformBuffer, m_Device->ResolveBuffer(m_UniformBuffer));
+    device->UpdateDescriptorSet(m_DescSet, kSSGIBindParams, rhi::DescriptorType::UniformBuffer, ResB(m_UniformBuffer));
 
     // 4. 编译管线（顶点 = 全屏三角，像素 = SSGI 计算）
     rhi::ShaderBytecode vs, fs;
@@ -101,7 +101,7 @@ bool GI_SSGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     // 前帧 HDR 辐射度（若已在 Initialize 之前注入则立刻绑定；否则首次 Render 时补绑）
     BindRadianceHistory();
     m_Ready = true;
-    HE_CORE_INFO("SSGI initialized ({}x{})", m_Device->ResolveTexture(m_Output)->GetWidth(), m_Device->ResolveTexture(m_Output)->GetHeight());
+    HE_CORE_INFO("SSGI initialized ({}x{})", ResT(m_Output)->GetWidth(), ResT(m_Output)->GetHeight());
     return true;
 }
 
@@ -127,7 +127,7 @@ void GI_SSGI::OnResize(u32 w, u32 h) {
 void GI_SSGI::SyncOutputSize() {
     if (!m_Device || !m_Ready) return;
     const u32 w = halfResW(m_Width), h = halfResH(m_Height);
-    if (!m_Output.IsValid() || m_Device->ResolveTexture(m_Output)->GetWidth() != w || m_Device->ResolveTexture(m_Output)->GetHeight() != h) {
+    if (!m_Output.IsValid() || ResT(m_Output)->GetWidth() != w || ResT(m_Output)->GetHeight() != h) {
         CreateOutputTex(w, h);
     }
 }
@@ -173,11 +173,11 @@ void GI_SSGI::Render(rhi::IRHICommandList* cmd) {
     }
 
     // 1. 绑定管线 + 描述符集，设置视口/裁剪
-    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
+    cmd->SetPipeline(ResP(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSet);
     // 视口用输出纹理实际尺寸（halfRes 时为半分辨率，与渲染目标一致）
-    u32 ow = m_Device->ResolveTexture(m_Output)->GetWidth();
-    u32 oh = m_Device->ResolveTexture(m_Output)->GetHeight();
+    u32 ow = ResT(m_Output)->GetWidth();
+    u32 oh = ResT(m_Output)->GetHeight();
     cmd->SetViewport({0, (float)oh, (float)ow, -(float)oh, 0, 1});
     cmd->SetScissor({0, 0, ow, oh});
 
@@ -219,11 +219,11 @@ void GI_SSGI::Render(rhi::IRHICommandList* cmd) {
     ub.proj    = proj;
     ub.view    = view;
 
-    auto* ubH = m_Device->ResolveBuffer(m_UniformBuffer);
+    auto* ubH = ResB(m_UniformBuffer);
     void* mapped = ubH ? ubH->Map() : nullptr;
     if (mapped) {
         memcpy(mapped, &ub, sizeof(ub));
-        if (auto* ubu = m_Device->ResolveBuffer(m_UniformBuffer)) ubu->Unmap();
+        if (auto* ubu = ResB(m_UniformBuffer)) ubu->Unmap();
     }
 
     // 5. 绘制全屏三角（3 顶点覆盖全屏）

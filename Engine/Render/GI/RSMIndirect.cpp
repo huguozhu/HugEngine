@@ -149,11 +149,11 @@ void RSMIndirect::SetRSM(rhi::IRHITexture* positionMap, rhi::IRHITexture* normal
 void RSMIndirect::PreBind(rhi::IRHICommandList* cmd) {
     if (!m_Ready || !m_PSO.IsValid() || !m_Output.IsValid()) return;
     // 见头文件：绑管线必须早于 BeginOffscreenPass
-    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
+    cmd->SetPipeline(ResP(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
     // 视口用输出纹理实际尺寸（半分辨率），与渲染目标一致
-    const u32 ow = m_Device->ResolveTexture(m_Output)->GetWidth();
-    const u32 oh = m_Device->ResolveTexture(m_Output)->GetHeight();
+    const u32 ow = ResT(m_Output)->GetWidth();
+    const u32 oh = ResT(m_Output)->GetHeight();
     cmd->SetViewport({0, (float)oh, (float)ow, -(float)oh, 0, 1});
     cmd->SetScissor({0, 0, ow, oh});
 }

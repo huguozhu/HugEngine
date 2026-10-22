@@ -65,8 +65,8 @@ bool GI_DDGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         init.cameraPos  = float4(0, 0, 0, 0);
         init.params     = float4(1.0f, 32.0f, 0.0f, 0.0f);
         init.viewProj   = float4x4(1.0f);
-        void* mapped = m_Device->ResolveBuffer(m_GridUniform)->Map();
-        if (mapped) { memcpy(mapped, &init, sizeof(ProbeGridUniform)); m_Device->ResolveBuffer(m_GridUniform)->Unmap(); }
+        void* mapped = ResB(m_GridUniform)->Map();
+        if (mapped) { memcpy(mapped, &init, sizeof(ProbeGridUniform)); ResB(m_GridUniform)->Unmap(); }
     }
 
     // ---- 采样器 ----
@@ -118,10 +118,10 @@ bool GI_DDGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
         rhi::BufferDesc sbd;
         sbd.size = sizeof(u32) * 8u; sbd.usage = rhi::BufferUsage::Storage; sbd.cpuAccess = true;
         m_StatsBuffer = device->CreateBufferHandle(sbd);
-        m_StatsMapped = m_StatsBuffer.IsValid() ? m_Device->ResolveBuffer(m_StatsBuffer)->Map() : nullptr;
+        m_StatsMapped = m_StatsBuffer.IsValid() ? ResB(m_StatsBuffer)->Map() : nullptr;
         if (m_StatsBuffer.IsValid()) {
             device->UpdateDescriptorSet(m_Set, kDDGIBindStats, rhi::DescriptorType::StorageBuffer,
-                                        m_Device->ResolveBuffer(m_StatsBuffer));
+                                        ResB(m_StatsBuffer));
         }
     }
 
@@ -129,7 +129,7 @@ bool GI_DDGI::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     BindRadianceHistory();
 
     // 预绑定不变的 binding：uniform buffer（每帧只需 Map/Unmap 更新内容）
-    device->UpdateDescriptorSet(m_Set, kDDGIBindGridParams, rhi::DescriptorType::UniformBuffer, m_Device->ResolveBuffer(m_GridUniform));
+    device->UpdateDescriptorSet(m_Set, kDDGIBindGridParams, rhi::DescriptorType::UniformBuffer, ResB(m_GridUniform));
 
     // ---- Compute PSO ----
     rhi::ShaderBytecode cs;
@@ -262,8 +262,8 @@ void GI_DDGI::Render(rhi::IRHICommandList* cmd) {
     static const u32 kNumSamples = kSamplesPerProbe;
 
     // 更新 descriptor set：绑定当前输出缓冲和历史缓冲（每帧因 swap 而变化）
-    m_Device->UpdateDescriptorSet(m_Set, kDDGIBindProbes, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ProbeBuffer));
-    m_Device->UpdateDescriptorSet(m_Set, kDDGIBindHistory, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ProbeHistory));
+    m_Device->UpdateDescriptorSet(m_Set, kDDGIBindProbes, rhi::DescriptorType::StorageBuffer, ResB(m_ProbeBuffer));
+    m_Device->UpdateDescriptorSet(m_Set, kDDGIBindHistory, rhi::DescriptorType::StorageBuffer, ResB(m_ProbeHistory));
     // 光追 march 的射线辐射度（任务 17）：由帧图在本帧的 DDGI_Trace pass 之后注入；
     // 未注入时保持上一次绑定，但 u_Flags.w=0 ⇒ 着色器根本不采样它（与 §9.2-T 同一约定：
     // "没用到的绑定"不会读，只是不能让"用了却没绑"发生）。
@@ -301,14 +301,14 @@ void GI_DDGI::Render(rhi::IRHICommandList* cmd) {
                                        kScreenProbeSymmetricScale, 0.0f);
     ++updatePhase;
 
-    void* mapped = m_Device->ResolveBuffer(m_GridUniform)->Map();
+    void* mapped = ResB(m_GridUniform)->Map();
     if (mapped) {
         memcpy(mapped, &uniforms, sizeof(ProbeGridUniform));
-        m_Device->ResolveBuffer(m_GridUniform)->Unmap();
+        ResB(m_GridUniform)->Unmap();
     }
 
     // ---- Compute Dispatch ----
-    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
+    cmd->SetPipeline(ResP(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
     // Dispatch 调试 marker（RenderDoc 定位用）
     char label[64];

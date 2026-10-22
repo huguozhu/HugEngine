@@ -58,7 +58,7 @@ bool GI_SSR::Initialize(rhi::IRHIDevice* device, u32 width, u32 height) {
     ubDesc.cpuAccess = true;
     m_UniformBuffer  = device->CreateBufferHandle(ubDesc);
     device->UpdateDescriptorSet(m_DescSet, kSSRBindParams,
-        rhi::DescriptorType::UniformBuffer, m_Device->ResolveBuffer(m_UniformBuffer));
+        rhi::DescriptorType::UniformBuffer, ResB(m_UniformBuffer));
 
     rhi::ShaderBytecode vs, fs;
     vs.stage = rhi::ShaderStage::Vertex;
@@ -112,7 +112,7 @@ void GI_SSR::OnResize(u32 w, u32 h) {
 void GI_SSR::SyncOutputSize() {
     if (!m_Device || !m_Ready) return;
     const u32 w = halfResW(m_Width), h = halfResH(m_Height);
-    if (!m_Output.IsValid() || m_Device->ResolveTexture(m_Output)->GetWidth() != w || m_Device->ResolveTexture(m_Output)->GetHeight() != h) {
+    if (!m_Output.IsValid() || ResT(m_Output)->GetWidth() != w || ResT(m_Output)->GetHeight() != h) {
         CreateOutputTex(w, h);
     }
 }
@@ -160,10 +160,10 @@ void GI_SSR::Render(rhi::IRHICommandList* cmd) {
     if (!m_Ready || !m_Settings.enabled || !m_Depth || !m_Normal || !m_Albedo) {
         return;
     }
-    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
+    cmd->SetPipeline(ResP(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DescSet);
-    u32 ow = m_Device->ResolveTexture(m_Output)->GetWidth();
-    u32 oh = m_Device->ResolveTexture(m_Output)->GetHeight();
+    u32 ow = ResT(m_Output)->GetWidth();
+    u32 oh = ResT(m_Output)->GetHeight();
     cmd->SetViewport({0, (float)oh, (float)ow, -(float)oh, 0, 1});
     cmd->SetScissor({0, 0, ow, oh});
     // ── 矩阵上传（UBO binding 3）：**正/逆投影分开传** ──
@@ -183,11 +183,11 @@ void GI_SSR::Render(rhi::IRHICommandList* cmd) {
             mats.view = float4x4(1.0f);
         }
         mats.invProj = glm::inverse(mats.proj);
-        auto* ubH = m_Device->ResolveBuffer(m_UniformBuffer);
+        auto* ubH = ResB(m_UniformBuffer);
     void* mapped = ubH ? ubH->Map() : nullptr;
         if (mapped) {
             std::memcpy(mapped, &mats, sizeof(mats));
-            if (auto* ubu = m_Device->ResolveBuffer(m_UniformBuffer)) ubu->Unmap();
+            if (auto* ubu = ResB(m_UniformBuffer)) ubu->Unmap();
         }
     }
 

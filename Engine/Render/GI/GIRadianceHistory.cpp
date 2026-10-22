@@ -71,7 +71,7 @@ bool GIRadianceHistory::Initialize(rhi::IRHIDevice* device, u32 width, u32 heigh
         return false;
     }
     HE_CORE_INFO("GIRadianceHistory initialized (source {}x{} -> {}x{})",
-                 width, height, m_Device->ResolveTexture(m_Texture)->GetWidth(), m_Device->ResolveTexture(m_Texture)->GetHeight());
+                 width, height, ResT(m_Texture)->GetWidth(), ResT(m_Texture)->GetHeight());
     return true;
 }
 
@@ -97,16 +97,16 @@ void GIRadianceHistory::Capture(rhi::IRHICommandList* cmd, rhi::IRHITexture* hdr
         if (!m_Texture.IsValid()) return;
     }
 
-    const u32 tw = m_Device->ResolveTexture(m_Texture)->GetWidth();
-    const u32 th = m_Device->ResolveTexture(m_Texture)->GetHeight();
+    const u32 tw = ResT(m_Texture)->GetWidth();
+    const u32 th = ResT(m_Texture)->GetHeight();
 
     m_Device->UpdateDescriptorSet(m_Set, kRadianceBindInput,
         rhi::DescriptorType::CombinedImageSampler, hdr, m_Device->ResolveSampler(m_Sampler));
 
-    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
+    cmd->SetPipeline(ResP(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
     rhi::ClearValue clr{};
-    cmd->BeginOffscreenPass(m_Device->ResolveTexture(m_Texture)->GetNativeHandle(), nullptr, tw, th, &clr, false);
+    cmd->BeginOffscreenPass(ResT(m_Texture)->GetNativeHandle(), nullptr, tw, th, &clr, false);
     cmd->SetViewport({0, (float)th, (float)tw, -(float)th, 0, 1});
     cmd->SetScissor({0, 0, tw, th});
     cmd->Draw(3);
