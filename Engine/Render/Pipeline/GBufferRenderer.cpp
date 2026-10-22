@@ -33,16 +33,16 @@ bool GBufferRenderer::Initialize(rhi::IRHIDevice* device, u32 width, u32 height)
     m_Ctx.device    = device;
     m_Ctx.width     = width;
     m_Ctx.height    = height;
-    m_Ctx.gbA       = m_Ctx.device->ResolveTexture(m_A);
-    m_Ctx.gbB       = m_Ctx.device->ResolveTexture(m_B);
-    m_Ctx.gbC       = m_Ctx.device->ResolveTexture(m_C);
-    m_Ctx.gbVel     = m_Ctx.device->ResolveTexture(m_D);
-    m_Ctx.gbDepth   = m_Ctx.device->ResolveTexture(m_Depth);
-    m_Ctx.gbWorldPos = m_Ctx.device->ResolveTexture(m_E);
-    m_Ctx.gbDisneyA = m_Ctx.device->ResolveTexture(m_F);
-    m_Ctx.gbDisneyB = m_Ctx.device->ResolveTexture(m_G);
-    m_Ctx.gbLightmapKey = m_Ctx.device->ResolveTexture(m_H);
-    m_Ctx.pso       = m_Ctx.device->ResolvePipelineState(m_PSO);
+    m_Ctx.gbA       = ResT(m_A);
+    m_Ctx.gbB       = ResT(m_B);
+    m_Ctx.gbC       = ResT(m_C);
+    m_Ctx.gbVel     = ResT(m_D);
+    m_Ctx.gbDepth   = ResT(m_Depth);
+    m_Ctx.gbWorldPos = ResT(m_E);
+    m_Ctx.gbDisneyA = ResT(m_F);
+    m_Ctx.gbDisneyB = ResT(m_G);
+    m_Ctx.gbLightmapKey = ResT(m_H);
+    m_Ctx.pso       = ResP(m_PSO);
     m_Ctx.descSet   = m_Set;
 
     // ── 5. 创建策略模式渲染器 ──
@@ -96,28 +96,28 @@ void GBufferRenderer::OnResize(u32 width, u32 height) {
     // 更新 GBufferContext 中的裸指针
     m_Ctx.width     = width;
     m_Ctx.height    = height;
-    m_Ctx.gbA       = m_Ctx.device->ResolveTexture(m_A);
-    m_Ctx.gbB       = m_Ctx.device->ResolveTexture(m_B);
-    m_Ctx.gbC       = m_Ctx.device->ResolveTexture(m_C);
-    m_Ctx.gbVel     = m_Ctx.device->ResolveTexture(m_D);
-    m_Ctx.gbDepth   = m_Ctx.device->ResolveTexture(m_Depth);
-    m_Ctx.gbWorldPos = m_Ctx.device->ResolveTexture(m_E);
-    m_Ctx.gbDisneyA = m_Ctx.device->ResolveTexture(m_F);
-    m_Ctx.gbDisneyB = m_Ctx.device->ResolveTexture(m_G);
-    m_Ctx.gbLightmapKey = m_Ctx.device->ResolveTexture(m_H);
+    m_Ctx.gbA       = ResT(m_A);
+    m_Ctx.gbB       = ResT(m_B);
+    m_Ctx.gbC       = ResT(m_C);
+    m_Ctx.gbVel     = ResT(m_D);
+    m_Ctx.gbDepth   = ResT(m_Depth);
+    m_Ctx.gbWorldPos = ResT(m_E);
+    m_Ctx.gbDisneyA = ResT(m_F);
+    m_Ctx.gbDisneyB = ResT(m_G);
+    m_Ctx.gbLightmapKey = ResT(m_H);
 }
 
 GBufferRenderer::Handles GBufferRenderer::ImportToRenderGraph(RenderGraph& rg) {
     Handles h;
-    h.albedo   = rg.ImportTexture("GB_A",        m_Ctx.device->ResolveTexture(m_A));
-    h.normal   = rg.ImportTexture("GB_B",        m_Ctx.device->ResolveTexture(m_B));
-    h.emissive  = rg.ImportTexture("GB_C",        m_Ctx.device->ResolveTexture(m_C));
-    h.velocity = rg.ImportTexture("GB_Vel",      m_Ctx.device->ResolveTexture(m_D));
-    h.worldPos = rg.ImportTexture("GB_WorldPos", m_Ctx.device->ResolveTexture(m_E));
-    h.disneyA  = rg.ImportTexture("GB_DisneyA",  m_Ctx.device->ResolveTexture(m_F));
-    h.disneyB  = rg.ImportTexture("GB_DisneyB",  m_Ctx.device->ResolveTexture(m_G));
-    h.lightmapKey = rg.ImportTexture("GB_LightmapKey", m_Ctx.device->ResolveTexture(m_H));
-    h.depth    = rg.ImportTexture("GB_Depth",    m_Ctx.device->ResolveTexture(m_Depth));
+    h.albedo   = rg.ImportTexture("GB_A",        ResT(m_A));
+    h.normal   = rg.ImportTexture("GB_B",        ResT(m_B));
+    h.emissive  = rg.ImportTexture("GB_C",        ResT(m_C));
+    h.velocity = rg.ImportTexture("GB_Vel",      ResT(m_D));
+    h.worldPos = rg.ImportTexture("GB_WorldPos", ResT(m_E));
+    h.disneyA  = rg.ImportTexture("GB_DisneyA",  ResT(m_F));
+    h.disneyB  = rg.ImportTexture("GB_DisneyB",  ResT(m_G));
+    h.lightmapKey = rg.ImportTexture("GB_LightmapKey", ResT(m_H));
+    h.depth    = rg.ImportTexture("GB_Depth",    ResT(m_Depth));
     return h;
 }
 

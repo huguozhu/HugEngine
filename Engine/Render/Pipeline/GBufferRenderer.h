@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Threading/RenderThreadContext.h"   // T2.6：帧上下文（唯一 RHI 出口）
+
 #include "RHI/RHI.h"
 #include "Pipeline/Material.h"
 #include "Pipeline/GPUCulling.h"
@@ -35,6 +37,9 @@ constexpr u32 kGBufferSlotLightmapKey = 7;  // LightmapKey：uv0.xy + objectInde
 // ============================================================
 struct GBufferContext {
     rhi::IRHIDevice* device = nullptr;
+    /// 【T2.6】本帧的渲染线程上下文（可空；空时解析回退 `device`）。
+    /// GBuffer 是"每帧由外部填上下文"的组件，所以上下文放在这里而不是类成员。
+    const RenderThreadContext* frameCtx = nullptr;
     u32 width  = 0;
     u32 height = 0;
 
@@ -175,19 +180,19 @@ public:
     GBufferContext& GetContext() { return m_Ctx; }
 
     // ── 纹理访问器（供 Lighting / PostProcess 使用）──
-    rhi::IRHITexture* GetAlbedo()   const { return m_Ctx.device->ResolveTexture(m_A); }
-    rhi::IRHITexture* GetNormal()   const { return m_Ctx.device->ResolveTexture(m_B); }
-    rhi::IRHITexture* GetEmissive() const { return m_Ctx.device->ResolveTexture(m_C); }
-    rhi::IRHITexture* GetVelocity() const { return m_Ctx.device->ResolveTexture(m_D); }
-    rhi::IRHITexture* GetWorldPos() const { return m_Ctx.device->ResolveTexture(m_E); }
-    rhi::IRHITexture* GetDisneyA()  const { return m_Ctx.device->ResolveTexture(m_F); }
-    rhi::IRHITexture* GetDisneyB()  const { return m_Ctx.device->ResolveTexture(m_G); }
+    rhi::IRHITexture* GetAlbedo()   const { return ResT(m_A); }
+    rhi::IRHITexture* GetNormal()   const { return ResT(m_B); }
+    rhi::IRHITexture* GetEmissive() const { return ResT(m_C); }
+    rhi::IRHITexture* GetVelocity() const { return ResT(m_D); }
+    rhi::IRHITexture* GetWorldPos() const { return ResT(m_E); }
+    rhi::IRHITexture* GetDisneyA()  const { return ResT(m_F); }
+    rhi::IRHITexture* GetDisneyB()  const { return ResT(m_G); }
     /// 光照图键（任务 31）：uv0.xy + objectIndex。Deferred Lighting 用它查烘焙光照图
-    rhi::IRHITexture* GetLightmapKey() const { return m_Ctx.device->ResolveTexture(m_H); }
-    rhi::IRHITexture* GetDepth()    const { return m_Ctx.device->ResolveTexture(m_Depth); }
+    rhi::IRHITexture* GetLightmapKey() const { return ResT(m_H); }
+    rhi::IRHITexture* GetDepth()    const { return ResT(m_Depth); }
 
     // ── 描述符集访问器 ──
-    rhi::IRHIPipelineState*       GetPSO()           const { return m_Ctx.device->ResolvePipelineState(m_PSO); }
+    rhi::IRHIPipelineState*       GetPSO()           const { return ResP(m_PSO); }
     rhi::DescriptorSetLayoutHandle GetLayout()       const { return m_Layout; }
     rhi::DescriptorSetHandle       GetDescriptorSet() const { return m_Set; }
 
@@ -216,6 +221,23 @@ private:
     std::unique_ptr<IGBufferRenderer> m_Renderer;
 
     // ── 上下文（传递给 IGBufferRenderer::Render）──
+    // 【T2.6】统一解析入口：优先帧上下文，未设置时回退设备
+    [[nodiscard]] rhi::IRHIBuffer* ResB(rhi::RHIBufferHandle h) const {
+        const RenderThreadContext* c = m_Ctx.frameCtx;
+        if (c) return c->ResolveBuffer(h);
+        return m_Ctx.device ? m_Ctx.device->ResolveBuffer(h) : nullptr;
+    }
+    [[nodiscard]] rhi::IRHITexture* ResT(rhi::RHITextureHandle h) const {
+        const RenderThreadContext* c = m_Ctx.frameCtx;
+        if (c) return c->ResolveTexture(h);
+        return m_Ctx.device ? m_Ctx.device->ResolveTexture(h) : nullptr;
+    }
+    [[nodiscard]] rhi::IRHIPipelineState* ResP(rhi::RHIPipelineStateHandle h) const {
+        const RenderThreadContext* c = m_Ctx.frameCtx;
+        if (c) return c->ResolvePipelineState(h);
+        return m_Ctx.device ? m_Ctx.device->ResolvePipelineState(h) : nullptr;
+    }
+
     GBufferContext m_Ctx;
 
     Mode m_Mode   = Mode::CPU;
