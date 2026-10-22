@@ -92,7 +92,7 @@ void LumenScene::CreateIrradianceGPUObjects() {
 
 void LumenScene::RunProbeIrradiance(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbNormal,
                                     rhi::IRHITexture* gbAlbedo, rhi::IRHITexture* gbWorldPos) {
-    if (!m_Device || !cmd || !m_ProbeBuf || !m_CellProbeBuf || !m_IrradianceTex.IsValid()) return;
+    if (!m_Device || !cmd || !m_ProbeBuf.IsValid() || !m_CellProbeBuf || !m_IrradianceTex.IsValid()) return;
     if (!gbNormal || !gbAlbedo || !gbWorldPos || !m_ProbeCount) return;
 
     if (!m_IrrBound) {
@@ -101,7 +101,7 @@ void LumenScene::RunProbeIrradiance(rhi::IRHICommandList* cmd, rhi::IRHITexture*
         // 【步骤 35】绑定**过滤后**的探针缓冲：辐照度是探针 SH 的逐像素重建，
         // 读未过滤的一份就等于把刚做的滤波丢掉（滤波 pass 每帧都会写出这一份）。
         m_Device->UpdateDescriptorSet(m_IrrSet, 0, rhi::DescriptorType::StorageBuffer,
-                                      m_ProbeFilteredBuf ? m_ProbeFilteredBuf.get() : m_ProbeBuf.get());
+                                      m_ProbeFilteredBuf ? m_ProbeFilteredBuf.get() : m_Device->ResolveBuffer(m_ProbeBuf));
         m_Device->UpdateDescriptorSet(m_IrrSet, 1, rhi::DescriptorType::StorageBuffer, m_CellProbeBuf.get());
         m_Device->UpdateDescriptorSetWithImageView(m_IrrSet, 5,
             rhi::DescriptorType::StorageImage, m_Device->ResolveTexture(m_IrradianceTex)->GetNativeHandle());
@@ -253,7 +253,7 @@ void LumenScene::LogMemoryUsage() const {
     const double px = (double)m_Width * (double)m_Height;
     items.push_back({"Lumen 输出 + 辐照度（2 × 屏幕 RGBA16F）", 2.0 * px * 8.0 / (1024.0 * 1024.0)});
     addBuf("卡片清单 / 页表镜像", m_Device->ResolveBuffer(m_ShadeCardsBuf));
-    addBuf("页表镜像", m_PageTableBuf.get());
+    addBuf("页表镜像", m_Device->ResolveBuffer(m_PageTableBuf));
     addBuf("命中点缓冲", m_RayHitPosBuf.get());
     addBuf("光线结果缓冲", m_RayResultBuf.get());
     addBuf("着色输出（atlas / GBuffer / 最优候选）", m_ShadeOutBuf.get());
@@ -261,7 +261,7 @@ void LumenScene::LogMemoryUsage() const {
     addBuf("着色输出（最优候选）", m_ShadeOutBestBuf.get());
     addBuf("远场光追结果（2 × 光线）", m_FarField ? m_FarField->GetResultBuffer() : nullptr);
     addBuf("远场切换 fade（2 × 光线）", m_RayFadeBuf.get());
-    addBuf("探针缓冲（65536 × 96 B）", m_ProbeBuf.get());
+    addBuf("探针缓冲（65536 × 96 B）", m_Device->ResolveBuffer(m_ProbeBuf));
     addBuf("单元 → 探针映射", m_CellProbeBuf.get());
     addBuf("SH 重建/参考辐照度（2 × 探针）", m_IrradShBuf.get());
 
@@ -369,10 +369,10 @@ void LumenScene::RunFarFieldRT(rhi::IRHICommandList* cmd) {
     if (!s_farLogged) {
         s_farLogged = true;
         HE_CORE_INFO("LumenScene 远场光追前置检查: device={} cmd={} probe={} tlas={} rayResult={} traceFrame={}",
-                     (void*)m_Device, (void*)cmd, (void*)m_ProbeBuf.get(), (void*)m_TLAS,
+                     (void*)m_Device, (void*)cmd, (void*)m_Device->ResolveBuffer(m_ProbeBuf), (void*)m_TLAS,
                      (void*)m_RayResultBuf.get(), m_TraceFrame);
     }
-    if (!m_Device || !cmd || !m_ProbeBuf || !m_TLAS || !m_RayResultBuf) return;
+    if (!m_Device || !cmd || !m_ProbeBuf.IsValid() || !m_TLAS || !m_RayResultBuf) return;
     if (m_TraceFrame == 0u) return;   // 还没追踪过 ⇒ 没有可比的光线
 
     if (!m_FarField) {
@@ -479,7 +479,7 @@ void LumenScene::RunFarFieldRT(rhi::IRHICommandList* cmd) {
     ComputeBarrier(cmd);   // 等"追踪 pass 写 SDF 光线结果"落地
 
     LumenFarFieldPass::FrameParams fp;
-    fp.probeBuffer   = m_ProbeBuf.get();
+    fp.probeBuffer   = m_Device->ResolveBuffer(m_ProbeBuf);
     fp.probeCount    = m_ProbeCount;
     fp.traceRep      = m_TraceConfig.traceRep;
     // 种子必须与 SDF 追踪那一帧一致（追踪 pass 用自己的帧计数当种子再自增）

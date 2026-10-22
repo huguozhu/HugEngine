@@ -97,7 +97,7 @@ void LumenScene::CreateProbeFilterGPUObjects() {
 }
 
 void LumenScene::RunScreenProbeFilter(rhi::IRHICommandList* cmd, const float4x4& viewProj) {
-    if (!m_Device || !cmd || !m_ProbeBuf || !m_CellProbeBuf) return;
+    if (!m_Device || !cmd || !m_ProbeBuf.IsValid() || !m_CellProbeBuf) return;
     if (!m_ProbeCount) return;
 
     const u32 cellsX = (m_Width + 15u) / 16u;
@@ -202,7 +202,7 @@ void LumenScene::RunScreenProbeFilter(rhi::IRHICommandList* cmd, const float4x4&
     if (!histProbe || !histCell || !outProbe || !outCell || !m_ProbeFilteredBuf || !m_ProbeFilterStatsBuf) return;
 
     // 描述符必须**每帧重绑**：乒乓使绑定 3/4/5/6 的目标每帧都换（步骤 27 的 fade 缓冲教训）
-    m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 0, rhi::DescriptorType::StorageBuffer, m_ProbeBuf.get());
+    m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 0, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ProbeBuf));
     m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 1, rhi::DescriptorType::StorageBuffer, m_ProbeFilteredBuf.get());
     m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 2, rhi::DescriptorType::StorageBuffer, m_CellProbeBuf.get());
     m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 3, rhi::DescriptorType::StorageBuffer, histCell);

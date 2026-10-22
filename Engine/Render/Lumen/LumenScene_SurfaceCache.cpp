@@ -102,7 +102,7 @@ void LumenScene::BuildPageTable() {
     bd.usage       = rhi::BufferUsage::Storage;
     bd.cpuAccess   = true;
     bd.initialData = m_PageTable.Entries().data();
-    m_PageTableBuf = m_Device->CreateBuffer(bd);
+    m_PageTableBuf = m_Device->CreateBufferHandle(bd);   // A-3
 
     HE_CORE_INFO("LumenScene 页表（步骤 14）: 卡片 {} 张 ⇒ 页 {} 个（1 卡 1 页；前 {} 页走六态演示，其余留给真实回路）；"
                  "Invalid {} / Requested {} / Allocating {} / Capturing {} / Captured {} / Dirty {}",
@@ -191,7 +191,7 @@ void LumenScene::CreatePageCheckGPUObjects() {
 void LumenScene::StepSurfaceCache(rhi::IRHICommandList* cmd) {
     if (!m_Device || !cmd) return;
     BuildPageTable();
-    if (m_PageCheckDone || !m_PageTableBuf) return;
+    if (m_PageCheckDone || !m_PageTableBuf.IsValid()) return;
 
     if (!m_PageCheckBound) {
         rhi::BufferDesc ob;
@@ -203,7 +203,7 @@ void LumenScene::StepSurfaceCache(rhi::IRHICommandList* cmd) {
         m_PageCheckOutMapped = m_Device->ResolveBuffer(m_PageCheckOut)->Map();
 
         m_Device->UpdateDescriptorSet(m_PageCheckSet, 0, rhi::DescriptorType::StorageBuffer,
-                                      m_PageTableBuf.get());
+                                      m_Device->ResolveBuffer(m_PageTableBuf));
         m_Device->UpdateDescriptorSet(m_PageCheckSet, 1, rhi::DescriptorType::StorageBuffer,
                                       m_Device->ResolveBuffer(m_PageCheckOut));
         m_PageCheckBound = true;
@@ -302,8 +302,8 @@ void LumenScene::CreateCaptureGPUObjects() {
     sb.size      = sizeof(u32) * 8u;   // 0=命中写入 1=未命中 2=march 命中 3=未用 4..7=push constant 回报(诊断)
     sb.usage     = rhi::BufferUsage::Storage;
     sb.cpuAccess = true;
-    m_CaptureStats = m_Device->CreateBuffer(sb);
-    m_CaptureStatsMapped = m_CaptureStats->Map();
+    m_CaptureStats = m_Device->CreateBufferHandle(sb);   // A-3
+    m_CaptureStatsMapped = m_Device->ResolveBuffer(m_CaptureStats)->Map();
 
     rhi::BufferDesc fb;                       // 每帧常量（与 shader 的 CaptureFrame 同布局：10 × 16B）
     fb.size      = 10u * 16u;
@@ -346,7 +346,7 @@ void LumenScene::RunCardCapture(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbA
         m_Device->UpdateDescriptorSetWithImageView(m_CaptureSet, 8,
             rhi::DescriptorType::StorageImage, m_Device->ResolveTexture(m_AtlasEmissive)->GetNativeHandle());
         m_Device->UpdateDescriptorSet(m_CaptureSet, 9, rhi::DescriptorType::StorageBuffer,
-                                      m_CaptureStats.get());
+                                      m_Device->ResolveBuffer(m_CaptureStats));
         m_CaptureBound = true;
     }
     // GBuffer 可能随 resize 换纹理 ⇒ 这三张每帧重绑
@@ -461,11 +461,11 @@ void LumenScene::RunCardCapture(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbA
         cmd->Dispatch(1, 1, 1);
 
         m_PageTable.EndCapture(page, true);      // Capturing → Captured
-        if (m_PageTableBuf) {
-            if (void* p = m_PageTableBuf->Map()) {
+        if (m_PageTableBuf.IsValid()) {
+            if (void* p = m_Device->ResolveBuffer(m_PageTableBuf)->Map()) {
                 std::memcpy(p, m_PageTable.Entries().data(),
                             m_PageTable.Size() * sizeof(SurfaceCachePageEntry));
-                m_PageTableBuf->Unmap();
+                if (auto* b = m_Device->ResolveBuffer(m_PageTableBuf)) b->Unmap();
             }
         }
         ++captured;
@@ -550,7 +550,7 @@ void LumenScene::CreateShadeGPUObjects() {
 void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbAlbedo,
                                         rhi::IRHITexture* gbWorldPos, const float4x4& viewProj) {
     if (!m_Device || !cmd || !m_ProbeCount || !m_RayHitPosBuf || !m_AtlasAlbedo.IsValid() || !gbAlbedo || !gbWorldPos) return;
-    if (!m_PageTableBuf) return;
+    if (!m_PageTableBuf.IsValid()) return;
 
     // 步骤 28：把 §6 的组合状态在运行期说清楚（只报一次）。非法组合在 `Validate()` 里已经被拒；
     // 这里处理的是**合法但首版未实现**的那些（HitLighting / screenTrace）—— 它们必须可见。
@@ -625,7 +625,7 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
         m_Device->UpdateDescriptorSet(m_ShadeSet, 0, rhi::DescriptorType::CombinedImageSampler,
                                       m_Device->ResolveTexture(m_AtlasAlbedo), m_SDF.GetLinearSampler());
         m_Device->UpdateDescriptorSet(m_ShadeSet, 1, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ShadeCardsBuf));
-        m_Device->UpdateDescriptorSet(m_ShadeSet, 2, rhi::DescriptorType::StorageBuffer, m_PageTableBuf.get());
+        m_Device->UpdateDescriptorSet(m_ShadeSet, 2, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_PageTableBuf));
         m_Device->UpdateDescriptorSet(m_ShadeSet, 3, rhi::DescriptorType::StorageBuffer, m_RayHitPosBuf.get());
         m_Device->UpdateDescriptorSet(m_ShadeSet, 5, rhi::DescriptorType::StorageBuffer, m_ShadeOutBuf.get());
         m_Device->UpdateDescriptorSet(m_ShadeSet, 6, rhi::DescriptorType::StorageBuffer, m_ShadeOutGbBuf.get());
@@ -797,7 +797,7 @@ void LumenScene::CreateProbeTraceGPUObjects() {
 }
 
 void LumenScene::RunProbeTrace(rhi::IRHICommandList* cmd) {
-    if (!m_Device || !cmd || !m_ProbeBuf) return;
+    if (!m_Device || !cmd || !m_ProbeBuf.IsValid()) return;
 
     // 配置校验：非法组合在**这里**（配置加载/派发前）就报错并拒绝
     const std::string cfgErr = m_TraceConfig.Validate();
@@ -846,7 +846,7 @@ void LumenScene::RunProbeTrace(rhi::IRHICommandList* cmd) {
                                       m_SDF.GetGlobalField(0), m_SDF.GetLinearSampler());
         m_Device->UpdateDescriptorSet(m_TraceSet, 6, rhi::DescriptorType::CombinedImageSampler,
                                       m_SDF.GetGlobalField(1), m_SDF.GetLinearSampler());
-        m_Device->UpdateDescriptorSet(m_TraceSet, 1, rhi::DescriptorType::StorageBuffer, m_ProbeBuf.get());
+        m_Device->UpdateDescriptorSet(m_TraceSet, 1, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ProbeBuf));
         m_Device->UpdateDescriptorSet(m_TraceSet, 2, rhi::DescriptorType::StorageBuffer, m_RayResultBuf.get());
         m_Device->UpdateDescriptorSet(m_TraceSet, 3, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayStatsBuf));
         m_Device->UpdateDescriptorSet(m_TraceSet, 4, rhi::DescriptorType::StorageBuffer, m_RayHitPosBuf.get());
@@ -960,7 +960,7 @@ void LumenScene::RunProbePlacement(rhi::IRHICommandList* cmd, rhi::IRHITexture* 
         rhi::BufferDesc pb;
         pb.size = (usize)kMaxScreenProbes * sizeof(ScreenProbe);
         pb.usage = rhi::BufferUsage::Storage;
-        m_ProbeBuf = m_Device->CreateBuffer(pb);
+        m_ProbeBuf = m_Device->CreateBufferHandle(pb);   // A-3
 
         rhi::BufferDesc cb;
         cb.size = sizeof(u32); cb.usage = rhi::BufferUsage::Storage; cb.cpuAccess = true;
@@ -987,7 +987,7 @@ void LumenScene::RunProbePlacement(rhi::IRHICommandList* cmd, rhi::IRHITexture* 
                                       gbNormal, m_SDF.GetLinearSampler());
         m_Device->UpdateDescriptorSet(m_ProbeSet, 1, rhi::DescriptorType::CombinedImageSampler,
                                       gbWorldPos, m_SDF.GetLinearSampler());
-        m_Device->UpdateDescriptorSet(m_ProbeSet, 2, rhi::DescriptorType::StorageBuffer, m_ProbeBuf.get());
+        m_Device->UpdateDescriptorSet(m_ProbeSet, 2, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ProbeBuf));
         m_Device->UpdateDescriptorSet(m_ProbeSet, 3, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ProbeCountBuf));
         m_Device->UpdateDescriptorSet(m_ProbeSet, 4, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_TileDevBuf));
         m_Device->UpdateDescriptorSet(m_ProbeSet, 5, rhi::DescriptorType::StorageBuffer, m_CellProbeBuf.get());
@@ -1229,7 +1229,7 @@ void LumenScene::RunFeedback(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbWorl
         m_LastTopPages = top;
         fbMark(s_fbTop);
 
-        if (m_PageTableBuf) {   // 状态变了 ⇒ 同步 GPU 镜像
+        if (m_PageTableBuf.IsValid()) {   // 状态变了 ⇒ 同步 GPU 镜像
             // 【步骤 37】这三行每帧要 13.2 ms（实测，占了整个 Lumen 计算 pass CPU 录制的 80%）。
             // 拆开计时才能知道该修哪一步：`Map()`/`Unmap()` 在 Vulkan 后端分别是
             // `vkInvalidateMappedMemoryRanges` / `vkFlushMappedMemoryRanges`（`VulkanResources.cpp`），
@@ -1237,12 +1237,12 @@ void LumenScene::RunFeedback(rhi::IRHICommandList* cmd, rhi::IRHITexture* gbWorl
             static const bool s_traceUpload = (std::getenv("HE_CPU_PASSES") != nullptr);
             static double s_mapMs = 0.0, s_copyMs = 0.0, s_unmapMs = 0.0;
             auto t0 = std::chrono::steady_clock::now();
-            void* p = m_PageTableBuf->Map();
+            void* p = m_Device->ResolveBuffer(m_PageTableBuf)->Map();
             auto t1 = std::chrono::steady_clock::now();
             if (p) {
                 std::memcpy(p, m_PageTable.Entries().data(),
                             m_PageTable.Size() * sizeof(SurfaceCachePageEntry));
-                m_PageTableBuf->Unmap();
+                if (auto* b = m_Device->ResolveBuffer(m_PageTableBuf)) b->Unmap();
             }
             auto t2 = std::chrono::steady_clock::now();
             if (s_traceUpload) {
@@ -1336,7 +1336,7 @@ void LumenScene::CreateSHGPUObjects() {
 }
 
 void LumenScene::RunScreenProbeSHProject(rhi::IRHICommandList* cmd, bool furnace) {
-    if (!m_Device || !cmd || !m_ProbeBuf || !m_ShadeOutBuf) return;
+    if (!m_Device || !cmd || !m_ProbeBuf.IsValid() || !m_ShadeOutBuf) return;
 
     if (!m_SHBound) {
         CreateSHGPUObjects();
@@ -1352,7 +1352,7 @@ void LumenScene::RunScreenProbeSHProject(rhi::IRHICommandList* cmd, bool furnace
         m_SHStatsBuf = m_Device->CreateBufferHandle(sb);   // A-3
         m_SHStatsMapped = m_Device->ResolveBuffer(m_SHStatsBuf)->Map();
 
-        m_Device->UpdateDescriptorSet(m_SHSet, 0, rhi::DescriptorType::StorageBuffer, m_ProbeBuf.get());
+        m_Device->UpdateDescriptorSet(m_SHSet, 0, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ProbeBuf));
         m_Device->UpdateDescriptorSet(m_SHSet, 1, rhi::DescriptorType::StorageBuffer, m_ShadeOutBuf.get());
         m_Device->UpdateDescriptorSet(m_SHSet, 2, rhi::DescriptorType::StorageBuffer, m_IrradShBuf.get());
         m_Device->UpdateDescriptorSet(m_SHSet, 3, rhi::DescriptorType::StorageBuffer, m_IrradRefBuf.get());

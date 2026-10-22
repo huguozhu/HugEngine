@@ -204,7 +204,7 @@ public:
     [[nodiscard]] const LumenTraceConfig& GetTraceConfig() const { return m_TraceConfig; }
     [[nodiscard]] u32 GetProbeCount() const { return m_ProbeCount; }
     /// 步骤 31：把 Screen Probe 的结果交给 DDGI（Radiance Cache）当作输入
-    [[nodiscard]] rhi::IRHIBuffer* GetProbeBuffer() const { return m_ProbeBuf.get(); }
+    [[nodiscard]] rhi::IRHIBuffer* GetProbeBuffer() const { return m_Device->ResolveBuffer(m_ProbeBuf); }
     [[nodiscard]] rhi::IRHIBuffer* GetCellProbeBuffer() const { return m_CellProbeBuf.get(); }
     [[nodiscard]] u32 GetScreenCellsX() const { return (m_Width + 15u) / 16u; }
     [[nodiscard]] u32 GetScreenCellsY() const { return (m_Height + 15u) / 16u; }
@@ -249,7 +249,7 @@ private:
     // ── Surface Cache 页表（步骤 14）──
     SurfaceCachePageTable m_PageTable;
     bool m_PageTableBuilt = false;
-    std::unique_ptr<rhi::IRHIBuffer>  m_PageTableBuf;    // GPU 侧镜像（StructuredBuffer）
+    rhi::RHIBufferHandle  m_PageTableBuf{};    // A-3：GPU 侧镜像（StructuredBuffer）
     rhi::RHIBufferHandle  m_PageCheckOut{};    // A-3：GPU 校验和（CPU 可读）
     void* m_PageCheckOutMapped = nullptr;                // 持久映射（与 SDF 探针缓冲同做法）
     rhi::DescriptorSetLayoutHandle    m_PageCheckLayout = 0;
@@ -288,7 +288,7 @@ private:
     [[nodiscard]] u32 GetEvictions() const { return m_Evictions; }
     [[nodiscard]] u32 GetAllocFailures() const { return m_AllocFailures; }
     rhi::RHITextureHandle m_AtlasAlbedo{}, m_AtlasNormal{}, m_AtlasEmissive{};   // A-3
-    std::unique_ptr<rhi::IRHIBuffer>  m_CaptureStats;
+    rhi::RHIBufferHandle  m_CaptureStats{};   // A-3
     void* m_CaptureStatsMapped = nullptr;
     rhi::RHIBufferHandle  m_CaptureFrameBuf{};      // A-3：每帧常量（push constant 只有 128B 上限）
     void* m_CaptureFrameMapped = nullptr;
@@ -330,7 +330,7 @@ private:
     // ── Screen Probe（步骤 20）──
     static constexpr u32 kMaxScreenProbes = 65536;    // 8K 探针量级（1080p 96×54 tile × 4）
     float m_MergeNormalCos = 0.995f;                  // 法线一致阈值（cos；越大越严格 ⇒ 探针越多）
-    std::unique_ptr<rhi::IRHIBuffer> m_ProbeBuf;
+    rhi::RHIBufferHandle m_ProbeBuf{};   // A-3
     rhi::RHIBufferHandle m_ProbeCountBuf{}, m_TileDevBuf{};   // A-3
     void* m_ProbeCountMapped = nullptr;
     void* m_TileDevMapped = nullptr;
