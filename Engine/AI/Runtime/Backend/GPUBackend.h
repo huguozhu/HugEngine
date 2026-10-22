@@ -122,11 +122,11 @@ private:
     rhi::IRHIDevice* m_Device = nullptr;
 
     /// 【T2.6】本帧的渲染线程上下文（可空；空时解析回退 `m_Device`）
-    const RenderThreadContext* m_FrameCtx = nullptr;
+    const render::RenderThreadContext* m_FrameCtx = nullptr;   // 在 he::ai 内需限定 he::render
 
 public:
     /// 【T2.6】设置本帧的渲染线程上下文（搬迁过渡期用）
-    void SetFrameContext(const RenderThreadContext* ctx) { m_FrameCtx = ctx; }
+    void SetFrameContext(const render::RenderThreadContext* ctx) { m_FrameCtx = ctx; }
 
     // 【T2.6】统一解析入口。回退分支直接调 m_Device->Resolve*（不能被同一个扫描命中，
     // 否则会变成无限递归）；也不引入新的访问标签，避免改变后续成员的访问级别。
