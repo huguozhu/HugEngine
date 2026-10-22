@@ -128,8 +128,8 @@ bool NaniteRaster::Initialize(rhi::IRHIDevice* device, u32 width, u32 height,
         td.height = kNaniteRasterTargetSize;
         td.format = rhi::Format::R8_UNORM;
         td.usage  = rhi::TextureUsage::RenderTarget;
-        m_Target = m_Device->CreateTexture(td);
-        if (!m_Target) { HE_CORE_ERROR("NaniteRaster: 1×1 R8 目标创建失败"); return false; }
+        m_Target = m_Device->CreateTextureHandle(td);
+        if (!m_Target.IsValid()) { HE_CORE_ERROR("NaniteRaster: 1×1 R8 目标创建失败"); return false; }
     }
 
     // ── 2. 占位顶点缓冲 ──
@@ -143,10 +143,10 @@ bool NaniteRaster::Initialize(rhi::IRHIDevice* device, u32 width, u32 height,
         vd.usage       = rhi::BufferUsage::Vertex;
         vd.cpuAccess   = true;
         vd.initialData = nullptr;
-        m_DummyVB = m_Device->CreateBuffer(vd);
-        if (!m_DummyVB) { HE_CORE_ERROR("NaniteRaster: 占位顶点缓冲创建失败"); return false; }
+        m_DummyVB = m_Device->CreateBufferHandle(vd);
+        if (!m_DummyVB.IsValid()) { HE_CORE_ERROR("NaniteRaster: 占位顶点缓冲创建失败"); return false; }
         float zeros[3] = { 0.0f, 0.0f, 0.0f };
-        if (void* p = m_DummyVB->Map()) { std::memcpy(p, zeros, sizeof(zeros)); m_DummyVB->Unmap(); }
+        if (void* p = m_Device->ResolveBuffer(m_DummyVB)->Map()) { std::memcpy(p, zeros, sizeof(zeros)); if (auto* b = m_Device->ResolveBuffer(m_DummyVB)) b->Unmap(); }
     }
 
     // ── 3. 片元描述符集：显式绑定"已光栅化的绘制条数"SSBO（binding 0）──
@@ -209,7 +209,7 @@ void NaniteRaster::Shutdown() {
         m_Device->DestroyDescriptorSetLayout(m_MeshTestLayout);
     m_MeshTestLayout = rhi::kInvalidLayout;
     m_MeshTestSet    = rhi::kInvalidSet;
-    m_MeshTestTarget.reset();
+    m_Device->DestroyTextureHandle(m_MeshTestTarget); m_MeshTestTarget = {};
     m_Device->DestroyBufferHandle(m_MeshTestCount); m_MeshTestCount = {};
     m_Device->DestroyBufferHandle(m_MeshTestReadback); m_MeshTestReadback = {};
 
@@ -252,8 +252,8 @@ void NaniteRaster::Shutdown() {
     m_HardLastMaxTriangles     = 0u;
     m_HardLastVisibleCapacity  = 0u;
 
-    m_Target.reset();
-    m_DummyVB.reset();
+    m_Device->DestroyTextureHandle(m_Target); m_Target = {};
+    m_Device->DestroyBufferHandle(m_DummyVB); m_DummyVB = {};
     m_PlaceholderIB.reset();
     m_PlaceholderIndexCount = 0u;
     m_RasterCountRef = nullptr;
@@ -276,7 +276,7 @@ void NaniteRaster::RecordRasterPass(rhi::IRHICommandList* cmd,
                                     rhi::IRHIBuffer* indirectCmdBuffer,
                                     rhi::IRHIBuffer* countBuffer,
                                     u32 maxDrawCount) {
-    if (!cmd || !m_PSO.IsValid() || !m_Target || !indirectCmdBuffer || !countBuffer) return;
+    if (!cmd || !m_PSO.IsValid() || !m_Target.IsValid() || !indirectCmdBuffer || !countBuffer) return;
     // 【任务 16】占位索引缓冲懒建：它的容量按资产给（见 SetPlaceholderIndexCapacity），
     //   而 Initialize 时资产还没上传 ⇒ 首次录制时才建。
     if (!EnsurePlaceholderIndexBuffer()) return;
@@ -303,7 +303,7 @@ void NaniteRaster::RecordRasterPass(rhi::IRHICommandList* cmd,
     clear.color[1] = 0.0f;
     clear.color[2] = 0.0f;
     clear.color[3] = 1.0f;
-    cmd->BeginOffscreenPass(m_Target->GetNativeHandle(), nullptr,
+    cmd->BeginOffscreenPass(m_Device->ResolveTexture(m_Target)->GetNativeHandle(), nullptr,
                             kNaniteRasterTargetSize, kNaniteRasterTargetSize, &clear, false);
     // 1×1 视口 + 剪裁：全屏三角形 ⇒ 每条间接命令的第一个三角形恰好产生 1 个片元，
     // 片元里用 `SV_PrimitiveID == 0` 判定"本条命令的第一个三角形" ⇒ 每个绘制恰好计一次。
@@ -313,7 +313,7 @@ void NaniteRaster::RecordRasterPass(rhi::IRHICommandList* cmd,
 
     // 绘制端点：`DrawIndexedIndirectCount`。maxDrawCount 只是命令缓冲容量上限，
     // 真正画几条由 countBuffer 的值决定 —— 这正是"可见簇数驱动绘制条数"的实现。
-    cmd->SetVertexBuffer(m_DummyVB.get(), 0);
+    cmd->SetVertexBuffer(m_Device->ResolveBuffer(m_DummyVB), 0);
     cmd->SetIndexBuffer(m_PlaceholderIB.get(), 0);
     cmd->SetDrawDebugLabel("Nanite_Raster (indirect count)");
     cmd->DrawIndexedIndirectCount(indirectCmdBuffer, 0, countBuffer, 0,
@@ -504,8 +504,8 @@ bool NaniteRaster::EnsureMeshTestResources() {
         td.format = rhi::Format::R8_UNORM;
         td.usage  = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::TransferSrc
                   | rhi::TextureUsage::ShaderResource;
-        m_MeshTestTarget = m_Device->CreateTexture(td);
-        if (!m_MeshTestTarget) { HE_CORE_ERROR("NaniteRaster: mesh 通道 1×1 R8 目标创建失败"); return false; }
+        m_MeshTestTarget = m_Device->CreateTextureHandle(td);
+        if (!m_MeshTestTarget.IsValid()) { HE_CORE_ERROR("NaniteRaster: mesh 通道 1×1 R8 目标创建失败"); return false; }
     }
 
     // ── 2. 片元原子计数缓冲（dump 帧 CPU Map 读回）──
@@ -599,7 +599,7 @@ void NaniteRaster::RecordMeshTestPass(rhi::IRHICommandList* cmd) {
     clear.color[1] = 0.0f;
     clear.color[2] = 0.0f;
     clear.color[3] = 1.0f;
-    cmd->BeginOffscreenPass(m_MeshTestTarget->GetNativeHandle(), nullptr,
+    cmd->BeginOffscreenPass(m_Device->ResolveTexture(m_MeshTestTarget)->GetNativeHandle(), nullptr,
                             kNaniteMeshTestTargetSize, kNaniteMeshTestTargetSize, &clear, false);
     // 视口/剪裁与任务 3 的 1×1 pass 同款（y 方向翻转与 Vulkan 约定一致）
     cmd->SetViewport({ 0.0f, (float)kNaniteMeshTestTargetSize,
@@ -615,7 +615,7 @@ void NaniteRaster::RecordMeshTestPass(rhi::IRHICommandList* cmd) {
     // 把 1×1 R8 目标拷进 host 可见缓冲（dump 帧 Map 读回 target_max）。
     // 【必须录在 render pass 之外】与 07.Nanite.cpp 的白炉探针/落盘读回同一约定；
     // `CopyTextureToBuffer` 内部自行做 TRANSFER_SRC 布局往返，并回写布局追踪器。
-    cmd->CopyTextureToBuffer(m_MeshTestTarget.get(), m_Device->ResolveBuffer(m_MeshTestReadback),
+    cmd->CopyTextureToBuffer(m_Device->ResolveTexture(m_MeshTestTarget), m_Device->ResolveBuffer(m_MeshTestReadback),
                              0, 0, kNaniteMeshTestTargetSize, kNaniteMeshTestTargetSize, 0);
 }
 
@@ -1646,8 +1646,8 @@ bool NaniteRaster::EnsureDebugViewResources(u32 mode,
         td.format = rhi::Format::R32_UINT;   // 整数目标：原子累加/取最大值直接写计数，不做浮点量化
         td.usage  = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::TransferSrc
                   | rhi::TextureUsage::ShaderResource;   // 见头文件对 ShaderResource 的说明
-        m_DebugTarget = m_Device->CreateTexture(td);
-        if (!m_DebugTarget) {
+        m_DebugTarget = m_Device->CreateTextureHandle(td);
+        if (!m_DebugTarget.IsValid()) {
             HE_CORE_ERROR("NaniteRaster: 可视化目标创建失败（{}×{} R32_UINT）",
                           kNaniteDebugViewWidth, kNaniteDebugViewHeight);
             return false;
@@ -1660,8 +1660,8 @@ bool NaniteRaster::EnsureDebugViewResources(u32 mode,
         d.size      = sizeof(u32) * kNaniteDebugViewPixels;
         d.usage     = rhi::BufferUsage::Storage;   // Storage 路径恒定带 TRANSFER_DST（拷贝目标）
         d.cpuAccess = true;
-        m_DebugReadback = m_Device->CreateBuffer(d);
-        if (!m_DebugReadback) { HE_CORE_ERROR("NaniteRaster: 可视化读回缓冲创建失败"); return false; }
+        m_DebugReadback = m_Device->CreateBufferHandle(d);
+        if (!m_DebugReadback.IsValid()) { HE_CORE_ERROR("NaniteRaster: 可视化读回缓冲创建失败"); return false; }
     }
 
     // ── 3. 描述符集布局：与 `Nanite_DebugView.comp.slang` 的绑定逐条对应 ──
@@ -1693,7 +1693,7 @@ bool NaniteRaster::EnsureDebugViewResources(u32 mode,
     m_Device->UpdateDescriptorSet(m_DebugSet, 3, rhi::DescriptorType::StorageBuffer, spheres);
     m_Device->UpdateDescriptorSet(m_DebugSet, 4, rhi::DescriptorType::StorageBuffer, lodInfo);
     m_Device->UpdateDescriptorSetWithImageView(m_DebugSet, 7, rhi::DescriptorType::StorageImage,
-                                               m_DebugTarget->GetNativeHandle());
+                                               m_Device->ResolveTexture(m_DebugTarget)->GetNativeHandle());
 
     // ── 5. compute PSO（push constant = 96B 的 `NaniteDebugViewParams`）──
     // 【每簇 BVH 深度表】它是 CPU 侧数组，需要一个 GPU 缓冲承载 ⇒ 模块自建一个小缓冲并在这里
@@ -1703,14 +1703,14 @@ bool NaniteRaster::EnsureDebugViewResources(u32 mode,
         d.size      = sizeof(u32) * bvhDepths.size();
         d.usage     = rhi::BufferUsage::Storage;
         d.cpuAccess = true;
-        m_DebugDepths = m_Device->CreateBuffer(d);
-        if (!m_DebugDepths) { HE_CORE_ERROR("NaniteRaster: 可视化 BVH 深度表创建失败"); return false; }
-        if (void* p = m_DebugDepths->Map()) {
+        m_DebugDepths = m_Device->CreateBufferHandle(d);
+        if (!m_DebugDepths.IsValid()) { HE_CORE_ERROR("NaniteRaster: 可视化 BVH 深度表创建失败"); return false; }
+        if (void* p = m_Device->ResolveBuffer(m_DebugDepths)->Map()) {
             std::memcpy(p, bvhDepths.data(), d.size);
-            m_DebugDepths->Unmap();
+            if (auto* b = m_Device->ResolveBuffer(m_DebugDepths)) b->Unmap();
         }
         m_Device->UpdateDescriptorSet(m_DebugSet, 5, rhi::DescriptorType::StorageBuffer,
-                                      m_DebugDepths.get());
+                                      m_Device->ResolveBuffer(m_DebugDepths));
     }
     m_Device->UpdateDescriptorSet(m_DebugSet, 6, rhi::DescriptorType::StorageBuffer, assetClusters);
 
@@ -1765,7 +1765,7 @@ void NaniteRaster::RecordDebugViewPass(rhi::IRHICommandList* cmd,
     //   那里正是为了消掉启动期的那 7 条布局告警才从 RenderTarget 改成 Undefined）。
     cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
                          rhi::ResourceState::Undefined, rhi::ResourceState::UnorderedAccess,
-                         m_DebugTarget.get());
+                         m_Device->ResolveTexture(m_DebugTarget));
 
     // ── ② 清屏趟（mode == 0 的内部趟；见 shader 文件头的说明）──
     NaniteDebugViewParams clearParams = params;
@@ -1788,19 +1788,19 @@ void NaniteRaster::RecordDebugViewPass(rhi::IRHICommandList* cmd,
     // ── ④ 目标 → host 可见缓冲（dump 帧 Map 读回；`CopyTextureToBuffer` 自己管布局往返）──
     cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::Transfer,
                          rhi::ResourceState::UnorderedAccess, rhi::ResourceState::CopySrc,
-                         m_DebugTarget.get());
-    cmd->CopyTextureToBuffer(m_DebugTarget.get(), m_DebugReadback.get(),
+                         m_Device->ResolveTexture(m_DebugTarget));
+    cmd->CopyTextureToBuffer(m_Device->ResolveTexture(m_DebugTarget), m_Device->ResolveBuffer(m_DebugReadback),
                              0, 0, kNaniteDebugViewWidth, kNaniteDebugViewHeight, 0);
 }
 
 void NaniteRaster::LogDebugViewReadback(u32 visible) {
     // 【门控】档位为 0（默认）或资源没建 ⇒ 直接返回：不 Map、不打一个字符
-    if (m_DebugLastMode == kNaniteDebugViewOff || !m_DebugReadback) return;
+    if (m_DebugLastMode == kNaniteDebugViewOff || !m_DebugReadback.IsValid()) return;
 
     u32 px[kNaniteDebugViewPixels] = {};
-    if (void* p = m_DebugReadback->Map()) {
+    if (void* p = m_Device->ResolveBuffer(m_DebugReadback)->Map()) {
         std::memcpy(px, p, sizeof(u32) * kNaniteDebugViewPixels);
-        m_DebugReadback->Unmap();
+        if (auto* b = m_Device->ResolveBuffer(m_DebugReadback)) b->Unmap();
     }
 
     // ── 统计（"不是黑屏"的判据全在这里；两种面板分别统计）──

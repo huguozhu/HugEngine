@@ -432,9 +432,9 @@ private:
     u32 m_Height = 0;
 
     /// 模块自建的小目标（R8，1×1）。它**不在** GBuffer 里，写它不会改变可见画面。
-    std::unique_ptr<rhi::IRHITexture> m_Target;
+    rhi::RHITextureHandle m_Target{};   // A-3
     /// 绘制端不读顶点属性，但 `DrawIndexedIndirectCount` 仍会绑定顶点缓冲
-    std::unique_ptr<rhi::IRHIBuffer>  m_DummyVB;
+    rhi::RHIBufferHandle m_DummyVB{};   // A-3
     /// 【任务 16】占位**索引**缓冲：覆盖资产的整个索引位置空间，内容 = `0,1,2` 周期模式。
     /// 懒建（首次录制时按 `m_PlaceholderIndexCount` 建，资产上传后由
     /// `SetPlaceholderIndexCapacity` 放大一次）。
@@ -472,7 +472,7 @@ private:
     /// usage 比任务 3 的目标多 `TransferSrc`（任务 6 要把它读回 host）与 `ShaderResource`
     /// （`CopyTextureToBuffer` 拷完无条件还原成 SHADER_READ_ONLY；缺 SAMPLED 位会报
     /// VUID-VkImageMemoryBarrier-oldLayout-01211）。
-    std::unique_ptr<rhi::IRHITexture> m_MeshTestTarget;
+    rhi::RHITextureHandle m_MeshTestTarget{};   // A-3
     /// 片元原子计数：本帧 mesh shader 真正输出并被光栅化的图元数（dump 帧读回）
     rhi::RHIBufferHandle  m_MeshTestCount{};   // A-3
     /// 1×1 R8 目标 → host 的读回缓冲（dump 帧 Map；照仓库既有 buffer 读回写法）
@@ -604,12 +604,12 @@ private:
     /// usage = `UnorderedAccess`（compute 原子写）| `TransferSrc`（`CopyTextureToBuffer` 读回）
     ///         | `ShaderResource`（拷完 RHI 无条件还原成 SHADER_READ_ONLY ⇒ 缺这一位会报
     ///         VUID-VkImageMemoryBarrier-oldLayout-01211，与任务 6 的 1×1 目标同一个坑）。 
-    std::unique_ptr<rhi::IRHITexture> m_DebugTarget;
+    rhi::RHITextureHandle m_DebugTarget{};   // A-3
     /// 目标 → host 的读回缓冲（`kNaniteDebugViewPixels × 4B`；dump 帧 Map）
-    std::unique_ptr<rhi::IRHIBuffer>  m_DebugReadback;
+    rhi::RHIBufferHandle m_DebugReadback{};   // A-3
     /// 【模式 4】每簇 BVH 节点深度的 GPU 承载（CPU 侧数组在资源懒建时一次性上传；
     ///   默认档不建）。它只被可视化读，不改任何剔除状态。
-    std::unique_ptr<rhi::IRHIBuffer>  m_DebugDepths;
+    rhi::RHIBufferHandle m_DebugDepths{};   // A-3
 
     rhi::ShaderBytecode m_DebugCS;   // Nanite_DebugView.comp.spv
     /// 可视化自己的描述符集布局 + 集合（bindings 0..7；与两条光栅路径**不共用**）
