@@ -474,9 +474,9 @@ private:
     /// VUID-VkImageMemoryBarrier-oldLayout-01211）。
     std::unique_ptr<rhi::IRHITexture> m_MeshTestTarget;
     /// 片元原子计数：本帧 mesh shader 真正输出并被光栅化的图元数（dump 帧读回）
-    std::unique_ptr<rhi::IRHIBuffer>  m_MeshTestCount;
+    rhi::RHIBufferHandle  m_MeshTestCount{};   // A-3
     /// 1×1 R8 目标 → host 的读回缓冲（dump 帧 Map；照仓库既有 buffer 读回写法）
-    std::unique_ptr<rhi::IRHIBuffer>  m_MeshTestReadback;
+    rhi::RHIBufferHandle  m_MeshTestReadback{};   // A-3
 
     rhi::DescriptorSetLayoutHandle m_MeshTestLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_MeshTestSet    = rhi::kInvalidSet;
@@ -535,7 +535,7 @@ private:
     ///   路径（复用 `m_DepthKeyZeroSrc`）⇒ 同尺寸同格式是这套复用成立的前提。
     /// 【容量】与深度键**共用** `m_DepthKeyPixels`（两者永远同生共死、尺寸逐位相同），
     ///   不另开一个容量字段 —— 避免出现"两个容量字段互相不一致"这种可以避免的状态。
-    std::unique_ptr<rhi::IRHIBuffer> m_WinnerID;
+    rhi::RHIBufferHandle m_WinnerID{};   // A-3
 
     /// 读数缓冲（扁平 u32，`kNaniteSoftStatsCapacity` 条）+ 每帧清零用的常驻 0 源
     rhi::RHIBufferHandle m_SoftStats{};   // A-3

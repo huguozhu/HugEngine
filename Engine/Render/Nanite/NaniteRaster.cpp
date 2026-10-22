@@ -210,8 +210,8 @@ void NaniteRaster::Shutdown() {
     m_MeshTestLayout = rhi::kInvalidLayout;
     m_MeshTestSet    = rhi::kInvalidSet;
     m_MeshTestTarget.reset();
-    m_MeshTestCount.reset();
-    m_MeshTestReadback.reset();
+    m_Device->DestroyBufferHandle(m_MeshTestCount); m_MeshTestCount = {};
+    m_Device->DestroyBufferHandle(m_MeshTestReadback); m_MeshTestReadback = {};
 
     // ── 【§14.8 任务 18】软光栅的懒建资源（未开启软光栅时它们是空的，这里自然是空操作）──
     m_Device->DestroyPipelineStateHandle(m_SoftRasterPSO); m_SoftRasterPSO = {};
@@ -234,7 +234,7 @@ void NaniteRaster::Shutdown() {
     m_Device->DestroyBufferHandle(m_DepthKey); m_DepthKey = {};
     m_Device->DestroyBufferHandle(m_DepthKeyZeroSrc); m_DepthKeyZeroSrc = {};
     // 【确定性赢家选择】赢家候选号缓冲与深度键同生共死（同一份容量、同一个清零源）
-    m_WinnerID.reset();
+    m_Device->DestroyBufferHandle(m_WinnerID); m_WinnerID = {};
     m_DepthKeyPixels        = 0u;
     m_DepthKeyZeroSrcPixels = 0u;
     m_Device->DestroyBufferHandle(m_SoftStats); m_SoftStats = {};
@@ -514,8 +514,8 @@ bool NaniteRaster::EnsureMeshTestResources() {
         d.size      = sizeof(u32);
         d.usage     = rhi::BufferUsage::Storage;
         d.cpuAccess = true;   // 每帧清零 + dump 帧读回（与 NaniteCull 的计数缓冲同做法）
-        m_MeshTestCount = m_Device->CreateBuffer(d);
-        if (!m_MeshTestCount) { HE_CORE_ERROR("NaniteRaster: mesh 通道计数缓冲创建失败"); return false; }
+        m_MeshTestCount = m_Device->CreateBufferHandle(d);
+        if (!m_MeshTestCount.IsValid()) { HE_CORE_ERROR("NaniteRaster: mesh 通道计数缓冲创建失败"); return false; }
     }
 
     // ── 3. 1×1 R8 → host 的读回缓冲 ──
@@ -527,8 +527,8 @@ bool NaniteRaster::EnsureMeshTestResources() {
         d.size      = kNaniteMeshTestTargetSize * kNaniteMeshTestTargetSize;
         d.usage     = rhi::BufferUsage::Storage;
         d.cpuAccess = true;
-        m_MeshTestReadback = m_Device->CreateBuffer(d);
-        if (!m_MeshTestReadback) { HE_CORE_ERROR("NaniteRaster: mesh 通道读回缓冲创建失败"); return false; }
+        m_MeshTestReadback = m_Device->CreateBufferHandle(d);
+        if (!m_MeshTestReadback.IsValid()) { HE_CORE_ERROR("NaniteRaster: mesh 通道读回缓冲创建失败"); return false; }
     }
 
     // ── 4. 片元描述符集：binding 0 = 计数 SSBO（显式绑定，不走 bindless）──
@@ -543,7 +543,7 @@ bool NaniteRaster::EnsureMeshTestResources() {
     }
     m_MeshTestSet = m_Device->AllocateDescriptorSet(m_MeshTestLayout);
     m_Device->UpdateDescriptorSet(m_MeshTestSet, 0, rhi::DescriptorType::StorageBuffer,
-                                  m_MeshTestCount.get());
+                                  m_Device->ResolveBuffer(m_MeshTestCount));
 
     // ── 5. 最小 mesh PSO：等价的 `PipelineStateDesc`，把 `meshShader` 填上即可 ──
     // 【关键】`desc.meshShader` 非空即走 `VulkanPipeline.cpp:485` 的 mesh 分支：不建 IA、
@@ -585,9 +585,9 @@ void NaniteRaster::RecordMeshTestPass(rhi::IRHICommandList* cmd) {
     // 每帧把计数清零：GPU 的 InterlockedAdd 从 0 开始，最终值 = 本帧被光栅化的 mesh 图元数。
     // 【为什么 CPU Map 清零】与 `NaniteCull::ResetFrameBuffers` 完全同做法（模块内一致的既有口径），
     // 不为此新造 GPU 清零路径。
-    if (void* p = m_MeshTestCount->Map()) {
+    if (void* p = m_Device->ResolveBuffer(m_MeshTestCount)->Map()) {
         *static_cast<u32*>(p) = 0u;
-        m_MeshTestCount->Unmap();
+        if (auto* b = m_Device->ResolveBuffer(m_MeshTestCount)) b->Unmap();
     }
 
     cmd->SetPipeline(m_Device->ResolvePipelineState(m_MeshTestPSO));
@@ -615,14 +615,14 @@ void NaniteRaster::RecordMeshTestPass(rhi::IRHICommandList* cmd) {
     // 把 1×1 R8 目标拷进 host 可见缓冲（dump 帧 Map 读回 target_max）。
     // 【必须录在 render pass 之外】与 07.Nanite.cpp 的白炉探针/落盘读回同一约定；
     // `CopyTextureToBuffer` 内部自行做 TRANSFER_SRC 布局往返，并回写布局追踪器。
-    cmd->CopyTextureToBuffer(m_MeshTestTarget.get(), m_MeshTestReadback.get(),
+    cmd->CopyTextureToBuffer(m_MeshTestTarget.get(), m_Device->ResolveBuffer(m_MeshTestReadback),
                              0, 0, kNaniteMeshTestTargetSize, kNaniteMeshTestTargetSize, 0);
 }
 
 u32 NaniteRaster::ReadbackMeshTestOutputs() {
     // 真实 GPU 读回：片元 `InterlockedAdd` 累加的"被光栅化图元数"。
     u32 n = 0;
-    if (auto* b = m_MeshTestCount.get()) {
+    if (auto* b = m_Device->ResolveBuffer(m_MeshTestCount)) {
         if (void* p = b->Map()) { n = *static_cast<const u32*>(p); b->Unmap(); }
     }
     return n;
@@ -633,7 +633,7 @@ u32 NaniteRaster::ReadbackMeshTestTargetMax() {
     // 那唯一一个像素），这里仍按宽×高取最大值，尺寸常量将来变大也不会读错语义。
     // 写入的是 1.0 ⇒ R8_UNORM 读回 255；若 mesh 通道没画出来（清屏后即拷贝）则为 0。
     u32 v = 0;
-    if (auto* b = m_MeshTestReadback.get()) {
+    if (auto* b = m_Device->ResolveBuffer(m_MeshTestReadback)) {
         if (void* p = b->Map()) {
             const auto* px = static_cast<const u8*>(p);
             const u32 count = kNaniteMeshTestTargetSize * kNaniteMeshTestTargetSize;
@@ -920,7 +920,7 @@ bool NaniteRaster::EnsureDepthKeyBuffers(u32 width, u32 height) {
     // 【确定性赢家选择】就绪条件必须**一并包含**赢家候选号缓冲：两者永远同尺寸同格式、
     //   同生共死；只判深度键会让"深度键在、候选号不在"这种半就绪状态溜进录制路径
     //   （仲裁趟会绑一个空缓冲 ⇒ 未定义行为）。
-    if (m_DepthKey.IsValid() && m_WinnerID && m_DepthKeyPixels == pixels) return true;
+    if (m_DepthKey.IsValid() && m_WinnerID.IsValid() && m_DepthKeyPixels == pixels) return true;
 
     // 【替换的安全性】本函数在 `RecordSoftRasterPass` 里被调用（帧内录制期），而深度键只被
     //   模块自己的三趟使用、且这三趟都录在**当前**命令缓冲里。视口变化时引擎会 OnResize →
@@ -937,8 +937,8 @@ bool NaniteRaster::EnsureDepthKeyBuffers(u32 width, u32 height) {
     // 【确定性赢家选择】赢家候选号缓冲：与深度键**逐字段相同**的 `BufferDesc`（同尺寸、同格式
     //   R32_UINT、同 usage）。它是仲裁趟（第 2.5 趟）的 `u_WinnerID`：每帧先被清成 0xFFFFFFFF，
     //   再由命中等值复检的候选做 `InterlockedMin` ⇒ 最终值 = 该像素的最小候选号 = 确定性赢家。
-    m_WinnerID = m_Device->CreateBuffer(d);
-    if (!m_WinnerID) { HE_CORE_ERROR("NaniteRaster: 赢家候选号缓冲创建失败（{} 像素）", pixels); return false; }
+    m_WinnerID = m_Device->CreateBufferHandle(d);
+    if (!m_WinnerID.IsValid()) { HE_CORE_ERROR("NaniteRaster: 赢家候选号缓冲创建失败（{} 像素）", pixels); return false; }
     m_DepthKeyPixels = pixels;
 
     // 【为什么用"常驻 0xFF 源 + CopyBuffer"而不是主机写】任务 13 的教训：录制期的主机写会与
@@ -970,8 +970,8 @@ void NaniteRaster::RecordDepthKeyClear(rhi::IRHICommandList* cmd) {
     //   【为什么初值必须是 0xFFFFFFFF】仲裁趟做的是 `InterlockedMin(u_WinnerID[p], candidateID)`；
     //   只有"初始值大于任何合法候选号"时，这次原子最小才等价于"取最小候选号"。哨兵
     //   `0xFFFFFFFF` 满足它（合法候选号 = (槽位 < 2^24) << 8 | 下标 ≤ 0xFFFFFF3F < 0xFFFFFFFF）。
-    if (m_WinnerID) {
-        cmd->CopyBuffer(m_Device->ResolveBuffer(m_DepthKeyZeroSrc), m_WinnerID.get(),
+    if (m_WinnerID.IsValid()) {
+        cmd->CopyBuffer(m_Device->ResolveBuffer(m_DepthKeyZeroSrc), m_Device->ResolveBuffer(m_WinnerID),
                         (u64)m_DepthKeyPixels * sizeof(u32), 0, 0);
     }
     // 拷贝 → 第 1 趟 compute：显式内存屏障（模块自持缓冲不在帧图里，同步必须自己给）
@@ -1186,9 +1186,9 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
     //   【为什么必须在上面那个循环之外单独写】第 1 趟的布局（`m_SoftDepthLayout`）**根本没有 21**
     //   ——它的着色器（深度键趟）不读候选号。若把这一句塞进 `{m_SoftDepthSet, m_SoftColorSet}`
     //   循环里，对第 1 趟的集合写一个不存在的绑定就是描述符越界写（未定义行为 / 校验层报错）。
-    if (m_WinnerID) {
+    if (m_WinnerID.IsValid()) {
         m_Device->UpdateDescriptorSet(m_SoftColorSet, 21, rhi::DescriptorType::StorageBuffer,
-                                      m_WinnerID.get());
+                                      m_Device->ResolveBuffer(m_WinnerID));
     }
     m_Device->UpdateDescriptorSetWithImageView(m_SoftColorSet, 8,  rhi::DescriptorType::StorageImage,
                                                targets.albedo->GetNativeHandle());
