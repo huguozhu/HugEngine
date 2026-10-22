@@ -2706,3 +2706,51 @@ return m_Device ? m_Device->ResolveTexture(h) : nullptr;   // 创建期：走设
 若将来真要删掉回退，前置条件是**先让创建也走命令流**（A-3 的 `EnqueuePSOCreateHandle` 那条路），
 即"创建期"这个概念本身消失。在那之前，回退分支是**架构上必需**的，不是遗留脏代码。
 
+## 20. 附录 I：Editor 四项（T2.5 / T4.2 / T4.3 / T4.4）状态（2026-10-22）
+
+### 20.1 T2.5 编辑器主循环改造 —— ✅ 完成（`abeb859`）
+
+`Samples/Editor/EditorApp.cpp` 的帧外壳原来四件散落调用，已全部收口到 `rhi::FramePresenter`：
+
+| 原写法 | 新写法 |
+|---|---|
+| `m_SwapChain->AcquireNextImage()` | `m_FramePresenter->BeginFrame()` |
+| `m_CmdList->Begin()` | `m_FramePresenter->BeginRecording(m_Device, m_CmdList)`（内含 Begin） |
+| `m_CmdList->End()` + `m_Device->Submit(...)` | `m_FramePresenter->EndRecording()`（内含 End + Submit） |
+| `m_SwapChain->Present(true)` | `m_FramePresenter->EndFrame(true)` |
+
+至此 **8 个样例 + HugEditor 共 9 个可执行目标走同一套帧外壳**（L4-1 + L4-2 全覆盖）。
+`EditorApp.h` 增加 `#include "RHI/FramePresenter.h"` 与 `std::unique_ptr<he::rhi::FramePresenter>`。
+
+### 20.2 T4.4 热重载 PSO 替换改渲染线程执行 —— ✅ 现状已满足（无需改代码）
+
+`ShaderHotReload::Poll()` 在编辑器主循环里调用（`EditorApp.cpp:243`），回调里直接
+`m_Pipeline->ReloadShader(shaderName, spirv)`。
+
+关键事实：**`EditorApp` 完全不使用渲染线程** —— 源码里没有 `RenderThread` / `RenderCommandQueue` /
+`FrameScheduler` / `RenderThreadingMode` 的任何引用（已 grep 确认）。也就是说编辑器的渲染与
+`Poll()` 在**同一线程**上 ⇒ "PSO 替换必须发生在拥有线程"这个约束**天然成立**。
+
+**结论**：当前形态不需要改动。若将来编辑器接入渲染线程（例如用 `RenderThreadingMode` 跑模式 1/2），
+则 `ReloadShader` 必须改为入队到渲染线程执行 —— 届时判据是"替换发生在渲染线程的帧命令里"。
+这条触发条件写在此处，避免以后误判为漏做。
+
+### 20.3 T4.2 消除 ImGui 专用 RHI 后门 —— 与 A-5 同一结论（范围外）
+
+`Engine/Editor/ImGuiIntegration.cpp` 只有 138 行，先关生命周期、再转调第三方后端：
+`ImGui_ImplVulkan_Init` / `CreateFontsTexture` / `NewFrame` / `RenderDrawData`。真正的
+PSO/纹理/描述符池创建都在 `Engine/External/imgui/backends/imgui_impl_vulkan.cpp` 里，用**原生 Vulkan**
+直接建，不经过本项目 RHI ⇒ 不存在"可以消除的后门"，只有"要不要重写第三方后端"这一个问题。
+
+**结论**：判为**范围外**（与 §16.7.2 对 A-5 的处置一致）。当前唯一要求是"只在拥有线程调用"，
+这一点成立：`m_ImGui->EndFrame(m_CmdList.get())` 在帧录制里、`BeginFrame()` 在帧首，都在同一线程。
+
+### 20.4 T4.3 面板改读快照 —— 与 T2.5 的"渲染线程化"前提不成立
+
+编辑器面板（`Samples/Editor/Panels/*`、`MaterialEditor` 等）直接读 `m_World` / `m_EditorCtx` 的实时状态。
+"面板改读快照"的前提是**面板与渲染分处两个线程**（否则快照没有意义，只是多一次拷贝）。
+
+而 20.2 已确认：编辑器是**单线程**结构，没有渲染线程 ⇒ 改造没有收益，反而会增加每帧一次世界快照的成本。
+
+**结论**：判为**不做**，触发条件同 20.2（若编辑器接入渲染线程，再按"面板读快照、渲染读快照"重构）。
+
