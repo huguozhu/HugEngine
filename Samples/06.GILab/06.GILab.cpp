@@ -1628,6 +1628,8 @@ int main() {
             // RHI 归属：启动时认领给渲染线程、停止时撤销（认领必须在新线程里做 ⇒ 走启动钩子）
             renderThread.SetThreadStartHook([] { he::rhi::GetThreadAffinity().Claim(); });
             renderThread.SetThreadStopHook([] { he::rhi::GetThreadAffinity().Release(); });
+            // 【T2.6】把设备登记给渲染线程：泵帧时写入 RenderThreadContext，成为渲染层唯一 RHI 出口
+            renderThread.SetDevice(device.get());
             renderThread.Start();
             HE_CORE_INFO("06.GILab：已起真渲染线程（模式 = {}；录制归它）", he::RenderThreadingModeName(mode));
         }
