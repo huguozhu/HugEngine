@@ -183,8 +183,8 @@ bool NaniteRaster::Initialize(rhi::IRHIDevice* device, u32 width, u32 height,
     desc.colorFormats[0]     = rhi::Format::R8_UNORM;
     desc.descriptorSetLayouts = { m_Layout };
     desc.debugName           = "NaniteRaster";
-    m_PSO = m_Device->CreatePipelineState(desc);
-    if (!m_PSO) { HE_CORE_ERROR("NaniteRaster: 图形 PSO 创建失败"); return false; }
+    m_PSO = m_Device->CreatePipelineStateHandle(desc);
+    if (!m_PSO.IsValid()) { HE_CORE_ERROR("NaniteRaster: 图形 PSO 创建失败"); return false; }
 
     HE_CORE_INFO("NaniteRaster: 初始化完成（DrawIndexedIndirectCount → {}×{} R8 目标）",
                  kNaniteRasterTargetSize, kNaniteRasterTargetSize);
@@ -192,19 +192,19 @@ bool NaniteRaster::Initialize(rhi::IRHIDevice* device, u32 width, u32 height,
 }
 
 void NaniteRaster::Shutdown() {
-    m_PSO.reset();
+    m_Device->DestroyPipelineStateHandle(m_PSO); m_PSO = {};
     if (m_Device && m_Layout != rhi::kInvalidLayout)
         m_Device->DestroyDescriptorSetLayout(m_Layout);
 
     // 【§14.8 任务 4】UAV 自证通道的懒建资源（从未开启时它们是空的，这里自然是空操作）
-    m_TestWritePSO.reset();
+    m_Device->DestroyPipelineStateHandle(m_TestWritePSO); m_TestWritePSO = {};
     if (m_Device && m_TestWriteLayout != rhi::kInvalidLayout)
         m_Device->DestroyDescriptorSetLayout(m_TestWriteLayout);
     m_TestWriteLayout = rhi::kInvalidLayout;
     m_TestWriteSet    = rhi::kInvalidSet;
 
     // 【§14.8 任务 6】mesh PSO 自证通道的懒建资源（从未开启时它们是空的，这里自然是空操作）
-    m_MeshTestPSO.reset();
+    m_Device->DestroyPipelineStateHandle(m_MeshTestPSO); m_MeshTestPSO = {};
     if (m_Device && m_MeshTestLayout != rhi::kInvalidLayout)
         m_Device->DestroyDescriptorSetLayout(m_MeshTestLayout);
     m_MeshTestLayout = rhi::kInvalidLayout;
@@ -214,11 +214,11 @@ void NaniteRaster::Shutdown() {
     m_MeshTestReadback.reset();
 
     // ── 【§14.8 任务 18】软光栅的懒建资源（未开启软光栅时它们是空的，这里自然是空操作）──
-    m_SoftRasterPSO.reset();
-    m_SoftColorPSO.reset();
+    m_Device->DestroyPipelineStateHandle(m_SoftRasterPSO); m_SoftRasterPSO = {};
+    m_Device->DestroyPipelineStateHandle(m_SoftColorPSO); m_SoftColorPSO = {};
     // 【确定性赢家选择】仲裁趟（第 2.5 趟）的 PSO：与另外两趟同一批懒建资源，一起释放
-    m_SoftWinnerPSO.reset();
-    m_DepthResolvePSO.reset();
+    m_Device->DestroyPipelineStateHandle(m_SoftWinnerPSO); m_SoftWinnerPSO = {};
+    m_Device->DestroyPipelineStateHandle(m_DepthResolvePSO); m_DepthResolvePSO = {};
     if (m_Device && m_SoftDepthLayout != rhi::kInvalidLayout)
         m_Device->DestroyDescriptorSetLayout(m_SoftDepthLayout);
     if (m_Device && m_SoftColorLayout != rhi::kInvalidLayout)
@@ -241,7 +241,7 @@ void NaniteRaster::Shutdown() {
     m_SoftStatsZeroSrc.reset();
 
     // ── 【§14.8 任务 22】硬光栅的懒建资源（未开启分流时它们是空的，这里自然是空操作）──
-    m_HardRasterPSO.reset();
+    m_Device->DestroyPipelineStateHandle(m_HardRasterPSO); m_HardRasterPSO = {};
     if (m_Device && m_HardRasterLayout != rhi::kInvalidLayout)
         m_Device->DestroyDescriptorSetLayout(m_HardRasterLayout);
     m_HardRasterLayout     = rhi::kInvalidLayout;
@@ -276,7 +276,7 @@ void NaniteRaster::RecordRasterPass(rhi::IRHICommandList* cmd,
                                     rhi::IRHIBuffer* indirectCmdBuffer,
                                     rhi::IRHIBuffer* countBuffer,
                                     u32 maxDrawCount) {
-    if (!cmd || !m_PSO || !m_Target || !indirectCmdBuffer || !countBuffer) return;
+    if (!cmd || !m_PSO.IsValid() || !m_Target || !indirectCmdBuffer || !countBuffer) return;
     // 【任务 16】占位索引缓冲懒建：它的容量按资产给（见 SetPlaceholderIndexCapacity），
     //   而 Initialize 时资产还没上传 ⇒ 首次录制时才建。
     if (!EnsurePlaceholderIndexBuffer()) return;
@@ -294,7 +294,7 @@ void NaniteRaster::RecordRasterPass(rhi::IRHICommandList* cmd,
                          rhi::ResourceState::UnorderedAccess,
                          rhi::ResourceState::IndirectArgument);
 
-    cmd->SetPipeline(m_PSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_PSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_Set);
 
     // 模块自建目标：1×1 R8。清成 0（内容无意义，只是让 RenderDoc 里可辨识）。
@@ -400,7 +400,7 @@ u32 NaniteRaster::ReadbackRasterCount() {
 // ============================================================
 
 bool NaniteRaster::EnsureTestWriteResources() {
-    if (m_TestWritePSO) return true;
+    if (m_TestWritePSO.IsValid()) return true;
     if (!m_Device) return false;
 
     // ── 描述符集布局：唯一的绑定是 GBuffer albedo 的存储图像（set=0 / binding=0）──
@@ -426,8 +426,8 @@ bool NaniteRaster::EnsureTestWriteResources() {
     desc.computeShader        = &m_TestWriteCS;
     desc.descriptorSetLayouts = { m_TestWriteLayout };
     desc.debugName            = "NaniteTestWrite";
-    m_TestWritePSO = m_Device->CreatePipelineState(desc);
-    if (!m_TestWritePSO) {
+    m_TestWritePSO = m_Device->CreatePipelineStateHandle(desc);
+    if (!m_TestWritePSO.IsValid()) {
         HE_CORE_ERROR("NaniteRaster: Nanite_TestWrite compute PSO 创建失败");
         return false;
     }
@@ -449,7 +449,7 @@ void NaniteRaster::RecordTestWritePass(rhi::IRHICommandList* cmd, rhi::IRHITextu
     const u32 h = albedo->GetHeight();
     if (w == 0 || h == 0) return;
 
-    cmd->SetPipeline(m_TestWritePSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_TestWritePSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_TestWriteSet);
 
     // ── 屏障①：GBuffer 写入 → 本 compute 的 UAV 写入 ──
@@ -485,7 +485,7 @@ void NaniteRaster::RecordTestWritePass(rhi::IRHICommandList* cmd, rhi::IRHITextu
 // ============================================================
 
 bool NaniteRaster::EnsureMeshTestResources() {
-    if (m_MeshTestPSO) return true;
+    if (m_MeshTestPSO.IsValid()) return true;
     if (!m_Device || !m_MeshShaderSupported) return false;
 
     // ── 1. 模块自建的 1×1 R8 目标 ──
@@ -567,8 +567,8 @@ bool NaniteRaster::EnsureMeshTestResources() {
     desc.colorFormats[0]      = rhi::Format::R8_UNORM;
     desc.descriptorSetLayouts = { m_MeshTestLayout };
     desc.debugName            = "NaniteMeshTest";
-    m_MeshTestPSO = m_Device->CreatePipelineState(desc);
-    if (!m_MeshTestPSO) {
+    m_MeshTestPSO = m_Device->CreatePipelineStateHandle(desc);
+    if (!m_MeshTestPSO.IsValid()) {
         HE_CORE_ERROR("NaniteRaster: 最小 mesh PSO 创建失败");
         return false;
     }
@@ -590,7 +590,7 @@ void NaniteRaster::RecordMeshTestPass(rhi::IRHICommandList* cmd) {
         m_MeshTestCount->Unmap();
     }
 
-    cmd->SetPipeline(m_MeshTestPSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_MeshTestPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_MeshTestSet);
 
     // 模块自建目标：1×1 R8，清成 0（内容本身无意义，只为让 RenderDoc 里可辨识）。
@@ -660,7 +660,7 @@ u32 NaniteRaster::ReadbackMeshTestTargetMax() {
 // ============================================================
 
 bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
-    if (m_SoftColorPSO) return true;
+    if (m_SoftColorPSO.IsValid()) return true;
     if (!m_Device || !targets.HasSoftRasterTargets()) return false;
 
     // ── 1. 第 1 趟（深度键）的描述符集布局：bindings 0..7 ──
@@ -708,8 +708,8 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
         desc.pushConstantRanges   = { pc };
         desc.descriptorSetLayouts = { m_SoftDepthLayout };
         desc.debugName            = "NaniteSoftRasterDepth";
-        m_SoftRasterPSO = m_Device->CreatePipelineState(desc);
-        if (!m_SoftRasterPSO) { HE_CORE_ERROR("NaniteRaster: 软光栅第 1 趟 PSO 创建失败"); return false; }
+        m_SoftRasterPSO = m_Device->CreatePipelineStateHandle(desc);
+        if (!m_SoftRasterPSO.IsValid()) { HE_CORE_ERROR("NaniteRaster: 软光栅第 1 趟 PSO 创建失败"); return false; }
     }
 
     // ── 2. 第 2 趟（写 GBuffer）的描述符集布局：bindings 0..7 同第 1 趟 + 8..11 = 4 张颜色目标 ──
@@ -792,8 +792,8 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
         desc.pushConstantRanges   = { pc };
         desc.descriptorSetLayouts = { m_SoftColorLayout };
         desc.debugName            = "NaniteSoftRasterWrite";
-        m_SoftColorPSO = m_Device->CreatePipelineState(desc);
-        if (!m_SoftColorPSO) { HE_CORE_ERROR("NaniteRaster: 软光栅第 2 趟 PSO 创建失败"); return false; }
+        m_SoftColorPSO = m_Device->CreatePipelineStateHandle(desc);
+        if (!m_SoftColorPSO.IsValid()) { HE_CORE_ERROR("NaniteRaster: 软光栅第 2 趟 PSO 创建失败"); return false; }
 
         // ── 【确定性赢家选择】第 2.5 趟（仲裁）：**复用第 2 趟的布局**，只多读 binding 21 ──
         // 【为什么复用而不是新建一套集合】它需要的 0..7 / 15..20 与第 2 趟完全一致，push constant
@@ -816,8 +816,8 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
         winnerDesc.pushConstantRanges   = { winnerPc };
         winnerDesc.descriptorSetLayouts = { m_SoftColorLayout };
         winnerDesc.debugName            = "NaniteSoftRasterWinner";
-        m_SoftWinnerPSO = m_Device->CreatePipelineState(winnerDesc);
-        if (!m_SoftWinnerPSO) { HE_CORE_ERROR("NaniteRaster: 软光栅仲裁趟 PSO 创建失败"); return false; }
+        m_SoftWinnerPSO = m_Device->CreatePipelineStateHandle(winnerDesc);
+        if (!m_SoftWinnerPSO.IsValid()) { HE_CORE_ERROR("NaniteRaster: 软光栅仲裁趟 PSO 创建失败"); return false; }
     }
 
     // ── 3. 深度解析：无颜色附件 + D32 深度附件（写法与 CSMTechnique 的深度专用 PSO 同款）──
@@ -882,8 +882,8 @@ bool NaniteRaster::EnsureSoftRasterResources(const GBufferTargets& targets) {
         desc.colorAttachmentCount = 0;                     // 深度专用通道（与 CSM/Spot 阴影同款）
         desc.descriptorSetLayouts = { m_DepthResolveLayout };
         desc.debugName            = "NaniteDepthResolve";
-        m_DepthResolvePSO = m_Device->CreatePipelineState(desc);
-        if (!m_DepthResolvePSO) { HE_CORE_ERROR("NaniteRaster: 深度解析 PSO 创建失败"); return false; }
+        m_DepthResolvePSO = m_Device->CreatePipelineStateHandle(desc);
+        if (!m_DepthResolvePSO.IsValid()) { HE_CORE_ERROR("NaniteRaster: 深度解析 PSO 创建失败"); return false; }
     }
 
     // ── 4. 读数缓冲（16×u32）+ 常驻 0 源（每帧在命令缓冲内清）──
@@ -988,7 +988,7 @@ void NaniteRaster::RecordSoftStatsClear(rhi::IRHICommandList* cmd) {
 }
 
 bool NaniteRaster::EnsureGBufferClearResources() {
-    if (m_ClearPSO) return true;
+    if (m_ClearPSO.IsValid()) return true;
     if (!m_Device) return false;
 
     // 8 张颜色目标的存储图像绑定（任务 4 的 A1 裁决已给全部 8 张加了 UnorderedAccess）
@@ -1024,8 +1024,8 @@ bool NaniteRaster::EnsureGBufferClearResources() {
     desc.pushConstantRanges   = { pc };
     desc.descriptorSetLayouts = { m_ClearLayout };
     desc.debugName            = "NaniteGBufferClear";
-    m_ClearPSO = m_Device->CreatePipelineState(desc);
-    if (!m_ClearPSO) { HE_CORE_ERROR("NaniteRaster: 清屏 compute PSO 创建失败"); return false; }
+    m_ClearPSO = m_Device->CreatePipelineStateHandle(desc);
+    if (!m_ClearPSO.IsValid()) { HE_CORE_ERROR("NaniteRaster: 清屏 compute PSO 创建失败"); return false; }
     return true;
 }
 
@@ -1077,7 +1077,7 @@ void NaniteRaster::RecordGBufferClearPass(rhi::IRHICommandList* cmd, const GBuff
                              colors[i]);
     }
 
-    cmd->SetPipeline(m_ClearPSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_ClearPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_ClearSet);
     cmd->SetPushConstants(0, (u32)sizeof(clears), clears);
     cmd->SetDrawDebugLabel("Nanite_GBufferClear (8 MRT via UAV)");
@@ -1112,7 +1112,7 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
     // 【确定性赢家选择】仲裁趟的 PSO 必须就绪：第 3 趟现在要核对它写下的候选号，缺了它
     //   "仲裁"与"写 GBuffer"两件事都不成立 ⇒ 直接跳过本帧软光栅（**不静默**：创建失败时
     //   `EnsureSoftRasterResources` 已经报过 HE_CORE_ERROR；这里只是不走空 PSO 的派发路径）。
-    if (!m_SoftWinnerPSO) return;
+    if (!m_SoftWinnerPSO.IsValid()) return;
 
     const u32 w = targets.albedo->GetWidth();
     const u32 h = targets.albedo->GetHeight();
@@ -1220,7 +1220,7 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
     // 【为什么要按容量而不是按可见数派发】可见计数是**同一帧 GPU 刚写出的**值，CPU 读不到（读回
     //   要等 GPU ⇒ 破坏无停顿）；按容量派发、由 shader 按 `slot >= visibleCount` 早退，是本引擎
     //   既有的"GPU 驱动"写法。容量 = 可见引用表容量（`NaniteCull::GetBVHVisibleCapacity`）。
-    cmd->SetPipeline(m_SoftRasterPSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_SoftRasterPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_SoftDepthSet);
     cmd->SetPushConstants(0, (u32)sizeof(NaniteSoftRasterParams), &paramsEff);
     cmd->SetDrawDebugLabel("Nanite_SoftRasterDepth (atomic depth key)");
@@ -1234,7 +1234,7 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
     //      做 `InterlockedMin(u_WinnerID[p], 候选号)`。**不写 GBuffer、不加任何读数**。
     // 【为什么绑 `m_SoftColorSet`】它复用第 2 趟的布局（多出来的只有 binding 21），且 0..7 / 15..20
     //   与第 2 趟是同一份绑定 ⇒ "仲裁趟看到的光栅化输入"与"写色趟看到的"在绑定层面不可能分叉。
-    cmd->SetPipeline(m_SoftWinnerPSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_SoftWinnerPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_SoftColorSet);
     cmd->SetPushConstants(0, (u32)sizeof(NaniteSoftRasterParams), &paramsEff);
     cmd->SetDrawDebugLabel("Nanite_SoftRasterWinner (deterministic winner id)");
@@ -1245,7 +1245,7 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
                          rhi::ResourceState::UnorderedAccess, rhi::ResourceState::UnorderedAccess);
 
     // ── ⑦ C 趟：重跑光栅化 → 等值复检 → **候选号复检** → 写 4 张 GBuffer ──
-    cmd->SetPipeline(m_SoftColorPSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_SoftColorPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_SoftColorSet);
     cmd->SetPushConstants(0, (u32)sizeof(NaniteSoftRasterParams), &paramsEff);
     cmd->SetDrawDebugLabel("Nanite_SoftRaster (equality test -> GBuffer)");
@@ -1268,7 +1268,7 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
     //   还原成 READ_ONLY —— 于是帧图的模型与真实布局继续一致，不需要额外的深度屏障。
     rhi::ClearValue depthClear{};
     depthClear.depth = clearDepth;
-    cmd->SetPipeline(m_DepthResolvePSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_DepthResolvePSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DepthResolveSet);
     // 【P0 修复（§14.30）】把屏幕尺寸推给片元：深度键是一维结构化缓冲，shader 不能从它反推
     //   二维宽高（`GetDimensions` 只会给出"元素个数 + 1"）。这里传的就是深度键的二维形状。
@@ -1310,7 +1310,7 @@ void NaniteRaster::RecordSoftRasterPass(rhi::IRHICommandList* cmd,
 // ============================================================
 
 bool NaniteRaster::EnsureHardRasterResources(const GBufferTargets& targets) {
-    if (m_HardRasterPSO) return true;
+    if (m_HardRasterPSO.IsValid()) return true;
     if (!m_Device || !m_HardRasterCapable) return false;
     // 【为什么要求 HasClearTargets（8 张颜色 + 深度）而不是只要 4 张】本通道是**渲染通道**：
     //   PSO 的附件数必须与实际帧缓冲一致（8 张颜色 + 深度），未被写入的 4 张靠
@@ -1435,8 +1435,8 @@ bool NaniteRaster::EnsureHardRasterResources(const GBufferTargets& targets) {
     desc.pushConstantRanges   = { pc };
     desc.descriptorSetLayouts = { m_HardRasterLayout };
     desc.debugName            = "NaniteHardRaster";
-    m_HardRasterPSO = m_Device->CreatePipelineState(desc);
-    if (!m_HardRasterPSO) {
+    m_HardRasterPSO = m_Device->CreatePipelineStateHandle(desc);
+    if (!m_HardRasterPSO.IsValid()) {
         HE_CORE_ERROR("NaniteRaster: 硬光栅 mesh PSO 创建失败（8 附件 + D32，LessEqual + Load）");
         return false;
     }
@@ -1576,7 +1576,7 @@ void NaniteRaster::RecordHardRasterPass(rhi::IRHICommandList* cmd,
     }
 
     // ── ③ 渲染：mesh 绘制 ──
-    cmd->SetPipeline(m_HardRasterPSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_HardRasterPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_HardRasterSet);
     cmd->SetPushConstants(0, (u32)sizeof(NaniteSoftRasterParams), &paramsEff);
 
@@ -1632,7 +1632,7 @@ bool NaniteRaster::EnsureDebugViewResources(u32 mode,
     // 四张只读输入表缺一不可（缺了就没有"非空洞"的可视化数据可用，宁可跳过也不画假图）
     if (!assetClusters || !spheres || !lodInfo || bvhDepths.empty()) return false;
 
-    if (m_DebugViewPSO) {
+    if (m_DebugViewPSO.IsValid()) {
         // 已经建好：只需在档位变化时刷新 push constant 的镜像（PSO/资源与档位无关，
         // 四种模式共用同一个 PSO 与同一张目标 —— 模式只决定累加时的编码）
         return true;
@@ -1728,8 +1728,8 @@ bool NaniteRaster::EnsureDebugViewResources(u32 mode,
     desc.pushConstantRanges   = { pc };
     desc.descriptorSetLayouts = { m_DebugLayout };
     desc.debugName            = "NaniteDebugView";
-    m_DebugViewPSO = m_Device->CreatePipelineState(desc);
-    if (!m_DebugViewPSO) {
+    m_DebugViewPSO = m_Device->CreatePipelineStateHandle(desc);
+    if (!m_DebugViewPSO.IsValid()) {
         HE_CORE_ERROR("NaniteRaster: 可视化 compute PSO 创建失败");
         return false;
     }
@@ -1748,7 +1748,7 @@ void NaniteRaster::RecordDebugViewPass(rhi::IRHICommandList* cmd,
                                        rhi::IRHIBuffer* instances,
                                        u32 visibleCapacity,
                                        const NaniteDebugViewParams& params) {
-    if (!cmd || !m_DebugViewPSO || !visibleRefs || !visibleCount || !instances) return;
+    if (!cmd || !m_DebugViewPSO.IsValid() || !visibleRefs || !visibleCount || !instances) return;
     if (params.mode == kNaniteDebugViewOff || params.mode > kNaniteDebugViewMaxMode) return;
     m_DebugLastMode = params.mode;
     m_DebugLastVisibleCapacity = visibleCapacity;
@@ -1770,7 +1770,7 @@ void NaniteRaster::RecordDebugViewPass(rhi::IRHICommandList* cmd,
     // ── ② 清屏趟（mode == 0 的内部趟；见 shader 文件头的说明）──
     NaniteDebugViewParams clearParams = params;
     clearParams.mode = kNaniteDebugViewClearMode;
-    cmd->SetPipeline(m_DebugViewPSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_DebugViewPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_DebugSet);
     cmd->SetPushConstants(0, (u32)sizeof(clearParams), &clearParams);
     cmd->SetDrawDebugLabel("Nanite_DebugView (clear target)");
@@ -1970,7 +1970,7 @@ void NaniteRaster::LogHardRasterReadback() {
                  m_HardLastMaxTriangles,
                  m_HardLastVisibleCapacity,
                  m_HardRasterCapable ? 1 : 0,
-                 m_HardRasterPSO ? "ok" : "fail",
+                 m_HardRasterPSO.IsValid() ? "ok" : "fail",
                  diagScreenW, diagScreenH, diagMaxTri, diagExtent,
                  diagInst, diagMats, diagPages,
                  diagMatch ? 1u : 0u,

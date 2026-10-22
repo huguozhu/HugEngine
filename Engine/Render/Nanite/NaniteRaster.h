@@ -57,7 +57,7 @@ public:
     void Shutdown();
     void OnResize(u32 width, u32 height);
 
-    [[nodiscard]] bool IsReady() const { return m_Device != nullptr && m_PSO != nullptr; }
+    [[nodiscard]] bool IsReady() const { return m_Device != nullptr && m_PSO.IsValid(); }
 
     /// 录制绘制：
     ///   `DrawIndexedIndirectCount(indirectCmdBuffer, 0, countBuffer, 0, maxDrawCount, 20)`
@@ -124,7 +124,7 @@ public:
     [[nodiscard]] bool IsMeshTestSupported() const { return m_MeshShaderSupported; }
 
     /// mesh PSO 是否真的建起来了（dump 帧日志 `mesh_pso=ok/fail` 的依据）。
-    [[nodiscard]] bool IsMeshTestPSOReady() const { return m_MeshTestPSO != nullptr; }
+    [[nodiscard]] bool IsMeshTestPSOReady() const { return m_MeshTestPSO.IsValid(); }
 
     /// 录制 `Nanite_MeshTest` pass：`DrawMeshTasks(1,1,1)` 画进模块自建的 1×1 R8 目标，
     /// 并把该目标拷进 host 可见缓冲供 dump 帧读回（拷贝在 render pass 之外录制）。
@@ -264,7 +264,7 @@ public:
     void ReadbackHardStats(u32 (&out)[kNaniteHardStatsCapacity]);
 
     /// 软光栅是否就绪（资源 + PSO 都建起来了）
-    [[nodiscard]] bool IsSoftRasterReady() const { return m_SoftColorPSO != nullptr; }
+    [[nodiscard]] bool IsSoftRasterReady() const { return m_SoftColorPSO.IsValid(); }
 
     // ============================================================
     // 【§14.8 任务 22】硬光栅：mesh shader 分流（大簇一侧）
@@ -294,7 +294,7 @@ public:
     [[nodiscard]] bool IsHardRasterSupported() const { return m_HardRasterCapable; }
 
     /// 硬光栅 PSO 是否真的建起来了（dump 帧日志 `pso=ok/fail` 的依据）
-    [[nodiscard]] bool IsHardRasterReady() const { return m_HardRasterPSO != nullptr; }
+    [[nodiscard]] bool IsHardRasterReady() const { return m_HardRasterPSO.IsValid(); }
 
     /// 懒建硬光栅资源（mesh PSO + 描述符集 + 读数缓冲）。
     /// 【为什么放在 public】与 `EnsureSoftRasterResources` 同一理由：`NaniteRenderer`（门面）在
@@ -352,7 +352,7 @@ public:
     // ============================================================
 
     /// 可视化是否可用（目标 + PSO + 描述符集都建起来了）
-    [[nodiscard]] bool IsDebugViewReady() const { return m_DebugViewPSO != nullptr; }
+    [[nodiscard]] bool IsDebugViewReady() const { return m_DebugViewPSO.IsValid(); }
 
     /// 懒建可视化的目标/读回缓冲/描述符集/PSO（只在 `debugView != 0` 时被调用）。
     /// @param mode          档位（1..4；0 不建任何东西）
@@ -450,7 +450,7 @@ private:
 
     rhi::DescriptorSetLayoutHandle m_Layout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_Set    = rhi::kInvalidSet;
-    std::unique_ptr<rhi::IRHIPipelineState> m_PSO;
+    rhi::RHIPipelineStateHandle m_PSO{};   // A-3
 
     /// 最近一次 pass 传入的 maxDrawCount（诊断用）
     u32 m_LastMaxDrawCount = 0;
@@ -459,7 +459,7 @@ private:
     rhi::ShaderBytecode            m_TestWriteCS;                                  // Nanite_TestWrite.comp.spv
     rhi::DescriptorSetLayoutHandle m_TestWriteLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_TestWriteSet    = rhi::kInvalidSet;
-    std::unique_ptr<rhi::IRHIPipelineState> m_TestWritePSO;
+    rhi::RHIPipelineStateHandle m_TestWritePSO{};   // A-3
 
     // ── §14.8 任务 6：mesh PSO 自证通道（懒建；meshTest 关闭时全部为空）──
     /// 设备能力（`Initialize` 时查询一次；false ⇒ 永不建 mesh PSO，也不注册 pass）
@@ -480,7 +480,7 @@ private:
 
     rhi::DescriptorSetLayoutHandle m_MeshTestLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_MeshTestSet    = rhi::kInvalidSet;
-    std::unique_ptr<rhi::IRHIPipelineState> m_MeshTestPSO;
+    rhi::RHIPipelineStateHandle m_MeshTestPSO{};   // A-3
 
     // ── §14.8 任务 18：软光栅（懒建；软光栅关闭或资产未就绪时为空）──
     /// 四个入口的字节码：三趟 compute + 深度解析的 VS/FS
@@ -504,21 +504,21 @@ private:
     rhi::DescriptorSetHandle       m_SoftDepthSet    = rhi::kInvalidSet;
     rhi::DescriptorSetLayoutHandle m_SoftColorLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_SoftColorSet    = rhi::kInvalidSet;
-    std::unique_ptr<rhi::IRHIPipelineState> m_SoftRasterPSO;      // 第 1 趟（深度键）
-    std::unique_ptr<rhi::IRHIPipelineState> m_SoftColorPSO;       // 第 3 趟（写 GBuffer）
+    rhi::RHIPipelineStateHandle m_SoftRasterPSO{};   // A-3      // 第 1 趟（深度键）
+    rhi::RHIPipelineStateHandle m_SoftColorPSO{};   // A-3       // 第 3 趟（写 GBuffer）
     /// 【确定性赢家选择】第 2.5 趟的 PSO（仲裁；复用 `m_SoftColorLayout`，不写任何 GBuffer）
-    std::unique_ptr<rhi::IRHIPipelineState> m_SoftWinnerPSO;
+    rhi::RHIPipelineStateHandle m_SoftWinnerPSO{};   // A-3
 
     /// 深度解析通道（全屏片元；只写深度附件，无颜色附件）
     rhi::DescriptorSetLayoutHandle m_DepthResolveLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_DepthResolveSet    = rhi::kInvalidSet;
-    std::unique_ptr<rhi::IRHIPipelineState> m_DepthResolvePSO;
+    rhi::RHIPipelineStateHandle m_DepthResolvePSO{};   // A-3
 
     /// 【任务 18】清屏 compute（8 张颜色目标的存储图像绑定 + 128B 清除值 push constant）
     rhi::ShaderBytecode m_ClearCS;   // Nanite_GBufferClear.comp.spv
     rhi::DescriptorSetLayoutHandle m_ClearLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_ClearSet    = rhi::kInvalidSet;
-    std::unique_ptr<rhi::IRHIPipelineState> m_ClearPSO;
+    rhi::RHIPipelineStateHandle m_ClearPSO{};   // A-3
 
     /// 深度键缓冲（`RWStructuredBuffer<uint>`，W×H 条）+ 每帧清零用的常驻 0xFF 源
     /// 【为什么用缓冲而不是 R32_UINT 存储图像】结构化缓冲上的 `InterlockedMin` 同样零额外设备
@@ -576,7 +576,7 @@ private:
     /// 于是"`u_Stats[...]` 写到哪里"由**描述符指向谁**决定，shader 源码不必分叉。
     rhi::DescriptorSetLayoutHandle m_HardRasterLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_HardRasterSet    = rhi::kInvalidSet;
-    std::unique_ptr<rhi::IRHIPipelineState> m_HardRasterPSO;
+    rhi::RHIPipelineStateHandle m_HardRasterPSO{};   // A-3
     /// 本通道的描述符集是否已登记到 bindless 堆（只登记一次；登记后强制一次 Flush）
     bool m_HardBindlessRegistered = false;
 
@@ -615,7 +615,7 @@ private:
     /// 可视化自己的描述符集布局 + 集合（bindings 0..7；与两条光栅路径**不共用**）
     rhi::DescriptorSetLayoutHandle m_DebugLayout = rhi::kInvalidLayout;
     rhi::DescriptorSetHandle       m_DebugSet    = rhi::kInvalidSet;
-    std::unique_ptr<rhi::IRHIPipelineState> m_DebugViewPSO;
+    rhi::RHIPipelineStateHandle m_DebugViewPSO{};   // A-3
 
     /// 上一次录制用的档位与容量（dump 帧读数行打印；也是"清屏趟"要派发多少组的依据）
     u32 m_DebugLastMode    = 0u;
