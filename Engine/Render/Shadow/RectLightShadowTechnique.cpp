@@ -132,10 +132,10 @@ void RectLightShadowTechnique::Render(rhi::IRHICommandList* cmd,const FrameScene
         float4x4 vp=sm.lightViewProj[0];
 
         rhi::ClearValue cv{};cv.depth=1.f;
-        void* depthView=m_Device->ResolveTexture(m_RectShadowMap[m_FrameSlot])->GetNativeHandle();
-        cmd->SetPipeline(m_Device->ResolvePipelineState(m_ShadowPSO));
+        void* depthView=ResT(m_RectShadowMap[m_FrameSlot])->GetNativeHandle();
+        cmd->SetPipeline(ResP(m_ShadowPSO));
         cmd->BeginOffscreenPass(nullptr,depthView,m_MapSize,m_MapSize,&cv);
-        cmd->SetPipeline(m_Device->ResolvePipelineState(m_ShadowPSO));
+        cmd->SetPipeline(ResP(m_ShadowPSO));
         cmd->SetViewport({0,(float)m_MapSize,(float)m_MapSize,-(float)m_MapSize,0,1});
         cmd->SetScissor({0,0,m_MapSize,m_MapSize});
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_ExternalDescSet);
@@ -161,7 +161,7 @@ void RectLightShadowTechnique::Render(rhi::IRHICommandList* cmd,const FrameScene
         // 若声明为 DepthStencilWrite 会给出错误的 oldLayout
         //（VUID-VkImageMemoryBarrier-oldLayout-01197，实测每帧触发）
         cmd->PipelineBarrier(rhi::PipelineStage::LateFragmentTests,rhi::PipelineStage::FragmentShader,
-            rhi::ResourceState::DepthStencilRead,rhi::ResourceState::DepthStencilRead,m_Device->ResolveTexture(m_RectShadowMap[m_FrameSlot]));
+            rhi::ResourceState::DepthStencilRead,rhi::ResourceState::DepthStencilRead,ResT(m_RectShadowMap[m_FrameSlot]));
     }
 }
 

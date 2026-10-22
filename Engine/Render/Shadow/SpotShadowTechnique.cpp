@@ -131,10 +131,10 @@ void SpotShadowTechnique::Render(rhi::IRHICommandList* cmd,const FrameSceneSnaps
         float4x4 vp=proj*view;
 
         rhi::ClearValue cv{};cv.depth=1.f;
-        void* depthView=m_Device->ResolveTexture(m_SpotShadowMap[m_FrameSlot])->GetNativeHandle();
-        cmd->SetPipeline(m_Device->ResolvePipelineState(m_ShadowPSO));
+        void* depthView=ResT(m_SpotShadowMap[m_FrameSlot])->GetNativeHandle();
+        cmd->SetPipeline(ResP(m_ShadowPSO));
         cmd->BeginOffscreenPass(nullptr,depthView,m_MapSize,m_MapSize,&cv);
-        cmd->SetPipeline(m_Device->ResolvePipelineState(m_ShadowPSO));
+        cmd->SetPipeline(ResP(m_ShadowPSO));
         cmd->SetViewport({0,(float)m_MapSize,(float)m_MapSize,-(float)m_MapSize,0,1});
         cmd->SetScissor({0,0,m_MapSize,m_MapSize});
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame,m_ExternalDescSet);
@@ -160,7 +160,7 @@ void SpotShadowTechnique::Render(rhi::IRHICommandList* cmd,const FrameSceneSnaps
         // depthAttach.finalLayout），故 srcState 必须是 DepthStencilRead
         //（声明 Write 会给出错误的 oldLayout：VUID-VkImageMemoryBarrier-oldLayout-01197）
         cmd->PipelineBarrier(rhi::PipelineStage::LateFragmentTests,rhi::PipelineStage::FragmentShader,
-            rhi::ResourceState::DepthStencilRead,rhi::ResourceState::DepthStencilRead,m_Device->ResolveTexture(m_SpotShadowMap[m_FrameSlot]));
+            rhi::ResourceState::DepthStencilRead,rhi::ResourceState::DepthStencilRead,ResT(m_SpotShadowMap[m_FrameSlot]));
     }
 }
 

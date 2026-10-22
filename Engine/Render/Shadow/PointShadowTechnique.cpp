@@ -115,7 +115,7 @@ void PointShadowTechnique::Render(rhi::IRHICommandList* cmd,const FrameSceneSnap
                                    const MeshRegistry& registry,
                                    const std::vector<GPUShadowData>& sd,u32 start){
     // 本帧只操作**本飞行帧槽位**那一份立方体（逐帧重画 ⇒ 必须分份，理由见头文件）
-    auto* cube=m_Device->ResolveTexture(m_PointShadowMap[m_FrameSlot]);   // A-3
+    auto* cube=ResT(m_PointShadowMap[m_FrameSlot]);   // A-3
     if(!cube||!m_ExternalObjectBuffer||m_ExternalDescSet==rhi::kInvalidSet)return;
     // 进入面循环前先把整张 cubemap 置为可采样：光照 pass 可能在首帧就采样它，
     // 而那时 6 个面都还没渲染过（层布局是 UNDEFINED）→ 校验层在提交时报
@@ -132,9 +132,9 @@ void PointShadowTechnique::Render(rhi::IRHICommandList* cmd,const FrameSceneSnap
             void*fv=cube->GetNativeHandle(face);
             if(!fv)continue;
             rhi::ClearValue cv{};cv.depth=1.f;
-            cmd->SetPipeline(m_Device->ResolvePipelineState(m_ShadowPSO));
+            cmd->SetPipeline(ResP(m_ShadowPSO));
             cmd->BeginOffscreenPass(nullptr,fv,m_MapSize,m_MapSize,&cv);
-            cmd->SetPipeline(m_Device->ResolvePipelineState(m_ShadowPSO));
+            cmd->SetPipeline(ResP(m_ShadowPSO));
             // 实验：点光 cubemap 渲染用正高度视口（去掉 y-flip）。
             // 排查：CSM 阴影在 shader 采样时用 uv.y=0.5-ndc.y*0.5 补偿了负高度视口的
             // y-flip；而点光 SamplePointShadow 用方向向量采样 cubemap 无补偿，
