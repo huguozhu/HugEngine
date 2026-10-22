@@ -71,3 +71,29 @@ struct RenderThreadContext {
 };
 
 } // namespace he::render
+
+// ============================================================
+// 【T2.6】每帧的"当前上下文"（线程局部）。
+//
+// 由 `RenderThread::PumpOnce` 在执行本帧命令前设置、执行后清除。各 pass 的解析 helper 在
+// `m_FrameCtx` 为空时会回退到这里 ⇒ 不必给几十个 pass 逐个调用 `SetFrameContext` 也能让
+// "唯一 RHI 出口" 真正生效；显式 `SetFrameContext` 仍然优先（便于将来按 pass 精确控制）。
+//
+// 线程局部的原因：它描述的是"这条线程此刻正在录哪一帧"，对别的线程没有意义。
+// ============================================================
+namespace he::render {
+
+/// 线程局部的当前帧上下文
+inline thread_local const RenderThreadContext* s_CurrentFrameContext = nullptr;
+
+/// 当前线程正在录制的帧上下文（无则 nullptr）
+inline const RenderThreadContext* GetFrameContext() {
+    return s_CurrentFrameContext;
+}
+
+/// 设置/清除当前线程的帧上下文（由渲染线程在泵帧前后调用）
+inline void SetCurrentFrameContext(const RenderThreadContext* ctx) {
+    s_CurrentFrameContext = ctx;
+}
+
+} // namespace he::render

@@ -67,20 +67,24 @@ public:
     // 【T2.6】统一解析入口。回退分支直接调 m_Device->Resolve*（不能被同一个扫描命中，
     // 否则会变成无限递归）；也不引入新的访问标签，避免改变后续成员的访问级别。
     [[nodiscard]] rhi::IRHIBuffer* ResB(rhi::RHIBufferHandle h) const {
-        if (m_FrameCtx) return m_FrameCtx->ResolveBuffer(h);
+        const RenderThreadContext* c = m_FrameCtx ? m_FrameCtx : GetFrameContext();
+        if (c) return c->ResolveBuffer(h);
         return m_Device ? m_Device->ResolveBuffer(h) : nullptr;
     }
     [[nodiscard]] rhi::IRHITexture* ResT(rhi::RHITextureHandle h) const {
-        if (m_FrameCtx) return m_FrameCtx->ResolveTexture(h);
+        const RenderThreadContext* c = m_FrameCtx ? m_FrameCtx : GetFrameContext();
+        if (c) return c->ResolveTexture(h);
         return m_Device ? m_Device->ResolveTexture(h) : nullptr;
     }
     [[nodiscard]] rhi::IRHIPipelineState* ResP(rhi::RHIPipelineStateHandle h) const {
-        if (m_FrameCtx) return m_FrameCtx->ResolvePipelineState(h);
+        const RenderThreadContext* c = m_FrameCtx ? m_FrameCtx : GetFrameContext();
+        if (c) return c->ResolvePipelineState(h);
         return m_Device ? m_Device->ResolvePipelineState(h) : nullptr;
     }
 
     [[nodiscard]] rhi::IRHISampler* ResS(rhi::RHISamplerHandle h) const {
-        if (m_FrameCtx) return m_FrameCtx->ResolveSampler(h);
+        const RenderThreadContext* c = m_FrameCtx ? m_FrameCtx : GetFrameContext();
+        if (c) return c->ResolveSampler(h);
         return m_Device ? m_Device->ResolveSampler(h) : nullptr;
     }
 

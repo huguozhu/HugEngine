@@ -68,10 +68,14 @@ bool RenderThread::PumpOnce() {
     ctx.frameSlot  = frame.frameSlot;
     ctx.device     = m_Device;   // 【T2.6】本次泵帧的 RHI 出口
 
+    // 【T2.6】把"本帧上下文"发布到线程局部，供各 pass 的解析 helper 回退使用；
+    //命令全部执行完后清除，避免下一帧/其它路径拿到过期上下文。
+    SetCurrentFrameContext(&ctx);
     for (RenderCommand& cmd : frame.commands) {
         if (cmd) cmd(ctx);                 // 命令为空（默认构造的 std::function）时跳过
         ++m_ExecutedCommands;
     }
+    SetCurrentFrameContext(nullptr);
 
     // 壳模式：执行完即视为"该帧已完成" ⇒ 立刻回收票据，让游戏线程不会因为壳而卡住
     m_Queue.RetireFrame(FrameTicket{frame.frameIndex, frame.frameSlot});

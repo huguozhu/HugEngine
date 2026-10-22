@@ -193,20 +193,24 @@ private:
     // 【T2.6】统一的解析入口：优先走帧上下文（唯一 RHI 出口），未设置时回退设备。
     // 搬迁完成后删掉回退分支、把 m_Device 从本类移除，即达成"上下文是唯一出口"。
     [[nodiscard]] rhi::IRHIBuffer* ResB(rhi::RHIBufferHandle h) const {
-        if (m_FrameCtx) return m_FrameCtx->ResolveBuffer(h);
+        const RenderThreadContext* c = m_FrameCtx ? m_FrameCtx : GetFrameContext();
+        if (c) return c->ResolveBuffer(h);
         return m_Device ? m_Device->ResolveBuffer(h) : nullptr;
     }
     [[nodiscard]] rhi::IRHITexture* ResT(rhi::RHITextureHandle h) const {
-        if (m_FrameCtx) return m_FrameCtx->ResolveTexture(h);
+        const RenderThreadContext* c = m_FrameCtx ? m_FrameCtx : GetFrameContext();
+        if (c) return c->ResolveTexture(h);
         return m_Device ? m_Device->ResolveTexture(h) : nullptr;
     }
     [[nodiscard]] rhi::IRHIPipelineState* ResP(rhi::RHIPipelineStateHandle h) const {
-        if (m_FrameCtx) return m_FrameCtx->ResolvePipelineState(h);
+        const RenderThreadContext* c = m_FrameCtx ? m_FrameCtx : GetFrameContext();
+        if (c) return c->ResolvePipelineState(h);
         return m_Device ? m_Device->ResolvePipelineState(h) : nullptr;
     }
 
     [[nodiscard]] rhi::IRHISampler* ResS(rhi::RHISamplerHandle h) const {
-        if (m_FrameCtx) return m_FrameCtx->ResolveSampler(h);
+        const RenderThreadContext* c = m_FrameCtx ? m_FrameCtx : GetFrameContext();
+        if (c) return c->ResolveSampler(h);
         return m_Device ? m_Device->ResolveSampler(h) : nullptr;
     }
     std::unique_ptr<rhi::IRHIPipelineState> m_PBR_PSO;
