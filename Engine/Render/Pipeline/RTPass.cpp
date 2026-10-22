@@ -107,13 +107,13 @@ bool RTPass::Initialize(rhi::IRHIDevice* device,
         rhi::BufferDesc sb;
         sb.size  = tlasSizes.buildScratchSize;
         sb.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::AccelerationStruct;
-        m_TLASScratch = device->CreateBuffer(sb);
+        m_TLASScratch = device->CreateBufferHandle(sb);   // A-3
     }
     {
         rhi::BufferDesc ib;
         ib.size  = sizeof(rhi::TLASInstanceDesc) * m_MaxInstanceCount;
         ib.usage = rhi::BufferUsage::Storage | rhi::BufferUsage::AccelerationStruct;
-        m_TLASInstanceBuffer = device->CreateBuffer(ib);
+        m_TLASInstanceBuffer = device->CreateBufferHandle(ib);   // A-3
     }
 
     m_Initialized = true;
@@ -247,18 +247,18 @@ RTPass::RTEffectPipeline RTPass::CreateEffectPipeline(
 }
 
 void RTPass::Shutdown() {
-    m_VertexPullBuffer.reset();
-    m_IndexPullBuffer.reset();
-    m_MaterialTex.reset();
-    m_SceneMaterialTex.reset();
-    m_SceneTriangleNormals.reset();
-    m_SceneTriangleUVs.reset();
-    m_LightUB.reset();
-    m_BindlessSampler.reset();
+    rhi::GetDevice()->DestroyBufferHandle(m_VertexPullBuffer); m_VertexPullBuffer = {};
+    rhi::GetDevice()->DestroyBufferHandle(m_IndexPullBuffer); m_IndexPullBuffer = {};
+    rhi::GetDevice()->DestroyTextureHandle(m_MaterialTex); m_MaterialTex = {};
+    rhi::GetDevice()->DestroyTextureHandle(m_SceneMaterialTex); m_SceneMaterialTex = {};
+    rhi::GetDevice()->DestroyTextureHandle(m_SceneTriangleNormals); m_SceneTriangleNormals = {};
+    rhi::GetDevice()->DestroyTextureHandle(m_SceneTriangleUVs); m_SceneTriangleUVs = {};
+    rhi::GetDevice()->DestroyBufferHandle(m_LightUB); m_LightUB = {};
+    rhi::GetDevice()->DestroySamplerHandle(m_BindlessSampler); m_BindlessSampler = {};
     m_BindlessTextures.clear();
     m_BindlessSamplers.clear();
-    m_TLASScratch.reset();
-    m_TLASInstanceBuffer.reset();
+    rhi::GetDevice()->DestroyBufferHandle(m_TLASScratch); m_TLASScratch = {};
+    rhi::GetDevice()->DestroyBufferHandle(m_TLASInstanceBuffer); m_TLASInstanceBuffer = {};
     m_SBTBuffer.reset();
     m_RTPipeline.reset();
     m_TLAS.reset();
@@ -386,11 +386,11 @@ void RTPass::BuildAS(rhi::IRHICommandList* cmd, const FrameSceneSnapshot& snapsh
     }
 
     if (!instances.empty()) {
-        void* mapped = m_TLASInstanceBuffer->Map();
+        void* mapped = rhi::GetDevice()->ResolveBuffer(m_TLASInstanceBuffer)->Map();
         std::memcpy(mapped, instances.data(), instances.size() * sizeof(rhi::TLASInstanceDesc));
-        m_TLASInstanceBuffer->Unmap();
+        rhi::GetDevice()->ResolveBuffer(m_TLASInstanceBuffer)->Unmap();
 
-        cmd->BuildTLAS(m_TLAS.get(), m_TLASScratch.get(), m_TLASInstanceBuffer.get(),
+        cmd->BuildTLAS(m_TLAS.get(), rhi::GetDevice()->ResolveBuffer(m_TLASScratch), rhi::GetDevice()->ResolveBuffer(m_TLASInstanceBuffer),
                        static_cast<u32>(instances.size()), false);
 
         HE_CORE_INFO("RTPass: TLAS 构建 ({} instances)", instances.size());
@@ -427,15 +427,15 @@ void RTPass::UpdateRTDescriptorSet(rhi::IRHIDevice* device,
 
     // set=1: 材质纹理 + 光源 UB（ClosestHit 使用）
     if (m_DescSet1 != rhi::kInvalidSet) {
-        if (m_MaterialTex) {
+        if (m_MaterialTex.IsValid()) {
             // 材质 = SampledImage（Texture2D::Load 不需要采样器）
             device->UpdateDescriptorSet(m_DescSet1, 0,
                 rhi::DescriptorType::SampledImage,
-                m_MaterialTex.get(), nullptr);
+                rhi::GetDevice()->ResolveTexture(m_MaterialTex), nullptr);
         }
-        if (m_LightUB)
+        if (m_LightUB.IsValid())
             device->UpdateDescriptorSet(m_DescSet1, 1,
-                rhi::DescriptorType::UniformBuffer, m_LightUB.get());
+                rhi::DescriptorType::UniformBuffer, rhi::GetDevice()->ResolveBuffer(m_LightUB));
     }
 }
 
@@ -485,9 +485,9 @@ bool RTPass::CreateMaterialTexture(rhi::IRHIDevice* device, u32 maxInstances,
     texDesc.mipLevels = 1;
     texDesc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::TransferDst;
     texDesc.initialData = texData.data();
-    m_MaterialTex = device->CreateTexture(texDesc);
+    m_MaterialTex = device->CreateTextureHandle(texDesc);   // A-3
     HE_CORE_INFO("RTPass: 材质纹理创建 ({}×3 RGBA32F, {} meshes)", m_MaterialInstanceCount, idx);
-    return m_MaterialTex != nullptr;
+    return m_MaterialTex.IsValid();
 }
 
 // ============================================================
@@ -689,8 +689,8 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, const FrameScene
         desc.mipLevels   = 1;
         desc.usage       = rhi::TextureUsage::ShaderResource;
         desc.initialData = matData.data();
-        m_SceneMaterialTex = device->CreateTexture(desc);
-        if (!m_SceneMaterialTex) {
+        m_SceneMaterialTex = device->CreateTextureHandle(desc);   // A-3
+        if (!m_SceneMaterialTex.IsValid()) {
             HE_CORE_ERROR("RTPass: 场景材质纹理创建失败");
             return false;
         }
@@ -705,8 +705,8 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, const FrameScene
         desc.mipLevels   = 1;
         desc.usage       = rhi::TextureUsage::ShaderResource;
         desc.initialData = normalData.data();
-        m_SceneTriangleNormals = device->CreateTexture(desc);
-        if (!m_SceneTriangleNormals) {
+        m_SceneTriangleNormals = device->CreateTextureHandle(desc);   // A-3
+        if (!m_SceneTriangleNormals.IsValid()) {
             HE_CORE_ERROR("RTPass: 三角形法线纹理创建失败");
             return false;
         }
@@ -721,8 +721,8 @@ bool RTPass::BuildSceneMaterialTexture(rhi::IRHIDevice* device, const FrameScene
         desc.mipLevels   = 1;
         desc.usage       = rhi::TextureUsage::ShaderResource;
         desc.initialData = uvData.data();
-        m_SceneTriangleUVs = device->CreateTexture(desc);
-        if (!m_SceneTriangleUVs) {
+        m_SceneTriangleUVs = device->CreateTextureHandle(desc);   // A-3
+        if (!m_SceneTriangleUVs.IsValid()) {
             HE_CORE_ERROR("RTPass: 三角形 UV 纹理创建失败");
             return false;
         }
@@ -742,18 +742,18 @@ bool RTPass::CreateLightBuffer(rhi::IRHIDevice* device, u32 maxLights) {
     rhi::BufferDesc ubDesc;
     ubDesc.size  = size;
     ubDesc.usage = rhi::BufferUsage::Uniform;
-    m_LightUB = device->CreateBuffer(ubDesc);
+    m_LightUB = device->CreateBufferHandle(ubDesc);   // A-3
     HE_CORE_INFO("RTPass: 光源 UB 创建 ({} lights, {}B)", m_LightMaxCount, size);
-    return m_LightUB != nullptr;
+    return m_LightUB.IsValid();
 }
 
 // 从 GPULight SSBO 提取光源数据填充 UB（每帧调用）
 void RTPass::UpdateLightBuffer(rhi::IRHIBuffer* lightBuffer) {
-    if (!m_LightUB || !lightBuffer) return;
+    if (!m_LightUB.IsValid() || !lightBuffer) return;
 
     // GPULight = 64 bytes: colorIntensity(16) + directionType(16) + positionRange(16) + coneAngles(8) + shadowIndex(4) + pad(4)
     u8* src = static_cast<u8*>(lightBuffer->Map());
-    u8* dst = static_cast<u8*>(m_LightUB->Map());
+    u8* dst = static_cast<u8*>(rhi::GetDevice()->ResolveBuffer(m_LightUB)->Map());
     if (!src || !dst) return;
 
     u32 count = 0;
@@ -771,7 +771,7 @@ void RTPass::UpdateLightBuffer(rhi::IRHIBuffer* lightBuffer) {
     // lightCount at end
     *reinterpret_cast<u32*>(dst + m_LightMaxCount * 32) = count;
 
-    m_LightUB->Unmap();
+    rhi::GetDevice()->ResolveBuffer(m_LightUB)->Unmap();
     lightBuffer->Unmap();
 }
 
@@ -834,7 +834,7 @@ bool RTPass::CreateBindlessDescriptorSet(rhi::IRHIDevice* device, u32 maxTexture
     samplerDesc.addressU  = rhi::AddressMode::Repeat;
     samplerDesc.addressV  = rhi::AddressMode::Repeat;
     samplerDesc.maxAnisotropy = 16.0f;
-    m_BindlessSampler = device->CreateSampler(samplerDesc);
+    m_BindlessSampler = device->CreateSamplerHandle(samplerDesc);   // A-3
 
     // 预分配纹理/采样器数组（用默认白色纹理填充）
     m_BindlessTextures.resize(maxTextures, nullptr);
@@ -853,7 +853,7 @@ u32 RTPass::RegisterBindlessTexture(rhi::IRHIDevice* device,
     for (u32 i = 0; i < m_BindlessMaxCount; ++i) {
         if (m_BindlessTextures[i] == nullptr) {
             m_BindlessTextures[i] = texture;
-            m_BindlessSamplers[i] = sampler ? sampler : m_BindlessSampler.get();
+            m_BindlessSamplers[i] = sampler ? sampler : rhi::GetDevice()->ResolveSampler(m_BindlessSampler);
 
             // 更新描述符集（绑定此纹理）
             device->UpdateDescriptorSet(m_DescSet2, 0,

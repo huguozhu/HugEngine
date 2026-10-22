@@ -93,11 +93,17 @@ public:
     /// 顶点/索引缓冲读 ⇒ 不再需要 `World`
     bool BuildSceneMaterialTexture(rhi::IRHIDevice* device, const FrameSceneSnapshot& snapshot,
                                    const MeshRegistry& registry);
-    rhi::IRHITexture* GetSceneMaterialTexture() const { return m_SceneMaterialTex.get(); }
-    rhi::IRHITexture* GetSceneTriangleNormals() const { return m_SceneTriangleNormals.get(); }
+    rhi::IRHITexture* GetSceneMaterialTexture() const {   // A-3：句柄按需解析
+        auto* d = rhi::GetDevice(); return d ? d->ResolveTexture(m_SceneMaterialTex) : nullptr;
+    }
+    rhi::IRHITexture* GetSceneTriangleNormals() const {   // A-3
+        auto* d = rhi::GetDevice(); return d ? d->ResolveTexture(m_SceneTriangleNormals) : nullptr;
+    }
     /// 三角形顶点 UV 纹理（每三角形 3 条，布局与法线纹理一致）：PT 的 ClosestHit 靠它插值出
     /// 命中点 UV，才能采样材质贴图（PT 贴图落地：PT 真正采样材质贴图）
-    rhi::IRHITexture* GetSceneTriangleUVs() const { return m_SceneTriangleUVs.get(); }
+    rhi::IRHITexture* GetSceneTriangleUVs() const {   // A-3
+        auto* d = rhi::GetDevice(); return d ? d->ResolveTexture(m_SceneTriangleUVs) : nullptr;
+    }
 
     // 创建 + 更新光源 Uniform Buffer
     bool CreateLightBuffer(rhi::IRHIDevice* device, u32 maxLights = 8);
@@ -117,8 +123,12 @@ public:
                                       u32 maxTextures = 256);
 
     // 获取资源
-    rhi::IRHITexture* GetMaterialTexture() const { return m_MaterialTex.get(); }
-    rhi::IRHIBuffer*  GetLightBuffer()    const { return m_LightUB.get(); }
+    rhi::IRHITexture* GetMaterialTexture() const {   // A-3
+        auto* d = rhi::GetDevice(); return d ? d->ResolveTexture(m_MaterialTex) : nullptr;
+    }
+    rhi::IRHIBuffer*  GetLightBuffer()    const {   // A-3
+        auto* d = rhi::GetDevice(); return d ? d->ResolveBuffer(m_LightUB) : nullptr;
+    }
 
     // 获取描述符集句柄（set0: RayGen, set1: ClosestHit, set2: Bindless 纹理）
     rhi::DescriptorSetHandle GetDescriptorSet0() const { return m_DescSet; }
@@ -175,12 +185,12 @@ private:
     // RT Pipeline + SBT
     std::unique_ptr<rhi::IRHIRayTracingPipelineState> m_RTPipeline;
     rhi::SBTDesc m_SBT;
-    std::unique_ptr<rhi::IRHIBuffer> m_SBTBuffer;
+    std::unique_ptr<rhi::IRHIBuffer> m_SBTBuffer;   // 注意：BuildSBT 以 unique_ptr& 接收，暂不句柄化
 
     // AS
     std::unique_ptr<rhi::IRHIAccelerationStructure> m_TLAS;
-    std::unique_ptr<rhi::IRHIBuffer> m_TLASScratch;
-    std::unique_ptr<rhi::IRHIBuffer> m_TLASInstanceBuffer;
+    rhi::RHIBufferHandle m_TLASScratch{};   // A-3
+    rhi::RHIBufferHandle m_TLASInstanceBuffer{};   // A-3
 
     // BLAS 映射: meshIndex → BLAS（第③段第 5 批：键从组件指针换成整数索引）
     struct BLASEntry {
@@ -204,16 +214,16 @@ private:
     rhi::PushConstantRange         m_PushConstRange;                      // Push Constant 范围
 
     // set=1 资源（ClosestHit 使用）
-    std::unique_ptr<rhi::IRHITexture> m_MaterialTex;                     // 材质 1D 纹理 (b=0)
-    std::unique_ptr<rhi::IRHITexture> m_SceneMaterialTex;               // 场景材质纹理（11×N RGBA32F：基础 PBR 4 行 + Disney 3 行 + 介质 1 行 + 贴图索引/因子 3 行，反射/GI/PT 用）
-    std::unique_ptr<rhi::IRHITexture> m_SceneTriangleNormals;           // 三角形顶点法线纹理（反射/GI ClosestHit 用）
-    std::unique_ptr<rhi::IRHITexture> m_SceneTriangleUVs;               // 三角形顶点 UV 纹理（RG32F，PT ClosestHit 采样贴图用）
-    std::unique_ptr<rhi::IRHIBuffer>  m_LightUB;                        // 光源 UB (b=1)
-    std::unique_ptr<rhi::IRHIBuffer>  m_VertexPullBuffer;               // 顶点拉取 SSBO (b=2, GPU 标量布局)
-    std::unique_ptr<rhi::IRHIBuffer>  m_IndexPullBuffer;                // 索引拉取 SSBO (b=3, 直接拷贝)
+    rhi::RHITextureHandle m_MaterialTex{};                     // A-3：材质 1D 纹理 (b=0)
+    rhi::RHITextureHandle m_SceneMaterialTex{};               // A-3：场景材质纹理（11×N RGBA32F，反射/GI/PT 用）
+    rhi::RHITextureHandle m_SceneTriangleNormals{};           // A-3：三角形顶点法线纹理
+    rhi::RHITextureHandle m_SceneTriangleUVs{};               // A-3：三角形顶点 UV 纹理
+    rhi::RHIBufferHandle  m_LightUB{};                        // A-3：光源 UB (b=1)
+    rhi::RHIBufferHandle  m_VertexPullBuffer{};               // A-3：顶点拉取 SSBO (b=2)
+    rhi::RHIBufferHandle  m_IndexPullBuffer{};                // A-3：索引拉取 SSBO (b=3)
 
     // set=2 资源（Bindless 纹理数组, Phase 4.2）
-    std::unique_ptr<rhi::IRHISampler>  m_BindlessSampler;               // 共享采样器 (b=1)
+    rhi::RHISamplerHandle  m_BindlessSampler{};               // A-3：共享采样器 (b=1)
     std::vector<rhi::IRHITexture*>     m_BindlessTextures;              // 已注册纹理列表
     std::vector<rhi::IRHISampler*>     m_BindlessSamplers;              // 对应采样器（CombinedImageSampler）
     u32 m_BindlessMaxCount = 0;
