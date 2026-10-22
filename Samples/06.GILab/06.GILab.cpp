@@ -317,6 +317,92 @@ std::pair<rhi::IRHITexture*, rhi::IRHISampler*> TextureCache::Load(const String&
     return {inserted->second.first.get(), inserted->second.second.get()};
 }
 
+// ============================================================
+// 场景搭建：Sponza glTF + 主方向光 + 两盏点光 + 天空盒 + 纹理与 bindless 材质注册
+//
+// 原先这 ~89 行内联在 main() 里。抽出来后 main 只保留"启动参数"性质的工作（窗口/RHI/配置读写），
+// 场景内容集中在这里 —— 想换场景或加灯只需改这一个函数。
+//
+// 【点光源句柄】样例后续要按索引访问两盏点光（面板编辑 → 配置序列化），故用出参回传。
+// 【顺序】纹理注册必须在天空盒之后、渲染管线初始化之前：bindless 默认占位纹理要先就位。
+// ============================================================
+static bool BuildScene(World& world, SceneGraph& sceneGraph, rhi::IRHIDevice* device,
+                       const String& sponzaPath, Entity (&pointLightEntities)[2]) {
+    HE_CORE_INFO("加载 Sponza 场景: {}", sponzaPath);
+    auto result = asset::LoadGLTF(world, sceneGraph, sponzaPath);
+    if (!result.success) {
+        HE_CORE_ERROR("Sponza 加载失败: {}", result.error);
+        return false;
+    }
+    HE_CORE_INFO("Sponza 加载完成: {} 实体, {} 网格图元",
+                 result.entities.size(), result.meshCount);
+
+    // 场景默认无直接光源（纯 GI）；DDGI 探针需首次照明输入（直接从 Lighting HDR 学习会自反馈发散），
+    // 故加一个弱主方向光提供 DDGI 首次照明（强度低，画面仍以 GI 为主导）。
+    {
+        Entity mainLightEntity = world.CreateEntity("DirectionalLight");
+        world.AddComponent<TransformComponent>(mainLightEntity);
+        auto* mainDL = world.AddComponent<DirectionalLight>(mainLightEntity);
+        mainDL->direction = float3(0.3f, -1.0f, 0.4f);
+        mainDL->color     = float3(1.0f, 0.95f, 0.9f);
+        mainDL->intensity = 3.0f;    // 弱光：DDGI 输入，不喧宾夺主
+        mainDL->castShadow = true;
+        mainDL->enabled    = false;  // 默认只看 GI（直接光关闭，勾选「只看 GI」可切回）
+        sceneGraph.SetParent(mainLightEntity, Entity{kInvalidEntity});
+    }
+
+    // 点光源（2 个：Sponza 走廊两端，用于测试点光 GI/阴影/DDGI 探针）；
+    // 位置/颜色/强度/范围可由面板编辑，并随 06_GILab.cfg 序列化。
+    {
+        struct PointLightInit { float3 pos; float3 color; float intensity; float range; };
+        const PointLightInit inits[2] = {
+            { float3(-20.0f, 5.0f, 0.0f), float3(1.0f, 0.7f, 0.4f), 30.0f, 18.0f },  // 暖色，走廊左端
+            { float3( 20.0f, 5.0f, 0.0f), float3(0.4f, 0.7f, 1.0f), 30.0f, 18.0f },  // 冷色，走廊右端
+        };
+        for (int i = 0; i < 2; i++) {
+            Entity e = world.CreateEntity("PointLight");
+            auto* tf = world.AddComponent<TransformComponent>(e);
+            tf->position = inits[i].pos;
+            auto* pl = world.AddComponent<PointLight>(e);
+            pl->color      = inits[i].color;
+            pl->intensity  = inits[i].intensity;
+            pl->range      = inits[i].range;
+            pl->castShadow = false;   // 点光阴影开销大，默认关闭（面板可开）
+            pl->enabled    = false;   // 默认只看 GI，与方向光一致
+            sceneGraph.SetParent(e, Entity{kInvalidEntity});
+            pointLightEntities[i] = e;
+        }
+    }
+
+    // 天空盒：HDR 等距柱状图 → 立方体贴图 → 场景实体
+    CreateSkybox(world, sceneGraph, device, String(HUGE_CONTENT_DIR) + "Textures/skybox.hdr");
+
+    // 纹理：创建/去重/默认占位在 TextureCache；这里只按 glTF 的 uri 取并注册 bindless 槽
+    TextureCache texCache(device);
+    texCache.CreateAndBindDefault();   // bindless 默认占位纹理（必须在注册材质纹理之前）
+    const String sponzaDir = std::filesystem::path(sponzaPath).parent_path().string();
+    auto loadTexture = [&](const String& uri) { return texCache.Load(sponzaDir, uri); };
+
+    u32 texCount = 0;
+    world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent& mesh) {
+        auto [bcTex, bcSamp] = loadTexture(mesh.baseColorTexture);
+        auto [nTex, nSamp]   = loadTexture(mesh.normalTexture);
+        auto [mrTex, mrSamp] = loadTexture(mesh.metallicRoughnessTexture);
+        auto [aoTex, aoSamp] = loadTexture(mesh.occlusionTexture);
+        // 材质 = 4 个连续 bindless 纹理槽（BaseColor/Normal/MetallicRoughness/Occlusion），
+        // 首调用返回值即 materialID（基索引），shader 用 texBase+0/1/2/3 采样
+        auto* heap = device->GetBindlessHeap();
+        const u32 matID = heap->RegisterTexture(bcTex, bcSamp);
+        heap->RegisterTexture(nTex, nSamp);
+        heap->RegisterTexture(mrTex, mrSamp);
+        heap->RegisterTexture(aoTex, aoSamp);
+        mesh.materialID = matID;
+        texCount++;
+    });
+    HE_CORE_INFO("纹理加载 + bindless 注册完成: {} primitive, {} 张独立纹理", texCount, texCache.Count());
+    return true;
+}
+
 int main() {
     // ---- 0. 安装崩溃处理器（Wave 0.8 诊断基建） ----
     //    崩溃时打印"函数名 + 源文件:行号"的完整调用栈，并写出 minidump。
@@ -365,94 +451,21 @@ int main() {
         .vsync  = !noVsync,   // 与 EngineConfig 同源（HE_NO_VSYNC=1 时同时关掉，否则帧率仍被锁 60）
     });
 
-    // ---- 4. 初始化场景（Sponza glTF——检验各种 GI 的间接光照/反射） ----
+    // ---- 4. 初始化场景（Sponza glTF + 光源 + 天空盒 + 纹理注册，实现见 BuildScene）----
     World world;
     SceneGraph sceneGraph(world);
 
-    String sponzaPath = String(HUGE_CONTENT_DIR) + "gltf/Sponza/glTF/Sponza.gltf";
-    HE_CORE_INFO("加载 Sponza 场景: {}", sponzaPath);
-
-    auto result = asset::LoadGLTF(world, sceneGraph, sponzaPath);
-    if (!result.success) {
-        HE_CORE_ERROR("Sponza 加载失败: {}", result.error);
+    const String sponzaPath = String(HUGE_CONTENT_DIR) + "gltf/Sponza/glTF/Sponza.gltf";
+    Entity pointLightEntities[2];   // 面板编辑/配置序列化要按索引访问，故由 BuildScene 回传
+    if (!BuildScene(world, sceneGraph, device.get(), sponzaPath, pointLightEntities)) {
         return 1;
     }
-    HE_CORE_INFO("Sponza 加载完成: {} 实体, {} 网格图元",
-                 result.entities.size(), result.meshCount);
 
     // --- 加载配置文件 ---
     auto cfgData = LoadConfigFile(g_ConfigPath);
-    bool hasConfig = !cfgData.empty();
+    const bool hasConfig = !cfgData.empty();
     if (hasConfig) {
         HE_CORE_INFO("加载配置文件: {}", g_ConfigPath);
-    }
-
-    // 场景默认无直接光源（纯 GI）；DDGI 探针需首次照明输入（直接从 Lighting HDR 学习会自反馈发散），
-    // 故加一个弱主方向光提供 DDGI 首次照明（强度低，画面仍以 GI 为主导）
-    {
-        Entity mainLightEntity = world.CreateEntity("DirectionalLight");
-        world.AddComponent<TransformComponent>(mainLightEntity);
-        auto* mainDL = world.AddComponent<DirectionalLight>(mainLightEntity);
-        mainDL->direction = float3(0.3f, -1.0f, 0.4f);
-        mainDL->color     = float3(1.0f, 0.95f, 0.9f);
-        mainDL->intensity = 3.0f;   // 弱光：DDGI 输入，不喧宾夺主
-        mainDL->castShadow = true;
-        mainDL->enabled    = false; // 默认只看 GI（直接光关闭，勾选「只看 GI」可切回）
-        sceneGraph.SetParent(mainLightEntity, Entity{kInvalidEntity});
-    }
-
-    // --- 点光源（2 个：Sponza 走廊两端，用于测试点光 GI/阴影/DDGI 探针）---
-    // 位置/颜色/强度/范围可由面板编辑，并随 06_GILab.cfg 序列化
-    Entity pointLightEntities[2];
-    {
-        struct PointLightInit { float3 pos; float3 color; float intensity; float range; };
-        const PointLightInit inits[2] = {
-            { float3(-20.0f, 5.0f,  0.0f), float3(1.0f, 0.7f, 0.4f), 30.0f, 18.0f },  // 暖色，走廊左端（X 负侧）
-            { float3( 20.0f, 5.0f,  0.0f), float3(0.4f, 0.7f, 1.0f), 30.0f, 18.0f },  // 冷色，走廊右端（X 正侧）
-        };
-        for (int i = 0; i < 2; i++) {
-            Entity e = world.CreateEntity("PointLight");
-            auto* tf = world.AddComponent<TransformComponent>(e);
-            tf->position = inits[i].pos;
-            auto* pl = world.AddComponent<PointLight>(e);
-            pl->color     = inits[i].color;
-            pl->intensity = inits[i].intensity;
-            pl->range     = inits[i].range;
-            pl->castShadow = false;       // 点光阴影开销大，默认关闭（面板可开）
-            pl->enabled    = false;       // 默认只看 GI，与方向光一致
-            sceneGraph.SetParent(e, Entity{kInvalidEntity});
-            pointLightEntities[i] = e;
-        }
-    }
-
-    // ---- 天空盒：HDR 等距柱状图 → 立方体贴图 → 场景实体（实现见 CreateSkybox）----
-    CreateSkybox(world, sceneGraph, device.get(), String(HUGE_CONTENT_DIR) + "Textures/skybox.hdr");
-
-    // ---- 5. 加载 glTF 纹理 → RHI Texture → MeshComponent ----
-    // 纹理的创建/去重/绑定默认占位都在 TextureCache（见 main 之前）；这里只按 glTF 的 uri 取。
-    TextureCache texCache(device.get());
-    texCache.CreateAndBindDefault();   // bindless 默认占位纹理（必须在注册材质纹理之前）
-    const String sponzaDir = std::filesystem::path(sponzaPath).parent_path().string();
-    auto loadTexture = [&](const String& uri) { return texCache.Load(sponzaDir, uri); };
-
-    {
-        u32 texCount = 0;
-        world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent& mesh) {
-            auto [bcTex, bcSamp] = loadTexture(mesh.baseColorTexture);
-            auto [nTex, nSamp] = loadTexture(mesh.normalTexture);
-            auto [mrTex, mrSamp] = loadTexture(mesh.metallicRoughnessTexture);
-            auto [aoTex, aoSamp] = loadTexture(mesh.occlusionTexture);
-            // 材质 = 4 个连续 bindless 纹理槽（BaseColor/Normal/MetallicRoughness/Occlusion），
-            // 首调用返回值即 materialID（基索引），shader 用 texBase+0/1/2/3 采样
-            auto* heap = device->GetBindlessHeap();
-            u32 matID = heap->RegisterTexture(bcTex, bcSamp);
-            heap->RegisterTexture(nTex, nSamp);
-            heap->RegisterTexture(mrTex, mrSamp);
-            heap->RegisterTexture(aoTex, aoSamp);
-            mesh.materialID = matID;
-            texCount++;
-        });
-        HE_CORE_INFO("纹理加载 + bindless 注册完成: {} primitive, {} 张独立纹理", texCount, texCache.Count());
     }
 
     // ---- 6. 初始化渲染管线（Forward / Deferred；光追经 GI 层栈的 RT 源启用） ----
