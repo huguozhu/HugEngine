@@ -380,12 +380,12 @@ public:
                         rhi::IRHITexture* depth, u32 screenW, u32 screenH);
 
     // ── 任务 14/15 的读回访问（`NaniteRenderer::LogCull3Readback` 使用）──
-    [[nodiscard]] rhi::IRHIBuffer* GetVisibleClusterBuffer()      const { return m_VisibleClusterBuf.get(); }
-    [[nodiscard]] rhi::IRHIBuffer* GetVisibleClusterCountBuffer() const { return m_VisibleClusterCountBuf.get(); }
+    [[nodiscard]] rhi::IRHIBuffer* GetVisibleClusterBuffer()      const { return m_Device->ResolveBuffer(m_VisibleClusterBuf); }
+    [[nodiscard]] rhi::IRHIBuffer* GetVisibleClusterCountBuffer() const { return m_Device->ResolveBuffer(m_VisibleClusterCountBuf); }
     /// 【任务 15】三阶段读数缓冲（扁平 u32，槽位见 `kNaniteCullStat*`）
-    [[nodiscard]] rhi::IRHIBuffer* GetCullStatsBuffer()           const { return m_CullStatsBuf.get(); }
+    [[nodiscard]] rhi::IRHIBuffer* GetCullStatsBuffer()           const { return m_Device->ResolveBuffer(m_CullStatsBuf); }
     /// 【任务 15】可见实例掩码缓冲（`mask[i] != 0` ⇒ Phase 1 判可见；调试/对照用）
-    [[nodiscard]] rhi::IRHIBuffer* GetVisibleMaskBuffer()         const { return m_VisibleMaskBuf.get(); }
+    [[nodiscard]] rhi::IRHIBuffer* GetVisibleMaskBuffer()         const { return m_Device->ResolveBuffer(m_VisibleMaskBuf); }
     /// 【任务 15】每簇 LOD 元数据（CPU 侧镜像；数量 == 参与剔除的簇数）
     [[nodiscard]] const std::vector<NaniteClusterLODInfo>& GetClusterLODInfo() const { return m_LODInfo; }
 
@@ -399,9 +399,9 @@ public:
     // ============================================================
 
     /// 簇包围球表（16B/条，**按资产簇下标**索引；与 GPU 遍历读的是同一份比特）
-    [[nodiscard]] rhi::IRHIBuffer* GetBVHSphereBuffer() const { return m_BVHSphereBuf.get(); }
+    [[nodiscard]] rhi::IRHIBuffer* GetBVHSphereBuffer() const { return m_Device->ResolveBuffer(m_BVHSphereBuf); }
     /// 每簇 LOD 元数据（16B/条，`lodLevel` 是可视化模式 3 的唯一输入）
-    [[nodiscard]] rhi::IRHIBuffer* GetLODInfoBuffer() const { return m_LODInfoBuf.get(); }
+    [[nodiscard]] rhi::IRHIBuffer* GetLODInfoBuffer() const { return m_Device->ResolveBuffer(m_LODInfoBuf); }
 
     /// 【§14.8 任务 26】每簇的 BVH 节点深度（根 = 1；**懒计算一次**，只为调试可视化服务）
     ///
@@ -413,9 +413,9 @@ public:
 
     // ── 【§14.8 任务 16】可见簇 → 间接绘制参数的读回访问（`NaniteRenderer` 与光栅端使用）──
     /// 间接绘制命令缓冲（20B/条；与可见簇引用同槽位、同容量）
-    [[nodiscard]] rhi::IRHIBuffer* GetIndirectDrawBuffer()  const { return m_IndirectDrawBuf.get(); }
+    [[nodiscard]] rhi::IRHIBuffer* GetIndirectDrawBuffer()  const { return m_Device->ResolveBuffer(m_IndirectDrawBuf); }
     /// 绘制计数缓冲（单个 u32；`DrawIndexedIndirectCount` 的 countBuffer）
-    [[nodiscard]] rhi::IRHIBuffer* GetDrawCountBuffer()     const { return m_DrawCountBuf.get(); }
+    [[nodiscard]] rhi::IRHIBuffer* GetDrawCountBuffer()     const { return m_Device->ResolveBuffer(m_DrawCountBuf); }
     /// 间接命令缓冲的容量上界（= `maxDrawCount`）
     [[nodiscard]] u32 GetMaxIndirectDraws() const { return kNaniteMaxIndirectDraws; }
     /// 每簇绘制参数表（CPU 侧镜像；CPU 参考打包与 GPU 读的是**同一份比特**）
@@ -599,33 +599,33 @@ private:
     u32 m_BVHInstanceDomain = 0u;
 
     // ── 三个只读输入缓冲（容量固定，`SetClusterBVH` 一次性上传）──
-    std::unique_ptr<rhi::IRHIBuffer> m_BVHNodeBuf;     // 节点（32B/条，容量 kNaniteMaxBVHNodes）
-    std::unique_ptr<rhi::IRHIBuffer> m_BVHLeafBuf;     // 叶子簇表（u32/条，容量 kNaniteMaxBVHClusters）
-    std::unique_ptr<rhi::IRHIBuffer> m_BVHSphereBuf;   // 簇球（16B/条，容量 kNaniteMaxBVHClusters）
+    rhi::RHIBufferHandle m_BVHNodeBuf{};   // A-3     // 节点（32B/条，容量 kNaniteMaxBVHNodes）
+    rhi::RHIBufferHandle m_BVHLeafBuf{};   // A-3     // 叶子簇表（u32/条，容量 kNaniteMaxBVHClusters）
+    rhi::RHIBufferHandle m_BVHSphereBuf{};   // A-3   // 簇球（16B/条，容量 kNaniteMaxBVHClusters）
     /// 【任务 15】LOD 元数据（16B/条，容量 kNaniteMaxBVHClusters）
-    std::unique_ptr<rhi::IRHIBuffer> m_LODInfoBuf;
+    rhi::RHIBufferHandle m_LODInfoBuf{};   // A-3
     /// 【任务 16】每簇绘制参数（16B/条，容量 kNaniteMaxBVHClusters；`SetClusterBVH` 一次性上传）
-    std::unique_ptr<rhi::IRHIBuffer> m_ClusterDrawRangeBuf;
+    rhi::RHIBufferHandle m_ClusterDrawRangeBuf{};   // A-3
     // ── 每帧由 GPU 写的可写缓冲 ──
-    std::unique_ptr<rhi::IRHIBuffer> m_VisibleClusterBuf;       // 可见簇引用（8B/条，容量 kNaniteMaxVisibleClusterRefs）
-    std::unique_ptr<rhi::IRHIBuffer> m_VisibleClusterCountBuf;  // 可见簇计数（u32；Phase 3 的最终计数）
+    rhi::RHIBufferHandle m_VisibleClusterBuf{};   // A-3       // 可见簇引用（8B/条，容量 kNaniteMaxVisibleClusterRefs）
+    rhi::RHIBufferHandle m_VisibleClusterCountBuf{};   // A-3  // 可见簇计数（u32；Phase 3 的最终计数）
     /// 【任务 16】间接绘制命令（20B/条，容量 `kNaniteMaxIndirectDraws`）。**必须带 `Indirect`
     ///   usage**：`vkCmdDrawIndexedIndirectCount` 会把整块当命令缓冲读。
-    std::unique_ptr<rhi::IRHIBuffer> m_IndirectDrawBuf;
+    rhi::RHIBufferHandle m_IndirectDrawBuf{};   // A-3
     /// 【任务 16】绘制计数（u32）。**必须带 `Indirect` usage**（它是 `DrawIndexedIndirectCount`
     ///   的 countBuffer）；`TransferDst` 是每帧"命令缓冲内清零"拷贝的目标。
-    std::unique_ptr<rhi::IRHIBuffer> m_DrawCountBuf;
+    rhi::RHIBufferHandle m_DrawCountBuf{};   // A-3
     /// 【任务 15】可见实例掩码（u32/实例；Phase 1 每线程写 0/1，**不需要清零**）
-    std::unique_ptr<rhi::IRHIBuffer> m_VisibleMaskBuf;
+    rhi::RHIBufferHandle m_VisibleMaskBuf{};   // A-3
     /// 【任务 15】三阶段读数（扁平 u32，容量 `kNaniteCullStatsCapacity`）
-    std::unique_ptr<rhi::IRHIBuffer> m_CullStatsBuf;
+    rhi::RHIBufferHandle m_CullStatsBuf{};   // A-3
     /// 【任务 15】三阶段参数（112B；CPU 每帧上传）
-    std::unique_ptr<rhi::IRHIBuffer> m_ChainParamBuf;
+    rhi::RHIBufferHandle m_ChainParamBuf{};   // A-3
     /// 【任务 15】各计数的清零源（96B 常驻 0，TransferSrc）：
     ///   【0,4) 可见实例计数；【4,8) 任务 3 的命令条数；【8,12) 任务 3 的光栅化簇计数；
     ///   【12,16) 可见簇计数；【16,80) 三阶段读数（64B）；【80,84) 任务 16 的绘制计数。
     ///   **每帧的清零都在命令缓冲内**（不用主机写）。
-    std::unique_ptr<rhi::IRHIBuffer> m_ClearZeroBuf;
+    rhi::RHIBufferHandle m_ClearZeroBuf{};   // A-3
     /// 【任务 15】Hi-Z 占位纹理（1×1 R32_FLOAT）+ 采样器：当本帧没有外部 Hi-Z 纹理时占位，
     ///   保证 binding 10 永远是**合法描述符**（Vulkan 不接受"未绑定/空纹理"的采样器绑定）。
     ///   层数传 0 ⇒ shader 的 `hizOccluded` 第一句就返回 false ⇒ 不会真的采样它。
