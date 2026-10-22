@@ -1433,7 +1433,7 @@ Submit → Present`，渲染线程只 append。由此推出一个硬约束：
   渲染**之后**）；③ `[ImGui BeginRenderPass + imgui.EndFrame(cmdList) + EndRenderPass + 调试绘制 +
   End + Submit + 探测读回 + Present]`。两条命令统一走 `submitRender`：模式 0 直接在本线程执行，
   模式 1/2 经队列 + **严格握手**。另外：**模式 1/2 起真渲染线程成为默认行为**
-  （`HE_RENDER_THREAD_FORCE_SHELL=1` 可退回壳模式对照）、启动/停止钩子认领与撤销 RHI 归属、
+  （壳模式对照见库层 `RenderThread` 的"未启动"形态）、启动/停止钩子认领与撤销 RHI 归属、
   控件里的 `SetSwapChain`/`OnResize` 改为置标志由下一条命令在渲染线程执行。
   · **判据（`HE_LUMEN_PROBE_FILTER=off`、`HE_NO_VSYNC=1`、120 帧 28 个转储目标）**：
     模式 0 与改动前二进制 **0 像素**；**模式 1（真渲染线程）与模式 0 0 像素**（逐位一致）；

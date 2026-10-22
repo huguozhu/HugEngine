@@ -17,6 +17,7 @@
 #include "RHI/ThreadAffinity.h"      // T2.4：渲染线程启动/停止钩子认领与撤销 RHI 归属
 #include "Threading/RenderThread.h"  // T2.4：命令队列 + 渲染线程（严格握手）
 #include "Pipeline/DeferredPipeline.h"
+#include "Debug/FrameDumpRecorder.h"   // GI 采样落盘（机制）
 #include "Pipeline/ForwardPipeline.h"
 #include "Pipeline/IRenderPipeline.h"
 #include "GI/GITypes.h"   // GI 数据模型 + GIRegistry（RHI-free）
@@ -52,6 +53,7 @@
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+#include "CameraInput.h"   // 样例共用：鼠标/键盘控制相机
 
 // stb_image — 纹理解码
 #define STB_IMAGE_IMPLEMENTATION
@@ -540,24 +542,9 @@ int main() {
     //       后两者减去基线即得各源自身的贡献（且两者带同一 albedo，比值即频谱之比）。
     // 实现：整幅 CopyTextureToBuffer 到 host 可见缓冲。仅测试路径使用，会 WaitIdle，不追求性能。
     // ============================================================
-    const char*  dumpTagEnv   = std::getenv("HE_DUMP_GI");
-    const char*  dumpFrameEnv = std::getenv("HE_DUMP_GI_FRAME");
-    const String g_DumpTag    = dumpTagEnv ? dumpTagEnv : "";
-    bool         g_DumpGI     = !g_DumpTag.empty();   // 非 const：失败时关闭以免每帧重试
-    const u64    g_DumpFrame  = dumpFrameEnv ? (u64)std::max(1, std::atoi(dumpFrameEnv)) : 60ull;
-    bool g_DumpDone    = false;   // 已录制拷贝（防止重复录制）
-    bool g_DumpWritten = false;   // 已落盘（防止每帧重复写文件）
-    // 采样目标列表：每项一张纹理 + 一条读回缓冲（尺寸各自取自纹理本身，故可混放不同分辨率）
-    struct DumpTarget {
-        String                          name;
-        rhi::IRHITexture*               tex = nullptr;
-        std::unique_ptr<rhi::IRHIBuffer> buf;
-        u32                             w = 0, h = 0;
-    };
-    std::vector<DumpTarget> g_DumpTargets;
-    if (g_DumpGI)
-        HE_CORE_INFO("[GI采样] 已启用：标签={} 目标帧={} 输出 build/verify/gi_{}_*.f16",
-                     g_DumpTag, g_DumpFrame, g_DumpTag);
+    // GI 采样落盘：**机制**在 Engine/Render/Debug/FrameDumpRecorder（读回缓冲 / 录制拷贝 /
+    // timeline 等待 / _meta.txt 与 _camera.txt 写法）；这里只给"哪些目标值得看"的清单。
+    auto giDump = render::FrameDumpRecorder::FromEnv();
 
     // 启动即应用白炉条件（HE_FURNACE=1 路径；面板开关在 GI 控制台里）
     if (g_FurnaceMode) {
@@ -957,9 +944,7 @@ int main() {
     sceneGraph.SetParent(camAnimEntity, Entity{kInvalidEntity});
     HE_CORE_INFO("相机动画已创建: {} 秒圆形路径", 6.0f);
 
-    bool   rightMouseDown = false;
     bool   animCameraMode = true;
-    double lastMouseX = 0.0, lastMouseY = 0.0;
 
     // ============================================================
     // 10. 窗口调整回调
@@ -1033,49 +1018,21 @@ int main() {
 
         // --- 相机控制 ---
         {
-            bool mouseDown = glfwGetMouseButton(glfwWin, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
-            if (mouseDown && !rightMouseDown) {
-                rightMouseDown = true;
-                glfwGetCursorPos(glfwWin, &lastMouseX, &lastMouseY);
-                glfwSetInputMode(glfwWin, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-            } else if (!mouseDown && rightMouseDown) {
-                rightMouseDown = false;
-                glfwSetInputMode(glfwWin, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-            } else if (mouseDown && rightMouseDown) {
-                double cx, cy;
-                glfwGetCursorPos(glfwWin, &cx, &cy);
-                float dx = static_cast<float>(cx - lastMouseX);
-                float dy = static_cast<float>(cy - lastMouseY);
-                lastMouseX = cx;
-                lastMouseY = cy;
-                camCtrl.Rotate(dx * 0.003f, -dy * 0.003f);
-            }
-
-            // T 键切换动画/手动相机模式
-            static bool tWasDown = false;
-            bool tDown = glfwGetKey(glfwWin, GLFW_KEY_T) == GLFW_PRESS;
-            if (tDown && !tWasDown) animCameraMode = !animCameraMode;
-            tWasDown = tDown;
-
-            // 动画相机模式：动画播放时同步 AnimationComponent 的位置
+            // 相机输入统一在 Samples/Common/CameraInput.h（六个样例共用，手感一致）；
+            // 这里只保留样例自己的策略：T 键切换"动画相机 / 手动相机"。
+            // 动画相机模式：先按 AnimationComponent 覆盖位置/朝向，再让输入叠加（与旧顺序一致）。
             if (animCameraMode && camAnim->playing) {
-                auto* camTf = world.GetComponent<TransformComponent>(camAnimEntity);
-                if (camTf) {
+                if (auto* camTf = world.GetComponent<TransformComponent>(camAnimEntity)) {
                     camCtrl.SetPosition(camTf->position);
-                    float3 toOrigin = glm::normalize(float3(0, 200, 0) - camTf->position);
+                    const float3 toOrigin = glm::normalize(float3(0, 200, 0) - camTf->position);
                     camCtrl.SetOrientationFromForward(toOrigin);
                 }
             }
-
-            render::CameraController::MoveInput moveIn;
-            moveIn.forward  = glfwGetKey(glfwWin, GLFW_KEY_W) == GLFW_PRESS;
-            moveIn.backward = glfwGetKey(glfwWin, GLFW_KEY_S) == GLFW_PRESS;
-            moveIn.left     = glfwGetKey(glfwWin, GLFW_KEY_A) == GLFW_PRESS;
-            moveIn.right    = glfwGetKey(glfwWin, GLFW_KEY_D) == GLFW_PRESS;
-            moveIn.up       = glfwGetKey(glfwWin, GLFW_KEY_E) == GLFW_PRESS;
-            moveIn.down     = glfwGetKey(glfwWin, GLFW_KEY_Q) == GLFW_PRESS;
-            moveIn.sprint   = glfwGetKey(glfwWin, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
-            camCtrl.Update(deltaTime, moveIn);
+            static he::samples::CameraInput camInput;   // 跨帧保存右键/光标状态
+            if (camInput.Update(glfwWin, camCtrl, deltaTime, {.toggleKey = GLFW_KEY_T})) {
+                animCameraMode = !animCameraMode;
+                camInput.Reset();   // 切回手动时丢弃过期光标坐标，避免视角跳一下
+            }
         }
 
         // Transform 动画更新（驱动 AnimationComponent → TransformComponent）
@@ -1897,23 +1854,10 @@ int main() {
             // 目标分三类：
             //   hdr / albedo  —— 合成结果与接收端反照率（做差 + 除 albedo 后即得 E/π）
             //   provN_raw/final —— 各有效 Provider 的原始输出 / 降噪后输出（定位"某源为 0"发生在哪一级）
-            if (g_DumpGI && !g_DumpDone && frameIndex >= g_DumpFrame) {
+            if (giDump.WantsFrame(frameIndex)) {
+                // 登记纹理目标：机制在 FrameDumpRecorder（读回缓冲 / 格式推断 / 拷贝录制）
                 auto addTarget = [&](const String& name, rhi::IRHITexture* tex) {
-                    if (!tex) return;
-                    DumpTarget t;
-                    t.name = name;
-                    t.tex  = tex;
-                    t.w    = tex->GetWidth();
-                    t.h    = tex->GetHeight();
-                    rhi::BufferDesc dd;                             // 宽×高×8 B（RGBA16F）
-                    dd.size      = (usize)t.w * t.h * 8;
-                    dd.usage     = rhi::BufferUsage::Storage;       // 该路径恒定带 TRANSFER_DST，可作拷贝目标
-                    dd.cpuAccess = true;                            // 需要 Map 读回
-                    t.buf = device->CreateBuffer(dd);
-                    if (!t.buf) { HE_CORE_ERROR("[GI采样] 读回缓冲创建失败: {}（{}x{}）", name, t.w, t.h); return; }
-                    // x=y=0 且取满宽高 ⇒ bufferRowLength=0 的紧密排布正好等于线性落盘布局
-                    cmdList->CopyTextureToBuffer(tex, t.buf.get(), 0, 0, t.w, t.h, 0);
-                    g_DumpTargets.push_back(std::move(t));
+                    giDump.AddTexture(device.get(), cmdList.get(), name.c_str(), tex);
                 };
                 // HDR 取**当前管线**的那张（任务 26）：Forward 没有 GBuffer / Provider 输出，
                 // 但它的 HDR 目标就是层栈归一化的产物 —— 这正是 Forward 侧唯一可读的判据出口。
@@ -1989,12 +1933,7 @@ int main() {
                     if (auto* ssr = deferredPipeline.GetSSR())
                         addTarget("ssr", ssr->GetIndirectSpecularTexture());
                 }
-                if (!g_DumpTargets.empty()) {
-                    g_DumpDone = true;   // 已录制；实际读取放在 Submit 之后
-                } else {
-                    g_DumpGI = false;
-                    HE_CORE_WARN("[GI采样] 没有可用目标（HDR 未创建？），本次跳过");
-                }
+                giDump.FinishRecording(device.get(), cmdList.get());   // 挂本帧 timeline
             }
 
             framePresenter.EndRecording();   // L4-2：End + Submit 收口
@@ -2024,7 +1963,7 @@ int main() {
             }
 
             // ── GI 频谱采样：等 GPU 完成后原样落盘（RGBA16F 原始像素、无文件头、行紧密排布）──
-            if (g_DumpDone && !g_DumpWritten) {
+            if (giDump.PendingWriteBack()) {
                 device->WaitIdle();   // 测试用途，允许停顿
 
                 // ── Nanite（§14.8 任务 3）：dump 帧打印**恰好一行**真实 GPU 读回 ──
@@ -2132,37 +2071,17 @@ int main() {
                     }
                 }
 
-                const String dir  = "build/verify/";
-                const String base = dir + "gi_" + g_DumpTag;
-                std::filesystem::create_directories(dir);
-                std::ofstream meta(base + "_meta.txt");
-                for (auto& t : g_DumpTargets) {                        // 逐目标写：像素直落，无头
-                    const usize bytes = (usize)t.w * t.h * 8;
-                    const void* p = t.buf ? t.buf->Map() : nullptr;
-                    if (p) {
-                        std::ofstream f(base + "_" + t.name + ".f16", std::ios::binary);
-                        f.write(static_cast<const char*>(p), (std::streamsize)bytes);
-                        t.buf->Unmap();
-                        meta << t.name << " " << t.w << " " << t.h << " RGBA16F\n";
-                        HE_CORE_INFO("[GI采样] {}_{}.f16  {}x{}  {} B", base, t.name, t.w, t.h, bytes);
-                    } else {
-                        HE_CORE_ERROR("[GI采样] 映射失败: {}_{}", base, t.name);
-                    }
-                }
-                HE_CORE_INFO("[GI采样] 共落盘 {} 个目标，请求退出", g_DumpTargets.size());
-                // 相机参数一并落盘：解析对照（平面镜的镜像点投影到屏幕）需要那套**渲染这一帧时**
-                // 的相机参数，否则判据只能靠硬编码 —— 而硬编码的相机参数一旦被 cfg 改动就失效。
-                {
-                    const render::CameraData& cam = camCtrl.GetCamera();
-                    std::ofstream cm(base + "_camera.txt");
-                    cm << "pos "     << cam.position.x << " " << cam.position.y << " " << cam.position.z << "\n";
-                    cm << "forward " << cam.forward.x  << " " << cam.forward.y  << " " << cam.forward.z  << "\n";
-                    cm << "up "      << cam.up.x       << " " << cam.up.y       << " " << cam.up.z       << "\n";
-                    cm << "fov "     << cam.fov        << "\n";
-                    cm << "near "    << cam.nearPlane  << "\n";
-                    cm << "far "     << cam.farPlane   << "\n";
-                    cm << "aspect "  << cam.aspectRatio << "\n";
-                }
+                // 落盘（机制在 FrameDumpRecorder）：等本帧 timeline → 写 .f16/_meta.txt/_camera.txt
+                const render::CameraData& camData = camCtrl.GetCamera();
+                render::FrameDumpRecorder::CameraSnapshot camSnap;
+                camSnap.pos[0] = camData.position.x; camSnap.pos[1] = camData.position.y; camSnap.pos[2] = camData.position.z;
+                camSnap.forward[0] = camData.forward.x; camSnap.forward[1] = camData.forward.y; camSnap.forward[2] = camData.forward.z;
+                camSnap.up[0] = camData.up.x; camSnap.up[1] = camData.up.y; camSnap.up[2] = camData.up.z;
+                camSnap.fov = camData.fov; camSnap.nearPlane = camData.nearPlane;
+                camSnap.farPlane = camData.farPlane; camSnap.aspect = camData.aspectRatio;
+                const bool dumpWritten = giDump.TryWriteBack(device.get(), camSnap);
+                // _mirror.txt 仍由样例写（它来自场景搭建的参数，不属于通用转储）
+                const String base = String("build/verify/") + "gi_" + giDump.Tag();
                 // 平面镜测试台的几何（任务 32）：与场景搭建同源，判据据此做解析镜像计算
                 if (g_MirrorRig.valid) {
                     std::ofstream mr(base + "_mirror.txt");
@@ -2176,9 +2095,8 @@ int main() {
                     mr << "green "  << g_MirrorRig.boxGreen.x << " " << g_MirrorRig.boxGreen.y << " "
                                     << g_MirrorRig.boxGreen.z << " " << g_MirrorRig.halfGreen << "\n";
                 }
-                g_DumpWritten = true;
                 // 采样完成即请求关窗：让脚本无需超时等待，也保证退出前正常走完清理与保存流程
-                glfwSetWindowShouldClose(engine.GetWindow()->GetNativeHandle(), GLFW_TRUE);
+                if (dumpWritten) glfwSetWindowShouldClose(engine.GetWindow()->GetNativeHandle(), GLFW_TRUE);
             }
 
             // 垂直同步必须与创建时一致：只改 SwapChainDesc 而这里仍传 true，帧率照样被锁在刷新率
@@ -2197,7 +2115,7 @@ int main() {
                 s_accMs += (double)deltaTime * 1000.0;
                 s_accCpuMs += cpuMs;
                 ++s_n;
-                if (g_DumpGI && s_n >= 120u) {
+                if (giDump.IsActive() && s_n >= 120u) {
                     const double wallMs = s_accMs / (double)s_n;
                     const double cm     = s_accCpuMs / (double)s_n;
                     const double pm     = s_accPipelineMs / (double)s_n;

@@ -926,7 +926,8 @@ void ForwardPipeline::Render(rhi::IRHICommandList* cmd, const FrameSceneSnapshot
     CpuScope recordScope(CpuSection::RecordTotal);   // 【读数】整帧 CPU 录制总时长
     // 【阶段 1 §15.1 第③段：帧入口收快照】
     // 本函数与其全部 helper **不再读世界**：渲染输入（物体/实例/蒙皮/光源/天空盒/材质）都来自
-    // 参数快照，而快照由样例在游戏线程经 `GetFrameAssembler().AssembleScene(...)` 装配
+    // 参数快照，而快照由样例在**该帧的录制命令内**经 `GetFrameAssembler().AssembleScene(...)` 装配
+    //（模式 0 游戏线程、模式 1/2 渲染线程；见 FrameSnapshotAssembler.h 的说明）
     //（读世界的代码在 `Engine/Render/Threading/` 白名单层）。这里只把指针记下来，
     // 供各 helper 与帧图 lambda（都在本次 Render 内执行）使用。
     m_FrameSnapshot = &snapshot;

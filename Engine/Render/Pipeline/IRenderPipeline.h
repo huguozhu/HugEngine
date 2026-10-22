@@ -57,7 +57,8 @@ public:
 
     /// 渲染完整一帧（场景 → 后处理 → 输出到 SwapChain）
     /// 【阶段 1 §15.1 第③段：帧入口收**快照**】不再收 `World&`/`SceneGraph&` —— 渲染输入由样例
-    /// 在游戏线程用 `GetFrameAssembler().AssembleScene(...)` 装配好，管线只消费它。
+    /// 在**该帧的录制命令内**用 `GetFrameAssembler().AssembleScene(...)` 装配好，管线只消费它
+    ///（模式 0 就在游戏线程；模式 1/2 在渲染线程 —— 由命令 1 的严格握手保证此刻无人改世界）。
     /// 调用顺序契约：`NextFrame()` → `AssembleScene` →（Forward/带阴影的路径）阴影收集 →
     /// `ResolveLightShadowIndices` → `Render(cmd, GetFrameSnapshot(), camera, dt)`。
     virtual void Render(rhi::IRHICommandList* cmd,
@@ -67,7 +68,8 @@ public:
 
     // ---- 快照交接（阶段 1 §15.1 第③段）----
 
-    /// 本帧快照装配器（**游戏线程**用；读世界的代码在 `Threading/` 白名单层，管线只配置口径）
+    /// 本帧快照装配器（**在该帧的录制命令内**用：模式 0 即游戏线程、模式 1/2 为渲染线程；
+    /// 读世界的代码在 `Threading/` 白名单层，管线只配置口径）
     virtual FrameSnapshotAssembler& GetFrameAssembler() = 0;
     /// 本帧快照（`AssembleScene` 之后有效；交给 `Render` 的就是它）
     virtual const FrameSceneSnapshot& GetFrameSnapshot() const = 0;

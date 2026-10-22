@@ -4,6 +4,8 @@
 #include "GI/GI_IBL.h"
 #include "GI/GI_RSM.h"
 #include "GI/GITypes.h"   // GIRegistry（可用性与降级）
+#include "GI/LumenProvider.h"        // 转储：Lumen 中间层
+#include "Debug/FrameDumpRecorder.h"   // 转储目标登记
 #include "Shadow/ShadowSystem.h"
 #include "PostProcess/ToneMapPass.h"
 #include "PostProcess/SkyboxPass.h"
@@ -839,6 +841,72 @@ void DeferredPipeline::UpdateIBLBindings(GI_IBL* gi) {
 
 void DeferredPipeline::UpdateRSMBindings() {
     (void)this; // Lighting pass 已在 BuildFrameGraph 中直接绑定 RSM 纹理
+}
+
+
+// ============================================================
+// 转储目标清单（诊断/验证）：把"哪些中间结果值得看"收在管线里，样例只开关一次。
+// 依据：GBuffer 是屏幕空间 GI 的输入；前帧辐射度是 DDGI/SSGI 的共同输入；
+// provN_raw/final 用来定位"某源为 0"发生在哪一级；Lumen 的 SDF/卡片/辐照度用来区分
+// "追踪错 / 滤波错 / 槽位排列错"。探针**缓冲**目标因需 ScreenProbe 尺寸，留在样例侧。
+// ============================================================
+void DeferredPipeline::CollectDumpTargets(FrameDumpRecorder& dump,
+                                          rhi::IRHIDevice* device, rhi::IRHICommandList* cmdList) {
+    if (!device || !cmdList) return;
+
+    auto addTex = [&](const String& name, rhi::IRHITexture* tex) {
+        dump.AddTexture(device, cmdList, name.c_str(), tex);
+    };
+
+    if (auto* gb = GetGBuffer()) {
+        addTex("albedo", gb->GetAlbedo());
+        // 世界坐标/法线：屏幕空间 GI pass 的输入。少了它们，"某源输出对不对"只能靠形状相关性猜。
+        addTex("gb_worldpos", gb->GetWorldPos());
+        addTex("gb_normal",   gb->GetNormal());
+        // 光照图键（MRT7 = uv0.x, uv0.y, objectIndex, 0）：烘焙光照图"逐像素反查页号"的直接证据。
+        addTex("gb_lightmapkey", gb->GetLightmapKey());
+    }
+    // 共享的前帧 HDR 辐射度（DDGI 探针 / SSGI 入射辐射度的共同输入）
+    addTex("radiance", GetRadianceHistory().GetTexture());
+    // IBL 辐照度：DDGI 探针更新的唯一辐射度回退来源；为空时 DDGI 会静默退化为硬编码常数。
+    if (auto* giIBL = dynamic_cast<GI_IBL*>(GetGI())) addTex("ibl_irr", giIBL->GetIrradianceMap());
+
+    for (size_t i = 0; i < m_GIProviders.size(); ++i) {
+        auto* p = m_GIProviders[i].get();
+        // 判据用 ProducedThisFrame()（"本帧真的跑了"）而非 IsValid()：Lumen/RTAO 这类源即使没进
+        // 任何层栈，IsValid() 也为真 ⇒ provN_* 会落到上一帧或从未使用的纹理上，成为假读数。
+        if (!p || !p->ProducedThisFrame()) continue;
+        const String pre = "prov" + std::to_string(i) + "_";
+        addTex(pre + "raw",   p->GetDiffuseOutput());
+        addTex(pre + "final", p->GetFinalDiffuseOutput());
+        // 镜面与 AO 通道的输出也要落盘：否则"SSR/SSAO 是否真的产出了东西"无从做纹理级对照。
+        addTex(pre + "spec_raw",   p->GetSpecularOutput());
+        addTex(pre + "spec_final", p->GetFinalSpecularOutput());
+        addTex(pre + "ao_raw",     p->GetAOOutput());
+        addTex(pre + "ao_final",   p->GetFinalAOOutput());
+
+        // Lumen 的中间层（名字稳定，不依赖注册顺序）
+        if (auto* lp = dynamic_cast<LumenProvider*>(p)) {
+            addTex("lumen_sdf_trace", lp->GetSDFDebugTexture());
+            addTex("lumen_irradiance", lp->GetIrradianceTexture());
+            addTex("lumen_card_coverage", lp->GetCardCoverageTexture());
+            addTex("lumen_sc_atlas_albedo", lp->GetCardAtlasAlbedo());
+            if (dump.IncludeBuffers()) {
+                // 两层全局 SDF 场：判定"场本身是否逐趟一致"（探针追踪的输入）
+                addTex("lumen_sdf_layer0", lp->GetGlobalSDFField(0));
+                addTex("lumen_sdf_layer1", lp->GetGlobalSDFField(1));
+                // mesh 级距离场：全局层是 min 归并 ⇒ 非最小项的 ULP 差异被掩盖，只能看这一层
+                for (u32 m = 0; m < 4u; ++m) {
+                    addTex("lumen_meshfield" + std::to_string(m), lp->GetMeshSDFField(m));
+                }
+            }
+        }
+    }
+
+    // RSM 间接光（任务 30）：pass 在跑、成本在付、画面里什么都没有时，靠它分辨"没产出"还是"被合成丢掉"。
+    addTex("rsm_indirect", GetRSMIndirect().GetOutput());
+    // SSR 输出单独给稳定名字：provider 输出名是 provN_spec_raw，N 取决于哪些 provider 有效。
+    if (auto* ssr = GetSSR()) addTex("ssr", ssr->GetIndirectSpecularTexture());
 }
 
 } // namespace he::render

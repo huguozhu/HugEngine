@@ -13,6 +13,7 @@
 
 namespace he::render { class GI_IBL; class GI_RSM; }
 namespace he::render { class ToneMapPass; class SkyboxPass; class SceneRenderer; }
+namespace he::render { class FrameDumpRecorder; }   // 诊断：转储目标登记
 
 #include "Shadow/IShadowSystem.h"
 #include "SceneRenderer.h"
@@ -153,6 +154,10 @@ public:
     [[nodiscard]] const NaniteSettings& GetNaniteSettings() const  { return m_Nanite.GetSettings(); }
     /// 已注册的 GI Provider（帧图按注册表遍历构建 pass，而非手写门控）
     std::vector<std::unique_ptr<IGIProvider>>& GetGIProviders() { return m_GIProviders; }
+
+    /// 登记本帧"值得落盘"的 GI 中间结果（GBuffer / 前帧辐射度 / IBL / 各 Provider / Lumen / RSM 间接光 / SSR）。
+    /// 只做**登记**（拷贝录制由 FrameDumpRecorder 完成），不做 IO 与等待。
+    void CollectDumpTargets(FrameDumpRecorder& dump, rhi::IRHIDevice* device, rhi::IRHICommandList* cmdList);
 
     /// 构造本帧的 GI 源上下文（第③段第 3 批）：统一注入**本帧快照 + 网格注册表**。
     /// 【为什么 world/sceneGraph 不再传】全 GI 源里唯一真正读世界的是 RSM 的几何遍历，

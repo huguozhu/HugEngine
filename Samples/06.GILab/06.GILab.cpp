@@ -8,10 +8,12 @@
 
 #include "Core/Core.h"
 #include "Core/Engine.h"
-#include <chrono>   // 步骤 37：CPU 侧帧时（判定 CPU 受限还是 GPU 受限）
 #include "Platform/Window.h"
 #include "RHI/RHI.h"
 #include "RHI/FramePresenter.h"   // L4-1：帧外壳（acquire/present）收口
+#include "Debug/FrameDumpRecorder.h"
+#include "Debug/PixelProbe.h"	// 白炉探针（像素数值读回）
+#include "CameraInput.h"   		// 样例共用：鼠标/键盘控制相机
 #include "RHI/ThreadAffinity.h"   // T2.2：渲染线程启动钩子里认领 RHI 归属（GetThreadAffinity）
 #include "Pipeline/DeferredPipeline.h"
 #include "Pipeline/ForwardPipeline.h"
@@ -23,7 +25,6 @@
 #include "Threading/RenderCommandQueue.h"
 #include "Threading/RenderThread.h"
 #include "Threading/RHIThread.h"      // 模式 2：RHI 线程（唯一提交者）
-#include <atomic>                     // P1：诊断读回的 timeline 屏障（跨线程传递句柄/值）
 #include "Lumen/ScreenProbe.slang"   // 2026-09-24 诊断：探针缓冲落盘需要 sizeof(ScreenProbe)
 #include "Pipeline/CameraController.h"
 #include "Pipeline/PhysicalCamera.h"
@@ -41,14 +42,11 @@
 #include "imgui.h"
 #include "Core/CrashHandler.h"   // 崩溃处理器（Wave 0.8）：崩溃时打印完整调用栈 + minidump
 
-#include <glm/gtc/packing.hpp>   // 白炉探针：half float 解码（RGBA16F 读回）
 
 #include <algorithm>
-#include <cmath>
-#include <cstdlib>   // std::getenv（HE_CRASH_TEST 自检开关）
+#include <cstdlib>   // std::getenv / std::atoi（环境变量开关）
 #include <filesystem>
 #include <fstream>
-#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -62,9 +60,7 @@
 
 using namespace he;
 
-// ============================================================
-// 配置读写（简易 key=value 格式）
-// ============================================================
+// ---- 配置读写（简易 key=value 格式） ----
 // 默认读写内容目录下的正式配置；自动化实验可用 HE_GILAB_CONFIG=<路径> 指向临时文件
 // （读写同一路径，因此指向临时文件即完全不触碰仓库内的正式配置）
 static String g_ConfigPath = []{
@@ -112,25 +108,7 @@ static int GetInt(const std::unordered_map<String, String>& m,
     return (it != m.end()) ? std::stoi(it->second) : def;
 }
 
-// ============================================================
-// 创建形状实体（立方体/球）——Cornell Box 场景构件
-// ============================================================
-// 平面镜测试台的几何（任务 32）：判据要在 CPU 侧做解析计算，所以参数必须**从同一处**导出，
-// 不能一边写在场景搭建里、一边抄进检查脚本（那种"两份真值"迟早漂移）。
-struct MirrorRigSpec {
-    bool   valid = false;
-    float3 planeNormal   = float3(0.0f, 1.0f, 0.0f);   // 镜面平面法线（朝向相机）
-    float  planeOffset   = -1700.0f;                    // 平面方程 n·P + d = 0 的 d
-    float3 slabCenter    = float3(0.0f, 1699.5f, 0.0f); // 镜面板中心
-    float3 slabHalf      = float3(400.0f, 0.5f, 400.0f);// 镜面板半尺寸
-    // 两个标记物（**立方体**，half* 是半边长；默认值与实际创建保持一致，避免两份真值漂移）
-    float3 boxRed        = float3(-150.0f, 1750.0f, 100.0f);
-    float  halfRed       = 50.0f;
-    float3 boxGreen      = float3(170.0f, 1770.0f, -120.0f);
-    float  halfGreen     = 45.0f;
-};
-static MirrorRigSpec g_MirrorRig;
-
+// ---- 创建形状实体（立方体/球）——Cornell Box 场景构件 ----
 Entity CreateShapeEntity(World& world, SceneGraph& sg,
                          const float3& position, const float3& scale,
                          const float4& baseColor, float metallic, float roughness,
@@ -158,36 +136,1048 @@ Entity CreateShapeEntity(World& world, SceneGraph& sg,
     return e;
 }
 
+// ============================================================
+// 天空盒：从等距柱状 HDR 生成 6 面立方体贴图，并注册为场景实体
+// 原先内联在 main() 里（79 行）—— 抽出来让 main 只保留流程骨架，也便于其它样例复用。
+// ============================================================
+static void CreateSkybox(World& world, SceneGraph& sceneGraph, rhi::IRHIDevice* device,
+                         const String& hdrPath) {
+{
+    String hdrPath = String(HUGE_CONTENT_DIR) + "Textures/skybox.hdr";
+    int hdrW, hdrH, hdrCh;
+    float* hdrData = stbi_loadf(hdrPath.c_str(), &hdrW, &hdrH, &hdrCh, 4);
+    if (!hdrData) {
+        HE_CORE_WARN("skybox.hdr 加载失败: {}", hdrPath);
+    } else {
+        HE_CORE_INFO("skybox.hdr: {}×{} ({} channels)", hdrW, hdrH, hdrCh);
+
+        const u32 faceSize = 512;
+        const u32 faceBytes = faceSize * faceSize * 4;
+        std::vector<u8> allFaces(faceBytes * 6);
+
+        struct { float3 dir; float3 up; float3 right; } faces[6] = {
+            {{ 1, 0, 0}, {0,-1, 0}, {0, 0,-1}},
+            {{-1, 0, 0}, {0,-1, 0}, {0, 0, 1}},
+            {{ 0, 1, 0}, {0, 0, 1}, {1, 0, 0}},
+            {{ 0,-1, 0}, {0, 0,-1}, {1, 0, 0}},
+            {{ 0, 0, 1}, {0,-1, 0}, {1, 0, 0}},
+            {{ 0, 0,-1}, {0,-1, 0}, {-1,0, 0}},
+        };
+
+        for (u32 f = 0; f < 6; ++f) {
+            u8* faceData = allFaces.data() + f * faceBytes;
+            for (u32 y = 0; y < faceSize; ++y) {
+                for (u32 x = 0; x < faceSize; ++x) {
+                    float u = (2.0f * x / faceSize) - 1.0f;
+                    float v = (2.0f * y / faceSize) - 1.0f;
+                    float3 dir = glm::normalize(
+                        faces[f].dir + faces[f].right * u + faces[f].up * v);
+                    float eqU = (std::atan2(dir.z, dir.x) / (2.0f * 3.14159265f)) + 0.5f;
+                    float eqV = (std::asin(glm::clamp(dir.y, -1.0f, 1.0f)) / 3.14159265f) + 0.5f;
+                    int px = static_cast<int>(eqU * hdrW) % hdrW;
+                    int py = static_cast<int>(eqV * hdrH) % hdrH;
+                    if (px < 0) px += hdrW;
+                    if (py < 0) py += hdrH;
+                    float* src = hdrData + (py * hdrW + px) * 4;
+                    auto tonemap = [](float c) {
+                        c = c / (1.0f + c);
+                        return static_cast<u8>(glm::clamp(c, 0.0f, 1.0f) * 255.0f);
+                    };
+                    usize idx = (y * faceSize + x) * 4;
+                    faceData[idx+0] = tonemap(src[0]);
+                    faceData[idx+1] = tonemap(src[1]);
+                    faceData[idx+2] = tonemap(src[2]);
+                    faceData[idx+3] = 255;
+                }
+            }
+        }
+        stbi_image_free(hdrData);
+
+        rhi::TextureDesc cmDesc;
+        cmDesc.format      = rhi::Format::RGBA8_UNORM;
+        cmDesc.width       = faceSize;
+        cmDesc.height      = faceSize;
+        cmDesc.mipLevels   = 1;
+        cmDesc.arrayLayers = 6;
+        cmDesc.usage       = rhi::TextureUsage::ShaderResource
+                           | rhi::TextureUsage::Cubemap
+                           | rhi::TextureUsage::TransferDst;
+        cmDesc.initialData = allFaces.data();
+        auto cubemap = device->CreateTexture(cmDesc);
+
+        rhi::SamplerDesc cmSamp;
+        cmSamp.minFilter  = rhi::FilterMode::Linear;
+        cmSamp.magFilter  = rhi::FilterMode::Linear;
+        cmSamp.addressU   = rhi::AddressMode::ClampToEdge;
+        cmSamp.addressV   = rhi::AddressMode::ClampToEdge;
+        cmSamp.addressW   = rhi::AddressMode::ClampToEdge;
+        auto cmSampler = device->CreateSampler(cmSamp);
+
+        Entity skyEntity = world.CreateEntity("Skybox");
+        world.AddComponent<TransformComponent>(skyEntity);
+        auto* skyComp = world.AddComponent<SkyboxComponent>(skyEntity);
+        skyComp->SetCubemap(std::move(cubemap), std::move(cmSampler));
+        sceneGraph.SetParent(skyEntity, Entity{kInvalidEntity});
+    }
+}
+}
+
+// ============================================================
+// TextureCache —— glTF 纹理 → RHI Texture/Sampler 的加载、去重、默认占位
+//
+// 原先内联在 main() 里：一个 g_TexCache 表 + 一个 loadTexture lambda（39 行）+ 一段 1x1 默认
+// 占位纹理的创建（19 行）。抽出来后 main 只剩"取纹理"的调用，纹理参数（RGBA8、mip 数、
+// Linear/Repeat、TransferSrc|TransferDst）也只有一处定义。
+//
+// 【去重】按**纹理全路径**缓存：同一张图被多个材质引用时只创建一次。
+// 【默认占位】bindless heap 必须在注册材质纹理**之前**拿到默认纹理，否则未贴图的材质槽无效。
+// ============================================================
+class TextureCache {
+public:
+    using Entry = std::pair<std::unique_ptr<rhi::IRHITexture>, std::unique_ptr<rhi::IRHISampler>>;
+
+    explicit TextureCache(rhi::IRHIDevice* device) : m_Device(device) {}
+
+    /// 创建 1x1 白色默认纹理并登记到 bindless heap；必须在注册材质纹理之前调用。
+    void CreateAndBindDefault();
+
+    /// 已缓存条目数（含默认占位纹理），仅用于日志。
+    [[nodiscard]] usize Count() const { return m_Cache.size(); }
+
+    /// 加载（或命中缓存返回）纹理与采样器；baseDir 为 glTF 所在目录，uri 为相对路径。
+    std::pair<rhi::IRHITexture*, rhi::IRHISampler*> Load(const String& baseDir, const String& uri);
+
+private:
+    rhi::IRHIDevice*                  m_Device = nullptr;
+    std::unordered_map<String, Entry> m_Cache;
+};
+
+void TextureCache::CreateAndBindDefault() {
+    u8 white[4] = {255, 255, 255, 255};
+    rhi::TextureDesc td;
+    td.format      = rhi::Format::RGBA8_UNORM;
+    td.width       = 1;
+    td.height      = 1;
+    td.mipLevels   = 1;
+    td.usage       = rhi::TextureUsage::ShaderResource;
+    td.initialData = white;
+    auto defaultTex = m_Device->CreateTexture(td);
+
+    rhi::SamplerDesc sd;
+    sd.minFilter = sd.magFilter = rhi::FilterMode::Linear;
+    sd.addressU  = sd.addressV  = rhi::AddressMode::Repeat;
+    auto defaultSamp = m_Device->CreateSampler(sd);
+
+    m_Device->GetBindlessHeap()->SetDefaultTexture(defaultTex.get(), defaultSamp.get());
+    m_Cache["__default__"] = {std::move(defaultTex), std::move(defaultSamp)};
+}
+
+std::pair<rhi::IRHITexture*, rhi::IRHISampler*> TextureCache::Load(const String& baseDir,
+                                                                  const String& uri) {
+    if (uri.empty()) return {nullptr, nullptr};
+
+    const String texPath = (std::filesystem::path(baseDir) / uri).string();
+    auto it = m_Cache.find(texPath);
+    if (it != m_Cache.end()) return {it->second.first.get(), it->second.second.get()};
+
+    int w = 0, h = 0, ch = 0;
+    u8* pixels = stbi_load(texPath.c_str(), &w, &h, &ch, 4);
+    if (!pixels) {
+        HE_CORE_WARN("纹理加载失败: {}", texPath);
+        return {nullptr, nullptr};
+    }
+
+    // mip 数：按最大边长逐次减半
+    u32 maxDim = static_cast<u32>(std::max(w, h));
+    u32 mipLevels = 1;
+    while (maxDim > 1) { maxDim >>= 1; ++mipLevels; }
+
+    rhi::TextureDesc td;
+    td.format      = rhi::Format::RGBA8_UNORM;
+    td.width       = static_cast<u32>(w);
+    td.height      = static_cast<u32>(h);
+    td.mipLevels   = mipLevels;
+    td.usage       = rhi::TextureUsage::ShaderResource
+                   | rhi::TextureUsage::TransferSrc
+                   | rhi::TextureUsage::TransferDst;
+    td.initialData = pixels;
+    auto tex = m_Device->CreateTexture(td);
+
+    rhi::SamplerDesc sd;
+    sd.minFilter = rhi::FilterMode::Linear;
+    sd.magFilter = rhi::FilterMode::Linear;
+    sd.mipFilter = rhi::FilterMode::Linear;
+    sd.maxLod    = static_cast<float>(mipLevels);
+    sd.addressU  = sd.addressV = rhi::AddressMode::Repeat;
+    auto samp = m_Device->CreateSampler(sd);
+
+    stbi_image_free(pixels);
+    auto inserted = m_Cache.emplace(texPath, std::make_pair(std::move(tex), std::move(samp))).first;
+    HE_CORE_INFO("GPU 纹理: {} ({}×{})", texPath, w, h);
+    return {inserted->second.first.get(), inserted->second.second.get()};
+}
+
+// ============================================================
+// 场景搭建：Sponza glTF + 主方向光 + 两盏点光 + 天空盒 + 纹理与 bindless 材质注册
+//
+// 原先这 ~89 行内联在 main() 里。抽出来后 main 只保留"启动参数"性质的工作（窗口/RHI/配置读写），
+// 场景内容集中在这里 —— 想换场景或加灯只需改这一个函数。
+//
+// 【点光源句柄】样例后续要按索引访问两盏点光（面板编辑 → 配置序列化），故用出参回传。
+// 【顺序】纹理注册必须在天空盒之后、渲染管线初始化之前：bindless 默认占位纹理要先就位。
+// ============================================================
+static bool BuildScene(World& world, SceneGraph& sceneGraph, rhi::IRHIDevice* device,
+                       const String& sponzaPath, Entity (&pointLightEntities)[2],
+                       TextureCache& texCache) {
+    HE_CORE_INFO("加载 Sponza 场景: {}", sponzaPath);
+    auto result = asset::LoadGLTF(world, sceneGraph, sponzaPath);
+    if (!result.success) {
+        HE_CORE_ERROR("Sponza 加载失败: {}", result.error);
+        return false;
+    }
+    HE_CORE_INFO("Sponza 加载完成: {} 实体, {} 网格图元",
+                 result.entities.size(), result.meshCount);
+
+    // 场景默认无直接光源（纯 GI）；DDGI 探针需首次照明输入（直接从 Lighting HDR 学习会自反馈发散），
+    // 故加一个弱主方向光提供 DDGI 首次照明（强度低，画面仍以 GI 为主导）。
+    {
+        Entity mainLightEntity = world.CreateEntity("DirectionalLight");
+        world.AddComponent<TransformComponent>(mainLightEntity);
+        auto* mainDL = world.AddComponent<DirectionalLight>(mainLightEntity);
+        mainDL->direction = float3(0.3f, -1.0f, 0.4f);
+        mainDL->color     = float3(1.0f, 0.95f, 0.9f);
+        mainDL->intensity = 3.0f;    // 弱光：DDGI 输入，不喧宾夺主
+        mainDL->castShadow = true;
+        mainDL->enabled    = false;  // 默认只看 GI（直接光关闭，勾选「只看 GI」可切回）
+        sceneGraph.SetParent(mainLightEntity, Entity{kInvalidEntity});
+    }
+
+    // 点光源（2 个：Sponza 走廊两端，用于测试点光 GI/阴影/DDGI 探针）；
+    // 位置/颜色/强度/范围可由面板编辑，并随 06_GILab.cfg 序列化。
+    {
+        struct PointLightInit { float3 pos; float3 color; float intensity; float range; };
+        const PointLightInit inits[2] = {
+            { float3(-20.0f, 5.0f, 0.0f), float3(1.0f, 0.7f, 0.4f), 30.0f, 18.0f },  // 暖色，走廊左端
+            { float3( 20.0f, 5.0f, 0.0f), float3(0.4f, 0.7f, 1.0f), 30.0f, 18.0f },  // 冷色，走廊右端
+        };
+        for (int i = 0; i < 2; i++) {
+            Entity e = world.CreateEntity("PointLight");
+            auto* tf = world.AddComponent<TransformComponent>(e);
+            tf->position = inits[i].pos;
+            auto* pl = world.AddComponent<PointLight>(e);
+            pl->color      = inits[i].color;
+            pl->intensity  = inits[i].intensity;
+            pl->range      = inits[i].range;
+            pl->castShadow = false;   // 点光阴影开销大，默认关闭（面板可开）
+            pl->enabled    = false;   // 默认只看 GI，与方向光一致
+            sceneGraph.SetParent(e, Entity{kInvalidEntity});
+            pointLightEntities[i] = e;
+        }
+    }
+
+    // 天空盒：HDR 等距柱状图 → 立方体贴图 → 场景实体
+    CreateSkybox(world, sceneGraph, device, String(HUGE_CONTENT_DIR) + "Textures/skybox.hdr");
+
+    // 纹理：创建/去重/默认占位在 TextureCache（由调用方持有 —— 它必须活得比本函数久，
+    // 因为 bindless 堆持有这些纹理/采样器指针）；这里只按 glTF 的 uri 取并注册 bindless 槽
+    texCache.CreateAndBindDefault();   // bindless 默认占位纹理（必须在注册材质纹理之前）
+    const String sponzaDir = std::filesystem::path(sponzaPath).parent_path().string();
+    auto loadTexture = [&](const String& uri) { return texCache.Load(sponzaDir, uri); };
+
+    u32 texCount = 0;
+    world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent& mesh) {
+        auto [bcTex, bcSamp] = loadTexture(mesh.baseColorTexture);
+        auto [nTex, nSamp]   = loadTexture(mesh.normalTexture);
+        auto [mrTex, mrSamp] = loadTexture(mesh.metallicRoughnessTexture);
+        auto [aoTex, aoSamp] = loadTexture(mesh.occlusionTexture);
+        // 材质 = 4 个连续 bindless 纹理槽（BaseColor/Normal/MetallicRoughness/Occlusion），
+        // 首调用返回值即 materialID（基索引），shader 用 texBase+0/1/2/3 采样
+        auto* heap = device->GetBindlessHeap();
+        const u32 matID = heap->RegisterTexture(bcTex, bcSamp);
+        heap->RegisterTexture(nTex, nSamp);
+        heap->RegisterTexture(mrTex, mrSamp);
+        heap->RegisterTexture(aoTex, aoSamp);
+        mesh.materialID = matID;
+        texCount++;
+    });
+    HE_CORE_INFO("纹理加载 + bindless 注册完成: {} primitive, {} 张独立纹理", texCount, texCache.Count());
+    return true;
+}
+
+// ============================================================
+// GILabUI —— 06.GILab 的两个 ImGui 面板（主窗口 / GI 控制台）
+//
+// 原先这两个面板共 ~460 行内联在 main() 的帧循环里。抽成成员函数后 main 只保留
+// "BeginFrame -> DrawMainPanel -> DrawGIPanel"，读 UI 逻辑不必在 1700 行里找。
+//
+// 【为什么用"全引用成员"】面板要读写 main 里的一批状态（相机、管线、模式开关、探针…）。
+// 把这些状态以**同名引用**成员交给本结构后，面板代码可以**逐字不动**（裸名字直接解析到成员），
+// 既没有 lambda 捕获，也不必给几百行代码逐个改写成 ui.xxx。
+// ============================================================
+struct GILabUI {
+    render::DeferredPipeline&            deferredPipeline;
+    render::ForwardPipeline&             forwardPipeline;
+    render::IRenderPipeline*&            curPipeline;
+    render::CameraController&            camCtrl;
+    World&                               world;
+    SceneGraph&                          sceneGraph;
+    std::unique_ptr<rhi::IRHIDevice>&    device;
+    std::unique_ptr<rhi::IRHISwapChain>& swapchain;
+    render::PixelProbe&                  probe;
+    f32&                                 deltaTime;
+    int&                                 g_PipelineMode;
+    bool&                                g_GISolo;
+    int&                                 g_GIPreset;
+    int&                                 g_UiThreadingMode;
+    bool&                                g_ProbeEnabled;
+    int&                                 g_ProbeInterval;
+    bool&                                g_FurnaceMode;
+    bool&                                g_PendingPipelineSwitch;
+    bool&                                g_PendingHalfResApply;
+
+    void DrawMainPanel();   // 主窗口：FPS / 管线信息 / 相机与曝光 / 场景与光源列表
+    void DrawGIPanel();     // GI 控制台：管线与档位 / 层栈四通道 / 配置诊断已删 / Shadow
+    void DrawGIChannels();  // 层栈四通道（Diffuse/Specular/AO）+ Shadow
+};
+
+void GILabUI::DrawMainPanel() {
+    ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
+    ImGui::SetNextWindowBgAlpha(0.55f);
+    ImGui::Begin("06.GILab (Cornell Box)");
+    {
+        float fps = 1.0f / (deltaTime > 0.001f ? deltaTime : 0.016f);
+        ImGui::TextColored({0.3f, 1.0f, 0.3f, 1.0f}, "FPS: %.0f", fps);
+        ImGui::SameLine(120);
+        ImGui::TextColored({0.6f, 0.6f, 0.6f, 1.0f}, "(%.2f ms)", deltaTime * 1000.0f);
+
+        ImGui::SeparatorText("延迟渲染管线");
+        ImGui::Text("GBuffer + Lighting Pass (全屏 PBR)");
+        ImGui::Text("3×MRT (albedo+metallic | normal+roughness | emissive+ao) + D32");
+        bool clustered = deferredPipeline.GetClusteredShading().enabled;
+        if (ImGui::Checkbox("Clustered Shading", &clustered))
+            deferredPipeline.GetClusteredShading().enabled = clustered;
+        if (clustered) {
+            ImGui::SameLine();
+            ImGui::TextColored({0.5f, 1.0f, 0.5f, 1.0f}, "%u clusters",
+                deferredPipeline.GetClusteredShading().GetClusterCount());
+        }
+        bool gpuCull = deferredPipeline.GetGPUCulling().enabled;
+        if (ImGui::Checkbox("GPU 视锥剔除", &gpuCull))
+            deferredPipeline.GetGPUCulling().enabled = gpuCull;
+        if (gpuCull) {
+            ImGui::SameLine();
+            ImGui::TextColored({0.5f, 1.0f, 0.5f, 1.0f}, "%u 可见",
+                deferredPipeline.GetGPUCulling().GetLastVisibleCount());
+        }
+
+        // 相机
+        ImGui::SeparatorText("相机");
+        // ---- 渲染线程模式（T2.4/T2.2）----
+    {
+        static const char* kModeItems[] = {
+            "0  单线程（收集/录制/提交/呈现都在游戏线程）",
+            "1  游戏线程 + 渲染线程（整帧 RHI 归渲染线程）",
+            "2  游戏线程 + 渲染线程 + RHI 线程（RHI 线程 = 唯一提交者）",
+        };
+        int sel = g_UiThreadingMode;
+        ImGui::SetNextItemWidth(360.0f);
+        if (ImGui::Combo("渲染线程模式##threading", &sel, kModeItems, IM_ARRAYSIZE(kModeItems))) {
+            g_UiThreadingMode = sel;   // 帧首统一生效（切换需要排空并停/起线程）
+        }
+        ImGui::TextDisabled("当前生效：%s；三种模式可任意切换，切换在下一帧帧首生效",
+                            he::RenderThreadingModeName(he::GetRenderThreadingMode()));
+    }
+
+    ImGui::DragFloat3("位置##Camera", &camCtrl.GetCamera().position[0], 5.0f);
+        float yawDeg   = glm::degrees(camCtrl.GetYaw());
+        float pitchDeg = glm::degrees(camCtrl.GetPitch());
+        if (ImGui::SliderFloat("Yaw", &yawDeg, -180.0f, 180.0f, "%.1f°"))
+            camCtrl.SetOrientation(glm::radians(yawDeg), camCtrl.GetPitch());
+        if (ImGui::SliderFloat("Pitch", &pitchDeg, -85.0f, 85.0f, "%.1f°"))
+            camCtrl.SetOrientation(camCtrl.GetYaw(), glm::radians(pitchDeg));
+        float moveSpeed = camCtrl.GetMoveSpeed();
+        if (ImGui::DragFloat("移动速度", &moveSpeed, 1.0f, 1.0f, 500.0f, "%.0f"))
+            camCtrl.SetMoveSpeed(moveSpeed);
+        float nearP = camCtrl.GetCamera().nearPlane;
+        float farP  = camCtrl.GetCamera().farPlane;
+        if (ImGui::DragFloat("近裁剪面", &nearP, 0.01f, 0.001f, 10.0f, "%.3f"))
+            camCtrl.GetCamera().nearPlane = nearP;
+        if (ImGui::DragFloat("远裁剪面", &farP, 10.0f, 10.0f, 50000.0f, "%.0f"))
+            camCtrl.GetCamera().farPlane = farP;
+
+
+        // ── AutoExposure ──
+        ImGui::SeparatorText("AutoExposure");
+        {
+            auto& ae = deferredPipeline.GetAutoExposure();
+            bool aeOn = ae.IsEnabled();
+            if (ImGui::Checkbox("启用自动曝光", &aeOn)) ae.SetEnabled(aeOn);
+            if (aeOn) {
+                ImGui::Indent(12.0f);
+                float s = ae.GetAdaptSpeed();
+                if (ImGui::SliderFloat("适应速度", &s, 0.1f, 10.0f, "%.1f")) ae.SetAdaptSpeed(s);
+                float t = ae.GetTargetLum();
+                if (ImGui::SliderFloat("目标亮度", &t, 0.01f, 1.0f, "%.2f")) ae.SetTargetLum(t);
+                ImGui::Text("当前曝光: %.2f", ae.GetExposure());
+                ImGui::Unindent(12.0f);
+            }
+        }
+
+        // 场景统计
+        ImGui::SeparatorText("场景");
+        u32 meshCount = 0, dirLightCount = 0, spotCount = 0;
+        world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent&) { meshCount++; });
+        world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight&) { dirLightCount++; });
+        world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight&) { spotCount++; });
+        ImGui::Text("%u 网格  |  %u 方向光  |  %u 点光  |  %u 聚光", meshCount, dirLightCount, 1, spotCount);
+
+        // ── 光源列表：类型 / 开关 / 颜色 / 强度 / 方向（可直接编辑）──
+        ImGui::SeparatorText("光源");
+        int lightId = 0;
+        world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& l) {
+            ImGui::PushID(lightId++);
+            ImGui::TextUnformatted("方向光"); ImGui::SameLine();
+            ImGui::Checkbox("启用##dl", &l.enabled); ImGui::SameLine();
+            ImGui::ColorEdit3("颜色##dl", &l.color.x, ImGuiColorEditFlags_NoInputs); ImGui::SameLine();
+            ImGui::SetNextItemWidth(90.0f);
+            ImGui::DragFloat("强度##dl", &l.intensity, 0.05f, 0.0f, 100.0f, "%.2f");
+            ImGui::SetNextItemWidth(220.0f);
+            ImGui::DragFloat3("方向##dl", &l.direction.x, 0.01f, -1.0f, 1.0f, "%.2f");
+            ImGui::Checkbox("投射阴影##dl", &l.castShadow);
+            ImGui::PopID();
+        });
+        world.ForEach<he::PointLight>([&](he::Entity e, he::PointLight& l) {
+            ImGui::PushID(lightId++);
+            ImGui::TextUnformatted("点光  "); ImGui::SameLine();
+            ImGui::Checkbox("启用##pl", &l.enabled); ImGui::SameLine();
+            ImGui::ColorEdit3("颜色##pl", &l.color.x, ImGuiColorEditFlags_NoInputs); ImGui::SameLine();
+            ImGui::SetNextItemWidth(90.0f);
+            ImGui::DragFloat("强度##pl", &l.intensity, 0.05f, 0.0f, 100.0f, "%.2f");
+            ImGui::SetNextItemWidth(90.0f);
+            ImGui::DragFloat("范围##pl", &l.range, 0.1f, 0.1f, 500.0f, "%.1f");
+            // 位置编辑：修改本地变换后标记 SceneGraph 脏，GetWorldPosition 即时反映
+            if (auto* tf = world.GetComponent<he::TransformComponent>(e)) {
+                float3 p = tf->position;
+                if (ImGui::DragFloat3("位置##pl", &p.x, 0.1f, -500.0f, 500.0f, "%.1f")) {
+                    tf->position = p;
+                    sceneGraph.MarkDirty(e);
+                }
+            }
+            ImGui::PopID();
+        });
+        world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight& l) {
+            ImGui::PushID(lightId++);
+            ImGui::TextUnformatted("聚光  "); ImGui::SameLine();
+            ImGui::Checkbox("启用##sl", &l.enabled); ImGui::SameLine();
+            ImGui::ColorEdit3("颜色##sl", &l.color.x, ImGuiColorEditFlags_NoInputs); ImGui::SameLine();
+            ImGui::SetNextItemWidth(90.0f);
+            ImGui::DragFloat("强度##sl", &l.intensity, 0.05f, 0.0f, 100.0f, "%.2f");
+            ImGui::SetNextItemWidth(90.0f);
+            ImGui::DragFloat("范围##sl", &l.range, 0.1f, 0.1f, 500.0f, "%.1f");
+            ImGui::SetNextItemWidth(160.0f);
+            ImGui::DragFloat3("方向##sl", &l.direction.x, 0.01f, -1.0f, 1.0f, "%.2f");
+            ImGui::PopID();
+        });
+        world.ForEach<he::RectLight>([&](he::Entity, he::RectLight& l) {
+            ImGui::PushID(lightId++);
+            ImGui::TextUnformatted("矩形光"); ImGui::SameLine();
+            ImGui::Checkbox("启用##rl", &l.enabled); ImGui::SameLine();
+            ImGui::ColorEdit3("颜色##rl", &l.color.x, ImGuiColorEditFlags_NoInputs); ImGui::SameLine();
+            ImGui::SetNextItemWidth(90.0f);
+            ImGui::DragFloat("强度##rl", &l.intensity, 0.05f, 0.0f, 100.0f, "%.2f");
+            ImGui::SetNextItemWidth(90.0f);
+            ImGui::DragFloat("范围##rl", &l.range, 0.1f, 0.1f, 500.0f, "%.1f");
+            ImGui::PopID();
+        });
+        if (lightId == 0) {
+            ImGui::TextUnformatted("（场景中无光源）");
+        }
+    }
+    ImGui::End();
+}
+
+void GILabUI::DrawGIPanel() {
+    ImGui::SetNextWindowPos(ImVec2(560.0f, 10.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(430.0f, 700.0f), ImGuiCond_FirstUseEver);
+    ImGui::Begin("GI 控制台");
+    {
+        // ── 渲染管线选择（Forward / Deferred）──
+        // 注：光追已归入 GI 源（层栈中的 RTGI/RT 反射/RTAO/RT 阴影），
+        //     Deferred 管线勾选 RT 源即等价于此前的 HybridRT，无需独立管线
+        ImGui::SeparatorText("渲染管线");
+        {
+            const char* pipelineNames[] = {"Forward", "Deferred"};
+            int prevMode = g_PipelineMode;
+            ImGui::Combo("管线##pipeline", &g_PipelineMode, pipelineNames, 2);
+            if (g_PipelineMode != prevMode) {
+                // 切换管线：确保交换链与视口尺寸同步。
+                // 【T2.2】`SetSwapChain`/`OnResize` 都是 RHI 调用 ⇒ 不能在这里做（控件跑在游戏
+                // 线程），改为置标志、由**下一条渲染命令**在渲染线程上执行。
+                g_PendingPipelineSwitch = true;
+            }
+        }
+
+        // ── GI 实验室：只看 GI（关闭直接光）→ 逐个开启 GI 看间接光贡献 ──
+        ImGui::SeparatorText("GI 实验室");
+        if (ImGui::Checkbox("只看 GI（关闭直接光）", &g_GISolo)) {
+            // 关闭/恢复所有直接光源：画面只剩 GI（IBL/SSGI/DDGI/RSM 等）的间接光
+            world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& l){ l.enabled = !g_GISolo; });
+            world.ForEach<he::PointLight>([&](he::Entity, he::PointLight& l){ l.enabled = !g_GISolo; });
+            world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight& l){ l.enabled = !g_GISolo; });
+            world.ForEach<he::RectLight>([&](he::Entity, he::RectLight& l){ l.enabled = !g_GISolo; });
+        }
+        ImGui::TextWrapped("开启后画面只剩 GI 间接光——\n逐个启用 SSGI/DDGI 看各自贡献；IBL 强度即环境 GI 强度。");
+
+        // ── 白炉探针（Wave 0.2）：能量守恒的数值读数 ──
+        ImGui::SeparatorText("白炉探针（能量守恒）");
+        ImGui::Checkbox("启用探针（读回 HDR 目标像素）", &g_ProbeEnabled);
+        ImGui::SetNextItemWidth(120.0f);
+        ImGui::SliderInt("采样间隔(帧)", &g_ProbeInterval, 1, 120);
+        if (ImGui::Checkbox("白炉数值测试（源真值=1）", &g_FurnaceMode)) {
+            // 白炉条件：全白环境 + albedo=1 + 关闭直接光（源真值由 shader 代入，这里保证场景端一致）
+            if (auto* gcPtr = curPipeline->GetGIConfig()) gcPtr->furnaceMode = g_FurnaceMode;
+            if (g_FurnaceMode) g_ProbeEnabled = true;   // 打开白炉即自动开探针
+            if (g_FurnaceMode) {
+                g_GISolo = true;   // 关闭全部直接光
+                world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& l){ l.enabled = false; });
+                world.ForEach<he::PointLight>([&](he::Entity, he::PointLight& l){ l.enabled = false; });
+                world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight& l){ l.enabled = false; });
+                world.ForEach<he::RectLight>([&](he::Entity, he::RectLight& l){ l.enabled = false; });
+                if (auto* gi = curPipeline->GetGI()) {   // 环境强度取 1（白炉真值）
+                    auto s = gi->GetSettings();
+                    s.intensity = 1.0f;
+                    gi->SetSettings(s);
+                }
+            }
+        }
+        ImGui::TextWrapped("白炉条件：全白环境 + albedo=1 + 关闭直接光 → 各源真值均为 1，\n"
+                           "正确的分层合成应恰好读回 1.0；>1 即存在归一化之外的双重计数。");
+        if (g_ProbeEnabled) {
+            const auto& pv = probe.Values();
+            ImGui::Text("中心像素 (线性 RGB): %.4f %.4f %.4f", pv[0].rgb[0], pv[0].rgb[1], pv[0].rgb[2]);
+            ImGui::Text("背景像素 (线性 RGB): %.4f %.4f %.4f", pv[1].rgb[0], pv[1].rgb[1], pv[1].rgb[2]);
+            // 白炉正确时：物体消失 → 中心与背景都应等于环境真值 1.0
+            const float ratio = probe.LuminanceRatio(0, 1);
+            const bool ok = (ratio > 0.98f && ratio < 1.02f);
+            const ImVec4 col = ok ? ImVec4(0.3f, 0.9f, 0.3f, 1.0f) : ImVec4(1.0f, 0.6f, 0.2f, 1.0f);
+            ImGui::TextColored(col, "亮度比 中心/背景 = %.4f   (白炉判据 0.98 ~ 1.02)", ratio);
+            ImGui::TextColored(col, "中心亮度 = %.4f   (白炉真值 1.0)", pv[0].luminance);
+        }
+
+        // ── GI 质量档位（紧随管线选择）──
+        ImGui::SeparatorText("GI 质量档位");
+        const char* presetNames[] = {"Low", "Medium", "High", "Ultra"};
+        render::GIConfig& gc = *curPipeline->GetGIConfig();
+        const u32  giCaps = curPipeline->GetGIPipelineCaps();
+        const bool rtOk   = device->GetCaps().supportsRayTracing;
+        if (ImGui::Combo("档位##preset", &g_GIPreset, presetNames, 4)) {
+            // 应用预设 + 按「管线能力 ∧ 设备能力」自动降级
+            gc = render::GIRegistry::Degrade(render::GIConfigFromPreset((render::GIQualityPreset)g_GIPreset),
+                                             giCaps, rtOk);
+            if (auto* dp = dynamic_cast<render::DeferredPipeline*>(curPipeline)) {
+                dp->GetSSGI()->SetEnabled(gc.ShouldRunSSGI());
+                dp->GetDDGI()->SetEnabled(gc.ShouldRunDDGI());
+                dp->GetSSR()->SetEnabled(gc.ShouldRunSpecular());
+                dp->GetSSAO().enabled = gc.ShouldRunAO();
+                auto sg = dp->GetSSGI()->GetSettings();
+                sg.halfRes = gc.halfRes;
+                dp->GetSSGI()->SetSettings(sg);
+                auto sr = dp->GetSSR()->GetSettings();
+                sr.halfRes = gc.halfRes;
+                dp->GetSSR()->SetSettings(sr);
+                dp->GetSSAO().halfRes = gc.halfRes;
+                // 纹理重建延迟到帧边界（NextFrame 之后），避免在 ImGui 回调内销毁/创建正在使用的纹理
+                g_PendingHalfResApply = true;
+            }
+        }
+
+        DrawGIChannels();   // 层栈四通道 + Shadow（实现见本函数之后）
+
+    }
+    ImGui::End();
+}
+
+// GI 通道 UI：层栈四通道（Diffuse/Specular/AO，含源勾选 + 权重 + 让位 + 合成方式）与 Shadow。
+// 依赖从 curPipeline / device 现算，因此可从 DrawGIPanel 里独立出来（原先 216 行内联在其中）。
+void GILabUI::DrawGIChannels() {
+    const u32  giCaps = curPipeline->GetGIPipelineCaps();
+    const bool rtOk   = device->GetCaps().supportsRayTracing;
+    render::GIConfig& gc = *curPipeline->GetGIConfig();
+
+        // 当前管线可用的 GI 子系统（按管线类型获取，Forward 无屏幕空间/探针 GI）
+        auto* dp = dynamic_cast<render::DeferredPipeline*>(curPipeline);
+        auto* giSSGI = dp ? dp->GetSSGI() : nullptr;
+        auto* giSSR  = dp ? dp->GetSSR()  : nullptr;
+        auto* giDDGI = dp ? dp->GetDDGI() : nullptr;
+
+        // ── GI 通道：Diffuse / Specular / AO / Shadow ──
+        ImGui::SeparatorText("GI 通道");
+        const ImVec4 colOk  = ImVec4(0.4f, 1.0f, 0.4f, 1.0f);
+        const ImVec4 colBad = ImVec4(1.0f, 0.55f, 0.2f, 1.0f);
+
+        // 本管线的能力位里一个 GI 源都没有（当前只有 Forward 是这样）：它的 IBL/RSM 由
+        // 管线级开关驱动、不读层栈，因此下面整段层栈 UI 对它是**死开关**。与其把死开关
+        // 摆出来，不如直说（§9.2-H）。阴影通道独立于层栈，仍然有效。
+        const bool anyGISource = (giCaps & render::PipelineCaps::AllSources) != 0u;
+        if (!anyGISource) {
+            ImGui::TextColored(colBad,
+                "本管线的 GI 不由层栈驱动（IBL/RSM 是管线级开关），层栈内容对它没有影响");
+            // 层栈 UI 全部置灰但不隐藏：内容仍可查看（便于对照诊断），但不可编辑，
+            // 免得用户以为改了这里就能改变 Forward 的画面。
+            ImGui::BeginDisabled();
+        }
+
+        // ── 通道 UI 辅助：显示该通道的「源层栈」（源 / 频段 / 权重 / 让位距离）──
+        // 勾选 = 该源参与合成（weight>0）；多个源同时勾选即为「融合」
+        auto channelUI = [&](const char* label, render::GIChannelStack& st,
+                             const render::GISourceId* candidates, int candCount) {
+            ImGui::TextUnformatted(label);
+            ImGui::Indent(12.0f);
+            for (int i = 0; i < candCount; i++) {
+                const render::GISourceId id = candidates[i];
+                const bool  avail  = render::GIRegistry::IsAvailable(id, giCaps, rtOk);
+                const float weight = st.WeightOf(id);
+                bool active = weight > 0.0f;
+                ImGui::PushID((int)id);
+                if (ImGui::Checkbox(render::GISourceName(id), &active)) {
+                    st.Set(id, active ? 1.0f : 0.0f, st.FalloffOf(id));
+                }
+                ImGui::SameLine();
+                ImGui::TextColored(avail ? colOk : colBad, "[%s]",
+                    avail ? render::GISourceClassName(id) : "不可用");
+                if (active) {
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(80.0f);
+                    float w = st.WeightOf(id);
+                    if (ImGui::DragFloat("权重", &w, 0.05f, 0.0f, 2.0f, "%.2f")) {
+                        st.Set(id, w, st.FalloffOf(id));
+                    }
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(80.0f);
+                    float fo = st.FalloffOf(id);
+                    if (ImGui::DragFloat("让位", &fo, 0.5f, 0.0f, 200.0f, "%.0f")) {
+                        st.Set(id, w, fo);
+                    }
+                }
+                ImGui::PopID();
+            }
+            // 该通道的合成方式（相加仅作对照；归一化保证无双重计数）
+            int mode = (int)st.mode;
+            const char* modes[] = {"相加(对照)", "归一化加权"};
+            ImGui::SetNextItemWidth(140.0f);
+            if (ImGui::Combo("合成", &mode, modes, 2)) {
+                st.mode = (render::GIBlendMode)mode;
+            }
+            ImGui::Unindent(12.0f);
+        };
+
+        // ---- Diffuse（间接漫反射）----
+        {
+            // P4：候选源从已注册的 Provider 派生（低频 → 高频排列）。
+            // 频段顺序用于面板可读性；未接入 Provider 的源（如预留的 Lightmap）不出现。
+            static const render::GISourceId kAllDiffuse[] = {
+                render::GISourceId::IBL, render::GISourceId::Lightmap, render::GISourceId::DDGI,
+                render::GISourceId::SSGI, render::GISourceId::RSM, render::GISourceId::RTGI,
+            render::GISourceId::Lumen };
+            std::vector<render::GISourceId> diffuseSources;
+            if (dp) {
+                for (auto id : kAllDiffuse) {
+                    // 只列出「本管线能力位允许」的源：能力位就是层栈模型下管线能承载的范围，
+                    // 列出一个它根本不消费的源，等于让面板把一个假开关摆给用户（§9.2-H）。
+                    if (!render::GIRegistry::IsAvailable(id, giCaps, rtOk)) continue;
+                    for (auto& p : dp->GetGIProviders()) {
+                        if (p->Handles(id)) { diffuseSources.push_back(id); break; }
+                    }
+                }
+            }
+            if (diffuseSources.empty()) diffuseSources.push_back(render::GISourceId::IBL);
+            channelUI("Diffuse — 间接漫反射（低频 → 高频）", gc.diffuse,
+                      diffuseSources.data(), (int)diffuseSources.size());
+            ImGui::Indent(12.0f);
+            ImGui::SliderFloat("GI 强度", &gc.giIntensity, 0.0f, 2.0f, "%.2f");
+            ImGui::Checkbox("半分辨率", &gc.halfRes);
+            if (giSSGI) {
+                bool on = giSSGI->IsEnabled();
+                if (ImGui::Checkbox("启用 SSGI", &on)) giSSGI->SetEnabled(on);
+                if (on) {
+                    ImGui::Indent(12.0f);
+                    ImGui::DragFloat("采样半径##ssgi", &giSSGI->radius, 0.1f, 0.1f, 5.0f, "%.1f");
+                    ImGui::SliderInt("采样数##ssgi", &giSSGI->sampleCount, 4, 64);
+                    ImGui::Unindent(12.0f);
+                }
+                ImGui::Text("SSGI 耗时 %.2f ms", giSSGI->GetDebugData().avgRenderTimeMs);
+            }
+            if (giDDGI) {
+                bool on = giDDGI->IsEnabled();
+                if (ImGui::Checkbox("启用 DDGI", &on)) giDDGI->SetEnabled(on);
+                if (on) {
+                    ImGui::Indent(12.0f);
+                    ImGui::SliderFloat("时间混合##ddgi", &giDDGI->blendAlpha, 0.0f, 0.98f, "%.2f");
+                    ImGui::SliderFloat("贡献缩放##ddgi", &giDDGI->debugScale, 0.0f, 2.0f, "%.2f");
+                    u32 pc = giDDGI->gridX * giDDGI->gridY * giDDGI->gridZ;
+                    ImGui::Text("%u 探针 (%u×%u×%u)", pc, giDDGI->gridX, giDDGI->gridY, giDDGI->gridZ);
+                    ImGui::Unindent(12.0f);
+                }
+                ImGui::Text("DDGI 耗时 %.2f ms", giDDGI->GetDebugData().avgRenderTimeMs);
+            }
+            // IBL 环境光（所有管线共用）
+            if (auto* gi = curPipeline->GetGI()) {
+                auto s = gi->GetSettings();
+                float inten = s.intensity;
+                if (ImGui::SliderFloat("IBL 强度", &inten, 0.0f, 3.0f, "%.2f")) {
+                    s.intensity = inten;
+                    gi->SetSettings(s);
+                }
+                ImGui::Text("IBL 耗时 %.2f ms", gi->GetDebugData().avgRenderTimeMs);
+            }
+            ImGui::Unindent(12.0f);
+        }
+
+        // ---- Specular（镜面反射）----
+        {
+            // P4：候选源从已注册的 Provider 派生
+            static const render::GISourceId kAllSpecular[] = {
+                render::GISourceId::IBL, render::GISourceId::SSR,
+            render::GISourceId::RTReflection, render::GISourceId::Lumen };
+            std::vector<render::GISourceId> specSources;
+            if (dp) {
+                for (auto id : kAllSpecular) {
+                    for (auto& p : dp->GetGIProviders()) {
+                        if (p->Handles(id)) { specSources.push_back(id); break; }
+                    }
+                }
+            }
+            if (specSources.empty()) specSources.push_back(render::GISourceId::IBL);
+            channelUI("Specular — 镜面反射（低频 → 高频）", gc.specular,
+                      specSources.data(), (int)specSources.size());
+            ImGui::Indent(12.0f);
+            if (giSSR) {
+                bool on = giSSR->IsEnabled();
+                if (ImGui::Checkbox("启用 SSR", &on)) giSSR->SetEnabled(on);
+                if (on) {
+                    ImGui::Indent(12.0f);
+                    ImGui::SliderFloat("最大步数##ssr", &giSSR->maxSteps, 16.0f, 256.0f, "%.0f");
+                    ImGui::SliderFloat("步长##ssr", &giSSR->stepSize, 0.1f, 2.0f, "%.1f");
+                    ImGui::Unindent(12.0f);
+                }
+                ImGui::Text("SSR 耗时 %.2f ms", giSSR->GetDebugData().avgRenderTimeMs);
+            }
+            ImGui::Unindent(12.0f);
+        }
+
+        // ---- AO（环境光遮蔽）----
+        {
+            // P4：候选源从已注册的 GI Provider 派生（不再硬编码源列表）。
+            // 目前 SSAO/GTAO 已 Provider 化；RTAO 尚未（留待下一波次推广）。
+            std::vector<render::GISourceId> aoSources;
+            if (dp) {
+                for (auto& p : dp->GetGIProviders()) {
+                    if (p->Handles(render::GISourceId::SSAO)) {
+                        aoSources.push_back(render::GISourceId::SSAO);
+                        aoSources.push_back(render::GISourceId::GTAO);
+                    }
+                }
+            }
+            if (aoSources.empty()) aoSources.push_back(render::GISourceId::SSAO);
+            aoSources.push_back(render::GISourceId::RTAO);   // 尚未 Provider 化
+            channelUI("AO — 环境光遮蔽", gc.ao, aoSources.data(), (int)aoSources.size());
+            ImGui::Indent(12.0f);
+            ImGui::SliderFloat("AO 强度##gc", &gc.aoIntensity, 0.0f, 1.5f, "%.2f");
+            if (dp) {
+                auto& ssao = dp->GetSSAO();
+                bool on = ssao.enabled;
+                if (ImGui::Checkbox("启用 SSAO", &on)) ssao.enabled = on;
+                if (on) {
+                    ImGui::Indent(12.0f);
+                    ImGui::DragFloat("半径##ssao", &ssao.radius, 0.05f, 0.1f, 5.0f, "%.2f");
+                    ImGui::SliderInt("采样数##ssao", &ssao.sampleCount, 4, 32);
+                    ImGui::Checkbox("半分辨率##ssao", &ssao.halfRes);
+                    ImGui::Unindent(12.0f);
+                }
+            }
+            ImGui::Unindent(12.0f);
+        }
+
+        // 结束「层栈 UI 置灰」（见上：本管线没有层栈 GI 源时）
+        if (!anyGISource) ImGui::EndDisabled();
+
+        // ---- Shadow（阴影）----
+        // 阴影是「可见性（乘法项）」而非「能量（加法项）」——不适用层栈的
+        // 频段/权重/距离让位语义，故用独立枚举：None / Raster / RT
+        {
+            const char* shadowNames[] = {"None", "Raster（光栅 CSM 等）", "RT（光追阴影）"};
+            int sh = (int)gc.shadow;
+            ImGui::TextUnformatted("Shadow — 阴影（可见性，不参与能量合成）");
+            ImGui::Indent(12.0f);
+            ImGui::SetNextItemWidth(220.0f);
+            if (ImGui::Combo("##shadow", &sh, shadowNames, 3)) {
+                gc.shadow = (render::ShadowChannel)sh;
+                gc = render::GIRegistry::Degrade(gc, giCaps, rtOk);   // 不可用则回退
+            }
+            const bool shOk = render::GIRegistry::IsAvailable(gc.shadow, giCaps, rtOk)
+                           || gc.shadow == render::ShadowChannel::None;
+            ImGui::SameLine();
+            ImGui::TextColored(shOk ? colOk : colBad, shOk ? "[可用]" : "[不可用]");
+            ImGui::Unindent(12.0f);
+        }
+}
+
+
+
+// ============================================================
+// GILabFrameRecorder —— 每帧两条渲染命令的录制体（命令 1 / 命令 2）
+//
+// 原先两条命令是 main() 里两个 [&] lambda（74 + 112 行）。抽成成员函数后主循环只剩
+// "submitRender(...)" 两处调用，录制逻辑集中在这里。
+//
+// 【为什么用"同名引用成员"】两条命令要读写 main 里的一批对象（设备/命令列表/管线/相机/
+// 转储器/探针/各开关）。以同名引用成员交给本结构后，命令体可以**逐字不动**。
+// 【哪些走参数】每帧会变的值（frameAborted、deltaTime、renderFrameIndex、dumpThisFrame）
+// 一律走参数 —— 避免引用成员绑到每帧新建的局部量上而悬空。
+// ============================================================
+struct GILabFrameRecorder {
+    editor::ImGuiIntegration&             imgui;
+    rhi::FramePresenter&               framePresenter;
+    std::unique_ptr<rhi::IRHIDevice>&     device;
+    std::unique_ptr<rhi::IRHICommandList>& cmdList;
+    std::unique_ptr<rhi::IRHISwapChain>&  swapchain;
+    Engine&                               engine;
+    render::DeferredPipeline&             deferredPipeline;
+    render::ForwardPipeline&              forwardPipeline;
+    render::IRenderPipeline*&             curPipeline;
+    render::CameraController&             camCtrl;
+    render::FrameDumpRecorder&            giDump;
+    render::PixelProbe&                   probe;
+    World&                                world;
+    SceneGraph&                           sceneGraph;
+    u64&                                  frameIndex;
+    int&                                  g_PipelineMode;
+    int&                                  g_ProbeInterval;
+    bool&                                 g_ProbeEnabled;
+    bool&                                 g_FurnaceMode;
+    bool&                                 g_PendingPipelineSwitch;
+    bool&                                 g_PendingHalfResApply;
+    const bool&                           noVsync;   // main 里是 const bool（开机决定一次）
+
+    /// 命令 1：Acquire + 切管线 + 装配快照 + 阴影 + 各 Pass 录制 + End/Submit
+    void RecordScene(bool& frameAborted, f32 deltaTime);
+
+    /// 命令 2：ImGui 录制 + 白炉探针 + GI 采样落盘 + Present
+    void RecordUiAndPresent(u64 renderFrameIndex, bool dumpThisFrame);
+};
+
+void GILabFrameRecorder::RecordScene(bool& frameAborted, f32 deltaTime) {
+    if (!framePresenter.BeginFrame()) {
+        HE_CORE_WARN("06.GILab：AcquireNextImage 失败，跳过本帧剩余部分");
+        frameAborted = true;   // 命令可能在渲染线程跑 ⇒ 用标志代替 while 的 continue
+        return;
+    }
+
+    // 控件里请求的管线切换（含 RHI）在这里（渲染线程）落地
+    if (g_PendingPipelineSwitch) {
+        g_PendingPipelineSwitch = false;
+        curPipeline->SetSwapChain(swapchain.get());
+        curPipeline->OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+    }
+
+    framePresenter.BeginRecording(device.get(), cmdList.get());   // L4-2
+    switch (g_PipelineMode) {
+    case 0:  // Forward
+        curPipeline = &forwardPipeline;
+        break;
+    default: // Deferred（含光追源：RT 已归入 GI 层栈，无需独立管线）
+        curPipeline = &deferredPipeline;
+        break;
+    }
+    curPipeline->NextFrame();
+    // 【阶段 1 §15.1 第③段：帧入口收快照】装配在**命令 1（recordScene）内部**统一经接口完成
+    // （模式 0 就地 ⇒ 游戏线程；模式 1/2 ⇒ 渲染线程，由命令 1 的严格握手保证此刻无人改世界；
+    //  三条管线同构；
+    // `AssembleScene` 每帧幂等 ⇒ Forward 分支下面再调一次也无副作用）。必须在任何阴影收集之前，
+    // 因为阴影技术现在从快照取几何与光源。
+    curPipeline->GetFrameAssembler().AssembleScene(world, sceneGraph, camCtrl.GetCamera());
+    // --- Forward 的阴影系统必须由**调用方**驱动（任务 34 / §9.2-AD）---
+    // `ShadowSystem` 不像 GI 子系统那样自己从帧图拿数据：它要靠调用方先
+    // `SetRenderResources`（对象/阴影缓冲 + 描述符集）再 `Update`（收集投影光源、拟合 CSM），
+    // 之后 `HasActiveShadows()` 才为真。02.Cube / 03.Sponza-Forward / AISamples 都这么做，
+    // **06.GILab 此前漏了** ⇒ Forward 模式下 `Shadow` 与 `RSM_Generate` 两个 pass 都不注册：
+    // 画面**没有阴影**，RSM 源恒为 0（而"层栈改变画面 / 多源不变亮 / 双源等于加权平均"
+    // 三条判据在"某个源恒为 0"时全部成立，看不出这件事）。
+    // 位置：必须在 NextFrame 之后（阴影缓冲按飞行帧轮换）且在本帧 Render 之前（帧图按
+    // `HasActiveShadows()` 门控）。Deferred 侧由管线内部自己驱动，这里只处理 Forward。
+    if (g_PipelineMode == 0) {
+        if (auto* shadowSys = forwardPipeline.GetShadowSystem()) {
+            shadowSys->SetRenderResources(forwardPipeline.GetCurrentShadowObjectBuffer(),
+                                          forwardPipeline.GetCurrentShadowBuffer(),
+                                          forwardPipeline.GetCurrentDescSet());
+            render::SubsystemContext shadowCtx;
+            shadowCtx.camera     = &camCtrl.GetCamera();
+            // 物理天空的太阳方向先同步到方向光：阴影与光照必须同向（02.Cube 同款做法）
+            he::SyncPhysicalSkyToSun(world);
+            // 快照已在上面统一装配（`AssembleScene` 幂等）；阴影收集吃的就是它
+            shadowCtx.snapshot     = &forwardPipeline.GetFrameSnapshot();
+            shadowCtx.meshRegistry = &forwardPipeline.GetMeshRegistry();
+            shadowSys->Update(shadowCtx);
+            forwardPipeline.GetFrameAssembler().ResolveLightShadowIndices(
+                [&](he::Entity le) { return shadowSys->GetShadowIndex(le); });
+            forwardPipeline.GetFrameAssembler().ReserveOnce();
+        }
+    }
+    // 帧边界应用延迟的半分辨率纹理重建（先等待 GPU 空闲，避免销毁正在使用的纹理）
+    if (g_PendingHalfResApply) {
+        device->WaitIdle();
+        if (auto* dpApply = dynamic_cast<render::DeferredPipeline*>(curPipeline)) {
+            dpApply->GetSSGI()->OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+            dpApply->GetSSR()->OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+            dpApply->GetSSAO().OnResize(swapchain->GetWidth(), swapchain->GetHeight());
+        }
+        g_PendingHalfResApply = false;
+    }
+    // 【T2.2 步骤 (b)】管线渲染与其余 RHI 调用一起放进本帧的**第一条命令**，
+    // 不再单独经队列（一帧两条命令，见下面 submitRender 的两处调用）。
+    curPipeline->Render(cmdList.get(), curPipeline->GetFrameSnapshot(),
+                         camCtrl.GetCamera(), deltaTime);
+
+
+}
+
+void GILabFrameRecorder::RecordUiAndPresent(u64 renderFrameIndex, bool dumpThisFrame) {
+    // --- ImGui（LOAD 保留 ToneMap 输出）---
+    cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
+        rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
+
+    imgui.EndFrame(cmdList.get());
+    cmdList->EndRenderPass();
+
+    // ── 白炉探针：把 HDR 目标上的两个像素拷进 host 可见缓冲 ──
+    // 必须在 render pass 之外录制（拷贝不能在 pass 内），因此放在 EndRenderPass 之后、End 之前
+    // 白炉探针：把 HDR 上的中心/背景两个像素读回（机制在 PixelProbe）
+    const bool probeThisFrame = g_ProbeEnabled &&
+        probe.WantsFrame(frameIndex, (u32)std::max(1, g_ProbeInterval));
+    if (probeThisFrame) {
+        // HDR 要按**当前管线**取：Forward 有自己的那张（层栈归一化在 Forward 也生效）
+        rhi::IRHITexture* hdr = (g_PipelineMode == 0) ? forwardPipeline.GetHDRTarget()
+                                                      : deferredPipeline.GetLighting().GetHDRTarget();
+        if (hdr) {
+            const u32 pw = swapchain->GetWidth(), ph = swapchain->GetHeight();
+            const render::PixelProbe::Sample pts[2] = {
+                {pw / 2,  ph / 2},    // 中心（物体所在）
+                {pw / 10, ph / 10},   // 背景取样点
+            };
+            probe.RecordReadback(cmdList.get(), hdr, pts, 2);
+            probe.FinishRecording(device.get(), cmdList.get());   // 挂本帧 timeline
+        }
+    }
+
+    // ── GI 频谱采样：把若干张纹理整幅拷进 host 可见缓冲（仅测试路径）──
+    // 同样必须在 render pass 之外录制；缓冲在采样帧才创建，尺寸取自纹理本身
+    // 目标分三类：
+    //   hdr / albedo  —— 合成结果与接收端反照率（做差 + 除 albedo 后即得 E/π）
+    //   provN_raw/final —— 各有效 Provider 的原始输出 / 降噪后输出（定位"某源为 0"发生在哪一级）
+    if (dumpThisFrame) {
+        // 登记纹理目标：机制（读回缓冲 / 格式推断 / 拷贝录制）在 FrameDumpRecorder 里
+        auto addTarget = [&](const String& name, rhi::IRHITexture* tex) {
+            giDump.AddTexture(device.get(), cmdList.get(), name.c_str(), tex);
+        };
+        // 【诊断用】缓冲落盘（只在 HE_DUMP_LUMEN_PROBES=1 时调用）
+        // 登记缓冲目标（探针/单元图等非纹理中间量，落盘为 .bin）
+        auto addBufferTarget = [&](const String& name, rhi::IRHIBuffer* src, usize bytes) {
+            giDump.AddBuffer(device.get(), cmdList.get(), name.c_str(), src, bytes);
+        };
+        // HDR 取**当前管线**的那张（任务 26）：Forward 没有 GBuffer / Provider 输出，
+        // 但它的 HDR 目标就是层栈归一化的产物 —— 这正是 Forward 侧唯一可读的判据出口。
+        // 此前这里无条件取 deferredPipeline 的 HDR，于是 `pipeline_mode=0` 下落盘的
+        // 根本不是 Forward 的画面（文档 §11.3 早就把这点写成了注意事项，任务 26 修掉）。
+        const bool forwardMode = (g_PipelineMode == 0);
+        addTarget("hdr", forwardMode ? forwardPipeline.GetHDRTarget()
+                                     : deferredPipeline.GetLighting().GetHDRTarget());
+                          // RSM 链路的逐级中间量（任务 30）：按当前管线取（两管线各有自己的光源视锥）
+        if (auto* rsm = forwardMode ? forwardPipeline.GetRSM() : deferredPipeline.GetRSM()) {
+            addTarget("rsm_pos", rsm->GetRSMPositionMap());
+            addTarget("rsm_nrm", rsm->GetRSMFluxMap());
+            addTarget("rsm_rad", rsm->GetRSMRadianceMap());
+        }
+        // Deferred 侧清单（GBuffer / 前帧辐射度 / 各 Provider / Lumen / RSM 间接光 / SSR）
+        // 已下沉到管线 CollectDumpTargets()：判据定义的"真值"只有一份。
+        if (auto* dpDump = dynamic_cast<render::DeferredPipeline*>(curPipeline))
+            dpDump->CollectDumpTargets(giDump, device.get(), cmdList.get());
+        // 探针级**缓冲**目标：需要 ScreenProbe 的尺寸（该类型只对本样例可见），故留在样例侧。
+        if (giDump.IncludeBuffers() && !forwardMode) {
+            constexpr usize kDumpProbes = 8192;
+            for (auto& prov : deferredPipeline.GetGIProviders()) {
+                auto* lp = dynamic_cast<render::LumenProvider*>(prov.get());
+                if (!lp || !lp->ProducedThisFrame()) continue;
+                addBufferTarget("lumen_probes",    lp->GetProbeBuffer(),    kDumpProbes * sizeof(ScreenProbe));
+                addBufferTarget("lumen_rawprobes", lp->GetRawProbeBuffer(), kDumpProbes * sizeof(ScreenProbe));
+                if (auto* cells = lp->GetCellProbeBuffer()) {
+                    addBufferTarget("lumen_cellmap", cells,
+                                    (usize)lp->GetScreenCellsX() * lp->GetScreenCellsY() * sizeof(u32));
+                }
+                break;
+            }
+        }
+        giDump.FinishRecording(device.get(), cmdList.get());   // 挂本帧 timeline 信号
+    }
+
+    framePresenter.EndRecording();   // L4-2：End + Submit 收口
+    deferredPipeline.FlushComputeWork();  // AsyncCompute: Graphics Submit 之后提交 Compute 工作
+
+    // ── 白炉探针：等本帧 timeline 后读回数值（机制在 PixelProbe）──
+    if (probeThisFrame && probe.TryReadBack(device.get())) {
+        const auto& v = probe.Values();
+        HE_CORE_INFO("[白炉探针] 中心 RGB=({:.4f},{:.4f},{:.4f}) 背景 RGB=({:.4f},{:.4f},{:.4f}) "
+                     "亮度 中心={:.4f} 背景={:.4f} 比值={:.4f} 白炉={}",
+                     v[0].rgb[0], v[0].rgb[1], v[0].rgb[2],
+                     v[1].rgb[0], v[1].rgb[1], v[1].rgb[2],
+                     v[0].luminance, v[1].luminance, probe.LuminanceRatio(0, 1),
+                     g_FurnaceMode ? "ON" : "off");
+    }
+
+    // ── GI 频谱采样：等本帧 timeline 后原样落盘（机制在 FrameDumpRecorder）──
+    {
+        const render::CameraData& cam = camCtrl.GetCamera();
+        render::FrameDumpRecorder::CameraSnapshot camSnap;
+        camSnap.pos[0] = cam.position.x; camSnap.pos[1] = cam.position.y; camSnap.pos[2] = cam.position.z;
+        camSnap.forward[0] = cam.forward.x; camSnap.forward[1] = cam.forward.y; camSnap.forward[2] = cam.forward.z;
+        camSnap.up[0] = cam.up.x; camSnap.up[1] = cam.up.y; camSnap.up[2] = cam.up.z;
+        camSnap.fov = cam.fov; camSnap.nearPlane = cam.nearPlane;
+        camSnap.farPlane = cam.farPlane; camSnap.aspect = cam.aspectRatio;
+        if (giDump.TryWriteBack(device.get(), camSnap)) {
+            // 采样完成即请求关窗：让脚本无需超时等待，也保证退出前正常走完清理与保存流程
+            glfwSetWindowShouldClose(engine.GetWindow()->GetNativeHandle(), GLFW_TRUE);
+        }
+    }
+
+
+    // 垂直同步必须与创建时一致：只改 SwapChainDesc 而这里仍传 true，帧率照样被锁在刷新率
+    // （步骤 37 第一次测就是这么被误导的：pass 合计 14 ms 却只有 19 fps）。
+    framePresenter.EndFrame(!noVsync);
+}
+
+
 int main() {
-    // ============================================================
-    // 0. 安装崩溃处理器（Wave 0.8 诊断基建）
+    // ---- 0. 安装崩溃处理器（Wave 0.8 诊断基建） ----
     //    崩溃时打印"函数名 + 源文件:行号"的完整调用栈，并写出 minidump。
     //    之所以放在最前面：初始化阶段（设备/交换链/资源创建）同样是崩溃高发区。
-    // ============================================================
     {
         const std::string crashLog = std::string(HUGE_CONTENT_DIR) + "Config/06_GILab_crash.log";
         he::InstallCrashHandler(crashLog.c_str(), nullptr);
     }
 
-    // ============================================================
-    // 1. 引擎启动
-    // ============================================================
+    // ---- 1. 引擎启动 ----
     EngineConfig config;
     config.appName      = "HugEngine — 06.GILab (Cornell Box GI 对比)";
     config.windowWidth  = 1920;   // 窗口宽（960×2）
     config.windowHeight = 1080;   // 窗口高（540×2）
 
-    // 【默认模式 1】06.GILab 默认走"游戏线程 + 渲染线程"（T2.2）：整帧 RHI（Acquire → 录制 →
-    // ImGui 录制 → Submit → 探测读回 → Present）都归渲染线程，游戏线程只做输入/相机/装配快照。
-    // 仍可被覆盖：环境变量 `HE_RENDER_THREADING_MODE=0` 可回到单线程（`Engine::Initialize` 里
-    // 环境变量优先于本配置，见 Engine.cpp）；`HE_RENDER_THREAD_FORCE_SHELL=1` 可强制壳模式做对照。
-    // 【模式 2 默认】**三线程形态**（游戏线程 + 渲染线程 + RHI 线程）：渲染线程只录制，`Submit`/`Present`
-    // 经二级队列交给 RHI 线程（唯一提交者）。判据（2026-10 实测）：模式 0 vs 模式 2 的 20 个 GI 转储
-    // 目标**逐字节一致**、断言 0、VUID 与模式 0 相同（只剩转储装置自身的既有 VUID）、到第 40 帧的墙钟
-    // 9.57 s vs 9.59 s（无退化）。`HE_RENDER_THREADING_MODE=1` 可退回单渲染线程（对照用）。
+    // 【默认模式 2：三线程】（游戏线程 + 渲染线程 + RHI 线程）
+    //   · 渲染线程只**录制**；`Submit` / `Present` 经二级队列交给 **RHI 线程**（唯一提交者）；
+    //   · 游戏线程只做输入 / 相机 / 打包命令与 UI —— **装配快照在命令 1（recordScene）里**，
+    //     因此模式 1/2 下它在**渲染线程**执行（详见下方 applyThreadingMode 附近的说明）。
+    // 【如何覆盖】环境变量优先于本配置（见 `Engine::Initialize`）：
+    //   · `HE_RENDER_THREADING_MODE=0` ⇒ 单线程；`=1` ⇒ 游戏线程 + 渲染线程（两线程对照）；
     config.renderThreadingMode = he::RenderThreadingMode::RenderThreadAndRHI;
-    // 【步骤 37 / L6 帧时判据】vsync 打开时墙钟帧率被锁在刷新率（60Hz），"有没有 60fps"
-    // 这件事就没法从帧率上判定。`HE_NO_VSYNC=1` 关掉垂直同步，让墙钟帧率反映真实 GPU 吞吐。
+    // vsync 打开时墙钟帧率被锁在刷新率，`HE_NO_VSYNC=1` 可关掉垂直同步（用于观察真实 GPU 吞吐）
     const bool noVsync = (std::getenv("HE_NO_VSYNC") != nullptr);
     config.enableVSync  = !noVsync;
     config.logLevel     = LogLevel::Info;
@@ -195,9 +1185,7 @@ int main() {
     Engine engine(config);
     engine.Initialize();
 
-    // ============================================================
-    // 2. 创建 Vulkan RHI 设备
-    // ============================================================
+    // ---- 2. 创建 Vulkan RHI 设备 ----
     rhi::DeviceInitDesc rhiDesc;
     rhiDesc.backend          = rhi::Backend::Vulkan;
     rhiDesc.enableValidation = true;
@@ -207,9 +1195,7 @@ int main() {
     device->Initialize(rhiDesc);
     rhi::SetDevice(device.get());
 
-    // ============================================================
-    // 3. 创建 SwapChain
-    // ============================================================
+    // ---- 3. 创建 SwapChain ----
     auto swapchain = device->CreateSwapChain({
         .windowHandle = engine.GetWindow()->GetNativeHandleRaw(),
         .width  = engine.GetWindow()->GetWidth(),
@@ -217,273 +1203,27 @@ int main() {
         .vsync  = !noVsync,   // 与 EngineConfig 同源（HE_NO_VSYNC=1 时同时关掉，否则帧率仍被锁 60）
     });
 
-    // ============================================================
-    // 4. 初始化场景（Sponza glTF——检验各种 GI 的间接光照/反射）
-    // ============================================================
+    // ---- 4. 初始化场景（Sponza glTF + 光源 + 天空盒 + 纹理注册，实现见 BuildScene）----
     World world;
     SceneGraph sceneGraph(world);
 
-    String sponzaPath = String(HUGE_CONTENT_DIR) + "gltf/Sponza/glTF/Sponza.gltf";
-    HE_CORE_INFO("加载 Sponza 场景: {}", sponzaPath);
-
-    auto result = asset::LoadGLTF(world, sceneGraph, sponzaPath);
-    if (!result.success) {
-        HE_CORE_ERROR("Sponza 加载失败: {}", result.error);
+    const String sponzaPath = String(HUGE_CONTENT_DIR) + "gltf/Sponza/glTF/Sponza.gltf";
+    Entity pointLightEntities[2];   // 面板编辑/配置序列化要按索引访问，故由 BuildScene 回传
+    // 纹理缓存必须由 main 持有：bindless 堆会长期持有这些纹理/采样器指针，
+    // 若让缓存随 BuildScene 作用域析构，下一帧 Flush() 更新描述符集就是野指针（实测崩溃）。
+    TextureCache texCache(device.get());
+    if (!BuildScene(world, sceneGraph, device.get(), sponzaPath, pointLightEntities, texCache)) {
         return 1;
     }
-    HE_CORE_INFO("Sponza 加载完成: {} 实体, {} 网格图元",
-                 result.entities.size(), result.meshCount);
 
     // --- 加载配置文件 ---
     auto cfgData = LoadConfigFile(g_ConfigPath);
-    bool hasConfig = !cfgData.empty();
+    const bool hasConfig = !cfgData.empty();
     if (hasConfig) {
         HE_CORE_INFO("加载配置文件: {}", g_ConfigPath);
     }
 
-    // 场景默认无直接光源（纯 GI）；DDGI 探针需首次照明输入（直接从 Lighting HDR 学习会自反馈发散），
-    // 故加一个弱主方向光提供 DDGI 首次照明（强度低，画面仍以 GI 为主导）
-    {
-        Entity mainLightEntity = world.CreateEntity("DirectionalLight");
-        world.AddComponent<TransformComponent>(mainLightEntity);
-        auto* mainDL = world.AddComponent<DirectionalLight>(mainLightEntity);
-        mainDL->direction = float3(0.3f, -1.0f, 0.4f);
-        mainDL->color     = float3(1.0f, 0.95f, 0.9f);
-        mainDL->intensity = 3.0f;   // 弱光：DDGI 输入，不喧宾夺主
-        mainDL->castShadow = true;
-        mainDL->enabled    = false; // 默认只看 GI（直接光关闭，勾选「只看 GI」可切回）
-        sceneGraph.SetParent(mainLightEntity, Entity{kInvalidEntity});
-    }
-
-    // --- 点光源（2 个：Sponza 走廊两端，用于测试点光 GI/阴影/DDGI 探针）---
-    // 位置/颜色/强度/范围可由面板编辑，并随 06_GILab.cfg 序列化
-    Entity pointLightEntities[2];
-    {
-        struct PointLightInit { float3 pos; float3 color; float intensity; float range; };
-        const PointLightInit inits[2] = {
-            { float3(-20.0f, 5.0f,  0.0f), float3(1.0f, 0.7f, 0.4f), 30.0f, 18.0f },  // 暖色，走廊左端（X 负侧）
-            { float3( 20.0f, 5.0f,  0.0f), float3(0.4f, 0.7f, 1.0f), 30.0f, 18.0f },  // 冷色，走廊右端（X 正侧）
-        };
-        for (int i = 0; i < 2; i++) {
-            Entity e = world.CreateEntity("PointLight");
-            auto* tf = world.AddComponent<TransformComponent>(e);
-            tf->position = inits[i].pos;
-            auto* pl = world.AddComponent<PointLight>(e);
-            pl->color     = inits[i].color;
-            pl->intensity = inits[i].intensity;
-            pl->range     = inits[i].range;
-            pl->castShadow = false;       // 点光阴影开销大，默认关闭（面板可开）
-            pl->enabled    = false;       // 默认只看 GI，与方向光一致
-            sceneGraph.SetParent(e, Entity{kInvalidEntity});
-            pointLightEntities[i] = e;
-        }
-    }
-
-    // --- 平面镜测试台（任务 32 / §9.2-W 的解析对照用；HE_SSR_MIRROR=1 时创建）---
-    // 为什么要有它：任务 25 只证明了"射线有效性恢复、两条 march 同量级、Hi-Z 更快"，
-    // **没有**证明反射的位置/方向正确。平面镜恰好有一个闭式解析真值：物体中心 C 关于平面
-    // (n, d) 的镜像点 C' = C − 2(n·C + d)n，相机 E 与 C' 的连线与镜面的交点 Q 就是"镜面上
-    // 出现该物体反射"的那一点 —— 于是反射是否落在正确的像素上可以逐像素判定，而不靠肉眼。
-    // 台子架在 Sponza 建筑上方（y≈500）的开阔处，背景是天空，避免建筑几何干扰判据。
-    if (std::getenv("HE_SSR_MIRROR")) {
-        // 【为什么是**地面镜**而不是竖镜】SSR 的命中判据只能命中**深度缓冲里存着的那一面**
-        // （相机看到的那一面）。物体若夹在相机与竖镜之间，反射线打到的是物体的**背面**，
-        // 深度图上却是它的正面 ⇒ 永远判不出命中（实测：竖镜下 99.96% 的镜面像素"有效"但
-        // 一个物体颜色都没有）。地面镜不存在这个问题：反射线从镜面向上，命中的正是物体
-        // 朝相机的那一面。
-        // 【为什么架在 y=1700】Sponza 建筑高约 1556（y∈[-57,1499]），放进楼里会被墙挡住
-        // （实测：相机在楼内时整屏只剩一面 25 单位外的墙）。架在楼顶之上，背景是天空，
-        // 判据里"出现物体颜色"才唯一对应**反射**。
-        // 镜面 = y=1700 平面、法线 +Y。用一块薄板实现：+Y 面即镜面。
-        CreateShapeEntity(world, sceneGraph, float3(0.0f, 1699.5f, 0.0f), float3(800.0f, 1.0f, 800.0f),
-                          float4(0.95f, 0.95f, 0.95f, 1.0f), /*metallic=*/1.0f, /*roughness=*/0.0f);
-        // 两个已知物体（红/绿）。**必须用立方体而不是球**：地面镜里球体只有朝下的那一面
-        // 会被反射到，而相机看不到那一面（深度图里存的是朝上的面）⇒ SSR 永远判不出命中
-        // （实测：球体时预测像素附近 0.1% 有效）。立方体的**正面**朝相机，反射线从正面一侧
-        // 打到它，深度图里存的就是那一面 ✓。
-        CreateShapeEntity(world, sceneGraph, float3(-150.0f, 1750.0f, 100.0f), float3(100.0f, 100.0f, 100.0f),
-                          float4(1.0f, 0.05f, 0.05f, 1.0f), 0.0f, 0.7f, /*sphere=*/false);
-        CreateShapeEntity(world, sceneGraph, float3(170.0f, 1770.0f, -120.0f), float3(90.0f, 90.0f, 90.0f),
-                          float4(0.05f, 1.0f, 0.05f, 1.0f), 0.0f, 0.7f, /*sphere=*/false);
-        HE_CORE_INFO("[平面镜测试台] 已创建：地面镜 y=1700（法线 +Y）、红立方 (-150,1750,100) 半长 50、"
-                     "绿立方 (170,1770,-120) 半长 45");
-        g_MirrorRig.valid = true;   // 参数落盘给检查脚本用（见上方的 MirrorRigSpec 注释）
-        g_MirrorRig.planeNormal = float3(0.0f, 1.0f, 0.0f);
-        g_MirrorRig.planeOffset = -1700.0f;
-        g_MirrorRig.slabCenter  = float3(0.0f, 1699.5f, 0.0f);
-        g_MirrorRig.slabHalf    = float3(400.0f, 0.5f, 400.0f);
-        g_MirrorRig.boxRed     = float3(-150.0f, 1750.0f, 100.0f);
-        g_MirrorRig.halfRed    = 50.0f;
-        g_MirrorRig.boxGreen   = float3(170.0f, 1770.0f, -120.0f);
-        g_MirrorRig.halfGreen  = 45.0f;
-    }
-
-    // --- 天空盒 ---
-    {
-        String hdrPath = String(HUGE_CONTENT_DIR) + "Textures/skybox.hdr";
-        int hdrW, hdrH, hdrCh;
-        float* hdrData = stbi_loadf(hdrPath.c_str(), &hdrW, &hdrH, &hdrCh, 4);
-        if (!hdrData) {
-            HE_CORE_WARN("skybox.hdr 加载失败: {}", hdrPath);
-        } else {
-            HE_CORE_INFO("skybox.hdr: {}×{} ({} channels)", hdrW, hdrH, hdrCh);
-
-            const u32 faceSize = 512;
-            const u32 faceBytes = faceSize * faceSize * 4;
-            std::vector<u8> allFaces(faceBytes * 6);
-
-            struct { float3 dir; float3 up; float3 right; } faces[6] = {
-                {{ 1, 0, 0}, {0,-1, 0}, {0, 0,-1}},
-                {{-1, 0, 0}, {0,-1, 0}, {0, 0, 1}},
-                {{ 0, 1, 0}, {0, 0, 1}, {1, 0, 0}},
-                {{ 0,-1, 0}, {0, 0,-1}, {1, 0, 0}},
-                {{ 0, 0, 1}, {0,-1, 0}, {1, 0, 0}},
-                {{ 0, 0,-1}, {0,-1, 0}, {-1,0, 0}},
-            };
-
-            for (u32 f = 0; f < 6; ++f) {
-                u8* faceData = allFaces.data() + f * faceBytes;
-                for (u32 y = 0; y < faceSize; ++y) {
-                    for (u32 x = 0; x < faceSize; ++x) {
-                        float u = (2.0f * x / faceSize) - 1.0f;
-                        float v = (2.0f * y / faceSize) - 1.0f;
-                        float3 dir = glm::normalize(
-                            faces[f].dir + faces[f].right * u + faces[f].up * v);
-                        float eqU = (std::atan2(dir.z, dir.x) / (2.0f * 3.14159265f)) + 0.5f;
-                        float eqV = (std::asin(glm::clamp(dir.y, -1.0f, 1.0f)) / 3.14159265f) + 0.5f;
-                        int px = static_cast<int>(eqU * hdrW) % hdrW;
-                        int py = static_cast<int>(eqV * hdrH) % hdrH;
-                        if (px < 0) px += hdrW;
-                        if (py < 0) py += hdrH;
-                        float* src = hdrData + (py * hdrW + px) * 4;
-                        auto tonemap = [](float c) {
-                            c = c / (1.0f + c);
-                            return static_cast<u8>(glm::clamp(c, 0.0f, 1.0f) * 255.0f);
-                        };
-                        usize idx = (y * faceSize + x) * 4;
-                        faceData[idx+0] = tonemap(src[0]);
-                        faceData[idx+1] = tonemap(src[1]);
-                        faceData[idx+2] = tonemap(src[2]);
-                        faceData[idx+3] = 255;
-                    }
-                }
-            }
-            stbi_image_free(hdrData);
-
-            rhi::TextureDesc cmDesc;
-            cmDesc.format      = rhi::Format::RGBA8_UNORM;
-            cmDesc.width       = faceSize;
-            cmDesc.height      = faceSize;
-            cmDesc.mipLevels   = 1;
-            cmDesc.arrayLayers = 6;
-            cmDesc.usage       = rhi::TextureUsage::ShaderResource
-                               | rhi::TextureUsage::Cubemap
-                               | rhi::TextureUsage::TransferDst;
-            cmDesc.initialData = allFaces.data();
-            auto cubemap = device->CreateTexture(cmDesc);
-
-            rhi::SamplerDesc cmSamp;
-            cmSamp.minFilter  = rhi::FilterMode::Linear;
-            cmSamp.magFilter  = rhi::FilterMode::Linear;
-            cmSamp.addressU   = rhi::AddressMode::ClampToEdge;
-            cmSamp.addressV   = rhi::AddressMode::ClampToEdge;
-            cmSamp.addressW   = rhi::AddressMode::ClampToEdge;
-            auto cmSampler = device->CreateSampler(cmSamp);
-
-            Entity skyEntity = world.CreateEntity("Skybox");
-            world.AddComponent<TransformComponent>(skyEntity);
-            auto* skyComp = world.AddComponent<SkyboxComponent>(skyEntity);
-            skyComp->SetCubemap(std::move(cubemap), std::move(cmSampler));
-            sceneGraph.SetParent(skyEntity, Entity{kInvalidEntity});
-        }
-    }
-
-    // ============================================================
-    // 5. 加载 glTF 纹理 → RHI Texture → MeshComponent
-    // ============================================================
-    std::unordered_map<String,
-        std::pair<std::unique_ptr<rhi::IRHITexture>,
-                  std::unique_ptr<rhi::IRHISampler>>> g_TexCache;
-
-    auto loadTexture = [&](const String& uri) -> std::pair<rhi::IRHITexture*, rhi::IRHISampler*> {
-        if (uri.empty()) return {nullptr, nullptr};
-        String texPath = (std::filesystem::path(sponzaPath).parent_path() / uri).string();
-        auto it = g_TexCache.find(texPath);
-        if (it == g_TexCache.end()) {
-            int w, h, ch;
-            u8* pixels = stbi_load(texPath.c_str(), &w, &h, &ch, 4);
-            if (!pixels) { HE_CORE_WARN("纹理加载失败: {}", texPath); return {nullptr, nullptr}; }
-            u32 maxDim = static_cast<u32>(std::max(w, h));
-            u32 mipLevels = 1;
-            while (maxDim > 1) { maxDim >>= 1; ++mipLevels; }
-
-            rhi::TextureDesc td;
-            td.format=rhi::Format::RGBA8_UNORM;
-            td.width=static_cast<u32>(w);
-            td.height=static_cast<u32>(h);
-            td.mipLevels = mipLevels;
-            td.usage=rhi::TextureUsage::ShaderResource
-                   | rhi::TextureUsage::TransferSrc
-                   | rhi::TextureUsage::TransferDst;
-            td.initialData=pixels;
-            auto t = device->CreateTexture(td);
-            rhi::SamplerDesc sd;
-            sd.minFilter=rhi::FilterMode::Linear;
-            sd.magFilter=rhi::FilterMode::Linear;
-            sd.mipFilter=rhi::FilterMode::Linear;
-            sd.maxLod = static_cast<float>(mipLevels);
-            sd.addressU=sd.addressV=rhi::AddressMode::Repeat;
-            auto s = device->CreateSampler(sd);
-            stbi_image_free(pixels);
-            it = g_TexCache.emplace(texPath, std::make_pair(std::move(t), std::move(s))).first;
-            HE_CORE_INFO("GPU 纹理: {} ({}×{})", texPath, w, h);
-        }
-        return {it->second.first.get(), it->second.second.get()};
-    };
-
-    {
-        // 创建 bindless 默认占位纹理（必须在注册材质纹理之前设置）
-        u8 white[4]={255,255,255,255};
-        rhi::TextureDesc td;
-        td.format=rhi::Format::RGBA8_UNORM;
-        td.width=1;
-        td.height=1;
-        td.mipLevels=1;
-        td.usage=rhi::TextureUsage::ShaderResource;
-        td.initialData=white;
-        auto defaultTex = device->CreateTexture(td);
-        rhi::SamplerDesc sd;
-        sd.minFilter=sd.magFilter=rhi::FilterMode::Linear;
-        sd.addressU=sd.addressV=rhi::AddressMode::Repeat;
-        auto defaultSamp = device->CreateSampler(sd);
-        device->GetBindlessHeap()->SetDefaultTexture(
-            defaultTex.get(), defaultSamp.get());
-        g_TexCache["__default__"] = {std::move(defaultTex), std::move(defaultSamp)};
-    }
-
-    {
-        u32 texCount = 0;
-        world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent& mesh) {
-            auto [bcTex, bcSamp] = loadTexture(mesh.baseColorTexture);
-            auto [nTex, nSamp] = loadTexture(mesh.normalTexture);
-            auto [mrTex, mrSamp] = loadTexture(mesh.metallicRoughnessTexture);
-            auto [aoTex, aoSamp] = loadTexture(mesh.occlusionTexture);
-            // 材质 = 4 个连续 bindless 纹理槽（BaseColor/Normal/MetallicRoughness/Occlusion），
-            // 首调用返回值即 materialID（基索引），shader 用 texBase+0/1/2/3 采样
-            auto* heap = device->GetBindlessHeap();
-            u32 matID = heap->RegisterTexture(bcTex, bcSamp);
-            heap->RegisterTexture(nTex, nSamp);
-            heap->RegisterTexture(mrTex, mrSamp);
-            heap->RegisterTexture(aoTex, aoSamp);
-            mesh.materialID = matID;
-            texCount++;
-        });
-        HE_CORE_INFO("纹理加载 + bindless 注册完成: {} primitive, {} 张独立纹理", texCount, g_TexCache.size());
-    }
-
-    // ============================================================
-    // 6. 初始化渲染管线（Forward / Deferred；光追经 GI 层栈的 RT 源启用）
-    // ============================================================
+    // ---- 6. 初始化渲染管线（Forward / Deferred；光追经 GI 层栈的 RT 源启用） ----
     render::DeferredPipeline   deferredPipeline;   // 延迟管线（默认，GI 对比主用）
     render::ForwardPipeline    forwardPipeline;    // 前向管线
 
@@ -501,15 +1241,14 @@ int main() {
     forwardPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
 
 
-    int  g_PipelineMode = 1;                       // 0=Forward 1=Deferred 2=HybridRT
-    bool g_PendingHalfResApply = false;
-bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）⇒ 延迟到渲染命令里做            // 档位切换后延迟到帧边界重建半分辨率纹理（ImGui 回调内重建会死锁）
-    bool g_GISolo = true;                          // 只看 GI（关闭直接光）
-    int  g_GIPreset = 1;                           // GI 质量档位（默认 Medium=1）
+    int  g_PipelineMode = 1;                // 0=Forward / 1=Deferred
+    bool g_PendingHalfResApply = false;     // 档位切换后延迟到帧边界重建半分辨率纹理
+    bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）⇒ 延迟到渲染命令里做
+    bool g_GISolo = true;                   // 只看 GI（关闭直接光）
+    int  g_GIPreset = 1;                    // GI 质量档位（默认 Medium=1）
     render::IRenderPipeline* curPipeline = &deferredPipeline;
 
-    // ============================================================
-    // 白炉探针（Wave 0.2）—— 能量守恒判据的读数设施
+    // ---- 白炉探针（Wave 0.2）—— 能量守恒判据的读数设施 ----
     //
     // 目的：白炉测试要求"全白环境 + albedo=1 + 关闭直接光"时物体应消失，即
     //       任意两点亮度应相等。这里读回 HDR 目标（**色调映射之前**，线性值）
@@ -517,26 +1256,15 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
     // 实现：RHI 的 CopyTextureToBuffer 把 1×1 像素拷进 host 可见缓冲，等 GPU 完成后
     //       映射读取（RGBA16_FLOAT → half 解码）。仅在启用探针时每 N 帧执行一次，
     //       且会 WaitIdle（测试用途，不追求性能）。
-    // ============================================================
     bool  g_ProbeEnabled   = (std::getenv("HE_FURNACE_PROBE") != nullptr);   // 也可用 HE_FURNACE_PROBE=1 直接开启（便于自动化验证）
     int   g_ProbeInterval  = 30;      // 每 N 帧采一次
-    float g_ProbeCenter[3] = {0, 0, 0};   // 中心像素 RGB（线性）
-    float g_ProbeBg[3]     = {0, 0, 0};   // 背景像素 RGB（线性）
-    float g_ProbeRatio     = 0.0f;        // 中心亮度 / 背景亮度（白炉正确时应 ≈ 1）
-    float g_ProbeLumCenter = 0.0f;        // 中心亮度绝对值（白炉正确时应 = 1.0）
-    // 白炉数值测试（Wave 0.2）：源真值取白炉条件（全白环境 + albedo=1 + 关直接光）
-    bool  g_FurnaceMode    = (std::getenv("HE_FURNACE") != nullptr);   // HE_FURNACE=1 直接开启
-    std::unique_ptr<rhi::IRHIBuffer> probeBuffer;   // 2 个 RGBA16F 像素 = 32 B
-    {
-        rhi::BufferDesc pd;
-        pd.size      = 32;
-        pd.usage     = rhi::BufferUsage::Storage;   // 该路径恒定带 TRANSFER_DST，可作拷贝目标
-        pd.cpuAccess = true;                        // 需要 Map 读回
-        probeBuffer  = device->CreateBuffer(pd);
-    }
+    // 白炉模式（HE_FURNACE=1 直接开启；面板开关在 GI 控制台里）
+    bool  g_FurnaceMode    = (std::getenv("HE_FURNACE") != nullptr);
+    // 像素数值探针（机制在 Engine/Render/Debug/PixelProbe；这里只保留开关/间隔与判据阈值）
+    render::PixelProbe probe;
+    probe.Initialize(device.get(), 2);   // 两个采样点：中心 / 背景
 
-    // ============================================================
-    // GI 频谱采样（P5 步骤 0）—— 判定 DDGI 与 SSGI 是否需要"频率分离"
+    // ---- GI 频谱采样（P5 步骤 0）—— 判定 DDGI 与 SSGI 是否需要"频率分离" ----
     //
     // 目的：把"单个漫反射源独开"时的 HDR 结果与 GBuffer albedo 原样落盘，供离线做
     //       频谱分析，回答那个决定性问题——"低通(SSGI) 是否 ≈ DDGI"。
@@ -553,39 +1281,10 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
     // 采样三组配置以便做差：漫反射栈=空（基线：天空+自发光+空气透视+镜面）、=[DDGI]、=[SSGI]；
     //       后两者减去基线即得各源自身的贡献（且两者带同一 albedo，比值即频谱之比）。
     // 实现：整幅 CopyTextureToBuffer 到 host 可见缓冲。仅测试路径使用，会 WaitIdle，不追求性能。
-    // ============================================================
-    const char*  dumpTagEnv   = std::getenv("HE_DUMP_GI");
-    const char*  dumpFrameEnv = std::getenv("HE_DUMP_GI_FRAME");
-    const String g_DumpTag    = dumpTagEnv ? dumpTagEnv : "";
-    bool         g_DumpGI     = !g_DumpTag.empty();   // 非 const：失败时关闭以免每帧重试
-    const u64    g_DumpFrame  = dumpFrameEnv ? (u64)std::max(1, std::atoi(dumpFrameEnv)) : 60ull;
-    bool g_DumpDone    = false;   // 已录制拷贝（防止重复录制）
-    bool g_DumpWritten = false;   // 已落盘（防止每帧重复写文件）
-    // 【P1 / A-5 收尾】诊断读回不再用**设备级** `WaitIdle`：录制侧给本帧挂一个 timeline 信号，
-    // 读取侧只等**那一次提交**完成即可。句柄与值跨线程传递（创建/信号在拥有线程上做，
-    // `WaitForFence` 本身没有归属断言，游戏线程可以等）。
-    std::atomic<he::rhi::RHIFenceHandle> g_DumpFence{he::rhi::kInvalidFence};
-    std::atomic<u64>                    g_DumpFenceValue{0};
-    // 采样目标列表：每项一张纹理 + 一条读回缓冲（尺寸各自取自纹理本身，故可混放不同分辨率）
-    struct DumpTarget {
-        String                          name;
-        rhi::IRHITexture*               tex = nullptr;
-        std::unique_ptr<rhi::IRHIBuffer> buf;
-        u32                             w = 0, h = 0;
-        // 【2026-09-24 诊断扩展（画质阶段 0 · Lumen 探针确定性排查）】缓冲也可以落盘。
-        //   动机：探针级证据此前只能靠"辐照度纹理 + CPU 统计"间接推断，排查 Lumen 屏幕探针的
-        //   逐趟不确定性时无法区分"同一探针（身份）值不同"与"值相同但槽位被原子追加换了位置"。
-        //   用 `HE_DUMP_LUMEN_PROBES=1` 开启（默认关 ⇒ 不改变既有验收的转储集合），
-        //   落盘名 `gi_<tag>_<name>.bin`（原始字节、无文件头）。
-        bool                            isBuffer = false;
-        usize                           bytes    = 0;
-        u32                             bytesPerPixel = 8;   // 诊断：按纹理实际格式算（R16F=2 / R32F=4 / RGBA16F=8）
-    };
-    std::vector<DumpTarget> g_DumpTargets;
-    const bool dumpProbeBuffers = (std::getenv("HE_DUMP_LUMEN_PROBES") != nullptr);
-    if (g_DumpGI)
-        HE_CORE_INFO("[GI采样] 已启用：标签={} 目标帧={} 输出 build/verify/gi_{}_*.f16",
-                     g_DumpTag, g_DumpFrame, g_DumpTag);
+    // GI 采样落盘：**机制**在 Engine/Render/Debug/FrameDumpRecorder（录制拷贝 / timeline 等待 /
+    // _meta.txt 与 _camera.txt 写法都收在那里）；这里只给"哪些目标值得看"的清单（策略）。
+    auto giDump = render::FrameDumpRecorder::FromEnv();
+
 
     // 启动即应用白炉条件（HE_FURNACE=1 路径；面板开关在 GI 控制台里）
     if (g_FurnaceMode) {
@@ -782,17 +1481,13 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
 
     HE_CORE_INFO("DeferredPipeline 初始化完成");
 
-    // ============================================================
-    // 7. 创建命令列表
-    // ============================================================
+    // ---- 7. 创建命令列表 ----
     auto cmdList = device->CreateCommandList();
     cmdList->SetSwapChain(swapchain.get());
     // 预设 ToneMap PSO → 匹配 BGRA8_UNORM RP（ImGui LoadOp 兼容）
     cmdList->SetPipeline(deferredPipeline.GetToneMap()->GetPSO());
 
-    // ============================================================
-    // 8. ImGui 初始化
-    // ============================================================
+    // ---- 8. ImGui 初始化 ----
     GLFWwindow* glfwWin = engine.GetWindow()->GetNativeHandle();
     editor::ImGuiIntegration imgui;
     imgui.Initialize(glfwWin, device.get(), swapchain.get());
@@ -801,9 +1496,7 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
     static String g_ImGuiIniPath = String(HUGE_CONTENT_DIR) + "Config/06_GILab_imgui.ini";
     ImGui::GetIO().IniFilename = g_ImGuiIniPath.c_str();
 
-    // ============================================================
-    // 9. 相机 — 从配置文件加载，否则使用默认位置
-    // ============================================================
+    // ---- 9. 相机 — 从配置文件加载，否则使用默认位置 ----
     render::CameraController camCtrl;
     camCtrl.SetAspectRatio(
         static_cast<float>(swapchain->GetWidth()),
@@ -829,9 +1522,7 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
         camCtrl.SetOrientation(-1.57f, -0.1f);
     }
 
-    // ============================================================
-    // 8.5 相机平移动画（AnimationComponent 演示）
-    // ============================================================
+    // ---- 8.5 相机平移动画（AnimationComponent 演示） ----
     Entity camAnimEntity = world.CreateEntity("CameraAnimation");
     world.AddComponent<TransformComponent>(camAnimEntity);
     auto* camAnim = world.AddComponent<AnimationComponent>(camAnimEntity);
@@ -854,13 +1545,6 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
         }
         camAnim->FinalizeClip();
         camAnim->playing = false;  // 默认关闭启动动画
-        // 【为什么留一个环境变量开关】步骤 31（L5 Radiance Cache）的验收有一条是"相机移动时
-        // 无拖影累积"—— 静态相机测不出来。`HE_CAMERA_ORBIT=1` 让这条圆形路径直接跑起来。
-        // 注意它按**墙钟** deltaTime 推进 ⇒ 该模式下的画面不保证逐位可复现（静态模式不受影响）。
-        if (std::getenv("HE_CAMERA_ORBIT")) {
-            camAnim->playing = true;
-            HE_CORE_INFO("相机动画已启用（HE_CAMERA_ORBIT=1）：用于验证时间混合无拖影累积");
-        }
     }
     sceneGraph.SetParent(camAnimEntity, Entity{kInvalidEntity});
     HE_CORE_INFO("相机动画已创建: {} 秒圆形路径", 6.0f);
@@ -869,9 +1553,7 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
     bool   animCameraMode = true;
     double lastMouseX = 0.0, lastMouseY = 0.0;
 
-    // ============================================================
-    // 10. 窗口调整回调
-    // ============================================================
+    // ---- 10. 窗口调整回调 ----
     engine.GetWindow()->SetResizeCallback([&](u32 w, u32 h) {
         if (w == 0 || h == 0) return;
         swapchain->Resize(w, h);
@@ -881,9 +1563,7 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
         camCtrl.SetAspectRatio(static_cast<float>(w), static_cast<float>(h));
     });
 
-    // ============================================================
-    // 11. 主渲染循环
-    // ============================================================
+    // ---- 11. 主渲染循环 ----
     HE_CORE_INFO("06.GILab (Cornell Box) 启动 — WASD=移动, 右键拖拽=旋转, Shift=加速, E/Q=升降");
     u64 frameIndex = 0;
     f64 lastTime   = glfwGetTime();
@@ -912,18 +1592,16 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
     // Submit → 探测读回 → Present）都在它上面执行；游戏线程只做输入/相机/装配快照/ImGui 的 CPU 侧，
     // 并按帧用**严格握手**（`SubmitAndWait`）等待本帧做完才继续下一帧。
     // 判据：模式 0 与模式 1 的转储逐位一致（实测 0 像素）、无归属断言、帧时间不退化。
-    // `HE_RENDER_THREAD_FORCE_SHELL=1` 可强制退回壳模式（对照实验用）。
-    const bool forceShell = std::getenv("HE_RENDER_THREAD_FORCE_SHELL") != nullptr;
     // 【模式 2】RHI 线程（三线程形态）：渲染线程的 Submit/Present 被路由到它，由它真正提交/呈现
     he::render::RHIThread rhiThread;
-    // 【统一切换入口】`mode` 为下拉选择的目标模式；`forceShell` 仅用于对照实验（强制壳模式）
+    // 【统一切换入口】`mode` 为下拉选择的目标模式（壳模式请直接用 RenderThread 的未启动形态）
     // 【为什么按"先停后起、停 RHI 先于渲染、起渲染先于 RHI"】任意两种模式之间切换都必须走这条路：
     //   · 停：RHI 线程先排空（它可能持有未提交的命令），否则渲染线程退出时还有路由在飞；
     //   · 起：渲染线程先起来（录制者），RHI 线程随后装路由（提交者）—— 反过来会让首帧的提交
     //     先路由到一个还没起来的线程（`RouteSubmit` 会退回就地执行，虽不丢命令但语义不清）。
     auto applyThreadingMode = [&](he::RenderThreadingMode mode) {
-        const bool wantRender = (mode != he::RenderThreadingMode::SingleThreaded) && !forceShell;
-        const bool wantRhi    = (mode == he::RenderThreadingMode::RenderThreadAndRHI) && !forceShell;
+        const bool wantRender = (mode != he::RenderThreadingMode::SingleThreaded);
+        const bool wantRhi    = (mode == he::RenderThreadingMode::RenderThreadAndRHI);
 
         // ① 先改模式（线程启停期间日志/`UsesRenderThread()` 与目标一致）
         he::SetRenderThreadingMode(mode);
@@ -970,110 +1648,58 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
         f64 now       = glfwGetTime();
         f32 deltaTime = static_cast<f32>(now - lastTime);
         lastTime      = now;
-        // 【步骤 37】CPU 侧耗时：从帧首到 Present 之前。与墙钟帧时一起看才能判定"CPU 受限还是
-        // GPU 受限"—— 只看墙钟帧率会把"CPU 在重建帧图"误读成"GPU 太慢"，从而去优化错的对象。
-        const auto cpuT0 = std::chrono::steady_clock::now();
 
         engine.GetWindow()->PollEvents();
 
         // 【帧首落地】下拉选择与当前生效模式不一致时，在这里统一切换（下一帧命令即按新模式走）
-        // 【自动化验证钩子】`HE_THREADING_MODE_CYCLE=<N>`：每 N 帧按 0→1→2→0 轮换一次模式，
-        // 用来在无人值守下验证"三种模式任意切换"（默认关 ⇒ 不影响正常使用）。
-        if (const char* cycleEnv = std::getenv("HE_THREADING_MODE_CYCLE")) {
-            const int period = std::max(1, std::atoi(cycleEnv));
-            if (frameIndex % (u64)period == 0ull && frameIndex > 0ull) {
-                static u64 s_LastCycleFrame = ~0ull;
-                if (s_LastCycleFrame != frameIndex) {
-                    s_LastCycleFrame = frameIndex;
-                    g_UiThreadingMode = (g_UiThreadingMode + 1) % 3;
-                    HE_CORE_INFO("06.GILab：[自动轮换] 第 {} 帧切到模式 {}", frameIndex, g_UiThreadingMode);
-                }
-            }
-        }
         if (g_UiThreadingMode != static_cast<int>(he::GetRenderThreadingMode())) {
             applyThreadingMode(static_cast<he::RenderThreadingMode>(g_UiThreadingMode));
         }
 
         bool frameAborted = false;   // 渲染命令里 Acquire 失败时置位（命令可能在别的线程跑）
-        // 管线 CPU 侧耗时累计（命令 1 里累加、命令 2 的帧率读数里消费 ⇒ 提到帧体层级）
-        static double s_accPipelineMs = 0.0;
 
-    // 【T2.2 步骤 (b)】一帧两条命令的统一交接：模式 0 直接在本线程执行（此时本线程就是渲染
-    // 线程）；模式 1/2 经队列 + **严格握手**（`SubmitAndWait`）⇒ 游戏线程在渲染线程工作期间
-    // 阻塞，所以命令里 `[&]` 捕获的帧内局部量不会被并发改写（T2.6 会换成类型化载荷 + cv 唤醒）。
-    // 【T2.4 步骤 (b)：去掉每帧的第二次握手】`waitForCompletion = false` 时**只发布不等待** ——
-    // 真线程模式下渲染线程按 FIFO 消费，所以"下一帧的命令 1"必然在"本帧的命令 2"之后执行；
-    // 于是游戏线程**不必**在命令 2 之后等待，可以直接去准备下一帧（输入/相机/装配快照），
-    // 与渲染线程执行本帧命令 2（ImGui 录制 + Submit + Present）**重叠**。
-    // 帧内资源仍安全：命令 2 不读快照，而同一份 `cmdList` 由 FIFO 保证了先来后到。
-    u64 lastAsyncFrame = UINT64_MAX;
-    auto submitRender = [&](auto&& fn, bool waitForCompletion = true) {
-        if (useRenderQueue) {
-            renderQueue.BeginFrame();
-            renderQueue.Enqueue([&](render::RenderThreadContext&) { fn(); });
-            if (waitForCompletion) {
-                bool timedOut = false;
-                frameScheduler.SubmitAndWait(timedOut);
-                if (timedOut) HE_CORE_WARN("06.GILab：等待本帧渲染命令完成超时");
-            } else {
-                // 只发布：真线程模式下由渲染线程执行；壳模式下 SubmitAndPump 会就地执行并回收
-                lastAsyncFrame = frameScheduler.SubmitAndPump();
-            }
-        } else {
-            fn();
-        }
-    };
-
-
-        // --- 相机控制（鼠标右键拖拽旋转 / WASD+EQ 移动 / T 切换相机动画）---
-        // 【回归修复】这段在 `da57916`（把帧体拆成两条渲染命令）时被整段丢失，导致鼠标与键盘都无法
-        // 操作相机。它属于**游戏线程的帧前准备**（必须在装配快照之前更新相机），因此放在这里：
-        // acquire 已在命令 1 里、与输入无关，故输入直接前置即可。
-        // --- 相机控制 ---
-        {
-            bool mouseDown = glfwGetMouseButton(glfwWin, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
-            if (mouseDown && !rightMouseDown) {
-                rightMouseDown = true;
-                glfwGetCursorPos(glfwWin, &lastMouseX, &lastMouseY);
-                glfwSetInputMode(glfwWin, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-            } else if (!mouseDown && rightMouseDown) {
-                rightMouseDown = false;
-                glfwSetInputMode(glfwWin, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-            } else if (mouseDown && rightMouseDown) {
-                double cx, cy;
-                glfwGetCursorPos(glfwWin, &cx, &cy);
-                float dx = static_cast<float>(cx - lastMouseX);
-                float dy = static_cast<float>(cy - lastMouseY);
-                lastMouseX = cx;
-                lastMouseY = cy;
-                camCtrl.Rotate(dx * 0.003f, -dy * 0.003f);
-            }
-
-            // T 键切换动画/手动相机模式
-            static bool tWasDown = false;
-            bool tDown = glfwGetKey(glfwWin, GLFW_KEY_T) == GLFW_PRESS;
-            if (tDown && !tWasDown) animCameraMode = !animCameraMode;
-            tWasDown = tDown;
-
-            // 动画相机模式：动画播放时同步 AnimationComponent 的位置
-            if (animCameraMode && camAnim->playing) {
-                auto* camTf = world.GetComponent<TransformComponent>(camAnimEntity);
-                if (camTf) {
-                    camCtrl.SetPosition(camTf->position);
-                    float3 toOrigin = glm::normalize(float3(0, 200, 0) - camTf->position);
-                    camCtrl.SetOrientationFromForward(toOrigin);
+        // 【T2.2 步骤 (b)】一帧两条命令的统一交接：模式 0 直接在本线程执行（此时本线程就是渲染
+        // 线程）；模式 1/2 经队列 + **严格握手**（`SubmitAndWait`）⇒ 游戏线程在渲染线程工作期间
+        // 阻塞，所以命令里 `[&]` 捕获的帧内局部量不会被并发改写（T2.6 会换成类型化载荷 + cv 唤醒）。
+        // 【T2.4 步骤 (b)：去掉每帧的第二次握手】`waitForCompletion = false` 时**只发布不等待** ——
+        // 真线程模式下渲染线程按 FIFO 消费，所以"下一帧的命令 1"必然在"本帧的命令 2"之后执行；
+        // 于是游戏线程**不必**在命令 2 之后等待，可以直接去准备下一帧（输入/相机/装配快照），
+        // 与渲染线程执行本帧命令 2（ImGui 录制 + Submit + Present）**重叠**。
+        // 帧内资源仍安全：命令 2 不读快照，而同一份 `cmdList` 由 FIFO 保证了先来后到。
+        u64 lastAsyncFrame = UINT64_MAX;
+        auto submitRender = [&](auto&& fn, bool waitForCompletion = true) {
+            if (useRenderQueue) {
+                renderQueue.BeginFrame();
+                renderQueue.Enqueue([&](render::RenderThreadContext&) { fn(); });
+                if (waitForCompletion) {
+                    bool timedOut = false;
+                    frameScheduler.SubmitAndWait(timedOut);
+                    if (timedOut) HE_CORE_WARN("06.GILab：等待本帧渲染命令完成超时");
+                } else {
+                    // 只发布：真线程模式下由渲染线程执行；壳模式下 SubmitAndPump 会就地执行并回收
+                    lastAsyncFrame = frameScheduler.SubmitAndPump();
                 }
+            } else {
+                fn();
             }
+        };
 
-            render::CameraController::MoveInput moveIn;
-            moveIn.forward  = glfwGetKey(glfwWin, GLFW_KEY_W) == GLFW_PRESS;
-            moveIn.backward = glfwGetKey(glfwWin, GLFW_KEY_S) == GLFW_PRESS;
-            moveIn.left     = glfwGetKey(glfwWin, GLFW_KEY_A) == GLFW_PRESS;
-            moveIn.right    = glfwGetKey(glfwWin, GLFW_KEY_D) == GLFW_PRESS;
-            moveIn.up       = glfwGetKey(glfwWin, GLFW_KEY_E) == GLFW_PRESS;
-            moveIn.down     = glfwGetKey(glfwWin, GLFW_KEY_Q) == GLFW_PRESS;
-            moveIn.sprint   = glfwGetKey(glfwWin, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
-            camCtrl.Update(deltaTime, moveIn);
+
+        // --- 相机控制（鼠标右键拖拽旋转 / WASD+EQ 移动 / T 切换动画相机）---
+        // 轮询与状态机统一在 Samples/Common/CameraInput.h（六个样例共用，手感一致）；
+        // 这里只保留样例自己的策略：T 键在"动画相机 / 手动相机"之间切换。
+        // 动画相机模式：先让 AnimationComponent 覆盖位置/朝向，再让输入叠加（与旧顺序一致）。
+        if (animCameraMode && camAnim->playing) {
+            if (auto* camTf = world.GetComponent<TransformComponent>(camAnimEntity)) {
+                camCtrl.SetPosition(camTf->position);
+                const float3 toOrigin = glm::normalize(float3(0, 200, 0) - camTf->position);
+                camCtrl.SetOrientationFromForward(toOrigin);
+            }
+        }
+        static he::samples::CameraInput camInput;   // 跨帧保存右键/光标/切换键状态
+        if (camInput.Update(glfwWin, camCtrl, deltaTime, {.toggleKey = GLFW_KEY_T})) {
+            animCameraMode = !animCameraMode;
+            camInput.Reset();   // 切回手动时丢弃过期的光标坐标，避免视角跳一下
         }
 
         // Transform 动画更新（驱动 AnimationComponent → TransformComponent）
@@ -1084,1002 +1710,55 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
 
         // --- 渲染（按选择的管线执行；各管线均通过 RenderGraph 自动编排）---
         // ---- 命令 1：Acquire + 录制（管线）----
-        auto recordScene = [&]() {
-            if (!framePresenter.BeginFrame()) {
-                HE_CORE_WARN("06.GILab：AcquireNextImage 失败，跳过本帧剩余部分");
-                frameAborted = true;   // 命令可能在渲染线程跑 ⇒ 用标志代替 while 的 continue
-                return;
-            }
+        // 两条渲染命令的录制体（全引用成员；见 main 之前的 GILabFrameRecorder）
+        GILabFrameRecorder frameRec{imgui, framePresenter, device, cmdList, swapchain, engine,
+                                    deferredPipeline, forwardPipeline, curPipeline, camCtrl,
+                                    giDump, probe, world, sceneGraph, frameIndex,
+                                    g_PipelineMode, g_ProbeInterval, g_ProbeEnabled, g_FurnaceMode,
+                                    g_PendingPipelineSwitch, g_PendingHalfResApply, noVsync};
 
-            // 控件里请求的管线切换（含 RHI）在这里（渲染线程）落地
-            if (g_PendingPipelineSwitch) {
-                g_PendingPipelineSwitch = false;
-                curPipeline->SetSwapChain(swapchain.get());
-                curPipeline->OnResize(swapchain->GetWidth(), swapchain->GetHeight());
-            }
-
-            framePresenter.BeginRecording(device.get(), cmdList.get());   // L4-2
-            switch (g_PipelineMode) {
-            case 0:  // Forward
-                curPipeline = &forwardPipeline;
-                break;
-            default: // Deferred（含光追源：RT 已归入 GI 层栈，无需独立管线）
-                curPipeline = &deferredPipeline;
-                break;
-            }
-            curPipeline->NextFrame();
-            // 【阶段 1 §15.1 第③段：帧入口收快照】装配在**游戏线程**统一经接口完成（三条管线同构；
-            // `AssembleScene` 每帧幂等 ⇒ Forward 分支下面再调一次也无副作用）。必须在任何阴影收集之前，
-            // 因为阴影技术现在从快照取几何与光源。
-            curPipeline->GetFrameAssembler().AssembleScene(world, sceneGraph, camCtrl.GetCamera());
-            // --- Forward 的阴影系统必须由**调用方**驱动（任务 34 / §9.2-AD）---
-            // `ShadowSystem` 不像 GI 子系统那样自己从帧图拿数据：它要靠调用方先
-            // `SetRenderResources`（对象/阴影缓冲 + 描述符集）再 `Update`（收集投影光源、拟合 CSM），
-            // 之后 `HasActiveShadows()` 才为真。02.Cube / 03.Sponza-Forward / AISamples 都这么做，
-            // **06.GILab 此前漏了** ⇒ Forward 模式下 `Shadow` 与 `RSM_Generate` 两个 pass 都不注册：
-            // 画面**没有阴影**，RSM 源恒为 0（而"层栈改变画面 / 多源不变亮 / 双源等于加权平均"
-            // 三条判据在"某个源恒为 0"时全部成立，看不出这件事）。
-            // 位置：必须在 NextFrame 之后（阴影缓冲按飞行帧轮换）且在本帧 Render 之前（帧图按
-            // `HasActiveShadows()` 门控）。Deferred 侧由管线内部自己驱动，这里只处理 Forward。
-            if (g_PipelineMode == 0) {
-                if (auto* shadowSys = forwardPipeline.GetShadowSystem()) {
-                    shadowSys->SetRenderResources(forwardPipeline.GetCurrentShadowObjectBuffer(),
-                                                  forwardPipeline.GetCurrentShadowBuffer(),
-                                                  forwardPipeline.GetCurrentDescSet());
-                    render::SubsystemContext shadowCtx;
-                    shadowCtx.camera     = &camCtrl.GetCamera();
-                    // 物理天空的太阳方向先同步到方向光：阴影与光照必须同向（02.Cube 同款做法）
-                    he::SyncPhysicalSkyToSun(world);
-                    // 快照已在上面统一装配（`AssembleScene` 幂等）；阴影收集吃的就是它
-                    shadowCtx.snapshot     = &forwardPipeline.GetFrameSnapshot();
-                    shadowCtx.meshRegistry = &forwardPipeline.GetMeshRegistry();
-                    shadowSys->Update(shadowCtx);
-                    forwardPipeline.GetFrameAssembler().ResolveLightShadowIndices(
-                        [&](he::Entity le) { return shadowSys->GetShadowIndex(le); });
-                    forwardPipeline.GetFrameAssembler().ReserveOnce();
-                }
-            }
-            // 帧边界应用延迟的半分辨率纹理重建（先等待 GPU 空闲，避免销毁正在使用的纹理）
-            if (g_PendingHalfResApply) {
-                device->WaitIdle();
-                if (auto* dpApply = dynamic_cast<render::DeferredPipeline*>(curPipeline)) {
-                    dpApply->GetSSGI()->OnResize(swapchain->GetWidth(), swapchain->GetHeight());
-                    dpApply->GetSSR()->OnResize(swapchain->GetWidth(), swapchain->GetHeight());
-                    dpApply->GetSSAO().OnResize(swapchain->GetWidth(), swapchain->GetHeight());
-                }
-                g_PendingHalfResApply = false;
-            }
-            // 【步骤 37】管线 CPU 侧耗时（重建帧图 + 录制 + 提交）与"其余 CPU"分开计：
-            // 整帧 CPU 受限时，先要知道这 50 ms 是花在管线里还是花在样例/ImGui 里，否则优化对象会选错。
-            {
-                const auto t0 = std::chrono::steady_clock::now();
-                // 【T2.2 步骤 (b)】管线渲染与其余 RHI 调用一起放进本帧的**第一条命令**，
-                // 不再单独经队列（一帧两条命令，见下面 submitRender 的两处调用）。
-                curPipeline->Render(cmdList.get(), curPipeline->GetFrameSnapshot(),
-                                     camCtrl.GetCamera(), deltaTime);
-                s_accPipelineMs += std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - t0).count();
-            }
-
-            // --- 崩溃处理器自检（Wave 0.8）---
-            // 设置环境变量 HE_CRASH_TEST=1 启动，会在第 3 帧主动解引用空指针，
-            // 用于验证崩溃处理器能否打出完整调用栈（默认关闭，不影响正常使用）。
-            // 放在 Render 之后是为了让调用栈具备真实深度。
-            if (std::getenv("HE_CRASH_TEST")) {
-                static int s_CrashTestFrame = 0;
-                if (++s_CrashTestFrame == 3) {
-                    HE_CORE_ERROR("HE_CRASH_TEST=1：主动触发崩溃，用于验证崩溃处理器");
-                    volatile int* nullPtr = nullptr;   // volatile 保证编译器不优化掉这次写入
-                    *nullPtr = 1;
-                }
-            }
-
-        };
-        submitRender(recordScene);
+        submitRender([&] { frameRec.RecordScene(frameAborted, deltaTime); });
         if (frameAborted) continue;   // Acquire 失败：跳过本帧剩余部分
 
+        // UI 依赖（全引用成员；见 main 之前的 GILabUI）
+        GILabUI uiDeps{deferredPipeline, forwardPipeline, curPipeline, camCtrl, world, sceneGraph,
+                       device, swapchain, probe, deltaTime,
+                       g_PipelineMode, g_GISolo, g_GIPreset, g_UiThreadingMode,
+                       g_ProbeEnabled, g_ProbeInterval, g_FurnaceMode,
+                       g_PendingPipelineSwitch, g_PendingHalfResApply};
+
         imgui.BeginFrame();
-        ImGui::SetNextWindowPos({10, 10}, ImGuiCond_Once);
-        ImGui::SetNextWindowBgAlpha(0.55f);
-        ImGui::Begin("06.GILab (Cornell Box)");
-        {
-            float fps = 1.0f / (deltaTime > 0.001f ? deltaTime : 0.016f);
-            ImGui::TextColored({0.3f, 1.0f, 0.3f, 1.0f}, "FPS: %.0f", fps);
-            ImGui::SameLine(120);
-            ImGui::TextColored({0.6f, 0.6f, 0.6f, 1.0f}, "(%.2f ms)", deltaTime * 1000.0f);
+        uiDeps.DrawMainPanel();   // 主窗口（实现见 main 之前）
 
-            ImGui::SeparatorText("延迟渲染管线");
-            ImGui::Text("GBuffer + Lighting Pass (全屏 PBR)");
-            ImGui::Text("3×MRT (albedo+metallic | normal+roughness | emissive+ao) + D32");
-            bool clustered = deferredPipeline.GetClusteredShading().enabled;
-            if (ImGui::Checkbox("Clustered Shading", &clustered))
-                deferredPipeline.GetClusteredShading().enabled = clustered;
-            if (clustered) {
-                ImGui::SameLine();
-                ImGui::TextColored({0.5f, 1.0f, 0.5f, 1.0f}, "%u clusters",
-                    deferredPipeline.GetClusteredShading().GetClusterCount());
-            }
-            bool gpuCull = deferredPipeline.GetGPUCulling().enabled;
-            if (ImGui::Checkbox("GPU 视锥剔除", &gpuCull))
-                deferredPipeline.GetGPUCulling().enabled = gpuCull;
-            if (gpuCull) {
-                ImGui::SameLine();
-                ImGui::TextColored({0.5f, 1.0f, 0.5f, 1.0f}, "%u 可见",
-                    deferredPipeline.GetGPUCulling().GetLastVisibleCount());
-            }
-
-            // 相机
-            ImGui::SeparatorText("相机");
-            // ---- 渲染线程模式（T2.4/T2.2）----
-        {
-            static const char* kModeItems[] = {
-                "0  单线程（收集/录制/提交/呈现都在游戏线程）",
-                "1  游戏线程 + 渲染线程（整帧 RHI 归渲染线程）",
-                "2  游戏线程 + 渲染线程 + RHI 线程（RHI 线程 = 唯一提交者）",
-            };
-            int sel = g_UiThreadingMode;
-            ImGui::SetNextItemWidth(360.0f);
-            if (ImGui::Combo("渲染线程模式##threading", &sel, kModeItems, IM_ARRAYSIZE(kModeItems))) {
-                g_UiThreadingMode = sel;   // 帧首统一生效（切换需要排空并停/起线程）
-            }
-            ImGui::TextDisabled("当前生效：%s；三种模式可任意切换，切换在下一帧帧首生效",
-                                he::RenderThreadingModeName(he::GetRenderThreadingMode()));
-        }
-
-        ImGui::DragFloat3("位置##Camera", &camCtrl.GetCamera().position[0], 5.0f);
-            float yawDeg   = glm::degrees(camCtrl.GetYaw());
-            float pitchDeg = glm::degrees(camCtrl.GetPitch());
-            if (ImGui::SliderFloat("Yaw", &yawDeg, -180.0f, 180.0f, "%.1f°"))
-                camCtrl.SetOrientation(glm::radians(yawDeg), camCtrl.GetPitch());
-            if (ImGui::SliderFloat("Pitch", &pitchDeg, -85.0f, 85.0f, "%.1f°"))
-                camCtrl.SetOrientation(camCtrl.GetYaw(), glm::radians(pitchDeg));
-            float moveSpeed = camCtrl.GetMoveSpeed();
-            if (ImGui::DragFloat("移动速度", &moveSpeed, 1.0f, 1.0f, 500.0f, "%.0f"))
-                camCtrl.SetMoveSpeed(moveSpeed);
-            float nearP = camCtrl.GetCamera().nearPlane;
-            float farP  = camCtrl.GetCamera().farPlane;
-            if (ImGui::DragFloat("近裁剪面", &nearP, 0.01f, 0.001f, 10.0f, "%.3f"))
-                camCtrl.GetCamera().nearPlane = nearP;
-            if (ImGui::DragFloat("远裁剪面", &farP, 10.0f, 10.0f, 50000.0f, "%.0f"))
-                camCtrl.GetCamera().farPlane = farP;
-
-
-            // ── AutoExposure ──
-            ImGui::SeparatorText("AutoExposure");
-            {
-                auto& ae = deferredPipeline.GetAutoExposure();
-                bool aeOn = ae.IsEnabled();
-                if (ImGui::Checkbox("启用自动曝光", &aeOn)) ae.SetEnabled(aeOn);
-                if (aeOn) {
-                    ImGui::Indent(12.0f);
-                    float s = ae.GetAdaptSpeed();
-                    if (ImGui::SliderFloat("适应速度", &s, 0.1f, 10.0f, "%.1f")) ae.SetAdaptSpeed(s);
-                    float t = ae.GetTargetLum();
-                    if (ImGui::SliderFloat("目标亮度", &t, 0.01f, 1.0f, "%.2f")) ae.SetTargetLum(t);
-                    ImGui::Text("当前曝光: %.2f", ae.GetExposure());
-                    ImGui::Unindent(12.0f);
-                }
-            }
-
-            // 场景统计
-            ImGui::SeparatorText("场景");
-            u32 meshCount = 0, dirLightCount = 0, spotCount = 0;
-            world.ForEach<he::MeshComponent>([&](he::Entity, he::MeshComponent&) { meshCount++; });
-            world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight&) { dirLightCount++; });
-            world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight&) { spotCount++; });
-            ImGui::Text("%u 网格  |  %u 方向光  |  %u 点光  |  %u 聚光", meshCount, dirLightCount, 1, spotCount);
-
-            // ── 光源列表：类型 / 开关 / 颜色 / 强度 / 方向（可直接编辑）──
-            ImGui::SeparatorText("光源");
-            int lightId = 0;
-            world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& l) {
-                ImGui::PushID(lightId++);
-                ImGui::TextUnformatted("方向光"); ImGui::SameLine();
-                ImGui::Checkbox("启用##dl", &l.enabled); ImGui::SameLine();
-                ImGui::ColorEdit3("颜色##dl", &l.color.x, ImGuiColorEditFlags_NoInputs); ImGui::SameLine();
-                ImGui::SetNextItemWidth(90.0f);
-                ImGui::DragFloat("强度##dl", &l.intensity, 0.05f, 0.0f, 100.0f, "%.2f");
-                ImGui::SetNextItemWidth(220.0f);
-                ImGui::DragFloat3("方向##dl", &l.direction.x, 0.01f, -1.0f, 1.0f, "%.2f");
-                ImGui::Checkbox("投射阴影##dl", &l.castShadow);
-                ImGui::PopID();
-            });
-            world.ForEach<he::PointLight>([&](he::Entity e, he::PointLight& l) {
-                ImGui::PushID(lightId++);
-                ImGui::TextUnformatted("点光  "); ImGui::SameLine();
-                ImGui::Checkbox("启用##pl", &l.enabled); ImGui::SameLine();
-                ImGui::ColorEdit3("颜色##pl", &l.color.x, ImGuiColorEditFlags_NoInputs); ImGui::SameLine();
-                ImGui::SetNextItemWidth(90.0f);
-                ImGui::DragFloat("强度##pl", &l.intensity, 0.05f, 0.0f, 100.0f, "%.2f");
-                ImGui::SetNextItemWidth(90.0f);
-                ImGui::DragFloat("范围##pl", &l.range, 0.1f, 0.1f, 500.0f, "%.1f");
-                // 位置编辑：修改本地变换后标记 SceneGraph 脏，GetWorldPosition 即时反映
-                if (auto* tf = world.GetComponent<he::TransformComponent>(e)) {
-                    float3 p = tf->position;
-                    if (ImGui::DragFloat3("位置##pl", &p.x, 0.1f, -500.0f, 500.0f, "%.1f")) {
-                        tf->position = p;
-                        sceneGraph.MarkDirty(e);
-                    }
-                }
-                ImGui::PopID();
-            });
-            world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight& l) {
-                ImGui::PushID(lightId++);
-                ImGui::TextUnformatted("聚光  "); ImGui::SameLine();
-                ImGui::Checkbox("启用##sl", &l.enabled); ImGui::SameLine();
-                ImGui::ColorEdit3("颜色##sl", &l.color.x, ImGuiColorEditFlags_NoInputs); ImGui::SameLine();
-                ImGui::SetNextItemWidth(90.0f);
-                ImGui::DragFloat("强度##sl", &l.intensity, 0.05f, 0.0f, 100.0f, "%.2f");
-                ImGui::SetNextItemWidth(90.0f);
-                ImGui::DragFloat("范围##sl", &l.range, 0.1f, 0.1f, 500.0f, "%.1f");
-                ImGui::SetNextItemWidth(160.0f);
-                ImGui::DragFloat3("方向##sl", &l.direction.x, 0.01f, -1.0f, 1.0f, "%.2f");
-                ImGui::PopID();
-            });
-            world.ForEach<he::RectLight>([&](he::Entity, he::RectLight& l) {
-                ImGui::PushID(lightId++);
-                ImGui::TextUnformatted("矩形光"); ImGui::SameLine();
-                ImGui::Checkbox("启用##rl", &l.enabled); ImGui::SameLine();
-                ImGui::ColorEdit3("颜色##rl", &l.color.x, ImGuiColorEditFlags_NoInputs); ImGui::SameLine();
-                ImGui::SetNextItemWidth(90.0f);
-                ImGui::DragFloat("强度##rl", &l.intensity, 0.05f, 0.0f, 100.0f, "%.2f");
-                ImGui::SetNextItemWidth(90.0f);
-                ImGui::DragFloat("范围##rl", &l.range, 0.1f, 0.1f, 500.0f, "%.1f");
-                ImGui::PopID();
-            });
-            if (lightId == 0) {
-                ImGui::TextUnformatted("（场景中无光源）");
-            }
-        }
-        ImGui::End();
-
-        // ============================================================
-        // 独立 GI 控制面板：渲染管线 → GI 质量档位 → GI 四通道（可用性 + 参数）
+        // ---- 独立 GI 控制面板：渲染管线 → GI 质量档位 → GI 四通道（可用性 + 参数） ----
         // 与主面板分离，便于独立摆放/查看
-        // ============================================================
         // 首次使用时默认摆放在主面板右侧（之后由 imgui.ini 恢复用户位置/大小）
-        ImGui::SetNextWindowPos(ImVec2(560.0f, 10.0f), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(430.0f, 700.0f), ImGuiCond_FirstUseEver);
-        ImGui::Begin("GI 控制台");
-        {
-            // ── 渲染管线选择（Forward / Deferred）──
-            // 注：光追已归入 GI 源（层栈中的 RTGI/RT 反射/RTAO/RT 阴影），
-            //     Deferred 管线勾选 RT 源即等价于此前的 HybridRT，无需独立管线
-            ImGui::SeparatorText("渲染管线");
-            {
-                const char* pipelineNames[] = {"Forward", "Deferred"};
-                int prevMode = g_PipelineMode;
-                ImGui::Combo("管线##pipeline", &g_PipelineMode, pipelineNames, 2);
-                if (g_PipelineMode != prevMode) {
-                    // 切换管线：确保交换链与视口尺寸同步。
-                    // 【T2.2】`SetSwapChain`/`OnResize` 都是 RHI 调用 ⇒ 不能在这里做（控件跑在游戏
-                    // 线程），改为置标志、由**下一条渲染命令**在渲染线程上执行。
-                    g_PendingPipelineSwitch = true;
-                }
-            }
-
-            // ── GI 实验室：只看 GI（关闭直接光）→ 逐个开启 GI 看间接光贡献 ──
-            ImGui::SeparatorText("GI 实验室");
-            if (ImGui::Checkbox("只看 GI（关闭直接光）", &g_GISolo)) {
-                // 关闭/恢复所有直接光源：画面只剩 GI（IBL/SSGI/DDGI/RSM 等）的间接光
-                world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& l){ l.enabled = !g_GISolo; });
-                world.ForEach<he::PointLight>([&](he::Entity, he::PointLight& l){ l.enabled = !g_GISolo; });
-                world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight& l){ l.enabled = !g_GISolo; });
-                world.ForEach<he::RectLight>([&](he::Entity, he::RectLight& l){ l.enabled = !g_GISolo; });
-            }
-            ImGui::TextWrapped("开启后画面只剩 GI 间接光——\n逐个启用 SSGI/DDGI 看各自贡献；IBL 强度即环境 GI 强度。");
-
-            // ── 白炉探针（Wave 0.2）：能量守恒的数值读数 ──
-            ImGui::SeparatorText("白炉探针（能量守恒）");
-            ImGui::Checkbox("启用探针（读回 HDR 目标像素）", &g_ProbeEnabled);
-            ImGui::SetNextItemWidth(120.0f);
-            ImGui::SliderInt("采样间隔(帧)", &g_ProbeInterval, 1, 120);
-            if (ImGui::Checkbox("白炉数值测试（源真值=1）", &g_FurnaceMode)) {
-                // 白炉条件：全白环境 + albedo=1 + 关闭直接光（源真值由 shader 代入，这里保证场景端一致）
-                if (auto* gcPtr = curPipeline->GetGIConfig()) gcPtr->furnaceMode = g_FurnaceMode;
-                if (g_FurnaceMode) g_ProbeEnabled = true;   // 打开白炉即自动开探针
-                if (g_FurnaceMode) {
-                    g_GISolo = true;   // 关闭全部直接光
-                    world.ForEach<he::DirectionalLight>([&](he::Entity, he::DirectionalLight& l){ l.enabled = false; });
-                    world.ForEach<he::PointLight>([&](he::Entity, he::PointLight& l){ l.enabled = false; });
-                    world.ForEach<he::SpotLight>([&](he::Entity, he::SpotLight& l){ l.enabled = false; });
-                    world.ForEach<he::RectLight>([&](he::Entity, he::RectLight& l){ l.enabled = false; });
-                    if (auto* gi = curPipeline->GetGI()) {   // 环境强度取 1（白炉真值）
-                        auto s = gi->GetSettings();
-                        s.intensity = 1.0f;
-                        gi->SetSettings(s);
-                    }
-                }
-            }
-            ImGui::TextWrapped("白炉条件：全白环境 + albedo=1 + 关闭直接光 → 各源真值均为 1，\n"
-                               "正确的分层合成应恰好读回 1.0；>1 即存在归一化之外的双重计数。");
-            if (g_ProbeEnabled) {
-                ImGui::Text("中心像素 (线性 RGB): %.4f %.4f %.4f", g_ProbeCenter[0], g_ProbeCenter[1], g_ProbeCenter[2]);
-                ImGui::Text("背景像素 (线性 RGB): %.4f %.4f %.4f", g_ProbeBg[0], g_ProbeBg[1], g_ProbeBg[2]);
-                // 白炉正确时：物体消失 → 中心与背景都应等于环境真值 1.0
-                const bool ok = (g_ProbeRatio > 0.98f && g_ProbeRatio < 1.02f);
-                const ImVec4 col = ok ? ImVec4(0.3f, 0.9f, 0.3f, 1.0f) : ImVec4(1.0f, 0.6f, 0.2f, 1.0f);
-                ImGui::TextColored(col, "亮度比 中心/背景 = %.4f   (白炉判据 0.98 ~ 1.02)", g_ProbeRatio);
-                ImGui::TextColored(col, "中心亮度 = %.4f   (白炉真值 1.0)", g_ProbeLumCenter);
-            }
-
-            // ── GI 质量档位（紧随管线选择）──
-            ImGui::SeparatorText("GI 质量档位");
-            const char* presetNames[] = {"Low", "Medium", "High", "Ultra"};
-            render::GIConfig& gc = *curPipeline->GetGIConfig();
-            const u32  giCaps = curPipeline->GetGIPipelineCaps();
-            const bool rtOk   = device->GetCaps().supportsRayTracing;
-            if (ImGui::Combo("档位##preset", &g_GIPreset, presetNames, 4)) {
-                // 应用预设 + 按「管线能力 ∧ 设备能力」自动降级
-                gc = render::GIRegistry::Degrade(render::GIConfigFromPreset((render::GIQualityPreset)g_GIPreset),
-                                                 giCaps, rtOk);
-                if (auto* dp = dynamic_cast<render::DeferredPipeline*>(curPipeline)) {
-                    dp->GetSSGI()->SetEnabled(gc.ShouldRunSSGI());
-                    dp->GetDDGI()->SetEnabled(gc.ShouldRunDDGI());
-                    dp->GetSSR()->SetEnabled(gc.ShouldRunSpecular());
-                    dp->GetSSAO().enabled = gc.ShouldRunAO();
-                    auto sg = dp->GetSSGI()->GetSettings();
-                    sg.halfRes = gc.halfRes;
-                    dp->GetSSGI()->SetSettings(sg);
-                    auto sr = dp->GetSSR()->GetSettings();
-                    sr.halfRes = gc.halfRes;
-                    dp->GetSSR()->SetSettings(sr);
-                    dp->GetSSAO().halfRes = gc.halfRes;
-                    // 纹理重建延迟到帧边界（NextFrame 之后），避免在 ImGui 回调内销毁/创建正在使用的纹理
-                    g_PendingHalfResApply = true;
-                }
-            }
-
-            // 当前管线可用的 GI 子系统（按管线类型获取，Forward 无屏幕空间/探针 GI）
-            auto* dp = dynamic_cast<render::DeferredPipeline*>(curPipeline);
-            auto* giSSGI = dp ? dp->GetSSGI() : nullptr;
-            auto* giSSR  = dp ? dp->GetSSR()  : nullptr;
-            auto* giDDGI = dp ? dp->GetDDGI() : nullptr;
-
-            // ── GI 通道：Diffuse / Specular / AO / Shadow ──
-            ImGui::SeparatorText("GI 通道");
-            const ImVec4 colOk  = ImVec4(0.4f, 1.0f, 0.4f, 1.0f);
-            const ImVec4 colBad = ImVec4(1.0f, 0.55f, 0.2f, 1.0f);
-
-            // 本管线的能力位里一个 GI 源都没有（当前只有 Forward 是这样）：它的 IBL/RSM 由
-            // 管线级开关驱动、不读层栈，因此下面整段层栈 UI 对它是**死开关**。与其把死开关
-            // 摆出来，不如直说（§9.2-H）。阴影通道独立于层栈，仍然有效。
-            const bool anyGISource = (giCaps & render::PipelineCaps::AllSources) != 0u;
-            if (!anyGISource) {
-                ImGui::TextColored(colBad,
-                    "本管线的 GI 不由层栈驱动（IBL/RSM 是管线级开关），层栈内容对它没有影响");
-                // 层栈 UI 全部置灰但不隐藏：内容仍可查看（便于对照诊断），但不可编辑，
-                // 免得用户以为改了这里就能改变 Forward 的画面。
-                ImGui::BeginDisabled();
-            }
-
-            // ── 通道 UI 辅助：显示该通道的「源层栈」（源 / 频段 / 权重 / 让位距离）──
-            // 勾选 = 该源参与合成（weight>0）；多个源同时勾选即为「融合」
-            auto channelUI = [&](const char* label, render::GIChannelStack& st,
-                                 const render::GISourceId* candidates, int candCount) {
-                ImGui::TextUnformatted(label);
-                ImGui::Indent(12.0f);
-                for (int i = 0; i < candCount; i++) {
-                    const render::GISourceId id = candidates[i];
-                    const bool  avail  = render::GIRegistry::IsAvailable(id, giCaps, rtOk);
-                    const float weight = st.WeightOf(id);
-                    bool active = weight > 0.0f;
-                    ImGui::PushID((int)id);
-                    if (ImGui::Checkbox(render::GISourceName(id), &active)) {
-                        st.Set(id, active ? 1.0f : 0.0f, st.FalloffOf(id));
-                    }
-                    ImGui::SameLine();
-                    ImGui::TextColored(avail ? colOk : colBad, "[%s]",
-                        avail ? render::GISourceClassName(id) : "不可用");
-                    if (active) {
-                        ImGui::SameLine();
-                        ImGui::SetNextItemWidth(80.0f);
-                        float w = st.WeightOf(id);
-                        if (ImGui::DragFloat("权重", &w, 0.05f, 0.0f, 2.0f, "%.2f")) {
-                            st.Set(id, w, st.FalloffOf(id));
-                        }
-                        ImGui::SameLine();
-                        ImGui::SetNextItemWidth(80.0f);
-                        float fo = st.FalloffOf(id);
-                        if (ImGui::DragFloat("让位", &fo, 0.5f, 0.0f, 200.0f, "%.0f")) {
-                            st.Set(id, w, fo);
-                        }
-                    }
-                    ImGui::PopID();
-                }
-                // 该通道的合成方式（相加仅作对照；归一化保证无双重计数）
-                int mode = (int)st.mode;
-                const char* modes[] = {"相加(对照)", "归一化加权"};
-                ImGui::SetNextItemWidth(140.0f);
-                if (ImGui::Combo("合成", &mode, modes, 2)) {
-                    st.mode = (render::GIBlendMode)mode;
-                }
-                ImGui::Unindent(12.0f);
-            };
-
-            // ---- Diffuse（间接漫反射）----
-            {
-                // P4：候选源从已注册的 Provider 派生（低频 → 高频排列）。
-                // 频段顺序用于面板可读性；未接入 Provider 的源（如预留的 Lightmap）不出现。
-                static const render::GISourceId kAllDiffuse[] = {
-                    render::GISourceId::IBL, render::GISourceId::Lightmap, render::GISourceId::DDGI,
-                    render::GISourceId::SSGI, render::GISourceId::RSM, render::GISourceId::RTGI,
-                    render::GISourceId::Lumen };
-                std::vector<render::GISourceId> diffuseSources;
-                if (dp) {
-                    for (auto id : kAllDiffuse) {
-                        // 只列出「本管线能力位允许」的源：能力位就是层栈模型下管线能承载的范围，
-                        // 列出一个它根本不消费的源，等于让面板把一个假开关摆给用户（§9.2-H）。
-                        if (!render::GIRegistry::IsAvailable(id, giCaps, rtOk)) continue;
-                        for (auto& p : dp->GetGIProviders()) {
-                            if (p->Handles(id)) { diffuseSources.push_back(id); break; }
-                        }
-                    }
-                }
-                if (diffuseSources.empty()) diffuseSources.push_back(render::GISourceId::IBL);
-                channelUI("Diffuse — 间接漫反射（低频 → 高频）", gc.diffuse,
-                          diffuseSources.data(), (int)diffuseSources.size());
-                ImGui::Indent(12.0f);
-                ImGui::SliderFloat("GI 强度", &gc.giIntensity, 0.0f, 2.0f, "%.2f");
-                ImGui::Checkbox("半分辨率", &gc.halfRes);
-                if (giSSGI) {
-                    bool on = giSSGI->IsEnabled();
-                    if (ImGui::Checkbox("启用 SSGI", &on)) giSSGI->SetEnabled(on);
-                    if (on) {
-                        ImGui::Indent(12.0f);
-                        ImGui::DragFloat("采样半径##ssgi", &giSSGI->radius, 0.1f, 0.1f, 5.0f, "%.1f");
-                        ImGui::SliderInt("采样数##ssgi", &giSSGI->sampleCount, 4, 64);
-                        ImGui::Unindent(12.0f);
-                    }
-                    ImGui::Text("SSGI 耗时 %.2f ms", giSSGI->GetDebugData().avgRenderTimeMs);
-                }
-                if (giDDGI) {
-                    bool on = giDDGI->IsEnabled();
-                    if (ImGui::Checkbox("启用 DDGI", &on)) giDDGI->SetEnabled(on);
-                    if (on) {
-                        ImGui::Indent(12.0f);
-                        ImGui::SliderFloat("时间混合##ddgi", &giDDGI->blendAlpha, 0.0f, 0.98f, "%.2f");
-                        ImGui::SliderFloat("贡献缩放##ddgi", &giDDGI->debugScale, 0.0f, 2.0f, "%.2f");
-                        u32 pc = giDDGI->gridX * giDDGI->gridY * giDDGI->gridZ;
-                        ImGui::Text("%u 探针 (%u×%u×%u)", pc, giDDGI->gridX, giDDGI->gridY, giDDGI->gridZ);
-                        ImGui::Unindent(12.0f);
-                    }
-                    ImGui::Text("DDGI 耗时 %.2f ms", giDDGI->GetDebugData().avgRenderTimeMs);
-                }
-                // IBL 环境光（所有管线共用）
-                if (auto* gi = curPipeline->GetGI()) {
-                    auto s = gi->GetSettings();
-                    float inten = s.intensity;
-                    if (ImGui::SliderFloat("IBL 强度", &inten, 0.0f, 3.0f, "%.2f")) {
-                        s.intensity = inten;
-                        gi->SetSettings(s);
-                    }
-                    ImGui::Text("IBL 耗时 %.2f ms", gi->GetDebugData().avgRenderTimeMs);
-                }
-                ImGui::Unindent(12.0f);
-            }
-
-            // ---- Specular（镜面反射）----
-            {
-                // P4：候选源从已注册的 Provider 派生
-                static const render::GISourceId kAllSpecular[] = {
-                    render::GISourceId::IBL, render::GISourceId::SSR,
-                    render::GISourceId::RTReflection, render::GISourceId::Lumen };
-                std::vector<render::GISourceId> specSources;
-                if (dp) {
-                    for (auto id : kAllSpecular) {
-                        for (auto& p : dp->GetGIProviders()) {
-                            if (p->Handles(id)) { specSources.push_back(id); break; }
-                        }
-                    }
-                }
-                if (specSources.empty()) specSources.push_back(render::GISourceId::IBL);
-                channelUI("Specular — 镜面反射（低频 → 高频）", gc.specular,
-                          specSources.data(), (int)specSources.size());
-                ImGui::Indent(12.0f);
-                if (giSSR) {
-                    bool on = giSSR->IsEnabled();
-                    if (ImGui::Checkbox("启用 SSR", &on)) giSSR->SetEnabled(on);
-                    if (on) {
-                        ImGui::Indent(12.0f);
-                        ImGui::SliderFloat("最大步数##ssr", &giSSR->maxSteps, 16.0f, 256.0f, "%.0f");
-                        ImGui::SliderFloat("步长##ssr", &giSSR->stepSize, 0.1f, 2.0f, "%.1f");
-                        ImGui::Unindent(12.0f);
-                    }
-                    ImGui::Text("SSR 耗时 %.2f ms", giSSR->GetDebugData().avgRenderTimeMs);
-                }
-                ImGui::Unindent(12.0f);
-            }
-
-            // ---- AO（环境光遮蔽）----
-            {
-                // P4：候选源从已注册的 GI Provider 派生（不再硬编码源列表）。
-                // 目前 SSAO/GTAO 已 Provider 化；RTAO 尚未（留待下一波次推广）。
-                std::vector<render::GISourceId> aoSources;
-                if (dp) {
-                    for (auto& p : dp->GetGIProviders()) {
-                        if (p->Handles(render::GISourceId::SSAO)) {
-                            aoSources.push_back(render::GISourceId::SSAO);
-                            aoSources.push_back(render::GISourceId::GTAO);
-                        }
-                    }
-                }
-                if (aoSources.empty()) aoSources.push_back(render::GISourceId::SSAO);
-                aoSources.push_back(render::GISourceId::RTAO);   // 尚未 Provider 化
-                channelUI("AO — 环境光遮蔽", gc.ao, aoSources.data(), (int)aoSources.size());
-                ImGui::Indent(12.0f);
-                ImGui::SliderFloat("AO 强度##gc", &gc.aoIntensity, 0.0f, 1.5f, "%.2f");
-                if (dp) {
-                    auto& ssao = dp->GetSSAO();
-                    bool on = ssao.enabled;
-                    if (ImGui::Checkbox("启用 SSAO", &on)) ssao.enabled = on;
-                    if (on) {
-                        ImGui::Indent(12.0f);
-                        ImGui::DragFloat("半径##ssao", &ssao.radius, 0.05f, 0.1f, 5.0f, "%.2f");
-                        ImGui::SliderInt("采样数##ssao", &ssao.sampleCount, 4, 32);
-                        ImGui::Checkbox("半分辨率##ssao", &ssao.halfRes);
-                        ImGui::Unindent(12.0f);
-                    }
-                }
-                ImGui::Unindent(12.0f);
-            }
-
-            // 结束「层栈 UI 置灰」（见上：本管线没有层栈 GI 源时）
-            if (!anyGISource) ImGui::EndDisabled();
-
-            // ---- Shadow（阴影）----
-            // 阴影是「可见性（乘法项）」而非「能量（加法项）」——不适用层栈的
-            // 频段/权重/距离让位语义，故用独立枚举：None / Raster / RT
-            {
-                const char* shadowNames[] = {"None", "Raster（光栅 CSM 等）", "RT（光追阴影）"};
-                int sh = (int)gc.shadow;
-                ImGui::TextUnformatted("Shadow — 阴影（可见性，不参与能量合成）");
-                ImGui::Indent(12.0f);
-                ImGui::SetNextItemWidth(220.0f);
-                if (ImGui::Combo("##shadow", &sh, shadowNames, 3)) {
-                    gc.shadow = (render::ShadowChannel)sh;
-                    gc = render::GIRegistry::Degrade(gc, giCaps, rtOk);   // 不可用则回退
-                }
-                const bool shOk = render::GIRegistry::IsAvailable(gc.shadow, giCaps, rtOk)
-                               || gc.shadow == render::ShadowChannel::None;
-                ImGui::SameLine();
-                ImGui::TextColored(shOk ? colOk : colBad, shOk ? "[可用]" : "[不可用]");
-                ImGui::Unindent(12.0f);
-            }
-
-            // ---- 配置诊断（P0 · REDUNDANCY）----
-            // 本架构要求每个已启用的源都**整幅、每帧**产出完整通道缓冲（文档 §3.5），
-            // 故「启用一个没有增益的源」= 白付一份全量成本。这里把这类配置显式列出来。
-            // 只做提示与可证等价的去重，不改变渲染语义。
-            {
-                const std::vector<render::GIDiagnostic> diags = render::GIRegistry::Analyze(gc);
-
-                // 诊断配色（本面板此前只定义了 colOk / colBad）
-                const ImVec4 colWarn = ImVec4(1.0f, 0.75f, 0.25f, 1.0f);   // 提示：可优化但不影响正确性
-                const ImVec4 colDim  = ImVec4(0.65f, 0.65f, 0.65f, 1.0f);  // 信息：性能提示
-
-                // 先统计各类别次数（连按钮的可见性判断也要用，故放在 if/else 之外）
-                u32 nRedundant = 0, nDupEst = 0, nCorr = 0, nCost = 0;
-                for (const auto& e : diags) {
-                    switch (e.kind) {
-                    case render::GIDiagnosticKind::RedundantDuplicate:  nRedundant++; break;
-                    case render::GIDiagnosticKind::DuplicateEstimate:   nDupEst++;    break;
-                    case render::GIDiagnosticKind::CorrelatedEstimates: nCorr++;      break;
-                    case render::GIDiagnosticKind::MultiSourceCost:     nCost++;      break;
-                    default: break;
-                    }
-                }
-
-                ImGui::SeparatorText("配置诊断");
-                if (diags.empty()) {
-                    ImGui::TextColored(colOk, "无问题：当前层栈无冗余或重复估计");
-                } else {
-                    if (nRedundant > 0) {
-                        ImGui::TextColored(colBad, "严格冗余 ×%u（零增益，可安全去重）", nRedundant);
-                    }
-                    if (nDupEst > 0) {
-                        ImGui::TextColored(colWarn, "重复估计 ×%u（成本翻倍、归一化互相稀释）", nDupEst);
-                    }
-                    if (nCorr > 0) {
-                        ImGui::TextColored(colWarn, "相关估计 ×%u（非独立，归一化失去无偏性）", nCorr);
-                    }
-                    if (nCost > 0) {
-                        ImGui::TextColored(colDim, "多源通道 ×%u（每源各跑一遍整幅 pass）", nCost);
-                    }
-
-                    ImGui::Indent(12.0f);
-                    for (const auto& e : diags) {
-                        const bool bad  = (e.kind == render::GIDiagnosticKind::RedundantDuplicate);
-                        const bool warn = (e.kind == render::GIDiagnosticKind::DuplicateEstimate ||
-                                           e.kind == render::GIDiagnosticKind::CorrelatedEstimates);
-                        const ImVec4 col = bad ? colBad : (warn ? colWarn : colDim);
-                        ImGui::TextColored(col, "[%s] %s: %s%s%s",
-                            render::GIDiagnosticKindName(e.kind),
-                            render::GIChannelName(e.channel),
-                            e.a != render::GISourceId::None ? render::GISourceName(e.a) : "",
-                            e.b != render::GISourceId::None ? " + " : "",
-                            e.b != render::GISourceId::None ? render::GISourceName(e.b) : "");
-                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", e.detail);
-                    }
-                    ImGui::Unindent(12.0f);
-                }
-
-                // 只在确有严格冗余时才提供一键去重
-                if (nRedundant > 0) {
-                    if (ImGui::Button("去除严格冗余（保留 GTAO）")) {
-                        render::GIRegistry::DeduplicateRedundant(gc);
-                    }
-                    ImGui::SameLine();
-                    ImGui::TextColored(colDim, "可证与去重前逐像素等价");
-                }
-            }
-        }
-        ImGui::End();
-
-        // ============================================================
-        // 独立 GPU Profiler 面板：各 pass 的 GPU 耗时统计
-        // ============================================================
-        // 首次使用时默认摆放在 GI 面板下方（之后由 imgui.ini 恢复）
-        ImGui::SetNextWindowPos(ImVec2(560.0f, 720.0f), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(430.0f, 260.0f), ImGuiCond_FirstUseEver);
-        ImGui::Begin("GPU Profiler");
-        {
-            auto& pdata = deferredPipeline.GetProfiler().GetLastFrameData();
-            float totalMs = 0;
-            for (auto& p : pdata) {
-                if (p.gpuMs < 0) continue;  // 未使用
-                totalMs += p.gpuMs;
-                ImGui::Text("%-20s %6.2fms", p.name.c_str(), p.gpuMs);
-            }
-            ImGui::Separator();
-            ImGui::Text("Total GPU: %.2fms (%.0f FPS)", totalMs, totalMs > 0 ? 1000.0f / totalMs : 0);
-        }
-        ImGui::End();
-
-        // GPU Profiler 面板（按 F1 切换）
-        if (ImGui::IsKeyPressed(ImGuiKey_F1))
-            deferredPipeline.GetProfilerPanel().Toggle();
-        deferredPipeline.GetProfilerPanel().Draw();
+        uiDeps.DrawGIPanel();     // GI 控制台（实现见 main 之前；Begin/End 都在函数内）
 
         // ---- 命令 2：ImGui 录制 + 调试绘制 + Submit + 探测读回 + Present ----
         // 【按值携带】帧号与转储判定由游戏线程算好后**按值**传进来（绝不读外层可变变量 ——
         // 命令可能在渲染线程执行，读外层变量会拿到下一帧已改写的值）。
-        auto recordUiAndPresent = [&](u64 renderFrameIndex, bool dumpThisFrame) {
-            // --- ImGui（LOAD 保留 ToneMap 输出）---
-            cmdList->BeginRenderPass(1, rhi::Format::BGRA8_UNORM,
-                rhi::Format::Unknown, nullptr, rhi::LoadOp::Load);
-
-            imgui.EndFrame(cmdList.get());
-            cmdList->EndRenderPass();
-
-            // ── 白炉探针：把 HDR 目标上的两个像素拷进 host 可见缓冲 ──
-            // 必须在 render pass 之外录制（拷贝不能在 pass 内），因此放在 EndRenderPass 之后、End 之前
-            const bool probeThisFrame = g_ProbeEnabled && (frameIndex % (u64)std::max(1, g_ProbeInterval) == 0);
-            if (probeThisFrame && probeBuffer) {
-                // 白炉探针也要按**当前管线**取 HDR：Forward 有自己的一张（任务 26 起层栈归一化
-                // 也在 Forward 生效，白炉判据必须能覆盖它）
-                rhi::IRHITexture* hdr = (g_PipelineMode == 0)
-                    ? forwardPipeline.GetHDRTarget()
-                    : deferredPipeline.GetLighting().GetHDRTarget();
-                if (hdr) {
-                    const u32 pw = swapchain->GetWidth(), ph = swapchain->GetHeight();
-                    const u32 cx = pw / 2,           cy = ph / 2;            // 中心（物体所在）
-                    const u32 bx = pw / 10,          by = ph / 10;           // 背景取样点
-                    // RGBA16_FLOAT：每像素 8 字节 → 第二个像素偏移 16 字节
-                    cmdList->CopyTextureToBuffer(hdr, probeBuffer.get(), cx, cy, 1, 1, 0);
-                    cmdList->CopyTextureToBuffer(hdr, probeBuffer.get(), bx, by, 1, 1, 16);
-                }
-            }
-
-            // ── GI 频谱采样：把若干张纹理整幅拷进 host 可见缓冲（仅测试路径）──
-            // 同样必须在 render pass 之外录制；缓冲在采样帧才创建，尺寸取自纹理本身
-            // 目标分三类：
-            //   hdr / albedo  —— 合成结果与接收端反照率（做差 + 除 albedo 后即得 E/π）
-            //   provN_raw/final —— 各有效 Provider 的原始输出 / 降噪后输出（定位"某源为 0"发生在哪一级）
-            if (dumpThisFrame) {
-                auto addTarget = [&](const String& name, rhi::IRHITexture* tex) {
-                    if (!tex) return;
-                    // 【2026-09-24 诊断】按纹理**实际格式**算 bytes/px：此前写死 8 B（RGBA16F），
-                    //   而 mesh 级距离场是 R16F/R32F —— 写死会让读回缓冲的其余部分保持未初始化，
-                    //   两趟对比就会把"未初始化内存"当成差异（或反之掩盖真差异），结论不可信。
-                    auto bppOf = [](rhi::Format f) -> u32 {
-                        switch (f) {
-                        case rhi::Format::R16_FLOAT:    return 2;
-                        case rhi::Format::RG16_FLOAT:   return 4;
-                        case rhi::Format::R32_FLOAT:    return 4;
-                        case rhi::Format::RGBA16_FLOAT: return 8;
-                        default:                        return 8;
-                        }
-                    };
-                    DumpTarget t;
-                    t.name = name;
-                    t.tex  = tex;
-                    t.w    = tex->GetWidth();
-                    t.h    = tex->GetHeight();
-                    t.bytesPerPixel = bppOf(tex->GetFormat());
-                    rhi::BufferDesc dd;                             // 宽×高×bpp B
-                    dd.size      = (usize)t.w * t.h * t.bytesPerPixel;
-                    dd.usage     = rhi::BufferUsage::Storage;       // 该路径恒定带 TRANSFER_DST，可作拷贝目标
-                    dd.cpuAccess = true;                            // 需要 Map 读回
-                    t.buf = device->CreateBuffer(dd);
-                    if (!t.buf) { HE_CORE_ERROR("[GI采样] 读回缓冲创建失败: {}（{}x{}）", name, t.w, t.h); return; }
-                    // x=y=0 且取满宽高 ⇒ bufferRowLength=0 的紧密排布正好等于线性落盘布局
-                    cmdList->CopyTextureToBuffer(tex, t.buf.get(), 0, 0, t.w, t.h, 0);
-                    g_DumpTargets.push_back(std::move(t));
-                };
-                // 【诊断用】缓冲落盘（只在 HE_DUMP_LUMEN_PROBES=1 时调用）
-                auto addBufferTarget = [&](const String& name, rhi::IRHIBuffer* src, usize bytes) {
-                    if (!src || bytes == 0) return;
-                    DumpTarget t;
-                    t.name     = name;
-                    t.isBuffer = true;
-                    t.bytes    = bytes;
-                    rhi::BufferDesc dd;
-                    dd.size      = bytes;
-                    dd.usage     = rhi::BufferUsage::Storage;   // 该路径恒定带 TRANSFER_DST
-                    dd.cpuAccess = true;
-                    t.buf = device->CreateBuffer(dd);
-                    if (!t.buf) { HE_CORE_ERROR("[GI采样] 缓冲读回创建失败: {}（{} B）", name, (u64)bytes); return; }
-                    cmdList->CopyBuffer(src, t.buf.get(), bytes, 0, 0);
-                    g_DumpTargets.push_back(std::move(t));
-                };
-                // HDR 取**当前管线**的那张（任务 26）：Forward 没有 GBuffer / Provider 输出，
-                // 但它的 HDR 目标就是层栈归一化的产物 —— 这正是 Forward 侧唯一可读的判据出口。
-                // 此前这里无条件取 deferredPipeline 的 HDR，于是 `pipeline_mode=0` 下落盘的
-                // 根本不是 Forward 的画面（文档 §11.3 早就把这点写成了注意事项，任务 26 修掉）。
-                const bool forwardMode = (g_PipelineMode == 0);
-                addTarget("hdr", forwardMode ? forwardPipeline.GetHDRTarget()
-                                             : deferredPipeline.GetLighting().GetHDRTarget());
-                if (!forwardMode) {
-                if (auto* gb = deferredPipeline.GetGBuffer()) {
-                    addTarget("albedo", gb->GetAlbedo());
-                    // GBuffer 的世界坐标/法线：屏幕空间 GI pass 的**输入**。少了它们，
-                    // "某个源的输出纹理对不对"就只能靠形状相关性猜；有了它们才能把那个 pass
-                    // 的公式在 CPU 上原样重算一遍做逐像素对照（任务 30 就是这么定位 RSM 链路的）。
-                    addTarget("gb_worldpos", gb->GetWorldPos());
-                    addTarget("gb_normal",   gb->GetNormal());
-                    // 光照图键（任务 31）：MRT7 = (uv0.x, uv0.y, objectIndex, 0)。烘焙光照图的
-                    // 前置条件就是"逐像素能反查页号与页内坐标"，这个转储是那条性质的唯一直接证据。
-                    addTarget("gb_lightmapkey", gb->GetLightmapKey());
-                }
-                // 共享的前帧 HDR 辐射度（DDGI 探针 / SSGI 入射辐射度的共同输入）：
-                // 它是 GI 源吃进去的东西，出问题时第一个要看的中间量
-                addTarget("radiance", deferredPipeline.GetRadianceHistory().GetTexture());
-                // IBL 辐照度：DDGI 探针更新的**唯一**辐射度回退来源（GI_DDGI::SetIBL）。
-                // 若它为空/未绑定，DDGI 会静默退化为 DDGI.comp.slang 的硬编码兜底常数。
-                if (auto* giIBL = dynamic_cast<render::GI_IBL*>(deferredPipeline.GetGI()))
-                    addTarget("ibl_irr", giIBL->GetIrradianceMap());
-                const auto& providers = deferredPipeline.GetGIProviders();
-                for (size_t i = 0; i < providers.size(); ++i) {
-                    auto* p = providers[i].get();
-                    // 【步骤 35】判据从 `IsValid()`（"pass 对象在"）换成 `ProducedThisFrame()`（"本帧真的跑了"）：
-                    // Lumen/RTAO 这些源即使没进任何层栈，`IsValid()` 也为真，于是 `provN_*` 会落到
-                    // 上一帧或从未使用的纹理上 —— 转储看起来"有内容"，实际是假读数。
-                    if (!p || !p->ProducedThisFrame()) continue;
-                    const String pre = "prov" + std::to_string(i) + "_";
-                    addTarget(pre + "raw",   p->GetDiffuseOutput());
-                    addTarget(pre + "final", p->GetFinalDiffuseOutput());
-                    // 镜面通道与 AO 通道的输出也必须能落盘：只看得见漫反射输出的话，
-                    // 「SSR/SSAO 是否真的产出了东西」就无从做纹理级对照（§9.2-B/C/E 都属这一类）。
-                    // 名称带通道后缀，避免与漫反射的 raw/final 混淆；不存在该通道输出时自动跳过。
-                    addTarget(pre + "spec_raw",   p->GetSpecularOutput());
-                    addTarget(pre + "spec_final", p->GetFinalSpecularOutput());
-                    addTarget(pre + "ao_raw",     p->GetAOOutput());
-                    addTarget(pre + "ao_final",   p->GetFinalAOOutput());
-                    // 步骤 12（L1 退出判据）：逐像素 SDF 追踪可视化。名字**稳定**（不依赖注册顺序），
-                    // 因为它是后面所有阶段（Screen Probe / Surface Cache）的公共"几何是否靠谱"凭据。
-                    if (auto* lp = dynamic_cast<render::LumenProvider*>(p)) {
-                        addTarget("lumen_sdf_trace", lp->GetSDFDebugTexture());
-                        // 步骤 37：把"逐像素入射辐照度"也落盘。它是 Lumen 的中间层，此前只有 CPU 侧
-                        // 统计（均值/覆盖）可看；当"统计正常但输出为黑"时，必须能直接看到这张纹理本身
-                        // 到底有没有内容，否则只能在"没画"和"画了但采样到空"之间猜。
-                        addTarget("lumen_irradiance", lp->GetIrradianceTexture());
-                        // 步骤 13（L2 的输入）：卡片覆盖率可视化（上半 = 代表 mesh 的 6 个投影面，下半 = 逐 mesh 覆盖条）
-                        addTarget("lumen_card_coverage", lp->GetCardCoverageTexture());
-                        addTarget("lumen_sc_atlas_albedo", lp->GetCardAtlasAlbedo());   // 步骤 15：Card 捕获的 albedo atlas
-                        // 【2026-09-24 诊断】探针级原始数据落盘（HE_DUMP_LUMEN_PROBES=1 才开）：
-                        //   probes  = 过滤后的探针（下游逐像素辐照度用的就是它）
-                        //   rawprobes = 追踪 + SH 投影后、未过滤的探针（区分"源头不同"还是"滤波不同"）
-                        //   cellmap = 单元 → 探针槽位（看槽位排列是否逐趟变化）
-                        // 落盘量：前 8192 个探针 × sizeof(ScreenProbe) + 单元数 × 4 B，量级 < 1 MB。
-                        if (dumpProbeBuffers) {
-                            constexpr usize kDumpProbes = 8192;
-                            addBufferTarget("lumen_probes",    lp->GetProbeBuffer(),     kDumpProbes * sizeof(ScreenProbe));
-                            addBufferTarget("lumen_rawprobes", lp->GetRawProbeBuffer(),  kDumpProbes * sizeof(ScreenProbe));
-                            if (auto* cells = lp->GetCellProbeBuffer()) {
-                                addBufferTarget("lumen_cellmap", cells,
-                                                (usize)lp->GetScreenCellsX() * lp->GetScreenCellsY() * sizeof(u32));
-                            }
-                            // 两层全局 SDF 场：直接判定"场本身是否逐趟一致"（探针追踪的输入）
-                            addTarget("lumen_sdf_layer0", lp->GetGlobalSDFField(0));
-                            addTarget("lumen_sdf_layer1", lp->GetGlobalSDFField(1));
-                            // mesh 级距离场（前 4 个已建好的）：全局层是 min 归并 ⇒ 非最小项的 ULP 差异
-                            // 会被掩盖；原地洪泛（JFA）是否逐趟一致只能看这一层。
-                            for (u32 m = 0; m < 4u; ++m) {
-                                addTarget("lumen_meshfield" + std::to_string(m), lp->GetMeshSDFField(m));
-                            }
-                        }
-                    }
-                }
-                }   // if (!forwardMode)
-                // RSM 链路的逐级中间量（任务 30）：位置 / 编码法线 / VPL 辐射度 / 间接光输出。
-                // 该链路的典型失效是"pass 在跑、成本在付、画面里什么都没有"（§9.2-AA），
-                // 只看最终 HDR 无法分辨是"没产出"还是"产出被合成丢掉"——所以四级都落盘。
-                // 两条管线各有自己的 GI_RSM 实例（同样是"同一个着色器、各自的光源视锥"），
-                // 故这里按当前管线取，才能对照两个视锥各自的产出。
-                if (auto* rsm = forwardMode ? forwardPipeline.GetRSM() : deferredPipeline.GetRSM()) {
-                    addTarget("rsm_pos", rsm->GetRSMPositionMap());
-                    addTarget("rsm_nrm", rsm->GetRSMFluxMap());
-                    addTarget("rsm_rad", rsm->GetRSMRadianceMap());
-                }
-                if (!forwardMode) addTarget("rsm_indirect", deferredPipeline.GetRSMIndirect().GetOutput());
-                // SSR 的输出单独给一个稳定名字（任务 32）：它的 provider 输出名是 `provN_spec_raw`，
-                // 而 N 取决于哪些 provider 有效 —— 判据不该依赖注册顺序。
-                if (!forwardMode) {
-                    if (auto* ssr = deferredPipeline.GetSSR())
-                        addTarget("ssr", ssr->GetIndirectSpecularTexture());
-                }
-                if (!g_DumpTargets.empty()) {
-                    g_DumpDone = true;   // 已录制；实际读取放在 Submit 之后
-                    // 【P1/A-5】给本帧挂 timeline 信号：读取侧只等这一次提交（见落盘处的 WaitForFence）
-                    if (g_DumpFence.load() == he::rhi::kInvalidFence) {
-                        g_DumpFence.store(device->CreateFence());   // 拥有线程（渲染线程）上创建
-                    }
-                    const u64 fv = g_DumpFenceValue.load() + 1ull;
-                    g_DumpFenceValue.store(fv);
-                    cmdList->SetTimelineSignal(g_DumpFence.load(), fv);
-                } else {
-                    g_DumpGI = false;
-                    HE_CORE_WARN("[GI采样] 没有可用目标（HDR 未创建？），本次跳过");
-                }
-            }
-
-            framePresenter.EndRecording();   // L4-2：End + Submit 收口
-            deferredPipeline.FlushComputeWork();  // AsyncCompute: Graphics Submit 之后提交 Compute 工作
-
-            // ── 白炉探针：等 GPU 完成后读回（half → float），算亮度比并打日志 ──
-            if (probeThisFrame && probeBuffer) {
-                device->WaitIdle();   // 测试用途，允许停顿
-                const auto* texels = static_cast<const uint16_t*>(probeBuffer->Map());
-                if (texels) {
-                    for (int i = 0; i < 3; ++i) {
-                        g_ProbeCenter[i] = glm::unpackHalf1x16(texels[i]);          // 像素 0：中心
-                        g_ProbeBg[i]     = glm::unpackHalf1x16(texels[8 + i]);      // 像素 1：背景（16B 偏移 = 8 个 half）
-                    }
-                    const float lumCenter = 0.2126f * g_ProbeCenter[0] + 0.7152f * g_ProbeCenter[1] + 0.0722f * g_ProbeCenter[2];
-                    const float lumBg     = 0.2126f * g_ProbeBg[0]     + 0.7152f * g_ProbeBg[1]     + 0.0722f * g_ProbeBg[2];
-                    g_ProbeLumCenter = lumCenter;
-                    g_ProbeRatio = (lumBg > 1e-6f) ? (lumCenter / lumBg) : 0.0f;
-                    HE_CORE_INFO("[白炉探针] 中心 RGB=({:.4f},{:.4f},{:.4f}) 背景 RGB=({:.4f},{:.4f},{:.4f}) "
-                                 "亮度 中心={:.4f} 背景={:.4f} 比值={:.4f} 白炉={}",
-                                 g_ProbeCenter[0], g_ProbeCenter[1], g_ProbeCenter[2],
-                                 g_ProbeBg[0], g_ProbeBg[1], g_ProbeBg[2],
-                                 lumCenter, lumBg, g_ProbeRatio,
-                                 g_FurnaceMode ? "ON" : "off");
-                    probeBuffer->Unmap();
-                }
-            }
-
-            // ── GI 频谱采样：等 GPU 完成后原样落盘（RGBA16F 原始像素、无文件头、行紧密排布）──
-            if (g_DumpDone && !g_DumpWritten) {
-                // 【P1/A-5】只等本帧那次提交：先让 RHI 线程把已排队的提交落地（模式 2），
-                // 再等 timeline 到本帧的值；不再做设备级 `vkDeviceWaitIdle`。
-                if (auto* router = device->GetSubmitRouter(); router != nullptr) router->FlushAndWait();
-                const auto fenceH = g_DumpFence.load();
-                if (fenceH != he::rhi::kInvalidFence) {
-                    device->WaitForFence(fenceH, g_DumpFenceValue.load(), UINT64_MAX);
-                } else {
-                    device->WaitIdle();   // 兜底（理论上不会走到：录制时就建了）
-                }
-                const String dir  = "build/verify/";
-                const String base = dir + "gi_" + g_DumpTag;
-                std::filesystem::create_directories(dir);
-                std::ofstream meta(base + "_meta.txt");
-                for (auto& t : g_DumpTargets) {                        // 逐目标写：像素直落，无头
-                    const usize bytes = t.isBuffer ? t.bytes : ((usize)t.w * t.h * t.bytesPerPixel);
-                    const void* p = t.buf ? t.buf->Map() : nullptr;
-                    if (p) {
-                        // 缓冲目标写 .bin（原始字节，无文件头）；纹理目标照旧写 .f16
-                        std::ofstream f(base + "_" + t.name + (t.isBuffer ? ".bin" : ".f16"), std::ios::binary);
-                        f.write(static_cast<const char*>(p), (std::streamsize)bytes);
-                        t.buf->Unmap();
-                        meta << t.name << " " << t.w << " " << t.h << " "
-                             << (t.isBuffer ? String("RAWBUFFER") : (std::to_string(t.bytesPerPixel * 8u) + "bit"))
-                             << "\n";
-                        HE_CORE_INFO("[GI采样] {}_{}.f16  {}x{}  {} B", base, t.name, t.w, t.h, bytes);
-                    } else {
-                        HE_CORE_ERROR("[GI采样] 映射失败: {}_{}", base, t.name);
-                    }
-                }
-                HE_CORE_INFO("[GI采样] 共落盘 {} 个目标，请求退出", g_DumpTargets.size());
-                // 相机参数一并落盘：解析对照（平面镜的镜像点投影到屏幕）需要那套**渲染这一帧时**
-                // 的相机参数，否则判据只能靠硬编码 —— 而硬编码的相机参数一旦被 cfg 改动就失效。
-                {
-                    const render::CameraData& cam = camCtrl.GetCamera();
-                    std::ofstream cm(base + "_camera.txt");
-                    cm << "pos "     << cam.position.x << " " << cam.position.y << " " << cam.position.z << "\n";
-                    cm << "forward " << cam.forward.x  << " " << cam.forward.y  << " " << cam.forward.z  << "\n";
-                    cm << "up "      << cam.up.x       << " " << cam.up.y       << " " << cam.up.z       << "\n";
-                    cm << "fov "     << cam.fov        << "\n";
-                    cm << "near "    << cam.nearPlane  << "\n";
-                    cm << "far "     << cam.farPlane   << "\n";
-                    cm << "aspect "  << cam.aspectRatio << "\n";
-                }
-                // 平面镜测试台的几何（任务 32）：与场景搭建同源，判据据此做解析镜像计算
-                if (g_MirrorRig.valid) {
-                    std::ofstream mr(base + "_mirror.txt");
-                    mr << "plane "  << g_MirrorRig.planeNormal.x << " " << g_MirrorRig.planeNormal.y << " "
-                                    << g_MirrorRig.planeNormal.z << " " << g_MirrorRig.planeOffset << "\n";
-                    mr << "slab "   << g_MirrorRig.slabCenter.x << " " << g_MirrorRig.slabCenter.y << " "
-                                    << g_MirrorRig.slabCenter.z << " " << g_MirrorRig.slabHalf.x << " "
-                                    << g_MirrorRig.slabHalf.y << " " << g_MirrorRig.slabHalf.z << "\n";
-                    mr << "red "    << g_MirrorRig.boxRed.x << " " << g_MirrorRig.boxRed.y << " "
-                                    << g_MirrorRig.boxRed.z << " " << g_MirrorRig.halfRed << "\n";
-                    mr << "green "  << g_MirrorRig.boxGreen.x << " " << g_MirrorRig.boxGreen.y << " "
-                                    << g_MirrorRig.boxGreen.z << " " << g_MirrorRig.halfGreen << "\n";
-                }
-                g_DumpWritten = true;
-                // 采样完成即请求关窗：让脚本无需超时等待，也保证退出前正常走完清理与保存流程
-                glfwSetWindowShouldClose(engine.GetWindow()->GetNativeHandle(), GLFW_TRUE);
-            }
-
-            // 垂直同步必须与创建时一致：只改 SwapChainDesc 而这里仍传 true，帧率照样被锁在刷新率
-            // （步骤 37 第一次测就是这么被误导的：pass 合计 14 ms 却只有 19 fps）。
-            framePresenter.EndFrame(!noVsync);
-        };
         // 命令 2 只发布：游戏线程随即进入下一帧的准备（与渲染线程重叠）
         // ---- 游戏线程记账（这些是游戏线程自己的循环状态，**不能**放进渲染命令）----
         // 【顺序很关键】先冻结本帧命令该看到的帧号（原判定发生在命令里、`frameIndex++` **之前**），
         // 再自增；写反会让转储/读数早一帧。
         const u64  renderFrameIndex = frameIndex;
-        const bool dumpNow = (g_DumpGI && !g_DumpDone && renderFrameIndex >= g_DumpFrame);
+        const bool dumpNow = giDump.WantsFrame(renderFrameIndex);
         frameIndex++;
 
-        // 【步骤 37 / L6 帧时判据】周期性打印**真实墙钟帧率**与 CPU 侧耗时。
-        // 只在 `HE_NO_VSYNC=1` 时帧率才有判据意义（vsync 打开时它恒等于刷新率，会被误读成"达标"）。
-        {
-            const double cpuMs = std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - cpuT0).count();
-            static double s_accMs = 0.0;
-            static double s_accCpuMs = 0.0;
-            static u32    s_n = 0;
-            s_accMs += (double)deltaTime * 1000.0;
-            s_accCpuMs += cpuMs;
-            ++s_n;
-            // 【测量确定性】转储/读数之前先把在飞的"命令 2"等掉：流水线化后它可能还没做完，
-            // 否则读回的是"少一帧"的状态（表现为转储差异与 pass/VUID 计数偏移）。
-            if (useRenderQueue && lastAsyncFrame != UINT64_MAX) {
-                // 【必须有超时】这是诊断/转储路径，不是背压点：无界等待会在"该帧因故未被回收"时
-                // 永久挂住（实测出现过一次 300 秒未退出）。超时只告警、继续转储。
-                if (!renderQueue.WaitFrameRetired(lastAsyncFrame, 5000u))
-                    HE_CORE_WARN("06.GILab：转储前等待在飞渲染命令超时（帧 {}）", lastAsyncFrame);
-                lastAsyncFrame = UINT64_MAX;
-            }
-            if (g_DumpGI && s_n >= 120u) {
-                const double wallMs = s_accMs / (double)s_n;
-                const double cm     = s_accCpuMs / (double)s_n;
-                const double pm     = s_accPipelineMs / (double)s_n;
-                // 步骤 37：管线 CPU 侧的三段分解（重建帧图 / 编译 / 执行）——判断该修哪一段
-                double bMs = 0.0, cMs = 0.0, eMs = 0.0;
-                if (auto* dp = dynamic_cast<render::DeferredPipeline*>(curPipeline)) {
-                    bMs = dp->GetCpuBuildMs(); cMs = dp->GetCpuCompileMs(); eMs = dp->GetCpuExecMs();
-                }
-                HE_CORE_INFO("帧率读数（步骤 37）: 最近 {} 帧 墙钟 {:.3f} ms ⇒ {:.1f} fps；CPU 侧 {:.3f} ms"
-                             "（{:.0f}% 的帧时，其中管线 Render {:.3f} ms / 其余 {:.3f} ms）⇒ 受限方 = {}"
-                             "（vsync {}；pass 合计见【帧预算】行）",
-                             s_n, wallMs, wallMs > 0.0 ? 1000.0 / wallMs : 0.0, cm,
-                             wallMs > 0.0 ? 100.0 * cm / wallMs : 0.0, pm, cm - pm,
-                             cm > wallMs * 0.8 ? "CPU" : "GPU/呈现",
-                             noVsync ? "关" : "开（帧率被锁刷新率，不作判据）");
-                HE_CORE_INFO("   管线 CPU 分解（上一帧）: 重建帧图 {:.3f} ms / 编译 {:.3f} ms / 执行(录制+提交) {:.3f} ms",
-                             bMs, cMs, eMs);
-                s_accMs = 0.0; s_accCpuMs = 0.0; s_accPipelineMs = 0.0;
-                s_n = 0;
-            }
+        // 【测量确定性】转储/读数之前先把在飞的"命令 2"等掉：流水线化后它可能还没做完，
+        // 否则读回的是"少一帧"的状态（表现为转储差异与 pass/VUID 计数偏移）。
+        if (useRenderQueue && lastAsyncFrame != UINT64_MAX) {
+            // 【必须有超时】这是诊断/转储路径，不是背压点：无界等待会在"该帧因故未被回收"时
+            // 永久挂住（实测出现过一次 300 秒未退出）。超时只告警、继续转储。
+            if (!renderQueue.WaitFrameRetired(lastAsyncFrame, 5000u))
+                HE_CORE_WARN("06.GILab：转储前等待在飞渲染命令超时（帧 {}）", lastAsyncFrame);
+            lastAsyncFrame = UINT64_MAX;
         }
+
         // ---- 入队命令 2（**按值捕获**帧号与转储判定：命令可能在渲染线程执行）----
         submitRender([&, renderFrameIndex, dumpNow]() {
-            recordUiAndPresent(renderFrameIndex, dumpNow);
+            frameRec.RecordUiAndPresent(renderFrameIndex, dumpNow);
         }, /*waitForCompletion=*/false);
 
 
@@ -2104,9 +1783,7 @@ bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）
     device->WaitIdle();
     deferredPipeline.Shutdown();
 
-    // ============================================================
-    // 保存配置（所有 ImGui 可控参数）
-    // ============================================================
+    // ---- 保存配置（所有 ImGui 可控参数） ----
     {
         std::unordered_map<String, String> out;
 

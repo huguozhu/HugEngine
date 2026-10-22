@@ -68,6 +68,7 @@
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+#include "CameraInput.h"   // 样例共用：鼠标/键盘控制相机
 
 using namespace he;
 
@@ -944,8 +945,6 @@ int main() {
     }
 
     // 鼠标状态
-    bool   rightMouseDown = false;
-    double lastMouseX = 0.0, lastMouseY = 0.0;
 
     // --- 8. 窗口调整回调 ---
     // 【T2.4】回调跑在游戏线程，而里面是 RHI（Resize/SetSwapChain/OnResize）⇒ 只置标志，
@@ -1012,37 +1011,10 @@ int main() {
         // ============================================================
         {
             // --- 鼠标旋转（右键拖拽）---
-            bool mouseDown = glfwGetMouseButton(glfwWin, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
-
-            if (mouseDown && !rightMouseDown) {
-                rightMouseDown = true;
-                glfwGetCursorPos(glfwWin, &lastMouseX, &lastMouseY);
-                glfwSetInputMode(glfwWin, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-            } else if (!mouseDown && rightMouseDown) {
-                rightMouseDown = false;
-                glfwSetInputMode(glfwWin, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-            } else if (mouseDown && rightMouseDown) {
-                double cx, cy;
-                glfwGetCursorPos(glfwWin, &cx, &cy);
-                float dx = static_cast<float>(cx - lastMouseX);
-                float dy = static_cast<float>(cy - lastMouseY);
-                lastMouseX = cx;
-                lastMouseY = cy;
-
-                camCtrl.Rotate(dx * 0.003f, -dy * 0.003f);  // 上推鼠标(dy<0) → pitch增大
-            }
-
-            // --- 键盘移动 ---
-            render::CameraController::MoveInput moveIn;
-            moveIn.forward  = glfwGetKey(glfwWin, GLFW_KEY_W) == GLFW_PRESS;
-            moveIn.backward = glfwGetKey(glfwWin, GLFW_KEY_S) == GLFW_PRESS;
-            moveIn.left     = glfwGetKey(glfwWin, GLFW_KEY_A) == GLFW_PRESS;
-            moveIn.right    = glfwGetKey(glfwWin, GLFW_KEY_D) == GLFW_PRESS;
-            moveIn.up       = glfwGetKey(glfwWin, GLFW_KEY_E) == GLFW_PRESS;
-            moveIn.down     = glfwGetKey(glfwWin, GLFW_KEY_Q) == GLFW_PRESS;
-            moveIn.sprint   = glfwGetKey(glfwWin, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
-
-            camCtrl.Update(deltaTime, moveIn);
+            // 鼠标/键盘相机输入统一在 Samples/Common/CameraInput.h（六个样例共用，手感一致）；
+            // 02 没有 T 键/动画相机切换，故只调 Update。
+            static he::samples::CameraInput camInput;   // 跨帧保存右键/光标状态
+            camInput.Update(glfwWin, camCtrl, deltaTime);
         }
 
         // ============================================================
