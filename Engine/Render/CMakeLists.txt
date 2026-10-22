@@ -6,6 +6,7 @@ set(RENDER_SOURCES
     # SceneRenderer
     SceneRenderer.h
     SceneRenderer.cpp
+    Debug/FrameDumpRecorder.cpp
     # Pipeline
     Pipeline/IRenderPipeline.h
     Pipeline/Camera.h

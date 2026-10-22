@@ -10,7 +10,8 @@
 #include "Core/Engine.h"
 #include "Platform/Window.h"
 #include "RHI/RHI.h"
-#include "RHI/FramePresenter.h"   // L4-1：帧外壳（acquire/present）收口
+#include "RHI/FramePresenter.h"
+#include "Debug/FrameDumpRecorder.h"   // L4-1：帧外壳（acquire/present）收口
 #include "RHI/ThreadAffinity.h"   // T2.2：渲染线程启动钩子里认领 RHI 归属（GetThreadAffinity）
 #include "Pipeline/DeferredPipeline.h"
 #include "Pipeline/ForwardPipeline.h"
@@ -476,38 +477,10 @@ int main() {
     // 采样三组配置以便做差：漫反射栈=空（基线：天空+自发光+空气透视+镜面）、=[DDGI]、=[SSGI]；
     //       后两者减去基线即得各源自身的贡献（且两者带同一 albedo，比值即频谱之比）。
     // 实现：整幅 CopyTextureToBuffer 到 host 可见缓冲。仅测试路径使用，会 WaitIdle，不追求性能。
-    const char*  dumpTagEnv   = std::getenv("HE_DUMP_GI");
-    const char*  dumpFrameEnv = std::getenv("HE_DUMP_GI_FRAME");
-    const String g_DumpTag    = dumpTagEnv ? dumpTagEnv : "";
-    bool         g_DumpGI     = !g_DumpTag.empty();   // 非 const：失败时关闭以免每帧重试
-    const u64    g_DumpFrame  = dumpFrameEnv ? (u64)std::max(1, std::atoi(dumpFrameEnv)) : 60ull;
-    bool g_DumpDone    = false;   // 已录制拷贝（防止重复录制）
-    bool g_DumpWritten = false;   // 已落盘（防止每帧重复写文件）
-    // 【P1 / A-5 收尾】诊断读回不再用**设备级** `WaitIdle`：录制侧给本帧挂一个 timeline 信号，
-    // 读取侧只等**那一次提交**完成即可。句柄与值跨线程传递（创建/信号在拥有线程上做，
-    // `WaitForFence` 本身没有归属断言，游戏线程可以等）。
-    std::atomic<he::rhi::RHIFenceHandle> g_DumpFence{he::rhi::kInvalidFence};
-    std::atomic<u64>                    g_DumpFenceValue{0};
-    // 采样目标列表：每项一张纹理 + 一条读回缓冲（尺寸各自取自纹理本身，故可混放不同分辨率）
-    struct DumpTarget {
-        String                          name;
-        rhi::IRHITexture*               tex = nullptr;
-        std::unique_ptr<rhi::IRHIBuffer> buf;
-        u32                             w = 0, h = 0;
-        // 【2026-09-24 诊断扩展（画质阶段 0 · Lumen 探针确定性排查）】缓冲也可以落盘。
-        //   动机：探针级证据此前只能靠"辐照度纹理 + CPU 统计"间接推断，排查 Lumen 屏幕探针的
-        //   逐趟不确定性时无法区分"同一探针（身份）值不同"与"值相同但槽位被原子追加换了位置"。
-        //   用 `HE_DUMP_LUMEN_PROBES=1` 开启（默认关 ⇒ 不改变既有验收的转储集合），
-        //   落盘名 `gi_<tag>_<name>.bin`（原始字节、无文件头）。
-        bool                            isBuffer = false;
-        usize                           bytes    = 0;
-        u32                             bytesPerPixel = 8;   // 诊断：按纹理实际格式算（R16F=2 / R32F=4 / RGBA16F=8）
-    };
-    std::vector<DumpTarget> g_DumpTargets;
-    const bool dumpProbeBuffers = (std::getenv("HE_DUMP_LUMEN_PROBES") != nullptr);
-    if (g_DumpGI)
-        HE_CORE_INFO("[GI采样] 已启用：标签={} 目标帧={} 输出 build/verify/gi_{}_*.f16",
-                     g_DumpTag, g_DumpFrame, g_DumpTag);
+    // GI 采样落盘：**机制**在 Engine/Render/Debug/FrameDumpRecorder（录制拷贝 / timeline 等待 /
+    // _meta.txt 与 _camera.txt 写法都收在那里）；这里只给"哪些目标值得看"的清单（策略）。
+    auto giDump = render::FrameDumpRecorder::FromEnv();
+
 
     // 启动即应用白炉条件（HE_FURNACE=1 路径；面板开关在 GI 控制台里）
     if (g_FurnaceMode) {
@@ -1554,51 +1527,14 @@ int main() {
             //   hdr / albedo  —— 合成结果与接收端反照率（做差 + 除 albedo 后即得 E/π）
             //   provN_raw/final —— 各有效 Provider 的原始输出 / 降噪后输出（定位"某源为 0"发生在哪一级）
             if (dumpThisFrame) {
+                // 登记纹理目标：机制（读回缓冲 / 格式推断 / 拷贝录制）在 FrameDumpRecorder 里
                 auto addTarget = [&](const String& name, rhi::IRHITexture* tex) {
-                    if (!tex) return;
-                    // 【2026-09-24 诊断】按纹理**实际格式**算 bytes/px：此前写死 8 B（RGBA16F），
-                    //   而 mesh 级距离场是 R16F/R32F —— 写死会让读回缓冲的其余部分保持未初始化，
-                    //   两趟对比就会把"未初始化内存"当成差异（或反之掩盖真差异），结论不可信。
-                    auto bppOf = [](rhi::Format f) -> u32 {
-                        switch (f) {
-                        case rhi::Format::R16_FLOAT:    return 2;
-                        case rhi::Format::RG16_FLOAT:   return 4;
-                        case rhi::Format::R32_FLOAT:    return 4;
-                        case rhi::Format::RGBA16_FLOAT: return 8;
-                        default:                        return 8;
-                        }
-                    };
-                    DumpTarget t;
-                    t.name = name;
-                    t.tex  = tex;
-                    t.w    = tex->GetWidth();
-                    t.h    = tex->GetHeight();
-                    t.bytesPerPixel = bppOf(tex->GetFormat());
-                    rhi::BufferDesc dd;                             // 宽×高×bpp B
-                    dd.size      = (usize)t.w * t.h * t.bytesPerPixel;
-                    dd.usage     = rhi::BufferUsage::Storage;       // 该路径恒定带 TRANSFER_DST，可作拷贝目标
-                    dd.cpuAccess = true;                            // 需要 Map 读回
-                    t.buf = device->CreateBuffer(dd);
-                    if (!t.buf) { HE_CORE_ERROR("[GI采样] 读回缓冲创建失败: {}（{}x{}）", name, t.w, t.h); return; }
-                    // x=y=0 且取满宽高 ⇒ bufferRowLength=0 的紧密排布正好等于线性落盘布局
-                    cmdList->CopyTextureToBuffer(tex, t.buf.get(), 0, 0, t.w, t.h, 0);
-                    g_DumpTargets.push_back(std::move(t));
+                    giDump.AddTexture(device.get(), cmdList.get(), name.c_str(), tex);
                 };
                 // 【诊断用】缓冲落盘（只在 HE_DUMP_LUMEN_PROBES=1 时调用）
+                // 登记缓冲目标（探针/单元图等非纹理中间量，落盘为 .bin）
                 auto addBufferTarget = [&](const String& name, rhi::IRHIBuffer* src, usize bytes) {
-                    if (!src || bytes == 0) return;
-                    DumpTarget t;
-                    t.name     = name;
-                    t.isBuffer = true;
-                    t.bytes    = bytes;
-                    rhi::BufferDesc dd;
-                    dd.size      = bytes;
-                    dd.usage     = rhi::BufferUsage::Storage;   // 该路径恒定带 TRANSFER_DST
-                    dd.cpuAccess = true;
-                    t.buf = device->CreateBuffer(dd);
-                    if (!t.buf) { HE_CORE_ERROR("[GI采样] 缓冲读回创建失败: {}（{} B）", name, (u64)bytes); return; }
-                    cmdList->CopyBuffer(src, t.buf.get(), bytes, 0, 0);
-                    g_DumpTargets.push_back(std::move(t));
+                    giDump.AddBuffer(device.get(), cmdList.get(), name.c_str(), src, bytes);
                 };
                 // HDR 取**当前管线**的那张（任务 26）：Forward 没有 GBuffer / Provider 输出，
                 // 但它的 HDR 目标就是层栈归一化的产物 —— 这正是 Forward 侧唯一可读的判据出口。
@@ -1659,7 +1595,7 @@ int main() {
                         //   rawprobes = 追踪 + SH 投影后、未过滤的探针（区分"源头不同"还是"滤波不同"）
                         //   cellmap = 单元 → 探针槽位（看槽位排列是否逐趟变化）
                         // 落盘量：前 8192 个探针 × sizeof(ScreenProbe) + 单元数 × 4 B，量级 < 1 MB。
-                        if (dumpProbeBuffers) {
+                        if (giDump.IncludeBuffers()) {
                             constexpr usize kDumpProbes = 8192;
                             addBufferTarget("lumen_probes",    lp->GetProbeBuffer(),     kDumpProbes * sizeof(ScreenProbe));
                             addBufferTarget("lumen_rawprobes", lp->GetRawProbeBuffer(),  kDumpProbes * sizeof(ScreenProbe));
@@ -1696,19 +1632,8 @@ int main() {
                     if (auto* ssr = deferredPipeline.GetSSR())
                         addTarget("ssr", ssr->GetIndirectSpecularTexture());
                 }
-                if (!g_DumpTargets.empty()) {
-                    g_DumpDone = true;   // 已录制；实际读取放在 Submit 之后
-                    // 【P1/A-5】给本帧挂 timeline 信号：读取侧只等这一次提交（见落盘处的 WaitForFence）
-                    if (g_DumpFence.load() == he::rhi::kInvalidFence) {
-                        g_DumpFence.store(device->CreateFence());   // 拥有线程（渲染线程）上创建
-                    }
-                    const u64 fv = g_DumpFenceValue.load() + 1ull;
-                    g_DumpFenceValue.store(fv);
-                    cmdList->SetTimelineSignal(g_DumpFence.load(), fv);
-                } else {
-                    g_DumpGI = false;
-                    HE_CORE_WARN("[GI采样] 没有可用目标（HDR 未创建？），本次跳过");
-                }
+                giDump.FinishRecording(device.get(), cmdList.get());   // 挂本帧 timeline 信号
+
             }
 
             framePresenter.EndRecording();   // L4-2：End + Submit 收口
@@ -1737,55 +1662,21 @@ int main() {
                 }
             }
 
-            // ── GI 频谱采样：等 GPU 完成后原样落盘（RGBA16F 原始像素、无文件头、行紧密排布）──
-            if (g_DumpDone && !g_DumpWritten) {
-                // 【P1/A-5】只等本帧那次提交：先让 RHI 线程把已排队的提交落地（模式 2），
-                // 再等 timeline 到本帧的值；不再做设备级 `vkDeviceWaitIdle`。
-                if (auto* router = device->GetSubmitRouter(); router != nullptr) router->FlushAndWait();
-                const auto fenceH = g_DumpFence.load();
-                if (fenceH != he::rhi::kInvalidFence) {
-                    device->WaitForFence(fenceH, g_DumpFenceValue.load(), UINT64_MAX);
-                } else {
-                    device->WaitIdle();   // 兜底（理论上不会走到：录制时就建了）
+            // ── GI 频谱采样：等本帧 timeline 后原样落盘（机制在 FrameDumpRecorder）──
+            {
+                const render::CameraData& cam = camCtrl.GetCamera();
+                render::FrameDumpRecorder::CameraSnapshot camSnap;
+                camSnap.pos[0] = cam.position.x; camSnap.pos[1] = cam.position.y; camSnap.pos[2] = cam.position.z;
+                camSnap.forward[0] = cam.forward.x; camSnap.forward[1] = cam.forward.y; camSnap.forward[2] = cam.forward.z;
+                camSnap.up[0] = cam.up.x; camSnap.up[1] = cam.up.y; camSnap.up[2] = cam.up.z;
+                camSnap.fov = cam.fov; camSnap.nearPlane = cam.nearPlane;
+                camSnap.farPlane = cam.farPlane; camSnap.aspect = cam.aspectRatio;
+                if (giDump.TryWriteBack(device.get(), camSnap)) {
+                    // 采样完成即请求关窗：让脚本无需超时等待，也保证退出前正常走完清理与保存流程
+                    glfwSetWindowShouldClose(engine.GetWindow()->GetNativeHandle(), GLFW_TRUE);
                 }
-                const String dir  = "build/verify/";
-                const String base = dir + "gi_" + g_DumpTag;
-                std::filesystem::create_directories(dir);
-                std::ofstream meta(base + "_meta.txt");
-                for (auto& t : g_DumpTargets) {                        // 逐目标写：像素直落，无头
-                    const usize bytes = t.isBuffer ? t.bytes : ((usize)t.w * t.h * t.bytesPerPixel);
-                    const void* p = t.buf ? t.buf->Map() : nullptr;
-                    if (p) {
-                        // 缓冲目标写 .bin（原始字节，无文件头）；纹理目标照旧写 .f16
-                        std::ofstream f(base + "_" + t.name + (t.isBuffer ? ".bin" : ".f16"), std::ios::binary);
-                        f.write(static_cast<const char*>(p), (std::streamsize)bytes);
-                        t.buf->Unmap();
-                        meta << t.name << " " << t.w << " " << t.h << " "
-                             << (t.isBuffer ? String("RAWBUFFER") : (std::to_string(t.bytesPerPixel * 8u) + "bit"))
-                             << "\n";
-                        HE_CORE_INFO("[GI采样] {}_{}.f16  {}x{}  {} B", base, t.name, t.w, t.h, bytes);
-                    } else {
-                        HE_CORE_ERROR("[GI采样] 映射失败: {}_{}", base, t.name);
-                    }
-                }
-                HE_CORE_INFO("[GI采样] 共落盘 {} 个目标，请求退出", g_DumpTargets.size());
-                // 相机参数一并落盘：解析对照（平面镜的镜像点投影到屏幕）需要那套**渲染这一帧时**
-                // 的相机参数，否则判据只能靠硬编码 —— 而硬编码的相机参数一旦被 cfg 改动就失效。
-                {
-                    const render::CameraData& cam = camCtrl.GetCamera();
-                    std::ofstream cm(base + "_camera.txt");
-                    cm << "pos "     << cam.position.x << " " << cam.position.y << " " << cam.position.z << "\n";
-                    cm << "forward " << cam.forward.x  << " " << cam.forward.y  << " " << cam.forward.z  << "\n";
-                    cm << "up "      << cam.up.x       << " " << cam.up.y       << " " << cam.up.z       << "\n";
-                    cm << "fov "     << cam.fov        << "\n";
-                    cm << "near "    << cam.nearPlane  << "\n";
-                    cm << "far "     << cam.farPlane   << "\n";
-                    cm << "aspect "  << cam.aspectRatio << "\n";
-                }
-                g_DumpWritten = true;
-                // 采样完成即请求关窗：让脚本无需超时等待，也保证退出前正常走完清理与保存流程
-                glfwSetWindowShouldClose(engine.GetWindow()->GetNativeHandle(), GLFW_TRUE);
             }
+
 
             // 垂直同步必须与创建时一致：只改 SwapChainDesc 而这里仍传 true，帧率照样被锁在刷新率
             // （步骤 37 第一次测就是这么被误导的：pass 合计 14 ms 却只有 19 fps）。
@@ -1796,7 +1687,7 @@ int main() {
         // 【顺序很关键】先冻结本帧命令该看到的帧号（原判定发生在命令里、`frameIndex++` **之前**），
         // 再自增；写反会让转储/读数早一帧。
         const u64  renderFrameIndex = frameIndex;
-        const bool dumpNow = (g_DumpGI && !g_DumpDone && renderFrameIndex >= g_DumpFrame);
+        const bool dumpNow = giDump.WantsFrame(renderFrameIndex);
         frameIndex++;
 
         // 【测量确定性】转储/读数之前先把在飞的"命令 2"等掉：流水线化后它可能还没做完，
