@@ -154,11 +154,8 @@ int main() {
     //   · 渲染线程只**录制**；`Submit` / `Present` 经二级队列交给 **RHI 线程**（唯一提交者）；
     //   · 游戏线程只做输入 / 相机 / 打包命令与 UI —— **装配快照在命令 1（recordScene）里**，
     //     因此模式 1/2 下它在**渲染线程**执行（详见下方 applyThreadingMode 附近的说明）。
-    // 【对照判据（2026-10 实测）】模式 0 vs 模式 2：20 个 GI 转储目标**逐字节一致**、断言 0、
-    //   VUID 与模式 0 相同（只剩转储装置自身的既有 VUID）、到第 40 帧墙钟 9.57 s vs 9.59 s（无退化）。
     // 【如何覆盖】环境变量优先于本配置（见 `Engine::Initialize`）：
     //   · `HE_RENDER_THREADING_MODE=0` ⇒ 单线程；`=1` ⇒ 游戏线程 + 渲染线程（两线程对照）；
-    //   · `HE_RENDER_THREAD_FORCE_SHELL=1` ⇒ 壳模式（模式值不变、不起真线程，命令就地执行）。
     config.renderThreadingMode = he::RenderThreadingMode::RenderThreadAndRHI;
     // vsync 打开时墙钟帧率被锁在刷新率，`HE_NO_VSYNC=1` 可关掉垂直同步（用于观察真实 GPU 吞吐）
     const bool noVsync = (std::getenv("HE_NO_VSYNC") != nullptr);
@@ -776,18 +773,16 @@ int main() {
     // Submit → 探测读回 → Present）都在它上面执行；游戏线程只做输入/相机/装配快照/ImGui 的 CPU 侧，
     // 并按帧用**严格握手**（`SubmitAndWait`）等待本帧做完才继续下一帧。
     // 判据：模式 0 与模式 1 的转储逐位一致（实测 0 像素）、无归属断言、帧时间不退化。
-    // `HE_RENDER_THREAD_FORCE_SHELL=1` 可强制退回壳模式（对照实验用）。
-    const bool forceShell = std::getenv("HE_RENDER_THREAD_FORCE_SHELL") != nullptr;
     // 【模式 2】RHI 线程（三线程形态）：渲染线程的 Submit/Present 被路由到它，由它真正提交/呈现
     he::render::RHIThread rhiThread;
-    // 【统一切换入口】`mode` 为下拉选择的目标模式；`forceShell` 仅用于对照实验（强制壳模式）
+    // 【统一切换入口】`mode` 为下拉选择的目标模式（壳模式请直接用 RenderThread 的未启动形态）
     // 【为什么按"先停后起、停 RHI 先于渲染、起渲染先于 RHI"】任意两种模式之间切换都必须走这条路：
     //   · 停：RHI 线程先排空（它可能持有未提交的命令），否则渲染线程退出时还有路由在飞；
     //   · 起：渲染线程先起来（录制者），RHI 线程随后装路由（提交者）—— 反过来会让首帧的提交
     //     先路由到一个还没起来的线程（`RouteSubmit` 会退回就地执行，虽不丢命令但语义不清）。
     auto applyThreadingMode = [&](he::RenderThreadingMode mode) {
-        const bool wantRender = (mode != he::RenderThreadingMode::SingleThreaded) && !forceShell;
-        const bool wantRhi    = (mode == he::RenderThreadingMode::RenderThreadAndRHI) && !forceShell;
+        const bool wantRender = (mode != he::RenderThreadingMode::SingleThreaded);
+        const bool wantRhi    = (mode == he::RenderThreadingMode::RenderThreadAndRHI);
 
         // ① 先改模式（线程启停期间日志/`UsesRenderThread()` 与目标一致）
         he::SetRenderThreadingMode(mode);
