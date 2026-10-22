@@ -824,13 +824,13 @@ void DeferredPipeline::CollectLights(PushConstantData& pc) {
     if (count == 0u) return;
 
     // 上传：一次 Map/Unmap 写完整段（旧实现是每个光源 Map/Unmap 一次，行为相同但更费）
-    auto* lb     = m_Device->ResolveBuffer(m_LightBuffers[RenderFrameSlot()]);
+    auto* lb     = ResB(m_LightBuffers[RenderFrameSlot()]);
     auto* lights = lb ? static_cast<GPULight*>(lb->Map()) : nullptr;
     if (!lights) return;
     for (u32 i = 0; i < count; ++i) {
         lights[i] = FrameSnap().lights[i].ToGpu();
     }
-    if (auto* lbu = m_Device->ResolveBuffer(m_LightBuffers[RenderFrameSlot()])) lbu->Unmap();
+    if (auto* lbu = ResB(m_LightBuffers[RenderFrameSlot()])) lbu->Unmap();
 }
 
 void DeferredPipeline::UpdateIBLBindings(GI_IBL* gi) {

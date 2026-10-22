@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Threading/RenderThreadContext.h"   // T2.6：帧上下文（唯一 RHI 出口）
+
 #include "Pipeline/IRenderPipeline.h"
 #include "Pipeline/Material.h"
 #include "GI/GlobalIllumination.h"
@@ -205,6 +207,28 @@ private:
 
     rhi::IRHIDevice* m_Device = nullptr;
     rhi::IRHISwapChain* m_SwapChain = nullptr;
+
+    /// 【T2.6】本帧的渲染线程上下文（可空；空时解析回退 `m_Device`）
+    const RenderThreadContext* m_FrameCtx = nullptr;
+
+public:
+    /// 【T2.6】设置本帧的渲染线程上下文（搬迁过渡期用；全部完成后可删掉回退分支）
+    void SetFrameContext(const RenderThreadContext* ctx) { m_FrameCtx = ctx; }
+
+private:
+    // 【T2.6】统一解析入口：优先上下文，未设置时回退设备
+    [[nodiscard]] rhi::IRHIBuffer* ResB(rhi::RHIBufferHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolveBuffer(h);
+        return m_Device ? m_Device->ResolveBuffer(h) : nullptr;
+    }
+    [[nodiscard]] rhi::IRHITexture* ResT(rhi::RHITextureHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolveTexture(h);
+        return m_Device ? m_Device->ResolveTexture(h) : nullptr;
+    }
+    [[nodiscard]] rhi::IRHIPipelineState* ResP(rhi::RHIPipelineStateHandle h) const {
+        if (m_FrameCtx) return m_FrameCtx->ResolvePipelineState(h);
+        return m_Device ? m_Device->ResolvePipelineState(h) : nullptr;
+    }
 
     // AsyncCompute: 专用 Compute 队列命令列表（延迟创建）
     std::unique_ptr<rhi::IRHICommandList> m_ComputeCmdList;
