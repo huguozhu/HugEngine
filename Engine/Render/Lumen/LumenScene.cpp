@@ -147,7 +147,7 @@ void LumenScene::DestroySkeletonPipeline() {
 }
 
 void LumenScene::PreBind(rhi::IRHICommandList* cmd) {
-    if (cmd && m_SkeletonPSO.IsValid()) cmd->SetPipeline(m_Device->ResolvePipelineState(m_SkeletonPSO));
+    if (cmd && m_SkeletonPSO.IsValid()) cmd->SetPipeline(ResP(m_SkeletonPSO));
 }
 
 void LumenScene::DrawSkeleton(rhi::IRHICommandList* cmd, float value, float alpha) {

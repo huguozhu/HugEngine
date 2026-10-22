@@ -148,7 +148,7 @@ void LumenScene::RunScreenProbeFilter(rhi::IRHICommandList* cmd, const float4x4&
         rhi::BufferDesc sb;
         sb.size = sizeof(u32) * 16u; sb.usage = rhi::BufferUsage::Storage; sb.cpuAccess = true;
         m_ProbeFilterStatsBuf = m_Device->CreateBufferHandle(sb);
-        m_ProbeFilterStatsMapped = m_Device->ResolveBuffer(m_ProbeFilterStatsBuf)->Map();
+        m_ProbeFilterStatsMapped = ResB(m_ProbeFilterStatsBuf)->Map();
 
         m_ProbeFilterBound = true;
         return;   // 本帧只建资源：新建资源当帧使用会读到未初始化的内容（§附二十）
@@ -202,14 +202,14 @@ void LumenScene::RunScreenProbeFilter(rhi::IRHICommandList* cmd, const float4x4&
     if (!histProbe || !histCell || !outProbe || !outCell || !m_ProbeFilteredBuf.IsValid() || !m_ProbeFilterStatsBuf.IsValid()) return;
 
     // 描述符必须**每帧重绑**：乒乓使绑定 3/4/5/6 的目标每帧都换（步骤 27 的 fade 缓冲教训）
-    m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 0, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ProbeBuf));
-    m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 1, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ProbeFilteredBuf));
-    m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 2, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_CellProbeBuf));
+    m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 0, rhi::DescriptorType::StorageBuffer, ResB(m_ProbeBuf));
+    m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 1, rhi::DescriptorType::StorageBuffer, ResB(m_ProbeFilteredBuf));
+    m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 2, rhi::DescriptorType::StorageBuffer, ResB(m_CellProbeBuf));
     m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 3, rhi::DescriptorType::StorageBuffer, histCell);
     m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 4, rhi::DescriptorType::StorageBuffer, outCell);
     m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 5, rhi::DescriptorType::StorageBuffer, histProbe);
     m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 6, rhi::DescriptorType::StorageBuffer, outProbe);
-    m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 7, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ProbeFilterStatsBuf));
+    m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 7, rhi::DescriptorType::StorageBuffer, ResB(m_ProbeFilterStatsBuf));
 
     ProbeFilterPC pc{};
     pc.prevViewProj = m_ProbePrevViewProj;
@@ -219,7 +219,7 @@ void LumenScene::RunScreenProbeFilter(rhi::IRHICommandList* cmd, const float4x4&
                         m_ProbeFilterDistTol);
 
     ComputeBarrier(cmd);   // 等"SH 投影写回探针系数"落地（Lumen 内部 pass 之间必须显式屏障）
-    cmd->SetPipeline(m_Device->ResolvePipelineState(m_ProbeFilterPSO));
+    cmd->SetPipeline(ResP(m_ProbeFilterPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_ProbeFilterSet);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     // 线程数取 max(探针数, 单元数)：每个单元一个线程负责"把当帧映射抄进历史缓冲"，

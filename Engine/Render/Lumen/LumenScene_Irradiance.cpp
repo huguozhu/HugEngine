@@ -50,7 +50,7 @@ void LumenScene::CreateIrradianceTexture() {
         rhi::BufferDesc sb;
         sb.size = sizeof(u32) * 4u; sb.usage = rhi::BufferUsage::Storage; sb.cpuAccess = true;
         m_IrradianceStatsBuf = m_Device->CreateBufferHandle(sb);
-        m_IrrStatsMapped = m_Device->ResolveBuffer(m_IrradianceStatsBuf)->Map();
+        m_IrrStatsMapped = ResB(m_IrradianceStatsBuf)->Map();
     }
 }
 
@@ -101,11 +101,11 @@ void LumenScene::RunProbeIrradiance(rhi::IRHICommandList* cmd, rhi::IRHITexture*
         // 【步骤 35】绑定**过滤后**的探针缓冲：辐照度是探针 SH 的逐像素重建，
         // 读未过滤的一份就等于把刚做的滤波丢掉（滤波 pass 每帧都会写出这一份）。
         m_Device->UpdateDescriptorSet(m_IrrSet, 0, rhi::DescriptorType::StorageBuffer,
-                                      m_ProbeFilteredBuf.IsValid() ? m_Device->ResolveBuffer(m_ProbeFilteredBuf) : m_Device->ResolveBuffer(m_ProbeBuf));
-        m_Device->UpdateDescriptorSet(m_IrrSet, 1, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_CellProbeBuf));
+                                      m_ProbeFilteredBuf.IsValid() ? ResB(m_ProbeFilteredBuf) : ResB(m_ProbeBuf));
+        m_Device->UpdateDescriptorSet(m_IrrSet, 1, rhi::DescriptorType::StorageBuffer, ResB(m_CellProbeBuf));
         m_Device->UpdateDescriptorSetWithImageView(m_IrrSet, 5,
-            rhi::DescriptorType::StorageImage, m_Device->ResolveTexture(m_IrradianceTex)->GetNativeHandle());
-        m_Device->UpdateDescriptorSet(m_IrrSet, 6, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_IrradianceStatsBuf));
+            rhi::DescriptorType::StorageImage, ResT(m_IrradianceTex)->GetNativeHandle());
+        m_Device->UpdateDescriptorSet(m_IrrSet, 6, rhi::DescriptorType::StorageBuffer, ResB(m_IrradianceStatsBuf));
         m_IrrBound = true;
         return;   // 本帧只建资源；下一帧开始派发（"新建资源当帧使用"的教训见 §附二十）
     }
@@ -123,7 +123,7 @@ void LumenScene::RunProbeIrradiance(rhi::IRHICommandList* cmd, rhi::IRHITexture*
         m_IrradianceTransitioned = true;
         cmd->PipelineBarrier(rhi::PipelineStage::ComputeShader, rhi::PipelineStage::ComputeShader,
                              rhi::ResourceState::Undefined, rhi::ResourceState::UnorderedAccess,
-                             m_Device->ResolveTexture(m_IrradianceTex));
+                             ResT(m_IrradianceTex));
     }
 
     // ① 先读上一帧的统计（同"先读后清"）
@@ -150,7 +150,7 @@ void LumenScene::RunProbeIrradiance(rhi::IRHICommandList* cmd, rhi::IRHITexture*
     pc.x = m_Width; pc.y = m_Height; pc.z = cellsX; pc.w = 0u;
     pc.params = float4(0.0f, 0.0f, 0.0f, 0.0f);   // x = 1 时只输出辐照度（调试）
     ComputeBarrier(cmd);   // 等"SH pass 写回探针系数"落地
-    cmd->SetPipeline(m_Device->ResolvePipelineState(m_IrrPSO));
+    cmd->SetPipeline(ResP(m_IrrPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_IrrSet);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     cmd->Dispatch((m_Width + 7u) / 8u, (m_Height + 7u) / 8u, 1);
@@ -206,7 +206,7 @@ void LumenScene::CreateIrradianceCopyPipeline() {
 
     if (m_IrradianceTex.IsValid()) {
         m_Device->UpdateDescriptorSet(m_IrrCopySet, 0, rhi::DescriptorType::CombinedImageSampler,
-                                      m_Device->ResolveTexture(m_IrradianceTex), GetOutputSampler());
+                                      ResT(m_IrradianceTex), GetOutputSampler());
     }
 }
 
@@ -216,9 +216,9 @@ void LumenScene::DrawIrradiance(rhi::IRHICommandList* cmd, float gain) {
     if (!m_IrrCopyPSO.IsValid() || !m_IrradianceTex.IsValid()) return;
     // 纹理可能刚随 resize 重建 ⇒ 每次绑定（一帧一次，代价可忽略）
     m_Device->UpdateDescriptorSet(m_IrrCopySet, 0, rhi::DescriptorType::CombinedImageSampler,
-                                  m_Device->ResolveTexture(m_IrradianceTex), GetOutputSampler());
+                                  ResT(m_IrradianceTex), GetOutputSampler());
     const float4 pc(gain, 1.0f, 0.0f, 0.0f);
-    cmd->SetPipeline(m_Device->ResolvePipelineState(m_IrrCopyPSO));
+    cmd->SetPipeline(ResP(m_IrrCopyPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_IrrCopySet);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     cmd->Draw(3);
@@ -252,18 +252,18 @@ void LumenScene::LogMemoryUsage() const {
     // 屏幕尺寸（与视口相关）
     const double px = (double)m_Width * (double)m_Height;
     items.push_back({"Lumen 输出 + 辐照度（2 × 屏幕 RGBA16F）", 2.0 * px * 8.0 / (1024.0 * 1024.0)});
-    addBuf("卡片清单 / 页表镜像", m_Device->ResolveBuffer(m_ShadeCardsBuf));
-    addBuf("页表镜像", m_Device->ResolveBuffer(m_PageTableBuf));
-    addBuf("命中点缓冲", m_Device->ResolveBuffer(m_RayHitPosBuf));
-    addBuf("光线结果缓冲", m_Device->ResolveBuffer(m_RayResultBuf));
-    addBuf("着色输出（atlas / GBuffer / 最优候选）", m_Device->ResolveBuffer(m_ShadeOutBuf));
-    addBuf("着色输出（GBuffer 对照）", m_Device->ResolveBuffer(m_ShadeOutGbBuf));
-    addBuf("着色输出（最优候选）", m_Device->ResolveBuffer(m_ShadeOutBestBuf));
+    addBuf("卡片清单 / 页表镜像", ResB(m_ShadeCardsBuf));
+    addBuf("页表镜像", ResB(m_PageTableBuf));
+    addBuf("命中点缓冲", ResB(m_RayHitPosBuf));
+    addBuf("光线结果缓冲", ResB(m_RayResultBuf));
+    addBuf("着色输出（atlas / GBuffer / 最优候选）", ResB(m_ShadeOutBuf));
+    addBuf("着色输出（GBuffer 对照）", ResB(m_ShadeOutGbBuf));
+    addBuf("着色输出（最优候选）", ResB(m_ShadeOutBestBuf));
     addBuf("远场光追结果（2 × 光线）", m_FarField ? m_FarField->GetResultBuffer() : nullptr);
-    addBuf("远场切换 fade（2 × 光线）", m_Device->ResolveBuffer(m_RayFadeBuf));
-    addBuf("探针缓冲（65536 × 96 B）", m_Device->ResolveBuffer(m_ProbeBuf));
-    addBuf("单元 → 探针映射", m_Device->ResolveBuffer(m_CellProbeBuf));
-    addBuf("SH 重建/参考辐照度（2 × 探针）", m_Device->ResolveBuffer(m_IrradShBuf));
+    addBuf("远场切换 fade（2 × 光线）", ResB(m_RayFadeBuf));
+    addBuf("探针缓冲（65536 × 96 B）", ResB(m_ProbeBuf));
+    addBuf("单元 → 探针映射", ResB(m_CellProbeBuf));
+    addBuf("SH 重建/参考辐照度（2 × 探针）", ResB(m_IrradShBuf));
 
     double total = 0.0;
     for (const auto& it : items) total += it.mb;
@@ -310,18 +310,18 @@ void LumenScene::CreateFarFieldCompareGPUObjects() {
     rhi::BufferDesc msb;
     msb.size = sizeof(u32) * 8u; msb.usage = rhi::BufferUsage::Storage; msb.cpuAccess = true;
     m_FarMergeStatsBuf = m_Device->CreateBufferHandle(msb);
-    m_FarMergeStatsMapped = m_Device->ResolveBuffer(m_FarMergeStatsBuf)->Map();
+    m_FarMergeStatsMapped = ResB(m_FarMergeStatsBuf)->Map();
     // 距离分桶缓冲在 CreateShadeGPUObjects 里已建（着色 pass 的绑定 11）
-    m_FarCmpStatsMapped = m_Device->ResolveBuffer(m_FarCmpStatsBuf)->Map();
+    m_FarCmpStatsMapped = ResB(m_FarCmpStatsBuf)->Map();
     rhi::BufferDesc hb;
     hb.size = sizeof(u32) * 16u; hb.usage = rhi::BufferUsage::Storage; hb.cpuAccess = true;
     m_FarCmpHistBuf = m_Device->CreateBufferHandle(hb);
-    m_FarCmpHistMapped = m_Device->ResolveBuffer(m_FarCmpHistBuf)->Map();
+    m_FarCmpHistMapped = ResB(m_FarCmpHistBuf)->Map();
     m_FarFieldHist.assign(16u, 0u);
 
-    m_Device->UpdateDescriptorSet(m_FarCmpSet, 0, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayResultBuf));
-    m_Device->UpdateDescriptorSet(m_FarCmpSet, 2, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_FarCmpStatsBuf));
-    m_Device->UpdateDescriptorSet(m_FarCmpSet, 3, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_FarCmpHistBuf));
+    m_Device->UpdateDescriptorSet(m_FarCmpSet, 0, rhi::DescriptorType::StorageBuffer, ResB(m_RayResultBuf));
+    m_Device->UpdateDescriptorSet(m_FarCmpSet, 2, rhi::DescriptorType::StorageBuffer, ResB(m_FarCmpStatsBuf));
+    m_Device->UpdateDescriptorSet(m_FarCmpSet, 3, rhi::DescriptorType::StorageBuffer, ResB(m_FarCmpHistBuf));
     if (!m_FarCmpPSO.IsValid()) HE_CORE_ERROR("LumenScene: 远场对照 PSO 创建失败");
 
     // ── 合并 pass：把远场光追的命中并进探针光线结果（见 shader 头的理由）──
@@ -348,11 +348,11 @@ void LumenScene::CreateFarFieldCompareGPUObjects() {
     mpso.pushConstantRanges   = {mpc};
     mpso.debugName            = "Lumen_FarFieldMerge";
     m_FarMergePSO = m_Device->CreatePipelineStateHandle(mpso);   // A-3
-    m_Device->UpdateDescriptorSet(m_FarMergeSet, 0, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayResultBuf));
-    m_Device->UpdateDescriptorSet(m_FarMergeSet, 2, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayHitPosBuf));
-    m_Device->UpdateDescriptorSet(m_FarMergeSet, 4, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_FarMergeStatsBuf));
+    m_Device->UpdateDescriptorSet(m_FarMergeSet, 0, rhi::DescriptorType::StorageBuffer, ResB(m_RayResultBuf));
+    m_Device->UpdateDescriptorSet(m_FarMergeSet, 2, rhi::DescriptorType::StorageBuffer, ResB(m_RayHitPosBuf));
+    m_Device->UpdateDescriptorSet(m_FarMergeSet, 4, rhi::DescriptorType::StorageBuffer, ResB(m_FarMergeStatsBuf));
     if (m_RayFadeBuf.IsValid())   // 在着色 pass 的资源创建里已经建好（见 CreateShadeGPUObjects）
-        m_Device->UpdateDescriptorSet(m_FarMergeSet, 3, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayFadeBuf));
+        m_Device->UpdateDescriptorSet(m_FarMergeSet, 3, rhi::DescriptorType::StorageBuffer, ResB(m_RayFadeBuf));
     // 绑定 1（光追结果）此时还不存在（它由第一次 Trace 创建）⇒ 在派发合并之前才绑。
     // 这是本轮第三次踩同一个坑："把结果缓冲当前置条件"在任何一条路径上都会变成死锁或空指针。
 }
@@ -369,8 +369,8 @@ void LumenScene::RunFarFieldRT(rhi::IRHICommandList* cmd) {
     if (!s_farLogged) {
         s_farLogged = true;
         HE_CORE_INFO("LumenScene 远场光追前置检查: device={} cmd={} probe={} tlas={} rayResult={} traceFrame={}",
-                     (void*)m_Device, (void*)cmd, (void*)m_Device->ResolveBuffer(m_ProbeBuf), (void*)m_TLAS,
-                     (void*)m_Device->ResolveBuffer(m_RayResultBuf), m_TraceFrame);
+                     (void*)m_Device, (void*)cmd, (void*)ResB(m_ProbeBuf), (void*)m_TLAS,
+                     (void*)ResB(m_RayResultBuf), m_TraceFrame);
     }
     if (!m_Device || !cmd || !m_ProbeBuf.IsValid() || !m_TLAS || !m_RayResultBuf.IsValid()) return;
     if (m_TraceFrame == 0u) return;   // 还没追踪过 ⇒ 没有可比的光线
@@ -479,7 +479,7 @@ void LumenScene::RunFarFieldRT(rhi::IRHICommandList* cmd) {
     ComputeBarrier(cmd);   // 等"追踪 pass 写 SDF 光线结果"落地
 
     LumenFarFieldPass::FrameParams fp;
-    fp.probeBuffer   = m_Device->ResolveBuffer(m_ProbeBuf);
+    fp.probeBuffer   = ResB(m_ProbeBuf);
     fp.probeCount    = m_ProbeCount;
     fp.traceRep      = m_TraceConfig.traceRep;
     // 种子必须与 SDF 追踪那一帧一致（追踪 pass 用自己的帧计数当种子再自增）
@@ -509,7 +509,7 @@ void LumenScene::RunFarFieldRT(rhi::IRHICommandList* cmd) {
     pc.nearBand = (u32)m_FarFieldNearBand;   // 近带/远带的分界（近带里 SDF 是准的，可作对照）
     if (m_FarCmpStatsMapped) { u32 zero[24] = {0}; std::memcpy(m_FarCmpStatsMapped, zero, sizeof(zero)); }
     if (m_FarCmpHistMapped)  { u32 zero[16] = {0}; std::memcpy(m_FarCmpHistMapped, zero, sizeof(zero)); }
-    cmd->SetPipeline(m_Device->ResolvePipelineState(m_FarCmpPSO));
+    cmd->SetPipeline(ResP(m_FarCmpPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_FarCmpSet);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     cmd->Dispatch((rays + 63u) / 64u, 1, 1);
@@ -524,7 +524,7 @@ void LumenScene::RunFarFieldRT(rhi::IRHICommandList* cmd) {
         // 创建的 —— 那一帧着色还没跑过，`if (m_RayFadeBuf)` 直接跳过 ⇒ 描述符一直是空的，
         // 合并 pass 的写入落进"未绑定描述符"（表现为"合并统计说 445 条在带内，着色侧一条也读不到"）。
         if (m_RayFadeBuf.IsValid())
-            m_Device->UpdateDescriptorSet(m_FarMergeSet, 3, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayFadeBuf));
+            m_Device->UpdateDescriptorSet(m_FarMergeSet, 3, rhi::DescriptorType::StorageBuffer, ResB(m_RayFadeBuf));
         // 重叠带 [t0, t1]：t1 == t0 时退化成硬切换（步骤 27 的 A/B 对照就靠它）
         const float halfBand = m_FarFieldThreshold * std::max(0.0f, m_FarFieldOverlap);
         const u32 t0 = (u32)std::max(0.0f, m_FarFieldThreshold - halfBand);
@@ -535,7 +535,7 @@ void LumenScene::RunFarFieldRT(rhi::IRHICommandList* cmd) {
         mpc2.rays = rays;
         mpc2.t0   = t0;
         mpc2.t1   = t1;
-        cmd->SetPipeline(m_Device->ResolvePipelineState(m_FarMergePSO));
+        cmd->SetPipeline(ResP(m_FarMergePSO));
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_FarMergeSet);
         cmd->SetPushConstants(0, sizeof(mpc2), &mpc2);
         cmd->Dispatch((rays + 63u) / 64u, 1, 1);
