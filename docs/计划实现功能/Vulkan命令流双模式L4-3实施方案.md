@@ -134,19 +134,41 @@ void VulkanDevice::ExecuteSubmit(IRHICommandList* cmdList, RHICommandList* strea
 
 ---
 
-## 7. 与 D3D11 / OpenGL 的关系（后续）
+## 7. 与其它后端的关系（**修正 2026-10-23**）
 
-模式 B 跑通后，其它后端可以**复用同一套命令流语义**，但不必照搬 Vulkan 的实现：
+### 7.1 先纠正一个错误结论
 
-| 后端 | 建议实现 |
-|---|---|
-| D3D12 | 不需要命令流：直接用 command list（与 Vulkan 模式 A 同构），只在 `DeviceCaps` 上声明支持多线程录制 |
-| D3D11 | 后端内部用 **deferred context** 实现 `IRHICommandList`；若某些命令（Map、query）受限，则在后端内部收集成命令记录再在 immediate context 执行 —— **等价于把模式 B 藏在 D3D11 后端里** |
-| OpenGL | 无法多线程录制 ⇒ 只能跑模式 0（单线程）或在后端内收集后单线程执行 |
+本文档初版写过"D3D11 用 deferred context、**OpenGL 只能跑模式 0**"。**这个结论是错的**，原因在于
+把"能否多线程录制"和"能否多线程架构"混为一谈：
 
-**结论**：`IRHICommandList` 这一层**已经就是命令流抽象**；模式 B 是"把它真正用作跨线程交接单位"的落地形式。
+* **模式 2 的真正约束**不是"渲染线程能不能发 API"，而是"**API 只在提交线程上被调用**"；
+* **L4-3 恰好消除了渲染线程的 API 调用** —— 渲染线程只 append 纯数据，API 全在 RHI 线程；
+* 所以 **L4-3 之后，任何后端（包括 OpenGL）都能跑模式 2**，只要该后端把 context 独占在 RHI 线程上。
 
----
+反过来说：**"OpenGL 只能模式 0"这句在"没有 L4-3"的前提下才成立**。
+
+### 7.2 各后端在两种前提下的能力
+
+| 后端 | **没有 L4-3** | **有了 L4-3** |
+|---|---|---|
+| Vulkan | 模式 1/2 ✅（命令缓冲原生支持多线程录制，现状） | 模式 2 ✅（等价；多一层编码/翻译，无运行时收益） |
+| D3D12 | 模式 1/2 ✅（command list + 每飞行帧 allocator） | 模式 2 ✅（同上） |
+| D3D11 | 模式 0/1 可靠；模式 2 需要 **deferred context**（Map/query 受限，需绕行） | **模式 2 ✅** —— 渲染线程零 D3D11 调用，immediate context 只在 RHI 线程 |
+| **OpenGL** | **只能模式 0/1** ❌（context 同一时刻只能 current 在一个线程；渲染线程一旦发 GL 调用就与提交线程冲突） | **模式 2 ✅** —— 渲染线程零 GL 调用；GL context 只 current 在 RHI 线程 |
+
+**这张表正是 L4-3 最有说服力的价值**：它把模式 2 从"Vulkan/D3D12 专属"变成"**所有后端通用**"。
+
+### 7.3 但有两个必须一起搬走的东西
+
+L4-3 只搬"录制类"命令还不够，下面两类调用若留在渲染线程，OpenGL/D3D11 仍然会冲突：
+
+| 类别 | 为什么必须搬 | 落地方式 |
+|---|---|---|
+| **`Map` / `Unmap`** | GL 的 `glMapBufferRange`、D3D11 的 `Map` 都属于 context；跨线程调用即冲突 | 两种选择：① 命令流里加 `MapBuffer`/`UnmapBuffer` 命令，由 RHI 线程执行；② 改成"写进命令流自带的 arena，回放时统一上传"（更彻底，推荐后者） |
+| **资源创建** | GL 的 `glGenBuffers`/`glTexImage*` 需要 current context；D3D11 的创建虽在 device 上但驱动内部有锁 | 命令流里加 `CreateBuffer`/`CreateTexture` 命令；或在 RHI 线程启动阶段统一创建 |
+
+**结论**：L4-3 的范围应当定义为"**渲染线程不出现任何后端 API 调用**"，而不只是"不出现 `vkCmd*`"。
+上一句里的"任何"包括 Map/Unmap 与创建 —— 这会直接决定命令类型清单（见 §3）。
 
 ## 8. 明确不做的部分
 
