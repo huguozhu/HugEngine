@@ -101,8 +101,8 @@ void LumenScene::OnResize(u32 width, u32 height) {
         m_ProbeFilterHistBuf[k].reset();
         m_CellProbeHistBuf[k].reset();
     }
-    m_ProbeFilteredBuf.reset();
-    m_ProbeFilterStatsBuf.reset();
+    m_Device->DestroyBufferHandle(m_ProbeFilteredBuf); m_ProbeFilteredBuf = {};
+    m_Device->DestroyBufferHandle(m_ProbeFilterStatsBuf); m_ProbeFilterStatsBuf = {};
     m_ProbeFilterStatsMapped = nullptr;
     m_ProbeFilterBound = false;
     m_ProbeFilterHistoryReady = false;

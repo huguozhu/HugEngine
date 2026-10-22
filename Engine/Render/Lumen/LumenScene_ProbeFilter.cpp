@@ -97,7 +97,7 @@ void LumenScene::CreateProbeFilterGPUObjects() {
 }
 
 void LumenScene::RunScreenProbeFilter(rhi::IRHICommandList* cmd, const float4x4& viewProj) {
-    if (!m_Device || !cmd || !m_ProbeBuf.IsValid() || !m_CellProbeBuf) return;
+    if (!m_Device || !cmd || !m_ProbeBuf.IsValid() || !m_CellProbeBuf.IsValid()) return;
     if (!m_ProbeCount) return;
 
     const u32 cellsX = (m_Width + 15u) / 16u;
@@ -121,7 +121,7 @@ void LumenScene::RunScreenProbeFilter(rhi::IRHICommandList* cmd, const float4x4&
         rhi::BufferDesc fb;
         fb.size = (usize)kMaxScreenProbes * sizeof(ScreenProbe);
         fb.usage = rhi::BufferUsage::Storage;
-        m_ProbeFilteredBuf = m_Device->CreateBuffer(fb);
+        m_ProbeFilteredBuf = m_Device->CreateBufferHandle(fb);
 
         rhi::BufferDesc hb;
         hb.size = (usize)kMaxScreenProbes * sizeof(ProbeFilterHistory);
@@ -147,8 +147,8 @@ void LumenScene::RunScreenProbeFilter(rhi::IRHICommandList* cmd, const float4x4&
 
         rhi::BufferDesc sb;
         sb.size = sizeof(u32) * 16u; sb.usage = rhi::BufferUsage::Storage; sb.cpuAccess = true;
-        m_ProbeFilterStatsBuf = m_Device->CreateBuffer(sb);
-        m_ProbeFilterStatsMapped = m_ProbeFilterStatsBuf->Map();
+        m_ProbeFilterStatsBuf = m_Device->CreateBufferHandle(sb);
+        m_ProbeFilterStatsMapped = m_Device->ResolveBuffer(m_ProbeFilterStatsBuf)->Map();
 
         m_ProbeFilterBound = true;
         return;   // 本帧只建资源：新建资源当帧使用会读到未初始化的内容（§附二十）
@@ -199,17 +199,17 @@ void LumenScene::RunScreenProbeFilter(rhi::IRHICommandList* cmd, const float4x4&
     rhi::IRHIBuffer* histCell  = m_CellHistFromPool[r]  ? m_CellHistFromPool[r]  : m_CellProbeHistBuf[r].get();
     rhi::IRHIBuffer* outProbe  = m_ProbeHistFromPool[w] ? m_ProbeHistFromPool[w] : m_ProbeFilterHistBuf[w].get();
     rhi::IRHIBuffer* outCell   = m_CellHistFromPool[w]  ? m_CellHistFromPool[w]  : m_CellProbeHistBuf[w].get();
-    if (!histProbe || !histCell || !outProbe || !outCell || !m_ProbeFilteredBuf || !m_ProbeFilterStatsBuf) return;
+    if (!histProbe || !histCell || !outProbe || !outCell || !m_ProbeFilteredBuf.IsValid() || !m_ProbeFilterStatsBuf.IsValid()) return;
 
     // 描述符必须**每帧重绑**：乒乓使绑定 3/4/5/6 的目标每帧都换（步骤 27 的 fade 缓冲教训）
     m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 0, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ProbeBuf));
-    m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 1, rhi::DescriptorType::StorageBuffer, m_ProbeFilteredBuf.get());
-    m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 2, rhi::DescriptorType::StorageBuffer, m_CellProbeBuf.get());
+    m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 1, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ProbeFilteredBuf));
+    m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 2, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_CellProbeBuf));
     m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 3, rhi::DescriptorType::StorageBuffer, histCell);
     m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 4, rhi::DescriptorType::StorageBuffer, outCell);
     m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 5, rhi::DescriptorType::StorageBuffer, histProbe);
     m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 6, rhi::DescriptorType::StorageBuffer, outProbe);
-    m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 7, rhi::DescriptorType::StorageBuffer, m_ProbeFilterStatsBuf.get());
+    m_Device->UpdateDescriptorSet(m_ProbeFilterSet, 7, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ProbeFilterStatsBuf));
 
     ProbeFilterPC pc{};
     pc.prevViewProj = m_ProbePrevViewProj;

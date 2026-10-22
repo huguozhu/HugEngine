@@ -614,11 +614,11 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
         rhi::BufferDesc fb;
         fb.size  = (usize)kMaxScreenProbes * 16u * 2u * sizeof(float4);   // 每光线两个 float4
         fb.usage = rhi::BufferUsage::Storage;
-        m_RayFadeBuf = m_Device->CreateBuffer(fb);
+        m_RayFadeBuf = m_Device->CreateBufferHandle(fb);
         rhi::BufferDesc dbb;
         dbb.size = sizeof(u32) * 32u; dbb.usage = rhi::BufferUsage::Storage; dbb.cpuAccess = true;
-        m_DistBinBuf = m_Device->CreateBuffer(dbb);
-        m_DistBinMapped = m_DistBinBuf->Map();
+        m_DistBinBuf = m_Device->CreateBufferHandle(dbb);
+        m_DistBinMapped = m_Device->ResolveBuffer(m_DistBinBuf)->Map();
         m_DistBinCount.assign(16u, 0u);
         m_DistBinLum.assign(16u, 0u);
 
@@ -631,8 +631,8 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
         m_Device->UpdateDescriptorSet(m_ShadeSet, 6, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ShadeOutGbBuf));
         m_Device->UpdateDescriptorSet(m_ShadeSet, 7, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ShadeStatsBuf));
         m_Device->UpdateDescriptorSet(m_ShadeSet, 9, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ShadeOutBestBuf));
-        m_Device->UpdateDescriptorSet(m_ShadeSet, 10, rhi::DescriptorType::StorageBuffer, m_RayFadeBuf.get());
-        m_Device->UpdateDescriptorSet(m_ShadeSet, 11, rhi::DescriptorType::StorageBuffer, m_DistBinBuf.get());
+        m_Device->UpdateDescriptorSet(m_ShadeSet, 10, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayFadeBuf));
+        m_Device->UpdateDescriptorSet(m_ShadeSet, 11, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_DistBinBuf));
         m_ShadeBound = true;
         return;
     }
@@ -642,10 +642,10 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
                                   gbWorldPos, m_SDF.GetLinearSampler());
     // 步骤 27：副命中点（由远场合并 pass 写）与距离分桶统计。fade 缓冲要到第一次远场合并
     // 才创建 ⇒ 这里按需绑定（绑 nullptr 会崩，这是本轮踩过三次的坑）。
-    if (m_RayFadeBuf)
-        m_Device->UpdateDescriptorSet(m_ShadeSet, 10, rhi::DescriptorType::StorageBuffer, m_RayFadeBuf.get());
-    if (m_DistBinBuf)
-        m_Device->UpdateDescriptorSet(m_ShadeSet, 11, rhi::DescriptorType::StorageBuffer, m_DistBinBuf.get());
+    if (m_RayFadeBuf.IsValid())
+        m_Device->UpdateDescriptorSet(m_ShadeSet, 10, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayFadeBuf));
+    if (m_DistBinBuf.IsValid())
+        m_Device->UpdateDescriptorSet(m_ShadeSet, 11, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_DistBinBuf));
     if (m_RayResultBuf.IsValid())
         m_Device->UpdateDescriptorSet(m_ShadeSet, 12, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayResultBuf));
 
@@ -981,7 +981,7 @@ void LumenScene::RunProbePlacement(rhi::IRHICommandList* cmd, rhi::IRHITexture* 
         rhi::BufferDesc cpb;
         cpb.size = (usize)cellsX * cellsY * sizeof(u32);
         cpb.usage = rhi::BufferUsage::Storage;
-        m_CellProbeBuf = m_Device->CreateBuffer(cpb);
+        m_CellProbeBuf = m_Device->CreateBufferHandle(cpb);
 
         m_Device->UpdateDescriptorSet(m_ProbeSet, 0, rhi::DescriptorType::CombinedImageSampler,
                                       gbNormal, m_SDF.GetLinearSampler());
@@ -990,7 +990,7 @@ void LumenScene::RunProbePlacement(rhi::IRHICommandList* cmd, rhi::IRHITexture* 
         m_Device->UpdateDescriptorSet(m_ProbeSet, 2, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ProbeBuf));
         m_Device->UpdateDescriptorSet(m_ProbeSet, 3, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ProbeCountBuf));
         m_Device->UpdateDescriptorSet(m_ProbeSet, 4, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_TileDevBuf));
-        m_Device->UpdateDescriptorSet(m_ProbeSet, 5, rhi::DescriptorType::StorageBuffer, m_CellProbeBuf.get());
+        m_Device->UpdateDescriptorSet(m_ProbeSet, 5, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_CellProbeBuf));
         m_ProbeBound = true;
         return;   // 新建资源当帧不用（§附二十、§附二十五 的教训）
     }

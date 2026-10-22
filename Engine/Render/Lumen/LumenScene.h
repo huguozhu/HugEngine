@@ -137,7 +137,7 @@ public:
     /// 下游（辐照度 / DDGI 输入）读的是**过滤后**的探针缓冲。
     void RunScreenProbeFilter(rhi::IRHICommandList* cmd, const float4x4& viewProj);
     /// 过滤后的探针缓冲（下游唯一该读的那一份）
-    [[nodiscard]] rhi::IRHIBuffer* GetProbeFilteredBuffer() const { return m_ProbeFilteredBuf.get(); }
+    [[nodiscard]] rhi::IRHIBuffer* GetProbeFilteredBuffer() const { return m_Device->ResolveBuffer(m_ProbeFilteredBuf); }
     /// 滤波模式：0 = 直通（= 没有这一步），1 = 仅空间，2 = 空间 + 时域（默认）
     [[nodiscard]] u32 GetProbeFilterMode() const { return m_ProbeFilterMode; }
     /// 噪声读数：l0 亮度的 std/mean（输入 = 未过滤；输出 = 过滤后），同一次运行内自成对照
@@ -205,7 +205,7 @@ public:
     [[nodiscard]] u32 GetProbeCount() const { return m_ProbeCount; }
     /// 步骤 31：把 Screen Probe 的结果交给 DDGI（Radiance Cache）当作输入
     [[nodiscard]] rhi::IRHIBuffer* GetProbeBuffer() const { return m_Device->ResolveBuffer(m_ProbeBuf); }
-    [[nodiscard]] rhi::IRHIBuffer* GetCellProbeBuffer() const { return m_CellProbeBuf.get(); }
+    [[nodiscard]] rhi::IRHIBuffer* GetCellProbeBuffer() const { return m_Device->ResolveBuffer(m_CellProbeBuf); }
     [[nodiscard]] u32 GetScreenCellsX() const { return (m_Width + 15u) / 16u; }
     [[nodiscard]] u32 GetScreenCellsY() const { return (m_Height + 15u) / 16u; }
     [[nodiscard]] u32 GetProbeTilesFlat() const { return m_ProbeTilesFlat; }        // 偏差缓冲里"够平坦"的 tile 数
@@ -389,13 +389,13 @@ private:
     rhi::DescriptorSetLayoutHandle m_ProbeFilterLayout = 0;
     rhi::DescriptorSetHandle       m_ProbeFilterSet    = 0;
     rhi::RHIPipelineStateHandle m_ProbeFilterPSO{};   // A-3
-    std::unique_ptr<rhi::IRHIBuffer> m_ProbeFilteredBuf;             // 过滤结果（96 B/探针，下游读它）
+    rhi::RHIBufferHandle m_ProbeFilteredBuf{};             // A-3：过滤结果（96 B/探针，下游读它）
     std::unique_ptr<rhi::IRHIBuffer> m_ProbeFilterHistBuf[2];        // 历史探针镜像（80 B/探针，乒乓）
     std::unique_ptr<rhi::IRHIBuffer> m_CellProbeHistBuf[2];          // 历史单元映射（乒乓）
     /// 历史资源来自统一池时用这两个（池持有，本类只借；为空表示池没给，退回自建）
     rhi::IRHIBuffer* m_ProbeHistFromPool[2] = {nullptr, nullptr};
     rhi::IRHIBuffer* m_CellHistFromPool[2]  = {nullptr, nullptr};
-    std::unique_ptr<rhi::IRHIBuffer> m_ProbeFilterStatsBuf;          // 11 项统计（CPU 可读）
+    rhi::RHIBufferHandle m_ProbeFilterStatsBuf{};          // A-3：11 项统计（CPU 可读）
     void* m_ProbeFilterStatsMapped = nullptr;
     bool  m_ProbeFilterBound = false;
     u32   m_ProbeFilterFrame = 0;
@@ -414,9 +414,9 @@ private:
     rhi::DescriptorSetLayoutHandle m_IrrLayout = 0;
     rhi::DescriptorSetHandle       m_IrrSet    = 0;
     rhi::RHIPipelineStateHandle m_IrrPSO{};   // A-3
-    std::unique_ptr<rhi::IRHIBuffer>        m_CellProbeBuf;
+    rhi::RHIBufferHandle        m_CellProbeBuf{};   // A-3
     rhi::RHITextureHandle       m_IrradianceTex{};   // A-3
-    std::unique_ptr<rhi::IRHIBuffer>        m_IrradianceStatsBuf;   // 0=覆盖像素 1=亮度定点累加 2=亮度定点最大
+    rhi::RHIBufferHandle        m_IrradianceStatsBuf{};   // A-3：0=覆盖像素 1=亮度定点累加 2=亮度定点最大
     void* m_IrrStatsMapped = nullptr;
     bool m_IrrBound = false;
     u32  m_IrrFrame = 0;
@@ -436,12 +436,12 @@ private:
     rhi::DescriptorSetLayoutHandle m_FarMergeLayout = 0;
     rhi::DescriptorSetHandle       m_FarMergeSet    = 0;
     rhi::RHIPipelineStateHandle m_FarMergePSO{};   // A-3
-    std::unique_ptr<rhi::IRHIBuffer> m_RayFadeBuf;      // 步骤 27：每光线的副命中点 + 混合权重
+    rhi::RHIBufferHandle m_RayFadeBuf{};      // A-3：步骤 27：每光线的副命中点 + 混合权重
     void* m_RayFadeMapped = nullptr;                    // 诊断：CPU 侧读 fade 缓冲
-    std::unique_ptr<rhi::IRHIBuffer> m_FarMergeStatsBuf, m_DistBinBuf;
+    rhi::RHIBufferHandle m_FarMergeStatsBuf{}, m_DistBinBuf{};   // A-3
     void* m_FarMergeStatsMapped = nullptr;
     void* m_DistBinMapped = nullptr;
-    std::unique_ptr<rhi::IRHIBuffer> m_FarCmpStatsBuf, m_FarCmpHistBuf;
+    rhi::RHIBufferHandle m_FarCmpStatsBuf{}, m_FarCmpHistBuf{};   // A-3
     void* m_FarCmpStatsMapped = nullptr;
     void* m_FarCmpHistMapped  = nullptr;
     float m_FarFieldThreshold = 50.0f;    // 远场阈值（重叠带的中心）
