@@ -274,7 +274,7 @@ void LumenScene::LogMemoryUsage() const {
     HE_CORE_INFO("   {:<44} {:8.2f} MB", "合计（Lumen 自持资源）", total);
 }
 void LumenScene::CreateFarFieldCompareGPUObjects() {
-    if (m_FarCmpPSO && m_FarMergePSO) return;
+    if (m_FarCmpPSO.IsValid() && m_FarMergePSO.IsValid()) return;
 
     rhi::DescriptorSetLayoutDesc layout;
     layout.bindings = {
@@ -302,7 +302,7 @@ void LumenScene::CreateFarFieldCompareGPUObjects() {
     pso.descriptorSetLayouts = {m_FarCmpLayout};
     pso.pushConstantRanges   = {pcr};
     pso.debugName            = "Lumen_FarFieldCompare";
-    m_FarCmpPSO = m_Device->CreatePipelineState(pso);
+    m_FarCmpPSO = m_Device->CreatePipelineStateHandle(pso);   // A-3
 
     rhi::BufferDesc sb;
     sb.size = sizeof(u32) * 24u; sb.usage = rhi::BufferUsage::Storage; sb.cpuAccess = true;
@@ -322,7 +322,7 @@ void LumenScene::CreateFarFieldCompareGPUObjects() {
     m_Device->UpdateDescriptorSet(m_FarCmpSet, 0, rhi::DescriptorType::StorageBuffer, m_RayResultBuf.get());
     m_Device->UpdateDescriptorSet(m_FarCmpSet, 2, rhi::DescriptorType::StorageBuffer, m_FarCmpStatsBuf.get());
     m_Device->UpdateDescriptorSet(m_FarCmpSet, 3, rhi::DescriptorType::StorageBuffer, m_FarCmpHistBuf.get());
-    if (!m_FarCmpPSO) HE_CORE_ERROR("LumenScene: 远场对照 PSO 创建失败");
+    if (!m_FarCmpPSO.IsValid()) HE_CORE_ERROR("LumenScene: 远场对照 PSO 创建失败");
 
     // ── 合并 pass：把远场光追的命中并进探针光线结果（见 shader 头的理由）──
     rhi::DescriptorSetLayoutDesc ml;
@@ -347,7 +347,7 @@ void LumenScene::CreateFarFieldCompareGPUObjects() {
     mpso.descriptorSetLayouts = {m_FarMergeLayout};
     mpso.pushConstantRanges   = {mpc};
     mpso.debugName            = "Lumen_FarFieldMerge";
-    m_FarMergePSO = m_Device->CreatePipelineState(mpso);
+    m_FarMergePSO = m_Device->CreatePipelineStateHandle(mpso);   // A-3
     m_Device->UpdateDescriptorSet(m_FarMergeSet, 0, rhi::DescriptorType::StorageBuffer, m_RayResultBuf.get());
     m_Device->UpdateDescriptorSet(m_FarMergeSet, 2, rhi::DescriptorType::StorageBuffer, m_RayHitPosBuf.get());
     m_Device->UpdateDescriptorSet(m_FarMergeSet, 4, rhi::DescriptorType::StorageBuffer, m_FarMergeStatsBuf.get());
@@ -385,7 +385,7 @@ void LumenScene::RunFarFieldRT(rhi::IRHICommandList* cmd) {
     }
     // 【别用 IsValid() 当这里的门】它包含 `结果缓冲非空`，而结果缓冲正是**这次 Trace** 才建的
     // ⇒ 用它当门会永远提前返回（第一次就是这么写的，表现是"初始化成功但一条光线都没发"）。
-    if (!m_FarField || !m_FarCmpPSO) return;
+    if (!m_FarField || !m_FarCmpPSO.IsValid()) return;
 
     // 步骤 29：资源都建齐之后报一次显存清单（对照 §15.3 的预算表）。
     // 【注意】m_FarFieldFrame 在函数尾部才自增 ⇒ 这里读到的是"上一帧"的计数，== 20 即第 21 帧。
@@ -509,13 +509,13 @@ void LumenScene::RunFarFieldRT(rhi::IRHICommandList* cmd) {
     pc.nearBand = (u32)m_FarFieldNearBand;   // 近带/远带的分界（近带里 SDF 是准的，可作对照）
     if (m_FarCmpStatsMapped) { u32 zero[24] = {0}; std::memcpy(m_FarCmpStatsMapped, zero, sizeof(zero)); }
     if (m_FarCmpHistMapped)  { u32 zero[16] = {0}; std::memcpy(m_FarCmpHistMapped, zero, sizeof(zero)); }
-    cmd->SetPipeline(m_FarCmpPSO.get());
+    cmd->SetPipeline(m_Device->ResolvePipelineState(m_FarCmpPSO));
     cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_FarCmpSet);
     cmd->SetPushConstants(0, sizeof(pc), &pc);
     cmd->Dispatch((rays + 63u) / 64u, 1, 1);
 
     // ── ③ 合并：近场留 SDF、远场用光追、重叠带两侧材质混合（步骤 26/27）──
-    if (m_FarMergePSO && m_FarField->GetResultBuffer()) {
+    if (m_FarMergePSO.IsValid() && m_FarField->GetResultBuffer()) {
         ComputeBarrier(cmd);
         // 光追结果缓冲可能在扩容时被重建 ⇒ 每次重绑
         m_Device->UpdateDescriptorSet(m_FarMergeSet, 1, rhi::DescriptorType::StorageBuffer,
@@ -535,7 +535,7 @@ void LumenScene::RunFarFieldRT(rhi::IRHICommandList* cmd) {
         mpc2.rays = rays;
         mpc2.t0   = t0;
         mpc2.t1   = t1;
-        cmd->SetPipeline(m_FarMergePSO.get());
+        cmd->SetPipeline(m_Device->ResolvePipelineState(m_FarMergePSO));
         cmd->BindDescriptorSet(rhi::kDescSetPerFrame, m_FarMergeSet);
         cmd->SetPushConstants(0, sizeof(mpc2), &mpc2);
         cmd->Dispatch((rays + 63u) / 64u, 1, 1);

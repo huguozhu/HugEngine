@@ -423,10 +423,10 @@ private:
     u32               m_RTLightCount = 0;
     rhi::DescriptorSetLayoutHandle m_FarCmpLayout = 0;
     rhi::DescriptorSetHandle       m_FarCmpSet    = 0;
-    std::unique_ptr<rhi::IRHIPipelineState> m_FarCmpPSO;
+    rhi::RHIPipelineStateHandle m_FarCmpPSO{};   // A-3
     rhi::DescriptorSetLayoutHandle m_FarMergeLayout = 0;
     rhi::DescriptorSetHandle       m_FarMergeSet    = 0;
-    std::unique_ptr<rhi::IRHIPipelineState> m_FarMergePSO;
+    rhi::RHIPipelineStateHandle m_FarMergePSO{};   // A-3
     std::unique_ptr<rhi::IRHIBuffer> m_RayFadeBuf;      // 步骤 27：每光线的副命中点 + 混合权重
     void* m_RayFadeMapped = nullptr;                    // 诊断：CPU 侧读 fade 缓冲
     std::unique_ptr<rhi::IRHIBuffer> m_FarMergeStatsBuf, m_DistBinBuf;
