@@ -599,8 +599,8 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
         const u32 maxRays = kMaxScreenProbes * 16u;
         rhi::BufferDesc ob; ob.size = (usize)maxRays * sizeof(float4); ob.usage = rhi::BufferUsage::Storage; ob.cpuAccess = true;
         m_ShadeOutBuf = m_Device->CreateBufferHandle(ob);   // A-3
-        m_ShadeOutGbBuf = m_Device->CreateBuffer(ob);
-        m_ShadeOutBestBuf = m_Device->CreateBuffer(ob);
+        m_ShadeOutGbBuf = m_Device->CreateBufferHandle(ob);   // A-3
+        m_ShadeOutBestBuf = m_Device->CreateBufferHandle(ob);   // A-3
 
         // 统计槽：0=页命中 1=不在任何卡内 2=卡在但页无内容 3=总计 4=越界夹取（其余保留）
         // 统计槽：0..6 见 shader；7/8/9 = 重叠带内 / 真正混合 / 副点无材质
@@ -628,9 +628,9 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
         m_Device->UpdateDescriptorSet(m_ShadeSet, 2, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_PageTableBuf));
         m_Device->UpdateDescriptorSet(m_ShadeSet, 3, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayHitPosBuf));
         m_Device->UpdateDescriptorSet(m_ShadeSet, 5, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ShadeOutBuf));
-        m_Device->UpdateDescriptorSet(m_ShadeSet, 6, rhi::DescriptorType::StorageBuffer, m_ShadeOutGbBuf.get());
+        m_Device->UpdateDescriptorSet(m_ShadeSet, 6, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ShadeOutGbBuf));
         m_Device->UpdateDescriptorSet(m_ShadeSet, 7, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ShadeStatsBuf));
-        m_Device->UpdateDescriptorSet(m_ShadeSet, 9, rhi::DescriptorType::StorageBuffer, m_ShadeOutBestBuf.get());
+        m_Device->UpdateDescriptorSet(m_ShadeSet, 9, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ShadeOutBestBuf));
         m_Device->UpdateDescriptorSet(m_ShadeSet, 10, rhi::DescriptorType::StorageBuffer, m_RayFadeBuf.get());
         m_Device->UpdateDescriptorSet(m_ShadeSet, 11, rhi::DescriptorType::StorageBuffer, m_DistBinBuf.get());
         m_ShadeBound = true;
@@ -670,9 +670,9 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
         void* pm = ((m_ShadeFrame % 40u) == 0u) ? m_Device->ResolveBuffer(m_ShadeOutBuf)->Map() : nullptr;
         if (pm) {
             const float4* a = static_cast<const float4*>(pm);
-            if (void* pg = m_ShadeOutGbBuf->Map()) {
+            if (void* pg = m_Device->ResolveBuffer(m_ShadeOutGbBuf)->Map()) {
                 const float4* g = static_cast<const float4*>(pg);
-                if (void* pb = m_ShadeOutBestBuf->Map()) {
+                if (void* pb = m_Device->ResolveBuffer(m_ShadeOutBestBuf)->Map()) {
                     const float4* b = static_cast<const float4*>(pb);
                     for (u32 i = 0; i < total; ++i) {
                         if (a[i].w < 0.5f || g[i].w < 0.5f) continue;
@@ -686,9 +686,9 @@ void LumenScene::RunSurfaceCacheShading(rhi::IRHICommandList* cmd, rhi::IRHIText
                         // 最优候选（多卡覆盖时"最贴合 GBuffer 的那张卡"）：选卡误差的下界
                         if (b[i].w > 0.5f) { sumBest += (double)glm::length(glm::vec3(b[i]) - gv); ++bestSamples; }
                     }
-                    m_ShadeOutBestBuf->Unmap();
+                    if (auto* b = m_Device->ResolveBuffer(m_ShadeOutBestBuf)) b->Unmap();
                 }
-                m_ShadeOutGbBuf->Unmap();
+                if (auto* b = m_Device->ResolveBuffer(m_ShadeOutGbBuf)) b->Unmap();
             }
             if (auto* sob = m_Device->ResolveBuffer(m_ShadeOutBuf)) sob->Unmap();
         }
@@ -1344,8 +1344,8 @@ void LumenScene::RunScreenProbeSHProject(rhi::IRHICommandList* cmd, bool furnace
         rhi::BufferDesc ib;
         ib.size  = (usize)kMaxScreenProbes * sizeof(float4);
         ib.usage = rhi::BufferUsage::Storage; ib.cpuAccess = true;
-        m_IrradShBuf  = m_Device->CreateBuffer(ib);
-        m_IrradRefBuf = m_Device->CreateBuffer(ib);
+        m_IrradShBuf  = m_Device->CreateBufferHandle(ib);   // A-3
+        m_IrradRefBuf = m_Device->CreateBufferHandle(ib);   // A-3
 
         rhi::BufferDesc sb;
         sb.size = sizeof(u32) * 4u; sb.usage = rhi::BufferUsage::Storage; sb.cpuAccess = true;
@@ -1354,8 +1354,8 @@ void LumenScene::RunScreenProbeSHProject(rhi::IRHICommandList* cmd, bool furnace
 
         m_Device->UpdateDescriptorSet(m_SHSet, 0, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ProbeBuf));
         m_Device->UpdateDescriptorSet(m_SHSet, 1, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_ShadeOutBuf));
-        m_Device->UpdateDescriptorSet(m_SHSet, 2, rhi::DescriptorType::StorageBuffer, m_IrradShBuf.get());
-        m_Device->UpdateDescriptorSet(m_SHSet, 3, rhi::DescriptorType::StorageBuffer, m_IrradRefBuf.get());
+        m_Device->UpdateDescriptorSet(m_SHSet, 2, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_IrradShBuf));
+        m_Device->UpdateDescriptorSet(m_SHSet, 3, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_IrradRefBuf));
         m_Device->UpdateDescriptorSet(m_SHSet, 4, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_SHStatsBuf));
         m_Device->UpdateDescriptorSet(m_SHSet, 5, rhi::DescriptorType::StorageBuffer, m_Device->ResolveBuffer(m_RayResultBuf));
         m_SHBound = true;
@@ -1375,10 +1375,10 @@ void LumenScene::RunScreenProbeSHProject(rhi::IRHICommandList* cmd, bool furnace
         }
         // 辐照度对照：SH 重建 vs 逐光线求和（同一方向 n，故两者都是"沿探针法线的辐照度"）
         double sumRel = 0.0; u32 n = 0;
-        void* ps = ((m_SHFrame % 40u) == 0u) ? m_IrradShBuf->Map() : nullptr;
+        void* ps = ((m_SHFrame % 40u) == 0u) ? m_Device->ResolveBuffer(m_IrradShBuf)->Map() : nullptr;
         if (ps) {
             const float4* a = static_cast<const float4*>(ps);
-            if (void* pr = m_IrradRefBuf->Map()) {
+            if (void* pr = m_Device->ResolveBuffer(m_IrradRefBuf)->Map()) {
                 const float4* b = static_cast<const float4*>(pr);
                 for (u32 i = 0; i < m_ProbeCount; ++i) {
                     if (a[i].w < 0.5f || b[i].w < 0.5f) continue;
@@ -1387,9 +1387,9 @@ void LumenScene::RunScreenProbeSHProject(rhi::IRHICommandList* cmd, bool furnace
                     if (ref < 1e-4) continue;
                     sumRel += dif / ref; ++n;
                 }
-                m_IrradRefBuf->Unmap();
+                if (auto* b = m_Device->ResolveBuffer(m_IrradRefBuf)) b->Unmap();
             }
-            m_IrradShBuf->Unmap();
+            if (auto* b = m_Device->ResolveBuffer(m_IrradShBuf)) b->Unmap();
         }
         m_SHIrradianceDiff = n ? (float)(sumRel / n) : 0.0f;
         m_SHIrradianceSamples = n;

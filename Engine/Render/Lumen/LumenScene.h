@@ -354,7 +354,7 @@ private:
     u32  m_ProbeRayHits = 0, m_ProbeRayMisses = 0, m_ProbeRaysTotal = 0, m_ProbeRayHemisphere = 0;
     // ── 命中点着色（步骤 22）──
     rhi::RHIBufferHandle m_RayHitPosBuf{}, m_ShadeOutBuf{};   // A-3
-    std::unique_ptr<rhi::IRHIBuffer> m_ShadeOutGbBuf, m_ShadeOutBestBuf;
+    rhi::RHIBufferHandle m_ShadeOutGbBuf{}, m_ShadeOutBestBuf{};   // A-3
     rhi::RHIBufferHandle m_ShadeCardsBuf{}, m_ShadeStatsBuf{};   // A-3
     void* m_ShadeStatsMapped = nullptr;
     rhi::DescriptorSetLayoutHandle m_ShadeLayout = 0;
@@ -369,7 +369,7 @@ private:
     float m_ShadedAlbedoBestDiff = 0.0f;      // 多卡覆盖下"最贴合 GBuffer 的候选"的平均 |Δalbedo|（归因下界）
     u32   m_ShadedAlbedoBestSamples = 0;
     // ── SH 投影（步骤 23）──
-    std::unique_ptr<rhi::IRHIBuffer> m_IrradShBuf, m_IrradRefBuf;
+    rhi::RHIBufferHandle m_IrradShBuf{}, m_IrradRefBuf{};   // A-3
     rhi::RHIBufferHandle m_SHStatsBuf{};   // A-3
     void* m_SHStatsMapped = nullptr;
     rhi::DescriptorSetLayoutHandle m_SHLayout = 0;

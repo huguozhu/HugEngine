@@ -257,13 +257,13 @@ void LumenScene::LogMemoryUsage() const {
     addBuf("命中点缓冲", m_Device->ResolveBuffer(m_RayHitPosBuf));
     addBuf("光线结果缓冲", m_Device->ResolveBuffer(m_RayResultBuf));
     addBuf("着色输出（atlas / GBuffer / 最优候选）", m_Device->ResolveBuffer(m_ShadeOutBuf));
-    addBuf("着色输出（GBuffer 对照）", m_ShadeOutGbBuf.get());
-    addBuf("着色输出（最优候选）", m_ShadeOutBestBuf.get());
+    addBuf("着色输出（GBuffer 对照）", m_Device->ResolveBuffer(m_ShadeOutGbBuf));
+    addBuf("着色输出（最优候选）", m_Device->ResolveBuffer(m_ShadeOutBestBuf));
     addBuf("远场光追结果（2 × 光线）", m_FarField ? m_FarField->GetResultBuffer() : nullptr);
     addBuf("远场切换 fade（2 × 光线）", m_RayFadeBuf.get());
     addBuf("探针缓冲（65536 × 96 B）", m_Device->ResolveBuffer(m_ProbeBuf));
     addBuf("单元 → 探针映射", m_CellProbeBuf.get());
-    addBuf("SH 重建/参考辐照度（2 × 探针）", m_IrradShBuf.get());
+    addBuf("SH 重建/参考辐照度（2 × 探针）", m_Device->ResolveBuffer(m_IrradShBuf));
 
     double total = 0.0;
     for (const auto& it : items) total += it.mb;
