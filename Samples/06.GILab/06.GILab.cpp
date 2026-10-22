@@ -1241,11 +1241,11 @@ int main() {
     forwardPipeline.OnResize(swapchain->GetWidth(), swapchain->GetHeight());
 
 
-    int  g_PipelineMode = 1;                       // 0=Forward 1=Deferred 2=HybridRT
-    bool g_PendingHalfResApply = false;
-    bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）⇒ 延迟到渲染命令里做            // 档位切换后延迟到帧边界重建半分辨率纹理（ImGui 回调内重建会死锁）
-    bool g_GISolo = true;                          // 只看 GI（关闭直接光）
-    int  g_GIPreset = 1;                           // GI 质量档位（默认 Medium=1）
+    int  g_PipelineMode = 1;                // 0=Forward / 1=Deferred
+    bool g_PendingHalfResApply = false;     // 档位切换后延迟到帧边界重建半分辨率纹理
+    bool g_PendingPipelineSwitch = false;   // 控件请求切换管线（含 RHI）⇒ 延迟到渲染命令里做            
+    bool g_GISolo = true;                   // 只看 GI（关闭直接光）
+    int  g_GIPreset = 1;                    // GI 质量档位（默认 Medium=1）
     render::IRenderPipeline* curPipeline = &deferredPipeline;
 
     // ---- 白炉探针（Wave 0.2）—— 能量守恒判据的读数设施 ----
