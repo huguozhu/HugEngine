@@ -2468,3 +2468,34 @@ A-5（ImGui/PSO 命令化）、T2.6、T3.3/T3.4、T5.1~T5.3、L4-3。
 6. **未核对设备指针**：`GPUScene`/`GBufferRenderer` 没有 `m_Device`；`GPUCulling` 的 `m_Device` 在
    `Initialize` 末尾才赋值 ⇒ 早点赋值或用参数里的 device。这类问题占失败批次的一半。
 
+
+### 16.7 A-5（ImGui / PSO 命令化）现状调查与实施方案
+
+**日期**：2026-10-22。A-3 收尾后开始 A-5；先查清现状，避免按假设动手。
+
+#### 16.7.1 调查结果
+
+| 项 | 现状 | 结论 |
+|---|---|---|
+| PSO 异步队列 | `IRHIDevice::EnqueuePSOCreate` / `ProcessPSOCreateQueue` / `GetPendingPSOCreateCount` 已存在（`RHI.h:117-121`，Vulkan 实现在 `VulkanDevice.cpp:1479-1496`） | **只有消费者没有生产者**：全仓库唯一的调用点是 `DeferredPipeline.cpp:622-627` 的 `Process`，**没有任何地方 `Enqueue`** ⇒ 这条队列目前是死代码 |
+| PSO 返回值形态 | `ProcessPSOCreateQueue` 返回 `std::vector<std::unique_ptr<IRHIPipelineState>>` | A-3 把 PSO 改成句柄后，这个签名**与句柄体系不一致** ⇒ 需要句柄版 |
+| ImGui 后端 | `ImGuiIntegration.cpp` 只有 138 行，实际创建/销毁都委托给 `ImGui_ImplVulkan_Init/CreateFontsTexture/Shutdown`（`Engine/External/imgui/backends/imgui_impl_vulkan.cpp`，第三方） | ImGui 自己用**原生 Vulkan** 建 PSO/纹理/描述符池，**不经过本项目 RHI** ⇒ 想让它走命令化等于重写第三方后端 |
+
+#### 16.7.2 据此确定的 A-5 范围（务实）
+
+1. **PSO 部分（做）**：把异步队列升级为**句柄版**，并接入一个真实生产者，让它不再是死代码。
+   - 新增 `RHIPipelineStateHandle EnqueuePSOCreateHandle(const PipelineStateDesc& desc)`：
+     立即返回一个**已登记但未就绪**的句柄（资源表里占位），`ProcessPSOCreateQueue` 在拥有线程上
+     真正 `vkCreateComputePipelines`/`vkCreateGraphicsPipelines` 并填充该条目；
+   - `ResolvePipelineState` 对未就绪条目返回 `nullptr`（调用方用 `IsValid()` 判，行为与"还没建好"一致）；
+   - 生产者：把 `GBufferRenderer` / `LightingPass` 里"首帧懒创建"的那几个 PSO 改为入队
+     （它们本来就在渲染线程创建，改成入队不改变语义，只是把**创建时机**摊到后续帧，降低首帧峰值）。
+2. **ImGui 部分（记录，不做命令化）**：ImGui 的 PSO/纹理/描述符池由第三方 `imgui_impl_vulkan`
+   直接创建，**不纳入命令化范围**；只需保证它**只在拥有线程上调用**（现状即如此：`EndFrame`
+   由渲染线程录制时调用）。文档在此明确边界，避免后续误判为"漏做"。
+
+#### 16.7.3 判据
+
+与 A-3 相同的四条（A/B 20/20、0 新 VUID、0 断言、干净退出）。PSO 入队属于**创建时机**变化，
+不影响每帧绘制指令 ⇒ 转储应当逐字节一致。
+
